@@ -22,6 +22,11 @@ release v0.1.1. It is the better base because it includes the unified proxy,
 llama.cpp support, and remote engine settings.
 
 A session-by-session record of changes is in [WORKLOG.md](WORKLOG.md).
+Each finished item below names its commit; the log has the full detail.
+
+**Status (2026-10-09):** phase 1 is partly done on `fork/groundwork`. Nothing
+has been measured on real hardware yet. See [Recommended order](#recommended-order)
+for what comes next.
 
 The ground rules in [AGENTS.md](AGENTS.md) and `.cursor/rules/` still apply.
 Runtime behavior belongs in `services/`; `desktop/` only relays commands and
@@ -29,21 +34,26 @@ renders state.
 
 ## Phase 1: Reduce idle overhead (in progress)
 
-Done on `fork/groundwork`:
+Done on `fork/groundwork`. Each item has unit tests and passes the repo's
+desktop checks and its service's Go tests. None has been measured for memory
+or CPU.
 
 - [x] **Workload history stays bounded on the desktop.** The broker used to trim
   its history without telling clients, so Electron and the renderer kept every
   finished job for the whole session. The caps now apply to every broker store,
   and the broker sends `workloads:remove` for each record it drops.
-  (`nvpair-ui-broker`)
+  (`nvpair-ui-broker`, `595b3d5`; generated API doc `3aaa0d8`)
+  *Still to check:* the cross-process workload tests need mDNS and could not
+  run here (see [Known local test caveats](#known-local-test-caveats)).
 - [x] **One model-list request per poll.** LM Studio and llama.cpp were queried
-  twice every 5 s for the same endpoint. (`nvpair-engine-manager`)
+  twice every 5 s for the same endpoint. (`nvpair-engine-manager`, `99a13f8`)
 - [x] **Proxy request size cap.** Bodies the proxy buffers for failover are
   limited to 64 MiB by default (`--max-request-bytes`); larger requests get a
-  413. (`nvpair-proxy`)
+  413. (`nvpair-proxy`, `63c7e92`)
 - [x] **Protocol logging follows the log level.** Broker JSON-RPC traffic is
   written to the log file only when the level is `debug`. It is no longer
-  written synchronously on every message at the default `warn`. (`desktop`)
+  written synchronously on every message at the default `warn`. (`desktop`,
+  `774753f`)
 
 Next:
 
@@ -54,6 +64,23 @@ Next:
   telemetry-only changes from triggering model and discovery notifications.
 - [ ] Measure before and after: PAIR's own memory with engines stopped, with
   Overview open, with Overview closed, and under a synthetic job stream.
+
+## Recommended order
+
+1. **Lazy tray popup** (phase 1). Small, desktop only, likely the biggest
+   remaining idle-memory saving. The hidden popup window is built at startup
+   in `desktop/src/electron/tray.ts`.
+2. **Visibility-gated node-info poller** (phase 1). Small, desktop only.
+   `node-info-poller.ts` already has start and stop hooks; tie them to window
+   visibility instead of the backend connection.
+3. **Manual nodes stored in the backend** (phase 2). Small to medium, mostly
+   Go, and fully testable here. Needed before the GUI can be optional.
+4. Then either **phase 2** (start with Option A, the Go supervisor) or
+   **phase 3** (the pause switch), if pausing for gaming matters more day to
+   day.
+
+Items 1 and 2 need a before-and-after memory check on a real machine. The
+measurement item in phase 1 covers that.
 
 ## Phase 2: Make the GUI optional
 

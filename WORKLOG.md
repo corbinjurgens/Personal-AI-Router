@@ -38,6 +38,8 @@ phase 1.
 | `aa9915a`, `9fa8251` | docs | Added `FORK.md` (goals, phased roadmap, open decisions, test caveats). |
 | `8772cf3` | docs | Added this log, a short fork introduction, and a fork notice at the top of `AGENTS.md`. |
 | `a73862e` | docs | Recorded the commit identity convention in `CLAUDE.md` (see Conventions set). |
+| `88652fa` | docs | Restored commit hashes in this log. |
+| *(this commit)* | docs | `FORK.md`: commit hashes and verification notes on finished items, a status line, and a recommended order for next steps. |
 
 ### Verification
 
