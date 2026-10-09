@@ -9,10 +9,12 @@ import { version } from '@/../package.json'
 import { APP_DISPLAY_NAME } from '@/shared/constants/app'
 import { MODULAR_RUNTIME_BINARIES } from '@/shared/constants/modular-binaries'
 import { MODULAR_DEFAULT_LOG_LEVEL } from '@/shared/constants/modular-runtime'
-import { getStructuredLogFilePath } from '@/shared/utils/log'
+import { flushLogs, getStructuredLogFilePath } from '@/shared/utils/log'
 import { currentPlatform } from '@/shared/utils/platform'
 import { getModularBridgeState } from '@/electron/service-bridge/modular-state'
 import { getCliBinDir, getModularSupervisor } from '@/electron/service-bridge/modular-supervisor'
+
+const LOG_FLUSH_TIMEOUT_MS = 2_000
 
 const SESSION_STARTED_AT = new Date(Date.now() - process.uptime() * 1000)
 
@@ -141,6 +143,9 @@ export async function saveDebugLogs(ownerWindow: BrowserWindow | null): Promise<
 
     if (result.canceled || !result.filePath) return null
 
+    // The bundle reads the log file, so lines still queued in memory would be
+    // missing from it.
+    await flushLogs(LOG_FLUSH_TIMEOUT_MS)
     writeFileSync(result.filePath, buildDebugLogBundle(), 'utf8')
     return result.filePath
 }
