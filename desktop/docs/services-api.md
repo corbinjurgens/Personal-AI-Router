@@ -259,6 +259,7 @@
 | `errors:clear` | notification (we consume) | ✅ yes |
 | `errors:report` | notification (we consume) | ✅ yes |
 | `errors:update` | notification (we consume) | ✅ yes |
+| `workloads:remove` | notification (we consume) | ✅ yes |
 | `workloads:upsert` | notification (we consume) | ✅ yes |
 | `connection/cluster-auto-sync` | request (we call) | ➖ ignored |
 | `connection/cluster-identity` | request (we call) | ✅ yes |
@@ -285,7 +286,6 @@
 | `nodes/list` | request (we call) | ✅ yes |
 | `ready` | request (we call) | ✅ yes |
 | `workloads:get-initial` | request (we call) | ✅ yes |
-| `workloads:remove` | request (we call) | ✅ yes |
 | `workloads:subscribe` | request (we call) | ✅ yes |
 | `workloads:unsubscribe` | request (we call) | ⚠️ not called |
 
