@@ -110,19 +110,26 @@ interface ReportedOutage {
  */
 const failingNodes = new Map<string, ReportedOutage>()
 
+/**
+ * Whether any app window (Overview or the tray popup) is on screen. The polled
+ * telemetry only feeds those windows' charts, so with none visible the poll is
+ * work nobody sees.
+ */
+let windowVisible = false
+
+/**
+ * Begin polling for this service run. Ticks only run while a window is
+ * visible; see {@link setNodeInfoPollerVisible}.
+ */
 export function startNodeInfoPoller(): void {
-    if (pollTimer) return
+    if (pollRun) return
 
     pollRun = new AbortController()
-    pollNodeInfoOnce()
-    pollTimer = setInterval(pollNodeInfoOnce, MODULAR_NODE_INFO_POLL_INTERVAL_MS)
+    resumeTicks()
 }
 
 export function stopNodeInfoPoller(): void {
-    if (pollTimer) {
-        clearInterval(pollTimer)
-        pollTimer = null
-    }
+    pauseTicks()
     // Runs even with no timer left: a poll can still be mid-fetch, and its outcome
     // must not land after the poller was told to stop.
     pollRun?.abort()
@@ -131,6 +138,31 @@ export function stopNodeInfoPoller(): void {
     pollChoices.clear()
     pollBackoffs.clear()
     failingNodes.clear()
+}
+
+/**
+ * Pause ticks while no app window is visible and resume, with an immediate
+ * poll, when one is. Pausing keeps what the poller has learned (where each node
+ * answered, backoff timing) so resuming costs one connect per node rather than
+ * a fresh walk, and a poll already in flight is left to finish.
+ */
+export function setNodeInfoPollerVisible(visible: boolean): void {
+    if (visible === windowVisible) return
+    windowVisible = visible
+    if (visible) resumeTicks()
+    else pauseTicks()
+}
+
+function resumeTicks(): void {
+    if (!pollRun || !windowVisible || pollTimer) return
+    pollNodeInfoOnce()
+    pollTimer = setInterval(pollNodeInfoOnce, MODULAR_NODE_INFO_POLL_INTERVAL_MS)
+}
+
+function pauseTicks(): void {
+    if (!pollTimer) return
+    clearInterval(pollTimer)
+    pollTimer = null
 }
 
 function pollNodeInfoOnce(): void {
