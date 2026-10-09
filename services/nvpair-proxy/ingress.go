@@ -4,14 +4,19 @@
 package main
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
 	"strconv"
+
+	"nvpair-shared/nodepolicy"
 )
 
 const engineIdentityProbeHeader = "X-NVPAIR-Engine-Identity-Probe"
@@ -49,10 +54,19 @@ func (f *facade) setLocalBackend(b localBackend) error {
 	if b.Host != "" && !isLoopbackHost(b.Host) {
 		return fmt.Errorf("local backend host %q is not loopback", b.Host)
 	}
+	f.storeLocalBackend(b)
+	// A request waiting for this engine to wake re-checks its health now,
+	// rather than at its deadline.
+	if f.host != nil && f.host.admission != nil {
+		f.host.admission.backendChanged()
+	}
+	return nil
+}
+
+func (f *facade) storeLocalBackend(b localBackend) {
 	f.backendMu.Lock()
 	defer f.backendMu.Unlock()
 	f.backend = b
-	return nil
 }
 
 // localBackendTarget returns the loopback URL of the current local engine, and
@@ -113,15 +127,88 @@ func (f *facade) handleClusterIngress(w http.ResponseWriter, r *http.Request) {
 			"client certificate is not a pinned member of this node's cluster")
 		return
 	}
+	f.serveIngress(w, r, peer)
+}
+
+// serveIngress is the authenticated half of the cluster ingress. Inference is
+// admitted first (FORK_DESIGN.md §3.3): the body's model is read within the
+// same cap the router applies, admission decides, the model's profile
+// requestOptions are merged in, and only then is the request forwarded. Every
+// other route is forwarded as before.
+func (f *facade) serveIngress(w http.ResponseWriter, r *http.Request, peer string) {
+	if !isInferenceRequest(f.profile, r.Method, r.URL.Path) {
+		target, ok := f.localBackendTarget()
+		if !ok {
+			writeIngressError(w, http.StatusServiceUnavailable, "no-local-backend",
+				"no local inference backend is available on this node")
+			return
+		}
+		slog.Debug("cluster ingress forwarding to local backend",
+			"peer", peer, "method", r.Method, "path", r.URL.Path, "target", target.Host)
+		f.reverseProxyToLocal(w, r, target)
+		return
+	}
+
+	body, model, err := bufferBodyAndModel(w, r, f.host.requestBodyLimit())
+	if err != nil {
+		writeIngressError(w, http.StatusRequestEntityTooLarge, "body-too-large",
+			"request body exceeds the proxy's size limit")
+		return
+	}
+	// The execution's own context, so cancelActive can stop it without the
+	// peer having gone anywhere.
+	ctx, cancel := context.WithCancel(r.Context())
+	defer cancel()
+	decision := f.host.admission.admit(ctx, admissionRequest{
+		engine:  f.profile.Name,
+		model:   model,
+		waitCap: parseAdmissionWait(r.Header),
+		cancel:  cancel,
+	})
+	if decision.err != nil {
+		// The peer gave up while the request waited; nobody is left to answer.
+		return
+	}
+	if decision.reject != "" {
+		slog.Debug("cluster ingress admission rejected",
+			"peer", peer, "path", r.URL.Path, "model", model, "reason", decision.reject)
+		writeAdmissionRejection(w, decision.reject)
+		return
+	}
+	// Deferred so it also runs when a mid-stream copy error unwinds this
+	// handler by panic (see spec.md §5.4).
+	defer decision.ticket.release()
+
 	target, ok := f.localBackendTarget()
 	if !ok {
 		writeIngressError(w, http.StatusServiceUnavailable, "no-local-backend",
 			"no local inference backend is available on this node")
 		return
 	}
+	if decision.hasProfile {
+		body = mergeDefaults(body, decision.profile.RequestOptions)
+	}
+	out := r.WithContext(ctx)
+	out.Header = r.Header.Clone()
+	out.Header.Del(nodepolicy.AdmissionWaitHeader)
+	setReplayBody(out, body)
 	slog.Debug("cluster ingress forwarding to local backend",
-		"peer", peer, "method", r.Method, "path", r.URL.Path, "target", target.Host)
-	f.reverseProxyToLocal(w, r, target)
+		"peer", peer, "method", r.Method, "path", r.URL.Path, "target", target.Host, "model", model)
+	f.reverseProxyToLocal(w, out, target)
+}
+
+// setReplayBody installs a buffered body on an outbound request, keeping its
+// length consistent with what will actually be sent.
+func setReplayBody(r *http.Request, body []byte) {
+	if body == nil {
+		r.Body = http.NoBody
+		r.ContentLength = 0
+		r.Header.Del("Content-Length")
+		return
+	}
+	r.Body = io.NopCloser(bytes.NewReader(body))
+	r.ContentLength = int64(len(body))
+	r.Header.Set("Content-Length", strconv.Itoa(len(body)))
 }
 
 // reverseProxyToLocal streams the request to the local engine, preserving

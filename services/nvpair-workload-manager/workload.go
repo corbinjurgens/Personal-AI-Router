@@ -78,6 +78,10 @@ type Workload struct {
 	CompletedAt    *int64        `json:"completedAt"`
 	Error          *string       `json:"error"`
 	RequesterID    *string       `json:"requesterId"`
+	// RequestedModel is the tier a request asked for ("weak", "medium",
+	// "strong") when Model is the concrete model chosen for it. Optional and
+	// additive; passed through opaquely, and not part of the dedup key.
+	RequestedModel string `json:"requestedModel,omitempty"`
 	// Seq numbers a workload's events in emission order, assigned by the
 	// producer. It exists so dedup can tell a new event from a redelivery even
 	// when the two carry the same state and placement — see keyLifecycle.

@@ -84,6 +84,9 @@ is a genuine limitation, not a safety margin (§5.6).
 - Per-request workload lifecycle events.
 - The process-wide reservation map that makes concurrent dispatch spread.
 - The persisted per-engine port a user chose through `set-port`.
+- The fork's node policy (§12): node-wide admission for work executed here,
+  weak/medium/strong tier resolution, routing metadata headers, and workload
+  cancel and regenerate.
 
 **Out of scope**
 
@@ -145,7 +148,7 @@ which takes one off and puts the other on.
 | Class | Addressed? | Examples |
 | --- | --- | --- |
 | Facade-scoped | yes | `ready`, `error`, `node/*`, `errors:*`, `set-port`, `discovery:subscribe`, `discovery:nodes` |
-| Process-scoped | no | `log/set-level`, `node/set-priority`, `workload:*`, `discovery:node-activity` |
+| Process-scoped | no | `log/set-level`, `node/set-priority`, `node/set-policy`, `node/set-availability`, `node/set-engine-drain`, `node/set-residency`, `node/set-engine-intent`, `workload/cancel`, `workload:*`, `admission/*`, `discovery:node-activity` |
 | Bootstrap | names its engine in the payload | `facade/enable` |
 
 `facade/enable` is unaddressed because it runs *before* the facade it names
@@ -454,6 +457,15 @@ redelivery and dropped by every peer.
 A job admitted but not yet dispatched has no execution node. Consumers must
 treat an absent `scheduledOn` as "not placed" rather than assuming a node.
 
+**Model fields.** `model` is the concrete model the job asks for. For a tier
+request (§12.3) it is the model of the candidate being tried, updated on each
+dispatch and fixed at commit, and the optional, additive `requestedModel`
+carries the tier (`weak`, `medium`, `strong`). `requestedModel` is absent when
+the client named a model. `engine` stays the facade the request entered on even
+when a tier candidate is served by another engine, because `engine` is part of
+the workload's store and dedup identity and changing it mid-life would fork the
+record; the engine that answered is in the `X-PAIR-Engine` response header.
+
 ### 5.6 Coverage gap: non-streaming requests
 
 A non-streaming request is the case the retry policy serves worst, and the
@@ -544,6 +556,7 @@ One port per facade, demultiplexed on the connection's first byte:
 - **Cluster mTLS** when `--cluster-dir` shows this node is a member: a peer
   whose client certificate matches a local pin is forwarded straight to the
   local engine reported by `node/set-local-backend`, never re-routed onward.
+  Inference is admitted first (§12.2).
 
 Membership and pins are re-derived per request and on a watch, so joining or
 leaving a cluster needs no restart.
@@ -601,3 +614,182 @@ new supervisor, and no new relay wiring.
 | Transport error with candidates left | Forget the node's confirmed address, fail over |
 | Client disconnects mid-stream | Terminal workload event emitted at once; upstream cancelled |
 | Broker link closed | Facades stop serving, then the shared transport pool closes |
+| Admission refuses work here | `503` with `X-PAIR-Admission` and `Retry-After`; a router fails over (§12.2) |
+| Tier with no eligible model | `404` `{"error":"no eligible model for tier <tier>","needs":[...]}` (§12.3) |
+| Invalid node policy request | JSON-RPC error; the previous state is kept (§12.1) |
+
+## 12. Node policy (fork)
+
+The fork's node policy is defined in `nvpair-shared/nodepolicy` (`policy.go`
+for the schema, `wire.go` for the methods and payloads) and described in
+`FORK_DESIGN.md` §3–§4 at the repository root. The broker owns the policy file;
+this process enforces it. Where this section and the Go source disagree, the
+source wins.
+
+### 12.1 Broker → proxy requests
+
+All are process-scoped (§4) and answered `{"ok":true}` or with a JSON-RPC error.
+Input is validated before anything is applied, and an invalid request leaves
+the previous state in force. The broker re-sends all five whenever the proxy
+starts; until it does, the proxy runs on `nodepolicy.Default()` with
+availability `available`.
+
+| Method | Params | Effect |
+| --- | --- | --- |
+| `node/set-policy` | the whole `Policy` | validated with `nodepolicy.Parse`; its `availability` field is ignored |
+| `node/set-availability` | `{state, cancelActive?}` | `available`, `draining` or `paused`; `cancelActive` cancels every admitted execution on this node |
+| `node/set-engine-drain` | `{engine, drain}` | refuse new work for one engine during a settings restart |
+| `node/set-residency` | `{loadedByEngine}` | the models loaded per engine on this node, normalized per engine |
+| `node/set-engine-intent` | `{enabledByEngine}` | each managed engine's saved On/Off intent |
+| `workload/cancel` | `{workloadId, engine?, runId?, regenerate?}` | §12.5; answers `{found}` |
+
+Unknown fields and unknown engines are errors.
+
+Proxy → broker notifications, also process-scoped:
+
+| Notification | When |
+| --- | --- |
+| `admission/state` | `{active, activeByEngine, queued, lastActivityMs}`; at most once a second while it changes, and immediately when `active` reaches 0 |
+| `admission/unload` | `{engine, models}`: idle models admission wants unloaded to make room; the result arrives as the next `node/set-residency` |
+| `admission/wake` | `{engine}`: a request arrived for a stopped engine saved On; the result arrives as `node/set-local-backend` reporting it healthy |
+
+### 12.2 Admission
+
+One controller per process, shared by every facade, because the limits are the
+machine's (the same reasoning as §3.1). It runs in two places:
+
+- the cluster ingress (§7), for inference a peer sends here: the body is read
+  within `--max-request-bytes` (`413` beyond it), admitted, the model profile's
+  `requestOptions` merged in, and only then forwarded. Non-inference routes are
+  not admitted.
+- `handleHTTP`, before dispatching to this node's own engine (the self
+  candidate). A rejection is a failed candidate, exactly like a peer's `503`,
+  and writes nothing to the client unless it is the request's answer.
+
+Decision order for `(engine, model)`, model normalized per engine (§5 step 1):
+
+1. **Availability**: `paused` → `paused`, `draining` → `draining`; an engine
+   drain → `draining`.
+2. **Engine running**, as `node/set-local-backend` last reported. A stopped
+   engine whose saved intent is Off, unknown, or with `idle.startOnDemand` off
+   is refused `engine-off` without a wake. Otherwise `admission/wake` is sent
+   (at most once per 10 s per engine) and the request waits for the engine to
+   report healthy, up to `idle.wakeTimeoutSeconds` under the wait cap, then
+   `wake-timeout`.
+3. **Profile** by `(engine, normalized model)`. Its `requestOptions` merge into
+   the body recursively for objects, with keys in the request winning.
+4. **Concurrency**: `profile.maxConcurrent`, else
+   `admission.maxConcurrentPerModel`; at the limit the request queues, then
+   `busy`.
+5. **Residency**: models reported loaded on any engine, plus models in flight,
+   plus models that finished after the latest residency report (presumed still
+   loaded). Before the first `node/set-residency` only in-flight models count.
+   If the model would exceed `maxResidentModels`, idle models are unloaded least
+   recently used first via `admission/unload` when `switchModels` is set; the
+   eviction waits up to `switchTimeoutSeconds` for the residency to change and
+   then admits anyway. Without `switchModels`, or when unloading every idle
+   model would not be enough, the request queues for in-flight work, then
+   `no-fit`.
+6. **Memory**: with `memoryBudgetBytes > 0`, the resident and in-flight
+   profiles' `memoryBytes` (unknown counts 0) plus this model's must fit,
+   evicting or queueing as in step 5. A model larger than the whole budget is
+   `no-fit` at once.
+7. **Bounds**: queue and wake waits are bounded by
+   `min(policy timeout, X-PAIR-Admission-Wait)`; the eviction wait by
+   `switchTimeoutSeconds` alone, since it ends in admission. A caller that
+   leaves while waiting is dropped.
+8. **Admit**: the in-flight count is taken and released when the execution
+   ends, including a panic unwind; `lastActivityMs` is stamped per engine on
+   admit and release.
+
+A rejection is `503` with `X-PAIR-Admission: <reason>`, `Retry-After`, and a
+JSON body naming the reason.
+
+**The router's wait header.** Each inference attempt carries
+`X-PAIR-Admission-Wait`: `0` while the round has other candidates, so a busy
+node hands the request straight back, and `admission.queueTimeoutSeconds` for
+the round's last candidate. The self candidate is admitted with the same value
+and the header is not passed to an engine.
+
+**A paused node and its own requests.** Pausing affects only work executed
+here. A self candidate refused while the node is not `available` is excluded
+for the rest of the request; when nothing else can take it, the request is
+answered at once with the admission `503` instead of spending its retry budget.
+
+**Waking a stopped engine.** The broker advertises an engine only while it is
+healthy, so a stopped engine drops this node out of that engine's discovery
+overlay. The proxy remembers its own node id and each engine's last advertised
+models from discovery, and offers a *dormant* self candidate — last in the
+round — when the engine is saved On, start-on-demand is set, the node is
+available, and the model was last advertised by that engine or is covered by a
+profile. Admission wakes it; the dispatch then targets the backend's reported
+address.
+
+**cancelActive** cancels every admitted execution: an ingress request's context
+is cancelled; a self dispatch that has not committed moves on to another
+candidate (this node excluded), and one that has committed ends as `cancelled`.
+
+### 12.3 Tiers
+
+A request whose `model` is `weak`, `medium` or `strong` on an inference route
+is resolved by the node it enters.
+
+- **Needs**, read from the buffered body in OpenAI and Ollama shapes: `tools`
+  (non-empty `tools` or `functions`), `vision` (an `image_url`, `image` or
+  `input_image` content part, or non-empty Ollama `images`), `structured`
+  (`response_format.type` `json_schema`/`json_object`, or an Ollama `format`),
+  `embeddings` (`/v1/embeddings`, `/api/embed`, `/api/embeddings`), and a
+  context estimate of body bytes / 4 plus `max_tokens`,
+  `max_completion_tokens` or a positive `options.num_predict`.
+- **Entries**: the requested tier's, then stronger tiers nearest first with
+  `allowStronger`, then weaker tiers nearest first with `allowWeaker`. An entry
+  lacking a needed capability, or whose `contextTokens` is set and below the
+  estimate, is dropped.
+- **Candidates**: each entry expands through its engine's facade in this
+  process with the ordinary owner filter and order (§5): node/select pin,
+  scheduler priority, ID, self mapped to that engine's local backend, peers over
+  cluster mTLS to the port that facade's discovery overlay carries — the peer's
+  facade port for that engine. A node whose `loadedByEngine` (or, for this node,
+  the reported residency) contains the model is warm.
+- **Engines**: `/v1/chat/completions`, `/v1/completions` and `/v1/embeddings`
+  may cross engines. Every other inference route resolves only to its own
+  engine. An engine without a facade enabled in this process contributes no
+  candidates, because the process has no routing view of it.
+- **Order**: `preferLoaded: "tier"` sorts by tier rank, then warm before cold;
+  `"any"` by warm first, then tier rank. Entry order and the per-entry owner
+  order break ties. Reservations (§6) are taken only among the candidates
+  sharing the leading tier rank and warmth.
+- **Body**: the top-level `model` is replaced by splicing its value's bytes;
+  every other byte is forwarded as received.
+- **Nothing eligible** before any dispatch: `404` with
+  `{"error":"no eligible model for tier <tier>","needs":[...]}`.
+- **Model lists**: an OpenAI-shape model list (`/v1/models`, llama.cpp's
+  `/models`) gains `{"id":"<tier>","object":"model","created":0,"owned_by":"pair"}`
+  for each tier with at least one entry. The native Ollama list does not.
+
+### 12.4 Routing metadata
+
+Every routed inference response that commits carries `X-PAIR-Model` (the
+concrete model sent), `X-PAIR-Engine` (the engine that answered), `X-PAIR-Node`
+(the node id that answered), and `X-PAIR-Tier` when a tier was requested. They
+are set on the committed response only, so a failed-over attempt's headers can
+never reach the client. Workload fields are in §5.5.
+
+### 12.5 Cancel and regenerate
+
+`workload/cancel {workloadId, engine?, runId?, regenerate?}` acts on an
+in-flight workload this process originated and answers `{found}`. Workload ids
+count per facade, so `engine` selects among facades and an id in flight on two
+engines without it is an error; a `runId` other than this process's finds
+nothing.
+
+- **Before commit, with `regenerate`**: the current attempt is abandoned
+  through the same claim the discovery watcher uses (§5.3), its node is excluded
+  for the rest of the request, and dispatch continues with the remaining
+  candidates, re-resolving as usual and emitting the usual `workload:submitted`
+  placements. The aborted attempt costs no dispatch. If the exclusion leaves no
+  candidate the request ends with `503`. Between attempts, the node last tried
+  is excluded.
+- **Without `regenerate`, or after commit**: the request is cancelled and its
+  workload ends `cancelled` with the error `cancelled by request`. A committed
+  stream is never re-dispatched, so two models' output is never spliced.
