@@ -7,6 +7,7 @@ interface FakeMenuItem {
     label?: string
     type?: string
     checked?: boolean
+    enabled?: boolean
     click?: (item: { checked: boolean }) => void
 }
 
@@ -84,6 +85,22 @@ const mocks = vi.hoisted(() => {
         }
     }
 
+    const supervisor = {
+        item: {
+            label: 'Pause inference on this PC',
+            enabled: true,
+            request: 'paused' as 'available' | 'paused' | null
+        },
+        listeners: new Set<() => void>(),
+        getAvailabilityMenuItem: () => supervisor.item,
+        onAvailabilityChanged: (listener: () => void) => {
+            supervisor.listeners.add(listener)
+            return () => supervisor.listeners.delete(listener)
+        },
+        setAvailability: vi.fn(() => Promise.resolve())
+    }
+    const destroyConnector = vi.fn(() => Promise.resolve())
+
     const state = {
         trayMode: 'popup',
         windows: [] as FakeWindow[],
@@ -91,6 +108,7 @@ const mocks = vi.hoisted(() => {
             label?: string
             type?: string
             checked?: boolean
+            enabled?: boolean
             click?: (item: { checked: boolean }) => void
         }[]
     }
@@ -100,7 +118,7 @@ const mocks = vi.hoisted(() => {
         return win && !win.isDestroyed() ? win : null
     }
 
-    return { FakeWindow, FakeTray, state, current }
+    return { FakeWindow, FakeTray, state, current, supervisor, destroyConnector }
 })
 
 vi.mock('electron', () => {
@@ -149,6 +167,12 @@ vi.mock('@/electron/config/ui-config', () => ({
     }
 }))
 
+vi.mock('@/electron/connector', () => ({ destroyConnector: mocks.destroyConnector }))
+
+vi.mock('@/electron/service-bridge/modular-supervisor', () => ({
+    getModularSupervisor: () => mocks.supervisor
+}))
+
 vi.mock('@/shared/utils/platform', () => ({ currentPlatform: () => 'win32' }))
 
 vi.mock('@/shared/utils/log', () => ({
@@ -160,6 +184,7 @@ vi.mock('@/shared/utils/log', () => ({
     })
 }))
 
+import { app } from 'electron'
 import { destroyTray, initTray } from '@/electron/tray'
 
 const IDLE_DESTROY_MS = 60_000
@@ -297,5 +322,67 @@ describe('tray popup lifecycle', () => {
         expect(mocks.state.trayMode).toBe('menu')
         expect(win.destroyed).toBe(true)
         expect(mocks.state.lastMenu.find(item => item.type === 'checkbox')?.checked).toBe(false)
+    })
+
+    describe('service items', () => {
+        function menuItem(label: string): FakeMenuItem | undefined {
+            return mocks.state.lastMenu.find(item => item.label === label)
+        }
+
+        beforeEach(() => {
+            mocks.supervisor.item = {
+                label: 'Pause inference on this PC',
+                enabled: true,
+                request: 'paused'
+            }
+            for (const listener of mocks.supervisor.listeners) listener()
+        })
+
+        it('pauses inference from the toggle', () => {
+            const pause = menuItem('Pause inference on this PC')
+            expect(pause?.enabled).toBe(true)
+
+            pause?.click?.({ checked: false })
+            expect(mocks.supervisor.setAvailability).toHaveBeenCalledWith('paused')
+        })
+
+        it('relabels the toggle when the availability changes', () => {
+            mocks.supervisor.item = {
+                label: 'Resume inference on this PC',
+                enabled: true,
+                request: 'available'
+            }
+            for (const listener of mocks.supervisor.listeners) listener()
+
+            menuItem('Resume inference on this PC')?.click?.({ checked: false })
+            expect(mocks.supervisor.setAvailability).toHaveBeenCalledWith('available')
+            expect(menuItem('Pause inference on this PC')).toBeUndefined()
+        })
+
+        it('shows a disabled Pausing... while draining, and clicking does nothing', () => {
+            mocks.supervisor.item = { label: 'Pausing…', enabled: false, request: null }
+            for (const listener of mocks.supervisor.listeners) listener()
+
+            const pausing = menuItem('Pausing…')
+            expect(pausing?.enabled).toBe(false)
+            pausing?.click?.({ checked: false })
+            expect(mocks.supervisor.setAvailability).not.toHaveBeenCalled()
+        })
+
+        it('stops the service before quitting from the stop item', async () => {
+            menuItem('Stop background service and quit')?.click?.({ checked: false })
+            await vi.advanceTimersByTimeAsync(0)
+
+            expect(mocks.destroyConnector).toHaveBeenCalledWith({ force: true })
+            expect(app.quit).toHaveBeenCalled()
+        })
+
+        it('quits without stopping the service from the exit item', () => {
+            const exit = mocks.state.lastMenu.find(item => item.label?.startsWith('Exit '))
+            exit?.click?.({ checked: false })
+
+            expect(app.quit).toHaveBeenCalled()
+            expect(mocks.destroyConnector).not.toHaveBeenCalled()
+        })
     })
 })

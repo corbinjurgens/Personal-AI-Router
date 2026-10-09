@@ -5,6 +5,8 @@ import { app, BrowserWindow, Menu, nativeImage, screen, Tray } from 'electron'
 import { join } from 'path'
 import { createTrayWindow, getTrayWindow, createOverviewWindow } from '@/electron/window'
 import { getTrayMode, setTrayMode, type TrayMode } from '@/electron/config/ui-config'
+import { destroyConnector } from '@/electron/connector'
+import { getModularSupervisor } from '@/electron/service-bridge/modular-supervisor'
 import { createStructuredLogger } from '@/shared/utils/log'
 import { currentPlatform } from '@/shared/utils/platform'
 import { APP_DISPLAY_NAME } from '@/shared/constants/app'
@@ -44,6 +46,7 @@ class TrayManager {
     private blurHidingDisabled = false
     private displayChangeListener: (() => void) | undefined
     private visibilityInterval: ReturnType<typeof setInterval> | undefined
+    private unsubscribeAvailability: (() => void) | undefined
     private popupIdleTimer: ReturnType<typeof setTimeout> | undefined
     /** A popup created by a click, waiting for its first paint before it is shown. */
     private pendingReveal: { win: BrowserWindow; timer: ReturnType<typeof setTimeout> } | undefined
@@ -86,6 +89,11 @@ class TrayManager {
             this.tray.setToolTip(APP_DISPLAY_NAME)
 
             this.setupContextMenu()
+            // init() reruns on a retry or a recreate; keep one subscription.
+            this.unsubscribeAvailability?.()
+            this.unsubscribeAvailability = getModularSupervisor().onAvailabilityChanged(() =>
+                this.refreshContextMenu()
+            )
             this.setupClickHandlers()
             this.setupVisibilityCheck()
             this.setupDisplayChangeListeners()
@@ -107,6 +115,7 @@ class TrayManager {
      * tray, which never builds a renderer.
      */
     private buildMenu(): Menu {
+        const pause = getModularSupervisor().getAvailabilityMenuItem()
         return Menu.buildFromTemplate([
             {
                 label: 'Overview',
@@ -120,10 +129,46 @@ class TrayManager {
             },
             { type: 'separator' },
             {
+                label: pause.label,
+                enabled: pause.enabled,
+                click: () => this.requestAvailability(pause.request)
+            },
+            { type: 'separator' },
+            {
+                label: 'Stop background service and quit',
+                click: () => void this.stopServiceAndQuit()
+            },
+            {
                 label: `Exit ${APP_DISPLAY_NAME}`,
                 click: () => app.quit()
             }
         ])
+    }
+
+    /** Pause or resume inference on this PC. The label follows the broker's own notifications. */
+    private requestAvailability(request: 'available' | 'paused' | null): void {
+        if (request === null) return
+        getModularSupervisor()
+            .setAvailability(request)
+            .catch((error: unknown) => {
+                log.warn({
+                    sublevel: 'lifecycle',
+                    message: `Could not set availability to ${request}: ${error}`
+                })
+            })
+    }
+
+    /**
+     * Quitting normally only detaches and leaves the service running. This item
+     * stops it first, so inference on this PC ends with the app.
+     */
+    private async stopServiceAndQuit(): Promise<void> {
+        try {
+            await destroyConnector({ force: true })
+        } catch (error) {
+            log.error({ sublevel: 'lifecycle', message: `Failed to stop the service: ${error}` })
+        }
+        app.quit()
     }
 
     private setupContextMenu(): void {
@@ -471,6 +516,8 @@ class TrayManager {
     destroy(): void {
         log.info({ sublevel: 'lifecycle', message: 'Destroying tray' })
         if (this.visibilityInterval) clearInterval(this.visibilityInterval)
+        this.unsubscribeAvailability?.()
+        this.unsubscribeAvailability = undefined
         if (this.displayChangeListener) {
             try {
                 screen.removeListener('display-metrics-changed', this.displayChangeListener)
