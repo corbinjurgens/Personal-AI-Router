@@ -1,15 +1,17 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-import { useMemo, memo, type CSSProperties } from 'react'
-import { Card, Flex, Stack, Text } from '@nvidia/foundations-react-core'
+import { useCallback, useMemo, useState, memo, type CSSProperties } from 'react'
+import { Button, Card, Flex, Stack, Text } from '@nvidia/foundations-react-core'
 import type { Workload } from '@/shared/types/workloads'
-import { workloadExecutionNodeId } from '@/shared/utils/workloads'
+import getErrorString from '@/shared/utils/get-error-string'
+import { workloadCancelRequest, workloadExecutionNodeId } from '@/shared/utils/workloads'
+import { useErrorsStore } from '@/ui/stores/errors.store'
 import { useNodesStore } from '@/ui/stores/nodes.store'
 import { WORKLOAD_COLOR_MAP } from '@/ui/constants/colors'
 import { formatModelDisplayName } from '@/ui/utils/format-model-display-name'
 import { getWorkloadColorBar } from '@/ui/utils/colors'
-import { workloadNodeLabel } from '@/ui/utils/workload-labels'
+import { workloadModelLabel, workloadNodeLabel } from '@/ui/utils/workload-labels'
 import EngineIcon from '@/ui/components/EngineIcon'
 
 const formatDate = (timestamp: number) => {
@@ -47,6 +49,52 @@ const formatDate = (timestamp: number) => {
 const CARD_STYLE: CSSProperties & { '--workload-in-flight-color': string } = {
     direction: 'ltr',
     '--workload-in-flight-color': WORKLOAD_COLOR_MAP.yellow
+}
+
+/** Cancel actions for a queued or running job; renders nothing for any other. */
+function WorkloadCancelActions({ workload }: { workload: Workload }) {
+    const [busy, setBusy] = useState(false)
+    const canCancel = workloadCancelRequest(workload, false) !== null
+
+    const cancel = useCallback(
+        async (regenerate: boolean) => {
+            const request = workloadCancelRequest(workload, regenerate)
+            if (!request) return
+            setBusy(true)
+            try {
+                const { ok } = await window.pairApi.workloads.cancel(request)
+                if (!ok) {
+                    useErrorsStore
+                        .getState()
+                        .addLocalError('Could not cancel the job. It may have already finished.')
+                }
+            } catch (err) {
+                useErrorsStore
+                    .getState()
+                    .addLocalError(`Could not cancel the job: ${getErrorString(err)}`)
+            } finally {
+                setBusy(false)
+            }
+        },
+        [workload]
+    )
+
+    if (!canCancel) return null
+    return (
+        <Flex gap="2" wrap="wrap" className="mt-2">
+            <Button
+                kind="secondary"
+                size="small"
+                disabled={busy}
+                onClick={() => void cancel(false)}
+            >
+                Cancel
+            </Button>
+            <Button kind="secondary" size="small" disabled={busy} onClick={() => void cancel(true)}>
+                Cancel and run on another device
+            </Button>
+        </Flex>
+    )
 }
 
 function WorkloadItemCard({ workload }: { workload: Workload }) {
@@ -139,7 +187,10 @@ function WorkloadItemCard({ workload }: { workload: Workload }) {
                 <Flex align="center" gap="2" className="min-w-0">
                     <EngineIcon type={workload.engine} size={16} />
                     <Text kind="body/bold/sm" className="min-w-0 truncate">
-                        {formatModelDisplayName(workload.model, workload.engine)}
+                        {workloadModelLabel(
+                            workload,
+                            formatModelDisplayName(workload.model, workload.engine)
+                        )}
                     </Text>
                 </Flex>
 
@@ -170,6 +221,7 @@ function WorkloadItemCard({ workload }: { workload: Workload }) {
                 <Flex align="center" gap="2">
                     {subtext}
                 </Flex>
+                <WorkloadCancelActions workload={workload} />
                 {workload.error && workload.state === 'failed' && (
                     <Text
                         kind="body/regular/sm"
