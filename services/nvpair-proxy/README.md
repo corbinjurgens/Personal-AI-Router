@@ -66,6 +66,7 @@ parameter, because one flag cannot carry multiple engines' plans.
 |------|---------|-------------|
 | `--ipc` | *(empty — use stdio)* | Path to a Unix domain socket or Windows named pipe for IPC |
 | `--cluster-dir` | *(empty)* | Cluster trust directory (`node.crt`/`node.key` plus trusted pins). Enables the LAN mTLS inference ingress while this node is a cluster member; empty means no ingress and no peer candidates. |
+| `--max-request-bytes` | `67108864` (64 MiB) | Largest request body the proxy buffers so a failed attempt can be replayed on another node. A larger body is answered with `413` and never dispatched. |
 | `--log-level` | *(`$NVPAIR_LOG_LEVEL`, else `info`)* | Initial log level: `debug`, `info`, `warn`, or `error`. Changeable at runtime with `log/set-level`. |
 | `--version` | | Print version and exit |
 

@@ -23,6 +23,7 @@ func main() {
 	ipcPath := flag.String("ipc", "", "IPC endpoint: Unix domain socket path or Windows named pipe (default: stdin/stdout)")
 	clusterDir := flag.String("cluster-dir", "", "cluster trust directory (node.crt/key + trusted pins); enables the LAN mTLS inference ingress when this node is clustered")
 	showVersion := flag.Bool("version", false, "print version and exit")
+	maxRequestBytes := flag.Int64("max-request-bytes", defaultMaxRequestBytes, "largest request body the proxy buffers for failover; larger requests get 413")
 	resolveLevel := applog.RegisterFlag(nil, slog.LevelInfo)
 	flag.Parse()
 
@@ -71,6 +72,7 @@ func main() {
 
 	codec := NewCodec(transport)
 	proxy := NewProxy(codec)
+	proxy.maxRequestBytes = *maxRequestBytes
 	// Open a live view of this node's cluster mTLS trust fabric. While unclustered
 	// the proxy serves only the loopback plaintext personality; once this node is
 	// a member the same listener also serves the pin-gated LAN mTLS ingress, and

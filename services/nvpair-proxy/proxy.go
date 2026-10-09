@@ -213,28 +213,50 @@ type workloadParams struct {
 	WorkloadInfo Workload `json:"workloadInfo"`
 }
 
+// defaultMaxRequestBytes bounds how much of an inference request the proxy
+// buffers for failover replay. It is generous on purpose: long contexts and
+// base64-embedded images are legitimate, and the cap exists to stop a runaway
+// or hostile body from exhausting memory, not to police prompt size.
+const defaultMaxRequestBytes int64 = 64 << 20
+
+// requestBodyLimit is the effective buffering cap. A Proxy built without
+// NewProxy (tests) gets the default rather than no limit.
+func (p *Proxy) requestBodyLimit() int64 {
+	if p.maxRequestBytes > 0 {
+		return p.maxRequestBytes
+	}
+	return defaultMaxRequestBytes
+}
+
 // bufferBodyAndModel reads the request body once and returns the raw bytes
 // (so each failover attempt can replay it — see the loop in handleHTTP) along
-// with the JSON "model" field for workload tracking. Inference bodies are
-// small (prompt + model), so full buffering is cheap. Returns (nil, "") when
-// the body is absent and an empty model when none is parseable. The caller
-// restores r.Body from the returned bytes before each forward attempt.
-func bufferBodyAndModel(r *http.Request) ([]byte, string) {
+// with the JSON "model" field for workload tracking. The read is capped at
+// limit bytes; a larger body returns a *http.MaxBytesError, which the caller
+// answers with 413 instead of forwarding a truncated request. Any other read
+// error keeps the previous behavior of forwarding what arrived. Returns
+// (nil, "", nil) when the body is absent and an empty model when none is
+// parseable. The caller restores r.Body from the returned bytes before each
+// forward attempt.
+func bufferBodyAndModel(w http.ResponseWriter, r *http.Request, limit int64) ([]byte, string, error) {
 	if r.Body == nil {
-		return nil, ""
+		return nil, "", nil
 	}
-	body, err := io.ReadAll(r.Body)
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, limit))
 	_ = r.Body.Close()
 	if err != nil {
-		return body, ""
+		var tooLarge *http.MaxBytesError
+		if stderrors.As(err, &tooLarge) {
+			return nil, "", err
+		}
+		return body, "", nil
 	}
 	var probe struct {
 		Model string `json:"model"`
 	}
 	if err := json.Unmarshal(body, &probe); err != nil {
-		return body, ""
+		return body, "", nil
 	}
-	return body, probe.Model
+	return body, probe.Model, nil
 }
 
 type statusCapture struct {
@@ -356,6 +378,10 @@ type Proxy struct {
 
 	codec  *Codec
 	cancel context.CancelFunc
+
+	// maxRequestBytes caps a buffered request body (see requestBodyLimit). Set
+	// from --max-request-bytes before serving; read-only afterwards.
+	maxRequestBytes int64
 
 	// mesh is this node's cluster mTLS trust fabric, loaded from --cluster-dir.
 	// nil = unclustered: the LAN TLS ingress accepts nothing and the node does
@@ -1165,7 +1191,22 @@ func (f *facade) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	// Parse the request's model before choosing a node. Model eligibility only
 	// applies to inference routes; control endpoints retain their existing
 	// routing behavior even when their JSON happens to contain a model field.
-	bodyBytes, model := bufferBodyAndModel(r)
+	bodyBytes, model, err := bufferBodyAndModel(w, r, p.requestBodyLimit())
+	if err != nil {
+		slog.Warn("proxy request rejected",
+			"id", reqID, "method", r.Method, "path", r.URL.Path,
+			"remote", r.RemoteAddr, "reason", "request body too large", "limit", p.requestBodyLimit())
+		http.Error(w, `{"error":"request body exceeds the proxy's size limit"}`, http.StatusRequestEntityTooLarge)
+		_ = f.notify("proxy/request", RequestEvent{
+			ID:       reqID,
+			Method:   r.Method,
+			Path:     r.URL.Path,
+			Status:   http.StatusRequestEntityTooLarge,
+			Duration: time.Since(start).Milliseconds(),
+			Error:    "request body too large",
+		})
+		return
+	}
 	isInf := isInferenceRequest(f.profile, r.Method, r.URL.Path)
 	routingModel := ""
 	if isInf {
