@@ -171,6 +171,12 @@ type Manager struct {
 
 	mu    sync.RWMutex
 	nodes map[string]*trackedNode
+
+	// statePath is where the entry list is persisted (see store.go); empty
+	// disables persistence. saveMu serialises writes so a slower save cannot
+	// land after a newer one.
+	statePath string
+	saveMu    sync.Mutex
 }
 
 func NewManager(codec *Codec, tlsOpts tlsClientOptions, mesh *clustertrust.Mesh) (*Manager, error) {
@@ -211,6 +217,10 @@ func (m *Manager) Run(ctx context.Context) error {
 	if err := m.codec.Notify("ready", ReadyParams{Version: Version}); err != nil {
 		return fmt.Errorf("failed to send ready notification: %w", err)
 	}
+
+	// After ready, so the parent is listening for the node/discovered each
+	// restored entry produces.
+	m.replay()
 
 	go m.probeLoop(ctx)
 
@@ -557,9 +567,11 @@ func (m *Manager) addNode(entry ManualEntry) ManualNodeStatus {
 			m.mu.RUnlock()
 			return
 		}
-		status = tn.status
+		// A local of its own: assigning the captured status raced the
+		// caller's return of it.
+		probed := tn.status
 		m.mu.RUnlock()
-		m.codec.Notify("node/discovered", status)
+		m.codec.Notify("node/discovered", probed)
 	}()
 
 	return status
@@ -653,6 +665,7 @@ func (m *Manager) handleMessage(msg *Message) {
 			return
 		}
 		status := m.addNode(entry)
+		m.persist()
 		if err := m.codec.Respond(msg.ID, status); err != nil {
 			log.Printf("failed to respond to node/add: %v", err)
 		}
@@ -667,6 +680,9 @@ func (m *Manager) handleMessage(msg *Message) {
 			return
 		}
 		removed := m.removeNode(params.ID)
+		if removed {
+			m.persist()
+		}
 		if err := m.codec.Respond(msg.ID, map[string]bool{"removed": removed}); err != nil {
 			log.Printf("failed to respond to node/remove: %v", err)
 		}

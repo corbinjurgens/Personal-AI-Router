@@ -5,7 +5,7 @@ SPDX-License-Identifier: Apache-2.0
 
 # nvpair-manual-nodes
 
-A Go service for managing manually configured nodes on networks where mDNS discovery is unavailable. Accepts node addresses via JSON-RPC, probes each for Ollama, LM Studio, and node-info, and emits status events.
+A Go service for managing manually configured nodes on networks where mDNS discovery is unavailable. Accepts node addresses via JSON-RPC, probes each for Ollama, LM Studio, and node-info, and emits status events. The node list is persisted, so it survives a restart of this worker, the broker, or the machine.
 
 ## Communication
 
@@ -19,6 +19,7 @@ Uses bidirectional newline-delimited JSON-RPC 2.0. By default, communication is 
 | `--client-cert <path>` | _(none)_ | PEM client certificate to present when probing TLS-enabled manual nodes (requires `--client-key`) |
 | `--client-key <path>` | _(none)_ | PEM client private key matching `--client-cert` |
 | `--ca-bundle <path>` | _(none)_ | PEM bundle of CAs to trust when verifying server certificates (additive to the system trust store) |
+| `--state-file <path>` | `manual-nodes.json` in the per-user data dir | File the node list is saved to on every change and restored from at startup. See [Persistence](#persistence) |
 | `--cluster-dir <path>` | _(none)_ | Cluster config dir; when set, a TLS manual node's node-info is probed over cluster mTLS, presenting this node's leaf and accepting any currently-pinned server cert |
 | `--log-level <level>` | `info` | `error` / `warn` / `info` / `debug`; falls back to `$NVPAIR_LOG_LEVEL`. Also changeable at runtime via the `log/set-level` method |
 | `--version` | | Print version and exit |
@@ -81,7 +82,7 @@ Emitted so the supervising broker can forward them into the `nvpair-errors` pipe
 
 ### `node/add`
 
-Add a node by address. The manager immediately probes it and emits a `node/discovered` event.
+Add a node by address. The manager immediately probes it and emits a `node/discovered` event, and saves the entry to the state file. Adding an entry whose node id (its `name`, or `manual:<address>`) is already tracked replaces it.
 
 A hostname is preferred over an IP literal: probe clients disable keep-alives specifically so every probe re-resolves the name, which lets a node that gets a new address recover on its own. An IP-literal entry is dead once the device is renumbered. Supply the address on its own — a `host:port` string is not parsed, because ports are appended to it, so such an entry reads permanently down.
 
@@ -100,7 +101,7 @@ Response: the initial node status object.
 
 ### `node/remove`
 
-Remove a previously added manual node.
+Remove a previously added manual node, and delete it from the state file.
 
 ```json
 {"jsonrpc":"2.0","id":2,"method":"node/remove","params":{"id":"my-server"}}
@@ -130,6 +131,33 @@ Changes the log level at runtime. Accepted as either a request (answered with `{
 {"jsonrpc":"2.0","id":5,"method":"log/set-level","params":{"level":"debug"}}
 ```
 
+## Persistence
+
+The entry list is saved to `<appdir>/manual-nodes.json` (or `--state-file`) after
+every `node/add` and every `node/remove` that removed something:
+
+```json
+{
+  "version": 1,
+  "nodes": [
+    {"address": "lab.tailnet.ts.net", "name": "lab", "tls_port": 14319, "mtls": true},
+    {"address": "10.0.1.50"}
+  ]
+}
+```
+
+- Writes are atomic (a temporary file in the same directory, synced, then
+  renamed over the old one) and the file is created with mode `0600`.
+- Entries are stored exactly as added. A hostname stays a hostname: nothing
+  resolved is ever saved.
+- At startup, after `ready`, every saved entry is re-added as if by `node/add`:
+  it is probed and announced with `node/discovered`, so a supervising broker
+  merges it back into discovery and bridges it into the proxies with no client
+  involvement.
+- A file that cannot be read is renamed to `manual-nodes.json.invalid` and the
+  worker starts with an empty list, rather than overwriting it on the next add.
+- A failed save is logged and does not fail the `node/add` or `node/remove`.
+
 ## Probing
 
 Each manual node is probed every 10 seconds, with a 3-second timeout per leg, for:
@@ -141,6 +169,8 @@ Each manual node is probed every 10 seconds, with a 3-second timeout per leg, fo
 A node can have any combination of these, or none if the target is unreachable. Status changes trigger `node/updated` events. Because change detection compares CPU, memory, and GPU values, a node running node-info emits a `node/updated` on most probe cycles as utilization moves.
 
 The three engine ports are compiled in: only the node-info leg's port can be moved, via `tls_port`. A remote engine on a non-default port is not discovered.
+
+Addresses may be hostnames, such as Tailscale MagicDNS names. Every probe client disables keep-alives, so every probe opens a new connection and resolves the name again (Go's resolver keeps no cache of its own; any caching is the operating system's), and a machine that changed address is followed on the next probe.
 
 ## Shutdown
 

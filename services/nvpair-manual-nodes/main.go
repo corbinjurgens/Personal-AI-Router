@@ -14,6 +14,7 @@ import (
 	"os/signal"
 	"syscall"
 
+	"nvpair-shared/appdir"
 	"nvpair-shared/applog"
 	"nvpair-shared/clustertrust"
 )
@@ -24,6 +25,7 @@ func main() {
 	clientKey := flag.String("client-key", "", "path to PEM client private key matching --client-cert")
 	caBundle := flag.String("ca-bundle", "", "path to PEM bundle of CAs to trust for verifying server certificates (additive to system trust store)")
 	clusterDir := flag.String("cluster-dir", "", "cluster config dir (node.crt/node.key + trusted/); when set, a TLS manual node is probed over cluster mTLS with our pinned leaf")
+	stateFile := flag.String("state-file", "", "file the manual-node list is persisted to and restored from at startup (default: manual-nodes.json in the per-user data dir)")
 	showVersion := flag.Bool("version", false, "print version and exit")
 	resolveLevel := applog.RegisterFlag(nil, slog.LevelInfo)
 	flag.Parse()
@@ -83,6 +85,14 @@ func main() {
 	mgr, err := NewManager(codec, tlsOpts, mesh)
 	if err != nil {
 		log.Fatalf("failed to construct manager: %v", err)
+	}
+	mgr.statePath = *stateFile
+	if mgr.statePath == "" {
+		if p, err := appdir.Path(stateFileName); err == nil {
+			mgr.statePath = p
+		} else {
+			slog.Warn("no per-user data dir; manual nodes will not survive a restart", "err", err)
+		}
 	}
 
 	if err := mgr.Run(ctx); err != nil && ctx.Err() == nil {
