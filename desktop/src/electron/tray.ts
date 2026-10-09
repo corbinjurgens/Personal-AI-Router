@@ -18,6 +18,17 @@ const BLUR_GRACE_MS = 500
 const RETRY_DELAY = 1000
 const MAX_RETRIES = 3
 const VISIBILITY_CHECK_INTERVAL = 5000
+/**
+ * How long the popup may sit hidden before its window, and the renderer behind
+ * it, is destroyed. Reopening within this keeps the instant show; after it, the
+ * next click builds a fresh popup.
+ */
+const POPUP_IDLE_DESTROY_MS = 60_000
+/**
+ * How long a freshly created popup waits for its first paint before it is
+ * shown anyway. On Linux `ready-to-show` can lag far behind (see window.ts).
+ */
+const POPUP_FIRST_SHOW_FALLBACK_MS = 1_500
 
 class TrayManager {
     private tray: Tray | null = null
@@ -32,6 +43,9 @@ class TrayManager {
     private blurHidingDisabled = false
     private displayChangeListener: (() => void) | undefined
     private visibilityInterval: ReturnType<typeof setInterval> | undefined
+    private popupIdleTimer: ReturnType<typeof setTimeout> | undefined
+    /** A popup created by a click, waiting for its first paint before it is shown. */
+    private pendingReveal: { win: BrowserWindow; timer: ReturnType<typeof setTimeout> } | undefined
 
     private getPlatformIcon(): Electron.NativeImage {
         const iconsDir = join(__dirname, '../../resources/icons')
@@ -75,9 +89,8 @@ class TrayManager {
             this.setupVisibilityCheck()
             this.setupDisplayChangeListeners()
 
-            const win = createTrayWindow()
-            this.setupTrayWindowEvents(win)
-
+            // The popup window is not built here: it is created on the first
+            // click and destroyed once it has been hidden for a while.
             this.isVisible = true
             this.retryCount = 0
             log.info({ sublevel: 'lifecycle', message: 'Tray initialized successfully' })
@@ -136,19 +149,23 @@ class TrayManager {
             this.lastCursorPoint = undefined
         }
 
-        let win = getTrayWindow()
-        if (!win) {
-            win = createTrayWindow()
-            this.setupTrayWindowEvents(win)
+        const existing = getTrayWindow()
+
+        // A second click while a new popup is still loading dismisses it, as
+        // it would an open one.
+        if (existing && this.pendingReveal?.win === existing) {
+            this.cancelPendingReveal()
+            this.schedulePopupIdleDestroy(existing)
+            return
         }
 
-        if (win.isVisible()) {
+        if (existing?.isVisible()) {
             if (currentPlatform() === 'darwin') {
-                win.hide()
+                existing.hide()
             } else if (currentPlatform() === 'win32') {
-                if (!win.isMinimized()) win.hide()
+                if (!existing.isMinimized()) existing.hide()
             } else {
-                win.hide()
+                existing.hide()
             }
             return
         }
@@ -156,6 +173,59 @@ class TrayManager {
         const blurAge = Date.now() - this.lastBlurHideAtMs
         if (blurAge < BLUR_GRACE_MS) return
 
+        if (existing) {
+            this.showTrayWindow(existing)
+            return
+        }
+
+        const win = createTrayWindow()
+        this.setupTrayWindowEvents(win)
+        this.revealWhenPainted(win)
+    }
+
+    /**
+     * Show a just-created popup once it has painted, so the user never sees its
+     * empty black frame, with a fallback for a `ready-to-show` that lags.
+     */
+    private revealWhenPainted(win: BrowserWindow): void {
+        const reveal = (): void => {
+            if (this.pendingReveal?.win !== win) return
+            this.cancelPendingReveal()
+            if (!win.isDestroyed()) this.showTrayWindow(win)
+        }
+        this.pendingReveal = { win, timer: setTimeout(reveal, POPUP_FIRST_SHOW_FALLBACK_MS) }
+        win.once('ready-to-show', reveal)
+    }
+
+    private cancelPendingReveal(): void {
+        if (!this.pendingReveal) return
+        clearTimeout(this.pendingReveal.timer)
+        this.pendingReveal = undefined
+    }
+
+    /**
+     * Destroy the popup once it has stayed hidden for {@link POPUP_IDLE_DESTROY_MS}.
+     * Its `show` cancels this, and the timer re-checks before acting, so a popup
+     * reopened in the meantime, or replaced by a newer one, is never destroyed.
+     */
+    private schedulePopupIdleDestroy(win: BrowserWindow): void {
+        this.cancelPopupIdleDestroy()
+        this.popupIdleTimer = setTimeout(() => {
+            this.popupIdleTimer = undefined
+            if (win.isDestroyed() || win.isVisible() || getTrayWindow() !== win) return
+            if (this.pendingReveal?.win === win) return
+            log.verbose({ sublevel: 'lifecycle', message: 'Destroying idle tray popup' })
+            win.destroy()
+        }, POPUP_IDLE_DESTROY_MS)
+    }
+
+    private cancelPopupIdleDestroy(): void {
+        if (!this.popupIdleTimer) return
+        clearTimeout(this.popupIdleTimer)
+        this.popupIdleTimer = undefined
+    }
+
+    private showTrayWindow(win: BrowserWindow): void {
         this.positionTrayWindow(win)
 
         this.blurHidingDisabled = true
@@ -181,6 +251,11 @@ class TrayManager {
             if (showAge < 300) return
             this.lastBlurHideAtMs = Date.now()
             win.hide()
+        })
+        win.on('show', () => this.cancelPopupIdleDestroy())
+        win.on('hide', () => this.schedulePopupIdleDestroy(win))
+        win.once('closed', () => {
+            if (this.pendingReveal?.win === win) this.cancelPendingReveal()
         })
     }
 
@@ -279,6 +354,8 @@ class TrayManager {
     }
 
     private setupVisibilityCheck(): void {
+        // init() reruns on a retry or a recreate; keep one interval, not one per run.
+        if (this.visibilityInterval) clearInterval(this.visibilityInterval)
         this.visibilityInterval = setInterval(() => {
             if (!this.isVisible && this.retryCount < MAX_RETRIES) {
                 log.warn({ sublevel: 'lifecycle', message: 'Tray not visible, recreating' })
@@ -338,6 +415,8 @@ class TrayManager {
                 /* ignore */
             }
         }
+        this.cancelPendingReveal()
+        this.cancelPopupIdleDestroy()
         const win = getTrayWindow()
         if (win && !win.isDestroyed()) win.destroy()
         if (this.tray) {

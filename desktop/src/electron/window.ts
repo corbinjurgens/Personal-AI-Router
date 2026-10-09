@@ -325,12 +325,16 @@ export function getTrayWindow(): BrowserWindow | null {
     return trayWindow && !trayWindow.isDestroyed() ? trayWindow : null
 }
 
+/**
+ * Create the tray popup window, hidden, and start loading its renderer. The
+ * tray creates it on demand and destroys it after it has sat hidden for a
+ * while, so this runs once per popup lifetime rather than once per app run.
+ */
 export function createTrayWindow(): BrowserWindow {
-    if (trayWindow && !trayWindow.isDestroyed()) {
-        return trayWindow
-    }
+    const existing = getTrayWindow()
+    if (existing) return existing
 
-    trayWindow = new BrowserWindow({
+    const window = new BrowserWindow({
         width: 380,
         height: 100,
         show: false,
@@ -346,22 +350,28 @@ export function createTrayWindow(): BrowserWindow {
         webPreferences
     })
 
-    trayWindow.on('closed', () => {
-        trayWindow = null
+    trayWindow = window
+
+    // `closed` can arrive after a replacement popup was already created (a
+    // destroyed window reports isDestroyed() at once, but its `closed` event
+    // follows later), so only clear the reference if it is still this window.
+    window.on('closed', () => {
+        if (trayWindow === window) trayWindow = null
     })
 
-    trackWindowVisibility(trayWindow)
-    guardExternalNavigation(trayWindow)
-    attachWebContentsDiagnostics(trayWindow)
+    trackWindowVisibility(window)
+    guardExternalNavigation(window)
+    attachWebContentsDiagnostics(window)
 
     const query = '?window=tray'
-    if (is.dev && process.env['ELECTRON_RENDERER_URL']) {
-        trayWindow.loadURL(process.env['ELECTRON_RENDERER_URL'] + query)
-    } else {
-        trayWindow.loadFile(join(__dirname, '../ui/index.html'), {
-            search: query
-        })
-    }
+    const rendererUrl = process.env['ELECTRON_RENDERER_URL']
+    const navigation =
+        is.dev && rendererUrl
+            ? window.loadURL(rendererUrl + query)
+            : window.loadFile(join(__dirname, '../ui/index.html'), { search: query })
+    // Destroying the popup mid-load rejects this with ERR_ABORTED; real load
+    // failures are reported by did-fail-load.
+    navigation.catch(() => {})
 
-    return trayWindow
+    return window
 }
