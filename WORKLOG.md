@@ -49,6 +49,8 @@ and their branches were merged here.
 | `aad9270` | docs | Architecture doc, AGENTS.md and two cursor rules describe the service-based process model. |
 | `4d62746`, `3df6fef` (merge `d086d56`) | desktop | Live availability and policy in Routing & resources; "Copy to this PC" with progress on paired nodes' models. Sonnet agent; 402 desktop tests pass. |
 | `dc6f8db` | TUI | Header shows Available / Pausing… / Paused (live); `P` toggles pause asynchronously. Sonnet agent; TUI tests pass. |
+| `8a6c892`, `4e85136` | docs | Handoff section in CLAUDE.md, and a temporary resume note, now removed. |
+| `02f6e89` | service | `nvpair-service autostart enable --systemd` writes a systemd user unit for headless Linux (with a `loginctl enable-linger` hint); `disable` and `status` cover both the unit and the XDG entry. Sonnet agent; service tests pass. |
 
 ### Verification
 

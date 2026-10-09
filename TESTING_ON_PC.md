@@ -46,6 +46,9 @@ Check these:
 - [ ] Reopening the TUI shows the same nodes and jobs.
 - [ ] `nvpair-service autostart enable` starts the service at the next login.
   `autostart disable` removes it.
+- [ ] **Headless Linux:** `nvpair-service autostart enable --systemd` installs
+  a systemd user unit. With `loginctl enable-linger $USER`, the service starts
+  at boot.
 - [ ] **Windows:** no console window appears when the TUI starts the service,
   and the service survives closing the terminal.
 - [ ] **macOS:** the service survives closing Terminal.

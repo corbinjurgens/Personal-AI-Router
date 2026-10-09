@@ -5,19 +5,6 @@ SPDX-License-Identifier: Apache-2.0
 
 # CLAUDE.md
 
-> **RESUME NOTE for the next session. Delete this note once handled.**
-> On 2026-10-10 the last session ran out of credit while it may still have been
-> working on: a `--systemd` option for `nvpair-service autostart enable` on
-> Linux (a systemd user unit for headless machines; code in
-> `services/nvpair-service/autostart_linux.go`).
->
-> To resume:
-> 1. Check `git log fork/groundwork` and WORKLOG.md for whether it landed.
-> 2. Check `git branch --list 'worktree-agent-*'` and `git worktree list` for
->    unmerged agent work. Merge it if it passes `go test ./...` in
->    `services/nvpair-service`, otherwise redo or drop it.
-> 3. Record the outcome in WORKLOG.md, then delete this note and commit.
-
 This is a **personal fork** of NVIDIA's Personal AI Router (PAIR). It adds
 features for running a small, changing group of personal machines as one
 inference pool: a backend that runs with no GUI, `weak`/`medium`/`strong` model
