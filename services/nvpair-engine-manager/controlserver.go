@@ -66,6 +66,8 @@ func (s *controlServer) mux() *http.ServeMux {
 	mux.HandleFunc(controlLoadPath, s.requirePin(s.handleLoad))
 	mux.HandleFunc(controlUnloadPath, s.requirePin(s.handleUnload))
 	mux.HandleFunc(controlDeletePath, s.requirePin(s.handleDelete))
+	mux.HandleFunc(controlModelFilesPath, s.requirePin(s.handleModelFiles))
+	mux.HandleFunc(controlModelFilePath, s.requirePin(s.handleModelFile))
 	mux.HandleFunc(controlStartPath, s.requirePin(s.handleStart))
 	mux.HandleFunc(controlStopPath, s.requirePin(s.handleStop))
 	return mux
