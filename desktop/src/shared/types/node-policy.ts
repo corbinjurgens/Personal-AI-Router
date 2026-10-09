@@ -27,6 +27,18 @@ export interface NodePolicyWrite extends NodePolicyTarget {
     policy: string
 }
 
+/** A node's availability changed; the broker relays every node's changes under its id. */
+export interface NodeAvailabilityChange {
+    nodeId: string
+    availability: NodeAvailability
+}
+
+/** A node's saved policy changed, as JSON text like {@link NodePolicyDocument.policy}. */
+export interface NodePolicyChange {
+    nodeId: string
+    policy: string
+}
+
 export interface NodeAvailabilityRequest extends NodePolicyTarget {
     state: RequestedAvailability
 }

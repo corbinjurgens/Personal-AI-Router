@@ -49,6 +49,13 @@ export function emptyEngineProgress(at: {
     return entry
 }
 
+/** Whether this progress is a copy of a model to this PC that has not ended. */
+export function isEngineCopyInProgress(
+    p: Pick<EngineProgress, 'operation' | 'status'> | undefined
+): boolean {
+    return p?.operation === 'copy' && p.status !== 'idle'
+}
+
 /** Whether UI should treat this progress as an active pull (show cancel, spinner, etc.). */
 export function isEnginePullInProgress(
     p: Pick<EngineProgress, 'operation' | 'status'> | undefined

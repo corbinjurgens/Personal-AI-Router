@@ -50,6 +50,7 @@ import {
 } from '@/shared/constants/modular-runtime'
 import { connectOrStart, serviceConnectionDeps } from './service-connection'
 import { defaultServiceEndpointEnvironment, resolveServiceEndpoint } from './service-endpoint'
+import { parseAvailabilityChange, parsePolicyChange } from './node-policy'
 import { NodeAvailabilityState, type AvailabilityMenuItem } from './node-availability'
 import {
     legacyManualNodesPath,
@@ -1341,6 +1342,14 @@ class ModularSupervisor {
 
         if (notification.method === 'node:availability-changed') {
             this.availability.applyNotification(notification.params)
+            const change = parseAvailabilityChange(notification.params)
+            if (change) emitBridgePush('node:availability-changed', change)
+            return
+        }
+
+        if (notification.method === 'policy:changed') {
+            const change = parsePolicyChange(notification.params)
+            if (change) emitBridgePush('policy:changed', change)
             return
         }
 
@@ -1959,6 +1968,45 @@ class ModularSupervisor {
         } finally {
             state.finishRemoteModelPull(nodeId, engineType, model)
         }
+    }
+
+    /**
+     * Copy a model from a paired peer to this PC via `engine:remote-copy-model`.
+     * Progress streams as `engine:remote-progress` with `op: "copy"` (applied by
+     * the bridge state); the awaited RPC settling ends the copy, and a failure,
+     * whether the RPC rejects or a terminal `error` frame arrived, is reported
+     * through the local error path. One copy per source peer and engine at a time.
+     */
+    async copyModelToThisPc(
+        nodeId: string,
+        engine: string,
+        engineType: EngineType,
+        model: string
+    ): Promise<void> {
+        const state = getModularBridgeState()
+        if (!state.beginModelCopy(nodeId, engineType, model)) return
+        let failure: string | undefined
+        try {
+            await this.callProcess(
+                'broker',
+                'engine:remote-copy-model',
+                { node: nodeId, engine, model },
+                PULL_TIMEOUT_MS
+            )
+        } catch (err) {
+            failure = getErrorString(err)
+        }
+        failure = state.finishModelCopy(nodeId, engineType) ?? failure
+        if (failure === undefined) {
+            // The copied model is now on this PC; refresh its list.
+            await this.refreshEngineModels(engine, engineType)
+            return
+        }
+        this.reportError(
+            `Failed to copy ${model} to this PC: ${failure}`,
+            'error',
+            `engine-copy-model:${nodeId}:${engineType}:${model}`
+        )
     }
 
     /**
