@@ -14,6 +14,8 @@ tiers, per-machine resource limits, a pause switch, and low idle overhead.
   it first, and add an entry for every session**, covering what changed, why,
   how it was verified, and what was left open.
 - [FORK.md](FORK.md): the goals and the phased roadmap.
+- [research_findings.md](research_findings.md): the original source review the
+  roadmap is based on.
 - [AGENTS.md](AGENTS.md): upstream's contributor guide. Its conventions still
   apply.
 

@@ -1,3 +1,8 @@
+<!--
+SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+-->
+
 **Yes. After inspecting the source, I think PAIR is a worthwhile foundation for what you want.** Its backend is open, its main responsibilities are reasonably separated, and several features you need already have useful implementation hooks.
 
 The two largest additions would be **a backend that runs independently of the GUI** and **a routing system that manages model choice, residency, and capacity**. I also found concrete opportunities to reduce background work, including a history-retention issue that can make the desktop’s memory usage grow over a long session.

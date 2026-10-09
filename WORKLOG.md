@@ -39,7 +39,7 @@ phase 1.
 | `8772cf3` | docs | Added this log, a short fork introduction, and a fork notice at the top of `AGENTS.md`. |
 | `a73862e` | docs | Recorded the commit identity convention in `CLAUDE.md` (see Conventions set). |
 | `88652fa` | docs | Restored commit hashes in this log. |
-| *(this commit)* | docs | `FORK.md`: commit hashes and verification notes on finished items, a status line, and a recommended order for next steps. |
+| `e5d9083` | docs | `FORK.md`: commit hashes and verification notes on finished items, a status line, and a recommended order for next steps. |
 
 ### Verification
 
@@ -73,6 +73,32 @@ phase 1.
   force-pushed. From now on, commits are authored as
   `Corbin Jurgens <corbinjurgens@gmail.com>` with no trailers (no sign-off,
   co-author, or session link). This is recorded in `CLAUDE.md`.
+
+### 2026-10-10 addendum: roadmap checked against the research
+
+The owner pushed `research_findings.md` (`1377cd7`), the original source
+review. Comparing it with `FORK.md`: same six phases in the same order, and
+phase 1's finished items match findings §5A, B, D and E. Points that were
+missing from `FORK.md` and are now added:
+
+- a trial run on each machine before building much further;
+- follow-ups to finished items: an async bounded log writer (§5B), Electron's
+  add-only baseline seeding (§5A), and separate residency and inventory polling
+  (§5D);
+- `nvpair-tui` as the interim way to run without Electron;
+- one start-on-demand and idle-unload policy across engines; a node-wide
+  reservation across engines; no fake GPU-percentage limits;
+- capability parsing in the proxy for tiers;
+- service-owned peer identity, invitations, and model-file integration;
+- job cancel and regenerate on another device, never splicing two answers
+  (§6);
+- packaging, signing, offline CSS vendoring, and engine and model licences
+  (§1).
+
+The one deliberate departure is the stream-abort classification. The research
+calls it a correctness issue; the plan keeps it as an open decision because
+upstream documents the current behavior on purpose. `research_findings.md`
+gained the SPDX header the repo's check requires, and `CLAUDE.md` links it.
 
 ### Next up
 
