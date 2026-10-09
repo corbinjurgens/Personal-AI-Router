@@ -513,6 +513,7 @@ class ModularSupervisor {
             })
 
             const child = new JsonRpcSubprocess(definition.processName, binaryPath)
+            child.setProtocolTrace(this.logLevel === 'debug')
             this.processes.set(definition.processName, child)
             this.attachChildHandlers(child)
             try {
@@ -715,6 +716,7 @@ class ModularSupervisor {
         this.logLevel = nextLevel
 
         for (const child of this.processes.values()) {
+            child.setProtocolTrace(nextLevel === 'debug')
             void child.notify('log/set-level', { level: nextLevel })
         }
     }
