@@ -388,3 +388,73 @@ func TestSameStringSet(t *testing.T) {
 		})
 	}
 }
+
+// TestSameReadRequestMatchesShippedManifests pins which bundled engines answer
+// list_models and loaded_models from one endpoint, so ModelsResult fetches it
+// once per sweep for them and twice only where the requests really differ.
+func TestSameReadRequestMatchesShippedManifests(t *testing.T) {
+	reg := NewRegistry()
+	if err := reg.LoadFS(bundledManifests, "manifests"); err != nil {
+		t.Fatalf("load bundled manifests: %v", err)
+	}
+	want := map[string]bool{"lmstudio": true, "llamacpp": true, "ollama": false}
+	for name, shared := range want {
+		mf, ok := reg.Get(name)
+		if !ok {
+			t.Fatalf("bundled manifest %q missing", name)
+		}
+		if got := sameReadRequest(mf.Actions["list_models"], mf.Actions["loaded_models"]); got != shared {
+			t.Errorf("%s: sameReadRequest = %v, want %v", name, got, shared)
+		}
+	}
+}
+
+func TestSameReadRequestRejectsDifferingOrSideEffectingActions(t *testing.T) {
+	get := func(path string) Action { return Action{HTTP: &ActionHTTP{Method: "GET", Path: path}} }
+	restart := get("/m")
+	restart.RestartAfter = true
+	cases := []struct {
+		name string
+		a, b Action
+		want bool
+	}{
+		{"identical GET", get("/m"), get("/m"), true},
+		{"different path", get("/m"), get("/n"), false},
+		{"different method", get("/m"), Action{HTTP: &ActionHTTP{Method: "POST", Path: "/m"}}, false},
+		{"restart after", get("/m"), restart, false},
+		{"cmd action", Action{Cmd: []string{"{cli}", "ls"}}, Action{Cmd: []string{"{cli}", "ls"}}, false},
+	}
+	for _, tc := range cases {
+		if got := sameReadRequest(tc.a, tc.b); got != tc.want {
+			t.Errorf("%s: sameReadRequest = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+// TestModelsResultSharedEndpoint: when both actions hit the same endpoint, the
+// single response still yields both the installed and the loaded views.
+func TestModelsResultSharedEndpoint(t *testing.T) {
+	m := testEngineManifest(fakeEngineBin)
+	m.Actions["list_models"] = Action{
+		HTTP:   &ActionHTTP{Method: "GET", Path: "/api/tags"},
+		Result: &ActionResult{Array: "models", Field: "name"},
+	}
+	m.Actions["loaded_models"] = Action{
+		HTTP:   &ActionHTTP{Method: "GET", Path: "/api/tags"},
+		Result: &ActionResult{Array: "models", Field: "name"},
+	}
+	ex := newTestExecutor(t, m)
+	ctx := context.Background()
+	t.Cleanup(func() { _ = ex.Stop("fake") })
+	if err := ex.Start(ctx, "fake"); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	res := ex.ModelsResult(ctx)
+	want := map[string][]string{"fake": {"llama3.2:1b"}}
+	if !reflect.DeepEqual(res.ByEngine, want) {
+		t.Fatalf("ByEngine = %v, want %v", res.ByEngine, want)
+	}
+	if !reflect.DeepEqual(res.LoadedByEngine, want) {
+		t.Fatalf("LoadedByEngine = %v, want %v", res.LoadedByEngine, want)
+	}
+}

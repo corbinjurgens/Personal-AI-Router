@@ -87,26 +87,32 @@ func (e *Executor) ModelsResult(ctx context.Context) ModelsResult {
 			continue
 		}
 		var listSpec, loadedSpec *ActionResult
-		if act, ok := mf.Actions["list_models"]; ok {
-			listSpec = act.Result
+		listAct, hasList := mf.Actions["list_models"]
+		if hasList {
+			listSpec = listAct.Result
 		}
-		if act, ok := mf.Actions["loaded_models"]; ok {
-			loadedSpec = act.Result
+		loadedAct, hasLoaded := mf.Actions["loaded_models"]
+		if hasLoaded {
+			loadedSpec = loadedAct.Result
 		}
 		if listSpec == nil && loadedSpec == nil {
 			continue
 		}
+		shared := listSpec != nil && loadedSpec != nil && sameReadRequest(listAct, loadedAct)
 		wg.Add(1)
-		go func(i int, name string, listSpec, loadedSpec *ActionResult) {
+		go func(i int, name string, listSpec, loadedSpec *ActionResult, shared bool) {
 			defer wg.Done()
 			st, err := e.Status(name)
 			if err != nil || !st.Running {
 				return
 			}
+			var listRaw json.RawMessage
+			var listErr error
 			if listSpec != nil {
-				if raw, err := e.Action(ctx, name, "list_models", nil); err != nil {
-					slog.Debug("engine:models list_models failed", "engine", name, "err", err)
-				} else if models, ok := extractStringsResult(raw, listSpec); ok {
+				listRaw, listErr = e.Action(ctx, name, "list_models", nil)
+				if listErr != nil {
+					slog.Debug("engine:models list_models failed", "engine", name, "err", listErr)
+				} else if models, ok := extractStringsResult(listRaw, listSpec); ok {
 					perEngine[i] = models
 					listOK[i] = true
 				} else {
@@ -114,7 +120,11 @@ func (e *Executor) ModelsResult(ctx context.Context) ModelsResult {
 				}
 			}
 			if loadedSpec != nil {
-				if raw, err := e.Action(ctx, name, "loaded_models", nil); err != nil {
+				raw, err := listRaw, listErr
+				if !shared {
+					raw, err = e.Action(ctx, name, "loaded_models", nil)
+				}
+				if err != nil {
 					slog.Debug("engine:models loaded_models failed", "engine", name, "err", err)
 				} else if models, ok := extractStringsResult(raw, loadedSpec); ok {
 					// A successful query — even an empty result — records the key
@@ -126,7 +136,7 @@ func (e *Executor) ModelsResult(ctx context.Context) ModelsResult {
 					slog.Debug("engine:models loaded_models returned an invalid inventory", "engine", name)
 				}
 			}
-		}(i, name, listSpec, loadedSpec)
+		}(i, name, listSpec, loadedSpec, shared)
 	}
 	wg.Wait()
 
@@ -261,4 +271,25 @@ func resolveObjectPath(obj map[string]json.RawMessage, path string) (json.RawMes
 		value, ok = nested[part]
 	}
 	return value, ok
+}
+
+// sameReadRequest reports whether two manifest actions issue the identical
+// side-effect-free HTTP request, so one response can serve both. LM Studio and
+// llama.cpp answer list_models and loaded_models from the same endpoint and only
+// filter the result differently; without this the loaded-model watcher fetched
+// that endpoint twice on every tick.
+func sameReadRequest(a, b Action) bool {
+	if a.HTTP == nil || b.HTTP == nil {
+		return false
+	}
+	if len(a.Cmd) > 0 || len(b.Cmd) > 0 || a.RemovePath != nil || b.RemovePath != nil {
+		return false
+	}
+	if a.RestartAfter || b.RestartAfter || a.ProgressProtocol != "" || b.ProgressProtocol != "" || a.ModelResolution != "" || b.ModelResolution != "" {
+		return false
+	}
+	return a.HTTP.Method == b.HTTP.Method &&
+		a.HTTP.Path == b.HTTP.Path &&
+		a.HTTP.ParamsIn == b.HTTP.ParamsIn &&
+		bytes.Equal(a.HTTP.BodySchema, b.HTTP.BodySchema)
 }
