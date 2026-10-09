@@ -9,7 +9,6 @@ import { useActiveWorkloads } from '@/ui/stores/workloads.store'
 import { useConnectionStore } from '@/ui/stores/connection.store'
 import { useServiceStatusStore } from '@/ui/stores/service-status.store'
 import { resolveShellView } from '@/ui/utils/shell-view'
-import { useClusterInvitationsStore } from '@/ui/stores/cluster-invitations.store'
 import { useOverviewNodes } from '@/ui/hooks/useOverviewNodes'
 import TrayNodeRow from './TrayNodeRow'
 import { APP_DISPLAY_NAME } from '@/shared/constants/app'
@@ -20,22 +19,11 @@ export default function TrayApp() {
     const connected = useConnectionStore(state => state.connected)
     const connectorStatus = useServiceStatusStore(state => state.status.connectorStatus)
     const activeWorkloads = useActiveWorkloads()
-    const pendingInviteCount = useClusterInvitationsStore(s => s.pendingInvites.length)
     const contentRef = useRef<HTMLDivElement>(null)
-    const previousClusterPromptCountRef = useRef<number | null>(null)
     const [maxHeight, setMaxHeight] = useState(0)
 
     const onlineNodes = useMemo(() => nodes.filter(n => n.status !== 'offline'), [nodes])
     const shellView = resolveShellView({ connectorStatus, connected, fetchedNodes })
-
-    useEffect(() => {
-        const nextPromptCount = pendingInviteCount
-        const previousPromptCount = previousClusterPromptCountRef.current
-        previousClusterPromptCountRef.current = nextPromptCount
-        if (previousPromptCount === null || nextPromptCount <= previousPromptCount) return
-
-        void window.windowApi.window.openOverview()
-    }, [pendingInviteCount])
 
     useEffect(() => {
         const el = contentRef.current

@@ -400,6 +400,39 @@ export function parseWorkloadsInitial(value: JsonValue | undefined): Workload[] 
     return workloads
 }
 
+/** A workload whose life has ended; the broker never revives one. */
+function isTerminalWorkload(workload: Workload): boolean {
+    return (
+        workload.state === 'completed' ||
+        workload.state === 'failed' ||
+        workload.state === 'cancelled'
+    )
+}
+
+function sameWorkload(left: Workload, right: Workload): boolean {
+    return (
+        left.id === right.id &&
+        left.model === right.model &&
+        left.engine === right.engine &&
+        left.state === right.state &&
+        left.originatedFrom === right.originatedFrom &&
+        (left.scheduledOn ?? null) === (right.scheduledOn ?? null) &&
+        left.createdAt === right.createdAt &&
+        left.startedAt === right.startedAt &&
+        left.completedAt === right.completedAt &&
+        left.error === right.error &&
+        left.requesterId === right.requesterId
+    )
+}
+
+/**
+ * How many realtime `workloads:remove` keys are remembered for baseline
+ * reconciliation. A removal only matters to a baseline request that was already
+ * in flight when it arrived, which is a window of one broker round trip, so a
+ * short bounded memory covers it.
+ */
+const WORKLOAD_REMOVAL_MEMORY = 1024
+
 const PENDING_OP_IDLE_TIMEOUT_MS = 90_000
 // Vendor installers can be quiet for minutes; allow a bounded 30-minute window.
 const INSTALL_PENDING_OP_IDLE_TIMEOUT_MS = 30 * 60_000
@@ -559,6 +592,38 @@ function sameInferenceHardwareIds(left?: string[], right?: string[]): boolean {
     // Preserve absent (undefined) vs empty ([]) — they mean different things.
     if (!left || !right) return left === right
     return sameStringList(left, right)
+}
+
+/**
+ * Whether only live readings differ: GPU and CPU utilization, VRAM and memory
+ * in use. Everything else node-info reports is hardware that a node card, the
+ * discovery list, and engine status are built from; these readings appear
+ * only in `metrics:update`.
+ */
+function sameHardware(
+    node: ModularNode,
+    gpus: ModularGpu[],
+    cpu: ModularCpu | null,
+    memory: ModularMemory | null,
+    inferenceHardwareIds: string[] | undefined
+): boolean {
+    if (node.gpus.length !== gpus.length) return false
+    for (let index = 0; index < gpus.length; index += 1) {
+        const left = node.gpus[index]
+        const right = gpus[index]
+        if (left.name !== right.name || left.vramBytes !== right.vramBytes) return false
+    }
+    if (!node.cpu || !cpu) {
+        if (node.cpu !== cpu) return false
+    } else if (node.cpu.name !== cpu.name || node.cpu.cores !== cpu.cores) {
+        return false
+    }
+    if (!node.memory || !memory) {
+        if (node.memory !== memory) return false
+    } else if (node.memory.totalBytes !== memory.totalBytes) {
+        return false
+    }
+    return sameInferenceHardwareIds(node.inferenceHardwareIds, inferenceHardwareIds)
 }
 
 function sameTelemetry(
@@ -883,6 +948,18 @@ class ModularBridgeState {
     private brokerNodeIds = new Set<string>()
     private errors: ServiceError[] = []
     private workloads = new Map<string, Workload>()
+    /**
+     * Ordering for baseline reconciliation. Every realtime workload event takes
+     * the next sequence number; {@link beginWorkloadBaseline} reads the current
+     * one before a `workloads:get-initial` request is sent, so seeding can tell an
+     * event that raced the request (newer than the baseline, or possibly so) from
+     * one the baseline already reflects.
+     */
+    private workloadEventSeq = 0
+    /** Sequence of the last realtime upsert for each key in {@link workloads}. */
+    private workloadUpsertSeq = new Map<string, number>()
+    /** Sequence of recent realtime removals, bounded by {@link WORKLOAD_REMOVAL_MEMORY}. */
+    private workloadRemovalSeq = new Map<string, number>()
     private logs: LogEntry[] = []
     // Per-engine bound proxy port reported by the broker. 0 = not reported yet;
     // we never fabricate a default — an unknown port surfaces as null, not a
@@ -1219,8 +1296,14 @@ class ModularBridgeState {
         const cpu = cpuValue(obj.cpu)
         const memory = memoryValue(obj.memory)
         const inferenceHardwareIds = optionalStringArrayValue(obj.inference_hardware_ids)
-        if (node.nodeInfoUp && sameTelemetry(node, gpus, cpu, memory, inferenceHardwareIds)) {
-            emitBridgePush('metrics:update', toMetrics(node))
+        // A change in live readings alone is stored and pushed as metrics only.
+        // Routing it through upsertNode would also push the node card, the whole
+        // discovery list, and every engine's status for this node on every poll
+        // tick that a utilization figure moved, none of which carry the readings.
+        if (node.nodeInfoUp && sameHardware(node, gpus, cpu, memory, inferenceHardwareIds)) {
+            const next: ModularNode = { ...node, gpus, cpu, memory }
+            this.nodes.set(nodeId, next)
+            emitBridgePush('metrics:update', toMetrics(next))
             return
         }
 
@@ -1274,21 +1357,59 @@ class ModularBridgeState {
     }
 
     /**
-     * Seed the catalog from a broker `workloads:get-initial` baseline and return
-     * the full current map. Adds each entry (keyed by `(originatedFrom, id)`)
-     * only when the key is absent, rather than clearing or overwriting: a live
-     * `workloads:upsert` that already landed at that key (the realtime stream is
-     * at least as fresh as this durable snapshot) is preserved, and the baseline
-     * only fills in jobs the stream has not delivered yet. No push is emitted —
-     * the caller (renderer / CLI) receives the seeded snapshot as the invoke
-     * response and observes subsequent changes on the push stream.
+     * Mark the moment a broker `workloads:get-initial` request is about to be
+     * sent. Pass the returned value to {@link seedWorkloads} with that request's
+     * result.
      */
-    seedWorkloads(workloads: Workload[]): WsInvokeResponse<'workloads:get-initial'> {
+    beginWorkloadBaseline(): number {
+        return this.workloadEventSeq
+    }
+
+    /**
+     * Reconcile the catalog against a broker `workloads:get-initial` baseline and
+     * return the full current map. Entries are keyed by `(originatedFrom, id)`.
+     *
+     * The broker's store is authoritative, and it applies every event before
+     * relaying it, so its snapshot reflects everything that reached this process
+     * before the request was sent. A realtime event that arrived after `since`
+     * raced the request: the snapshot may predate it, so that event wins.
+     *
+     * - A baseline entry fills in a missing key, and replaces an entry the stream
+     *   has not touched since the request was sent, which repairs a missed
+     *   `workloads:upsert`. A replacement is pushed as `workloads:upsert`; a
+     *   fill-in is not, because the caller receives it in the returned snapshot.
+     * - A baseline entry is skipped if its key was upserted or removed after the
+     *   request was sent.
+     * - A terminal entry the baseline no longer lists is dropped with a
+     *   `workloads:remove` push, which repairs a missed removal (for example, the
+     *   broker retiring old history). An active entry is never dropped here, and
+     *   neither is one upserted after the request was sent.
+     */
+    seedWorkloads(workloads: Workload[], since: number): WsInvokeResponse<'workloads:get-initial'> {
+        const baselineKeys = new Set<string>()
         for (const workload of workloads) {
             const key = workloadKey(workload.originatedFrom, workload.id)
-            if (!this.workloads.has(key)) this.workloads.set(key, workload)
+            baselineKeys.add(key)
+            if (this.touchedSince(key, since)) continue
+            const existing = this.workloads.get(key)
+            if (existing && sameWorkload(existing, workload)) continue
+            this.workloads.set(key, workload)
+            if (existing) emitBridgePush('workloads:upsert', workload)
+        }
+        for (const [key, workload] of Array.from(this.workloads)) {
+            if (baselineKeys.has(key) || !isTerminalWorkload(workload)) continue
+            if (this.touchedSince(key, since)) continue
+            this.evictWorkload(key, workload)
         }
         return this.getWorkloads()
+    }
+
+    /** Whether a realtime upsert or removal for `key` arrived after `since`. */
+    private touchedSince(key: string, since: number): boolean {
+        return (
+            (this.workloadUpsertSeq.get(key) ?? 0) > since ||
+            (this.workloadRemovalSeq.get(key) ?? 0) > since
+        )
     }
 
     /** Relay a broker `workloads:upsert` (`{ workloadInfo }`) into the catalog + UI. */
@@ -1296,7 +1417,11 @@ class ModularBridgeState {
         const obj = objectValue(params)
         const workload = parseWorkload(obj?.workloadInfo)
         if (!workload) return
-        this.workloads.set(workloadKey(workload.originatedFrom, workload.id), workload)
+        const key = workloadKey(workload.originatedFrom, workload.id)
+        this.workloadEventSeq += 1
+        this.workloadUpsertSeq.set(key, this.workloadEventSeq)
+        this.workloadRemovalSeq.delete(key)
+        this.workloads.set(key, workload)
         emitBridgePush('workloads:upsert', workload)
     }
 
@@ -1306,13 +1431,24 @@ class ModularBridgeState {
         const workloadId = stringValue(obj?.workloadId)
         if (!workloadId) return
         const originatedFrom = nullableStringValue(obj?.originatedFrom)
-        this.workloads.delete(workloadKey(originatedFrom, workloadId))
+        const key = workloadKey(originatedFrom, workloadId)
+        this.workloadEventSeq += 1
+        this.workloadUpsertSeq.delete(key)
+        // Re-inserted so the map's insertion order stays oldest-first for trimming.
+        this.workloadRemovalSeq.delete(key)
+        this.workloadRemovalSeq.set(key, this.workloadEventSeq)
+        if (this.workloadRemovalSeq.size > WORKLOAD_REMOVAL_MEMORY) {
+            const oldest = this.workloadRemovalSeq.keys().next()
+            if (!oldest.done) this.workloadRemovalSeq.delete(oldest.value)
+        }
+        this.workloads.delete(key)
         emitBridgePush('workloads:remove', { workloadId, originatedFrom })
     }
 
     /** Push a `workloads:remove` for an entry and drop it from the catalog. */
     private evictWorkload(key: string, workload: Workload): void {
         this.workloads.delete(key)
+        this.workloadUpsertSeq.delete(key)
         emitBridgePush('workloads:remove', {
             workloadId: workload.id,
             originatedFrom: workload.originatedFrom

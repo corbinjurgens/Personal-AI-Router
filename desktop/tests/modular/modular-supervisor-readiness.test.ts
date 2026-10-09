@@ -8,10 +8,15 @@ import {
 } from '@/electron/service-bridge/json-rpc-subprocess'
 
 const mocks = vi.hoisted(() => ({
+    pendingInviteIds: new Set<string>(),
     bridgeState: {
         handleNotification: vi.fn(),
         getSelfId: vi.fn(() => null),
-        getProxyPort: vi.fn(() => null)
+        getProxyPort: vi.fn(() => null),
+        getPendingInvites: () => Array.from(mocks.pendingInviteIds),
+        addPendingInvite: (invite: { inviteId: string; state: string }) => {
+            if (invite.state === 'pending') mocks.pendingInviteIds.add(invite.inviteId)
+        }
     },
     emitBridgePush: vi.fn()
 }))
@@ -22,6 +27,8 @@ vi.mock('electron', () => ({
         getAppPath: () => process.cwd()
     }
 }))
+
+vi.mock('@/electron/window', () => ({ createOverviewWindow: vi.fn() }))
 
 vi.mock('@/shared/utils/log', () => ({
     createStructuredLogger: () => ({
@@ -62,6 +69,7 @@ import {
     getModularSupervisor,
     ModularStartupTimeoutError
 } from '@/electron/service-bridge/modular-supervisor'
+import { createOverviewWindow } from '@/electron/window'
 
 interface ReadinessHarness {
     readonly ready: boolean
@@ -193,5 +201,28 @@ describe('modular supervisor readiness', () => {
         oldBroker.emit('exit', { source: 'broker', code: 1 })
 
         expect(supervisor.ready).toBe(true)
+    })
+})
+
+// The PIN prompt lives in Overview. The tray popup used to raise Overview for a
+// new inbound invite while it sat resident; it now exists only while open, so
+// main raises Overview itself.
+describe('inbound pairing invites', () => {
+    beforeEach(() => {
+        mocks.pendingInviteIds.clear()
+        vi.mocked(createOverviewWindow).mockClear()
+    })
+
+    it('raises Overview for a new pending invite, once', () => {
+        notify('cluster:invite-received', { inviteId: 'inv-1', state: 'pending' })
+        expect(createOverviewWindow).toHaveBeenCalledOnce()
+
+        notify('cluster:invite-received', { inviteId: 'inv-1', state: 'pending' })
+        expect(createOverviewWindow).toHaveBeenCalledOnce()
+    })
+
+    it('does not raise Overview for an invite that is no longer pending', () => {
+        notify('cluster:invite-received', { inviteId: 'inv-2', state: 'expired' })
+        expect(createOverviewWindow).not.toHaveBeenCalled()
     })
 })

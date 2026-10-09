@@ -116,6 +116,8 @@ vi.mock('electron', () => ({
     BrowserWindow: { getAllWindows: () => [] }
 }))
 
+vi.mock('@/electron/window', () => ({ createOverviewWindow: vi.fn() }))
+
 vi.mock('@/electron/service-bridge/modular-state', () => ({
     getModularBridgeState: () => ({
         getProxyPort: (engine: EngineType) => proxyPorts[engine]

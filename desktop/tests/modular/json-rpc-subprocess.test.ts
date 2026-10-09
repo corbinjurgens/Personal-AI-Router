@@ -22,6 +22,66 @@ const readline = require('readline').createInterface({ input: process.stdin })
 readline.on('line', () => process.exit(0))
 `
 
+// Prints one protocol frame carrying a pairing PIN and one line that is not a
+// frame, then a notification, the first time it is asked anything. Exits on the
+// next message, which is the shutdown call.
+const FAKE_CHATTY = `
+const readline = require('readline').createInterface({ input: process.stdin })
+let spoke = false
+readline.on('line', () => {
+  if (spoke) process.exit(0)
+  spoke = true
+  process.stdout.write(JSON.stringify({ jsonrpc: '2.0', method: 'cluster:invite-received', params: { pin: '481920' } }) + '\\n')
+  process.stdout.write('panic: not a frame\\n')
+  process.stdout.write(JSON.stringify({ jsonrpc: '2.0', method: 'done' }) + '\\n')
+})
+`
+
+async function stdoutLogsFor(trace: boolean): Promise<{ texts: string[]; methods: string[] }> {
+    const rpc = new JsonRpcSubprocess('fake', process.execPath)
+    rpc.setProtocolTrace(trace)
+    const texts: string[] = []
+    const methods: string[] = []
+    rpc.on('log', entry => {
+        if (entry.stream === 'stdout') texts.push(entry.text)
+    })
+    const done = new Promise<void>(resolve => {
+        rpc.on('notification', notification => {
+            methods.push(notification.method)
+            if (notification.method === 'done') resolve()
+        })
+    })
+    rpc.start(['-e', FAKE_CHATTY])
+    try {
+        await rpc.notify('go')
+        await done
+    } finally {
+        await rpc.stop()
+    }
+    return { texts, methods }
+}
+
+// Below debug, protocol frames used to be redacted and buffered for the debug
+// panel only to be filtered out of the file afterwards. They are now not
+// emitted at all unless tracing, while still being handled.
+describe('JsonRpcSubprocess stdout logging', () => {
+    it('emits no protocol frames when not tracing, but still handles them', async () => {
+        const { texts, methods } = await stdoutLogsFor(false)
+
+        expect(texts).toEqual(['panic: not a frame'])
+        expect(methods).toEqual(['cluster:invite-received', 'done'])
+    })
+
+    it('emits every frame redacted when tracing', async () => {
+        const { texts } = await stdoutLogsFor(true)
+
+        expect(texts).toHaveLength(3)
+        expect(texts.join('\n')).not.toContain('481920')
+        expect(texts[0]).toContain('[redacted]')
+        expect(texts[1]).toBe('panic: not a frame')
+    })
+})
+
 describe('JsonRpcSubprocess.sendWithResponse', () => {
     it('observes delayed responses without imposing a short timeout', async () => {
         const rpc = new JsonRpcSubprocess('fake', process.execPath)

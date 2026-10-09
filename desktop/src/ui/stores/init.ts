@@ -17,6 +17,17 @@ import { useDiscoveredNodesStore } from '@/ui/stores/discovered-nodes.store'
 import { useClusterInvitationsStore } from '@/ui/stores/cluster-invitations.store'
 import { useInferenceDemoStore } from '@/ui/stores/inference-demo.store'
 import { useServiceStatusStore } from '@/ui/stores/service-status.store'
+import { isTrayWindow } from '@/ui/utils/window-kind'
+
+/**
+ * The tray popup shows node rows (nodes, cluster members, metrics, engine
+ * status, active job counts) and the service and connection state, so it sets
+ * up only those stores. Everything else here feeds Overview alone: errors,
+ * discovery, engine models, progress and updates, pending engine actions, and
+ * the inference demo toast. Skipping them keeps the popup's snapshot fetches
+ * and push subscriptions to what it renders.
+ */
+const overviewStores = !isTrayWindow
 
 let unsubStateRefresh: (() => void) | null = null
 let unsubServiceStatus: (() => void) | null = null
@@ -26,7 +37,7 @@ export async function connectAndInitialize(): Promise<void> {
     // the `pairApi` guard and stays out of `initializeAllStores`/
     // `cleanupAllStores` — those cycle with the cluster connection, and a
     // node-local demo must survive that cycle and remain stoppable.
-    useInferenceDemoStore.getState().initialize()
+    if (overviewStores) useInferenceDemoStore.getState().initialize()
 
     // Also `windowApi`-backed, and seeded before the watcher below so that
     // reading an already-connected service is not mistaken for a restart.
@@ -61,9 +72,9 @@ async function initializeAllStores(): Promise<void> {
     const clusterInitial = await fetchClusterInitial()
 
     await useConnectionStore.getState().initialize(appInitial, clusterInitial)
-    await useErrorsStore.getState().initialize()
+    if (overviewStores) await useErrorsStore.getState().initialize()
     await useNodesStore.getState().initialize()
-    await useDiscoveredNodesStore.getState().initialize()
+    if (overviewStores) await useDiscoveredNodesStore.getState().initialize()
     await useClusterInvitationsStore.getState().initialize(clusterInitial)
     useMetricsStore.getState().initialize()
 
@@ -82,10 +93,12 @@ async function initializeAllStores(): Promise<void> {
         }
     }
     await useEngineStatusStore.getState().initialize(engineInitial)
-    await useEngineModelsStore.getState().initialize(engineInitial)
-    await useEngineProgressStore.getState().initialize(engineInitial)
-    await useEngineUpdateAvailableStore.getState().initialize(engineInitial)
-    usePendingActionsStore.getState().initialize()
+    if (overviewStores) {
+        await useEngineModelsStore.getState().initialize(engineInitial)
+        await useEngineProgressStore.getState().initialize(engineInitial)
+        await useEngineUpdateAvailableStore.getState().initialize(engineInitial)
+        usePendingActionsStore.getState().initialize()
+    }
     await useWorkloadsStore.getState().initialize()
 
     if (window.pairApi) {
@@ -107,17 +120,19 @@ function cleanupAllStores(): void {
     unsubStateRefresh?.()
     unsubStateRefresh = null
     useConnectionStore.getState().cleanup()
-    useErrorsStore.getState().cleanup()
     useNodesStore.getState().cleanup()
-    useDiscoveredNodesStore.getState().cleanup()
     useClusterInvitationsStore.getState().cleanup()
     useMetricsStore.getState().cleanup()
     useEngineStatusStore.getState().cleanup()
-    useEngineModelsStore.getState().cleanup()
-    useEngineProgressStore.getState().cleanup()
-    useEngineUpdateAvailableStore.getState().cleanup()
-    usePendingActionsStore.getState().cleanup()
     useWorkloadsStore.getState().cleanup()
+    if (overviewStores) {
+        useErrorsStore.getState().cleanup()
+        useDiscoveredNodesStore.getState().cleanup()
+        useEngineModelsStore.getState().cleanup()
+        useEngineProgressStore.getState().cleanup()
+        useEngineUpdateAvailableStore.getState().cleanup()
+        usePendingActionsStore.getState().cleanup()
+    }
 }
 
 /** Re-reads every domain snapshot in place, keeping existing subscriptions. */
@@ -127,14 +142,14 @@ async function resyncAllStores(): Promise<void> {
 
     await useConnectionStore.getState().initialize(appInitial, clusterInitial)
     await useNodesStore.getState().refresh()
-    await useDiscoveredNodesStore.getState().refresh()
+    if (overviewStores) await useDiscoveredNodesStore.getState().refresh()
     if (clusterInitial) {
         useClusterInvitationsStore.getState().hydrate(clusterInitial)
     } else {
         await useClusterInvitationsStore.getState().refresh()
     }
     await useWorkloadsStore.getState().refresh()
-    useErrorsStore.getState().refresh()
+    if (overviewStores) useErrorsStore.getState().refresh()
     useMetricsStore.getState().clearAll()
 
     let engineInitial: EngineInitialState | undefined
@@ -151,10 +166,12 @@ async function resyncAllStores(): Promise<void> {
         }
     }
     useEngineStatusStore.getState().initialize(engineInitial)
-    useEngineModelsStore.getState().initialize(engineInitial)
-    useEngineProgressStore.getState().initialize(engineInitial)
-    useEngineUpdateAvailableStore.getState().initialize(engineInitial)
-    usePendingActionsStore.getState().initialize()
+    if (overviewStores) {
+        useEngineModelsStore.getState().initialize(engineInitial)
+        useEngineProgressStore.getState().initialize(engineInitial)
+        useEngineUpdateAvailableStore.getState().initialize(engineInitial)
+        usePendingActionsStore.getState().initialize()
+    }
 }
 
 async function fetchAppInitial(): Promise<AppInitialSnapshot | undefined> {
