@@ -48,6 +48,7 @@ and their branches were merged here.
 | `5910e7f`, `370231c` | desktop | Job cancel and cancel-and-regenerate actions; `requestedModel → model` on jobs; Settings "Routing & resources" tab (node picker, pause/resume, policy JSON editor). Sonnet agent; 392 desktop tests pass. |
 | `aad9270` | docs | Architecture doc, AGENTS.md and two cursor rules describe the service-based process model. |
 | `4d62746`, `3df6fef` (merge `d086d56`) | desktop | Live availability and policy in Routing & resources; "Copy to this PC" with progress on paired nodes' models. Sonnet agent; 402 desktop tests pass. |
+| `dc6f8db` | TUI | Header shows Available / Pausing… / Paused (live); `P` toggles pause asynchronously. Sonnet agent; TUI tests pass. |
 
 ### Verification
 

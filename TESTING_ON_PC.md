@@ -36,6 +36,8 @@ The TUI is now a client. `./nvpair-tui` starts the service if needed:
 
 - `q` quits the TUI and leaves inference running.
 - `Q` then `y` stops the service.
+- `P` pauses or resumes inference on this PC. The header shows Available,
+  Pausing… or Paused.
 
 Check these:
 
