@@ -12,6 +12,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"nvpair-shared/jsonrpc"
 )
 
 // fakeBrokerEnv makes the test binary act as a broker process, so the real
@@ -27,7 +29,8 @@ func TestMain(m *testing.M) {
 }
 
 // runProcessBroker announces its working directory and arguments in app:ready,
-// writes one stderr line, and exits on shutdown or stdin EOF.
+// writes a stderr line at start and on "log", and exits on shutdown or stdin
+// EOF.
 func runProcessBroker() {
 	cwd, _ := os.Getwd()
 	params, _ := json.Marshal(map[string]any{"version": "proc", "cwd": cwd, "args": os.Args[1:]})
@@ -39,7 +42,14 @@ func runProcessBroker() {
 			ID     json.RawMessage `json:"id"`
 			Method string          `json:"method"`
 		}
-		if json.Unmarshal(sc.Bytes(), &m) == nil && m.Method == "shutdown" {
+		if json.Unmarshal(sc.Bytes(), &m) != nil {
+			continue
+		}
+		switch m.Method {
+		case "log":
+			fmt.Fprintln(os.Stderr, "[nvpair-ui-broker] INFO asked to log")
+			fmt.Printf(`{"jsonrpc":"2.0","id":%s,"result":null}`+"\n", m.ID)
+		case "shutdown":
 			fmt.Printf(`{"jsonrpc":"2.0","id":%s,"result":null}`+"\n", m.ID)
 			os.Exit(0)
 		}
@@ -83,7 +93,16 @@ func TestExecSpawnerRunsBrokerFromItsDirectoryWithArgs(t *testing.T) {
 	if strings.Join(p.Args, " ") != "--log-level debug" {
 		t.Fatalf("broker args = %q", p.Args)
 	}
-	c.notification("service/log")
+	// Lines written before this client attached are in broker.log only, so
+	// ask for a fresh one.
+	c.call("0", "log", "")
+	c.next("service/log for the requested line", func(m *jsonrpc.Message) bool {
+		return m.Method == "service/log" && strings.Contains(string(m.Params), "asked to log")
+	})
+	waitUntil(t, "startup line in broker.log", func() bool {
+		data, err := os.ReadFile(filepath.Join(h.dir, "broker.log"))
+		return err == nil && strings.Contains(string(data), "INFO started\n")
+	})
 
 	r := c.call("1", "service/stop", "")
 	if r.Error != nil {
