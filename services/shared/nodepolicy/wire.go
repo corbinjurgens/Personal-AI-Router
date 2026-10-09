@@ -103,3 +103,31 @@ type UnloadRequest struct {
 type WakeRequest struct {
 	Engine string `json:"engine"`
 }
+
+// MethodWorkloadCancel is the broker → proxy request behind workloads:cancel
+// for a workload this node originated (FORK_DESIGN.md §4). Like the node/*
+// methods above it is process-scoped. It carries WorkloadCancelParams and is
+// answered with WorkloadCancelResult or a JSON-RPC error.
+const MethodWorkloadCancel = "workload/cancel"
+
+// WorkloadCancelParams names one in-flight workload this node's proxy
+// originated. Workload ids are counted per engine facade, so two facades can
+// hold the same id at once: Engine (the workload's engine field) picks one, and
+// the proxy refuses an ambiguous id without it. RunID, when set, must match
+// the proxy's run nonce, so a cancel aimed at an earlier proxy process finds
+// nothing.
+type WorkloadCancelParams struct {
+	WorkloadID string `json:"workloadId"`
+	Engine     string `json:"engine,omitempty"`
+	RunID      string `json:"runId,omitempty"`
+	// Regenerate, before the response commits, aborts the current attempt,
+	// excludes its node for this request and continues dispatch elsewhere.
+	// Without it, or once the response has committed, the workload ends as
+	// cancelled. Two models' output is never spliced together.
+	Regenerate bool `json:"regenerate,omitempty"`
+}
+
+// WorkloadCancelResult reports whether an in-flight workload matched.
+type WorkloadCancelResult struct {
+	Found bool `json:"found"`
+}

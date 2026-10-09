@@ -136,7 +136,7 @@ LAN caller is refused. When `--cluster-dir` shows this node is a cluster member,
 the same listener also terminates cluster mTLS: a peer whose client certificate
 matches one of this node's pins is forwarded straight to the local engine
 reported by `node/set-local-backend`, and is never re-routed onward to another
-node. Membership and pins are re-derived per request, so joining or leaving a
+node. Inference arriving this way is admitted first (see "Node policy" below). Membership and pins are re-derived per request, so joining or leaving a
 cluster needs no restart.
 
 **Persisted port.** A port chosen at runtime via `set-port` is saved to the
@@ -189,6 +189,43 @@ One limit is outside the proxy's control: current Chromium-based browsers gate a
   trying under a dispatch budget and a wall-clock deadline, and it commits to a
   node at the first byte of response body rather than at its headers. `spec.md`
   §5.1–§5.4 is normative for the bounds, the commit point, and the statuses.
+
+### Node policy: admission, tiers, cancel (fork)
+
+The broker pushes this node's policy (`nvpair-shared/nodepolicy`) with five
+process-scoped requests — `node/set-policy`, `node/set-availability`,
+`node/set-engine-drain`, `node/set-residency`, `node/set-engine-intent` — each
+validated, answered `{"ok":true}`, and refused with the previous state kept when
+invalid. Until the first one arrives the proxy runs on `nodepolicy.Default()`.
+`spec.md` §12 is normative; in short:
+
+- **Admission.** One controller for the whole process decides whether
+  inference may run on this machine: in the cluster ingress before forwarding a
+  peer's request, and before dispatching a local request to this node's own
+  engine. It checks availability and engine drains, wakes a stopped engine
+  saved On (`admission/wake`, then waits for `node/set-local-backend` healthy),
+  limits concurrency per model, keeps the resident model set and the memory
+  budget, unloading idle models via `admission/unload` when `switchModels` is
+  set, and merges the model profile's `requestOptions` into the body. A refusal
+  is `503` with `X-PAIR-Admission: <reason>` and `Retry-After`; a router fails
+  over on it. Waits are bounded by `X-PAIR-Admission-Wait`, which the router
+  sets to `0` while a round has other candidates. It reports
+  `admission/state` (active, queued, last activity per engine) to the broker.
+- **Tiers.** A request for model `weak`, `medium` or `strong` is resolved to a
+  concrete model from the policy's tier entries, filtered by what the request
+  needs (tools, vision, structured output, embeddings, context) and ordered by
+  tier and by whether the model is already loaded. OpenAI-compatible routes may
+  be served by another engine; native routes stay on their own. The body's
+  `model` is rewritten in place, and `/v1/models` lists the configured tiers.
+  Nothing eligible is a `404` naming the needs.
+- **Routing metadata.** Routed inference responses carry `X-PAIR-Model`,
+  `X-PAIR-Engine`, `X-PAIR-Node`, and `X-PAIR-Tier` for a tier request.
+  Workloads carry the concrete `model` and, for a tier request,
+  `requestedModel`.
+- **Cancel.** `workload/cancel {workloadId, engine?, regenerate?}` cancels an
+  in-flight workload this node originated. Before the response commits,
+  `regenerate` re-dispatches it to another node; otherwise, or after the
+  commit, it ends as `cancelled`.
 
 ### IPC Transport
 
