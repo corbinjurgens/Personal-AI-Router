@@ -15,7 +15,8 @@ SPDX-License-Identifier: Apache-2.0
 
 PAIR is an Electron application backed by the sibling `services/` tree.
 
-- Electron starts only `nvpair-ui-broker`.
+- Electron and `nvpair-tui` attach to `nvpair-service`, which owns
+  `nvpair-ui-broker`; neither starts the broker itself.
 - The broker supervises every runtime worker.
 - Backend processes communicate with their parent over stdio JSON-RPC.
 - Development binaries live in `cli-bin/`.
@@ -41,13 +42,14 @@ Broker-owned workers:
 - `nvpair-errors`;
 - `nvpair-job-scheduler`.
 
-`nvpair-tui` is bundled but not supervised by Electron or the broker.
+`nvpair-service` is started detached by whichever client needs it first, and
+outlives every client. `nvpair-tui` is bundled but not supervised by anyone.
 
 Never launch one worker from both Electron and the broker. There is no
 broker-absent fallback.
 
 The Inference Demo's `inference-dispatcher` is the one non-broker executable
-Electron launches, and the only child `nvpair-tui` spawns besides its own broker.
+Electron launches, and the only child `nvpair-tui` spawns besides `nvpair-service`.
 It is not a worker: its source lives in `scripts/inference-dispatcher` at the
 monorepo root, and it is absent from `services/versions.json` and
 `modular-binaries.ts`. It nonetheless ships inside `cli-bin` — beside the
@@ -86,8 +88,7 @@ IPC types live in `src/shared/types/ipc-channels.ts`. All handlers use
 ### Terminal
 
 PAIR has no Electron-backed console client. The `nvpair` command on PATH is a
-launcher for the bundled Go `nvpair-tui`, which owns its own broker and worker
-tree. Electron generates that launcher on packaged builds
+launcher for the bundled Go `nvpair-tui`, a client of `nvpair-service`. Electron generates that launcher on packaged builds
 (`src/electron/nvpair-command.ts`); the Debian package installs the equivalent
 wrapper at `/usr/bin/nvpair`. Do not add a TypeScript command surface, control
 socket, or local control server.
