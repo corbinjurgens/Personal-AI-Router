@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+import type { WorkloadCancelRequest } from '@/shared/types/node-policy'
 import type { Workload } from '@/shared/types/workloads'
 
 /**
@@ -35,4 +36,25 @@ export function workloadKey(originatedFrom: string | null, id: string): string {
  */
 export function workloadExecutionNodeId(workload: Pick<Workload, 'scheduledOn'>): string | null {
     return workload.scheduledOn ?? null
+}
+
+/**
+ * The `workloads:cancel` request for a job, or null when it cannot be
+ * cancelled: only queued and running jobs can be, and the broker needs the node
+ * the job originated on to route the cancel.
+ */
+export function workloadCancelRequest(
+    workload: Pick<Workload, 'id' | 'engine' | 'state' | 'originatedFrom' | 'runId'>,
+    regenerate: boolean
+): WorkloadCancelRequest | null {
+    if (workload.state !== 'queued' && workload.state !== 'running') return null
+    if (!workload.originatedFrom) return null
+    const request: WorkloadCancelRequest = {
+        originatedFrom: workload.originatedFrom,
+        workloadId: workload.id,
+        engine: workload.engine,
+        regenerate
+    }
+    if (workload.runId) request.runId = workload.runId
+    return request
 }

@@ -20,6 +20,15 @@ import {
     parseEngineSettingsReceipt
 } from './engine-settings'
 import {
+    nodeTargetParams,
+    parseAvailabilityResult,
+    parseCancelResult,
+    parsePolicyDocument,
+    parsePolicySetResult,
+    parsePolicyText,
+    workloadCancelParams
+} from './node-policy'
+import {
     getModularBridgeState,
     isUpstreamUnreachableError,
     parseServiceErrors,
@@ -731,7 +740,41 @@ const EMPTY_SERVICE_BRIDGE_HANDLERS: BridgeHandlerMap = {
     'errors:get-initial': () => handleErrorsGetInitial(),
     'errors:clear': payload => (payload ? handleErrorsClear(payload) : null),
 
-    'workloads:get-initial': () => handleWorkloadsGetInitial()
+    'workloads:get-initial': () => handleWorkloadsGetInitial(),
+    'workloads:cancel': async payload => {
+        if (!payload) throw new Error('Missing cancel request')
+        return parseCancelResult(
+            await getModularSupervisor().callProcess(
+                'broker',
+                'workloads:cancel',
+                workloadCancelParams(payload)
+            )
+        )
+    },
+
+    'policy:get': async payload =>
+        parsePolicyDocument(
+            await getModularSupervisor().callProcess(
+                'broker',
+                'policy:get',
+                nodeTargetParams(payload ?? {})
+            )
+        ),
+    'policy:set': async payload => {
+        if (!payload) throw new Error('Missing policy')
+        return parsePolicySetResult(
+            await getModularSupervisor().callProcess('broker', 'policy:set', {
+                ...nodeTargetParams(payload),
+                policy: parsePolicyText(payload.policy)
+            })
+        )
+    },
+    'node:set-availability': async payload => {
+        if (!payload) throw new Error('Missing availability request')
+        return parseAvailabilityResult(
+            await getModularSupervisor().setAvailability(payload.state, payload.nodeId)
+        )
+    }
 }
 
 export function handleServiceBridgeInvoke<C extends WsInvokeChannel>(

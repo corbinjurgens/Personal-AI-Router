@@ -12,6 +12,12 @@ import type {
 import type { NodeItem } from '@/shared/types/nodes'
 import type { ServiceError } from '@/shared/types/errors'
 import type { NodeItemMetrics } from '@/shared/types/metrics'
+import type {
+    NodeAvailability,
+    NodePolicyDocument,
+    RequestedAvailability,
+    WorkloadCancelRequest
+} from '@/shared/types/node-policy'
 import type { Workload } from '@/shared/types/workloads'
 import type { AppInitialSnapshot, ClusterInitialSnapshot } from '@/shared/types/bootstrap'
 
@@ -88,6 +94,20 @@ export interface IWorkloadsApi {
     onRemove(
         callback: (removal: { workloadId: string; originatedFrom: string | null }) => void
     ): () => void
+    /** Cancel a job on the node it originated on. `ok` is false when no such job is found. */
+    cancel(request: WorkloadCancelRequest): Promise<{ ok: boolean }>
+}
+
+export interface INodePolicyApi {
+    /** A node's policy as JSON text plus its live availability. Omit `nodeId` for this PC. */
+    get(nodeId?: string): Promise<NodePolicyDocument>
+    /** Replace a node's policy. Rejects with the service's validation message. */
+    set(policy: string, nodeId?: string): Promise<{ policy: string }>
+    /** Pause or resume a node; pausing resolves once the node has drained. */
+    setAvailability(
+        state: RequestedAvailability,
+        nodeId?: string
+    ): Promise<{ availability: NodeAvailability }>
 }
 
 export interface IErrorsApi {
@@ -120,6 +140,7 @@ export interface IPairApi {
     discovery: IDiscoveryApi
     engines: IEngineApi
     workloads: IWorkloadsApi
+    nodePolicy: INodePolicyApi
     errors: IErrorsApi
     metrics: IMetricsApi
 }
@@ -172,7 +193,14 @@ export function createPairApi(transport: ServiceTransport): IPairApi {
         workloads: {
             getInitial: () => transport.invoke('workloads:get-initial'),
             onUpsert: cb => transport.subscribePush('workloads:upsert', cb),
-            onRemove: cb => transport.subscribePush('workloads:remove', cb)
+            onRemove: cb => transport.subscribePush('workloads:remove', cb),
+            cancel: request => transport.invoke('workloads:cancel', request)
+        },
+        nodePolicy: {
+            get: nodeId => transport.invoke('policy:get', { nodeId }),
+            set: (policy, nodeId) => transport.invoke('policy:set', { nodeId, policy }),
+            setAvailability: (state, nodeId) =>
+                transport.invoke('node:set-availability', { nodeId, state })
         },
         errors: {
             getInitial: () => transport.invoke('errors:get-initial'),

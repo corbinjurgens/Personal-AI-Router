@@ -53,7 +53,6 @@
 - ⚠️ nvpair-ui-broker → engine:unsubscribe
 - ⚠️ nvpair-ui-broker → engine:wake
 - ⚠️ nvpair-ui-broker → internal:set-reserved-port
-- ⚠️ nvpair-ui-broker → policy:set
 - ⚠️ nvpair-ui-broker → workloads:unsubscribe
 
 ### Backend binaries not listed in `modular-binaries.ts`
@@ -306,9 +305,9 @@
 | `policy:cancel` | request (we call) | ➖ ignored |
 | `policy:get` | request (we call) | ✅ yes |
 | `policy:request` | request (we call) | ➖ ignored |
-| `policy:set` | request (we call) | ⚠️ not called |
+| `policy:set` | request (we call) | ✅ yes |
 | `ready` | request (we call) | ✅ yes |
-| `workloads:cancel` | request (we call) | ➖ ignored |
+| `workloads:cancel` | request (we call) | ✅ yes |
 | `workloads:get-initial` | request (we call) | ✅ yes |
 | `workloads:subscribe` | request (we call) | ✅ yes |
 | `workloads:unsubscribe` | request (we call) | ⚠️ not called |
@@ -326,7 +325,7 @@
 | Method | Direction | In bridge? |
 |---|---|---|
 | `ready` | notification (we consume) | ✅ yes |
-| `workloads:cancel` | notification (we consume) | ➖ ignored |
+| `workloads:cancel` | notification (we consume) | ✅ yes |
 | `workloads:remove` | notification (we consume) | ✅ yes |
 | `workloads:upsert` | notification (we consume) | ✅ yes |
 

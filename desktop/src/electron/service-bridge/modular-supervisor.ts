@@ -454,16 +454,22 @@ class ModularSupervisor {
 
     /**
      * Pause or resume inference on this node. Pausing returns once the drain
-     * has finished, which can take as long as the node's drain timeout.
+     * has finished, which can take as long as the node's drain timeout. With a
+     * `nodeId` the broker relays the change to that node and the tray, which
+     * shows only this node, is left alone.
      */
-    async setAvailability(state: 'available' | 'paused'): Promise<void> {
+    async setAvailability(
+        state: 'available' | 'paused',
+        nodeId?: string
+    ): Promise<JsonValue | undefined> {
         const result = await this.callProcess(
             'broker',
             'node:set-availability',
-            { state },
+            nodeId ? { state, nodeId } : { state },
             AVAILABILITY_CALL_TIMEOUT_MS
         )
-        this.availability.applyResult(result)
+        if (!nodeId) this.availability.applyResult(result)
+        return result
     }
 
     /** Register a handler invoked whenever the broker reports app:ready. */

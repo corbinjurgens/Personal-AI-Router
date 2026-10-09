@@ -1,10 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+import type { NodeAvailability } from '@/shared/types/node-policy'
 import type { JsonValue } from './json-rpc-client'
-
-/** The node's live availability, as the broker reports it. `draining` is the pause in progress. */
-type NodeAvailability = 'available' | 'draining' | 'paused'
 
 /** What the tray's pause toggle shows and does for an availability. */
 export interface AvailabilityMenuItem {
@@ -18,7 +16,7 @@ const PAUSE_LABEL = 'Pause inference on this PC'
 const RESUME_LABEL = 'Resume inference on this PC'
 const PAUSING_LABEL = 'Pausing…'
 
-function availabilityValue(value: JsonValue | undefined): NodeAvailability | null {
+export function availabilityValue(value: JsonValue | undefined): NodeAvailability | null {
     return value === 'available' || value === 'draining' || value === 'paused' ? value : null
 }
 

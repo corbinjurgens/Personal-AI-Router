@@ -41,6 +41,14 @@ import type { AppInitialSnapshot, ClusterInitialSnapshot } from '@/shared/types/
 import type { ServiceError } from '@/shared/types/errors'
 import type { NodeItem } from '@/shared/types/nodes'
 import type { NodeItemMetrics } from '@/shared/types/metrics'
+import type {
+    NodeAvailability,
+    NodeAvailabilityRequest,
+    NodePolicyDocument,
+    NodePolicyTarget,
+    NodePolicyWrite,
+    WorkloadCancelRequest
+} from '@/shared/types/node-policy'
 import type { Workload } from '@/shared/types/workloads'
 import type {
     AvailableNode,
@@ -113,6 +121,16 @@ export interface WsInvokeChannelMap {
 
     // Workloads
     'workloads:get-initial': { request: void; response: Record<string, Workload> }
+    // `ok` is false when the broker found no such job (it may have just finished).
+    'workloads:cancel': { request: WorkloadCancelRequest; response: { ok: boolean } }
+
+    // Node policy and availability
+    'policy:get': { request: NodePolicyTarget; response: NodePolicyDocument }
+    'policy:set': { request: NodePolicyWrite; response: { policy: string } }
+    'node:set-availability': {
+        request: NodeAvailabilityRequest
+        response: { availability: NodeAvailability }
+    }
 }
 
 export type WsInvokeChannel = keyof WsInvokeChannelMap
