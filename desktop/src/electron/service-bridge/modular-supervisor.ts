@@ -1492,9 +1492,11 @@ class ModularSupervisor {
      * live jobs. Best-effort: the relay stream is the backstop if it fails.
      */
     private async seedWorkloadBaseline(): Promise<void> {
+        const state = getModularBridgeState()
+        const since = state.beginWorkloadBaseline()
         try {
             const result = await this.callProcess('broker', 'workloads:get-initial')
-            getModularBridgeState().seedWorkloads(parseWorkloadsInitial(result ?? null))
+            state.seedWorkloads(parseWorkloadsInitial(result ?? null), since)
         } catch (err) {
             log.verbose({
                 sublevel: 'broker',
