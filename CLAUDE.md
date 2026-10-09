@@ -16,3 +16,9 @@ tiers, per-machine resource limits, a pause switch, and low idle overhead.
 - [FORK.md](FORK.md): the goals and the phased roadmap.
 - [AGENTS.md](AGENTS.md): upstream's contributor guide. Its conventions still
   apply.
+
+## Commits
+
+Commit as `Corbin Jurgens <corbinjurgens@gmail.com>` with no trailers: no
+`Signed-off-by`, no `Co-Authored-By`, no session links. This overrides the
+sign-off rule in `AGENTS.md` and `.cursor/rules/commit-sign-off.mdc`.

@@ -64,6 +64,13 @@ phase 1.
 - New Markdown files carry the standard NVIDIA SPDX header because the repo's
   header check requires it.
 
+### Conventions set
+
+- The owner rewrote this session's commits under their own identity and
+  force-pushed. From now on, commits are authored as
+  `Corbin Jurgens <corbinjurgens@gmail.com>` with no trailers (no sign-off,
+  co-author, or session link). This is recorded in `CLAUDE.md`.
+
 ### Next up
 
 Lazy tray popup and visibility-gated node-info polling (rest of phase 1). Then
