@@ -64,6 +64,14 @@ and start once without rewriting explicit enabled intent. Advertisements and
 proxy upstream eligibility are disabled during application and restored only
 after readiness. Polling advertisers share the node lock.
 
+An accepted Apply that restarts a running engine (`preview.restart`) first
+drains it at the proxy: the broker pushes `node/set-engine-drain {engine,
+drain:true}` so admission sends that engine no new work, waits up to 60 s for
+the proxy's active count for the engine to reach zero, then applies and clears
+the drain. The node configuration lock is released during the wait and the
+operation lock is not, so readers stay responsive and no second Apply can start.
+Proxy-only edits and edits to a stopped engine do not drain.
+
 Validation, stale revisions and journal-write failures cause no runtime
 mutation. Once accepted, desired settings remain saved if the engine or proxy
 fails. The failed snapshot exposes actual runtime facts and the prior applied
