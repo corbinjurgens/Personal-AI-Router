@@ -126,6 +126,10 @@ does not carry, and only the open node is polled.
 - `?` — full help
 - `ctrl+x` — dismiss the update notice, while one is showing
 - `q` / `ctrl+c` — quit; the service, the broker, and inference keep running
+- `P` — pause or resume this node (`node:set-availability`, run in the
+  background). The header shows `Available`, `Pausing…`, or `Paused`, read from
+  `policy:get` at startup and kept current by `node:availability-changed`. It is
+  the shifted key because lower-case `p` is "pair" / "proxy port" in the views
 - `Q` — stop the service and quit, after a `y` confirmation shown in the notice
   row. The service stops the broker cleanly (the broker tears its workers down
   proxy first, then engines), so inference on this machine stops for every

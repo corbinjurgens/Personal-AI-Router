@@ -19,6 +19,7 @@ type globalKeyMap struct {
 	Help     key.Binding
 	Quit     key.Binding
 	StopQuit key.Binding
+	Pause    key.Binding
 	Dismiss  key.Binding
 }
 
@@ -90,6 +91,12 @@ func newGlobalKeyMap(tabs int) globalKeyMap {
 		StopQuit: key.NewBinding(
 			key.WithKeys("Q"),
 			key.WithHelp("Q", "stop service & quit"),
+		),
+		// Pausing is the shifted p for the same reason: the lower-case p is
+		// "pair" on Nodes and "proxy port" / "browse models" on a node's detail.
+		Pause: key.NewBinding(
+			key.WithKeys("P"),
+			key.WithHelp("P", "pause/resume"),
 		),
 		// ctrl+x because every letter is already spoken for — the views between
 		// them bind a through y, and the table and viewport add b, g, G, space,
