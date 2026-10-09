@@ -13,9 +13,10 @@ import (
 	"time"
 )
 
-// Persistence defaults. Only historic (terminal) records are written to disk;
-// active records are ephemeral and rebuilt from the live event stream, so a
-// previous session's "running" entries are never restored.
+// Retention and persistence defaults. The history caps bound the in-memory
+// store whether or not persistence is on; only historic (terminal) records are
+// written to disk, and active records are ephemeral and rebuilt from the live
+// event stream, so a previous session's "running" entries are never restored.
 const (
 	DefaultHistoryCap    = 10000 // keep newest N terminal records
 	DefaultHistoryMaxAge = 7 * 24 * time.Hour
@@ -24,17 +25,15 @@ const (
 	DefaultDumpInterval  = 5 * time.Minute // rotation checkpoint cadence
 )
 
-// WithPersistence enables on-disk persistence of historic records at path with
-// default bounds, and returns the store for chaining. Call Load once at startup
-// and Run to start the coalescing flusher. With an empty path (the default),
-// the store is purely in-memory and every persistence method is a no-op.
+// WithPersistence enables on-disk persistence of historic records at path, and
+// returns the store for chaining. Call Load once at startup and Run to start the
+// coalescing flusher. With an empty path (the default), the store is purely
+// in-memory and every persistence method is a no-op.
 func (s *Store) WithPersistence(path string) *Store {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.path = path
 	s.rotations = DefaultRotations
-	s.historyCap = DefaultHistoryCap
-	s.maxAgeMs = int64(DefaultHistoryMaxAge / time.Millisecond)
 	return s
 }
 
@@ -80,7 +79,6 @@ func (s *Store) Flush() error {
 		s.mu.Unlock()
 		return nil
 	}
-	s.pruneLocked(s.now().UnixMilli())
 	infos := s.historyInfosLocked()
 	s.dirty = false
 	path := s.path
@@ -103,7 +101,6 @@ func (s *Store) Checkpoint() error {
 		return nil
 	}
 	s.mu.Lock()
-	s.pruneLocked(s.now().UnixMilli())
 	infos := s.historyInfosLocked()
 	path, rotations := s.path, s.rotations
 	s.dirty = false
@@ -171,38 +168,88 @@ func (s *Store) historyInfosLocked() []json.RawMessage {
 	return out
 }
 
-// pruneLocked enforces the age and count caps on historic (terminal) records.
-// Active records are never pruned. Caller holds s.mu.
-func (s *Store) pruneLocked(now int64) {
+// Retired names a workload the history caps dropped from the store, in the
+// (originatedFrom, workloadId) shape a workloads:remove carries.
+type Retired struct {
+	Origin string
+	ID     string
+}
+
+// PruneHistory enforces the age and count caps on historic (terminal) records
+// and returns what clients must be told to forget. Load prunes silently because
+// nothing has been announced yet; once the store is live, the broker calls this
+// periodically and turns each Retired into a workloads:remove, so a subscriber's
+// mirror is bounded by the same caps as the store instead of growing for the
+// life of the session. Flush and Checkpoint deliberately do not prune, so a
+// record is never dropped without its removal being announced.
+//
+// A pair is reported only when no record sharing it survives. Clients key by
+// (originatedFrom, workloadId) and a proxy restart reuses ids, so retiring an
+// old generation must not erase a newer one that the client already shows.
+func (s *Store) PruneHistory() []Retired {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.pruneLocked(s.now().UnixMilli())
+}
+
+// pruneLocked enforces the age and count caps on historic (terminal) records
+// and returns the retired pairs no surviving record still carries. Active
+// records are never pruned. Caller holds s.mu.
+func (s *Store) pruneLocked(now int64) []Retired {
+	var dropped []Record
+	drop := func(k Key, r Record) {
+		delete(s.records, k)
+		if !r.Inferred {
+			s.dirty = true
+		}
+		dropped = append(dropped, r)
+	}
 	if s.maxAgeMs > 0 {
 		for k, r := range s.records {
 			if r.Terminal && now-completionOrder(r) > s.maxAgeMs {
-				delete(s.records, k)
+				drop(k, r)
 			}
 		}
 	}
-	if s.historyCap <= 0 {
-		return
-	}
-	type termEntry struct {
-		key Key
-		ord int64
-	}
-	term := make([]termEntry, 0)
-	for k, r := range s.records {
-		if r.Terminal {
-			term = append(term, termEntry{key: k, ord: completionOrder(r)})
+	if s.historyCap > 0 {
+		type termEntry struct {
+			key Key
+			ord int64
+		}
+		term := make([]termEntry, 0)
+		for k, r := range s.records {
+			if r.Terminal {
+				term = append(term, termEntry{key: k, ord: completionOrder(r)})
+			}
+		}
+		if len(term) > s.historyCap {
+			sort.Slice(term, func(i, j int) bool {
+				return term[i].ord < term[j].ord // oldest first
+			})
+			for i := 0; i < len(term)-s.historyCap; i++ {
+				drop(term[i].key, s.records[term[i].key])
+			}
 		}
 	}
-	if len(term) <= s.historyCap {
-		return
+	if len(dropped) == 0 {
+		return nil
 	}
-	sort.Slice(term, func(i, j int) bool {
-		return term[i].ord < term[j].ord // oldest first
-	})
-	for i := 0; i < len(term)-s.historyCap; i++ {
-		delete(s.records, term[i].key)
+
+	surviving := make(map[Retired]bool, len(s.records))
+	for _, r := range s.records {
+		surviving[Retired{Origin: r.Origin, ID: r.ID}] = true
 	}
+	seen := make(map[Retired]bool, len(dropped))
+	retired := make([]Retired, 0, len(dropped))
+	for _, r := range dropped {
+		pair := Retired{Origin: r.Origin, ID: r.ID}
+		if surviving[pair] || seen[pair] {
+			continue
+		}
+		seen[pair] = true
+		retired = append(retired, pair)
+	}
+	return retired
 }
 
 // completionOrder is a record's sort/age key: its workload completedAt when

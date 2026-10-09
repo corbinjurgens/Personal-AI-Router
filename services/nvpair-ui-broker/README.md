@@ -252,6 +252,8 @@ Two classes of proxy notification are **not** re-emitted under the `ollama-proxy
   that through unchanged.
 - **Peer workloads** — the `workloads:upsert` / `workloads:remove` the `nvpair-workload-manager` relays from other nodes after validating and de-duplicating their broadcasts.
 
+- **Retired history** — a `workloads:remove` for a completed or failed workload that fell outside the broker's history caps (the newest 10,000 terminal records, none older than seven days). The broker enforces the caps once a minute whether or not history persistence is on, so a subscriber that applies removals stays as bounded as the broker. Active workloads are never retired, and no removal is sent while a newer workload with the same `(originatedFrom, workloadId)` pair is still held. Retirement is local housekeeping and is not broadcast to peers.
+
 - **Inferred workloads** — a `workloads:upsert` transitioning a workload to `failed` that **no origin ever sent**. The broker synthesizes one in two situations: when a node leaves discovery while workloads are pinned to it, and when a remote origin that is still present stops re-asserting a workload this node believes is running (the origin's re-sync heartbeat asserts each of its active workloads indefinitely, so prolonged silence about one means it is finished or the origin is gone). Both are recorded as *inferred*, so the origin's next authoritative event overrides them; a client should treat a `failed` as the broker's best current answer rather than proof the origin reported a failure, and its `error` text names the reason. Workloads this node originated or is itself executing are never inferred about.
 
 `workloads:upsert` carries `params.workloadInfo` (a full `Workload`); `workloads:remove` carries `params.workloadId` and the origin `params.originatedFrom`. See [`nvpair-workload-manager`](../nvpair-workload-manager/README.md) for the `Workload` shape.
@@ -508,7 +510,7 @@ Response:
 
 #### `workloads:get-initial`
 
-Returns `{ "workloads": [Workload, ...] }`, the broker's full-fidelity current and historic workload snapshot. Active records are kept in memory; bounded completed/failed history is persisted across broker restarts. The scheduler uses an internal active-only replay of the same catalog when its subprocess restarts.
+Returns `{ "workloads": [Workload, ...] }`, the broker's full-fidelity current and historic workload snapshot. Active records are kept in memory; completed/failed history is bounded by the caps described under `workloads:remove` and persisted across broker restarts. The scheduler uses an internal active-only replay of the same catalog when its subprocess restarts.
 
 #### `errors:get-initial`
 

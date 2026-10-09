@@ -108,8 +108,9 @@ func TestCountCapEviction(t *testing.T) {
 	s.Apply(mkTerm("1", "a", testNow-1000, testNow-300))
 	s.Apply(mkTerm("2", "a", testNow-1000, testNow-200))
 	s.Apply(mkTerm("3", "a", testNow-1000, testNow-100))
-	if err := s.Flush(); err != nil { // prune runs during flush
-		t.Fatalf("flush: %v", err)
+	retired := s.PruneHistory()
+	if len(retired) != 1 || retired[0] != (Retired{Origin: "a", ID: "1"}) {
+		t.Fatalf("retired = %+v, want only the oldest (a, 1)", retired)
 	}
 	if s.Len() != 2 {
 		t.Fatalf("len = %d, want 2 after cap eviction", s.Len())
@@ -130,14 +131,87 @@ func TestAgeCapEviction(t *testing.T) {
 
 	s.Apply(mkTerm("old", "a", 0, 8000)) // age 2000 > 1000 → evicted
 	s.Apply(mkTerm("new", "a", 0, 9500)) // age 500 → kept
-	if err := s.Flush(); err != nil {
-		t.Fatalf("flush: %v", err)
+	retired := s.PruneHistory()
+	if len(retired) != 1 || retired[0] != (Retired{Origin: "a", ID: "old"}) {
+		t.Fatalf("retired = %+v, want only (a, old)", retired)
 	}
 	if _, ok := s.Get("a", "old"); ok {
 		t.Fatal("record older than maxAge should be pruned")
 	}
 	if _, ok := s.Get("a", "new"); !ok {
 		t.Fatal("record within maxAge should remain")
+	}
+}
+
+// TestFlushDoesNotPrune: only PruneHistory drops records, so nothing leaves the
+// store without the broker getting a Retired to announce.
+func TestFlushDoesNotPrune(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "wl.json")
+	s := newStoreAt(path, testNow)
+	s.historyCap = 1
+
+	s.Apply(mkTerm("1", "a", testNow-1000, testNow-200))
+	s.Apply(mkTerm("2", "a", testNow-1000, testNow-100))
+	if err := s.Flush(); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
+	if err := s.Checkpoint(); err != nil {
+		t.Fatalf("checkpoint: %v", err)
+	}
+	if s.Len() != 2 {
+		t.Fatalf("len = %d, want 2: flush and checkpoint must not prune", s.Len())
+	}
+}
+
+// TestHistoryCapsApplyWithoutPersistence: an in-memory store (no data dir) is
+// bounded by the same caps, so a broker that could not resolve its history
+// path still cannot grow without limit.
+func TestHistoryCapsApplyWithoutPersistence(t *testing.T) {
+	s := New()
+	at := time.UnixMilli(testNow)
+	s.now = func() time.Time { return at }
+	s.historyCap = 1
+
+	s.Apply(mkTerm("1", "a", testNow-1000, testNow-200))
+	s.Apply(mkTerm("2", "a", testNow-1000, testNow-100))
+	if retired := s.PruneHistory(); len(retired) != 1 {
+		t.Fatalf("retired = %+v, want one record", retired)
+	}
+	if s.Len() != 1 {
+		t.Fatalf("len = %d, want 1", s.Len())
+	}
+}
+
+// TestPruneKeepsActiveRecords: the caps only ever retire terminal history.
+func TestPruneKeepsActiveRecords(t *testing.T) {
+	s := newStoreAt("", testNow)
+	s.historyCap = 1
+	s.maxAgeMs = 1
+
+	s.Apply(mkIn("run", "a", "running", "a", testNow-1_000_000))
+	s.Apply(mkTerm("1", "a", testNow-1000, testNow-200))
+	s.Apply(mkTerm("2", "a", testNow-1000, testNow-100))
+	s.PruneHistory()
+	if _, ok := s.Get("a", "run"); !ok {
+		t.Fatal("an active record must survive pruning")
+	}
+}
+
+// TestPruneSuppressesPairStillInUse: a proxy restart reuses ids, and a removal
+// targets (origin, id). Retiring an old generation while a newer one with the
+// same pair is still stored must not announce a removal that would erase the
+// newer one from a client.
+func TestPruneSuppressesPairStillInUse(t *testing.T) {
+	s := newStoreAt("", testNow)
+	s.historyCap = 1
+
+	s.Apply(mkTermFull("1", "a", "ollama", "run-old", testNow-5000, testNow-4000))
+	s.Apply(mkTermFull("1", "a", "ollama", "run-new", testNow-1000, testNow-100))
+	if retired := s.PruneHistory(); len(retired) != 0 {
+		t.Fatalf("retired = %+v, want none while (a, 1) survives", retired)
+	}
+	if s.Len() != 1 {
+		t.Fatalf("len = %d, want 1 (old generation pruned)", s.Len())
 	}
 }
 

@@ -119,22 +119,26 @@ type Store struct {
 	// persistence boundaries.
 	now func() time.Time
 
+	// History caps (see PruneHistory), applied with or without persistence.
+	historyCap int
+	maxAgeMs   int64
+
 	// Persistence config + state (see persistence.go). Zero-valued when
 	// persistence is disabled (path == ""). dirty is set whenever the historic
 	// (terminal) set changes, so the coalescing flusher only writes on a real
 	// change.
-	path       string
-	rotations  int
-	historyCap int
-	maxAgeMs   int64
-	dirty      bool
+	path      string
+	rotations int
+	dirty     bool
 }
 
 // New returns an empty store.
 func New() *Store {
 	return &Store{
-		records: make(map[Key]Record),
-		now:     time.Now,
+		records:    make(map[Key]Record),
+		now:        time.Now,
+		historyCap: DefaultHistoryCap,
+		maxAgeMs:   int64(DefaultHistoryMaxAge / time.Millisecond),
 	}
 }
 

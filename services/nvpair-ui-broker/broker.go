@@ -2873,6 +2873,51 @@ func (b *Broker) emitWorkloadEventProvenance(method string, params json.RawMessa
 	}
 }
 
+// retireWorkloadHistory enforces the store's history caps and announces each
+// retired workload as a workloads:remove, so a subscribed client drops it from
+// its own mirror instead of keeping every finished job for the life of the
+// session. It rides the stale-workload sweep's ticker rather than the history
+// flusher, because the store is bounded whether or not persistence is on.
+//
+// Retirement is this node's own housekeeping: each broker applies the same caps
+// to its own store, so the removal is not forwarded to the workload-manager for
+// cluster broadcast.
+func (b *Broker) retireWorkloadHistory() {
+	b.workloadEmitMu.Lock()
+	defer b.workloadEmitMu.Unlock()
+
+	retired := b.workloads.PruneHistory()
+	if len(retired) == 0 {
+		return
+	}
+	slog.Debug("retired workload history past the retention caps", "count", len(retired))
+
+	b.workloadsMu.Lock()
+	subscribed := b.workloadsSubscribed
+	b.workloadsMu.Unlock()
+	for _, r := range retired {
+		raw, err := json.Marshal(workloadRemoveParams{WorkloadID: r.ID, OriginatedFrom: r.Origin})
+		if err != nil {
+			continue
+		}
+		params := json.RawMessage(raw)
+		b.fanWorkloadToScheduler("workloads:remove", params)
+		if !subscribed {
+			continue
+		}
+		if err := b.codec.Notify("workloads:remove", params); err != nil {
+			slog.Warn("emit workloads event failed", "method", "workloads:remove", "err", err)
+		}
+	}
+}
+
+// workloadRemoveParams is the workloads:remove payload: the (originatedFrom,
+// workloadId) pair a client keys its mirror by.
+type workloadRemoveParams struct {
+	WorkloadID     string `json:"workloadId"`
+	OriginatedFrom string `json:"originatedFrom"`
+}
+
 // fanWorkloadToScheduler forwards a workloads:upsert/remove notification to the
 // scheduler child verbatim. A no-op when no scheduler is running.
 func (b *Broker) fanWorkloadToScheduler(method string, params json.RawMessage) {
@@ -2923,10 +2968,7 @@ func (b *Broker) applyWorkloadEvent(method string, params json.RawMessage, infer
 		}
 		return b.workloads.Apply(in)
 	case "workloads:remove":
-		var rm struct {
-			WorkloadID     string `json:"workloadId"`
-			OriginatedFrom string `json:"originatedFrom"`
-		}
+		var rm workloadRemoveParams
 		if err := json.Unmarshal(params, &rm); err != nil || rm.WorkloadID == "" {
 			return false
 		}
@@ -3045,6 +3087,7 @@ func (b *Broker) runStaleWorkloadSweep(ctx context.Context) {
 			return
 		case <-ticker.C:
 			b.failStaleForeignWorkloads(workloadOriginSilenceTimeout)
+			b.retireWorkloadHistory()
 		}
 	}
 }
