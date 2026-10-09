@@ -5,7 +5,7 @@
  * Minimal JSON value type for safely narrowing `JSON.parse` results without
  * casts or `unknown` in signatures. Shared by the CLI client and the in-app
  * control server (the Electron service bridge has its own copy in
- * `json-rpc-subprocess.ts` for the stdio plane).
+ * `json-rpc-client.ts` for the service socket plane).
  */
 export type JsonValue =
     | string

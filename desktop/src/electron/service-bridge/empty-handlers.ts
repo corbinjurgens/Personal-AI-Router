@@ -26,9 +26,8 @@ import {
     parseWorkloadsInitial
 } from './modular-state'
 
-import type { JsonObject, JsonValue } from './json-rpc-subprocess'
+import type { JsonObject, JsonValue } from './json-rpc-client'
 import { emptyInvite, parseClusterNodes, parseInvite, parseNodeIdentity } from './cluster-json'
-import { removeManualNodeEntry, resolveManualNodeKey } from './manual-nodes-store'
 
 type BridgeHandler<C extends WsInvokeChannel> = (
     payload?: WsInvokeRequest<C>
@@ -622,6 +621,23 @@ async function handleClusterCancelInvite(
     return result
 }
 
+/** Remove a manual peer through the broker, trying each candidate key until one matches. */
+async function removeManualNode(
+    supervisor: ReturnType<typeof getModularSupervisor>,
+    candidateKeys: readonly string[]
+): Promise<void> {
+    for (const id of new Set(candidateKeys.filter(key => key !== ''))) {
+        try {
+            const result = objectValue(
+                await supervisor.callProcess('broker', 'node/remove', { id })
+            )
+            if (booleanValue(result?.removed)) return
+        } catch {
+            return
+        }
+    }
+}
+
 async function handleNodeRemoveMember(
     payload?: WsInvokeRequest<'nodes:remove-member'>
 ): Promise<WsInvokeResponse<'nodes:remove-member'>> {
@@ -631,20 +647,17 @@ async function handleNodeRemoveMember(
     const selfId = state.getSelfId()
     const isSelfLeave = selfId !== null && payload.nodeId === selfId
 
-    // `payload.nodeId` is the node's UUID, but the manual-nodes store and the
-    // broker's `node/remove` relay key a manual entry by the name it was added
-    // with — never the UUID. Map the UUID back through the node's reachable
-    // addresses to the persisted entry so it is actually pruned (and does not
-    // reappear on the next replay). If it is not a manual node (no address match)
-    // fall back to the display hostname, then the raw id; both are harmless
-    // no-ops for a purely-discovered peer. The broker supervises
-    // nvpair-manual-nodes and relays `node/*` verbatim.
-    const manualKey =
-        resolveManualNodeKey(state.getNodeAddresses(payload.nodeId)) ||
-        state.getNodeHostname(payload.nodeId) ||
+    // `payload.nodeId` is the node's UUID, but the broker's `node/remove` relay
+    // keys a manual entry by the name it was added with — never the UUID. The
+    // list lives in the service, so try each name this node is known by: its
+    // reachable addresses (an entry added without a name is keyed by its
+    // address), then its display hostname, then the raw id. All but the one that
+    // matches are harmless no-ops for a purely-discovered peer.
+    void removeManualNode(supervisor, [
+        ...state.getNodeAddresses(payload.nodeId),
+        state.getNodeHostname(payload.nodeId),
         payload.nodeId
-    removeManualNodeEntry(manualKey)
-    supervisor.callProcess('broker', 'node/remove', { id: manualKey }).catch(() => {})
+    ])
 
     if (isSelfLeave) {
         // Self-departure is `cluster:leave`, not `nodes:remove` (the cluster-manager

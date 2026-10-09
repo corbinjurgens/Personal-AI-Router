@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { getModularBridgeState } from './modular-state'
-import type { JsonValue } from './json-rpc-subprocess'
+import type { JsonValue } from './json-rpc-client'
 import getErrorString from '@/shared/utils/get-error-string'
 import { createStructuredLogger } from '@/shared/utils/log'
 import {

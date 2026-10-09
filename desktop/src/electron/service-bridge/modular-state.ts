@@ -33,7 +33,7 @@ import { workloadKey } from '@/shared/utils/workloads'
 import { currentPlatform, platformDisplayName } from '@/shared/utils/platform'
 import { emitBridgePush } from './broadcaster'
 import { mergePullProgressPercent } from './pull-error-handling'
-import type { JsonObject, JsonRpcNotification, JsonValue } from './json-rpc-subprocess'
+import type { JsonObject, JsonRpcNotification, JsonValue } from './json-rpc-client'
 import { serviceLogLevel } from './service-log-level'
 import {
     isProxyEngine,

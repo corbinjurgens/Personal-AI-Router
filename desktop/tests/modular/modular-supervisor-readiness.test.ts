@@ -3,15 +3,17 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
-    JsonRpcSubprocess,
+    JsonRpcSocketClient,
     type JsonRpcNotification
-} from '@/electron/service-bridge/json-rpc-subprocess'
+} from '@/electron/service-bridge/json-rpc-client'
 
 const mocks = vi.hoisted(() => ({
+    selfId: null as string | null,
     pendingInviteIds: new Set<string>(),
     bridgeState: {
         handleNotification: vi.fn(),
-        getSelfId: vi.fn(() => null),
+        getSelfId: vi.fn((): string | null => mocks.selfId),
+        clearWorkloads: vi.fn(),
         getProxyPort: vi.fn(() => null),
         getPendingInvites: () => Array.from(mocks.pendingInviteIds),
         addPendingInvite: (invite: { inviteId: string; state: string }) => {
@@ -47,10 +49,6 @@ vi.mock('@/electron/service-bridge/broadcaster', () => ({
     emitBridgePush: mocks.emitBridgePush
 }))
 
-vi.mock('@/electron/service-bridge/manual-nodes-store', () => ({
-    listManualNodeEntries: () => []
-}))
-
 vi.mock('@/electron/service-bridge/node-info-poller', () => ({
     startNodeInfoPoller: vi.fn(),
     stopNodeInfoPoller: vi.fn()
@@ -73,7 +71,7 @@ import { createOverviewWindow } from '@/electron/window'
 
 interface ReadinessHarness {
     readonly ready: boolean
-    processes: Map<string, JsonRpcSubprocess>
+    processes: Map<string, JsonRpcSocketClient>
     isReady: boolean
     brokerReady: boolean
     brokerHydrationDone: boolean
@@ -85,10 +83,15 @@ interface ReadinessHarness {
     setOnReady: (callback: () => void) => void
     waitUntilReady: (timeoutMs: number) => Promise<void>
     handleNotification: (notification: JsonRpcNotification) => void
-    attachChildHandlers: (child: JsonRpcSubprocess) => void
+    attachChildHandlers: (child: JsonRpcSocketClient) => void
+    getAvailabilityMenuItem: () => { label: string; enabled: boolean }
 }
 
 const supervisor = getModularSupervisor() as unknown as ReadinessHarness
+
+function unusedClient(): JsonRpcSocketClient {
+    return new JsonRpcSocketClient('broker', () => Promise.reject(new Error('not connected')))
+}
 
 function notify(method: string, params?: JsonRpcNotification['params']): void {
     supervisor.handleNotification({ source: 'broker', method, params })
@@ -109,6 +112,7 @@ describe('modular supervisor readiness', () => {
         supervisor.processes.clear()
         supervisor.onReady = undefined
         supervisor.onBrokerReady = vi.fn().mockResolvedValue(undefined)
+        mocks.selfId = null
     })
 
     afterEach(() => {
@@ -179,9 +183,50 @@ describe('modular supervisor readiness', () => {
         expect(onReady).toHaveBeenCalledOnce()
     })
 
+    it('is not ready again until app:ready after the service restarts the broker', () => {
+        const client = unusedClient()
+        supervisor.processes.set('broker', client)
+        supervisor.attachChildHandlers(client)
+        const onConnectionLost = vi.fn()
+        getModularSupervisor().setOnConnectionLost(onConnectionLost)
+        notify('app:ready')
+        expect(supervisor.ready).toBe(true)
+
+        client.emit('broker-restarted')
+
+        expect(supervisor.ready).toBe(false)
+        expect(onConnectionLost).toHaveBeenCalledOnce()
+        notify('app:ready')
+        expect(supervisor.ready).toBe(true)
+    })
+
+    it('is not ready while the connection to the service is down', () => {
+        const client = unusedClient()
+        supervisor.processes.set('broker', client)
+        supervisor.attachChildHandlers(client)
+        notify('app:ready')
+
+        client.emit('disconnected')
+
+        expect(supervisor.ready).toBe(false)
+        expect(supervisor.getAvailabilityMenuItem().enabled).toBe(false)
+    })
+
+    it("follows this node's availability pushes and ignores other nodes'", () => {
+        mocks.selfId = 'self'
+        notify('node:availability-changed', { nodeId: 'other', availability: 'paused', active: 0 })
+        expect(supervisor.getAvailabilityMenuItem().label).toBe('Pause inference on this PC')
+
+        notify('node:availability-changed', { nodeId: 'self', availability: 'draining', active: 2 })
+        expect(supervisor.getAvailabilityMenuItem()).toMatchObject({
+            label: 'Pausing…',
+            enabled: false
+        })
+    })
+
     it('ignores readiness from a replaced broker generation', () => {
-        const oldBroker = new JsonRpcSubprocess('broker', 'old-broker')
-        const newBroker = new JsonRpcSubprocess('broker', 'new-broker')
+        const oldBroker = unusedClient()
+        const newBroker = unusedClient()
         supervisor.processes.set('broker', oldBroker)
         supervisor.attachChildHandlers(oldBroker)
 

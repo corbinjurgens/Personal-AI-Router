@@ -24,15 +24,15 @@ export type ModularPackageArch = 'x64' | 'arm64'
  * - `'broker'` — the binary is a worker the `nvpair-ui-broker` supervises. Electron
  *   passes its path to the broker (e.g. `--proxy-path`) but never spawns it
  *   directly. The broker owns its lifecycle, readiness, and log fan-out.
- * - `'electron'` — Electron's `ModularSupervisor` spawns the binary directly over
- *   stdio JSON-RPC. Only the broker itself is launched this way; it is then the
- *   parent of every broker-owned worker.
+ * - `'service'` — `nvpair-service` spawns and supervises the binary, and Electron
+ *   attaches to the service over its local socket. Only the broker is launched
+ *   this way; it is then the parent of every broker-owned worker. Electron
+ *   itself launches only `nvpair-service`, and only when nothing answers.
  *
- * As the broker absorbs more workers, flip the owner from `'electron'` to
- * `'broker'` and drop the direct spawn in `modular-supervisor.ts` — never run a
- * worker from both owners at once.
+ * As the broker absorbs more workers, flip the owner from `'service'` to
+ * `'broker'` — never run a worker from both owners at once.
  */
-type ModularLaunchOwner = 'broker' | 'electron'
+type ModularLaunchOwner = 'broker' | 'service'
 
 interface ModularRuntimeBinary {
     processName: ModularProcessName
@@ -152,27 +152,31 @@ export const MODULAR_RUNTIME_BINARIES: ModularRuntimeBinary[] = [
         needsFirewallAccess: false,
         optional: true
     },
-    // Electron-direct: only the broker. Electron's ModularSupervisor spawns it
-    // over stdio JSON-RPC, and it is then the parent of every worker above.
+    // Service-owned: only the broker. nvpair-service spawns it over stdio
+    // JSON-RPC and Electron reaches it through the service; it is the parent of
+    // every worker above.
     {
         processName: 'broker',
         baseName: 'nvpair-ui-broker',
         args: [],
-        launchOwner: 'electron',
+        launchOwner: 'service',
         needsFirewallAccess: false
     }
 ]
 
+/** The per-user process that owns `nvpair-ui-broker` for its clients and outlives them. */
+export const SERVICE_BINARY_BASE_NAME = 'nvpair-service'
+
 /**
- * Binaries bundled in the installer but not spawned by Electron or the broker.
- * `nvpair-service` is the per-user process that owns `nvpair-ui-broker` for its
- * clients and outlives them; `nvpair-tui` is a headless terminal client that
- * attaches to it, starting it when needed — see `services/nvpair-service/README.md`
- * and `services/nvpair-tui/README.md`. Electron does not use the service yet.
+ * Binaries bundled in the installer but not supervised by the broker.
+ * `nvpair-service` is the one Electron launches (detached, only when nothing
+ * answers on its endpoint) and attaches to; `nvpair-tui` is a headless terminal
+ * client that attaches to it the same way — see `services/nvpair-service/README.md`
+ * and `services/nvpair-tui/README.md`.
  */
 export const MODULAR_BUNDLED_BINARIES: { baseName: string }[] = [
     { baseName: 'nvpair-tui' },
-    { baseName: 'nvpair-service' }
+    { baseName: SERVICE_BINARY_BASE_NAME }
 ]
 
 /** Every backend binary shipped in the installer (runtime workers + bundled tools). */

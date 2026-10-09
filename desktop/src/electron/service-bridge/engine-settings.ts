@@ -9,7 +9,7 @@ import type {
     EngineSettingsTarget
 } from '@/shared/types/engine-settings'
 import { engineTypeFromManagerName } from '@/shared/utils/engines'
-import type { JsonObject, JsonValue } from './json-rpc-subprocess'
+import type { JsonObject, JsonValue } from './json-rpc-client'
 
 function object(value: JsonValue | undefined): JsonObject {
     if (!value || typeof value !== 'object' || Array.isArray(value))

@@ -4,7 +4,7 @@
 import { app } from 'electron'
 import fs from 'fs'
 import path from 'path'
-import type { JsonObject, JsonValue } from '@/electron/service-bridge/json-rpc-subprocess'
+import type { JsonObject, JsonValue } from '@/electron/service-bridge/json-rpc-client'
 
 /**
  * Persists which update version has been downloaded to disk so the

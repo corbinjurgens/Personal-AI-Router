@@ -16,7 +16,7 @@ import type {
     InviteState,
     MembershipState
 } from '@/shared/types/cluster'
-import type { JsonObject, JsonValue } from './json-rpc-subprocess'
+import type { JsonObject, JsonValue } from './json-rpc-client'
 
 function objectValue(value: JsonValue | undefined): JsonObject | null {
     if (!value || typeof value !== 'object' || Array.isArray(value)) return null
