@@ -10,6 +10,7 @@ import { ModelExpiry } from '@/shared/types/engines'
 
 import { ConfirmModal } from '@/ui/components/ConfirmModal'
 import { ModelHubModal } from '@/ui/components/ModelHub/ModelHubModal'
+import { useConnectionStore } from '@/ui/stores/connection.store'
 import { useEngineProgressStore } from '@/ui/stores/engine-progress.store'
 import { usePendingActionsStore } from '@/ui/stores/pending-actions.store'
 import { isEnginePullInProgress } from '@/shared/utils/engine-progress'
@@ -47,6 +48,24 @@ export function ModelManager({ backend, nodeId }: { backend: BackendInfo; nodeId
         }
         return parts.join('|')
     })
+
+    /** Same for copies to this PC, which are keyed `...:copy:<model>`. */
+    const copyProgressFingerprint = useEngineProgressStore(state => {
+        const prefix = `${nodeId}:${backend.type}:copy`
+        const parts: string[] = []
+        for (const [key, p] of state.progress) {
+            if (key.startsWith(prefix)) {
+                parts.push(`${p.model ?? ''}:${p.status}:${p.percent ?? ''}`)
+            }
+        }
+        return parts.join('|')
+    })
+    void copyProgressFingerprint
+
+    // A model on a paired node can be copied here; one copy per node and engine at a time.
+    const selfId = useConnectionStore(state => state.selfId)
+    const isRemoteNode = selfId !== null && nodeId !== selfId
+    const copyInFlight = copyProgressFingerprint !== ''
 
     /**
      * Re-render when an optimistic model action for this engine begins/clears;
@@ -121,6 +140,9 @@ export function ModelManager({ backend, nodeId }: { backend: BackendInfo; nodeId
                     break
                 case 'eject':
                     window.pairApi.engines.unloadModel(backendType, nodeId, modelName)
+                    break
+                case 'copy':
+                    window.pairApi.engines.copyModelToThisPc(backendType, nodeId, modelName)
                     break
                 case 'delete':
                     if (confirmBeforeDelete) {
@@ -228,6 +250,13 @@ export function ModelManager({ backend, nodeId }: { backend: BackendInfo; nodeId
                                     pendingAction={usePendingActionsStore
                                         .getState()
                                         .getModelPending(nodeId, backendType, model.name)}
+                                    canCopyToThisPc={isRemoteNode && !copyInFlight}
+                                    copyProgress={getProgress(
+                                        nodeId,
+                                        backend.type,
+                                        'copy',
+                                        model.name
+                                    )}
                                     displayName={displayName}
                                     onAction={handleAction}
                                     onExpiryChange={handleExpiryChange}

@@ -373,6 +373,11 @@ function routeRemoteEngineCommand(payload: WsInvokeRequest<'engine:command'>): v
                 void supervisor.pullModelRemote(nodeId, engine, payload.engineType, payload.model)
             }
             break
+        case 'copyModelToThisPc':
+            if (payload.model) {
+                void supervisor.copyModelToThisPc(nodeId, engine, payload.engineType, payload.model)
+            }
+            break
         case 'uninstall':
         case 'update':
             refuseRemote(
