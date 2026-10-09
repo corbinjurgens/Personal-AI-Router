@@ -18,10 +18,10 @@ history.
 
 | Domain                     | Status                          | Current state                                                                                                                                   |
 | -------------------------- | ------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
-| Process supervision        | Complete                        | Electron starts only `nvpair-ui-broker`; the broker supervises all workers                                                                      |
+| Process supervision        | Complete                        | Electron attaches to `nvpair-service`, which owns `nvpair-ui-broker`; the broker supervises all workers                                                                   |
 | Discovery                  | Complete                        | Broker discovery snapshots drive available nodes and node state                                                                                 |
 | Node telemetry             | Integrated with direct poll     | Electron polls advertised `/v1/node-info` (plain HTTP); remote OS and some remote telemetry are backend-limited                                 |
-| Manual nodes               | Complete with local persistence | Broker owns probing and proxy registration; Electron persists entries for replay                                                                |
+| Manual nodes               | Complete with local persistence | Broker owns probing, proxy registration, and persistence; Electron's old entries are migrated once                                              |
 | Ollama routing             | Complete                        | Broker relay and backend scheduler drive proxy routing                                                                                          |
 | LM Studio routing          | Complete                        | Parallel broker relay and scheduler path                                                                                                        |
 | llama.cpp backend          | Integrated                      | Desktop and TUI expose install, lifecycle, catalog pull, inventory, load/unload, endpoints, routing, and demo traffic                            |
@@ -95,8 +95,8 @@ Two limitations follow from the current discovery and node-info contract:
   to a placeholder until the backend reports OS on discovery or node-info.
 
 Manual nodes use the broker's `node/add`, `node/remove`, and `nodes/list`
-surface. Electron persists user entries and replays them after broker startup so
-they survive worker restarts.
+surface. `nvpair-manual-nodes` persists the list itself. Electron's former
+`configs/manual-nodes.json` is sent once as `node/add` per entry, then deleted.
 
 ## Routing and inference
 
@@ -484,7 +484,7 @@ provide an equivalent client-facing contract:
 | Responsibility                                              | Location                                         |
 | ----------------------------------------------------------- | ------------------------------------------------ |
 | Poll node telemetry over `/v1/node-info`                    | `node-info-poller.ts`                            |
-| Persist and replay manual node entries                      | `manual-nodes-store.ts`, `modular-supervisor.ts` |
+| Migrate Electron's old manual node file once               | `manual-nodes-migration.ts`, `modular-supervisor.ts` |
 | Bridge the local node into engine proxies                   | `modular-supervisor.ts`                          |
 | Present optimistic engine transition state                  | `pending-actions.store.ts`, bridge state         |
 | Relay the backend model catalogue to the renderer           | `service-bridge/model-catalog.ts`                |

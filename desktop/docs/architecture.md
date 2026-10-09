@@ -21,17 +21,23 @@ flowchart LR
         Supervisor["ModularSupervisor"]
     end
 
+    Service["nvpair-service"]
     Broker["nvpair-ui-broker"]
     Workers["Broker-owned workers"]
 
     UI -->|"window.pairApi"| Preload
     Preload <-->|"service-bridge IPC"| Main
     Main --> Supervisor
-    Supervisor <-->|"stdio JSON-RPC"| Broker
+    Supervisor <-->|"JSON-RPC over a local socket"| Service
+    Service <-->|"stdio JSON-RPC"| Broker
     Broker --> Workers
 ```
 
-`nvpair-ui-broker` is the only backend binary Electron spawns directly. The
+Electron does not spawn the broker. `nvpair-service` is a per-user, long-running
+process that owns `nvpair-ui-broker` and outlives every client. Electron
+attaches to it over a Unix socket or Windows named pipe, and starts it
+(detached) only when nothing answers on its endpoint. Quitting the app detaches
+and leaves the service, the broker, and the inference they serve running. The
 broker supervises every runtime worker and relays their JSON-RPC methods and
 notifications. In development binaries live in `cli-bin/`; packaged builds load
 them from `process.resourcesPath/cli-bin`.
@@ -41,7 +47,8 @@ The canonical runtime inventory is
 
 | Binary                    | Owner            | Purpose                                     |
 | ------------------------- | ---------------- | ------------------------------------------- |
-| `nvpair-ui-broker`        | Electron         | Worker supervision and control-plane relay  |
+| `nvpair-service`          | Electron (on demand) | Per-user owner of the broker; multiplexes it for every client |
+| `nvpair-ui-broker`        | Service          | Worker supervision and control-plane relay  |
 | `nvpair-proxy`            | Broker           | Engine proxy and cluster routing; one process hosting a facade per enabled engine |
 | `nvpair-node-scanner`     | Broker           | LAN discovery and announcement              |
 | `nvpair-node-info`        | Broker           | Node metadata and telemetry endpoint        |
@@ -54,9 +61,10 @@ The canonical runtime inventory is
 | `nvpair-job-scheduler`    | Broker, optional | Node-wide routing priority                  |
 
 `nvpair-tui` is bundled as a standalone terminal client; it is not supervised by
-Electron or the broker. It spawns and owns its own `nvpair-ui-broker`, so it runs
-over SSH with no display. It is what the `nvpair` command on PATH resolves to on
-every platform — see [Terminal use](#terminal-use).
+Electron or the broker. It attaches to the same `nvpair-service` (starting it
+when needed), so it runs over SSH with no display and can share a running
+service with the desktop app. It is what the `nvpair` command on PATH resolves
+to on every platform — see [Terminal use](#terminal-use).
 
 ## Communication boundaries
 
@@ -98,15 +106,40 @@ PATH, and a shell script in `~/.local/bin` or `/usr/local/bin` otherwise. The
 Debian package installs the same wrapper at `/usr/bin/nvpair`. The desktop entry
 launches the GUI directly from `/opt` and does not go through the wrapper.
 
-Because the TUI starts its own broker, do not run it alongside the desktop app —
-the two process trees compete for the same engines and proxy ports.
+The TUI and the desktop app share one service and one broker, so running them
+together is supported.
 
 ### Electron to backend
 
-`JsonRpcSubprocess` provides newline-delimited JSON-RPC over stdio. The
-supervisor passes worker paths and the configured log level to the broker,
-subscribes to broker relays after `app:ready`, and converts backend responses
-into stable UI contracts.
+`JsonRpcSocketClient` provides newline-delimited JSON-RPC over the service
+socket. The supervisor resolves the endpoint (`service-endpoint.ts`, which must
+agree with `services/shared/servicectl`; `NVPAIR_SERVICE_ENDPOINT` overrides it),
+dials it, and, if nothing answers, starts the bundled `nvpair-service` detached
+with the broker arguments after `--` (worker paths and the configured log level)
+and retries for about ten seconds (`service-connection.ts`). It subscribes to
+broker relays after `app:ready`, which the service replays to a client that
+attaches late, and converts backend responses into stable UI contracts.
+
+- **Logs.** The service relays broker stderr as `service/log`; the client
+  redacts it exactly as it redacted child stderr, then logs it.
+- **Broker restarts.** On `service/broker-restarted` the supervisor drops the old
+  broker's state; the new broker's `app:ready` reruns the same hydration
+  (subscriptions and baselines).
+- **Dropped connection.** The client reconnects with backoff, starting the
+  service again if needed, and reports the broker crashed only when every
+  attempt fails.
+- **Quit detaches.** A normal quit closes the socket and sends nothing; the
+  service answers a client `shutdown` locally anyway. The tray's *Stop background
+  service and quit* item, a restart, an update, and an app data wipe send
+  `service/stop` instead.
+- **Pause.** The tray's *Pause inference on this PC* / *Resume inference on this
+  PC* item calls the broker's `node:set-availability`. Its label follows
+  `policy:get` (read at hydrate time) and `node:availability-changed` pushes for
+  this node, and reads *Pausing…* (disabled) while the node drains.
+- **Manual nodes.** The service-side `nvpair-manual-nodes` persists its own list.
+  Electron's old `<userData>/configs/manual-nodes.json` is sent once as
+  `node/add` per entry after the broker is ready, then deleted
+  (`manual-nodes-migration.ts`).
 
 Electron reports the service connected after broker `app:ready`. The
 broker-owned engine proxies remain asynchronous capabilities; a
@@ -401,7 +434,7 @@ files (see comments in `scripts/wipe-app-data.*` and
 
 The in-app path never deletes while Electron is alive, otherwise Chromium flushes
 session and cache files back into the directories just removed. Instead Electron
-stops the service tree, spawns the script detached with `--wait-pid=<electron pid>`,
+stops the service (`service/stop`), spawns the script detached with `--wait-pid=<electron pid>`,
 and exits. The script waits for the process to disappear, then wipes. Packaged
 builds also pass `--relaunch=<app executable>` so the script starts the app after
 deletes finish. Unpackaged (`electron-vite dev`) builds omit relaunch and the UI

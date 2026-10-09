@@ -15,7 +15,7 @@ you need to work in this directory.
 ## Layout
 
 ```text
-src/electron/     Main process: broker supervision, service bridge, IPC
+src/electron/     Main process: service attachment, service bridge, IPC
 src/preload/      Typed preload bridge (window.pairApi, window.windowApi)
 src/ui/           React renderer
 src/shared/       Types and utilities shared across the three above
@@ -26,8 +26,10 @@ docs/             Desktop-specific architecture and contract documentation
 ```
 
 The renderer reaches services only through the preload bridge; it never talks to
-a Go worker directly. Electron starts `nvpair-ui-broker` and the broker
-supervises every other worker.
+a Go worker directly. Electron attaches to `nvpair-service` (starting it,
+detached, if it is not running); the service owns `nvpair-ui-broker`, and the
+broker supervises every other worker. Quitting the app detaches and leaves the
+service running; the tray's *Stop background service and quit* stops it.
 
 ## Develop
 

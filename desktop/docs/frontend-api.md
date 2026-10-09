@@ -27,7 +27,7 @@ flowchart LR
     UI --> API
     API --> Preload
     Preload <-->|"service-bridge IPC"| Main
-    Main <-->|"stdio JSON-RPC"| Broker
+    Main <-->|"JSON-RPC via nvpair-service"| Broker
 ```
 
 `WsInvokeChannelMap` and `WsPushChannelMap` describe logical service messages.
