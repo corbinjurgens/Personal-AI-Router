@@ -46,6 +46,8 @@ and their branches were merged here.
 | `e5806b4`..`fd95cdf` | desktop | Electron attaches to `nvpair-service` (endpoint mirror of servicectl, connect-or-start, socket JSON-RPC client with reconnect, `service/log` redacted into logs); quit detaches; tray pause toggle and "Stop background service and quit"; one-time manual-node migration, store and replay removed. Sonnet agent; 379 desktop tests pass. |
 | `ed6ed6d`, `93f5a01` | docs | `TESTING_ON_PC.md`, `FORK.md` status, this entry, AGENTS.md fork notice. |
 | `5910e7f`, `370231c` | desktop | Job cancel and cancel-and-regenerate actions; `requestedModel → model` on jobs; Settings "Routing & resources" tab (node picker, pause/resume, policy JSON editor). Sonnet agent; 392 desktop tests pass. |
+| `aad9270` | docs | Architecture doc, AGENTS.md and two cursor rules describe the service-based process model. |
+| `4d62746`, `3df6fef` (merge `d086d56`) | desktop | Live availability and policy in Routing & resources; "Copy to this PC" with progress on paired nodes' models. Sonnet agent; 402 desktop tests pass. |
 
 ### Verification
 
@@ -82,8 +84,7 @@ and their branches were merged here.
 ### Next up
 
 - Test on real PCs (TESTING_ON_PC.md).
-- Desktop model-copy screen; live availability in the Routing tab; advertise
-  paused nodes to peers; automatic memory estimates.
+- Advertise paused nodes to peers; automatic memory estimates.
 
 ---
 
