@@ -36,6 +36,7 @@ import { resolvePullCatchError } from './pull-error-handling'
 import { isServiceLogLevelEnabled, serviceLogLevel } from './service-log-level'
 import { engineManagerName } from '@/shared/utils/engines'
 import { isFirstRun } from '@/electron/config/ui-config'
+import { createOverviewWindow } from '@/electron/window'
 import { parseClusterNodes, parseInvite, parseNodeIdentity } from './cluster-json'
 import { startNodeInfoPoller, stopNodeInfoPoller } from './node-info-poller'
 import {
@@ -1379,11 +1380,18 @@ class ModularSupervisor {
     private handleClusterManagerNotification(notification: JsonRpcNotification): void {
         if (notification.method === 'cluster:invite-received') {
             const invite = parseInvite(notification.params)
+            const state = getModularBridgeState()
+            const pendingBefore = state.getPendingInvites().length
             // Record it in the authoritative set (re-emits the full snapshot for
             // the Settings card / CLI cache), then keep the per-arrival signal the
             // modal and tray use to surface this specific invite.
-            getModularBridgeState().addPendingInvite(invite)
+            state.addPendingInvite(invite)
             emitBridgePush('cluster:invite-received', invite)
+            // The PIN has to be entered on this machine before the invite
+            // expires, so a new one raises Overview, where the prompt lives.
+            // Main does this because the tray popup, which used to, now exists
+            // only while the user has it open.
+            if (state.getPendingInvites().length > pendingBefore) createOverviewWindow()
             return
         }
         if (notification.method === 'cluster:invite-canceled') {
