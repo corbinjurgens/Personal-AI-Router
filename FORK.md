@@ -34,8 +34,9 @@ Each finished item below names its commit; the log has the full detail.
 there. None of it has run on Windows, macOS, a GPU or two real machines yet.
 [TESTING_ON_PC.md](TESTING_ON_PC.md) is the checklist for that. The technical
 contract is [FORK_DESIGN.md](FORK_DESIGN.md). The biggest remaining gap is the
-desktop app: it does not attach to the new service yet, and it has no UI for
-the new features. Until it does, use `nvpair-service call`.
+desktop UI: apart from the tray's pause toggle, the new features (policy,
+tiers, cancel, model copy) have no desktop screens yet. Use
+`nvpair-service call` for them.
 
 ## Phase 1: Reduce idle overhead (done, needs measuring)
 
@@ -62,8 +63,9 @@ the new features. Until it does, use `nvpair-service call`.
   `status` / `stop` / `call` subcommands (merge `32c7820`, `92ce606`).
 - [x] The TUI attaches to the service. Quitting leaves inference running.
 - [x] Manual nodes are saved by the backend, and hostnames are re-resolved.
-- [ ] The desktop app attaches to the service instead of spawning a broker,
-  and migrates Electron's old manual-node file.
+- [x] The desktop app attaches to the service instead of spawning a broker
+  (detached start, reconnect, quit detaches, tray "Stop background service
+  and quit"), and migrates Electron's old manual-node file (`e5806b4`..`fd95cdf`).
 
 ## Phase 3: Reliable node availability (done)
 
@@ -101,7 +103,8 @@ the new features. Until it does, use `nvpair-service call`.
 - [x] Job cancel, and cancel-and-regenerate on another machine, from any node
   (`82bbc29`).
 - [x] Manual peers by hostname (for example Tailscale) persist.
-- [ ] Desktop UI for pause, policy and tiers, job cancel and model copy.
+- [x] Tray pause/resume toggle for this PC.
+- [ ] Desktop UI for policy and tiers, job cancel, remote pause and model copy.
 
 ## Open decisions
 

@@ -43,6 +43,7 @@ and their branches were merged here.
 | `32c7820` (merge) | service, TUI, manual-nodes, build | `nvpair-service` (multi-client attach, broker restart, logs, autostart); `servicectl` and `ipc.ListenPrivate`; the TUI attaches to the service; manual nodes persisted; the service added to build, installers and desktop bundling. |
 | `e35a283` (merge) | proxy | Destination admission, tiers across nodes and engines, routing headers and `requestedModel`, `workload/cancel` with regenerate. |
 | `92ce606` | service | `nvpair-service call <method> [json]`; short socket path fallback when the app data path is too long for a Unix socket. |
+| `e5806b4`..`fd95cdf` | desktop | Electron attaches to `nvpair-service` (endpoint mirror of servicectl, connect-or-start, socket JSON-RPC client with reconnect, `service/log` redacted into logs); quit detaches; tray pause toggle and "Stop background service and quit"; one-time manual-node migration, store and replay removed. Sonnet agent; 379 desktop tests pass. |
 | *(this commit)* | docs | `TESTING_ON_PC.md`, `FORK.md` status, this entry. |
 
 ### Verification
@@ -79,9 +80,7 @@ and their branches were merged here.
 
 ### Next up
 
-- The desktop app attaches to `nvpair-service` and migrates the old
-  manual-node file.
-- Desktop UI for pause, policy and tiers, cancel and model copy.
+- Desktop UI for policy and tiers, cancel, remote pause and model copy.
 
 ---
 

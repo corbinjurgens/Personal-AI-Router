@@ -48,9 +48,17 @@ Check these:
   and the service survives closing the terminal.
 - [ ] **macOS:** the service survives closing Terminal.
 
-> **Desktop app status.** The desktop app still starts its own broker. Do not
-> run it while the service is running. See the open items in
-> [FORK.md](FORK.md).
+The desktop app is a client too.
+
+- [ ] It starts the service if it is not running. Quitting the app leaves the
+  service and inference running, and reopening it reattaches.
+- [ ] The tray menu's "Stop background service and quit" stops the service
+  (this can take about 20 s).
+- [ ] The tray menu's pause toggle shows "Pausing…" while draining.
+- [ ] Killing the service makes the app reconnect, restarting the service if
+  needed.
+- [ ] An old `configs/manual-nodes.json` from the upstream app is migrated
+  once and then deleted.
 
 ## 3. Pause for gaming
 
@@ -170,8 +178,8 @@ To edit another paired PC's policy, add `"nodeId": "<its hostUuid>"` to
 
 The open items list in [FORK.md](FORK.md) is the authoritative version.
 
-- The desktop app does not yet attach to the service. It has no UI for pause,
-  policy, tiers, job cancel or model copy; use `nvpair-service call` for these.
+- The desktop app has no screens for policy, tiers, job cancel or model copy;
+  use `nvpair-service call` for these. Pause is in the tray menu.
 - Paused peers are not advertised. Other PCs find out from a fast `503` and
   move on.
 - `services/versions.json` has no `nvpair-service` entry, so the service

@@ -8,7 +8,10 @@ SPDX-License-Identifier: Apache-2.0
 > **Fork notice:** this is a personal fork of PAIR that adds features for
 > personal use. Read [WORKLOG.md](WORKLOG.md), the record of all fork work, and
 > add an entry for every session. [FORK.md](FORK.md) has the roadmap. The
-> upstream guidance below still applies.
+> upstream guidance below still applies, except where the fork changed the
+> process model: Electron and `nvpair-tui` no longer start the broker. Both
+> attach to `nvpair-service`, which owns it (see
+> [FORK_DESIGN.md](FORK_DESIGN.md)).
 
 Guidance for agents and contributors working in the **NVIDIA Personal AI Router**
 (PAIR) repository. It holds an Electron desktop application and the Go services
