@@ -337,6 +337,7 @@ func (f *facade) replaceSubscribed(params json.RawMessage) {
 		nodes = append(nodes, n)
 		present[n.ID] = true
 	}
+	f.noteSelfFromSnapshot(nodes)
 	discovered, updated, removed := f.discovery.SetSubscribed(nodes)
 	// Surface the relay-fed set to the client as node/* events — the signal a
 	// consumer (the UI) uses to show which peers run this engine — mirroring how

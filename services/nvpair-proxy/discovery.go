@@ -41,6 +41,12 @@ type Node struct {
 	// advertises the requested model; an empty list stays in discovery but is
 	// not an inference candidate until a later inventory update.
 	Models []string `json:"models,omitempty"`
+	// Loaded is the subset of Models the node reports resident in memory for
+	// this engine (DirectoryNode.LoadedByEngine). Tier routing prefers a warm
+	// node. Internal routing metadata like ClusterUUID: it changes with every
+	// load and unload, so it is neither part of the outward node contract nor
+	// of nodeEqual, which would otherwise announce node/updated for each one.
+	Loaded []string `json:"-"`
 	// IP is the single canonical LAN address a consumer should dial/display for
 	// this node, resolved via the shared netpick ranker: the node's
 	// own ip= TXT if present, else the best-scored advertised IPv4. It is
