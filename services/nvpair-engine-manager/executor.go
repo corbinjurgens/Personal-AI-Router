@@ -123,6 +123,11 @@ type Executor struct {
 	// immediate out-of-cycle loaded-set check instead of waiting for the next
 	// tick. Buffered depth 1: a coalesced signal is enough.
 	loadedPoke chan struct{}
+	// inventoryMu guards inventory, the last installed model list per engine,
+	// which lets the watcher check residency every tick without re-reading an
+	// unchanged inventory (see modelsSweep).
+	inventoryMu sync.Mutex
+	inventory   map[string][]string
 
 	reservedPort atomic.Int32
 	// StopAll is terminal for an Executor; the gate closes its start/snapshot race.
