@@ -21,20 +21,21 @@ SPDX-License-Identifier: Apache-2.0
 - Preload forwards logical service calls through the `service-bridge:*` IPC
   envelope.
 - `handleServiceBridgeInvoke` is the service dispatch for renderer clients.
-- `ModularSupervisor` communicates with `nvpair-ui-broker` through newline
-  JSON-RPC over stdio.
-- Electron starts only the broker. The broker owns every worker process.
+- `ModularSupervisor` communicates with `nvpair-ui-broker` through
+  `nvpair-service`, over newline JSON-RPC on a local socket or named pipe.
+- Electron starts only `nvpair-service`, and only if it is not already running.
+  The service owns the broker, and the broker owns every worker process.
 - Modular notifications update `ModularBridgeState`, which emits typed renderer
   push events.
 
 ## Terminal client
 
 - The `nvpair` command on PATH launches the bundled Go `nvpair-tui`, which
-  spawns and owns its own broker.
+  attaches to `nvpair-service` like Electron does.
 - Electron generates that launcher on packaged builds
   (`src/electron/nvpair-command.ts`).
-- There is no Electron console client, control socket, or local control server.
-  Do not reintroduce one.
+- There is no Electron console client. The one local control socket is
+  `nvpair-service`'s per-user endpoint; do not add another.
 
 ## Backend network traffic
 

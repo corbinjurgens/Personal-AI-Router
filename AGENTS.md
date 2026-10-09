@@ -48,12 +48,14 @@ change belongs in a Go service instead.
 
 ## How the Pieces Connect
 
-- Electron starts **only** `nvpair-ui-broker` from `desktop/cli-bin/`.
+- Electron starts **only** `nvpair-service` from `desktop/cli-bin/` (when it is
+  not already running) and attaches to it; the service owns `nvpair-ui-broker`.
 - The broker supervises the other Go workers: discovery, proxies, engines,
   cluster, settings, manual nodes, workloads, errors, and the scheduler.
 - The broker spawns all 10 workers at startup. Only the scanner is required; the
   rest are optional and non-fatal.
-- `nvpair-tui` is bundled but never supervised. It owns its own broker.
+- `nvpair-tui` is bundled but never supervised. It attaches to `nvpair-service`
+  too.
 - Interprocess communication is newline-delimited JSON-RPC 2.0 over stdio
   (optional `--ipc`).
 - The desktop build compiles the Go binaries from the sibling `services/`

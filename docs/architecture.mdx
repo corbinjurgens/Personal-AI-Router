@@ -62,31 +62,32 @@ flowchart TB
         Supervisor["ModularSupervisor"]
     end
 
+    Service["nvpair-service"]
     Broker["nvpair-ui-broker"]
     Workers["broker-supervised Go workers"]
     Tui["nvpair-tui"]
-    TuiBroker["TUI-owned nvpair-ui-broker"]
-    TuiWorkers["TUI broker-supervised Go workers"]
 
     Renderer -->|"window.pairApi"| Preload
     Preload <-->|"Electron IPC"| Main
     Main --> Supervisor
-    Supervisor <-->|"newline-delimited JSON-RPC 2.0 over stdio"| Broker
+    Supervisor <-->|"JSON-RPC over a local socket or named pipe"| Service
+    Tui <-->|"JSON-RPC over a local socket or named pipe"| Service
+    Service <-->|"newline-delimited JSON-RPC 2.0 over stdio"| Broker
     Broker --> Workers
-    Tui <-->|"JSON-RPC over stdio"| TuiBroker
-    TuiBroker --> TuiWorkers
 ```
 
-Electron starts only `nvpair-ui-broker`. In normal operation the broker starts
+In this fork, `nvpair-service` is a per-user background process that owns
+`nvpair-ui-broker`. Electron and the terminal interface are clients: each
+connects to the service's local socket (a named pipe on Windows), starts the
+service detached if it is not running, and detaches on quit, so inference keeps
+running with no GUI open. In normal operation the broker starts
 the scanner and available optional workers, monitors them, reports crashes, and
 attempts bounded restart with backoff. Workers log to stderr, and stdout is
 reserved for newline-delimited JSON-RPC when stdio is used.
 
-The terminal interface is a separate broker client for headless use, and is what
-the `nvpair` command on PATH resolves to. Do not run it and the desktop
-application on the same machine at the same time, because each starts its own
-broker and worker tree and the two would then contend for the same local ports,
-engines, and persisted settings.
+The terminal interface is a client of the same service for headless use, and is
+what the `nvpair` command on PATH resolves to. It and the desktop application can
+be open at the same time, because both attach to the one service and broker.
 
 ### Health and Failure Detection
 
