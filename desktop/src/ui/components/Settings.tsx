@@ -3,6 +3,7 @@
 
 import { Flex, Stack } from '@nvidia/foundations-react-core'
 import ClusterSettings from '@/ui/components/ClusterSettings/ClusterSettings'
+import RoutingSettings from '@/ui/components/RoutingSettings/RoutingSettings'
 import ServiceSettings from '@/ui/components/ServiceSettings/ServiceSettings'
 import { InviteApprovalModal } from './InviteApprovalModal'
 import { ResponsiveNavLayout, type ResponsiveNavItem } from './ResponsiveNavLayout'
@@ -11,6 +12,7 @@ import { useOverviewUiStore } from '@/ui/stores/overview-ui.store'
 
 const SETTINGS_NAV_ITEMS: ResponsiveNavItem[] = [
     { id: 'cluster', label: 'Cluster' },
+    { id: 'routing', label: 'Routing & resources' },
     { id: 'service', label: 'Service' }
 ]
 
@@ -33,6 +35,7 @@ export default function Settings() {
                 <Stack className="grow overflow-hidden w-full">
                     <Stack className="grow overflow-y-auto w-full">
                         {activeTab === 'cluster' && <ClusterSettings />}
+                        {activeTab === 'routing' && <RoutingSettings />}
                         {activeTab === 'service' && <ServiceSettings />}
                     </Stack>
                 </Stack>
