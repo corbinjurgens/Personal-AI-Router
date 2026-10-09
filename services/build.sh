@@ -4,7 +4,7 @@
 
 # build.sh — NVIDIA Personal AI Router build script for Linux and macOS.
 #
-# Mirrors build.bat. Reads versions.json with jq, builds the twelve worker
+# Mirrors build.bat. Reads versions.json with jq, builds the thirteen service
 # binaries with -X main.Version=... ldflags, then copies them into the
 # repo-root staging bundle at:
 #
@@ -67,6 +67,10 @@ V_BROKER=$( jq -r --arg k 'nvpair-ui-broker'    '.components[$k]' "$VERSIONS_FIL
 V_CLUMGR=$( jq -r --arg k 'nvpair-cluster-manager' '.components[$k]' "$VERSIONS_FILE")
 V_SCHED=$(  jq -r --arg k 'nvpair-job-scheduler' '.components[$k]' "$VERSIONS_FILE")
 V_TUI=$(    jq -r --arg k 'nvpair-tui'          '.components[$k]' "$VERSIONS_FILE")
+# nvpair-service has no versions.json entry yet: that file is written by release
+# automation, not by hand. Until it gains one the binary is stamped 0.0.0, the
+# same fallback the desktop build (build-modular-binaries.ts) uses.
+V_SERVICE=$(jq -r --arg k 'nvpair-service'      '.components[$k] // "0.0.0"' "$VERSIONS_FILE")
 
 # The release version, which lives in desktop/package.json rather than here.
 #
@@ -103,6 +107,7 @@ printf '  nvpair-ui-broker     = %s\n' "$V_BROKER"
 printf '  nvpair-cluster-mgr   = %s\n' "$V_CLUMGR"
 printf '  nvpair-job-scheduler = %s\n' "$V_SCHED"
 printf '  nvpair-tui           = %s\n' "$V_TUI"
+printf '  nvpair-service       = %s\n' "$V_SERVICE"
 echo
 
 echo "========================================"
@@ -112,7 +117,7 @@ echo
 
 build_subbinary() {
     local idx="$1" name="$2" version="$3"
-    echo "[$idx/13] Building $name (v$version)..."
+    echo "[$idx/14] Building $name (v$version)..."
     (cd "$ROOT/$name" && go build -ldflags "-X main.Version=$version" -o "$name" .)
     echo "      OK"
 }
@@ -131,11 +136,15 @@ build_subbinary 11 nvpair-job-scheduler   "$V_SCHED"
 # compares against the published tag, and its own component version means
 # nothing to that comparison. A -X on a symbol path that does not exist fails
 # silently, so verify the stamp rather than assuming it.
-echo "[12/13] Building nvpair-tui (v$V_TUI)..."
+echo "[12/14] Building nvpair-tui (v$V_TUI)..."
 (cd "$ROOT/nvpair-tui" && go build \
     -ldflags "-X main.Version=$V_TUI -X nvpair-tui/ui.ReleaseVersion=$V_RELEASE" \
     -o nvpair-tui .)
 echo "      OK"
+
+# nvpair-service owns the broker for every client; nvpair-tui starts it from
+# beside its own executable, so it is staged with the rest.
+build_subbinary 13 nvpair-service "$V_SERVICE"
 
 # inference-dispatcher is built here but is not a worker: it speaks no JSON-RPC,
 # nothing supervises it, and it is deliberately absent from versions.json. It is
@@ -149,7 +158,7 @@ echo "      OK"
 # it fails loudly here rather than producing a bundle that is quietly missing a
 # feature.
 DISPATCHER_SRC="$ROOT/../scripts/inference-dispatcher"
-echo "[13/13] Building inference-dispatcher (v$V_SERVICES)..."
+echo "[14/14] Building inference-dispatcher (v$V_SERVICES)..."
 if [ ! -d "$DISPATCHER_SRC" ]; then
     echo "ERROR: $DISPATCHER_SRC not found." >&2
     echo "       The Inference Demo client lives at scripts/inference-dispatcher" >&2
@@ -186,8 +195,9 @@ cp "$ROOT/nvpair-ui-broker/nvpair-ui-broker"       "$BIN_OUT/nvpair-ui-broker"
 cp "$ROOT/nvpair-cluster-manager/nvpair-cluster-manager" "$BIN_OUT/nvpair-cluster-manager"
 cp "$ROOT/nvpair-job-scheduler/nvpair-job-scheduler" "$BIN_OUT/nvpair-job-scheduler"
 cp "$ROOT/nvpair-tui/nvpair-tui"                   "$BIN_OUT/nvpair-tui"
-# Beside the binaries it is not one of: nvpair-tui resolves the broker next to
-# its own executable, and the demo finds this the same way.
+cp "$ROOT/nvpair-service/nvpair-service"           "$BIN_OUT/nvpair-service"
+# Beside the binaries it is not one of: nvpair-tui resolves nvpair-service next
+# to its own executable, and the demo finds this the same way.
 cp "$DISPATCHER_SRC/inference-dispatcher"          "$BIN_OUT/inference-dispatcher"
 
 echo
@@ -207,5 +217,6 @@ printf '  UI Broker:    %s\n' "$BIN_OUT/nvpair-ui-broker"
 printf '  Cluster Mgr:  %s\n' "$BIN_OUT/nvpair-cluster-manager"
 printf '  Job Scheduler:%s\n' " $BIN_OUT/nvpair-job-scheduler"
 printf '  TUI:          %s\n' "$BIN_OUT/nvpair-tui"
+printf '  Service:      %s\n' "$BIN_OUT/nvpair-service"
 printf '  Demo client:  %s\n' "$BIN_OUT/inference-dispatcher"
 echo

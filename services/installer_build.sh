@@ -148,6 +148,7 @@ cp "$BIN_SRC/nvpair-cluster-manager" "$STAGE/bin/"
 cp "$BIN_SRC/nvpair-job-scheduler" "$STAGE/bin/"
 cp "$BIN_SRC/nvpair-ui-broker"    "$STAGE/bin/"
 cp "$BIN_SRC/nvpair-tui"          "$STAGE/bin/"
+cp "$BIN_SRC/nvpair-service"      "$STAGE/bin/"
 
 if [[ "$PLATFORM" == "darwin" ]]; then
     cp "$ROOT/installer/macos/INSTALL.md" "$STAGE/"

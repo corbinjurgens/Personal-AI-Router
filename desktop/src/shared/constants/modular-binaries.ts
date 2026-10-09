@@ -165,10 +165,15 @@ export const MODULAR_RUNTIME_BINARIES: ModularRuntimeBinary[] = [
 
 /**
  * Binaries bundled in the installer but not spawned by Electron or the broker.
- * `nvpair-tui` is a headless terminal client that spawns its own `nvpair-ui-broker` —
- * see `services/nvpair-tui/README.md`.
+ * `nvpair-service` is the per-user process that owns `nvpair-ui-broker` for its
+ * clients and outlives them; `nvpair-tui` is a headless terminal client that
+ * attaches to it, starting it when needed — see `services/nvpair-service/README.md`
+ * and `services/nvpair-tui/README.md`. Electron does not use the service yet.
  */
-export const MODULAR_BUNDLED_BINARIES: { baseName: string }[] = [{ baseName: 'nvpair-tui' }]
+export const MODULAR_BUNDLED_BINARIES: { baseName: string }[] = [
+    { baseName: 'nvpair-tui' },
+    { baseName: 'nvpair-service' }
+]
 
 /** Every backend binary shipped in the installer (runtime workers + bundled tools). */
 export function modularShippedBinaryBaseNames(): string[] {
