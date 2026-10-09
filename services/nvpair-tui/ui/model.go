@@ -53,9 +53,14 @@ type Model struct {
 	updateDismissed bool
 
 	// wipeOnExit records a confirmed reset request. The deletion itself happens
-	// in the caller after the broker has stopped, because the workers hold those
-	// files while it runs.
+	// in the caller after the service has stopped, because the workers hold
+	// those files while it runs.
 	wipeOnExit bool
+
+	// confirmingStop is set while Q waits for its y. stopOnExit records the
+	// confirmed request; the caller stops the service once the program ends.
+	confirmingStop bool
+	stopOnExit     bool
 }
 
 // closer is a view holding something that outlives the update loop and has to
@@ -72,11 +77,20 @@ func closeViews(views []View) {
 	}
 }
 
-// Outcome reports what the operator asked for on the way out, for work that can
-// only be done once the service tree is down.
+// Outcome reports what the operator asked for on the way out. Plain quitting
+// asks for nothing: the service keeps running.
 type Outcome struct {
+	// StopService stops nvpair-service, and with it the broker and every
+	// worker, after the program ends.
+	StopService bool
+	// WipeData deletes the data directory once the service tree is down. It
+	// implies stopping the service.
 	WipeData bool
 }
+
+// stopServiceMsg asks the shell to quit and stop the service, after the
+// operator confirmed it on the Service tab.
+type stopServiceMsg struct{}
 
 // New builds the root model over a connected broker client, the broker's
 // captured stderr line channel, and the set of views (tabs) to present,
@@ -124,6 +138,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.Type == tea.KeyCtrlC {
 			return m, tea.Quit
 		}
+		// An armed stop answers the next key, whatever it is, so a stray key
+		// cancels rather than doing something else as well.
+		if m.confirmingStop {
+			m.confirmingStop = false
+			m.resizeViews()
+			if msg.String() == "y" {
+				m.stopOnExit = true
+				return m, tea.Quit
+			}
+			return m, nil
+		}
 		// A view editing a text field (e.g. a port or PIN entry) captures
 		// all keys, so global bindings like tab/q don't steal characters
 		// mid-input.
@@ -143,6 +168,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		case key.Matches(msg, m.keys.Quit):
 			return m, tea.Quit
+		case key.Matches(msg, m.keys.StopQuit):
+			m.confirmingStop = true
+			m.resizeViews()
+			return m, nil
 		case key.Matches(msg, m.keys.Help):
 			m.showFullHelp = !m.showFullHelp
 			m.resizeViews()
@@ -171,6 +200,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.Msg.Method == "app:ready" {
 			m.ready = true
 			m.brokerVersion = readyVersion(msg.Msg)
+		}
+		// The service restarted a broker that died; it is not ready again
+		// until the new one sends its own app:ready.
+		if msg.Msg.Method == "service/broker-restarted" {
+			m.ready = false
 		}
 		cmds := m.broadcast(msg)
 		cmds = append(cmds, waitForNotification(m.client))
@@ -204,6 +238,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case wipeDataMsg:
 		m.wipeOnExit = true
+		return m, tea.Quit
+
+	case stopServiceMsg:
+		m.stopOnExit = true
 		return m, tea.Quit
 
 	case DisconnectedMsg:
@@ -382,6 +420,9 @@ func (m Model) footerRoom() int {
 // release, and offers no key to install it — this client cannot, see
 // updatecheck.go.
 func (m Model) banner() string {
+	if m.confirmingStop {
+		return m.stopBanner()
+	}
 	if m.updateLatest == "" || m.updateDismissed {
 		return ""
 	}
@@ -406,6 +447,21 @@ func (m Model) banner() string {
 		}
 	}
 	return statusOKStyle.Render(dismiss)
+}
+
+// stopBanner asks for the stop confirmation in the shell-wide notice row,
+// longest form that fits, keeping the keys to press at the end of every form.
+func (m Model) stopBanner() string {
+	for _, text := range []string{
+		" Stop nvpair-service? Inference on this machine stops for every client. y to confirm, any other key cancels",
+		" Stop the service and quit? y to confirm, any other key cancels",
+		" Stop service? y / any key cancels",
+	} {
+		if lipgloss.Width(text) <= m.width {
+			return statusErrStyle.Render(text)
+		}
+	}
+	return statusErrStyle.Render(" Stop? y")
 }
 
 func (m *Model) resizeViews() {
@@ -491,7 +547,7 @@ func (m Model) footerView() string {
 	// Quit and help lead. The short footer is truncated from the right, and at
 	// the forty-column minimum even the shell's own keys overrun it, so the
 	// line ended "shift+tab prev …" with the way out cut off.
-	global := []key.Binding{m.keys.Quit, m.keys.Help, m.keys.NextTab, m.keys.PrevTab, m.keys.JumpTab}
+	global := []key.Binding{m.keys.Quit, m.keys.Help, m.keys.NextTab, m.keys.PrevTab, m.keys.JumpTab, m.keys.StopQuit}
 
 	// None of them while a view owns the keyboard. Each view narrows its own
 	// help to enter and esc in that state, and the footer used to prepend the

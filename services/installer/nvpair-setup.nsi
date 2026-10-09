@@ -128,6 +128,7 @@ FunctionEnd
   nsExec::ExecToLog 'taskkill /F /IM "nvpair-job-scheduler.exe"'
   nsExec::ExecToLog 'taskkill /F /IM "nvpair-ui-broker.exe"'
   nsExec::ExecToLog 'taskkill /F /IM "nvpair-tui.exe"'
+  nsExec::ExecToLog 'taskkill /F /IM "nvpair-service.exe"'
   ; Give Windows a moment to release the handles.
   Sleep 500
 !macroend
@@ -252,10 +253,14 @@ Section "Install"
   ; bundled alongside this backend launches it to drive the NVPAIR API, and it
   ; supervises the bundled workers.
   File "..\build\bin\nvpair-ui-broker.exe"
-  ; nvpair-tui is a terminal client that spawns and supervises nvpair-ui-broker
-  ; over stdio for headless / SSH operation. It has no listening port, so
-  ; it needs no firewall rule.
+  ; nvpair-tui is a terminal client for headless / SSH operation. It attaches to
+  ; nvpair-service (starting it when needed) and has no listening port, so it
+  ; needs no firewall rule.
   File "..\build\bin\nvpair-tui.exe"
+  ; nvpair-service is the per-user process that owns nvpair-ui-broker for every
+  ; client and outlives them. It listens only on a per-user named pipe, so it
+  ; needs no firewall rule.
+  File "..\build\bin\nvpair-service.exe"
 
   ; Write uninstaller
   WriteUninstaller "$INSTDIR\uninstall.exe"
@@ -378,6 +383,7 @@ Section "Uninstall"
   Delete "$INSTDIR\bin\nvpair-job-scheduler.exe"
   Delete "$INSTDIR\bin\nvpair-ui-broker.exe"
   Delete "$INSTDIR\bin\nvpair-tui.exe"
+  Delete "$INSTDIR\bin\nvpair-service.exe"
   RMDir  "$INSTDIR\bin"
   Delete "$INSTDIR\EULA.txt"
   Delete "$INSTDIR\uninstall.exe"

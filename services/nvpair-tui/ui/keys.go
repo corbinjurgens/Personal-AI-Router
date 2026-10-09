@@ -13,12 +13,13 @@ import (
 // globalKeyMap holds the bindings that work in every view. View-specific
 // bindings are returned by each View's Help and handled inside its Update.
 type globalKeyMap struct {
-	NextTab key.Binding
-	PrevTab key.Binding
-	JumpTab key.Binding
-	Help    key.Binding
-	Quit    key.Binding
-	Dismiss key.Binding
+	NextTab  key.Binding
+	PrevTab  key.Binding
+	JumpTab  key.Binding
+	Help     key.Binding
+	Quit     key.Binding
+	StopQuit key.Binding
+	Dismiss  key.Binding
 }
 
 // While a text field owns the keyboard, these two are the only keys that do
@@ -77,9 +78,18 @@ func newGlobalKeyMap(tabs int) globalKeyMap {
 			key.WithKeys("?"),
 			key.WithHelp("?", "help"),
 		),
+		// Quitting detaches: nvpair-service keeps the broker, and the
+		// inference it serves, running for the next client.
 		Quit: key.NewBinding(
 			key.WithKeys("q", "ctrl+c"),
 			key.WithHelp("q", "quit"),
+		),
+		// Stopping the service is the deliberate counterpart, so it is the
+		// shifted quit and asks for y first. Upper-case letters are unbound
+		// everywhere else, so it shadows no view's verb.
+		StopQuit: key.NewBinding(
+			key.WithKeys("Q"),
+			key.WithHelp("Q", "stop service & quit"),
 		),
 		// ctrl+x because every letter is already spoken for — the views between
 		// them bind a through y, and the table and viewport add b, g, G, space,

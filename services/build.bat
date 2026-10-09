@@ -50,6 +50,10 @@ for /f "delims=" %%V in ('jq -r --arg k "nvpair-engine-manager"   ".components[$
 for /f "delims=" %%V in ('jq -r --arg k "nvpair-cluster-manager"  ".components[$k]" "%VERSIONS_FILE%"')            do set "V_CLUMGR=%%V"
 for /f "delims=" %%V in ('jq -r --arg k "nvpair-job-scheduler"    ".components[$k]" "%VERSIONS_FILE%"')            do set "V_SCHED=%%V"
 for /f "delims=" %%V in ('jq -r --arg k "nvpair-tui"              ".components[$k]" "%VERSIONS_FILE%"')            do set "V_TUI=%%V"
+REM nvpair-service has no versions.json entry yet: that file is written by
+REM release automation, not by hand. Until it gains one the binary is stamped
+REM 0.0.0, the same fallback the desktop build (build-modular-binaries.ts) uses.
+for /f "delims=" %%V in ('jq -r --arg k "nvpair-service" --arg d "0.0.0" ".components[$k] // $d" "%VERSIONS_FILE%"') do set "V_SERVICE=%%V"
 
 REM The release version, which lives in desktop/package.json rather than here.
 REM nvpair-tui's update notice compares this against the published release tag,
@@ -87,6 +91,7 @@ echo  nvpair-engine-manager= %V_ENGMGR%
 echo  nvpair-cluster-mgr   = %V_CLUMGR%
 echo  nvpair-job-scheduler = %V_SCHED%
 echo  nvpair-tui           = %V_TUI%
+echo  nvpair-service       = %V_SERVICE%
 echo.
 
 echo ========================================
@@ -94,57 +99,57 @@ echo  Building all components
 echo ========================================
 echo.
 
-echo [1/13] Building nvpair-proxy (v%V_PROXY%)...
+echo [1/14] Building nvpair-proxy (v%V_PROXY%)...
 cd /d "%ROOT%nvpair-proxy"
 go build -ldflags "-X main.Version=%V_PROXY%" -o nvpair-proxy.exe . || goto :fail
 echo       OK
 
-echo [2/13] Building nvpair-node-info (v%V_NINFO%)...
+echo [2/14] Building nvpair-node-info (v%V_NINFO%)...
 cd /d "%ROOT%nvpair-node-info"
 go build -ldflags "-X main.Version=%V_NINFO%" -o nvpair-node-info.exe . || goto :fail
 echo       OK
 
-echo [3/13] Building nvpair-node-scanner (v%V_NSCAN%)...
+echo [3/14] Building nvpair-node-scanner (v%V_NSCAN%)...
 cd /d "%ROOT%nvpair-node-scanner"
 go build -ldflags "-X main.Version=%V_NSCAN%" -o nvpair-node-scanner.exe . || goto :fail
 echo       OK
 
-echo [4/13] Building nvpair-manual-nodes (v%V_MNODES%)...
+echo [4/14] Building nvpair-manual-nodes (v%V_MNODES%)...
 cd /d "%ROOT%nvpair-manual-nodes"
 go build -ldflags "-X main.Version=%V_MNODES%" -o nvpair-manual-nodes.exe . || goto :fail
 echo       OK
 
-echo [5/13] Building nvpair-workload-manager (v%V_WLMGR%)...
+echo [5/14] Building nvpair-workload-manager (v%V_WLMGR%)...
 cd /d "%ROOT%nvpair-workload-manager"
 go build -ldflags "-X main.Version=%V_WLMGR%" -o nvpair-workload-manager.exe . || goto :fail
 echo       OK
 
-echo [6/13] Building nvpair-errors (v%V_ERRORS%)...
+echo [6/14] Building nvpair-errors (v%V_ERRORS%)...
 cd /d "%ROOT%nvpair-errors"
 go build -ldflags "-X main.Version=%V_ERRORS%" -o nvpair-errors.exe . || goto :fail
 echo       OK
 
-echo [7/13] Building nvpair-engine-manager (v%V_ENGMGR%)...
+echo [7/14] Building nvpair-engine-manager (v%V_ENGMGR%)...
 cd /d "%ROOT%nvpair-engine-manager"
 go build -ldflags "-X main.Version=%V_ENGMGR%" -o nvpair-engine-manager.exe . || goto :fail
 echo       OK
 
-echo [8/13] Building nvpair-node-settings (v%V_NSETTINGS%)...
+echo [8/14] Building nvpair-node-settings (v%V_NSETTINGS%)...
 cd /d "%ROOT%nvpair-node-settings"
 go build -ldflags "-X main.Version=%V_NSETTINGS%" -o nvpair-node-settings.exe . || goto :fail
 echo       OK
 
-echo [9/13] Building nvpair-ui-broker (v%V_BROKER%)...
+echo [9/14] Building nvpair-ui-broker (v%V_BROKER%)...
 cd /d "%ROOT%nvpair-ui-broker"
 go build -ldflags "-X main.Version=%V_BROKER%" -o nvpair-ui-broker.exe . || goto :fail
 echo       OK
 
-echo [10/13] Building nvpair-cluster-manager (v%V_CLUMGR%)...
+echo [10/14] Building nvpair-cluster-manager (v%V_CLUMGR%)...
 cd /d "%ROOT%nvpair-cluster-manager"
 go build -ldflags "-X main.Version=%V_CLUMGR%" -o nvpair-cluster-manager.exe . || goto :fail
 echo       OK
 
-echo [11/13] Building nvpair-job-scheduler (v%V_SCHED%)...
+echo [11/14] Building nvpair-job-scheduler (v%V_SCHED%)...
 cd /d "%ROOT%nvpair-job-scheduler"
 go build -ldflags "-X main.Version=%V_SCHED%" -o nvpair-job-scheduler.exe . || goto :fail
 echo       OK
@@ -153,9 +158,16 @@ REM nvpair-tui also carries the release version: that is what the update notice
 REM compares against the published tag, and its own component version means
 REM nothing to that comparison. A -X on a symbol path that does not exist fails
 REM silently, so verify the stamp rather than assuming it.
-echo [12/13] Building nvpair-tui (v%V_TUI%)...
+echo [12/14] Building nvpair-tui (v%V_TUI%)...
 cd /d "%ROOT%nvpair-tui"
 go build -ldflags "-X main.Version=%V_TUI% -X nvpair-tui/ui.ReleaseVersion=%V_RELEASE%" -o nvpair-tui.exe . || goto :fail
+echo       OK
+
+REM nvpair-service owns the broker for every client; nvpair-tui starts it from
+REM beside its own executable, so it is staged with the rest.
+echo [13/14] Building nvpair-service (v%V_SERVICE%)...
+cd /d "%ROOT%nvpair-service"
+go build -ldflags "-X main.Version=%V_SERVICE%" -o nvpair-service.exe . || goto :fail
 echo       OK
 
 REM inference-dispatcher is built here but is not a worker: it speaks no
@@ -164,7 +176,7 @@ REM versions.json. It is an ordinary HTTP client the Inference Demo spawns once
 REM per request, built here because the terminal interface runs the same demo
 REM and ships from this bundle. Its module lives outside this tree, at the
 REM monorepo root, for the same reason: it is not a service.
-echo [13/13] Building inference-dispatcher (v%V_SERVICES%)...
+echo [14/14] Building inference-dispatcher (v%V_SERVICES%)...
 if not exist "%ROOT%..\scripts\inference-dispatcher" (
     echo ERROR: %ROOT%..\scripts\inference-dispatcher not found. 1>&2
     echo        The Inference Demo client lives at scripts\inference-dispatcher 1>&2
@@ -198,8 +210,9 @@ copy /y "%ROOT%nvpair-ui-broker\nvpair-ui-broker.exe" "%BIN_OUT%\nvpair-ui-broke
 copy /y "%ROOT%nvpair-cluster-manager\nvpair-cluster-manager.exe" "%BIN_OUT%\nvpair-cluster-manager.exe" >nul || goto :fail
 copy /y "%ROOT%nvpair-job-scheduler\nvpair-job-scheduler.exe" "%BIN_OUT%\nvpair-job-scheduler.exe" >nul || goto :fail
 copy /y "%ROOT%nvpair-tui\nvpair-tui.exe" "%BIN_OUT%\nvpair-tui.exe" >nul || goto :fail
-REM Beside the binaries it is not one of: nvpair-tui resolves the broker next to
-REM its own executable, and the demo finds this the same way.
+copy /y "%ROOT%nvpair-service\nvpair-service.exe" "%BIN_OUT%\nvpair-service.exe" >nul || goto :fail
+REM Beside the binaries it is not one of: nvpair-tui resolves nvpair-service
+REM next to its own executable, and the demo finds this the same way.
 copy /y "%ROOT%..\scripts\inference-dispatcher\inference-dispatcher.exe" "%BIN_OUT%\inference-dispatcher.exe" >nul || goto :fail
 
 echo.
@@ -219,6 +232,7 @@ echo  UI Broker:        %BIN_OUT%\nvpair-ui-broker.exe
 echo  Cluster Mgr:      %BIN_OUT%\nvpair-cluster-manager.exe
 echo  Job Scheduler:    %BIN_OUT%\nvpair-job-scheduler.exe
 echo  TUI:              %BIN_OUT%\nvpair-tui.exe
+echo  Service:          %BIN_OUT%\nvpair-service.exe
 echo.
 
 REM Surface the services version to any caller (e.g. installer_build.bat) so

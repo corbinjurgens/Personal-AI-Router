@@ -153,6 +153,49 @@ func TestClientDeliversNotifications(t *testing.T) {
 	}
 }
 
+func TestNotificationFilterConsumesMatchingFrames(t *testing.T) {
+	c1, c2 := net.Pipe()
+	t.Cleanup(func() {
+		c1.Close()
+		c2.Close()
+	})
+	client := NewClient(c1, c1)
+	consumed := make(chan string, 1)
+	client.SetNotificationFilter(func(m *Message) bool {
+		if m.Method == "service/log" {
+			consumed <- string(m.Params)
+			return true
+		}
+		return false
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go client.Run(ctx)
+
+	server := NewCodec(c2, c2)
+	go func() {
+		_ = server.Write(&Message{JSONRPC: "2.0", Method: "service/log", Params: json.RawMessage(`{"text":"x"}`)})
+		_ = server.Write(&Message{JSONRPC: "2.0", Method: "app:ready", Params: json.RawMessage(`{}`)})
+	}()
+
+	select {
+	case got := <-consumed:
+		if got != `{"text":"x"}` {
+			t.Fatalf("filter saw %s", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("filter never ran")
+	}
+	select {
+	case msg := <-client.Notifications():
+		if msg.Method != "app:ready" {
+			t.Fatalf("first queued notification = %s; the filtered one leaked", msg.Method)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("unfiltered notification not delivered")
+	}
+}
+
 func TestClientDisconnectClosesNotifications(t *testing.T) {
 	client, _, srv := newPair(t)
 	srv.Close() // broker drops the connection -> client read loop hits EOF

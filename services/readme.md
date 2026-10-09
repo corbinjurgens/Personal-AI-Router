@@ -43,7 +43,7 @@ see the [root README](../README.md#what-is-supported).
 
 ## Architecture
 
-This tree builds twelve Go binaries. `nvpair-ui-broker` is the parent service and supervises the workers, all spawned at startup — only the scanner is required, and a missing binary for any other leaves the broker running without that capability. `nvpair-proxy` is one worker process that fronts every enabled engine, hosting a facade for each. `nvpair-tui` is a terminal client that launches and supervises its own broker rather than being supervised. Processes communicate via newline-delimited JSON-RPC 2.0 over stdio or, optionally, a Unix socket / Windows named pipe.
+This tree builds thirteen Go binaries. `nvpair-ui-broker` is the parent service and supervises the workers, all spawned at startup — only the scanner is required, and a missing binary for any other leaves the broker running without that capability. `nvpair-proxy` is one worker process that fronts every enabled engine, hosting a facade for each. `nvpair-service` is the per-user, long-running owner of the broker: clients attach to it over a local socket or named pipe and detach without stopping anything. `nvpair-tui` is a terminal client of that service, starting it when it is not running. The desktop app still launches its own broker for now. Processes communicate via newline-delimited JSON-RPC 2.0 over stdio or, optionally, a Unix socket / Windows named pipe.
 
 | Binary | Role |
 | --- | --- |
@@ -58,7 +58,8 @@ This tree builds twelve Go binaries. `nvpair-ui-broker` is the parent service an
 | `nvpair-node-settings` | Typed key-value store for per-node preferences. |
 | `nvpair-cluster-manager` | Node identity, PIN pairing, and the trusted-node store. |
 | `nvpair-job-scheduler` | Responsive scheduler combining total node queue depth across engines with smoothed GPU pressure. |
-| `nvpair-tui` | Terminal interface for headless and SSH operation; launches and supervises its own broker. |
+| `nvpair-service` | Per-user owner of `nvpair-ui-broker`. Restarts it if it dies, multiplexes any number of clients onto its stdio over `<appdir>/service.sock` or a per-user named pipe, and keeps running after they detach. Also registers itself to start at login (`autostart`). |
+| `nvpair-tui` | Terminal interface for headless and SSH operation; attaches to `nvpair-service`, starting it when needed. |
 
 Shared code lives in the local `shared/` Go module (imported as `nvpair-shared/…`, replaced via `replace nvpair-shared => ../shared`). It provides logging, wire types, JSON-RPC and IPC, discovery records, mDNS, network monitoring, stable node identity, application data paths, and cluster trust helpers.
 
@@ -91,12 +92,13 @@ nvpair-node-settings/    Per-node preferences store
 nvpair-cluster-manager/  Node pairing / trust service
 nvpair-job-scheduler/    Cluster job scheduler
 nvpair-tui/              Terminal interface for headless / SSH operation
+nvpair-service/          Per-user service that owns the broker for its clients
 shared/                   Shared Go module (nvpair-shared/…)
 eap-noob/                 EAP-NOOB implementation used by cluster pairing
 tests/                    Cross-process integration tests (separate go.mod)
 versions.json             Single source of truth for every component version
-build.bat                 Builds all twelve binaries (Windows)
-build.sh                  Builds all twelve binaries (Linux)
+build.bat                 Builds all thirteen binaries (Windows)
+build.sh                  Builds all thirteen binaries (Linux)
 VERSIONING.md             SemVer rules and version-bump workflow
 ```
 
@@ -126,7 +128,7 @@ On Linux and macOS:
 ./build.sh
 ```
 
-Both scripts read `versions.json`, build all twelve Go binaries with `-X main.Version=…` ldflags, and stage them together in `services/build/bin/`.
+Both scripts read `versions.json`, build all thirteen Go binaries with `-X main.Version=…` ldflags, and stage them together in `services/build/bin/`.
 
 Do **not** build individual components by hand without also copying their binaries into `build/bin/`: the broker will silently keep using the older binary there.
 
@@ -139,8 +141,10 @@ come from the
 Normal installations launch the bundled UI, which starts the broker from the same
 installation directory.
 
-To drive a services-only build interactively, run `nvpair-tui` — it launches and
-supervises its own broker, so nothing else needs to be running. See
+To drive a services-only build interactively, run `nvpair-tui` — it attaches to
+`nvpair-service`, starting it (and through it the broker) when it is not
+running, so nothing else needs to be running. Quitting the TUI leaves the
+service running; `nvpair-service stop` or `nvpair-tui --stop-service` stops it. See
 [Using the PAIR terminal interface](../docs/terminal-interface.mdx).
 
 For backend development or direct API access, launch the broker yourself; it
@@ -201,7 +205,7 @@ cd shared
 go test ./...
 ```
 
-**Every one of the twelve binaries has tests**, as do `shared/` and
+**Every one of the thirteen binaries has tests**, as do `shared/` and
 `eap-noob/`. Depth varies with how much behaviour a component carries:
 `nvpair-engine-manager` and `nvpair-cluster-manager` have the largest suites,
 while a component with one test file may still hold twenty test functions in it.
