@@ -34,6 +34,10 @@ type Client struct {
 
 	notifications chan *Message
 
+	// filter, when set, sees each notification before it is queued and keeps
+	// it off the channel by returning true.
+	filter func(*Message) bool
+
 	closeOnce sync.Once
 	closeErr  error
 	done      chan struct{}
@@ -54,6 +58,11 @@ func NewClient(r io.Reader, w io.Writer) *Client {
 // notifications such as app:ready, errors:update, discovery:nodes-changed).
 // The channel is closed when Run returns.
 func (c *Client) Notifications() <-chan *Message { return c.notifications }
+
+// SetNotificationFilter installs a hook that sees every notification before
+// it is queued; returning true consumes it. It must be called before Run. The
+// hook runs on the read loop, so it must not block.
+func (c *Client) SetNotificationFilter(filter func(*Message) bool) { c.filter = filter }
 
 // Run drives the read loop until the stream closes or ctx is cancelled.
 // On exit it unblocks every pending Call and closes the notifications
@@ -84,6 +93,9 @@ func (c *Client) Run(ctx context.Context) error {
 		case msg.IsResponse():
 			c.deliverResponse(msg)
 		case msg.IsNotification():
+			if c.filter != nil && c.filter(msg) {
+				continue
+			}
 			select {
 			case c.notifications <- msg:
 			case <-ctx.Done():

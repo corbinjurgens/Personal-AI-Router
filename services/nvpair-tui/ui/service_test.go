@@ -368,7 +368,7 @@ func armedResetView(t *testing.T, client *rpc.Client) *serviceView {
 	t.Helper()
 	v := newServiceView(client)
 	for i, it := range v.items {
-		if it.destructive {
+		if it.action == actionReset {
 			v.cursor = i
 			v.activate()
 			return v
@@ -486,7 +486,7 @@ func TestResetHoldsTheKeyboard(t *testing.T) {
 	// A second confirmation must not start a parallel removal.
 	v.cursor = 0
 	for i, it := range v.items {
-		if it.destructive {
+		if it.action == actionReset {
 			v.cursor = i
 		}
 	}
@@ -503,7 +503,7 @@ func TestResetRequiresConfirmation(t *testing.T) {
 	client, _ := resetBroker(t, `{"engines":[]}`)
 	v := newServiceView(client)
 	for i, it := range v.items {
-		if it.destructive {
+		if it.action == actionReset {
 			resetIdx = i
 			break
 		}

@@ -10,18 +10,22 @@ machine over SSH**, where the bundled graphical UI cannot run. That is its
 purpose: it is an operations tool for hosts without a desktop, not a replacement
 for the graphical UI, and it does not cover every operation the desktop does.
 
-It spawns and owns its own `nvpair-ui-broker` child over stdio; the broker in turn
-supervises the worker subprocesses, so `nvpair-tui` drives one host on its own.
+It attaches to [`nvpair-service`](../nvpair-service/README.md), the per-user
+process that owns `nvpair-ui-broker`, and starts that service detached when it is
+not running; the broker in turn supervises the worker subprocesses. Quitting the
+TUI detaches and leaves the service, and the inference it serves, running.
+Stopping the service is an explicit action (`Q`, or `--stop-service`).
 
 This file is the component reference. For task-oriented usage instructions, see
 [Using the PAIR terminal interface](../../docs/terminal-interface.mdx).
 
 ## What it does
 
-`nvpair-tui` is a JSON-RPC 2.0 client of `nvpair-ui-broker` (newline-delimited
-JSON over the broker's stdin/stdout). It launches the broker, consumes its
-notification stream, and renders a tabbed, keyboard-driven dashboard built
-with [Bubble Tea](https://github.com/charmbracelet/bubbletea).
+`nvpair-tui` is a JSON-RPC 2.0 client of `nvpair-ui-broker`, reached through
+`nvpair-service` (newline-delimited JSON over the service's Unix socket or named
+pipe, which the service multiplexes onto the broker's stdio). It consumes the
+broker's notification stream and renders a tabbed, keyboard-driven dashboard
+built with [Bubble Tea](https://github.com/charmbracelet/bubbletea).
 
 The tab set is machine-first: a node is the unit an operator reasons about, so
 everything specific to one machine hangs off its row rather than living in a tab
@@ -31,9 +35,9 @@ of its own.
 | --- | --- |
 | **Nodes** | Every machine PAIR knows about — discovered, added by hand, or paired into the cluster — merged into one table. Reachability (`STATUS`) and membership (`CLUSTER`) are separate columns because they are independent facts. `enter` opens the node's detail screen; `p` pairs, `n` pairs by address, `f` finds by address, `c` cancels a pairing request you sent, `r` removes — un-pairing a member asks you to confirm, dropping a hand-added entry does not — `a`/`d` answer an inbound pairing request, `l` leaves the cluster (with a confirmation), `/` filters by name or address. The keys follow the words on screen: everything here is "pair", so `p` starts one and `a` accepts one. A filtered table says so, and the cluster summary still counts every node rather than the visible ones. |
 | **Jobs** | Inference work across the cluster (`workloads:get-initial` plus the live `workloads:upsert` / `workloads:remove` stream), headed by the proxy endpoints local clients connect to. `FROM` and `RAN ON` are the job's `originatedFrom` and `scheduledOn` nodes. `a` toggles finished work. `t` starts or stops the Inference Demo — a sixty-second burst of synthetic traffic through those endpoints, which is why it lives here rather than with the service controls: the ports it needs are already on this tab and the jobs it produces land in the table below. |
-| **Service** | Broker version and uptime (`ping`), a row per supervised worker derived from `supervisor:subprocess-crashed:*` errors, the cluster name, the fleet log level (a picker over the four `applog` levels), and a confirmed data reset. The reset uninstalls the engines PAIR installed before it quits and deletes the data directory — engine files live outside that directory when a vendor installer chose their location — and keeps every engine's downloaded models. Ports are not here — they live on the node detail screen beside the engine each one serves. `force-ports` and `cluster-auto-sync` are persisted by `nvpair-node-settings` but not offered: nothing currently acts on either. |
+| **Service** | Broker version and uptime (`ping`), a row per supervised worker derived from `supervisor:subprocess-crashed:*` errors, the cluster name, the fleet log level (a picker over the four `applog` levels), a confirmed stop of the service (the same as `Q`), and a confirmed data reset. The reset uninstalls the engines PAIR installed, stops the service, and deletes the data directory — engine files live outside that directory when a vendor installer chose their location — and keeps every engine's downloaded models. Ports are not here — they live on the node detail screen beside the engine each one serves. `force-ports` and `cluster-auto-sync` are persisted by `nvpair-node-settings` but not offered: nothing currently acts on either. |
 | **Errors** | The service-error datastore (`errors:get-initial` plus live `errors:update`); `c` clears the selected entry. Only entries this node reported are clearable: `errors:clear` is delete-by-id on the receiving node and cross-node propagation is unbuilt (`shared/errors` stamps `ClearedBy` for it and ignores it), so clearing a peer's entry is reverted by the next sync. The broker acknowledges the relay rather than the outcome, so the reply cannot be used to detect it — the key is withdrawn for a peer's entry instead, naming the node to clear it from. Node ids are resolved to names, and a line under the table carries the selected entry's engine, operation, model, and suggested action. |
-| **Logs** | The broker's and workers' stderr, with a substring filter (`/`), a follow toggle (`t`, for tail — `f` belongs to the viewport's paging), and save-to-file (`s`). |
+| **Logs** | The broker's and workers' stderr, relayed by the service as `service/log` (lines from before this session attached are in `<appdir>/logs/broker.log`), with a substring filter (`/`), a follow toggle (`t`, for tail — `f` belongs to the viewport's paging), and save-to-file (`s`). |
 
 Diagnostics come last, errors before logs, which is the order you consult them
 in. The **Errors** tab carries its active count in its own label (`Errors (2)`),
@@ -73,8 +77,8 @@ component's own version and the services suite version describe parts of the
 build and mean nothing to the comparison. Drafts and prereleases are ignored.
 
 Awareness only: nothing is downloaded or installed, because this client resolves
-the broker beside its own executable and that broker spawns the worker set from
-the same directory — replacing "the client" means swapping every binary
+the service beside its own executable, the service runs the broker from the same
+directory, and that broker spawns the worker set from it too — replacing "the client" means swapping every binary
 atomically while they serve inference, and a partial swap leaves a new client
 driving old workers across a JSON-RPC contract that may have changed. Silent on
 failure, skipped for an unstamped build, and disabled by
@@ -121,7 +125,11 @@ does not carry, and only the open node is polled.
 - `tab` / `shift+tab` or the digits `1`-`5` — switch tabs
 - `?` — full help
 - `ctrl+x` — dismiss the update notice, while one is showing
-- `q` / `ctrl+c` — quit (the broker is shut down cleanly on exit)
+- `q` / `ctrl+c` — quit; the service, the broker, and inference keep running
+- `Q` — stop the service and quit, after a `y` confirmation shown in the notice
+  row. The service stops the broker cleanly (the broker tears its workers down
+  proxy first, then engines), so inference on this machine stops for every
+  client
 - Per-tab keys appear in the footer. While editing a field (port, PIN, address,
   model name) every key goes to the field until `enter` or `esc`.
 
@@ -130,12 +138,15 @@ move within content, and the node detail screen needs them for its panes.
 
 ## Running
 
-`nvpair-tui` resolves `nvpair-ui-broker` next to its own executable (the
-installed `bin/` layout). Override with `--broker-path`:
+`nvpair-tui` attaches to the running `nvpair-service`. When none is running it
+starts `nvpair-service` from next to its own executable (the installed `bin/`
+layout), detached, and waits up to ten seconds for it to answer. Override the
+binary with `--service-path`:
 
 ```sh
-nvpair-tui                                   # broker is a sibling binary
-nvpair-tui --broker-path /opt/nvpair/bin/nvpair-ui-broker
+nvpair-tui                                   # attach, starting the service if needed
+nvpair-tui --service-path /opt/nvpair/bin/nvpair-service
+nvpair-tui --stop-service                    # stop the running service and exit
 nvpair-tui --log-level debug                 # own logging (to stderr)
 nvpair-tui --appearance light                # if the colours come out wrong
 nvpair-tui --version
@@ -143,6 +154,12 @@ nvpair-tui --version
 
 Logging goes to stderr (the broker's logs are shown inside the **Logs**
 tab, not on the terminal), so it never corrupts the full-screen UI.
+
+A service the TUI starts gets no broker arguments: the broker resolves its
+workers beside itself and inherits the environment the service was started
+with, including `NVPAIR_LOG_LEVEL`. To run the service with other broker
+arguments, start it yourself first (`nvpair-service -- <broker args>`) or
+register it with `nvpair-service autostart enable`.
 
 ### Colours
 
@@ -161,8 +178,8 @@ It is therefore forced at startup instead, while stdin is still ours, and the
 result cached behind lipgloss's `sync.Once`.
 
 That query costs nothing on a terminal that answers and five seconds on one
-that does not, since termenv's timeout is a constant. It runs alongside broker
-startup for that reason, and is joined immediately before the first render. It
+that does not, since termenv's timeout is a constant. It runs alongside
+attaching to the service for that reason, and is joined immediately before the first render. It
 cannot be abandoned early: the query owns the terminal until it returns.
 
 termenv declines to ask at all under `screen`, `tmux`, or `TERM=dumb`, which can
@@ -173,20 +190,23 @@ be attached to several terminals at once. Those fall back to assuming dark, and
 
 ```
 nvpair-tui (this process)
-├── supervisor.go      spawn/own nvpair-ui-broker over stdio, graceful teardown
+├── servicelink.go     attach to (or start) nvpair-service, relay service/log, stop it
 ├── rpc/               JSON-RPC 2.0 codec + id-matching client
 └── ui/                Bubble Tea root model, one file per tab, plus:
     ├── table.go       shared column layout (accounts for bubbles' cell padding)
     ├── toast.go       transient status lines that expire on their own
     ├── nodesmodel.go  merges the discovery, cluster, and manual feeds
     └── nodedetail.go  the per-node engines + models drill-down
-        │ stdio (newline-delimited JSON-RPC 2.0)
+        │ Unix socket / named pipe (newline-delimited JSON-RPC 2.0)
         ▼
-   nvpair-ui-broker ──► nvpair-node-scanner, nvpair-proxy, nvpair-errors, ... (workers)
+   nvpair-service ──stdio──► nvpair-ui-broker ──► nvpair-node-scanner, nvpair-proxy, ... (workers)
 ```
 
-The supervisor sends `shutdown` and closes the broker's stdin on exit; the
-broker tears its own workers down, so quitting leaves no orphans.
+Quitting closes the connection, which the service treats as a detach. `Q` and
+`--stop-service` send `service/stop` instead: the service sends the broker
+`shutdown`, closes its stdin, and waits for it to tear its own workers down
+before exiting, so stopping leaves no orphans. The data reset stops the service
+the same way and deletes the data directory only once the service has gone.
 
 ## Build & test
 
