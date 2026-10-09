@@ -56,21 +56,12 @@ func normalizeSlashPath(path string) string {
 // lmsDiskPathsToDelete returns absolute filesystem paths for every on-disk file
 // that matches the requested model identifier.
 func (e *Executor) lmsDiskPathsToDelete(ctx context.Context, cli, modelsDir, model string) ([]string, error) {
-	cli = strings.TrimSpace(cli)
-	if cli == "" {
+	if strings.TrimSpace(cli) == "" {
 		return nil, fmt.Errorf("lms-disk-path: runtime cli is not configured")
 	}
-	out, err := e.runCommandOutput(ctx, []string{expandPath(cli), "ls", "--json"})
+	entries, err := e.lmsList(ctx, cli)
 	if err != nil {
-		return nil, fmt.Errorf("lms ls --json: %w", err)
-	}
-	out = strings.TrimSpace(out)
-	if out == "" {
-		return nil, nil
-	}
-	var entries []lmsListEntry
-	if err := json.Unmarshal([]byte(out), &entries); err != nil {
-		return nil, fmt.Errorf("lms ls --json: parse: %w", err)
+		return nil, err
 	}
 	modelsDir = expandPath(modelsDir)
 	seen := make(map[string]bool)
@@ -87,4 +78,26 @@ func (e *Executor) lmsDiskPathsToDelete(ctx context.Context, cli, modelsDir, mod
 		paths = append(paths, full)
 	}
 	return paths, nil
+}
+
+// lmsList runs `lms ls --json` and parses its rows. Model deletion and model
+// copy both map logical ids to on-disk paths through it.
+func (e *Executor) lmsList(ctx context.Context, cli string) ([]lmsListEntry, error) {
+	cli = strings.TrimSpace(cli)
+	if cli == "" {
+		return nil, fmt.Errorf("LM Studio's lms CLI is not configured")
+	}
+	out, err := e.runCommandOutput(ctx, []string{expandPath(cli), "ls", "--json"})
+	if err != nil {
+		return nil, fmt.Errorf("lms ls --json: %w", err)
+	}
+	out = strings.TrimSpace(out)
+	if out == "" {
+		return nil, nil
+	}
+	var entries []lmsListEntry
+	if err := json.Unmarshal([]byte(out), &entries); err != nil {
+		return nil, fmt.Errorf("lms ls --json: parse: %w", err)
+	}
+	return entries, nil
 }
