@@ -26,6 +26,11 @@ type workloadCancelParams struct {
 	OriginatedFrom string `json:"originatedFrom"`
 	WorkloadID     string `json:"workloadId"`
 	Regenerate     bool   `json:"regenerate,omitempty"`
+	// Engine and RunID narrow the target: workload ids are per-engine counters
+	// that restart with the proxy, so the id alone can name two jobs. The proxy
+	// refuses an ambiguous id rather than guess.
+	Engine string `json:"engine,omitempty"`
+	RunID  string `json:"runId,omitempty"`
 }
 
 // handleWorkloadsCancel answers a client's workloads:cancel with {ok}. On the
@@ -70,7 +75,14 @@ func (b *Broker) cancelLocalWorkload(p workloadCancelParams) (bool, error) {
 	if pp == nil {
 		return false, fmt.Errorf("proxy not available")
 	}
-	data, err := json.Marshal(map[string]any{"workloadId": p.WorkloadID, "regenerate": p.Regenerate})
+	req := map[string]any{"workloadId": p.WorkloadID, "regenerate": p.Regenerate}
+	if p.Engine != "" {
+		req["engine"] = p.Engine
+	}
+	if p.RunID != "" {
+		req["runId"] = p.RunID
+	}
+	data, err := json.Marshal(req)
 	if err != nil {
 		return false, err
 	}

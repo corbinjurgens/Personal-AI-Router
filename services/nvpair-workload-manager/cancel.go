@@ -31,7 +31,11 @@ type cancelParams struct {
 	OriginatedFrom string `json:"originatedFrom"`
 	WorkloadID     string `json:"workloadId"`
 	Regenerate     bool   `json:"regenerate,omitempty"`
-	CancelID       string `json:"cancelId,omitempty"`
+	// Engine and RunID narrow the target: workload ids are per-engine counters
+	// that restart with the proxy, so the id alone can name two jobs.
+	Engine   string `json:"engine,omitempty"`
+	RunID    string `json:"runId,omitempty"`
+	CancelID string `json:"cancelId,omitempty"`
 }
 
 func parseCancel(params json.RawMessage) (cancelParams, error) {
