@@ -22,6 +22,7 @@ nvpair-cluster-manager/nvpair-cluster-manager
 nvpair-ui-broker/nvpair-ui-broker
 nvpair-job-scheduler/nvpair-job-scheduler
 nvpair-tui/nvpair-tui
+nvpair-service/nvpair-service
 
 # Staged binary bundle produced by build.bat / build.sh (all worker binaries
 # copied here for packaging). Windows .exe files are already ignored above; this
