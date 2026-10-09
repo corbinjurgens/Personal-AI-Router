@@ -30,4 +30,16 @@ export interface Workload {
     completedAt: number | null
     error: string | null
     requesterId: string | null
+    /**
+     * The proxy run the workload belongs to. Workload ids are per-engine
+     * counters that restart with the proxy, so cancelling needs this to pick
+     * the job when two share an id. Absent on records that predate it.
+     */
+    runId?: string
+    /**
+     * What the caller asked for (for example the tier `weak`) when the router
+     * resolved it to the concrete `model`. Absent when the request named the
+     * model itself.
+     */
+    requestedModel?: string
 }

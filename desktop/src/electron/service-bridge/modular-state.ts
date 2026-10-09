@@ -380,6 +380,10 @@ function parseWorkload(value: JsonValue | undefined): Workload | null {
     }
     const scheduledOn = nullableStringValue(obj.scheduledOn)
     if (scheduledOn) workload.scheduledOn = scheduledOn
+    const runId = stringValue(obj.runId)
+    if (runId) workload.runId = runId
+    const requestedModel = stringValue(obj.requestedModel)
+    if (requestedModel) workload.requestedModel = requestedModel
     return workload
 }
 
@@ -421,7 +425,9 @@ function sameWorkload(left: Workload, right: Workload): boolean {
         left.startedAt === right.startedAt &&
         left.completedAt === right.completedAt &&
         left.error === right.error &&
-        left.requesterId === right.requesterId
+        left.requesterId === right.requesterId &&
+        left.runId === right.runId &&
+        left.requestedModel === right.requestedModel
     )
 }
 
