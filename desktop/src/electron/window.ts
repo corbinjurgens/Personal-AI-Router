@@ -8,6 +8,7 @@ import { is } from '@electron-toolkit/utils'
 import type { OverviewCommand, OverviewMessage } from '@/shared/types/overview'
 import { createStructuredLogger } from '@/shared/utils/log'
 import { openExternalSafe } from '@/electron/open-external'
+import { trackWindowVisibility } from '@/electron/window-visibility'
 
 const MIN_DIMENSION = 420
 
@@ -310,6 +311,7 @@ export function createOverviewWindow(): void {
     }
 
     revealWhenReady(window, 'overview', load)
+    trackWindowVisibility(window)
     guardExternalNavigation(window)
     attachWebContentsDiagnostics(window)
     attachMaximizedStateForwarding(window)
@@ -348,6 +350,7 @@ export function createTrayWindow(): BrowserWindow {
         trayWindow = null
     })
 
+    trackWindowVisibility(trayWindow)
     guardExternalNavigation(trayWindow)
     attachWebContentsDiagnostics(trayWindow)
 

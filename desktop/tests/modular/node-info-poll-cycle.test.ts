@@ -54,7 +54,11 @@ vi.mock('@/shared/utils/log', () => {
     }
 })
 
-import { startNodeInfoPoller, stopNodeInfoPoller } from '@/electron/service-bridge/node-info-poller'
+import {
+    setNodeInfoPollerVisible,
+    startNodeInfoPoller,
+    stopNodeInfoPoller
+} from '@/electron/service-bridge/node-info-poller'
 
 const fetchMock = vi.fn<typeof fetch>()
 
@@ -122,10 +126,12 @@ describe('node info polling', () => {
         fetchMock.mockReset()
         mocks.state.getNodeInfoPollTargets.mockReturnValue([])
         mocks.logged.length = 0
+        setNodeInfoPollerVisible(true)
     })
 
     afterEach(() => {
         stopNodeInfoPoller()
+        setNodeInfoPollerVisible(false)
         vi.unstubAllGlobals()
         vi.useRealTimers()
     })

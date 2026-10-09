@@ -594,6 +594,38 @@ function sameInferenceHardwareIds(left?: string[], right?: string[]): boolean {
     return sameStringList(left, right)
 }
 
+/**
+ * Whether only live readings differ: GPU and CPU utilization, VRAM and memory
+ * in use. Everything else node-info reports is hardware that a node card, the
+ * discovery list, and engine status are built from; these readings appear
+ * only in `metrics:update`.
+ */
+function sameHardware(
+    node: ModularNode,
+    gpus: ModularGpu[],
+    cpu: ModularCpu | null,
+    memory: ModularMemory | null,
+    inferenceHardwareIds: string[] | undefined
+): boolean {
+    if (node.gpus.length !== gpus.length) return false
+    for (let index = 0; index < gpus.length; index += 1) {
+        const left = node.gpus[index]
+        const right = gpus[index]
+        if (left.name !== right.name || left.vramBytes !== right.vramBytes) return false
+    }
+    if (!node.cpu || !cpu) {
+        if (node.cpu !== cpu) return false
+    } else if (node.cpu.name !== cpu.name || node.cpu.cores !== cpu.cores) {
+        return false
+    }
+    if (!node.memory || !memory) {
+        if (node.memory !== memory) return false
+    } else if (node.memory.totalBytes !== memory.totalBytes) {
+        return false
+    }
+    return sameInferenceHardwareIds(node.inferenceHardwareIds, inferenceHardwareIds)
+}
+
 function sameTelemetry(
     node: ModularNode,
     gpus: ModularGpu[],
@@ -1264,8 +1296,14 @@ class ModularBridgeState {
         const cpu = cpuValue(obj.cpu)
         const memory = memoryValue(obj.memory)
         const inferenceHardwareIds = optionalStringArrayValue(obj.inference_hardware_ids)
-        if (node.nodeInfoUp && sameTelemetry(node, gpus, cpu, memory, inferenceHardwareIds)) {
-            emitBridgePush('metrics:update', toMetrics(node))
+        // A change in live readings alone is stored and pushed as metrics only.
+        // Routing it through upsertNode would also push the node card, the whole
+        // discovery list, and every engine's status for this node on every poll
+        // tick that a utilization figure moved, none of which carry the readings.
+        if (node.nodeInfoUp && sameHardware(node, gpus, cpu, memory, inferenceHardwareIds)) {
+            const next: ModularNode = { ...node, gpus, cpu, memory }
+            this.nodes.set(nodeId, next)
+            emitBridgePush('metrics:update', toMetrics(next))
             return
         }
 
