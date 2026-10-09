@@ -54,10 +54,10 @@ const THRESHOLD_RANK: Record<ModularLogLevel, number> = { debug: 0, info: 1, war
  * Whether a classified service line clears the configured log level and so
  * belongs in the log file.
  *
- * The services already filter their own stderr by this level, so in practice
- * this gates the broker's stdout: every JSON-RPC frame classifies as `verbose`,
- * and writing each one synchronously on the main thread is a cost no one asked
- * for at the default level. Choosing `debug` brings the full protocol trace back.
+ * The services already filter their own stderr by this level, and JSON-RPC
+ * frames on stdout are not emitted at all below `debug` (see
+ * `JsonRpcSubprocess.setProtocolTrace`), so in practice this gates stdout lines
+ * that are not protocol frames, which classify as `verbose`.
  */
 export function isServiceLogLevelEnabled(
     level: ServiceLogLevel,
