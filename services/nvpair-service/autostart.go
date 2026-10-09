@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 )
 
@@ -37,7 +38,14 @@ type autostartEntry struct {
 // with those broker arguments.
 func runAutostart(args []string, out io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("usage: nvpair-service autostart enable|disable|status [service flags] [-- broker args]")
+		return errors.New("usage: nvpair-service autostart enable|disable|status [--systemd] [service flags] [-- broker args]")
+	}
+	args, useSystemd := extractSystemdFlag(args)
+	if useSystemd && runtime.GOOS != "linux" {
+		return errors.New("--systemd is only supported on Linux")
+	}
+	if len(args) == 0 {
+		return errors.New("usage: nvpair-service autostart enable|disable|status [--systemd] [service flags] [-- broker args]")
 	}
 	location, err := autostartLocation()
 	if err != nil {
@@ -55,7 +63,11 @@ func runAutostart(args []string, out io.Writer) error {
 		if resolved, err := filepath.EvalSymlinks(exe); err == nil {
 			exe = resolved
 		}
-		if err := writeAutostart(autostartEntry{Program: exe, Args: args[1:]}); err != nil {
+		entry := autostartEntry{Program: exe, Args: args[1:]}
+		if useSystemd {
+			return enableSystemd(entry, out)
+		}
+		if err := writeAutostart(entry); err != nil {
 			return err
 		}
 		fmt.Fprintf(out, "autostart enabled: %s\n", location)
@@ -67,7 +79,12 @@ func runAutostart(args []string, out io.Writer) error {
 		}
 		if removed {
 			fmt.Fprintf(out, "autostart disabled: removed %s\n", location)
-		} else {
+		}
+		unitRemoved, err := disableSystemd(out)
+		if err != nil {
+			return err
+		}
+		if !removed && !unitRemoved {
 			fmt.Fprintln(out, "autostart was not enabled")
 		}
 	case "status":
@@ -75,15 +92,39 @@ func runAutostart(args []string, out io.Writer) error {
 		if err != nil {
 			return err
 		}
-		if !ok {
-			fmt.Fprintln(out, "autostart: disabled")
-			return nil
+		if ok {
+			fmt.Fprintf(out, "autostart: enabled (%s)\n  %s\n", location, command)
 		}
-		fmt.Fprintf(out, "autostart: enabled (%s)\n  %s\n", location, command)
+		unitOK, err := statusSystemd(out)
+		if err != nil {
+			return err
+		}
+		if !ok && !unitOK {
+			fmt.Fprintln(out, "autostart: disabled")
+		}
 	default:
 		return fmt.Errorf("unknown autostart command %q: use enable, disable, or status", args[0])
 	}
 	return nil
+}
+
+// extractSystemdFlag removes a --systemd flag from the service-flag part of
+// args (before any "--") and reports whether it was present.
+func extractSystemdFlag(args []string) ([]string, bool) {
+	found := false
+	out := make([]string, 0, len(args))
+	for i, a := range args {
+		if a == "--" {
+			out = append(out, args[i:]...)
+			break
+		}
+		if a == "--systemd" || a == "-systemd" {
+			found = true
+			continue
+		}
+		out = append(out, a)
+	}
+	return out, found
 }
 
 // desktopEntry renders an XDG autostart .desktop file for e.

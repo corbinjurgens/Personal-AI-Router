@@ -76,7 +76,7 @@ service the same way `service/stop` does; `SIGHUP` is ignored.
 ### Autostart
 
 ```sh
-nvpair-service autostart enable [service flags] [-- broker args]
+nvpair-service autostart enable [--systemd] [service flags] [-- broker args]
 nvpair-service autostart status
 nvpair-service autostart disable
 ```
@@ -91,9 +91,26 @@ arguments after `enable`, and takes effect at the next login:
 | Linux | `$XDG_CONFIG_HOME/autostart/nvpair-service.desktop` (`~/.config` when unset) |
 
 The Linux entry follows the XDG autostart specification, so it runs when a
-desktop session starts. A headless machine with no desktop session does not
-process it; there, start the service from a systemd user unit or the shell
-profile instead.
+desktop session starts. A headless machine has no desktop session to process
+it; use `--systemd` there (Linux only, an error elsewhere):
+
+```sh
+nvpair-service autostart enable --systemd [service flags] [-- broker args]
+```
+
+This writes the systemd user unit
+`$XDG_CONFIG_HOME/systemd/user/nvpair-service.service` (`~/.config` when
+unset) with `ExecStart` set to the absolute binary path plus the same flags and
+broker arguments, `Restart=on-failure`, and `WantedBy=default.target`. It then
+runs `systemctl --user daemon-reload` and
+`systemctl --user enable nvpair-service.service`. If `systemctl` is missing or
+fails, the unit file is kept and the exact commands are printed to run by hand.
+Start it now with `systemctl --user start nvpair-service.service`. A user unit
+starts at login unless lingering is on; to start at boot with no login, run
+`loginctl enable-linger $USER` once.
+
+`disable` removes whichever of the XDG entry and the unit exist (running
+`systemctl --user disable` best-effort), and `status` reports both.
 
 ## Broker supervision
 

@@ -105,7 +105,7 @@ func newRunFlags(stderr io.Writer) (*flag.FlagSet, *runOptions, func() slog.Leve
 	fs.Usage = func() {
 		fmt.Fprintln(stderr, "usage: nvpair-service [flags] [-- broker args]")
 		fmt.Fprintln(stderr, "       nvpair-service status | stop")
-		fmt.Fprintln(stderr, "       nvpair-service autostart enable [flags] [-- broker args] | disable | status")
+		fmt.Fprintln(stderr, "       nvpair-service autostart enable [--systemd] [flags] [-- broker args] | disable | status")
 		fs.PrintDefaults()
 	}
 	return fs, opts, resolveLevel, levelSet
