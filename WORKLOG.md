@@ -44,7 +44,8 @@ and their branches were merged here.
 | `e35a283` (merge) | proxy | Destination admission, tiers across nodes and engines, routing headers and `requestedModel`, `workload/cancel` with regenerate. |
 | `92ce606` | service | `nvpair-service call <method> [json]`; short socket path fallback when the app data path is too long for a Unix socket. |
 | `e5806b4`..`fd95cdf` | desktop | Electron attaches to `nvpair-service` (endpoint mirror of servicectl, connect-or-start, socket JSON-RPC client with reconnect, `service/log` redacted into logs); quit detaches; tray pause toggle and "Stop background service and quit"; one-time manual-node migration, store and replay removed. Sonnet agent; 379 desktop tests pass. |
-| *(this commit)* | docs | `TESTING_ON_PC.md`, `FORK.md` status, this entry. |
+| `ed6ed6d`, `93f5a01` | docs | `TESTING_ON_PC.md`, `FORK.md` status, this entry, AGENTS.md fork notice. |
+| `5910e7f`, `370231c` | desktop | Job cancel and cancel-and-regenerate actions; `requestedModel → model` on jobs; Settings "Routing & resources" tab (node picker, pause/resume, policy JSON editor). Sonnet agent; 392 desktop tests pass. |
 
 ### Verification
 
@@ -80,7 +81,9 @@ and their branches were merged here.
 
 ### Next up
 
-- Desktop UI for policy and tiers, cancel, remote pause and model copy.
+- Test on real PCs (TESTING_ON_PC.md).
+- Desktop model-copy screen; live availability in the Routing tab; advertise
+  paused nodes to peers; automatic memory estimates.
 
 ---
 

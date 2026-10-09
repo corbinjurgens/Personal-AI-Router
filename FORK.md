@@ -34,9 +34,7 @@ Each finished item below names its commit; the log has the full detail.
 there. None of it has run on Windows, macOS, a GPU or two real machines yet.
 [TESTING_ON_PC.md](TESTING_ON_PC.md) is the checklist for that. The technical
 contract is [FORK_DESIGN.md](FORK_DESIGN.md). The biggest remaining gap is the
-desktop UI: apart from the tray's pause toggle, the new features (policy,
-tiers, cancel, model copy) have no desktop screens yet. Use
-`nvpair-service call` for them.
+lack of a desktop screen for model copy. Use `nvpair-service call` for it.
 
 ## Phase 1: Reduce idle overhead (done, needs measuring)
 
@@ -104,7 +102,11 @@ tiers, cancel, model copy) have no desktop screens yet. Use
   (`82bbc29`).
 - [x] Manual peers by hostname (for example Tailscale) persist.
 - [x] Tray pause/resume toggle for this PC.
-- [ ] Desktop UI for policy and tiers, job cancel, remote pause and model copy.
+- [x] Desktop UI: job "Cancel" / "Cancel and run on another device", tier →
+  model shown on jobs, and a Settings "Routing & resources" tab (node picker,
+  pause/resume, policy JSON editor with validation errors) (`5910e7f`,
+  `370231c`).
+- [ ] Desktop UI for model copy (use `nvpair-service call engine:remote-copy-model`).
 
 ## Open decisions
 

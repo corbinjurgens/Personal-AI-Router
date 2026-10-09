@@ -178,8 +178,9 @@ To edit another paired PC's policy, add `"nodeId": "<its hostUuid>"` to
 
 The open items list in [FORK.md](FORK.md) is the authoritative version.
 
-- The desktop app has no screens for policy, tiers, job cancel or model copy;
-  use `nvpair-service call` for these. Pause is in the tray menu.
+- The desktop app has no model-copy screen; use `nvpair-service call`. Policy,
+  tiers and pause are in Settings → Routing & resources, and cancel is on each
+  job. The availability line there refreshes only on Reload or a toggle.
 - Paused peers are not advertised. Other PCs find out from a fast `503` and
   move on.
 - `services/versions.json` has no `nvpair-service` entry, so the service
