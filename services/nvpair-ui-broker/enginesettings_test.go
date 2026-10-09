@@ -36,6 +36,16 @@ type settingsHarness struct {
 	// launchMu guards the fixture's launch state, which a suspended
 	// engine:configure-launch mutates while the reader loop keeps serving.
 	launchMu sync.Mutex
+	// proxyCalls records the unaddressed requests the fake proxy answered,
+	// such as node/set-engine-drain, in arrival order.
+	proxyCallsMu sync.Mutex
+	proxyCalls   []policyCall
+}
+
+func (h *settingsHarness) unaddressedProxyCalls() []policyCall {
+	h.proxyCallsMu.Lock()
+	defer h.proxyCallsMu.Unlock()
+	return append([]policyCall(nil), h.proxyCalls...)
 }
 
 func newSettingsHarness(t *testing.T) *settingsHarness {
@@ -80,6 +90,11 @@ func newSettingsHarnessForEngine(t *testing.T, engine string) *settingsHarness {
 				continue
 			}
 			engine, method := engines.SplitAddressedMethod(msg.Method)
+			if engine == "" {
+				h.proxyCallsMu.Lock()
+				h.proxyCalls = append(h.proxyCalls, policyCall{method: msg.Method, params: append(json.RawMessage(nil), msg.Params...)})
+				h.proxyCallsMu.Unlock()
+			}
 			if engine == "" || method != "set-port" {
 				_ = proxyCodec.Respond(msg.ID, map[string]bool{"ok": true})
 				continue
