@@ -182,6 +182,8 @@ func TestServiceStatus(t *testing.T) {
 	h.broker()
 	c := h.dial()
 	c.notification("app:ready")
+	// The harness's readiness probe is a connection too; let its detach land.
+	waitUntil(t, "probe connection detached", func() bool { return h.svc.status().Clients == 1 })
 	r := c.call("1", "service/status", "")
 	var st statusResult
 	if err := json.Unmarshal(r.Result, &st); err != nil {
