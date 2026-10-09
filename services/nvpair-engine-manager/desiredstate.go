@@ -99,6 +99,9 @@ func (e *Executor) setDesiredEnabled(engine string, enabled bool) error {
 	if err := e.desired.set(engine, enabled); err != nil {
 		return fmt.Errorf("persist %s desired state: %w", engine, err)
 	}
+	// The broker mirrors saved intent into the proxy so admission can refuse a
+	// request for an engine saved Off instead of asking to wake it.
+	e.emitIntent()
 	return nil
 }
 
