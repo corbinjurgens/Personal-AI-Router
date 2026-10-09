@@ -61,6 +61,9 @@ type Model struct {
 	// confirmed request; the caller stops the service once the program ends.
 	confirmingStop bool
 	stopOnExit     bool
+
+	// avail is this node's pause switch, shown in the header.
+	avail availabilityState
 }
 
 // closer is a view holding something that outlives the update loop and has to
@@ -114,6 +117,12 @@ func (m Model) Init() tea.Cmd {
 	// tea.Batch drops nils, so this needs no guard.
 	cmds := []tea.Cmd{waitForNotification(m.client), waitForLog(m.logCh), uiTick(),
 		checkUpdateCmd(), updateCheckTickCmd()}
+	if m.client != nil {
+		cmds = append(cmds, policyGetCmd(m.client),
+			nodeIdentityCmd(m.client, func(id clusterIdentity, err error) tea.Msg {
+				return selfIdentityMsg{id: id}
+			}))
+	}
 	for _, v := range m.views {
 		if c := v.Init(); c != nil {
 			cmds = append(cmds, c)
@@ -172,6 +181,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.confirmingStop = true
 			m.resizeViews()
 			return m, nil
+		case key.Matches(msg, m.keys.Pause):
+			if m.avail.pending != "" || m.client == nil {
+				return m, nil
+			}
+			m.avail.pending = m.avail.toggleTarget()
+			m.avail.err = ""
+			return m, setAvailabilityCmd(m.client, m.avail.pending)
 		case key.Matches(msg, m.keys.Help):
 			m.showFullHelp = !m.showFullHelp
 			m.resizeViews()
@@ -196,7 +212,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case selfIdentityMsg, policyGetMsg, setAvailabilityMsg:
+		m.avail.update(msg)
+		return m, nil
+
 	case NotificationMsg:
+		m.avail.update(msg)
 		if msg.Msg.Method == "app:ready" {
 			m.ready = true
 			m.brokerVersion = readyVersion(msg.Msg)
@@ -482,6 +503,17 @@ func (m Model) headerView() string {
 	default:
 		status = footerStyle.Render("starting service...")
 	}
+	// The pause switch sits between the title and the service status. A failure
+	// replaces the indicator until the next attempt.
+	if m.avail.err != "" {
+		left += "  " + statusErrStyle.Render("pause failed: "+m.avail.err)
+	} else if label := m.avail.label(); label != "" {
+		style := statusOKStyle
+		if m.avail.value != availAvailable || m.avail.pending != "" {
+			style = footerStyle
+		}
+		left += "  " + style.Render(label)
+	}
 	gap := m.width - lipgloss.Width(left) - lipgloss.Width(status)
 	if gap < 1 {
 		gap = 1
@@ -547,7 +579,7 @@ func (m Model) footerView() string {
 	// Quit and help lead. The short footer is truncated from the right, and at
 	// the forty-column minimum even the shell's own keys overrun it, so the
 	// line ended "shift+tab prev …" with the way out cut off.
-	global := []key.Binding{m.keys.Quit, m.keys.Help, m.keys.NextTab, m.keys.PrevTab, m.keys.JumpTab, m.keys.StopQuit}
+	global := []key.Binding{m.keys.Quit, m.keys.Help, m.keys.NextTab, m.keys.PrevTab, m.keys.JumpTab, m.keys.Pause, m.keys.StopQuit}
 
 	// None of them while a view owns the keyboard. Each view narrows its own
 	// help to enter and esc in that state, and the footer used to prepend the

@@ -132,6 +132,7 @@ provides.
 
 The top line shows `NVPAIR` and the service state on the right:
 `starting service...`, `service ready v<version>`, or `service disconnected`.
+Beside `NVPAIR` is this node's availability: `Available`, `Pausing…`, or `Paused`.
 The second line is the numbered tab bar; when anything has gone wrong, the count
 appears on the **Errors** tab's own label. The footer shows the keys available
 where you are, starting with the ones that always work. When a newer release of
@@ -153,6 +154,7 @@ header stays on `starting service...`, the service tree did not come up, and the
 | `?` | Toggle full help |
 | `ctrl+x` | Dismiss the update notice, while one is showing |
 | `q`, `ctrl+c` | Quit; the service keeps running |
+| `P` | Pause or resume this node. A pause waits for running jobs to finish, so the header shows `Pausing…` meanwhile; a failure is shown in the header |
 | `Q` | Stop the service and quit, after a `y` confirmation |
 
 Within a table, `j` / `k` (or `↓` / `↑`) move the selection, `f` / `b` page, and
