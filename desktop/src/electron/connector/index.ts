@@ -62,6 +62,17 @@ function ensureBrokerCrashHandler(): void {
     const supervisor = getModularSupervisor()
     supervisor.setOnBrokerCrash(handleBrokerCrash)
     supervisor.setOnReady(handleSupervisorReady)
+    supervisor.setOnConnectionLost(handleConnectionLost)
+}
+
+/**
+ * The connection to the service dropped, or the service restarted the broker.
+ * The supervisor is already reconnecting; show that until the broker is ready
+ * again, when `handleSupervisorReady` flips the status back.
+ */
+function handleConnectionLost(): void {
+    if (status !== 'connected') return
+    setStatus('reconnecting')
 }
 
 function handleSupervisorReady(): void {
@@ -103,7 +114,9 @@ function enqueueConnectorRestart(options: { logServiceRestart?: boolean } = {}):
         if (options.logServiceRestart) {
             log.info({ sublevel: 'lifecycle', message: 'Service restart requested' })
         }
-        await destroyConnector()
+        // A restart restarts the service (and so the broker); detaching and
+        // reattaching would leave both running as they were.
+        await destroyConnector({ force: true })
         await initializeConnector()
     }
     const next = connectorRestartTail.then(run, run).catch((err: unknown) => {
@@ -172,16 +185,18 @@ export const restartConnector = (): Promise<void> => {
 }
 
 /**
- * Tear down the modular service processes. We always stop the subprocess tree
- * we spawned (and unconditionally when `force` is set) — the service does not
- * outlive the app.
+ * Disconnect from the modular service. A normal call only detaches, and the
+ * service keeps serving; with `force` it is asked to stop (broker first, in
+ * order) and exits. Quitting detaches. Restart, update, data wipe and the
+ * explicit stop force.
  */
 export const destroyConnector = async (options?: { force?: boolean }): Promise<void> => {
     log.info({ sublevel: 'lifecycle', message: 'Destroying connector' })
     setStatus('disconnected')
 
-    const shouldStop = options?.force || weSpawned
-    if (shouldStop) {
+    if (options?.force) {
+        await getModularSupervisor().stopService()
+    } else if (weSpawned) {
         await getModularSupervisor().stop()
     }
 
@@ -192,8 +207,8 @@ export const destroyConnector = async (options?: { force?: boolean }): Promise<v
 export const destroyConnectorSync = (): void => {
     setStatus('disconnected')
 
-    const shouldStop = weSpawned
-    if (shouldStop) {
+    // Detach only: a service that outlives the app is the point.
+    if (weSpawned) {
         void getModularSupervisor().stop()
     }
 

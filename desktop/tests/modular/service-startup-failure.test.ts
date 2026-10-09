@@ -16,7 +16,9 @@ const mocks = vi.hoisted(() => {
         }),
         start: vi.fn((): void => {}),
         waitUntilReady: vi.fn((_timeoutMs: number): Promise<void> => Promise.resolve()),
-        stop: vi.fn((): Promise<void> => Promise.resolve())
+        setOnConnectionLost: vi.fn((_callback: () => void): void => {}),
+        stop: vi.fn((): Promise<void> => Promise.resolve()),
+        stopService: vi.fn((): Promise<void> => Promise.resolve())
     }
 
     return {
@@ -71,6 +73,7 @@ describe('service startup failure handling', () => {
             (_timeoutMs: number): Promise<void> => Promise.resolve()
         )
         mocks.supervisor.stop.mockResolvedValue()
+        mocks.supervisor.stopService.mockResolvedValue()
         await destroyConnector({ force: true })
     })
 
@@ -109,5 +112,18 @@ describe('service startup failure handling', () => {
 
         expect(getConnectorStatus()).toBe('connected')
         expect(getConnectorError()).toBeUndefined()
+    })
+
+    it('detaches on a normal teardown and stops the service only when forced', async () => {
+        await initializeConnector()
+        mocks.supervisor.stop.mockClear()
+        mocks.supervisor.stopService.mockClear()
+
+        await destroyConnector()
+        expect(mocks.supervisor.stop).toHaveBeenCalledOnce()
+        expect(mocks.supervisor.stopService).not.toHaveBeenCalled()
+
+        await destroyConnector({ force: true })
+        expect(mocks.supervisor.stopService).toHaveBeenCalledOnce()
     })
 })

@@ -4,14 +4,15 @@
 import fs from 'fs'
 import path from 'path'
 import { app } from 'electron'
+import type { Duplex } from 'stream'
 import {
     JsonRpcResponseError,
-    JsonRpcSubprocess,
+    JsonRpcSocketClient,
     type JsonObject,
     type JsonRpcInboundRequest,
     type JsonRpcNotification,
     type JsonValue
-} from './json-rpc-subprocess'
+} from './json-rpc-client'
 import { createStructuredLogger } from '@/shared/utils/log'
 import getErrorString from '@/shared/utils/get-error-string'
 import { currentPlatform } from '@/shared/utils/platform'
@@ -47,9 +48,18 @@ import {
     isModularLogLevel,
     type ModularLogLevel
 } from '@/shared/constants/modular-runtime'
-import { listManualNodeEntries } from './manual-nodes-store'
+import { connectOrStart, serviceConnectionDeps } from './service-connection'
+import { defaultServiceEndpointEnvironment, resolveServiceEndpoint } from './service-endpoint'
+import { NodeAvailabilityState, type AvailabilityMenuItem } from './node-availability'
+import {
+    legacyManualNodesPath,
+    manualNodesFileOps,
+    migrateManualNodes
+} from './manual-nodes-migration'
+import { getPaths } from '@/electron/globals'
 import {
     MODULAR_RUNTIME_BINARIES,
+    SERVICE_BINARY_BASE_NAME,
     modularBinaryFileName
 } from '@/shared/constants/modular-binaries'
 import type { ModularProcessName } from '@/shared/constants/modular-binaries'
@@ -280,6 +290,12 @@ function pullResultError(result: JsonValue | undefined): string | null {
  * link without being unbounded (a hung pull must eventually clear its spinner).
  */
 const PULL_TIMEOUT_MS = 6 * 60 * 60 * 1000
+/**
+ * Upper bound on `node:set-availability`. Pausing answers only once the node has
+ * drained, which the node's own drain timeout bounds; this outlasts any
+ * sensible setting without leaving a hung request pending for good.
+ */
+const AVAILABILITY_CALL_TIMEOUT_MS = 10 * 60 * 1000
 const DISCOVERY_MODEL_RETRY_MIN_MS = 1_000
 const DISCOVERY_MODEL_RETRY_MAX_MS = 30_000
 
@@ -293,8 +309,6 @@ const DISCOVERY_MODEL_RETRY_MAX_MS = 30_000
  * so a peer's engine state converges without a proactive backend signal.
  */
 const REMOTE_STATUS_POLL_MS = 20_000
-
-type ModularRuntimeBinaryDefinition = (typeof MODULAR_RUNTIME_BINARIES)[number]
 
 /** Per-engine local-node → proxy bridge state (see reconcileLocalNodeBridge). */
 interface LocalEngineBridge {
@@ -310,13 +324,16 @@ function emptyLocalEngineBridge(): LocalEngineBridge {
 }
 
 /**
- * Spawns and supervises the modular backend.
+ * Attaches to the modular backend.
  *
- * Ownership is hybrid (see `MODULAR_RUNTIME_BINARIES` and
+ * Ownership is layered (see `MODULAR_RUNTIME_BINARIES` and
  * `docs/services-backend.md`):
  *
- * - The `nvpair-ui-broker` is the **only** Electron-spawned binary and is itself the
- *   parent of every broker-owned worker (`nvpair-proxy`,
+ * - `nvpair-service` is the only binary Electron ever launches, and only when
+ *   nothing answers on its endpoint. It runs detached and outlives this app;
+ *   quitting detaches, and stopping it is an explicit action. It owns
+ *   `nvpair-ui-broker`, multiplexes it over a local socket, and restarts it.
+ * - The `nvpair-ui-broker` is the parent of every broker-owned worker (`nvpair-proxy`,
  *   `nvpair-node-scanner`, `nvpair-node-info`, `nvpair-workload-manager`,
  *   `nvpair-cluster-manager`, `nvpair-node-settings`, `nvpair-manual-nodes`,
  *   `nvpair-engine-manager`, `nvpair-errors`, `nvpair-job-scheduler`). Electron passes their resolved paths to
@@ -329,7 +346,7 @@ function emptyLocalEngineBridge(): LocalEngineBridge {
  *   for telemetry (see `node-info-poller.ts`).
  */
 class ModularSupervisor {
-    private processes = new Map<ModularProcessName, JsonRpcSubprocess>()
+    private processes = new Map<ModularProcessName, JsonRpcSocketClient>()
     private readinessWaiters = new Map<number, ReadinessWaiter>()
     private nextReadinessWaiterId = 0
     private readinessReported = false
@@ -363,7 +380,13 @@ class ModularSupervisor {
     // connector registers this to flip status and prompt the user — the
     // supervisor never imports the connector, keeping the dependency one-way.
     private onBrokerCrash?: (info: { code: number | null }) => void
+    private onConnectionLost?: () => void
     private onReady?: () => void
+    // This node's pause state, for the tray. Read from `policy:get` at hydrate
+    // time and kept current by `node:availability-changed`.
+    private readonly availability = new NodeAvailabilityState(() =>
+        getModularBridgeState().getSelfId()
+    )
     // Set when an invite lazily created the cluster (the cluster-manager refuses
     // to invite while unclustered). Tracks that the cluster exists *only* because
     // of an in-flight pairing, so a failed pairing can dissolve the orphaned solo
@@ -408,6 +431,39 @@ class ModularSupervisor {
     /** Register a handler invoked when the broker exits unexpectedly. */
     setOnBrokerCrash(cb: (info: { code: number | null }) => void): void {
         this.onBrokerCrash = cb
+    }
+
+    /**
+     * Register a handler invoked when the connection to the service drops, or the
+     * service restarts the broker, and the broker is not ready again yet.
+     * `setOnReady` fires once it is.
+     */
+    setOnConnectionLost(cb: () => void): void {
+        this.onConnectionLost = cb
+    }
+
+    /** The tray's pause toggle as it should read now. */
+    getAvailabilityMenuItem(): AvailabilityMenuItem {
+        return this.availability.menuItem()
+    }
+
+    /** Register for changes to the pause toggle; returns the unsubscribe function. */
+    onAvailabilityChanged(listener: () => void): () => void {
+        return this.availability.onChange(listener)
+    }
+
+    /**
+     * Pause or resume inference on this node. Pausing returns once the drain
+     * has finished, which can take as long as the node's drain timeout.
+     */
+    async setAvailability(state: 'available' | 'paused'): Promise<void> {
+        const result = await this.callProcess(
+            'broker',
+            'node:set-availability',
+            { state },
+            AVAILABILITY_CALL_TIMEOUT_MS
+        )
+        this.availability.applyResult(result)
     }
 
     /** Register a handler invoked whenever the broker reports app:ready. */
@@ -494,38 +550,17 @@ class ModularSupervisor {
 
         this.validateRequiredBinaries()
 
-        for (const definition of this.electronOwnedDefinitions()) {
-            const binaryPath = getModularBinaryPath(definition.baseName)
-            if (!fs.existsSync(binaryPath)) {
-                // Required binaries were validated above; only optional ones can
-                // reach here, so skip them rather than throwing.
-                log.warn({
-                    sublevel: definition.processName,
-                    message: 'Optional modular binary not present; skipping',
-                    data: { binaryPath }
-                })
-                continue
-            }
+        log.info({
+            sublevel: 'broker',
+            message: 'Attaching to the service',
+            data: { binaryPath: this.serviceBinaryPath() }
+        })
 
-            log.info({
-                sublevel: definition.processName,
-                message: 'Starting modular subprocess',
-                data: { binaryPath }
-            })
-
-            const child = new JsonRpcSubprocess(definition.processName, binaryPath)
-            child.setProtocolTrace(this.logLevel === 'debug')
-            this.processes.set(definition.processName, child)
-            this.attachChildHandlers(child)
-            try {
-                child.start(this.startupArgs(definition))
-            } catch (error) {
-                if (this.processes.get(definition.processName) === child) {
-                    this.processes.delete(definition.processName)
-                }
-                throw error
-            }
-        }
+        const broker = new JsonRpcSocketClient('broker', () => this.connectToService())
+        broker.setProtocolTrace(this.logLevel === 'debug')
+        this.processes.set('broker', broker)
+        this.attachChildHandlers(broker)
+        broker.start()
 
         getModularBridgeState().setLocalDiscoveryModelRefresher(engine =>
             this.refreshDiscoveryEngineModels(engine)
@@ -534,12 +569,30 @@ class ModularSupervisor {
         this.isReady = true
         this.updateReadiness()
         startNodeInfoPoller()
-        log.info({ sublevel: 'lifecycle', message: 'Started modular service processes' })
+        log.info({ sublevel: 'lifecycle', message: 'Attached to the modular service' })
     }
 
+    /**
+     * Detach from the service and leave it running, with the broker and every
+     * inference it is serving. Nothing is sent to it: a `shutdown` would only
+     * be answered locally, and the service ending is a separate, explicit act.
+     */
     async stop(): Promise<void> {
-        // Mark teardown first so the broker's exit during stop() is treated as a
-        // deliberate shutdown, not a crash.
+        await this.teardown(client => client.detach())
+    }
+
+    /**
+     * Stop the service itself: it stops the broker in order (proxy, engines,
+     * workers) and exits. Used for the explicit stop, a restart, an update and a
+     * data wipe. It never starts a service just to stop it.
+     */
+    async stopService(): Promise<void> {
+        await this.teardown(client => client.stopService())
+    }
+
+    private async teardown(close: (client: JsonRpcSocketClient) => Promise<void>): Promise<void> {
+        // Mark teardown first so the connection closing during teardown is
+        // treated as deliberate, not a crash.
         this.shuttingDown = true
         stopNodeInfoPoller()
         if (this.remoteStatusDebounceTimer) {
@@ -567,12 +620,10 @@ class ModularSupervisor {
         // where the time actually went.
         const teardownStartedAt = Date.now()
 
-        // The engines are not stopped from here. The broker's own shutdown
-        // orders it: the proxy first, so no new inference arrives, then the
-        // engines, keeping their saved on/off state, then the workers. Stopping
-        // the engines ahead of that ran the same step early and in the opposite
-        // order — engines went down while the proxy was still routing requests
-        // to them.
+        // The engines are not stopped from here. When the service is stopped, the
+        // broker's own shutdown orders it: the proxy first, so no new inference
+        // arrives, then the engines, keeping their saved on/off state, then the
+        // workers.
         const processes = Array.from(this.processes.values()).reverse()
         this.processes.clear()
         this.localBridges.clear()
@@ -580,29 +631,25 @@ class ModularSupervisor {
         this.brokerHydrationDone = false
         this.isReady = false
         this.readinessReported = false
+        this.availability.reset()
         this.rejectReadinessWaiters(
             new Error(`${APP_DISPLAY_NAME} service stopped before becoming ready`)
         )
 
         for (const child of processes) {
             try {
-                // The broker is the parent of the whole worker tree and runs each
-                // worker's graceful shutdown on its own exit — notably
-                // engine-manager's StopAll() (stops engines it launched). Give it a
-                // longer grace so a slow engine shutdown isn't cut short by SIGKILL
-                // (which would orphan the engine).
-                await child.stop(child.name === 'broker' ? 15_000 : undefined)
+                await close(child)
             } catch (err) {
                 log.warn({
                     sublevel: child.name,
-                    message: `Failed to stop ${child.name}: ${getErrorString(err)}`
+                    message: `Failed to close ${child.name}: ${getErrorString(err)}`
                 })
             }
         }
 
         log.info({
             sublevel: 'lifecycle',
-            message: `Stopped modular service processes in ${Date.now() - teardownStartedAt}ms`
+            message: `Closed the modular service connection in ${Date.now() - teardownStartedAt}ms`
         })
     }
 
@@ -613,9 +660,9 @@ class ModularSupervisor {
     callProcess(
         name: ModularProcessName,
         method: string,
-        params?: Parameters<JsonRpcSubprocess['call']>[1],
+        params?: Parameters<JsonRpcSocketClient['call']>[1],
         timeoutMs?: number
-    ): Promise<Awaited<ReturnType<JsonRpcSubprocess['call']>>> {
+    ): Promise<Awaited<ReturnType<JsonRpcSocketClient['call']>>> {
         const child = this.processes.get(name)
         // Reject rather than throw synchronously: callers on the notification
         // dispatch path (e.g. refreshManagedEngineModels) chain .catch() and
@@ -718,7 +765,8 @@ class ModularSupervisor {
 
         for (const child of this.processes.values()) {
             child.setProtocolTrace(nextLevel === 'debug')
-            void child.notify('log/set-level', { level: nextLevel })
+            // Not connected yet (or between connections): the next start passes the level.
+            child.notify('log/set-level', { level: nextLevel }).catch(() => {})
         }
     }
 
@@ -726,7 +774,24 @@ class ModularSupervisor {
         return this.logLevel
     }
 
+    private serviceBinaryPath(): string {
+        return getModularBinaryPath(SERVICE_BINARY_BASE_NAME)
+    }
+
+    /** Attach to the service, starting it detached when nothing answers. */
+    private connectToService(): Promise<Duplex> {
+        return connectOrStart(
+            { endpoint: resolveServiceEndpoint(defaultServiceEndpointEnvironment()) },
+            serviceConnectionDeps(this.serviceBinaryPath(), this.brokerStartupArgs())
+        )
+    }
+
     private validateRequiredBinaries(): void {
+        if (!fs.existsSync(this.serviceBinaryPath())) {
+            throw new Error(
+                `Required modular binary not found: ${this.serviceBinaryPath()}. Run npm run build:modular-binaries to populate cli-bin.`
+            )
+        }
         for (const definition of MODULAR_RUNTIME_BINARIES) {
             if (definition.optional) continue
             const binaryPath = getModularBinaryPath(definition.baseName)
@@ -738,11 +803,16 @@ class ModularSupervisor {
         }
     }
 
-    private electronOwnedDefinitions(): ModularRuntimeBinaryDefinition[] {
-        return MODULAR_RUNTIME_BINARIES.filter(definition => definition.launchOwner === 'electron')
+    /** Forget what a broker that is gone told us, until the next `app:ready`. */
+    private resetBrokerSession(): void {
+        this.brokerReady = false
+        this.brokerHydrationDone = false
+        this.readinessReported = false
+        this.availability.reset()
+        getModularBridgeState().clearWorkloads()
     }
 
-    private attachChildHandlers(child: JsonRpcSubprocess): void {
+    private attachChildHandlers(child: JsonRpcSocketClient): void {
         const isCurrent = (): boolean =>
             this.processes.get(child.name as ModularProcessName) === child
 
@@ -763,6 +833,21 @@ class ModularSupervisor {
                 data: { stream: entry.stream }
             })
         })
+        child.on('disconnected', () => {
+            if (!isCurrent()) return
+            log.warn({ sublevel: child.name, message: 'Lost the connection to the service' })
+            this.resetBrokerSession()
+            this.onConnectionLost?.()
+        })
+        // The service restarted the broker. Its `app:ready` follows once it is up
+        // and runs `onBrokerReady`, which redoes every subscription and baseline.
+        // Until then the old broker's state is not trusted.
+        child.on('broker-restarted', () => {
+            if (!isCurrent()) return
+            log.warn({ sublevel: child.name, message: 'The service restarted the broker' })
+            this.resetBrokerSession()
+            this.onConnectionLost?.()
+        })
         child.on('exit', event => {
             if (!isCurrent()) return
             this.processes.delete(child.name as ModularProcessName)
@@ -771,6 +856,7 @@ class ModularSupervisor {
                 this.brokerHydrationDone = false
                 this.isReady = false
                 this.readinessReported = false
+                this.availability.reset()
                 this.rejectReadinessWaiters(
                     new Error(`${APP_DISPLAY_NAME} service exited before becoming ready`)
                 )
@@ -799,13 +885,6 @@ class ModularSupervisor {
         return getModularBinaryPath(definition.baseName)
     }
 
-    private startupArgs(definition: ModularRuntimeBinaryDefinition): string[] {
-        if (definition.processName === 'broker') {
-            return this.brokerStartupArgs()
-        }
-        return [...definition.args, ...this.logLevelArgs()]
-    }
-
     private brokerStartupArgs(): string[] {
         const args: string[] = []
         const passPath = (flag: string, name: ModularProcessName): void => {
@@ -832,25 +911,32 @@ class ModularSupervisor {
     }
 
     /**
-     * Re-add persisted manual nodes through the broker's `node/add` relay. The
-     * broker's `nvpair-manual-nodes` loses its in-memory entries on restart (N86),
-     * so PAIR UI owns the durable list (`manual-nodes.json`) and replays it once
-     * the broker is ready.
+     * Hand the manual peers Electron used to keep (`configs/manual-nodes.json`)
+     * to the service, once. `nvpair-manual-nodes` persists its own list now, so
+     * this only sends the old file's entries as `node/add` and deletes it.
      */
-    private async replayManualNodes(): Promise<void> {
-        const entries = listManualNodeEntries()
-        for (const entry of entries) {
-            try {
+    private async migrateManualNodes(): Promise<void> {
+        const filePath = legacyManualNodesPath(getPaths().getUserData())
+        await migrateManualNodes({
+            ...manualNodesFileOps(filePath),
+            addNode: async entry => {
                 await this.callProcess('broker', 'node/add', {
                     address: entry.address,
                     name: entry.name
                 })
-            } catch (err) {
-                log.warn({
-                    sublevel: 'manual-nodes',
-                    message: `Failed to replay manual node ${entry.address}: ${getErrorString(err)}`
-                })
             }
+        })
+    }
+
+    /** Read this node's pause state from the broker. */
+    private async hydrateAvailability(): Promise<void> {
+        try {
+            this.availability.applyResult(await this.callProcess('broker', 'policy:get', {}))
+        } catch (err) {
+            log.warn({
+                sublevel: 'broker',
+                message: `Unable to read node availability: ${getErrorString(err)}`
+            })
         }
     }
 
@@ -876,7 +962,8 @@ class ModularSupervisor {
 
         await this.syncClusterIdentityToManager()
         await this.resolveSelfId()
-        await this.replayManualNodes()
+        await this.migrateManualNodes()
+        await this.hydrateAvailability()
         await this.hydrateEngineManager()
         this.startInstalledEnginesOnFirstOpen()
         await this.seedClusterPeerIds()
@@ -1171,7 +1258,7 @@ class ModularSupervisor {
         }
     }
 
-    private childByName(name: string): JsonRpcSubprocess | undefined {
+    private childByName(name: string): JsonRpcSocketClient | undefined {
         for (const child of this.processes.values()) {
             if (child.name === name) return child
         }
@@ -1243,6 +1330,11 @@ class ModularSupervisor {
         if (notification.method === 'connection/cluster-identity') {
             const id = stringValue(objectValue(notification.params)?.id)
             void this.onClusterIdentityChanged(id)
+            return
+        }
+
+        if (notification.method === 'node:availability-changed') {
+            this.availability.applyNotification(notification.params)
             return
         }
 

@@ -4,7 +4,7 @@
 import type { EngineType } from '@/shared/types/engines'
 import type { EngineHubModel, EngineHubSearchResponse } from '@/shared/types/engine-api'
 import { getModularSupervisor } from '@/electron/service-bridge/modular-supervisor'
-import type { JsonObject, JsonValue } from '@/electron/service-bridge/json-rpc-subprocess'
+import type { JsonObject, JsonValue } from '@/electron/service-bridge/json-rpc-client'
 import { createStructuredLogger } from '@/shared/utils/log'
 import { MODULAR_CATALOG_CALL_TIMEOUT_MS } from '@/shared/constants/modular-runtime'
 import { engineManagerName } from '@/shared/utils/engines'
