@@ -33,7 +33,7 @@ import {
 import { emitBridgePush } from './broadcaster'
 import { parseEngineSettings } from './engine-settings'
 import { resolvePullCatchError } from './pull-error-handling'
-import { serviceLogLevel } from './service-log-level'
+import { isServiceLogLevelEnabled, serviceLogLevel } from './service-log-level'
 import { engineManagerName } from '@/shared/utils/engines'
 import { isFirstRun } from '@/electron/config/ui-config'
 import { parseClusterNodes, parseInvite, parseNodeIdentity } from './cluster-json'
@@ -752,7 +752,9 @@ class ModularSupervisor {
         child.on('log', entry => {
             if (!isCurrent()) return
             getModularBridgeState().appendLog(entry.source, entry.stream, entry.text)
-            log[serviceLogLevel(entry.stream, entry.text)]({
+            const level = serviceLogLevel(entry.stream, entry.text)
+            if (!isServiceLogLevelEnabled(level, this.logLevel)) return
+            log[level]({
                 sublevel: entry.source,
                 message: entry.text,
                 data: { stream: entry.stream }

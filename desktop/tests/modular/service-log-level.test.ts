@@ -2,7 +2,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { describe, expect, it } from 'vitest'
-import { serviceLogLevel } from '@/electron/service-bridge/service-log-level'
+import {
+    isServiceLogLevelEnabled,
+    serviceLogLevel
+} from '@/electron/service-bridge/service-log-level'
 
 /**
  * The services log every severity to stderr, so classifying a line by the
@@ -35,5 +38,32 @@ describe('serviceLogLevel', () => {
         // unstructured stderr line is the shape a crash takes.
         expect(serviceLogLevel('stderr', 'panic: runtime error: index out of range')).toBe('warn')
         expect(serviceLogLevel('stdout', '{"jsonrpc":"2.0","method":"ready"}')).toBe('verbose')
+    })
+})
+
+/**
+ * Every broker JSON-RPC frame used to be written to the log file synchronously
+ * at any level. The configured level now decides what reaches the file.
+ */
+describe('isServiceLogLevelEnabled', () => {
+    it('keeps protocol traffic out of the file unless the level is debug', () => {
+        const frame = serviceLogLevel(
+            'stdout',
+            '{"jsonrpc":"2.0","method":"discovery:nodes-changed"}'
+        )
+        expect(isServiceLogLevelEnabled(frame, 'warn')).toBe(false)
+        expect(isServiceLogLevelEnabled(frame, 'info')).toBe(false)
+        expect(isServiceLogLevelEnabled(frame, 'debug')).toBe(true)
+    })
+
+    it('always keeps a line at or above the threshold', () => {
+        expect(isServiceLogLevelEnabled('warn', 'warn')).toBe(true)
+        expect(isServiceLogLevelEnabled('error', 'warn')).toBe(true)
+        expect(isServiceLogLevelEnabled('info', 'warn')).toBe(false)
+        // An unformatted stderr line (a crash) classifies as warn and survives
+        // the default level.
+        expect(isServiceLogLevelEnabled(serviceLogLevel('stderr', 'panic: boom'), 'warn')).toBe(
+            true
+        )
     })
 })

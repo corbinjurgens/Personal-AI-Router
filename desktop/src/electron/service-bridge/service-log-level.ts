@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+import type { ModularLogLevel } from '@/shared/constants/modular-runtime'
+
 /**
  * The severity a backend log line reports about itself.
  *
@@ -43,4 +45,23 @@ export function serviceLogLevel(stream: 'stdout' | 'stderr', text: string): Serv
         default:
             return stream === 'stderr' ? 'warn' : 'verbose'
     }
+}
+
+const SERVICE_LOG_RANK: Record<ServiceLogLevel, number> = { verbose: 0, info: 1, warn: 2, error: 3 }
+const THRESHOLD_RANK: Record<ModularLogLevel, number> = { debug: 0, info: 1, warn: 2, error: 3 }
+
+/**
+ * Whether a classified service line clears the configured log level and so
+ * belongs in the log file.
+ *
+ * The services already filter their own stderr by this level, so in practice
+ * this gates the broker's stdout: every JSON-RPC frame classifies as `verbose`,
+ * and writing each one synchronously on the main thread is a cost no one asked
+ * for at the default level. Choosing `debug` brings the full protocol trace back.
+ */
+export function isServiceLogLevelEnabled(
+    level: ServiceLogLevel,
+    threshold: ModularLogLevel
+): boolean {
+    return SERVICE_LOG_RANK[level] >= THRESHOLD_RANK[threshold]
 }
