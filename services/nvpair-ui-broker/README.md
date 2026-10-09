@@ -380,10 +380,13 @@ that node (see [Node policy](#node-policy)).
 
 #### `workloads:cancel`
 
-Params `{ originatedFrom, workloadId, regenerate? }`, result `{ ok }`. Only the
-node a job originated on can cancel it. When `originatedFrom` is this node the
-broker calls its proxy's `workload/cancel {workloadId, regenerate}` and `ok` is
-the proxy's `found`. Otherwise the cancel goes to `nvpair-workload-manager`, which
+Params `{ originatedFrom, workloadId, regenerate?, engine?, runId? }`, result
+`{ ok }`. Workload ids are per-engine counters, so `engine` (and `runId`, from the
+workload record) pick the job when two share an id; the proxy refuses an
+ambiguous id. Only the node a job originated on can cancel it. When
+`originatedFrom` is this node the broker calls its proxy's
+`workload/cancel {workloadId, regenerate, engine?, runId?}` and `ok` is the
+proxy's `found`. Otherwise the cancel goes to `nvpair-workload-manager`, which
 carries it to the origin over the pinned peer channel, and `ok:true` only means it
 was handed on; the outcome arrives on the `workloads:*` stream. A peer's relayed
 `workloads:cancel` reaches the broker from the workload-manager and is acted on

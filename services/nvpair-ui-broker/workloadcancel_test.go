@@ -21,7 +21,7 @@ func TestWorkloadsCancelLocalAsksTheProxy(t *testing.T) {
 		}
 		return map[string]bool{"ok": true}, ""
 	})
-	b.handleMessage(clientRequest(1, methodWorkloadsCancel, map[string]any{"originatedFrom": "self-node", "workloadId": "7", "regenerate": true}))
+	b.handleMessage(clientRequest(1, methodWorkloadsCancel, map[string]any{"originatedFrom": "self-node", "workloadId": "7", "regenerate": true, "engine": "ollama", "runId": "r9"}))
 	resp := out.waitFrame(t, "workloads:cancel response", isResponse(1))
 	if resp.Error != nil || string(resp.Result) != `{"ok":true}` {
 		t.Fatalf("local cancel = %+v %s", resp.Error, resp.Result)
@@ -32,7 +32,7 @@ func TestWorkloadsCancelLocalAsksTheProxy(t *testing.T) {
 	}
 	var p map[string]any
 	_ = json.Unmarshal(calls[0].params, &p)
-	if p["workloadId"] != "7" || p["regenerate"] != true {
+	if p["workloadId"] != "7" || p["regenerate"] != true || p["engine"] != "ollama" || p["runId"] != "r9" {
 		t.Fatalf("workload/cancel params = %s", calls[0].params)
 	}
 

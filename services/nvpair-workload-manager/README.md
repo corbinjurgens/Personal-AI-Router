@@ -77,7 +77,7 @@ Each carries `params.workloadInfo`. Removal uses `workloads:remove` with
 
 Only the node a job entered on can cancel it, because only its proxy holds the
 request. When a user cancels a job another node originated, the broker writes
-`workloads:cancel` with `{ originatedFrom, workloadId, regenerate? }` to this
+`workloads:cancel` with `{ originatedFrom, workloadId, regenerate?, engine?, runId? }` to this
 component's stdin. The manager adds a fresh `cancelId` and posts the cancel over
 the same pinned channel: to the origin if it is a current peer, otherwise to
 every peer. It is sent directly, not through the ordered lifecycle queue, so a
@@ -119,7 +119,7 @@ Translated remote events are forwarded to the broker as:
 | --- | --- |
 | `workloads:upsert` | `{ workloadInfo }` |
 | `workloads:remove` | `{ workloadId, originatedFrom }` |
-| `workloads:cancel` | `{ originatedFrom, workloadId, regenerate?, cancelId }` — a peer's cancel; the broker acts only if it is the origin |
+| `workloads:cancel` | `{ originatedFrom, workloadId, regenerate?, engine?, runId?, cancelId }` — a peer's cancel; the broker acts only if it is the origin |
 | `ready` | `{ version }` — startup handshake |
 
 Duplicate events arriving from more than one peer are collapsed before they reach
