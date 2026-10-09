@@ -90,6 +90,19 @@ const (
 	itemAction
 )
 
+// serviceAction is what an itemAction row runs.
+type serviceAction int
+
+const (
+	// actionNone is every row that is not an action.
+	actionNone serviceAction = iota
+	// actionReset removes PAIR's engines, stops the service, and deletes the
+	// data directory.
+	actionReset
+	// actionStop stops the service, and with it inference, and quits.
+	actionStop
+)
+
 // serviceItem is one row of the configuration list.
 type serviceItem struct {
 	kind  serviceItemKind
@@ -100,6 +113,8 @@ type serviceItem struct {
 	getMethod, setMethod string
 	// destructive rows require an explicit confirmation keystroke.
 	destructive bool
+	// action says what an itemAction row does once confirmed.
+	action serviceAction
 	// options are the values an itemChoice row offers, in the order the picker
 	// presents them.
 	options []string
@@ -331,7 +346,11 @@ func newServiceView(client *rpc.Client) *serviceView {
 			{kind: itemText, label: "Cluster name",
 				getMethod: getClusterNameMethod, setMethod: setClusterNameMethod,
 				help: "this machine's own label for the cluster - not shared with peers"},
-			{kind: itemAction, label: "Reset all data and quit", destructive: true,
+			// Quitting leaves the service running for the next client; this is
+			// the explicit stop, the same as Q from any tab.
+			{kind: itemAction, label: "Stop service and quit", destructive: true, action: actionStop,
+				help: "stops the broker, every worker, and inference on this machine - q alone leaves them running"},
+			{kind: itemAction, label: "Reset all data and quit", destructive: true, action: actionReset,
 				help: "deletes settings, cluster identity, pairing, and engines PAIR installed - downloaded models are kept"},
 		},
 	}
@@ -649,7 +668,10 @@ func (v *serviceView) submitEdit() tea.Cmd {
 
 // runAction performs a confirmed action row.
 func (v *serviceView) runAction(idx int) tea.Cmd {
-	if v.items[idx].destructive {
+	switch v.items[idx].action {
+	case actionStop:
+		return func() tea.Msg { return stopServiceMsg{} }
+	case actionReset:
 		if v.resetting {
 			return nil // already running; a second confirm must not start another
 		}
@@ -840,7 +862,7 @@ func (v *serviceView) View() string {
 	if v.pingErr != nil {
 		summary = statusErrStyle.Render(
 			"service not responding: " + v.pingErr.Error() +
-				" - press 5 for Logs, or q to quit and restart nvpair")
+				" - press 5 for Logs, or Q to stop the service and start nvpair again")
 	}
 
 	if len(v.workers.Rows()) == 0 {

@@ -12,10 +12,10 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 )
 
-// Run builds the tabbed program over a connected broker client and the broker's
-// stderr stream, and blocks until the user quits. The caller is responsible for
-// shutting the broker down afterwards, and for honouring the returned Outcome
-// once it has.
+// Run builds the tabbed program over a client attached to nvpair-service and
+// the broker's stderr stream, and blocks until the user quits. The caller
+// detaches afterwards, and honours the returned Outcome: stopping the service,
+// and wiping the data directory once it has stopped.
 func Run(client *rpc.Client, stderr io.Reader) (Outcome, error) {
 	logCh := make(chan string, 2000)
 	go scanLines(stderr, logCh)
@@ -36,6 +36,7 @@ func Run(client *rpc.Client, stderr io.Reader) (Outcome, error) {
 	var outcome Outcome
 	if m, ok := final.(Model); ok {
 		outcome.WipeData = m.wipeOnExit
+		outcome.StopService = m.stopOnExit
 	}
 	return outcome, err
 }
