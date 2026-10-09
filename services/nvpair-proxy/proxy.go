@@ -20,6 +20,7 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"runtime/debug"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -34,6 +35,7 @@ import (
 	"nvpair-shared/netmon"
 	"nvpair-shared/netpick"
 	"nvpair-shared/nodeactivity"
+	"nvpair-shared/nodepolicy"
 	"nvpair-shared/noderec"
 	"nvpair-shared/schedulerwire"
 )
@@ -191,6 +193,10 @@ type Workload struct {
 	CompletedAt    *int64  `json:"completedAt"`
 	Error          *string `json:"error"`
 	RequesterID    *string `json:"requesterId"`
+	// RequestedModel is the tier the client asked for ("weak", "medium",
+	// "strong") when it asked for one; Model is then the concrete model chosen
+	// for it. Optional and additive: absent for a request that named a model.
+	RequestedModel string `json:"requestedModel,omitempty"`
 	// Seq counts this workload's events, from 1, in emission order.
 	//
 	// The workload-manager's inter-node dedup is a permanent set, so an event
@@ -425,16 +431,44 @@ type Proxy struct {
 	// exists because each facade's request counter restarts at 1, so without it
 	// a reused id after a restart would collide in the broker's store.
 	runID string
+
+	// admission is the node-wide admission controller every facade shares
+	// (FORK_DESIGN.md §3.3). Process-wide for the same reason as the
+	// reservation map: the limits are the machine's, not an engine's.
+	admission *admissionController
+
+	// selfMu guards what this process has learned about its own node from
+	// discovery: its node id and, per engine, the models it last advertised.
+	// A stopped engine is unregistered from discovery, so this memory is the
+	// only evidence left that waking it could serve a request.
+	selfMu     sync.RWMutex
+	selfNodeID string
+	selfModels map[string][]string
+
+	// workloadsMu guards workloads, the in-flight workloads this process
+	// originated, keyed by engine and id, so workload/cancel can reach them.
+	workloadsMu sync.Mutex
+	workloads   map[workloadKey]*workloadCtl
 }
 
 // NewProxy builds a facade-less process host. Facades arrive via
 // enableFacade, so nothing is listening when this returns.
 func NewProxy(codec *Codec) *Proxy {
-	return &Proxy{
+	p := &Proxy{
 		codec:    codec,
 		runID:    newRunID(),
 		activity: nodeactivity.NewReporter(activityReportInterval),
 	}
+	p.admission = newAdmissionController(
+		func(method string, params any) {
+			if err := p.codec.Notify(method, params); err != nil {
+				slog.Debug("failed to send admission notification", "method", method, "err", err)
+			}
+		},
+		p.localEngineHealthy,
+		normalizeEngineModel,
+	)
+	return p
 }
 
 // facadeFor resolves the facade an addressed message names, or nil when that
@@ -836,6 +870,24 @@ type candidate struct {
 	id       string
 	url      *url.URL
 	peerUUID string
+
+	// fac is the facade that resolved this candidate, and engine the engine it
+	// targets. They differ from the routing facade only for a tier request
+	// that crossed engines; failover bookkeeping (discovery watch, confirmed
+	// addresses) belongs to fac.
+	fac    *facade
+	engine string
+	// model is the concrete model to send, or empty to send the request's own.
+	model string
+	// self marks this node's own engine. Admission runs here before dispatch.
+	self bool
+	// dormant marks a self candidate whose engine is stopped but can be woken
+	// on demand. Its url is a placeholder until admission has woken it.
+	dormant bool
+	// warm reports the model already loaded on the node; tierRank is the
+	// position of its tier in the search order. Both order tier candidates.
+	warm     bool
+	tierRank int
 }
 
 // candidateTransport returns the reverse-proxy / model-list transport for a
@@ -1148,6 +1200,9 @@ func (f *facade) serveModelList(w http.ResponseWriter, r *http.Request, matchedR
 			models = append(models, item.raw)
 		}
 	}
+	if openAI {
+		models = append(models, f.tierModelEntries(seen)...)
+	}
 	if !success {
 		err := fmt.Errorf("no valid model list from %d candidate(s)", len(candidates))
 		writeJSON(http.StatusServiceUnavailable, []byte(`{"error":"model inventory unavailable"}`))
@@ -1188,6 +1243,29 @@ func (f *facade) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	// whether a matching Started was seen.
 	reqID := strconv.FormatUint(f.nextRequestID.Add(1), 10)
 
+	// The request's own context. The client leaving still cancels it, and so
+	// can workload/cancel and cancelActive, each naming why in cancelReason so
+	// the terminal workload event does not blame a client that never left.
+	reqCtx, cancelReqCtx := context.WithCancel(r.Context())
+	defer cancelReqCtx()
+	r = r.WithContext(reqCtx)
+	var cancelReason atomic.Pointer[string]
+	cancelRequest := func(reason string) {
+		cancelReason.CompareAndSwap(nil, &reason)
+		cancelReqCtx()
+	}
+	cancelReasonOr := func(def string) string {
+		if reason := cancelReason.Load(); reason != nil {
+			return *reason
+		}
+		return def
+	}
+	// curTicket is the admission held for a self dispatch. Released after each
+	// attempt and, by this defer, on every other way out, including the
+	// ErrAbortHandler unwind of a mid-stream copy error.
+	var curTicket *admissionTicket
+	defer func() { curTicket.release() }()
+
 	// Parse the request's model before choosing a node. Model eligibility only
 	// applies to inference routes; control endpoints retain their existing
 	// routing behavior even when their JSON happens to contain a model field.
@@ -1212,7 +1290,36 @@ func (f *facade) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	if isInf {
 		routingModel = model
 	}
-	candidates := f.resolveCandidates(routingModel)
+	// A tier request resolves to concrete (node, engine, model) candidates
+	// from the policy instead of to owners of the literal model name.
+	tier := ""
+	var needs requestNeeds
+	crossEngine := false
+	if isInf && nodepolicy.IsTier(model) {
+		tier = model
+		needs = parseRequestNeeds(bodyBytes, r.URL.Path)
+		crossEngine = openAICompatibleInference[r.URL.Path]
+	}
+	ctl := newWorkloadCtl(cancelRequest)
+	resolve := func() []candidate {
+		var cands []candidate
+		if tier != "" {
+			cands = f.resolveTierCandidates(tier, needs, crossEngine)
+		} else {
+			cands = f.resolveCandidates(routingModel)
+		}
+		if !ctl.hasExclusions() {
+			return cands
+		}
+		kept := make([]candidate, 0, len(cands))
+		for _, c := range cands {
+			if !ctl.isExcluded(c.id) {
+				kept = append(kept, c)
+			}
+		}
+		return kept
+	}
+	candidates := resolve()
 	if cors.IsPreflight(r) {
 		targets := make([]cors.Target, 0, len(candidates))
 		for _, cand := range candidates {
@@ -1231,7 +1338,7 @@ func (f *facade) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		held  reservation
 	)
 	if isInf && model != "" {
-		candidates, held = p.reserveCandidate(f, candidates)
+		candidates, held = f.reserveRound(candidates, tier != "")
 	}
 	// Released exactly once, whichever way the request ends: normal unwind,
 	// client disconnect, or an early return below. Without this a node stays
@@ -1267,6 +1374,33 @@ func (f *facade) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		_ = f.notify("proxy/request", RequestEvent{
 			ID: reqID, Method: r.Method, Path: r.URL.Path, Target: "cluster",
 			Status: status, Duration: time.Since(start).Milliseconds(), Error: errText,
+		})
+		return
+	}
+	if len(candidates) == 0 && tier != "" {
+		// Nothing anywhere can answer this tier for this request, which waiting
+		// will not change.
+		body, mErr := json.Marshal(struct {
+			Error string   `json:"error"`
+			Needs []string `json:"needs"`
+		}{Error: "no eligible model for tier " + tier, Needs: needs.names()})
+		if mErr != nil {
+			body = []byte(`{"error":"no eligible model for tier"}`)
+		}
+		slog.Warn("proxy request rejected",
+			"id", reqID, "method", r.Method, "path", r.URL.Path,
+			"remote", r.RemoteAddr, "reason", "no eligible model for tier", "tier", tier)
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write(body)
+		_ = f.notify("proxy/request", RequestEvent{
+			ID:       reqID,
+			Method:   r.Method,
+			Path:     r.URL.Path,
+			Status:   http.StatusNotFound,
+			Duration: time.Since(start).Milliseconds(),
+			Error:    "no eligible model for tier",
 		})
 		return
 	}
@@ -1340,16 +1474,27 @@ func (f *facade) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	// attempts re-points it.
 	if isInf && model != "" {
 		createdMs := start.UnixMilli()
+		// A tier request's model is the concrete model it is headed for: the
+		// leading candidate's until a dispatch says otherwise.
+		wlModel := model
+		if tier != "" && candidates[0].model != "" {
+			wlModel = candidates[0].model
+		}
 		wl = &Workload{
-			ID:        reqID,
-			Model:     model,
-			Engine:    f.profile.Name,
-			RunID:     p.runID,
-			State:     "queued",
-			CreatedAt: createdMs,
-			Seq:       nextWlSeq(),
+			ID:             reqID,
+			Model:          wlModel,
+			RequestedModel: tier,
+			Engine:         f.profile.Name,
+			RunID:          p.runID,
+			State:          "queued",
+			CreatedAt:      createdMs,
+			Seq:            nextWlSeq(),
 		}
 		p.emitWorkload(workloadSubmittedMethod, *wl)
+		key := workloadKey{engine: f.profile.Name, id: reqID}
+		p.registerWorkload(key, ctl)
+		defer p.unregisterWorkload(key)
+		defer ctl.finish()
 	}
 
 	// The terminal workload transition (completed/errored) can be reached from
@@ -1408,7 +1553,7 @@ func (f *facade) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		go func() {
 			select {
 			case <-reqCtx.Done():
-				emitTerminal("cancelled", "client disconnected before completion")
+				emitTerminal("cancelled", cancelReasonOr("client disconnected before completion"))
 			case <-finished:
 			}
 		}()
@@ -1498,7 +1643,7 @@ func (f *facade) handleHTTP(w http.ResponseWriter, r *http.Request) {
 				// watcher above usually beats us to it; emitTerminal makes that
 				// a no-op.) Cancelled rather than failed: nothing went wrong
 				// here, the requester stopped waiting.
-				emitTerminal("cancelled", "request cancelled before completion")
+				emitTerminal("cancelled", cancelReasonOr("request cancelled before completion"))
 			case committedSC != nil && committedSC.wroteErr != nil:
 				// The response committed but a write to (or flush toward) the
 				// client failed — typically the idle deadline tripping on a
@@ -1533,16 +1678,19 @@ func (f *facade) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	// given up on from still looking busy. The state stays "queued" throughout,
 	// because "running" means the engine is generating and the broker's store
 	// would reject a return to "queued" as a backwards transition.
-	repointWorkload := func(nodeID string) {
+	repointWorkload := func(nodeID, concrete string) {
 		if wl == nil {
 			return
 		}
 		wlMu.Lock()
-		if terminated || wl.ScheduledOn == nodeID {
+		if terminated || (wl.ScheduledOn == nodeID && (concrete == "" || wl.Model == concrete)) {
 			wlMu.Unlock()
 			return
 		}
 		wl.ScheduledOn = nodeID
+		if concrete != "" {
+			wl.Model = concrete
+		}
 		wl.Seq = nextWlSeq()
 		snapshot := *wl
 		wlMu.Unlock()
@@ -1569,7 +1717,7 @@ func (f *facade) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		defer resMu.Unlock()
 		p.releaseReservation(held)
 		var out []candidate
-		out, held = p.reserveCandidate(f, cands)
+		out, held = f.reserveRound(cands, tier != "")
 		return out
 	}
 
@@ -1608,6 +1756,10 @@ func (f *facade) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	dispatches := 0
 	committed := false
 	respondedWithError := false
+	regenExhausted := false
+	// selfRejection is why this node refused its own candidate when that
+	// refusal excluded it, and is the answer if nothing else remains.
+	var selfRejection nodepolicy.RejectReason
 	round := candidates
 	next := 0
 
@@ -1634,16 +1786,39 @@ func (f *facade) handleHTTP(w http.ResponseWriter, r *http.Request) {
 			// Round exhausted, or no owner was available. Either way the job is
 			// on no node right now, so drop both the placement and the capacity
 			// claim before waiting.
-			repointWorkload("")
+			repointWorkload("", "")
 			releaseHeld()
+			// This node refused its own candidate for a reason no backoff will
+			// change, and nothing else can take the request: answer now.
+			if selfRejection != "" && len(resolve()) == 0 {
+				respondedWithError = true
+				finalStatus = http.StatusServiceUnavailable
+				proxyErr = "admission rejected: " + string(selfRejection)
+				writeAdmissionRejection(w, selfRejection)
+				break
+			}
 			if !waitBeforeRetry(r.Context(), backoffFor(dispatches, time.Until(deadline))) {
 				break
 			}
-			round = f.resolveCandidates(routingModel)
+			round = resolve()
 			if isInf && model != "" {
 				round = takeHeld(round)
 			}
 			next = 0
+			if len(round) == 0 && ctl.hasExclusions() {
+				// A cancel, or this node's own pause, excluded the only node
+				// left. Waiting for an owner would only run out the deadline on
+				// a node this request may not use.
+				if selfRejection != "" {
+					respondedWithError = true
+					finalStatus = http.StatusServiceUnavailable
+					proxyErr = "admission rejected: " + string(selfRejection)
+					writeAdmissionRejection(w, selfRejection)
+					break
+				}
+				regenExhausted = true
+				break
+			}
 			if len(round) == 0 {
 				// Every owner went away mid-flight. Not a rejection: keep
 				// waiting for one to come back. This consumes no attempt, which
@@ -1653,6 +1828,11 @@ func (f *facade) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		cand := round[next]
 		next++
+		// A node a cancel excluded stays out of this request, including later
+		// entries of a round resolved before the exclusion.
+		if ctl.isExcluded(cand.id) {
+			continue
+		}
 		dispatches++
 		// lastPermitted means no further dispatch can happen, so this attempt's
 		// failure is the client's answer. It is not "last candidate in the
@@ -1660,7 +1840,18 @@ func (f *facade) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		lastPermitted := dispatches >= maxDispatches ||
 			(retryRounds && !time.Now().Before(deadline))
 		last := lastPermitted
-		repointWorkload(cand.id)
+		// What this attempt asks for: a tier candidate names its concrete model
+		// and may be another engine of this process.
+		candModel := model
+		if cand.model != "" {
+			candModel = cand.model
+		}
+		candEngine := cand.engineOr(f.profile.Name)
+		candFacade := cand.fac
+		if candFacade == nil {
+			candFacade = f
+		}
+		repointWorkload(cand.id, candModel)
 		// The claim follows the node we are about to try, not the one
 		// reserveCandidate happened to pick for the round — an attempt can hold
 		// a node for the whole first-content budget, and for that time it is
@@ -1676,6 +1867,99 @@ func (f *facade) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		// claim decides, once, whether this attempt commits or is abandoned;
 		// see attemptClaim for why a pair of channels could not.
 		claim := &attemptClaim{}
+		att := &attemptCtl{claim: claim, cancel: cancelAttempt, nodeID: cand.id}
+		ctl.setAttempt(att)
+
+		// The body this attempt sends: the request's own, with a tier's concrete
+		// model in place of the tier name and every other byte untouched.
+		sendBody := bodyBytes
+		if cand.model != "" && bodyBytes != nil {
+			if rewritten, ok := replaceModel(bodyBytes, cand.model); ok {
+				sendBody = rewritten
+			}
+		}
+		// How long the destination may queue this attempt: not at all while
+		// this round still has somewhere else to go, so a busy node hands the
+		// request straight back; the policy's queue timeout for the last one.
+		admissionWait := 0
+		if next >= len(round) {
+			admissionWait = p.admission.currentPolicy().Admission.QueueTimeoutSeconds
+		}
+
+		// This node's own engine is admitted here, before dispatch, the way a
+		// peer's ingress admits what we send it. A rejection is a failed
+		// candidate like a peer's 503, and writes nothing to the client unless
+		// it is the answer.
+		target := cand.url
+		if cand.self && isInf {
+			decision := p.admission.admit(attemptCtx, admissionRequest{
+				engine:  candEngine,
+				model:   candModel,
+				waitCap: time.Duration(admissionWait) * time.Second,
+				cancel:  ctl.abortLocal,
+			})
+			rejectSelf := func(errText string, answer func()) bool {
+				cancelAttempt()
+				ctl.setAttempt(nil)
+				proxyErr = errText
+				if !last {
+					slog.Debug("proxy self candidate not admitted, failing over",
+						"id", reqID, "node_id", cand.id, "engine", candEngine, "err", errText)
+					return false
+				}
+				respondedWithError = true
+				servedNodeID = cand.id
+				servedTarget = target.Host
+				finalStatus = http.StatusServiceUnavailable
+				answer()
+				return true
+			}
+			if decision.err != nil {
+				cancelAttempt()
+				ctl.setAttempt(nil)
+				if att.redispatched() {
+					dispatches--
+				}
+				// Otherwise the request itself ended while it waited; the loop's
+				// own check ends it.
+				continue
+			}
+			if decision.reject != "" {
+				if rejectSelf("admission rejected: "+string(decision.reject), func() {
+					writeAdmissionRejection(w, decision.reject)
+				}) {
+					break
+				}
+				// A node that is pausing or paused will refuse every later
+				// round too, so it leaves this request rather than spending
+				// its retry budget on the same refusal.
+				if p.admission.currentAvailability() != nodepolicy.Available {
+					ctl.exclude(cand.id)
+					selfRejection = decision.reject
+				}
+				continue
+			}
+			curTicket = decision.ticket
+			if decision.hasProfile {
+				sendBody = mergeDefaults(sendBody, decision.profile.RequestOptions)
+			}
+			if cand.dormant {
+				// Admission waited for the wake; the engine's address is the one
+				// it came up on.
+				u, ok := candFacade.localBackendTarget()
+				if !ok {
+					curTicket.release()
+					if rejectSelf("local engine is not running", func() {
+						writeIngressError(w, http.StatusServiceUnavailable, "no-local-backend",
+							"no local inference backend is available on this node")
+					}) {
+						break
+					}
+					continue
+				}
+				target = u
+			}
+		}
 
 		// Watch the target while the attempt is pre-commit. A node that has
 		// dropped out of discovery is not coming back to answer a request
@@ -1689,49 +1973,64 @@ func (f *facade) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		// stops at the commit point, because cancelling after that would kill a
 		// stream that is working.
 		//
+		// A dormant self candidate is not in discovery until its engine has
+		// been advertised again, so it is not watched.
+		//
 		// Read the interval once, on this goroutine: the watcher must not
 		// depend on a value that could change under it mid-attempt.
 		watchEvery := targetWatchInterval
-		go func() {
-			t := time.NewTicker(watchEvery)
-			defer t.Stop()
-			for {
-				select {
-				case <-attemptCtx.Done():
-					return
-				case <-t.C:
-					// The commit path may have claimed the outcome since the
-					// last tick, in which case this attempt is no longer ours
-					// to cancel.
-					if claim.settled() {
+		if !cand.dormant {
+			go func() {
+				t := time.NewTicker(watchEvery)
+				defer t.Stop()
+				for {
+					select {
+					case <-attemptCtx.Done():
+						return
+					case <-t.C:
+						// The commit path may have claimed the outcome since the
+						// last tick, in which case this attempt is no longer ours
+						// to cancel.
+						if claim.settled() {
+							return
+						}
+						if candFacade.discovery.Has(cand.id) {
+							continue
+						}
+						if claim.abandon() {
+							cancelAttempt()
+						}
 						return
 					}
-					if f.discovery.Has(cand.id) {
-						continue
-					}
-					if claim.abandon() {
-						cancelAttempt()
-					}
-					return
 				}
-			}
-		}()
+			}()
+		}
 
 		// ReverseProxy derives the outbound request from the one it is given,
 		// so the attempt context has to travel on a copy. The replayed body
-		// goes on the copy for the same reason.
+		// and the per-attempt admission header go on the copy for the same
+		// reason, with headers cloned so one attempt's never leak into the
+		// next.
 		attemptReq := r.WithContext(attemptCtx)
+		attemptReq.Header = r.Header.Clone()
 		if bodyBytes != nil {
-			attemptReq.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+			setReplayBody(attemptReq, sendBody)
+		}
+		if isInf {
+			if cand.self {
+				attemptReq.Header.Del(nodepolicy.AdmissionWaitHeader)
+			} else {
+				attemptReq.Header.Set(nodepolicy.AdmissionWaitHeader, strconv.Itoa(admissionWait))
+			}
 		}
 		retry := false
 		sc := &statusCapture{ResponseWriter: w, status: http.StatusOK, idle: idleClientWriteTimeout}
 
 		proxy := &httputil.ReverseProxy{
 			Director: func(req *http.Request) {
-				req.URL.Scheme = cand.url.Scheme
-				req.URL.Host = cand.url.Host
-				req.Host = cand.url.Host
+				req.URL.Scheme = target.Scheme
+				req.URL.Host = target.Host
+				req.Host = target.Host
 			},
 			// A remote cluster peer is dialed over mTLS (per-peer pinned config);
 			// self/manual candidates use the plain transport. See candidateTransport.
@@ -1773,12 +2072,12 @@ func (f *facade) handleHTTP(w http.ResponseWriter, r *http.Request) {
 						if !last {
 							retry = true
 							slog.Warn("proxy upstream produced no content, failing over",
-								"id", reqID, "node_id", cand.id, "target", cand.url.Host,
+								"id", reqID, "node_id", cand.id, "target", target.Host,
 								"path", r.URL.Path, "err", err)
 							return retrySignal{}
 						}
 						slog.Warn("proxy upstream produced no content, retries exhausted",
-							"id", reqID, "node_id", cand.id, "target", cand.url.Host,
+							"id", reqID, "node_id", cand.id, "target", target.Host,
 							"method", r.Method, "path", r.URL.Path,
 							"duration_ms", time.Since(start).Milliseconds(), "err", err)
 						return err
@@ -1790,11 +2089,16 @@ func (f *facade) handleHTTP(w http.ResponseWriter, r *http.Request) {
 				// so committing would stream through a context that is about to
 				// die and truncate the response we just started.
 				if !claim.commit() {
+					if att.redispatch.Load() {
+						// A cancel moved this request on before it committed.
+						retry = true
+						return retrySignal{}
+					}
 					proxyErr = errTargetGone.Error()
 					if !last {
 						retry = true
 						slog.Warn("proxy target left discovery as the response committed, failing over",
-							"id", reqID, "node_id", cand.id, "target", cand.url.Host,
+							"id", reqID, "node_id", cand.id, "target", target.Host,
 							"path", r.URL.Path)
 						return retrySignal{}
 					}
@@ -1805,10 +2109,23 @@ func (f *facade) handleHTTP(w http.ResponseWriter, r *http.Request) {
 				if peeked != nil {
 					resp.Body = peeked
 				}
+				// Name what actually answered (FORK_DESIGN.md §3.8). Set on the
+				// committed response only, so a failed-over attempt's headers
+				// can never reach the client.
+				if isInf {
+					resp.Header.Set(nodepolicy.ModelHeader, candModel)
+					resp.Header.Set(nodepolicy.EngineHeader, candEngine)
+					resp.Header.Set(nodepolicy.NodeHeader, cand.id)
+					if tier != "" {
+						resp.Header.Set(nodepolicy.TierHeader, tier)
+					} else {
+						resp.Header.Del(nodepolicy.TierHeader)
+					}
+				}
 				// Committing to this candidate — body stream is about to begin.
 				ttfbMs = time.Since(start).Milliseconds()
 				servedNodeID = cand.id
-				servedTarget = cand.url.Host
+				servedTarget = target.Host
 				proxyErr = "" // clear any error recorded from a failed-over candidate
 				// Arm the liveness report only now. statusCapture also carries
 				// the proxy's OWN error bodies — ReverseProxy's ErrorHandler
@@ -1826,7 +2143,7 @@ func (f *facade) handleHTTP(w http.ResponseWriter, r *http.Request) {
 						NodeID: cand.id,
 						Method: r.Method,
 						Path:   r.URL.Path,
-						Target: cand.url.Host,
+						Target: target.Host,
 					})
 					// The claim already follows each dispatch, so this is a
 					// no-op unless something reordered underneath us; it stays
@@ -1852,6 +2169,7 @@ func (f *facade) handleHTTP(w http.ResponseWriter, r *http.Request) {
 							wl.State = "running"
 							wl.StartedAt = &startedMs
 							wl.ScheduledOn = cand.id
+							wl.Model = candModel
 							wl.Seq = nextWlSeq()
 							snapshot := *wl
 							wlMu.Unlock()
@@ -1867,28 +2185,34 @@ func (f *facade) handleHTTP(w http.ResponseWriter, r *http.Request) {
 				if _, ok := err.(retrySignal); ok {
 					return // retryable status — the loop advances to the next candidate
 				}
+				// A deliberate abort says nothing about the node or its
+				// address, and is never the client's answer.
+				if att.redispatch.Load() && claim.abandoned() {
+					retry = true
+					return
+				}
 				// Transport/dial error (not a status-based retry): forget this
 				// node's confirmed address so the next request re-confirms and
 				// can fail over to another of its published addresses
 				// (multi-homed peer). The in-request failover below moves on to
 				// the next node.
-				f.targets.Forget(cand.id)
+				candFacade.targets.Forget(cand.id)
 				if !last {
 					// Transport/dial error with candidates left: fail over.
 					retry = true
 					proxyErr = err.Error()
 					slog.Warn("proxy upstream error, failing over",
-						"id", reqID, "node_id", cand.id, "target", cand.url.Host,
+						"id", reqID, "node_id", cand.id, "target", target.Host,
 						"path", r.URL.Path, "err", err)
 					return
 				}
 				// No further dispatch is permitted: terminal, surface it.
 				respondedWithError = true
 				servedNodeID = cand.id
-				servedTarget = cand.url.Host
+				servedTarget = target.Host
 				proxyErr = err.Error()
 				slog.Warn("proxy upstream error, retries exhausted",
-					"id", reqID, "node_id", cand.id, "target", cand.url.Host,
+					"id", reqID, "node_id", cand.id, "target", target.Host,
 					"method", r.Method, "path", r.URL.Path,
 					"duration_ms", time.Since(start).Milliseconds(), "err", err)
 				body, mErr := json.Marshal(map[string]string{
@@ -1912,7 +2236,17 @@ func (f *facade) handleHTTP(w http.ResponseWriter, r *http.Request) {
 
 		proxy.ServeHTTP(sc, attemptReq)
 		cancelAttempt()
-		if claim.abandoned() {
+		// The admitted execution ends with the attempt: a retried attempt no
+		// longer occupies this node, and a committed one has finished copying.
+		curTicket.release()
+		ctl.setAttempt(nil)
+		switch {
+		case att.redispatched():
+			// Moved on by a cancel, not failed: it costs no dispatch.
+			retry = true
+			dispatches--
+			proxyErr = "attempt aborted to re-dispatch the request"
+		case claim.abandoned():
 			// Name the real reason rather than the bare "context canceled" the
 			// transport reports, which reads identically to a client hangup.
 			proxyErr = errTargetGone.Error()
@@ -1943,6 +2277,8 @@ func (f *facade) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		// which is the wait for an owner to come back.
 		reason := "no node advertising the requested model became available before the retry deadline"
 		switch {
+		case regenExhausted:
+			reason = "no other eligible node remained after the previous one was excluded"
 		case dispatches >= maxDispatches:
 			reason = "every dispatch attempt failed"
 		case len(round) > 0:
@@ -2035,6 +2371,7 @@ func (f *facade) resolveCandidates(model string) []candidate {
 			return
 		}
 		peerUUID := ""
+		self := false
 		switch {
 		case isSelfTarget(u, selfPort) || isAnyAliasSelfTarget(u, aliasBoundAddresses):
 			// Our own advertised endpoint (ol now points at this proxy). Serve
@@ -2047,6 +2384,7 @@ func (f *facade) resolveCandidates(model string) []candidate {
 				return
 			}
 			u = lb
+			self = true
 		case p.mesh.HasPin(n.ClusterUUID):
 			// A pinned cluster peer: reach it only over mTLS to its promoted
 			// proxy (the ol port now advertises the proxy, not the engine).
@@ -2080,10 +2418,19 @@ func (f *facade) resolveCandidates(model string) []candidate {
 			return
 		}
 		seenHost[u.Host] = true
+		warm := false
+		if model != "" {
+			warm = nodeHasLoaded(f.profile, n, model) ||
+				(self && p.admission.isLoaded(f.profile.Name, model))
+		}
 		out = append(out, candidate{
 			id:       n.ID,
 			url:      u,
 			peerUUID: peerUUID,
+			fac:      f,
+			engine:   f.profile.Name,
+			self:     self,
+			warm:     warm,
 		})
 	}
 
@@ -2102,6 +2449,15 @@ func (f *facade) resolveCandidates(model string) []candidate {
 	for _, n := range nodes {
 		if !placed[n.ID] {
 			add(n)
+		}
+	}
+
+	// This node's engine may be stopped and so absent from discovery, yet able
+	// to serve the model once woken. Offered last: waking costs time a
+	// running owner does not.
+	if model != "" && !slices.ContainsFunc(out, func(c candidate) bool { return c.self }) {
+		if c, ok := f.dormantSelfCandidate(model); ok {
+			out = append(out, c)
 		}
 	}
 
@@ -2588,6 +2944,7 @@ func subscribedToNode(p engineProfile, n noderec.DirectoryNode) (Node, bool) {
 		// accepted as an Ollama owner here (falls back to the union for a peer
 		// that sends no attribution — see DirectoryNode.EngineModels).
 		Models: append([]string(nil), n.EngineModels(p.Name)...),
+		Loaded: append([]string(nil), n.LoadedByEngine[p.Name]...),
 	}, true
 }
 
@@ -2674,6 +3031,16 @@ func (p *Proxy) handleMessage(msg *Message) {
 		if msg.IsNotification() {
 			log.Printf("ignoring incoming notification: %s", msg.Method)
 		}
+		return
+	}
+
+	// Node policy and workload cancellation are process-scoped: they concern
+	// the machine and its requests, never one facade.
+	if engine == "" && p.handlePolicyMethod(msg, method) {
+		return
+	}
+	if engine == "" && method == nodepolicy.MethodWorkloadCancel {
+		p.handleWorkloadCancel(msg)
 		return
 	}
 
