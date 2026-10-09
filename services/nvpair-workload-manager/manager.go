@@ -140,6 +140,7 @@ func NewManager(codec *Codec, port int, selfUUID, clusterDir string) *Manager {
 		broadcastCh: make(chan []byte, broadcastQueueDepth),
 	}
 	m.server = NewServer(port, dedup, mesh, m.emitUpsert, m.emitRemove)
+	m.server.emitCancel = m.emitCancel
 	return m
 }
 
@@ -308,6 +309,9 @@ func (m *Manager) handleMessage(msg *Message) {
 
 	case msg.Method == MethodRemove:
 		m.handleLocalRemove(msg)
+
+	case msg.Method == MethodCancel:
+		m.handleLocalCancel(msg)
 
 	case msg.Method == "shutdown":
 		if msg.IsRequest() {

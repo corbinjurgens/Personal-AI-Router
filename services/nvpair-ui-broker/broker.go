@@ -2832,6 +2832,8 @@ func (b *Broker) forwardWorkloadManagerNotification(method string, params json.R
 	switch method {
 	case "workloads:upsert", "workloads:remove":
 		b.emitWorkloadEvent(method, params)
+	case methodWorkloadsCancel:
+		b.handlePeerWorkloadCancel(params)
 	default:
 		slog.Debug("ignoring workload-manager notification", "method", method)
 	}
