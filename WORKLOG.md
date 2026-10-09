@@ -16,6 +16,75 @@ owner. Update the entry in the same commit as the work when practical.
 
 ---
 
+## 2026-10-10: All six phases, first implementation
+
+**Branch:** `fork/groundwork`. The owner asked for the entire plan, using
+subagents economically. Partway through, credits ran low, so the rest runs on
+cheaper models, one agent at a time. Agents worked in separate git worktrees
+and their branches were merged here.
+
+**How the work was split:**
+- Two read-only agents mapped routing and engine control.
+- I wrote the shared contract (`services/shared/nodepolicy`) and
+  `FORK_DESIGN.md`.
+- Build agents each took one area: phase 1 desktop, the service and TUI, the
+  proxy, the broker with engine-manager, and model transfer.
+
+### Changes
+
+| Commit | Area | Change |
+|--------|------|--------|
+| `351a55d` | engine-manager | Residency checked each tick, inventory once a minute or after a PAIR action. |
+| `eb3b58e` | shared, docs | `nodepolicy` contract (policy file, defaults, validation, broker↔proxy wire) and `FORK_DESIGN.md`. |
+| `978562c` (merge) | desktop | Lazy tray popup and menu-only mode; visibility-gated node poller with metrics-only pushes; bounded async log writer; protocol frames skipped below debug; workload baseline reconciliation; Overview opens on a pairing invite. |
+| `7862aca` (merge) | engine-manager | Model copy between paired nodes (`/v1/models/files`, `/v1/models/file`, `engine:remote-copy-model`) for Ollama, llama.cpp and LM Studio, with resume and sha256 checks. |
+| `db99d82` (merge) | broker, engine-manager, workload-manager | Policy store and `policy:get/set`, `node:set-availability` with drain, cancel, unload and stop; `engine:wake/sleep/intent/unload-model`; idle policy; settings-restart drain; remote policy through `ec`; `workloads:cancel` relay. Merge conflicts in engine-manager README and spec resolved by hand. |
+| `82bbc29` | broker, workload-manager | `workloads:cancel` carries optional `engine` and `runId`, since ids repeat across engines. |
+| `32c7820` (merge) | service, TUI, manual-nodes, build | `nvpair-service` (multi-client attach, broker restart, logs, autostart); `servicectl` and `ipc.ListenPrivate`; the TUI attaches to the service; manual nodes persisted; the service added to build, installers and desktop bundling. |
+| `e35a283` (merge) | proxy | Destination admission, tiers across nodes and engines, routing headers and `requestedModel`, `workload/cancel` with regenerate. |
+| `92ce606` | service | `nvpair-service call <method> [json]`; short socket path fallback when the app data path is too long for a Unix socket. |
+| *(this commit)* | docs | `TESTING_ON_PC.md`, `FORK.md` status, this entry. |
+
+### Verification
+
+- Go `vet` and `test` pass in shared, proxy, broker, engine-manager,
+  workload-manager, manual-nodes, service and TUI. The one exception fails
+  on unmodified upstream too: proxy `TestHandleHTTP_RealSocketFlushDeadline`.
+- Desktop: lint (0 warnings), typecheck, 323 unit tests, dead-code check,
+  contracts check and SPDX check all clean.
+- `services/build.sh` stages all 14 binaries.
+- **End-to-end in the container** (real binaries, isolated config dir): the
+  service started the broker, and through `nvpair-service call` I exercised
+  `policy:get`, pause and resume, `policy:set` (persisted, with an invalid
+  tier rejected), `workloads:cancel` relay, and `stop`. No processes were left
+  behind.
+- **Not verified:** Windows and macOS, real engines and GPUs, two machines,
+  pipe ACLs, autostart, memory savings. The `services/tests` cross-process
+  suite still needs mDNS.
+
+### Decisions and deviations recorded
+
+- Recorded in `FORK_DESIGN.md` and the agents' component docs:
+  - `/v1/models/files` streams NDJSON.
+  - `engine:intent` and `engine:unload-model` were added to engine-manager.
+  - Idle stop applies only to engines saved On.
+  - `Workload.engine` stays the facade the request entered on.
+  - A paused node rejects its own self candidate once per request.
+- Left for the owner:
+  - A `versions.json` entry for `nvpair-service`.
+  - The stream-abort classification.
+  - Docs that still describe the TUI as owning its broker
+    (`docs/architecture.mdx`, `.cursor/rules/system-architecture.mdc`,
+    `communication-layers.mdc`).
+
+### Next up
+
+- The desktop app attaches to `nvpair-service` and migrates the old
+  manual-node file.
+- Desktop UI for pause, policy and tiers, cancel and model copy.
+
+---
+
 ## 2026-10-09: Groundwork, phase 1 start
 
 **Branch:** `fork/groundwork`, based on upstream `develop` at `54d2fe33`.

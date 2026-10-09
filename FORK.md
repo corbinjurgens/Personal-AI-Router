@@ -29,154 +29,79 @@ departs from it.
 A session-by-session record of changes is in [WORKLOG.md](WORKLOG.md).
 Each finished item below names its commit; the log has the full detail.
 
-**Status (2026-10-09):** phase 1 is partly done on `fork/groundwork`. Nothing
-has been measured on real hardware yet. See [Recommended order](#recommended-order)
-for what comes next.
+**Status (2026-10-10):** every phase has a first implementation on
+`fork/groundwork`, tested in a Linux container and in an end-to-end check
+there. None of it has run on Windows, macOS, a GPU or two real machines yet.
+[TESTING_ON_PC.md](TESTING_ON_PC.md) is the checklist for that. The technical
+contract is [FORK_DESIGN.md](FORK_DESIGN.md). The biggest remaining gap is the
+desktop app: it does not attach to the new service yet, and it has no UI for
+the new features. Until it does, use `nvpair-service call`.
 
-The ground rules in [AGENTS.md](AGENTS.md) and `.cursor/rules/` still apply.
-Runtime behavior belongs in `services/`; `desktop/` only relays commands and
-renders state.
+## Phase 1: Reduce idle overhead (done, needs measuring)
 
-## Phase 1: Reduce idle overhead (in progress)
+- [x] Workload history stays bounded on the desktop (`595b3d5`, `3aaa0d8`;
+  research §5A).
+- [x] One model-list request per poll (`99a13f8`; §5D).
+- [x] Proxy request size cap, 64 MiB by default (`63c7e92`; §5E). Spilling
+  very large requests to disk is left until it is needed.
+- [x] Protocol logging follows the log level (`774753f`); bounded async log
+  writer, and protocol frames skipped below `debug` (`f2c3ba6`, `d3f3d3d`;
+  §5B).
+- [x] Desktop workload baseline reconciles instead of only adding (`49eb7a8`).
+- [x] Residency checked every 5 s, inventory once a minute (`351a55d`).
+- [x] Lazy tray popup, destroyed after 60 s hidden, loading only the stores it
+  shows. Optional menu-only tray. (`2f75db9`, `9c70c89`, `dad9c9b`)
+- [x] Node-info poller runs only while a window is visible. Readings-only
+  changes push only metrics. (`86e5dab`; §5C)
+- [ ] Measure memory before and after on a real PC (TESTING_ON_PC.md §9).
 
-Done on `fork/groundwork`. Each item has unit tests and passes the repo's
-desktop checks and its service's Go tests. None has been measured for memory
-or CPU.
+## Phase 2: Make the GUI optional (service done, desktop pending)
 
-- [x] **Workload history stays bounded on the desktop.** The broker used to trim
-  its history without telling clients, so Electron and the renderer kept every
-  finished job for the whole session. The caps now apply to every broker store,
-  and the broker sends `workloads:remove` for each record it drops.
-  (`nvpair-ui-broker`, `595b3d5`; generated API doc `3aaa0d8`; research §5A)
-  *Still to check:* the cross-process workload tests need mDNS and could not
-  run here (see [Known local test caveats](#known-local-test-caveats)).
-- [x] **One model-list request per poll.** LM Studio and llama.cpp were queried
-  twice every 5 s for the same endpoint. (`nvpair-engine-manager`, `99a13f8`;
-  research §5D)
-- [x] **Proxy request size cap.** Bodies the proxy buffers for failover are
-  limited to 64 MiB by default (`--max-request-bytes`); larger requests get a
-  413. (`nvpair-proxy`, `63c7e92`; research §5E) Spilling very large
-  replayable requests to a temporary file, which the research mentions as an
-  option, is left until a real need appears.
-- [x] **Protocol logging follows the log level.** Broker JSON-RPC traffic is
-  written to the log file only when the level is `debug`. It is no longer
-  written synchronously on every message at the default `warn`. (`desktop`,
-  `774753f`; research §5B, partly; see the follow-up below)
+- [x] `nvpair-service`: per-user background service that owns the broker,
+  with multi-client attach and detach, broker restart, logs, autostart, and
+  `status` / `stop` / `call` subcommands (merge `32c7820`, `92ce606`).
+- [x] The TUI attaches to the service. Quitting leaves inference running.
+- [x] Manual nodes are saved by the backend, and hostnames are re-resolved.
+- [ ] The desktop app attaches to the service instead of spawning a broker,
+  and migrates Electron's old manual-node file.
 
-Next:
+## Phase 3: Reliable node availability (done)
 
-- [ ] Before building much further, run the pinned base plus this branch on
-  each machine and confirm the basic workflow works there (research:
-  "My recommendation").
-- [ ] Create the tray popup only when it is opened, destroy it on dismiss, and
-  initialize only the stores it displays. Consider a native-menu-only tray
-  mode.
-- [ ] Run the 2 s node-info poller only while a window is visible. Keep
-  telemetry-only changes from triggering model and discovery notifications.
-- [ ] Measure before and after: PAIR's own memory with engines stopped, with
-  Overview open, with Overview closed, and under a synthetic job stream.
-  Phase 2 adds a fourth case: the service running with no Electron.
+- [x] `available` / `draining` / `paused`, persisted. Pausing drains or
+  cancels running work, unloads models, and optionally stops engines without
+  changing their saved intent (merge `db99d82`).
+- [x] Engines saved Off are never started on demand.
+- [x] Idle unload, idle stop, and start-on-demand, all configurable and off by
+  default except start-on-demand.
+- [x] Settings restarts drain the engine first.
+- [ ] Advertise paused nodes to peers. Today peers learn from a fast `503`.
 
-Follow-ups to finished items (smaller, can wait):
+## Phase 4: Resource admission and model profiles (done)
 
-- [ ] Logging: research §5B also asks for a bounded asynchronous writer
-  instead of `appendFileSync`, and for skipping the work of building an entry
-  (including redaction) for lines that will not be written.
-- [ ] Workload history: Electron's `seedWorkloads` only adds entries from a
-  fresh baseline and never drops ones the broker no longer has, so a missed
-  removal is never repaired (research §5A).
-- [ ] Model polling: check residency often and reconcile the installed
-  inventory less often, keeping occasional reconciliation because models can
-  change outside PAIR (research §5D).
+- [x] Node policy file with profiles (`eb3b58e`).
+- [x] Destination-side admission in the proxy covering availability, wake,
+  concurrency, resident model count across engines with model switching, and
+  the memory budget. Bounded queueing; the router hands a busy request
+  straight to the next machine (merge `e35a283`).
+- [ ] Automatic memory estimates. Today `memoryBytes` is declared per profile.
 
-## Recommended order
+## Phase 5: Tiered routing (done)
 
-1. **Lazy tray popup** (phase 1). Small, desktop only, likely the biggest
-   remaining idle-memory saving. The hidden popup window is built at startup
-   in `desktop/src/electron/tray.ts`.
-2. **Visibility-gated node-info poller** (phase 1). Small, desktop only.
-   `node-info-poller.ts` already has start and stop hooks; tie them to window
-   visibility instead of the backend connection.
-3. **Manual nodes stored in the backend** (phase 2). Small to medium, mostly
-   Go, and fully testable here. Needed before the GUI can be optional.
-4. Then either **phase 2** (start with Option A, the Go supervisor) or
-   **phase 3** (the pause switch), if pausing for gaming matters more day to
-   day.
+- [x] `weak` / `medium` / `strong` resolve across machines and, on
+  OpenAI-compatible routes, across engines. Capability and context checks,
+  warm-model preference, and stronger/weaker fallback.
+- [x] `X-PAIR-Model` / `-Engine` / `-Node` / `-Tier` headers, and
+  `requestedModel` on jobs. Tiers appear in `/v1/models`.
 
-Items 1 and 2 need a before-and-after memory check on a real machine. The
-measurement item in phase 1 covers that.
+## Phase 6: Remote management (done, UI pending)
 
-## Phase 2: Make the GUI optional
-
-- [ ] Keep the broker running independently as a per-user service that
-  listens on a local socket or Windows named pipe. Electron and the TUI attach
-  to it and detach from it.
-  - Option A: a small Go supervisor that owns the broker's stdio and exposes
-    attach/detach. Less disruptive.
-  - Option B: refactor the broker so its runtime does not depend on any client
-    session. Cleaner, but more work.
-- [ ] Move persistence of manual nodes from Electron into the service (today
-  Electron stores the list and replays it into the backend).
-- [ ] Make the desktop and TUI reconnect to a running service instead of
-  spawning their own broker.
-
-Until then, `nvpair-tui` from the standalone services bundle runs PAIR
-without Electron. It must stay open, and must not run alongside the desktop
-app, since both try to own the same services and ports.
-
-## Phase 3: Reliable node availability
-
-- [ ] Add node states `Available`, `Draining`, and `Paused`. Pausing stops new
-  work, finishes or cancels running jobs, unloads models or stops the managed
-  engine, and persists until you turn it off.
-- [ ] Keep requests from waking an engine whose saved intent is Off.
-- [ ] One PAIR policy for starting models on demand and unloading them when
-  idle, across engines. Today this is engine-specific; llama.cpp's launch
-  settings include a 300 s idle sleep.
-- [ ] Coordinate engine launch-setting restarts with draining.
-
-## Phase 4: Resource admission and model profiles
-
-- [ ] A profile is a concrete model, engine, quantization, context limit,
-  launch settings, and capabilities.
-- [ ] Each machine has final say over what it accepts. The originating router
-  picks a candidate, and the destination accepts, queues, or rejects based on
-  its pause state, the resident model, current reservations, memory headroom,
-  and whether accepting would need a model switch. Local and peer requests go
-  through the same path.
-- [ ] Settings for resident model count and concurrent request count are
-  separate. The Mac is budgeted as one unified-memory pool; the RTX machines
-  track RAM and VRAM separately.
-- [ ] A node-wide reservation that covers every engine on the machine, so
-  "one resident model" holds across engines and model switches. Use
-  conservative memory estimates.
-- [ ] Do not present a GPU-utilization percentage as an enforced limit unless
-  the engine can actually enforce it.
-
-## Phase 5: Tiered routing
-
-- [ ] `weak` / `medium` / `strong` aliases resolve to eligible profiles. Tools,
-  vision, structured output, and context length are hard requirements. The
-  proxy reads only `model` today, so it must parse enough of the request to
-  check them.
-- [ ] A stronger model may answer a weaker tier when allowed.
-- [ ] Prefer an already-loaded model that fits. A degradation policy decides
-  whether a stronger request may fall back to a weaker tier.
-- [ ] Routing metadata always names the concrete model that answered.
-
-## Phase 6: Remote management
-
-- [ ] Edit model profiles remotely, coordinated with running requests.
-- [ ] Easier connection setup: reliable manual peers over LAN or Tailscale
-  first, with identity and peer configuration owned by the service. Later,
-  invitations and address updates built on the existing cluster trust.
-  Remote model download and delete already exist and can be reused.
-- [ ] Direct model-file transfer between machines, with resume, checksums,
-  and integration with the destination's model storage.
-- [ ] Jobs: remote cancel controls, and "cancel and regenerate on another
-  device". Never splice two models' output into one answer. Moving a
-  generation to another machine mid-stream is a separate, much harder feature
-  and out of scope (research §6).
+- [x] Remote policy and pause editing through paired nodes (`nodeId`).
+- [x] Model copy between machines, with resume and sha256 checks, for Ollama,
+  llama.cpp and LM Studio (merge `7862aca`).
+- [x] Job cancel, and cancel-and-regenerate on another machine, from any node
+  (`82bbc29`).
+- [x] Manual peers by hostname (for example Tailscale) persist.
+- [ ] Desktop UI for pause, policy and tiers, job cancel and model copy.
 
 ## Open decisions
 
@@ -195,6 +120,9 @@ app, since both try to own the same services and ports.
   or auto-update. The build also downloads NVIDIA UI CSS at build time; vendor
   or cache it for reproducible offline builds. Engines and models keep their
   own licences (research §1).
+- **`versions.json` entry for nvpair-service.** Without one the service
+  reports version 0.0.0 and upstream's CI check fails. Upstream forbids hand
+  edits to that file; in this fork you may choose to add the entry.
 - **Release automation.** Upstream CI rejects hand edits to
   `services/versions.json` and `CHANGELOG.md`, and expects a
   `pair-release-intent:v1` block in each PR description. Decide whether the fork
