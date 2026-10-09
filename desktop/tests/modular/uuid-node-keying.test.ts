@@ -170,8 +170,9 @@ describe('UUID node keying', () => {
 
     it('seedWorkloads keeps a live upsert and only fills in unseen baseline jobs', () => {
         const state = getModularBridgeState()
-        // A live push landed first (the realtime stream is at least as fresh as any
-        // durable snapshot).
+        const since = state.beginWorkloadBaseline()
+        // A live push landed while the baseline request was in flight, so the
+        // snapshot may predate it.
         state.upsertWorkloadFromInfo({
             workloadInfo: {
                 id: 'job-live',
@@ -203,7 +204,8 @@ describe('UUID node keying', () => {
                         createdAt: 200
                     }
                 ]
-            })
+            }),
+            since
         )
 
         const liveKey = 'uuid-wl-seed\u0000job-live'

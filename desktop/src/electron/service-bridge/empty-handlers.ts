@@ -495,9 +495,10 @@ async function handleWorkloadsGetInitial(): Promise<WsInvokeResponse<'workloads:
     const supervisor = getModularSupervisor()
     const state = getModularBridgeState()
     if (supervisor.hasProcess('broker')) {
+        const since = state.beginWorkloadBaseline()
         try {
             const result = await supervisor.callProcess('broker', 'workloads:get-initial')
-            return state.seedWorkloads(parseWorkloadsInitial(result ?? null))
+            return state.seedWorkloads(parseWorkloadsInitial(result ?? null), since)
         } catch {
             return state.getWorkloads()
         }
