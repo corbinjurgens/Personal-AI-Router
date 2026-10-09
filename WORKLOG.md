@@ -28,15 +28,16 @@ phase 1.
 
 ### Changes
 
-| Area | Change |
-|------|--------|
-| `nvpair-ui-broker` | **Workload history stays bounded on clients.** The history caps (newest 10,000 terminal records, none older than 7 days) used to be enforced only inside the persistence flusher, and silently. Electron and the renderer drop an entry only on `workloads:remove`, so finished jobs piled up for the whole session, and without a data dir the store had no bound at all. The caps now apply to every store. A once-a-minute sweep (on the stale-workload ticker) prunes and emits `workloads:remove` for each retired record. `Flush`/`Checkpoint` no longer prune. A removal is withheld while a newer workload with the same `(originatedFrom, workloadId)` survives, because proxy restarts reuse ids. Retirement is local and not broadcast to peers. README updated. |
-| `nvpair-engine-manager` | **One model-list request per poll.** LM Studio and llama.cpp declare `list_models` and `loaded_models` against the same endpoint, so the 5 s watcher fetched it twice. When both actions are the identical side-effect-free HTTP request (`sameReadRequest`), one response feeds both extractors. Ollama (`/api/tags` vs `/api/ps`) is unchanged. |
-| `nvpair-proxy` | **Request body cap.** The proxy buffers bodies for failover replay through `http.MaxBytesReader`, with a 64 MiB default set by the new `--max-request-bytes` flag. Oversized requests get 413 and are never dispatched. Other read errors keep the old behavior. README flag table updated. |
-| `desktop/docs` | Regenerated `services-api.md` with `npm run service-contracts:write`: `workloads:remove` is now a notification the broker sends. |
-| `desktop` | **Protocol logging follows the log level.** Every broker stdout JSON-RPC line went to the log file through `appendFileSync` on the main thread at any level. A new `isServiceLogLevelEnabled` gates file writes on the level chosen in Service Settings: protocol traffic (`verbose`) is written only at `debug`. The in-memory debug panel buffer and redaction are unchanged. |
-| docs | Added `FORK.md` (goals, phased roadmap, open decisions, test caveats). |
-| docs | Added this log, a short fork introduction, and a fork notice at the top of `AGENTS.md`. |
+| Commit | Area | Change |
+|--------|------|--------|
+| `595b3d5` | `nvpair-ui-broker` | **Workload history stays bounded on clients.** The history caps (newest 10,000 terminal records, none older than 7 days) used to be enforced only inside the persistence flusher, and silently. Electron and the renderer drop an entry only on `workloads:remove`, so finished jobs piled up for the whole session, and without a data dir the store had no bound at all. The caps now apply to every store. A once-a-minute sweep (on the stale-workload ticker) prunes and emits `workloads:remove` for each retired record. `Flush`/`Checkpoint` no longer prune. A removal is withheld while a newer workload with the same `(originatedFrom, workloadId)` survives, because proxy restarts reuse ids. Retirement is local and not broadcast to peers. README updated. |
+| `99a13f8` | `nvpair-engine-manager` | **One model-list request per poll.** LM Studio and llama.cpp declare `list_models` and `loaded_models` against the same endpoint, so the 5 s watcher fetched it twice. When both actions are the identical side-effect-free HTTP request (`sameReadRequest`), one response feeds both extractors. Ollama (`/api/tags` vs `/api/ps`) is unchanged. |
+| `63c7e92` | `nvpair-proxy` | **Request body cap.** The proxy buffers bodies for failover replay through `http.MaxBytesReader`, with a 64 MiB default set by the new `--max-request-bytes` flag. Oversized requests get 413 and are never dispatched. Other read errors keep the old behavior. README flag table updated. |
+| `3aaa0d8` | `desktop/docs` | Regenerated `services-api.md` with `npm run service-contracts:write`: `workloads:remove` is now a notification the broker sends. |
+| `774753f` | `desktop` | **Protocol logging follows the log level.** Every broker stdout JSON-RPC line went to the log file through `appendFileSync` on the main thread at any level. A new `isServiceLogLevelEnabled` gates file writes on the level chosen in Service Settings: protocol traffic (`verbose`) is written only at `debug`. The in-memory debug panel buffer and redaction are unchanged. |
+| `aa9915a`, `9fa8251` | docs | Added `FORK.md` (goals, phased roadmap, open decisions, test caveats). |
+| `8772cf3` | docs | Added this log, a short fork introduction, and a fork notice at the top of `AGENTS.md`. |
+| `a73862e` | docs | Recorded the commit identity convention in `CLAUDE.md` (see Conventions set). |
 
 ### Verification
 
