@@ -347,6 +347,10 @@ type Broker struct {
 	// and workload fanout. A restarted scheduler receives its active workload
 	// baseline before its discovery baseline, then only newer live events.
 	schedulerFeedMu sync.Mutex
+
+	// nodePolicy is the fork's node policy: the policy file, availability,
+	// and the state mirrored into the proxy. See policy.go.
+	nodePolicy policyRuntime
 }
 
 // workerPaths bundles the resolved binary paths for every worker the
@@ -522,6 +526,10 @@ func (b *Broker) restoreEnabledEngines(w *rpcWorker) {
 	// An unreadable journal must not discard the component stores' enabled
 	// intent. Recovery logs the failure; restore still uses the saved runtime.
 	b.recoverEngineSettings()
+	if b.skipRestoreWhilePaused() {
+		slog.Info("node is paused with stopEngines; engines are restored when it resumes")
+		return
+	}
 	if err := w.Notify(restoreEnabledEnginesMethod, nil); err != nil {
 		slog.Warn("failed to request enabled-engine restoration", "err", err)
 	}
@@ -916,6 +924,10 @@ func (b *Broker) spawnProxy() (supervisedHandle, error) {
 	bringUp, cancelBringUp := b.proxyBringUpContext()
 	defer cancelBringUp()
 
+	// Node policy first, before any facade listens, so a paused node is never
+	// briefly admitting work after a proxy restart.
+	b.replayPolicyToProxy(bringUp, pp)
+
 	enabled := 0
 	var failed []engineProxyProfile
 	for _, profile := range engineProxyProfiles {
@@ -1140,6 +1152,7 @@ func (b *Broker) spawnEngineMgr() (supervisedHandle, error) {
 		return nil, err
 	}
 	b.setEngineMgr(w)
+	go b.refreshEnginePolicySnapshot(w)
 	// Re-push the alias reservation before anything can drive this worker: a
 	// respawned engine-manager starts with an empty reservation and must not
 	// adopt or start a backend on the port the proxy alias owns.
@@ -1490,6 +1503,9 @@ func (b *Broker) pushClusterIdentityToNodeInfo() {
 // pipeline; the rest of each worker's notification stream is logged and
 // dropped until its control-plane relay is wired in.
 func (b *Broker) forwardEngineNotification(method string, params json.RawMessage) {
+	if b.handlePolicyEngineNotification(method, params) {
+		return
+	}
 	if method == "engine:settings-request" {
 		b.handleSettingsRelay(params)
 		return
@@ -2099,6 +2115,16 @@ func (b *Broker) Serve(ctx context.Context) error {
 	// as in-flight. Independent of persistence above: it guards the live set.
 	go b.runStaleWorkloadSweep(ctx)
 	go b.refreshEngineSettings(ctx)
+
+	// The node policy is loaded before engine-manager and the proxy start: the
+	// proxy is handed it before it can admit anything, and a node paused with
+	// stopEngines must not have its engines restored.
+	if path, err := defaultNodePolicyPath(); err != nil {
+		slog.Warn("could not resolve the node policy path; using the default policy in memory", "err", err)
+	} else {
+		b.loadNodePolicy(path)
+	}
+	go b.runIdlePolicy(ctx)
 
 	// The scanner is the broker's core worker. Its supervisor's first
 	// spawn is synchronous so a hard startup failure stays fatal — the
@@ -3229,6 +3255,9 @@ func (b *Broker) handleMessage(msg *Message) {
 		if b.handleEngineProxyBrokerRequest(profile, method, msg) {
 			return
 		}
+	}
+	if b.handlePolicyRequest(msg) {
+		return
 	}
 
 	switch msg.Method {
