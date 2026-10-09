@@ -1,13 +1,12 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-import { app, BrowserWindow, clipboard, Menu, nativeImage } from 'electron'
+import { app, BrowserWindow, clipboard, nativeImage } from 'electron'
 import { safeHandle } from '@/electron/ipc/safe-handle'
 import { openExternalSafe } from '@/electron/open-external'
 import { createOverviewWindow, focusNodeInOverview, markOverviewReady } from '@/electron/window'
 import { warmEngineHubs } from '@/electron/service-bridge/model-catalog'
-import { APP_DISPLAY_NAME } from '@/shared/constants/app'
-import { resizeTrayWindow } from '@/electron/tray'
+import { resizeTrayWindow, showTrayMenu } from '@/electron/tray'
 import { saveDebugLogs } from './debug-log-export'
 
 export function registerWindowIpc(): void {
@@ -66,13 +65,8 @@ export function registerWindowIpc(): void {
     })
 
     safeHandle('tray:show-menu', event => {
-        const menu = Menu.buildFromTemplate([
-            { label: 'Overview', click: () => createOverviewWindow() },
-            { type: 'separator' },
-            { label: `Exit ${APP_DISPLAY_NAME}`, click: () => app.quit() }
-        ])
         const win = BrowserWindow.fromWebContents(event.sender)
-        if (win) menu.popup({ window: win })
+        if (win) showTrayMenu(win)
     })
 
     safeHandle('window:copy-to-clipboard', (_event, text) => {
