@@ -138,6 +138,15 @@ func (b *Broker) pauseNode(ctx context.Context) (nodepolicy.Availability, error)
 				return "", errAvailabilitySuperseded
 			}
 			if _, err := b.callEngine(ctx, engineSleepMethod, map[string]string{"engine": engine}); err != nil {
+				if ctx.Err() != nil {
+					// Superseded mid-stop: engine-manager may still finish the
+					// stop, so let the resume that superseded us wake it.
+					// Transitions are serialized, so it reads this afterwards.
+					r.mu.Lock()
+					r.pauseSlept[engine] = true
+					r.mu.Unlock()
+					return "", errAvailabilitySuperseded
+				}
 				slog.Warn("could not stop engine for pause", "engine", engine, "err", err)
 				continue
 			}
