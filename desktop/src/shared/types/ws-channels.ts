@@ -43,7 +43,9 @@ import type { NodeItem } from '@/shared/types/nodes'
 import type { NodeItemMetrics } from '@/shared/types/metrics'
 import type {
     NodeAvailability,
+    NodeAvailabilityChange,
     NodeAvailabilityRequest,
+    NodePolicyChange,
     NodePolicyDocument,
     NodePolicyTarget,
     NodePolicyWrite,
@@ -154,6 +156,10 @@ export interface WsPushChannelMap {
     'engines:settings-disconnected': { nodeId: string }
     'engines:progress-changed': EngineProgress
     'engines:progress-cleared': { key: string }
+
+    // Node policy and availability, for every node the broker relays (not only this PC)
+    'node:availability-changed': NodeAvailabilityChange
+    'policy:changed': NodePolicyChange
 
     // Metrics
     'metrics:update': NodeItemMetrics

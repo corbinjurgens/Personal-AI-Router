@@ -48,6 +48,12 @@ export default function RoutingSettings() {
     const [loadError, setLoadError] = useState<string | null>(null)
     const [saveError, setSaveError] = useState<string | null>(null)
     const latestLoad = useRef(0)
+    // The policy as last loaded or saved, to tell whether the editor has unsaved edits.
+    const textRef = useRef('')
+    const savedTextRef = useRef('')
+    textRef.current = text
+    // The id the broker uses for the selected node; this PC's is the self id.
+    const targetId = nodeId ?? selfId
 
     const load = useCallback(async () => {
         latestLoad.current += 1
@@ -58,6 +64,7 @@ export default function RoutingSettings() {
         try {
             const document = await window.pairApi.nodePolicy.get(nodeId ?? undefined)
             if (ticket !== latestLoad.current) return
+            savedTextRef.current = document.policy
             setText(document.policy)
             setAvailability(document.availability)
         } catch (err) {
@@ -71,9 +78,29 @@ export default function RoutingSettings() {
     useEffect(() => {
         if (!connected) return
         setAvailability(null)
+        savedTextRef.current = ''
         setText('')
         void load()
     }, [connected, load])
+
+    // Live updates from the broker. The policy text is replaced only when the
+    // user has no unsaved edits, so a push never overwrites typing.
+    useEffect(() => {
+        if (targetId === null) return
+        const offAvailability = window.pairApi.nodePolicy.onAvailabilityChanged(change => {
+            if (change.nodeId === targetId) setAvailability(change.availability)
+        })
+        const offPolicy = window.pairApi.nodePolicy.onPolicyChanged(change => {
+            if (change.nodeId !== targetId) return
+            if (textRef.current !== savedTextRef.current) return
+            savedTextRef.current = change.policy
+            setText(change.policy)
+        })
+        return () => {
+            offAvailability()
+            offPolicy()
+        }
+    }, [targetId])
 
     const toggleAvailability = useCallback(async () => {
         if (availability !== 'available' && availability !== 'paused') return
@@ -98,6 +125,7 @@ export default function RoutingSettings() {
         try {
             const result = await window.pairApi.nodePolicy.set(text, nodeId ?? undefined)
             // Show the policy as persisted: the service fills in omitted fields.
+            savedTextRef.current = result.policy
             setText(result.policy)
         } catch (err) {
             setSaveError(getErrorString(err))

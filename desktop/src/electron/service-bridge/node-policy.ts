@@ -3,6 +3,8 @@
 
 import type {
     NodeAvailability,
+    NodeAvailabilityChange,
+    NodePolicyChange,
     NodePolicyDocument,
     NodePolicyTarget,
     WorkloadCancelRequest
@@ -64,6 +66,24 @@ export function parseAvailabilityResult(result: JsonValue | undefined): {
     const availability = availabilityValue(objectValue(result)?.availability)
     if (!availability) throw new Error('The service returned no node availability')
     return { availability }
+}
+
+/** Parse a `node:availability-changed {nodeId, availability, active}` push; null if malformed. */
+export function parseAvailabilityChange(
+    params: JsonValue | undefined
+): NodeAvailabilityChange | null {
+    const body = objectValue(params)
+    const availability = availabilityValue(body?.availability)
+    if (!body || typeof body.nodeId !== 'string' || body.nodeId === '' || !availability) return null
+    return { nodeId: body.nodeId, availability }
+}
+
+/** Parse a `policy:changed {nodeId, policy}` push; null if malformed. */
+export function parsePolicyChange(params: JsonValue | undefined): NodePolicyChange | null {
+    const body = objectValue(params)
+    if (!body || typeof body.nodeId !== 'string' || body.nodeId === '') return null
+    if (objectValue(body.policy) === null) return null
+    return { nodeId: body.nodeId, policy: policyText(body.policy) }
 }
 
 /**
