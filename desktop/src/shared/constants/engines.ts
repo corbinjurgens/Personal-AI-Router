@@ -76,5 +76,6 @@ export const EngineOperationTypes = [
     'pull',
     'load',
     'unload',
-    'delete'
+    'delete',
+    'copy'
 ] as const

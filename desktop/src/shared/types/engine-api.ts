@@ -64,6 +64,7 @@ export type EngineCommandType =
     | 'loadModel'
     | 'unloadModel'
     | 'deleteModel'
+    | 'copyModelToThisPc'
     | 'setModelExpiry'
 
 /** Payload for engine commands sent from the UI. */

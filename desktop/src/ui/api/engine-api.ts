@@ -60,6 +60,8 @@ export interface IEngineApi {
     unloadModel(engineType: EngineType, nodeId: string, model: string): void
     /** Delete a downloaded model from a node. */
     deleteModel(engineType: EngineType, nodeId: string, model: string): void
+    /** Copy a model from a paired node (`nodeId`) to this PC. Progress arrives as `copy` progress. */
+    copyModelToThisPc(engineType: EngineType, nodeId: string, model: string): void
     /** Set the model keep-alive expiry duration on a node. */
     setModelExpiry(engineType: EngineType, nodeId: string, model: string, expiry: string): void
     /** Load an engine catalog or explicitly search its upstream registry. */
@@ -106,6 +108,18 @@ export function createEngineApi(transport: ServiceTransport): IEngineApi {
             fireCommand(transport, { command: 'unloadModel', engineType, nodeId, model }),
         deleteModel: (engineType, nodeId, model) =>
             fireCommand(transport, { command: 'deleteModel', engineType, nodeId, model }),
+        // Not `fireCommand`: the copy shows its own progress, and a pending-action
+        // entry on the source's row would lock its other actions for the duration.
+        copyModelToThisPc: (engineType, nodeId, model) => {
+            transport
+                .invoke('engine:command', {
+                    command: 'copyModelToThisPc',
+                    engineType,
+                    nodeId,
+                    model
+                })
+                .catch(() => {})
+        },
         setModelExpiry: (engineType, nodeId, model, expiry) =>
             fireCommand(transport, {
                 command: 'setModelExpiry',
