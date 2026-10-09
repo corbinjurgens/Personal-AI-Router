@@ -21,6 +21,7 @@
 - ⚠️ nvpair-engine-manager → engine:describe
 - ⚠️ nvpair-engine-manager → engine:errors
 - ⚠️ nvpair-engine-manager → engine:get-launch
+- ⚠️ nvpair-engine-manager → engine:intent
 - ⚠️ nvpair-engine-manager → engine:logs
 - ⚠️ nvpair-engine-manager → engine:preview-launch
 - ⚠️ nvpair-engine-manager → engine:remote-apply-settings
@@ -29,6 +30,9 @@
 - ⚠️ nvpair-engine-manager → engine:remote-preview-settings
 - ⚠️ nvpair-engine-manager → engine:restart
 - ⚠️ nvpair-engine-manager → engine:set-port
+- ⚠️ nvpair-engine-manager → engine:sleep
+- ⚠️ nvpair-engine-manager → engine:unload-model
+- ⚠️ nvpair-engine-manager → engine:wake
 - ⚠️ nvpair-engine-manager → internal:set-reserved-port
 - ⚠️ nvpair-job-scheduler → scheduler:get-interval
 - ⚠️ nvpair-job-scheduler → scheduler:get-status
@@ -47,7 +51,11 @@
 - ⚠️ nvpair-ui-broker → engine:set-port
 - ⚠️ nvpair-ui-broker → engine:set-reserved-port
 - ⚠️ nvpair-ui-broker → engine:unsubscribe
+- ⚠️ nvpair-ui-broker → engine:wake
 - ⚠️ nvpair-ui-broker → internal:set-reserved-port
+- ⚠️ nvpair-ui-broker → node:set-availability
+- ⚠️ nvpair-ui-broker → policy:get
+- ⚠️ nvpair-ui-broker → policy:set
 - ⚠️ nvpair-ui-broker → workloads:unsubscribe
 
 ### Backend binaries not listed in `modular-binaries.ts`
@@ -82,6 +90,7 @@
 | Method | Direction | In bridge? |
 |---|---|---|
 | `engine:install-progress` | notification (we consume) | ✅ yes |
+| `engine:intent-changed` | notification (we consume) | ➖ ignored |
 | `engine:models-changed` | notification (we consume) | ✅ yes |
 | `engine:pull-progress` | notification (we consume) | ✅ yes |
 | `engine:ready` | notification (we consume) | ✅ yes |
@@ -100,6 +109,7 @@
 | `engine:get-installed` | request (we call) | ✅ yes |
 | `engine:get-launch` | request (we call) | ⚠️ not called |
 | `engine:install` | request (we call) | ✅ yes |
+| `engine:intent` | request (we call) | ⚠️ not called |
 | `engine:logs` | request (we call) | ⚠️ not called |
 | `engine:models` | request (we call) | ✅ yes |
 | `engine:prepare-shutdown` | request (we call) | ➖ ignored |
@@ -118,11 +128,14 @@
 | `engine:remote-unload-model` | request (we call) | ✅ yes |
 | `engine:restart` | request (we call) | ⚠️ not called |
 | `engine:set-port` | request (we call) | ⚠️ not called |
+| `engine:sleep` | request (we call) | ⚠️ not called |
 | `engine:start` | request (we call) | ✅ yes |
 | `engine:status` | request (we call) | ✅ yes |
 | `engine:stop` | request (we call) | ✅ yes |
 | `engine:uninstall` | request (we call) | ✅ yes |
 | `engine:uninstall-managed` | request (we call) | ✅ yes |
+| `engine:unload-model` | request (we call) | ⚠️ not called |
+| `engine:wake` | request (we call) | ⚠️ not called |
 | `error` | request (we call) | ✅ yes |
 | `internal:set-reserved-port` | request (we call) | ⚠️ not called |
 
@@ -261,6 +274,7 @@
 | `errors:clear` | notification (we consume) | ✅ yes |
 | `errors:report` | notification (we consume) | ✅ yes |
 | `errors:update` | notification (we consume) | ✅ yes |
+| `policy:reply` | notification (we consume) | ➖ ignored |
 | `workloads:remove` | notification (we consume) | ✅ yes |
 | `workloads:upsert` | notification (we consume) | ✅ yes |
 | `connection/cluster-auto-sync` | request (we call) | ➖ ignored |
@@ -272,12 +286,16 @@
 | `engine:configure-launch` | request (we call) | ⚠️ not called |
 | `engine:get-settings` | request (we call) | ✅ yes |
 | `engine:install` | request (we call) | ✅ yes |
+| `engine:intent-changed` | request (we call) | ➖ ignored |
+| `engine:models-changed` | request (we call) | ✅ yes |
 | `engine:preview-settings` | request (we call) | ✅ yes |
 | `engine:set-port` | request (we call) | ⚠️ not called |
 | `engine:set-reserved-port` | request (we call) | ⚠️ not called |
 | `engine:start` | request (we call) | ✅ yes |
+| `engine:state-changed` | request (we call) | ✅ yes |
 | `engine:subscribe` | request (we call) | ✅ yes |
 | `engine:unsubscribe` | request (we call) | ⚠️ not called |
+| `engine:wake` | request (we call) | ⚠️ not called |
 | `errors:get-initial` | request (we call) | ✅ yes |
 | `internal:set-reserved-port` | request (we call) | ⚠️ not called |
 | `node/add` | request (we call) | ✅ yes |
@@ -285,8 +303,14 @@
 | `node/remove` | request (we call) | ✅ yes |
 | `node/removed` | request (we call) | ✅ yes |
 | `node/updated` | request (we call) | ✅ yes |
+| `node:set-availability` | request (we call) | ⚠️ not called |
 | `nodes/list` | request (we call) | ✅ yes |
+| `policy:cancel` | request (we call) | ➖ ignored |
+| `policy:get` | request (we call) | ⚠️ not called |
+| `policy:request` | request (we call) | ➖ ignored |
+| `policy:set` | request (we call) | ⚠️ not called |
 | `ready` | request (we call) | ✅ yes |
+| `workloads:cancel` | request (we call) | ➖ ignored |
 | `workloads:get-initial` | request (we call) | ✅ yes |
 | `workloads:subscribe` | request (we call) | ✅ yes |
 | `workloads:unsubscribe` | request (we call) | ⚠️ not called |
@@ -295,6 +319,7 @@
 - `method (var)  (broker.go, 5 sites)`
 - `method (var)  (clustermanager.go)`
 - `method (var)  (errors.go)`
+- `method (var)  (policy.go)`
 - `method (var)  (proxy.go, 2 sites)`
 - `method (var)  (rpcworker.go, 2 sites)`
 
@@ -303,6 +328,7 @@
 | Method | Direction | In bridge? |
 |---|---|---|
 | `ready` | notification (we consume) | ✅ yes |
+| `workloads:cancel` | notification (we consume) | ➖ ignored |
 | `workloads:remove` | notification (we consume) | ✅ yes |
 | `workloads:upsert` | notification (we consume) | ✅ yes |
 

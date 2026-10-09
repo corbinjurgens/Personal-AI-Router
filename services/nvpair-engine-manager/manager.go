@@ -62,6 +62,7 @@ type setPortParam struct {
 // loop never blocks; the codec serializes the concurrent responses.
 type Manager struct {
 	settingsRelay settingsRelay
+	policyRelay   policyRelay
 	codec         *Codec
 	exec          *Executor
 	peers         *peerDirectory
@@ -99,6 +100,8 @@ func NewManager(codec *Codec, exec *Executor, mesh *clustertrust.Mesh) *Manager 
 	}
 	m.settingsRelay.send = codec.Notify
 	exec.settingsParent = m.settingsRelay.call
+	m.policyRelay.send = codec.Notify
+	exec.policyParent = m.policyRelay.call
 	return m
 }
 
@@ -159,7 +162,7 @@ func (m *Manager) readLoop(ctx context.Context) error {
 }
 
 func (m *Manager) handleMessage(ctx context.Context, msg *Message) {
-	if m.handleSettingsMessage(ctx, msg) {
+	if m.handleSettingsMessage(ctx, msg) || m.handlePolicyMessage(ctx, msg) {
 		return
 	}
 	if msg.Method == applog.SetLevelMethod {

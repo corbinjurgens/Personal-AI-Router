@@ -73,10 +73,22 @@ Requests (caller → service):
 | `engine:remote-copy-model` | `{ node, engine, model }` | `{ opId, result: { engine, model, files, filesSkipped, bytesTotal, bytesCopied } }` after copying the model from `node`'s engine store into this node's (live progress via `engine:remote-progress` with `op:"copy"`). See "Model copy between nodes" below |
 | `engine:remote-start` | `{ node, engine, port? }` | `EngineStatus` from the remote node (always the manifest's `runtime.bind`; no per-call bind override on the remote path) |
 | `engine:remote-stop` | `{ node, engine }` | `EngineStatus` from the remote node |
+| `engine:wake` | `{ engine }` | `EngineStatus` — starts the engine only if its saved intent is On (an engine with no saved intent counts as Off and is refused). Never changes the saved intent. Refused once shutdown has begun |
+| `engine:sleep` | `{ engine }` | `EngineStatus` — stops the engine the way `engine:restart` and shutdown do, without recording Off intent, so `engine:wake` or the next launch's restore can start it again |
+| `engine:intent` | — | `{ enabledByEngine: { <engine>: bool } }` — every registered engine's saved intent, read from the intent file without taking any engine's lifecycle lock |
+| `engine:unload-model` | `{ engine, model }` | the engine's raw response — unloads one model through the same per-engine mapping the remote unload uses (Ollama `keep_alive:0`, the others `unload_model`) |
+| `engine:remote-policy-get` | `{ nodeId }` | the target broker's `policy:get` result |
+| `engine:remote-policy-set` | `{ nodeId, policy }` | the target broker's `policy:set` result |
+| `engine:remote-availability-set` | `{ nodeId, state }` | the target broker's `node:set-availability` result (waits for the target's drain, on the readiness-sized response budget) |
 | `shutdown` | — | `null` |
 | `log/set-level` | `{ level }` | `{ level }` |
 
 `EngineStatus` = `{ engine, display_name, installed, running, healthy, port }`.
+
+`engine:wake`, `engine:sleep` and `engine:intent` exist for the broker's node
+policy (pause, idle stop, start on demand). `engine:start` and `engine:stop`
+remain the only operations that record what the user wants; wake and sleep take
+the engine's lifecycle lock like `engine:restart` but only act on that record.
 
 Notifications (service → caller): `engine:ready{version}`,
 `engine:state-changed{EngineStatus}`,
@@ -94,7 +106,12 @@ a failed pull emits a terminal `stage:"error", percent:-1, message` frame so a
 UI converges even if its synchronous call already timed out),
 `engine:remote-progress{opId, node, engine, op, stage, percent?, message}`
 (relayed live progress for a remote install/pull; a model copy adds
-`file?, bytesDone?, bytesTotal?`), and — for the error
+`file?, bytesDone?, bytesTotal?`),
+`engine:intent-changed{enabledByEngine}` (pushed after an explicit start, stop,
+restart or install-and-start changes saved intent; wake and sleep never do), and
+`policy:request{id, method, caller, params}` / `policy:cancel{id}` (a paired
+node's node-policy call relayed to the broker, answered by the broker's
+`policy:reply{id, result, error?}`; see below), and — for the error
 pipeline — `errors:report` / `errors:clear` (consumed by `nvpair-errors`
 via the broker; see below).
 
@@ -272,6 +289,18 @@ Endpoints (all under `/v1`):
 | `POST /v1/engines/stop` | JSON | remote stop → `EngineStatus` |
 | `GET /v1/models/files?engine=&model=` | NDJSON stream | the model's files with size and sha256, for a peer copying it |
 | `GET /v1/models/file?engine=&model=&path=` | file bytes | one listed file, with HTTP Range support |
+| `POST /v1/node-policy/get` | JSON | the target broker's `policy:get` |
+| `POST /v1/node-policy/set` | JSON `{ policy }` | the target broker's `policy:set` |
+| `POST /v1/node-availability/set` | JSON `{ state }` | the target broker's `node:set-availability`, answered once the state is reached |
+
+The node-policy routes carry the broker's policy, which engine-manager does not
+interpret. Each is gated on the caller's pin like the settings routes, accepts at
+most 256 KiB, refuses unknown fields, clears any `nodeId` so the target acts on
+itself and never forwards a further hop, and relays to the broker as
+`policy:request` stamped with the authenticated caller. The broker re-checks the
+pin, acts, and answers with `policy:reply`. The route abandons its wait (and sends
+`policy:cancel`) if the caller loses its pin or 15 minutes pass; a pause the broker
+already accepted still finishes.
 
 The streaming routes emit zero or more `{"type":"progress",...}` frames followed
 by exactly one terminal `{"type":"result",...}` or `{"type":"error",...}` frame.

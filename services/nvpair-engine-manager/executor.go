@@ -80,8 +80,11 @@ type engineState struct {
 // layer runs the long ones (install, start) in goroutines so the read
 // loop stays responsive.
 type Executor struct {
-	settingsHub      settings.Hub
-	settingsParent   func(context.Context, string, settings.Request, string) (json.RawMessage, error)
+	settingsHub    settings.Hub
+	settingsParent func(context.Context, string, settings.Request, string) (json.RawMessage, error)
+	// policyParent relays a paired node's node-policy call to the broker
+	// (policyrelay.go). nil until a Manager wires it.
+	policyParent     func(ctx context.Context, method string, params json.RawMessage, caller string) (json.RawMessage, error)
 	reg              *Registry
 	reporter         *Reporter
 	emit             func(method string, params any)

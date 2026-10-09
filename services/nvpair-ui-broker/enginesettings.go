@@ -569,6 +569,11 @@ func (b *Broker) applyEngineSettings(ctx context.Context, p settings.Request, ca
 	// peer cannot abandon half a port swap. The operation has its own deadline.
 	operationCtx, operationCancel := context.WithTimeout(context.Background(), settings.OperationBudget)
 	defer operationCancel()
+	// A restart of a running engine first drains it at the proxy (settingsdrain.go).
+	if preview.Restart {
+		release := b.drainEngineForSettingsLocked(operationCtx, p.Engine)
+		defer release()
+	}
 	_ = b.runSettingsOperationLocked(operationCtx, p.Engine, record)
 	return record.Receipts[p.RequestID], nil
 }
