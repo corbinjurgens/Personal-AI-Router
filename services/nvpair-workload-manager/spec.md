@@ -77,6 +77,7 @@ Tracks inference workloads cluster-wide as they are queued, executed, and retire
   completedAt: number | null
   error: string | null
   requesterId: string | null
+  requestedModel?: string  // The tier ("weak" | "medium" | "strong") the request asked for, when `model` is the concrete model the proxy chose for it. Optional/additive (§7.3): absent when the client named a model. Passed through opaquely; not part of the dedup key.
 }
 ```
 
@@ -86,7 +87,7 @@ Tracks inference workloads cluster-wide as they are queued, executed, and retire
 
 Validation: check every inbound envelope before processing. A `Workload` must
 carry `id`, `model`, `engine`, `state`, and `originatedFrom`; `runId`, `seq`,
-and `scheduledOn` are optional/additive, and the timestamp and nullable fields
+`scheduledOn` and `requestedModel` are optional/additive, and the timestamp and nullable fields
 are passed through opaquely. Note the asymmetry with the dedup key: `runId` and
 `seq` are part of that key but are not required, so a producer that omits them
 is accepted and simply gets coarser deduplication rather than a rejection.

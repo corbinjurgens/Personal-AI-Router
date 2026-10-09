@@ -88,6 +88,7 @@ Defined in [`workload.go`](workload.go):
 | `createdAt`, `startedAt`, `completedAt` | Epoch milliseconds; the last two are nullable |
 | `error` | Normalized failure text, nullable |
 | `requesterId` | Optional client attribution, nullable |
+| `requestedModel` | Optional, additive: the tier (`weak`, `medium`, `strong`) a request asked for, when `model` is the concrete model chosen for it. Absent when the client named a model |
 | `seq` | Producer's event counter, from 1. Part of the dedup key, so a workload that returns to a placement it already had is not mistaken for a redelivery |
 
 Optional and nullable fields use pointers so a peer's payload round-trips without
