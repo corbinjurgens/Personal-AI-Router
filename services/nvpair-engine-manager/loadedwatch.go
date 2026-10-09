@@ -55,15 +55,24 @@ func (e *Executor) watchLoaded(ctx context.Context) {
 	defer t.Stop()
 
 	var prev map[string][]string
+	var lastInventory time.Time
 	seeded := false
 	for {
+		poked := false
 		select {
 		case <-ctx.Done():
 			return
 		case <-t.C:
 		case <-e.loadedPoke:
+			poked = true
 		}
-		changed, next, res := e.sweepLoaded(ctx, prev)
+		// A poke follows a PAIR action (pull, delete, load) that may have changed
+		// the installed list, so it always refreshes the inventory too.
+		fullInventory := poked || time.Since(lastInventory) >= inventoryReconcileInterval
+		if fullInventory {
+			lastInventory = time.Now()
+		}
+		changed, next, res := e.sweepLoaded(ctx, prev, fullInventory)
 		prev = next
 		if !seeded {
 			seeded = true
@@ -84,8 +93,8 @@ func (e *Executor) watchLoaded(ctx context.Context) {
 // transient loaded_models miss isn't mistaken for an unload. It never mutates
 // prevLoaded. Split out of watchLoaded so the diff logic is unit-testable
 // without goroutines or timers.
-func (e *Executor) sweepLoaded(ctx context.Context, prevLoaded map[string][]string) (changed []string, next map[string][]string, res ModelsResult) {
-	res = e.ModelsResult(ctx)
+func (e *Executor) sweepLoaded(ctx context.Context, prevLoaded map[string][]string, fullInventory bool) (changed []string, next map[string][]string, res ModelsResult) {
+	res = e.modelsSweep(ctx, fullInventory)
 	changed = changedEngines(prevLoaded, res.LoadedByEngine)
 	next = make(map[string][]string, len(prevLoaded)+len(res.LoadedByEngine))
 	for name, ld := range prevLoaded {

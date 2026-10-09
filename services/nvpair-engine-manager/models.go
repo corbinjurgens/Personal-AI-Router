@@ -70,8 +70,26 @@ func (e *Executor) Models(ctx context.Context) []string {
 // dropped its models for peers. Concurrency bounds the sweep by the slowest
 // single engine, not the sum.
 func (e *Executor) ModelsResult(ctx context.Context) ModelsResult {
+	return e.modelsSweep(ctx, true)
+}
+
+// inventoryReconcileInterval is how often the loaded-model watcher refreshes
+// each engine's installed inventory. Residency (what is loaded) changes on its
+// own — JIT loads, TTL evictions — so the watcher checks it every tick, but the
+// installed list only changes when someone pulls or deletes a model. PAIR's own
+// pulls and deletes poke the watcher, which forces a full sweep; this interval
+// only bounds how long a change made outside PAIR takes to show up.
+const inventoryReconcileInterval = 60 * time.Second
+
+// modelsSweep is ModelsResult with control over the installed inventory. With
+// fullInventory false, an engine whose list_models is a separate request from
+// loaded_models reuses its last inventory instead of querying it again; an
+// engine with no cached inventory, or whose two actions share one request, is
+// still queried. Every successful inventory query refreshes the cache.
+func (e *Executor) modelsSweep(ctx context.Context, fullInventory bool) ModelsResult {
 	ctx, cancel := context.WithTimeout(ctx, modelsTimeout)
 	defer cancel()
+	cached := e.cachedInventory()
 
 	engineNames := e.reg.Names()
 	// Results indexed by engine position so the flattened output stays
@@ -99,6 +117,8 @@ func (e *Executor) ModelsResult(ctx context.Context) ModelsResult {
 			continue
 		}
 		shared := listSpec != nil && loadedSpec != nil && sameReadRequest(listAct, loadedAct)
+		inv, haveInv := cached[name]
+		reuseInv := !fullInventory && !shared && haveInv
 		wg.Add(1)
 		go func(i int, name string, listSpec, loadedSpec *ActionResult, shared bool) {
 			defer wg.Done()
@@ -108,7 +128,10 @@ func (e *Executor) ModelsResult(ctx context.Context) ModelsResult {
 			}
 			var listRaw json.RawMessage
 			var listErr error
-			if listSpec != nil {
+			if listSpec != nil && reuseInv {
+				perEngine[i] = inv
+				listOK[i] = true
+			} else if listSpec != nil {
 				listRaw, listErr = e.Action(ctx, name, "list_models", nil)
 				if listErr != nil {
 					slog.Debug("engine:models list_models failed", "engine", name, "err", listErr)
@@ -139,6 +162,14 @@ func (e *Executor) ModelsResult(ctx context.Context) ModelsResult {
 		}(i, name, listSpec, loadedSpec, shared)
 	}
 	wg.Wait()
+
+	fresh := make(map[string][]string)
+	for i, ok := range listOK {
+		if ok {
+			fresh[engineNames[i]] = perEngine[i]
+		}
+	}
+	e.storeInventory(fresh)
 
 	res := ModelsResult{Models: []string{}}
 	seen := map[string]bool{}
@@ -292,4 +323,24 @@ func sameReadRequest(a, b Action) bool {
 		a.HTTP.Path == b.HTTP.Path &&
 		a.HTTP.ParamsIn == b.HTTP.ParamsIn &&
 		bytes.Equal(a.HTTP.BodySchema, b.HTTP.BodySchema)
+}
+
+// cachedInventory returns a copy of the last installed inventory per engine.
+func (e *Executor) cachedInventory() map[string][]string {
+	e.inventoryMu.Lock()
+	defer e.inventoryMu.Unlock()
+	out := make(map[string][]string, len(e.inventory))
+	for name, models := range e.inventory {
+		out[name] = models
+	}
+	return out
+}
+
+// storeInventory replaces the cache with the engines answered this sweep. An
+// engine missing from the sweep (stopped, or its query failed) loses its entry,
+// so a restarted engine is always queried afresh rather than served stale.
+func (e *Executor) storeInventory(fresh map[string][]string) {
+	e.inventoryMu.Lock()
+	defer e.inventoryMu.Unlock()
+	e.inventory = fresh
 }

@@ -303,20 +303,20 @@ func TestSweepLoadedSeedsThenEmitsOnChange(t *testing.T) {
 	}
 
 	// Seed sweep: baseline is {fake:[llama3.2:1b]}.
-	_, prev, _ := ex.sweepLoaded(ctx, nil)
+	_, prev, _ := ex.sweepLoaded(ctx, nil, true)
 	if want := map[string][]string{"fake": {"llama3.2:1b"}}; !reflect.DeepEqual(prev, want) {
 		t.Fatalf("seed baseline = %v, want %v", prev, want)
 	}
 
 	// No residency change -> no engine reported changed.
-	changed, prev, _ := ex.sweepLoaded(ctx, prev)
+	changed, prev, _ := ex.sweepLoaded(ctx, prev, true)
 	if len(changed) != 0 {
 		t.Fatalf("unchanged sweep reported %v, want none", changed)
 	}
 
 	// Evict everything -> fake changes; payload carries the empty loaded set.
 	setLoaded(t, ex, nil)
-	changed, _, res := ex.sweepLoaded(ctx, prev)
+	changed, _, res := ex.sweepLoaded(ctx, prev, true)
 	if !reflect.DeepEqual(changed, []string{"fake"}) {
 		t.Fatalf("changed = %v, want [fake]", changed)
 	}
@@ -334,7 +334,7 @@ func TestSweepLoadedRetainsLastGoodOnTransientMiss(t *testing.T) {
 	prev := map[string][]string{"fake": {"llama3.2:1b"}}
 	// The engine isn't started, so ModelsResult reports it neither running nor
 	// queryable: LoadedByEngine has no "fake" key this sweep.
-	changed, next, _ := ex.sweepLoaded(context.Background(), prev)
+	changed, next, _ := ex.sweepLoaded(context.Background(), prev, true)
 	if len(changed) != 0 {
 		t.Fatalf("a disappeared engine reported %v changed, want none", changed)
 	}
@@ -456,5 +456,52 @@ func TestModelsResultSharedEndpoint(t *testing.T) {
 	}
 	if !reflect.DeepEqual(res.LoadedByEngine, want) {
 		t.Fatalf("LoadedByEngine = %v, want %v", res.LoadedByEngine, want)
+	}
+}
+
+// TestSweepReusesInventoryBetweenReconciles: between full sweeps the watcher
+// checks residency only, so an engine with separate list and loaded endpoints
+// keeps its last inventory, and the next full sweep picks up the change.
+func TestSweepReusesInventoryBetweenReconciles(t *testing.T) {
+	m := loadedActionManifest()
+	m.Actions["delete_model"] = Action{HTTP: &ActionHTTP{Method: "DELETE", Path: "/api/delete"}}
+	ex := newTestExecutor(t, m)
+	ctx := context.Background()
+	t.Cleanup(func() { _ = ex.Stop("fake") })
+	if err := ex.Start(ctx, "fake"); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+
+	if res := ex.modelsSweep(ctx, true); !reflect.DeepEqual(res.ByEngine, map[string][]string{"fake": {"llama3.2:1b"}}) {
+		t.Fatalf("full sweep ByEngine = %v", res.ByEngine)
+	}
+	if _, err := ex.Action(ctx, "fake", "delete_model", json.RawMessage(`{"name":"llama3.2:1b"}`)); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+
+	res := ex.modelsSweep(ctx, false)
+	if !reflect.DeepEqual(res.ByEngine, map[string][]string{"fake": {"llama3.2:1b"}}) {
+		t.Fatalf("residency-only sweep ByEngine = %v, want the cached inventory", res.ByEngine)
+	}
+	if _, ok := res.LoadedByEngine["fake"]; !ok {
+		t.Fatal("residency-only sweep must still report the loaded set")
+	}
+
+	if res := ex.modelsSweep(ctx, true); !reflect.DeepEqual(res.ByEngine, map[string][]string{"fake": {}}) {
+		t.Fatalf("full sweep after delete ByEngine = %v, want empty", res.ByEngine)
+	}
+}
+
+// TestSweepQueriesInventoryOnCacheMiss: a residency-only sweep with nothing
+// cached (first sweep, or the engine just restarted) still reads the inventory.
+func TestSweepQueriesInventoryOnCacheMiss(t *testing.T) {
+	ex := newTestExecutor(t, loadedActionManifest())
+	ctx := context.Background()
+	t.Cleanup(func() { _ = ex.Stop("fake") })
+	if err := ex.Start(ctx, "fake"); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	if res := ex.modelsSweep(ctx, false); !reflect.DeepEqual(res.ByEngine, map[string][]string{"fake": {"llama3.2:1b"}}) {
+		t.Fatalf("ByEngine = %v, want the queried inventory", res.ByEngine)
 	}
 }
