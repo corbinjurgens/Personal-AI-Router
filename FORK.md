@@ -117,8 +117,16 @@ Next:
   `pair-release-intent:v1` block in each PR description. Decide whether the fork
   keeps that pipeline or replaces it.
 
-## Known local test caveat
+## Known local test caveats
 
-`TestHandleHTTP_RealSocketFlushDeadline` (`services/nvpair-proxy`) depends on
-kernel socket buffer sizes. It fails in some containers on unmodified upstream
-code and passes in upstream CI.
+These fail identically on unmodified upstream code in a sandboxed container,
+and pass in upstream CI:
+
+- `TestHandleHTTP_RealSocketFlushDeadline` (`services/nvpair-proxy`) depends on
+  kernel socket buffer sizes.
+- Eleven cross-process tests in `services/tests` (discovery, broker
+  subscription, and workload-manager rehydration and broadcast) need working
+  mDNS/multicast networking.
+
+Run them on a real machine before trusting a change to discovery or workload
+broadcast.
