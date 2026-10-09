@@ -3,15 +3,13 @@
 
 import { lazy, Suspense, type ReactNode } from 'react'
 import MainApp from '@/ui/components/MainApp/MainApp'
+import { isTrayWindow } from '@/ui/utils/window-kind'
 
 const TrayApp = lazy(() => import('@/ui/components/TrayApp/TrayApp'))
 
-const params = new URLSearchParams(window.location.search)
-const windowType = params.get('window')
-
 function App() {
     let content: ReactNode
-    if (windowType === 'tray') {
+    if (isTrayWindow) {
         content = (
             <Suspense fallback={null}>
                 <TrayApp />
