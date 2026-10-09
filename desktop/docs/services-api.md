@@ -220,7 +220,7 @@
 | `nodes/list` | request (we call) | ✅ yes |
 
 **Dynamic / unresolved notify sites (verify by hand — `npm run service-contracts` prints the line numbers):**
-- `method (var)  (proxy.go)`
+- `method (var)  (proxy.go, 2 sites)`
 
 ## nvpair-tui
 
