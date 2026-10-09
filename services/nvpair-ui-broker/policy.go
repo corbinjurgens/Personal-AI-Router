@@ -312,6 +312,9 @@ func (b *Broker) handlePolicyRequest(msg *Message) bool {
 	case methodPolicyGet, methodPolicySet, methodSetAvailability:
 		go b.servePolicyRequest(msg)
 		return true
+	case methodWorkloadsCancel:
+		go b.handleWorkloadsCancel(msg)
+		return true
 	case engineWakeMethod:
 		if reason := b.wakeRefusal(); reason != "" {
 			_ = b.codec.RespondError(msg.ID, -32000, reason)
