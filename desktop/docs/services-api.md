@@ -25,7 +25,6 @@
 - ⚠️ nvpair-engine-manager → engine:logs
 - ⚠️ nvpair-engine-manager → engine:preview-launch
 - ⚠️ nvpair-engine-manager → engine:remote-apply-settings
-- ⚠️ nvpair-engine-manager → engine:remote-copy-model
 - ⚠️ nvpair-engine-manager → engine:remote-get-settings
 - ⚠️ nvpair-engine-manager → engine:remote-preview-settings
 - ⚠️ nvpair-engine-manager → engine:restart
@@ -112,7 +111,7 @@
 | `engine:prepare-shutdown` | request (we call) | ➖ ignored |
 | `engine:preview-launch` | request (we call) | ⚠️ not called |
 | `engine:remote-apply-settings` | request (we call) | ⚠️ not called |
-| `engine:remote-copy-model` | request (we call) | ⚠️ not called |
+| `engine:remote-copy-model` | request (we call) | ✅ yes |
 | `engine:remote-delete-model` | request (we call) | ✅ yes |
 | `engine:remote-get-installed` | request (we call) | ✅ yes |
 | `engine:remote-get-settings` | request (we call) | ⚠️ not called |

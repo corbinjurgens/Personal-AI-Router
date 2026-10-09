@@ -5,8 +5,10 @@ import { describe, expect, it } from 'vitest'
 import { parseWorkloadsInitial } from '@/electron/service-bridge/modular-state'
 import {
     nodeTargetParams,
+    parseAvailabilityChange,
     parseAvailabilityResult,
     parseCancelResult,
+    parsePolicyChange,
     parsePolicyDocument,
     parsePolicySetResult,
     parsePolicyText,
@@ -134,5 +136,32 @@ describe('node policy bridge helpers', () => {
         expect(() => parsePolicyText('{oops')).toThrow(/not valid JSON/)
         expect(() => parsePolicyText('[1]')).toThrow(/must be a JSON object/)
         expect(() => parsePolicyText('null')).toThrow(/must be a JSON object/)
+    })
+})
+
+describe('node push parsers', () => {
+    it('reads an availability change and ignores the extras', () => {
+        expect(
+            parseAvailabilityChange({ nodeId: 'n1', availability: 'draining', active: 2 })
+        ).toEqual({ nodeId: 'n1', availability: 'draining' })
+    })
+
+    it('rejects an availability change without a node or a known state', () => {
+        expect(parseAvailabilityChange({ availability: 'paused' })).toBeNull()
+        expect(parseAvailabilityChange({ nodeId: 'n1', availability: 'sleeping' })).toBeNull()
+        expect(parseAvailabilityChange(undefined)).toBeNull()
+    })
+
+    it('renders a policy change as the same pretty JSON text policy:get shows', () => {
+        const change = parsePolicyChange({ nodeId: 'n1', policy: { cpu: { maxPercent: 50 } } })
+        expect(change).toEqual({
+            nodeId: 'n1',
+            policy: JSON.stringify({ cpu: { maxPercent: 50 } }, null, 2)
+        })
+    })
+
+    it('rejects a policy change without a node or an object policy', () => {
+        expect(parsePolicyChange({ policy: {} })).toBeNull()
+        expect(parsePolicyChange({ nodeId: 'n1', policy: 'x' })).toBeNull()
     })
 })
