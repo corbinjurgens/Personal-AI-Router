@@ -1527,6 +1527,10 @@ class ModularBridgeState {
         if (!nodeId || !engineType) return
 
         const op = stringValue(obj.op)
+        // A model copy from a peer (op `copy`) runs on this node, with
+        // `node` naming the source peer. Nothing renders it yet, and treating
+        // it as an install would mark the source's engine as installing.
+        if (op === 'copy') return
         const operation = op === 'pull' || op === 'pull_model' ? 'pull' : 'install'
         const stage = stringValue(obj.stage) || 'working'
         // `engine:remote-progress` carries no `model`, so for a pull we backfill
