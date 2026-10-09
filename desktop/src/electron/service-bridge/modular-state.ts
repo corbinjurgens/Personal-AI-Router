@@ -32,6 +32,7 @@ import { engineProgressKey } from '@/shared/utils/engine-progress'
 import { workloadKey } from '@/shared/utils/workloads'
 import { currentPlatform, platformDisplayName } from '@/shared/utils/platform'
 import { emitBridgePush } from './broadcaster'
+import { isModelCopyTerminal, modelCopyProgress, parseModelCopyFrame } from './model-copy'
 import { mergePullProgressPercent } from './pull-error-handling'
 import type { JsonObject, JsonRpcNotification, JsonValue } from './json-rpc-client'
 import { serviceLogLevel } from './service-log-level'
@@ -1063,6 +1064,13 @@ class ModularBridgeState {
      */
     private localPullModels = new Map<EngineType, string>()
     /**
+     * In-flight copies to this PC keyed by {@link remoteOpKey} of the source peer
+     * and engine. `engine:remote-progress` copy frames carry no `model` either, so
+     * the model dispatched is stamped here; `failure` holds the message of a
+     * terminal `error` frame for {@link finishModelCopy} to hand back.
+     */
+    private modelCopies = new Map<string, { model: string; failure?: string }>()
+    /**
      * The authoritative set of live inbound invites awaiting the local user's PIN
      * entry, keyed by `inviteId`. The cluster-manager pushes `cluster:invite-received`
      * exactly once per invite (always `pending`) and has no list-pending RPC, so
@@ -1639,6 +1647,59 @@ class ModularBridgeState {
         emitBridgePush('engines:progress-changed', progress)
     }
 
+    /** Start a copy of a model from a peer to this PC; false when one is already in flight. */
+    beginModelCopy(nodeId: string, engineType: EngineType, model: string): boolean {
+        const key = this.remoteOpKey(nodeId, engineType)
+        if (this.modelCopies.has(key)) return false
+        this.modelCopies.set(key, { model })
+        emitBridgePush(
+            'engines:progress-changed',
+            modelCopyProgress(
+                { nodeId, engineType, stage: 'starting' },
+                model,
+                this.nodes.get(nodeId)?.name ?? nodeId
+            )
+        )
+        return true
+    }
+
+    /** End a copy, clearing its progress. Returns the failure message a terminal frame carried. */
+    finishModelCopy(nodeId: string, engineType: EngineType): string | undefined {
+        const key = this.remoteOpKey(nodeId, engineType)
+        const copy = this.modelCopies.get(key)
+        if (!copy) return undefined
+        this.modelCopies.delete(key)
+        emitBridgePush('engines:progress-cleared', {
+            key: engineProgressKey({
+                nodeId,
+                engineType,
+                operation: 'copy',
+                model: copy.model
+            })
+        })
+        return copy.failure
+    }
+
+    /**
+     * Apply an `engine:remote-progress` frame with `op: "copy"`. A terminal frame
+     * is left for {@link finishModelCopy}, which the awaiting RPC runs; an
+     * `error` frame only records its message first.
+     */
+    private applyModelCopyFrame(params: JsonValue | undefined): void {
+        const frame = parseModelCopyFrame(params)
+        if (!frame) return
+        const copy = this.modelCopies.get(this.remoteOpKey(frame.nodeId, frame.engineType))
+        if (!copy) return
+        if (isModelCopyTerminal(frame.stage)) {
+            if (frame.stage === 'error') copy.failure = frame.message ?? 'The copy failed'
+            return
+        }
+        emitBridgePush(
+            'engines:progress-changed',
+            modelCopyProgress(frame, copy.model, this.nodes.get(frame.nodeId)?.name ?? frame.nodeId)
+        )
+    }
+
     /** Whether an optimistic remote pull entry for this model is still in flight. */
     isRemoteModelPullActive(nodeId: string, engineType: EngineType, model: string): boolean {
         return this.activePulls.has(
@@ -1670,9 +1731,12 @@ class ModularBridgeState {
 
         const op = stringValue(obj.op)
         // A model copy from a peer (op `copy`) runs on this node, with
-        // `node` naming the source peer. Nothing renders it yet, and treating
+        // `node` naming the source peer. It has its own progress entry; treating
         // it as an install would mark the source's engine as installing.
-        if (op === 'copy') return
+        if (op === 'copy') {
+            this.applyModelCopyFrame(params)
+            return
+        }
         const operation = op === 'pull' || op === 'pull_model' ? 'pull' : 'install'
         const stage = stringValue(obj.stage) || 'working'
         // `engine:remote-progress` carries no `model`, so for a pull we backfill

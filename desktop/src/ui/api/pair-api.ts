@@ -14,6 +14,8 @@ import type { ServiceError } from '@/shared/types/errors'
 import type { NodeItemMetrics } from '@/shared/types/metrics'
 import type {
     NodeAvailability,
+    NodeAvailabilityChange,
+    NodePolicyChange,
     NodePolicyDocument,
     RequestedAvailability,
     WorkloadCancelRequest
@@ -108,6 +110,10 @@ export interface INodePolicyApi {
         state: RequestedAvailability,
         nodeId?: string
     ): Promise<{ availability: NodeAvailability }>
+    /** Any node's availability changed (this PC included); compare `nodeId` with the self id. */
+    onAvailabilityChanged(callback: (change: NodeAvailabilityChange) => void): () => void
+    /** Any node's saved policy changed. */
+    onPolicyChanged(callback: (change: NodePolicyChange) => void): () => void
 }
 
 export interface IErrorsApi {
@@ -200,7 +206,9 @@ export function createPairApi(transport: ServiceTransport): IPairApi {
             get: nodeId => transport.invoke('policy:get', { nodeId }),
             set: (policy, nodeId) => transport.invoke('policy:set', { nodeId, policy }),
             setAvailability: (state, nodeId) =>
-                transport.invoke('node:set-availability', { nodeId, state })
+                transport.invoke('node:set-availability', { nodeId, state }),
+            onAvailabilityChanged: cb => transport.subscribePush('node:availability-changed', cb),
+            onPolicyChanged: cb => transport.subscribePush('policy:changed', cb)
         },
         errors: {
             getInitial: () => transport.invoke('errors:get-initial'),
