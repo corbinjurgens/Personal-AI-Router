@@ -24,7 +24,7 @@ stdio to a single parent, which is now this process.
 
 | Platform | Endpoint | Access |
 |---|---|---|
-| Linux, macOS | `<appdir>/service.sock` | Unix socket, mode `0600` |
+| Linux, macOS | `<appdir>/service.sock`, or `$TMPDIR/nvpair-<uid>/service.sock` when that path is longer than a socket path allows | Unix socket, mode `0600`; the fallback directory must be `0700` and owned by the user |
 | Windows | `\\.\pipe\nvpair-service-<username>` | DACL granting only the current user's SID; remote clients rejected |
 
 `<appdir>` is `nvpair-shared/appdir.Dir()`. `NVPAIR_SERVICE_ENDPOINT` overrides
@@ -45,6 +45,7 @@ nvpair-service                              # serve; broker found beside this bi
 nvpair-service --log-level debug            # also passed to the broker
 nvpair-service -- --proxy-engines ollama    # everything after -- goes to the broker
 nvpair-service status                       # print service/status of the running service
+nvpair-service call <method> [json-params]  # send any request through the service and print the result
 nvpair-service stop                         # service/stop: stop the broker cleanly, then exit
 nvpair-service --version
 ```

@@ -54,6 +54,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 			return runStatus(stdout, stderr)
 		case "stop":
 			return runStop(stdout, stderr)
+		case "call":
+			return runCall(args[1:], stdout, stderr)
 		}
 	}
 
