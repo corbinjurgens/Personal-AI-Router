@@ -292,6 +292,9 @@ func (m *Manager) handleMessage(ctx context.Context, msg *Message) {
 		"engine:remote-start", "engine:remote-stop":
 		go m.runRemote(ctx, msg)
 
+	case "engine:remote-copy-model":
+		go m.runRemoteCopy(ctx, msg)
+
 	default:
 		m.codec.RespondError(msg.ID, -32601, fmt.Sprintf("method not found: %s", msg.Method))
 	}
