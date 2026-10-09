@@ -197,13 +197,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case NotificationMsg:
-		switch msg.Msg.Method {
-		case "app:ready":
+		if msg.Msg.Method == "app:ready" {
 			m.ready = true
 			m.brokerVersion = readyVersion(msg.Msg)
-		case "service/broker-restarted":
-			// The service restarted a broker that died; it is not ready again
-			// until the new one sends its own app:ready.
+		}
+		// The service restarted a broker that died; it is not ready again
+		// until the new one sends its own app:ready.
+		if msg.Msg.Method == "service/broker-restarted" {
 			m.ready = false
 		}
 		cmds := m.broadcast(msg)
