@@ -5,6 +5,11 @@ SPDX-License-Identifier: Apache-2.0
 
 # AGENTS.md
 
+> **Fork notice:** this is a personal fork of PAIR that adds features for
+> personal use. Read [WORKLOG.md](WORKLOG.md), the record of all fork work, and
+> add an entry for every session. [FORK.md](FORK.md) has the roadmap. The
+> upstream guidance below still applies.
+
 Guidance for agents and contributors working in the **NVIDIA Personal AI Router**
 (PAIR) repository. It holds an Electron desktop application and the Go services
 it runs on, built from one checkout.
