@@ -75,6 +75,7 @@ export class JsonRpcSubprocess extends EventEmitter<JsonRpcSubprocessEvents> {
     private pending = new Map<number, PendingCall>()
     private nextId = 0
     private writeTail: Promise<void> = Promise.resolve()
+    private traceProtocol = false
 
     constructor(name: string, binaryPath: string) {
         super()
@@ -84,6 +85,14 @@ export class JsonRpcSubprocess extends EventEmitter<JsonRpcSubprocessEvents> {
 
     get running(): boolean {
         return this.child !== null
+    }
+
+    /**
+     * Whether JSON-RPC frames on stdout are emitted as `log` entries. Only the
+     * `debug` service log level wants them; stderr is always emitted.
+     */
+    setProtocolTrace(enabled: boolean): void {
+        this.traceProtocol = enabled
     }
 
     start(args: string[] = []): void {
@@ -297,21 +306,28 @@ export class JsonRpcSubprocess extends EventEmitter<JsonRpcSubprocessEvents> {
 
     private handleStdout(line: string): void {
         if (!line) return
-        // Redact only what is logged; `line` stays intact for the parse below so
-        // the pairing flow still receives the real PIN it has to display.
-        this.emit('log', {
-            source: this.name,
-            stream: 'stdout',
-            text: redactSensitiveLogText(line)
-        })
 
-        let message: JsonRpcMessage
+        let message: JsonRpcMessage | null
         try {
             message = JSON.parse(line) as JsonRpcMessage
         } catch {
-            // Already emitted above; the owner logs it.
-            return
+            message = null
         }
+
+        // A protocol frame is logged only while tracing, and then it is redacted
+        // first: it costs a redaction pass, a debug panel entry, and a file line
+        // per frame. A line that is not a frame is not protocol traffic, so it is
+        // always handed over. Redact only what is logged; `line` stays intact for
+        // the handling below so the pairing flow still receives the real PIN it
+        // has to display.
+        if (!message || this.traceProtocol) {
+            this.emit('log', {
+                source: this.name,
+                stream: 'stdout',
+                text: redactSensitiveLogText(line)
+            })
+        }
+        if (!message) return
 
         if (message.id !== undefined && message.method) {
             this.emit('request', {

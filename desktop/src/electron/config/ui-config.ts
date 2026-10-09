@@ -10,6 +10,12 @@ import {
     type ModularLogLevel
 } from '@/shared/constants/modular-runtime'
 
+/**
+ * What a primary click on the tray icon does: open the status popup (a small
+ * renderer window), or show only the native menu, which costs no renderer.
+ */
+export type TrayMode = 'popup' | 'menu'
+
 interface UiConfig {
     /** When true, first-run onboarding has not been completed or explicitly dismissed. */
     firstRun: boolean
@@ -17,12 +23,15 @@ interface UiConfig {
     modularLogLevel: ModularLogLevel
     /** macOS only: the one-time privileged-helper setup (register the SMAppService daemon + configure the Application Firewall) has completed. Gates the first-run admin prompt; left false until the daemon is enabled and firewall configuration succeeds, so an approval-pending launch retries next time. */
     macHelperSetupComplete: boolean
+    /** Tray icon click behavior, toggled from the tray menu. */
+    trayMode: TrayMode
 }
 
 const DEFAULTS: UiConfig = {
     firstRun: true,
     modularLogLevel: MODULAR_DEFAULT_LOG_LEVEL,
-    macHelperSetupComplete: false
+    macHelperSetupComplete: false,
+    trayMode: 'popup'
 }
 
 let config: UiConfig = { ...DEFAULTS }
@@ -119,5 +128,15 @@ export function isMacHelperSetupComplete(): boolean {
 
 export function setMacHelperSetupComplete(value: boolean): void {
     config.macHelperSetupComplete = value
+    save()
+}
+
+export function getTrayMode(): TrayMode {
+    // A hand-edited value that is not a known mode reads as the default.
+    return config.trayMode === 'menu' ? 'menu' : 'popup'
+}
+
+export function setTrayMode(value: TrayMode): void {
+    config.trayMode = value
     save()
 }

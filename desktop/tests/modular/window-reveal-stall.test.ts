@@ -72,6 +72,8 @@ vi.mock('@electron-toolkit/utils', () => ({ is: { dev: false } }))
 
 vi.mock('@/electron/open-external', () => ({ openExternalSafe: vi.fn() }))
 
+vi.mock('@/electron/window-visibility', () => ({ trackWindowVisibility: vi.fn() }))
+
 vi.mock('@/shared/utils/log', () => {
     const record =
         (level: string) =>
