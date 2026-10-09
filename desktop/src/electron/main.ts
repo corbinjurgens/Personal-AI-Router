@@ -9,7 +9,7 @@ import { registerApplicationIconMenu } from '@/electron/application-icon-menu'
 import { createOverviewWindow } from '@/electron/window'
 import { registerWindowShortcuts } from '@/electron/window-shortcuts'
 import { initTray, destroyTray } from '@/electron/tray'
-import { createStructuredLogger } from '@/shared/utils/log'
+import { createStructuredLogger, flushLogs, flushLogsSync } from '@/shared/utils/log'
 import {
     loadUiConfig,
     isMacHelperSetupComplete,
@@ -27,6 +27,9 @@ import { ensureNvpairOnPath } from '@/electron/nvpair-command'
 import { isAppDataWipeScheduled } from '@/electron/app-data-wipe-orchestrator'
 import { destroyInferenceDemoSync, stopInferenceDemo } from '@/electron/inference-demo'
 import { startEventLoopMonitor } from '@/electron/event-loop-monitor'
+
+/** How long quitting waits for queued log lines to reach the disk. */
+const LOG_FLUSH_TIMEOUT_MS = 2_000
 
 const gotTheLock = app.requestSingleInstanceLock()
 const exitRequested = process.argv.includes(APP_EXIT_ARGUMENT)
@@ -219,8 +222,11 @@ if (!gotTheLock || exitRequested) {
         stopInferenceDemo()
         destroyConnector()
             .catch(() => {})
-            .finally(() => {
+            .finally(async () => {
                 log.info({ sublevel: 'lifecycle', message: 'App shut down' })
+                // `app.exit` skips Node's own exit, so the queued log lines are
+                // written here or not at all.
+                await flushLogs(LOG_FLUSH_TIMEOUT_MS)
                 app.exit(0)
                 process.exit(0)
             })
@@ -233,8 +239,9 @@ if (!gotTheLock || exitRequested) {
             stopInferenceDemo()
             destroyConnector()
                 .catch(() => {})
-                .finally(() => {
+                .finally(async () => {
                     log.info({ sublevel: 'lifecycle', message: 'App shut down' })
+                    await flushLogs(LOG_FLUSH_TIMEOUT_MS)
                     process.exit(0)
                 })
         })
@@ -245,5 +252,7 @@ if (!gotTheLock || exitRequested) {
     process.on('exit', () => {
         destroyInferenceDemoSync()
         destroyConnectorSync()
+        // Last, so lines the cleanup above logged are included.
+        flushLogsSync()
     })
 }
