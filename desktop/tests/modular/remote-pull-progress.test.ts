@@ -105,6 +105,28 @@ describe('remote pull progress', () => {
 
         expect(progressEvents.at(-1)?.percent).toBe(42)
     })
+
+    it('ignores model copy frames, which name the source peer', () => {
+        const state = getModularBridgeState()
+        const channels: string[] = []
+        unsubscribe = subscribePush(event => {
+            channels.push(event.channel)
+        })
+
+        state.applyRemoteEngineProgress({
+            opId: 'op-1',
+            node: 'source-node',
+            engine: 'ollama',
+            op: 'copy',
+            stage: 'downloading',
+            percent: 10,
+            file: 'blobs/sha256-0',
+            bytesDone: 10,
+            bytesTotal: 100
+        })
+
+        expect(channels).toEqual([])
+    })
 })
 
 describe('mergePullProgressPercent', () => {

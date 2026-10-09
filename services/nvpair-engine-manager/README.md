@@ -70,6 +70,7 @@ Requests (caller → service):
 | `engine:remote-get-installed` | `{ node }` | `{ engines: [EngineStatus] }` fetched from the remote node over `ec` mTLS |
 | `engine:remote-install` | `{ node, engine, start? }` | `{ opId, status: EngineStatus }` after the remote install (live progress via `engine:remote-progress`) |
 | `engine:remote-pull-model` | `{ node, engine, model?, params? }` | `{ opId, result }` after the remote pull (live progress via `engine:remote-progress`) |
+| `engine:remote-copy-model` | `{ node, engine, model }` | `{ opId, result: { engine, model, files, filesSkipped, bytesTotal, bytesCopied } }` after copying the model from `node`'s engine store into this node's (live progress via `engine:remote-progress` with `op:"copy"`). See "Model copy between nodes" below |
 | `engine:remote-start` | `{ node, engine, port? }` | `EngineStatus` from the remote node (always the manifest's `runtime.bind`; no per-call bind override on the remote path) |
 | `engine:remote-stop` | `{ node, engine }` | `EngineStatus` from the remote node |
 | `shutdown` | — | `null` |
@@ -92,7 +93,8 @@ stage/percent, the engine's terminal success surfaces as `stage:"success"`, and
 a failed pull emits a terminal `stage:"error", percent:-1, message` frame so a
 UI converges even if its synchronous call already timed out),
 `engine:remote-progress{opId, node, engine, op, stage, percent?, message}`
-(relayed live progress for a remote install/pull), and — for the error
+(relayed live progress for a remote install/pull; a model copy adds
+`file?, bytesDone?, bytesTotal?`), and — for the error
 pipeline — `errors:report` / `errors:clear` (consumed by `nvpair-errors`
 via the broker; see below).
 
@@ -268,6 +270,8 @@ Endpoints (all under `/v1`):
 | `POST /v1/models/pull` | NDJSON stream | remote model pull with live progress |
 | `POST /v1/engines/start` | JSON | remote start → `EngineStatus` |
 | `POST /v1/engines/stop` | JSON | remote stop → `EngineStatus` |
+| `GET /v1/models/files?engine=&model=` | NDJSON stream | the model's files with size and sha256, for a peer copying it |
+| `GET /v1/models/file?engine=&model=&path=` | file bytes | one listed file, with HTTP Range support |
 
 The streaming routes emit zero or more `{"type":"progress",...}` frames followed
 by exactly one terminal `{"type":"result",...}` or `{"type":"error",...}` frame.
@@ -282,6 +286,65 @@ relays engine-manager's `discovery:subscribe{services:[ec]}` into the relay
 directory so the peer directory stays current. It does **not** restart
 engine-manager on `cluster:identity-changed` — the surface follows membership on
 its own.
+
+## Model copy between nodes
+
+`engine:remote-copy-model {node, engine, model}` copies a model that a pinned
+peer (`node`) already holds into this node's store for the same engine, over
+the peer's `ec` surface, instead of downloading it from the internet again.
+
+On the source, `GET /v1/models/files` resolves the model's files from the
+engine's on-disk layout and lists them as paths relative to the engine's store,
+with size and sha256. Hashes are computed when first asked for, by streaming
+the file, and cached by absolute path, size and modification time. Files whose
+name is already their sha256 (Ollama blobs, llama.cpp blobs behind snapshot
+links) are not re-read on the source; the destination still verifies them. The
+listing is an NDJSON stream in the shape of the other streaming routes:
+`{"type":"progress","stage":"hashing","message":<path>,"percent"?}` frames
+while files are hashed, then one `{"type":"result","result":{engine, model,
+revision?, files:[{path, size, sha256}]}}` or `{"type":"error"}` frame, so the
+first hash of a large model does not run into the 30-second response-header
+budget. `GET /v1/models/file` serves one file with `http.ServeContent`, so
+`Range` requests work. It only serves a path that is exactly one of the
+model's listed files; a malformed path (`..`, absolute, backslashes, drive
+letters) is a `400`, anything else not in the list is a `404`, and every listed
+file must resolve, after symlinks, inside the engine's store.
+
+On the destination, the copy:
+
+1. Refuses an engine with no known layout, an engine that is not installed
+   here, and a listing whose paths or hashes do not fit the engine's layout.
+2. Skips files already present with the listed size and sha256.
+3. Refuses to start when the volume holding the store has less free space than
+   the bytes still missing (net of partial downloads) plus 256 MiB.
+4. Downloads each missing file into `<final>.part` beside its final name,
+   resuming an existing partial with an HTTP `Range` request. Partials are kept
+   across retries and restarts. A download that receives nothing for 60
+   seconds, or drops, is retried from where it stopped, up to five attempts.
+5. Verifies the sha256 of the complete file, then renames it into place. A
+   mismatch deletes the partial and fails the copy (after one fresh retry when
+   the attempt had resumed an older partial).
+6. Writes the file that makes the model visible to the engine last.
+
+Progress is `engine:remote-progress` with `op:"copy"` and `node` naming the
+source. Stages are `listing`, `hashing` (relayed from the source, `file` set),
+`checking`, `downloading` (`file`, and `bytesDone`/`bytesTotal`/`percent` over
+the whole model, about every 500 ms), `finalizing`, then a terminal `done`
+(`percent:100`) or `error` (`percent:-1`, `message`). The desktop app does not
+render copy progress yet and ignores these frames.
+
+| Engine | Store | What is copied | How the engine sees it |
+|---|---|---|---|
+| Ollama | `OLLAMA_MODELS` from the launch environment or this process, else `{models_dir}/models` (`~/.ollama/models`) | `blobs/sha256-*` named by the manifest, then `manifests/<host>/<namespace>/<name>/<tag>` | The manifest is written last, after checking every blob it names is in place. Ollama reads manifests on each listing, so no restart is needed |
+| llama.cpp | `LLAMA_CACHE` (the manifest sets `{models_dir}`, `~/.llamacpp`) | For `owner/repo:TAG`, the snapshot GGUF matching `TAG` with all its splits, plus the multimodal projector beside it, chosen as llama.cpp chooses them | Files go under the destination's existing snapshot for the repo, or the source's revision with `refs/main` written last. The first split goes last. A running router is asked to rescan (`GET /models?reload=1`) |
+| LM Studio | `{models_dir}` (`~/.lmstudio/models`) | The path `lms ls --json` gives for the model (a GGUF file plus any `mmproj` GGUF beside it, or an MLX directory). An id that matches several models by path prefix is refused | Same relative path. A running server is restarted afterwards, as for `delete_model`, because LM Studio indexes models at startup |
+
+Limits: one copy of a given model at a time per node. Ollama models named with
+a registry port (`host:port/...`) are refused. An adopted Ollama instance
+started outside PAIR may use a different `OLLAMA_MODELS` than this service
+resolves, and LM Studio's models root is the manifest's `models_dir`, not a
+custom folder chosen in LM Studio's settings. The destination's sha256 check
+catches a source file that changes during a copy.
 
 ## CLI flags
 
