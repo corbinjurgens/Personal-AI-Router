@@ -222,7 +222,13 @@ func TestCancel_LookupRules(t *testing.T) {
 	a, b := newWorkloadCtl(func(string) {}), newWorkloadCtl(func(string) {})
 	p.registerWorkload(workloadKey{engine: "ollama", id: "4"}, a)
 	p.registerWorkload(workloadKey{engine: "lmstudio", id: "4"}, b)
-	rpcErr(t, p, w, nodepolicy.MethodWorkloadCancel, nodepolicy.WorkloadCancelParams{WorkloadID: "4"})
+	f = rpc(t, p, w, nodepolicy.MethodWorkloadCancel, nodepolicy.WorkloadCancelParams{WorkloadID: "4", Regenerate: true})
+	if f.Error == nil || f.Error.Code != -32602 || f.Error.Message != "ambiguous workload id; pass engine" {
+		t.Fatalf("ambiguous id answered %+v", f.Error)
+	}
+	if a.isExcluded("") || b.done || a.done {
+		t.Fatal("an ambiguous cancel acted on a workload")
+	}
 	rpcOK(t, p, w, nodepolicy.MethodWorkloadCancel, nodepolicy.WorkloadCancelParams{WorkloadID: "4", Engine: "lmstudio"})
 
 	// A runId from another proxy process finds nothing.

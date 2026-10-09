@@ -18,7 +18,6 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"sync"
 	"sync/atomic"
 
@@ -203,7 +202,7 @@ func (p *Proxy) handleWorkloadCancel(msg *Message) {
 	p.workloadsMu.Unlock()
 	if len(matches) > 1 {
 		_ = p.codec.RespondError(msg.ID, -32602,
-			fmt.Sprintf("workload %q is in flight on more than one engine; pass engine", in.WorkloadID))
+			"ambiguous workload id; pass engine")
 		return
 	}
 	found := len(matches) == 1 && matches[0].cancel(in.Regenerate)
