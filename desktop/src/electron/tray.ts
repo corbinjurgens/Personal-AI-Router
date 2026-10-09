@@ -4,6 +4,7 @@
 import { app, BrowserWindow, Menu, nativeImage, screen, Tray } from 'electron'
 import { join } from 'path'
 import { createTrayWindow, getTrayWindow, createOverviewWindow } from '@/electron/window'
+import { getTrayMode, setTrayMode, type TrayMode } from '@/electron/config/ui-config'
 import { createStructuredLogger } from '@/shared/utils/log'
 import { currentPlatform } from '@/shared/utils/platform'
 import { APP_DISPLAY_NAME } from '@/shared/constants/app'
@@ -100,11 +101,22 @@ class TrayManager {
         }
     }
 
-    private setupContextMenu(): void {
-        this.contextMenu = Menu.buildFromTemplate([
+    /**
+     * The tray menu, shared by the icon's context menu and the popup's own menu
+     * button. The checkbox switches between the status popup and a menu-only
+     * tray, which never builds a renderer.
+     */
+    private buildMenu(): Menu {
+        return Menu.buildFromTemplate([
             {
                 label: 'Overview',
                 click: () => this.showOrCreateMainWindow()
+            },
+            {
+                label: 'Show Status Popup on Click',
+                type: 'checkbox',
+                checked: getTrayMode() === 'popup',
+                click: item => this.setMode(item.checked ? 'popup' : 'menu')
             },
             { type: 'separator' },
             {
@@ -112,13 +124,56 @@ class TrayManager {
                 click: () => app.quit()
             }
         ])
+    }
 
-        if (currentPlatform() !== 'darwin') {
-            this.tray!.setContextMenu(this.contextMenu)
-        }
+    private setupContextMenu(): void {
+        this.refreshContextMenu()
 
         if (currentPlatform() === 'linux') {
-            this.tray!.setIgnoreDoubleClickEvents(true)
+            this.tray?.setIgnoreDoubleClickEvents(true)
+        }
+    }
+
+    /**
+     * Rebuild the icon's context menu so its checkbox reflects the saved mode.
+     * Linux only picks up a changed menu through another setContextMenu call.
+     */
+    private refreshContextMenu(): void {
+        this.contextMenu = this.buildMenu()
+        if (currentPlatform() !== 'darwin') {
+            this.tray?.setContextMenu(this.contextMenu)
+        }
+    }
+
+    private setMode(mode: TrayMode): void {
+        if (mode === getTrayMode()) return
+        setTrayMode(mode)
+        log.info({ sublevel: 'lifecycle', message: `Tray click now opens the ${mode}` })
+        this.refreshContextMenu()
+        if (mode === 'menu') {
+            // Deferred: this runs from a menu item click, which may belong to
+            // a menu the popup itself opened.
+            setImmediate(() => this.destroyPopup())
+        }
+    }
+
+    private destroyPopup(): void {
+        this.cancelPendingReveal()
+        this.cancelPopupIdleDestroy()
+        const win = getTrayWindow()
+        if (win) win.destroy()
+    }
+
+    /**
+     * Show the native menu at the icon. Electron can only do this on macOS and
+     * Windows; on Linux the menu set with setContextMenu is shown by the desktop
+     * itself.
+     */
+    private popUpNativeMenu(): void {
+        if (currentPlatform() === 'darwin') {
+            if (this.contextMenu) this.tray?.popUpContextMenu(this.contextMenu)
+        } else {
+            this.tray?.popUpContextMenu()
         }
     }
 
@@ -129,19 +184,22 @@ class TrayManager {
             this.tray.on('click', (_event, bounds) => this.handlePrimaryClick(bounds))
             this.tray.on('middle-click', (_event, bounds) => this.handlePrimaryClick(bounds))
             this.tray.on('double-click', (_event, bounds) => this.handlePrimaryClick(bounds))
-            this.tray.on('right-click', () => this.tray?.popUpContextMenu())
-        } else if (currentPlatform() === 'darwin') {
-            this.tray.on('click', (_event, bounds) => this.handlePrimaryClick(bounds))
-            this.tray.on('right-click', () => {
-                if (this.contextMenu) this.tray?.popUpContextMenu(this.contextMenu)
-            })
         } else {
             this.tray.on('click', (_event, bounds) => this.handlePrimaryClick(bounds))
-            this.tray.on('right-click', () => this.tray?.popUpContextMenu())
         }
+        this.tray.on('right-click', () => this.popUpNativeMenu())
     }
 
     private handlePrimaryClick = (bounds?: Electron.Rectangle): void => {
+        if (getTrayMode() === 'menu') {
+            // Electron cannot pop a tray menu up on Linux. StatusNotifier
+            // desktops show the menu on a left click themselves and report no
+            // click; where a click is reported, it opens Overview instead.
+            if (currentPlatform() === 'linux') this.showOrCreateMainWindow()
+            else this.popUpNativeMenu()
+            return
+        }
+
         if (bounds) this.lastTrayBounds = bounds
         try {
             this.lastCursorPoint = screen.getCursorScreenPoint()
@@ -405,6 +463,11 @@ class TrayManager {
         createOverviewWindow()
     }
 
+    /** The popup's menu button: the same menu as the icon's, anchored in the popup. */
+    showMenuInWindow(win: BrowserWindow): void {
+        this.buildMenu().popup({ window: win })
+    }
+
     destroy(): void {
         log.info({ sublevel: 'lifecycle', message: 'Destroying tray' })
         if (this.visibilityInterval) clearInterval(this.visibilityInterval)
@@ -415,10 +478,7 @@ class TrayManager {
                 /* ignore */
             }
         }
-        this.cancelPendingReveal()
-        this.cancelPopupIdleDestroy()
-        const win = getTrayWindow()
-        if (win && !win.isDestroyed()) win.destroy()
+        this.destroyPopup()
         if (this.tray) {
             this.tray.destroy()
             this.tray = null
@@ -438,4 +498,8 @@ export function destroyTray(): void {
 
 export function resizeTrayWindow(contentHeight: number): number {
     return trayManager.resizeTrayWindow(contentHeight)
+}
+
+export function showTrayMenu(win: BrowserWindow): void {
+    trayManager.showMenuInWindow(win)
 }
