@@ -181,6 +181,74 @@ Shared lifecycle for all workers:
 - Shutdown: when the broker exits (signal, peer EOF, or `shutdown` RPC), it first stops the proxy so no new inference arrives, then asks engine-manager to stop its engines (`engine:prepare-shutdown`) while the rest of the tree is still up, then closes each running worker's stdin. Clients leave this ordering to the broker; one that calls `engine:prepare-shutdown` itself stops the engines while the proxy is still routing to them. The worker sees EOF and exits cleanly, and the broker waits for it to exit — no timeout and no force-kill. Each worker owns its own bounded shutdown (engine-manager bounds its engine stop internally; the HTTP workers cancel their context and drain their server on EOF), so the broker never SIGKILLs a worker mid-teardown. A grace-then-kill teardown would orphan engine processes by killing engine-manager partway through stopping them, which is why there is no timeout here.
 - **Auto-restart with crash surfacing** for every supervised worker (see [Supervision & recovery](#supervision--recovery)): a crash is reported as `supervisor:subprocess-crashed:<name>` and the worker is restarted with backoff, clearing the entry once it's healthy again and leaving it up if the restart budget is exhausted.
 
+## Node policy
+
+The fork's node policy (see `FORK_DESIGN.md` §3 at the repository root) is owned
+by the broker. Its schema, defaults and validation live in
+`nvpair-shared/nodepolicy`; the broker is the only writer of the file and the
+proxy enforces it.
+
+- **File.** `<appdir>/node-policy.json`, loaded at startup before engine-manager
+  and the proxy start. A missing file means `nodepolicy.Default()`. A file that
+  does not parse or validate is kept as `node-policy.json.bad` and the default is
+  used, so a bad hand edit never stops the node. Every change is written
+  atomically (temp file, fsync, rename).
+- **Proxy state.** The broker pushes `node/set-policy`, `node/set-availability`,
+  `node/set-residency`, `node/set-engine-intent` and `node/set-engine-drain`
+  (methods and payloads in `nodepolicy/wire.go`). Residency comes from
+  engine-manager's `engine:models-changed` (`loadedByEngine`) and
+  `engine:state-changed` (a stopped engine is absent); saved intent from
+  `engine:intent` and `engine:intent-changed`. Both are seeded from
+  `engine:intent`, `engine:get-installed` and `engine:models` whenever
+  engine-manager (re)starts. Each push sends the state current at send time and
+  pushes are serialized, so an older state can never overwrite a newer one.
+  When the proxy (re)starts, all five are re-sent from its spawn hook **before
+  any facade is enabled**, availability first, so a paused node is never briefly
+  admitting work.
+- **Admission.** The proxy's `admission/state` (active, per-engine active, last
+  activity) feeds the drains below; `admission/unload` unloads the named models
+  through `engine:unload-model`; `admission/wake` calls `engine:wake` unless the
+  node is not `available` or the engine is saved Off. None of them reach clients.
+- **Pausing** (`node:set-availability {state:"paused"}`): persist `paused`, push
+  `draining` (with `cancelActive` when `pause.onActive` is `cancel`), wait for the
+  proxy's active count to reach zero for up to `pause.drainTimeoutSeconds`, then
+  push again with `cancelActive` and allow 10 s for that work to unwind. Then, as
+  the policy says, unload every loaded model and `engine:sleep` every running
+  engine, push `paused`, and notify clients. The request returns once paused.
+- **Resuming** persists and pushes `available`, then `engine:wake`s the engines
+  the pause stopped. Their saved intent was never changed, so only engines saved
+  On come back.
+- **Ordering.** Transitions run one at a time. A newer `node:set-availability`
+  cancels the one in progress, which returns the error `superseded by a later
+  node:set-availability request`; the latest request always wins, and a resume
+  never waits out a pause's drain.
+- **Startup.** A persisted `paused` reaches the proxy before it can admit
+  anything. With `pause.stopEngines` set, `engine:restore-enabled` is skipped
+  (also when engine-manager restarts while paused) and sent on resume instead.
+- **Idle policy.** Every 30 s the broker looks at each running engine with no
+  active requests. Its idle time runs from the latest of its last admitted
+  request (`admission/state.lastActivityMs`), the moment it was seen to start,
+  and the moment it last gained a loaded model. Past `idle.unloadAfterMinutes`
+  its models are unloaded; past `idle.stopEngineAfterMinutes` an engine saved On
+  is put to sleep. Each step runs once per idle period, so an engine that refuses
+  to stop is not retried every tick. Nothing runs while the node is draining.
+- **Start on demand.** `engine:wake` (from `admission/wake` or a client) starts
+  only an engine saved On, never while the node is paused or draining; a client's
+  `engine:wake` is refused with an error then.
+- **Settings restarts.** When `engine:apply-settings` would restart a running
+  engine (`preview.restart`), the broker pushes `node/set-engine-drain
+  {engine, drain:true}`, waits up to 60 s for that engine's active count to reach
+  zero (releasing the settings journal lock meanwhile), applies, and clears the
+  drain. See [ENGINE_SETTINGS.md](ENGINE_SETTINGS.md).
+- **Other nodes.** A `nodeId` naming another node is relayed through
+  engine-manager's pinned control server (`engine:remote-policy-get`,
+  `engine:remote-policy-set`, `engine:remote-availability-set`). On the target,
+  engine-manager delivers it as `policy:request {id, method, caller, params}`;
+  the broker checks the caller is still pinned, acts on itself only (a relayed
+  request is never forwarded again), and answers `policy:reply`. A successful
+  remote change is also announced to this node's clients under the target's
+  `nodeId`.
+
 ## JSON-RPC Surface
 
 ### Notifications (broker → caller)
@@ -284,7 +352,42 @@ ServiceError = { id, message, timestamp, nodeId?, severity?, action?, engineType
 
 The change-only cluster signals `nvpair-node-settings` pushes when `cluster_id` / `cluster_auto_sync` change. Relayed verbatim and unconditionally — the same way the UI receives them from the settings subprocess directly.
 
+#### `policy:changed` / `node:availability-changed`
+
+**Not opt-in**: sent to every client. `policy:changed {nodeId, policy}` follows a
+successful `policy:set`. `node:availability-changed {nodeId, availability,
+active}` follows each availability transition (`draining`, then `paused`; or
+`available`), and while draining it repeats whenever the active count changes.
+Both are also sent with another node's `nodeId` after this node changed that
+node's policy or availability; the remote form carries no `active`.
+
+```json
+{"jsonrpc":"2.0","method":"node:availability-changed","params":{"nodeId":"<hostUuid>","availability":"draining","active":2}}
+```
+
 ### Requests (caller → broker)
+
+#### `policy:get` / `policy:set` / `node:set-availability`
+
+| Method | Params | Result |
+|---|---|---|
+| `policy:get` | `{ nodeId? }` | `{ policy, availability }` — `policy` is the persisted `nodepolicy.Policy`; `availability` is live and may be `draining` |
+| `policy:set` | `{ nodeId?, policy }` | `{ policy }` after validation and persisting. Fields the caller omits take their defaults. `policy.availability` is ignored and the persisted value kept: only `node:set-availability` changes it. An invalid policy is error `-32602` and nothing changes |
+| `node:set-availability` | `{ nodeId?, state: "available" \| "paused" }` | `{ availability }` once the state is reached; pausing waits for the drain. A request replaced by a newer one fails with `superseded by a later node:set-availability request` |
+
+An omitted `nodeId`, or this node's own, acts locally; any other is relayed to
+that node (see [Node policy](#node-policy)).
+
+#### `workloads:cancel`
+
+Params `{ originatedFrom, workloadId, regenerate? }`, result `{ ok }`. Only the
+node a job originated on can cancel it. When `originatedFrom` is this node the
+broker calls its proxy's `workload/cancel {workloadId, regenerate}` and `ok` is
+the proxy's `found`. Otherwise the cancel goes to `nvpair-workload-manager`, which
+carries it to the origin over the pinned peer channel, and `ok:true` only means it
+was handed on; the outcome arrives on the `workloads:*` stream. A peer's relayed
+`workloads:cancel` reaches the broker from the workload-manager and is acted on
+only by the origin. `-32602` without `originatedFrom` or `workloadId`.
 
 #### `discovery:get-nodes`
 
@@ -530,7 +633,10 @@ Opt into / out of the `engine:<event>` stream (off by default). Acks `{ subscrib
 
 #### `engine:<method>` (generic relay)
 
-Any other `engine:*` request is forwarded to `nvpair-engine-manager` verbatim and its response relayed straight back. This covers the whole engine control plane: `engine:get-installed`, `engine:describe`, `engine:status`, `engine:install`, `engine:uninstall`, `engine:start`, `engine:stop`, `engine:restart`, `engine:action`, `engine:logs`, `engine:errors`, `engine:models`. Lifecycle ops run for minutes (reporting progress via the `engine:install-progress` / `engine:state-changed` push events), so the relay imposes **no broker-side timeout** — fire the request and watch the event stream for the outcome. Error `-32000 "engine-manager not available"` when no engine-manager is supervised.
+Any other `engine:*` request is forwarded to `nvpair-engine-manager` verbatim and its response relayed straight back. This covers the whole engine control plane: `engine:get-installed`, `engine:describe`, `engine:status`, `engine:install`, `engine:uninstall`, `engine:start`, `engine:stop`, `engine:restart`, `engine:action`, `engine:logs`, `engine:errors`, `engine:models`, and the node
+policy's `engine:wake`, `engine:sleep`, `engine:intent` and
+`engine:unload-model`. `engine:wake` is refused by the broker while this node is
+paused or draining. Lifecycle ops run for minutes (reporting progress via the `engine:install-progress` / `engine:state-changed` push events), so the relay imposes **no broker-side timeout** — fire the request and watch the event stream for the outcome. Error `-32000 "engine-manager not available"` when no engine-manager is supervised.
 
 `engine:set-port` is **not** in that generic set. Like `<engine>-proxy:set-port` it is intercepted and run through the authoritative settings operation, so moving an engine's server port from a port-only caller validates and restarts exactly as the full editor does, and persists as a manifest override that survives a restart. Its response is the engine's `engine:status` result.
 

@@ -539,7 +539,8 @@ func (b *Broker) routeProcessScopedProxyNotification(method string, params json.
 		b.routeNodeActivity(params)
 		return true
 	}
-	return false
+	// Admission is node-wide, like the two routes above.
+	return b.handleAdmissionNotification(method, params)
 }
 
 // engineProxySubscribed reports whether a client has subscribed to this

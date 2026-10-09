@@ -73,6 +73,21 @@ Inbound lifecycle notifications, on either channel:
 Each carries `params.workloadInfo`. Removal uses `workloads:remove` with
 `params.workloadId` and the origin `params.originatedFrom`.
 
+## Cancelling a job on its origin
+
+Only the node a job entered on can cancel it, because only its proxy holds the
+request. When a user cancels a job another node originated, the broker writes
+`workloads:cancel` with `{ originatedFrom, workloadId, regenerate? }` to this
+component's stdin. The manager adds a fresh `cancelId` and posts the cancel over
+the same pinned channel: to the origin if it is a current peer, otherwise to
+every peer. It is sent directly, not through the ordered lifecycle queue, so a
+slow broadcast round cannot hold it up.
+
+A receiving manager rejects a cancel without `originatedFrom` or `workloadId`
+(`400`), collapses retried deliveries by `(originatedFrom, workloadId,
+cancelId)`, and hands it to its broker as `workloads:cancel`. The broker acts
+only if it is the origin.
+
 ## Workload shape
 
 Defined in [`workload.go`](workload.go):
@@ -104,6 +119,7 @@ Translated remote events are forwarded to the broker as:
 | --- | --- |
 | `workloads:upsert` | `{ workloadInfo }` |
 | `workloads:remove` | `{ workloadId, originatedFrom }` |
+| `workloads:cancel` | `{ originatedFrom, workloadId, regenerate?, cancelId }` — a peer's cancel; the broker acts only if it is the origin |
 | `ready` | `{ version }` — startup handshake |
 
 Duplicate events arriving from more than one peer are collapsed before they reach

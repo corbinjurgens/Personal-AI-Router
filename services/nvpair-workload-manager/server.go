@@ -52,6 +52,9 @@ type Server struct {
 	// wrap the codec, whose writes are serialized so frames never interleave.
 	emitUpsert func(w *Workload) error
 	emitRemove func(workloadID, nodeID string) error
+	// emitCancel forwards a peer's workloads:cancel (cancel.go). nil refuses
+	// cancels with 500.
+	emitCancel func(cancelParams) error
 
 	// mesh is this node's live cluster state. The inter-node interface is cluster
 	// mTLS unconditionally (§7.2); the mesh decides per request WHICH callers are
@@ -152,6 +155,8 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 		s.handleLifecycle(w, &msg)
 	case msg.Method == MethodRemove:
 		s.handleRemove(w, &msg)
+	case msg.Method == MethodCancel:
+		s.handleCancel(w, &msg)
 	default:
 		s.badRequest(w, "unknown method: "+msg.Method)
 	}
