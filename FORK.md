@@ -21,6 +21,8 @@ Base: upstream `develop` at `54d2fe33` (October 9, 2026), which is ahead of
 release v0.1.1. It is the better base because it includes the unified proxy,
 llama.cpp support, and remote engine settings.
 
+A session-by-session record of changes is in [WORKLOG.md](WORKLOG.md).
+
 The ground rules in [AGENTS.md](AGENTS.md) and `.cursor/rules/` still apply.
 Runtime behavior belongs in `services/`; `desktop/` only relays commands and
 renders state.
