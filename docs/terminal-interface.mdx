@@ -13,21 +13,23 @@ desktop environment, or over SSH, where the desktop application cannot run. If a
 desktop is available, use the desktop application.
 
 **It has known limitations.** It is an operations tool, not a full replacement.
-It cannot update an engine or send an inference request for you, and it stops
-when your connection drops unless you run it under a terminal multiplexer. The
-full list is in
+It cannot update an engine or send an inference request for you. The full list
+is in
 [What the Terminal Interface Cannot Do](#what-the-terminal-interface-cannot-do),
 and it is worth reading before you depend on it.
 
-> **Never run the terminal interface and the desktop application on the same
-> machine at the same time.** This is not a preference. Each one starts its own
-> broker and full worker tree, so two sets of services would fight over the same
-> proxy ports, try to manage the same engines, and write the same settings files.
-> Expect port conflicts, engines that refuse to start, and confusing state on both
-> sides. Quit one before starting the other.
+> **Never run the terminal interface's service and the desktop application on
+> the same machine at the same time.** This is not a preference. The desktop
+> application still starts its own broker and full worker tree, so two sets of
+> services would fight over the same proxy ports, try to manage the same engines,
+> and write the same settings files. Expect port conflicts, engines that refuse
+> to start, and confusing state on both sides. Quitting the terminal interface
+> leaves its service running, so stop the service (`Q`, or
+> `nvpair-tui --stop-service`) before starting the desktop application.
 
-Within its scope it is self-contained. It starts its own service process tree, so
-you do not run anything else first.
+Within its scope it is self-contained. It attaches to `nvpair-service`, the
+background process that runs the broker and worker tree, and starts it if it is
+not already running, so you do not run anything else first.
 
 ## `nvpair` and `nvpair-tui` Both Start It
 
@@ -53,8 +55,8 @@ nvpair-tui
 ```
 
 From the release archive, extract it and run `nvpair-tui` from the directory the
-binaries are in. It looks for `nvpair-ui-broker` beside itself, so keep the
-extracted files together:
+binaries are in. It looks for `nvpair-service` beside itself, and the service
+looks for `nvpair-ui-broker` beside itself, so keep the extracted files together:
 
 ```bash
 cd <directory containing nvpair-tui>
@@ -63,7 +65,8 @@ cd <directory containing nvpair-tui>
 
 | Flag | Effect |
 | --- | --- |
-| `--broker-path <path>` | Use a service binary that is not beside `nvpair-tui` |
+| `--service-path <path>` | Start an `nvpair-service` binary that is not beside `nvpair-tui` |
+| `--stop-service` | Stop the running service, and with it every worker and inference on this machine, then exit |
 | `--log-level <level>` | Verbosity of the terminal interface's own logging: `debug`, `info`, `warn`, or `error`. PAIR also reads this from `NVPAIR_LOG_LEVEL` |
 | `--appearance <mode>` | `auto`, `light`, or `dark`. See below |
 | `--version` | Print the version and exit |
@@ -96,23 +99,28 @@ A terminal that never answers also makes PAIR wait for the reply before it
 starts, which is a pause of a few seconds on the way in. That wait comes from
 the terminal library and applies whether or not you pass `--appearance`.
 
-Press `q` to quit. Quitting shuts the services down cleanly rather than leaving
-them running.
+Press `q` to quit. Quitting only closes the interface: the service keeps running
+and keeps serving inference, and the next `nvpair-tui` attaches to it. Press `Q`
+to stop the service and quit instead; it asks for `y` first, and the service then
+shuts the workers down cleanly. `nvpair-tui --stop-service` does the same from
+the command line.
 
 ### Keep It Running After You Disconnect
 
-Quitting stops the services, and losing an SSH connection ends the program the
-same way. A node you reach over SSH therefore stops serving requests when your
-session drops. Start it inside a terminal multiplexer so the session survives
-independently of your connection:
+The service does not depend on your session: losing an SSH connection ends the
+interface but not the service, so the node keeps serving requests. Run
+`nvpair-tui` again to reattach. To start the service at login without opening
+the interface, use `nvpair-service autostart enable`.
+
+A terminal multiplexer is still useful to keep the interface itself open across
+disconnects:
 
 ```bash
 tmux new -s pair
 nvpair-tui
 ```
 
-Detach with `Ctrl-b d`, and reattach later with `tmux attach -t pair`. The
-services keep running in between.
+Detach with `Ctrl-b d`, and reattach later with `tmux attach -t pair`.
 
 [tmux](https://github.com/tmux/tmux/wiki) and
 [GNU Screen](https://www.gnu.org/software/screen/) both work. With Screen, start
@@ -144,7 +152,8 @@ header stays on `starting service...`, the service tree did not come up, and the
 | `tab`, `shift+tab` | Next, previous tab |
 | `?` | Toggle full help |
 | `ctrl+x` | Dismiss the update notice, while one is showing |
-| `q`, `ctrl+c` | Quit |
+| `q`, `ctrl+c` | Quit; the service keeps running |
+| `Q` | Stop the service and quit, after a `y` confirmation |
 
 Within a table, `j` / `k` (or `↓` / `↑`) move the selection, `f` / `b` page, and
 `home` / `end` jump to the first and last row. `h` / `l` and `←` / `→` move between
@@ -472,12 +481,16 @@ the **Nodes** tab. Refer to
 [Ports](getting-started.mdx#7-connecting-your-agents-and-port-information)
 for how PAIR arranges ports.
 
+**Stop service and quit** stops the service, and with it every worker and
+inference on this machine, then exits. It asks for confirmation first. It is the
+same as pressing `Q` on any tab.
+
 **Reset all data and quit** deletes this machine's settings, cluster identity,
-and pairing, and uninstalls the engines PAIR installed, then exits. It asks for
-confirmation first, and cannot be undone. Your downloaded models are kept, and
-so is any engine you installed yourself. The engines are removed while the
-services are still running, and the services are then stopped before the files
-are deleted, so nothing rewrites them on the way out. If an engine PAIR
+and pairing, and uninstalls the engines PAIR installed, then stops the service
+and exits. It asks for confirmation first, and cannot be undone. Your downloaded
+models are kept, and so is any engine you installed yourself. The engines are
+removed while the services are still running, and the services are then stopped
+before the files are deleted, so nothing rewrites them on the way out. If an engine PAIR
 installed cannot be removed, the reset stops before deleting anything, names the
 engine on the status line, and leaves you in the interface to try again. You
 will need to pair again afterwards.
@@ -494,8 +507,9 @@ It is an operations tool, not a full replacement for the desktop application:
   choose the prompt and you never see the reply.
 - It cannot install PAIR updates. It tells you when a release is available;
   installing one is the same job it was before.
-- It does not survive losing your connection. Use a terminal multiplexer, as
-  above.
+- The interface itself does not survive losing your connection, although the
+  service does. Run `nvpair-tui` again to reattach, or use a terminal
+  multiplexer, as above.
 
 ## See Also
 

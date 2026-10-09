@@ -74,6 +74,7 @@ fi
 # MODULAR_BUNDLED_BINARIES in src/shared/constants/modular-binaries.ts.
 for proc in \
   "nvpair-tui" \
+  "nvpair-service" \
   "nvpair-proxy" \
   "ollama-proxy" \
   "lmstudio-proxy" \

@@ -1,13 +1,16 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-// Command nvpair-tui is a terminal UI that spawns and supervises nvpair-ui-broker
-// (and, through it, the whole NVPAIR subprocess fleet) over a stdio JSON-RPC
-// connection. It is designed to run comfortably over SSH on a headless
-// server where the bundled graphical UI cannot run.
+// Command nvpair-tui is a terminal UI for nvpair-service, the per-user process
+// that owns nvpair-ui-broker (and, through it, the whole NVPAIR subprocess
+// fleet). It attaches to the running service, starting it detached when it is
+// not running, and speaks the broker's JSON-RPC through it. Quitting detaches
+// and leaves the service and its inference running. It is designed to run
+// comfortably over SSH on a headless server where the bundled graphical UI
+// cannot run.
 //
 // This file is the process entrypoint: it parses flags, initialises
-// logging, spawns the broker, and drives the supervisor. Logging goes to
+// logging, attaches to the service, and runs the UI. Logging goes to
 // stderr so it never collides with the full-screen TUI on stdout.
 package main
 
@@ -32,7 +35,8 @@ import (
 var Version = "dev"
 
 func main() {
-	brokerPath := flag.String("broker-path", "", "path to nvpair-ui-broker binary (default: ./nvpair-ui-broker alongside this executable)")
+	servicePath := flag.String("service-path", "", "path to nvpair-service binary, started when no service is running (default: ./nvpair-service alongside this executable)")
+	stopService := flag.Bool("stop-service", false, "stop the running nvpair-service (and with it the broker and inference) and exit")
 	showVersion := flag.Bool("version", false, "print version and exit")
 	appearance := flag.String("appearance", "auto", "terminal background: auto, light, or dark")
 	resolveLevel := applog.RegisterFlag(nil, slog.LevelInfo)
@@ -43,11 +47,26 @@ func main() {
 		os.Exit(0)
 	}
 
+	if *stopService {
+		applog.Init("nvpair-tui", resolveLevel())
+		running, err := stopRunningService()
+		switch {
+		case err != nil:
+			fmt.Fprintln(os.Stderr, "nvpair-tui: could not stop nvpair-service:", err)
+			os.Exit(1)
+		case running:
+			fmt.Println("nvpair-service stopped")
+		default:
+			fmt.Println("nvpair-service is not running")
+		}
+		os.Exit(0)
+	}
+
 	// Started before the program, not merely before the first draw. On auto
 	// this asks the terminal for its background and reads the answer, which
 	// only works while stdin is still ours — once Bubble Tea is running, its
 	// reader takes the reply and the query learns nothing. Joined below, after
-	// the broker is up, so a terminal that never answers costs its timeout
+	// the service is attached, so a terminal that never answers costs its timeout
 	// alongside startup rather than in front of it.
 	chosen, ok := ui.ParseAppearance(*appearance)
 	if !ok {
@@ -62,9 +81,9 @@ func main() {
 	applog.SetOutput(ui.LogOutput())
 	applog.Init("nvpair-tui", resolveLevel())
 
-	resolvedBroker, err := resolveBrokerPath(*brokerPath)
+	resolvedService, err := resolveServicePath(*servicePath)
 	if err != nil {
-		slog.Error("cannot locate broker", "err", err)
+		slog.Error("cannot locate nvpair-service", "err", err)
 		os.Exit(1)
 	}
 
@@ -81,9 +100,9 @@ func main() {
 		}
 	}()
 
-	sup, err := Spawn(ctx, resolvedBroker)
+	link, err := connectService(ctx, resolvedService)
 	if err != nil {
-		slog.Error("failed to start broker", "err", err)
+		slog.Error("failed to attach to nvpair-service", "err", err)
 		os.Exit(1)
 	}
 
@@ -96,19 +115,32 @@ func main() {
 	slog.Debug("terminal appearance", "requested", string(chosen),
 		"using", string(ui.DetectedAppearance()))
 
-	// The broker's stderr (its logs plus every worker's, prefixed) is fed
-	// into the UI's Logs view rather than the terminal, so it never
-	// collides with the full-screen TUI on stdout.
-	outcome, err := ui.Run(sup.Client, sup.Stderr)
+	// The broker's stderr (its logs plus every worker's, prefixed), relayed by
+	// the service as service/log, is fed into the UI's Logs view rather than
+	// the terminal, so it never collides with the full-screen TUI on stdout.
+	outcome, err := ui.Run(link.Client, link.Logs)
 	if err != nil {
 		slog.Error("ui error", "err", err)
 	}
 
-	sup.Shutdown()
+	// Quitting detaches: the service, the broker, and inference keep running.
+	// Stopping them is the explicit choice the operator made with Q, or part
+	// of a data reset.
+	if outcome.StopService || outcome.WipeData {
+		if err := link.stopService(); err != nil {
+			slog.Error("could not stop nvpair-service", "err", err)
+			if outcome.WipeData {
+				// The workers still hold the files; wiping now would race them.
+				slog.Error("data directory not reset because the service is still running")
+				outcome.WipeData = false
+			}
+		}
+	}
+	link.detach()
 
-	// Only now, with every worker joined, is the data directory unowned. Wiping
-	// it while the broker ran would race a shutting-down worker into recreating
-	// the files we deleted.
+	// Only now, with the service stopped and every worker joined, is the data
+	// directory unowned. Wiping it while the broker ran would race a
+	// shutting-down worker into recreating the files we deleted.
 	if outcome.WipeData {
 		wipeAppData()
 	}
