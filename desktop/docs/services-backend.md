@@ -15,11 +15,14 @@ projects backend notifications into renderer state.
 
 ## Runtime ownership
 
-`nvpair-ui-broker` is the only backend process Electron starts directly. The
+`nvpair-service` is the only backend process Electron ever starts, and only when
+nothing answers on its endpoint. It owns `nvpair-ui-broker`, outlives Electron,
+and lets Electron and the TUI attach over a local socket or named pipe. The
 broker supervises every worker and relays its control plane.
 
 | Binary                    | Runtime role                                              |
 | ------------------------- | --------------------------------------------------------- |
+| `nvpair-service`          | Per-user owner of the broker; multiplexes it for clients  |
 | `nvpair-ui-broker`        | Worker supervision and relay                              |
 | `nvpair-proxy`            | Engine routing proxy with cluster-mTLS ingress; one process hosting a facade per enabled engine |
 | `nvpair-node-scanner`     | Discovery and node announcement                           |
@@ -31,7 +34,7 @@ broker supervises every worker and relays its control plane.
 | `nvpair-engine-manager`   | Engine lifecycle and model operations                     |
 | `nvpair-cluster-manager`  | Pairing, trust, and membership                            |
 | `nvpair-job-scheduler`    | Node-wide routing priority                                |
-| `nvpair-tui`              | Bundled standalone terminal client                        |
+| `nvpair-tui`              | Bundled terminal client; attaches to `nvpair-service`     |
 
 The runtime inventory and ownership flags live in
 `src/shared/constants/modular-binaries.ts`. Product and component versions live
@@ -41,6 +44,7 @@ only in `services/versions.json` and are rendered into `docs/services-api.md` by
 ```mermaid
 flowchart TB
     Electron["Electron ModularSupervisor"]
+    Service["nvpair-service"]
     Broker["nvpair-ui-broker"]
     Scanner["nvpair-node-scanner"]
     NodeInfo["nvpair-node-info"]
@@ -53,7 +57,8 @@ flowchart TB
     Errors["nvpair-errors"]
     Scheduler["nvpair-job-scheduler"]
 
-    Electron <-->|"stdio JSON-RPC"| Broker
+    Electron <-->|"local socket"| Service
+    Service <-->|"stdio JSON-RPC"| Broker
     Broker --> Scanner
     Broker --> NodeInfo
     Broker --> Proxies
@@ -76,7 +81,10 @@ The main integration points are:
 | Responsibility                                                     | File                                                 |
 | ------------------------------------------------------------------ | ---------------------------------------------------- |
 | Process startup, broker flags, subscriptions, notification routing | `src/electron/service-bridge/modular-supervisor.ts`  |
-| JSON-RPC stdio framing                                             | `src/electron/service-bridge/json-rpc-subprocess.ts` |
+| JSON-RPC framing over the service socket, reconnect                | `src/electron/service-bridge/json-rpc-client.ts` |
+| Service endpoint resolution, attach-or-start                       | `src/electron/service-bridge/service-endpoint.ts`, `service-connection.ts` |
+| Pause toggle state                                                 | `src/electron/service-bridge/node-availability.ts`   |
+| One-time manual node migration                                     | `src/electron/service-bridge/manual-nodes-migration.ts` |
 | Logical invoke handlers                                            | `src/electron/service-bridge/empty-handlers.ts`      |
 | Node, engine, workload, and error projection                       | `src/electron/service-bridge/modular-state.ts`       |
 | Node telemetry polling                                             | `src/electron/service-bridge/node-info-poller.ts`    |
@@ -94,7 +102,7 @@ asynchronous capability signal. Personal AI Router waits up to the canonical
 startup deadline in `src/shared/constants/modular-runtime.ts` for
 `app:ready`; an outright failure or stalled broker startup is surfaced in
 Settings > Service with retry and log access. If a stalled broker reports ready
-later, the connector transitions to connected without spawning a second broker.
+later, the connector transitions to connected without starting a second service.
 
 ### Direct HTTP exception
 

@@ -53,8 +53,6 @@
 - ⚠️ nvpair-ui-broker → engine:unsubscribe
 - ⚠️ nvpair-ui-broker → engine:wake
 - ⚠️ nvpair-ui-broker → internal:set-reserved-port
-- ⚠️ nvpair-ui-broker → node:set-availability
-- ⚠️ nvpair-ui-broker → policy:get
 - ⚠️ nvpair-ui-broker → policy:set
 - ⚠️ nvpair-ui-broker → workloads:unsubscribe
 
@@ -303,10 +301,10 @@
 | `node/remove` | request (we call) | ✅ yes |
 | `node/removed` | request (we call) | ✅ yes |
 | `node/updated` | request (we call) | ✅ yes |
-| `node:set-availability` | request (we call) | ⚠️ not called |
+| `node:set-availability` | request (we call) | ✅ yes |
 | `nodes/list` | request (we call) | ✅ yes |
 | `policy:cancel` | request (we call) | ➖ ignored |
-| `policy:get` | request (we call) | ⚠️ not called |
+| `policy:get` | request (we call) | ✅ yes |
 | `policy:request` | request (we call) | ➖ ignored |
 | `policy:set` | request (we call) | ⚠️ not called |
 | `ready` | request (we call) | ✅ yes |
