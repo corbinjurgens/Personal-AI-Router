@@ -17,6 +17,7 @@
   ; src/shared/constants/modular-binaries.ts.
   nsExec::ExecToLog 'taskkill /F /T /IM "${APP_EXECUTABLE_FILENAME}"'
   nsExec::ExecToLog 'taskkill /F /T /IM "nvpair-tui.exe"'
+  nsExec::ExecToLog 'taskkill /F /T /IM "nvpair-service.exe"'
   nsExec::ExecToLog 'taskkill /F /T /IM "nvpair-proxy.exe"'
   ; Pre-unification names. An orphan still holding 11434 or 1234 is exactly
   ; what the managed-facade planner has to block on, so kill it here too.
