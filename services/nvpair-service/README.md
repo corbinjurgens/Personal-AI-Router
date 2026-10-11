@@ -247,3 +247,61 @@ baselines, unsubscribe and shutdown handling, broker restart, clean and forced
 stop, single instance, stale sockets, slow clients, and log rotation), plus one
 test that runs the real exec-based spawner against the test binary acting as a
 broker.
+
+### Real-service lifecycle integration
+
+`services/tests` also runs the service, broker and scanner as separate real
+processes against each other. From the repository root:
+
+```sh
+cd services/tests
+go test -count=1 -timeout 10m -run '^TestServiceLifecycle' -v .
+go test -count=3 -timeout 10m -run '^TestServiceLifecycle' -v .
+```
+
+`-count=1` disables the test cache; `-count=3` repeats every named case in one
+test process to check for state leaks. A skipped lifecycle case leaves that
+behavior unverified. The cases assert, against real processes:
+
+- Two clients call `policy:get` under the same request id and each receives its
+  own reply.
+- One client detaching leaves the other functional.
+- All clients detaching and a later reconnect preserve the service, broker and
+  scanner identities.
+- `service/stop` replies `{"stopped": true}` and the owned service exits.
+- A second service launched at the same endpoint exits without replacing the
+  first.
+- CLI `status` prints the structured `service/status` snapshot, and after the
+  service stops `status` exits 3.
+- CLI `stop` allows the full broker shutdown grace.
+- Cleanup started before readiness is awaited, and cleanup after the owned
+  service is killed, each leave no owned process and a rejected endpoint.
+- A reader that cannot close or exceeds its notification retention budget
+  makes cleanup fail visibly and preserves the bundle until the injected
+  failure is disposed of.
+
+Each case copies only `nvpair-service`, `nvpair-ui-broker` and
+`nvpair-node-scanner` into a fresh temporary bundle, then launches the copied
+service with the copied broker, an endpoint private to the bundle
+(`NVPAIR_SERVICE_ENDPOINT`; a Unix socket in the bundle, or a unique
+`\\.\pipe\nvpair-test-<id>` on Windows), disposable
+`HOME`/`XDG_CONFIG_HOME`/`APPDATA`/`LOCALAPPDATA`, and broker arguments
+`--scanner-path <copied scanner> --cluster-dir <empty directory> --proxy-engines=`. The scanner is the only explicitly supplied worker and is
+required; the other optional workers are absent from the bundle, and their
+absence is non-fatal. No engine management or inference listener is present, so
+the fixture operates no engine, model, autostart registration or pairing.
+Readiness is a broker `app:ready` received over the endpoint. Cleanup identifies owned
+processes by exact copied executable path through
+`github.com/shirou/gopsutil/v4/process`, revalidates PID, path and creation time
+before any fallback kill, and retains the bundle whenever cleanup could not be
+verified.
+
+The scanner still performs real network discovery, so run the command on a
+controlled network and never assert which peers it finds.
+
+The command proves JSON-RPC multiplexing and process lifetime only. It does not
+exercise real inference, an engine or a model, GPU scheduling, the desktop or
+TUI attach paths, login startup, paired or multi-machine routing, or memory use,
+and the fixture runs without a proxy. Run it natively on macOS and Windows;
+a cross-compiled binary does not establish named-pipe or process-lifetime
+behavior.
