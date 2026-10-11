@@ -28,6 +28,7 @@ var (
 	scannerBin      string
 	nodeSettingsBin string
 	brokerBin       string
+	serviceBin      string
 	workloadMgrBin  string
 	engineMgrBin    string
 	manualNodesBin  string
@@ -52,6 +53,7 @@ func TestMain(m *testing.M) {
 	nodeInfoBin = filepath.Join(tmpDir, "nvpair-node-info"+ext)
 	scannerBin = filepath.Join(tmpDir, "nvpair-node-scanner"+ext)
 	brokerBin = filepath.Join(tmpDir, "nvpair-ui-broker"+ext)
+	serviceBin = filepath.Join(tmpDir, "nvpair-service"+ext)
 	nodeSettingsBin = filepath.Join(tmpDir, "nvpair-node-settings"+ext)
 	workloadMgrBin = filepath.Join(tmpDir, "nvpair-workload-manager"+ext)
 	engineMgrBin = filepath.Join(tmpDir, "nvpair-engine-manager"+ext)
@@ -92,6 +94,14 @@ func TestMain(m *testing.M) {
 	if err := goBuild(filepath.Join("..", "nvpair-ui-broker"), brokerBin); err != nil {
 		os.RemoveAll(tmpDir)
 		log.Fatalf("build nvpair-ui-broker: %v", err)
+	}
+
+	// The service owns and supervises the broker, so the service-lifetime
+	// tests need its binary in the same bundle as the broker and scanner.
+	log.Println("building nvpair-service...")
+	if err := goBuild(filepath.Join("..", "nvpair-service"), serviceBin); err != nil {
+		os.RemoveAll(tmpDir)
+		log.Fatalf("build nvpair-service: %v", err)
 	}
 
 	log.Println("building nvpair-node-settings...")
@@ -204,7 +214,6 @@ func waitForMethod(t *testing.T, ch <-chan jsonrpc.Message, method string, timeo
 			t.Fatalf("timed out (%s) waiting for method %q", timeout, method)
 		}
 	}
-	return jsonrpc.Message{}
 }
 
 func waitForResponse(t *testing.T, ch <-chan jsonrpc.Message, timeout time.Duration) jsonrpc.Message {
@@ -224,7 +233,6 @@ func waitForResponse(t *testing.T, ch <-chan jsonrpc.Message, timeout time.Durat
 			t.Fatal("timed out waiting for JSON-RPC response")
 		}
 	}
-	return jsonrpc.Message{}
 }
 
 // codeFacadeBindFailed mirrors the constant of the same name in nvpair-proxy:
