@@ -257,11 +257,14 @@ processes against each other. From the repository root:
 cd services/tests
 go test -count=1 -timeout 10m -run '^TestServiceLifecycle' -v .
 go test -count=3 -timeout 10m -run '^TestServiceLifecycle' -v .
+go test -count=1 -timeout 10m -run '^(TestServiceLifecycle|TestServiceInspectionError|TestServiceRecovery|TestServiceRPCReader)' -v .
 ```
 
 `-count=1` disables the test cache; `-count=3` repeats every named case in one
-test process to check for state leaks. A skipped lifecycle case leaves that
-behavior unverified. The cases assert, against real processes:
+test process to check for state leaks. The third command adds the
+inspection-error, process-recovery and RPC-reader regressions to the lifecycle
+selection. A skipped case leaves that behavior unverified. The lifecycle cases
+assert, against real processes:
 
 - Two clients call `policy:get` under the same request id and each receives its
   own reply.
@@ -276,11 +279,23 @@ behavior unverified. The cases assert, against real processes:
 - CLI `stop` allows the full broker shutdown grace.
 - Cleanup started before readiness is awaited, and cleanup after the owned
   service is killed, each leave no owned process and a rejected endpoint.
-- A reader that cannot close or exceeds its notification retention budget
-  makes cleanup fail visibly and preserves the bundle until the injected
-  failure is disposed of.
+- A failed process scan or a failed empty enumeration retains its error, does
+  not report cleanup as verified, and still stops every recorded owned
+  descendant while leaving the bundle in place.
+- A malformed RPC frame, a reader that cannot close, or a reader that exceeds
+  its notification retention budget makes cleanup fail visibly and preserves
+  the bundle until the injected failure is disposed of.
 
-Each case copies only `nvpair-service`, `nvpair-ui-broker` and
+The inspection-error, process-recovery and RPC-reader regressions are
+deterministic and in-memory: they drive the fixture's cleanup inspection,
+recovery and frame-reader helpers with injected failures and in-memory
+transports, so they assert which errors are retained and which identities are
+recovered without launching a process or opening an endpoint. The lifecycle
+cases instead run real copied processes, so the verified process absence and
+retained bundles they check come from the fixture's own process inventory and
+endpoint.
+
+Each lifecycle case copies only `nvpair-service`, `nvpair-ui-broker` and
 `nvpair-node-scanner` into a fresh temporary bundle, then launches the copied
 service with the copied broker, an endpoint private to the bundle
 (`NVPAIR_SERVICE_ENDPOINT`; a Unix socket in the bundle, or a unique
@@ -296,12 +311,12 @@ processes by exact copied executable path through
 before any fallback kill, and retains the bundle whenever cleanup could not be
 verified.
 
-The scanner still performs real network discovery, so run the command on a
-controlled network and never assert which peers it finds.
+The scanner still performs real network discovery, so run the lifecycle
+commands on a controlled network and never assert which peers it finds.
 
-The command proves JSON-RPC multiplexing and process lifetime only. It does not
-exercise real inference, an engine or a model, GPU scheduling, the desktop or
-TUI attach paths, login startup, paired or multi-machine routing, or memory use,
-and the fixture runs without a proxy. Run it natively on macOS and Windows;
-a cross-compiled binary does not establish named-pipe or process-lifetime
-behavior.
+The lifecycle cases prove JSON-RPC multiplexing and process lifetime only. They
+do not exercise real inference, an engine or a model, GPU scheduling, the
+desktop or TUI attach paths, login startup, paired or multi-machine routing, or
+memory use, and the fixture runs without a proxy. Run them natively on macOS
+and Windows; a cross-compiled binary does not establish named-pipe or
+process-lifetime behavior.
