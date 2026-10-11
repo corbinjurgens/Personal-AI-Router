@@ -5,6 +5,7 @@ package tests
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
 	"os"
 	"reflect"
@@ -159,6 +160,62 @@ func TestServiceLifecycle(t *testing.T) {
 		f.cleanup()
 		f.assertStopped()
 	})
+	t.Run("cleanup stops owned descendants despite an inventory error", func(t *testing.T) {
+		f := newServiceFixture(t)
+		f.start()
+		f.readyClient()
+		owned := f.scan()
+		for _, path := range []string{f.brokerPath, f.scannerPath} {
+			found := false
+			for _, identity := range owned {
+				if identity.Path == path {
+					found = true
+				}
+			}
+			if !found {
+				t.Fatalf("fault injection lacks running owned descendant %q: %+v", path, owned)
+			}
+		}
+		injected := errors.New("fixture injected inventory error")
+		f.inventory.mu.Lock()
+		f.inventory.scanError = injected
+		f.inventory.mu.Unlock()
+		// Force identity-based cleanup rather than letting graceful RPC stop
+		// remove the descendants before the injected scan failure is observed.
+		endpoint := f.endpoint
+		f.endpoint += "-unavailable"
+		defer func() {
+			f.endpoint = endpoint
+			f.inventory.mu.Lock()
+			f.inventory.scanError = nil
+			f.inventory.mu.Unlock()
+			f.cleanup()
+		}()
+		if err := f.cleanupChecked(); !errors.Is(err, injected) {
+			t.Fatalf("cleanup error=%v, want injected inventory error", err)
+		}
+		if f.cleanupVerified {
+			t.Fatal("cleanup verified despite the injected inventory error")
+		}
+		if err := f.removeBundle(); err == nil {
+			t.Fatal("bundle removal accepted failed inventory")
+		}
+		for _, path := range []string{f.dir, f.servicePath, f.brokerPath, f.scannerPath} {
+			if _, err := os.Stat(path); err != nil {
+				t.Fatalf("failed inventory did not retain %q: %v", path, err)
+			}
+		}
+		remaining, err := f.inventory.scan()
+		if !errors.Is(err, injected) || len(remaining) != 0 {
+			t.Fatalf("inventory error left owned processes: identities=%+v error=%v", remaining, err)
+		}
+		f.inventory.mu.Lock()
+		f.inventory.scanError = nil
+		f.inventory.mu.Unlock()
+		f.endpoint = endpoint
+		f.assertStopped()
+		t.Log("cleanup_inventory_error_visible=true cleanup_verified=false bundle_retained=true owned_running=0 endpoint_rejected=true")
+	})
 	t.Run("cleanup after forced owned service termination", func(t *testing.T) {
 		f := newServiceFixture(t)
 		f.start()
@@ -182,6 +239,130 @@ func TestServiceLifecycle(t *testing.T) {
 		}
 		f.cleanup()
 		f.assertStopped()
+	})
+	t.Run("cleanup recovers recorded descendants after empty enumeration fails", func(t *testing.T) {
+		f := newServiceFixture(t)
+		f.start()
+		f.readyClient()
+		recorded := f.scan()
+		var owner serviceProcessIdentity
+		for _, path := range f.inventory.paths {
+			found := false
+			for _, identity := range recorded {
+				if identity.Path == path {
+					found = true
+					if path == f.servicePath && int(identity.PID) == f.service.cmd.Process.Pid {
+						owner = identity
+					}
+				}
+			}
+			if !found {
+				t.Fatalf("empty-enumeration fault lacks recorded copied identity %q: %+v", path, recorded)
+			}
+		}
+		if owner.PID == 0 {
+			t.Fatal("owned service identity unavailable for forced termination")
+		}
+		if err := f.inventory.kill(owner); err != nil {
+			t.Fatal(err)
+		}
+		f.waitChild(f.service, serviceCallTimeout)
+		if f.service.err == nil {
+			t.Fatal("forced termination unexpectedly exited cleanly")
+		}
+		remaining := f.scan()
+		for _, identity := range recorded {
+			if identity.Path == f.servicePath {
+				continue
+			}
+			found := false
+			for _, current := range remaining {
+				if current == identity {
+					found = true
+				}
+			}
+			if !found {
+				t.Fatalf("fault injection needs a still-live recorded descendant %+v: %+v", identity, remaining)
+			}
+		}
+		injected := errors.New("fixture injected empty enumeration error")
+		endpoint := f.endpoint
+		f.endpoint += "-unavailable"
+		f.inventory.mu.Lock()
+		f.inventory.enumerationError = injected
+		f.inventory.mu.Unlock()
+		defer func() {
+			f.endpoint = endpoint
+			f.inventory.mu.Lock()
+			f.inventory.enumerationError = nil
+			f.inventory.mu.Unlock()
+			f.cleanup()
+		}()
+		if owned, err := f.inventory.scan(); len(owned) != 0 || !errors.Is(err, injected) {
+			t.Fatalf("enumeration fault returned identities=%+v error=%v", owned, err)
+		}
+		if err := f.cleanupChecked(); !errors.Is(err, injected) {
+			t.Fatalf("cleanup error=%v, want injected enumeration error", err)
+		}
+		if f.cleanupVerified {
+			t.Fatal("cleanup verified despite failed enumeration")
+		}
+		if err := f.removeBundle(); err == nil {
+			t.Fatal("bundle removal accepted failed enumeration")
+		}
+		for _, path := range []string{f.dir, f.servicePath, f.brokerPath, f.scannerPath} {
+			if _, err := os.Stat(path); err != nil {
+				t.Fatalf("failed enumeration did not retain %q: %v", path, err)
+			}
+		}
+		// Restore actual enumeration before proving that descendants exited.
+		f.inventory.mu.Lock()
+		f.inventory.enumerationError = nil
+		f.inventory.mu.Unlock()
+		f.endpoint = endpoint
+		f.assertStopped()
+		t.Log("cleanup_empty_enumeration_error_visible=true cleanup_verified=false bundle_retained=true recorded_descendants_stopped=true owned_running=0 endpoint_rejected=true")
+	})
+	t.Run("cleanup retains the bundle after a malformed RPC frame", func(t *testing.T) {
+		f := newServiceFixture(t)
+		f.start()
+		f.readyClient()
+		originalClients := len(f.clients)
+		r, w := io.Pipe()
+		c := newServiceRPCClient(&serviceNotificationPipe{PipeReader: r})
+		f.clients = append(f.clients, c)
+		defer func() {
+			if err := w.Close(); err != nil {
+				t.Errorf("release malformed-frame writer: %v", err)
+			}
+			if err := r.Close(); err != nil {
+				t.Errorf("release malformed-frame reader: %v", err)
+			}
+			if !waitServiceReader(t, c) {
+				return
+			}
+			var decodeErr *jsonrpc.DecodeError
+			if err := c.close(); !errors.As(err, &decodeErr) {
+				t.Errorf("repeated close erased malformed-frame error: %v", err)
+			}
+			// Remove only the joined injected client; its error remains sticky.
+			f.clients = f.clients[:originalClients]
+			f.cleanup()
+		}()
+		if _, err := io.WriteString(w, "{\n"); err != nil {
+			t.Fatal(err)
+		}
+		if err := w.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if !waitServiceReader(t, c) {
+			t.FailNow()
+		}
+		var decodeErr *jsonrpc.DecodeError
+		if err := c.close(); !errors.As(err, &decodeErr) {
+			t.Fatalf("close erased malformed-frame error: %v", err)
+		}
+		assertServiceCleanupRetainsBundle(t, f, "invalid JSON-RPC message")
 	})
 	t.Run("cleanup retains the bundle when a reader cannot close", func(t *testing.T) {
 		f := newServiceFixture(t)

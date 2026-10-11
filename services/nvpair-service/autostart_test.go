@@ -5,6 +5,7 @@ package main
 
 import (
 	"bytes"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -21,7 +22,11 @@ func TestDesktopEntryQuotesExec(t *testing.T) {
 	if !strings.Contains(got, wantExec+"\n") {
 		t.Fatalf("desktop entry:\n%s\nwant line:\n%s", got, wantExec)
 	}
-	for _, want := range []string{"[Desktop Entry]\n", "Type=Application\n", "Path=/opt/My Apps\n", "X-GNOME-Autostart-enabled=true\n"} {
+	wantPath := "Path=/opt/My Apps\n"
+	if runtime.GOOS == "windows" {
+		wantPath = `Path=\\opt\\My Apps` + "\n"
+	}
+	for _, want := range []string{"[Desktop Entry]\n", "Type=Application\n", wantPath, "X-GNOME-Autostart-enabled=true\n"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("desktop entry missing %q:\n%s", want, got)
 		}

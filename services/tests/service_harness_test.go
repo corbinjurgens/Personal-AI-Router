@@ -253,22 +253,41 @@ func (f *serviceFixture) cleanupChecked() error {
 		return nil
 	}
 	var failures []error
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	conn, err := servicectl.DialEndpoint(ctx, f.endpoint)
-	cancel()
-	if err == nil {
-		c := newServiceRPCClient(conn)
-		m, callErr := c.call("900000", "service/stop", nil, serviceStopTimeout)
-		err = callErr
-		if err == nil && m.Error != nil {
-			err = fmt.Errorf("service/stop RPC error: %+v", m.Error)
+	gracefulDeadline := time.Now().Add(3 * time.Second)
+	for {
+		ctx, cancel := context.WithDeadline(context.Background(), gracefulDeadline)
+		conn, err := servicectl.DialEndpoint(ctx, f.endpoint)
+		cancel()
+		if err == nil {
+			c := newServiceRPCClient(conn)
+			m, callErr := c.call("900000", "service/stop", nil, serviceStopTimeout)
+			err = callErr
+			if err == nil && m.Error != nil {
+				err = fmt.Errorf("service/stop RPC error: %+v", m.Error)
+			}
+			if closeErr := c.close(); closeErr != nil {
+				failures = append(failures, closeErr)
+			}
+			if err != nil {
+				f.t.Logf("graceful fixture stop unavailable: %v", err)
+			}
+			break
 		}
-		if closeErr := c.close(); closeErr != nil {
-			failures = append(failures, closeErr)
+		if time.Now().After(gracefulDeadline) {
+			break
 		}
-		if err != nil {
-			f.t.Logf("graceful fixture stop unavailable: %v", err)
+		directRunning := false
+		for _, child := range f.children {
+			select {
+			case <-child.done:
+			default:
+				directRunning = true
+			}
 		}
+		if !directRunning {
+			break
+		}
+		time.Sleep(25 * time.Millisecond)
 	}
 	deadline := time.Now().Add(10 * time.Second)
 	cleanupCtx, cleanupCancel := context.WithDeadline(context.Background(), deadline)
@@ -277,6 +296,29 @@ func (f *serviceFixture) cleanupChecked() error {
 		owned, err := f.inventory.scanContext(cleanupCtx)
 		if err != nil {
 			failures = append(failures, fmt.Errorf("cleanup inventory: %w", err))
+		}
+		owned, recoveryErr := f.inventory.recoveryContext(cleanupCtx, owned)
+		if recoveryErr != nil {
+			failures = append(failures, fmt.Errorf("cleanup recorded identities: %w", recoveryErr))
+		}
+		// Unrecorded direct children remain ambiguous and prevent verification.
+		f.inventory.mu.Lock()
+		for _, child := range f.children {
+			select {
+			case <-child.done:
+				continue
+			default:
+			}
+			pid := int32(child.cmd.Process.Pid)
+			identity, known := f.inventory.known[pid]
+			if !known || identity.Path != f.servicePath {
+				failures = append(failures, fmt.Errorf("direct child pid %d lacks a recorded copied-service identity", pid))
+				continue
+			}
+		}
+		f.inventory.mu.Unlock()
+		if cleanupCtx.Err() != nil {
+			failures = append(failures, cleanupCtx.Err())
 			break
 		}
 		if len(owned) == 0 {
@@ -285,6 +327,10 @@ func (f *serviceFixture) cleanupChecked() error {
 		// Killing the owner first prevents it from restarting the descendants.
 		for _, path := range f.inventory.paths {
 			for _, identity := range owned {
+				if cleanupCtx.Err() != nil {
+					failures = append(failures, cleanupCtx.Err())
+					break
+				}
 				if identity.Path == path {
 					if err := f.inventory.killContext(cleanupCtx, identity); err != nil {
 						failures = append(failures, fmt.Errorf("kill owned fixture %+v: %w", identity, err))
@@ -317,8 +363,8 @@ func (f *serviceFixture) cleanupChecked() error {
 	} else if len(owned) != 0 {
 		failures = append(failures, fmt.Errorf("final cleanup still owns %+v", owned))
 	}
-	ctx, cancel = context.WithTimeout(context.Background(), time.Second)
-	conn, err = servicectl.DialEndpoint(ctx, f.endpoint)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	conn, err := servicectl.DialEndpoint(ctx, f.endpoint)
 	cancel()
 	if err == nil {
 		_ = conn.Close()
@@ -332,56 +378,13 @@ func (f *serviceFixture) cleanupChecked() error {
 }
 
 type serviceRPCClient struct {
-	fixture        *serviceFixture
-	conn           io.ReadWriteCloser
-	mu             sync.Mutex
-	wmu            sync.Mutex
-	frames         []*jsonrpc.Message
-	bytes          int
-	err            error
-	budgetErr      error
-	wake           chan struct{}
-	done           chan struct{}
-	closeOnce      sync.Once
-	closeErr       error
-	readerCloseErr error
+	*serviceRPCReader
+	fixture *serviceFixture
+	wmu     sync.Mutex
 }
 
 func newServiceRPCClient(conn io.ReadWriteCloser) *serviceRPCClient {
-	c := &serviceRPCClient{conn: conn, wake: make(chan struct{}, 1), done: make(chan struct{})}
-	go func() {
-		defer close(c.done)
-		codec := jsonrpc.NewCodecMaxFrame(conn, jsonrpc.WorkerFrameBytes)
-		for {
-			m, err := codec.Read()
-			c.mu.Lock()
-			if err != nil {
-				if c.err == nil {
-					c.err = err
-				}
-				c.mu.Unlock()
-				c.signal()
-				return
-			}
-			size := serviceFrameBytes(m)
-			if len(c.frames) >= 4096 || c.bytes+size > 16*1024*1024 {
-				c.budgetErr = fmt.Errorf("fixture client retained-frame budget exceeded")
-				c.err = c.budgetErr
-			} else {
-				c.frames = append(c.frames, m)
-				c.bytes += size
-			}
-			c.mu.Unlock()
-			c.signal()
-		}
-	}()
-	return c
-}
-func (c *serviceRPCClient) signal() {
-	select {
-	case c.wake <- struct{}{}:
-	default:
-	}
+	return &serviceRPCClient{serviceRPCReader: newServiceRPCReader(conn)}
 }
 
 func (c *serviceRPCClient) next(timeout time.Duration, pred func(*jsonrpc.Message) bool) (*jsonrpc.Message, error) {
@@ -424,7 +427,7 @@ func (c *serviceRPCClient) request(id, method string, params json.RawMessage) er
 	case err := <-done:
 		return err
 	case <-time.After(serviceCallTimeout):
-		_ = c.conn.Close()
+		c.closeConnection()
 		return fmt.Errorf("request write exceeded %s", serviceCallTimeout)
 	}
 }
@@ -461,44 +464,11 @@ func (c *serviceRPCClient) notification(t *testing.T, method string) *jsonrpc.Me
 	}
 	return m
 }
-func (c *serviceRPCClient) close() error {
-	c.closeOnce.Do(func() {
-		if err := c.conn.Close(); err != nil {
-			c.closeErr = fmt.Errorf("close fixture client: %w", err)
-		}
-	})
-	select {
-	case <-c.done:
-	case <-time.After(2 * time.Second):
-		c.mu.Lock()
-		if c.readerCloseErr == nil {
-			c.readerCloseErr = errors.New("fixture client reader did not exit")
-		}
-		c.mu.Unlock()
-	}
-	c.mu.Lock()
-	budgetErr := c.budgetErr
-	readerErr := c.readerCloseErr
-	c.mu.Unlock()
-	return errors.Join(c.closeErr, readerErr, budgetErr)
-}
-
 func (c *serviceRPCClient) mustClose(t *testing.T) {
 	t.Helper()
 	if err := c.close(); err != nil {
 		t.Error(err)
 	}
-}
-
-func serviceFrameBytes(m *jsonrpc.Message) int {
-	size := 128 + len(m.JSONRPC) + len(m.Params) + len(m.Result) + len(m.Method)
-	if m.ID != nil {
-		size += len(*m.ID)
-	}
-	if m.Error != nil {
-		size += len(m.Error.Message) + len(m.Error.Data)
-	}
-	return size
 }
 
 type serviceStatusSnapshot struct {
