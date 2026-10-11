@@ -272,32 +272,57 @@ func (in *serviceProcessInventory) kill(want serviceProcessIdentity) error {
 }
 
 func (in *serviceProcessInventory) killContext(ctx context.Context, want serviceProcessIdentity) error {
-	p, err := process.NewProcessWithContext(ctx, want.PID)
-	if errors.Is(err, process.ErrorProcessNotRunning) {
-		return nil
-	}
-	if err != nil {
+	return in.killContextWithProbes(ctx, want, func(ctx context.Context, pid int32) (serviceKillProcess, error) {
+		return process.NewProcessWithContext(ctx, pid)
+	}, serviceProcessStopped)
+}
+
+type serviceKillProcess interface {
+	ExeWithContext(context.Context) (string, error)
+	CreateTimeWithContext(context.Context) (int64, error)
+	KillWithContext(context.Context) error
+}
+
+// The real and deterministic test paths share every check before signalling.
+func (in *serviceProcessInventory) killContextWithProbes(ctx context.Context, want serviceProcessIdentity, open func(context.Context, int32) (serviceKillProcess, error), stopped func(context.Context, int32) (bool, error)) error {
+	if err := ctx.Err(); err != nil {
 		return err
 	}
-	path, err := p.ExeWithContext(ctx)
-	if errors.Is(err, process.ErrorProcessNotRunning) {
-		return nil
+	inspectionFailed := func(stage string, inspectionErr error) error {
+		return serviceInspectionErrorWithProbe(ctx, want.PID, "revalidate "+stage, inspectionErr, func(ctx context.Context, pid int32) (bool, error) {
+			isStopped, err := stopped(ctx, pid)
+			return !isStopped, err
+		})
 	}
+	p, err := open(ctx, want.PID)
 	if err != nil {
-		return fmt.Errorf("revalidate pid %d executable: %w", want.PID, err)
+		return inspectionFailed("process", err)
+	}
+	path, err := p.ExeWithContext(ctx)
+	if err != nil {
+		return inspectionFailed("executable", err)
 	}
 	path, err = serviceExecutablePath(path)
 	if err != nil {
-		return err
+		return inspectionFailed("executable path", err)
 	}
 	created, err := p.CreateTimeWithContext(ctx)
 	if err != nil {
-		return err
+		return inspectionFailed("creation time", err)
 	}
 	if path != want.Path || created != want.Created || !in.owns(path) {
 		return fmt.Errorf("refusing changed pid %d identity: path=%q created=%d, recorded=%+v", want.PID, path, created, want)
 	}
-	if err := p.KillWithContext(ctx); err != nil && !errors.Is(err, process.ErrorProcessNotRunning) {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := p.KillWithContext(ctx); err != nil {
+		if errors.Is(err, process.ErrorProcessNotRunning) {
+			return inspectionFailed("signal", err)
+		}
+		return errors.Join(err, ctx.Err())
+	}
+	if err := ctx.Err(); err != nil {
 		return err
 	}
 	return nil

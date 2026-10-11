@@ -263,18 +263,10 @@ func TestServiceLifecycle(t *testing.T) {
 		if owner.PID == 0 {
 			t.Fatal("owned service identity unavailable for forced termination")
 		}
-		if err := f.inventory.kill(owner); err != nil {
-			t.Fatal(err)
-		}
-		f.waitChild(f.service, serviceCallTimeout)
-		if f.service.err == nil {
-			t.Fatal("forced termination unexpectedly exited cleanly")
-		}
+		// Inject while the owner and descendants are still live. Killing the
+		// owner first lets its broker exit on EOF before recovery is exercised.
 		remaining := f.scan()
 		for _, identity := range recorded {
-			if identity.Path == f.servicePath {
-				continue
-			}
 			found := false
 			for _, current := range remaining {
 				if current == identity {
@@ -282,7 +274,7 @@ func TestServiceLifecycle(t *testing.T) {
 				}
 			}
 			if !found {
-				t.Fatalf("fault injection needs a still-live recorded descendant %+v: %+v", identity, remaining)
+				t.Fatalf("fault injection needs a still-live recorded identity %+v: %+v", identity, remaining)
 			}
 		}
 		injected := errors.New("fixture injected empty enumeration error")
@@ -303,6 +295,10 @@ func TestServiceLifecycle(t *testing.T) {
 		}
 		if err := f.cleanupChecked(); !errors.Is(err, injected) {
 			t.Fatalf("cleanup error=%v, want injected enumeration error", err)
+		}
+		f.waitChild(f.service, serviceCallTimeout)
+		if f.service.err == nil {
+			t.Fatal("forced termination unexpectedly exited cleanly")
 		}
 		if f.cleanupVerified {
 			t.Fatal("cleanup verified despite failed enumeration")

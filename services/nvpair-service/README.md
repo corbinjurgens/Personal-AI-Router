@@ -248,16 +248,16 @@ stop, single instance, stale sockets, slow clients, and log rotation), plus one
 test that runs the real exec-based spawner against the test binary acting as a
 broker.
 
-### Real-service lifecycle integration
+### Real-service lifecycle and policy integration
 
 `services/tests` also runs the service, broker and scanner as separate real
 processes against each other. From the repository root:
 
 ```sh
 cd services/tests
-go test -count=1 -timeout 10m -run '^TestServiceLifecycle' -v .
-go test -count=3 -timeout 10m -run '^TestServiceLifecycle' -v .
-go test -count=1 -timeout 10m -run '^(TestServiceLifecycle|TestServiceInspectionError|TestServiceRecovery|TestServiceRPCReader)' -v .
+go test -count=1 -timeout 10m -run '^TestService(Lifecycle|Policy)' -v .
+go test -count=3 -timeout 10m -run '^TestService(Lifecycle|Policy)' -v .
+go test -count=1 -timeout 10m -run '^(TestServiceLifecycle|TestServicePolicy|TestServiceInspectionError|TestServiceRecovery|TestServiceRPCReader)' -v .
 ```
 
 `-count=1` disables the test cache; `-count=3` repeats every named case in one
@@ -285,6 +285,23 @@ assert, against real processes:
 - A malformed RPC frame, a reader that cannot close, or a reader that exceeds
   its notification retention budget makes cleanup fail visibly and preserves
   the bundle until the injected failure is disposed of.
+
+The policy cases each use fresh fixture state and complete policies fetched
+through `policy:get`. They assert that:
+
+- A valid concurrency update returns the complete policy, notifies an observer
+  with the fixture's node identity, writes the platform-resolved disposable
+  `appdir` policy file, and survives a service and broker restart.
+- Invalid `tierPolicy.preferLoaded` input returns a structured JSON-RPC error
+  and preserves both the complete policy/live snapshot and exact stored bytes.
+- Pausing returns and publishes the final paused state to another connection,
+  persists it across restart, and resuming returns, publishes and stores the
+  available state. The observer waits for the final state while retaining the
+  intermediate draining event.
+- CLI `call policy:get '{}'` transports the complete updated policy through
+  the fixture's private endpoint.
+- Detaching the command client leaves the updated policy readable on the
+  surviving connection without replacing the service or broker.
 
 The inspection-error, process-recovery and RPC-reader regressions are
 deterministic and in-memory: they drive the fixture's cleanup inspection,
@@ -314,7 +331,11 @@ verified.
 The scanner still performs real network discovery, so run the lifecycle
 commands on a controlled network and never assert which peers it finds.
 
-The lifecycle cases prove JSON-RPC multiplexing and process lifetime only. They
+The lifecycle and policy cases prove JSON-RPC multiplexing, process lifetime,
+policy persistence, and availability control flow. Availability is exercised
+without a proxy or engines; it does not prove destination rejection, live
+draining, unloading, or Off/wake behavior. Those require the existing proxy
+and broker suites and real-engine validation. These integration cases
 do not exercise real inference, an engine or a model, GPU scheduling, the
 desktop or TUI attach paths, login startup, paired or multi-machine routing, or
 memory use, and the fixture runs without a proxy. Run them natively on macOS

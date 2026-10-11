@@ -14,10 +14,12 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"nvpair-shared/appdir"
 	"nvpair-shared/jsonrpc"
 	"nvpair-shared/nodepolicy"
 	"nvpair-shared/servicectl"
@@ -519,13 +521,20 @@ func servicePolicy(t *testing.T, c *serviceRPCClient) nodepolicy.Policy {
 }
 func decodeServicePolicy(t *testing.T, m *jsonrpc.Message) nodepolicy.Policy {
 	t.Helper()
+	return decodeServicePolicySnapshot(t, m).Policy
+}
+
+type servicePolicySnapshot struct {
+	Policy       nodepolicy.Policy       `json:"policy"`
+	Availability nodepolicy.Availability `json:"availability"`
+}
+
+func decodeServicePolicySnapshot(t *testing.T, m *jsonrpc.Message) servicePolicySnapshot {
+	t.Helper()
 	if m.Error != nil {
 		t.Fatalf("policy:get: %+v", m.Error)
 	}
-	var result struct {
-		Policy       nodepolicy.Policy       `json:"policy"`
-		Availability nodepolicy.Availability `json:"availability"`
-	}
+	var result servicePolicySnapshot
 	if err := json.Unmarshal(m.Result, &result); err != nil {
 		t.Fatal(err)
 	}
@@ -540,5 +549,48 @@ func decodeServicePolicy(t *testing.T, m *jsonrpc.Message) nodepolicy.Policy {
 	default:
 		t.Fatalf("invalid live availability: %q", result.Availability)
 	}
-	return result.Policy
+	return result
+}
+
+// Resolve with the child's exact config environment, then restore the parent
+// before accessing files. These fixtures and their callers remain serial.
+func (f *serviceFixture) policyPath() string {
+	f.t.Helper()
+	for _, key := range []string{"HOME", "XDG_CONFIG_HOME", "APPDATA", "LOCALAPPDATA"} {
+		original, existed := os.LookupEnv(key)
+		defer func() {
+			var err error
+			if existed {
+				err = os.Setenv(key, original)
+			} else {
+				err = os.Unsetenv(key)
+			}
+			if err != nil {
+				f.t.Errorf("restore config environment %s: %v", key, err)
+			}
+		}()
+		var value string
+		found := false
+		for _, entry := range f.env {
+			if v, ok := strings.CutPrefix(entry, key+"="); ok {
+				value, found = v, true
+			}
+		}
+		if !found {
+			f.t.Fatalf("child config environment missing %s", key)
+		}
+		if err := os.Setenv(key, value); err != nil {
+			f.t.Fatalf("resolve child config environment %s: %v", key, err)
+		}
+	}
+	path, err := appdir.Path(nodepolicy.FileName)
+	if err != nil {
+		f.t.Fatalf("resolve fixture policy path: %v", err)
+	}
+	rel, err := filepath.Rel(f.configDir, path)
+	if err != nil || filepath.IsAbs(rel) || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		f.t.Fatalf("policy path %q escapes disposable config %q: %v", path, f.configDir, err)
+	}
+	f.t.Logf("fixture_policy_path path=%q disposable_config=%q", path, f.configDir)
+	return path
 }
