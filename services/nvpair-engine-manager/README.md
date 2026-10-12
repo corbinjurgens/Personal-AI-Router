@@ -228,6 +228,20 @@ would only collide on the port. Consequences worth knowing:
   image is **not** our managed binary is declined with an actionable error
   naming the offending PID and image path — the user / desktop app owns that
   process, and NVPAIR won't terminate it out from under them.
+- **Executable inspection fails closed.** Linux reads `/proc/<pid>/exe`;
+  macOS uses the kernel's `proc_pidpath` with a fixed-size buffer, without
+  trusting command-line text. Port lookup is bounded and refuses ambiguous
+  owners. An unavailable or empty first lookup permits another provider;
+  malformed, incomplete or conflicting ownership remains unknown even if that
+  provider reports one PID. macOS resolves filesystem aliases such as `/var`
+  and `/private/var` before matching; an executable symlink escaping the managed
+  install directory does not confer ownership. Unknown images are refused before signaling or
+  uninstalling files.
+  Configured filenames are literal. A ` (deleted)` suffix is interpreted as
+  Linux process-image metadata only when that full spelling does not exist;
+  an existing executable with that literal suffix retains its distinct identity.
+  Linux confirms an existing suffixed file against the `/proc` executable's
+  file identity; a different file at that spelling makes inspection unknown.
 - **`engine:stop` may return an error while still saving OFF.** When stop
   declines a foreign listener it returns an actionable error, but the user's
   OFF choice is persisted anyway — UI layers should treat the saved desired

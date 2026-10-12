@@ -4,6 +4,7 @@
 package main
 
 import (
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -38,10 +39,8 @@ func TestStopGrace(t *testing.T) {
 	}
 }
 
-// spawnFakeListener starts a fake-engine copied to binPath, bound to
-// 127.0.0.1:port, and skips the test when this host can't resolve the PID/
-// image behind a listening port (no lsof/ss, or a /proc-less OS) — the
-// reclaim/decline behavior can't be exercised without that resolution.
+// spawnFakeListener owns exactly one copied fake-engine child and one waiter.
+// Cleanup is registered before readiness/inspection and reaps on every path.
 func spawnFakeListener(t *testing.T, binPath string, port int) *exec.Cmd {
 	t.Helper()
 	cmd := exec.Command(binPath)
@@ -50,11 +49,40 @@ func spawnFakeListener(t *testing.T, binPath string, port int) *exec.Cmd {
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = cmd.Process.Kill() })
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	t.Logf("owned listener started: pid=%d port=%d path=%q", cmd.Process.Pid, port, binPath)
+	t.Cleanup(func() {
+		select {
+		case err := <-done:
+			t.Logf("owned listener reaped: pid=%d wait=%v", cmd.Process.Pid, err)
+			return
+		default:
+		}
+		if err := cmd.Process.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) {
+			t.Errorf("kill owned listener pid=%d: %v", cmd.Process.Pid, err)
+		}
+		select {
+		case err := <-done:
+			t.Logf("owned listener cleanup reaped: pid=%d wait=%v", cmd.Process.Pid, err)
+		case <-time.After(3 * time.Second):
+			t.Errorf("owned listener pid=%d was not reaped within 3s", cmd.Process.Pid)
+		}
+	})
 	waitPortServing(t, port)
-	if _, image, ok := pidOnPort(port); !ok || image == "" {
-		t.Skip("host cannot resolve the PID/image owning a port; skipping PID-precise stop test")
+	pid, image, ok := pidOnPort(port)
+	if !ok || pid != cmd.Process.Pid || image == "" {
+		t.Fatalf("listener inspection = (%d, %q, %v), want owned pid %d and full image", pid, image, ok, cmd.Process.Pid)
 	}
+	want, err := filepath.EvalSymlinks(binPath)
+	if err != nil {
+		t.Fatalf("resolve fixture image: %v", err)
+	}
+	got, err := filepath.EvalSymlinks(image)
+	if err != nil || !strings.EqualFold(got, want) {
+		t.Fatalf("listener image = %q (canonical %q, err=%v), want %q", image, got, err, want)
+	}
+	t.Logf("owned listener inspected: pid=%d image=%q canonical=%q", pid, image, got)
 	return cmd
 }
 
@@ -136,8 +164,11 @@ func TestStopDoesNotReclaimSameExternalImage(t *testing.T) {
 // foreign process is left running, and OFF intent is still recorded.
 func TestStopDeclinesForeignListenerWithActionableError(t *testing.T) {
 	dir := t.TempDir()
-	ourBin := filepath.Join(dir, "ourengine"+exeExt())
-	foreignBin := filepath.Join(dir, "foreignengine"+exeExt())
+	ourBin := filepath.Join(dir, "fake", "ourengine"+exeExt())
+	foreignBin := filepath.Join(t.TempDir(), "foreignengine"+exeExt())
+	if err := os.MkdirAll(filepath.Dir(ourBin), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	copyFile(t, fakeEngineBin, ourBin)
 	copyFile(t, fakeEngineBin, foreignBin)
 	port, err := freePort()
@@ -152,7 +183,9 @@ func TestStopDeclinesForeignListenerWithActionableError(t *testing.T) {
 	p.Runtime.Port = port
 	m.Platforms[key] = p
 
-	ex := newTestExecutor(t, m)
+	reg := NewRegistry()
+	reg.engines[m.Engine] = m
+	ex := NewExecutor(reg, NewReporter(nil), func(string, any) {}, dir)
 	if st, err := ex.Status("fake"); err != nil || !st.Running {
 		t.Fatalf("adopt foreign listener: status=%+v err=%v", st, err)
 	}
@@ -170,8 +203,82 @@ func TestStopDeclinesForeignListenerWithActionableError(t *testing.T) {
 	if !portServing(port) {
 		t.Fatal("a genuinely foreign listener must be left running")
 	}
+	if !fileExists(ourBin) || !fileExists(foreignBin) {
+		t.Fatal("refused stop must preserve managed and external executable files")
+	}
 	if enabled, known, err := ex.desired.get("fake"); err != nil || !known || enabled {
 		t.Fatalf("desired state = (%v, %v, %v), want known OFF after a declined stop", enabled, known, err)
+	}
+}
+
+func TestStopDeclinesLiteralDeletedSuffixListener(t *testing.T) {
+	base := t.TempDir()
+	managed := filepath.Join(base, "fake", "engine"+exeExt())
+	distinct := managed + " (deleted)"
+	if err := os.MkdirAll(filepath.Dir(managed), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	copyFile(t, fakeEngineBin, managed)
+	copyFile(t, fakeEngineBin, distinct)
+	port, err := freePort()
+	if err != nil {
+		t.Fatal(err)
+	}
+	child := spawnFakeListener(t, distinct, port)
+	m := testEngineManifest(managed)
+	key := runtime.GOOS + "/" + runtime.GOARCH
+	p := m.Platforms[key]
+	p.Runtime.Port = port
+	m.Platforms[key] = p
+	reg := NewRegistry()
+	reg.engines[m.Engine] = m
+	ex := NewExecutor(reg, NewReporter(nil), func(string, any) {}, base)
+	if st, err := ex.Status(m.Engine); err != nil || !st.Running {
+		t.Fatalf("adopt distinct suffixed listener: status=%+v err=%v", st, err)
+	}
+	err = ex.Stop(m.Engine)
+	if err == nil || !strings.Contains(err.Error(), "external management") || !strings.Contains(err.Error(), strconv.Itoa(child.Process.Pid)) || !strings.Contains(err.Error(), " (deleted)") {
+		t.Fatalf("distinct literal-suffix stop error=%v, want refusal naming actual pid/image", err)
+	}
+	if !portServing(port) || !fileExists(managed) || !fileExists(distinct) {
+		t.Fatal("refused Stop must preserve the distinct live listener and both executable files")
+	}
+	if enabled, known, err := ex.desired.get(m.Engine); err != nil || !known || enabled {
+		t.Fatalf("desired state=(%v,%v,%v), want known OFF after refusal", enabled, known, err)
+	}
+}
+
+func TestStopReclaimsManagedLiteralDeletedSuffix(t *testing.T) {
+	base := t.TempDir()
+	bin := filepath.Join(base, "fake", "engine"+exeExt()+" (deleted)")
+	if err := os.MkdirAll(filepath.Dir(bin), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	copyFile(t, fakeEngineBin, bin)
+	port, err := freePort()
+	if err != nil {
+		t.Fatal(err)
+	}
+	spawnFakeListener(t, bin, port)
+	m := testEngineManifest(bin)
+	key := runtime.GOOS + "/" + runtime.GOARCH
+	p := m.Platforms[key]
+	p.Runtime.Port = port
+	m.Platforms[key] = p
+	reg := NewRegistry()
+	reg.engines[m.Engine] = m
+	ex := NewExecutor(reg, NewReporter(nil), func(string, any) {}, base)
+	if st, err := ex.Status(m.Engine); err != nil || !st.Running {
+		t.Fatalf("adopt managed literal-suffix listener: status=%+v err=%v", st, err)
+	}
+	if err := ex.Stop(m.Engine); err != nil {
+		t.Fatalf("reclaim exact managed literal-suffix image: %v", err)
+	}
+	if portServing(port) || !fileExists(bin) {
+		t.Fatal("Stop must terminate the exact managed listener while preserving its literal-suffix file")
+	}
+	if enabled, known, err := ex.desired.get(m.Engine); err != nil || !known || enabled {
+		t.Fatalf("desired state=(%v,%v,%v), want known OFF", enabled, known, err)
 	}
 }
 

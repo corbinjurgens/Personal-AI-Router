@@ -14,7 +14,6 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -791,14 +790,7 @@ func TestUninstallTerminatesRunningInstance(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cmd := exec.Command(bin)
-	cmd.Env = append(os.Environ(), "OLLAMA_HOST=127.0.0.1:"+strconv.Itoa(port))
-	configureSysProcAttr(cmd)
-	if err := cmd.Start(); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = cmd.Process.Kill() })
-	waitPortServing(t, port)
+	spawnFakeListener(t, bin, port)
 
 	m := testEngineManifest(bin)
 	key := runtime.GOOS + "/" + runtime.GOARCH
@@ -837,14 +829,7 @@ func TestUninstallDoesNotKillExternalSameNameProcess(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cmd := exec.Command(externalBin)
-	cmd.Env = append(os.Environ(), "OLLAMA_HOST=127.0.0.1:"+strconv.Itoa(port))
-	configureSysProcAttr(cmd)
-	if err := cmd.Start(); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = cmd.Process.Kill() })
-	waitPortServing(t, port)
+	spawnFakeListener(t, externalBin, port)
 
 	m := testEngineManifest(managedBin)
 	key := runtime.GOOS + "/" + runtime.GOARCH
@@ -887,6 +872,42 @@ func TestUninstallRefusesExternalProcessEngine(t *testing.T) {
 	}
 	if !fileExists(externalBin) {
 		t.Fatal("external executable was removed")
+	}
+}
+
+func TestUninstallRefusesManagedSymlinkToExternalImage(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix symlink ownership fixture")
+	}
+	baseDir := t.TempDir()
+	managedBin := filepath.Join(baseDir, "fake", "managed-link")
+	externalBin := filepath.Join(t.TempDir(), "external engine")
+	if err := os.MkdirAll(filepath.Dir(managedBin), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	copyFile(t, fakeEngineBin, externalBin)
+	if err := os.Symlink(externalBin, managedBin); err != nil {
+		t.Fatal(err)
+	}
+	port, err := freePort()
+	if err != nil {
+		t.Fatal(err)
+	}
+	spawnFakeListener(t, externalBin, port)
+	m := testEngineManifest(managedBin)
+	key := runtime.GOOS + "/" + runtime.GOARCH
+	p := m.Platforms[key]
+	p.Runtime.Port = port
+	p.Uninstall = &Uninstall{Run: rmCmd(managedBin)}
+	m.Platforms[key] = p
+	reg := NewRegistry()
+	reg.engines[m.Engine] = m
+	ex := NewExecutor(reg, NewReporter(nil), func(string, any) {}, baseDir)
+	if err := ex.Uninstall(context.Background(), m.Engine); err == nil || !strings.Contains(err.Error(), "outside NVPAIR's managed install directory") {
+		t.Fatalf("symlink external uninstall error = %v", err)
+	}
+	if !portServing(port) || !fileExists(managedBin) || !fileExists(externalBin) {
+		t.Fatal("refused uninstall must preserve external listener, managed link and external executable")
 	}
 }
 

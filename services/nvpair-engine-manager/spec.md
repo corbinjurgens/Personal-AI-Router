@@ -83,6 +83,19 @@ extensibility story for an open-source product.
 - Load + validate per-engine JSON manifests (bundled + user dir); select the host `<goos>/<goarch>` block; resolve placeholders (`{bin}`, `{cli}`, `{port}`, `{download}`, `{install_dir}`). Install commands also receive resolved download and destination paths in child-scoped `NVPAIR_INSTALL_*` environment variables so shell reparsing cannot corrupt them.
 - Support both `process` (owned foreground) and `command` (daemon + control-CLI) runtimes; execute detect / install / uninstall / start / stop / restart / status / health and HTTP **or** CLI actions; emit `engine:*` results and notifications.
 - Bound process-mode stops: on Unix send SIGTERM to the owned process group, then SIGKILL after `runtime.stop.grace_s` (five seconds by default); `signal:"kill"` skips the grace. On Windows, windowless managed engines require immediate `taskkill /T /F`.
+- Reclaim an adopted managed orphan only after authoritative executable-image
+  inspection: Linux `/proc/<pid>/exe`, macOS kernel `proc_pidpath` with a
+  fixed-size buffer, or the Windows process-image API. Refuse unavailable,
+  malformed or ambiguous ownership inspection. An unavailable or empty port
+  lookup may fall back to another provider; known malformed, incomplete or
+  conflicting output must not. Resolve macOS filesystem aliases for image
+  comparison, while canonical install containment rejects symlinks
+  to external executables. Refusal must preserve external listeners and files.
+  Configured paths remain literal; only Linux process-image metadata may remove
+  one trailing ` (deleted)`, and an existing literal suffixed file takes
+  precedence over that interpretation.
+  On Linux, an existing suffixed spelling must identify the actual `/proc`
+  executable file; a metadata collision with another file fails closed.
 - Emit `errors:report` / `errors:clear` on its stdio for the Broker to forward to `nvpair-errors`.
 
 **Non-functional**

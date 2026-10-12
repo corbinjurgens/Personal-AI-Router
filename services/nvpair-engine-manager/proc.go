@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -137,17 +138,46 @@ func terminatePID(pid int, grace time.Duration) {
 	}
 }
 
-// normalizeEngineImage cleans an executable path for comparison. Linux
-// /proc/<pid>/exe can suffix " (deleted)" when the file was replaced while
-// the process still runs.
-func normalizeEngineImage(path string) string {
-	path = strings.TrimSuffix(path, " (deleted)")
+// normalizeEngineImage handles annotations supplied by process inspection,
+// never configured filenames. Only Linux /proc annotates a deleted image.
+// An existing literal suffixed file must not be mistaken for that annotation;
+// if the two spellings collide, refusing reclaim is safer than guessing.
+func normalizeEngineImage(path, platform string) string {
+	if platform == "linux" && strings.HasSuffix(path, " (deleted)") {
+		if _, err := os.Lstat(path); os.IsNotExist(err) {
+			path = strings.TrimSuffix(path, " (deleted)")
+		}
+	}
 	return filepath.Clean(path)
+}
+
+// linuxEngineImage distinguishes a literal suffixed file from a deleted-image
+// annotation colliding with another file. exe is the exact /proc/PID/exe path.
+func linuxEngineImage(path, exe string) string {
+	if strings.HasSuffix(path, " (deleted)") {
+		// Use the same entry-existence check as normalization. A dangling
+		// symlink is an existing literal entry, not a deleted annotation.
+		if _, err := os.Lstat(path); err != nil {
+			if os.IsNotExist(err) {
+				return path
+			}
+			return ""
+		}
+		literal, err := os.Stat(path)
+		if err != nil {
+			return ""
+		}
+		actual, err := os.Stat(exe)
+		if err != nil || !os.SameFile(literal, actual) {
+			return ""
+		}
+	}
+	return path
 }
 
 // isOurEngineImage reports whether the listener on our managed port is
 // running the same binary this service manages for the engine (st.binPath).
-// The compare is path-cleaned and case-insensitive so a PAIR-owned orphan on
+// The compare is path-cleaned (canonical on Darwin) so a PAIR-owned orphan on
 // our managed port is reclaimed by Stop, while an unrelated process that
 // merely grabbed the port is left for the caller to decline. An empty image
 // (e.g. a PID we can't introspect) never matches, so Stop fails closed.
@@ -155,7 +185,27 @@ func isOurEngineImage(image, binPath string) bool {
 	if image == "" || binPath == "" {
 		return false
 	}
-	return strings.EqualFold(normalizeEngineImage(image), normalizeEngineImage(binPath))
+	image = normalizeEngineImage(image, runtime.GOOS)
+	binPath = filepath.Clean(binPath)
+	if runtime.GOOS == "darwin" {
+		var err error
+		image, err = filepath.EvalSymlinks(image)
+		if err != nil {
+			return false
+		}
+		binPath, err = filepath.EvalSymlinks(binPath)
+		if err != nil {
+			return false
+		}
+		if image == binPath {
+			return true
+		}
+		// Case aliases count only when the filesystem confirms the same file.
+		imageInfo, imageErr := os.Stat(image)
+		binInfo, binErr := os.Stat(binPath)
+		return strings.EqualFold(image, binPath) && imageErr == nil && binErr == nil && os.SameFile(imageInfo, binInfo)
+	}
+	return strings.EqualFold(image, binPath)
 }
 
 // isManagedInstallPath reports whether binPath is inside this engine's
@@ -166,12 +216,23 @@ func isManagedInstallPath(binPath, installDir string) bool {
 	if binPath == "" || installDir == "" {
 		return false
 	}
-	binAbs, err := filepath.Abs(normalizeEngineImage(binPath))
+	binAbs, err := filepath.Abs(binPath)
 	if err != nil {
 		return false
 	}
 	dirAbs, err := filepath.Abs(installDir)
 	if err != nil {
+		return false
+	}
+	// Resolve existing paths together so canonical image aliases cannot turn
+	// a symlink escaping the managed directory into install ownership.
+	if resolvedBin, err := filepath.EvalSymlinks(binAbs); err == nil {
+		resolvedDir, err := filepath.EvalSymlinks(dirAbs)
+		if err != nil {
+			return false
+		}
+		binAbs, dirAbs = resolvedBin, resolvedDir
+	} else if !os.IsNotExist(err) {
 		return false
 	}
 	rel, err := filepath.Rel(dirAbs, binAbs)
