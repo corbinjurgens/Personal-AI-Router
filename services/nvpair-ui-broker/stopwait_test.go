@@ -4,9 +4,16 @@
 package main
 
 import (
+	"bufio"
+	"errors"
+	"fmt"
+	"io"
+	"os"
 	"os/exec"
+	"os/signal"
 	"runtime"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -88,46 +95,174 @@ func TestWaitForStdinCloseGivesUpWithoutProcess(t *testing.T) {
 // TestWaitForStdinCloseKillsWorkerThatIgnoresShutdown checks the escalation
 // actually reaches a real process that will not leave on its own.
 func TestWaitForStdinCloseKillsWorkerThatIgnoresShutdown(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("needs a POSIX shell to spawn a signal-ignoring sleeper")
-	}
 	resetTeardownClock()
 
-	// Ignore SIGTERM so the terminate step cannot be what ends it, forcing the
-	// kill step to be exercised.
-	cmd := exec.Command("/bin/sh", "-c", "trap '' TERM; sleep 120")
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatalf("test executable: %v", err)
+	}
+	cmd := exec.Command(executable, shutdownIgnoringChildArg)
+	configureSubprocess(cmd)
+	cmd.Stderr = os.Stderr
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		t.Fatalf("stdin pipe: %v", err)
 	}
+	t.Cleanup(func() {
+		if err := stdin.Close(); err != nil && !errors.Is(err, os.ErrClosed) {
+			t.Errorf("cleanup close stdin: %v", err)
+		}
+	})
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatalf("stdout pipe: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := stdout.Close(); err != nil && !errors.Is(err, os.ErrClosed) {
+			t.Errorf("cleanup close stdout: %v", err)
+		}
+	})
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start: %v", err)
 	}
 
 	done := make(chan struct{})
+	var waitErr error
 	go func() {
-		_ = cmd.Wait()
+		waitErr = cmd.Wait()
 		close(done)
 	}()
 
-	returned := make(chan struct{})
+	type childLine struct {
+		text string
+		err  error
+	}
+	lines := make(chan childLine, 2)
+	readerDone := make(chan struct{})
+	go func() {
+		defer close(readerDone)
+		reader := bufio.NewReader(stdout)
+		for range 2 {
+			line, err := reader.ReadString('\n')
+			lines <- childLine{text: line, err: err}
+			if err != nil {
+				return
+			}
+		}
+	}()
+
+	var returned chan struct{}
+	t.Cleanup(func() {
+		select {
+		case <-done:
+		default:
+			if err := cmd.Process.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) {
+				t.Errorf("cleanup kill child %d: %v", cmd.Process.Pid, err)
+			}
+		}
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Errorf("cleanup did not reap child %d", cmd.Process.Pid)
+		}
+		if err := stdout.Close(); err != nil && !errors.Is(err, os.ErrClosed) {
+			t.Errorf("cleanup close stdout: %v", err)
+		}
+		select {
+		case <-readerDone:
+		case <-time.After(2 * time.Second):
+			t.Error("cleanup did not join child stdout reader")
+		}
+		if returned != nil {
+			select {
+			case <-returned:
+			case <-time.After(2 * time.Second):
+				t.Error("cleanup did not join shutdown waiter")
+			}
+		}
+	})
+	readLine := func(want string) {
+		t.Helper()
+		select {
+		case got := <-lines:
+			if got.err != nil {
+				t.Fatalf("child handshake %q: %v", want, got.err)
+			}
+			if got.text != want+"\n" {
+				t.Fatalf("child handshake = %q, want %q", got.text, want+"\n")
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("child handshake %q timed out", want)
+		}
+	}
+	readLine("ready")
+	t.Logf("owned shutdown fixture ready: pid=%d", cmd.Process.Pid)
+	select {
+	case <-done:
+		t.Fatalf("child exited before shutdown: %v", waitErr)
+	default:
+	}
+
+	started := time.Now()
+	returned = make(chan struct{})
 	go func() {
 		waitForStdinClose("scanner", cmd, stdin, done)
 		close(returned)
 	}()
+	readLine("stdin-closed")
 
 	select {
 	case <-returned:
 	case <-time.After(workerStopGrace + 4*workerSignalGrace + 5*time.Second):
-		_ = cmd.Process.Kill()
 		t.Fatal("escalation never completed for a worker that ignores shutdown")
 	}
 
 	select {
 	case <-done:
 	case <-time.After(2 * time.Second):
-		_ = cmd.Process.Kill()
 		t.Fatal("worker was left running after the join returned")
+	}
+	var exitErr *exec.ExitError
+	if !errors.As(waitErr, &exitErr) {
+		t.Fatalf("worker wait = %v, want an unsuccessful native termination", waitErr)
+	}
+	if runtime.GOOS != "windows" {
+		status, ok := exitErr.Sys().(syscall.WaitStatus)
+		if !ok || !status.Signaled() || status.Signal() != syscall.SIGKILL {
+			t.Fatalf("worker exit = %v, want SIGKILL after ignored SIGTERM", exitErr)
+		}
+	}
+	// POSIX reaches forced kill after both graces; Windows TerminateProcess
+	// ends this scanner fixture at the first escalation, after the EOF grace.
+	minimum := 3 * time.Second
+	if runtime.GOOS != "windows" {
+		minimum = 5 * time.Second
+	}
+	if elapsed := time.Since(started); elapsed < minimum {
+		t.Fatalf("worker exited after %v, before its %v shutdown graces", elapsed, minimum)
+	}
+	t.Logf("owned shutdown fixture reaped before cleanup: pid=%d, exit=%v", cmd.Process.Pid, waitErr)
+}
+
+const shutdownIgnoringChildArg = "--nvpair-broker-shutdown-ignoring-child"
+
+// Entered by TestMain before it allocates app-data directories: a killed child
+// cannot run the normal TestMain cleanup. This fixture creates no files.
+func runShutdownIgnoringChild() {
+	if runtime.GOOS != "windows" {
+		signal.Ignore(syscall.SIGTERM)
+	}
+	if _, err := fmt.Fprintln(os.Stdout, "ready"); err != nil {
+		os.Exit(2)
+	}
+	if _, err := io.Copy(io.Discard, os.Stdin); err != nil {
+		os.Exit(2)
+	}
+	if _, err := fmt.Fprintln(os.Stdout, "stdin-closed"); err != nil {
+		os.Exit(2)
+	}
+	for {
+		time.Sleep(time.Hour)
 	}
 }
 

@@ -12,6 +12,10 @@ import (
 // Bare broker fixtures also consult the settings journal during startup. Keep
 // all default app-data lookups away from the developer's live configuration.
 func TestMain(m *testing.M) {
+	if len(os.Args) == 2 && os.Args[1] == shutdownIgnoringChildArg {
+		runShutdownIgnoringChild()
+		return
+	}
 	dir, err := os.MkdirTemp("", "nvpair-broker-test-")
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
