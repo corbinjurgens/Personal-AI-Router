@@ -122,9 +122,11 @@ type Manager struct {
 	// this node rejoined the same cluster (a rejoin does not clear sessions).
 	// Only resetSessions bumps it, so an unrelated membership change or a sibling
 	// invite never trips it.
-	sessGen  atomic.Uint64
-	sessMu   sync.Mutex
-	sessions map[string]*pairingSession // keyed by inviteId
+	sessGen         atomic.Uint64
+	sessMu          sync.Mutex
+	sessions        map[string]*pairingSession // keyed by inviteId
+	receiptMu       sync.Mutex
+	pairingReceipts map[string]pairingReceipt
 
 	browser *Browser
 
@@ -261,6 +263,12 @@ func NewManager(codec *Codec, configDir string, port int) (*Manager, error) {
 	if err := mgr.loadMembers(); err != nil {
 		return nil, fmt.Errorf("load members: %w", err)
 	}
+	if err := mgr.loadPairingReceipts(); err != nil {
+		return nil, fmt.Errorf("load pairing receipts: %w", err)
+	}
+	if err := mgr.recoverPairingRollbacks(); err != nil {
+		return nil, fmt.Errorf("recover pairing rollback: %w", err)
+	}
 	if err := mgr.rollbackIncompleteAdmission(); err != nil {
 		return nil, fmt.Errorf("rollback incomplete admission: %w", err)
 	}
@@ -332,6 +340,7 @@ func (m *Manager) Run(ctx context.Context) error {
 
 	go m.reconcileLoop(ctx)
 	go m.inviteExpiryLoop(ctx)
+	go m.resumeOutboundPairings()
 
 	err := m.readLoop(ctx)
 	m.clients.CloseIdle()

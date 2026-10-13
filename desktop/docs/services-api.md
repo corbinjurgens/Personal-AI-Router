@@ -64,6 +64,7 @@
 | `cluster:identity-changed` | notification (we consume) | ✅ yes |
 | `cluster:invite-canceled` | notification (we consume) | ✅ yes |
 | `cluster:invite-expired` | notification (we consume) | ✅ yes |
+| `cluster:invite-failed` | notification (we consume) | ✅ yes |
 | `cluster:invite-received` | notification (we consume) | ✅ yes |
 | `cluster:trust-changed` | notification (we consume) | ➖ ignored |
 | `nodes:changed` | notification (we consume) | ✅ yes |
@@ -79,7 +80,7 @@
 | `nodes:remove` | request (we call) | ✅ yes |
 
 **Dynamic / unresolved notify sites (verify by hand — `npm run service-contracts` prints the line numbers):**
-- `notifyMethod (var)  (httpserver.go, 2 sites)`
+- `notifyMethod (var)  (httpserver.go)`
 
 ## nvpair-engine-manager
 

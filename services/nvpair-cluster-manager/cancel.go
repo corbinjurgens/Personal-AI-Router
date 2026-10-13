@@ -60,7 +60,7 @@ func (m *Manager) handleCancelInvite(msg *Message) {
 	m.inviteMu.Lock()
 	sess.mu.Lock()
 	cur, ok := m.getInvite(p.InviteID)
-	if !ok || cur.State != inviteStatePending {
+	if !ok || cur.State != inviteStatePending || sess.awaitingAck {
 		sess.mu.Unlock()
 		m.inviteMu.Unlock()
 		state := inviteStateFailed

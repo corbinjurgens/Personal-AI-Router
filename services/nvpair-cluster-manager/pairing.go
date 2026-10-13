@@ -21,6 +21,15 @@ import (
 // EAP-NOOB ServerInfo/PeerInfo (§7.2).
 const pairingInfoVersion = 2
 
+// This optional capability is part of the authenticated EAP transcript. Its
+// own version does not change the v2 admission-epoch requirement.
+const inviterCompletionV1 = "inviter-v1"
+
+const (
+	reasonRollbackPending      = "rollback-pending"
+	reasonAwaitingConfirmation = "awaiting-confirmation"
+)
+
 // legacyAdmissionEpoch is the deterministic incarnation assigned to peers from
 // the v1 protocol and pre-admission on-disk state. Those peers had no admission
 // counter and therefore all represent their first admission to the cluster.
@@ -42,6 +51,7 @@ type PairingInfo struct {
 	ClusterFriendlyName string `json:"clusterFriendlyName"`
 	Addr                string `json:"addr,omitempty"`
 	Cert                string `json:"cert"`
+	Completion          string `json:"completion,omitempty"`
 }
 
 // localPairingInfo builds this node's PairingInfo. addr is the inviter's
@@ -65,6 +75,7 @@ func (m *Manager) localPairingInfo(addr string, admissionEpoch ...uint64) *Pairi
 		ClusterFriendlyName: friendly,
 		Addr:                addr,
 		Cert:                string(m.identity.CertPEM),
+		Completion:          inviterCompletionV1,
 	}
 }
 
@@ -92,6 +103,9 @@ func parsePairingInfo(raw []byte) (*PairingInfo, *x509.Certificate, error) {
 	}
 	if pi.NodeUUID == "" {
 		return nil, nil, fmt.Errorf("PairingInfo missing nodeUuid")
+	}
+	if pi.Completion != "" && (pi.Completion != inviterCompletionV1 || pi.V < 2) {
+		return nil, nil, fmt.Errorf("unsupported PairingInfo completion capability")
 	}
 	block, _ := pem.Decode([]byte(pi.Cert))
 	if block == nil || block.Type != "CERTIFICATE" {
@@ -199,9 +213,25 @@ type pairingSession struct {
 	// acknowledges its own durable commit. This makes a lost EAP-Success response
 	// retryable and lets a post-success joiner failure roll the inviter back.
 	awaitingAck        bool
+	rollbackPending    bool
 	completionResponse []byte
+	completionMode     string
+	ready              bool
+	completionStep     int
+	droppedFinalReply  bool
+	// cachedRequest/cachedResponse make the final completion round retryable
+	// without advancing EAP twice after a lost HTTP reply.
+	cachedRequest  []byte
+	cachedResponse []byte
 
 	mu sync.Mutex
+}
+
+func (s *pairingSession) legacyNotifyAddress() string {
+	if s.completionMode == inviterCompletionV1 {
+		return ""
+	}
+	return s.addr
 }
 
 func (m *Manager) putSession(s *pairingSession) {

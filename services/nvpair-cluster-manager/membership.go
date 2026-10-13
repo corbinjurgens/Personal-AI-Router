@@ -75,8 +75,8 @@ type Invite struct {
 	ClusterFriendlyName string      `json:"clusterFriendlyName"`
 	Pin                 *string     `json:"pin"`
 	State               InviteState `json:"state"`
-	// Reason is an optional machine-readable qualifier for a terminal state
-	// (e.g. "incorrect-pin" on a wrong-PIN failure). Empty when no specific
+	// Reason is an optional machine-readable qualifier for an outcome or wait
+	// (e.g. "incorrect-pin", "rollback-pending", "awaiting-confirmation"). Empty when no specific
 	// reason applies, so consumers fall back to generic copy.
 	Reason      string `json:"reason,omitempty"`
 	CreatedAt   int64  `json:"createdAt"`

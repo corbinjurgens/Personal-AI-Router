@@ -93,7 +93,7 @@ func (m *Manager) handleRespondToInvite(msg *Message) {
 		// tell the inviter its outbound invite is declined (with retries). Local
 		// teardown is authoritative even if the notify ultimately fails — the
 		// inviter's invite TTL then expires the pending invite as a fallback.
-		inviterAddr := sess.addr
+		inviterAddr := sess.legacyNotifyAddress()
 		m.finishInvite(p.InviteID, inviteStateDeclined)
 		if sess.peerPairing != nil {
 			m.removeMemberByUUID(sess.peerPairing.NodeUUID)
@@ -134,6 +134,34 @@ func (m *Manager) handleRespondToInvite(msg *Message) {
 		return
 	}
 
+	if sess.completionMode == inviterCompletionV1 {
+		if sess.ready {
+			sess.mu.Unlock()
+			m.codec.RespondErrorData(msg.ID, codeInvalidState, "invite already ready", nil)
+			return
+		}
+		if err := sess.peer.OOBInputNoob(noobFromPIN(*p.Pin)); err != nil {
+			sess.mu.Unlock()
+			m.codec.RespondErrorData(msg.ID, codeInternalError, "feed pin: "+err.Error(), nil)
+			return
+		}
+		sess.ready = true
+		sess.mu.Unlock()
+		// The inviter owns every network round trip. Wait only for local state;
+		// neither invitation nor composition locks are held during this wait.
+		deadline := time.Now().Add(3 * pairingHTTPTimeout)
+		for time.Now().Before(deadline) {
+			cur, exists := m.getInvite(p.InviteID)
+			if !exists || cur.State != inviteStatePending {
+				m.respondInvite(msg, p.InviteID)
+				return
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+		m.respondInvite(msg, p.InviteID)
+		return
+	}
+
 	if err := m.runCompletionExchangeLocked(sess, *p.Pin); err != nil {
 		log.Printf("invite %s: completion failed: %v", p.InviteID, err)
 		// Every completion failure is mirrored to the inviter (phase:"fail"),
@@ -151,7 +179,7 @@ func (m *Manager) handleRespondToInvite(msg *Message) {
 		// Capture the inviter address before teardown so we can still reach it
 		// after the session is dropped. Local teardown is authoritative even if
 		// the notify fails — the inviter's invite TTL is the remaining backstop.
-		inviterAddr := sess.addr
+		inviterAddr := sess.legacyNotifyAddress()
 		m.finishInviteReason(p.InviteID, inviteStateFailed, reason)
 		if sess.peerPairing != nil {
 			m.removeMemberByUUID(sess.peerPairing.NodeUUID)
@@ -169,54 +197,14 @@ func (m *Manager) handleRespondToInvite(msg *Message) {
 	// activation leaves a nonzero provisional self member that startup rolls
 	// back; a crash after activation has every required member/pin already.
 	pi := sess.peerPairing
-	now := time.Now().UnixMilli()
-	var pinErr error
-	m.withClusterComposition(func() {
-		if m.teardownPending.Load() {
-			pinErr = fmt.Errorf("cluster teardown is pending")
-			return
-		}
-		if m.removalProofBlocksAdmission(pi.NodeUUID, inv.ClusterID, pi.AdmissionEpoch) {
-			pinErr = fmt.Errorf("peer admission %d was already removed", pi.AdmissionEpoch)
-			return
-		}
-		admitted := *pi
-		admitted.ClusterID = inv.ClusterID
-		end := m.endorsePeerForAdmission(admitted.NodeUUID,
-			certFingerprintFromDER(sess.peerCert.Raw), inv.ClusterID,
-			admitted.AdmissionEpoch, sess.localAdmissionEpoch)
-		rollback := func(cause error) error {
-			var rollbackErr error
-			if err := m.trust.Remove(admitted.NodeUUID); err != nil {
-				m.trust.Forget(admitted.NodeUUID)
-				rollbackErr = errors.Join(rollbackErr, err)
-			}
-			m.removeMemberByUUID(admitted.NodeUUID)
-			m.removeMemberByUUID(m.identity.NodeUUID)
-			rollbackErr = errors.Join(rollbackErr, m.persistMembersErr())
-			m.setClusterIdentity("", "")
-			return errors.Join(cause, rollbackErr)
-		}
-		m.recordMember(&admitted, stateMember, &now)
-		m.addSelfMemberForAdmission(inv.ClusterID, sess.localAdmissionEpoch)
-		if pinErr = m.persistMembersErr(); pinErr != nil {
-			pinErr = rollback(pinErr)
-			return
-		}
-		if pinErr = m.pinPeer(&admitted, sess.peerCert, []Endorsement{end}); pinErr != nil {
-			pinErr = rollback(pinErr)
-			return
-		}
-		if pinErr = m.activateAdmission(inv.ClusterID, sess.localAdmissionEpoch); pinErr != nil {
-			pinErr = rollback(pinErr)
-			return
-		}
-		m.setClusterIdentity(inv.ClusterID, inv.ClusterFriendlyName)
-		if clearErr := m.clearRemovalProofAfterAdmission(admitted.NodeUUID, admitted.AdmissionEpoch); clearErr != nil {
-			log.Printf("pairing %s: clear superseded removal proof for %s: %v", p.InviteID, admitted.NodeUUID, clearErr)
-		}
-	})
+	pinErr := m.commitJoinerPairing(sess, inv)
 	if pinErr != nil {
+		if sess.rollbackPending {
+			sess.mu.Unlock()
+			m.emitNodesChanged()
+			m.respondInvite(msg, p.InviteID)
+			return
+		}
 		inviterAddr := sess.addr
 		inviterDER := append([]byte(nil), sess.peerCert.Raw...)
 		m.finishInvite(p.InviteID, inviteStateFailed)

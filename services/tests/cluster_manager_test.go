@@ -35,8 +35,12 @@ func startCM(t *testing.T, configDir string, port int) *cmProc {
 // subprocess env (used to drive test-only fault injection, e.g. the
 // cancel-vs-Completion commit-window delay).
 func startCMEnv(t *testing.T, configDir string, port int, extraEnv []string) *cmProc {
+	return startCMBinaryEnv(t, clusterMgrBin, configDir, port, extraEnv)
+}
+
+func startCMBinaryEnv(t *testing.T, binary, configDir string, port int, extraEnv []string) *cmProc {
 	t.Helper()
-	cmd := exec.Command(clusterMgrBin, "--config-dir", configDir, "--port", strconv.Itoa(port))
+	cmd := exec.Command(binary, "--config-dir", configDir, "--port", strconv.Itoa(port))
 	if len(extraEnv) > 0 {
 		cmd.Env = append(os.Environ(), extraEnv...)
 	}

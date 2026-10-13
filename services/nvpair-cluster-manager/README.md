@@ -150,7 +150,9 @@ as a JSON-RPC `error`. See [Errors](#errors).
 // --- pairing (joiner side) ---
 {"jsonrpc":"2.0","id":8,"method":"cluster:respond-to-invite","params":{"inviteId":"inv-9f3a1c","accept":true,"pin":"402199"}}
 //   -> <Invite with state:"paired">   (state:"failed" + reason:"incorrect-pin" on a wrong PIN; state:"declined" if accept:false)
-//   On decline the joiner also best-effort notifies the inviter (pairing phase "decline"),
+//   With negotiated inviter-v1 completion, the inviter polls the joiner and drives
+//   Completion plus authenticated confirmation; the joiner makes no pairing dial.
+//   On the legacy transport, decline best-effort notifies the inviter (phase "decline"),
 //   so the inviter's invite-status flips to "declined" and it pushes cluster:invite-declined.
 //   On a wrong PIN it likewise notifies the inviter (pairing phase "fail"), so the inviter's
 //   invite-status flips to "failed" (reason:"incorrect-pin") and it pushes cluster:invite-failed.
@@ -162,10 +164,25 @@ as a JSON-RPC `error`. See [Errors](#errors).
 {"jsonrpc":"2.0","id":9,"method":"log/set-level","params":{"level":"debug"}}
 ```
 
-`cluster:invite-node` and `cluster:respond-to-invite` block on multi-round
-network I/O for up to the pairing timeout. The manager processes requests
-concurrently and **responses may return out of order** (match by `id`), so
-set your per-request timeout above the pairing timeout for these two.
+`cluster:invite-node` runs the Initial Exchange. When both transcript objects
+advertise `completion:"inviter-v1"`, PIN submission makes the joiner ready and
+waits for a local terminal outcome for up to 30 seconds; a pending response can
+be followed through `cluster:invite-status`. The inviter drives every pairing
+network round trip, allowing it to pair while new inbound connections are
+blocked. An older peer retains the joiner-driven Completion transport. Match
+responses by JSON-RPC `id` and allow the PIN submission wait in client timeouts.
+
+If PIN submission returns pending, continue polling `cluster:invite-status`
+with that same inviteId through its matching terminal or unknown/expired outcome. The receiver
+updates `nodes:changed` when a wrong PIN or receipt-write failure clears its
+pending member; there is no separate new receiver terminal notification.
+Either role compensating a failed commit stays pending with
+`reason:"rollback-pending"` until its durable pin/member cleanup succeeds.
+Unconfirmed restart recovery stays pending with `reason:"awaiting-confirmation"`
+until it authenticates the exact invite outcome or the existing invite TTL
+expires; expiry/unknown does not undo the durable admission. A rollback receipt is replayed
+before startup serves and preserves a newer admission; failed durable replay
+aborts startup. Silence never authorizes rollback or a new paired success claim.
 
 ## Notifications (manager → caller)
 
@@ -307,6 +324,7 @@ Generated on first run and reused forever after, under
   node.key                 # this node's private key (PEM) — never leaves the host
   node.crt                 # this node's self-signed leaf (PEM)
   trusted/                 # the trusted-node store: ONE <peerUuid>.json per pinned peer
+  pairing-receipts.json     # bounded public transcript/terminal confirmation receipts
 ```
 
 The **node UUID is the trust principal** (cert subject `CN`/URI SAN), not

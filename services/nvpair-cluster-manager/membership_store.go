@@ -84,11 +84,30 @@ func (m *Manager) rollbackIncompleteAdmission() error {
 		return nil
 	}
 	var errs []error
+	peers := make(map[string]bool)
 	for _, pin := range m.trust.List() {
-		if err := m.trust.Remove(pin.NodeUUID); err != nil {
-			errs = append(errs, err)
-			m.trust.Forget(pin.NodeUUID)
+		peers[pin.NodeUUID] = true
+	}
+	// A malformed/unreadable pin can be absent from the loaded trust cache.
+	// The durable provisional roster still names its deletion boundary.
+	m.memMu.Lock()
+	for uuid, member := range m.members {
+		if uuid != self.NodeUUID && member.ClusterID == self.ClusterID {
+			peers[uuid] = true
 		}
+	}
+	m.memMu.Unlock()
+	for uuid := range peers {
+		if err := m.trust.Remove(uuid); err != nil {
+			errs = append(errs, err)
+			m.trust.Forget(uuid)
+		}
+	}
+	if len(errs) > 0 {
+		// Retain the durable provisional-self marker until every pin is gone.
+		// A later restart must not forget unfinished compensation just because
+		// this constructor already denied its in-memory pins.
+		return errors.Join(errs...)
 	}
 	m.resetMembership()
 	if err := m.persistMembersErr(); err != nil {

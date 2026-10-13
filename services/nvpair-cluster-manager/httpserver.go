@@ -41,8 +41,13 @@ type pairingEnvelope struct {
 	// the inviter (e.g. the joiner is already clustered). Sent with HTTP 409 and
 	// distinct from a transport/protocol error so the inviter can report
 	// state:"rejected" rather than state:"failed". Empty on normal messages.
-	Rejected bool   `json:"rejected,omitempty"`
-	Reason   string `json:"reason,omitempty"`
+	Rejected     bool        `json:"rejected,omitempty"`
+	Reason       string      `json:"reason,omitempty"`
+	State        InviteState `json:"state,omitempty"`
+	Ready        bool        `json:"ready,omitempty"`
+	ClusterID    string      `json:"clusterId,omitempty"`
+	InviterEpoch uint64      `json:"inviterEpoch,omitempty"`
+	JoinerEpoch  uint64      `json:"joinerEpoch,omitempty"`
 }
 
 // runHTTP starts the inter-node listener on the configured port and blocks until
@@ -63,6 +68,12 @@ func (m *Manager) runHTTP(ctx context.Context) error {
 		return fmt.Errorf("listen on :%d: %w", m.port, err)
 	}
 	log.Printf("inter-node server listening on :%d (plain pairing + mTLS trusted)", m.port)
+	// Isolated cross-process pairing regression: a blocked-inbound inviter
+	// must still complete by dialing the joiner's listener. Never enabled by
+	// product launchers, and never applied to the user's live service.
+	if os.Getenv("NVPAIR_TEST_PAIR_REJECT_INBOUND") == "1" {
+		listener = rejectingPairingListener{Listener: listener}
+	}
 	return m.serveSplit(ctx, listener, pairingMux, trustedMux)
 }
 
@@ -98,6 +109,12 @@ func (m *Manager) handlePairing(w http.ResponseWriter, r *http.Request) {
 		m.handlePairingInitial(w, &env, msg, hostOnly(r.RemoteAddr))
 	case "completion":
 		m.handlePairingCompletion(w, &env, msg, hostOnly(r.RemoteAddr))
+	case "outbound-ready":
+		m.handlePairingReady(w, &env)
+	case "outbound-completion":
+		m.handleOutboundCompletion(w, &env, msg)
+	case "confirm":
+		m.handlePairingConfirmation(w, r, &env)
 	case "cancel":
 		m.handlePairingCancel(w, &env)
 	case "decline":
@@ -196,6 +213,16 @@ func (m *Manager) handlePairingInitial(w http.ResponseWriter, env *pairingEnvelo
 	}
 
 	sess.mu.Lock()
+	if sess.invitedEmitted {
+		var result struct {
+			EAP string `json:"eap"`
+		}
+		if json.Unmarshal(msg, &result) != nil || result.EAP != "failure" || sess.ready {
+			sess.mu.Unlock()
+			http.Error(w, "initial transcript cannot change", http.StatusConflict)
+			return
+		}
+	}
 	out, err := sess.peer.Receive(msg)
 	if err != nil {
 		m.deleteSession(env.InviteID)
@@ -206,6 +233,12 @@ func (m *Manager) handlePairingInitial(w http.ResponseWriter, env *pairingEnvelo
 	var completed *Invite
 	if out.State == eapnoob.StateWaiting && !sess.invitedEmitted {
 		completed = m.prepareJoinerInitialComplete(env.InviteID, sess)
+		if completed == nil {
+			m.deleteSession(env.InviteID)
+			sess.mu.Unlock()
+			http.Error(w, "invalid inviter PairingInfo", http.StatusBadRequest)
+			return
+		}
 	}
 	sess.mu.Unlock()
 	if completed != nil {
@@ -228,6 +261,10 @@ func (m *Manager) handlePairingCompletion(w http.ResponseWriter, env *pairingEnv
 		http.Error(w, "phase does not match session state", http.StatusConflict)
 		return
 	}
+	if sess.completionMode == inviterCompletionV1 {
+		http.Error(w, "completion mode cannot change", http.StatusConflict)
+		return
+	}
 
 	m.inviteMu.Lock()
 	defer m.inviteMu.Unlock()
@@ -239,6 +276,10 @@ func (m *Manager) handlePairingCompletion(w http.ResponseWriter, env *pairingEnv
 	// Re-checked on every round trip because cancellation/decline can arrive
 	// between them.
 	inv, ok := m.getInvite(env.InviteID)
+	if sess.rollbackPending {
+		http.Error(w, "pairing rollback is pending", http.StatusConflict)
+		return
+	}
 	if ok && inv.State == inviteStatePaired && sess.awaitingAck && len(sess.completionResponse) > 0 {
 		respondPairing(w, sess.completionResponse)
 		return
@@ -358,6 +399,10 @@ func (m *Manager) handlePairingFailedFrom(w http.ResponseWriter, env *pairingEnv
 
 func (m *Manager) handlePairingAck(w http.ResponseWriter, env *pairingEnvelope, callerUUID string) {
 	defer respondPairing(w, nil)
+	m.ackPairing(env, callerUUID)
+}
+
+func (m *Manager) ackPairing(env *pairingEnvelope, callerUUID string) {
 	sess, ok := m.getSession(env.InviteID)
 	if !ok || sess.role != roleInviter {
 		return
@@ -365,11 +410,30 @@ func (m *Manager) handlePairingAck(w http.ResponseWriter, env *pairingEnvelope, 
 	m.inviteMu.Lock()
 	sess.mu.Lock()
 	inv, ok := m.getInvite(env.InviteID)
-	if !ok || inv.State != inviteStatePaired || !sess.awaitingAck ||
+	if !ok || (inv.State != inviteStatePaired && inv.State != inviteStatePending) || !sess.awaitingAck || sess.rollbackPending ||
 		sess.peerPairing == nil || sess.peerPairing.NodeUUID != callerUUID {
 		sess.mu.Unlock()
 		m.inviteMu.Unlock()
 		return
+	}
+	receipt, exists := m.getPairingReceipt(sess.inviteID)
+	if !exists {
+		receipt = m.newPairingReceipt(sess, inv, sess.completionResponse)
+		receipt.ClusterID = sess.clusterID
+	}
+	matched := false
+	m.withClusterComposition(func() {
+		if sess.peerCert != nil {
+			matched = m.receiptCommitMatchesLocked(receipt, sess.peerPairing, sess.peerCert)
+		}
+	})
+	if !matched {
+		sess.mu.Unlock()
+		m.inviteMu.Unlock()
+		return
+	}
+	if inv.State == inviteStatePending {
+		m.finishInvite(env.InviteID, inviteStatePaired)
 	}
 	sess.awaitingAck = false
 	m.deleteSession(env.InviteID)
@@ -414,8 +478,7 @@ func (m *Manager) handlePairingTerminalSignal(env *pairingEnvelope, state Invite
 	m.inviteMu.Lock()
 	sess.mu.Lock()
 	cur, ok := m.getInvite(env.InviteID)
-	rolledBackPair := false
-	if ok && cur.State == inviteStatePaired && state == inviteStateFailed && sess.awaitingAck {
+	if ok && state == inviteStateFailed && sess.awaitingAck {
 		peerUUID := ""
 		if sess.peerPairing != nil {
 			peerUUID = sess.peerPairing.NodeUUID
@@ -425,46 +488,19 @@ func (m *Manager) handlePairingTerminalSignal(env *pairingEnvelope, state Invite
 			m.inviteMu.Unlock()
 			return
 		}
-		m.withClusterComposition(func() {
-			if peerUUID == "" {
-				return
-			}
-			member, memberOK := m.memberByNodeID(peerUUID)
-			pin, pinOK := m.trust.Get(peerUUID)
-			if !memberOK || !pinOK ||
-				member.ClusterID != sess.clusterID || pin.ClusterID != sess.clusterID ||
-				member.AdmissionEpoch != sess.peerPairing.AdmissionEpoch ||
-				pin.AdmissionEpoch != sess.peerPairing.AdmissionEpoch {
-				return
-			}
-			if err := m.trust.Remove(peerUUID); err != nil {
-				m.trust.Forget(peerUUID)
-				log.Printf("pairing %s: rollback durable pin: %v", env.InviteID, err)
-			}
-			m.removeMemberByUUID(peerUUID)
-			if err := m.persistMembersErr(); err != nil {
-				log.Printf("pairing %s: persist rollback after joiner failure: %v", env.InviteID, err)
-			}
-			rolledBackPair = true
-		})
-		m.finishInviteReason(env.InviteID, state, reason)
-		m.deleteSession(env.InviteID)
+		rollbackErr := m.rollbackPairingSessionLocked(sess, cur)
 		sess.mu.Unlock()
-		inv, _ := m.getInvite(env.InviteID)
-		if inv != nil {
-			inv.Pin = nil
-			if err := m.codec.Notify(notifyMethod, inv); err != nil {
-				log.Printf("emit %s: %v", notifyMethod, err)
-			}
+		if rollbackErr == nil {
+			m.emitPairingFailure(env.InviteID)
+			m.maybeLeaveInviteCreatedClusterLocked()
+		} else {
+			log.Printf("pairing %s: rollback remains pending: %v", env.InviteID, rollbackErr)
 		}
-		m.maybeLeaveInviteCreatedClusterLocked()
 		m.inviteMu.Unlock()
-		if rolledBackPair {
-			m.emitNodesChanged()
-		}
+		m.emitNodesChanged()
 		return
 	}
-	if !ok || cur.State != inviteStatePending {
+	if !ok || cur.State != inviteStatePending || sess.awaitingAck {
 		sess.mu.Unlock()
 		m.inviteMu.Unlock()
 		return
@@ -488,6 +524,17 @@ func (m *Manager) handlePairingTerminalSignal(env *pairingEnvelope, state Invite
 	m.inviteMu.Unlock()
 }
 
+func (m *Manager) emitPairingFailure(inviteID string) {
+	inv, ok := m.getInvite(inviteID)
+	if !ok {
+		return
+	}
+	inv.Pin = nil
+	if err := m.codec.Notify("cluster:invite-failed", inv); err != nil {
+		log.Printf("emit cluster:invite-failed: %v", err)
+	}
+}
+
 // prepareJoinerInitialComplete captures the inviter's authenticated PairingInfo
 // while the caller holds sess.mu. The returned invite is published after that
 // lock is released so same-sender supersession can safely lock older sessions.
@@ -499,6 +546,9 @@ func (m *Manager) prepareJoinerInitialComplete(inviteID string, sess *pairingSes
 	}
 	sess.peerPairing = pi
 	sess.peerCert = cert
+	if pi.Completion == inviterCompletionV1 {
+		sess.completionMode = inviterCompletionV1
+	}
 	sess.addr = pi.Addr
 	sess.invitedEmitted = true
 
@@ -592,7 +642,7 @@ func (m *Manager) supersedePendingInboundLocked(fromNodeUUID, keepInviteID strin
 		}
 		m.finishInvite(id, inviteStateCanceled)
 		m.deleteSession(id)
-		inviterAddr := sess.addr
+		inviterAddr := sess.legacyNotifyAddress()
 		sess.mu.Unlock()
 
 		canceled, ok := m.getInvite(id)
@@ -739,6 +789,7 @@ func (m *Manager) commitPairing(sess *pairingSession, pi *PairingInfo, cert *x50
 			log.Printf("pairing: clear superseded removal proof for %s: %v", admitted.NodeUUID, clearErr)
 		}
 		sess.peerPairing = &admitted
+		sess.peerCert = cert
 		committed = true
 	})
 	return

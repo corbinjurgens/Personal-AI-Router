@@ -221,6 +221,9 @@ func (m *Manager) handleInviteNode(msg *Message) {
 		return
 	}
 	m.codec.Respond(msg.ID, map[string]any{"inviteId": inviteID, "state": inviteStatePending, "pin": pin})
+	if sess.completionMode == inviterCompletionV1 {
+		go m.driveOutboundCompletion(sess)
+	}
 }
 
 func (m *Manager) publishInitialInvite(inv *Invite, clusterID string) (uint64, bool) {
@@ -257,7 +260,8 @@ var errPairingAbandoned = errors.New("pairing abandoned: invite is no longer pen
 // its liveness.
 func (m *Manager) runInitialExchange(inviteID, target, cid0 string, sessGen0 uint64) (*pairingSession, string, error) {
 	myAddr := net.JoinHostPort(outboundIP(target), strconv.Itoa(m.port))
-	info, err := m.localPairingInfo(myAddr).toMap()
+	localInfo := m.localPairingInfo(myAddr)
+	info, err := localInfo.toMap()
 	if err != nil {
 		return nil, "", fmt.Errorf("build pairing info: %w", err)
 	}
@@ -268,6 +272,7 @@ func (m *Manager) runInitialExchange(inviteID, target, cid0 string, sessGen0 uin
 	sess := &pairingSession{
 		inviteID: inviteID, role: roleInviter, createdAt: time.Now().UnixMilli(),
 		server: server, addr: myAddr, clusterID: cid0, joinerAddr: target,
+		localAdmissionEpoch: localInfo.AdmissionEpoch,
 	}
 	// Register under the teardown boundary: if the cluster was torn down (or
 	// rejoined, bumping the session generation) since the invite began, abandon
@@ -308,6 +313,14 @@ func (m *Manager) runInitialExchange(inviteID, target, cid0 string, sessGen0 uin
 
 	if server.State() != eapnoob.StateWaiting {
 		return sess, "", fmt.Errorf("initial exchange ended in state %s, want Waiting", server.State())
+	}
+	pi, cert, err := parsePairingInfo(server.PeerInfo())
+	if err != nil {
+		return sess, "", err
+	}
+	sess.peerPairing, sess.peerCert = pi, cert
+	if pi.Completion == inviterCompletionV1 {
+		sess.completionMode = inviterCompletionV1
 	}
 	pin, noob, err := generatePIN()
 	if err != nil {

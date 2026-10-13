@@ -94,6 +94,7 @@ func (m *Manager) inviteExpiryLoop(ctx context.Context) {
 func (m *Manager) expirePendingInvites(now time.Time) {
 	m.inviteMu.Lock()
 	defer m.inviteMu.Unlock()
+	m.retryPairingRollbacksLocked()
 
 	m.expirePreInviteSessions(now)
 	cutoff := now.Add(-m.effectiveInviteTTL()).UnixMilli()
@@ -102,7 +103,20 @@ func (m *Manager) expirePendingInvites(now time.Time) {
 	m.memMu.Lock()
 	self := m.identity.NodeUUID
 	for id, inv := range m.invites {
-		if inv.State != inviteStatePending || inv.CreatedAt > cutoff {
+		if inv.Reason == reasonRollbackPending {
+			continue
+		}
+		if inv.State != inviteStatePending {
+			terminalAt := inv.CreatedAt
+			if inv.RespondedAt != nil {
+				terminalAt = *inv.RespondedAt
+			}
+			if terminalAt <= cutoff {
+				delete(m.invites, id)
+			}
+			continue
+		}
+		if inv.CreatedAt > cutoff {
 			continue
 		}
 		if inv.FromNodeUUID == self {
@@ -149,12 +163,17 @@ func (m *Manager) expirePreInviteSessions(now time.Time) {
 		if !session.mu.TryLock() {
 			continue
 		}
+		if session.rollbackPending {
+			session.mu.Unlock()
+			continue
+		}
 		if session.createdAt == 0 || session.createdAt > cutoff {
 			session.mu.Unlock()
 			continue
 		}
 		if session.role == roleJoiner {
-			if _, published := m.getInvite(session.inviteID); published {
+			if inv, published := m.getInvite(session.inviteID); published &&
+				(inv.State == inviteStatePending || session.completionMode != inviterCompletionV1) {
 				session.mu.Unlock()
 				continue
 			}
@@ -238,7 +257,7 @@ func (m *Manager) expireInboundInvitesLocked(ids []string) {
 		if sess.peerPairing != nil && m.removeMemberByUUID(sess.peerPairing.NodeUUID) {
 			membersChanged = true
 		}
-		inviterAddr := sess.addr
+		inviterAddr := sess.legacyNotifyAddress()
 		m.deleteSession(id)
 		sess.mu.Unlock()
 
