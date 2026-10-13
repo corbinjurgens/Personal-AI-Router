@@ -156,16 +156,16 @@ as a JSON-RPC `error`. See [Errors](#errors).
 
 // --- pairing (joiner side) ---
 {"jsonrpc":"2.0","id":8,"method":"cluster:respond-to-invite","params":{"inviteId":"inv-9f3a1c","accept":true,"pin":"402199"}}
-//   -> <Invite with state:"paired">   (state:"failed" + reason:"incorrect-pin" on a wrong PIN; state:"declined" if accept:false)
+//   -> <Invite with state:"paired" or "pending">   (state:"failed" + reason:"incorrect-pin" on a wrong PIN; state:"declined" if accept:false)
 //   With negotiated inviter-v1 completion, the inviter polls the joiner and drives
 //   Completion plus authenticated confirmation; the joiner makes no pairing dial.
 //   On the legacy transport, decline best-effort notifies the inviter (phase "decline"),
 //   so the inviter's invite-status flips to "declined" and it pushes cluster:invite-declined.
-//   On a wrong PIN it likewise notifies the inviter (pairing phase "fail"), so the inviter's
+//   In legacy mode, a wrong PIN likewise notifies the inviter (pairing phase "fail"), so the inviter's
 //   invite-status flips to "failed" (reason:"incorrect-pin") and it pushes cluster:invite-failed.
 //   If the user never responds, the invite times out on both sides after the invite TTL
-//   (default 5m): the receiver expires it, clears the PIN prompt, and notifies the inviter
-//   (pairing phase "expire"); both push cluster:invite-expired (see below).
+//   (default 5m): the receiver expires it and clears the PIN prompt. Legacy mode notifies
+//   the inviter (phase "expire"); negotiated mode exposes expiry through readiness polling.
 
 // --- logging ---
 {"jsonrpc":"2.0","id":9,"method":"log/set-level","params":{"level":"debug"}}
