@@ -3,7 +3,11 @@
 
 import { Button, Flex, Stack, Text } from '@nvidia/foundations-react-core'
 import { InlineErrorBanner } from './InlineErrorBanner'
-import { INCORRECT_PIN_SENDER_MESSAGE } from '@/ui/utils/cluster-invite-error'
+import {
+    inviteFailureMessage,
+    isInviteConnectionFailure,
+    REVERSE_INVITE_GUIDANCE
+} from '@/ui/utils/cluster-invite-error'
 import type { Invite } from '@/shared/types/cluster'
 
 interface InvitePairingPanelProps {
@@ -47,17 +51,32 @@ export function InvitePairingPanel({
     if (!invite) return null
 
     if (invite.state === 'pending') {
+        const confirming =
+            invite.reason === 'awaiting-confirmation' || invite.reason === 'rollback-pending'
         return (
             <Stack gap="3" align="center">
-                <Text kind="body/regular/sm" className="text-subtle-color">
-                    Enter this PIN on the other device to confirm pairing:
-                </Text>
-                <Text kind="title/md" style={{ fontFamily: 'monospace', letterSpacing: '0.3em' }}>
-                    {invite.pin ?? '------'}
-                </Text>
+                {!confirming && (
+                    <Text kind="body/regular/sm" className="text-subtle-color">
+                        Enter this PIN on the other device to confirm pairing:
+                    </Text>
+                )}
+                {!confirming && (
+                    <Text
+                        kind="title/md"
+                        style={{ fontFamily: 'monospace', letterSpacing: '0.3em' }}
+                    >
+                        {invite.pin ?? '------'}
+                    </Text>
+                )}
                 <Flex align="center" gap="2">
                     <span className="spinner-element" role="status" aria-label="" />
-                    <Text kind="body/regular/sm">Waiting for the other node to confirm...</Text>
+                    <Text kind="body/regular/sm">
+                        {invite.reason === 'rollback-pending'
+                            ? 'Pairing could not complete. Waiting for cleanup to finish...'
+                            : confirming
+                              ? 'Waiting for pairing confirmation...'
+                              : 'Waiting for the other node to confirm...'}
+                    </Text>
                 </Flex>
                 <Button kind="secondary" size="small" onClick={onCancel ?? onReset}>
                     Cancel
@@ -77,14 +96,17 @@ export function InvitePairingPanel({
         )
     }
 
-    // A wrong PIN entered on the joiner is a terminal, non-retryable failure —
-    // the backend evicts the session, so there is no in-session retry. Mirror
-    // the joiner's "Incorrect PIN" error here so the inviter knows to send a
-    // fresh invite (returns to the pre-invite form via Try again → onReset).
-    if (invite.state === 'failed' && invite.reason === 'incorrect-pin') {
+    // Failed invites retain their diagnostic and offer a fresh invitation.
+    if (invite.state === 'failed') {
         return (
             <Stack gap="2">
-                <InlineErrorBanner message={INCORRECT_PIN_SENDER_MESSAGE} onClose={onReset} />
+                <InlineErrorBanner
+                    message={error ?? inviteFailureMessage(invite)}
+                    onClose={onReset}
+                />
+                {isInviteConnectionFailure(invite.reason) && (
+                    <Text kind="body/regular/sm">{REVERSE_INVITE_GUIDANCE}</Text>
+                )}
                 <Flex justify="end">
                     <Button kind="secondary" size="small" onClick={onReset}>
                         Try again
@@ -104,7 +126,9 @@ export function InvitePairingPanel({
                     ? 'That node is already in a cluster.'
                     : 'The other node refused the invite.'
                 : invite.state === 'expired'
-                  ? 'The invite expired before it was confirmed.'
+                  ? invite.reason === 'outcome-unknown'
+                      ? 'The invitation status is no longer available. Pairing could not be confirmed. Check the cluster on both devices.'
+                      : 'The invite expired before it was confirmed. Check the cluster on both devices.'
                   : 'Pairing failed. Please try again.'
 
     return (

@@ -29,6 +29,13 @@ internal; you only need to make sure the port is reachable (see
 
 ## Communication
 
+An Initial Exchange transport failure returns `state:"failed"`, its original
+`error` diagnostic, and a stable `reason` (`connection-reset`,
+`connection-refused`, `connection-timeout`, or `connection-unreachable`).
+The reason is retained in invite status. Desktop and terminal clients suggest
+opening PAIR on the other device and inviting this computer for these failures;
+wrong PIN, protocol failure, and explicit refusal retain their own remedies.
+
 Newline-delimited **JSON-RPC 2.0**, one object per `\n`. Stdio by default
 (`stdin` = requests in, `stdout` = results + notifications out); `--ipc
 <path>` switches to a Unix domain socket or Windows named pipe. The local

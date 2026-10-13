@@ -8,6 +8,21 @@ import { parseInvite } from '@/electron/service-bridge/cluster-json'
 // `Invite` shape. This sync added the terminal `canceled`/`rejected` states and
 // the machine-readable `reason`, which the outbound-invite UI branches on.
 describe('parseInvite terminal states', () => {
+    it('retains the classified connection reason and original diagnostic', () => {
+        expect(
+            parseInvite({
+                inviteId: 'transport',
+                state: 'failed',
+                reason: 'connection-reset',
+                error: 'read: connection reset by peer'
+            })
+        ).toMatchObject({
+            inviteId: 'transport',
+            state: 'failed',
+            reason: 'connection-reset',
+            error: 'read: connection reset by peer'
+        })
+    })
     it('round-trips a rejected invite with its reason', () => {
         const invite = parseInvite({
             inviteId: 'inv-1',

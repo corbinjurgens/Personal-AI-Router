@@ -4,6 +4,7 @@
 package ui
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -83,6 +84,9 @@ type nodesView struct {
 	// screen until the cluster manager settles it: a PIN it refuses as
 	// malformed leaves the session open for another try.
 	answering string
+	// A submitted PIN remains single-use while exact-invite confirmation is pending.
+	awaitingPairing bool
+	pairingPollID   string
 	// invitedKey is the node an outbound invite is pending against, held so the
 	// pinned PIN can be retired once that node turns up trusted. Empty for an
 	// invite sent by address, which has no node identity to key on — see
@@ -231,8 +235,20 @@ type nodeInviteMsg struct {
 	reason   string
 	// ended is the terminal state the manager answered with instead of a
 	// PIN, when no invite went out.
-	ended string
-	err   error
+	ended   string
+	errText string
+	err     error
+}
+
+const reverseInviteGuidance = "If the other device blocks incoming connections, open PAIR on that device and invite this computer instead."
+
+func inviteConnectionFailure(reason string) bool {
+	switch reason {
+	case "connection-reset", "connection-refused", "connection-timeout", "connection-unreachable":
+		return true
+	default:
+		return false
+	}
 }
 
 // Key labels distinguish the two things an address can be used for, which are
@@ -486,6 +502,9 @@ func (v *nodesView) updateList(msg tea.Msg) tea.Cmd {
 		// Relative ages and presence both derive from the clock, so a node
 		// going quiet has to re-grade without waiting for a broker push.
 		v.rebuild()
+		if v.awaitingPairing && v.pairingPollID == "" {
+			return v.pairingStatusCmd()
+		}
 		return nil
 
 	case nodeActionMsg:
@@ -501,6 +520,30 @@ func (v *nodesView) updateList(msg tea.Msg) tea.Cmd {
 
 	case pairingResultMsg:
 		return v.handlePairingResult(msg)
+	case pairingStatusMsg:
+		if v.pairingPollID == msg.inviteID {
+			v.pairingPollID = ""
+		}
+		if v.inbound == nil || v.inbound.InviteID != msg.inviteID || !v.awaitingPairing {
+			return nil
+		}
+		if msg.err != nil {
+			var rpcError *rpc.RPCError
+			if errors.As(msg.err, &rpcError) && rpcError.Code == -32001 {
+				return v.handlePairingResult(pairingResultMsg{inviteID: msg.inviteID, from: v.inbound.FromNodeName, state: "expired", reason: "outcome-unknown"})
+			}
+			return nil
+		}
+		if msg.result.InviteID != msg.inviteID {
+			return nil
+		}
+		if msg.result.State == inviteStatePending {
+			if msg.result.Reason == "rollback-pending" {
+				v.status.busy("pairing could not complete - waiting for cleanup")
+			}
+			return nil // The shell tick schedules the next bounded status read.
+		}
+		return v.handlePairingResult(pairingResultMsg{inviteID: msg.inviteID, from: v.inbound.FromNodeName, state: msg.result.State, reason: msg.result.Reason})
 
 	case waitingDeclinedMsg:
 		if msg.err != nil {
@@ -541,7 +584,13 @@ func (v *nodesView) handleInviteResult(msg nodeInviteMsg) tea.Cmd {
 		v.status.error("%s rejected the invite (%s)", msg.name, rejectReason(msg.reason))
 	case msg.ended != "":
 		v.clearOutboundInvite()
-		v.status.error("the invite to %s did not go out (%s) - check the Logs tab", msg.name, msg.ended)
+		if inviteConnectionFailure(msg.reason) {
+			v.status.error("invite to %s failed: %s. %s", msg.name, msg.errText, reverseInviteGuidance)
+		} else if msg.errText != "" {
+			v.status.error("invite to %s failed: %s", msg.name, msg.errText)
+		} else {
+			v.status.error("the invite to %s did not go out (%s) - check the Logs tab", msg.name, msg.ended)
+		}
 	case msg.pin != "":
 		// Pinned, not expiring: the operator reads this PIN to someone at the
 		// other machine. It clears when the invite resolves.
@@ -663,6 +712,8 @@ func (v *nodesView) dropInbound(id string) bool {
 		v.inbound = nil
 		if v.answering == id {
 			v.answering = ""
+			v.awaitingPairing = false
+			v.pairingPollID = ""
 		}
 		if len(v.queued) > 0 {
 			next := v.queued[0]
@@ -704,6 +755,8 @@ func (v *nodesView) inboundPrompt() string {
 	}
 	var line string
 	switch {
+	case v.awaitingPairing && v.answering == v.inbound.InviteID:
+		line = fmt.Sprintf("waiting for pairing confirmation from %s...", v.inbound.FromNodeName)
 	case v.answering == v.inbound.InviteID:
 		line = fmt.Sprintf("answering the pairing request from %s...", v.inbound.FromNodeName)
 	case v.mode == nodesInputPin:
@@ -725,6 +778,8 @@ func (v *nodesView) inboundPrompt() string {
 // screen replaces the list where they are otherwise shown.
 func (v *nodesView) pairingLine() string {
 	switch {
+	case v.inbound != nil && v.awaitingPairing && v.answering == v.inbound.InviteID:
+		return statusOKStyle.Render(fmt.Sprintf("waiting for pairing confirmation from %s...", v.inbound.FromNodeName))
 	case v.inbound != nil && v.answering == v.inbound.InviteID:
 		return statusOKStyle.Render(fmt.Sprintf(
 			"answering the pairing request from %s...", v.inbound.FromNodeName))
@@ -1033,6 +1088,7 @@ type inviteNodeResult struct {
 	State    string  `json:"state"`
 	Pin      *string `json:"pin"`
 	Reason   string  `json:"reason"`
+	Error    string  `json:"error"`
 }
 
 // inviteResolution is how the UI reports an invite that is no longer pending.
@@ -1103,7 +1159,7 @@ func inviteResultMsg(name, address string, res inviteNodeResult, err error) tea.
 			name: name, address: address, rejected: true, reason: res.Reason,
 		}
 	default:
-		return nodeInviteMsg{name: name, address: address, ended: res.State}
+		return nodeInviteMsg{name: name, address: address, ended: res.State, reason: res.Reason, errText: res.Error}
 	}
 }
 
@@ -1186,10 +1242,50 @@ type pairingResultMsg struct {
 	err      error
 }
 
+type pairingStatusMsg struct {
+	inviteID string
+	result   inviteNodeResult
+	err      error
+}
+
+func (v *nodesView) pairingStatusCmd() tea.Cmd {
+	if v.inbound == nil || !v.awaitingPairing || v.answering != v.inbound.InviteID {
+		return nil
+	}
+	id := v.inbound.InviteID
+	v.pairingPollID = id
+	return call(v.client, "cluster:invite-status", map[string]string{"inviteId": id}, func(msg *rpc.Message, err error) tea.Msg {
+		var result inviteNodeResult
+		if err == nil {
+			decodeOrLog("cluster:invite-status", msg.Result, &result)
+		}
+		return pairingStatusMsg{inviteID: id, result: result, err: err}
+	})
+}
+
 // handlePairingResult reports whether this machine actually joined.
 func (v *nodesView) handlePairingResult(msg pairingResultMsg) tea.Cmd {
+	// A terminal notification may retire this invite before the command returns.
+	if msg.inviteID != "" && (v.inbound == nil || v.inbound.InviteID != msg.inviteID) {
+		return nil
+	}
+	if msg.state == inviteStatePending {
+		v.answering = msg.inviteID
+		v.awaitingPairing = true
+		if msg.reason == "rollback-pending" {
+			v.status.busy("pairing could not complete - waiting for cleanup")
+		} else {
+			v.status.busy("waiting for pairing confirmation from %s...", msg.from)
+		}
+		if v.pairingPollID == "" {
+			return v.pairingStatusCmd()
+		}
+		return nil
+	}
 	if v.answering == msg.inviteID {
 		v.answering = ""
+		v.awaitingPairing = false
+		v.pairingPollID = ""
 	}
 	if msg.err != nil {
 		// Kept on screen. An error reply settles nothing: the cluster manager
@@ -1220,6 +1316,8 @@ func (v *nodesView) handlePairingResult(msg pairingResultMsg) tea.Cmd {
 		v.status.error("wrong PIN - ask %s to send a new invite, then try again", msg.from)
 	case msg.state == inviteStateDeclined:
 		v.status.info("pairing request declined")
+	case msg.state == "expired":
+		v.status.error("pairing with %s could not be confirmed (%s) - check the cluster on both devices", msg.from, msg.reason)
 	default:
 		v.status.error("pairing with %s failed (%s) - ask for a new invite",
 			msg.from, rejectReason(msg.reason))

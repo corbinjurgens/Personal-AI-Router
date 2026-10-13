@@ -118,6 +118,8 @@ Because membership **is** trust, this service is also the **trust fabric** for t
   clusterFriendlyName: string
   pin: string | null         // six-digit PIN — present in the cluster:invite-node RESULT (inviter displays it); never sent to the invitee and never logged
   state: InviteState
+  reason?: string           // stable failure or pending-outcome reason
+  error?: string            // original diagnostic on failed invite-node result
   createdAt: number          // epoch ms
   respondedAt: number | null // epoch ms when the PIN was entered / declined; null while pending
 }
@@ -132,6 +134,7 @@ The `pin` is returned only to the **inviting** node and carried to the joiner **
 - `canceled` — the **inviter** aborted the invite before it completed (`cluster:cancel-invite`); the pairing session is torn down and the PIN invalidated. On the joiner, set when the inviter's cancel signal arrives.
 - `expired` — TTL elapsed with no PIN entry (see §4).
 - `failed` — pairing could not complete (peer unreachable, wrong PIN → MAC / `NoobId` mismatch, malformed).
+  Initial transport failures carry `reason:"connection-reset"`, `"connection-refused"`, `"connection-timeout"`, or `"connection-unreachable"` and the original diagnostic in the `invite-node` result's optional `error` field. The stable reason is retained for status polling. Protocol failures, wrong PIN, and explicit rejection do not acquire a connection reason. Clients can suggest inviting in the other direction only for these connection reasons.
 - `rejected` — the target **explicitly refused** the pairing during the Initial Exchange because it is already clustered (it must leave / be removed before it can pair again). No PIN is minted. The `invite-node` result also carries a `reason` (`"already-clustered"`). Distinct from `failed` (a transport/protocol failure) so a UI can show "already paired / node is in a cluster" rather than "invite failed".
 
 Validation: check every inbound envelope before processing. Reject malformed / unknown-`method` payloads on the inter-node interface (`400`); on the local interface, reply with a JSON-RPC `error` for any request carrying an `id`, and drop-and-log only lines that can't be correlated to an `id` — the full result-vs-error contract and code table are in §7.6. Assume the Broker supplies well-formed requests with epoch-millisecond timestamps.

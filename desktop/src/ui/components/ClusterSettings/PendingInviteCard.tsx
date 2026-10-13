@@ -15,6 +15,9 @@ import { useClusterInvitationsStore } from '@/ui/stores/cluster-invitations.stor
 export default function PendingInviteCard({ invite }: { invite: Invite }) {
     const setActiveInvite = useClusterInvitationsStore(state => state.setActiveInvite)
     const respondToInvite = useClusterInvitationsStore(state => state.respondToInvite)
+    const submitted = useClusterInvitationsStore(state =>
+        Boolean(state.inviteResults[invite.inviteId])
+    )
     const [declining, setDeclining] = useState(false)
 
     const handleRespond = useCallback(() => {
@@ -54,7 +57,7 @@ export default function PendingInviteCard({ invite }: { invite: Invite }) {
                         kind="secondary"
                         size="small"
                         onClick={handleDecline}
-                        disabled={declining}
+                        disabled={declining || submitted}
                     >
                         Decline
                     </Button>
@@ -65,7 +68,7 @@ export default function PendingInviteCard({ invite }: { invite: Invite }) {
                         onClick={handleRespond}
                         disabled={declining}
                     >
-                        Enter PIN
+                        {submitted ? 'View pairing status' : 'Enter PIN'}
                     </Button>
                 </Flex>
             </Flex>

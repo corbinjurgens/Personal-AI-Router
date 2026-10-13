@@ -17,6 +17,28 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 )
 
+func TestInviteConnectionFailureGuidance(t *testing.T) {
+	for _, reason := range []string{"connection-reset", "connection-refused", "connection-timeout", "connection-unreachable", "incorrect-pin", "already-clustered", "protocol-error", ""} {
+		t.Run(reason, func(t *testing.T) {
+			v := nodesView{}
+			msg := inviteResultMsg("Other", "", inviteNodeResult{State: "failed", Reason: reason, Error: "original diagnostic"}, nil)
+			result, ok := msg.(nodeInviteMsg)
+			if !ok {
+				t.Fatalf("invite result type = %T", msg)
+			}
+			v.handleInviteResult(result)
+			text := v.status.render()
+			wantHint := reason == "connection-reset" || reason == "connection-refused" || reason == "connection-timeout" || reason == "connection-unreachable"
+			if strings.Contains(text, "open PAIR on that device and invite this computer instead") != wantHint {
+				t.Errorf("guidance for %q: %s", reason, text)
+			}
+			if !strings.Contains(text, "original diagnostic") {
+				t.Errorf("lost actual diagnostic: %s", text)
+			}
+		})
+	}
+}
+
 // TestToastExpires is the regression guard for status lines that never went
 // away: an outcome must stop rendering once its TTL has passed.
 func TestToastExpires(t *testing.T) {

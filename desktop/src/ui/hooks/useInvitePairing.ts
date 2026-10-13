@@ -5,7 +5,11 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import type { Invite } from '@/shared/types/cluster'
 import { MODULAR_INVITE_STATUS_POLL_INTERVAL_MS } from '@/shared/constants/modular-runtime'
 import getErrorString from '@/shared/utils/get-error-string'
-import { formatClusterInviteError } from '@/ui/utils/cluster-invite-error'
+import {
+    formatClusterInviteError,
+    inviteFailureMessage,
+    isInviteStatusUnknown
+} from '@/ui/utils/cluster-invite-error'
 
 interface InvitePairing {
     /** The outbound invite (carries the PIN to display) once started; null before. */
@@ -37,6 +41,7 @@ export function useInvitePairing(): InvitePairing {
     const [error, setError] = useState<string | null>(null)
     const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
     const inviteIdRef = useRef<string | null>(null)
+    const generationRef = useRef(0)
 
     const stopPolling = useCallback(() => {
         if (pollRef.current) {
@@ -46,6 +51,7 @@ export function useInvitePairing(): InvitePairing {
     }, [])
 
     const reset = useCallback(() => {
+        generationRef.current++
         stopPolling()
         inviteIdRef.current = null
         setInvite(null)
@@ -53,10 +59,17 @@ export function useInvitePairing(): InvitePairing {
         setError(null)
     }, [stopPolling])
 
-    useEffect(() => () => stopPolling(), [stopPolling])
+    useEffect(
+        () => () => {
+            generationRef.current++
+            stopPolling()
+        },
+        [stopPolling]
+    )
 
     const cancel = useCallback(async () => {
         const id = inviteIdRef.current
+        const generation = generationRef.current
         stopPolling()
         if (id) {
             try {
@@ -65,6 +78,7 @@ export function useInvitePairing(): InvitePairing {
                 // Best-effort: the backend's session TTL and the client sweep are
                 // the backstops if this fails (e.g. it already resolved).
             }
+            if (generation !== generationRef.current || inviteIdRef.current !== id) return
             // The invite may have auto-created a throwaway solo cluster; drop it
             // if no peer joined (same as a terminal non-paired outcome).
             void window.pairApi.cluster.abandonIfSolo()
@@ -74,20 +88,28 @@ export function useInvitePairing(): InvitePairing {
 
     const start = useCallback(
         async (ipAddress: string) => {
+            const generation = ++generationRef.current
+            inviteIdRef.current = null
+            setInvite(null)
             setSubmitting(true)
             setError(null)
             stopPolling()
             try {
                 const result = await window.pairApi.cluster.inviteNode(ipAddress)
+                if (generation !== generationRef.current) return
                 setInvite(result)
                 if (result.state === 'pending' && result.inviteId) {
                     inviteIdRef.current = result.inviteId
+                    let polling = false
                     pollRef.current = setInterval(() => {
                         const id = inviteIdRef.current
-                        if (!id) return
+                        if (!id || polling) return
+                        polling = true
                         void window.pairApi.cluster
                             .inviteStatus(id)
                             .then(status => {
+                                if (generation !== generationRef.current || status.inviteId !== id)
+                                    return
                                 setInvite(status)
                                 if (status.state !== 'pending') {
                                     stopPolling()
@@ -99,8 +121,19 @@ export function useInvitePairing(): InvitePairing {
                                     }
                                 }
                             })
-                            .catch(() => {
-                                /* transient poll failure; keep trying */
+                            .catch(err => {
+                                if (generation !== generationRef.current) return
+                                if (isInviteStatusUnknown(getErrorString(err))) {
+                                    setInvite({
+                                        ...result,
+                                        state: 'expired',
+                                        reason: 'outcome-unknown'
+                                    })
+                                    stopPolling()
+                                }
+                            })
+                            .finally(() => {
+                                polling = false
                             })
                     }, MODULAR_INVITE_STATUS_POLL_INTERVAL_MS)
                 } else if (result.state !== 'paired') {
@@ -110,14 +143,15 @@ export function useInvitePairing(): InvitePairing {
                     // branch before, so its solo cluster was never dissolved. The
                     // panel renders the state/reason-specific copy; a bare `failed`
                     // also surfaces the generic error banner.
-                    if (result.state === 'failed') setError(formatClusterInviteError(null))
+                    if (result.state === 'failed') setError(inviteFailureMessage(result))
                     void window.pairApi.cluster.abandonIfSolo()
                 }
             } catch (err) {
+                if (generation !== generationRef.current) return
                 setError(formatClusterInviteError(getErrorString(err)))
                 void window.pairApi.cluster.abandonIfSolo()
             } finally {
-                setSubmitting(false)
+                if (generation === generationRef.current) setSubmitting(false)
             }
         },
         [stopPolling]

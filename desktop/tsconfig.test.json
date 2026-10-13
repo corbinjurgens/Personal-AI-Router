@@ -4,6 +4,7 @@
     "include": [
         "src/shared/**/*.ts",
         "tests/modular/**/*.test.ts",
+        "tests/modular/**/*.test.tsx",
         "vitest.config.ts",
         "scripts/test-clean.ts"
     ],
@@ -16,6 +17,7 @@
     "exclude": ["src/ui/**", "node_modules", "dist", "out", "src/**/*.tsx"],
     "compilerOptions": {
         "composite": false,
+        "jsx": "react-jsx",
         "moduleResolution": "bundler",
         "types": ["node", "vitest/globals"]
     }

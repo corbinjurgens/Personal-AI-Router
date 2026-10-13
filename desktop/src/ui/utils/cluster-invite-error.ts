@@ -2,6 +2,48 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { APP_DISPLAY_NAME } from '@/shared/constants/app'
+import type { Invite } from '@/shared/types/cluster'
+
+export const REVERSE_INVITE_GUIDANCE =
+    'If the other device blocks incoming connections, open PAIR on that device and invite this computer instead.'
+
+export function isInviteConnectionFailure(reason: string): boolean {
+    return [
+        'connection-reset',
+        'connection-refused',
+        'connection-timeout',
+        'connection-unreachable'
+    ].includes(reason)
+}
+
+export function inviteFailureMessage(invite: Invite, receiver = false): string {
+    if (invite.reason === 'incorrect-pin') {
+        return receiver ? INCORRECT_PIN_RECEIVER_MESSAGE : INCORRECT_PIN_SENDER_MESSAGE
+    }
+    if (invite.error) return invite.error
+    switch (invite.reason) {
+        case 'connection-reset':
+            return 'The connection to the other node was reset.'
+        case 'connection-refused':
+            return 'The other node refused the connection.'
+        case 'connection-timeout':
+            return 'The connection to the other node timed out.'
+        case 'connection-unreachable':
+            return 'The other node could not be reached.'
+        default:
+            return invite.reason
+                ? `Pairing failed: ${invite.reason}`
+                : 'Pairing failed. Please try again.'
+    }
+}
+
+export function isInviteStatusUnknown(message: string): boolean {
+    return (
+        message.includes('-32001') ||
+        message.toLowerCase().includes('unknown invite') ||
+        message.toLowerCase().includes('invite session evicted')
+    )
+}
 
 const DEFAULT_INVITE_ERROR = `Could not invite that node. Check the IP address, port, and that ${APP_DISPLAY_NAME} is running on the other machine, then try again.`
 
@@ -14,10 +56,10 @@ const INVITE_SESSION_ENDED_MESSAGE =
     'This invitation is no longer valid — ask the inviting node to send a new one.'
 
 /** Wrong-PIN copy for the joiner (the node that entered the PIN). */
-export const INCORRECT_PIN_RECEIVER_MESSAGE = `Incorrect PIN. ${INVITE_SESSION_ENDED_MESSAGE}`
+const INCORRECT_PIN_RECEIVER_MESSAGE = `Incorrect PIN. ${INVITE_SESSION_ENDED_MESSAGE}`
 
 /** Wrong-PIN copy mirrored on the inviter (the node that issued the PIN). */
-export const INCORRECT_PIN_SENDER_MESSAGE =
+const INCORRECT_PIN_SENDER_MESSAGE =
     'Incorrect PIN entered on the other node. Send a new invite to try again.'
 
 export function formatClusterInviteError(message: string | null | undefined): string {

@@ -21,6 +21,7 @@ import * as path from 'path'
  * to the public internet) trips a hard fail before a test body runs.
  */
 export default defineConfig({
+    esbuild: { jsx: 'automatic' },
     resolve: {
         alias: {
             '@': path.resolve(__dirname, 'src')
@@ -28,7 +29,7 @@ export default defineConfig({
     },
     test: {
         // Default tests: modular-era tests only. E2E is opt-in once rewritten.
-        include: ['tests/modular/**/*.test.ts'],
+        include: ['tests/modular/**/*.test.{ts,tsx}'],
         setupFiles: ['tests/fixtures/isolation.ts'],
         environment: 'node',
         clearMocks: true,
@@ -84,7 +85,7 @@ export default defineConfig({
                 extends: true,
                 test: {
                     name: 'unit',
-                    include: ['tests/modular/**/*.test.ts']
+                    include: ['tests/modular/**/*.test.{ts,tsx}']
                 }
             },
             {

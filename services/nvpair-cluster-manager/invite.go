@@ -164,8 +164,10 @@ func (m *Manager) handleInviteNode(msg *Message) {
 		var rej *pairingRejectedError
 		rejected := errors.As(err, &rej)
 		state := inviteStateFailed
+		reason := inviteFailureReason(err)
 		if rejected {
 			state = inviteStateRejected
+			reason = rej.reason
 		}
 		m.inviteMu.Lock()
 		// Terminal bookkeeping only while this pairing is still live and its
@@ -177,6 +179,7 @@ func (m *Manager) handleInviteNode(msg *Message) {
 		recorded, applied := m.withPendingPairing(inviteID, sess, func(cur *Invite) {
 			m.deleteSession(inviteID)
 			cur.State = state
+			cur.Reason = reason
 			m.putInvite(cur)
 		})
 		if applied {
@@ -200,7 +203,7 @@ func (m *Manager) handleInviteNode(msg *Message) {
 			m.codec.Respond(msg.ID, resp)
 		default:
 			log.Printf("invite %s: initial exchange failed: %v", inviteID, err)
-			m.codec.Respond(msg.ID, map[string]any{"inviteId": inviteID, "state": inviteStateFailed})
+			m.codec.Respond(msg.ID, map[string]any{"inviteId": inviteID, "state": inviteStateFailed, "reason": reason, "error": err.Error()})
 		}
 		return
 	}

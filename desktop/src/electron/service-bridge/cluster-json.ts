@@ -86,6 +86,7 @@ export function parseInvite(value: JsonValue | undefined): Invite {
         pin: nullableString(obj?.pin),
         state: inviteState(obj?.state),
         reason: stringValue(obj?.reason),
+        ...(typeof obj?.error === 'string' ? { error: obj.error } : {}),
         createdAt: numberValue(obj?.createdAt),
         respondedAt: nullableNumber(obj?.respondedAt)
     }

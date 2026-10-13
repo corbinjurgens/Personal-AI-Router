@@ -122,9 +122,14 @@ export interface Invite {
      * - `'already-clustered'` — paired with `state: 'rejected'`.
      * - `'incorrect-pin'` — paired with `state: 'failed'`; the joiner entered a
      *   wrong PIN. Set on both the joiner and inviter so the wrong-PIN error is
-     *   mirrored on both sides. Empty/absent for other `failed` causes.
+     *   mirrored on both sides.
+     * - `connection-reset`, `connection-refused`, `connection-timeout`,
+     *   `connection-unreachable` — transport failure during invitation.
+     * - `rollback-pending`, `awaiting-confirmation` — pending durable outcome.
      */
     reason: string
+    /** Original diagnostic for a failed Initial Exchange, when supplied. */
+    error?: string
     createdAt: number
     respondedAt: number | null
 }
