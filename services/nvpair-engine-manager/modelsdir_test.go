@@ -367,12 +367,28 @@ func TestRemoveTreePreservingIsBestEffort(t *testing.T) {
 	if err := os.WriteFile(binary, []byte("x"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	// Read-only parent: the child cannot be unlinked, so "locked" fails while
-	// "bin" — which sorts after it — must still go.
-	if err := os.Chmod(locked, 0o500); err != nil {
-		t.Fatal(err)
+	// Make "locked" undeletable so it fails while "bin", which sorts after it,
+	// must still go. On Unix a read-only parent stops the child being
+	// unlinked. On Windows the read-only attribute does not stop os.RemoveAll,
+	// so hold a file open instead, as a vendor daemon would: os.Open shares
+	// read and write access but not delete. The close is registered after
+	// t.TempDir, so it runs before the temporary directory is removed.
+	if runtime.GOOS == "windows" {
+		held := filepath.Join(locked, "child", "held")
+		if err := os.WriteFile(held, []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		f, err := os.Open(held)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = f.Close() })
+	} else {
+		if err := os.Chmod(locked, 0o500); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(locked, 0o700) })
 	}
-	t.Cleanup(func() { _ = os.Chmod(locked, 0o700) })
 
 	err := removeTreePreserving(engineRoot, filepath.Join(engineRoot, "models"))
 	if err == nil {
