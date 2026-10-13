@@ -154,8 +154,11 @@ func TestMain(m *testing.M) {
 	// developer's real config. These are the variables appdir resolves
 	// through on each platform. They are set after the builds, because go
 	// derives its module and build caches from these variables.
+	// USERPROFILE is redirected too, so Windows engine manifests that
+	// resolve vendor CLIs from the user profile, such as LM Studio's
+	// lms.exe, cannot reach a real install.
 	testsConfigBase = filepath.Join(tmpDir, "config")
-	for _, key := range []string{"XDG_CONFIG_HOME", "HOME", "APPDATA", "LOCALAPPDATA"} {
+	for _, key := range []string{"XDG_CONFIG_HOME", "HOME", "APPDATA", "LOCALAPPDATA", "USERPROFILE"} {
 		if err := os.Setenv(key, testsConfigBase); err != nil {
 			os.RemoveAll(tmpDir)
 			log.Fatalf("set %s: %v", key, err)
