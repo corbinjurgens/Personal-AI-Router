@@ -39,7 +39,10 @@ func mintClusterIdentity(t *testing.T, dir, uuid string) string {
 	if err != nil {
 		t.Fatalf("generate key: %v", err)
 	}
-	san, _ := url.Parse("urn:nvpair:node:" + uuid)
+	san, err := url.Parse("urn:nvpair:node:" + uuid)
+	if err != nil {
+		t.Fatalf("parse identity URI: %v", err)
+	}
 	tmpl := &x509.Certificate{
 		SerialNumber:          big.NewInt(time.Now().UnixNano()),
 		Subject:               pkix.Name{CommonName: uuid},
@@ -78,7 +81,10 @@ func writePin(t *testing.T, dir, peerUUID, peerCertPEM string) {
 	if err := os.MkdirAll(trustedDir, 0o700); err != nil {
 		t.Fatalf("mkdir trusted: %v", err)
 	}
-	pin, _ := json.Marshal(map[string]string{"nodeUuid": peerUUID, "certPem": peerCertPEM})
+	pin, err := json.Marshal(map[string]any{"nodeUuid": peerUUID, "certPem": peerCertPEM, "clusterId": "remote-engine-test-cluster", "admissionEpoch": 1})
+	if err != nil {
+		t.Fatalf("marshal pin: %v", err)
+	}
 	if err := os.WriteFile(filepath.Join(trustedDir, peerUUID+".json"), pin, 0o600); err != nil {
 		t.Fatalf("write pin: %v", err)
 	}
@@ -110,6 +116,8 @@ func TestRemoteEngineGetInstalled(t *testing.T) {
 	const uuidA, uuidB = "test-node-a", "test-node-b"
 	certA := mintClusterIdentity(t, dirA, uuidA)
 	certB := mintClusterIdentity(t, dirB, uuidB)
+	writeActiveAdmission(t, dirA)
+	writeActiveAdmission(t, dirB)
 	writePin(t, dirA, uuidB, certB) // A trusts B
 	writePin(t, dirB, uuidA, certA) // B trusts A
 
@@ -162,6 +170,7 @@ func TestRemoteEngineRejectsUntrusted(t *testing.T) {
 	const uuidA, uuidB = "untrusted-a", "server-b"
 	_ = mintClusterIdentity(t, dirA, uuidA)
 	certB := mintClusterIdentity(t, dirB, uuidB)
+	writeActiveAdmission(t, dirA)
 	writePin(t, dirA, uuidB, certB) // A trusts B (so A can complete the handshake)
 	writeActiveAdmission(t, dirB)   // B is clustered, but still does not trust A
 	// Deliberately do NOT pin A into B: B must reject A at the per-request gate.

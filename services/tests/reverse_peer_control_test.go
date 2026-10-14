@@ -269,6 +269,10 @@ func newTask1Observer(t *testing.T, target *task1Node, service noderec.ServiceKe
 		}
 		peer := source.uuid
 		proxy.ModifyResponse = func(response *http.Response) error {
+			// Settings notifications are a live stream, not a finite reply.
+			if response.Request.URL.Path == "/v1/engine-settings/events" {
+				return nil
+			}
 			if response.StatusCode == http.StatusSwitchingProtocols {
 				o.mu.Lock()
 				o.readyUpgrades[peer]++
