@@ -11,8 +11,7 @@
 //   - Outbound (proxy -> broker -> manager -> peer): a real inference
 //     request through the supervised ollama-proxy produces a workload event
 //     that the broker stamps with the local node id and the manager
-//     broadcasts to a discovered peer (a stub mTLS server advertised over
-//     mDNS).
+//     broadcasts to a peer supplied over discovery:nodes (a stub mTLS server).
 //
 // Both paths run over cluster mTLS, because that is the only personality the
 // inter-node interface has: each test puts the node under test and its stub peer
@@ -27,16 +26,18 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"nvpair-shared/jsonrpc"
+	"nvpair-shared/noderec"
 
 	"github.com/grandcat/zeroconf"
 )
@@ -47,6 +48,223 @@ const workloadMgrService = "_nvpair-workload-manager._tcp"
 // advertises ONE of these carrying a compact TXT service map; the broker's
 // node-scanner daemon browses it and relays the directory to subscribers.
 const nodeRecordService = "_nvpair-node._tcp"
+
+// The broker does not expose a workload worker port override. This test-only
+// stdio adapter starts the real worker on an isolated port and supplies its peer
+// directory through discovery:nodes. All other broker input and all worker
+// output pass through unchanged; it never synthesizes a service response or a
+// workload. Dispatch before TestMain so broker worker arguments are not parsed
+// as testing flags and the adapter does not build another binary bundle.
+func init() {
+	if bridge := os.Getenv("NVPAIR_TEST_WORKLOAD_BRIDGE"); bridge != "" && bridge == os.Args[0] {
+		if err := runWorkloadInteropBridge(); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
+}
+
+func runWorkloadInteropBridge() error {
+	args := append(os.Args[1:], "--port", os.Getenv("NVPAIR_TEST_WORKLOAD_PORT"))
+	cmd := exec.Command(os.Getenv("NVPAIR_TEST_WORKLOAD_BINARY"), args...)
+	cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		return err
+	}
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	fmt.Fprintf(os.Stderr, "fixture_worker_started pid=%d\n", cmd.Process.Pid)
+	wait := make(chan error, 1)
+	go func() { wait <- cmd.Wait() }()
+	forward := make(chan error, 1)
+	go func() {
+		encoder := json.NewEncoder(stdin)
+		directory := json.RawMessage(os.Getenv("NVPAIR_TEST_WORKLOAD_NODES"))
+		if !json.Valid(directory) {
+			forward <- fmt.Errorf("invalid fixture discovery directory")
+			return
+		}
+		if err := encoder.Encode(jsonrpc.Message{JSONRPC: "2.0", Method: noderec.NotifyNodes, Params: directory}); err != nil {
+			forward <- err
+			return
+		}
+		decoder := json.NewDecoder(os.Stdin)
+		for {
+			var frame jsonrpc.Message
+			if err := decoder.Decode(&frame); err != nil {
+				forward <- err
+				return
+			}
+			if frame.Method == noderec.NotifyNodes {
+				frame.Params = directory
+			}
+			if err := encoder.Encode(frame); err != nil {
+				forward <- err
+				return
+			}
+		}
+	}()
+	select {
+	case err := <-wait:
+		return fmt.Errorf("workload worker exited before broker EOF: %v", err)
+	case err := <-forward:
+		closeErr := stdin.Close()
+		select {
+		case waitErr := <-wait:
+			if waitErr != nil {
+				return fmt.Errorf("workload worker exit: %w", waitErr)
+			}
+		case <-time.After(5 * time.Second):
+			if killErr := cmd.Process.Kill(); killErr != nil {
+				return fmt.Errorf("kill workload worker: %w", killErr)
+			}
+			select {
+			case <-wait:
+			case <-time.After(2 * time.Second):
+				return fmt.Errorf("workload worker did not exit after kill")
+			}
+			return fmt.Errorf("workload worker required forced cleanup")
+		}
+		if err != io.EOF {
+			return fmt.Errorf("forward broker input: %w", err)
+		}
+		if closeErr != nil {
+			return closeErr
+		}
+	}
+	fmt.Fprintf(os.Stderr, "fixture_worker_exited pid=%d exit=0\n", cmd.Process.Pid)
+	return nil
+}
+
+type interopProcess struct {
+	cmd       *exec.Cmd
+	in        io.WriteCloser
+	msgs      <-chan jsonrpc.Message
+	output    serviceOutput
+	done      chan error
+	stopOnce  sync.Once
+	ports     []int
+	paths     []string
+	inventory *serviceProcessInventory
+	workerPID int32
+}
+
+func startInteropProcess(t *testing.T, base, binary string, port int, extraEnv []string, args ...string) *interopProcess {
+	t.Helper()
+	canonical, err := canonicalServicePath(binary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := &interopProcess{cmd: exec.Command(binary, args...), done: make(chan error, 1), paths: []string{canonical}}
+	if port != 0 {
+		p.ports = []int{port}
+	}
+	p.cmd.Dir = base
+	p.cmd.Env = append(os.Environ(), "HOME="+base, "XDG_CONFIG_HOME="+base, "APPDATA="+base, "LOCALAPPDATA="+base, "USERPROFILE="+base)
+	p.cmd.Env = append(p.cmd.Env, extraEnv...)
+	p.in, err = p.cmd.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := p.cmd.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.cmd.Stderr = &p.output
+	p.cmd.WaitDelay = 2 * time.Second
+	if err := p.cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	frames := make(chan jsonrpc.Message, 256)
+	p.msgs = frames
+	readDone := make(chan error, 1)
+	discard := make(chan struct{})
+	go func() {
+		defer close(frames)
+		codec := jsonrpc.NewCodecMaxFrame(struct {
+			io.Reader
+			io.Writer
+		}{out, io.Discard}, jsonrpc.WorkerFrameBytes)
+		for {
+			frame, err := codec.Read()
+			if err != nil {
+				readDone <- err
+				return
+			}
+			select {
+			case frames <- *frame:
+			case <-discard:
+			}
+		}
+	}()
+	go func() {
+		readErr := <-readDone
+		waitErr := p.cmd.Wait()
+		if readErr != io.EOF {
+			p.done <- fmt.Errorf("stdout: %v; exit: %v", readErr, waitErr)
+			return
+		}
+		p.done <- waitErr
+	}()
+	t.Logf("fixture_started pid=%d binary=%q port=%d", p.cmd.Process.Pid, binary, port)
+	t.Cleanup(func() {
+		p.stopOnce.Do(func() {
+			close(discard)
+			if err := p.in.Close(); err != nil {
+				t.Errorf("close fixture stdin: %v", err)
+			}
+			select {
+			case err := <-p.done:
+				if err != nil {
+					t.Errorf("fixture exit: %v; stderr: %s", err, p.output.String())
+				}
+			case <-time.After(10 * time.Second):
+				t.Error("fixture required forced cleanup")
+				if err := p.cmd.Process.Kill(); err != nil {
+					t.Errorf("kill fixture: %v", err)
+				}
+				if err := out.Close(); err != nil {
+					t.Errorf("close fixture stdout: %v", err)
+				}
+				select {
+				case <-p.done:
+				case <-time.After(3 * time.Second):
+					t.Error("fixture did not exit after kill")
+				}
+			}
+			if p.inventory == nil {
+				p.inventory = &serviceProcessInventory{paths: p.paths, known: make(map[int32]serviceProcessIdentity)}
+			}
+			owned, err := p.inventory.scan()
+			if err != nil || len(owned) != 0 {
+				t.Errorf("fixture process cleanup: owned=%+v err=%v", owned, err)
+			}
+			if p.workerPID != 0 && !strings.Contains(p.output.String(), fmt.Sprintf("fixture_worker_exited pid=%d exit=0", p.workerPID)) {
+				t.Errorf("real workload child %d did not report a clean exit", p.workerPID)
+			}
+			for _, port := range p.ports {
+				assertInteropListenerClosed(t, port)
+			}
+			t.Logf("fixture_cleanup pid=%d owned_processes=%+v listener_ports=%v stderr=%s", p.cmd.Process.Pid, owned, p.ports, p.output.String())
+		})
+	})
+	return p
+}
+
+func assertInteropListenerClosed(t *testing.T, port int) {
+	t.Helper()
+	conn, err := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)), time.Second)
+	if err == nil {
+		if closeErr := conn.Close(); closeErr != nil {
+			t.Errorf("close listener probe: %v", closeErr)
+		}
+		t.Errorf("fixture listener %d survived cleanup", port)
+	}
+	t.Logf("fixture_listener_cleanup port=%d closed=%t", port, err != nil)
+}
 
 // wlInfo is the subset of the Workload object the interop tests assert on.
 type wlInfo struct {
@@ -352,55 +570,131 @@ func TestWorkloadManagerOutboundBroadcast(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte(`{"done":true}`))
 	}))
-	defer ollama.Close()
-	ou, _ := url.Parse(ollama.URL)
-	_, ollamaPortStr, _ := net.SplitHostPort(ou.Host)
-	ollamaPort, _ := strconv.Atoi(ollamaPortStr)
+	ollamaPort := ollama.Listener.Addr().(*net.TCPAddr).Port
+	t.Cleanup(func() {
+		ollama.Close()
+		assertInteropListenerClosed(t, ollamaPort)
+	})
 
 	// Stub peer: a real cluster peer (cross-pinned with the node under test) that
 	// records the workload broadcasts the manager fans out to it. It has to be a
 	// cluster peer — the inter-node interface is mTLS only, so an unpinned host is
-	// never dialed at all. The broker's node-scanner browses the stub's
-	// _nvpair-node record and pushes it to the subscribed workload-manager's relay
-	// peer source, which is the path that replaced the per-service browse.
+	// never dialed at all. The fixture feeds the public worker discovery seam,
+	// avoiding installed peers and multicast registration/teardown dependencies.
 	fx := newInterNodeCluster(t)
-	received := fx.startStubClusterPeer(t, "stub-wm-peer", "stub-wm-peer-uuid")
-
-	stdin, msgs, cleanup := startBrokerProcInCluster(t, fx.nodeDir,
+	received, peerPort := fx.startDirectClusterPeer(t)
+	base := t.TempDir()
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(executable)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bridge := filepath.Join(base, "workload-bridge"+filepath.Ext(workloadMgrBin))
+	if err := os.WriteFile(bridge, data, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	workerPort := temporaryClusterPort(t)
+	proxyPort := temporaryClusterPort(t)
+	// Persist an explicit startup choice in the broker's temporary journal;
+	// changing a proxy port later requires an engine-manager we do not need.
+	journal := map[string]any{"ollama": map[string]any{
+		"explicit": true,
+		"snapshot": map[string]any{
+			"engine": "ollama", "revision": 1, "appliedRevision": 1, "phase": "idle", "format": "pair-arguments-v1",
+			"settings": map[string]any{"serverPort": ollamaPort, "proxyPort": proxyPort, "launchText": ""},
+		},
+	}}
+	if err := os.WriteFile(filepath.Join(filepath.Dir(fx.nodeDir), "engine-settings-operations.json"), mustMarshal(t, journal), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	directory := noderec.GetNodesResult{Nodes: []noderec.DirectoryNode{{
+		HostUUID: "stub-wm-peer-uuid", ClusterUUID: fx.peerUUID, IP: "127.0.0.1",
+		Services: map[noderec.ServiceKey]noderec.ServiceStatus{noderec.ServiceWorkload: {Port: peerPort}},
+	}}}
+	p := startInteropProcess(t, base, brokerBin, workerPort, []string{
+		"OLLAMA_HOST=",
+		"NVPAIR_TEST_WORKLOAD_BRIDGE=" + bridge,
+		"NVPAIR_TEST_WORKLOAD_BINARY=" + workloadMgrBin,
+		"NVPAIR_TEST_WORKLOAD_PORT=" + strconv.Itoa(workerPort),
+		"NVPAIR_TEST_WORKLOAD_NODES=" + string(mustMarshal(t, directory)),
+	},
+		"--cluster-dir", fx.nodeDir,
 		"--scanner-path", scannerBin,
 		"--proxy-path", proxyBin, "--proxy-engines", "ollama",
-		"--workload-manager-path", workloadMgrBin,
+		"--workload-manager-path", bridge,
 	)
-	t.Cleanup(cleanup)
+	p.paths = append(p.paths, scannerBin, proxyBin, bridge, workloadMgrBin)
+	for i, path := range p.paths {
+		canonical, err := canonicalServicePath(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		p.paths[i] = canonical
+	}
+	p.inventory = &serviceProcessInventory{paths: p.paths, known: make(map[int32]serviceProcessIdentity)}
+	stdin, msgs := p.in, p.msgs
 
 	waitForMethod(t, msgs, "app:ready", 10*time.Second)
 	t.Log("broker ready")
 
 	// The proxy reports its bound port asynchronously; poll ollama-proxy:get-status.
-	proxyPort := waitProxyReady(t, stdin, msgs, 15*time.Second)
+	if readyPort := waitProxyReady(t, stdin, msgs, 15*time.Second); readyPort != proxyPort {
+		t.Fatalf("proxy port=%d want fixture port=%d", readyPort, proxyPort)
+	}
+	p.ports = append(p.ports, proxyPort)
+	waitTCP(t, net.JoinHostPort("127.0.0.1", strconv.Itoa(workerPort)), 10*time.Second)
+	owned, err := p.inventory.scan()
+	if err != nil || len(owned) != len(p.paths) {
+		t.Fatalf("fixture process inventory: owned=%+v err=%v want paths=%v", owned, err, p.paths)
+	}
+	for _, child := range owned {
+		if child.Path == p.paths[len(p.paths)-1] {
+			p.workerPID = child.PID
+		}
+	}
+	if p.workerPID == 0 {
+		t.Fatal("real workload worker missing from fixture inventory")
+	}
+	t.Logf("fixture_inventory owned=%+v", owned)
 	t.Logf("proxy ready on port %d", proxyPort)
 
 	// Register the fake Ollama as a manual node and pin it as the target so
 	// the proxy forwards there deterministically.
 	writeRawFrame(t, stdin, fmt.Sprintf(`{"jsonrpc":"2.0","id":50,"method":"ollama-proxy:node/add-manual","params":{"id":"fake-ollama","host":"127.0.0.1","port":%d,"addresses":["127.0.0.1"],"models":["test-model"]}}`, ollamaPort))
-	waitForResponse(t, msgs, 5*time.Second)
+	if reply := waitForResponse(t, msgs, 5*time.Second); reply.Error != nil {
+		t.Fatalf("add manual upstream: %+v", reply.Error)
+	}
 	writeRawFrame(t, stdin, `{"jsonrpc":"2.0","id":51,"method":"ollama-proxy:node/select","params":{"id":"fake-ollama"}}`)
-	waitForResponse(t, msgs, 5*time.Second)
+	if reply := waitForResponse(t, msgs, 5*time.Second); reply.Error != nil {
+		t.Fatalf("select upstream: %+v", reply.Error)
+	}
 	t.Log("fake ollama pinned as proxy target")
 
 	// Fire inference requests until the stub peer records a broadcast. The
-	// retry loop absorbs mDNS discovery latency (the manager refreshes its
+	// retry loop absorbs worker discovery latency (the manager refreshes its
 	// peer set every 5 s and only broadcasts to peers it already knows).
 	client := &http.Client{Timeout: 3 * time.Second}
+	t.Cleanup(client.CloseIdleConnections)
 	fire := func() {
 		resp, err := client.Post(
 			fmt.Sprintf("http://127.0.0.1:%d/api/chat", proxyPort),
 			"application/json",
 			strings.NewReader(`{"model":"test-model","messages":[]}`),
 		)
-		if err == nil {
-			io.Copy(io.Discard, resp.Body)
-			resp.Body.Close()
+		if err != nil {
+			t.Fatalf("inference through real proxy: %v", err)
+		}
+		if _, err := io.Copy(io.Discard, resp.Body); err != nil {
+			t.Errorf("read inference response: %v", err)
+		}
+		if err := resp.Body.Close(); err != nil {
+			t.Errorf("close inference response: %v", err)
+		}
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("inference status=%d want=200", resp.StatusCode)
 		}
 	}
 	fire()
@@ -421,8 +715,8 @@ func TestWorkloadManagerOutboundBroadcast(t *testing.T) {
 			if p.WorkloadInfo.Model != "test-model" {
 				continue
 			}
-			if p.WorkloadInfo.OriginatedFrom == "" {
-				t.Errorf("broadcast workload originatedFrom is empty; broker did not stamp it")
+			if p.WorkloadInfo.OriginatedFrom != fx.nodeUUID {
+				t.Errorf("broadcast workload originatedFrom=%q want=%q", p.WorkloadInfo.OriginatedFrom, fx.nodeUUID)
 			}
 			if p.WorkloadInfo.Engine != "ollama" {
 				t.Errorf("broadcast workload engine = %q, want %q", p.WorkloadInfo.Engine, "ollama")

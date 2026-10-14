@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -32,11 +33,6 @@ import (
 	"nvpair-shared/netpick"
 
 	"github.com/grandcat/zeroconf"
-)
-
-const (
-	workloadEventsURL = "127.0.0.1:14320/v1/workloads/events"
-	errorsSyncURL     = "127.0.0.1:14319/v1/errors"
 )
 
 // interNodeCluster is a synthetic two-node cluster for the data-plane tests.
@@ -53,14 +49,38 @@ type interNodeCluster struct {
 
 func newInterNodeCluster(t *testing.T) *interNodeCluster {
 	t.Helper()
-	nodeDir, peerDir := t.TempDir(), t.TempDir()
-	const nodeUUID, peerUUID = "data-plane-node", "data-plane-peer"
+	nodeDir, peerDir := filepath.Join(t.TempDir(), "cluster"), filepath.Join(t.TempDir(), "cluster")
+	for _, dir := range []string{nodeDir, peerDir} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	const nodeUUID, peerUUID, clusterID = "data-plane-node", "data-plane-peer", "data-plane-cluster"
 	nodeCert := mintClusterIdentity(t, nodeDir, nodeUUID)
 	peerCert := mintClusterIdentity(t, peerDir, peerUUID)
-	writePin(t, nodeDir, peerUUID, peerCert) // the node under test trusts the peer
-	writePin(t, peerDir, nodeUUID, nodeCert) // and the peer trusts it back
-	writeActiveAdmission(t, nodeDir)
-	writeActiveAdmission(t, peerDir)
+	// Current peer-service callers require an exact active admission tuple.
+	// Keep fixture pins complete rather than relying on legacy identity-only pins.
+	for _, member := range []struct{ dir, uuid, peerUUID, peerCert string }{
+		{nodeDir, nodeUUID, peerUUID, peerCert}, {peerDir, peerUUID, nodeUUID, nodeCert},
+	} {
+		if err := os.MkdirAll(filepath.Join(member.dir, "trusted"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		for _, file := range []struct {
+			path string
+			data map[string]any
+		}{
+			{"identity.json", map[string]any{"node_uuid": member.uuid}},
+			{"admission.json", map[string]any{"counter": 1, "activated": 1, "clusterId": clusterID, "epoch": 1}},
+			{filepath.Join("trusted", member.peerUUID+".json"), map[string]any{
+				"nodeUuid": member.peerUUID, "certPem": member.peerCert, "clusterId": clusterID, "admissionEpoch": 1,
+			}},
+		} {
+			if err := os.WriteFile(filepath.Join(member.dir, file.path), mustMarshal(t, file.data), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
 
 	peer := clustertrust.Open(peerDir)
 	if !peer.Clustered() {
@@ -77,7 +97,9 @@ func (c *interNodeCluster) clientAsPeer(t *testing.T) *http.Client {
 	if !ok {
 		t.Fatal("the stub peer must be able to build a pinned client for the node under test")
 	}
-	return &http.Client{Timeout: 5 * time.Second, Transport: &http.Transport{TLSClientConfig: cfg}}
+	client := &http.Client{Timeout: 5 * time.Second, Transport: &http.Transport{TLSClientConfig: cfg}}
+	t.Cleanup(client.CloseIdleConnections)
+	return client
 }
 
 // startStubClusterPeer runs a stub inter-node peer for this cluster over cluster
@@ -91,6 +113,22 @@ func (c *interNodeCluster) clientAsPeer(t *testing.T) *http.Client {
 // record distinct from the node under test's own.
 func (c *interNodeCluster) startStubClusterPeer(t *testing.T, instance, hostUUID string) <-chan jsonrpc.Message {
 	t.Helper()
+	received, port := c.startDirectClusterPeer(t)
+	txt := []string{"v=1", "uuid=" + hostUUID, fmt.Sprintf("wl=%d", port),
+		clustertrust.ClusterUUIDTXTKey + "=" + c.peerUUID}
+	adv, err := zeroconf.Register(instance, nodeRecordService, testDomain, port, txt, nil)
+	if err != nil {
+		t.Fatalf("register stub peer: %v", err)
+	}
+	t.Cleanup(adv.Shutdown)
+	t.Logf("stub cluster peer advertising %s (wl=%d, cluster-uuid=%s)", nodeRecordService, port, c.peerUUID)
+	return received
+}
+
+// startDirectClusterPeer exposes the authenticated peer without mDNS. A fixture
+// can supply its address through the worker's public discovery:nodes seam.
+func (c *interNodeCluster) startDirectClusterPeer(t *testing.T) (<-chan jsonrpc.Message, int) {
+	t.Helper()
 	received := make(chan jsonrpc.Message, 128)
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/workloads/events", func(w http.ResponseWriter, r *http.Request) {
@@ -100,13 +138,21 @@ func (c *interNodeCluster) startStubClusterPeer(t *testing.T, instance, hostUUID
 			http.Error(w, "forbidden: not a pinned cluster peer", http.StatusForbidden)
 			return
 		}
-		body, _ := io.ReadAll(r.Body)
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, "read workload frame", http.StatusBadRequest)
+			return
+		}
 		var msg jsonrpc.Message
-		if json.Unmarshal(body, &msg) == nil {
-			select {
-			case received <- msg:
-			default:
-			}
+		if err := json.Unmarshal(body, &msg); err != nil {
+			http.Error(w, "decode workload frame", http.StatusBadRequest)
+			return
+		}
+		select {
+		case received <- msg:
+		default:
+			http.Error(w, "fixture frame budget exceeded", http.StatusServiceUnavailable)
+			return
 		}
 		w.WriteHeader(http.StatusOK)
 	})
@@ -119,18 +165,39 @@ func (c *interNodeCluster) startStubClusterPeer(t *testing.T, instance, hostUUID
 	}
 	port := ln.Addr().(*net.TCPAddr).Port
 	srv := &http.Server{Handler: mux}
-	go srv.Serve(tls.NewListener(ln, c.peer.ServerTLSConfig()))
-	t.Cleanup(func() { _ = srv.Close() })
+	done := make(chan error, 1)
+	go func() { done <- srv.Serve(tls.NewListener(ln, c.peer.ServerTLSConfig())) }()
+	t.Cleanup(func() {
+		if err := srv.Close(); err != nil {
+			t.Errorf("close stub peer: %v", err)
+		}
+		select {
+		case err := <-done:
+			if err != http.ErrServerClosed {
+				t.Errorf("stub peer exit: %v", err)
+			}
+		case <-time.After(3 * time.Second):
+			t.Error("stub peer did not exit within cleanup deadline")
+		}
+		assertInteropListenerClosed(t, port)
+	})
+	t.Logf("fixture_listener peer_port=%d", port)
+	return received, port
+}
 
-	txt := []string{"v=1", "uuid=" + hostUUID, fmt.Sprintf("wl=%d", port),
-		clustertrust.ClusterUUIDTXTKey + "=" + c.peerUUID}
-	adv, err := zeroconf.Register(instance, nodeRecordService, testDomain, port, txt, nil)
-	if err != nil {
-		t.Fatalf("register stub peer: %v", err)
-	}
-	t.Cleanup(adv.Shutdown)
-	t.Logf("stub cluster peer advertising %s (wl=%d, cluster-uuid=%s)", nodeRecordService, port, c.peerUUID)
-	return received
+func startDataPlaneWorkers(t *testing.T, clusterDir string) (string, string) {
+	t.Helper()
+	workloadPort, errorsPort := temporaryClusterPort(t), temporaryClusterPort(t)
+	base := t.TempDir()
+	startInteropProcess(t, base, workloadMgrBin, workloadPort, nil,
+		"--cluster-dir", clusterDir, "--port", strconv.Itoa(workloadPort))
+	startInteropProcess(t, base, errorsBin, errorsPort, nil,
+		"--cluster-dir", clusterDir, "--peer-sync", "--port", strconv.Itoa(errorsPort))
+	workloadAddr := net.JoinHostPort("127.0.0.1", strconv.Itoa(workloadPort))
+	errorsAddr := net.JoinHostPort("127.0.0.1", strconv.Itoa(errorsPort))
+	waitTCP(t, workloadAddr, 10*time.Second)
+	waitTCP(t, errorsAddr, 10*time.Second)
+	return workloadAddr + "/v1/workloads/events", errorsAddr + "/v1/errors"
 }
 
 // waitTCP blocks until addr accepts a TCP connection. Every "this request must be
@@ -188,22 +255,8 @@ const dataPlaneErrorsEnvelope = `{"nodeId":"intruder-node","errors":[{"id":"intr
 // plaintext workload events from any host on the network and relayed them into its
 // catalog as though a peer had sent them.
 func TestDataPlaneRefusesNonMemberWhenUnclustered(t *testing.T) {
-	if portBusy(14319) || portBusy(14320) {
-		t.Skip("an inter-node port is already in use; skipping")
-	}
-	// startBrokerProc pins an EMPTY cluster dir, so these workers are non-members.
-	_, msgs, cleanup := startBrokerProc(t,
-		"--scanner-path", scannerBin,
-		"--workload-manager-path", workloadMgrBin,
-		"--errors-path", errorsBin,
-	)
-	t.Cleanup(cleanup)
-	waitForMethod(t, msgs, "app:ready", 10*time.Second)
-
-	waitTCP(t, "127.0.0.1:14320", 15*time.Second)
+	workloadEventsURL, errorsSyncURL := startDataPlaneWorkers(t, t.TempDir())
 	assertPlaintextRefused(t, workloadEventsURL, dataPlaneWorkloadFrame)
-
-	waitTCP(t, "127.0.0.1:14319", 15*time.Second)
 	assertPlaintextRefused(t, errorsSyncURL, dataPlaneErrorsEnvelope)
 }
 
@@ -271,9 +324,6 @@ func TestModelInventoryRefusesLANPlaintext(t *testing.T) {
 // host can complete the TLS handshake, which is what makes the per-request pin
 // gate load-bearing rather than decorative.
 func TestDataPlaneRefusesNonMemberWhenClustered(t *testing.T) {
-	if portBusy(14319) || portBusy(14320) {
-		t.Skip("an inter-node port is already in use; skipping")
-	}
 	fx := newInterNodeCluster(t)
 
 	// A stranger: it pins the node under test (so it can verify the server and
@@ -288,20 +338,11 @@ func TestDataPlaneRefusesNonMemberWhenClustered(t *testing.T) {
 		t.Fatal("the stranger must be able to build a client for the node it pins")
 	}
 	stranger := &http.Client{Timeout: 5 * time.Second, Transport: &http.Transport{TLSClientConfig: strangerCfg}}
-
-	_, msgs, cleanup := startBrokerProcInCluster(t, fx.nodeDir,
-		"--scanner-path", scannerBin,
-		"--workload-manager-path", workloadMgrBin,
-		"--errors-path", errorsBin,
-	)
-	t.Cleanup(cleanup)
-	waitForMethod(t, msgs, "app:ready", 10*time.Second)
-
-	waitTCP(t, "127.0.0.1:14320", 15*time.Second)
+	t.Cleanup(stranger.CloseIdleConnections)
+	workloadEventsURL, errorsSyncURL := startDataPlaneWorkers(t, fx.nodeDir)
 	assertPlaintextRefused(t, workloadEventsURL, dataPlaneWorkloadFrame)
 	assertForbidden(t, stranger, "https://"+workloadEventsURL, dataPlaneWorkloadFrame)
 
-	waitTCP(t, "127.0.0.1:14319", 15*time.Second)
 	assertPlaintextRefused(t, errorsSyncURL, dataPlaneErrorsEnvelope)
 	assertForbidden(t, stranger, "https://"+errorsSyncURL, dataPlaneErrorsEnvelope)
 
@@ -312,6 +353,8 @@ func TestDataPlaneRefusesNonMemberWhenClustered(t *testing.T) {
 	// injected workload is absent from the catalog.
 	peer := fx.clientAsPeer(t)
 	postUntil(t, peer, "https://"+workloadEventsURL, dataPlanePeerFrame, http.StatusOK, 15*time.Second)
+	const peerErrors = `{"nodeId":"data-plane-peer","errors":[{"id":"peer:err","nodeId":"data-plane-peer","severity":"error","message":"pinned peer"}]}`
+	postUntil(t, peer, "https://"+errorsSyncURL, peerErrors, http.StatusNoContent, 15*time.Second)
 }
 
 // assertForbidden requires a request that completes a handshake to be turned away

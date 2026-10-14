@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"io"
 	"os"
-	"os/exec"
 	"sort"
 	"strconv"
 	"sync"
@@ -35,26 +34,8 @@ import (
 //   - clear   →  update broadcast with empty list
 //   - re-report after clear  →  resurrect (ack-until-reemit)
 func TestErrorsBrokerPipeline_EndToEnd(t *testing.T) {
-	cmd := exec.Command(errorsBin)
-	stdin, err := cmd.StdinPipe()
-	if err != nil {
-		t.Fatalf("stdin pipe: %v", err)
-	}
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		t.Fatalf("stdout pipe: %v", err)
-	}
-	if err := cmd.Start(); err != nil {
-		t.Fatalf("start nvpair-errors: %v", err)
-	}
-	// Defer-close stdin so that even on t.Fatal mid-test the
-	// subprocess sees EOF and exits cleanly rather than orphaning.
-	defer func() {
-		stdin.Close()
-		_ = cmd.Wait()
-	}()
-
-	out := startBrokerStream(stdout)
+	p := startInteropProcess(t, t.TempDir(), errorsBin, 0, nil)
+	stdin, out := p.in, p.msgs
 
 	// First frame: the subprocess emits "ready" right after startup.
 	waitForMethodOrTimeout(t, out, "ready", 5*time.Second)
@@ -65,7 +46,10 @@ func TestErrorsBrokerPipeline_EndToEnd(t *testing.T) {
 	// scoped to local-origin entries for cross-node correctness)
 	// resolves against the reports — a fixed fake nodeId would no
 	// longer match the binary's real hostname.
-	localNode, _ := os.Hostname()
+	localNode, err := os.Hostname()
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	// 1. errors:report (REQUEST form, id=1). Expect a null response,
 	//    then an errors:update notification with the new entry.
