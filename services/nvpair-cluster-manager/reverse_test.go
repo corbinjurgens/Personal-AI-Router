@@ -13,9 +13,11 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -290,6 +292,126 @@ func TestReverseBlockedDirectionConcurrentPrivateStreaming(t *testing.T) {
 	}
 	wg.Wait()
 	t.Logf("verified response bytes per concurrent stream: %d", len(payload))
+}
+
+func TestReversePeerServiceClientPrivateHTTPSFallback(t *testing.T) {
+	a, b := newReverseTestManager(t), newReverseTestManager(t)
+	startPrivateReverse(t, a)
+	startReverseHTTP(t, a, false)
+	startReverseHTTP(t, b, true)
+	pairReverseManagers(t, a, b)
+	connectReverseManagers(t, a, b)
+	var dispatched atomic.Int32
+	service := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if uuid, ok := b.verifyClientPin(r); !ok || uuid != a.identity.NodeUUID {
+			t.Error("private tunnel did not preserve the pinned inner client certificate")
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
+		if r.TLS.ServerName != "original.example" || r.URL.Path != "/original" || r.URL.RawQuery != "a=1" {
+			t.Errorf("original TLS/URL changed: SNI=%q URL=%s", r.TLS.ServerName, r.URL)
+		}
+		dispatched.Add(1)
+		if _, err := io.WriteString(w, "private pinned response"); err != nil {
+			t.Error(err)
+		}
+	}))
+	service.TLS = b.buildServerTLSConfig()
+	service.StartTLS()
+	defer service.Close()
+	port := service.Listener.Addr().(*net.TCPAddr).Port
+	setReverseServices(t, b, 1, noderec.RegisterParams{Service: noderec.ServiceOllama, Port: port})
+	address := net.JoinHostPort("original.example", strconv.Itoa(port))
+	var attempts atomic.Int32
+	adapter := clustertrust.NewPeerServiceClient(clustertrust.Open(a.clusterDir), clustertrust.PeerServiceClientOptions{
+		PeerClientOptions: clustertrust.PeerClientOptions{Timeout: time.Second, ResolvePin: a.trust.DER},
+		BaseConfigDir:     filepath.Dir(a.clusterDir), DirectTimeout: 60 * time.Millisecond,
+		ResolveRoute: func(uuid string, service noderec.ServiceKey) (clustertrust.PeerServiceRoute, bool) {
+			peer, ok := a.reversePeer(uuid)
+			return clustertrust.PeerServiceRoute{Incarnation: peer.Incarnation, Address: address, Protocol: clustertrust.ReverseTLS, Generation: 1}, ok && service == noderec.ServiceOllama
+		},
+		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			attempts.Add(1)
+			<-ctx.Done()
+			return nil, ctx.Err()
+		},
+	})
+	client := adapter.Client(b.identity.NodeUUID, noderec.ServiceOllama)
+	for range 2 {
+		response, err := client.Get("https://" + address + "/original?a=1")
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, err := io.ReadAll(response.Body)
+		closeErr := response.Body.Close()
+		if err != nil || closeErr != nil || response.StatusCode != http.StatusOK || string(body) != "private pinned response" {
+			t.Fatalf("private HTTPS response: status=%d body=%q read=%v close=%v", response.StatusCode, body, err, closeErr)
+		}
+	}
+	if attempts.Load() != 1 || dispatched.Load() != 2 {
+		t.Fatalf("cached route direct=%d HTTP=%d, want 1 and 2", attempts.Load(), dispatched.Load())
+	}
+}
+
+func TestReversePeerServiceClientCancellationAfterResponse(t *testing.T) {
+	a, b := newReverseTestManager(t), newReverseTestManager(t)
+	startPrivateReverse(t, a)
+	startReverseHTTP(t, a, false)
+	pairReverseManagers(t, a, b)
+	connectReverseManagers(t, a, b)
+	stopped := make(chan struct{})
+	service := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if _, ok := b.verifyClientPin(r); !ok {
+			t.Error("missing pinned client")
+			w.WriteHeader(http.StatusForbidden)
+			return
+		}
+		if _, err := io.WriteString(w, "start"); err != nil {
+			t.Error(err)
+			return
+		}
+		w.(http.Flusher).Flush()
+		<-r.Context().Done()
+		close(stopped)
+	}))
+	service.TLS = b.buildServerTLSConfig()
+	service.StartTLS()
+	defer service.Close()
+	port := service.Listener.Addr().(*net.TCPAddr).Port
+	setReverseServices(t, b, 1, noderec.RegisterParams{Service: noderec.ServiceOllama, Port: port})
+	address := net.JoinHostPort("original.example", strconv.Itoa(port))
+	adapter := clustertrust.NewPeerServiceClient(clustertrust.Open(a.clusterDir), clustertrust.PeerServiceClientOptions{
+		PeerClientOptions: clustertrust.PeerClientOptions{ResolvePin: a.trust.DER}, BaseConfigDir: filepath.Dir(a.clusterDir),
+		ResolveRoute: func(uuid string, service noderec.ServiceKey) (clustertrust.PeerServiceRoute, bool) {
+			peer, ok := a.reversePeer(uuid)
+			return clustertrust.PeerServiceRoute{Incarnation: peer.Incarnation, Address: address, Protocol: clustertrust.ReverseTLS, Generation: 1}, ok && service == noderec.ServiceOllama
+		},
+		DialContext: func(context.Context, string, string) (net.Conn, error) { return nil, errors.New("direct blocked") },
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://"+address, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := adapter.Client(b.identity.NodeUUID, noderec.ServiceOllama).Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	var initial [5]byte
+	if _, err := io.ReadFull(response.Body, initial[:]); err != nil || string(initial[:]) != "start" {
+		t.Fatalf("initial response=%q err=%v", initial, err)
+	}
+	cancel()
+	if _, err := io.ReadAll(response.Body); !errors.Is(err, context.Canceled) {
+		t.Fatalf("response cancellation = %v", err)
+	}
+	select {
+	case <-stopped:
+	case <-time.After(time.Second):
+		t.Fatal("retained private lifecycle did not cancel remote HTTP")
+	}
 }
 
 func TestReverseProtocolGateBeforeLoopback(t *testing.T) {
