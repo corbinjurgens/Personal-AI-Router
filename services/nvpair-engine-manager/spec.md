@@ -208,6 +208,16 @@ The `engine:remote-*` methods are the client half: engine-manager resolves the t
 ### 7.3 Model copy between nodes
 `engine:remote-copy-model {node, engine, model}` copies a model the pinned peer `node` holds into this node's store for the same engine. Requirements:
 
+- **Transport owner.** The shared pinned peer/service adapter resolves the
+  admitted source and current advertised `ec` endpoint, prefers direct mTLS,
+  and uses the existing authenticated reverse session after a bounded
+  pre-dispatch direct failure. Inner mTLS retains the source handler's pin and
+  membership checks. Listing frames and file bytes stream with backpressure
+  and cancellation, without whole-file buffering or a new listener. The
+  adapter does not replay dispatched requests or exposed responses. An
+  interrupted file attempt ends; the copy owner issues a new Range request and
+  verifies the final hash under the transfer rules below.
+
 - **Source listing.** `GET /v1/models/files` resolves exactly the model's files from the engine's on-disk layout, as slash-separated paths relative to the engine's store, with size and sha256. Hashes are computed lazily by streaming the file and cached by absolute path, size and mtime; a file named by its sha256 (Ollama blobs, llama.cpp LFS blobs behind snapshot links) uses that name. Every listed file must resolve, after symlinks, to a regular file inside the store.
 - **Source serving.** `GET /v1/models/file` serves a path only when it is exactly one of the model's listed files (`400` for a malformed path, `404` otherwise), through `http.ServeContent` for Range support.
 - **Refusals before downloading.** An engine without a known layout, an engine not installed on the destination, a listing whose paths, hashes or shape do not fit the layout, and a volume with less free space than the missing bytes (net of partials) plus 256 MiB.

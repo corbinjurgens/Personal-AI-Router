@@ -37,7 +37,7 @@ leaves the broker running without that capability rather than failing to start.
 The [worker subprocesses](#worker-subprocesses) section covers each one's link,
 lifecycle, and relay rules.
 
-Two responsibilities live in the broker itself rather than in a worker:
+These responsibilities live in the broker itself rather than in a worker:
 
 - **Engine advertising.** The broker polls local Ollama, LM Studio, and
   llama.cpp every 5 s and registers each running engine's promoted facade port
@@ -392,6 +392,36 @@ was handed on; the outcome arrives on the `workloads:*` stream. A peer's relayed
 `workloads:cancel` reaches the broker from the workload-manager and is acted on
 only by the origin. `-32602` without `originatedFrom` or `workloadId`.
 
+#### `discovery:get-node-info`
+
+```json
+{"jsonrpc":"2.0","id":17,"method":"discovery:get-node-info","params":{"hostUuid":"physical-host"}}
+```
+
+Relays an asynchronous fresh read to the scanner over its existing stdio peer.
+Desktop paired-node polling and TUI paired detail polling call it through
+`nvpair-service`'s existing local control connection. The scanner owns current
+directory/admission/pin resolution and direct/reverse `ni` transport; clients
+supply only the host UUID. Self and unpaired client polling stays direct, and
+manual TLS telemetry remains supplied by the manual-node worker.
+
+The result is the full existing node-info shape, directly in `result`: `GPUs`,
+optional `cpu`/`memory`, `telemetryValid`, `msSince`, `hostUuid` and nullable
+`clusterUuid`. This is neither cached enrichment nor compact scheduler telemetry.
+The scanner validates host and reported principal before success. Invalid or
+extra params yield `-32602`; scanner failures retain their RPC code/message/data.
+A missing scanner yields `-32000` (`node scanner unavailable`); deadline/transport
+failure yields `-32000` (`node information unavailable`) without a fresh result.
+These failures do not remove cluster membership.
+
+Each broker/scanner read has a 1500 ms backend budget. Broker write-gate wait,
+active scanner-input write and response wait are bounded. A response-only or
+queued timeout leaves the scanner usable; an interrupted active frame retires
+that scanner and existing supervision replaces it. Client timeout/cancellation
+disowns late results locally; there is no wire cancellation method. The scanner
+may retry this bodyless GET once over reverse after a direct first-data reset,
+before response exposure. No remote-control renderer method or listener is added.
+
 #### `discovery:get-nodes`
 
 Returns the broker's current snapshot of every node `nvpair-node-scanner` has reported as live on the network. The list is sorted by `id` for stable rendering.
@@ -744,7 +774,7 @@ Attach to a pre-existing endpoint:
   `lm`, or `lc` with the daemon while each is up. There's no manual-advertise
   RPC (custom service, port, name, or TXT), and no way to advertise anything
   other than the detected engines.
-- **node-info control surface.** node-info is spawned and torn down with the broker, and the broker pushes it only two things over stdin: the log level, and this node's cluster principal (`nodeinfo:set-cluster-identity`, sent on spawn and on every membership or pin-set change, because node-info holds no cluster dir and so cannot read membership itself). Otherwise it's hands-off: the broker registers its port with the daemon (which enriches over plain HTTP) but doesn't pass through TLS material (`--cert` / `--key` / `--client-ca`) or a custom `--port`, and exposes no RPC to query or reconfigure it. It runs with its own defaults plus those two pushes.
+- **node-info control surface.** node-info is spawned and torn down with the broker, and the broker pushes it only two things over stdin: the log level, and this node's cluster principal (`nodeinfo:set-cluster-identity`, sent on spawn and on every membership or pin-set change, because node-info holds no cluster dir and so cannot read membership itself). The broker registers its plain port with the daemon but passes no TLS material or custom port. `discovery:get-node-info` queries admitted peers through the scanner; it does not reconfigure the node-info worker.
 - **Per-event push semantics.** `discovery:nodes-changed` always carries the full current snapshot, not a delta. For small N this is fine and lets the client treat the payload as authoritative without state reconciliation. `errors:update` is likewise a full snapshot.
 - **BYO-TLS node-info discovery.** The daemon enriches peers over plain HTTP per the consolidated transport policy (node-info is plain on the broker path). Reading a node-info served over operator-configured BYO-TLS / mTLS is not supported through the broker; discovery works for the plain-HTTP case (the common one).
 - **Per-worker log-level granularity.** `log/set-level` fans the broker's single level out to every running child, but there's no way to set a different level per worker — it's one level for the whole process tree.

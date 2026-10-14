@@ -33,7 +33,7 @@ Bidirectional newline-delimited JSON-RPC 2.0. Stdio by default; `--ipc <path>` s
 | Flag | Default | Description |
 |---|---|---|
 | `--ipc <path>` | _(stdio)_ | IPC endpoint: Unix socket or Windows named pipe |
-| `--cluster-dir <path>` | _(none)_ | Cluster config dir (`node.crt`/`node.key` + `trusted/`). Gates four things: a browsed peer holding a pin we trust is annotated `trusted`; this node advertises `cluster-uuid=` while it is actually a member; a peer's `em` model list is fetched over cluster mTLS; and the directory above it is the base this node's identity is resolved from |
+| `--cluster-dir <path>` | _(none)_ | Cluster config dir (`node.crt`/`node.key` + `trusted/`). Controls peer trust annotation, local membership advertisement, pinned direct/reverse peer transport for node information and model inventory, and the parent directory used to resolve this node's identity |
 | `--ca-bundle <path>` | _(none)_ | PEM CA bundle to trust for verifying node-info server certs (additive to the system trust store). Setting any TLS flag moves node-info enrichment onto HTTPS |
 | `--client-cert <path>` | _(none)_ | PEM client certificate to present when fetching `/v1/node-info` from TLS-enabled nodes (mTLS; requires `--client-key`) |
 | `--client-key <path>` | _(none)_ | PEM client private key matching `--client-cert` |
@@ -50,12 +50,34 @@ Bidirectional newline-delimited JSON-RPC 2.0. Stdio by default; `--ipc <path>` s
 | `discovery:unregister` | `{service}` | `{ok:true}` — drop a local service |
 | `discovery:update-txt` | `{service, port, txt?}` | `{ok:true}` — same as register with a new TXT |
 | `discovery:get-nodes` | `{service?}` | `{nodes:[DirectoryNode]}` — the directory, optionally filtered to nodes advertising one service |
+| `discovery:get-node-info` | `{hostUuid}` | Fresh full node-info sample for an admitted peer: `GPUs`, optional `cpu`/`memory`, `telemetryValid`, `msSince`, `hostUuid`, and nullable `clusterUuid` |
 | `discovery:reload-identity` | — | `{ok:true}` — re-resolve and re-advertise this node's identity |
 | `discovery:reload-trust` | — | `{ok:true}` — re-derive `trusted` on every directory entry from the current pin set |
 | `discovery:set-observed-addresses` | `{addresses}` | `{ok:true}` — the local addresses peers have actually reached this node on, so address selection can rank a peer-proven address above an inferred one |
 | `shutdown` | — | `null` |
 
 `log/set-level` is also accepted.
+
+`discovery:get-node-info` is a read for paired remote telemetry. The scanner
+resolves the host identity to its current directory endpoint and admitted
+cluster principal; callers cannot supply a URL, port or principal. It uses the
+shared pinned peer/service adapter for `ni`, preferring direct plain HTTP and
+using plain HTTP inside the authenticated reverse session when direct fails.
+This bodyless GET may retry once over reverse when direct TCP connects but
+first data resets, only before a response is exposed. The full response must
+contain one JSON value with a clean body end, match the requested host UUID,
+and match the directory principal if `clusterUuid` is non-null. Authority is
+checked again before success.
+
+The fresh read has a 1500 ms backend budget covering queue wait, address
+attempts and HTTP/body work. It does not return the last-good enrichment cache
+or compact scheduling telemetry. Invalid params yield `-32602`; missing
+directory/admission/pin, unavailable transport, timeout or an invalid sample yields
+`-32000` (`node information unavailable`) without a successful result or a
+membership change. Recovery fetches a new sample through the same adapter.
+There is no unpaired or operator-TLS fallback for a failed paired getter.
+Existing self and unpaired enrichment paths remain direct. The broker exposes
+this method over its existing local service connection; no listener is added.
 
 Two notifications are accepted rather than requests, because the daemon has
 nothing to answer and the caller must not wait:

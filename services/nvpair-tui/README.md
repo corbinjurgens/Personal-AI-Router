@@ -116,9 +116,20 @@ A remote node's models come from the discovery snapshot, which the broker
 enriches from each peer's engine manager — no extra request. This machine's come
 from `engine:models` and stay live through `engine:models-changed`.
 
-The detail screen also polls the node's own `/v1/node-info` endpoint over HTTP
-for GPU, CPU, and memory. That is the one reading the broker's JSON-RPC surface
-does not carry, and only the open node is polled.
+The detail screen polls GPU, CPU and memory only for the open node, with the
+existing two-second interval between reads. Paired remote detail uses
+`discovery:get-node-info {hostUuid}` through the existing
+local service RPC client; Go owns admitted endpoint selection and the pinned
+direct/reverse route. Self and unpaired discovery retain direct HTTP reads;
+manual TLS telemetry retains the manual-node worker's metrics. A paired read
+needs a resolved physical host identity, without requiring a direct address.
+
+The getter returns a fresh full sample within its 1500 ms backend budget.
+RPC, decode, timeout or identity failures mark telemetry unavailable while
+preserving membership. Recovery refreshes the values; a failed paired read
+does not fall back to unpaired HTTP. Detail generations, current host identity
+and self route intent reject late results after a screen or route transition.
+Client timeout disowns the result locally rather than sending wire cancellation.
 
 ## Keys
 

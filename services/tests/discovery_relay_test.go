@@ -35,6 +35,14 @@ func TestBrokerAdvertisesNodeRecord(t *testing.T) {
 		t.Fatalf("hostname: %v", err)
 	}
 	instance := strings.Trim(host, ".")
+	hasTXT := func(values []string, want string) bool {
+		for _, value := range values {
+			if value == want {
+				return true
+			}
+		}
+		return false
+	}
 
 	// The scanner first announces the base node record, then re-announces after
 	// node-info registers ni=. Startup ordering can therefore expose a valid
@@ -46,7 +54,7 @@ func TestBrokerAdvertisesNodeRecord(t *testing.T) {
 		entry := browseForInstance(t, "_nvpair-node._tcp", instance, 2*time.Second)
 		if entry != nil {
 			entryText = entry.Text
-			if strings.Contains(strings.Join(entry.Text, ";"), "ni=14318") {
+			if hasTXT(entry.Text, "ni=14318") {
 				break
 			}
 		}
@@ -56,11 +64,10 @@ func TestBrokerAdvertisesNodeRecord(t *testing.T) {
 	if entry == nil {
 		t.Fatal("did not discover this node's _nvpair-node record within timeout")
 	}
-	txt := strings.Join(entry, ";")
-	if !strings.Contains(txt, "ni=14318") {
+	if !hasTXT(entry, "ni=14318") {
 		t.Errorf("_nvpair-node TXT missing ni=14318 (register->advertise path): %v", entry)
 	}
-	if !strings.Contains(txt, "v=1") {
+	if !hasTXT(entry, "v=1") {
 		t.Errorf("_nvpair-node TXT missing schema v=1: %v", entry)
 	}
 }

@@ -139,6 +139,23 @@ reported by `node/set-local-backend`, and is never re-routed onward to another
 node. Inference arriving this way is admitted first (see "Node policy" below). Membership and pins are re-derived per request, so joining or leaving a
 cluster needs no restart.
 
+**Peer transport.** Cluster candidates use the shared pinned peer/service
+adapter with the engine's advertised facade endpoint (`ol`, `lm`, or `lc`),
+including runtime port changes. It prefers direct mTLS, then uses the existing
+authenticated reverse session after a bounded failure before HTTP request
+dispatch. The stream still carries inner mTLS to the receiving facade; it does
+not enter that facade's loopback plaintext routing path. Current admission,
+pins, endpoint generation and the receiver's local policy remain authoritative.
+A failed direct probe alone does not remove a pinned model owner from the
+discovery overlay. Self and manual targets retain their existing transports.
+
+Reverse transport preserves streamed status, headers, ordered body bytes,
+backpressure and cancellation without buffering the complete response. It does
+not replay a request after dispatch or splice an interrupted response. After
+response bytes have been exposed, an interrupted stream terminates that attempt;
+new requests can use a restored session. The proxy's existing dispatch policy
+continues to own retries before its commitment point. No listener is added.
+
 **Persisted port.** A port chosen at runtime via `set-port` is saved to the
 per-user data dir (`%LocalAppData%\Nvidia Corporation\Personal AI Router` on
 Windows, `~/.config/Nvidia Corporation/Personal AI Router` on Linux) and

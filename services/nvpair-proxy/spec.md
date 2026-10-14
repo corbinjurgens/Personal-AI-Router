@@ -162,6 +162,23 @@ two.
 
 ## 5. Request path
 
+Cluster peer dispatch uses `nvpair-shared/clustertrust.PeerServiceClient`,
+addressed by the admitted peer UUID and the facade's fixed service identifier
+(`ol`, `lm`, or `lc`). Its route resolves the current advertised endpoint and
+generation, including runtime ports. Direct mTLS is preferred; bounded failure
+before HTTP dispatch can select the existing authenticated reverse session.
+The reverse byte stream retains inner mTLS to the receiving facade, its pin
+checks and local admission policy, and its prohibition on onward routing.
+Direct probe failure does not by itself exclude a pinned model owner from the
+discovery overlay. Self and manual candidates keep their existing transports.
+
+The adapter streams status, headers and ordered bodies with backpressure and
+cancellation. It adds neither a listener nor whole-response buffering, and
+does not replay dispatched requests or resume exposed response bodies. A lost
+session after output has been exposed truncates that attempt; a restored
+session serves new requests. Retry decisions before the proxy's commitment
+point remain owned by the existing dispatch policy below.
+
 For a model-bearing inference request:
 
 1. Filter a request-local discovery snapshot to nodes whose per-engine inventory

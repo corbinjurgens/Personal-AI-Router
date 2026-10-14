@@ -336,6 +336,17 @@ its own.
 peer (`node`) already holds into this node's store for the same engine, over
 the peer's `ec` surface, instead of downloading it from the internet again.
 
+The shared pinned peer/service adapter owns both listing and file transport.
+It resolves the current admitted source and advertised `ec` endpoint, prefers
+direct mTLS, and can use the existing authenticated reverse session after a
+bounded failure before HTTP dispatch. Inner mTLS still reaches the source's
+ordinary pin-gated control handlers. Listing frames and file bytes stream with
+backpressure and cancellation; the adapter adds no listener, full-file buffer,
+or replay after dispatch or response exposure. A broken file response ends that
+HTTP attempt. The copy owner below issues a new Range request from the retained
+partial's current length and checks the completed file's hash; transport does
+not invent a second resume policy.
+
 On the source, `GET /v1/models/files` resolves the model's files from the
 engine's on-disk layout and lists them as paths relative to the engine's store,
 with size and sha256. Hashes are computed when first asked for, by streaming
