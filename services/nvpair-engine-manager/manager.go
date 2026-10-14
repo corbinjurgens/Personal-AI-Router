@@ -12,6 +12,7 @@ import (
 	"log"
 	"log/slog"
 	"net"
+	"path/filepath"
 
 	"nvpair-shared/applog"
 	"nvpair-shared/clustertrust"
@@ -68,18 +69,17 @@ type Manager struct {
 	peers         *peerDirectory
 	addrs         *reach.Chooser
 	mesh          *clustertrust.Mesh // cluster identity + pins for dialing peers' ec surfaces
-	// remoteHTTP / readyHTTP are long-lived per-peer mTLS pools. A throwaway
-	// Transport per engine:remote-* call leaked the idle socket. readyHTTP
-	// uses the longer header budget for start/delete (see waitsForEngineReadiness).
-	remoteHTTP *clustertrust.PeerClientPool
-	readyHTTP  *clustertrust.PeerClientPool
+	// Model-file traffic retains its direct pool until the file-transfer phase.
+	remoteHTTP       *clustertrust.PeerClientPool
+	controlHTTP      *clustertrust.PeerServiceClient
+	controlReadyHTTP *clustertrust.PeerServiceClient
 	// catalog answers engine:catalog: the models an engine can download, as
 	// opposed to the ones it already holds.
 	catalog *catalogService
 	cancel  context.CancelFunc
 }
 
-func NewManager(codec *Codec, exec *Executor, mesh *clustertrust.Mesh) *Manager {
+func NewManager(codec *Codec, exec *Executor, mesh *clustertrust.Mesh, clusterDir string) *Manager {
 	// cancel defaults to a no-op so the "shutdown" handler is safe even if
 	// handleMessage is reached before Run() installs the real CancelFunc
 	// (e.g. a unit test calling it directly); Run overwrites it.
@@ -92,12 +92,21 @@ func NewManager(codec *Codec, exec *Executor, mesh *clustertrust.Mesh) *Manager 
 		remoteHTTP: clustertrust.NewPeerClientPoolOpts(mesh, clustertrust.PeerClientOptions{
 			ResponseHeaderTimeout: remoteResponseHeaderTimeout,
 		}),
-		readyHTTP: clustertrust.NewPeerClientPoolOpts(mesh, clustertrust.PeerClientOptions{
-			ResponseHeaderTimeout: remoteReadyResponseHeaderTimeout,
-		}),
 		catalog: newCatalogService(),
 		cancel:  func() {},
 	}
+	baseDir := ""
+	if clusterDir != "" {
+		baseDir = filepath.Dir(filepath.Clean(clusterDir))
+	}
+	m.controlHTTP = clustertrust.NewPeerServiceClient(mesh, clustertrust.PeerServiceClientOptions{
+		PeerClientOptions: clustertrust.PeerClientOptions{ResponseHeaderTimeout: remoteResponseHeaderTimeout},
+		BaseConfigDir:     baseDir, ResolveRoute: m.resolveControlRoute,
+	})
+	m.controlReadyHTTP = clustertrust.NewPeerServiceClient(mesh, clustertrust.PeerServiceClientOptions{
+		PeerClientOptions: clustertrust.PeerClientOptions{ResponseHeaderTimeout: remoteReadyResponseHeaderTimeout},
+		BaseConfigDir:     baseDir, ResolveRoute: m.resolveControlRoute,
+	})
 	m.settingsRelay.send = codec.Notify
 	exec.settingsParent = m.settingsRelay.call
 	m.policyRelay.send = codec.Notify
@@ -134,7 +143,8 @@ func (m *Manager) Run(ctx context.Context) error {
 	cancel()
 	m.exec.StopAll()
 	m.remoteHTTP.CloseIdle()
-	m.readyHTTP.CloseIdle()
+	m.controlHTTP.CloseIdle()
+	m.controlReadyHTTP.CloseIdle()
 	return err
 }
 

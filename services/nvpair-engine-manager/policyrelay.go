@@ -197,17 +197,17 @@ func (c *remoteClient) postPolicy(ctx context.Context, path string, body policyB
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	client := c.http
-	if path == controlAvailabilitySetPath && c.readyHTTP != nil {
-		client = c.readyHTTP
-	}
+	client := c.controlClient(path == controlAvailabilitySetPath)
 	resp, err := client.Do(req)
 	if err != nil {
 		c.forgetAddress()
 		return nil, err
 	}
 	defer resp.Body.Close()
-	out, _ := io.ReadAll(io.LimitReader(resp.Body, policyBodyLimit))
+	out, err := readRemoteResponse(resp.Body, policyBodyLimit)
+	if err != nil {
+		return nil, fmt.Errorf("remote node policy: read response; operation outcome may be uncertain: %w", err)
+	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return nil, fmt.Errorf("remote node policy: HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(out)))
 	}

@@ -21,7 +21,7 @@ func TestManagerErrorResponses(t *testing.T) {
 	newM := func() (*Manager, *bytes.Buffer) {
 		var out bytes.Buffer
 		ex := NewExecutor(NewRegistry(), NewReporter(nil), func(string, any) {}, t.TempDir())
-		return NewManager(NewCodec(&out), ex, nil), &out
+		return NewManager(NewCodec(&out), ex, nil, ""), &out
 	}
 	id := json.RawMessage("1")
 	ctx := context.Background()
@@ -50,7 +50,7 @@ func TestManagerErrorResponses(t *testing.T) {
 func TestRunOpRejectsBadPort(t *testing.T) {
 	var out bytes.Buffer
 	ex := NewExecutor(NewRegistry(), NewReporter(nil), func(string, any) {}, t.TempDir())
-	m := NewManager(NewCodec(&out), ex, nil)
+	m := NewManager(NewCodec(&out), ex, nil, "")
 	id := json.RawMessage("1")
 	m.runOp(context.Background(), &Message{JSONRPC: "2.0", ID: &id, Method: "engine:start",
 		Params: json.RawMessage(`{"engine":"fake","port":70000}`)})
@@ -60,7 +60,7 @@ func TestRunOpRejectsBadPort(t *testing.T) {
 func TestRunOpRejectsBadBind(t *testing.T) {
 	var out bytes.Buffer
 	ex := NewExecutor(NewRegistry(), NewReporter(nil), func(string, any) {}, t.TempDir())
-	m := NewManager(NewCodec(&out), ex, nil)
+	m := NewManager(NewCodec(&out), ex, nil, "")
 	id := json.RawMessage("1")
 	m.runOp(context.Background(), &Message{JSONRPC: "2.0", ID: &id, Method: "engine:start",
 		Params: json.RawMessage(`{"engine":"fake","bind":"not-an-ip"}`)})
@@ -71,7 +71,7 @@ func TestRunOpInstallAutostart(t *testing.T) {
 	var out bytes.Buffer
 	ex := newTestExecutor(t, testEngineManifest(fakeEngineBin))
 	t.Cleanup(func() { _ = ex.Stop("fake") })
-	m := NewManager(NewCodec(&out), ex, nil)
+	m := NewManager(NewCodec(&out), ex, nil, "")
 	id := json.RawMessage("1")
 	m.runOp(context.Background(), &Message{JSONRPC: "2.0", ID: &id, Method: "engine:install",
 		Params: json.RawMessage(`{"engine":"fake","start":true}`)})
@@ -101,7 +101,7 @@ func TestStatusQueriesDoNotBlockMessageDispatchDuringEngineOperation(t *testing.
 			managerConn, clientConn := net.Pipe()
 			defer managerConn.Close()
 			defer clientConn.Close()
-			m := NewManager(NewCodec(managerConn), ex, nil)
+			m := NewManager(NewCodec(managerConn), ex, nil, "")
 			id := json.RawMessage("1")
 			response := make(chan string, 1)
 			go func() {

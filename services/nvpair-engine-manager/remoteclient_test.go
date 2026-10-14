@@ -22,9 +22,9 @@ func TestRemoteStartUsesReadinessHeaderBudget(t *testing.T) {
 
 	base := http.DefaultTransport.(*http.Transport)
 	c := &remoteClient{
-		http:      newRemoteHTTPClient(base, 20*time.Millisecond),
-		readyHTTP: newRemoteHTTPClient(base, time.Second),
-		base:      srv.URL,
+		controlHTTP:      newRemoteHTTPClient(base, 20*time.Millisecond),
+		controlReadyHTTP: newRemoteHTTPClient(base, time.Second),
+		base:             srv.URL,
 	}
 	if _, err := c.postJSON(context.Background(), controlStartPath, "remote-only", startRequest{Engine: "remote-only"}); err != nil {
 		t.Fatalf("remote start was cut off by the ordinary response-header budget: %v", err)
@@ -48,9 +48,9 @@ func TestRemoteSlowModelOperationsUseReadinessHeaderBudget(t *testing.T) {
 
 	base := http.DefaultTransport.(*http.Transport)
 	c := &remoteClient{
-		http:      newRemoteHTTPClient(base, 20*time.Millisecond),
-		readyHTTP: newRemoteHTTPClient(base, time.Second),
-		base:      srv.URL,
+		controlHTTP:      newRemoteHTTPClient(base, 20*time.Millisecond),
+		controlReadyHTTP: newRemoteHTTPClient(base, time.Second),
+		base:             srv.URL,
 	}
 	ollama := modelActionRequest{Engine: "ollama", Model: "qwen2.5"}
 	if _, err := c.postJSON(context.Background(), controlLoadPath, "ollama", ollama); err != nil {
@@ -108,9 +108,9 @@ func TestRemoteStartHeaderWaitRemainsBounded(t *testing.T) {
 
 	base := http.DefaultTransport.(*http.Transport)
 	c := &remoteClient{
-		http:      newRemoteHTTPClient(base, time.Second),
-		readyHTTP: newRemoteHTTPClient(base, 50*time.Millisecond),
-		base:      srv.URL,
+		controlHTTP:      newRemoteHTTPClient(base, time.Second),
+		controlReadyHTTP: newRemoteHTTPClient(base, 50*time.Millisecond),
+		base:             srv.URL,
 	}
 	started := time.Now()
 	_, err := c.postJSON(context.Background(), controlStartPath, "ollama", startRequest{Engine: "ollama"})

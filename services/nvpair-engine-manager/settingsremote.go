@@ -5,6 +5,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -15,6 +16,7 @@ import (
 
 	"nvpair-shared/engines"
 	settings "nvpair-shared/enginesettings"
+	"nvpair-shared/noderec"
 )
 
 const settingsPath = "/v1/engine-settings/"
@@ -222,11 +224,16 @@ func (m *Manager) consumeSettingsStream(parent context.Context, peer ecPeer) {
 	if err != nil {
 		return
 	}
+	route, ok := m.resolveControlRoute(peer.clusterUUID, noderec.ServiceEngineControl)
+	config, pinned := m.mesh.ClientTLSConfig(peer.clusterUUID)
+	if !ok || !pinned || len(config.Certificates) == 0 {
+		return
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, client.base+settingsPath+"events", nil)
 	if err != nil {
 		return
 	}
-	response, err := client.http.Do(req)
+	response, err := client.controlClient(false).Do(req)
 	if err != nil {
 		client.forgetAddress()
 		return
@@ -235,11 +242,40 @@ func (m *Manager) consumeSettingsStream(parent context.Context, peer ecPeer) {
 	if response.StatusCode != http.StatusOK {
 		return
 	}
+	// The transport checks admission before dispatch. This subscription owner
+	// also retires an active body when either identity or the endpoint changes;
+	// watchPeerSettings owns the subsequent read-only reconnect.
+	current := func() bool {
+		now, admitted := m.resolveControlRoute(peer.clusterUUID, noderec.ServiceEngineControl)
+		live, pinned := m.mesh.ClientTLSConfig(peer.clusterUUID)
+		return admitted && now == route && pinned && len(live.Certificates) != 0 &&
+			bytes.Equal(live.Certificates[0].Certificate[0], config.Certificates[0].Certificate[0]) &&
+			response.TLS != nil && len(response.TLS.PeerCertificates) != 0 &&
+			live.VerifyPeerCertificate([][]byte{response.TLS.PeerCertificates[0].Raw}, nil) == nil
+	}
+	go func() {
+		ticker := time.NewTicker(time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if !current() {
+					cancel()
+					return
+				}
+			}
+		}
+	}()
 	watchdog := time.AfterFunc(15*time.Second, cancel)
 	defer watchdog.Stop()
 	scanner := bufio.NewScanner(response.Body)
 	scanner.Buffer(make([]byte, 4096), 256*1024)
 	for scanner.Scan() {
+		if !current() {
+			return
+		}
 		watchdog.Reset(15 * time.Second)
 		var snapshots []settings.Snapshot
 		if json.Unmarshal(scanner.Bytes(), &snapshots) != nil {

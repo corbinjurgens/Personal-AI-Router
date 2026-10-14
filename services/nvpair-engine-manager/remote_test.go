@@ -14,7 +14,7 @@ import (
 
 func TestRunRemoteRequiresNode(t *testing.T) {
 	var out bytes.Buffer
-	m := NewManager(NewCodec(&out), &Executor{progress: newProgressHub()}, nil)
+	m := NewManager(NewCodec(&out), &Executor{progress: newProgressHub()}, nil, "")
 	id := json.RawMessage("1")
 	m.runRemote(context.Background(), &Message{JSONRPC: "2.0", ID: &id,
 		Method: "engine:remote-install", Params: json.RawMessage(`{"engine":"ollama"}`)})
@@ -23,7 +23,7 @@ func TestRunRemoteRequiresNode(t *testing.T) {
 
 func TestRunRemoteUnknownPeer(t *testing.T) {
 	var out bytes.Buffer
-	m := NewManager(NewCodec(&out), &Executor{progress: newProgressHub()}, nil)
+	m := NewManager(NewCodec(&out), &Executor{progress: newProgressHub()}, nil, "")
 	id := json.RawMessage("1")
 	m.runRemote(context.Background(), &Message{JSONRPC: "2.0", ID: &id,
 		Method: "engine:remote-install", Params: json.RawMessage(`{"node":"ghost","engine":"ollama"}`)})
@@ -34,7 +34,7 @@ func TestRunRemoteNotClustered(t *testing.T) {
 	var out bytes.Buffer
 	// Peer is discovered, but this node has no mesh (not clustered), so the
 	// pinned dial can't be built.
-	m := NewManager(NewCodec(&out), &Executor{progress: newProgressHub()}, nil)
+	m := NewManager(NewCodec(&out), &Executor{progress: newProgressHub()}, nil, "")
 	m.peers.set([]noderec.DirectoryNode{{
 		HostUUID: "uuid-b", Name: "nodeB", IP: "192.168.1.42", ClusterUUID: "cuuid-b",
 		Services: map[noderec.ServiceKey]noderec.ServiceStatus{

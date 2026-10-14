@@ -20,6 +20,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"nvpair-shared/noderec"
 )
 
 const (
@@ -29,12 +31,20 @@ const (
 
 // remoteClient talks to one peer's ec surface.
 type remoteClient struct {
-	http *http.Client
-	// readyHTTP serves endpoints whose peer may withhold response headers during
-	// engine readiness or Ollama model loading. See waitsForEngineReadiness.
-	readyHTTP *http.Client
-	base      string // https://<ip>:<port>
-	forget    func()
+	// http retains the direct model-file transport used by modelcopy.go.
+	http        *http.Client
+	controlHTTP *http.Client
+	// controlReadyHTTP covers engine readiness, model loading and settings apply.
+	controlReadyHTTP *http.Client
+	base             string // https://<ip>:<port>
+	forget           func()
+}
+
+func (c *remoteClient) controlClient(ready bool) *http.Client {
+	if ready {
+		return c.controlReadyHTTP
+	}
+	return c.controlHTTP
 }
 
 // waitsForEngineReadiness reports whether a peer may only answer after an
@@ -73,29 +83,30 @@ func (m *Manager) remoteClient(ctx context.Context, peer ecPeer) (*remoteClient,
 		return nil, fmt.Errorf("this node is not clustered; remote engine management is unavailable")
 	}
 	m.remoteHTTP.DropUnpinned()
-	m.readyHTTP.DropUnpinned()
 	httpClient, ok := m.remoteHTTP.Client(peer.clusterUUID)
-	if !ok {
-		return nil, fmt.Errorf("node %q is not a pinned cluster peer", peer.nodeID)
-	}
-	readyClient, ok := m.readyHTTP.Client(peer.clusterUUID)
 	if !ok {
 		return nil, fmt.Errorf("node %q is not a pinned cluster peer", peer.nodeID)
 	}
 	// No total client timeout: install/pull run for minutes, bounded on the
 	// server by the executor's action ceiling. ResponseHeaderTimeout still
 	// guards a peer that accepts the connection but never replies (ordinary
-	// vs readiness budgets live on the two pools).
+	// vs readiness budgets live on the two adapters).
 	candidates := make([]string, 0, len(peer.addresses))
 	for _, address := range peer.addresses {
 		candidates = append(candidates, net.JoinHostPort(address, strconv.Itoa(peer.port)))
 	}
 	hostport := m.addrs.ChooseWithin(ctx, peer.nodeID, candidates)
+	if !m.peers.selectAddress(peer, hostport) {
+		return nil, fmt.Errorf("node %q ec endpoint changed before dispatch", peer.nodeID)
+	}
+	control := m.controlHTTP.Client(peer.clusterUUID, noderec.ServiceEngineControl)
+	ready := m.controlReadyHTTP.Client(peer.clusterUUID, noderec.ServiceEngineControl)
 	return &remoteClient{
-		http:      httpClient,
-		readyHTTP: readyClient,
-		base:      "https://" + hostport,
-		forget:    func() { m.addrs.Forget(peer.nodeID) },
+		http:             httpClient,
+		controlHTTP:      control,
+		controlReadyHTTP: ready,
+		base:             "https://" + hostport,
+		forget:           func() { m.addrs.Forget(peer.nodeID) },
 	}, nil
 }
 
@@ -105,6 +116,19 @@ func (c *remoteClient) forgetAddress() {
 	}
 }
 
+// Read one byte past the cap so a complete prefix cannot hide overflow or an
+// incomplete HTTP body. Only the real body's EOF establishes completeness.
+func readRemoteResponse(body io.Reader, limit int64) ([]byte, error) {
+	data, err := io.ReadAll(io.LimitReader(body, limit+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > limit {
+		return nil, fmt.Errorf("response exceeds %d-byte limit", limit)
+	}
+	return data, nil
+}
+
 // getEngines fetches the peer's engine status list (GET /v1/engines), returning
 // the raw {"engines":[...]} object.
 func (c *remoteClient) getEngines(ctx context.Context) (json.RawMessage, error) {
@@ -112,13 +136,16 @@ func (c *remoteClient) getEngines(ctx context.Context) (json.RawMessage, error) 
 	if err != nil {
 		return nil, err
 	}
-	resp, err := c.http.Do(req)
+	resp, err := c.controlClient(false).Do(req)
 	if err != nil {
 		c.forgetAddress()
 		return nil, err
 	}
 	defer resp.Body.Close()
-	data, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
+	data, err := readRemoteResponse(resp.Body, 8<<20)
+	if err != nil {
+		return nil, fmt.Errorf("remote engines: read response: %w", err)
+	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return nil, fmt.Errorf("remote engines: HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(data)))
 	}
@@ -137,17 +164,17 @@ func (c *remoteClient) postJSON(ctx context.Context, path, engine string, body a
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	client := c.http
-	if waitsForEngineReadiness(path, engine) && c.readyHTTP != nil {
-		client = c.readyHTTP
-	}
+	client := c.controlClient(waitsForEngineReadiness(path, engine))
 	resp, err := client.Do(req)
 	if err != nil {
 		c.forgetAddress()
 		return nil, err
 	}
 	defer resp.Body.Close()
-	data, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
+	data, err := readRemoteResponse(resp.Body, 8<<20)
+	if err != nil {
+		return nil, fmt.Errorf("remote %s: read response; operation outcome may be uncertain: %w", path, err)
+	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return nil, fmt.Errorf("remote %s: HTTP %d: %s", path, resp.StatusCode, strings.TrimSpace(string(data)))
 	}
@@ -167,7 +194,7 @@ func (c *remoteClient) stream(ctx context.Context, path string, body any, onProg
 		return streamFrame{}, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := c.http.Do(req)
+	resp, err := c.controlClient(false).Do(req)
 	if err != nil {
 		c.forgetAddress()
 		return streamFrame{}, err

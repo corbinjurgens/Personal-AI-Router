@@ -18,12 +18,12 @@ import (
 
 	"nvpair-shared/clustertrust"
 	"nvpair-shared/clustertrusttest"
+	"nvpair-shared/noderec"
 )
 
-// TestRemoteClient_ReusesPeerConnections is the regression for the
-// engine:remote-* leak: remoteClient used to build a fresh Transport per call,
-// so every remote op paid a full mTLS handshake and then leaked the socket.
-func TestRemoteClient_ReusesPeerConnections(t *testing.T) {
+// File-copy requests keep their existing pooled direct path. Control requests
+// instead use fresh connections to forbid transport replay after dispatch.
+func TestRemoteClient_ReusesModelFileConnections(t *testing.T) {
 	selfDir := t.TempDir()
 	peerDir := t.TempDir()
 	clustertrusttest.WriteKeypair(t, selfDir, "uuid-self")
@@ -42,12 +42,14 @@ func TestRemoteClient_ReusesPeerConnections(t *testing.T) {
 	var mu sync.Mutex
 	newConns := 0
 	mux := http.NewServeMux()
-	mux.HandleFunc(controlEnginesPath, func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc(controlModelFilesPath, func(w http.ResponseWriter, r *http.Request) {
 		if _, ok := peerMesh.VerifyClientPin(r); !ok {
 			http.Error(w, "forbidden", http.StatusForbidden)
 			return
 		}
-		_ = json.NewEncoder(w).Encode(map[string]any{"engines": []any{}})
+		if err := json.NewEncoder(w).Encode(streamFrame{Type: "result", Result: json.RawMessage(`{"files":[]}`)}); err != nil {
+			t.Errorf("encode file list: %v", err)
+		}
 	})
 	ts := httptest.NewUnstartedServer(mux)
 	ts.Config.ConnState = func(_ net.Conn, state http.ConnState) {
@@ -71,23 +73,24 @@ func TestRemoteClient_ReusesPeerConnections(t *testing.T) {
 	}
 
 	var out bytes.Buffer
-	m := NewManager(NewCodec(&out), &Executor{progress: newProgressHub()}, selfMesh)
+	m := NewManager(NewCodec(&out), &Executor{progress: newProgressHub()}, selfMesh, selfDir)
 	defer m.remoteHTTP.CloseIdle()
-	defer m.readyHTTP.CloseIdle()
 
-	client, err := m.remoteClient(context.Background(), ecPeer{
-		nodeID:      "host-peer",
-		addresses:   []string{host},
-		port:        port,
-		clusterUUID: "uuid-peer",
-	})
+	m.peers.set([]noderec.DirectoryNode{{HostUUID: "host-peer", IP: host, ClusterUUID: "uuid-peer",
+		Services: map[noderec.ServiceKey]noderec.ServiceStatus{noderec.ServiceEngineControl: {Port: port}},
+	}})
+	peer, ok := m.peers.lookup("host-peer")
+	if !ok {
+		t.Fatal("peer not in directory")
+	}
+	client, err := m.remoteClient(context.Background(), peer)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	const rounds = 5
 	for i := 0; i < rounds; i++ {
-		if _, gerr := client.getEngines(context.Background()); gerr != nil {
+		if _, gerr := client.modelFiles(context.Background(), "ollama", "fixture", nil); gerr != nil {
 			t.Fatalf("round %d: %v", i, gerr)
 		}
 	}
@@ -96,7 +99,7 @@ func TestRemoteClient_ReusesPeerConnections(t *testing.T) {
 	got := newConns
 	mu.Unlock()
 	if got != 1 {
-		t.Fatalf("peer accepted %d connections for %d getEngines calls, want 1", got, rounds)
+		t.Fatalf("peer accepted %d connections for %d modelFiles calls, want 1", got, rounds)
 	}
 }
 
@@ -110,7 +113,19 @@ func writePinFromCert(t *testing.T, clusterDir, peerUUID, certPath string) {
 	if err := os.MkdirAll(trusted, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	body, err := json.Marshal(map[string]string{"nodeUuid": peerUUID, "certPem": string(certPEM)})
+	admissionData, err := os.ReadFile(filepath.Join(clusterDir, "admission.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var admission struct {
+		ClusterID string `json:"clusterId"`
+		Epoch     uint64 `json:"epoch"`
+	}
+	if err := json.Unmarshal(admissionData, &admission); err != nil {
+		t.Fatal(err)
+	}
+	body, err := json.Marshal(map[string]any{"nodeUuid": peerUUID, "certPem": string(certPEM),
+		"clusterId": admission.ClusterID, "admissionEpoch": admission.Epoch})
 	if err != nil {
 		t.Fatal(err)
 	}

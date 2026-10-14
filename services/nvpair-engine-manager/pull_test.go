@@ -414,7 +414,7 @@ func TestActionPullModelStreamsProgress(t *testing.T) {
 	}
 
 	var out bytes.Buffer
-	mgr := NewManager(NewCodec(&out), ex, nil)
+	mgr := NewManager(NewCodec(&out), ex, nil, "")
 	id := json.RawMessage("7")
 	mgr.runAction(ctx, &Message{JSONRPC: "2.0", ID: &id, Method: "engine:action",
 		Params: json.RawMessage(`{"engine":"fake","action":"pull_model","params":{"name":"demo:1b"}}`)})
@@ -467,7 +467,7 @@ func TestActionPullModelCmdMarkerAndResult(t *testing.T) {
 
 	// A Cmd action just runs a binary; the engine need not be started.
 	var out bytes.Buffer
-	mgr := NewManager(NewCodec(&out), ex, nil)
+	mgr := NewManager(NewCodec(&out), ex, nil, "")
 	id := json.RawMessage("8")
 	mgr.runAction(context.Background(), &Message{JSONRPC: "2.0", ID: &id, Method: "engine:action",
 		Params: json.RawMessage(`{"engine":"fake","action":"pull_model","params":{"model":"demo:1b"}}`)})
@@ -515,7 +515,7 @@ func TestActionPullModelFailureEmitsTerminalError(t *testing.T) {
 
 	// The engine is never started, so the HTTP pull path fails with "not running".
 	var out bytes.Buffer
-	mgr := NewManager(NewCodec(&out), ex, nil)
+	mgr := NewManager(NewCodec(&out), ex, nil, "")
 	id := json.RawMessage("9")
 	mgr.runAction(context.Background(), &Message{JSONRPC: "2.0", ID: &id, Method: "engine:action",
 		Params: json.RawMessage(`{"engine":"fake","action":"pull_model","params":{"name":"demo:1b"}}`)})

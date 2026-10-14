@@ -117,7 +117,7 @@ func main() {
 	// dialing without a restart.
 	mesh := clustertrust.Open(*clusterDir)
 	go mesh.Watch(ctx, nil)
-	mgr := NewManager(codec, exec, mesh)
+	mgr := NewManager(codec, exec, mesh, *clusterDir)
 
 	// Optional LAN model-list surface (the em service, for peer discovery
 	// enrichment). Off unless the parent opts in with --http-port. A node's model

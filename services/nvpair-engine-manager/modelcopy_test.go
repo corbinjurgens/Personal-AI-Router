@@ -583,7 +583,7 @@ func TestRunRemoteCopyValidatesParams(t *testing.T) {
 		`{"node":"ghost","engine":"ollama","model":"x"}`: "not a discovered ec peer",
 	} {
 		out := &lockedBuffer{}
-		m := NewManager(NewCodec(out), &Executor{progress: newProgressHub()}, nil)
+		m := NewManager(NewCodec(out), &Executor{progress: newProgressHub()}, nil, "")
 		id := json.RawMessage("1")
 		// Through the dispatcher, which runs the copy on its own goroutine.
 		m.handleMessage(context.Background(), &Message{JSONRPC: "2.0", ID: &id, Method: "engine:remote-copy-model", Params: json.RawMessage(params)})

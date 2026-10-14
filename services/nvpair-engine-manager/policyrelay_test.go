@@ -103,9 +103,8 @@ func TestRemotePolicyRelaysToPeerWithoutFurtherHop(t *testing.T) {
 	port, _ := strconv.Atoi(portText)
 
 	out := &syncBuffer{}
-	m := NewManager(NewCodec(out), &Executor{progress: newProgressHub()}, clustertrust.Open(selfDir))
+	m := NewManager(NewCodec(out), &Executor{progress: newProgressHub()}, clustertrust.Open(selfDir), selfDir)
 	t.Cleanup(m.remoteHTTP.CloseIdle)
-	t.Cleanup(m.readyHTTP.CloseIdle)
 	m.peers.set([]noderec.DirectoryNode{{
 		HostUUID: "host-peer", Name: "peer", IP: host, ClusterUUID: "uuid-peer",
 		Services: map[noderec.ServiceKey]noderec.ServiceStatus{noderec.ServiceEngineControl: {Port: port}},
