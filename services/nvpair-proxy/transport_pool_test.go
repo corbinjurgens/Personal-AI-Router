@@ -4,10 +4,9 @@
 package main
 
 import (
-	"path/filepath"
+	"net/http"
 	"testing"
 
-	"nvpair-shared/clustertrust"
 	"nvpair-shared/clustertrusttest"
 )
 
@@ -23,54 +22,44 @@ func TestCandidateTransportReusesPlainTransport(t *testing.T) {
 	}
 }
 
-func TestCandidateTransportReusesPeerTransport(t *testing.T) {
-	const peerUUID = "principal-peer"
-	clusterDir := filepath.Join(t.TempDir(), "cluster")
-	clustertrusttest.Join(t, clusterDir, "cluster-xyz", "principal-self", peerUUID)
-
-	p := testProxy(anyProfile(t), NewDiscovery(), 11435)
-	p.mesh = clustertrust.Open(clusterDir)
-
-	a := p.candidateTransport(candidate{peerUUID: peerUUID})
-	b := p.candidateTransport(candidate{peerUUID: peerUUID})
-	if a != b {
-		t.Fatalf("same peerUUID returned distinct Transports")
+func TestCandidateTransportPeerUsesFreshPinnedConnections(t *testing.T) {
+	f := newProxyReverseFixture(t, "ollama", http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	f.directHealthy.Store(true)
+	c := f.candidate(t)
+	tr := f.p.candidateTransport(c)
+	for range 3 {
+		proxyReverseRoundTrip(t, tr, c.url.String())
 	}
-	if a.TLSClientConfig == nil {
-		t.Fatal("peer Transport missing TLSClientConfig")
+	if got := f.directCalls.Load(); got != 3 {
+		t.Fatalf("direct connections = %d, want 3 fresh connections", got)
 	}
-
-	other := p.candidateTransport(candidate{peerUUID: "principal-other"})
-	if other == a {
-		t.Fatal("unpinned peer reused pinned peer Transport")
+	if got := f.reverseCalls.Load(); got != 0 {
+		t.Fatalf("reverse connections = %d, want 0 with healthy direct TLS", got)
+	}
+	if got := f.closedRequests.Load(); got != 3 {
+		t.Fatalf("pinned ingress Connection: close requests = %d, want 3", got)
 	}
 }
 
-func TestDropUnpinnedPeerTransportsRemovesEntry(t *testing.T) {
-	const peerUUID = "principal-peer"
-	clusterDir := filepath.Join(t.TempDir(), "cluster")
-	clustertrusttest.Join(t, clusterDir, "cluster-xyz", "principal-self", peerUUID)
-
-	p := testProxy(anyProfile(t), NewDiscovery(), 11435)
-	p.mesh = clustertrust.Open(clusterDir)
-
-	tr := p.candidateTransport(candidate{peerUUID: peerUUID})
-	p.transportMu.Lock()
-	if _, ok := p.peerTransports[peerUUID]; !ok {
-		p.transportMu.Unlock()
-		t.Fatal("peer Transport was not cached")
+func TestDropUnpinnedPeerTransportsRejectsExistingCandidate(t *testing.T) {
+	f := newProxyReverseFixture(t, "ollama", http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	c := f.candidate(t)
+	tr := f.p.candidateTransport(c)
+	proxyReverseRoundTrip(t, tr, c.url.String())
+	before := f.reverseCalls.Load()
+	clustertrusttest.RemovePeerPin(t, f.selfDir, "uuid-peer")
+	f.p.mesh.Refresh()
+	f.p.dropUnpinnedPeerTransports()
+	request := proxyReverseRequest(t, http.MethodPost, c.url.String(), nil)
+	if response, err := tr.RoundTrip(request); err == nil {
+		response.Body.Close()
+		t.Fatal("transport retained authority after peer pin removal")
 	}
-	p.transportMu.Unlock()
-
-	clustertrusttest.RemovePeerPin(t, clusterDir, peerUUID)
-	p.mesh.Refresh()
-	p.dropUnpinnedPeerTransports()
-
-	p.transportMu.Lock()
-	_, still := p.peerTransports[peerUUID]
-	p.transportMu.Unlock()
-	if still {
-		t.Fatal("peer Transport remained after pin removal")
+	if got := f.reverseCalls.Load(); got != before {
+		t.Fatalf("removed peer triggered %d additional reverse dials", got-before)
 	}
-	_ = tr
 }

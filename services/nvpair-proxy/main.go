@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 
 	"nvpair-shared/applog"
@@ -83,6 +84,9 @@ func main() {
 	// presence: a left/removed node keeps its keypair by design, and would
 	// otherwise keep logging cluster_ingress with no cluster peers to serve.
 	proxy.mesh = clustertrust.Open(*clusterDir)
+	if *clusterDir != "" {
+		proxy.baseConfigDir = filepath.Dir(*clusterDir)
+	}
 
 	go proxy.mesh.Watch(ctx, func(clustered bool) {
 		slog.Info("cluster inference ingress switched personality", "cluster_ingress", clustered)

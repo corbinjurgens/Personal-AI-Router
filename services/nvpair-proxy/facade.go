@@ -13,6 +13,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -29,7 +30,7 @@ import (
 // facade is one engine's presence on this node: the ports it listens on, the
 // dialect it speaks, and the routing state that answers for it. Proxy is the
 // process that hosts facades and owns everything they share — the JSON-RPC
-// codec, the cluster mesh, the outbound transport pool, the scheduler baseline.
+// codec, the cluster mesh, the outbound transport owner, the scheduler baseline.
 //
 // One Proxy hosts a facade per enabled engine, keyed by engine id, and they run
 // concurrently — see spec.md §3. That is what makes the ownership question
@@ -40,8 +41,8 @@ import (
 // Ownership rule for anything added here: a field belongs to the facade if two
 // engines would each need their own, and to Proxy if a second copy would be
 // wasteful or actively wrong. Listeners are per facade because the ports
-// differ. The transport pool is per process because it is keyed by peer, not
-// by engine, and duplicating it would double the connections to every peer.
+// differ. The peer transport owner is per process so all facades share its
+// connection limits and direct/reverse health for each peer and service.
 type facade struct {
 	// host is the process hosting this facade. Reached for shared state only.
 	host *Proxy
@@ -96,6 +97,12 @@ type facade struct {
 	// overwriting each other's confirmed endpoint for the same peer.
 	targets *reach.Chooser
 
+	// peerMu guards generations of the current endpoint authority. Admission
+	// lives in the mesh; this state records endpoint and selected-address changes.
+	peerMu         sync.Mutex
+	peerEndpoints  map[string]proxyPeerEndpoint
+	peerGeneration uint64
+
 	// nextRequestID tags this facade's RequestStarted / RequestEvent pairs.
 	// Atomic add returns the new value, so ids start at 1 per facade.
 	//
@@ -105,6 +112,59 @@ type facade struct {
 	// separates them. A shared counter would hand the second facade "2" and
 	// leave that guarantee untested.
 	nextRequestID atomic.Uint64
+}
+
+type proxyPeerEndpoint struct {
+	nodeID     string
+	addresses  []string
+	selected   string
+	generation uint64
+}
+
+// refreshPeerEndpoints reads live discovery rather than a request's candidate.
+// A principal assigned to multiple targets is ambiguous and has no authority.
+func (f *facade) refreshPeerEndpoints() {
+	f.peerMu.Lock()
+	defer f.peerMu.Unlock()
+	f.refreshPeerEndpointsLocked()
+}
+
+func (f *facade) refreshPeerEndpointsLocked() {
+	nodes := f.discovery.Nodes()
+	counts := make(map[string]int, len(nodes))
+	for _, n := range nodes {
+		counts[n.ClusterUUID]++
+	}
+	next := make(map[string]proxyPeerEndpoint, len(nodes))
+	for _, n := range nodes {
+		if n.ClusterUUID == "" || counts[n.ClusterUUID] != 1 {
+			continue
+		}
+		addresses := nodeCandidates(n)
+		if len(addresses) == 0 {
+			continue
+		}
+		endpoint := proxyPeerEndpoint{nodeID: n.ID, addresses: addresses,
+			selected: f.targets.Prefer(n.ID, addresses)}
+		previous, exists := f.peerEndpoints[n.ClusterUUID]
+		if exists && previous.nodeID == endpoint.nodeID &&
+			slices.Equal(previous.addresses, addresses) && previous.selected == endpoint.selected {
+			endpoint.generation = previous.generation
+		} else {
+			f.peerGeneration++
+			endpoint.generation = f.peerGeneration
+		}
+		next[n.ClusterUUID] = endpoint
+	}
+	f.peerEndpoints = next
+}
+
+func (f *facade) peerEndpoint(uuid string) (proxyPeerEndpoint, bool) {
+	f.peerMu.Lock()
+	defer f.peerMu.Unlock()
+	f.refreshPeerEndpointsLocked()
+	endpoint, ok := f.peerEndpoints[uuid]
+	return endpoint, ok
 }
 
 func newFacade(host *Proxy, profile engineProfile, discovery *Discovery, port int) *facade {
@@ -339,6 +399,7 @@ func (f *facade) replaceSubscribed(params json.RawMessage) {
 	}
 	f.noteSelfFromSnapshot(nodes)
 	discovered, updated, removed := f.discovery.SetSubscribed(nodes)
+	f.refreshPeerEndpoints()
 	// Surface the relay-fed set to the client as node/* events — the signal a
 	// consumer (the UI) uses to show which peers run this engine — mirroring how
 	// manual nodes are announced. Without this the routing overlay updates

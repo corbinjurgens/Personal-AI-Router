@@ -7,7 +7,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
-	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
 	stderrors "errors"
@@ -414,15 +413,12 @@ type Proxy struct {
 	// SetPrioritySnapshot.
 	appliedPriorityGeneration uint64
 
-	// transportMu guards the long-lived HTTP transports reused across forwards
-	// and model-list fetches. Allocating a new http.Transport per request
-	// defeats connection pooling and leaks idle sockets until GC.
-	//
-	// Shared across facades: the pool is keyed by peer, not by engine, so a
-	// second copy would double the connections this node opens to every peer.
+	// transportMu guards the plain transport and process-owned peer adapter.
+	// Peer requests use fresh connections so net/http cannot replay inference.
 	transportMu    sync.Mutex
 	plainTransport *http.Transport
-	peerTransports map[string]*http.Transport
+	peerServices   *clustertrust.PeerServiceClient
+	baseConfigDir  string
 
 	// runID is a per-process nonce minted at startup and stamped on every
 	// workload this proxy emits. Shared across facades is correct: a workload's
@@ -892,16 +888,16 @@ type candidate struct {
 
 // candidateTransport returns the reverse-proxy / model-list transport for a
 // candidate. Plain/self/manual candidates share one long-lived Transport.
-// Cluster peers share one long-lived mTLS Transport per peerUUID. Callers must
+// Cluster peers use the process-owned pinned direct/reverse adapter. Callers must
 // not CloseIdleConnections on the returned value except via closeIdleTransports.
-func (p *Proxy) candidateTransport(c candidate) *http.Transport {
+func (p *Proxy) candidateTransport(c candidate) http.RoundTripper {
 	if c.peerUUID == "" {
 		return p.plainHTTPTransport()
 	}
-	return p.peerHTTPTransport(c.peerUUID)
+	return p.peerServiceClient().Client(c.peerUUID, c.fac.profile.DiscoveryService).Transport
 }
 
-func newProxyTransport(tlsCfg *tls.Config) *http.Transport {
+func newProxyTransport() *http.Transport {
 	tr := &http.Transport{
 		DialContext: (&net.Dialer{
 			Timeout:   proxyDialTimeout,
@@ -912,9 +908,6 @@ func newProxyTransport(tlsCfg *tls.Config) *http.Transport {
 		MaxIdleConnsPerHost:   proxyMaxIdleConns,
 		IdleConnTimeout:       proxyIdleConnTimeout,
 	}
-	if tlsCfg != nil {
-		tr.TLSClientConfig = tlsCfg
-	}
 	return tr
 }
 
@@ -922,47 +915,52 @@ func (p *Proxy) plainHTTPTransport() *http.Transport {
 	p.transportMu.Lock()
 	defer p.transportMu.Unlock()
 	if p.plainTransport == nil {
-		p.plainTransport = newProxyTransport(nil)
+		p.plainTransport = newProxyTransport()
 	}
 	return p.plainTransport
 }
 
-func (p *Proxy) peerHTTPTransport(peerUUID string) *http.Transport {
+func (p *Proxy) peerServiceClient() *clustertrust.PeerServiceClient {
 	p.transportMu.Lock()
 	defer p.transportMu.Unlock()
-	if tr, ok := p.peerTransports[peerUUID]; ok {
-		if p.mesh != nil && p.mesh.HasPin(peerUUID) {
-			return tr
-		}
-		tr.CloseIdleConnections()
-		delete(p.peerTransports, peerUUID)
+	if p.peerServices == nil {
+		p.peerServices = clustertrust.NewPeerServiceClient(p.mesh, clustertrust.PeerServiceClientOptions{
+			PeerClientOptions: clustertrust.PeerClientOptions{ResponseHeaderTimeout: proxyResponseTimeout},
+			BaseConfigDir:     p.baseConfigDir, ResolveRoute: p.resolvePeerServiceRoute,
+		})
 	}
-	if p.mesh == nil {
-		return newProxyTransport(nil)
-	}
-	cfg, ok := p.mesh.ClientTLSConfig(peerUUID)
-	if !ok {
-		return newProxyTransport(nil)
-	}
-	tr := newProxyTransport(cfg)
-	if p.peerTransports == nil {
-		p.peerTransports = make(map[string]*http.Transport)
-	}
-	p.peerTransports[peerUUID] = tr
-	return tr
+	return p.peerServices
 }
 
-// dropUnpinnedPeerTransports closes idle conns for peer Transports whose pins
-// are gone. Safe to call from the mesh Watch callback.
+func (p *Proxy) resolvePeerServiceRoute(uuid string, service noderec.ServiceKey) (clustertrust.PeerServiceRoute, bool) {
+	if p.mesh == nil {
+		return clustertrust.PeerServiceRoute{}, false
+	}
+	p.mesh.Refresh()
+	incarnation, ok := p.mesh.PeerServiceIncarnation(uuid)
+	if !ok {
+		return clustertrust.PeerServiceRoute{}, false
+	}
+	for _, f := range p.enabledFacades() {
+		if f.profile.DiscoveryService == service {
+			endpoint, ok := f.peerEndpoint(uuid)
+			if !ok {
+				return clustertrust.PeerServiceRoute{}, false
+			}
+			return clustertrust.PeerServiceRoute{Incarnation: incarnation, Address: endpoint.selected,
+				Protocol: clustertrust.ReverseTLS, Generation: endpoint.generation}, true
+		}
+	}
+	return clustertrust.PeerServiceRoute{}, false
+}
+
+// Admission is rechecked on every adapter dispatch; the watch also retires idle
+// connections promptly. Safe to call from the mesh Watch callback.
 func (p *Proxy) dropUnpinnedPeerTransports() {
 	p.transportMu.Lock()
 	defer p.transportMu.Unlock()
-	for uuid, tr := range p.peerTransports {
-		if p.mesh != nil && p.mesh.HasPin(uuid) {
-			continue
-		}
-		tr.CloseIdleConnections()
-		delete(p.peerTransports, uuid)
+	if p.peerServices != nil {
+		p.peerServices.CloseIdle()
 	}
 }
 
@@ -972,9 +970,8 @@ func (p *Proxy) closeIdleTransports() {
 	if p.plainTransport != nil {
 		p.plainTransport.CloseIdleConnections()
 	}
-	for uuid, tr := range p.peerTransports {
-		tr.CloseIdleConnections()
-		delete(p.peerTransports, uuid)
+	if p.peerServices != nil {
+		p.peerServices.CloseIdle()
 	}
 }
 

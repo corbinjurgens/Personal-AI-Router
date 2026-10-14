@@ -312,11 +312,16 @@ func TestCORSPairedIngressPreservesPolicyAndIsTerminal(t *testing.T) {
 		clustertrusttest.Join(t, aDir, "cluster", "a")
 		clustertrusttest.Join(t, bDir, "cluster", "b")
 		pin := func(dst, src, id string) {
+			t.Helper()
 			pem, err := os.ReadFile(filepath.Join(src, "node.crt"))
 			if err != nil {
 				t.Fatal(err)
 			}
-			body, _ := json.Marshal(map[string]string{"nodeUuid": id, "certPem": string(pem)})
+			body, err := json.Marshal(map[string]any{"nodeUuid": id, "certPem": string(pem),
+				"clusterId": "cluster", "admissionEpoch": 1})
+			if err != nil {
+				t.Fatal(err)
+			}
 			if err = os.MkdirAll(filepath.Join(dst, "trusted"), 0700); err != nil {
 				t.Fatal(err)
 			}
