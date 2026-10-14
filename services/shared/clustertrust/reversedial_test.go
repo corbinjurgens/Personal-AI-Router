@@ -53,7 +53,7 @@ func reverseDialFixture(t *testing.T) (string, net.Listener) {
 
 func TestReverseDialPrivateEndpointRecoversStaleSocket(t *testing.T) {
 	if runtime.GOOS == "windows" {
-		return // Unix socket pathname recovery does not apply to named pipes.
+		t.Skip("Unix socket pathname recovery does not apply to named pipes")
 	}
 	if path := os.Getenv("PAIR_REVERSE_PRIVATE_CRASH_PATH"); path != "" {
 		listener, err := ListenReversePrivate(path)
@@ -137,7 +137,7 @@ func TestReverseDialPrivateEndpointRecoversStaleSocket(t *testing.T) {
 
 func TestReverseDialPrivateEndpointPreservesUnrecordedStaleSocket(t *testing.T) {
 	if runtime.GOOS == "windows" {
-		return // Unix socket ownership records do not apply to named pipes.
+		t.Skip("Unix socket ownership records do not apply to named pipes")
 	}
 	path := ReverseDialPath(reverseDialConfigFixture(t))
 	stale, err := net.ListenUnix("unix", &net.UnixAddr{Name: path, Net: "unix"})
@@ -205,7 +205,7 @@ func reverseDialAssertListenerReachable(t *testing.T, path string, listener net.
 
 func TestReverseDialPrivateEndpointPreservesLiveOwner(t *testing.T) {
 	if runtime.GOOS == "windows" {
-		return // This regression exercises the Unix lifetime lock.
+		t.Skip("Unix lifetime locks do not apply to named pipes")
 	}
 	base, owner := reverseDialFixture(t)
 	path := ReverseDialPath(base)
@@ -230,7 +230,7 @@ func TestReverseDialPrivateEndpointPreservesLiveOwner(t *testing.T) {
 
 func TestReverseDialPrivateEndpointPreservesUnlockedLiveOwner(t *testing.T) {
 	if runtime.GOOS == "windows" {
-		return // This regression exercises Unix stale socket detection.
+		t.Skip("Unix stale socket detection does not apply to named pipes")
 	}
 	path := ReverseDialPath(reverseDialConfigFixture(t))
 	owner, err := net.ListenUnix("unix", &net.UnixAddr{Name: path, Net: "unix"})
@@ -260,7 +260,7 @@ func TestReverseDialPrivateEndpointPreservesUnlockedLiveOwner(t *testing.T) {
 
 func TestReverseDialPrivateEndpointPreservesSaturatedUnlockedLiveOwner(t *testing.T) {
 	if runtime.GOOS == "windows" {
-		return // This regression exercises Unix listener backlog saturation.
+		t.Skip("Unix listener backlog saturation does not apply to named pipes")
 	}
 	path := ReverseDialPath(reverseDialConfigFixture(t))
 	owner, err := net.ListenUnix("unix", &net.UnixAddr{Name: path, Net: "unix"})
@@ -327,7 +327,7 @@ func TestReverseDialPrivateEndpointPreservesSaturatedUnlockedLiveOwner(t *testin
 
 func TestReverseDialPrivateEndpointPreservesMismatchedOwnershipRecord(t *testing.T) {
 	if runtime.GOOS == "windows" {
-		return // This regression exercises Unix socket ownership records.
+		t.Skip("Unix socket ownership records do not apply to named pipes")
 	}
 	path := ReverseDialPath(reverseDialConfigFixture(t))
 	owner, err := net.ListenUnix("unix", &net.UnixAddr{Name: path, Net: "unix"})
@@ -360,7 +360,7 @@ func TestReverseDialPrivateEndpointPreservesMismatchedOwnershipRecord(t *testing
 
 func TestReverseDialPrivateEndpointCloseReleasesOwnership(t *testing.T) {
 	if runtime.GOOS == "windows" {
-		return // This regression exercises the Unix lifetime lock.
+		t.Skip("Unix lifetime locks do not apply to named pipes")
 	}
 	base, first := reverseDialFixture(t)
 	path := ReverseDialPath(base)
@@ -392,7 +392,7 @@ func TestReverseDialPrivateEndpointCloseReleasesOwnership(t *testing.T) {
 
 func TestReverseDialPrivateEndpointPrepareFailureReleasesOwnership(t *testing.T) {
 	if runtime.GOOS == "windows" {
-		return // Unix pathname preparation does not apply to named pipes.
+		t.Skip("Unix pathname preparation does not apply to named pipes")
 	}
 	path := ReverseDialPath(reverseDialConfigFixture(t))
 	if err := os.Mkdir(path, 0o700); err != nil {
@@ -424,7 +424,7 @@ func TestReverseDialPrivateEndpointPrepareFailureReleasesOwnership(t *testing.T)
 
 func TestReverseDialPrivateEndpointBindFailureReleasesOwnership(t *testing.T) {
 	if runtime.GOOS == "windows" {
-		return // Unix socket path length does not apply to named pipes.
+		t.Skip("Unix socket path length does not apply to named pipes")
 	}
 	path := filepath.Join(reverseDialConfigFixture(t), strings.Repeat("x", 200))
 	for attempt := 0; attempt < 2; attempt++ {
@@ -441,10 +441,10 @@ func TestReverseDialPrivateEndpointBindFailureReleasesOwnership(t *testing.T) {
 }
 
 func TestReverseDialPrivateEndpointPermissions(t *testing.T) {
-	base, _ := reverseDialFixture(t)
 	if runtime.GOOS == "windows" {
-		return
-	} // Windows uses the current-user pipe ACL, without Unix mode bits.
+		t.Skip("Windows pipe ACL coverage is in TestReverseDialPrivatePipeCurrentUser")
+	}
+	base, _ := reverseDialFixture(t)
 	info, err := os.Stat(ReverseDialPath(base))
 	if err != nil {
 		t.Fatal(err)

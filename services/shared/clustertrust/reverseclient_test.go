@@ -985,7 +985,10 @@ func TestPeerServiceClientRejectedRedirectClosesRecreatedBody(t *testing.T) {
 			if reopened.Load() != 1 || recreated == nil || recreated.closed.Load() != 1 || original.closed.Load() < 1 || dispatches.Load() != 1 {
 				t.Fatalf("redirect ownership: reopen=%d recreated=%v original closes=%d dispatches=%d", reopened.Load(), recreated, original.closed.Load(), dispatches.Load())
 			}
-			if _, err := recreated.Stat(); !errors.Is(err, os.ErrClosed) {
+			// Read checks os.File's closed state on every platform; Windows
+			// Stat instead exposes the native invalid-handle error.
+			var probe [1]byte
+			if _, err := recreated.Read(probe[:]); !errors.Is(err, os.ErrClosed) {
 				t.Fatalf("recreated redirect file remains open: %v", err)
 			}
 		})

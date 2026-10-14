@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -25,7 +26,11 @@ import (
 func TestReverseSubprocessPrivateDialMetadataReplayAndRebind(t *testing.T) {
 	buildCtx, buildCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer buildCancel()
-	binary := filepath.Join(t.TempDir(), "cm")
+	name := "cm"
+	if runtime.GOOS == "windows" {
+		name += ".exe"
+	}
+	binary := filepath.Join(t.TempDir(), name)
 	build := exec.CommandContext(buildCtx, "go", "build", "-o", binary, ".")
 	if output, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("build isolated CM: %v\n%s", err, output)
