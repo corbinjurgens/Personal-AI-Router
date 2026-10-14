@@ -55,10 +55,9 @@ type daemon struct {
 	// deadline, so a peer with several engines can legitimately take longer than
 	// a node-info probe. A shorter client would give up mid-sweep and silently
 	// drop that peer's models.
-	modelsHTTP *http.Client
-	// modelsClients is the long-lived per-peer mTLS pool for LAN /v1/models
-	// fetches. A throwaway Transport every 15s paid a full handshake each time.
-	modelsClients *clustertrust.PeerClientPool
+	modelsHTTP  *http.Client
+	peerMu      sync.Mutex
+	peerClients map[scannerPeerEndpoint]*clustertrust.PeerServiceClient
 	// tlsHTTP, when non-nil (the operator passed --client-cert/--client-key/
 	// --ca-bundle), fetches node-info over HTTPS on the ni port instead of plain
 	// HTTP. Dormant by default (nil): node-info is plain per the transport policy,
@@ -359,7 +358,6 @@ func newDaemon(codec *Codec, mesh *clustertrust.Mesh, clusterDir string, tlsHTTP
 		dir:                newDirectory(),
 		http:               &http.Client{Timeout: nodeInfoFetchTimeout, Transport: nodeInfoTransport(nil)},
 		modelsHTTP:         &http.Client{Timeout: modelsFetchTimeout},
-		modelsClients:      clustertrust.NewPeerClientPool(mesh, modelsFetchTimeout),
 		tlsHTTP:            tlsHTTP,
 		lastInfo:           make(map[string]NodeInfoResponse),
 		lastInfoAt:         make(map[string]time.Time),
@@ -423,9 +421,7 @@ func (d *daemon) run(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
-			if d.modelsClients != nil {
-				d.modelsClients.CloseIdle()
-			}
+			d.closePeerClients()
 			return
 		case ev, ok := <-events:
 			if !ok {
@@ -1099,7 +1095,9 @@ func (d *daemon) identityAlive(rec noderec.NodeRecord, ips []string) (alive, con
 		if ip == "" {
 			continue
 		}
-		info, ok := d.probeIdentity(ip, port)
+		ctx, cancel := context.WithTimeout(context.Background(), probeIdentityTimeout)
+		info, ok := d.fetchPeerNodeInfoWithin(ctx, rec.HostUUID, rec.ClusterUUID, ip, port)
+		cancel()
 		if !ok || info.HostUUID == "" {
 			continue
 		}
@@ -1118,16 +1116,6 @@ func (d *daemon) identityAlive(rec noderec.NodeRecord, ips []string) (alive, con
 	slog.Warn("node record superseded: no address it published still answers for it",
 		"ip", mismatchedAt, "recordUuid", rec.HostUUID, "actualUuid", mismatchedUUID)
 	return false, true
-}
-
-// probeIdentity reads one address's node-info under the identity probe's own
-// budget, which is tighter than enrichment's: this runs inside the browser's scan
-// cycle, and each address gets the same allowance so a slow first candidate cannot
-// consume the rest of the list's time.
-func (d *daemon) probeIdentity(ip string, port int) (NodeInfoResponse, bool) {
-	ctx, cancel := context.WithTimeout(context.Background(), probeIdentityTimeout)
-	defer cancel()
-	return d.fetchNodeInfoWithin(ctx, ip, port)
 }
 
 // enrich decorates a node with the data that lives off the mDNS record: its
@@ -1178,7 +1166,7 @@ func (d *daemon) enrichInfoCandidates(node *noderec.DirectoryNode, hosts []strin
 		return
 	}
 	ask := func(host string) (NodeInfoResponse, bool) {
-		candidate, fetched := d.fetchNodeInfo(host, ni.Port)
+		candidate, fetched := d.fetchNodeInfoForPeer(context.Background(), node.HostUUID, node.ClusterUUID, host, ni.Port, true)
 		if !fetched {
 			return NodeInfoResponse{}, false
 		}
@@ -1273,9 +1261,35 @@ func (d *daemon) fetchNodeInfo(ip string, port int) (NodeInfoResponse, bool) {
 // the TLS choice above); every other caller passes a background context and gets
 // the client timeout unchanged.
 func (d *daemon) fetchNodeInfoWithin(ctx context.Context, ip string, port int) (NodeInfoResponse, bool) {
+	return d.fetchPeerNodeInfoWithin(ctx, "", "", ip, port)
+}
+
+func (d *daemon) fetchPeerNodeInfoWithin(ctx context.Context, hostUUID, peerUUID, ip string, port int) (NodeInfoResponse, bool) {
+	return d.fetchNodeInfoForPeer(ctx, hostUUID, peerUUID, ip, port, false)
+}
+
+func (d *daemon) fetchNodeInfoForPeer(ctx context.Context, hostUUID, peerUUID, ip string, port int, discovering bool) (NodeInfoResponse, bool) {
 	client, scheme := d.http, "http"
+	current := func() bool { return true }
 	if d.tlsHTTP != nil {
 		client, scheme = d.tlsHTTP, "https"
+	} else if !isLoopbackHost(ip) && hostUUID != "" {
+		d.mesh.Refresh()
+		if peerUUID == "" && d.dir != nil {
+			if node, ok := d.dir.get(hostUUID); ok {
+				peerUUID = node.ClusterUUID
+			}
+		}
+		if peerUUID == "" && d.mesh.HasPin(hostUUID) {
+			peerUUID = hostUUID
+		}
+		if peerUUID != "" && (d.mesh.HasPin(peerUUID) || d.hasPeerClient(peerUUID)) {
+			var ok bool
+			client, current, ok = d.peerServiceClient(hostUUID, peerUUID, ip, port, noderec.ServiceNodeInfo, discovering)
+			if !ok {
+				return NodeInfoResponse{}, false
+			}
+		}
 	}
 	if client == nil {
 		return NodeInfoResponse{}, false
@@ -1306,7 +1320,15 @@ func (d *daemon) fetchNodeInfoWithin(ctx context.Context, ip string, port int) (
 		return NodeInfoResponse{}, false
 	}
 	var info NodeInfoResponse
-	if err := json.NewDecoder(resp.Body).Decode(&info); err != nil {
+	decoder := json.NewDecoder(resp.Body)
+	if err := decoder.Decode(&info); err != nil {
+		return NodeInfoResponse{}, false
+	}
+	var trailing json.RawMessage
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		return NodeInfoResponse{}, false
+	}
+	if !current() {
 		return NodeInfoResponse{}, false
 	}
 	return info, true
@@ -1334,7 +1356,7 @@ func (d *daemon) enrichModelsCandidates(node *noderec.DirectoryNode, hosts []str
 		return
 	}
 	ask := func(host string) (modelInventory, bool) {
-		models, byEngine, loadedByEngine, fetched := d.fetchModels(host, em.Port, node.ClusterUUID)
+		models, byEngine, loadedByEngine, fetched := d.fetchModelsForPeer(node.HostUUID, host, em.Port, node.ClusterUUID, true)
 		if !fetched {
 			return modelInventory{}, false
 		}
@@ -1388,7 +1410,15 @@ func (d *daemon) enrichModelsCandidates(node *noderec.DirectoryNode, hosts []str
 // therefore keeps working when this node belongs to no cluster — a standalone
 // machine still has to show its own models.
 func (d *daemon) fetchModels(ip string, port int, clusterUUID string) ([]string, map[string][]string, map[string][]string, bool) {
-	client, scheme, ok := d.modelsClient(ip, clusterUUID)
+	return d.fetchModelsForPeer("", ip, port, clusterUUID, true)
+}
+
+func (d *daemon) fetchPeerModels(hostUUID, ip string, port int, clusterUUID string) ([]string, map[string][]string, map[string][]string, bool) {
+	return d.fetchModelsForPeer(hostUUID, ip, port, clusterUUID, false)
+}
+
+func (d *daemon) fetchModelsForPeer(hostUUID, ip string, port int, clusterUUID string, discovering bool) ([]string, map[string][]string, map[string][]string, bool) {
+	client, scheme, current, ok := d.modelsClient(hostUUID, ip, port, clusterUUID, discovering)
 	if !ok {
 		slog.Debug("model enrichment skipped: peer is not a pinned cluster member",
 			"ip", ip, "clusterUuid", clusterUUID)
@@ -1409,7 +1439,15 @@ func (d *daemon) fetchModels(ip string, port int, clusterUUID string) ([]string,
 		ModelsByEngine map[string][]string `json:"modelsByEngine"`
 		LoadedByEngine map[string][]string `json:"loadedByEngine"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+	decoder := json.NewDecoder(resp.Body)
+	if err := decoder.Decode(&body); err != nil {
+		return nil, nil, nil, false
+	}
+	var trailing json.RawMessage
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		return nil, nil, nil, false
+	}
+	if !current() {
 		return nil, nil, nil, false
 	}
 	return body.Models, body.ModelsByEngine, body.LoadedByEngine, true
@@ -1420,19 +1458,12 @@ func (d *daemon) fetchModels(ip string, port int, clusterUUID string) ([]string,
 // every membership state), or a per-peer pinned mTLS client for a LAN peer. ok is
 // false when a peer holds no pin here, which is the client-side cluster gate —
 // there is deliberately no plaintext fallback for a peer.
-func (d *daemon) modelsClient(ip, clusterUUID string) (*http.Client, string, bool) {
+func (d *daemon) modelsClient(hostUUID, ip string, port int, clusterUUID string, discovering bool) (*http.Client, string, func() bool, bool) {
 	if isLoopbackHost(ip) {
-		return d.modelsHTTP, "http", true
+		return d.modelsHTTP, "http", func() bool { return true }, d.modelsHTTP != nil
 	}
-	d.mesh.Refresh()
-	if d.modelsClients == nil {
-		return nil, "", false
-	}
-	client, ok := d.modelsClients.Client(clusterUUID)
-	if !ok {
-		return nil, "", false
-	}
-	return client, "https", true
+	client, current, ok := d.peerServiceClient(hostUUID, clusterUUID, ip, port, noderec.ServiceEngineManager, discovering)
+	return client, "https", current, ok
 }
 
 // isLoopbackHost reports whether a dial host addresses this machine.
@@ -1462,9 +1493,6 @@ func (d *daemon) refreshPeersLoop(ctx context.Context) {
 		case <-ticker.C:
 			d.refreshAdvertisedAddressesOnce()
 			d.mesh.Refresh()
-			if d.modelsClients != nil {
-				d.modelsClients.DropUnpinned()
-			}
 			d.refreshClusterIdentityOnce()
 			d.refreshModelsOnce()
 		}
@@ -1603,7 +1631,7 @@ type telemetrySample struct {
 func (d *daemon) refreshNodeTelemetryCandidates(ctx context.Context, hostUUID string, hosts []string, niPort int) bool {
 	ask := func(host string) (telemetrySample, bool) {
 		startedAt := time.Now()
-		candidate, ok := d.fetchNodeInfoWithin(ctx, host, niPort)
+		candidate, ok := d.fetchPeerNodeInfoWithin(ctx, hostUUID, "", host, niPort)
 		if !ok {
 			return telemetrySample{}, false
 		}
@@ -1722,7 +1750,7 @@ func (d *daemon) refreshNodeClusterIdentity(hostUUID, ip string, niPort int) boo
 // direct-connect addresses can legitimately resolve to a different machine.
 func (d *daemon) refreshNodeClusterIdentityCandidates(hostUUID string, hosts []string, niPort int) bool {
 	ask := func(host string) (NodeInfoResponse, bool) {
-		candidate, ok := d.fetchNodeInfo(host, niPort)
+		candidate, ok := d.fetchPeerNodeInfoWithin(context.Background(), hostUUID, "", host, niPort)
 		if !ok {
 			return NodeInfoResponse{}, false
 		}
@@ -1809,7 +1837,7 @@ func (d *daemon) refreshNodeModelsCandidates(hostUUID, guardIP string, hosts []s
 		hosts = []string{loopbackHost}
 	}
 	ask := func(host string) (modelInventory, bool) {
-		models, byEngine, loadedByEngine, fetched := d.fetchModels(host, emPort, clusterUUID)
+		models, byEngine, loadedByEngine, fetched := d.fetchPeerModels(hostUUID, host, emPort, clusterUUID)
 		if !fetched {
 			return modelInventory{}, false
 		}
@@ -1857,6 +1885,14 @@ func (d *daemon) refreshNodeModelsCandidates(hostUUID, guardIP string, hosts []s
 // forget drops a node's cached enrichment when it's evicted, so a later
 // re-discovery re-probes from scratch rather than resurrecting stale metrics.
 func (d *daemon) forget(hostUUID string) {
+	d.peerMu.Lock()
+	for key, adapter := range d.peerClients {
+		if key.hostUUID == hostUUID {
+			adapter.CloseIdle()
+			delete(d.peerClients, key)
+		}
+	}
+	d.peerMu.Unlock()
 	d.telemetryRetries.forget(hostUUID)
 	d.infoMu.Lock()
 	delete(d.lastInfo, hostUUID)

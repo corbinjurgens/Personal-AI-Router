@@ -239,8 +239,8 @@ func (m *Mesh) HasPin(uuid string) bool {
 }
 
 // PeerServiceIncarnation returns the opaque admission identity for one current
-// pinned peer. It includes both local and peer admission epochs, so readmission
-// changes it even when neither certificate changes. Endpoint/protocol changes
+// pinned peer. It includes both certificates and admission epochs, so certificate
+// replacement and readmission each change it. Endpoint/protocol changes
 // remain the caller's PeerServiceRoute.Generation responsibility.
 //
 // Refresh remains responsible for loading identities and pins. This lookup
@@ -261,7 +261,7 @@ func (m *Mesh) peerServiceIncarnation(peerUUID string, readFile func(string) ([]
 	m.mu.RLock()
 	id, clustered := m.id, m.clustered
 	m.mu.RUnlock()
-	if !clustered || id == nil || id.NodeUUID == "" || peerUUID == id.NodeUUID || m.trust == nil {
+	if !clustered || id == nil || id.NodeUUID == "" || len(selfLeafDER(id)) == 0 || peerUUID == id.NodeUUID || m.trust == nil {
 		return "", false
 	}
 
@@ -316,6 +316,11 @@ func (m *Mesh) peerServiceIncarnation(peerUUID string, readFile func(string) ([]
 	tuple := fmt.Appendf(nil, "%d:%s%d:%s%d:%s:%d:%d",
 		len(admission.ClusterID), admission.ClusterID, len(id.NodeUUID), id.NodeUUID,
 		len(peerUUID), peerUUID, admission.Epoch, pin.AdmissionEpoch)
+	tuple = fmt.Appendf(tuple, ":%d:", len(der))
+	tuple = append(tuple, der...)
+	selfDER := selfLeafDER(id)
+	tuple = fmt.Appendf(tuple, ":%d:", len(selfDER))
+	tuple = append(tuple, selfDER...)
 	digest := sha256.Sum256(tuple)
 	return fmt.Sprintf("%x", digest), true
 }

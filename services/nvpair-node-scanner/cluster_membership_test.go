@@ -18,7 +18,6 @@ func newMembershipTestDaemon(clusterDir string) *daemon {
 	mesh := clustertrust.Open(clusterDir)
 	return &daemon{
 		mesh:               mesh,
-		modelsClients:      clustertrust.NewPeerClientPool(mesh, modelsFetchTimeout),
 		clusterDir:         clusterDir,
 		baseDir:            filepath.Dir(clusterDir),
 		reg:                newRegistry("host-uuid", "", selfAddrs("127.0.0.1")),
@@ -43,29 +42,30 @@ func TestModelFetchTransportFollowsMembership(t *testing.T) {
 	d.modelsHTTP = &http.Client{}
 
 	// Unclustered: loopback (self) still resolves a plain client...
-	if _, scheme, ok := d.modelsClient("127.0.0.1", ""); !ok || scheme != "http" {
+	if _, scheme, _, ok := d.modelsClient("", "127.0.0.1", 14317, "", true); !ok || scheme != "http" {
 		t.Fatalf("unclustered loopback: scheme=%q ok=%v, want http/true", scheme, ok)
 	}
 	// ...but no LAN peer is reachable at all, in either transport.
-	if _, _, ok := d.modelsClient("192.168.1.42", "principal-peer"); ok {
+	if _, _, _, ok := d.modelsClient("", "192.168.1.42", 14317, "principal-peer", true); ok {
 		t.Fatal("an unclustered node must not fetch a peer's model inventory")
 	}
-	if _, _, ok := d.modelsClient("192.168.1.42", ""); ok {
+	if _, _, _, ok := d.modelsClient("", "192.168.1.42", 14317, "", true); ok {
 		t.Fatal("a peer advertising no cluster principal must not be fetched")
 	}
 
 	// Join a cluster that pins one peer.
 	clustertrusttest.Join(t, clusterDir, "cluster-models", "principal-self", "principal-peer")
+	writeScannerAdmissionPin(t, clusterDir, "principal-peer", "cluster-models", 1)
 	d.mesh.Refresh()
 
-	if _, scheme, ok := d.modelsClient("192.168.1.42", "principal-peer"); !ok || scheme != "https" {
+	if _, scheme, _, ok := d.modelsClient("", "192.168.1.42", 14317, "principal-peer", true); !ok || scheme != "https" {
 		t.Fatalf("pinned peer: scheme=%q ok=%v, want https/true", scheme, ok)
 	}
-	if _, _, ok := d.modelsClient("192.168.1.99", "principal-stranger"); ok {
+	if _, _, _, ok := d.modelsClient("", "192.168.1.99", 14317, "principal-stranger", true); ok {
 		t.Fatal("an unpinned peer must not be fetched")
 	}
 	// Self keeps its loopback plaintext path once clustered too.
-	if _, scheme, ok := d.modelsClient("127.0.0.1", "principal-self"); !ok || scheme != "http" {
+	if _, scheme, _, ok := d.modelsClient("", "127.0.0.1", 14317, "principal-self", true); !ok || scheme != "http" {
 		t.Fatalf("clustered loopback: scheme=%q ok=%v, want http/true", scheme, ok)
 	}
 }

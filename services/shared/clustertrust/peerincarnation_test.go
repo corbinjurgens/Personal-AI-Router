@@ -176,6 +176,32 @@ func TestMeshPeerServiceIncarnationRejectsLocalAuthority(t *testing.T) {
 	})
 }
 
+func TestMeshPeerServiceIncarnationChangesOnSameEpochCertificateReplacement(t *testing.T) {
+	t.Run("peer certificate", func(t *testing.T) {
+		f := newIncarnationFixture(t)
+		before := requireIncarnation(t, f.mesh)
+		peerPEM, _, _ := genLeaf(t, "peer")
+		f.pin.CertPem = string(peerPEM)
+		f.writePin(t)
+		// A new durable pin cannot be combined with the Mesh's old loaded leaf.
+		requireNoIncarnation(t, f.mesh, "peer")
+		f.mesh.Refresh()
+		if got := requireIncarnation(t, f.mesh); got == before {
+			t.Fatal("same-epoch peer certificate replacement reused old authority")
+		}
+	})
+	t.Run("local certificate", func(t *testing.T) {
+		f := newIncarnationFixture(t)
+		before := requireIncarnation(t, f.mesh)
+		selfPEM, selfKey, _ := genLeaf(t, "self")
+		writeIdentity(t, f.dir, selfPEM, selfKey)
+		f.mesh.Refresh()
+		if got := requireIncarnation(t, f.mesh); got == before {
+			t.Fatal("same-epoch local certificate replacement reused old authority")
+		}
+	})
+}
+
 func TestMeshPeerServiceIncarnationRejectsPeerAuthority(t *testing.T) {
 	test := func(name string, mutate func(*testing.T, *incarnationFixture)) {
 		t.Run(name, func(t *testing.T) {

@@ -18,10 +18,9 @@ import (
 	"nvpair-shared/clustertrusttest"
 )
 
-// TestModelsClient_ReusesPeerConnections is the regression for the 15s
-// enrichment handshake storm: modelsClient used to build a fresh Transport
-// per peer fetch. Several /v1/models GETs must ride ONE connection.
-func TestModelsClient_ReusesPeerConnections(t *testing.T) {
+// Inventory requests use fresh connections so net/http cannot replay a GET
+// after dispatch on a stale pooled connection.
+func TestModelsClientUsesOneConnectionPerDispatch(t *testing.T) {
 	selfDir := t.TempDir()
 	peerDir := t.TempDir()
 	clustertrusttest.WriteKeypair(t, selfDir, "uuid-self")
@@ -30,14 +29,14 @@ func TestModelsClient_ReusesPeerConnections(t *testing.T) {
 	clustertrusttest.WriteAdmission(t, peerDir, "cluster-1", 1)
 	writePinFromCert(t, selfDir, "uuid-peer", filepath.Join(peerDir, "node.crt"))
 	writePinFromCert(t, peerDir, "uuid-self", filepath.Join(selfDir, "node.crt"))
+	writeScannerAdmissionPin(t, selfDir, "uuid-peer", "cluster-1", 1)
 
 	selfMesh := clustertrust.Open(selfDir)
 	peerMesh := clustertrust.Open(peerDir)
 	d := &daemon{
-		mesh:          selfMesh,
-		modelsClients: clustertrust.NewPeerClientPool(selfMesh, modelsFetchTimeout),
+		mesh: selfMesh, clusterDir: selfDir,
 	}
-	defer d.modelsClients.CloseIdle()
+	defer d.closePeerClients()
 
 	var mu sync.Mutex
 	newConns := 0
@@ -83,8 +82,8 @@ func TestModelsClient_ReusesPeerConnections(t *testing.T) {
 	mu.Lock()
 	got := newConns
 	mu.Unlock()
-	if got != 1 {
-		t.Fatalf("peer accepted %d connections for %d model fetches, want 1", got, rounds)
+	if got != rounds {
+		t.Fatalf("peer accepted %d connections for %d model fetches, want %d", got, rounds, rounds)
 	}
 }
 
