@@ -37,6 +37,10 @@ type clusterManagerProcess struct {
 	peer     *Peer
 	done     chan struct{}
 	onNotify func(method string, params json.RawMessage)
+	// Initialized and queued only under Broker.localServicesMu. Each child
+	// has its own sender so a blocked old child cannot delay its replacement.
+	localServicesUpdates chan localServicesSnapshot
+	localServicesStop    chan struct{}
 
 	// relayDir is the broker's LAN directory. When the cluster-manager sends a
 	// discovery:subscribe, the broker subscribes it here and pushes

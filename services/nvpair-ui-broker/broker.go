@@ -215,6 +215,10 @@ type Broker struct {
 	// policy-derived), relaying the set to the daemon and replaying it whenever
 	// the daemon (re)starts.
 	regCache *relay.RegistrationCache
+	// localServicesMu serializes cache mutations, generations and delivery to
+	// the current cluster-manager. No child I/O runs while this lock is held.
+	localServicesMu         sync.Mutex
+	localServicesGeneration uint64
 
 	// workersMu guards the supervised worker handles below. They are no
 	// longer assigned once in Serve and then treated as read-only: each
@@ -429,9 +433,13 @@ func NewBroker(codec *Codec, paths workerPaths) *Broker {
 // _nvpair-node record. Idempotent — only a real change is pushed. Broker-local:
 // the broker registers on behalf of the workers it spawns.
 func (b *Broker) registerService(p noderec.RegisterParams) {
+	b.localServicesMu.Lock()
+	defer b.localServicesMu.Unlock()
 	if !b.regCache.Register(p) {
 		return
 	}
+	b.localServicesGeneration++
+	b.pushLocalServicesLocked()
 	if sc := b.getScanner(); sc != nil {
 		go sc.pushRegister(p)
 	}
@@ -439,9 +447,13 @@ func (b *Broker) registerService(p noderec.RegisterParams) {
 
 // unregisterService removes a local service from the cache and the daemon.
 func (b *Broker) unregisterService(svc noderec.ServiceKey) {
+	b.localServicesMu.Lock()
+	defer b.localServicesMu.Unlock()
 	if !b.regCache.Unregister(svc) {
 		return
 	}
+	b.localServicesGeneration++
+	b.pushLocalServicesLocked()
 	if sc := b.getScanner(); sc != nil {
 		go sc.pushUnregister(svc)
 	}
@@ -597,9 +609,17 @@ func (b *Broker) getScheduler() *rpcWorker {
 }
 
 func (b *Broker) setClusterMgr(c *clusterManagerProcess) {
+	b.localServicesMu.Lock()
+	defer b.localServicesMu.Unlock()
 	b.workersMu.Lock()
+	old := b.clusterMgr
 	b.clusterMgr = c
 	b.workersMu.Unlock()
+	if old != nil && old != c && old.localServicesStop != nil {
+		close(old.localServicesStop)
+		old.localServicesStop = nil
+	}
+	b.pushLocalServicesLocked()
 }
 
 func (b *Broker) getClusterMgr() *clusterManagerProcess {
@@ -3609,6 +3629,12 @@ func (b *Broker) relayToManualNodes(msg *Message) {
 // shape as the proxy/settings relays). If no cluster-manager is supervised
 // the client gets a clear error rather than a silent hang.
 func (b *Broker) relayToClusterManager(msg *Message) {
+	if msg.Method == setLocalServicesMethod {
+		if err := b.codec.RespondError(msg.ID, -32601, "method not found: "+msg.Method); err != nil {
+			log.Printf("failed to reject private cluster-manager method: %v", err)
+		}
+		return
+	}
 	cm := b.getClusterMgr()
 	if cm == nil {
 		if err := b.codec.RespondError(msg.ID, -32000, "nvpair-cluster-manager not available"); err != nil {

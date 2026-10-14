@@ -655,7 +655,19 @@ Relayed to `nvpair-manual-nodes`. `node/add` (`{ address, name?, tls_port?, mtls
 
 #### `cluster:<method>` / `nodes:<method>` (generic relay)
 
-Any request whose method starts with `cluster:` or `nodes:` is **forwarded to `nvpair-cluster-manager`** verbatim (no prefix stripping — these are the manager's own native namespaces), and the manager's result or JSON-RPC error is relayed straight back to the caller unchanged. As with the proxy relay this means the cluster-manager's whole surface is reachable through the broker without enumerating individual methods. Current methods include `cluster:get-node-id`, `cluster:set-identity`, `cluster:create`, `cluster:invite-node`, `cluster:respond-to-invite`, `cluster:cancel-invite`, `cluster:invite-status`, `nodes:get-initial`, and `nodes:remove` (see the [`nvpair-cluster-manager` README](../nvpair-cluster-manager/README.md) for their params/results and app-defined error codes).
+Requests whose method starts with `cluster:` or `nodes:` are **forwarded to `nvpair-cluster-manager`** verbatim (no prefix stripping — these are the manager's own native namespaces), and the manager's result or JSON-RPC error is relayed straight back to the caller unchanged. The private `cluster:set-local-services` method is excluded: client requests receive method-not-found and client notifications are discarded. Current public methods include `cluster:get-node-id`, `cluster:set-identity`, `cluster:create`, `cluster:invite-node`, `cluster:respond-to-invite`, `cluster:cancel-invite`, `cluster:invite-status`, `nodes:get-initial`, and `nodes:remove` (see the [`nvpair-cluster-manager` README](../nvpair-cluster-manager/README.md) for their params/results and app-defined error codes).
+
+The broker sends `cluster:set-local-services` only down the child's stdio link,
+with `{"generation":UINT64,"services":[noderec.RegisterParams,...]}`. This is an
+authoritative full snapshot of the broker's current registration cache, including
+removals and empty arrays. Engine entries (`ol`, `lm`, `lc`) contain registered
+proxy listener ports, never the raw engine ports. Each real cache mutation
+advances the generation; every cluster-manager spawn or respawn receives the
+current baseline even when no registration changes. Snapshot capture and queueing
+are serialized, and a blocked old child cannot delay its replacement or broker
+registration/shutdown. Cluster-manager owns the listener protocol classification;
+the broker supplies no user-selected TLS policy and does not infer it from
+discovery transport labels. This metadata has no desktop consumer.
 
 The cluster-manager also pushes notifications (`cluster:invite-received`, `cluster:invite-canceled`, `cluster:identity-changed`, `nodes:changed`, ...); the broker forwards them to the caller verbatim. Unlike `ollama-proxy:<event>` / `workloads:*` these are **not opt-in** — there is no `cluster:subscribe`; the events always flow.
 

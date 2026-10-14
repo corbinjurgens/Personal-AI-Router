@@ -300,6 +300,52 @@ func TestSettingsFailedApplyRestoresOnlyRunningReadyService(t *testing.T) {
 	}
 }
 
+func TestSettingsProxyRebindPushesLivePortToClusterManager(t *testing.T) {
+	for _, tc := range []struct {
+		engine  string
+		service noderec.ServiceKey
+	}{
+		{engine: "ollama", service: noderec.ServiceOllama},
+		{engine: "lmstudio", service: noderec.ServiceLMStudio},
+		{engine: "llamacpp", service: noderec.ServiceLlamaCPP},
+	} {
+		t.Run(tc.engine, func(t *testing.T) {
+			h := newSettingsHarnessForEngine(t, tc.engine)
+			current, err := h.b.getEngineSettings(context.Background(), settings.Request{Engine: tc.engine}, "")
+			if err != nil {
+				t.Fatalf("get engine settings: %v", err)
+			}
+			p := settings.Request{Engine: tc.engine, ExpectedRevision: current.Revision,
+				RequestID: settingsID(), Settings: current.Settings}
+			h.b.regCache = relay.NewRegistrationCache()
+			seen := observeLocalServices(t, h.b)
+			awaitLocalServices(t, seen, 0)
+			h.b.registerService(noderec.RegisterParams{Service: tc.service, Port: p.Settings.ProxyPort})
+			awaitLocalServices(t, seen, 1)
+			listener, err := net.Listen("tcp", "127.0.0.1:0")
+			if err != nil {
+				t.Fatalf("reserve new proxy port: %v", err)
+			}
+			p.Settings.ProxyPort = listener.Addr().(*net.TCPAddr).Port
+			p.Settings.LaunchText += " --rebind-fixture"
+			if err := listener.Close(); err != nil {
+				t.Fatalf("release new proxy port: %v", err)
+			}
+			receipt, err := h.b.applyEngineSettings(context.Background(), p, "")
+			if err != nil || receipt.Phase != "succeeded" {
+				t.Fatalf("proxy port apply = %+v, %v", receipt, err)
+			}
+			got := awaitLocalServices(t, seen, 3)
+			if len(got.Services) != 1 || got.Services[0].Service != tc.service || got.Services[0].Port != p.Settings.ProxyPort {
+				t.Fatalf("rebound snapshot = %+v, want %s proxy on %d", got, tc.service, p.Settings.ProxyPort)
+			}
+			if got.Services[0].Port == p.Settings.ServerPort || h.proxyRebinds.Load() != 1 {
+				t.Fatalf("snapshot used raw engine port or missed live rebind: %+v; rebinds=%d", got, h.proxyRebinds.Load())
+			}
+		})
+	}
+}
+
 func TestSettingsCoordinatorSerializesAndCancelsQueuedRequests(t *testing.T) {
 	h := newSettingsHarness(t)
 	p := h.request(t)
