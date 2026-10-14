@@ -296,7 +296,7 @@ func (t *peerServiceTransport) RoundTrip(req *http.Request) (*http.Response, err
 	var tlsState atomic.Pointer[tls.ConnectionState]
 	if plain {
 		var connectedDirect bool
-		conn, connectedDirect, err = p.connect(req, key, identity, cfg, h, direct, budget)
+		conn, connectedDirect, err = p.connect(req, req.Context(), key, identity, cfg, h, direct, budget)
 		usedDirect.Store(connectedDirect)
 		if err != nil {
 			release()
@@ -326,7 +326,7 @@ func (t *peerServiceTransport) RoundTrip(req *http.Request) (*http.Response, err
 			tr.DialTLSContext = func(context.Context, string, string) (net.Conn, error) {
 				// DialTLSContext bypasses Transport's TLS configuration and
 				// handshake timeout. Complete both explicitly in this hook.
-				secure, connectedDirect, err := p.connect(req, key, identity, cfg, h, direct, budget)
+				secure, connectedDirect, err := p.connect(req, req.Context(), key, identity, cfg, h, direct, budget)
 				usedDirect.Store(connectedDirect)
 				if err != nil {
 					return nil, err
@@ -353,7 +353,7 @@ func (t *peerServiceTransport) RoundTrip(req *http.Request) (*http.Response, err
 			tr.CloseIdleConnections()
 			conn.Close()
 			var connectedDirect bool
-			conn, connectedDirect, err = p.connect(req, key, identity, cfg, h, false, budget)
+			conn, connectedDirect, err = p.connect(req, req.Context(), key, identity, cfg, h, false, budget)
 			usedDirect.Store(connectedDirect)
 			if err == nil {
 				tr = newTransport(conn, false)
@@ -454,7 +454,7 @@ func (p *PeerServiceClient) reusableRoundTrip(req *http.Request, key peerService
 		// finishes a response. Setup still observes the caller's cancellation.
 		lifetime, cancel := context.WithCancel(context.WithoutCancel(req.Context()))
 		stop := context.AfterFunc(req.Context(), cancel)
-		conn, usedDirect, err := p.connect(req.WithContext(lifetime), key, identity, cfg, h, direct, budget)
+		conn, usedDirect, err := p.connect(req.WithContext(lifetime), req.Context(), key, identity, cfg, h, direct, budget)
 		stop()
 		if err != nil || req.Context().Err() != nil {
 			cancel()
@@ -582,8 +582,10 @@ func (c *peerServiceAuthorizedConn) ConnectionState() tls.ConnectionState {
 
 // Setup completes before HTTP owns any request bytes. In particular, a TCP
 // connection that resets or stalls on its first TLS data is a direct failure.
-func (p *PeerServiceClient) connect(req *http.Request, key peerServiceKey, identity peerServiceIdentity, cfg *tls.Config, h *peerServiceHealth, direct bool, budget time.Duration) (net.Conn, bool, error) {
-	if err := reverseDialContextError(req.Context()); err != nil {
+// setupContext remains the caller's context when a reusable connection has a
+// detached lifetime, so cancellation cannot race a direct-to-reverse fallback.
+func (p *PeerServiceClient) connect(req *http.Request, setupContext context.Context, key peerServiceKey, identity peerServiceIdentity, cfg *tls.Config, h *peerServiceHealth, direct bool, budget time.Duration) (net.Conn, bool, error) {
+	if err := reverseDialContextError(setupContext); err != nil {
 		return nil, false, err
 	}
 	finish := func(conn net.Conn, setup context.Context) (net.Conn, error) {
@@ -609,7 +611,7 @@ func (p *PeerServiceClient) connect(req *http.Request, key peerServiceKey, ident
 	}
 	var directErr error
 	if direct {
-		setup, cancel := context.WithTimeout(req.Context(), budget)
+		setup, cancel := context.WithTimeout(setupContext, budget)
 		conn, err := p.opts.DialContext(setup, "tcp", identity.route.Address)
 		if err == nil {
 			conn, err = finish(conn, setup)
@@ -620,23 +622,23 @@ func (p *PeerServiceClient) connect(req *http.Request, key peerServiceKey, ident
 			return conn, true, nil
 		}
 		directErr = err
-		if req.Context().Err() == nil {
+		if setupContext.Err() == nil {
 			p.outcome(h, false)
 		} else {
-			return nil, false, req.Context().Err()
+			return nil, false, setupContext.Err()
 		}
 	}
 	if err := p.current(key, identity); err != nil {
 		return nil, false, err
 	}
-	if err := reverseDialContextError(req.Context()); err != nil {
+	if err := reverseDialContextError(setupContext); err != nil {
 		return nil, false, err
 	}
 	// The private context owns the full lifetime; only inner TLS uses this
 	// separate setup timer, so its successful stream survives setup cancellation.
 	conn, err := p.opts.DialReverse(req.Context(), p.opts.BaseConfigDir, key.uuid, key.service)
 	if err == nil {
-		setup, cancel := context.WithTimeout(req.Context(), 5*time.Second)
+		setup, cancel := context.WithTimeout(setupContext, 5*time.Second)
 		conn, err = finish(conn, setup)
 		cancel()
 	}

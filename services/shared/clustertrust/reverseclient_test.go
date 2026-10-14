@@ -740,6 +740,35 @@ func TestPeerServiceClientCanceledBeforeDial(t *testing.T) {
 	}
 }
 
+func TestPeerServiceClientReusableCancellationDuringDirectSetupSkipsReverse(t *testing.T) {
+	f := newServiceClientFixture(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		t.Error("canceled request dispatched")
+		w.WriteHeader(http.StatusOK)
+	}))
+	f.adapter.opts.ReuseConnections = true
+	ctx, cancel := context.WithCancel(context.Background())
+	f.direct = func(context.Context, noderec.ServiceKey) (net.Conn, error) {
+		cancel()
+		return nil, errors.New("direct setup failed")
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, f.url, strings.NewReader("snapshot"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := f.adapter.Client("peer", noderec.ServiceCluster).Do(req)
+	if response != nil {
+		response.Body.Close()
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled setup error = %v, want context.Canceled", err)
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if direct, reverse := f.directCalls[noderec.ServiceCluster], f.reverseCalls[noderec.ServiceCluster]; direct != 1 || reverse != 0 {
+		t.Fatalf("canceled setup routes: direct=%d reverse=%d, want 1/0", direct, reverse)
+	}
+}
+
 func TestPeerServiceClientBothPathsUnavailable(t *testing.T) {
 	f := newServiceClientFixture(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		t.Error("unavailable route dispatched")
