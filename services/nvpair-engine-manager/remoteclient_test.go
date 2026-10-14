@@ -5,12 +5,54 @@ package main
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 )
+
+func TestRemoteClientModelFilesUseOrdinaryHeaderBudget(t *testing.T) {
+	test := func(name string, call func(context.Context, *remoteClient) error) {
+		t.Run(name, func(t *testing.T) {
+			release := make(chan struct{})
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				select {
+				case <-release:
+				case <-r.Context().Done():
+				}
+			}))
+			defer func() {
+				close(release)
+				srv.Close()
+			}()
+			base := http.DefaultTransport.(*http.Transport)
+			client := &remoteClient{
+				controlHTTP:      newRemoteHTTPClient(base, 20*time.Millisecond),
+				controlReadyHTTP: newRemoteHTTPClient(base, time.Second),
+				base:             srv.URL,
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+			defer cancel()
+			err := call(ctx, client)
+			if err == nil || !strings.Contains(err.Error(), "timeout awaiting response headers") {
+				t.Fatalf("model request error = %v, want ordinary header timeout", err)
+			}
+		})
+	}
+	test("listing", func(ctx context.Context, client *remoteClient) error {
+		_, err := client.modelFiles(ctx, "ollama", "tiny", nil)
+		return err
+	})
+	test("download", func(ctx context.Context, client *remoteClient) error {
+		body, _, err := client.modelFile(ctx, "ollama", "tiny", "blobs/fixture", 0)
+		if body != nil {
+			err = errors.Join(err, body.Close())
+		}
+		return err
+	})
+}
 
 func TestRemoteStartUsesReadinessHeaderBudget(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {

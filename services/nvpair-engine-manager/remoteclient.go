@@ -31,8 +31,6 @@ const (
 
 // remoteClient talks to one peer's ec surface.
 type remoteClient struct {
-	// http retains the direct model-file transport used by modelcopy.go.
-	http        *http.Client
 	controlHTTP *http.Client
 	// controlReadyHTTP covers engine readiness, model loading and settings apply.
 	controlReadyHTTP *http.Client
@@ -82,9 +80,7 @@ func (m *Manager) remoteClient(ctx context.Context, peer ecPeer) (*remoteClient,
 	if !m.mesh.Clustered() {
 		return nil, fmt.Errorf("this node is not clustered; remote engine management is unavailable")
 	}
-	m.remoteHTTP.DropUnpinned()
-	httpClient, ok := m.remoteHTTP.Client(peer.clusterUUID)
-	if !ok {
+	if _, ok := m.mesh.PeerServiceIncarnation(peer.clusterUUID); !ok {
 		return nil, fmt.Errorf("node %q is not a pinned cluster peer", peer.nodeID)
 	}
 	// No total client timeout: install/pull run for minutes, bounded on the
@@ -102,7 +98,6 @@ func (m *Manager) remoteClient(ctx context.Context, peer ecPeer) (*remoteClient,
 	control := m.controlHTTP.Client(peer.clusterUUID, noderec.ServiceEngineControl)
 	ready := m.controlReadyHTTP.Client(peer.clusterUUID, noderec.ServiceEngineControl)
 	return &remoteClient{
-		http:             httpClient,
 		controlHTTP:      control,
 		controlReadyHTTP: ready,
 		base:             "https://" + hostport,

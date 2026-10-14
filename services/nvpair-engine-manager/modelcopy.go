@@ -534,7 +534,7 @@ func (c *remoteClient) modelFiles(ctx context.Context, engine, model string, onP
 	if err != nil {
 		return modelFileList{}, err
 	}
-	resp, err := c.http.Do(req)
+	resp, err := c.controlClient(false).Do(req)
 	if err != nil {
 		c.forgetAddress()
 		return modelFileList{}, err
@@ -581,7 +581,7 @@ func (c *remoteClient) modelFile(ctx context.Context, engine, model, path string
 	if offset > 0 {
 		req.Header.Set("Range", "bytes="+strconv.FormatInt(offset, 10)+"-")
 	}
-	resp, err := c.http.Do(req)
+	resp, err := c.controlClient(false).Do(req)
 	if err != nil {
 		c.forgetAddress()
 		return nil, 0, err

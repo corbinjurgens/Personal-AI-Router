@@ -121,7 +121,6 @@ func newRemoteReverseFixture(t *testing.T, handler func(*clustertrust.Mesh) http
 	f.m.controlHTTP, f.m.controlReadyHTTP = adapter(remoteResponseHeaderTimeout), adapter(remoteReadyResponseHeaderTimeout)
 	t.Cleanup(f.m.controlHTTP.CloseIdle)
 	t.Cleanup(f.m.controlReadyHTTP.CloseIdle)
-	t.Cleanup(f.m.remoteHTTP.CloseIdle)
 	return f
 }
 

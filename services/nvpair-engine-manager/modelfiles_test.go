@@ -115,7 +115,7 @@ func modelFileServer(t *testing.T, exec *Executor, wrap func(http.Handler) http.
 	}
 	srv := httptest.NewServer(h)
 	t.Cleanup(srv.Close)
-	return srv, &remoteClient{http: srv.Client(), base: srv.URL}
+	return srv, &remoteClient{controlHTTP: srv.Client(), base: srv.URL}
 }
 
 func TestValidModelRelPath(t *testing.T) {

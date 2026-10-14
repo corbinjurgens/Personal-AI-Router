@@ -21,9 +21,9 @@ import (
 	"nvpair-shared/noderec"
 )
 
-// File-copy requests keep their existing pooled direct path. Control requests
-// instead use fresh connections to forbid transport replay after dispatch.
-func TestRemoteClient_ReusesModelFileConnections(t *testing.T) {
+// File requests use fresh pinned connections so an interrupted HTTP request
+// cannot be replayed by an idle-connection transport.
+func TestRemoteClient_ModelFilesUseFreshConnections(t *testing.T) {
 	selfDir := t.TempDir()
 	peerDir := t.TempDir()
 	clustertrusttest.WriteKeypair(t, selfDir, "uuid-self")
@@ -43,6 +43,9 @@ func TestRemoteClient_ReusesModelFileConnections(t *testing.T) {
 	newConns := 0
 	mux := http.NewServeMux()
 	mux.HandleFunc(controlModelFilesPath, func(w http.ResponseWriter, r *http.Request) {
+		if !r.Close {
+			t.Error("model listing request could retain a replayable idle connection")
+		}
 		if _, ok := peerMesh.VerifyClientPin(r); !ok {
 			http.Error(w, "forbidden", http.StatusForbidden)
 			return
@@ -74,7 +77,8 @@ func TestRemoteClient_ReusesModelFileConnections(t *testing.T) {
 
 	var out bytes.Buffer
 	m := NewManager(NewCodec(&out), &Executor{progress: newProgressHub()}, selfMesh, selfDir)
-	defer m.remoteHTTP.CloseIdle()
+	defer m.controlHTTP.CloseIdle()
+	defer m.controlReadyHTTP.CloseIdle()
 
 	m.peers.set([]noderec.DirectoryNode{{HostUUID: "host-peer", IP: host, ClusterUUID: "uuid-peer",
 		Services: map[noderec.ServiceKey]noderec.ServiceStatus{noderec.ServiceEngineControl: {Port: port}},
@@ -98,8 +102,8 @@ func TestRemoteClient_ReusesModelFileConnections(t *testing.T) {
 	mu.Lock()
 	got := newConns
 	mu.Unlock()
-	if got != 1 {
-		t.Fatalf("peer accepted %d connections for %d modelFiles calls, want 1", got, rounds)
+	if got != rounds {
+		t.Fatalf("peer accepted %d connections for %d modelFiles calls, want %d", got, rounds, rounds)
 	}
 }
 

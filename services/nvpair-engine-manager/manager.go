@@ -62,15 +62,13 @@ type setPortParam struct {
 // start, stop, restart, action) run in their own goroutine so the read
 // loop never blocks; the codec serializes the concurrent responses.
 type Manager struct {
-	settingsRelay settingsRelay
-	policyRelay   policyRelay
-	codec         *Codec
-	exec          *Executor
-	peers         *peerDirectory
-	addrs         *reach.Chooser
-	mesh          *clustertrust.Mesh // cluster identity + pins for dialing peers' ec surfaces
-	// Model-file traffic retains its direct pool until the file-transfer phase.
-	remoteHTTP       *clustertrust.PeerClientPool
+	settingsRelay    settingsRelay
+	policyRelay      policyRelay
+	codec            *Codec
+	exec             *Executor
+	peers            *peerDirectory
+	addrs            *reach.Chooser
+	mesh             *clustertrust.Mesh // cluster identity + pins for dialing peers' ec surfaces
 	controlHTTP      *clustertrust.PeerServiceClient
 	controlReadyHTTP *clustertrust.PeerServiceClient
 	// catalog answers engine:catalog: the models an engine can download, as
@@ -84,14 +82,11 @@ func NewManager(codec *Codec, exec *Executor, mesh *clustertrust.Mesh, clusterDi
 	// handleMessage is reached before Run() installs the real CancelFunc
 	// (e.g. a unit test calling it directly); Run overwrites it.
 	m := &Manager{
-		codec: codec,
-		exec:  exec,
-		peers: newPeerDirectory(),
-		addrs: reach.NewChooser(),
-		mesh:  mesh,
-		remoteHTTP: clustertrust.NewPeerClientPoolOpts(mesh, clustertrust.PeerClientOptions{
-			ResponseHeaderTimeout: remoteResponseHeaderTimeout,
-		}),
+		codec:   codec,
+		exec:    exec,
+		peers:   newPeerDirectory(),
+		addrs:   reach.NewChooser(),
+		mesh:    mesh,
 		catalog: newCatalogService(),
 		cancel:  func() {},
 	}
@@ -142,7 +137,6 @@ func (m *Manager) Run(ctx context.Context) error {
 	// then stop engines so the parent's exit doesn't orphan them.
 	cancel()
 	m.exec.StopAll()
-	m.remoteHTTP.CloseIdle()
 	m.controlHTTP.CloseIdle()
 	m.controlReadyHTTP.CloseIdle()
 	return err
