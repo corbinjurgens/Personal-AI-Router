@@ -374,6 +374,71 @@ Example removal (`POST /v1/cluster/members/remove`, mTLS):
 ```
 Response: `200 OK`.
 
+### Authenticated reverse peer transport
+
+The trusted side of the existing split TCP listener also accepts HTTP/1.1
+`GET /cluster/reverse` with `Connection: Upgrade`, `Upgrade: nvpair-reverse/1`,
+and `X-Nvpair-Reverse-Session` containing a random lowercase hexadecimal
+session ID. Plain pairing HTTP never exposes this endpoint. Both ends require
+the exact current certificate pin, a confirmed member in the current cluster,
+matching pin/member admission epochs, an active local admission, and no pending
+teardown. The candidate incarnation is derived using the authenticated request
+certificate DER; a replacement pin cannot authorize an older TLS connection
+under a newly sampled admission. These checks bind the session to both
+certificates and admissions.
+
+Both nodes independently initiate direct TCP plus pinned TLS upgrades toward
+known peer addresses with a five-second setup budget and bounded retry workers.
+Neither UUID order excludes the only reachable direction. Yamux multiplexes
+service streams over an owned outer connection. Duplicate sessions converge by
+initiator UUID, then session ID; either direction alone remains usable. Buffered
+HTTP bytes are preserved and setup deadlines cleared at the handoff. Pin
+removal, in-memory revocation, membership/admission changes, local identity
+changes, leave, and shutdown close obsolete sessions and their active streams.
+Interrupted application traffic is never replayed by this transport.
+
+The broker supplies `cluster:set-local-services` exclusively over its child
+stdio transport: `{generation: uint64, services: RegisterParams[]}` is a full
+snapshot. Initial generation zero, including an empty baseline, is valid.
+Strictly older snapshots are ignored; equal generations require equal contents.
+The manager validates the entire new snapshot before publishing it. Unknown or
+duplicate keys, invalid ports, missing fields, and protocol overrides fail
+without replacing any live registration. Registration metadata is memory-only
+and must be replayed by the broker after a manager restart.
+
+Streams identify a service, never a caller-selected host or port. Current
+registrations resolve only to IPv4 loopback. The listener-derived protocol
+policy requires a bounded, valid TLS ClientHello for `cl`, `ol`, `lm`, `lc`,
+`em`, `ec`, `er`, and `wl` before dialing loopback; original bytes are preserved
+for the service's own inner mTLS gate. Only `ni` explicitly allows plaintext
+inside an authenticated outer session. Unknown or unregistered services fail.
+A registration change during protocol setup rejects the stale destination.
+Shared transport limits bound sessions, active streams, incomplete service
+headers, control frames, and ClientHello setup independently of application
+stream lifetime.
+
+Other local subprocesses use `clustertrust.DialReverse(ctx, baseConfigDir,
+peerUUID, serviceKey)`. Its private listener is `cluster/reverse.sock` under the
+base config directory on Unix (created with mode `0600` before goroutines);
+Windows uses a config-directory-derived named pipe with a current-user-only
+ACL and message-mode byte adapter for half-close. No HTTP handler exposes this
+operation, including any loopback or tunnel service. The bounded private JSON
+header contains `peerUuid`, `service`, a random `callId`, and an optional local
+`deadlineUnixNano` applied by the manager; a one-byte zero
+reply admits the stream and a nonzero reply refuses it. A retained private
+`{callId, watch: true}` lifecycle connection must attach and receive its own
+zero acknowledgement before an application stream is opened or acknowledged.
+Closing that connection cancels the request through an already admitted path,
+including when all private accept/header slots are occupied. `CloseWrite`
+leaves the lifecycle connection open so request EOF permits a delayed response.
+Failed attachment is bounded by the setup deadline and cleans both halves;
+lifecycle waiters are joined at shutdown. Active calls and both connection
+halves remain within the process caps.
+Context deadlines, cancellation, and closing the local client revoke only that
+request. Unavailability is reported as `ReverseUnavailableError`. Shutdown
+closes and joins the private listener, its requests, and owned reverse sessions;
+a second instance never removes an endpoint another instance owns.
+
 ### 7.3 Versioning
 - URL path prefix (`/v1`) on the inter-node interface.
 - JSON-RPC `method` names and HTTP endpoints are namespaced and additive. Wire objects gain optional fields, while security validation may fail closed on evidence that predates the admission-bound schema (for example a timestamp-only removal cannot authorize self-eviction).

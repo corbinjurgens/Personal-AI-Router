@@ -49,6 +49,17 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	codec := NewCodec(transport)
+	mgr, err := NewManager(codec, *configDir, *port)
+	if err != nil {
+		log.Fatalf("failed to initialise cluster manager: %v", err)
+	}
+	mgr.localServicesAllowed = *ipcPath == ""
+	mgr.controlTransport = transport
+	// Bind before starting goroutines: ListenPrivate temporarily narrows umask.
+	if err := mgr.startReversePrivate(); err != nil {
+		log.Fatalf("private dial: %v", err)
+	}
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
@@ -59,12 +70,6 @@ func main() {
 		case <-ctx.Done():
 		}
 	}()
-
-	codec := NewCodec(transport)
-	mgr, err := NewManager(codec, *configDir, *port)
-	if err != nil {
-		log.Fatalf("failed to initialise cluster manager: %v", err)
-	}
 
 	if err := mgr.Run(ctx); err != nil && ctx.Err() == nil {
 		log.Fatalf("manager error: %v", err)

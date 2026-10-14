@@ -125,6 +125,7 @@ func (m *Manager) upsertMember(node *ClusterNode) {
 	m.members[node.NodeUUID] = cloneClusterNode(node)
 	m.memMu.Unlock()
 	m.clusterGen.Add(1)
+	m.revalidateReverse()
 }
 
 // removeMemberByUUID drops a member; returns whether one was present.
@@ -135,6 +136,7 @@ func (m *Manager) removeMemberByUUID(uuid string) bool {
 	m.memMu.Unlock()
 	if ok {
 		m.clusterGen.Add(1)
+		m.revalidateReverse()
 	}
 	return ok
 }
@@ -145,6 +147,7 @@ func (m *Manager) resetMembership() {
 	m.members = make(map[string]*ClusterNode)
 	m.memMu.Unlock()
 	m.clusterGen.Add(1)
+	m.revalidateReverse()
 }
 
 // resetInvites abandons every in-flight (pending) Broker-facing invite so a
@@ -357,6 +360,7 @@ func (m *Manager) emitNodesChanged() {
 // trusting a diff carried on the wire, so a message that arrives out of order,
 // twice, or coalesced with another is harmless.
 func (m *Manager) announceTrustChanged() {
+	m.revalidateReverse()
 	m.mesh.Refresh()
 	m.clients.DropUnpinned()
 	if err := m.codec.Notify("cluster:trust-changed", struct{}{}); err != nil {

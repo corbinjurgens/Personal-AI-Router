@@ -43,8 +43,11 @@ type Manager struct {
 	// authority for both inbound and outbound cluster-manager traffic. clients
 	// is the long-lived per-peer mTLS pool — a throwaway Transport per reconcile
 	// leaked a socket for the life of the process.
-	mesh    *clustertrust.Mesh
-	clients *clustertrust.PeerClientPool
+	mesh                 *clustertrust.Mesh
+	clients              *clustertrust.PeerClientPool
+	reverse              *reverseState
+	localServicesAllowed bool
+	controlTransport     io.Closer
 
 	clusterMu            sync.RWMutex
 	clusterID            string
@@ -171,6 +174,7 @@ func (m *Manager) setClusterIdentity(id, friendly string) {
 	// the same reconcile pass and postpone the offline-removed self-remove.
 	if changed {
 		m.clusterGen.Add(1)
+		m.revalidateReverse()
 	}
 }
 
@@ -186,6 +190,7 @@ func (m *Manager) setClusterIdentity(id, friendly string) {
 func (m *Manager) withClusterComposition(fn func()) {
 	m.rosterMu.Lock()
 	defer m.rosterMu.Unlock()
+	defer m.revalidateReverse()
 	fn()
 }
 
@@ -224,12 +229,13 @@ func NewManager(codec *Codec, configDir string, port int) (*Manager, error) {
 	}
 	mesh := clustertrust.Open(clusterDir)
 	mgr := &Manager{
-		codec:      codec,
-		clusterDir: clusterDir,
-		port:       port,
-		identity:   identity,
-		trust:      trust,
-		mesh:       mesh,
+		codec:                codec,
+		clusterDir:           clusterDir,
+		port:                 port,
+		identity:             identity,
+		trust:                trust,
+		localServicesAllowed: true,
+		mesh:                 mesh,
 		clients: clustertrust.NewPeerClientPoolOpts(mesh, clustertrust.PeerClientOptions{
 			Timeout:    pairingHTTPTimeout,
 			ResolvePin: trust.DER,
@@ -298,6 +304,9 @@ func NewManager(codec *Codec, configDir string, port int) (*Manager, error) {
 	if err := mgr.replayRemovalProofs(); err != nil {
 		return nil, fmt.Errorf("replay removal proofs: %w", err)
 	}
+	if err := mgr.initReverse(); err != nil {
+		return nil, err
+	}
 	return mgr, nil
 }
 
@@ -319,8 +328,20 @@ func (m *Manager) Run(ctx context.Context) error {
 	ctx, cancel := context.WithCancel(ctx)
 	m.cancel = cancel
 	defer cancel()
+	if m.controlTransport != nil {
+		stop := context.AfterFunc(ctx, func() { m.controlTransport.Close() })
+		defer stop()
+	}
+	if err := m.startReversePrivate(); err != nil {
+		return err
+	}
+	defer func() { cancel(); m.reverse.listener.Close(); m.reverse.manager.Close(); m.reverse.wg.Wait() }()
+	m.reverse.wg.Add(1)
+	go m.runReversePrivate(ctx)
 
+	m.reverse.wg.Add(1)
 	go func() {
+		defer m.reverse.wg.Done()
 		if err := m.runHTTP(ctx); err != nil {
 			log.Printf("inter-node HTTP server error: %v", err)
 			cancel()
@@ -328,6 +349,8 @@ func (m *Manager) Run(ctx context.Context) error {
 	}()
 
 	m.startResolver()
+	m.reverse.wg.Add(1)
+	go m.reverseConnectLoop(ctx)
 
 	// Subscribe to the broker's discovery relay for cl peer targets. They arrive
 	// as discovery:nodes snapshots (handled in handleMessage), each replacing the
@@ -406,6 +429,10 @@ func (m *Manager) handleMessage(msg *Message) {
 
 	if msg.IsNotification() {
 		switch msg.Method {
+		case "cluster:set-local-services":
+			if err := m.applyLocalServices(msg.Params); err != nil {
+				log.Printf("invalid local services snapshot: %v", err)
+			}
 		case noderec.NotifyNodes:
 			m.applyDiscovery(msg)
 		default:
@@ -418,6 +445,12 @@ func (m *Manager) handleMessage(msg *Message) {
 	}
 
 	switch msg.Method {
+	case "cluster:set-local-services":
+		if err := m.applyLocalServices(msg.Params); err != nil {
+			m.codec.RespondError(msg.ID, codeInvalidParams, err.Error())
+		} else {
+			m.codec.Respond(msg.ID, nil)
+		}
 	case "cluster:get-node-id":
 		m.handleGetNodeID(msg)
 	case "cluster:set-identity":

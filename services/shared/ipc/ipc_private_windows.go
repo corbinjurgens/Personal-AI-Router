@@ -36,6 +36,20 @@ func ListenPrivate(path string) (net.Listener, error) {
 	return ListenSDDL(path, sddl)
 }
 
+// ListenPrivateMessagePipe is an owner-only byte stream with CloseWrite support
+// supplied by go-winio's message-mode adapter. Other private listeners retain
+// their existing byte-mode contract.
+func ListenPrivateMessagePipe(path string) (net.Listener, error) {
+	if !isPipePath(path) {
+		return nil, fmt.Errorf("private message pipe requires a named pipe path")
+	}
+	sddl, err := CurrentUserSDDL()
+	if err != nil {
+		return nil, err
+	}
+	return winio.ListenPipe(path, &winio.PipeConfig{SecurityDescriptor: sddl, MessageMode: true})
+}
+
 // ListenSDDL creates a named-pipe listener at path whose security descriptor is
 // the given SDDL string.
 func ListenSDDL(path, sddl string) (net.Listener, error) {

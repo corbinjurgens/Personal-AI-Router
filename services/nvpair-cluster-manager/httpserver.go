@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"eapnoob"
+	"nvpair-shared/clustertrust"
 )
 
 const (
@@ -62,6 +63,7 @@ func (m *Manager) runHTTP(ctx context.Context) error {
 	trustedMux.HandleFunc(pairingPath, m.handlePairing)
 	trustedMux.HandleFunc(membersRemovePath, m.handleMembersRemove)
 	trustedMux.HandleFunc(rosterPath, m.handleRoster)
+	trustedMux.HandleFunc(clustertrust.ReverseUpgradePath, m.handleReverseUpgrade)
 
 	listener, err := net.Listen("tcp", fmt.Sprintf(":%d", m.port))
 	if err != nil {

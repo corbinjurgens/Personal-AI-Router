@@ -215,5 +215,6 @@ func (m *Manager) teardownClusterLocalLocked() error {
 	if err := m.beginDurableTeardown(); err != nil {
 		return fmt.Errorf("start teardown journal: %w", err)
 	}
+	m.revalidateReverse()
 	return m.finishDurableTeardown()
 }
