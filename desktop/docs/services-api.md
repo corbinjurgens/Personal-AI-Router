@@ -76,6 +76,7 @@
 | `cluster:leave` | request (we call) | ✅ yes |
 | `cluster:respond-to-invite` | request (we call) | ✅ yes |
 | `cluster:set-identity` | request (we call) | ✅ yes |
+| `cluster:set-local-services` | request (we call) | ➖ ignored |
 | `nodes:get-initial` | request (we call) | ✅ yes |
 | `nodes:remove` | request (we call) | ✅ yes |
 
@@ -263,6 +264,7 @@
 | Method | Direction | In bridge? |
 |---|---|---|
 | `app:ready` | notification (we consume) | ✅ yes |
+| `cluster:set-local-services` | notification (we consume) | ➖ ignored |
 | `discovery:nodes-changed` | notification (we consume) | ✅ yes |
 | `engine:restore-enabled` | notification (we consume) | ➖ ignored |
 | `engine:settings-changed` | notification (we consume) | ✅ yes |
