@@ -36,6 +36,11 @@ type PeerServiceClientOptions struct {
 	ResolveRoute  func(string, noderec.ServiceKey) (PeerServiceRoute, bool)
 	DirectTimeout time.Duration
 	ProbeInterval time.Duration
+	// ReuseConnections opts into pooling for receiver-deduplicated POSTs with
+	// a nonempty, known-length body. Other request shapes keep fresh connections.
+	// GetBody is withheld from net/http during dispatch, even with idempotency
+	// headers, so a stale connection cannot trigger an internal mutation replay.
+	ReuseConnections bool
 	// Optional transport seams retain the same cancellation/lifetime contract
 	// as net.Dialer.DialContext and DialReverse respectively.
 	DialContext func(context.Context, string, string) (net.Conn, error)
@@ -43,18 +48,19 @@ type PeerServiceClientOptions struct {
 }
 
 // PeerServiceClient is opt-in. Classic PeerClientPool callers keep their pooled
-// transport. This adapter uses a fresh HTTP/1 connection per request: net/http
+// transport. This adapter defaults to a fresh HTTP/1 connection per request: net/http
 // may replay a mutation on a reused connection, including a request carrying an
 // Idempotency-Key even when its GetBody is nil. Fresh connections make its
 // shouldRetryRequest gate refuse replay, while preserving request headers/body.
-// No idle connection survives a route or authority change; active bodies drain
-// normally. The cost is one pinned TLS handshake per request until a transport
-// with explicit dispatch ownership can safely pool these operations.
+// ReuseConnections explicitly enables pooling for eligible POSTs whose receiver
+// owns deduplication. No idle connection survives an observed authority change;
+// active bodies drain normally.
 type PeerServiceClient struct {
 	mesh    *Mesh
 	opts    PeerServiceClientOptions
 	mu      sync.Mutex
 	entries map[peerServiceKey]*peerServiceHealth
+	idle    int
 }
 
 type peerServiceKey struct {
@@ -68,10 +74,13 @@ type peerServiceIdentity struct {
 }
 
 type peerServiceHealth struct {
-	identity  peerServiceIdentity
-	nextProbe time.Time
-	probing   bool
-	slots     chan struct{}
+	identity        peerServiceIdentity
+	nextProbe       time.Time
+	probing         bool
+	probeGeneration uint64
+	slots           chan struct{}
+	idle            []*peerServiceReuse
+	retired         bool
 }
 
 func NewPeerServiceClient(mesh *Mesh, opts PeerServiceClientOptions) *PeerServiceClient {
@@ -142,11 +151,16 @@ func (p *PeerServiceClient) authority(key peerServiceKey) (peerServiceIdentity, 
 
 func (p *PeerServiceClient) current(key peerServiceKey, identity peerServiceIdentity) error {
 	now, _, err := p.authority(key)
-	if err != nil {
-		return err
-	}
-	if now != identity {
-		return &ReverseUnavailableError{PeerUUID: key.uuid, Cause: errors.New("peer service authority changed during dial")}
+	if err != nil || now != identity {
+		p.mu.Lock()
+		if h := p.entries[key]; h != nil && h.identity == identity {
+			p.retireLocked(h)
+		}
+		p.mu.Unlock()
+		if err != nil {
+			return err
+		}
+		return &ReverseUnavailableError{PeerUUID: key.uuid, Cause: errors.New("peer service authority changed before dispatch")}
 	}
 	return nil
 }
@@ -158,26 +172,38 @@ func (p *PeerServiceClient) health(key peerServiceKey, identity peerServiceIdent
 	if h == nil {
 		h = &peerServiceHealth{identity: identity, slots: make(chan struct{}, peerMaxConnsPerHost)}
 		p.entries[key] = h
-	} else if h.identity != identity {
+	} else if h.identity != identity || h.retired {
 		// Health belongs to this identity, but active responses from older
 		// identities still count against the logical peer/service limit.
+		p.retireLocked(h)
 		h = &peerServiceHealth{identity: identity, slots: h.slots}
 		p.entries[key] = h
 	}
 	return h
 }
 
-func (p *PeerServiceClient) direct(h *peerServiceHealth) bool {
+func (p *PeerServiceClient) direct(h *peerServiceHealth) (bool, uint64) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if h.nextProbe.IsZero() {
-		return true
+		return true, 0
 	}
 	if h.probing || time.Now().Before(h.nextProbe) {
-		return false
+		return false, 0
 	}
 	h.probing = true
-	return true
+	h.probeGeneration++
+	return true, h.probeGeneration
+}
+
+func (p *PeerServiceClient) releaseProbe(h *peerServiceHealth, generation uint64) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	// Setup may already have completed this probe and another caller may have
+	// reserved its successor. Cancellation releases only this request's probe.
+	if h.probeGeneration == generation {
+		h.probing = false
+	}
 }
 
 func (p *PeerServiceClient) outcome(h *peerServiceHealth, healthy bool) {
@@ -222,8 +248,14 @@ func (t *peerServiceTransport) RoundTrip(req *http.Request) (*http.Response, err
 	}
 	identity, cfg, err := p.authority(key)
 	if err != nil {
+		p.mu.Lock()
+		if h := p.entries[key]; h != nil {
+			p.retireLocked(h)
+		}
+		p.mu.Unlock()
 		return nil, err
 	}
+	h := p.health(key, identity)
 	plain := identity.route.Protocol == ReversePlain
 	scheme := "https"
 	if plain {
@@ -232,7 +264,6 @@ func (t *peerServiceTransport) RoundTrip(req *http.Request) (*http.Response, err
 	if req.URL.Scheme != scheme || req.URL.Host != identity.route.Address {
 		return nil, &ReverseUnavailableError{PeerUUID: key.uuid, Cause: errors.New("URL does not match current peer service endpoint")}
 	}
-	h := p.health(key, identity)
 	select {
 	case h.slots <- struct{}{}:
 	case <-req.Context().Done():
@@ -247,8 +278,19 @@ func (t *peerServiceTransport) RoundTrip(req *http.Request) (*http.Response, err
 		release()
 		return nil, err
 	}
-	direct := p.direct(h)
+	direct, probe := p.direct(h)
+	if probe != 0 {
+		defer p.releaseProbe(h, probe)
+	}
 	budget := p.budget(req.Context(), plain)
+	if p.opts.ReuseConnections && req.Method == http.MethodPost && req.Body != nil && req.Body != http.NoBody && req.ContentLength > 0 {
+		response, err := p.reusableRoundTrip(req, key, identity, cfg, h, direct, budget)
+		handedToHTTP = true // reusableRoundTrip owns the request body, including setup failures.
+		return response, err
+	}
+	p.mu.Lock()
+	p.trimIdleLocked(h)
+	p.mu.Unlock()
 	var conn net.Conn
 	var usedDirect atomic.Bool
 	var tlsState atomic.Pointer[tls.ConnectionState]
@@ -348,15 +390,200 @@ func (t *peerServiceTransport) RoundTrip(req *http.Request) (*http.Response, err
 	return response, nil
 }
 
+// Each pooled transport owns exactly one established connection. It cannot
+// redial behind the caller's back; the next caller owns any replacement setup.
+type peerServiceReuse struct {
+	conn   *peerServiceAuthorizedConn
+	tr     *http.Transport
+	direct bool
+	timer  *time.Timer
+}
+
+func (c *peerServiceReuse) close() {
+	c.tr.CloseIdleConnections()
+	c.conn.Close()
+}
+
+func (p *PeerServiceClient) removeIdleLocked(h *peerServiceHealth, index int) *peerServiceReuse {
+	c := h.idle[index]
+	h.idle = append(h.idle[:index], h.idle[index+1:]...)
+	p.idle--
+	c.timer.Stop()
+	return c
+}
+
+func (p *PeerServiceClient) retireLocked(h *peerServiceHealth) {
+	h.retired = true
+	for len(h.idle) != 0 {
+		p.removeIdleLocked(h, len(h.idle)-1).close()
+	}
+}
+
+func (p *PeerServiceClient) trimIdleLocked(h *peerServiceHealth) {
+	for len(h.idle)+len(h.slots) > peerMaxConnsPerHost {
+		p.removeIdleLocked(h, len(h.idle)-1).close()
+	}
+}
+
+// CloseIdle retires pooled idle connections without interrupting active bodies.
+func (p *PeerServiceClient) CloseIdle() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, h := range p.entries {
+		p.retireLocked(h)
+	}
+}
+
+func (p *PeerServiceClient) reusableRoundTrip(req *http.Request, key peerServiceKey, identity peerServiceIdentity, cfg *tls.Config, h *peerServiceHealth, direct bool, budget time.Duration) (*http.Response, error) {
+	release := func() { <-h.slots }
+	p.mu.Lock()
+	var c *peerServiceReuse
+	for i := len(h.idle) - 1; i >= 0; i-- {
+		if h.idle[i].direct == direct {
+			c = p.removeIdleLocked(h, i)
+			break
+		}
+	}
+	// Idle connections plus reserved active requests share the logical bound,
+	// including while direct probes coexist with reverse responses.
+	p.trimIdleLocked(h)
+	p.mu.Unlock()
+	if c == nil {
+		// A successful reverse stream must outlive this request's deadline. Its
+		// private lifetime ends when the transport closes, not when the caller
+		// finishes a response. Setup still observes the caller's cancellation.
+		lifetime, cancel := context.WithCancel(context.WithoutCancel(req.Context()))
+		stop := context.AfterFunc(req.Context(), cancel)
+		conn, usedDirect, err := p.connect(req.WithContext(lifetime), key, identity, cfg, h, direct, budget)
+		stop()
+		if err != nil || req.Context().Err() != nil {
+			cancel()
+			if conn != nil {
+				conn.Close()
+			}
+			req.Body.Close()
+			release()
+			if req.Context().Err() != nil {
+				return nil, req.Context().Err()
+			}
+			return nil, err
+		}
+		guarded := &peerServiceAuthorizedConn{Conn: conn, authorize: func() error { return p.current(key, identity) }, cancel: cancel}
+		tr := &http.Transport{
+			TLSClientConfig: cfg, TLSNextProto: map[string]func(string, *tls.Conn) http.RoundTripper{},
+			ResponseHeaderTimeout: p.opts.ResponseHeaderTimeout,
+			MaxConnsPerHost:       1, MaxIdleConns: 1, MaxIdleConnsPerHost: 1,
+		}
+		var handedOff atomic.Bool
+		dial := func(context.Context, string, string) (net.Conn, error) {
+			if !handedOff.CompareAndSwap(false, true) {
+				return nil, errors.New("pooled peer service connection is no longer available")
+			}
+			if err := p.current(key, identity); err != nil {
+				return nil, err
+			}
+			return guarded, nil
+		}
+		if identity.route.Protocol == ReversePlain {
+			tr.DialContext = dial
+			if usedDirect && (tr.ResponseHeaderTimeout <= 0 || tr.ResponseHeaderTimeout > budget) {
+				tr.ResponseHeaderTimeout = budget
+			}
+		} else {
+			tr.DialTLSContext = dial
+		}
+		c = &peerServiceReuse{conn: guarded, tr: tr, direct: usedDirect}
+	}
+	// A positive outgoing length and nil GetBody jointly disable both
+	// shouldRetryRequest paths: nothingWrittenError and isReplayable. Preserve
+	// the original GetBody for http.Client's redirect handling and body ownership.
+	dispatch := req.Clone(req.Context())
+	dispatch.GetBody = nil
+	response, err := c.tr.RoundTrip(dispatch)
+	if err != nil {
+		if c.direct && req.Context().Err() == nil {
+			p.outcome(h, false)
+		}
+		c.close()
+		release()
+		if req.Context().Err() != nil {
+			return nil, req.Context().Err()
+		}
+		return nil, &ReverseUnavailableError{PeerUUID: key.uuid, Cause: err}
+	}
+	if c.direct {
+		p.outcome(h, true)
+	}
+	if identity.route.Protocol == ReverseTLS && response.TLS == nil {
+		state := c.conn.ConnectionState()
+		response.TLS = &state
+	}
+	body := &peerServiceBody{ReadCloser: response.Body, ctx: req.Context(), failed: func() {
+		if c.direct && req.Context().Err() == nil {
+			p.outcome(h, false)
+		}
+	}}
+	body.finish = func() {
+		current := p.current(key, identity) == nil
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		release()
+		if body.complete.Load() && !response.Close && current && req.Context().Err() == nil && p.entries[key] == h && !h.retired && p.idle < peerMaxIdleConns && len(h.idle)+len(h.slots) < peerMaxConnsPerHost {
+			h.idle = append(h.idle, c)
+			p.idle++
+			var timer *time.Timer
+			timer = time.AfterFunc(PeerIdleTimeout, func() {
+				p.mu.Lock()
+				defer p.mu.Unlock()
+				for i, idle := range h.idle {
+					if idle == c && c.timer == timer {
+						p.removeIdleLocked(h, i).close()
+						break
+					}
+				}
+			})
+			c.timer = timer
+		} else {
+			c.close()
+		}
+	}
+	response.Body = body
+	return response, nil
+}
+
+// Every application write on a reusable connection checks its frozen authority,
+// including the first write of each subsequent request. HTTP/1.1 serializes
+// writes; request cancellation belongs to Transport, which closes only this conn.
+type peerServiceAuthorizedConn struct {
+	net.Conn
+	authorize func() error
+	cancel    context.CancelFunc
+}
+
+func (c *peerServiceAuthorizedConn) Write(data []byte) (int, error) {
+	if err := c.authorize(); err != nil {
+		c.Close()
+		return 0, err
+	}
+	return c.Conn.Write(data)
+}
+
+func (c *peerServiceAuthorizedConn) Close() error {
+	c.cancel()
+	return c.Conn.Close()
+}
+
+func (c *peerServiceAuthorizedConn) ConnectionState() tls.ConnectionState {
+	if secure, ok := c.Conn.(interface{ ConnectionState() tls.ConnectionState }); ok {
+		return secure.ConnectionState()
+	}
+	return tls.ConnectionState{}
+}
+
 // Setup completes before HTTP owns any request bytes. In particular, a TCP
 // connection that resets or stalls on its first TLS data is a direct failure.
 func (p *PeerServiceClient) connect(req *http.Request, key peerServiceKey, identity peerServiceIdentity, cfg *tls.Config, h *peerServiceHealth, direct bool, budget time.Duration) (net.Conn, bool, error) {
 	if err := reverseDialContextError(req.Context()); err != nil {
-		if direct {
-			p.mu.Lock()
-			h.probing = false
-			p.mu.Unlock()
-		}
 		return nil, false, err
 	}
 	finish := func(conn net.Conn, setup context.Context) (net.Conn, error) {
@@ -396,9 +623,6 @@ func (p *PeerServiceClient) connect(req *http.Request, key peerServiceKey, ident
 		if req.Context().Err() == nil {
 			p.outcome(h, false)
 		} else {
-			p.mu.Lock()
-			h.probing = false
-			p.mu.Unlock()
 			return nil, false, req.Context().Err()
 		}
 	}
@@ -463,10 +687,11 @@ func (c *peerServiceConn) ConnectionState() tls.ConnectionState {
 
 type peerServiceBody struct {
 	io.ReadCloser
-	ctx    context.Context
-	once   sync.Once
-	finish func()
-	failed func()
+	ctx      context.Context
+	once     sync.Once
+	finish   func()
+	failed   func()
+	complete atomic.Bool
 }
 
 func (b *peerServiceBody) Read(data []byte) (int, error) {
@@ -477,6 +702,8 @@ func (b *peerServiceBody) Read(data []byte) (int, error) {
 		}
 		if err != io.EOF {
 			b.failed()
+		} else {
+			b.complete.Store(true)
 		}
 		b.once.Do(b.finish)
 	}
