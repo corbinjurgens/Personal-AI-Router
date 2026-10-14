@@ -51,7 +51,8 @@ const MATCHERS: LicenseMatcher[] = [
             /\bapache license\b/i.test(text) && /version\s*2\.0/i.test(text) ? 'Apache-2.0' : null
     },
     {
-        detect: text => (/mozilla public license\s*version\s*2\.0/i.test(text) ? 'MPL-2.0' : null)
+        detect: text =>
+            /mozilla public license(?:,|\s)+version\s*2\.0/i.test(text) ? 'MPL-2.0' : null
     },
     {
         detect: text =>

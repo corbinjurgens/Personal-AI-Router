@@ -20,6 +20,29 @@ describe('detectLicenseType', () => {
         expect(detectLicenseType(text)).toBe('MIT')
     })
 
+    it('detects comma-headed MPL-2.0 before its secondary GPL references', () => {
+        const text = [
+            'Mozilla Public License, version 2.0',
+            '',
+            'This Source Code Form is subject to the terms of the Mozilla Public License, v. 2.0.',
+            '',
+            '"Secondary License" means either the GNU General Public License, Version 2.0,',
+            'the GNU Lesser General Public License, Version 2.1, or Affero General Public',
+            'License, Version 3.0, or any later versions of those licenses.'
+        ].join('\n')
+        expect(detectLicenseType(text)).toBe('MPL-2.0')
+    })
+
+    it('detects whitespace-headed MPL-2.0', () => {
+        const text = 'Mozilla Public License\nVersion 2.0'
+        expect(detectLicenseType(text)).toBe('MPL-2.0')
+    })
+
+    it('detects GPL-3.0 from a genuine GPL version header', () => {
+        const text = 'GNU GENERAL PUBLIC LICENSE\nVersion 3, 29 June 2007'
+        expect(detectLicenseType(text)).toBe('GPL-3.0')
+    })
+
     it('returns Unknown for empty or unrecognized text', () => {
         expect(detectLicenseType('')).toBe('Unknown')
         expect(detectLicenseType('some proprietary blob')).toBe('Unknown')
