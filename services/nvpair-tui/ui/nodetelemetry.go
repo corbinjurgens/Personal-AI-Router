@@ -63,6 +63,10 @@ type nodeTelemetryMsg struct {
 	// close-and-reopen. Matching on the node alone is not enough — it is the
 	// same node.
 	gen int
+	// route is the detail screen's route epoch when this read started. Unlike
+	// gen, it changes while the screen stays open so a direct result cannot land
+	// after pairing, identity replacement, endpoint replacement, or removal.
+	route int
 	// address is the one that answered, tried first on the next poll.
 	address   string
 	telemetry nodeTelemetry

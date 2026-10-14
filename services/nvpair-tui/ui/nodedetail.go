@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -121,6 +122,16 @@ type nodeDetail struct {
 	// telemetryGen identifies this screen's polling chain. Bubble Tea cannot
 	// cancel a pending tick, so a chain is retired by no longer matching it.
 	telemetryGen int
+	// telemetryRoute identifies the route state captured by an in-flight poll.
+	// It advances independently of telemetryGen so identity, pairing, endpoint,
+	// and removal changes can retire a result without starting another polling
+	// chain or disturbing the detail screen's other refreshes.
+	telemetryRoute int
+	// telemetryFound distinguishes a current row from one removed from every
+	// feed. The retained node fields keep the screen legible while it is absent,
+	// but a result started before removal must not become current after an ABA
+	// removal and recreation.
+	telemetryFound bool
 	// telemetryRunning is whether a chain is in flight. Direct polling waits for
 	// a known address; paired polling can ask the getter without one.
 	telemetryRunning bool
@@ -221,14 +232,15 @@ func newNodeDetail(client *rpc.Client, node nodeRow) *nodeDetail {
 	ti := textinput.New()
 	telemetryChains++
 	d := &nodeDetail{
-		client:        client,
-		node:          node,
-		hostUUID:      telemetryIdentity(node),
-		telemetrySelf: node.self,
-		engineTable:   newTable(detailEngineColumns(defaultTableWidth, !node.self)),
-		modelTable:    newTable(detailModelColumns(defaultTableWidth)),
-		input:         ti,
-		telemetryGen:  telemetryChains,
+		client:         client,
+		node:           node,
+		hostUUID:       telemetryIdentity(node),
+		telemetrySelf:  node.self,
+		engineTable:    newTable(detailEngineColumns(defaultTableWidth, !node.self)),
+		modelTable:     newTable(detailModelColumns(defaultTableWidth)),
+		input:          ti,
+		telemetryGen:   telemetryChains,
+		telemetryFound: true,
 	}
 	if node.self {
 		d.proxy = newProxyTracker()
@@ -341,7 +353,9 @@ func (d *nodeDetail) telemetryCmd() tea.Cmd {
 	}
 	if !d.telemetrySelf && d.node.membership == membershipMember {
 		d.telemetryRunning = true
-		return pollPairedTelemetryCmd(d.client, d.node.key, d.telemetryGen, d.hostUUID)
+		return d.ownTelemetryRoute(
+			pollPairedTelemetryCmd(d.client, d.node.key, d.telemetryGen, d.hostUUID),
+		)
 	}
 	node := d.node
 	node.self = d.telemetrySelf
@@ -353,14 +367,25 @@ func (d *nodeDetail) telemetryCmd() tea.Cmd {
 	// entry opened before its first probe landed showed "unavailable" forever,
 	// even once discovery supplied an address.
 	d.telemetryRunning = cmd != nil
-	if cmd != nil && d.telemetrySelf {
-		return func() tea.Msg {
-			msg := cmd().(nodeTelemetryMsg)
-			msg.self = true
-			return msg
-		}
+	return d.ownTelemetryRoute(cmd)
+}
+
+// ownTelemetryRoute stamps a poll with the route state that launched it. The
+// polling generation deliberately stays stable while an open detail follows a
+// node through pairing and feed changes; the route epoch rejects only the old
+// sample and lets that one chain continue on the current route.
+func (d *nodeDetail) ownTelemetryRoute(cmd tea.Cmd) tea.Cmd {
+	if cmd == nil {
+		return nil
 	}
-	return cmd
+	route := d.telemetryRoute
+	self := d.telemetrySelf
+	return func() tea.Msg {
+		msg := cmd().(nodeTelemetryMsg)
+		msg.route = route
+		msg.self = self
+		return msg
+	}
 }
 
 func (d *nodeDetail) enginesCmd() tea.Cmd {
@@ -426,28 +451,46 @@ func (d *nodeDetail) own(cmd tea.Cmd) tea.Cmd {
 func (d *nodeDetail) followNode(row nodeRow, found bool) {
 	was := d.node.membership
 	hardwareWas := d.hardwareHeight()
+	oldHostUUID := d.hostUUID
+	oldSelf := d.telemetrySelf
+	oldMember := d.node.membership == membershipMember
+	oldTLS := d.node.nodeInfoTLS
+	oldAddress := d.node.address
+	oldAddresses := d.node.addresses
+	oldPort := d.node.port
+	oldFound := d.telemetryFound
 	if found {
 		hostUUID := telemetryIdentity(row)
-		if hostUUID != d.hostUUID || row.self != d.telemetrySelf {
-			d.telemetryOK = false
-			d.telemetryAddress = ""
-		}
 		d.hostUUID = hostUUID
 		d.telemetrySelf = row.self
 		d.node.name = row.name
+		d.node.address = row.address
+		d.node.addresses = row.addresses
 		d.node.presence = row.presence
 		d.node.membership = row.membership
 		// A hand-added node's node-info port and TLS setting arrive with the
 		// worker's first probe, which can land after the screen opened.
-		if d.node.port == 0 {
+		if row.port != 0 {
 			d.node.port = row.port
 		}
 		d.node.nodeInfoTLS = row.nodeInfoTLS
 		d.node.probedTelemetry = row.probedTelemetry
-		d.adoptProbedTelemetry()
 	} else {
 		d.node.presence = presenceOffline
 		d.node.membership = membershipNone
+	}
+	d.telemetryFound = found
+	newMember := d.node.membership == membershipMember
+	if oldFound != d.telemetryFound || oldHostUUID != d.hostUUID ||
+		oldSelf != d.telemetrySelf || oldMember != newMember ||
+		oldTLS != d.node.nodeInfoTLS || oldAddress != d.node.address ||
+		!slices.Equal(oldAddresses, d.node.addresses) || oldPort != d.node.port {
+		d.telemetryRoute++
+		d.telemetryOK = false
+		d.telemetryAddress = ""
+	}
+	if found {
+		d.adoptProbedTelemetry()
 	}
 	if d.hardwareHeight() != hardwareWas {
 		d.sizeEngineTable()
@@ -739,9 +782,11 @@ func (d *nodeDetail) update(msg tea.Msg) (tea.Cmd, bool) {
 			d.telemetryRunning = false
 			return nil, true
 		}
-		if msg.hostUUID != d.hostUUID || msg.self != d.telemetrySelf {
-			// The manual row acquired a host identity or became this machine
+		if msg.route != d.telemetryRoute || msg.hostUUID != d.hostUUID || msg.self != d.telemetrySelf {
+			// Identity, pairing intent, endpoint, or feed membership changed
 			// while this read was in flight. Keep the chain, not its sample.
+			// The route epoch also catches ABA transitions whose current values
+			// happen to match the retired request again.
 			return telemetryTickCmd(d.node.key, d.telemetryGen), true
 		}
 		// A failed poll is expected for an unreachable node and is recorded
@@ -887,10 +932,19 @@ func (d *nodeDetail) handleNotification(msg *rpc.Message) tea.Cmd {
 			// Adopt an address learned since the screen opened, and start
 			// polling if there was nothing to poll before. A manual entry is
 			// routinely opened before discovery has resolved it.
+			oldAddress := d.node.address
+			oldAddresses := d.node.addresses
+			oldPort := d.node.port
 			d.node.address = n.IPAddress
 			d.node.addresses = candidateAddresses(n)
 			if n.Port != 0 {
 				d.node.port = n.Port
+			}
+			if oldAddress != d.node.address ||
+				!slices.Equal(oldAddresses, d.node.addresses) || oldPort != d.node.port {
+				d.telemetryRoute++
+				d.telemetryOK = false
+				d.telemetryAddress = ""
 			}
 			if !d.telemetryRunning {
 				return d.telemetryCmd()

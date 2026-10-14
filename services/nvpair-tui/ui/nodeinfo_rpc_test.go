@@ -536,6 +536,177 @@ func TestNodeInfoRPCLateResponseAfterCloseReopenIsIgnored(t *testing.T) {
 	}
 }
 
+func TestNodeInfoRPCRouteTransitionDisownsSample(t *testing.T) {
+	tests := []struct {
+		name       string
+		transition func(*nodeDetail, nodeRow)
+	}{
+		{
+			name: "unpaired to paired",
+			transition: func(d *nodeDetail, row nodeRow) {
+				row.membership = membershipMember
+				d.followNode(row, true)
+			},
+		},
+		{
+			name: "self identity ABA",
+			transition: func(d *nodeDetail, row nodeRow) {
+				row.self = true
+				d.followNode(row, true)
+				row.self = false
+				d.followNode(row, true)
+			},
+		},
+		{
+			name: "host identity ABA",
+			transition: func(d *nodeDetail, row nodeRow) {
+				other := row
+				other.key = "other"
+				d.followNode(other, true)
+				d.followNode(row, true)
+			},
+		},
+		{
+			name: "removed and recreated",
+			transition: func(d *nodeDetail, row nodeRow) {
+				d.followNode(row, false)
+				d.followNode(row, true)
+			},
+		},
+		{
+			name: "direct endpoint changed",
+			transition: func(d *nodeDetail, row nodeRow) {
+				row.address = "192.0.2.2"
+				row.addresses = []string{"192.0.2.2"}
+				row.port++
+				d.followNode(row, true)
+			},
+		},
+		{
+			name: "manual TLS enabled",
+			transition: func(d *nodeDetail, row nodeRow) {
+				row.nodeInfoTLS = true
+				d.followNode(row, true)
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			row := nodeRow{
+				key: "peer", address: "192.0.2.1", addresses: []string{"192.0.2.1"},
+				port: 14318, presence: presenceOnline,
+			}
+			d := newNodeDetail(nil, row)
+			startRoute := d.telemetryRoute
+			stale := nodeTelemetryMsg{
+				nodeKey: d.node.key, hostUUID: d.hostUUID, self: d.telemetrySelf,
+				gen: d.telemetryGen, route: startRoute,
+				telemetry: nodeTelemetry{HostUUID: "peer", TelemetryValid: true},
+			}
+
+			test.transition(d, row)
+			next, _ := d.update(stale)
+			if d.telemetryRoute == startRoute {
+				t.Fatal("route transition did not advance its epoch")
+			}
+			if d.telemetryOK {
+				t.Fatal("retired telemetry result was accepted")
+			}
+			if d.node.nodeInfoTLS {
+				if next != nil || d.telemetryRunning {
+					t.Fatal("manual TLS transition continued client polling")
+				}
+				return
+			}
+			if next == nil {
+				t.Fatal("route transition stranded the existing polling chain")
+			}
+		})
+	}
+}
+
+func TestNodeInfoRPCPairingDisownsInFlightDirectSample(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		close(started)
+		select {
+		case <-release:
+		case <-t.Context().Done():
+			return
+		}
+		if _, err := w.Write([]byte(`{
+			"hostUuid":"physical-host","telemetryValid":true,
+			"cpu":{"name":"retired direct CPU"}
+		}`)); err != nil {
+			t.Errorf("write direct sample: %v", err)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	host, port := splitTestServer(t, srv.URL)
+	row := nodeRow{
+		key: "physical-host", address: host, addresses: []string{host},
+		port: port, presence: presenceOnline,
+	}
+	d := newNodeDetail(nil, row)
+	result := make(chan tea.Msg, 1)
+	go func() { result <- d.telemetryCmd()() }()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("direct telemetry read did not start")
+	}
+
+	row.membership = membershipMember
+	d.followNode(row, true)
+	close(release)
+	select {
+	case msg := <-result:
+		reading, ok := msg.(nodeTelemetryMsg)
+		if !ok || reading.err != nil {
+			t.Fatalf("direct telemetry result = %+v", msg)
+		}
+		next, _ := d.update(reading)
+		if d.telemetryOK || d.telemetry.CPU != nil {
+			t.Fatal("paired detail accepted the pre-pairing direct sample")
+		}
+		if next == nil {
+			t.Fatal("pairing transition stranded the existing polling chain")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("direct telemetry read did not finish")
+	}
+}
+
+func TestNodeInfoRPCDiscoveryEndpointChangeDisownsSample(t *testing.T) {
+	row := nodeRow{
+		key: "physical-host", address: "192.0.2.1", addresses: []string{"192.0.2.1"},
+		port: 14318, presence: presenceOnline,
+	}
+	d := newNodeDetail(nil, row)
+	d.telemetryRunning = true
+	stale := nodeTelemetryMsg{
+		nodeKey: d.node.key, hostUUID: d.hostUUID, gen: d.telemetryGen,
+		route:     d.telemetryRoute,
+		telemetry: nodeTelemetry{HostUUID: "physical-host", TelemetryValid: true},
+	}
+	params, err := json.Marshal([]availableNode{{
+		HostUUID: "physical-host", IPAddress: "192.0.2.2",
+		IPAddresses: []string{"192.0.2.3"}, Port: 14319,
+	}})
+	if err != nil {
+		t.Fatalf("encode discovery update: %v", err)
+	}
+	d.handleNotification(&rpc.Message{Method: "discovery:nodes-changed", Params: params})
+	next, _ := d.update(stale)
+	if d.telemetryOK {
+		t.Fatal("telemetry from the retired discovery endpoint was accepted")
+	}
+	if next == nil {
+		t.Fatal("endpoint transition stranded the existing polling chain")
+	}
+}
+
 func TestNodeInfoRPCResponseTimeoutDisownsLateReply(t *testing.T) {
 	client, broker := nodeInfoRPCFixture(t)
 	d := newNodeDetail(client, nodeRow{key: "physical-host", membership: membershipMember})

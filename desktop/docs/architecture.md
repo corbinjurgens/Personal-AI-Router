@@ -159,11 +159,13 @@ on a service nobody is starting. When the connector reaches `connected` again,
 the renderer re-reads every domain snapshot, because the restarted broker builds
 a fresh state projection.
 
-The only direct backend HTTP polling in Electron is `/v1/node-info`: Electron
-polls healthy local and discovered nodes every two seconds because rich
-telemetry is not part of the broker JSON-RPC surface. Consecutive failures back
-off to 4, 8, 16, then 30 seconds; the first success or a changed endpoint
-restores the normal cadence.
+Electron refreshes healthy local and discovered node telemetry every two seconds.
+Paired remote nodes use `discovery:get-node-info {hostUuid}` through the local
+service and broker; the scanner owns the admitted direct/reverse route and returns
+a fresh full sample. Self and unpaired discovery targets retain direct
+`/v1/node-info` polling, Electron's only direct backend HTTP polling. Consecutive
+failures back off to 4, 8, 16, then 30 seconds; the first success or a changed
+endpoint restores the normal cadence.
 
 ## State flow
 
@@ -358,8 +360,9 @@ cannot yet be reported are centralized in
 
 - Ollama-compatible clients use the proxy port reported by the broker.
 - Cluster pairing currently uses port `14321`.
-- Node telemetry is read from `/v1/node-info` at each discovered node's
-  advertised port.
+- Paired node telemetry is resolved by the backend from the admitted node's
+  advertised `/v1/node-info` service and may use its reverse session. Self and
+  unpaired telemetry use the advertised port directly.
 
 Browser access is decided by the engines, not by the proxies. A proxy passes
 through the upstream engine's CORS headers and its refusals, and adds no

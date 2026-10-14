@@ -104,12 +104,18 @@ startup deadline in `src/shared/constants/modular-runtime.ts` for
 Settings > Service with retry and log access. If a stalled broker reports ready
 later, the connector transitions to connected without starting a second service.
 
-### Direct HTTP exception
+### Node telemetry
 
-The broker does not expose rich node telemetry over JSON-RPC. Electron therefore
-polls each healthy discovered node's advertised `/v1/node-info` endpoint every
-two seconds and merges CPU, memory, GPU, and VRAM data into `metrics:update`;
-consecutive failures back off to a 30-second cap and reset on success.
+Electron schedules a refresh for each healthy node every two seconds and merges
+CPU, memory, GPU, and VRAM data into `metrics:update`; consecutive failures back
+off to a 30-second cap and reset on success. A paired remote refresh calls
+`discovery:get-node-info {hostUuid}` through the local service and broker. The
+scanner resolves current admission, directory identity, and the pinned
+direct/reverse route, then returns a fresh full sample rather than its cached
+enrichment or compact scheduling telemetry. Self and unpaired discovery targets
+retain direct `/v1/node-info` polling. A failed paired getter does not fall back
+to unpaired direct HTTP or change membership.
+
 Those renderer snapshots are display-only. Independently, the backend scanner
 samples a compact maximum-GPU utilization value on the same healthy cadence,
 with the same capped failure backoff, and sends it through the broker to the
@@ -310,6 +316,11 @@ ingress tracks a create, join, or leave with no worker restart. Loopback
 plaintext requests from local clients are unaffected. This is entirely
 backend-owned; Personal AI Router only reflects the advertised proxy port and does not
 implement any of the transport security.
+
+For an admitted peer, the backend prefers the advertised direct facade and can
+reach that same ordinary mTLS ingress through its existing authenticated reverse
+session after a bounded pre-dispatch failure. Inner mTLS, receiver admission,
+and the prohibition on onward routing remain in force on either path.
 
 ## Building binaries
 

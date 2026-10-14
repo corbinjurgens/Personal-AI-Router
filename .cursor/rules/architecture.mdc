@@ -40,7 +40,9 @@ The binary inventory and launch ownership live in
   its own broker. PAIR has no Electron-backed console client.
 - Renderer code (`src/ui/`) must not import from `src/electron/`.
 
-The only direct service-data HTTP polling in Electron is `/v1/node-info`.
+The only direct service-data HTTP polling in Electron is `/v1/node-info` for
+self and unpaired discovery targets. Paired remote telemetry uses the local
+broker-backed getter.
 Inference HTTP endpoints are for local client-compatible traffic.
 
 ## Reactive state

@@ -95,11 +95,13 @@ socket, or local control server.
 
 ### Node telemetry
 
-Electron directly polls each discovered node's advertised `/v1/node-info`
-endpoint every two seconds while it is healthy. Consecutive failures back off to
-4, 8, 16, then 30 seconds and reset on success or an endpoint change. This is the
-only service-data HTTP exception because rich telemetry is not exposed by the
-broker JSON-RPC contract.
+Electron refreshes each healthy node every two seconds. Paired remote reads must
+call `discovery:get-node-info {hostUuid}` through the local service and broker;
+the scanner owns admission, endpoint resolution, identity checks, and the
+direct/reverse retry. Self and unpaired discovery targets keep direct polling of
+their advertised `/v1/node-info` endpoint. Consecutive failures back off to 4,
+8, 16, then 30 seconds and reset on success or an endpoint change. Do not add a
+paired-to-unpaired fallback in Electron.
 
 This renderer-facing metrics path is display-only. Independently, the backend
 scanner provides compact maximum-GPU utilization on the same healthy cadence and

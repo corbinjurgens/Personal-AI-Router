@@ -49,7 +49,9 @@ flowchart TB
 
 PAIR evaluates eligibility at the bottom of that hierarchy. A request names a
 model, so it can only be served by a node whose running engine holds it. Cluster
-membership makes a node reachable. It does not make it capable.
+membership admits a node to pinned peer routes; a working direct connection or
+authenticated reverse session still determines reachability. Membership alone
+does not make a node reachable or capable.
 
 ## Process Architecture
 
@@ -147,8 +149,12 @@ the peer services described next, then surface as notifications on this path.
 ## Node-to-Node Communication
 
 Nodes do not talk to each other over the JSON-RPC control path. Each node runs the
-same set of HTTP services, and peers call those services directly. There is no
-central broker for the cluster. Every node is both a client and a server.
+same set of HTTP services. Requests to an admitted peer service prefer its
+advertised direct endpoint and can carry the same HTTP exchange over an existing
+authenticated reverse session after a bounded pre-dispatch failure. The shared
+peer/service adapter resolves the current admitted UUID, service endpoint, and
+generation for each attempt. There is no central broker for the cluster. Every
+node is both a client and a server.
 
 ### Transport and Authentication
 
@@ -173,16 +179,19 @@ Not every surface is gated, and the exceptions are deliberate:
 | Workload replication, error synchronization | Mutual TLS |
 | Cluster membership | Mutual TLS, after pairing |
 | Pairing itself | Plaintext, authenticated by the PIN |
-| Host and GPU telemetry | Plaintext HTTP, **not** authenticated |
+| Host and GPU telemetry | Plaintext HTTP directly; paired reverse reads carry plaintext HTTP inside the authenticated pinned session |
 
 Pairing is plaintext because no trust exists yet at that point. The six-digit PIN
 is what authenticates the exchange that establishes the pinned certificates.
 
-Node telemetry is a considered trade-off, not an oversight. It is treated as the
-lowest-sensitivity inter-node surface and is read by consumers that are not
-cluster members, so it stays plaintext even on a clustered node. The practical
-consequence is that hostname, hardware inventory, and utilization for a node
-running PAIR are readable by anything on the same subnet that asks. Do not run
+Node telemetry is a considered trade-off, not an oversight. Its direct endpoint
+is the lowest-sensitivity inter-node surface and remains plaintext so unpaired
+discovery consumers can read it. For a paired remote read, the scanner resolves
+the current admitted peer and can carry that same plaintext HTTP request inside
+the authenticated pinned reverse session; it validates the reported host and
+cluster identities before returning the fresh sample. This does not authenticate
+the direct endpoint itself. Hostname, hardware inventory, and utilization remain
+readable by anything on the same subnet that can reach that endpoint. Do not run
 PAIR on a network where that is unacceptable.
 
 ### Two Personalities on One Port
@@ -234,14 +243,17 @@ shows:
 
 Each of these listens on its own port. Refer to the [port map](#port-map) below.
 
-Electron polls every discovered node's `/v1/node-info` directly because that
-detail is richer than the broker's control surface exposes. Healthy nodes are
-sampled every two seconds; consecutive failures back off to 4, 8, 16, then 30
-seconds and reset on success. This is the one place Electron makes service-data
-HTTP calls of its own. Separately, the backend scanner samples a compact
-maximum-GPU utilization value for scheduling with the same healthy cadence and
-capped failure backoff, which the broker relays straight to the job scheduler.
-Routing never depends on renderer metrics.
+Electron samples healthy nodes every two seconds; consecutive failures back off
+to 4, 8, 16, then 30 seconds and reset on success. Paired remote reads call
+`discovery:get-node-info {hostUuid}` through the local service and broker. The
+scanner owns the fresh full read, admitted endpoint selection, identity checks,
+and direct/reverse route. Self and unpaired discovery targets retain direct
+`/v1/node-info` polling, which is Electron's only service-data HTTP exception.
+A paired failure does not fall back to unpaired HTTP or change membership; the
+client retains its existing unavailable and last-good presentation. Separately,
+the backend scanner samples compact maximum-GPU utilization for scheduling with
+the same healthy cadence and capped failure backoff, which the broker relays
+straight to the job scheduler. Routing never depends on renderer metrics.
 
 ## Inference Data Flow
 
@@ -264,13 +276,20 @@ flowchart LR
 
     Client <==>|"request and response"| Proxy
     Proxy --> LocalEngine
-    Proxy ==>|"mutual TLS"| RemoteProxy
+    Proxy ==>|"direct or authenticated reverse<br/>with inner mutual TLS"| RemoteProxy
     RemoteProxy --> RemoteEngine
     Control -.->|"node priority"| Proxy
 ```
 
 Responses stream back along the same path they arrived on. One request goes to one
 node and the proxy never splits it.
+
+The shared peer/service adapter also carries model listing and file reads through
+the admitted peer's `ec` service. It preserves status, headers, ordered body bytes,
+backpressure, and cancellation without buffering a full inference response or
+model file. Transport does not replay a dispatched request or resume an exposed
+body. Model copy owns any later Range request and verifies the completed file's
+hash before publication.
 
 Engines started by PAIR bind to loopback, so a peer never reaches another node's
 engine directly. It goes through that node's proxy, which is the only
@@ -609,7 +628,8 @@ long-lived receiver.
 ### Node Enrichment
 
 Announcements establish that a node exists and which ports it serves. PAIR
-fetches the interesting facts afterwards, for each node, over HTTP:
+fetches the interesting facts afterwards over HTTP. Admitted peers use the
+shared direct/reverse service route; unpaired nodes use their direct endpoint:
 
 - GPU, CPU, and memory inventory from its node-info port
 - Its model list from its engine-manager port, as a flat union, a per-engine

@@ -20,7 +20,7 @@ history.
 | -------------------------- | ------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
 | Process supervision        | Complete                        | Electron attaches to `nvpair-service`, which owns `nvpair-ui-broker`; the broker supervises all workers                                                                   |
 | Discovery                  | Complete                        | Broker discovery snapshots drive available nodes and node state                                                                                 |
-| Node telemetry             | Integrated with direct poll     | Electron polls advertised `/v1/node-info` (plain HTTP); remote OS and some remote telemetry are backend-limited                                 |
+| Node telemetry             | Integrated                      | Paired remotes use the broker-backed fresh getter; self and unpaired discovery retain direct `/v1/node-info`; remote OS remains backend-limited |
 | Manual nodes               | Complete with local persistence | Broker owns probing, proxy registration, and persistence; Electron's old entries are migrated once                                              |
 | Ollama routing             | Complete                        | Broker relay and backend scheduler drive proxy routing                                                                                          |
 | LM Studio routing          | Complete                        | Parallel broker relay and scheduler path                                                                                                        |
@@ -81,15 +81,19 @@ broker. The bridge:
 at startup and resolved as soon as the broker is ready, so self is identified by
 the same UUID key rather than a hostname guess.
 
-The broker discovery surface does not include full dynamic telemetry, so
-Electron polls `/v1/node-info` for CPU, memory, GPU, and VRAM values.
+The discovery snapshot does not include full dynamic telemetry. Electron
+schedules CPU, memory, GPU, and VRAM refreshes separately. Paired remote nodes
+use `discovery:get-node-info {hostUuid}` through the local service and broker;
+the scanner owns admitted identity and direct/reverse route selection. Self and
+unpaired discovery targets retain direct `/v1/node-info` polling.
 
 Two limitations follow from the current discovery and node-info contract:
 
-- **Remote telemetry.** The poll is plain HTTP. A remote node that does not
-  answer `/v1/node-info` over plain HTTP contributes no live CPU/GPU/VRAM
-  telemetry; Personal AI Router still shows its discovery-level data. This resolves when the
-  backend exposes a plaintext metrics path for such nodes.
+- **Remote telemetry.** An admitted paired peer can provide its full sample over
+  the authenticated reverse session when inbound direct HTTP fails. If neither
+  route works, Personal AI Router keeps its last-good or unavailable presentation
+  without changing membership. A paired getter never falls back to an unpaired
+  direct request.
 - **Remote OS.** The contract does not report a remote node's operating system.
   The local node's OS is known from the running process; remote nodes fall back
   to a placeholder until the backend reports OS on discovery or node-info.
@@ -138,6 +142,11 @@ cluster mTLS that forwards trusted-peer requests to the loopback engine. Because
 the engine port is private, discovery advertises the **promoted proxy port** for
 `ol`/`lm`/`lc`, and the peer's real engine port is knowable only from
 authoritative `engine:remote-get-installed` facts.
+
+Admitted peer dispatch prefers that advertised direct facade and can carry the
+same request through the existing authenticated reverse session after a bounded
+pre-dispatch failure. The reverse stream still enters the ordinary mTLS facade,
+so receiver admission and the no-onward-routing rule remain unchanged.
 
 Personal AI Router consequences (all reflection, no security implementation):
 
@@ -483,7 +492,7 @@ provide an equivalent client-facing contract:
 
 | Responsibility                                              | Location                                         |
 | ----------------------------------------------------------- | ------------------------------------------------ |
-| Poll node telemetry over `/v1/node-info`                    | `node-info-poller.ts`                            |
+| Schedule and merge node telemetry; call the paired getter and directly poll self/unpaired nodes | `node-info-poller.ts` |
 | Migrate Electron's old manual node file once               | `manual-nodes-migration.ts`, `modular-supervisor.ts` |
 | Bridge the local node into engine proxies                   | `modular-supervisor.ts`                          |
 | Present optimistic engine transition state                  | `pending-actions.store.ts`, bridge state         |
