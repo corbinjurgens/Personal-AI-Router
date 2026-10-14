@@ -4,6 +4,8 @@ go 1.25.0
 
 require nvpair-shared v0.0.0-00010101000000-000000000000
 
+require github.com/hashicorp/yamux v0.1.2 // indirect
+
 replace nvpair-shared => ../shared
 
 require (

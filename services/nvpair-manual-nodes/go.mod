@@ -8,5 +8,6 @@ replace nvpair-shared => ../shared
 
 require (
 	github.com/Microsoft/go-winio v0.6.2 // indirect
+	github.com/hashicorp/yamux v0.1.2 // indirect
 	golang.org/x/sys v0.47.0 // indirect
 )
