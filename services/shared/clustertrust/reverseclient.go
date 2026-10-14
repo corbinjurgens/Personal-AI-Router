@@ -155,8 +155,13 @@ func (p *PeerServiceClient) health(key peerServiceKey, identity peerServiceIdent
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	h := p.entries[key]
-	if h == nil || h.identity != identity {
+	if h == nil {
 		h = &peerServiceHealth{identity: identity, slots: make(chan struct{}, peerMaxConnsPerHost)}
+		p.entries[key] = h
+	} else if h.identity != identity {
+		// Health belongs to this identity, but active responses from older
+		// identities still count against the logical peer/service limit.
+		h = &peerServiceHealth{identity: identity, slots: h.slots}
 		p.entries[key] = h
 	}
 	return h

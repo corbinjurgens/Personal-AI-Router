@@ -314,6 +314,121 @@ func TestPeerServiceClientReadmissionAndGenerationResetHealth(t *testing.T) {
 	test("new endpoint generation", func(r *PeerServiceRoute) { r.Generation = 2 })
 }
 
+type serviceSlotWaitContext struct {
+	context.Context
+	entered chan struct{}
+	once    sync.Once
+}
+
+func (c *serviceSlotWaitContext) Done() <-chan struct{} {
+	c.once.Do(func() { close(c.entered) })
+	return c.Context.Done()
+}
+
+func TestPeerServiceClientAuthorityChangesPreserveConnectionCap(t *testing.T) {
+	test := func(name string, change func(*PeerServiceRoute)) {
+		t.Run(name, func(t *testing.T) {
+			var dispatches atomic.Int32
+			f := newServiceClientFixture(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				dispatches.Add(1)
+				writeServiceResponse(t, w, "held")
+			}))
+			client := f.adapter.Client("peer", noderec.ServiceCluster)
+			client.Timeout = 0
+			var responses []*http.Response
+			t.Cleanup(func() {
+				for _, response := range responses {
+					if err := response.Body.Close(); err != nil {
+						t.Errorf("close held response: %v", err)
+					}
+				}
+			})
+			for range 8 {
+				response, err := client.Get(f.url)
+				if err != nil {
+					t.Fatal(err)
+				}
+				responses = append(responses, response)
+			}
+			f.mu.Lock()
+			route := f.routes[noderec.ServiceCluster]
+			change(&route)
+			f.routes[noderec.ServiceCluster] = route
+			f.mu.Unlock()
+
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			waiting := &serviceSlotWaitContext{Context: ctx, entered: make(chan struct{})}
+			req, err := http.NewRequestWithContext(waiting, http.MethodGet, f.url, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			type result struct {
+				response *http.Response
+				err      error
+			}
+			completed := make(chan result, 1)
+			go func() {
+				// RoundTrip first evaluates Done when selecting its connection
+				// slot. Calling it directly avoids http.Client's context watchers.
+				response, err := client.Transport.RoundTrip(req)
+				completed <- result{response, err}
+			}()
+			select {
+			case <-waiting.entered:
+			case <-ctx.Done():
+				t.Fatal("ninth request did not reach the connection gate")
+			}
+			f.adapter.mu.Lock()
+			health := f.adapter.entries[peerServiceKey{"peer", noderec.ServiceCluster}]
+			occupied, capacity := len(health.slots), cap(health.slots)
+			f.adapter.mu.Unlock()
+			if occupied != 8 || capacity != 8 {
+				t.Fatalf("new authority gate has %d/%d occupied slots, want 8/8", occupied, capacity)
+			}
+			if got := dispatches.Load(); got != 8 {
+				t.Fatalf("dispatches before releasing an old response = %d, want 8", got)
+			}
+			select {
+			case got := <-completed:
+				if got.response != nil {
+					responses = append(responses, got.response)
+				}
+				t.Fatalf("ninth request completed while all eight old responses were open: %v", got.err)
+			default:
+			}
+
+			body, err := io.ReadAll(responses[0].Body)
+			if err != nil || string(body) != "held" {
+				t.Fatalf("old response after authority change = %q, %v", body, err)
+			}
+			if err := responses[0].Body.Close(); err != nil {
+				t.Fatal(err)
+			}
+			select {
+			case got := <-completed:
+				if got.err != nil {
+					t.Fatal(got.err)
+				}
+				responses = append(responses, got.response)
+				if got.response.StatusCode != http.StatusOK {
+					t.Fatalf("ninth response status = %d, want 200", got.response.StatusCode)
+				}
+			case <-ctx.Done():
+				t.Fatal("ninth request did not complete after releasing an old response")
+			}
+			if got := dispatches.Load(); got != 9 {
+				t.Fatalf("dispatches after releasing one old response = %d, want 9", got)
+			}
+			if got := len(health.slots); got != 8 {
+				t.Fatalf("occupied slots after EOF and Close = %d, want 8 (one release)", got)
+			}
+		})
+	}
+	test("generation", func(route *PeerServiceRoute) { route.Generation++ })
+	test("readmission", func(route *PeerServiceRoute) { route.Incarnation = "v2" })
+}
+
 func TestPeerServiceClientPeriodicDirectRecovery(t *testing.T) {
 	f := newServiceClientFixture(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { writeServiceResponse(t, w, "ok") }))
 	reachable := f.direct
