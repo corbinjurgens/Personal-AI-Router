@@ -12,15 +12,18 @@ import (
 	"io"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
+	"syscall"
 	"testing"
 	"time"
 
 	"nvpair-shared/noderec"
 )
 
-func reverseDialFixture(t *testing.T) (string, net.Listener) {
+func reverseDialConfigFixture(t *testing.T) string {
 	t.Helper()
 	base, err := os.MkdirTemp("", "pair-dial-")
 	if err != nil {
@@ -34,12 +37,407 @@ func reverseDialFixture(t *testing.T) (string, net.Listener) {
 	if err = os.Mkdir(filepath.Join(base, "cluster"), 0o700); err != nil {
 		t.Fatal(err)
 	}
+	return base
+}
+
+func reverseDialFixture(t *testing.T) (string, net.Listener) {
+	t.Helper()
+	base := reverseDialConfigFixture(t)
 	listener, err := ListenReversePrivate(ReverseDialPath(base))
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { listener.Close() })
 	return base, listener
+}
+
+func TestReverseDialPrivateEndpointRecoversStaleSocket(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		return // Unix socket pathname recovery does not apply to named pipes.
+	}
+	if path := os.Getenv("PAIR_REVERSE_PRIVATE_CRASH_PATH"); path != "" {
+		listener, err := ListenReversePrivate(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := fmt.Fprintln(os.Stdout, "ready"); err != nil {
+			t.Fatal(err)
+		}
+		conn, err := listener.Accept()
+		if err == nil {
+			err = conn.Close()
+		}
+		t.Fatalf("crash fixture unexpectedly accepted or stopped: %v", err)
+	}
+	path := ReverseDialPath(reverseDialConfigFixture(t))
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestReverseDialPrivateEndpointRecoversStaleSocket$")
+	cmd.Env = append(os.Environ(), "PAIR_REVERSE_PRIVATE_CRASH_PATH="+path)
+	cmd.Stderr = os.Stderr
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	waited := false
+	t.Cleanup(func() {
+		if !waited {
+			if err := cmd.Process.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) {
+				t.Errorf("kill crash fixture: %v", err)
+			}
+			_ = cmd.Wait()
+		}
+	})
+	if ready, err := bufio.NewReader(stdout).ReadString('\n'); err != nil || ready != "ready\n" {
+		t.Fatalf("lock-aware listener did not become ready: %q, %v", ready, err)
+	}
+	if err := cmd.Process.Kill(); err != nil {
+		t.Fatal(err)
+	}
+	err = cmd.Wait()
+	waited = true
+	var killed *exec.ExitError
+	if !errors.As(err, &killed) {
+		t.Fatalf("crash fixture did not exit by force: %v", err)
+	}
+	if info, err := os.Stat(path); err != nil || info.Mode()&os.ModeSocket == 0 {
+		t.Fatalf("stale socket fixture missing: info=%v, err=%v", info, err)
+	}
+	record, err := os.ReadFile(path + ".lock")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var identity struct {
+		Version int    `json:"version"`
+		Inode   uint64 `json:"inode"`
+	}
+	if err := json.Unmarshal(record, &identity); err != nil {
+		t.Fatalf("crash left invalid ownership record: %v", err)
+	}
+	if identity.Version != 1 || identity.Inode == 0 {
+		t.Fatalf("crash left no socket ownership evidence: %+v", identity)
+	}
+	listener, err := ListenReversePrivate(path)
+	if err != nil {
+		t.Fatalf("recover stale socket: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := listener.Close(); err != nil {
+			t.Errorf("close recovered listener: %v", err)
+		}
+	})
+	if info, err := os.Stat(path); err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("recovered socket is not owner-only: info=%v, err=%v", info, err)
+	}
+	reverseDialAssertListenerReachable(t, path, listener)
+}
+
+func TestReverseDialPrivateEndpointPreservesUnrecordedStaleSocket(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		return // Unix socket ownership records do not apply to named pipes.
+	}
+	path := ReverseDialPath(reverseDialConfigFixture(t))
+	stale, err := net.ListenUnix("unix", &net.UnixAddr{Name: path, Net: "unix"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stale.SetUnlinkOnClose(false)
+	if err := stale.Close(); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	listener, err := ListenReversePrivate(path)
+	if err == nil {
+		closeErr := listener.Close()
+		t.Fatalf("reclaimed socket without ownership evidence; close: %v", closeErr)
+	}
+	after, err := os.Stat(path)
+	if err != nil || !os.SameFile(before, after) {
+		t.Fatalf("unrecorded stale socket changed: info=%v, err=%v", after, err)
+	}
+}
+
+func reverseDialAssertListenerReachable(t *testing.T, path string, listener net.Listener) {
+	t.Helper()
+	done := make(chan error, 1)
+	go func() {
+		conn, err := listener.Accept()
+		if err != nil {
+			done <- err
+			return
+		}
+		if err := conn.SetWriteDeadline(time.Now().Add(time.Second)); err != nil {
+			done <- errors.Join(err, conn.Close())
+			return
+		}
+		_, err = conn.Write([]byte("owner"))
+		done <- errors.Join(err, conn.Close())
+	}()
+	conn, err := net.DialTimeout("unix", path, time.Second)
+	if err != nil {
+		t.Fatalf("dial original listener: %v", err)
+	}
+	defer func() {
+		if err := conn.Close(); err != nil {
+			t.Errorf("close listener probe: %v", err)
+		}
+	}()
+	if err := conn.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	var reply [5]byte
+	if _, err := io.ReadFull(conn, reply[:]); err != nil {
+		t.Fatalf("read original listener reply: %v", err)
+	}
+	if string(reply[:]) != "owner" {
+		t.Fatalf("original listener reply %q, want owner", reply)
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("original listener probe: %v", err)
+	}
+}
+
+func TestReverseDialPrivateEndpointPreservesLiveOwner(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		return // This regression exercises the Unix lifetime lock.
+	}
+	base, owner := reverseDialFixture(t)
+	path := ReverseDialPath(base)
+	before, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	competitor, err := ListenReversePrivate(path)
+	if err == nil {
+		closeErr := competitor.Close()
+		t.Fatalf("second live owner acquired endpoint; close: %v", closeErr)
+	}
+	after, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("competitor removed live socket: %v", err)
+	}
+	if !os.SameFile(before, after) {
+		t.Fatal("competitor replaced live socket")
+	}
+	reverseDialAssertListenerReachable(t, path, owner)
+}
+
+func TestReverseDialPrivateEndpointPreservesUnlockedLiveOwner(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		return // This regression exercises Unix stale socket detection.
+	}
+	path := ReverseDialPath(reverseDialConfigFixture(t))
+	owner, err := net.ListenUnix("unix", &net.UnixAddr{Name: path, Net: "unix"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := owner.Close(); err != nil {
+			t.Errorf("close unlocked owner: %v", err)
+		}
+	})
+	before, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	competitor, err := ListenReversePrivate(path)
+	if err == nil {
+		closeErr := competitor.Close()
+		t.Fatalf("replaced answering socket without lifetime lock; close: %v", closeErr)
+	}
+	after, err := os.Stat(path)
+	if err != nil || !os.SameFile(before, after) {
+		t.Fatalf("competitor changed answering socket: info=%v, err=%v", after, err)
+	}
+	reverseDialAssertListenerReachable(t, path, owner)
+}
+
+func TestReverseDialPrivateEndpointPreservesSaturatedUnlockedLiveOwner(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		return // This regression exercises Unix listener backlog saturation.
+	}
+	path := ReverseDialPath(reverseDialConfigFixture(t))
+	owner, err := net.ListenUnix("unix", &net.UnixAddr{Name: path, Net: "unix"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := owner.Close(); err != nil {
+			t.Errorf("close saturated owner: %v", err)
+		}
+	})
+	before, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var queued []net.Conn
+	t.Cleanup(func() {
+		for _, conn := range queued {
+			if err := conn.Close(); err != nil {
+				t.Errorf("close queued client: %v", err)
+			}
+		}
+	})
+	var refused error
+	for len(queued) < 8192 {
+		conn, err := net.DialTimeout("unix", path, 20*time.Millisecond)
+		if err != nil {
+			refused = err
+			break
+		}
+		queued = append(queued, conn)
+	}
+	if refused == nil || len(queued) == 0 {
+		t.Fatalf("could not saturate live socket backlog: queued=%d, err=%v", len(queued), refused)
+	}
+	var dialErr net.Error
+	if !errors.Is(refused, syscall.ECONNREFUSED) && !(errors.As(refused, &dialErr) && dialErr.Timeout()) {
+		t.Fatalf("dial failed for a reason other than full backlog: %v", refused)
+	}
+	t.Logf("saturated backlog after %d queued connections: %v", len(queued), refused)
+	competitor, err := ListenReversePrivate(path)
+	if err == nil {
+		closeErr := competitor.Close()
+		t.Fatalf("replaced saturated live owner; close: %v", closeErr)
+	}
+	after, err := os.Stat(path)
+	if err != nil || !os.SameFile(before, after) {
+		t.Fatalf("competitor changed saturated socket: info=%v, err=%v", after, err)
+	}
+	if err := owner.SetDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	for range queued {
+		conn, err := owner.Accept()
+		if err != nil {
+			t.Fatalf("drain saturated owner: %v", err)
+		}
+		if err := conn.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	reverseDialAssertListenerReachable(t, path, owner)
+}
+
+func TestReverseDialPrivateEndpointPreservesMismatchedOwnershipRecord(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		return // This regression exercises Unix socket ownership records.
+	}
+	path := ReverseDialPath(reverseDialConfigFixture(t))
+	owner, err := net.ListenUnix("unix", &net.UnixAddr{Name: path, Net: "unix"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := owner.Close(); err != nil {
+			t.Errorf("close mismatched-record owner: %v", err)
+		}
+	})
+	if err := os.WriteFile(path+".lock", []byte(`{"version":1,"device":0,"inode":0}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	competitor, err := ListenReversePrivate(path)
+	if err == nil {
+		closeErr := competitor.Close()
+		t.Fatalf("accepted mismatched ownership record; close: %v", closeErr)
+	}
+	after, err := os.Stat(path)
+	if err != nil || !os.SameFile(before, after) {
+		t.Fatalf("mismatched record replaced owner: info=%v, err=%v", after, err)
+	}
+	reverseDialAssertListenerReachable(t, path, owner)
+}
+
+func TestReverseDialPrivateEndpointCloseReleasesOwnership(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		return // This regression exercises the Unix lifetime lock.
+	}
+	base, first := reverseDialFixture(t)
+	path := ReverseDialPath(base)
+	if err := first.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if record, err := os.ReadFile(path + ".lock"); err != nil || len(record) != 0 {
+		t.Fatalf("graceful close retained stale ownership evidence: %q, %v", record, err)
+	}
+	replacement, err := ListenReversePrivate(path)
+	if err != nil {
+		t.Fatalf("ownership not released on close: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := replacement.Close(); err != nil {
+			t.Errorf("close replacement listener: %v", err)
+		}
+	})
+	if err := first.Close(); err != nil {
+		t.Fatalf("repeated close: %v", err)
+	}
+	competitor, err := ListenReversePrivate(path)
+	if err == nil {
+		closeErr := competitor.Close()
+		t.Fatalf("repeated close released replacement ownership; close: %v", closeErr)
+	}
+	reverseDialAssertListenerReachable(t, path, replacement)
+}
+
+func TestReverseDialPrivateEndpointPrepareFailureReleasesOwnership(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		return // Unix pathname preparation does not apply to named pipes.
+	}
+	path := ReverseDialPath(reverseDialConfigFixture(t))
+	if err := os.Mkdir(path, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	child := filepath.Join(path, "occupied")
+	if err := os.WriteFile(child, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	failed, err := ListenReversePrivate(path)
+	if err == nil {
+		closeErr := failed.Close()
+		t.Fatalf("removed nonempty directory; close: %v", closeErr)
+	}
+	if err := os.Remove(child); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	listener, err := ListenReversePrivate(path)
+	if err != nil {
+		t.Fatalf("ownership not released after preparation failure: %v", err)
+	}
+	if err := listener.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestReverseDialPrivateEndpointBindFailureReleasesOwnership(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		return // Unix socket path length does not apply to named pipes.
+	}
+	path := filepath.Join(reverseDialConfigFixture(t), strings.Repeat("x", 200))
+	for attempt := 0; attempt < 2; attempt++ {
+		listener, err := ListenReversePrivate(path)
+		if err == nil {
+			closeErr := listener.Close()
+			t.Fatalf("bound overlong Unix socket path; close: %v", closeErr)
+		}
+		var bindErr *net.OpError
+		if !errors.As(err, &bindErr) || bindErr.Op != "listen" {
+			t.Fatalf("attempt %d failed before bind, possibly retaining lock: %v", attempt, err)
+		}
+	}
 }
 
 func TestReverseDialPrivateEndpointPermissions(t *testing.T) {
