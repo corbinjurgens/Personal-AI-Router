@@ -512,6 +512,12 @@ function primaryNodeAddress(node: ModularNode): string {
     return node.reachableAddress || node.host
 }
 
+function nodeInfoPollHosts(node: ModularNode, selfId: string | null): string[] {
+    if (node.id === selfId) return [MODULAR_NODE_INFO_SELF_HOST]
+    if (node.trusted) return nodeAddresses(node)
+    return mergeAddresses([primaryNodeAddress(node)], nodeAddresses(node))
+}
+
 function mergeSources(sources: BrokerNodeSource[], source: BrokerNodeSource): BrokerNodeSource[] {
     return sources.includes(source) ? sources : [...sources, source]
 }
@@ -977,6 +983,9 @@ class ModularBridgeState {
         'llama-cpp': 0
     }
     private selfId: string | null = null
+    /** Poll authority survives ordinary refreshes, but never removal or route changes. */
+    private nodeInfoGeneration = 0
+    private nodeInfoGenerations = new Map<string, number>()
     /**
      * Authoritative local-engine facts from `nvpair-engine-manager`, keyed by
      * engine type. Stored independent of `selfId` because engine-manager
@@ -1178,6 +1187,9 @@ class ModularBridgeState {
     setSelfId(nodeUuid: string): void {
         const trimmed = nodeUuid.trim()
         if (!trimmed || this.selfId === trimmed) return
+        for (const nodeId of [this.selfId, trimmed]) {
+            if (nodeId && this.nodes.has(nodeId)) this.advanceNodeInfoGeneration(nodeId)
+        }
         this.selfId = trimmed
         emitBridgePush('state:request-refresh', undefined)
     }
@@ -1264,9 +1276,32 @@ class ModularBridgeState {
         })
     }
 
-    getNodeInfoPollTargets(): { id: string; hosts: string[]; port: number }[] {
-        const targets: { id: string; hosts: string[]; port: number }[] = []
+    getNodeInfoPollTargets(): {
+        id: string
+        hosts: string[]
+        port: number
+        generation: number
+        paired?: true
+    }[] {
+        const targets: ReturnType<ModularBridgeState['getNodeInfoPollTargets']> = []
         for (const node of Array.from(this.nodes.values())) {
+            // Discovery can arrive before self identity hydration. A trusted
+            // entry might be this machine, so wait rather than select either
+            // paired RPC or direct HTTP until its identity is distinguishable.
+            if (node.trusted && !this.selfId) continue
+            // Trust is reported by Go. A paired remote read needs only its logical
+            // identity, even when discovery has no usable direct node-info endpoint.
+            // Foreign-cluster membership alone is not paired route intent.
+            if (node.id !== this.selfId && node.trusted) {
+                targets.push({
+                    id: node.id,
+                    generation: this.nodeInfoGenerationFor(node.id),
+                    hosts: nodeInfoPollHosts(node, this.selfId),
+                    port: node.nodeInfoPort,
+                    paired: true
+                })
+                continue
+            }
             if (!node.nodeInfoUp || node.nodeInfoPort <= 0) continue
             // This machine appears in its own discovery snapshot, but its own
             // node-info is on this machine: loopback reaches it without depending
@@ -1277,7 +1312,8 @@ class ModularBridgeState {
             if (node.id === this.selfId) {
                 targets.push({
                     id: node.id,
-                    hosts: [MODULAR_NODE_INFO_SELF_HOST],
+                    generation: this.nodeInfoGenerationFor(node.id),
+                    hosts: nodeInfoPollHosts(node, this.selfId),
                     port: node.nodeInfoPort
                 })
                 continue
@@ -1286,11 +1322,26 @@ class ModularBridgeState {
             // published alternatives. The poller walks them in order and verifies
             // hostUuid, so a direct-connect address that resolves to another host
             // cannot hide telemetry available at a later address.
-            const hosts = mergeAddresses([primaryNodeAddress(node)], nodeAddresses(node))
+            const hosts = nodeInfoPollHosts(node, this.selfId)
             if (hosts.length === 0) continue
-            targets.push({ id: node.id, hosts, port: node.nodeInfoPort })
+            targets.push({
+                id: node.id,
+                hosts,
+                port: node.nodeInfoPort,
+                generation: this.nodeInfoGenerationFor(node.id)
+            })
         }
         return targets
+    }
+
+    private advanceNodeInfoGeneration(nodeId: string): void {
+        this.nodeInfoGenerations.set(nodeId, ++this.nodeInfoGeneration)
+    }
+
+    private nodeInfoGenerationFor(nodeId: string): number {
+        const generation = this.nodeInfoGenerations.get(nodeId)
+        if (generation === undefined) throw new Error(`Missing node-info generation for ${nodeId}`)
+        return generation
     }
 
     mergeNodeInfoResponse(nodeId: string, response: JsonValue): void {
@@ -2591,6 +2642,8 @@ class ModularBridgeState {
             return
         }
 
+        this.advanceNodeInfoGeneration(nodeId)
+
         // A proxy source still reports the node; drop only the node-info snapshot
         // (the broker is the sole node-info / telemetry source now).
         const next: ModularNode = {
@@ -2626,6 +2679,19 @@ class ModularBridgeState {
             return
         }
         if (existing && sameNode(existing, merged)) return
+        if (
+            !existing ||
+            existing.trusted !== merged.trusted ||
+            existing.nodeInfoPort !== merged.nodeInfoPort ||
+            ((!merged.trusted || merged.id === this.selfId) &&
+                existing.nodeInfoUp !== merged.nodeInfoUp) ||
+            !sameStringList(
+                nodeInfoPollHosts(existing, this.selfId),
+                nodeInfoPollHosts(merged, this.selfId)
+            )
+        ) {
+            this.advanceNodeInfoGeneration(merged.id)
+        }
         this.nodes.set(merged.id, merged)
         this.emitNodeChanged(merged)
 
@@ -2722,6 +2788,7 @@ class ModularBridgeState {
     /** Delete a node and clean every index that referenced it. */
     private removeNodeEntry(nodeId: string): void {
         if (!this.nodes.delete(nodeId)) return
+        this.nodeInfoGenerations.delete(nodeId)
         this.brokerNodeIds.delete(nodeId)
         this.dropRemoteEngineFacts(nodeId)
         emitBridgePush('nodes:remove', nodeId)

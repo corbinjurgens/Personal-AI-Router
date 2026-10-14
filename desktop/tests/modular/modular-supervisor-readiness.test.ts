@@ -2,6 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import fs from 'fs'
+import type { getModularBridgeState } from '@/electron/service-bridge/modular-state'
+import { startNodeInfoPoller } from '@/electron/service-bridge/node-info-poller'
 import {
     JsonRpcSocketClient,
     type JsonRpcNotification
@@ -14,6 +17,8 @@ const mocks = vi.hoisted(() => ({
         handleNotification: vi.fn(),
         getSelfId: vi.fn((): string | null => mocks.selfId),
         clearWorkloads: vi.fn(),
+        setLocalDiscoveryModelRefresher:
+            vi.fn<ReturnType<typeof getModularBridgeState>['setLocalDiscoveryModelRefresher']>(),
         getProxyPort: vi.fn(() => null),
         getPendingInvites: () => Array.from(mocks.pendingInviteIds),
         addPendingInvite: (invite: { inviteId: string; state: string }) => {
@@ -144,6 +149,41 @@ describe('modular supervisor readiness', () => {
         await expect(waiting).resolves.toBeUndefined()
         expect(supervisor.ready).toBe(true)
         expect(onReady).toHaveBeenCalledOnce()
+    })
+
+    it('injects the bounded broker node-info getter when the supervisor starts', async () => {
+        const exists = vi
+            .spyOn(fs, 'existsSync')
+            .mockImplementation(file => String(file).includes('nvpair-'))
+        const start = vi.spyOn(JsonRpcSocketClient.prototype, 'start').mockImplementation(() => {})
+        const call = vi.spyOn(JsonRpcSocketClient.prototype, 'call').mockResolvedValue({
+            hostUuid: 'paired-peer',
+            cpu: { name: 'peer CPU' }
+        })
+        vi.mocked(startNodeInfoPoller).mockClear()
+        supervisor.isReady = false
+        try {
+            getModularSupervisor().start()
+            expect(startNodeInfoPoller).toHaveBeenCalledOnce()
+            const getter = vi.mocked(startNodeInfoPoller).mock.calls[0]?.[0]
+            if (!getter) throw new Error('supervisor did not inject a node-info getter')
+
+            await expect(getter('paired-peer')).resolves.toEqual({
+                hostUuid: 'paired-peer',
+                cpu: { name: 'peer CPU' }
+            })
+            expect(call).toHaveBeenCalledWith(
+                'discovery:get-node-info',
+                { hostUuid: 'paired-peer' },
+                1500
+            )
+            supervisor.processes.clear()
+            await expect(getter('paired-peer')).rejects.toThrow('broker is not running')
+        } finally {
+            call.mockRestore()
+            start.mockRestore()
+            exists.mockRestore()
+        }
     })
 
     it('keeps the service ready and refreshes capability state when the proxy arrives late', async () => {

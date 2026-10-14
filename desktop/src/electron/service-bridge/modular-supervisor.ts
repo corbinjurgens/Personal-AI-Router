@@ -45,6 +45,7 @@ import {
     MODULAR_ENGINE_LIFECYCLE_CALL_TIMEOUT_MS,
     MODULAR_INVITE_STATUS_POLL_INTERVAL_MS,
     MODULAR_MODEL_ACTION_TIMEOUT_MS,
+    MODULAR_NODE_INFO_POLL_TIMEOUT_MS,
     isModularLogLevel,
     type ModularLogLevel
 } from '@/shared/constants/modular-runtime'
@@ -575,7 +576,14 @@ class ModularSupervisor {
 
         this.isReady = true
         this.updateReadiness()
-        startNodeInfoPoller()
+        startNodeInfoPoller(hostUuid =>
+            this.callProcess(
+                'broker',
+                'discovery:get-node-info',
+                { hostUuid },
+                MODULAR_NODE_INFO_POLL_TIMEOUT_MS
+            )
+        )
         log.info({ sublevel: 'lifecycle', message: 'Attached to the modular service' })
     }
 

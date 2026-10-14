@@ -189,6 +189,7 @@
 | Method | Direction | In bridge? |
 |---|---|---|
 | `ready` | notification (we consume) | ✅ yes |
+| `discovery:get-node-info` | request (we call) | ✅ yes |
 
 **Dynamic / unresolved notify sites (verify by hand — `npm run service-contracts` prints the line numbers):**
 - `method (var)  (daemon.go, 3 sites)`
@@ -278,6 +279,7 @@
 | `workloads:upsert` | notification (we consume) | ✅ yes |
 | `connection/cluster-auto-sync` | request (we call) | ➖ ignored |
 | `connection/cluster-identity` | request (we call) | ✅ yes |
+| `discovery:get-node-info` | request (we call) | ✅ yes |
 | `discovery:get-nodes` | request (we call) | ✅ yes |
 | `discovery:subscribe` | request (we call) | ✅ yes |
 | `discovery:unsubscribe` | request (we call) | ⚠️ not called |

@@ -61,6 +61,7 @@ import {
 } from '@/electron/service-bridge/node-info-poller'
 
 const fetchMock = vi.fn<typeof fetch>()
+const pairedNodeInfo = vi.fn<Parameters<typeof startNodeInfoPoller>[0]>()
 
 /** The once-per-node outage reports, the only user-visible poll verdict. */
 function outageWarnings(): string[] {
@@ -124,12 +125,14 @@ describe('node info polling', () => {
         vi.useFakeTimers()
         vi.stubGlobal('fetch', fetchMock)
         fetchMock.mockReset()
+        pairedNodeInfo.mockReset()
         mocks.state.getNodeInfoPollTargets.mockReturnValue([])
         mocks.logged.length = 0
         setNodeInfoPollerVisible(true)
     })
 
     afterEach(() => {
+        expect(pairedNodeInfo).not.toHaveBeenCalled()
         stopNodeInfoPoller()
         setNodeInfoPollerVisible(false)
         vi.unstubAllGlobals()
@@ -141,6 +144,7 @@ describe('node info polling', () => {
             {
                 id: 'uuid-multihomed',
                 hosts: ['192.0.2.1', '192.0.2.2', '192.0.2.3', '10.0.0.5'],
+                generation: 1,
                 port: 14318
             }
         ])
@@ -150,7 +154,7 @@ describe('node info polling', () => {
                 : blackhole(input, init)
         )
 
-        startNodeInfoPoller()
+        startNodeInfoPoller(pairedNodeInfo)
         await vi.advanceTimersByTimeAsync(0)
         // Every address is asked straight away. Asking one at a time meant the three
         // that drop connections each cost a full timeout, and the walk ran out of
@@ -167,7 +171,7 @@ describe('node info polling', () => {
 
     it('keeps the address that answers even when a better-ranked one starts working', async () => {
         mocks.state.getNodeInfoPollTargets.mockReturnValue([
-            { id: 'uuid-stable', hosts: ['192.0.2.1', '10.0.0.5'], port: 14318 }
+            { id: 'uuid-stable', hosts: ['192.0.2.1', '10.0.0.5'], generation: 1, port: 14318 }
         ])
         fetchMock.mockImplementation(input =>
             String(input).includes('10.0.0.5')
@@ -175,7 +179,7 @@ describe('node info polling', () => {
                 : Promise.reject(new Error('ECONNREFUSED'))
         )
 
-        startNodeInfoPoller()
+        startNodeInfoPoller(pairedNodeInfo)
         await vi.advanceTimersByTimeAsync(MODULAR_NODE_INFO_POLL_INTERVAL_MS)
 
         // The top-ranked address comes up. Nothing is wrong with the one in use, so
@@ -198,6 +202,7 @@ describe('node info polling', () => {
             {
                 id: 'uuid-settled',
                 hosts: ['192.0.2.1', '192.0.2.2', '10.0.0.5', '192.0.2.3'],
+                generation: 1,
                 port: 14318
             }
         ])
@@ -207,7 +212,7 @@ describe('node info polling', () => {
                 : Promise.reject(new Error('ECONNREFUSED'))
         )
 
-        startNodeInfoPoller()
+        startNodeInfoPoller(pairedNodeInfo)
         await vi.advanceTimersByTimeAsync(0)
         // The one walk that had a reason to happen: every address asked at once,
         // and the best-ranked answer taken.
@@ -226,7 +231,7 @@ describe('node info polling', () => {
 
     it('walks again when the remembered address stops answering', async () => {
         mocks.state.getNodeInfoPollTargets.mockReturnValue([
-            { id: 'uuid-moved', hosts: ['10.0.0.5', '10.0.0.6'], port: 14318 }
+            { id: 'uuid-moved', hosts: ['10.0.0.5', '10.0.0.6'], generation: 1, port: 14318 }
         ])
         fetchMock.mockImplementation(input =>
             String(input).includes('10.0.0.5')
@@ -234,7 +239,7 @@ describe('node info polling', () => {
                 : Promise.reject(new Error('ECONNREFUSED'))
         )
 
-        startNodeInfoPoller()
+        startNodeInfoPoller(pairedNodeInfo)
         await vi.advanceTimersByTimeAsync(0)
         fetchMock.mockClear()
 
@@ -261,11 +266,12 @@ describe('node info polling', () => {
             {
                 id: 'uuid-offline',
                 hosts: ['192.0.2.11', '192.0.2.12', '192.0.2.13', '192.0.2.14'],
+                generation: 1,
                 port: 14318
             }
         ])
 
-        startNodeInfoPoller()
+        startNodeInfoPoller(pairedNodeInfo)
         await vi.advanceTimersByTimeAsync(0)
         expect(fetchMock).toHaveBeenCalledTimes(4)
         expect(outageWarnings()).toHaveLength(1)
@@ -294,10 +300,10 @@ describe('node info polling', () => {
     it('backs off repeated failures geometrically and caps the retry delay', async () => {
         fetchMock.mockRejectedValue(new Error('ECONNREFUSED'))
         mocks.state.getNodeInfoPollTargets.mockReturnValue([
-            { id: 'uuid-backoff', hosts: ['192.0.2.31'], port: 14318 }
+            { id: 'uuid-backoff', hosts: ['192.0.2.31'], generation: 1, port: 14318 }
         ])
 
-        startNodeInfoPoller()
+        startNodeInfoPoller(pairedNodeInfo)
         await vi.advanceTimersByTimeAsync(0)
         expect(fetchMock).toHaveBeenCalledTimes(1)
         fetchMock.mockClear()
@@ -332,8 +338,8 @@ describe('node info polling', () => {
     it('keeps healthy nodes on cadence and resets a failed node on success', async () => {
         let recovering = false
         mocks.state.getNodeInfoPollTargets.mockReturnValue([
-            { id: 'uuid-recovering', hosts: ['192.0.2.41'], port: 14318 },
-            { id: 'uuid-healthy', hosts: ['10.0.0.41'], port: 14318 }
+            { id: 'uuid-recovering', hosts: ['192.0.2.41'], generation: 1, port: 14318 },
+            { id: 'uuid-healthy', hosts: ['10.0.0.41'], generation: 1, port: 14318 }
         ])
         fetchMock.mockImplementation(input => {
             if (String(input).includes('10.0.0.41')) {
@@ -344,7 +350,7 @@ describe('node info polling', () => {
                 : Promise.reject(new Error('ECONNREFUSED'))
         })
 
-        startNodeInfoPoller()
+        startNodeInfoPoller(pairedNodeInfo)
         await vi.advanceTimersByTimeAsync(0)
         recovering = true
         fetchMock.mockClear()
@@ -366,16 +372,16 @@ describe('node info polling', () => {
 
     it('tries a changed endpoint immediately while the old target is backed off', async () => {
         mocks.state.getNodeInfoPollTargets.mockReturnValue([
-            { id: 'uuid-retargeted', hosts: ['192.0.2.51'], port: 14318 }
+            { id: 'uuid-retargeted', hosts: ['192.0.2.51'], generation: 1, port: 14318 }
         ])
         fetchMock.mockRejectedValueOnce(new Error('ECONNREFUSED'))
 
-        startNodeInfoPoller()
+        startNodeInfoPoller(pairedNodeInfo)
         await vi.advanceTimersByTimeAsync(0)
         fetchMock.mockClear()
 
         mocks.state.getNodeInfoPollTargets.mockReturnValue([
-            { id: 'uuid-retargeted', hosts: ['10.0.0.51'], port: 14319 }
+            { id: 'uuid-retargeted', hosts: ['10.0.0.51'], generation: 1, port: 14319 }
         ])
         fetchMock.mockResolvedValue(answersFor('uuid-retargeted'))
         await vi.advanceTimersByTimeAsync(MODULAR_NODE_INFO_POLL_INTERVAL_MS)
@@ -389,12 +395,13 @@ describe('node info polling', () => {
             {
                 id: 'uuid-new-secondary',
                 hosts: ['192.0.2.61', '192.0.2.62'],
+                generation: 1,
                 port: 14318
             }
         ])
         fetchMock.mockRejectedValue(new Error('ECONNREFUSED'))
 
-        startNodeInfoPoller()
+        startNodeInfoPoller(pairedNodeInfo)
         await vi.advanceTimersByTimeAsync(0)
         expect(fetchMock).toHaveBeenCalledTimes(2)
         fetchMock.mockClear()
@@ -403,6 +410,7 @@ describe('node info polling', () => {
             {
                 id: 'uuid-new-secondary',
                 hosts: ['192.0.2.61', '192.0.2.62', '10.0.0.61'],
+                generation: 1,
                 port: 14318
             }
         ])
@@ -425,6 +433,7 @@ describe('node info polling', () => {
             {
                 id: 'uuid-remembered-growth',
                 hosts: ['192.0.2.71', '10.0.0.71'],
+                generation: 1,
                 port: 14318
             }
         ])
@@ -434,7 +443,7 @@ describe('node info polling', () => {
                 : Promise.reject(new Error('ECONNREFUSED'))
         )
 
-        startNodeInfoPoller()
+        startNodeInfoPoller(pairedNodeInfo)
         await vi.advanceTimersByTimeAsync(0)
         fetchMock.mockClear()
 
@@ -442,6 +451,7 @@ describe('node info polling', () => {
             {
                 id: 'uuid-remembered-growth',
                 hosts: ['192.0.2.71', '192.0.2.72', '10.0.0.71'],
+                generation: 1,
                 port: 14318
             }
         ])
@@ -452,11 +462,16 @@ describe('node info polling', () => {
     })
 
     it('forgets retry state when a node disappears from the poll targets', async () => {
-        const target = { id: 'uuid-rediscovered', hosts: ['192.0.2.52'], port: 14318 }
+        const target = {
+            id: 'uuid-rediscovered',
+            hosts: ['192.0.2.52'],
+            generation: 1,
+            port: 14318
+        }
         mocks.state.getNodeInfoPollTargets.mockReturnValue([target])
         fetchMock.mockRejectedValue(new Error('ECONNREFUSED'))
 
-        startNodeInfoPoller()
+        startNodeInfoPoller(pairedNodeInfo)
         await vi.advanceTimersByTimeAsync(0)
         await vi.advanceTimersByTimeAsync(MODULAR_NODE_INFO_POLL_INTERVAL_MS * 2)
         fetchMock.mockClear()
@@ -473,10 +488,10 @@ describe('node info polling', () => {
         const response = new Response('temporarily unavailable', { status: 503 })
         fetchMock.mockResolvedValue(response)
         mocks.state.getNodeInfoPollTargets.mockReturnValue([
-            { id: 'uuid-http-error', hosts: ['10.0.0.61'], port: 14318 }
+            { id: 'uuid-http-error', hosts: ['10.0.0.61'], generation: 1, port: 14318 }
         ])
 
-        startNodeInfoPoller()
+        startNodeInfoPoller(pairedNodeInfo)
         await vi.advanceTimersByTimeAsync(0)
 
         expect(response.bodyUsed).toBe(true)
@@ -486,15 +501,15 @@ describe('node info polling', () => {
     it('clears a failed node backoff when the poller restarts', async () => {
         fetchMock.mockRejectedValue(new Error('ECONNREFUSED'))
         mocks.state.getNodeInfoPollTargets.mockReturnValue([
-            { id: 'uuid-restarted', hosts: ['192.0.2.71'], port: 14318 }
+            { id: 'uuid-restarted', hosts: ['192.0.2.71'], generation: 1, port: 14318 }
         ])
 
-        startNodeInfoPoller()
+        startNodeInfoPoller(pairedNodeInfo)
         await vi.advanceTimersByTimeAsync(0)
         fetchMock.mockClear()
 
         stopNodeInfoPoller()
-        startNodeInfoPoller()
+        startNodeInfoPoller(pairedNodeInfo)
         await vi.advanceTimersByTimeAsync(0)
 
         expect(fetchMock).toHaveBeenCalledTimes(1)
@@ -502,8 +517,8 @@ describe('node info polling', () => {
 
     it('polls every other node on time while one node is stuck', async () => {
         mocks.state.getNodeInfoPollTargets.mockReturnValue([
-            { id: 'uuid-stuck', hosts: ['192.0.2.1'], port: 14318 },
-            { id: 'uuid-healthy', hosts: ['10.0.0.7'], port: 14318 }
+            { id: 'uuid-stuck', hosts: ['192.0.2.1'], generation: 1, port: 14318 },
+            { id: 'uuid-healthy', hosts: ['10.0.0.7'], generation: 1, port: 14318 }
         ])
         fetchMock.mockImplementation((input, init) =>
             String(input).includes('10.0.0.7')
@@ -511,7 +526,7 @@ describe('node info polling', () => {
                 : blackhole(input, init)
         )
 
-        startNodeInfoPoller()
+        startNodeInfoPoller(pairedNodeInfo)
         await vi.advanceTimersByTimeAsync(0)
         mocks.state.mergeNodeInfoResponse.mockClear()
 
@@ -524,8 +539,8 @@ describe('node info polling', () => {
 
     it('says why a node stopped answering, a timeout apart from a refusal', async () => {
         mocks.state.getNodeInfoPollTargets.mockReturnValue([
-            { id: 'uuid-silent', hosts: ['192.0.2.31'], port: 14318 },
-            { id: 'uuid-refused', hosts: ['192.0.2.32'], port: 14318 }
+            { id: 'uuid-silent', hosts: ['192.0.2.31'], generation: 1, port: 14318 },
+            { id: 'uuid-refused', hosts: ['192.0.2.32'], generation: 1, port: 14318 }
         ])
         fetchMock.mockImplementation((input, init) =>
             String(input).includes('192.0.2.31')
@@ -533,7 +548,7 @@ describe('node info polling', () => {
                 : Promise.reject(refused('192.0.2.32:14318'))
         )
 
-        startNodeInfoPoller()
+        startNodeInfoPoller(pairedNodeInfo)
         await vi.advanceTimersByTimeAsync(MODULAR_NODE_INFO_POLL_TIMEOUT_MS)
 
         const reasons = outageReasons()
@@ -548,7 +563,12 @@ describe('node info polling', () => {
 
     it('names the address that failed when a multi-homed node answers nowhere', async () => {
         mocks.state.getNodeInfoPollTargets.mockReturnValue([
-            { id: 'uuid-both-down', hosts: ['192.0.2.41', '192.0.2.42'], port: 14318 }
+            {
+                id: 'uuid-both-down',
+                hosts: ['192.0.2.41', '192.0.2.42'],
+                generation: 1,
+                port: 14318
+            }
         ])
         fetchMock.mockImplementation(input =>
             Promise.reject(
@@ -558,7 +578,7 @@ describe('node info polling', () => {
             )
         )
 
-        startNodeInfoPoller()
+        startNodeInfoPoller(pairedNodeInfo)
         await vi.advanceTimersByTimeAsync(0)
 
         // Both addresses were asked, so both are accounted for: a report naming
@@ -570,12 +590,12 @@ describe('node info polling', () => {
 
     it('reports again when the fault changes while the node stays unreachable', async () => {
         mocks.state.getNodeInfoPollTargets.mockReturnValue([
-            { id: 'uuid-changing', hosts: ['192.0.2.51'], port: 14318 }
+            { id: 'uuid-changing', hosts: ['192.0.2.51'], generation: 1, port: 14318 }
         ])
         // First the address swallows the request, so the poll can only time out.
         fetchMock.mockImplementation((input, init) => blackhole(input, init))
 
-        startNodeInfoPoller()
+        startNodeInfoPoller(pairedNodeInfo)
         await vi.advanceTimersByTimeAsync(MODULAR_NODE_INFO_POLL_TIMEOUT_MS)
         expect(outageReasons()['uuid-changing']).toBe(
             `no response within ${MODULAR_NODE_INFO_POLL_TIMEOUT_MS}ms`
@@ -603,14 +623,14 @@ describe('node info polling', () => {
 
     it('reports the new endpoint when a node is retargeted mid-outage', async () => {
         mocks.state.getNodeInfoPollTargets.mockReturnValue([
-            { id: 'uuid-moving', hosts: ['192.0.2.81'], port: 14318 }
+            { id: 'uuid-moving', hosts: ['192.0.2.81'], generation: 1, port: 14318 }
         ])
         // Dropped rather than refused, so the reason carries no address of its own.
         // A refusal names its address inside the reason, which distinguishes the
         // report on its own; a timeout is the case that needs the endpoint checked.
         fetchMock.mockImplementation((input, init) => blackhole(input, init))
 
-        startNodeInfoPoller()
+        startNodeInfoPoller(pairedNodeInfo)
         await vi.advanceTimersByTimeAsync(MODULAR_NODE_INFO_POLL_TIMEOUT_MS)
         expect(outageUrls()['uuid-moving']).toContain('192.0.2.81:14318')
 
@@ -619,7 +639,7 @@ describe('node info polling', () => {
         // nothing would leave that first line — naming an address no longer polled
         // — as the newest thing the log says about this node.
         mocks.state.getNodeInfoPollTargets.mockReturnValue([
-            { id: 'uuid-moving', hosts: ['10.0.0.81'], port: 14319 }
+            { id: 'uuid-moving', hosts: ['10.0.0.81'], generation: 1, port: 14319 }
         ])
         await vi.advanceTimersByTimeAsync(
             MODULAR_NODE_INFO_POLL_INTERVAL_MS + MODULAR_NODE_INFO_POLL_TIMEOUT_MS
@@ -650,10 +670,10 @@ describe('node info polling', () => {
                 })
         )
         mocks.state.getNodeInfoPollTargets.mockReturnValue([
-            { id: 'uuid-stopped', hosts: ['192.0.2.21'], port: 14318 }
+            { id: 'uuid-stopped', hosts: ['192.0.2.21'], generation: 1, port: 14318 }
         ])
 
-        startNodeInfoPoller()
+        startNodeInfoPoller(pairedNodeInfo)
         await vi.advanceTimersByTimeAsync(0)
         expect(pending).toHaveLength(1)
 
@@ -667,7 +687,7 @@ describe('node info polling', () => {
 
         // The stop left no in-flight guard behind, so the restarted poller's
         // first tick actually polls instead of being skipped.
-        startNodeInfoPoller()
+        startNodeInfoPoller(pairedNodeInfo)
         await vi.advanceTimersByTimeAsync(0)
         expect(pending).toHaveLength(2)
     })

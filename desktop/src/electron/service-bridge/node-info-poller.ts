@@ -26,6 +26,12 @@ let pollTimer: ReturnType<typeof setInterval> | null = null
  */
 let pollRun: AbortController | null = null
 
+type NodeInfoGetter = (hostUuid: string) => Promise<JsonValue | undefined>
+type PollTarget = ReturnType<
+    ReturnType<typeof getModularBridgeState>['getNodeInfoPollTargets']
+>[number]
+let pairedNodeInfo: NodeInfoGetter | null = null
+
 /**
  * Nodes whose poll from an earlier tick has not finished.
  *
@@ -33,7 +39,7 @@ let pollRun: AbortController | null = null
  * other node's telemetry: a node still walking its addresses skips this tick,
  * while every other node is polled on time.
  */
-const inFlight = new Set<string>()
+const inFlight = new Map<string, { targetKey: string; controller: AbortController }>()
 
 /**
  * Where each node was last reached — the reason the steady state costs one
@@ -121,10 +127,11 @@ let windowVisible = false
  * Begin polling for this service run. Ticks only run while a window is
  * visible; see {@link setNodeInfoPollerVisible}.
  */
-export function startNodeInfoPoller(): void {
+export function startNodeInfoPoller(getPairedNodeInfo: NodeInfoGetter): void {
     if (pollRun) return
 
     pollRun = new AbortController()
+    pairedNodeInfo = getPairedNodeInfo
     resumeTicks()
 }
 
@@ -134,6 +141,7 @@ export function stopNodeInfoPoller(): void {
     // must not land after the poller was told to stop.
     pollRun?.abort()
     pollRun = null
+    pairedNodeInfo = null
     inFlight.clear()
     pollChoices.clear()
     pollBackoffs.clear()
@@ -167,12 +175,20 @@ function pauseTicks(): void {
 
 function pollNodeInfoOnce(): void {
     const run = pollRun
-    if (!run) return
+    const getter = pairedNodeInfo
+    if (!run || !getter) return
 
     const targets = getModularBridgeState().getNodeInfoPollTargets()
     // A node that is no longer polled has no outage to still be in, and nothing
     // left to remember about where it answered.
     const polled = new Set(targets.map(target => target.id))
+    for (const [nodeId, pending] of inFlight) {
+        const target = targets.find(candidate => candidate.id === nodeId)
+        if (!target || pollTargetKey(target) !== pending.targetKey) {
+            pending.controller.abort()
+            inFlight.delete(nodeId)
+        }
+    }
     for (const nodeId of failingNodes.keys()) {
         if (!polled.has(nodeId)) failingNodes.delete(nodeId)
     }
@@ -185,21 +201,62 @@ function pollNodeInfoOnce(): void {
 
     for (const target of targets) {
         if (inFlight.has(target.id)) continue
-        const targetKey = pollTargetKey(target.hosts, target.port)
+        const targetKey = pollTargetKey(target)
         if (!pollDue(target.id, targetKey, Date.now())) continue
-        inFlight.add(target.id)
-        void pollTarget(target.id, target.hosts, target.port, targetKey, run.signal)
+        const controller = new AbortController()
+        const pending = { targetKey, controller }
+        const signal = AbortSignal.any([run.signal, controller.signal])
+        inFlight.set(target.id, pending)
+        const poll = target.paired
+            ? pollPairedTarget(target.id, targetKey, getter, signal)
+            : pollTarget(target.id, target.hosts, target.port, targetKey, signal)
+        void poll
             .catch((err: unknown) => {
-                if (run.signal.aborted) return
+                if (!pollTargetIsCurrent(target.id, targetKey, signal)) return
                 log.warn({
                     sublevel: 'node-info-poller',
                     message: `Error polling node info: ${getErrorString(err)}`
                 })
             })
             .finally(() => {
-                inFlight.delete(target.id)
+                if (inFlight.get(target.id) === pending) inFlight.delete(target.id)
             })
     }
+}
+
+/** Local RPC has no wire cancellation; late results belong only to this target/run. */
+async function pollPairedTarget(
+    nodeId: string,
+    targetKey: string,
+    getter: NodeInfoGetter,
+    run: AbortSignal
+): Promise<void> {
+    let parsed: JsonValue | undefined
+    let reason = ''
+    try {
+        parsed = await getter(nodeId)
+        const reportedUuid = parsed === undefined ? '' : nodeInfoHostUuid(parsed)
+        if (reportedUuid !== nodeId) reason = 'node information unavailable: host identity mismatch'
+    } catch (err) {
+        reason = getErrorString(err)
+    }
+    if (!pollTargetIsCurrent(nodeId, targetKey, run)) return
+    const endpoint = `discovery:get-node-info(${nodeId})`
+    if (reason || parsed === undefined) {
+        noteNotAnswering(nodeId, [{ host: endpoint, reason }], 0, targetKey, endpoint)
+        return
+    }
+    pollChoices.delete(nodeId)
+    noteAnswering(nodeId, endpoint)
+    getModularBridgeState().mergeNodeInfoResponse(nodeId, parsed)
+}
+
+function pollTargetIsCurrent(nodeId: string, targetKey: string, run: AbortSignal): boolean {
+    if (run.aborted) return false
+    const target = getModularBridgeState()
+        .getNodeInfoPollTargets()
+        .find(candidate => candidate.id === nodeId)
+    return target !== undefined && pollTargetKey(target) === targetKey
 }
 
 async function pollTarget(
@@ -221,8 +278,8 @@ async function pollTarget(
     // address with nothing wrong with it, and every swap costs a reconnect.
     const remembered = rememberedHost(nodeId, hosts)
     if (remembered) {
-        const probe = await probeHost(nodeId, remembered, port, run)
-        if (run.aborted) return
+        const probe = await probeHost(nodeId, remembered, port, targetKey, run)
+        if (!pollTargetIsCurrent(nodeId, targetKey, run)) return
         if (probe.parsed) {
             accept(nodeId, remembered, port, probe.parsed)
             return
@@ -251,17 +308,17 @@ async function pollTarget(
     // address use up the walk before a working one was ever tried. The answers are
     // then read in the node's published order, so the address used is the same one
     // a sequential walk would have chosen — not whichever replied first.
-    const probes = order.map(host => probeHost(nodeId, host, port, run))
+    const probes = order.map(host => probeHost(nodeId, host, port, targetKey, run))
     for (const [index, probe] of probes.entries()) {
         const result = await probe
-        if (run.aborted) return
+        if (!pollTargetIsCurrent(nodeId, targetKey, run)) return
         if (result.parsed) {
             accept(nodeId, order[index], port, result.parsed)
             return
         }
         failed.push({ host: order[index], reason: result.reason })
     }
-    if (run.aborted) return
+    if (!pollTargetIsCurrent(nodeId, targetKey, run)) return
     if (!cooling) pollChoices.set(nodeId, { host: null, walkedAt: Date.now(), targetKey })
     noteNotAnswering(nodeId, failed, port, targetKey)
 }
@@ -293,13 +350,14 @@ async function probeHost(
     nodeId: string,
     host: string,
     port: number,
+    targetKey: string,
     run: AbortSignal
 ): Promise<Probe> {
     const probe = await fetchNodeInfo(host, port, run)
     // An abandoned run has no verdict to report: its answer belongs to a poller
     // that has already stopped, so recording an outcome or merging telemetry would
     // repopulate state the stop cleared.
-    if (run.aborted) return { parsed: null, reason: '' }
+    if (!pollTargetIsCurrent(nodeId, targetKey, run)) return { parsed: null, reason: '' }
     if (!probe.parsed) return probe
 
     // A reused/shared address can answer for another machine. That response is not
@@ -354,7 +412,8 @@ function noteNotAnswering(
     nodeId: string,
     failed: FailedAttempt[],
     port: number,
-    targetKey: string
+    targetKey: string,
+    endpoint?: string
 ): void {
     const previous = pollBackoffs.get(nodeId)
     const consecutiveFailures =
@@ -391,7 +450,7 @@ function noteNotAnswering(
             : 'Node info is not answering; this node keeps the metrics last read from it',
         data: {
             nodeId,
-            url: failed.map(attempt => nodeInfoUrl(attempt.host, port)).join(', '),
+            url: endpoint ?? failed.map(attempt => nodeInfoUrl(attempt.host, port)).join(', '),
             // Bare when one address was asked, host-prefixed when several, so a
             // multi-homed node says which of its addresses failed and how.
             reason:
@@ -423,8 +482,8 @@ function pollBackoffDelay(consecutiveFailures: number): number {
     return delay
 }
 
-function pollTargetKey(hosts: string[], port: number): string {
-    return `${port}|${hosts.join('|')}`
+function pollTargetKey(target: PollTarget): string {
+    return JSON.stringify([target.generation, target.paired === true, target.port, target.hosts])
 }
 
 async function fetchNodeInfo(host: string, port: number, run: AbortSignal): Promise<Probe> {

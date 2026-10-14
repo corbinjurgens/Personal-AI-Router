@@ -164,7 +164,8 @@ describe('UUID node keying', () => {
         ).toEqual({
             id: 'uuid-ni-failover',
             hosts: ['192.0.2.80', '10.20.30.40'],
-            port: 14318
+            port: 14318,
+            generation: expect.any(Number)
         })
     })
 

@@ -58,6 +58,12 @@ const (
 type nodeDetail struct {
 	client *rpc.Client
 	node   nodeRow
+	// hostUUID follows the current merged identity. node.key stays the screen's
+	// message scope when a manual row is joined to a discovered host.
+	hostUUID string
+	// telemetrySelf follows the merged route without changing the engine/proxy
+	// structure chosen from node.self when the detail screen opened.
+	telemetrySelf bool
 
 	engines     []engineStatus
 	engineTable table.Model
@@ -75,10 +81,10 @@ type nodeDetail struct {
 	// selection, which does not fit alongside two other tables.
 	catalog *catalogBrowser
 
-	// telemetry is the node's own hardware readout, polled directly over HTTP
-	// because the broker does not carry it. telemetryOK records whether the last
-	// poll succeeded, so an unreachable node reads as unavailable rather than as
-	// a machine with no hardware.
+	// telemetry is the node's own hardware readout. Paired peers use the local
+	// discovery getter; self and unpaired nodes use HTTP. telemetryOK records
+	// whether the last poll succeeded, so an unreachable node reads as unavailable
+	// rather than as a machine with no hardware.
 	// pending is a destructive action waiting for confirmation. Deleting a model
 	// throws away gigabytes that have to be downloaded again; uninstalling an
 	// engine keeps its models but still costs a reinstall. Both keys sit among
@@ -115,8 +121,8 @@ type nodeDetail struct {
 	// telemetryGen identifies this screen's polling chain. Bubble Tea cannot
 	// cancel a pending tick, so a chain is retired by no longer matching it.
 	telemetryGen int
-	// telemetryRunning is whether a chain is in flight. A node with no known
-	// address has nothing to poll and so no chain; one can start later.
+	// telemetryRunning is whether a chain is in flight. Direct polling waits for
+	// a known address; paired polling can ask the getter without one.
 	telemetryRunning bool
 	// telemetryAddress is the address that answered the last poll, empty once
 	// a poll fails.
@@ -215,12 +221,14 @@ func newNodeDetail(client *rpc.Client, node nodeRow) *nodeDetail {
 	ti := textinput.New()
 	telemetryChains++
 	d := &nodeDetail{
-		client:       client,
-		node:         node,
-		engineTable:  newTable(detailEngineColumns(defaultTableWidth, !node.self)),
-		modelTable:   newTable(detailModelColumns(defaultTableWidth)),
-		input:        ti,
-		telemetryGen: telemetryChains,
+		client:        client,
+		node:          node,
+		hostUUID:      telemetryIdentity(node),
+		telemetrySelf: node.self,
+		engineTable:   newTable(detailEngineColumns(defaultTableWidth, !node.self)),
+		modelTable:    newTable(detailModelColumns(defaultTableWidth)),
+		input:         ti,
+		telemetryGen:  telemetryChains,
 	}
 	if node.self {
 		d.proxy = newProxyTracker()
@@ -331,14 +339,27 @@ func (d *nodeDetail) telemetryCmd() tea.Cmd {
 		d.telemetryRunning = false
 		return nil
 	}
+	if !d.telemetrySelf && d.node.membership == membershipMember {
+		d.telemetryRunning = true
+		return pollPairedTelemetryCmd(d.client, d.node.key, d.telemetryGen, d.hostUUID)
+	}
+	node := d.node
+	node.self = d.telemetrySelf
 	cmd := pollTelemetryCmd(d.node.key, d.telemetryGen,
-		preferAddress(telemetryHosts(d.node), d.telemetryAddress), d.node.port, telemetryIdentity(d.node))
+		preferAddress(telemetryHosts(node), d.telemetryAddress), d.node.port, d.hostUUID)
 	// Whether a chain is running, so a node whose address is not known yet can
 	// have one started later. Nothing schedules a tick when there is nothing to
 	// poll, and the reply is what continues the chain — so without this a manual
 	// entry opened before its first probe landed showed "unavailable" forever,
 	// even once discovery supplied an address.
 	d.telemetryRunning = cmd != nil
+	if cmd != nil && d.telemetrySelf {
+		return func() tea.Msg {
+			msg := cmd().(nodeTelemetryMsg)
+			msg.self = true
+			return msg
+		}
+	}
 	return cmd
 }
 
@@ -404,7 +425,15 @@ func (d *nodeDetail) own(cmd tea.Cmd) tea.Cmd {
 // "Online" and "Member" here until the screen was reopened.
 func (d *nodeDetail) followNode(row nodeRow, found bool) {
 	was := d.node.membership
+	hardwareWas := d.hardwareHeight()
 	if found {
+		hostUUID := telemetryIdentity(row)
+		if hostUUID != d.hostUUID || row.self != d.telemetrySelf {
+			d.telemetryOK = false
+			d.telemetryAddress = ""
+		}
+		d.hostUUID = hostUUID
+		d.telemetrySelf = row.self
 		d.node.name = row.name
 		d.node.presence = row.presence
 		d.node.membership = row.membership
@@ -419,6 +448,9 @@ func (d *nodeDetail) followNode(row nodeRow, found bool) {
 	} else {
 		d.node.presence = presenceOffline
 		d.node.membership = membershipNone
+	}
+	if d.hardwareHeight() != hardwareWas {
+		d.sizeEngineTable()
 	}
 	// Leaving the cluster puts the engines out of reach, so the list read while
 	// it was a member offers controls that can no longer do anything. It goes,
@@ -706,6 +738,11 @@ func (d *nodeDetail) update(msg tea.Msg) (tea.Cmd, bool) {
 		if d.node.nodeInfoTLS {
 			d.telemetryRunning = false
 			return nil, true
+		}
+		if msg.hostUUID != d.hostUUID || msg.self != d.telemetrySelf {
+			// The manual row acquired a host identity or became this machine
+			// while this read was in flight. Keep the chain, not its sample.
+			return telemetryTickCmd(d.node.key, d.telemetryGen), true
 		}
 		// A failed poll is expected for an unreachable node and is recorded
 		// rather than reported: the panel says telemetry is unavailable, and no

@@ -30,7 +30,7 @@ func TestTelemetryReplyIsGenerationScoped(t *testing.T) {
 
 	// The older screen's in-flight poll lands on the newer screen.
 	cmd, _ := second.update(nodeTelemetryMsg{
-		nodeKey: node.key, gen: first.telemetryGen,
+		nodeKey: node.key, hostUUID: "n1", gen: first.telemetryGen,
 		telemetry: nodeTelemetry{TelemetryValid: true},
 	})
 	if cmd != nil {
@@ -39,7 +39,7 @@ func TestTelemetryReplyIsGenerationScoped(t *testing.T) {
 
 	// Its own reply does continue the chain.
 	cmd, _ = second.update(nodeTelemetryMsg{
-		nodeKey: node.key, gen: second.telemetryGen,
+		nodeKey: node.key, hostUUID: "n1", gen: second.telemetryGen,
 		telemetry: nodeTelemetry{TelemetryValid: true},
 	})
 	if cmd == nil {
@@ -282,11 +282,11 @@ func TestTelemetryTriesTheAddressThatAnswered(t *testing.T) {
 	}
 
 	d := newNodeDetail(nil, nodeRow{key: "peer", addresses: addresses, presence: presenceOnline})
-	d.update(nodeTelemetryMsg{nodeKey: "peer", gen: d.telemetryGen, address: "10.0.0.3"})
+	d.update(nodeTelemetryMsg{nodeKey: "peer", hostUUID: "peer", gen: d.telemetryGen, address: "10.0.0.3"})
 	if d.telemetryAddress != "10.0.0.3" {
 		t.Errorf("the address that answered was not kept: %q", d.telemetryAddress)
 	}
-	d.update(nodeTelemetryMsg{nodeKey: "peer", gen: d.telemetryGen, err: errors.New("unreachable")})
+	d.update(nodeTelemetryMsg{nodeKey: "peer", hostUUID: "peer", gen: d.telemetryGen, err: errors.New("unreachable")})
 	if d.telemetryAddress != "" {
 		t.Error("an address that stopped answering was still tried first")
 	}

@@ -36,6 +36,7 @@ import {
 import { trackWindowVisibility } from '@/electron/window-visibility'
 
 const fetchMock = vi.fn<typeof fetch>()
+const pairedNodeInfo = vi.fn<Parameters<typeof startNodeInfoPoller>[0]>()
 
 function answer(): Promise<Response> {
     return Promise.resolve(new Response(JSON.stringify({ hostUuid: 'uuid-a' }), { status: 200 }))
@@ -57,11 +58,12 @@ describe('node info poller visibility gating', () => {
         fetchMock.mockReset()
         fetchMock.mockImplementation(answer)
         mocks.state.getNodeInfoPollTargets.mockReturnValue([
-            { id: 'uuid-a', hosts: ['192.0.2.1'], port: 14318 }
+            { id: 'uuid-a', hosts: ['192.0.2.1'], generation: 1, port: 14318 }
         ])
     })
 
     afterEach(() => {
+        expect(pairedNodeInfo).not.toHaveBeenCalled()
         stopNodeInfoPoller()
         setNodeInfoPollerVisible(false)
         vi.unstubAllGlobals()
@@ -69,12 +71,12 @@ describe('node info poller visibility gating', () => {
     })
 
     it('does not poll while started with no window visible', async () => {
-        startNodeInfoPoller()
+        startNodeInfoPoller(pairedNodeInfo)
         expect(await pollsDuring(MODULAR_NODE_INFO_POLL_INTERVAL_MS * 3)).toBe(0)
     })
 
     it('polls at once when a window becomes visible, then on the interval', async () => {
-        startNodeInfoPoller()
+        startNodeInfoPoller(pairedNodeInfo)
         setNodeInfoPollerVisible(true)
         expect(fetchMock).toHaveBeenCalledTimes(1)
 
@@ -82,7 +84,7 @@ describe('node info poller visibility gating', () => {
     })
 
     it('pauses when every window is hidden and resumes with an immediate poll', async () => {
-        startNodeInfoPoller()
+        startNodeInfoPoller(pairedNodeInfo)
         setNodeInfoPollerVisible(true)
         await vi.advanceTimersByTimeAsync(0)
 
@@ -99,7 +101,7 @@ describe('node info poller visibility gating', () => {
         setNodeInfoPollerVisible(true)
         expect(await pollsDuring(MODULAR_NODE_INFO_POLL_INTERVAL_MS * 3)).toBe(0)
 
-        startNodeInfoPoller()
+        startNodeInfoPoller(pairedNodeInfo)
         expect(fetchMock).toHaveBeenCalledTimes(1)
 
         stopNodeInfoPoller()
@@ -107,7 +109,7 @@ describe('node info poller visibility gating', () => {
     })
 
     it('does not double the interval when visibility is reported twice', async () => {
-        startNodeInfoPoller()
+        startNodeInfoPoller(pairedNodeInfo)
         setNodeInfoPollerVisible(true)
         setNodeInfoPollerVisible(true)
         await vi.advanceTimersByTimeAsync(0)
@@ -167,9 +169,9 @@ describe('window visibility tracking drives the poller', () => {
         fetchMock.mockReset()
         fetchMock.mockImplementation(answer)
         mocks.state.getNodeInfoPollTargets.mockReturnValue([
-            { id: 'uuid-a', hosts: ['192.0.2.1'], port: 14318 }
+            { id: 'uuid-a', hosts: ['192.0.2.1'], generation: 1, port: 14318 }
         ])
-        startNodeInfoPoller()
+        startNodeInfoPoller(pairedNodeInfo)
     })
 
     afterEach(() => {

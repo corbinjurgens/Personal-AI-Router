@@ -15,15 +15,13 @@ import (
 	"time"
 
 	"nvpair-shared/noderec"
+	"nvpair-tui/rpc"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
 
-// The node-info HTTP contract. Hardware telemetry is the one thing the broker's
-// JSON-RPC surface does not carry: it keeps GPU, CPU, and memory readings
-// internally but does not put them on the discovery wire, so a client that wants
-// them has to ask each node directly. The desktop app does the same thing, and
-// these values match its cadence so the two behave alike.
+// Paired peers use the local discovery getter, which owns their trusted route.
+// Self and unpaired nodes retain the node-info HTTP contract and cadence.
 const (
 	nodeInfoPath         = "/v1/node-info"
 	nodeInfoDefaultPort  = 14318
@@ -52,6 +50,12 @@ type nodeTelemetry struct {
 // screen simply says telemetry is unavailable.
 type nodeTelemetryMsg struct {
 	nodeKey string
+	// hostUUID is the identity expected when the request started, which can
+	// change after an open manual row joins discovery without changing its key.
+	hostUUID string
+	// self distinguishes loopback from an unresolved manual route, both of
+	// which intentionally have no expected host identity.
+	self bool
 	// gen identifies the polling chain this reading belongs to. It matters
 	// because the reply is what schedules the next tick: a reading from a
 	// previous visit to the same node would otherwise be accepted and start a
@@ -121,11 +125,39 @@ func pollTelemetryCmd(key string, gen int, addresses []string, port int, expect 
 				err = fmt.Errorf("%s answered as another machine", address)
 			}
 			if err == nil {
-				return nodeTelemetryMsg{nodeKey: key, gen: gen, address: address, telemetry: t}
+				return nodeTelemetryMsg{nodeKey: key, hostUUID: expect, gen: gen, address: address, telemetry: t}
 			}
 			lastErr = err
 		}
-		return nodeTelemetryMsg{nodeKey: key, gen: gen, err: lastErr}
+		return nodeTelemetryMsg{nodeKey: key, hostUUID: expect, gen: gen, err: lastErr}
+	}
+}
+
+// pollPairedTelemetryCmd asks by host identity only. The scanner owns endpoint
+// selection and reverse retry; a failed getter never falls back to direct HTTP.
+func pollPairedTelemetryCmd(client *rpc.Client, key string, gen int, hostUUID string) tea.Cmd {
+	return func() tea.Msg {
+		result := nodeTelemetryMsg{nodeKey: key, hostUUID: hostUUID, gen: gen}
+		if client == nil || hostUUID == "" {
+			result.err = fmt.Errorf("node information unavailable")
+			return result
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), nodeInfoPollTimeout)
+		defer cancel()
+		msg, err := client.Call(ctx, "discovery:get-node-info", struct {
+			HostUUID string `json:"hostUuid"`
+		}{HostUUID: hostUUID})
+		if err == nil {
+			err = json.Unmarshal(msg.Result, &result.telemetry)
+		}
+		if err == nil && result.telemetry.HostUUID != hostUUID {
+			err = fmt.Errorf("node information answered as another machine")
+		}
+		if err != nil {
+			result.telemetry = nodeTelemetry{}
+		}
+		result.err = err
+		return result
 	}
 }
 

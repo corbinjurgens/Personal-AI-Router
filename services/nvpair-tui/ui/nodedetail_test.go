@@ -1555,7 +1555,7 @@ func TestDetailResizesWhenHardwareArrives(t *testing.T) {
 	}
 
 	// A dual-GPU reading is four hardware lines instead of the unavailable one.
-	d.update(nodeTelemetryMsg{nodeKey: d.node.key, gen: d.telemetryGen, telemetry: nodeTelemetry{
+	d.update(nodeTelemetryMsg{nodeKey: d.node.key, self: true, gen: d.telemetryGen, telemetry: nodeTelemetry{
 		TelemetryValid: true,
 		GPUs: []noderec.GPUInfo{
 			{Name: "GPU 0", VramBytes: 1 << 30},
