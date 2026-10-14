@@ -10,6 +10,8 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strconv"
 	"sync"
 	"testing"
@@ -104,15 +106,27 @@ func TestLocalCancelGoesToTheOriginOrEveryPeer(t *testing.T) {
 	selfDir, peerDir := newPinnedPeerDirs(t)
 	peerMesh := clustertrust.Open(peerDir)
 	origin := startCancelPeer(t, peerMesh)
-	bystander := startCancelPeer(t, peerMesh)
+	bystanderCert, bystanderKey := genLeaf(t, "uuid-bystander")
+	selfCert, err := os.ReadFile(filepath.Join(selfDir, "node.crt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	bystanderDir := setupNode(t, bystanderCert, bystanderKey, map[string][]byte{"uuid-self": selfCert})
+	pin, err := json.Marshal(workloadTestPin{"uuid-bystander", string(bystanderCert), "test-cluster", 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(selfDir, "trusted", "uuid-bystander.json"), pin, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	bystander := startCancelPeer(t, clustertrust.Open(bystanderDir))
 
 	var out bytes.Buffer
 	m := NewManager(NewCodec(&out), 0, "uuid-self-host", selfDir)
-	t.Cleanup(m.broadcaster.CloseIdle)
 	txt := []string{clustertrust.ClusterUUIDTXTKey + "=uuid-peer"}
 	m.peers.Replace([]PeerNode{
 		{ID: "origin-host", Host: origin.host, Addresses: []string{origin.host}, Port: origin.port, TXT: txt},
-		{ID: "bystander-host", Host: bystander.host, Addresses: []string{bystander.host}, Port: bystander.port, TXT: txt},
+		{ID: "bystander-host", Host: bystander.host, Addresses: []string{bystander.host}, Port: bystander.port, TXT: []string{clustertrust.ClusterUUIDTXTKey + "=uuid-bystander"}},
 	})
 	wait := func(what string, pred func() bool) {
 		t.Helper()

@@ -6,6 +6,7 @@ package main
 import (
 	"context"
 	"net"
+	"slices"
 	"strconv"
 	"sync"
 
@@ -51,6 +52,7 @@ type PeerSource interface {
 type peerEntry struct {
 	candidates []string
 	uuid       string
+	generation uint64
 }
 
 // target is one broadcast destination and the peer uuid used to look up its pin.
@@ -67,6 +69,8 @@ type peerSet struct {
 	mu          sync.RWMutex
 	defaultPort int
 	peers       map[string]peerEntry // node id -> destination
+	generation  uint64
+	onChange    func() // retire idle service connections after a route-set change
 }
 
 func newPeerSet(defaultPort int) *peerSet {
@@ -102,7 +106,18 @@ func (p *peerSet) Replace(nodes []PeerNode) (added, removed []string) {
 	}
 
 	p.mu.Lock()
-	defer p.mu.Unlock()
+	changed := len(p.peers) != len(next)
+	for id, e := range next {
+		previous, exists := p.peers[id]
+		if exists && previous.uuid == e.uuid && slices.Equal(previous.candidates, e.candidates) {
+			e.generation = previous.generation
+		} else {
+			changed = true
+			p.generation++
+			e.generation = p.generation
+		}
+		next[id] = e
+	}
 	for id := range next {
 		if _, ok := p.peers[id]; !ok {
 			added = append(added, id)
@@ -114,6 +129,12 @@ func (p *peerSet) Replace(nodes []PeerNode) (added, removed []string) {
 		}
 	}
 	p.peers = next
+	onChange := p.onChange
+	p.mu.Unlock()
+	// Cleanup may recheck routes; never call it while holding the peer lock.
+	if changed && onChange != nil {
+		onChange()
+	}
 	return added, removed
 }
 
@@ -132,4 +153,24 @@ func (p *peerSet) count() int {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	return len(p.peers)
+}
+
+// targetUUID resolves the current logical service endpoint. Conflicting
+// advertisements for one principal fail closed rather than choosing a map entry.
+func (p *peerSet) targetUUID(uuid string) (target, uint64, bool) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	var found target
+	var generation uint64
+	for id, e := range p.peers {
+		if e.uuid != uuid {
+			continue
+		}
+		if found.uuid != "" {
+			return target{}, 0, false
+		}
+		found = target{id: id, candidates: e.candidates, uuid: e.uuid}
+		generation = e.generation
+	}
+	return found, generation, found.uuid != ""
 }

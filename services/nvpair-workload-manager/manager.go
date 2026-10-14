@@ -133,7 +133,7 @@ func NewManager(codec *Codec, port int, selfUUID, clusterDir string) *Manager {
 		dedup:       dedup,
 		peers:       peers,
 		mesh:        mesh,
-		broadcaster: NewBroadcaster(peers, mesh),
+		broadcaster: NewBroadcaster(peers, mesh, clusterDir),
 		peerSource:  relaySource,
 		relaySource: relaySource,
 		activeLocal: make(map[workloadKey]workloadEvent),
@@ -149,7 +149,7 @@ func (m *Manager) Run(ctx context.Context) error {
 	m.ctx = ctx
 	m.cancel = cancel
 	defer cancel()
-	defer m.broadcaster.CloseIdle()
+	defer m.broadcaster.clients.CloseIdle()
 
 	if err := m.codec.Notify("ready", ReadyParams{Version: Version}); err != nil {
 		return fmt.Errorf("failed to send ready notification: %w", err)
@@ -181,13 +181,9 @@ func (m *Manager) Run(ctx context.Context) error {
 	// and to re-assert our workloads immediately: peers that could not receive
 	// them while we were unclustered would otherwise wait for the next heartbeat.
 	go m.mesh.Watch(ctx, func(clustered bool) {
+		m.broadcaster.clients.CloseIdle()
 		slog.Info("inter-node interface switched personality",
 			"clustered", clustered, "peers", m.peers.count())
-		// Retire pooled connections to peers the new membership no longer pins.
-		// The fan-out does this per round too, but a node that just left a
-		// cluster stops fanning out entirely, so without this its sockets would
-		// stay open with nothing left to send on them.
-		m.broadcaster.DropUnpinned()
 		// Detached: the fan-out blocks per peer, and the watch is this node's
 		// self-healing loop — it must stay free to observe the next change.
 		go m.pushActiveSnapshot()

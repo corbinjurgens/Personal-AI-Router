@@ -15,25 +15,24 @@ import (
 	"nvpair-shared/clustertrust"
 )
 
-// TestBroadcast_ReusesPeerConnections is the regression for stale "running"
-// workload lines that never clear.
-//
-// The fan-out used to build a fresh http.Client (and Transport) per peer per
-// event, so every lifecycle event paid a full mTLS handshake and then leaked the
-// socket — a hand-built Transport has no IdleConnTimeout and its read loop keeps
-// it reachable. Under an inference burst that exhausts the ability to handshake
-// at all, and the events that go missing include the terminal
-// completed/errored, which is what leaves a peer showing "running" forever.
-//
-// Several broadcast rounds must therefore ride ONE connection per peer.
+// TestBroadcast_ReusesPeerConnections guards the field failure where a fresh
+// mTLS handshake per lifecycle event exhausted connections and lost terminal
+// events, leaving stale running workloads. Several rounds must use one bounded
+// connection; the receiver, rather than the transport, owns mutation dedup.
 func TestBroadcast_ReusesPeerConnections(t *testing.T) {
-	self, peer := newPinnedPeerMeshes(t)
+	selfDir, peerDir := newPinnedPeerDirs(t)
+	self, peer := clustertrust.Open(selfDir), clustertrust.Open(peerDir)
 
 	var mu sync.Mutex
 	newConns := 0
+	closedConns := 0
+	requests := 0
 
 	mux := http.NewServeMux()
 	mux.HandleFunc(eventsPath, func(w http.ResponseWriter, _ *http.Request) {
+		mu.Lock()
+		requests++
+		mu.Unlock()
 		w.WriteHeader(http.StatusOK)
 	})
 	ts := httptest.NewUnstartedServer(mux)
@@ -41,6 +40,11 @@ func TestBroadcast_ReusesPeerConnections(t *testing.T) {
 		if state == http.StateNew {
 			mu.Lock()
 			newConns++
+			mu.Unlock()
+		}
+		if state == http.StateClosed {
+			mu.Lock()
+			closedConns++
 			mu.Unlock()
 		}
 	}
@@ -67,8 +71,8 @@ func TestBroadcast_ReusesPeerConnections(t *testing.T) {
 		TXT:       []string{clustertrust.ClusterUUIDTXTKey + "=uuid-peer"},
 	}})
 
-	b := NewBroadcaster(peers, self)
-	defer b.CloseIdle()
+	b := NewBroadcaster(peers, self, selfDir)
+	defer b.clients.CloseIdle()
 
 	const rounds = 5
 	for i := 0; i < rounds; i++ {
@@ -76,10 +80,10 @@ func TestBroadcast_ReusesPeerConnections(t *testing.T) {
 	}
 
 	mu.Lock()
-	got := newConns
+	opened, closed, delivered := newConns, closedConns, requests
 	mu.Unlock()
-	if got != 1 {
-		t.Fatalf("peer accepted %d connections for %d broadcast rounds, want 1 (a handshake per event is the leak that drops terminal events)", got, rounds)
+	if opened != 1 || closed != 0 || delivered != rounds {
+		t.Fatalf("connections opened=%d closed=%d requests=%d, want 1, 0, %d (handshakes per event lose terminal events)", opened, closed, delivered, rounds)
 	}
 }
 

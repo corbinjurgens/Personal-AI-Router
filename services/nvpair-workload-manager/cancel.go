@@ -127,8 +127,8 @@ func (m *Manager) emitCancel(p cancelParams) error {
 // with the same retry budget and cluster gate as Broadcast.
 func (b *Broadcaster) BroadcastTo(ctx context.Context, frame []byte, keep func(target) bool) {
 	b.mesh.Refresh()
-	b.clients.DropUnpinned()
 	if !b.mesh.Clustered() {
+		b.clients.CloseIdle()
 		slog.Debug("targeted send skipped: node is not a cluster member")
 		return
 	}

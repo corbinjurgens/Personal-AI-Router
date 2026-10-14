@@ -11,10 +11,12 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"path/filepath"
 	"sync"
 	"time"
 
 	"nvpair-shared/clustertrust"
+	"nvpair-shared/noderec"
 	"nvpair-shared/reach"
 )
 
@@ -28,9 +30,7 @@ const (
 	maxBroadcastAttempts = 3
 	// retryBaseDelay is the first backoff interval; it doubles each retry.
 	retryBaseDelay = 200 * time.Millisecond
-	// maxDrainBytes bounds how much of a peer's response body we read purely to
-	// make its connection reusable. Both inter-node answers are an empty 200 or a
-	// short error string, so this drains every legitimate body in full.
+	// maxDrainBytes bounds draining the empty success or short error response.
 	maxDrainBytes = 8 << 10
 )
 
@@ -46,41 +46,73 @@ const (
 // round, so a node that joins or leaves mid-session starts (or stops) addressing
 // its peers on the next event rather than at its next restart.
 //
-// Peer clients are pooled and long-lived (clustertrust.PeerClientPool), so a
-// fan-out reuses a warm connection per peer instead of handshaking per event.
+// The shared adapter prefers direct mTLS and falls back to a pinned reverse
+// session before dispatch. Each application retry is a new HTTP attempt;
+// the transport never replays a dispatched mutation.
 type Broadcaster struct {
 	peers   *peerSet
 	mesh    *clustertrust.Mesh
-	clients *clustertrust.PeerClientPool
+	clients *clustertrust.PeerServiceClient
 	addrs   *reach.Chooser
 }
 
-func NewBroadcaster(peers *peerSet, mesh *clustertrust.Mesh) *Broadcaster {
-	return &Broadcaster{
-		peers:   peers,
-		mesh:    mesh,
-		clients: clustertrust.NewPeerClientPool(mesh, perPeerTimeout),
-		addrs:   reach.NewChooser(),
+func NewBroadcaster(peers *peerSet, mesh *clustertrust.Mesh, clusterDir string) *Broadcaster {
+	b := &Broadcaster{
+		peers: peers,
+		mesh:  mesh,
+		addrs: reach.NewChooser(),
 	}
+	base := ""
+	if clusterDir != "" {
+		base = filepath.Dir(clusterDir)
+	}
+	b.clients = clustertrust.NewPeerServiceClient(mesh, clustertrust.PeerServiceClientOptions{
+		PeerClientOptions: clustertrust.PeerClientOptions{Timeout: perPeerTimeout},
+		BaseConfigDir:     base,
+		ResolveRoute:      b.resolveRoute,
+		// Only post uses this client: nonempty, known-length event/cancel
+		// POSTs whose receiver owns deduplication. The adapter never replays.
+		ReuseConnections: true,
+	})
+	peers.mu.Lock()
+	peers.onChange = func() { b.clients.CloseIdle() }
+	peers.mu.Unlock()
+	return b
 }
 
-// CloseIdle releases every pooled peer connection. Called on shutdown.
-func (b *Broadcaster) CloseIdle() { b.clients.CloseIdle() }
-
-// DropUnpinned retires pooled clients for peers this node no longer pins.
-func (b *Broadcaster) DropUnpinned() { b.clients.DropUnpinned() }
+// resolveRoute combines shared admission authority with the current discovery
+// endpoint at every adapter authorization boundary, including after TLS setup.
+func (b *Broadcaster) resolveRoute(uuid string, service noderec.ServiceKey) (clustertrust.PeerServiceRoute, bool) {
+	fail := func() (clustertrust.PeerServiceRoute, bool) { return clustertrust.PeerServiceRoute{}, false }
+	b.mesh.Refresh()
+	if service != noderec.ServiceWorkload {
+		return fail()
+	}
+	incarnation, ok := b.mesh.PeerServiceIncarnation(uuid)
+	if !ok {
+		return fail()
+	}
+	t, generation, ok := b.peers.targetUUID(uuid)
+	if !ok {
+		return fail()
+	}
+	return clustertrust.PeerServiceRoute{
+		Incarnation: incarnation,
+		Address:     b.addrs.Prefer(t.id, t.candidates),
+		Protocol:    clustertrust.ReverseTLS,
+		Generation:  generation,
+	}, true
+}
 
 // Broadcast posts the already-marshaled notification frame to every current
 // peer concurrently and returns once all peers have either succeeded or
 // exhausted their retry budget. ctx cancellation (parent shutdown) aborts
 // in-flight attempts.
 func (b *Broadcaster) Broadcast(ctx context.Context, frame []byte) {
-	// Re-derive membership and pins so a cluster joined, left, or re-paired since
-	// the last round is reflected before we fan out, then retire pooled clients
-	// for peers those fresh pins no longer cover.
+	// Re-derive membership and pins before the fan-out.
 	b.mesh.Refresh()
-	b.clients.DropUnpinned()
 	if !b.mesh.Clustered() {
+		b.clients.CloseIdle()
 		// Not a member: there is no channel to fan out on. Bail before building
 		// targets so this is unmistakably a no-op rather than a failed round.
 		slog.Debug("broadcast skipped: node is not a cluster member")
@@ -105,9 +137,7 @@ func (b *Broadcaster) Broadcast(ctx context.Context, frame []byte) {
 }
 
 // deliver attempts a single peer with bounded exponential backoff. It resolves
-// the peer's pooled pinned client — an unpinned peer is not a trusted member and
-// is skipped (the client-side cluster gate) — and reuses it across events. There
-// is no unpinned path.
+// the current peer endpoint and pinned service client on each attempt.
 func (b *Broadcaster) deliver(ctx context.Context, t target, frame []byte) {
 	delay := retryBaseDelay
 	for attempt := 1; attempt <= maxBroadcastAttempts; attempt++ {
@@ -118,13 +148,18 @@ func (b *Broadcaster) deliver(ctx context.Context, t target, frame []byte) {
 		// spans seconds, and a peer removed from the cluster inside it must stop
 		// being dialed immediately rather than keep receiving our events until the
 		// budget runs out.
-		client, ok := b.clients.Client(t.uuid)
-		if !ok {
+		current, _, ok := b.peers.targetUUID(t.uuid)
+		b.mesh.Refresh()
+		if !ok || !b.mesh.HasPin(t.uuid) {
+			// This rejection bypasses adapter authorization, so retire idle
+			// capacity here too. Active responses keep their own lifetime.
+			b.clients.CloseIdle()
 			slog.Debug("broadcast skipped: peer not a pinned cluster member", "nodeId", t.id, "uuid", t.uuid)
 			return
 		}
-		hostport := b.addrs.ChooseWithin(ctx, t.id, t.candidates)
+		hostport := b.addrs.ChooseWithin(ctx, current.id, current.candidates)
 		url := "https://" + hostport + eventsPath
+		client := b.clients.Client(t.uuid, noderec.ServiceWorkload)
 		err := b.post(ctx, client, url, frame)
 		if err == nil {
 			slog.Debug("broadcast delivered", "url", url, "attempt", attempt)
@@ -163,12 +198,7 @@ func (b *Broadcaster) post(ctx context.Context, client *http.Client, url string,
 	if err != nil {
 		return err
 	}
-	// Drain before closing. A body left unread is not merely untidy: the
-	// connection cannot be returned to the idle pool, so an error response
-	// carrying a body would silently cost us the pooled connection and put the
-	// next event back to a full handshake. Bounded, because this endpoint only
-	// ever answers with an empty 200 or a short error string — a peer streaming
-	// something larger forfeits its connection instead of our bandwidth.
+	// Drain the bounded response before releasing the adapter's request slot.
 	defer func() {
 		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxDrainBytes))
 		_ = resp.Body.Close()

@@ -68,17 +68,30 @@ func setupNode(t *testing.T, certPEM, keyPEM []byte, pins map[string][]byte) str
 	if err := os.WriteFile(filepath.Join(dir, "node.key"), keyPEM, 0o600); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(filepath.Join(dir, "admission.json"), []byte(`{"clusterId":"test-cluster","epoch":1,"counter":1,"activated":1}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	td := filepath.Join(dir, "trusted")
 	if err := os.MkdirAll(td, 0o700); err != nil {
 		t.Fatal(err)
 	}
 	for uuid, pcert := range pins {
-		body, _ := json.Marshal(map[string]string{"nodeUuid": uuid, "certPem": string(pcert)})
+		body, err := json.Marshal(workloadTestPin{uuid, string(pcert), "test-cluster", 1})
+		if err != nil {
+			t.Fatal(err)
+		}
 		if err := os.WriteFile(filepath.Join(td, uuid+".json"), body, 0o600); err != nil {
 			t.Fatal(err)
 		}
 	}
 	return dir
+}
+
+type workloadTestPin struct {
+	NodeUUID       string `json:"nodeUuid"`
+	CertPem        string `json:"certPem"`
+	ClusterID      string `json:"clusterId"`
+	AdmissionEpoch uint64 `json:"admissionEpoch"`
 }
 
 // newPinnedPeerDirs builds two mutually pinned nodes. Tests that construct a
@@ -282,7 +295,8 @@ func TestBroadcast_UnclusteredNodeSendsNothing(t *testing.T) {
 	peers := newPeerSet(14320)
 	peers.Replace([]PeerNode{{ID: "peer-1", Host: host, Addresses: []string{host}}})
 
-	b := NewBroadcaster(peers, clustertrust.Open(t.TempDir()))
+	dir := t.TempDir()
+	b := NewBroadcaster(peers, clustertrust.Open(dir), dir)
 	b.Broadcast(context.Background(), []byte(`{"jsonrpc":"2.0","method":"workload:started"}`))
 
 	if got := atomic.LoadInt32(&hits); got != 0 {
