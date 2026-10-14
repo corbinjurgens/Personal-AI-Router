@@ -53,6 +53,9 @@ func TestHandleRosterLearnsSourceAddr(t *testing.T) {
 
 	mA := newTestManagerPort(t, 15021)
 	mB := newTestManagerPort(t, 15022)
+	// Even an initialized reverse-service snapshot must not suppress source
+	// learning for an ordinary authenticated direct connection.
+	setReverseServices(t, mA, 0)
 	go func() { _ = mA.runHTTP(ctx) }()
 	go func() { _ = mB.runHTTP(ctx) }()
 	time.Sleep(400 * time.Millisecond)
@@ -61,8 +64,8 @@ func TestHandleRosterLearnsSourceAddr(t *testing.T) {
 	pinTrusted(t, mB, mA.identity.NodeUUID, string(mA.identity.CertPEM), mA.identity.CertFingerprint)
 
 	// mA's record for mB points at a stale IP; mB still reaches mA fine.
-	mA.upsertMember(&ClusterNode{NodeUUID: mB.identity.NodeUUID, ID: "node-b", IPAddress: "10.9.9.9", Port: 15022, State: stateMember})
-	mB.upsertMember(&ClusterNode{NodeUUID: mA.identity.NodeUUID, ID: "node-a", IPAddress: "127.0.0.1", Port: 15021, State: stateMember})
+	mA.upsertMember(&ClusterNode{NodeUUID: mB.identity.NodeUUID, ID: "node-b", IPAddress: "10.9.9.9", Port: 15022, ClusterID: "cluster-1", AdmissionEpoch: 1, State: stateMember})
+	mB.upsertMember(&ClusterNode{NodeUUID: mA.identity.NodeUUID, ID: "node-a", IPAddress: "127.0.0.1", Port: 15021, ClusterID: "cluster-1", AdmissionEpoch: 1, State: stateMember})
 
 	mB.reconcileWith([]string{net.JoinHostPort("127.0.0.1", strconv.Itoa(15021))}, mA.identity.NodeUUID)
 

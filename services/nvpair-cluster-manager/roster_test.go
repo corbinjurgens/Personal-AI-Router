@@ -33,8 +33,8 @@ func TestReconcileMTLSFanout(t *testing.T) {
 	// records so reconcile has an address.
 	pinTrusted(t, mA, mB.identity.NodeUUID, string(mB.identity.CertPEM), mB.identity.CertFingerprint)
 	pinTrusted(t, mB, mA.identity.NodeUUID, string(mA.identity.CertPEM), mA.identity.CertFingerprint)
-	mA.upsertMember(&ClusterNode{NodeUUID: mB.identity.NodeUUID, ID: "node-b", IPAddress: "127.0.0.1", Port: 15012, AdmissionEpoch: 1, State: stateMember})
-	mB.upsertMember(&ClusterNode{NodeUUID: mA.identity.NodeUUID, ID: "node-a", IPAddress: "127.0.0.1", Port: 15011, AdmissionEpoch: 1, State: stateMember})
+	mA.upsertMember(&ClusterNode{NodeUUID: mB.identity.NodeUUID, ID: "node-b", IPAddress: "127.0.0.1", Port: 15012, ClusterID: "cluster-1", AdmissionEpoch: 1, State: stateMember})
+	mB.upsertMember(&ClusterNode{NodeUUID: mA.identity.NodeUUID, ID: "node-a", IPAddress: "127.0.0.1", Port: 15011, ClusterID: "cluster-1", AdmissionEpoch: 1, State: stateMember})
 
 	// A holds a third member C, endorsed by A.
 	cUUID, cCert, cFP, _ := makeNode(t, "node-c")
@@ -72,6 +72,8 @@ func newTestManagerPort(t *testing.T, port int) *Manager {
 	if err != nil {
 		t.Fatalf("new manager: %v", err)
 	}
+	t.Cleanup(mgr.peerServices.CloseIdle)
+	t.Cleanup(mgr.removalPeerServices.CloseIdle)
 	if _, err := mgr.ensureAdmission("cluster-1"); err != nil {
 		t.Fatalf("establish test admission: %v", err)
 	}

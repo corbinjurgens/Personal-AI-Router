@@ -45,7 +45,148 @@ type reverseState struct {
 	calls        map[string]*reversePrivateCall
 	callChanged  chan struct{}
 	privateSlots chan struct{}
+	forwardMu    sync.Mutex
+	forwarded    map[reverseForwardKey]*reverseForwardMarker
 	wg           sync.WaitGroup
+}
+
+type reverseForwardKey struct {
+	source string
+	target string
+}
+
+type reverseForwardMarker struct {
+	conn     net.Conn
+	accepted net.Conn
+	timer    *time.Timer
+	closing  bool
+	consumed bool
+}
+
+type reverseForwardConn struct {
+	net.Conn
+	state  *reverseState
+	key    reverseForwardKey
+	marker *reverseForwardMarker
+}
+
+func (c *reverseForwardConn) Close() error {
+	c.state.forwardMu.Lock()
+	defer c.state.forwardMu.Unlock()
+	if c.state.forwarded[c.key] == c.marker {
+		// Keep a pending dial reserved until Accept transfers its provenance
+		// to the concrete accepted connection, or the setup bound expires.
+		c.marker.closing = true
+		return c.Conn.SetDeadline(time.Now())
+	}
+	return c.Conn.Close()
+}
+
+func (c *reverseForwardConn) CloseWrite() error {
+	half, ok := c.Conn.(interface{ CloseWrite() error })
+	if !ok {
+		return errors.New("reverse forward connection does not support half-close")
+	}
+	return half.CloseWrite()
+}
+
+type reverseForwardContextKey struct{}
+
+// The caller holds forwardMu across dialing and publication so Accept
+// cannot inspect an accepted connection before its marker exists.
+func (m *Manager) markReverseForward(conn net.Conn) net.Conn {
+	key := reverseForwardKey{source: conn.LocalAddr().String(), target: conn.RemoteAddr().String()}
+	marker := &reverseForwardMarker{conn: conn}
+	if m.reverse.forwarded == nil {
+		m.reverse.forwarded = make(map[reverseForwardKey]*reverseForwardMarker)
+	}
+	m.reverse.forwarded[key] = marker
+	marker.timer = time.AfterFunc(reverseSetupTimeout, func() {
+		m.reverse.retireReverseForward(key, marker)
+	})
+	return &reverseForwardConn{Conn: conn, state: m.reverse, key: key, marker: marker}
+}
+
+func (s *reverseState) retireReverseForward(key reverseForwardKey, marker *reverseForwardMarker) {
+	s.forwardMu.Lock()
+	defer s.forwardMu.Unlock()
+	if marker.consumed {
+		return
+	}
+	if s.forwarded[key] == marker {
+		delete(s.forwarded, key)
+	}
+	// Close only this handoff's sockets, never a later tuple owner. An
+	// unconsumed accepted connection has not begun its server TLS handshake.
+	marker.conn.Close()
+	if marker.accepted != nil {
+		marker.accepted.Close()
+	}
+}
+
+type reverseForwardListener struct {
+	net.Listener
+	manager *Manager
+}
+
+func (l reverseForwardListener) Accept() (net.Conn, error) {
+	conn, err := l.Listener.Accept()
+	if err != nil {
+		return nil, err
+	}
+	return l.manager.acceptReverseForward(conn), nil
+}
+
+type reverseAcceptedConn struct {
+	net.Conn
+	state  *reverseState
+	marker *reverseForwardMarker
+}
+
+// acceptReverseForward runs before split/TLS wrapping or reads. Tuple matching
+// ends here; HTTP receives provenance owned by this accepted connection alone.
+func (m *Manager) acceptReverseForward(conn net.Conn) net.Conn {
+	if m.reverse == nil {
+		return conn
+	}
+	m.reverse.forwardMu.Lock()
+	defer m.reverse.forwardMu.Unlock()
+	key := reverseForwardKey{source: conn.RemoteAddr().String(), target: conn.LocalAddr().String()}
+	if marker := m.reverse.forwarded[key]; marker != nil {
+		delete(m.reverse.forwarded, key)
+		marker.accepted = conn
+		if marker.closing {
+			marker.conn.Close()
+		}
+		return &reverseAcceptedConn{Conn: conn, state: m.reverse, marker: marker}
+	}
+	return conn
+}
+
+func (m *Manager) reverseConnContext(ctx context.Context, conn net.Conn) context.Context {
+	for {
+		if accepted, ok := conn.(*reverseAcceptedConn); ok {
+			accepted.state.forwardMu.Lock()
+			defer accepted.state.forwardMu.Unlock()
+			if accepted.marker.consumed {
+				return ctx
+			}
+			accepted.marker.consumed = true
+			accepted.marker.timer.Stop()
+			return context.WithValue(ctx, reverseForwardContextKey{}, true)
+		}
+		// Both crypto/tls and splitlisten preserve the accepted connection.
+		wrapped, ok := conn.(interface{ NetConn() net.Conn })
+		if !ok {
+			return ctx
+		}
+		conn = wrapped.NetConn()
+	}
+}
+
+func isReverseForward(r *http.Request) bool {
+	forwarded, _ := r.Context().Value(reverseForwardContextKey{}).(bool)
+	return forwarded
 }
 
 type reversePrivateCall struct {
@@ -199,7 +340,18 @@ func (m *Manager) resolveReverseService(ctx context.Context, peer clustertrust.R
 		if m.reverse.generation != generation || m.reverse.services[key].Port != service.Port {
 			return nil, errors.New("service registration changed")
 		}
-		return (&net.Dialer{}).DialContext(ctx, "tcp", net.JoinHostPort("127.0.0.1", fmt.Sprint(service.Port)))
+		if key == noderec.ServiceCluster {
+			m.reverse.forwardMu.Lock()
+			defer m.reverse.forwardMu.Unlock()
+		}
+		conn, err := (&net.Dialer{}).DialContext(ctx, "tcp", net.JoinHostPort("127.0.0.1", fmt.Sprint(service.Port)))
+		if err != nil {
+			return nil, err
+		}
+		if key == noderec.ServiceCluster {
+			return m.markReverseForward(conn), nil
+		}
+		return conn, nil
 	}}, nil
 }
 

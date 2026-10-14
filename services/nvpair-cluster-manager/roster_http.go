@@ -66,7 +66,7 @@ func (m *Manager) handleRoster(w http.ResponseWriter, r *http.Request) {
 	// cert, so the TCP source IP is trustworthy enough to dial back on the
 	// member's known listening port (we pass port 0 to keep the stored
 	// listening port, never the ephemeral source port).
-	if host := hostOnly(r.RemoteAddr); host != "" && m.noteObservedPeerHost(senderUUID, host) {
+	if host := hostOnly(r.RemoteAddr); host != "" && !isReverseForward(r) && m.noteObservedPeerHost(senderUUID, host) {
 		log.Printf("roster: refreshed peer %s address to %s (from connection)", senderUUID, host)
 		changed = true
 	}
@@ -226,6 +226,9 @@ func (m *Manager) reconcileWithin(ctx context.Context, addrs []string, peerUUID 
 		return reconcileUnreachable, false
 	}
 	for _, addr := range confirmedFirst(addrs, m.peerAddrs.ChooseWithin(ctx, peerUUID, addrs)) {
+		if !m.selectPeerServiceAddress(peerUUID, addr) {
+			continue // the candidate ceased to be a current member/service endpoint
+		}
 		outcome, proven, answered := m.reconcileOnce(ctx, client, body, addr, peerUUID)
 		if answered {
 			return outcome, proven

@@ -114,11 +114,13 @@ func TestSelfRemoveGuardStaleVerdict(t *testing.T) {
 			defer srv.Close()
 
 			mA.upsertMember(&ClusterNode{
-				NodeUUID:  peer.identity.NodeUUID,
-				ID:        "peer",
-				IPAddress: "127.0.0.1",
-				Port:      ln.Addr().(*net.TCPAddr).Port,
-				State:     stateMember,
+				NodeUUID:       peer.identity.NodeUUID,
+				ID:             "peer",
+				IPAddress:      "127.0.0.1",
+				Port:           ln.Addr().(*net.TCPAddr).Port,
+				ClusterID:      "cluster-1",
+				AdmissionEpoch: 1,
+				State:          stateMember,
 			})
 
 			done := make(chan struct{})

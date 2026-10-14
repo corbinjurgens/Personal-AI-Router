@@ -4,26 +4,55 @@
 package main
 
 import (
+	"bytes"
+	"context"
 	"crypto/tls"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"nvpair-shared/clustertrust"
 )
 
-// TestReconcile_ReusesPeerConnections is the regression for the roster
-// heartbeat leak: reconcileWith used to build a fresh http.Client (and
-// Transport) per peer per pass, so every 30s tick paid a full mTLS handshake
-// and then leaked the socket — a hand-built Transport has no IdleConnTimeout
-// and its read loop keeps it reachable. Several reconciles must ride ONE
-// connection per peer.
+// Repeated roster heartbeats reuse the same authority-bound mTLS connection.
 func TestReconcile_ReusesPeerConnections(t *testing.T) {
-	m := newTestManager(t)
-	defer m.clients.CloseIdle()
+	f := newPeerConnectionFixture(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if _, err := w.Write([]byte(`{"clusterId":"cluster-1"}`)); err != nil {
+			t.Error(err)
+		}
+	}))
+	const rounds = 5
+	for i := 0; i < rounds; i++ {
+		if outcome, _ := f.m.reconcileWith([]string{f.address}, f.peerUUID); outcome != reconcileAccepted {
+			t.Fatalf("round %d: outcome = %v, want accepted", i, outcome)
+		}
+	}
+	if f.newConns.Load() != 1 || f.closedConns.Load() != 0 {
+		t.Fatalf("connections new=%d closed=%d, want 1 open reusable connection", f.newConns.Load(), f.closedConns.Load())
+	}
+}
+
+type peerConnectionFixture struct {
+	m           *Manager
+	peerUUID    string
+	address     string
+	newConns    atomic.Int32
+	closedConns atomic.Int32
+	closed      chan struct{}
+}
+
+func newPeerConnectionFixture(t *testing.T, handler http.Handler) *peerConnectionFixture {
+	t.Helper()
+	m := newReverseTestManager(t)
+	t.Cleanup(m.peerServices.CloseIdle)
+	t.Cleanup(m.removalPeerServices.CloseIdle)
+	t.Cleanup(m.clients.CloseIdle)
 
 	peerUUID, err := newUUIDv4()
 	if err != nil {
@@ -44,38 +73,115 @@ func TestReconcile_ReusesPeerConnections(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	var mu sync.Mutex
-	newConns := 0
-	mux := http.NewServeMux()
-	mux.HandleFunc(rosterPath, func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"clusterId":"cluster-1"}`))
-	})
-	ts := httptest.NewUnstartedServer(mux)
+	f := &peerConnectionFixture{m: m, peerUUID: peerUUID, closed: make(chan struct{}, 1)}
+	ts := httptest.NewUnstartedServer(handler)
 	ts.Config.ConnState = func(_ net.Conn, state http.ConnState) {
 		if state == http.StateNew {
-			mu.Lock()
-			newConns++
-			mu.Unlock()
+			f.newConns.Add(1)
+		}
+		if state == http.StateClosed {
+			f.closedConns.Add(1)
+			select {
+			case f.closed <- struct{}{}:
+			default:
+			}
 		}
 	}
 	ts.TLS = clustertrust.ServerTLSConfig(cert)
 	ts.StartTLS()
-	defer ts.Close()
+	t.Cleanup(ts.Close)
 
 	addr := ts.Listener.Addr().String()
-	const rounds = 5
-	for i := 0; i < rounds; i++ {
-		if outcome, _ := m.reconcileWith([]string{addr}, peerUUID); outcome != reconcileAccepted {
-			t.Fatalf("round %d: outcome = %v, want accepted", i, outcome)
+	m.upsertMember(&ClusterNode{NodeUUID: peerUUID, ID: "peer", IPAddress: "127.0.0.1", Port: ts.Listener.Addr().(*net.TCPAddr).Port, ClusterID: "cluster-1", AdmissionEpoch: 1, State: stateMember})
+	f.address = addr
+	return f
+}
+
+func TestNotifyPeerRemovalUsesFreshConnections(t *testing.T) {
+	var requests atomic.Int32
+	f := newPeerConnectionFixture(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != membersRemovePath {
+			t.Errorf("request = %s %s, want POST %s", r.Method, r.URL.Path, membersRemovePath)
+		}
+		if _, err := io.Copy(io.Discard, r.Body); err != nil {
+			t.Error(err)
+		}
+		requests.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	for range 2 {
+		f.m.notifyPeerRemoval(f.address, f.peerUUID, RemovalProof{})
+		select {
+		case <-f.closed:
+		case <-time.After(time.Second):
+			t.Fatal("removal connection was left idle")
 		}
 	}
+	if requests.Load() != 2 || f.newConns.Load() != 2 || f.closedConns.Load() != 2 {
+		t.Fatalf("removals=%d connections new=%d closed=%d, want 2 of each", requests.Load(), f.newConns.Load(), f.closedConns.Load())
+	}
+}
 
-	mu.Lock()
-	got := newConns
-	mu.Unlock()
-	if got != 1 {
-		t.Fatalf("peer accepted %d connections for %d reconciles, want 1 (a handshake per pass is the leak)", got, rounds)
+func TestManagerRunClosesIdleRosterConnections(t *testing.T) {
+	f := newPeerConnectionFixture(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if _, err := w.Write([]byte(`{"clusterId":"cluster-1"}`)); err != nil {
+			t.Error(err)
+		}
+	}))
+	if outcome, _ := f.m.reconcileWith([]string{f.address}, f.peerUUID); outcome != reconcileAccepted {
+		t.Fatalf("outcome = %v, want accepted", outcome)
+	}
+	if f.newConns.Load() != 1 || f.closedConns.Load() != 0 {
+		t.Fatalf("before Run: new=%d closed=%d, want 1/0", f.newConns.Load(), f.closedConns.Load())
+	}
+	if err := f.m.Run(context.Background()); err != nil {
+		t.Fatalf("Run on control EOF: %v", err)
+	}
+	select {
+	case <-f.closed:
+	case <-time.After(time.Second):
+		t.Fatal("Run left roster connection idle")
+	}
+	if f.newConns.Load() != 1 || f.closedConns.Load() != 1 {
+		t.Fatalf("after Run: new=%d closed=%d, want 1/1", f.newConns.Load(), f.closedConns.Load())
+	}
+}
+
+func TestManagerRunPreservesActiveRosterResponse(t *testing.T) {
+	release := make(chan struct{})
+	f := newPeerConnectionFixture(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Length", "2")
+		if _, err := w.Write([]byte("[")); err != nil {
+			t.Error(err)
+			return
+		}
+		w.(http.Flusher).Flush()
+		<-release
+		if _, err := w.Write([]byte("]")); err != nil {
+			t.Error(err)
+		}
+	}))
+	// Release the handler before the fixture's server cleanup, even on failure.
+	defer close(release)
+	client, err := f.m.peerClient(f.peerUUID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := client.Post("https://"+f.address+rosterPath, "application/json", bytes.NewReader([]byte("{}")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if err := f.m.Run(context.Background()); err != nil {
+		t.Fatalf("Run on control EOF: %v", err)
+	}
+	if f.newConns.Load() != 1 || f.closedConns.Load() != 0 {
+		t.Fatalf("Run closed active response: new=%d closed=%d, want 1/0", f.newConns.Load(), f.closedConns.Load())
+	}
+	release <- struct{}{}
+	body, err := io.ReadAll(response.Body)
+	if err != nil || string(body) != "[]" {
+		t.Fatalf("response after Run = %q, err=%v, want complete []", body, err)
 	}
 }
 
@@ -100,6 +206,7 @@ func TestPeerClient_ForgetRevokesWithPinStillOnDisk(t *testing.T) {
 		t.Fatal(err)
 	}
 	pinTrusted(t, m, peerUUID, string(certPEM), fp)
+	m.upsertMember(&ClusterNode{NodeUUID: peerUUID, ID: "peer", IPAddress: "127.0.0.1", Port: 14321, ClusterID: "cluster-1", AdmissionEpoch: 1, State: stateMember})
 
 	if _, err := m.peerClient(peerUUID); err != nil {
 		t.Fatalf("pinned peer must yield a client: %v", err)

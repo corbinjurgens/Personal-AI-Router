@@ -27,7 +27,349 @@ import (
 	"nvpair-shared/clustertrust"
 	"nvpair-shared/ipc"
 	"nvpair-shared/noderec"
+	"nvpair-shared/splitlisten"
 )
+
+type reverseProvenanceTestConn struct {
+	net.Conn
+	local, remote net.Addr
+	closed        chan struct{}
+	closeOnce     sync.Once
+}
+
+func (c *reverseProvenanceTestConn) LocalAddr() net.Addr  { return c.local }
+func (c *reverseProvenanceTestConn) RemoteAddr() net.Addr { return c.remote }
+func (c *reverseProvenanceTestConn) Close() error {
+	err := c.Conn.Close()
+	c.closeOnce.Do(func() { close(c.closed) })
+	return err
+}
+
+func newReverseProvenanceManager(t *testing.T) *Manager {
+	t.Helper()
+	m := &Manager{reverse: &reverseState{}}
+	t.Cleanup(func() {
+		m.reverse.forwardMu.Lock()
+		defer m.reverse.forwardMu.Unlock()
+		for key, marker := range m.reverse.forwarded {
+			marker.timer.Stop()
+			delete(m.reverse.forwarded, key)
+			marker.conn.Close()
+		}
+	})
+	return m
+}
+
+func newReverseProvenancePair(t *testing.T, sourcePort, targetPort int) (*reverseProvenanceTestConn, net.Conn) {
+	t.Helper()
+	local, accepted := net.Pipe()
+	source := &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: sourcePort}
+	target := &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: targetPort}
+	forward := &reverseProvenanceTestConn{Conn: local, local: source, remote: target, closed: make(chan struct{})}
+	server := &reverseProvenanceTestConn{Conn: accepted, local: target, remote: source, closed: make(chan struct{})}
+	t.Cleanup(func() {
+		if err := forward.Close(); err != nil {
+			t.Errorf("close forwarding fixture: %v", err)
+		}
+		if err := server.Close(); err != nil {
+			t.Errorf("close accepted fixture: %v", err)
+		}
+	})
+	return forward, server
+}
+
+func TestReverseForwardCloseBeforeConnContext(t *testing.T) {
+	m := newReverseProvenanceManager(t)
+	local, accepted := newReverseProvenancePair(t, 41001, 42001)
+	m.reverse.forwardMu.Lock()
+	forward := m.markReverseForward(local)
+	m.reverse.forwardMu.Unlock()
+	// Close completes before the listener handoff and HTTP context. Pending
+	// I/O stops; Accept then binds provenance to the concrete connection.
+	if err := forward.Close(); err != nil {
+		t.Fatalf("close before context: %v", err)
+	}
+	select {
+	case <-local.closed:
+		t.Fatal("source socket released before the listener consumed provenance")
+	default:
+	}
+	var one [1]byte
+	if _, err := forward.Read(one[:]); err == nil {
+		t.Fatal("Close left forwarding I/O usable")
+	} else if timeout, ok := err.(net.Error); !ok || !timeout.Timeout() {
+		t.Fatalf("pending close read = %v, want expired deadline", err)
+	}
+	accepted = m.acceptReverseForward(accepted)
+	ctx := m.reverseConnContext(context.Background(), accepted)
+	request := httptest.NewRequest(http.MethodPost, rosterPath, nil).WithContext(ctx)
+	if !isReverseForward(request) {
+		t.Fatal("close-before-context connection lost its forwarded classification")
+	}
+	select {
+	case <-local.closed:
+	default:
+		t.Fatal("accepted handoff did not release the closed forwarding socket")
+	}
+	// Consumption is once-only, and retirement cannot change the captured
+	// context later in the handler or classify a reused direct connection.
+	_, direct := newReverseProvenancePair(t, 41001, 42001)
+	if isReverseForward(httptest.NewRequest(http.MethodPost, rosterPath, nil).WithContext(m.reverseConnContext(context.Background(), m.acceptReverseForward(direct)))) {
+		t.Fatal("a later connection inherited consumed provenance")
+	}
+	if !isReverseForward(request) {
+		t.Fatal("handler context lost provenance after the socket closed")
+	}
+}
+
+func TestReverseForwardUnconsumedMarkerExpires(t *testing.T) {
+	m := newReverseProvenanceManager(t)
+	local, _ := newReverseProvenancePair(t, 41002, 42002)
+	m.reverse.forwardMu.Lock()
+	m.markReverseForward(local)
+	m.reverse.forwardMu.Unlock()
+	// Even a forward that never calls Close must retire its unconsumed marker
+	// and close the socket before that source address can be reused.
+	select {
+	case <-local.closed:
+	case <-time.After(6 * time.Second):
+		t.Fatal("unconsumed marker and source socket outlived the five-second setup bound")
+	}
+	m.reverse.forwardMu.Lock()
+	remaining := len(m.reverse.forwarded)
+	m.reverse.forwardMu.Unlock()
+	if remaining != 0 {
+		t.Fatalf("retained markers = %d, want 0", remaining)
+	}
+	// Reuse the exact source and destination tuple after expiry.
+	_, direct := newReverseProvenancePair(t, 41002, 42002)
+	ctx := m.reverseConnContext(context.Background(), m.acceptReverseForward(direct))
+	if isReverseForward(httptest.NewRequest(http.MethodPost, rosterPath, nil).WithContext(ctx)) {
+		t.Fatal("expired marker classified a later direct connection")
+	}
+}
+
+func TestReverseForwardMarkerBindsDestination(t *testing.T) {
+	m := newReverseProvenanceManager(t)
+	local, forwarded := newReverseProvenancePair(t, 41003, 42003)
+	_, direct := newReverseProvenancePair(t, 41003, 42004)
+	m.reverse.forwardMu.Lock()
+	m.markReverseForward(local)
+	m.reverse.forwardMu.Unlock()
+	if isReverseForward(httptest.NewRequest(http.MethodPost, rosterPath, nil).WithContext(m.reverseConnContext(context.Background(), m.acceptReverseForward(direct)))) {
+		t.Fatal("same source at a different listener inherited provenance")
+	}
+	if !isReverseForward(httptest.NewRequest(http.MethodPost, rosterPath, nil).WithContext(m.reverseConnContext(context.Background(), m.acceptReverseForward(forwarded)))) {
+		t.Fatal("the direct connection consumed the forwarded listener's marker")
+	}
+}
+
+func TestReverseForwardOldRetirementPreservesReusedAddress(t *testing.T) {
+	m := newReverseProvenanceManager(t)
+	first, accepted := newReverseProvenancePair(t, 41004, 42004)
+	m.reverse.forwardMu.Lock()
+	old := m.markReverseForward(first).(*reverseForwardConn)
+	m.reverse.forwardMu.Unlock()
+	ctx := m.reverseConnContext(context.Background(), m.acceptReverseForward(accepted))
+	if !isReverseForward(httptest.NewRequest(http.MethodPost, rosterPath, nil).WithContext(ctx)) {
+		t.Fatal("first forwarded connection was not classified")
+	}
+	if err := old.Close(); err != nil {
+		t.Fatal(err)
+	}
+	second, reused := newReverseProvenancePair(t, 41004, 42004)
+	m.reverse.forwardMu.Lock()
+	m.markReverseForward(second)
+	m.reverse.forwardMu.Unlock()
+	// A timer callback already queued before Stop must not retire a new
+	// connection that now owns the same address tuple.
+	m.reverse.retireReverseForward(old.key, old.marker)
+	select {
+	case <-second.closed:
+		t.Fatal("old retirement closed the replacement connection")
+	default:
+	}
+	if !isReverseForward(httptest.NewRequest(http.MethodPost, rosterPath, nil).WithContext(m.reverseConnContext(context.Background(), m.acceptReverseForward(reused)))) {
+		t.Fatal("old retirement deleted replacement provenance")
+	}
+}
+
+func TestReverseForwardResetTupleReuseBeforeConnContext(t *testing.T) {
+	m := newReverseProvenanceManager(t)
+	base, err := net.ListenTCP("tcp4", &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer base.Close()
+	if err := base.SetDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		t.Fatalf("set accept deadline: %v", err)
+	}
+	var listener net.Listener = reverseForwardListener{Listener: base, manager: m}
+	local, err := net.DialTCP("tcp4", nil, base.Addr().(*net.TCPAddr))
+	if err != nil {
+		t.Fatalf("dial original: %v", err)
+	}
+	defer local.Close()
+	started := time.Now()
+	m.reverse.forwardMu.Lock()
+	forward := m.markReverseForward(local).(*reverseForwardConn)
+	m.reverse.forwardMu.Unlock()
+	accepted, err := listener.Accept()
+	if err != nil {
+		t.Fatalf("accept original: %v", err)
+	}
+	defer accepted.Close()
+	// Reset the accepted socket before HTTP builds its context. Read the RST
+	// on the still-open forwarding descriptor so tuple reuse needs no sleep.
+	reset := accepted.(*reverseAcceptedConn).Conn.(*net.TCPConn)
+	if err := reset.SetLinger(0); err != nil {
+		t.Fatalf("set reset linger: %v", err)
+	}
+	if err := reset.Close(); err != nil {
+		t.Fatalf("reset original: %v", err)
+	}
+	if err := local.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatalf("set reset read deadline: %v", err)
+	}
+	var one [1]byte
+	if _, err := local.Read(one[:]); err == nil || errors.Is(err, io.EOF) {
+		t.Fatalf("original read = %v, want TCP reset", err)
+	} else if timeout, ok := err.(net.Error); ok && timeout.Timeout() {
+		t.Fatalf("original read timed out instead of observing reset: %v", err)
+	}
+	// Keep the original descriptor open, exactly as the r2 pending Close did.
+	replacement, err := net.DialTCP("tcp4", local.LocalAddr().(*net.TCPAddr), base.Addr().(*net.TCPAddr))
+	if err != nil {
+		t.Fatalf("reuse reset TCP tuple: %v", err)
+	}
+	defer replacement.Close()
+	direct, err := listener.Accept()
+	if err != nil {
+		t.Fatalf("accept replacement: %v", err)
+	}
+	defer direct.Close()
+	if direct.LocalAddr().String() != accepted.LocalAddr().String() || direct.RemoteAddr().String() != accepted.RemoteAddr().String() {
+		t.Fatalf("replacement tuple = %s/%s, want %s/%s", direct.LocalAddr(), direct.RemoteAddr(), accepted.LocalAddr(), accepted.RemoteAddr())
+	}
+	if time.Since(started) >= reverseSetupTimeout {
+		t.Fatal("tuple reuse occurred after the provenance setup bound")
+	}
+	if isReverseForward(httptest.NewRequest(http.MethodPost, rosterPath, nil).WithContext(m.reverseConnContext(context.Background(), direct))) {
+		t.Fatal("same-tuple direct replacement inherited stale forwarded provenance")
+	}
+	if err := forward.Close(); err != nil {
+		t.Fatalf("close original forward: %v", err)
+	}
+	// Run stale cleanup while the original accepted handoff is unconsumed.
+	m.reverse.retireReverseForward(forward.key, forward.marker)
+	if err := replacement.SetDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatalf("set replacement deadline: %v", err)
+	}
+	if _, err := replacement.Write([]byte("G")); err != nil {
+		t.Fatalf("write replacement after stale cleanup: %v", err)
+	}
+	if err := direct.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatalf("set direct read deadline: %v", err)
+	}
+	if _, err := io.ReadFull(direct, one[:]); err != nil || one[0] != 'G' {
+		t.Fatalf("replacement read = %q, %v, want G after stale cleanup", one, err)
+	}
+	if !isReverseForward(httptest.NewRequest(http.MethodPost, rosterPath, nil).WithContext(m.reverseConnContext(context.Background(), accepted))) {
+		t.Fatal("original accepted connection lost provenance after reset and close")
+	}
+	if isReverseForward(httptest.NewRequest(http.MethodPost, rosterPath, nil).WithContext(m.reverseConnContext(context.Background(), accepted))) {
+		t.Fatal("original accepted provenance was consumed twice")
+	}
+}
+
+func TestReverseForwardContextRequiresAcceptedHandoff(t *testing.T) {
+	m := newReverseProvenanceManager(t)
+	local, accepted := newReverseProvenancePair(t, 41006, 42006)
+	m.reverse.forwardMu.Lock()
+	m.markReverseForward(local)
+	m.reverse.forwardMu.Unlock()
+	if isReverseForward(httptest.NewRequest(http.MethodPost, rosterPath, nil).WithContext(m.reverseConnContext(context.Background(), accepted))) {
+		t.Fatal("context inferred provenance from endpoints without an accepted handoff")
+	}
+	if !isReverseForward(httptest.NewRequest(http.MethodPost, rosterPath, nil).WithContext(m.reverseConnContext(context.Background(), m.acceptReverseForward(accepted)))) {
+		t.Fatal("raw context lookup consumed provenance before the accepted handoff")
+	}
+}
+
+func TestReverseForwardAcceptedHandoffExpires(t *testing.T) {
+	m := newReverseProvenanceManager(t)
+	local, server := newReverseProvenancePair(t, 41005, 42005)
+	m.reverse.forwardMu.Lock()
+	m.markReverseForward(local)
+	m.reverse.forwardMu.Unlock()
+	accepted := m.acceptReverseForward(server)
+	if _, ok := accepted.(*reverseAcceptedConn); !ok {
+		t.Fatal("listener did not attach accepted provenance")
+	}
+	select {
+	case <-local.closed:
+	case <-time.After(6 * time.Second):
+		t.Fatal("unconsumed accepted handoff retained its forwarding socket")
+	}
+	select {
+	case <-server.(*reverseProvenanceTestConn).closed:
+	case <-time.After(time.Second):
+		t.Fatal("unconsumed accepted handoff retained its accepted socket")
+	}
+	_, direct := newReverseProvenancePair(t, 41005, 42005)
+	if isReverseForward(httptest.NewRequest(http.MethodPost, rosterPath, nil).WithContext(m.reverseConnContext(context.Background(), m.acceptReverseForward(direct)))) {
+		t.Fatal("expired accepted handoff classified a same-tuple direct connection")
+	}
+}
+
+func TestReverseForwardProvenanceThroughSplit(t *testing.T) {
+	test := func(name string, tlsMode bool) {
+		t.Run(name, func(t *testing.T) {
+			m := newReverseProvenanceManager(t)
+			base, err := net.Listen("tcp", "127.0.0.1:0")
+			if err != nil {
+				t.Fatalf("listen: %v", err)
+			}
+			split := splitlisten.New(reverseForwardListener{Listener: base, manager: m})
+			defer split.Close()
+			m.reverse.forwardMu.Lock()
+			local, err := net.DialTimeout("tcp", base.Addr().String(), time.Second)
+			if err != nil {
+				m.reverse.forwardMu.Unlock()
+				t.Fatalf("dial: %v", err)
+			}
+			forward := m.markReverseForward(local)
+			m.reverse.forwardMu.Unlock()
+			defer forward.Close()
+			first := byte('G')
+			listener := split.Plain()
+			if tlsMode {
+				first = 0x16
+				listener = tls.NewListener(split.TLS(), &tls.Config{})
+			}
+			if _, err := forward.Write([]byte{first}); err != nil {
+				t.Fatalf("write split prefix: %v", err)
+			}
+			accepted, err := listener.Accept()
+			if err != nil {
+				t.Fatalf("accept split: %v", err)
+			}
+			defer accepted.Close()
+			if err := forward.Close(); err != nil {
+				t.Fatalf("close before wrapped context: %v", err)
+			}
+			ctx := m.reverseConnContext(context.Background(), accepted)
+			if !isReverseForward(httptest.NewRequest(http.MethodPost, rosterPath, nil).WithContext(ctx)) {
+				t.Fatal("split/TLS wrapping lost original accepted provenance")
+			}
+			if isReverseForward(httptest.NewRequest(http.MethodPost, rosterPath, nil).WithContext(m.reverseConnContext(context.Background(), accepted))) {
+				t.Fatal("split/TLS provenance was consumed twice")
+			}
+		})
+	}
+	test("plain prefix", false)
+	test("TLS and prefix", true)
+}
 
 func newReverseTestManager(t *testing.T) *Manager {
 	t.Helper()

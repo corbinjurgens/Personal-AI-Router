@@ -38,8 +38,16 @@ func TestReconcileWithFailsOverToAnAnsweringAddress(t *testing.T) {
 
 	pinTrusted(t, mA, mB.identity.NodeUUID, string(mB.identity.CertPEM), mB.identity.CertFingerprint)
 	pinTrusted(t, mB, mA.identity.NodeUUID, string(mA.identity.CertPEM), mA.identity.CertFingerprint)
-	mA.upsertMember(&ClusterNode{NodeUUID: mB.identity.NodeUUID, ID: "node-b", IPAddress: "127.0.0.1", Port: 15032, AdmissionEpoch: 1, State: stateMember})
-	mB.upsertMember(&ClusterNode{NodeUUID: mA.identity.NodeUUID, ID: "node-a", IPAddress: "192.0.2.1", Port: 15031, AdmissionEpoch: 1, State: stateMember})
+	mA.upsertMember(&ClusterNode{NodeUUID: mB.identity.NodeUUID, ID: "node-b", IPAddress: "127.0.0.1", Port: 15032, ClusterID: "cluster-1", AdmissionEpoch: 1, State: stateMember})
+	mB.upsertMember(&ClusterNode{NodeUUID: mA.identity.NodeUUID, ID: "node-a", IPAddress: "192.0.2.1", Port: 15031, ClusterID: "cluster-1", AdmissionEpoch: 1, State: stateMember})
+	mB.browser = newBrowser()
+	mB.browser.setRelay([]noderec.DirectoryNode{{
+		HostUUID: mA.identity.NodeUUID,
+		Name:     "node-a",
+		IP:       "192.0.2.1",
+		IPs:      []string{"192.0.2.1", "127.0.0.1"},
+		Services: map[noderec.ServiceKey]noderec.ServiceStatus{noderec.ServiceCluster: {Port: 15031}},
+	}})
 
 	working := net.JoinHostPort("127.0.0.1", strconv.Itoa(15031))
 	outcome, _ := mB.reconcileWith([]string{unreachableAddr, working}, mA.identity.NodeUUID)
@@ -58,6 +66,15 @@ func TestReconcileBudgetCoversTheWholeCandidateWalk(t *testing.T) {
 	pinTrusted(t, m, peerUUID, certPEM, fingerprint)
 
 	blackholed := []string{"192.0.2.1:14321", "192.0.2.2:14321", "192.0.2.3:14321", "192.0.2.4:14321"}
+	m.upsertMember(&ClusterNode{NodeUUID: peerUUID, ID: "peer", IPAddress: "192.0.2.1", Port: 14321, ClusterID: "cluster-1", AdmissionEpoch: 1, State: stateMember})
+	m.browser = newBrowser()
+	m.browser.setRelay([]noderec.DirectoryNode{{
+		HostUUID: peerUUID,
+		Name:     "peer",
+		IP:       "192.0.2.1",
+		IPs:      []string{"192.0.2.1", "192.0.2.2", "192.0.2.3", "192.0.2.4"},
+		Services: map[noderec.ServiceKey]noderec.ServiceStatus{noderec.ServiceCluster: {Port: 14321}},
+	}})
 	budget := 600 * time.Millisecond
 	ctx, cancel := context.WithTimeout(context.Background(), budget)
 	defer cancel()

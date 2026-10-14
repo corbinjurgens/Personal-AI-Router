@@ -147,6 +147,10 @@ type prefixConn struct {
 	prefix []byte
 }
 
+// NetConn returns the connection accepted by the base listener. Callers can
+// inspect connection-owned metadata without bypassing the restored prefix.
+func (c *prefixConn) NetConn() net.Conn { return c.Conn }
+
 func (c *prefixConn) Read(p []byte) (int, error) {
 	if len(c.prefix) > 0 {
 		n := copy(p, c.prefix)

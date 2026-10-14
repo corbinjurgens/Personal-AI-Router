@@ -39,12 +39,14 @@ type Manager struct {
 
 	identity *NodeIdentity
 	trust    *TrustStore
-	// mesh supplies the pool's reloadable local identity; TrustStore is the pin
-	// authority for both inbound and outbound cluster-manager traffic. clients
-	// is the long-lived per-peer mTLS pool — a throwaway Transport per reconcile
-	// leaked a socket for the life of the process.
+	// TrustStore is the pin authority for inbound and outbound traffic. The
+	// peer-service adapter binds each request to current admission and routes.
 	mesh                 *clustertrust.Mesh
 	clients              *clustertrust.PeerClientPool
+	peerServices         *clustertrust.PeerServiceClient
+	removalPeerServices  *clustertrust.PeerServiceClient
+	peerRoutesMu         sync.Mutex
+	peerRoutes           map[string]clusterPeerRoute
 	reverse              *reverseState
 	localServicesAllowed bool
 	controlTransport     io.Closer
@@ -247,6 +249,11 @@ func NewManager(codec *Codec, configDir string, port int) (*Manager, error) {
 		sessions:      make(map[string]*pairingSession),
 		peerAddrs:     reach.NewChooser(),
 	}
+	mgr.peerRoutes = make(map[string]clusterPeerRoute)
+	peerOptions := mgr.peerServiceOptions()
+	mgr.removalPeerServices = clustertrust.NewPeerServiceClient(mesh, peerOptions)
+	peerOptions.ReuseConnections = true
+	mgr.peerServices = clustertrust.NewPeerServiceClient(mesh, peerOptions)
 	// Announce every pin-set mutation. This node's other workers cache answers
 	// derived from the trusted/ directory — above all "may work be routed to this
 	// peer?" — and this process is the only writer, so without this they can only
@@ -328,6 +335,8 @@ func (m *Manager) Run(ctx context.Context) error {
 	ctx, cancel := context.WithCancel(ctx)
 	m.cancel = cancel
 	defer cancel()
+	defer m.peerServices.CloseIdle()
+	defer m.removalPeerServices.CloseIdle()
 	if m.controlTransport != nil {
 		stop := context.AfterFunc(ctx, func() { m.controlTransport.Close() })
 		defer stop()

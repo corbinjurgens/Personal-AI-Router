@@ -69,6 +69,48 @@ func TestTLSConnectionRoutesToTLSServer(t *testing.T) {
 	}
 }
 
+func TestPrefixConnNetConnPreservesAcceptedIdentity(t *testing.T) {
+	test := func(name string, first byte, tlsMode bool) {
+		t.Run(name, func(t *testing.T) {
+			client, accepted := net.Pipe()
+			defer client.Close()
+			defer accepted.Close()
+			split := &Splitter{plain: newChanListener(accepted.LocalAddr()), tls: newChanListener(accepted.LocalAddr())}
+			defer split.plain.Close()
+			defer split.tls.Close()
+			go split.dispatch(accepted)
+			if err := client.SetWriteDeadline(time.Now().Add(time.Second)); err != nil {
+				t.Fatalf("set prefix write deadline: %v", err)
+			}
+			if _, err := client.Write([]byte{first}); err != nil {
+				t.Fatalf("write prefix: %v", err)
+			}
+			listener := split.Plain()
+			if tlsMode {
+				listener = tls.NewListener(split.TLS(), &tls.Config{})
+			}
+			conn, err := listener.Accept()
+			if err != nil {
+				t.Fatalf("accept: %v", err)
+			}
+			defer conn.Close()
+			if tlsConn, ok := conn.(*tls.Conn); ok {
+				conn = tlsConn.NetConn()
+			}
+			prefix, ok := conn.(*prefixConn)
+			if !ok || prefix.NetConn() != accepted {
+				t.Fatal("unwrapping did not return the exact base accepted connection")
+			}
+			var one [1]byte
+			if _, err := io.ReadFull(prefix, one[:]); err != nil || one[0] != first {
+				t.Fatalf("restored prefix = %x, %v, want %x", one, err, first)
+			}
+		})
+	}
+	test("plain", 'G', false)
+	test("TLS", 0x16, true)
+}
+
 // TestMalformedConnectionDoesNotWedgeDispatch opens connections that never
 // complete (a silent client that sends no byte, and one that connects then
 // immediately closes) and confirms the dispatcher drops them without blocking:
@@ -237,11 +279,11 @@ func testServerTLSConfig(t *testing.T) *tls.Config {
 
 // scriptedListener is a net.Listener whose Accept behavior is driven by acceptFn.
 type scriptedListener struct {
-	addr     net.Addr
-	acceptFn func(call int) (net.Conn, error)
-	mu       sync.Mutex
-	calls    int
-	closed   chan struct{}
+	addr      net.Addr
+	acceptFn  func(call int) (net.Conn, error)
+	mu        sync.Mutex
+	calls     int
+	closed    chan struct{}
 	closeOnce sync.Once
 }
 

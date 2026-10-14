@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"nvpair-shared/clustertrust"
+	"nvpair-shared/noderec"
 	"nvpair-shared/splitlisten"
 )
 
@@ -36,21 +37,27 @@ func (m *Manager) buildServerTLSConfig() *tls.Config {
 	return clustertrust.ServerTLSConfig(m.identity.Cert)
 }
 
-// peerClient returns the pooled pinned-mTLS client for peerUUID. A throwaway
-// Transport per call cannot reuse a connection and never reaps the idle socket.
-// The pool resolves pins from TrustStore, the same authority as the inbound
-// gate, so even an in-memory Forget after a durable-delete failure takes effect.
-// An unpinned peer, or a teardown in flight, is the cluster gate.
+// peerClient reuses roster connections under current direct/reverse authority.
 func (m *Manager) peerClient(peerUUID string) (*http.Client, error) {
+	return m.peerServiceClient(peerUUID, m.peerServices)
+}
+
+// removalPeerClient keeps removal notifications on fresh connections; a lost
+// reply belongs to the removal owner and must never cause transport replay.
+func (m *Manager) removalPeerClient(peerUUID string) (*http.Client, error) {
+	return m.peerServiceClient(peerUUID, m.removalPeerServices)
+}
+
+func (m *Manager) peerServiceClient(peerUUID string, adapter *clustertrust.PeerServiceClient) (*http.Client, error) {
 	if m.teardownPending.Load() {
 		return nil, fmt.Errorf("cluster teardown is pending")
 	}
 	m.mesh.Refresh()
-	client, ok := m.clients.Client(peerUUID)
+	_, ok := m.resolvePeerServiceRoute(peerUUID, noderec.ServiceCluster)
 	if !ok {
-		return nil, fmt.Errorf("no pin for peer %s", peerUUID)
+		return nil, fmt.Errorf("no current cluster route for peer %s", peerUUID)
 	}
-	return client, nil
+	return adapter.Client(peerUUID, noderec.ServiceCluster), nil
 }
 
 func (m *Manager) buildPairingClientTLSConfig(peerDER []byte) (*tls.Config, error) {
@@ -153,7 +160,11 @@ func (m *Manager) handleMembersRemove(w http.ResponseWriter, r *http.Request) {
 // notifyPeerRemoval best-effort tells a peer it has been removed, over mTLS,
 // while the peer's pin still exists (call before deleting it locally).
 func (m *Manager) notifyPeerRemoval(addr, peerUUID string, proof RemovalProof) {
-	client, err := m.peerClient(peerUUID)
+	if !m.selectPeerServiceAddress(peerUUID, addr) {
+		log.Printf("notify removal: no current endpoint for peer %s", peerUUID)
+		return
+	}
+	client, err := m.removalPeerClient(peerUUID)
 	if err != nil {
 		log.Printf("notify removal: %v", err)
 		return
@@ -174,10 +185,10 @@ func (m *Manager) notifyPeerRemoval(addr, peerUUID string, proof RemovalProof) {
 // server. The dispatch/prefix-restore/chan-listener plumbing lives in the shared
 // package now so the promoted proxies reuse the exact same split.
 func (m *Manager) serveSplit(ctx context.Context, ln net.Listener, plainMux, tlsMux http.Handler) error {
-	split := splitlisten.New(ln)
+	split := splitlisten.New(reverseForwardListener{Listener: ln, manager: m})
 
-	plainSrv := &http.Server{Handler: plainMux, ReadHeaderTimeout: 5 * time.Second, IdleTimeout: clustertrust.PeerListenerIdleTimeout}
-	tlsSrv := &http.Server{Handler: tlsMux, ReadHeaderTimeout: 5 * time.Second, IdleTimeout: clustertrust.PeerListenerIdleTimeout}
+	plainSrv := &http.Server{Handler: plainMux, ConnContext: m.reverseConnContext, ReadHeaderTimeout: 5 * time.Second, IdleTimeout: clustertrust.PeerListenerIdleTimeout}
+	tlsSrv := &http.Server{Handler: tlsMux, ConnContext: m.reverseConnContext, ReadHeaderTimeout: 5 * time.Second, IdleTimeout: clustertrust.PeerListenerIdleTimeout}
 
 	go func() { _ = plainSrv.Serve(split.Plain()) }()
 	go func() { _ = tlsSrv.Serve(tls.NewListener(split.TLS(), m.buildServerTLSConfig())) }()
