@@ -52,7 +52,7 @@ func reverseTestManager(t *testing.T, opts ReverseOptions) *ReverseManager {
 	return m
 }
 
-func reverseTestConnect(t *testing.T, a, b *ReverseManager, initiator, id string) {
+func reverseTestConnect(t *testing.T, a, b *ReverseManager, initiator, id string) net.Conn {
 	t.Helper()
 	left, right := net.Pipe()
 	if err := a.Register(ReversePeer{b.opts.LocalUUID, "v1"}, left, initiator, id); err != nil {
@@ -78,6 +78,7 @@ func reverseTestConnect(t *testing.T, a, b *ReverseManager, initiator, id string
 			t.Fatal("control setup timed out")
 		}
 	}
+	return right
 }
 
 func reverseTestRawControl(t *testing.T, raw *yamux.Session, initiator bool) *yamux.Stream {
@@ -320,6 +321,235 @@ func TestReverseExplicitRevokePreservesOtherPeer(t *testing.T) {
 	}
 	if !b.Has(ReversePeer{"c", "v1"}) {
 		t.Fatal("unrelated peer lost its session")
+	}
+}
+
+func TestReverseSessionEndClosesActiveForwarding(t *testing.T) {
+	for _, mode := range []string{"revoke", "shutdown", "replacement", "outer failure"} {
+		t.Run(mode, func(t *testing.T) {
+			dialed := make(chan net.Conn, 1)
+			resolve := func(context.Context, ReversePeer, noderec.ServiceKey) (ReverseTarget, error) {
+				return ReverseTarget{Protocol: ReversePlain, Dial: func(context.Context) (net.Conn, error) {
+					left, right := net.Pipe()
+					dialed <- right
+					return left, nil
+				}}, nil
+			}
+			a := reverseTestManager(t, ReverseOptions{LocalUUID: "a"})
+			b := reverseTestManager(t, ReverseOptions{LocalUUID: "b", ResolveService: resolve})
+			c := reverseTestManager(t, ReverseOptions{LocalUUID: "c"})
+			outer := reverseTestConnect(t, a, b, "b", reverseTestID)
+			reverseTestConnect(t, c, b, "c", reverseTestID)
+			conn, err := a.Open(context.Background(), ReversePeer{"b", "v1"}, noderec.ServiceNodeInfo)
+			if err != nil {
+				t.Fatalf("open stream: %v", err)
+			}
+			defer conn.Close()
+			var local net.Conn
+			select {
+			case local = <-dialed:
+			case <-time.After(2 * time.Second):
+				t.Fatal("service not dialed")
+			}
+			defer local.Close()
+			switch mode {
+			case "revoke":
+				b.Revoke("a")
+			case "shutdown":
+				if err := b.Close(); err != nil {
+					t.Fatalf("close remote manager: %v", err)
+				}
+			case "replacement":
+				reverseTestConnect(t, a, b, "a", "22222222222222222222222222222222")
+			case "outer failure":
+				// Close the owned transport without explicitly cancelling the
+				// manager lifetime, exercising its session-failure cleanup.
+				if err := outer.Close(); err != nil {
+					t.Fatalf("fail outer session: %v", err)
+				}
+			}
+			reverseTestClosed(t, conn)
+			reverseTestClosed(t, local)
+			if mode != "shutdown" && (!b.Has(ReversePeer{"c", "v1"}) || !c.Has(ReversePeer{"b", "v1"})) {
+				t.Fatal("ending one session closed an unrelated session")
+			}
+			if mode == "replacement" && (!a.Has(ReversePeer{"b", "v1"}) || !b.Has(ReversePeer{"a", "v1"})) {
+				t.Fatal("old session cleanup closed its replacement")
+			}
+		})
+	}
+}
+
+func TestReverseClosedConnRejectsIOBeforeRemoteFIN(t *testing.T) {
+	conn, client, server := reverseTestClientConn(t)
+	var releases atomic.Int32
+	conn.release = func() { releases.Add(1) }
+	if err := conn.SetReadDeadline(time.Now()); err != nil {
+		t.Fatalf("set live stream deadline: %v", err)
+	}
+	var payload [1]byte
+	if _, err := conn.Read(payload[:]); err == nil {
+		t.Fatal("live idle stream did not time out")
+	} else if timeout, ok := err.(net.Error); !ok || !timeout.Timeout() {
+		t.Fatalf("live stream read = %v, want timeout", err)
+	}
+	if err := conn.Close(); err != nil {
+		t.Fatalf("close client connection: %v", err)
+	}
+	if err := conn.SetDeadline(time.Now().Add(100 * time.Millisecond)); !errors.Is(err, net.ErrClosed) {
+		t.Fatalf("renew closed connection deadline = %v, want closed connection", err)
+	}
+	if _, err := conn.Read(payload[:]); !errors.Is(err, net.ErrClosed) {
+		t.Fatalf("read before remote FIN = %v, want closed connection", err)
+	}
+	if _, err := conn.Write([]byte("request")); !errors.Is(err, net.ErrClosed) {
+		t.Fatalf("write after close = %v, want closed connection", err)
+	}
+	if got := releases.Load(); got != 1 {
+		t.Fatalf("released reservations = %d, want 1", got)
+	}
+	if client.IsClosed() || server.IsClosed() {
+		t.Fatal("closing the application connection closed its outer session")
+	}
+}
+
+func reverseTestClientConn(t *testing.T) (*reverseConn, *yamux.Session, *yamux.Session) {
+	t.Helper()
+	left, right := net.Pipe()
+	cfg := yamux.DefaultConfig()
+	cfg.LogOutput = io.Discard
+	client, err := yamux.Client(left, cfg)
+	if err != nil {
+		left.Close()
+		right.Close()
+		t.Fatalf("create client session: %v", err)
+	}
+	t.Cleanup(func() { client.Close() })
+	server, err := yamux.Server(right, cfg)
+	if err != nil {
+		right.Close()
+		t.Fatalf("create server session: %v", err)
+	}
+	t.Cleanup(func() { server.Close() })
+	stream, err := client.OpenStream()
+	if err != nil {
+		t.Fatalf("open client stream: %v", err)
+	}
+	remote, err := server.AcceptStream()
+	if err != nil {
+		t.Fatalf("accept remote stream: %v", err)
+	}
+	// Keep the remote response side and outer session open: yamux's Close
+	// alone is a half-close, so it cannot supply EOF to the caller's reader.
+	t.Cleanup(func() { remote.Close() })
+	conn := &reverseConn{Stream: stream, notify: func() {}, release: func() {}}
+	t.Cleanup(func() { conn.Close() })
+	return conn, client, server
+}
+
+func TestReverseFullCloseRejectsDeadlineResetDuringPendingRead(t *testing.T) {
+	previous := runtime.GOMAXPROCS(1)
+	t.Cleanup(func() { runtime.GOMAXPROCS(previous) })
+	for _, tc := range []struct {
+		name string
+		set  func(*reverseConn, time.Time) error
+	}{
+		{"combined deadline", (*reverseConn).SetDeadline},
+		{"read deadline", (*reverseConn).SetReadDeadline},
+		{"write deadline", (*reverseConn).SetWriteDeadline},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			conn, _, _ := reverseTestClientConn(t)
+			if err := tc.set(conn, time.Time{}); err != nil {
+				t.Fatalf("reset live connection deadline: %v", err)
+			}
+			if err := conn.CloseWrite(); err != nil {
+				t.Fatalf("half-close request: %v", err)
+			}
+			done := make(chan error, 1)
+			started := make(chan struct{})
+			go func() {
+				close(started)
+				var payload [1]byte
+				_, err := conn.Read(payload[:])
+				done <- err
+			}()
+			<-started
+			// A single processor lets the reader reach its blocking select,
+			// then keeps it parked across Close and the attempted reset.
+			runtime.Gosched()
+			select {
+			case err := <-done:
+				t.Fatalf("response reader returned before full close: %v", err)
+			default:
+			}
+			if err := conn.Close(); err != nil {
+				t.Fatalf("full-close connection: %v", err)
+			}
+			resetErr := tc.set(conn, time.Time{})
+			select {
+			case err := <-done:
+				if !errors.Is(err, net.ErrClosed) {
+					t.Fatalf("pending response read = %v, want closed connection", err)
+				}
+			case <-time.After(100 * time.Millisecond):
+				t.Fatal("deadline reset kept the full-closed response reader blocked")
+			}
+			if !errors.Is(resetErr, net.ErrClosed) {
+				t.Fatalf("reset full-closed connection deadline = %v, want closed connection", resetErr)
+			}
+		})
+	}
+}
+
+func TestReverseFullCloseRejectsDeadlineResetDuringPendingWrite(t *testing.T) {
+	previous := runtime.GOMAXPROCS(1)
+	t.Cleanup(func() { runtime.GOMAXPROCS(previous) })
+	for _, tc := range []struct {
+		name string
+		set  func(*reverseConn, time.Time) error
+	}{
+		{"combined deadline", (*reverseConn).SetDeadline},
+		{"read deadline", (*reverseConn).SetReadDeadline},
+		{"write deadline", (*reverseConn).SetWriteDeadline},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			conn, _, _ := reverseTestClientConn(t)
+			if err := tc.set(conn, time.Time{}); err != nil {
+				t.Fatalf("reset live connection deadline: %v", err)
+			}
+			done := make(chan error, 1)
+			started := make(chan struct{})
+			go func() {
+				close(started)
+				// The peer never reads, so a request larger than yamux's
+				// advertised window must wait for credit.
+				_, err := conn.Write(make([]byte, 512*1024))
+				done <- err
+			}()
+			<-started
+			runtime.Gosched()
+			select {
+			case err := <-done:
+				t.Fatalf("request writer returned before full close: %v", err)
+			default:
+			}
+			if err := conn.Close(); err != nil {
+				t.Fatalf("full-close connection: %v", err)
+			}
+			resetErr := tc.set(conn, time.Time{})
+			select {
+			case err := <-done:
+				if !errors.Is(err, net.ErrClosed) {
+					t.Fatalf("pending request write = %v, want closed connection", err)
+				}
+			case <-time.After(100 * time.Millisecond):
+				t.Fatal("deadline reset kept the full-closed request writer blocked")
+			}
+			if !errors.Is(resetErr, net.ErrClosed) {
+				t.Fatalf("reset full-closed connection deadline = %v, want closed connection", resetErr)
+			}
+		})
 	}
 }
 

@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/hashicorp/yamux"
@@ -965,16 +966,72 @@ func (m *ReverseManager) Open(ctx context.Context, peer ReversePeer, service nod
 type reverseConn struct {
 	*yamux.Stream
 	once    sync.Once
+	closed  atomic.Bool
 	mu      sync.Mutex
 	release func()
 	stops   []func() bool
 	notify  func()
 }
 
+// Abort deadlines wake yamux I/O before its session finishes force-closing
+// streams. Report connection closure across that interval. CloseWrite remains
+// a half-close.
+func (c *reverseConn) Read(b []byte) (int, error) {
+	if c.closed.Load() {
+		return 0, net.ErrClosed
+	}
+	n, err := c.Stream.Read(b)
+	if c.closed.Load() {
+		return 0, net.ErrClosed
+	}
+	return n, err
+}
+
+func (c *reverseConn) Write(b []byte) (int, error) {
+	if c.closed.Load() {
+		return 0, net.ErrClosed
+	}
+	n, err := c.Stream.Write(b)
+	if c.closed.Load() {
+		return n, net.ErrClosed
+	}
+	return n, err
+}
+
+// Serialize deadline mutation with the start of full Close so a concurrent
+// reset cannot clear the abort deadlines that wake already pending I/O.
+func (c *reverseConn) SetDeadline(deadline time.Time) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed.Load() {
+		return net.ErrClosed
+	}
+	return c.Stream.SetDeadline(deadline)
+}
+
+func (c *reverseConn) SetReadDeadline(deadline time.Time) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed.Load() {
+		return net.ErrClosed
+	}
+	return c.Stream.SetReadDeadline(deadline)
+}
+
+func (c *reverseConn) SetWriteDeadline(deadline time.Time) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed.Load() {
+		return net.ErrClosed
+	}
+	return c.Stream.SetWriteDeadline(deadline)
+}
+
 func (c *reverseConn) CloseWrite() error { return c.Stream.Close() }
 func (c *reverseConn) Close() error {
 	c.once.Do(func() {
 		c.mu.Lock()
+		c.closed.Store(true)
 		for _, stop := range c.stops {
 			stop()
 		}
