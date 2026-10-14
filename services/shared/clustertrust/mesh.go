@@ -5,8 +5,10 @@ package clustertrust
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -234,6 +236,88 @@ func (m *Mesh) trustedDER(uuid string) ([]byte, bool) {
 func (m *Mesh) HasPin(uuid string) bool {
 	_, ok := m.trustedDER(uuid)
 	return ok
+}
+
+// PeerServiceIncarnation returns the opaque admission identity for one current
+// pinned peer. It includes both local and peer admission epochs, so readmission
+// changes it even when neither certificate changes. Endpoint/protocol changes
+// remain the caller's PeerServiceRoute.Generation responsibility.
+//
+// Refresh remains responsible for loading identities and pins. This lookup
+// reads admission.json and the peer pin afresh and refuses missing, invalid or
+// changing authority rather than carrying cached admissions across teardown.
+// It never writes or upgrades the cluster-manager's records.
+func (m *Mesh) PeerServiceIncarnation(peerUUID string) (string, bool) {
+	return m.peerServiceIncarnation(peerUUID, os.ReadFile)
+}
+
+func (m *Mesh) peerServiceIncarnation(peerUUID string, readFile func(string) ([]byte, error)) (string, bool) {
+	// Reject path components on every supported platform before constructing a
+	// filename, including Windows separators/drive names on Unix readers.
+	if m == nil || m.dir == "" || peerUUID == "" || peerUUID == "." || peerUUID == ".." ||
+		strings.ContainsAny(peerUUID, "/\\:\x00") || strings.TrimSpace(peerUUID) != peerUUID {
+		return "", false
+	}
+	m.mu.RLock()
+	id, clustered := m.id, m.clustered
+	m.mu.RUnlock()
+	if !clustered || id == nil || id.NodeUUID == "" || peerUUID == id.NodeUUID || m.trust == nil {
+		return "", false
+	}
+
+	admissionPath := filepath.Join(m.dir, admissionFileName)
+	pinPath := filepath.Join(m.dir, "trusted", peerUUID+".json")
+	admissionData, err := readFile(admissionPath)
+	if err != nil {
+		return "", false
+	}
+	admission, ok := peerServiceAdmission(admissionData)
+	if !ok {
+		return "", false
+	}
+	pinData, err := readFile(pinPath)
+	if err != nil {
+		return "", false
+	}
+	var pin struct {
+		NodeUUID       string `json:"nodeUuid"`
+		CertPem        string `json:"certPem"`
+		ClusterID      string `json:"clusterId"`
+		AdmissionEpoch uint64 `json:"admissionEpoch"`
+	}
+	if err := json.Unmarshal(pinData, &pin); err != nil || pin.ClusterID != admission.ClusterID || pin.AdmissionEpoch == 0 {
+		return "", false
+	}
+	der, err := pinDER(pin.NodeUUID, pin.CertPem, peerUUID)
+	if err != nil {
+		return "", false
+	}
+
+	// Validate in reverse read order: the two matching admission reads bracket
+	// both pin reads. The owner's monotonic admission epochs prevent a cleared
+	// or replaced local admission from masquerading as the original tuple.
+	// No cross-file writer lock is available; a changed/partial snapshot fails
+	// closed and a subsequent complete refresh can succeed.
+	currentPin, err := readFile(pinPath)
+	if err != nil || !bytes.Equal(currentPin, pinData) {
+		return "", false
+	}
+	currentAdmission, err := readFile(admissionPath)
+	if err != nil || !bytes.Equal(currentAdmission, admissionData) {
+		return "", false
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if !m.clustered || m.id != id || !m.trust.MatchDER(peerUUID, der) {
+		return "", false
+	}
+	// Length-prefix principals so arbitrary cluster IDs cannot alias another
+	// tuple. Hashing keeps this a comparison token, not a schema for callers.
+	tuple := fmt.Appendf(nil, "%d:%s%d:%s%d:%s:%d:%d",
+		len(admission.ClusterID), admission.ClusterID, len(id.NodeUUID), id.NodeUUID,
+		len(peerUUID), peerUUID, admission.Epoch, pin.AdmissionEpoch)
+	digest := sha256.Sum256(tuple)
+	return fmt.Sprintf("%x", digest), true
 }
 
 // matchDER is the server-side gate: accept der for uuid when it byte-for-byte
