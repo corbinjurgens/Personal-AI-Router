@@ -24,6 +24,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"path/filepath"
 	"strconv"
 	"sync"
 	"time"
@@ -31,6 +32,7 @@ import (
 	"nvpair-shared/clustertrust"
 	"nvpair-shared/errors"
 	"nvpair-shared/netpick"
+	"nvpair-shared/noderec"
 	"nvpair-shared/reach"
 )
 
@@ -42,9 +44,9 @@ const (
 	// discovered-event push long before the first heartbeat.
 	heartbeatInterval = 30 * time.Second
 	pushTimeout       = 3 * time.Second
-	// maxDrainBytes bounds how much of a peer's response body we read purely to
-	// make its connection reusable. The ingest endpoint answers 204 or a short
-	// error string, so every legitimate body drains in full.
+	// maxDrainBytes bounds how much of a peer's response body we drain to make
+	// its connection reusable. The ingest endpoint answers 204 or a short error
+	// string, so every legitimate body drains in full.
 	maxDrainBytes = 8 << 10
 )
 
@@ -62,6 +64,8 @@ const (
 type peerTarget struct {
 	candidates []string // "host:port", the peer's own order
 	uuid       string   // peer cluster uuid
+	address    string   // selected original URL authority
+	generation uint64
 }
 
 type PeerSync struct {
@@ -72,11 +76,10 @@ type PeerSync struct {
 	// per-peer pinned client, or no push at all.
 	mesh *clustertrust.Mesh
 
-	// clients holds one long-lived client per pinned peer. Building one per push
-	// would pay a full mTLS handshake every heartbeat and leak the socket
-	// afterwards, so a long-running node accumulates dead connections to every
-	// peer it has ever synced with.
-	clients *clustertrust.PeerClientPool
+	// clients reuses direct or reverse connections without replaying a request.
+	// Full-snapshot reconciliation and the later heartbeat own convergence.
+	clients    *clustertrust.PeerServiceClient
+	clusterDir string
 
 	// addrs remembers which of a peer's published addresses answered, so a
 	// heartbeat that repeats every 30 seconds does not re-confirm an address that
@@ -84,8 +87,9 @@ type PeerSync struct {
 	// here stops costing a push timeout per round.
 	addrs *reach.Chooser
 
-	mu    sync.RWMutex
-	peers map[string]peerTarget // nodeId -> push destination
+	mu         sync.RWMutex
+	peers      map[string]peerTarget // nodeId -> push destination
+	generation uint64
 
 	// trigger coalesces local-change notifications: the Manager's
 	// onLocalChange callback does a non-blocking send, and the Run loop
@@ -94,16 +98,59 @@ type PeerSync struct {
 	trigger chan struct{}
 }
 
-func NewPeerSync(mgr *Manager, mesh *clustertrust.Mesh) *PeerSync {
-	return &PeerSync{
+func NewPeerSync(mgr *Manager, mesh *clustertrust.Mesh, clusterDir string) *PeerSync {
+	ps := &PeerSync{
 		mgr:         mgr,
 		localNodeID: mgr.LocalNodeID(),
 		mesh:        mesh,
-		clients:     clustertrust.NewPeerClientPool(mesh, pushTimeout),
+		clusterDir:  clusterDir,
 		addrs:       reach.NewChooser(),
 		peers:       make(map[string]peerTarget),
 		trigger:     make(chan struct{}, 1),
 	}
+	baseDir := ""
+	if clusterDir != "" {
+		baseDir = filepath.Dir(filepath.Clean(clusterDir))
+	}
+	ps.clients = clustertrust.NewPeerServiceClient(mesh, clustertrust.PeerServiceClientOptions{
+		PeerClientOptions: clustertrust.PeerClientOptions{Timeout: pushTimeout},
+		BaseConfigDir:     baseDir,
+		ResolveRoute:      ps.resolveRoute,
+		ReuseConnections:  true,
+	})
+	return ps
+}
+
+// resolveRoute uses shared admission authority at every adapter authorization
+// boundary. Discovery supplies the endpoint only for an unambiguous principal.
+func (ps *PeerSync) resolveRoute(uuid string, service noderec.ServiceKey) (clustertrust.PeerServiceRoute, bool) {
+	if service != noderec.ServiceErrors {
+		return clustertrust.PeerServiceRoute{}, false
+	}
+	ps.mesh.Refresh()
+	incarnation, ok := ps.mesh.PeerServiceIncarnation(uuid)
+	if !ok {
+		return clustertrust.PeerServiceRoute{}, false
+	}
+	ps.mu.RLock()
+	defer ps.mu.RUnlock()
+	var selected peerTarget
+	found := false
+	for _, target := range ps.peers {
+		if target.uuid == uuid {
+			if found {
+				return clustertrust.PeerServiceRoute{}, false
+			}
+			selected, found = target, true
+		}
+	}
+	if !found || selected.address == "" {
+		return clustertrust.PeerServiceRoute{}, false
+	}
+	return clustertrust.PeerServiceRoute{
+		Incarnation: incarnation, Address: selected.address,
+		Protocol: clustertrust.ReverseTLS, Generation: selected.generation,
+	}, true
 }
 
 // TriggerPush is the Manager.onLocalChange hook. Non-blocking: if a
@@ -170,11 +217,16 @@ func (ps *PeerSync) handleEvent(ctx context.Context, ev DiscoveryEvent) {
 		}
 		candidates := peerHostPorts(ev.Node)
 		if len(candidates) == 0 {
+			ps.mu.Lock()
+			delete(ps.peers, ev.Node.ID)
+			ps.mu.Unlock()
 			slog.Warn("peer has no reachable address", "nodeId", ev.Node.ID)
 			return
 		}
 		target := peerTarget{candidates: candidates, uuid: uuid}
 		ps.mu.Lock()
+		ps.generation++
+		target.generation = ps.generation
 		ps.peers[ev.Node.ID] = target
 		ps.mu.Unlock()
 		slog.Info("errors peer discovered", "nodeId", ev.Node.ID, "addresses", candidates, "event", ev.Type)
@@ -200,10 +252,9 @@ func (ps *PeerSync) handleEvent(ctx context.Context, ev DiscoveryEvent) {
 // trigger cadence reflects real completion.
 func (ps *PeerSync) pushAll(ctx context.Context) {
 	// Re-derive membership and pins so a cluster joined or left, and a
-	// newly-paired (or unpinned) peer, are reflected before we fan out this round,
-	// then retire pooled clients those fresh pins no longer cover.
+	// newly-paired (or unpinned) peer, are reflected before we fan out this round.
+	// The adapter also refreshes authority at each request boundary.
 	ps.mesh.Refresh()
-	ps.clients.DropUnpinned()
 
 	ps.mu.RLock()
 	targets := make(map[string]peerTarget, len(ps.peers))
@@ -258,14 +309,8 @@ func (ps *PeerSync) snapshotBody() ([]byte, error) {
 // dropped — the heartbeat (and the next local change) will retry, which
 // is the whole point of an idempotent full-snapshot push.
 func (ps *PeerSync) post(ctx context.Context, nodeID string, target peerTarget, body []byte) {
-	// Take this peer's pooled client: it presents our cluster leaf and pins the
-	// peer's exact server cert, and it is reused across pushes so a heartbeat
-	// doesn't re-handshake. A peer without a current pin can't be dialed — skip
-	// it (the cluster gate, enforced client-side too). There is no plaintext
-	// alternative: while this node belongs to no cluster no client resolves and
-	// nothing is pushed.
-	client, ok := ps.clients.Client(target.uuid)
-	if !ok {
+	ps.mesh.Refresh()
+	if !ps.mesh.HasPin(target.uuid) {
 		slog.Debug("push: peer not pinned; skipping", "nodeId", nodeID, "uuid", target.uuid)
 		return
 	}
@@ -277,6 +322,21 @@ func (ps *PeerSync) post(ctx context.Context, nodeID string, target peerTarget, 
 		slog.Warn("push: peer has no reachable address", "nodeId", nodeID)
 		return
 	}
+	// Publish the selected endpoint only if this push still owns the discovery
+	// generation it captured. A removed or replaced target cannot regain a route.
+	ps.mu.Lock()
+	current, ok := ps.peers[nodeID]
+	if !ok || current.uuid != target.uuid || current.generation != target.generation {
+		ps.mu.Unlock()
+		return
+	}
+	if current.address != hostport {
+		ps.generation++
+		current.address, current.generation = hostport, ps.generation
+		ps.peers[nodeID] = current
+	}
+	ps.mu.Unlock()
+	client := ps.clients.Client(target.uuid, noderec.ServiceErrors)
 	url := "https://" + hostport + "/v1/errors"
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
@@ -296,10 +356,7 @@ func (ps *PeerSync) post(ctx context.Context, nodeID string, target peerTarget, 
 		slog.Warn("push failed", "nodeId", nodeID, "url", url, "err", err)
 		return
 	}
-	// Drain before closing: an unread body cannot return its connection to the
-	// idle pool, so the next push would re-handshake. Bounded — this endpoint
-	// answers 204 or a short error string, so a peer streaming more than that
-	// forfeits its connection rather than our bandwidth.
+	// Drain bounded response data and release the connection for later snapshots.
 	defer func() {
 		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxDrainBytes))
 		_ = resp.Body.Close()

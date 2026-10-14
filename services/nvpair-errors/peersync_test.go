@@ -287,7 +287,8 @@ func TestPeerHostPorts(t *testing.T) {
 // sent. This is the outbound half of "the cluster data plane is always mTLS" —
 // previously such a node kept the peer and pushed its error snapshot in the clear.
 func TestUnclusteredNodeKeepsNoPeers(t *testing.T) {
-	ps := NewPeerSync(managerForNode("node-a"), clustertrust.Open(t.TempDir()))
+	dir := t.TempDir()
+	ps := NewPeerSync(managerForNode("node-a"), clustertrust.Open(dir), dir)
 	ps.handleEvent(context.Background(), DiscoveryEvent{
 		Type: "discovered",
 		Node: RawNode{

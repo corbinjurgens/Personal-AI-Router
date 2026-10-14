@@ -83,7 +83,7 @@ func main() {
 		// left/removed node keeps its keypair by design. The mesh is a live view of
 		// the cluster dir, so this node follows a create/join/leave that happens
 		// while it runs instead of latching whatever it read at startup.
-		startPeerSync(ctx, mgr, *port, clustertrust.Open(*clusterDir))
+		startPeerSync(ctx, mgr, *port, clustertrust.Open(*clusterDir), *clusterDir)
 	}
 
 	if err := mgr.Run(ctx); err != nil && ctx.Err() == nil {
@@ -100,8 +100,8 @@ func main() {
 // A failure to bind the HTTP port is fatal: without an inbound endpoint
 // peers can't reach this node, so silently degrading to "advertises but
 // never receives" would be worse than a clear crash the supervisor logs.
-func startPeerSync(ctx context.Context, mgr *Manager, port int, mesh *clustertrust.Mesh) {
-	peers := NewPeerSync(mgr, mesh)
+func startPeerSync(ctx context.Context, mgr *Manager, port int, mesh *clustertrust.Mesh, clusterDir string) {
+	peers := NewPeerSync(mgr, mesh, clusterDir)
 	mgr.SetOnLocalChange(peers.TriggerPush)
 
 	// Peers come solely from the broker's discovery relay. The Manager reconciles

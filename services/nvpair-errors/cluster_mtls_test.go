@@ -35,8 +35,14 @@ func genLeaf(t *testing.T, uuid string) (certPEM, keyPEM []byte) {
 	if err != nil {
 		t.Fatalf("genkey: %v", err)
 	}
-	serial, _ := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
-	uri, _ := url.Parse("urn:nvpair:node:" + uuid)
+	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+	if err != nil {
+		t.Fatalf("serial: %v", err)
+	}
+	uri, err := url.Parse("urn:nvpair:node:" + uuid)
+	if err != nil {
+		t.Fatalf("certificate URI: %v", err)
+	}
 	tmpl := &x509.Certificate{
 		SerialNumber:          serial,
 		Subject:               pkix.Name{CommonName: uuid},
@@ -51,7 +57,10 @@ func genLeaf(t *testing.T, uuid string) (certPEM, keyPEM []byte) {
 	if err != nil {
 		t.Fatalf("create cert: %v", err)
 	}
-	keyDER, _ := x509.MarshalPKCS8PrivateKey(priv)
+	keyDER, err := x509.MarshalPKCS8PrivateKey(priv)
+	if err != nil {
+		t.Fatalf("marshal key: %v", err)
+	}
 	certPEM = pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
 	keyPEM = pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER})
 	return certPEM, keyPEM
@@ -61,7 +70,13 @@ func genLeaf(t *testing.T, uuid string) (certPEM, keyPEM []byte) {
 // a pin (trusted/<uuid>.json) for each peer uuid -> cert PEM in pins.
 func setupNode(t *testing.T, certPEM, keyPEM []byte, pins map[string][]byte) string {
 	t.Helper()
-	dir := t.TempDir()
+	dir := filepath.Join(t.TempDir(), "cluster")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "admission.json"), []byte(`{"clusterId":"test-cluster","epoch":1,"counter":1,"activated":1}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(filepath.Join(dir, "node.crt"), certPEM, 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -73,7 +88,12 @@ func setupNode(t *testing.T, certPEM, keyPEM []byte, pins map[string][]byte) str
 		t.Fatal(err)
 	}
 	for uuid, pcert := range pins {
-		body, _ := json.Marshal(map[string]string{"nodeUuid": uuid, "certPem": string(pcert)})
+		body := mustJSON(t, struct {
+			NodeUUID       string `json:"nodeUuid"`
+			CertPEM        string `json:"certPem"`
+			ClusterID      string `json:"clusterId"`
+			AdmissionEpoch uint64 `json:"admissionEpoch"`
+		}{uuid, string(pcert), "test-cluster", 1})
 		if err := os.WriteFile(filepath.Join(td, uuid+".json"), body, 0o600); err != nil {
 			t.Fatal(err)
 		}
