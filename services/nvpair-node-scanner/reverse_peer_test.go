@@ -54,24 +54,25 @@ func writeScannerAdmissionPin(t *testing.T, dir, uuid, cluster string, epoch uin
 }
 
 type scannerReverseFixture struct {
-	d              *daemon
-	node           noderec.DirectoryNode
-	direct         atomic.Bool
-	reverse        atomic.Bool
-	infoCalls      atomic.Int32
-	modelCalls     atomic.Int32
-	directInfo     atomic.Int32
-	directModels   atomic.Int32
-	reverseInfo    atomic.Int32
-	reverseModels  atomic.Int32
-	reportedHost   atomic.Value
-	beforeReply    func(noderec.ServiceKey)
-	interrupt      atomic.Bool
-	responseEnding atomic.Int32
-	mu             sync.Mutex
-	connections    []net.Conn
-	wg             sync.WaitGroup
-	listeners      []net.Listener
+	d                 *daemon
+	node              noderec.DirectoryNode
+	direct            atomic.Bool
+	reverse           atomic.Bool
+	infoCalls         atomic.Int32
+	modelCalls        atomic.Int32
+	directInfo        atomic.Int32
+	directModels      atomic.Int32
+	reverseInfo       atomic.Int32
+	reverseModels     atomic.Int32
+	reportedHost      atomic.Value
+	reportedPrincipal atomic.Pointer[string]
+	beforeReply       func(noderec.ServiceKey)
+	interrupt         atomic.Bool
+	responseEnding    atomic.Int32
+	mu                sync.Mutex
+	connections       []net.Conn
+	wg                sync.WaitGroup
+	listeners         []net.Listener
 }
 
 const (
@@ -141,6 +142,8 @@ func newScannerReverseFixture(t *testing.T) *scannerReverseFixture {
 	peerMesh := clustertrust.Open(peerDir)
 	f := &scannerReverseFixture{d: newMembershipTestDaemon(dir)}
 	f.reportedHost.Store("peer")
+	principal := "peer"
+	f.reportedPrincipal.Store(&principal)
 	f.reverse.Store(true)
 	f.d.http = &http.Client{Timeout: nodeInfoFetchTimeout, Transport: nodeInfoTransport(nil)}
 	f.d.modelsHTTP = &http.Client{Timeout: modelsFetchTimeout}
@@ -173,14 +176,15 @@ func newScannerReverseFixture(t *testing.T) *scannerReverseFixture {
 			t.Error("invalid fixture host identity")
 			return
 		}
-		cluster, gpuName := reportedHost, "reverse GPU"
+		cluster, gpuName := f.reportedPrincipal.Load(), "reverse GPU"
 		if reportedHost != "peer" {
 			gpuName = "stranger GPU"
 		}
 		if f.responseEnding.Load() == scannerIncompleteFraming {
-			cluster, gpuName = "", "uncommitted GPU"
+			empty := ""
+			cluster, gpuName = &empty, "uncommitted GPU"
 		}
-		writeScannerFixtureResponse(t, w, NodeInfoResponse{HostUUID: reportedHost, ClusterUUID: &cluster, GPUs: []GPUInfo{{Name: gpuName, UtilizationPercent: 73}}, TelemetryValid: true, MSSince: 100}, f.responseEnding.Load())
+		writeScannerFixtureResponse(t, w, NodeInfoResponse{HostUUID: reportedHost, ClusterUUID: cluster, GPUs: []GPUInfo{{Name: gpuName, UtilizationPercent: 73}}, CPU: &CPUInfo{Name: "peer CPU", Cores: 8, UtilizationPercent: 42}, Memory: &MemoryInfo{TotalBytes: 8192, UsedBytes: 2048}, TelemetryValid: true, MSSince: 100}, f.responseEnding.Load())
 	}))
 	models := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		f.modelCalls.Add(1)

@@ -31,7 +31,8 @@ var ErrPeerClosed = errors.New("jsonrpc peer closed")
 // calls Close when the transport goes away. Serve also closes the peer when
 // Read returns a terminal error, so in-flight and future Calls fail fast.
 type Peer struct {
-	codec *Codec
+	codec          *Codec
+	interruptWrite func()
 
 	idCounter atomic.Int64
 
@@ -53,6 +54,30 @@ func NewPeer(codec *Codec) *Peer {
 	}
 }
 
+// NewPeerWithWriteInterrupt is NewPeer with context-bounded Call writes.
+// interrupt must promptly and permanently unblock the codec's active Write
+// (for example by closing subprocess stdin and invalidating the subprocess).
+// It runs only after a Peer write owns the write gate, on active Call
+// cancellation or any Peer write failure, and is never invoked for queued
+// cancellation or response-only timeout. The peer closes before interrupt
+// runs, and the codec is retired before ownership is released, because a
+// partial frame cannot be reused.
+//
+// interrupt must not wait for the Call or acquire the codec's write gate. It
+// may call Peer.Close. Call waits for both Write and interrupt to finish; its
+// time bound therefore depends on interrupt fulfilling this contract. A nil
+// interrupt preserves NewPeer's synchronous, non-interruptible writes.
+func NewPeerWithWriteInterrupt(codec *Codec, interrupt func()) *Peer {
+	p := NewPeer(codec)
+	if interrupt != nil {
+		p.interruptWrite = func() {
+			p.Close()
+			interrupt()
+		}
+	}
+	return p
+}
+
 // Codec returns the underlying codec (for callers that need raw framing).
 func (p *Peer) Codec() *Codec { return p.codec }
 
@@ -61,19 +86,19 @@ func (p *Peer) Codec() *Codec { return p.codec }
 func (p *Peer) Done() <-chan struct{} { return p.closedCh }
 
 // Notify sends a fire-and-forget notification.
-func (p *Peer) Notify(method string, params any) error { return p.codec.Notify(method, params) }
+func (p *Peer) Notify(method string, params any) error { return notify(p.write, method, params) }
 
 // Respond answers an inbound request with a result.
-func (p *Peer) Respond(id *json.RawMessage, result any) error { return p.codec.Respond(id, result) }
+func (p *Peer) Respond(id *json.RawMessage, result any) error { return respond(p.write, id, result) }
 
 // RespondError answers an inbound request with an error.
 func (p *Peer) RespondError(id *json.RawMessage, code int, message string) error {
-	return p.codec.RespondError(id, code, message)
+	return respondErrorData(p.write, id, code, message, nil)
 }
 
 // RespondErrorData answers an inbound request with an error carrying data.
 func (p *Peer) RespondErrorData(id *json.RawMessage, code int, message string, data any) error {
-	return p.codec.RespondErrorData(id, code, message, data)
+	return respondErrorData(p.write, id, code, message, data)
 }
 
 // Call sends an id-bearing request and blocks until the response arrives, ctx
@@ -88,7 +113,7 @@ func (p *Peer) Call(ctx context.Context, method string, params json.RawMessage) 
 	}
 	defer p.clearPending(id)
 
-	if err := p.writeRequest(id, method, params); err != nil {
+	if err := p.writeRequestContext(ctx, id, method, params); err != nil {
 		return nil, nil, err
 	}
 
@@ -146,8 +171,20 @@ func (p *Peer) register() (chan *Message, int64, error) {
 }
 
 func (p *Peer) writeRequest(id int64, method string, params json.RawMessage) error {
+	return p.writeRequestContext(context.Background(), id, method, params)
+}
+
+func (p *Peer) writeRequestContext(ctx context.Context, id int64, method string, params json.RawMessage) error {
 	idRaw := json.RawMessage(strconv.FormatInt(id, 10))
-	return p.codec.write(&Message{JSONRPC: "2.0", ID: &idRaw, Method: method, Params: params})
+	return p.writeContext(ctx, &Message{JSONRPC: "2.0", ID: &idRaw, Method: method, Params: params})
+}
+
+func (p *Peer) write(msg *Message) error {
+	return p.writeContext(context.Background(), msg)
+}
+
+func (p *Peer) writeContext(ctx context.Context, msg *Message) error {
+	return p.codec.writeContext(ctx, p.closedCh, p.interruptWrite, msg)
 }
 
 func (p *Peer) clearPending(id int64) {
@@ -163,6 +200,7 @@ func (p *Peer) deliverResponse(msg *Message) {
 	}
 	p.mu.Lock()
 	ch := p.pending[id]
+	delete(p.pending, id)
 	p.mu.Unlock()
 	if ch != nil {
 		ch <- msg // ch is buffered (size 1); the id is unique so this never blocks
@@ -175,6 +213,7 @@ func (p *Peer) Close() {
 	p.closeOnce.Do(func() {
 		p.mu.Lock()
 		p.closed = true
+		clear(p.pending)
 		p.mu.Unlock()
 		close(p.closedCh)
 	})

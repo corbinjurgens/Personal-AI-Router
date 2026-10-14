@@ -3304,6 +3304,9 @@ func (b *Broker) handleMessage(msg *Message) {
 			log.Printf("failed to respond to discovery:get-nodes: %v", err)
 		}
 
+	case "discovery:get-node-info":
+		go b.handleNodeInfoRPC(msg)
+
 	case "discovery:subscribe":
 		b.subMu.Lock()
 		wasSubscribed := b.subscribed

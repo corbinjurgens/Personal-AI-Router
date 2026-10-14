@@ -1294,6 +1294,10 @@ func (d *daemon) fetchNodeInfoForPeer(ctx context.Context, hostUUID, peerUUID, i
 	if client == nil {
 		return NodeInfoResponse{}, false
 	}
+	return d.readNodeInfoWithin(ctx, client, scheme, ip, port, current)
+}
+
+func (d *daemon) readNodeInfoWithin(ctx context.Context, client *http.Client, scheme, ip string, port int, current func() bool) (NodeInfoResponse, bool) {
 	origin := scheme + "://" + net.JoinHostPort(ip, strconv.Itoa(port))
 	release, acquired := d.nodeInfoOrigins.acquire(ctx, origin)
 	if !acquired {
@@ -1962,6 +1966,12 @@ func (d *daemon) activitySince(hostUUID string) (time.Duration, bool) {
 // filtered directory snapshot.
 func (d *daemon) handle(msg *Message) bool {
 	switch msg.Method {
+	case "discovery:get-node-info":
+		if msg.IsRequest() {
+			go d.handleNodeInfoRPC(msg)
+		}
+		return true
+
 	case noderec.MethodRegister, noderec.MethodUpdateTXT:
 		var p noderec.RegisterParams
 		if err := json.Unmarshal(msg.Params, &p); err != nil {

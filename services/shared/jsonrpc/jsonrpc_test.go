@@ -5,6 +5,7 @@ package jsonrpc
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -172,5 +173,115 @@ func TestNewCodecMaxFrameAcceptsLargeFrame(t *testing.T) {
 	var params map[string]string
 	if err := json.Unmarshal(msg.Params, &params); err != nil || len(params["blob"]) != len(big) {
 		t.Fatalf("large frame round-trip failed: %v", err)
+	}
+}
+
+func TestCodecInterruptibleShortWriteCompletesFrame(t *testing.T) {
+	var w oneByteWriter
+	c := writeCodec(&w)
+	interrupts := 0
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	id := json.RawMessage("42")
+	if err := c.writeContext(ctx, nil, func() { interrupts++ }, &Message{
+		JSONRPC: "2.0", ID: &id, Method: "request", Params: json.RawMessage(`{"key":"value"}`),
+	}); err != nil {
+		t.Fatalf("interruptible short write: %v", err)
+	}
+	cancel()
+	if err := c.Notify("after", nil); err != nil {
+		t.Fatalf("Notify after completed write: %v", err)
+	}
+	reader := readCodec(bytes.NewReader(w.buf.Bytes()))
+	msg, err := reader.Read()
+	if err != nil {
+		t.Fatalf("Read short-written request: %v", err)
+	}
+	if !msg.IsRequest() || msg.Method != "request" || string(*msg.ID) != "42" {
+		t.Fatalf("short-written request = %+v", msg)
+	}
+	var params map[string]string
+	if err := json.Unmarshal(msg.Params, &params); err != nil || params["key"] != "value" {
+		t.Fatalf("short-written params = %v, err=%v", params, err)
+	}
+	next, err := reader.Read()
+	if err != nil || !next.IsNotification() || next.Method != "after" {
+		t.Fatalf("next frame = %+v, err=%v", next, err)
+	}
+	if _, err := reader.Read(); !errors.Is(err, io.EOF) {
+		t.Fatalf("unexpected extra frame: %v", err)
+	}
+	if interrupts != 0 {
+		t.Fatalf("completed frame interruption calls = %d, want 0", interrupts)
+	}
+}
+
+type failingFrameWriter struct {
+	calls int
+	n     int
+	err   error
+}
+
+func (w *failingFrameWriter) Write([]byte) (int, error) {
+	w.calls++
+	return w.n, w.err
+}
+
+func TestCodecInterruptibleWriteFailureRetiresFrame(t *testing.T) {
+	test := func(name string, n int, writeErr, wantErr error) {
+		t.Run(name, func(t *testing.T) {
+			w := &failingFrameWriter{n: n, err: writeErr}
+			c := writeCodec(w)
+			interrupts := 0
+			if err := c.writeContext(context.Background(), nil, func() { interrupts++ }, &Message{JSONRPC: "2.0", Method: "first"}); !errors.Is(err, wantErr) {
+				t.Fatalf("write error = %v, want %v", err, wantErr)
+			}
+			if err := c.Notify("later", nil); !errors.Is(err, ErrPeerClosed) {
+				t.Fatalf("write after failure = %v, want peer closed", err)
+			}
+			if w.calls != 1 || interrupts != 1 {
+				t.Fatalf("writer calls=%d, interruption calls=%d; want one each", w.calls, interrupts)
+			}
+		})
+	}
+	test("zero-byte short write", 0, nil, io.ErrShortWrite)
+	test("partial write error", 3, io.ErrClosedPipe, io.ErrClosedPipe)
+}
+
+func TestCodecInterruptibleInvalidFramePreservesWriter(t *testing.T) {
+	var buf bytes.Buffer
+	c := writeCodec(&buf)
+	interrupts := 0
+	err := c.writeContext(context.Background(), nil, func() { interrupts++ }, &Message{JSONRPC: "2.0", Method: "invalid", Params: json.RawMessage("{")})
+	if err == nil {
+		t.Fatal("invalid raw JSON frame was accepted")
+	}
+	if buf.Len() != 0 || interrupts != 0 {
+		t.Fatalf("invalid frame wrote %d bytes and interrupted %d times", buf.Len(), interrupts)
+	}
+	if err := c.Notify("healthy", nil); err != nil {
+		t.Fatalf("Notify after encoding failure: %v", err)
+	}
+	msg, err := readCodec(&buf).Read()
+	if err != nil || !msg.IsNotification() || msg.Method != "healthy" {
+		t.Fatalf("frame after encoding failure = %+v, err=%v", msg, err)
+	}
+}
+
+func TestCodecDirectWriteFailurePreservesExistingBehavior(t *testing.T) {
+	var w partialErrorWriter
+	c := writeCodec(&w)
+	if err := c.Notify("first", nil); !errors.Is(err, io.ErrUnexpectedEOF) {
+		t.Fatalf("direct Codec write error = %v, want unexpected EOF", err)
+	}
+	if err := c.Notify("second", nil); err != nil {
+		t.Fatalf("direct Codec second write = %v, want existing caller-owned lifecycle", err)
+	}
+	if w.calls != 2 {
+		t.Fatalf("direct Codec writer calls = %d, want 2", w.calls)
+	}
+	want := `{"jsonr{"jsonrpc":"2.0","method":"second","params":null}` + "\n"
+	if w.buf.String() != want {
+		t.Fatalf("direct Codec bytes = %q, want %q", w.buf.String(), want)
 	}
 }

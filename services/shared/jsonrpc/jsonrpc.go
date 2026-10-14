@@ -15,6 +15,7 @@ package jsonrpc
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -92,7 +93,8 @@ const WorkerFrameBytes = 8 << 20
 type Codec struct {
 	scanner *bufio.Scanner
 	writer  io.Writer
-	wmu     sync.Mutex
+	wgate   chan struct{}
+	retired bool // guarded by wgate
 }
 
 // NewCodec wraps rw with a Codec. Reads accept frames up to 1 MiB.
@@ -102,6 +104,7 @@ func NewCodec(rw io.ReadWriter) *Codec {
 	return &Codec{
 		scanner: scanner,
 		writer:  rw,
+		wgate:   make(chan struct{}, 1),
 	}
 }
 
@@ -117,6 +120,7 @@ func NewCodecMaxFrame(rw io.ReadWriter, maxFrame int) *Codec {
 	return &Codec{
 		scanner: scanner,
 		writer:  rw,
+		wgate:   make(chan struct{}, 1),
 	}
 }
 
@@ -141,22 +145,99 @@ func (c *Codec) Read() (*Message, error) {
 }
 
 func (c *Codec) write(msg *Message) error {
-	c.wmu.Lock()
-	defer c.wmu.Unlock()
+	return c.writeContext(context.Background(), nil, nil, msg)
+}
+
+// writeContext shares ownership with all codec writes. Only an active frame
+// may interrupt the transport; a cancelled waiter never owns that decision.
+func (c *Codec) writeContext(ctx context.Context, closed <-chan struct{}, interrupt func(), msg *Message) (err error) {
 	data, err := json.Marshal(msg)
 	if err != nil {
 		return err
 	}
 	data = append(data, '\n')
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-closed:
+		return ErrPeerClosed
+	case c.wgate <- struct{}{}:
+	}
+	defer func() { <-c.wgate }()
+	// The gate and cancellation can become ready together. Recheck before any
+	// transport access so an expired waiter cannot write later.
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	select {
+	case <-closed:
+		return ErrPeerClosed
+	default:
+	}
+	if c.retired {
+		return ErrPeerClosed
+	}
+
+	var finish func()
+	var interruptWrite func()
+	if interrupt != nil {
+		var mu sync.Mutex
+		finished, interrupted := false, false
+		interruptWrite = func() {
+			mu.Lock()
+			if finished || interrupted {
+				mu.Unlock()
+				return
+			}
+			interrupted = true
+			mu.Unlock()
+			interrupt()
+		}
+		done := make(chan struct{})
+		stop := context.AfterFunc(ctx, func() {
+			interruptWrite()
+			close(done)
+		})
+		finish = func() {
+			mu.Lock()
+			finished = true
+			c.retired = interrupted
+			mu.Unlock()
+			// Join an already-started callback before releasing write ownership.
+			// The Write itself always runs synchronously on this goroutine.
+			if !stop() {
+				<-done
+			}
+		}
+		defer func() {
+			finish()
+			if c.retired && ctx.Err() != nil {
+				err = ctx.Err()
+			}
+		}()
+	}
 	// Loop on Write so a short-write doesn't truncate the JSON-RPC frame
 	// the peer's bufio.Scanner is about to parse — a half-frame would either
 	// fail to decode or silently merge with the next frame's bytes.
 	for off := 0; off < len(data); {
+		if interruptWrite != nil && ctx.Err() != nil {
+			interruptWrite()
+			return ctx.Err()
+		}
 		n, werr := c.writer.Write(data[off:])
 		if werr != nil {
+			if interruptWrite != nil {
+				interruptWrite()
+				if ctx.Err() != nil {
+					return ctx.Err()
+				}
+			}
 			return werr
 		}
 		if n == 0 {
+			if interruptWrite != nil {
+				interruptWrite()
+			}
 			return io.ErrShortWrite
 		}
 		off += n
@@ -166,11 +247,15 @@ func (c *Codec) write(msg *Message) error {
 
 // Notify sends a fire-and-forget notification (method, params, no id).
 func (c *Codec) Notify(method string, params any) error {
+	return notify(c.write, method, params)
+}
+
+func notify(write func(*Message) error, method string, params any) error {
 	raw, err := json.Marshal(params)
 	if err != nil {
 		return err
 	}
-	return c.write(&Message{
+	return write(&Message{
 		JSONRPC: "2.0",
 		Method:  method,
 		Params:  raw,
@@ -179,11 +264,15 @@ func (c *Codec) Notify(method string, params any) error {
 
 // Respond sends a successful response carrying result for the given request id.
 func (c *Codec) Respond(id *json.RawMessage, result any) error {
+	return respond(c.write, id, result)
+}
+
+func respond(write func(*Message) error, id *json.RawMessage, result any) error {
 	raw, err := json.Marshal(result)
 	if err != nil {
 		return err
 	}
-	return c.write(&Message{
+	return write(&Message{
 		JSONRPC: "2.0",
 		ID:      id,
 		Result:  raw,
@@ -192,19 +281,16 @@ func (c *Codec) Respond(id *json.RawMessage, result any) error {
 
 // RespondError sends an error response for the given request id.
 func (c *Codec) RespondError(id *json.RawMessage, code int, message string) error {
-	return c.write(&Message{
-		JSONRPC: "2.0",
-		ID:      id,
-		Error: &RPCError{
-			Code:    code,
-			Message: message,
-		},
-	})
+	return respondErrorData(c.write, id, code, message, nil)
 }
 
 // RespondErrorData is like RespondError but carries an optional structured
 // data payload (JSON-RPC 2.0 error object's "data" field). data may be nil.
 func (c *Codec) RespondErrorData(id *json.RawMessage, code int, message string, data any) error {
+	return respondErrorData(c.write, id, code, message, data)
+}
+
+func respondErrorData(write func(*Message) error, id *json.RawMessage, code int, message string, data any) error {
 	var raw json.RawMessage
 	if data != nil {
 		b, err := json.Marshal(data)
@@ -213,7 +299,7 @@ func (c *Codec) RespondErrorData(id *json.RawMessage, code int, message string, 
 		}
 		raw = b
 	}
-	return c.write(&Message{
+	return write(&Message{
 		JSONRPC: "2.0",
 		ID:      id,
 		Error:   &RPCError{Code: code, Message: message, Data: raw},

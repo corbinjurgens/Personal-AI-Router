@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"nvpair-shared/applog"
+	"nvpair-shared/jsonrpc"
 	"nvpair-shared/netpick"
 	"nvpair-shared/noderec"
 
@@ -418,7 +419,6 @@ func startScanner(
 	sp := &scannerProcess{
 		cmd:                cmd,
 		stdin:              stdin,
-		peer:               NewPeer(NewCodec(readWriter{stdout, stdin})),
 		store:              store,
 		relayDir:           relayDir,
 		onNodeLost:         onNodeLost,
@@ -427,6 +427,7 @@ func startScanner(
 		activity:           make(chan nodeActivityReport, activityQueueDepth),
 		done:               make(chan struct{}),
 	}
+	sp.peer = jsonrpc.NewPeerWithWriteInterrupt(NewCodec(readWriter{stdout, stdin}), sp.interruptWrite)
 
 	go sp.peer.Serve(nil, sp.handleNotify)
 	go sp.drainNodeActivity()
@@ -437,6 +438,18 @@ func startScanner(
 	}()
 
 	return sp, nil
+}
+
+// An interrupted frame makes this scanner's input unusable. Close its pipe to
+// release the writer and terminate the worker so supervision can replace it.
+// This hook must not join the process or wait for the interrupted Call.
+func (s *scannerProcess) interruptWrite() {
+	if s.stdin != nil {
+		_ = s.stdin.Close()
+	}
+	if s.cmd != nil && s.cmd.Process != nil {
+		_ = s.cmd.Process.Kill()
+	}
 }
 
 // Stop signals the scanner to exit (by closing its stdin, which the scanner
