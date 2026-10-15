@@ -11,6 +11,24 @@ Concretely, the daemon:
 
 - **Advertises** this node's one `_nvpair-node._tcp` record, built from a registry of the local services its parent (the broker) registers — `ni`/`ol`/`lm`/`er`/`wl`/`cl`/`em`/`ec` ports plus the node identity (`uuid=`, `cluster-uuid=` when clustered, `ip=`). One record per node covers every service.
 - **Browses** `_nvpair-node._tcp` for every node on the LAN (including itself) and maintains a queryable directory keyed by host UUID.
+- **Bootstraps admitted peers without mDNS:** cluster-manager reads the peer's
+  complete self-description through its pinned direct/reverse `cl` route. The
+  broker privately relays `discovery:peer-services` notifications to the scanner,
+  which checks the original shared Mesh admission incarnation and installs the
+  services through the same directory, enrichment and discovery events. This
+  notification is worker IPC, not a public client method. Descriptors carry only
+  identity, name, public candidate addresses and allowlisted service ports;
+  trust, transport policy, membership and liveness remain locally derived.
+  Authenticated snapshots take precedence over browse claims, including complete
+  service withdrawal. Browse updates and removals affect only their own claim.
+  Leave, removal, certificate/admission replacement and same-certificate re-pair
+  retire authenticated metadata on trust reload; a one-second reconciliation also
+  expires observations after 30 seconds. A surviving browse claim remains visible.
+  Sequence watermarks are scoped to the cluster-manager process source, and stale
+  responses and delayed enrichment cannot replace a newer snapshot. Endpoint or
+  incarnation changes clear cached enrichment and advance the route generation.
+  Independently observed inference activity survives a source change; final
+  removal clears it only when neither claim remains.
 - **Enriches** each discovered node: GPU/CPU/memory inventory from its `ni` (node-info) port over plain HTTP, and the model list from its `em` (engine-manager) port (`GET /v1/models`) over cluster mTLS — a peer's model inventory is cluster data, so it is fetched only when this node holds a pin for the principal that peer advertises, while this node's own list is read over loopback in plaintext — the flat union, the per-engine breakdown (`modelsByEngine`), and the per-engine set of models loaded in memory (`loadedByEngine`), all carried onto the node's directory entry so remote cards can show loaded state. Each enrichment has a last-good cache so a transient fetch miss doesn't blank the node's card. Node-info enrichment can optionally be moved onto HTTPS (see the TLS flags below) — off by default and gated only on operator flags, never inferred per-node.
 - **Samples scheduling telemetry** from healthy nodes every two seconds with
   stable per-node jitter. Consecutive remote failures back off to 4, 8, 16, then
@@ -79,7 +97,7 @@ There is no unpaired or operator-TLS fallback for a failed paired getter.
 Existing self and unpaired enrichment paths remain direct. The broker exposes
 this method over its existing local service connection; no listener is added.
 
-Two notifications are accepted rather than requests, because the daemon has
+The following notifications are accepted rather than requests, because the daemon has
 nothing to answer and the caller must not wait:
 
 - `discovery:node-activity` `{hostUuid, msSince}` — a peer's engine returned

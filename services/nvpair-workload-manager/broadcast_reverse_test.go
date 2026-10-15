@@ -693,6 +693,14 @@ func TestBroadcastReusableAuthorityChanges(t *testing.T) {
 		if err := os.WriteFile(path, data, 0o600); err != nil {
 			t.Fatal(err)
 		}
+		members, err := json.Marshal([]map[string]any{{"nodeUuid": pin.NodeUUID, "state": "member",
+			"clusterId": pin.ClusterID, "admissionEpoch": pin.AdmissionEpoch}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(f.dir, "members.json"), members, 0o600); err != nil {
+			t.Fatal(err)
+		}
 	}
 	revoke := func(t *testing.T, f *workloadReverseFixture) {
 		t.Helper()

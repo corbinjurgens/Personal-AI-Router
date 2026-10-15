@@ -108,6 +108,23 @@ func writeActiveAdmission(t *testing.T, dir string) {
 	}
 }
 
+// writeMembers persists the cluster-manager roster that authorizes peer
+// service routes. Pins authenticate certificates; this roster confirms the
+// corresponding admission epoch is still current.
+func writeMembers(t *testing.T, dir string, uuids ...string) {
+	t.Helper()
+	members := make([]map[string]any, 0, len(uuids))
+	for _, uuid := range uuids {
+		members = append(members, map[string]any{
+			"id": uuid, "nodeUuid": uuid, "clusterId": "remote-engine-test-cluster",
+			"admissionEpoch": 1, "state": "member",
+		})
+	}
+	if err := os.WriteFile(filepath.Join(dir, "members.json"), mustMarshal(t, members), 0o600); err != nil {
+		t.Fatalf("write members.json: %v", err)
+	}
+}
+
 // TestRemoteEngineGetInstalled drives engine:remote-get-installed from node A to
 // node B over the pin-gated ec mTLS surface and asserts B's engine list comes
 // back.
@@ -120,6 +137,8 @@ func TestRemoteEngineGetInstalled(t *testing.T) {
 	writeActiveAdmission(t, dirB)
 	writePin(t, dirA, uuidB, certB) // A trusts B
 	writePin(t, dirB, uuidA, certA) // B trusts A
+	writeMembers(t, dirA, uuidA, uuidB)
+	writeMembers(t, dirB, uuidA, uuidB)
 
 	// Node B: serve the ec surface over mTLS. Give it a live stdin so it stays
 	// up (EOF would shut it down) and drain its stdout so it can't block.
@@ -173,6 +192,8 @@ func TestRemoteEngineRejectsUntrusted(t *testing.T) {
 	writeActiveAdmission(t, dirA)
 	writePin(t, dirA, uuidB, certB) // A trusts B (so A can complete the handshake)
 	writeActiveAdmission(t, dirB)   // B is clustered, but still does not trust A
+	writeMembers(t, dirA, uuidA, uuidB)
+	writeMembers(t, dirB, uuidB)
 	// Deliberately do NOT pin A into B: B must reject A at the per-request gate.
 
 	portB := freePort(t)

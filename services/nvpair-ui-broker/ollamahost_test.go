@@ -125,12 +125,42 @@ func TestReservedOllamaHostAliasPort(t *testing.T) {
 			if tc.lmstudioProxy > 0 {
 				siblings[tc.lmstudioProxy] = fmt.Sprintf("the LM Studio proxy is configured on port %d", tc.lmstudioProxy)
 			}
-			reason := reservedOllamaHostAliasPort(tc.port, enginePorts, siblings)
+			reason := (&Broker{}).reservedOllamaHostAliasPort(tc.port, enginePorts, siblings)
 			if tc.wantReasonSubstr == "" && reason != "" {
 				t.Fatalf("reason = %q, want none", reason)
 			}
 			if tc.wantReasonSubstr != "" && !strings.Contains(reason, tc.wantReasonSubstr) {
 				t.Fatalf("reason = %q, want substring %q", reason, tc.wantReasonSubstr)
+			}
+		})
+	}
+}
+
+func TestEngineManagerPortsOllamaHostAliasDiagnostic(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		port int
+		want string
+	}{
+		{name: "model listener", port: 25122, want: "the engine model service uses port 25122"},
+		{name: "control listener", port: 25123, want: "the engine control service uses port 25123"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			isolateOllamaHostTestConfig(t)
+			t.Setenv("OLLAMA_HOST", fmt.Sprintf("127.0.0.1:%d", tc.port))
+			b := brokerWithEngineInventory(t, map[string]int{"ollama": 11435})
+			b.engineMgrHTTPPort, b.engineMgrControlPort = 25122, 25123
+			b.prepareOllamaHostAlias(true, 11435)
+			if alias := b.currentOllamaHostAlias(); alias != (ollamaHostAlias{}) {
+				t.Fatalf("alias claimed configured engine-manager listener: %+v", alias)
+			}
+			if b.ollamaHostAliasError == nil || !strings.Contains(b.ollamaHostAliasError.Message, tc.want) {
+				t.Fatalf("alias warning = %+v, want %q", b.ollamaHostAliasError, tc.want)
+			}
+			for _, defaultPort := range []int{14322, 14323} {
+				if reason := b.reservedOllamaHostAliasPort(defaultPort, nil, nil); reason != "" {
+					t.Fatalf("unused default port %d remains reserved: %s", defaultPort, reason)
+				}
 			}
 		})
 	}

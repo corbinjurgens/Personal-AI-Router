@@ -78,6 +78,13 @@ func newInterNodeCluster(t *testing.T) *interNodeCluster {
 				t.Fatal(err)
 			}
 		}
+		members := []map[string]any{
+			{"id": member.uuid, "nodeUuid": member.uuid, "clusterId": clusterID, "admissionEpoch": 1, "state": "member"},
+			{"id": member.peerUUID, "nodeUuid": member.peerUUID, "clusterId": clusterID, "admissionEpoch": 1, "state": "member"},
+		}
+		if err := os.WriteFile(filepath.Join(member.dir, "members.json"), mustMarshal(t, members), 0o600); err != nil {
+			t.Fatal(err)
+		}
 	}
 
 	peer := clustertrust.Open(peerDir)

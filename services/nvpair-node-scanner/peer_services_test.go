@@ -1,0 +1,342 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+package main
+
+import (
+	"encoding/json"
+	"io"
+	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"nvpair-shared/clustertrusttest"
+	"nvpair-shared/noderec"
+)
+
+func newPeerServicesScanner(t *testing.T) (*daemon, noderec.PeerServicesClaim) {
+	t.Helper()
+	dir := filepath.Join(t.TempDir(), "cluster")
+	clustertrusttest.Join(t, dir, "cluster", "self", "peer")
+	writeScannerAdmissionPin(t, dir, "peer", "cluster", 1)
+	d := newMembershipTestDaemon(dir)
+	incarnation, ok := d.mesh.PeerServiceIncarnation("peer")
+	if !ok {
+		t.Fatal("fixture has no current incarnation")
+	}
+	claim := noderec.PeerServicesClaim{Incarnation: incarnation, Source: "cm-first", Sequence: 1, ObservedAt: time.Now().UnixMilli(), Descriptor: noderec.PeerServicesDescriptor{HostUUID: "peer", Name: "peer-name", Addresses: []string{"192.0.2.40"}, Services: []noderec.PeerService{{Service: noderec.ServiceCluster, Port: 14311}}}}
+	return d, claim
+}
+
+func peerServicesNode(t *testing.T, d *daemon) noderec.DirectoryNode {
+	t.Helper()
+	node, ok := d.dir.get("peer")
+	if !ok {
+		t.Fatal("peer missing from directory")
+	}
+	return node
+}
+
+func TestPeerServicesBootstrapsAdmittedPeer(t *testing.T) {
+	d, claim := newPeerServicesScanner(t)
+	if !d.acceptPeerServices(claim) {
+		t.Fatal("current authenticated claim rejected")
+	}
+	node := peerServicesNode(t, d)
+	if node.HostUUID != "peer" || node.ClusterUUID != "peer" || !node.Trusted || node.Name != "peer-name" || node.IP != "192.0.2.40" || node.Services[noderec.ServiceCluster].Port != 14311 {
+		t.Fatalf("bootstrap node = %+v", node)
+	}
+	if node.LastSeen != 0 {
+		t.Fatalf("descriptor minted liveness timestamp %d", node.LastSeen)
+	}
+}
+
+func TestPeerServicesRejectsInvalidAuthorityAndMetadata(t *testing.T) {
+	test := func(name string, change func(*noderec.PeerServicesClaim)) {
+		t.Run(name, func(t *testing.T) {
+			d, claim := newPeerServicesScanner(t)
+			change(&claim)
+			if d.acceptPeerServices(claim) {
+				t.Fatal("invalid claim accepted")
+			}
+			if nodes := d.dir.snapshot(""); len(nodes) != 0 {
+				t.Fatalf("invalid claim changed directory: %+v", nodes)
+			}
+		})
+	}
+	test("third party identity", func(c *noderec.PeerServicesClaim) { c.Descriptor.HostUUID = "stranger" })
+	test("wrong incarnation", func(c *noderec.PeerServicesClaim) { c.Incarnation = "obsolete" })
+	test("loopback address", func(c *noderec.PeerServicesClaim) { c.Descriptor.Addresses = []string{"127.0.0.1"} })
+	test("gateway hostname", func(c *noderec.PeerServicesClaim) { c.Descriptor.Addresses = []string{"localhost"} })
+	test("unknown service", func(c *noderec.PeerServicesClaim) { c.Descriptor.Services[0].Service = "arbitrary" })
+	test("invalid port", func(c *noderec.PeerServicesClaim) { c.Descriptor.Services[0].Port = 65536 })
+	test("expired observation", func(c *noderec.PeerServicesClaim) { c.ObservedAt = time.Now().Add(-31 * time.Second).UnixMilli() })
+	test("future observation", func(c *noderec.PeerServicesClaim) { c.ObservedAt = time.Now().Add(time.Minute).UnixMilli() })
+	test("missing source", func(c *noderec.PeerServicesClaim) { c.Source = "" })
+	test("zero sequence", func(c *noderec.PeerServicesClaim) { c.Sequence = 0 })
+}
+
+func TestPeerServicesReconcilesBrowseClaims(t *testing.T) {
+	test := func(name string, browseFirst bool) {
+		t.Run(name, func(t *testing.T) {
+			d, claim := newPeerServicesScanner(t)
+			d.lastActivityAt = make(map[string]time.Time)
+			d.noteActivity("peer", 0)
+			browse := DiscoveryEvent{Type: "discovered", Node: RawNode{ID: "browse-name", Addresses: []string{"192.0.2.90"}, TXT: []string{"uuid=peer", "cluster-uuid=peer", "cl=14444"}}}
+			if browseFirst {
+				d.onBrowse(browse)
+			}
+			if !d.acceptPeerServices(claim) {
+				t.Fatal("claim rejected")
+			}
+			if _, ok := d.activitySince("peer"); !ok {
+				t.Fatal("route replacement cleared independently observed activity")
+			}
+			browse.Type = "updated"
+			d.onBrowse(browse)
+			if node := peerServicesNode(t, d); node.Name != "peer-name" || node.Services[noderec.ServiceCluster].Port != 14311 {
+				t.Fatalf("browse overwrote authenticated snapshot: %+v", node)
+			}
+			if err := os.Remove(filepath.Join(d.clusterDir, "trusted", "peer.json")); err != nil {
+				t.Fatal(err)
+			}
+			d.reloadTrust()
+			if node := peerServicesNode(t, d); node.Name != "browse-name" || node.Services[noderec.ServiceCluster].Port != 14444 || node.Trusted {
+				t.Fatalf("retirement did not restore live browse: %+v", node)
+			}
+			if _, ok := d.activitySince("peer"); !ok {
+				t.Fatal("surviving browse claim lost independently observed activity")
+			}
+			browse.Type = "removed"
+			d.onBrowse(browse)
+			if _, ok := d.dir.get("peer"); ok {
+				t.Fatal("last claim removal retained peer")
+			}
+			if _, ok := d.activitySince("peer"); ok {
+				t.Fatal("last claim removal retained activity cache")
+			}
+		})
+	}
+	test("browse before authenticated", true)
+	test("authenticated before browse", false)
+}
+
+func TestPeerServicesBrowseRemovalPreservesAuthenticatedSnapshot(t *testing.T) {
+	d, claim := newPeerServicesScanner(t)
+	if !d.acceptPeerServices(claim) {
+		t.Fatal("claim rejected")
+	}
+	d.onBrowse(DiscoveryEvent{Type: "removed", Node: RawNode{TXT: []string{"uuid=peer"}}})
+	if node := peerServicesNode(t, d); node.Services[noderec.ServiceCluster].Port != 14311 {
+		t.Fatalf("browse removal changed authenticated node: %+v", node)
+	}
+}
+
+func TestPeerServicesCompleteSnapshotsOrderAndWithdrawServices(t *testing.T) {
+	d, first := newPeerServicesScanner(t)
+	if !d.acceptPeerServices(first) {
+		t.Fatal("first snapshot rejected")
+	}
+	second := first
+	second.Sequence = 2
+	second.Descriptor.Services = []noderec.PeerService{}
+	if !d.acceptPeerServices(second) {
+		t.Fatal("withdrawal rejected")
+	}
+	if node := peerServicesNode(t, d); len(node.Services) != 0 {
+		t.Fatalf("withdrawn services survived: %+v", node.Services)
+	}
+	if d.acceptPeerServices(first) {
+		t.Fatal("older response restored withdrawn service")
+	}
+	third := first
+	third.Sequence = 3
+	third.Descriptor.Services = []noderec.PeerService{{Service: noderec.ServiceCluster, Port: 15000}}
+	if !d.acceptPeerServices(third) {
+		t.Fatal("port update rejected")
+	}
+	if node := peerServicesNode(t, d); node.Services[noderec.ServiceCluster].Port != 15000 {
+		t.Fatalf("port update not applied: %+v", node.Services)
+	}
+	restarted := third
+	restarted.Source = "cm-restarted"
+	restarted.Sequence = 1
+	if !d.acceptPeerServices(restarted) {
+		t.Fatal("process restart sequence reset rejected")
+	}
+	if d.acceptPeerServices(third) {
+		t.Fatal("old source replay accepted")
+	}
+}
+
+func TestPeerServicesSameCertificateReadmissionRetiresClaim(t *testing.T) {
+	d, old := newPeerServicesScanner(t)
+	if !d.acceptPeerServices(old) {
+		t.Fatal("claim rejected")
+	}
+	writeScannerAdmissionPin(t, d.clusterDir, "peer", "cluster", 2)
+	d.reloadTrust()
+	if _, ok := d.dir.get("peer"); ok {
+		t.Fatal("same-certificate re-pair retained old claim")
+	}
+	if d.acceptPeerServices(old) {
+		t.Fatal("old admission restored peer")
+	}
+	d.enrichPeerServices(old, noderec.DirectoryNode{HostUUID: "peer"}, d.dir.routeGeneration("peer"))
+	if _, ok := d.dir.get("peer"); ok {
+		t.Fatal("delayed old enrichment resurrected peer")
+	}
+	current, ok := d.mesh.PeerServiceIncarnation("peer")
+	if !ok || current == old.Incarnation {
+		t.Fatal("readmission did not replace authority")
+	}
+	old.Incarnation = current
+	if !d.acceptPeerServices(old) {
+		t.Fatal("fresh readmission claim rejected")
+	}
+}
+
+func TestPeerServicesLocalLeaveRetiresClaimAndPendingApply(t *testing.T) {
+	d, claim := newPeerServicesScanner(t)
+	if !d.acceptPeerServices(claim) {
+		t.Fatal("claim rejected")
+	}
+	generation := d.dir.routeGeneration("peer")
+	clustertrusttest.WriteAdmission(t, d.clusterDir, "", 2)
+	d.reloadTrust()
+	if _, ok := d.dir.get("peer"); ok {
+		t.Fatal("local leave retained authenticated metadata")
+	}
+	if d.acceptPeerServices(claim) {
+		t.Fatal("local leave accepted old claim")
+	}
+	d.enrichPeerServices(claim, noderec.DirectoryNode{HostUUID: "peer"}, generation)
+	if _, ok := d.dir.get("peer"); ok {
+		t.Fatal("pending enrichment survived local leave")
+	}
+}
+
+func TestPeerServicesExpiryRemovesOnlyAuthenticatedClaim(t *testing.T) {
+	d, claim := newPeerServicesScanner(t)
+	if !d.acceptPeerServices(claim) {
+		t.Fatal("claim rejected")
+	}
+	d.peerServicesMu.Lock()
+	d.dir.mu.Lock()
+	expired := d.dir.peerServices["peer"]
+	expired.ObservedAt = time.Now().Add(-31 * time.Second).UnixMilli()
+	d.dir.peerServices["peer"] = expired
+	d.dir.mu.Unlock()
+	d.peerServicesMu.Unlock()
+	d.reconcilePeerServices()
+	if _, ok := d.dir.get("peer"); ok {
+		t.Fatal("expired metadata remained routable")
+	}
+	if d.acceptPeerServices(claim) {
+		t.Fatal("replay after retirement accepted")
+	}
+}
+
+func TestPeerServicesPrivateMethodRejectsRequests(t *testing.T) {
+	d, claim := newPeerServicesScanner(t)
+	params, err := json.Marshal(claim)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := json.RawMessage(`1`)
+	request := &Message{Method: "discovery:peer-services", Params: params, ID: &id}
+	if !d.handle(request) {
+		t.Fatal("private method not consumed")
+	}
+	if _, ok := d.dir.get("peer"); ok {
+		t.Fatal("ordinary request installed authority")
+	}
+	request.ID = nil
+	if !d.handle(request) {
+		t.Fatal("notification not consumed")
+	}
+	peerServicesNode(t, d)
+}
+
+func TestPeerServicesUnchangedSnapshotPreservesEnrichmentAndGeneration(t *testing.T) {
+	d, claim := newPeerServicesScanner(t)
+	if !d.acceptPeerServices(claim) {
+		t.Fatal("claim rejected")
+	}
+	d.dir.mu.Lock()
+	node := d.dir.nodes["peer"]
+	node.Models = []string{"existing-model"}
+	service := node.Services[noderec.ServiceCluster]
+	service.Probe = noderec.ProbeStatus("reachable")
+	node.Services[noderec.ServiceCluster] = service
+	d.dir.nodes["peer"] = node
+	d.dir.mu.Unlock()
+	generation := d.dir.routeGeneration("peer")
+	claim.Sequence++
+	if !d.acceptPeerServices(claim) {
+		t.Fatal("unchanged refresh rejected")
+	}
+	node = peerServicesNode(t, d)
+	if generation != d.dir.routeGeneration("peer") || len(node.Models) != 1 || node.Models[0] != "existing-model" || node.Services[noderec.ServiceCluster].Probe != noderec.ProbeStatus("reachable") {
+		t.Fatalf("unchanged metadata reset route or enrichment: generation %d -> %d, node %+v", generation, d.dir.routeGeneration("peer"), node)
+	}
+}
+
+type peerServicesTestTransport func(*http.Request) (*http.Response, error)
+
+func (f peerServicesTestTransport) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+func TestPeerServicesHeldEnrichmentCannotRestoreWithdrawnMetadataOrCaches(t *testing.T) {
+	d, claim := newPeerServicesScanner(t)
+	claim.Descriptor.Services = []noderec.PeerService{{Service: noderec.ServiceNodeInfo, Port: 14318}}
+	node := noderec.DirectoryNode{HostUUID: "peer", Name: "peer-name", ClusterUUID: "peer", IP: "192.0.2.40", IPs: []string{"192.0.2.40"}, Services: map[noderec.ServiceKey]noderec.ServiceStatus{noderec.ServiceNodeInfo: {Port: 14318}}}
+	d.dir.installPeerServices(claim, node)
+	started, release, done := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	releaseFetch := func() { once.Do(func() { close(release) }) }
+	t.Cleanup(releaseFetch)
+	d.tlsHTTP = &http.Client{Transport: peerServicesTestTransport(func(r *http.Request) (*http.Response, error) {
+		close(started)
+		select {
+		case <-release:
+		case <-r.Context().Done():
+			return nil, r.Context().Err()
+		}
+		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"hostUuid":"peer","GPUs":[{"name":"obsolete GPU"}]}`))}, nil
+	})}
+	generation := d.dir.routeGeneration("peer")
+	go func() { d.enrichPeerServices(claim, node, generation); close(done) }()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("enrichment did not begin")
+	}
+	withdrawal := claim
+	withdrawal.Sequence++
+	withdrawal.Descriptor.Services = []noderec.PeerService{}
+	if !d.acceptPeerServices(withdrawal) {
+		t.Fatal("withdrawal rejected while response held")
+	}
+	d.infoMu.Lock()
+	d.lastInfo["peer"] = NodeInfoResponse{GPUs: []GPUInfo{{Name: "new cache"}}}
+	d.infoMu.Unlock()
+	releaseFetch()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("held enrichment did not complete")
+	}
+	if current := peerServicesNode(t, d); len(current.Services) != 0 || len(current.GPUs) != 0 {
+		t.Fatalf("held response restored withdrawn metadata: %+v", current)
+	}
+	d.infoMu.Lock()
+	cached := d.lastInfo["peer"]
+	d.infoMu.Unlock()
+	if len(cached.GPUs) != 1 || cached.GPUs[0].Name != "new cache" {
+		t.Fatalf("obsolete completion changed current cache: %+v", cached)
+	}
+}

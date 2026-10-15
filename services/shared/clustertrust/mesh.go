@@ -244,7 +244,7 @@ func (m *Mesh) HasPin(uuid string) bool {
 // remain the caller's PeerServiceRoute.Generation responsibility.
 //
 // Refresh remains responsible for loading identities and pins. This lookup
-// reads admission.json and the peer pin afresh and refuses missing, invalid or
+// reads admission.json, members.json and the peer pin afresh and refuses missing, invalid or
 // changing authority rather than carrying cached admissions across teardown.
 // It never writes or upgrades the cluster-manager's records.
 func (m *Mesh) PeerServiceIncarnation(peerUUID string) (string, bool) {
@@ -267,6 +267,7 @@ func (m *Mesh) peerServiceIncarnation(peerUUID string, readFile func(string) ([]
 
 	admissionPath := filepath.Join(m.dir, admissionFileName)
 	pinPath := filepath.Join(m.dir, "trusted", peerUUID+".json")
+	membersPath := filepath.Join(m.dir, membersFileName)
 	admissionData, err := readFile(admissionPath)
 	if err != nil {
 		return "", false
@@ -292,12 +293,24 @@ func (m *Mesh) peerServiceIncarnation(peerUUID string, readFile func(string) ([]
 	if err != nil {
 		return "", false
 	}
+	membersData, err := readFile(membersPath)
+	if err != nil {
+		return "", false
+	}
+	memberEpoch, ok := peerServiceMember(membersData, peerUUID, admission.ClusterID, pin.AdmissionEpoch)
+	if !ok {
+		return "", false
+	}
 
-	// Validate in reverse read order: the two matching admission reads bracket
-	// both pin reads. The owner's monotonic admission epochs prevent a cleared
+	// Validate in reverse read order: matching admission reads bracket both
+	// pin reads, which bracket both member reads. Monotonic epochs prevent a cleared
 	// or replaced local admission from masquerading as the original tuple.
 	// No cross-file writer lock is available; a changed/partial snapshot fails
 	// closed and a subsequent complete refresh can succeed.
+	currentMembers, err := readFile(membersPath)
+	if err != nil || !bytes.Equal(currentMembers, membersData) {
+		return "", false
+	}
 	currentPin, err := readFile(pinPath)
 	if err != nil || !bytes.Equal(currentPin, pinData) {
 		return "", false
@@ -315,7 +328,7 @@ func (m *Mesh) peerServiceIncarnation(peerUUID string, readFile func(string) ([]
 	// tuple. Hashing keeps this a comparison token, not a schema for callers.
 	tuple := fmt.Appendf(nil, "%d:%s%d:%s%d:%s:%d:%d",
 		len(admission.ClusterID), admission.ClusterID, len(id.NodeUUID), id.NodeUUID,
-		len(peerUUID), peerUUID, admission.Epoch, pin.AdmissionEpoch)
+		len(peerUUID), peerUUID, admission.Epoch, memberEpoch)
 	tuple = fmt.Appendf(tuple, ":%d:", len(der))
 	tuple = append(tuple, der...)
 	selfDER := selfLeafDER(id)

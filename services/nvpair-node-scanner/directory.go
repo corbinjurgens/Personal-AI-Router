@@ -64,15 +64,19 @@ func toDirectoryNode(raw RawNode, trusted bool) (noderec.DirectoryNode, bool) {
 }
 
 // directory is the daemon's view of all LAN nodes (this node included), keyed by
-// hostUuid. Mutations come from the browse-event goroutine; reads come from
-// discovery:get-nodes handlers, so it's an RWMutex map.
+// hostUuid. Browse and authenticated service claims are retained independently;
+// the latter owns the visible service snapshot while current. Reads and
+// enrichment/reconciliation writes share the same RWMutex.
 type directory struct {
-	mu    sync.RWMutex
-	nodes map[string]noderec.DirectoryNode
+	mu           sync.RWMutex
+	nodes        map[string]noderec.DirectoryNode
+	browse       map[string]noderec.DirectoryNode
+	peerServices map[string]noderec.PeerServicesClaim
+	generations  map[string]uint64
 }
 
 func newDirectory() *directory {
-	return &directory{nodes: make(map[string]noderec.DirectoryNode)}
+	return &directory{nodes: make(map[string]noderec.DirectoryNode), browse: make(map[string]noderec.DirectoryNode), peerServices: make(map[string]noderec.PeerServicesClaim), generations: make(map[string]uint64)}
 }
 
 // upsert stores a node and reports whether it was new (vs. an update).
@@ -80,7 +84,10 @@ func (d *directory) upsert(n noderec.DirectoryNode) (isNew bool) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	_, existed := d.nodes[n.HostUUID]
-	d.nodes[n.HostUUID] = n
+	d.browse[n.HostUUID] = n
+	if _, authenticated := d.peerServices[n.HostUUID]; !authenticated {
+		d.storeLocked(n)
+	}
 	return !existed
 }
 
@@ -175,6 +182,9 @@ func (d *directory) upsertEvicting(n noderec.DirectoryNode, proven []noderec.Dir
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	for _, old := range proven {
+		if _, authenticated := d.peerServices[old.HostUUID]; authenticated {
+			continue
+		}
 		if old.HostUUID == n.HostUUID {
 			continue
 		}
@@ -183,10 +193,15 @@ func (d *directory) upsertEvicting(n noderec.DirectoryNode, proven []noderec.Dir
 			continue
 		}
 		delete(d.nodes, old.HostUUID)
+		delete(d.browse, old.HostUUID)
+		d.generations[old.HostUUID]++
 		evicted = append(evicted, current)
 	}
 	sort.Slice(evicted, func(i, j int) bool { return evicted[i].HostUUID < evicted[j].HostUUID })
-	d.nodes[n.HostUUID] = n
+	d.browse[n.HostUUID] = n
+	if _, authenticated := d.peerServices[n.HostUUID]; !authenticated {
+		d.storeLocked(n)
+	}
 	return evicted
 }
 
@@ -196,6 +211,9 @@ func (d *directory) remove(hostUUID string) (existed bool) {
 	defer d.mu.Unlock()
 	_, existed = d.nodes[hostUUID]
 	delete(d.nodes, hostUUID)
+	delete(d.browse, hostUUID)
+	delete(d.peerServices, hostUUID)
+	d.generations[hostUUID]++
 	return existed
 }
 
@@ -294,6 +312,10 @@ func (d *directory) applyClusterIdentity(hostUUID string, clusterUUID *string, t
 	if clusterUUID != nil {
 		settled = *clusterUUID
 	}
+	// Plain node-info cannot replace an authenticated claim's principal.
+	if _, authenticated := d.peerServices[hostUUID]; authenticated {
+		settled = hostUUID
+	}
 	trusted := false
 	if settled != "" {
 		trusted = trustFor(settled)
@@ -303,7 +325,7 @@ func (d *directory) applyClusterIdentity(hostUUID string, clusterUUID *string, t
 	}
 	n.ClusterUUID = settled
 	n.Trusted = trusted
-	d.nodes[hostUUID] = n
+	d.storeLocked(n)
 	return n, true
 }
 

@@ -26,18 +26,11 @@ var (
 )
 
 const (
-	// engineManagerHTTPPort is the fixed LAN port the broker tells
-	// nvpair-engine-manager to serve its HTTP surface (/v1/models) on, and the port
-	// it registers as the em service so peers' daemons can fetch this node's
-	// model list. Fixed like node-info's :14318 (next free in the 143xx range);
-	// the broker knows it, so no dynamic port handshake is needed.
+	// engineManagerHTTPPort is the default model-list HTTP port (em).
+	// Broker configuration supplies the port used for both spawn and discovery.
 	engineManagerHTTPPort = 14322
 
-	// engineControlPort is the fixed LAN port the broker tells
-	// nvpair-engine-manager to serve its cluster-scoped mTLS remote-control surface
-	// (the ec service: remote install/pull/start/stop + engine status) on. Unlike
-	// em (plain, model list) it's pin-based mTLS and only binds when this node is
-	// clustered. Next free after em in the 143xx range.
+	// engineControlPort is the default cluster-scoped mTLS control port (ec).
 	engineControlPort = 14323
 
 	// autoAdvertiseInterval is how often the broker polls a local engine to
@@ -45,6 +38,32 @@ const (
 	// daemon (a 5s cadence).
 	autoAdvertiseInterval = 5 * time.Second
 )
+
+// engineManagerPorts resolves the immutable startup configuration. Bare Broker
+// fixtures and zero-valued workerPaths retain the product defaults.
+func (b *Broker) engineManagerPorts() (httpPort, controlPort int) {
+	httpPort, controlPort = b.engineMgrHTTPPort, b.engineMgrControlPort
+	if httpPort == 0 {
+		httpPort = engineManagerHTTPPort
+	}
+	if controlPort == 0 {
+		controlPort = engineControlPort
+	}
+	return httpPort, controlPort
+}
+
+func validateEngineManagerPorts(httpPort, controlPort int) error {
+	if httpPort < 1 || httpPort > 65535 {
+		return fmt.Errorf("--engine-manager-http-port must be between 1 and 65535 (got %d)", httpPort)
+	}
+	if controlPort < 1 || controlPort > 65535 {
+		return fmt.Errorf("--engine-manager-control-port must be between 1 and 65535 (got %d)", controlPort)
+	}
+	if httpPort == controlPort {
+		return fmt.Errorf("--engine-manager-http-port and --engine-manager-control-port must differ (both are %d)", httpPort)
+	}
+	return nil
+}
 
 // runAutoAdvertise is the broker's ollama engine-registration loop. It polls
 // the local ollama server on a fixed cadence and reconciles this node's ol

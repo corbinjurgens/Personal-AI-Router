@@ -184,7 +184,7 @@ func (b *Broker) prepareOllamaHostAlias(enabled bool, backendPort int) {
 	if backendPort > 0 {
 		enginePorts[backendPort] = "ollama"
 	}
-	if reason := reservedOllamaHostAliasPort(alias.Port, enginePorts, b.siblingEngineProxyPorts(ollamaProxyProfile)); reason != "" {
+	if reason := b.reservedOllamaHostAliasPort(alias.Port, enginePorts, b.siblingEngineProxyPorts(ollamaProxyProfile)); reason != "" {
 		b.reportOllamaHostAliasBlocked(alias.displayAddress(), reason)
 		return
 	}
@@ -383,7 +383,7 @@ func (b *Broker) siblingEngineProxyPorts(self engineProxyProfile) map[int]string
 	return reserved
 }
 
-func reservedOllamaHostAliasPort(port int, enginePorts map[int]string, siblingProxyPorts map[int]string) string {
+func (b *Broker) reservedOllamaHostAliasPort(port int, enginePorts map[int]string, siblingProxyPorts map[int]string) string {
 	if engine, ok := enginePorts[port]; ok {
 		if engine == "" {
 			engine = "an engine"
@@ -392,6 +392,13 @@ func reservedOllamaHostAliasPort(port int, enginePorts map[int]string, siblingPr
 	}
 	if reason, ok := siblingProxyPorts[port]; ok {
 		return reason
+	}
+	httpPort, controlPort := b.engineManagerPorts()
+	if port == httpPort {
+		return fmt.Sprintf("the engine model service uses port %d", port)
+	}
+	if port == controlPort {
+		return fmt.Sprintf("the engine control service uses port %d", port)
 	}
 	switch port {
 	case nodeInfoHTTPPort:
@@ -402,10 +409,6 @@ func reservedOllamaHostAliasPort(port int, enginePorts map[int]string, siblingPr
 		return fmt.Sprintf("the workload service uses port %d", port)
 	case clusterManagerHTTPPort:
 		return fmt.Sprintf("the cluster manager uses port %d", port)
-	case engineManagerHTTPPort:
-		return fmt.Sprintf("the engine model service uses port %d", port)
-	case engineControlPort:
-		return fmt.Sprintf("the engine control service uses port %d", port)
 	}
 	return ""
 }

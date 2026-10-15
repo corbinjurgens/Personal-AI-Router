@@ -39,12 +39,14 @@ import (
 // through the broker relay, which the broker builds from this daemon's
 // discovery:node-* stream and fans out to consumers as discovery:nodes snapshots.
 type daemon struct {
-	codec     *Codec
-	mesh      *clustertrust.Mesh
-	reg       *registry
-	dir       *directory
-	responder *mdns.Responder
-	browser   *Discovery
+	codec             *Codec
+	mesh              *clustertrust.Mesh
+	peerServicesMu    sync.Mutex
+	peerServicesOrder map[string]peerServicesOrder
+	reg               *registry
+	dir               *directory
+	responder         *mdns.Responder
+	browser           *Discovery
 	// instance is this node's mDNS instance name (the hostname). It names the
 	// registry-driven self directory entry (publishSelf), which is anchored to
 	// our own identity rather than to hearing our own multicast.
@@ -418,6 +420,7 @@ func (d *daemon) run(ctx context.Context) {
 	// otherwise leave a directory entry permanently stale. Stops with ctx.
 	go d.refreshPeersLoop(ctx)
 	go d.refreshTelemetryLoop(ctx)
+	go d.peerServicesLoop(ctx)
 	for {
 		select {
 		case <-ctx.Done():
@@ -454,12 +457,32 @@ func (d *daemon) onBrowse(ev DiscoveryEvent) {
 		// store, and a removed event for it is a no-op since it was never added.
 		return
 	}
+	d.peerServicesMu.Lock()
+	if d.dir.authenticated(node.HostUUID) {
+		if ev.Type == "removed" {
+			d.dir.removeBrowse(node.HostUUID)
+		} else {
+			d.dir.upsert(node)
+		}
+		d.peerServicesMu.Unlock()
+		return
+	}
+	d.peerServicesMu.Unlock()
 
 	var method string
 	switch ev.Type {
 	case "removed":
-		d.dir.remove(node.HostUUID)
+		d.peerServicesMu.Lock()
+		defer d.peerServicesMu.Unlock()
+		removed, changed := d.dir.removeBrowse(node.HostUUID)
+		if d.dir.authenticated(node.HostUUID) {
+			return
+		}
 		d.forget(node.HostUUID)
+		if !changed {
+			return
+		}
+		node = removed
 		method = noderec.NotifyNodeRemoved
 	case "updated":
 		d.enrich(&node)
@@ -469,6 +492,17 @@ func (d *daemon) onBrowse(ev DiscoveryEvent) {
 		d.enrich(&node)
 		d.supersedingUpsert(node)
 		method = noderec.NotifyNodeDiscovered
+	}
+	if ev.Type != "removed" {
+		d.peerServicesMu.Lock()
+		defer d.peerServicesMu.Unlock()
+		// A concurrent authenticated snapshot remains authoritative even when a
+		// browse enrichment that started earlier finishes afterward.
+		if current, exists := d.dir.get(node.HostUUID); exists {
+			node = current
+		} else {
+			return
+		}
 	}
 	d.emit(method, node)
 }
@@ -499,6 +533,8 @@ func (d *daemon) supersedingUpsert(node noderec.DirectoryNode) {
 			proven = append(proven, old)
 		}
 	}
+	d.peerServicesMu.Lock()
+	defer d.peerServicesMu.Unlock()
 	for _, old := range d.dir.upsertEvicting(node, proven) {
 		slog.Warn("dropping node record proven superseded by a newer identity on the same host",
 			"ip", old.IP, "droppedUuid", old.HostUUID, "droppedName", old.Name,
@@ -621,6 +657,7 @@ func (d *daemon) reconcileIdentity() {
 // idempotent, so a duplicated or coalesced announcement costs one map lookup per
 // known node and emits nothing.
 func (d *daemon) reconcileTrust() {
+	d.reconcilePeerServices()
 	for _, n := range d.dir.snapshot("") {
 		// nil principal: this pass knows the pin set, not what each peer
 		// advertises, so it re-derives trust from whatever principal is stored
@@ -1179,6 +1216,11 @@ func (d *daemon) enrichInfoCandidates(node *noderec.DirectoryNode, hosts []strin
 	}
 	key := hostKey{hostUUID: node.HostUUID, service: noderec.ServiceNodeInfo}
 	selectedHost, info, _ := askRemembered(&d.enrichHosts, key, hosts, ask)
+	d.peerServicesMu.Lock()
+	defer d.peerServicesMu.Unlock()
+	if d.dir != nil && d.dir.authenticated(node.HostUUID) {
+		return
+	}
 
 	endpointHost := selectedHost
 	if endpointHost == "" {
@@ -1367,7 +1409,13 @@ func (d *daemon) enrichModelsCandidates(node *noderec.DirectoryNode, hosts []str
 		return modelInventory{models: models, byEngine: byEngine, loadedByEngine: loadedByEngine}, true
 	}
 	key := hostKey{hostUUID: node.HostUUID, service: noderec.ServiceEngineManager}
-	if _, inventory, ok := askRemembered(&d.enrichHosts, key, hosts, ask); ok {
+	_, inventory, fetched := askRemembered(&d.enrichHosts, key, hosts, ask)
+	d.peerServicesMu.Lock()
+	defer d.peerServicesMu.Unlock()
+	if d.dir != nil && d.dir.authenticated(node.HostUUID) {
+		return
+	}
+	if fetched {
 		d.infoMu.Lock()
 		if d.lastModels == nil {
 			d.lastModels = make(map[string][]string)
@@ -1497,6 +1545,7 @@ func (d *daemon) refreshPeersLoop(ctx context.Context) {
 		case <-ticker.C:
 			d.refreshAdvertisedAddressesOnce()
 			d.mesh.Refresh()
+			d.reconcilePeerServices()
 			d.refreshClusterIdentityOnce()
 			d.refreshModelsOnce()
 		}
@@ -1837,6 +1886,7 @@ func (d *daemon) refreshNodeModels(hostUUID, ip string, emPort int, clusterUUID 
 // sweep, alone — and it shares that memory with the enrichment path, so both
 // converge on one address per peer instead of each rediscovering it.
 func (d *daemon) refreshNodeModelsCandidates(hostUUID, guardIP string, hosts []string, emPort int, clusterUUID string) bool {
+	generation := d.dir.routeGeneration(hostUUID)
 	if d.reg != nil && hostUUID == d.reg.record().HostUUID {
 		hosts = []string{loopbackHost}
 	}
@@ -1853,6 +1903,20 @@ func (d *daemon) refreshNodeModelsCandidates(hostUUID, guardIP string, hosts []s
 		return false
 	}
 	models, byEngine, loadedByEngine := inventory.models, inventory.byEngine, inventory.loadedByEngine
+	d.peerServicesMu.Lock()
+	defer d.peerServicesMu.Unlock()
+	if d.dir.routeGeneration(hostUUID) != generation {
+		return false
+	}
+	if d.dir.authenticated(hostUUID) {
+		d.dir.mu.RLock()
+		claim := d.dir.peerServices[hostUUID]
+		d.dir.mu.RUnlock()
+		incarnation, admitted := d.mesh.PeerServiceIncarnation(hostUUID)
+		if !admitted || incarnation != claim.Incarnation || !peerServicesFresh(claim, time.Now()) {
+			return false
+		}
+	}
 	// Refresh the enrichment cache BEFORE touching the directory: the caches
 	// (infoMu) and the directory (dir.mu) are guarded by different locks, so if
 	// the directory were updated first, a concurrent onBrowse->enrichModelsAt whose
@@ -1886,9 +1950,11 @@ func (d *daemon) refreshNodeModelsCandidates(hostUUID, guardIP string, hosts []s
 	return changed
 }
 
-// forget drops a node's cached enrichment when it's evicted, so a later
-// re-discovery re-probes from scratch rather than resurrecting stale metrics.
-func (d *daemon) forget(hostUUID string) {
+// invalidatePeerServicesRoute discards endpoint-derived state while retaining
+// independently observed host activity across a source or route change.
+func (d *daemon) invalidatePeerServicesRoute(hostUUID string) {
+	d.enrichHosts.forget(hostKey{hostUUID: hostUUID, service: noderec.ServiceNodeInfo})
+	d.enrichHosts.forget(hostKey{hostUUID: hostUUID, service: noderec.ServiceEngineManager})
 	d.peerMu.Lock()
 	for key, adapter := range d.peerClients {
 		if key.hostUUID == hostUUID {
@@ -1906,6 +1972,11 @@ func (d *daemon) forget(hostUUID string) {
 	delete(d.lastLoadedByEngine, hostUUID)
 	delete(d.nodeInfoDown, hostUUID)
 	d.infoMu.Unlock()
+}
+
+// forget drops all cached state only when the last directory claim disappears.
+func (d *daemon) forget(hostUUID string) {
+	d.invalidatePeerServicesRoute(hostUUID)
 	d.activityMu.Lock()
 	delete(d.lastActivityAt, hostUUID)
 	d.activityMu.Unlock()
@@ -1966,6 +2037,16 @@ func (d *daemon) activitySince(hostUUID string) (time.Duration, bool) {
 // filtered directory snapshot.
 func (d *daemon) handle(msg *Message) bool {
 	switch msg.Method {
+	case "discovery:peer-services":
+		// Only the broker's private worker notification path carries authority.
+		// Ordinary requests cannot invoke the ingestion method.
+		if !msg.IsRequest() {
+			var claim noderec.PeerServicesClaim
+			if json.Unmarshal(msg.Params, &claim) == nil {
+				d.acceptPeerServices(claim)
+			}
+		}
+		return true
 	case "discovery:get-node-info":
 		if msg.IsRequest() {
 			go d.handleNodeInfoRPC(msg)

@@ -592,6 +592,39 @@ constraint. mDNS TXT records are small, so per-service records would not hold th
 payload. Bulky facts like the model list are fetched over HTTP afterwards instead
 of being crammed into TXT.
 
+### Admitted Peers Without Inbound Multicast
+
+Scanner also accepts a private authenticated service claim when an admitted peer
+never appears in mDNS. Cluster-manager uses current membership to locate `cl`,
+then reads the peer's own complete service descriptor over its existing pinned
+direct/reverse client. The serving peer derives identity and ranked addresses
+from its scanner self row, and ports from current broker registrations. A roster
+entry or a reverse connection alone cannot create operational service presence.
+
+Cluster-manager captures the exact local and remote admission/certificate
+incarnation before the read and revalidates it after the complete bounded
+response. Broker consumes its private event only from the current child and
+relays a typed private notification to scanner, which checks the original
+incarnation again at apply. These envelopes never reach ordinary clients and
+cannot modify local reverse-forwarding targets. Protocol selection and inner
+protected-service mutual TLS retain their existing owners.
+
+Scanner atomically reconciles authenticated and mDNS claims. A current
+authenticated snapshot takes precedence; service omission withdraws the old
+service, and a multicast update or removal cannot overwrite or delete that
+snapshot. Losing authenticated authority clears only that claim, retaining an
+independent browse record when present. Normal discovery events update every
+existing subscriber and all public reads use that same directory.
+
+Refreshes serialize per peer, retry with bounded concurrency and time, and
+reconstruct state after worker restart. Successful observations expire after
+30 seconds without refresh; route failure cannot renew them or remove durable
+membership. Leave, removal and same-certificate re-pair invalidate old work.
+Descriptor metadata does not establish liveness, trust or membership, and cannot
+select protocol, filesystem state or a tunnel's local target. Remote loopback,
+unspecified, multicast and non-IP candidates are rejected, so the reverse
+gateway's loopback/ephemeral endpoint never becomes a public address.
+
 ### Node Identity
 
 PAIR identifies every node by a stable UUID, never by its hostname.

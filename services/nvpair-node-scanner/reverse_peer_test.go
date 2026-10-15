@@ -51,6 +51,13 @@ func writeScannerAdmissionPin(t *testing.T, dir, uuid, cluster string, epoch uin
 	if err := os.WriteFile(path, data, 0o600); err != nil {
 		t.Fatal(err)
 	}
+	member, err := json.Marshal([]map[string]any{{"nodeUuid": uuid, "state": "member", "clusterId": cluster, "admissionEpoch": epoch}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "members.json"), member, 0o600); err != nil {
+		t.Fatal(err)
+	}
 }
 
 type scannerReverseFixture struct {

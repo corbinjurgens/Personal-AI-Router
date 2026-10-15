@@ -13,6 +13,37 @@ import (
 // the cluster dir. Kept in sync with nvpair-cluster-manager/admission_store.go.
 const admissionFileName = "admission.json"
 
+// membersFileName is the cluster-manager's atomically persisted member roster.
+const membersFileName = "members.json"
+
+// peerServiceMember requires a unique confirmed durable peer admission. Pins
+// alone cannot establish a new admission when the roster still records the old
+// epoch. Only the cluster-manager writes or upgrades these records.
+func peerServiceMember(data []byte, peerUUID, clusterID string, pinEpoch uint64) (uint64, bool) {
+	var members []struct {
+		NodeUUID       string `json:"nodeUuid"`
+		State          string `json:"state"`
+		ClusterID      string `json:"clusterId"`
+		AdmissionEpoch uint64 `json:"admissionEpoch"`
+	}
+	if err := json.Unmarshal(data, &members); err != nil {
+		return 0, false
+	}
+	var epoch uint64
+	found := false
+	for _, member := range members {
+		if member.NodeUUID != peerUUID {
+			continue
+		}
+		if found || member.State != "member" || member.ClusterID != clusterID ||
+			member.AdmissionEpoch == 0 || member.AdmissionEpoch != pinEpoch {
+			return 0, false
+		}
+		found, epoch = true, member.AdmissionEpoch
+	}
+	return epoch, found
+}
+
 // admissionRecord mirrors the subset of admission.json that answers "does this
 // node currently belong to a cluster". nvpair-cluster-manager owns the full
 // schema (a monotonic counter, retirement marker, etc.); the read side only

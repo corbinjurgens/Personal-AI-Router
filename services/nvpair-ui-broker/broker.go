@@ -172,6 +172,8 @@ type Broker struct {
 	workloadMgrPath      string
 	errorsPath           string
 	engineMgrPath        string
+	engineMgrHTTPPort    int
+	engineMgrControlPort int
 	manualNodesPath      string
 	settingsPath         string
 	clusterMgrPath       string
@@ -231,16 +233,17 @@ type Broker struct {
 	// spawn goroutine can be abandoned when the broker is shutting down.
 	// Guarded by workersMu because a respawn reads it off the monitor
 	// goroutine. See proxyBringUpContext.
-	serveCtx    context.Context
-	scanner     *scannerProcess
-	nodeInfo    *nodeInfoProcess
-	workloadMgr *workloadManagerProcess
-	errorsProc  *errorsProcess
-	engineMgr   *rpcWorker
-	manualNodes *rpcWorker
-	settings    *rpcWorker
-	clusterMgr  *clusterManagerProcess
-	scheduler   *rpcWorker
+	serveCtx       context.Context
+	scanner        *scannerProcess
+	peerServicesMu sync.Mutex
+	nodeInfo       *nodeInfoProcess
+	workloadMgr    *workloadManagerProcess
+	errorsProc     *errorsProcess
+	engineMgr      *rpcWorker
+	manualNodes    *rpcWorker
+	settings       *rpcWorker
+	clusterMgr     *clusterManagerProcess
+	scheduler      *rpcWorker
 
 	// Per-worker supervisors own the (re)spawn + crash-detect + restart
 	// lifecycle of each worker. nil when the worker's binary wasn't resolved
@@ -372,10 +375,13 @@ type workerPaths struct {
 	workloadMgr  string
 	errors       string
 	engineMgr    string
-	manualNodes  string
-	settings     string
-	clusterMgr   string
-	scheduler    string
+	// Zero ports retain the product defaults for programmatic callers.
+	engineMgrHTTPPort    int
+	engineMgrControlPort int
+	manualNodes          string
+	settings             string
+	clusterMgr           string
+	scheduler            string
 	// clusterDir is the cluster-manager config dir (node.crt/node.key +
 	// trusted/). Threaded to every worker that does cluster-scoped inter-node
 	// mTLS so they serve/dial pinned peers once this node joins a cluster.
@@ -401,30 +407,32 @@ func NewBroker(codec *Codec, paths workerPaths) *Broker {
 	// its localNodeID stays in lockstep with what the broker stamps.
 	nodeID := resolveLocalNodeID(paths.clusterDir)
 	return &Broker{
-		codec:              codec,
-		startedAt:          time.Now(),
-		nodeID:             nodeID,
-		scannerPath:        paths.scanner,
-		nodeInfoPath:       paths.nodeInfo,
-		proxyPath:          paths.proxy,
-		proxyEngines:       paths.proxyEngines,
-		workloadMgrPath:    paths.workloadMgr,
-		errorsPath:         paths.errors,
-		engineMgrPath:      paths.engineMgr,
-		manualNodesPath:    paths.manualNodes,
-		settingsPath:       paths.settings,
-		clusterMgrPath:     paths.clusterMgr,
-		schedulerPath:      paths.scheduler,
-		clusterDir:         paths.clusterDir,
-		store:              newDiscoveryStore(),
-		telemetry:          newTelemetryCache(),
-		relayDir:           relay.NewDirectory(),
-		regCache:           relay.NewRegistrationCache(),
-		manualNodeKeys:     make(map[string]string),
-		manualNodeStatuses: make(map[string]manualNodeStatusEntry),
-		workloads:          workloadstore.New(),
-		ollamaPortReady:    make(chan struct{}),
-		lmstudioPortReady:  make(chan struct{}),
+		codec:                codec,
+		startedAt:            time.Now(),
+		nodeID:               nodeID,
+		scannerPath:          paths.scanner,
+		nodeInfoPath:         paths.nodeInfo,
+		proxyPath:            paths.proxy,
+		proxyEngines:         paths.proxyEngines,
+		workloadMgrPath:      paths.workloadMgr,
+		errorsPath:           paths.errors,
+		engineMgrPath:        paths.engineMgr,
+		engineMgrHTTPPort:    paths.engineMgrHTTPPort,
+		engineMgrControlPort: paths.engineMgrControlPort,
+		manualNodesPath:      paths.manualNodes,
+		settingsPath:         paths.settings,
+		clusterMgrPath:       paths.clusterMgr,
+		schedulerPath:        paths.scheduler,
+		clusterDir:           paths.clusterDir,
+		store:                newDiscoveryStore(),
+		telemetry:            newTelemetryCache(),
+		relayDir:             relay.NewDirectory(),
+		regCache:             relay.NewRegistrationCache(),
+		manualNodeKeys:       make(map[string]string),
+		manualNodeStatuses:   make(map[string]manualNodeStatusEntry),
+		workloads:            workloadstore.New(),
+		ollamaPortReady:      make(chan struct{}),
+		lmstudioPortReady:    make(chan struct{}),
 	}
 }
 
@@ -609,6 +617,8 @@ func (b *Broker) getScheduler() *rpcWorker {
 }
 
 func (b *Broker) setClusterMgr(c *clusterManagerProcess) {
+	b.peerServicesMu.Lock()
+	defer b.peerServicesMu.Unlock()
 	b.localServicesMu.Lock()
 	defer b.localServicesMu.Unlock()
 	b.workersMu.Lock()
@@ -1153,16 +1163,20 @@ func (b *Broker) spawnErrors() (supervisedHandle, error) {
 }
 
 func (b *Broker) spawnEngineMgr() (supervisedHandle, error) {
-	// Tell engine-manager to serve its LAN HTTP surface on the fixed em port so
+	httpPort, controlPort := b.engineManagerPorts()
+	if err := validateEngineManagerPorts(httpPort, controlPort); err != nil {
+		return nil, fmt.Errorf("engine-manager ports: %w", err)
+	}
+	// Tell engine-manager to serve its LAN HTTP surface on the configured em port so
 	// peers can fetch this node's model list at /v1/models, and its cluster-scoped
-	// mTLS remote-control surface (ec) on the fixed control port. --cluster-dir
+	// mTLS remote-control surface (ec) on the configured control port. --cluster-dir
 	// gates the ec surface: it is bound whenever a cluster dir is configured, but
 	// admits a caller only while this node is a live cluster member (its TLS
 	// identity is resolved per handshake from the live cluster dir), so a join or
 	// leave needs no restart here.
 	args := append(b.logLevelArgs(),
-		"--http-port", fmt.Sprintf("%d", engineManagerHTTPPort),
-		"--control-port", fmt.Sprintf("%d", engineControlPort))
+		"--http-port", fmt.Sprintf("%d", httpPort),
+		"--control-port", fmt.Sprintf("%d", controlPort))
 	if aliasPort := b.currentOllamaHostAlias().Port; aliasPort > 0 {
 		args = append(args, "--reserved-port", fmt.Sprintf("%d", aliasPort))
 	}
@@ -1184,9 +1198,9 @@ func (b *Broker) spawnEngineMgr() (supervisedHandle, error) {
 		b.restoreEnabledEngines(w)
 	}
 	// Register engine-manager's HTTP surface so the daemon advertises em= on this
-	// node's _nvpair-node record; peers enrich models from it. Fixed port (like
-	// node-info's ni=), replayed across scanner restarts by regCache.
-	b.registerService(noderec.RegisterParams{Service: noderec.ServiceEngineManager, Port: engineManagerHTTPPort})
+	// node's _nvpair-node record; peers enrich models from it. The same configured
+	// port is replayed across scanner restarts by regCache.
+	b.registerService(noderec.RegisterParams{Service: noderec.ServiceEngineManager, Port: httpPort})
 	// Advertise the ec remote-control surface too, whenever a cluster dir is
 	// configured — which is exactly when engine-manager binds it. The port is
 	// bound for the life of the process and admits callers by live membership
@@ -1195,9 +1209,9 @@ func (b *Broker) spawnEngineMgr() (supervisedHandle, error) {
 	// also why no re-registration is needed on a membership change: nothing about
 	// the advertised address depends on whether this node is currently a member.
 	if b.clusterDir != "" {
-		b.registerService(noderec.RegisterParams{Service: noderec.ServiceEngineControl, Port: engineControlPort})
+		b.registerService(noderec.RegisterParams{Service: noderec.ServiceEngineControl, Port: controlPort})
 	}
-	slog.Info("engine-manager started", "path", b.engineMgrPath, "pid", w.cmd.Process.Pid, "httpPort", engineManagerHTTPPort, "controlPort", engineControlPort)
+	slog.Info("engine-manager started", "path", b.engineMgrPath, "pid", w.cmd.Process.Pid, "httpPort", httpPort, "controlPort", controlPort)
 	return w, nil
 }
 
@@ -1272,11 +1286,26 @@ func (b *Broker) spawnClusterManager() (supervisedHandle, error) {
 	// its parent is the base — the same derivation resolveLocalNodeID performs.
 	// Passing it keeps the only writer of the cluster dir and the workers reading it
 	// on one directory.
-	cm, err := startClusterManager(b.clusterMgrPath, applog.LevelString(), b.clusterManagerConfigDir(), b.relayDir, b.forwardClusterManagerNotification)
+	var callbackMu sync.Mutex
+	var cm *clusterManagerProcess
+	callbackMu.Lock()
+	started, err := startClusterManager(b.clusterMgrPath, applog.LevelString(), b.clusterManagerConfigDir(), b.relayDir, func(method string, params json.RawMessage) {
+		if method == peerServicesEvent {
+			callbackMu.Lock()
+			child := cm
+			callbackMu.Unlock()
+			b.relayPeerServices(child, params)
+			return
+		}
+		b.forwardClusterManagerNotification(method, params)
+	})
 	if err != nil {
+		callbackMu.Unlock()
 		return nil, err
 	}
+	cm = started
 	b.setClusterMgr(cm)
+	callbackMu.Unlock()
 	b.registerService(noderec.RegisterParams{Service: noderec.ServiceCluster, Port: clusterManagerHTTPPort})
 	// Reflect the persisted clusterId (owned by nvpair-node-settings) back into the
 	// cluster-manager, which doesn't persist it itself. Synchronous so the first
@@ -2102,6 +2131,9 @@ func (b *Broker) runWorkloadHistoryFlusher(ctx context.Context) func() {
 }
 
 func (b *Broker) Serve(ctx context.Context) error {
+	if err := validateEngineManagerPorts(b.engineManagerPorts()); err != nil {
+		return fmt.Errorf("engine-manager ports: %w", err)
+	}
 	ctx, cancel := context.WithCancel(ctx)
 	b.cancel = cancel
 	b.setServeCtx(ctx)
@@ -2790,6 +2822,11 @@ func (b *Broker) forwardLogLevel(level string) {
 // errors:clear are routed into the nvpair-errors pipeline (the broker now
 // supervises it) rather than dropped.
 func (b *Broker) forwardClusterManagerNotification(method string, params json.RawMessage) {
+	// Private authority envelopes never reach ordinary clients, even if an
+	// alternate internal caller bypasses the child-bound notification hook.
+	if method == peerServicesEvent {
+		return
+	}
 	if b.dispatchErrorsNotif("cluster-manager", method, params) {
 		return
 	}

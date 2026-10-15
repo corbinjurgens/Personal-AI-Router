@@ -496,6 +496,14 @@ func proxyReversePin(t *testing.T, destination, source, uuid string) {
 	if err := os.WriteFile(filepath.Join(trusted, uuid+".json"), body, 0o600); err != nil {
 		t.Fatal(err)
 	}
+	members, err := json.Marshal([]map[string]any{{"nodeUuid": uuid, "state": "member",
+		"clusterId": "fixture-cluster", "admissionEpoch": 1}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(destination, "members.json"), members, 0o600); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func (f *proxyReverseFixture) candidate(t *testing.T) candidate {

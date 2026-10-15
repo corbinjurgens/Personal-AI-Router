@@ -895,6 +895,10 @@ func TestErrorsSnapshotReadmissionRetiresPooledConnection(t *testing.T) {
 				t.Fatal("initial route unavailable")
 			}
 			changeErrorSyncRecord(t, filepath.Join(f.ps.clusterDir, "trusted", "uuid-b.json"), "admissionEpoch", 2)
+			members := mustJSON(t, []map[string]any{{"nodeUuid": "uuid-b", "state": "member", "clusterId": "test-cluster", "admissionEpoch": 2}})
+			if err := os.WriteFile(filepath.Join(f.ps.clusterDir, "members.json"), members, 0o600); err != nil {
+				t.Fatal(err)
+			}
 			after, ok := f.ps.resolveRoute("uuid-b", noderec.ServiceErrors)
 			incarnation, admitted := f.ps.mesh.PeerServiceIncarnation("uuid-b")
 			if !ok || !admitted || after.Incarnation != incarnation || after.Incarnation == before.Incarnation || after.Generation != before.Generation || after.Address != before.Address {

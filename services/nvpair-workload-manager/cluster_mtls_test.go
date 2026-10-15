@@ -75,6 +75,7 @@ func setupNode(t *testing.T, certPEM, keyPEM []byte, pins map[string][]byte) str
 	if err := os.MkdirAll(td, 0o700); err != nil {
 		t.Fatal(err)
 	}
+	var members []map[string]any
 	for uuid, pcert := range pins {
 		body, err := json.Marshal(workloadTestPin{uuid, string(pcert), "test-cluster", 1})
 		if err != nil {
@@ -83,6 +84,14 @@ func setupNode(t *testing.T, certPEM, keyPEM []byte, pins map[string][]byte) str
 		if err := os.WriteFile(filepath.Join(td, uuid+".json"), body, 0o600); err != nil {
 			t.Fatal(err)
 		}
+		members = append(members, map[string]any{"nodeUuid": uuid, "state": "member", "clusterId": "test-cluster", "admissionEpoch": 1})
+	}
+	memberData, err := json.Marshal(members)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "members.json"), memberData, 0o600); err != nil {
+		t.Fatal(err)
 	}
 	return dir
 }

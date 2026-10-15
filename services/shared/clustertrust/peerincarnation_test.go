@@ -35,6 +35,7 @@ func newIncarnationFixture(t *testing.T) incarnationFixture {
 	writeAdmission(t, dir, "cluster", 3)
 	f := incarnationFixture{dir: dir, pin: incarnationPin{"peer", string(peerPEM), "cluster", 7}}
 	f.writePin(t)
+	f.writeMember(t)
 	f.mesh = Open(dir)
 	return f
 }
@@ -58,6 +59,20 @@ func (f incarnationFixture) writePin(t *testing.T) {
 	writeIncarnationFile(t, filepath.Join(f.dir, "trusted", "peer.json"), data)
 }
 
+func (f incarnationFixture) writeMember(t *testing.T) {
+	t.Helper()
+	data, err := json.Marshal([]struct {
+		NodeUUID       string `json:"nodeUuid"`
+		State          string `json:"state"`
+		ClusterID      string `json:"clusterId"`
+		AdmissionEpoch uint64 `json:"admissionEpoch"`
+	}{{"peer", "member", f.pin.ClusterID, f.pin.AdmissionEpoch}})
+	if err != nil {
+		t.Fatalf("encode member: %v", err)
+	}
+	writeIncarnationFile(t, filepath.Join(f.dir, membersFileName), data)
+}
+
 func requireIncarnation(t *testing.T, m *Mesh) string {
 	t.Helper()
 	incarnation, ok := m.PeerServiceIncarnation("peer")
@@ -76,7 +91,7 @@ func requireNoIncarnation(t *testing.T, m *Mesh, peer string) {
 
 func TestMeshPeerServiceIncarnationStableReadOnlySnapshot(t *testing.T) {
 	f := newIncarnationFixture(t)
-	paths := []string{"admission.json", "trusted/peer.json", "node.crt", "node.key"}
+	paths := []string{"admission.json", "members.json", "trusted/peer.json", "node.crt", "node.key"}
 	before := make(map[string][]byte)
 	for _, path := range paths {
 		data, err := os.ReadFile(filepath.Join(f.dir, path))
@@ -110,6 +125,8 @@ func TestMeshPeerServiceIncarnationSameCertificateReadmission(t *testing.T) {
 		first := requireIncarnation(t, f.mesh)
 		f.pin.AdmissionEpoch = 8
 		f.writePin(t)
+		requireNoIncarnation(t, f.mesh, "peer")
+		f.writeMember(t)
 		if got := requireIncarnation(t, f.mesh); got == first {
 			t.Fatal("same-cert peer readmission reused old incarnation")
 		}
@@ -128,10 +145,23 @@ func TestMeshPeerServiceIncarnationSameCertificateReadmission(t *testing.T) {
 		writeAdmission(t, f.dir, "other:cluster", 3)
 		f.pin.ClusterID = "other:cluster"
 		f.writePin(t)
+		f.writeMember(t)
 		if got := requireIncarnation(t, f.mesh); got == first {
 			t.Fatal("different cluster reused old incarnation")
 		}
 	})
+}
+
+func TestMeshPeerServiceIncarnationIgnoresStableMemberMetadata(t *testing.T) {
+	f := newIncarnationFixture(t)
+	before := requireIncarnation(t, f.mesh)
+	writeIncarnationFile(t, filepath.Join(f.dir, membersFileName), []byte(`[
+		{"nodeUuid":"peer","state":"member","clusterId":"cluster","admissionEpoch":7,"name":"renamed","ipAddress":"192.0.2.40","port":25000,"lastSeen":100},
+		{"nodeUuid":"other","state":"member","clusterId":"cluster","admissionEpoch":9}
+	]`))
+	if got := requireIncarnation(t, f.mesh); got != before {
+		t.Fatalf("non-authority member metadata changed incarnation: %q -> %q", before, got)
+	}
 }
 
 func TestMeshPeerServiceIncarnationRejectsLocalAuthority(t *testing.T) {
@@ -268,6 +298,80 @@ func TestMeshPeerServiceIncarnationRejectsPeerAuthority(t *testing.T) {
 	})
 }
 
+func TestMeshPeerServiceIncarnationRejectsDurableMemberAuthority(t *testing.T) {
+	test := func(name, record string) {
+		t.Run(name, func(t *testing.T) {
+			f := newIncarnationFixture(t)
+			writeIncarnationFile(t, filepath.Join(f.dir, membersFileName), []byte(record))
+			requireNoIncarnation(t, f.mesh, "peer")
+			if !f.mesh.Clustered() {
+				t.Fatal("service-route rejection changed compatibility membership")
+			}
+		})
+	}
+	test("malformed JSON", `[`)
+	test("object instead of roster", `{}`)
+	test("null roster", `null`)
+	test("empty roster", `[]`)
+	test("missing peer", `[{"nodeUuid":"other","state":"member","clusterId":"cluster","admissionEpoch":7}]`)
+	test("pending inbound", `[{"nodeUuid":"peer","state":"pending-inbound","clusterId":"cluster","admissionEpoch":7}]`)
+	test("pending outbound", `[{"nodeUuid":"peer","state":"pending-outbound","clusterId":"cluster","admissionEpoch":7}]`)
+	test("missing state", `[{"nodeUuid":"peer","clusterId":"cluster","admissionEpoch":7}]`)
+	test("wrong cluster", `[{"nodeUuid":"peer","state":"member","clusterId":"other","admissionEpoch":7}]`)
+	test("zero epoch", `[{"nodeUuid":"peer","state":"member","clusterId":"cluster","admissionEpoch":0}]`)
+	test("malformed epoch", `[{"nodeUuid":"peer","state":"member","clusterId":"cluster","admissionEpoch":"7"}]`)
+	test("pin newer than member", `[{"nodeUuid":"peer","state":"member","clusterId":"cluster","admissionEpoch":6}]`)
+	test("pin older than member", `[{"nodeUuid":"peer","state":"member","clusterId":"cluster","admissionEpoch":8}]`)
+	test("duplicate current members", `[{"nodeUuid":"peer","state":"member","clusterId":"cluster","admissionEpoch":7},{"nodeUuid":"peer","state":"member","clusterId":"cluster","admissionEpoch":7}]`)
+	test("duplicate pending member", `[{"nodeUuid":"peer","state":"member","clusterId":"cluster","admissionEpoch":7},{"nodeUuid":"peer","state":"pending-inbound","clusterId":"cluster","admissionEpoch":7}]`)
+	t.Run("missing roster", func(t *testing.T) {
+		f := newIncarnationFixture(t)
+		if err := os.Remove(filepath.Join(f.dir, membersFileName)); err != nil {
+			t.Fatal(err)
+		}
+		requireNoIncarnation(t, f.mesh, "peer")
+	})
+	t.Run("unreadable roster", func(t *testing.T) {
+		f := newIncarnationFixture(t)
+		path := filepath.Join(f.dir, membersFileName)
+		if err := os.Remove(path); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Mkdir(path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		requireNoIncarnation(t, f.mesh, "peer")
+	})
+}
+
+func TestMeshPeerServiceIncarnationSameCertificateRepairRequiresBothRecords(t *testing.T) {
+	test := func(name string, memberFirst bool) {
+		t.Run(name, func(t *testing.T) {
+			f := newIncarnationFixture(t)
+			before := requireIncarnation(t, f.mesh)
+			f.pin.AdmissionEpoch = 8
+			if memberFirst {
+				f.writeMember(t)
+			} else {
+				f.writePin(t)
+			}
+			f.mesh.Refresh()
+			requireNoIncarnation(t, f.mesh, "peer")
+			if memberFirst {
+				f.writePin(t)
+			} else {
+				f.writeMember(t)
+			}
+			f.mesh.Refresh()
+			if got := requireIncarnation(t, f.mesh); got == before {
+				t.Fatal("complete same-cert readmission reused old authority")
+			}
+		})
+	}
+	test("pin before member", false)
+	test("member before pin", true)
+}
+
 func TestMeshPeerServiceIncarnationRejectsInvalidMeshAndPaths(t *testing.T) {
 	var nilMesh *Mesh
 	requireNoIncarnation(t, nilMesh, "peer")
@@ -334,7 +438,16 @@ func TestMeshPeerServiceIncarnationRejectsAuthorityChangeDuringRead(t *testing.T
 			t.Fatal(err)
 		}
 	})
-	test("local teardown after final pin read", 3, func(t *testing.T, f *incarnationFixture) {
+	test("member replacement after first member read", 3, func(t *testing.T, f *incarnationFixture) {
+		f.pin.AdmissionEpoch = 8
+		f.writeMember(t)
+	})
+	test("member removal after first member read", 3, func(t *testing.T, f *incarnationFixture) {
+		if err := os.Remove(filepath.Join(f.dir, membersFileName)); err != nil {
+			t.Fatal(err)
+		}
+	})
+	test("local teardown after final pin read", 5, func(t *testing.T, f *incarnationFixture) {
 		writeAdmission(t, f.dir, "", 0)
 	})
 	test("cluster replacement during snapshot", 2, func(t *testing.T, f *incarnationFixture) {
@@ -342,13 +455,13 @@ func TestMeshPeerServiceIncarnationRejectsAuthorityChangeDuringRead(t *testing.T
 		f.pin.ClusterID = "replacement"
 		f.writePin(t)
 	})
-	test("Mesh pin removed during final admission read", 4, func(t *testing.T, f *incarnationFixture) {
+	test("Mesh pin removed during final admission read", 6, func(t *testing.T, f *incarnationFixture) {
 		if err := os.Remove(filepath.Join(f.dir, "trusted", "peer.json")); err != nil {
 			t.Fatal(err)
 		}
 		f.mesh.Refresh()
 	})
-	test("Mesh identity replaced during final admission read", 4, func(t *testing.T, f *incarnationFixture) {
+	test("Mesh identity replaced during final admission read", 6, func(t *testing.T, f *incarnationFixture) {
 		certPEM, keyPEM, _ := genLeaf(t, "replacement-self")
 		writeIdentity(t, f.dir, certPEM, keyPEM)
 		f.mesh.Refresh()
@@ -366,6 +479,8 @@ func TestMeshPeerServiceIncarnationRecoversAfterPartialAuthority(t *testing.T) {
 	requireNoIncarnation(t, f.mesh, "peer")
 	f.pin.ClusterID, f.pin.AdmissionEpoch = "new-cluster", 8
 	f.writePin(t)
+	requireNoIncarnation(t, f.mesh, "peer")
+	f.writeMember(t)
 	f.mesh.Refresh()
 	if got := requireIncarnation(t, f.mesh); got == first {
 		t.Fatal("complete readmission reused old authority")

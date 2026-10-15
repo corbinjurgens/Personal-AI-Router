@@ -66,6 +66,7 @@
 | `cluster:invite-expired` | notification (we consume) | ✅ yes |
 | `cluster:invite-failed` | notification (we consume) | ✅ yes |
 | `cluster:invite-received` | notification (we consume) | ✅ yes |
+| `cluster:peer-services` | notification (we consume) | ➖ ignored |
 | `cluster:trust-changed` | notification (we consume) | ➖ ignored |
 | `nodes:changed` | notification (we consume) | ✅ yes |
 | `cluster:cancel-invite` | request (we call) | ✅ yes |
@@ -190,9 +191,11 @@
 |---|---|---|
 | `ready` | notification (we consume) | ✅ yes |
 | `discovery:get-node-info` | request (we call) | ✅ yes |
+| `discovery:peer-services` | request (we call) | ➖ ignored |
 
 **Dynamic / unresolved notify sites (verify by hand — `npm run service-contracts` prints the line numbers):**
 - `method (var)  (daemon.go, 3 sites)`
+- `method (var)  (peer_services.go)`
 
 ## nvpair-node-settings
 
@@ -267,6 +270,7 @@
 | `app:ready` | notification (we consume) | ✅ yes |
 | `cluster:set-local-services` | notification (we consume) | ➖ ignored |
 | `discovery:nodes-changed` | notification (we consume) | ✅ yes |
+| `discovery:peer-services` | notification (we consume) | ➖ ignored |
 | `engine:restore-enabled` | notification (we consume) | ➖ ignored |
 | `engine:settings-changed` | notification (we consume) | ✅ yes |
 | `engine:settings-projection` | notification (we consume) | ➖ ignored |

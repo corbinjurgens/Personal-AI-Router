@@ -119,6 +119,16 @@ func TestLocalCancelGoesToTheOriginOrEveryPeer(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(selfDir, "trusted", "uuid-bystander.json"), pin, 0o600); err != nil {
 		t.Fatal(err)
 	}
+	members, err := json.Marshal([]map[string]any{
+		{"nodeUuid": "uuid-peer", "state": "member", "clusterId": "test-cluster", "admissionEpoch": 1},
+		{"nodeUuid": "uuid-bystander", "state": "member", "clusterId": "test-cluster", "admissionEpoch": 1},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(selfDir, "members.json"), members, 0o600); err != nil {
+		t.Fatal(err)
+	}
 	bystander := startCancelPeer(t, clustertrust.Open(bystanderDir))
 
 	var out bytes.Buffer

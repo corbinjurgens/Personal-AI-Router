@@ -328,6 +328,13 @@ func TestCORSPairedIngressPreservesPolicyAndIsTerminal(t *testing.T) {
 			if err = os.WriteFile(filepath.Join(dst, "trusted", id+".json"), body, 0600); err != nil {
 				t.Fatal(err)
 			}
+			members, err := json.Marshal([]map[string]any{{"nodeUuid": id, "state": "member", "clusterId": "cluster", "admissionEpoch": 1}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(dst, "members.json"), members, 0o600); err != nil {
+				t.Fatal(err)
+			}
 		}
 		pin(aDir, bDir, "b")
 		pin(bDir, aDir, "a")

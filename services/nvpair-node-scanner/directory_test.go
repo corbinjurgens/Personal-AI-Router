@@ -9,6 +9,19 @@ import (
 	"nvpair-shared/noderec"
 )
 
+func TestDirectoryAuthenticatedClaimResistsBrowseSupersedeEviction(t *testing.T) {
+	d := newDirectory()
+	old := noderec.DirectoryNode{HostUUID: "admitted-peer", Name: "same-hostname", IP: "192.0.2.10", LastSeen: 1}
+	d.installPeerServices(noderec.PeerServicesClaim{Incarnation: "current"}, old)
+	arriving := noderec.DirectoryNode{HostUUID: "new-browse-peer", Name: "same-hostname", IP: "192.0.2.11", LastSeen: 1000}
+	if evicted := d.upsertEvicting(arriving, []noderec.DirectoryNode{old}); len(evicted) != 0 {
+		t.Fatalf("browse eviction removed authenticated authority: %+v", evicted)
+	}
+	if current, present := d.get("admitted-peer"); !present || current.IP != "192.0.2.10" {
+		t.Fatalf("authenticated claim lost: %+v, %v", current, present)
+	}
+}
+
 func TestToDirectoryNode(t *testing.T) {
 	raw := RawNode{
 		ID:        "hostA",

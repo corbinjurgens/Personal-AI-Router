@@ -399,6 +399,30 @@ Reconciles fire on pair success and removal, with a ~30 s heartbeat backstop.
 The human PIN stays the only root of trust — nothing is pinned without an
 endorsement chain leading back to a real pairing. Full model in spec §7.7.
 
+## Private peer-service bootstrap
+
+After admission, the manager periodically reads the peer's complete current
+service descriptor from `GET /v1/cluster/services` on the existing trusted
+`cl` mux. Membership supplies only the locator. The response uses the serving
+scanner's self identity/addresses and current broker service registrations;
+neither roster entries nor reverse sessions establish service presence.
+The pinned direct/reverse client retains its normal transport policy.
+
+The original admission incarnation accompanies the validated result through
+private `cluster:peer-services` and broker-to-scanner `discovery:peer-services`
+notifications. They are consumed internally and never forwarded to clients or
+installed as local reverse forwarding registrations. Scanner owns directory
+mutation, normal enrichment, trust and existing discovery events. Its separate
+authenticated and browse claims prevent multicast updates or expiry from
+overwriting authenticated services. Valid service omission withdraws that
+service. Admission changes immediately invalidate old authority; unavailable
+routes do not renew the bounded metadata lifetime or remove membership.
+
+Refresh retries cover startup, restored admission, reverse availability and
+worker replacement. Requests have bounded concurrency, duration and response
+size; complete validation precedes atomic scanner application. Details and
+bounds are in the specification's authenticated operational-directory section.
+
 ## Security note
 
 The six-digit pairing PIN is **temporary, low-entropy security debt**: it

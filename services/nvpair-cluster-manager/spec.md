@@ -653,6 +653,47 @@ Point-to-point pairing alone leaves trust un-propagated: if A pairs B and then A
 - **Local interface severed** (Broker exited → `stdin` EOF / `stdout` `EPIPE` / `ERROR_BROKEN_PIPE`): an orphaned manager would have no one to serve. → Treat EOF/`EPIPE` as the shutdown signal: stop the listener and exit cleanly. No reconnect/buffering — a new Broker spawns a fresh manager (which reloads persisted membership if §4 lands on persistence).
 - **Stale discovery snapshot** (departed node still resolvable, or new node not yet in a snapshot): wasted delivery attempts or a not-yet-invitable node. → Replace the resolver map from every `discovery:nodes` snapshot, so a node absent from the next one stops resolving without any expiry logic here; liveness is the discovery daemon's. A Broker-supplied address is the fallback when the resolver is stale or empty.
 
+### Authenticated operational-directory bootstrap
+
+An admitted peer need not have an inbound mDNS browse record. The manager uses
+current membership only to locate that peer's `cl` endpoint, then performs a
+bodyless `GET /v1/cluster/services` through the existing pinned direct/reverse
+client. The trusted mux serves only its own descriptor: canonical local UUID,
+display name and ranked addresses from the scanner's registry-owned self row,
+with a complete service/port snapshot from current broker registrations.
+An uninitialized registry or missing self row returns unavailable. An initialized
+empty service list is a valid withdrawal. The plain pairing mux has no such route.
+
+The descriptor is bounded to 8192 bytes, the shared advertised-address bound,
+and known service keys with unique ports in range. It cannot set transport,
+trust, membership, liveness or a loopback forwarding target. Candidate addresses
+must be unique unicast IP literals excluding loopback, unspecified, multicast,
+link-local and scoped addresses. Complete parsing, clean EOF and exact self
+identity are required before publishing anything. The serving endpoint requires
+current mutual admission and the exact pinned requester certificate.
+
+Refreshes retry every two seconds, with at most four network reads and one
+fetch/publish per peer in flight; each read has an eight-second overall budget.
+The original shared Mesh incarnation (both certificates and admission epochs)
+is captured before the read and checked again after the complete response.
+The manager emits private `cluster:peer-services` metadata with that original
+token, a process source identity, receiver-owned sequence and observation time.
+The broker binds delivery to its current manager child and relays only through
+the scanner's private `discovery:peer-services` notification. Neither envelope
+is an ordinary client contract or local reverse-registration input.
+
+Scanner validates the same current incarnation at apply, replaces the complete
+authenticated claim atomically, computes trust locally and emits the existing
+discovery events. A later mDNS update/removal changes only its browse claim;
+authenticated services retain priority while current. Leave, removal, pin or
+admission replacement retires that claim; an independent browse claim survives
+without granting obsolete protected authority. Authenticated claims expire after
+30 seconds without a successful fresh read. Failed transport never refreshes
+metadata or changes durable membership. Restart reconstructs metadata through
+fresh reads, without treating a remote broker generation as durable ordering.
+Direct-first routing, reverse service allowlists, inner protected-service mTLS
+and node-info's plain protocol policy remain owned by their existing adapters.
+
 ## 13. Observability
 - **Logging**: pairing lifecycle (initial-exchange started / completed, PIN issued [**never the PIN value**], PIN entered, paired / declined / expired / failed) with `inviteId` and peer; EAP-NOOB protocol errors (`MACs`/`MACp` mismatch, unrecognized `NoobId`); membership changes (join, local removal, peer-initiated removal) with `nodeId`/`nodeUuid`; cert pins added and dropped (with UUID + fingerprint); mTLS rejections (`403`) with the presented subject/fingerprint vs. the pinned one; cert expiry warnings (own and peer leaves); first-run identity generation; inter-node delivery failures including final drop; malformed/protocol-error rejections (`400`); resolver changes applied from a `discovery:nodes` snapshot, and whether a dialed address was resolved or Broker-supplied; startup and clean shutdown on `stdin` EOF / `stdout` `EPIPE`. Never log private key material, full cert PEMs at info level, or the PIN.
 - **Metrics**: pairings started/completed and outcome counts by terminal state; failed-PIN-attempt count (online-guessing signal); pending-pairing count and age (expiry pressure); current member count; pinned-cert count; mTLS handshake failure count and `403` count; days-to-expiry of the nearest-expiring pinned/own cert; inter-node delivery success/failure/retry/drop counts; resolvable peer count and the resolved-vs-Broker-supplied split of dialed addresses.

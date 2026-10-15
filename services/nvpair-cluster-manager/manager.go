@@ -47,6 +47,7 @@ type Manager struct {
 	removalPeerServices  *clustertrust.PeerServiceClient
 	peerRoutesMu         sync.Mutex
 	peerRoutes           map[string]clusterPeerRoute
+	serviceRefresh       peerServicesState
 	reverse              *reverseState
 	localServicesAllowed bool
 	controlTransport     io.Closer
@@ -360,13 +361,14 @@ func (m *Manager) Run(ctx context.Context) error {
 	m.startResolver()
 	m.reverse.wg.Add(1)
 	go m.reverseConnectLoop(ctx)
+	go m.peerServicesLoop(ctx)
 
 	// Subscribe to the broker's discovery relay for cl peer targets. They arrive
 	// as discovery:nodes snapshots (handled in handleMessage), each replacing the
 	// browser's relay overlay, backing invite/member address resolution.
 	// Non-fatal: if the parent isn't a relay-aware broker, only Broker-supplied
 	// addresses resolve peers (there is no self-run mDNS fallback post-cutover).
-	if err := m.codec.Notify(noderec.MethodSubscribe, noderec.SubscribeParams{Services: []noderec.ServiceKey{noderec.ServiceCluster}}); err != nil {
+	if err := m.codec.Notify(noderec.MethodSubscribe, noderec.SubscribeParams{}); err != nil {
 		log.Printf("failed to subscribe to discovery relay: %v", err)
 	}
 
@@ -404,6 +406,7 @@ func (m *Manager) applyDiscovery(msg *Message) {
 		return
 	}
 	m.browser.setRelay(res.Nodes)
+	m.setSelfServicesIdentity(res.Nodes)
 }
 
 func (m *Manager) readLoop(ctx context.Context) error {

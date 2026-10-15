@@ -262,7 +262,8 @@ func (b *Broker) validateSettingsPortsLocked(ctx context.Context, engine string,
 	if config.ServerPort == config.ProxyPort {
 		return fmt.Errorf("Server port and proxy port collide: both are %d. Choose different ports.", config.ServerPort)
 	}
-	reserved := map[int]bool{engineManagerHTTPPort: true, engineControlPort: true, nodeInfoHTTPPort: true, errorsHTTPPort: true, workloadHTTPPort: true, clusterManagerHTTPPort: true}
+	httpPort, controlPort := b.engineManagerPorts()
+	reserved := map[int]bool{httpPort: true, controlPort: true, nodeInfoHTTPPort: true, errorsHTTPPort: true, workloadHTTPPort: true, clusterManagerHTTPPort: true}
 	if alias := b.currentOllamaHostAlias().Port; alias > 0 {
 		reserved[alias] = true
 	}

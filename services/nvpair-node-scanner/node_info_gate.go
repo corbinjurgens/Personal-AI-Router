@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strconv"
 	"sync"
+	"time"
 
 	"nvpair-shared/clustertrust"
 	"nvpair-shared/noderec"
@@ -18,18 +19,46 @@ import (
 type scannerPeerEndpoint struct {
 	hostUUID, peerUUID, address string
 	service                     noderec.ServiceKey
+	incarnation                 string
+	generation                  uint64
+}
+
+func (d *daemon) peerServiceRoute(key scannerPeerEndpoint, host string, port int, directoryBacked bool) (clustertrust.PeerServiceRoute, bool) {
+	d.mesh.Refresh()
+	incarnation, admitted := d.mesh.PeerServiceIncarnation(key.peerUUID)
+	if !admitted {
+		return clustertrust.PeerServiceRoute{}, false
+	}
+	var generation uint64
+	if d.dir != nil {
+		// Read endpoint authority and its semantic generation in one snapshot.
+		d.dir.mu.RLock()
+		node, found := d.dir.nodes[key.hostUUID]
+		endpoint, registered := node.Services[key.service]
+		valid := (!directoryBacked || found) && (!found || registered && endpoint.Port == port && node.ClusterUUID == key.peerUUID && slices.Contains(node.CandidateIPs(), host))
+		if claim, authenticated := d.dir.peerServices[key.hostUUID]; authenticated {
+			valid = valid && claim.Incarnation == incarnation && peerServicesFresh(claim, time.Now())
+		}
+		if directoryBacked {
+			generation = d.dir.generations[key.hostUUID]
+		}
+		d.dir.mu.RUnlock()
+		if !valid {
+			return clustertrust.PeerServiceRoute{}, false
+		}
+	}
+	protocol := clustertrust.ReverseTLS
+	if key.service == noderec.ServiceNodeInfo {
+		protocol = clustertrust.ReversePlain
+	}
+	return clustertrust.PeerServiceRoute{Incarnation: incarnation, Address: key.address, Protocol: protocol, Generation: generation}, true
 }
 
 // peerServiceClient retains route health per advertised address. Directory reads
 // own endpoint authority; initial browse enrichment precedes directory insertion
 // and therefore has only the current admission as its authority boundary.
 func (d *daemon) peerServiceClient(hostUUID, peerUUID, host string, port int, service noderec.ServiceKey, discovering bool) (*http.Client, func() bool, bool) {
-	d.mesh.Refresh()
-	incarnation, admitted := d.mesh.PeerServiceIncarnation(peerUUID)
-	if !admitted {
-		return nil, nil, false
-	}
-	key := scannerPeerEndpoint{hostUUID, peerUUID, net.JoinHostPort(host, strconv.Itoa(port)), service}
+	key := scannerPeerEndpoint{hostUUID: hostUUID, peerUUID: peerUUID, address: net.JoinHostPort(host, strconv.Itoa(port)), service: service}
 	directoryBacked := false
 	if d.dir != nil {
 		_, directoryBacked = d.dir.get(hostUUID)
@@ -37,33 +66,29 @@ func (d *daemon) peerServiceClient(hostUUID, peerUUID, host string, port int, se
 	if !directoryBacked && !discovering {
 		return nil, nil, false
 	}
+	captured, ok := d.peerServiceRoute(key, host, port, directoryBacked)
+	if !ok {
+		return nil, nil, false
+	}
+	key.incarnation, key.generation = captured.Incarnation, captured.Generation
 	resolve := func(uuid string, requested noderec.ServiceKey) (clustertrust.PeerServiceRoute, bool) {
 		if uuid != peerUUID || requested != service {
 			return clustertrust.PeerServiceRoute{}, false
 		}
-		d.mesh.Refresh()
-		current, ok := d.mesh.PeerServiceIncarnation(uuid)
-		if !ok {
-			return clustertrust.PeerServiceRoute{}, false
-		}
-		if d.dir != nil {
-			node, found := d.dir.get(hostUUID)
-			endpoint, registered := node.Services[service]
-			if (!found && directoryBacked) || (found && (!registered || endpoint.Port != port || node.ClusterUUID != peerUUID || !slices.Contains(node.CandidateIPs(), host))) {
-				return clustertrust.PeerServiceRoute{}, false
-			}
-		}
-		protocol := clustertrust.ReverseTLS
-		if service == noderec.ServiceNodeInfo {
-			protocol = clustertrust.ReversePlain
-		}
-		return clustertrust.PeerServiceRoute{Incarnation: current, Address: key.address, Protocol: protocol}, true
+		route, ok := d.peerServiceRoute(key, host, port, directoryBacked)
+		return route, ok && route.Incarnation == captured.Incarnation && route.Generation == captured.Generation
 	}
 	d.peerMu.Lock()
 	adapter := d.peerClients[key]
 	// Pre-insertion enrichment must not install a permanent route which could
 	// outlive a later directory removal.
 	if adapter == nil || !directoryBacked {
+		for endpoint, old := range d.peerClients {
+			if endpoint.hostUUID == hostUUID && (endpoint.incarnation != key.incarnation || endpoint.generation != key.generation) {
+				old.CloseIdle()
+				delete(d.peerClients, endpoint)
+			}
+		}
 		timeout := modelsFetchTimeout
 		if service == noderec.ServiceNodeInfo {
 			timeout = nodeInfoFetchTimeout
@@ -83,7 +108,7 @@ func (d *daemon) peerServiceClient(hostUUID, peerUUID, host string, port int, se
 	d.peerMu.Unlock()
 	current := func() bool {
 		route, ok := resolve(peerUUID, service)
-		return ok && route.Incarnation == incarnation
+		return ok && route.Incarnation == captured.Incarnation && route.Generation == captured.Generation
 	}
 	return adapter.Client(peerUUID, service), current, true
 }

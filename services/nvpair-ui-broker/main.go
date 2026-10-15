@@ -31,6 +31,8 @@ func main() {
 	workloadMgrPath := flag.String("workload-manager-path", "", "path to nvpair-workload-manager binary (default: ./nvpair-workload-manager in the current working directory)")
 	errorsPath := flag.String("errors-path", "", "path to nvpair-errors binary (default: ./nvpair-errors in the current working directory)")
 	engineMgrPath := flag.String("engine-manager-path", "", "path to nvpair-engine-manager binary (default: ./nvpair-engine-manager in the current working directory)")
+	engineMgrHTTPPort := flag.Int("engine-manager-http-port", engineManagerHTTPPort, "engine-manager model HTTP service port (1..65535; must differ from the control port)")
+	engineMgrControlPort := flag.Int("engine-manager-control-port", engineControlPort, "engine-manager remote-control service port (1..65535; must differ from the HTTP port)")
 	manualNodesPath := flag.String("manual-nodes-path", "", "path to nvpair-manual-nodes binary (default: ./nvpair-manual-nodes in the current working directory)")
 	settingsPath := flag.String("settings-path", "", "path to nvpair-node-settings binary (default: ./nvpair-node-settings in the current working directory)")
 	clusterMgrPath := flag.String("cluster-manager-path", "", "path to nvpair-cluster-manager binary (default: ./nvpair-cluster-manager in the current working directory)")
@@ -65,6 +67,9 @@ func main() {
 		slog.Error(fmt.Sprintf(format, a...))
 		sink.Close()
 		os.Exit(1)
+	}
+	if err := validateEngineManagerPorts(*engineMgrHTTPPort, *engineMgrControlPort); err != nil {
+		fatalf("engine-manager ports: %v", err)
 	}
 
 	// The inter-node workers do cluster-scoped mTLS off the cert + pins
@@ -246,18 +251,20 @@ func main() {
 
 	codec := NewCodec(transport)
 	paths := workerPaths{
-		scanner:      resolvedScanner,
-		nodeInfo:     resolvedNodeInfo,
-		proxy:        resolvedProxy,
-		proxyEngines: selectedEngines,
-		workloadMgr:  resolvedWorkloadMgr,
-		errors:       resolvedErrors,
-		engineMgr:    resolvedEngineMgr,
-		manualNodes:  resolvedManualNodes,
-		settings:     resolvedSettings,
-		clusterMgr:   resolvedClusterMgr,
-		scheduler:    resolvedScheduler,
-		clusterDir:   clusterDir,
+		scanner:              resolvedScanner,
+		nodeInfo:             resolvedNodeInfo,
+		proxy:                resolvedProxy,
+		proxyEngines:         selectedEngines,
+		workloadMgr:          resolvedWorkloadMgr,
+		errors:               resolvedErrors,
+		engineMgr:            resolvedEngineMgr,
+		engineMgrHTTPPort:    *engineMgrHTTPPort,
+		engineMgrControlPort: *engineMgrControlPort,
+		manualNodes:          resolvedManualNodes,
+		settings:             resolvedSettings,
+		clusterMgr:           resolvedClusterMgr,
+		scheduler:            resolvedScheduler,
+		clusterDir:           clusterDir,
 	}
 	if err := NewBroker(codec, paths).Serve(ctx); err != nil && ctx.Err() == nil {
 		fatalf("broker error: %v", err)

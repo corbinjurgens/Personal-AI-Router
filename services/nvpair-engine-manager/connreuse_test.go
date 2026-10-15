@@ -136,4 +136,12 @@ func writePinFromCert(t *testing.T, clusterDir, peerUUID, certPath string) {
 	if err := os.WriteFile(filepath.Join(trusted, peerUUID+".json"), body, 0o600); err != nil {
 		t.Fatal(err)
 	}
+	members, err := json.Marshal([]map[string]any{{"nodeUuid": peerUUID, "state": "member",
+		"clusterId": admission.ClusterID, "admissionEpoch": admission.Epoch}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(clusterDir, "members.json"), members, 0o600); err != nil {
+		t.Fatal(err)
+	}
 }
