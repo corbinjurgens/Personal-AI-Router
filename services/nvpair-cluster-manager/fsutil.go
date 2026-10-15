@@ -16,8 +16,12 @@ import (
 	"time"
 )
 
-// renameFile is the replace step of atomicWrite. Tests inject failures here.
-var renameFile = os.Rename
+// renameFile and removeFile are the filesystem mutation steps. Tests inject
+// failures here.
+var (
+	renameFile = os.Rename
+	removeFile = os.Remove
+)
 
 const (
 	atomicWriteMaxAttempts = 10
@@ -61,6 +65,24 @@ func atomicWrite(path string, data []byte, perm os.FileMode) error {
 	return fmt.Errorf("rename %s -> %s: %w", tmp, path, renameErr)
 }
 
+// removeFileWithRetry deletes path, tolerating the brief sharing conflicts that
+// Windows reports while a sibling clustertrust reader has the file open. A
+// missing path is already removed and therefore succeeds.
+func removeFileWithRetry(path string) error {
+	var removeErr error
+	for attempt := 1; attempt <= atomicWriteMaxAttempts; attempt++ {
+		removeErr = removeFile(path)
+		if removeErr == nil || os.IsNotExist(removeErr) {
+			return nil
+		}
+		if !isTransientReplaceError(removeErr) || attempt == atomicWriteMaxAttempts {
+			break
+		}
+		time.Sleep(atomicWriteRetryBase * time.Duration(attempt))
+	}
+	return removeErr
+}
+
 func uniqueTmpPath(path string) (string, error) {
 	var b [8]byte
 	if _, err := rand.Read(b[:]); err != nil {
@@ -69,8 +91,8 @@ func uniqueTmpPath(path string) (string, error) {
 	return path + "." + hex.EncodeToString(b[:]) + ".tmp", nil
 }
 
-// isTransientReplaceError reports whether err is a replace conflict that may
-// clear once a concurrent reader releases the destination file. Windows
+// isTransientReplaceError reports whether err is a mutation conflict that may
+// clear once a concurrent reader releases the file. Windows
 // ERROR_ACCESS_DENIED (5) and ERROR_SHARING_VIOLATION (32) are matched by
 // errno only on Windows; elsewhere we match the platform error text Go surfaces.
 func isTransientReplaceError(err error) bool {

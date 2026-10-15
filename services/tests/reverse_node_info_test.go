@@ -454,9 +454,7 @@ func TestReverseNodeInfoPhase04(t *testing.T) {
 					t.Error(err)
 				}
 			})
-			if err := os.Remove(path); err != nil {
-				t.Fatal(err)
-			}
+			removeAuthorityFile(t, path)
 			mu.Lock()
 			before := requests
 			mu.Unlock()

@@ -106,6 +106,52 @@ func TestAtomicWriteNonTransientRenameFailsFast(t *testing.T) {
 	}
 }
 
+func TestRemoveFileWithRetryRetriesTransientSharingConflict(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "peer.json")
+	if err := os.WriteFile(path, []byte("pin\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var attempts atomic.Int32
+	orig := removeFile
+	removeFile = func(name string) error {
+		if attempts.Add(1) < 3 {
+			return errors.New("remove: The process cannot access the file because it is being used by another process.")
+		}
+		return orig(name)
+	}
+	t.Cleanup(func() { removeFile = orig })
+
+	if err := removeFileWithRetry(path); err != nil {
+		t.Fatalf("removeFileWithRetry: %v", err)
+	}
+	if got := attempts.Load(); got != 3 {
+		t.Fatalf("remove attempts = %d, want 3", got)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("removed path still exists: %v", err)
+	}
+}
+
+func TestRemoveFileWithRetryFailsFastForPermanentError(t *testing.T) {
+	var attempts atomic.Int32
+	orig := removeFile
+	removeFile = func(string) error {
+		attempts.Add(1)
+		return errors.New("remove: read-only file system")
+	}
+	t.Cleanup(func() { removeFile = orig })
+
+	err := removeFileWithRetry(filepath.Join(t.TempDir(), "peer.json"))
+	if err == nil || !strings.Contains(err.Error(), "read-only file system") {
+		t.Fatalf("remove error = %v, want permanent cause", err)
+	}
+	if got := attempts.Load(); got != 1 {
+		t.Fatalf("remove attempts = %d, want 1", got)
+	}
+}
+
 func TestIsTransientReplaceError(t *testing.T) {
 	if !isTransientReplaceError(errors.New("Access is denied.")) {
 		t.Fatal("expected Access is denied to be transient")

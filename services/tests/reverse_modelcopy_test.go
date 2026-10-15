@@ -372,9 +372,7 @@ func TestReverseModelCopyPhase04(t *testing.T) {
 			}
 			task1WriteJSON(t, pin, map[string]any{"nodeUuid": source.uuid, "nodeId": source.uuid, "certPem": destination.cert, "clusterId": task1ClusterID, "admissionEpoch": 1})
 			assertRejected()
-			if err := os.Remove(pin); err != nil {
-				t.Fatal(err)
-			}
+			removeAuthorityFile(t, pin)
 			assertRejected()
 		})
 	}

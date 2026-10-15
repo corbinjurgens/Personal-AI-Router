@@ -374,7 +374,7 @@ func (ts *TrustStore) Remove(uuid string) error {
 	defer ts.announce(&changed)
 	ts.mu.Lock()
 	defer ts.mu.Unlock()
-	if err := os.Remove(ts.pinPath(uuid)); err != nil && !os.IsNotExist(err) {
+	if err := removeFileWithRetry(ts.pinPath(uuid)); err != nil {
 		return fmt.Errorf("remove pin %s: %w", uuid, err)
 	}
 	_, held := ts.pins[uuid]

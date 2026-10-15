@@ -80,7 +80,7 @@ func TestScannerEvictsRecordSupersededAtItsAddress(t *testing.T) {
 		fmt.Sprintf("%s=%d", noderec.ServiceNodeInfo, niPort),
 	}
 	stopResponder := startMDNSAdvertiser(t, mdnsAdvertiserFixture{
-		Instance: peerInstance, Service: noderec.ServiceType, Port: noderec.SRVPort, TXT: txt, Interface: loopbackMDNSInterface(t).Name,
+		Instance: peerInstance, Service: noderec.ServiceType, Port: noderec.SRVPort, TXT: txt, Interface: mdnsFixtureInterface(t).Name,
 	})
 
 	events := startScannerForGhostTest(t)

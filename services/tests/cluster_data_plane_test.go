@@ -115,7 +115,7 @@ func (c *interNodeCluster) startStubClusterPeer(t *testing.T, instance, hostUUID
 	txt := []string{"v=1", "uuid=" + hostUUID, fmt.Sprintf("wl=%d", port),
 		clustertrust.ClusterUUIDTXTKey + "=" + c.peerUUID}
 	startMDNSAdvertiser(t, mdnsAdvertiserFixture{
-		Instance: instance, Service: nodeRecordService, Port: port, TXT: txt, Interface: loopbackMDNSInterface(t).Name,
+		Instance: instance, Service: nodeRecordService, Port: port, TXT: txt, Interface: mdnsFixtureInterface(t).Name,
 	})
 	t.Logf("stub cluster peer advertising %s (wl=%d, cluster-uuid=%s)", nodeRecordService, port, c.peerUUID)
 	return received

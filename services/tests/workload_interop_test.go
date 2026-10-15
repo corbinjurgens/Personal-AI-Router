@@ -508,7 +508,7 @@ func TestWorkloadFailedOnNodeLoss(t *testing.T) {
 	// it from colliding with this host's own record.
 	peerTXT := []string{"v=1", "uuid=" + peerUUID, "ip=127.0.0.1"}
 	stopAdv := startMDNSAdvertiser(t, mdnsAdvertiserFixture{
-		Instance: peerNode, Service: nodeRecordService, Port: 14999, TXT: peerTXT, Interface: loopbackMDNSInterface(t).Name,
+		Instance: peerNode, Service: nodeRecordService, Port: 14999, TXT: peerTXT, Interface: mdnsFixtureInterface(t).Name,
 	})
 	t.Logf("advertising peer %q as %s", peerNode, nodeRecordService)
 

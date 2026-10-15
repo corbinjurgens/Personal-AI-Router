@@ -12,6 +12,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -59,19 +60,69 @@ func init() {
 	}
 }
 
-func loopbackMDNSInterface(t *testing.T) net.Interface {
+func mdnsFixtureInterface(t *testing.T) net.Interface {
 	t.Helper()
 	ifaces, err := net.Interfaces()
 	if err != nil {
 		t.Fatal(err)
 	}
+	if runtime.GOOS == "windows" {
+		// x/net's Windows WriteTo ignores zeroconf's IfIndex control message.
+		// Join the interface used by the OS multicast route so queries and
+		// responses arrive on the same interface. DialUDP selects that route
+		// without sending a packet; choosing the first adapter is ambiguous
+		// on hosts with Ethernet, Wi-Fi and virtual adapters.
+		conn, err := net.DialUDP("udp4", nil, &net.UDPAddr{IP: net.IPv4(224, 0, 0, 251), Port: 5353})
+		if err != nil {
+			t.Fatalf("select mDNS multicast route: %v; interfaces: %v", err, ifaces)
+		}
+		source := conn.LocalAddr().(*net.UDPAddr).IP
+		if err := conn.Close(); err != nil {
+			t.Fatalf("close mDNS route probe: %v", err)
+		}
+		for _, iface := range ifaces {
+			if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagMulticast == 0 || iface.Flags&net.FlagLoopback != 0 {
+				continue
+			}
+			addrs, err := iface.Addrs()
+			if err != nil {
+				t.Fatalf("addresses for mDNS interface %s: %v", iface.Name, err)
+			}
+			for _, addr := range addrs {
+				ip, _, err := net.ParseCIDR(addr.String())
+				if err != nil {
+					t.Fatalf("parse mDNS interface %s address %q: %v", iface.Name, addr, err)
+				}
+				if ip.Equal(source) {
+					t.Logf("mDNS fixture interface: %s index=%d flags=%s multicast source=%s", iface.Name, iface.Index, iface.Flags, source)
+					return iface
+				}
+			}
+		}
+		t.Fatalf("no active multicast interface owns mDNS route source %s; interfaces: %v", source, ifaces)
+	}
 	for _, iface := range ifaces {
 		if iface.Flags&net.FlagUp != 0 && iface.Flags&net.FlagLoopback != 0 {
+			t.Logf("mDNS fixture interface: %s index=%d flags=%s", iface.Name, iface.Index, iface.Flags)
 			return iface
 		}
 	}
 	t.Fatal("no active loopback interface for multicast fixture")
 	return net.Interface{}
+}
+
+func mdnsResolverOptions(ifaces []net.Interface) []zeroconf.ClientOption {
+	if ifaces == nil {
+		return nil
+	}
+	options := []zeroconf.ClientOption{zeroconf.SelectIfaces(ifaces)}
+	if runtime.GOOS == "windows" {
+		// The fixture selects Windows' IPv4 multicast route and publishes an
+		// A record. IPv6 need not be enabled on that adapter. Unix retains
+		// both transports, including IPv6 multicast over macOS loopback.
+		options = append(options, zeroconf.SelectIPTraffic(zeroconf.IPv4))
+	}
+	return options
 }
 
 // Keep zeroconf's goodbye writes out of the test process. A stalled multicast
@@ -148,11 +199,11 @@ func TestInProcessDiscovery(t *testing.T) {
 		port     = 55555
 	)
 
-	iface := loopbackMDNSInterface(t)
+	iface := mdnsFixtureInterface(t)
 	startMDNSAdvertiser(t, mdnsAdvertiserFixture{Instance: instance, Service: service, Port: port, TXT: []string{"env=test"}, Interface: iface.Name})
 	time.Sleep(500 * time.Millisecond)
 
-	resolver, err := zeroconf.NewResolver(zeroconf.SelectIfaces([]net.Interface{iface}))
+	resolver, err := zeroconf.NewResolver(mdnsResolverOptions([]net.Interface{iface})...)
 	if err != nil {
 		t.Fatalf("resolver: %v", err)
 	}
@@ -198,13 +249,13 @@ func TestInProcessMultipleInstances(t *testing.T) {
 	const service = "_test-multi._tcp"
 	instances := []string{"node-alpha", "node-beta", "node-gamma"}
 
-	iface := loopbackMDNSInterface(t)
+	iface := mdnsFixtureInterface(t)
 	for i, inst := range instances {
 		startMDNSAdvertiser(t, mdnsAdvertiserFixture{Instance: inst, Service: service, Port: 50000 + i, Interface: iface.Name})
 	}
 	time.Sleep(500 * time.Millisecond)
 
-	resolver, err := zeroconf.NewResolver(zeroconf.SelectIfaces([]net.Interface{iface}))
+	resolver, err := zeroconf.NewResolver(mdnsResolverOptions([]net.Interface{iface})...)
 	if err != nil {
 		t.Fatalf("resolver: %v", err)
 	}
@@ -246,7 +297,7 @@ func TestInProcessRemoval(t *testing.T) {
 		port     = 55556
 	)
 
-	iface := loopbackMDNSInterface(t)
+	iface := mdnsFixtureInterface(t)
 	stop := startMDNSAdvertiser(t, mdnsAdvertiserFixture{Instance: instance, Service: service, Port: port, Interface: iface.Name})
 
 	// Phase 1: verify discoverable
@@ -278,11 +329,7 @@ func browseForInstance(t *testing.T, service, instance string, timeout time.Dura
 
 func browseForInstanceOnInterfaces(t *testing.T, service, instance string, timeout time.Duration, ifaces []net.Interface) *zeroconf.ServiceEntry {
 	t.Helper()
-	var options []zeroconf.ClientOption
-	if ifaces != nil {
-		options = append(options, zeroconf.SelectIfaces(ifaces))
-	}
-	resolver, err := zeroconf.NewResolver(options...)
+	resolver, err := zeroconf.NewResolver(mdnsResolverOptions(ifaces)...)
 	if err != nil {
 		t.Fatalf("resolver: %v", err)
 	}

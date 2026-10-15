@@ -325,9 +325,7 @@ func TestSecureInferenceClusterMTLS(t *testing.T) {
 		if _, err := os.Stat(pin); err != nil {
 			t.Fatalf("expected A's pin in B's trust store at %s: %v", pin, err)
 		}
-		if err := os.Remove(pin); err != nil {
-			t.Fatalf("remove A's pin: %v", err)
-		}
+		removeAuthorityFile(t, pin)
 		before := atomic.LoadInt32(bGenerates)
 		resp := postInference(t, fmt.Sprintf("http://127.0.0.1:%d/api/generate", proxyA.port), genBody)
 		defer resp.Body.Close()

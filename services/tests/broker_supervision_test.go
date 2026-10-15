@@ -17,7 +17,6 @@ import (
 	"os"
 	"os/exec"
 	"regexp"
-	"runtime"
 	"strconv"
 	"testing"
 	"time"
@@ -345,20 +344,12 @@ func TestAllDefaultEnginesAreServedByOneProxyProcess(t *testing.T) {
 // workers during teardown. This guards the regression where Ctrl+C left
 // the broker hung and self-restarting its children.
 func TestBrokerShutsDownOnSignal(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		// os.Process.Signal(os.Interrupt) is unsupported on Windows — you
-		// can't deliver SIGINT to an arbitrary process there. The bug this
-		// guards (ctx cancelled by a signal while the read loop is parked on
-		// stdin) is a Unix interactive-terminal concern; on Windows the
-		// broker is shut down by its parent closing stdin (EOF), which the
-		// other tests' teardown already exercises.
-		t.Skip("signalling a specific process is not supported on Windows")
-	}
 	cmd := exec.Command(brokerBin,
 		"--scanner-path", scannerBin,
 		"--proxy-path", proxyBin, "--proxy-engines", "ollama",
 		"--cluster-dir", t.TempDir(),
 	)
+	configureBrokerSignalTarget(cmd)
 	cmd.Stderr = os.Stderr
 	// Keep stdin OPEN for the lifetime of the test so shutdown is driven
 	// purely by the signal, not by stdin EOF (closing stdin would shut the
@@ -367,7 +358,6 @@ func TestBrokerShutsDownOnSignal(t *testing.T) {
 	if err != nil {
 		t.Fatalf("broker stdin pipe: %v", err)
 	}
-	defer stdin.Close()
 	stdoutPipe, err := cmd.StdoutPipe()
 	if err != nil {
 		t.Fatalf("broker stdout pipe: %v", err)
@@ -375,22 +365,38 @@ func TestBrokerShutsDownOnSignal(t *testing.T) {
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start broker: %v", err)
 	}
+	waited := false
+	defer func() {
+		_ = stdin.Close()
+		if !waited {
+			_ = cmd.Process.Kill()
+			_ = cmd.Wait()
+		}
+	}()
 	msgs := startMsgReader(stdoutPipe)
 	waitForMethod(t, msgs, "app:ready", 10*time.Second)
 
-	// SIGINT to the broker only (children are in their own process groups).
-	if err := cmd.Process.Signal(os.Interrupt); err != nil {
+	// Interrupt the broker only (children are in their own process groups).
+	// Windows uses Ctrl+Break because os.Process.Signal(os.Interrupt) cannot
+	// target an arbitrary process there.
+	if err := sendBrokerInterrupt(cmd.Process); err != nil {
 		t.Fatalf("signal broker: %v", err)
 	}
 
 	done := make(chan error, 1)
 	go func() { done <- cmd.Wait() }()
 	select {
-	case <-done:
+	case err := <-done:
+		waited = true
 		// Exited — the broker observed the signal and tore down cleanly.
+		if err != nil {
+			t.Fatalf("broker exited after interrupt: %v", err)
+		}
 	case <-time.After(10 * time.Second):
-		cmd.Process.Kill()
-		t.Fatal("broker did not exit within 10s of SIGINT (read loop blocked on stdin?)")
+		_ = cmd.Process.Kill()
+		<-done
+		waited = true
+		t.Fatal("broker did not exit within 10s of interrupt (read loop blocked on stdin?)")
 	}
 }
 

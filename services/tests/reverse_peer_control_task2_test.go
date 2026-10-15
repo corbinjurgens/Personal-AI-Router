@@ -528,9 +528,7 @@ func TestReversePeerControlTask2(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := os.Remove(pin); err != nil {
-			t.Fatal(err)
-		}
+		removeAuthorityFile(t, pin)
 		t.Cleanup(func() {
 			if err := os.WriteFile(pin, original, 0o600); err != nil {
 				t.Error(err)

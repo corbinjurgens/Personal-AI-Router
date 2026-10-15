@@ -60,7 +60,7 @@ func TestModelsHTTPEnrichment(t *testing.T) {
 	// address in the daemon's enrichment target selection).
 	txt := []string{"v=1", "uuid=" + instance + "-uuid", "ip=127.0.0.1", fmt.Sprintf("em=%d", emPort)}
 	startMDNSAdvertiser(t, mdnsAdvertiserFixture{
-		Instance: instance, Service: nodeRecordService, Port: emPort, TXT: txt, Interface: loopbackMDNSInterface(t).Name,
+		Instance: instance, Service: nodeRecordService, Port: emPort, TXT: txt, Interface: mdnsFixtureInterface(t).Name,
 	})
 	t.Logf("advertising %s @ %s (em=%d)", instance, nodeRecordService, emPort)
 

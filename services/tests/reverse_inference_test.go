@@ -460,9 +460,7 @@ func TestReverseInferencePhase04(t *testing.T) {
 			}
 			task1WriteJSON(t, pin, map[string]any{"nodeUuid": target.uuid, "nodeId": target.uuid, "certPem": source.cert, "clusterId": task1ClusterID, "admissionEpoch": 1})
 			assertRejected(t, "wrong-pin")
-			if err := os.Remove(pin); err != nil {
-				t.Fatal(err)
-			}
+			removeAuthorityFile(t, pin)
 			assertRejected(t, "removed-pin")
 		})
 	}
