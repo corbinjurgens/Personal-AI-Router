@@ -17,8 +17,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/grandcat/zeroconf"
-
 	"nvpair-shared/jsonrpc"
 	"nvpair-shared/noderec"
 )
@@ -81,16 +79,9 @@ func TestScannerEvictsRecordSupersededAtItsAddress(t *testing.T) {
 		"ip=127.0.0.1",
 		fmt.Sprintf("%s=%d", noderec.ServiceNodeInfo, niPort),
 	}
-	responder, err := zeroconf.Register(peerInstance, noderec.ServiceType, testDomain, noderec.SRVPort, txt, nil)
-	if err != nil {
-		t.Fatalf("register peer: %v", err)
-	}
-	responderDown := false
-	defer func() {
-		if !responderDown {
-			responder.Shutdown()
-		}
-	}()
+	stopResponder := startMDNSAdvertiser(t, mdnsAdvertiserFixture{
+		Instance: peerInstance, Service: noderec.ServiceType, Port: noderec.SRVPort, TXT: txt, Interface: loopbackMDNSInterface(t).Name,
+	})
 
 	events := startScannerForGhostTest(t)
 
@@ -102,8 +93,7 @@ func TestScannerEvictsRecordSupersededAtItsAddress(t *testing.T) {
 
 	// The wipe: the record stops being advertised under the old identity, and
 	// the machine now answers as someone else at the same address and port.
-	responder.Shutdown()
-	responderDown = true
+	stopResponder()
 	reported.Store(wipedUUID)
 
 	// Eviction waits on the browser's full miss threshold (12 scans at 5s, a full

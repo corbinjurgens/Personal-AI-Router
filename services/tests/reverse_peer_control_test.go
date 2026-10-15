@@ -403,15 +403,7 @@ func newTask1Nodes(t *testing.T) ([]*task1Node, int) {
 	t.Cleanup(func() { _ = blocked.Close(); <-blockedDone })
 	nodes := []*task1Node{}
 	for _, uuid := range []string{"task1-reachable", "task1-restricted", "task1-third"} {
-		base, err := os.MkdirTemp("", "p1u4-")
-		if err != nil {
-			t.Fatal(err)
-		}
-		t.Cleanup(func() {
-			if err := os.RemoveAll(base); err != nil {
-				t.Error(err)
-			}
-		})
+		base := shortClusterTempDir(t)
 		dir := filepath.Join(base, "cluster")
 		if err := os.MkdirAll(filepath.Join(dir, "trusted"), 0o700); err != nil {
 			t.Fatal(err)

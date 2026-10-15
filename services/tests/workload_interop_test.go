@@ -38,8 +38,6 @@ import (
 
 	"nvpair-shared/jsonrpc"
 	"nvpair-shared/noderec"
-
-	"github.com/grandcat/zeroconf"
 )
 
 const workloadMgrService = "_nvpair-workload-manager._tcp"
@@ -150,6 +148,7 @@ type interopProcess struct {
 	paths     []string
 	inventory *serviceProcessInventory
 	workerPID int32
+	cleanup   func()
 }
 
 func startInteropProcess(t *testing.T, base, binary string, port int, extraEnv []string, args ...string) *interopProcess {
@@ -210,7 +209,7 @@ func startInteropProcess(t *testing.T, base, binary string, port int, extraEnv [
 		p.done <- waitErr
 	}()
 	t.Logf("fixture_started pid=%d binary=%q port=%d", p.cmd.Process.Pid, binary, port)
-	t.Cleanup(func() {
+	p.cleanup = func() {
 		p.stopOnce.Do(func() {
 			close(discard)
 			if err := p.in.Close(); err != nil {
@@ -250,7 +249,8 @@ func startInteropProcess(t *testing.T, base, binary string, port int, extraEnv [
 			}
 			t.Logf("fixture_cleanup pid=%d owned_processes=%+v listener_ports=%v stderr=%s", p.cmd.Process.Pid, owned, p.ports, p.output.String())
 		})
-	})
+	}
+	t.Cleanup(p.cleanup)
 	return p
 }
 
@@ -507,17 +507,9 @@ func TestWorkloadFailedOnNodeLoss(t *testing.T) {
 	// probe has nothing to dial and evicts it cleanly. A distinct uuid keeps
 	// it from colliding with this host's own record.
 	peerTXT := []string{"v=1", "uuid=" + peerUUID, "ip=127.0.0.1"}
-	peerAdv, err := zeroconf.Register(peerNode, nodeRecordService, testDomain, 14999, peerTXT, nil)
-	if err != nil {
-		t.Fatalf("register peer node: %v", err)
-	}
-	stopAdv := func() {
-		if peerAdv != nil {
-			peerAdv.Shutdown()
-			peerAdv = nil
-		}
-	}
-	t.Cleanup(stopAdv)
+	stopAdv := startMDNSAdvertiser(t, mdnsAdvertiserFixture{
+		Instance: peerNode, Service: nodeRecordService, Port: 14999, TXT: peerTXT, Interface: loopbackMDNSInterface(t).Name,
+	})
 	t.Logf("advertising peer %q as %s", peerNode, nodeRecordService)
 
 	// The peer must be in the broker's directory before its removal can

@@ -9,8 +9,7 @@
 //	B. the broker accepts a client-originated errors:report and forwards it
 //	   into nvpair-errors, reflected in the next errors:update.
 //
-// Both reuse the supervision harness (startBrokerWith) and binaries built by
-// TestMain.
+// The broker fixtures use binaries built by TestMain.
 package tests
 
 import (
@@ -21,11 +20,67 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
-
-	"nvpair-shared/appdir"
 )
+
+// The broker has no per-worker port override for errors or cluster-manager.
+// This adapter only changes a real worker's listen port; its stdio protocol
+// passes through unchanged, following the workload interop adapter precedent.
+func init() {
+	if bridge := os.Getenv("NVPAIR_TEST_PORT_BRIDGE"); bridge != "" && bridge == os.Args[0] {
+		if err := runPortInteropBridge(); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
+}
+
+func runPortInteropBridge() error {
+	args := append(os.Args[1:], "--port", os.Getenv("NVPAIR_TEST_PORT"))
+	return runOwnedPortWorker(os.Getenv("NVPAIR_TEST_PORT_BINARY"), args)
+}
+
+func newPortInteropBridge(t *testing.T, base, binary string, port int) (string, []string) {
+	t.Helper()
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(executable)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bridge := filepath.Join(base, "port-bridge"+filepath.Ext(binary))
+	if err := os.WriteFile(bridge, data, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return bridge, []string{
+		"NVPAIR_TEST_PORT_BRIDGE=" + bridge,
+		"NVPAIR_TEST_PORT_BINARY=" + binary,
+		"NVPAIR_TEST_PORT=" + strconv.Itoa(port),
+	}
+}
+
+func startClientErrorsBroker(t *testing.T) *interopProcess {
+	t.Helper()
+	base := t.TempDir()
+	port := freePort(t)
+	bridge, env := newPortInteropBridge(t, base, errorsBin, port)
+	p := startInteropProcess(t, base, brokerBin, port, env,
+		"--cluster-dir", filepath.Join(base, "cluster"), "--scanner-path", scannerBin, "--errors-path", bridge)
+	for _, path := range []string{scannerBin, bridge, errorsBin} {
+		canonical, err := canonicalServicePath(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		p.paths = append(p.paths, canonical)
+	}
+	waitForMethod(t, p.msgs, "app:ready", 10*time.Second)
+	return p
+}
 
 // fakeOllama stands up a minimal Ollama-looking HTTP server on the fixed
 // port nvpair-manual-nodes probes (11434): GET / returns 200 (liveness) and
@@ -50,44 +105,49 @@ func fakeOllama(t *testing.T) func() {
 	return func() { _ = srv.Close() }
 }
 
-// fakeLMStudio stands up a minimal LM Studio-looking OpenAI-API server on the
-// fixed port nvpair-manual-nodes probes (1234): GET /v1/models returns 200 with a
-// one-model list, so a manual node pointed at it reports lmstudio_up=true.
-// Skips the test if the port can't be bound.
-func fakeLMStudio(t *testing.T) func() {
+// Own every endpoint the manual worker probes, including a negative Ollama
+// response and a stable node-info identity. Otherwise an installed node-info
+// changes the candidate's key from the manual name to the machine's UUID.
+func fakeLMStudio(t *testing.T, hostUUID string) {
 	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:1234")
-	if err != nil {
-		t.Skipf("cannot bind fake lmstudio on 127.0.0.1:1234 (%v); skipping", err)
-	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/models", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(w, `{"object":"list","data":[{"id":"qwen2.5-7b-instruct","object":"model"}]}`)
+		if _, err := io.WriteString(w, `{"object":"list","data":[{"id":"qwen2.5-7b-instruct","object":"model"}]}`); err != nil {
+			t.Errorf("write fixture LM Studio model list: %v", err)
+		}
 	})
-	srv := &http.Server{Handler: mux}
-	go func() { _ = srv.Serve(ln) }()
-	return func() { _ = srv.Close() }
-}
-
-func persistLMStudioProxyPort(t *testing.T, port int) string {
-	t.Helper()
-	root := t.TempDir()
-	t.Setenv("LOCALAPPDATA", root)
-	t.Setenv("APPDATA", root)
-	t.Setenv("XDG_CONFIG_HOME", root)
-	t.Setenv("HOME", root)
-	path, err := appdir.Path("lmstudio-proxy-port.json")
-	if err != nil {
-		t.Fatal(err)
+	nodeInfo := http.NewServeMux()
+	nodeInfo.HandleFunc("/v1/node-info", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if _, err := io.WriteString(w, fmt.Sprintf(`{"GPUs":[],"hostUuid":%q}`, hostUUID)); err != nil {
+			t.Errorf("write fixture node-info: %v", err)
+		}
+	})
+	for _, endpoint := range []struct {
+		port    int
+		handler http.Handler
+	}{
+		{1234, mux},
+		{11434, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusServiceUnavailable) })},
+		{14318, nodeInfo},
+	} {
+		ln, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(endpoint.port)))
+		if err != nil {
+			t.Fatalf("bind manual probe fixture port %d: %v", endpoint.port, err)
+		}
+		srv := &http.Server{Handler: endpoint.handler}
+		go func() {
+			if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
+				t.Errorf("serve manual probe fixture: %v", err)
+			}
+		}()
+		t.Cleanup(func() {
+			if err := srv.Close(); err != nil {
+				t.Errorf("close manual probe fixture: %v", err)
+			}
+		})
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(path, []byte(fmt.Sprintf(`{"port":%d}`, port)), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	return root
 }
 
 // fakeNodeInfo stands up a minimal node-info server on the fixed port the
@@ -254,17 +314,38 @@ func TestBrokerBridgesManualNodeUnderLearnedUUID(t *testing.T) {
 // into lmstudio-proxy (node/add-manual) so it shows up in
 // lmstudio-proxy:nodes/list — even though it never appears over mDNS.
 func TestBrokerBridgesManualNodeIntoLMStudioProxy(t *testing.T) {
-	configDir := persistLMStudioProxyPort(t, freePort(t))
-	stopLM := fakeLMStudio(t) // skips if 1234 unavailable
-	t.Cleanup(stopLM)
-
-	stdin, msgs, _, cleanup := startBrokerWithConfigDir(t, configDir,
+	const hostUUID = "xproc-manual-lmstudio-uuid"
+	fakeLMStudio(t, hostUUID)
+	base := t.TempDir()
+	proxyPort := freePort(t)
+	journal := map[string]any{"lmstudio": map[string]any{
+		"explicit": true,
+		"snapshot": map[string]any{
+			"engine": "lmstudio", "revision": 1, "appliedRevision": 1, "phase": "idle", "format": "pair-arguments-v1",
+			"settings": map[string]any{"serverPort": freePort(t), "proxyPort": proxyPort, "launchText": ""},
+		},
+	}}
+	if err := os.WriteFile(filepath.Join(base, "engine-settings-operations.json"), mustMarshal(t, journal), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	p := startInteropProcess(t, base, brokerBin, proxyPort, nil,
+		"--cluster-dir", filepath.Join(base, "cluster"), "--scanner-path", scannerBin,
 		"--manual-nodes-path", manualNodesBin,
 		"--proxy-path", proxyBin, "--proxy-engines", "lmstudio",
 	)
-	t.Cleanup(cleanup)
+	for _, path := range []string{scannerBin, manualNodesBin, proxyBin} {
+		canonical, err := canonicalServicePath(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		p.paths = append(p.paths, canonical)
+	}
+	stdin, msgs := p.in, p.msgs
 
 	waitForMethod(t, msgs, "app:ready", 10*time.Second)
+	if port := waitLMStudioProxyReady(t, stdin, msgs, 10*time.Second); port != proxyPort {
+		t.Fatalf("LM Studio proxy port=%d want=%d; stderr: %s", port, proxyPort, p.output.String())
+	}
 
 	const nodeName = "xproc-manual-lmstudio-bridge"
 	addReq := fmt.Sprintf(`{"jsonrpc":"2.0","id":920,"method":"node/add","params":{"address":"127.0.0.1","name":%q}}`, nodeName) + "\n"
@@ -283,15 +364,20 @@ func TestBrokerBridgesManualNodeIntoLMStudioProxy(t *testing.T) {
 			if !ok {
 				t.Fatal("broker stream closed before the manual node bridged into lmstudio-proxy")
 			}
-			if msg.Method == "" && msg.ID != nil && proxyNodesHas(t, msg.Result, nodeName) {
-				t.Logf("manual node %q bridged into lmstudio-proxy nodes/list", nodeName)
-				return
+			if msg.Method == "" && msg.ID != nil {
+				if msg.Error != nil {
+					t.Fatalf("manual node/proxy RPC id=%s: %+v; stderr: %s", *msg.ID, msg.Error, p.output.String())
+				}
+				if proxyNodesHas(t, msg.Result, hostUUID) {
+					t.Logf("manual node %q bridged under learned UUID %q", nodeName, hostUUID)
+					return
+				}
 			}
 		case <-ticker.C:
 			reqID++
 			sendReq(t, stdin, reqID, "lmstudio-proxy:nodes/list")
 		case <-deadline:
-			t.Fatalf("timed out waiting for manual node %q in lmstudio-proxy:nodes/list", nodeName)
+			t.Fatalf("timed out waiting for manual node UUID %q in lmstudio-proxy:nodes/list; stderr: %s", hostUUID, p.output.String())
 		}
 	}
 }
@@ -301,14 +387,8 @@ func TestBrokerBridgesManualNodeIntoLMStudioProxy(t *testing.T) {
 // reflected in the next errors:update — the same as a supervised worker
 // emitting one on its stdout.
 func TestBrokerAcceptsClientErrorsReport(t *testing.T) {
-	if portBusy(14319) {
-		t.Skip("nvpair-errors --peer-sync port 14319 already in use; skipping")
-	}
-
-	stdin, msgs, _, cleanup := startBrokerWith(t, "--errors-path", errorsBin)
-	t.Cleanup(cleanup)
-
-	waitForMethod(t, msgs, "app:ready", 10*time.Second)
+	p := startClientErrorsBroker(t)
+	stdin, msgs := p.in, p.msgs
 
 	const id = "client:leg-b-notif"
 	report := fmt.Sprintf(`{"jsonrpc":"2.0","method":"errors:report","params":{"id":%q,"message":"client-synthesized","severity":"error"}}`, id) + "\n"
@@ -326,14 +406,8 @@ func TestBrokerAcceptsClientErrorsReport(t *testing.T) {
 // leg B: an id-bearing errors:report is acked with a null result and also
 // reflected in errors:update.
 func TestBrokerAcceptsClientErrorsReportRequest(t *testing.T) {
-	if portBusy(14319) {
-		t.Skip("nvpair-errors --peer-sync port 14319 already in use; skipping")
-	}
-
-	stdin, msgs, _, cleanup := startBrokerWith(t, "--errors-path", errorsBin)
-	t.Cleanup(cleanup)
-
-	waitForMethod(t, msgs, "app:ready", 10*time.Second)
+	p := startClientErrorsBroker(t)
+	stdin, msgs := p.in, p.msgs
 
 	const (
 		reqID = 950

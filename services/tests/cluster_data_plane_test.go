@@ -31,8 +31,6 @@ import (
 	"nvpair-shared/clustertrust"
 	"nvpair-shared/jsonrpc"
 	"nvpair-shared/netpick"
-
-	"github.com/grandcat/zeroconf"
 )
 
 // interNodeCluster is a synthetic two-node cluster for the data-plane tests.
@@ -49,7 +47,7 @@ type interNodeCluster struct {
 
 func newInterNodeCluster(t *testing.T) *interNodeCluster {
 	t.Helper()
-	nodeDir, peerDir := filepath.Join(t.TempDir(), "cluster"), filepath.Join(t.TempDir(), "cluster")
+	nodeDir, peerDir := filepath.Join(shortClusterTempDir(t), "cluster"), filepath.Join(shortClusterTempDir(t), "cluster")
 	for _, dir := range []string{nodeDir, peerDir} {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			t.Fatal(err)
@@ -116,11 +114,9 @@ func (c *interNodeCluster) startStubClusterPeer(t *testing.T, instance, hostUUID
 	received, port := c.startDirectClusterPeer(t)
 	txt := []string{"v=1", "uuid=" + hostUUID, fmt.Sprintf("wl=%d", port),
 		clustertrust.ClusterUUIDTXTKey + "=" + c.peerUUID}
-	adv, err := zeroconf.Register(instance, nodeRecordService, testDomain, port, txt, nil)
-	if err != nil {
-		t.Fatalf("register stub peer: %v", err)
-	}
-	t.Cleanup(adv.Shutdown)
+	startMDNSAdvertiser(t, mdnsAdvertiserFixture{
+		Instance: instance, Service: nodeRecordService, Port: port, TXT: txt, Interface: loopbackMDNSInterface(t).Name,
+	})
 	t.Logf("stub cluster peer advertising %s (wl=%d, cluster-uuid=%s)", nodeRecordService, port, c.peerUUID)
 	return received
 }

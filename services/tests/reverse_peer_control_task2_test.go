@@ -128,15 +128,7 @@ func newTask2Fixture(t *testing.T) *task2Fixture {
 		<-blockedDone
 	})
 	for _, uuid := range []string{"task2-reachable", "task2-restricted"} {
-		base, err := os.MkdirTemp("", "p1u7-")
-		if err != nil {
-			t.Fatal(err)
-		}
-		t.Cleanup(func() {
-			if err := os.RemoveAll(base); err != nil {
-				t.Error(err)
-			}
-		})
+		base := shortClusterTempDir(t)
 		dir := filepath.Join(base, "cluster")
 		if err := os.MkdirAll(filepath.Join(dir, "trusted"), 0o700); err != nil {
 			t.Fatal(err)

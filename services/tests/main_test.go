@@ -165,7 +165,29 @@ func TestMain(m *testing.M) {
 		}
 	}
 
+	// macOS's default temporary prefix can make t.TempDir paths longer than
+	// Unix socket addresses permit (notably cluster/reverse.sock). Keep test
+	// fixture roots short and private, after builds have used the normal cache
+	// environment. Other platforms retain their existing temporary directory.
+	var shortTmpDir string
+	if runtime.GOOS == "darwin" {
+		shortTmpDir, err = os.MkdirTemp("/tmp", "nvp-")
+		if err != nil {
+			os.RemoveAll(tmpDir)
+			log.Fatalf("create short test temporary root: %v", err)
+		}
+		if err := os.Setenv("TMPDIR", shortTmpDir); err != nil {
+			os.RemoveAll(shortTmpDir)
+			os.RemoveAll(tmpDir)
+			log.Fatalf("set test temporary root: %v", err)
+		}
+		log.Printf("using private short test temporary root: %s", shortTmpDir)
+	}
+
 	code := m.Run()
+	if shortTmpDir != "" {
+		os.RemoveAll(shortTmpDir)
+	}
 	os.RemoveAll(tmpDir)
 	os.Exit(code)
 }
@@ -176,6 +198,25 @@ func goBuild(srcDir, output string) error {
 	cmd.Stdout = os.Stderr
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
+}
+
+// Cluster config bases contain private Unix sockets. On Darwin, even a short
+// TMPDIR cannot accommodate t.TempDir's full test-name prefix for long cases.
+func shortClusterTempDir(t *testing.T) string {
+	t.Helper()
+	if runtime.GOOS != "darwin" {
+		return t.TempDir()
+	}
+	dir, err := os.MkdirTemp("/tmp", "nvp-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.RemoveAll(dir); err != nil {
+			t.Errorf("remove short cluster fixture directory: %v", err)
+		}
+	})
+	return dir
 }
 
 // --- JSON-RPC helpers ---

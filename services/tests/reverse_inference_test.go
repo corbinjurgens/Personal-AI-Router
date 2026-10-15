@@ -174,15 +174,7 @@ func newPhase04Fixture(t *testing.T) *phase04Fixture {
 		<-done
 	})
 	for _, uuid := range []string{"phase04-reachable", "phase04-restricted"} {
-		base, err := os.MkdirTemp("", "p04-")
-		if err != nil {
-			t.Fatal(err)
-		}
-		t.Cleanup(func() {
-			if err := os.RemoveAll(base); err != nil {
-				t.Error(err)
-			}
-		})
+		base := shortClusterTempDir(t)
 		dir := filepath.Join(base, "cluster")
 		if err := os.MkdirAll(filepath.Join(dir, "trusted"), 0o700); err != nil {
 			t.Fatal(err)

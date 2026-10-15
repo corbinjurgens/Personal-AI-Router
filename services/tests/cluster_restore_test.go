@@ -12,8 +12,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"os"
-	"os/exec"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -25,39 +24,25 @@ import (
 // same dir is reused), returning its stdin, stdout frame stream, and a cleanup.
 func startBrokerInDir(t *testing.T, configDir string, extraArgs ...string) (io.WriteCloser, <-chan jsonrpc.Message, func()) {
 	t.Helper()
-	args := append([]string{"--scanner-path", scannerBin, "--cluster-dir", t.TempDir()}, extraArgs...)
-	cmd := exec.Command(brokerBin, args...)
-	cmd.Env = append(os.Environ(),
+	base := configDir
+	port := freePort(t)
+	bridge, env := newPortInteropBridge(t, base, clusterMgrBin, port)
+	args := append([]string{"--scanner-path", scannerBin, "--cluster-dir", filepath.Join(base, "cluster"), "--cluster-manager-path", bridge}, extraArgs...)
+	env = append(env,
 		"HOME="+configDir,
 		"XDG_CONFIG_HOME="+configDir,
 		"APPDATA="+configDir,
 		"LOCALAPPDATA="+configDir,
 	)
-	stdin, err := cmd.StdinPipe()
-	if err != nil {
-		t.Fatalf("broker stdin pipe: %v", err)
-	}
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		t.Fatalf("broker stdout pipe: %v", err)
-	}
-	cmd.Stderr = os.Stderr
-	if err := cmd.Start(); err != nil {
-		t.Fatalf("start broker: %v", err)
-	}
-	msgs := startMsgReader(stdout)
-	cleanup := func() {
-		stdin.Close()
-		done := make(chan error, 1)
-		go func() { done <- cmd.Wait() }()
-		select {
-		case <-done:
-		case <-time.After(8 * time.Second):
-			cmd.Process.Kill()
-			<-done
+	p := startInteropProcess(t, base, brokerBin, port, env, args...)
+	for _, path := range []string{scannerBin, nodeSettingsBin, bridge, clusterMgrBin} {
+		canonical, err := canonicalServicePath(path)
+		if err != nil {
+			t.Fatal(err)
 		}
+		p.paths = append(p.paths, canonical)
 	}
-	return stdin, msgs, cleanup
+	return p.in, p.msgs, p.cleanup
 }
 
 // waitForResponseID scans for the JSON-RPC response with the given id.
@@ -85,7 +70,7 @@ func waitForResponseID(t *testing.T, msgs <-chan jsonrpc.Message, id int, timeou
 // config dir, and asserts cluster:get-node-id reports the restored clusterId
 // (rather than the "" a fresh cluster-manager comes up with).
 func TestBrokerRestoresClusterIdentityAfterRestart(t *testing.T) {
-	configDir := t.TempDir()
+	configDir := shortClusterTempDir(t)
 	const clusterID = "restore-test-cluster-0001"
 	const friendly = "Restore Test Lab"
 
@@ -93,7 +78,6 @@ func TestBrokerRestoresClusterIdentityAfterRestart(t *testing.T) {
 	// clustered node's UI would have on create/join.
 	stdin1, msgs1, cleanup1 := startBrokerInDir(t, configDir,
 		"--settings-path", nodeSettingsBin,
-		"--cluster-manager-path", clusterMgrBin,
 	)
 	waitForMethod(t, msgs1, "app:ready", 15*time.Second)
 
@@ -118,7 +102,6 @@ func TestBrokerRestoresClusterIdentityAfterRestart(t *testing.T) {
 	// serving requests.
 	stdin2, msgs2, cleanup2 := startBrokerInDir(t, configDir,
 		"--settings-path", nodeSettingsBin,
-		"--cluster-manager-path", clusterMgrBin,
 	)
 	t.Cleanup(cleanup2)
 	waitForMethod(t, msgs2, "app:ready", 15*time.Second)
@@ -188,15 +171,11 @@ func waitSettingClusterID(t *testing.T, stdin io.Writer, msgs <-chan jsonrpc.Mes
 // survives a restart), and cluster:leave must clear it (so the node stays
 // unclustered after a restart rather than having the stale id restored).
 func TestBrokerPersistsClusterLifecycleToSettings(t *testing.T) {
-	if portBusy(14321) {
-		t.Skip("cluster-manager inter-node port 14321 already in use; skipping")
-	}
-	configDir := t.TempDir()
+	configDir := shortClusterTempDir(t)
 
 	// 1. Create a cluster; the broker must mirror the new id into settings.
 	stdin1, msgs1, cleanup1 := startBrokerInDir(t, configDir,
 		"--settings-path", nodeSettingsBin,
-		"--cluster-manager-path", clusterMgrBin,
 	)
 	waitForMethod(t, msgs1, "app:ready", 15*time.Second)
 
@@ -215,7 +194,6 @@ func TestBrokerPersistsClusterLifecycleToSettings(t *testing.T) {
 	// 2. Restart: the created identity is restored from settings.
 	stdin2, msgs2, cleanup2 := startBrokerInDir(t, configDir,
 		"--settings-path", nodeSettingsBin,
-		"--cluster-manager-path", clusterMgrBin,
 	)
 	waitForMethod(t, msgs2, "app:ready", 15*time.Second)
 	sendReq(t, stdin2, 320, "cluster:get-node-id")
@@ -234,7 +212,6 @@ func TestBrokerPersistsClusterLifecycleToSettings(t *testing.T) {
 	// 4. Restart: the node stays unclustered (the leave stuck).
 	stdin3, msgs3, cleanup3 := startBrokerInDir(t, configDir,
 		"--settings-path", nodeSettingsBin,
-		"--cluster-manager-path", clusterMgrBin,
 	)
 	t.Cleanup(cleanup3)
 	waitForMethod(t, msgs3, "app:ready", 15*time.Second)

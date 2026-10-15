@@ -70,7 +70,7 @@ func newBlockedPairingFixture(t *testing.T, joinerEnv []string) blockedPairingFi
 
 func newBlockedPairingFixtureEnv(t *testing.T, inviterEnv, joinerEnv []string) blockedPairingFixture {
 	t.Helper()
-	f := blockedPairingFixture{aDir: t.TempDir(), bDir: t.TempDir(), aPort: temporaryClusterPort(t), bPort: temporaryClusterPort(t)}
+	f := blockedPairingFixture{aDir: shortClusterTempDir(t), bDir: shortClusterTempDir(t), aPort: temporaryClusterPort(t), bPort: temporaryClusterPort(t)}
 	f.a = startCMEnv(t, f.aDir, f.aPort, append([]string{"NVPAIR_TEST_PAIR_REJECT_INBOUND=1"}, inviterEnv...))
 	f.b = startCMEnv(t, f.bDir, f.bPort, joinerEnv)
 	t.Cleanup(f.a.stop)
@@ -383,7 +383,7 @@ func TestClusterOutboundPairingLegacyBinary(t *testing.T) {
 	}
 	test := func(name, inviterBin, joinerBin string) {
 		t.Run(name, func(t *testing.T) {
-			aDir, bDir := t.TempDir(), t.TempDir()
+			aDir, bDir := shortClusterTempDir(t), shortClusterTempDir(t)
 			aPort, bPort := temporaryClusterPort(t), temporaryClusterPort(t)
 			a := startCMBinaryEnv(t, inviterBin, aDir, aPort, nil)
 			b := startCMBinaryEnv(t, joinerBin, bDir, bPort, nil)

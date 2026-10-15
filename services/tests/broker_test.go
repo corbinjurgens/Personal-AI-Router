@@ -4,11 +4,11 @@
 // Cross-process test for nvpair-ui-broker's opt-in discovery notification
 // stream (discovery:subscribe / discovery:unsubscribe).
 //
-// The broker spawns nvpair-node-scanner, whose promoted daemon browses
-// _nvpair-node._tcp and folds each node into the broker's discovery store even
-// when the /v1/node-info enrichment fetch fails. So we drive real discovery by
-// registering a bare _nvpair-node record via zeroconf (ni=<port> in TXT, no HTTP
-// node-info server required) and assert on the broker's stdout JSON-RPC frames:
+// A test-owned scanner subprocess emits the shared discovery node-event
+// protocol. This isolates the real broker's subscription contract from host
+// multicast availability. The scanner module's daemon/directory tests cover
+// discovery ingestion; real multicast is exercised by discovery_test.go and
+// discovery_relay_test.go. We assert on the broker's stdout JSON-RPC frames:
 //
 //   - while unsubscribed: the node is reachable via discovery:get-nodes
 //     but the broker pushes NO discovery:nodes-changed;
@@ -19,21 +19,26 @@
 //   - after discovery:unsubscribe: a further newly-advertised node is
 //     still discovered (visible via get-nodes) but is NOT pushed.
 //
-// Both broker and scanner binaries are built by TestMain.
+// The broker binary is built by TestMain.
 package tests
 
 import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
+	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"nvpair-shared/jsonrpc"
-
-	"github.com/grandcat/zeroconf"
+	"nvpair-shared/noderec"
 )
 
 // availableNode mirrors the broker's external camelCase wire shape (see
@@ -98,20 +103,146 @@ func sendReq(t *testing.T, w io.Writer, id int, method string) {
 	}
 }
 
-func registerNodeInfo(t *testing.T, instance string, port int) *zeroconf.Server {
-	t.Helper()
-	// One consolidated _nvpair-node record carrying ni=<port> (the node-info
-	// service). A distinct uuid keeps each stub from colliding with this node's
-	// own record or the others. The daemon browses this, folds it into its
-	// directory, and pushes it to the broker store.
-	txt := []string{"v=1", "uuid=" + instance + "-uuid", fmt.Sprintf("ni=%d", port)}
-	srv, err := zeroconf.Register(instance, nodeRecordService, testDomain, port, txt, nil)
-	if err != nil {
-		t.Fatalf("register %s: %v", instance, err)
+// Dispatch before TestMain so the broker's worker arguments do not become
+// testing flags and the scanner fixture does not rebuild the service bundle.
+func init() {
+	if fixture := os.Getenv("NVPAIR_TEST_SUBSCRIPTION_SCANNER"); fixture != "" && fixture == os.Args[0] {
+		if err := runSubscriptionScanner(); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		os.Exit(0)
 	}
-	t.Cleanup(srv.Shutdown)
-	t.Logf("advertising %s @ %s (ni=%d)", instance, nodeRecordService, port)
-	return srv
+}
+
+func runSubscriptionScanner() error {
+	codec := jsonrpc.NewCodec(struct {
+		io.Reader
+		io.Writer
+	}{os.Stdin, os.Stdout})
+	nodes := make(map[string]noderec.DirectoryNode)
+	var mu sync.Mutex
+	ln, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", os.Getenv("NVPAIR_TEST_SUBSCRIPTION_PORT")))
+	if err != nil {
+		return err
+	}
+	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var frame jsonrpc.Message
+		if err := json.NewDecoder(r.Body).Decode(&frame); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		var event noderec.NodeEvent
+		if err := json.Unmarshal(frame.Params, &event); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		switch frame.Method {
+		case noderec.NotifyNodeDiscovered, noderec.NotifyNodeUpdated:
+			nodes[event.Node.HostUUID] = event.Node
+		case noderec.NotifyNodeRemoved:
+			delete(nodes, event.Node.HostUUID)
+		default:
+			http.Error(w, "unexpected fixture event "+frame.Method, http.StatusBadRequest)
+			return
+		}
+		if err := codec.Notify(frame.Method, event); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
+	})}
+	serveDone := make(chan error, 1)
+	go func() { serveDone <- srv.Serve(ln) }()
+	defer srv.Close()
+	if err := codec.Notify("ready", map[string]string{"version": "subscription-fixture"}); err != nil {
+		return err
+	}
+	for {
+		frame, err := codec.Read()
+		if err == io.EOF {
+			if err := srv.Close(); err != nil {
+				return err
+			}
+			select {
+			case err := <-serveDone:
+				if err != http.ErrServerClosed {
+					return err
+				}
+				return nil
+			case <-time.After(time.Second):
+				return fmt.Errorf("fixture scanner HTTP server did not stop")
+			}
+		}
+		if err != nil {
+			return err
+		}
+		if !frame.IsRequest() {
+			continue
+		}
+		if frame.Method == noderec.MethodGetNodes {
+			mu.Lock()
+			snapshot := noderec.GetNodesResult{Nodes: make([]noderec.DirectoryNode, 0, len(nodes))}
+			for _, node := range nodes {
+				snapshot.Nodes = append(snapshot.Nodes, node)
+			}
+			mu.Unlock()
+			if err := codec.Respond(frame.ID, snapshot); err != nil {
+				return err
+			}
+		} else if err := codec.Respond(frame.ID, map[string]bool{"ok": true}); err != nil {
+			return err
+		}
+	}
+}
+
+func startSubscriptionBroker(t *testing.T) (*interopProcess, func(string, string, int)) {
+	t.Helper()
+	base := t.TempDir()
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(executable)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture := filepath.Join(base, "subscription-scanner"+filepath.Ext(scannerBin))
+	if err := os.WriteFile(fixture, data, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	port := freePort(t)
+	p := startInteropProcess(t, base, brokerBin, port, []string{
+		"NVPAIR_TEST_SUBSCRIPTION_SCANNER=" + fixture,
+		"NVPAIR_TEST_SUBSCRIPTION_PORT=" + strconv.Itoa(port),
+	}, "--scanner-path", fixture, "--cluster-dir", filepath.Join(base, "cluster"))
+	canonical, err := canonicalServicePath(fixture)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.paths = append(p.paths, canonical)
+	client := &http.Client{Timeout: 2 * time.Second}
+	t.Cleanup(client.CloseIdleConnections)
+	waitTCP(t, net.JoinHostPort("127.0.0.1", strconv.Itoa(port)), 5*time.Second)
+	return p, func(method, instance string, nodeInfoPort int) {
+		t.Helper()
+		event := noderec.NodeEvent{Node: noderec.DirectoryNode{
+			HostUUID: instance + "-uuid", Name: instance, IP: "127.0.0.1",
+			Services: map[noderec.ServiceKey]noderec.ServiceStatus{noderec.ServiceNodeInfo: {Port: nodeInfoPort}},
+		}}
+		frame := jsonrpc.Message{JSONRPC: "2.0", Method: method, Params: mustMarshal(t, event)}
+		resp, err := client.Post(fmt.Sprintf("http://127.0.0.1:%d", port), "application/json", strings.NewReader(string(mustMarshal(t, frame))))
+		if err != nil {
+			t.Fatalf("publish fixture scanner event: %v; stderr: %s", err, p.output.String())
+		}
+		body, err := io.ReadAll(resp.Body)
+		if closeErr := resp.Body.Close(); closeErr != nil {
+			t.Errorf("close scanner event response: %v", closeErr)
+		}
+		if err != nil || resp.StatusCode != http.StatusOK {
+			t.Fatalf("scanner event response status=%d body=%q err=%v; stderr: %s", resp.StatusCode, body, err, p.output.String())
+		}
+	}
 }
 
 func containsNode(nodes []availableNode, id string) bool {
@@ -201,14 +332,11 @@ func TestCrossProcessBrokerSubscription(t *testing.T) {
 		port3 = 14403
 	)
 
-	// Advertise the first node before the broker starts so it is in the
-	// store by the time we query it.
-	registerNodeInfo(t, inst1, port1)
-
-	stdin, msgs, cleanup := startBroker(t)
-	t.Cleanup(cleanup)
+	p, publish := startSubscriptionBroker(t)
+	stdin, msgs := p.in, p.msgs
 
 	waitForMethod(t, msgs, "app:ready", 5*time.Second)
+	publish(noderec.NotifyNodeDiscovered, inst1, port1)
 	t.Log("broker ready")
 
 	// Phase 1 — unsubscribed: the node must be visible via the on-demand
@@ -253,7 +381,7 @@ func TestCrossProcessBrokerSubscription(t *testing.T) {
 	t.Log("phase 2 OK: subscribe acked and baseline snapshot received")
 
 	// Phase 3 — subscribed: a newly advertised node must be pushed.
-	registerNodeInfo(t, inst2, port2)
+	publish(noderec.NotifyNodeDiscovered, inst2, port2)
 	waitForPushContaining(t, msgs, inst2, 25*time.Second)
 	t.Log("phase 3 OK: live push received for new node while subscribed")
 
@@ -289,7 +417,7 @@ func TestCrossProcessBrokerSubscription(t *testing.T) {
 	// discovered (visible via get-nodes) but must NOT be pushed. Keying
 	// the negative assertion on inst3 (which only exists from now on)
 	// makes it immune to any pre-unsubscribe push still draining.
-	registerNodeInfo(t, inst3, port3)
+	publish(noderec.NotifyNodeDiscovered, inst3, port3)
 	pollNodeListed(t, stdin, msgs, inst3, 300, 25*time.Second, func(nodes []availableNode) bool {
 		return !containsNode(nodes, inst3)
 	})
