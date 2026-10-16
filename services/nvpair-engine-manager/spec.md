@@ -48,6 +48,19 @@ extensibility story for an open-source product.
   `/props` to report `role:"router"`; a single-model listener is incompatible
   and must not be started or adopted because its `/models` contract does not
   expose router residency state.
+- The same bundled llama.cpp launch also fixes `--ctx-size 8192 --parallel 1`
+  in both `runtime.args` and `runtime.editable_launch.fixed_args`, so fresh and
+  previously saved editable launches start with one parallel slot and an
+  8,192-token total context. This bounds default KV-cache memory (the router
+  propagates parent options to model children and would otherwise derive a much
+  larger context from the model), at the cost of one-slot concurrency and a
+  shorter maximum prompt; a loaded child resolving `--parallel auto` to four
+  slots multiplied that memory. The tradeoff is deliberate: low default memory
+  over default concurrency and maximum prompt length. Opaque user arguments
+  remain the explicit override lane: an advanced user whose hardware and
+  workload need different values supplies later llama.cpp arguments in the
+  launch text. The manifest carries no parsing, range validation, migration or
+  per-model logic for these values.
 - Per-engine stdout/stderr log capture and structured operational error records, surfaced via the errors pipeline.
 - A normalized node-level model list (`engine:models`): union of every running engine's `list_models`, name-extracted via each action's declarative `result` spec, plus the per-engine set of models loaded in memory (`loadedByEngine`, from each engine's `loaded_models` action). A successful explicit empty inventory remains an engine key with `[]`; a missing/malformed/failed inventory omits that engine key instead of being mislabeled as authoritative empty. A watcher polls the loaded set and pushes `engine:models-changed` when it changes (explicit load/unload, JIT auto-load, TTL/idle eviction).
 - Expose all of the above over the `engine:*` JSON-RPC surface to whatever orchestrates the service, plus an optional plain-HTTP LAN endpoint (`--http-port`, `GET /v1/models`) that serves the model list to a peer's discovery daemon (the list moved off the size-limited mDNS TXT onto HTTP).

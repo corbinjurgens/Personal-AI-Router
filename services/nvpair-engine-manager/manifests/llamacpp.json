@@ -8,14 +8,14 @@
   "uninstall": { "remove": ["{install_dir}"] },
   "runtime": {
     "editable_launch": {
-      "fixed_args": ["--sleep-idle-seconds", "300"],
+      "fixed_args": ["--sleep-idle-seconds", "300", "--ctx-size", "8192", "--parallel", "1"],
       "controls": [
         { "flags": ["--host"], "value": "{server.host}" },
         { "flags": ["--port"], "value": "{server.port}" },
         { "flags": ["--cors-origins"], "value": "{cors.origins}" }
       ]
     },
-    "args": ["--sleep-idle-seconds", "300", "--host", "{host}", "--port", "{port}", "--cors-origins", ""],
+    "args": ["--sleep-idle-seconds", "300", "--ctx-size", "8192", "--parallel", "1", "--host", "{host}", "--port", "{port}", "--cors-origins", ""],
     "env": { "LLAMA_CACHE": "{models_dir}" },
     "bind": "127.0.0.1",
     "port": 8081,
