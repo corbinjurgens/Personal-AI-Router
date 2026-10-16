@@ -10,6 +10,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -417,6 +418,60 @@ func TestSettingsResultPersistenceFailureReturnsFailedReceipt(t *testing.T) {
 	}
 }
 
+func TestSettingsJournalLoadRebasesOwnerWithoutChangingRecoveryDataOrDisk(t *testing.T) {
+	b := &Broker{nodeID: "current-node", clusterDir: filepath.Join(t.TempDir(), "cluster")}
+	path, err := b.engineSettingsPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	journal := []byte(`{
+		"ollama": {"snapshot": {"nodeId":"former-node","engine":"ollama","revision":9,"appliedRevision":7,"epoch":"former-epoch","sequence":42,"settings":{"serverPort":11436,"proxyPort":11434,"launchText":"--parallel 2"},"effectiveServerPort":11435,"effectiveProxyPort":11434,"running":true,"adopted":true,"editable":true,"reason":"fixture reason","format":"pair-arguments-v1","phase":"applying","error":"interrupted","requestId":"active-request"},"previous":{"serverPort":11435,"proxyPort":11434,"launchText":"--parallel 1"},"resume":true,"explicit":true,"receipts":{"active-request":{"hash":"active-hash","revision":9,"phase":"applying"},"earlier-request":{"hash":"earlier-hash","revision":7,"phase":"succeeded"}}},
+		"lmstudio": {"snapshot": {"engine":"lmstudio","revision":5,"appliedRevision":3,"epoch":"old-epoch","sequence":18,"settings":{"serverPort":1235,"proxyPort":1234,"launchText":"--fixture"},"phase":"failed","error":"startup failure","requestId":"failed-request"},"previous":{"serverPort":1236,"proxyPort":1234},"resume":false,"explicit":false,"receipts":{"failed-request":{"hash":"failed-hash","revision":5,"phase":"failed"}}}
+	}`)
+	var want map[string]*engineSettingsRecord
+	if err := json.Unmarshal(journal, &want); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, journal, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.loadEngineSettingsLocked(); err != nil {
+		t.Fatal(err)
+	}
+	if b.engineSettingsEpoch == "" || b.engineSettingsEpoch == "former-epoch" || b.engineSettingsEpoch == "old-epoch" {
+		t.Fatalf("epoch was not renewed: %q", b.engineSettingsEpoch)
+	}
+	for _, record := range want {
+		record.Snapshot.NodeID = "current-node"
+		record.Snapshot.Epoch = b.engineSettingsEpoch
+		record.Snapshot.Sequence = 0
+	}
+	if !reflect.DeepEqual(b.engineSettings, want) {
+		t.Fatalf("loaded records differ from preserved recovery data: got %+v, want %+v", b.engineSettings, want)
+	}
+	loadedBytes, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(loadedBytes, journal) {
+		t.Fatal("loading rewrote the journal")
+	}
+	if err := b.saveEngineSettingsLocked(); err != nil {
+		t.Fatal(err)
+	}
+	savedBytes, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var saved map[string]*engineSettingsRecord
+	if err := json.Unmarshal(savedBytes, &saved); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(saved, want) {
+		t.Fatalf("normal save did not preserve rebased records: got %+v, want %+v", saved, want)
+	}
+}
+
 func TestSettingsJournalFailureAndInterruptedRecovery(t *testing.T) {
 	h := newSettingsHarness(t)
 	p := h.request(t)
@@ -438,6 +493,7 @@ func TestSettingsJournalFailureAndInterruptedRecovery(t *testing.T) {
 	r.Snapshot.Settings = p.Settings
 	r.Snapshot.Revision++
 	r.Snapshot.Phase = "applying"
+	r.Snapshot.NodeID = "former-node"
 	r.Resume = true
 	r.Explicit = true
 	if err := h.b.saveEngineSettingsLocked(); err != nil {
@@ -457,6 +513,17 @@ func TestSettingsJournalFailureAndInterruptedRecovery(t *testing.T) {
 	}
 	if _, ok := h.b.explicitEngineSettings("ollama"); !ok {
 		t.Fatal("explicit startup preference lost")
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var saved map[string]*engineSettingsRecord
+	if err := json.Unmarshal(data, &saved); err != nil {
+		t.Fatal(err)
+	}
+	if saved["ollama"] == nil || saved["ollama"].Snapshot.NodeID != "target" {
+		t.Fatal("recovery did not persist the current settings owner")
 	}
 }
 

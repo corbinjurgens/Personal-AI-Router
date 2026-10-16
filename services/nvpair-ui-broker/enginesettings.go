@@ -81,6 +81,7 @@ func (b *Broker) loadEngineSettingsLocked() error {
 			b.engineSettingsError = fmt.Errorf("invalid settings journal")
 			return b.engineSettingsError
 		}
+		record.Snapshot.NodeID = b.nodeID
 		record.Snapshot.Epoch = b.engineSettingsEpoch
 		record.Snapshot.Sequence = 0
 		if record.Receipts == nil {
