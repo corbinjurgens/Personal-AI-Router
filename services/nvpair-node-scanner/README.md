@@ -117,7 +117,11 @@ Emitted as the directory changes. Each carries the affected `DirectoryNode` (ide
 - `discovery:node-telemetry` — compact maximum-GPU utilization, validity, and
   sample age for broker-internal scheduling
 
-- `errors:report` / `errors:clear` — a **paired** (`trusted`) remote peer whose node-info stops answering is reported as a `warning` (`action:"none"`) under the id `node-scanner:node-info-unreachable:<hostUuid>`, at the same point the daemon logs `node-info is not answering` (the first enrichment sweep in which no published address answers). The clear follows when node-info answers again, the peer is no longer paired, or the node is evicted. Unpaired LAN nodes and this node's own loopback node-info are not reported. The scanner leaves `nodeId` and `timestamp` unset; the broker stamps them and forwards both notifications to `nvpair-errors`. A peer reached only through an authenticated reverse session is not swept by this path and is not reported by it.
+- `errors:report` / `errors:clear` — a **paired** (`trusted`) remote peer this node cannot reach is reported as a `warning` (`action:"none"`) under one id per peer, `node-scanner:node-info-unreachable:<hostUuid>`. Two observations raise it, and the message states which:
+  - **node-info not answering.** Checked when the peer's mDNS record is discovered or changes, at the point the daemon logs `node-info is not answering` (no published address answered). A peer already down when first discovered is reported. A peer that goes quiet behind an unchanged record is not noticed by this path, because nothing re-enriches it between record changes.
+  - **reverse-session claims lapsing.** A peer known through an authenticated peer-services claim is not enriched over HTTP at all. When its claim passes the 30 s age limit while it is still admitted, the peer is reported; the claim age is the debounce.
+
+  The clear follows when node-info answers again, the next claim for the peer is accepted, the peer stops being paired, or the node is evicted. Unpaired LAN nodes and this node's own loopback node-info are not reported. The scanner leaves `nodeId` and `timestamp` unset; the broker stamps them and forwards both notifications to `nvpair-errors`, and clears the ids still standing if the scanner crashes (a restarted scanner re-reports what is still true).
 
 A one-shot `ready` notification is sent on startup carrying the daemon version. The broker replays its service registrations on every scanner spawn, so a restarted daemon is repopulated without needing to compare an epoch.
 

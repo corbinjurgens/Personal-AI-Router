@@ -334,6 +334,13 @@ type Broker struct {
 	manualNodeKeys     map[string]string
 	manualNodeStatuses map[string]manualNodeStatusEntry
 
+	// scannerErrorIDsMu guards scannerErrorIDs: the error ids the scanner
+	// currently has standing in nvpair-errors, so a scanner that dies can have
+	// them cleared. Its own record of what it reported dies with it, and nothing
+	// else would ever clear them.
+	scannerErrorIDsMu sync.Mutex
+	scannerErrorIDs   map[string]struct{}
+
 	// schedMu guards the cached ranking and its generation.
 	//
 	// One cache, not one per engine: the scheduler computes a single node-wide
@@ -2185,7 +2192,10 @@ func (b *Broker) Serve(ctx context.Context) error {
 	// it and (when auto-restart is enabled) respawns it on an unexpected
 	// exit instead of leaving the discovery snapshot frozen.
 	b.scannerSup = newSupervisor("scanner", defaultRestartPolicy(), b.spawnScanner)
-	b.scannerSup.onCrash, b.scannerSup.onRecovered = b.supervisedWorkerCallbacks("scanner", func() { b.setScanner(nil) })
+	b.scannerSup.onCrash, b.scannerSup.onRecovered = b.supervisedWorkerCallbacks("scanner", func() {
+		b.setScanner(nil)
+		b.clearScannerErrors()
+	})
 	if err := b.scannerSup.Start(); err != nil {
 		return fmt.Errorf("start scanner: %w", err)
 	}

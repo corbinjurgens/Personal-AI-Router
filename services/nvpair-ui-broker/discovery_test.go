@@ -6,6 +6,7 @@ package main
 import (
 	"encoding/json"
 	"testing"
+	"time"
 
 	"nvpair-shared/errors"
 	"nvpair-shared/noderec"
@@ -368,5 +369,42 @@ func TestScannerErrorsNotificationsReachTheErrorsPipeline(t *testing.T) {
 	}
 	if cleared.ID != id || cleared.ClearedBy != "local-node" {
 		t.Fatalf("forwarded clear = %+v", cleared)
+	}
+}
+
+// A scanner that dies takes its record of what it reported with it, so the
+// broker withdraws the errors it forwarded: the ones still standing, not the
+// ones the scanner already cleared.
+func TestScannerCrashClearsTheErrorsItReported(t *testing.T) {
+	b := &Broker{nodeID: "local-node"}
+	seen := observeErrors(t, b)
+	sp := &scannerProcess{onErrorsNotif: b.dispatchScannerErrorsNotif}
+
+	const standing, recovered = "node-scanner:node-info-unreachable:a", "node-scanner:node-info-unreachable:b"
+	sp.handleNotify(methodErrorsReport, json.RawMessage(`{"id":"`+standing+`","message":"quiet"}`))
+	sp.handleNotify(methodErrorsReport, json.RawMessage(`{"id":"`+recovered+`","message":"quiet"}`))
+	sp.handleNotify(methodErrorsClear, json.RawMessage(`{"id":"`+recovered+`"}`))
+	for range 3 {
+		select {
+		case <-seen:
+		case <-time.After(2 * time.Second):
+			t.Fatal("scanner notifications did not reach the errors process")
+		}
+	}
+
+	b.clearScannerErrors()
+	msg := awaitErrorsNotification(t, seen, methodErrorsClear)
+	var cleared errors.ClearParams
+	if err := json.Unmarshal(msg.Params, &cleared); err != nil {
+		t.Fatal(err)
+	}
+	if cleared.ID != standing || cleared.ClearedBy != "local-node" {
+		t.Fatalf("crash clear = %+v, want %s", cleared, standing)
+	}
+	b.clearScannerErrors()
+	select {
+	case extra := <-seen:
+		t.Fatalf("a second crash cleared again: %+v", extra)
+	case <-time.After(gateQuietWindow):
 	}
 }

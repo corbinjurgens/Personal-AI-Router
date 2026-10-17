@@ -5,6 +5,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"maps"
 	"slices"
 	"time"
@@ -146,6 +147,9 @@ func (d *daemon) acceptPeerServices(claim noderec.PeerServicesClaim) bool {
 	if isNew || routeChanged || previousNode.Name != node.Name || previousNode.Trusted != node.Trusted {
 		d.emit(method, node)
 	}
+	// A claim is proof the peer reaches us again, whatever the lapse that put it
+	// in the errors view.
+	d.clearUnreachable(hostUUID)
 	if !wasAuthenticated || routeChanged {
 		enrichmentNode := node
 		enrichmentNode.Services = maps.Clone(node.Services)
@@ -226,18 +230,31 @@ func (d *daemon) enrichPeerServices(claim noderec.PeerServicesClaim, node nodere
 
 // reconcilePeerServices removes derived authority on leave, re-pair or expiry.
 // Browse claims survive independently and become visible again on retirement.
+//
+// A claim that expires while its peer is still admitted is the reverse session
+// going quiet: cluster-manager stops sending claims when it can no longer reach
+// the peer, and the claim's age is the debounce. That is the one point where a
+// paired peer that is down is observable without a direct connection, so it is
+// reported (reportUnreachable), under the same id enrichment uses, and cleared
+// by the next accepted claim, by the peer ceasing to be paired, or by a later
+// eviction.
 func (d *daemon) reconcilePeerServices() {
 	d.peerServicesMu.Lock()
 	defer d.peerServicesMu.Unlock()
 	d.dir.mu.Lock()
 	var changed []noderec.DirectoryNode
 	var removed []noderec.DirectoryNode
+	var lapsed []noderec.DirectoryNode
 	for hostUUID, claim := range d.dir.peerServices {
 		incarnation, admitted := d.mesh.PeerServiceIncarnation(hostUUID)
-		if admitted && incarnation == claim.Incarnation && peerServicesFresh(claim, time.Now()) {
+		current := admitted && incarnation == claim.Incarnation
+		if current && peerServicesFresh(claim, time.Now()) {
 			continue
 		}
 		old := d.dir.nodes[hostUUID]
+		if current {
+			lapsed = append(lapsed, old)
+		}
 		delete(d.dir.peerServices, hostUUID)
 		d.dir.generations[hostUUID]++
 		if browse, exists := d.dir.browse[hostUUID]; exists {
@@ -258,6 +275,13 @@ func (d *daemon) reconcilePeerServices() {
 		d.forget(node.HostUUID)
 		d.emit(noderec.NotifyNodeRemoved, node)
 	}
+	// After the loops above: reverting or forgetting a node clears its report, and
+	// this one has to outlive that.
+	for _, node := range lapsed {
+		d.reportUnreachable(node.HostUUID, fmt.Sprintf("Paired node %q has stopped answering over its reverse session for %s; it may be unreachable from this machine",
+			nodeLabel(node), peerServicesMaxAge))
+	}
+	d.clearUnpairedReports()
 }
 
 func (d *daemon) peerServicesLoop(ctx context.Context) {

@@ -233,13 +233,12 @@ func TestNodeInfoErrorBodyIsDrainedForConnectionReuse(t *testing.T) {
 }
 
 // reportingDaemon is a daemon whose codec output is captured and whose directory
-// holds the paired peer, as it does by the time the refresh loop sweeps it.
+// has not yet entered the directory, as is the case for a peer being discovered.
 func reportingDaemon(t *testing.T) (*daemon, noderec.DirectoryNode, func() []Message) {
 	t.Helper()
 	var out bytes.Buffer
 	d := &daemon{codec: NewCodec(&out), dir: newDirectory()}
 	peer := noderec.DirectoryNode{HostUUID: "peer-uuid", Name: "mac-studio", Trusted: true}
-	d.dir.upsert(peer)
 	sent := func() []Message {
 		var msgs []Message
 		decoder := json.NewDecoder(bytes.NewReader(out.Bytes()))
@@ -303,15 +302,10 @@ func TestNodeInfoOutageIsReportedOnceAndClearedOnRecovery(t *testing.T) {
 }
 
 // TestNodeInfoOutageIsClearedOnEviction: forgetting a node takes its report out
-// of the errors view, and a late failed sweep for the evicted node does not put
-// it back.
+// of the errors view. The peer was never in the directory, which is how a peer
+// that is already down when it is discovered looks: it is still reported.
 func TestNodeInfoOutageIsClearedOnEviction(t *testing.T) {
 	d, peer, sent := reportingDaemon(t)
-
-	d.noteNodeInfo(peer, "10.0.0.5:14300", false)
-	d.dir.remove(peer.HostUUID)
-	d.forget(peer.HostUUID)
-	requireErrorsFrames(t, sent(), "errors:report", "errors:clear")
 
 	d.noteNodeInfo(peer, "10.0.0.5:14300", false)
 	d.forget(peer.HostUUID)

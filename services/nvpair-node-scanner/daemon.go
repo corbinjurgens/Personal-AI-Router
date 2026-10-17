@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -120,8 +121,9 @@ type daemon struct {
 	// nodeInfoReported holds the nodes whose outage is currently in the errors
 	// view, so the report and its clear are each sent once. It is separate from
 	// nodeInfoDown because the two answer different questions: down is what the
-	// last sweep saw, reported is what the operator has been told, and a node can
-	// be down for a while before it is paired or present in the directory.
+	// last enrichment saw, reported is what the operator has been told, and a
+	// peer can be reported for reasons enrichment never sees (see
+	// reportLapsedPeerServices).
 	nodeInfoReported map[string]bool
 
 	// activityMu guards lastActivityAt, when each peer was last seen returning
@@ -1264,11 +1266,11 @@ func (d *daemon) enrichInfoCandidates(node *noderec.DirectoryNode, hosts []strin
 // noteNodeInfo reports a peer's node-info endpoint going quiet, and coming back,
 // at a level someone reading the log will see.
 //
-// Only the transitions are reported. The enrichment sweep repeats every
-// peerRefreshInterval for as long as a node is advertised, so a peer whose
-// address accepts nothing produces an unbounded run of identical failures; one
-// line each time is why this was a debug line, and being a debug line is why an
-// address that never once answered looked, in the log, exactly like one that was
+// Only the transitions are reported. The enrichment runs on every mDNS record
+// change for as long as a node is advertised, so a peer whose address accepts
+// nothing would produce an unbounded run of identical failures; one line each
+// time is why this was a debug line, and being a debug line is why an address
+// that never once answered looked, in the log, exactly like one that was
 // working. A node that is failing is stated once, with where it was asked, and
 // its recovery is stated once.
 //
@@ -1278,19 +1280,20 @@ func (d *daemon) enrichInfoCandidates(node *noderec.DirectoryNode, hosts []strin
 //
 // The log is not where an operator looks, so a paired peer's outage is also put
 // in the errors view (nodeInfoUnreachableID) and taken out again when the peer
-// answers or leaves. Only paired peers are reported: an unpaired LAN node that
-// firewalls this machine is not something the operator can act on here, and this
-// node's own node-info (reached over loopback) is the supervisor's to report.
-// A peer not yet in the directory is reported on the first sweep after it is,
-// because eviction forgets a node and a report sent for an evicted node would
-// have nothing left to clear it.
+// answers, stops being paired, or the node is evicted. Only paired peers are
+// reported: an unpaired LAN node that firewalls this machine is not something
+// the operator can act on here, and this node's own node-info (reached over
+// loopback) is the supervisor's to report.
+//
+// This runs when the peer's mDNS record is discovered or changes, so it catches
+// a peer that is unreachable from the start but not one that goes quiet behind
+// an unchanged record. That second case reaches the errors view through the
+// reverse-session path (reportLapsedPeerServices) or, once the record ages out,
+// through the proxies' upstream-unreachable error.
 func (d *daemon) noteNodeInfo(node noderec.DirectoryNode, endpoint string, ok bool) {
 	hostUUID := node.HostUUID
 	host, _, _ := net.SplitHostPort(endpoint)
 	reportable := !ok && node.Trusted && !isLoopbackHost(host)
-	if reportable && d.dir != nil {
-		_, reportable = d.dir.get(hostUUID)
-	}
 
 	d.infoMu.Lock()
 	was := d.nodeInfoDown[hostUUID]
@@ -1302,15 +1305,6 @@ func (d *daemon) noteNodeInfo(node noderec.DirectoryNode, endpoint string, ok bo
 		}
 		d.nodeInfoDown[hostUUID] = true
 	}
-	wasReported := d.nodeInfoReported[hostUUID]
-	if reportable {
-		if d.nodeInfoReported == nil {
-			d.nodeInfoReported = make(map[string]bool)
-		}
-		d.nodeInfoReported[hostUUID] = true
-	} else {
-		delete(d.nodeInfoReported, hostUUID)
-	}
 	d.infoMu.Unlock()
 
 	switch {
@@ -1321,23 +1315,18 @@ func (d *daemon) noteNodeInfo(node noderec.DirectoryNode, endpoint string, ok bo
 		slog.Info("node-info is answering again", "hostUuid", hostUUID, "endpoint", endpoint)
 	}
 
-	switch {
-	case reportable && !wasReported:
-		d.emitError(sharederrors.ServiceError{
-			ID: nodeInfoUnreachableID(hostUUID),
-			Message: fmt.Sprintf("Paired node %q is not answering on its node-info endpoint (%s); its inventory is not updating and it may be unreachable from this machine",
-				nodeLabel(node), endpoint),
-			Severity: "warning",
-			Action:   "none",
-		})
-	case !reportable && wasReported:
-		d.emitErrorClear(hostUUID)
+	if reportable {
+		d.reportUnreachable(hostUUID, fmt.Sprintf("Paired node %q is not answering on its node-info endpoint (%s); its inventory is not updating and it may be unreachable from this machine",
+			nodeLabel(node), endpoint))
+	} else {
+		d.clearUnreachable(hostUUID)
 	}
 }
 
-// nodeInfoUnreachableID is the errors-view id for a paired peer whose node-info
-// has stopped answering. One id per peer, so a peer that keeps failing refreshes
-// a single entry and the clear in noteNodeInfo/forget can always name it.
+// nodeInfoUnreachableID is the errors-view id for a paired peer this node cannot
+// reach. There is one id per peer, whichever path noticed (node-info not
+// answering, or its reverse-session claims lapsing), so the view shows a single
+// entry whose message is the latest observation and one clear removes it.
 func nodeInfoUnreachableID(hostUUID string) string {
 	return "node-scanner:node-info-unreachable:" + hostUUID
 }
@@ -1349,6 +1338,64 @@ func nodeLabel(node noderec.DirectoryNode) string {
 		return node.Name
 	}
 	return node.HostUUID
+}
+
+// reportUnreachable puts a peer's outage in the errors view, once. Repeating
+// the call while the outage stands sends nothing.
+func (d *daemon) reportUnreachable(hostUUID, message string) {
+	if d.setUnreachableReported(hostUUID, true) {
+		return
+	}
+	d.emitError(sharederrors.ServiceError{
+		ID:       nodeInfoUnreachableID(hostUUID),
+		Message:  message,
+		Severity: "warning",
+		Action:   "none",
+	})
+}
+
+// clearUnreachable takes a peer's outage out of the errors view if it is there.
+func (d *daemon) clearUnreachable(hostUUID string) {
+	if d.setUnreachableReported(hostUUID, false) {
+		d.emitErrorClear(hostUUID)
+	}
+}
+
+// setUnreachableReported records whether hostUUID's outage is in the errors view
+// and returns what it was. The record is separate from nodeInfoDown because the
+// two answer different questions: down is what the last enrichment saw, reported
+// is what the operator has been told.
+func (d *daemon) setUnreachableReported(hostUUID string, on bool) (was bool) {
+	d.infoMu.Lock()
+	defer d.infoMu.Unlock()
+	was = d.nodeInfoReported[hostUUID]
+	if !on {
+		delete(d.nodeInfoReported, hostUUID)
+		return was
+	}
+	if d.nodeInfoReported == nil {
+		d.nodeInfoReported = make(map[string]bool)
+	}
+	d.nodeInfoReported[hostUUID] = true
+	return was
+}
+
+// clearUnpairedReports takes out the report of any peer that is no longer
+// paired, which no enrichment would otherwise notice: a peer that stops being
+// trusted stops being enriched, so nothing else would clear its entry.
+func (d *daemon) clearUnpairedReports() {
+	d.infoMu.Lock()
+	hosts := slices.Collect(maps.Keys(d.nodeInfoReported))
+	d.infoMu.Unlock()
+	for _, hostUUID := range hosts {
+		principal := hostUUID
+		if node, ok := d.dir.get(hostUUID); ok && node.ClusterUUID != "" {
+			principal = node.ClusterUUID
+		}
+		if !d.mesh.HasPin(principal) {
+			d.clearUnreachable(hostUUID)
+		}
+	}
 }
 
 // emitError and emitErrorClear push errors:report / errors:clear to the broker,
@@ -2056,12 +2103,8 @@ func (d *daemon) invalidatePeerServicesRoute(hostUUID string) {
 	delete(d.lastModelsByEngine, hostUUID)
 	delete(d.lastLoadedByEngine, hostUUID)
 	delete(d.nodeInfoDown, hostUUID)
-	reported := d.nodeInfoReported[hostUUID]
-	delete(d.nodeInfoReported, hostUUID)
 	d.infoMu.Unlock()
-	if reported {
-		d.emitErrorClear(hostUUID)
-	}
+	d.clearUnreachable(hostUUID)
 }
 
 // forget drops all cached state only when the last directory claim disappears.
