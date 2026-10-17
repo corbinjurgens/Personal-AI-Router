@@ -147,6 +147,43 @@ func TestManagerRunClosesIdleRosterConnections(t *testing.T) {
 	}
 }
 
+// A removed or torn-down peer must not keep a pooled keep-alive connection
+// open until the 90 s idle timeout; the sockets close with the authority.
+func TestPooledPeerConnectionClosesWhenPeerLeavesMembership(t *testing.T) {
+	for name, drop := range map[string]func(*peerConnectionFixture){
+		"member removal": func(f *peerConnectionFixture) {
+			if !f.m.removeMemberByUUID(f.peerUUID) {
+				t.Fatal("peer was not a member")
+			}
+		},
+		"local teardown": func(f *peerConnectionFixture) {
+			if err := f.m.teardownClusterLocal(); err != nil {
+				t.Fatal(err)
+			}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newPeerConnectionFixture(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				if _, err := w.Write([]byte(`{"clusterId":"cluster-1"}`)); err != nil {
+					t.Error(err)
+				}
+			}))
+			if outcome, _ := f.m.reconcileWith([]string{f.address}, f.peerUUID); outcome != reconcileAccepted {
+				t.Fatalf("outcome = %v, want accepted", outcome)
+			}
+			if f.newConns.Load() != 1 || f.closedConns.Load() != 0 {
+				t.Fatalf("before: new=%d closed=%d, want 1/0", f.newConns.Load(), f.closedConns.Load())
+			}
+			drop(f)
+			select {
+			case <-f.closed:
+			case <-time.After(time.Second):
+				t.Fatal("pooled peer connection stayed open")
+			}
+		})
+	}
+}
+
 func TestManagerRunPreservesActiveRosterResponse(t *testing.T) {
 	release := make(chan struct{})
 	f := newPeerConnectionFixture(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {

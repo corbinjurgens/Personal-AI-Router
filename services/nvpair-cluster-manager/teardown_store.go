@@ -89,6 +89,8 @@ func (m *Manager) finishDurableTeardown() error {
 	m.clusterTornDown = true
 	m.mesh.Refresh()
 	m.clients.CloseIdle()
+	m.peerServices.CloseIdle()
+	m.removalPeerServices.CloseIdle()
 
 	if err := errors.Join(errs...); err != nil {
 		return err
