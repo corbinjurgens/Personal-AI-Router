@@ -78,7 +78,7 @@ Requests (caller → service):
 | `engine:intent` | — | `{ enabledByEngine: { <engine>: bool } }` — every registered engine's saved intent, read from the intent file without taking any engine's lifecycle lock |
 | `engine:unload-model` | `{ engine, model }` | the engine's raw response — unloads one model through the same per-engine mapping the remote unload uses (Ollama `keep_alive:0`, the others `unload_model`) |
 | `engine:remote-policy-get` | `{ nodeId }` | the target broker's `policy:get` result |
-| `engine:remote-policy-set` | `{ nodeId, policy }` | the target broker's `policy:set` result |
+| `engine:remote-policy-set` | `{ nodeId, policy, expectedPersistedRevision }` | the target broker's `policy:set` result; the revision is forwarded unchanged and compared by the broker |
 | `engine:remote-availability-set` | `{ nodeId, state }` | the target broker's `node:set-availability` result (waits for the target's drain, on the readiness-sized response budget) |
 | `shutdown` | — | `null` |
 | `log/set-level` | `{ level }` | `{ level }` |
@@ -304,7 +304,7 @@ Endpoints (all under `/v1`):
 | `GET /v1/models/files?engine=&model=` | NDJSON stream | the model's files with size and sha256, for a peer copying it |
 | `GET /v1/models/file?engine=&model=&path=` | file bytes | one listed file, with HTTP Range support |
 | `POST /v1/node-policy/get` | JSON | the target broker's `policy:get` |
-| `POST /v1/node-policy/set` | JSON `{ policy }` | the target broker's `policy:set` |
+| `POST /v1/node-policy/set` | JSON `{ policy, expectedPersistedRevision }` | the target broker's `policy:set`; the revision is forwarded unchanged |
 | `POST /v1/node-availability/set` | JSON `{ state }` | the target broker's `node:set-availability`, answered once the state is reached |
 
 The node-policy routes carry the broker's policy, which engine-manager does not

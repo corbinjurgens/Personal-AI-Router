@@ -65,10 +65,13 @@ var policyRemoteMethods = map[string]string{
 
 // policyBody is the one body shape every policy route accepts. Unknown fields
 // are refused, so a peer cannot smuggle anything the broker would act on.
+// ExpectedPersistedRevision is the compare-and-set precondition of a policy
+// set. It is opaque here: it is carried unchanged and the broker enforces it.
 type policyBody struct {
-	NodeID string          `json:"nodeId,omitempty"`
-	Policy json.RawMessage `json:"policy,omitempty"`
-	State  string          `json:"state,omitempty"`
+	NodeID                    string          `json:"nodeId,omitempty"`
+	Policy                    json.RawMessage `json:"policy,omitempty"`
+	State                     string          `json:"state,omitempty"`
+	ExpectedPersistedRevision string          `json:"expectedPersistedRevision,omitempty"`
 }
 
 // policyRelayRequest is the policy:request payload sent to the broker.

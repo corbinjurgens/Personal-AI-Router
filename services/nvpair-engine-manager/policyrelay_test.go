@@ -115,7 +115,7 @@ func TestRemotePolicyRelaysToPeerWithoutFurtherHop(t *testing.T) {
 		method, params, wantMethod string
 	}{
 		{"engine:remote-policy-get", `{"nodeId":"host-peer"}`, "get"},
-		{"engine:remote-policy-set", `{"nodeId":"host-peer","policy":{"version":1}}`, "set"},
+		{"engine:remote-policy-set", `{"nodeId":"host-peer","policy":{"version":1},"expectedPersistedRevision":"7"}`, "set"},
 		{"engine:remote-availability-set", `{"nodeId":"host-peer","state":"paused"}`, "set-availability"},
 	}
 	for i, c := range cases {
@@ -147,6 +147,9 @@ func TestRemotePolicyRelaysToPeerWithoutFurtherHop(t *testing.T) {
 	}
 	if seen["set-availability"].params.State != "paused" || len(seen["set"].params.Policy) == 0 {
 		t.Errorf("payload lost in transit: %+v", seen)
+	}
+	if got := seen["set"].params.ExpectedPersistedRevision; got != "7" {
+		t.Errorf("set reached the peer broker with expectedPersistedRevision %q, want \"7\"", got)
 	}
 	for len(out.frames()) < len(cases) && time.Now().Before(deadline) {
 		time.Sleep(10 * time.Millisecond)
@@ -190,6 +193,9 @@ func TestPolicyRoutesRejectStrangersAndBadBodies(t *testing.T) {
 	self := client(selfDir)
 	if code := post(self, controlPolicySetPath, `{"policy":{},"extra":1}`); code != http.StatusBadRequest {
 		t.Fatalf("unknown field got %d, want 400", code)
+	}
+	if code := post(self, controlPolicySetPath, `{"policy":{},"expectedPersistedRevision":"7","extra":1}`); code != http.StatusBadRequest {
+		t.Fatalf("unknown field beside expectedPersistedRevision got %d, want 400", code)
 	}
 	big := `{"policy":{"pad":"` + strings.Repeat("x", policyBodyLimit) + `"}}`
 	if code := post(self, controlPolicySetPath, big); code != http.StatusBadRequest {
