@@ -34,7 +34,9 @@ model's memory grow by gigabytes over many requests. The tradeoff is fewer
 parallel requests, a shorter maximum prompt and fewer cached conversations to
 resume quickly.
 If your hardware and workload need different values, supply later llama.cpp
-arguments in the text; those opaque arguments are your override.
+arguments in the text; those opaque arguments are your override. Environment
+variables such as `LLAMA_ARG_CACHE_RAM` do not override these flags, because a
+command-line flag wins over its environment variable in llama.cpp.
 
 - Spaces, tabs and line breaks separate unquoted tokens.
 - Single quotes enclose literal text. Double quotes enclose literal text with
