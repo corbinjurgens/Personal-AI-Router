@@ -80,6 +80,22 @@ func (b *Broker) runAvailabilityTransition(ctx context.Context, gen uint64, stat
 	return b.resumeNode()
 }
 
+// persistAvailabilityLocked returns the current policy with state as its
+// availability, saved under the next revision. While policy recovery is
+// required nothing is saved, so the corrupt file and recoveryRequired stay as
+// they are; the change then lives in memory only and persisted is false. The
+// caller sets r.current from the result once it has no further failure. Caller
+// holds r.mu.
+func (r *policyRuntime) persistAvailabilityLocked(state nodepolicy.Availability) (policy nodepolicy.Policy, persisted bool, err error) {
+	policy = r.current
+	policy.Availability = state
+	if r.recoveryRequired {
+		return policy, false, nil
+	}
+	policy, err = r.publishLocked(policy)
+	return policy, err == nil, err
+}
+
 // pauseNode drains, then unloads and stops engines as the policy says.
 func (b *Broker) pauseNode(ctx context.Context) (nodepolicy.Availability, error) {
 	r := b.nodePolicyRuntime()
@@ -88,9 +104,8 @@ func (b *Broker) pauseNode(ctx context.Context) (nodepolicy.Availability, error)
 		r.mu.Unlock()
 		return nodepolicy.Paused, nil
 	}
-	policy := r.current
-	policy.Availability = nodepolicy.Paused
-	if err := r.saveLocked(policy); err != nil {
+	policy, persisted, err := r.persistAvailabilityLocked(nodepolicy.Paused)
+	if err != nil {
 		r.mu.Unlock()
 		return "", fmt.Errorf("the paused state could not be saved: %w", err)
 	}
@@ -99,6 +114,9 @@ func (b *Broker) pauseNode(ctx context.Context) (nodepolicy.Availability, error)
 	r.cancelActive = policy.Pause.OnActive == nodepolicy.CancelActive
 	pause := policy.Pause
 	r.mu.Unlock()
+	if persisted {
+		b.notifyPolicyChanged(policy)
+	}
 	slog.Info("pausing node", "onActive", pause.OnActive, "drainTimeoutSeconds", pause.DrainTimeoutSeconds,
 		"unloadModels", pause.UnloadModels, "stopEngines", pause.StopEngines)
 
@@ -180,9 +198,8 @@ func (b *Broker) resumeNode() (nodepolicy.Availability, error) {
 		r.mu.Unlock()
 		return nodepolicy.Available, nil
 	}
-	policy := r.current
-	policy.Availability = nodepolicy.Available
-	if err := r.saveLocked(policy); err != nil {
+	policy, persisted, err := r.persistAvailabilityLocked(nodepolicy.Available)
+	if err != nil {
 		r.mu.Unlock()
 		return "", fmt.Errorf("the available state could not be saved: %w", err)
 	}
@@ -198,6 +215,9 @@ func (b *Broker) resumeNode() (nodepolicy.Availability, error) {
 	restore := r.restoreSkipped
 	r.restoreSkipped = false
 	r.mu.Unlock()
+	if persisted {
+		b.notifyPolicyChanged(policy)
+	}
 
 	b.pushPolicyNow(context.Background(), pushAvailability)
 	b.notifyAvailability()

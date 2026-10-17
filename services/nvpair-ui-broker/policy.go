@@ -19,14 +19,18 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
 	"nvpair-shared/appdir"
 	"nvpair-shared/clustertrust"
+	"nvpair-shared/durablefile"
 	"nvpair-shared/nodepolicy"
 )
 
@@ -77,6 +81,17 @@ type policyRuntime struct {
 	path    string
 	current nodepolicy.Policy
 	ready   bool
+	// recoveryRequired is set when the policy file could not be used at startup.
+	// The node then runs on a paused recovery policy and nothing is persisted
+	// until an explicit policy:set succeeds.
+	recoveryRequired bool
+	// issued is the highest revision this process has assigned, published or
+	// not, so a revision is never assigned twice even when its publication
+	// failed after the new bytes reached the disk.
+	issued int64
+	// replacer publishes the file. Its zero value uses the platform steps; a
+	// test sets one step to inject a failure at that boundary.
+	replacer durablefile.Replacer
 	// live is the availability the node is actually in. It differs from
 	// current.Availability only while draining.
 	live         nodepolicy.Availability
@@ -155,35 +170,55 @@ func (r *policyRuntime) initLocked() {
 }
 
 // loadNodePolicy reads the policy file at startup. A missing file means the
-// default policy. A file that cannot be parsed or validated is kept as
-// <file>.bad for the user to inspect and the default is used, so a bad edit
-// can never stop the node from starting.
+// default policy. A version 1 file is migrated in memory and rewritten as
+// version 2 by the next successful save. A file that cannot be read, parsed or
+// validated is kept as <file>.bad when it was read, and the node starts on the
+// recovery policy with recoveryRequired set, so a bad edit can never stop the
+// node from starting and the node never comes back more permissive than the
+// file could have been.
 func (b *Broker) loadNodePolicy(path string) {
 	r := b.nodePolicyRuntime()
 	policy := nodepolicy.Default()
+	recovery := false
 	data, err := os.ReadFile(path)
 	switch {
 	case errors.Is(err, os.ErrNotExist):
 	case err != nil:
-		slog.Warn("node policy unreadable; using the default policy", "path", path, "err", err)
+		recovery = true
+		slog.Warn("node policy unreadable; policy recovery is required", "path", path, "err", err)
 	default:
 		parsed, perr := nodepolicy.Parse(data)
 		if perr != nil {
+			recovery = true
 			bad := path + ".bad"
 			if werr := os.WriteFile(bad, data, 0o600); werr != nil {
 				slog.Warn("could not keep a copy of the invalid node policy", "path", bad, "err", werr)
 			}
-			slog.Warn("node policy invalid; kept a copy and using the default policy", "path", path, "copy", bad, "err", perr)
+			slog.Warn("node policy invalid; kept a copy and policy recovery is required", "path", path, "copy", bad, "err", perr)
 		} else {
 			policy = parsed
 		}
+	}
+	if recovery {
+		policy = recoveryPolicy()
 	}
 	r.mu.Lock()
 	r.path = path
 	r.current = policy
 	r.live = policy.Availability
+	r.recoveryRequired = recovery
 	r.mu.Unlock()
-	slog.Info("node policy loaded", "path", path, "availability", policy.Availability)
+	slog.Info("node policy loaded", "path", path, "availability", policy.Availability, "revision", policy.Revision, "recoveryRequired", recovery)
+}
+
+// recoveryPolicy is what a node runs on while its policy file is unusable: the
+// defaults, which keep remote and paid execution off and define no tiers or
+// profiles, with the node paused. The failed file may have said paused, so the
+// node never starts more available than it could have been.
+func recoveryPolicy() nodepolicy.Policy {
+	policy := nodepolicy.Default()
+	policy.Availability = nodepolicy.Paused
+	return policy
 }
 
 // defaultNodePolicyPath is <appdir>/node-policy.json.
@@ -191,7 +226,7 @@ func defaultNodePolicyPath() (string, error) {
 	return appdir.Path(nodepolicy.FileName)
 }
 
-// saveLocked writes the policy atomically. Caller holds r.mu.
+// saveLocked publishes the policy file through durablefile. Caller holds r.mu.
 func (r *policyRuntime) saveLocked(policy nodepolicy.Policy) error {
 	if r.path == "" {
 		return nil
@@ -203,31 +238,49 @@ func (r *policyRuntime) saveLocked(policy nodepolicy.Policy) error {
 	if err := os.MkdirAll(filepath.Dir(r.path), 0o700); err != nil {
 		return err
 	}
-	file, err := os.CreateTemp(filepath.Dir(r.path), ".node-policy-*")
+	return r.replacer.WriteFile(r.path, append(data, '\n'), 0o600)
+}
+
+// nextRevisionLocked assigns the next revision: the larger of the previous one
+// plus one and the current Unix time in nanoseconds. The clock term keeps a
+// revision issued before a corrupt file was recovered from ever matching one
+// issued after. Caller holds r.mu.
+func (r *policyRuntime) nextRevisionLocked() (string, error) {
+	base, err := nodepolicy.NanoUSD(r.current.Revision).Int64()
 	if err != nil {
-		return err
+		return "", fmt.Errorf("the stored revision is invalid: %w", err)
 	}
-	tmp := file.Name()
-	defer os.Remove(tmp)
-	if err = file.Chmod(0o600); err == nil {
-		_, err = file.Write(append(data, '\n'))
+	base = max(base, r.issued)
+	if base == math.MaxInt64 {
+		return "", errors.New("the policy revision cannot advance past the signed 64-bit maximum")
 	}
-	if err == nil {
-		err = file.Sync()
-	}
-	if closeErr := file.Close(); err == nil {
-		err = closeErr
-	}
+	next := max(base+1, r.now().UnixNano())
+	r.issued = next
+	return strconv.FormatInt(next, 10), nil
+}
+
+// publishLocked stamps policy with the next revision and publishes it
+// durably, returning the stamped document. r.current is the caller's to update
+// after this succeeds; on error nothing is changed. Caller holds r.mu.
+func (r *policyRuntime) publishLocked(policy nodepolicy.Policy) (nodepolicy.Policy, error) {
+	revision, err := r.nextRevisionLocked()
 	if err != nil {
-		return err
+		return nodepolicy.Policy{}, err
 	}
-	return os.Rename(tmp, r.path)
+	policy.Revision = revision
+	if err := r.saveLocked(policy); err != nil {
+		return nodepolicy.Policy{}, err
+	}
+	return policy, nil
 }
 
 // policyGetResult is the policy:get result.
 type policyGetResult struct {
 	Policy       nodepolicy.Policy       `json:"policy"`
 	Availability nodepolicy.Availability `json:"availability"`
+	// RecoveryRequired is true while the node runs on the recovery policy
+	// because its file was unusable; an explicit policy:set clears it.
+	RecoveryRequired bool `json:"recoveryRequired"`
 }
 
 // policyParams is the params shape of every policy method.
@@ -241,7 +294,7 @@ func (b *Broker) localPolicy() policyGetResult {
 	r := b.nodePolicyRuntime()
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return policyGetResult{Policy: r.current, Availability: r.live}
+	return policyGetResult{Policy: r.current, Availability: r.live, RecoveryRequired: r.recoveryRequired}
 }
 
 // peerPolicyGetResult is the policy:get result a paired node receives: the
@@ -258,8 +311,9 @@ func (b *Broker) peerPolicy() peerPolicyGetResult {
 
 // setLocalPolicy validates, persists and applies a new policy. Availability is
 // not part of what policy:set changes — node:set-availability owns it — so the
-// incoming value is ignored and the persisted one kept. Omitted fields take
-// their defaults, exactly as when the file is loaded.
+// incoming value is ignored and the persisted one kept. The same holds for the
+// revision, which only the broker assigns. Omitted fields take their defaults,
+// exactly as when the file is loaded.
 func (b *Broker) setLocalPolicy(raw json.RawMessage) (nodepolicy.Policy, error) {
 	return b.persistPolicy(func(stored nodepolicy.Policy) (nodepolicy.Policy, error) {
 		if len(raw) == 0 {
@@ -270,6 +324,7 @@ func (b *Broker) setLocalPolicy(raw json.RawMessage) (nodepolicy.Policy, error) 
 			return nodepolicy.Policy{}, fmt.Errorf("policy must be a JSON object")
 		}
 		delete(fields, "availability")
+		dropRevision(fields)
 		stripped, err := json.Marshal(fields)
 		if err != nil {
 			return nodepolicy.Policy{}, err
@@ -291,15 +346,48 @@ func (b *Broker) setLocalPolicy(raw json.RawMessage) (nodepolicy.Policy, error) 
 // stored policy and it must send no routing section; the protected sections are
 // restored from the stored policy.
 func (b *Broker) setPeerPolicy(raw json.RawMessage) (nodepolicy.Policy, error) {
+	r := b.nodePolicyRuntime()
 	return b.persistPolicy(func(stored nodepolicy.Policy) (nodepolicy.Policy, error) {
-		return nodepolicy.MergePeerSet(stored, raw)
+		// build runs under r.mu. Recovery is the owner's to complete.
+		if r.recoveryRequired {
+			return nodepolicy.Policy{}, errors.New("this node's policy needs recovery; set it from this node")
+		}
+		return nodepolicy.MergePeerSet(stored, withoutRevision(raw))
 	})
+}
+
+// dropRevision removes the revision a caller sent, whatever its spelling: the
+// policy parser matches keys case-insensitively, and only the broker assigns
+// revisions.
+func dropRevision(fields map[string]json.RawMessage) {
+	for key := range fields {
+		if strings.EqualFold(key, "revision") {
+			delete(fields, key)
+		}
+	}
+}
+
+// withoutRevision returns raw without its revision key. A document that is not
+// a JSON object is returned as it is, for MergePeerSet to refuse.
+func withoutRevision(raw json.RawMessage) json.RawMessage {
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(raw, &fields) != nil || fields == nil {
+		return raw
+	}
+	dropRevision(fields)
+	stripped, err := json.Marshal(fields)
+	if err != nil {
+		return raw
+	}
+	return stripped
 }
 
 // persistPolicy persists and applies the policy that build derives from the
 // stored one. build runs in the same critical section as the save, so a policy
-// derived from the stored document can never be saved over a newer one. A build
-// error persists and pushes nothing.
+// derived from the stored document can never be saved over a newer one. The
+// saved document carries the next revision. A build or save error persists,
+// pushes and announces nothing and leaves the previous document in memory. A
+// successful save ends policy recovery.
 func (b *Broker) persistPolicy(build func(stored nodepolicy.Policy) (nodepolicy.Policy, error)) (nodepolicy.Policy, error) {
 	r := b.nodePolicyRuntime()
 	r.mu.Lock()
@@ -308,15 +396,23 @@ func (b *Broker) persistPolicy(build func(stored nodepolicy.Policy) (nodepolicy.
 		r.mu.Unlock()
 		return nodepolicy.Policy{}, err
 	}
-	if err := r.saveLocked(policy); err != nil {
+	policy, err = r.publishLocked(policy)
+	if err != nil {
 		r.mu.Unlock()
 		return nodepolicy.Policy{}, fmt.Errorf("the policy could not be saved: %w", err)
 	}
 	r.current = policy
+	r.recoveryRequired = false
 	r.mu.Unlock()
 	b.schedulePolicyPush(pushPolicy)
-	b.notifyClients(notifyPolicyChanged, map[string]any{"nodeId": b.nodeID, "policy": policy})
+	b.notifyPolicyChanged(policy)
 	return policy, nil
+}
+
+// notifyPolicyChanged announces this node's persisted policy, and so its new
+// revision, to every client.
+func (b *Broker) notifyPolicyChanged(policy nodepolicy.Policy) {
+	b.notifyClients(notifyPolicyChanged, map[string]any{"nodeId": b.nodeID, "policy": policy})
 }
 
 // notifyClients sends a notification to every client. These are low-volume

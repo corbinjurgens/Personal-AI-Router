@@ -8,16 +8,19 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net"
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"nvpair-shared/clustertrusttest"
+	"nvpair-shared/durablefile"
 	"nvpair-shared/nodepolicy"
 )
 
@@ -248,8 +251,8 @@ func TestNodePolicyLoadDefaultsCorruptAndPersist(t *testing.T) {
 	}
 	b, _ = newPolicyBroker(t)
 	b.loadNodePolicy(path)
-	if got := b.localPolicy(); got.Availability != nodepolicy.Available {
-		t.Fatalf("invalid file was not replaced by the default: %+v", got)
+	if got := b.localPolicy(); got.Availability != nodepolicy.Paused || !got.RecoveryRequired {
+		t.Fatalf("invalid file was not replaced by the paused recovery policy: availability=%q recoveryRequired=%t", got.Availability, got.RecoveryRequired)
 	}
 	if bad, err := os.ReadFile(path + ".bad"); err != nil || !strings.Contains(string(bad), "sideways") {
 		t.Fatalf("invalid file was not kept as .bad: %q %v", bad, err)
@@ -279,7 +282,7 @@ func TestNodePolicyLoadDefaultsCorruptAndPersist(t *testing.T) {
 	if got.Availability != nodepolicy.Paused {
 		t.Fatalf("policy:set changed availability to %q; only node:set-availability may", got.Availability)
 	}
-	if entries, _ := filepath.Glob(filepath.Join(dir, ".node-policy-*")); len(entries) != 0 {
+	if entries, _ := filepath.Glob(filepath.Join(dir, nodepolicy.FileName+".*.tmp")); len(entries) != 0 {
 		t.Fatalf("atomic write left temp files: %v", entries)
 	}
 }
@@ -871,18 +874,26 @@ type routedBroker struct {
 
 func newRoutedBroker(t *testing.T) *routedBroker {
 	t.Helper()
+	rb := newBrokerOnFile(t, routedPolicyDocument)
+	if got := rb.b.localPolicy().Policy.Routing.Accounts; len(got) != 2 {
+		t.Fatalf("loaded accounts = %d, want the 2 in the fixture (was the fixture rejected?)", len(got))
+	}
+	return rb
+}
+
+// newBrokerOnFile is a routedBroker whose policy file holds contents, valid or
+// not, when the broker loads it.
+func newBrokerOnFile(t *testing.T, contents string) *routedBroker {
+	t.Helper()
 	b, out := newPolicyBroker(t)
 	_, proxy := attachFakeProxy(t, b)
 	engine := attachFakeEngine(t, b)
 	clustertrusttest.Join(t, b.clusterDir, "cluster-1", "self-node", "pinned-peer")
 	path := filepath.Join(t.TempDir(), nodepolicy.FileName)
-	if err := os.WriteFile(path, []byte(routedPolicyDocument), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
 		t.Fatalf("write policy file: %v", err)
 	}
 	b.loadNodePolicy(path)
-	if got := b.localPolicy().Policy.Routing.Accounts; len(got) != 2 {
-		t.Fatalf("loaded accounts = %d, want the 2 in the fixture (was the fixture rejected?)", len(got))
-	}
 	return &routedBroker{b: b, out: out, proxy: proxy, engine: engine, path: path}
 }
 
@@ -1196,4 +1207,668 @@ func TestPeerPolicySetCannotRestoreProtectedSectionsFromAStaleSnapshot(t *testin
 			t.Errorf("weak tier = %+v, want the local owner's %+v", got, want)
 		}
 	})
+}
+
+// errPublish is the failure the publication tests inject at a durablefile step.
+var errPublish = errors.New("injected publication failure")
+
+// faultTemp is the temporary file durablefile writes, failing the chosen step.
+// Close always releases the descriptor.
+type faultTemp struct {
+	durablefile.File
+	writeErr, syncErr, closeErr error
+}
+
+func (f faultTemp) Write(p []byte) (int, error) {
+	if f.writeErr != nil {
+		return 0, f.writeErr
+	}
+	return f.File.Write(p)
+}
+
+func (f faultTemp) Sync() error {
+	if f.syncErr != nil {
+		return f.syncErr
+	}
+	return f.File.Sync()
+}
+
+func (f faultTemp) Close() error {
+	err := f.File.Close()
+	if f.closeErr != nil {
+		return f.closeErr
+	}
+	return err
+}
+
+// faultingTemp is a Replacer that fails the temporary file's step f selects.
+func faultingTemp(f faultTemp) durablefile.Replacer {
+	return durablefile.Replacer{CreateTemp: func(dir, base string, perm os.FileMode) (durablefile.File, error) {
+		file, err := os.OpenFile(filepath.Join(dir, base+".fault.tmp"), os.O_RDWR|os.O_CREATE|os.O_EXCL, perm)
+		if err != nil {
+			return nil, err
+		}
+		f.File = file
+		return f, nil
+	}}
+}
+
+// setReplacer swaps the step functions the policy store publishes with.
+func setReplacer(b *Broker, rep durablefile.Replacer) {
+	r := b.nodePolicyRuntime()
+	r.mu.Lock()
+	r.replacer = rep
+	r.mu.Unlock()
+}
+
+// setClock fixes the time revisions are assigned from.
+func setClock(b *Broker, unixNano int64) {
+	r := b.nodePolicyRuntime()
+	r.mu.Lock()
+	r.now = func() time.Time { return time.Unix(0, unixNano) }
+	r.mu.Unlock()
+}
+
+// freshBroker is a broker started on the files the previous one left behind.
+func freshBroker(t *testing.T, path string) *Broker {
+	t.Helper()
+	b, _ := newPolicyBroker(t)
+	b.loadNodePolicy(path)
+	return b
+}
+
+func revisionNumber(t *testing.T, p nodepolicy.Policy) int64 {
+	t.Helper()
+	n, err := strconv.ParseInt(p.Revision, 10, 64)
+	if err != nil {
+		t.Fatalf("revision %q is not a decimal number: %v", p.Revision, err)
+	}
+	return n
+}
+
+// paidCeilingDoc is the broker's current policy with the paid account's
+// monthly ceiling replaced, as a policy:set body.
+func paidCeilingDoc(t *testing.T, b *Broker, ceiling string) json.RawMessage {
+	t.Helper()
+	var doc map[string]any
+	if err := json.Unmarshal(mustJSON(b.localPolicy().Policy), &doc); err != nil {
+		t.Fatalf("decode current policy: %v", err)
+	}
+	accounts, ok := doc["routing"].(map[string]any)["accounts"].([]any)
+	if !ok || len(accounts) != 2 {
+		t.Fatalf("fixture accounts = %v, want the 2 in routedPolicyDocument", accounts)
+	}
+	accounts[1].(map[string]any)["monthlyCeiling"] = ceiling
+	return mustJSON(doc)
+}
+
+// policyChangedRevisions lists the revision of every policy:changed this node
+// announced for itself, in order.
+func policyChangedRevisions(t *testing.T, out *syncBuffer) []string {
+	t.Helper()
+	var revisions []string
+	for _, m := range out.frames() {
+		if m.Method != notifyPolicyChanged {
+			continue
+		}
+		var event struct {
+			NodeID string            `json:"nodeId"`
+			Policy nodepolicy.Policy `json:"policy"`
+		}
+		if err := json.Unmarshal(m.Params, &event); err != nil {
+			t.Fatalf("decode policy:changed: %v", err)
+		}
+		if event.NodeID == "self-node" {
+			revisions = append(revisions, event.Policy.Revision)
+		}
+	}
+	return revisions
+}
+
+// publicationBoundary is one durablefile step that can fail. landed is whether
+// the new bytes are in place when it does: only a directory-sync failure comes
+// after the replacement.
+type publicationBoundary struct {
+	name   string
+	rep    durablefile.Replacer
+	landed bool
+}
+
+func publicationBoundaries() []publicationBoundary {
+	return []publicationBoundary{
+		{"temp create", durablefile.Replacer{CreateTemp: func(string, string, os.FileMode) (durablefile.File, error) { return nil, errPublish }}, false},
+		{"temp write", faultingTemp(faultTemp{writeErr: errPublish}), false},
+		{"file sync", faultingTemp(faultTemp{syncErr: errPublish}), false},
+		{"file close", faultingTemp(faultTemp{closeErr: errPublish}), false},
+		{"replace", durablefile.Replacer{Replace: func(string, string) error { return errPublish }}, false},
+		{"directory sync", durablefile.Replacer{SyncDir: func(string) error { return errPublish }}, true},
+	}
+}
+
+func TestPolicyPublicationFailureLeavesOneWholeDocument(t *testing.T) {
+	for _, boundary := range publicationBoundaries() {
+		name, rep, landed := boundary.name, boundary.rep, boundary.landed
+		t.Run(name, func(t *testing.T) {
+			rb := newRoutedBroker(t)
+			if _, err := rb.b.setLocalPolicy(paidCeilingDoc(t, rb.b, "5")); err != nil {
+				t.Fatalf("acknowledged ceiling reduction: %v", err)
+			}
+			acked := rb.b.localPolicy().Policy
+			if got := acked.Routing.Accounts[1].MonthlyCeiling; got != "5" {
+				t.Fatalf("acknowledged ceiling = %q, want %q", got, "5")
+			}
+			ackedBytes := rb.fileBytes(t)
+			rb.proxy.waitFor("push of the acknowledged policy", func(calls []policyCall) bool { return policyPushes(rb.proxy) >= 1 })
+			pushes := policyPushes(rb.proxy)
+			changed := policyChangedRevisions(t, rb.out)
+
+			raise := paidCeilingDoc(t, rb.b, "9")
+			setReplacer(rb.b, rep)
+			_, err := rb.b.setLocalPolicy(raise)
+			setReplacer(rb.b, durablefile.Replacer{})
+			if !errors.Is(err, errPublish) {
+				t.Fatalf("setLocalPolicy error = %v, want it to wrap the injected failure", err)
+			}
+
+			if got := rb.b.localPolicy().Policy; !reflect.DeepEqual(got, acked) {
+				t.Errorf("failed publication changed the in-memory policy: revision %s -> %s", acked.Revision, got.Revision)
+			}
+			time.Sleep(100 * time.Millisecond)
+			if got := policyPushes(rb.proxy); got != pushes {
+				t.Errorf("failed publication pushed to the proxy: %d pushes, want %d", got, pushes)
+			}
+			if got := policyChangedRevisions(t, rb.out); !reflect.DeepEqual(got, changed) {
+				t.Errorf("failed publication announced policy:changed %v, want %v", got, changed)
+			}
+			if leftovers, _ := filepath.Glob(filepath.Join(filepath.Dir(rb.path), "*.tmp")); len(leftovers) != 0 {
+				t.Errorf("failed publication left temporary files: %v", leftovers)
+			}
+
+			fresh := freshBroker(t, rb.path).localPolicy()
+			if fresh.RecoveryRequired {
+				t.Fatalf("restart after a failed publication needs recovery")
+			}
+			if landed {
+				want, err := nodepolicy.Parse(raise)
+				if err != nil {
+					t.Fatalf("parse the attempted document: %v", err)
+				}
+				want.Revision = fresh.Policy.Revision
+				if !reflect.DeepEqual(fresh.Policy, want) {
+					t.Errorf("restart loaded a document that is neither wholly old nor wholly new: %+v", fresh.Policy)
+				}
+				if revisionNumber(t, fresh.Policy) <= revisionNumber(t, acked) {
+					t.Errorf("new document revision %s is not above the acknowledged %s", fresh.Policy.Revision, acked.Revision)
+				}
+				return
+			}
+			if !reflect.DeepEqual(fresh.Policy, acked) {
+				t.Errorf("restart loaded a document other than the acknowledged one (revision %s, monthly ceiling %q)",
+					fresh.Policy.Revision, fresh.Policy.Routing.Accounts[1].MonthlyCeiling)
+			}
+			if got := rb.fileBytes(t); !bytes.Equal(got, ackedBytes) {
+				t.Errorf("policy file bytes changed although the replacement never happened")
+			}
+		})
+	}
+}
+
+func TestAvailabilityPublicationFailureLeavesOneWholeDocument(t *testing.T) {
+	transitions := []struct {
+		name string
+		// from is the availability reached, acknowledged, before the failing
+		// attempt; to is what the attempt asks for. Revisions come from a fixed
+		// clock, so each save is the previous revision plus one.
+		from, to            nodepolicy.Availability
+		baseline, attempted string
+	}{
+		{"pause", nodepolicy.Available, nodepolicy.Paused, "12", "13"},
+		{"resume", nodepolicy.Paused, nodepolicy.Available, "13", "14"},
+	}
+	for _, transition := range transitions {
+		for _, boundary := range publicationBoundaries() {
+			from, to, baseline, attempted := transition.from, transition.to, transition.baseline, transition.attempted
+			rep, landed := boundary.rep, boundary.landed
+			t.Run(transition.name+" fails at "+boundary.name, func(t *testing.T) {
+				rb := newRoutedBroker(t)
+				setClock(rb.b, 5)
+				if from == nodepolicy.Paused {
+					if _, err := rb.b.setAvailability(context.Background(), from); err != nil {
+						t.Fatalf("acknowledged %s: %v", from, err)
+					}
+				}
+				before := rb.b.localPolicy()
+				if before.Policy.Revision != baseline || before.Availability != from {
+					t.Fatalf("baseline: revision %q live %q, want revision %q live %q", before.Policy.Revision, before.Availability, baseline, from)
+				}
+				beforeBytes := rb.fileBytes(t)
+				pushes := len(availabilityPushes(rb.proxy.snapshot()))
+				changed := policyChangedRevisions(t, rb.out)
+
+				setReplacer(rb.b, rep)
+				_, err := rb.b.setAvailability(context.Background(), to)
+				setReplacer(rb.b, durablefile.Replacer{})
+				if !errors.Is(err, errPublish) {
+					t.Fatalf("setAvailability(%s) error = %v, want it to wrap the injected failure", to, err)
+				}
+
+				if after := rb.b.localPolicy(); !reflect.DeepEqual(after, before) {
+					t.Errorf("failed save changed the state: revision %s -> %s, live %q -> %q",
+						before.Policy.Revision, after.Policy.Revision, before.Availability, after.Availability)
+				}
+				time.Sleep(100 * time.Millisecond)
+				if got := len(availabilityPushes(rb.proxy.snapshot())); got != pushes {
+					t.Errorf("failed save pushed availability to the proxy: %d pushes, want %d", got, pushes)
+				}
+				if got := policyChangedRevisions(t, rb.out); !reflect.DeepEqual(got, changed) {
+					t.Errorf("failed save announced policy:changed %v, want %v", got, changed)
+				}
+				if leftovers, _ := filepath.Glob(filepath.Join(filepath.Dir(rb.path), "*.tmp")); len(leftovers) != 0 {
+					t.Errorf("failed save left temporary files: %v", leftovers)
+				}
+
+				fresh := freshBroker(t, rb.path).localPolicy()
+				if fresh.RecoveryRequired {
+					t.Fatal("restart after a failed save needs recovery")
+				}
+				want := before.Policy
+				if landed {
+					want.Availability, want.Revision = to, attempted
+				}
+				if !reflect.DeepEqual(fresh.Policy, want) || fresh.Availability != want.Availability {
+					t.Errorf("restart loaded revision %q availability %q (live %q), want the wholly %s document at revision %q availability %q",
+						fresh.Policy.Revision, fresh.Policy.Availability, fresh.Availability, map[bool]string{true: "new", false: "old"}[landed], want.Revision, want.Availability)
+				}
+				if !landed && !bytes.Equal(rb.fileBytes(t), beforeBytes) {
+					t.Error("policy file bytes changed although the replacement never happened")
+				}
+
+				// A failed attempt may have reached the disk, so its revision is spent
+				// whether or not it landed and the retry takes the one after it.
+				attemptedNumber, err := strconv.ParseInt(attempted, 10, 64)
+				if err != nil {
+					t.Fatal(err)
+				}
+				retryRevision := strconv.FormatInt(attemptedNumber+1, 10)
+				if _, err := rb.b.setAvailability(context.Background(), to); err != nil {
+					t.Fatalf("retry of %s: %v", to, err)
+				}
+				if got := rb.b.localPolicy(); got.Policy.Revision != retryRevision || got.Availability != to {
+					t.Errorf("retry: revision %q live %q, want revision %q live %q", got.Policy.Revision, got.Availability, retryRevision, to)
+				}
+			})
+		}
+	}
+}
+
+func TestPolicyRevisionNeverRepeatsAfterAFailedDirectorySync(t *testing.T) {
+	rb := newRoutedBroker(t)
+	setClock(rb.b, 5)
+	if _, err := rb.b.setLocalPolicy(paidCeilingDoc(t, rb.b, "5")); err != nil {
+		t.Fatalf("first set: %v", err)
+	}
+	if got := rb.b.localPolicy().Policy.Revision; got != "13" {
+		t.Fatalf("first revision = %q, want %q", got, "13")
+	}
+	setReplacer(rb.b, durablefile.Replacer{SyncDir: func(string) error { return errPublish }})
+	if _, err := rb.b.setLocalPolicy(paidCeilingDoc(t, rb.b, "4")); !errors.Is(err, errPublish) {
+		t.Fatalf("failed set error = %v, want the injected failure", err)
+	}
+	setReplacer(rb.b, durablefile.Replacer{})
+	if got := freshBroker(t, rb.path).localPolicy().Policy.Revision; got != "14" {
+		t.Fatalf("the failed set left revision %q on disk, want %q", got, "14")
+	}
+	if _, err := rb.b.setLocalPolicy(paidCeilingDoc(t, rb.b, "3")); err != nil {
+		t.Fatalf("set after the failure: %v", err)
+	}
+	if got := rb.b.localPolicy().Policy.Revision; got != "15" {
+		t.Fatalf("revision after a failed attempt = %q, want %q: 14 was already on disk", got, "15")
+	}
+}
+
+func TestPolicyRevisionAssignment(t *testing.T) {
+	t.Run("a local set takes the next revision whatever the client sends", func(t *testing.T) {
+		rb := newRoutedBroker(t)
+		setClock(rb.b, 5)
+		for i, supplied := range []string{"999999", "not-a-number", "0"} {
+			var doc map[string]any
+			if err := json.Unmarshal(paidCeilingDoc(t, rb.b, strconv.Itoa(i+1)), &doc); err != nil {
+				t.Fatal(err)
+			}
+			doc["revision"] = supplied
+			policy, err := rb.b.setLocalPolicy(mustJSON(doc))
+			if err != nil {
+				t.Fatalf("set with supplied revision %q: %v", supplied, err)
+			}
+			if want := strconv.Itoa(13 + i); policy.Revision != want {
+				t.Errorf("revision after supplying %q = %q, want %q", supplied, policy.Revision, want)
+			}
+		}
+	})
+
+	t.Run("a clock past the previous revision wins", func(t *testing.T) {
+		rb := newRoutedBroker(t)
+		setClock(rb.b, 1<<60)
+		policy, err := rb.b.setLocalPolicy(paidCeilingDoc(t, rb.b, "5"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if policy.Revision != "1152921504606846976" {
+			t.Fatalf("revision = %q, want the clock's 2^60 nanoseconds", policy.Revision)
+		}
+	})
+
+	t.Run("a peer set takes the next revision whatever the peer sends", func(t *testing.T) {
+		rb := newRoutedBroker(t)
+		setClock(rb.b, 5)
+		// Each spelling would fail or be honoured if the parser saw it.
+		supplied := []struct {
+			name  string
+			key   string
+			value any
+		}{
+			{"arbitrary", "revision", "7777"},
+			{"malformed", "revision", "not-a-number"},
+			{"leading zero", "revision", "01"},
+			{"JSON number", "revision", 5},
+			{"null", "revision", nil},
+			{"other case", "Revision", "oops"},
+		}
+		for i, tc := range supplied {
+			snapshot := rb.peerSnapshot(t)
+			snapshot[tc.key] = tc.value
+			snapshot["idle"].(map[string]any)["unloadAfterMinutes"] = i + 1
+			if _, errText := rb.relay(t, "set", map[string]any{"policy": snapshot}); errText != "" {
+				t.Fatalf("relayed set with %s revision: %s", tc.name, errText)
+			}
+			got := rb.b.localPolicy().Policy
+			if want := strconv.Itoa(13 + i); got.Revision != want || got.Idle.UnloadAfterMinutes != i+1 {
+				t.Errorf("after the %s revision: revision %q idle %d, want revision %q and the peer's idle edit %d",
+					tc.name, got.Revision, got.Idle.UnloadAfterMinutes, want, i+1)
+			}
+		}
+	})
+
+	t.Run("a local set ignores a revision in any spelling", func(t *testing.T) {
+		rb := newRoutedBroker(t)
+		setClock(rb.b, 5)
+		var doc map[string]any
+		if err := json.Unmarshal(paidCeilingDoc(t, rb.b, "5"), &doc); err != nil {
+			t.Fatal(err)
+		}
+		delete(doc, "revision")
+		doc["Revision"] = 5
+		policy, err := rb.b.setLocalPolicy(mustJSON(doc))
+		if err != nil {
+			t.Fatalf("set with a numeric Revision: %v", err)
+		}
+		if policy.Revision != "13" {
+			t.Errorf("revision = %q, want %q", policy.Revision, "13")
+		}
+	})
+
+	t.Run("a restart reloads the revision that was acknowledged", func(t *testing.T) {
+		rb := newRoutedBroker(t)
+		policy, err := rb.b.setLocalPolicy(paidCeilingDoc(t, rb.b, "5"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if revisionNumber(t, policy) <= 12 {
+			t.Fatalf("revision %s did not advance past 12", policy.Revision)
+		}
+		if got := freshBroker(t, rb.path).localPolicy().Policy.Revision; got != policy.Revision {
+			t.Fatalf("restart loaded revision %q, want %q", got, policy.Revision)
+		}
+	})
+
+	t.Run("overflow is an error and changes nothing", func(t *testing.T) {
+		rb := newBrokerOnFile(t, strings.Replace(routedPolicyDocument, `"revision": "12"`, `"revision": "9223372036854775807"`, 1))
+		before := rb.fileBytes(t)
+		if _, err := rb.b.setLocalPolicy(paidCeilingDoc(t, rb.b, "5")); err == nil {
+			t.Fatal("a set at the maximum revision succeeded")
+		}
+		if got := rb.b.localPolicy().Policy.Revision; got != "9223372036854775807" {
+			t.Errorf("revision = %q after the refused set", got)
+		}
+		if !bytes.Equal(rb.fileBytes(t), before) {
+			t.Error("the refused set changed the policy file")
+		}
+	})
+
+	t.Run("a persisted availability change takes the next revision and announces it", func(t *testing.T) {
+		rb := newRoutedBroker(t)
+		setClock(rb.b, 5)
+		for _, step := range []struct {
+			state nodepolicy.Availability
+			want  string
+		}{{nodepolicy.Paused, "13"}, {nodepolicy.Available, "14"}} {
+			if _, err := rb.b.setAvailability(context.Background(), step.state); err != nil {
+				t.Fatalf("set availability %s: %v", step.state, err)
+			}
+			got := rb.b.localPolicy().Policy
+			if got.Revision != step.want || got.Availability != step.state {
+				t.Errorf("after %s: revision %q availability %q, want revision %q", step.state, got.Revision, got.Availability, step.want)
+			}
+			var stored nodepolicy.Policy
+			if err := json.Unmarshal(rb.fileBytes(t), &stored); err != nil {
+				t.Fatalf("decode stored policy: %v", err)
+			}
+			if stored.Revision != step.want || stored.Availability != step.state {
+				t.Errorf("stored after %s: revision %q availability %q, want revision %q", step.state, stored.Revision, stored.Availability, step.want)
+			}
+		}
+		if got, want := policyChangedRevisions(t, rb.out), []string{"13", "14"}; !reflect.DeepEqual(got, want) {
+			t.Errorf("policy:changed revisions = %v, want %v", got, want)
+		}
+	})
+
+	t.Run("a failed availability save changes nothing", func(t *testing.T) {
+		rb := newRoutedBroker(t)
+		before := rb.b.localPolicy()
+		setReplacer(rb.b, durablefile.Replacer{Replace: func(string, string) error { return errPublish }})
+		if _, err := rb.b.setAvailability(context.Background(), nodepolicy.Paused); !errors.Is(err, errPublish) {
+			t.Fatalf("pause error = %v, want the injected failure", err)
+		}
+		setReplacer(rb.b, durablefile.Replacer{})
+		if after := rb.b.localPolicy(); !reflect.DeepEqual(after, before) {
+			t.Errorf("failed pause changed the state: availability %q -> %q", before.Availability, after.Availability)
+		}
+		if got := policyChangedRevisions(t, rb.out); len(got) != 0 {
+			t.Errorf("failed pause announced policy:changed %v", got)
+		}
+	})
+}
+
+func TestPolicyRecovery(t *testing.T) {
+	// A corrupt document whose last state was paused, and one that was available.
+	const corruptPaused = `{"version":2,"availability":"paused","idle":{"unloadAfterMinutes":"soon"}}`
+	const corruptAvailable = `{"version":2,"availability":"available","idle":{"unloadAfterMinutes":"soon"}}`
+
+	t.Run("a corrupt file runs paused with remote and paid off", func(t *testing.T) {
+		for name, contents := range map[string]string{"last state paused": corruptPaused, "last state available": corruptAvailable, "truncated": `{"version":2,`} {
+			t.Run(name, func(t *testing.T) {
+				rb := newBrokerOnFile(t, contents)
+				got := rb.b.localPolicy()
+				if !got.RecoveryRequired || got.Availability != nodepolicy.Paused || got.Policy.Availability != nodepolicy.Paused {
+					t.Fatalf("recovery=%t live=%q persisted=%q, want recovery required and paused",
+						got.RecoveryRequired, got.Availability, got.Policy.Availability)
+				}
+				if len(got.Policy.Tiers) != 0 || len(got.Policy.Profiles) != 0 {
+					t.Errorf("recovery policy defines tiers %v or profiles %v", got.Policy.Tiers, got.Policy.Profiles)
+				}
+				for tier, routing := range got.Policy.Routing.Tiers {
+					if routing.RemoteAllowed || routing.PaidAllowed {
+						t.Errorf("recovery policy allows remote or paid execution for tier %s: %+v", tier, routing)
+					}
+				}
+				if bad, err := os.ReadFile(rb.path + ".bad"); err != nil || string(bad) != contents {
+					t.Errorf("kept copy = %q (%v), want the corrupt bytes", bad, err)
+				}
+			})
+		}
+	})
+
+	t.Run("policy:get reports recoveryRequired", func(t *testing.T) {
+		get := func(t *testing.T, rb *routedBroker) map[string]json.RawMessage {
+			t.Helper()
+			rb.b.handleMessage(clientRequest(1, methodPolicyGet, nil))
+			resp := rb.out.waitFrame(t, "policy:get response", isResponse(1))
+			var result map[string]json.RawMessage
+			if err := json.Unmarshal(resp.Result, &result); err != nil {
+				t.Fatalf("decode policy:get: %v", err)
+			}
+			return result
+		}
+		if got := string(get(t, newBrokerOnFile(t, corruptPaused))["recoveryRequired"]); got != "true" {
+			t.Errorf("recoveryRequired after a corrupt file = %s, want true", got)
+		}
+		if got := string(get(t, newRoutedBroker(t))["recoveryRequired"]); got != "false" {
+			t.Errorf("recoveryRequired after a good file = %s, want false", got)
+		}
+	})
+
+	t.Run("an unreadable file needs recovery", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), nodepolicy.FileName)
+		if err := os.Mkdir(path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		got := freshBroker(t, path).localPolicy()
+		if !got.RecoveryRequired || got.Availability != nodepolicy.Paused {
+			t.Fatalf("recovery=%t live=%q, want recovery required and paused", got.RecoveryRequired, got.Availability)
+		}
+	})
+
+	t.Run("a missing file is the default and needs no recovery", func(t *testing.T) {
+		got := freshBroker(t, filepath.Join(t.TempDir(), nodepolicy.FileName)).localPolicy()
+		if got.RecoveryRequired || got.Availability != nodepolicy.Available || got.Policy.Revision != "0" {
+			t.Fatalf("recovery=%t live=%q revision=%q, want the available default at revision 0", got.RecoveryRequired, got.Availability, got.Policy.Revision)
+		}
+	})
+
+	t.Run("availability changes stay in memory", func(t *testing.T) {
+		rb := newBrokerOnFile(t, corruptAvailable)
+		before := rb.fileBytes(t)
+		for _, state := range []nodepolicy.Availability{nodepolicy.Available, nodepolicy.Paused, nodepolicy.Available} {
+			if _, err := rb.b.setAvailability(context.Background(), state); err != nil {
+				t.Fatalf("set availability %s: %v", state, err)
+			}
+			got := rb.b.localPolicy()
+			if got.Availability != state || !got.RecoveryRequired || got.Policy.Revision != "0" {
+				t.Errorf("after %s: live=%q recovery=%t revision=%q, want the change in memory, recovery still required and revision 0",
+					state, got.Availability, got.RecoveryRequired, got.Policy.Revision)
+			}
+			if !bytes.Equal(rb.fileBytes(t), before) {
+				t.Errorf("setting %s overwrote the corrupt file", state)
+			}
+		}
+		if got := policyChangedRevisions(t, rb.out); len(got) != 0 {
+			t.Errorf("unpersisted availability changes announced policy:changed %v", got)
+		}
+		pushes := availabilityPushes(rb.proxy.snapshot())
+		if len(pushes) == 0 || pushes[len(pushes)-1].State != nodepolicy.Available {
+			t.Errorf("proxy availability pushes = %+v, want the last to be %s", pushes, nodepolicy.Available)
+		}
+	})
+
+	t.Run("a paired node cannot complete recovery", func(t *testing.T) {
+		rb := newBrokerOnFile(t, corruptPaused)
+		before := rb.fileBytes(t)
+		if result, errText := rb.relay(t, "set", map[string]any{"policy": rb.peerSnapshot(t)}); errText == "" {
+			t.Fatalf("a relayed set was accepted during recovery: %s", result)
+		}
+		if !rb.b.localPolicy().RecoveryRequired || !bytes.Equal(rb.fileBytes(t), before) {
+			t.Error("the refused relayed set changed the recovery state or the file")
+		}
+	})
+
+	t.Run("an explicit set clears it and the file reloads normally", func(t *testing.T) {
+		rb := newBrokerOnFile(t, corruptAvailable)
+		var doc map[string]any
+		if err := json.Unmarshal(mustJSON(rb.b.localPolicy().Policy), &doc); err != nil {
+			t.Fatal(err)
+		}
+		doc["idle"].(map[string]any)["unloadAfterMinutes"] = 7
+		policy, err := rb.b.setLocalPolicy(mustJSON(doc))
+		if err != nil {
+			t.Fatalf("explicit set: %v", err)
+		}
+		if policy.Revision == "0" {
+			t.Error("the recovering set kept revision 0")
+		}
+		got := rb.b.localPolicy()
+		if got.RecoveryRequired || got.Availability != nodepolicy.Paused {
+			t.Errorf("after the set: recovery=%t live=%q, want recovery cleared and the node still paused", got.RecoveryRequired, got.Availability)
+		}
+		fresh := freshBroker(t, rb.path).localPolicy()
+		if fresh.RecoveryRequired || fresh.Policy.Idle.UnloadAfterMinutes != 7 || fresh.Policy.Revision != policy.Revision {
+			t.Errorf("restart: recovery=%t idle=%d revision=%q, want the saved document",
+				fresh.RecoveryRequired, fresh.Policy.Idle.UnloadAfterMinutes, fresh.Policy.Revision)
+		}
+	})
+
+	t.Run("a failed set leaves recovery in place", func(t *testing.T) {
+		rb := newBrokerOnFile(t, corruptAvailable)
+		before := rb.fileBytes(t)
+		setReplacer(rb.b, durablefile.Replacer{Replace: func(string, string) error { return errPublish }})
+		_, err := rb.b.setLocalPolicy(mustJSON(rb.b.localPolicy().Policy))
+		setReplacer(rb.b, durablefile.Replacer{})
+		if !errors.Is(err, errPublish) {
+			t.Fatalf("set error = %v, want the injected failure", err)
+		}
+		if !rb.b.localPolicy().RecoveryRequired || !bytes.Equal(rb.fileBytes(t), before) {
+			t.Error("a failed set cleared recovery or changed the file")
+		}
+	})
+
+	t.Run("a revision issued before corruption is never issued again", func(t *testing.T) {
+		before := newBrokerOnFile(t, `{"version":2,"revision":"0"}`)
+		setClock(before.b, 0)
+		issued := map[string]bool{}
+		for i := 1; i <= 3; i++ {
+			policy, err := before.b.setLocalPolicy(mustJSON(map[string]any{"version": 2, "idle": map[string]any{"unloadAfterMinutes": i}}))
+			if err != nil {
+				t.Fatalf("set %d: %v", i, err)
+			}
+			issued[policy.Revision] = true
+		}
+		if want := map[string]bool{"1": true, "2": true, "3": true}; !reflect.DeepEqual(issued, want) {
+			t.Fatalf("revisions issued before corruption = %v, want %v", issued, want)
+		}
+		if err := os.WriteFile(before.path, []byte(corruptAvailable), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		after := freshBroker(t, before.path)
+		setClock(after, 1_000_000)
+		policy, err := after.setLocalPolicy(mustJSON(map[string]any{"version": 2}))
+		if err != nil {
+			t.Fatalf("recovering set: %v", err)
+		}
+		if issued[policy.Revision] || revisionNumber(t, policy) <= 3 {
+			t.Errorf("recovery issued revision %s, which matches or precedes one issued before corruption %v", policy.Revision, issued)
+		}
+	})
+}
+
+func TestPolicyVersion1FileIsRewrittenByTheFirstSave(t *testing.T) {
+	const v1 = `{"version":1,"idle":{"unloadAfterMinutes":4}}`
+	rb := newBrokerOnFile(t, v1)
+	got := rb.b.localPolicy()
+	if got.RecoveryRequired || got.Policy.Version != nodepolicy.SchemaVersion || got.Policy.Revision != "0" || got.Policy.Idle.UnloadAfterMinutes != 4 {
+		t.Fatalf("migrated v1: recovery=%t version=%d revision=%q idle=%d", got.RecoveryRequired, got.Policy.Version, got.Policy.Revision, got.Policy.Idle.UnloadAfterMinutes)
+	}
+	if string(rb.fileBytes(t)) != v1 {
+		t.Fatal("loading a v1 file rewrote it")
+	}
+	setClock(rb.b, 5)
+	if _, err := rb.b.setAvailability(context.Background(), nodepolicy.Paused); err != nil {
+		t.Fatalf("pause: %v", err)
+	}
+	var stored nodepolicy.Policy
+	if err := json.Unmarshal(rb.fileBytes(t), &stored); err != nil {
+		t.Fatalf("decode the rewritten file: %v", err)
+	}
+	if stored.Version != nodepolicy.SchemaVersion || stored.Revision != "5" || stored.Availability != nodepolicy.Paused || stored.Idle.UnloadAfterMinutes != 4 {
+		t.Fatalf("rewritten file: version=%d revision=%q availability=%q idle=%d, want version 2, revision 5, paused and the migrated idle setting",
+			stored.Version, stored.Revision, stored.Availability, stored.Idle.UnloadAfterMinutes)
+	}
 }

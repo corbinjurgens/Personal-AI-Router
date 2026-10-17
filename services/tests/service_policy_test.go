@@ -9,7 +9,9 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"testing"
+	"time"
 
 	"nvpair-shared/jsonrpc"
 	"nvpair-shared/nodepolicy"
@@ -27,7 +29,7 @@ func TestServicePolicy(t *testing.T) {
 			t.Fatal("fresh policy already has the update's concurrency value")
 		}
 		want.Admission.MaxConcurrentPerModel = 7
-		setServicePolicy(t, command, want)
+		want = setServicePolicy(t, command, want)
 		assertPolicyChanged(t, observer, nodeID, want)
 		assertPolicySnapshot(t, fetchServicePolicy(t, command), want, nodepolicy.Available)
 		path := f.policyPath()
@@ -44,7 +46,7 @@ func TestServicePolicy(t *testing.T) {
 		c := f.readyClient()
 		want := servicePolicy(t, c)
 		want.Admission.MaxConcurrentPerModel = 5
-		setServicePolicy(t, c, want)
+		want = setServicePolicy(t, c, want)
 		before := fetchServicePolicy(t, c)
 		assertPolicySnapshot(t, before, want, nodepolicy.Available)
 		path := f.policyPath()
@@ -73,9 +75,15 @@ func TestServicePolicy(t *testing.T) {
 		nodeID := fixturePolicyNodeID(t, f)
 		want := servicePolicy(t, command)
 		assertPolicySnapshot(t, fetchServicePolicy(t, command), want, nodepolicy.Available)
+		started := time.Now().UnixNano()
 		setServiceAvailability(t, command, nodepolicy.Paused)
-		assertAvailabilityChanged(t, observer, nodeID, nodepolicy.Paused)
+		finished := time.Now().UnixNano()
+		paused := fetchServicePolicy(t, command)
+		assertNextRevision(t, want.Revision, paused.Policy.Revision, started, finished)
+		want.Revision = paused.Policy.Revision
 		want.Availability = nodepolicy.Paused
+		assertPolicyChanged(t, observer, nodeID, want)
+		assertAvailabilityChanged(t, observer, nodeID, nodepolicy.Paused)
 		assertPolicySnapshot(t, fetchServicePolicy(t, command), want, nodepolicy.Paused)
 		path := f.policyPath()
 		assertStoredPolicy(t, path, want)
@@ -86,9 +94,15 @@ func TestServicePolicy(t *testing.T) {
 			t.Fatalf("restart changed fixture node identity: got %q, want %q", got, nodeID)
 		}
 		assertPolicySnapshot(t, fetchServicePolicy(t, command), want, nodepolicy.Paused)
+		started = time.Now().UnixNano()
 		setServiceAvailability(t, command, nodepolicy.Available)
-		assertAvailabilityChanged(t, observer, nodeID, nodepolicy.Available)
+		finished = time.Now().UnixNano()
+		resumed := fetchServicePolicy(t, command)
+		assertNextRevision(t, want.Revision, resumed.Policy.Revision, started, finished)
+		want.Revision = resumed.Policy.Revision
 		want.Availability = nodepolicy.Available
+		assertPolicyChanged(t, observer, nodeID, want)
+		assertAvailabilityChanged(t, observer, nodeID, nodepolicy.Available)
 		assertPolicySnapshot(t, fetchServicePolicy(t, command), want, nodepolicy.Available)
 		assertStoredPolicy(t, path, want)
 	})
@@ -99,7 +113,7 @@ func TestServicePolicy(t *testing.T) {
 		c := f.readyClient()
 		want := servicePolicy(t, c)
 		want.Admission.MaxConcurrentPerModel = 9
-		setServicePolicy(t, c, want)
+		want = setServicePolicy(t, c, want)
 		output, code := f.cli(serviceCallTimeout, "call", "policy:get", "{}")
 		if code != 0 {
 			t.Fatalf("CLI call policy:get exit=%d output=%s", code, output)
@@ -117,7 +131,7 @@ func TestServicePolicy(t *testing.T) {
 		before := serviceStatus(t, observer)
 		want := servicePolicy(t, command)
 		want.Admission.MaxConcurrentPerModel = 11
-		setServicePolicy(t, command, want)
+		want = setServicePolicy(t, command, want)
 		assertPolicyChanged(t, observer, fixturePolicyNodeID(t, f), want)
 		assertPolicySnapshot(t, fetchServicePolicy(t, observer), want, nodepolicy.Available)
 		command.mustClose(t)
@@ -148,12 +162,17 @@ func (c *serviceRPCClient) mustPolicyCall(t *testing.T, id string, policy nodepo
 	return m
 }
 
-func setServicePolicy(t *testing.T, c *serviceRPCClient, want nodepolicy.Policy) {
+// setServicePolicy sends want and returns it stamped with the revision the
+// broker assigned. The broker ignores the revision in want, so the result must
+// be the next one after it.
+func setServicePolicy(t *testing.T, c *serviceRPCClient, want nodepolicy.Policy) nodepolicy.Policy {
 	t.Helper()
 	if err := want.Validate(); err != nil {
 		t.Fatalf("invalid update fixture: %v", err)
 	}
+	started := time.Now().UnixNano()
 	m := c.mustPolicyCall(t, "202", want)
+	finished := time.Now().UnixNano()
 	if m.Error != nil {
 		t.Fatalf("valid policy:set RPC error: %+v", m.Error)
 	}
@@ -163,8 +182,30 @@ func setServicePolicy(t *testing.T, c *serviceRPCClient, want nodepolicy.Policy)
 	if err := json.Unmarshal(m.Result, &result); err != nil {
 		t.Fatalf("decode policy:set: %v", err)
 	}
-	if !reflect.DeepEqual(result.Policy, want) {
+	assertNextRevision(t, want.Revision, result.Policy.Revision, started, finished)
+	stamped := want
+	stamped.Revision = result.Policy.Revision
+	if !reflect.DeepEqual(result.Policy, stamped) {
 		t.Fatal("policy:set returned a different complete policy")
+	}
+	return stamped
+}
+
+// assertNextRevision requires got to be the revision the broker assigns after
+// previous: the larger of previous+1 and the broker's clock in Unix
+// nanoseconds, which was read between started and finished.
+func assertNextRevision(t *testing.T, previous, got string, started, finished int64) {
+	t.Helper()
+	prev, err := strconv.ParseInt(previous, 10, 64)
+	if err != nil {
+		t.Fatalf("previous revision %q: %v", previous, err)
+	}
+	rev, err := strconv.ParseInt(got, 10, 64)
+	if err != nil || strconv.FormatInt(rev, 10) != got {
+		t.Fatalf("revision %q is not a canonical decimal: %v", got, err)
+	}
+	if lowest, highest := max(prev+1, started), max(prev+1, finished); rev < lowest || rev > highest {
+		t.Fatalf("revision %d after %d is outside the next-revision range [%d, %d]", rev, prev, lowest, highest)
 	}
 }
 

@@ -191,10 +191,45 @@ by the broker. Its schema, defaults and validation live in
 proxy enforces it.
 
 - **File.** `<appdir>/node-policy.json`, loaded at startup before engine-manager
-  and the proxy start. A missing file means `nodepolicy.Default()`. A file that
-  does not parse or validate is kept as `node-policy.json.bad` and the default is
-  used, so a bad hand edit never stops the node. Every change is written
-  atomically (temp file, fsync, rename).
+  and the proxy start. A missing file means `nodepolicy.Default()` (revision
+  `"0"`). A version 1 file is migrated in memory and left untouched on disk; the
+  first successful save of any kind, including a pause or resume, rewrites it as
+  version 2. A document without a `version` key parses as version 2, not
+  version 1.
+- **Revision.** The broker is the only revision assigner. Every persisted
+  document, whether from `policy:set`, a relayed peer set or a persisted
+  availability change, is stamped with the next revision before it is written:
+  the larger of the previous revision plus one and the current Unix time in
+  nanoseconds, as a canonical decimal string. The clock term means a revision
+  issued before a corrupt file was recovered is never issued again afterwards (a
+  clock that moves backwards across a recovery can defeat this). A `revision` a
+  client or peer sends is ignored, as `availability` is. A revision at the
+  signed 64-bit maximum cannot advance and the save fails. A restart reloads the
+  revision that was stored. After a persisted availability change the broker
+  sends `policy:changed` with the new revision, so editors refresh their base.
+- **Durability.** Every save goes through `nvpair-shared/durablefile`: a
+  temporary sibling is written and synced, replaces the file, and the parent
+  directory is synced (Windows uses write-through replacement instead). The
+  in-memory policy, the proxy push and `policy:changed` follow only a successful
+  save; on any failure the previous document, revision and in-memory state are
+  kept and the error is returned. Failure before the replacement leaves the old
+  file byte for byte. A directory-sync failure comes after the replacement: the
+  error is returned while the new bytes are already on disk, so they become
+  effective at the next restart. That uncertainty is accepted and not hidden.
+  The tests inject a failure at each step and restart a broker on the resulting
+  files, which shows ordering under a crash of the process. They are not proof of
+  power-loss durability: that rests on what `fsync`, `rename` and Windows
+  `MoveFileEx` write-through guarantee on the underlying filesystem and storage.
+- **Recovery.** A file that cannot be read, parsed or validated is kept as
+  `node-policy.json.bad` (when it could be read) and the node starts on a
+  recovery policy: the defaults, so no tiers or profiles and remote and paid
+  execution off, with availability `paused` whatever the file said. `policy:get`
+  reports `recoveryRequired: true` until an explicit successful `policy:set`
+  from this node, which saves a valid document under a fresh revision and clears
+  it. Until then an availability change (local or relayed) takes effect in memory
+  and reaches the proxy as usual but is not persisted: it does not overwrite the
+  corrupt file, take a revision or announce `policy:changed`. A relayed
+  `policy:set` from a paired node is refused during recovery.
 - **Proxy state.** The broker pushes `node/set-policy`, `node/set-availability`,
   `node/set-residency`, `node/set-engine-intent` and `node/set-engine-drain`
   (methods and payloads in `nodepolicy/wire.go`). Residency comes from
@@ -374,7 +409,8 @@ The change-only cluster signals `nvpair-node-settings` pushes when `cluster_id` 
 #### `policy:changed` / `node:availability-changed`
 
 **Not opt-in**: sent to every client. `policy:changed {nodeId, policy}` follows a
-successful `policy:set`. `node:availability-changed {nodeId, availability,
+successful `policy:set` and each persisted availability change (not one made
+during policy recovery), carrying the new persisted revision. `node:availability-changed {nodeId, availability,
 active}` follows each availability transition (`draining`, then `paused`; or
 `available`), and while draining it repeats whenever the active count changes.
 Both are also sent with another node's `nodeId` after this node changed that
@@ -390,8 +426,8 @@ node's policy or availability; the remote form carries no `active`.
 
 | Method | Params | Result |
 |---|---|---|
-| `policy:get` | `{ nodeId? }` | `{ policy, availability }` — `policy` is the persisted `nodepolicy.Policy`; `availability` is live and may be `draining`. Relayed from a paired node, `policy` is the peer projection (`nodepolicy.PeerPolicy`: no `routing`, no API tier entries) |
-| `policy:set` | `{ nodeId?, policy }` | `{ policy }` after validation and persisting. Fields the caller omits take their defaults. `policy.availability` is ignored and the persisted value kept: only `node:set-availability` changes it. An invalid policy is error `-32602` and nothing changes. Relayed from a paired node, only device fields may change: `tiers` and `tierPolicy` must equal the projection and `routing` must be absent, or the set is rejected; the result is the peer projection |
+| `policy:get` | `{ nodeId? }` | `{ policy, availability, recoveryRequired }` — `policy` is the persisted `nodepolicy.Policy` (`policy.revision` is the broker-assigned revision of the stored document); `availability` is live and may be `draining`; `recoveryRequired` is true while the node runs on the paused recovery policy because its file was unusable, until an explicit `policy:set` succeeds. Relayed from a paired node, `policy` is the peer projection (`nodepolicy.PeerPolicy`: no `routing`, no API tier entries) |
+| `policy:set` | `{ nodeId?, policy }` | `{ policy }` after validation and persisting. Fields the caller omits take their defaults. `policy.availability` and `policy.revision` are ignored (the persisted availability is kept: only `node:set-availability` changes it; the broker assigns the next revision). A save that cannot be published durably is an error and changes nothing. An invalid policy is error `-32602` and nothing changes. Relayed from a paired node, only device fields may change: `tiers` and `tierPolicy` must equal the projection and `routing` must be absent, or the set is rejected; the result is the peer projection |
 | `node:set-availability` | `{ nodeId?, state: "available" \| "paused" }` | `{ availability }` once the state is reached; pausing waits for the drain. A request replaced by a newer one fails with `superseded by a later node:set-availability request` |
 
 An omitted `nodeId`, or this node's own, acts locally; any other is relayed to
