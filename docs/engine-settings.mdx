@@ -23,14 +23,20 @@ PAIR supplies the executable and startup subcommand. Leave the text empty to use
 managed defaults. Tokens are passed directly to the engine, using the same
 notation on every operating system.
 
-Managed llama.cpp launches add `--ctx-size 8192` and `--parallel 1` to every
-start, so by default a request runs in one slot with an 8,192-token total
-context. This keeps default memory bounded: the alternative llama.cpp defaults
+Managed llama.cpp launches add `--ctx-size 8192`, `--parallel 1` and
+`--cache-ram 512` to every start, so by default a request runs in one slot with
+an 8,192-token total context and at most 512 MiB of host memory for cached
+prompts. This keeps default memory bounded: the alternative llama.cpp defaults
 derive the context from the model and let a loaded model run four slots, which
 asked for far more KV-cache memory than a typical machine should spend by
-default. The tradeoff is fewer parallel requests and a shorter maximum prompt.
+default. llama.cpp's own prompt-cache default is 8,192 MiB, which let a loaded
+model's memory grow by gigabytes over many requests. The tradeoff is fewer
+parallel requests, a shorter maximum prompt and fewer cached conversations to
+resume quickly.
 If your hardware and workload need different values, supply later llama.cpp
-arguments in the text; those opaque arguments are your override.
+arguments in the text; those opaque arguments are your override. Environment
+variables such as `LLAMA_ARG_CACHE_RAM` do not override these flags, because a
+command-line flag wins over its environment variable in llama.cpp.
 
 - Spaces, tabs and line breaks separate unquoted tokens.
 - Single quotes enclose literal text. Double quotes enclose literal text with

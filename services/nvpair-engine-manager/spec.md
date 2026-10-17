@@ -48,10 +48,11 @@ extensibility story for an open-source product.
   `/props` to report `role:"router"`; a single-model listener is incompatible
   and must not be started or adopted because its `/models` contract does not
   expose router residency state.
-- The same bundled llama.cpp launch also fixes `--ctx-size 8192 --parallel 1`
+- The same bundled llama.cpp launch also fixes
+  `--ctx-size 8192 --parallel 1 --cache-ram 512`
   in both `runtime.args` and `runtime.editable_launch.fixed_args`, so fresh and
-  previously saved editable launches start with one parallel slot and an
-  8,192-token total context. This bounds default KV-cache memory (the router
+  previously saved editable launches start with one parallel slot, an
+  8,192-token total context and a 512 MiB prompt-cache cap. This bounds default KV-cache memory (the router
   propagates parent options to model children and would otherwise derive a much
   larger context from the model), at the cost of one-slot concurrency and a
   shorter maximum prompt; a loaded child resolving `--parallel auto` to four
@@ -60,7 +61,16 @@ extensibility story for an open-source product.
   remain the explicit override lane: an advanced user whose hardware and
   workload need different values supplies later llama.cpp arguments in the
   launch text. The manifest carries no parsing, range validation, migration or
-  per-model logic for these values.
+  per-model logic for these values. `--cache-ram 512` caps llama-server's
+  host-memory prompt cache at 512 MiB; the upstream default of 8,192 MiB lets a
+  loaded model's process grow by up to that much as distinct prompts accumulate,
+  cleared only by restarting the engine. Measured with Qwen3-0.6B over 150
+  distinct streamed prompts, the working set plateaued after about 10 requests
+  at roughly 466 MiB above its start with the cap, while it grew about 136 MiB
+  per request without it. The cap limits only the host-memory prompt cache; for
+  that model one cached entry for a long prompt is about 140 MiB, so 512 MiB
+  holds a few recent prompts, and a full 8,192-token state (about 896 MiB in
+  f16) does not fit, so long contexts are not kept in the host cache.
 - Per-engine stdout/stderr log capture and structured operational error records, surfaced via the errors pipeline.
 - A normalized node-level model list (`engine:models`): union of every running engine's `list_models`, name-extracted via each action's declarative `result` spec, plus the per-engine set of models loaded in memory (`loadedByEngine`, from each engine's `loaded_models` action). A successful explicit empty inventory remains an engine key with `[]`; a missing/malformed/failed inventory omits that engine key instead of being mislabeled as authoritative empty. A watcher polls the loaded set and pushes `engine:models-changed` when it changes (explicit load/unload, JIT auto-load, TTL/idle eviction).
 - Expose all of the above over the `engine:*` JSON-RPC surface to whatever orchestrates the service, plus an optional plain-HTTP LAN endpoint (`--http-port`, `GET /v1/models`) that serves the model list to a peer's discovery daemon (the list moved off the size-limited mDNS TXT onto HTTP).
