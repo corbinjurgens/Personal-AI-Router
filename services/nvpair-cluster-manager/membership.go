@@ -128,10 +128,9 @@ func (m *Manager) upsertMember(node *ClusterNode) {
 	m.revalidateReverse()
 }
 
-// removeMemberByUUID drops a member; returns whether one was present. The peer
-// service pool cannot retire one peer, so it drops every idle connection; they
-// redial on next use, and the removed peer's would otherwise linger until idle
-// expiry. The removal pool keeps no idle connections.
+// removeMemberByUUID drops a member; returns whether one was present. The
+// removed peer's pooled connections are retired so they do not linger until idle
+// expiry; other peers keep theirs. The removal pool keeps no idle connections.
 func (m *Manager) removeMemberByUUID(uuid string) bool {
 	m.memMu.Lock()
 	_, ok := m.members[uuid]
@@ -140,7 +139,7 @@ func (m *Manager) removeMemberByUUID(uuid string) bool {
 	if ok {
 		m.clusterGen.Add(1)
 		m.revalidateReverse()
-		m.peerServices.CloseIdle()
+		m.peerServices.DropUnauthorized()
 	}
 	return ok
 }
@@ -367,6 +366,7 @@ func (m *Manager) announceTrustChanged() {
 	m.revalidateReverse()
 	m.mesh.Refresh()
 	m.clients.DropUnpinned()
+	m.peerServices.DropUnauthorized()
 	if err := m.codec.Notify("cluster:trust-changed", struct{}{}); err != nil {
 		log.Printf("emit cluster:trust-changed: %v", err)
 	}

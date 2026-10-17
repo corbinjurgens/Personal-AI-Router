@@ -2279,6 +2279,57 @@ func TestPeerServiceClientCloseIdlePreservesExposedResponse(t *testing.T) {
 	}
 }
 
+func TestPeerServiceClientDropUnauthorized(t *testing.T) {
+	test := func(name string, change func(*serviceClientFixture), wantRetired bool) {
+		t.Run(name, func(t *testing.T) {
+			f := newServiceClientFixture(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if _, err := io.Copy(io.Discard, r.Body); err != nil {
+					t.Error(err)
+				}
+				writeServiceResponse(t, w, "ok")
+			}))
+			f.adapter.opts.ReuseConnections = true
+			serviceClientPost(t, f.adapter.Client("peer", noderec.ServiceCluster), f.url)
+			key := peerServiceKey{"peer", noderec.ServiceCluster}
+			f.adapter.mu.Lock()
+			h := f.adapter.entries[key]
+			f.adapter.mu.Unlock()
+
+			change(f)
+			f.adapter.DropUnauthorized()
+
+			f.adapter.mu.Lock()
+			retired, idle, global := h.retired, len(h.idle), f.adapter.idle
+			f.adapter.mu.Unlock()
+			if retired != wantRetired || (idle == 0) != wantRetired || (global == 0) != wantRetired {
+				t.Fatalf("DropUnauthorized state: retired=%v idle=%d global=%d, want retired=%v", retired, idle, global, wantRetired)
+			}
+			if wantRetired {
+				select {
+				case <-f.closed:
+				case <-time.After(time.Second):
+					t.Fatal("DropUnauthorized did not close the idle socket")
+				}
+			} else if f.connections.Load() != 1 {
+				t.Fatalf("connections = %d, want the original connection kept", f.connections.Load())
+			}
+		})
+	}
+	test("keeps authorized peer", func(*serviceClientFixture) {}, false)
+	test("retires peer without route", func(f *serviceClientFixture) {
+		f.mu.Lock()
+		delete(f.routes, noderec.ServiceCluster)
+		f.mu.Unlock()
+	}, true)
+	test("retires peer with new incarnation", func(f *serviceClientFixture) {
+		f.mu.Lock()
+		route := f.routes[noderec.ServiceCluster]
+		route.Incarnation = "v2"
+		f.routes[noderec.ServiceCluster] = route
+		f.mu.Unlock()
+	}, true)
+}
+
 func TestPeerServiceClientReusableProbePreservesReverseResponse(t *testing.T) {
 	release := make(chan struct{})
 	var once sync.Once
