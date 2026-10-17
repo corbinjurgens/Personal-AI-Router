@@ -123,7 +123,7 @@ type daemon struct {
 	// nodeInfoDown because the two answer different questions: down is what the
 	// last enrichment saw, reported is what the operator has been told, and a
 	// peer can be reported for reasons enrichment never sees (see
-	// reportLapsedPeerServices).
+	// reconcilePeerServices).
 	nodeInfoReported map[string]bool
 
 	// activityMu guards lastActivityAt, when each peer was last seen returning
@@ -1288,7 +1288,7 @@ func (d *daemon) enrichInfoCandidates(node *noderec.DirectoryNode, hosts []strin
 // This runs when the peer's mDNS record is discovered or changes, so it catches
 // a peer that is unreachable from the start but not one that goes quiet behind
 // an unchanged record. That second case reaches the errors view through the
-// reverse-session path (reportLapsedPeerServices) or, once the record ages out,
+// reverse-session path (reconcilePeerServices) or, once the record ages out,
 // through the proxies' upstream-unreachable error.
 func (d *daemon) noteNodeInfo(node noderec.DirectoryNode, endpoint string, ok bool) {
 	hostUUID := node.HostUUID

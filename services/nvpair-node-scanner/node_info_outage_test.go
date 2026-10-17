@@ -325,7 +325,7 @@ func TestNodeInfoOutageReportsOnlyPairedRemotePeers(t *testing.T) {
 }
 
 // TestNodeInfoOutageReportsOnceThePeerIsPaired: a peer that was already down when
-// it became paired is reported on the next sweep, and un-pairing clears it.
+// it became paired is reported on its next node-info enrichment, and un-pairing clears it.
 func TestNodeInfoOutageReportsOnceThePeerIsPaired(t *testing.T) {
 	d, peer, sent := reportingDaemon(t)
 
