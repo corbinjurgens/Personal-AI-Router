@@ -49,7 +49,7 @@ func TestResolvedLaunchMatchesBundledEngines(t *testing.T) {
 					if err == nil {
 						launch, err = resolveProcessLaunch(platform.Runtime, bin, vars)
 					}
-					want = []string{"LLAMA_CACHE=/test models", bin, "--sleep-idle-seconds", "300", "--ctx-size", "8192", "--parallel", "1", "--host", "127.0.0.1", "--port", "12345", "--cors-origins", ""}
+					want = []string{"LLAMA_CACHE=/test models", bin, "--sleep-idle-seconds", "300", "--ctx-size", "8192", "--parallel", "1", "--cache-ram", "512", "--host", "127.0.0.1", "--port", "12345", "--cors-origins", ""}
 					if strings.HasPrefix(platformKey, "linux/") {
 						want = append([]string{"LD_LIBRARY_PATH=/test path"}, want...)
 					}
