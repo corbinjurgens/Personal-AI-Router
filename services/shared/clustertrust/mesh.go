@@ -207,7 +207,7 @@ func (m *Mesh) PeerUUIDs() []string {
 	if m == nil || m.trust == nil {
 		return nil
 	}
-	return m.trust.UUIDs()
+	return m.trust.uuids()
 }
 
 // identity returns the loaded leaf, or false when none is loaded.

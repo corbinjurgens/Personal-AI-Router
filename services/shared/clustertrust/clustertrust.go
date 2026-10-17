@@ -194,8 +194,8 @@ func (t *Trust) DER(uuid string) ([]byte, bool) {
 	return cp, true
 }
 
-// UUIDs returns the currently-pinned peers' UUIDs, sorted.
-func (t *Trust) UUIDs() []string {
+// uuids returns the currently-pinned peers' UUIDs, sorted.
+func (t *Trust) uuids() []string {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
 	return slices.Sorted(maps.Keys(t.ders))

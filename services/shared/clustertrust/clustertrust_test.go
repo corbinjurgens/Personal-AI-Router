@@ -108,7 +108,7 @@ func TestTrustPinMatchAndGate(t *testing.T) {
 	if tr.Count() != 1 {
 		t.Fatalf("trust count = %d, want 1", tr.Count())
 	}
-	if got := tr.UUIDs(); len(got) != 1 || got[0] != "uuid-peer" {
+	if got := tr.uuids(); len(got) != 1 || got[0] != "uuid-peer" {
 		t.Fatalf("pinned UUIDs = %v, want [uuid-peer]", got)
 	}
 	if !tr.MatchDER("uuid-peer", peerDER) {

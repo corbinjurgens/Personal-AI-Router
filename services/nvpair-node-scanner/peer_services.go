@@ -293,12 +293,20 @@ func (d *daemon) reconcilePeerServices() {
 // and message style as a lapse, and the same events clear it.
 //
 // The rule is limited to what nothing else covers. A peer with a directory entry
-// has an mDNS record, so enrichment owns it (it reports when node-info does not
-// answer, and clears when it does); only a peer this node knows about from its
-// pin alone is left. That also excludes peers that reach this node directly,
-// which never need a claim. It is a single look rather than a standing rule so
-// that a peer evicted later is not reported straight back after its report was
-// cleared by the eviction.
+// has either a claim or an mDNS record, so a claim or enrichment owns it
+// (enrichment reports when node-info does not answer, and clears when it does);
+// only a peer this node knows about from its pin alone is left. cluster-manager
+// sends claims to every member whose descriptor it can read, so a peer reached
+// directly is not excluded by that: it is skipped only because it has an entry.
+// It is a single look rather than a standing rule so that a peer evicted later is
+// not reported straight back after its report was cleared by the eviction.
+//
+// Known limits, accepted: the look can report a peer that is in fact reachable
+// when cluster-manager is also new and its first claim takes longer than the
+// grace (the claim then clears it), or when it runs between a browse's enrich and
+// its upsert, which happens outside peerServicesMu. And a peer missed at the look
+// (its pin mid-rewrite, or the mesh not yet clustered) is not looked at again
+// until the scanner restarts.
 func (d *daemon) reportSilentPeers(now time.Time) {
 	if d.startupPeersChecked || d.startedAt.IsZero() || now.Sub(d.startedAt) < peerServicesMaxAge {
 		return

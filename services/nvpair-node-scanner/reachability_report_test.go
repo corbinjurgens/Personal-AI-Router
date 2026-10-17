@@ -215,16 +215,45 @@ func TestSilentPeerWithADirectoryEntryIsLeftToEnrichment(t *testing.T) {
 	requireErrorsFrames(t, sent())
 }
 
-// The startup look is a single look: a peer evicted later is cleared by the
-// eviction and not reported straight back.
+// The startup look is a single look: a peer that is evicted later is cleared by
+// the eviction and not reported straight back.
 func TestStartupLookDoesNotReportAnEvictedPeerAgain(t *testing.T) {
 	d, _, sent := peerServicesWithCapturedCodec(t)
 	d.mesh.Refresh()
+	d.onBrowse(DiscoveryEvent{Type: "discovered", Node: RawNode{ID: "browse-name", Addresses: []string{"192.0.2.90"}, TXT: []string{"uuid=peer", "cluster-uuid=peer", "cl=14444"}}})
 	d.startedAt = time.Now().Add(-peerServicesMaxAge)
 	d.reconcilePeerServices()
-	requireErrorsFrames(t, sent(), "errors:report")
+	requireErrorsFrames(t, sent())
 
-	d.forget("peer")
+	// A failing enrichment reports the peer, then it is evicted.
+	d.noteNodeInfo(peerServicesNode(t, d), "192.0.2.90:14300", false)
+	requireErrorsFrames(t, sent(), "errors:report")
+	d.onBrowse(DiscoveryEvent{Type: "removed", Node: RawNode{ID: "browse-name", Addresses: []string{"192.0.2.90"}, TXT: []string{"uuid=peer", "cluster-uuid=peer", "cl=14444"}}})
+	if _, ok := d.dir.get("peer"); ok {
+		t.Fatal("peer was not evicted")
+	}
 	d.reconcilePeerServices()
 	requireErrorsFrames(t, sent(), "errors:report", "errors:clear")
+}
+
+// A claim that arrives just inside the grace and lapses later is reported once:
+// the startup look finds the peer in the directory and leaves it alone.
+func TestClaimArrivingJustBeforeTheStartupLookLapsesOnce(t *testing.T) {
+	d, claim, sent := peerServicesWithCapturedCodec(t)
+	d.mesh.Refresh()
+	started := time.Now()
+	d.startedAt = started.Add(-peerServicesMaxAge + time.Second)
+	claim.ObservedAt = time.Now().UnixMilli()
+	if !d.acceptPeerServices(claim) {
+		t.Fatal("claim rejected")
+	}
+
+	d.startedAt = started.Add(-peerServicesMaxAge)
+	d.reconcilePeerServices()
+	requireErrorsFrames(t, sent())
+
+	expireClaim(d, "peer")
+	d.reconcilePeerServices()
+	d.reconcilePeerServices()
+	requireErrorsFrames(t, sent(), "errors:report")
 }
