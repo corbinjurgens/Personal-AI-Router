@@ -126,6 +126,13 @@ type daemon struct {
 	// reconcilePeerServices).
 	nodeInfoReported map[string]bool
 
+	// startedAt is when this daemon began, and startupPeersChecked records that
+	// reportSilentPeers has had its one look at who never spoke after start. Both
+	// are guarded by peerServicesMu. A zero startedAt means no start was recorded,
+	// which never checks.
+	startedAt           time.Time
+	startupPeersChecked bool
+
 	// activityMu guards lastActivityAt, when each peer was last seen returning
 	// inference response bytes to one of this node's proxies (keyed by hostUuid,
 	// relayed by the broker from the proxies).
@@ -378,6 +385,7 @@ func newDaemon(codec *Codec, mesh *clustertrust.Mesh, clusterDir string, tlsHTTP
 		lastLoadedByEngine: make(map[string]map[string][]string),
 		nodeInfoDown:       make(map[string]bool),
 		nodeInfoReported:   make(map[string]bool),
+		startedAt:          time.Now(),
 		lastActivityAt:     make(map[string]time.Time),
 	}
 	// Anti-flap: before evicting a node that's missed the mDNS threshold,

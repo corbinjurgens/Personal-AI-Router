@@ -165,3 +165,66 @@ func TestNodeInfoOutageIsClearedWhenThePeerIsUnpaired(t *testing.T) {
 	d.reloadTrust()
 	requireErrorsFrames(t, sent(), "errors:report", "errors:clear")
 }
+
+// A scanner that starts while an admitted, reverse-only peer is down is never
+// handed a claim, so it never sees one lapse. After the same grace a claim has,
+// the peer is reported once, and the next claim clears it.
+func TestSilentPeerIsReportedOnceAfterTheStartupGraceAndClearedByAClaim(t *testing.T) {
+	d, claim, sent := peerServicesWithCapturedCodec(t)
+	d.mesh.Refresh()
+	started := time.Now()
+	d.startedAt = started
+
+	d.reconcilePeerServices()
+	requireErrorsFrames(t, sent())
+
+	d.startedAt = started.Add(-peerServicesMaxAge + time.Second)
+	d.reconcilePeerServices()
+	requireErrorsFrames(t, sent())
+
+	d.startedAt = started.Add(-peerServicesMaxAge)
+	for range 3 {
+		d.reconcilePeerServices()
+	}
+	msgs := sent()
+	requireErrorsFrames(t, msgs, "errors:report")
+	var report sharederrors.ServiceError
+	if err := json.Unmarshal(msgs[0].Params, &report); err != nil {
+		t.Fatal(err)
+	}
+	if report.ID != peerUnreachableID || report.Severity != "warning" || report.Action != "none" {
+		t.Fatalf("report = %+v", report)
+	}
+
+	claim.ObservedAt = time.Now().UnixMilli()
+	if !d.acceptPeerServices(claim) {
+		t.Fatal("claim rejected")
+	}
+	requireErrorsFrames(t, sent(), "errors:report", "errors:clear")
+}
+
+// A peer with a directory entry has an mDNS record, so enrichment owns it; the
+// startup look must not report it a second time.
+func TestSilentPeerWithADirectoryEntryIsLeftToEnrichment(t *testing.T) {
+	d, _, sent := peerServicesWithCapturedCodec(t)
+	d.mesh.Refresh()
+	d.onBrowse(DiscoveryEvent{Type: "discovered", Node: RawNode{ID: "browse-name", Addresses: []string{"192.0.2.90"}, TXT: []string{"uuid=peer", "cluster-uuid=peer", "cl=14444"}}})
+	d.startedAt = time.Now().Add(-peerServicesMaxAge)
+
+	d.reconcilePeerServices()
+	requireErrorsFrames(t, sent())
+}
+
+// The startup look is a single look: a peer evicted later is cleared by the
+// eviction and not reported straight back.
+func TestStartupLookDoesNotReportAnEvictedPeerAgain(t *testing.T) {
+	d, _, sent := peerServicesWithCapturedCodec(t)
+	d.mesh.Refresh()
+	d.startedAt = time.Now().Add(-peerServicesMaxAge)
+	d.reconcilePeerServices()
+	requireErrorsFrames(t, sent(), "errors:report")
+
+	d.forget("peer")
+	d.reconcilePeerServices()
+	requireErrorsFrames(t, sent(), "errors:report", "errors:clear")
+}

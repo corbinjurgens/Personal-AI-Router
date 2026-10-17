@@ -281,7 +281,39 @@ func (d *daemon) reconcilePeerServices() {
 		d.reportUnreachable(node.HostUUID, fmt.Sprintf("Paired node %q has stopped answering over its reverse session for %s; it may be unreachable from this machine",
 			nodeLabel(node), peerServicesMaxAge))
 	}
+	d.reportSilentPeers(time.Now())
 	d.clearUnpairedReports()
+}
+
+// reportSilentPeers closes the restart gap in the lapse report above. A claim is
+// only ever sent after cluster-manager reads a peer's descriptor, so a scanner
+// that starts while a reverse-only peer is down is never handed a claim and so
+// never sees one lapse. Once, peerServicesMaxAge after start, it reports every
+// admitted peer that has no claim and is not in the directory, with the same id
+// and message style as a lapse, and the same events clear it.
+//
+// The rule is limited to what nothing else covers. A peer with a directory entry
+// has an mDNS record, so enrichment owns it (it reports when node-info does not
+// answer, and clears when it does); only a peer this node knows about from its
+// pin alone is left. That also excludes peers that reach this node directly,
+// which never need a claim. It is a single look rather than a standing rule so
+// that a peer evicted later is not reported straight back after its report was
+// cleared by the eviction.
+func (d *daemon) reportSilentPeers(now time.Time) {
+	if d.startupPeersChecked || d.startedAt.IsZero() || now.Sub(d.startedAt) < peerServicesMaxAge {
+		return
+	}
+	d.startupPeersChecked = true
+	for _, hostUUID := range d.mesh.PeerUUIDs() {
+		if _, admitted := d.mesh.PeerServiceIncarnation(hostUUID); !admitted {
+			continue
+		}
+		if _, known := d.dir.get(hostUUID); known {
+			continue
+		}
+		d.reportUnreachable(hostUUID, fmt.Sprintf("Paired node %q has not been reachable over its reverse session since this node started; it may be unreachable from this machine",
+			nodeLabel(noderec.DirectoryNode{HostUUID: hostUUID})))
+	}
 }
 
 func (d *daemon) peerServicesLoop(ctx context.Context) {

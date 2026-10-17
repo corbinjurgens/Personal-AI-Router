@@ -26,9 +26,11 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
+	"maps"
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 )
@@ -190,6 +192,13 @@ func (t *Trust) DER(uuid string) ([]byte, bool) {
 	cp := make([]byte, len(der))
 	copy(cp, der)
 	return cp, true
+}
+
+// UUIDs returns the currently-pinned peers' UUIDs, sorted.
+func (t *Trust) UUIDs() []string {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	return slices.Sorted(maps.Keys(t.ders))
 }
 
 // Count returns the number of currently-pinned peers.

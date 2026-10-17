@@ -159,8 +159,10 @@ func (b *Broker) dispatchScannerErrorsNotif(method string, params json.RawMessag
 
 // clearScannerErrors withdraws every error the scanner reported, for when it
 // crashes. A restarted scanner starts with no memory of them and re-reports
-// whatever is still true, so clearing here costs a brief gap rather than leaving
-// an entry nothing will ever clear.
+// whatever is still true: peers whose node-info does not answer when their
+// records are rediscovered, and admitted peers that stay silent for its first
+// 30 s. Clearing here costs that brief gap rather than leaving an entry nothing
+// will ever clear.
 func (b *Broker) clearScannerErrors() {
 	b.scannerErrorIDsMu.Lock()
 	ids := b.scannerErrorIDs
