@@ -434,6 +434,23 @@ func (p *PeerServiceClient) CloseIdle() {
 	}
 }
 
+// DropUnauthorized retires pooled idle connections of every peer service whose
+// current authority no longer matches the one it was built under: the route is
+// gone, or the pin, local certificate, or route changed. Services still
+// authorized keep their idle connections and health. Like DropUnpinned, it
+// resolves authority with p.mu NOT held, because the resolvers take other locks.
+func (p *PeerServiceClient) DropUnauthorized() {
+	p.mu.Lock()
+	pooled := make(map[peerServiceKey]peerServiceIdentity, len(p.entries))
+	for key, h := range p.entries {
+		pooled[key] = h.identity
+	}
+	p.mu.Unlock()
+	for key, identity := range pooled {
+		_ = p.current(key, identity) // retires the entry when authority moved
+	}
+}
+
 func (p *PeerServiceClient) reusableRoundTrip(req *http.Request, key peerServiceKey, identity peerServiceIdentity, cfg *tls.Config, h *peerServiceHealth, direct bool, budget time.Duration) (*http.Response, error) {
 	release := func() { <-h.slots }
 	p.mu.Lock()
