@@ -131,6 +131,48 @@ func (b *Broker) dispatchErrorsNotif(source, method string, params json.RawMessa
 	return false
 }
 
+// dispatchScannerErrorsNotif is the scanner's errors:report / errors:clear path
+// into the pipeline. The scanner owns the only vantage point on a paired peer
+// going quiet, so it reports that itself; it is a core worker with no errors
+// reader of its own, which is why discovery.go hands the broker its
+// notifications through this hook. The ids it forwards are remembered so
+// clearScannerErrors can withdraw them if the scanner dies.
+func (b *Broker) dispatchScannerErrorsNotif(method string, params json.RawMessage) {
+	var p struct {
+		ID string `json:"id"`
+	}
+	if json.Unmarshal(params, &p) == nil && p.ID != "" {
+		b.scannerErrorIDsMu.Lock()
+		switch method {
+		case methodErrorsReport:
+			if b.scannerErrorIDs == nil {
+				b.scannerErrorIDs = make(map[string]struct{})
+			}
+			b.scannerErrorIDs[p.ID] = struct{}{}
+		case methodErrorsClear:
+			delete(b.scannerErrorIDs, p.ID)
+		}
+		b.scannerErrorIDsMu.Unlock()
+	}
+	b.dispatchErrorsNotif("scanner", method, params)
+}
+
+// clearScannerErrors withdraws every error the scanner reported, for when it
+// crashes. A restarted scanner starts with no memory of them and re-reports
+// whatever is still true: peers whose node-info does not answer when their
+// records are rediscovered, and admitted peers that stay silent for its first
+// 30 s. Clearing here costs that brief gap rather than leaving an entry nothing
+// will ever clear.
+func (b *Broker) clearScannerErrors() {
+	b.scannerErrorIDsMu.Lock()
+	ids := b.scannerErrorIDs
+	b.scannerErrorIDs = nil
+	b.scannerErrorIDsMu.Unlock()
+	for id := range ids {
+		b.forwardErrorsClear(id)
+	}
+}
+
 // forwardErrorsReport sends an errors:report notification to nvpair-errors.
 // A no-op (with a debug log) when nvpair-errors is unavailable so callers
 // don't each need the nil guard — the alternative is every producer's

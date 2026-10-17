@@ -5,6 +5,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"maps"
 	"slices"
 	"time"
@@ -146,6 +147,9 @@ func (d *daemon) acceptPeerServices(claim noderec.PeerServicesClaim) bool {
 	if isNew || routeChanged || previousNode.Name != node.Name || previousNode.Trusted != node.Trusted {
 		d.emit(method, node)
 	}
+	// A claim is proof the peer reaches us again, whatever the lapse that put it
+	// in the errors view.
+	d.clearUnreachable(hostUUID)
 	if !wasAuthenticated || routeChanged {
 		enrichmentNode := node
 		enrichmentNode.Services = maps.Clone(node.Services)
@@ -226,18 +230,31 @@ func (d *daemon) enrichPeerServices(claim noderec.PeerServicesClaim, node nodere
 
 // reconcilePeerServices removes derived authority on leave, re-pair or expiry.
 // Browse claims survive independently and become visible again on retirement.
+//
+// A claim that expires while its peer is still admitted is the reverse session
+// going quiet: cluster-manager stops sending claims when it can no longer reach
+// the peer, and the claim's age is the debounce. That is the one point where a
+// paired peer that is down is observable without a direct connection, so it is
+// reported (reportUnreachable), under the same id enrichment uses, and cleared
+// by the next accepted claim, by the peer ceasing to be paired, or by a later
+// eviction.
 func (d *daemon) reconcilePeerServices() {
 	d.peerServicesMu.Lock()
 	defer d.peerServicesMu.Unlock()
 	d.dir.mu.Lock()
 	var changed []noderec.DirectoryNode
 	var removed []noderec.DirectoryNode
+	var lapsed []noderec.DirectoryNode
 	for hostUUID, claim := range d.dir.peerServices {
 		incarnation, admitted := d.mesh.PeerServiceIncarnation(hostUUID)
-		if admitted && incarnation == claim.Incarnation && peerServicesFresh(claim, time.Now()) {
+		current := admitted && incarnation == claim.Incarnation
+		if current && peerServicesFresh(claim, time.Now()) {
 			continue
 		}
 		old := d.dir.nodes[hostUUID]
+		if current {
+			lapsed = append(lapsed, old)
+		}
 		delete(d.dir.peerServices, hostUUID)
 		d.dir.generations[hostUUID]++
 		if browse, exists := d.dir.browse[hostUUID]; exists {
@@ -257,6 +274,53 @@ func (d *daemon) reconcilePeerServices() {
 	for _, node := range removed {
 		d.forget(node.HostUUID)
 		d.emit(noderec.NotifyNodeRemoved, node)
+	}
+	// After the loops above: reverting or forgetting a node clears its report, and
+	// this one has to outlive that.
+	for _, node := range lapsed {
+		d.reportUnreachable(node.HostUUID, fmt.Sprintf("Paired node %q has stopped answering over its reverse session for %s; it may be unreachable from this machine",
+			nodeLabel(node), peerServicesMaxAge))
+	}
+	d.reportSilentPeers(time.Now())
+	d.clearUnpairedReports()
+}
+
+// reportSilentPeers closes the restart gap in the lapse report above. A claim is
+// only ever sent after cluster-manager reads a peer's descriptor, so a scanner
+// that starts while a reverse-only peer is down is never handed a claim and so
+// never sees one lapse. Once, peerServicesMaxAge after start, it reports every
+// admitted peer that has no claim and is not in the directory, with the same id
+// and message style as a lapse, and the same events clear it.
+//
+// The rule is limited to what nothing else covers. A peer with a directory entry
+// has either a claim or an mDNS record, so a claim or enrichment owns it
+// (enrichment reports when node-info does not answer, and clears when it does);
+// only a peer this node knows about from its pin alone is left. cluster-manager
+// sends claims to every member whose descriptor it can read, so a peer reached
+// directly is not excluded by that: it is skipped only because it has an entry.
+// It is a single look rather than a standing rule so that a peer evicted later is
+// not reported straight back after its report was cleared by the eviction.
+//
+// Known limits, accepted: the look can report a peer that is in fact reachable
+// when cluster-manager is also new and its first claim takes longer than the
+// grace (the claim then clears it), or when it runs between a browse's enrich and
+// its upsert, which happens outside peerServicesMu. And a peer missed at the look
+// (its pin mid-rewrite, or the mesh not yet clustered) is not looked at again
+// until the scanner restarts.
+func (d *daemon) reportSilentPeers(now time.Time) {
+	if d.startupPeersChecked || d.startedAt.IsZero() || now.Sub(d.startedAt) < peerServicesMaxAge {
+		return
+	}
+	d.startupPeersChecked = true
+	for _, hostUUID := range d.mesh.PeerUUIDs() {
+		if _, admitted := d.mesh.PeerServiceIncarnation(hostUUID); !admitted {
+			continue
+		}
+		if _, known := d.dir.get(hostUUID); known {
+			continue
+		}
+		d.reportUnreachable(hostUUID, fmt.Sprintf("Paired node %q has not been reachable over its reverse session since this node started; it may be unreachable from this machine",
+			nodeLabel(noderec.DirectoryNode{HostUUID: hostUUID})))
 	}
 }
 

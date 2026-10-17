@@ -200,6 +200,16 @@ func (m *Mesh) PeerCount() int {
 	return m.trust.Count()
 }
 
+// PeerUUIDs returns the UUIDs of the currently-pinned peers (excludes self),
+// sorted. It is the pin set as of the last Refresh, not a statement of
+// admission: PeerServiceIncarnation answers that per peer.
+func (m *Mesh) PeerUUIDs() []string {
+	if m == nil || m.trust == nil {
+		return nil
+	}
+	return m.trust.uuids()
+}
+
 // identity returns the loaded leaf, or false when none is loaded.
 func (m *Mesh) identity() (*Identity, bool) {
 	if m == nil {

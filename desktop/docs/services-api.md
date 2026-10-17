@@ -189,6 +189,8 @@
 
 | Method | Direction | In bridge? |
 |---|---|---|
+| `errors:clear` | notification (we consume) | ✅ yes |
+| `errors:report` | notification (we consume) | ✅ yes |
 | `ready` | notification (we consume) | ✅ yes |
 | `discovery:get-node-info` | request (we call) | ✅ yes |
 | `discovery:peer-services` | request (we call) | ➖ ignored |

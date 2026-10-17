@@ -349,6 +349,10 @@ type scannerProcess struct {
 	onNodeLost         func(uuid, name string)
 	onTelemetry        func(noderec.NodeTelemetry)
 	onTelemetryRemoved func(hostUUID string)
+	// onErrorsNotif receives the scanner's errors:report / errors:clear
+	// notifications (a paired peer's node-info going quiet, and coming back) so
+	// the broker can forward them into the nvpair-errors pipeline.
+	onErrorsNotif func(method string, params json.RawMessage)
 	// activity queues peer liveness reports for the scanner. It exists so the
 	// proxy-reader goroutine that receives them never waits on the scanner's
 	// pipe: reports arrive while inference is streaming, and a wedged scanner
@@ -395,6 +399,7 @@ func startScanner(
 	onNodeLost func(uuid, name string),
 	onTelemetry func(noderec.NodeTelemetry),
 	onTelemetryRemoved func(hostUUID string),
+	onErrorsNotif func(method string, params json.RawMessage),
 	extraArgs ...string,
 ) (*scannerProcess, error) {
 	cmd := exec.Command(binaryPath, append([]string{"--log-level", logLevel}, extraArgs...)...)
@@ -424,6 +429,7 @@ func startScanner(
 		onNodeLost:         onNodeLost,
 		onTelemetry:        onTelemetry,
 		onTelemetryRemoved: onTelemetryRemoved,
+		onErrorsNotif:      onErrorsNotif,
 		activity:           make(chan nodeActivityReport, activityQueueDepth),
 		done:               make(chan struct{}),
 	}
@@ -627,6 +633,10 @@ func (s *scannerProcess) handleNotify(method string, params json.RawMessage) {
 		}
 		if s.onTelemetry != nil {
 			s.onTelemetry(telemetry)
+		}
+	case methodErrorsReport, methodErrorsClear:
+		if s.onErrorsNotif != nil {
+			s.onErrorsNotif(method, params)
 		}
 	case "ready":
 		slog.Info("scanner reported ready", "params", string(params))

@@ -340,7 +340,7 @@ A few semantics worth knowing:
 
 #### `errors:update`
 
-The full service-error snapshot from `nvpair-errors`, relayed verbatim on every change (a bare `ServiceError[]`). **Not opt-in:** following the established error-reporting protocol the broker forwards it unconditionally. Every supervised worker's `errors:report` / `errors:clear` — proxy upstream-unreachable, engine-manager install/exit failures, manual-node probe failures, and the supervisor's own `supervisor:subprocess-crashed:<name>` — is forwarded into `nvpair-errors`, deduped there, and re-emitted here. A client can also inject its own `errors:report` (see Requests below); it is forwarded into `nvpair-errors` the same way a worker's is.
+The full service-error snapshot from `nvpair-errors`, relayed verbatim on every change (a bare `ServiceError[]`). **Not opt-in:** following the established error-reporting protocol the broker forwards it unconditionally. Every supervised worker's `errors:report` / `errors:clear` — proxy upstream-unreachable, engine-manager install/exit failures, manual-node probe failures, the node scanner's `node-scanner:node-info-unreachable:<hostUuid>` for a paired peer it cannot reach (the broker clears the ones still standing if the scanner crashes), and the supervisor's own `supervisor:subprocess-crashed:<name>` — is forwarded into `nvpair-errors`, deduped there, and re-emitted here. A client can also inject its own `errors:report` (see Requests below); it is forwarded into `nvpair-errors` the same way a worker's is.
 
 ```
 ServiceError = { id, message, timestamp, nodeId?, severity?, action?, engineType?, operation?, modelName? }

@@ -549,7 +549,7 @@ func main() {
 	if output, err := exec.CommandContext(buildCtx, "go", "build", "-o", binary, source).CombinedOutput(); err != nil {
 		t.Fatalf("build owned scanner fixture: %v\n%s", err, output)
 	}
-	sp, err := startScanner(binary, "error", nil, nil, nil, nil, nil)
+	sp, err := startScanner(binary, "error", nil, nil, nil, nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -573,7 +573,7 @@ func main() {
 	if sp.cmd.ProcessState == nil || sp.cmd.ProcessState.Success() {
 		t.Fatalf("stalled scanner did not terminate unsuccessfully: %v", sp.cmd.ProcessState)
 	}
-	replacement, err := startScanner(binary, "error", nil, nil, nil, nil, nil, "responsive")
+	replacement, err := startScanner(binary, "error", nil, nil, nil, nil, nil, nil, "responsive")
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -7,6 +7,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"maps"
@@ -14,12 +15,14 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"nvpair-shared/clustertrust"
+	sharederrors "nvpair-shared/errors"
 	"nvpair-shared/mdns"
 	"nvpair-shared/netmon"
 	"nvpair-shared/netpick"
@@ -115,6 +118,20 @@ type daemon struct {
 	// per sweep. Guarded by infoMu with the caches it explains: the reason a
 	// card keeps showing an old inventory is exactly this entry.
 	nodeInfoDown map[string]bool
+	// nodeInfoReported holds the nodes whose outage is currently in the errors
+	// view, so the report and its clear are each sent once. It is separate from
+	// nodeInfoDown because the two answer different questions: down is what the
+	// last enrichment saw, reported is what the operator has been told, and a
+	// peer can be reported for reasons enrichment never sees (see
+	// reconcilePeerServices).
+	nodeInfoReported map[string]bool
+
+	// startedAt is when this daemon began, and startupPeersChecked records that
+	// reportSilentPeers has had its one look at who never spoke after start. Both
+	// are guarded by peerServicesMu. A zero startedAt means no start was recorded,
+	// which never checks.
+	startedAt           time.Time
+	startupPeersChecked bool
 
 	// activityMu guards lastActivityAt, when each peer was last seen returning
 	// inference response bytes to one of this node's proxies (keyed by hostUuid,
@@ -367,6 +384,8 @@ func newDaemon(codec *Codec, mesh *clustertrust.Mesh, clusterDir string, tlsHTTP
 		lastModelsByEngine: make(map[string]map[string][]string),
 		lastLoadedByEngine: make(map[string]map[string][]string),
 		nodeInfoDown:       make(map[string]bool),
+		nodeInfoReported:   make(map[string]bool),
+		startedAt:          time.Now(),
 		lastActivityAt:     make(map[string]time.Time),
 	}
 	// Anti-flap: before evicting a node that's missed the mDNS threshold,
@@ -1226,7 +1245,7 @@ func (d *daemon) enrichInfoCandidates(node *noderec.DirectoryNode, hosts []strin
 	if endpointHost == "" {
 		endpointHost = hosts[0]
 	}
-	d.noteNodeInfo(node.HostUUID, net.JoinHostPort(endpointHost, strconv.Itoa(ni.Port)), selectedHost != "")
+	d.noteNodeInfo(*node, net.JoinHostPort(endpointHost, strconv.Itoa(ni.Port)), selectedHost != "")
 	if selectedHost != "" {
 		d.infoMu.Lock()
 		if d.lastInfo == nil {
@@ -1255,18 +1274,35 @@ func (d *daemon) enrichInfoCandidates(node *noderec.DirectoryNode, hosts []strin
 // noteNodeInfo reports a peer's node-info endpoint going quiet, and coming back,
 // at a level someone reading the log will see.
 //
-// Only the transitions are reported. The enrichment sweep repeats every
-// peerRefreshInterval for as long as a node is advertised, so a peer whose
-// address accepts nothing produces an unbounded run of identical failures; one
-// line each time is why this was a debug line, and being a debug line is why an
-// address that never once answered looked, in the log, exactly like one that was
+// Only the transitions are reported. The enrichment runs on every mDNS record
+// change for as long as a node is advertised, so a peer whose address accepts
+// nothing would produce an unbounded run of identical failures; one line each
+// time is why this was a debug line, and being a debug line is why an address
+// that never once answered looked, in the log, exactly like one that was
 // working. A node that is failing is stated once, with where it was asked, and
 // its recovery is stated once.
 //
 // Silence between those two lines does not mean the peer is fine — it means
 // nothing has changed and the node's card is still showing the last inventory
 // that was actually read.
-func (d *daemon) noteNodeInfo(hostUUID, endpoint string, ok bool) {
+//
+// The log is not where an operator looks, so a paired peer's outage is also put
+// in the errors view (nodeInfoUnreachableID) and taken out again when the peer
+// answers, stops being paired, or the node is evicted. Only paired peers are
+// reported: an unpaired LAN node that firewalls this machine is not something
+// the operator can act on here, and this node's own node-info (reached over
+// loopback) is the supervisor's to report.
+//
+// This runs when the peer's mDNS record is discovered or changes, so it catches
+// a peer that is unreachable from the start but not one that goes quiet behind
+// an unchanged record. That second case reaches the errors view through the
+// reverse-session path (reconcilePeerServices) or, once the record ages out,
+// through the proxies' upstream-unreachable error.
+func (d *daemon) noteNodeInfo(node noderec.DirectoryNode, endpoint string, ok bool) {
+	hostUUID := node.HostUUID
+	host, _, _ := net.SplitHostPort(endpoint)
+	reportable := !ok && node.Trusted && !isLoopbackHost(host)
+
 	d.infoMu.Lock()
 	was := d.nodeInfoDown[hostUUID]
 	if ok {
@@ -1285,6 +1321,110 @@ func (d *daemon) noteNodeInfo(hostUUID, endpoint string, ok bool) {
 			"hostUuid", hostUUID, "endpoint", endpoint)
 	case ok && was:
 		slog.Info("node-info is answering again", "hostUuid", hostUUID, "endpoint", endpoint)
+	}
+
+	if reportable {
+		d.reportUnreachable(hostUUID, fmt.Sprintf("Paired node %q is not answering on its node-info endpoint (%s); its inventory is not updating and it may be unreachable from this machine",
+			nodeLabel(node), endpoint))
+	} else {
+		d.clearUnreachable(hostUUID)
+	}
+}
+
+// nodeInfoUnreachableID is the errors-view id for a paired peer this node cannot
+// reach. There is one id per peer, whichever path noticed (node-info not
+// answering, or its reverse-session claims lapsing), so the view shows a single
+// entry whose message is the latest observation and one clear removes it.
+func nodeInfoUnreachableID(hostUUID string) string {
+	return "node-scanner:node-info-unreachable:" + hostUUID
+}
+
+// nodeLabel names a peer for a message: its hostname, or its uuid when the
+// record carried none.
+func nodeLabel(node noderec.DirectoryNode) string {
+	if node.Name != "" {
+		return node.Name
+	}
+	return node.HostUUID
+}
+
+// reportUnreachable puts a peer's outage in the errors view, once. Repeating
+// the call while the outage stands sends nothing.
+func (d *daemon) reportUnreachable(hostUUID, message string) {
+	if d.setUnreachableReported(hostUUID, true) {
+		return
+	}
+	d.emitError(sharederrors.ServiceError{
+		ID:       nodeInfoUnreachableID(hostUUID),
+		Message:  message,
+		Severity: "warning",
+		Action:   "none",
+	})
+}
+
+// clearUnreachable takes a peer's outage out of the errors view if it is there.
+func (d *daemon) clearUnreachable(hostUUID string) {
+	if d.setUnreachableReported(hostUUID, false) {
+		d.emitErrorClear(hostUUID)
+	}
+}
+
+// setUnreachableReported records whether hostUUID's outage is in the errors view
+// and returns what it was. The record is separate from nodeInfoDown because the
+// two answer different questions: down is what the last enrichment saw, reported
+// is what the operator has been told.
+func (d *daemon) setUnreachableReported(hostUUID string, on bool) (was bool) {
+	d.infoMu.Lock()
+	defer d.infoMu.Unlock()
+	was = d.nodeInfoReported[hostUUID]
+	if !on {
+		delete(d.nodeInfoReported, hostUUID)
+		return was
+	}
+	if d.nodeInfoReported == nil {
+		d.nodeInfoReported = make(map[string]bool)
+	}
+	d.nodeInfoReported[hostUUID] = true
+	return was
+}
+
+// clearUnpairedReports takes out the report of any peer that is no longer
+// paired, which no enrichment would otherwise notice: a peer that stops being
+// trusted stops being enriched, so nothing else would clear its entry.
+func (d *daemon) clearUnpairedReports() {
+	d.infoMu.Lock()
+	hosts := slices.Collect(maps.Keys(d.nodeInfoReported))
+	d.infoMu.Unlock()
+	for _, hostUUID := range hosts {
+		principal := hostUUID
+		if node, ok := d.dir.get(hostUUID); ok && node.ClusterUUID != "" {
+			principal = node.ClusterUUID
+		}
+		if !d.mesh.HasPin(principal) {
+			d.clearUnreachable(hostUUID)
+		}
+	}
+}
+
+// emitError and emitErrorClear push errors:report / errors:clear to the broker,
+// which stamps the origin nodeId and timestamp and forwards them to
+// nvpair-errors. Nil-codec-safe for the same reason as emit.
+func (d *daemon) emitError(e sharederrors.ServiceError) {
+	if d.codec == nil {
+		return
+	}
+	if err := d.codec.Notify("errors:report", e); err != nil {
+		slog.Warn("failed to send errors:report", "id", e.ID, "err", err)
+	}
+}
+
+func (d *daemon) emitErrorClear(hostUUID string) {
+	if d.codec == nil {
+		return
+	}
+	id := nodeInfoUnreachableID(hostUUID)
+	if err := d.codec.Notify("errors:clear", sharederrors.ClearParams{ID: id}); err != nil {
+		slog.Warn("failed to send errors:clear", "id", id, "err", err)
 	}
 }
 
@@ -1972,6 +2112,7 @@ func (d *daemon) invalidatePeerServicesRoute(hostUUID string) {
 	delete(d.lastLoadedByEngine, hostUUID)
 	delete(d.nodeInfoDown, hostUUID)
 	d.infoMu.Unlock()
+	d.clearUnreachable(hostUUID)
 }
 
 // forget drops all cached state only when the last directory claim disappears.
