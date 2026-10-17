@@ -250,6 +250,23 @@ proxy enforces it.
   request is never forwarded again), and answers `policy:reply`. A successful
   remote change is also announced to this node's clients under the target's
   `nodeId`.
+- **Peer projection.** A paired node sees and changes a projection of the policy,
+  never the owner's document. A relayed `policy:get` and the result of a relayed
+  `policy:set` carry `nodepolicy.PeerPolicy`: the device fields, the local tier
+  entries (a tier left with none is omitted), `tierPolicy` and the `revision` of
+  the protected source document. The whole `routing` section (accounts,
+  credential references, deployments, limits, listener) and every API tier entry
+  are left out. A relayed `policy:set` must carry the projection's `tiers` and
+  `tierPolicy` unchanged and no `routing` key; it is then merged into the stored
+  policy, whose tiers (API entries included), `tierPolicy`, `routing`,
+  `revision` and availability are kept exactly, and only the device fields
+  change. Any change to those protected sections, or any `routing` content, is
+  rejected with nothing persisted and nothing pushed to the proxy. The merge runs
+  against the stored policy inside the same critical section as the save, so a
+  peer holding an older projection cannot restore protected content a local
+  `policy:set` has since changed: an unchanged `routing` is kept as it is now,
+  and stale `tiers` or `tierPolicy` are rejected. Local clients keep the full
+  document, including in `policy:changed`.
 
 ## JSON-RPC Surface
 
@@ -373,8 +390,8 @@ node's policy or availability; the remote form carries no `active`.
 
 | Method | Params | Result |
 |---|---|---|
-| `policy:get` | `{ nodeId? }` | `{ policy, availability }` — `policy` is the persisted `nodepolicy.Policy`; `availability` is live and may be `draining` |
-| `policy:set` | `{ nodeId?, policy }` | `{ policy }` after validation and persisting. Fields the caller omits take their defaults. `policy.availability` is ignored and the persisted value kept: only `node:set-availability` changes it. An invalid policy is error `-32602` and nothing changes |
+| `policy:get` | `{ nodeId? }` | `{ policy, availability }` — `policy` is the persisted `nodepolicy.Policy`; `availability` is live and may be `draining`. Relayed from a paired node, `policy` is the peer projection (`nodepolicy.PeerPolicy`: no `routing`, no API tier entries) |
+| `policy:set` | `{ nodeId?, policy }` | `{ policy }` after validation and persisting. Fields the caller omits take their defaults. `policy.availability` is ignored and the persisted value kept: only `node:set-availability` changes it. An invalid policy is error `-32602` and nothing changes. Relayed from a paired node, only device fields may change: `tiers` and `tierPolicy` must equal the projection and `routing` must be absent, or the set is rejected; the result is the peer projection |
 | `node:set-availability` | `{ nodeId?, state: "available" \| "paused" }` | `{ availability }` once the state is reached; pausing waits for the drain. A request replaced by a newer one fails with `superseded by a later node:set-availability request` |
 
 An omitted `nodeId`, or this node's own, acts locally; any other is relayed to

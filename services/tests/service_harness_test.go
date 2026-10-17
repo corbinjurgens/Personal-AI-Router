@@ -541,7 +541,7 @@ func decodeServicePolicySnapshot(t *testing.T, m *jsonrpc.Message) servicePolicy
 	if err := result.Policy.Validate(); err != nil {
 		t.Fatalf("policy:get invalid policy: %v", err)
 	}
-	if result.Policy.Version != 1 {
+	if result.Policy.Version != 2 {
 		t.Fatalf("unexpected policy version: %d", result.Policy.Version)
 	}
 	switch result.Availability {

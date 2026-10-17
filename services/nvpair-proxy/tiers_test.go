@@ -180,8 +180,8 @@ func TestTier_CapabilityFilterAndBodyRewrite(t *testing.T) {
 	tc := ollamaCase(t)
 	pol := ollamaTierPolicy(map[string][]nodepolicy.TierEntry{
 		"weak": {
-			{Engine: "ollama", Model: "small:1b"},
-			{Engine: "ollama", Model: "small-tools:1b", Capabilities: []nodepolicy.Capability{nodepolicy.CapTools}},
+			{Kind: nodepolicy.EntryLocal, Engine: "ollama", Model: "small:1b"},
+			{Kind: nodepolicy.EntryLocal, Engine: "ollama", Model: "small-tools:1b", Capabilities: []nodepolicy.Capability{nodepolicy.CapTools}},
 		},
 	})
 	fx := newTierFixture(t, tc, pol, map[string][]string{
@@ -210,8 +210,8 @@ func TestTier_CapabilityFilterAndBodyRewrite(t *testing.T) {
 func TestTier_ContextFilterAndStrongerFallback(t *testing.T) {
 	tc := ollamaCase(t)
 	pol := ollamaTierPolicy(map[string][]nodepolicy.TierEntry{
-		"weak":   {{Engine: "ollama", Model: "small:1b", ContextTokens: 100}},
-		"medium": {{Engine: "ollama", Model: "mid:7b", ContextTokens: 32000}},
+		"weak":   {{Kind: nodepolicy.EntryLocal, Engine: "ollama", Model: "small:1b", ContextTokens: 100}},
+		"medium": {{Kind: nodepolicy.EntryLocal, Engine: "ollama", Model: "mid:7b", ContextTokens: 32000}},
 	})
 	fx := newTierFixture(t, tc, pol, map[string][]string{"a": {"small:1b"}, "b": {"mid:7b"}}, nil)
 
@@ -262,8 +262,8 @@ func TestTier_NoEntriesIs404WithEmptyNeeds(t *testing.T) {
 func TestTier_WarmPreference(t *testing.T) {
 	tc := ollamaCase(t)
 	tiers := map[string][]nodepolicy.TierEntry{
-		"weak":   {{Engine: "ollama", Model: "cold:1b"}, {Engine: "ollama", Model: "warm:1b"}},
-		"medium": {{Engine: "ollama", Model: "mid:7b"}},
+		"weak":   {{Kind: nodepolicy.EntryLocal, Engine: "ollama", Model: "cold:1b"}, {Kind: nodepolicy.EntryLocal, Engine: "ollama", Model: "warm:1b"}},
+		"medium": {{Kind: nodepolicy.EntryLocal, Engine: "ollama", Model: "mid:7b"}},
 	}
 	nodes := map[string][]string{"a": {"cold:1b"}, "b": {"warm:1b"}, "c": {"mid:7b"}}
 
@@ -293,7 +293,7 @@ func TestTier_WarmPreference(t *testing.T) {
 // Workload events carry the concrete model and the tier asked for.
 func TestTier_WorkloadCarriesRequestedModel(t *testing.T) {
 	tc := ollamaCase(t)
-	pol := ollamaTierPolicy(map[string][]nodepolicy.TierEntry{"medium": {{Engine: "ollama", Model: "mid:7b"}}})
+	pol := ollamaTierPolicy(map[string][]nodepolicy.TierEntry{"medium": {{Kind: nodepolicy.EntryLocal, Engine: "ollama", Model: "mid:7b"}}})
 	fx := newTierFixture(t, tc, pol, map[string][]string{"a": {"mid:7b"}}, nil)
 	if rec := fx.do(t, "/api/generate", `{"model":"medium","prompt":"x"}`); rec.Code != http.StatusOK {
 		t.Fatalf("status %d", rec.Code)
@@ -367,7 +367,7 @@ func TestTier_CrossEngineSelfRouting(t *testing.T) {
 	setBackend(t, oll, ollEngine.URL, true)
 
 	pol := nodepolicy.Default()
-	pol.Tiers = map[string][]nodepolicy.TierEntry{"strong": {{Engine: "lmstudio", Model: "qwen3-8b"}}}
+	pol.Tiers = map[string][]nodepolicy.TierEntry{"strong": {{Kind: nodepolicy.EntryLocal, Engine: "lmstudio", Model: "qwen3-8b"}}}
 	p.admission.setPolicy(pol)
 
 	rec := httptest.NewRecorder()
@@ -407,7 +407,7 @@ func TestTier_CrossEnginePeerUsesThatEnginesPort(t *testing.T) {
 	peerLM := newRecordingEngine(t, http.StatusOK)
 	lm.discovery.AddManual(nodeForModel(t, "peer", peerLM.URL, "qwen3-8b"))
 	pol := nodepolicy.Default()
-	pol.Tiers = map[string][]nodepolicy.TierEntry{"weak": {{Engine: "lmstudio", Model: "qwen3-8b"}}}
+	pol.Tiers = map[string][]nodepolicy.TierEntry{"weak": {{Kind: nodepolicy.EntryLocal, Engine: "lmstudio", Model: "qwen3-8b"}}}
 	p.admission.setPolicy(pol)
 
 	cands := oll.resolveTierCandidates("weak", requestNeeds{}, true)
@@ -430,8 +430,8 @@ func TestModelList_OffersTiers(t *testing.T) {
 	p := testProxy(tc.profile, disc, tc.profile.FacadePort)
 	pol := nodepolicy.Default()
 	pol.Tiers = map[string][]nodepolicy.TierEntry{
-		"weak":   {{Engine: "lmstudio", Model: "qwen3-8b"}},
-		"strong": {{Engine: "lmstudio", Model: "qwen3-8b"}},
+		"weak":   {{Kind: nodepolicy.EntryLocal, Engine: "lmstudio", Model: "qwen3-8b"}},
+		"strong": {{Kind: nodepolicy.EntryLocal, Engine: "lmstudio", Model: "qwen3-8b"}},
 	}
 	p.admission.setPolicy(pol)
 	rec := httptest.NewRecorder()
@@ -464,11 +464,156 @@ func TestModelList_NativeShapeGetsNoTiers(t *testing.T) {
 	disc.AddManual(nodeFor(t, "n1", e.URL))
 	p := testProxy(tc.profile, disc, tc.profile.FacadePort)
 	pol := nodepolicy.Default()
-	pol.Tiers = map[string][]nodepolicy.TierEntry{"weak": {{Engine: "ollama", Model: "qwen3"}}}
+	pol.Tiers = map[string][]nodepolicy.TierEntry{"weak": {{Kind: nodepolicy.EntryLocal, Engine: "ollama", Model: "qwen3"}}}
 	p.admission.setPolicy(pol)
 	rec := httptest.NewRecorder()
 	p.soleFacade().handleHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/tags", nil))
 	if strings.Contains(rec.Body.String(), "weak") {
 		t.Fatalf("native model list gained a tier: %s", rec.Body)
+	}
+}
+
+// A version 1 policy file migrated to version 2 resolves exactly the candidates
+// it resolved before: its entries are local entries.
+func TestTier_MigratedV1PolicyResolvesTheSameCandidates(t *testing.T) {
+	pol, err := nodepolicy.Parse([]byte(`{
+		"version": 1,
+		"tiers": {
+			"weak":   [{"engine":"ollama","model":"small:1b"}, {"engine":"ollama","model":"small-tools:1b","capabilities":["tools"]}],
+			"medium": [{"engine":"ollama","model":"mid:7b"}]
+		}
+	}`))
+	if err != nil {
+		t.Fatalf("Parse(v1): %v", err)
+	}
+	fx := newTierFixture(t, ollamaCase(t), pol, map[string][]string{
+		"a": {"small:1b"}, "b": {"small-tools:1b"}, "c": {"mid:7b"}, "d": {"unrelated:1b"},
+	}, nil)
+	f := fx.p.soleFacade()
+
+	type resolved struct {
+		node, model string
+		rank        int
+	}
+	resolve := func(needs requestNeeds) []resolved {
+		var out []resolved
+		for _, c := range f.resolveTierCandidates("weak", needs, false) {
+			out = append(out, resolved{c.id, c.model, c.tierRank})
+		}
+		return out
+	}
+	want := []resolved{{"a", "small:1b", 0}, {"b", "small-tools:1b", 0}, {"c", "mid:7b", 1}}
+	if got := resolve(requestNeeds{}); !slices.Equal(got, want) {
+		t.Errorf("candidates = %+v, want %+v", got, want)
+	}
+	if got, want := resolve(requestNeeds{caps: []nodepolicy.Capability{nodepolicy.CapTools}}), []resolved{{"b", "small-tools:1b", 0}}; !slices.Equal(got, want) {
+		t.Errorf("tools candidates = %+v, want %+v", got, want)
+	}
+	if rec := fx.do(t, "/v1/chat/completions", `{"model":"weak"}`); rec.Code != http.StatusOK || fx.servedBy(t) != "a" {
+		t.Errorf("status %d served by %q, want a", rec.Code, fx.servedBy(t))
+	}
+}
+
+// A v1 tier may list one engine and model twice with different declared
+// bounds; each entry made a candidate eligible on its own, and still does.
+func TestTier_MigratedV1NearDuplicateEntriesBothResolve(t *testing.T) {
+	pol, err := nodepolicy.Parse([]byte(`{"version":1,"tiers":{"weak":[
+		{"engine":"ollama","model":"small:1b","contextTokens":100},
+		{"engine":"ollama","model":"small:1b","contextTokens":32000,"capabilities":["tools"]}]}}`))
+	if err != nil {
+		t.Fatalf("Parse(v1): %v", err)
+	}
+	pol.TierPolicy.AllowStronger = false
+	fx := newTierFixture(t, ollamaCase(t), pol, map[string][]string{"a": {"small:1b"}}, nil)
+	f := fx.p.soleFacade()
+	count := func(needs requestNeeds) int { return len(f.resolveTierCandidates("weak", needs, false)) }
+
+	if got := count(requestNeeds{caps: []nodepolicy.Capability{nodepolicy.CapTools}}); got != 1 {
+		t.Errorf("tools request candidates = %d, want 1 through the second entry", got)
+	}
+	if got := count(requestNeeds{contextTokens: 1000}); got != 1 {
+		t.Errorf("1000-token request candidates = %d, want 1 through the second entry", got)
+	}
+	if got := count(requestNeeds{contextTokens: 50}); got != 1 {
+		t.Errorf("50-token request candidates = %d, want 1 (deduplicated by node and model)", got)
+	}
+	if got := count(requestNeeds{contextTokens: 40000}); got != 0 {
+		t.Errorf("40000-token request candidates = %d, want 0", got)
+	}
+}
+
+const apiTierPolicy = `{
+  "version": 2,
+  "tiers": {
+    "weak":   [{"kind":"api","deployment":"cloud-small"}],
+    "medium": [{"kind":"api","deployment":"cloud-small"}, {"kind":"local","engine":"ollama","model":"mid:7b"}]
+  },
+  "routing": {
+    "accounts": [{"id":"acct","credential":"NVPAIR_PROVIDER_SECRET_ACCT","billing":"free",
+      "perRequestCeiling":"0","dailyCeiling":"0","monthlyCeiling":"0"}],
+    "deployments": [{"id":"cloud-small","account":"acct","model":"small-1","family":"alpha",
+      "contextTokens":8192,"maxOutputTokens":1024,"enabled":false}]
+  }
+}`
+
+func TestTier_APIEntriesAreSkipped(t *testing.T) {
+	pol, err := nodepolicy.Parse([]byte(apiTierPolicy))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	pol.TierPolicy.AllowStronger = false
+	fx := newTierFixture(t, ollamaCase(t), pol, map[string][]string{
+		"a": {"mid:7b"}, "b": {"cloud-small", "small-1"},
+	}, nil)
+	f := fx.p.soleFacade()
+	resolve := func(tier string) []string {
+		var out []string
+		for _, c := range f.resolveTierCandidates(tier, requestNeeds{}, false) {
+			out = append(out, c.id+"/"+c.model)
+		}
+		return out
+	}
+
+	if got := resolve("weak"); len(got) != 0 {
+		t.Errorf("an API-only tier resolved candidates %v, want none", got)
+	}
+	if rec := fx.do(t, "/v1/chat/completions", `{"model":"weak"}`); rec.Code != http.StatusNotFound || fx.servedBy(t) != "" {
+		t.Errorf("API-only tier: status %d served by %q, want 404 and no engine request", rec.Code, fx.servedBy(t))
+	}
+	if got, want := resolve("medium"), []string{"a/mid:7b"}; !slices.Equal(got, want) {
+		t.Errorf("mixed tier candidates = %v, want only the local entry %v", got, want)
+	}
+
+	// The kind decides, not the other fields: an API entry that also carries a
+	// local engine and model is still not a local candidate. Validation refuses
+	// such an entry, so it is installed past Validate.
+	odd := nodepolicy.Default()
+	odd.Tiers = map[string][]nodepolicy.TierEntry{
+		"weak": {{Kind: nodepolicy.EntryAPI, Engine: "ollama", Model: "mid:7b", Deployment: "cloud-small"}},
+	}
+	fx.p.admission.setPolicy(odd)
+	if got := resolve("weak"); len(got) != 0 {
+		t.Errorf("an API entry resolved as a local candidate: %v", got)
+	}
+}
+
+func TestModelList_OffersOnlyTiersWithLocalEntries(t *testing.T) {
+	pol, err := nodepolicy.Parse([]byte(apiTierPolicy))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	fx := newTierFixture(t, ollamaCase(t), pol, map[string][]string{"a": {"mid:7b"}}, nil)
+	var ids []string
+	for _, raw := range fx.p.soleFacade().tierModelEntries(map[string]modelListItem{}) {
+		var item struct {
+			ID string `json:"id"`
+		}
+		if err := json.Unmarshal(raw, &item); err != nil {
+			t.Fatalf("decode %s: %v", raw, err)
+		}
+		ids = append(ids, item.ID)
+	}
+	if want := []string{"medium"}; !slices.Equal(ids, want) {
+		t.Fatalf("tier model entries = %v, want %v (weak has only an API entry)", ids, want)
 	}
 }

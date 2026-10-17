@@ -110,7 +110,7 @@ func TestPolicyMethods_SetPolicyValidatesAndKeepsPrevious(t *testing.T) {
 	bad.Version = 99
 	rpcErr(t, p, w, nodepolicy.MethodSetPolicy, bad)
 	bad = pol
-	bad.Tiers = map[string][]nodepolicy.TierEntry{"weak": {{Engine: "nope", Model: "m"}}}
+	bad.Tiers = map[string][]nodepolicy.TierEntry{"weak": {{Kind: nodepolicy.EntryLocal, Engine: "nope", Model: "m"}}}
 	rpcErr(t, p, w, nodepolicy.MethodSetPolicy, bad)
 	if got := p.admission.currentPolicy().Admission.MaxResidentModels; got != 3 {
 		t.Fatalf("an invalid policy replaced the previous one: maxResidentModels = %d", got)

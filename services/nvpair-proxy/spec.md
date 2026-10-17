@@ -751,6 +751,15 @@ candidate (this node excluded), and one that has committed ends as `cancelled`.
 A request whose `model` is `weak`, `medium` or `strong` on an inference route
 is resolved by the node it enters.
 
+- **Entry kinds**: a policy (schema version 2) tier entry has a `kind`. A
+  `local` entry names an engine and model. An `api` entry names a deployment in
+  the policy's origin-only `routing` section. Until hybrid dispatch exists
+  (Phase 4 of the hybrid routing plan) the resolver and the model list consider
+  `local` entries only and skip `api` entries without error: a tier whose
+  entries are all `api` has no candidate and is not listed. Migrating a
+  version 1 file tags every entry `local`, so it resolves the candidates it
+  resolved before.
+
 - **Needs**, read from the buffered body in OpenAI and Ollama shapes: `tools`
   (non-empty `tools` or `functions`), `vision` (an `image_url`, `image` or
   `input_image` content part, or non-empty Ollama `images`), `structured`
@@ -782,7 +791,7 @@ is resolved by the node it enters.
   `{"error":"no eligible model for tier <tier>","needs":[...]}`.
 - **Model lists**: an OpenAI-shape model list (`/v1/models`, llama.cpp's
   `/models`) gains `{"id":"<tier>","object":"model","created":0,"owned_by":"pair"}`
-  for each tier with at least one entry. The native Ollama list does not.
+  for each tier with at least one `local` entry. The native Ollama list does not.
 
 ### 12.4 Routing metadata
 

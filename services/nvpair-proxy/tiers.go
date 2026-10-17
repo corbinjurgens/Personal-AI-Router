@@ -172,8 +172,9 @@ func entryEligible(e nodepolicy.TierEntry, needs requestNeeds) bool {
 }
 
 // resolveTierCandidates builds the ordered (node, engine, model) candidates for
-// a tier request. Within an entry, candidates keep resolveCandidates' order
-// (node/select pin, scheduler priority, ID); across entries the policy's
+// a tier request from the tier's local entries; API entries are skipped until
+// hybrid dispatch exists. Within an entry, candidates keep resolveCandidates'
+// order (node/select pin, scheduler priority, ID); across entries the policy's
 // preferLoaded decides whether tier rank or warmth leads.
 func (f *facade) resolveTierCandidates(tier string, needs requestNeeds, crossEngine bool) []candidate {
 	p := f.host
@@ -182,7 +183,7 @@ func (f *facade) resolveTierCandidates(tier string, needs requestNeeds, crossEng
 	seen := map[string]bool{}
 	for rank, t := range tierSearchOrder(tier, pol.TierPolicy) {
 		for _, e := range pol.Tiers[t] {
-			if !entryEligible(e, needs) {
+			if !e.IsLocal() || !entryEligible(e, needs) {
 				continue
 			}
 			g := f
@@ -241,13 +242,14 @@ func (f *facade) reserveRound(cands []candidate, tier bool) ([]candidate, reserv
 
 // tierModelEntries appends one synthetic OpenAI model record per configured
 // tier to a merged /v1/models list, so a client can pick a tier from it. A
-// tier with no entries is not offered, and an upstream model already named
-// like a tier is left alone.
+// tier with no local entries is not offered, and an upstream model already
+// named like a tier is left alone. API entries are skipped until hybrid
+// dispatch exists.
 func (f *facade) tierModelEntries(seen map[string]modelListItem) []json.RawMessage {
 	pol := f.host.admission.currentPolicy()
 	var out []json.RawMessage
 	for _, t := range nodepolicy.TierOrder {
-		if len(pol.Tiers[t]) == 0 {
+		if !slices.ContainsFunc(pol.Tiers[t], nodepolicy.TierEntry.IsLocal) {
 			continue
 		}
 		if _, dup := seen[t]; dup {

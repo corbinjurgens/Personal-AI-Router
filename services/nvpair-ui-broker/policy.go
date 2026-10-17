@@ -244,31 +244,67 @@ func (b *Broker) localPolicy() policyGetResult {
 	return policyGetResult{Policy: r.current, Availability: r.live}
 }
 
+// peerPolicyGetResult is the policy:get result a paired node receives: the
+// peer projection, without the routing section or API tier entries.
+type peerPolicyGetResult struct {
+	Policy       nodepolicy.PeerPolicy   `json:"policy"`
+	Availability nodepolicy.Availability `json:"availability"`
+}
+
+func (b *Broker) peerPolicy() peerPolicyGetResult {
+	local := b.localPolicy()
+	return peerPolicyGetResult{Policy: local.Policy.PeerProjection(), Availability: local.Availability}
+}
+
 // setLocalPolicy validates, persists and applies a new policy. Availability is
 // not part of what policy:set changes — node:set-availability owns it — so the
 // incoming value is ignored and the persisted one kept. Omitted fields take
 // their defaults, exactly as when the file is loaded.
 func (b *Broker) setLocalPolicy(raw json.RawMessage) (nodepolicy.Policy, error) {
-	if len(raw) == 0 {
-		return nodepolicy.Policy{}, fmt.Errorf("policy is required")
-	}
-	var fields map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &fields); err != nil || fields == nil {
-		return nodepolicy.Policy{}, fmt.Errorf("policy must be a JSON object")
-	}
-	delete(fields, "availability")
-	stripped, err := json.Marshal(fields)
-	if err != nil {
-		return nodepolicy.Policy{}, err
-	}
-	policy, err := nodepolicy.Parse(stripped)
-	if err != nil {
-		return nodepolicy.Policy{}, err
-	}
+	return b.persistPolicy(func(stored nodepolicy.Policy) (nodepolicy.Policy, error) {
+		if len(raw) == 0 {
+			return nodepolicy.Policy{}, fmt.Errorf("policy is required")
+		}
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &fields); err != nil || fields == nil {
+			return nodepolicy.Policy{}, fmt.Errorf("policy must be a JSON object")
+		}
+		delete(fields, "availability")
+		stripped, err := json.Marshal(fields)
+		if err != nil {
+			return nodepolicy.Policy{}, err
+		}
+		policy, err := nodepolicy.Parse(stripped)
+		if err != nil {
+			return nodepolicy.Policy{}, err
+		}
+		policy.Availability = stored.Availability
+		if err := policy.Validate(); err != nil {
+			return nodepolicy.Policy{}, err
+		}
+		return policy, nil
+	})
+}
+
+// setPeerPolicy applies a paired node's policy:set. The peer may change device
+// fields only: its tiers and tierPolicy must equal the peer projection of the
+// stored policy and it must send no routing section; the protected sections are
+// restored from the stored policy.
+func (b *Broker) setPeerPolicy(raw json.RawMessage) (nodepolicy.Policy, error) {
+	return b.persistPolicy(func(stored nodepolicy.Policy) (nodepolicy.Policy, error) {
+		return nodepolicy.MergePeerSet(stored, raw)
+	})
+}
+
+// persistPolicy persists and applies the policy that build derives from the
+// stored one. build runs in the same critical section as the save, so a policy
+// derived from the stored document can never be saved over a newer one. A build
+// error persists and pushes nothing.
+func (b *Broker) persistPolicy(build func(stored nodepolicy.Policy) (nodepolicy.Policy, error)) (nodepolicy.Policy, error) {
 	r := b.nodePolicyRuntime()
 	r.mu.Lock()
-	policy.Availability = r.current.Availability
-	if err := policy.Validate(); err != nil {
+	policy, err := build(r.current)
+	if err != nil {
 		r.mu.Unlock()
 		return nodepolicy.Policy{}, err
 	}
@@ -364,9 +400,10 @@ type invalidParamsError struct{ err error }
 
 func (e *invalidParamsError) Error() string { return e.err.Error() }
 
-// dispatchPolicy runs one policy method against this node. It is shared by the
-// client surface and the relay from paired nodes, neither of which can reach
-// another node through it.
+// dispatchPolicy runs one policy method against this node for a local client,
+// with the full policy. The relay from paired nodes shares it for availability
+// and answers policy:get and policy:set from the peer projection instead;
+// neither path can reach another node through it.
 func (b *Broker) dispatchPolicy(ctx context.Context, method string, p policyParams) (any, error) {
 	switch method {
 	case methodPolicyGet:
@@ -456,7 +493,8 @@ var relayedPolicyMethods = map[string]string{
 
 // handlePolicyRelay serves a paired node's policy call. The caller must still
 // be pinned, and the call always targets this node: a relayed request never
-// reaches relayPolicyToPeer, so it cannot be forwarded again.
+// reaches relayPolicyToPeer, so it cannot be forwarded again. A peer sees and
+// changes the peer projection only (servePolicyRelay).
 func (b *Broker) handlePolicyRelay(raw json.RawMessage) {
 	var req policyRelayRequest
 	if json.Unmarshal(raw, &req) != nil || req.ID == "" {
@@ -509,6 +547,16 @@ func (b *Broker) servePolicyRelay(ctx context.Context, req policyRelayRequest) (
 	}
 	p.NodeID = ""
 	slog.Info("serving a paired node's policy request", "method", method, "caller", req.Caller)
+	switch method {
+	case methodPolicyGet:
+		return b.peerPolicy(), nil
+	case methodPolicySet:
+		policy, err := b.setPeerPolicy(p.Policy)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{"policy": policy.PeerProjection()}, nil
+	}
 	return b.dispatchPolicy(ctx, method, p)
 }
 

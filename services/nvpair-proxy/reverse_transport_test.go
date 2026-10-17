@@ -181,7 +181,7 @@ func TestProxyReverseCrossEngineTierUsesPeerService(t *testing.T) {
 	ollama := newFacade(f.p, profile, NewDiscovery(), 0)
 	f.p.facades["ollama"] = ollama
 	policy := nodepolicy.Default()
-	policy.Tiers = map[string][]nodepolicy.TierEntry{"weak": {{Engine: "lmstudio", Model: "fixture-model"}}}
+	policy.Tiers = map[string][]nodepolicy.TierEntry{"weak": {{Kind: nodepolicy.EntryLocal, Engine: "lmstudio", Model: "fixture-model"}}}
 	if err := policy.Validate(); err != nil {
 		t.Fatal(err)
 	}

@@ -11,6 +11,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -825,4 +826,374 @@ func TestPolicyRelayFromPeerActsLocallyOnly(t *testing.T) {
 	if result["availability"] != string(nodepolicy.Paused) {
 		t.Fatalf("relayed get = %v", got)
 	}
+}
+
+// routedPolicyDocument is a stored version 2 policy with origin-only routing
+// content: a local and an API entry in one tier, an API-only tier, two
+// accounts, two deployments and a listener.
+const routedPolicyDocument = `{
+  "version": 2,
+  "revision": "12",
+  "tiers": {
+    "weak": [
+      {"kind": "local", "engine": "ollama", "model": "qwen3:8b"},
+      {"kind": "api", "deployment": "free-small"}
+    ],
+    "strong": [{"kind": "api", "deployment": "free-small"}]
+  },
+  "routing": {
+    "accounts": [
+      {"id": "free-acct", "credential": "NVPAIR_PROVIDER_SECRET_FREE", "billing": "free",
+       "perRequestCeiling": "0", "dailyCeiling": "0", "monthlyCeiling": "0"},
+      {"id": "paid-acct", "credential": "NVPAIR_PROVIDER_SECRET_PAID", "billing": "paid",
+       "perRequestCeiling": "1000000", "dailyCeiling": "9007199254740993", "monthlyCeiling": "9223372036854775807"}
+    ],
+    "deployments": [
+      {"id": "free-small", "account": "free-acct", "model": "small-1", "family": "alpha",
+       "contextTokens": 32768, "maxOutputTokens": 4096, "enabled": false},
+      {"id": "paid-big", "account": "paid-acct", "model": "big-1", "family": "beta",
+       "contextTokens": 200000, "maxOutputTokens": 8192, "enabled": false}
+    ],
+    "listener": {"enabled": true, "port": 4321, "allowedOrigins": ["http://localhost:3000"]}
+  }
+}`
+
+// routedBroker loads routedPolicyDocument, attaches a fake proxy and engine
+// manager, and pins "pinned-peer" so it may relay.
+type routedBroker struct {
+	b      *Broker
+	out    *syncBuffer
+	proxy  *fakeWorker
+	engine *fakeWorker
+	path   string
+	relays int
+}
+
+func newRoutedBroker(t *testing.T) *routedBroker {
+	t.Helper()
+	b, out := newPolicyBroker(t)
+	_, proxy := attachFakeProxy(t, b)
+	engine := attachFakeEngine(t, b)
+	clustertrusttest.Join(t, b.clusterDir, "cluster-1", "self-node", "pinned-peer")
+	path := filepath.Join(t.TempDir(), nodepolicy.FileName)
+	if err := os.WriteFile(path, []byte(routedPolicyDocument), 0o600); err != nil {
+		t.Fatalf("write policy file: %v", err)
+	}
+	b.loadNodePolicy(path)
+	if got := b.localPolicy().Policy.Routing.Accounts; len(got) != 2 {
+		t.Fatalf("loaded accounts = %d, want the 2 in the fixture (was the fixture rejected?)", len(got))
+	}
+	return &routedBroker{b: b, out: out, proxy: proxy, engine: engine, path: path}
+}
+
+// relay sends one relayed policy request from the pinned peer and returns the
+// raw reply notification.
+func (rb *routedBroker) relay(t *testing.T, method string, params any) (result json.RawMessage, errText string) {
+	t.Helper()
+	rb.relays++
+	id := "relay-" + strings.Repeat("x", rb.relays)
+	rb.b.forwardEngineNotification(policyRelayRequestMethod, mustJSON(map[string]any{
+		"id": id, "method": method, "caller": "pinned-peer", "params": params,
+	}))
+	calls := rb.engine.waitFor("policy:reply "+id, func(calls []policyCall) bool {
+		for _, c := range calls {
+			if c.method == policyRelayReplyMethod && strings.Contains(string(c.params), `"id":"`+id+`"`) {
+				return true
+			}
+		}
+		return false
+	})
+	for _, c := range calls {
+		if c.method == policyRelayReplyMethod && strings.Contains(string(c.params), `"id":"`+id+`"`) {
+			var reply struct {
+				Result json.RawMessage `json:"result"`
+				Error  string          `json:"error"`
+			}
+			if err := json.Unmarshal(c.params, &reply); err != nil {
+				t.Fatalf("decode reply: %v", err)
+			}
+			return reply.Result, reply.Error
+		}
+	}
+	t.Fatalf("reply %s vanished", id)
+	return nil, ""
+}
+
+// peerSnapshot is a relayed policy:get: the document a peer would edit.
+func (rb *routedBroker) peerSnapshot(t *testing.T) map[string]any {
+	t.Helper()
+	result, errText := rb.relay(t, "get", map[string]any{})
+	if errText != "" {
+		t.Fatalf("relayed get: %s", errText)
+	}
+	var got struct {
+		Policy map[string]any `json:"policy"`
+	}
+	if err := json.Unmarshal(result, &got); err != nil || got.Policy == nil {
+		t.Fatalf("decode relayed get %s: %v", result, err)
+	}
+	return got.Policy
+}
+
+// fileSections reads the policy file and returns its top-level sections.
+func (rb *routedBroker) fileSections(t *testing.T) map[string]json.RawMessage {
+	t.Helper()
+	data, err := os.ReadFile(rb.path)
+	if err != nil {
+		t.Fatalf("read policy file: %v", err)
+	}
+	var sections map[string]json.RawMessage
+	if err := json.Unmarshal(data, &sections); err != nil {
+		t.Fatalf("decode policy file: %v", err)
+	}
+	return sections
+}
+
+func (rb *routedBroker) fileBytes(t *testing.T) []byte {
+	t.Helper()
+	data, err := os.ReadFile(rb.path)
+	if err != nil {
+		t.Fatalf("read policy file: %v", err)
+	}
+	return data
+}
+
+// localSet applies a local policy:set that edits the current full policy.
+func (rb *routedBroker) localSet(t *testing.T, edit func(doc map[string]any)) {
+	t.Helper()
+	data, err := json.Marshal(rb.b.localPolicy().Policy)
+	if err != nil {
+		t.Fatalf("marshal current policy: %v", err)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(data, &doc); err != nil {
+		t.Fatalf("decode current policy: %v", err)
+	}
+	edit(doc)
+	if _, err := rb.b.setLocalPolicy(mustJSON(doc)); err != nil {
+		t.Fatalf("local set: %v", err)
+	}
+}
+
+// policyPushes counts node/set-policy calls the fake proxy received.
+func policyPushes(f *fakeWorker) int { return len(f.methods(nodepolicy.MethodSetPolicy)) }
+
+// leaks are strings that identify origin-only routing content.
+var routingLeaks = []string{
+	"routing", "NVPAIR_PROVIDER_SECRET", "free-acct", "paid-acct", "free-small", "paid-big",
+	"deployment", `"api"`, "9223372036854775807", "allowedOrigins",
+}
+
+func TestPeerPolicyGetReturnsTheProjection(t *testing.T) {
+	rb := newRoutedBroker(t)
+	result, errText := rb.relay(t, "get", map[string]any{})
+	if errText != "" {
+		t.Fatalf("relayed get: %s", errText)
+	}
+	for _, leak := range routingLeaks {
+		if strings.Contains(string(result), leak) {
+			t.Errorf("relayed get contains %q: %s", leak, result)
+		}
+	}
+	var got struct {
+		Policy       nodepolicy.PeerPolicy `json:"policy"`
+		Availability string                `json:"availability"`
+	}
+	if err := json.Unmarshal(result, &got); err != nil {
+		t.Fatalf("decode relayed get: %v", err)
+	}
+	wantTiers := map[string][]nodepolicy.TierEntry{"weak": {{Kind: nodepolicy.EntryLocal, Engine: "ollama", Model: "qwen3:8b"}}}
+	if !reflect.DeepEqual(got.Policy.Tiers, wantTiers) {
+		t.Errorf("relayed tiers = %+v, want %+v", got.Policy.Tiers, wantTiers)
+	}
+	if got.Policy.Revision != "12" || got.Availability != "available" {
+		t.Errorf("relayed revision/availability = %q/%q, want 12/available", got.Policy.Revision, got.Availability)
+	}
+}
+
+func TestLocalPolicyGetKeepsTheFullDocument(t *testing.T) {
+	rb := newRoutedBroker(t)
+	rb.b.handleMessage(clientRequest(1, methodPolicyGet, nil))
+	resp := rb.out.waitFrame(t, "policy:get response", isResponse(1))
+	if resp.Error != nil {
+		t.Fatalf("policy:get: %+v", resp.Error)
+	}
+	var got policyGetResult
+	if err := json.Unmarshal(resp.Result, &got); err != nil {
+		t.Fatalf("decode policy:get: %v", err)
+	}
+	if len(got.Policy.Routing.Accounts) != 2 || got.Policy.Routing.Accounts[0].ID != "free-acct" {
+		t.Errorf("local policy:get routing accounts = %+v, want the owner's full document", got.Policy.Routing.Accounts)
+	}
+	if len(got.Policy.Tiers["strong"]) != 1 || got.Policy.Tiers["strong"][0].Kind != nodepolicy.EntryAPI {
+		t.Errorf("local policy:get strong tier = %+v, want the API entry", got.Policy.Tiers["strong"])
+	}
+}
+
+func TestPeerPolicySetRoundTripKeepsProtectedSections(t *testing.T) {
+	rb := newRoutedBroker(t)
+	beforeRouting := mustJSON(rb.b.localPolicy().Policy.Routing)
+	beforeTiers := mustJSON(rb.b.localPolicy().Policy.Tiers)
+
+	doc := rb.peerSnapshot(t)
+	doc["idle"].(map[string]any)["unloadAfterMinutes"] = 7
+	result, errText := rb.relay(t, "set", map[string]any{"policy": doc})
+	if errText != "" {
+		t.Fatalf("relayed set of an unchanged projection: %s", errText)
+	}
+	for _, leak := range routingLeaks {
+		if strings.Contains(string(result), leak) {
+			t.Errorf("relayed set result contains %q: %s", leak, result)
+		}
+	}
+
+	sections := rb.fileSections(t)
+	var gotRouting, gotTiers bytes.Buffer
+	if err := json.Compact(&gotRouting, sections["routing"]); err != nil {
+		t.Fatalf("compact routing: %v", err)
+	}
+	if err := json.Compact(&gotTiers, sections["tiers"]); err != nil {
+		t.Fatalf("compact tiers: %v", err)
+	}
+	if gotRouting.String() != string(beforeRouting) {
+		t.Errorf("stored routing changed:\n got %s\nwant %s", gotRouting.String(), beforeRouting)
+	}
+	if gotTiers.String() != string(beforeTiers) {
+		t.Errorf("stored tiers changed (API entries must survive):\n got %s\nwant %s", gotTiers.String(), beforeTiers)
+	}
+	var idle nodepolicy.IdleConfig
+	if err := json.Unmarshal(sections["idle"], &idle); err != nil || idle.UnloadAfterMinutes != 7 {
+		t.Errorf("stored idle = %+v (%v), want the peer's device edit", idle, err)
+	}
+
+	calls := rb.proxy.waitFor("node/set-policy push", func(calls []policyCall) bool { return len(rb.proxy.methods(nodepolicy.MethodSetPolicy)) > 0 })
+	var pushed nodepolicy.Policy
+	for _, c := range calls {
+		if c.method == nodepolicy.MethodSetPolicy {
+			if err := json.Unmarshal(c.params, &pushed); err != nil {
+				t.Fatalf("decode pushed policy: %v", err)
+			}
+		}
+	}
+	if string(mustJSON(pushed.Routing)) != string(beforeRouting) || pushed.Idle.UnloadAfterMinutes != 7 {
+		t.Errorf("the proxy was pushed routing %s and idle %+v, want the preserved routing and the edit", mustJSON(pushed.Routing), pushed.Idle)
+	}
+}
+
+func TestPeerPolicySetRejectsProtectedChangesWithoutEffect(t *testing.T) {
+	test := func(name string, edit func(doc map[string]any)) {
+		t.Helper()
+		t.Run(name, func(t *testing.T) {
+			rb := newRoutedBroker(t)
+			beforeFile := rb.fileBytes(t)
+			before := rb.b.localPolicy().Policy
+			doc := rb.peerSnapshot(t)
+			edit(doc)
+
+			// Holding pushMu keeps a scheduled push marked pending, so a push that
+			// a rejected set wrongly scheduled is visible without waiting.
+			r := rb.b.nodePolicyRuntime()
+			r.pushMu.Lock()
+			result, errText := rb.relay(t, "set", map[string]any{"policy": doc})
+			r.mu.Lock()
+			pending := len(r.pendingPush)
+			r.mu.Unlock()
+			r.pushMu.Unlock()
+
+			if errText == "" {
+				t.Fatalf("relayed set accepted a protected change: %s", result)
+			}
+			if strings.Contains(errText, "NVPAIR_PROVIDER_SECRET") {
+				t.Errorf("rejection echoes a credential reference: %q", errText)
+			}
+			if got := rb.fileBytes(t); !bytes.Equal(got, beforeFile) {
+				t.Errorf("policy file changed after a rejected set")
+			}
+			if got := rb.b.localPolicy().Policy; !reflect.DeepEqual(got, before) {
+				t.Errorf("in-memory policy changed after a rejected set")
+			}
+			if pending != 0 || policyPushes(rb.proxy) != 0 {
+				t.Errorf("a rejected set scheduled %d pushes and sent %d to the proxy", pending, policyPushes(rb.proxy))
+			}
+			for _, m := range rb.out.frames() {
+				if m.Method == notifyPolicyChanged {
+					t.Errorf("a rejected set notified clients: %s", m.Params)
+				}
+			}
+		})
+	}
+
+	test("changed tier entry", func(doc map[string]any) {
+		doc["tiers"].(map[string]any)["weak"] = []any{map[string]any{"kind": "local", "engine": "ollama", "model": "llama3:8b"}}
+	})
+	test("added tier entry", func(doc map[string]any) {
+		doc["tiers"].(map[string]any)["medium"] = []any{map[string]any{"kind": "local", "engine": "ollama", "model": "llama3:8b"}}
+	})
+	test("changed tier policy", func(doc map[string]any) {
+		doc["tierPolicy"].(map[string]any)["allowWeaker"] = true
+	})
+	test("injected routing section", func(doc map[string]any) {
+		doc["routing"] = map[string]any{"limits": map[string]any{"maxAttempts": 10}}
+	})
+	test("injected capitalized routing section", func(doc map[string]any) {
+		doc["Routing"] = map[string]any{"limits": map[string]any{"maxAttempts": 10}}
+	})
+	test("injected account", func(doc map[string]any) {
+		doc["routing"] = map[string]any{"accounts": []any{map[string]any{
+			"id": "extra", "credential": "NVPAIR_PROVIDER_SECRET_EXTRA", "billing": "free",
+			"perRequestCeiling": "0", "dailyCeiling": "0", "monthlyCeiling": "0",
+		}}}
+	})
+	test("injected api tier entry", func(doc map[string]any) {
+		doc["tiers"].(map[string]any)["weak"] = []any{
+			map[string]any{"kind": "local", "engine": "ollama", "model": "qwen3:8b"},
+			map[string]any{"kind": "api", "deployment": "paid-big"},
+		}
+	})
+}
+
+func TestPeerPolicySetCannotRestoreProtectedSectionsFromAStaleSnapshot(t *testing.T) {
+	t.Run("local routing change is kept", func(t *testing.T) {
+		rb := newRoutedBroker(t)
+		stale := rb.peerSnapshot(t)
+		rb.localSet(t, func(doc map[string]any) {
+			accounts := doc["routing"].(map[string]any)["accounts"].([]any)
+			accounts[1].(map[string]any)["monthlyCeiling"] = "5"
+		})
+		stale["idle"].(map[string]any)["unloadAfterMinutes"] = 9
+		if _, errText := rb.relay(t, "set", map[string]any{"policy": stale}); errText != "" {
+			t.Fatalf("relayed set of an unchanged projection: %s", errText)
+		}
+		got := rb.b.localPolicy().Policy
+		if got.Routing.Accounts[1].MonthlyCeiling != "5" {
+			t.Errorf("monthly ceiling = %q, want the local owner's lowered %q kept", got.Routing.Accounts[1].MonthlyCeiling, "5")
+		}
+		if got.Idle.UnloadAfterMinutes != 9 {
+			t.Errorf("idle.unloadAfterMinutes = %d, want the peer's device edit", got.Idle.UnloadAfterMinutes)
+		}
+		var onDisk nodepolicy.Policy
+		if err := json.Unmarshal(rb.fileBytes(t), &onDisk); err != nil || onDisk.Routing.Accounts[1].MonthlyCeiling != "5" {
+			t.Errorf("stored monthly ceiling = %q (%v), want %q", onDisk.Routing.Accounts[1].MonthlyCeiling, err, "5")
+		}
+	})
+
+	t.Run("local tier change rejects the stale tiers", func(t *testing.T) {
+		rb := newRoutedBroker(t)
+		stale := rb.peerSnapshot(t)
+		rb.localSet(t, func(doc map[string]any) {
+			doc["tiers"].(map[string]any)["weak"] = []any{map[string]any{"kind": "local", "engine": "ollama", "model": "llama3:8b"}}
+		})
+		afterLocal := rb.fileBytes(t)
+		stale["idle"].(map[string]any)["unloadAfterMinutes"] = 9
+		if result, errText := rb.relay(t, "set", map[string]any{"policy": stale}); errText == "" {
+			t.Fatalf("a stale snapshot restored the old tiers: %s", result)
+		}
+		if got := rb.fileBytes(t); !bytes.Equal(got, afterLocal) {
+			t.Errorf("policy file changed after the rejected stale set")
+		}
+		want := []nodepolicy.TierEntry{{Kind: nodepolicy.EntryLocal, Engine: "ollama", Model: "llama3:8b"}}
+		if got := rb.b.localPolicy().Policy.Tiers["weak"]; !reflect.DeepEqual(got, want) {
+			t.Errorf("weak tier = %+v, want the local owner's %+v", got, want)
+		}
+	})
 }

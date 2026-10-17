@@ -229,12 +229,22 @@ invalid. Until the first one arrives the proxy runs on `nodepolicy.Default()`.
   sets to `0` while a round has other candidates. It reports
   `admission/state` (active, queued, last activity per engine) to the broker.
 - **Tiers.** A request for model `weak`, `medium` or `strong` is resolved to a
-  concrete model from the policy's tier entries, filtered by what the request
+  concrete model from the policy's local tier entries, filtered by what the request
   needs (tools, vision, structured output, embeddings, context) and ordered by
   tier and by whether the model is already loaded. OpenAI-compatible routes may
   be served by another engine; native routes stay on their own. The body's
-  `model` is rewritten in place, and `/v1/models` lists the configured tiers.
-  Nothing eligible is a `404` naming the needs.
+  `model` is rewritten in place, and `/v1/models` lists the tiers that have a
+  local entry. Nothing eligible is a `404` naming the needs. A tier entry is
+  tagged `local` (an engine and model) or `api` (a provider deployment from the
+  policy's origin-only `routing` section). Until hybrid dispatch exists the
+  proxy resolves and lists only local entries and skips `api` entries, so a tier
+  with only API entries has no candidate. A version 1 policy is migrated to
+  version 2 with every entry local (an exact repeat within a tier, same
+  engine, model, context bound and capabilities, keeps its first occurrence;
+  entries that differ in bounds stay separate). A document without a `version` key is read as version 2,
+  so a version-less legacy file with tier entries fails validation because its
+  entries have no `kind`. `routing.listener.enabled` is accepted but has no
+  effect until the unified listener exists.
 - **Routing metadata.** Routed inference responses carry `X-PAIR-Model`,
   `X-PAIR-Engine`, `X-PAIR-Node`, and `X-PAIR-Tier` for a tier request.
   Workloads carry the concrete `model` and, for a tier request,

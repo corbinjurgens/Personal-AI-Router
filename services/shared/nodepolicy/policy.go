@@ -6,6 +6,15 @@
 // concurrency, memory), how idle engines are unloaded or stopped, the model
 // profiles it serves, and the weak/medium/strong tiers it routes by.
 //
+// Schema version 2 adds hybrid routing. A tier entry is tagged: a local entry
+// names an engine and model on a cluster node, an API entry names a provider
+// deployment. Tier memberships stay in Tiers. The origin-only Routing section
+// holds the accounts, deployments, per-tier settings, limits and listener those
+// entries refer to; Revision identifies the document. Parse migrates a version 1
+// file by tagging its entries local and leaving remote and paid execution off.
+// Validation refuses to enable remote or paid execution until a dispatch path
+// exists, but accepts disabled provider configuration.
+//
 // The broker owns the policy file and is the only writer. It pushes the policy
 // to the proxy, which enforces admission and resolves tiers. Both import this
 // package so the two sides cannot drift. See FORK_DESIGN.md at the repo root.
@@ -13,6 +22,7 @@ package nodepolicy
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"regexp"
 	"slices"
@@ -24,7 +34,10 @@ import (
 const FileName = "node-policy.json"
 
 // SchemaVersion is the current policy file version.
-const SchemaVersion = 1
+const SchemaVersion = 2
+
+// legacySchemaVersion is the previous version Parse still migrates.
+const legacySchemaVersion = 1
 
 // Availability is whether this node runs inference work. It only governs work
 // executed on this machine: a paused node still routes its own requests to
@@ -76,7 +89,10 @@ var TierOrder = []string{TierWeak, TierMedium, TierStrong}
 
 // Policy is the whole node policy file.
 type Policy struct {
-	Version      int          `json:"version"`
+	Version int `json:"version"`
+	// Revision identifies this document: a canonical decimal string, "0" until
+	// the broker assigns one.
+	Revision     string       `json:"revision"`
 	Availability Availability `json:"availability"`
 	Pause        PauseConfig  `json:"pause"`
 	Admission    Admission    `json:"admission"`
@@ -90,6 +106,8 @@ type Policy struct {
 	// cluster that has a candidate model installed.
 	Tiers      map[string][]TierEntry `json:"tiers"`
 	TierPolicy TierPolicy             `json:"tierPolicy"`
+	// Routing is the origin-only hybrid routing configuration.
+	Routing Routing `json:"routing"`
 }
 
 // PauseConfig controls what pausing does.
@@ -164,13 +182,32 @@ type Profile struct {
 	RequestOptions json.RawMessage `json:"requestOptions,omitempty"`
 }
 
-// TierEntry is one candidate model for a tier.
+// EntryKind tags what a tier entry refers to.
+type EntryKind string
+
+const (
+	// EntryLocal is an engine and model on a cluster node.
+	EntryLocal EntryKind = "local"
+	// EntryAPI is a provider deployment in Routing.Deployments.
+	EntryAPI EntryKind = "api"
+)
+
+// TierEntry is one candidate for a tier, either a local engine and model or a
+// provider deployment. Kind says which fields apply; validation refuses an
+// entry that sets the other kind's fields.
 type TierEntry struct {
-	Engine        string       `json:"engine"`
-	Model         string       `json:"model"`
+	Kind EntryKind `json:"kind"`
+	// Engine, Model, ContextTokens and Capabilities describe a local entry.
+	Engine        string       `json:"engine,omitempty"`
+	Model         string       `json:"model,omitempty"`
 	ContextTokens int          `json:"contextTokens,omitempty"`
 	Capabilities  []Capability `json:"capabilities,omitempty"`
+	// Deployment is the Routing.Deployments id of an API entry.
+	Deployment string `json:"deployment,omitempty"`
 }
+
+// IsLocal reports whether the entry names a local engine and model.
+func (e TierEntry) IsLocal() bool { return e.Kind == EntryLocal }
 
 // TierPolicy controls fallback between tiers.
 type TierPolicy struct {
@@ -191,6 +228,7 @@ type TierPolicy struct {
 func Default() Policy {
 	return Policy{
 		Version:      SchemaVersion,
+		Revision:     "0",
 		Availability: Available,
 		Pause: PauseConfig{
 			OnActive:            FinishActive,
@@ -219,6 +257,7 @@ func Default() Policy {
 			AllowWeaker:   false,
 			PreferLoaded:  "tier",
 		},
+		Routing: defaultRouting(),
 	}
 }
 
@@ -230,6 +269,9 @@ var profileName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$`)
 func (p Policy) Validate() error {
 	if p.Version != SchemaVersion {
 		return fmt.Errorf("unsupported policy version %d (want %d)", p.Version, SchemaVersion)
+	}
+	if err := validateRevision(p.Revision); err != nil {
+		return err
 	}
 	switch p.Availability {
 	case Available, Paused:
@@ -291,14 +333,15 @@ func (p Policy) Validate() error {
 			}
 		}
 	}
+	if err := p.Routing.validate(); err != nil {
+		return err
+	}
 	for tier, entries := range p.Tiers {
 		if !slices.Contains(TierOrder, tier) {
 			return fmt.Errorf("unknown tier %q (want one of %v)", tier, TierOrder)
 		}
-		for i, e := range entries {
-			if err := checkModelRef(e.Engine, e.Model, e.ContextTokens, e.Capabilities); err != nil {
-				return fmt.Errorf("tiers.%s[%d]: %w", tier, i, err)
-			}
+		if err := p.Routing.validateTierRefs(tier, entries); err != nil {
+			return err
 		}
 	}
 	switch p.TierPolicy.PreferLoaded {
@@ -316,8 +359,8 @@ func checkModelRef(engine, model string, contextTokens int, caps []Capability) e
 	if model == "" {
 		return fmt.Errorf("model is required")
 	}
-	if slices.Contains(TierOrder, model) {
-		return fmt.Errorf("model %q is a tier name", model)
+	if IsReservedAlias(model) {
+		return fmt.Errorf("model %q is a reserved alias", model)
 	}
 	if contextTokens < 0 {
 		return fmt.Errorf("contextTokens must not be negative")
@@ -344,21 +387,116 @@ func (p Policy) ProfileFor(engine, model string) (Profile, bool) {
 	return Profile{}, false
 }
 
+// validateRevision requires the canonical decimal form money uses: "0" or a
+// nonzero leading digit, within the signed 64-bit range.
+func validateRevision(rev string) error {
+	if _, err := ParseNanoUSD(rev); err != nil {
+		return errors.New("revision must be a canonical decimal string: 0 or a nonzero leading digit, within the signed 64-bit range")
+	}
+	return nil
+}
+
 // Parse decodes and validates a policy file, filling fields the file omits
-// from Default so an older or hand-written file keeps working.
+// from Default so an older or hand-written file keeps working. A version 1 file
+// is migrated: every local setting is kept, its tier entries become local
+// entries, and routing and revision take their defaults, so remote and paid
+// execution stay off. Parsing the marshaled result of Parse gives the same
+// policy.
 func Parse(data []byte) (Policy, error) {
-	p := Default()
-	if err := json.Unmarshal(data, &p); err != nil {
+	var head struct {
+		Version *int `json:"version"`
+	}
+	if err := json.Unmarshal(data, &head); err != nil {
 		return Policy{}, fmt.Errorf("parse policy: %w", err)
 	}
-	if p.Profiles == nil {
-		p.Profiles = []Profile{}
+	var p Policy
+	var err error
+	if head.Version != nil && *head.Version == legacySchemaVersion {
+		p, err = migrateV1(data)
+	} else {
+		p = Default()
+		if err = json.Unmarshal(data, &p); err != nil {
+			err = fmt.Errorf("parse policy: %w", err)
+		}
 	}
-	if p.Tiers == nil {
-		p.Tiers = map[string][]TierEntry{}
+	if err != nil {
+		return Policy{}, err
 	}
+	p.normalize()
 	if err := p.Validate(); err != nil {
 		return Policy{}, err
 	}
 	return p, nil
+}
+
+// tierEntryV1 is a version 1 tier entry, which had no kind.
+type tierEntryV1 struct {
+	Engine        string       `json:"engine"`
+	Model         string       `json:"model"`
+	ContextTokens int          `json:"contextTokens"`
+	Capabilities  []Capability `json:"capabilities"`
+}
+
+// migrateV1 decodes a version 1 document onto the defaults and returns it as
+// version 2.
+func migrateV1(data []byte) (Policy, error) {
+	doc := struct {
+		Policy
+		Tiers map[string][]tierEntryV1 `json:"tiers"`
+	}{Policy: Default()}
+	if err := json.Unmarshal(data, &doc); err != nil {
+		return Policy{}, fmt.Errorf("parse policy: %w", err)
+	}
+	p := doc.Policy
+	def := Default()
+	p.Version, p.Revision, p.Routing = def.Version, def.Revision, def.Routing
+	p.Tiers = make(map[string][]TierEntry, len(doc.Tiers))
+	for tier, entries := range doc.Tiers {
+		if entries == nil {
+			p.Tiers[tier] = nil
+			continue
+		}
+		// Version 1 accepted a repeated entry. An exact repeat (same engine,
+		// model, context bound and capabilities) resolved as the first did, so
+		// migration keeps the first rather than rejecting the file. Entries that
+		// differ in bounds stay separate.
+		migrated := make([]TierEntry, 0, len(entries))
+		seen := map[string]bool{}
+		for _, e := range entries {
+			entry := TierEntry{Kind: EntryLocal, Engine: e.Engine, Model: e.Model, ContextTokens: e.ContextTokens, Capabilities: e.Capabilities}
+			if key := entryKey(entry); !seen[key] {
+				seen[key] = true
+				migrated = append(migrated, entry)
+			}
+		}
+		p.Tiers[tier] = migrated
+	}
+	return p, nil
+}
+
+// normalize makes equal policies compare equal after a JSON round trip: absent
+// lists become empty, empty capability lists become nil and request options are
+// rewritten the way encoding/json writes them, HTML escaping included.
+func (p *Policy) normalize() {
+	if p.Profiles == nil {
+		p.Profiles = []Profile{}
+	}
+	for i := range p.Profiles {
+		pr := &p.Profiles[i]
+		pr.Capabilities = nilIfEmpty(pr.Capabilities)
+		if len(pr.RequestOptions) > 0 {
+			if canonical, err := json.Marshal(pr.RequestOptions); err == nil {
+				pr.RequestOptions = canonical
+			}
+		}
+	}
+	if p.Tiers == nil {
+		p.Tiers = map[string][]TierEntry{}
+	}
+	for _, entries := range p.Tiers {
+		for i := range entries {
+			entries[i].Capabilities = nilIfEmpty(entries[i].Capabilities)
+		}
+	}
+	p.Routing.normalize()
 }
