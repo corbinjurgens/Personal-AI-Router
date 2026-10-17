@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"testing"
 
+	"nvpair-shared/errors"
 	"nvpair-shared/noderec"
 )
 
@@ -337,5 +338,35 @@ func TestScannerProcessRoutesAndRemovesTelemetry(t *testing.T) {
 	sp.handleNotify(noderec.NotifyNodeRemoved, nodeRemovedFrame(t, "peer", "peer-uuid"))
 	if removed != "peer-uuid" {
 		t.Fatalf("removed telemetry host = %q, want peer-uuid", removed)
+	}
+}
+
+// A scanner errors:report / errors:clear reaches nvpair-errors the same way a
+// supervised worker's does: with the broker's nodeId and a timestamp stamped on
+// the report, and the broker's attribution on the clear.
+func TestScannerErrorsNotificationsReachTheErrorsPipeline(t *testing.T) {
+	b := &Broker{nodeID: "local-node"}
+	seen := observeErrors(t, b)
+	sp := &scannerProcess{onErrorsNotif: b.dispatchScannerErrorsNotif}
+
+	const id = "node-scanner:node-info-unreachable:peer-uuid"
+	sp.handleNotify(methodErrorsReport, json.RawMessage(`{"id":"`+id+`","message":"peer is quiet","severity":"warning","action":"none"}`))
+	report := awaitErrorsNotification(t, seen, methodErrorsReport)
+	var got errors.ServiceError
+	if err := json.Unmarshal(report.Params, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.ID != id || got.NodeID != "local-node" || got.Timestamp == 0 || got.Severity != "warning" {
+		t.Fatalf("forwarded report = %+v", got)
+	}
+
+	sp.handleNotify(methodErrorsClear, json.RawMessage(`{"id":"`+id+`"}`))
+	clearMsg := awaitErrorsNotification(t, seen, methodErrorsClear)
+	var cleared errors.ClearParams
+	if err := json.Unmarshal(clearMsg.Params, &cleared); err != nil {
+		t.Fatal(err)
+	}
+	if cleared.ID != id || cleared.ClearedBy != "local-node" {
+		t.Fatalf("forwarded clear = %+v", cleared)
 	}
 }

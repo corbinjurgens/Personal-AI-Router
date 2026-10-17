@@ -7,6 +7,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"maps"
@@ -20,6 +21,7 @@ import (
 	"time"
 
 	"nvpair-shared/clustertrust"
+	sharederrors "nvpair-shared/errors"
 	"nvpair-shared/mdns"
 	"nvpair-shared/netmon"
 	"nvpair-shared/netpick"
@@ -115,6 +117,12 @@ type daemon struct {
 	// per sweep. Guarded by infoMu with the caches it explains: the reason a
 	// card keeps showing an old inventory is exactly this entry.
 	nodeInfoDown map[string]bool
+	// nodeInfoReported holds the nodes whose outage is currently in the errors
+	// view, so the report and its clear are each sent once. It is separate from
+	// nodeInfoDown because the two answer different questions: down is what the
+	// last sweep saw, reported is what the operator has been told, and a node can
+	// be down for a while before it is paired or present in the directory.
+	nodeInfoReported map[string]bool
 
 	// activityMu guards lastActivityAt, when each peer was last seen returning
 	// inference response bytes to one of this node's proxies (keyed by hostUuid,
@@ -367,6 +375,7 @@ func newDaemon(codec *Codec, mesh *clustertrust.Mesh, clusterDir string, tlsHTTP
 		lastModelsByEngine: make(map[string]map[string][]string),
 		lastLoadedByEngine: make(map[string]map[string][]string),
 		nodeInfoDown:       make(map[string]bool),
+		nodeInfoReported:   make(map[string]bool),
 		lastActivityAt:     make(map[string]time.Time),
 	}
 	// Anti-flap: before evicting a node that's missed the mDNS threshold,
@@ -1226,7 +1235,7 @@ func (d *daemon) enrichInfoCandidates(node *noderec.DirectoryNode, hosts []strin
 	if endpointHost == "" {
 		endpointHost = hosts[0]
 	}
-	d.noteNodeInfo(node.HostUUID, net.JoinHostPort(endpointHost, strconv.Itoa(ni.Port)), selectedHost != "")
+	d.noteNodeInfo(*node, net.JoinHostPort(endpointHost, strconv.Itoa(ni.Port)), selectedHost != "")
 	if selectedHost != "" {
 		d.infoMu.Lock()
 		if d.lastInfo == nil {
@@ -1266,7 +1275,23 @@ func (d *daemon) enrichInfoCandidates(node *noderec.DirectoryNode, hosts []strin
 // Silence between those two lines does not mean the peer is fine — it means
 // nothing has changed and the node's card is still showing the last inventory
 // that was actually read.
-func (d *daemon) noteNodeInfo(hostUUID, endpoint string, ok bool) {
+//
+// The log is not where an operator looks, so a paired peer's outage is also put
+// in the errors view (nodeInfoUnreachableID) and taken out again when the peer
+// answers or leaves. Only paired peers are reported: an unpaired LAN node that
+// firewalls this machine is not something the operator can act on here, and this
+// node's own node-info (reached over loopback) is the supervisor's to report.
+// A peer not yet in the directory is reported on the first sweep after it is,
+// because eviction forgets a node and a report sent for an evicted node would
+// have nothing left to clear it.
+func (d *daemon) noteNodeInfo(node noderec.DirectoryNode, endpoint string, ok bool) {
+	hostUUID := node.HostUUID
+	host, _, _ := net.SplitHostPort(endpoint)
+	reportable := !ok && node.Trusted && !isLoopbackHost(host)
+	if reportable && d.dir != nil {
+		_, reportable = d.dir.get(hostUUID)
+	}
+
 	d.infoMu.Lock()
 	was := d.nodeInfoDown[hostUUID]
 	if ok {
@@ -1277,6 +1302,15 @@ func (d *daemon) noteNodeInfo(hostUUID, endpoint string, ok bool) {
 		}
 		d.nodeInfoDown[hostUUID] = true
 	}
+	wasReported := d.nodeInfoReported[hostUUID]
+	if reportable {
+		if d.nodeInfoReported == nil {
+			d.nodeInfoReported = make(map[string]bool)
+		}
+		d.nodeInfoReported[hostUUID] = true
+	} else {
+		delete(d.nodeInfoReported, hostUUID)
+	}
 	d.infoMu.Unlock()
 
 	switch {
@@ -1285,6 +1319,57 @@ func (d *daemon) noteNodeInfo(hostUUID, endpoint string, ok bool) {
 			"hostUuid", hostUUID, "endpoint", endpoint)
 	case ok && was:
 		slog.Info("node-info is answering again", "hostUuid", hostUUID, "endpoint", endpoint)
+	}
+
+	switch {
+	case reportable && !wasReported:
+		d.emitError(sharederrors.ServiceError{
+			ID: nodeInfoUnreachableID(hostUUID),
+			Message: fmt.Sprintf("Paired node %q is not answering on its node-info endpoint (%s); its inventory is not updating and it may be unreachable from this machine",
+				nodeLabel(node), endpoint),
+			Severity: "warning",
+			Action:   "none",
+		})
+	case !reportable && wasReported:
+		d.emitErrorClear(hostUUID)
+	}
+}
+
+// nodeInfoUnreachableID is the errors-view id for a paired peer whose node-info
+// has stopped answering. One id per peer, so a peer that keeps failing refreshes
+// a single entry and the clear in noteNodeInfo/forget can always name it.
+func nodeInfoUnreachableID(hostUUID string) string {
+	return "node-scanner:node-info-unreachable:" + hostUUID
+}
+
+// nodeLabel names a peer for a message: its hostname, or its uuid when the
+// record carried none.
+func nodeLabel(node noderec.DirectoryNode) string {
+	if node.Name != "" {
+		return node.Name
+	}
+	return node.HostUUID
+}
+
+// emitError and emitErrorClear push errors:report / errors:clear to the broker,
+// which stamps the origin nodeId and timestamp and forwards them to
+// nvpair-errors. Nil-codec-safe for the same reason as emit.
+func (d *daemon) emitError(e sharederrors.ServiceError) {
+	if d.codec == nil {
+		return
+	}
+	if err := d.codec.Notify("errors:report", e); err != nil {
+		slog.Warn("failed to send errors:report", "id", e.ID, "err", err)
+	}
+}
+
+func (d *daemon) emitErrorClear(hostUUID string) {
+	if d.codec == nil {
+		return
+	}
+	id := nodeInfoUnreachableID(hostUUID)
+	if err := d.codec.Notify("errors:clear", sharederrors.ClearParams{ID: id}); err != nil {
+		slog.Warn("failed to send errors:clear", "id", id, "err", err)
 	}
 }
 
@@ -1971,7 +2056,12 @@ func (d *daemon) invalidatePeerServicesRoute(hostUUID string) {
 	delete(d.lastModelsByEngine, hostUUID)
 	delete(d.lastLoadedByEngine, hostUUID)
 	delete(d.nodeInfoDown, hostUUID)
+	reported := d.nodeInfoReported[hostUUID]
+	delete(d.nodeInfoReported, hostUUID)
 	d.infoMu.Unlock()
+	if reported {
+		d.emitErrorClear(hostUUID)
+	}
 }
 
 // forget drops all cached state only when the last directory claim disappears.

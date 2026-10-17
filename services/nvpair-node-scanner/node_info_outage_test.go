@@ -18,6 +18,9 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	sharederrors "nvpair-shared/errors"
+	"nvpair-shared/noderec"
 )
 
 // A peer whose node-info address silently drops packets is the failure these
@@ -44,7 +47,7 @@ func TestNodeInfoOutageIsStatedOnceAtEachEnd(t *testing.T) {
 	d := &daemon{}
 
 	for range 3 {
-		d.noteNodeInfo("peer-uuid", "10.0.0.5:14300", false)
+		d.noteNodeInfo(noderec.DirectoryNode{HostUUID: "peer-uuid"}, "10.0.0.5:14300", false)
 	}
 	if got := strings.Count(logs.String(), "node-info is not answering"); got != 1 {
 		t.Fatalf("outage reported %d times, want exactly 1:\n%s", got, logs.String())
@@ -57,7 +60,7 @@ func TestNodeInfoOutageIsStatedOnceAtEachEnd(t *testing.T) {
 	}
 
 	for range 2 {
-		d.noteNodeInfo("peer-uuid", "10.0.0.5:14300", true)
+		d.noteNodeInfo(noderec.DirectoryNode{HostUUID: "peer-uuid"}, "10.0.0.5:14300", true)
 	}
 	if got := strings.Count(logs.String(), "node-info is answering again"); got != 1 {
 		t.Fatalf("recovery reported %d times, want exactly 1:\n%s", got, logs.String())
@@ -71,7 +74,7 @@ func TestNodeInfoSilenceWhenNothingChanges(t *testing.T) {
 	d := &daemon{}
 
 	for range 5 {
-		d.noteNodeInfo("peer-uuid", "10.0.0.5:14300", true)
+		d.noteNodeInfo(noderec.DirectoryNode{HostUUID: "peer-uuid"}, "10.0.0.5:14300", true)
 	}
 	if logs.Len() != 0 {
 		t.Fatalf("a healthy peer must log nothing:\n%s", logs.String())
@@ -227,4 +230,117 @@ func TestNodeInfoErrorBodyIsDrainedForConnectionReuse(t *testing.T) {
 	if got := connections.Load(); got != 1 {
 		t.Fatalf("requests used %d TCP connections, want 1 reused connection", got)
 	}
+}
+
+// reportingDaemon is a daemon whose codec output is captured and whose directory
+// holds the paired peer, as it does by the time the refresh loop sweeps it.
+func reportingDaemon(t *testing.T) (*daemon, noderec.DirectoryNode, func() []Message) {
+	t.Helper()
+	var out bytes.Buffer
+	d := &daemon{codec: NewCodec(&out), dir: newDirectory()}
+	peer := noderec.DirectoryNode{HostUUID: "peer-uuid", Name: "mac-studio", Trusted: true}
+	d.dir.upsert(peer)
+	sent := func() []Message {
+		var msgs []Message
+		decoder := json.NewDecoder(bytes.NewReader(out.Bytes()))
+		for decoder.More() {
+			var msg Message
+			if err := decoder.Decode(&msg); err != nil {
+				t.Fatalf("decode captured frame: %v", err)
+			}
+			msgs = append(msgs, msg)
+		}
+		return msgs
+	}
+	return d, peer, sent
+}
+
+func requireErrorsFrames(t *testing.T, msgs []Message, methods ...string) {
+	t.Helper()
+	if len(msgs) != len(methods) {
+		t.Fatalf("sent %d frames %+v, want methods %v", len(msgs), msgs, methods)
+	}
+	for i, method := range methods {
+		if msgs[i].Method != method {
+			t.Fatalf("frame %d method = %q, want %q", i, msgs[i].Method, method)
+		}
+	}
+}
+
+// TestNodeInfoOutageIsReportedOnceAndClearedOnRecovery covers the errors view:
+// one report when a paired peer stops answering, none while it stays down, one
+// clear when it answers again, and nothing further while it stays healthy.
+func TestNodeInfoOutageIsReportedOnceAndClearedOnRecovery(t *testing.T) {
+	d, peer, sent := reportingDaemon(t)
+
+	for range 3 {
+		d.noteNodeInfo(peer, "10.0.0.5:14300", false)
+	}
+	requireErrorsFrames(t, sent(), "errors:report")
+	var report sharederrors.ServiceError
+	if err := json.Unmarshal(sent()[0].Params, &report); err != nil {
+		t.Fatal(err)
+	}
+	if report.ID != "node-scanner:node-info-unreachable:peer-uuid" || report.Severity != "warning" || report.Action != "none" {
+		t.Fatalf("report = %+v", report)
+	}
+	if !strings.Contains(report.Message, "mac-studio") || !strings.Contains(report.Message, "10.0.0.5:14300") {
+		t.Fatalf("message must name the peer and where it was asked: %q", report.Message)
+	}
+
+	for range 2 {
+		d.noteNodeInfo(peer, "10.0.0.5:14300", true)
+	}
+	msgs := sent()
+	requireErrorsFrames(t, msgs, "errors:report", "errors:clear")
+	var cleared sharederrors.ClearParams
+	if err := json.Unmarshal(msgs[1].Params, &cleared); err != nil {
+		t.Fatal(err)
+	}
+	if cleared.ID != report.ID {
+		t.Fatalf("clear names %q, want %q", cleared.ID, report.ID)
+	}
+}
+
+// TestNodeInfoOutageIsClearedOnEviction: forgetting a node takes its report out
+// of the errors view, and a late failed sweep for the evicted node does not put
+// it back.
+func TestNodeInfoOutageIsClearedOnEviction(t *testing.T) {
+	d, peer, sent := reportingDaemon(t)
+
+	d.noteNodeInfo(peer, "10.0.0.5:14300", false)
+	d.dir.remove(peer.HostUUID)
+	d.forget(peer.HostUUID)
+	requireErrorsFrames(t, sent(), "errors:report", "errors:clear")
+
+	d.noteNodeInfo(peer, "10.0.0.5:14300", false)
+	d.forget(peer.HostUUID)
+	requireErrorsFrames(t, sent(), "errors:report", "errors:clear")
+}
+
+// TestNodeInfoOutageReportsOnlyPairedRemotePeers: an unpaired LAN node and this
+// node's own loopback node-info are not the operator's to act on here.
+func TestNodeInfoOutageReportsOnlyPairedRemotePeers(t *testing.T) {
+	d, peer, sent := reportingDaemon(t)
+
+	unpaired := peer
+	unpaired.Trusted = false
+	d.noteNodeInfo(unpaired, "10.0.0.5:14300", false)
+	d.noteNodeInfo(peer, "127.0.0.1:14300", false)
+	requireErrorsFrames(t, sent())
+}
+
+// TestNodeInfoOutageReportsOnceThePeerIsPaired: a peer that was already down when
+// it became paired is reported on the next sweep, and un-pairing clears it.
+func TestNodeInfoOutageReportsOnceThePeerIsPaired(t *testing.T) {
+	d, peer, sent := reportingDaemon(t)
+
+	unpaired := peer
+	unpaired.Trusted = false
+	d.noteNodeInfo(unpaired, "10.0.0.5:14300", false)
+	d.noteNodeInfo(peer, "10.0.0.5:14300", false)
+	requireErrorsFrames(t, sent(), "errors:report")
+
+	d.noteNodeInfo(unpaired, "10.0.0.5:14300", false)
+	requireErrorsFrames(t, sent(), "errors:report", "errors:clear")
 }

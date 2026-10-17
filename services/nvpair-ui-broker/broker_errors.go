@@ -131,6 +131,15 @@ func (b *Broker) dispatchErrorsNotif(source, method string, params json.RawMessa
 	return false
 }
 
+// dispatchScannerErrorsNotif is the scanner's errors:report / errors:clear
+// path into the pipeline. The scanner owns the only vantage point on a paired
+// peer's node-info going quiet, so it reports that itself; it is a core worker
+// with no errors reader of its own, which is why discovery.go hands the broker
+// its notifications through this hook.
+func (b *Broker) dispatchScannerErrorsNotif(method string, params json.RawMessage) {
+	b.dispatchErrorsNotif("scanner", method, params)
+}
+
 // forwardErrorsReport sends an errors:report notification to nvpair-errors.
 // A no-op (with a debug log) when nvpair-errors is unavailable so callers
 // don't each need the nil guard — the alternative is every producer's

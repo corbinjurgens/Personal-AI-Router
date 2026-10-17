@@ -654,6 +654,7 @@ func (b *Broker) spawnScanner() (supervisedHandle, error) {
 		b.failWorkloadsForNode,
 		func(telemetry noderec.NodeTelemetry) { b.ingestTelemetry(sourceScanner, telemetry) },
 		func(hostUUID string) { b.removeTelemetry(sourceScanner, hostUUID) },
+		b.dispatchScannerErrorsNotif,
 		b.clusterDirArgs()...,
 	)
 	if err != nil {
