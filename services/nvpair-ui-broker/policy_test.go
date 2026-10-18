@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -34,6 +35,7 @@ type policyCall struct {
 // fakeWorker records what the broker sends one worker and answers requests.
 type fakeWorker struct {
 	t      *testing.T
+	conn   net.Conn
 	codec  *Codec
 	mu     sync.Mutex
 	calls  []policyCall
@@ -119,19 +121,70 @@ func newFakeWorkerPipe(t *testing.T) (*Peer, *fakeWorker) {
 	t.Cleanup(func() { _ = client.Close(); _ = server.Close() })
 	peer := NewPeer(NewCodec(client))
 	go peer.Serve(nil, nil)
-	f := &fakeWorker{t: t, codec: NewCodec(server), signal: make(chan struct{}, 1)}
+	f := &fakeWorker{t: t, conn: server, codec: NewCodec(server), signal: make(chan struct{}, 1)}
 	go f.serve()
 	return peer, f
 }
 
-// attachFakeProxy publishes a fake proxy process for every engine.
-func attachFakeProxy(t *testing.T, b *Broker) (*proxyProcess, *fakeWorker) {
+// proxyAcks answers node/set-policy the way the real proxy does: it holds one
+// revision, refuses a policy older than it, and acknowledges with its run id.
+// Everything else, node/set-availability included, is answered {"ok":true}.
+type proxyAcks struct {
+	runID string
+	mu    sync.Mutex
+	held  string
+}
+
+func (a *proxyAcks) heldRevision() string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.held
+}
+
+func (a *proxyAcks) answer(method string, params json.RawMessage) (any, string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	switch method {
+	case nodepolicy.MethodSetPolicy:
+		var in struct {
+			Revision string `json:"revision"`
+		}
+		if err := json.Unmarshal(params, &in); err != nil {
+			return nil, "unreadable policy"
+		}
+		if cmp, err := nodepolicy.CompareRevisions(in.Revision, a.held); err != nil || cmp < 0 {
+			return nil, "revision " + in.Revision + " is older than the active revision"
+		}
+		a.held = in.Revision
+	default:
+		return map[string]bool{"ok": true}, ""
+	}
+	return nodepolicy.PolicyAck{Revision: a.held, RunID: a.runID}, ""
+}
+
+var fakeProxyRuns atomic.Int64
+
+// attachAckingProxy publishes a fake proxy process for every engine, with a run
+// id of its own, that acknowledges like the real one. It does not replay the
+// policy to it: the broker's start does that, and a test calls
+// replayPolicyToProxy when it wants the start.
+func attachAckingProxy(t *testing.T, b *Broker) (*proxyProcess, *fakeWorker, *proxyAcks) {
 	t.Helper()
 	peer, f := newFakeWorkerPipe(t)
 	pp := &proxyProcess{peer: peer}
+	acks := &proxyAcks{runID: "run-" + strconv.FormatInt(fakeProxyRuns.Add(1), 10)}
+	f.setAnswer(acks.answer)
 	for _, profile := range engineProxyProfiles {
 		b.setEngineProxyHandle(profile, pp)
 	}
+	return pp, f, acks
+}
+
+// attachFakeProxy is attachAckingProxy for a test that does not use the
+// acknowledgement state.
+func attachFakeProxy(t *testing.T, b *Broker) (*proxyProcess, *fakeWorker) {
+	t.Helper()
+	pp, f, _ := attachAckingProxy(t, b)
 	return pp, f
 }
 
@@ -287,9 +340,93 @@ func TestNodePolicyLoadDefaultsCorruptAndPersist(t *testing.T) {
 	}
 }
 
+// activatedBroker is a broker on a fresh policy file whose acknowledging proxy
+// started and was replayed the persisted policy: revision 0 is active. Its
+// clock is fixed, so the revisions it assigns are 5000, 5001 and so on.
+type activatedBroker struct {
+	b     *Broker
+	out   *syncBuffer
+	pp    *proxyProcess
+	proxy *fakeWorker
+	acks  *proxyAcks
+	path  string
+}
+
+func newActivatedBroker(t *testing.T) *activatedBroker {
+	t.Helper()
+	b, out := newPolicyBroker(t)
+	path := filepath.Join(t.TempDir(), nodepolicy.FileName)
+	b.loadNodePolicy(path)
+	setClock(b, 5000)
+	pp, proxy, acks := attachAckingProxy(t, b)
+	b.replayPolicyToProxy(context.Background(), pp)
+	ab := &activatedBroker{b: b, out: out, pp: pp, proxy: proxy, acks: acks, path: path}
+	ab.wantActivation(t, "0", activationActive, "")
+	return ab
+}
+
+// wantActivation checks the persisted revision against the activation fields
+// policy:get reports: the active revision, the state and, when wantErr is not
+// empty, that the error text names it.
+func (ab *activatedBroker) wantActivation(t *testing.T, wantActive, wantState, wantErr string) policyGetResult {
+	t.Helper()
+	got := ab.b.localPolicy()
+	if got.ActiveRevision != wantActive || got.Activation != wantState {
+		t.Fatalf("policy:get at revision %q reports %+v, want %s at %q", got.Policy.Revision, got.policyActivation, wantState, wantActive)
+	}
+	if wantErr == "" && got.ActivationError != "" {
+		t.Fatalf("policy:get reports an error %q for a %s revision", got.ActivationError, got.Activation)
+	}
+	if wantErr != "" && !strings.Contains(got.ActivationError, wantErr) {
+		t.Fatalf("activation error = %q, want it to contain %q", got.ActivationError, wantErr)
+	}
+	return got
+}
+
+// setIdle is a local policy:set that changes only the idle unload minutes.
+func (ab *activatedBroker) setIdle(t *testing.T, minutes int) policySetResult {
+	t.Helper()
+	result, err := ab.b.dispatchPolicy(context.Background(), methodPolicySet, policyParams{
+		Policy: mustJSON(map[string]any{"version": nodepolicy.SchemaVersion, "idle": map[string]any{"unloadAfterMinutes": minutes}}),
+	})
+	if err != nil {
+		t.Fatalf("policy:set: %v", err)
+	}
+	set, ok := result.(policySetResult)
+	if !ok {
+		t.Fatalf("policy:set result is %T", result)
+	}
+	return set
+}
+
+// lastPolicyChanged is the newest policy:changed this node announced.
+func lastPolicyChanged(t *testing.T, out *syncBuffer) (nodepolicy.Policy, policyActivation) {
+	t.Helper()
+	var last *Message
+	frames := out.frames()
+	for i := range frames {
+		if frames[i].Method == notifyPolicyChanged {
+			last = &frames[i]
+		}
+	}
+	if last == nil {
+		t.Fatal("no policy:changed was announced")
+	}
+	var event struct {
+		Policy nodepolicy.Policy `json:"policy"`
+		policyActivation
+	}
+	if err := json.Unmarshal(last.Params, &event); err != nil {
+		t.Fatalf("decode policy:changed: %v", err)
+	}
+	return event.Policy, event.policyActivation
+}
+
 func TestPolicySetValidatesPushesAndNotifies(t *testing.T) {
 	b, out := newPolicyBroker(t)
-	_, proxy := attachFakeProxy(t, b)
+	setClock(b, 5000)
+	pp, proxy, _ := attachAckingProxy(t, b)
+	b.replayPolicyToProxy(context.Background(), pp)
 
 	bad := map[string]any{"version": 1, "profiles": []any{map[string]any{"name": "x", "engine": "nope", "model": "m"}}}
 	b.handleMessage(clientRequest(1, methodPolicySet, map[string]any{"policy": bad}))
@@ -304,34 +441,82 @@ func TestPolicySetValidatesPushesAndNotifies(t *testing.T) {
 	if resp.Error != nil {
 		t.Fatalf("valid policy refused: %+v", resp.Error)
 	}
-	var result struct {
-		Policy nodepolicy.Policy `json:"policy"`
+	var result policySetResult
+	if err := json.Unmarshal(resp.Result, &result); err != nil {
+		t.Fatalf("decode policy:set result %s: %v", resp.Result, err)
 	}
-	_ = json.Unmarshal(resp.Result, &result)
 	if result.Policy.Availability != nodepolicy.Available || result.Policy.Idle.UnloadAfterMinutes != 5 || !result.Policy.Idle.StartOnDemand {
 		t.Fatalf("policy:set result = %+v; want availability kept and omitted fields defaulted", result.Policy)
 	}
-	out.waitFrame(t, "policy:changed", func(m Message) bool { return m.Method == notifyPolicyChanged })
-	proxy.waitFor("node/set-policy push", func(calls []policyCall) bool {
-		for _, c := range calls {
-			if c.method == nodepolicy.MethodSetPolicy && strings.Contains(string(c.params), `"unloadAfterMinutes":5`) {
-				return true
+	// The proxy acknowledged the exact revision this set persisted, so the
+	// result says it is enforced, not merely saved.
+	if result.Policy.Revision != "5000" || result.ActiveRevision != "5000" || result.Activation != activationActive || result.ActivationError != "" {
+		t.Fatalf("policy:set result = revision %q, %+v; want revision 5000 active at 5000", result.Policy.Revision, result.policyActivation)
+	}
+	changed := out.waitFrame(t, "policy:changed for revision 5000", func(m Message) bool {
+		return m.Method == notifyPolicyChanged && strings.Contains(string(m.Params), `"revision":"5000"`)
+	})
+	var event struct {
+		Policy nodepolicy.Policy `json:"policy"`
+		policyActivation
+	}
+	if err := json.Unmarshal(changed.Params, &event); err != nil {
+		t.Fatalf("decode policy:changed %s: %v", changed.Params, err)
+	}
+	if event.Policy.Revision != "5000" || event.ActiveRevision != "5000" || event.Activation != activationActive {
+		t.Fatalf("policy:changed = revision %q, %+v; want revision 5000 active at 5000", event.Policy.Revision, event.policyActivation)
+	}
+	var pushed nodepolicy.Policy
+	for _, c := range proxy.snapshot() {
+		if c.method == nodepolicy.MethodSetPolicy {
+			if err := json.Unmarshal(c.params, &pushed); err != nil {
+				t.Fatalf("decode node/set-policy push %s: %v", c.params, err)
 			}
 		}
-		return false
-	})
+	}
+	if pushed.Idle.UnloadAfterMinutes != 5 || pushed.Revision != "5000" {
+		t.Fatalf("last node/set-policy push = revision %q, unloadAfterMinutes %d; want revision 5000 and 5", pushed.Revision, pushed.Idle.UnloadAfterMinutes)
+	}
 
 	b.handleMessage(clientRequest(3, methodPolicyGet, nil))
 	resp = out.waitFrame(t, "policy:get response", isResponse(3))
 	var got policyGetResult
-	_ = json.Unmarshal(resp.Result, &got)
+	if err := json.Unmarshal(resp.Result, &got); err != nil {
+		t.Fatalf("decode policy:get result %s: %v", resp.Result, err)
+	}
 	if got.Policy.Idle.UnloadAfterMinutes != 5 || got.Availability != nodepolicy.Available {
 		t.Fatalf("policy:get = %+v", got)
 	}
+	if got.Policy.Revision != "5000" || got.ActiveRevision != "5000" || got.Activation != activationActive {
+		t.Fatalf("policy:get = revision %q, %+v; want revision 5000 active at 5000", got.Policy.Revision, got.policyActivation)
+	}
+}
+
+// waitPushesSettled returns once every push the observe calls scheduled has
+// run, so none can reach a proxy attached afterwards ahead of its replay.
+func waitPushesSettled(t *testing.T, b *Broker) {
+	t.Helper()
+	r := b.nodePolicyRuntime()
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		r.mu.Lock()
+		scheduled := len(r.pendingPush)
+		r.mu.Unlock()
+		if scheduled == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%d scheduled pushes never ran", scheduled)
+		}
+		time.Sleep(time.Millisecond)
+	}
+	// A push that has left the pending set may still be sending.
+	r.acquirePush(context.Background())
+	r.releasePush()
 }
 
 func TestPolicyStateReplayedToRestartedProxy(t *testing.T) {
-	b, _ := newPolicyBroker(t)
+	b, out := newPolicyBroker(t)
 	r := b.nodePolicyRuntime()
 	r.mu.Lock()
 	r.current.Availability = nodepolicy.Paused
@@ -344,7 +529,11 @@ func TestPolicyStateReplayedToRestartedProxy(t *testing.T) {
 	b.observeEngineRunning("ollama", true)
 	b.observeLoaded(map[string][]string{"ollama": {"qwen3:8b"}})
 
-	pp, proxy := attachFakeProxy(t, b)
+	waitPushesSettled(t, b)
+	pp, proxy, acks := attachAckingProxy(t, b)
+	if got := b.activationOf("0"); got.Activation != activationPending || got.ActiveRevision != "" {
+		t.Fatalf("before the replay the new proxy has acknowledged %+v; want pending with no active revision", got)
+	}
 	b.replayPolicyToProxy(context.Background(), pp)
 	calls := proxy.waitFor("all five pushes", func(calls []policyCall) bool {
 		seen := map[string]bool{}
@@ -381,6 +570,20 @@ func TestPolicyStateReplayedToRestartedProxy(t *testing.T) {
 	r.mu.Unlock()
 	if stale {
 		t.Fatal("admission state from the dead proxy survived its restart")
+	}
+
+	// The replayed policy is the persisted revision, acknowledged by this
+	// process, and the announcement says so.
+	got := b.localPolicy()
+	if got.Activation != activationActive || got.ActiveRevision != got.Policy.Revision || got.Policy.Revision != "0" {
+		t.Fatalf("after the replay policy:get = revision %q, %+v; want revision 0 active at 0", got.Policy.Revision, got.policyActivation)
+	}
+	if held := acks.heldRevision(); held != "0" {
+		t.Fatalf("the restarted proxy holds revision %q, want 0", held)
+	}
+	announced, activation := lastPolicyChanged(t, out)
+	if announced.Revision != "0" || activation.Activation != activationActive || activation.ActiveRevision != "0" {
+		t.Fatalf("policy:changed after the replay = revision %q, %+v; want revision 0 active at 0", announced.Revision, activation)
 	}
 }
 
@@ -1101,15 +1304,15 @@ func TestPeerPolicySetRejectsProtectedChangesWithoutEffect(t *testing.T) {
 			doc := rb.peerSnapshot(t)
 			edit(doc)
 
-			// Holding pushMu keeps a scheduled push marked pending, so a push that
-			// a rejected set wrongly scheduled is visible without waiting.
+			// Holding the push slot keeps a scheduled push marked pending, so a
+			// push that a rejected set wrongly scheduled is visible without waiting.
 			r := rb.b.nodePolicyRuntime()
-			r.pushMu.Lock()
+			r.acquirePush(context.Background())
 			result, errText := rb.relay(t, "set", map[string]any{"policy": doc})
 			r.mu.Lock()
 			pending := len(r.pendingPush)
 			r.mu.Unlock()
-			r.pushMu.Unlock()
+			r.releasePush()
 
 			if errText == "" {
 				t.Fatalf("relayed set accepted a protected change: %s", result)
@@ -1870,5 +2073,582 @@ func TestPolicyVersion1FileIsRewrittenByTheFirstSave(t *testing.T) {
 	if stored.Version != nodepolicy.SchemaVersion || stored.Revision != "5" || stored.Availability != nodepolicy.Paused || stored.Idle.UnloadAfterMinutes != 4 {
 		t.Fatalf("rewritten file: version=%d revision=%q availability=%q idle=%d, want version 2, revision 5, paused and the migrated idle setting",
 			stored.Version, stored.Revision, stored.Availability, stored.Idle.UnloadAfterMinutes)
+	}
+}
+
+// setActivationWait sets how long one activation of b may wait.
+func setActivationWait(b *Broker, d time.Duration) {
+	r := b.nodePolicyRuntime()
+	r.mu.Lock()
+	r.activationTimeout = d
+	r.mu.Unlock()
+}
+
+// refuseSetPolicy makes the fake proxy refuse node/set-policy and acknowledge
+// everything else as before.
+func (ab *activatedBroker) refuseSetPolicy() {
+	ab.proxy.setAnswer(func(method string, params json.RawMessage) (any, string) {
+		if method == nodepolicy.MethodSetPolicy {
+			return nil, "policy refused"
+		}
+		return ab.acks.answer(method, params)
+	})
+}
+
+func TestPolicyActivationFailureLeavesTheSavedRevisionAheadOfTheActiveOne(t *testing.T) {
+	// Each fault happens after the new revision is durably saved. The proxy
+	// keeps enforcing revision 0, and policy:set, policy:get and policy:changed
+	// all report both revisions without claiming the saved one is enforced.
+	test := func(name, wantErr string, fault func(t *testing.T, ab *activatedBroker)) {
+		t.Helper()
+		t.Run(name, func(t *testing.T) {
+			ab := newActivatedBroker(t)
+			setActivationWait(ab.b, 100*time.Millisecond)
+			fault(t, ab)
+
+			set := ab.setIdle(t, 5)
+			if set.Policy.Revision != "5000" || set.ActiveRevision != "0" || set.Activation != activationError {
+				t.Fatalf("policy:set = revision %q, %+v; want revision 5000 in error with revision 0 active", set.Policy.Revision, set.policyActivation)
+			}
+			if !strings.Contains(set.ActivationError, wantErr) || !strings.Contains(set.ActivationError, "5000") {
+				t.Fatalf("activation error = %q, want it to name revision 5000 and contain %q", set.ActivationError, wantErr)
+			}
+			ab.wantActivation(t, "0", activationError, wantErr)
+
+			announced, activation := lastPolicyChanged(t, ab.out)
+			if announced.Revision != "5000" || activation.ActiveRevision != "0" || activation.Activation != activationError {
+				t.Fatalf("policy:changed = revision %q, %+v; want revision 5000 in error with revision 0 active", announced.Revision, activation)
+			}
+			if data, err := os.ReadFile(ab.path); err != nil || !strings.Contains(string(data), `"revision": "5000"`) {
+				t.Fatalf("the saved file does not hold revision 5000 (read error %v): %s", err, data)
+			}
+		})
+	}
+	test("proxy refuses the push", "refused", func(t *testing.T, ab *activatedBroker) { ab.refuseSetPolicy() })
+	test("push cannot reach the proxy", "did not acknowledge", func(t *testing.T, ab *activatedBroker) {
+		if err := ab.proxy.conn.Close(); err != nil {
+			t.Fatalf("close the proxy pipe: %v", err)
+		}
+	})
+	test("acknowledgement is lost", "deadline exceeded", func(t *testing.T, ab *activatedBroker) {
+		release := make(chan struct{})
+		t.Cleanup(func() { close(release) })
+		ab.proxy.setAnswer(func(method string, params json.RawMessage) (any, string) {
+			if method == nodepolicy.MethodSetPolicy {
+				<-release
+			}
+			return ab.acks.answer(method, params)
+		})
+	})
+	test("acknowledgement is from another proxy run", "different proxy run", func(t *testing.T, ab *activatedBroker) {
+		ab.proxy.setAnswer(func(method string, params json.RawMessage) (any, string) {
+			if method == nodepolicy.MethodSetPolicy {
+				return nodepolicy.PolicyAck{Revision: "5000", RunID: "run-earlier-process"}, ""
+			}
+			return ab.acks.answer(method, params)
+		})
+	})
+	test("acknowledgement names another revision", "not the revision 5000", func(t *testing.T, ab *activatedBroker) {
+		ab.proxy.setAnswer(func(method string, params json.RawMessage) (any, string) {
+			if method == nodepolicy.MethodSetPolicy {
+				return nodepolicy.PolicyAck{Revision: "4999", RunID: ab.acks.runID}, ""
+			}
+			return ab.acks.answer(method, params)
+		})
+	})
+	test("acknowledgement is unreadable", "unreadable", func(t *testing.T, ab *activatedBroker) {
+		ab.proxy.setAnswer(func(method string, params json.RawMessage) (any, string) {
+			if method == nodepolicy.MethodSetPolicy {
+				return map[string]bool{"ok": true}, ""
+			}
+			return ab.acks.answer(method, params)
+		})
+	})
+}
+
+func TestPolicyActivationRefusedPushKeepsThePriorProxyConfiguration(t *testing.T) {
+	ab := newActivatedBroker(t)
+	ab.setIdle(t, 3)
+	ab.refuseSetPolicy()
+	set := ab.setIdle(t, 9)
+	if set.Policy.Revision != "5001" || set.ActiveRevision != "5000" || set.Activation != activationError {
+		t.Fatalf("policy:set = revision %q, %+v; want revision 5001 in error with revision 5000 active", set.Policy.Revision, set.policyActivation)
+	}
+	if held := ab.acks.heldRevision(); held != "5000" {
+		t.Fatalf("the proxy holds revision %q after a refused push, want its prior 5000", held)
+	}
+}
+
+func TestPolicyActivationRecoversOnTheNextSuccessfulPush(t *testing.T) {
+	ab := newActivatedBroker(t)
+	ab.refuseSetPolicy()
+	ab.setIdle(t, 5)
+	ab.wantActivation(t, "0", activationError, "refused")
+
+	ab.proxy.setAnswer(ab.acks.answer)
+	ab.b.pushPolicyNow(context.Background(), pushPolicy)
+	got := ab.wantActivation(t, "5000", activationActive, "")
+	if got.Policy.Revision != "5000" {
+		t.Fatalf("persisted revision = %q, want 5000", got.Policy.Revision)
+	}
+}
+
+func TestPolicyActivationWithoutARunningProxyIsPending(t *testing.T) {
+	b, _ := newPolicyBroker(t)
+	setClock(b, 5000)
+	ab := &activatedBroker{b: b}
+	set := ab.setIdle(t, 5)
+	if set.Policy.Revision != "5000" || set.ActiveRevision != "" || set.Activation != activationPending || set.ActivationError != "" {
+		t.Fatalf("policy:set with no proxy = revision %q, %+v; want revision 5000 pending with nothing active", set.Policy.Revision, set.policyActivation)
+	}
+}
+
+func TestPolicyActivationNeedsTheReplayToStartTheIncarnation(t *testing.T) {
+	b, _ := newPolicyBroker(t)
+	setClock(b, 5000)
+	attachAckingProxy(t, b)
+	ab := &activatedBroker{b: b}
+	set := ab.setIdle(t, 5)
+	if set.Activation != activationPending || set.ActiveRevision != "" {
+		t.Fatalf("policy:set on a proxy that was not replayed = %+v; want pending with nothing active", set.policyActivation)
+	}
+}
+
+func TestPolicyActivationDiscardsAnAnswerFromAnEarlierProxyProcess(t *testing.T) {
+	ab := newActivatedBroker(t)
+	old := ab.pp
+
+	// The proxy restarts; the new process holds revision 0 until it is told more.
+	pp2, proxy2, acks2 := attachAckingProxy(t, ab.b)
+	ab.b.replayPolicyToProxy(context.Background(), pp2)
+	ab.proxy, ab.acks = proxy2, acks2
+	ab.wantActivation(t, "0", activationActive, "")
+	ab.refuseSetPolicy()
+	ab.setIdle(t, 5)
+	ab.wantActivation(t, "0", activationError, "refused")
+
+	// A push to the earlier process answers late, naming exactly the saved
+	// revision with a well-formed acknowledgement. It must not activate it.
+	late, err := json.Marshal(nodepolicy.PolicyAck{Revision: "5000", RunID: "run-1-late"})
+	if err != nil {
+		t.Fatalf("encode the late acknowledgement: %v", err)
+	}
+	ab.b.recordActivation(old, "5000", late, nil, nil)
+	ab.wantActivation(t, "0", activationError, "refused")
+}
+
+func TestPolicyReplayAfterProxyRestartActivatesThePersistedRevision(t *testing.T) {
+	ab := newActivatedBroker(t)
+	ab.setIdle(t, 5)
+	ab.wantActivation(t, "5000", activationActive, "")
+
+	pp2, _, acks2 := attachAckingProxy(t, ab.b)
+	// The new process is published but has not been told anything yet.
+	if got := ab.b.activationOf("5000"); got.Activation != activationPending || got.ActiveRevision != "" {
+		t.Fatalf("a restarted proxy that was not replayed reports %+v; want pending with nothing active", got)
+	}
+	ab.b.replayPolicyToProxy(context.Background(), pp2)
+	ab.wantActivation(t, "5000", activationActive, "")
+	if held := acks2.heldRevision(); held != "5000" {
+		t.Fatalf("the restarted proxy holds revision %q, want 5000", held)
+	}
+	announced, activation := lastPolicyChanged(t, ab.out)
+	if announced.Revision != "5000" || activation.Activation != activationActive || activation.ActiveRevision != "5000" {
+		t.Fatalf("policy:changed after the restart = revision %q, %+v; want revision 5000 active at 5000", announced.Revision, activation)
+	}
+}
+
+func TestPolicyActivationFollowsPauseAndResume(t *testing.T) {
+	ab := newActivatedBroker(t)
+	ab.setIdle(t, 5)
+
+	if a, err := ab.b.setAvailability(context.Background(), nodepolicy.Paused); err != nil || a != nodepolicy.Paused {
+		t.Fatalf("pause = %q, %v", a, err)
+	}
+	got := ab.wantActivation(t, "5001", activationActive, "")
+	if got.Policy.Revision != "5001" || got.Policy.Availability != nodepolicy.Paused {
+		t.Fatalf("after the pause the saved policy is revision %q, %q; want 5001, paused", got.Policy.Revision, got.Policy.Availability)
+	}
+	announced, activation := lastPolicyChanged(t, ab.out)
+	if announced.Revision != "5001" || activation.Activation != activationActive || activation.ActiveRevision != "5001" {
+		t.Fatalf("policy:changed after the pause = revision %q, %+v; want revision 5001 active at 5001", announced.Revision, activation)
+	}
+
+	if a, err := ab.b.setAvailability(context.Background(), nodepolicy.Available); err != nil || a != nodepolicy.Available {
+		t.Fatalf("resume = %q, %v", a, err)
+	}
+	got = ab.wantActivation(t, "5002", activationActive, "")
+	if got.Policy.Revision != "5002" || got.Policy.Availability != nodepolicy.Available {
+		t.Fatalf("after the resume the saved policy is revision %q, %q; want 5002, available", got.Policy.Revision, got.Policy.Availability)
+	}
+	if held := ab.acks.heldRevision(); held != "5002" {
+		t.Fatalf("the proxy holds revision %q after the resume, want 5002", held)
+	}
+}
+
+func TestPolicyActivationPauseAfterARefusedPushDeliversThePolicy(t *testing.T) {
+	ab := newActivatedBroker(t)
+	// Revision 5000 changes the policy content but the proxy refuses it.
+	ab.refuseSetPolicy()
+	ab.setIdle(t, 5)
+	ab.wantActivation(t, "0", activationError, "refused")
+
+	// The proxy recovers. Pausing saves revision 5001, whose content is revision
+	// 5000's: availability goes to the proxy first, then the whole document,
+	// and only that policy push activates the revision.
+	ab.proxy.setAnswer(ab.acks.answer)
+	before := len(ab.proxy.snapshot())
+	if a, err := ab.b.setAvailability(context.Background(), nodepolicy.Paused); err != nil || a != nodepolicy.Paused {
+		t.Fatalf("pause = %q, %v", a, err)
+	}
+	got := ab.wantActivation(t, "5001", activationActive, "")
+	if got.Policy.Revision != "5001" || got.Policy.Idle.UnloadAfterMinutes != 5 {
+		t.Fatalf("after the pause the saved policy is revision %q, unloadAfterMinutes %d; want 5001 and 5", got.Policy.Revision, got.Policy.Idle.UnloadAfterMinutes)
+	}
+	if held := ab.acks.heldRevision(); held != "5001" {
+		t.Fatalf("the proxy holds revision %q, want 5001 (the content it refused is delivered by the pause)", held)
+	}
+	var order []string
+	for _, c := range ab.proxy.snapshot()[before:] {
+		if c.method == nodepolicy.MethodSetAvailability || c.method == nodepolicy.MethodSetPolicy {
+			order = append(order, c.method)
+		}
+	}
+	if len(order) < 2 || order[0] != nodepolicy.MethodSetAvailability || order[1] != nodepolicy.MethodSetPolicy {
+		t.Fatalf("pause pushes = %v, want node/set-availability first, then node/set-policy", order)
+	}
+}
+
+func TestPolicyActivationPauseWhileThePolicyIsStillRefusedStaysInError(t *testing.T) {
+	ab := newActivatedBroker(t)
+	ab.refuseSetPolicy()
+	ab.setIdle(t, 5)
+
+	if a, err := ab.b.setAvailability(context.Background(), nodepolicy.Paused); err != nil || a != nodepolicy.Paused {
+		t.Fatalf("pause = %q, %v", a, err)
+	}
+	got := ab.wantActivation(t, "0", activationError, "refused")
+	if got.Policy.Revision != "5001" {
+		t.Fatalf("persisted revision = %q, want 5001", got.Policy.Revision)
+	}
+	if held := ab.acks.heldRevision(); held != "0" {
+		t.Fatalf("the proxy holds revision %q, want 0 (it never took the 5000 content)", held)
+	}
+}
+
+func TestPolicyActivationInRecoveryReportsTheRevisionPushed(t *testing.T) {
+	b, _ := newPolicyBroker(t)
+	path := filepath.Join(t.TempDir(), nodepolicy.FileName)
+	if err := os.WriteFile(path, []byte("not json"), 0o600); err != nil {
+		t.Fatalf("write the corrupt policy file: %v", err)
+	}
+	b.loadNodePolicy(path)
+	pp, proxy, acks := attachAckingProxy(t, b)
+	b.replayPolicyToProxy(context.Background(), pp)
+	ab := &activatedBroker{b: b, acks: acks, path: path}
+
+	got := ab.wantActivation(t, "0", activationActive, "")
+	if !got.RecoveryRequired || got.Policy.Revision != "0" || got.Policy.Availability != nodepolicy.Paused {
+		t.Fatalf("recovery policy:get = revision %q, %q, recoveryRequired %v; want revision 0, paused, true", got.Policy.Revision, got.Policy.Availability, got.RecoveryRequired)
+	}
+
+	// A resume during recovery is not saved, so no new revision is claimed and
+	// no policy follows the availability push.
+	policyPushesBefore := len(proxy.methods(nodepolicy.MethodSetPolicy))
+	if a, err := b.setAvailability(context.Background(), nodepolicy.Available); err != nil || a != nodepolicy.Available {
+		t.Fatalf("resume = %q, %v", a, err)
+	}
+	got = ab.wantActivation(t, "0", activationActive, "")
+	if got.Policy.Revision != "0" || got.Policy.Availability != nodepolicy.Available {
+		t.Fatalf("after an unsaved resume policy:get = revision %q, %q; want revision 0, available", got.Policy.Revision, got.Policy.Availability)
+	}
+	if got := len(proxy.methods(nodepolicy.MethodSetPolicy)); got != policyPushesBefore {
+		t.Fatalf("an unsaved resume sent %d node/set-policy pushes, want none", got-policyPushesBefore)
+	}
+	if data, err := os.ReadFile(path); err != nil || string(data) != "not json" {
+		t.Fatalf("recovery overwrote the unusable file (read error %v): %s", err, data)
+	}
+}
+
+// waitActivation polls policy:get until the activation reaches state.
+func (ab *activatedBroker) waitActivation(t *testing.T, state string) policyGetResult {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		got := ab.b.localPolicy()
+		if got.Activation == state {
+			return got
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("policy:get still reports %+v at revision %q; want %s", got.policyActivation, got.Policy.Revision, state)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestPolicyActivationSetDuringAHungReplayReturnsPendingWithinTheBound(t *testing.T) {
+	b, out := newPolicyBroker(t)
+	path := filepath.Join(t.TempDir(), nodepolicy.FileName)
+	b.loadNodePolicy(path)
+	setClock(b, 5000)
+	setActivationWait(b, 100*time.Millisecond)
+	pp, proxy, acks := attachAckingProxy(t, b)
+	release := make(chan struct{})
+	t.Cleanup(func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+	})
+	proxy.setAnswer(func(method string, params json.RawMessage) (any, string) {
+		if method == nodepolicy.MethodSetAvailability {
+			<-release
+		}
+		return acks.answer(method, params)
+	})
+	replayed := make(chan struct{})
+	go func() {
+		b.replayPolicyToProxy(context.Background(), pp)
+		close(replayed)
+	}()
+	proxy.waitFor("the replay's availability push", func(calls []policyCall) bool {
+		return len(availabilityPushes(calls)) > 0
+	})
+
+	// The replay holds the push slot while the proxy sits on its answer.
+	ab := &activatedBroker{b: b, out: out, proxy: proxy, acks: acks}
+	done := make(chan policySetResult, 1)
+	go func() { done <- ab.setIdle(t, 5) }()
+	var set policySetResult
+	select {
+	case set = <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("policy:set is wedged behind a hung replay; its wait must stay within the bound")
+	}
+	if set.Policy.Revision != "5000" || set.ActiveRevision != "" || set.Activation != activationPending || set.ActivationError != "" {
+		t.Fatalf("policy:set behind a hung replay = revision %q, %+v; want revision 5000 pending with nothing active", set.Policy.Revision, set.policyActivation)
+	}
+	if data, err := os.ReadFile(path); err != nil || !strings.Contains(string(data), `"revision": "5000"`) {
+		t.Fatalf("the saved file does not hold revision 5000 (read error %v)", err)
+	}
+
+	// The push the set left scheduled still goes out once the replay is done.
+	close(release)
+	select {
+	case <-replayed:
+	case <-time.After(3 * time.Second):
+		t.Fatal("the replay did not finish after the proxy answered")
+	}
+	got := ab.waitActivation(t, activationActive)
+	if got.ActiveRevision != "5000" || got.Policy.Revision != "5000" {
+		t.Fatalf("after the replay policy:get = revision %q, %+v; want revision 5000 active at 5000", got.Policy.Revision, got.policyActivation)
+	}
+	if held := acks.heldRevision(); held != "5000" {
+		t.Fatalf("the proxy holds revision %q, want 5000", held)
+	}
+}
+
+func TestPolicyActivationAProxyThatStopsReadingDoesNotWedgeLaterSets(t *testing.T) {
+	b, _ := newPolicyBroker(t)
+	b.loadNodePolicy(filepath.Join(t.TempDir(), nodepolicy.FileName))
+	setClock(b, 5000)
+	setActivationWait(b, 100*time.Millisecond)
+
+	// Nothing ever reads the far end of this pipe, so a write to it blocks.
+	client, server := net.Pipe()
+	t.Cleanup(func() { _ = client.Close(); _ = server.Close() })
+	pp := &proxyProcess{stdin: client}
+	pp.attachPeer(client)
+	go pp.peer.Serve(nil, nil)
+	for _, profile := range engineProxyProfiles {
+		b.setEngineProxyHandle(profile, pp)
+	}
+	r := b.nodePolicyRuntime()
+	r.mu.Lock()
+	r.incarnation = pp
+	r.mu.Unlock()
+	ab := &activatedBroker{b: b}
+
+	for _, minutes := range []int{5, 6} {
+		done := make(chan policySetResult, 1)
+		go func() { done <- ab.setIdle(t, minutes) }()
+		select {
+		case set := <-done:
+			if set.ActiveRevision != "" || set.Activation != activationError {
+				t.Fatalf("policy:set (idle %d) to a proxy that stopped reading = %+v; want error with nothing active", minutes, set.policyActivation)
+			}
+		case <-time.After(3 * time.Second):
+			t.Fatalf("policy:set (idle %d) is wedged behind a proxy that stopped reading", minutes)
+		}
+	}
+	if got := b.localPolicy().Policy.Idle.UnloadAfterMinutes; got != 6 {
+		t.Fatalf("persisted idle unload = %d, want the second set's 6", got)
+	}
+}
+
+func TestPolicyActivationConcurrentSetsEachDescribeTheirOwnRevision(t *testing.T) {
+	ab := newActivatedBroker(t)
+	setActivationWait(ab.b, 3*time.Second)
+	release := make(chan struct{})
+	ab.proxy.setAnswer(func(method string, params json.RawMessage) (any, string) {
+		if method == nodepolicy.MethodSetPolicy && strings.Contains(string(params), `"revision":"5000"`) {
+			<-release
+		}
+		return ab.acks.answer(method, params)
+	})
+
+	results := make(chan policySetResult, 2)
+	go func() { results <- ab.setIdle(t, 5) }()
+	ab.proxy.waitFor("the push of revision 5000", func(calls []policyCall) bool {
+		for _, c := range calls {
+			if c.method == nodepolicy.MethodSetPolicy && strings.Contains(string(c.params), `"revision":"5000"`) {
+				return true
+			}
+		}
+		return false
+	})
+	// Set B persists revision 5001 while the proxy holds set A's answer.
+	go func() { results <- ab.setIdle(t, 9) }()
+	for deadline := time.Now().Add(3 * time.Second); ab.b.localPolicy().Policy.Revision != "5001"; {
+		if time.Now().After(deadline) {
+			t.Fatal("the second set never persisted revision 5001")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	close(release)
+
+	byRevision := map[string]policySetResult{}
+	for range 2 {
+		select {
+		case set := <-results:
+			byRevision[set.Policy.Revision] = set
+		case <-time.After(5 * time.Second):
+			t.Fatal("a policy:set never returned")
+		}
+	}
+	a, b := byRevision["5000"], byRevision["5001"]
+	// A asks about revision 5000, which the proxy acknowledged: active, whether
+	// or not revision 5001 has been acknowledged by the time A's reply is built.
+	if a.Activation != activationActive || a.ActiveRevision < "5000" {
+		t.Fatalf("set A (revision 5000) = %+v; want active at 5000 or later", a.policyActivation)
+	}
+	if b.Activation != activationActive || b.ActiveRevision != "5001" {
+		t.Fatalf("set B (revision 5001) = %+v; want active at 5001", b.policyActivation)
+	}
+}
+
+func TestPolicyActivationDescribesTheRevisionAsked(t *testing.T) {
+	b, _ := newPolicyBroker(t)
+	pp := &proxyProcess{}
+	r := b.nodePolicyRuntime()
+	test := func(name, active, failure, revision string, want policyActivation) {
+		t.Helper()
+		t.Run(name, func(t *testing.T) {
+			r.mu.Lock()
+			defer r.mu.Unlock()
+			r.incarnation, r.activeRevision, r.activationErr = pp, active, failure
+			if got := r.activationLocked(pp, revision); got != want {
+				t.Fatalf("activation of %q with active %q = %+v, want %+v", revision, active, got, want)
+			}
+		})
+	}
+	test("the acknowledged revision", "5000", "", "5000", policyActivation{"5000", activationActive, ""})
+	test("an older revision a newer acknowledgement covers", "5000", "", "4000", policyActivation{"5000", activationActive, ""})
+	test("a newer revision not acknowledged", "5000", "", "5001", policyActivation{"5000", activationPending, ""})
+	test("a newer revision whose push failed", "5000", "refused", "5001", policyActivation{"5000", activationError, "refused"})
+	test("an acknowledged revision despite a later failure", "5000", "refused", "5000", policyActivation{"5000", activationActive, ""})
+	test("nothing acknowledged", "", "", "0", policyActivation{"", activationPending, ""})
+	t.Run("another proxy process", func(t *testing.T) {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		r.incarnation, r.activeRevision, r.activationErr = pp, "5000", ""
+		if got, want := r.activationLocked(&proxyProcess{}, "5000"), (policyActivation{"", activationPending, ""}); got != want {
+			t.Fatalf("activation against a different process = %+v, want %+v", got, want)
+		}
+	})
+}
+
+// waitLastPolicyChanged polls until the newest policy:changed announces
+// revision with the given activation state.
+func waitLastPolicyChanged(t *testing.T, out *syncBuffer, revision, state string) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		var frames []Message
+		for _, m := range out.frames() {
+			if m.Method == notifyPolicyChanged {
+				frames = append(frames, m)
+			}
+		}
+		if len(frames) > 0 {
+			var event struct {
+				Policy nodepolicy.Policy `json:"policy"`
+				policyActivation
+			}
+			if err := json.Unmarshal(frames[len(frames)-1].Params, &event); err != nil {
+				t.Fatalf("decode policy:changed: %v", err)
+			}
+			if event.Policy.Revision == revision && event.Activation == state {
+				return
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("the newest policy:changed is revision %q, %+v; want revision %s %s", event.Policy.Revision, event.policyActivation, revision, state)
+			}
+		} else if time.Now().After(deadline) {
+			t.Fatal("no policy:changed was announced")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestPolicyActivationLaterActivationByTheScheduledPushIsAnnounced(t *testing.T) {
+	ab := newActivatedBroker(t)
+	setActivationWait(ab.b, 100*time.Millisecond)
+	r := ab.b.nodePolicyRuntime()
+	// While the slot is taken, the set cannot push within its bound.
+	r.acquirePush(context.Background())
+	set := ab.setIdle(t, 5)
+	if set.Policy.Revision != "5000" || set.Activation != activationPending || set.ActiveRevision != "0" {
+		r.releasePush()
+		t.Fatalf("policy:set behind a busy slot = revision %q, %+v; want revision 5000 pending with 0 active", set.Policy.Revision, set.policyActivation)
+	}
+	waitLastPolicyChanged(t, ab.out, "5000", activationPending)
+	r.releasePush()
+
+	// The scheduled push activates the revision after the set already replied;
+	// that, too, is announced.
+	ab.waitActivation(t, activationActive)
+	waitLastPolicyChanged(t, ab.out, "5000", activationActive)
+}
+
+func TestPolicyActivationSlotReleasedAtTheDeadlineStillDeliversThePush(t *testing.T) {
+	// The slot comes free just before the bound runs out, so the set takes it
+	// with next to nothing left of its budget. Wherever the request would have
+	// failed unsent, the push is left scheduled instead: never an error, and
+	// the revision is delivered and announced as active.
+	for offset := 97 * time.Millisecond; offset <= 101*time.Millisecond; offset += 200 * time.Microsecond {
+		// In memory, so a save does not move the deadline away from the timer.
+		b, out := newPolicyBroker(t)
+		setClock(b, 5000)
+		setActivationWait(b, 100*time.Millisecond)
+		pp, proxy, acks := attachAckingProxy(t, b)
+		b.replayPolicyToProxy(context.Background(), pp)
+		ab := &activatedBroker{b: b, out: out, proxy: proxy, acks: acks}
+		r := ab.b.nodePolicyRuntime()
+		r.acquirePush(context.Background())
+		time.AfterFunc(offset, r.releasePush)
+		set := ab.setIdle(t, 5)
+		if set.Activation == activationError {
+			t.Fatalf("slot released at %v: policy:set = %+v, want an unsent push to stay pending, not an error", offset, set.policyActivation)
+		}
+		got := ab.waitActivation(t, activationActive)
+		if got.Policy.Revision != "5000" || got.ActiveRevision != "5000" {
+			t.Fatalf("slot released at %v: policy:get = revision %q, %+v; want revision 5000 active at 5000", offset, got.Policy.Revision, got.policyActivation)
+		}
+		if held := ab.acks.heldRevision(); held != "5000" {
+			t.Fatalf("slot released at %v: the proxy holds revision %q, want 5000", offset, held)
+		}
+		waitLastPolicyChanged(t, ab.out, "5000", activationActive)
 	}
 }

@@ -3,13 +3,19 @@
 
 package nodepolicy
 
+import "errors"
+
 // Broker → proxy requests. Each is answered with {"ok":true} or a JSON-RPC
-// error. The broker re-sends all of them whenever the proxy (re)starts.
+// error, except MethodSetPolicy, which answers with a PolicyAck. The broker
+// re-sends all of them whenever the proxy (re)starts.
 const (
-	// MethodSetPolicy carries the whole Policy. Availability inside it is
-	// ignored by the proxy; MethodSetAvailability is authoritative.
+	// MethodSetPolicy carries the whole Policy and is answered with a
+	// PolicyAck of its revision. Availability inside it is ignored by the
+	// proxy; MethodSetAvailability is authoritative.
 	MethodSetPolicy = "node/set-policy"
-	// MethodSetAvailability carries SetAvailabilityParams.
+	// MethodSetAvailability carries SetAvailabilityParams. The broker follows
+	// a persisted availability change with MethodSetPolicy, whose revision is
+	// the availability's, so availability never activates a revision itself.
 	MethodSetAvailability = "node/set-availability"
 	// MethodSetEngineDrain carries SetEngineDrainParams.
 	MethodSetEngineDrain = "node/set-engine-drain"
@@ -67,6 +73,47 @@ type SetAvailabilityParams struct {
 	State Availability `json:"state"`
 	// CancelActive cancels work already running on this node.
 	CancelActive bool `json:"cancelActive,omitempty"`
+}
+
+// PolicyAck is the proxy's answer to MethodSetPolicy: Revision is the policy
+// revision it activated, the one it was sent. RunID names the proxy process, so
+// the broker can discard an acknowledgement from an earlier one. It is the only
+// acknowledgement that activates a revision.
+type PolicyAck struct {
+	Revision string `json:"revision"`
+	RunID    string `json:"runId"`
+}
+
+// CompareRevisions orders two revisions, each canonical decimal or empty;
+// empty is the proxy's "no revision yet" and is older than any revision.
+func CompareRevisions(a, b string) (int, error) {
+	x, err := revisionValue(a)
+	if err != nil {
+		return 0, err
+	}
+	y, err := revisionValue(b)
+	if err != nil {
+		return 0, err
+	}
+	switch {
+	case x < y:
+		return -1, nil
+	case x > y:
+		return 1, nil
+	}
+	return 0, nil
+}
+
+// revisionValue maps the empty revision to -1, below every canonical one.
+func revisionValue(rev string) (int64, error) {
+	if rev == "" {
+		return -1, nil
+	}
+	n, err := NanoUSD(rev).Int64()
+	if err != nil {
+		return 0, errors.New("revision must be a canonical decimal string")
+	}
+	return n, nil
 }
 
 type SetEngineDrainParams struct {

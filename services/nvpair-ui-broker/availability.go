@@ -81,7 +81,8 @@ func (b *Broker) runAvailabilityTransition(ctx context.Context, gen uint64, stat
 }
 
 // persistAvailabilityLocked returns the current policy with state as its
-// availability, saved under the next revision. While policy recovery is
+// availability, saved under the next revision. The policy push that follows
+// the availability push activates that revision. While policy recovery is
 // required nothing is saved, so the corrupt file and recoveryRequired stay as
 // they are; the change then lives in memory only and persisted is false. The
 // caller sets r.current from the result once it has no further failure. Caller
@@ -110,19 +111,26 @@ func (b *Broker) pauseNode(ctx context.Context) (nodepolicy.Availability, error)
 		return "", fmt.Errorf("the paused state could not be saved: %w", err)
 	}
 	r.current = policy
+	if persisted {
+		r.activationErr = ""
+	}
 	r.live = nodepolicy.Draining
 	r.cancelActive = policy.Pause.OnActive == nodepolicy.CancelActive
 	pause := policy.Pause
 	r.mu.Unlock()
-	if persisted {
-		b.notifyPolicyChanged(policy)
-	}
 	slog.Info("pausing node", "onActive", pause.OnActive, "drainTimeoutSeconds", pause.DrainTimeoutSeconds,
 		"unloadModels", pause.UnloadModels, "stopEngines", pause.StopEngines)
 
 	// Pushes use their own context: a superseded pause still leaves the proxy
-	// with the state the next transition then replaces.
+	// with the state the next transition then replaces. Availability goes
+	// first, so admission stops before anything else; the policy follows, its
+	// revision being the one this change took, and the announcement after it
+	// says whether the proxy activated that revision.
 	b.pushPolicyNow(context.Background(), pushAvailability)
+	if persisted {
+		b.activatePolicyNow()
+		b.notifyPolicyChanged(policy)
+	}
 	b.notifyAvailability()
 
 	idle := func(st nodepolicy.AdmissionState) bool { return st.Active == 0 }
@@ -204,6 +212,9 @@ func (b *Broker) resumeNode() (nodepolicy.Availability, error) {
 		return "", fmt.Errorf("the available state could not be saved: %w", err)
 	}
 	r.current = policy
+	if persisted {
+		r.activationErr = ""
+	}
 	r.live = nodepolicy.Available
 	r.cancelActive = false
 	slept := make([]string, 0, len(r.pauseSlept))
@@ -215,11 +226,12 @@ func (b *Broker) resumeNode() (nodepolicy.Availability, error) {
 	restore := r.restoreSkipped
 	r.restoreSkipped = false
 	r.mu.Unlock()
-	if persisted {
-		b.notifyPolicyChanged(policy)
-	}
 
 	b.pushPolicyNow(context.Background(), pushAvailability)
+	if persisted {
+		b.activatePolicyNow()
+		b.notifyPolicyChanged(policy)
+	}
 	b.notifyAvailability()
 	slog.Info("node resumed", "waking", slept, "restore", restore)
 	go b.wakeAfterResume(slept, restore)

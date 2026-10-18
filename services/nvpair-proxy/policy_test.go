@@ -178,3 +178,88 @@ func TestPolicyMethods_AreProcessScoped(t *testing.T) {
 		t.Fatal("an engine-addressed request changed availability")
 	}
 }
+
+// policyAt is the default policy stamped with revision.
+func policyAt(revision string) nodepolicy.Policy {
+	pol := nodepolicy.Default()
+	pol.Revision = revision
+	return pol
+}
+
+// ackOf decodes a successful response as the acknowledgement it must be.
+func ackOf(t *testing.T, f frame) nodepolicy.PolicyAck {
+	t.Helper()
+	if f.Error != nil {
+		t.Fatalf("request rejected: %s", f.Error.Message)
+	}
+	var ack nodepolicy.PolicyAck
+	if err := json.Unmarshal(f.Result, &ack); err != nil {
+		t.Fatalf("result %s is not an acknowledgement: %v", f.Result, err)
+	}
+	return ack
+}
+
+func TestPolicyActivation_SetPolicyAcknowledgesItsRevisionAndTheRunID(t *testing.T) {
+	p, w := policyProxy(t)
+	if p.runID == "" {
+		t.Fatal("the proxy has no run id to acknowledge with")
+	}
+	pol := policyAt("1700")
+	pol.Admission.MaxResidentModels = 3
+	ack := ackOf(t, rpc(t, p, w, nodepolicy.MethodSetPolicy, pol))
+	if ack.Revision != "1700" || ack.RunID != p.runID {
+		t.Fatalf("acknowledgement = %+v, want revision 1700 from run %q", ack, p.runID)
+	}
+	got := p.admission.currentPolicy()
+	if got.Revision != "1700" || got.Admission.MaxResidentModels != 3 {
+		t.Fatalf("active pair = revision %q, maxResidentModels %d; want 1700 and 3", got.Revision, got.Admission.MaxResidentModels)
+	}
+}
+
+func TestPolicyActivation_StartsWithoutARevision(t *testing.T) {
+	p, _ := policyProxy(t)
+	if got := p.admission.currentPolicy().Revision; got != "" {
+		t.Fatalf("revision before any activation = %q, want none", got)
+	}
+}
+
+func TestPolicyActivation_RefusesAnOutOfOrderRevisionAndKeepsThePreviousPolicy(t *testing.T) {
+	p, w := policyProxy(t)
+	newer := policyAt("200")
+	newer.Admission.MaxResidentModels = 4
+	rpcOK(t, p, w, nodepolicy.MethodSetPolicy, newer)
+
+	older := policyAt("100")
+	older.Admission.MaxResidentModels = 2
+	if f := rpc(t, p, w, nodepolicy.MethodSetPolicy, older); f.Error == nil {
+		t.Fatal("a revision older than the active one was acknowledged")
+	}
+	got := p.admission.currentPolicy()
+	if got.Revision != "200" || got.Admission.MaxResidentModels != 4 {
+		t.Fatalf("after the refusal the pair = revision %q, maxResidentModels %d; want 200 and 4", got.Revision, got.Admission.MaxResidentModels)
+	}
+
+	// The same revision again is an idempotent replay, not an out-of-order one.
+	if ack := ackOf(t, rpc(t, p, w, nodepolicy.MethodSetPolicy, newer)); ack.Revision != "200" {
+		t.Fatalf("replay of the active revision acknowledged %q", ack.Revision)
+	}
+}
+
+func TestPolicyActivation_AvailabilityAnswersOkAndNeverMovesTheRevision(t *testing.T) {
+	p, w := policyProxy(t)
+	rpcOK(t, p, w, nodepolicy.MethodSetPolicy, policyAt("100"))
+	f := rpc(t, p, w, nodepolicy.MethodSetAvailability, nodepolicy.SetAvailabilityParams{State: nodepolicy.Paused})
+	if f.Error != nil {
+		t.Fatalf("node/set-availability rejected: %s", f.Error.Message)
+	}
+	var result map[string]bool
+	if err := json.Unmarshal(f.Result, &result); err != nil || !result["ok"] || len(result) != 1 {
+		t.Fatalf("node/set-availability result = %s (%v), want {\"ok\":true}", f.Result, err)
+	}
+	if got := p.admission.currentPolicy().Revision; got != "100" {
+		t.Fatalf("held revision after an availability change = %q, want 100 (only node/set-policy activates a revision)", got)
+	}
+	if p.admission.currentAvailability() != nodepolicy.Paused {
+		t.Fatal("the availability was not applied")
+	}
+}

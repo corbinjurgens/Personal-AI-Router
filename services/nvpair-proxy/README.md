@@ -212,8 +212,14 @@ One limit is outside the proxy's control: current Chromium-based browsers gate a
 The broker pushes this node's policy (`nvpair-shared/nodepolicy`) with five
 process-scoped requests — `node/set-policy`, `node/set-availability`,
 `node/set-engine-drain`, `node/set-residency`, `node/set-engine-intent` — each
-validated, answered `{"ok":true}`, and refused with the previous state kept when
-invalid. Until the first one arrives the proxy runs on `nodepolicy.Default()`.
+validated and refused with the previous state kept when invalid. All but
+`node/set-policy` answer `{"ok":true}`; `node/set-policy` answers an
+acknowledgement `{revision, runId}` of the policy revision it activated and the
+process's run id, which is how the broker learns that a persisted revision is
+active. It is the only request that activates a revision: the broker follows a
+persisted availability change with a `node/set-policy` of the same revision. A
+`node/set-policy` older than the active revision is refused as out of order and
+the previous policy stays. Until the first request arrives the proxy runs on `nodepolicy.Default()` with no active revision.
 `spec.md` §12 is normative; in short:
 
 - **Admission.** One controller for the whole process decides whether

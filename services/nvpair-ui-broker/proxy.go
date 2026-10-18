@@ -15,6 +15,7 @@ import (
 
 	"nvpair-shared/applog"
 	"nvpair-shared/engines"
+	"nvpair-shared/jsonrpc"
 	"nvpair-shared/noderec"
 	"nvpair-ui-broker/relay"
 )
@@ -142,11 +143,11 @@ func startProxy(name, binaryPath, logLevel string, relayDir *relay.Directory, on
 		name:     name,
 		cmd:      cmd,
 		stdin:    stdin,
-		peer:     NewPeer(NewCodec(readWriter{stdout, stdin})),
 		done:     make(chan struct{}),
 		onNotify: onNotify,
 		relayDir: relayDir,
 	}
+	pp.attachPeer(readWriter{stdout, stdin})
 
 	go pp.peer.Serve(nil, pp.handleNotify)
 	go func() {
@@ -166,6 +167,26 @@ func startProxy(name, binaryPath, logLevel string, relayDir *relay.Directory, on
 	}()
 
 	return pp, nil
+}
+
+// attachPeer builds the JSON-RPC peer over the proxy's pipes. A Call whose
+// write blocks on a proxy that stopped reading is cancellable: see
+// interruptWrite.
+func (p *proxyProcess) attachPeer(rw io.ReadWriter) {
+	p.peer = jsonrpc.NewPeerWithWriteInterrupt(NewCodec(rw), p.interruptWrite)
+}
+
+// interruptWrite releases a Call blocked writing to a proxy that stopped
+// reading: an interrupted frame makes the proxy's input unusable, so close its
+// pipe and end the process, and supervision replaces it. This hook must not
+// join the process or wait for the interrupted Call.
+func (p *proxyProcess) interruptWrite() {
+	if p.stdin != nil {
+		_ = p.stdin.Close()
+	}
+	if p.cmd != nil && p.cmd.Process != nil {
+		_ = p.cmd.Process.Kill()
+	}
 }
 
 // handleNotify records the proxy's "ready" port and forwards every notification

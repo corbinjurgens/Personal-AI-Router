@@ -645,22 +645,50 @@ source wins.
 
 ### 12.1 Broker → proxy requests
 
-All are process-scoped (§4) and answered `{"ok":true}` or with a JSON-RPC error.
-Input is validated before anything is applied, and an invalid request leaves
-the previous state in force. The broker re-sends all five whenever the proxy
-starts; until it does, the proxy runs on `nodepolicy.Default()` with
-availability `available`.
+All are process-scoped (§4) and answered `{"ok":true}` or with a JSON-RPC error,
+except `node/set-policy`, which answers an acknowledgement (§12.1.1). Input is
+validated before anything is applied, and an invalid request leaves the previous
+state in force. The broker re-sends all five whenever the proxy starts; until it does, the proxy runs on
+`nodepolicy.Default()` with availability `available` and no active revision.
 
 | Method | Params | Effect |
 | --- | --- | --- |
-| `node/set-policy` | the whole `Policy` | validated with `nodepolicy.Parse`; its `availability` field is ignored |
-| `node/set-availability` | `{state, cancelActive?}` | `available`, `draining` or `paused`; `cancelActive` cancels every admitted execution on this node |
+| `node/set-policy` | the whole `Policy` | validated with `nodepolicy.Parse`; its `availability` field is ignored; its `revision` becomes the active revision, and a revision older than the active one is refused with the previous policy kept |
+| `node/set-availability` | `{state, cancelActive?}` | `available`, `draining` or `paused`; `cancelActive` cancels every admitted execution on this node; it never changes the active revision (§12.1.1) |
 | `node/set-engine-drain` | `{engine, drain}` | refuse new work for one engine during a settings restart |
 | `node/set-residency` | `{loadedByEngine}` | the models loaded per engine on this node, normalized per engine |
 | `node/set-engine-intent` | `{enabledByEngine}` | each managed engine's saved On/Off intent |
 | `workload/cancel` | `{workloadId, engine?, runId?, regenerate?}` | §12.5; answers `{found}` |
 
 Unknown fields and unknown engines are errors.
+
+#### 12.1.1 Activation acknowledgement
+
+The broker persists a policy under a revision (a canonical decimal string) and
+asks the proxy to activate it. The proxy holds the active revision and the
+policy it names as one value, so a reader of the admission controller's policy
+never sees a revision without its policy, or the reverse. It starts with no
+revision, older than any.
+
+`node/set-policy` is the only request that activates a revision. It answers
+`{revision, runId}`: the revision applied, and `runId`, this process's run nonce
+(the one stamped on workloads). A revision lower than the active one is out of
+order: the request is refused with `-32602` and the previous policy and
+revision stay. The same revision again is an idempotent replay.
+
+A persisted availability change also takes a revision. The broker sends
+`node/set-availability` first, so admission stops before anything else, and then
+`node/set-policy` with the current document, whose revision is the availability
+change's; `node/set-availability` itself carries no revision and does not move
+the active one. That second request is also what re-delivers a policy whose
+earlier push was refused. During policy recovery, where nothing is saved, only
+`node/set-availability` is sent.
+
+The broker accepts an acknowledgement as activation only from the proxy process
+it last replayed to, with the run id that process first acknowledged under, and
+only for the exact revision it pushed, and it bounds its whole wait for one
+(`nvpair-ui-broker` README). The lease that gates public egress on the active
+revision belongs to hybrid dispatch and is not part of this contract.
 
 Proxy → broker notifications, also process-scoped:
 

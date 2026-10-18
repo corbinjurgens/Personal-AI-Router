@@ -102,9 +102,13 @@ type admissionController struct {
 }
 
 func newAdmissionController(notify func(string, any), healthy func(string) bool, normalize func(string, string) string) *admissionController {
+	// The defaults the controller starts on were never activated, so they
+	// carry no revision: the broker's first acknowledged one is the first.
+	initial := nodepolicy.Default()
+	initial.Revision = ""
 	return &admissionController{
 		changed:        make(chan struct{}),
-		policy:         nodepolicy.Default(),
+		policy:         initial,
 		availability:   nodepolicy.Available,
 		drain:          map[string]bool{},
 		intent:         map[string]bool{},
@@ -135,6 +139,25 @@ func (a *admissionController) setPolicy(p nodepolicy.Policy) {
 	defer a.mu.Unlock()
 	a.policy = p
 	a.signalLocked()
+}
+
+// activatePolicy installs p, whose revision becomes the active one, unless the
+// active revision is newer: a policy that arrives out of order is refused and
+// the previous one stays. The policy and its revision change together, so a
+// reader of currentPolicy never sees one without the other.
+func (a *admissionController) activatePolicy(p nodepolicy.Policy) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	cmp, err := nodepolicy.CompareRevisions(p.Revision, a.policy.Revision)
+	if err != nil {
+		return err
+	}
+	if cmp < 0 {
+		return fmt.Errorf("revision %s is older than the active revision %s", p.Revision, a.policy.Revision)
+	}
+	a.policy = p
+	a.signalLocked()
+	return nil
 }
 
 // currentPolicy snapshots the policy. Profiles and tiers are slices the

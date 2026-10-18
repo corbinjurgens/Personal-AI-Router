@@ -7,8 +7,10 @@ package main
 // process-scoped: the policy is the machine's, not an engine's, so none of
 // them is addressed to a facade. Each validates before applying, keeps the
 // previous state on invalid input, and answers {"ok":true} or a JSON-RPC
-// error. Until the broker sends anything the controller runs on
-// nodepolicy.Default() with availability Available.
+// error; node/set-policy answers a nodepolicy.PolicyAck instead. Until the
+// broker sends anything the controller runs on the content of
+// nodepolicy.Default() with availability Available and no active revision, so
+// the broker's first acknowledged revision is the first the proxy holds.
 
 import (
 	"encoding/json"
@@ -24,9 +26,12 @@ import (
 // method is not one of them.
 func (p *Proxy) handlePolicyMethod(msg *Message, method string) bool {
 	var err error
+	var result any = map[string]bool{"ok": true}
 	switch method {
 	case nodepolicy.MethodSetPolicy:
-		err = p.applySetPolicy(msg.Params)
+		var revision string
+		revision, err = p.applySetPolicy(msg.Params)
+		result = nodepolicy.PolicyAck{Revision: revision, RunID: p.runID}
 	case nodepolicy.MethodSetAvailability:
 		err = p.applySetAvailability(msg.Params)
 	case nodepolicy.MethodSetEngineDrain:
@@ -43,24 +48,28 @@ func (p *Proxy) handlePolicyMethod(msg *Message, method string) bool {
 		_ = p.codec.RespondError(msg.ID, -32602, err.Error())
 		return true
 	}
-	_ = p.codec.Respond(msg.ID, map[string]bool{"ok": true})
+	_ = p.codec.Respond(msg.ID, result)
 	return true
 }
 
-func (p *Proxy) applySetPolicy(params json.RawMessage) error {
+// applySetPolicy activates the policy and returns its revision. A revision
+// older than the active one is refused and the previous policy stays.
+func (p *Proxy) applySetPolicy(params json.RawMessage) (string, error) {
 	if len(params) == 0 {
-		return fmt.Errorf("params must be a node policy object")
+		return "", fmt.Errorf("params must be a node policy object")
 	}
 	policy, err := nodepolicy.Parse(params)
 	if err != nil {
-		return err
+		return "", err
 	}
-	p.admission.setPolicy(policy)
-	slog.Info("node policy applied",
+	if err := p.admission.activatePolicy(policy); err != nil {
+		return "", err
+	}
+	slog.Info("node policy applied", "revision", policy.Revision,
 		"profiles", len(policy.Profiles), "tiers", len(policy.Tiers),
 		"max_resident", policy.Admission.MaxResidentModels,
 		"switch_models", policy.Admission.SwitchModels)
-	return nil
+	return policy.Revision, nil
 }
 
 func (p *Proxy) applySetAvailability(params json.RawMessage) error {

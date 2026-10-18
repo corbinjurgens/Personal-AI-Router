@@ -65,15 +65,34 @@ var remotePolicyMethods = map[string]string{
 	methodSetAvailability: "engine:remote-availability-set",
 }
 
+// policyActivationTimeout bounds the whole wait for the proxy to activate a
+// revision: getting the push slot and the proxy's acknowledgement together. A
+// revision not acknowledged by then is pending or in error, and the proxy keeps
+// enforcing what it had.
+const policyActivationTimeout = proxyCallTimeout
+
+// activationFloorDivisor sets the least budget a bounded activation starts a
+// push with: one part in this many of policyActivationTimeout. A request begun
+// with less cannot be told apart, when it fails, from one lost after it was
+// written, so it is not begun.
+const activationFloorDivisor = 10
+
+// Activation states a client sees beside the persisted revision.
+const (
+	activationActive  = "active"
+	activationPending = "pending"
+	activationError   = "error"
+)
+
 // engineCallTimeout bounds one engine-manager call made on the policy's behalf
 // (an unload, a sleep, a wake). A wake waits for engine readiness, which can
 // take minutes for a large model server.
 const engineCallTimeout = 5 * time.Minute
 
 // policyRuntime is everything the node policy tracks. One mutex guards the
-// state; pushMu serializes what is sent to the proxy, and every push reads the
-// state at send time, so a later change can never be overwritten by an earlier
-// one that happened to be sent second.
+// state; the push slot serializes what is sent to the proxy, and every push
+// reads the state at send time, so a later change can never be overwritten by
+// an earlier one that happened to be sent second.
 type policyRuntime struct {
 	mu sync.Mutex
 	// path is the policy file. Empty keeps the policy in memory only, which is
@@ -92,6 +111,19 @@ type policyRuntime struct {
 	// replacer publishes the file. Its zero value uses the platform steps; a
 	// test sets one step to inject a failure at that boundary.
 	replacer durablefile.Replacer
+	// activationTimeout replaces policyActivationTimeout when positive; a test
+	// sets it to make a lost acknowledgement cheap.
+	activationTimeout time.Duration
+	// Activation: what the current proxy incarnation has acknowledged of the
+	// node/set-policy pushes, the only requests that activate a revision.
+	// incarnation is the proxy process replayPolicyToProxy last started
+	// from, runID the run id of its first acknowledgement, activeRevision the
+	// newest revision it acknowledged and activationErr why the newest push
+	// failed. An acknowledgement from any other process or run is discarded.
+	incarnation    *proxyProcess
+	runID          string
+	activeRevision string
+	activationErr  string
 	// live is the availability the node is actually in. It differs from
 	// current.Availability only while draining.
 	live         nodepolicy.Availability
@@ -128,7 +160,9 @@ type policyRuntime struct {
 
 	waking map[string]bool
 
-	pushMu      sync.Mutex
+	// pushSlot is the push lock: a one-slot channel, so a caller can wait for
+	// it under a deadline. Whoever holds it sends to the proxy.
+	pushSlot    chan struct{}
 	pendingPush map[string]bool
 
 	relayCancels map[string]context.CancelFunc
@@ -163,6 +197,7 @@ func (r *policyRuntime) initLocked() {
 	r.pauseSlept = map[string]bool{}
 	r.waking = map[string]bool{}
 	r.pendingPush = map[string]bool{}
+	r.pushSlot = make(chan struct{}, 1)
 	r.relayCancels = map[string]context.CancelFunc{}
 	if r.now == nil {
 		r.now = time.Now
@@ -274,6 +309,51 @@ func (r *policyRuntime) publishLocked(policy nodepolicy.Policy) (nodepolicy.Poli
 	return policy, nil
 }
 
+// policyActivation says whether the revision of the policy it accompanies is
+// enforced by the running proxy. It is flattened into the policy:get and policy:set results
+// and the policy:changed params. The persisted revision is policy.revision.
+type policyActivation struct {
+	// ActiveRevision is the revision the current proxy incarnation
+	// acknowledged, or empty when it has acknowledged none or none runs.
+	ActiveRevision string `json:"activeRevision"`
+	// Activation is activationActive when ActiveRevision has reached the
+	// revision of the policy described, activationError when the newest push
+	// failed and activationPending otherwise.
+	Activation string `json:"activation"`
+	// ActivationError is operational text, never policy content or credential
+	// references.
+	ActivationError string `json:"activationError,omitempty"`
+}
+
+// activationBoundLocked is the bound on one activation wait. Caller holds r.mu.
+func (r *policyRuntime) activationBoundLocked() time.Duration {
+	if r.activationTimeout > 0 {
+		return r.activationTimeout
+	}
+	return policyActivationTimeout
+}
+
+// activationLocked reports whether the running proxy has activated revision,
+// the revision of the policy a result or announcement describes. running is
+// the proxy process now published. It is active when the proxy acknowledged
+// that revision or a later one, in error when the newest push failed and
+// pending otherwise. Caller holds r.mu.
+func (r *policyRuntime) activationLocked(running *proxyProcess, revision string) policyActivation {
+	if running == nil || running != r.incarnation {
+		return policyActivation{Activation: activationPending}
+	}
+	a := policyActivation{ActiveRevision: r.activeRevision}
+	switch cmp, err := nodepolicy.CompareRevisions(r.activeRevision, revision); {
+	case r.activeRevision != "" && err == nil && cmp >= 0:
+		a.Activation = activationActive
+	case r.activationErr != "":
+		a.Activation, a.ActivationError = activationError, r.activationErr
+	default:
+		a.Activation = activationPending
+	}
+	return a
+}
+
 // policyGetResult is the policy:get result.
 type policyGetResult struct {
 	Policy       nodepolicy.Policy       `json:"policy"`
@@ -281,6 +361,14 @@ type policyGetResult struct {
 	// RecoveryRequired is true while the node runs on the recovery policy
 	// because its file was unusable; an explicit policy:set clears it.
 	RecoveryRequired bool `json:"recoveryRequired"`
+	policyActivation
+}
+
+// policySetResult is the policy:set result: the persisted policy and whether
+// the proxy has activated it.
+type policySetResult struct {
+	Policy nodepolicy.Policy `json:"policy"`
+	policyActivation
 }
 
 // policyParams is the params shape of every policy method.
@@ -292,9 +380,21 @@ type policyParams struct {
 
 func (b *Broker) localPolicy() policyGetResult {
 	r := b.nodePolicyRuntime()
+	running := b.policyProxy()
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return policyGetResult{Policy: r.current, Availability: r.live, RecoveryRequired: r.recoveryRequired}
+	return policyGetResult{Policy: r.current, Availability: r.live, RecoveryRequired: r.recoveryRequired, policyActivation: r.activationLocked(running, r.current.Revision)}
+}
+
+// activationOf is the activation of one revision right now. A result or
+// announcement describes the policy it carries, not whichever revision is
+// persisted by the time it is built.
+func (b *Broker) activationOf(revision string) policyActivation {
+	r := b.nodePolicyRuntime()
+	running := b.policyProxy()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.activationLocked(running, revision)
 }
 
 // peerPolicyGetResult is the policy:get result a paired node receives: the
@@ -387,7 +487,10 @@ func withoutRevision(raw json.RawMessage) json.RawMessage {
 // derived from the stored document can never be saved over a newer one. The
 // saved document carries the next revision. A build or save error persists,
 // pushes and announces nothing and leaves the previous document in memory. A
-// successful save ends policy recovery.
+// successful save ends policy recovery, and is followed by one push whose
+// acknowledgement, within policyActivationTimeout in all, activates the
+// revision; a push that fails or does not finish in time leaves the revision
+// persisted and not active.
 func (b *Broker) persistPolicy(build func(stored nodepolicy.Policy) (nodepolicy.Policy, error)) (nodepolicy.Policy, error) {
 	r := b.nodePolicyRuntime()
 	r.mu.Lock()
@@ -403,16 +506,22 @@ func (b *Broker) persistPolicy(build func(stored nodepolicy.Policy) (nodepolicy.
 	}
 	r.current = policy
 	r.recoveryRequired = false
+	r.activationErr = ""
 	r.mu.Unlock()
-	b.schedulePolicyPush(pushPolicy)
+	b.activatePolicyNow()
 	b.notifyPolicyChanged(policy)
 	return policy, nil
 }
 
-// notifyPolicyChanged announces this node's persisted policy, and so its new
-// revision, to every client.
+// notifyPolicyChanged announces this node's persisted policy, its revision and
+// whether the proxy has activated it, to every client. Callers announce after
+// the push that activates the revision, so the announcement carries the result.
 func (b *Broker) notifyPolicyChanged(policy nodepolicy.Policy) {
-	b.notifyClients(notifyPolicyChanged, map[string]any{"nodeId": b.nodeID, "policy": policy})
+	b.notifyClients(notifyPolicyChanged, struct {
+		NodeID string            `json:"nodeId"`
+		Policy nodepolicy.Policy `json:"policy"`
+		policyActivation
+	}{b.nodeID, policy, b.activationOf(policy.Revision)})
 }
 
 // notifyClients sends a notification to every client. These are low-volume
@@ -509,7 +618,7 @@ func (b *Broker) dispatchPolicy(ctx context.Context, method string, p policyPara
 		if err != nil {
 			return nil, &invalidParamsError{err}
 		}
-		return map[string]any{"policy": policy}, nil
+		return policySetResult{Policy: policy, policyActivation: b.activationOf(policy.Revision)}, nil
 	case methodSetAvailability:
 		state := nodepolicy.Availability(p.State)
 		if state != nodepolicy.Available && state != nodepolicy.Paused {
@@ -844,6 +953,23 @@ func (b *Broker) policyProxy() *proxyProcess {
 	return nil
 }
 
+// acquirePush takes the push slot, giving up when ctx ends first.
+func (r *policyRuntime) acquirePush(ctx context.Context) bool {
+	select {
+	case r.pushSlot <- struct{}{}:
+		return true
+	default:
+	}
+	select {
+	case r.pushSlot <- struct{}{}:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
+func (r *policyRuntime) releasePush() { <-r.pushSlot }
+
 // schedulePolicyPush sends one kind of state to the proxy in the background.
 func (b *Broker) schedulePolicyPush(kind string) {
 	r := b.nodePolicyRuntime()
@@ -855,22 +981,55 @@ func (b *Broker) schedulePolicyPush(kind string) {
 	r.pendingPush[kind] = true
 	r.mu.Unlock()
 	go func() {
-		r.pushMu.Lock()
-		defer r.pushMu.Unlock()
+		r.acquirePush(context.Background())
 		r.mu.Lock()
 		delete(r.pendingPush, kind)
 		r.mu.Unlock()
-		b.sendPolicyStateLocked(context.Background(), b.policyProxy(), kind)
+		changed := b.sendPolicyStateLocked(context.Background(), b.policyProxy(), kind)
+		r.releasePush()
+		// Nothing waits on this push, so nothing else would tell clients that
+		// it activated, or failed to activate, the revision.
+		if changed {
+			b.notifyPolicyChanged(b.localPolicy().Policy)
+		}
 	}()
 }
 
 // pushPolicyNow sends one kind of state and returns once the proxy answered,
-// for the steps that must not continue before the proxy knows.
+// for the steps that must not continue before the proxy knows. It waits for
+// the push slot as long as it takes, so it is for state the node must not run
+// without; activatePolicyNow is the bounded wait for a revision.
 func (b *Broker) pushPolicyNow(ctx context.Context, kind string) {
 	r := b.nodePolicyRuntime()
-	r.pushMu.Lock()
-	defer r.pushMu.Unlock()
+	r.acquirePush(context.Background())
+	defer r.releasePush()
 	b.sendPolicyStateLocked(ctx, b.policyProxy(), kind)
+}
+
+// activatePolicyNow pushes the persisted policy and waits for the proxy's
+// acknowledgement of it, getting the push slot and the answer both within
+// policyActivationTimeout. When the slot is not free in time, as while a
+// replay is still talking to a slow proxy, or is got with too little of the
+// budget left to send the request and hear back, nothing was sent: the revision
+// stays pending and the push is left scheduled, so it still goes out. A request
+// that was sent and not answered in time is a failed activation instead.
+func (b *Broker) activatePolicyNow() {
+	r := b.nodePolicyRuntime()
+	r.mu.Lock()
+	bound := r.activationBoundLocked()
+	r.mu.Unlock()
+	ctx, cancel := context.WithTimeout(context.Background(), bound)
+	defer cancel()
+	if !r.acquirePush(ctx) {
+		b.schedulePolicyPush(pushPolicy)
+		return
+	}
+	defer r.releasePush()
+	if deadline, ok := ctx.Deadline(); ok && time.Until(deadline) < bound/activationFloorDivisor {
+		b.schedulePolicyPush(pushPolicy)
+		return
+	}
+	b.sendPolicyStateLocked(ctx, b.policyProxy(), pushPolicy)
 }
 
 // replayPolicyToProxy re-sends everything to a freshly started proxy. It runs
@@ -878,13 +1037,15 @@ func (b *Broker) pushPolicyNow(ctx context.Context, kind string) {
 // can admit anything. Availability goes first for the same reason.
 func (b *Broker) replayPolicyToProxy(ctx context.Context, pp *proxyProcess) {
 	r := b.nodePolicyRuntime()
-	r.pushMu.Lock()
-	defer r.pushMu.Unlock()
+	r.acquirePush(context.Background())
+	defer r.releasePush()
 	r.mu.Lock()
-	// Work in flight on the old process died with it.
+	// Work in flight on the old process died with it, and so did what it
+	// acknowledged: only this process's acknowledgements count from here.
 	r.admission = nodepolicy.AdmissionState{}
 	r.haveAdmission = false
 	r.signalAdmissionLocked()
+	r.incarnation, r.runID, r.activeRevision, r.activationErr = pp, "", "", ""
 	kinds := []string{pushAvailability, pushPolicy, pushIntent, pushResidency}
 	for engine := range r.drains {
 		kinds = append(kinds, pushDrainPrefix+engine)
@@ -893,21 +1054,28 @@ func (b *Broker) replayPolicyToProxy(ctx context.Context, pp *proxyProcess) {
 	for _, kind := range kinds {
 		b.sendPolicyStateLocked(ctx, pp, kind)
 	}
+	r.mu.Lock()
+	persisted := r.current
+	r.mu.Unlock()
+	b.notifyPolicyChanged(persisted)
 }
 
-// sendPolicyStateLocked sends the current state of one kind. Caller holds
-// pushMu. An older proxy without the method only logs.
-func (b *Broker) sendPolicyStateLocked(ctx context.Context, pp *proxyProcess, kind string) {
+// sendPolicyStateLocked sends the current state of one kind. Caller holds the
+// push slot. It reports whether the answer changed what the broker reports of
+// activation, for a caller that has no result of its own to announce it in. An older proxy without the method only logs.
+func (b *Broker) sendPolicyStateLocked(ctx context.Context, pp *proxyProcess, kind string) (activationChanged bool) {
 	if pp == nil {
-		return
+		return false
 	}
 	r := &b.nodePolicy
 	r.mu.Lock()
 	var method string
 	var params any
+	// activates is the revision this push asks the proxy to activate.
+	var activates string
 	switch {
 	case kind == pushPolicy:
-		method, params = nodepolicy.MethodSetPolicy, r.current
+		method, params, activates = nodepolicy.MethodSetPolicy, r.current, r.current.Revision
 	case kind == pushAvailability:
 		method, params = nodepolicy.MethodSetAvailability, nodepolicy.SetAvailabilityParams{State: r.live, CancelActive: r.cancelActive}
 	case kind == pushResidency:
@@ -929,20 +1097,76 @@ func (b *Broker) sendPolicyStateLocked(ctx context.Context, pp *proxyProcess, ki
 		method, params = nodepolicy.MethodSetEngineDrain, nodepolicy.SetEngineDrainParams{Engine: engine, Drain: r.drains[engine]}
 	default:
 		r.mu.Unlock()
-		return
+		return false
 	}
 	data, err := json.Marshal(params)
+	bound := r.activationBoundLocked()
 	r.mu.Unlock()
 	if err != nil {
-		return
+		return false
 	}
-	_, rpcErr, err := pp.Call(ctx, method, data)
+	if activates != "" {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, bound)
+		defer cancel()
+	}
+	result, rpcErr, err := pp.Call(ctx, method, data)
 	switch {
 	case err != nil:
 		slog.Warn("could not push node policy state to the proxy", "method", method, "err", err)
 	case rpcErr != nil:
 		slog.Warn("proxy refused node policy state", "method", method, "code", rpcErr.Code, "err", rpcErr.Message)
 	}
+	if activates != "" {
+		return b.recordActivation(pp, activates, result, rpcErr, err)
+	}
+	return false
+}
+
+// recordActivation takes the proxy's answer to a node/set-policy push of
+// revision. Caller holds the push slot, which serializes activations. The
+// revision becomes active only on an acknowledgement from the current
+// incarnation, with the run id that incarnation first acknowledged under,
+// naming exactly the revision pushed. Anything else leaves activeRevision as it
+// was; a failed push also records why. It reports whether the active revision
+// or the recorded failure changed.
+func (b *Broker) recordActivation(pp *proxyProcess, revision string, result json.RawMessage, rpcErr *RPCError, callErr error) (changed bool) {
+	r := &b.nodePolicy
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if pp != r.incarnation {
+		slog.Debug("discarded an answer from a proxy that is not the current incarnation", "revision", revision)
+		return false
+	}
+	was := policyActivation{ActiveRevision: r.activeRevision, ActivationError: r.activationErr}
+	defer func() {
+		changed = was != policyActivation{ActiveRevision: r.activeRevision, ActivationError: r.activationErr}
+	}()
+	var ack nodepolicy.PolicyAck
+	failure := ""
+	switch {
+	case callErr != nil:
+		failure = fmt.Sprintf("the proxy did not acknowledge revision %s: %v", revision, callErr)
+	case rpcErr != nil:
+		failure = fmt.Sprintf("the proxy refused revision %s (code %d)", revision, rpcErr.Code)
+	case json.Unmarshal(result, &ack) != nil || ack.RunID == "":
+		failure = fmt.Sprintf("the proxy's acknowledgement of revision %s was unreadable", revision)
+	case r.runID != "" && ack.RunID != r.runID:
+		failure = fmt.Sprintf("an acknowledgement of revision %s came from a different proxy run", revision)
+	case ack.Revision != revision:
+		failure = fmt.Sprintf("the proxy acknowledged revision %q, not the revision %s that was sent", ack.Revision, revision)
+	default:
+		r.runID = ack.RunID
+		if cmp, err := nodepolicy.CompareRevisions(revision, r.activeRevision); err == nil && cmp > 0 {
+			r.activeRevision = revision
+		}
+		if cmp, err := nodepolicy.CompareRevisions(r.activeRevision, r.current.Revision); err == nil && cmp >= 0 {
+			r.activationErr = ""
+		}
+		return
+	}
+	r.activationErr = failure
+	return false
 }
 
 // handleAdmissionNotification takes the proxy's admission/* notifications and
