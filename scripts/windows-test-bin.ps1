@@ -85,7 +85,7 @@ if (!$principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 $changed = 0
 $skipped = 0
 foreach ($path in $paths) {
-    $name = 'pair-test-bin ' + $path.Substring($root.TrimEnd('\').Length + 1)
+    $name = 'pair-test-bin ' + $path
     $existing = @(Get-NetFirewallRule -DisplayName $name -ErrorAction SilentlyContinue | Where-Object { $_.DisplayName -eq $name })
     if ($Remove) {
         if ($existing.Count) { $existing | Remove-NetFirewallRule; $changed++ } else { $skipped++ }
