@@ -170,6 +170,11 @@ type policyRuntime struct {
 	pushSlot    chan struct{}
 	pendingPush map[string]bool
 
+	// publishMu serializes this node's policy and availability announcements
+	// to clients (policy_notifications.go). It is taken before r.mu and held
+	// across the client write; r.mu is not.
+	publishMu sync.Mutex
+
 	relayCancels map[string]context.CancelFunc
 }
 
@@ -604,22 +609,11 @@ func (b *Broker) persistPolicy(build func(stored nodepolicy.Policy) (nodepolicy.
 		b.reconcileProxySupervision()
 	}
 	b.activatePolicyNow()
-	b.notifyPolicyChanged(policy)
+	b.notifyPolicyChanged()
 	if err != nil {
 		return policy, &policySaveError{err: err, revision: policy.Revision}
 	}
 	return policy, nil
-}
-
-// notifyPolicyChanged announces this node's persisted policy, its revision and
-// whether the proxy has activated it, to every client. Callers announce after
-// the push that activates the revision, so the announcement carries the result.
-func (b *Broker) notifyPolicyChanged(policy nodepolicy.Policy) {
-	b.notifyClients(notifyPolicyChanged, struct {
-		NodeID string            `json:"nodeId"`
-		Policy nodepolicy.Policy `json:"policy"`
-		policyActivation
-	}{b.nodeID, policy, b.activationOf(policy.Revision)})
 }
 
 // notifyClients sends a notification to every client. These are low-volume
@@ -631,15 +625,6 @@ func (b *Broker) notifyClients(method string, params any) {
 	if err := b.codec.Notify(method, params); err != nil {
 		slog.Warn("notify clients failed", "method", method, "err", err)
 	}
-}
-
-// notifyAvailability tells clients the live availability and active count.
-func (b *Broker) notifyAvailability() {
-	r := b.nodePolicyRuntime()
-	r.mu.Lock()
-	live, active := r.live, r.admission.Active
-	r.mu.Unlock()
-	b.notifyClients(notifyAvailabilityChanged, map[string]any{"nodeId": b.nodeID, "availability": live, "active": active})
 }
 
 // handlePolicyRequest serves the broker-owned node policy methods, and holds
@@ -1126,7 +1111,7 @@ func (b *Broker) schedulePolicyPush(kind string) {
 		// Nothing waits on this push, so nothing else would tell clients that
 		// it activated, or failed to activate, the revision.
 		if changed {
-			b.notifyPolicyChanged(b.localPolicy().Policy)
+			b.notifyPolicyChanged()
 		}
 	}()
 }
@@ -1147,7 +1132,7 @@ func (b *Broker) pushPolicyNow(ctx context.Context, kind string) (activationChan
 // push changed whether the proxy enforces it.
 func (b *Broker) announceActivationChange(changed bool) {
 	if changed {
-		b.notifyPolicyChanged(b.localPolicy().Policy)
+		b.notifyPolicyChanged()
 	}
 }
 
@@ -1199,10 +1184,7 @@ func (b *Broker) replayPolicyToProxy(ctx context.Context, pp *proxyProcess) {
 	for _, kind := range kinds {
 		b.sendPolicyStateLocked(ctx, pp, kind)
 	}
-	r.mu.Lock()
-	persisted := r.current
-	r.mu.Unlock()
-	b.notifyPolicyChanged(persisted)
+	b.notifyPolicyChanged()
 }
 
 // sendPolicyStateLocked sends the current state of one kind. Caller holds the

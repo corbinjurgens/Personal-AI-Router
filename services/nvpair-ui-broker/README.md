@@ -550,9 +550,12 @@ The change-only cluster signals `nvpair-node-settings` pushes when `cluster_id` 
 **Not opt-in**: sent to every client. `policy:changed {nodeId, policy,
 activeRevision, activation, activationError?}` follows a successful `policy:set`
 and each persisted availability change (not one made during policy recovery),
-carrying the new persisted revision and, once the push that activates it has
-been answered or has timed out, whether the proxy enforces that revision (see
-Activation above). A push scheduled in the background announces again when its
+once the push that activates it has been answered or has timed out. Each
+announcement carries the policy persisted when it is sent and whether the proxy
+enforces that revision (see Activation above): announcements of this node are
+sent one at a time, each reading the state as it is sent, so their revisions
+never go backwards and the last one matches `policy:get`. The same holds for
+`node:availability-changed`. A push scheduled in the background announces again when its
 answer changes the activation, and so does a pause's later availability push or
 an availability push made during policy recovery. It is also
 sent when a proxy start has been replayed the policy. `node:availability-changed {nodeId, availability,
