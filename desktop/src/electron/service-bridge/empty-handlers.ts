@@ -25,7 +25,7 @@ import {
     parseCancelResult,
     parsePolicyDocument,
     parsePolicySetResult,
-    parsePolicyText,
+    policySetParams,
     workloadCancelParams
 } from './node-policy'
 import {
@@ -768,10 +768,11 @@ const EMPTY_SERVICE_BRIDGE_HANDLERS: BridgeHandlerMap = {
     'policy:set': async payload => {
         if (!payload) throw new Error('Missing policy')
         return parsePolicySetResult(
-            await getModularSupervisor().callProcess('broker', 'policy:set', {
-                ...nodeTargetParams(payload),
-                policy: parsePolicyText(payload.policy)
-            })
+            await getModularSupervisor().callProcess(
+                'broker',
+                'policy:set',
+                policySetParams(payload)
+            )
         )
     },
     'node:set-availability': async payload => {

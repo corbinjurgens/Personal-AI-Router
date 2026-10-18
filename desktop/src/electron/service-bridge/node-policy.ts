@@ -6,7 +6,10 @@ import type {
     NodeAvailabilityChange,
     NodePolicyChange,
     NodePolicyDocument,
+    NodePolicySnapshot,
     NodePolicyTarget,
+    NodePolicyWrite,
+    PolicyActivationStatus,
     WorkloadCancelRequest
 } from '@/shared/types/node-policy'
 import { engineManagerName } from '@/shared/utils/engines'
@@ -41,9 +44,46 @@ export function parseCancelResult(result: JsonValue | undefined): { ok: boolean 
     return { ok: objectValue(result)?.ok === true }
 }
 
-function policyText(value: JsonValue | undefined): string {
-    if (objectValue(value) === null) throw new Error('The service returned no node policy')
-    return JSON.stringify(value, null, 2)
+// A revision is "0" or a decimal without leading zeros. It stays a string: it
+// exceeds what a JavaScript number holds exactly.
+const REVISION_PATTERN = /^(0|[1-9][0-9]*)$/
+
+function revisionValue(value: JsonValue | undefined): string | null {
+    return typeof value === 'string' && REVISION_PATTERN.test(value) ? value : null
+}
+
+/**
+ * The enforcement report that accompanies a policy. A paired node's answers carry
+ * none, which is null; a report that is present must be well formed.
+ */
+function activationStatus(body: JsonObject): PolicyActivationStatus | null {
+    const { activation, activeRevision, activationError } = body
+    if (activation === undefined) return null
+    if (activation !== 'active' && activation !== 'pending' && activation !== 'error') {
+        throw new Error('The service returned an unknown policy activation state')
+    }
+    const active = activeRevision === '' ? '' : revisionValue(activeRevision)
+    if (active === null) throw new Error('The service returned an invalid active policy revision')
+    if (activationError !== undefined && typeof activationError !== 'string') {
+        throw new Error('The service returned an invalid policy activation error')
+    }
+    return {
+        state: activation,
+        activeRevision: active,
+        ...(activationError ? { error: activationError } : {})
+    }
+}
+
+function policySnapshot(body: JsonObject | null): NodePolicySnapshot {
+    const policy = objectValue(body?.policy)
+    if (!body || !policy) throw new Error('The service returned no node policy')
+    const revision = revisionValue(policy.revision)
+    if (revision === null) throw new Error('The service returned a node policy without a revision')
+    return {
+        policy: JSON.stringify(policy, null, 2),
+        revision,
+        activation: activationStatus(body)
+    }
 }
 
 /** Parse a `policy:get` result into the policy as editable text plus the live availability. */
@@ -51,12 +91,20 @@ export function parsePolicyDocument(result: JsonValue | undefined): NodePolicyDo
     const body = objectValue(result)
     const availability = availabilityValue(body?.availability)
     if (!availability) throw new Error('The service returned no node availability')
-    return { policy: policyText(body?.policy), availability }
+    // A paired node's projection omits the flag.
+    if (body?.recoveryRequired !== undefined && typeof body.recoveryRequired !== 'boolean') {
+        throw new Error('The service returned an invalid policy recovery flag')
+    }
+    return {
+        ...policySnapshot(body),
+        availability,
+        recoveryRequired: body?.recoveryRequired === true
+    }
 }
 
 /** Parse a `policy:set` result: the policy as persisted, after defaults were applied. */
-export function parsePolicySetResult(result: JsonValue | undefined): { policy: string } {
-    return { policy: policyText(objectValue(result)?.policy) }
+export function parsePolicySetResult(result: JsonValue | undefined): NodePolicySnapshot {
+    return policySnapshot(objectValue(result))
 }
 
 /** Parse a `node:set-availability` result. */
@@ -78,12 +126,15 @@ export function parseAvailabilityChange(
     return { nodeId: body.nodeId, availability }
 }
 
-/** Parse a `policy:changed {nodeId, policy}` push; null if malformed. */
+/** Parse a `policy:changed {nodeId, policy, activation...}` push; null if malformed. */
 export function parsePolicyChange(params: JsonValue | undefined): NodePolicyChange | null {
     const body = objectValue(params)
     if (!body || typeof body.nodeId !== 'string' || body.nodeId === '') return null
-    if (objectValue(body.policy) === null) return null
-    return { nodeId: body.nodeId, policy: policyText(body.policy) }
+    try {
+        return { nodeId: body.nodeId, ...policySnapshot(body) }
+    } catch {
+        return null
+    }
 }
 
 /**
@@ -101,4 +152,16 @@ export function parsePolicyText(text: string): JsonObject {
     const policy = objectValue(parsed)
     if (!policy) throw new Error('The policy must be a JSON object')
     return policy
+}
+
+/** `policy:set` params: the edited policy, checked against the revision it was edited from. */
+export function policySetParams(request: NodePolicyWrite): JsonObject {
+    if (revisionValue(request.expectedPersistedRevision) === null) {
+        throw new Error('The policy revision it was edited from must be a decimal string')
+    }
+    return {
+        ...nodeTargetParams(request),
+        policy: parsePolicyText(request.policy),
+        expectedPersistedRevision: request.expectedPersistedRevision
+    }
 }

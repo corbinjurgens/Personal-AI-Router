@@ -47,6 +47,7 @@ import type {
     NodeAvailabilityRequest,
     NodePolicyChange,
     NodePolicyDocument,
+    NodePolicySnapshot,
     NodePolicyTarget,
     NodePolicyWrite,
     WorkloadCancelRequest
@@ -128,7 +129,7 @@ export interface WsInvokeChannelMap {
 
     // Node policy and availability
     'policy:get': { request: NodePolicyTarget; response: NodePolicyDocument }
-    'policy:set': { request: NodePolicyWrite; response: { policy: string } }
+    'policy:set': { request: NodePolicyWrite; response: NodePolicySnapshot }
     'node:set-availability': {
         request: NodeAvailabilityRequest
         response: { availability: NodeAvailability }

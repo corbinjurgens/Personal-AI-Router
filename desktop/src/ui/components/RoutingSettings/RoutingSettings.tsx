@@ -13,7 +13,11 @@ import {
     type DropdownEntry
 } from '@nvidia/foundations-react-core'
 import { useShallow } from 'zustand/react/shallow'
-import type { NodeAvailability } from '@/shared/types/node-policy'
+import type {
+    NodeAvailability,
+    NodePolicySnapshot,
+    PolicyActivation
+} from '@/shared/types/node-policy'
 import getErrorString from '@/shared/utils/get-error-string'
 import { InlineErrorBanner } from '@/ui/components/InlineErrorBanner'
 import { useConnectionStore } from '@/ui/stores/connection.store'
@@ -25,6 +29,30 @@ const AVAILABILITY_COLORS: Record<NodeAvailability, 'green' | 'yellow' | 'gray'>
     available: 'green',
     draining: 'yellow',
     paused: 'gray'
+}
+
+const ACTIVATION_COLORS: Record<PolicyActivation, 'green' | 'yellow' | 'red'> = {
+    active: 'green',
+    pending: 'yellow',
+    error: 'red'
+}
+
+const ACTIVATION_LABELS: Record<PolicyActivation, string> = {
+    active: 'Active',
+    pending: 'Saved, not yet enforced',
+    error: 'Saved, not enforced'
+}
+
+/** The newest saved revision the node has reported on, and whether its proxy enforces it. */
+type PolicyStatus = Pick<NodePolicySnapshot, 'revision' | 'activation'>
+
+/**
+ * Whether `revision` is older than `than`. The bridge only passes canonical
+ * decimal strings; they are compared as integers because they exceed what a
+ * number holds exactly. An empty `than` is not yet known, so nothing is older.
+ */
+function isOlder(revision: string, than: string): boolean {
+    return than !== '' && BigInt(revision) < BigInt(than)
 }
 
 /** Policy and pause switch for one node: this PC, or a paired node reached through the broker. */
@@ -47,10 +75,21 @@ export default function RoutingSettings() {
     const [saving, setSaving] = useState(false)
     const [loadError, setLoadError] = useState<string | null>(null)
     const [saveError, setSaveError] = useState<string | null>(null)
+    const [status, setStatus] = useState<PolicyStatus | null>(null)
+    const [recoveryRequired, setRecoveryRequired] = useState(false)
+    // The saved policy found newer than the draft's base when a save failed,
+    // with the service's message for that save.
+    const [conflict, setConflict] = useState<{
+        latest: NodePolicySnapshot
+        message: string
+    } | null>(null)
+    const [reviewing, setReviewing] = useState(false)
     const latestLoad = useRef(0)
     // The policy as last loaded or saved, to tell whether the editor has unsaved edits.
     const textRef = useRef('')
     const savedTextRef = useRef('')
+    // The persisted revision the draft was edited from; empty until a policy loads.
+    const baseRevisionRef = useRef('')
     textRef.current = text
     // The id the broker uses for the selected node; this PC's is the self id.
     const targetId = nodeId ?? selfId
@@ -61,11 +100,16 @@ export default function RoutingSettings() {
         setLoading(true)
         setLoadError(null)
         setSaveError(null)
+        setConflict(null)
+        setReviewing(false)
         try {
             const document = await window.pairApi.nodePolicy.get(nodeId ?? undefined)
             if (ticket !== latestLoad.current) return
             savedTextRef.current = document.policy
+            baseRevisionRef.current = document.revision
             setText(document.policy)
+            setStatus({ revision: document.revision, activation: document.activation })
+            setRecoveryRequired(document.recoveryRequired)
             setAvailability(document.availability)
         } catch (err) {
             if (ticket !== latestLoad.current) return
@@ -79,31 +123,55 @@ export default function RoutingSettings() {
         if (!connected) return
         setAvailability(null)
         savedTextRef.current = ''
+        baseRevisionRef.current = ''
+        setStatus(null)
+        setRecoveryRequired(false)
         setText('')
         void load()
     }, [connected, load])
 
-    // Live updates from the broker. The policy text is replaced only when the
-    // user has no unsaved edits, so a push never overwrites typing.
+    // A saved policy reported by the node. Changes can arrive out of order, so
+    // the status only moves forward. The text and base revision follow only when
+    // the user has no unsaved edits and the report is not older than the base:
+    // a push never overwrites typing or rewinds the editor.
+    const noteStatus = useCallback((saved: NodePolicySnapshot) => {
+        setStatus(current =>
+            current && isOlder(saved.revision, current.revision)
+                ? current
+                : { revision: saved.revision, activation: saved.activation }
+        )
+    }, [])
+
+    const adopt = useCallback(
+        (saved: NodePolicySnapshot) => {
+            noteStatus(saved)
+            if (textRef.current !== savedTextRef.current) return
+            if (isOlder(saved.revision, baseRevisionRef.current)) return
+            baseRevisionRef.current = saved.revision
+            savedTextRef.current = saved.policy
+            setText(saved.policy)
+        },
+        [noteStatus]
+    )
+
+    // Live updates from the broker.
     useEffect(() => {
         if (targetId === null) return
         const offAvailability = window.pairApi.nodePolicy.onAvailabilityChanged(change => {
             if (change.nodeId === targetId) setAvailability(change.availability)
         })
         const offPolicy = window.pairApi.nodePolicy.onPolicyChanged(change => {
-            if (change.nodeId !== targetId) return
-            if (textRef.current !== savedTextRef.current) return
-            savedTextRef.current = change.policy
-            setText(change.policy)
+            if (change.nodeId === targetId) adopt(change)
         })
         return () => {
             offAvailability()
             offPolicy()
         }
-    }, [targetId])
+    }, [targetId, adopt])
 
     const toggleAvailability = useCallback(async () => {
         if (availability !== 'available' && availability !== 'paused') return
+        const ticket = latestLoad.current
         setSwitching(true)
         setLoadError(null)
         try {
@@ -112,27 +180,59 @@ export default function RoutingSettings() {
                 nodeId ?? undefined
             )
             setAvailability(result.availability)
+            // The change took a new revision. This PC announces it; a paired
+            // node does not, and the result carries none, so read it back.
+            const document = await window.pairApi.nodePolicy.get(nodeId ?? undefined)
+            if (ticket === latestLoad.current) adopt(document)
         } catch (err) {
             setLoadError(getErrorString(err))
         } finally {
             setSwitching(false)
         }
-    }, [availability, nodeId])
+    }, [availability, nodeId, adopt])
 
     const save = useCallback(async () => {
+        const ticket = latestLoad.current
+        const base = baseRevisionRef.current
         setSaving(true)
         setSaveError(null)
         try {
-            const result = await window.pairApi.nodePolicy.set(text, nodeId ?? undefined)
+            const result = await window.pairApi.nodePolicy.set({
+                nodeId: nodeId ?? undefined,
+                policy: text,
+                expectedPersistedRevision: base
+            })
+            if (ticket !== latestLoad.current) return
             // Show the policy as persisted: the service fills in omitted fields.
             savedTextRef.current = result.policy
+            baseRevisionRef.current = result.revision
             setText(result.policy)
+            // A change for a newer revision may have been announced before this reply.
+            noteStatus(result)
+            setRecoveryRequired(false)
         } catch (err) {
-            setSaveError(getErrorString(err))
+            if (ticket !== latestLoad.current) return
+            // The error code of a refusal does not survive a paired node's
+            // relay, so the outcome is found by reading the saved revision back.
+            const message = getErrorString(err)
+            const latest = await window.pairApi.nodePolicy
+                .get(nodeId ?? undefined)
+                .catch(() => null)
+            if (ticket !== latestLoad.current) return
+            if (latest === null) {
+                setSaveError(
+                    `Could not confirm whether the save took effect: ${message} Reload to see the saved policy.`
+                )
+            } else if (latest.revision !== base) {
+                noteStatus(latest)
+                setConflict({ latest, message })
+            } else {
+                setSaveError(message)
+            }
         } finally {
             setSaving(false)
         }
-    }, [text, nodeId])
+    }, [text, nodeId, noteStatus])
 
     const nodeItems: DropdownEntry[] = useMemo(
         () => [
@@ -146,6 +246,9 @@ export default function RoutingSettings() {
     )
 
     const canSwitch = (availability === 'available' || availability === 'paused') && !switching
+    // Save needs the revision the draft is based on, which a loaded policy supplies.
+    const canSave = availability !== null && conflict === null && text.trim() !== ''
+    const activation = status?.activation ?? null
 
     return (
         <Stack gap="6" className="relative py-8 px-3 w-full">
@@ -186,18 +289,76 @@ export default function RoutingSettings() {
 
                     <Stack gap="2">
                         <Text kind="body/semibold/sm">Policy</Text>
-                        <TextArea
-                            size="small"
-                            aria-label="Node policy JSON"
-                            value={text}
-                            onValueChange={setText}
-                            resizeable="auto"
-                            rows={14}
-                            maxLength={65536}
-                            disabled={loading || saving}
-                            className="font-mono"
-                        />
+                        {recoveryRequired && (
+                            <InlineErrorBanner
+                                severity="warning"
+                                message="The saved policy file was unreadable, so default settings are in use. Save a policy to replace them."
+                            />
+                        )}
+                        {activation && (
+                            <Flex align="center" gap="3" wrap="wrap">
+                                <Text kind="body/regular/sm" className="text-subtle-color">
+                                    Saved policy
+                                </Text>
+                                <Badge color={ACTIVATION_COLORS[activation.state]} kind="solid">
+                                    {ACTIVATION_LABELS[activation.state]}
+                                </Badge>
+                            </Flex>
+                        )}
+                        {activation?.state === 'error' && (
+                            <InlineErrorBanner
+                                severity="error"
+                                message={`The saved policy is not enforced yet${activation.error ? `: ${activation.error}` : '.'}`}
+                            />
+                        )}
+                        <Flex gap="3" align="start">
+                            <div className="min-w-0 flex-1">
+                                <TextArea
+                                    size="small"
+                                    aria-label="Node policy JSON"
+                                    value={text}
+                                    onValueChange={setText}
+                                    resizeable="auto"
+                                    rows={14}
+                                    maxLength={65536}
+                                    disabled={loading || saving}
+                                    className="font-mono"
+                                />
+                            </div>
+                            {conflict && reviewing && (
+                                <div className="min-w-0 flex-1">
+                                    <TextArea
+                                        size="small"
+                                        aria-label="Latest saved node policy JSON"
+                                        value={conflict.latest.policy}
+                                        readOnly
+                                        resizeable="auto"
+                                        rows={14}
+                                        className="font-mono"
+                                    />
+                                </div>
+                            )}
+                        </Flex>
                         {saveError && <InlineErrorBanner severity="error" message={saveError} />}
+                        {conflict && (
+                            <InlineErrorBanner
+                                severity="warning"
+                                message={`The saved policy changed after you loaded it, so this draft was not applied to it. If the service's reply was lost, the save may have taken effect. Your edits stay in the editor, and Save stays off until you discard them and reload. Service message: ${conflict.message}`}
+                            >
+                                <Button
+                                    kind="secondary"
+                                    size="tiny"
+                                    onClick={() => setReviewing(current => !current)}
+                                >
+                                    {reviewing
+                                        ? 'Hide latest saved policy'
+                                        : 'Review latest saved policy'}
+                                </Button>
+                                <Button kind="secondary" size="tiny" onClick={() => void load()}>
+                                    Discard draft and reload
+                                </Button>
+                            </InlineErrorBanner>
+                        )}
                         <Flex gap="2" justify="end">
                             <Button
                                 kind="secondary"
@@ -211,7 +372,7 @@ export default function RoutingSettings() {
                                 kind="primary"
                                 color="brand"
                                 size="small"
-                                disabled={loading || saving || text.trim() === ''}
+                                disabled={loading || saving || !canSave}
                                 aria-busy={saving}
                                 onClick={() => void save()}
                             >

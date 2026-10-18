@@ -1,7 +1,10 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
+// @vitest-environment jsdom
 
-import { describe, expect, it } from 'vitest'
+import { act, createElement } from 'react'
+import { createRoot, type Root } from 'react-dom/client'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { parseWorkloadsInitial } from '@/electron/service-bridge/modular-state'
 import {
     nodeTargetParams,
@@ -12,9 +15,20 @@ import {
     parsePolicyDocument,
     parsePolicySetResult,
     parsePolicyText,
+    policySetParams,
     workloadCancelParams
 } from '@/electron/service-bridge/node-policy'
+import type {
+    NodeAvailabilityChange,
+    NodePolicyChange,
+    NodePolicyDocument,
+    NodePolicySnapshot,
+    PolicyActivationStatus
+} from '@/shared/types/node-policy'
 import { workloadCancelRequest } from '@/shared/utils/workloads'
+import type { INodePolicyApi } from '@/ui/api/pair-api'
+import RoutingSettings from '@/ui/components/RoutingSettings/RoutingSettings'
+import { useConnectionStore } from '@/ui/stores/connection.store'
 import { workloadModelLabel } from '@/ui/utils/workload-labels'
 
 describe('parseWorkloadsInitial', () => {
@@ -107,11 +121,15 @@ describe('node policy bridge helpers', () => {
 
     it('turns a policy:get result into editable text', () => {
         const document = parsePolicyDocument({
-            policy: { tier: 'weak', limits: { maxJobs: 2 } },
+            policy: { revision: '5', tier: 'weak', limits: { maxJobs: 2 } },
             availability: 'draining'
         })
         expect(document.availability).toBe('draining')
-        expect(JSON.parse(document.policy)).toEqual({ tier: 'weak', limits: { maxJobs: 2 } })
+        expect(JSON.parse(document.policy)).toEqual({
+            revision: '5',
+            tier: 'weak',
+            limits: { maxJobs: 2 }
+        })
         expect(document.policy).toContain('\n')
     })
 
@@ -123,7 +141,9 @@ describe('node policy bridge helpers', () => {
     })
 
     it('reads set and availability results', () => {
-        expect(JSON.parse(parsePolicySetResult({ policy: { a: 1 } }).policy)).toEqual({ a: 1 })
+        expect(
+            JSON.parse(parsePolicySetResult({ policy: { revision: '2', a: 1 } }).policy)
+        ).toEqual({ revision: '2', a: 1 })
         expect(parseAvailabilityResult({ availability: 'paused' })).toEqual({
             availability: 'paused'
         })
@@ -153,15 +173,606 @@ describe('node push parsers', () => {
     })
 
     it('renders a policy change as the same pretty JSON text policy:get shows', () => {
-        const change = parsePolicyChange({ nodeId: 'n1', policy: { cpu: { maxPercent: 50 } } })
-        expect(change).toEqual({
+        const policy = { revision: '3', cpu: { maxPercent: 50 } }
+        expect(parsePolicyChange({ nodeId: 'n1', policy })).toEqual({
             nodeId: 'n1',
-            policy: JSON.stringify({ cpu: { maxPercent: 50 } }, null, 2)
+            policy: JSON.stringify(policy, null, 2),
+            revision: '3',
+            activation: null
         })
     })
 
     it('rejects a policy change without a node or an object policy', () => {
-        expect(parsePolicyChange({ policy: {} })).toBeNull()
+        expect(parsePolicyChange({ policy: { revision: '1' } })).toBeNull()
         expect(parsePolicyChange({ nodeId: 'n1', policy: 'x' })).toBeNull()
+    })
+})
+
+describe('policy revision and activation fields', () => {
+    it('reads the persisted revision and the activation report from policy:get', () => {
+        const document = parsePolicyDocument({
+            policy: { revision: '12' },
+            availability: 'available',
+            recoveryRequired: false,
+            activeRevision: '11',
+            activation: 'error',
+            activationError: 'proxy refused the policy'
+        })
+        expect(document.revision).toBe('12')
+        expect(document.recoveryRequired).toBe(false)
+        expect(document.activation).toEqual({
+            state: 'error',
+            activeRevision: '11',
+            error: 'proxy refused the policy'
+        })
+    })
+
+    it('reads an active policy with no error text', () => {
+        const result = parsePolicySetResult({
+            policy: { revision: '4' },
+            activeRevision: '4',
+            activation: 'active'
+        })
+        expect(result.revision).toBe('4')
+        expect(result.activation).toEqual({ state: 'active', activeRevision: '4' })
+    })
+
+    it('reads a pending policy that no proxy has acknowledged', () => {
+        const change = parsePolicyChange({
+            nodeId: 'n1',
+            policy: { revision: '9' },
+            activeRevision: '',
+            activation: 'pending'
+        })
+        expect(change?.activation).toEqual({ state: 'pending', activeRevision: '' })
+    })
+
+    it('reports recovery from policy:get', () => {
+        const document = parsePolicyDocument({
+            policy: { revision: '1' },
+            availability: 'paused',
+            recoveryRequired: true,
+            activeRevision: '',
+            activation: 'pending'
+        })
+        expect(document.recoveryRequired).toBe(true)
+    })
+
+    it('reads a paired node answer that carries no activation or recovery fields', () => {
+        const document = parsePolicyDocument({
+            policy: { revision: '30' },
+            availability: 'available'
+        })
+        expect(document.activation).toBeNull()
+        expect(document.recoveryRequired).toBe(false)
+    })
+
+    it.each([
+        ['a numeric revision', { policy: { revision: 7 } }],
+        ['a revision with a leading zero', { policy: { revision: '07' } }],
+        ['a signed revision', { policy: { revision: '-1' } }],
+        ['no revision', { policy: {} }],
+        ['an unknown activation state', { policy: { revision: '1' }, activation: 'on' }],
+        [
+            'a numeric active revision',
+            { policy: { revision: '1' }, activation: 'active', activeRevision: 1 }
+        ],
+        ['a missing active revision', { policy: { revision: '1' }, activation: 'active' }],
+        [
+            'a non-decimal active revision',
+            { policy: { revision: '1' }, activation: 'active', activeRevision: '1.5' }
+        ],
+        [
+            'a non-text activation error',
+            {
+                policy: { revision: '1' },
+                activation: 'error',
+                activeRevision: '',
+                activationError: 3
+            }
+        ]
+    ])('rejects a policy:set result with %s', (_name, result) => {
+        expect(() => parsePolicySetResult(result)).toThrow()
+    })
+
+    it.each([
+        ['an unknown activation state', { activation: 'on' }],
+        ['a non-decimal revision', { policy: { revision: 'abc' } }]
+    ])('drops a policy:changed push with %s', (_name, extra) => {
+        expect(
+            parsePolicyChange({
+                nodeId: 'n1',
+                policy: { revision: '1' },
+                activeRevision: '',
+                activation: 'pending',
+                ...extra
+            })
+        ).toBeNull()
+    })
+
+    it('rejects a policy:get result with a non-boolean recovery flag', () => {
+        expect(() =>
+            parsePolicyDocument({
+                policy: { revision: '1' },
+                availability: 'available',
+                recoveryRequired: 'yes'
+            })
+        ).toThrow(/recovery flag/)
+    })
+})
+
+describe('policy set params', () => {
+    it('sends the base revision beside the edited policy', () => {
+        expect(
+            policySetParams({ policy: '{"tier":"weak"}', expectedPersistedRevision: '41' })
+        ).toEqual({ policy: { tier: 'weak' }, expectedPersistedRevision: '41' })
+    })
+
+    it('names the target node when one is given', () => {
+        expect(
+            policySetParams({
+                nodeId: 'node-b',
+                policy: '{}',
+                expectedPersistedRevision: '0'
+            })
+        ).toEqual({ nodeId: 'node-b', policy: {}, expectedPersistedRevision: '0' })
+    })
+
+    it.each(['', '1.5', '-1', '1e3', '007', ' 1'])('refuses the base revision %j', revision => {
+        expect(() =>
+            policySetParams({ policy: '{}', expectedPersistedRevision: revision })
+        ).toThrow(/decimal string/)
+    })
+
+    it('keeps numbers beyond double precision exact as strings end to end', () => {
+        const text = JSON.stringify({
+            revision: '9223372036854775807',
+            budget: { monthly: '9007199254740993' }
+        })
+        expect(parsePolicyText(text)).toEqual({
+            revision: '9223372036854775807',
+            budget: { monthly: '9007199254740993' }
+        })
+        expect(
+            policySetParams({ policy: text, expectedPersistedRevision: '9223372036854775807' })
+        ).toEqual({
+            policy: { revision: '9223372036854775807', budget: { monthly: '9007199254740993' } },
+            expectedPersistedRevision: '9223372036854775807'
+        })
+        const document = parsePolicyDocument({
+            policy: { revision: '9223372036854775807', budget: { monthly: '9007199254740993' } },
+            availability: 'available',
+            activeRevision: '9223372036854775806',
+            activation: 'pending'
+        })
+        expect(document.revision).toBe('9223372036854775807')
+        expect(document.activation?.activeRevision).toBe('9223372036854775806')
+        expect(document.policy).toContain('"9007199254740993"')
+    })
+})
+
+describe('routing settings editor', () => {
+    const SELF = 'self'
+    const EDITOR = 'Node policy JSON'
+    const CONFLICT = 'The saved policy changed after you loaded it'
+
+    const policyText = (revision: string, tier = 'weak'): string =>
+        JSON.stringify({ revision, tier }, null, 2)
+    const activation = (
+        state: PolicyActivationStatus['state'],
+        activeRevision: string
+    ): PolicyActivationStatus => ({ state, activeRevision })
+    const snapshot = (
+        revision: string,
+        state: PolicyActivationStatus['state'] = 'active',
+        tier = 'weak'
+    ): NodePolicySnapshot => ({
+        policy: policyText(revision, tier),
+        revision,
+        activation: activation(state, state === 'active' ? revision : '')
+    })
+    const savedDocument = (
+        revision: string,
+        over: Partial<NodePolicyDocument> = {}
+    ): NodePolicyDocument => ({
+        ...snapshot(revision),
+        availability: 'available',
+        recoveryRequired: false,
+        ...over
+    })
+
+    const get = vi.fn<INodePolicyApi['get']>()
+    const set = vi.fn<INodePolicyApi['set']>()
+    const setAvailability = vi.fn<INodePolicyApi['setAvailability']>()
+    let emitPolicy: (change: NodePolicyChange) => void
+    let emitAvailability: (change: NodeAvailabilityChange) => void
+    let container: HTMLDivElement
+    let root: Root
+
+    beforeEach(async () => {
+        vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
+        // jsdom has no CSS.supports, which the auto-sizing text area asks.
+        vi.stubGlobal('CSS', { supports: () => true })
+        Object.defineProperty(window, 'pairApi', {
+            configurable: true,
+            value: {
+                nodePolicy: {
+                    get,
+                    set,
+                    setAvailability,
+                    onPolicyChanged: (callback: (change: NodePolicyChange) => void) => {
+                        emitPolicy = callback
+                        return () => undefined
+                    },
+                    onAvailabilityChanged: (callback: (change: NodeAvailabilityChange) => void) => {
+                        emitAvailability = callback
+                        return () => undefined
+                    }
+                }
+            }
+        })
+        useConnectionStore.setState({ connected: true, selfId: SELF })
+        container = document.createElement('div')
+        document.body.append(container)
+        root = createRoot(container)
+    })
+    afterEach(async () => {
+        await act(async () => root.unmount())
+        container.remove()
+        useConnectionStore.setState({ connected: false, selfId: null })
+        vi.unstubAllGlobals()
+    })
+
+    async function open(): Promise<void> {
+        await act(async () => root.render(createElement(RoutingSettings)))
+    }
+    function editor(): HTMLTextAreaElement {
+        const found = container.querySelector<HTMLTextAreaElement>(
+            `textarea[aria-label="${EDITOR}"]`
+        )
+        if (!found) throw new Error('the policy editor is not rendered')
+        return found
+    }
+    function button(label: string): HTMLButtonElement {
+        const found = Array.from(container.querySelectorAll('button')).find(
+            candidate => candidate.textContent?.trim() === label
+        )
+        if (!found) throw new Error(`no button labelled ${label}`)
+        return found
+    }
+    async function click(label: string): Promise<void> {
+        await act(async () => button(label).click())
+    }
+    async function type(text: string): Promise<void> {
+        const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set
+        if (!setter) throw new Error('textarea has no value setter')
+        await act(async () => {
+            setter.call(editor(), text)
+            editor().dispatchEvent(new Event('input', { bubbles: true }))
+        })
+    }
+    async function push(change: NodePolicyChange): Promise<void> {
+        await act(async () => emitPolicy(change))
+    }
+    const lastBase = (): string | undefined => set.mock.lastCall?.[0].expectedPersistedRevision
+
+    describe('activation status', () => {
+        it('shows a saved policy the proxy has not enforced as pending', async () => {
+            get.mockResolvedValue(savedDocument('5', { activation: activation('pending', '4') }))
+            await open()
+            expect(container.textContent).toContain('Saved, not yet enforced')
+            expect(container.textContent).not.toContain('Active')
+        })
+
+        it('shows only an acknowledged policy as active', async () => {
+            get.mockResolvedValue(savedDocument('5'))
+            await open()
+            expect(container.textContent).toContain('Active')
+            expect(container.textContent).not.toContain('not yet enforced')
+        })
+
+        it('shows why an activation failed', async () => {
+            get.mockResolvedValue(
+                savedDocument('5', {
+                    activation: { state: 'error', activeRevision: '4', error: 'proxy unreachable' }
+                })
+            )
+            await open()
+            expect(container.textContent).toContain('Saved, not enforced')
+            expect(container.textContent).toContain('proxy unreachable')
+        })
+
+        it('shows nothing about enforcement for a node that reports none', async () => {
+            get.mockResolvedValue(savedDocument('5', { activation: null }))
+            await open()
+            expect(container.textContent).not.toContain('Saved policy')
+        })
+
+        it('warns that defaults are in use after an unreadable file', async () => {
+            get.mockResolvedValue(savedDocument('1', { recoveryRequired: true }))
+            await open()
+            expect(container.textContent).toContain('saved policy file was unreadable')
+        })
+
+        it('follows a pending save to active when the proxy acknowledges it', async () => {
+            get.mockResolvedValue(savedDocument('5'))
+            set.mockResolvedValue(snapshot('6', 'pending'))
+            await open()
+            await type(policyText('5', 'strong'))
+            await click('Save')
+            expect(container.textContent).toContain('Saved, not yet enforced')
+            await push({ nodeId: SELF, ...snapshot('6', 'active', 'strong') })
+            expect(container.textContent).toContain('Active')
+            expect(container.textContent).not.toContain('not yet enforced')
+        })
+
+        it('keeps a newer pending status when the reply for an older revision arrives after it', async () => {
+            get.mockResolvedValue(savedDocument('5'))
+            let reply: (saved: NodePolicySnapshot) => void = () => undefined
+            set.mockReturnValue(new Promise(resolve => (reply = resolve)))
+            await open()
+            await type(policyText('5', 'strong'))
+            await click('Save')
+            await push({ nodeId: SELF, ...snapshot('7', 'pending') })
+            await act(async () => reply(snapshot('6', 'active')))
+            expect(container.textContent).toContain('Saved, not yet enforced')
+            expect(container.textContent).not.toContain('Active')
+        })
+
+        it('takes a newer reply over an older notification that arrived first', async () => {
+            get.mockResolvedValue(savedDocument('5'))
+            let reply: (saved: NodePolicySnapshot) => void = () => undefined
+            set.mockReturnValue(new Promise(resolve => (reply = resolve)))
+            await open()
+            await type(policyText('5', 'strong'))
+            await click('Save')
+            await push({ nodeId: SELF, ...snapshot('6', 'pending') })
+            await act(async () => reply(snapshot('7', 'active')))
+            expect(container.textContent).toContain('Active')
+            expect(container.textContent).not.toContain('not yet enforced')
+        })
+
+        it('keeps the newest revision status when an older notification arrives late', async () => {
+            get.mockResolvedValue(savedDocument('7'))
+            await open()
+            await push({ nodeId: SELF, ...snapshot('6', 'pending') })
+            expect(container.textContent).toContain('Active')
+            expect(container.textContent).not.toContain('not yet enforced')
+        })
+
+        it('updates the status while the user has unsaved edits', async () => {
+            get.mockResolvedValue(savedDocument('5'))
+            await open()
+            await type('{"draft": true}')
+            await push({ nodeId: SELF, ...snapshot('6', 'pending') })
+            expect(container.textContent).toContain('Saved, not yet enforced')
+            expect(editor().value).toBe('{"draft": true}')
+        })
+    })
+
+    describe('base revision', () => {
+        it('saves against the revision it loaded', async () => {
+            get.mockResolvedValue(savedDocument('9223372036854775807'))
+            set.mockResolvedValue(snapshot('9223372036854775808'))
+            await open()
+            await type(policyText('9223372036854775807', 'strong'))
+            await click('Save')
+            expect(lastBase()).toBe('9223372036854775807')
+        })
+
+        it('saves the next edit against the revision the last save produced', async () => {
+            get.mockResolvedValue(savedDocument('5'))
+            set.mockResolvedValue(snapshot('6'))
+            await open()
+            await type(policyText('5', 'strong'))
+            await click('Save')
+            await type(policyText('6', 'stronger'))
+            await click('Save')
+            expect(set.mock.calls.map(([request]) => request.expectedPersistedRevision)).toEqual([
+                '5',
+                '6'
+            ])
+        })
+
+        it('follows a newer notification while the editor is clean', async () => {
+            get.mockResolvedValue(savedDocument('5'))
+            set.mockResolvedValue(snapshot('7'))
+            await open()
+            await push({ nodeId: SELF, ...snapshot('6', 'active', 'other') })
+            expect(editor().value).toBe(policyText('6', 'other'))
+            await type(policyText('6', 'edited'))
+            await click('Save')
+            expect(lastBase()).toBe('6')
+        })
+
+        it('ignores a notification older than the base', async () => {
+            get.mockResolvedValue(savedDocument('9223372036854775807'))
+            set.mockResolvedValue(snapshot('9223372036854775808'))
+            await open()
+            await push({ nodeId: SELF, ...snapshot('9007199254740993', 'active', 'old') })
+            expect(editor().value).toBe(policyText('9223372036854775807'))
+            await type(policyText('9223372036854775807', 'edited'))
+            await click('Save')
+            expect(lastBase()).toBe('9223372036854775807')
+        })
+
+        it('ignores a notification for another node', async () => {
+            get.mockResolvedValue(savedDocument('5'))
+            await open()
+            await push({ nodeId: 'other', ...snapshot('6', 'active', 'theirs') })
+            expect(editor().value).toBe(policyText('5'))
+        })
+
+        it('keeps unsaved text when a newer notification arrives', async () => {
+            get.mockResolvedValue(savedDocument('5'))
+            set.mockResolvedValue(snapshot('7'))
+            await open()
+            await type('{"draft": true}')
+            await push({ nodeId: SELF, ...snapshot('6', 'active', 'other') })
+            expect(editor().value).toBe('{"draft": true}')
+            await click('Save')
+            expect(lastBase()).toBe('5')
+        })
+    })
+
+    describe('availability change', () => {
+        beforeEach(() => {
+            setAvailability.mockResolvedValue({ availability: 'paused' })
+        })
+
+        it('takes the new revision from the policy notification so the next save is not stale', async () => {
+            get.mockResolvedValue(savedDocument('5'))
+            set.mockResolvedValue(snapshot('7'))
+            await open()
+            setAvailability.mockImplementation(async () => {
+                emitPolicy({ nodeId: SELF, ...snapshot('6') })
+                return { availability: 'paused' }
+            })
+            await click('Pause')
+            await type(policyText('6', 'edited'))
+            await click('Save')
+            expect(lastBase()).toBe('6')
+            expect(container.textContent).not.toContain(CONFLICT)
+        })
+
+        it('reads the new revision back when only the availability result arrives', async () => {
+            get.mockResolvedValueOnce(savedDocument('5')).mockResolvedValue(savedDocument('6'))
+            set.mockResolvedValue(snapshot('7'))
+            await open()
+            await click('Pause')
+            await type(policyText('6', 'edited'))
+            await click('Save')
+            expect(lastBase()).toBe('6')
+            expect(container.textContent).not.toContain(CONFLICT)
+        })
+
+        it('does not move the base back when the read-back is older than a notification', async () => {
+            get.mockResolvedValueOnce(savedDocument('5')).mockResolvedValue(savedDocument('5'))
+            set.mockResolvedValue(snapshot('7'))
+            await open()
+            setAvailability.mockImplementation(async () => {
+                emitPolicy({ nodeId: SELF, ...snapshot('6') })
+                return { availability: 'paused' }
+            })
+            await click('Pause')
+            await type(policyText('6', 'edited'))
+            await click('Save')
+            expect(lastBase()).toBe('6')
+        })
+
+        it('leaves a draft on its own base so the save goes through conflict review', async () => {
+            get.mockResolvedValueOnce(savedDocument('5')).mockResolvedValue(savedDocument('6'))
+            set.mockRejectedValue(new Error('policy revision is stale'))
+            await open()
+            await type('{"draft": true}')
+            await click('Pause')
+            await click('Save')
+            expect(lastBase()).toBe('5')
+            expect(container.textContent).toContain(CONFLICT)
+            expect(editor().value).toBe('{"draft": true}')
+        })
+
+        it('shows the availability the broker pushes', async () => {
+            get.mockResolvedValue(savedDocument('5'))
+            await open()
+            await act(async () => emitAvailability({ nodeId: SELF, availability: 'paused' }))
+            expect(container.textContent).toContain('paused')
+        })
+    })
+
+    describe('stale draft', () => {
+        const draft = '{"draft": true}'
+
+        async function staleSave(): Promise<void> {
+            get.mockResolvedValueOnce(savedDocument('5')).mockResolvedValue(
+                savedDocument('8', { activation: activation('pending', '5') })
+            )
+            set.mockRejectedValue(new Error('policy revision is stale'))
+            await open()
+            await type(draft)
+            await click('Save')
+        }
+
+        it('reports a newer saved revision and keeps the draft', async () => {
+            await staleSave()
+            expect(container.textContent).toContain(CONFLICT)
+            expect(editor().value).toBe(draft)
+        })
+
+        it('still shows the service message when the saved revision moved', async () => {
+            await staleSave()
+            expect(container.textContent).toContain('policy revision is stale')
+        })
+
+        it('does not resubmit the draft on its own', async () => {
+            await staleSave()
+            expect(set).toHaveBeenCalledTimes(1)
+            expect(button('Save').disabled).toBe(true)
+        })
+
+        it('shows the latest saved policy beside the draft on review', async () => {
+            await staleSave()
+            await click('Review latest saved policy')
+            const latest = container.querySelector<HTMLTextAreaElement>(
+                'textarea[aria-label="Latest saved node policy JSON"]'
+            )
+            expect(latest?.value).toBe(policyText('8'))
+            expect(latest?.readOnly).toBe(true)
+            expect(editor().value).toBe(draft)
+        })
+
+        it('replaces the draft with the latest saved policy on discard', async () => {
+            await staleSave()
+            await click('Discard draft and reload')
+            expect(editor().value).toBe(policyText('8'))
+            expect(container.textContent).not.toContain(CONFLICT)
+        })
+
+        it('offers no way to save the stale draft against the newer revision', async () => {
+            await staleSave()
+            expect(() => button('Keep my draft')).toThrow()
+            await click('Review latest saved policy')
+            expect(button('Save').disabled).toBe(true)
+            await type('{"tierPolicy": {"remoteAllowed": true}}')
+            expect(button('Save').disabled).toBe(true)
+            expect(set).toHaveBeenCalledTimes(1)
+        })
+
+        it('bases a new draft on the latest revision only after a reload', async () => {
+            await staleSave()
+            set.mockResolvedValue(snapshot('9', 'pending', 'edited'))
+            await click('Discard draft and reload')
+            await type(policyText('8', 'edited'))
+            await click('Save')
+            expect(set).toHaveBeenCalledTimes(2)
+            expect(lastBase()).toBe('8')
+        })
+
+        it('shows the save error when the saved revision is the one it was based on', async () => {
+            get.mockResolvedValue(savedDocument('5'))
+            set.mockRejectedValue(new Error('tiers must be named'))
+            await open()
+            await type(draft)
+            await click('Save')
+            expect(container.textContent).toContain('tiers must be named')
+            expect(container.textContent).not.toContain(CONFLICT)
+            expect(button('Save').disabled).toBe(false)
+        })
+
+        it('says the outcome is unknown when the saved revision cannot be read back', async () => {
+            get.mockResolvedValueOnce(savedDocument('5')).mockRejectedValue(
+                new Error('node offline')
+            )
+            set.mockRejectedValue(new Error('tiers must be named'))
+            await open()
+            await type(draft)
+            await click('Save')
+            expect(container.textContent).toContain('tiers must be named')
+            expect(container.textContent).toContain(
+                'Could not confirm whether the save took effect'
+            )
+            expect(container.textContent).not.toContain('was not applied')
+            expect(editor().value).toBe(draft)
+        })
     })
 })

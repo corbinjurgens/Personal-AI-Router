@@ -17,6 +17,8 @@ import type {
     NodeAvailabilityChange,
     NodePolicyChange,
     NodePolicyDocument,
+    NodePolicySnapshot,
+    NodePolicyWrite,
     RequestedAvailability,
     WorkloadCancelRequest
 } from '@/shared/types/node-policy'
@@ -103,8 +105,8 @@ export interface IWorkloadsApi {
 export interface INodePolicyApi {
     /** A node's policy as JSON text plus its live availability. Omit `nodeId` for this PC. */
     get(nodeId?: string): Promise<NodePolicyDocument>
-    /** Replace a node's policy. Rejects with the service's validation message. */
-    set(policy: string, nodeId?: string): Promise<{ policy: string }>
+    /** Replace a node's policy. Rejects with the service's message, including a stale revision. */
+    set(request: NodePolicyWrite): Promise<NodePolicySnapshot>
     /** Pause or resume a node; pausing resolves once the node has drained. */
     setAvailability(
         state: RequestedAvailability,
@@ -204,7 +206,7 @@ export function createPairApi(transport: ServiceTransport): IPairApi {
         },
         nodePolicy: {
             get: nodeId => transport.invoke('policy:get', { nodeId }),
-            set: (policy, nodeId) => transport.invoke('policy:set', { nodeId, policy }),
+            set: request => transport.invoke('policy:set', request),
             setAvailability: (state, nodeId) =>
                 transport.invoke('node:set-availability', { nodeId, state }),
             onAvailabilityChanged: cb => transport.subscribePush('node:availability-changed', cb),
