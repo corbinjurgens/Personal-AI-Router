@@ -521,7 +521,8 @@ class ModularBridgeState {
                 // Invite eligibility: a node already in a cluster cannot be invited
                 // into another; `trusted` marks an already-pinned peer.
                 trusted: node.trusted,
-                clustered: node.clustered
+                clustered: node.clustered,
+                ...(node.policy ? { policy: node.policy } : {})
             }
         })
     }
@@ -1987,6 +1988,8 @@ class ModularBridgeState {
             gpus: [],
             cpu: null,
             memory: null,
+            // The advertisement came with the broker's record; none is left.
+            policy: undefined,
             lastSeen: Date.now()
         }
         this.nodes.set(next.id, next)
@@ -2225,6 +2228,7 @@ class ModularBridgeState {
             models: existing.models,
             modelsByEngine: existing.modelsByEngine,
             loadedByEngine: existing.loadedByEngine,
+            policy: existing.policy,
             engines: setEngine(existing.engines, engine, next.engines[engine]),
             lastSeen: Math.max(existing.lastSeen, next.lastSeen)
         }

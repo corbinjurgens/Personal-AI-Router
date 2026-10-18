@@ -24,6 +24,7 @@ import { buildRadialChartMetrics, getMetricReading } from '@/ui/utils/build-radi
 import { hasInferenceReadyGpu, isGpuInferenceReady } from '@/ui/utils/gpu-inference'
 import NodeEnginesInline from './NodeEnginesInline'
 import NodeEngineSettings from './NodeEngineSettings'
+import NodeDeclaredRoles from './NodeDeclaredRoles'
 
 const MAX_CHART_SIZE = 60
 
@@ -300,6 +301,9 @@ function NodeCardDetails({ node }: NodeCardDetailsProps) {
                         >
                             <NodeEnginesInline nodeId={node.id} />
                         </Flex>
+                        <div className="ml-1 -mt-1 empty:hidden">
+                            <NodeDeclaredRoles nodeId={node.id} />
+                        </div>
                         {isNarrow && (
                             <Flex align="center" gap="2" className="ml-1 -mt-0.5">
                                 {expandButtons('top')}

@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+import type { NodePolicyAdvertisement } from '@/shared/types/node-roles'
+
 /**
  * Cluster-layer data types shared by service transports and the UI.
  *
@@ -36,6 +38,13 @@ export interface AvailableNode {
      * cannot be invited into another, so invite UI treats it as non-invitable.
      */
     clustered: boolean
+    /**
+     * The node's own policy advertisement (declared roles and pause origin),
+     * from the same pinned inventory fetch as its models. Absent until the node
+     * has published one, and from a node that predates roles; either way the
+     * node declares nothing.
+     */
+    policy?: NodePolicyAdvertisement
 }
 
 /**
