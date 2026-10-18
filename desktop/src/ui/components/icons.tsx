@@ -11,6 +11,7 @@ import {
     ChevronRight,
     CirclePlus,
     Copy,
+    Cpu,
     Download as LucideDownload,
     Ellipsis,
     ExternalLink,
@@ -51,6 +52,7 @@ export const Close = appIcon(X)
 export const ContentCopy = appIcon(Copy)
 export const Square = appIcon(LucideSquare)
 export const Download = appIcon(LucideDownload)
+export const GenericEngine = appIcon(Cpu)
 export const ExpandMore = appIcon(ChevronDown)
 export const FilterList = appIcon(Filter)
 export const KeyboardArrowRight = appIcon(ChevronRight)

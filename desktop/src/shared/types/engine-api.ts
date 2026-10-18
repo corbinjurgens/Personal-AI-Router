@@ -8,7 +8,12 @@
  * All state flows via push events, not command responses.
  */
 import type { EngineStatusData, EngineType } from '@/shared/types/engines'
-import type { EngineModels, EngineProgress, EngineUpdateAvailable } from '@/shared/types/engines'
+import type {
+    EngineDescriptor,
+    EngineModels,
+    EngineProgress,
+    EngineUpdateAvailable
+} from '@/shared/types/engines'
 
 /**
  * One normalized model row returned by an engine-owned hub source (a committed
@@ -78,6 +83,8 @@ export interface EngineCommandPayload {
 
 /** Canonical engine state snapshot sent on connect/reconnect. */
 export interface EngineStateSnapshot {
+    /** This node's engine-manager descriptors; peers' engines are looked up here too. */
+    descriptors: EngineDescriptor[]
     statuses: EngineStatusData[]
     models: EngineModels[]
     activeProgress: EngineProgress[]

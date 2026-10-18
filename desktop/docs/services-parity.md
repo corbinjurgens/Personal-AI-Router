@@ -251,13 +251,20 @@ from node-scanner enrichment and is attributed per engine.
 Personal AI Router uses:
 
 - `list_models`;
-- `pull_model`;
-- Ollama `run_model`, `unload_model` (`keep_alive: 0`), and `delete_model`;
-- LM Studio `load_model`, `unload_model`, and `delete_model` (`remove_path`);
-- llama.cpp `load_model`, `unload_model`, and `delete_model` (`DELETE /models`
-  with URL-encoded query params).
+- `pull_model`, whose body the bridge still spells by engine family (Ollama's
+  `name`, every other engine's `model`);
+- the typed `engine:load-model`, `engine:unload-model` and
+  `engine:delete-model` operations, which engine-manager maps onto each
+  manifest's `operations` bindings: Ollama `run_model`, `unload_model`
+  (`keep_alive: 0`) and `delete_model`; LM Studio `load_model`, `unload_model`
+  and `delete_model` (`remove_path`); llama.cpp `load_model`, `unload_model`
+  and `delete_model` (`DELETE /models` with URL-encoded query params).
 
-All three engines expose Load, Eject, and Delete in the model manager.
+All three engines expose Load, Eject, and Delete in the model manager. Any
+other engine engine-manager registers, such as a locally configured fork, is
+listed once installed, with its descriptor's label and only the operations its
+`engine:descriptors` entry declares. An engine without a descriptor here (a
+paired node's variant) shows status and start/stop only.
 User-configurable keep-alive / expiry controls remain unsupported; managed
 llama.cpp uses its fixed five-minute idle sleep.
 

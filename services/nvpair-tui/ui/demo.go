@@ -206,7 +206,8 @@ func (d *demoRunner) start(proxy *proxyTracker) (tea.Cmd, error) {
 		if !e.ready || e.port == 0 {
 			continue
 		}
-		probes = append(probes, probe{backend: dispatcherBackend(e.engine), port: e.port})
+		// The dispatcher takes engine-manager's engine IDs as its backend names.
+		probes = append(probes, probe{backend: e.engine, port: e.port})
 	}
 	if len(probes) == 0 {
 		return nil, fmt.Errorf("no proxy is listening yet - wait for the endpoints above to come up")
@@ -226,16 +227,6 @@ func (d *demoRunner) start(proxy *proxyTracker) (tea.Cmd, error) {
 		}
 		return demoTargetsMsg{gen: gen, targets: targets}
 	}, nil
-}
-
-// dispatcherBackend maps an engine-manager engine name to the dispatcher's own
-// spelling of it. They agree for Ollama and differ for LM Studio, and the
-// dispatcher rejects a name it does not know.
-func dispatcherBackend(engine string) string {
-	if strings.EqualFold(engine, "lmstudio") {
-		return "lmstudio"
-	}
-	return engine
 }
 
 // probeModels asks one engine for its inventory. Any failure means that engine

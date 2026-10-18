@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import {
+    EngineDescriptorOperations,
     EngineManagerNames,
     EngineOperationTypes,
     EngineProcessStatuses,
@@ -12,23 +13,67 @@ import {
 } from '@/shared/constants/engines'
 
 /**
- * Canonical engine identifier — a closed literal union of every engine PAIR
- * ships. This codebase has no concept of "custom" or "user-registered"
- * engines: every engine is built in to the binary and listed in the
- * `EngineTypes` const tuple. Always prefer this type over `string` for
- * engine identifiers so the compiler flags typos like `'olllama'` or stale
- * literal values. Strings arriving from service bridge payloads or config JSON
- * must be narrowed via `isEngineType()` at the boundary.
+ * An engine PAIR ships: a closed literal union of the `EngineTypes` tuple.
+ * Built-in engines have a proxy facade, curated presentation and an install
+ * recipe. Prefer it wherever behavior is specific to those engines, and narrow
+ * with `isBuiltinEngineType()`.
  */
-export type EngineType = (typeof EngineTypes)[number]
+export type BuiltinEngineType = (typeof EngineTypes)[number]
+
+declare const descriptorEngineBrand: unique symbol
 
 /**
- * An engine identifier in `nvpair-engine-manager`'s spelling, as it appears in
- * JSON-RPC params and notification payloads. Convert at the boundary with
- * `engineManagerName()` / `engineTypeFromManagerName()`; keep `EngineType`
- * everywhere inside PAIR.
+ * Any other engine a node's `nvpair-engine-manager` registers, such as a
+ * locally configured llama.cpp fork. It is spelled exactly as engine-manager
+ * spells it, and what PAIR may know about it comes from its descriptor
+ * (`EngineDescriptor`). The brand means a value can only come from
+ * `isDescriptorEngineType()` / `engineTypeFromManagerName()`, which check the
+ * engine-manager ID syntax and refuse the built-in spellings, so an arbitrary
+ * string never becomes an engine identity by accident.
  */
-export type EngineManagerName = (typeof EngineManagerNames)[EngineType]
+export type DescriptorEngineType = string & { readonly [descriptorEngineBrand]: true }
+
+/**
+ * Canonical engine identifier inside PAIR: a built-in engine or a
+ * descriptor-known one. Strings arriving from service bridge payloads or
+ * persisted JSON must be narrowed via `isEngineType()` /
+ * `engineTypeFromManagerName()` at the boundary.
+ */
+export type EngineType = BuiltinEngineType | DescriptorEngineType
+
+/**
+ * A built-in engine identifier in `nvpair-engine-manager`'s spelling. Convert
+ * at the boundary with `engineManagerName()` / `engineTypeFromManagerName()`;
+ * keep `EngineType` everywhere inside PAIR. Descriptor engines are spelled the
+ * same way on both sides.
+ */
+export type EngineManagerName = (typeof EngineManagerNames)[BuiltinEngineType]
+
+/** A semantic model operation an engine descriptor can declare. */
+export type EngineDescriptorOperation = (typeof EngineDescriptorOperations)[number]
+
+/**
+ * The desktop projection of one `engine:descriptors` entry
+ * (`nvpair-shared/engines.Descriptor`), validated at the bridge. It carries
+ * identity, presentation and capabilities only; nothing in it can name a
+ * binary, command, path or credential.
+ */
+export interface EngineDescriptor {
+    engineType: EngineType
+    /** Engine-manager family name (a llama.cpp fork has family `llamacpp`). */
+    family: string
+    label: string
+    /** Whether the publishing host is one of the manifest's platforms. */
+    available: boolean
+    protocols: string[]
+    modelNaming: string
+    /** Coded model-store adapter, in engine-manager spelling; empty when none. */
+    modelStore: string
+    /** Coded download catalogue, in engine-manager spelling; empty when none. */
+    catalog: string
+    /** Supported model operations. An absent key is an unsupported operation. */
+    operations: Partial<Record<EngineDescriptorOperation, { responseTimeoutS: number }>>
+}
 
 export type EngineSource = (typeof EngineSources)[number]
 

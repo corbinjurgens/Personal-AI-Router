@@ -9,7 +9,8 @@ import type { PlatformDisplayName } from '@/shared/types/platform'
 import { InstallButton } from './InstallButton'
 import { DismissibleTooltip } from '@/ui/components/DismissibleTooltip/DismissibleTooltip'
 import { gatewayEndpointDisplayUrl } from '@/ui/utils/gateway-inference-paths'
-import { EngineCapabilities } from '@/ui/constants/engine-capabilities'
+import { engineCapabilities } from '@/ui/constants/engine-capabilities'
+import { useEngineDescriptor } from '@/ui/stores/engine-status.store'
 import { statusLabel } from '@/ui/utils/status'
 
 /** Install/uninstall lines include asset names + percentages — allow more room than generic status. */
@@ -43,12 +44,12 @@ export function BackendHeader({
     targetOs: PlatformDisplayName
     onInstall: () => void
 }) {
-    const caps = EngineCapabilities[backend.type]
+    const caps = engineCapabilities(backend.type, useEngineDescriptor(backend.type))
     // The proxy URL / web UI live on this machine's 127.0.0.1 — meaningless for a
     // remote node's engine, so only offer them on the local node.
     const showWebUI =
         isLocalNode &&
-        caps?.hasProxyWebUI &&
+        caps.hasProxyWebUI &&
         backend.processStatus === 'running' &&
         backend.proxyPort
 

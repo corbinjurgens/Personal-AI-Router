@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-import type { EngineType } from '@/shared/types/engines'
+import type { BuiltinEngineType } from '@/shared/types/engines'
 import type { ModelItem } from '@/ui/types/engine-info'
 import type { ModelEntry } from '@/ui/types/model-hub'
 
@@ -40,20 +40,23 @@ const matchHfPullKeyOrName: DownloadedMatcher = (hubEntry, d) => {
 
 const matchExactName: DownloadedMatcher = (hubEntry, downloaded) => downloaded.name === hubEntry.id
 
-const MATCHERS: Partial<Record<EngineType, DownloadedMatcher>> = {
+const MATCHERS: Record<BuiltinEngineType, DownloadedMatcher> = {
     ollama: matchOllama,
     'lm-studio': matchHfPullKeyOrName,
     'llama-cpp': matchExactName
 }
 
+/**
+ * `adapterType` is the built-in engine whose naming the engine shares (see
+ * `engineAdapterType`); an engine of an unknown family matches nothing.
+ */
 export function isHubEntryDownloaded(
-    engine: EngineType,
+    adapterType: BuiltinEngineType | null,
     hubEntry: ModelEntry,
     downloaded: readonly ModelItem[]
 ): boolean {
-    if (downloaded.length === 0) return false
-    const matcher = MATCHERS[engine]
-    if (!matcher) return false
+    if (downloaded.length === 0 || !adapterType) return false
+    const matcher = MATCHERS[adapterType]
     for (const d of downloaded) {
         if (!d.downloaded) continue
         if (matcher(hubEntry, d)) return true

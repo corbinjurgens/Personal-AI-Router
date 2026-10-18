@@ -28,7 +28,7 @@
  * state.
  */
 import { create } from 'zustand'
-import { EngineCapabilities } from '@/ui/constants/engine-capabilities'
+import { engineCapabilities } from '@/ui/constants/engine-capabilities'
 import type { EngineCommandPayload, EngineCommandType } from '@/shared/types/engine-api'
 import type { EngineProcessStatus, EngineType } from '@/shared/types/engines'
 import type { ServiceStatus } from '@/shared/types/ipc-channels'
@@ -37,8 +37,13 @@ import { useEngineStatusStore } from '@/ui/stores/engine-status.store'
 
 /** Re-enable a control after this long if no superseding push ever arrives. */
 const PENDING_TIMEOUT_MS = 60_000
-/** Keep Ollama Load locked one safety-net interval beyond the longest (11m) backend path. */
-const OLLAMA_LOAD_PENDING_TIMEOUT_MS = 12 * 60_000
+/**
+ * Margin past a declared load budget. engine-manager may take the descriptor's
+ * `responseTimeoutS` to begin answering a load and the bridge one more default
+ * interval to report it; the net stays one interval beyond that, which for
+ * Ollama's 10-minute budget is 12 minutes.
+ */
+const LOAD_BUDGET_MARGIN_MS = 2 * PENDING_TIMEOUT_MS
 /**
  * Safety net for a delete on an engine whose backend restarts to pick the
  * deletion up (`EngineCaps.restartsOnModelDelete` / the manifest's
@@ -103,14 +108,20 @@ interface PendingAction {
 
 /**
  * How long the safety net waits for a command before re-enabling its control.
- * Slow Ollama loads and restart-backed deletes outlast the default net; every
- * other command keeps 60 seconds.
+ * A load whose descriptor declares a longer response budget (Ollama's) and a
+ * restart-backed delete outlast the default net; every other command keeps 60
+ * seconds.
  */
 function timeoutFor(command: EngineCommandType, engineType: EngineType): number {
-    if (command === 'loadModel' && engineType === 'ollama') {
-        return OLLAMA_LOAD_PENDING_TIMEOUT_MS
+    const descriptor = useEngineStatusStore.getState().descriptors.get(engineType)
+    const loadBudgetS = descriptor?.operations.load?.responseTimeoutS ?? 0
+    if (command === 'loadModel' && loadBudgetS > 0) {
+        return loadBudgetS * 1000 + LOAD_BUDGET_MARGIN_MS
     }
-    if (command === 'deleteModel' && EngineCapabilities[engineType]?.restartsOnModelDelete) {
+    if (
+        command === 'deleteModel' &&
+        engineCapabilities(engineType, descriptor).restartsOnModelDelete
+    ) {
         return RESTART_DELETE_TIMEOUT_MS
     }
     return PENDING_TIMEOUT_MS

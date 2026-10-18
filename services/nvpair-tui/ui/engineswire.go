@@ -71,73 +71,91 @@ var remoteEngineMethods = map[string]string{
 	"engine:stop":    "engine:remote-stop",
 }
 
-// modelAction is one model operation: the remote method that performs it on a
-// peer, and the operator-facing verb. The local engine:action name and params
-// are per engine — see modelActionWire.
+// modelAction is one model operation: the engine-manager method that performs
+// it on this machine, the remote method that performs it on a peer, and the
+// operator-facing verb. Both methods take only an engine and a model, so the
+// engine's own action names and body spelling stay with engine-manager, which
+// maps them through the manifest's operation bindings.
 type modelAction struct {
 	op     string
+	local  string
 	remote string
 	what   string
 }
 
 var modelActions = map[string]modelAction{
-	"load": {op: "load", remote: "engine:remote-load-model", what: "load"},
+	"load": {op: engines.OperationLoad, local: "engine:load-model", remote: "engine:remote-load-model", what: "load"},
 	// "eject" to match the key's own label and the docs; the backend's method
 	// keeps its own name. A key labelled eject that reports "unload requested"
 	// leaves the operator wondering whether it did something else.
-	"unload": {op: "unload", remote: "engine:remote-unload-model", what: "eject"},
-	"delete": {op: "delete", remote: "engine:remote-delete-model", what: "delete"},
-	"pull":   {op: "pull", remote: "engine:remote-pull-model", what: "download"},
+	"unload": {op: engines.OperationUnload, local: "engine:unload-model", remote: "engine:remote-unload-model", what: "eject"},
+	"delete": {op: engines.OperationDelete, local: "engine:delete-model", remote: "engine:remote-delete-model", what: "delete"},
+	// A local pull has no typed method yet: it is engine:action pull_model,
+	// spelled by pullParams.
+	"pull": {op: engines.OperationPull, remote: "engine:remote-pull-model", what: "download"},
 }
 
-// modelWire is how one engine spells each model operation: the engine:action
-// name, and the params that action takes for a given model.
-type modelWire map[string]func(model string) (action string, params map[string]any)
+// engineDescriptors is this machine's engine-manager descriptor set
+// (engine:descriptors), keyed by engine ID. It says what each engine is and
+// which model operations it supports. A peer's engine is looked up here too;
+// one that is absent gets no new action, and its own engine-manager decides
+// the operations the interface already offered.
+type engineDescriptors map[string]engines.Descriptor
 
-// modelWires is every engine's spelling of the model operations, keyed by
-// engine id.
-//
-// The engines do not share a contract here, so one spelling for both is wrong
-// in ways that fail quietly. This mirrors nvpair-engine-manager's own
-// modelActionWire, which is authoritative for the remote path. An engine is
-// supported by adding its entry; one without an entry is refused rather than
-// sent another engine's vocabulary, and TestEveryEngineHasAModelWire fails
-// until the entry exists.
-var modelWires = map[string]modelWire{
-	engines.NameOllama: {
-		// Ollama has no load action at all. Warming a model is run_model with
-		// streaming off; sending load_model just errors.
-		"load": func(model string) (string, map[string]any) {
-			return "run_model", map[string]any{"model": model, "stream": false}
-		},
-		// Ollama only frees a model when keep_alive is 0. Without it the
-		// request succeeds and the model stays resident.
-		"unload": func(model string) (string, map[string]any) {
-			return "unload_model", map[string]any{"model": model, "keep_alive": 0}
-		},
-		"delete": nameAndModel("delete_model"),
-		"pull":   nameAndModel("pull_model"),
-	},
-	engines.NameLMStudio: {
-		"load":   modelOnly("load_model"),
-		"unload": modelOnly("unload_model"),
-		"delete": nameAndModel("delete_model"),
-		"pull":   nameAndModel("pull_model"),
-	},
-	// llama.cpp's router takes the model under "model" alone, delete included.
-	// Its delete puts the params in the query string, where a second key would
-	// be sent to the engine as a parameter it does not take.
-	engines.NameLlamaCPP: {
-		"load":   modelOnly("load_model"),
-		"unload": modelOnly("unload_model"),
-		"delete": modelOnly("delete_model"),
-		"pull":   modelOnly("pull_model"),
-	},
+// descriptorsMsg carries a fresh descriptor read.
+type descriptorsMsg struct {
+	descriptors engineDescriptors
 }
 
-// downloadExamples show what a download name looks like for each engine. The
-// engines spell them very differently: an Ollama tag, a Hugging Face repo, and
-// a repo with its quantization after a colon.
+// descriptorsCmd reads the local engine-manager's descriptors. A descriptor
+// that fails validation is dropped rather than guessed at, and a failed read
+// leaves the set empty; either way the engine keeps today's behavior.
+func descriptorsCmd(client *rpc.Client) tea.Cmd {
+	const method = "engine:descriptors"
+	return call(client, method, nil, func(msg *rpc.Message, err error) tea.Msg {
+		out := engineDescriptors{}
+		if err != nil {
+			return descriptorsMsg{descriptors: out}
+		}
+		var r struct {
+			Engines []engines.Descriptor `json:"engines"`
+		}
+		decodeOrLog(method, msg.Result, &r)
+		for _, d := range r.Engines {
+			if d.Validate() == nil {
+				out[d.Engine] = d
+			}
+		}
+		return descriptorsMsg{descriptors: out}
+	})
+}
+
+// family is the engine's family: its descriptor's, or the engine's own ID when
+// there is no descriptor (a built-in engine's ID is its family).
+func (ds engineDescriptors) family(engine string) string {
+	if d, ok := ds[engine]; ok {
+		return d.Family
+	}
+	return engine
+}
+
+// unsupported is an error when the engine's descriptor does not declare the
+// operation, and nil when it does or when this machine holds no descriptor for
+// the engine.
+func (ds engineDescriptors) unsupported(engine string, act modelAction) error {
+	d, ok := ds[engine]
+	if !ok {
+		return nil
+	}
+	if _, ok := d.Operations[act.op]; ok {
+		return nil
+	}
+	return fmt.Errorf("%s does not support %s", d.Label, act.what)
+}
+
+// downloadExamples show what a download name looks like for each engine family.
+// The families spell them very differently: an Ollama tag, a Hugging Face repo,
+// and a repo with its quantization after a colon.
 var downloadExamples = map[string]string{
 	engines.NameOllama:   "llama3.2",
 	engines.NameLMStudio: "lmstudio-community/Qwen3-8B-GGUF",
@@ -145,43 +163,38 @@ var downloadExamples = map[string]string{
 }
 
 // downloadPrompt is the placeholder for the download-by-name field, with an
-// example in the engine's own spelling where there is one.
-func downloadPrompt(engine, label string) string {
-	if example, ok := downloadExamples[engine]; ok {
+// example in the engine family's own spelling where there is one.
+func downloadPrompt(family, label string) string {
+	if example, ok := downloadExamples[family]; ok {
 		return fmt.Sprintf("model name for %s (e.g. %s)", label, example)
 	}
 	return "model name for " + label
 }
 
-// modelOnly is an action that takes the model under "model".
-func modelOnly(action string) func(string) (string, map[string]any) {
-	return func(model string) (string, map[string]any) {
-		return action, map[string]any{"model": model}
+// pullParams spells a local pull_model for an engine family.
+//
+// Ollama's pull takes "name" and LM Studio's takes "model", so both are sent
+// there. Every other family gets "model" alone, engine-manager's conventional
+// parameter: llama.cpp's pull would pass a second key to the engine as a
+// parameter it does not take.
+func pullParams(family, model string) map[string]any {
+	switch family {
+	case engines.NameOllama, engines.NameLMStudio:
+		return map[string]any{"name": model, "model": model}
+	default:
+		return map[string]any{"model": model}
 	}
 }
 
-// nameAndModel is an action that takes the model under both keys. The engines
-// name it differently — Ollama's delete and pull take "name", LM Studio's take
-// "model" — so both are sent where a name is all the action needs.
-func nameAndModel(action string) func(string) (string, map[string]any) {
-	return func(model string) (string, map[string]any) {
-		return action, map[string]any{"name": model, "model": model}
+// localModelRequest is the method and params of a model operation on this
+// machine.
+func localModelRequest(engine, family string, act modelAction, model string) (string, map[string]any) {
+	if act.local == "" {
+		return "engine:action", map[string]any{
+			"engine": engine, "action": "pull_model", "params": pullParams(family, model),
+		}
 	}
-}
-
-// modelActionWire builds the local engine:action envelope for a model
-// operation on a specific engine.
-func modelActionWire(engine, op, model string) (map[string]any, error) {
-	wire, ok := modelWires[engine]
-	if !ok {
-		return nil, fmt.Errorf("model operations are not supported for engine %q", engine)
-	}
-	build, ok := wire[op]
-	if !ok {
-		return nil, fmt.Errorf("unknown model operation %q", op)
-	}
-	action, params := build(model)
-	return map[string]any{"engine": engine, "action": action, "params": params}, nil
+	return act.local, map[string]any{"engine": engine, "model": model}
 }
 
 // engineOpMsg is the outcome of a lifecycle or model command.
@@ -225,19 +238,14 @@ func engineCmd(client *rpc.Client, node, engine, method, op, what string) tea.Cm
 // this replaced, which left the operator with no acknowledgement that the
 // download had started at all, and nothing to distinguish it from a keystroke
 // that missed.
-func modelCmd(client *rpc.Client, node, engine string, act modelAction, model string) tea.Cmd {
+func modelCmd(client *rpc.Client, node, engine, family string, act modelAction, model string) tea.Cmd {
 	what := act.what + " " + model
-	// The remote methods take the operation in the method name, so the
-	// engine's own action vocabulary stays on the target's side.
+	// The methods take the operation in the method name, so the engine's own
+	// action vocabulary stays with the engine-manager that runs it.
 	method := act.remote
 	params := map[string]any{"node": node, "engine": engine, "model": model}
 	if node == "" {
-		method = "engine:action"
-		local, err := modelActionWire(engine, act.op, model)
-		if err != nil {
-			return func() tea.Msg { return engineOpMsg{what: what, engine: engine, err: err} }
-		}
-		params = local
+		method, params = localModelRequest(engine, family, act, model)
 	}
 	return call(client, method, params, func(_ *rpc.Message, err error) tea.Msg {
 		return classifyOpResult(what, engine, act.op, err)

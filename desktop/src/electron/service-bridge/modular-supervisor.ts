@@ -33,6 +33,7 @@ import {
 } from './proxy-engines'
 import { emitBridgePush } from './broadcaster'
 import { parseEngineSettings } from './engine-settings'
+import { parseEngineDescriptors } from './engine-descriptors'
 import { resolvePullCatchError } from './pull-error-handling'
 import { isServiceLogLevelEnabled, serviceLogLevel } from './service-log-level'
 import { engineManagerName } from '@/shared/utils/engines'
@@ -232,17 +233,16 @@ function normalizeLogLevel(value: string | undefined): ModularLogLevel {
 }
 
 /**
- * Shape the `pull_model` action params per engine. Ollama's `pull_model` body is
- * sent verbatim to `/api/pull` (reads `name`); every other manifest consumes
- * `model` either as an HTTP body field or a CLI template. Sending the wrong key
- * leaves the placeholder unresolved or fails body-schema validation.
+ * Shape the `pull_model` action params for an engine family. Ollama's
+ * `pull_model` body is sent verbatim to `/api/pull` (reads `name`); every other
+ * manifest consumes `model` either as an HTTP body field or a CLI template.
+ * Sending the wrong key leaves the placeholder unresolved or fails body-schema
+ * validation. Pull is the one model operation without a typed engine-manager
+ * method, so its body is still spelled here; load, unload and delete use
+ * `engine:load-model` / `engine:unload-model` / `engine:delete-model`.
  */
-export function pullModelParams(engineManagerEngine: string, model: string): JsonObject {
-    return engineManagerEngine === 'ollama' ? { name: model } : { model }
-}
-
-function deleteModelParams(engineManagerEngine: string, model: string): JsonObject {
-    return engineManagerEngine === 'ollama' ? { name: model } : { model }
+export function pullModelParams(family: string, model: string): JsonObject {
+    return family === 'ollama' ? { name: model } : { model }
 }
 
 /**
@@ -1208,6 +1208,9 @@ class ModularSupervisor {
 
     private async hydrateEngineManager(): Promise<void> {
         if (!this.processes.has('broker')) return
+        // Descriptors first, so the renderer can label and gate every engine
+        // the status hydration below publishes.
+        await this.hydrateEngineDescriptors()
         try {
             const result = await this.callProcess('broker', 'engine:get-installed')
             const obj = objectValue(result)
@@ -1220,6 +1223,23 @@ class ModularSupervisor {
             log.verbose({
                 sublevel: 'engine-manager',
                 message: `Unable to hydrate engine-manager state: ${getErrorString(err)}`
+            })
+        }
+    }
+
+    /**
+     * Read the local engine-manager's sanitized engine descriptors. A failed
+     * read keeps the previous set: engines without a descriptor still render,
+     * with safe defaults.
+     */
+    private async hydrateEngineDescriptors(): Promise<void> {
+        try {
+            const result = await this.callProcess('broker', 'engine:descriptors')
+            getModularBridgeState().setEngineDescriptors(parseEngineDescriptors(result))
+        } catch (err) {
+            log.verbose({
+                sublevel: 'engine-manager',
+                message: `Unable to read engine descriptors: ${getErrorString(err)}`
             })
         }
     }
@@ -1807,7 +1827,11 @@ class ModularSupervisor {
             const result = await this.callProcess(
                 'broker',
                 'engine:action',
-                { engine, action: 'pull_model', params: pullModelParams(engine, model) },
+                {
+                    engine,
+                    action: 'pull_model',
+                    params: pullModelParams(state.engineFamily(engine), model)
+                },
                 PULL_TIMEOUT_MS
             )
             const failure = pullResultError(result)
@@ -1901,8 +1925,8 @@ class ModularSupervisor {
         try {
             await this.callProcess(
                 'broker',
-                'engine:action',
-                { engine, action: 'delete_model', params: deleteModelParams(engine, model) },
+                'engine:delete-model',
+                { engine, model },
                 MODULAR_MODEL_ACTION_TIMEOUT_MS
             )
         } catch (err) {

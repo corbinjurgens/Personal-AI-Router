@@ -14,7 +14,7 @@ import type {
     EngineStatePatch,
     EngineCommandPayload
 } from '@/shared/types/engine-api'
-import type { EngineProgress, EngineType } from '@/shared/types/engines'
+import type { EngineDescriptor, EngineProgress, EngineType } from '@/shared/types/engines'
 import { usePendingActionsStore } from '@/ui/stores/pending-actions.store'
 import type {
     EngineSettingsTarget,
@@ -67,6 +67,8 @@ export interface IEngineApi {
     /** Load an engine catalog or explicitly search its upstream registry. */
     searchHub(engineType: EngineType, query?: string): Promise<EngineHubSearchResponse>
 
+    /** The local engine-manager's descriptor set changed (full replacement). */
+    onDescriptorsChanged(callback: (descriptors: EngineDescriptor[]) => void): () => void
     /** Durable engine state changed. Prefer this for new renderer state. */
     onStateChanged(callback: (patch: EngineStatePatch) => void): () => void
     /** Engine operation progress update (pull, install, etc.). */
@@ -134,6 +136,7 @@ export function createEngineApi(transport: ServiceTransport): IEngineApi {
                 query === undefined ? { engineType } : { engineType, query }
             ),
 
+        onDescriptorsChanged: cb => transport.subscribePush('engines:descriptors-changed', cb),
         onStateChanged: cb => transport.subscribePush('engines:state-changed', cb),
         onProgress: cb => transport.subscribePush('engines:progress-changed', cb),
         onProgressRemove: cb =>

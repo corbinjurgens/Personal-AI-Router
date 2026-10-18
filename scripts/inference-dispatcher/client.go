@@ -111,11 +111,11 @@ func decodeObject(data []byte, target any) error {
 func (c *backendClient) listModels(ctx context.Context) ([]RegisteredModel, error) {
 	var models []RegisteredModel
 	var err error
-	switch c.cfg.Backend {
-	case "lmstudio":
+	switch {
+	case c.cfg.Backend == "lmstudio":
 		models, err = c.listLMStudioModels(ctx)
-	case "llamacpp":
-		models, err = c.listLlamaCPPModels(ctx)
+	case c.usesOpenAIProtocol():
+		models, err = c.listOpenAIModels(ctx)
 	default:
 		models, err = c.listOllamaModels(ctx)
 	}
@@ -131,10 +131,12 @@ func (c *backendClient) listModels(ctx context.Context) ([]RegisteredModel, erro
 	return models, nil
 }
 
-func (c *backendClient) listLlamaCPPModels(ctx context.Context) ([]RegisteredModel, error) {
+// listOpenAIModels reads an OpenAI-compatible /v1/models: llama.cpp's, and any
+// configured engine driven through the openai-v1 profile.
+func (c *backendClient) listOpenAIModels(ctx context.Context) ([]RegisteredModel, error) {
 	data, err := c.request(ctx, http.MethodGet, "/v1/models", nil)
 	if err != nil {
-		return nil, fmt.Errorf("query llama.cpp models: %w", err)
+		return nil, fmt.Errorf("query %s models: %w", c.cfg.Backend, err)
 	}
 	return parseOpenAIModels(data)
 }
@@ -142,7 +144,7 @@ func (c *backendClient) listLlamaCPPModels(ctx context.Context) ([]RegisteredMod
 func (c *backendClient) listOllamaModels(ctx context.Context) ([]RegisteredModel, error) {
 	data, err := c.request(ctx, http.MethodGet, "/api/tags", nil)
 	if err != nil {
-		return nil, fmt.Errorf("query Ollama models: %w", err)
+		return nil, fmt.Errorf("query %s models: %w", c.cfg.Backend, err)
 	}
 	var response struct {
 		Models []struct {
@@ -359,7 +361,7 @@ func (c *backendClient) inferencePath() string {
 }
 
 func (c *backendClient) usesOpenAIProtocol() bool {
-	return c.cfg.Backend == "lmstudio" || c.cfg.Backend == "llamacpp"
+	return effectiveProtocol(c.cfg) == protocolOpenAIV1
 }
 
 func (c *backendClient) infer(ctx context.Context, model, prompt string) (string, error) {

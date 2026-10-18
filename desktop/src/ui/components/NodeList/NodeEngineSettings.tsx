@@ -9,11 +9,9 @@ import { useEngineStatusStore } from '@/ui/stores/engine-status.store'
 import { useEngineUpdateAvailableStore } from '@/ui/stores/engine-update-available.store'
 import { useConnectionStore } from '@/ui/stores/connection.store'
 import type { BackendInfo } from '@/ui/types/engine-info'
-import {
-    EnabledEngineTypes,
-    EngineDefaultLinks,
-    EngineDisplayNames
-} from '@/shared/constants/engines'
+import { EngineDefaultLinks } from '@/shared/constants/engines'
+import { engineLabel, isBuiltinEngineType } from '@/shared/utils/engines'
+import { engineTypesForNode } from '@/ui/utils/get-engines-for-node'
 import { BackendRow } from '@/ui/components/BackendRow/BackendRow'
 import { InlineErrorBanner } from '@/ui/components/InlineErrorBanner'
 
@@ -50,9 +48,17 @@ export default function NodeEngineSettings({ nodeId }: { nodeId: string }) {
         return parts.join('|')
     })
     void updateAvailableFingerprint
+    // The node's engine list: the built-in engines, then any other engine it
+    // reports, labelled from this node's descriptors (safe defaults otherwise).
+    const statusByNode = useEngineStatusStore(state => state.statusByNode)
+    const descriptors = useEngineStatusStore(state => state.descriptors)
+    const engineTypes = useMemo(
+        () => engineTypesForNode(nodeId, statusByNode, descriptors),
+        [nodeId, statusByNode, descriptors]
+    )
     const modelsFingerprint = useEngineModelsStore(state => {
         let fp = ''
-        for (const type of EnabledEngineTypes) {
+        for (const type of engineTypes) {
             const key = `${nodeId}:${type}`
             const m = state.models.get(key)
             if (!m) {
@@ -75,35 +81,34 @@ export default function NodeEngineSettings({ nodeId }: { nodeId: string }) {
     void engineFingerprint
     void modelsFingerprint
 
-    const allBackends: { backend: BackendInfo; statusKnown: boolean }[] = EnabledEngineTypes.map(
-        type => {
-            const statusStore = useEngineStatusStore.getState()
-            // Distinguish "the service reported this engine" from "we synthesized
-            // a placeholder". The placeholder's processStatus is 'initializing';
-            // without this flag a never-reported remote engine spins forever.
-            const statusKnown = statusStore.statusByNode.get(nodeId)?.has(type) ?? false
-            const status = statusStore.getStatus(nodeId, type)
-            const models = useEngineModelsStore.getState().getModels(nodeId, type)
-            const updateAvailable = useEngineUpdateAvailableStore.getState().getInfo(nodeId, type)
+    const allBackends: { backend: BackendInfo; statusKnown: boolean }[] = engineTypes.map(type => {
+        const statusStore = useEngineStatusStore.getState()
+        // Distinguish "the service reported this engine" from "we synthesized
+        // a placeholder". The placeholder's processStatus is 'initializing';
+        // without this flag a never-reported remote engine spins forever.
+        const statusKnown = statusStore.statusByNode.get(nodeId)?.has(type) ?? false
+        const status = statusStore.getStatus(nodeId, type)
+        const models = useEngineModelsStore.getState().getModels(nodeId, type)
+        const updateAvailable = useEngineUpdateAvailableStore.getState().getInfo(nodeId, type)
+        const links = isBuiltinEngineType(type) ? EngineDefaultLinks[type] : undefined
 
-            return {
-                backend: {
-                    type,
-                    displayName: EngineDisplayNames[type],
-                    source: 'detected',
-                    processStatus: status.processStatus,
-                    port: status.enginePort,
-                    proxyPort: status.proxyPort,
-                    models: models.models,
-                    docsUrl: EngineDefaultLinks[type]?.docsUrl,
-                    installUrl: EngineDefaultLinks[type]?.installUrl,
-                    installedVersion: status.installedVersion,
-                    updateAvailable
-                },
-                statusKnown
-            }
+        return {
+            backend: {
+                type,
+                displayName: engineLabel(type, descriptors.get(type)),
+                source: 'detected',
+                processStatus: status.processStatus,
+                port: status.enginePort,
+                proxyPort: status.proxyPort,
+                models: models.models,
+                docsUrl: links?.docsUrl,
+                installUrl: links?.installUrl,
+                installedVersion: status.installedVersion,
+                updateAvailable
+            },
+            statusKnown
         }
-    )
+    })
 
     return (
         <Stack gap="6" className="pt-1 pb-2">

@@ -1,19 +1,21 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-import { EnabledEngineTypes, EngineDisplayNames } from '@/shared/constants/engines'
 import { EngineType } from '@/shared/types/engines'
+import { engineLabel } from '@/shared/utils/engines'
+import { engineCapabilities } from '@/ui/constants/engine-capabilities'
 import { useEngineStatusStore } from '@/ui/stores/engine-status.store'
 import { useConnectionStore } from '@/ui/stores/connection.store'
 import { useNodesStore } from '@/ui/stores/nodes.store'
 import { usePendingActionsStore } from '@/ui/stores/pending-actions.store'
-import { getEnginesForNode } from '@/ui/utils/get-engines-for-node'
+import { engineTypesForNode, getEnginesForNode } from '@/ui/utils/get-engines-for-node'
 import { Button, Flex, Switch, Text } from '@nvidia/foundations-react-core'
 import { Download } from '@/ui/components/icons'
 import { useCallback, useMemo } from 'react'
 
 export default function NodeEnginesInline({ nodeId }: { nodeId: string }) {
     const statusByNode = useEngineStatusStore(s => s.statusByNode)
+    const descriptors = useEngineStatusStore(s => s.descriptors)
     const isRemote = useConnectionStore(s => s.selfId !== nodeId)
     const isDisconnected = useNodesStore(s => isRemote && s.nodes.get(nodeId)?.status === 'offline')
     // Re-render when a lifecycle command for this node begins/clears; the
@@ -28,13 +30,17 @@ export default function NodeEnginesInline({ nodeId }: { nodeId: string }) {
         return parts.join('|')
     })
     void lifecyclePendingFingerprint
+    const engineTypes = useMemo(
+        () => engineTypesForNode(nodeId ?? '', statusByNode, descriptors),
+        [nodeId, statusByNode, descriptors]
+    )
     const selfEngines = useMemo(
-        () => getEnginesForNode(nodeId ?? '', statusByNode, EnabledEngineTypes),
-        [nodeId, statusByNode]
+        () => getEnginesForNode(nodeId ?? '', statusByNode, engineTypes),
+        [nodeId, statusByNode, engineTypes]
     )
 
     const allBackends = useMemo(() => {
-        return EnabledEngineTypes.flatMap(type => {
+        return engineTypes.flatMap(type => {
             const backend = selfEngines.find(b => b.engineType === type)
 
             // Show every engine the node has actually reported — not just ones
@@ -47,15 +53,17 @@ export default function NodeEnginesInline({ nodeId }: { nodeId: string }) {
                 return []
             }
 
+            const descriptor = descriptors.get(type)
             return [
                 {
                     type,
-                    name: EngineDisplayNames[type],
-                    status: backend.processStatus
+                    name: engineLabel(type, descriptor),
+                    status: backend.processStatus,
+                    installable: engineCapabilities(type, descriptor).hasInstall.length > 0
                 }
             ]
         })
-    }, [selfEngines])
+    }, [engineTypes, selfEngines, descriptors])
 
     const handleToggle = useCallback(
         (engineType: EngineType) => {
@@ -85,6 +93,8 @@ export default function NodeEnginesInline({ nodeId }: { nodeId: string }) {
                     b.status === 'stopping'
 
                 if (b.status === 'not-installed' && !pending) {
+                    // An engine PAIR cannot install offers no control here.
+                    if (!b.installable) return null
                     return (
                         <Button
                             key={b.name}

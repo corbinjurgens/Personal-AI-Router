@@ -8,8 +8,8 @@ import type {
     EngineSettingsReceipt,
     EngineSettingsTarget
 } from '@/shared/types/engine-settings'
-import { engineTypeFromManagerName } from '@/shared/utils/engines'
 import type { JsonObject, JsonValue } from './json-rpc-client'
+import { proxyEngineFromManagerId } from './proxy-engines'
 
 function object(value: JsonValue | undefined): JsonObject {
     if (!value || typeof value !== 'object' || Array.isArray(value))
@@ -28,8 +28,9 @@ function flag(value: JsonValue | undefined): boolean {
     if (typeof value !== 'boolean') throw new Error('Invalid engine settings response.')
     return value
 }
+// The broker owns settings only for the engines it fronts with a proxy facade.
 function isSettingsEngine(value: JsonValue | undefined): value is EngineSettingsTarget['engine'] {
-    return typeof value === 'string' && engineTypeFromManagerName(value) !== null
+    return typeof value === 'string' && proxyEngineFromManagerId(value) !== null
 }
 function isSnapshotPhase(value: JsonValue | undefined): value is EngineSettingsSnapshot['phase'] {
     return isReceiptPhase(value) || value === 'idle'

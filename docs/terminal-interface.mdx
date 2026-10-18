@@ -339,6 +339,13 @@ configured, and says why.
 The `LOADED` column reads `?` for an engine that cannot report which models are
 in memory.
 
+An engine configured on this machine beyond the three built-in ones, such as a
+llama.cpp fork, is listed with the name its definition gives it. A model action
+its definition does not declare is refused with a message naming the engine,
+before anything is sent or a delete asks for confirmation. A peer's engine that
+is not configured here keeps the actions above, and that peer decides whether
+they apply.
+
 Pressing `p` opens the catalog of models this engine can download. Press `/` to
 filter — by name, family, or parameter size, so both `llama` and `8b` narrow the
 list — `o` to change the sort between popularity, name, and size, `enter` to

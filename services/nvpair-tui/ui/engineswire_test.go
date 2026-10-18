@@ -6,97 +6,71 @@ package ui
 import (
 	"context"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 
 	"nvpair-shared/engines"
 )
 
-// wireOf builds a model operation's envelope, failing the test if the engine
-// or operation is not known.
-func wireOf(t *testing.T, engine, op, model string) map[string]any {
+// localRequest builds a local model operation's method and params for an
+// engine whose family is its own ID, as a built-in engine's is.
+func localRequest(t *testing.T, engine, op, model string) (string, map[string]any) {
 	t.Helper()
-	envelope, err := modelActionWire(engine, op, model)
-	if err != nil {
-		t.Fatalf("%s %s: %v", engine, op, err)
+	act, ok := modelActions[op]
+	if !ok {
+		t.Fatalf("unknown model operation %q", op)
 	}
-	return envelope
+	return localModelRequest(engine, engine, act, model)
 }
 
-// actionOf unwraps an engine:action envelope for assertions.
-func actionOf(t *testing.T, envelope map[string]any) (string, map[string]any) {
-	t.Helper()
-	action, _ := envelope["action"].(string)
-	params, ok := envelope["params"].(map[string]any)
-	if !ok {
-		t.Fatalf("params = %T, want map[string]any", envelope["params"])
+// TestLocalModelOperationsUseTypedMethods checks load, eject and delete reach
+// engine-manager's typed methods with only the engine and the model, for every
+// engine and for a variant the shared table has never heard of. Ollama's
+// run_model, stream:false and keep_alive:0 now live in its manifest's
+// operation bindings, so a second spelling here could only drift from them.
+func TestLocalModelOperationsUseTypedMethods(t *testing.T) {
+	want := map[string]string{
+		"load": "engine:load-model", "unload": "engine:unload-model", "delete": "engine:delete-model",
 	}
-	return action, params
+	ids := append(engines.Names(), "llamacpp-custom")
+	for _, engine := range ids {
+		for op, method := range want {
+			t.Run(engine+"/"+op, func(t *testing.T) {
+				got, params := localRequest(t, engine, op, "owner/model")
+				if got != method {
+					t.Errorf("method = %q, want %q", got, method)
+				}
+				wantParams := map[string]any{"engine": engine, "model": "owner/model"}
+				if !reflect.DeepEqual(params, wantParams) {
+					t.Errorf("params = %v, want %v", params, wantParams)
+				}
+			})
+		}
+	}
 }
 
 // TestPullSendsBothKeys guards the LM Studio fix: a pull must carry the model
 // under BOTH "name" (Ollama's /api/pull body key) and "model" (LM Studio's
 // `lms get {model}` CLI placeholder). Sending only "name" silently ran
-// `lms get "" --yes`, so the download never reached LM Studio.
+// `lms get "" --yes`, so the download never reached LM Studio. A pull has no
+// typed method yet, so it is still engine:action spelled by family.
 func TestPullSendsBothKeys(t *testing.T) {
 	for _, engine := range []string{engines.NameOllama, engines.NameLMStudio} {
-		envelope := wireOf(t, engine, "pull", "owner/model")
-		if envelope["engine"] != engine {
-			t.Fatalf("engine = %v, want %s", envelope["engine"], engine)
+		method, envelope := localRequest(t, engine, "pull", "owner/model")
+		if method != "engine:action" {
+			t.Fatalf("%s: method = %q, want engine:action", engine, method)
 		}
-		action, params := actionOf(t, envelope)
-		if action != "pull_model" {
-			t.Fatalf("%s: action = %q, want pull_model", engine, action)
+		if envelope["engine"] != engine || envelope["action"] != "pull_model" {
+			t.Fatalf("%s: envelope = %v", engine, envelope)
+		}
+		params, ok := envelope["params"].(map[string]any)
+		if !ok {
+			t.Fatalf("%s: params = %T, want map[string]any", engine, envelope["params"])
 		}
 		if params["name"] != "owner/model" || params["model"] != "owner/model" {
 			t.Errorf("%s: pull params = %v, want both name and model set", engine, params)
 		}
-	}
-}
-
-// TestOllamaLoadUsesRunModel guards the contract the two engines do NOT share.
-// Ollama has no load action — warming a model is run_model with streaming off —
-// so sending load_model errors, and the failure is quiet enough to look like the
-// model simply not loading.
-func TestOllamaLoadUsesRunModel(t *testing.T) {
-	envelope := wireOf(t, engines.NameOllama, "load", "llama3.2")
-	action, params := actionOf(t, envelope)
-
-	if action != "run_model" {
-		t.Errorf("ollama load action = %q, want run_model", action)
-	}
-	if params["model"] != "llama3.2" {
-		t.Errorf("model = %v", params["model"])
-	}
-	if params["stream"] != false {
-		t.Errorf("stream = %v, want false; a streaming load never completes here", params["stream"])
-	}
-
-	// LM Studio does declare a real load action.
-	lmEnvelope := wireOf(t, engines.NameLMStudio, "load", "owner/model")
-	if lmAction, _ := actionOf(t, lmEnvelope); lmAction != "load_model" {
-		t.Errorf("lmstudio load action = %q, want load_model", lmAction)
-	}
-}
-
-// TestOllamaUnloadSendsKeepAlive guards the other asymmetry: Ollama only frees a
-// model when keep_alive is 0. Without it the request succeeds and the model
-// stays resident, so eject appears to do nothing.
-func TestOllamaUnloadSendsKeepAlive(t *testing.T) {
-	envelope := wireOf(t, engines.NameOllama, "unload", "llama3.2")
-	action, params := actionOf(t, envelope)
-
-	if action != "unload_model" {
-		t.Errorf("action = %q, want unload_model", action)
-	}
-	if params["keep_alive"] != 0 {
-		t.Errorf("keep_alive = %v, want 0; without it the model is not evicted", params["keep_alive"])
-	}
-
-	// LM Studio's unload takes no keep_alive.
-	lmEnvelope := wireOf(t, engines.NameLMStudio, "unload", "owner/model")
-	if _, lmParams := actionOf(t, lmEnvelope); lmParams["keep_alive"] != nil {
-		t.Errorf("lmstudio unload sent keep_alive = %v, want absent", lmParams["keep_alive"])
 	}
 }
 
@@ -172,73 +146,75 @@ func TestDeadlineLeniencyTracksOperationLength(t *testing.T) {
 	}
 }
 
-// TestDeleteSendsBothKeys checks delete works on either engine, since Ollama
-// keys it as "name" and LM Studio as "model".
-func TestDeleteSendsBothKeys(t *testing.T) {
-	for _, engine := range []string{engines.NameOllama, engines.NameLMStudio} {
-		envelope := wireOf(t, engine, "delete", "victim")
-		action, params := actionOf(t, envelope)
-		if action != "delete_model" {
-			t.Errorf("%s: action = %q", engine, action)
-		}
-		if params["name"] != "victim" || params["model"] != "victim" {
-			t.Errorf("%s: delete params = %v, want both keys", engine, params)
-		}
+// TestPullSpellsByFamily checks a pull is spelled by the engine's family, not
+// its ID: a llama.cpp fork pulls like llama.cpp, with the model under "model"
+// alone, since llama.cpp would take a second key as a parameter it does not
+// accept; an Ollama-family variant sends Ollama's "name".
+func TestPullSpellsByFamily(t *testing.T) {
+	pull := modelActions["pull"]
+	_, envelope := localModelRequest("llamacpp-custom", engines.NameLlamaCPP, pull, "m:Q4")
+	if !reflect.DeepEqual(envelope["params"], map[string]any{"model": "m:Q4"}) {
+		t.Errorf("llama.cpp fork pull params = %v, want only the model", envelope["params"])
 	}
-}
-
-// TestLlamaCPPSendsTheModelAlone checks every llama.cpp model operation carries
-// the model under "model" and nothing else, as the engine manager's own wire
-// for it does. Its delete sends the params as a query string, so an extra
-// "name" would reach the engine as a parameter it does not take.
-func TestLlamaCPPSendsTheModelAlone(t *testing.T) {
-	want := map[string]string{
-		"load": "load_model", "unload": "unload_model",
-		"delete": "delete_model", "pull": "pull_model",
+	_, envelope = localModelRequest("ollama-nightly", engines.NameOllama, pull, "m")
+	if params, _ := envelope["params"].(map[string]any); params["name"] != "m" {
+		t.Errorf("Ollama-family pull params = %v, want name set", envelope["params"])
 	}
-	for op, action := range want {
-		envelope := wireOf(t, engines.NameLlamaCPP, op, "ggml-org/gemma-3-1b-it-GGUF:Q4_K_M")
-		got, params := actionOf(t, envelope)
-		if got != action {
-			t.Errorf("%s: action = %q, want %q", op, got, action)
-		}
-		if len(params) != 1 || params["model"] != "ggml-org/gemma-3-1b-it-GGUF:Q4_K_M" {
-			t.Errorf("%s: params = %v, want only the model", op, params)
-		}
+	_, envelope = localModelRequest("strata", "strata", pull, "m")
+	if !reflect.DeepEqual(envelope["params"], map[string]any{"model": "m"}) {
+		t.Errorf("unknown-family pull params = %v, want the conventional model key", envelope["params"])
 	}
 }
 
 // TestDownloadPromptUsesTheEnginesSpelling is the regression guard for an
 // Ollama example offered for every engine. "llama3.2" is not a name LM Studio
 // or llama.cpp can download, and llama.cpp's needs a quantization after a colon.
+// Examples are per family, so a fork shows its family's.
 func TestDownloadPromptUsesTheEnginesSpelling(t *testing.T) {
 	for _, e := range engines.All() {
 		if _, ok := downloadExamples[e.Name]; !ok {
 			t.Errorf("%s has no download example", e.Name)
 		}
 	}
-	if got := downloadPrompt(engines.NameLlamaCPP, "llama.cpp"); !strings.Contains(got, ":Q4_K_M") {
-		t.Errorf("llama.cpp prompt %q does not show the quantization suffix", got)
+	if got := downloadPrompt(engines.NameLlamaCPP, "llama.cpp (custom)"); !strings.Contains(got, ":Q4_K_M") {
+		t.Errorf("llama.cpp-family prompt %q does not show the quantization suffix", got)
 	}
 	if got := downloadPrompt("vllm", "vLLM"); got != "model name for vLLM" {
 		t.Errorf("an engine with no example got %q", got)
 	}
 }
 
-// TestEveryEngineHasAModelWire is what makes adding an engine a matter of
-// adding its entry: an engine in the shared table without a spelling for every
-// model operation fails here, rather than being sent another engine's action
-// names at runtime.
-func TestEveryEngineHasAModelWire(t *testing.T) {
-	for _, e := range engines.All() {
-		for op := range modelActions {
-			if _, err := modelActionWire(e.Name, op, "m"); err != nil {
-				t.Errorf("%s has no local wire for %s: %v", e.Name, op, err)
-			}
+// TestDescriptorsGateModelOperations checks an operation the engine's
+// descriptor does not declare is refused before anything is sent, while an
+// engine with no descriptor here (a peer's variant) keeps the operations the
+// interface already offered.
+func TestDescriptorsGateModelOperations(t *testing.T) {
+	ds := engineDescriptors{
+		"strata": {
+			Version: engines.DescriptorVersion, Engine: "strata", Family: "strata", Label: "Strata",
+			ModelNaming: engines.ModelNamingExact,
+			Operations: map[string]engines.OperationCapability{
+				engines.OperationLoad: {}, engines.OperationUnload: {},
+			},
+		},
+	}
+	if err := ds.unsupported("strata", modelActions["load"]); err != nil {
+		t.Errorf("declared load refused: %v", err)
+	}
+	for _, op := range []string{"delete", "pull"} {
+		err := ds.unsupported("strata", modelActions[op])
+		if err == nil || !strings.Contains(err.Error(), "Strata does not support") {
+			t.Errorf("undeclared %s = %v, want refused naming the engine", op, err)
 		}
 	}
-	if _, err := modelActionWire("vllm", "load", "m"); err == nil {
-		t.Error("an engine with no wire was given one")
+	if err := ds.unsupported("peer-variant", modelActions["delete"]); err != nil {
+		t.Errorf("engine without a descriptor refused: %v", err)
+	}
+	if got := ds.family("strata"); got != "strata" {
+		t.Errorf("family = %q", got)
+	}
+	if got := ds.family(engines.NameOllama); got != engines.NameOllama {
+		t.Errorf("an engine without a descriptor is its own family, got %q", got)
 	}
 }
 

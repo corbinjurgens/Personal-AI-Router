@@ -50,11 +50,13 @@ function ModelRowInner({
         // A command is already in flight for this model -- lock the whole menu so
         // the user cannot fire a second conflicting op before it resolves.
         const busy = pendingAction !== undefined
-        items.push({
-            id: 'load',
-            children: 'Load',
-            disabled: busy || isLoaded || !model.downloaded || !isRunning
-        })
+        if (capabilities.hasLoad) {
+            items.push({
+                id: 'load',
+                children: 'Load',
+                disabled: busy || isLoaded || !model.downloaded || !isRunning
+            })
+        }
         if (capabilities.hasEject) {
             items.push({
                 id: 'eject',
@@ -79,6 +81,7 @@ function ModelRowInner({
         return items
     }, [
         canCopyToThisPc,
+        capabilities.hasLoad,
         capabilities.hasEject,
         capabilities.hasDeleteModel,
         isLoaded,
