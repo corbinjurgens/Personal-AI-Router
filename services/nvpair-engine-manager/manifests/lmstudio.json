@@ -3,6 +3,9 @@
   "engine": "lmstudio",
   "display_name": "LM Studio",
   "manifest_version": 1,
+  "family": "lmstudio",
+  "protocols": ["openai-v1", "anthropic-messages"],
+  "model_naming": "exact",
   "detect": ["~/.lmstudio/bin/lms"],
   "install": {
     "fetch": { "url": "https://lmstudio.ai/install.sh" },
@@ -64,6 +67,12 @@
     "darwin/amd64": { "runtime": { "cli": "~/.lmstudio/bin/lms" } },
     "linux/amd64": { "runtime": { "cli": "~/.lmstudio/bin/lms" } },
     "linux/arm64": { "runtime": { "cli": "~/.lmstudio/bin/lms" } }
+  },
+  "operations": {
+    "load": { "action": "load_model" },
+    "unload": { "action": "unload_model" },
+    "pull": { "action": "pull_model" },
+    "delete": { "action": "delete_model" }
   },
   "actions": {
     "list_models": {

@@ -3,6 +3,9 @@
   "engine": "ollama",
   "display_name": "Ollama",
   "manifest_version": 1,
+  "family": "ollama",
+  "protocols": ["ollama-api", "openai-v1", "anthropic-messages"],
+  "model_naming": "implied-latest-tag",
   "install": { "mode": "user" },
   "models_dir": "~/.ollama",
   "runtime": {
@@ -90,6 +93,12 @@
         "env": { "LD_LIBRARY_PATH": "{install_dir}/lib/ollama" }
       }
     }
+  },
+  "operations": {
+    "load": { "action": "run_model", "params": { "stream": false }, "response_timeout_s": 600 },
+    "unload": { "action": "unload_model", "params": { "keep_alive": 0 } },
+    "pull": { "action": "pull_model", "model_param": "name" },
+    "delete": { "action": "delete_model", "model_param": "name" }
   },
   "actions": {
     "list_models": {

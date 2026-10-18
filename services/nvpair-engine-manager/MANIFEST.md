@@ -122,6 +122,10 @@ and recovery. Editing `args`/`start` directly remains trusted manifest authoring
 | `manifest_version` | int | yes | Must be `1`. A higher value is rejected (asks for behavior this binary lacks). Unknown optional fields within a supported version are ignored, so the schema can grow additively. |
 | `platforms` | object | yes | Map of `"<goos>/<goarch>"` → platform block (e.g. `"windows/amd64"`, `"darwin/arm64"`, `"linux/amd64"`). At least one entry. The runner selects the block matching the host. |
 | `actions` | object | no | Map of action name → action (see below). |
+| `family` | string | no | The engine's lineage, same syntax as `engine`; defaults to the engine id. It selects the coded adapters the family shares: the model-store layout used by model copy and the download catalogue (`ollama`, `lmstudio` and `llamacpp` have both). A fork with its own id declares the family it came from. |
+| `protocols` | string[] | no | Protocol profiles the engine serves: `ollama-api`, `openai-v1`, `anthropic-messages`, `llamacpp-router`. Published in the engine's descriptor; none means no inference surface is claimed. |
+| `model_naming` | string | no | `exact` (default) or `implied-latest-tag` (an untagged name means `:latest`, as in Ollama). |
+| `operations` | object | no | Semantic model operation bindings; see Model operations. |
 | `detect` / `install` / `uninstall` / `models_dir` / `runtime` | — | no | Optional **shared defaults** inherited by every platform (see below). |
 
 **Shared defaults & per-platform overrides.** The platform-level fields `detect`, `install`, `uninstall`, `models_dir`, and `runtime` may also be given once at the top level as shared defaults; each `platforms` entry is then merged onto them. Nested objects (e.g. `runtime`, `runtime.env`) merge key-by-key with the platform value winning, while arrays and scalars are replaced wholesale. So a runtime that's identical across platforms except `cli` is declared once at the top level, and each platform sets only `"runtime": { "cli": "…" }`. Omitting a key inherits the default; setting it (even to a zero value like `"port": 0`) overrides it. A manifest that fully specifies each platform with no top-level defaults behaves exactly as before.
@@ -362,6 +366,47 @@ The rules the runner enforces:
 Actions target the engine's control plane — **not** inference endpoints
 (those stay with the proxy).
 
+## Model operations
+
+`operations` binds the semantic model operations `load`, `unload`, `pull` and
+`delete` to actions. Clients call `engine:load-model`, `engine:unload-model`,
+`engine:delete-model` or a remote model endpoint with only an engine and a
+model, and the binding decides how the engine is asked:
+
+| Field | Required | Notes |
+|---|---|---|
+| `action` | yes | A declared action. `pull` must bind `pull_model`, which owns the streaming pull path. |
+| `model_param` | no | Parameter carrying the model, default `model`: the JSON body or query key of an HTTP action, or the `{placeholder}` a `cmd` or `remove_path` action must template. Actions with `model_resolution` or `progress_protocol` read `model` and require it. |
+| `params` | no | Fixed scalar parameters sent with the model, such as Ollama's `"stream": false`. Query-parameter actions take strings only. Runner placeholders and the model param are rejected. |
+| `response_timeout_s` | no | How long, 1–1800 seconds, the engine may take to begin answering an HTTP action. It applies to every call of that action, `engine:action` included, and two operations sharing an action must agree on it. Not allowed on `pull`, which its progress watchdog bounds. A remote peer's load uses the readiness budget when this node binds a load budget above 30 seconds for the same engine id. |
+
+An operation the manifest does not bind falls back to the conventional action
+(`load_model`, `unload_model`, `pull_model`, `delete_model`) with the model
+under `model`, when that action exists. A pull that names only a model gets its
+params from the pull binding.
+
+```json
+"operations": {
+  "load": { "action": "run_model", "params": { "stream": false }, "response_timeout_s": 600 },
+  "unload": { "action": "unload_model", "params": { "keep_alive": 0 } },
+  "pull": { "action": "pull_model", "model_param": "name" },
+  "delete": { "action": "delete_model", "model_param": "name" }
+}
+```
+
+## Descriptors
+
+`engine:descriptors` publishes a sanitized projection of every registered
+manifest: `engine`, `family`, `label`, `platforms`, `available`, `protocols`,
+`modelNaming`, `modelStore`, `catalog`, `operations` (each with an optional
+`responseTimeoutS`) and `version`. Its type, vocabulary and validation live in
+`nvpair-shared/engines`. Binaries, commands, environment values, paths, URLs,
+action definitions and operation parameters never reach it.
+
+A local fork is therefore a complete user manifest with a new id, its own
+`runtime.port` and `models_dir`, and the `family` it was forked from. It gets
+that family's model-store layout and catalogue with no code change.
+
 ## Placeholders
 
 Resolved by the runner at execution time; any other `{token}` fails
@@ -401,7 +446,9 @@ an action sets none or more than one of
 `http`/`cmd`/`remove_path`, a `remove_path` action omits `root` or
 `path`, `http.params_in` is not `body` or `query`, a `result` is set without
 both `array` and `field` (or a
-`result.match` without both `match.field` and a non-empty `match.in`), or
+`result.match` without both `match.field` and a non-empty `match.in`),
+`family` is not a valid id, `protocols` or `model_naming` name an unknown
+value, an `operations` binding breaks a rule in Model operations, or
 a non-action templated string uses an unknown placeholder.
 
 ---

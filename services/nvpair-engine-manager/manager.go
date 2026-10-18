@@ -90,6 +90,7 @@ func NewManager(codec *Codec, exec *Executor, mesh *clustertrust.Mesh, clusterDi
 		catalog: newCatalogService(),
 		cancel:  func() {},
 	}
+	m.catalog.familyOf = exec.reg.familyOf
 	baseDir := ""
 	if clusterDir != "" {
 		baseDir = filepath.Dir(filepath.Clean(clusterDir))
@@ -245,6 +246,9 @@ func (m *Manager) handleMessage(ctx context.Context, msg *Message) {
 		}
 		m.codec.Respond(msg.ID, mf)
 
+	case descriptorsMethod:
+		m.codec.Respond(msg.ID, map[string]any{"engines": m.exec.reg.Descriptors()})
+
 	case "engine:status":
 		var p engineParam
 		if !m.parse(msg, &p) {
@@ -293,6 +297,9 @@ func (m *Manager) handleMessage(ctx context.Context, msg *Message) {
 
 	case "engine:action":
 		go m.runAction(ctx, msg)
+
+	case loadModelMethod, unloadModelMethod, deleteModelMethod:
+		go m.runModelOperation(ctx, msg)
 
 	case "engine:remote-get-installed", "engine:remote-install", "engine:remote-pull-model",
 		"engine:remote-load-model", "engine:remote-unload-model", "engine:remote-delete-model",

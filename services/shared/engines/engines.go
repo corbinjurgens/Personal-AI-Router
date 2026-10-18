@@ -14,6 +14,12 @@
 // discovers, advertises, and never resolves a model owner. Declaring the set
 // once, here, is what turns that class of bug into a build error.
 //
+// This table is the compiled set of built-in engines. Engine-manager also
+// accepts engines defined only by manifest data; what other processes may
+// know about any registered engine is its Descriptor (descriptor.go), which
+// engine-manager publishes. The built-in names double as the family names that
+// select engine-manager's coded adapters.
+//
 // Design decisions this package encodes:
 //
 //   - Name is lower-case and unpunctuated ("lmstudio", not "lm-studio"). The
