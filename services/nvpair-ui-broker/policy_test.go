@@ -323,7 +323,7 @@ func TestNodePolicyLoadDefaultsCorruptAndPersist(t *testing.T) {
 
 	next := nodepolicy.Default()
 	next.Idle.UnloadAfterMinutes = 7
-	if _, err := b.setLocalPolicy(mustJSON(next)); err != nil {
+	if _, err := setCurrent(b, mustJSON(next)); err != nil {
 		t.Fatal(err)
 	}
 	reloaded, _ := newPolicyBroker(t)
@@ -387,7 +387,8 @@ func (ab *activatedBroker) wantActivation(t *testing.T, wantActive, wantState, w
 func (ab *activatedBroker) setIdle(t *testing.T, minutes int) policySetResult {
 	t.Helper()
 	result, err := ab.b.dispatchPolicy(context.Background(), methodPolicySet, policyParams{
-		Policy: mustJSON(map[string]any{"version": nodepolicy.SchemaVersion, "idle": map[string]any{"unloadAfterMinutes": minutes}}),
+		Policy:                    mustJSON(map[string]any{"version": nodepolicy.SchemaVersion, "idle": map[string]any{"unloadAfterMinutes": minutes}}),
+		ExpectedPersistedRevision: mustJSON(ab.b.localPolicy().Policy.Revision),
 	})
 	if err != nil {
 		t.Fatalf("policy:set: %v", err)
@@ -429,14 +430,14 @@ func TestPolicySetValidatesPushesAndNotifies(t *testing.T) {
 	b.replayPolicyToProxy(context.Background(), pp)
 
 	bad := map[string]any{"version": 1, "profiles": []any{map[string]any{"name": "x", "engine": "nope", "model": "m"}}}
-	b.handleMessage(clientRequest(1, methodPolicySet, map[string]any{"policy": bad}))
+	b.handleMessage(clientRequest(1, methodPolicySet, map[string]any{"policy": bad, "expectedPersistedRevision": "0"}))
 	resp := out.waitFrame(t, "invalid policy:set response", isResponse(1))
 	if resp.Error == nil || resp.Error.Code != -32602 {
 		t.Fatalf("invalid policy accepted: %+v", resp)
 	}
 
 	good := map[string]any{"version": 1, "availability": "paused", "idle": map[string]any{"unloadAfterMinutes": 5}}
-	b.handleMessage(clientRequest(2, methodPolicySet, map[string]any{"policy": good}))
+	b.handleMessage(clientRequest(2, methodPolicySet, map[string]any{"policy": good, "expectedPersistedRevision": "0"}))
 	resp = out.waitFrame(t, "policy:set response", isResponse(2))
 	if resp.Error != nil {
 		t.Fatalf("valid policy refused: %+v", resp.Error)
@@ -949,7 +950,7 @@ func TestRemotePolicyRelaysThroughEngineManager(t *testing.T) {
 		return map[string]any{"policy": map[string]any{}, "availability": "available"}, ""
 	})
 	b.handleMessage(clientRequest(1, methodPolicyGet, map[string]string{"nodeId": "peer-node"}))
-	b.handleMessage(clientRequest(2, methodPolicySet, map[string]any{"nodeId": "peer-node", "policy": map[string]any{"version": 1}}))
+	b.handleMessage(clientRequest(2, methodPolicySet, map[string]any{"nodeId": "peer-node", "policy": map[string]any{"version": 1}, "expectedPersistedRevision": "77"}))
 	b.handleMessage(clientRequest(3, methodSetAvailability, map[string]any{"nodeId": "peer-node", "state": "paused"}))
 	for id := 1; id <= 3; id++ {
 		if resp := out.waitFrame(t, "remote policy response", isResponse(id)); resp.Error != nil {
@@ -963,6 +964,9 @@ func TestRemotePolicyRelaysThroughEngineManager(t *testing.T) {
 		got[c.method] = true
 		if !strings.Contains(string(c.params), `"nodeId":"peer-node"`) {
 			t.Errorf("%s lost its target: %s", c.method, c.params)
+		}
+		if c.method == "engine:remote-policy-set" && !strings.Contains(string(c.params), `"expectedPersistedRevision":"77"`) {
+			t.Errorf("%s lost its precondition: %s", c.method, c.params)
 		}
 	}
 	for _, m := range want {
@@ -1172,6 +1176,19 @@ func (rb *routedBroker) fileBytes(t *testing.T) []byte {
 	return data
 }
 
+// setCurrent is a local policy:set that carries the revision a policy:get
+// returns right now, so it is never stale.
+func setCurrent(b *Broker, raw json.RawMessage) (nodepolicy.Policy, error) {
+	return b.setLocalPolicy(raw, mustJSON(b.localPolicy().Policy.Revision))
+}
+
+// relaySet sends a relayed policy:set whose precondition is the revision the
+// peer's own snapshot carries.
+func (rb *routedBroker) relaySet(t *testing.T, doc map[string]any) (result json.RawMessage, errText string) {
+	t.Helper()
+	return rb.relay(t, "set", map[string]any{"policy": doc, "expectedPersistedRevision": doc["revision"]})
+}
+
 // localSet applies a local policy:set that edits the current full policy.
 func (rb *routedBroker) localSet(t *testing.T, edit func(doc map[string]any)) {
 	t.Helper()
@@ -1184,7 +1201,7 @@ func (rb *routedBroker) localSet(t *testing.T, edit func(doc map[string]any)) {
 		t.Fatalf("decode current policy: %v", err)
 	}
 	edit(doc)
-	if _, err := rb.b.setLocalPolicy(mustJSON(doc)); err != nil {
+	if _, err := setCurrent(rb.b, mustJSON(doc)); err != nil {
 		t.Fatalf("local set: %v", err)
 	}
 }
@@ -1251,7 +1268,7 @@ func TestPeerPolicySetRoundTripKeepsProtectedSections(t *testing.T) {
 
 	doc := rb.peerSnapshot(t)
 	doc["idle"].(map[string]any)["unloadAfterMinutes"] = 7
-	result, errText := rb.relay(t, "set", map[string]any{"policy": doc})
+	result, errText := rb.relaySet(t, doc)
 	if errText != "" {
 		t.Fatalf("relayed set of an unchanged projection: %s", errText)
 	}
@@ -1308,7 +1325,7 @@ func TestPeerPolicySetRejectsProtectedChangesWithoutEffect(t *testing.T) {
 			// push that a rejected set wrongly scheduled is visible without waiting.
 			r := rb.b.nodePolicyRuntime()
 			r.acquirePush(context.Background())
-			result, errText := rb.relay(t, "set", map[string]any{"policy": doc})
+			result, errText := rb.relaySet(t, doc)
 			r.mu.Lock()
 			pending := len(r.pendingPush)
 			r.mu.Unlock()
@@ -1366,7 +1383,71 @@ func TestPeerPolicySetRejectsProtectedChangesWithoutEffect(t *testing.T) {
 	})
 }
 
-func TestPeerPolicySetCannotRestoreProtectedSectionsFromAStaleSnapshot(t *testing.T) {
+func TestPeerPolicySetKeepsLocalChangesMadeBeforeItsSnapshot(t *testing.T) {
+	rb := newRoutedBroker(t)
+	rb.localSet(t, func(doc map[string]any) {
+		accounts := doc["routing"].(map[string]any)["accounts"].([]any)
+		accounts[1].(map[string]any)["monthlyCeiling"] = "5"
+	})
+	fresh := rb.peerSnapshot(t)
+	fresh["idle"].(map[string]any)["unloadAfterMinutes"] = 9
+	if _, errText := rb.relaySet(t, fresh); errText != "" {
+		t.Fatalf("relayed set of a fresh projection: %s", errText)
+	}
+	got := rb.b.localPolicy().Policy
+	if got.Routing.Accounts[1].MonthlyCeiling != "5" {
+		t.Errorf("monthly ceiling = %q, want the local owner's lowered %q kept", got.Routing.Accounts[1].MonthlyCeiling, "5")
+	}
+	if got.Idle.UnloadAfterMinutes != 9 {
+		t.Errorf("idle.unloadAfterMinutes = %d, want the peer's device edit", got.Idle.UnloadAfterMinutes)
+	}
+	var onDisk nodepolicy.Policy
+	if err := json.Unmarshal(rb.fileBytes(t), &onDisk); err != nil || onDisk.Routing.Accounts[1].MonthlyCeiling != "5" {
+		t.Errorf("stored monthly ceiling = %q (%v), want %q", onDisk.Routing.Accounts[1].MonthlyCeiling, err, "5")
+	}
+}
+
+// noEffectBaseline records what a rejected set must leave as it was: the stored
+// bytes, the revision, the in-memory policy, the proxy push count and the
+// clients' announcements.
+type noEffectBaseline struct {
+	file     []byte
+	policy   nodepolicy.Policy
+	pushes   int
+	changed  int
+	rb       *routedBroker
+	revision string
+}
+
+func (rb *routedBroker) baseline(t *testing.T) noEffectBaseline {
+	t.Helper()
+	policy := rb.b.localPolicy().Policy
+	return noEffectBaseline{file: rb.fileBytes(t), policy: policy, revision: policy.Revision, pushes: policyPushes(rb.proxy), changed: len(policyChangedRevisions(t, rb.out)), rb: rb}
+}
+
+func (n noEffectBaseline) requireUnchanged(t *testing.T) {
+	t.Helper()
+	rb := n.rb
+	if got := rb.fileBytes(t); !bytes.Equal(got, n.file) {
+		t.Errorf("policy file changed after a rejected set")
+	}
+	got := rb.b.localPolicy().Policy
+	if !reflect.DeepEqual(got, n.policy) || got.Revision != n.revision {
+		t.Errorf("in-memory policy changed after a rejected set: revision %q, want %q", got.Revision, n.revision)
+	}
+	r := rb.b.nodePolicyRuntime()
+	r.mu.Lock()
+	pending := len(r.pendingPush)
+	r.mu.Unlock()
+	if pending != 0 || policyPushes(rb.proxy) != n.pushes {
+		t.Errorf("a rejected set scheduled %d pushes and sent %d (was %d) to the proxy", pending, policyPushes(rb.proxy), n.pushes)
+	}
+	if got := len(policyChangedRevisions(t, rb.out)); got != n.changed {
+		t.Errorf("a rejected set announced policy:changed %d times (was %d)", got, n.changed)
+	}
+}
+
+func TestPeerPolicySetFromAStaleSnapshotIsAConflict(t *testing.T) {
 	t.Run("local routing change is kept", func(t *testing.T) {
 		rb := newRoutedBroker(t)
 		stale := rb.peerSnapshot(t)
@@ -1374,20 +1455,16 @@ func TestPeerPolicySetCannotRestoreProtectedSectionsFromAStaleSnapshot(t *testin
 			accounts := doc["routing"].(map[string]any)["accounts"].([]any)
 			accounts[1].(map[string]any)["monthlyCeiling"] = "5"
 		})
+		persisted := rb.b.localPolicy().Policy.Revision
+		base := rb.baseline(t)
 		stale["idle"].(map[string]any)["unloadAfterMinutes"] = 9
-		if _, errText := rb.relay(t, "set", map[string]any{"policy": stale}); errText != "" {
-			t.Fatalf("relayed set of an unchanged projection: %s", errText)
+		result, errText := rb.relaySet(t, stale)
+		if !strings.HasPrefix(errText, "policy conflict:") || !strings.Contains(errText, persisted) {
+			t.Fatalf("stale relayed set = %q (result %s), want a policy conflict naming revision %s", errText, result, persisted)
 		}
-		got := rb.b.localPolicy().Policy
-		if got.Routing.Accounts[1].MonthlyCeiling != "5" {
-			t.Errorf("monthly ceiling = %q, want the local owner's lowered %q kept", got.Routing.Accounts[1].MonthlyCeiling, "5")
-		}
-		if got.Idle.UnloadAfterMinutes != 9 {
-			t.Errorf("idle.unloadAfterMinutes = %d, want the peer's device edit", got.Idle.UnloadAfterMinutes)
-		}
-		var onDisk nodepolicy.Policy
-		if err := json.Unmarshal(rb.fileBytes(t), &onDisk); err != nil || onDisk.Routing.Accounts[1].MonthlyCeiling != "5" {
-			t.Errorf("stored monthly ceiling = %q (%v), want %q", onDisk.Routing.Accounts[1].MonthlyCeiling, err, "5")
+		base.requireUnchanged(t)
+		if got := rb.b.localPolicy().Policy.Routing.Accounts[1].MonthlyCeiling; got != "5" {
+			t.Errorf("monthly ceiling = %q, want the local owner's lowered %q kept", got, "5")
 		}
 	})
 
@@ -1397,19 +1474,157 @@ func TestPeerPolicySetCannotRestoreProtectedSectionsFromAStaleSnapshot(t *testin
 		rb.localSet(t, func(doc map[string]any) {
 			doc["tiers"].(map[string]any)["weak"] = []any{map[string]any{"kind": "local", "engine": "ollama", "model": "llama3:8b"}}
 		})
-		afterLocal := rb.fileBytes(t)
+		base := rb.baseline(t)
 		stale["idle"].(map[string]any)["unloadAfterMinutes"] = 9
-		if result, errText := rb.relay(t, "set", map[string]any{"policy": stale}); errText == "" {
-			t.Fatalf("a stale snapshot restored the old tiers: %s", result)
+		if result, errText := rb.relaySet(t, stale); !strings.HasPrefix(errText, "policy conflict:") {
+			t.Fatalf("a stale snapshot restored the old tiers: %q %s", errText, result)
 		}
-		if got := rb.fileBytes(t); !bytes.Equal(got, afterLocal) {
-			t.Errorf("policy file changed after the rejected stale set")
-		}
+		base.requireUnchanged(t)
 		want := []nodepolicy.TierEntry{{Kind: nodepolicy.EntryLocal, Engine: "ollama", Model: "llama3:8b"}}
 		if got := rb.b.localPolicy().Policy.Tiers["weak"]; !reflect.DeepEqual(got, want) {
 			t.Errorf("weak tier = %+v, want the local owner's %+v", got, want)
 		}
 	})
+
+	t.Run("a stale projection cannot mutate protected fields", func(t *testing.T) {
+		rb := newRoutedBroker(t)
+		stale := rb.peerSnapshot(t)
+		rb.localSet(t, func(doc map[string]any) {
+			doc["idle"].(map[string]any)["unloadAfterMinutes"] = 11
+		})
+		base := rb.baseline(t)
+		stale["tierPolicy"].(map[string]any)["allowWeaker"] = true
+		if result, errText := rb.relaySet(t, stale); !strings.HasPrefix(errText, "policy conflict:") {
+			t.Fatalf("stale protected edit = %q %s, want a policy conflict", errText, result)
+		}
+		base.requireUnchanged(t)
+	})
+}
+
+func TestPolicySetWithoutAPreconditionIsRefused(t *testing.T) {
+	cases := map[string]json.RawMessage{
+		"missing":      nil,
+		"null":         json.RawMessage(`null`),
+		"empty":        json.RawMessage(`""`),
+		"number":       json.RawMessage(`12`),
+		"leading zero": json.RawMessage(`"012"`),
+		"signed":       json.RawMessage(`"-1"`),
+		"overflow":     json.RawMessage(`"9223372036854775808"`),
+		"padded":       json.RawMessage(`" 12"`),
+	}
+	for name, expected := range cases {
+		t.Run(name, func(t *testing.T) {
+			rb := newRoutedBroker(t)
+			base := rb.baseline(t)
+			params := map[string]any{"policy": mustJSON(rb.b.localPolicy().Policy)}
+			if expected != nil {
+				params["expectedPersistedRevision"] = expected
+			}
+			rb.b.handleMessage(clientRequest(1, methodPolicySet, params))
+			resp := rb.out.waitFrame(t, "policy:set response", isResponse(1))
+			if resp.Error == nil || resp.Error.Code != -32602 || !strings.Contains(resp.Error.Message, "expectedPersistedRevision") {
+				t.Fatalf("local set with a %s precondition = %+v, want invalid params naming expectedPersistedRevision", name, resp)
+			}
+			base.requireUnchanged(t)
+
+			peerParams := map[string]any{"policy": rb.peerSnapshot(t)}
+			if expected != nil {
+				peerParams["expectedPersistedRevision"] = expected
+			}
+			if result, errText := rb.relay(t, "set", peerParams); !strings.Contains(errText, "expectedPersistedRevision") {
+				t.Fatalf("relayed set with a %s precondition = %q %s, want it refused naming expectedPersistedRevision", name, errText, result)
+			}
+			base.requireUnchanged(t)
+		})
+	}
+}
+
+func TestPolicySetConflictIsNotInvalidParams(t *testing.T) {
+	rb := newRoutedBroker(t)
+	base := rb.baseline(t)
+	// The fixture's persisted revision is 12.
+	rb.b.handleMessage(clientRequest(1, methodPolicySet, map[string]any{"policy": mustJSON(rb.b.localPolicy().Policy), "expectedPersistedRevision": "11"}))
+	resp := rb.out.waitFrame(t, "policy:set response", isResponse(1))
+	if resp.Error == nil || resp.Error.Code == -32602 || !strings.HasPrefix(resp.Error.Message, "policy conflict:") || !strings.Contains(resp.Error.Message, "12") {
+		t.Fatalf("stale local set = %+v, want a policy conflict naming revision 12 that is not invalid params", resp)
+	}
+	base.requireUnchanged(t)
+}
+
+// Two clients read revision 12. A lowers the paid monthly ceiling and the node
+// policy; B, still on its draft of revision 12, tries to raise the ceiling back.
+func TestStaleLocalDraftCannotOverwriteANewerPolicy(t *testing.T) {
+	rb := newRoutedBroker(t)
+	draft := mustJSON(rb.b.localPolicy().Policy)
+	baseRevision := mustJSON(rb.b.localPolicy().Policy.Revision)
+
+	rb.localSet(t, func(doc map[string]any) {
+		accounts := doc["routing"].(map[string]any)["accounts"].([]any)
+		accounts[1].(map[string]any)["monthlyCeiling"] = "5"
+		doc["idle"].(map[string]any)["unloadAfterMinutes"] = 3
+	})
+	base := rb.baseline(t)
+
+	var stale map[string]any
+	if err := json.Unmarshal(draft, &stale); err != nil {
+		t.Fatal(err)
+	}
+	stale["routing"].(map[string]any)["accounts"].([]any)[1].(map[string]any)["monthlyCeiling"] = "9000"
+	_, err := rb.b.setLocalPolicy(mustJSON(stale), baseRevision)
+	var conflict *policyConflictError
+	if !errors.As(err, &conflict) || !strings.HasPrefix(err.Error(), "policy conflict:") || !strings.Contains(err.Error(), base.revision) {
+		t.Fatalf("stale local set error = %v, want a policy conflict naming revision %s", err, base.revision)
+	}
+	base.requireUnchanged(t)
+	got := rb.b.localPolicy().Policy
+	if got.Routing.Accounts[1].MonthlyCeiling != "5" || got.Idle.UnloadAfterMinutes != 3 {
+		t.Errorf("after the stale set the ceiling is %q and idle %d, want client A's %q and 3", got.Routing.Accounts[1].MonthlyCeiling, got.Idle.UnloadAfterMinutes, "5")
+	}
+}
+
+// Writers holding the same revision race: one passes the check and the rest
+// see its revision, so the stored policy is exactly one writer's.
+func TestConcurrentSetsWithTheSameRevisionAdmitExactlyOne(t *testing.T) {
+	rb := newRoutedBroker(t)
+	base := rb.b.localPolicy().Policy.Revision
+	const writers = 8
+	snapshot := mustJSON(rb.peerSnapshot(t))
+	var wg sync.WaitGroup
+	results := make([]error, writers)
+	start := make(chan struct{})
+	for i := 0; i < writers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			if i%2 == 0 {
+				doc := map[string]any{"version": nodepolicy.SchemaVersion, "idle": map[string]any{"unloadAfterMinutes": i + 1}}
+				_, results[i] = rb.b.setLocalPolicy(mustJSON(doc), mustJSON(base))
+				return
+			}
+			var peer map[string]any
+			if err := json.Unmarshal(snapshot, &peer); err != nil {
+				results[i] = err
+				return
+			}
+			peer["idle"].(map[string]any)["unloadAfterMinutes"] = i + 1
+			_, results[i] = rb.b.setPeerPolicy(mustJSON(peer), mustJSON(base))
+		}()
+	}
+	close(start)
+	wg.Wait()
+	passed := 0
+	for i, err := range results {
+		switch {
+		case err == nil:
+			passed++
+		case !strings.HasPrefix(err.Error(), "policy conflict:"):
+			t.Errorf("writer %d failed with %v, want success or a policy conflict", i, err)
+		}
+	}
+	if passed != 1 {
+		t.Fatalf("%d writers passed the check against revision %s, want exactly one", passed, base)
+	}
 }
 
 // errPublish is the failure the publication tests inject at a durablefile step.
@@ -1553,7 +1768,7 @@ func TestPolicyPublicationFailureLeavesOneWholeDocument(t *testing.T) {
 		name, rep, landed := boundary.name, boundary.rep, boundary.landed
 		t.Run(name, func(t *testing.T) {
 			rb := newRoutedBroker(t)
-			if _, err := rb.b.setLocalPolicy(paidCeilingDoc(t, rb.b, "5")); err != nil {
+			if _, err := setCurrent(rb.b, paidCeilingDoc(t, rb.b, "5")); err != nil {
 				t.Fatalf("acknowledged ceiling reduction: %v", err)
 			}
 			acked := rb.b.localPolicy().Policy
@@ -1567,7 +1782,7 @@ func TestPolicyPublicationFailureLeavesOneWholeDocument(t *testing.T) {
 
 			raise := paidCeilingDoc(t, rb.b, "9")
 			setReplacer(rb.b, rep)
-			_, err := rb.b.setLocalPolicy(raise)
+			_, err := setCurrent(rb.b, raise)
 			setReplacer(rb.b, durablefile.Replacer{})
 			if !errors.Is(err, errPublish) {
 				t.Fatalf("setLocalPolicy error = %v, want it to wrap the injected failure", err)
@@ -1707,21 +1922,21 @@ func TestAvailabilityPublicationFailureLeavesOneWholeDocument(t *testing.T) {
 func TestPolicyRevisionNeverRepeatsAfterAFailedDirectorySync(t *testing.T) {
 	rb := newRoutedBroker(t)
 	setClock(rb.b, 5)
-	if _, err := rb.b.setLocalPolicy(paidCeilingDoc(t, rb.b, "5")); err != nil {
+	if _, err := setCurrent(rb.b, paidCeilingDoc(t, rb.b, "5")); err != nil {
 		t.Fatalf("first set: %v", err)
 	}
 	if got := rb.b.localPolicy().Policy.Revision; got != "13" {
 		t.Fatalf("first revision = %q, want %q", got, "13")
 	}
 	setReplacer(rb.b, durablefile.Replacer{SyncDir: func(string) error { return errPublish }})
-	if _, err := rb.b.setLocalPolicy(paidCeilingDoc(t, rb.b, "4")); !errors.Is(err, errPublish) {
+	if _, err := setCurrent(rb.b, paidCeilingDoc(t, rb.b, "4")); !errors.Is(err, errPublish) {
 		t.Fatalf("failed set error = %v, want the injected failure", err)
 	}
 	setReplacer(rb.b, durablefile.Replacer{})
 	if got := freshBroker(t, rb.path).localPolicy().Policy.Revision; got != "14" {
 		t.Fatalf("the failed set left revision %q on disk, want %q", got, "14")
 	}
-	if _, err := rb.b.setLocalPolicy(paidCeilingDoc(t, rb.b, "3")); err != nil {
+	if _, err := setCurrent(rb.b, paidCeilingDoc(t, rb.b, "3")); err != nil {
 		t.Fatalf("set after the failure: %v", err)
 	}
 	if got := rb.b.localPolicy().Policy.Revision; got != "15" {
@@ -1739,7 +1954,7 @@ func TestPolicyRevisionAssignment(t *testing.T) {
 				t.Fatal(err)
 			}
 			doc["revision"] = supplied
-			policy, err := rb.b.setLocalPolicy(mustJSON(doc))
+			policy, err := setCurrent(rb.b, mustJSON(doc))
 			if err != nil {
 				t.Fatalf("set with supplied revision %q: %v", supplied, err)
 			}
@@ -1752,7 +1967,7 @@ func TestPolicyRevisionAssignment(t *testing.T) {
 	t.Run("a clock past the previous revision wins", func(t *testing.T) {
 		rb := newRoutedBroker(t)
 		setClock(rb.b, 1<<60)
-		policy, err := rb.b.setLocalPolicy(paidCeilingDoc(t, rb.b, "5"))
+		policy, err := setCurrent(rb.b, paidCeilingDoc(t, rb.b, "5"))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1779,9 +1994,10 @@ func TestPolicyRevisionAssignment(t *testing.T) {
 		}
 		for i, tc := range supplied {
 			snapshot := rb.peerSnapshot(t)
+			base := snapshot["revision"]
 			snapshot[tc.key] = tc.value
 			snapshot["idle"].(map[string]any)["unloadAfterMinutes"] = i + 1
-			if _, errText := rb.relay(t, "set", map[string]any{"policy": snapshot}); errText != "" {
+			if _, errText := rb.relay(t, "set", map[string]any{"policy": snapshot, "expectedPersistedRevision": base}); errText != "" {
 				t.Fatalf("relayed set with %s revision: %s", tc.name, errText)
 			}
 			got := rb.b.localPolicy().Policy
@@ -1801,7 +2017,7 @@ func TestPolicyRevisionAssignment(t *testing.T) {
 		}
 		delete(doc, "revision")
 		doc["Revision"] = 5
-		policy, err := rb.b.setLocalPolicy(mustJSON(doc))
+		policy, err := setCurrent(rb.b, mustJSON(doc))
 		if err != nil {
 			t.Fatalf("set with a numeric Revision: %v", err)
 		}
@@ -1812,7 +2028,7 @@ func TestPolicyRevisionAssignment(t *testing.T) {
 
 	t.Run("a restart reloads the revision that was acknowledged", func(t *testing.T) {
 		rb := newRoutedBroker(t)
-		policy, err := rb.b.setLocalPolicy(paidCeilingDoc(t, rb.b, "5"))
+		policy, err := setCurrent(rb.b, paidCeilingDoc(t, rb.b, "5"))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1827,7 +2043,7 @@ func TestPolicyRevisionAssignment(t *testing.T) {
 	t.Run("overflow is an error and changes nothing", func(t *testing.T) {
 		rb := newBrokerOnFile(t, strings.Replace(routedPolicyDocument, `"revision": "12"`, `"revision": "9223372036854775807"`, 1))
 		before := rb.fileBytes(t)
-		if _, err := rb.b.setLocalPolicy(paidCeilingDoc(t, rb.b, "5")); err == nil {
+		if _, err := setCurrent(rb.b, paidCeilingDoc(t, rb.b, "5")); err == nil {
 			t.Fatal("a set at the maximum revision succeeded")
 		}
 		if got := rb.b.localPolicy().Policy.Revision; got != "9223372036854775807" {
@@ -1976,7 +2192,7 @@ func TestPolicyRecovery(t *testing.T) {
 	t.Run("a paired node cannot complete recovery", func(t *testing.T) {
 		rb := newBrokerOnFile(t, corruptPaused)
 		before := rb.fileBytes(t)
-		if result, errText := rb.relay(t, "set", map[string]any{"policy": rb.peerSnapshot(t)}); errText == "" {
+		if result, errText := rb.relaySet(t, rb.peerSnapshot(t)); errText == "" {
 			t.Fatalf("a relayed set was accepted during recovery: %s", result)
 		}
 		if !rb.b.localPolicy().RecoveryRequired || !bytes.Equal(rb.fileBytes(t), before) {
@@ -1991,7 +2207,7 @@ func TestPolicyRecovery(t *testing.T) {
 			t.Fatal(err)
 		}
 		doc["idle"].(map[string]any)["unloadAfterMinutes"] = 7
-		policy, err := rb.b.setLocalPolicy(mustJSON(doc))
+		policy, err := setCurrent(rb.b, mustJSON(doc))
 		if err != nil {
 			t.Fatalf("explicit set: %v", err)
 		}
@@ -2013,7 +2229,7 @@ func TestPolicyRecovery(t *testing.T) {
 		rb := newBrokerOnFile(t, corruptAvailable)
 		before := rb.fileBytes(t)
 		setReplacer(rb.b, durablefile.Replacer{Replace: func(string, string) error { return errPublish }})
-		_, err := rb.b.setLocalPolicy(mustJSON(rb.b.localPolicy().Policy))
+		_, err := setCurrent(rb.b, mustJSON(rb.b.localPolicy().Policy))
 		setReplacer(rb.b, durablefile.Replacer{})
 		if !errors.Is(err, errPublish) {
 			t.Fatalf("set error = %v, want the injected failure", err)
@@ -2028,7 +2244,7 @@ func TestPolicyRecovery(t *testing.T) {
 		setClock(before.b, 0)
 		issued := map[string]bool{}
 		for i := 1; i <= 3; i++ {
-			policy, err := before.b.setLocalPolicy(mustJSON(map[string]any{"version": 2, "idle": map[string]any{"unloadAfterMinutes": i}}))
+			policy, err := setCurrent(before.b, mustJSON(map[string]any{"version": 2, "idle": map[string]any{"unloadAfterMinutes": i}}))
 			if err != nil {
 				t.Fatalf("set %d: %v", i, err)
 			}
@@ -2042,7 +2258,7 @@ func TestPolicyRecovery(t *testing.T) {
 		}
 		after := freshBroker(t, before.path)
 		setClock(after, 1_000_000)
-		policy, err := after.setLocalPolicy(mustJSON(map[string]any{"version": 2}))
+		policy, err := setCurrent(after, mustJSON(map[string]any{"version": 2}))
 		if err != nil {
 			t.Fatalf("recovering set: %v", err)
 		}

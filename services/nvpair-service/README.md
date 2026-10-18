@@ -50,6 +50,20 @@ nvpair-service stop                         # service/stop: stop the broker clea
 nvpair-service --version
 ```
 
+`policy:set` is conditional: it must carry `expectedPersistedRevision`, the
+`policy.revision` of the `policy:get` the new policy is based on. Read the
+policy first, edit it, then send it back with that revision:
+
+```sh
+nvpair-service call policy:get '{}'
+nvpair-service call policy:set '{"expectedPersistedRevision":"1792285135482000000","policy":{...}}'
+```
+
+A set without the field is refused with `-32602`. A set whose revision is no
+longer the persisted one is refused with a `policy conflict:` error that names
+the current revision and changes nothing; call `policy:get` again, review the
+policy and resubmit.
+
 Clients normally start it themselves: `servicectl.ConnectOrStart` dials the
 endpoint and, when nothing answers, starts the service detached — its own
 session on Unix (`Setsid`), `DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP |
@@ -298,6 +312,15 @@ through `policy:get`. They assert that:
   persists it across restart, and resuming returns, publishes and stores the
   available state. The observer waits for the final state while retaining the
   intermediate draining event.
+- A `policy:set` based on a revision another client has since replaced returns a
+  `policy conflict:` error naming the persisted revision and preserves the
+  complete policy/live snapshot and exact stored bytes; a set based on the
+  reloaded revision then succeeds. A `policy:set` without
+  `expectedPersistedRevision` returns `-32602` and changes neither.
+- With a copied `nvpair-proxy` fronting ollama (the proxy variant of the
+  fixture; the Ollama facade picks a free port), `policy:get` and the `policy:set`
+  result report `activation` `active` with `activeRevision` equal to the
+  persisted `policy.revision` after a set, a pause and a resume.
 - CLI `call policy:get '{}'` transports the complete updated policy through
   the fixture's private endpoint.
 - Detaching the command client leaves the updated policy readable on the
@@ -310,7 +333,9 @@ transports, so they assert which errors are retained and which identities are
 recovered without launching a process or opening an endpoint. The lifecycle
 cases instead run real copied processes, so the verified process absence and
 retained bundles they check come from the fixture's own process inventory and
-endpoint.
+endpoint. The proxy variant of the fixture also copies `nvpair-proxy` into the
+bundle and passes `--proxy-path <copied proxy> --proxy-engines ollama` instead of
+`--proxy-engines=`.
 
 Each lifecycle case copies only `nvpair-service`, `nvpair-ui-broker` and
 `nvpair-node-scanner` into a fresh temporary bundle, then launches the copied

@@ -203,7 +203,9 @@ proxy enforces it.
   nanoseconds, as a canonical decimal string. The clock term means a revision
   issued before a corrupt file was recovered is never issued again afterwards (a
   clock that moves backwards across a recovery can defeat this). A `revision` a
-  client or peer sends is ignored, as `availability` is. A revision at the
+  client or peer sends inside the policy document is ignored, as `availability`
+  is; the base revision a set is conditional on travels separately, as
+  `expectedPersistedRevision`. A revision at the
   signed 64-bit maximum cannot advance and the save fails. A restart reloads the
   revision that was stored. After a persisted availability change the broker
   sends `policy:changed` with the new revision, so editors refresh their base.
@@ -341,12 +343,14 @@ proxy enforces it.
   `tierPolicy` unchanged and no `routing` key; it is then merged into the stored
   policy, whose tiers (API entries included), `tierPolicy`, `routing`,
   `revision` and availability are kept exactly, and only the device fields
-  change. Any change to those protected sections, or any `routing` content, is
+  change. The relayed set also carries `expectedPersistedRevision`, compared
+  before the merge, so a peer holding an older projection is refused as a
+  conflict rather than merged. Any change to those protected sections, or any `routing` content, is
   rejected with nothing persisted and nothing pushed to the proxy. The merge runs
-  against the stored policy inside the same critical section as the save, so a
-  peer holding an older projection cannot restore protected content a local
-  `policy:set` has since changed: an unchanged `routing` is kept as it is now,
-  and stale `tiers` or `tierPolicy` are rejected. Local clients keep the full
+  against the stored policy inside the same critical section as the save, and
+  the revision check precedes it, so a peer holding an older projection cannot
+  restore protected content a local `policy:set` has since changed: the stale
+  set is a conflict and changes nothing. Local clients keep the full
   document, including in `policy:changed`.
 
 ## JSON-RPC Surface
@@ -478,7 +482,7 @@ node's policy or availability; the remote form carries no `active`.
 | Method | Params | Result |
 |---|---|---|
 | `policy:get` | `{ nodeId? }` | `{ policy, availability, recoveryRequired, activeRevision, activation, activationError? }` — `policy` is the persisted `nodepolicy.Policy` (`policy.revision` is the broker-assigned revision of the stored document); `availability` is live and may be `draining`; `recoveryRequired` is true while the node runs on the paused recovery policy because its file was unusable, until an explicit `policy:set` succeeds; `activeRevision` is the revision the running proxy acknowledged (empty when none) and `activation` is `active`, `pending` or `error` (Activation above). Relayed from a paired node, `policy` is the peer projection (`nodepolicy.PeerPolicy`: no `routing`, no API tier entries) and the activation fields are absent |
-| `policy:set` | `{ nodeId?, policy }` | `{ policy, activeRevision, activation, activationError? }` after validation, persisting and the bounded wait for the proxy to acknowledge that exact revision; `activation` describes `policy.revision` and is `pending` or `error` when it was saved but not activated; `policy.revision` against `activeRevision` shows both revisions. The wait is bounded, so a busy push slot yields `pending`. Fields the caller omits take their defaults. `policy.availability` and `policy.revision` are ignored (the persisted availability is kept: only `node:set-availability` changes it; the broker assigns the next revision). A save that cannot be published durably is an error and changes nothing. An invalid policy is error `-32602` and nothing changes. Relayed from a paired node, only device fields may change: `tiers` and `tierPolicy` must equal the projection and `routing` must be absent, or the set is rejected; the result is the peer projection |
+| `policy:set` | `{ nodeId?, policy, expectedPersistedRevision }` | `{ policy, activeRevision, activation, activationError? }` after the precondition, validation, persisting and the bounded wait for the proxy to acknowledge that exact revision; `activation` describes `policy.revision` and is `pending` or `error` when it was saved but not activated; `policy.revision` against `activeRevision` shows both revisions. The wait is bounded, so a busy push slot yields `pending`. Fields the caller omits take their defaults. `policy.availability` and `policy.revision` are ignored (the persisted availability is kept: only `node:set-availability` changes it; the broker assigns the next revision). `expectedPersistedRevision` is required: the canonical decimal `policy.revision` of the `policy:get` the draft is based on. A missing, null, empty or non-canonical value is error `-32602` before anything else, and there is no unconditional write. It is compared with the persisted `policy.revision` under the same lock as the save, so two writers holding the same revision cannot both succeed; a mismatch is error `-32000` whose message starts with `policy conflict:` and names the current persisted revision, with nothing validated, persisted, pushed or announced. The caller reloads and reviews the policy rather than resubmitting the old draft. A save that cannot be published durably is an error and changes nothing. An invalid policy is error `-32602` and nothing changes. Relayed from a paired node, `expectedPersistedRevision` is required in the same way (the `revision` of the projection it read) and a mismatch is returned as `policy conflict:` text in `policy:reply`; only device fields may change: `tiers` and `tierPolicy` must equal the projection and `routing` must be absent, or the set is rejected; the result is the peer projection |
 | `node:set-availability` | `{ nodeId?, state: "available" \| "paused" }` | `{ availability }` once the state is reached; pausing waits for the drain. A request replaced by a newer one fails with `superseded by a later node:set-availability request` |
 
 An omitted `nodeId`, or this node's own, acts locally; any other is relayed to

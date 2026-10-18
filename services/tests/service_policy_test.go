@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -64,6 +65,123 @@ func TestServicePolicy(t *testing.T) {
 		current := readPolicyBytes(t, path)
 		if !bytes.Equal(current, stored) {
 			t.Fatal("rejected policy changed persisted bytes")
+		}
+	})
+
+	t.Run("stale revision conflicts and leaves the stored policy as it was", func(t *testing.T) {
+		f := newServiceFixture(t)
+		f.start()
+		a := f.readyClient()
+		b := f.readyClient()
+		draft := servicePolicy(t, b)
+		next := servicePolicy(t, a)
+		next.Admission.MaxConcurrentPerModel = 6
+		next = setServicePolicy(t, a, next)
+		path := f.policyPath()
+		stored := assertStoredPolicy(t, path, next)
+		before := fetchServicePolicy(t, a)
+
+		draft.Admission.MaxConcurrentPerModel = 8
+		m := b.mustPolicyCall(t, "204", draft)
+		wantMessage := "policy conflict: the persisted revision is " + next.Revision + ", not the expected " + draft.Revision + "; reload the policy and review it before saving"
+		if m.Error == nil || m.Error.Code != -32000 || m.Error.Message != wantMessage || len(m.Result) != 0 {
+			t.Fatalf("stale policy:set response: error=%+v result_bytes=%d, want code -32000 and %q", m.Error, len(m.Result), wantMessage)
+		}
+		if !reflect.DeepEqual(fetchServicePolicy(t, b), before) {
+			t.Fatal("conflicting policy:set changed the policy/live snapshot")
+		}
+		if !bytes.Equal(readPolicyBytes(t, path), stored) {
+			t.Fatal("conflicting policy:set changed persisted bytes")
+		}
+		// The reloaded revision is accepted: a conflict is resolved by review, not retried as is.
+		reloaded := servicePolicy(t, b)
+		reloaded.Admission.MaxConcurrentPerModel = 8
+		setServicePolicy(t, b, reloaded)
+	})
+
+	t.Run("missing precondition is invalid params and leaves the stored policy as it was", func(t *testing.T) {
+		f := newServiceFixture(t)
+		f.start()
+		c := f.readyClient()
+		// A fresh node has no stored file yet; the first set writes it.
+		first := servicePolicy(t, c)
+		first.Admission.MaxConcurrentPerModel = 3
+		setServicePolicy(t, c, first)
+		before := fetchServicePolicy(t, c)
+		path := f.policyPath()
+		stored := readPolicyBytes(t, path)
+		params, err := json.Marshal(struct {
+			Policy nodepolicy.Policy `json:"policy"`
+		}{Policy: before.Policy})
+		if err != nil {
+			t.Fatal(err)
+		}
+		m, err := c.call("205", "policy:set", params, serviceCallTimeout)
+		if err != nil {
+			t.Fatalf("policy:set transport: %v", err)
+		}
+		if m.Error == nil || m.Error.Code != -32602 || !strings.Contains(m.Error.Message, "expectedPersistedRevision") || len(m.Result) != 0 {
+			t.Fatalf("policy:set without a precondition: error=%+v result_bytes=%d", m.Error, len(m.Result))
+		}
+		if !reflect.DeepEqual(fetchServicePolicy(t, c), before) || !bytes.Equal(readPolicyBytes(t, path), stored) {
+			t.Fatal("refused policy:set changed the snapshot or persisted bytes")
+		}
+	})
+
+	t.Run("a real proxy activates the persisted revision after set, pause and resume", func(t *testing.T) {
+		f := newProxyServiceFixture(t)
+		f.start()
+		c := f.readyClient()
+		assertActive := func(step string) servicePolicySnapshot {
+			t.Helper()
+			deadline := time.Now().Add(serviceCallTimeout)
+			for {
+				got := fetchServicePolicy(t, c)
+				if got.Activation == "active" && got.ActiveRevision == got.Policy.Revision {
+					return got
+				}
+				if time.Now().After(deadline) {
+					t.Fatalf("after %s the proxy never activated the persisted revision: revision=%q activation=%q activeRevision=%q", step, got.Policy.Revision, got.Activation, got.ActiveRevision)
+				}
+				time.Sleep(50 * time.Millisecond)
+			}
+		}
+		assertActive("startup")
+
+		want := servicePolicy(t, c)
+		want.Admission.MaxConcurrentPerModel = 4
+		started := time.Now().UnixNano()
+		m := c.mustPolicyCall(t, "206", want)
+		finished := time.Now().UnixNano()
+		if m.Error != nil {
+			t.Fatalf("policy:set RPC error: %+v", m.Error)
+		}
+		var set struct {
+			Policy         nodepolicy.Policy `json:"policy"`
+			Activation     string            `json:"activation"`
+			ActiveRevision string            `json:"activeRevision"`
+		}
+		if err := json.Unmarshal(m.Result, &set); err != nil {
+			t.Fatalf("decode policy:set: %v", err)
+		}
+		assertNextRevision(t, want.Revision, set.Policy.Revision, started, finished)
+		if set.Activation != "active" || set.ActiveRevision != set.Policy.Revision {
+			t.Fatalf("policy:set result activation=%q activeRevision=%q, want active at %q", set.Activation, set.ActiveRevision, set.Policy.Revision)
+		}
+		afterSet := assertActive("policy:set")
+		if afterSet.Policy.Revision != set.Policy.Revision {
+			t.Fatalf("policy:get revision %q, want the set's %q", afterSet.Policy.Revision, set.Policy.Revision)
+		}
+
+		setServiceAvailability(t, c, nodepolicy.Paused)
+		paused := assertActive("pause")
+		if paused.Availability != nodepolicy.Paused || paused.Policy.Revision == afterSet.Policy.Revision {
+			t.Fatalf("pause: availability=%q revision=%q, want paused with a new revision after %q", paused.Availability, paused.Policy.Revision, afterSet.Policy.Revision)
+		}
+		setServiceAvailability(t, c, nodepolicy.Available)
+		resumed := assertActive("resume")
+		if resumed.Availability != nodepolicy.Available || resumed.Policy.Revision == paused.Policy.Revision {
+			t.Fatalf("resume: availability=%q revision=%q, want available with a new revision after %q", resumed.Availability, resumed.Policy.Revision, paused.Policy.Revision)
 		}
 	})
 
@@ -147,11 +265,19 @@ func fetchServicePolicy(t *testing.T, c *serviceRPCClient) servicePolicySnapshot
 	return decodeServicePolicySnapshot(t, c.mustCall(t, "201", "policy:get", nil))
 }
 
+// mustPolicyCall sends policy based on its own revision, which callers take
+// from the preceding policy:get.
 func (c *serviceRPCClient) mustPolicyCall(t *testing.T, id string, policy nodepolicy.Policy) *jsonrpc.Message {
 	t.Helper()
+	return c.mustPolicyCallBased(t, id, policy, policy.Revision)
+}
+
+func (c *serviceRPCClient) mustPolicyCallBased(t *testing.T, id string, policy nodepolicy.Policy, expected string) *jsonrpc.Message {
+	t.Helper()
 	params, err := json.Marshal(struct {
-		Policy nodepolicy.Policy `json:"policy"`
-	}{Policy: policy})
+		Policy                    nodepolicy.Policy `json:"policy"`
+		ExpectedPersistedRevision string            `json:"expectedPersistedRevision"`
+	}{Policy: policy, ExpectedPersistedRevision: expected})
 	if err != nil {
 		t.Fatalf("encode complete policy: %v", err)
 	}

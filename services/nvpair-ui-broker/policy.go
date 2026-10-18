@@ -376,6 +376,43 @@ type policyParams struct {
 	NodeID string          `json:"nodeId,omitempty"`
 	Policy json.RawMessage `json:"policy,omitempty"`
 	State  string          `json:"state,omitempty"`
+	// ExpectedPersistedRevision is the policy.revision of the policy:get the
+	// caller's draft is based on. Only policy:set reads it; it stays raw so a
+	// stray value on another method is ignored rather than rejected.
+	ExpectedPersistedRevision json.RawMessage `json:"expectedPersistedRevision,omitempty"`
+}
+
+// policyConflictError reports a policy:set whose draft is based on a revision
+// other than the persisted one. The caller must reload and review the policy;
+// resubmitting the old draft would restore what a newer write removed.
+type policyConflictError struct{ expected, current string }
+
+func (e *policyConflictError) Error() string {
+	return fmt.Sprintf("policy conflict: the persisted revision is %s, not the expected %s; reload the policy and review it before saving", e.current, e.expected)
+}
+
+// parseExpectedRevision reads the precondition of a policy:set. A missing,
+// null, empty or non-canonical revision is refused: there is no unconditional
+// write.
+func parseExpectedRevision(raw json.RawMessage) (string, error) {
+	var revision string
+	if len(raw) == 0 || json.Unmarshal(raw, &revision) != nil || revision == "" {
+		return "", errors.New("expectedPersistedRevision is required: send the revision from the preceding policy:get")
+	}
+	if _, err := nodepolicy.ParseNanoUSD(revision); err != nil {
+		return "", errors.New("expectedPersistedRevision must be a canonical decimal string: 0 or a nonzero leading digit, within the signed 64-bit range")
+	}
+	return revision, nil
+}
+
+// checkExpectedRevision is the compare-and-set of every policy:set. It runs
+// first in the build step of persistPolicy, under r.mu, so two writers holding
+// the same revision cannot both pass.
+func checkExpectedRevision(stored nodepolicy.Policy, expected string) error {
+	if stored.Revision != expected {
+		return &policyConflictError{expected: expected, current: stored.Revision}
+	}
+	return nil
 }
 
 func (b *Broker) localPolicy() policyGetResult {
@@ -413,9 +450,17 @@ func (b *Broker) peerPolicy() peerPolicyGetResult {
 // not part of what policy:set changes — node:set-availability owns it — so the
 // incoming value is ignored and the persisted one kept. The same holds for the
 // revision, which only the broker assigns. Omitted fields take their defaults,
-// exactly as when the file is loaded.
-func (b *Broker) setLocalPolicy(raw json.RawMessage) (nodepolicy.Policy, error) {
+// exactly as when the file is loaded. The write applies only when the persisted
+// revision is the one the caller's draft is based on (expected).
+func (b *Broker) setLocalPolicy(raw, expected json.RawMessage) (nodepolicy.Policy, error) {
+	want, err := parseExpectedRevision(expected)
+	if err != nil {
+		return nodepolicy.Policy{}, err
+	}
 	return b.persistPolicy(func(stored nodepolicy.Policy) (nodepolicy.Policy, error) {
+		if err := checkExpectedRevision(stored, want); err != nil {
+			return nodepolicy.Policy{}, err
+		}
 		if len(raw) == 0 {
 			return nodepolicy.Policy{}, fmt.Errorf("policy is required")
 		}
@@ -444,11 +489,19 @@ func (b *Broker) setLocalPolicy(raw json.RawMessage) (nodepolicy.Policy, error) 
 // setPeerPolicy applies a paired node's policy:set. The peer may change device
 // fields only: its tiers and tierPolicy must equal the peer projection of the
 // stored policy and it must send no routing section; the protected sections are
-// restored from the stored policy.
-func (b *Broker) setPeerPolicy(raw json.RawMessage) (nodepolicy.Policy, error) {
+// restored from the stored policy. Like a local set, it applies only against
+// the persisted revision the peer's draft is based on (expected).
+func (b *Broker) setPeerPolicy(raw, expected json.RawMessage) (nodepolicy.Policy, error) {
+	want, err := parseExpectedRevision(expected)
+	if err != nil {
+		return nodepolicy.Policy{}, err
+	}
 	r := b.nodePolicyRuntime()
 	return b.persistPolicy(func(stored nodepolicy.Policy) (nodepolicy.Policy, error) {
 		// build runs under r.mu. Recovery is the owner's to complete.
+		if err := checkExpectedRevision(stored, want); err != nil {
+			return nodepolicy.Policy{}, err
+		}
 		if r.recoveryRequired {
 			return nodepolicy.Policy{}, errors.New("this node's policy needs recovery; set it from this node")
 		}
@@ -614,8 +667,12 @@ func (b *Broker) dispatchPolicy(ctx context.Context, method string, p policyPara
 	case methodPolicyGet:
 		return b.localPolicy(), nil
 	case methodPolicySet:
-		policy, err := b.setLocalPolicy(p.Policy)
+		policy, err := b.setLocalPolicy(p.Policy, p.ExpectedPersistedRevision)
 		if err != nil {
+			var conflict *policyConflictError
+			if errors.As(err, &conflict) {
+				return nil, err
+			}
 			return nil, &invalidParamsError{err}
 		}
 		return policySetResult{Policy: policy, policyActivation: b.activationOf(policy.Revision)}, nil
@@ -756,7 +813,7 @@ func (b *Broker) servePolicyRelay(ctx context.Context, req policyRelayRequest) (
 	case methodPolicyGet:
 		return b.peerPolicy(), nil
 	case methodPolicySet:
-		policy, err := b.setPeerPolicy(p.Policy)
+		policy, err := b.setPeerPolicy(p.Policy, p.ExpectedPersistedRevision)
 		if err != nil {
 			return nil, err
 		}

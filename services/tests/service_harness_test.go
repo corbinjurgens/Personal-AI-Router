@@ -60,6 +60,7 @@ type serviceFixture struct {
 	t                                    *testing.T
 	dir, configDir, clusterDir, endpoint string
 	servicePath, brokerPath, scannerPath string
+	proxyPath                            string
 	env                                  []string
 	inventory                            *serviceProcessInventory
 	children                             []*serviceChild
@@ -122,7 +123,37 @@ func newServiceFixture(t *testing.T) *serviceFixture {
 }
 
 func (f *serviceFixture) args() []string {
-	return []string{"--broker-path", f.brokerPath, "--endpoint", f.endpoint, "--log-dir", filepath.Join(f.dir, "logs"), "--", "--scanner-path", f.scannerPath, "--cluster-dir", f.clusterDir, "--proxy-engines="}
+	args := []string{"--broker-path", f.brokerPath, "--endpoint", f.endpoint, "--log-dir", filepath.Join(f.dir, "logs"), "--", "--scanner-path", f.scannerPath, "--cluster-dir", f.clusterDir}
+	if f.proxyPath != "" {
+		return append(args, "--proxy-path", f.proxyPath, "--proxy-engines", "ollama")
+	}
+	return append(args, "--proxy-engines=")
+}
+
+// newProxyServiceFixture is newServiceFixture with the broker fronting ollama
+// through a copied nvpair-proxy, so policy activation is acknowledged by a real
+// proxy. The proxy listens on the ollama facade port, so the caller skips when
+// that port is busy.
+func newProxyServiceFixture(t *testing.T) *serviceFixture {
+	t.Helper()
+	f := newServiceFixture(t)
+	data, err := os.ReadFile(proxyBin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(proxyBin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(f.dir, filepath.Base(proxyBin))
+	if err := os.WriteFile(path, data, info.Mode().Perm()); err != nil {
+		t.Fatal(err)
+	}
+	if f.proxyPath, err = canonicalServicePath(path); err != nil {
+		t.Fatal(err)
+	}
+	f.inventory.paths = append(f.inventory.paths, f.proxyPath)
+	return f
 }
 
 func (f *serviceFixture) startChild(args ...string) *serviceChild {
@@ -527,6 +558,9 @@ func decodeServicePolicy(t *testing.T, m *jsonrpc.Message) nodepolicy.Policy {
 type servicePolicySnapshot struct {
 	Policy       nodepolicy.Policy       `json:"policy"`
 	Availability nodepolicy.Availability `json:"availability"`
+	// Activation and ActiveRevision say whether the proxy enforces Policy.Revision.
+	Activation     string `json:"activation"`
+	ActiveRevision string `json:"activeRevision"`
 }
 
 func decodeServicePolicySnapshot(t *testing.T, m *jsonrpc.Message) servicePolicySnapshot {
