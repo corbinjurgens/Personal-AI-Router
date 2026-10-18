@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"nvpair-shared/clustertrust"
+	"nvpair-shared/performancewire"
 )
 
 // eventsPath is the single inter-node endpoint (spec §7.2).
@@ -60,7 +61,8 @@ type Server struct {
 	// mTLS unconditionally (§7.2); the mesh decides per request WHICH callers are
 	// pinned members, and per handshake whether this node can serve at all — never
 	// once at bind time, because a node joins and leaves while this process runs.
-	mesh *clustertrust.Mesh
+	mesh        *clustertrust.Mesh
+	performance *performanceRelay
 
 	srv *http.Server
 }
@@ -134,9 +136,16 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+	// Read one extra byte to detect truncation, including an otherwise valid
+	// JSON frame followed by enough whitespace to exceed the outer frame cap.
+	const maxFrameBytes = 1 << 20
+	body, err := io.ReadAll(io.LimitReader(r.Body, maxFrameBytes+1))
 	if err != nil {
 		s.badRequest(w, "read body: "+err.Error())
+		return
+	}
+	if len(body) > maxFrameBytes {
+		s.badRequest(w, "frame too large")
 		return
 	}
 
@@ -151,6 +160,18 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	}
 
 	switch {
+	case msg.Method == performancewire.MethodSummary:
+		if s.performance == nil {
+			http.Error(w, "broker unavailable", http.StatusInternalServerError)
+			return
+		}
+		s.performance.handleSummary(w, r, msg.Params)
+	case msg.Method == methodPerformanceCapabilities:
+		if s.performance == nil {
+			http.Error(w, "broker unavailable", http.StatusInternalServerError)
+			return
+		}
+		s.performance.capabilities(w, r, msg.Params)
 	case isLifecycleMethod(msg.Method):
 		s.handleLifecycle(w, &msg)
 	case msg.Method == MethodRemove:

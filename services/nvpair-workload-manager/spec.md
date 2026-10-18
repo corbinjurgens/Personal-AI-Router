@@ -114,6 +114,11 @@ All traffic is JSON-RPC 2.0. The local interface uses `stdin`/`stdout` (or a nam
 | `workloads:upsert` | — | — | After validated remote `workload:*` |
 | `workloads:remove` | Broker → WM; broadcast | Peer → WM; → `workloads:remove` | After validated remote `workloads:remove` |
 | `workloads:cancel` | Broker → WM; sent to the origin (or every peer) | Peer → WM; → `workloads:cancel` | After validated, deduplicated remote `workloads:cancel` |
+| `performance:publish` | Broker → WM; full own `Summary` in params | — | — |
+| `performance:capabilities` | — | Authenticated support probe; params `{}` | — |
+| `performance:summary` | — | Authenticated measuring host's full `Summary` | — |
+| `performance:received` | — | — | Accepted higher-revision replacement, with admission identity |
+| `performance:status` | — | — | Receiver-owned freshness or admission retirement |
 
 - **Inbound `workload:*` (Broker → WM)**: local-origin transitions to broadcast cluster-wide; `params.workloadInfo` is a full `Workload`. No response.
 - **`workloads:upsert` (WM → Broker)**: emitted for remote-origin lifecycle updates — each validated inter-node `workload:*` is translated (not forwarded) into an upsert. Not used on inter-node HTTP or Broker `stdin`. Params: `workloadInfo` copied unchanged from the peer event. Semantics: upsert into the Broker catalog by `Workload.id` (create if absent, replace if present) — the latest metadata/state, not a replay of the method name.
@@ -231,6 +236,132 @@ Response: `200 OK`.
 - JSON-RPC `method` names are namespaced and additive — new event types are new methods, never changes to existing ones.
 - `Workload` schema changes are backward compatible (new fields optional, unknown fields ignored); breaking changes require a new version (`/v2`).
 
+### 7.4 Performance summary transport
+
+This is a separate bounded transport for own performance aggregates, not a
+workload lifecycle event or sample stream. The unchanged schema and strict
+validation limits live in `shared/performancewire/wire.go`; the manager does not
+aggregate measurements, persist history, rank nodes or project a UI cache.
+
+**Local publication:** `performance:publish` takes the full `Summary` directly
+in params. The configured local host UUID, certificate principal and
+`measuringHost` must agree. `admissionIncarnation` must be the canonical positive
+decimal `uint64` returned by `Mesh.LocalAdmissionEpoch()`, with no signs, leading
+zeroes, spaces or alternate number formats. Invalid requests return JSON-RPC
+`-32602`; accepted requests return `null`. Notifications have no reply. A lower
+local revision or changed contents at the same revision is rejected. An empty
+`entries: []` replaces every prior entry. Local admission changes withhold pending
+bytes until the broker republishes for the current epoch; temporary authority
+failure preserves the stored revision/content and publication age anchor.
+The own-summary slot is scoped to the broker's persisted host/epoch revision;
+same-epoch certificate replacement may preserve it because every actual send is
+fenced by the current shared Mesh admission identity.
+
+Each summary POST requires exactly one `X-PAIR-Performance-Elapsed-Ms` header.
+Its value is canonical nonnegative decimal milliseconds on the sender's
+monotonic clock since receipt of that revision's broker publication; zero is
+valid. Identical same-revision publications must not reset the anchor. A new
+revision starts a new anchor. Do not send once elapsed time exceeds
+`performancewire.RetentionMs` (seven days). Reject a missing or duplicate
+header, signs, leading zeroes, whitespace, alternate number formats, negative
+values and values above retention with `400`. Accept the exact retention
+boundary. This transport metadata does not change the summary wire schema or
+its source ages.
+The existing mTLS channel authenticates this header; no extra signature or
+synchronized node clocks are required because an offset only makes data older.
+
+**Sender:** one latest full snapshot and one pending wake token coalesce all
+intermediate publications. Discovery of a new workload peer wakes a backfill;
+the 30-second timer wakes a heartbeat. A dedicated sender round covers all
+current admitted targets, with four concurrent requests and one summary attempt
+per peer. Each summary POST snapshots the newest value after any capability probe, just before
+constructing the request. Later publications cannot change an already dispatched
+request. Network delays may coalesce/delay subsequent performance rounds; the
+timer and receiver freshness sweeps continue independently. This path uses a
+separate `PeerServiceClient` pool on the same `ServiceWorkload`, peer routes,
+direct/reverse policy, port and events endpoint. Discovery changes and Mesh
+changes retire both pools. It never enqueues into, acquires locks from, or
+consumes connection slots from the lifecycle FIFO or direct cancel path.
+
+**Support exchange:** before the first summary per route generation and opaque
+Mesh admission identity, send `performance:capabilities` with params `{}` over
+the authenticated events endpoint. The response is `200` with exactly
+`{"version":1}` (bounded to 1024 bytes, strict JSON and no trailing data).
+`400` or `501` caches unsupported until the route/admission changes. All other
+failures, invalid replies and unsupported schema versions consume a probe
+budget of three, at most one probe per round; exhausted peers receive no more
+probes until that identity changes. There is no warning/retry backlog. No
+descriptor or mDNS capability fields are added. An unsupported peer has no
+accepted summary and therefore remains unknown at the broker.
+Retain negotiation state only for the current peer set. The receiver's
+128-record bound does not cap outbound targets or negotiation coverage.
+Temporary authority lookup failure withholds traffic while preserving the last
+known negotiation result and attempt budget. Reset only upon a positively
+observed admission identity or route generation change; prune departed targets.
+
+**Inbound authority and limits:** the certificate must still match its pin, the
+peer must have a current durable admission, `measuringHost` must equal the
+authenticated principal, and the canonical wire epoch must match
+`Mesh.PeerAdmissionEpoch(principal)`. Host equality relies on the existing
+authenticated `peer_services` descriptor contract, not on the broker relay's
+legacy host-to-principal mapping. Forwarded summaries and unequal legacy host
+aliases fail closed; the sender also skips those aliases. Capture and compare
+`Mesh.PeerServiceIncarnation(principal)` before processing and around broker
+emission, repeating pin checks. No cluster files are read by this component.
+`performancewire.DecodeSummary` enforces the 128 KiB params cap, field validation,
+unknown-field rejection and trailing-data rejection. Read the outer frame with
+a 1 MiB cap plus overflow byte, rejecting overflow instead of silently
+truncating. Invalid data returns `400`, unauthorized data `403`, receiver state
+capacity exhaustion `503`, and broker write failure `500`.
+
+**Broker notifications:** a higher revision emits `performance:received` with
+exact params `{summary: Summary, admissionIdentity: string, sampleElapsedMs: int64}`.
+Then emit `performance:status` with exactly:
+
+```text
+{ measuringHost: string, admissionIncarnation: string,
+  admissionIdentity: string, status: "fresh" | "stale" | "unknown",
+  revision: int64, sampleElapsedMs: int64, lastSeenAgeMs: int64 }
+```
+
+The opaque `admissionIdentity` is a receiver-local comparison token, not the
+sender's decimal epoch. The broker must revalidate it through Mesh before
+consuming a notification. If authority changes during a pipe write, return
+`403`, emit `unknown` for the just-emitted identity, and retain no accepted
+payload for that identity. A completed pipe write cannot be retracted. A failed
+replacement write leaves its revision retryable. A replacement already written
+successfully is not emitted again merely because its following status failed.
+Accepted summaries and freshness statuses are never rebroadcast.
+
+**Revisions, freshness and bounds:** lower revisions return `200` without
+refreshing reachability. Equal revisions must have identical canonical content;
+an identical heartbeat emits status only, never another aggregate replacement.
+Only a newly authoritatively accepted sender epoch resets its revision floor.
+Receiver-local readmission or certificate changes retire payloads while keeping
+the current sender epoch's revision floor and digest, including across pin loss.
+A missing local pin cannot prove a new sender epoch. State is capped at 128
+current or retired peer records; new hosts receive `503` at capacity rather than
+evicting revision floors. State is discarded at process exit. There is no durable
+performance cache here.
+
+Track time with receiver-monotonic timestamps. An accepted heartbeat refreshes
+reachability and `lastSeenAgeMs`; at 90 seconds of silence a 30-second sweep emits
+`stale` at its first tick at or after the boundary. The timer is independent of
+network fan-out. `sampleElapsedMs` begins with the sender's elapsed header and
+advances with receiver-monotonic time from this revision's original accepted
+receipt, including across equal-revision heartbeats and receiver-local
+authority changes. A duplicate with greater elapsed time raises the offset;
+one with less elapsed time never makes samples younger. Carry this metadata in
+both broker notifications. Add it to the source sample ages when
+consuming; do not rewrite their wire ages or `newestObservedAtMs`. Authority loss
+emits `unknown`, clearing cached payloads. Failed stale/unknown status writes
+retry on a later sweep. T3b must stamp the canonical current local epoch,
+publish the latest full own snapshot, consume these notifications and implement
+its admission-fenced cache and freshness projection. On broker or manager
+restart, rebase saved source ages by elapsed time since persistence using
+monotonic time when available, otherwise wall-clock elapsed time clamped to zero
+or greater. Persisted samples must not become younger after restart.
+
 ## 8. Dependencies
 - **Upstream**: UI Broker — the parent process that launches the Workload Manager as a child and feeds it local events over `stdin`.
 - **Downstream**: local UI Broker (consumes `workloads:upsert` / `workloads:remove` on `stdout`); peer Workload Manager instances (receive broadcasts via `POST /v1/workloads/events`).
@@ -240,7 +371,7 @@ Response: `200 OK`.
   - **Multicast-capable network** — required by the discovery daemon's browse, not by this service directly. Where multicast is unavailable the daemon reports no peers, the snapshots are empty, and broadcast has no targets.
 
 ## 9. Data Ownership
-- **Owned**: none durable — only transient in-memory state (the bounded dedup index and the discovered/target peer set). `Workload` entities are not owned.
+- **Owned**: none durable — only transient in-memory state (the bounded dedup index, discovered/target peer set, and bounded performance snapshot, negotiation and receiver revision/freshness state). `Workload` entities are not owned.
 - **Source of truth**: no — the Broker is authoritative; this service is a stateless relay.
 - **Storage**: none — in-memory state is discarded on exit.
 
