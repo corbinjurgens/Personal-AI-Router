@@ -63,6 +63,50 @@ type PeerServiceClient struct {
 	idle    int
 }
 
+// ErrPeerSlotOccupied reports that a request bounded by WithPeerSlotWait found
+// every slot for its peer and service in use until the bound elapsed. Nothing
+// was dialed or sent, and the request holds no slot.
+var ErrPeerSlotOccupied = errors.New("peer service slots are occupied")
+
+type peerSlotWaitKey struct{}
+
+// WithPeerSlotWait bounds how long a PeerServiceClient request made with ctx
+// waits for one of the peerMaxConnsPerHost slots shared by its peer and
+// service. A wait of zero or less takes a free slot or fails at once. When the
+// bound elapses first, the request fails with ErrPeerSlotOccupied; when ctx
+// ends first, it fails with ctx's error. Without this option a request waits
+// until a slot frees or ctx ends.
+func WithPeerSlotWait(ctx context.Context, wait time.Duration) context.Context {
+	return context.WithValue(ctx, peerSlotWaitKey{}, wait)
+}
+
+// acquirePeerSlot reserves one of slots for the caller, who must release it by
+// receiving from slots.
+func acquirePeerSlot(ctx context.Context, slots chan struct{}) error {
+	var expired <-chan time.Time
+	if wait, bounded := ctx.Value(peerSlotWaitKey{}).(time.Duration); bounded {
+		select {
+		case slots <- struct{}{}:
+			return nil
+		default:
+		}
+		if wait <= 0 {
+			return ErrPeerSlotOccupied
+		}
+		timer := time.NewTimer(wait)
+		defer timer.Stop()
+		expired = timer.C
+	}
+	select {
+	case slots <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-expired:
+		return ErrPeerSlotOccupied
+	}
+}
+
 type peerServiceKey struct {
 	uuid    string
 	service noderec.ServiceKey
@@ -264,10 +308,8 @@ func (t *peerServiceTransport) RoundTrip(req *http.Request) (*http.Response, err
 	if req.URL.Scheme != scheme || req.URL.Host != identity.route.Address {
 		return nil, &ReverseUnavailableError{PeerUUID: key.uuid, Cause: errors.New("URL does not match current peer service endpoint")}
 	}
-	select {
-	case h.slots <- struct{}{}:
-	case <-req.Context().Done():
-		return nil, req.Context().Err()
+	if err := acquirePeerSlot(req.Context(), h.slots); err != nil {
+		return nil, err
 	}
 	release := func() { <-h.slots }
 	if err := reverseDialContextError(req.Context()); err != nil {
