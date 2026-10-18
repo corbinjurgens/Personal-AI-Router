@@ -134,13 +134,6 @@ func (a *admissionController) signalLocked() {
 
 // --- broker inputs -------------------------------------------------------
 
-func (a *admissionController) setPolicy(p nodepolicy.Policy) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	a.policy = p
-	a.signalLocked()
-}
-
 // activatePolicy installs p, whose revision becomes the active one, unless the
 // active revision is newer: a policy that arrives out of order is refused and
 // the previous one stays. The policy and its revision change together, so a
@@ -161,7 +154,7 @@ func (a *admissionController) activatePolicy(p nodepolicy.Policy) error {
 }
 
 // currentPolicy snapshots the policy. Profiles and tiers are slices the
-// controller never mutates in place (setPolicy replaces the whole value), so a
+// controller never mutates in place (activatePolicy replaces the whole value), so a
 // shallow copy is safe to read without the lock.
 func (a *admissionController) currentPolicy() nodepolicy.Policy {
 	a.mu.Lock()

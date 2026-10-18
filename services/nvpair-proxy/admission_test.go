@@ -19,6 +19,15 @@ import (
 	"nvpair-shared/nodepolicy"
 )
 
+// setPolicy installs p without activatePolicy's revision order check, so a
+// test can give the controller any policy, including one with no revision.
+func (a *admissionController) setPolicy(p nodepolicy.Policy) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.policy = p
+	a.signalLocked()
+}
+
 // admHarness is a controller with recorded notifications and settable engine
 // health.
 type admHarness struct {
