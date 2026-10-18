@@ -126,6 +126,110 @@ Translated remote events are forwarded to the broker as:
 Duplicate events arriving from more than one peer are collapsed before they reach
 the broker, so a workload observed over several paths is reported once.
 
+## Performance summaries
+
+The broker can publish its latest complete own `performancewire.Summary` on
+stdin as `performance:publish`, with the summary directly in `params`. An
+optional JSON-RPC request receives `null` on acceptance or `-32602` for invalid
+data. A notification has no reply. This manager validates the measuring host
+against both its configured host UUID and current certificate principal, and
+requires `admissionIncarnation` to be the canonical positive decimal value of
+`Mesh.LocalAdmissionEpoch()`. It accepts increasing revisions and identical
+retransmissions; changing a revision's contents is invalid. Empty `entries: []`
+is a complete replacement, including removal of the previous entries.
+The own-summary slot belongs to the broker's persisted host/epoch revision;
+same-epoch certificate replacement preserves it while each actual transport
+dispatch is fenced by the current shared Mesh admission identity.
+
+Each summary POST carries exactly one `X-PAIR-Performance-Elapsed-Ms` header:
+canonical nonnegative decimal milliseconds elapsed on the sender's monotonic
+clock since it received that revision's broker publication. Identical
+same-revision publications preserve this anchor; a new revision resets it.
+The sender withholds a publication once its elapsed time exceeds the seven-day
+`performancewire.RetentionMs` window. The receiver returns `400` for a missing,
+duplicate, noncanonical, negative or out-of-window elapsed header, including
+signs, leading zeroes, spaces and alternate number formats. Zero and the exact
+retention boundary are valid. The header leaves the shared summary wire schema
+and its source ages unchanged.
+
+Performance uses the existing pinned direct/reverse workload service and
+`POST /v1/workloads/events`, with `performance:summary` and the unchanged shared
+summary schema. It has its own connection pool, a latest-summary slot and a
+coalesced wake token. A worker round covers all current admitted targets,
+using at most four simultaneous requests. No performance frame enters
+the lifecycle FIFO or holds its locks. Each peer gets one summary attempt per
+round; the next publish, discovery backfill or 30-second heartbeat sends the
+newest whole snapshot. Snapshot selection happens after capability negotiation,
+immediately before constructing that peer's summary POST. In-flight requests
+finish independently; pending intermediate snapshots are replaced. Slow peers
+can delay subsequent performance rounds, while the independent timer continues
+freshness sweeps and coalesces heartbeat wakes. Lifecycle ordering and direct
+cancel delivery retain their existing behavior.
+
+Support is negotiated once per authenticated admission and endpoint generation
+with `performance:capabilities`, `params: {}`, on the same endpoint. A compatible
+peer replies `200` with exactly `{"version":1}`. An older peer's `400` unknown
+method or `501` disables further probes for that route/admission. Other failures,
+including malformed or unsupported-version replies, permit at most three probe
+attempts, one per round. Negotiation failures produce no repeated warnings or
+summary POSTs. A changed route/admission permits a new negotiation. Absence of an
+accepted summary remains unknown at the broker, including for unsupported peers.
+Negotiation state is retained only for the current peer set; it does not impose
+the receiver's 128-record cap on outbound targets.
+
+Inbound summaries require a current pin and durable peer admission, not merely
+discovery presence. `measuringHost` must equal the authenticated certificate
+principal; the authenticated peer-services contract already binds the host UUID
+to that principal. Legacy discovery host aliases cannot assert a measuring
+identity, and outbound performance skips aliases whose host ID differs from the
+principal. The epoch must equal `Mesh.PeerAdmissionEpoch(principal)`. The manager
+uses `Mesh.PeerServiceIncarnation` and repeats pin checks around processing and
+broker emission. Forwarded summaries are rejected and accepted summaries are
+never gossiped. The receiver rejects unknown fields, malformed/trailing data and
+params over 128 KiB via `performancewire.DecodeSummary`; the outer HTTP frame is
+limited to 1 MiB with explicit overflow detection.
+
+The stdout contracts, intended for the broker's subsequent performance handler,
+are:
+
+| Notification | Exact params |
+| --- | --- |
+| `performance:received` | `{ summary: Summary, admissionIdentity: string, sampleElapsedMs: int64 }` — full replacement for a higher sender revision |
+| `performance:status` | `{ measuringHost: string, admissionIncarnation: string, admissionIdentity: string, status: "fresh" \| "stale" \| "unknown", revision: int64, sampleElapsedMs: int64, lastSeenAgeMs: int64 }` |
+
+`admissionIdentity` is the receiver-local opaque Mesh hash, not a wire epoch.
+The broker must revalidate it against current shared admission authority before
+consuming either notification. An authority change during a pipe write returns
+`403` and emits an `unknown` status for the just-written identity; a completed
+write cannot be retracted. Failed broker writes return `500`, keeping a new
+revision retryable; if only its status write failed, retrying emits status without
+re-emitting the already accepted replacement.
+
+A lower revision is ignored without refreshing reachability. An identical
+same-revision heartbeat emits freshness only; a changed same-revision summary
+returns `400`. Only a newly verified sender epoch resets the revision floor.
+Receiver-local admission/certificate changes retire cached payload bytes while
+preserving that sender epoch's revision floor and content digest, including
+across pin loss. A missing local pin cannot prove a new sender epoch. Receiver
+state is bounded to 128 current or retired peer records; additional records
+receive `503` until the process restarts. This manager owns no durable history.
+
+An accepted summary is fresh until 90 seconds of receiver-monotonic silence;
+the independent 30-second sweep emits `stale` at the first sweep at or after that
+boundary. A verified heartbeat refreshes reachability to `fresh` and resets
+`lastSeenAgeMs`, while `sampleElapsedMs` starts with the sender's elapsed header
+and advances using receiver-monotonic time from this revision's first accepted
+receipt. A duplicate can raise the elapsed offset but cannot make samples
+younger. Both notifications carry this elapsed metadata; the broker adds it to
+source entry ages. Heartbeats never rewrite source ages or observation
+timestamps. Authority loss emits `unknown` and retires payloads; failed status writes retry on a later
+sweep. No aggregation, persistence, scheduling or UI projection is implemented
+here. T3b must stamp the canonical current local epoch, publish full snapshots,
+consume these notifications and apply their admission/freshness fences. On a
+broker or manager restart, it must also rebase saved source ages by elapsed time
+since persistence, using monotonic time when available and otherwise wall-clock
+time clamped to zero or greater. Restart must not rejuvenate persisted samples.
+
 ## Testing
 
 ```bash

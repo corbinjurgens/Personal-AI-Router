@@ -509,3 +509,236 @@ func TestMeshPeerServiceIncarnationConcurrentRefresh(t *testing.T) {
 	}()
 	workers.Wait()
 }
+
+func TestMeshAdmissionEpochStableReadOnlySnapshot(t *testing.T) {
+	f := newIncarnationFixture(t)
+	paths := []string{"admission.json", "members.json", "trusted/peer.json", "node.crt", "node.key"}
+	before := make(map[string][]byte)
+	for _, path := range paths {
+		data, err := os.ReadFile(filepath.Join(f.dir, path))
+		if err != nil {
+			t.Fatalf("read before lookup: %v", err)
+		}
+		before[path] = data
+	}
+	if epoch, ok := f.mesh.LocalAdmissionEpoch(); !ok || epoch != 3 {
+		t.Fatalf("local epoch = %d, %v; want 3, true", epoch, ok)
+	}
+	if epoch, ok := f.mesh.PeerAdmissionEpoch("peer"); !ok || epoch != 7 {
+		t.Fatalf("peer epoch = %d, %v; want 7, true", epoch, ok)
+	}
+	for _, path := range paths {
+		data, err := os.ReadFile(filepath.Join(f.dir, path))
+		if err != nil {
+			t.Fatalf("read after lookup: %v", err)
+		}
+		if !bytes.Equal(data, before[path]) {
+			t.Fatalf("epoch lookup rewrote %s", path)
+		}
+	}
+}
+
+func TestMeshAdmissionEpochLocalWithoutPeers(t *testing.T) {
+	dir := t.TempDir()
+	certPEM, keyPEM, _ := genLeaf(t, "self")
+	writeIdentity(t, dir, certPEM, keyPEM)
+	writeAdmission(t, dir, "cluster", 11)
+	m := Open(dir)
+	if epoch, ok := m.LocalAdmissionEpoch(); !ok || epoch != 11 {
+		t.Fatalf("local epoch without peers = %d, %v; want 11, true", epoch, ok)
+	}
+	if epoch, ok := m.PeerAdmissionEpoch("peer"); ok || epoch != 0 {
+		t.Fatalf("absent peer epoch = %d, %v; want 0, false", epoch, ok)
+	}
+}
+
+func TestMeshAdmissionEpochSameCertificatePeerReadmission(t *testing.T) {
+	f := newIncarnationFixture(t)
+	f.pin.AdmissionEpoch = 8
+	f.writePin(t)
+	if epoch, ok := f.mesh.PeerAdmissionEpoch("peer"); ok || epoch != 0 {
+		t.Fatalf("partial peer readmission epoch = %d, %v; want 0, false", epoch, ok)
+	}
+	f.writeMember(t)
+	if epoch, ok := f.mesh.PeerAdmissionEpoch("peer"); !ok || epoch != 8 {
+		t.Fatalf("peer readmission epoch = %d, %v; want 8, true", epoch, ok)
+	}
+}
+
+func TestMeshAdmissionEpochSameCertificateLocalReadmission(t *testing.T) {
+	f := newIncarnationFixture(t)
+	writeAdmission(t, f.dir, "cluster", 4)
+	if epoch, ok := f.mesh.LocalAdmissionEpoch(); !ok || epoch != 4 {
+		t.Fatalf("local readmission epoch = %d, %v; want 4, true", epoch, ok)
+	}
+}
+
+func TestMeshAdmissionEpochRejectsInvalidLocalAuthority(t *testing.T) {
+	test := func(name, record string) {
+		t.Run(name, func(t *testing.T) {
+			f := newIncarnationFixture(t)
+			writeIncarnationFile(t, filepath.Join(f.dir, admissionFileName), []byte(record))
+			if epoch, ok := f.mesh.LocalAdmissionEpoch(); ok || epoch != 0 {
+				t.Fatalf("invalid local epoch = %d, %v; want 0, false", epoch, ok)
+			}
+			if epoch, ok := f.mesh.PeerAdmissionEpoch("peer"); ok || epoch != 0 {
+				t.Fatalf("peer epoch with invalid local authority = %d, %v; want 0, false", epoch, ok)
+			}
+		})
+	}
+	test("malformed JSON", `{`)
+	test("missing cluster", `{"counter":3,"epoch":3}`)
+	test("zero epoch", `{"counter":3,"clusterId":"cluster","epoch":0}`)
+	test("missing counter", `{"clusterId":"cluster","epoch":3}`)
+	test("epoch exceeds activated", `{"counter":4,"activated":2,"clusterId":"cluster","epoch":3}`)
+	test("activated exceeds counter", `{"counter":3,"activated":4,"clusterId":"cluster","epoch":3}`)
+	test("retired admission", `{"counter":3,"retired":true,"clusterId":"cluster","epoch":3}`)
+	t.Run("missing admission", func(t *testing.T) {
+		f := newIncarnationFixture(t)
+		if err := os.Remove(filepath.Join(f.dir, admissionFileName)); err != nil {
+			t.Fatal(err)
+		}
+		if epoch, ok := f.mesh.LocalAdmissionEpoch(); ok || epoch != 0 {
+			t.Fatalf("missing local epoch = %d, %v; want 0, false", epoch, ok)
+		}
+	})
+}
+
+func TestMeshAdmissionEpochRejectsInvalidPeerAuthority(t *testing.T) {
+	test := func(name string, change func(*testing.T, *incarnationFixture)) {
+		t.Run(name, func(t *testing.T) {
+			f := newIncarnationFixture(t)
+			change(t, &f)
+			if epoch, ok := f.mesh.PeerAdmissionEpoch("peer"); ok || epoch != 0 {
+				t.Fatalf("invalid peer epoch = %d, %v; want 0, false", epoch, ok)
+			}
+		})
+	}
+	test("zero pin epoch", func(t *testing.T, f *incarnationFixture) {
+		f.pin.AdmissionEpoch = 0
+		f.writePin(t)
+	})
+	test("cross cluster pin", func(t *testing.T, f *incarnationFixture) {
+		f.pin.ClusterID = "other"
+		f.writePin(t)
+	})
+	test("pin and roster disagree", func(t *testing.T, f *incarnationFixture) {
+		f.pin.AdmissionEpoch = 8
+		f.writeMember(t)
+	})
+	test("missing roster", func(t *testing.T, f *incarnationFixture) {
+		if err := os.Remove(filepath.Join(f.dir, membersFileName)); err != nil {
+			t.Fatal(err)
+		}
+	})
+	test("durable certificate differs from loaded pin", func(t *testing.T, f *incarnationFixture) {
+		certPEM, _, _ := genLeaf(t, "peer")
+		f.pin.CertPem = string(certPEM)
+		f.writePin(t)
+	})
+}
+
+func TestMeshAdmissionEpochRejectsInvalidMeshAndPaths(t *testing.T) {
+	var nilMesh *Mesh
+	for _, m := range []*Mesh{nilMesh, Open(""), Open(t.TempDir())} {
+		if epoch, ok := m.LocalAdmissionEpoch(); ok || epoch != 0 {
+			t.Fatalf("invalid Mesh local epoch = %d, %v; want 0, false", epoch, ok)
+		}
+		if epoch, ok := m.PeerAdmissionEpoch("peer"); ok || epoch != 0 {
+			t.Fatalf("invalid Mesh peer epoch = %d, %v; want 0, false", epoch, ok)
+		}
+	}
+	f := newIncarnationFixture(t)
+	for _, peer := range []string{"self", "unknown", "", ".", "..", "../peer", `..\peer`, `C:peer`, "peer\x00", " peer"} {
+		t.Run(fmt.Sprintf("rejects %q", peer), func(t *testing.T) {
+			if epoch, ok := f.mesh.PeerAdmissionEpoch(peer); ok || epoch != 0 {
+				t.Fatalf("invalid principal epoch = %d, %v; want 0, false", epoch, ok)
+			}
+		})
+	}
+}
+
+func TestMeshAdmissionEpochRejectsLocalAuthorityChangeDuringRead(t *testing.T) {
+	test := func(name string, afterRead int, change func(*testing.T, *incarnationFixture)) {
+		t.Run(name, func(t *testing.T) {
+			f := newIncarnationFixture(t)
+			reads := 0
+			read := func(path string) ([]byte, error) {
+				data, err := os.ReadFile(path)
+				if err != nil {
+					return nil, err
+				}
+				reads++
+				if reads == afterRead {
+					change(t, &f)
+				}
+				return data, nil
+			}
+			if epoch, ok := f.mesh.localAdmissionEpoch(read); ok || epoch != 0 {
+				t.Fatalf("changing local epoch = %d, %v; want 0, false", epoch, ok)
+			}
+			if reads < afterRead {
+				t.Fatalf("fault was not injected: reads = %d, want at least %d", reads, afterRead)
+			}
+		})
+	}
+	test("readmission after first read", 1, func(t *testing.T, f *incarnationFixture) {
+		writeAdmission(t, f.dir, "cluster", 4)
+	})
+	test("teardown during final read", 2, func(t *testing.T, f *incarnationFixture) {
+		writeAdmission(t, f.dir, "", 0)
+		if err := os.Remove(filepath.Join(f.dir, "trusted", "peer.json")); err != nil {
+			t.Fatal(err)
+		}
+		f.mesh.Refresh()
+	})
+	test("identity replacement during final read", 2, func(t *testing.T, f *incarnationFixture) {
+		certPEM, keyPEM, _ := genLeaf(t, "replacement-self")
+		writeIdentity(t, f.dir, certPEM, keyPEM)
+		f.mesh.Refresh()
+	})
+}
+
+func TestMeshAdmissionEpochRejectsPeerAuthorityChangeDuringRead(t *testing.T) {
+	test := func(name string, afterRead int, change func(*testing.T, *incarnationFixture)) {
+		t.Run(name, func(t *testing.T) {
+			f := newIncarnationFixture(t)
+			reads := 0
+			read := func(path string) ([]byte, error) {
+				data, err := os.ReadFile(path)
+				if err != nil {
+					return nil, err
+				}
+				reads++
+				if reads == afterRead {
+					change(t, &f)
+				}
+				return data, nil
+			}
+			if epoch, ok := f.mesh.peerAdmissionEpoch("peer", read); ok || epoch != 0 {
+				t.Fatalf("changing peer epoch = %d, %v; want 0, false", epoch, ok)
+			}
+			if reads < afterRead {
+				t.Fatalf("fault was not injected: reads = %d, want at least %d", reads, afterRead)
+			}
+		})
+	}
+	test("local readmission after first read", 1, func(t *testing.T, f *incarnationFixture) {
+		writeAdmission(t, f.dir, "cluster", 4)
+	})
+	test("same certificate peer readmission after pin read", 2, func(t *testing.T, f *incarnationFixture) {
+		f.pin.AdmissionEpoch = 8
+		f.writePin(t)
+		f.writeMember(t)
+	})
+	test("roster change after member read", 3, func(t *testing.T, f *incarnationFixture) {
+		f.pin.AdmissionEpoch = 8
+		f.writeMember(t)
+	})
+	test("loaded pin removed during final read", 6, func(t *testing.T, f *incarnationFixture) {
+		if err := os.Remove(filepath.Join(f.dir, "trusted", "peer.json")); err != nil {
+			t.Fatal(err)
+		}
+		f.mesh.Refresh()
+	})
+}

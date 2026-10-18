@@ -80,6 +80,7 @@ type Manager struct {
 	dedup       *dedupIndex
 	peers       *peerSet
 	broadcaster *Broadcaster
+	performance *performanceRelay
 	server      *Server
 	peerSource  PeerSource
 	relaySource *relayPeerSource // relay-fed peer set; the concrete peerSource
@@ -141,6 +142,9 @@ func NewManager(codec *Codec, port int, selfUUID, clusterDir string) *Manager {
 	}
 	m.server = NewServer(port, dedup, mesh, m.emitUpsert, m.emitRemove)
 	m.server.emitCancel = m.emitCancel
+	m.performance = newPerformanceRelay(selfUUID, mesh, codec.Notify)
+	m.performance.broadcaster = NewBroadcaster(peers, mesh, clusterDir)
+	m.server.performance = m.performance
 	return m
 }
 
@@ -150,6 +154,7 @@ func (m *Manager) Run(ctx context.Context) error {
 	m.cancel = cancel
 	defer cancel()
 	defer m.broadcaster.clients.CloseIdle()
+	defer m.performance.broadcaster.clients.CloseIdle()
 
 	if err := m.codec.Notify("ready", ReadyParams{Version: Version}); err != nil {
 		return fmt.Errorf("failed to send ready notification: %w", err)
@@ -176,12 +181,15 @@ func (m *Manager) Run(ctx context.Context) error {
 	// read loop produced them, so a queued remove cannot overtake the
 	// lifecycle event it follows.
 	go m.broadcastLoop(ctx)
+	go m.performance.run(ctx)
 	// Follow this node into and out of a cluster. Every gate already reads live
 	// membership, so the watch exists to notice a change with no traffic flowing
 	// and to re-assert our workloads immediately: peers that could not receive
 	// them while we were unclustered would otherwise wait for the next heartbeat.
 	go m.mesh.Watch(ctx, func(clustered bool) {
 		m.broadcaster.clients.CloseIdle()
+		m.performance.broadcaster.clients.CloseIdle()
+		m.performance.signal()
 		slog.Info("inter-node interface switched personality",
 			"clustered", clustered, "peers", m.peers.count())
 		// Detached: the fan-out blocks per peer, and the watch is this node's
@@ -248,6 +256,9 @@ func (m *Manager) refreshPeers(ctx context.Context) {
 	// peers dedup, so nodes that already have these ignore the re-push.
 	if len(added) > 0 {
 		m.pushActiveSnapshot()
+		if m.performance != nil {
+			m.performance.signal()
+		}
 	}
 }
 
@@ -297,6 +308,9 @@ func (m *Manager) handleMessage(msg *Message) {
 	}
 
 	switch {
+	case msg.Method == methodPerformancePublish:
+		m.handleLocalPerformance(msg)
+
 	case msg.Method == noderec.NotifyNodes:
 		m.applyDiscovery(msg)
 

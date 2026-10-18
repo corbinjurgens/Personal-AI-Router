@@ -262,17 +262,96 @@ func (m *Mesh) PeerServiceIncarnation(peerUUID string) (string, bool) {
 }
 
 func (m *Mesh) peerServiceIncarnation(peerUUID string, readFile func(string) ([]byte, error)) (string, bool) {
+	snapshot, ok := m.peerServiceAuthority(peerUUID, readFile)
+	if !ok {
+		return "", false
+	}
+	// Length-prefix principals so arbitrary cluster IDs cannot alias another
+	// tuple. Hashing keeps this a comparison token, not a schema for callers.
+	tuple := fmt.Appendf(nil, "%d:%s%d:%s%d:%s:%d:%d",
+		len(snapshot.admission.ClusterID), snapshot.admission.ClusterID, len(snapshot.id.NodeUUID), snapshot.id.NodeUUID,
+		len(peerUUID), peerUUID, snapshot.admission.Epoch, snapshot.peerEpoch)
+	tuple = fmt.Appendf(tuple, ":%d:", len(snapshot.peerDER))
+	tuple = append(tuple, snapshot.peerDER...)
+	selfDER := selfLeafDER(snapshot.id)
+	tuple = fmt.Appendf(tuple, ":%d:", len(selfDER))
+	tuple = append(tuple, selfDER...)
+	digest := sha256.Sum256(tuple)
+	return fmt.Sprintf("%x", digest), true
+}
+
+// LocalAdmissionEpoch returns this node's current authoritative admission
+// epoch, including when it has no peers. Invalid or changing authority fails
+// closed; the cluster-manager's records are never written or upgraded.
+func (m *Mesh) LocalAdmissionEpoch() (uint64, bool) {
+	return m.localAdmissionEpoch(os.ReadFile)
+}
+
+func (m *Mesh) localAdmissionEpoch(readFile func(string) ([]byte, error)) (uint64, bool) {
+	if m == nil || m.dir == "" {
+		return 0, false
+	}
+	m.mu.RLock()
+	id, clustered := m.id, m.clustered
+	m.mu.RUnlock()
+	if !clustered || id == nil || id.NodeUUID == "" || len(selfLeafDER(id)) == 0 {
+		return 0, false
+	}
+	path := filepath.Join(m.dir, admissionFileName)
+	data, err := readFile(path)
+	if err != nil {
+		return 0, false
+	}
+	admission, ok := peerServiceAdmission(data)
+	if !ok {
+		return 0, false
+	}
+	current, err := readFile(path)
+	if err != nil || !bytes.Equal(current, data) {
+		return 0, false
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if !m.clustered || m.id != id {
+		return 0, false
+	}
+	return admission.Epoch, true
+}
+
+// PeerAdmissionEpoch returns a peer's current authoritative admission epoch.
+// It requires the same local admission, roster and loaded pin agreement as
+// PeerServiceIncarnation, and is distinct from that receiver-local hash token.
+func (m *Mesh) PeerAdmissionEpoch(peerUUID string) (uint64, bool) {
+	return m.peerAdmissionEpoch(peerUUID, os.ReadFile)
+}
+
+func (m *Mesh) peerAdmissionEpoch(peerUUID string, readFile func(string) ([]byte, error)) (uint64, bool) {
+	snapshot, ok := m.peerServiceAuthority(peerUUID, readFile)
+	if !ok {
+		return 0, false
+	}
+	return snapshot.peerEpoch, true
+}
+
+type peerServiceSnapshot struct {
+	admission admissionRecord
+	id        *Identity
+	peerDER   []byte
+	peerEpoch uint64
+}
+
+func (m *Mesh) peerServiceAuthority(peerUUID string, readFile func(string) ([]byte, error)) (peerServiceSnapshot, bool) {
 	// Reject path components on every supported platform before constructing a
 	// filename, including Windows separators/drive names on Unix readers.
 	if m == nil || m.dir == "" || peerUUID == "" || peerUUID == "." || peerUUID == ".." ||
 		strings.ContainsAny(peerUUID, "/\\:\x00") || strings.TrimSpace(peerUUID) != peerUUID {
-		return "", false
+		return peerServiceSnapshot{}, false
 	}
 	m.mu.RLock()
 	id, clustered := m.id, m.clustered
 	m.mu.RUnlock()
 	if !clustered || id == nil || id.NodeUUID == "" || len(selfLeafDER(id)) == 0 || peerUUID == id.NodeUUID || m.trust == nil {
-		return "", false
+		return peerServiceSnapshot{}, false
 	}
 
 	admissionPath := filepath.Join(m.dir, admissionFileName)
@@ -280,15 +359,15 @@ func (m *Mesh) peerServiceIncarnation(peerUUID string, readFile func(string) ([]
 	membersPath := filepath.Join(m.dir, membersFileName)
 	admissionData, err := readFile(admissionPath)
 	if err != nil {
-		return "", false
+		return peerServiceSnapshot{}, false
 	}
 	admission, ok := peerServiceAdmission(admissionData)
 	if !ok {
-		return "", false
+		return peerServiceSnapshot{}, false
 	}
 	pinData, err := readFile(pinPath)
 	if err != nil {
-		return "", false
+		return peerServiceSnapshot{}, false
 	}
 	var pin struct {
 		NodeUUID       string `json:"nodeUuid"`
@@ -297,19 +376,19 @@ func (m *Mesh) peerServiceIncarnation(peerUUID string, readFile func(string) ([]
 		AdmissionEpoch uint64 `json:"admissionEpoch"`
 	}
 	if err := json.Unmarshal(pinData, &pin); err != nil || pin.ClusterID != admission.ClusterID || pin.AdmissionEpoch == 0 {
-		return "", false
+		return peerServiceSnapshot{}, false
 	}
 	der, err := pinDER(pin.NodeUUID, pin.CertPem, peerUUID)
 	if err != nil {
-		return "", false
+		return peerServiceSnapshot{}, false
 	}
 	membersData, err := readFile(membersPath)
 	if err != nil {
-		return "", false
+		return peerServiceSnapshot{}, false
 	}
 	memberEpoch, ok := peerServiceMember(membersData, peerUUID, admission.ClusterID, pin.AdmissionEpoch)
 	if !ok {
-		return "", false
+		return peerServiceSnapshot{}, false
 	}
 
 	// Validate in reverse read order: matching admission reads bracket both
@@ -319,33 +398,22 @@ func (m *Mesh) peerServiceIncarnation(peerUUID string, readFile func(string) ([]
 	// closed and a subsequent complete refresh can succeed.
 	currentMembers, err := readFile(membersPath)
 	if err != nil || !bytes.Equal(currentMembers, membersData) {
-		return "", false
+		return peerServiceSnapshot{}, false
 	}
 	currentPin, err := readFile(pinPath)
 	if err != nil || !bytes.Equal(currentPin, pinData) {
-		return "", false
+		return peerServiceSnapshot{}, false
 	}
 	currentAdmission, err := readFile(admissionPath)
 	if err != nil || !bytes.Equal(currentAdmission, admissionData) {
-		return "", false
+		return peerServiceSnapshot{}, false
 	}
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	if !m.clustered || m.id != id || !m.trust.MatchDER(peerUUID, der) {
-		return "", false
+		return peerServiceSnapshot{}, false
 	}
-	// Length-prefix principals so arbitrary cluster IDs cannot alias another
-	// tuple. Hashing keeps this a comparison token, not a schema for callers.
-	tuple := fmt.Appendf(nil, "%d:%s%d:%s%d:%s:%d:%d",
-		len(admission.ClusterID), admission.ClusterID, len(id.NodeUUID), id.NodeUUID,
-		len(peerUUID), peerUUID, admission.Epoch, memberEpoch)
-	tuple = fmt.Appendf(tuple, ":%d:", len(der))
-	tuple = append(tuple, der...)
-	selfDER := selfLeafDER(id)
-	tuple = fmt.Appendf(tuple, ":%d:", len(selfDER))
-	tuple = append(tuple, selfDER...)
-	digest := sha256.Sum256(tuple)
-	return fmt.Sprintf("%x", digest), true
+	return peerServiceSnapshot{admission: admission, id: id, peerDER: der, peerEpoch: memberEpoch}, true
 }
 
 // matchDER is the server-side gate: accept der for uuid when it byte-for-byte
