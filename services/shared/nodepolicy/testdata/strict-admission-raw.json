@@ -1,0 +1,60 @@
+[
+  {
+    "name": "absent capability",
+    "document": "{\"revision\":\"0\",\"roles\":{}}",
+    "state": "absent"
+  },
+  {
+    "name": "canonical unsupported capability",
+    "document": "{\"revision\":\"0\",\"roles\":{},\"strictAdmission\":{\"version\":2,\"future\":true}}",
+    "state": "unsupported"
+  },
+  {
+    "name": "canonical null",
+    "document": "{\"strictAdmission\":null}",
+    "error": "strictAdmission must not be null"
+  },
+  {
+    "name": "alternate-case null",
+    "document": "{\"StrictAdmission\":null}",
+    "error": "exact field name strictAdmission"
+  },
+  {
+    "name": "alternate-case supported capability",
+    "document": "{\"StrictAdmission\":{\"version\":1,\"models\":[{\"engine\":\"ollama\",\"model\":\"m\",\"maxConcurrent\":1,\"identity\":{\"engineRunId\":\"run-1\",\"settingsFingerprint\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"modelDigest\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}}]}}",
+    "error": "exact field name strictAdmission"
+  },
+  {
+    "name": "canonical unsupported followed by alternate-case supported",
+    "document": "{\"strictAdmission\":{\"version\":2,\"future\":true},\"sTrIcTaDmIsSiOn\":{\"version\":1,\"models\":[{\"engine\":\"ollama\",\"model\":\"m\",\"maxConcurrent\":1,\"identity\":{\"engineRunId\":\"run-1\",\"settingsFingerprint\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"modelDigest\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}}]}}",
+    "error": "exact field name strictAdmission"
+  },
+  {
+    "name": "Unicode case-fold alias",
+    "document": "{\"\u017ftrictAdmission\":null}",
+    "error": "exact field name strictAdmission"
+  },
+  {
+    "name": "surrogate and replacement duplicate models",
+    "document": "{\"strictAdmission\":{\"version\":1,\"models\":[{\"engine\":\"ollama\",\"model\":\"\\ud800\",\"maxConcurrent\":1,\"identity\":{\"engineRunId\":\"run-1\",\"settingsFingerprint\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"modelDigest\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}},{\"engine\":\"ollama\",\"model\":\"\\ufffd\",\"maxConcurrent\":1,\"identity\":{\"engineRunId\":\"run-1\",\"settingsFingerprint\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"modelDigest\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}}]}}",
+    "error": "uplicate"
+  },
+  {
+    "name": "lone high surrogate round trip",
+    "document": "{\"strictAdmission\":{\"version\":1,\"models\":[{\"engine\":\"ollama\",\"model\":\"\\ud800\",\"maxConcurrent\":1,\"identity\":{\"engineRunId\":\"run-1\",\"settingsFingerprint\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"modelDigest\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}}]}}",
+    "state": "valid",
+    "model": "\ufffd"
+  },
+  {
+    "name": "lone low surrogate round trip",
+    "document": "{\"strictAdmission\":{\"version\":1,\"models\":[{\"engine\":\"ollama\",\"model\":\"\\udfff\",\"maxConcurrent\":1,\"identity\":{\"engineRunId\":\"run-1\",\"settingsFingerprint\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"modelDigest\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}}]}}",
+    "state": "valid",
+    "model": "\ufffd"
+  },
+  {
+    "name": "valid surrogate pair round trip",
+    "document": "{\"strictAdmission\":{\"version\":1,\"models\":[{\"engine\":\"ollama\",\"model\":\"\\ud83d\\ude00\",\"maxConcurrent\":1,\"identity\":{\"engineRunId\":\"run-1\",\"settingsFingerprint\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"modelDigest\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}}]}}",
+    "state": "valid",
+    "model": "\ud83d\ude00"
+  }
+]

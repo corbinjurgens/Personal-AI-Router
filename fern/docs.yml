@@ -55,6 +55,9 @@ navigation:
       - page: Developer Guide
         path: ../docs/developing.mdx
         slug: developing
+      - page: Strict Local Admission
+        path: ../docs/strict-local-admission.mdx
+        slug: strict-local-admission
       - page: Log Collection
         path: ../docs/log-collection.mdx
         slug: log-collection
