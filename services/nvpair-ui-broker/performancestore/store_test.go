@@ -335,6 +335,52 @@ func TestClockAnomalies(t *testing.T) {
 	})
 }
 
+func TestWallRollbackDoesNotRejuvenateLocalOrPublishedAges(t *testing.T) {
+	s, c := newTestStore(t, snapshotPath(t))
+	r := &recorder{t: t, s: s}
+	r.record(testKey("m"), completed())
+	c.advance(time.Minute)
+	mustSave(t, s)
+	c.advance(-30 * time.Second)
+	if age := onlyEntry(t, s).NewestAgeMs; age != 60_000 {
+		t.Fatalf("local age after rollback = %d, want 60000", age)
+	}
+	if age := mustPublished(t, s).Entries[0].NewestAgeMs; age != 60_000 {
+		t.Fatalf("published age after rollback = %d, want 60000", age)
+	}
+}
+
+func TestAgeClockAddsElapsedWhenAheadOfWallTime(t *testing.T) {
+	s, _ := newTestStore(t, "")
+	// Add preserves Go's monotonic reading. The logical age clock is ahead
+	// of wall time, as it would be after loading a rollback checkpoint.
+	anchor := time.Now()
+	s.now = func() time.Time { return anchor }
+	s.clockAt, s.clockMs = anchor, anchor.UnixMilli()+3_600_000
+	r := &recorder{t: t, s: s}
+	r.record(testKey("m"), completed())
+	s.now = func() time.Time { return anchor.Add(time.Minute) }
+	if age := onlyEntry(t, s).NewestAgeMs; age != 60_000 {
+		t.Fatalf("elapsed age = %d, want 60000 despite wall time below age clock", age)
+	}
+}
+
+func TestAgeClockRetainsSubMillisecondElapsed(t *testing.T) {
+	s, _ := newTestStore(t, "")
+	anchor := time.Now()
+	s.now = func() time.Time { return anchor }
+	s.clockAt, s.clockMs = anchor, anchor.UnixMilli()+3_600_000
+	r := &recorder{t: t, s: s}
+	r.record(testKey("m"), completed())
+	for _, elapsed := range []time.Duration{400 * time.Microsecond, 800 * time.Microsecond, 1200 * time.Microsecond} {
+		s.now = func() time.Time { return anchor.Add(elapsed) }
+		s.Local()
+	}
+	if age := onlyEntry(t, s).NewestAgeMs; age != 1 {
+		t.Fatalf("age after frequent reads = %d, want 1 millisecond", age)
+	}
+}
+
 // maxMeasurement sets every metric to a wide value, the worst case for
 // encoded size.
 func maxMeasurement() performancewire.Measurement {
