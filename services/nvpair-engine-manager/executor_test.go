@@ -22,6 +22,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"nvpair-shared/testbin"
 )
 
 // testEngineManifest returns a manifest whose host-platform block runs
@@ -779,11 +781,8 @@ func TestPreviouslyAdoptedForeignReplacementFailsClosed(t *testing.T) {
 // engine started without an executor process handle. Uninstall must reconcile
 // and reclaim that exact managed image before deleting it.
 func TestUninstallTerminatesRunningInstance(t *testing.T) {
-	baseDir := t.TempDir()
-	bin := filepath.Join(baseDir, "fake", "fakeu"+strconv.Itoa(os.Getpid())+exeExt())
-	if err := os.MkdirAll(filepath.Dir(bin), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	dir := testbin.Dir(t, "nvpair-engine-manager", "uninstall-running", "fakeu")
+	bin := filepath.Join(dir, testbin.Exe("fakeu"))
 	copyFile(t, fakeEngineBin, bin)
 
 	port, err := freePort()
@@ -800,13 +799,11 @@ func TestUninstallTerminatesRunningInstance(t *testing.T) {
 	p.Uninstall = &Uninstall{Run: rmCmd(bin)}
 	m.Platforms[key] = p
 
-	reg := NewRegistry()
-	reg.engines[m.Engine] = m
-	ex := NewExecutor(reg, NewReporter(nil), func(string, any) {}, baseDir)
-	if err := ex.Uninstall(context.Background(), "fake"); err != nil {
+	ex := managedFixtureExecutor(t, m, dir)
+	if err := ex.Uninstall(context.Background(), m.Engine); err != nil {
 		t.Fatalf("uninstall: %v", err)
 	}
-	if ok, _ := ex.Detect("fake"); ok {
+	if ok, _ := ex.Detect(m.Engine); ok {
 		t.Fatal("engine still detected after uninstall")
 	}
 	if portServing(port) {
@@ -815,13 +812,10 @@ func TestUninstallTerminatesRunningInstance(t *testing.T) {
 }
 
 func TestUninstallDoesNotKillExternalSameNameProcess(t *testing.T) {
-	baseDir := t.TempDir()
-	name := "fakeu" + strconv.Itoa(os.Getpid()) + exeExt()
-	managedBin := filepath.Join(baseDir, "fake", name)
-	externalBin := filepath.Join(t.TempDir(), name)
-	if err := os.MkdirAll(filepath.Dir(managedBin), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	dir := testbin.Dir(t, "nvpair-engine-manager", "uninstall-managed-same-name", "fakeu")
+	name := testbin.Exe("fakeu")
+	managedBin := filepath.Join(dir, name)
+	externalBin := filepath.Join(testbin.Dir(t, "nvpair-engine-manager", "uninstall-external-same-name", "fakeu"), name)
 	copyFile(t, fakeEngineBin, managedBin)
 	copyFile(t, fakeEngineBin, externalBin)
 
@@ -839,9 +833,7 @@ func TestUninstallDoesNotKillExternalSameNameProcess(t *testing.T) {
 	p.Runtime.Port = port
 	p.Uninstall = &Uninstall{Run: rmCmd(managedBin)}
 	m.Platforms[key] = p
-	reg := NewRegistry()
-	reg.engines[m.Engine] = m
-	ex := NewExecutor(reg, NewReporter(nil), func(string, any) {}, baseDir)
+	ex := managedFixtureExecutor(t, m, dir)
 
 	err = ex.Uninstall(context.Background(), m.Engine)
 	if err == nil || !strings.Contains(err.Error(), "external management") {
@@ -856,7 +848,7 @@ func TestUninstallDoesNotKillExternalSameNameProcess(t *testing.T) {
 }
 
 func TestUninstallRefusesExternalProcessEngine(t *testing.T) {
-	externalBin := filepath.Join(t.TempDir(), "external"+exeExt())
+	externalBin := filepath.Join(testbin.Dir(t, "nvpair-engine-manager", "uninstall-external", "external"), testbin.Exe("external"))
 	copyFile(t, fakeEngineBin, externalBin)
 	m := testEngineManifest(externalBin)
 	key := runtime.GOOS + "/" + runtime.GOARCH
@@ -879,13 +871,13 @@ func TestUninstallRefusesManagedSymlinkToExternalImage(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("Unix symlink ownership fixture")
 	}
-	baseDir := t.TempDir()
-	managedBin := filepath.Join(baseDir, "fake", "managed-link")
-	externalBin := filepath.Join(t.TempDir(), "external engine")
-	if err := os.MkdirAll(filepath.Dir(managedBin), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	dir := testbin.Dir(t, "nvpair-engine-manager", "uninstall-managed-symlink", "managed-link")
+	managedBin := filepath.Join(dir, "managed-link")
+	externalBin := filepath.Join(testbin.Dir(t, "nvpair-engine-manager", "uninstall-symlink-external", "external-engine"), "external-engine")
 	copyFile(t, fakeEngineBin, externalBin)
+	if err := os.Remove(managedBin); err != nil && !os.IsNotExist(err) {
+		t.Fatalf("remove previous managed link: %v", err)
+	}
 	if err := os.Symlink(externalBin, managedBin); err != nil {
 		t.Fatal(err)
 	}
@@ -900,9 +892,7 @@ func TestUninstallRefusesManagedSymlinkToExternalImage(t *testing.T) {
 	p.Runtime.Port = port
 	p.Uninstall = &Uninstall{Run: rmCmd(managedBin)}
 	m.Platforms[key] = p
-	reg := NewRegistry()
-	reg.engines[m.Engine] = m
-	ex := NewExecutor(reg, NewReporter(nil), func(string, any) {}, baseDir)
+	ex := managedFixtureExecutor(t, m, dir)
 	if err := ex.Uninstall(context.Background(), m.Engine); err == nil || !strings.Contains(err.Error(), "outside NVPAIR's managed install directory") {
 		t.Fatalf("symlink external uninstall error = %v", err)
 	}
@@ -912,11 +902,8 @@ func TestUninstallRefusesManagedSymlinkToExternalImage(t *testing.T) {
 }
 
 func TestUninstallRefusesUnidentifiedLiveListener(t *testing.T) {
-	baseDir := t.TempDir()
-	managedBin := filepath.Join(baseDir, "fake", "fake"+exeExt())
-	if err := os.MkdirAll(filepath.Dir(managedBin), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	dir := testbin.Dir(t, "nvpair-engine-manager", "uninstall-unidentified", "fake")
+	managedBin := filepath.Join(dir, testbin.Exe("fake"))
 	copyFile(t, fakeEngineBin, managedBin)
 
 	srv := httptest.NewServer(http.NotFoundHandler())
@@ -933,9 +920,7 @@ func TestUninstallRefusesUnidentifiedLiveListener(t *testing.T) {
 	p.Uninstall = &Uninstall{Run: rmCmd(managedBin)}
 	m.Platforms[key] = p
 
-	reg := NewRegistry()
-	reg.engines[m.Engine] = m
-	ex := NewExecutor(reg, NewReporter(nil), func(string, any) {}, baseDir)
+	ex := managedFixtureExecutor(t, m, dir)
 	err := ex.Uninstall(context.Background(), m.Engine)
 	if err == nil || !strings.Contains(err.Error(), "occupied by an unidentified service") {
 		t.Fatalf("uninstall unidentified listener error = %v", err)
@@ -1023,11 +1008,8 @@ func TestInstallRefusesAdmin(t *testing.T) {
 func TestEngineUninstall(t *testing.T) {
 	// Copy the fake engine so uninstall can delete the copy without
 	// disturbing the shared build artifact other tests rely on.
-	baseDir := t.TempDir()
-	binCopy := filepath.Join(baseDir, "fake", "fake"+exeExt())
-	if err := os.MkdirAll(filepath.Dir(binCopy), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	dir := testbin.Dir(t, "nvpair-engine-manager", "uninstall", "fake")
+	binCopy := filepath.Join(dir, testbin.Exe("fake"))
 	copyFile(t, fakeEngineBin, binCopy)
 
 	m := testEngineManifest(binCopy)
@@ -1037,16 +1019,14 @@ func TestEngineUninstall(t *testing.T) {
 	p.Uninstall = &Uninstall{Run: rmCmd(binCopy)}
 	m.Platforms[key] = p
 
-	reg := NewRegistry()
-	reg.engines[m.Engine] = m
-	ex := NewExecutor(reg, NewReporter(nil), func(string, any) {}, baseDir)
-	if ok, _ := ex.Detect("fake"); !ok {
+	ex := managedFixtureExecutor(t, m, dir)
+	if ok, _ := ex.Detect(m.Engine); !ok {
 		t.Fatal("expected installed before uninstall")
 	}
-	if err := ex.Uninstall(context.Background(), "fake"); err != nil {
+	if err := ex.Uninstall(context.Background(), m.Engine); err != nil {
 		t.Fatalf("uninstall: %v", err)
 	}
-	if ok, _ := ex.Detect("fake"); ok {
+	if ok, _ := ex.Detect(m.Engine); ok {
 		t.Fatal("expected not-installed after uninstall")
 	}
 }
@@ -1211,6 +1191,19 @@ func exeExt() string {
 	return ""
 }
 
+// Keep the real base/engine install-directory derivation for copied managed
+// fixtures. The executable directory names the synthetic engine; mutable
+// desired state remains private even when executable directories persist.
+func managedFixtureExecutor(t *testing.T, m *Manifest, dir string) *Executor {
+	t.Helper()
+	m.Engine = filepath.Base(dir)
+	reg := NewRegistry()
+	reg.engines[m.Engine] = m
+	ex := NewExecutor(reg, NewReporter(nil), func(string, any) {}, filepath.Dir(dir))
+	ex.desired = newDesiredStateStore(t.TempDir())
+	return ex
+}
+
 func copyFile(t *testing.T, src, dst string) {
 	t.Helper()
 	data, err := os.ReadFile(src)
@@ -1218,7 +1211,7 @@ func copyFile(t *testing.T, src, dst string) {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(dst, data, 0o755); err != nil {
-		t.Fatal(err)
+		t.Fatalf("copy executable to %q: %v (a process from a previous run may still be using this path)", dst, err)
 	}
 }
 

@@ -11,6 +11,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"nvpair-shared/testbin"
 )
 
 func TestIsOurEngineImage(t *testing.T) {
@@ -340,11 +342,8 @@ func TestProcImageUnavailableOwnerRefused(t *testing.T) {
 	}
 	test := func(name string, uninstall bool) {
 		t.Run(name, func(t *testing.T) {
-			base := t.TempDir()
-			bin := filepath.Join(base, "fake", "managed engine")
-			if err := os.MkdirAll(filepath.Dir(bin), 0o755); err != nil {
-				t.Fatal(err)
-			}
+			binDir := testbin.Dir(t, "nvpair-engine-manager", "proc-unavailable-"+name, "managed-engine")
+			bin := filepath.Join(binDir, "managed-engine")
 			copyFile(t, fakeEngineBin, bin)
 			port, err := freePort()
 			if err != nil {
@@ -357,9 +356,7 @@ func TestProcImageUnavailableOwnerRefused(t *testing.T) {
 			p.Runtime.Port = port
 			p.Uninstall = &Uninstall{Run: rmCmd(bin)}
 			m.Platforms[key] = p
-			reg := NewRegistry()
-			reg.engines[m.Engine] = m
-			ex := NewExecutor(reg, NewReporter(nil), func(string, any) {}, base)
+			ex := managedFixtureExecutor(t, m, binDir)
 			if st, err := ex.Status(m.Engine); err != nil || !st.Running {
 				t.Fatalf("adopt fixture: status=%+v err=%v", st, err)
 			}

@@ -11,10 +11,8 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -22,6 +20,7 @@ import (
 	"time"
 
 	"nvpair-shared/engines"
+	"nvpair-shared/testbin"
 )
 
 // The real binary, built on first use rather than in TestMain.
@@ -40,16 +39,12 @@ var (
 func proxyBinary(t *testing.T) string {
 	t.Helper()
 	proxyBinOnce.Do(func() {
-		tmp, err := os.MkdirTemp("", "nvpair-proxy-e2e-*")
+		tmp, _, err := testbin.MainDir("nvpair-proxy", "e2e", "nvpair-proxy-e2e-*", "nvpair-proxy")
 		if err != nil {
 			proxyBinErr = err
 			return
 		}
-		suffix := ""
-		if runtime.GOOS == "windows" {
-			suffix = ".exe"
-		}
-		proxyBinPath = filepath.Join(tmp, "nvpair-proxy"+suffix)
+		proxyBinPath = filepath.Join(tmp, testbin.Exe("nvpair-proxy"))
 		if out, err := exec.Command("go", "build", "-o", proxyBinPath, ".").CombinedOutput(); err != nil {
 			proxyBinErr = fmt.Errorf("build nvpair-proxy: %w\n%s", err, out)
 		}

@@ -1,0 +1,22 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+nvpair-engine-manager/delete-model-restart-failure/fake-engine
+nvpair-engine-manager/delete-model-restart-failure/fake-engine.moved
+nvpair-engine-manager/main/fake-engine
+nvpair-engine-manager/main/nvpair-engine-manager
+nvpair-engine-manager/proc-unavailable-stop/managed-engine
+nvpair-engine-manager/proc-unavailable-uninstall/managed-engine
+nvpair-engine-manager/stop-external-same-image/external-ollama
+nvpair-engine-manager/stop-foreign/foreignengine
+nvpair-engine-manager/stop-managed-foreign/ourengine
+nvpair-engine-manager/stop-orphan/fakeorphan
+nvpair-engine-manager/uninstall/fake
+nvpair-engine-manager/uninstall-external/external
+nvpair-engine-manager/uninstall-external-same-name/fakeu
+nvpair-engine-manager/uninstall-managed-same-name/fakeu
+nvpair-engine-manager/uninstall-managed-symlink/managed-link
+nvpair-engine-manager/uninstall-retries/fake
+nvpair-engine-manager/uninstall-running/fakeu
+nvpair-engine-manager/uninstall-symlink-external/external-engine
+nvpair-engine-manager/uninstall-unidentified/fake

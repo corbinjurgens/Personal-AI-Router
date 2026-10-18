@@ -1,0 +1,7 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+nvpair-ui-broker/node-info-rpc/scanner-fixture
+nvpair-ui-broker/ports-cli/nvpair-ui-broker
+nvpair-ui-broker/ports-spawn/nvpair-engine-manager
+nvpair-ui-broker/ports-spawn/scanner

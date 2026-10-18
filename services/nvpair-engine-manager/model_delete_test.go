@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"nvpair-shared/testbin"
 )
 
 func TestLMStudioDeleteModelRemovePath(t *testing.T) {
@@ -67,18 +69,13 @@ func deleteModelRestartManifest(t *testing.T, root, bin string) *Manifest {
 	return m
 }
 
-// privateEngineBin copies the shared fake engine into the test's own temp dir so
+// privateEngineBin copies the shared fake engine into a private fixture path so
 // a test may delete or corrupt it without disturbing any other test.
 func privateEngineBin(t *testing.T) string {
 	t.Helper()
-	data, err := os.ReadFile(fakeEngineBin)
-	if err != nil {
-		t.Fatalf("read fake engine: %v", err)
-	}
-	bin := filepath.Join(t.TempDir(), "fake-engine"+filepath.Ext(fakeEngineBin))
-	if err := os.WriteFile(bin, data, 0o755); err != nil {
-		t.Fatalf("write fake engine copy: %v", err)
-	}
+	dir := testbin.Dir(t, "nvpair-engine-manager", "delete-model-restart-failure", "fake-engine", "fake-engine.moved")
+	bin := filepath.Join(dir, testbin.Exe("fake-engine"))
+	copyFile(t, fakeEngineBin, bin)
 	return bin
 }
 
@@ -213,7 +210,11 @@ func TestDeleteModelRestartFailureFailsTheAction(t *testing.T) {
 	// restart's start half cannot succeed and the engine stays down. Renaming
 	// rather than deleting keeps this portable: Windows refuses to delete a
 	// running executable but allows moving it.
-	if err := os.Rename(bin, bin+".moved"); err != nil {
+	moved := filepath.Join(filepath.Dir(bin), testbin.Exe("fake-engine.moved"))
+	if err := os.Remove(moved); err != nil && !os.IsNotExist(err) {
+		t.Fatalf("remove previous moved engine: %v (a process from a previous run may still be using this path)", err)
+	}
+	if err := os.Rename(bin, moved); err != nil {
 		t.Fatalf("move engine binary aside: %v", err)
 	}
 

@@ -17,6 +17,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"nvpair-shared/testbin"
 )
 
 func TestStopGrace(t *testing.T) {
@@ -90,11 +92,8 @@ func spawnFakeListener(t *testing.T, binPath string, port int) *exec.Cmd {
 // engine whose listener is our own managed binary (an orphan left on our
 // port) terminates it, stays off across a health interval, and records OFF.
 func TestStopReclaimsOurOrphanOnManagedPort(t *testing.T) {
-	baseDir := t.TempDir()
-	bin := filepath.Join(baseDir, "fake", "fakeorphan"+strconv.Itoa(os.Getpid())+exeExt())
-	if err := os.MkdirAll(filepath.Dir(bin), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	dir := testbin.Dir(t, "nvpair-engine-manager", "stop-orphan", "fakeorphan")
+	bin := filepath.Join(dir, testbin.Exe("fakeorphan"))
 	copyFile(t, fakeEngineBin, bin)
 	port, err := freePort()
 	if err != nil {
@@ -110,30 +109,28 @@ func TestStopReclaimsOurOrphanOnManagedPort(t *testing.T) {
 	p.Runtime.Health = &Probe{HTTP: "http://127.0.0.1:{port}/", Status: http.StatusOK, IntervalS: 1}
 	m.Platforms[key] = p
 
-	reg := NewRegistry()
-	reg.engines[m.Engine] = m
-	ex := NewExecutor(reg, NewReporter(nil), func(string, any) {}, baseDir)
-	if st, err := ex.Status("fake"); err != nil || !st.Running {
+	ex := managedFixtureExecutor(t, m, dir)
+	if st, err := ex.Status(m.Engine); err != nil || !st.Running {
 		t.Fatalf("adopt orphan: status=%+v err=%v", st, err)
 	}
 
-	if err := ex.Stop("fake"); err != nil {
+	if err := ex.Stop(m.Engine); err != nil {
 		t.Fatalf("stop must reclaim our own orphan, got err=%v", err)
 	}
 	if portServing(port) {
 		t.Fatal("orphan on our managed port must be terminated by stop")
 	}
 	time.Sleep(1500 * time.Millisecond) // outlast a health interval
-	if st, _ := ex.Status("fake"); st.Running || st.Healthy {
+	if st, _ := ex.Status(m.Engine); st.Running || st.Healthy {
 		t.Fatalf("engine must stay stopped after reclaim, got %+v", st)
 	}
-	if enabled, known, err := ex.desired.get("fake"); err != nil || !known || enabled {
+	if enabled, known, err := ex.desired.get(m.Engine); err != nil || !known || enabled {
 		t.Fatalf("desired state = (%v, %v, %v), want known OFF", enabled, known, err)
 	}
 }
 
 func TestStopDoesNotReclaimSameExternalImage(t *testing.T) {
-	bin := filepath.Join(t.TempDir(), "external-ollama"+strconv.Itoa(os.Getpid())+exeExt())
+	bin := filepath.Join(testbin.Dir(t, "nvpair-engine-manager", "stop-external-same-image", "external-ollama"), testbin.Exe("external-ollama"))
 	copyFile(t, fakeEngineBin, bin)
 	port, err := freePort()
 	if err != nil {
@@ -163,12 +160,9 @@ func TestStopDoesNotReclaimSameExternalImage(t *testing.T) {
 // image) is declined with an error naming the offending PID and image, the
 // foreign process is left running, and OFF intent is still recorded.
 func TestStopDeclinesForeignListenerWithActionableError(t *testing.T) {
-	dir := t.TempDir()
-	ourBin := filepath.Join(dir, "fake", "ourengine"+exeExt())
-	foreignBin := filepath.Join(t.TempDir(), "foreignengine"+exeExt())
-	if err := os.MkdirAll(filepath.Dir(ourBin), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	dir := testbin.Dir(t, "nvpair-engine-manager", "stop-managed-foreign", "ourengine")
+	ourBin := filepath.Join(dir, testbin.Exe("ourengine"))
+	foreignBin := filepath.Join(testbin.Dir(t, "nvpair-engine-manager", "stop-foreign", "foreignengine"), testbin.Exe("foreignengine"))
 	copyFile(t, fakeEngineBin, ourBin)
 	copyFile(t, fakeEngineBin, foreignBin)
 	port, err := freePort()
@@ -183,14 +177,12 @@ func TestStopDeclinesForeignListenerWithActionableError(t *testing.T) {
 	p.Runtime.Port = port
 	m.Platforms[key] = p
 
-	reg := NewRegistry()
-	reg.engines[m.Engine] = m
-	ex := NewExecutor(reg, NewReporter(nil), func(string, any) {}, dir)
-	if st, err := ex.Status("fake"); err != nil || !st.Running {
+	ex := managedFixtureExecutor(t, m, dir)
+	if st, err := ex.Status(m.Engine); err != nil || !st.Running {
 		t.Fatalf("adopt foreign listener: status=%+v err=%v", st, err)
 	}
 
-	err = ex.Stop("fake")
+	err = ex.Stop(m.Engine)
 	if err == nil || !strings.Contains(err.Error(), "external management") {
 		t.Fatalf("stop error = %v, want external-management decline", err)
 	}
@@ -206,7 +198,7 @@ func TestStopDeclinesForeignListenerWithActionableError(t *testing.T) {
 	if !fileExists(ourBin) || !fileExists(foreignBin) {
 		t.Fatal("refused stop must preserve managed and external executable files")
 	}
-	if enabled, known, err := ex.desired.get("fake"); err != nil || !known || enabled {
+	if enabled, known, err := ex.desired.get(m.Engine); err != nil || !known || enabled {
 		t.Fatalf("desired state = (%v, %v, %v), want known OFF after a declined stop", enabled, known, err)
 	}
 }

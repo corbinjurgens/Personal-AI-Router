@@ -14,23 +14,19 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"sync"
 	"testing"
 	"time"
 
 	"nvpair-shared/clustertrust"
 	"nvpair-shared/noderec"
+	"nvpair-shared/testbin"
 )
 
 func TestReverseSubprocessPrivateDialMetadataReplayAndRebind(t *testing.T) {
 	buildCtx, buildCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer buildCancel()
-	name := "cm"
-	if runtime.GOOS == "windows" {
-		name += ".exe"
-	}
-	binary := filepath.Join(t.TempDir(), name)
+	binary := filepath.Join(testbin.Dir(t, "nvpair-cluster-manager", "reverse-subprocess", "cm"), testbin.Exe("cm"))
 	build := exec.CommandContext(buildCtx, "go", "build", "-o", binary, ".")
 	if output, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("build isolated CM: %v\n%s", err, output)

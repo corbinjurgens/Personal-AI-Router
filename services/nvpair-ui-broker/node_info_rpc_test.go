@@ -12,7 +12,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
-	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -20,6 +19,7 @@ import (
 	"time"
 
 	"nvpair-shared/jsonrpc"
+	"nvpair-shared/testbin"
 )
 
 func nodeInfoBrokerTestClient(t *testing.T, onScannerRequest func(*Peer, *Message)) (*Broker, *Peer, *Peer) {
@@ -498,10 +498,7 @@ func TestNodeInfoRPCStalledProcessIsReapedAndReplaced(t *testing.T) {
 	// the same newline JSON-RPC pipe startScanner uses in production.
 	dir := t.TempDir()
 	source := filepath.Join(dir, "scanner.go")
-	binary := filepath.Join(dir, "scanner-fixture")
-	if runtime.GOOS == "windows" {
-		binary += ".exe"
-	}
+	binary := filepath.Join(testbin.Dir(t, "nvpair-ui-broker", "node-info-rpc", "scanner-fixture"), testbin.Exe("scanner-fixture"))
 	const helper = `// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 package main

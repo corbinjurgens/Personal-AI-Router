@@ -19,6 +19,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"nvpair-shared/testbin"
 )
 
 // captured records the executor's emitted notifications so tests can
@@ -103,7 +105,7 @@ func TestUninstallRetries(t *testing.T) {
 	defer func() { uninstallRetries, uninstallBackoff = oldR, oldB }()
 
 	dir := t.TempDir()
-	binCopy := filepath.Join(dir, "fake"+exeExt())
+	binCopy := filepath.Join(testbin.Dir(t, "nvpair-engine-manager", "uninstall-retries", "fake"), testbin.Exe("fake"))
 	copyFile(t, fakeEngineBin, binCopy)
 	marker := filepath.Join(dir, "attempts")
 

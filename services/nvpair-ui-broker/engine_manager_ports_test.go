@@ -13,7 +13,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
-	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -22,6 +21,7 @@ import (
 	settings "nvpair-shared/enginesettings"
 	"nvpair-shared/nodepolicy"
 	"nvpair-shared/noderec"
+	"nvpair-shared/testbin"
 )
 
 func TestEngineManagerPortsConfiguration(t *testing.T) {
@@ -50,7 +50,7 @@ func TestEngineManagerPortsConfiguration(t *testing.T) {
 }
 
 func TestEngineManagerPortsCLIRejectsInvalidBeforeWorkerResolution(t *testing.T) {
-	binary := buildEngineManagerPortTestBinary(t, ".", ".")
+	binary := buildEngineManagerPortTestBinary(t, "ports-cli", "nvpair-ui-broker", ".", ".")
 	for _, tc := range []struct {
 		name, httpPort, controlPort, want string
 	}{
@@ -109,13 +109,13 @@ func TestEngineManagerPortsInvalidProgrammaticConfigurationDoesNotSpawn(t *testi
 
 func TestEngineManagerPortsSpawnAndScannerReplay(t *testing.T) {
 	isolateOllamaHostTestConfig(t)
-	engineBinary := buildEngineManagerPortTestBinary(t, "../nvpair-engine-manager", ".")
+	engineBinary := buildEngineManagerPortTestBinary(t, "ports-spawn", "nvpair-engine-manager", "../nvpair-engine-manager", ".")
 	scannerDir := t.TempDir()
 	scannerSource := filepath.Join(scannerDir, "main.go")
 	if err := os.WriteFile(scannerSource, []byte(engineManagerPortScannerFixture), 0600); err != nil {
 		t.Fatalf("write scanner fixture: %v", err)
 	}
-	scannerBinary := buildEngineManagerPortTestBinary(t, ".", scannerSource)
+	scannerBinary := buildEngineManagerPortTestBinary(t, "ports-spawn", "scanner", ".", scannerSource)
 	ports := make([]int, 2)
 	listeners := make([]net.Listener, 2)
 	for i := range ports {
@@ -304,12 +304,9 @@ func TestEngineManagerPortsSettingsReleaseUnusedDefaults(t *testing.T) {
 	}
 }
 
-func buildEngineManagerPortTestBinary(t *testing.T, directory, target string) string {
+func buildEngineManagerPortTestBinary(t *testing.T, role, program, directory, target string) string {
 	t.Helper()
-	binary := filepath.Join(t.TempDir(), "port-test-worker")
-	if runtime.GOOS == "windows" {
-		binary += ".exe"
-	}
+	binary := filepath.Join(testbin.Dir(t, "nvpair-ui-broker", role, program), testbin.Exe(program))
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
 	// TestMain and individual fixtures isolate HOME; keep any modules fetched
