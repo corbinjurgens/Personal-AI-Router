@@ -8,6 +8,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -324,5 +326,156 @@ func TestPolicyRelayCorrelatesReplies(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("abandoned call sent no policy:cancel")
+	}
+}
+
+// policyReplyPeerServer uses the real inbound relay and notification consumer;
+// only the broker's wire reply is supplied by the fixture.
+func policyReplyPeerServer(t *testing.T, peerDir string, code int, message string) *httptest.Server {
+	t.Helper()
+	peer := &Manager{}
+	peer.policyRelay.send = func(method string, params any) error {
+		if method != policyRequestMethod {
+			return fmt.Errorf("unexpected relay notification %q", method)
+		}
+		raw, err := json.Marshal(params)
+		if err != nil {
+			return err
+		}
+		var request struct {
+			ID     string `json:"id"`
+			Caller string `json:"caller"`
+		}
+		if err := json.Unmarshal(raw, &request); err != nil {
+			return err
+		}
+		if request.ID == "" || request.Caller != "uuid-self" {
+			return fmt.Errorf("relay lost correlation or authenticated caller")
+		}
+		reply, err := json.Marshal(map[string]any{
+			"id": request.ID, "error": message, "errorCode": code,
+			"result": map[string]bool{"ok": true},
+		})
+		if err != nil {
+			return err
+		}
+		if !peer.handlePolicyMessage(context.Background(), &Message{JSONRPC: "2.0", Method: "policy:reply", Params: reply}) {
+			return fmt.Errorf("policy reply notification was not consumed")
+		}
+		return nil
+	}
+	exec := &Executor{progress: newProgressHub(), policyParent: peer.policyRelay.call}
+	mesh := clustertrust.Open(peerDir)
+	server := httptest.NewUnstartedServer((&controlServer{exec: exec, mesh: mesh}).mux())
+	server.TLS = mesh.ServerTLSConfig()
+	server.StartTLS()
+	t.Cleanup(server.Close)
+	return server
+}
+
+func TestPolicyRoutesMapReplyErrorCodesToHTTPStatus(t *testing.T) {
+	cases := []struct {
+		name, path, body, message string
+		code, wantStatus          int
+	}{
+		{"invalid get", controlPolicyGetPath, `{}`, "policy conflict: deliberately misleading text", -32602, http.StatusBadRequest},
+		{"missing revision", controlPolicySetPath, `{"policy":{}}`, "expectedPersistedRevision is required", -32602, http.StatusBadRequest},
+		{"invalid availability", controlAvailabilitySetPath, `{"state":"invalid"}`, "invalid state", -32602, http.StatusBadRequest},
+		{"conflict", controlPolicySetPath, `{"policy":{},"expectedPersistedRevision":"11"}`, "invalid params: deliberately misleading text", -32000, http.StatusConflict},
+		{"save failure", controlPolicySetPath, `{"policy":{},"expectedPersistedRevision":"12"}`, "the policy could not be saved", -32000, http.StatusConflict},
+		{"other broker failure", controlPolicyGetPath, `{}`, "coordinator failed", -32603, http.StatusConflict},
+		{"success", controlPolicyGetPath, `{}`, "", 0, http.StatusOK},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			selfDir, peerDir := pairedPolicyDirs(t)
+			server := policyReplyPeerServer(t, peerDir, c.code, c.message)
+			config, ok := clustertrust.Open(selfDir).ClientTLSConfig("uuid-peer")
+			if !ok {
+				t.Fatal("peer pin unavailable")
+			}
+			transport := &http.Transport{TLSClientConfig: config}
+			t.Cleanup(transport.CloseIdleConnections)
+			client := &http.Client{Transport: transport, Timeout: 5 * time.Second}
+			resp, err := client.Post(server.URL+c.path, "application/json", strings.NewReader(c.body))
+			if err != nil {
+				t.Fatalf("post policy: %v", err)
+			}
+			defer resp.Body.Close()
+			body, err := io.ReadAll(resp.Body)
+			if err != nil {
+				t.Fatalf("read policy reply: %v", err)
+			}
+			if resp.StatusCode != c.wantStatus {
+				t.Fatalf("HTTP status = %d, want %d", resp.StatusCode, c.wantStatus)
+			}
+			if c.message != "" {
+				if strings.TrimSpace(string(body)) != c.message {
+					t.Fatalf("HTTP diagnostic was not preserved")
+				}
+			} else {
+				var result struct {
+					OK bool `json:"ok"`
+				}
+				if err := json.Unmarshal(body, &result); err != nil {
+					t.Fatalf("decode successful policy reply: %v", err)
+				}
+				if !result.OK {
+					t.Fatal("successful relay result was lost")
+				}
+			}
+		})
+	}
+}
+
+func TestRemotePolicyPreservesHTTPErrorClassification(t *testing.T) {
+	cases := []struct {
+		name, method, params, message string
+		brokerCode, wantCode          int
+	}{
+		{"missing revision", "engine:remote-policy-set", `{"nodeId":"host-peer","policy":{}}`, "expectedPersistedRevision is required", -32602, -32602},
+		{"invalid policy", "engine:remote-policy-set", `{"nodeId":"host-peer","policy":{},"expectedPersistedRevision":"12"}`, "policy conflict: deliberately misleading text", -32602, -32602},
+		{"invalid availability", "engine:remote-availability-set", `{"nodeId":"host-peer","state":"invalid"}`, "invalid state", -32602, -32602},
+		{"revision conflict", "engine:remote-policy-set", `{"nodeId":"host-peer","policy":{},"expectedPersistedRevision":"11"}`, "invalid params: deliberately misleading text", -32000, -32000},
+		{"save failure", "engine:remote-policy-set", `{"nodeId":"host-peer","policy":{},"expectedPersistedRevision":"12"}`, "the policy could not be saved", -32000, -32000},
+		{"other broker failure", "engine:remote-policy-get", `{"nodeId":"host-peer"}`, "coordinator failed", -32603, -32000},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			selfDir, peerDir := pairedPolicyDirs(t)
+			server := policyReplyPeerServer(t, peerDir, c.brokerCode, c.message)
+			host, portText, err := net.SplitHostPort(server.Listener.Addr().String())
+			if err != nil {
+				t.Fatalf("split peer address: %v", err)
+			}
+			port, err := strconv.Atoi(portText)
+			if err != nil {
+				t.Fatalf("parse peer port: %v", err)
+			}
+			out := &syncBuffer{}
+			m := NewManager(NewCodec(out), &Executor{progress: newProgressHub()}, clustertrust.Open(selfDir), selfDir)
+			t.Cleanup(m.controlHTTP.CloseIdle)
+			t.Cleanup(m.controlReadyHTTP.CloseIdle)
+			m.peers.set([]noderec.DirectoryNode{{
+				HostUUID: "host-peer", IP: host, ClusterUUID: "uuid-peer",
+				Services: map[noderec.ServiceKey]noderec.ServiceStatus{noderec.ServiceEngineControl: {Port: port}},
+			}})
+			id := json.RawMessage("1")
+			m.handleMessage(context.Background(), &Message{JSONRPC: "2.0", ID: &id, Method: c.method, Params: json.RawMessage(c.params)})
+			deadline := time.Now().Add(5 * time.Second)
+			for time.Now().Before(deadline) {
+				for _, response := range out.frames() {
+					if !response.IsResponse() || response.ID == nil || string(*response.ID) != "1" {
+						continue
+					}
+					if response.Error == nil || response.Error.Code != c.wantCode || !strings.HasSuffix(response.Error.Message, c.message) {
+						t.Fatalf("remote policy error = %+v, want code %d with the broker diagnostic", response.Error, c.wantCode)
+					}
+					return
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
+			t.Fatal("remote policy produced no correlated response")
+		})
 	}
 }

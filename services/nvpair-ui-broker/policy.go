@@ -523,7 +523,7 @@ func (b *Broker) setLocalPolicy(raw, expected json.RawMessage) (nodepolicy.Polic
 func (b *Broker) setPeerPolicy(raw, expected json.RawMessage) (nodepolicy.Policy, error) {
 	want, err := parseExpectedRevision(expected)
 	if err != nil {
-		return nodepolicy.Policy{}, err
+		return nodepolicy.Policy{}, &invalidParamsError{err}
 	}
 	r := b.nodePolicyRuntime()
 	return b.persistPolicy(func(stored nodepolicy.Policy) (nodepolicy.Policy, error) {
@@ -534,7 +534,11 @@ func (b *Broker) setPeerPolicy(raw, expected json.RawMessage) (nodepolicy.Policy
 		if r.recoveryRequired {
 			return nodepolicy.Policy{}, errors.New("this node's policy needs recovery; set it from this node")
 		}
-		return nodepolicy.MergePeerSet(stored, withoutRevision(raw))
+		policy, err := nodepolicy.MergePeerSet(stored, withoutRevision(raw))
+		if err != nil {
+			return nodepolicy.Policy{}, &invalidParamsError{err}
+		}
+		return policy, nil
 	})
 }
 
@@ -683,12 +687,7 @@ func (b *Broker) servePolicyRequest(msg *Message) {
 	}
 	result, err := b.dispatchPolicy(context.Background(), msg.Method, p)
 	if err != nil {
-		code := -32000
-		var invalid *invalidParamsError
-		if errors.As(err, &invalid) {
-			code = -32602
-		}
-		_ = b.codec.RespondError(msg.ID, code, err.Error())
+		_ = b.codec.RespondError(msg.ID, policyErrorCode(err), err.Error())
 		return
 	}
 	_ = b.codec.Respond(msg.ID, result)
@@ -698,6 +697,14 @@ func (b *Broker) servePolicyRequest(msg *Message) {
 type invalidParamsError struct{ err error }
 
 func (e *invalidParamsError) Error() string { return e.err.Error() }
+
+func policyErrorCode(err error) int {
+	var invalid *invalidParamsError
+	if errors.As(err, &invalid) {
+		return -32602
+	}
+	return -32000
+}
 
 // policySaveError marks a publication or durability failure. A nonempty revision
 // identifies the document already saved and being applied. The request was fine,
@@ -812,6 +819,13 @@ type policyRelayRequest struct {
 	Params json.RawMessage `json:"params"`
 }
 
+type policyRelayReply struct {
+	ID        string `json:"id"`
+	Result    any    `json:"result"`
+	Error     string `json:"error,omitempty"`
+	ErrorCode int    `json:"errorCode,omitempty"`
+}
+
 // relayedPolicyMethods maps the relay's method names to the client methods.
 var relayedPolicyMethods = map[string]string{
 	"get":              methodPolicyGet,
@@ -838,7 +852,7 @@ func (b *Broker) handlePolicyRelay(raw json.RawMessage) {
 	if len(r.relayCancels) >= 64 {
 		r.mu.Unlock()
 		cancel()
-		_ = worker.Notify(policyRelayReplyMethod, map[string]string{"id": req.ID, "error": "too many policy requests"})
+		_ = worker.Notify(policyRelayReplyMethod, policyRelayReply{ID: req.ID, Error: "too many policy requests", ErrorCode: -32000})
 		return
 	}
 	r.relayCancels[req.ID] = cancel
@@ -846,14 +860,11 @@ func (b *Broker) handlePolicyRelay(raw json.RawMessage) {
 	go func() {
 		defer cancel()
 		defer func() { r.mu.Lock(); delete(r.relayCancels, req.ID); r.mu.Unlock() }()
-		reply := struct {
-			ID     string `json:"id"`
-			Result any    `json:"result"`
-			Error  string `json:"error,omitempty"`
-		}{ID: req.ID}
+		reply := policyRelayReply{ID: req.ID}
 		result, err := b.servePolicyRelay(ctx, req)
 		if err != nil {
 			reply.Error = err.Error()
+			reply.ErrorCode = policyErrorCode(err)
 		} else {
 			reply.Result = result
 		}
@@ -871,7 +882,7 @@ func (b *Broker) servePolicyRelay(ctx context.Context, req policyRelayRequest) (
 	}
 	var p policyParams
 	if len(req.Params) > 0 && json.Unmarshal(req.Params, &p) != nil {
-		return nil, fmt.Errorf("invalid policy request")
+		return nil, &invalidParamsError{fmt.Errorf("invalid policy request")}
 	}
 	p.NodeID = ""
 	slog.Info("serving a paired node's policy request", "method", method, "caller", req.Caller)

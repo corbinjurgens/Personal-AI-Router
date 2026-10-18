@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -83,10 +84,19 @@ type policyRelayRequest struct {
 }
 
 type policyRelayReply struct {
-	ID     string          `json:"id"`
-	Result json.RawMessage `json:"result"`
-	Error  string          `json:"error,omitempty"`
+	ID        string          `json:"id"`
+	Result    json.RawMessage `json:"result"`
+	Error     string          `json:"error,omitempty"`
+	ErrorCode int             `json:"errorCode,omitempty"`
 }
+
+// policyRelayError preserves the broker's classification across the relay.
+type policyRelayError struct {
+	code    int
+	message string
+}
+
+func (e *policyRelayError) Error() string { return e.message }
 
 // policyRelay correlates policy:request notifications with policy:reply ones.
 type policyRelay struct {
@@ -120,7 +130,7 @@ func (r *policyRelay) call(ctx context.Context, method string, params json.RawMe
 	select {
 	case reply := <-ch:
 		if reply.Error != "" {
-			return nil, fmt.Errorf("%s", reply.Error)
+			return nil, &policyRelayError{code: reply.ErrorCode, message: reply.Error}
 		}
 		return reply.Result, nil
 	case <-ctx.Done():
@@ -212,7 +222,11 @@ func (c *remoteClient) postPolicy(ctx context.Context, path string, body policyB
 		return nil, fmt.Errorf("remote node policy: read response; operation outcome may be uncertain: %w", err)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("remote node policy: HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(out)))
+		message := fmt.Sprintf("remote node policy: HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(out)))
+		if resp.StatusCode == http.StatusBadRequest {
+			return nil, &policyRelayError{code: -32602, message: message}
+		}
+		return nil, errors.New(message)
 	}
 	return json.RawMessage(out), nil
 }
@@ -268,7 +282,12 @@ func (s *controlServer) policyRoutes(mux *http.ServeMux) {
 			}()
 			result, err := s.exec.policyParent(ctx, method, params, caller)
 			if err != nil {
-				http.Error(w, err.Error(), http.StatusConflict)
+				status := http.StatusConflict
+				var relayErr *policyRelayError
+				if errors.As(err, &relayErr) && relayErr.code == -32602 {
+					status = http.StatusBadRequest
+				}
+				http.Error(w, err.Error(), status)
 				return
 			}
 			w.Header().Set("Content-Type", "application/json")

@@ -466,7 +466,12 @@ func (m *Manager) parse(msg *Message, v any) bool {
 
 func (m *Manager) respondOrErr(msg *Message, result any, err error) {
 	if err != nil {
-		m.codec.RespondError(msg.ID, -32000, err.Error())
+		code := -32000
+		var relayErr *policyRelayError
+		if errors.As(err, &relayErr) && relayErr.code == -32602 {
+			code = -32602
+		}
+		m.codec.RespondError(msg.ID, code, err.Error())
 		return
 	}
 	m.codec.Respond(msg.ID, result)

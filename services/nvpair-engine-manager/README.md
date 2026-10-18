@@ -111,7 +111,7 @@ UI converges even if its synchronous call already timed out),
 restart or install-and-start changes saved intent; wake and sleep never do), and
 `policy:request{id, method, caller, params}` / `policy:cancel{id}` (a paired
 node's node-policy call relayed to the broker, answered by the broker's
-`policy:reply{id, result, error?}`; see below), and — for the error
+`policy:reply{id, result, error?, errorCode?}`; see below), and — for the error
 pipeline — `errors:report` / `errors:clear` (consumed by `nvpair-errors`
 via the broker; see below).
 
@@ -319,7 +319,16 @@ interpret. Each is gated on the caller's pin like the settings routes, accepts a
 most 256 KiB, refuses unknown fields, clears any `nodeId` so the target acts on
 itself and never forwards a further hop, and relays to the broker as
 `policy:request` stamped with the authenticated caller. The broker re-checks the
-pin, acts, and answers with `policy:reply`. The route abandons its wait (and sends
+pin, acts, and answers with `policy:reply {id, result, error?, errorCode?}`.
+Every error carries a JSON-RPC `errorCode`: `-32602` for invalid parameters,
+including missing `expectedPersistedRevision`, invalid policy or availability;
+`-32000` for a revision conflict, save failure or other operational failure.
+The route maps `-32602` to HTTP 400 and other failures to HTTP 409. The origin's
+remote-policy methods map HTTP 400 to JSON-RPC `-32602` and other HTTP failures,
+including 409, to `-32000`, preserving the diagnostic. No classification depends
+on diagnostic text. A stale policy draft is a conflict before its policy is
+validated, including a draft that tries to enable remote or paid execution.
+The route abandons its wait (and sends
 `policy:cancel`) if the caller loses its pin or 15 minutes pass; a pause the broker
 already accepted still finishes.
 

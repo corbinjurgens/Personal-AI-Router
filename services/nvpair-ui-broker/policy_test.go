@@ -1120,9 +1120,20 @@ func newBrokerOnFile(t *testing.T, contents string) *routedBroker {
 	return &routedBroker{b: b, out: out, proxy: proxy, engine: engine, path: path}
 }
 
-// relay sends one relayed policy request from the pinned peer and returns the
-// raw reply notification.
 func (rb *routedBroker) relay(t *testing.T, method string, params any) (result json.RawMessage, errText string) {
+	t.Helper()
+	reply := rb.relayReply(t, method, params)
+	return reply.Result, reply.Error
+}
+
+type peerPolicyReply struct {
+	Result    json.RawMessage `json:"result"`
+	Error     string          `json:"error"`
+	ErrorCode int             `json:"errorCode"`
+}
+
+// relayReply exercises the notification path and decodes the broker's wire reply.
+func (rb *routedBroker) relayReply(t *testing.T, method string, params any) peerPolicyReply {
 	t.Helper()
 	rb.relays++
 	id := "relay-" + strings.Repeat("x", rb.relays)
@@ -1139,18 +1150,15 @@ func (rb *routedBroker) relay(t *testing.T, method string, params any) (result j
 	})
 	for _, c := range calls {
 		if c.method == policyRelayReplyMethod && strings.Contains(string(c.params), `"id":"`+id+`"`) {
-			var reply struct {
-				Result json.RawMessage `json:"result"`
-				Error  string          `json:"error"`
-			}
+			var reply peerPolicyReply
 			if err := json.Unmarshal(c.params, &reply); err != nil {
 				t.Fatalf("decode reply: %v", err)
 			}
-			return reply.Result, reply.Error
+			return reply
 		}
 	}
 	t.Fatalf("reply %s vanished", id)
-	return nil, ""
+	return peerPolicyReply{}
 }
 
 // peerSnapshot is a relayed policy:get: the document a peer would edit.
@@ -1595,6 +1603,132 @@ func TestPolicySetConflictIsNotInvalidParams(t *testing.T) {
 		t.Fatalf("stale local set = %+v, want a policy conflict naming revision 12 that is not invalid params", resp)
 	}
 	base.requireUnchanged(t)
+}
+
+func TestRelayedPolicySetWithoutExpectedPersistedRevisionIsInvalidParams(t *testing.T) {
+	cases := []struct {
+		name     string
+		expected json.RawMessage
+	}{
+		{"missing", nil},
+		{"null", json.RawMessage(`null`)},
+		{"empty", json.RawMessage(`""`)},
+		{"number", json.RawMessage(`12`)},
+		{"noncanonical", json.RawMessage(`"012"`)},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			rb := newRoutedBroker(t)
+			params := map[string]any{"policy": rb.peerSnapshot(t)}
+			if c.expected != nil {
+				params["expectedPersistedRevision"] = c.expected
+			}
+			base := rb.baseline(t)
+			reply := rb.relayReply(t, "set", params)
+			if reply.ErrorCode != -32602 || !strings.Contains(reply.Error, "expectedPersistedRevision") {
+				t.Fatalf("relayed %s precondition: code %d, error %q; want -32602 naming expectedPersistedRevision", c.name, reply.ErrorCode, reply.Error)
+			}
+			base.requireUnchanged(t)
+		})
+	}
+}
+
+func TestStaleRemoteAllowedDraftIsConflictBeforeValidation(t *testing.T) {
+	for _, source := range []string{"local", "peer"} {
+		t.Run(source, func(t *testing.T) {
+			rb := newRoutedBroker(t)
+			var draft nodepolicy.Policy
+			if err := json.Unmarshal(mustJSON(rb.b.localPolicy().Policy), &draft); err != nil {
+				t.Fatalf("copy client A's policy: %v", err)
+			}
+			// Client A has a dirty draft enabling execution. Phase 1 refuses
+			// that draft even at the current revision. Client B saves both
+			// permissions off before A submits the old draft.
+			for tier := range draft.Routing.Tiers {
+				settings := draft.Routing.Tiers[tier]
+				settings.RemoteAllowed = true
+				settings.PaidAllowed = true
+				draft.Routing.Tiers[tier] = settings
+			}
+			if err := draft.Validate(); err == nil {
+				t.Fatal("dirty remote/paid draft must be invalid in Phase 1")
+			}
+			rb.localSet(t, func(doc map[string]any) {
+				for _, settings := range doc["routing"].(map[string]any)["tiers"].(map[string]any) {
+					settings.(map[string]any)["remoteAllowed"] = false
+					settings.(map[string]any)["paidAllowed"] = false
+				}
+				doc["idle"].(map[string]any)["unloadAfterMinutes"] = 3
+			})
+			base := rb.baseline(t)
+			params := map[string]any{"policy": draft, "expectedPersistedRevision": draft.Revision}
+			var code int
+			var message string
+			if source == "local" {
+				rb.b.handleMessage(clientRequest(1, methodPolicySet, params))
+				resp := rb.out.waitFrame(t, "stale policy:set response", isResponse(1))
+				if resp.Error == nil {
+					t.Fatal("stale local draft was accepted")
+				}
+				code, message = resp.Error.Code, resp.Error.Message
+			} else {
+				reply := rb.relayReply(t, "set", params)
+				code, message = reply.ErrorCode, reply.Error
+			}
+			if code != -32000 || !strings.HasPrefix(message, "policy conflict:") || !strings.Contains(message, base.revision) {
+				t.Fatalf("stale dirty draft: code %d, error %q; want -32000 conflict naming revision %s", code, message, base.revision)
+			}
+			base.requireUnchanged(t)
+			for tier, settings := range rb.b.localPolicy().Policy.Routing.Tiers {
+				if settings.RemoteAllowed || settings.PaidAllowed {
+					t.Errorf("tier %s restored remote or paid permission", tier)
+				}
+			}
+		})
+	}
+}
+
+func TestRelayedPolicyValidationErrorsAreInvalidParams(t *testing.T) {
+	test := func(name, method string, params func(*testing.T, *routedBroker) any) {
+		t.Run(name, func(t *testing.T) {
+			rb := newRoutedBroker(t)
+			body := params(t, rb)
+			base := rb.baseline(t)
+			reply := rb.relayReply(t, method, body)
+			if reply.ErrorCode != -32602 || reply.Error == "" {
+				t.Fatalf("code %d, error %q; want -32602 validation error", reply.ErrorCode, reply.Error)
+			}
+			base.requireUnchanged(t)
+		})
+	}
+	test("malformed params", "set", func(*testing.T, *routedBroker) any { return []string{"invalid"} })
+	test("invalid availability", "set-availability", func(*testing.T, *routedBroker) any { return map[string]any{"state": "invalid"} })
+	test("missing policy", "set", func(*testing.T, *routedBroker) any { return map[string]any{"expectedPersistedRevision": "12"} })
+	test("protected routing", "set", func(t *testing.T, rb *routedBroker) any {
+		doc := rb.peerSnapshot(t)
+		doc["routing"] = map[string]any{}
+		return map[string]any{"policy": doc, "expectedPersistedRevision": "12"}
+	})
+}
+
+func TestRelayedPolicySaveFailuresAreServerErrors(t *testing.T) {
+	for _, boundary := range publicationBoundaries() {
+		t.Run(boundary.name, func(t *testing.T) {
+			rb := newRoutedBroker(t)
+			doc := rb.peerSnapshot(t)
+			doc["idle"].(map[string]any)["unloadAfterMinutes"] = 7
+			setClock(rb.b, 5)
+			setReplacer(rb.b, boundary.rep)
+			reply := rb.relayReply(t, "set", map[string]any{"policy": doc, "expectedPersistedRevision": "12"})
+			want := "the policy could not be saved: "
+			if boundary.landed {
+				want = "the policy document with revision 13 was saved and is being applied but may not survive a power loss: "
+			}
+			if reply.ErrorCode != -32000 || !strings.HasPrefix(reply.Error, want) || !strings.Contains(reply.Error, errPublish.Error()) {
+				t.Fatalf("code %d, error %q; want -32000 with %q and publication cause", reply.ErrorCode, reply.Error, want)
+			}
+		})
+	}
 }
 
 // Two clients read revision 12. A lowers the paid monthly ceiling and the node
