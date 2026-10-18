@@ -7,6 +7,10 @@ nvpair-engine-manager/main/fake-engine
 nvpair-engine-manager/main/nvpair-engine-manager
 nvpair-engine-manager/proc-unavailable-stop/managed-engine
 nvpair-engine-manager/proc-unavailable-uninstall/managed-engine
+nvpair-engine-manager/secretenv-lsof/lsof
+nvpair-engine-manager/secretenv-signalpid/taskkill
+nvpair-engine-manager/secretenv-ss/ss
+nvpair-engine-manager/secretenv-taskkill/taskkill
 nvpair-engine-manager/stop-external-same-image/external-ollama
 nvpair-engine-manager/stop-foreign/foreignengine
 nvpair-engine-manager/stop-managed-foreign/ourengine

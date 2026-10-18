@@ -13,6 +13,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"nvpair-shared/secretenv"
 )
 
 // managedProc is a spawned engine process with its stdout/stderr
@@ -25,18 +27,25 @@ type managedProc struct {
 	done chan struct{}
 }
 
+// childEnv is the environment of every process engine-manager starts: the
+// current environment with overrides merged over it, then without the reserved
+// provider-secret namespace. Filtering after the merge means an override
+// cannot reintroduce a provider secret.
+func childEnv(overrides map[string]string) []string {
+	env := os.Environ()
+	for k, v := range overrides {
+		env = append(env, k+"="+v)
+	}
+	return secretenv.Remove(env)
+}
+
 // startManagedProc launches bin with args and the extra env (merged
-// over the current environment), hides any console window, and streams
-// stdout/stderr lines to onLine. The returned proc's done channel
-// closes once the process exits.
+// over the current environment, see childEnv), hides any console window,
+// and streams stdout/stderr lines to onLine. The returned proc's done
+// channel closes once the process exits.
 func startManagedProc(bin string, args []string, env map[string]string, onLine func(stream, line string)) (*managedProc, error) {
 	cmd := exec.Command(bin, args...)
-	if len(env) > 0 {
-		cmd.Env = os.Environ()
-		for k, v := range env {
-			cmd.Env = append(cmd.Env, k+"="+v)
-		}
-	}
+	cmd.Env = childEnv(env)
 	configureSysProcAttr(cmd)
 
 	stdout, err := cmd.StdoutPipe()

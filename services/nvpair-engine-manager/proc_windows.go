@@ -50,6 +50,7 @@ func taskkill(cmd *exec.Cmd, force bool) error {
 	ctx, cancel := context.WithTimeout(context.Background(), taskkillTimeout)
 	defer cancel()
 	kc := exec.CommandContext(ctx, "taskkill", args...)
+	kc.Env = childEnv(nil)
 	configureSysProcAttr(kc) // hide taskkill's own console window
 	return kc.Run()
 }
@@ -183,6 +184,7 @@ func signalPID(pid int, force bool) error {
 	ctx, cancel := context.WithTimeout(context.Background(), taskkillTimeout)
 	defer cancel()
 	kc := exec.CommandContext(ctx, "taskkill", args...)
+	kc.Env = childEnv(nil)
 	configureSysProcAttr(kc) // hide taskkill's own console window
 	return kc.Run()
 }

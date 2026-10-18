@@ -63,7 +63,12 @@ so editing or removing an assignment cannot leave an old value behind through
 manifest merging. These values reach both process and command-mode launches
 literally, overriding inherited values. An empty array clears prior explicit
 editable assignments (inherited OS environment still applies). Environment names
-are not allowlisted. Explicit assignments override manifest defaults, including
+are not allowlisted, but a name in the reserved provider-secret namespace
+(`NVPAIR_PROVIDER_SECRET_` in any case) is rejected with an error that names the
+variable and omits its value. Every process engine-manager starts, including
+engines, control and install commands and port-owner lookups, gets the
+inherited environment without that namespace, removed after any manifest or
+settings values are merged. Explicit assignments override manifest defaults, including
 values such as Linux Ollama's `LD_LIBRARY_PATH`; omitted defaults are restored
 from the manifest. Existing trusted `args`,
 `start`, `env`, install and other-platform overrides are preserved.

@@ -70,7 +70,9 @@ func pidOnPort(port int) (pid int, image string, ok bool) {
 func lsofPID(port int) (int, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), portLookupTimeout)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, "lsof", "-nP", "-tiTCP:"+strconv.Itoa(port), "-sTCP:LISTEN").Output()
+	cmd := exec.CommandContext(ctx, "lsof", "-nP", "-tiTCP:"+strconv.Itoa(port), "-sTCP:LISTEN")
+	cmd.Env = childEnv(nil)
+	out, err := cmd.Output()
 	pid := 0
 	for _, field := range strings.Fields(string(out)) {
 		p, err := strconv.Atoi(field)
@@ -92,7 +94,9 @@ func lsofPID(port int) (int, error) {
 func ssPID(port int) (int, bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), portLookupTimeout)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, "ss", "-ltnp", "sport", "=", ":"+strconv.Itoa(port)).Output()
+	cmd := exec.CommandContext(ctx, "ss", "-ltnp", "sport", "=", ":"+strconv.Itoa(port))
+	cmd.Env = childEnv(nil)
+	out, err := cmd.Output()
 	if err != nil {
 		return 0, false
 	}

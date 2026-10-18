@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"nvpair-shared/ipc"
+	"nvpair-shared/secretenv/secretenvtest"
 )
 
 // fakeServiceEnv makes the test binary act as a minimal service: it listens on
@@ -23,6 +24,7 @@ import (
 const fakeServiceEnv = "NVPAIR_SERVICECTL_FAKE"
 
 func TestMain(m *testing.M) {
+	secretenvtest.RunChild()
 	if os.Getenv(fakeServiceEnv) == "1" {
 		runFakeService()
 		return
@@ -145,4 +147,25 @@ func TestConnectOrStartReportsUnstartableBinary(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected an error for a missing binary")
 	}
+}
+
+// A client-to-service launch is a trusted carrier: the service owns the broker,
+// which hands configured credential references to the proxy, so the detached
+// service keeps the whole provider-secret namespace.
+func TestStartDetachedKeepsProviderSecrets(t *testing.T) {
+	report := secretenvtest.Prepare(t)
+	if err := StartDetached(os.Args[0], []string{"--log-level", "debug"}); err != nil {
+		t.Fatalf("StartDetached: %v", err)
+	}
+	secretenvtest.AssertRetained(t, secretenvtest.Wait(t, report))
+}
+
+func TestStartDetachedFailureDoesNotExposeProviderSecrets(t *testing.T) {
+	secretenvtest.Prepare(t)
+	t.Setenv(EndpointEnv, filepath.Join(shortTempDir(t), "s.sock"))
+	_, err := ConnectOrStart(context.Background(), "/nonexistent/nvpair-service", []string{"--log-level", "debug"})
+	if err == nil {
+		t.Fatal("expected an error for a missing binary")
+	}
+	secretenvtest.AssertNoValue(t, "start error", err.Error())
 }

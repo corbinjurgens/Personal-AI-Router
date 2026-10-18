@@ -441,12 +441,7 @@ func runManifestCommand(ctx context.Context, argv []string, environment map[stri
 		return nil
 	}
 	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
-	if len(environment) > 0 {
-		cmd.Env = os.Environ()
-		for key, value := range environment {
-			cmd.Env = append(cmd.Env, key+"="+value)
-		}
-	}
+	cmd.Env = childEnv(environment)
 	configureSysProcAttr(cmd) // hide the console window on Windows
 	out, err := cmd.CombinedOutput()
 	if err != nil {

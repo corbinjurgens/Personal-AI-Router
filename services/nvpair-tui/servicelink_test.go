@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"nvpair-shared/ipc"
+	"nvpair-shared/secretenv/secretenvtest"
 	"nvpair-shared/servicectl"
 )
 
@@ -30,6 +31,7 @@ const fakeServiceEnv = "NVPAIR_TUI_FAKE_SERVICE"
 const fakeLogLine = "[nvpair-ui-broker] INFO fake broker line"
 
 func TestMain(m *testing.M) {
+	secretenvtest.RunChild()
 	if os.Getenv(fakeServiceEnv) == "1" {
 		runFakeService()
 		return
@@ -227,4 +229,27 @@ func TestStopRunningService(t *testing.T) {
 	if answering() {
 		t.Fatal("service still answering after --stop-service")
 	}
+}
+
+// The TUI starts the service as a client-to-service launch, which keeps the
+// provider-secret namespace. The sentinel child reports and exits instead of
+// listening, which also drives the start-failure path.
+func TestConnectServiceKeepsProviderSecretsForTheService(t *testing.T) {
+	dir, err := os.MkdirTemp("", "tui")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	t.Setenv(servicectl.EndpointEnv, filepath.Join(dir, "s.sock"))
+	report := secretenvtest.Prepare(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	link, err := connectService(ctx, os.Args[0])
+	if err == nil {
+		link.detach()
+		t.Fatal("connectService attached to a child that never listens")
+	}
+	secretenvtest.AssertNoValue(t, "connect error", err.Error())
+	secretenvtest.AssertRetained(t, secretenvtest.Wait(t, report))
 }

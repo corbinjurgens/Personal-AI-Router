@@ -222,7 +222,7 @@ applies to the host the test runs on.
 | `mode` | string | no | `"process"` (default) — the engine is a foreground process this service spawns and **owns** (liveness = process alive) — or `"command"` — a daemon driven by start/stop commands (liveness = the probe). |
 | `bin` | string | process mode | Path to the engine binary (required in `process` mode). Placeholders + OS env refs resolved. |
 | `args` | string[] | no | Arguments (process mode). |
-| `env` | object | no | Extra environment (merged over the inherited env). Use `{host}`/`{port}` for the listen address, e.g. `"OLLAMA_HOST": "{host}:{port}"`. |
+| `env` | object | no | Extra environment (merged over the inherited env; the `NVPAIR_PROVIDER_SECRET_` namespace is removed after the merge). Use `{host}`/`{port}` for the listen address, e.g. `"OLLAMA_HOST": "{host}:{port}"`. |
 | `port` | int | no | Fixed port, or `0` to auto-assign a free loopback port. |
 | `bind` | string | no | Listen address, substituted as `{host}`. Empty ⇒ `127.0.0.1` (the safe default); an inference engine that serves the cluster sets `"0.0.0.0"` (Ollama does), overridable per call via `engine:start {bind}`. Probes always target loopback. |
 | `start` | string[][] | command mode | Ordered bring-up commands (each an argv) for `command` mode, e.g. `[["{cli}","server","start","--port","{port}"]]`. |

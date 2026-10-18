@@ -12,6 +12,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"nvpair-shared/secretenv"
+	"nvpair-shared/secretenv/secretenvtest"
 )
 
 // The demo's guarantees are all about what it does NOT do: nothing at or after
@@ -424,6 +427,45 @@ func TestProbeIgnoresOutputThatIsNotAModelList(t *testing.T) {
 	exe, _ := fakeDispatcher(t, "Model query failed: connection refused")
 	if got := probeModels(context.Background(), exe, "ollama", 11434); got != nil {
 		t.Errorf("got %d targets from non-JSON output, want none", len(got))
+	}
+}
+
+// Both demo launch sites start the dispatcher without the provider-secret
+// namespace. A sentinel child stands in for the dispatcher; the port is only an
+// argument it ignores.
+func TestDemoChildrenReceiveNoProviderSecrets(t *testing.T) {
+	t.Run("model probe", func(t *testing.T) {
+		report := secretenvtest.Prepare(t)
+		if got := probeModels(context.Background(), os.Args[0], "ollama", 1); got != nil {
+			t.Errorf("got %d targets from a sentinel child, want none", len(got))
+		}
+		secretenvtest.AssertRemoved(t, secretenvtest.Wait(t, report))
+	})
+	t.Run("model probe that fails", func(t *testing.T) {
+		report := secretenvtest.Prepare(t)
+		t.Setenv(secretenvtest.ExitEnv, "1")
+		if got := probeModels(context.Background(), os.Args[0], "ollama", 1); got != nil {
+			t.Errorf("got %d targets from a failing child, want none", len(got))
+		}
+		secretenvtest.AssertRemoved(t, secretenvtest.Wait(t, report))
+	})
+	t.Run("request", func(t *testing.T) {
+		report := secretenvtest.Prepare(t)
+		req := demoRequest{target: demoTarget{backend: "ollama", port: 1, model: "m"}}
+		if msg := submitDemoRequest(context.Background(), os.Args[0], req, 7)(); msg != (demoSpawnedMsg{gen: 7}) {
+			t.Fatalf("submit returned %#v, want a spawned message", msg)
+		}
+		secretenvtest.AssertRemoved(t, secretenvtest.Wait(t, report))
+	})
+}
+
+func TestDispatcherEnvDropsProviderSecrets(t *testing.T) {
+	secretenvtest.Prepare(t)
+	for _, kv := range dispatcherEnv() {
+		name, _, _ := strings.Cut(kv, "=")
+		if strings.HasPrefix(strings.ToUpper(name), secretenv.Prefix) {
+			t.Errorf("child environment still carries %s", name)
+		}
 	}
 }
 
