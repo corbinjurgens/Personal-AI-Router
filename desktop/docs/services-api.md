@@ -277,6 +277,7 @@
 | `cluster:set-local-services` | notification (we consume) | ➖ ignored |
 | `discovery:nodes-changed` | notification (we consume) | ✅ yes |
 | `discovery:peer-services` | notification (we consume) | ➖ ignored |
+| `engine:node-projection` | notification (we consume) | ➖ ignored |
 | `engine:restore-enabled` | notification (we consume) | ➖ ignored |
 | `engine:settings-changed` | notification (we consume) | ✅ yes |
 | `engine:settings-projection` | notification (we consume) | ➖ ignored |
