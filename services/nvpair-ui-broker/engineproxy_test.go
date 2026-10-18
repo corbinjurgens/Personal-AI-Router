@@ -712,9 +712,14 @@ func TestProxySupervisionRunsTheListenerWithoutFacades(t *testing.T) {
 	})
 
 	spawns := b.currentOllamaProxyGeneration()
-	sb.mustSetListener(t, false)
+	if got := sb.mustSetListener(t, false); got.activation == activationError {
+		t.Fatal("disabling the listener reported a failed activation for the proxy it stopped")
+	}
 	requireProxyExited(t, first, "the listener was disabled and no facade is configured")
 	waitReconciled(t, b)
+	if got := b.localPolicy(); got.Activation == activationError {
+		t.Fatalf("the stopped proxy left a failed activation: %s", got.ActivationError)
+	}
 	if b.getProxySupervisor() != nil || b.proxyProcessHandle() != nil || b.policyProxy() != nil {
 		t.Fatal("a stopped proxy is still supervised or published")
 	}

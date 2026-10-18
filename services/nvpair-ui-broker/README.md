@@ -272,14 +272,16 @@ proxy enforces it.
   `activationError`, operational text that never holds policy content or
   credential references) and `pending` otherwise, including when no proxy runs,
   before a started proxy has been replayed to, and while a push is still
-  waiting to be sent. Only a `node/set-policy` acknowledgement
-  (`{revision, runId}`, `nodepolicy.PolicyAck`) names a revision, and the proxy
-  ignores the availability inside it, so a revision is `active` only while the
-  newest `node/set-availability` push to that proxy process was acknowledged as
-  well; there is one activation path. The broker accepts a policy
-  acknowledgement only from the proxy process it last replayed to, with the run
-  id that process first acknowledged under, and only for the exact revision it
-  pushed; anything else leaves `activeRevision` as it was. While the newest
+  waiting to be sent. A proxy the broker stops on purpose stops counting first,
+  so a push its closing pipe fails is not an `error`. Only a `node/set-policy`
+  acknowledgement (`{revision, runId}`, `nodepolicy.PolicyAck`) names a
+  revision, and the proxy ignores the availability inside it, so a revision is
+  `active` only while the newest `node/set-availability` push to that proxy
+  process was acknowledged as well; there is one activation path. The broker
+  accepts a policy acknowledgement only from the proxy process it last
+  replayed to, with the run id that process first acknowledged under, and only
+  for the exact revision it pushed; anything else leaves `activeRevision` as it
+  was. While the newest
   availability push was refused, failed or not answered in time, every revision
   is `error` with an `activationError` naming the availability push and
   `activeRevision` is empty, because the proxy is not known to enforce what the

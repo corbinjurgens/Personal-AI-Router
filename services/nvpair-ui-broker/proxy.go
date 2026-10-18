@@ -424,6 +424,12 @@ func (b *Broker) startProxySupervisorLocked() {
 // stopProxySupervisorLocked stops the proxy and withdraws its handles. Caller
 // holds proxySupMu.
 func (b *Broker) stopProxySupervisorLocked() {
+	// The process is stopped on purpose, so a push its closing pipe fails is
+	// not a failed activation: retire it first and such an answer is discarded.
+	r := b.nodePolicyRuntime()
+	r.mu.Lock()
+	r.incarnation = nil
+	r.mu.Unlock()
 	if sup := b.getProxySupervisor(); sup != nil {
 		sup.Stop()
 		b.setProxySupervisor(nil)
