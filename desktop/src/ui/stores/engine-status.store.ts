@@ -7,14 +7,28 @@
  *
  * Structure: outer key = node id, inner key = engine type. Sparse: only types the
  * service has reported appear; use {@link getEnginesForNode} for a full UI row list.
+ *
+ * It also holds this node's engine descriptors, which say what every engine is
+ * (label, family, supported model operations). A peer's engine is looked up in
+ * the same set; one absent from it renders with safe defaults.
  */
 import { create } from 'zustand'
 import type { EngineInitialState } from '@/shared/types/engine-api'
 import { emptyEngineStatus } from '@/shared/utils/engines'
-import type { EngineStatusByNode, EngineStatusData, EngineType } from '@/shared/types/engines'
+import type {
+    EngineDescriptor,
+    EngineStatusByNode,
+    EngineStatusData,
+    EngineType
+} from '@/shared/types/engines'
+
+function descriptorMap(descriptors: EngineDescriptor[]): Map<EngineType, EngineDescriptor> {
+    return new Map(descriptors.map(d => [d.engineType, d]))
+}
 
 interface EngineStatusState {
     statusByNode: EngineStatusByNode
+    descriptors: Map<EngineType, EngineDescriptor>
     initialize(initial?: EngineInitialState): Promise<void>
     cleanup(): void
     /** Always defined; uses {@link emptyEngineStatus} when the service has not reported this pair. */
@@ -25,6 +39,7 @@ let unsubs: Array<() => void> = []
 
 export const useEngineStatusStore = create<EngineStatusState>((set, get) => ({
     statusByNode: new Map(),
+    descriptors: new Map(),
 
     initialize: async initialSnapshot => {
         // Idempotent: initialize() runs on connect and again on a
@@ -43,7 +58,7 @@ export const useEngineStatusStore = create<EngineStatusState>((set, get) => ({
                 }
                 inner.set(s.engineType, s)
             }
-            set({ statusByNode: byNode })
+            set({ statusByNode: byNode, descriptors: descriptorMap(initial.descriptors) })
         } catch {
             console.error('Failed to initialize engine status store')
         }
@@ -51,6 +66,9 @@ export const useEngineStatusStore = create<EngineStatusState>((set, get) => ({
         if (!window.pairApi) return
 
         unsubs.push(
+            window.pairApi.engines.onDescriptorsChanged(descriptors => {
+                set({ descriptors: descriptorMap(descriptors) })
+            }),
             window.pairApi.engines.onStateChanged(patch => {
                 const status = patch.status
                 if (!status) return
@@ -83,3 +101,8 @@ export const useEngineStatusStore = create<EngineStatusState>((set, get) => ({
         )
     }
 }))
+
+/** This node's descriptor for an engine, or undefined when it holds none. */
+export function useEngineDescriptor(engineType: EngineType): EngineDescriptor | undefined {
+    return useEngineStatusStore(state => state.descriptors.get(engineType))
+}

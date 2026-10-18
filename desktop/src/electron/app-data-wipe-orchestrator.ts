@@ -7,8 +7,7 @@ import { destroyTray } from '@/electron/tray'
 import { spawnWipeScript } from '@/electron/run-wipe-script'
 import { getModularSupervisor } from '@/electron/service-bridge/modular-supervisor'
 import { APP_DISPLAY_NAME } from '@/shared/constants/app'
-import { EngineDisplayNames } from '@/shared/constants/engines'
-import { engineTypeFromManagerName } from '@/shared/utils/engines'
+import { engineLabel, engineTypeFromManagerName } from '@/shared/utils/engines'
 import getErrorString from '@/shared/utils/get-error-string'
 import { createStructuredLogger } from '@/shared/utils/log'
 import type { ManagedEngineUninstall } from '@/shared/types/engine-api'
@@ -81,7 +80,7 @@ async function removeManagedEngines(): Promise<void> {
                 message: `Engine ${outcome.engine} not removed: ${outcome.error}`
             })
             const engine = engineTypeFromManagerName(outcome.engine)
-            stuck.push(engine ? EngineDisplayNames[engine] : outcome.engine)
+            stuck.push(engine ? engineLabel(engine, undefined) : outcome.engine)
         } else {
             log.info({
                 sublevel: 'wipe',

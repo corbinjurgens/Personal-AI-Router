@@ -3,16 +3,16 @@
 
 import { Fragment } from 'react'
 import { Divider, Stack, Text } from '@nvidia/foundations-react-core'
-import type { EngineType } from '@/shared/types/engines'
+import type { BuiltinEngineType } from '@/shared/types/engines'
 import { WelcomeEngineRow } from './WelcomeEngineRow'
 
 interface WelcomeEnginesStepProps {
-    candidates: EngineType[]
+    candidates: BuiltinEngineType[]
     nodeId: string
-    engineSelections: Partial<Record<EngineType, boolean>> | null
+    engineSelections: Partial<Record<BuiltinEngineType, boolean>> | null
     installing: boolean
-    onEngineToggle: (engineType: EngineType, checked: boolean) => void
-    isEngineInstalled: (engineType: EngineType) => boolean
+    onEngineToggle: (engineType: BuiltinEngineType, checked: boolean) => void
+    isEngineInstalled: (engineType: BuiltinEngineType) => boolean
 }
 
 export function WelcomeEnginesStep({

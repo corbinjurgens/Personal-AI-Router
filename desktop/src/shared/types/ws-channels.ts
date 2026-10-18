@@ -29,7 +29,7 @@ import type {
     EngineInitialState,
     EngineStatePatch
 } from '@/shared/types/engine-api'
-import type { EngineProgress, EngineType } from '@/shared/types/engines'
+import type { EngineDescriptor, EngineProgress, EngineType } from '@/shared/types/engines'
 import type {
     EngineSettingsTarget,
     EngineSettingsRequest,
@@ -157,6 +157,8 @@ export interface WsPushChannelMap {
     'engines:settings-disconnected': { nodeId: string }
     'engines:progress-changed': EngineProgress
     'engines:progress-cleared': { key: string }
+    /** The local engine-manager's full descriptor set, replaced whenever it is re-read. */
+    'engines:descriptors-changed': EngineDescriptor[]
 
     // Node policy and availability, for every node the broker relays (not only this PC)
     'node:availability-changed': NodeAvailabilityChange

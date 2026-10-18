@@ -46,9 +46,9 @@ describe('parseModelCopyFrame', () => {
         expect(frame?.bytesDone).toBeUndefined()
     })
 
-    it('rejects frames without a node or a known engine', () => {
+    it('rejects frames without a node or a valid engine id', () => {
         expect(parseModelCopyFrame({ engine: 'ollama' })).toBeNull()
-        expect(parseModelCopyFrame({ node: 'peer-1', engine: 'nope' })).toBeNull()
+        expect(parseModelCopyFrame({ node: 'peer-1', engine: '../nope' })).toBeNull()
         expect(parseModelCopyFrame(undefined)).toBeNull()
         expect(parseModelCopyFrame([])).toBeNull()
     })

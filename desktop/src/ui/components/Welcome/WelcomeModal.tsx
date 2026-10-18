@@ -9,7 +9,7 @@ import { useBlurOnOpen } from '@/ui/hooks/useBlurOnOpen'
 import { useEngineStatusStore } from '@/ui/stores/engine-status.store'
 import { useErrorsStore } from '@/ui/stores/errors.store'
 import { useOverviewUiStore } from '@/ui/stores/overview-ui.store'
-import type { EngineType } from '@/shared/types/engines'
+import type { BuiltinEngineType } from '@/shared/types/engines'
 import {
     getWelcomeEngineCandidates,
     WELCOME_ENGINE_DEFAULT_SELECTED,
@@ -42,13 +42,13 @@ export function WelcomeModal({ open, onOpenChange, selfId }: WelcomeModalProps) 
 
     const [step, setStep] = useState(0)
     const [engineSelections, setEngineSelections] = useState<Partial<
-        Record<EngineType, boolean>
+        Record<BuiltinEngineType, boolean>
     > | null>(null)
     const [installing, setInstalling] = useState(false)
-    const [installTargets, setInstallTargets] = useState<EngineType[]>([])
+    const [installTargets, setInstallTargets] = useState<BuiltinEngineType[]>([])
     const [error, setError] = useState<string | null>(null)
-    const startedTargets = useRef(new Set<EngineType>())
-    const failedTargets = useRef(new Set<EngineType>())
+    const startedTargets = useRef(new Set<BuiltinEngineType>())
+    const failedTargets = useRef(new Set<BuiltinEngineType>())
     const knownErrors = useRef(new Map<string, number>())
 
     const candidates = useMemo(() => getWelcomeEngineCandidates(window.windowApi.platform), [])
@@ -72,7 +72,7 @@ export function WelcomeModal({ open, onOpenChange, selfId }: WelcomeModalProps) 
     useEffect(() => {
         if (!open || step !== 1) return
         if (engineSelections !== null) return
-        const initial: Partial<Record<EngineType, boolean>> = {}
+        const initial: Partial<Record<BuiltinEngineType, boolean>> = {}
         for (const t of candidates) {
             initial[t] = WELCOME_ENGINE_DEFAULT_SELECTED[t] ?? false
         }
@@ -80,7 +80,7 @@ export function WelcomeModal({ open, onOpenChange, selfId }: WelcomeModalProps) 
     }, [open, step, candidates, engineSelections])
 
     const isEngineInstalled = useCallback(
-        (t: EngineType) => {
+        (t: BuiltinEngineType) => {
             const status = statusByNode.get(selfId)?.get(t)?.processStatus
             return isWelcomeEngineInstalled(status)
         },
@@ -88,7 +88,7 @@ export function WelcomeModal({ open, onOpenChange, selfId }: WelcomeModalProps) 
     )
 
     const isEngineInstallable = useCallback(
-        (t: EngineType) => {
+        (t: BuiltinEngineType) => {
             const status = statusByNode.get(selfId)?.get(t)?.processStatus
             return isWelcomeEngineInstallable(status)
         },
@@ -122,7 +122,7 @@ export function WelcomeModal({ open, onOpenChange, selfId }: WelcomeModalProps) 
         [handleDismiss]
     )
 
-    const handleEngineToggle = useCallback((engineType: EngineType, checked: boolean) => {
+    const handleEngineToggle = useCallback((engineType: BuiltinEngineType, checked: boolean) => {
         setEngineSelections(prev => ({
             ...(prev ?? {}),
             [engineType]: checked

@@ -2,12 +2,18 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import {
+    type EngineDescriptor,
     type EngineStatusData,
     type EngineStatusByNode,
     type EngineType
 } from '@/shared/types/engines'
-import { emptyEngineStatus, isEngineType } from '@/shared/utils/engines'
-import { EnabledEngineTypes, EngineDisplayNames } from '@/shared/constants/engines'
+import {
+    emptyEngineStatus,
+    engineLabel,
+    isBuiltinEngineType,
+    isEngineType
+} from '@/shared/utils/engines'
+import { EnabledEngineTypes } from '@/shared/constants/engines'
 
 interface EngineListRow {
     rowKey: string
@@ -36,11 +42,32 @@ export function getEnginesForNode(
     })
 }
 
-function engineDisplayName(engineType: string): string {
-    if (isEngineType(engineType)) {
-        return EngineDisplayNames[engineType]
+/**
+ * The engines a node's engine views list: every enabled built-in engine, then
+ * any other engine the node reports as installed, ordered by label. A variant
+ * PAIR cannot install is not offered before it exists, and a not-yet-reported
+ * placeholder is not listed at all.
+ */
+export function engineTypesForNode(
+    nodeId: string,
+    statusByNode: EngineStatusByNode,
+    descriptors: ReadonlyMap<EngineType, EngineDescriptor>
+): EngineType[] {
+    const others: EngineType[] = []
+    for (const [engineType, status] of statusByNode.get(nodeId) ?? []) {
+        if (isBuiltinEngineType(engineType)) continue
+        if (status.processStatus === 'not-installed' || status.processStatus === 'initializing') {
+            continue
+        }
+        others.push(engineType)
     }
-    return engineType
+    const label = (engineType: EngineType) => engineLabel(engineType, descriptors.get(engineType))
+    others.sort((a, b) => label(a).localeCompare(label(b)))
+    return [...EnabledEngineTypes, ...others]
+}
+
+function engineDisplayName(engineType: string): string {
+    return isEngineType(engineType) ? engineLabel(engineType, undefined) : engineType
 }
 
 /** True if any node in the cluster has this engine type running. */

@@ -4,7 +4,8 @@
 import { useCallback, useMemo, useState } from 'react'
 import { Button, Flex, Stack, Text } from '@nvidia/foundations-react-core'
 import type { BackendInfo } from '@/ui/types/engine-info'
-import { EngineCapabilities } from '@/ui/constants/engine-capabilities'
+import { engineCapabilities } from '@/ui/constants/engine-capabilities'
+import { useEngineDescriptor } from '@/ui/stores/engine-status.store'
 import { formatModelDisplayName } from '@/ui/utils/format-model-display-name'
 import { ModelExpiry } from '@/shared/types/engines'
 
@@ -29,7 +30,7 @@ export function ModelManager({ backend, nodeId }: { backend: BackendInfo; nodeId
             formatModelDisplayName(b.name, backend.type)
         )
     )
-    const caps = EngineCapabilities[backend.type]
+    const caps = engineCapabilities(backend.type, useEngineDescriptor(backend.type))
 
     const backendType = backend.type
     const getProgress = useEngineProgressStore(state => state.getProgress)
@@ -130,7 +131,7 @@ export function ModelManager({ backend, nodeId }: { backend: BackendInfo; nodeId
     // them, which `tests/modular/delete-model-restart.test.ts` pins against the
     // engine-manager manifests. The restart itself belongs to the engine
     // manager, not to this click.
-    const confirmBeforeDelete = caps?.restartsOnModelDelete ?? false
+    const confirmBeforeDelete = caps.restartsOnModelDelete ?? false
 
     const handleAction = useCallback(
         (modelName: string, action: string) => {
@@ -177,18 +178,13 @@ export function ModelManager({ backend, nodeId }: { backend: BackendInfo; nodeId
         ? getProgress(nodeId, backend.type, 'pull', transientModel.name)
         : undefined
 
-    const hasModelSearchOnlyWhenRunning = useMemo(
-        () => caps?.hasModelSearchOnlyWhenRunning ?? false,
-        [caps?.hasModelSearchOnlyWhenRunning]
-    )
-    const modelOpsWhenStopped = useMemo(
-        () => caps?.modelOpsWhenStopped ?? false,
-        [caps?.modelOpsWhenStopped]
-    )
+    const hasModelSearchOnlyWhenRunning = caps.hasModelSearchOnlyWhenRunning
+    const modelOpsWhenStopped = caps.modelOpsWhenStopped
     const isRunning = useMemo(() => backend.processStatus === 'running', [backend.processStatus])
+    // An engine that cannot download a model offers no hub at all.
     const supportsSearch = useMemo(
-        () => !hasModelSearchOnlyWhenRunning || isRunning,
-        [hasModelSearchOnlyWhenRunning, isRunning]
+        () => caps.hasPull && (!hasModelSearchOnlyWhenRunning || isRunning),
+        [caps.hasPull, hasModelSearchOnlyWhenRunning, isRunning]
     )
 
     const handleDownload = useCallback(
@@ -250,7 +246,9 @@ export function ModelManager({ backend, nodeId }: { backend: BackendInfo; nodeId
                                     pendingAction={usePendingActionsStore
                                         .getState()
                                         .getModelPending(nodeId, backendType, model.name)}
-                                    canCopyToThisPc={isRemoteNode && !copyInFlight}
+                                    canCopyToThisPc={
+                                        isRemoteNode && !copyInFlight && caps.hasModelCopy
+                                    }
                                     copyProgress={getProgress(
                                         nodeId,
                                         backend.type,

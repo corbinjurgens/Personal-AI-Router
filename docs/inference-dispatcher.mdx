@@ -77,6 +77,14 @@ Ollama, `1234` for LM Studio, and `8080` for llama.cpp. These are the ports the
 router's proxies claim, so requests enter the cluster router rather than a
 single engine. Use `--port` to select another local port.
 
+`--backend` also accepts any other engine ID a node's engine manager registers,
+such as a configured llama.cpp fork. The dispatcher knows nothing about such an
+engine, so both `--protocol` and `--port` are required: `--protocol` takes one
+of the protocol profiles from the engine's descriptor, `openai-v1` or
+`ollama-api`, and the engine is then driven exactly as a built-in engine
+speaking that profile is. The built-in backends keep their own protocol, and
+`--protocol` may only repeat it.
+
 ## API behavior
 
 - Ollama inventory: `GET /api/tags`

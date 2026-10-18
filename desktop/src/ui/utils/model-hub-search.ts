@@ -4,8 +4,9 @@
 import { ModelEntry, SORT_FIELD } from '@/ui/types/model-hub'
 import { EngineType } from '@/shared/types/engines'
 import type { EngineHubModel } from '@/shared/types/engine-api'
-import { EngineCapabilities } from '@/ui/constants/engine-capabilities'
+import { engineCapabilities } from '@/ui/constants/engine-capabilities'
 import { EngineHubConfig } from '@/ui/types/engine-manifest'
+import { useEngineStatusStore } from '@/ui/stores/engine-status.store'
 
 export const sortFieldLabel = (sort: SORT_FIELD) => {
     switch (sort) {
@@ -21,7 +22,8 @@ export const sortFieldLabel = (sort: SORT_FIELD) => {
 }
 
 function getEngineHub(engine: EngineType): EngineHubConfig | undefined {
-    return EngineCapabilities[engine]?.engineHub
+    const descriptor = useEngineStatusStore.getState().descriptors.get(engine)
+    return engineCapabilities(engine, descriptor).engineHub
 }
 
 /** Map a normalized hub row from the Electron-main module into a display entry. */

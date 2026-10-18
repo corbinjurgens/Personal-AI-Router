@@ -7,6 +7,7 @@ import type { EngineStatePatch } from '@/shared/types/engine-api'
 import type { ModelItem } from '@/shared/types/engines'
 import type { ServiceStatus } from '@/shared/types/ipc-channels'
 import { usePendingActionsStore } from '@/ui/stores/pending-actions.store'
+import { useEngineStatusStore } from '@/ui/stores/engine-status.store'
 
 /**
  * Two ways the "Deleting…" spinner used to outlive the operation:
@@ -187,6 +188,25 @@ describe('pending-actions store: model actions', () => {
     })
 
     it('keeps Ollama loads pending through the backend budget and clears on real outcomes', () => {
+        // The budget is the one Ollama's descriptor declares for its load.
+        useEngineStatusStore.setState({
+            descriptors: new Map([
+                [
+                    'ollama',
+                    {
+                        engineType: 'ollama',
+                        family: 'ollama',
+                        label: 'Ollama',
+                        available: true,
+                        protocols: ['ollama-api', 'openai-v1'],
+                        modelNaming: 'implied-latest-tag',
+                        modelStore: 'ollama',
+                        catalog: 'ollama',
+                        operations: { load: { responseTimeoutS: 600 } }
+                    }
+                ]
+            ])
+        })
         const store = usePendingActionsStore.getState()
         for (const nodeId of ['local-node', 'remote-node']) {
             store.begin({

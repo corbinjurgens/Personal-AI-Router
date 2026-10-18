@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import type { DispatcherBackend } from '@/shared/types/inference-dispatcher'
-import type { EngineType } from '@/shared/types/engines'
+import type { BuiltinEngineType } from '@/shared/types/engines'
 
 /**
  * Inference Demo — a fixed, node-local burst of synthetic inference traffic sent
@@ -55,7 +55,7 @@ export const DEMO_REQUEST_TIMEOUT_SECONDS = 120
 export const DEMO_ENGINE_PROBES: readonly {
     backend: DispatcherBackend
     /** Engine key used by the broker's proxy port registry. */
-    proxyEngine: EngineType
+    proxyEngine: BuiltinEngineType
 }[] = [
     { backend: 'ollama', proxyEngine: 'ollama' },
     { backend: 'lmstudio', proxyEngine: 'lm-studio' },

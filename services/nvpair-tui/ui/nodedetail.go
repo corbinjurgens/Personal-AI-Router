@@ -68,6 +68,11 @@ type nodeDetail struct {
 
 	engines     []engineStatus
 	engineTable table.Model
+	// descriptors is this machine's engine descriptor set, which gates the
+	// model operations offered for an engine and labels one the engine list
+	// has not named. Read once per screen: engine-manager loads its manifests
+	// at startup.
+	descriptors engineDescriptors
 	models      modelsResult
 	modelTable  table.Model
 	modelRows   []detailModelRow
@@ -319,7 +324,7 @@ func (d *nodeDetail) Init() tea.Cmd {
 	// The telemetry chain is started by this first poll, not by a tick: each
 	// reading schedules the next one when it lands, so there is exactly one
 	// chain and it cannot outrun a slow node.
-	cmds := []tea.Cmd{d.enginesCmd(), d.modelsCmd(), d.telemetryCmd()}
+	cmds := []tea.Cmd{d.enginesCmd(), d.modelsCmd(), d.telemetryCmd(), d.own(descriptorsCmd(d.client))}
 	if d.proxy != nil {
 		cmds = append(cmds, d.proxy.init(d.client))
 	}
@@ -664,6 +669,10 @@ func (d *nodeDetail) update(msg tea.Msg) (tea.Cmd, bool) {
 			return nil, true
 		}
 		return d.update(msg.msg)
+
+	case descriptorsMsg:
+		d.descriptors = msg.descriptors
+		return nil, true
 
 	case detailEnginesMsg:
 		if msg.err != nil {
@@ -1280,7 +1289,10 @@ func (d *nodeDetail) handleModelKey(msg tea.KeyMsg) tea.Cmd {
 			return nil
 		}
 		d.mode = detailInputModelName
-		d.input.Placeholder = downloadPrompt(engine, d.engineLabel(engine))
+		if d.refuseModelOp(engine, modelActions["pull"]) {
+			return nil
+		}
+		d.input.Placeholder = downloadPrompt(d.descriptors.family(engine), d.engineLabel(engine))
 		d.input.CharLimit = 0
 		d.input.SetValue("")
 		d.input.Focus()
@@ -1315,7 +1327,7 @@ func (d *nodeDetail) submitInput() tea.Cmd {
 			return nil
 		}
 		d.status.busy("download %s: %s...", d.engineLabel(engine), val)
-		return d.own(modelCmd(d.client, d.nodeArg(), engine, modelActions["pull"], val))
+		return d.modelCmd(engine, modelActions["pull"], val)
 
 	case detailInputEnginePort, detailInputProxyPort, detailInputLaunchArgs:
 		return d.submitSettings(mode, d.input.Value(), val)
@@ -1507,6 +1519,9 @@ func (d *nodeDetail) openCatalog() tea.Cmd {
 		d.status.error("start an engine before downloading a model")
 		return nil
 	}
+	if d.refuseModelOp(engine, modelActions["pull"]) {
+		return nil
+	}
 	label := engine
 	for _, e := range d.engines {
 		if e.Engine == engine {
@@ -1522,7 +1537,23 @@ func (d *nodeDetail) openCatalog() tea.Cmd {
 // downloadFromCatalog starts the download the operator picked in the browser.
 func (d *nodeDetail) downloadFromCatalog(engine, model string) tea.Cmd {
 	d.status.busy("download %s: %s...", d.engineLabel(engine), model)
-	return d.own(modelCmd(d.client, d.nodeArg(), engine, modelActions["pull"], model))
+	return d.modelCmd(engine, modelActions["pull"], model)
+}
+
+// refuseModelOp reports a model operation the engine's descriptor does not
+// declare, and says whether it did. An engine with no descriptor here keeps
+// the operations already offered; its own engine-manager decides them.
+func (d *nodeDetail) refuseModelOp(engine string, act modelAction) bool {
+	if err := d.descriptors.unsupported(engine, act); err != nil {
+		d.status.error("%s", err)
+		return true
+	}
+	return false
+}
+
+// modelCmd issues a model operation against this screen's node.
+func (d *nodeDetail) modelCmd(engine string, act modelAction, model string) tea.Cmd {
+	return d.own(modelCmd(d.client, d.nodeArg(), engine, d.descriptors.family(engine), act, model))
 }
 
 func (d *nodeDetail) modelOp(op string) tea.Cmd {
@@ -1541,8 +1572,11 @@ func (d *nodeDetail) modelOp(op string) tea.Cmd {
 		d.status.error("%s did not report which engine serves %s", d.node.name, row.model)
 		return nil
 	}
+	if d.refuseModelOp(row.engine, act) {
+		return nil
+	}
 	d.status.busy("%s %s...", act.what, row.model)
-	return d.own(modelCmd(d.client, d.nodeArg(), row.engine, act, row.model))
+	return d.modelCmd(row.engine, act, row.model)
 }
 
 // pendingDestructive is an armed action bound to the exact target it was armed
@@ -1676,10 +1710,13 @@ func (d *nodeDetail) deleteSelectedModel() tea.Cmd {
 		d.status.error("%s did not report which engine serves %s", d.node.name, row.model)
 		return nil
 	}
+	if d.refuseModelOp(row.engine, modelActions["delete"]) {
+		return nil
+	}
 	target := *row
 	return d.arm(fmt.Sprintf("delete %s from %s?", target.model, d.engineLabel(target.engine)), func() tea.Cmd {
 		d.status.busy("delete %s...", target.model)
-		return d.own(modelCmd(d.client, d.nodeArg(), target.engine, modelActions["delete"], target.model))
+		return d.modelCmd(target.engine, modelActions["delete"], target.model)
 	})
 }
 
@@ -1854,8 +1891,13 @@ func (d *nodeDetail) engineLabel(key string) string {
 	// back to the raw wire id made the same engine read "Ollama" on one machine
 	// and "ollama" on another, purely from whether that fetch had landed.
 	//
-	// engineDisplayName answers from the static proxy inventory, so it does not
-	// depend on any fetch. Only a genuinely unknown engine reaches the key.
+	// A descriptor names an engine the list has not, such as a configured
+	// variant. engineDisplayName answers from the static proxy inventory, so it
+	// does not depend on any fetch. Only a genuinely unknown engine reaches the
+	// key.
+	if desc, ok := d.descriptors[key]; ok {
+		return desc.Label
+	}
 	return engineDisplayName(key)
 }
 

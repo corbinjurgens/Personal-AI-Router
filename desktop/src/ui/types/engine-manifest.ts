@@ -17,6 +17,8 @@ export interface EngineHubConfig {
 
 export interface EngineCaps {
     hasExpiry: boolean
+    /** When true, show the Load action in the model action menu. */
+    hasLoad: boolean
     hasEject: boolean
     /** Platforms where PAIR can auto-install this engine. Empty = no auto-install. */
     hasInstall: SupportedPlatform[]
@@ -36,6 +38,10 @@ export interface EngineCaps {
     modelOpsWhenStopped: boolean
     /** When true, show the Delete action in the model action menu. */
     hasDeleteModel: boolean
+    /** When true, models can be downloaded into the engine (the "Add model" hub). */
+    hasPull: boolean
+    /** When true, a paired node's model can be copied to this PC for this engine. */
+    hasModelCopy: boolean
     /**
      * When true, the engine restarts as part of deleting a model, so Delete asks
      * for confirmation first. The engine manager owns the restart; this flag only

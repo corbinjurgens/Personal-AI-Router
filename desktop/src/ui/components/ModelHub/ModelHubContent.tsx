@@ -12,6 +12,8 @@ import { mergeModelHubResults, searchEngineHub } from '@/ui/utils/model-hub-sear
 import { resolveStoredSort, writeStoredSort } from '@/ui/utils/model-hub-content-storage'
 import { isHubEntryDownloaded } from '@/ui/utils/match-downloaded-model'
 import { EngineType } from '@/shared/types/engines'
+import { engineAdapterType } from '@/shared/utils/engines'
+import { useEngineStatusStore } from '@/ui/stores/engine-status.store'
 import type { ModelItem } from '@/ui/types/engine-info'
 import getErrorString from '@/shared/utils/get-error-string'
 
@@ -50,6 +52,10 @@ export const ModelHubContent = ({
         engine ? resolveStoredSort(engine, SORT_DEFAULT_STATE) : { ...SORT_DEFAULT_STATE }
     )
     const [errors, setErrors] = useState<{ id: string; message: string }[]>([])
+    // The built-in engine whose catalogue search and model naming this engine
+    // shares: itself, or a variant's family.
+    const descriptor = useEngineStatusStore(s => (engine ? s.descriptors.get(engine) : undefined))
+    const adapterType = engine ? engineAdapterType(engine, descriptor) : null
 
     // Per-engine raw-response cache so reopening an engine is instant and
     // keystrokes filter locally instead of re-invoking the search IPC.
@@ -117,8 +123,8 @@ export const ModelHubContent = ({
 
     const visibleModels = useMemo(() => {
         if (!engine || !downloadedModels || downloadedModels.length === 0) return queryFiltered
-        return queryFiltered.filter(m => !isHubEntryDownloaded(engine, m, downloadedModels))
-    }, [engine, queryFiltered, downloadedModels])
+        return queryFiltered.filter(m => !isHubEntryDownloaded(adapterType, m, downloadedModels))
+    }, [engine, adapterType, queryFiltered, downloadedModels])
 
     const handleSortPersist = useCallback(
         (next: SortState) => {
@@ -184,7 +190,7 @@ export const ModelHubContent = ({
         async (nextQuery: string) => {
             const normalized = nextQuery.trim()
             setQuery(nextQuery)
-            if (engine !== 'llama-cpp' || normalized.length === 0) return
+            if (!engine || adapterType !== 'llama-cpp' || normalized.length === 0) return
 
             const generation = ++searchGenRef.current
             submittedQueryRef.current = normalized
@@ -204,7 +210,7 @@ export const ModelHubContent = ({
                 if (searchGenRef.current === generation) setSearching(false)
             }
         },
-        [engine]
+        [engine, adapterType]
     )
 
     return (

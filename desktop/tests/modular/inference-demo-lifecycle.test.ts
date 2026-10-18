@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import type { EngineType } from '@/shared/types/engines'
+import type { BuiltinEngineType } from '@/shared/types/engines'
 
 /**
  * Lifecycle guarantees for the Inference Demo scheduler.
@@ -47,7 +47,7 @@ const POISONED_ENV: Record<string, string> = {
 }
 
 /** Proxy ports the fake broker reports. Mutable so a test can withhold one. */
-const proxyPorts: Record<EngineType, number | null> = {
+const proxyPorts: Record<BuiltinEngineType, number | null> = {
     ollama: 11434,
     'lm-studio': 1234,
     'llama-cpp': 8080
@@ -120,7 +120,7 @@ vi.mock('@/electron/window', () => ({ createOverviewWindow: vi.fn() }))
 
 vi.mock('@/electron/service-bridge/modular-state', () => ({
     getModularBridgeState: () => ({
-        getProxyPort: (engine: EngineType) => proxyPorts[engine]
+        getProxyPort: (engine: BuiltinEngineType) => proxyPorts[engine]
     })
 }))
 

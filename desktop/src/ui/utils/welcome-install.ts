@@ -67,12 +67,15 @@ export function getWelcomeInstallOutcome(
     return 'pending'
 }
 
-export function targetForInstallError(
+export function targetForInstallError<T extends EngineType>(
     error: ServiceError,
-    targets: readonly EngineType[]
-): EngineType | null {
+    targets: readonly T[]
+): T | null {
     const explicit = errorEngineType(error.engineType)
-    if (explicit && targets.includes(explicit)) return explicit
+    const explicitTarget = explicit
+        ? targets.find(engineType => engineType === explicit)
+        : undefined
+    if (explicitTarget) return explicitTarget
 
     const text = `${error.id} ${error.message}`.toLowerCase()
     return (

@@ -264,60 +264,34 @@ function routeEngineManagerCommand(payload: WsInvokeRequest<'engine:command'>): 
             }
             break
         case 'loadModel':
-            // "Load" warms a model into the engine's memory/VRAM. Ollama has no
-            // first-class load action, so we POST its `run_model` HTTP action
-            // (`/api/generate`) with no prompt: Ollama loads the model into VRAM
-            // and returns immediately (`done_reason: "load"`) without generating.
-            // LM Studio and llama.cpp declare real `load_model` manifest actions.
-            // All require the engine running (HTTP/CLI action), matching the
-            // disabled rule in ModelRow.tsx.
-            // See docs/services-parity.md#models.
+            // "Load" warms a model into the engine's memory/VRAM through
+            // engine-manager's typed operation, which applies the engine's own
+            // `load` binding (Ollama's is `run_model` with streaming off and a
+            // 10-minute budget). The reply can take that long, so it is observed
+            // rather than timed: a rejection clears the row's pending entry.
+            // All require the engine running, matching the disabled rule in
+            // ModelRow.tsx. See docs/services-parity.md#models.
             if (payload.model) {
-                if (payload.engineType === 'ollama') {
-                    supervisor.sendProcess(
-                        'broker',
-                        'engine:action',
-                        {
-                            engine,
-                            action: 'run_model',
-                            params: { model: payload.model, stream: false }
-                        },
-                        failAction('load model', {
-                            nodeId: payload.nodeId,
-                            engineType: payload.engineType,
-                            operation: 'load',
-                            modelName: payload.model
-                        }),
-                        true
-                    )
-                } else {
-                    supervisor.sendProcess(
-                        'broker',
-                        'engine:action',
-                        {
-                            engine,
-                            action: 'load_model',
-                            params: { model: payload.model }
-                        },
-                        failAction('load model')
-                    )
-                }
+                supervisor.sendProcess(
+                    'broker',
+                    'engine:load-model',
+                    { engine, model: payload.model },
+                    failAction('load model', {
+                        nodeId: payload.nodeId,
+                        engineType: payload.engineType,
+                        operation: 'load',
+                        modelName: payload.model
+                    }),
+                    true
+                )
             }
             break
         case 'unloadModel':
             if (payload.model) {
-                const unloadParams: JsonObject =
-                    payload.engineType === 'ollama'
-                        ? { model: payload.model, keep_alive: 0 }
-                        : { model: payload.model }
                 supervisor.sendProcess(
                     'broker',
-                    'engine:action',
-                    {
-                        engine,
-                        action: 'unload_model',
-                        params: unloadParams
-                    },
+                    'engine:unload-model',
+                    { engine, model: payload.model },
                     failAction('unload model')
                 )
             }
@@ -413,8 +387,8 @@ async function handleEngineCommand(payload?: WsInvokeRequest<'engine:command'>):
     // "Load" loads a model into the engine's memory/VRAM — never proxy routing.
     // Proxy node selection is owned by the backend nvpair-job-scheduler (it drives
     // node/set-priority via the broker); PAIR UI never pins node/select, and a user
-    // clicking "Load" must not pin a route. Ollama loads via its `run_model` HTTP
-    // action; LM Studio and llama.cpp use their manifest `load_model` actions.
+    // clicking "Load" must not pin a route. Every engine loads through
+    // engine-manager's typed `engine:load-model`, which owns the engine's binding.
 
     // Remote peers: `nvpair-engine-manager` exposes `engine:remote-*` client methods
     // (cluster mTLS `ec` surface) for install/start/stop/pull and model ops.

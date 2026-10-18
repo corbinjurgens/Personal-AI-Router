@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"nvpair-shared/engines"
 	"nvpair-shared/enginesettings"
 	"nvpair-shared/noderec"
 	"nvpair-tui/rpc"
@@ -1766,5 +1767,36 @@ func TestServiceTabNoLongerOffersPorts(t *testing.T) {
 		if strings.Contains(strings.ToLower(it.label), "port") {
 			t.Errorf("Service tab still offers %q; ports belong on the node", it.label)
 		}
+	}
+}
+
+// TestUndeclaredModelOperationIsRefusedBeforeArming checks a model operation
+// this machine's descriptor says the engine lacks is refused at the keypress,
+// naming the engine by its descriptor label, rather than armed for a
+// confirmation and then failed by the engine manager.
+func TestUndeclaredModelOperationIsRefusedBeforeArming(t *testing.T) {
+	d := localDetail()
+	d.descriptors = engineDescriptors{
+		"strata": {
+			Version: engines.DescriptorVersion, Engine: "strata", Family: "strata", Label: "Strata",
+			ModelNaming: engines.ModelNamingExact,
+			Operations:  map[string]engines.OperationCapability{engines.OperationLoad: {}},
+		},
+	}
+	d.models = modelsResult{ModelsByEngine: map[string][]string{"strata": {"victim"}}}
+	d.refreshModels()
+	d.pane = detailModels
+
+	if cmd := d.deleteSelectedModel(); cmd != nil || d.pending != nil {
+		t.Fatal("an undeclared delete was armed")
+	}
+	if !contains(d.status.render(), "Strata does not support delete") {
+		t.Errorf("refusal not explained: %q", d.status.render())
+	}
+	if cmd := d.modelOp("load"); cmd == nil {
+		t.Error("a declared load was refused")
+	}
+	if got := d.engineLabel("strata"); got != "Strata" {
+		t.Errorf("engine label = %q, want the descriptor's", got)
 	}
 }

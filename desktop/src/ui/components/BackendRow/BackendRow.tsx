@@ -5,6 +5,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Divider, Stack } from '@nvidia/foundations-react-core'
 import type { BackendInfo } from '@/ui/types/engine-info'
 import type { EngineProcessStatus } from '@/shared/types/engines'
+import { isBuiltinEngineType } from '@/shared/utils/engines'
 
 import { engineProgressKey } from '@/shared/utils/engine-progress'
 import { useConnectionStore } from '@/ui/stores/connection.store'
@@ -188,7 +189,8 @@ export function BackendRow({
                 <ModelSection backend={displayBackend} nodeId={nodeId} disabled={isTransitioning} />
             )}
 
-            {canShowAccordions && (
+            {/* The broker owns settings only for the engines it fronts with a proxy. */}
+            {canShowAccordions && isBuiltinEngineType(backend.type) && (
                 <EngineSettingsSection
                     key={`${nodeId}:${backend.type}`}
                     nodeId={nodeId}

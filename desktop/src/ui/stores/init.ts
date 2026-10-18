@@ -85,6 +85,7 @@ async function initializeAllStores(): Promise<void> {
         } catch {
             console.error('Failed to fetch engine initial state')
             engineInitial = {
+                descriptors: [],
                 statuses: [],
                 models: [],
                 activeProgress: [],
@@ -158,6 +159,7 @@ async function resyncAllStores(): Promise<void> {
             engineInitial = await window.pairApi.engines.getInitialState()
         } catch {
             engineInitial = {
+                descriptors: [],
                 statuses: [],
                 models: [],
                 activeProgress: [],

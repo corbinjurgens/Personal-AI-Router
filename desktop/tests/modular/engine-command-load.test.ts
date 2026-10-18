@@ -47,12 +47,8 @@ describe('local model load command', () => {
             mocks.supervisor.sendProcess.mock.calls[0]
         expect([name, method, params, observeResponse]).toEqual([
             'broker',
-            'engine:action',
-            {
-                engine: 'ollama',
-                action: 'run_model',
-                params: { model: 'llama3.2', stream: false }
-            },
+            'engine:load-model',
+            { engine: 'ollama', model: 'llama3.2' },
             true
         ])
 
@@ -70,7 +66,7 @@ describe('local model load command', () => {
         )
     })
 
-    it('leaves the LM Studio load path unobserved', async () => {
+    it('loads every engine through the typed operation, never an engine:action body', async () => {
         await handleServiceBridgeInvoke('engine:command', {
             command: 'loadModel',
             engineType: 'lm-studio',
@@ -79,20 +75,16 @@ describe('local model load command', () => {
         })
 
         expect(mocks.supervisor.sendProcess).toHaveBeenCalledOnce()
-        expect(mocks.supervisor.sendProcess.mock.calls[0]).toHaveLength(4)
         expect(mocks.supervisor.sendProcess).toHaveBeenCalledWith(
             'broker',
-            'engine:action',
-            {
-                engine: 'lmstudio',
-                action: 'load_model',
-                params: { model: 'publisher/demo' }
-            },
-            expect.any(Function)
+            'engine:load-model',
+            { engine: 'lmstudio', model: 'publisher/demo' },
+            expect.any(Function),
+            true
         )
     })
 
-    it('routes llama.cpp load and unload through its manifest actions', async () => {
+    it('routes llama.cpp load and unload through the typed operations', async () => {
         await handleServiceBridgeInvoke('engine:command', {
             command: 'loadModel',
             engineType: 'llama-cpp',
@@ -109,23 +101,16 @@ describe('local model load command', () => {
         expect(mocks.supervisor.sendProcess).toHaveBeenNthCalledWith(
             1,
             'broker',
-            'engine:action',
-            {
-                engine: 'llamacpp',
-                action: 'load_model',
-                params: { model: 'ggml-org/gemma-3-1b-it-GGUF:Q4_K_M' }
-            },
-            expect.any(Function)
+            'engine:load-model',
+            { engine: 'llamacpp', model: 'ggml-org/gemma-3-1b-it-GGUF:Q4_K_M' },
+            expect.any(Function),
+            true
         )
         expect(mocks.supervisor.sendProcess).toHaveBeenNthCalledWith(
             2,
             'broker',
-            'engine:action',
-            {
-                engine: 'llamacpp',
-                action: 'unload_model',
-                params: { model: 'ggml-org/gemma-3-1b-it-GGUF:Q4_K_M' }
-            },
+            'engine:unload-model',
+            { engine: 'llamacpp', model: 'ggml-org/gemma-3-1b-it-GGUF:Q4_K_M' },
             expect.any(Function)
         )
     })

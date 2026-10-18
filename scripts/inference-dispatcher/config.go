@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 )
@@ -29,6 +30,32 @@ const (
 	maxPromptsPerBatch  = 100
 )
 
+// The protocol profiles the dispatcher can speak, named as engine descriptors
+// name them. An engine's descriptor lists the profiles it serves; a backend
+// other than the built-in three is driven through the one the caller passes.
+const (
+	protocolOllamaAPI = "ollama-api"
+	protocolOpenAIV1  = "openai-v1"
+)
+
+// builtinProtocols is the protocol each built-in backend is driven through.
+// LM Studio additionally merges its native model list; see
+// listLMStudioModels.
+var builtinProtocols = map[string]string{
+	"ollama":   protocolOllamaAPI,
+	"lmstudio": protocolOpenAIV1,
+	"llamacpp": protocolOpenAIV1,
+}
+
+// engineIDRe is engine-manager's engine ID syntax. Any registered engine's ID
+// is accepted as a backend, so a configured variant such as a llama.cpp fork
+// can be driven like a built-in one.
+var engineIDRe = regexp.MustCompile(`^[a-zA-Z0-9._-]+$`)
+
+func validEngineID(id string) bool {
+	return engineIDRe.MatchString(id) && id != "." && id != ".."
+}
+
 var defaultTopics = []string{
 	"dog", "cat", "food", "toys", "birds", "planes",
 	"robots", "space", "gardens", "music", "mountains", "friendship",
@@ -39,6 +66,7 @@ var defaultTopics = []string{
 type Config struct {
 	Port                     int      `json:"port,omitempty"`
 	Backend                  string   `json:"backend"`
+	Protocol                 string   `json:"protocol,omitempty"`
 	Model                    string   `json:"model,omitempty"`
 	AllowNonGenerativeModels bool     `json:"allow_non_generative_models,omitempty"`
 	Count                    int      `json:"count"`
@@ -222,6 +250,7 @@ func envBool(name string, dst *bool) error {
 
 func applyEnvironment(cfg *Config) error {
 	envString("INFERENCE_DISPATCHER_BACKEND", &cfg.Backend)
+	envString("INFERENCE_DISPATCHER_PROTOCOL", &cfg.Protocol)
 	envString("INFERENCE_DISPATCHER_MODEL", &cfg.Model)
 	envString("INFERENCE_DISPATCHER_MODE", &cfg.Mode)
 	envString("INFERENCE_DISPATCHER_PROMPT_TEMPLATE", &cfg.PromptTemplate)
@@ -291,8 +320,9 @@ func parseConfig(args []string, stderr io.Writer) (Config, error) {
 	fs.SetOutput(stderr)
 	var parsedConfigPath string
 	fs.StringVar(&parsedConfigPath, "config", configPath, "JSON configuration file")
-	fs.StringVar(&cfg.Backend, "backend", cfg.Backend, "backend: ollama, lmstudio, or llamacpp")
+	fs.StringVar(&cfg.Backend, "backend", cfg.Backend, "backend engine ID: ollama, lmstudio, llamacpp, or a configured engine's ID")
 	fs.StringVar(&cfg.Backend, "provider", cfg.Backend, "alias for --backend")
+	fs.StringVar(&cfg.Protocol, "protocol", cfg.Protocol, "protocol profile from the engine's descriptor, ollama-api or openai-v1; required for an engine other than the built-in three")
 	fs.IntVar(&cfg.Port, "port", cfg.Port, "server port (backend default when omitted)")
 	fs.StringVar(&cfg.Model, "model", cfg.Model, "model name; omitted or auto selects an available model")
 	fs.BoolVar(&cfg.AllowNonGenerativeModels, "allow-non-generative-models", cfg.AllowNonGenerativeModels, "allow automatic selection of models not marked for text generation")
@@ -353,13 +383,32 @@ func parseConfig(args []string, stderr io.Writer) (Config, error) {
 		cfg.DebugErrorLog = defaultErrorLog
 	}
 	cfg.Backend = strings.ToLower(strings.TrimSpace(cfg.Backend))
+	cfg.Protocol = strings.ToLower(strings.TrimSpace(cfg.Protocol))
 	cfg.Mode = strings.ToLower(strings.TrimSpace(cfg.Mode))
 	return cfg, validateConfig(cfg)
 }
 
 func validateConfig(cfg Config) error {
-	if cfg.Backend != "ollama" && cfg.Backend != "lmstudio" && cfg.Backend != "llamacpp" {
-		return errors.New("--backend must be ollama, lmstudio, or llamacpp")
+	if !validEngineID(cfg.Backend) {
+		return errors.New("--backend must be ollama, lmstudio, llamacpp, or a configured engine's ID")
+	}
+	if cfg.Protocol != "" && cfg.Protocol != protocolOllamaAPI && cfg.Protocol != protocolOpenAIV1 {
+		return fmt.Errorf("--protocol must be %s or %s", protocolOllamaAPI, protocolOpenAIV1)
+	}
+	if builtin, ok := builtinProtocols[cfg.Backend]; ok {
+		if cfg.Protocol != "" && cfg.Protocol != builtin {
+			return fmt.Errorf("--protocol for %s must be %s", cfg.Backend, builtin)
+		}
+	} else {
+		// Nothing about another engine is known here: how to talk to it and
+		// where it listens both come from the caller, which has its descriptor
+		// and its facade.
+		if cfg.Protocol == "" {
+			return fmt.Errorf("--protocol is required for engine %q", cfg.Backend)
+		}
+		if cfg.Port == 0 {
+			return fmt.Errorf("--port is required for engine %q, which has no default port", cfg.Backend)
+		}
 	}
 	if cfg.Port < 0 || cfg.Port > 65535 {
 		return errors.New("--port must be between 1 and 65535")
@@ -406,10 +455,19 @@ func validateConfig(cfg Config) error {
 	default:
 		return errors.New("--ollama-think must be true, false, low, medium, or high")
 	}
-	if cfg.Backend != "ollama" && cfg.OllamaThink != "" {
-		return errors.New("--ollama-think is only valid with --backend ollama")
+	if effectiveProtocol(cfg) != protocolOllamaAPI && cfg.OllamaThink != "" {
+		return errors.New("--ollama-think is only valid with the ollama-api protocol")
 	}
 	return nil
+}
+
+// effectiveProtocol is the protocol the backend is driven through: a built-in
+// backend's own, otherwise the one the caller passed.
+func effectiveProtocol(cfg Config) string {
+	if builtin, ok := builtinProtocols[cfg.Backend]; ok {
+		return builtin
+	}
+	return cfg.Protocol
 }
 
 func effectivePort(cfg Config) int {
