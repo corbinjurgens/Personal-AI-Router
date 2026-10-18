@@ -52,19 +52,6 @@ func (b *Broker) engineManagerPorts() (httpPort, controlPort int) {
 	return httpPort, controlPort
 }
 
-func validateEngineManagerPorts(httpPort, controlPort int) error {
-	if httpPort < 1 || httpPort > 65535 {
-		return fmt.Errorf("--engine-manager-http-port must be between 1 and 65535 (got %d)", httpPort)
-	}
-	if controlPort < 1 || controlPort > 65535 {
-		return fmt.Errorf("--engine-manager-control-port must be between 1 and 65535 (got %d)", controlPort)
-	}
-	if httpPort == controlPort {
-		return fmt.Errorf("--engine-manager-http-port and --engine-manager-control-port must differ (both are %d)", httpPort)
-	}
-	return nil
-}
-
 // runAutoAdvertise is the broker's ollama engine-registration loop. It polls
 // the local ollama server on a fixed cadence and reconciles this node's ol
 // service registration in the discovery daemon against it: register (with the

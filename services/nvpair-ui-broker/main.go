@@ -33,6 +33,10 @@ func main() {
 	engineMgrPath := flag.String("engine-manager-path", "", "path to nvpair-engine-manager binary (default: ./nvpair-engine-manager in the current working directory)")
 	engineMgrHTTPPort := flag.Int("engine-manager-http-port", engineManagerHTTPPort, "engine-manager model HTTP service port (1..65535; must differ from the control port)")
 	engineMgrControlPort := flag.Int("engine-manager-control-port", engineControlPort, "engine-manager remote-control service port (1..65535; must differ from the HTTP port)")
+	nodeInfoPort := flag.Int("node-info-port", nodeInfoHTTPPort, "node-info HTTP service port (ni) passed to nvpair-node-info and registered with discovery (1..65535; unique among the local service ports)")
+	errorsPort := flag.Int("errors-port", errorsHTTPPort, "errors peer-sync service port (er) passed to nvpair-errors and registered with discovery (1..65535; unique among the local service ports)")
+	workloadMgrPort := flag.Int("workload-manager-port", workloadHTTPPort, "workload-manager service port (wl) passed to nvpair-workload-manager and registered with discovery (1..65535; unique among the local service ports)")
+	clusterMgrPort := flag.Int("cluster-manager-port", clusterManagerHTTPPort, "cluster-manager service port (cl) passed to nvpair-cluster-manager and registered with discovery (1..65535; unique among the local service ports)")
 	manualNodesPath := flag.String("manual-nodes-path", "", "path to nvpair-manual-nodes binary (default: ./nvpair-manual-nodes in the current working directory)")
 	settingsPath := flag.String("settings-path", "", "path to nvpair-node-settings binary (default: ./nvpair-node-settings in the current working directory)")
 	clusterMgrPath := flag.String("cluster-manager-path", "", "path to nvpair-cluster-manager binary (default: ./nvpair-cluster-manager in the current working directory)")
@@ -68,8 +72,15 @@ func main() {
 		sink.Close()
 		os.Exit(1)
 	}
-	if err := validateEngineManagerPorts(*engineMgrHTTPPort, *engineMgrControlPort); err != nil {
-		fatalf("engine-manager ports: %v", err)
+	if err := validateServicePorts(servicePortPlan{
+		nodeInfo:          *nodeInfoPort,
+		errors:            *errorsPort,
+		workload:          *workloadMgrPort,
+		clusterManager:    *clusterMgrPort,
+		engineManagerHTTP: *engineMgrHTTPPort,
+		engineControl:     *engineMgrControlPort,
+	}); err != nil {
+		fatalf("service ports: %v", err)
 	}
 
 	// The inter-node workers do cluster-scoped mTLS off the cert + pins
@@ -260,6 +271,10 @@ func main() {
 		engineMgr:            resolvedEngineMgr,
 		engineMgrHTTPPort:    *engineMgrHTTPPort,
 		engineMgrControlPort: *engineMgrControlPort,
+		nodeInfoPort:         *nodeInfoPort,
+		errorsPort:           *errorsPort,
+		workloadMgrPort:      *workloadMgrPort,
+		clusterMgrPort:       *clusterMgrPort,
 		manualNodes:          resolvedManualNodes,
 		settings:             resolvedSettings,
 		clusterMgr:           resolvedClusterMgr,

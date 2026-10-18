@@ -42,7 +42,7 @@ func TestEngineManagerPortsConfiguration(t *testing.T) {
 			if httpPort != tc.wantHTTP || controlPort != tc.wantControl {
 				t.Fatalf("ports = %d/%d, want %d/%d", httpPort, controlPort, tc.wantHTTP, tc.wantControl)
 			}
-			if err := validateEngineManagerPorts(httpPort, controlPort); err != nil {
+			if err := validateServicePorts(b.servicePorts()); err != nil {
 				t.Fatalf("valid configuration rejected: %v", err)
 			}
 		})
@@ -53,7 +53,13 @@ func TestEngineManagerPortsCLIRejectsInvalidBeforeWorkerResolution(t *testing.T)
 	binary := buildEngineManagerPortTestBinary(t, "ports-cli", "nvpair-ui-broker", ".", ".")
 	for _, tc := range []struct {
 		name, httpPort, controlPort, want string
+		extra                             []string
 	}{
+		{name: "node-info collides with HTTP", httpPort: "25122", controlPort: "25123", extra: []string{"--node-info-port", "25122"}, want: "--node-info-port and --engine-manager-http-port must differ (both are 25122)"},
+		{name: "control collides with default cluster port", httpPort: "25122", controlPort: "14321", want: "--cluster-manager-port and --engine-manager-control-port must differ (both are 14321)"},
+		{name: "errors below range", httpPort: "25122", controlPort: "25123", extra: []string{"--errors-port", "0"}, want: "--errors-port must be between 1 and 65535 (got 0)"},
+		{name: "workload on a compatibility facade", httpPort: "25122", controlPort: "25123", extra: []string{"--workload-manager-port", "11434"}, want: "--workload-manager-port 11434 is reserved"},
+		{name: "HTTP on a managed backend base", httpPort: "1235", controlPort: "25123", want: "--engine-manager-http-port 1235 is reserved"},
 		{name: "zero HTTP", httpPort: "0", controlPort: "25123", want: "--engine-manager-http-port must be between 1 and 65535 (got 0)"},
 		{name: "zero control", httpPort: "25122", controlPort: "0", want: "--engine-manager-control-port must be between 1 and 65535 (got 0)"},
 		{name: "negative HTTP", httpPort: "-1", controlPort: "25123", want: "--engine-manager-http-port must be between 1 and 65535 (got -1)"},
@@ -65,10 +71,12 @@ func TestEngineManagerPortsCLIRejectsInvalidBeforeWorkerResolution(t *testing.T)
 		t.Run(tc.name, func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
-			output, err := exec.CommandContext(ctx, binary,
+			args := append([]string{
 				"--scanner-path", filepath.Join(t.TempDir(), "missing-scanner"),
 				"--engine-manager-http-port", tc.httpPort,
-				"--engine-manager-control-port", tc.controlPort).CombinedOutput()
+				"--engine-manager-control-port", tc.controlPort,
+			}, tc.extra...)
+			output, err := exec.CommandContext(ctx, binary, args...).CombinedOutput()
 			if ctx.Err() != nil {
 				t.Fatalf("startup did not fail promptly: %v", ctx.Err())
 			}
@@ -94,10 +102,10 @@ func TestEngineManagerPortsInvalidProgrammaticConfigurationDoesNotSpawn(t *testi
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			b := NewBroker(nil, workerPaths{engineMgrHTTPPort: tc.httpPort, engineMgrControlPort: tc.controlPort})
-			if err := b.Serve(context.Background()); err == nil || !strings.Contains(err.Error(), "engine-manager ports:") {
+			if err := b.Serve(context.Background()); err == nil || !strings.Contains(err.Error(), "service ports:") {
 				t.Fatalf("Serve error = %v, want port configuration failure", err)
 			}
-			if handle, err := b.spawnEngineMgr(); err == nil || handle != nil || !strings.Contains(err.Error(), "engine-manager ports:") {
+			if handle, err := b.spawnEngineMgr(); err == nil || handle != nil || !strings.Contains(err.Error(), "service ports:") {
 				t.Fatalf("spawn = %v, %v, want port configuration failure without a handle", handle, err)
 			}
 			if b.getScanner() != nil || b.getEngineMgr() != nil || len(b.regCache.Snapshot()) != 0 {

@@ -17,17 +17,7 @@ import (
 	"nvpair-shared/errors"
 )
 
-const (
-	ollamaHostAliasBlockedID = "ollama-proxy:ollama-host-alias-blocked"
-
-	// These ports are fixed by the broker-owned service topology. Keep the
-	// values here as the broker's single source and use them when registering
-	// the corresponding workers as well as when reserving an OLLAMA_HOST alias.
-	nodeInfoHTTPPort       = 14318
-	errorsHTTPPort         = 14319
-	workloadHTTPPort       = 14320
-	clusterManagerHTTPPort = 14321
-)
+const ollamaHostAliasBlockedID = "ollama-proxy:ollama-host-alias-blocked"
 
 type ollamaHostAlias struct {
 	Address          string
@@ -393,22 +383,8 @@ func (b *Broker) reservedOllamaHostAliasPort(port int, enginePorts map[int]strin
 	if reason, ok := siblingProxyPorts[port]; ok {
 		return reason
 	}
-	httpPort, controlPort := b.engineManagerPorts()
-	if port == httpPort {
-		return fmt.Sprintf("the engine model service uses port %d", port)
-	}
-	if port == controlPort {
-		return fmt.Sprintf("the engine control service uses port %d", port)
-	}
-	switch port {
-	case nodeInfoHTTPPort:
-		return fmt.Sprintf("the node-info service uses port %d", port)
-	case errorsHTTPPort:
-		return fmt.Sprintf("the errors service uses port %d", port)
-	case workloadHTTPPort:
-		return fmt.Sprintf("the workload service uses port %d", port)
-	case clusterManagerHTTPPort:
-		return fmt.Sprintf("the cluster manager uses port %d", port)
+	if owner := b.servicePorts().owner(port); owner != "" {
+		return fmt.Sprintf("%s uses port %d", owner, port)
 	}
 	return ""
 }

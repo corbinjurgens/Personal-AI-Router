@@ -68,7 +68,9 @@ func (b *Broker) spawnNodeInfo() (supervisedHandle, error) {
 	// /v1/node-info agrees with the identity the fleet keys on, even on a custom
 	// --cluster-dir data root (node-info gets no cluster-dir, so it would
 	// otherwise resolve the default root and could report a different UUID).
-	np, err := startNodeInfo(b.nodeInfoPath, applog.LevelString(), b.forwardNodeInfoNotification, "--node-id", b.nodeID)
+	port := b.servicePorts().nodeInfo
+	extra := append([]string{"--node-id", b.nodeID}, servicePortArgs(port, nodeInfoHTTPPort)...)
+	np, err := startNodeInfo(b.nodeInfoPath, applog.LevelString(), b.forwardNodeInfoNotification, extra...)
 	if err != nil {
 		return nil, err
 	}
@@ -78,9 +80,9 @@ func (b *Broker) spawnNodeInfo() (supervisedHandle, error) {
 	// only source. It runs on every spawn, which also covers a supervised restart.
 	b.pushClusterIdentityToNodeInfo()
 	// Register node-info's service so the daemon advertises ni= on _nvpair-node.
-	// node-info binds the fixed :14318 (force_ports is inert), so the broker
-	// knows its port. Idempotent across restarts.
-	b.registerService(noderec.RegisterParams{Service: noderec.ServiceNodeInfo, Port: nodeInfoHTTPPort})
+	// node-info binds the planned port it was given (force_ports is inert), so
+	// the broker knows its port. Idempotent across restarts.
+	b.registerService(noderec.RegisterParams{Service: noderec.ServiceNodeInfo, Port: port})
 	slog.Info("node-info started", "path", b.nodeInfoPath, "pid", np.cmd.Process.Pid)
 	return np, nil
 }
@@ -419,12 +421,14 @@ func (b *Broker) spawnProxy() (supervisedHandle, error) {
 }
 
 func (b *Broker) spawnWorkloadManager() (supervisedHandle, error) {
-	wm, err := startWorkloadManager(b.workloadMgrPath, applog.LevelString(), b.relayDir, b.forwardWorkloadManagerNotification, b.clusterDirArgs()...)
+	port := b.servicePorts().workload
+	extra := append(b.clusterDirArgs(), servicePortArgs(port, workloadHTTPPort)...)
+	wm, err := startWorkloadManager(b.workloadMgrPath, applog.LevelString(), b.relayDir, b.forwardWorkloadManagerNotification, extra...)
 	if err != nil {
 		return nil, err
 	}
 	b.setWorkloadMgr(wm)
-	b.registerService(noderec.RegisterParams{Service: noderec.ServiceWorkload, Port: workloadHTTPPort})
+	b.registerService(noderec.RegisterParams{Service: noderec.ServiceWorkload, Port: port})
 	// A (re)started manager's anti-entropy set starts empty. Replay this node's
 	// active local-origin workloads so a supervised restart mid-job doesn't
 	// leave a later-joining peer unable to learn those jobs (and the heartbeat
@@ -438,23 +442,26 @@ func (b *Broker) spawnErrors() (supervisedHandle, error) {
 	// Pass the resolved node UUID so nvpair-errors attributes this node's errors
 	// to the same identity the broker stamps (and the cluster keys on), not its
 	// hostname — keeping local-origin attribution and clear-by-id in lockstep.
+	port := b.servicePorts().errors
 	extra := append(b.clusterDirArgs(), "--node-id", b.nodeID)
+	extra = append(extra, servicePortArgs(port, errorsHTTPPort)...)
 	ep, err := startErrors(b.errorsPath, applog.LevelString(), b.relayDir, b.onErrorsUpdate, extra...)
 	if err != nil {
 		return nil, err
 	}
 	b.setErrors(ep)
 	b.replayStickyErrors()
-	b.registerService(noderec.RegisterParams{Service: noderec.ServiceErrors, Port: errorsHTTPPort})
+	b.registerService(noderec.RegisterParams{Service: noderec.ServiceErrors, Port: port})
 	slog.Info("nvpair-errors started", "path", b.errorsPath, "pid", ep.cmd.Process.Pid)
 	return ep, nil
 }
 
 func (b *Broker) spawnEngineMgr() (supervisedHandle, error) {
-	httpPort, controlPort := b.engineManagerPorts()
-	if err := validateEngineManagerPorts(httpPort, controlPort); err != nil {
-		return nil, fmt.Errorf("engine-manager ports: %w", err)
+	ports := b.servicePorts()
+	if err := validateServicePorts(ports); err != nil {
+		return nil, fmt.Errorf("service ports: %w", err)
 	}
+	httpPort, controlPort := ports.engineManagerHTTP, ports.engineControl
 	// Tell engine-manager to serve its LAN HTTP surface on the configured em port so
 	// peers can fetch this node's model list at /v1/models, and its cluster-scoped
 	// mTLS remote-control surface (ec) on the configured control port. --cluster-dir
@@ -558,10 +565,11 @@ func (b *Broker) spawnClusterManager() (supervisedHandle, error) {
 	// its parent is the base — the same derivation resolveLocalNodeID performs.
 	// Passing it keeps the only writer of the cluster dir and the workers reading it
 	// on one directory.
+	port := b.servicePorts().clusterManager
 	var callbackMu sync.Mutex
 	var cm *clusterManagerProcess
 	callbackMu.Lock()
-	started, err := startClusterManager(b.clusterMgrPath, applog.LevelString(), b.clusterManagerConfigDir(), b.relayDir, func(method string, params json.RawMessage) {
+	started, err := startClusterManager(b.clusterMgrPath, applog.LevelString(), b.clusterManagerConfigDir(), b.relayDir, servicePortArgs(port, clusterManagerHTTPPort), func(method string, params json.RawMessage) {
 		if method == peerServicesEvent {
 			callbackMu.Lock()
 			child := cm
@@ -578,7 +586,7 @@ func (b *Broker) spawnClusterManager() (supervisedHandle, error) {
 	cm = started
 	b.setClusterMgr(cm)
 	callbackMu.Unlock()
-	b.registerService(noderec.RegisterParams{Service: noderec.ServiceCluster, Port: clusterManagerHTTPPort})
+	b.registerService(noderec.RegisterParams{Service: noderec.ServiceCluster, Port: port})
 	// Reflect the persisted clusterId (owned by nvpair-node-settings) back into the
 	// cluster-manager, which doesn't persist it itself. Synchronous so the first
 	// spawn restores before app:ready/readLoop (no client-visible race); also
