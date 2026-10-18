@@ -3,7 +3,12 @@
 
 package ui
 
-import "nvpair-shared/noderec"
+import (
+	"encoding/json"
+	"time"
+
+	"nvpair-shared/noderec"
+)
 
 // The wire shapes behind the Nodes tab. One machine is described by three
 // different services, so their payloads are collected here and folded into the
@@ -102,6 +107,22 @@ type manualNode struct {
 	CPU            *noderec.CPUInfo    `json:"cpu"`
 	Memory         *noderec.MemoryInfo `json:"memory"`
 	TelemetryValid bool                `json:"telemetryValid"`
+	MSSince        int64               `json:"msSince"`
+	receivedAt     time.Time
+}
+
+// UnmarshalJSON records receipt once, so unrelated feed merges do not refresh
+// the age of the manual worker's last reading.
+func (m *manualNode) UnmarshalJSON(data []byte) error {
+	type wireManualNode manualNode
+	// An omitted age cannot establish freshness, even if validity is true.
+	wire := wireManualNode{MSSince: -1}
+	if err := json.Unmarshal(data, &wire); err != nil {
+		return err
+	}
+	*m = manualNode(wire)
+	m.receivedAt = time.Now()
+	return nil
 }
 
 // answered reports whether any service on the host responded to the worker's
