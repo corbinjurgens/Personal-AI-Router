@@ -34,7 +34,7 @@ func (b *Broker) handleSettingsPortRPC(msg *Message, proxyEngine string) {
 	if proxyEngine != "" {
 		p.Engine = proxyEngine
 	}
-	if b.rejectOllamaHostAliasPort(msg, p.Port, p.Engine) {
+	if b.rejectProxyHeldPort(msg, p.Port, p.Engine) {
 		return
 	}
 	target := settings.Request{Engine: p.Engine}

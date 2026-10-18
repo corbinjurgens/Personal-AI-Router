@@ -78,9 +78,7 @@ func newSettingsHarnessForEngine(t *testing.T, engine string) *settingsHarness {
 		"lmstudio": {ready: true, port: ports[2]},
 		"llamacpp": {ready: true, port: ports[3]},
 	}}
-	for _, profile := range engineProxyProfiles {
-		h.b.setEngineProxyHandle(profile, proxy)
-	}
+	publishTestProxy(h.b, proxy)
 	go func() {
 		for {
 			msg, err := proxyCodec.Read()

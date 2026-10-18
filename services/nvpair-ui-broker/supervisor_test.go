@@ -4,6 +4,7 @@
 package main
 
 import (
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -206,6 +207,39 @@ func TestSupervisorGivesUpAfterBudget(t *testing.T) {
 		t.Fatal("supervisor spawned a 4th worker after exhausting its restart budget")
 	case <-time.After(200 * time.Millisecond):
 		// No further spawn — correct.
+	}
+}
+
+// A respawn refused because Stop was called is the shutdown itself, so it must
+// not count as a failed attempt and run the exhausted path during teardown.
+func TestSupervisorRespawnRefusedByStopIsNotExhaustion(t *testing.T) {
+	first := newFakeHandle()
+	var sup *supervisor
+	spawns := 0
+	spawn := func() (supervisedHandle, error) {
+		spawns++
+		if spawns == 1 {
+			return first, nil
+		}
+		// Stop joins this goroutine, so request it elsewhere and wait for
+		// the stop signal, as a shutdown racing a respawn would.
+		go sup.Stop()
+		<-sup.Stopping()
+		return nil, errors.New("shutting down")
+	}
+	exhausted := make(chan int, 1)
+	sup = newSupervisor("test", fastPolicy(1, time.Hour), spawn)
+	sup.onExhausted = func(attempt int) { exhausted <- attempt }
+	if err := sup.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer sup.Stop()
+
+	first.crash()
+	select {
+	case attempt := <-exhausted:
+		t.Fatalf("a respawn refused by Stop exhausted the budget at attempt %d", attempt)
+	case <-time.After(200 * time.Millisecond):
 	}
 }
 

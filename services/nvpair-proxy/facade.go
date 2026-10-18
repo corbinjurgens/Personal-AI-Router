@@ -449,7 +449,7 @@ func (f *facade) notify(method string, params any) error {
 // notification before the process exits. The caller is responsible for
 // closing the returned listener if it doesn't hand it to serveHTTP.
 func (f *facade) listen() (net.Listener, error) {
-	return net.Listen("tcp", fmt.Sprintf(":%d", f.port))
+	return f.host.routing.listenWildcard(f.port)
 }
 
 // start brings this facade up: bind, reserve the alias, announce readiness,
@@ -842,7 +842,7 @@ func (f *facade) swapListener(newPort int) (bool, error) {
 	if newPort == port {
 		return false, savePersistedPort(f.profile, newPort)
 	}
-	newLn, err := net.Listen("tcp", fmt.Sprintf(":%d", newPort))
+	newLn, err := f.host.routing.listenWildcard(newPort)
 	if err != nil {
 		return false, fmt.Errorf("failed to bind port %d: %w", newPort, err)
 	}

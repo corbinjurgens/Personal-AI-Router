@@ -903,7 +903,9 @@ An engine-independent loopback listener that serves the hybrid aliases (§12.3)
 with no engine running. Its configuration is the active policy's
 `routing.listener` (`enabled`, `port`, `allowedOrigins`), off by default. It has
 no engine profile, facade, discovery state or cluster personality, and is never
-advertised to peers.
+advertised to peers: the proxy sends nothing upward about it except the
+unaddressed `errors:report` and `errors:clear` below, and no `ready`,
+discovery or node notification names its port.
 
 - **Lifecycle**: `node/set-policy` reconciles it after the revision activates,
   from the policy the controller then holds. Enabled with a port, it binds
@@ -918,7 +920,39 @@ advertised to peers.
   drains it before the facades and a later reconcile does nothing. A reconcile
   that finds the configured port already served is a no-op, so the broker's
   replay after a proxy restart re-establishes the listener without a new push.
-- **Collision**: a failed bind leaves no listener, never picks another port,
+- **Port exclusivity**: the listener does not bind a port another listener
+  holds. Go sets `SO_REUSEADDR` on listeners, and on macOS a bind of
+  `127.0.0.1:<port>` then succeeds beside a socket bound to `0.0.0.0:<port>`,
+  `[::]:<port>` or `[::1]:<port>`, leaving two listeners on one port, with
+  the other holder's clients (or a client dialling `localhost`) possibly
+  answered by this one. So `listenLoopbackExclusive` binds and releases
+  `0.0.0.0:<port>`, then `[::1]:<port>`, then binds `127.0.0.1:<port>`. The
+  IPv4 wildcard probe fails while any wildcard holder exists (IPv4 or
+  dual-stack, foreign or one of this process's facades); a holder on
+  `127.0.0.1` fails the loopback bind itself. A `[::1]` bind failure counts only
+  when an ephemeral `[::1]` bind succeeds, so a host with no IPv6 loopback
+  address does not block the listener. The probes are released before the
+  loopback bind, because holding them could make a platform that refuses
+  overlapping binds collide with the listener's own probe.
+  - **Residual window**: between the probe's release and the loopback bind (two
+    system calls) a foreign process can bind the wildcard or `[::1]` and, on
+    macOS, share the port with the listener without either side noticing. The
+    same sharing results when a foreign process binds a wildcard address after
+    the listener is up; the listener cannot prevent that. Only this process's
+    own facades are refused (below).
+  - **Verified**: macOS only (IPv4 wildcard, IPv6 wildcard, `[::1]` and a
+    facade as holders). Linux and Windows have not been run.
+  - **Facades**: the reverse order is closed from the other side. A facade's
+    `listen` and `setPort` bind through `listenWildcard`, which refuses the
+    port the listener holds under the listener's lock, so the broker retries
+    the facade on another port.
+  - **When both meet**: whichever binds first keeps the port. If a facade
+    already holds the port when the policy is activated, the facade keeps it and
+    the listener is reported blocked (retried on any later reconcile). If the
+    listener holds it when `facade/enable` arrives, the facade is refused with
+    the bind failure. After a proxy restart the broker replays the policy
+    first, so the listener takes the port and the facade is refused.
+- **Collision**: a failed bind or probe leaves no listener, never picks another port,
   logs a warning and sends the unaddressed `errors:report`
   `nvpair-proxy:routing-listener-blocked` (severity `error`, action `none`).
   The proxy reports once and runs no retry timer, so the broker caches the

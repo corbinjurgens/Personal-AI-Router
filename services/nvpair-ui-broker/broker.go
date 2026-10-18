@@ -244,6 +244,29 @@ type Broker struct {
 	settings       *rpcWorker
 	clusterMgr     *clusterManagerProcess
 	scheduler      *rpcWorker
+	// proxyProc is the one proxy process whether or not any facade came up in
+	// it. The per-engine handles say which facades serve; this one is what the
+	// node policy and the routing listener, which belong to the process, talk
+	// to. Guarded by workersMu; read through proxyProcessHandle.
+	proxyProc *proxyProcess
+
+	// proxySupMu serializes starting and stopping proxySup. It is held for as
+	// long as a start or stop takes, so nothing on a request path takes it; see
+	// reconcileProxySupervision. proxySupWorkMu guards the request flags only.
+	proxySupMu      sync.Mutex
+	proxySupPhase   proxySupPhase
+	proxySupWorkMu  sync.Mutex
+	proxySupDirty   bool
+	proxySupWorking bool
+	// Set after the supervisor's terminal callback completes. An absent process
+	// otherwise belongs to its existing spawn/backoff and must not be replaced.
+	proxySupExhausted atomic.Bool
+	// Published before shutdown waits for proxySupMu, so queued starts see it.
+	proxySupClosing atomic.Bool
+	// Optional publication barriers, set before supervision starts by tests.
+	beforeProxySpawnPublished      func()
+	beforeProxyExhaustionPublished func()
+	beforeProxyShutdownLocked      func()
 
 	// Per-worker supervisors own the (re)spawn + crash-detect + restart
 	// lifecycle of each worker. nil when the worker's binary wasn't resolved
@@ -785,7 +808,7 @@ func (b *Broker) proxyBringUpContext() (context.Context, context.CancelFunc) {
 	}
 	ctx, cancel := context.WithCancel(parent)
 
-	sup := b.proxySup
+	sup := b.getProxySupervisor()
 	if sup == nil {
 		return ctx, cancel
 	}
@@ -922,10 +945,16 @@ func (b *Broker) ollamaFallbackPort(failed int) int {
 // simultaneous bursts to the same node believing it idle.
 //
 // A facade that fails to come up is logged and skipped, not fatal. The spawn
-// only fails if no engine came up at all, because a process with no listener
-// serves nobody and should be retried by the supervisor rather than left
-// running.
+// only fails if no engine came up at all and the policy does not enable the
+// routing listener, because a process with no listener serves nobody and should
+// be retried by the supervisor rather than left running.
 func (b *Broker) spawnProxy() (supervisedHandle, error) {
+	if b.proxySupClosing.Load() {
+		return nil, fmt.Errorf("proxy supervision is shutting down")
+	}
+	if ctx := b.getServeCtx(); ctx != nil && ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
 	// Both generations are captured before the spawn and advance together: they
 	// are per-incarnation stale-notification filters, and with one process the
 	// facades are re-created as a set. Each engine keeps its own counter so its
@@ -946,7 +975,10 @@ func (b *Broker) spawnProxy() (supervisedHandle, error) {
 		return nil, err
 	}
 	// Published for every engine before any facade is enabled, so a facade's
-	// own ready notification finds the handle it belongs to.
+	// own ready notification finds the handle it belongs to. The process handle
+	// is published even for a node with no facade: the policy and the routing
+	// listener reach the proxy through it.
+	b.setProxyProcessHandle(pp)
 	for _, profile := range engineProxyProfiles {
 		if b.proxyEnabled(profile) {
 			b.setEngineProxyHandle(profile, pp)
@@ -984,7 +1016,9 @@ func (b *Broker) spawnProxy() (supervisedHandle, error) {
 			failed = append(failed, profile)
 		}
 	}
-	if enabled == 0 {
+	// A process with no facade is kept only for the routing listener, which
+	// belongs to the process and is served from the policy replayed above.
+	if enabled == 0 && !b.routingListenerEnabled() {
 		// The whole spawn failed, so the supervisor will retry it. Leave every
 		// engine's managed claim and its OLLAMA_HOST alias reservation exactly
 		// as they are: the retry needs them, and releasing the alias here would
@@ -994,9 +1028,7 @@ func (b *Broker) spawnProxy() (supervisedHandle, error) {
 		// A first-spawn failure and an exhausted restart budget are the paths
 		// that give up for good, and the supervisor owns both.
 		pp.Stop()
-		for _, profile := range engineProxyProfiles {
-			b.setEngineProxyHandle(profile, nil)
-		}
+		b.clearProxyHandles()
 		// The startup gates open anyway, because they are a separate concern
 		// from the claim: the alias reservation has to survive a retry, the
 		// gates must not wait for one. waitForManagedPortOwnership is unbounded
@@ -1010,8 +1042,9 @@ func (b *Broker) spawnProxy() (supervisedHandle, error) {
 		return nil, fmt.Errorf("no engine facade could be brought up in %s", b.proxyPath)
 	}
 
-	// At least one facade is serving, so this process incarnation is staying
-	// and will not be retried. Only now is a failed engine terminal for it.
+	// This process incarnation is staying and will not be retried, because a
+	// facade is serving or the listener is. Only now is a failed engine terminal
+	// for it.
 	for _, profile := range failed {
 		b.setEngineProxyHandle(profile, nil)
 		b.blockAndFinishEngineProxy(profile)
@@ -1028,6 +1061,12 @@ func (b *Broker) spawnProxy() (supervisedHandle, error) {
 	if ready, port := pp.Status(lmstudioProxyProfile.Name); ready && port > 0 {
 		go b.reconcileLMStudioProxyPortOnReadyForGeneration(lmstudioGeneration, port)
 	}
+	if b.beforeProxySpawnPublished != nil {
+		b.beforeProxySpawnPublished()
+	}
+	pp.listenerOnly.Store(enabled == 0)
+	pp.bringUpDone.Store(true)
+	b.resumeProxySupervision()
 	return pp, nil
 }
 
@@ -1979,6 +2018,10 @@ func (b *Broker) livePriorityTargets() []priorityTarget {
 		seen[p] = true
 		out = append(out, priorityTarget{engine: profile.Name, proxy: p})
 	}
+	// A process with no facade still takes the ranking and the log level.
+	if p := b.proxyProcessHandle(); p != nil && !seen[p] {
+		out = append(out, priorityTarget{engine: engines.ProxyComponent, proxy: p})
+	}
 	return out
 }
 
@@ -2271,6 +2314,9 @@ func (b *Broker) Serve(ctx context.Context) error {
 	// reservations of all facades in one place, which is the point of the
 	// unified proxy; the cost is shared fate, so a crash takes every engine's
 	// facade down and the supervisor brings them all back together.
+	//
+	// It also runs for the routing listener alone, which the persisted policy
+	// enables independently of any engine: see startProxySupervision.
 	anyProxyEnabled := false
 	for _, profile := range engineProxyProfiles {
 		if b.proxyEnabled(profile) {
@@ -2288,28 +2334,8 @@ func (b *Broker) Serve(ctx context.Context) error {
 		}
 		b.finishEngineProxyStartup(profile)
 	}
-	if anyProxyEnabled {
-		b.proxySup = newSupervisor(engines.ProxyComponent, defaultRestartPolicy(), b.spawnProxy)
-		b.configureProxySupervisorCallbacks(b.proxySup)
-		if err := b.proxySup.Start(); err != nil {
-			slog.Warn("proxy failed to start; continuing without local engine proxies",
-				"path", b.proxyPath, "err", err)
-			b.proxySup = nil
-			// No facade will come up, so both engines take the terminal path:
-			// report the blocked claim where one was made, then finish, which
-			// is what returns the OLLAMA_HOST alias reservation.
-			if b.ollamaState().managedFacade.Load() {
-				b.blockManagedOllamaFacade("the proxy could not be started")
-			}
-			b.finishOllamaProxyTerminal()
-			if b.lmstudioState().managedFacade.Load() {
-				_, _ = b.blockManagedLMStudioFacade("the proxy could not be started", nil)
-			}
-			b.finishLMStudioProxyTerminal()
-		} else {
-			defer b.proxySup.Stop()
-		}
-	}
+	b.startProxySupervision(anyProxyEnabled)
+	defer b.shutdownProxySupervision()
 
 	// Restore engines and begin advertising only after both managed proxy
 	// startup attempts have established either readiness or a terminal outcome.
@@ -2407,12 +2433,7 @@ func (b *Broker) shutdownInferenceStack() {
 	// it never adds a parent-side kill timeout. One process holds every
 	// engine's facade, so this closes all of them at once — the child drains
 	// each facade before releasing the shared transport pool.
-	if b.proxySup != nil {
-		b.proxySup.Stop()
-		for _, profile := range engineProxyProfiles {
-			b.setEngineProxyHandle(profile, nil)
-		}
-	}
+	b.shutdownProxySupervision()
 	b.prepareEngineManagerShutdown()
 }
 
@@ -3548,7 +3569,7 @@ func (b *Broker) relayToEngineNow(msg *Message) {
 		defer b.reconcileLegacySettingsLocked()
 	}
 	isOllamaPortAssignment := isEnginePortAssignment && requestedEngine == "ollama"
-	if isEnginePortAssignment && b.rejectOllamaHostAliasPort(msg, requestedPort, requestedEngine) {
+	if isEnginePortAssignment && b.rejectProxyHeldPort(msg, requestedPort, requestedEngine) {
 		return
 	}
 	if isOllamaPortAssignment && requestedPort == managedOllamaFacadePort && b.ollamaState().managedFacade.Load() {

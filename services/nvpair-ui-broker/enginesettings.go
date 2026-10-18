@@ -268,6 +268,9 @@ func (b *Broker) validateSettingsPortsLocked(ctx context.Context, engine string,
 	if alias := b.currentOllamaHostAlias().Port; alias > 0 {
 		reserved[alias] = true
 	}
+	if listener := b.routingListenerPort(); listener > 0 {
+		reserved[listener] = true
+	}
 	// Include every registered PAIR listener, including services added later.
 	if b.regCache != nil {
 		for _, service := range b.regCache.Snapshot() {

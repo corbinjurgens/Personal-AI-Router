@@ -284,7 +284,9 @@ the previous policy stays. Until the first request arrives the proxy runs on `no
   follows `node/set-policy`: a changed port closes and drains only this
   listener before binding the new one, disabling closes it, and the broker's
   replay after a proxy restart re-establishes it. A port already in use leaves
-  no listener, never another port, and is reported as the service error
+  no listener, never another port (including a port a facade of this process or
+  any other socket holds on a wildcard address or `[::1]`, and a facade is likewise refused
+  the listener's port), and is reported as the service error
   `nvpair-proxy:routing-listener-blocked` (`errors:report`, cleared when the
   listener binds or is disabled); the policy still activates, and replaying it
   retries the bind. It serves only:

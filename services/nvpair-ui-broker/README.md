@@ -62,6 +62,58 @@ Every worker runs under a supervisor that auto-restarts it on an unexpected exit
 
 There is **one supervisor per process, not per engine**. `nvpair-proxy` hosts a facade for every enabled engine, so its crash entry names the process (`nvpair-proxy`) and its restart brings every facade back together; a terminal failure releases each engine's port-ownership gate individually, so a caller waiting on one engine is never held by another's state.
 
+The proxy also runs for the **routing listener**, which belongs to the process
+and needs no engine. A spawn in which no facade comes up still fails and is
+retried as before, unless the persisted policy enables `routing.listener`: then
+the process is kept and serves the listener, and any facade that failed is
+terminal for it, exactly as when another facade is serving.
+
+- **Startup.** Serve creates the one supervisor when a facade is configured or
+  the saved policy enables the listener (and a proxy binary is resolved).
+- **Policy changes.** Only a change to `routing.listener.enabled` or
+  `routing.listener.port` requests lifecycle work. Other policy edits never
+  start, stop, replace or renew supervision, including after restart-budget
+  exhaustion.
+- **No serving facade or recovery in progress.** A `policy:set` that enables
+  the listener starts a missing supervisor, including after initial facade
+  startup failed. Disabling the listener stops a process whose completed
+  bring-up yielded no facades, including when every configured facade failed:
+  no idle proxy remains. A supervisor whose restart budget is exhausted may
+  likewise be retired and replaced for an enabled listener when a listener
+  change is pending. Exhaustion alone never starts a fresh supervisor or renews
+  its restart budget. Neither start nor stop runs on the request: `policy:set`
+  returns within its own activation bound (5 s) with the new revision saved, and
+  a background pass starts or stops the proxy. Until the new process has
+  acknowledged the policy it is replayed, the revision is `pending`
+  (`policy:changed` announces the activation then), and after a disable there is
+  no proxy to acknowledge anything. Toggles made while a pass runs are folded
+  into one more pass that reads the policy afresh, so the last change wins.
+  A change deferred during bring-up or recovery stays pending; completion of
+  bring-up or publication of exhaustion wakes that pending change.
+  The start can take as long as a proxy start does, a stop as long as the proxy
+  takes to exit, and neither can delay a `policy:set`.
+- **A serving facade or recovery in progress.** A listener change never starts,
+  stops or replaces a supervisor while a facade is serving, while facade
+  bring-up is unfinished, or while a crashed process is awaiting a restart
+  with budget remaining. Configuration alone does not preserve it. The
+  running proxy serves or closes the listener as the pushed policy says.
+- **Ordering.** A policy change cannot start the proxy before startup has
+  decided whether it runs. Once the Serve context is cancelled or proxy
+  shutdown is entered, pending and new reconciliation cannot begin a spawn;
+  shutdown publishes its closing state before waiting for lifecycle work. A
+  spawn that had already passed that check can still create its process, and
+  shutdown then stops it. A respawn refused because shutdown began does not
+  count against the restart budget.
+- **Port overlap.** The listener and a facade cannot share a port. `policy:set`
+  refuses (`-32602`, message starting `routing.listener.port`) an enabled
+  listener whose port a configured facade uses: its compatibility port or the
+  one persisted in its place, the port planned for its next spawn, the port it
+  bound, or the inherited Ollama alias. `<engine>-proxy:set-port` and
+  `engine:set-port` refuse (`-32000`) the port of an enabled listener, like the
+  alias port. The node policy, the scheduler ranking and `log/set-level`
+  reach the proxy through the process, so they also reach one that serves no
+  facade.
+
 ## Communication
 
 Bidirectional newline-delimited JSON-RPC 2.0 — same conventions as every other NVPAIR subprocess. By default the broker reads stdin and writes stdout; with `--ipc <path>` it dials a Unix domain socket or Windows named pipe instead. The parent UI process owns the endpoint in both cases: it either spawns the broker with piped stdio, or sets up the pipe / socket beforehand and points the broker at it via `--ipc`. The broker always talks to exactly one peer.
@@ -221,13 +273,20 @@ proxy enforces it.
   credential references) and `pending` otherwise, including when no proxy runs,
   before a started proxy has been replayed to, and while a push is still
   waiting to be sent. Only a `node/set-policy` acknowledgement
-  (`{revision, runId}`, `nodepolicy.PolicyAck`) activates a revision, so there is
-  one activation path. The broker accepts it only from the proxy process it last
-  replayed to, with the run id that process first acknowledged under, and only
-  for the exact revision it pushed; anything else leaves `activeRevision` as it
-  was. The push slot is a one-slot lock that serializes what is sent to the
-  proxy. `policy:set` saves, then takes the slot and pushes the saved document,
-  and the whole wait, slot and acknowledgement together, is bounded by the proxy
+  (`{revision, runId}`, `nodepolicy.PolicyAck`) names a revision, and the proxy
+  ignores the availability inside it, so a revision is `active` only while the
+  newest `node/set-availability` push to that proxy process was acknowledged as
+  well; there is one activation path. The broker accepts a policy
+  acknowledgement only from the proxy process it last replayed to, with the run
+  id that process first acknowledged under, and only for the exact revision it
+  pushed; anything else leaves `activeRevision` as it was. While the newest
+  availability push was refused, failed or not answered in time, every revision
+  is `error` with an `activationError` naming the availability push and
+  `activeRevision` is empty, because the proxy is not known to enforce what the
+  policy says; the next availability acknowledgement restores the reporting.
+  The push slot is a one-slot lock that serializes what is sent to the proxy.
+  `policy:set` saves, then takes the slot and pushes the saved document, and the
+  whole wait, slot and acknowledgement together, is bounded by the proxy
   call bound (5 s). If the slot is not free in that time (a replay is still
   talking to a slow proxy), or is got with less than a tenth of the bound left,
   nothing is sent: the result is `pending` with both revisions and a push is
@@ -246,23 +305,35 @@ proxy enforces it.
   supervision rather than wedging every later push. A persisted pause or resume
   pushes `node/set-availability` first, so admission stops before anything
   else, then `node/set-policy` with the current document, whose revision is the
-  availability change's: the same path, so a pause never leaves an enforced
-  policy pending, and it also re-delivers a policy whose earlier push was
-  refused. Nothing else retries a failed activation: the next policy or
-  availability change, or a proxy restart, pushes the persisted document again.
-  During recovery, where nothing is saved, availability is pushed alone and
-  activation is reported against the revision actually pushed (`"0"`). The
+  availability change's: the same path, so the revision is reported `active`
+  only once the proxy acknowledged both pushes, and the push also re-delivers a
+  policy whose earlier push was refused. A refused or unanswered availability
+  push leaves that revision saved and `error`, and the `node:set-availability`
+  result says so (below); the state was still reached on this node. Nothing else
+  retries a failed activation, except that every policy push first sends
+  availability again when the newest availability push was not acknowledged: the
+  next policy or availability change, or a proxy restart, pushes the persisted
+  document again. A repeated `node:set-availability` for the state the node is
+  already in does nothing, except while the availability push is unacknowledged:
+  then it takes a new revision and pushes again. During recovery, where nothing is saved, availability is pushed
+  alone and activation is reported against the revision actually pushed (`"0"`),
+  which a refused availability push leaves in `error`. The
   public-egress lease that consumes the active revision belongs to hybrid
   dispatch and is not implemented here.
-- **Durability.** Every save goes through `nvpair-shared/durablefile`: a
-  temporary sibling is written and synced, replaces the file, and the parent
-  directory is synced (Windows uses write-through replacement instead). The
-  in-memory policy, the proxy push and `policy:changed` follow only a successful
-  save; on any failure the previous document, revision and in-memory state are
-  kept and the error is returned. Failure before the replacement leaves the old
-  file byte for byte. A directory-sync failure comes after the replacement: the
-  error is returned while the new bytes are already on disk, so they become
-  effective at the next restart. That uncertainty is accepted and not hidden.
+- **Durability.** Every save (`policy:set`, a relayed peer set, a persisted pause
+  or resume) goes through `nvpair-shared/durablefile`: a temporary sibling is
+  written and synced, replaces the file, and the parent directory is synced
+  (Windows uses write-through replacement instead). The in-memory policy, the
+  proxy push and `policy:changed` follow only a successful save. On any failure
+  the running broker keeps its previous document, revision and in-memory state
+  and the error is returned, but what the file holds depends on the step. A
+  failure to create, write, sync or close the temporary file, or to replace the
+  file, leaves the old file byte for byte. A directory-sync failure comes after
+  the replacement: the error is returned while the new bytes are already on disk,
+  so the running broker and the file disagree until the next restart, which loads
+  the new document under the revision the failed save took. That revision is
+  spent either way and is never assigned again, so the next save takes the one
+  after it. That uncertainty is accepted and not hidden.
   The tests inject a failure at each step and restart a broker on the resulting
   files, which shows ordering under a crash of the process. They are not proof of
   power-loss durability: that rests on what `fsync`, `rename` and Windows
@@ -275,7 +346,8 @@ proxy enforces it.
   from this node, which saves a valid document under a fresh revision and clears
   it. Until then an availability change (local or relayed) takes effect in memory
   and reaches the proxy as usual but is not persisted: it does not overwrite the
-  corrupt file, take a revision or announce `policy:changed`. A relayed
+  corrupt file, take a revision or announce `policy:changed`, except to report an
+  availability push the proxy refused (Activation). A relayed
   `policy:set` from a paired node is refused during recovery.
 - **Proxy state.** The broker pushes `node/set-policy`, `node/set-availability`,
   `node/set-residency`, `node/set-engine-intent` and `node/set-engine-drain`
@@ -464,7 +536,8 @@ and each persisted availability change (not one made during policy recovery),
 carrying the new persisted revision and, once the push that activates it has
 been answered or has timed out, whether the proxy enforces that revision (see
 Activation above). A push scheduled in the background announces again when its
-answer changes the activation. It is also
+answer changes the activation, and so does a pause's later availability push or
+an availability push made during policy recovery. It is also
 sent when a proxy start has been replayed the policy. `node:availability-changed {nodeId, availability,
 active}` follows each availability transition (`draining`, then `paused`; or
 `available`), and while draining it repeats whenever the active count changes.
@@ -481,9 +554,9 @@ node's policy or availability; the remote form carries no `active`.
 
 | Method | Params | Result |
 |---|---|---|
-| `policy:get` | `{ nodeId? }` | `{ policy, availability, recoveryRequired, activeRevision, activation, activationError? }` — `policy` is the persisted `nodepolicy.Policy` (`policy.revision` is the broker-assigned revision of the stored document); `availability` is live and may be `draining`; `recoveryRequired` is true while the node runs on the paused recovery policy because its file was unusable, until an explicit `policy:set` succeeds; `activeRevision` is the revision the running proxy acknowledged (empty when none) and `activation` is `active`, `pending` or `error` (Activation above). Relayed from a paired node, `policy` is the peer projection (`nodepolicy.PeerPolicy`: no `routing`, no API tier entries) and the activation fields are absent |
-| `policy:set` | `{ nodeId?, policy, expectedPersistedRevision }` | `{ policy, activeRevision, activation, activationError? }` after the precondition, validation, persisting and the bounded wait for the proxy to acknowledge that exact revision; `activation` describes `policy.revision` and is `pending` or `error` when it was saved but not activated; `policy.revision` against `activeRevision` shows both revisions. The wait is bounded, so a busy push slot yields `pending`. Fields the caller omits take their defaults. `policy.availability` and `policy.revision` are ignored (the persisted availability is kept: only `node:set-availability` changes it; the broker assigns the next revision). `expectedPersistedRevision` is required: the canonical decimal `policy.revision` of the `policy:get` the draft is based on. A missing, null, empty or non-canonical value is error `-32602` before anything else, and there is no unconditional write. It is compared with the persisted `policy.revision` under the same lock as the save, so two writers holding the same revision cannot both succeed; a mismatch is error `-32000` whose message starts with `policy conflict:` and names the current persisted revision, with nothing validated, persisted, pushed or announced. The caller reloads and reviews the policy rather than resubmitting the old draft. A save that cannot be published durably is an error and changes nothing. An invalid policy is error `-32602` and nothing changes. Relayed from a paired node, `expectedPersistedRevision` is required in the same way (the `revision` of the projection it read) and a mismatch is returned as `policy conflict:` text in `policy:reply`; only device fields may change: `tiers` and `tierPolicy` must equal the projection and `routing` must be absent, or the set is rejected; the result is the peer projection |
-| `node:set-availability` | `{ nodeId?, state: "available" \| "paused" }` | `{ availability }` once the state is reached; pausing waits for the drain. A request replaced by a newer one fails with `superseded by a later node:set-availability request` |
+| `policy:get` | `{ nodeId? }` | `{ policy, availability, recoveryRequired, activeRevision, activation, activationError? }` — `policy` is the persisted `nodepolicy.Policy` (`policy.revision` is the broker-assigned revision of the stored document); `availability` is live and may be `draining`; `recoveryRequired` is true while the node runs on the paused recovery policy because its file was unusable, until an explicit `policy:set` succeeds; `activeRevision` is the revision the running proxy acknowledged (empty when none, and while the newest availability push is unacknowledged) and `activation` is `active`, `pending` or `error` (Activation above). Relayed from a paired node, `policy` is the peer projection (`nodepolicy.PeerPolicy`: no `routing`, no API tier entries) and the activation fields are absent |
+| `policy:set` | `{ nodeId?, policy, expectedPersistedRevision }` | `{ policy, activeRevision, activation, activationError? }` after the precondition, validation, persisting and the bounded wait for the proxy to acknowledge that exact revision; `activation` describes `policy.revision` and is `pending` or `error` when it was saved but not activated; `policy.revision` against `activeRevision` shows both revisions. The wait is bounded, so a busy push slot yields `pending`. Fields the caller omits take their defaults. `policy.availability` and `policy.revision` are ignored (the persisted availability is kept: only `node:set-availability` changes it; the broker assigns the next revision). `expectedPersistedRevision` is required: the canonical decimal `policy.revision` of the `policy:get` the draft is based on. A missing, null, empty or non-canonical value is error `-32602` before anything else, and there is no unconditional write. It is compared with the persisted `policy.revision` under the same lock as the save, so two writers holding the same revision cannot both succeed; a mismatch is error `-32000` whose message starts with `policy conflict:` and names the current persisted revision, with nothing validated, persisted, pushed or announced. The caller reloads and reviews the policy rather than resubmitting the old draft. A save that cannot be published durably is error `-32000` (`the policy could not be saved: ...`), not `-32602`, because the request was fine: the running broker, the proxy and the clients stay as they were, and so does the file except after a directory-sync failure (Durability: the new document is then already on disk and loads at the next restart). An invalid policy is error `-32602` and nothing changes, as is an enabled `routing.listener.port` that a configured facade uses (Supervision & recovery). Enabling or disabling the listener on a node with no facade starts or stops the proxy in the background, so that revision is `pending` until the new process acknowledges the replay. Relayed from a paired node, `expectedPersistedRevision` is required in the same way (the `revision` of the projection it read) and a mismatch is returned as `policy conflict:` text in `policy:reply`; only device fields may change: `tiers` and `tierPolicy` must equal the projection and `routing` must be absent, or the set is rejected; the result is the peer projection |
+| `node:set-availability` | `{ nodeId?, state: "available" \| "paused" }` | `{ availability, revision, activeRevision, activation, activationError? }` once the state is reached; pausing waits for the drain. `revision` is the persisted revision the activation fields describe (the one this change took, unless it was made during policy recovery); `activation` is `error`, with `activeRevision` empty, when the proxy refused or did not answer the availability push, even though the state was reached on this node (Activation). A request replaced by a newer one fails with `superseded by a later node:set-availability request`. Relayed from a paired node the result is `{ availability }` alone: like the relayed `policy:get`, it shows that peer no activation fields |
 
 An omitted `nodeId`, or this node's own, acts locally; any other is relayed to
 that node (see [Node policy](#node-policy)).

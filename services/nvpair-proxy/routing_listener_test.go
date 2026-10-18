@@ -11,6 +11,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	stderrors "errors"
 	"fmt"
 	"io"
 	"net"
@@ -53,6 +54,20 @@ func zeroFacadeProxy(t *testing.T) (*Proxy, *recordingWriter) {
 func activate(t *testing.T, p *Proxy, w *recordingWriter, pol nodepolicy.Policy) {
 	t.Helper()
 	rpcOK(t, p, w, nodepolicy.MethodSetPolicy, pol)
+}
+
+// freeRoutingPort returns a port that was free on the IPv4 wildcard a moment
+// ago. freeTCPPort probes only 127.0.0.1, and on macOS that succeeds beside a
+// wildcard listener an earlier test has not yet released, which the routing
+// listener rightly refuses as a collision.
+func freeRoutingPort(t *testing.T) int {
+	t.Helper()
+	ln, err := net.Listen("tcp", "0.0.0.0:0")
+	if err != nil {
+		t.Fatalf("reserve free port: %v", err)
+	}
+	defer ln.Close()
+	return ln.Addr().(*net.TCPAddr).Port
 }
 
 // boundPort returns the port the proxy's routing listener is bound to, or 0.
@@ -155,7 +170,7 @@ func listedIDs(t *testing.T, a answer) []string {
 
 func TestRoutingListener_ListsAliasesWithNoEngineRunning(t *testing.T) {
 	p, w := zeroFacadeProxy(t)
-	activate(t, p, w, listenerPolicy(t, "1", nodepolicy.Listener{Enabled: true, Port: freeTCPPort(t)}))
+	activate(t, p, w, listenerPolicy(t, "1", nodepolicy.Listener{Enabled: true, Port: freeRoutingPort(t)}))
 	port := boundPort(p)
 	if port == 0 {
 		t.Fatal("listener is not bound after activating an enabled policy")
@@ -182,7 +197,7 @@ func TestRoutingListener_ListsAnEmptyPolicyAsAnEmptyArray(t *testing.T) {
 	p, w := zeroFacadeProxy(t)
 	pol := nodepolicy.Default()
 	pol.Revision = "1"
-	pol.Routing.Listener = nodepolicy.Listener{Enabled: true, Port: freeTCPPort(t)}
+	pol.Routing.Listener = nodepolicy.Listener{Enabled: true, Port: freeRoutingPort(t)}
 	activate(t, p, w, pol)
 
 	got := call(t, boundPort(p), http.MethodGet, "/v1/models", nil)
@@ -193,7 +208,7 @@ func TestRoutingListener_ListsAnEmptyPolicyAsAnEmptyArray(t *testing.T) {
 
 func TestRoutingListener_ListFollowsTheActivatedPolicy(t *testing.T) {
 	p, w := zeroFacadeProxy(t)
-	listener := nodepolicy.Listener{Enabled: true, Port: freeTCPPort(t)}
+	listener := nodepolicy.Listener{Enabled: true, Port: freeRoutingPort(t)}
 	activate(t, p, w, listenerPolicy(t, "1", listener))
 	port := boundPort(p)
 
@@ -218,7 +233,7 @@ func TestRoutingListener_IsOffUntilEnabled(t *testing.T) {
 	if port := boundPort(p); port != 0 {
 		t.Fatalf("a default policy bound a listener on %d", port)
 	}
-	activate(t, p, w, listenerPolicy(t, "2", nodepolicy.Listener{Port: freeTCPPort(t)}))
+	activate(t, p, w, listenerPolicy(t, "2", nodepolicy.Listener{Port: freeRoutingPort(t)}))
 	if port := boundPort(p); port != 0 {
 		t.Fatalf("a policy with a port but not enabled bound a listener on %d", port)
 	}
@@ -240,7 +255,7 @@ func TestRoutingListener_BindsLoopbackOnly(t *testing.T) {
 		t.Skip("no non-loopback IPv4 address on this host to probe")
 	}
 	p, w := zeroFacadeProxy(t)
-	activate(t, p, w, listenerPolicy(t, "1", nodepolicy.Listener{Enabled: true, Port: freeTCPPort(t)}))
+	activate(t, p, w, listenerPolicy(t, "1", nodepolicy.Listener{Enabled: true, Port: freeRoutingPort(t)}))
 	port := boundPort(p)
 
 	if refuses(port) {
@@ -298,7 +313,7 @@ func TestRoutingListener_RejectsInferenceWithoutSideEffects(t *testing.T) {
 
 	t.Run("every inference route", func(t *testing.T) {
 		p, w, local := newFixture(t)
-		activate(t, p, w, listenerPolicy(t, "1", nodepolicy.Listener{Enabled: true, Port: freeTCPPort(t)}))
+		activate(t, p, w, listenerPolicy(t, "1", nodepolicy.Listener{Enabled: true, Port: freeRoutingPort(t)}))
 		port := boundPort(p)
 		for _, path := range []string{
 			"/v1/chat/completions", "/v1/completions", "/v1/embeddings", "/v1/messages",
@@ -322,7 +337,7 @@ func TestRoutingListener_RejectsInferenceWithoutSideEffects(t *testing.T) {
 
 	t.Run("every model name form", func(t *testing.T) {
 		p, w, local := newFixture(t)
-		activate(t, p, w, listenerPolicy(t, "1", nodepolicy.Listener{Enabled: true, Port: freeTCPPort(t)}))
+		activate(t, p, w, listenerPolicy(t, "1", nodepolicy.Listener{Enabled: true, Port: freeRoutingPort(t)}))
 		port := boundPort(p)
 		bodies := []string{
 			`{"model":"mid:7b"}`,
@@ -359,7 +374,7 @@ func TestRoutingListener_RejectsInferenceWithoutSideEffects(t *testing.T) {
 
 func TestRoutingListener_RejectsMethodsAndPaths(t *testing.T) {
 	p, w := zeroFacadeProxy(t)
-	activate(t, p, w, listenerPolicy(t, "1", nodepolicy.Listener{Enabled: true, Port: freeTCPPort(t)}))
+	activate(t, p, w, listenerPolicy(t, "1", nodepolicy.Listener{Enabled: true, Port: freeRoutingPort(t)}))
 	port := boundPort(p)
 
 	test := func(name, method, target string, wantStatus int, wantCode string) {
@@ -418,9 +433,9 @@ func TestRoutingListener_RebindsAndDisablesOnlyItsOwnListener(t *testing.T) {
 	}
 	defer foreign.Close()
 
-	first, second := freeTCPPort(t), freeTCPPort(t)
+	first, second := freeRoutingPort(t), freeRoutingPort(t)
 	for second == first {
-		second = freeTCPPort(t)
+		second = freeRoutingPort(t)
 	}
 
 	activate(t, p, w, listenerPolicy(t, "1", nodepolicy.Listener{Enabled: true, Port: first}))
@@ -454,7 +469,7 @@ func TestRoutingListener_RebindsAndDisablesOnlyItsOwnListener(t *testing.T) {
 
 func TestRoutingListener_DisablingClosesKeptAliveConnections(t *testing.T) {
 	p, w := zeroFacadeProxy(t)
-	port := freeTCPPort(t)
+	port := freeRoutingPort(t)
 	activate(t, p, w, listenerPolicy(t, "1", nodepolicy.Listener{Enabled: true, Port: port}))
 
 	client := &http.Client{Timeout: 5 * time.Second, Transport: &http.Transport{}}
@@ -523,10 +538,76 @@ func TestRoutingListener_ReportsACollisionAndNeverPicksAnotherPort(t *testing.T)
 	}
 }
 
+// facadeProxy is a process with an Ollama and an LM Studio facade enabled on
+// ephemeral ports, keyed by engine.
+func facadeProxy(t *testing.T) (*Proxy, *recordingWriter, map[string]int) {
+	t.Helper()
+	redirectConfigDir(t)
+	w := &recordingWriter{}
+	p := NewProxy(NewCodec(w))
+	p.serveCtx = t.Context()
+	ports := map[string]int{
+		"ollama":   enableOnFreePort(t, p, "ollama"),
+		"lmstudio": enableOnFreePort(t, p, "lmstudio"),
+	}
+	t.Cleanup(func() { p.shutdown(context.Background()) })
+	return p, w, ports
+}
+
+// facadeRoutes is one inference route each facade answers itself, whatever the
+// routing listener does.
+var facadeRoutes = map[string]string{
+	"ollama":   "/api/chat",
+	"lmstudio": "/v1/chat/completions",
+}
+
+// askFacade posts a request for a model no node serves to one facade.
+func askFacade(t *testing.T, engine string, port int) answer {
+	t.Helper()
+	target := "http://127.0.0.1:" + strconv.Itoa(port) + facadeRoutes[engine]
+	resp, err := noKeepAlive.Post(target, "application/json", strings.NewReader(`{"model":"no-such-model"}`))
+	if err != nil {
+		t.Fatalf("ask the %s facade: %v", engine, err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read the %s facade's answer: %v", engine, err)
+	}
+	return answer{status: resp.StatusCode, header: resp.Header, body: body}
+}
+
+func askFacades(t *testing.T, ports map[string]int) map[string]answer {
+	t.Helper()
+	out := make(map[string]answer, len(ports))
+	for engine, port := range ports {
+		out[engine] = askFacade(t, engine, port)
+	}
+	return out
+}
+
+func assertFacadesUnchanged(t *testing.T, ports map[string]int, before map[string]answer) {
+	t.Helper()
+	for engine, want := range before {
+		got := askFacade(t, engine, ports[engine])
+		if got.status != want.status || string(got.body) != string(want.body) {
+			t.Errorf("%s facade answered %d %q after the listener event, want the unchanged %d %q",
+				engine, got.status, got.body, want.status, want.body)
+		}
+		if strings.Contains(string(got.body), routingReasonNotInferenceReady) {
+			t.Errorf("%s facade was answered by the routing listener: %s", engine, got.body)
+		}
+	}
+}
+
 func TestRoutingListener_MovingOntoATakenPortLeavesNoListener(t *testing.T) {
-	p, w := zeroFacadeProxy(t)
-	working := freeTCPPort(t)
+	p, w, ports := facadeProxy(t)
+	working := freeRoutingPort(t)
 	activate(t, p, w, listenerPolicy(t, "1", nodepolicy.Listener{Enabled: true, Port: working}))
+	if boundPort(p) != working {
+		t.Fatalf("listener did not bind %d", working)
+	}
+	before := askFacades(t, ports)
 
 	held, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -536,6 +617,9 @@ func TestRoutingListener_MovingOntoATakenPortLeavesNoListener(t *testing.T) {
 	taken := held.Addr().(*net.TCPAddr).Port
 	activate(t, p, w, listenerPolicy(t, "2", nodepolicy.Listener{Enabled: true, Port: taken}))
 
+	if got := p.admission.currentPolicy().Revision; got != "2" {
+		t.Errorf("active revision = %q, want 2 despite the collision", got)
+	}
 	if boundPort(p) != 0 {
 		t.Errorf("listener bound %d, want none after the configured port collided", boundPort(p))
 	}
@@ -545,13 +629,180 @@ func TestRoutingListener_MovingOntoATakenPortLeavesNoListener(t *testing.T) {
 	if n := len(notificationsOf(t, w, "errors:report")); n != 1 {
 		t.Errorf("%d errors:report notifications, want 1", n)
 	}
+	assertFacadesUnchanged(t, ports, before)
+}
+
+// holdAddress listens on address (an ephemeral port) and answers every request
+// with marker, returning the port.
+func holdAddress(t *testing.T, address, marker string) int {
+	t.Helper()
+	ln, err := net.Listen("tcp", address)
+	if err != nil {
+		t.Skipf("cannot listen on %s here: %v", address, err)
+	}
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(marker))
+	}))
+	_ = srv.Listener.Close()
+	srv.Listener = ln
+	srv.Start()
+	t.Cleanup(srv.Close)
+	return ln.Addr().(*net.TCPAddr).Port
+}
+
+// A port that another socket holds on a wildcard address or on the IPv6
+// loopback address is a collision even though a loopback bind beside it would
+// succeed on some platforms. The holder keeps answering its own route and the
+// listener never binds.
+func TestRoutingListener_ReportsAnotherHolderAsACollision(t *testing.T) {
+	for _, tc := range []struct {
+		name, address, dial string
+		reachableOnIPv4     bool
+	}{
+		{"IPv6 wildcard", "[::]:0", "127.0.0.1", true},
+		{"IPv4 wildcard", "0.0.0.0:0", "127.0.0.1", true},
+		{"IPv6 loopback", "[::1]:0", "[::1]", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p, w := zeroFacadeProxy(t)
+			const marker = "the foreign holder"
+			taken := holdAddress(t, tc.address, marker)
+
+			activate(t, p, w, listenerPolicy(t, "1", nodepolicy.Listener{Enabled: true, Port: taken}))
+
+			if got := p.admission.currentPolicy().Revision; got != "1" {
+				t.Errorf("active revision = %q, want 1 despite the collision", got)
+			}
+			if port := boundPort(p); port != 0 {
+				t.Errorf("listener bound %d beside a holder on %s", port, tc.address)
+			}
+			if !tc.reachableOnIPv4 && !refuses(taken) {
+				t.Errorf("something accepts connections on 127.0.0.1:%d, but the foreign holder is bound to ::1 only", taken)
+			}
+			if n := len(notificationsOf(t, w, "errors:report")); n != 1 {
+				t.Errorf("%d errors:report notifications, want 1", n)
+			}
+			resp, err := noKeepAlive.Post("http://"+tc.dial+":"+strconv.Itoa(taken)+"/api/chat", "application/json", strings.NewReader(`{}`))
+			if err != nil {
+				t.Fatalf("ask the holder: %v", err)
+			}
+			defer resp.Body.Close()
+			body, _ := io.ReadAll(resp.Body)
+			if string(body) != marker {
+				t.Errorf("the holder's route answered %d %q, want its own %q", resp.StatusCode, body, marker)
+			}
+		})
+	}
+}
+
+// One of this process's own facades is a wildcard holder too: the listener
+// refuses its port, and the facade keeps answering its own route.
+func TestRoutingListener_ReportsAFacadePortAsACollision(t *testing.T) {
+	p, w, ports := facadeProxy(t)
+	before := askFacades(t, ports)
+
+	activate(t, p, w, listenerPolicy(t, "1", nodepolicy.Listener{Enabled: true, Port: ports["ollama"]}))
+
+	if got := p.admission.currentPolicy().Revision; got != "1" {
+		t.Errorf("active revision = %q, want 1 despite the collision", got)
+	}
+	if port := boundPort(p); port != 0 {
+		t.Errorf("listener bound %d on a facade's port", port)
+	}
+	if n := len(notificationsOf(t, w, "errors:report")); n != 1 {
+		t.Errorf("%d errors:report notifications, want 1", n)
+	}
+	assertFacadesUnchanged(t, ports, before)
+}
+
+// The reverse order: a facade asked onto the port the listener holds fails to
+// bind, as the broker's retry on another port expects, and neither side moves.
+func TestRoutingListener_RefusesAFacadeOnItsPort(t *testing.T) {
+	t.Run("enable", func(t *testing.T) {
+		redirectConfigDir(t)
+		w := &recordingWriter{}
+		p := NewProxy(NewCodec(w))
+		p.serveCtx = t.Context()
+		t.Cleanup(func() { p.shutdown(context.Background()) })
+		port := freeRoutingPort(t)
+		activate(t, p, w, listenerPolicy(t, "1", nodepolicy.Listener{Enabled: true, Port: port}))
+		if boundPort(p) != port {
+			t.Fatalf("listener did not bind %d", port)
+		}
+
+		_, err := p.enableFacade(enableFacadeParams{Engine: "ollama", Port: port, IgnorePersistedPort: true})
+		if !stderrors.Is(err, errFacadeBindFailed) {
+			t.Fatalf("enabling a facade on the listener's port = %v, want errFacadeBindFailed", err)
+		}
+		if got := call(t, port, http.MethodGet, "/v1/models", nil); got.status != http.StatusOK {
+			t.Errorf("the listener answered %d after the refused bind, want 200", got.status)
+		}
+	})
+	t.Run("set-port", func(t *testing.T) {
+		p, w, ports := facadeProxy(t)
+		port := freeRoutingPort(t)
+		activate(t, p, w, listenerPolicy(t, "1", nodepolicy.Listener{Enabled: true, Port: port}))
+		if boundPort(p) != port {
+			t.Fatalf("listener did not bind %d", port)
+		}
+		before := askFacades(t, ports)
+
+		if err := p.facadeFor("lmstudio").setPort(port); err == nil {
+			t.Fatal("moving a facade onto the listener's port succeeded")
+		}
+		if got := call(t, port, http.MethodGet, "/v1/models", nil); got.status != http.StatusOK {
+			t.Errorf("the listener answered %d after the refused move, want 200", got.status)
+		}
+		assertFacadesUnchanged(t, ports, before)
+	})
+}
+
+// The listener is local state: nothing the proxy sends upward names its port or
+// announces it for discovery. The only frames it adds are the error pipeline's
+// report and clear, and a clear never carries a port.
+func TestRoutingListener_IsNeverAnnouncedBeyondTheErrorPipeline(t *testing.T) {
+	p, w, _ := facadeProxy(t)
+	seen := len(w.lines())
+
+	port := freeRoutingPort(t)
+	activate(t, p, w, listenerPolicy(t, "1", nodepolicy.Listener{Enabled: true, Port: port}))
+	if got := call(t, port, http.MethodGet, "/v1/models", nil); got.status != http.StatusOK {
+		t.Fatalf("listener answered %d, want 200", got.status)
+	}
+	activate(t, p, w, listenerPolicy(t, "2", nodepolicy.Listener{}))
+
+	held, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("occupy a port: %v", err)
+	}
+	defer held.Close()
+	activate(t, p, w, listenerPolicy(t, "3", nodepolicy.Listener{Enabled: true, Port: held.Addr().(*net.TCPAddr).Port}))
+
+	for _, line := range w.lines()[seen:] {
+		var f frame
+		if err := json.Unmarshal(line, &f); err != nil {
+			t.Fatalf("bad frame %q: %v", line, err)
+		}
+		if f.ID != nil {
+			continue // the response to node/set-policy
+		}
+		switch f.Method {
+		case "errors:clear":
+			if strings.Contains(string(line), strconv.Itoa(port)) {
+				t.Errorf("a clear names the listener port: %s", line)
+			}
+		case "errors:report":
+		default:
+			t.Errorf("the listener caused a %q notification: %s", f.Method, line)
+		}
+	}
 }
 
 func TestRoutingListener_DeniesBrowserOriginsUnlessExactlyAllowed(t *testing.T) {
 	const allowed = "http://localhost:3000"
 	p, w := zeroFacadeProxy(t)
 	activate(t, p, w, listenerPolicy(t, "1", nodepolicy.Listener{
-		Enabled: true, Port: freeTCPPort(t), AllowedOrigins: []string{allowed, "https://app.example.test"},
+		Enabled: true, Port: freeRoutingPort(t), AllowedOrigins: []string{allowed, "https://app.example.test"},
 	}))
 	port := boundPort(p)
 
@@ -624,7 +875,7 @@ func TestRoutingListener_AnswersPreflightOnlyForAllowedOrigins(t *testing.T) {
 	const allowed = "http://localhost:3000"
 	p, w := zeroFacadeProxy(t)
 	activate(t, p, w, listenerPolicy(t, "1", nodepolicy.Listener{
-		Enabled: true, Port: freeTCPPort(t), AllowedOrigins: []string{allowed},
+		Enabled: true, Port: freeRoutingPort(t), AllowedOrigins: []string{allowed},
 	}))
 	port := boundPort(p)
 
@@ -690,7 +941,7 @@ func TestRoutingListener_AnswersPreflightOnlyForAllowedOrigins(t *testing.T) {
 
 func TestRoutingListener_OriginAllowListFollowsActivationWithoutARebind(t *testing.T) {
 	p, w := zeroFacadeProxy(t)
-	port := freeTCPPort(t)
+	port := freeRoutingPort(t)
 	activate(t, p, w, listenerPolicy(t, "1", nodepolicy.Listener{
 		Enabled: true, Port: port, AllowedOrigins: []string{"http://localhost:3000"},
 	}))
@@ -710,7 +961,7 @@ func TestRoutingListener_RejectsHostsThatAreNotItsLoopbackName(t *testing.T) {
 	const allowed = "http://localhost:3000"
 	p, w := zeroFacadeProxy(t)
 	activate(t, p, w, listenerPolicy(t, "1", nodepolicy.Listener{
-		Enabled: true, Port: freeTCPPort(t), AllowedOrigins: []string{allowed},
+		Enabled: true, Port: freeRoutingPort(t), AllowedOrigins: []string{allowed},
 	}))
 	port := boundPort(p)
 	other := strconv.Itoa(port + 1)
@@ -754,7 +1005,7 @@ func TestRoutingListener_RejectsHostsThatAreNotItsLoopbackName(t *testing.T) {
 }
 
 func TestRoutingListener_ReturnsAfterARestartWhenThePolicyIsReplayed(t *testing.T) {
-	port := freeTCPPort(t)
+	port := freeRoutingPort(t)
 	pol := listenerPolicy(t, "7", nodepolicy.Listener{Enabled: true, Port: port})
 
 	first, firstOut := zeroFacadeProxy(t)
@@ -784,10 +1035,10 @@ func TestRoutingListener_ReturnsAfterARestartWhenThePolicyIsReplayed(t *testing.
 
 func TestRoutingListener_StaleRevisionDoesNotChangeTheListener(t *testing.T) {
 	p, w := zeroFacadeProxy(t)
-	port := freeTCPPort(t)
+	port := freeRoutingPort(t)
 	activate(t, p, w, listenerPolicy(t, "5", nodepolicy.Listener{Enabled: true, Port: port}))
 
-	other := freeTCPPort(t)
+	other := freeRoutingPort(t)
 	rpcErr(t, p, w, nodepolicy.MethodSetPolicy, listenerPolicy(t, "4", nodepolicy.Listener{Enabled: true, Port: other}))
 	if boundPort(p) != port || !refuses(other) {
 		t.Errorf("a refused older revision changed the listener: bound %d, %d refuses=%v", boundPort(p), other, refuses(other))
@@ -800,7 +1051,7 @@ func TestRoutingListener_StaleRevisionDoesNotChangeTheListener(t *testing.T) {
 
 func TestRoutingListener_ShutdownClosesItForGood(t *testing.T) {
 	p, w := zeroFacadeProxy(t)
-	port := freeTCPPort(t)
+	port := freeRoutingPort(t)
 	pol := listenerPolicy(t, "1", nodepolicy.Listener{Enabled: true, Port: port})
 	activate(t, p, w, pol)
 
@@ -858,11 +1109,11 @@ func TestRoutingListener_StalledClientsNeitherDelayAnAnswerNorHoldTheControlLoop
 
 	for name, newListener := range map[string]nodepolicy.Listener{
 		"disabled": {},
-		"moved":    {Enabled: true, Port: freeTCPPort(t)},
+		"moved":    {Enabled: true, Port: freeRoutingPort(t)},
 	} {
 		t.Run(name, func(t *testing.T) {
 			p, w := zeroFacadeProxy(t)
-			port := freeTCPPort(t)
+			port := freeRoutingPort(t)
 			activate(t, p, w, listenerPolicy(t, "1", nodepolicy.Listener{Enabled: true, Port: port}))
 
 			// Headers and part of the declared body, then silence.

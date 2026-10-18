@@ -282,6 +282,13 @@ func (s *supervisor) monitor(h supervisedHandle) {
 				next = nh
 				break
 			}
+			select {
+			case <-s.stopCh:
+				// Stop was called while respawning: the refusal is the shutdown,
+				// not a failed attempt, so it must not exhaust the budget.
+				return
+			default:
+			}
 			attempts++
 			slog.Warn("supervisor: respawn failed", "worker", s.name, "attempt", attempts, "err", err)
 			if s.exhausted(attempts) {

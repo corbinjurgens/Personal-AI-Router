@@ -20,6 +20,7 @@ import (
 	"time"
 
 	settings "nvpair-shared/enginesettings"
+	"nvpair-shared/nodepolicy"
 	"nvpair-shared/noderec"
 )
 
@@ -252,6 +253,29 @@ func TestEngineManagerPortsSettingsReserveConfiguredListeners(t *testing.T) {
 			err := b.validateSettingsPortsLocked(context.Background(), "ollama", settings.Config{ServerPort: tc.serverPort, ProxyPort: tc.proxyPort}, settings.Snapshot{})
 			if err == nil || err.Error() != "a selected port is reserved by a PAIR service or proxy alias" {
 				t.Fatalf("settings validation error = %v, want PAIR reservation", err)
+			}
+		})
+	}
+}
+
+func TestEngineManagerPortsSettingsReserveTheRoutingListenerPort(t *testing.T) {
+	b, _ := newPolicyBroker(t)
+	path := filepath.Join(t.TempDir(), nodepolicy.FileName)
+	doc := nodepolicy.Default()
+	doc.Routing.Listener = nodepolicy.Listener{Enabled: true, Port: 25300, AllowedOrigins: []string{}}
+	writePolicyFile(t, path, doc)
+	b.loadNodePolicy(path)
+	for _, tc := range []struct {
+		name                  string
+		serverPort, proxyPort int
+	}{
+		{name: "server port", serverPort: 25300, proxyPort: 25301},
+		{name: "proxy port", serverPort: 25301, proxyPort: 25300},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := b.validateSettingsPortsLocked(context.Background(), "ollama", settings.Config{ServerPort: tc.serverPort, ProxyPort: tc.proxyPort}, settings.Snapshot{})
+			if err == nil || err.Error() != "a selected port is reserved by a PAIR service or proxy alias" {
+				t.Fatalf("settings validation error = %v, want the routing listener port reserved", err)
 			}
 		})
 	}

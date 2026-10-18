@@ -379,17 +379,64 @@ func enginePortAssignmentRequest(method string, params json.RawMessage) (string,
 	}
 }
 
-func (b *Broker) rejectOllamaHostAliasPort(msg *Message, port int, owner string) bool {
-	aliasPort := b.currentOllamaHostAlias().Port
-	if aliasPort <= 0 || port != aliasPort {
+// rejectProxyHeldPort refuses to give a port the proxy holds for itself to
+// an engine or a proxy: the inherited OLLAMA_HOST alias, and the port of the
+// routing listener the policy enables. Both are served by the proxy process, so
+// a facade or backend moved onto either would lose the bind or take it from the
+// other after the next proxy restart.
+func (b *Broker) rejectProxyHeldPort(msg *Message, port int, owner string) bool {
+	reason := ""
+	switch aliasPort := b.currentOllamaHostAlias().Port; {
+	case aliasPort > 0 && port == aliasPort:
+		reason = fmt.Sprintf("port %d is configured as the inherited OLLAMA_HOST proxy alias; change or unset OLLAMA_HOST and restart NVPAIR before assigning that port to %s",
+			port, owner)
+	case b.routingListenerPort() == port:
+		reason = fmt.Sprintf("port %d is the routing listener's port; change routing.listener.port in the node policy before assigning that port to %s",
+			port, owner)
+	}
+	if reason == "" {
 		return false
 	}
-	if err := b.codec.RespondError(msg.ID, -32000, fmt.Sprintf(
-		"port %d is configured as the inherited OLLAMA_HOST proxy alias; change or unset OLLAMA_HOST and restart NVPAIR before assigning that port to %s",
-		port, owner)); err != nil {
-		log.Printf("failed to reject port assignment conflicting with OLLAMA_HOST alias: %v", err)
+	if err := b.codec.RespondError(msg.ID, -32000, reason); err != nil {
+		log.Printf("failed to reject port assignment conflicting with a proxy-held port: %v", err)
 	}
 	return true
+}
+
+// routingListenerPort is the port the persisted policy has the routing listener
+// serve, or 0 while it is disabled.
+func (b *Broker) routingListenerPort() int {
+	r := b.nodePolicyRuntime()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if l := r.current.Routing.Listener; l.Enabled {
+		return l.Port
+	}
+	return 0
+}
+
+// facadePortOwner names the configured facade a port belongs to, or "". It
+// covers what the broker knows of each: the engine's compatibility port or the
+// one persisted in its place, the port planned for the next spawn, the port
+// the running facade bound, and the Ollama alias.
+func (b *Broker) facadePortOwner(port int) string {
+	for _, profile := range engineProxyProfiles {
+		if !b.proxyEnabled(profile) {
+			continue
+		}
+		planned := int(b.engineProxy(profile).startupPort.Load())
+		bound := 0
+		if pp := b.engineProxyHandle(profile); pp != nil {
+			_, bound = pp.Status(profile.Name)
+		}
+		if port == configuredEngineProxyPort(profile) || port == planned || port == bound {
+			return fmt.Sprintf("the %s proxy", profile.DisplayName)
+		}
+		if profile.Name == ollamaProxyProfile.Name && port == b.currentOllamaHostAlias().Port {
+			return "the inherited OLLAMA_HOST proxy alias"
+		}
+	}
+	return ""
 }
 
 // needsOllamaPortGate reports the client requests that can probe and adopt the

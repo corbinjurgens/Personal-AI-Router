@@ -418,6 +418,43 @@ func TestModelList_NativeListStays503WhenDown(t *testing.T) {
 	}
 }
 
+// The Ollama native list merges models by their normalized name, so a reserved
+// alias that an engine reports bare stays distinct from the same word tagged
+// ":latest", while an ordinary untagged name still merges with its tagged form.
+// No alias record is invented on the native list.
+func TestModelList_NativeListKeepsAReservedNameUntagged(t *testing.T) {
+	tc := ollamaCase(t)
+	e := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"models":[{"model":"weak"},{"model":"weak:latest"},{"model":"llama3"},{"model":"llama3:latest"}]}`))
+	}))
+	t.Cleanup(e.Close)
+	fx := &tierFixture{w: &recordingWriter{}, eng: map[string]*recordingEngine{}}
+	disc := NewDiscovery()
+	disc.AddManual(nodeFor(t, "n1", e.URL))
+	fx.p = newTestProxy(tc.profile, NewCodec(fx.w), disc, tc.profile.FacadePort)
+	fx.p.admission.setPolicy(stagedHybridPolicy(t))
+
+	rec := fx.listModels(t, "/api/tags")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body %s", rec.Code, rec.Body)
+	}
+	var list struct {
+		Models []struct {
+			Model string `json:"model"`
+		} `json:"models"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &list); err != nil {
+		t.Fatalf("decode %s: %v", rec.Body, err)
+	}
+	var got []string
+	for _, m := range list.Models {
+		got = append(got, m.Model)
+	}
+	if want := []string{"weak", "weak:latest", "llama3"}; !slices.Equal(got, want) {
+		t.Errorf("native model list = %v, want %v", got, want)
+	}
+}
+
 func (fx *tierFixture) request(t *testing.T, method, target, body string) *httptest.ResponseRecorder {
 	t.Helper()
 	rec := httptest.NewRecorder()

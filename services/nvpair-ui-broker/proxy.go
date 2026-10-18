@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"os/exec"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"nvpair-shared/applog"
@@ -39,6 +40,11 @@ type proxyProcess struct {
 	stdin io.WriteCloser
 	peer  *Peer
 	done  chan struct{}
+
+	// bringUpDone publishes listenerOnly after facade bring-up finishes. Until
+	// then a listener change must leave the in-flight spawn alone.
+	listenerOnly atomic.Bool
+	bringUpDone  atomic.Bool
 
 	// readyMu guards facadeState, written by the read pump when a facade's
 	// addressed "ready" notification arrives and read by the broker to answer
@@ -287,4 +293,225 @@ func (p *proxyProcess) Call(ctx context.Context, method string, params json.RawM
 // not — see waitForStdinClose. Safe to call multiple times.
 func (p *proxyProcess) Stop() {
 	waitForStdinClose(p.name, p.cmd, p.stdin, p.done)
+}
+
+// proxyProcessHandle returns the proxy process while it runs, whether or not
+// any facade came up in it, or nil. A process that has exited is nil: a crash
+// clears the per-engine handles but would leave this one pointing at a dead
+// peer, and the policy would then report a failed push where it should report
+// that no proxy runs.
+func (b *Broker) proxyProcessHandle() *proxyProcess {
+	b.workersMu.Lock()
+	pp := b.proxyProc
+	b.workersMu.Unlock()
+	if pp == nil {
+		return nil
+	}
+	select {
+	case <-pp.Done():
+		return nil
+	default:
+		return pp
+	}
+}
+
+func (b *Broker) setProxyProcessHandle(pp *proxyProcess) {
+	b.workersMu.Lock()
+	b.proxyProc = pp
+	b.workersMu.Unlock()
+}
+
+// clearProxyHandles withdraws the process handle and every engine's handle.
+func (b *Broker) clearProxyHandles() {
+	b.setProxyProcessHandle(nil)
+	for _, profile := range engineProxyProfiles {
+		b.setEngineProxyHandle(profile, nil)
+	}
+}
+
+// getProxySupervisor reads proxySup, which a policy change can now replace
+// while a respawn reads it.
+func (b *Broker) getProxySupervisor() *supervisor {
+	b.workersMu.Lock()
+	defer b.workersMu.Unlock()
+	return b.proxySup
+}
+
+func (b *Broker) setProxySupervisor(sup *supervisor) {
+	b.workersMu.Lock()
+	b.proxySup = sup
+	b.workersMu.Unlock()
+}
+
+// proxySupPhase says whether the proxy supervisor may be started or stopped by
+// a policy change.
+type proxySupPhase int
+
+const (
+	// proxySupStarting is before Serve has decided whether the proxy runs, so a
+	// policy change arriving from a paired node cannot start it ahead of the
+	// facades' preparation.
+	proxySupStarting proxySupPhase = iota
+	proxySupLive
+	// proxySupClosed is after shutdown, so a late policy change cannot start a
+	// proxy that nothing would stop.
+	proxySupClosed
+)
+
+// routingListenerEnabled reports whether the persisted policy enables the
+// routing listener, which only the proxy process can serve.
+func (b *Broker) routingListenerEnabled() bool {
+	r := b.nodePolicyRuntime()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.current.Routing.Listener.Enabled
+}
+
+// listenerNeedsProxy is routingListenerEnabled for a node that has a proxy
+// binary to run it.
+func (b *Broker) listenerNeedsProxy() bool {
+	return b.proxyPath != "" && b.routingListenerEnabled()
+}
+
+// startProxySupervision is Serve's one decision to run the proxy: for the
+// facades the operator asked for, or for the routing listener the policy
+// enables. It opens the supervisor to later policy changes.
+func (b *Broker) startProxySupervision(facadesConfigured bool) {
+	b.proxySupMu.Lock()
+	defer b.proxySupMu.Unlock()
+	if facadesConfigured || b.listenerNeedsProxy() {
+		b.startProxySupervisorLocked()
+	}
+	b.proxySupPhase = proxySupLive
+	b.resumeProxySupervision()
+}
+
+// startProxySupervisorLocked creates and starts the one proxy supervisor.
+// Caller holds proxySupMu.
+func (b *Broker) startProxySupervisorLocked() {
+	sup := newSupervisor(engines.ProxyComponent, defaultRestartPolicy(), b.spawnProxy)
+	b.configureProxySupervisorCallbacks(sup)
+	b.proxySupExhausted.Store(false)
+	onExhausted := sup.onExhausted
+	sup.onExhausted = func(attempt int) {
+		onExhausted(attempt)
+		if b.beforeProxyExhaustionPublished != nil {
+			b.beforeProxyExhaustionPublished()
+		}
+		b.proxySupExhausted.Store(true)
+		b.resumeProxySupervision()
+	}
+	// Published before Start, because the first spawn's bring-up context reads it.
+	b.setProxySupervisor(sup)
+	if err := sup.Start(); err != nil {
+		slog.Warn("proxy failed to start; continuing without local engine proxies",
+			"path", b.proxyPath, "err", err)
+		b.setProxySupervisor(nil)
+		// No facade will come up, so both engines take the terminal path:
+		// report the blocked claim where one was made, then finish, which
+		// is what returns the OLLAMA_HOST alias reservation.
+		if b.ollamaState().managedFacade.Load() {
+			b.blockManagedOllamaFacade("the proxy could not be started")
+		}
+		b.finishOllamaProxyTerminal()
+		if b.lmstudioState().managedFacade.Load() {
+			_, _ = b.blockManagedLMStudioFacade("the proxy could not be started", nil)
+		}
+		b.finishLMStudioProxyTerminal()
+	}
+}
+
+// stopProxySupervisorLocked stops the proxy and withdraws its handles. Caller
+// holds proxySupMu.
+func (b *Broker) stopProxySupervisorLocked() {
+	if sup := b.getProxySupervisor(); sup != nil {
+		sup.Stop()
+		b.setProxySupervisor(nil)
+	}
+	b.clearProxyHandles()
+}
+
+// shutdownProxySupervision stops the proxy for good. Idempotent.
+func (b *Broker) shutdownProxySupervision() {
+	b.proxySupClosing.Store(true)
+	if b.beforeProxyShutdownLocked != nil {
+		b.beforeProxyShutdownLocked()
+	}
+	b.proxySupMu.Lock()
+	defer b.proxySupMu.Unlock()
+	b.proxySupPhase = proxySupClosed
+	b.stopProxySupervisorLocked()
+}
+
+// reconcileProxySupervision asks for the proxy to be brought in line with the
+// persisted policy, and returns at once. Starting a proxy replays the policy to
+// it and stopping one joins its exit, neither of which a policy:set may wait
+// for beyond its own activation bound, so the work runs on one background
+// goroutine and policy:set reports the revision pending until the new process
+// acknowledges the replay. Requests made while it runs are folded into one more
+// pass, which reads the policy afresh, so the last change wins.
+func (b *Broker) reconcileProxySupervision() {
+	b.proxySupWorkMu.Lock()
+	defer b.proxySupWorkMu.Unlock()
+	b.proxySupDirty = true
+	b.resumeProxySupervisionLocked()
+}
+
+// resumeProxySupervision wakes only a pending listener change. Lifecycle
+// publication alone must not renew an exhausted supervisor's restart budget.
+func (b *Broker) resumeProxySupervision() {
+	b.proxySupWorkMu.Lock()
+	defer b.proxySupWorkMu.Unlock()
+	b.resumeProxySupervisionLocked()
+}
+
+func (b *Broker) resumeProxySupervisionLocked() {
+	if !b.proxySupDirty || b.proxySupWorking {
+		return
+	}
+	b.proxySupWorking = true
+	go func() {
+		for b.reconcileProxySupervisionNow() {
+		}
+	}()
+}
+
+// reconcileProxySupervisionNow is one pass of reconcileProxySupervision,
+// through the same supervisor Serve starts rather than a second path.
+//
+// A serving facade consumes the request without changing its lifecycle. An
+// unfinished spawn or a supervisor still recovering defers it until publication
+// wakes the worker. Otherwise an enabled listener starts a missing proxy, and a
+// disabled listener stops a process whose bring-up yielded no facades.
+func (b *Broker) reconcileProxySupervisionNow() bool {
+	b.proxySupMu.Lock()
+	defer b.proxySupMu.Unlock()
+	// Decide whether the request can be consumed under the same lock as a
+	// publication wakeup. A blocked pass leaves it dirty and retires the worker
+	// before publication can wake it, so neither ordering loses the request.
+	b.proxySupWorkMu.Lock()
+	sup, exhausted := b.getProxySupervisor(), b.proxySupExhausted.Load()
+	pp := b.proxyProcessHandle()
+	blocked := b.proxySupPhase == proxySupStarting ||
+		(sup != nil && !exhausted && (pp == nil || !pp.bringUpDone.Load()))
+	if !b.proxySupDirty || (b.proxySupPhase != proxySupClosed && blocked) {
+		b.proxySupWorking = false
+		b.proxySupWorkMu.Unlock()
+		return false
+	}
+	b.proxySupDirty = false
+	b.proxySupWorkMu.Unlock()
+	if b.proxySupPhase != proxySupLive || (sup != nil && !exhausted && !pp.listenerOnly.Load()) {
+		return true
+	}
+	switch listener := b.listenerNeedsProxy(); {
+	case listener && (sup == nil || exhausted):
+		if sup != nil {
+			b.stopProxySupervisorLocked()
+		}
+		b.startProxySupervisorLocked()
+	case !listener && sup != nil:
+		b.stopProxySupervisorLocked()
+	}
+	return true
 }

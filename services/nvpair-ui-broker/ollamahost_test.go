@@ -638,7 +638,7 @@ func TestAliasBindFailureReleasesReservationButKeepsWarning(t *testing.T) {
 	if warning == nil || warning.ID != ollamaHostAliasBlockedID {
 		t.Fatal("bind warning was cleared while releasing the reservation")
 	}
-	if b.rejectOllamaHostAliasPort(&Message{}, 15555, "Ollama") {
+	if b.rejectProxyHeldPort(&Message{}, 15555, "Ollama") {
 		t.Fatal("released alias still rejects assignment to the existing owner's port")
 	}
 	if !b.availableOffOllamaHostAlias(func(port int) bool { return port == 15555 })(15555) {

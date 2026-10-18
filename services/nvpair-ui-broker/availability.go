@@ -81,8 +81,9 @@ func (b *Broker) runAvailabilityTransition(ctx context.Context, gen uint64, stat
 }
 
 // persistAvailabilityLocked returns the current policy with state as its
-// availability, saved under the next revision. The policy push that follows
-// the availability push activates that revision. While policy recovery is
+// availability, saved under the next revision. That revision is active once the
+// proxy has acknowledged the availability push and the policy push that follows
+// it. While policy recovery is
 // required nothing is saved, so the corrupt file and recoveryRequired stay as
 // they are; the change then lives in memory only and persisted is false. The
 // caller sets r.current from the result once it has no further failure. Caller
@@ -97,11 +98,25 @@ func (r *policyRuntime) persistAvailabilityLocked(state nodepolicy.Availability)
 	return policy, err == nil, err
 }
 
+// pushAvailabilityAndActivate sends the availability, then, for a change that
+// was saved, the policy carrying its revision, and announces the outcome. An
+// unsaved change (during recovery) has no revision of its own: it announces only
+// when the availability answer changed what activation reports.
+func (b *Broker) pushAvailabilityAndActivate(persisted bool, policy nodepolicy.Policy) {
+	changed := b.pushPolicyNow(context.Background(), pushAvailability)
+	if persisted {
+		b.activatePolicyNow()
+		b.notifyPolicyChanged(policy)
+		return
+	}
+	b.announceActivationChange(changed)
+}
+
 // pauseNode drains, then unloads and stops engines as the policy says.
 func (b *Broker) pauseNode(ctx context.Context) (nodepolicy.Availability, error) {
 	r := b.nodePolicyRuntime()
 	r.mu.Lock()
-	if r.live == nodepolicy.Paused && r.current.Availability == nodepolicy.Paused {
+	if r.live == nodepolicy.Paused && r.current.Availability == nodepolicy.Paused && r.availabilityErr == "" {
 		r.mu.Unlock()
 		return nodepolicy.Paused, nil
 	}
@@ -125,12 +140,9 @@ func (b *Broker) pauseNode(ctx context.Context) (nodepolicy.Availability, error)
 	// with the state the next transition then replaces. Availability goes
 	// first, so admission stops before anything else; the policy follows, its
 	// revision being the one this change took, and the announcement after it
-	// says whether the proxy activated that revision.
-	b.pushPolicyNow(context.Background(), pushAvailability)
-	if persisted {
-		b.activatePolicyNow()
-		b.notifyPolicyChanged(policy)
-	}
+	// says whether the proxy activated that revision, which needs both pushes
+	// acknowledged.
+	b.pushAvailabilityAndActivate(persisted, policy)
 	b.notifyAvailability()
 
 	idle := func(st nodepolicy.AdmissionState) bool { return st.Active == 0 }
@@ -143,7 +155,7 @@ func (b *Broker) pauseNode(ctx context.Context) (nodepolicy.Availability, error)
 		r.mu.Lock()
 		r.cancelActive = true
 		r.mu.Unlock()
-		b.pushPolicyNow(context.Background(), pushAvailability)
+		b.announceActivationChange(b.pushPolicyNow(context.Background(), pushAvailability))
 		b.waitAdmission(ctx, pauseCancelSettle, idle)
 	}
 	if ctx.Err() != nil {
@@ -189,7 +201,7 @@ func (b *Broker) pauseNode(ctx context.Context) (nodepolicy.Availability, error)
 	r.live = nodepolicy.Paused
 	r.cancelActive = false
 	r.mu.Unlock()
-	b.pushPolicyNow(context.Background(), pushAvailability)
+	b.announceActivationChange(b.pushPolicyNow(context.Background(), pushAvailability))
 	b.notifyAvailability()
 	slog.Info("node paused")
 	return nodepolicy.Paused, nil
@@ -202,7 +214,7 @@ func (b *Broker) pauseNode(ctx context.Context) (nodepolicy.Availability, error)
 func (b *Broker) resumeNode() (nodepolicy.Availability, error) {
 	r := b.nodePolicyRuntime()
 	r.mu.Lock()
-	if r.live == nodepolicy.Available && r.current.Availability == nodepolicy.Available {
+	if r.live == nodepolicy.Available && r.current.Availability == nodepolicy.Available && r.availabilityErr == "" {
 		r.mu.Unlock()
 		return nodepolicy.Available, nil
 	}
@@ -227,11 +239,7 @@ func (b *Broker) resumeNode() (nodepolicy.Availability, error) {
 	r.restoreSkipped = false
 	r.mu.Unlock()
 
-	b.pushPolicyNow(context.Background(), pushAvailability)
-	if persisted {
-		b.activatePolicyNow()
-		b.notifyPolicyChanged(policy)
-	}
+	b.pushAvailabilityAndActivate(persisted, policy)
 	b.notifyAvailability()
 	slog.Info("node resumed", "waking", slept, "restore", restore)
 	go b.wakeAfterResume(slept, restore)

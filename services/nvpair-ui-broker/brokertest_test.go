@@ -81,6 +81,16 @@ func requireGateOpenNow(t *testing.T, gate <-chan struct{}, reason string) {
 	}
 }
 
+// publishTestProxy publishes pp the way spawnProxy does: as the proxy process
+// and as the proxy of every engine. A test that gives the broker a proxy by any
+// other route would reach code that production never reaches.
+func publishTestProxy(b *Broker, pp *proxyProcess) {
+	b.setProxyProcessHandle(pp)
+	for _, profile := range engineProxyProfiles {
+		b.setEngineProxyHandle(profile, pp)
+	}
+}
+
 // newTestRPCWorkerPipe returns a worker whose peer is served over an in-memory
 // pipe, plus the codec for the far end so a test can act as the worker.
 func newTestRPCWorkerPipe(t *testing.T) (*rpcWorker, *Codec) {

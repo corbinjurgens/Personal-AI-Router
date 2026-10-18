@@ -4,12 +4,19 @@
 package main
 
 import (
+	"bufio"
+	"context"
 	"encoding/json"
 	"net"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"nvpair-shared/errors"
+	"nvpair-shared/nodepolicy"
 )
 
 // The broker's table must cover exactly the shared engine set, in the same
@@ -474,5 +481,804 @@ func TestStickyErrorsReplayEveryCachedIDInOrder(t *testing.T) {
 	case msg := <-received:
 		t.Errorf("replayed an unrelated report: %s", msg.Params)
 	case <-time.After(200 * time.Millisecond):
+	}
+}
+
+// fakeProxyEnv makes the test binary act as a proxy child, so supervision runs
+// against a real process without a facade port or the proxy binary. It is read
+// in init because the child must answer before the test framework parses the
+// argv the broker gives it. Its value picks the behaviour.
+const (
+	fakeProxyEnv = "NVPAIR_BROKER_TEST_FAKE_PROXY"
+	// fakeProxyAcceptsFacades makes the child enable a facade instead of
+	// refusing it.
+	fakeProxyAcceptsFacades = "accept-facades"
+	// fakeProxyHangs makes the child read its requests and never answer.
+	fakeProxyHangs = "hang"
+)
+
+func init() {
+	if os.Getenv(fakeProxyEnv) != "" {
+		runFakeProxy()
+		os.Exit(0)
+	}
+}
+
+// runFakeProxy acknowledges every policy push, refuses every facade/enable
+// unless told to accept it, and exits when its stdin closes, which is how the
+// broker stops a proxy.
+func runFakeProxy() {
+	in := bufio.NewScanner(os.Stdin)
+	in.Buffer(nil, 1<<20)
+	out := json.NewEncoder(os.Stdout)
+	for in.Scan() {
+		var req struct {
+			ID     json.RawMessage `json:"id"`
+			Method string          `json:"method"`
+			Params json.RawMessage `json:"params"`
+		}
+		if json.Unmarshal(in.Bytes(), &req) != nil || len(req.ID) == 0 || os.Getenv(fakeProxyEnv) == fakeProxyHangs {
+			continue
+		}
+		reply := map[string]any{"jsonrpc": "2.0", "id": req.ID}
+		switch req.Method {
+		case nodepolicy.MethodSetPolicy:
+			var pol nodepolicy.Policy
+			_ = json.Unmarshal(req.Params, &pol)
+			reply["result"] = nodepolicy.PolicyAck{Revision: pol.Revision, RunID: "fake-run"}
+		case "facade/enable":
+			if os.Getenv(fakeProxyEnv) == fakeProxyAcceptsFacades {
+				var spec enableFacadeRequest
+				_ = json.Unmarshal(req.Params, &spec)
+				reply["result"] = enableFacadeReply{Engine: spec.Engine, Port: 40124}
+			} else {
+				reply["error"] = map[string]any{"code": -32000, "message": "refused"}
+			}
+		default:
+			reply["result"] = map[string]any{}
+		}
+		if out.Encode(reply) != nil {
+			return
+		}
+	}
+}
+
+// testListenerPort is a port the fake proxy never binds, so the tests below
+// need no free port.
+const testListenerPort = 40123
+
+// supervisedBroker is a broker with a policy file, a client codec and the fake
+// child as its proxy binary. It is driven the way a client drives it: through
+// handleMessage.
+type supervisedBroker struct {
+	b    *Broker
+	out  *syncBuffer
+	path string
+	next int
+}
+
+// newSupervisedBroker loads a policy whose listener is enabled or not. The
+// broker's lifetime is cancelled before supervision is shut down, as Serve does.
+func newSupervisedBroker(t *testing.T, listener bool, facades ...string) *supervisedBroker {
+	t.Helper()
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(fakeProxyEnv, "1")
+	b, out := newPolicyBroker(t)
+	b.proxyPath = exe
+	b.proxyEngines = facades
+	b.ollamaPortReady = make(chan struct{})
+	b.lmstudioPortReady = make(chan struct{})
+	path := filepath.Join(t.TempDir(), nodepolicy.FileName)
+	if listener {
+		doc := nodepolicy.Default()
+		doc.Routing.Listener = nodepolicy.Listener{Enabled: true, Port: testListenerPort, AllowedOrigins: []string{}}
+		writePolicyFile(t, path, doc)
+	}
+	b.loadNodePolicy(path)
+	ctx, cancel := context.WithCancel(context.Background())
+	b.setServeCtx(ctx)
+	t.Cleanup(func() {
+		cancel()
+		b.shutdownProxySupervision()
+	})
+	return &supervisedBroker{b: b, out: out, path: path}
+}
+
+// policyResponse is a policy:set answer, decoded.
+type policyResponse struct {
+	Message
+	activation string
+	elapsed    time.Duration
+}
+
+// call sends one request and waits for its response.
+func (sb *supervisedBroker) call(t *testing.T, method string, params any, within time.Duration) policyResponse {
+	t.Helper()
+	sb.next++
+	id := sb.next
+	started := time.Now()
+	sb.b.handleMessage(clientRequest(id, method, params))
+	deadline := started.Add(within)
+	for time.Now().Before(deadline) {
+		for _, m := range sb.out.frames() {
+			if isResponse(id)(m) {
+				var result struct {
+					Activation string `json:"activation"`
+				}
+				_ = json.Unmarshal(m.Result, &result)
+				return policyResponse{Message: m, activation: result.Activation, elapsed: time.Since(started)}
+			}
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("%s was not answered within %s", method, within)
+	return policyResponse{}
+}
+
+// setListener is a policy:set that changes only the routing listener.
+func (sb *supervisedBroker) setListener(t *testing.T, enabled bool, port int) policyResponse {
+	t.Helper()
+	doc := sb.b.localPolicy().Policy
+	doc.Routing.Listener = nodepolicy.Listener{Enabled: enabled, Port: port, AllowedOrigins: []string{}}
+	return sb.call(t, methodPolicySet, map[string]any{"policy": doc, "expectedPersistedRevision": doc.Revision}, 2*policyActivationTimeout)
+}
+
+func (sb *supervisedBroker) mustSetListener(t *testing.T, enabled bool) policyResponse {
+	t.Helper()
+	got := sb.setListener(t, enabled, testListenerPort)
+	if got.Error != nil {
+		t.Fatalf("policy:set listener enabled=%t: %+v", enabled, got.Error)
+	}
+	return got
+}
+
+func eventually(t *testing.T, what string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for !cond() {
+		if time.Now().After(deadline) {
+			t.Fatalf("never happened: %s", what)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// waitReconciled returns once the background supervision pass has nothing left
+// to do, so a test can assert that a policy change did not touch the proxy.
+func waitReconciled(t *testing.T, b *Broker) {
+	t.Helper()
+	eventually(t, "the supervision pass finishing", func() bool {
+		b.proxySupWorkMu.Lock()
+		defer b.proxySupWorkMu.Unlock()
+		return !b.proxySupWorking
+	})
+}
+
+func exited(pp *proxyProcess) bool {
+	select {
+	case <-pp.Done():
+		return true
+	default:
+		return false
+	}
+}
+
+func requireProxyRunning(t *testing.T, pp *proxyProcess, why string) {
+	t.Helper()
+	if pp == nil {
+		t.Fatalf("no proxy process: %s", why)
+	}
+	if exited(pp) {
+		t.Fatalf("the proxy process exited: %s", why)
+	}
+}
+
+func requireProxyExited(t *testing.T, pp *proxyProcess, why string) {
+	t.Helper()
+	eventually(t, "the proxy process exiting: "+why, func() bool { return exited(pp) })
+}
+
+// A node with no facade runs the proxy for the routing listener alone: a
+// policy:set that enables the listener starts it in the background, the
+// revision is active once the new process has acknowledged the replay, and a
+// policy:set that disables it stops it.
+func TestProxySupervisionRunsTheListenerWithoutFacades(t *testing.T) {
+	sb := newSupervisedBroker(t, false)
+	b := sb.b
+
+	b.startProxySupervision(false)
+	if b.getProxySupervisor() != nil || b.proxyProcessHandle() != nil {
+		t.Fatal("a node with no facade and no listener started a proxy")
+	}
+
+	sb.mustSetListener(t, true)
+	eventually(t, "the listener's proxy starting", func() bool { return b.proxyProcessHandle() != nil })
+	first := b.proxyProcessHandle()
+	requireProxyRunning(t, first, "the policy enables the listener")
+	if b.getProxySupervisor() == nil {
+		t.Fatal("the listener's proxy is not supervised")
+	}
+	if b.engineProxyHandle(ollamaProxyProfile) != nil {
+		t.Fatal("a facade is published on a node with none configured")
+	}
+	if got := b.policyProxy(); got != first {
+		t.Fatalf("the policy talks to %p, want the listener's process %p", got, first)
+	}
+	eventually(t, "the revision activating in the new process", func() bool {
+		return b.localPolicy().Activation == activationActive
+	})
+
+	spawns := b.currentOllamaProxyGeneration()
+	sb.mustSetListener(t, false)
+	requireProxyExited(t, first, "the listener was disabled and no facade is configured")
+	waitReconciled(t, b)
+	if b.getProxySupervisor() != nil || b.proxyProcessHandle() != nil || b.policyProxy() != nil {
+		t.Fatal("a stopped proxy is still supervised or published")
+	}
+	if got := b.currentOllamaProxyGeneration(); got != spawns {
+		t.Fatalf("stopping a proxy with no facade configured spawned another (%d -> %d)", spawns, got)
+	}
+
+	sb.mustSetListener(t, true)
+	eventually(t, "a fresh proxy for the re-enabled listener", func() bool {
+		again := b.proxyProcessHandle()
+		return again != nil && again != first
+	})
+}
+
+// A node restarted with the listener already enabled in its saved policy runs
+// the proxy from startup, with no facade configured.
+func TestProxySupervisionStartsForAnEnabledListenerWithoutFacades(t *testing.T) {
+	sb := newSupervisedBroker(t, true)
+
+	sb.b.startProxySupervision(false)
+
+	requireProxyRunning(t, sb.b.proxyProcessHandle(), "the saved policy enables the listener")
+	if sb.b.getProxySupervisor() == nil {
+		t.Fatal("the listener's proxy is not supervised")
+	}
+}
+
+// Every facade failing keeps the proxy while the policy enables the listener,
+// and the failed engines take the terminal path a spawn with some facade up
+// gives them, because this incarnation is not retried.
+func TestProxySupervisionKeepsTheProxyWhenEveryFacadeFailsAndTheListenerIsEnabled(t *testing.T) {
+	sb := newSupervisedBroker(t, true, ollamaProxyProfile.Name)
+	b := sb.b
+	b.ollamaState().managedFacade.Store(true)
+
+	b.startProxySupervision(true)
+
+	requireProxyRunning(t, b.proxyProcessHandle(), "the listener is enabled and every facade was refused")
+	if b.getProxySupervisor() == nil {
+		t.Fatal("the proxy is not supervised")
+	}
+	if b.engineProxyHandle(ollamaProxyProfile) != nil {
+		t.Fatal("a refused facade is published as up")
+	}
+	requireGateOpens(t, b.ollamaPortReady, "the refused facade is terminal for the kept process")
+	if b.ollamaState().managedFacade.Load() {
+		t.Fatal("the refused facade kept its managed claim in a process that is not retried")
+	}
+	if got := b.localPolicy().Activation; got != activationActive {
+		t.Fatalf("activation = %q, want %q", got, activationActive)
+	}
+}
+
+// With the listener disabled and every facade failing, a start fails as it
+// always has: no process stays and the supervisor is dropped.
+func TestProxySupervisionFailsAStartWithNoFacadeAndNoListener(t *testing.T) {
+	sb := newSupervisedBroker(t, false, ollamaProxyProfile.Name)
+	sb.b.ollamaState().managedFacade.Store(true)
+
+	sb.b.startProxySupervision(true)
+
+	if sb.b.getProxySupervisor() != nil || sb.b.proxyProcessHandle() != nil {
+		t.Fatal("a proxy with no facade and no listener was kept")
+	}
+	requireGateOpens(t, sb.b.ollamaPortReady, "a failed start releases the startup gate")
+}
+
+func TestProxySupervisionEnablingTheListenerRecoversFailedFacadeStartup(t *testing.T) {
+	sb := newSupervisedBroker(t, false, ollamaProxyProfile.Name)
+	b := sb.b
+	b.startProxySupervision(true)
+	if b.getProxySupervisor() != nil || b.proxyProcessHandle() != nil {
+		t.Fatal("the refused facade unexpectedly kept the initial proxy")
+	}
+
+	got := sb.mustSetListener(t, true)
+	if got.elapsed > policyActivationTimeout+2*time.Second {
+		t.Fatalf("policy:set took %s, exceeding its activation bound", got.elapsed)
+	}
+	waitReconciled(t, b)
+	requireProxyRunning(t, b.proxyProcessHandle(), "enabling the listener after failed facade startup")
+	if b.getProxySupervisor() == nil {
+		t.Fatal("the recovered listener's proxy is not supervised")
+	}
+	if b.engineProxyHandle(ollamaProxyProfile) != nil {
+		t.Fatal("the refused facade is published as up")
+	}
+	eventually(t, "the recovered listener's revision activating", func() bool {
+		got := b.localPolicy()
+		return got.Activation == activationActive && got.ActiveRevision == got.Policy.Revision
+	})
+}
+
+func TestProxySupervisionDisablingTheListenerStopsAfterEveryFacadeFails(t *testing.T) {
+	sb := newSupervisedBroker(t, true, ollamaProxyProfile.Name)
+	b := sb.b
+	b.startProxySupervision(true)
+	pp := b.proxyProcessHandle()
+	requireProxyRunning(t, pp, "the enabled listener keeps the proxy after every facade was refused")
+	if b.engineProxyHandle(ollamaProxyProfile) != nil {
+		t.Fatal("the refused facade is published as up")
+	}
+	spawns := b.currentOllamaProxyGeneration()
+
+	got := sb.mustSetListener(t, false)
+	if got.elapsed > policyActivationTimeout+2*time.Second {
+		t.Fatalf("policy:set took %s, exceeding its activation bound", got.elapsed)
+	}
+	waitReconciled(t, b)
+	if !exited(pp) {
+		t.Fatal("disabling the listener left a proxy running with every facade refused")
+	}
+	if b.getProxySupervisor() != nil || b.proxyProcessHandle() != nil || b.policyProxy() != nil {
+		t.Fatal("the idle proxy is still supervised or published")
+	}
+	if got := b.currentOllamaProxyGeneration(); got != spawns {
+		t.Fatalf("stopping the idle proxy spawned a replacement (%d -> %d)", spawns, got)
+	}
+}
+
+// A serving facade keeps the supervisor Serve gave it across listener changes.
+func TestProxySupervisionLeavesAFacadeNodesSupervisorAlone(t *testing.T) {
+	sb := newSupervisedBroker(t, true, ollamaProxyProfile.Name)
+	t.Setenv(fakeProxyEnv, fakeProxyAcceptsFacades)
+	b := sb.b
+	b.startProxySupervision(true)
+	pp, sup := b.proxyProcessHandle(), b.getProxySupervisor()
+	requireProxyRunning(t, pp, "the facade is accepted")
+
+	for _, enabled := range []bool{false, true, false} {
+		sb.mustSetListener(t, enabled)
+		waitReconciled(t, b)
+		if b.getProxySupervisor() != sup || b.proxyProcessHandle() != pp {
+			t.Fatalf("setting the listener to %t replaced the supervisor or the process of a node with a facade", enabled)
+		}
+		requireProxyRunning(t, pp, "a listener change must not stop a facade node's proxy")
+		if b.engineProxyHandle(ollamaProxyProfile) != pp {
+			t.Fatal("the accepted facade is not published on its original process")
+		}
+	}
+}
+
+// During a crash backoff the facade node's supervisor still has its restart
+// budget; a listener change must neither replace it nor end the backoff.
+func TestProxySupervisionKeepsTheBackoffOfAFacadeNodeAcrossListenerChanges(t *testing.T) {
+	sb := newSupervisedBroker(t, false, ollamaProxyProfile.Name)
+	t.Setenv(fakeProxyEnv, fakeProxyAcceptsFacades)
+	b := sb.b
+	b.startProxySupervision(true)
+	pp, sup := b.proxyProcessHandle(), b.getProxySupervisor()
+	requireProxyRunning(t, pp, "the facade is accepted")
+
+	if err := pp.cmd.Process.Kill(); err != nil {
+		t.Fatal(err)
+	}
+	requireProxyExited(t, pp, "killed")
+	for _, enabled := range []bool{true, false} {
+		sb.mustSetListener(t, enabled)
+		waitReconciled(t, b)
+		if b.getProxySupervisor() != sup {
+			t.Fatalf("setting the listener to %t during the backoff replaced the supervisor", enabled)
+		}
+	}
+	eventually(t, "the supervisor's own restart", func() bool {
+		again := b.proxyProcessHandle()
+		return again != nil && again != pp
+	})
+	if b.getProxySupervisor() != sup {
+		t.Fatal("the restart replaced the supervisor")
+	}
+}
+
+// publicationBarrier pauses a lifecycle publisher without a timing window.
+// Cleanup releases it before the fixture joins its owned supervisor.
+func publicationBarrier(t *testing.T) (func(), <-chan struct{}, func()) {
+	t.Helper()
+	reached, released := make(chan struct{}), make(chan struct{})
+	var signal, release sync.Once
+	unblock := func() { release.Do(func() { close(released) }) }
+	t.Cleanup(unblock)
+	return func() {
+		signal.Do(func() { close(reached) })
+		<-released
+	}, reached, unblock
+}
+
+func awaitPublication(t *testing.T, reached <-chan struct{}) {
+	t.Helper()
+	select {
+	case <-reached:
+	case <-time.After(10 * time.Second):
+		t.Fatal("proxy did not reach the publication barrier")
+	}
+}
+
+// Set before Start launches the monitor, keeping the real recovery mechanism
+// but making its restart budget practical for repeated race tests.
+func fastProxyRestartBudget(b *Broker) func() {
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			b.getProxySupervisor().policy = restartPolicy{
+				baseDelay: time.Millisecond, maxDelay: time.Millisecond, maxAttempts: 1,
+			}
+		})
+	}
+}
+
+func TestProxySupervisionDefersDisableUntilRespawnPublication(t *testing.T) {
+	sb := newSupervisedBroker(t, true, ollamaProxyProfile.Name)
+	b := sb.b
+	pause, reached, release := publicationBarrier(t)
+	spawned := 0
+	fastBudget := fastProxyRestartBudget(b)
+	b.beforeProxySpawnPublished = func() {
+		fastBudget()
+		spawned++
+		if spawned == 2 {
+			pause()
+		}
+	}
+	b.startProxySupervision(true)
+	first, sup := b.proxyProcessHandle(), b.getProxySupervisor()
+	requireProxyRunning(t, first, "the listener keeps the refused-facade proxy")
+	if err := first.cmd.Process.Kill(); err != nil {
+		t.Fatal(err)
+	}
+	awaitPublication(t, reached)
+	respawned := b.proxyProcessHandle()
+	requireProxyRunning(t, respawned, "respawn is paused before listener-only publication")
+	if respawned == first || respawned.bringUpDone.Load() {
+		t.Fatal("respawn barrier did not hold the new incarnation before publication")
+	}
+
+	sb.mustSetListener(t, false)
+	waitReconciled(t, b)
+	if b.getProxySupervisor() != sup || exited(respawned) {
+		t.Fatal("disable interrupted unfinished bring-up")
+	}
+	release()
+	eventually(t, "deferred disable retiring the idle supervisor", func() bool {
+		return b.getProxySupervisor() == nil
+	})
+	waitReconciled(t, b)
+	if !exited(respawned) || b.proxyProcessHandle() != nil {
+		t.Fatal("deferred disable left an idle proxy after respawn publication")
+	}
+	if got := b.currentOllamaProxyGeneration(); got != 2 {
+		t.Fatalf("spawn generation = %d, want exactly the initial spawn and its respawn", got)
+	}
+}
+
+func TestProxySupervisionDefersEnableUntilExhaustionPublication(t *testing.T) {
+	sb := newSupervisedBroker(t, false, ollamaProxyProfile.Name)
+	t.Setenv(fakeProxyEnv, fakeProxyAcceptsFacades)
+	b := sb.b
+	b.beforeProxySpawnPublished = fastProxyRestartBudget(b)
+	pause, reached, release := publicationBarrier(t)
+	b.beforeProxyExhaustionPublished = pause
+	b.startProxySupervision(true)
+	first, sup := b.proxyProcessHandle(), b.getProxySupervisor()
+	requireProxyRunning(t, first, "the initial facade is accepted")
+	// The recovery spawn refuses its facade, exhausting the existing budget.
+	t.Setenv(fakeProxyEnv, "1")
+	if err := first.cmd.Process.Kill(); err != nil {
+		t.Fatal(err)
+	}
+	awaitPublication(t, reached)
+	if b.proxySupExhausted.Load() || b.proxyProcessHandle() != nil {
+		t.Fatal("terminal barrier did not hold exhaustion before publication")
+	}
+
+	got := sb.mustSetListener(t, true)
+	if got.activation == activationActive {
+		t.Fatal("an absent proxy reported the enabled listener revision active")
+	}
+	revision := b.localPolicy().Policy.Revision
+	waitReconciled(t, b)
+	if b.getProxySupervisor() != sup {
+		t.Fatal("enable replaced the supervisor before exhaustion was published")
+	}
+	release()
+	eventually(t, "deferred enable replacing the exhausted supervisor", func() bool {
+		return b.getProxySupervisor() != sup
+	})
+	waitReconciled(t, b)
+	requireProxyRunning(t, b.proxyProcessHandle(), "the pending enable survives exhaustion publication")
+	eventually(t, "the exact deferred revision activating", func() bool {
+		got := b.localPolicy()
+		return got.Activation == activationActive && got.ActiveRevision == revision && got.Policy.Revision == revision
+	})
+	if got := b.currentOllamaProxyGeneration(); got != 3 {
+		t.Fatalf("spawn generation = %d, want initial, failed recovery and one replacement", got)
+	}
+}
+
+func TestProxySupervisionExhaustionWithoutPendingChangeStaysExhausted(t *testing.T) {
+	sb := newSupervisedBroker(t, true, ollamaProxyProfile.Name)
+	b := sb.b
+	b.beforeProxySpawnPublished = fastProxyRestartBudget(b)
+	pause, reached, release := publicationBarrier(t)
+	b.beforeProxyExhaustionPublished = pause
+	b.startProxySupervision(true)
+	first, sup := b.proxyProcessHandle(), b.getProxySupervisor()
+	requireProxyRunning(t, first, "the saved listener enables the refused-facade proxy")
+	if err := first.cmd.Process.Kill(); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "the budgeted respawn completing", func() bool {
+		pp := b.proxyProcessHandle()
+		return pp != nil && pp != first && pp.bringUpDone.Load()
+	})
+	if err := b.proxyProcessHandle().cmd.Process.Kill(); err != nil {
+		t.Fatal(err)
+	}
+	awaitPublication(t, reached)
+	spawns := b.currentOllamaProxyGeneration()
+	if spawns != 2 {
+		t.Fatalf("spawn generation = %d, want initial plus the budgeted respawn", spawns)
+	}
+	release()
+	// Join the exhausted monitor so its publication and wakeup have completed;
+	// waitReconciled then drains any work that wakeup actually scheduled.
+	sup.Stop()
+	waitReconciled(t, b)
+	if !b.proxySupExhausted.Load() || b.getProxySupervisor() != sup || b.proxyProcessHandle() != nil {
+		t.Fatal("exhaustion with no pending listener change restarted supervision")
+	}
+	if got := b.currentOllamaProxyGeneration(); got != spawns {
+		t.Fatalf("exhaustion renewed the restart budget (%d -> %d)", spawns, got)
+	}
+}
+
+func TestProxySupervisionUnrelatedPolicyEditPreservesExhaustion(t *testing.T) {
+	sb := newSupervisedBroker(t, true)
+	b := sb.b
+	b.beforeProxySpawnPublished = fastProxyRestartBudget(b)
+	pause, reached, release := publicationBarrier(t)
+	b.beforeProxyExhaustionPublished = pause
+	b.startProxySupervision(false)
+	first, sup := b.proxyProcessHandle(), b.getProxySupervisor()
+	requireProxyRunning(t, first, "the saved listener starts the proxy")
+	if err := first.cmd.Process.Kill(); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "the budgeted respawn completing", func() bool {
+		pp := b.proxyProcessHandle()
+		return pp != nil && pp != first && pp.bringUpDone.Load()
+	})
+	if err := b.proxyProcessHandle().cmd.Process.Kill(); err != nil {
+		t.Fatal(err)
+	}
+	awaitPublication(t, reached)
+	release()
+	sup.Stop()
+	waitReconciled(t, b)
+	if !b.proxySupExhausted.Load() || b.currentOllamaProxyGeneration() != 2 {
+		t.Fatal("the fixture did not exhaust its initial spawn and one restart")
+	}
+
+	doc := b.localPolicy().Policy
+	doc.Idle.UnloadAfterMinutes = 5
+	got := sb.call(t, methodPolicySet, map[string]any{"policy": doc, "expectedPersistedRevision": doc.Revision}, 2*policyActivationTimeout)
+	if got.Error != nil {
+		t.Fatalf("policy:set idle timeout: %+v", got.Error)
+	}
+	waitReconciled(t, b)
+	stored := b.localPolicy().Policy
+	if stored.Idle.UnloadAfterMinutes != 5 || stored.Revision == doc.Revision {
+		t.Fatal("the unrelated policy edit was not persisted with a new revision")
+	}
+	if b.getProxySupervisor() != sup || !b.proxySupExhausted.Load() || b.proxyProcessHandle() != nil {
+		t.Fatal("an unrelated policy edit renewed exhausted supervision")
+	}
+	if got := b.currentOllamaProxyGeneration(); got != 2 {
+		t.Fatalf("unrelated policy edit spawned generation %d, want 2", got)
+	}
+
+	got = sb.setListener(t, true, testListenerPort+1)
+	if got.Error != nil {
+		t.Fatalf("policy:set listener port: %+v", got.Error)
+	}
+	waitReconciled(t, b)
+	if b.getProxySupervisor() == sup || b.proxySupExhausted.Load() {
+		t.Fatal("a listener port change did not renew exhausted supervision")
+	}
+	requireProxyRunning(t, b.proxyProcessHandle(), "the changed listener renews the budget")
+	if got := b.currentOllamaProxyGeneration(); got != 3 {
+		t.Fatalf("listener port change spawned generation %d, want 3", got)
+	}
+}
+
+func TestProxySupervisionQueuedStartHonorsServeCancellation(t *testing.T) {
+	sb := newSupervisedBroker(t, false)
+	b := sb.b
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	b.setServeCtx(ctx)
+	b.startProxySupervision(false)
+	b.proxySupMu.Lock()
+	var unlocked sync.Once
+	unlock := func() { unlocked.Do(b.proxySupMu.Unlock) }
+	t.Cleanup(unlock)
+	sb.mustSetListener(t, true)
+	cancel()
+	unlock()
+	waitReconciled(t, b)
+	if got := b.currentOllamaProxyGeneration(); got != 0 {
+		t.Fatalf("queued reconciliation spawned generation %d after Serve cancellation, want 0", got)
+	}
+	if b.getProxySupervisor() != nil || b.proxyProcessHandle() != nil {
+		t.Fatal("cancelled Serve retained proxy supervision")
+	}
+}
+
+func TestProxySupervisionQueuedStartHonorsShutdownEntry(t *testing.T) {
+	sb := newSupervisedBroker(t, false)
+	b := sb.b
+	pause, reached, release := publicationBarrier(t)
+	b.beforeProxyShutdownLocked = pause
+	b.startProxySupervision(false)
+	b.proxySupMu.Lock()
+	var unlocked sync.Once
+	unlock := func() { unlocked.Do(b.proxySupMu.Unlock) }
+	t.Cleanup(unlock)
+	sb.mustSetListener(t, true)
+	stopped := make(chan struct{})
+	go func() {
+		b.shutdownProxySupervision()
+		close(stopped)
+	}()
+	t.Cleanup(func() {
+		release()
+		unlock()
+		awaitPublication(t, stopped)
+	})
+	awaitPublication(t, reached)
+	// Shutdown has entered but cannot take the mutex until this barrier is
+	// released. Let the already-queued reconciliation finish ahead of it.
+	unlock()
+	waitReconciled(t, b)
+	if got := b.currentOllamaProxyGeneration(); got != 0 {
+		t.Fatalf("queued reconciliation spawned generation %d after shutdown entry, want 0", got)
+	}
+	if b.getProxySupervisor() != nil || b.proxyProcessHandle() != nil {
+		t.Fatal("shutdown entry allowed queued proxy supervision")
+	}
+	release()
+	awaitPublication(t, stopped)
+}
+
+// A listener change cannot start the proxy before Serve has decided whether it
+// runs, nor after shutdown, when nothing would stop it.
+func TestProxySupervisionIgnoresPolicyChangesOutsideItsLifetime(t *testing.T) {
+	sb := newSupervisedBroker(t, false)
+	b := sb.b
+	sb.mustSetListener(t, true)
+	waitReconciled(t, b)
+	if b.getProxySupervisor() != nil {
+		t.Fatal("a policy change started the proxy before startup decided")
+	}
+
+	b.startProxySupervision(false)
+	pp := b.proxyProcessHandle()
+	requireProxyRunning(t, pp, "the policy enabled the listener before startup")
+	b.shutdownProxySupervision()
+	requireProxyExited(t, pp, "shutdown")
+
+	sb.mustSetListener(t, false)
+	sb.mustSetListener(t, true)
+	waitReconciled(t, b)
+	if b.getProxySupervisor() != nil || b.proxyProcessHandle() != nil {
+		t.Fatal("a policy change started a proxy after shutdown")
+	}
+}
+
+// policy:set stays within the activation bound whatever the proxy does: the
+// start and the stop run in the background, and an unresponsive child leaves
+// the revision unactivated rather than holding the request.
+func TestProxySupervisionKeepsPolicySetWithinItsBoundAgainstAnUnresponsiveProxy(t *testing.T) {
+	sb := newSupervisedBroker(t, false)
+	t.Setenv(fakeProxyEnv, fakeProxyHangs)
+	b := sb.b
+	b.startProxySupervision(false)
+	limit := policyActivationTimeout + 2*time.Second
+
+	enabled := sb.mustSetListener(t, true)
+	if enabled.elapsed > limit {
+		t.Fatalf("enabling the listener took %s, over the %s bound", enabled.elapsed, limit)
+	}
+	if enabled.activation == activationActive {
+		t.Fatalf("a proxy that never answers activated the revision: %+v", enabled)
+	}
+	eventually(t, "the unresponsive proxy starting", func() bool { return b.getProxySupervisor() != nil })
+
+	disabled := sb.mustSetListener(t, false)
+	if disabled.elapsed > limit {
+		t.Fatalf("disabling the listener took %s, over the %s bound", disabled.elapsed, limit)
+	}
+	if disabled.activation == activationActive {
+		t.Fatalf("a proxy that never answers activated the revision: %+v", disabled)
+	}
+}
+
+// The listener and a facade cannot be given one port: policy:set refuses a
+// listener port that any configured facade uses, however the broker knows it.
+func TestPolicySetRefusesAListenerPortAFacadeUses(t *testing.T) {
+	const planned, bound = 40555, 40556
+	for _, tc := range []struct {
+		name  string
+		port  int
+		setup func(b *Broker)
+	}{
+		{"compatibility port", ollamaProxyProfile.FacadePort, func(*Broker) {}},
+		{"planned port", planned, func(b *Broker) { b.ollamaState().startupPort.Store(planned) }},
+		{"bound port", bound, func(b *Broker) {
+			publishTestProxy(b, &proxyProcess{facadeState: readyFacade(ollamaProxyProfile.Name, bound)})
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sb := newSupervisedBroker(t, false, ollamaProxyProfile.Name)
+			tc.setup(sb.b)
+			before := sb.b.localPolicy().Policy
+
+			got := sb.setListener(t, true, tc.port)
+
+			if got.Error == nil || got.Error.Code != -32602 || !strings.Contains(got.Error.Message, "routing.listener.port") {
+				t.Fatalf("policy:set with a facade's port %d: error %+v, want -32602 naming routing.listener.port", tc.port, got.Error)
+			}
+			if after := sb.b.localPolicy().Policy; after.Revision != before.Revision || after.Routing.Listener.Enabled {
+				t.Fatalf("a refused listener port changed the policy: %+v", after.Routing.Listener)
+			}
+		})
+	}
+
+	t.Run("a node that does not front the engine", func(t *testing.T) {
+		sb := newSupervisedBroker(t, false)
+		if got := sb.setListener(t, true, ollamaProxyProfile.FacadePort); got.Error != nil {
+			t.Fatalf("policy:set refused a port no facade uses: %+v", got.Error)
+		}
+	})
+}
+
+// The other direction: moving a facade onto the enabled listener's port is
+// refused, so the overlap cannot be reached from either side.
+func TestFacadeSetPortRefusesTheListenersPort(t *testing.T) {
+	sb := newSupervisedBroker(t, true, ollamaProxyProfile.Name)
+	call := func(port int) policyResponse {
+		return sb.call(t, ollamaProxyProfile.ComponentName()+":set-port", map[string]int{"port": port}, 5*time.Second)
+	}
+
+	got := call(testListenerPort)
+	if got.Error == nil || !strings.Contains(got.Error.Message, "routing listener") {
+		t.Fatalf("set-port onto the listener's port: error %+v, want a refusal naming the routing listener", got.Error)
+	}
+
+	// Only that port is refused, and only while the listener is enabled.
+	other := call(testListenerPort + 1)
+	if other.Error != nil && strings.Contains(other.Error.Message, "routing listener") {
+		t.Fatalf("set-port onto another port was refused for the listener: %+v", other.Error)
+	}
+	sb.mustSetListener(t, false)
+	released := call(testListenerPort)
+	if released.Error != nil && strings.Contains(released.Error.Message, "routing listener") {
+		t.Fatalf("a disabled listener still holds its port: %+v", released.Error)
 	}
 }

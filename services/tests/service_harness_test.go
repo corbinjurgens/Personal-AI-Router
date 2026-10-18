@@ -61,6 +61,7 @@ type serviceFixture struct {
 	dir, configDir, clusterDir, endpoint string
 	servicePath, brokerPath, scannerPath string
 	proxyPath                            string
+	facadePort                           int
 	env                                  []string
 	inventory                            *serviceProcessInventory
 	children                             []*serviceChild
@@ -125,15 +126,14 @@ func newServiceFixture(t *testing.T) *serviceFixture {
 func (f *serviceFixture) args() []string {
 	args := []string{"--broker-path", f.brokerPath, "--endpoint", f.endpoint, "--log-dir", filepath.Join(f.dir, "logs"), "--", "--scanner-path", f.scannerPath, "--cluster-dir", f.clusterDir}
 	if f.proxyPath != "" {
-		return append(args, "--proxy-path", f.proxyPath, "--proxy-engines", "ollama")
+		return append(args, "--proxy-path", f.proxyPath, "--proxy-engines", "llamacpp")
 	}
 	return append(args, "--proxy-engines=")
 }
 
-// newProxyServiceFixture is newServiceFixture with the broker fronting ollama
+// newProxyServiceFixture is newServiceFixture with the broker fronting llama.cpp
 // through a copied nvpair-proxy, so policy activation is acknowledged by a real
-// proxy. The proxy listens on the ollama facade port, so the caller skips when
-// that port is busy.
+// proxy. Its facade restores an OS-assigned port from the fixture's app directory.
 func newProxyServiceFixture(t *testing.T) *serviceFixture {
 	t.Helper()
 	f := newServiceFixture(t)
@@ -153,6 +153,21 @@ func newProxyServiceFixture(t *testing.T) *serviceFixture {
 		t.Fatal(err)
 	}
 	f.inventory.paths = append(f.inventory.paths, f.proxyPath)
+	f.facadePort = freePort(t)
+	portPath := filepath.Join(filepath.Dir(f.policyPath()), "llamacpp-proxy-port.json")
+	data, err = json.Marshal(struct {
+		Port int `json:"port"`
+	}{Port: f.facadePort})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(portPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(portPath, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("fixture_facade_config engine=llamacpp port=%d path=%q", f.facadePort, portPath)
 	return f
 }
 
@@ -224,6 +239,22 @@ func (f *serviceFixture) readyClient() *serviceRPCClient {
 		}
 	}
 	servicePolicy(f.t, c)
+	if f.facadePort != 0 {
+		m := c.mustCall(f.t, "102", "llamacpp-proxy:get-status", nil)
+		var status struct {
+			Ready bool `json:"ready"`
+			Port  int  `json:"port"`
+		}
+		if err := json.Unmarshal(m.Result, &status); err != nil {
+			f.t.Fatal(err)
+		}
+		if !status.Ready || status.Port != f.facadePort {
+			f.t.Fatalf("fixture facade ready=%t port=%d, want ready on ephemeral port %d", status.Ready, status.Port, f.facadePort)
+		}
+		f.t.Logf("fixture_facade_ready engine=llamacpp port=%d", status.Port)
+	} else {
+		f.t.Log("fixture_facade_ready engines=none")
+	}
 	f.t.Logf("fixture_ready endpoint=%q processes=%+v", f.endpoint, owned)
 	return c
 }

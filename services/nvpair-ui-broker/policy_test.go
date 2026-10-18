@@ -41,7 +41,17 @@ type fakeWorker struct {
 	calls  []policyCall
 	answer func(method string, params json.RawMessage) (any, string)
 	signal chan struct{}
+	// held is closed by releaseHeld; a request whose answer is holdReply is
+	// answered only then, while the worker keeps reading, as a slow proxy does.
+	held     chan struct{}
+	holdOnce sync.Once
 }
+
+// holdReply is what an answer function returns to leave the request unanswered
+// until releaseHeld.
+const holdReply = "\x00hold"
+
+func (f *fakeWorker) releaseHeld() { f.holdOnce.Do(func() { close(f.held) }) }
 
 func (f *fakeWorker) serve() {
 	for {
@@ -64,6 +74,13 @@ func (f *fakeWorker) serve() {
 		errText := ""
 		if answer != nil {
 			result, errText = answer(msg.Method, msg.Params)
+		}
+		if errText == holdReply {
+			go func() {
+				<-f.held
+				_ = f.codec.RespondError(msg.ID, -32000, "answered after the bound")
+			}()
+			continue
 		}
 		if errText != "" {
 			_ = f.codec.RespondError(msg.ID, -32000, errText)
@@ -121,7 +138,8 @@ func newFakeWorkerPipe(t *testing.T) (*Peer, *fakeWorker) {
 	t.Cleanup(func() { _ = client.Close(); _ = server.Close() })
 	peer := NewPeer(NewCodec(client))
 	go peer.Serve(nil, nil)
-	f := &fakeWorker{t: t, conn: server, codec: NewCodec(server), signal: make(chan struct{}, 1)}
+	f := &fakeWorker{t: t, conn: server, codec: NewCodec(server), signal: make(chan struct{}, 1), held: make(chan struct{})}
+	t.Cleanup(f.releaseHeld)
 	go f.serve()
 	return peer, f
 }
@@ -174,9 +192,7 @@ func attachAckingProxy(t *testing.T, b *Broker) (*proxyProcess, *fakeWorker, *pr
 	pp := &proxyProcess{peer: peer}
 	acks := &proxyAcks{runID: "run-" + strconv.FormatInt(fakeProxyRuns.Add(1), 10)}
 	f.setAnswer(acks.answer)
-	for _, profile := range engineProxyProfiles {
-		b.setEngineProxyHandle(profile, pp)
-	}
+	publishTestProxy(b, pp)
 	return pp, f, acks
 }
 
@@ -1239,6 +1255,36 @@ func TestPeerPolicyGetReturnsTheProjection(t *testing.T) {
 	}
 	if got.Policy.Revision != "12" || got.Availability != "available" {
 		t.Errorf("relayed revision/availability = %q/%q, want 12/available", got.Policy.Revision, got.Availability)
+	}
+}
+
+// A paired node sees no activation fields in the policy it reads, so the answer
+// to its node:set-availability carries none either; the node's own client gets
+// the revision and the activation of it.
+func TestRelayedSetAvailabilityShowsNoActivationFields(t *testing.T) {
+	rb := newRoutedBroker(t)
+	result, errText := rb.relay(t, "set-availability", map[string]any{"state": "paused"})
+	if errText != "" {
+		t.Fatalf("relayed set-availability: %s", errText)
+	}
+	var relayed map[string]json.RawMessage
+	if err := json.Unmarshal(result, &relayed); err != nil {
+		t.Fatalf("decode relayed set-availability %s: %v", result, err)
+	}
+	if len(relayed) != 1 || string(relayed["availability"]) != `"paused"` {
+		t.Fatalf("relayed set-availability = %s, want only {\"availability\":\"paused\"}", result)
+	}
+
+	rb.b.handleMessage(clientRequest(7, methodSetAvailability, map[string]any{"state": "available"}))
+	m := rb.out.waitFrame(t, "the local set-availability answer", isResponse(7))
+	var local map[string]json.RawMessage
+	if err := json.Unmarshal(m.Result, &local); err != nil {
+		t.Fatalf("decode local set-availability %s: %v", m.Result, err)
+	}
+	for _, key := range []string{"availability", "revision", "activeRevision", "activation"} {
+		if _, ok := local[key]; !ok {
+			t.Errorf("local set-availability lost %q: %s", key, m.Result)
+		}
 	}
 }
 
@@ -2677,9 +2723,7 @@ func TestPolicyActivationAProxyThatStopsReadingDoesNotWedgeLaterSets(t *testing.
 	pp := &proxyProcess{stdin: client}
 	pp.attachPeer(client)
 	go pp.peer.Serve(nil, nil)
-	for _, profile := range engineProxyProfiles {
-		b.setEngineProxyHandle(profile, pp)
-	}
+	publishTestProxy(b, pp)
 	r := b.nodePolicyRuntime()
 	r.mu.Lock()
 	r.incarnation = pp
@@ -2866,5 +2910,322 @@ func TestPolicyActivationSlotReleasedAtTheDeadlineStillDeliversThePush(t *testin
 			t.Fatalf("slot released at %v: the proxy holds revision %q, want 5000", offset, held)
 		}
 		waitLastPolicyChanged(t, ab.out, "5000", activationActive)
+	}
+}
+
+// awaitResponse waits up to d for the response to request id. A hung proxy
+// answer is cut off at the proxy call bound (5 s), so waitFrame's 3 s is too
+// short for the timed-out cases.
+func awaitResponse(t *testing.T, out *syncBuffer, id int, d time.Duration) Message {
+	t.Helper()
+	deadline := time.Now().Add(d)
+	for time.Now().Before(deadline) {
+		for _, m := range out.frames() {
+			if isResponse(id)(m) {
+				return m
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("no response to request %d within %v", id, d)
+	return Message{}
+}
+
+func TestPolicySetPublicationFailureIsAServerError(t *testing.T) {
+	// The request was fine; the broker could not write the file. -32602 tells a
+	// caller to change the request, so it is kept for invalid input, and a
+	// failed publication is the ordinary server error at every boundary.
+	for _, boundary := range publicationBoundaries() {
+		name, rep := boundary.name, boundary.rep
+		t.Run(name, func(t *testing.T) {
+			rb := newRoutedBroker(t)
+			setReplacer(rb.b, rep)
+			rb.b.handleMessage(clientRequest(1, methodPolicySet, map[string]any{
+				"policy":                    json.RawMessage(paidCeilingDoc(t, rb.b, "9")),
+				"expectedPersistedRevision": rb.b.localPolicy().Policy.Revision,
+			}))
+			resp := rb.out.waitFrame(t, "policy:set response", isResponse(1))
+			if resp.Error == nil || resp.Error.Code != -32000 || !strings.HasPrefix(resp.Error.Message, "the policy could not be saved: ") || !strings.Contains(resp.Error.Message, errPublish.Error()) {
+				t.Fatalf("policy:set that cannot be published = %+v, want -32000 \"the policy could not be saved: ...\"", resp.Error)
+			}
+
+			setReplacer(rb.b, durablefile.Replacer{})
+			rb.b.handleMessage(clientRequest(2, methodPolicySet, map[string]any{
+				"policy":                    map[string]any{"version": 1, "profiles": []any{map[string]any{"name": "x", "engine": "nope", "model": "m"}}},
+				"expectedPersistedRevision": rb.b.localPolicy().Policy.Revision,
+			}))
+			resp = rb.out.waitFrame(t, "invalid policy:set response", isResponse(2))
+			if resp.Error == nil || resp.Error.Code != -32602 {
+				t.Fatalf("invalid policy:set = %+v, want -32602", resp.Error)
+			}
+		})
+	}
+}
+
+// failAvailability answers node/set-availability from fail, which gets the
+// 1-based number of the push since this call and returns "" to acknowledge it,
+// "hang" to leave it unanswered until the proxy double's releaseHeld, or any
+// other text to refuse it. Everything else is answered by the proxy double.
+func (ab *activatedBroker) failAvailability(fail func(n int) string) {
+	var mu sync.Mutex
+	count := 0
+	ab.proxy.setAnswer(func(method string, params json.RawMessage) (any, string) {
+		if method == nodepolicy.MethodSetAvailability {
+			mu.Lock()
+			count++
+			n := count
+			mu.Unlock()
+			switch reason := fail(n); reason {
+			case "":
+			case "hang":
+				return nil, holdReply
+			default:
+				return nil, reason
+			}
+		}
+		return ab.acks.answer(method, params)
+	})
+}
+
+func TestPolicyActivationAvailabilityPushFaults(t *testing.T) {
+	always := func(reason string) func(int) string { return func(int) string { return reason } }
+	// Revisions come from the fixed clock: the pause or resume under test is
+	// 5000 (resume: after a healthy pause at 5000, 5001); the retry that heals
+	// it takes the next one.
+	cases := []struct {
+		name string
+		// pausedFirst pauses with a healthy proxy before the fault is set.
+		pausedFirst bool
+		to          nodepolicy.Availability
+		fail        func(n int) string
+		// wantError is whether the reported activation of the new revision is
+		// an error once the request returns; wantText is what it must say.
+		wantError bool
+		wantText  string
+		// healByRepeating heals with the same request again; otherwise with a
+		// policy:set, which sends the availability again before its policy.
+		healByRepeating bool
+		// policyDelivered is whether the proxy gets the revision's policy: not
+		// when a hung availability push uses up the whole activation budget.
+		policyDelivered bool
+	}{
+		{"pause refused", false, nodepolicy.Paused, always("availability refused"), true, "refused availability", true, true},
+		{"pause final push refused", false, nodepolicy.Paused, func(n int) string {
+			if n == 2 {
+				return "availability refused"
+			}
+			return ""
+		}, true, "refused availability paused", false, true},
+		{"pause final push timed out", false, nodepolicy.Paused, func(n int) string {
+			if n == 2 {
+				return "hang"
+			}
+			return ""
+		}, true, "did not acknowledge availability paused", false, true},
+		{"pause draining push refused, paused push acknowledged", false, nodepolicy.Paused, func(n int) string {
+			if n == 1 {
+				return "availability refused"
+			}
+			return ""
+		}, false, "", false, true},
+		{"resume refused", true, nodepolicy.Available, always("availability refused"), true, "refused availability available", false, true},
+		{"resume timed out", true, nodepolicy.Available, always("hang"), true, "did not acknowledge availability available", true, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			ab := newActivatedBroker(t)
+			// A hung availability push is cut off at the proxy call bound (5 s); the
+			// shorter activation wait keeps the retry after it from taking as long.
+			setActivationWait(ab.b, 500*time.Millisecond)
+			next := 5000
+			if c.pausedFirst {
+				if a, err := ab.b.setAvailability(context.Background(), nodepolicy.Paused); err != nil || a != nodepolicy.Paused {
+					t.Fatalf("healthy pause = %q, %v", a, err)
+				}
+				ab.wantActivation(t, "5000", activationActive, "")
+				next = 5001
+			}
+			attempted := strconv.Itoa(next)
+			ab.failAvailability(c.fail)
+
+			ab.b.handleMessage(clientRequest(1, methodSetAvailability, map[string]any{"state": c.to}))
+			resp := awaitResponse(t, ab.out, 1, 20*time.Second)
+			if resp.Error != nil {
+				t.Fatalf("node:set-availability = error %+v; the state was reached, so the call succeeds and its result carries the activation", resp.Error)
+			}
+			var result availabilitySetResult
+			if err := json.Unmarshal(resp.Result, &result); err != nil {
+				t.Fatalf("decode node:set-availability result %s: %v", resp.Result, err)
+			}
+			if result.Availability != c.to || result.Revision != attempted {
+				t.Fatalf("node:set-availability result = %q at revision %q, want %q at revision %s", result.Availability, result.Revision, c.to, attempted)
+			}
+			got := ab.b.localPolicy()
+			if got.Policy.Revision != attempted || got.Policy.Availability != c.to || got.Availability != c.to {
+				t.Fatalf("policy:get = revision %q, saved %q, live %q; want the change saved and reached: revision %s, %q", got.Policy.Revision, got.Policy.Availability, got.Availability, attempted, c.to)
+			}
+			if !c.wantError {
+				if result.Activation != activationActive || result.ActiveRevision != attempted || result.ActivationError != "" {
+					t.Fatalf("result = %+v, want revision %s active: the newest availability push was acknowledged", result.policyActivation, attempted)
+				}
+				ab.wantActivation(t, attempted, activationActive, "")
+				return
+			}
+			// The proxy acknowledged the policy carrying the revision, which alone
+			// must not activate it: it still admits as it did before.
+			if held := ab.acks.heldRevision(); c.policyDelivered && held != attempted {
+				t.Fatalf("the proxy holds revision %q, want %s: the policy push was acknowledged", held, attempted)
+			}
+			if result.Activation != activationError || !strings.Contains(result.ActivationError, c.wantText) {
+				t.Fatalf("result = %+v, want activation error naming %q", result.policyActivation, c.wantText)
+			}
+			if result.ActiveRevision != "" {
+				t.Fatalf("result reports revision %q active although its availability was not acknowledged", result.ActiveRevision)
+			}
+			ab.wantActivation(t, result.ActiveRevision, activationError, c.wantText)
+			waitLastPolicyChanged(t, ab.out, attempted, activationError)
+			if data, err := os.ReadFile(ab.path); err != nil || !strings.Contains(string(data), `"revision": "`+attempted+`"`) {
+				t.Fatalf("the saved file does not hold revision %s (read error %v)", attempted, err)
+			}
+
+			// The proxy recovers and the next successful push activates.
+			ab.proxy.releaseHeld()
+			ab.proxy.setAnswer(ab.acks.answer)
+			before := len(ab.proxy.snapshot())
+			healed := strconv.Itoa(next + 1)
+			if c.healByRepeating {
+				ab.b.handleMessage(clientRequest(2, methodSetAvailability, map[string]any{"state": c.to}))
+				resp = awaitResponse(t, ab.out, 2, 20*time.Second)
+				var again availabilitySetResult
+				if resp.Error != nil || json.Unmarshal(resp.Result, &again) != nil {
+					t.Fatalf("repeated node:set-availability = %+v", resp)
+				}
+				if again.Availability != c.to || again.Revision != healed || again.Activation != activationActive || again.ActiveRevision != healed || again.ActivationError != "" {
+					t.Fatalf("repeated node:set-availability = %+v at revision %q, want revision %s active", again.policyActivation, again.Revision, healed)
+				}
+			} else {
+				if set := ab.setIdle(t, 5); set.Policy.Revision != healed || set.Activation != activationActive || set.ActiveRevision != healed {
+					t.Fatalf("policy:set after the proxy recovered = revision %q, %+v, want revision %s active", set.Policy.Revision, set.policyActivation, healed)
+				}
+			}
+			ab.wantActivation(t, healed, activationActive, "")
+			waitLastPolicyChanged(t, ab.out, healed, activationActive)
+			var order []string
+			for _, call := range ab.proxy.snapshot()[before:] {
+				if call.method == nodepolicy.MethodSetAvailability || call.method == nodepolicy.MethodSetPolicy {
+					order = append(order, call.method)
+				}
+			}
+			if len(order) < 2 || order[0] != nodepolicy.MethodSetAvailability || order[1] != nodepolicy.MethodSetPolicy {
+				t.Fatalf("pushes that healed it = %v, want node/set-availability, then node/set-policy", order)
+			}
+		})
+	}
+}
+
+func TestPolicyActivationRecoveryAvailabilityRefusedIsNotActive(t *testing.T) {
+	// During recovery nothing is saved, so the revision at stake is the
+	// recovery policy's "0": a pause the proxy refuses must not leave it active.
+	b, out := newPolicyBroker(t)
+	path := filepath.Join(t.TempDir(), nodepolicy.FileName)
+	if err := os.WriteFile(path, []byte("not json"), 0o600); err != nil {
+		t.Fatalf("write the corrupt policy file: %v", err)
+	}
+	b.loadNodePolicy(path)
+	pp, proxy, acks := attachAckingProxy(t, b)
+	b.replayPolicyToProxy(context.Background(), pp)
+	ab := &activatedBroker{b: b, out: out, pp: pp, proxy: proxy, acks: acks, path: path}
+	ab.wantActivation(t, "0", activationActive, "")
+
+	ab.failAvailability(func(int) string { return "availability refused" })
+	b.handleMessage(clientRequest(1, methodSetAvailability, map[string]any{"state": nodepolicy.Available}))
+	resp := awaitResponse(t, out, 1, 5*time.Second)
+	var result availabilitySetResult
+	if resp.Error != nil || json.Unmarshal(resp.Result, &result) != nil {
+		t.Fatalf("node:set-availability = %+v", resp)
+	}
+	if result.Availability != nodepolicy.Available || result.Revision != "0" || result.Activation != activationError || !strings.Contains(result.ActivationError, "refused availability available") {
+		t.Fatalf("result = %q revision %q %+v, want available at revision 0 in error", result.Availability, result.Revision, result.policyActivation)
+	}
+	waitLastPolicyChanged(t, out, "0", activationError)
+	if data, err := os.ReadFile(path); err != nil || string(data) != "not json" {
+		t.Fatalf("recovery overwrote the unusable file (read error %v): %s", err, data)
+	}
+}
+
+func TestPeerPolicySetPublicationFailureLeavesOneWholeDocument(t *testing.T) {
+	// The relayed set merges the peer's device fields into the stored policy and
+	// then persists the result; each publication boundary can fail the persist.
+	for _, boundary := range publicationBoundaries() {
+		name, rep, landed := boundary.name, boundary.rep, boundary.landed
+		t.Run(name, func(t *testing.T) {
+			rb := newRoutedBroker(t)
+			setClock(rb.b, 5)
+			doc := rb.peerSnapshot(t)
+			doc["idle"].(map[string]any)["unloadAfterMinutes"] = 7
+			if _, errText := rb.relaySet(t, doc); errText != "" {
+				t.Fatalf("acknowledged peer set: %s", errText)
+			}
+			rb.proxy.waitFor("push of the acknowledged policy", func([]policyCall) bool { return policyPushes(rb.proxy) >= 1 })
+			before := rb.b.localPolicy()
+			beforeBytes := rb.fileBytes(t)
+			pushes := policyPushes(rb.proxy)
+			changed := policyChangedRevisions(t, rb.out)
+
+			attempt := rb.peerSnapshot(t)
+			attempt["idle"].(map[string]any)["unloadAfterMinutes"] = 9
+			setReplacer(rb.b, rep)
+			result, errText := rb.relaySet(t, attempt)
+			setReplacer(rb.b, durablefile.Replacer{})
+			if !strings.Contains(errText, errPublish.Error()) || len(result) != 0 && string(result) != "null" {
+				t.Fatalf("relayed set that cannot be published = result %s, error %q, want an error naming the injected failure and no result", result, errText)
+			}
+
+			if after := rb.b.localPolicy(); !reflect.DeepEqual(after, before) {
+				t.Errorf("failed publication changed the in-memory state: revision %s -> %s, idle %d -> %d",
+					before.Policy.Revision, after.Policy.Revision, before.Policy.Idle.UnloadAfterMinutes, after.Policy.Idle.UnloadAfterMinutes)
+			}
+			time.Sleep(100 * time.Millisecond)
+			if got := policyPushes(rb.proxy); got != pushes {
+				t.Errorf("failed publication pushed to the proxy: %d pushes, want %d", got, pushes)
+			}
+			if got := policyChangedRevisions(t, rb.out); !reflect.DeepEqual(got, changed) {
+				t.Errorf("failed publication announced policy:changed %v, want %v", got, changed)
+			}
+			if leftovers, _ := filepath.Glob(filepath.Join(filepath.Dir(rb.path), "*.tmp")); len(leftovers) != 0 {
+				t.Errorf("failed publication left temporary files: %v", leftovers)
+			}
+
+			fresh := freshBroker(t, rb.path).localPolicy()
+			if fresh.RecoveryRequired {
+				t.Fatal("restart after a failed publication needs recovery")
+			}
+			spent := revisionNumber(t, before.Policy) + 1
+			if landed {
+				want := before.Policy
+				want.Idle.UnloadAfterMinutes = 9
+				want.Revision = strconv.FormatInt(spent, 10)
+				if !reflect.DeepEqual(fresh.Policy, want) {
+					t.Errorf("restart loaded a document that is neither wholly old nor wholly new: %+v", fresh.Policy)
+				}
+			} else {
+				if !reflect.DeepEqual(fresh.Policy, before.Policy) {
+					t.Errorf("restart loaded revision %s (idle %d), want the acknowledged revision %s (idle 7)",
+						fresh.Policy.Revision, fresh.Policy.Idle.UnloadAfterMinutes, before.Policy.Revision)
+				}
+				if got := rb.fileBytes(t); !bytes.Equal(got, beforeBytes) {
+					t.Error("policy file bytes changed although the replacement never happened")
+				}
+			}
+
+			// The same draft, still based on the acknowledged revision, now saves,
+			// under a revision the failed attempt did not use.
+			if _, errText := rb.relaySet(t, attempt); errText != "" {
+				t.Fatalf("retry of the same peer set: %s", errText)
+			}
+			if got, want := rb.b.localPolicy().Policy.Revision, strconv.FormatInt(spent+1, 10); got != want {
+				t.Errorf("retry took revision %q, want %q: %d was already spent", got, want, spent)
+			}
+		})
 	}
 }

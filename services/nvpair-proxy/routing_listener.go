@@ -107,7 +107,7 @@ func (l *routingListener) reconcile() {
 	l.stopLocked()
 
 	address := net.JoinHostPort("127.0.0.1", strconv.Itoa(want.Port))
-	ln, err := net.Listen("tcp", address)
+	ln, err := listenLoopbackExclusive(want.Port)
 	if err != nil {
 		l.reportBlockedLocked(address, err)
 		return
@@ -132,6 +132,61 @@ func (l *routingListener) reconcile() {
 	l.srv, l.port = srv, want.Port
 	l.clearBlockedLocked()
 	slog.Info("routing listener listening", "address", address)
+}
+
+// listenLoopbackExclusive binds 127.0.0.1:port only when nothing else holds the
+// port on any address a loopback client can reach. Go sets SO_REUSEADDR on its
+// listeners, and on macOS that lets a loopback bind succeed beside a socket
+// already bound to the wildcard address or to ::1: both would then be listening,
+// and a client of the other holder (or one dialling localhost) could be answered
+// by this one. So the port is first bound, then released, on the IPv4 wildcard
+// (which fails while any IPv4 or dual-stack wildcard holder exists, foreign or
+// one of this process's facades) and on ::1. A holder on 127.0.0.1 itself fails
+// the loopback bind. The probes are released before the loopback bind because a
+// platform that refuses overlapping binds would otherwise make the listener
+// collide with its own probe. That leaves a window of two system calls in which
+// a foreign wildcard bind can still succeed on macOS; spec section 12.6 records it.
+func listenLoopbackExclusive(port int) (net.Listener, error) {
+	p := strconv.Itoa(port)
+	probe, err := net.Listen("tcp", net.JoinHostPort("0.0.0.0", p))
+	if err != nil {
+		return nil, fmt.Errorf("port %d is not free on all addresses: %w", port, err)
+	}
+	_ = probe.Close()
+	if err := probeIPv6Loopback(p); err != nil {
+		return nil, fmt.Errorf("port %d is not free on the IPv6 loopback address: %w", port, err)
+	}
+	return net.Listen("tcp", net.JoinHostPort("127.0.0.1", p))
+}
+
+// probeIPv6Loopback fails when another socket holds ::1:port. A host with no
+// IPv6 loopback address cannot have such a holder, so it is not an error: the
+// bind failing is only believed when an ephemeral ::1 bind succeeds.
+func probeIPv6Loopback(port string) error {
+	probe, err := net.Listen("tcp", net.JoinHostPort("::1", port))
+	if err == nil {
+		return probe.Close()
+	}
+	capable, capErr := net.Listen("tcp", net.JoinHostPort("::1", "0"))
+	if capErr != nil {
+		return nil
+	}
+	_ = capable.Close()
+	return err
+}
+
+// listenWildcard binds an engine facade's all-address listener, refusing the
+// port this listener holds. The reverse of listenLoopbackExclusive: on macOS a
+// wildcard bind succeeds beside a loopback holder, so only this process's own
+// record of the port can refuse it. The lock makes the check and the bind one
+// step against a concurrent reconcile, which probes the wildcard under it.
+func (l *routingListener) listenWildcard(port int) (net.Listener, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.srv != nil && l.port == port {
+		return nil, fmt.Errorf("port %d is held by the routing listener", port)
+	}
+	return net.Listen("tcp", fmt.Sprintf(":%d", port))
 }
 
 // close stops the listener for good; a later reconcile does nothing.
