@@ -13,7 +13,7 @@ package main
 //
 // The routable Node projection (IP / withPrimaryIP) and the manual-node
 // overlay live here; request-path reachability (TCP-probe + failover) lives in
-// proxy.go.
+// proxy.go and http_handler.go.
 
 import (
 	"slices"
