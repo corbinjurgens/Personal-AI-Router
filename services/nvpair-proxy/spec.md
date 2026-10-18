@@ -784,7 +784,7 @@ is resolved by the node it enters.
   the policy's origin-only `routing` section. Until hybrid dispatch exists
   (Phase 4 of the hybrid routing plan) the resolver and the model list consider
   `local` entries only and skip `api` entries without error: a tier whose
-  entries are all `api` has no candidate and is not listed. Migrating a
+  entries are all `api` has no candidate. Migrating a
   version 1 file tags every entry `local`, so it resolves the candidates it
   resolved before.
 
@@ -817,9 +817,50 @@ is resolved by the node it enters.
   every other byte is forwarded as received.
 - **Nothing eligible** before any dispatch: `404` with
   `{"error":"no eligible model for tier <tier>","needs":[...]}`.
+- **Reserved aliases**: `weak`, `medium`, `strong` and each with a `-api` or
+  `-local` suffix are reserved exact model names. Matching is byte-for-byte
+  after trimming surrounding whitespace, so `<alias>:latest`, case variants and
+  qualified names such as `org/weak-api` are ordinary model names.
+  `normalizeModel` returns a reserved name unchanged, so Ollama's implied
+  `:latest` is never appended to one.
+- **Refusals**: a request is answered `400`
+  `{"error":"...","code":"feature_unavailable","reason":"alias_not_inference_ready"|"unsupported_alias_use","model":"<alias>"}`
+  before the CORS preflight, candidate resolution, admission, wake, reservation,
+  workload events or any engine request, and only the `proxy/request` report is
+  emitted, when it names:
+  - a `-api` or `-local` alias in the body `model` on any route
+    (`alias_not_inference_ready`);
+  - a `-api` or `-local` alias as the string value of any top-level JSON key
+    equal under `strings.EqualFold` to `model` or `name`, repeated keys
+    included, so a case-variant key the engine may read instead of the one the
+    router read is covered (Ollama `/api/pull`, `/api/show`, `/api/delete`,
+    `/api/create` use `name`); as any `model` query parameter value (llama.cpp
+    `GET /props?model=`); or as the whole remainder of a `/v1/models/` or
+    `/api/v0/models/` path (LM Studio model detail)
+    (`alias_not_inference_ready`);
+  - a bare tier in the body `model` on a route that is not a classified
+    inference route (Responses, an unclassified native or passthrough path), or
+    a bare tier in `model` with surrounding whitespace
+    (`unsupported_alias_use`).
+  Nested keys, other fields and other paths are not checked. A bare tier in
+  `name`, a query parameter or a model path keeps today's behavior. A bare tier
+  spelled exactly in `model` on a classified inference route (including native
+  and Messages routes) keeps the tier path above until the Phase 4 cutover;
+  staged hybrid settings do not change it. The cluster ingress (§7) is not
+  covered; refusing aliases there is Phase 4 work.
 - **Model lists**: an OpenAI-shape model list (`/v1/models`, llama.cpp's
-  `/models`) gains `{"id":"<tier>","object":"model","created":0,"owned_by":"pair"}`
-  for each tier with at least one `local` entry. The native Ollama list does not.
+  `/models`) gains `{"id":"<alias>","object":"model","created":0,"owned_by":"pair"}`
+  for the bare tier and its `-api` and `-local` variants, for each tier with at
+  least one entry of either kind, including a tier whose entries are all `api`.
+  The records are built from the policy alone (`configuredAliases`,
+  `hybridAliasRecords`) and carry no credential, account, deployment or
+  endpoint. An upstream model already named like an alias is left alone. When no
+  upstream yields a list and at least one alias is configured, the aliases are
+  returned with `200` instead of `503`; without a configured tier the statuses
+  are unchanged, and the browser `Origin` checks of §5.8 still apply. The
+  native Ollama list does not carry aliases.
+- **Readiness**: listed `-api` and `-local` aliases are not inference-ready
+  until Phase 4 of the hybrid routing plan; they are refused as above.
 
 ### 12.4 Routing metadata
 

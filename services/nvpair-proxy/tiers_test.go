@@ -449,7 +449,12 @@ func TestModelList_OffersTiers(t *testing.T) {
 	for _, d := range out.Data {
 		ids = append(ids, d.ID+"/"+d.OwnedBy)
 	}
-	if !slices.Equal(ids, []string{"qwen3-8b/", "weak/pair", "strong/pair"}) {
+	want := []string{
+		"qwen3-8b/",
+		"weak/pair", "weak-api/pair", "weak-local/pair",
+		"strong/pair", "strong-api/pair", "strong-local/pair",
+	}
+	if !slices.Equal(ids, want) {
 		t.Fatalf("model list = %v", ids)
 	}
 }
@@ -597,7 +602,7 @@ func TestTier_APIEntriesAreSkipped(t *testing.T) {
 	}
 }
 
-func TestModelList_OffersOnlyTiersWithLocalEntries(t *testing.T) {
+func TestModelList_OffersEveryTierWithEntriesAndBothVariants(t *testing.T) {
 	pol, err := nodepolicy.Parse([]byte(apiTierPolicy))
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
@@ -613,7 +618,8 @@ func TestModelList_OffersOnlyTiersWithLocalEntries(t *testing.T) {
 		}
 		ids = append(ids, item.ID)
 	}
-	if want := []string{"medium"}; !slices.Equal(ids, want) {
-		t.Fatalf("tier model entries = %v, want %v (weak has only an API entry)", ids, want)
+	want := []string{"weak", "weak-api", "weak-local", "medium", "medium-api", "medium-local"}
+	if !slices.Equal(ids, want) {
+		t.Fatalf("tier model entries = %v, want %v (weak has only an API entry; strong has none)", ids, want)
 	}
 }

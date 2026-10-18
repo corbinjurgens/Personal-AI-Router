@@ -151,6 +151,17 @@ func TestModelNaming(t *testing.T) {
 		{ollama, "llama3@sha256:abc", "llama3@sha256:abc"},
 		{ollama, "", ""},
 
+		// The nine reserved aliases are not model identifiers, so the implied
+		// tag is never appended; names that merely resemble one still are.
+		{ollama, "weak", "weak"},
+		{ollama, "medium-api", "medium-api"},
+		{ollama, "strong-local", "strong-local"},
+		{ollama, "  weak-api ", "weak-api"},
+		{ollama, "weaker", "weaker:latest"},
+		{ollama, "Weak", "Weak:latest"},
+		{ollama, "weak-api-x", "weak-api-x:latest"},
+		{ollama, "weak:latest", "weak:latest"},
+
 		{lmstudio, "qwen3-8b", "qwen3-8b"},
 		{lmstudio, "qwen3-8b:latest", "qwen3-8b:latest"},
 		{lmstudio, "", ""},
@@ -174,6 +185,21 @@ func TestNodeAdvertisesModelUsesTheProfilesNaming(t *testing.T) {
 	}
 	if nodeAdvertisesModel(ollama, Node{Models: []string{"llama3:latest"}}, "") {
 		t.Error("an empty request model advertises nothing")
+	}
+}
+
+// A real model named weak:latest does not answer the reserved alias "weak",
+// which the implied-tag rule would otherwise equate with it.
+func TestNodeAdvertisesModelDoesNotMatchAnAliasToATaggedModel(t *testing.T) {
+	ollama, _ := profileFor("ollama")
+	node := Node{Models: []string{"weak:latest", "weak-api:latest"}}
+	for _, alias := range []string{"weak", "weak-api", "weak-local"} {
+		if nodeAdvertisesModel(ollama, node, alias) {
+			t.Errorf("alias %q matched a model advertised by the node", alias)
+		}
+	}
+	if !nodeAdvertisesModel(ollama, node, "weak:latest") {
+		t.Error("the concrete model weak:latest must still match itself")
 	}
 }
 

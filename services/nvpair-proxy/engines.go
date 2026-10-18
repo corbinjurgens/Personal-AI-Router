@@ -24,6 +24,7 @@ import (
 	"strings"
 
 	"nvpair-shared/engines"
+	"nvpair-shared/nodepolicy"
 )
 
 // routeRole classifies an inbound request path. It carries the HTTP method
@@ -258,9 +259,11 @@ func (r routeRole) isModelList() bool {
 
 // normalizeModel applies the engine's naming convention to a model
 // identifier, so the federated list's dedupe key and the routing gate agree.
+// A reserved hybrid alias is not a model identifier: it is returned as is, so
+// the implied ":latest" tag never turns "weak" into the model "weak:latest".
 func (p engineProfile) normalizeModel(model string) string {
 	model = strings.TrimSpace(model)
-	if p.ModelNaming != impliedLatestTag || model == "" {
+	if p.ModelNaming != impliedLatestTag || model == "" || nodepolicy.IsReservedAlias(model) {
 		return model
 	}
 	name := model[strings.LastIndex(model, "/")+1:]

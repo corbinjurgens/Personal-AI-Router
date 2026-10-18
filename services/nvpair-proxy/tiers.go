@@ -19,8 +19,10 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"net/http"
 	"slices"
 	"sort"
+	"strings"
 
 	"nvpair-shared/nodepolicy"
 )
@@ -240,23 +242,40 @@ func (f *facade) reserveRound(cands []candidate, tier bool) ([]candidate, reserv
 	return cands, held
 }
 
-// tierModelEntries appends one synthetic OpenAI model record per configured
-// tier to a merged /v1/models list, so a client can pick a tier from it. A
-// tier with no local entries is not offered, and an upstream model already
-// named like a tier is left alone. API entries are skipped until hybrid
-// dispatch exists.
+// tierModelEntries appends the synthetic alias records to a merged /v1/models
+// list, so a client can pick a tier from it. An upstream model already named
+// like an alias is left alone.
 func (f *facade) tierModelEntries(seen map[string]modelListItem) []json.RawMessage {
-	pol := f.host.admission.currentPolicy()
-	var out []json.RawMessage
+	return hybridAliasRecords(f.host.admission.currentPolicy(), seen)
+}
+
+// configuredAliases lists the reserved hybrid alias names a policy offers:
+// every tier with at least one entry of any kind, each as the bare tier and
+// both variants, weakest tier first. A tier whose entries are all API
+// deployments is listed like any other. It reads only the policy, so a
+// listener with no facade and no upstream can serve it.
+func configuredAliases(pol nodepolicy.Policy) []string {
+	var out []string
 	for _, t := range nodepolicy.TierOrder {
-		if !slices.ContainsFunc(pol.Tiers[t], nodepolicy.TierEntry.IsLocal) {
+		if len(pol.Tiers[t]) == 0 {
 			continue
 		}
-		if _, dup := seen[t]; dup {
+		out = append(out, t, t+"-api", t+"-local")
+	}
+	return out
+}
+
+// hybridAliasRecords returns one synthetic OpenAI model record per configured
+// alias, skipping any id present in skip (which may be nil). The record names
+// no policy detail: never a credential, account, endpoint or deployment.
+func hybridAliasRecords(pol nodepolicy.Policy, skip map[string]modelListItem) []json.RawMessage {
+	var out []json.RawMessage
+	for _, id := range configuredAliases(pol) {
+		if _, dup := skip[id]; dup {
 			continue
 		}
 		raw, err := json.Marshal(map[string]any{
-			"id":       t,
+			"id":       id,
 			"object":   "model",
 			"created":  0,
 			"owned_by": "pair",
@@ -267,4 +286,128 @@ func (f *facade) tierModelEntries(seen map[string]modelListItem) []json.RawMessa
 		out = append(out, raw)
 	}
 	return out
+}
+
+// Reasons a request naming a reserved alias is refused. Both answer 400 with
+// code "feature_unavailable".
+const (
+	// aliasReasonNotInferenceReady: the -api and -local aliases have no
+	// dispatch path until the hybrid cutover.
+	aliasReasonNotInferenceReady = "alias_not_inference_ready"
+	// aliasReasonUnsupportedUse: a bare tier named where only a plain tier
+	// request on an inference route is supported, or not spelled exactly.
+	aliasReasonUnsupportedUse = "unsupported_alias_use"
+)
+
+// aliasRejection decides, from the raw requested model, whether a request must
+// be refused before any admission, wake, reservation, workload or upstream
+// request. It runs on the raw name, before any engine normalization, and is
+// the only place that decides it.
+//
+// Refused: a -api or -local alias on any route; a bare tier on a route that is
+// not a classified inference route (the proxy would forward the alias to the
+// engine as if it were a model); and a bare tier with surrounding whitespace,
+// which the legacy tier path never matched. Allowed: a bare tier exactly
+// spelled on a classified inference route, which keeps the legacy local-only
+// tier path.
+func aliasRejection(model string, inference bool) (reason string, rejected bool) {
+	trimmed := strings.TrimSpace(model)
+	_, mode, ok := nodepolicy.ParseAlias(trimmed)
+	switch {
+	case !ok:
+		return "", false
+	case mode != nodepolicy.AliasBare:
+		return aliasReasonNotInferenceReady, true
+	case trimmed != model, !inference:
+		return aliasReasonUnsupportedUse, true
+	}
+	return "", false
+}
+
+// modelDetailPrefixes are the path prefixes whose remainder names one model, as
+// in LM Studio's /v1/models/<id> and /api/v0/models/<id>.
+var modelDetailPrefixes = []string{"/v1/models/", "/api/v0/models/"}
+
+// requestAliasRejection is the refusal decision for one request. It applies
+// aliasRejection to the body's "model" as the router reads it, and refuses a
+// -api or -local alias in any other place an engine could read a model name
+// from, because an engine may read a different one than the router does:
+//   - every top-level JSON key equal under strings.EqualFold to "model" or
+//     "name", counting repeated keys (Ollama's /api/pull, /api/show,
+//     /api/delete and /api/create read "name");
+//   - every "model" query parameter (llama.cpp's GET /props?model=...);
+//   - the remainder of a model-detail path (modelDetailPrefixes).
+//
+// A bare tier in those places keeps its legacy routing. alias is the name to
+// report. The cluster ingress is not covered; it has its own listener.
+func requestAliasRejection(r *http.Request, body []byte, model string, inference bool) (alias, reason string, rejected bool) {
+	if reason, rejected := aliasRejection(model, inference); rejected {
+		return strings.TrimSpace(model), reason, true
+	}
+	names := jsonModelNames(body)
+	names = append(names, r.URL.Query()["model"]...)
+	for _, prefix := range modelDetailPrefixes {
+		if rest, ok := strings.CutPrefix(r.URL.Path, prefix); ok {
+			names = append(names, rest)
+		}
+	}
+	for _, name := range names {
+		name = strings.TrimSpace(name)
+		if _, mode, ok := nodepolicy.ParseAlias(name); ok && mode != nodepolicy.AliasBare {
+			return name, aliasReasonNotInferenceReady, true
+		}
+	}
+	return "", "", false
+}
+
+// jsonModelNames returns the string values of every top-level key of a JSON
+// object body that equals "model" or "name" under strings.EqualFold. A body
+// that is not a JSON object yields none.
+func jsonModelNames(body []byte) []string {
+	dec := json.NewDecoder(bytes.NewReader(body))
+	if tok, err := dec.Token(); err != nil || tok != json.Delim('{') {
+		return nil
+	}
+	var out []string
+	for dec.More() {
+		tok, err := dec.Token()
+		key, isString := tok.(string)
+		if err != nil || !isString {
+			return out
+		}
+		var raw json.RawMessage
+		if dec.Decode(&raw) != nil {
+			return out
+		}
+		if !strings.EqualFold(key, "model") && !strings.EqualFold(key, "name") {
+			continue
+		}
+		var value string
+		if json.Unmarshal(raw, &value) == nil {
+			out = append(out, value)
+		}
+	}
+	return out
+}
+
+// writeAliasRejection answers a refused alias request with a structured 400.
+func writeAliasRejection(w http.ResponseWriter, alias, reason string) {
+	body, err := json.Marshal(struct {
+		Error  string `json:"error"`
+		Code   string `json:"code"`
+		Reason string `json:"reason"`
+		Model  string `json:"model"`
+	}{
+		Error:  "hybrid routing alias is not available on this request",
+		Code:   "feature_unavailable",
+		Reason: reason,
+		Model:  strings.TrimSpace(alias),
+	})
+	if err != nil {
+		body = []byte(`{"error":"hybrid routing alias is not available on this request","code":"feature_unavailable"}`)
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.WriteHeader(http.StatusBadRequest)
+	_, _ = w.Write(body)
 }

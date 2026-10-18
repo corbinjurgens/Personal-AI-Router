@@ -1197,10 +1197,14 @@ func (f *facade) serveModelList(w http.ResponseWriter, r *http.Request, matchedR
 			models = append(models, item.raw)
 		}
 	}
+	var aliasModels []json.RawMessage
 	if openAI {
-		models = append(models, f.tierModelEntries(seen)...)
+		aliasModels = f.tierModelEntries(seen)
+		models = append(models, aliasModels...)
 	}
-	if !success {
+	// Configured aliases are served without any upstream. The Origin checks
+	// above still apply: they speak for the engines' own CORS policy.
+	if !success && len(aliasModels) == 0 {
 		err := fmt.Errorf("no valid model list from %d candidate(s)", len(candidates))
 		writeJSON(http.StatusServiceUnavailable, []byte(`{"error":"model inventory unavailable"}`))
 		return http.StatusServiceUnavailable, err
@@ -1283,6 +1287,23 @@ func (f *facade) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	isInf := isInferenceRequest(f.profile, r.Method, r.URL.Path)
+	// A reserved hybrid alias the legacy tier path does not serve is refused
+	// here, before candidates, admission, reservation, workload or upstream.
+	if alias, reason, rejected := requestAliasRejection(r, bodyBytes, model, isInf); rejected {
+		slog.Warn("proxy request rejected",
+			"id", reqID, "method", r.Method, "path", r.URL.Path,
+			"remote", r.RemoteAddr, "reason", reason, "alias", alias)
+		writeAliasRejection(w, alias, reason)
+		_ = f.notify("proxy/request", RequestEvent{
+			ID:       reqID,
+			Method:   r.Method,
+			Path:     r.URL.Path,
+			Status:   http.StatusBadRequest,
+			Duration: time.Since(start).Milliseconds(),
+			Error:    reason,
+		})
+		return
+	}
 	routingModel := ""
 	if isInf {
 		routingModel = model

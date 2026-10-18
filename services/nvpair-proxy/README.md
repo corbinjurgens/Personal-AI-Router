@@ -239,18 +239,45 @@ the previous policy stays. Until the first request arrives the proxy runs on `no
   needs (tools, vision, structured output, embeddings, context) and ordered by
   tier and by whether the model is already loaded. OpenAI-compatible routes may
   be served by another engine; native routes stay on their own. The body's
-  `model` is rewritten in place, and `/v1/models` lists the tiers that have a
-  local entry. Nothing eligible is a `404` naming the needs. A tier entry is
+  `model` is rewritten in place. Nothing eligible is a `404` naming the needs.
+  A tier entry is
   tagged `local` (an engine and model) or `api` (a provider deployment from the
   policy's origin-only `routing` section). Until hybrid dispatch exists the
-  proxy resolves and lists only local entries and skips `api` entries, so a tier
-  with only API entries has no candidate. A version 1 policy is migrated to
+  proxy resolves only local entries and skips `api` entries, so a tier with only
+  API entries has no candidate. A version 1 policy is migrated to
   version 2 with every entry local (an exact repeat within a tier, same
   engine, model, context bound and capabilities, keeps its first occurrence;
   entries that differ in bounds stay separate). A document without a `version` key is read as version 2,
   so a version-less legacy file with tier entries fails validation because its
   entries have no `kind`. `routing.listener.enabled` is accepted but has no
   effect until the unified listener exists.
+- **Hybrid aliases.** The nine names `weak`, `medium`, `strong` and each with a
+  `-api` or `-local` suffix are reserved exact model names: matching is
+  byte-for-byte after trimming surrounding whitespace, so `weak-api:latest`,
+  `Weak-API` and `org/weak-api` are ordinary model names. The Ollama implied
+  `:latest` tag is never appended to a reserved name. `/v1/models` on a facade
+  lists every tier that has at least one entry of either kind as the bare tier
+  and both variants, including a tier whose entries are all API deployments, as
+  synthetic records that name nothing of the policy. They are merged with the
+  upstream models; when no upstream answers and tiers are configured the
+  synthetic records are still returned instead of `503`, and without
+  configured tiers the statuses are unchanged. The native Ollama list gains
+  none. **Listed `-api` and `-local` aliases are not inference-ready until
+  Phase 4.** A request is answered `400`
+  `{"error":...,"code":"feature_unavailable","reason":"alias_not_inference_ready"|"unsupported_alias_use","model":"<alias>"}`
+  before the CORS preflight, candidate resolution, admission, wake,
+  reservation, workload events or any engine request when it names a `-api` or
+  `-local` alias in any of: a top-level JSON body key equal under case folding
+  to `model` or `name` (repeated keys included), a `model` query parameter, or
+  the remainder of a `/v1/models/` or `/api/v0/models/` path; or when it names
+  a bare tier in the body `model` on a route that is not a classified inference
+  route (Responses, an unclassified native or passthrough route), or with
+  surrounding whitespace. Nothing else is checked: nested keys, other fields and
+  other paths are not. A bare tier in `name`, a query parameter or a model path
+  keeps today's behavior, and a bare tier exactly spelled in `model` on a
+  classified inference route keeps the legacy local-only tier path above,
+  unchanged by staged hybrid settings, until the Phase 4 cutover. The cluster
+  ingress is not covered; refusing aliases there belongs to Phase 4.
 - **Routing metadata.** Routed inference responses carry `X-PAIR-Model`,
   `X-PAIR-Engine`, `X-PAIR-Node`, and `X-PAIR-Tier` for a tier request.
   Workloads carry the concrete `model` and, for a tier request,
