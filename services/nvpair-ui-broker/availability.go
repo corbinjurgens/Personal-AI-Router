@@ -104,11 +104,11 @@ func (r *policyRuntime) persistAvailabilityLocked(state nodepolicy.Availability)
 // was saved, the policy carrying its revision, and announces the outcome. An
 // unsaved change (during recovery) has no revision of its own: it announces only
 // when the availability answer changed what activation reports.
-func (b *Broker) pushAvailabilityAndActivate(persisted bool, policy nodepolicy.Policy) {
+func (b *Broker) pushAvailabilityAndActivate(persisted bool) {
 	changed := b.pushPolicyNow(context.Background(), pushAvailability)
 	if persisted {
 		b.activatePolicyNow()
-		b.notifyPolicyChanged(policy)
+		b.notifyPolicyChanged()
 		return
 	}
 	b.announceActivationChange(changed)
@@ -145,7 +145,7 @@ func (b *Broker) pauseNode(ctx context.Context) (nodepolicy.Availability, error)
 	// revision being the one this change took, and the announcement after it
 	// says whether the proxy activated that revision, which needs both pushes
 	// acknowledged.
-	b.pushAvailabilityAndActivate(persisted, policy)
+	b.pushAvailabilityAndActivate(persisted)
 	b.notifyAvailability()
 
 	idle := func(st nodepolicy.AdmissionState) bool { return st.Active == 0 }
@@ -246,7 +246,7 @@ func (b *Broker) resumeNode() (nodepolicy.Availability, error) {
 	r.restoreSkipped = false
 	r.mu.Unlock()
 
-	b.pushAvailabilityAndActivate(persisted, policy)
+	b.pushAvailabilityAndActivate(persisted)
 	b.notifyAvailability()
 	slog.Info("node resumed", "waking", slept, "restore", restore)
 	go b.wakeAfterResume(slept, restore)
