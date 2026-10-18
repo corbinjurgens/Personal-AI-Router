@@ -13,10 +13,11 @@ import (
 )
 
 // PeerPolicy is what a paired node sees of this node's policy: the device
-// fields, the local tier entries and the tier fallback rules. The origin-only
-// routing section and every API tier entry stay out, so a peer can neither read
-// accounts, credential references or deployments nor reconfigure what spends
-// money. Revision is the revision of the protected source document.
+// fields (roles included), the local tier entries, the tier fallback rules and
+// who paused the node. The origin-only routing section and every API tier entry
+// stay out, so a peer can neither read accounts, credential references or
+// deployments nor reconfigure what spends money. Revision is the revision of
+// the protected source document.
 type PeerPolicy struct {
 	Version      int                    `json:"version"`
 	Revision     string                 `json:"revision"`
@@ -25,8 +26,10 @@ type PeerPolicy struct {
 	Admission    Admission              `json:"admission"`
 	Idle         IdleConfig             `json:"idle"`
 	Profiles     []Profile              `json:"profiles"`
+	Roles        map[string]Role        `json:"roles"`
 	Tiers        map[string][]TierEntry `json:"tiers"`
 	TierPolicy   TierPolicy             `json:"tierPolicy"`
+	PausedBy     PauseOrigin            `json:"pausedBy,omitempty"`
 }
 
 // PeerProjection returns the part of p a paired node may see. Tiers keep their
@@ -41,8 +44,10 @@ func (p Policy) PeerProjection() PeerPolicy {
 		Admission:    p.Admission,
 		Idle:         p.Idle,
 		Profiles:     p.Profiles,
+		Roles:        p.Roles,
 		Tiers:        localTiers(p.Tiers),
 		TierPolicy:   p.TierPolicy,
+		PausedBy:     p.PausedBy,
 	}
 }
 
@@ -115,10 +120,10 @@ func peerFields(raw []byte) (map[string]json.RawMessage, error) {
 // MergePeerSet applies a paired node's policy:set document to the stored
 // policy. The document must carry no routing section, and its tiers and
 // tierPolicy must equal the peer projection of stored: a peer may change device
-// fields only. The result is the document's device fields with the stored
-// tiers, tierPolicy, routing, revision and availability restored exactly, so
-// the caller must pass the stored policy it is about to replace. Errors never
-// echo the document.
+// fields only, roles included. The result is the document's device fields with
+// the stored tiers, tierPolicy, routing, revision, availability and pausedBy
+// restored exactly, so the caller must pass the stored policy it is about to
+// replace. Errors never echo the document.
 func MergePeerSet(stored Policy, raw []byte) (Policy, error) {
 	if len(raw) == 0 {
 		return Policy{}, errors.New("policy is required")
@@ -128,13 +133,17 @@ func MergePeerSet(stored Policy, raw []byte) (Policy, error) {
 		return Policy{}, err
 	}
 	// Parse matches keys case-insensitively, so "Routing" would be decoded as
-	// the routing section; reject every spelling.
+	// the routing section; reject every spelling. Availability and pausedBy are
+	// restored from stored and validated as a pair, so every spelling of either
+	// is dropped before the document is parsed on its own.
 	for key := range fields {
 		if strings.EqualFold(key, "routing") {
 			return Policy{}, errors.New("a paired node cannot change the routing configuration")
 		}
+		if strings.EqualFold(key, "availability") || strings.EqualFold(key, "pausedBy") {
+			delete(fields, key)
+		}
 	}
-	delete(fields, "availability")
 	stripped, err := json.Marshal(fields)
 	if err != nil {
 		return Policy{}, err
@@ -155,6 +164,7 @@ func MergePeerSet(stored Policy, raw []byte) (Policy, error) {
 	merged.Routing = stored.Routing
 	merged.Revision = stored.Revision
 	merged.Availability = stored.Availability
+	merged.PausedBy = stored.PausedBy
 	if err := merged.Validate(); err != nil {
 		return Policy{}, err
 	}

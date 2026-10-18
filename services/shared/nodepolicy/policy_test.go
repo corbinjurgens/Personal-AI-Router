@@ -124,6 +124,7 @@ func TestParseMigratesV1KeepingLocalSettings(t *testing.T) {
 			Capabilities: []Capability{CapTools}, MemoryBytes: 5000000000, MaxConcurrent: 2,
 			RequestOptions: json.RawMessage(`{"options":{"num_ctx":16384}}`),
 		}},
+		Roles: map[string]Role{},
 		Tiers: map[string][]TierEntry{
 			"weak": {{Kind: EntryLocal, Engine: "ollama", Model: "qwen3:8b", ContextTokens: 8192, Capabilities: []Capability{CapTools, CapStructured}}},
 			"strong": {
@@ -181,6 +182,9 @@ func TestParseIsIdempotent(t *testing.T) {
 		"v1 html options":    `{"version":1,"profiles":[{"name":"a","engine":"ollama","model":"m","requestOptions":{"stop":["</s>"]}}]}`,
 		"v2 html options":    `{"version":2,"profiles":[{"name":"a","engine":"ollama","model":"m","requestOptions":{"q":"a&b","c":"<x>"}}]}`,
 		"v2 escaped options": `{"version":2,"profiles":[{"name":"a","engine":"ollama","model":"m","requestOptions":{"q":"a\u0026b \u003c"}}]}`,
+		"v2 null roles":      `{"version":2,"roles":null}`,
+		"v2 with roles":      `{"version":2,"roles":{"weak":{"engine":"ollama","model":"m"},"strong":{"engine":"lmstudio","model":"big"}}}`,
+		"v2 paused by peer":  `{"version":2,"availability":"paused","pausedBy":"peer"}`,
 	}
 	marshalers := map[string]func(any) ([]byte, error){
 		"Marshal":       json.Marshal,
@@ -385,4 +389,111 @@ func TestParseV2DuplicateEntryKey(t *testing.T) {
 			t.Fatalf("Parse err = %v, want duplicate entry", err)
 		}
 	})
+}
+
+func TestValidateRoles(t *testing.T) {
+	test := func(name string, roles map[string]Role, wantErr string) {
+		t.Helper()
+		t.Run(name, func(t *testing.T) {
+			p := Default()
+			p.Roles = roles
+			err := p.Validate()
+			if wantErr == "" {
+				if err != nil {
+					t.Fatalf("Validate() = %v, want nil", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), wantErr) {
+				t.Fatalf("Validate() = %v, want an error containing %q", err, wantErr)
+			}
+		})
+	}
+
+	test("no roles", map[string]Role{}, "")
+	test("every tier declared", map[string]Role{
+		TierWeak: {Engine: "ollama", Model: "qwen3:8b"}, TierMedium: {Engine: "lmstudio", Model: "mid"}, TierStrong: {Engine: "ollama", Model: "big"},
+	}, "")
+	test("same model serves two tiers", map[string]Role{
+		TierWeak: {Engine: "ollama", Model: "qwen3:8b"}, TierMedium: {Engine: "ollama", Model: "qwen3:8b"},
+	}, "")
+	test("role without a profile", map[string]Role{TierStrong: {Engine: "ollama", Model: "not-profiled"}}, "")
+	test("unknown tier", map[string]Role{"huge": {Engine: "ollama", Model: "m"}}, `unknown tier "huge"`)
+	test("suffixed alias as tier", map[string]Role{"weak-local": {Engine: "ollama", Model: "m"}}, `unknown tier "weak-local"`)
+	test("unknown engine", map[string]Role{TierWeak: {Engine: "nope", Model: "m"}}, `unknown engine "nope"`)
+	test("missing model", map[string]Role{TierWeak: {Engine: "ollama"}}, "model is required")
+	test("tier name as model", map[string]Role{TierWeak: {Engine: "ollama", Model: "strong"}}, "reserved alias")
+	test("suffixed alias as model", map[string]Role{TierWeak: {Engine: "ollama", Model: "medium-api"}}, "reserved alias")
+}
+
+func TestValidatePausedBy(t *testing.T) {
+	test := func(name string, availability Availability, pausedBy PauseOrigin, wantErr string) {
+		t.Helper()
+		t.Run(name, func(t *testing.T) {
+			p := Default()
+			p.Availability = availability
+			p.PausedBy = pausedBy
+			err := p.Validate()
+			if wantErr == "" {
+				if err != nil {
+					t.Fatalf("Validate() = %v, want nil", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), wantErr) {
+				t.Fatalf("Validate() = %v, want an error containing %q", err, wantErr)
+			}
+		})
+	}
+
+	test("available without provenance", Available, "", "")
+	test("paused locally", Paused, PausedLocally, "")
+	test("paused by a peer", Paused, PausedByPeer, "")
+	// A pause saved before provenance existed counts as local.
+	test("paused without provenance", Paused, "", "")
+	test("available but paused locally", Available, PausedLocally, "pausedBy must be empty")
+	test("available but paused by a peer", Available, PausedByPeer, "pausedBy must be empty")
+	test("unknown provenance", Paused, "remote", `pausedBy must be "local" or "peer"`)
+}
+
+func TestParseOlderFileWithoutRolesOrPausedBy(t *testing.T) {
+	p, err := Parse([]byte(`{"version":2,"availability":"paused","tiers":{"weak":[{"kind":"local","engine":"ollama","model":"m"}]}}`))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if p.Roles == nil || len(p.Roles) != 0 {
+		t.Errorf("roles = %#v, want an empty map", p.Roles)
+	}
+	if p.PausedBy != "" {
+		t.Errorf("pausedBy = %q, want empty", p.PausedBy)
+	}
+	data, err := json.Marshal(p)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if !strings.Contains(string(data), `"roles":{}`) || strings.Contains(string(data), "pausedBy") {
+		t.Errorf("marshaled policy = %s, want an empty roles map and no pausedBy", data)
+	}
+	again, err := Parse(data)
+	if err != nil {
+		t.Fatalf("Parse(Marshal(Parse(x))): %v", err)
+	}
+	if !reflect.DeepEqual(again, p) {
+		t.Errorf("round trip changed the policy:\n got %+v\nwant %+v", again, p)
+	}
+}
+
+func TestParseKeepsRolesAndPausedBy(t *testing.T) {
+	p, err := Parse([]byte(`{"version":2,"availability":"paused","pausedBy":"local",
+		"roles":{"weak":{"engine":"ollama","model":"qwen3:8b"},"strong":{"engine":"lmstudio","model":"big"}}}`))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	want := map[string]Role{TierWeak: {Engine: "ollama", Model: "qwen3:8b"}, TierStrong: {Engine: "lmstudio", Model: "big"}}
+	if !reflect.DeepEqual(p.Roles, want) {
+		t.Errorf("roles = %+v, want %+v", p.Roles, want)
+	}
+	if p.PausedBy != PausedLocally {
+		t.Errorf("pausedBy = %q, want %q", p.PausedBy, PausedLocally)
+	}
 }
