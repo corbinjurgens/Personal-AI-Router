@@ -28,6 +28,9 @@ const (
 	nodeInfoPollInterval = 2 * time.Second
 	nodeInfoPollTimeout  = 1500 * time.Millisecond
 	nodeInfoSelfHost     = "127.0.0.1"
+	// Five normal poll intervals allow collection jitter without presenting a
+	// retained last-good reading as current indefinitely.
+	gpuTelemetryMaxAge = 10 * time.Second
 )
 
 // nodeTelemetry is one node-info reading. The GPU, CPU, and memory shapes are
@@ -39,7 +42,9 @@ type nodeTelemetry struct {
 	Memory *noderec.MemoryInfo `json:"memory"`
 	// TelemetryValid reports whether the dynamic sample is usable at all; a node
 	// with no GPU telemetry source still answers, with this false.
-	TelemetryValid bool `json:"telemetryValid"`
+	TelemetryValid bool  `json:"telemetryValid"`
+	MSSince        int64 `json:"msSince"`
+	receivedAt     time.Time
 	// HostUUID is the answering machine's own identity, empty when it could
 	// not resolve one.
 	HostUUID string `json:"hostUuid"`
@@ -153,6 +158,7 @@ func pollPairedTelemetryCmd(client *rpc.Client, key string, gen int, hostUUID st
 		}{HostUUID: hostUUID})
 		if err == nil {
 			err = json.Unmarshal(msg.Result, &result.telemetry)
+			result.telemetry.receivedAt = time.Now()
 		}
 		if err == nil && result.telemetry.HostUUID != hostUUID {
 			err = fmt.Errorf("node information answered as another machine")
@@ -212,6 +218,7 @@ func fetchTelemetry(url string) (nodeTelemetry, error) {
 	if err := json.NewDecoder(io.LimitReader(resp.Body, maxTelemetryBody)).Decode(&t); err != nil {
 		return nodeTelemetry{}, err
 	}
+	t.receivedAt = time.Now()
 	return t, nil
 }
 
@@ -235,9 +242,30 @@ func nodeInfoURL(address string, port int) string {
 // summary renders the readings as compact lines for the detail screen. Returns
 // nil when the node reported nothing worth showing.
 func (t nodeTelemetry) summary() []string {
+	return t.summaryAt(time.Now())
+}
+
+func (t nodeTelemetry) summaryAt(now time.Time) []string {
 	lines := make([]string, 0, len(t.GPUs)+2)
+	status := "Unknown"
+	if t.TelemetryValid && t.MSSince >= 0 && !t.receivedAt.IsZero() {
+		status = "Stale"
+		elapsed := now.Sub(t.receivedAt).Milliseconds()
+		if elapsed < 0 {
+			elapsed = 0
+		}
+		// Compare before adding to avoid overflowing an untrusted wire age.
+		if t.MSSince <= gpuTelemetryMaxAge.Milliseconds() &&
+			elapsed <= gpuTelemetryMaxAge.Milliseconds()-t.MSSince {
+			status = ""
+		}
+	}
 	for _, g := range t.GPUs {
-		lines = append(lines, "  "+gpuLine(g, t.TelemetryValid))
+		line := gpuLine(g, status == "")
+		if status != "" {
+			line += "  " + status
+		}
+		lines = append(lines, "  "+line)
 	}
 	if t.CPU != nil {
 		name := t.CPU.Name
@@ -270,7 +298,11 @@ func gpuLine(g noderec.GPUInfo, valid bool) string {
 	}
 	line := fmt.Sprintf("%-28s %s", truncate(name, 28), util)
 	if g.VramBytes > 0 {
-		line += fmt.Sprintf("  %s / %s", humanBytes(g.VramUsedBytes), humanBytes(g.VramBytes))
+		used := "--"
+		if valid {
+			used = humanBytes(g.VramUsedBytes)
+		}
+		line += fmt.Sprintf("  %s / %s", used, humanBytes(g.VramBytes))
 	}
 	return line
 }

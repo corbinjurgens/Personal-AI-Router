@@ -30,17 +30,13 @@ interface MetricsStore {
 let unsubs: Array<() => void> = []
 
 function pushMetric(arr: PerformanceMetric[], value: number | undefined, timestamp: number): void {
+    if (value === undefined || !Number.isFinite(value) || !Number.isFinite(timestamp)) return
+    const last = arr[arr.length - 1]
+    if (last && timestamp <= last.timestamp) return
     if (arr.length >= MAX_DATA_POINTS) {
         arr.shift()
     }
-    arr.push({ timestamp, value: value ?? 0 })
-}
-
-function createPrefill(baseTs: number): PerformanceMetric[] {
-    return Array.from({ length: MAX_DATA_POINTS }, (_, i) => ({
-        timestamp: baseTs - (MAX_DATA_POINTS - i) * 1000,
-        value: 0
-    }))
+    arr.push({ timestamp, value })
 }
 
 export const useMetricsStore = create<MetricsStore>((set, get) => ({
@@ -67,26 +63,24 @@ export const useMetricsStore = create<MetricsStore>((set, get) => ({
                 let history = map.get(metrics.id)
 
                 if (!history) {
-                    const ts = metrics.current.timestamp
                     history = {
-                        gpuUtilization: metrics.current.gpuUtilization.map(gpu => ({
-                            id: gpu.id,
-                            data: createPrefill(ts)
-                        })),
-                        gpuVramUsage: metrics.current.gpuVramUsage.map(gpu => ({
-                            id: gpu.id,
-                            data: createPrefill(ts)
-                        })),
-                        cpuUtilization: createPrefill(ts),
-                        memoryUsage: createPrefill(ts)
+                        gpuUtilization: [],
+                        gpuVramUsage: [],
+                        cpuUtilization: [],
+                        memoryUsage: []
                     }
                     map.set(metrics.id, history)
                 }
 
-                const lastTs = history.cpuUtilization[history.cpuUtilization.length - 1]?.timestamp
-                if (lastTs === metrics.current.timestamp) return
-
                 const ts = metrics.current.timestamp
+
+                // Reconcile inventory even when the observation timestamp did not change.
+                history.gpuUtilization = history.gpuUtilization.filter(entry =>
+                    metrics.current.gpuUtilization.some(gpu => gpu.id === entry.id)
+                )
+                history.gpuVramUsage = history.gpuVramUsage.filter(entry =>
+                    metrics.current.gpuVramUsage.some(gpu => gpu.id === entry.id)
+                )
 
                 for (const gpu of metrics.current.gpuUtilization) {
                     let entry = history.gpuUtilization.find(h => h.id === gpu.id)

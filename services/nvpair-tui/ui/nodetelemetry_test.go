@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"nvpair-shared/noderec"
 	"nvpair-tui/rpc"
@@ -208,6 +209,9 @@ func TestPollTelemetryDecodesResponse(t *testing.T) {
 	if !msg.telemetry.TelemetryValid {
 		t.Error("telemetryValid did not decode")
 	}
+	if msg.telemetry.MSSince != 120 || msg.telemetry.receivedAt.IsZero() {
+		t.Errorf("sample age or receipt time missing: %+v", msg.telemetry)
+	}
 }
 
 // TestPollTelemetryReportsFailure checks a non-200 is an error rather than being
@@ -308,9 +312,50 @@ func TestTelemetrySummaryOmitsUtilizationWhenStale(t *testing.T) {
 	}
 
 	tel.TelemetryValid = true
+	tel.receivedAt = time.Now()
 	tel.GPUs[0].UtilizationPercent = 55
 	if got := strings.Join(tel.summary(), "\n"); !strings.Contains(got, "55%") {
 		t.Errorf("valid sample did not render utilization: %q", got)
+	}
+}
+
+func TestTelemetryLastGoodSampleAgesWithoutAnotherPoll(t *testing.T) {
+	now := time.Unix(100, 0)
+	tel := nodeTelemetry{
+		GPUs: []noderec.GPUInfo{{Name: "GPU", VramBytes: 1 << 30,
+			VramUsedBytes: 1 << 29, UtilizationPercent: 55}},
+		TelemetryValid: true,
+		MSSince:        9000,
+		receivedAt:     now,
+	}
+	if got := strings.Join(tel.summaryAt(now.Add(time.Second)), "\n"); !strings.Contains(got, "55%") {
+		t.Fatalf("sample at threshold should be current: %q", got)
+	}
+	got := strings.Join(tel.summaryAt(now.Add(time.Second+time.Millisecond)), "\n")
+	if !strings.Contains(got, "Stale") || strings.Contains(got, "55%") || strings.Contains(got, "512 MiB") {
+		t.Fatalf("aged sample should hide dynamic GPU values and say Stale: %q", got)
+	}
+}
+
+func TestTelemetryUnknownSampleHidesDynamicGPUValues(t *testing.T) {
+	tel := nodeTelemetry{
+		GPUs: []noderec.GPUInfo{{Name: "GPU", VramBytes: 1 << 30}},
+	}
+	got := strings.Join(tel.summary(), "\n")
+	if !strings.Contains(got, "Unknown") || strings.Contains(got, "0%") || strings.Contains(got, "0 B") {
+		t.Fatalf("unknown sample should not look idle or empty: %q", got)
+	}
+}
+
+func TestTelemetryWireAgeMarksLastGoodSampleStale(t *testing.T) {
+	var tel nodeTelemetry
+	if err := json.Unmarshal([]byte(`{"GPUs":[{"name":"GPU","utilization_percent":55}],"telemetryValid":true,"msSince":10001}`), &tel); err != nil {
+		t.Fatal(err)
+	}
+	tel.receivedAt = time.Unix(100, 0)
+	got := strings.Join(tel.summaryAt(tel.receivedAt), "\n")
+	if !strings.Contains(got, "Stale") || strings.Contains(got, "55%") {
+		t.Fatalf("last-good wire reading appeared current: %q", got)
 	}
 }
 
