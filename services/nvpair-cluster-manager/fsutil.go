@@ -4,23 +4,23 @@
 package main
 
 import (
-	"crypto/rand"
-	"encoding/hex"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"syscall"
 	"time"
+
+	"nvpair-shared/durablefile"
 )
 
-// renameFile and removeFile are the filesystem mutation steps. Tests inject
-// failures here.
+// Tests inject write and deletion failures at their respective mutation seams.
 var (
-	renameFile = os.Rename
-	removeFile = os.Remove
+	clusterFileReplacer durablefile.Replacer
+	removeFile          = os.Remove
 )
 
 const (
@@ -28,41 +28,20 @@ const (
 	atomicWriteRetryBase   = 50 * time.Millisecond
 )
 
-// atomicWrite writes data to path via the standard write-to-tmp + rename
-// replace pattern, so a crash mid-write leaves either the previous file intact
-// or the new one fully written — never a torn half-file. The temp file lives in
-// the same directory as the destination so the rename stays on one filesystem.
-//
-// On Windows, sibling clustertrust readers can briefly hold admission.json open
-// for ReadFile; os.Rename then fails with Access Denied / sharing violation.
-// Those errors are retried with short backoff. Temp names are unique so a
-// crashed prior .tmp cannot block the next write.
+// atomicWrite durably replaces path. Adopt a landed replacement even when its
+// durability is uncertain, so callers do not roll memory back behind disk.
 func atomicWrite(path string, data []byte, perm os.FileMode) error {
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("create dir %s: %w", dir, err)
 	}
-	tmp, err := uniqueTmpPath(path)
-	if err != nil {
-		return err
-	}
-	if err := os.WriteFile(tmp, data, perm); err != nil {
-		_ = os.Remove(tmp)
-		return fmt.Errorf("write %s: %w", tmp, err)
-	}
-	var renameErr error
-	for attempt := 1; attempt <= atomicWriteMaxAttempts; attempt++ {
-		renameErr = renameFile(tmp, path)
-		if renameErr == nil {
-			return nil
+	if err := clusterFileReplacer.WriteFile(path, data, perm); err != nil {
+		if !errors.Is(err, durablefile.ErrReplaced) {
+			return err
 		}
-		if !isTransientReplaceError(renameErr) || attempt == atomicWriteMaxAttempts {
-			break
-		}
-		time.Sleep(atomicWriteRetryBase * time.Duration(attempt))
+		slog.Warn("cluster file replacement landed with uncertain durability", "path", path)
 	}
-	_ = os.Remove(tmp)
-	return fmt.Errorf("rename %s -> %s: %w", tmp, path, renameErr)
+	return nil
 }
 
 // removeFileWithRetry deletes path, tolerating the brief sharing conflicts that
@@ -81,14 +60,6 @@ func removeFileWithRetry(path string) error {
 		time.Sleep(atomicWriteRetryBase * time.Duration(attempt))
 	}
 	return removeErr
-}
-
-func uniqueTmpPath(path string) (string, error) {
-	var b [8]byte
-	if _, err := rand.Read(b[:]); err != nil {
-		return "", fmt.Errorf("mint tmp name for %s: %w", path, err)
-	}
-	return path + "." + hex.EncodeToString(b[:]) + ".tmp", nil
 }
 
 // isTransientReplaceError reports whether err is a mutation conflict that may

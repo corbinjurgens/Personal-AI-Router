@@ -91,6 +91,8 @@ func loadOrMintIdentity(clusterDir string) (*NodeIdentity, error) {
 	if err != nil {
 		return nil, fmt.Errorf("generate leaf cert: %w", err)
 	}
+	// atomicWrite adopts ErrReplaced: continue after a landed key or cert so
+	// uncertain durability alone does not leave the identity sequence incomplete.
 	if err := atomicWrite(keyPath, keyPEM, 0o600); err != nil {
 		return nil, fmt.Errorf("write node.key: %w", err)
 	}
