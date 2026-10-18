@@ -3,13 +3,14 @@
 
 export interface GpuMetricValue {
     id: string // GPU ID from topology
-    value: number // percentage
+    timestamp?: number // GPU observation time; absent for receipt-timed sources
+    value?: number // percentage; absent when no observation is available
 }
 
 export interface NodeItemMetricsEntry {
     timestamp: number // milliseconds since epoch
-    cpuUtilization: number // percentage
-    memoryUsage: number // percentage
+    cpuUtilization?: number // percentage
+    memoryUsage?: number // percentage
     gpuUtilization: GpuMetricValue[] // percentage per GPU
     gpuVramUsage: GpuMetricValue[] // percentage per GPU
 }

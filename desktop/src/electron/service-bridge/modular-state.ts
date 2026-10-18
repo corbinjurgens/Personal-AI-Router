@@ -611,12 +611,19 @@ class ModularBridgeState {
         const cpu = cpuValue(obj.cpu)
         const memory = memoryValue(obj.memory)
         const inferenceHardwareIds = optionalStringArrayValue(obj.inference_hardware_ids)
+        const telemetryValid = booleanValue(obj.telemetryValid)
+        const receivedAt = Date.now()
+        const age = obj.msSince
+        const observedAt =
+            telemetryValid && typeof age === 'number' && Number.isFinite(age) && age >= 0
+                ? Math.max(0, Math.min(receivedAt, receivedAt - age))
+                : undefined
         // A change in live readings alone is stored and pushed as metrics only.
         // Routing it through upsertNode would also push the node card, the whole
         // discovery list, and every engine's status for this node on every poll
         // tick that a utilization figure moved, none of which carry the readings.
         if (node.nodeInfoUp && sameHardware(node, gpus, cpu, memory, inferenceHardwareIds)) {
-            const next: ModularNode = { ...node, gpus, cpu, memory }
+            const next: ModularNode = { ...node, gpus, cpu, memory, telemetryValid, observedAt }
             this.nodes.set(nodeId, next)
             emitBridgePush('metrics:update', toMetrics(next))
             return
@@ -628,6 +635,8 @@ class ModularBridgeState {
             cpu,
             memory,
             inferenceHardwareIds,
+            telemetryValid,
+            observedAt,
             nodeInfoUp: true
         })
     }
@@ -2174,6 +2183,8 @@ class ModularBridgeState {
                 // supplies one too now, but the broker's wins on merge.
                 reachableAddress: next.reachableAddress || existing.reachableAddress,
                 gpus: existing.gpus,
+                telemetryValid: existing.telemetryValid,
+                observedAt: existing.observedAt,
                 cpu: existing.cpu,
                 memory: existing.memory,
                 inferenceHardwareIds: existing.inferenceHardwareIds,
@@ -2203,6 +2214,8 @@ class ModularBridgeState {
             nodeInfoPort: existing.nodeInfoPort,
             nodeInfoUp: existing.nodeInfoUp,
             gpus: existing.gpus,
+            telemetryValid: existing.telemetryValid,
+            observedAt: existing.observedAt,
             cpu: existing.cpu,
             memory: existing.memory,
             inferenceHardwareIds: existing.inferenceHardwareIds,

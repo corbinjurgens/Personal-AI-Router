@@ -3,12 +3,14 @@
 
 import { useCallback, useMemo, useState } from 'react'
 import { Flex, Stack, Text } from '@nvidia/foundations-react-core'
-import SvgLineChart, { type MetricDataset } from '@/ui/components/SvgLineChart'
+import SvgLineChart from '@/ui/components/SvgLineChart'
+import type { MetricDataset } from '@/ui/utils/line-chart-path'
 import type { NodeItem } from '@/shared/types/nodes'
 import { useMetricsStore } from '@/ui/stores/metrics.store'
 import { getGpuColor, getVramColor } from '@/ui/utils/colors'
 import { formatBytes } from '@/ui/utils/formatters'
 import { CHART_COLORS } from '@/ui/constants/colors'
+import { buildPerformanceHardwareInfo } from '@/ui/utils/performance-hardware-info'
 
 export default function NodePerformance({
     node,
@@ -18,6 +20,7 @@ export default function NodePerformance({
     className?: string
 }) {
     const nodeMetrics = useMetricsStore(state => state.nodeMetrics.get(node.id))
+    const now = Date.now()
     const [selectedMetric, setSelectedMetric] = useState<string | undefined>(undefined)
 
     const handleLegendClick = useCallback((metricKey: string) => {
@@ -32,16 +35,14 @@ export default function NodePerformance({
     // inspecting raw hardware activity, so an iGPU's utilization is useful signal
     // rather than noise.
     const datasets = useMemo(() => {
-        if (!nodeMetrics) return []
-
-        const gpuCount = nodeMetrics.gpuUtilization.length
+        const gpuCount = node.topology.gpus.length
         const result: MetricDataset[] = []
 
         // Add GPU utilization datasets (cycling through color palette)
-        nodeMetrics.gpuUtilization.forEach((gpu, index) => {
+        node.topology.gpus.forEach((gpu, index) => {
             const color = getGpuColor(index)
             result.push({
-                data: gpu.data,
+                data: nodeMetrics?.gpuUtilization.find(entry => entry.id === gpu.id)?.data ?? [],
                 label: gpuCount > 1 ? `GPU ${index}` : 'GPU',
                 color,
                 key: `gpu-${gpu.id}`
@@ -50,7 +51,7 @@ export default function NodePerformance({
 
         // Add CPU
         result.push({
-            data: nodeMetrics.cpuUtilization,
+            data: nodeMetrics?.cpuUtilization ?? [],
             label: 'CPU',
             color: CHART_COLORS.CPU,
             key: 'cpu'
@@ -58,17 +59,17 @@ export default function NodePerformance({
 
         // Add RAM
         result.push({
-            data: nodeMetrics.memoryUsage,
+            data: nodeMetrics?.memoryUsage ?? [],
             label: 'RAM',
             color: CHART_COLORS.MEMORY,
             key: 'memory'
         })
 
         // Add VRAM datasets (cycling through color palette)
-        nodeMetrics.gpuVramUsage.forEach((gpu, index) => {
+        node.topology.gpus.forEach((gpu, index) => {
             const color = getVramColor(index)
             result.push({
-                data: gpu.data,
+                data: nodeMetrics?.gpuVramUsage.find(entry => entry.id === gpu.id)?.data ?? [],
                 label: gpuCount > 1 ? `VRAM ${index}` : 'VRAM',
                 color,
                 key: `vram-${gpu.id}`
@@ -76,48 +77,12 @@ export default function NodePerformance({
         })
 
         return result
-    }, [nodeMetrics])
+    }, [node.topology.gpus, nodeMetrics])
 
-    const hardwareInfo = useMemo(() => {
-        const totalStorage = node.topology.storage.reduce(
-            (sum, storage) => sum + storage.capacity,
-            0
-        )
-
-        // Helper to get the latest value from a metric data array
-        const getLatestValue = (data: { timestamp: number; value: number }[]) => {
-            if (data.length === 0) return 0
-            const value = data[data.length - 1].value
-            return value ?? 0 // Treat undefined as 0
-        }
-
-        return {
-            // Detailed view lists every detected GPU (incl. iGPUs); only the
-            // radial filters to inference-ready GPUs (via inferenceHardwareIds).
-            gpus: node.topology.gpus.map((gpu, index) => {
-                const gpuUtilData = nodeMetrics?.gpuUtilization[index]
-                const gpuVramData = nodeMetrics?.gpuVramUsage[index]
-
-                return {
-                    id: gpu.id,
-                    name: gpu.name,
-                    vramTotal: gpu.vramTotal,
-                    vramFormatted: formatBytes(gpu.vramTotal, 1),
-                    utilization: gpuUtilData ? getLatestValue(gpuUtilData.data) : 0,
-                    vramUsage: gpuVramData ? getLatestValue(gpuVramData.data) : 0,
-                    color: getGpuColor(index),
-                    vramColor: getVramColor(index)
-                }
-            }),
-            cpuCores: node.topology.cpu.cores,
-            cpuModel: node.topology.cpu.model,
-            cpuUtilization: nodeMetrics ? getLatestValue(nodeMetrics.cpuUtilization) : 0,
-            memory: formatBytes(node.topology.ram, 1),
-            memoryTotal: node.topology.ram,
-            memoryUsage: nodeMetrics ? getLatestValue(nodeMetrics.memoryUsage) : 0,
-            storage: formatBytes(totalStorage, 1)
-        }
-    }, [node, nodeMetrics])
+    const hardwareInfo = useMemo(
+        () => buildPerformanceHardwareInfo(node.topology, nodeMetrics, now),
+        [node.topology, nodeMetrics, now]
+    )
 
     return (
         <Flex
@@ -198,8 +163,15 @@ export default function NodePerformance({
                                         }}
                                     >
                                         <Text kind="body/regular/sm">Usage</Text>
-                                        <Text kind="body/regular/sm">
-                                            {Math.floor(gpu.utilization)}%
+                                        <Text
+                                            kind="body/regular/sm"
+                                            className={
+                                                gpu.utilization.status !== 'current'
+                                                    ? 'text-subtle-color'
+                                                    : undefined
+                                            }
+                                        >
+                                            {gpu.utilization.label}
                                         </Text>
                                     </Flex>
                                 </Flex>
@@ -237,11 +209,23 @@ export default function NodePerformance({
                                         }}
                                     >
                                         <Text kind="body/regular/sm">VRAM</Text>
-                                        <Text kind="body/regular/sm">
-                                            {formatBytes(
-                                                Math.floor((gpu.vramTotal * gpu.vramUsage) / 100),
-                                                1
-                                            )}{' '}
+                                        <Text
+                                            kind="body/regular/sm"
+                                            className={
+                                                gpu.vramUsage.status !== 'current'
+                                                    ? 'text-subtle-color'
+                                                    : undefined
+                                            }
+                                        >
+                                            {gpu.vramUsage.value === undefined
+                                                ? gpu.vramUsage.label
+                                                : formatBytes(
+                                                      Math.floor(
+                                                          (gpu.vramTotal * gpu.vramUsage.value) /
+                                                              100
+                                                      ),
+                                                      1
+                                                  )}{' '}
                                             / {gpu.vramFormatted}
                                         </Text>
                                     </Flex>
@@ -282,8 +266,15 @@ export default function NodePerformance({
                         >
                             {hardwareInfo.cpuModel}
                         </Text>
-                        <Text kind="body/regular/sm">
-                            {Math.floor(hardwareInfo.cpuUtilization)}%{' '}
+                        <Text
+                            kind="body/regular/sm"
+                            className={
+                                hardwareInfo.cpuUtilization.status !== 'current'
+                                    ? 'text-subtle-color'
+                                    : undefined
+                            }
+                        >
+                            {hardwareInfo.cpuUtilization.label}{' '}
                             {hardwareInfo.cpuCores ? `(${hardwareInfo.cpuCores} cores)` : ''}
                         </Text>
                     </Stack>
@@ -318,13 +309,24 @@ export default function NodePerformance({
                         }}
                     >
                         <Text kind="body/semibold/sm">Memory</Text>
-                        <Text kind="body/regular/sm">
-                            {formatBytes(
-                                Math.floor(
-                                    (hardwareInfo.memoryTotal * hardwareInfo.memoryUsage) / 100
-                                ),
-                                1
-                            )}{' '}
+                        <Text
+                            kind="body/regular/sm"
+                            className={
+                                hardwareInfo.memoryUsage.status !== 'current'
+                                    ? 'text-subtle-color'
+                                    : undefined
+                            }
+                        >
+                            {hardwareInfo.memoryUsage.value === undefined
+                                ? hardwareInfo.memoryUsage.label
+                                : formatBytes(
+                                      Math.floor(
+                                          (hardwareInfo.memoryTotal *
+                                              hardwareInfo.memoryUsage.value) /
+                                              100
+                                      ),
+                                      1
+                                  )}{' '}
                             / {hardwareInfo.memory}
                         </Text>
                     </Stack>

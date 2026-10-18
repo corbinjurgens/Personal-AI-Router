@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+import type { getMetricReading } from '@/ui/utils/build-radial-chart-metrics'
+
 export type GpuInfo = {
     id: string
     name: string
@@ -8,17 +10,17 @@ export type GpuInfo = {
     vramTotal: number
     vramTotalFormatted: string
     vramUsageFormatted: string
-    vramUsage: number // percentage
-    usage: number // percentage
+    vramUsage: ReturnType<typeof getMetricReading>
+    usage: ReturnType<typeof getMetricReading>
     usageColor: string
     vramColor: string
 }
 
 export type CpuFallbackInfo = {
     model: string
-    usage: number // percentage 0-100
+    usage: ReturnType<typeof getMetricReading>
     usageColor: string
-    memoryUsage: number // percentage 0-100
+    memoryUsage: ReturnType<typeof getMetricReading>
     memoryUsageFormatted: string
     memoryTotalFormatted: string
     memoryColor: string

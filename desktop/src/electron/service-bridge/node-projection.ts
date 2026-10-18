@@ -81,6 +81,9 @@ interface ModularNode {
     gpus: ModularGpu[]
     cpu: ModularCpu | null
     memory: ModularMemory | null
+    // Validity and observation time apply only to GPU telemetry, not CPU/RAM.
+    telemetryValid?: boolean
+    observedAt?: number
     // Node-level list of inference-ready hardware ids from /v1/node-info, mapped
     // straight to SystemTopology.inferenceHardwareIds. undefined = the backend
     // does not report readiness yet (UI shows all GPUs). See the routing
@@ -157,19 +160,19 @@ function anyEngineUp(node: ModularNode): boolean {
 interface ModularGpu {
     name: string
     vramBytes: number
-    vramUsedBytes: number
-    utilizationPercent: number
+    vramUsedBytes?: number
+    utilizationPercent?: number
 }
 
 interface ModularCpu {
     name: string
     cores: number
-    utilizationPercent: number
+    utilizationPercent?: number
 }
 
 interface ModularMemory {
     totalBytes: number
-    usedBytes: number
+    usedBytes?: number
 }
 
 function objectValue(value: JsonValue | undefined): JsonObject | null {
@@ -183,6 +186,10 @@ function stringValue(value: JsonValue | undefined): string {
 
 function numberValue(value: JsonValue | undefined): number {
     return typeof value === 'number' ? value : 0
+}
+
+function observationValue(value: JsonValue | undefined): number | undefined {
+    return typeof value === 'number' && Number.isFinite(value) ? value : undefined
 }
 function booleanValue(value: JsonValue | undefined): boolean {
     return typeof value === 'boolean' ? value : false
@@ -312,8 +319,8 @@ function gpuArrayValue(value: JsonValue | undefined): ModularGpu[] {
         gpus.push({
             name: stringValue(obj.name),
             vramBytes: numberValue(obj.vram_bytes),
-            vramUsedBytes: numberValue(obj.vram_used_bytes),
-            utilizationPercent: numberValue(obj.utilization_percent)
+            vramUsedBytes: observationValue(obj.vram_used_bytes),
+            utilizationPercent: observationValue(obj.utilization_percent)
         })
     }
     return gpus.sort((left, right) => nvidiaGpuRank(left) - nvidiaGpuRank(right))
@@ -325,7 +332,7 @@ function cpuValue(value: JsonValue | undefined): ModularCpu | null {
     return {
         name: stringValue(obj.name),
         cores: numberValue(obj.cores),
-        utilizationPercent: numberValue(obj.utilization_percent)
+        utilizationPercent: observationValue(obj.utilization_percent)
     }
 }
 
@@ -334,7 +341,7 @@ function memoryValue(value: JsonValue | undefined): ModularMemory | null {
     if (!obj) return null
     return {
         totalBytes: numberValue(obj.total_bytes),
-        usedBytes: numberValue(obj.used_bytes)
+        usedBytes: observationValue(obj.used_bytes)
     }
 }
 
@@ -491,21 +498,27 @@ function toNodeItem(node: ModularNode, selfId: string | null): NodeItem {
 }
 
 function toMetrics(node: ModularNode): NodeItemMetrics {
+    const gpus = node.telemetryValid && node.observedAt !== undefined ? node.gpus : []
     const memoryUsage =
-        node.memory && node.memory.totalBytes > 0
+        node.memory && node.memory.totalBytes > 0 && node.memory.usedBytes !== undefined
             ? (node.memory.usedBytes / node.memory.totalBytes) * 100
-            : 0
+            : undefined
     const current = {
         timestamp: Date.now(),
-        cpuUtilization: node.cpu?.utilizationPercent ?? 0,
+        cpuUtilization: node.cpu?.utilizationPercent,
         memoryUsage,
-        gpuUtilization: node.gpus.map((gpu, index) => ({
+        gpuUtilization: gpus.map((gpu, index) => ({
             id: `${node.id}:gpu:${index}`,
+            timestamp: node.observedAt,
             value: gpu.utilizationPercent
         })),
-        gpuVramUsage: node.gpus.map((gpu, index) => ({
+        gpuVramUsage: gpus.map((gpu, index) => ({
             id: `${node.id}:gpu:${index}`,
-            value: gpu.vramBytes > 0 ? (gpu.vramUsedBytes / gpu.vramBytes) * 100 : 0
+            timestamp: node.observedAt,
+            value:
+                gpu.vramBytes > 0 && gpu.vramUsedBytes !== undefined
+                    ? (gpu.vramUsedBytes / gpu.vramBytes) * 100
+                    : undefined
         }))
     }
     return { id: node.id, current, historical: [current] }

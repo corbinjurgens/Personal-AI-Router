@@ -2,14 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { memo, useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
-import type { PerformanceMetric } from '@/ui/types/types'
-
-export interface MetricDataset {
-    data: PerformanceMetric[]
-    label: string
-    color: string
-    key: string
-}
+import { buildLineChartPaths, type MetricDataset } from '@/ui/utils/line-chart-path'
 
 interface SvgLineChartProps {
     datasets: MetricDataset[]
@@ -19,29 +12,6 @@ interface SvgLineChartProps {
 }
 
 const PADDING = 4
-
-function buildSmoothPath(points: { x: number; y: number }[], tension = 0.3): string {
-    if (points.length === 0) return ''
-    if (points.length === 1) return `M ${points[0].x} ${points[0].y}`
-
-    const d: string[] = [`M ${points[0].x} ${points[0].y}`]
-
-    for (let i = 0; i < points.length - 1; i++) {
-        const p0 = points[Math.max(0, i - 1)]
-        const p1 = points[i]
-        const p2 = points[i + 1]
-        const p3 = points[Math.min(points.length - 1, i + 2)]
-
-        const cp1x = p1.x + ((p2.x - p0.x) * tension) / 3
-        const cp1y = p1.y + ((p2.y - p0.y) * tension) / 3
-        const cp2x = p2.x - ((p3.x - p1.x) * tension) / 3
-        const cp2y = p2.y - ((p3.y - p1.y) * tension) / 3
-
-        d.push(`C ${cp1x} ${cp1y}, ${cp2x} ${cp2y}, ${p2.x} ${p2.y}`)
-    }
-
-    return d.join(' ')
-}
 
 function SvgLineChart({
     datasets,
@@ -88,35 +58,10 @@ function SvgLineChart({
     const chartW = size.w - PADDING * 2
     const chartH = size.h - PADDING * 2
 
-    const paths = useMemo(() => {
-        if (chartW <= 0 || chartH <= 0) return []
-
-        const xStep = chartW / (maxDataPoints - 1)
-
-        return datasets.map(ds => {
-            const recent = ds.data.slice(-maxDataPoints)
-            const step =
-                recent.length > 1
-                    ? ds.data.length >= maxDataPoints
-                        ? xStep
-                        : chartW / (recent.length - 1)
-                    : 0
-
-            const pts = recent.map((p, i) => ({
-                x: PADDING + i * step,
-                y: PADDING + chartH - (Math.min(p.value ?? 0, yAxisMax) / yAxisMax) * chartH
-            }))
-
-            if (pts.length === 0) return { key: ds.key, color: ds.color, line: '', fill: '' }
-
-            const line = buildSmoothPath(pts)
-            const last = pts[pts.length - 1]
-            const first = pts[0]
-            const fill = `${line} L ${last.x} ${PADDING + chartH} L ${first.x} ${PADDING + chartH} Z`
-
-            return { key: ds.key, color: ds.color, line, fill }
-        })
-    }, [datasets, maxDataPoints, yAxisMax, chartW, chartH])
+    const paths = useMemo(
+        () => buildLineChartPaths(datasets, maxDataPoints, yAxisMax, chartW, chartH),
+        [datasets, maxDataPoints, yAxisMax, chartW, chartH]
+    )
 
     const clipId = `${uid}-clip`
 

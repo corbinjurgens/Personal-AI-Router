@@ -4,6 +4,8 @@
 package ui
 
 import (
+	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -242,6 +244,70 @@ func TestMergeUsesEveryFactTheManualWorkerReports(t *testing.T) {
 	if !tls.nodeInfoTLS || tls.probedTelemetry == nil || len(tls.probedTelemetry.GPUs) != 1 {
 		t.Errorf("TLS node-info was not carried with the worker's reading: tls=%v telemetry=%+v",
 			tls.nodeInfoTLS, tls.probedTelemetry)
+	}
+}
+
+func TestManualTLSTelemetryAgesFromWireReceipt(t *testing.T) {
+	var reply struct {
+		Nodes []manualNode `json:"nodes"`
+	}
+	err := json.Unmarshal([]byte(`{"nodes":[{
+		"id":"tls", "name":"tls-box", "address":"gpu-box.lan",
+		"node_info_up":true, "tls_enabled":true,
+		"telemetryValid":true, "msSince":9000,
+		"gpus":[{"name":"GPU", "utilization_percent":55,
+		"vram_bytes":1073741824, "vram_used_bytes":536870912}]
+	}]}`), &reply)
+	if err != nil {
+		t.Fatalf("decode manual nodes reply: %v", err)
+	}
+	if len(reply.Nodes) != 1 {
+		t.Fatalf("decoded %d manual nodes, want 1", len(reply.Nodes))
+	}
+	if reply.Nodes[0].receivedAt.IsZero() {
+		t.Fatal("manual reading has no local receipt time")
+	}
+	// Use a deterministic receipt/render clock after exercising wire decoding.
+	receivedAt := time.Unix(100, 0)
+	reply.Nodes[0].receivedAt = receivedAt
+	feeds := nodeFeeds{manual: reply.Nodes}
+	check := func(name string, elapsed time.Duration, wantStatus string, wantDynamic bool) {
+		t.Run(name, func(t *testing.T) {
+			row := findRow(t, mergeNodes(feeds), "tls-box")
+			if row.probedTelemetry == nil {
+				t.Fatal("manual TLS reading was dropped")
+			}
+			got := strings.Join(row.probedTelemetry.summaryAt(receivedAt.Add(elapsed)), "\n")
+			if strings.Contains(got, "Unknown") || strings.Contains(got, "Stale") != (wantStatus == "Stale") {
+				t.Errorf("summary status, want %q: %q", wantStatus, got)
+			}
+			if strings.Contains(got, "55%") != wantDynamic || strings.Contains(got, "512 MiB") != wantDynamic {
+				t.Errorf("dynamic GPU values visible, want %v: %q", wantDynamic, got)
+			}
+			if !strings.Contains(got, "1.0 GiB") {
+				t.Errorf("static GPU capacity missing: %q", got)
+			}
+		})
+	}
+	check("current at threshold", time.Second, "", true)
+	// Re-merging the same feed must retain its original receipt time.
+	check("stale beyond threshold after another merge", time.Second+time.Millisecond, "Stale", false)
+}
+
+func TestManualTLSTelemetryWithoutWireAgeIsUnknown(t *testing.T) {
+	var node manualNode
+	if err := json.Unmarshal([]byte(`{"id":"tls", "name":"tls-box",
+		"node_info_up":true, "tls_enabled":true, "telemetryValid":true,
+		"gpus":[{"name":"GPU", "utilization_percent":55}]}`), &node); err != nil {
+		t.Fatalf("decode manual node without age: %v", err)
+	}
+	row := findRow(t, mergeNodes(nodeFeeds{manual: []manualNode{node}}), "tls-box")
+	if row.probedTelemetry == nil {
+		t.Fatal("manual TLS reading was dropped")
+	}
+	got := strings.Join(row.probedTelemetry.summaryAt(node.receivedAt), "\n")
+	if !strings.Contains(got, "Unknown") || strings.Contains(got, "55%") {
+		t.Errorf("unaged manual reading should hide dynamic values and say Unknown: %q", got)
 	}
 }
 

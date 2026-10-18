@@ -8,8 +8,25 @@ import { CHART_COLORS } from '@/ui/constants/colors'
 import { getGpuColor, getVramColor } from '@/ui/utils/colors'
 import { hasInferenceReadyGpu, isGpuInferenceReady } from '@/ui/utils/gpu-inference'
 
-function getLatest(data: { timestamp: number; value: number }[]): number {
-    return data.length === 0 ? 0 : (data[data.length - 1].value ?? 0)
+// Match the TUI's five normal poll intervals. No timer is created here: the
+// existing render/poll cadence checks the actual observation timestamp.
+const MAX_SAMPLE_AGE_MS = 10_000
+
+export function getMetricReading(
+    data: { timestamp: number; value: number }[] | undefined,
+    now = Date.now()
+): { status: 'current' | 'stale' | 'unknown'; value?: number; label: string } {
+    const sample = data?.[data.length - 1]
+    if (!sample || !Number.isFinite(sample.value)) return { status: 'unknown', label: '--' }
+    const age = now - sample.timestamp
+    if (!Number.isFinite(age) || age < 0) return { status: 'unknown', label: '--' }
+    return age <= MAX_SAMPLE_AGE_MS
+        ? { status: 'current', value: sample.value, label: `${Math.floor(sample.value)}%` }
+        : { status: 'stale', label: 'Stale' }
+}
+
+function getLatest(data: { timestamp: number; value: number }[] | undefined): number | undefined {
+    return getMetricReading(data).value
 }
 
 export function buildRadialChartMetrics(
@@ -21,37 +38,43 @@ export function buildRadialChartMetrics(
     hasGpu = hasInferenceReadyGpu(topology)
 ): RadialMetric[] {
     if (!hasGpu) {
+        const cpu = getLatest(nodeMetrics?.cpuUtilization)
+        const memory = getLatest(nodeMetrics?.memoryUsage)
         return [
             {
-                value: nodeMetrics ? getLatest(nodeMetrics.cpuUtilization) : 0,
+                value: cpu ?? 0,
                 color: CHART_COLORS.CPU,
-                shown: true
+                shown: cpu !== undefined
             },
             {
-                value: nodeMetrics ? getLatest(nodeMetrics.memoryUsage) : 0,
+                value: memory ?? 0,
                 color: CHART_COLORS.MEMORY,
-                shown: true
+                shown: memory !== undefined
             }
         ]
     }
 
-    // Keep the original GPU index (metrics arrays and colors are keyed
-    // positionally to topology.gpus) but omit the rings for any GPU the backend
+    // Keep the original GPU index for colors, joining observations by identity
+    // after inventory changes. Omit the rings for any GPU the backend
     // did not mark inference-ready (when it sends a readiness list).
     return topology.gpus.flatMap((gpu, gpuIdx) => {
         if (!isGpuInferenceReady(gpu, topology.inferenceHardwareIds)) return []
-        const gpuUtil = nodeMetrics?.gpuUtilization[gpuIdx]
-        const gpuVram = nodeMetrics?.gpuVramUsage[gpuIdx]
+        const gpuUtil = getLatest(
+            nodeMetrics?.gpuUtilization.find(entry => entry.id === gpu.id)?.data
+        )
+        const gpuVram = getLatest(
+            nodeMetrics?.gpuVramUsage.find(entry => entry.id === gpu.id)?.data
+        )
         return [
             {
-                value: gpuUtil ? getLatest(gpuUtil.data) : 0,
+                value: gpuUtil ?? 0,
                 color: getGpuColor(gpuIdx),
-                shown: true
+                shown: gpuUtil !== undefined
             },
             {
-                value: gpuVram ? getLatest(gpuVram.data) : 0,
+                value: gpuVram ?? 0,
                 color: getVramColor(gpuIdx),
-                shown: true
+                shown: gpuVram !== undefined
             }
         ]
     })
