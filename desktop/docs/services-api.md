@@ -323,12 +323,13 @@
 | `workloads:unsubscribe` | request (we call) | ⚠️ not called |
 
 **Dynamic / unresolved notify sites (verify by hand — `npm run service-contracts` prints the line numbers):**
-- `method (var)  (broker.go, 5 sites)`
+- `method (var)  (broker.go, 3 sites)`
 - `method (var)  (clustermanager.go)`
 - `method (var)  (errors.go)`
 - `method (var)  (policy.go)`
 - `method (var)  (proxy.go, 2 sites)`
 - `method (var)  (rpcworker.go, 2 sites)`
+- `method (var)  (workload_projection.go, 2 sites)`
 
 ## nvpair-workload-manager
 
