@@ -525,11 +525,11 @@ func (b *Broker) forwardDefaultEngineProxyNotification(profile engineProxyProfil
 // the proxy process rather than to one of its facades, and reports whether it
 // took the method.
 //
-// Both routes here read the engine out of the payload — a workload record
-// carries its own Engine, and a node-activity report is about a peer — so
-// neither needs to know which facade emitted it. That is exactly why they must
-// be handled once per process: dispatching them through each engine's handler
-// in turn would file every workload twice.
+// None of these routes needs to know which facade emitted it: a workload record
+// carries its own Engine, a node-activity report is about a peer, and an error
+// report names its own id. That is exactly why they must be handled once per
+// process: dispatching them through each engine's handler in turn would file
+// every workload twice.
 func (b *Broker) routeProcessScopedProxyNotification(method string, params json.RawMessage) bool {
 	switch {
 	case proxyWorkloadMethods[method]:
@@ -538,6 +538,10 @@ func (b *Broker) routeProcessScopedProxyNotification(method string, params json.
 	case method == noderec.NotifyNodeActivity:
 		b.routeNodeActivity(params)
 		return true
+	case method == methodErrorsReport || method == methodErrorsClear:
+		// The routing listener belongs to the process, so its bind failure
+		// arrives unaddressed.
+		return b.dispatchErrorsNotif(engines.ProxyComponent, method, params)
 	}
 	// Admission is node-wide, like the two routes above.
 	return b.handleAdmissionNotification(method, params)

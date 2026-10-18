@@ -433,6 +433,10 @@ type Proxy struct {
 	// reservation map: the limits are the machine's, not an engine's.
 	admission *admissionController
 
+	// routing is the engine-independent routing listener. It follows the
+	// activated policy and is owned by the process, not by any facade.
+	routing *routingListener
+
 	// selfMu guards what this process has learned about its own node from
 	// discovery: its node id and, per engine, the models it last advertised.
 	// A stopped engine is unregistered from discovery, so this memory is the
@@ -455,6 +459,7 @@ func NewProxy(codec *Codec) *Proxy {
 		runID:    newRunID(),
 		activity: nodeactivity.NewReporter(activityReportInterval),
 	}
+	p.routing = &routingListener{host: p}
 	p.admission = newAdmissionController(
 		func(method string, params any) {
 			if err := p.codec.Notify(method, params); err != nil {
@@ -838,6 +843,7 @@ var modelListClient = &http.Client{
 // because it is shared: closing it per facade would drop another engine's
 // pooled connections to every peer.
 func (p *Proxy) shutdown(ctx context.Context) {
+	p.routing.close(ctx)
 	// Every facade, then the shared transports: the pool is process-wide, so
 	// closing it before a facade has drained would cut that facade's own
 	// in-flight upstream connections.

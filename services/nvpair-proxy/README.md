@@ -249,8 +249,7 @@ the previous policy stays. Until the first request arrives the proxy runs on `no
   engine, model, context bound and capabilities, keeps its first occurrence;
   entries that differ in bounds stay separate). A document without a `version` key is read as version 2,
   so a version-less legacy file with tier entries fails validation because its
-  entries have no `kind`. `routing.listener.enabled` is accepted but has no
-  effect until the unified listener exists.
+  entries have no `kind`.
 - **Hybrid aliases.** The nine names `weak`, `medium`, `strong` and each with a
   `-api` or `-local` suffix are reserved exact model names: matching is
   byte-for-byte after trimming surrounding whitespace, so `weak-api:latest`,
@@ -278,6 +277,35 @@ the previous policy stays. Until the first request arrives the proxy runs on `no
   classified inference route keeps the legacy local-only tier path above,
   unchanged by staged hybrid settings, until the Phase 4 cutover. The cluster
   ingress is not covered; refusing aliases there belongs to Phase 4.
+- **Routing listener.** When the active policy sets `routing.listener.enabled`
+  with a `port`, the process itself (not an engine facade) binds
+  `127.0.0.1:<port>` and serves the hybrid aliases with no engine running. It is
+  off by default, loopback only, and never advertised or exposed to the LAN. It
+  follows `node/set-policy`: a changed port closes and drains only this
+  listener before binding the new one, disabling closes it, and the broker's
+  replay after a proxy restart re-establishes it. A port already in use leaves
+  no listener, never another port, and is reported as the service error
+  `nvpair-proxy:routing-listener-blocked` (`errors:report`, cleared when the
+  listener binds or is disabled); the policy still activates, and replaying it
+  retries the bind. It serves only:
+  - `GET /v1/models`: the synthetic alias records, built from the policy alone,
+    including a tier whose entries are all API. No upstream request is made.
+  - Every inference route any engine profile declares (`POST /v1/chat/completions`,
+    `/v1/completions`, `/v1/embeddings`, `/v1/messages`, `/api/generate`,
+    `/api/chat`, `/api/embeddings`, `/api/embed`): `501`
+    `{"error":...,"code":"feature_unavailable","reason":"routing_listener_not_inference_ready"}`
+    without reading the body, so there is no admission, wake, workload, engine
+    or remote activity. **The listed aliases are not inference-ready until
+    Phase 4.** A query string, including a bare `?`, is `400` `query_not_allowed`.
+
+  Other paths are `404` and other methods `405`. `Host` must be `127.0.0.1` or
+  `localhost` with the bound port, else `403` `host_not_allowed`. A request with
+  an `Origin` header is `403` `origin_not_allowed` unless the header is
+  exactly one of the policy's `routing.listener.allowedOrigins`; for those,
+  responses carry `Access-Control-Allow-Origin` and a preflight (`OPTIONS` with
+  `Access-Control-Request-Method`) is answered `204` for the route's own method
+  and the headers `Content-Type` and `Authorization` only, else `403`
+  `preflight_not_allowed`. Engine facades and their CORS behavior are unchanged.
 - **Routing metadata.** Routed inference responses carry `X-PAIR-Model`,
   `X-PAIR-Engine`, `X-PAIR-Node`, and `X-PAIR-Tier` for a tier request.
   Workloads carry the concrete `model` and, for a tier request,

@@ -5,8 +5,11 @@ package main
 
 import (
 	"encoding/json"
+	"net"
 	"testing"
 	"time"
+
+	"nvpair-shared/errors"
 )
 
 // The broker's table must cover exactly the shared engine set, in the same
@@ -299,5 +302,177 @@ func TestAStrangerOnTheFacadeBlocksEveryEngine(t *testing.T) {
 				t.Fatalf("plan = %+v, want blocked on the occupied facade", got)
 			}
 		})
+	}
+}
+
+// An unaddressed errors:report or errors:clear is the proxy process speaking
+// for itself, as the routing listener does. It must reach the pipeline, stamped
+// with this node, rather than be dropped as an unknown process notification.
+func TestUnaddressedProxyErrorsReachThePipeline(t *testing.T) {
+	const id = "nvpair-proxy:routing-listener-blocked"
+	b := &Broker{nodeID: "local-node"}
+	client, server := net.Pipe()
+	defer client.Close()
+	defer server.Close()
+	b.setErrors(&errorsProcess{peer: NewPeer(NewCodec(client))})
+
+	received := make(chan *Message, 2)
+	go func() {
+		codec := NewCodec(server)
+		for range 2 {
+			msg, err := codec.Read()
+			if err != nil {
+				return
+			}
+			received <- msg
+		}
+	}()
+
+	report, err := json.Marshal(errors.ServiceError{ID: id, Message: "port in use", Severity: "error", Action: "none"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b.forwardProxyProcessNotification(0, 0, "errors:report", report)
+	b.forwardProxyProcessNotification(0, 0, "errors:clear", json.RawMessage(`{"id":"`+id+`"}`))
+
+	for _, want := range []string{"errors:report", "errors:clear"} {
+		select {
+		case msg := <-received:
+			if msg.Method != want {
+				t.Fatalf("forwarded %q, want %q", msg.Method, want)
+			}
+			var got struct {
+				ID        string `json:"id"`
+				NodeID    string `json:"nodeId"`
+				ClearedBy string `json:"clearedBy"`
+			}
+			if err := json.Unmarshal(msg.Params, &got); err != nil {
+				t.Fatalf("decode %s params: %v", want, err)
+			}
+			if got.ID != id {
+				t.Errorf("%s id = %q, want %q", want, got.ID, id)
+			}
+			if want == "errors:report" && got.NodeID != "local-node" {
+				t.Errorf("report nodeId = %q, want the broker's node", got.NodeID)
+			}
+			if want == "errors:clear" && got.ClearedBy != "local-node" {
+				t.Errorf("clear clearedBy = %q, want the broker's node", got.ClearedBy)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("timed out waiting for %s", want)
+		}
+	}
+}
+
+// stickyError returns the cached report for id, or nil.
+func (b *Broker) stickyError(id string) *errors.ServiceError {
+	b.stickyErrorsMu.Lock()
+	defer b.stickyErrorsMu.Unlock()
+	if e, ok := b.stickyErrors[id]; ok {
+		return &e
+	}
+	return nil
+}
+
+// errorsPipe attaches a fresh fake nvpair-errors and returns what it receives.
+func errorsPipe(t *testing.T, b *Broker) <-chan *Message {
+	t.Helper()
+	client, server := net.Pipe()
+	t.Cleanup(func() { _ = client.Close(); _ = server.Close() })
+	b.setErrors(&errorsProcess{peer: NewPeer(NewCodec(client))})
+	received := make(chan *Message, 8)
+	go func() {
+		codec := NewCodec(server)
+		for {
+			msg, err := codec.Read()
+			if err != nil {
+				return
+			}
+			received <- msg
+		}
+	}()
+	return received
+}
+
+// The routing listener's collision report is sent once and nvpair-errors holds
+// errors only in memory, so the broker replays it to a restarted nvpair-errors
+// until the proxy clears it.
+func TestRoutingListenerCollisionSurvivesAnErrorsRestart(t *testing.T) {
+	const id = "nvpair-proxy:routing-listener-blocked"
+	b := &Broker{nodeID: "local-node"}
+	report, err := json.Marshal(errors.ServiceError{ID: id, Message: "port in use", Severity: "error", Action: "none"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wait := func(t *testing.T, ch <-chan *Message, method string) {
+		t.Helper()
+		select {
+		case msg := <-ch:
+			var got errors.ServiceError
+			if err := json.Unmarshal(msg.Params, &got); err != nil {
+				t.Fatalf("decode %s: %v", msg.Method, err)
+			}
+			if msg.Method != method || got.ID != id {
+				t.Fatalf("received %s for %q, want %s for %q", msg.Method, got.ID, method, id)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("timed out waiting for %s", method)
+		}
+	}
+
+	first := errorsPipe(t, b)
+	b.forwardProxyProcessNotification(0, 0, "errors:report", report)
+	wait(t, first, "errors:report")
+
+	restarted := errorsPipe(t, b)
+	b.replayStickyErrors()
+	wait(t, restarted, "errors:report")
+
+	b.forwardProxyProcessNotification(0, 0, "errors:clear", json.RawMessage(`{"id":"`+id+`"}`))
+	wait(t, restarted, "errors:clear")
+	if cached := b.stickyError(id); cached != nil {
+		t.Fatalf("a cleared collision is still cached: %+v", cached)
+	}
+
+	again := errorsPipe(t, b)
+	b.replayStickyErrors()
+	select {
+	case msg := <-again:
+		t.Fatalf("replayed %s after the collision was cleared", msg.Method)
+	case <-time.After(300 * time.Millisecond):
+	}
+}
+
+// Both sticky ids share the one cache and replay.
+func TestStickyErrorsReplayEveryCachedIDInOrder(t *testing.T) {
+	b := &Broker{nodeID: "local-node"}
+	ids := []string{routingListenerBlockedID, ollamaHostAliasBlockedID}
+	for _, id := range ids {
+		b.forwardErrorsReport(errors.ServiceError{ID: id, Message: "m"})
+	}
+	b.forwardErrorsReport(errors.ServiceError{ID: "unrelated:error", Message: "m"})
+
+	received := errorsPipe(t, b)
+	b.replayStickyErrors()
+	var got []string
+	for range ids {
+		select {
+		case msg := <-received:
+			var e errors.ServiceError
+			if err := json.Unmarshal(msg.Params, &e); err != nil {
+				t.Fatal(err)
+			}
+			got = append(got, e.ID)
+		case <-time.After(2 * time.Second):
+			t.Fatalf("replayed %v, want both sticky ids", got)
+		}
+	}
+	if want := []string{"nvpair-proxy:routing-listener-blocked", "ollama-proxy:ollama-host-alias-blocked"}; got[0] != want[0] || got[1] != want[1] {
+		t.Errorf("replayed %v, want %v", got, want)
+	}
+	select {
+	case msg := <-received:
+		t.Errorf("replayed an unrelated report: %s", msg.Params)
+	case <-time.After(200 * time.Millisecond):
 	}
 }

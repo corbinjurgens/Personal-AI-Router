@@ -154,8 +154,8 @@ func TestEngineManagerPortsOllamaHostAliasDiagnostic(t *testing.T) {
 			if alias := b.currentOllamaHostAlias(); alias != (ollamaHostAlias{}) {
 				t.Fatalf("alias claimed configured engine-manager listener: %+v", alias)
 			}
-			if b.ollamaHostAliasError == nil || !strings.Contains(b.ollamaHostAliasError.Message, tc.want) {
-				t.Fatalf("alias warning = %+v, want %q", b.ollamaHostAliasError, tc.want)
+			if warning := b.stickyError(ollamaHostAliasBlockedID); warning == nil || !strings.Contains(warning.Message, tc.want) {
+				t.Fatalf("alias warning = %+v, want %q", warning, tc.want)
 			}
 			for _, defaultPort := range []int{14322, 14323} {
 				if reason := b.reservedOllamaHostAliasPort(defaultPort, nil, nil); reason != "" {
@@ -300,7 +300,7 @@ func TestAliasWarningReplaysAfterErrorsProcessRecovery(t *testing.T) {
 		msg, _ := NewCodec(server).Read()
 		received <- msg
 	}()
-	b.replayOllamaHostAliasError()
+	b.replayStickyErrors()
 	select {
 	case msg := <-received:
 		if msg == nil || msg.Method != methodErrorsReport || !strings.Contains(string(msg.Params), ollamaHostAliasBlockedID) {
@@ -634,9 +634,7 @@ func TestAliasBindFailureReleasesReservationButKeepsWarning(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for failed-alias reservation release")
 	}
-	b.ollamaHostAliasErrorMu.Lock()
-	warning := b.ollamaHostAliasError
-	b.ollamaHostAliasErrorMu.Unlock()
+	warning := b.stickyError(ollamaHostAliasBlockedID)
 	if warning == nil || warning.ID != ollamaHostAliasBlockedID {
 		t.Fatal("bind warning was cleared while releasing the reservation")
 	}
@@ -672,9 +670,7 @@ func TestStaleAliasBindFailureDoesNotReleaseReplacementReservation(t *testing.T)
 	if alias := b.currentOllamaHostAlias(); alias.Port != 16666 {
 		t.Fatalf("stale failure changed replacement alias: %+v", alias)
 	}
-	b.ollamaHostAliasErrorMu.Lock()
-	warning := b.ollamaHostAliasError
-	b.ollamaHostAliasErrorMu.Unlock()
+	warning := b.stickyError(ollamaHostAliasBlockedID)
 	if warning != nil {
 		t.Fatal("stale failure published a warning for the replacement generation")
 	}

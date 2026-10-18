@@ -196,8 +196,8 @@ type Broker struct {
 	ollamaHostAlias                  ollamaHostAlias
 	ollamaProxyGeneration            uint64 // guarded by ollamaHostAliasMu
 	ollamaHostAliasSyncMu            sync.Mutex
-	ollamaHostAliasErrorMu           sync.Mutex
-	ollamaHostAliasError             *errors.ServiceError
+	stickyErrorsMu                   sync.Mutex
+	stickyErrors                     map[string]errors.ServiceError // see stickyErrorIDs
 	ollamaPortReady                  chan struct{}
 	ollamaPortReadyOnce              sync.Once
 	lmstudioProxyGeneration          atomic.Uint64
@@ -1164,7 +1164,7 @@ func (b *Broker) spawnErrors() (supervisedHandle, error) {
 		return nil, err
 	}
 	b.setErrors(ep)
-	b.replayOllamaHostAliasError()
+	b.replayStickyErrors()
 	b.registerService(noderec.RegisterParams{Service: noderec.ServiceErrors, Port: errorsHTTPPort})
 	slog.Info("nvpair-errors started", "path", b.errorsPath, "pid", ep.cmd.Process.Pid)
 	return ep, nil

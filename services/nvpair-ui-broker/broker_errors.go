@@ -8,8 +8,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"slices"
 	"time"
 
+	"nvpair-shared/engines"
 	"nvpair-shared/errors"
 )
 
@@ -178,11 +180,13 @@ func (b *Broker) clearScannerErrors() {
 // don't each need the nil guard — the alternative is every producer's
 // report vanishing with a hard error rather than a benign drop.
 func (b *Broker) forwardErrorsReport(e errors.ServiceError) {
-	if e.ID == ollamaHostAliasBlockedID {
-		copy := e
-		b.ollamaHostAliasErrorMu.Lock()
-		b.ollamaHostAliasError = &copy
-		b.ollamaHostAliasErrorMu.Unlock()
+	if stickyErrorIDs[e.ID] {
+		b.stickyErrorsMu.Lock()
+		if b.stickyErrors == nil {
+			b.stickyErrors = map[string]errors.ServiceError{}
+		}
+		b.stickyErrors[e.ID] = e
+		b.stickyErrorsMu.Unlock()
 	}
 	ep := b.getErrors()
 	if ep == nil {
@@ -199,11 +203,9 @@ func (b *Broker) forwardErrorsReport(e errors.ServiceError) {
 // of that attribution). No-op with a debug log when nvpair-errors is
 // unavailable.
 func (b *Broker) forwardErrorsClear(id string) {
-	if id == ollamaHostAliasBlockedID {
-		b.ollamaHostAliasErrorMu.Lock()
-		b.ollamaHostAliasError = nil
-		b.ollamaHostAliasErrorMu.Unlock()
-	}
+	b.stickyErrorsMu.Lock()
+	delete(b.stickyErrors, id)
+	b.stickyErrorsMu.Unlock()
 	ep := b.getErrors()
 	if ep == nil {
 		slog.Debug("dropping errors:clear — nvpair-errors unavailable", "id", id)
@@ -214,18 +216,37 @@ func (b *Broker) forwardErrorsClear(id string) {
 	}
 }
 
-func (b *Broker) replayOllamaHostAliasError() {
-	b.ollamaHostAliasErrorMu.Lock()
-	defer b.ollamaHostAliasErrorMu.Unlock()
-	if b.ollamaHostAliasError == nil {
-		return
-	}
+// stickyErrorIDs are the reports the broker caches until they are cleared and
+// replays whenever nvpair-errors (re)starts, because nvpair-errors holds errors
+// only in memory and the producer reports the condition once. Both are bind
+// failures their producer does not retry on a timer.
+var stickyErrorIDs = map[string]bool{
+	ollamaHostAliasBlockedID: true,
+	routingListenerBlockedID: true,
+}
+
+// routingListenerBlockedID is the proxy's routing-listener bind failure; the
+// proxy owns the string (routingListenerBlockedID in nvpair-proxy).
+const routingListenerBlockedID = engines.ProxyComponent + ":routing-listener-blocked"
+
+// replayStickyErrors re-sends every cached sticky report to a newly started
+// nvpair-errors, in id order.
+func (b *Broker) replayStickyErrors() {
+	b.stickyErrorsMu.Lock()
+	defer b.stickyErrorsMu.Unlock()
 	ep := b.getErrors()
 	if ep == nil {
 		return
 	}
-	if err := ep.Notify(methodErrorsReport, *b.ollamaHostAliasError); err != nil {
-		slog.Warn("failed to replay OLLAMA_HOST alias warning", "err", err)
+	ids := make([]string, 0, len(b.stickyErrors))
+	for id := range b.stickyErrors {
+		ids = append(ids, id)
+	}
+	slices.Sort(ids)
+	for _, id := range ids {
+		if err := ep.Notify(methodErrorsReport, b.stickyErrors[id]); err != nil {
+			slog.Warn("failed to replay sticky error", "id", id, "err", err)
+		}
 	}
 }
 

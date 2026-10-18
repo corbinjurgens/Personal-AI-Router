@@ -156,6 +156,10 @@ exists. Only a known engine id counts as an address: plenty of unaddressed
 methods contain a colon, so treating `errors:report` as engine `errors` would
 strip a real method down to `report`.
 
+The routing listener (§12.6) belongs to the process, so its `errors:report` and
+`errors:clear` are sent unaddressed; the broker relays them to the error
+pipeline like a facade's.
+
 An unaddressed facade-scoped message resolves to **no** facade. Falling back to
 "the only facade" would work with one engine enabled and misroute silently with
 two.
@@ -575,6 +579,10 @@ One port per facade, demultiplexed on the connection's first byte:
   local engine reported by `node/set-local-backend`, never re-routed onward.
   Inference is admitted first (§12.2).
 
+Separately from the facades, the process may hold one **routing listener**
+(§12.6): loopback only, no cluster mTLS personality, owned by the process rather
+than an engine.
+
 Membership and pins are re-derived per request and on a watch, so joining or
 leaving a cluster needs no restart.
 
@@ -888,3 +896,70 @@ nothing.
 - **Without `regenerate`, or after commit**: the request is cancelled and its
   workload ends `cancelled` with the error `cancelled by request`. A committed
   stream is never re-dispatched, so two models' output is never spliced.
+
+### 12.6 Routing listener
+
+An engine-independent loopback listener that serves the hybrid aliases (§12.3)
+with no engine running. Its configuration is the active policy's
+`routing.listener` (`enabled`, `port`, `allowedOrigins`), off by default. It has
+no engine profile, facade, discovery state or cluster personality, and is never
+advertised to peers.
+
+- **Lifecycle**: `node/set-policy` reconciles it after the revision activates,
+  from the policy the controller then holds. Enabled with a port, it binds
+  `127.0.0.1:<port>` and nothing else; disabled, it is closed. A changed port
+  drains and closes the old listener first, then binds the new one. The drain
+  is bounded to 250 ms (`routingDrainGrace`) and then forced: every handler is
+  instant, so only a stalled client can outlast it, and it must not hold the
+  control loop. A request that declares a body is answered with
+  `Connection: close`, because no handler reads a body and net/http would
+  otherwise read the unread body before sending the answer. Only the
+  listener this code owns is touched; facades are unaffected. Process shutdown
+  drains it before the facades and a later reconcile does nothing. A reconcile
+  that finds the configured port already served is a no-op, so the broker's
+  replay after a proxy restart re-establishes the listener without a new push.
+- **Collision**: a failed bind leaves no listener, never picks another port,
+  logs a warning and sends the unaddressed `errors:report`
+  `nvpair-proxy:routing-listener-blocked` (severity `error`, action `none`).
+  The proxy reports once and runs no retry timer, so the broker caches the
+  report until the matching `errors:clear` and replays it to a restarted
+  `nvpair-errors`, as it does for the OLLAMA_HOST alias warning.
+  The revision still activates and acknowledges, so an unrelated setting is not
+  held back by a port clash. Any later reconcile retries the bind. A bind,
+  a no-op reconcile or a disable sends `errors:clear` for the same id the first
+  time it is not blocked in this process, which also clears an error a previous
+  process left in the pipeline.
+- **Request order**: `Host`, then `Origin`, then route and method, then (for an
+  inference route) the query check, then the refusal. The first failing step
+  answers; none reads the body or touches a facade, admission, discovery or the
+  scheduler.
+  - `Host` must be `127.0.0.1` or `localhost` (case-insensitive) with exactly
+    the bound port, else `403` `host_not_allowed`. This resists DNS rebinding.
+  - Any `Origin` header (including `null`, an empty value or repeats) is `403`
+    `origin_not_allowed` unless there is exactly one and it equals an entry of
+    `allowedOrigins` byte for byte. The entries are read from the active policy
+    per request, so a changed list needs no rebind. An allowed origin gets
+    `Access-Control-Allow-Origin: <origin>` on every response; `Vary: Origin` is
+    always set. Engine CORS is not consulted.
+  - `GET /v1/models` answers `200` `{"object":"list","data":[...]}` from
+    `hybridAliasRecords` over the active policy, `[]` when none; a query string
+    on it is ignored.
+  - A route is an inference route when any engine profile classifies the path as
+    a `POST` inference route (`isInferenceRequest`), so the set is the facades'
+    union. Another method on a known path is `405` with `Allow`; an unknown path
+    is `404`. A query string or a bare `?` on an inference route is `400`
+    `query_not_allowed`. Otherwise `501`
+    `{"error","code":"feature_unavailable","reason":"routing_listener_not_inference_ready"}`.
+    Phase 4 replaces this refusal with dispatch; until then the aliases are
+    listed but not inference-ready.
+  - `OPTIONS` with `Origin` and `Access-Control-Request-Method` on a known path
+    is a preflight: `204` with `Access-Control-Allow-Methods` (the route's
+    method and `OPTIONS`), `Access-Control-Allow-Headers: Content-Type,
+    Authorization` and `Access-Control-Max-Age`, provided the requested method is
+    the route's own and every requested header is one of those two; else `403`
+    `preflight_not_allowed`. An `OPTIONS` that is not a preflight is `405`.
+- **Alias parsing**: the listener refuses every inference request regardless of
+  the model it names, so it does not parse bodies and shares no alias-parsing
+  code with the facades; `aliasRejection` and `requestAliasRejection` (§12.3)
+  remain the only place a model name is judged. Phase 4 decides what the
+  listener does with a named model.

@@ -65,6 +65,7 @@ func (p *Proxy) applySetPolicy(params json.RawMessage) (string, error) {
 	if err := p.admission.activatePolicy(policy); err != nil {
 		return "", err
 	}
+	p.routing.reconcile()
 	slog.Info("node policy applied", "revision", policy.Revision,
 		"profiles", len(policy.Profiles), "tiers", len(policy.Tiers),
 		"max_resident", policy.Admission.MaxResidentModels,
