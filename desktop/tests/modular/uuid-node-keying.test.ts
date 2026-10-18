@@ -6,10 +6,8 @@ import { describe, expect, it, vi } from 'vitest'
 vi.mock('electron', () => ({ BrowserWindow: { getAllWindows: () => [] } }))
 vi.mock('@/electron/window', () => ({ createOverviewWindow: vi.fn() }))
 
-import {
-    getModularBridgeState,
-    parseWorkloadsInitial
-} from '@/electron/service-bridge/modular-state'
+import { getModularBridgeState } from '@/electron/service-bridge/modular-state'
+import { parseWorkloadsInitial } from '@/electron/service-bridge/workload-projection'
 
 // The bridge keys every node by the backend's stable per-host UUID; the hostname
 // is display only. These tests lock in the two behaviours that migration exists
