@@ -452,6 +452,282 @@ func TestPeerServiceClientAuthorityChangesPreserveConnectionCap(t *testing.T) {
 	test("reusable readmission", true, func(route *PeerServiceRoute) { route.Incarnation = "v2" })
 }
 
+// serviceSlotFixture holds peerMaxConnsPerHost streaming responses open to one
+// peer service, over direct connections or over reverse sessions only.
+type serviceSlotFixture struct {
+	*serviceClientFixture
+	client     *http.Client
+	streams    []*http.Response
+	cancels    []context.CancelFunc
+	dispatches atomic.Int32
+}
+
+func newServiceSlotFixture(t *testing.T, reverse bool) *serviceSlotFixture {
+	t.Helper()
+	release := make(chan struct{})
+	s := &serviceSlotFixture{}
+	s.serviceClientFixture = newServiceClientFixture(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		s.dispatches.Add(1)
+		if r.URL.Path != "/stream" {
+			writeServiceResponse(t, w, "ok")
+			return
+		}
+		writeServiceResponse(t, w, "start-")
+		w.(http.Flusher).Flush()
+		select {
+		case <-release:
+		case <-r.Context().Done():
+		}
+	}))
+	t.Cleanup(func() {
+		close(release)
+		for _, response := range s.streams {
+			if err := response.Body.Close(); err != nil {
+				t.Errorf("close held stream: %v", err)
+			}
+		}
+		for _, cancel := range s.cancels {
+			cancel()
+		}
+	})
+	if reverse {
+		s.direct = func(context.Context, noderec.ServiceKey) (net.Conn, error) { return nil, errors.New("blocked") }
+	}
+	s.client = s.adapter.Client("peer", noderec.ServiceCluster)
+	s.client.Timeout = 0
+	for range peerMaxConnsPerHost {
+		ctx, cancel := context.WithCancel(context.Background())
+		s.cancels = append(s.cancels, cancel)
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.url+"/stream", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		response, err := s.client.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		s.streams = append(s.streams, response)
+	}
+	wantDirect, wantReverse := peerMaxConnsPerHost, 0
+	if reverse {
+		// The first stream's failed direct attempt defers direct probing.
+		wantDirect, wantReverse = 1, peerMaxConnsPerHost
+	}
+	if direct, reverse := s.dialCounts(); direct != wantDirect || reverse != wantReverse {
+		t.Fatalf("saturating dials direct=%d reverse=%d, want %d/%d", direct, reverse, wantDirect, wantReverse)
+	}
+	if got := s.occupiedSlots(); got != peerMaxConnsPerHost {
+		t.Fatalf("occupied slots after saturation = %d, want %d", got, peerMaxConnsPerHost)
+	}
+	return s
+}
+
+func (s *serviceSlotFixture) dialCounts() (int, int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.directCalls[noderec.ServiceCluster], s.reverseCalls[noderec.ServiceCluster]
+}
+
+func (s *serviceSlotFixture) occupiedSlots() int {
+	s.adapter.mu.Lock()
+	defer s.adapter.mu.Unlock()
+	return len(s.adapter.entries[peerServiceKey{"peer", noderec.ServiceCluster}].slots)
+}
+
+type serviceRoundTripResult struct {
+	response *http.Response
+	err      error
+}
+
+// roundTrip dispatches through the adapter's transport, so the result carries
+// the transport's own error rather than http.Client's wrapping.
+func (s *serviceSlotFixture) roundTrip(t *testing.T, ctx context.Context) <-chan serviceRoundTripResult {
+	t.Helper()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.url, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	completed := make(chan serviceRoundTripResult, 1)
+	go func() {
+		response, err := s.client.Transport.RoundTrip(req)
+		completed <- serviceRoundTripResult{response, err}
+	}()
+	return completed
+}
+
+// requireNoDispatch checks that a refused request reserved no slot, dialed
+// nothing and reached no handler.
+func (s *serviceSlotFixture) requireNoDispatch(t *testing.T, direct, reverse int) {
+	t.Helper()
+	if gotDirect, gotReverse := s.dialCounts(); gotDirect != direct || gotReverse != reverse {
+		t.Fatalf("refused request dialed: direct=%d reverse=%d, want %d/%d", gotDirect, gotReverse, direct, reverse)
+	}
+	if got := s.dispatches.Load(); got != int32(peerMaxConnsPerHost) {
+		t.Fatalf("dispatches = %d, want %d", got, peerMaxConnsPerHost)
+	}
+	if got := s.occupiedSlots(); got != peerMaxConnsPerHost {
+		t.Fatalf("occupied slots = %d, want %d", got, peerMaxConnsPerHost)
+	}
+}
+
+// requireServiceOK reads a successful response to completion and closes it.
+func requireServiceOK(t *testing.T, got serviceRoundTripResult) {
+	t.Helper()
+	if got.err != nil {
+		t.Fatalf("request failed: %v", got.err)
+	}
+	defer got.response.Body.Close()
+	body, err := io.ReadAll(got.response.Body)
+	if err != nil || got.response.StatusCode != http.StatusOK || string(body) != "ok" {
+		t.Fatalf("response = %d %q, %v; want 200 \"ok\"", got.response.StatusCode, body, err)
+	}
+}
+
+func requireSlotOccupied(t *testing.T, got serviceRoundTripResult) {
+	t.Helper()
+	if got.response != nil {
+		got.response.Body.Close()
+		t.Fatal("occupied request returned a response")
+	}
+	var unavailable *ReverseUnavailableError
+	if !errors.Is(got.err, ErrPeerSlotOccupied) || errors.As(got.err, &unavailable) {
+		t.Fatalf("error = %v, want ErrPeerSlotOccupied distinct from ReverseUnavailableError", got.err)
+	}
+}
+
+func TestPeerServiceClientSlotWait(t *testing.T) {
+	const bound = 250 * time.Millisecond
+	for _, path := range []struct {
+		name    string
+		reverse bool
+	}{{"direct", false}, {"reverse", true}} {
+		t.Run(path.name, func(t *testing.T) {
+			t.Run("nonblocking request is occupied immediately", func(t *testing.T) {
+				s := newServiceSlotFixture(t, path.reverse)
+				direct, reverse := s.dialCounts()
+				started := time.Now()
+				select {
+				case got := <-s.roundTrip(t, WithPeerSlotWait(context.Background(), 0)):
+					requireSlotOccupied(t, got)
+				case <-time.After(5 * time.Second):
+					t.Fatal("nonblocking request waited for a slot")
+				}
+				if elapsed := time.Since(started); elapsed >= bound {
+					t.Fatalf("nonblocking request took %v, want well under %v", elapsed, bound)
+				}
+				s.requireNoDispatch(t, direct, reverse)
+			})
+
+			t.Run("bounded request is occupied at its deadline", func(t *testing.T) {
+				s := newServiceSlotFixture(t, path.reverse)
+				direct, reverse := s.dialCounts()
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				started := time.Now()
+				got := <-s.roundTrip(t, WithPeerSlotWait(ctx, bound))
+				elapsed := time.Since(started)
+				requireSlotOccupied(t, got)
+				if elapsed < bound || ctx.Err() != nil {
+					t.Fatalf("bounded request failed after %v (context %v), want occupied at %v", elapsed, ctx.Err(), bound)
+				}
+				s.requireNoDispatch(t, direct, reverse)
+			})
+
+			t.Run("bounded request takes a slot freed within its wait", func(t *testing.T) {
+				s := newServiceSlotFixture(t, path.reverse)
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				waiting := &serviceSlotWaitContext{Context: ctx, entered: make(chan struct{})}
+				completed := s.roundTrip(t, WithPeerSlotWait(waiting, 4*time.Second))
+				select {
+				case <-waiting.entered:
+				case got := <-completed:
+					t.Fatalf("bounded request completed while every slot was held: %v", got.err)
+				}
+				if err := s.streams[0].Body.Close(); err != nil {
+					t.Fatal(err)
+				}
+				requireServiceOK(t, <-completed)
+				if got := s.occupiedSlots(); got != peerMaxConnsPerHost-1 {
+					t.Fatalf("occupied slots after completion = %d, want %d", got, peerMaxConnsPerHost-1)
+				}
+			})
+
+			t.Run("default request still blocks until a slot frees", func(t *testing.T) {
+				s := newServiceSlotFixture(t, path.reverse)
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				waiting := &serviceSlotWaitContext{Context: ctx, entered: make(chan struct{})}
+				completed := s.roundTrip(t, waiting)
+				select {
+				case <-waiting.entered:
+				case got := <-completed:
+					t.Fatalf("default request completed while every slot was held: %v", got.err)
+				}
+				// Outlast the bounded case: the default has no occupied result.
+				select {
+				case got := <-completed:
+					t.Fatalf("default request stopped waiting before a slot freed: %v", got.err)
+				case <-time.After(2 * bound):
+				}
+				if got := s.dispatches.Load(); got != int32(peerMaxConnsPerHost) {
+					t.Fatalf("dispatches while waiting = %d, want %d", got, peerMaxConnsPerHost)
+				}
+				if err := s.streams[0].Body.Close(); err != nil {
+					t.Fatal(err)
+				}
+				requireServiceOK(t, <-completed)
+			})
+
+			t.Run("canceled wait returns the context error and takes no slot", func(t *testing.T) {
+				s := newServiceSlotFixture(t, path.reverse)
+				direct, reverse := s.dialCounts()
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				waiting := &serviceSlotWaitContext{Context: ctx, entered: make(chan struct{})}
+				completed := s.roundTrip(t, WithPeerSlotWait(waiting, 4*time.Second))
+				select {
+				case <-waiting.entered:
+				case got := <-completed:
+					t.Fatalf("bounded request completed while every slot was held: %v", got.err)
+				}
+				cancel()
+				got := <-completed
+				if got.response != nil {
+					got.response.Body.Close()
+				}
+				if !errors.Is(got.err, context.Canceled) || errors.Is(got.err, ErrPeerSlotOccupied) {
+					t.Fatalf("canceled wait error = %v, want context.Canceled", got.err)
+				}
+				s.requireNoDispatch(t, direct, reverse)
+			})
+
+			t.Run("canceled and closed streams release their slots", func(t *testing.T) {
+				s := newServiceSlotFixture(t, path.reverse)
+				s.cancels[0]()
+				if _, err := io.ReadAll(s.streams[0].Body); !errors.Is(err, context.Canceled) {
+					t.Fatalf("canceled stream read error = %v, want context.Canceled", err)
+				}
+				if got := s.occupiedSlots(); got != peerMaxConnsPerHost-1 {
+					t.Fatalf("occupied slots after cancellation = %d, want %d", got, peerMaxConnsPerHost-1)
+				}
+				if err := s.streams[1].Body.Close(); err != nil {
+					t.Fatal(err)
+				}
+				if got := s.occupiedSlots(); got != peerMaxConnsPerHost-2 {
+					t.Fatalf("occupied slots after Close = %d, want %d", got, peerMaxConnsPerHost-2)
+				}
+				for range 2 {
+					requireServiceOK(t, <-s.roundTrip(t, WithPeerSlotWait(context.Background(), 0)))
+				}
+				if got := s.occupiedSlots(); got != peerMaxConnsPerHost-2 {
+					t.Fatalf("occupied slots after nonblocking requests = %d, want %d", got, peerMaxConnsPerHost-2)
+				}
+			})
+		})
+	}
+}
+
 func TestPeerServiceClientPeriodicDirectRecovery(t *testing.T) {
 	f := newServiceClientFixture(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { writeServiceResponse(t, w, "ok") }))
 	reachable := f.direct

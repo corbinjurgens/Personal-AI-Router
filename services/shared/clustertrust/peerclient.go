@@ -34,6 +34,8 @@ const (
 	// receiver in the first place. Capped, a burst queues on warm connections
 	// instead: a warm POST to these endpoints is single-digit milliseconds, so
 	// hundreds of queued frames drain well inside the per-request timeout.
+	// PeerServiceClient applies the same bound to each peer and service; a
+	// request can limit its wait for a slot with WithPeerSlotWait.
 	peerMaxConnsPerHost = 8
 	// peerMaxIdleConnsPerHost keeps the whole cap warm between bursts, so a
 	// steady trickle of events never re-handshakes.
