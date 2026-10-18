@@ -4,9 +4,25 @@
 package engines
 
 import (
+	"slices"
 	"strings"
 	"testing"
 )
+
+func TestDescriptorOpenAIChatProtocol(t *testing.T) {
+	if ProtocolOpenAIChat != "openai-chat" || !slices.Contains(Protocols(), ProtocolOpenAIChat) {
+		t.Fatal("chat-only protocol missing from accepted vocabulary")
+	}
+	d := validDescriptor()
+	d.Protocols = []string{ProtocolOpenAIChat}
+	if err := d.Validate(); err != nil {
+		t.Fatalf("chat-only descriptor rejected: %v", err)
+	}
+	d.Protocols = []string{ProtocolOpenAIV1}
+	if err := d.Validate(); err != nil {
+		t.Fatalf("existing OpenAI v1 descriptor rejected: %v", err)
+	}
+}
 
 func TestValidID(t *testing.T) {
 	for _, id := range []string{"ollama", "llamacpp-custom", "llama.cpp_2", "A1"} {

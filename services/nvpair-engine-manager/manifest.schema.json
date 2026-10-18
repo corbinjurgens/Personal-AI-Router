@@ -13,7 +13,7 @@
       "type": "array",
       "uniqueItems": true,
       "items": {
-        "enum": ["ollama-api", "openai-v1", "anthropic-messages", "llamacpp-router"]
+        "enum": ["ollama-api", "openai-v1", "openai-chat", "anthropic-messages", "llamacpp-router"]
       }
     },
     "model_naming": {

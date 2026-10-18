@@ -1,0 +1,34 @@
+{
+  "$schema": "../../manifest.schema.json",
+  "engine": "strata",
+  "display_name": "Strata",
+  "manifest_version": 1,
+  "family": "strata",
+  "protocols": ["openai-chat"],
+  "model_naming": "exact",
+  "runtime": {
+    "mode": "process",
+    "bin": "/REPLACE_WITH_ABSOLUTE_PATH/python",
+    "args": ["/REPLACE_WITH_ABSOLUTE_PATH/server.py", "--engine", "strata", "--config", "/REPLACE_WITH_ABSOLUTE_PATH/config.json", "--host", "127.0.0.1", "--port", "{port}", "--lazy"],
+    "bind": "127.0.0.1",
+    "port": 18082,
+    "ready": { "http": "http://127.0.0.1:{port}/health", "status": 200, "timeout_s": 60, "json_match": { "field": "service", "value": "strata" } },
+    "health": { "http": "http://127.0.0.1:{port}/health", "status": 200, "interval_s": 5, "json_match": { "field": "service", "value": "strata" } },
+    "stop": { "signal": "term", "grace_s": 10 }
+  },
+  "platforms": {
+    "windows/amd64": { "detect": ["/REPLACE_WITH_ABSOLUTE_PATH/server.py"] },
+    "darwin/arm64": { "detect": ["/REPLACE_WITH_ABSOLUTE_PATH/server.py"] },
+    "linux/amd64": { "detect": ["/REPLACE_WITH_ABSOLUTE_PATH/server.py"] }
+  },
+  "operations": {
+    "load": { "action": "load_model", "response_timeout_s": 600 },
+    "unload": { "action": "unload_model", "response_timeout_s": 30 }
+  },
+  "actions": {
+    "list_models": { "http": { "method": "GET", "path": "/v1/models" }, "result": { "array": "data", "field": "id" } },
+    "loaded_models": { "http": { "method": "GET", "path": "/v1/models" }, "result": { "array": "data", "field": "id", "match": { "field": "status.value", "in": ["loaded"] } } },
+    "load_model": { "http": { "method": "POST", "path": "/v1/load", "body_schema": { "model": "string" } } },
+    "unload_model": { "http": { "method": "POST", "path": "/v1/unload", "body_schema": { "model": "string" } } }
+  }
+}
