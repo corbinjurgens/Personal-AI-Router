@@ -9,7 +9,9 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"os"
 	"os/exec"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -17,6 +19,7 @@ import (
 	"nvpair-shared/applog"
 	"nvpair-shared/engines"
 	"nvpair-shared/jsonrpc"
+	"nvpair-shared/nodepolicy"
 	"nvpair-shared/noderec"
 	"nvpair-ui-broker/relay"
 )
@@ -40,6 +43,12 @@ type proxyProcess struct {
 	stdin io.WriteCloser
 	peer  *Peer
 	done  chan struct{}
+
+	// credentialRefs is the provider credential reference set this process was
+	// launched with, sorted. Its environment holds these and no other name in
+	// the reserved namespace, so a policy that configures another set needs a
+	// new process.
+	credentialRefs []nodepolicy.CredentialRef
 
 	// bringUpDone publishes listenerOnly after facade bring-up finishes. Until
 	// then a listener change must leave the in-flight spawn alone.
@@ -117,17 +126,25 @@ func (p *proxyProcess) ReadyParams(engine string) json.RawMessage {
 	return p.facadeState[engine].params
 }
 
-// startProxy spawns nvpair-proxy with the broker's current log level, hides the
-// console window on Windows, and runs the peer read pump to capture each
-// facade's "ready" notification (and thus its bound port). The process starts
-// with no facade; the caller enables them. onNotify (may be nil) is invoked for
-// every notification the proxy emits so the broker can forward its event
-// stream. Proxy stderr goes to the broker's non-blocking sink (see
-// stderrsink.go), so a stalled reader cannot block the proxy's exit.
-func startProxy(name, binaryPath, logLevel string, relayDir *relay.Directory, onNotify func(method string, params json.RawMessage), extraArgs ...string) (*proxyProcess, error) {
+// startProxy spawns nvpair-proxy with the broker's current log level and an
+// environment that keeps only the credential references refs from the reserved
+// provider-secret namespace, hides the console window on Windows, and runs the
+// peer read pump to capture each facade's "ready" notification (and thus its
+// bound port). An environment that cannot be built fails the launch before any
+// process starts. The process starts with no facade; the caller enables them.
+// onNotify (may be nil) is invoked for every notification the proxy emits so
+// the broker can forward its event stream. Proxy stderr goes to the broker's
+// non-blocking sink (see stderrsink.go), so a stalled reader cannot block the
+// proxy's exit.
+func startProxy(name, binaryPath, logLevel string, refs []nodepolicy.CredentialRef, relayDir *relay.Directory, onNotify func(method string, params json.RawMessage), extraArgs ...string) (*proxyProcess, error) {
+	env, err := proxyEnv(os.Environ(), refs)
+	if err != nil {
+		return nil, err
+	}
 	args := append([]string{"--log-level", logLevel}, extraArgs...)
 	cmd := exec.Command(binaryPath, args...)
 	configureSubprocess(cmd)
+	cmd.Env = env
 
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
@@ -152,6 +169,8 @@ func startProxy(name, binaryPath, logLevel string, relayDir *relay.Directory, on
 		done:     make(chan struct{}),
 		onNotify: onNotify,
 		relayDir: relayDir,
+		// Compared with the policy by proxyCredentialsStale.
+		credentialRefs: refs,
 	}
 	pp.attachPeer(readWriter{stdout, stdin})
 
@@ -437,6 +456,49 @@ func (b *Broker) stopProxySupervisorLocked() {
 	b.clearProxyHandles()
 }
 
+// credentialRefs is the sorted set of provider credential references the
+// policy configures, one per routing account.
+func credentialRefs(p nodepolicy.Policy) []nodepolicy.CredentialRef {
+	refs := make([]nodepolicy.CredentialRef, 0, len(p.Routing.Accounts))
+	for _, a := range p.Routing.Accounts {
+		refs = append(refs, a.Credential)
+	}
+	slices.Sort(refs)
+	return slices.Compact(refs)
+}
+
+// credentialRefsDiffer reports whether two policies configure different
+// reference sets.
+func credentialRefsDiffer(a, b nodepolicy.Policy) bool {
+	return !slices.Equal(credentialRefs(a), credentialRefs(b))
+}
+
+// proxyCredentialRefs snapshots the persisted policy's references for a proxy
+// launch.
+func (b *Broker) proxyCredentialRefs() []nodepolicy.CredentialRef {
+	r := b.nodePolicyRuntime()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return credentialRefs(r.current)
+}
+
+// proxyCredentialsStale reports whether pp was launched with another reference
+// set than the persisted policy now configures.
+func (b *Broker) proxyCredentialsStale(pp *proxyProcess) bool {
+	return !slices.Equal(pp.credentialRefs, b.proxyCredentialRefs())
+}
+
+// restartProxyForCredentialsLocked replaces the running proxy, whose
+// environment holds a stale reference set, through the same stop and start a
+// listener change uses, so it spends none of the crash restart budget. Caller
+// holds proxySupMu.
+func (b *Broker) restartProxyForCredentialsLocked() {
+	slog.Info("restarting the proxy for a changed provider credential reference set")
+	// Phase 4 withdraws the egress lease here, before the old proxy stops.
+	b.stopProxySupervisorLocked()
+	b.startProxySupervisorLocked()
+}
+
 // shutdownProxySupervision stops the proxy for good. Idempotent.
 func (b *Broker) shutdownProxySupervision() {
 	b.proxySupClosing.Store(true)
@@ -485,9 +547,11 @@ func (b *Broker) resumeProxySupervisionLocked() {
 // reconcileProxySupervisionNow is one pass of reconcileProxySupervision,
 // through the same supervisor Serve starts rather than a second path.
 //
-// A serving facade consumes the request without changing its lifecycle. An
-// unfinished spawn or a supervisor still recovering defers it until publication
-// wakes the worker. Otherwise an enabled listener starts a missing proxy, and a
+// An unfinished spawn or a supervisor still recovering defers the request until
+// publication wakes the worker. A proxy that stays, because a facade is serving
+// or the listener is enabled, keeps its lifecycle unless it was launched with a
+// credential reference set the policy no longer configures, in which case it
+// is replaced once. Otherwise an enabled listener starts a missing proxy, and a
 // disabled listener stops a process whose bring-up yielded no facades.
 func (b *Broker) reconcileProxySupervisionNow() bool {
 	b.proxySupMu.Lock()
@@ -507,11 +571,16 @@ func (b *Broker) reconcileProxySupervisionNow() bool {
 	}
 	b.proxySupDirty = false
 	b.proxySupWorkMu.Unlock()
-	if b.proxySupPhase != proxySupLive || (sup != nil && !exhausted && !pp.listenerOnly.Load()) {
+	if b.proxySupPhase != proxySupLive {
 		return true
 	}
+	running := sup != nil && !exhausted
 	switch listener := b.listenerNeedsProxy(); {
-	case listener && (sup == nil || exhausted):
+	case running && (listener || !pp.listenerOnly.Load()):
+		if b.proxyCredentialsStale(pp) {
+			b.restartProxyForCredentialsLocked()
+		}
+	case listener:
 		if sup != nil {
 			b.stopProxySupervisorLocked()
 		}

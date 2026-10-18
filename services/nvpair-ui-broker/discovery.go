@@ -404,6 +404,7 @@ func startScanner(
 ) (*scannerProcess, error) {
 	cmd := exec.Command(binaryPath, append([]string{"--log-level", logLevel}, extraArgs...)...)
 	configureSubprocess(cmd)
+	cmd.Env = workerEnv()
 
 	stdin, err := cmd.StdinPipe()
 	if err != nil {

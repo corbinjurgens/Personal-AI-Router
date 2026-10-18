@@ -90,6 +90,7 @@ func startErrors(binaryPath, logLevel string, relayDir *relay.Directory, onUpdat
 	args := append([]string{"--peer-sync", "--log-level", logLevel}, extraArgs...)
 	cmd := exec.Command(binaryPath, args...)
 	configureSubprocess(cmd)
+	cmd.Env = workerEnv()
 
 	stdin, err := cmd.StdinPipe()
 	if err != nil {

@@ -7,11 +7,14 @@ import (
 	"fmt"
 	"os"
 	"testing"
+
+	"nvpair-shared/secretenv/secretenvtest"
 )
 
 // Bare broker fixtures also consult the settings journal during startup. Keep
 // all default app-data lookups away from the developer's live configuration.
 func TestMain(m *testing.M) {
+	secretenvtest.RunChild()
 	if len(os.Args) == 2 && os.Args[1] == shutdownIgnoringChildArg {
 		runShutdownIgnoringChild()
 		return
