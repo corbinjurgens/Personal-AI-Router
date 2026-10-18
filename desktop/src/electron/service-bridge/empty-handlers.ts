@@ -31,9 +31,9 @@ import {
 import {
     getModularBridgeState,
     isUpstreamUnreachableError,
-    parseServiceErrors,
-    parseWorkloadsInitial
+    parseServiceErrors
 } from './modular-state'
+import { parseWorkloadsInitial } from './workload-projection'
 
 import type { JsonObject, JsonValue } from './json-rpc-client'
 import { emptyInvite, parseClusterNodes, parseInvite, parseNodeIdentity } from './cluster-json'

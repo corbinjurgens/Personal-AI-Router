@@ -5,7 +5,7 @@
 import { act, createElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { parseWorkloadsInitial } from '@/electron/service-bridge/modular-state'
+import { parseWorkloadsInitial } from '@/electron/service-bridge/workload-projection'
 import {
     nodeTargetParams,
     parseAvailabilityChange,

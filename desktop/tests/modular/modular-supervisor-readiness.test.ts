@@ -63,9 +63,12 @@ vi.mock('@/electron/service-bridge/modular-state', () => ({
     getModularBridgeState: () => mocks.bridgeState,
     isUpstreamUnreachableError: () => false,
     parseServiceErrors: () => [],
-    parseWorkloadsInitial: () => [],
     PROXY_ENGINES: ['ollama', 'lm-studio'],
     PROXY_NODE_SOURCES: ['ollama-proxy', 'lmstudio-proxy']
+}))
+
+vi.mock('@/electron/service-bridge/workload-projection', () => ({
+    parseWorkloadsInitial: () => []
 }))
 
 import {

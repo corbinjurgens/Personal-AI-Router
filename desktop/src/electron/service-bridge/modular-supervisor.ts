@@ -19,9 +19,9 @@ import { currentPlatform } from '@/shared/utils/platform'
 import {
     getModularBridgeState,
     isUpstreamUnreachableError,
-    parseServiceErrors,
-    parseWorkloadsInitial
+    parseServiceErrors
 } from './modular-state'
+import { parseWorkloadsInitial } from './workload-projection'
 import {
     isProxyEngine,
     proxyEngineFromManagerId,

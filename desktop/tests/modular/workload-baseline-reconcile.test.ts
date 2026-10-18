@@ -17,10 +17,8 @@ vi.mock('@/electron/service-bridge/broadcaster', () => ({
     }
 }))
 
-import {
-    getModularBridgeState,
-    parseWorkloadsInitial
-} from '@/electron/service-bridge/modular-state'
+import { getModularBridgeState } from '@/electron/service-bridge/modular-state'
+import { parseWorkloadsInitial } from '@/electron/service-bridge/workload-projection'
 
 const ORIGIN = 'uuid-reconcile'
 
