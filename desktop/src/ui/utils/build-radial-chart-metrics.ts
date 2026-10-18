@@ -12,11 +12,21 @@ import { hasInferenceReadyGpu, isGpuInferenceReady } from '@/ui/utils/gpu-infere
 // existing render/poll cadence checks the actual observation timestamp.
 const MAX_SAMPLE_AGE_MS = 10_000
 
-function getLatest(data: { timestamp: number; value: number }[] | undefined): number | undefined {
+export function getMetricReading(
+    data: { timestamp: number; value: number }[] | undefined,
+    now = Date.now()
+): { status: 'current' | 'stale' | 'unknown'; value?: number; label: string } {
     const sample = data?.[data.length - 1]
-    if (!sample || !Number.isFinite(sample.value)) return undefined
-    const age = Date.now() - sample.timestamp
-    return age >= 0 && age <= MAX_SAMPLE_AGE_MS ? sample.value : undefined
+    if (!sample || !Number.isFinite(sample.value)) return { status: 'unknown', label: '--' }
+    const age = now - sample.timestamp
+    if (!Number.isFinite(age) || age < 0) return { status: 'unknown', label: '--' }
+    return age <= MAX_SAMPLE_AGE_MS
+        ? { status: 'current', value: sample.value, label: `${Math.floor(sample.value)}%` }
+        : { status: 'stale', label: 'Stale' }
+}
+
+function getLatest(data: { timestamp: number; value: number }[] | undefined): number | undefined {
+    return getMetricReading(data).value
 }
 
 export function buildRadialChartMetrics(

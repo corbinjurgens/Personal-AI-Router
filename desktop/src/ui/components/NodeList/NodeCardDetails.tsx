@@ -20,7 +20,7 @@ import { formatBytes } from '@/ui/utils/formatters'
 import { CHART_COLORS } from '@/ui/constants/colors'
 import NodePerformance from './NodePerformance'
 import NodeChartLegend from './NodeChartLegend'
-import { buildRadialChartMetrics } from '@/ui/utils/build-radial-chart-metrics'
+import { buildRadialChartMetrics, getMetricReading } from '@/ui/utils/build-radial-chart-metrics'
 import { hasInferenceReadyGpu, isGpuInferenceReady } from '@/ui/utils/gpu-inference'
 import NodeEnginesInline from './NodeEnginesInline'
 import NodeEngineSettings from './NodeEngineSettings'
@@ -57,28 +57,28 @@ function NodeCardDetails({ node }: NodeCardDetailsProps) {
     const [isNarrow, setIsNarrow] = useState(false)
     const resizeRafRef = useRef(0)
 
-    const chartMetrics = useMemo(
-        () => buildRadialChartMetrics(node.topology, nodeMetrics, hasGpu),
-        [hasGpu, node.topology, nodeMetrics]
-    )
+    // Recheck age on existing renders, including expand/resume, without a timer.
+    const now = Date.now()
+    const chartMetrics = buildRadialChartMetrics(node.topology, nodeMetrics, hasGpu)
 
     const metricsReady = hasFirstMetrics(node, nodeMetrics)
-
-    const getLatestValue = (data: { timestamp: number; value: number }[]) => {
-        if (data.length === 0) return 0
-        return data[data.length - 1].value ?? 0
-    }
 
     const gpuInfo: GpuInfo[] = useMemo(() => {
         if (!hasGpu) return []
 
-        // Keep the original index (metrics/colors are positional to
-        // topology.gpus) but drop any GPU the backend did not mark
+        // Keep the original index for colors, join metrics by GPU identity,
+        // and drop any GPU the backend did not mark
         // inference-ready so the legend mirrors the radial rings exactly.
         return node.topology.gpus.flatMap((gpu, index) => {
             if (!isGpuInferenceReady(gpu, node.topology.inferenceHardwareIds)) return []
-            const gpuUtilData = nodeMetrics?.gpuUtilization[index]
-            const gpuVramData = nodeMetrics?.gpuVramUsage[index]
+            const usage = getMetricReading(
+                nodeMetrics?.gpuUtilization.find(entry => entry.id === gpu.id)?.data,
+                now
+            )
+            const vramUsage = getMetricReading(
+                nodeMetrics?.gpuVramUsage.find(entry => entry.id === gpu.id)?.data,
+                now
+            )
 
             return [
                 {
@@ -86,40 +86,50 @@ function NodeCardDetails({ node }: NodeCardDetailsProps) {
                     name: gpu.name,
                     vramTotal: gpu.vramTotal,
                     vramTotalFormatted: formatBytes(gpu.vramTotal, 1),
-                    vramUsageFormatted: formatBytes(
-                        (gpu.vramTotal * (gpuVramData ? getLatestValue(gpuVramData.data) : 0)) /
-                            100,
-                        1
-                    ),
-                    vramUsage: gpuVramData ? getLatestValue(gpuVramData.data) : 0,
-                    usage: gpuUtilData ? getLatestValue(gpuUtilData.data) : 0,
+                    vramUsageFormatted:
+                        vramUsage.value === undefined
+                            ? vramUsage.label
+                            : formatBytes((gpu.vramTotal * vramUsage.value) / 100, 1),
+                    vramUsage,
+                    usage,
                     usageColor: getGpuColor(index),
                     vramColor: getVramColor(index)
                 }
             ]
         })
-    }, [hasGpu, node, nodeMetrics])
+    }, [hasGpu, node, nodeMetrics, now])
 
     // Memoized so the label's segment list keeps a stable identity across
     // renders; NodeLabel observes its segments and would otherwise rebuild the
     // ResizeObserver every render.
-    const gpuLabels = useMemo(() => gpuInfo.map(gpu => gpu.name), [gpuInfo])
+    const gpuLabels = useMemo(
+        () =>
+            hasGpu
+                ? node.topology.gpus
+                      .filter(gpu => isGpuInferenceReady(gpu, node.topology.inferenceHardwareIds))
+                      .map(gpu => gpu.name)
+                : [],
+        [hasGpu, node.topology]
+    )
 
     const cpuFallbackInfo: CpuFallbackInfo | null = useMemo(() => {
         if (hasGpu) return null
         const ramTotal = node.topology.ram
-        const cpuUsage = nodeMetrics ? getLatestValue(nodeMetrics.cpuUtilization) : 0
-        const memUsage = nodeMetrics ? getLatestValue(nodeMetrics.memoryUsage) : 0
+        const cpuUsage = getMetricReading(nodeMetrics?.cpuUtilization, now)
+        const memUsage = getMetricReading(nodeMetrics?.memoryUsage, now)
         return {
             model: node.topology.cpu.model,
-            usage: Math.round(cpuUsage),
+            usage: cpuUsage,
             usageColor: CHART_COLORS.CPU,
             memoryUsage: memUsage,
-            memoryUsageFormatted: formatBytes((ramTotal * memUsage) / 100, 1),
+            memoryUsageFormatted:
+                memUsage.value === undefined
+                    ? memUsage.label
+                    : formatBytes((ramTotal * memUsage.value) / 100, 1),
             memoryTotalFormatted: formatBytes(ramTotal, 1),
             memoryColor: CHART_COLORS.MEMORY
         }
-    }, [hasGpu, node, nodeMetrics])
+    }, [hasGpu, node, nodeMetrics, now])
 
     const jobCount = useNodeActiveJobCount(node.id)
 

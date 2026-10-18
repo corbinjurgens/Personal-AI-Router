@@ -19,6 +19,9 @@ interface SvgLineChartProps {
 }
 
 const PADDING = 4
+// Permit jitter at the slower two-second poll cadence, but never connect
+// observations separated by more than 2.5 poll intervals, even with sparse history.
+const MAX_SAMPLE_GAP_MS = 5_000
 
 function buildSmoothPath(points: { x: number; y: number }[], tension = 0.3): string {
     if (points.length === 0) return ''
@@ -41,6 +44,57 @@ function buildSmoothPath(points: { x: number; y: number }[], tension = 0.3): str
     }
 
     return d.join(' ')
+}
+
+export function buildLineChartPaths(
+    datasets: MetricDataset[],
+    maxDataPoints: number,
+    yAxisMax: number,
+    chartW: number,
+    chartH: number
+) {
+    if (chartW <= 0 || chartH <= 0 || yAxisMax <= 0) return []
+    const recentDatasets = datasets.map(dataset => ({
+        ...dataset,
+        data: dataset.data
+            .slice(-maxDataPoints)
+            .filter(sample => Number.isFinite(sample.timestamp) && Number.isFinite(sample.value))
+    }))
+    // A shared time domain keeps independently sampled CPU/GPU series aligned.
+    const timestamps = recentDatasets.flatMap(dataset =>
+        dataset.data.map(sample => sample.timestamp)
+    )
+    const start = Math.min(...timestamps)
+    const end = Math.max(...timestamps)
+
+    return recentDatasets.map(dataset => {
+        const segments: { x: number; y: number }[][] = []
+        dataset.data.forEach((sample, index) => {
+            const previous = dataset.data[index - 1]
+            if (!previous || sample.timestamp - previous.timestamp > MAX_SAMPLE_GAP_MS) {
+                segments.push([])
+            }
+            segments[segments.length - 1].push({
+                x:
+                    PADDING +
+                    (end > start ? ((sample.timestamp - start) / (end - start)) * chartW : 0),
+                y: PADDING + chartH - (Math.min(sample.value, yAxisMax) / yAxisMax) * chartH
+            })
+        })
+        const lines = segments.map(segment => buildSmoothPath(segment))
+        // Close each area separately so its fill cannot bridge an observation gap.
+        const fills = segments.map((segment, index) => {
+            const first = segment[0]
+            const last = segment[segment.length - 1]
+            return `${lines[index]} L ${last.x} ${PADDING + chartH} L ${first.x} ${PADDING + chartH} Z`
+        })
+        return {
+            key: dataset.key,
+            color: dataset.color,
+            line: lines.join(' '),
+            fill: fills.join(' ')
+        }
+    })
 }
 
 function SvgLineChart({
@@ -88,35 +142,10 @@ function SvgLineChart({
     const chartW = size.w - PADDING * 2
     const chartH = size.h - PADDING * 2
 
-    const paths = useMemo(() => {
-        if (chartW <= 0 || chartH <= 0) return []
-
-        const xStep = chartW / (maxDataPoints - 1)
-
-        return datasets.map(ds => {
-            const recent = ds.data.slice(-maxDataPoints)
-            const step =
-                recent.length > 1
-                    ? ds.data.length >= maxDataPoints
-                        ? xStep
-                        : chartW / (recent.length - 1)
-                    : 0
-
-            const pts = recent.map((p, i) => ({
-                x: PADDING + i * step,
-                y: PADDING + chartH - (Math.min(p.value ?? 0, yAxisMax) / yAxisMax) * chartH
-            }))
-
-            if (pts.length === 0) return { key: ds.key, color: ds.color, line: '', fill: '' }
-
-            const line = buildSmoothPath(pts)
-            const last = pts[pts.length - 1]
-            const first = pts[0]
-            const fill = `${line} L ${last.x} ${PADDING + chartH} L ${first.x} ${PADDING + chartH} Z`
-
-            return { key: ds.key, color: ds.color, line, fill }
-        })
-    }, [datasets, maxDataPoints, yAxisMax, chartW, chartH])
+    const paths = useMemo(
+        () => buildLineChartPaths(datasets, maxDataPoints, yAxisMax, chartW, chartH),
+        [datasets, maxDataPoints, yAxisMax, chartW, chartH]
+    )
 
     const clipId = `${uid}-clip`
 

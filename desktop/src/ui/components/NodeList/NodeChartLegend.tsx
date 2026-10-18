@@ -38,7 +38,16 @@ function NodeChartLegend({
                         <Text kind="body/regular/sm" className="text-subtle-color">
                             CPU
                         </Text>
-                        <Text kind="body/semibold/sm">{cpuFallbackInfo.usage}%</Text>
+                        <Text
+                            kind="body/semibold/sm"
+                            className={
+                                cpuFallbackInfo.usage.status !== 'current'
+                                    ? 'text-subtle-color'
+                                    : undefined
+                            }
+                        >
+                            {cpuFallbackInfo.usage.label}
+                        </Text>
                     </Flex>
                 </Flex>
                 <Flex align="center" gap="2">
@@ -46,7 +55,14 @@ function NodeChartLegend({
                     <Text kind="body/regular/sm" className="text-subtle-color">
                         RAM
                     </Text>
-                    <Text kind="body/semibold/sm">
+                    <Text
+                        kind="body/semibold/sm"
+                        className={
+                            cpuFallbackInfo.memoryUsage.status !== 'current'
+                                ? 'text-subtle-color'
+                                : undefined
+                        }
+                    >
                         {cpuFallbackInfo.memoryUsageFormatted} /{' '}
                         {cpuFallbackInfo.memoryTotalFormatted}
                     </Text>
@@ -66,7 +82,14 @@ function NodeChartLegend({
                             <Text kind="body/regular/sm" className="text-subtle-color">
                                 Usage
                             </Text>
-                            <Text kind="body/semibold/sm">{gpu.usage}%</Text>
+                            <Text
+                                kind="body/semibold/sm"
+                                className={
+                                    gpu.usage.status !== 'current' ? 'text-subtle-color' : undefined
+                                }
+                            >
+                                {gpu.usage.label}
+                            </Text>
                         </Flex>
                     </Flex>
                     <Flex align="center" gap="2">
@@ -74,7 +97,12 @@ function NodeChartLegend({
                         <Text kind="body/regular/sm" className="text-subtle-color">
                             VRAM
                         </Text>
-                        <Text kind="body/semibold/sm">
+                        <Text
+                            kind="body/semibold/sm"
+                            className={
+                                gpu.vramUsage.status !== 'current' ? 'text-subtle-color' : undefined
+                            }
+                        >
                             {gpu.vramUsageFormatted} / {gpu.vramTotalFormatted}
                         </Text>
                     </Flex>
