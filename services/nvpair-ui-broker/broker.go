@@ -332,7 +332,8 @@ type Broker struct {
 	// (failWorkloadsForNode). Written from the proxy / workload-manager reader
 	// goroutines (via emitWorkloadEvent) and the scanner-event goroutine (via
 	// failWorkloadsForNode); it is internally synchronized.
-	workloads *workloadstore.Store
+	workloads   *workloadstore.Store
+	performance *performanceRuntime
 
 	// engineMu guards engineSubscribed. The engine:<event> stream is
 	// opt-in like proxy's: forwardEngineNotification (engine-manager reader
@@ -1483,6 +1484,8 @@ func (b *Broker) Serve(ctx context.Context) error {
 	b.cancel = cancel
 	b.setServeCtx(ctx)
 	defer cancel()
+	stopPerformance := b.startPerformance(ctx)
+	defer stopPerformance()
 
 	// Enable durable workload history: load the prior session's terminal
 	// records so a late-subscribing client / workloads:get-initial has a
@@ -1927,7 +1930,9 @@ func (b *Broker) readLoop(ctx context.Context) error {
 				slog.Warn("JSON-RPC read error", "err", r.err)
 				continue
 			}
-			b.handleMessage(r.msg)
+			if !b.handlePerformanceRequest(r.msg) {
+				b.handleMessage(r.msg)
+			}
 			if ctx.Err() != nil {
 				return nil
 			}
@@ -1950,6 +1955,9 @@ func (b *Broker) forwardClusterManagerNotification(method string, params json.Ra
 	}
 	if b.dispatchErrorsNotif("cluster-manager", method, params) {
 		return
+	}
+	if b.performance != nil && (method == "cluster:identity-changed" || method == "cluster:trust-changed" || method == "nodes:changed") {
+		performanceSignal(b.performance.changeWake)
 	}
 	if err := b.codec.Notify(method, params); err != nil {
 		slog.Warn("forward cluster-manager notification failed", "method", method, "err", err)

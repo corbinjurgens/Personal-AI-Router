@@ -37,7 +37,17 @@ var ErrDuplicate = errors.New("performancestore: duplicate sample")
 // milliseconds and what the sample measured.
 type record struct {
 	ObservedAtMs int64 `json:"observedAtMs"`
+	// AgeAtMs is receipt on the nondecreasing age clock. Zero identifies an
+	// older snapshot whose receipt used ObservedAtMs for both clocks.
+	AgeAtMs int64 `json:"ageAtMs,omitempty"`
 	performancewire.Measurement
+}
+
+func (r record) ageAtMs() int64 {
+	if r.AgeAtMs != 0 {
+		return r.AgeAtMs
+	}
+	return r.ObservedAtMs
 }
 
 // keyState is one profile key's retained samples, oldest received first.
@@ -55,6 +65,9 @@ type Stats struct {
 	// PublishedRevision is the revision of the last saved or loaded snapshot,
 	// or 0 when none exists.
 	PublishedRevision int64
+	// HistoryReset is true after Load successfully quarantined unreadable
+	// history. Persistence remains enabled for a fresh empty snapshot.
+	HistoryReset bool
 	// EvictedKeys counts keys dropped to admit a new key or to fit the file.
 	EvictedKeys uint64
 	// EvictedSamples counts samples dropped when a key's ring was full.
@@ -80,6 +93,11 @@ type Store struct {
 	mu        sync.Mutex
 	keys      map[performancewire.ProfileKey]*keyState
 	producers map[string]producerState
+	// clockAt anchors elapsed time (monotonic when available); clockMs is
+	// its age-clock value and clockFloorMs prevents wall rollback rejuvenation.
+	clockAt      time.Time
+	clockMs      int64
+	clockFloorMs int64
 	// changes counts live mutations; savedChanges is its value at the last
 	// adopted snapshot, so the store is dirty when they differ.
 	changes      uint64
@@ -144,7 +162,8 @@ func (s *Store) Record(sample performancewire.Sample) error {
 		st.samples = slices.Delete(st.samples, 0, len(st.samples)-performancewire.MaxSamplesPerKey+1)
 		s.stats.EvictedSamples++
 	}
-	st.samples = append(st.samples, record{ObservedAtMs: s.now().UnixMilli(), Measurement: sample.Measurement})
+	wallMs, ageMs := s.clockLocked()
+	st.samples = append(st.samples, record{ObservedAtMs: wallMs, AgeAtMs: ageMs, Measurement: sample.Measurement})
 	s.changes++
 	return nil
 }
@@ -196,7 +215,36 @@ func (s *Store) evictLeastRecentLocked() {
 func (s *Store) Local() performancewire.Summary {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return buildSummary(s.host, "", 0, s.keys, s.now().UnixMilli())
+	wallMs, ageMs := s.clockLocked()
+	return buildSummary(s.host, "", 0, s.keys, wallMs, ageMs)
+}
+
+// clockLocked returns wall time for observation metadata and a nondecreasing
+// clock for ages. The fixed anchor retains sub-millisecond elapsed time between
+// reads. A wall step forward may make samples older; a step back cannot make
+// them younger. Caller holds s.mu.
+func (s *Store) clockLocked() (int64, int64) {
+	now := s.now()
+	wallMs := now.UnixMilli()
+	if s.clockAt.IsZero() {
+		s.clockAt, s.clockMs = now, wallMs
+	}
+	elapsed := max(int64(0), now.Sub(s.clockAt).Milliseconds())
+	ageMs := addElapsed(s.clockMs, elapsed)
+	if wallMs > ageMs {
+		s.clockAt, s.clockMs, ageMs = now, wallMs, wallMs
+	}
+	ageMs = max(s.clockFloorMs, ageMs)
+	s.clockFloorMs = ageMs
+	return wallMs, ageMs
+}
+
+// addElapsed saturates the age clock rather than overflowing into young ages.
+func addElapsed(base, elapsed int64) int64 {
+	if base > math.MaxInt64-elapsed {
+		return math.MaxInt64
+	}
+	return base + elapsed
 }
 
 // Stats reports the store's current size and drop counters.
@@ -217,11 +265,11 @@ func (s *Store) Stats() Stats {
 
 // pruneLocked drops samples outside the retention window and keys left empty.
 // Caller holds s.mu.
-func (s *Store) pruneLocked(nowMs int64) {
+func (s *Store) pruneLocked(wallMs, ageMs int64) {
 	for k, st := range s.keys {
 		kept := st.samples[:0]
 		for _, r := range st.samples {
-			if retained(r, nowMs) {
+			if retained(r, wallMs, ageMs) {
 				kept = append(kept, r)
 			}
 		}
@@ -239,9 +287,10 @@ func (s *Store) pruneLocked(nowMs int64) {
 // retained reports whether a sample is inside the retention window. A sample
 // stamped later than now is kept as clock-uncertain unless it lies a whole
 // window in the future, where it would otherwise never age out.
-func retained(r record, nowMs int64) bool {
-	age := nowMs - r.ObservedAtMs
-	return age <= performancewire.RetentionMs && age >= -performancewire.RetentionMs
+func retained(r record, wallMs, ageMs int64) bool {
+	age := ageMs - r.ageAtMs()
+	return age <= performancewire.RetentionMs && age >= -performancewire.RetentionMs &&
+		wallMs-r.ObservedAtMs >= -performancewire.RetentionMs
 }
 
 func newestObserved(samples []record) int64 {
@@ -272,17 +321,20 @@ func keyLess(a, b performancewire.ProfileKey) bool {
 // known to be missing. Phase rates additionally require a known protocol end,
 // a known token count and a positive matching phase duration, and are
 // token-weighted. Unknown values are skipped, never counted as zero.
-func aggregate(key performancewire.ProfileKey, st *keyState, nowMs int64) (performancewire.Entry, bool) {
+func aggregate(key performancewire.ProfileKey, st *keyState, wallMs, ageMs int64) (performancewire.Entry, bool) {
 	e := performancewire.Entry{Key: key, Profile: st.profile}
 	var admission, header, firstBody, firstToken, total, load []int64
 	var prefill, decode rateSum
 	for _, r := range st.samples {
-		if !retained(r, nowMs) {
+		if !retained(r, wallMs, ageMs) {
 			continue
 		}
-		age := nowMs - r.ObservedAtMs
+		age := ageMs - r.ageAtMs()
 		if age < 0 {
 			age = 0
+			e.ClockUncertain = true
+		}
+		if wallMs < r.ObservedAtMs {
 			e.ClockUncertain = true
 		}
 		if e.Samples == 0 {
@@ -387,10 +439,10 @@ func (r rateSum) rate() *performancewire.Rate {
 // buildSummary aggregates keys into a summary, most recently measured key
 // first. It omits the least recent entries that would take the encoded summary
 // over performancewire.MaxPayloadBytes, counting them in OmittedEntries.
-func buildSummary(host, incarnation string, revision int64, keys map[performancewire.ProfileKey]*keyState, nowMs int64) performancewire.Summary {
+func buildSummary(host, incarnation string, revision int64, keys map[performancewire.ProfileKey]*keyState, wallMs, ageMs int64) performancewire.Summary {
 	entries := make([]performancewire.Entry, 0, len(keys))
 	for k, st := range keys {
-		if e, ok := aggregate(k, st, nowMs); ok {
+		if e, ok := aggregate(k, st, wallMs, ageMs); ok {
 			entries = append(entries, e)
 		}
 	}

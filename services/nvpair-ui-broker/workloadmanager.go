@@ -36,9 +36,9 @@ type workloadManagerProcess struct {
 	done    chan struct{}
 
 	// onNotify, if non-nil, is invoked on the reader goroutine for every
-	// notification the manager emits on stdout (workloads:upsert /
-	// workloads:remove, plus its startup "ready"). The broker uses it to
-	// relay peer-origin workload events to subscribed clients.
+	// notification the manager emits on stdout, including private performance
+	// replacements/status and peer workload events. The broker consumes private
+	// frames and projects only subscribed client state.
 	onNotify func(method string, params json.RawMessage)
 
 	// relayDir is the broker's LAN directory. When the manager sends a
@@ -141,7 +141,7 @@ func (m *workloadManagerProcess) readMessages(stdout io.Reader) {
 	for scanner.Scan() {
 		var msg Message
 		if err := json.Unmarshal(scanner.Bytes(), &msg); err != nil {
-			slog.Warn("workload-manager emitted invalid JSON", "err", err, "raw", scanner.Text())
+			slog.Warn("workload-manager emitted invalid JSON", "bytes", len(scanner.Bytes()))
 			continue
 		}
 		if msg.JSONRPC != "2.0" || msg.Method == "" {

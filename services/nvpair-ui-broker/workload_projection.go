@@ -77,6 +77,7 @@ func (b *Broker) activeLocalReplayFrames() []workloadReplayFrame {
 // the pipe until the manager's read loop consumes them, so this works without
 // waiting on the manager's readiness handshake.
 func (b *Broker) rehydrateWorkloadManager(wm *workloadManagerProcess) {
+	b.replayPerformanceToManager(wm)
 	frames := b.activeLocalReplayFrames()
 	for _, f := range frames {
 		if err := wm.Forward(f.method, f.params); err != nil {
@@ -249,6 +250,8 @@ func setNodeIDIfEmpty(m map[string]json.RawMessage, key, nodeID string) bool {
 // "ready" (and anything else) is internal and dropped.
 func (b *Broker) forwardWorkloadManagerNotification(method string, params json.RawMessage) {
 	switch method {
+	case methodPerformanceReceived, methodPerformanceStatus:
+		b.consumePerformanceNotification(method, params)
 	case "workloads:upsert", "workloads:remove":
 		b.emitWorkloadEvent(method, params)
 	case methodWorkloadsCancel:

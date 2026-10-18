@@ -532,6 +532,11 @@ func (b *Broker) forwardDefaultEngineProxyNotification(profile engineProxyProfil
 // every workload twice.
 func (b *Broker) routeProcessScopedProxyNotification(method string, params json.RawMessage) bool {
 	switch {
+	case method == methodPerformanceSample:
+		if err := b.ingestPerformanceSample(params); err != nil {
+			slog.Debug("performance sample rejected")
+		}
+		return true
 	case proxyWorkloadMethods[method]:
 		b.routeProxyWorkload(method, params)
 		return true

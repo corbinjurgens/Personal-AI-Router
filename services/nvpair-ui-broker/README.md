@@ -986,6 +986,114 @@ Attach to a pre-existing endpoint:
 ./nvpair-ui-broker --ipc /tmp/nvpair-ui-broker.sock
 ```
 
+## Performance history and projection
+
+The broker owns destination-local inference performance aggregation and the
+dedicated application-data file `performance-history.json`. It loads history
+before accepting samples. Dirty samples coalesce into a durable save on a
+five-second timer, with a final flush joined for at most five seconds after
+worker teardown. Startup and each distinct workload-manager incarnation force
+a durable `Store.Checkpoint()` before publication, including when no sample
+changed. A current local admission epoch change also forces a checkpoint.
+These restart/authority checkpoints are separate from the dirty-save timer.
+
+Only a successful durable save/checkpoint becomes eligible for publication.
+A failed write keeps the live local view available and sets persistence
+degraded; even a replacement adopted by the store with a durability error is
+withheld until a later clean checkpoint. A blocked disk, manager stdin or
+client output does not hold the sample-ingestion path. Disk persistence, the
+coalesced manager sender and the client change sender run independently.
+
+Corrupt, oversize or unreadable regular history is moved to a unique sibling
+`performance-history.json.corrupt-<unix-ms>` without replacing prior quarantines.
+The store warns with the quarantine path only, starts empty and exposes
+`persistence.stats.HistoryReset`. If quarantine fails, the original remains
+untouched, ingestion/display continue in memory and publication stays blocked.
+Losing or quarantining the file also loses its revision floor. Revisions use
+the existing larger-of-previous-plus-one/current-wall-milliseconds rule; if the
+clock is behind a peer's retained floor, that peer rejects lower revisions until
+a later successful save or checkpoint issues a revision above the floor.
+
+Public JSON-RPC methods accept absent, null or empty-object params:
+
+| Method | Result and behavior |
+| --- | --- |
+| `performance:get` | Current full projection, without subscribing. |
+| `performance:subscribe` | `{subscribed:true}`, then an asynchronous `performance:changed` baseline and subsequent full replacements. Repeated subscriptions are idempotent. |
+| `performance:unsubscribe` | `{subscribed:false}`; disables subsequent changes. A notification already being written can finish. |
+
+The `performance:changed` payload is identical to the read result:
+
+```text
+{
+  local: {measuringHost, status, lastSeenAgeMs, summary?, expiredEntries},
+  peers: [{measuringHost, status, lastSeenAgeMs, summary?, expiredEntries}],
+  persistence: {degraded, publicationBlocked, error?, stats},
+  expiredPeers
+}
+```
+
+`status` is `fresh`, `stale`, `unknown` or `missing`. Local data is live broker
+aggregation, including unsaved samples, and uses projection-only revision zero
+with an empty admission incarnation. An empty local history is `missing`.
+An admitted peer without an accepted summary is `missing`; revoked/retired data
+is `unknown` with no summary. `stats` is `performancestore.Stats`: `Keys`,
+`Samples`, `Dirty`, `PublishedRevision`, `HistoryReset`, `EvictedKeys`,
+`EvictedSamples`, `ExpiredSamples` and `Duplicates`. `summary.omittedEntries`
+reports source keys omitted by the wire cap. `expiredEntries` counts projected
+keys whose newest sample is beyond the source retention window; `expiredPeers`
+counts payloads retired after an hour without a heartbeat. Unknown metric
+values remain absent, preserving the shared wire's nullable measurements.
+
+`Broker.consumePerformanceNotification` privately consumes the manager's
+`performance:received` and `performance:status` contracts from workload-manager
+specification section 7.4. The receiver-local opaque admission token and the
+canonical positive decimal sender epoch must both match the current shared
+`Mesh.PeerServiceIncarnation` and `Mesh.PeerAdmissionEpoch`. Checks bracket cache
+mutation and projection; discovery names and aliases grant no authority.
+Unknown fields, missing/null required metadata, invalid numbers, oversized
+summaries, old revisions and changed-body equal revisions are rejected. Each
+peer holds a latest full summary, never additive totals, bounded by the shared
+128 KiB summary cap. The cache retains at most 128 peer records including
+revision/digest tombstones; at capacity, new peers are withheld rather than
+evicting a floor. A newly validated sender epoch resets its revision floor.
+Certificate or receiver-local admission changes retire payloads while keeping
+the same sender epoch's floor. Equal revisions and delayed fresh statuses cannot
+revive retired payloads; a higher revision from current authority can.
+
+Source wire bytes and ages remain immutable per revision. Reads add
+`sampleElapsedMs` and receiver-monotonic elapsed time with saturating arithmetic.
+Greater duplicate/status offsets raise the age floor; smaller offsets and clock
+rollback cannot lower it. A heartbeat refreshes reachability independently of
+sample age. Silence makes the view stale at 90 seconds and retires its payload
+at one hour; reads revalidate immediately and periodic sweeps run every five
+seconds independently of client, disk-save and worker writes. Status offsets can
+exceed the seven-day retention window; initial received offsets are bounded by it.
+
+Own-host publication is a private `performance:publish` notification containing
+the shared summary. It requires the current `Mesh.LocalAdmissionEpoch` and this
+host's canonical UUID. The sender selects the latest successfully saved revision
+and freezes its body as late as possible, immediately before the first stdin
+write; retries reuse identical bytes. Successful unchanged revisions are not
+resent; the manager owns peer heartbeats. Broker/manager restarts checkpoint and
+rebase saved ages without rejuvenating samples. The first manager shares the
+broker startup checkpoint. A blocked local stdio write's delay is not represented
+in ages: the immutable local publish contract has no
+elapsed header, and the manager anchors elapsed time when it receives the
+publication. The same stdin still carries ordinary lifecycle traffic; this is
+not a separate worker transport.
+
+The future T2 boundary is `Broker.ingestPerformanceSample(json.RawMessage) error`,
+reached exactly once through the proxy's unaddressed, process-scoped
+`performance:sample` notification. It strictly decodes and validates
+`performancewire.Sample`, checks the measuring host through the store and
+deduplicates the producer/sequence pair. It never writes disk or worker stdin.
+No proxy extractor emits these samples yet. This projection has no scheduler or
+ranking input, and desktop/TUI bridge consumers and UI are later work. Public
+contract drift for these methods must be addressed by that integration; the
+private worker exceptions do not exempt the public surface. Unsubscribed clients
+receive neither performance changes nor private manager frames.
+
 ## What this version intentionally does NOT do (yet)
 
 - **Engine-advertise control surface.** Engine registration is auto-driven only:
