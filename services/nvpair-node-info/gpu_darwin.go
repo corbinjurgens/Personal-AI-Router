@@ -9,14 +9,18 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"os"
 	"os/exec"
 	"time"
+
+	"nvpair-shared/secretenv"
 )
 
-const (
-	ioRegistryPath    = "/usr/sbin/ioreg"
-	ioRegistryTimeout = 3 * time.Second
-)
+const ioRegistryTimeout = 3 * time.Second
+
+// ioRegistryPath is the absolute ioreg path, so PATH cannot substitute another
+// program. Tests point it at a sentinel child.
+var ioRegistryPath = "/usr/sbin/ioreg"
 
 func detectGPUs() []GPUInfo {
 	data, err := readDarwinIORegistry()
@@ -38,7 +42,7 @@ func readDarwinIORegistry() ([]byte, error) {
 
 func readDarwinIORegistryContext(parent context.Context) ([]byte, error) {
 	return readDarwinIORegistryWithRunner(parent, ioRegistryTimeout, func(ctx context.Context) ([]byte, error) {
-		return exec.CommandContext(
+		cmd := exec.CommandContext(
 			ctx,
 			ioRegistryPath,
 			"-a",
@@ -47,7 +51,9 @@ func readDarwinIORegistryContext(parent context.Context) ([]byte, error) {
 			"1",
 			"-c",
 			"IOAccelerator",
-		).Output()
+		)
+		cmd.Env = secretenv.Remove(os.Environ())
+		return cmd.Output()
 	})
 }
 

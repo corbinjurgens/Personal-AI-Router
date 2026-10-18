@@ -8,12 +8,15 @@ package main
 import (
 	"context"
 	"log"
+	"os"
 	"os/exec"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/jaypipes/ghw"
+
+	"nvpair-shared/secretenv"
 )
 
 // nvidiaSmiTimeout caps how long we wait for a single nvidia-smi invocation.
@@ -78,9 +81,11 @@ func detectGPUsGHW() []GPUInfo {
 func nvidiaSmiCSV(fields string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), nvidiaSmiTimeout)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, "nvidia-smi",
+	cmd := exec.CommandContext(ctx, "nvidia-smi",
 		"--query-gpu="+fields,
-		"--format=csv,noheader,nounits").Output()
+		"--format=csv,noheader,nounits")
+	cmd.Env = secretenv.Remove(os.Environ())
+	out, err := cmd.Output()
 	return string(out), err
 }
 

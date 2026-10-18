@@ -327,6 +327,7 @@ func (e *Executor) runCommandOutput(ctx context.Context, argv []string) (string,
 		return "", nil
 	}
 	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
+	cmd.Env = childEnv(nil)
 	configureSysProcAttr(cmd)
 	out, err := cmd.Output()
 	if err != nil {

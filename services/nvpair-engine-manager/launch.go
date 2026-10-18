@@ -8,6 +8,8 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+
+	"nvpair-shared/secretenv"
 )
 
 // launchCommand contains exactly what is handed to exec.Command. Keeping
@@ -38,6 +40,13 @@ func validEnvironmentKey(key string) bool {
 	return true
 }
 
+// reservedEnvironmentKey reports whether key is in the provider-secret
+// namespace, whatever its case. Engines never receive provider secrets, so
+// launch settings may not assign one; childEnv would drop it anyway.
+func reservedEnvironmentKey(key string) bool {
+	return strings.HasPrefix(strings.ToUpper(key), secretenv.Prefix)
+}
+
 func literalEnvironment(assignments []string) (map[string]string, error) {
 	if _, err := formatLaunchText(append([]string{"environment"}, assignments...)); err != nil {
 		return nil, err
@@ -48,6 +57,9 @@ func literalEnvironment(assignments []string) (map[string]string, error) {
 		key, value, ok := strings.Cut(assignment, "=")
 		if !ok || !validEnvironmentKey(key) {
 			return nil, fmt.Errorf("environment variable names must start with a letter or underscore and contain only letters, digits, or underscores")
+		}
+		if reservedEnvironmentKey(key) {
+			return nil, fmt.Errorf("environment variable %s is reserved for provider credentials and cannot be set for an engine", key)
 		}
 		if seen[environmentKey(key)] {
 			return nil, fmt.Errorf("an environment variable is assigned more than once")

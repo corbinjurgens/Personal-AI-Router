@@ -7,6 +7,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -14,6 +15,7 @@ import (
 	"time"
 
 	"nvpair-shared/jsonrpc"
+	"nvpair-shared/secretenv/secretenvtest"
 )
 
 // fakeBrokerEnv makes the test binary act as a broker process, so the real
@@ -21,6 +23,7 @@ import (
 const fakeBrokerEnv = "NVPAIR_SERVICE_TEST_BROKER"
 
 func TestMain(m *testing.M) {
+	secretenvtest.RunChild()
 	if os.Getenv(fakeBrokerEnv) == "1" {
 		runProcessBroker()
 		return
@@ -134,4 +137,42 @@ func TestResolveBrokerPathOverride(t *testing.T) {
 	if _, err := resolveBrokerPath(filepath.Join(dir, "missing")); err == nil {
 		t.Fatal("missing override accepted")
 	}
+}
+
+// The service-to-broker launch is a trusted carrier: the broker hands the
+// configured credential references to the proxy, so it keeps the whole
+// provider-secret namespace. The sentinel child exits nonzero after reporting,
+// so the failure path's captured output is checked too.
+func TestExecSpawnerKeepsProviderSecretsForTheBroker(t *testing.T) {
+	report := secretenvtest.Prepare(t)
+	t.Setenv(secretenvtest.ExitEnv, "3")
+	exe, err := filepath.Abs(os.Args[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	proc, err := execSpawner(exe, []string{"--log-level", "debug"})()
+	if err != nil {
+		t.Fatalf("spawn: %v", err)
+	}
+	defer proc.stdin.Close()
+	defer proc.closeOutput()
+	stdout, stderr := make(chan []byte, 1), make(chan []byte, 1)
+	go func() { data, _ := io.ReadAll(proc.stdout); stdout <- data }()
+	go func() { data, _ := io.ReadAll(proc.stderr); stderr <- data }()
+	if code := proc.wait(); code != 3 {
+		t.Fatalf("sentinel broker exit code = %d, want 3", code)
+	}
+	secretenvtest.AssertNoValue(t, "broker stdout", string(<-stdout))
+	secretenvtest.AssertNoValue(t, "broker stderr", string(<-stderr))
+	secretenvtest.AssertRetained(t, secretenvtest.Wait(t, report))
+}
+
+func TestExecSpawnerFailureDoesNotExposeProviderSecrets(t *testing.T) {
+	secretenvtest.Prepare(t)
+	proc, err := execSpawner(filepath.Join(t.TempDir(), "missing-broker"), []string{"--log-level", "debug"})()
+	if err == nil {
+		_ = proc.kill()
+		t.Fatal("spawned a missing broker")
+	}
+	secretenvtest.AssertNoValue(t, "spawn error", err.Error())
 }

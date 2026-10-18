@@ -13,6 +13,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+
+	"nvpair-shared/secretenv"
 )
 
 // systemdUnitName is the systemd user unit that `autostart enable --systemd`
@@ -20,9 +22,11 @@ import (
 const systemdUnitName = "nvpair-service.service"
 
 // systemctlRun runs `systemctl --user args...`. Tests replace it so they never
-// touch the real user manager.
+// touch the real user manager. systemctl gets no provider secrets.
 var systemctlRun = func(args ...string) ([]byte, error) {
-	return exec.Command("systemctl", append([]string{"--user"}, args...)...).CombinedOutput()
+	cmd := exec.Command("systemctl", append([]string{"--user"}, args...)...)
+	cmd.Env = secretenv.Remove(os.Environ())
+	return cmd.CombinedOutput()
 }
 
 // systemdUnitPath is $XDG_CONFIG_HOME/systemd/user/nvpair-service.service,

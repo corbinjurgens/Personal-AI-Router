@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"nvpair-shared/secretenv/secretenvtest"
 	"nvpair-shared/testbin"
 )
 
@@ -21,6 +22,7 @@ var (
 )
 
 func TestMain(m *testing.M) {
+	secretenvtest.RunChild()
 	if len(os.Args) == 3 && os.Args[1] == "command-test-helper" {
 		os.Exit(runCommandTestHelper(os.Args[2]))
 	}

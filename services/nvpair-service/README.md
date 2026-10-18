@@ -68,7 +68,9 @@ Clients normally start it themselves: `servicectl.ConnectOrStart` dials the
 endpoint and, when nothing answers, starts the service detached — its own
 session on Unix (`Setsid`), `DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP |
 CREATE_NO_WINDOW` on Windows, stdio on the null device, working directory set to
-the binary's directory — and keeps dialing for up to ten seconds.
+the binary's directory — and keeps dialing for up to ten seconds. The service
+inherits the client's whole environment, including provider credentials in the
+reserved `NVPAIR_PROVIDER_SECRET_` namespace.
 
 ### Flags
 
@@ -85,7 +87,10 @@ The broker is started from its own directory with that directory as its
 working directory, which is where it resolves its sibling workers. It gets its
 own process group, so Ctrl+C in a terminal running the service reaches only the
 service, which then stops the broker in order. `SIGINT` and `SIGTERM` stop the
-service the same way `service/stop` does; `SIGHUP` is ignored.
+service the same way `service/stop` does; `SIGHUP` is ignored. The broker
+inherits the service's whole environment, including the
+`NVPAIR_PROVIDER_SECRET_` namespace, because it passes the configured credential
+references on to the proxy.
 
 ### Autostart
 
@@ -124,7 +129,12 @@ starts at login unless lingering is on; to start at boot with no login, run
 `loginctl enable-linger $USER` once.
 
 `disable` removes whichever of the XDG entry and the unit exist (running
-`systemctl --user disable` best-effort), and `status` reports both.
+`systemctl --user disable` best-effort), and `status` reports both. `systemctl`
+itself runs without the `NVPAIR_PROVIDER_SECRET_` namespace.
+
+An autostarted service receives the login session's environment, not one PAIR
+builds. That environment is the place to configure provider credentials; GUI
+and terminal clients can then attach with a clean environment.
 
 ## Broker supervision
 

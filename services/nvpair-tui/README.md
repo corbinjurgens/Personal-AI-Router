@@ -172,7 +172,9 @@ tab, not on the terminal), so it never corrupts the full-screen UI.
 
 A service the TUI starts gets no broker arguments: the broker resolves its
 workers beside itself and inherits the environment the service was started
-with, including `NVPAIR_LOG_LEVEL`. To run the service with other broker
+with, including `NVPAIR_LOG_LEVEL` and any provider credentials in the reserved
+`NVPAIR_PROVIDER_SECRET_` namespace. Inference Demo children get neither that
+namespace nor `INFERENCE_DISPATCHER_*` variables. To run the service with other broker
 arguments, start it yourself first (`nvpair-service -- <broker args>`) or
 register it with `nvpair-service autostart enable`.
 

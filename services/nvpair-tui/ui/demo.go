@@ -16,6 +16,8 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+
+	"nvpair-shared/secretenv"
 )
 
 // The Inference Demo's runtime half: model discovery, submission, and the
@@ -133,6 +135,9 @@ func resolveDispatcher() (string, error) {
 // The comparison is case-insensitive because Windows matches environment names
 // that way: a lowercase inference_dispatcher_loop in this process's environment
 // would still reach the child as INFERENCE_DISPATCHER_LOOP.
+//
+// The provider-secret namespace is dropped too: a demo child talks only to
+// local engines and never needs a provider credential.
 func dispatcherEnv() []string {
 	const prefix = "inference_dispatcher_"
 	src := os.Environ()
@@ -144,7 +149,7 @@ func dispatcherEnv() []string {
 		}
 		out = append(out, kv)
 	}
-	return out
+	return secretenv.Remove(out)
 }
 
 // dispatcherModel is one entry of the dispatcher's --list-models output.

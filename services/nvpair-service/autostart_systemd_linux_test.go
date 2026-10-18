@@ -12,6 +12,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"nvpair-shared/secretenv/secretenvtest"
 )
 
 // fakeSystemctl replaces systemctlRun with a recorder for one test.
@@ -133,4 +135,18 @@ func TestSystemdQuote(t *testing.T) {
 			t.Errorf("systemdQuote(%q) = %q, want %q", in, got, want)
 		}
 	}
+}
+
+// The real systemctlRun, with a sentinel child standing in for systemctl. The
+// child fails after reporting, so the failure output is checked too.
+func TestSystemctlRunRemovesProviderSecrets(t *testing.T) {
+	report := secretenvtest.Prepare(t)
+	t.Setenv(secretenvtest.ExitEnv, "1")
+	secretenvtest.OnPath(t, "nvpair-service", "secretenv", "systemctl")
+	out, err := systemctlRun("is-enabled", systemdUnitName)
+	if err == nil {
+		t.Fatal("systemctlRun succeeded; want the sentinel child's failure")
+	}
+	secretenvtest.AssertNoValue(t, "systemctl output", string(out))
+	secretenvtest.AssertRemoved(t, secretenvtest.Wait(t, report))
 }

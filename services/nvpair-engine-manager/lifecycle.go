@@ -363,12 +363,7 @@ func runPrivateLaunchCommand(ctx context.Context, argv []string, environment map
 	diagnostics := newStartupOutput(privateArgs, environment)
 	defer diagnostics.close()
 	cmd.Stdout, cmd.Stderr = diagnostics, diagnostics
-	if len(environment) > 0 {
-		cmd.Env = os.Environ()
-		for key, value := range environment {
-			cmd.Env = append(cmd.Env, key+"="+value)
-		}
-	}
+	cmd.Env = childEnv(environment)
 	configureSysProcAttr(cmd)
 	if err := cmd.Run(); err != nil {
 		return diagnostics.failure(fmt.Errorf("launch command failed: %w", err))

@@ -282,6 +282,9 @@ func (e *Executor) previewLaunchLocked(st *engineState, request settings.Request
 		if !validEnvironmentKey(key) {
 			return fail("Environment variable names must start with a letter or underscore and contain only letters, digits, or underscores.")
 		}
+		if reservedEnvironmentKey(key) {
+			return fail(fmt.Sprintf("Environment variable %s is reserved for provider credentials and cannot be set for an engine.", key))
+		}
 		if seenEnv[environmentKey(key)] {
 			return fail("An environment assignment is repeated.")
 		}
