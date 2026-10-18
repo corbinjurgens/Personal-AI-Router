@@ -4,15 +4,42 @@
 package main
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/xml"
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
+
+	"nvpair-shared/durablefile"
 )
+
+var autostartFileReplacer = durablefile.Replacer{CreateTemp: createAutostartTemp}
+
+// createAutostartTemp preserves the exact mode previously set by Chmod,
+// independent of the process umask. Failed setup leaves no temporary file.
+func createAutostartTemp(dir, base string, perm os.FileMode) (durablefile.File, error) {
+	var suffix [8]byte
+	if _, err := rand.Read(suffix[:]); err != nil {
+		return nil, err
+	}
+	name := filepath.Join(dir, base+"."+hex.EncodeToString(suffix[:])+".tmp")
+	f, err := os.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, perm)
+	if err != nil {
+		return nil, err
+	}
+	if err := f.Chmod(perm); err != nil {
+		_ = f.Close()
+		_ = os.Remove(name)
+		return nil, err
+	}
+	return f, nil
+}
 
 // Names under which the service registers itself to start at login.
 const (
@@ -283,28 +310,17 @@ func windowsQuoteArg(s string) string {
 	return b.String()
 }
 
-// writeFileAtomic writes data to path through a temporary file in the same
-// directory, so a crash never leaves a half-written entry behind.
+// writeFileAtomic durably replaces an autostart entry. A landed replacement
+// with uncertain durability is adopted and reported as a warning.
 func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
-	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".*")
-	if err != nil {
-		return err
+	if err := autostartFileReplacer.WriteFile(path, data, perm); err != nil {
+		if !errors.Is(err, durablefile.ErrReplaced) {
+			return err
+		}
+		slog.Warn("autostart file replacement landed with uncertain durability", "path", path)
 	}
-	tmpName := tmp.Name()
-	defer os.Remove(tmpName)
-	if _, err := tmp.Write(data); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Chmod(perm); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	return os.Rename(tmpName, path)
+	return nil
 }
