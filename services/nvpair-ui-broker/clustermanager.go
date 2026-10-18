@@ -83,6 +83,7 @@ func startClusterManager(binaryPath, logLevel, configDir string, relayDir *relay
 	args = append(args, extraArgs...)
 	cmd := exec.Command(binaryPath, args...)
 	configureSubprocess(cmd)
+	cmd.Env = workerEnv()
 
 	stdin, err := cmd.StdinPipe()
 	if err != nil {

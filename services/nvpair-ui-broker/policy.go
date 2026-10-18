@@ -598,14 +598,16 @@ func (b *Broker) persistPolicy(build func(stored nodepolicy.Policy) (nodepolicy.
 	}
 	listenerChanged := policy.Routing.Listener.Enabled != r.current.Routing.Listener.Enabled ||
 		policy.Routing.Listener.Port != r.current.Routing.Listener.Port
+	refsChanged := credentialRefsDiffer(policy, r.current)
 	r.current = policy
 	r.recoveryRequired = false
 	r.activationErr = ""
 	r.mu.Unlock()
 	// A listener the policy just enabled has no proxy to activate it in until
 	// the background start has replayed the policy, so its revision is pending
-	// until then.
-	if listenerChanged {
+	// until then. A changed credential reference set needs a proxy launched
+	// with it.
+	if listenerChanged || refsChanged {
 		b.reconcileProxySupervision()
 	}
 	b.activatePolicyNow()

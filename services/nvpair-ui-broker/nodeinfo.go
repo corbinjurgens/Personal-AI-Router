@@ -73,6 +73,7 @@ func (n *nodeInfoProcess) Done() <-chan struct{} { return n.done }
 func startNodeInfo(binaryPath, logLevel string, onNotify func(method string, params json.RawMessage), extraArgs ...string) (*nodeInfoProcess, error) {
 	cmd := exec.Command(binaryPath, append([]string{"--log-level", logLevel}, extraArgs...)...)
 	configureSubprocess(cmd)
+	cmd.Env = workerEnv()
 
 	stdin, err := cmd.StdinPipe()
 	if err != nil {

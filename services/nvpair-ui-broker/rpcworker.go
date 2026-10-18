@@ -88,6 +88,7 @@ func (w *rpcWorker) RelayRequest(method string, params json.RawMessage, respond 
 func startRPCWorker(name, binaryPath string, args []string, onNotify func(method string, params json.RawMessage)) (*rpcWorker, error) {
 	cmd := exec.Command(binaryPath, args...)
 	configureSubprocess(cmd)
+	cmd.Env = workerEnv()
 
 	stdin, err := cmd.StdinPipe()
 	if err != nil {

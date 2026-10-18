@@ -534,6 +534,8 @@ func runFakeProxy() {
 			} else {
 				reply["error"] = map[string]any{"code": -32000, "message": "refused"}
 			}
+		case fakeProxyEnvironmentMethod:
+			reply["result"] = fakeProxyEnvironment()
 		default:
 			reply["result"] = map[string]any{}
 		}
