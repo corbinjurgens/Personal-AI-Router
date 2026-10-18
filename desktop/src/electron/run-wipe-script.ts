@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { spawn } from 'child_process'
+import { removeProviderSecrets } from './child-environment'
 import fs from 'fs'
 import path from 'path'
 import { app } from 'electron'
@@ -48,15 +49,19 @@ export function spawnWipeScript(options: SpawnWipeScriptOptions): void {
         args.push(`--relaunch=${options.relaunchExecPath}`)
     }
 
+    // Relaunch intentionally has no credentials because they belong on the background service.
+    const env = removeProviderSecrets(process.env)
     const child =
         currentPlatform() === 'win32'
             ? spawn(`"${scriptPath}"`, args.map(quoteWindowsArg), {
                   shell: true,
+                  env,
                   windowsHide: true,
                   detached: true,
                   stdio: 'ignore'
               })
             : spawn('bash', [scriptPath, ...args], {
+                  env,
                   detached: true,
                   stdio: 'ignore'
               })

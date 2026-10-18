@@ -23,6 +23,7 @@ import fs from 'fs'
 import os from 'os'
 import path from 'path'
 import { execFile } from 'child_process'
+import { removeProviderSecrets } from './child-environment'
 import { app } from 'electron'
 import { currentPlatform } from '@/shared/utils/platform'
 import { modularBinaryFileName } from '@/shared/constants/modular-binaries'
@@ -127,6 +128,7 @@ function addToWindowsUserPath(dir: string): void {
     execFile(
         'powershell',
         ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', script],
+        { env: removeProviderSecrets(process.env) },
         err => {
             if (err) {
                 log.warn({

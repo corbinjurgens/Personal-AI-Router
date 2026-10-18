@@ -163,6 +163,32 @@ afterEach(() => {
 })
 
 describe('inference demo lifecycle', () => {
+    it('filters provider secrets from discovery probes and request submissions', async () => {
+        vi.stubGlobal('process', {
+            ...process,
+            env: {
+                ...process.env,
+                NVPAIR_PROVIDER_SECRET_TEST: 'test-sentinel',
+                nvpair_provider_secret_test: 'lowercase-sentinel',
+                C2_UNRELATED: 'kept'
+            }
+        })
+        try {
+            await startInferenceDemo()
+            await vi.advanceTimersByTimeAsync(12_000)
+            expect(probeOptions.length).toBeGreaterThan(0)
+            expect(spawned.length).toBeGreaterThan(0)
+            for (const options of [...probeOptions, ...spawned.map(child => child.options)]) {
+                expect(options.env !== undefined).toBe(true)
+                expect(Object.hasOwn(options.env ?? {}, 'NVPAIR_PROVIDER_SECRET_TEST')).toBe(false)
+                expect(Object.hasOwn(options.env ?? {}, 'nvpair_provider_secret_test')).toBe(false)
+                expect(options.env?.C2_UNRELATED === 'kept').toBe(true)
+            }
+        } finally {
+            vi.unstubAllGlobals()
+        }
+    })
+
     it('returns to idle immediately on stop, with no draining tail', async () => {
         await startInferenceDemo()
         expect(getInferenceDemoState().status).toBe('running')
