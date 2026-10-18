@@ -76,7 +76,7 @@ package engines
 import (
 	"strings"
 
-	"nvpair-shared/noderec"
+	"nvpair-shared/noderec/servicekey"
 )
 
 // Engine is the cross-process identity of one inference engine.
@@ -92,7 +92,7 @@ type Engine struct {
 
 	// DiscoveryService is the compact TXT key under which a node advertises this
 	// engine's port on the consolidated _nvpair-node record.
-	DiscoveryService noderec.ServiceKey
+	DiscoveryService servicekey.Key
 
 	// FacadePort is the engine's stock client-facing port, which PAIR's proxy
 	// claims in managed mode.
@@ -144,7 +144,7 @@ var all = []Engine{
 	{
 		Name:             NameOllama,
 		DisplayName:      "Ollama",
-		DiscoveryService: noderec.ServiceOllama,
+		DiscoveryService: servicekey.Ollama,
 		FacadePort:       11434,
 		EnginePortBase:   11435,
 		PortFile:         "proxy-port.json",
@@ -152,7 +152,7 @@ var all = []Engine{
 	{
 		Name:             NameLMStudio,
 		DisplayName:      "LM Studio",
-		DiscoveryService: noderec.ServiceLMStudio,
+		DiscoveryService: servicekey.LMStudio,
 		FacadePort:       1234,
 		EnginePortBase:   1235,
 		PortFile:         "lmstudio-proxy-port.json",
@@ -160,7 +160,7 @@ var all = []Engine{
 	{
 		Name:             NameLlamaCPP,
 		DisplayName:      "llama.cpp",
-		DiscoveryService: noderec.ServiceLlamaCPP,
+		DiscoveryService: servicekey.LlamaCPP,
 		FacadePort:       8080,
 		EnginePortBase:   8081,
 		PortFile:         "llamacpp-proxy-port.json",

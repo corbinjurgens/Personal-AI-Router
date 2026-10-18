@@ -175,8 +175,7 @@ func (d *daemon) enrichPeerServices(claim noderec.PeerServicesClaim, node nodere
 	}
 	if em, present := node.Services[noderec.ServiceEngineManager]; present {
 		ask := func(host string) (modelInventory, bool) {
-			models, byEngine, loaded, ok := d.fetchPeerModels(node.HostUUID, host, em.Port, node.ClusterUUID)
-			return modelInventory{models: models, byEngine: byEngine, loadedByEngine: loaded}, ok
+			return d.fetchPeerModels(node.HostUUID, host, em.Port, node.ClusterUUID)
 		}
 		_, inventory, modelsFetched = askRemembered(&memory, hostKey{hostUUID: node.HostUUID, service: noderec.ServiceEngineManager}, node.CandidateIPs(), ask)
 	}
@@ -192,7 +191,7 @@ func (d *daemon) enrichPeerServices(claim noderec.PeerServicesClaim, node nodere
 			node.GPUs, node.CPU, node.Memory = info.GPUs, info.CPU, info.Memory
 		}
 		if modelsFetched {
-			node.Models, node.ModelsByEngine, node.LoadedByEngine = inventory.models, inventory.byEngine, inventory.loadedByEngine
+			inventory.applyTo(&node)
 		}
 		d.dir.nodes[node.HostUUID] = node
 	}
@@ -211,16 +210,7 @@ func (d *daemon) enrichPeerServices(claim noderec.PeerServicesClaim, node nodere
 		d.lastInfo[node.HostUUID], d.lastInfoAt[node.HostUUID] = info, time.Now()
 	}
 	if modelsFetched {
-		if d.lastModels == nil {
-			d.lastModels = make(map[string][]string)
-		}
-		if d.lastModelsByEngine == nil {
-			d.lastModelsByEngine = make(map[string]map[string][]string)
-		}
-		if d.lastLoadedByEngine == nil {
-			d.lastLoadedByEngine = make(map[string]map[string][]string)
-		}
-		d.lastModels[node.HostUUID], d.lastModelsByEngine[node.HostUUID], d.lastLoadedByEngine[node.HostUUID] = inventory.models, inventory.byEngine, inventory.loadedByEngine
+		d.cacheInventoryLocked(node.HostUUID, inventory)
 	}
 	d.infoMu.Unlock()
 	if infoFetched || modelsFetched {

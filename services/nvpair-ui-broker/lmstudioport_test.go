@@ -955,14 +955,24 @@ func TestEngineManagerRespawnReconcilesUnknownCustomBackendBeforeRestore(t *test
 	b.setEngineMgr(newEngine)
 	order := make(chan string, 4)
 	go func() {
-		status, err := newEngineCodec.Read()
+		// engine:ready also publishes the node projection, at no fixed point
+		// in this sequence.
+		read := func() (*Message, error) {
+			for {
+				msg, err := newEngineCodec.Read()
+				if err != nil || msg.Method != engineNodeProjectionMethod {
+					return msg, err
+				}
+			}
+		}
+		status, err := read()
 		if err != nil {
 			return
 		}
 		order <- status.Method
 		_ = newEngineCodec.Respond(status.ID, ollamaPortStatus{Port: 12400})
 
-		restore, err := newEngineCodec.Read()
+		restore, err := read()
 		if err == nil {
 			order <- restore.Method
 		}

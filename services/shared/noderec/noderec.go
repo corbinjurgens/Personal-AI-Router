@@ -17,7 +17,7 @@
 //     read every service port from TXT. A missing service key means that
 //     service is absent on that node.
 //   - Transport is NOT advertised. A consumer derives a service's transport from
-//     the static per-service policy here (service type + whether the target node
+//     the static per-service policy in servicekey (service type + whether the target node
 //     is clustered), because transport is global policy every same-version
 //     binary already knows, not per-instance data.
 //   - uuid= (hostUuid) and cluster-uuid= (clusterUuid) are distinct fields:
@@ -33,6 +33,9 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"nvpair-shared/nodepolicy"
+	"nvpair-shared/noderec/servicekey"
 )
 
 const (
@@ -80,27 +83,30 @@ const MaxAdvertisedIPs = 4
 // and bounded, but the guard stays as defense against a future long key.
 const maxTXTStringLen = 255
 
-// ServiceKey is the compact TXT key for one advertised service's port.
-type ServiceKey string
+// ServiceKey is the compact TXT key for one advertised service's port. The type,
+// its keys and their transport policy live in servicekey (see that package for
+// why); these are the names consumers use.
+type ServiceKey = servicekey.Key
 
 const (
-	ServiceNodeInfo ServiceKey = "ni"
-	ServiceOllama   ServiceKey = "ol"
-	ServiceLMStudio ServiceKey = "lm"
-	ServiceLlamaCPP ServiceKey = "lc"
-	ServiceErrors   ServiceKey = "er"
-	ServiceWorkload ServiceKey = "wl"
-	ServiceCluster  ServiceKey = "cl"
-	// ServiceEngineManager is nvpair-engine-manager's LAN HTTP endpoint (the model
-	// list, and future remote engine operations). Its /v1/models is how a peer's
-	// discovery daemon learns a node's models now that the list is off the
-	// size-limited mDNS TXT record. Plain HTTP (model names aren't secret).
-	ServiceEngineManager ServiceKey = "em"
-	// ServiceEngineControl is nvpair-engine-manager's cluster-scoped remote-control
-	// endpoint (remote install/pull/start/stop + engine status). Unlike em, it
-	// is pin-based mTLS (cluster peers only) because it performs privileged
-	// operations, and it binds only when the node is clustered.
-	ServiceEngineControl ServiceKey = "ec"
+	ServiceNodeInfo      = servicekey.NodeInfo
+	ServiceOllama        = servicekey.Ollama
+	ServiceLMStudio      = servicekey.LMStudio
+	ServiceLlamaCPP      = servicekey.LlamaCPP
+	ServiceErrors        = servicekey.Errors
+	ServiceWorkload      = servicekey.Workload
+	ServiceCluster       = servicekey.Cluster
+	ServiceEngineManager = servicekey.EngineManager
+	ServiceEngineControl = servicekey.EngineControl
+)
+
+// Transport is the connection policy for a service, derived (not advertised).
+type Transport = servicekey.Transport
+
+const (
+	TransportPlain             = servicekey.TransportPlain
+	TransportMTLSWhenClustered = servicekey.TransportMTLSWhenClustered
+	TransportSplit             = servicekey.TransportSplit
 )
 
 // serviceKeyOrder is the deterministic emit order for service ports in TXT.
@@ -108,49 +114,6 @@ var serviceKeyOrder = []ServiceKey{
 	ServiceNodeInfo, ServiceOllama, ServiceLMStudio, ServiceLlamaCPP,
 	ServiceErrors, ServiceWorkload, ServiceCluster, ServiceEngineManager,
 	ServiceEngineControl,
-}
-
-// Transport is the connection policy for a service, derived (not advertised).
-type Transport int
-
-const (
-	// TransportPlain: always plain HTTP, even on a clustered node (node-info and
-	// the local inference engines).
-	TransportPlain Transport = iota
-	// TransportMTLSWhenClustered: cluster-scoped pin-based mTLS when the target
-	// node is clustered, else plain (nvpair-errors, nvpair-workload-manager).
-	TransportMTLSWhenClustered
-	// TransportSplit: nvpair-cluster-manager's :14321 — a plain PIN-authenticated
-	// pairing channel plus mTLS trusted endpoints on one port, demuxed by the
-	// first byte. cluster-manager owns this; generic consumers don't dial it.
-	TransportSplit
-)
-
-// Transport returns the static transport policy for the service.
-func (s ServiceKey) Transport() Transport {
-	switch s {
-	case ServiceErrors, ServiceWorkload, ServiceEngineControl:
-		return TransportMTLSWhenClustered
-	case ServiceCluster:
-		return TransportSplit
-	default: // node-info, engines (em model list is plain)
-		return TransportPlain
-	}
-}
-
-// UsesMTLS reports whether a consumer should dial this service over cluster
-// mTLS, given whether the target node is clustered. node-info is deliberately
-// plain even on a clustered node; errors/workload gate on the target's cluster
-// state; the cluster-manager split channel's trusted plane is mTLS.
-func (s ServiceKey) UsesMTLS(targetClustered bool) bool {
-	switch s.Transport() {
-	case TransportPlain:
-		return false
-	case TransportMTLSWhenClustered, TransportSplit:
-		return targetClustered
-	default:
-		return false
-	}
 }
 
 // NodeRecord is the parsed _nvpair-node TXT map for one node.
@@ -515,7 +478,13 @@ type DirectoryNode struct {
 	// empty list means "running, nothing loaded"; a missing key means the peer
 	// didn't report loaded state for it. Omitted when the peer reports none.
 	LoadedByEngine map[string][]string `json:"loadedByEngine,omitempty"`
-	LastSeen       int64               `json:"lastSeen"` // Unix seconds
+	// Policy is the node's own policy advertisement (declared roles, policy
+	// revision, pause origin), enriched from the same pinned em /v1/models
+	// fetch as the model lists and kept with the same last-good rule. Omitted
+	// when the node's engine-manager has not published one (an older peer, or
+	// before its broker's first push); absent means the node declares nothing.
+	Policy   *nodepolicy.Advertisement `json:"policy,omitempty"`
+	LastSeen int64                     `json:"lastSeen"` // Unix seconds
 }
 
 // Clustered reports whether the node advertises a cluster identity.

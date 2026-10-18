@@ -37,9 +37,13 @@ type fakeWorker struct {
 	t      *testing.T
 	conn   net.Conn
 	codec  *Codec
-	mu     sync.Mutex
-	calls  []policyCall
-	answer func(method string, params json.RawMessage) (any, string)
+	mu    sync.Mutex
+	calls []policyCall
+	// projections holds the engine:node-projection notifications apart from
+	// calls: every save, pause and resume sends one, and they are state, not
+	// the engine actions the tests that read calls assert on.
+	projections []policyCall
+	answer      func(method string, params json.RawMessage) (any, string)
 	signal chan struct{}
 	// held is closed by releaseHeld; a request whose answer is holdReply is
 	// answered only then, while the worker keeps reading, as a slow proxy does.
@@ -60,7 +64,12 @@ func (f *fakeWorker) serve() {
 			return
 		}
 		f.mu.Lock()
-		f.calls = append(f.calls, policyCall{method: msg.Method, params: append(json.RawMessage(nil), msg.Params...), notify: !msg.IsRequest()})
+		call := policyCall{method: msg.Method, params: append(json.RawMessage(nil), msg.Params...), notify: !msg.IsRequest()}
+		if call.method == engineNodeProjectionMethod {
+			f.projections = append(f.projections, call)
+		} else {
+			f.calls = append(f.calls, call)
+		}
 		answer := f.answer
 		f.mu.Unlock()
 		select {

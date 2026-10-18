@@ -7,15 +7,26 @@ import (
 	"log/slog"
 	"sync"
 
+	"nvpair-shared/nodepolicy"
 	"nvpair-shared/noderec"
 )
 
-// modelInventory is the three-part answer a node's engine manager gives, carried
-// as one value so the concurrent ask can return it.
+// modelInventory is the answer a node's engine manager gives on /v1/models,
+// carried as one value so the concurrent ask can return it: the model lists and
+// the node's policy advertisement (nil when it publishes none).
 type modelInventory struct {
 	models         []string
 	byEngine       map[string][]string
 	loadedByEngine map[string][]string
+	policy         *nodepolicy.Advertisement
+}
+
+// applyTo sets the node's inventory fields from inv.
+func (inv modelInventory) applyTo(node *noderec.DirectoryNode) {
+	node.Models = inv.models
+	node.ModelsByEngine = inv.byEngine
+	node.LoadedByEngine = inv.loadedByEngine
+	node.Policy = inv.policy
 }
 
 // hostKey identifies one node's endpoint for one service. Node-info and the engine

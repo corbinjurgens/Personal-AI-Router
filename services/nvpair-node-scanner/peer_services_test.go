@@ -9,12 +9,14 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"nvpair-shared/clustertrusttest"
+	"nvpair-shared/nodepolicy"
 	"nvpair-shared/noderec"
 )
 
@@ -338,5 +340,69 @@ func TestPeerServicesHeldEnrichmentCannotRestoreWithdrawnMetadataOrCaches(t *tes
 	d.infoMu.Unlock()
 	if len(cached.GPUs) != 1 || cached.GPUs[0].Name != "new cache" {
 		t.Fatalf("obsolete completion changed current cache: %+v", cached)
+	}
+}
+
+// cachedPolicy is the last-good policy advertisement cached for hostUUID.
+func cachedPolicy(d *daemon, hostUUID string) *nodepolicy.Advertisement {
+	d.infoMu.Lock()
+	defer d.infoMu.Unlock()
+	return d.lastPolicy[hostUUID]
+}
+
+// TestPinnedFetchCarriesPolicyAndRetainsItOnFailure follows a browsed peer's
+// policy advertisement through the pinned mTLS /v1/models fetch, and checks a
+// failed fetch keeps the last good value rather than making the peer look
+// undeclared.
+func TestPinnedFetchCarriesPolicyAndRetainsItOnFailure(t *testing.T) {
+	f := newScannerReverseFixture(t)
+	f.direct.Store(true)
+	node := f.node
+	f.d.enrich(&node)
+	if !reflect.DeepEqual(node.Policy, scannerFixturePolicy) {
+		t.Fatalf("enriched policy = %+v, want %+v", node.Policy, scannerFixturePolicy)
+	}
+	if got := cachedPolicy(f.d, "peer"); !reflect.DeepEqual(got, scannerFixturePolicy) {
+		t.Fatalf("cached policy = %+v, want %+v", got, scannerFixturePolicy)
+	}
+
+	f.direct.Store(false)
+	f.reverse.Store(false)
+	node = f.node
+	f.d.enrich(&node)
+	if !reflect.DeepEqual(node.Policy, scannerFixturePolicy) {
+		t.Fatalf("policy after a failed fetch = %+v, want the last good %+v", node.Policy, scannerFixturePolicy)
+	}
+}
+
+// TestPeerServicesBootstrapEnrichmentCarriesPolicy covers a peer known only
+// from its authenticated claim, with no mDNS record: enrichPeerServices reuses
+// the same pinned fetch and records the advertisement on the node and in the
+// last-good cache.
+func TestPeerServicesBootstrapEnrichmentCarriesPolicy(t *testing.T) {
+	f := newScannerReverseFixture(t)
+	f.direct.Store(true)
+	if _, existed := f.d.dir.removeBrowse("peer"); !existed {
+		t.Fatal("fixture peer had no browse record to remove")
+	}
+	incarnation, ok := f.d.mesh.PeerServiceIncarnation("peer")
+	if !ok {
+		t.Fatal("fixture has no current incarnation")
+	}
+	claim := noderec.PeerServicesClaim{Incarnation: incarnation, Source: "cm-first", Sequence: 1, ObservedAt: time.Now().UnixMilli(),
+		Descriptor: noderec.PeerServicesDescriptor{HostUUID: "peer", Name: "peer-name", Addresses: []string{"192.0.2.40"}}}
+	// Installed directly, like the held-enrichment test: the descriptor
+	// validation refuses the loopback address the fixture serves on.
+	f.d.dir.installPeerServices(claim, f.node)
+	if !f.d.dir.authenticated("peer") {
+		t.Fatal("peer is not held by an authenticated claim")
+	}
+	f.d.enrichPeerServices(claim, f.node, f.d.dir.routeGeneration("peer"))
+	node := peerServicesNode(t, f.d)
+	if !reflect.DeepEqual(node.Policy, scannerFixturePolicy) || !reflect.DeepEqual(node.Models, []string{"model"}) {
+		t.Fatalf("bootstrap enrichment = policy %+v models %v, want %+v and [model]", node.Policy, node.Models, scannerFixturePolicy)
+	}
+	if got := cachedPolicy(f.d, "peer"); !reflect.DeepEqual(got, scannerFixturePolicy) {
+		t.Fatalf("cached policy = %+v, want %+v", got, scannerFixturePolicy)
 	}
 }

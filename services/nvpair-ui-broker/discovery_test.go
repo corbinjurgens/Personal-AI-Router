@@ -5,10 +5,13 @@ package main
 
 import (
 	"encoding/json"
+	"reflect"
+	"strings"
 	"testing"
 	"time"
 
 	"nvpair-shared/errors"
+	"nvpair-shared/nodepolicy"
 	"nvpair-shared/noderec"
 )
 
@@ -124,6 +127,34 @@ func TestDiscoveryStoreScannerProjectionWins(t *testing.T) {
 	snap = s.Snapshot()
 	if len(snap) != 1 || snap[0].ID != "manual-host" {
 		t.Fatalf("manual projection should surface after scanner removal: %+v", snap)
+	}
+}
+
+// TestDiscoveryRelayCarriesPolicyAdvertisement covers the broker hop of the
+// roles advertisement: the scanner's DirectoryNode.Policy reaches the client
+// node list unchanged, and a node without one carries no policy key.
+func TestDiscoveryRelayCarriesPolicyAdvertisement(t *testing.T) {
+	adv := &nodepolicy.Advertisement{
+		Revision: "7",
+		Roles:    map[string]nodepolicy.AdvertisedRole{nodepolicy.TierWeak: {Engine: "ollama", Model: "qwen3:4b"}},
+		PausedBy: nodepolicy.PausedByPeer,
+	}
+	s := newDiscoveryStore()
+	s.Upsert(directoryToEnriched(noderec.DirectoryNode{HostUUID: "declared", Name: "declared", Policy: adv}), sourceScanner)
+	s.Upsert(directoryToEnriched(noderec.DirectoryNode{HostUUID: "undeclared", Name: "undeclared"}), sourceScanner)
+	byID := map[string]AvailableNode{}
+	for _, n := range s.Snapshot() {
+		byID[n.HostUUID] = n
+	}
+	if got := byID["declared"].Policy; !reflect.DeepEqual(got, adv) {
+		t.Fatalf("declared node policy = %+v, want %+v", got, adv)
+	}
+	raw, err := json.Marshal(byID["undeclared"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), `"policy"`) {
+		t.Fatalf("undeclared node carries a policy key: %s", raw)
 	}
 }
 

@@ -22,6 +22,7 @@ import (
 	"nvpair-shared/engines"
 	"nvpair-shared/errors"
 	"nvpair-shared/nodeid"
+	"nvpair-shared/nodepolicy"
 	"nvpair-shared/noderec"
 	"nvpair-shared/schedulerwire"
 
@@ -112,6 +113,10 @@ type AvailableNode struct {
 	// consumer show which of a remote node's models are loaded. Omitted
 	// when no engine reports loaded state.
 	LoadedByEngine map[string][]string `json:"loadedByEngine,omitempty"`
+	// Policy is the node's own policy advertisement (declared roles, policy
+	// revision, pause origin) from the same /v1/models fetch. Omitted when the
+	// node publishes none, which means it declares nothing.
+	Policy *nodepolicy.Advertisement `json:"policy,omitempty"`
 }
 
 // GetNodesResult is the response to "discovery:get-nodes". Wrapped in an
@@ -967,6 +972,9 @@ func (b *Broker) forwardEngineNotification(method string, params json.RawMessage
 	}
 	if method == "engine:ready" {
 		b.reconcileLMStudioProxyAfterEngineManagerReady()
+		// A (re)started engine-manager holds no node projection until it is
+		// sent one. Off the read pump, like the settings projection below.
+		go b.publishNodeProjection()
 		go func() {
 			b.engineConfigMu.Lock()
 			defer b.engineConfigMu.Unlock()

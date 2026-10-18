@@ -21,6 +21,7 @@ import (
 
 	"nvpair-shared/discovery"
 	"nvpair-shared/netpick"
+	"nvpair-shared/nodepolicy"
 )
 
 // uuidFromTXT extracts a node's stable uuid= from its TXT records. Kept as a
@@ -62,6 +63,13 @@ type Node struct {
 	// removed. Internal routing metadata, not part of the proxy's outward node
 	// contract.
 	ClusterUUID string `json:"-"`
+	// Roles and PolicyRevision are the node's own policy advertisement
+	// (DirectoryNode.Policy): what it declares it serves per tier, and the
+	// revision of the policy that says so. Nil and empty when the node
+	// publishes none, which means it declares nothing. Internal routing
+	// metadata like Loaded, so a role edit does not announce node/updated.
+	Roles          map[string]nodepolicy.AdvertisedRole `json:"-"`
+	PolicyRevision string                               `json:"-"`
 }
 
 // withPrimaryIP returns a copy of the node with IP resolved by the shared ranker
@@ -154,7 +162,8 @@ func (d *Discovery) SetSubscribed(nodes []Node) (discovered, updated, removed []
 
 // nodeEqual reports whether two routable Nodes carry the same routing/display
 // identity — the fields a consumer dials or renders. A change in any of them
-// warrants a node/updated.
+// warrants a node/updated. Loaded, ClusterUUID, Roles and PolicyRevision are
+// internal routing metadata and deliberately not compared.
 func nodeEqual(a, b Node) bool {
 	return a.ID == b.ID && a.Host == b.Host && a.Port == b.Port && a.IP == b.IP &&
 		slices.Equal(a.Addresses, b.Addresses) && slices.Equal(a.TXT, b.TXT) &&

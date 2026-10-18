@@ -13,6 +13,7 @@ import (
 	"io"
 	"log"
 	"log/slog"
+	"maps"
 	"net"
 	"net/http"
 	"net/url"
@@ -1219,7 +1220,7 @@ func subscribedToNode(p engineProfile, n noderec.DirectoryNode) (Node, bool) {
 	// machines. Host stays the hostname (display / dial name). A relay
 	// DirectoryNode always carries a hostUuid (the scanner guarantees it at the
 	// browse boundary), so there is no name fallback here.
-	return Node{
+	node := Node{
 		ID:   n.HostUUID,
 		Host: n.Name,
 		Port: svc.Port,
@@ -1237,7 +1238,14 @@ func subscribedToNode(p engineProfile, n noderec.DirectoryNode) (Node, bool) {
 		// that sends no attribution — see DirectoryNode.EngineModels).
 		Models: append([]string(nil), n.EngineModels(p.Name)...),
 		Loaded: append([]string(nil), n.LoadedByEngine[p.Name]...),
-	}, true
+	}
+	// The node's own declaration, carried for tier routing; no routing reads
+	// it yet.
+	if n.Policy != nil {
+		node.Roles = maps.Clone(n.Policy.Roles)
+		node.PolicyRevision = n.Policy.Revision
+	}
+	return node, true
 }
 
 func (p *Proxy) readLoop(ctx context.Context) error {

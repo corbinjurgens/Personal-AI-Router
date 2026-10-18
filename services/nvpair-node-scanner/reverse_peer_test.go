@@ -24,6 +24,7 @@ import (
 
 	"nvpair-shared/clustertrust"
 	"nvpair-shared/clustertrusttest"
+	"nvpair-shared/nodepolicy"
 	"nvpair-shared/noderec"
 )
 
@@ -80,6 +81,13 @@ type scannerReverseFixture struct {
 	connections       []net.Conn
 	wg                sync.WaitGroup
 	listeners         []net.Listener
+}
+
+// scannerFixturePolicy is the policy advertisement the fixture's peer serves
+// with its model inventory.
+var scannerFixturePolicy = &nodepolicy.Advertisement{
+	Revision: "31",
+	Roles:    map[string]nodepolicy.AdvertisedRole{nodepolicy.TierMedium: {Engine: "ollama", Model: "model", ContextTokens: 16384}},
 }
 
 const (
@@ -221,7 +229,7 @@ func newScannerReverseFixture(t *testing.T) *scannerReverseFixture {
 		if f.responseEnding.Load() == scannerIncompleteFraming {
 			model = "uncommitted model"
 		}
-		writeScannerFixtureResponse(t, w, map[string]any{"models": []string{model}, "modelsByEngine": map[string][]string{"ollama": {model}}, "loadedByEngine": map[string][]string{"ollama": {model}}}, f.responseEnding.Load())
+		writeScannerFixtureResponse(t, w, map[string]any{"models": []string{model}, "modelsByEngine": map[string][]string{"ollama": {model}}, "loadedByEngine": map[string][]string{"ollama": {model}}, "policy": scannerFixturePolicy}, f.responseEnding.Load())
 	}))
 	models.TLS = peerMesh.ServerTLSConfig()
 	models.StartTLS()
@@ -419,8 +427,8 @@ func TestScannerReverseEnrichmentAndDirectRecovery(t *testing.T) {
 	if _, ok := f.d.fetchPeerNodeInfoWithin(context.Background(), "peer", "peer", "localhost", f.node.Services[noderec.ServiceNodeInfo].Port); !ok {
 		t.Fatal("recovered direct node-info failed")
 	}
-	if models, _, _, ok := f.d.fetchPeerModels("peer", "localhost", f.node.Services[noderec.ServiceEngineManager].Port, "peer"); !ok || !reflect.DeepEqual(models, []string{"model"}) {
-		t.Fatalf("recovered direct models=%v ok=%v", models, ok)
+	if inventory, ok := f.d.fetchPeerModels("peer", "localhost", f.node.Services[noderec.ServiceEngineManager].Port, "peer"); !ok || !reflect.DeepEqual(inventory.models, []string{"model"}) {
+		t.Fatalf("recovered direct models=%v ok=%v", inventory.models, ok)
 	}
 	if f.directInfo.Load()-beforeInfo != 1 || f.directModels.Load()-beforeModels != 1 {
 		t.Fatal("readmission did not recover the direct paths")
@@ -445,7 +453,7 @@ func TestScannerDirectInventoryReplyLossDoesNotReplay(t *testing.T) {
 	f := newScannerReverseFixture(t)
 	f.direct.Store(true)
 	f.interrupt.Store(true)
-	if _, _, _, ok := f.d.fetchPeerModels("peer", "localhost", f.node.Services[noderec.ServiceEngineManager].Port, "peer"); ok {
+	if _, ok := f.d.fetchPeerModels("peer", "localhost", f.node.Services[noderec.ServiceEngineManager].Port, "peer"); ok {
 		t.Fatal("interrupted direct inventory succeeded")
 	}
 	if f.modelCalls.Load() != 1 || f.directModels.Load() != 1 || f.reverseModels.Load() != 0 {
@@ -514,7 +522,7 @@ func TestScannerRejectsResponseAfterAuthorityLoss(t *testing.T) {
 							_, ok := f.d.fetchPeerNodeInfoWithin(context.Background(), "peer", "peer", "localhost", f.node.Services[service].Port)
 							done <- ok
 						} else {
-							_, _, _, ok := f.d.fetchPeerModels("peer", "localhost", f.node.Services[service].Port, "peer")
+							_, ok := f.d.fetchPeerModels("peer", "localhost", f.node.Services[service].Port, "peer")
 							done <- ok
 						}
 					}()
@@ -622,7 +630,7 @@ func TestScannerRequiresOneJSONValueAndCleanBodyEnd(t *testing.T) {
 			if _, ok := f.d.fetchPeerNodeInfoWithin(context.Background(), "peer", "peer", "localhost", f.node.Services[noderec.ServiceNodeInfo].Port); ok != wantOK {
 				t.Fatalf("node-info success = %v, want %v", ok, wantOK)
 			}
-			if _, _, _, ok := f.d.fetchPeerModels("peer", "localhost", f.node.Services[noderec.ServiceEngineManager].Port, "peer"); ok != wantOK {
+			if _, ok := f.d.fetchPeerModels("peer", "localhost", f.node.Services[noderec.ServiceEngineManager].Port, "peer"); ok != wantOK {
 				t.Fatalf("inventory success = %v, want %v", ok, wantOK)
 			}
 		})

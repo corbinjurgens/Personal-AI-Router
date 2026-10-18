@@ -17,6 +17,7 @@ import (
 	"nvpair-shared/applog"
 	"nvpair-shared/jsonrpc"
 	"nvpair-shared/netpick"
+	"nvpair-shared/nodepolicy"
 	"nvpair-shared/noderec"
 
 	"nvpair-ui-broker/relay"
@@ -72,6 +73,9 @@ type EnrichedNode struct {
 	// peer's engine-manager /v1/models loadedByEngine field. Carried through to
 	// AvailableNode so a remote node's cards can reflect loaded state.
 	LoadedByEngine map[string][]string `json:"loadedByEngine,omitempty"`
+	// Policy is the node's policy advertisement from the same fetch, carried
+	// through to AvailableNode. Nil when the node publishes none.
+	Policy *nodepolicy.Advertisement `json:"policy,omitempty"`
 }
 
 // directoryToEnriched projects the promoted daemon's DirectoryNode onto the
@@ -110,6 +114,7 @@ func directoryToEnriched(n noderec.DirectoryNode) EnrichedNode {
 		Models:         n.Models,
 		ModelsByEngine: n.ModelsByEngine,
 		LoadedByEngine: n.LoadedByEngine,
+		Policy:         n.Policy,
 	}
 }
 
@@ -324,6 +329,7 @@ func (sn storedNode) toAvailable() AvailableNode {
 		Models:         n.Models,
 		ModelsByEngine: n.ModelsByEngine,
 		LoadedByEngine: n.LoadedByEngine,
+		Policy:         n.Policy,
 	}
 }
 

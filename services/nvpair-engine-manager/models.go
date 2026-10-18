@@ -11,6 +11,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"nvpair-shared/nodepolicy"
 )
 
 // modelsTimeout bounds the whole engine:models sweep so one hung engine can't
@@ -39,10 +41,16 @@ const modelsTimeout = 5 * time.Second
 // loaded_models succeeds, a loaded name can appear here without a matching
 // ByEngine/Models entry until the next successful sweep. Its own omitempty drops
 // the whole map when no engine reports loaded state.
+//
+// Policy is this node's policy advertisement as the broker last pushed it
+// (nodeprojection.go). It is omitted until the first push, and an older peer
+// never sends it; either way a reader treats the node as declaring nothing. The
+// engine:models-changed notification carries no Policy.
 type ModelsResult struct {
-	Models         []string            `json:"models"`
-	ByEngine       map[string][]string `json:"modelsByEngine,omitempty"`
-	LoadedByEngine map[string][]string `json:"loadedByEngine,omitempty"`
+	Models         []string                  `json:"models"`
+	ByEngine       map[string][]string       `json:"modelsByEngine,omitempty"`
+	LoadedByEngine map[string][]string       `json:"loadedByEngine,omitempty"`
+	Policy         *nodepolicy.Advertisement `json:"policy,omitempty"`
 }
 
 // Models returns the union of model names served by every installed, running
@@ -70,7 +78,9 @@ func (e *Executor) Models(ctx context.Context) []string {
 // dropped its models for peers. Concurrency bounds the sweep by the slowest
 // single engine, not the sum.
 func (e *Executor) ModelsResult(ctx context.Context) ModelsResult {
-	return e.modelsSweep(ctx, true)
+	res := e.modelsSweep(ctx, true)
+	res.Policy = e.nodeProjection.advertisement()
+	return res
 }
 
 // inventoryReconcileInterval is how often the loaded-model watcher refreshes
