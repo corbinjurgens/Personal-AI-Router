@@ -7,12 +7,15 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -197,6 +200,116 @@ func TestStopAllStopsDetachedCommandDaemonBeforeReadiness(t *testing.T) {
 	}
 	if !waitPortClosed(port, 5*time.Second) {
 		t.Fatalf("detached command daemon remained on port %d after StopAll", port)
+	}
+	if hasErr(ex.Errors(), startFailedID("fake")) {
+		t.Fatalf("shutdown cancellation retained a command-mode start-failed error: %+v", ex.Errors())
+	}
+}
+
+// runCommandTestHelper is dispatched by TestMain before building the usual
+// fixtures. A start request can launch a daemon and hold the CLI open until
+// cancellation; a separate stop request must still terminate that daemon.
+func runCommandTestHelper(url string) int {
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Get(url)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return 1
+	}
+	return 0
+}
+
+func TestStopAllStopsDetachedDaemonWhileCommandStartIsPending(t *testing.T) {
+	helper, err := os.Executable()
+	if err != nil {
+		t.Fatalf("test helper executable: %v", err)
+	}
+	port, err := freePort()
+	if err != nil {
+		t.Fatalf("free port: %v", err)
+	}
+	daemon := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	})}
+	t.Cleanup(func() { _ = daemon.Close() })
+	daemonStarted := make(chan error, 1)
+	releaseStart := make(chan struct{})
+	var stopCalls atomic.Int32
+	control := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/start":
+			ln, err := net.Listen("tcp", "127.0.0.1:"+strconv.Itoa(port))
+			if err != nil {
+				daemonStarted <- err
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			go func() { _ = daemon.Serve(ln) }()
+			daemonStarted <- nil
+			// The daemon outlives this CLI request. Do not acknowledge start:
+			// shutdown must cancel the CLI while it is still waiting here.
+			select {
+			case <-r.Context().Done():
+			case <-releaseStart:
+			}
+		case "/stop":
+			stopCalls.Add(1)
+			if err := daemon.Close(); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+			}
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(control.Close)
+	t.Cleanup(func() { close(releaseStart) })
+
+	manifest := testEngineManifest(fakeEngineBin)
+	platform := manifest.Platforms[hostKey()]
+	platform.Runtime = Runtime{
+		Mode:  "command",
+		Port:  port,
+		Start: [][]string{{helper, "command-test-helper", control.URL + "/start"}},
+		Stop:  &StopSpec{Cmd: []string{helper, "command-test-helper", control.URL + "/stop"}, GraceS: 1},
+		Ready: &Probe{HTTP: "http://127.0.0.1:{port}/", Status: http.StatusOK, TimeoutS: 60},
+	}
+	manifest.Platforms[hostKey()] = platform
+	ex := newTestExecutor(t, manifest)
+	started := make(chan error, 1)
+	go func() { started <- ex.Start(context.Background(), "fake") }()
+	t.Cleanup(ex.StopAll)
+	select {
+	case err := <-daemonStarted:
+		if err != nil {
+			t.Fatalf("detached daemon: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("start CLI did not launch its detached daemon")
+	}
+	if !portServing(port) {
+		t.Fatal("detached daemon did not start serving")
+	}
+
+	ex.StopAll()
+
+	select {
+	case err := <-started:
+		if err == nil || !strings.Contains(err.Error(), "start command failed:") {
+			t.Fatalf("Start() error = %v, want cancellation while the control CLI is pending", err)
+		}
+		t.Logf("pending control CLI returned: %v", err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("pending command-mode start did not return after StopAll")
+	}
+	if got := stopCalls.Load(); got != 1 {
+		t.Fatalf("stop CLI calls = %d, want 1 after daemon detached with start CLI pending", got)
+	}
+	if portServing(port) {
+		t.Fatalf("detached daemon remained on port %d after StopAll", port)
 	}
 	if hasErr(ex.Errors(), startFailedID("fake")) {
 		t.Fatalf("shutdown cancellation retained a command-mode start-failed error: %+v", ex.Errors())

@@ -299,9 +299,9 @@ func (e *Executor) bringUpCommand(ctx context.Context, st *engineState, engine s
 	st.mu.Lock()
 	st.proc = nil
 	st.mu.Unlock()
-	started := false
+	startAttempted := false
 	cleanup := func(startErr error) error {
-		if !started {
+		if !startAttempted {
 			return startErr
 		}
 		if stopErr := e.runCommandStop(st, engine, rt, port); stopErr != nil {
@@ -334,19 +334,16 @@ func (e *Executor) bringUpCommand(ctx context.Context, st *engineState, engine s
 			run = func(ctx context.Context, argv []string) error {
 				return runPrivateLaunchCommand(ctx, argv, launch.Env, launchDiagnosticArgs(rt))
 			}
-			// A vendor command may spawn its daemon and then exit unsuccessfully.
-			// Attempt its official cleanup even if the first command failed.
-			started = true
 		}
+		// A control CLI may detach its daemon before returning, then fail or
+		// be cancelled. Attempt official cleanup once any start command runs,
+		// even when that command never reports success.
+		startAttempted = true
 		if err := run(ctx, argv); err != nil {
 			werr := fmt.Errorf("start command failed: %w", err)
 			e.reportStartFailedUnlessShuttingDown(ctx, engine, werr)
 			return cleanup(werr)
 		}
-		// A successful control command may have launched a detached daemon.
-		// From here on, any readiness/cancellation failure must run the bounded
-		// official stop command before Start releases the lifecycle lock.
-		started = true
 	}
 	if err := e.waitReady(ctx, rt.Ready, port); err != nil {
 		werr := fmt.Errorf("engine %q did not become ready: %w", engine, err)

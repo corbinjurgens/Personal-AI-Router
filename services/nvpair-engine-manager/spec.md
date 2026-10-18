@@ -105,6 +105,11 @@ extensibility story for an open-source product.
 **Functional**
 - Load + validate per-engine JSON manifests (bundled + user dir); select the host `<goos>/<goarch>` block; resolve placeholders (`{bin}`, `{cli}`, `{port}`, `{download}`, `{install_dir}`). Install commands also receive resolved download and destination paths in child-scoped `NVPAIR_INSTALL_*` environment variables so shell reparsing cannot corrupt them.
 - Support both `process` (owned foreground) and `command` (daemon + control-CLI) runtimes; execute detect / install / uninstall / start / stop / restart / status / health and HTTP **or** CLI actions; emit `engine:*` results and notifications.
+- For command-mode startup failures or cancellation after any start-command
+  attempt, run the bounded official stop command and use the configured
+  readiness endpoint to confirm listener closure before releasing the lifecycle
+  lock. A control CLI may detach a daemon before it returns, so cleanup must
+  also run when that CLI fails or is cancelled.
 - Bound process-mode stops: on Unix send SIGTERM to the owned process group, then SIGKILL after `runtime.stop.grace_s` (five seconds by default); `signal:"kill"` skips the grace. On Windows, windowless managed engines require immediate `taskkill /T /F`.
 - Reclaim an adopted managed orphan only after authoritative executable-image
   inspection: Linux `/proc/<pid>/exe`, macOS kernel `proc_pidpath` with a

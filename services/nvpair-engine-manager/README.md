@@ -207,6 +207,13 @@ startup cleanup uses the same policy. On Windows, the windowless engines we
 spawn cannot receive a graceful (non-`/F`) close, so stopping uses immediate
 `taskkill /T /F`.
 
+For command-mode engines, any attempted start command may have launched a
+detached daemon before returning. If startup fails or is cancelled, including
+during shutdown, cleanup runs the manifest's bounded stop command and confirms
+that the listener closes using the configured readiness endpoint before
+releasing the lifecycle lock. This also applies when the start CLI itself
+fails or is cancelled before returning.
+
 ### Adoption — start may attach to an engine it didn't launch
 
 Before spawning, `engine:start` **probes the chosen port's readiness

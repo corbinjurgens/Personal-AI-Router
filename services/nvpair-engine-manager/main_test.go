@@ -20,6 +20,9 @@ var (
 )
 
 func TestMain(m *testing.M) {
+	if len(os.Args) == 3 && os.Args[1] == "command-test-helper" {
+		os.Exit(runCommandTestHelper(os.Args[2]))
+	}
 	tmp, err := os.MkdirTemp("", "nvpair-em-test-*")
 	if err != nil {
 		panic(err)
