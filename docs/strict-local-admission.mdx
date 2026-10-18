@@ -1,0 +1,147 @@
+{/*
+SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+*/}
+
+# Strict local admission contracts
+
+The A0 slice defines versioned contracts for future hybrid local admission.
+It does not enable hybrid inference, advertise readiness, add an endpoint, or
+change concrete-model admission. Destination enforcement belongs to A1 and
+inventory propagation belongs to A2. Qualification remains a separate contract.
+
+## Inventory capability
+
+The existing `/v1/models` inventory's `policy` object (the shared
+`nodepolicy.Advertisement`) may carry `strictAdmission`:
+
+```json
+{
+  "revision": "12",
+  "roles": {},
+  "strictAdmission": {
+    "version": 1,
+    "models": [{
+      "engine": "ollama",
+      "model": "m:latest",
+      "maxConcurrent": 1,
+      "identity": {
+        "engineRunId": "engine-run-1",
+        "settingsFingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "modelDigest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      }
+    }]
+  }
+}
+```
+
+`Policy.Advertisement()` always leaves this field absent. A future authoritative
+readiness producer may set it only after enforcement and identity reconciliation.
+It never belongs in mDNS TXT or the strictly decoded peer-services descriptor.
+
+| State | Meaning for future hybrid selection |
+| --- | --- |
+| Absent | Older peer or enforcement not ready; exclude from hybrid only. |
+| Unsupported | Positive integer version other than 1; retain the envelope without interpreting its contents; exclude from hybrid only. |
+| Valid | Version 1 schema validates; current availability, capacity and qualification still require destination checks. |
+| Invalid | Malformed version 1 or invalid envelope; reject the contract. |
+
+Versions are integers in 1..2147483647, independent of policy schema version 2.
+Unknown-version JSON is preserved by Go for round trips. TypeScript reports its
+version and unsupported state without interpreting payload fields. Explicit null
+is malformed, distinct from absence. Version 1 rejects unknown fields recursively.
+The Advertisement field name must be exactly `strictAdmission`; case-variant
+aliases reject the advertisement, including when the canonical key is also present.
+Wire strings use Go JSON decoding semantics: unpaired UTF-16 surrogate escapes
+become U+FFFD before validation, duplicate checks and identity use. TypeScript
+applies `toWellFormed()` to every interpreted strict-contract string to match.
+Models contain 1..1024 distinct engine/model entries; engine IDs use the existing
+node-policy built-in engine vocabulary and models cannot be reserved aliases.
+`maxConcurrent` is an integer in 1..1048576; zero never means unlimited here.
+Engine/model names must be normalized by the destination before publication and
+ticket allocation, using the existing engine-specific normalization. The shared
+schema does not duplicate engine adapters or prove normalization.
+
+Identity fields are required. `engineRunId` fences engine process incarnations;
+`settingsFingerprint` is lowercase SHA-256 hex of effective launch/settings epoch
+and applied configuration; `modelDigest` is lowercase SHA-256 hex identifying
+immutable model content. A model name alone proves neither identity nor readiness.
+No credential, prompt, account, qualification schema or endpoint is carried.
+Run/node identifiers match `[A-Za-z0-9][A-Za-z0-9._:-]{0,127}`.
+
+## Trusted request envelope
+
+`X-PAIR-Strict-Admission` is reserved for a single JSON request on trusted paired
+ingress and the equivalent local dispatch seam. A0 only names it; handlers do not
+consume or emit it yet. A1 must reject malformed/unsupported strict requests,
+accept it only in the authorized internal path, and strip all internal headers
+before forwarding to engines. It grants no remote or paid permission.
+
+```json
+{
+  "version": 1,
+  "queueBudgetMs": 0,
+  "coldStartBudgetMs": 0,
+  "preOutputBudgetMs": 30000,
+  "request": {"originNodeId": "node-1", "proxyRunId": "proxy-1", "requestId": "1"},
+  "identity": {
+    "engineRunId": "engine-run-1",
+    "settingsFingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "modelDigest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  }
+}
+```
+
+All fields are required and nonnull. Budgets are integral milliseconds:
+`preOutputBudgetMs` is 1..600000 and each remaining queue/cold allowance is
+0..`preOutputBudgetMs`. Integral numeric JSON spellings such as `1.0` are accepted.
+The origin accounts for cumulative waits, including its peer-client transport
+slot, and sends only remaining durations. Destination monotonic timers may only
+shrink them; no cross-machine wall-clock synchronization is assumed. Queue and
+cold allowances overlap within the pre-output cap, rather than adding to it.
+An already committed healthy generation is outside these selection budgets.
+
+Zero cold budget forbids wake/unload and excludes unloaded models. Exhaustion
+rejects, with no timeout-admit escape. Availability/off, busy capacity and cold
+residency remain distinct reasons in A1. All facades/origins use one destination
+controller with atomic normalized engine/model tickets.
+
+The request key is `(originNodeId, proxyRunId, requestId)`. Its positive canonical
+decimal-string counter is bounded by signed int64 and allocated process-wide,
+across facades. It is origin-private identity, separate from existing workload
+IDs and conversation affinity. The broker's acknowledged stable node identity
+must precede future hybrid readiness; A0 adds no identity message handler.
+
+## Frozen implementation seams
+
+`nvpair-proxy/readiness_contract.go` declares `strictDestinationAdmission`:
+`AdmitStrict(ctx, engine, model, request)` and `StrictReadiness()`. A1 connects
+`ingress.go:serveIngress` and `http_handler.go:handleHTTP` self dispatch to the same
+controller. It revalidates current identity, qualification, availability and
+capacity before local effects. `strictAdmissionTicket.BeforeStrictDispatch`
+must durably mark dirty capacity before inference bytes are sent; failure prevents
+dispatch. Idempotent `Finish` distinguishes not-dispatched, qualified completion,
+authoritative idle, verified replacement and uncertain work. Uncertainty retains
+capacity through cancellation, transport loss, first-body timeout and restart;
+elapsed time alone cannot release it.
+
+`nvpair-ui-broker/readiness_contract.go` declares `strictReadinessSource`, a
+revision/proxy-incarnation-fenced snapshot, and `strictAdvertisementSink` for the
+whole advertisement. Both sides use shared `StrictAdmissionReadiness` with
+`policyRevision`, `proxyRunId` and optional `capability`; a nil capability
+withdraws readiness. Its validation checks syntax, while the broker must check
+the fences against current state. A2 connects acknowledged policy publication
+in `policy.go` to the inventory's future `ModelsResult.Policy`; scanner caches, directory
+and proxy overlays carry that same policy object. Missing/mismatched fences,
+disconnect, restart or pending activation withdraw the capability. These
+interfaces have no production implementation in A0, and no readiness is emitted.
+
+## Parser compatibility
+
+The Go and desktop parser tests consume the same mutation corpus in
+`services/shared/nodepolicy/testdata/strict-admission.json`. They check named
+field failures, version states, bounds and nested identity, plus duplicate and
+cardinality checks and integral numeric spellings. Go tests retain R1 inventory
+bytes when the field is absent and preserve future-version envelopes. The TUI
+currently reads availability only; `ui/policywire.go` supplies a minimal standalone
+advertisement decoder for future diagnostics, with no new subscription.

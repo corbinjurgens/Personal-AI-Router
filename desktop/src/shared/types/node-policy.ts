@@ -3,6 +3,42 @@
 
 import type { EngineType } from '@/shared/types/engines'
 
+/** Origin-private identity shared across facades; never a conversation key. */
+export interface RoutingRequestKey {
+    originNodeId: string
+    proxyRunId: string
+    requestId: string
+}
+
+/** Nonsecret engine/settings/content fence, independent of qualification. */
+export interface StrictModelIdentity {
+    engineRunId: string
+    settingsFingerprint: string
+    modelDigest: string
+}
+
+export interface StrictAdmissionRequest {
+    version: 1
+    queueBudgetMs: number
+    coldStartBudgetMs: number
+    preOutputBudgetMs: number
+    request: RoutingRequestKey
+    identity: StrictModelIdentity
+}
+
+export interface StrictAdmissionModel {
+    engine: string
+    model: string
+    maxConcurrent: number
+    identity: StrictModelIdentity
+}
+
+/** Schema validity is separate from availability, capacity and qualification. */
+export type StrictAdmissionCapability =
+    | { state: 'absent' }
+    | { state: 'unsupported'; version: number }
+    | { state: 'valid'; version: 1; models: StrictAdmissionModel[] }
+
 /** A node's live availability. `draining` is a pause in progress. */
 export type NodeAvailability = 'available' | 'draining' | 'paused'
 

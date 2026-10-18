@@ -10,16 +10,152 @@ import type {
     NodePolicyTarget,
     NodePolicyWrite,
     PolicyActivationStatus,
-    WorkloadCancelRequest
+    WorkloadCancelRequest,
+    RoutingRequestKey,
+    StrictModelIdentity,
+    StrictAdmissionRequest,
+    StrictAdmissionModel,
+    StrictAdmissionCapability
 } from '@/shared/types/node-policy'
 import { engineManagerName } from '@/shared/utils/engines'
 import getErrorString from '@/shared/utils/get-error-string'
 import { availabilityValue } from './node-availability'
 import type { JsonObject, JsonValue } from './json-rpc-client'
+import { EngineManagerNames } from '@/shared/constants/engines'
 
 function objectValue(value: JsonValue | undefined): JsonObject | null {
     if (value === null || typeof value !== 'object' || Array.isArray(value)) return null
     return value
+}
+
+const STRICT_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/
+const STRICT_DIGEST = /^[0-9a-f]{64}$/
+
+function strictObject(value: JsonValue | undefined, fields: string[]): JsonObject {
+    const body = objectValue(value)
+    if (
+        !body ||
+        Object.keys(body).some(key => !fields.includes(key)) ||
+        fields.some(key => body[key] === undefined || body[key] === null)
+    ) {
+        throw new Error('Invalid strict-admission object fields')
+    }
+    return body
+}
+
+function strictString(value: JsonValue | undefined, pattern: RegExp): string {
+    const normalized = typeof value === 'string' ? value.toWellFormed() : null
+    if (normalized === null || normalized.match(pattern)?.[0] !== normalized) {
+        throw new Error('Invalid strict-admission identity')
+    }
+    return normalized
+}
+
+function strictInteger(value: JsonValue | undefined, min: number, max: number): number {
+    if (typeof value !== 'number' || !Number.isInteger(value) || value < min || value > max) {
+        throw new Error('Invalid strict-admission integer')
+    }
+    return value
+}
+
+function strictModelIdentity(value: JsonValue | undefined): StrictModelIdentity {
+    const body = strictObject(value, ['engineRunId', 'settingsFingerprint', 'modelDigest'])
+    return {
+        engineRunId: strictString(body.engineRunId, STRICT_ID),
+        settingsFingerprint: strictString(body.settingsFingerprint, STRICT_DIGEST),
+        modelDigest: strictString(body.modelDigest, STRICT_DIGEST)
+    }
+}
+
+function routingRequestKey(value: JsonValue | undefined): RoutingRequestKey {
+    const body = strictObject(value, ['originNodeId', 'proxyRunId', 'requestId'])
+    const requestId = strictString(body.requestId, /^[1-9][0-9]*$/)
+    if (BigInt(requestId) > 9223372036854775807n) throw new Error('Invalid routing requestId')
+    return {
+        originNodeId: strictString(body.originNodeId, STRICT_ID),
+        proxyRunId: strictString(body.proxyRunId, STRICT_ID),
+        requestId
+    }
+}
+
+/** A0 contract parser only; it grants no dispatch permission. */
+export function parseStrictAdmissionRequest(value: JsonValue | undefined): StrictAdmissionRequest {
+    const body = strictObject(value, [
+        'version',
+        'queueBudgetMs',
+        'coldStartBudgetMs',
+        'preOutputBudgetMs',
+        'request',
+        'identity'
+    ])
+    if (body.version !== 1) throw new Error('Unsupported strict-admission version')
+    const preOutputBudgetMs = strictInteger(body.preOutputBudgetMs, 1, 600000)
+    return {
+        version: 1,
+        queueBudgetMs: strictInteger(body.queueBudgetMs, 0, preOutputBudgetMs),
+        coldStartBudgetMs: strictInteger(body.coldStartBudgetMs, 0, preOutputBudgetMs),
+        preOutputBudgetMs,
+        request: routingRequestKey(body.request),
+        identity: strictModelIdentity(body.identity)
+    }
+}
+
+/** Decode only the inventory policy's capability. Future versions are excluded. */
+export function parseStrictAdmissionCapability(
+    value: JsonValue | undefined
+): StrictAdmissionCapability {
+    if (value === undefined) return { state: 'absent' }
+    const envelope = objectValue(value)
+    if (!envelope) throw new Error('Invalid strict-admission capability')
+    const version = strictInteger(envelope.version, 1, 2147483647)
+    if (version !== 1) return { state: 'unsupported', version }
+    const body = strictObject(value, ['version', 'models'])
+    if (!Array.isArray(body.models) || body.models.length < 1 || body.models.length > 1024) {
+        throw new Error('Invalid strict-admission models')
+    }
+    const seen = new Set<string>()
+    const models: StrictAdmissionModel[] = body.models.map(value => {
+        const model = strictObject(value, ['engine', 'model', 'maxConcurrent', 'identity'])
+        // Match encoding/json's replacement of unpaired UTF-16 surrogates before
+        // validation, duplicate checks and downstream identity use.
+        const engine = typeof model.engine === 'string' ? model.engine.toWellFormed() : null
+        const name = typeof model.model === 'string' ? model.model.toWellFormed() : null
+        if (
+            engine === null ||
+            !Object.values(EngineManagerNames).some(value => value === engine) ||
+            name === null ||
+            name === '' ||
+            /^(weak|medium|strong)(-api|-local)?$/.exec(name)?.[0] === name
+        ) {
+            throw new Error('Invalid strict-admission engine/model')
+        }
+        const key = JSON.stringify([engine, name])
+        if (seen.has(key)) throw new Error('Duplicate strict-admission engine/model')
+        seen.add(key)
+        return {
+            engine,
+            model: name,
+            maxConcurrent: strictInteger(model.maxConcurrent, 1, 1048576),
+            identity: strictModelIdentity(model.identity)
+        }
+    })
+    return { state: 'valid', version: 1, models }
+}
+
+/** Extract the A0 contract at the Advertisement boundary; legacy fields stay opaque. */
+export function parseAdvertisementStrictAdmission(
+    value: JsonValue | undefined
+): StrictAdmissionCapability {
+    const body = objectValue(value)
+    if (!body) throw new Error('Invalid policy advertisement')
+    for (const key of Object.keys(body)) {
+        // Unicode case folding also covers the long s accepted by Go EqualFold.
+        if (key !== 'strictAdmission' && /^strictAdmission$/iu.exec(key)?.[0] === key) {
+            throw new Error(`${key} must use the exact field name strictAdmission`)
+        }
+    }
+    if (body.strictAdmission === null) throw new Error('strictAdmission must not be null')
+    return parseStrictAdmissionCapability(body.strictAdmission)
 }
 
 /** Broker params that name a node; an omitted id means this PC. */
