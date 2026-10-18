@@ -4,8 +4,10 @@
 package main
 
 import (
+	"reflect"
 	"testing"
 
+	"nvpair-shared/nodepolicy"
 	"nvpair-shared/noderec"
 )
 
@@ -196,6 +198,55 @@ func TestSubscribedToNodeKeysByHostUUID(t *testing.T) {
 		}
 		if got.Host != "host-a" {
 			t.Fatalf("Host = %q, want hostname for display", got.Host)
+		}
+	})
+}
+
+// TestSubscribedCarriesPolicyWithoutChurn covers the proxy overlay hop of the
+// roles advertisement: subscribedToNode copies the node's declared roles and
+// policy revision onto the routable Node, a node without an advertisement
+// declares nothing, and a role edit alone does not announce node/updated.
+func TestSubscribedCarriesPolicyWithoutChurn(t *testing.T) {
+	forEachEngine(t, func(t *testing.T, tc engineCase) {
+		n := noderec.DirectoryNode{
+			HostUUID: "host-uuid",
+			Name:     "host-a",
+			IP:       "10.0.0.5",
+			Services: map[noderec.ServiceKey]noderec.ServiceStatus{
+				tc.profile.DiscoveryService: {Port: tc.profile.FacadePort},
+			},
+		}
+		undeclared, ok := subscribedToNode(tc.profile, n)
+		if !ok {
+			t.Fatal("node advertising this engine + IP should project")
+		}
+		if undeclared.Roles != nil || undeclared.PolicyRevision != "" {
+			t.Fatalf("node without an advertisement projected roles %+v at revision %q", undeclared.Roles, undeclared.PolicyRevision)
+		}
+
+		roles := map[string]nodepolicy.AdvertisedRole{nodepolicy.TierStrong: {Engine: tc.profile.Name, Model: "big", ContextTokens: 32768}}
+		n.Policy = &nodepolicy.Advertisement{Revision: "40", Roles: roles}
+		declared, ok := subscribedToNode(tc.profile, n)
+		if !ok {
+			t.Fatal("declared node should project")
+		}
+		if !reflect.DeepEqual(declared.Roles, roles) || declared.PolicyRevision != "40" {
+			t.Fatalf("projected roles %+v at revision %q, want %+v at 40", declared.Roles, declared.PolicyRevision, roles)
+		}
+		roles[nodepolicy.TierWeak] = nodepolicy.AdvertisedRole{Engine: tc.profile.Name, Model: "small"}
+		if _, aliased := declared.Roles[nodepolicy.TierWeak]; aliased {
+			t.Fatal("projected roles alias the directory node's map")
+		}
+
+		d := NewDiscovery()
+		d.SetSubscribed([]Node{undeclared})
+		disc, upd, rem := d.SetSubscribed([]Node{declared})
+		if len(disc)+len(upd)+len(rem) != 0 {
+			t.Fatalf("a role declaration alone announced changes: disc=%v upd=%v rem=%v", disc, upd, rem)
+		}
+		nodes := d.Nodes()
+		if len(nodes) != 1 || nodes[0].PolicyRevision != "40" {
+			t.Fatalf("overlay did not take the declared node: %+v", nodes)
 		}
 	})
 }

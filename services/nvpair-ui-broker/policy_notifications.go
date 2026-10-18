@@ -13,9 +13,15 @@ package main
 // pass in, so it cannot announce a document it captured before a newer save.
 //
 // Only the client write is serialized: r.mu is never held across it, so saves,
-// proxy pushes and reads go on while a client is slow to read.
+// proxy pushes and reads go on while a client is slow to read. The projection
+// this node publishes to engine-manager for its paired peers follows the same
+// rule under its own lock.
 
-import "nvpair-shared/nodepolicy"
+import (
+	"log/slog"
+
+	"nvpair-shared/nodepolicy"
+)
 
 // notifyPolicyChanged announces this node's persisted policy, its revision and
 // whether the proxy has activated it, to every client. Callers announce after
@@ -42,4 +48,32 @@ func (b *Broker) notifyAvailability() {
 	live, active := r.live, r.admission.Active
 	r.mu.Unlock()
 	b.notifyClients(notifyAvailabilityChanged, map[string]any{"nodeId": b.nodeID, "availability": live, "active": active})
+}
+
+// nodeProjection is the engine:node-projection payload: what engine-manager
+// publishes about this node's policy in its pinned /v1/models document.
+type nodeProjection struct {
+	Policy nodepolicy.Advertisement `json:"policy"`
+}
+
+// publishNodeProjection sends engine-manager this node's policy advertisement,
+// read from the policy as it is now. Callers publish after every persisted
+// policy or availability change and whenever engine-manager reports ready, so a
+// restarted engine-manager learns it again. It follows the discipline above
+// under its own lock, so a projection that read older state can never reach
+// engine-manager after one that read newer state.
+func (b *Broker) publishNodeProjection() {
+	r := b.nodePolicyRuntime()
+	r.projectionMu.Lock()
+	defer r.projectionMu.Unlock()
+	worker := b.getEngineMgr()
+	if worker == nil {
+		return
+	}
+	r.mu.Lock()
+	projection := nodeProjection{Policy: r.current.Advertisement()}
+	r.mu.Unlock()
+	if err := worker.Notify(engineNodeProjectionMethod, projection); err != nil {
+		slog.Warn("could not publish the node projection to engine-manager", "err", err)
+	}
 }

@@ -99,6 +99,9 @@ type Executor struct {
 	// desired persists explicit per-engine ON/OFF intent. Runtime state remains
 	// in-memory; shutdown cleanup must not rewrite this store.
 	desired *desiredStateStore
+	// nodeProjection is the broker's last node projection, served with the
+	// model inventory (nodeprojection.go).
+	nodeProjection nodeProjectionStore
 	// overrideDir is the per-user manifest-override directory (the same
 	// engines/ dir buildRegistry overlays). engine:set-port persists the
 	// chosen port here as a manifest override. Empty disables persistence.

@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"nvpair-shared/nodepolicy"
 	"nvpair-shared/noderec"
 )
 
@@ -437,6 +438,60 @@ func TestRefreshLoadedRetainedOnFailure(t *testing.T) {
 	}
 }
 
+// TestRefreshPolicyAdvertisement covers the policy advertisement on the
+// periodic refresh: a revision change alone is a change, an identical one is
+// not, a failed fetch keeps the last good value, and a successful answer
+// without one makes the node undeclared.
+func TestRefreshPolicyAdvertisement(t *testing.T) {
+	d := newRefreshTestDaemon()
+	inventory := func(revision string) map[string]any {
+		return map[string]any{
+			"models": []string{"a"},
+			"policy": map[string]any{"revision": revision, "roles": map[string]any{"weak": map[string]any{"engine": "ollama", "model": "a"}}},
+		}
+	}
+	stub, port := startModelsStub(t, http.StatusOK, inventory("1"))
+	seedEMNode(d, "peer-P", "127.0.0.1", port)
+	if !d.refreshNodeModels("peer-P", "127.0.0.1", port, "") {
+		t.Fatal("initial populate should report a change")
+	}
+	want := &nodepolicy.Advertisement{Revision: "1", Roles: map[string]nodepolicy.AdvertisedRole{nodepolicy.TierWeak: {Engine: "ollama", Model: "a"}}}
+	if got, _ := d.dir.get("peer-P"); !reflect.DeepEqual(got.Policy, want) {
+		t.Fatalf("Policy = %+v, want %+v", got.Policy, want)
+	}
+	if d.refreshNodeModels("peer-P", "127.0.0.1", port, "") {
+		t.Error("an identical advertisement should not report a change")
+	}
+
+	stub.set(http.StatusOK, inventory("2"))
+	if !d.refreshNodeModels("peer-P", "127.0.0.1", port, "") {
+		t.Fatal("a policy revision change should report a change even when the models are unchanged")
+	}
+	want.Revision = "2"
+
+	stub.set(http.StatusInternalServerError, nil)
+	if d.refreshNodeModels("peer-P", "127.0.0.1", port, "") {
+		t.Error("a failed fetch should not report a change")
+	}
+	if got, _ := d.dir.get("peer-P"); !reflect.DeepEqual(got.Policy, want) {
+		t.Errorf("Policy after failure = %+v, want retained %+v", got.Policy, want)
+	}
+	d.infoMu.Lock()
+	cached := d.lastPolicy["peer-P"]
+	d.infoMu.Unlock()
+	if !reflect.DeepEqual(cached, want) {
+		t.Errorf("cached policy = %+v, want retained %+v", cached, want)
+	}
+
+	stub.set(http.StatusOK, map[string]any{"models": []string{"a"}})
+	if !d.refreshNodeModels("peer-P", "127.0.0.1", port, "") {
+		t.Fatal("an answer without a policy should report a change")
+	}
+	if got, _ := d.dir.get("peer-P"); got.Policy != nil {
+		t.Errorf("Policy after an answer without one = %+v, want nil", got.Policy)
+	}
+}
+
 // TestApplyModelsGuard covers requirement 6 at the directory layer: a completed
 // fetch is discarded (ok == false) when the node was removed or re-addressed
 // while it was in flight, so it can neither resurrect a removed node nor
@@ -445,7 +500,7 @@ func TestApplyModelsGuard(t *testing.T) {
 	d := newDirectory()
 
 	// Removed mid-sweep: node absent -> not resurrected.
-	if _, changed, ok := d.applyModels("ghost", "127.0.0.1", 14322, []string{"a"}, nil, nil); ok || changed {
+	if _, changed, ok := d.applyModels("ghost", "127.0.0.1", 14322, modelInventory{models: []string{"a"}}); ok || changed {
 		t.Errorf("applyModels on an absent node = (changed %v, ok %v), want (false, false)", changed, ok)
 	}
 	if _, present := d.get("ghost"); present {
@@ -459,11 +514,11 @@ func TestApplyModelsGuard(t *testing.T) {
 		Services: map[noderec.ServiceKey]noderec.ServiceStatus{noderec.ServiceEngineManager: {Port: 14322}},
 		Models:   []string{"old"},
 	})
-	if _, changed, ok := d.applyModels("peer-E", "127.0.0.1", 14322, []string{"new"}, nil, nil); ok || changed {
+	if _, changed, ok := d.applyModels("peer-E", "127.0.0.1", 14322, modelInventory{models: []string{"new"}}); ok || changed {
 		t.Errorf("applyModels with a stale IP = (changed %v, ok %v), want (false, false)", changed, ok)
 	}
 	// em port changed -> also discarded.
-	if _, changed, ok := d.applyModels("peer-E", "10.0.0.9", 99999, []string{"new"}, nil, nil); ok || changed {
+	if _, changed, ok := d.applyModels("peer-E", "10.0.0.9", 99999, modelInventory{models: []string{"new"}}); ok || changed {
 		t.Errorf("applyModels with a stale em port = (changed %v, ok %v), want (false, false)", changed, ok)
 	}
 	got, _ := d.get("peer-E")

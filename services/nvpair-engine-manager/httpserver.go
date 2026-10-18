@@ -49,18 +49,7 @@ const modelsPath = "/v1/models"
 //     the same listener with no rebind.
 func serveHTTP(ctx context.Context, port int, exec *Executor, mesh *clustertrust.Mesh) {
 	addr := net.JoinHostPort("0.0.0.0", strconv.Itoa(port))
-	models := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		// {"models":[...union...],"modelsByEngine":{"ollama":[...],...},
-		// "loadedByEngine":{"ollama":[...],...}} — the flat union stays for
-		// existing consumers; modelsByEngine and loadedByEngine are additive
-		// (both omitempty, so absent when no engine reports them).
-		_ = json.NewEncoder(w).Encode(exec.ModelsResult(r.Context()))
-	})
+	models := modelsHandler(exec)
 
 	plainMux := http.NewServeMux()
 	plainMux.Handle(modelsPath, loopbackOnly(models))
@@ -95,6 +84,23 @@ func serveHTTP(ctx context.Context, port int, exec *Executor, mesh *clustertrust
 func serveOrWarn(srv *http.Server, l net.Listener) {
 	if err := srv.Serve(l); err != nil && !errors.Is(err, http.ErrServerClosed) && !errors.Is(err, net.ErrClosed) {
 		slog.Warn("engine-manager HTTP endpoint exited", "err", err)
+	}
+}
+
+// modelsHandler serves the model inventory document on GET:
+// {"models":[...union...],"modelsByEngine":{"ollama":[...],...},
+// "loadedByEngine":{"ollama":[...],...},"policy":{...}}. The flat union stays for
+// existing consumers; modelsByEngine and loadedByEngine are additive (both
+// omitempty, so absent when no engine reports them), and policy is this node's
+// advertisement, absent until the broker pushes it.
+func modelsHandler(exec *Executor) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(exec.ModelsResult(r.Context()))
 	}
 }
 

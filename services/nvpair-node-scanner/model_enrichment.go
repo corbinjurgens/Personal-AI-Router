@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"nvpair-shared/nodepolicy"
 	"nvpair-shared/noderec"
 )
 
@@ -38,11 +39,7 @@ func (d *daemon) enrichModelsCandidates(node *noderec.DirectoryNode, hosts []str
 		return
 	}
 	ask := func(host string) (modelInventory, bool) {
-		models, byEngine, loadedByEngine, fetched := d.fetchModelsForPeer(node.HostUUID, host, em.Port, node.ClusterUUID, true)
-		if !fetched {
-			return modelInventory{}, false
-		}
-		return modelInventory{models: models, byEngine: byEngine, loadedByEngine: loadedByEngine}, true
+		return d.fetchModelsForPeer(node.HostUUID, host, em.Port, node.ClusterUUID, true)
 	}
 	key := hostKey{hostUUID: node.HostUUID, service: noderec.ServiceEngineManager}
 	_, inventory, fetched := askRemembered(&d.enrichHosts, key, hosts, ask)
@@ -53,43 +50,55 @@ func (d *daemon) enrichModelsCandidates(node *noderec.DirectoryNode, hosts []str
 	}
 	if fetched {
 		d.infoMu.Lock()
-		if d.lastModels == nil {
-			d.lastModels = make(map[string][]string)
-		}
-		if d.lastModelsByEngine == nil {
-			d.lastModelsByEngine = make(map[string]map[string][]string)
-		}
-		if d.lastLoadedByEngine == nil {
-			d.lastLoadedByEngine = make(map[string]map[string][]string)
-		}
-		d.lastModels[node.HostUUID] = inventory.models
-		d.lastModelsByEngine[node.HostUUID] = inventory.byEngine
-		d.lastLoadedByEngine[node.HostUUID] = inventory.loadedByEngine
+		d.cacheInventoryLocked(node.HostUUID, inventory)
 		d.infoMu.Unlock()
-		node.Models = inventory.models
-		node.ModelsByEngine = inventory.byEngine
-		node.LoadedByEngine = inventory.loadedByEngine
+		inventory.applyTo(node)
 		return
 	}
 	d.infoMu.Lock()
-	cached, had := d.lastModels[node.HostUUID]
-	cachedByEngine := d.lastModelsByEngine[node.HostUUID]
-	cachedLoaded := d.lastLoadedByEngine[node.HostUUID]
+	_, had := d.lastModels[node.HostUUID]
+	cached := modelInventory{
+		models:         d.lastModels[node.HostUUID],
+		byEngine:       d.lastModelsByEngine[node.HostUUID],
+		loadedByEngine: d.lastLoadedByEngine[node.HostUUID],
+		policy:         d.lastPolicy[node.HostUUID],
+	}
 	d.infoMu.Unlock()
 	if had {
-		node.Models = cached
-		node.ModelsByEngine = cachedByEngine
-		node.LoadedByEngine = cachedLoaded
+		cached.applyTo(node)
 	}
+}
+
+// cacheInventoryLocked records a successful /v1/models answer as the node's
+// last-good inventory. Caller holds infoMu.
+func (d *daemon) cacheInventoryLocked(hostUUID string, inventory modelInventory) {
+	if d.lastModels == nil {
+		d.lastModels = make(map[string][]string)
+	}
+	if d.lastModelsByEngine == nil {
+		d.lastModelsByEngine = make(map[string]map[string][]string)
+	}
+	if d.lastLoadedByEngine == nil {
+		d.lastLoadedByEngine = make(map[string]map[string][]string)
+	}
+	if d.lastPolicy == nil {
+		d.lastPolicy = make(map[string]*nodepolicy.Advertisement)
+	}
+	d.lastModels[hostUUID] = inventory.models
+	d.lastModelsByEngine[hostUUID] = inventory.byEngine
+	d.lastLoadedByEngine[hostUUID] = inventory.loadedByEngine
+	d.lastPolicy[hostUUID] = inventory.policy
 }
 
 // fetchModels does one GET of a node's /v1/models, returning the
 // flat model-name union, the per-engine attribution (engine name -> models),
-// the per-engine loaded (in-memory) set, and whether it succeeded. Shape:
-// {"models":["name",...],"modelsByEngine":{"ollama":[...]},"loadedByEngine":{"ollama":[...]}}.
-// modelsByEngine and loadedByEngine are additive (omitempty on the wire); a peer
-// that doesn't send them yields nil maps, and the flat union still enriches the
-// node. A present engine key with [] is a successful empty inventory.
+// the per-engine loaded (in-memory) set, the node's policy advertisement, and
+// whether it succeeded. Shape:
+// {"models":["name",...],"modelsByEngine":{"ollama":[...]},"loadedByEngine":{"ollama":[...]},"policy":{...}}.
+// modelsByEngine, loadedByEngine and policy are additive (omitempty on the
+// wire); a peer that doesn't send them yields nil, and the flat union still
+// enriches the node. A present engine key with [] is a successful empty
+// inventory; an absent policy means the node declares nothing.
 // A peer's model inventory is cluster data, so a peer is fetched over cluster
 // mTLS keyed on the cluster principal it advertises (clusterUUID, from its
 // cluster-uuid= TXT): this node must hold a pin for that principal, or there is
@@ -97,48 +106,49 @@ func (d *daemon) enrichModelsCandidates(node *noderec.DirectoryNode, hosts []str
 // dialed over loopback (both callers force that for self), which stays plain and
 // therefore keeps working when this node belongs to no cluster — a standalone
 // machine still has to show its own models.
-func (d *daemon) fetchModels(ip string, port int, clusterUUID string) ([]string, map[string][]string, map[string][]string, bool) {
+func (d *daemon) fetchModels(ip string, port int, clusterUUID string) (modelInventory, bool) {
 	return d.fetchModelsForPeer("", ip, port, clusterUUID, true)
 }
 
-func (d *daemon) fetchPeerModels(hostUUID, ip string, port int, clusterUUID string) ([]string, map[string][]string, map[string][]string, bool) {
+func (d *daemon) fetchPeerModels(hostUUID, ip string, port int, clusterUUID string) (modelInventory, bool) {
 	return d.fetchModelsForPeer(hostUUID, ip, port, clusterUUID, false)
 }
 
-func (d *daemon) fetchModelsForPeer(hostUUID, ip string, port int, clusterUUID string, discovering bool) ([]string, map[string][]string, map[string][]string, bool) {
+func (d *daemon) fetchModelsForPeer(hostUUID, ip string, port int, clusterUUID string, discovering bool) (modelInventory, bool) {
 	client, scheme, current, ok := d.modelsClient(hostUUID, ip, port, clusterUUID, discovering)
 	if !ok {
 		slog.Debug("model enrichment skipped: peer is not a pinned cluster member",
 			"ip", ip, "clusterUuid", clusterUUID)
-		return nil, nil, nil, false
+		return modelInventory{}, false
 	}
 	url := scheme + "://" + net.JoinHostPort(ip, strconv.Itoa(port)) + "/v1/models"
 	resp, err := client.Get(url)
 	if err != nil {
 		slog.Debug("model enrichment failed", "ip", ip, "url", url, "err", err)
-		return nil, nil, nil, false
+		return modelInventory{}, false
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return nil, nil, nil, false
+		return modelInventory{}, false
 	}
 	var body struct {
-		Models         []string            `json:"models"`
-		ModelsByEngine map[string][]string `json:"modelsByEngine"`
-		LoadedByEngine map[string][]string `json:"loadedByEngine"`
+		Models         []string                  `json:"models"`
+		ModelsByEngine map[string][]string       `json:"modelsByEngine"`
+		LoadedByEngine map[string][]string       `json:"loadedByEngine"`
+		Policy         *nodepolicy.Advertisement `json:"policy"`
 	}
 	decoder := json.NewDecoder(resp.Body)
 	if err := decoder.Decode(&body); err != nil {
-		return nil, nil, nil, false
+		return modelInventory{}, false
 	}
 	var trailing json.RawMessage
 	if err := decoder.Decode(&trailing); err != io.EOF {
-		return nil, nil, nil, false
+		return modelInventory{}, false
 	}
 	if !current() {
-		return nil, nil, nil, false
+		return modelInventory{}, false
 	}
-	return body.Models, body.ModelsByEngine, body.LoadedByEngine, true
+	return modelInventory{models: body.Models, byEngine: body.ModelsByEngine, loadedByEngine: body.LoadedByEngine, policy: body.Policy}, true
 }
 
 // modelsClient picks the transport for a model fetch: the plain client over
@@ -214,18 +224,13 @@ func (d *daemon) refreshNodeModelsCandidates(hostUUID, guardIP string, hosts []s
 		hosts = []string{loopbackHost}
 	}
 	ask := func(host string) (modelInventory, bool) {
-		models, byEngine, loadedByEngine, fetched := d.fetchPeerModels(hostUUID, host, emPort, clusterUUID)
-		if !fetched {
-			return modelInventory{}, false
-		}
-		return modelInventory{models: models, byEngine: byEngine, loadedByEngine: loadedByEngine}, true
+		return d.fetchPeerModels(hostUUID, host, emPort, clusterUUID)
 	}
 	key := hostKey{hostUUID: hostUUID, service: noderec.ServiceEngineManager}
 	_, inventory, fetched := askRemembered(&d.enrichHosts, key, hosts, ask)
 	if !fetched {
 		return false
 	}
-	models, byEngine, loadedByEngine := inventory.models, inventory.byEngine, inventory.loadedByEngine
 	d.peerServicesMu.Lock()
 	defer d.peerServicesMu.Unlock()
 	if d.dir.routeGeneration(hostUUID) != generation {
@@ -249,21 +254,10 @@ func (d *daemon) refreshNodeModelsCandidates(hostUUID, guardIP string, hosts []s
 	// a node applyModels then finds removed — is benign (it is the last-known-good
 	// value the cache exists to preserve, and forget() clears it on eviction).
 	d.infoMu.Lock()
-	if d.lastModels == nil {
-		d.lastModels = make(map[string][]string)
-	}
-	if d.lastModelsByEngine == nil {
-		d.lastModelsByEngine = make(map[string]map[string][]string)
-	}
-	if d.lastLoadedByEngine == nil {
-		d.lastLoadedByEngine = make(map[string]map[string][]string)
-	}
-	d.lastModels[hostUUID] = models
-	d.lastModelsByEngine[hostUUID] = byEngine
-	d.lastLoadedByEngine[hostUUID] = loadedByEngine
+	d.cacheInventoryLocked(hostUUID, inventory)
 	d.infoMu.Unlock()
 
-	node, changed, valid := d.dir.applyModels(hostUUID, guardIP, emPort, models, byEngine, loadedByEngine)
+	node, changed, valid := d.dir.applyModels(hostUUID, guardIP, emPort, inventory)
 	if !valid {
 		return false
 	}

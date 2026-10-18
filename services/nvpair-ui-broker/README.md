@@ -371,6 +371,14 @@ proxy enforces it.
   any facade is enabled**, availability first, so a paused node is never briefly
   admitting work, and `policy:changed` then reports the activation the replay
   reached.
+- **Node projection.** After every persisted policy change, pause and resume,
+  and on every `engine:ready` (and when a new engine-manager is attached), the
+  broker sends engine-manager `engine:node-projection {policy}`: the stored
+  policy's advertisement (`revision`, declared `roles` with the bounds of the
+  matching profiles, `pausedBy`). engine-manager serves it to paired peers as
+  `policy` in its pinned `GET /v1/models` document. Each send reads the policy
+  current at send time under one lock, so an older projection never follows a
+  newer one.
 - **Admission.** The proxy's `admission/state` (active, per-engine active, last
   activity) feeds the drains below; `admission/unload` unloads the named models
   through `engine:unload-model`; `admission/wake` calls `engine:wake` unless the
@@ -669,6 +677,7 @@ Field-by-field:
 | `models` | string[] | the node's available model names, enriched by the daemon from the node's engine-manager `em` endpoint (`GET /v1/models`). Omitted when the node advertises no engine-manager or no engine is running. |
 | `modelsByEngine` | object | the same models attributed to the engine that serves each (keyed by engine name, e.g. `ollama` / `lmstudio`). Additive alongside the flat `models` union. A present engine key with `[]` means its inventory was successfully queried and is empty; a missing key means it was not running/queryable. Omitted when no engine inventory was successfully reported. |
 | `loadedByEngine` | object | the models currently **loaded in memory** for each engine (normally a subset of `modelsByEngine`), keyed by engine name. Enriched from the peer's `loadedByEngine`. An engine key with an empty list means "running, nothing loaded"; a missing key means loaded state wasn't reported. Omitted when no engine reports loaded state. |
+| `policy` | object | the node's own policy advertisement, enriched from the same `GET /v1/models` fetch: `revision` (its persisted policy revision), `roles` (tier name to `{engine, model, contextTokens?, capabilities?}`) and `pausedBy?` (`local` or `peer`). Omitted when the node publishes none (an older peer, or before its broker's first push), which means the node declares nothing. |
 
 A node that the scanner reports as removed is deleted from the snapshot; `lastSeen` is not preserved for removed nodes. The response is wrapped in `{nodes: [...]}` (rather than a bare array) so we can grow summary fields later without breaking clients. An empty list is a normal early-startup state, not an error.
 

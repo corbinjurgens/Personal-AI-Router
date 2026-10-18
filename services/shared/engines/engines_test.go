@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"nvpair-shared/noderec"
+	"nvpair-shared/noderec/servicekey"
 )
 
 // TestOllamaIsPreparedFirst pins the ordering the broker's managed-port
@@ -106,7 +106,7 @@ func TestPortFilesAreDeclaredNotDerived(t *testing.T) {
 func TestIdentitiesAreUnique(t *testing.T) {
 	names := map[string]bool{}
 	components := map[string]bool{}
-	services := map[noderec.ServiceKey]bool{}
+	services := map[servicekey.Key]bool{}
 	facades := map[int]bool{}
 
 	for _, e := range All() {

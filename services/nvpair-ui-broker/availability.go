@@ -136,6 +136,7 @@ func (b *Broker) pauseNode(ctx context.Context) (nodepolicy.Availability, error)
 	r.cancelActive = policy.Pause.OnActive == nodepolicy.CancelActive
 	pause := policy.Pause
 	r.mu.Unlock()
+	b.publishNodeProjection()
 	slog.Info("pausing node", "onActive", pause.OnActive, "drainTimeoutSeconds", pause.DrainTimeoutSeconds,
 		"unloadModels", pause.UnloadModels, "stopEngines", pause.StopEngines)
 
@@ -245,6 +246,7 @@ func (b *Broker) resumeNode() (nodepolicy.Availability, error) {
 	restore := r.restoreSkipped
 	r.restoreSkipped = false
 	r.mu.Unlock()
+	b.publishNodeProjection()
 
 	b.pushAvailabilityAndActivate(persisted)
 	b.notifyAvailability()

@@ -8,6 +8,8 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"nvpair-shared/nodepolicy"
 )
 
 func TestEngineModels(t *testing.T) {
@@ -235,6 +237,38 @@ func TestDirectoryNodeJSONRoundTrip(t *testing.T) {
 	if !reflect.DeepEqual(orig, got) {
 		t.Fatalf("round-trip mismatch:\n orig=%+v\n got =%+v", orig, got)
 	}
+}
+
+func TestDirectoryNodePolicy(t *testing.T) {
+	t.Run("absent policy is omitted", func(t *testing.T) {
+		b, err := json.Marshal(DirectoryNode{HostUUID: "host-1"})
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		if strings.Contains(string(b), `"policy"`) {
+			t.Fatalf("undeclared node carries a policy key: %s", b)
+		}
+	})
+	t.Run("advertisement round-trips", func(t *testing.T) {
+		orig := DirectoryNode{HostUUID: "host-1", Policy: &nodepolicy.Advertisement{
+			Revision: "42",
+			Roles: map[string]nodepolicy.AdvertisedRole{
+				nodepolicy.TierStrong: {Engine: "ollama", Model: "qwen3:32b", ContextTokens: 32768, Capabilities: []nodepolicy.Capability{nodepolicy.CapTools}},
+			},
+			PausedBy: nodepolicy.PausedLocally,
+		}}
+		b, err := json.Marshal(orig)
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		var got DirectoryNode
+		if err := json.Unmarshal(b, &got); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		if !reflect.DeepEqual(orig, got) {
+			t.Fatalf("round-trip mismatch:\n orig=%+v\n got =%+v", orig.Policy, got.Policy)
+		}
+	})
 }
 
 func TestValidateTXTSize(t *testing.T) {

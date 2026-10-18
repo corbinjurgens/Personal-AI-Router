@@ -45,16 +45,17 @@ const (
 
 // Engine-manager methods and notifications the policy uses.
 const (
-	engineWakeMethod          = "engine:wake"
-	engineSleepMethod         = "engine:sleep"
-	engineIntentMethod        = "engine:intent"
-	engineIntentChanged       = "engine:intent-changed"
-	engineUnloadModelMethod   = "engine:unload-model"
-	engineStateChangedMethod  = "engine:state-changed"
-	engineModelsChangedMethod = "engine:models-changed"
-	policyRelayRequestMethod  = "policy:request"
-	policyRelayReplyMethod    = "policy:reply"
-	policyRelayCancelMethod   = "policy:cancel"
+	engineWakeMethod           = "engine:wake"
+	engineSleepMethod          = "engine:sleep"
+	engineIntentMethod         = "engine:intent"
+	engineIntentChanged        = "engine:intent-changed"
+	engineUnloadModelMethod    = "engine:unload-model"
+	engineStateChangedMethod   = "engine:state-changed"
+	engineModelsChangedMethod  = "engine:models-changed"
+	engineNodeProjectionMethod = "engine:node-projection"
+	policyRelayRequestMethod   = "policy:request"
+	policyRelayReplyMethod     = "policy:reply"
+	policyRelayCancelMethod    = "policy:cancel"
 )
 
 // remotePolicyMethods maps a client method aimed at another node to the
@@ -174,6 +175,10 @@ type policyRuntime struct {
 	// to clients (policy_notifications.go). It is taken before r.mu and held
 	// across the client write; r.mu is not.
 	publishMu sync.Mutex
+	// projectionMu serializes this node's projections to engine-manager the
+	// same way (policy_notifications.go). It is separate from publishMu so an
+	// engine-manager slow to read never holds up client announcements.
+	projectionMu sync.Mutex
 
 	relayCancels map[string]context.CancelFunc
 }
@@ -602,6 +607,7 @@ func (b *Broker) persistPolicy(build func(stored nodepolicy.Policy) (nodepolicy.
 	r.recoveryRequired = false
 	r.activationErr = ""
 	r.mu.Unlock()
+	b.publishNodeProjection()
 	// A listener the policy just enabled has no proxy to activate it in until
 	// the background start has replayed the policy, so its revision is pending
 	// until then.
@@ -1019,11 +1025,14 @@ func containsString(list []string, s string) bool {
 }
 
 // refreshEnginePolicySnapshot seeds running engines, residency and saved
-// intent from a (re)started engine-manager, whose watcher pushes only changes.
+// intent from a (re)started engine-manager, whose watcher pushes only changes,
+// and sends it the node projection. engine:ready sends the projection too, but
+// it can be read before the new worker's handle is installed; this runs after.
 func (b *Broker) refreshEnginePolicySnapshot(w *rpcWorker) {
 	if w == nil {
 		return
 	}
+	b.publishNodeProjection()
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 	if result, rpcErr, err := w.CallNoTimeout(ctx, engineIntentMethod, nil); err == nil && rpcErr == nil {

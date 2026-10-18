@@ -191,6 +191,10 @@ func (m *Manager) handleMessage(ctx context.Context, msg *Message) {
 		m.applyDiscovery(msg)
 		return
 	}
+	if msg.Method == nodeProjectionMethod && msg.IsNotification() {
+		m.applyNodeProjection(msg)
+		return
+	}
 	if msg.Method == restoreEnabledMethod && msg.IsNotification() {
 		go func() {
 			if err := m.exec.RestoreEnabled(ctx); err != nil {

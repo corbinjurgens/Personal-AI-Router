@@ -26,6 +26,7 @@ import (
 	"nvpair-shared/netmon"
 	"nvpair-shared/netpick"
 	"nvpair-shared/nodeid"
+	"nvpair-shared/nodepolicy"
 	"nvpair-shared/noderec"
 	"nvpair-shared/reach"
 )
@@ -112,6 +113,10 @@ type daemon struct {
 	// same /v1/models fetch, so a transient miss reuses it rather than blanking
 	// a remote node's loaded state. Keyed by hostUuid.
 	lastLoadedByEngine map[string]map[string][]string
+	// lastPolicy caches the policy advertisement from the same /v1/models
+	// fetch, under the same last-good rule, so a transient miss does not make a
+	// node that declares roles look undeclared. Keyed by hostUuid.
+	lastPolicy map[string]*nodepolicy.Advertisement
 	// nodeInfoDown holds the nodes whose last node-info enrichment failed, so
 	// the outage is reported when it starts and when it ends rather than once
 	// per sweep. Guarded by infoMu with the caches it explains: the reason a
@@ -260,6 +265,7 @@ func newDaemon(codec *Codec, mesh *clustertrust.Mesh, clusterDir string, tlsHTTP
 		lastModels:         make(map[string][]string),
 		lastModelsByEngine: make(map[string]map[string][]string),
 		lastLoadedByEngine: make(map[string]map[string][]string),
+		lastPolicy:         make(map[string]*nodepolicy.Advertisement),
 		nodeInfoDown:       make(map[string]bool),
 		nodeInfoReported:   make(map[string]bool),
 		startedAt:          time.Now(),
@@ -756,11 +762,15 @@ func (d *daemon) dropSelf(oldHostUUID, newHostUUID string) {
 	if loaded, ok := d.lastLoadedByEngine[oldHostUUID]; ok {
 		d.lastLoadedByEngine[newHostUUID] = loaded
 	}
+	if policy, ok := d.lastPolicy[oldHostUUID]; ok {
+		d.lastPolicy[newHostUUID] = policy
+	}
 	delete(d.lastInfo, oldHostUUID)
 	delete(d.lastInfoAt, oldHostUUID)
 	delete(d.lastModels, oldHostUUID)
 	delete(d.lastModelsByEngine, oldHostUUID)
 	delete(d.lastLoadedByEngine, oldHostUUID)
+	delete(d.lastPolicy, oldHostUUID)
 	d.infoMu.Unlock()
 	if existed {
 		d.emit(noderec.NotifyNodeRemoved, noderec.DirectoryNode{HostUUID: oldHostUUID, Name: node.Name})
@@ -1552,6 +1562,7 @@ func (d *daemon) invalidatePeerServicesRoute(hostUUID string) {
 	delete(d.lastModels, hostUUID)
 	delete(d.lastModelsByEngine, hostUUID)
 	delete(d.lastLoadedByEngine, hostUUID)
+	delete(d.lastPolicy, hostUUID)
 	delete(d.nodeInfoDown, hostUUID)
 	d.infoMu.Unlock()
 	d.clearUnreachable(hostUUID)
