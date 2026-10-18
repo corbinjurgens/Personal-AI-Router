@@ -172,6 +172,10 @@ type Broker struct {
 	engineMgrPath        string
 	engineMgrHTTPPort    int
 	engineMgrControlPort int
+	nodeInfoPort         int
+	errorsPort           int
+	workloadMgrPort      int
+	clusterMgrPort       int
 	manualNodesPath      string
 	settingsPath         string
 	clusterMgrPath       string
@@ -406,6 +410,10 @@ type workerPaths struct {
 	// Zero ports retain the product defaults for programmatic callers.
 	engineMgrHTTPPort    int
 	engineMgrControlPort int
+	nodeInfoPort         int
+	errorsPort           int
+	workloadMgrPort      int
+	clusterMgrPort       int
 	manualNodes          string
 	settings             string
 	clusterMgr           string
@@ -447,6 +455,10 @@ func NewBroker(codec *Codec, paths workerPaths) *Broker {
 		engineMgrPath:        paths.engineMgr,
 		engineMgrHTTPPort:    paths.engineMgrHTTPPort,
 		engineMgrControlPort: paths.engineMgrControlPort,
+		nodeInfoPort:         paths.nodeInfoPort,
+		errorsPort:           paths.errorsPort,
+		workloadMgrPort:      paths.workloadMgrPort,
+		clusterMgrPort:       paths.clusterMgrPort,
 		manualNodesPath:      paths.manualNodes,
 		settingsPath:         paths.settings,
 		clusterMgrPath:       paths.clusterMgr,
@@ -1456,8 +1468,8 @@ func (b *Broker) onErrorsUpdate(params json.RawMessage) {
 // if no nodes have been found yet — mDNS browsing takes a moment to
 // populate).
 func (b *Broker) Serve(ctx context.Context) error {
-	if err := validateEngineManagerPorts(b.engineManagerPorts()); err != nil {
-		return fmt.Errorf("engine-manager ports: %w", err)
+	if err := validateServicePorts(b.servicePorts()); err != nil {
+		return fmt.Errorf("service ports: %w", err)
 	}
 	ctx, cancel := context.WithCancel(ctx)
 	b.cancel = cancel

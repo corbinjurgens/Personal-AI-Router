@@ -73,12 +73,14 @@ func (c *clusterManagerProcess) Done() <-chan struct{} { return c.done }
 // membership, so if it resolved a different base than the broker handed the
 // workers, the node would pair successfully into a directory nothing reads —
 // healthy roster, no cluster traffic. An empty configDir leaves the manager on its
-// own default (standalone invocation).
-func startClusterManager(binaryPath, logLevel, configDir string, relayDir *relay.Directory, onNotify func(method string, params json.RawMessage)) (*clusterManagerProcess, error) {
+// own default (standalone invocation). extraArgs (the broker's planned --port
+// override, when any) follow the fixed flags.
+func startClusterManager(binaryPath, logLevel, configDir string, relayDir *relay.Directory, extraArgs []string, onNotify func(method string, params json.RawMessage)) (*clusterManagerProcess, error) {
 	args := []string{"--log-level", logLevel}
 	if configDir != "" {
 		args = append(args, "--config-dir", configDir)
 	}
+	args = append(args, extraArgs...)
 	cmd := exec.Command(binaryPath, args...)
 	configureSubprocess(cmd)
 
