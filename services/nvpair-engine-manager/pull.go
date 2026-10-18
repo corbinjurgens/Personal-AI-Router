@@ -107,8 +107,8 @@ func modelFromParams(params json.RawMessage) string {
 
 // PullModelStream runs the engine's pull_model action, publishing progress to
 // the hub as it advances, and returns the action's final JSON result. When
-// params is empty it defaults to {"name","model"} (covering Ollama's `name` body
-// key and the {model} CLI placeholder), so a caller can pass just a model name.
+// params is empty they come from the engine's pull binding (modelops.go), so a
+// caller can pass just a model name.
 func (e *Executor) PullModelStream(ctx context.Context, engine, model string, params json.RawMessage) (json.RawMessage, error) {
 	st, err := e.state(engine)
 	if err != nil {
@@ -119,7 +119,9 @@ func (e *Executor) PullModelStream(ctx context.Context, engine, model string, pa
 		return nil, fmt.Errorf("engine %q has no action %q", engine, pullModelAction)
 	}
 	if len(params) == 0 || string(params) == "null" {
-		params, _ = json.Marshal(map[string]string{"name": model, "model": model})
+		if params, err = e.pullParams(engine, model); err != nil {
+			return nil, err
+		}
 	}
 
 	// CLI action (e.g. lms get): no structured line progress; emit a start

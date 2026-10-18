@@ -50,7 +50,7 @@ func newRemoteReverseFixture(t *testing.T, handler func(*clustertrust.Mesh) http
 	f.server.StartTLS()
 	t.Cleanup(f.server.Close)
 	out := &syncBuffer{}
-	f.m = NewManager(NewCodec(out), &Executor{progress: newProgressHub()}, mesh, selfDir)
+	f.m = NewManager(NewCodec(out), &Executor{progress: newProgressHub(), reg: NewRegistry()}, mesh, selfDir)
 	host, portText, err := net.SplitHostPort(f.server.Listener.Addr().String())
 	if err != nil {
 		t.Fatal(err)

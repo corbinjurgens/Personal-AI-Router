@@ -20,7 +20,6 @@ const (
 	sleepMethod         = "engine:sleep"
 	intentMethod        = "engine:intent"
 	intentChangedMethod = "engine:intent-changed"
-	unloadModelMethod   = "engine:unload-model"
 )
 
 // errIntentOff is returned by Wake for an engine whose saved intent is not On.
@@ -93,8 +92,8 @@ func (e *Executor) emitIntent() {
 	}
 }
 
-// handleLifecyclePolicyRequest serves engine:wake, engine:sleep, engine:intent
-// and engine:unload-model. It reports whether it took the method.
+// handleLifecyclePolicyRequest serves engine:wake, engine:sleep and
+// engine:intent. It reports whether it took the method.
 func (m *Manager) handleLifecyclePolicyRequest(ctx context.Context, msg *Message) bool {
 	switch msg.Method {
 	case wakeMethod, sleepMethod:
@@ -124,25 +123,6 @@ func (m *Manager) handleLifecyclePolicyRequest(ctx context.Context, msg *Message
 	case intentMethod:
 		intent, err := m.exec.Intent()
 		m.respondOrErr(msg, intent, err)
-		return true
-	case unloadModelMethod:
-		go func() {
-			var p modelActionRequest
-			if !m.parse(msg, &p) {
-				return
-			}
-			if p.Engine == "" || p.Model == "" {
-				m.codec.RespondError(msg.ID, -32602, "engine and model are required")
-				return
-			}
-			res, err := m.exec.ModelUnload(ctx, p.Engine, p.Model)
-			if err != nil {
-				m.codec.RespondError(msg.ID, -32000, err.Error())
-				return
-			}
-			m.exec.pokeLoaded()
-			m.codec.Respond(msg.ID, res)
-		}()
 		return true
 	}
 	return false

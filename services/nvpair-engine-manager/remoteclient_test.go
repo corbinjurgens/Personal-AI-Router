@@ -80,6 +80,7 @@ func TestRemoteStartUsesReadinessHeaderBudget(t *testing.T) {
 // A remote Ollama load can withhold headers while a cold model loads. A remote
 // LM Studio delete can likewise restart the peer's engine before it replies.
 // Both need the longer response-header budget; other model calls remain bounded.
+// The load budget comes from the bundled manifests' load bindings.
 func TestRemoteSlowModelOperationsUseReadinessHeaderBudget(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		time.Sleep(100 * time.Millisecond)
@@ -93,6 +94,7 @@ func TestRemoteSlowModelOperationsUseReadinessHeaderBudget(t *testing.T) {
 		controlHTTP:      newRemoteHTTPClient(base, 20*time.Millisecond),
 		controlReadyHTTP: newRemoteHTTPClient(base, time.Second),
 		base:             srv.URL,
+		loadBudget:       bundledTestExecutor(t).loadResponseBudget,
 	}
 	ollama := modelActionRequest{Engine: "ollama", Model: "qwen2.5"}
 	if _, err := c.postJSON(context.Background(), controlLoadPath, "ollama", ollama); err != nil {
@@ -117,6 +119,7 @@ func TestRemoteReadinessBudgetCoversEngineStartupAllowance(t *testing.T) {
 		t.Fatalf("readiness budget %s must exceed the ordinary budget %s",
 			remoteReadyResponseHeaderTimeout, remoteResponseHeaderTimeout)
 	}
+	ex := bundledTestExecutor(t)
 	cases := []struct {
 		path   string
 		engine string
@@ -126,13 +129,15 @@ func TestRemoteReadinessBudgetCoversEngineStartupAllowance(t *testing.T) {
 		{controlDeletePath, "lmstudio", true},
 		{controlLoadPath, "ollama", true},
 		{controlLoadPath, "lmstudio", false},
+		{controlLoadPath, "llamacpp", false},
+		{controlLoadPath, "peer-only", false},
 		{controlStopPath, "ollama", false},
 		{controlUnloadPath, "ollama", false},
 		{controlEnginesPath, "", false},
 	}
 	for _, tc := range cases {
-		if got := waitsForEngineReadiness(tc.path, tc.engine); got != tc.want {
-			t.Errorf("waitsForEngineReadiness(%q, %q) = %v, want %v", tc.path, tc.engine, got, tc.want)
+		if got := waitsForEngineReadiness(tc.path, ex.loadResponseBudget(tc.engine)); got != tc.want {
+			t.Errorf("waitsForEngineReadiness(%q, budget of %q) = %v, want %v", tc.path, tc.engine, got, tc.want)
 		}
 	}
 }

@@ -26,10 +26,7 @@ var (
 	unixEnvRe = regexp.MustCompile(`\$(?:\{[A-Za-z_][A-Za-z0-9_]*\}|[A-Za-z_][A-Za-z0-9_]*)`)
 )
 
-const (
-	engineResponseHeaderTimeout     = 30 * time.Second
-	ollamaLoadResponseHeaderTimeout = 10 * time.Minute
-)
+const engineResponseHeaderTimeout = 30 * time.Second
 
 // EngineStatus is the snapshot returned by engine:status and
 // engine:get-installed.
@@ -84,12 +81,16 @@ type Executor struct {
 	settingsParent func(context.Context, string, settings.Request, string) (json.RawMessage, error)
 	// policyParent relays a paired node's node-policy call to the broker
 	// (policyrelay.go). nil until a Manager wires it.
-	policyParent     func(ctx context.Context, method string, params json.RawMessage, caller string) (json.RawMessage, error)
-	reg              *Registry
-	reporter         *Reporter
-	emit             func(method string, params any)
-	client           *http.Client
-	ollamaLoadClient *http.Client
+	policyParent func(ctx context.Context, method string, params json.RawMessage, caller string) (json.RawMessage, error)
+	reg          *Registry
+	reporter     *Reporter
+	emit         func(method string, params any)
+	client       *http.Client
+	// budgetClients holds one engine client per operation response budget a
+	// manifest declares (OperationBinding.ResponseTimeoutS), created on first
+	// use and reused so its connections are too. Guarded by budgetMu.
+	budgetMu      sync.Mutex
+	budgetClients map[time.Duration]*http.Client
 	// progress fans install/pull progress to transient subscribers (the ec
 	// streaming handlers) in addition to the local engine:install-progress
 	// notification path. See progress.go.
@@ -145,7 +146,6 @@ func NewExecutor(reg *Registry, reporter *Reporter, emit func(string, any), base
 		reporter:            reporter,
 		emit:                emit,
 		client:              newEngineHTTPClient(engineResponseHeaderTimeout),
-		ollamaLoadClient:    newEngineHTTPClient(ollamaLoadResponseHeaderTimeout),
 		progress:            newProgressHub(),
 		baseDir:             baseDir,
 		desired:             newDesiredStateStore(baseDir),
@@ -175,9 +175,29 @@ func (e *Executor) reservedPortError(port int) error {
 	return nil
 }
 
+// clientFor returns the engine client for an action's response budget: the
+// ordinary client for zero, else the client for that budget.
+func (e *Executor) clientFor(budget time.Duration) *http.Client {
+	if budget <= 0 {
+		return e.client
+	}
+	e.budgetMu.Lock()
+	defer e.budgetMu.Unlock()
+	if c, ok := e.budgetClients[budget]; ok {
+		return c
+	}
+	if e.budgetClients == nil {
+		e.budgetClients = make(map[time.Duration]*http.Client)
+	}
+	c := newEngineHTTPClient(budget)
+	e.budgetClients[budget] = c
+	return c
+}
+
 // newEngineHTTPClient builds a client used for downloads, loopback actions,
 // and probes. The ordinary shared client keeps a 30s response-header bound;
-// Ollama's cold-load action gets a separate 10m client. Both set NO total
+// an action a model operation binds with a longer budget (Ollama's cold load,
+// 10m) gets a client of its own (clientFor). Neither sets a total
 // http.Client.Timeout: a multi-GB engine download can legitimately run
 // for many minutes and every call site already bounds total time with a
 // context deadline or inactivity watchdog (install download 30m, streaming

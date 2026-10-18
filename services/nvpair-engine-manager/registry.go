@@ -14,8 +14,11 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
+
+	"nvpair-shared/engines"
 )
 
 // ManifestSchemaVersion is the highest manifest_version this binary
@@ -49,11 +52,6 @@ var resultMatchFieldPathRe = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_-]*(?:\.[a
 var artifactNameRe = regexp.MustCompile(`^[a-z][a-z0-9_]{0,31}$`)
 var sha256Re = regexp.MustCompile(`^[a-fA-F0-9]{64}$`)
 
-// engineNameRe restricts engine names to a safe charset — the name is
-// used as a filesystem path component (the per-engine install dir), so
-// it must not contain separators (and "."/".." are rejected separately).
-var engineNameRe = regexp.MustCompile(`^[a-zA-Z0-9._-]+$`)
-
 // Manifest is one engine's declarative definition. Behavior lives in
 // JSON; the engine-agnostic runner executes it. The bundled manifests
 // under manifests/ are the authoring reference.
@@ -63,6 +61,39 @@ type Manifest struct {
 	ManifestVersion int                 `json:"manifest_version"`
 	Platforms       map[string]Platform `json:"platforms"`
 	Actions         map[string]Action   `json:"actions,omitempty"`
+
+	// Family names the engine's lineage and selects the coded adapters it
+	// shares with that lineage: the model-store layout model copy uses and the
+	// download catalogue. Empty means the engine is its own family. A fork with
+	// its own ID, port and store declares the family it was forked from.
+	Family string `json:"family,omitempty"`
+	// Protocols are the protocol profiles the engine serves (see
+	// nvpair-shared/engines). They are published in the engine's descriptor;
+	// an engine that declares none claims no inference surface.
+	Protocols []string `json:"protocols,omitempty"`
+	// ModelNaming is how the engine spells model identifiers; empty means
+	// exact identifiers.
+	ModelNaming string `json:"model_naming,omitempty"`
+	// Operations binds the semantic model operations (load, unload, pull,
+	// delete) to this manifest's actions. See OperationBinding.
+	Operations map[string]OperationBinding `json:"operations,omitempty"`
+}
+
+// FamilyOrDefault returns the engine's family, which is its own ID unless the
+// manifest names another.
+func (m *Manifest) FamilyOrDefault() string {
+	if m.Family != "" {
+		return m.Family
+	}
+	return m.Engine
+}
+
+// ModelNamingOrDefault returns the engine's model naming rule.
+func (m *Manifest) ModelNamingOrDefault() string {
+	if m.ModelNaming != "" {
+		return m.ModelNaming
+	}
+	return engines.ModelNamingExact
 }
 
 // Platform is the per-`<goos>/<goarch>` block. Variance lives here
@@ -656,8 +687,24 @@ func (m *Manifest) Validate() error {
 	if strings.TrimSpace(m.Engine) == "" {
 		return errors.New("engine is required")
 	}
-	if !engineNameRe.MatchString(m.Engine) || m.Engine == "." || m.Engine == ".." {
+	if !engines.ValidID(m.Engine) {
 		return fmt.Errorf("engine %q must match [A-Za-z0-9._-]+ (it is used as a filesystem path component)", m.Engine)
+	}
+	if m.Family != "" && !engines.ValidID(m.Family) {
+		return fmt.Errorf("family %q must match [A-Za-z0-9._-]+", m.Family)
+	}
+	if m.ModelNaming != "" && !slices.Contains(engines.ModelNamings(), m.ModelNaming) {
+		return fmt.Errorf("model_naming %q invalid (want one of %s)", m.ModelNaming, strings.Join(engines.ModelNamings(), ", "))
+	}
+	seenProtocols := make(map[string]bool, len(m.Protocols))
+	for _, p := range m.Protocols {
+		if !slices.Contains(engines.Protocols(), p) {
+			return fmt.Errorf("protocols: unknown protocol %q (want one of %s)", p, strings.Join(engines.Protocols(), ", "))
+		}
+		if seenProtocols[p] {
+			return fmt.Errorf("protocols: %q is listed twice", p)
+		}
+		seenProtocols[p] = true
 	}
 	if strings.TrimSpace(m.DisplayName) == "" {
 		return errors.New("display_name is required")
@@ -697,6 +744,9 @@ func (m *Manifest) Validate() error {
 				}
 			}
 		}
+	}
+	if err := m.validateOperations(); err != nil {
+		return err
 	}
 	return m.validatePlaceholders()
 }

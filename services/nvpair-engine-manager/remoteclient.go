@@ -36,6 +36,9 @@ type remoteClient struct {
 	controlReadyHTTP *http.Client
 	base             string // https://<ip>:<port>
 	forget           func()
+	// loadBudget returns an engine's model-load response budget as this node's
+	// manifest binds it (Executor.loadResponseBudget). Nil means ordinary.
+	loadBudget func(engine string) time.Duration
 }
 
 func (c *remoteClient) controlClient(ready bool) *http.Client {
@@ -46,21 +49,23 @@ func (c *remoteClient) controlClient(ready bool) *http.Client {
 }
 
 // waitsForEngineReadiness reports whether a peer may only answer after an
-// engine is healthy or an Ollama model is loaded, which the ordinary 30s
-// response-header budget cannot cover.
+// engine is healthy or a model is loaded, which the ordinary 30s
+// response-header budget cannot cover. loadBudget is the engine's model-load
+// response budget; a load waits on the readiness budget when that exceeds the
+// ordinary one (Ollama answers a load only once the model is resident).
 //
 // Cutting such a call off is worse than slow. The initiator's cancellation
 // propagates into the peer's in-flight handler, so bringUpCommand tears the
 // engine back down — for a delete that means the files are gone, the engine is
 // left stopped, and the caller is told the delete failed.
-func waitsForEngineReadiness(path, engine string) bool {
+func waitsForEngineReadiness(path string, loadBudget time.Duration) bool {
 	if path == settingsPath+"apply" {
 		return true
 	}
 	// controlDeletePath: LM Studio's delete_model declares restart_after, so the
 	// peer replies only after the post-delete restart is ready.
 	if path == controlLoadPath {
-		return engine == "ollama"
+		return loadBudget > remoteResponseHeaderTimeout
 	}
 	return path == controlStartPath || path == controlDeletePath
 }
@@ -102,6 +107,7 @@ func (m *Manager) remoteClient(ctx context.Context, peer ecPeer) (*remoteClient,
 		controlReadyHTTP: ready,
 		base:             "https://" + hostport,
 		forget:           func() { m.addrs.Forget(peer.nodeID) },
+		loadBudget:       m.exec.loadResponseBudget,
 	}, nil
 }
 
@@ -159,7 +165,11 @@ func (c *remoteClient) postJSON(ctx context.Context, path, engine string, body a
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	client := c.controlClient(waitsForEngineReadiness(path, engine))
+	var loadBudget time.Duration
+	if path == controlLoadPath && c.loadBudget != nil {
+		loadBudget = c.loadBudget(engine)
+	}
+	client := c.controlClient(waitsForEngineReadiness(path, loadBudget))
 	resp, err := client.Do(req)
 	if err != nil {
 		c.forgetAddress()

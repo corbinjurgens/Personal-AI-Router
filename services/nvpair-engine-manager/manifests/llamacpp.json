@@ -3,6 +3,9 @@
   "engine": "llamacpp",
   "display_name": "llama.cpp",
   "manifest_version": 1,
+  "family": "llamacpp",
+  "protocols": ["llamacpp-router", "openai-v1"],
+  "model_naming": "exact",
   "install": { "mode": "user" },
   "models_dir": "~/.llamacpp",
   "uninstall": { "remove": ["{install_dir}"] },
@@ -84,6 +87,12 @@
       },
       "runtime": { "bin": "{install_dir}/llama-server" }
     }
+  },
+  "operations": {
+    "load": { "action": "load_model" },
+    "unload": { "action": "unload_model" },
+    "pull": { "action": "pull_model" },
+    "delete": { "action": "delete_model" }
   },
   "actions": {
     "list_models": {

@@ -73,12 +73,21 @@ func TestEngineHTTPClientsBoundResponseHeaders(t *testing.T) {
 	if got := responseHeaderTimeout(t, ex.client); got != engineResponseHeaderTimeout {
 		t.Fatalf("ordinary response-header timeout = %s, want %s", got, engineResponseHeaderTimeout)
 	}
-	if got := responseHeaderTimeout(t, ex.ollamaLoadClient); got != ollamaLoadResponseHeaderTimeout {
-		t.Fatalf("Ollama load response-header timeout = %s, want %s", got, ollamaLoadResponseHeaderTimeout)
+	if ex.clientFor(0) != ex.client {
+		t.Fatal("a zero budget must use the ordinary client")
+	}
+	slow := ex.clientFor(10 * time.Minute)
+	if got := responseHeaderTimeout(t, slow); got != 10*time.Minute {
+		t.Fatalf("budget client response-header timeout = %s, want 10m", got)
+	}
+	if ex.clientFor(10*time.Minute) != slow {
+		t.Fatal("a budget's client must be reused so its connections are")
 	}
 }
 
-func TestOnlyOllamaRunModelUsesSlowResponseHeaderBudget(t *testing.T) {
+// The response budget a manifest binds to an operation belongs to the action,
+// so it applies to engine:action calls too, and to no other action or engine.
+func TestBoundOperationBudgetAppliesOnlyToItsAction(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		time.Sleep(100 * time.Millisecond)
 		w.Header().Set("Content-Type", "application/json")
@@ -97,9 +106,14 @@ func TestOnlyOllamaRunModelUsesSlowResponseHeaderBudget(t *testing.T) {
 		"run_model":    {HTTP: &ActionHTTP{Method: "POST", Path: "/api/generate"}},
 		"delete_model": {HTTP: &ActionHTTP{Method: "DELETE", Path: "/api/delete"}},
 	}
+	m.Operations = map[string]OperationBinding{
+		"load": {Action: "run_model", ResponseTimeoutS: 1},
+	}
+	if err := m.Validate(); err != nil {
+		t.Fatal(err)
+	}
 	ex := newTestExecutor(t, m)
 	ex.client = newEngineHTTPClient(20 * time.Millisecond)
-	ex.ollamaLoadClient = newEngineHTTPClient(500 * time.Millisecond)
 	st, err := ex.state("ollama")
 	if err != nil {
 		t.Fatal(err)
@@ -123,14 +137,13 @@ func TestOnlyOllamaRunModelUsesSlowResponseHeaderBudget(t *testing.T) {
 	}
 	otherEx := newTestExecutor(t, other)
 	otherEx.client = newEngineHTTPClient(20 * time.Millisecond)
-	otherEx.ollamaLoadClient = newEngineHTTPClient(500 * time.Millisecond)
 	otherState, err := otherEx.state("other")
 	if err != nil {
 		t.Fatal(err)
 	}
 	otherState.running = true
 	if _, err := otherEx.Action(context.Background(), "other", "run_model", json.RawMessage(`{"model":"tiny"}`)); err == nil || !strings.Contains(err.Error(), "timeout awaiting response headers") {
-		t.Fatalf("non-Ollama run_model error = %v, want ordinary response-header timeout", err)
+		t.Fatalf("unbound run_model error = %v, want ordinary response-header timeout", err)
 	}
 }
 

@@ -319,16 +319,3 @@ func TestRestartAfterRequiresReadinessProbe(t *testing.T) {
 		t.Fatalf("error = %q, want it to name runtime.ready", err)
 	}
 }
-
-func TestModelActionWireOllamaUnload(t *testing.T) {
-	action, params, err := modelActionWire("ollama", "unload", "llama3.2")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if action != "unload_model" {
-		t.Fatalf("action = %q, want unload_model", action)
-	}
-	if !strings.Contains(string(params), `"keep_alive":0`) {
-		t.Fatalf("params missing keep_alive: %s", params)
-	}
-}

@@ -21,6 +21,8 @@ import (
 	"sync"
 	"time"
 	"unicode/utf8"
+
+	"nvpair-shared/engines"
 )
 
 // engine:catalog serves the set of models an engine can download, as opposed to
@@ -227,6 +229,11 @@ type hfSibling struct {
 type catalogService struct {
 	client *http.Client
 
+	// familyOf resolves a registered engine to its family, which selects the
+	// catalogue, so a fork reads its family's source. Nil, or an engine it does
+	// not know, selects by the requested name.
+	familyOf func(engine string) (string, bool)
+
 	ollamaOnce sync.Once
 	ollama     []CatalogModel
 	ollamaMeta ollamaLibraryFile
@@ -294,8 +301,8 @@ func newCatalogService() *catalogService {
 // that can search.
 func (c *catalogService) Catalog(ctx context.Context, engine, platform, arch, query string) (CatalogResult, error) {
 	platform, arch = catalogTarget(platform, arch)
-	switch normalizeCatalogEngine(engine) {
-	case "ollama":
+	switch c.adapterFor(engine) {
+	case engines.NameOllama:
 		models, meta, err := c.ollamaCatalog()
 		if err != nil {
 			return CatalogResult{}, err
@@ -309,7 +316,7 @@ func (c *catalogService) Catalog(ctx context.Context, engine, platform, arch, qu
 			// nothing is dropped and the caller's target does not change it.
 			FetchedAt: meta.ScrapedAt,
 		}, nil
-	case "lmstudio":
+	case engines.NameLMStudio:
 		models, fetchedAt, err := c.lmStudio.get(ctx)
 		if err != nil {
 			return CatalogResult{}, err
@@ -321,7 +328,7 @@ func (c *catalogService) Catalog(ctx context.Context, engine, platform, arch, qu
 			Arch:      arch,
 			FetchedAt: fetchedAt.UTC().Format(time.RFC3339),
 		}, nil
-	case "llamacpp":
+	case engines.NameLlamaCPP:
 		query, err := catalogQuery(query)
 		if err != nil {
 			return CatalogResult{}, err
@@ -392,6 +399,21 @@ func filterForTarget(models []CatalogModel, platform, arch string) []CatalogMode
 		out = append(out, m)
 	}
 	return out
+}
+
+// adapterFor selects the catalogue for a requested engine: a registered
+// engine's family, else the requested name in the spellings a client might
+// send. Empty means no catalogue.
+func (c *catalogService) adapterFor(engine string) string {
+	name := normalizeCatalogEngine(engine)
+	if c.familyOf != nil {
+		if family, ok := c.familyOf(engine); ok {
+			name = family
+		} else if family, ok := c.familyOf(name); ok {
+			name = family
+		}
+	}
+	return catalogAdapter(name)
 }
 
 // normalizeCatalogEngine tolerates the spellings a client might send.

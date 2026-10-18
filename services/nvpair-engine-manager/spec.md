@@ -41,6 +41,20 @@ extensibility story for an open-source product.
   `GET /api/ps`, LM Studio filters nonempty `loaded_instances` from
   `GET /api/v1/models`, and llama.cpp matches nested `status.value == loaded`
   records from `GET /models`.
+- Semantic model operations: each manifest binds `load`, `unload`, `pull` and
+  `delete` to its actions, with the model parameter name, fixed scalar
+  parameters and an optional bounded response budget
+  ([MANIFEST.md](MANIFEST.md#model-operations)). Local typed RPCs and the
+  remote `ec` model endpoints resolve through the same bindings, so clients
+  name only an engine and a model. Ollama binds `load` to `run_model` with
+  `stream:false` and a 600-second budget, `unload` with `keep_alive:0`, and
+  `pull`/`delete` with `name`; LM Studio and llama.cpp use the conventional
+  actions with `model`.
+- Engine identity and family: a manifest's `engine` is the stable ID and its
+  optional `family` selects the coded model-store and catalogue adapters, so a
+  locally defined fork with its own ID, port and store gets its family's
+  behavior with no code change. `engine:descriptors` publishes the sanitized
+  projection.
 - The bundled llama.cpp launch fixes `--sleep-idle-seconds 300`: after five
   minutes without inference work, a loaded model releases its model and
   KV-cache memory and wakes on the next request. The router child remains alive
@@ -178,7 +192,8 @@ Requests (caller → service):
 | Method | Params | Result |
 |--------|--------|--------|
 | `engine:get-installed` | — | `{ engines: [EngineStatus] }` |
-| `engine:describe` | `{ engine }` | the engine's manifest |
+| `engine:describe` | `{ engine }` | the engine's manifest; local only, since it contains commands and paths |
+| `engine:descriptors` | — | `{ engines: [Descriptor] }` — the sanitized, versioned projection of every registered manifest (`nvpair-shared/engines.Descriptor`): `version`, `engine`, `family`, `label`, `platforms`, `available`, `protocols`, `modelNaming`, `modelStore?`, `catalog?`, `operations` (`load`/`unload`/`pull`/`delete`, each `{ responseTimeoutS? }`). It must never contain executables, commands, environment values, private paths, URLs or credentials; the descriptor tests check a manifest containing all of them. Consumers validate it with `Descriptor.Validate` and reject unknown versions, protocols and operations |
 | `engine:status` | `{ engine }` | `EngineStatus` |
 | `engine:install` | `{ engine }` | `EngineStatus` (after install) |
 | `engine:uninstall` | `{ engine }` | `EngineStatus` (after removal) |
@@ -189,7 +204,7 @@ Requests (caller → service):
 | `engine:action` | `{ engine, action, params }` | the engine's raw response |
 | `engine:logs` | `{ engine }` | `{ lines: [LogLine] }` |
 | `engine:errors` | — | `{ errors: [ServiceError] }` |
-| `engine:catalog` | `{ engine, platform?, arch?, query? }` | `{ models: [CatalogModel], source, platform?, arch?, fetchedAt?, searchable?, query? }` — the models an engine can **download**. One curated source per engine: Ollama's is compiled in (`catalog/ollama-models.json`, no network), LM Studio's is the `lmstudio-community` Hugging Face org fetched live and cached, and llama.cpp's is the GGUF repos of `ggml-org`, `bartowski`, and `unsloth`, fetched live and cached, offered as `repo:Q4_K_M`. Only llama.cpp's is `searchable`: a `query` searches all of Hugging Face for GGUF repos, each query cached on its own, and is echoed back; a query over 100 characters is an error rather than being shortened; other sources ignore it and return their whole list. `platform` and `arch` are the GOOS and GOARCH the models will be installed on; omitting both means this host, and naming a platform without an arch leaves the arch unknown rather than borrowing this host's. `appleOnly` rows (MLX) are kept only for a `darwin`/`arm64` target. An engine with no curated source is an error, not an empty list. The Ollama reply is a single multi-megabyte frame — every hop on its path must allow `jsonrpc.WorkerFrameBytes`. |
+| `engine:catalog` | `{ engine, platform?, arch?, query? }` | `{ models: [CatalogModel], source, platform?, arch?, fetchedAt?, searchable?, query? }` — the models an engine can **download**. One curated source per engine family, selected by the manifest's `family`: Ollama's is compiled in (`catalog/ollama-models.json`, no network), LM Studio's is the `lmstudio-community` Hugging Face org fetched live and cached, and llama.cpp's is the GGUF repos of `ggml-org`, `bartowski`, and `unsloth`, fetched live and cached, offered as `repo:Q4_K_M`. Only llama.cpp's is `searchable`: a `query` searches all of Hugging Face for GGUF repos, each query cached on its own, and is echoed back; a query over 100 characters is an error rather than being shortened; other sources ignore it and return their whole list. `platform` and `arch` are the GOOS and GOARCH the models will be installed on; omitting both means this host, and naming a platform without an arch leaves the arch unknown rather than borrowing this host's. `appleOnly` rows (MLX) are kept only for a `darwin`/`arm64` target. An engine with no curated source is an error, not an empty list. The Ollama reply is a single multi-megabyte frame — every hop on its path must allow `jsonrpc.WorkerFrameBytes`. |
 | `engine:remote-get-installed` | `{ node }` | `{ engines: [EngineStatus] }` from the remote node |
 | `engine:remote-install` | `{ node, engine, start? }` | `{ opId, status }` after the remote install |
 | `engine:remote-pull-model` | `{ node, engine, model?, params? }` | `{ opId, result }` after the remote pull |
@@ -202,7 +217,9 @@ Requests (caller → service):
 | `engine:wake` | `{ engine }` | `EngineStatus` — starts the engine only if its saved intent is On; intent-neutral; holds the engine's lifecycle lock like `engine:restart`; refused once shutdown has begun |
 | `engine:sleep` | `{ engine }` | `EngineStatus` — the `doStop` that restart and shutdown use; intent-neutral |
 | `engine:intent` | — | `{ enabledByEngine }` — saved intent per registered engine; no saved intent reads as `false` |
-| `engine:unload-model` | `{ engine, model }` | the engine's raw response, via the per-engine unload mapping |
+| `engine:load-model` | `{ engine, model }` | the engine's raw response, via the manifest's `load` operation binding |
+| `engine:unload-model` | `{ engine, model }` | the engine's raw response, via the manifest's `unload` operation binding |
+| `engine:delete-model` | `{ engine, model }` | the engine's raw response, via the manifest's `delete` operation binding |
 | `engine:remote-policy-get` | `{ nodeId }` | `{ policy, availability }` — the target broker's peer projection of its policy: no routing section, and tiers keep only their local entries |
 | `engine:remote-policy-set` | `{ nodeId, policy, expectedPersistedRevision }` | `{ policy }` — the peer projection after the target broker merges the change into its stored policy; the revision is forwarded unchanged and compared by the broker |
 | `engine:remote-availability-set` | `{ nodeId, state }` | the target broker's `node:set-availability` result |
@@ -265,7 +282,7 @@ The `engine:remote-*` methods are the client half: engine-manager resolves the t
 - **Visibility.** The file that makes the model visible is written last: Ollama's manifest (after checking that every blob it names is present), llama.cpp's first GGUF split and then `refs/main` when the repo was not cached before, followed by `GET /models?reload=1` on a running router; LM Studio's model GGUF, followed by a restart of a running server (the `restart_after` path, since LM Studio indexes at startup).
 - **Progress.** `engine:remote-progress` with `op:"copy"` and `node` = the source: `listing`, `hashing` (relayed, with `file`), `checking`, `downloading` (`file`, `bytesDone`, `bytesTotal`, `percent` over the whole model), `finalizing`, then `done` (`percent:100`) or `error` (`percent:-1`).
 
-Stores: Ollama uses `OLLAMA_MODELS` from the engine's launch environment or this process, else `{models_dir}/models`; llama.cpp uses `LLAMA_CACHE` (the manifest sets `{models_dir}`) in the Hugging Face hub cache layout, selecting `owner/repo:TAG` files as llama.cpp does; LM Studio uses `{models_dir}` and the paths `lms ls --json` reports. One copy of a given model runs at a time per node.
+Stores: Ollama uses `OLLAMA_MODELS` from the engine's launch environment or this process, else `{models_dir}/models`; llama.cpp uses `LLAMA_CACHE` (the manifest sets `{models_dir}`) in the Hugging Face hub cache layout, selecting `owner/repo:TAG` files as llama.cpp does; LM Studio uses `{models_dir}` and the paths `lms ls --json` reports. The layout is selected by the manifest's `family`, so a fork with its own id and `models_dir` uses its family's layout rooted at its own store; an engine whose family has no layout is refused. One copy of a given model runs at a time per node.
 
 ## 8. Dependencies
 - **Upstream**: the orchestrator that spawns it and forwards `engine:*` (`nvpair-ui-broker`).

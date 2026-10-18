@@ -3,7 +3,7 @@
 
 package main
 
-// modellayout.go knows how each engine stores a model on disk, which model copy
+// modellayout.go knows how each engine family stores a model on disk, which model copy
 // needs on both ends: the source lists exactly the files that make up a model
 // (modelfiles.go), and the destination decides where each one goes and in what
 // order, so the engine only sees the model once it is complete (modelcopy.go).
@@ -36,6 +36,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"nvpair-shared/engines"
 )
 
 // errModelCopyUnsupported marks an engine whose model layout this service does
@@ -43,10 +45,13 @@ import (
 var errModelCopyUnsupported = errors.New("model copy is not supported for this engine")
 
 // engineModelStore is one engine's on-disk model store, as model copy sees it.
+// adapter is the layout the engine's family selects (modelStoreAdapter), so a
+// fork with its own ID and store is copied with its family's layout.
 type engineModelStore struct {
-	engine string
-	root   string // absolute
-	cli    string // LM Studio's lms, resolved
+	engine  string
+	adapter string
+	root    string // absolute
+	cli     string // LM Studio's lms, resolved
 }
 
 // modelStoreFor resolves an engine's model store on this node.
@@ -55,19 +60,19 @@ func (e *Executor) modelStoreFor(engine string) (*engineState, engineModelStore,
 	if err != nil {
 		return nil, engineModelStore{}, err
 	}
-	store := engineModelStore{engine: engine}
-	switch engine {
-	case "ollama":
+	store := engineModelStore{engine: engine, adapter: modelStoreAdapter(st.manifest.FamilyOrDefault())}
+	switch store.adapter {
+	case engines.NameOllama:
 		store.root = engineEnvValue(st, "OLLAMA_MODELS")
 		if store.root == "" && st.modelsDir != "" {
 			store.root = filepath.Join(st.modelsDir, "models")
 		}
-	case "llamacpp":
+	case engines.NameLlamaCPP:
 		store.root = engineEnvValue(st, "LLAMA_CACHE")
 		if store.root == "" {
 			store.root = st.modelsDir
 		}
-	case "lmstudio":
+	case engines.NameLMStudio:
 		store.root = st.modelsDir
 		if cli := st.plat.Runtime.CLI; cli != "" {
 			store.cli = expandPath(cli)
@@ -115,12 +120,12 @@ func (e *Executor) modelSourceFiles(ctx context.Context, engine, model string) (
 		return modelFileList{}, err
 	}
 	var list modelFileList
-	switch engine {
-	case "ollama":
+	switch store.adapter {
+	case engines.NameOllama:
 		list, err = ollamaSourceFiles(store.root, model)
-	case "llamacpp":
+	case engines.NameLlamaCPP:
 		list, err = llamacppSourceFiles(store.root, model)
-	case "lmstudio":
+	case engines.NameLMStudio:
 		list, err = e.lmstudioSourceFiles(ctx, store, model)
 	}
 	if err != nil {
@@ -174,13 +179,13 @@ func (e *Executor) planModelCopy(st *engineState, store engineModelStore, model 
 		plan copyPlan
 		err  error
 	)
-	switch store.engine {
-	case "ollama":
+	switch store.adapter {
+	case engines.NameOllama:
 		plan, err = ollamaPlan(store.root, model, list)
-	case "llamacpp":
+	case engines.NameLlamaCPP:
 		plan, err = e.llamacppPlan(st, store.root, model, list)
-	case "lmstudio":
-		plan, err = e.lmstudioPlan(st, store.root, list)
+	case engines.NameLMStudio:
+		plan, err = e.lmstudioPlan(st, store, list)
 	default:
 		return copyPlan{}, fmt.Errorf("%w: %q", errModelCopyUnsupported, store.engine)
 	}
@@ -850,11 +855,11 @@ func (e *Executor) lmstudioSourceFiles(ctx context.Context, store engineModelSto
 	return list, nil
 }
 
-func (e *Executor) lmstudioPlan(st *engineState, root string, list modelFileList) (copyPlan, error) {
+func (e *Executor) lmstudioPlan(st *engineState, store engineModelStore, list modelFileList) (copyPlan, error) {
 	var plan copyPlan
 	var last []plannedFile
 	for _, f := range list.Files {
-		pf := plannedFile{modelFile: f, dest: filepath.Join(root, filepath.FromSlash(f.Path))}
+		pf := plannedFile{modelFile: f, dest: filepath.Join(store.root, filepath.FromSlash(f.Path))}
 		if ggufIsModel(f.Path) {
 			last = append(last, pf)
 			continue
@@ -866,7 +871,7 @@ func (e *Executor) lmstudioPlan(st *engineState, root string, list modelFileList
 	// reason its delete_model declares restart_after: restart a running server
 	// so it lists the new model. A stopped one indexes it when next started.
 	plan.finalize = func(ctx context.Context) error {
-		return e.restartAfterAction(ctx, st, "lmstudio", "copy_model")
+		return e.restartAfterAction(ctx, st, store.engine, "copy_model")
 	}
 	return plan, nil
 }

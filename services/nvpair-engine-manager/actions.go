@@ -143,11 +143,10 @@ func (e *Executor) dispatchAction(ctx context.Context, st *engineState, engine, 
 		req.Header.Set("Content-Type", "application/json")
 	}
 	req.Header.Set(engineIdentityProbeHeader, "1")
-	client := e.client
-	if engine == "ollama" && action == "run_model" && e.ollamaLoadClient != nil {
-		client = e.ollamaLoadClient
-	}
-	resp, err := client.Do(req)
+	// An action a model operation binds with a longer response budget (Ollama
+	// answers a cold load only once the model is resident) gets that budget on
+	// every call, engine:action included.
+	resp, err := e.clientFor(st.manifest.actionResponseBudget(action)).Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("action %q: %w", action, err)
 	}
