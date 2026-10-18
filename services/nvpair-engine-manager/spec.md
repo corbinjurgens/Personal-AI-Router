@@ -198,8 +198,8 @@ Requests (caller → service):
 | `engine:sleep` | `{ engine }` | `EngineStatus` — the `doStop` that restart and shutdown use; intent-neutral |
 | `engine:intent` | — | `{ enabledByEngine }` — saved intent per registered engine; no saved intent reads as `false` |
 | `engine:unload-model` | `{ engine, model }` | the engine's raw response, via the per-engine unload mapping |
-| `engine:remote-policy-get` | `{ nodeId }` | the target broker's `policy:get` result |
-| `engine:remote-policy-set` | `{ nodeId, policy, expectedPersistedRevision }` | the target broker's `policy:set` result; the revision is forwarded unchanged and compared by the broker |
+| `engine:remote-policy-get` | `{ nodeId }` | `{ policy, availability }` — the target broker's peer projection of its policy: no routing section, and tiers keep only their local entries |
+| `engine:remote-policy-set` | `{ nodeId, policy, expectedPersistedRevision }` | `{ policy }` — the peer projection after the target broker merges the change into its stored policy; the revision is forwarded unchanged and compared by the broker |
 | `engine:remote-availability-set` | `{ nodeId, state }` | the target broker's `node:set-availability` result |
 | `shutdown` | — | `null` |
 | `log/set-level` | `{ level }` | `{ level }` |

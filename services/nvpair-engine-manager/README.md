@@ -77,8 +77,8 @@ Requests (caller → service):
 | `engine:sleep` | `{ engine }` | `EngineStatus` — stops the engine the way `engine:restart` and shutdown do, without recording Off intent, so `engine:wake` or the next launch's restore can start it again |
 | `engine:intent` | — | `{ enabledByEngine: { <engine>: bool } }` — every registered engine's saved intent, read from the intent file without taking any engine's lifecycle lock |
 | `engine:unload-model` | `{ engine, model }` | the engine's raw response — unloads one model through the same per-engine mapping the remote unload uses (Ollama `keep_alive:0`, the others `unload_model`) |
-| `engine:remote-policy-get` | `{ nodeId }` | the target broker's `policy:get` result |
-| `engine:remote-policy-set` | `{ nodeId, policy, expectedPersistedRevision }` | the target broker's `policy:set` result; the revision is forwarded unchanged and compared by the broker |
+| `engine:remote-policy-get` | `{ nodeId }` | `{ policy, availability }` — the target broker's peer projection of its policy: no routing section, and tiers keep only their local entries |
+| `engine:remote-policy-set` | `{ nodeId, policy, expectedPersistedRevision }` | `{ policy }` — the peer projection after the target broker merges the change into its stored policy; the revision is forwarded unchanged and compared by the broker |
 | `engine:remote-availability-set` | `{ nodeId, state }` | the target broker's `node:set-availability` result (waits for the target's drain, on the readiness-sized response budget) |
 | `shutdown` | — | `null` |
 | `log/set-level` | `{ level }` | `{ level }` |
@@ -303,8 +303,8 @@ Endpoints (all under `/v1`):
 | `POST /v1/engines/stop` | JSON | remote stop → `EngineStatus` |
 | `GET /v1/models/files?engine=&model=` | NDJSON stream | the model's files with size and sha256, for a peer copying it |
 | `GET /v1/models/file?engine=&model=&path=` | file bytes | one listed file, with HTTP Range support |
-| `POST /v1/node-policy/get` | JSON | the target broker's `policy:get` |
-| `POST /v1/node-policy/set` | JSON `{ policy, expectedPersistedRevision }` | the target broker's `policy:set`; the revision is forwarded unchanged |
+| `POST /v1/node-policy/get` | JSON | the target broker's peer projection of its policy, as for `engine:remote-policy-get` |
+| `POST /v1/node-policy/set` | JSON `{ policy, expectedPersistedRevision }` | the peer projection after the target broker merges the change; the revision is forwarded unchanged |
 | `POST /v1/node-availability/set` | JSON `{ state }` | the target broker's `node:set-availability`, answered once the state is reached |
 
 The node-policy routes carry the broker's policy, which engine-manager does not
