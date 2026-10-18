@@ -212,8 +212,9 @@ export default function RoutingSettings() {
             setRecoveryRequired(false)
         } catch (err) {
             if (ticket !== latestLoad.current) return
-            // The error code of a refusal does not survive a paired node's
-            // relay, so the outcome is found by reading the saved revision back.
+            // Read the saved revision after errors: a durability warning means
+            // the replacement landed, and a transport failure can leave the
+            // outcome uncertain even though refusal codes survive the relay.
             const message = getErrorString(err)
             const latest = await window.pairApi.nodePolicy
                 .get(nodeId ?? undefined)

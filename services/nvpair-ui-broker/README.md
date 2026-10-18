@@ -245,9 +245,9 @@ proxy enforces it.
 - **File.** `<appdir>/node-policy.json`, loaded at startup before engine-manager
   and the proxy start. A missing file means `nodepolicy.Default()` (revision
   `"0"`). A version 1 file is migrated in memory and left untouched on disk; the
-  first successful save of any kind, including a pause or resume, rewrites it as
-  version 2. A document without a `version` key parses as version 2, not
-  version 1.
+  first save of any kind whose replacement lands, including a pause or resume,
+  rewrites it as version 2, even when the save returns a durability warning.
+  A document without a `version` key parses as version 2, not version 1.
 - **Revision.** The broker is the only revision assigner. Every persisted
   document, whether from `policy:set`, a relayed peer set or a persisted
   availability change, is stamped with the next revision before it is written:
@@ -350,9 +350,10 @@ proxy enforces it.
   `node-policy.json.bad` (when it could be read) and the node starts on a
   recovery policy: the defaults, so no tiers or profiles and remote and paid
   execution off, with availability `paused` whatever the file said. `policy:get`
-  reports `recoveryRequired: true` until an explicit successful `policy:set`
-  from this node, which saves a valid document under a fresh revision and clears
-  it. Until then an availability change (local or relayed) takes effect in memory
+  reports `recoveryRequired: true` until an explicit local `policy:set` lands a
+  valid replacement under a fresh revision, which clears recovery even when
+  the save returns a durability warning. Until then an availability change
+  (local or relayed) takes effect in memory
   and reaches the proxy as usual but is not persisted: it does not overwrite the
   corrupt file, take a revision or announce `policy:changed`, except to report an
   availability push the proxy refused (Activation). A relayed
