@@ -197,7 +197,9 @@ func runSubscriptionScanner() error {
 	}
 }
 
-func startSubscriptionBroker(t *testing.T) (*interopProcess, func(string, string, int)) {
+// startSubscriptionBroker starts a broker whose scanner is the test binary's
+// mDNS-free stub, with the given service-port plan and extra broker arguments.
+func startSubscriptionBroker(t *testing.T, ports fixtureServicePorts, extraArgs ...string) (*interopProcess, func(string, string, int)) {
 	t.Helper()
 	base := t.TempDir()
 	executable, err := os.Executable()
@@ -213,10 +215,11 @@ func startSubscriptionBroker(t *testing.T) (*interopProcess, func(string, string
 		t.Fatalf("copy subscription scanner to %q (a previous process may still be running): %v", fixture, err)
 	}
 	port := freePort(t)
+	args := append([]string{"--scanner-path", fixture, "--cluster-dir", filepath.Join(base, "cluster")}, ports.args()...)
 	p := startInteropProcess(t, base, brokerBin, port, []string{
 		"NVPAIR_TEST_SUBSCRIPTION_SCANNER=" + fixture,
 		"NVPAIR_TEST_SUBSCRIPTION_PORT=" + strconv.Itoa(port),
-	}, "--scanner-path", fixture, "--cluster-dir", filepath.Join(base, "cluster"))
+	}, append(args, extraArgs...)...)
 	canonical, err := canonicalServicePath(fixture)
 	if err != nil {
 		t.Fatal(err)
@@ -333,7 +336,7 @@ func TestCrossProcessBrokerSubscription(t *testing.T) {
 		port3 = 14403
 	)
 
-	p, publish := startSubscriptionBroker(t)
+	p, publish := startSubscriptionBroker(t, reserveFixtureServicePorts(t))
 	stdin, msgs := p.in, p.msgs
 
 	waitForMethod(t, msgs, "app:ready", 5*time.Second)

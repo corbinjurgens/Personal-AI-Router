@@ -278,24 +278,22 @@ func TestModelInventoryRefusesLANPlaintext(t *testing.T) {
 	if lanIP == "" {
 		t.Skip("no non-loopback IPv4 address available; cannot exercise the LAN path")
 	}
-	if portBusy(14322) {
-		t.Skip("engine-manager em port 14322 already in use; skipping")
-	}
-
 	// Isolate both cluster identity and engine desired state. A developer's
 	// saved enabled engine can otherwise start here and block inventory reads
 	// behind restoration, even though this test only exercises ingress policy.
-	_, msgs, _, cleanup := startBrokerWith(t,
+	ports := reserveFixtureServicePorts(t)
+	emPort := strconv.Itoa(ports.engineManagerHTTP)
+	_, msgs, _, cleanup := startBrokerWithPorts(t, t.TempDir(), t.TempDir(), nil, ports,
 		"--engine-manager-path", engineMgrBin,
 	)
 	t.Cleanup(cleanup)
 	waitForMethod(t, msgs, "app:ready", 15*time.Second)
-	waitTCP(t, "127.0.0.1:14322", 20*time.Second)
+	waitTCP(t, net.JoinHostPort("127.0.0.1", emPort), 20*time.Second)
 
 	client := &http.Client{Timeout: 5 * time.Second}
 
 	// Loopback: this node's own scanner path must keep working while unclustered.
-	resp, err := client.Get("http://127.0.0.1:14322/v1/models")
+	resp, err := client.Get("http://" + net.JoinHostPort("127.0.0.1", emPort) + "/v1/models")
 	if err != nil {
 		t.Fatalf("loopback model fetch failed: %v", err)
 	}
@@ -308,7 +306,7 @@ func TestModelInventoryRefusesLANPlaintext(t *testing.T) {
 
 	// The same request from this host's LAN address is a non-loopback caller with
 	// no cluster credentials, and must be refused.
-	lanResp, err := client.Get("http://" + net.JoinHostPort(lanIP, "14322") + "/v1/models")
+	lanResp, err := client.Get("http://" + net.JoinHostPort(lanIP, emPort) + "/v1/models")
 	if err != nil {
 		t.Logf("LAN plaintext model fetch refused at the transport: %v", err)
 		return

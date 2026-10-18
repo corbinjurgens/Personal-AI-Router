@@ -27,9 +27,11 @@ import (
 	"nvpair-shared/testbin"
 )
 
-// The broker has no per-worker port override for errors or cluster-manager.
 // This adapter only changes a real worker's listen port; its stdio protocol
 // passes through unchanged, following the workload interop adapter precedent.
+// Broker fixtures configure their service ports with the broker's own port
+// flags instead (see fixture_ports_test.go); the adapter remains for fixtures
+// that start a worker outside that plan.
 func init() {
 	if bridge := os.Getenv("NVPAIR_TEST_PORT_BRIDGE"); bridge != "" && bridge == os.Args[0] {
 		if err := runPortInteropBridge(); err != nil {
@@ -69,11 +71,10 @@ func newPortInteropBridge(t *testing.T, binary string, port int) (string, []stri
 func startClientErrorsBroker(t *testing.T) *interopProcess {
 	t.Helper()
 	base := t.TempDir()
-	port := freePort(t)
-	bridge, env := newPortInteropBridge(t, errorsBin, port)
-	p := startInteropProcess(t, base, brokerBin, port, env,
-		"--cluster-dir", filepath.Join(base, "cluster"), "--scanner-path", scannerBin, "--errors-path", bridge)
-	for _, path := range []string{scannerBin, bridge, errorsBin} {
+	ports := reserveFixtureServicePorts(t)
+	args := append([]string{"--cluster-dir", filepath.Join(base, "cluster"), "--scanner-path", scannerBin, "--errors-path", errorsBin}, ports.args()...)
+	p := startInteropProcess(t, base, brokerBin, ports.errors, nil, args...)
+	for _, path := range []string{scannerBin, errorsBin} {
 		canonical, err := canonicalServicePath(path)
 		if err != nil {
 			t.Fatal(err)
@@ -84,12 +85,26 @@ func startClientErrorsBroker(t *testing.T) *interopProcess {
 	return p
 }
 
+// manualProbePorts are the product ports nvpair-manual-nodes probes on a manual
+// node's address (Ollama, LM Studio, node-info). The worker fixes them, so a
+// test pointing it at loopback fakes must own all three: otherwise the prober
+// reaches whatever else listens there, typically an installed PAIR.
+var manualProbePorts = []int{11434, 1234, 14318}
+
+// skipIfManualProbePortsOccupied skips, without binding beside or contacting the
+// owner, when any manual probe port is held on IPv4 or IPv6.
+func skipIfManualProbePortsOccupied(t *testing.T) {
+	t.Helper()
+	for _, port := range manualProbePorts {
+		skipIfDefaultPortOccupied(t, port, "the loopback manual-node probe fixture")
+	}
+}
+
 // fakeOllama stands up a minimal Ollama-looking HTTP server on the fixed
 // port nvpair-manual-nodes probes (11434): GET / returns 200 (liveness) and
 // GET /api/tags returns one model, so a manual node pointed at it reports
-// ollama_up=true with a model list. Returns a stop func. Skips the test if
-// the port can't be bound (real Ollama or something else holds it — we
-// can't control the response then).
+// ollama_up=true with a model list. Returns a stop func. Callers first run
+// skipIfManualProbePortsOccupied. Skips the test if the port can't be bound.
 func fakeOllama(t *testing.T) func() {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:11434")
@@ -112,6 +127,7 @@ func fakeOllama(t *testing.T) func() {
 // changes the candidate's key from the manual name to the machine's UUID.
 func fakeLMStudio(t *testing.T, hostUUID string) {
 	t.Helper()
+	skipIfManualProbePortsOccupied(t)
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/models", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -154,8 +170,9 @@ func fakeLMStudio(t *testing.T, hostUUID string) {
 
 // fakeNodeInfo stands up a minimal node-info server on the fixed port the
 // manual prober hits (14318): GET /v1/node-info returns 200 with the given
-// hostUuid, so a manual node pointed at it learns its stable UUID. Skips the
-// test if the port can't be bound.
+// hostUuid, so a manual node pointed at it learns its stable UUID. Callers
+// first run skipIfManualProbePortsOccupied. Skips the test if the port can't
+// be bound.
 func fakeNodeInfo(t *testing.T, hostUUID string) func() {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:14318")
@@ -208,7 +225,8 @@ func TestBrokerBridgesManualNodeIntoProxy(t *testing.T) {
 	if portBusy(11435) {
 		t.Skip("ollama-proxy port 11435 already in use; skipping")
 	}
-	stopOllama := fakeOllama(t) // skips if 11434 unavailable
+	skipIfManualProbePortsOccupied(t)
+	stopOllama := fakeOllama(t)
 	t.Cleanup(stopOllama)
 
 	stdin, msgs, _, cleanup := startBrokerWith(t,
@@ -262,9 +280,10 @@ func TestBrokerBridgesManualNodeUnderLearnedUUID(t *testing.T) {
 	if portBusy(11435) {
 		t.Skip("ollama-proxy port 11435 already in use; skipping")
 	}
-	stopOllama := fakeOllama(t) // skips if 11434 unavailable
+	skipIfManualProbePortsOccupied(t)
+	stopOllama := fakeOllama(t)
 	t.Cleanup(stopOllama)
-	stopNodeInfo := fakeNodeInfo(t, "learned-host-uuid") // skips if 14318 unavailable
+	stopNodeInfo := fakeNodeInfo(t, "learned-host-uuid")
 	t.Cleanup(stopNodeInfo)
 
 	stdin, msgs, _, cleanup := startBrokerWith(t,
@@ -330,11 +349,12 @@ func TestBrokerBridgesManualNodeIntoLMStudioProxy(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(base, "engine-settings-operations.json"), mustMarshal(t, journal), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	p := startInteropProcess(t, base, brokerBin, proxyPort, nil,
+	args := append([]string{
 		"--cluster-dir", filepath.Join(base, "cluster"), "--scanner-path", scannerBin,
 		"--manual-nodes-path", manualNodesBin,
 		"--proxy-path", proxyBin, "--proxy-engines", "lmstudio",
-	)
+	}, reserveFixtureServicePorts(t).args()...)
+	p := startInteropProcess(t, base, brokerBin, proxyPort, nil, args...)
 	for _, path := range []string{scannerBin, manualNodesBin, proxyBin} {
 		canonical, err := canonicalServicePath(path)
 		if err != nil {

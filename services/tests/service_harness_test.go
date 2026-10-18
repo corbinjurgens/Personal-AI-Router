@@ -86,6 +86,7 @@ type serviceFixture struct {
 	servicePath, brokerPath, scannerPath string
 	proxyPath                            string
 	facadePort                           int
+	ports                                fixtureServicePorts
 	env                                  []string
 	inventory                            *serviceProcessInventory
 	children                             []*serviceChild
@@ -141,6 +142,8 @@ func newServiceFixture(t *testing.T) *serviceFixture {
 	f.brokerPath = f.copyBinary(brokerBin)
 	f.scannerPath = f.copyBinary(scannerBin)
 	f.inventory = &serviceProcessInventory{paths: []string{f.servicePath, f.brokerPath, f.scannerPath}, known: make(map[int32]serviceProcessIdentity)}
+	// One plan for the fixture's lifetime: a restarted broker reuses it.
+	f.ports = reserveFixtureServicePorts(t)
 	f.env = append(os.Environ(), "HOME="+f.configDir, "XDG_CONFIG_HOME="+f.configDir, "APPDATA="+f.configDir, "LOCALAPPDATA="+f.configDir, servicectl.EndpointEnv+"="+f.endpoint)
 	return f
 }
@@ -168,6 +171,7 @@ func (f *serviceFixture) copyBinary(src string) string {
 
 func (f *serviceFixture) args() []string {
 	args := []string{"--broker-path", f.brokerPath, "--endpoint", f.endpoint, "--log-dir", filepath.Join(f.dir, "logs"), "--", "--scanner-path", f.scannerPath, "--cluster-dir", f.clusterDir}
+	args = append(args, f.ports.args()...)
 	if f.proxyPath != "" {
 		return append(args, "--proxy-path", f.proxyPath, "--proxy-engines", "llamacpp")
 	}
