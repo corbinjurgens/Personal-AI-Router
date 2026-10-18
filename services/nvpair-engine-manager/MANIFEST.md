@@ -40,6 +40,40 @@ the engine identifier is all that remains. A host-platform port override is
 updated too if needed, so it cannot shadow the saved shared port at startup.
 An invalid existing override is left intact and the save fails.
 
+## Strata user-manifest template
+
+[testdata/strata/strata.json](testdata/strata/strata.json) is a complete user
+manifest template, kept as testdata rather than bundled. Copy it to `strata.json`
+in the per-user `engines/` directory listed above. Set `$schema` to the absolute
+location of this checkout's `manifest.schema.json` for editor validation after
+copying it.
+
+Before enabling it, replace every `/REPLACE_WITH_ABSOLUTE_PATH/` value:
+
+- Set `runtime.bin` to the absolute Python interpreter path for the Strata
+  environment (including `python.exe` on Windows).
+- Set the first `runtime.args` entry to the absolute Strata `server.py` path,
+  and the argument after `--config` to the absolute configuration file path.
+  Arguments are literal strings, not shell commands; do not rely on environment
+  variable or tilde expansion in them. Escape backslashes in JSON on Windows.
+- Set each retained platform's `detect` entry to its absolute `server.py` path.
+  Detection checks existence, not Python dependencies or configuration validity.
+  Keep only the platform entries you configure, and select an unused runtime port.
+
+The process command is Python plus `server.py --engine strata --config` followed
+by the configuration path, then `--host 127.0.0.1 --port {port} --lazy`.
+Readiness and health require `/health` to return HTTP 200 and `service:"strata"`.
+Inventory uses `/v1/models` and `data[].id`; only `status.value == "loaded"`
+counts as resident. Load and unload POST `{"model":"<model-id>"}` to `/v1/load`
+and `/v1/unload`, with response budgets of 600 and 30 seconds respectively.
+Pull, delete and model copy are unsupported. Strata is chat-only: `openai-chat`
+advertises `/v1/chat/completions` and `/v1/models`, without legacy completions,
+embeddings, Messages or Responses.
+
+The fixture verifies the manifest contract against loopback HTTP fakes. Real
+Strata launch, GPU behavior and cleanup still require owner-approved runtime
+qualification; platform entries in this template do not establish that evidence.
+
 ## Top-level fields
 
 For editable launch settings, `runtime.editable_launch` declares optional
@@ -123,7 +157,7 @@ and recovery. Editing `args`/`start` directly remains trusted manifest authoring
 | `platforms` | object | yes | Map of `"<goos>/<goarch>"` → platform block (e.g. `"windows/amd64"`, `"darwin/arm64"`, `"linux/amd64"`). At least one entry. The runner selects the block matching the host. |
 | `actions` | object | no | Map of action name → action (see below). |
 | `family` | string | no | The engine's lineage, same syntax as `engine`; defaults to the engine id. It selects the coded adapters the family shares: the model-store layout used by model copy and the download catalogue (`ollama`, `lmstudio` and `llamacpp` have both). A fork with its own id declares the family it came from. |
-| `protocols` | string[] | no | Protocol profiles the engine serves: `ollama-api`, `openai-v1`, `anthropic-messages`, `llamacpp-router`. Published in the engine's descriptor; none means no inference surface is claimed. |
+| `protocols` | string[] | no | Protocol profiles the engine serves: `ollama-api`, `openai-v1`, `openai-chat`, `anthropic-messages`, `llamacpp-router`. `openai-chat` claims only `/v1/chat/completions` and `/v1/models`, without legacy completions or embeddings; `openai-v1` retains all of those routes. Published in the engine's descriptor; none means no inference surface is claimed. |
 | `model_naming` | string | no | `exact` (default) or `implied-latest-tag` (an untagged name means `:latest`, as in Ollama). |
 | `operations` | object | no | Semantic model operation bindings; see Model operations. |
 | `detect` / `install` / `uninstall` / `models_dir` / `runtime` | — | no | Optional **shared defaults** inherited by every platform (see below). |

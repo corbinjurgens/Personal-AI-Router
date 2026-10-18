@@ -95,6 +95,9 @@ const (
 	// ProtocolOpenAIV1 is the OpenAI-compatible chat, completions and
 	// embeddings routes with the /v1/models list.
 	ProtocolOpenAIV1 = "openai-v1"
+	// ProtocolOpenAIChat is the OpenAI-compatible /v1/chat/completions route
+	// with /v1/models, without legacy completions or embeddings.
+	ProtocolOpenAIChat = "openai-chat"
 	// ProtocolAnthropicMessages is the Anthropic-compatible /v1/messages route.
 	ProtocolAnthropicMessages = "anthropic-messages"
 	// ProtocolLlamaCPPRouter is llama.cpp's router model list at /models,
@@ -114,7 +117,7 @@ const (
 
 var (
 	operations   = []string{OperationLoad, OperationUnload, OperationPull, OperationDelete}
-	protocols    = []string{ProtocolOllamaAPI, ProtocolOpenAIV1, ProtocolAnthropicMessages, ProtocolLlamaCPPRouter}
+	protocols    = []string{ProtocolOllamaAPI, ProtocolOpenAIV1, ProtocolOpenAIChat, ProtocolAnthropicMessages, ProtocolLlamaCPPRouter}
 	modelNamings = []string{ModelNamingExact, ModelNamingImpliedLatestTag}
 )
 

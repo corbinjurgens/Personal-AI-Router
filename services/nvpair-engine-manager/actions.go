@@ -20,6 +20,18 @@ import (
 	"time"
 )
 
+// ActionHTTPError preserves the status of a failed HTTP action. Body is the
+// bounded, whitespace-trimmed response excerpt used by the action diagnostic.
+type ActionHTTPError struct {
+	Action     string
+	StatusCode int
+	Body       string
+}
+
+func (e *ActionHTTPError) Error() string {
+	return fmt.Sprintf("action %q: engine returned HTTP %d: %s", e.Action, e.StatusCode, e.Body)
+}
+
 // Action runs a manifest-declared action against the engine and, when the
 // action declares restart_after, restarts the engine on success.
 func (e *Executor) Action(ctx context.Context, engine, action string, params json.RawMessage) (json.RawMessage, error) {
@@ -153,7 +165,7 @@ func (e *Executor) dispatchAction(ctx context.Context, st *engineState, engine, 
 	defer resp.Body.Close()
 	data, _ := io.ReadAll(io.LimitReader(resp.Body, 8*1024*1024))
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("action %q: engine returned HTTP %d: %s", action, resp.StatusCode, strings.TrimSpace(string(data)))
+		return nil, &ActionHTTPError{Action: action, StatusCode: resp.StatusCode, Body: strings.TrimSpace(string(data))}
 	}
 	if len(data) == 0 {
 		return json.RawMessage("null"), nil
