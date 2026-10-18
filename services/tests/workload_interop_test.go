@@ -38,6 +38,7 @@ import (
 
 	"nvpair-shared/jsonrpc"
 	"nvpair-shared/noderec"
+	"nvpair-shared/testbin"
 )
 
 const workloadMgrService = "_nvpair-workload-manager._tcp"
@@ -584,9 +585,9 @@ func TestWorkloadManagerOutboundBroadcast(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	bridge := filepath.Join(base, "workload-bridge"+filepath.Ext(workloadMgrBin))
+	bridge := filepath.Join(testbin.Dir(t, "tests", "workload-bridge", "workload-bridge"), testbin.Exe("workload-bridge"))
 	if err := os.WriteFile(bridge, data, 0o700); err != nil {
-		t.Fatal(err)
+		t.Fatalf("copy workload bridge to %q (a previous process may still be running): %v", bridge, err)
 	}
 	workerPort := temporaryClusterPort(t)
 	proxyPort := temporaryClusterPort(t)

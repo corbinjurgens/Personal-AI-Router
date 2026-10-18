@@ -23,6 +23,8 @@ import (
 	"strconv"
 	"testing"
 	"time"
+
+	"nvpair-shared/testbin"
 )
 
 // The broker has no per-worker port override for errors or cluster-manager.
@@ -43,7 +45,7 @@ func runPortInteropBridge() error {
 	return runOwnedPortWorker(os.Getenv("NVPAIR_TEST_PORT_BINARY"), args)
 }
 
-func newPortInteropBridge(t *testing.T, base, binary string, port int) (string, []string) {
+func newPortInteropBridge(t *testing.T, binary string, port int) (string, []string) {
 	t.Helper()
 	executable, err := os.Executable()
 	if err != nil {
@@ -53,9 +55,9 @@ func newPortInteropBridge(t *testing.T, base, binary string, port int) (string, 
 	if err != nil {
 		t.Fatal(err)
 	}
-	bridge := filepath.Join(base, "port-bridge"+filepath.Ext(binary))
+	bridge := filepath.Join(testbin.Dir(t, "tests", "port-bridge", "port-bridge"), testbin.Exe("port-bridge"))
 	if err := os.WriteFile(bridge, data, 0o700); err != nil {
-		t.Fatal(err)
+		t.Fatalf("copy port bridge to %q (a previous process may still be running): %v", bridge, err)
 	}
 	return bridge, []string{
 		"NVPAIR_TEST_PORT_BRIDGE=" + bridge,
@@ -68,7 +70,7 @@ func startClientErrorsBroker(t *testing.T) *interopProcess {
 	t.Helper()
 	base := t.TempDir()
 	port := freePort(t)
-	bridge, env := newPortInteropBridge(t, base, errorsBin, port)
+	bridge, env := newPortInteropBridge(t, errorsBin, port)
 	p := startInteropProcess(t, base, brokerBin, port, env,
 		"--cluster-dir", filepath.Join(base, "cluster"), "--scanner-path", scannerBin, "--errors-path", bridge)
 	for _, path := range []string{scannerBin, bridge, errorsBin} {

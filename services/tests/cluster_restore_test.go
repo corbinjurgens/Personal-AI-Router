@@ -26,7 +26,7 @@ func startBrokerInDir(t *testing.T, configDir string, extraArgs ...string) (io.W
 	t.Helper()
 	base := configDir
 	port := freePort(t)
-	bridge, env := newPortInteropBridge(t, base, clusterMgrBin, port)
+	bridge, env := newPortInteropBridge(t, clusterMgrBin, port)
 	args := append([]string{"--scanner-path", scannerBin, "--cluster-dir", filepath.Join(base, "cluster"), "--cluster-manager-path", bridge}, extraArgs...)
 	env = append(env,
 		"HOME="+configDir,

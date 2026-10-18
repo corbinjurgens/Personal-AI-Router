@@ -19,6 +19,7 @@ import (
 	"nvpair-shared/appdir"
 	"nvpair-shared/engines"
 	"nvpair-shared/jsonrpc"
+	"nvpair-shared/testbin"
 )
 
 var (
@@ -43,41 +44,49 @@ func TestMain(m *testing.M) {
 		log.Fatalf("failed to create temp dir: %v", err)
 	}
 
-	ext := ""
-	if runtime.GOOS == "windows" {
-		ext = ".exe"
+	binDir, cleanupBins, err := testbin.MainDir("tests", "products", "nvpair-tests-*",
+		"nvpair-proxy", "nvpair-errors", "nvpair-node-info", "nvpair-node-scanner",
+		"nvpair-ui-broker", "nvpair-service", "nvpair-node-settings", "nvpair-workload-manager",
+		"nvpair-engine-manager", "nvpair-manual-nodes", "nvpair-cluster-manager", "nvpair-job-scheduler")
+	if err != nil {
+		os.RemoveAll(tmpDir)
+		log.Fatalf("allocate test binaries: %v", err)
 	}
 
-	proxyBin = filepath.Join(tmpDir, "nvpair-proxy"+ext)
-	errorsBin = filepath.Join(tmpDir, "nvpair-errors"+ext)
-	nodeInfoBin = filepath.Join(tmpDir, "nvpair-node-info"+ext)
-	scannerBin = filepath.Join(tmpDir, "nvpair-node-scanner"+ext)
-	brokerBin = filepath.Join(tmpDir, "nvpair-ui-broker"+ext)
-	serviceBin = filepath.Join(tmpDir, "nvpair-service"+ext)
-	nodeSettingsBin = filepath.Join(tmpDir, "nvpair-node-settings"+ext)
-	workloadMgrBin = filepath.Join(tmpDir, "nvpair-workload-manager"+ext)
-	engineMgrBin = filepath.Join(tmpDir, "nvpair-engine-manager"+ext)
-	manualNodesBin = filepath.Join(tmpDir, "nvpair-manual-nodes"+ext)
-	clusterMgrBin = filepath.Join(tmpDir, "nvpair-cluster-manager"+ext)
-	schedulerBin = filepath.Join(tmpDir, "nvpair-job-scheduler"+ext)
+	proxyBin = filepath.Join(binDir, testbin.Exe("nvpair-proxy"))
+	errorsBin = filepath.Join(binDir, testbin.Exe("nvpair-errors"))
+	nodeInfoBin = filepath.Join(binDir, testbin.Exe("nvpair-node-info"))
+	scannerBin = filepath.Join(binDir, testbin.Exe("nvpair-node-scanner"))
+	brokerBin = filepath.Join(binDir, testbin.Exe("nvpair-ui-broker"))
+	serviceBin = filepath.Join(binDir, testbin.Exe("nvpair-service"))
+	nodeSettingsBin = filepath.Join(binDir, testbin.Exe("nvpair-node-settings"))
+	workloadMgrBin = filepath.Join(binDir, testbin.Exe("nvpair-workload-manager"))
+	engineMgrBin = filepath.Join(binDir, testbin.Exe("nvpair-engine-manager"))
+	manualNodesBin = filepath.Join(binDir, testbin.Exe("nvpair-manual-nodes"))
+	clusterMgrBin = filepath.Join(binDir, testbin.Exe("nvpair-cluster-manager"))
+	schedulerBin = filepath.Join(binDir, testbin.Exe("nvpair-job-scheduler"))
+	cleanup := func() {
+		cleanupBins()
+		os.RemoveAll(tmpDir)
+	}
 
 	// One process fronts every engine, with a facade enabled per engine, so
 	// both the Ollama and LM Studio bridge tests run against this build.
 	log.Println("building nvpair-proxy...")
 	if err := goBuild(filepath.Join("..", "nvpair-proxy"), proxyBin); err != nil {
-		os.RemoveAll(tmpDir)
+		cleanup()
 		log.Fatalf("build nvpair-proxy: %v", err)
 	}
 
 	log.Println("building nvpair-errors...")
 	if err := goBuild(filepath.Join("..", "nvpair-errors"), errorsBin); err != nil {
-		os.RemoveAll(tmpDir)
+		cleanup()
 		log.Fatalf("build nvpair-errors: %v", err)
 	}
 
 	log.Println("building nvpair-node-info...")
 	if err := goBuild(filepath.Join("..", "nvpair-node-info"), nodeInfoBin); err != nil {
-		os.RemoveAll(tmpDir)
+		cleanup()
 		log.Fatalf("build nvpair-node-info: %v", err)
 	}
 
@@ -86,13 +95,13 @@ func TestMain(m *testing.M) {
 	// --scanner-path so it doesn't depend on a sibling-file layout.
 	log.Println("building nvpair-node-scanner...")
 	if err := goBuild(filepath.Join("..", "nvpair-node-scanner"), scannerBin); err != nil {
-		os.RemoveAll(tmpDir)
+		cleanup()
 		log.Fatalf("build nvpair-node-scanner: %v", err)
 	}
 
 	log.Println("building nvpair-ui-broker...")
 	if err := goBuild(filepath.Join("..", "nvpair-ui-broker"), brokerBin); err != nil {
-		os.RemoveAll(tmpDir)
+		cleanup()
 		log.Fatalf("build nvpair-ui-broker: %v", err)
 	}
 
@@ -100,13 +109,13 @@ func TestMain(m *testing.M) {
 	// tests need its binary in the same bundle as the broker and scanner.
 	log.Println("building nvpair-service...")
 	if err := goBuild(filepath.Join("..", "nvpair-service"), serviceBin); err != nil {
-		os.RemoveAll(tmpDir)
+		cleanup()
 		log.Fatalf("build nvpair-service: %v", err)
 	}
 
 	log.Println("building nvpair-node-settings...")
 	if err := goBuild(filepath.Join("..", "nvpair-node-settings"), nodeSettingsBin); err != nil {
-		os.RemoveAll(tmpDir)
+		cleanup()
 		log.Fatalf("build nvpair-node-settings: %v", err)
 	}
 
@@ -115,7 +124,7 @@ func TestMain(m *testing.M) {
 	// via --workload-manager-path.
 	log.Println("building nvpair-workload-manager...")
 	if err := goBuild(filepath.Join("..", "nvpair-workload-manager"), workloadMgrBin); err != nil {
-		os.RemoveAll(tmpDir)
+		cleanup()
 		log.Fatalf("build nvpair-workload-manager: %v", err)
 	}
 
@@ -125,19 +134,19 @@ func TestMain(m *testing.M) {
 	// --cluster-manager-path).
 	log.Println("building nvpair-engine-manager...")
 	if err := goBuild(filepath.Join("..", "nvpair-engine-manager"), engineMgrBin); err != nil {
-		os.RemoveAll(tmpDir)
+		cleanup()
 		log.Fatalf("build nvpair-engine-manager: %v", err)
 	}
 
 	log.Println("building nvpair-manual-nodes...")
 	if err := goBuild(filepath.Join("..", "nvpair-manual-nodes"), manualNodesBin); err != nil {
-		os.RemoveAll(tmpDir)
+		cleanup()
 		log.Fatalf("build nvpair-manual-nodes: %v", err)
 	}
 
 	log.Println("building nvpair-cluster-manager...")
 	if err := goBuild(filepath.Join("..", "nvpair-cluster-manager"), clusterMgrBin); err != nil {
-		os.RemoveAll(tmpDir)
+		cleanup()
 		log.Fatalf("build nvpair-cluster-manager: %v", err)
 	}
 
@@ -145,7 +154,7 @@ func TestMain(m *testing.M) {
 	// the scheduler-interop test also drives its binary directly.
 	log.Println("building nvpair-job-scheduler...")
 	if err := goBuild(filepath.Join("..", "nvpair-job-scheduler"), schedulerBin); err != nil {
-		os.RemoveAll(tmpDir)
+		cleanup()
 		log.Fatalf("build nvpair-job-scheduler: %v", err)
 	}
 
@@ -160,7 +169,7 @@ func TestMain(m *testing.M) {
 	testsConfigBase = filepath.Join(tmpDir, "config")
 	for _, key := range []string{"XDG_CONFIG_HOME", "HOME", "APPDATA", "LOCALAPPDATA", "USERPROFILE"} {
 		if err := os.Setenv(key, testsConfigBase); err != nil {
-			os.RemoveAll(tmpDir)
+			cleanup()
 			log.Fatalf("set %s: %v", key, err)
 		}
 	}
@@ -173,12 +182,12 @@ func TestMain(m *testing.M) {
 	if runtime.GOOS == "darwin" {
 		shortTmpDir, err = os.MkdirTemp("/tmp", "nvp-")
 		if err != nil {
-			os.RemoveAll(tmpDir)
+			cleanup()
 			log.Fatalf("create short test temporary root: %v", err)
 		}
 		if err := os.Setenv("TMPDIR", shortTmpDir); err != nil {
 			os.RemoveAll(shortTmpDir)
-			os.RemoveAll(tmpDir)
+			cleanup()
 			log.Fatalf("set test temporary root: %v", err)
 		}
 		log.Printf("using private short test temporary root: %s", shortTmpDir)
@@ -188,7 +197,7 @@ func TestMain(m *testing.M) {
 	if shortTmpDir != "" {
 		os.RemoveAll(shortTmpDir)
 	}
-	os.RemoveAll(tmpDir)
+	cleanup()
 	os.Exit(code)
 }
 

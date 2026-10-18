@@ -39,6 +39,7 @@ import (
 
 	"nvpair-shared/jsonrpc"
 	"nvpair-shared/noderec"
+	"nvpair-shared/testbin"
 )
 
 // availableNode mirrors the broker's external camelCase wire shape (see
@@ -207,9 +208,9 @@ func startSubscriptionBroker(t *testing.T) (*interopProcess, func(string, string
 	if err != nil {
 		t.Fatal(err)
 	}
-	fixture := filepath.Join(base, "subscription-scanner"+filepath.Ext(scannerBin))
+	fixture := filepath.Join(testbin.Dir(t, "tests", "subscription-scanner", "subscription-scanner"), testbin.Exe("subscription-scanner"))
 	if err := os.WriteFile(fixture, data, 0o700); err != nil {
-		t.Fatal(err)
+		t.Fatalf("copy subscription scanner to %q (a previous process may still be running): %v", fixture, err)
 	}
 	port := freePort(t)
 	p := startInteropProcess(t, base, brokerBin, port, []string{

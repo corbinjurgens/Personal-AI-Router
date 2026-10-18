@@ -24,6 +24,7 @@ import (
 	"nvpair-shared/jsonrpc"
 	"nvpair-shared/nodepolicy"
 	"nvpair-shared/noderec"
+	"nvpair-shared/testbin"
 )
 
 // The origin is a real engine-manager with a fixture discovery directory. The
@@ -275,8 +276,9 @@ func newPolicyJointFixture(t *testing.T) *policyJointFixture {
 	}
 	jointWriteJSON(t, f.path, f.want)
 
-	f.engine = filepath.Join(f.base, "joint-target-engine"+filepath.Ext(engineMgrBin))
-	f.scanner = filepath.Join(f.base, "joint-empty-scanner"+filepath.Ext(scannerBin))
+	binDir := testbin.Dir(t, "tests", "policy-joint", "joint-target-engine", "joint-origin-engine", "joint-empty-scanner")
+	f.engine = filepath.Join(binDir, testbin.Exe("joint-target-engine"))
+	f.scanner = filepath.Join(binDir, testbin.Exe("joint-empty-scanner"))
 	self, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)
@@ -297,7 +299,7 @@ func newPolicyJointFixture(t *testing.T) *policyJointFixture {
 		}
 	}
 	f.startTarget(t)
-	f.originEngine = filepath.Join(originBase, "joint-origin-engine"+filepath.Ext(engineMgrBin))
+	f.originEngine = filepath.Join(binDir, testbin.Exe("joint-origin-engine"))
 	jointCopyExecutable(t, engineMgrBin, f.originEngine)
 	f.startOrigin(t)
 	return f
@@ -484,7 +486,7 @@ func jointCopyExecutable(t *testing.T, source, target string) {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(target, data, 0o700); err != nil {
-		t.Fatal(err)
+		t.Fatalf("copy joint executable to %q (a previous process may still be running): %v", target, err)
 	}
 }
 

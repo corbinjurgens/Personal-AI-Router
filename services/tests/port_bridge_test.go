@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"nvpair-shared/jsonrpc"
+	"nvpair-shared/testbin"
 )
 
 func init() {
@@ -70,12 +71,12 @@ func TestPortInteropBridgeBrokerTeardownKillsStalledWorker(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	worker := filepath.Join(base, "stalled-worker"+filepath.Ext(errorsBin))
+	worker := filepath.Join(testbin.Dir(t, "tests", "stalled-worker", "stalled-worker"), testbin.Exe("stalled-worker"))
 	if err := os.WriteFile(worker, data, 0o700); err != nil {
-		t.Fatal(err)
+		t.Fatalf("copy stalled worker to %q (a previous process may still be running): %v", worker, err)
 	}
 	port := freePort(t)
-	bridge, env := newPortInteropBridge(t, base, worker, port)
+	bridge, env := newPortInteropBridge(t, worker, port)
 	env = append(env, "NVPAIR_TEST_STALLED_PORT_WORKER="+worker)
 	p := startInteropProcess(t, base, brokerBin, port, env,
 		"--cluster-dir", filepath.Join(base, "cluster"), "--scanner-path", scannerBin, "--errors-path", bridge)

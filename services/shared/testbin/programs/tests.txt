@@ -1,0 +1,28 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+tests/policy-joint/joint-empty-scanner
+tests/policy-joint/joint-origin-engine
+tests/policy-joint/joint-target-engine
+tests/port-bridge/port-bridge
+tests/products/nvpair-cluster-manager
+tests/products/nvpair-engine-manager
+tests/products/nvpair-errors
+tests/products/nvpair-job-scheduler
+tests/products/nvpair-manual-nodes
+tests/products/nvpair-node-info
+tests/products/nvpair-node-scanner
+tests/products/nvpair-node-settings
+tests/products/nvpair-proxy
+tests/products/nvpair-service
+tests/products/nvpair-ui-broker
+tests/products/nvpair-workload-manager
+tests/service-bundle-1/nvpair-cluster-manager
+tests/service-bundle-1/nvpair-engine-manager
+tests/service-bundle-1/nvpair-node-scanner
+tests/service-bundle-1/nvpair-proxy
+tests/service-bundle-1/nvpair-service
+tests/service-bundle-1/nvpair-ui-broker
+tests/stalled-worker/stalled-worker
+tests/subscription-scanner/subscription-scanner
+tests/workload-bridge/workload-bridge

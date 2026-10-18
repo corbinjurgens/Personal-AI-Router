@@ -23,12 +23,34 @@ import (
 	"nvpair-shared/jsonrpc"
 	"nvpair-shared/nodepolicy"
 	"nvpair-shared/servicectl"
+	"nvpair-shared/testbin"
 )
 
 const serviceCallTimeout = 10 * time.Second
 
 // The service allows 2s for shutdown's reply and 18s for broker teardown.
 const serviceStopTimeout = 35 * time.Second
+
+// All current service-fixture callers are serial and hold one fixture at a time.
+// Keep the slots aligned with the service-bundle roles in programs/tests.txt.
+var serviceBundleSlots = struct {
+	sync.Mutex
+	used [1]bool
+}{}
+
+func acquireServiceBundle(t *testing.T) int {
+	t.Helper()
+	serviceBundleSlots.Lock()
+	defer serviceBundleSlots.Unlock()
+	for slot, used := range serviceBundleSlots.used {
+		if !used {
+			serviceBundleSlots.used[slot] = true
+			return slot
+		}
+	}
+	t.Fatalf("service fixture slots exhausted: manifest supports %d concurrent fixtures", len(serviceBundleSlots.used))
+	return 0
+}
 
 type serviceOutput struct {
 	mu  sync.Mutex
@@ -59,6 +81,8 @@ type serviceChild struct {
 type serviceFixture struct {
 	t                                    *testing.T
 	dir, configDir, clusterDir, endpoint string
+	binDir                               string
+	cleanupBins                          func()
 	servicePath, brokerPath, scannerPath string
 	proxyPath                            string
 	facadePort                           int
@@ -81,11 +105,29 @@ func newServiceFixture(t *testing.T) *serviceFixture {
 		t.Fatal(err)
 	}
 	f := &serviceFixture{t: t, dir: dir, configDir: filepath.Join(dir, "config"), clusterDir: filepath.Join(dir, "cluster")}
+	slot := acquireServiceBundle(t)
+	programs := []string{"nvpair-service", "nvpair-ui-broker", "nvpair-node-scanner", "nvpair-proxy", "nvpair-cluster-manager", "nvpair-engine-manager"}
 	t.Cleanup(func() {
 		if err := f.removeBundle(); err != nil {
 			t.Error(err)
+			return // Retain the slot when ownership cleanup could not be verified.
 		}
+		serviceBundleSlots.Lock()
+		serviceBundleSlots.used[slot] = false
+		serviceBundleSlots.Unlock()
 	})
+	f.binDir, f.cleanupBins, err = testbin.MainDir("tests", fmt.Sprintf("service-bundle-%d", slot+1), "nvs-bin-", programs...)
+	if err != nil {
+		t.Fatalf("allocate service fixture binaries: %v", err)
+	}
+	// A fixed bundle may contain optional workers from an earlier fixture.
+	// Remove those before the broker can discover stale siblings on startup.
+	for _, program := range programs {
+		path := filepath.Join(f.binDir, testbin.Exe(program))
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			t.Fatalf("remove previous fixture executable %q (a previous process may still be running): %v", path, err)
+		}
+	}
 	f.endpoint = filepath.Join(dir, "s.sock")
 	if runtime.GOOS == "windows" {
 		f.endpoint = `\\.\pipe\nvpair-test-` + filepath.Base(dir)
@@ -95,32 +137,33 @@ func newServiceFixture(t *testing.T) *serviceFixture {
 			t.Fatal(err)
 		}
 	}
-	copyBinary := func(src string) string {
-		t.Helper()
-		data, err := os.ReadFile(src)
-		if err != nil {
-			t.Fatal(err)
-		}
-		info, err := os.Stat(src)
-		if err != nil {
-			t.Fatal(err)
-		}
-		path := filepath.Join(dir, filepath.Base(src))
-		if err := os.WriteFile(path, data, info.Mode().Perm()); err != nil {
-			t.Fatal(err)
-		}
-		path, err = canonicalServicePath(path)
-		if err != nil {
-			t.Fatal(err)
-		}
-		return path
-	}
-	f.servicePath = copyBinary(serviceBin)
-	f.brokerPath = copyBinary(brokerBin)
-	f.scannerPath = copyBinary(scannerBin)
+	f.servicePath = f.copyBinary(serviceBin)
+	f.brokerPath = f.copyBinary(brokerBin)
+	f.scannerPath = f.copyBinary(scannerBin)
 	f.inventory = &serviceProcessInventory{paths: []string{f.servicePath, f.brokerPath, f.scannerPath}, known: make(map[int32]serviceProcessIdentity)}
 	f.env = append(os.Environ(), "HOME="+f.configDir, "XDG_CONFIG_HOME="+f.configDir, "APPDATA="+f.configDir, "LOCALAPPDATA="+f.configDir, servicectl.EndpointEnv+"="+f.endpoint)
 	return f
+}
+
+func (f *serviceFixture) copyBinary(src string) string {
+	f.t.Helper()
+	data, err := os.ReadFile(src)
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	info, err := os.Stat(src)
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	path := filepath.Join(f.binDir, filepath.Base(src))
+	if err := os.WriteFile(path, data, info.Mode().Perm()); err != nil {
+		f.t.Fatalf("copy fixture executable to %q (a previous process may still be running): %v", path, err)
+	}
+	path, err = canonicalServicePath(path)
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	return path
 }
 
 func (f *serviceFixture) args() []string {
@@ -137,25 +180,11 @@ func (f *serviceFixture) args() []string {
 func newProxyServiceFixture(t *testing.T) *serviceFixture {
 	t.Helper()
 	f := newServiceFixture(t)
-	data, err := os.ReadFile(proxyBin)
-	if err != nil {
-		t.Fatal(err)
-	}
-	info, err := os.Stat(proxyBin)
-	if err != nil {
-		t.Fatal(err)
-	}
-	path := filepath.Join(f.dir, filepath.Base(proxyBin))
-	if err := os.WriteFile(path, data, info.Mode().Perm()); err != nil {
-		t.Fatal(err)
-	}
-	if f.proxyPath, err = canonicalServicePath(path); err != nil {
-		t.Fatal(err)
-	}
+	f.proxyPath = f.copyBinary(proxyBin)
 	f.inventory.paths = append(f.inventory.paths, f.proxyPath)
 	f.facadePort = freePort(t)
 	portPath := filepath.Join(filepath.Dir(f.policyPath()), "llamacpp-proxy-port.json")
-	data, err = json.Marshal(struct {
+	data, err := json.Marshal(struct {
 		Port int `json:"port"`
 	}{Port: f.facadePort})
 	if err != nil {
@@ -309,7 +338,13 @@ func (f *serviceFixture) removeBundle() error {
 	if len(f.children) > 0 && !f.cleanupVerified {
 		return fmt.Errorf("retaining fixture bundle after incomplete cleanup: %s", f.dir)
 	}
-	return os.RemoveAll(f.dir)
+	if err := os.RemoveAll(f.dir); err != nil {
+		return err
+	}
+	if f.cleanupBins != nil {
+		f.cleanupBins()
+	}
+	return nil
 }
 
 func (f *serviceFixture) cleanupChecked() error {

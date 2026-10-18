@@ -219,24 +219,8 @@ func newPairedBootstrapFixture(t *testing.T, blocked bool) *pairedBootstrapFixtu
 		{Service: noderec.ServiceNodeInfo, Port: f.b.ports[noderec.ServiceNodeInfo]},
 		{Service: noderec.ServiceEngineControl, Port: f.b.ports[noderec.ServiceEngineControl]},
 	}})
-	copyWorker := func(source string) string {
-		t.Helper()
-		data, err := os.ReadFile(source)
-		if err != nil {
-			t.Fatal(err)
-		}
-		path := filepath.Join(f.local.dir, filepath.Base(source))
-		if err := os.WriteFile(path, data, 0o700); err != nil {
-			t.Fatal(err)
-		}
-		canonical, err := canonicalServicePath(path)
-		if err != nil {
-			t.Fatal(err)
-		}
-		return canonical
-	}
-	localCM, localEngine := copyWorker(clusterMgrBin), copyWorker(engineMgrBin)
-	bridge, env := newPortInteropBridge(t, f.local.dir, localCM, f.a.ports[noderec.ServiceCluster])
+	localCM, localEngine := f.local.copyBinary(clusterMgrBin), f.local.copyBinary(engineMgrBin)
+	bridge, env := newPortInteropBridge(t, localCM, f.a.ports[noderec.ServiceCluster])
 	f.local.env = append(f.local.env, env...)
 	for _, path := range []string{bridge, localCM, localEngine} {
 		canonical, err := canonicalServicePath(path)
