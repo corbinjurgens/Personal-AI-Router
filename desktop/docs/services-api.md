@@ -18,13 +18,10 @@
 ### Requests the backend handles but the bridge never calls (unused capability)
 - ⚠️ nvpair-engine-manager → engine:configure-launch
 - ⚠️ nvpair-engine-manager → engine:configured-ports
-- ⚠️ nvpair-engine-manager → engine:delete-model
 - ⚠️ nvpair-engine-manager → engine:describe
-- ⚠️ nvpair-engine-manager → engine:descriptors
 - ⚠️ nvpair-engine-manager → engine:errors
 - ⚠️ nvpair-engine-manager → engine:get-launch
 - ⚠️ nvpair-engine-manager → engine:intent
-- ⚠️ nvpair-engine-manager → engine:load-model
 - ⚠️ nvpair-engine-manager → engine:logs
 - ⚠️ nvpair-engine-manager → engine:preview-launch
 - ⚠️ nvpair-engine-manager → engine:remote-apply-settings
@@ -33,7 +30,6 @@
 - ⚠️ nvpair-engine-manager → engine:restart
 - ⚠️ nvpair-engine-manager → engine:set-port
 - ⚠️ nvpair-engine-manager → engine:sleep
-- ⚠️ nvpair-engine-manager → engine:unload-model
 - ⚠️ nvpair-engine-manager → engine:wake
 - ⚠️ nvpair-engine-manager → internal:set-reserved-port
 - ⚠️ nvpair-job-scheduler → scheduler:get-interval
@@ -106,15 +102,15 @@
 | `engine:catalog` | request (we call) | ✅ yes |
 | `engine:configure-launch` | request (we call) | ⚠️ not called |
 | `engine:configured-ports` | request (we call) | ⚠️ not called |
-| `engine:delete-model` | request (we call) | ⚠️ not called |
+| `engine:delete-model` | request (we call) | ✅ yes |
 | `engine:describe` | request (we call) | ⚠️ not called |
-| `engine:descriptors` | request (we call) | ⚠️ not called |
+| `engine:descriptors` | request (we call) | ✅ yes |
 | `engine:errors` | request (we call) | ⚠️ not called |
 | `engine:get-installed` | request (we call) | ✅ yes |
 | `engine:get-launch` | request (we call) | ⚠️ not called |
 | `engine:install` | request (we call) | ✅ yes |
 | `engine:intent` | request (we call) | ⚠️ not called |
-| `engine:load-model` | request (we call) | ⚠️ not called |
+| `engine:load-model` | request (we call) | ✅ yes |
 | `engine:logs` | request (we call) | ⚠️ not called |
 | `engine:models` | request (we call) | ✅ yes |
 | `engine:prepare-shutdown` | request (we call) | ➖ ignored |
@@ -139,7 +135,7 @@
 | `engine:stop` | request (we call) | ✅ yes |
 | `engine:uninstall` | request (we call) | ✅ yes |
 | `engine:uninstall-managed` | request (we call) | ✅ yes |
-| `engine:unload-model` | request (we call) | ⚠️ not called |
+| `engine:unload-model` | request (we call) | ✅ yes |
 | `engine:wake` | request (we call) | ⚠️ not called |
 | `error` | request (we call) | ✅ yes |
 | `internal:set-reserved-port` | request (we call) | ⚠️ not called |
