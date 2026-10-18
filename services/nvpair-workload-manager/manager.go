@@ -31,7 +31,7 @@ const discoveryInterval = 5 * time.Second
 // re-assertions before it ages out. Removals are not kept in that set.
 //
 // resyncInterval is load-bearing OUTSIDE this binary. nvpair-ui-broker's
-// staleness sweep (workloadOriginSilenceTimeout in its broker.go) retires a
+// staleness sweep (workloadOriginSilenceTimeout in its workload_projection.go) retires a
 // remote workload after a fixed multiple of this interval's worth of silence, on
 // the assumption that a live origin re-asserts every active workload every
 // interval, forever. Lengthening this value past that budget — or shipping a peer
