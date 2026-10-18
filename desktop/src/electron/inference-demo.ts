@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { execFile, spawn } from 'node:child_process'
+import { removeProviderSecrets } from './child-environment'
 import fs from 'node:fs'
 import path from 'node:path'
 import { BrowserWindow } from 'electron'
@@ -233,7 +234,7 @@ const DISPATCHER_ENV_PREFIX = 'inference_dispatcher_'
  */
 function dispatcherChildEnv(): NodeJS.ProcessEnv {
     return Object.fromEntries(
-        Object.entries(process.env).filter(
+        Object.entries(removeProviderSecrets(process.env)).filter(
             ([key]) => !key.toLowerCase().startsWith(DISPATCHER_ENV_PREFIX)
         )
     )

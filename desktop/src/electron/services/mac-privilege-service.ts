@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { execFile } from 'node:child_process'
+import { removeProviderSecrets } from '@/electron/child-environment'
 import { existsSync } from 'node:fs'
 import path from 'node:path'
 import { app } from 'electron'
@@ -105,20 +106,29 @@ function isSupported(): boolean {
 
 function runCtl(args: string[], timeoutMs: number): Promise<JsonValue | null> {
     return new Promise(resolve => {
-        execFile(ctlPath(), args, { timeout: timeoutMs, encoding: 'utf8' }, (error, stdout) => {
-            const text = stdout.trim()
-            if (!text) {
-                if (error) {
-                    log.error({
-                        sublevel: 'ctl',
-                        message: `ctl ${args[0]} failed: ${error.message}`
-                    })
+        execFile(
+            ctlPath(),
+            args,
+            {
+                timeout: timeoutMs,
+                encoding: 'utf8',
+                env: removeProviderSecrets(process.env)
+            },
+            (error, stdout) => {
+                const text = stdout.trim()
+                if (!text) {
+                    if (error) {
+                        log.error({
+                            sublevel: 'ctl',
+                            message: `ctl ${args[0]} failed: ${error.message}`
+                        })
+                    }
+                    resolve(null)
+                    return
                 }
-                resolve(null)
-                return
+                resolve(parseJson(text))
             }
-            resolve(parseJson(text))
-        })
+        )
     })
 }
 

@@ -350,7 +350,22 @@ node-local.
   never synchronized across the cluster.
 - Prompts and responses are never surfaced or logged; child processes run with
   `stdio: 'ignore'` and with the `INFERENCE_DISPATCHER_*` environment namespace
-  stripped so an inherited variable cannot redirect output to disk.
+  stripped so an inherited variable cannot redirect output to disk. Discovery
+  probes and request submissions also strip `NVPAIR_PROVIDER_SECRET_*`, with
+  case-insensitive matching.
+
+Electron filters provider-secret variables from its explicit helper launches:
+the Windows PATH update, wipe scripts, and macOS privilege control tool. A wipe
+script's relaunch intentionally inherits this filtered environment; credentials
+belong on the background service. Detached `nvpair-service` startup retains the
+parent environment.
+
+This filtering is not OS isolation. Framework-managed launches through
+`shell.openPath` / `shell.openExternal`, `autoUpdater`, Electron helper processes,
+OS autostart, and the macOS LaunchDaemon are outside these explicit launch
+options; this does not establish their environment inheritance behavior. Keep
+provider credentials on the background service and attach the GUI from a clean
+environment.
 
 ## Local HTTP endpoints
 
