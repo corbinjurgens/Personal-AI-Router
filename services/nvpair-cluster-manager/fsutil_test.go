@@ -10,6 +10,9 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
+
+	"nvpair-shared/durablefile"
 )
 
 func TestAtomicWriteCreatesAndReplaces(t *testing.T) {
@@ -57,15 +60,15 @@ func TestAtomicWriteRetriesTransientRename(t *testing.T) {
 	}
 
 	var attempts atomic.Int32
-	orig := renameFile
-	renameFile = func(oldpath, newpath string) error {
+	orig := clusterFileReplacer
+	clusterFileReplacer = durablefile.Replacer{Replace: func(oldpath, newpath string) error {
 		n := attempts.Add(1)
 		if n < 3 {
 			return errors.New("rename: Access is denied.")
 		}
-		return orig(oldpath, newpath)
-	}
-	t.Cleanup(func() { renameFile = orig })
+		return os.Rename(oldpath, newpath)
+	}, IsTransient: isTransientReplaceError, Sleep: func(time.Duration) {}}
+	t.Cleanup(func() { clusterFileReplacer = orig })
 
 	if err := atomicWrite(path, []byte("new\n"), 0o600); err != nil {
 		t.Fatalf("atomicWrite: %v", err)
@@ -87,12 +90,12 @@ func TestAtomicWriteNonTransientRenameFailsFast(t *testing.T) {
 	path := filepath.Join(dir, "admission.json")
 
 	var attempts atomic.Int32
-	orig := renameFile
-	renameFile = func(oldpath, newpath string) error {
+	orig := clusterFileReplacer
+	clusterFileReplacer = durablefile.Replacer{Replace: func(oldpath, newpath string) error {
 		attempts.Add(1)
 		return errors.New("rename: no such file or directory")
-	}
-	t.Cleanup(func() { renameFile = orig })
+	}}
+	t.Cleanup(func() { clusterFileReplacer = orig })
 
 	err := atomicWrite(path, []byte("x\n"), 0o600)
 	if err == nil {

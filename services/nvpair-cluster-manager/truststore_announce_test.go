@@ -13,6 +13,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"nvpair-shared/durablefile"
 )
 
 // newAnnouncingStore returns a trust store wired to count change announcements.
@@ -195,10 +197,10 @@ func TestTrustStoreStaysSilentWhenEndorsementWriteFails(t *testing.T) {
 			beforeCount := count()
 			// Fail the final replace, after the temporary file was written.
 			// The existing pin must remain intact on disk and in memory.
-			originalRename := renameFile
+			originalReplacer := clusterFileReplacer
 			writeErr := errors.New("injected endorsement replace failure")
-			renameFile = func(_, _ string) error { return writeErr }
-			t.Cleanup(func() { renameFile = originalRename })
+			clusterFileReplacer = durablefile.Replacer{Replace: func(_, _ string) error { return writeErr }}
+			t.Cleanup(func() { clusterFileReplacer = originalReplacer })
 			if err := merge(ts, pin, []Endorsement{second}); !errors.Is(err, writeErr) {
 				t.Fatalf("merge error = %v, want injected replace failure", err)
 			}
@@ -220,7 +222,7 @@ func TestTrustStoreStaysSilentWhenEndorsementWriteFails(t *testing.T) {
 			if len(entries) != 1 || entries[0].Name() != pin.NodeUUID+".json" {
 				t.Fatalf("failed write left temporary residue: entries=%v", entries)
 			}
-			renameFile = originalRename
+			clusterFileReplacer = originalReplacer
 			if err := merge(ts, pin, []Endorsement{second}); err != nil {
 				t.Fatalf("retry after storage recovery: %v", err)
 			}
