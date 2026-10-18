@@ -5,6 +5,7 @@ package durablefile
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -135,6 +136,9 @@ func TestWriteFileFailureBeforeReplaceKeepsTarget(t *testing.T) {
 			if !errors.Is(err, errInjected) {
 				t.Fatalf("error = %v, want it to wrap the injected failure", err)
 			}
+			if errors.Is(err, ErrReplaced) {
+				t.Fatalf("error = %v, replacement did not land", err)
+			}
 			if !strings.Contains(err.Error(), wantStep) {
 				t.Fatalf("error = %q, want it to name step %q", err, wantStep)
 			}
@@ -174,6 +178,9 @@ func TestWriteFileDirectorySyncFailureLeavesNewBytes(t *testing.T) {
 	err := r.WriteFile(path, []byte("replacement"), 0o600)
 	if !errors.Is(err, errInjected) || !strings.Contains(err.Error(), "sync directory") {
 		t.Fatalf("error = %v, want a sync directory failure wrapping the injected failure", err)
+	}
+	if !errors.Is(err, ErrReplaced) {
+		t.Fatalf("error = %v, want ErrReplaced after the replacement landed", err)
 	}
 	if got := readString(t, path); got != "replacement" {
 		t.Fatalf("target = %q, want the complete new bytes", got)
@@ -222,10 +229,14 @@ func TestWriteFileReplaceBoundaryFailuresLeaveWholeOldOrNewTarget(t *testing.T) 
 				if err := replaceFile(tmp, target); err != nil {
 					return err
 				}
-				return errInjected
+				return fmt.Errorf("%w: %w", ErrReplaced, errInjected)
 			}}
-			if err := r.WriteFile(path, []byte("replacement"), 0o600); !errors.Is(err, errInjected) {
+			err := r.WriteFile(path, []byte("replacement"), 0o600)
+			if !errors.Is(err, errInjected) {
 				t.Fatalf("WriteFile error = %v, want injected replace failure", err)
+			}
+			if got, want := errors.Is(err, ErrReplaced), boundary == "after replace"; got != want {
+				t.Fatalf("replacement landed = %t, want %t (error %v)", got, want, err)
 			}
 			want := original
 			if boundary == "after replace" {
@@ -252,7 +263,7 @@ func TestWriteFileDirectoryFlushBoundaryFailuresLeaveWholeNewTarget(t *testing.T
 				}
 				return errInjected
 			}}
-			if err := r.WriteFile(path, []byte("replacement"), 0o600); !errors.Is(err, errInjected) {
+			if err := r.WriteFile(path, []byte("replacement"), 0o600); !errors.Is(err, errInjected) || !errors.Is(err, ErrReplaced) {
 				t.Fatalf("WriteFile error = %v, want injected directory-flush failure", err)
 			}
 			if got := readString(t, path); got != "replacement" {
@@ -260,6 +271,34 @@ func TestWriteFileDirectoryFlushBoundaryFailuresLeaveWholeNewTarget(t *testing.T
 			}
 		})
 	}
+}
+
+func TestWriteFileDoesNotRetryLandedReplacement(t *testing.T) {
+	dir := t.TempDir()
+	path := writeTarget(t, dir, "original bytes")
+	attempts := 0
+	r := Replacer{
+		Replace: func(tmp, target string) error {
+			attempts++
+			if err := replaceFile(tmp, target); err != nil {
+				return err
+			}
+			return fmt.Errorf("%w: %w", ErrReplaced, errInjected)
+		},
+		IsTransient: func(error) bool { return true },
+		Sleep:       func(time.Duration) {},
+	}
+	err := r.WriteFile(path, []byte("replacement"), 0o600)
+	if !errors.Is(err, ErrReplaced) || !errors.Is(err, errInjected) {
+		t.Fatalf("WriteFile error = %v, want the landed replacement and injected failure", err)
+	}
+	if attempts != 1 {
+		t.Fatalf("replacement attempts = %d, want 1 for a landed replacement", attempts)
+	}
+	if got := readString(t, path); got != "replacement" {
+		t.Fatalf("target = %q, want complete replacement", got)
+	}
+	assertOnlyTarget(t, dir, path)
 }
 
 func TestWriteFileOrdersSteps(t *testing.T) {

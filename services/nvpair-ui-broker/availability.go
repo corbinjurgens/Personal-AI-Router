@@ -20,6 +20,7 @@ import (
 	"sort"
 	"time"
 
+	"nvpair-shared/durablefile"
 	"nvpair-shared/nodepolicy"
 )
 
@@ -85,9 +86,10 @@ func (b *Broker) runAvailabilityTransition(ctx context.Context, gen uint64, stat
 // proxy has acknowledged the availability push and the policy push that follows
 // it. While policy recovery is
 // required nothing is saved, so the corrupt file and recoveryRequired stay as
-// they are; the change then lives in memory only and persisted is false. The
-// caller sets r.current from the result once it has no further failure. Caller
-// holds r.mu.
+// they are; the change then lives in memory only and persisted is false.
+// A landed replacement is persisted even when durability failed; the caller
+// adopts it and completes the transition before returning the save warning.
+// Caller holds r.mu.
 func (r *policyRuntime) persistAvailabilityLocked(state nodepolicy.Availability) (policy nodepolicy.Policy, persisted bool, err error) {
 	policy = r.current
 	policy.Availability = state
@@ -95,7 +97,7 @@ func (r *policyRuntime) persistAvailabilityLocked(state nodepolicy.Availability)
 		return policy, false, nil
 	}
 	policy, err = r.publishLocked(policy)
-	return policy, err == nil, err
+	return policy, err == nil || errors.Is(err, durablefile.ErrReplaced), err
 }
 
 // pushAvailabilityAndActivate sends the availability, then, for a change that
@@ -121,12 +123,13 @@ func (b *Broker) pauseNode(ctx context.Context) (nodepolicy.Availability, error)
 		return nodepolicy.Paused, nil
 	}
 	policy, persisted, err := r.persistAvailabilityLocked(nodepolicy.Paused)
-	if err != nil {
+	if err != nil && !persisted {
 		r.mu.Unlock()
 		return "", fmt.Errorf("the paused state could not be saved: %w", err)
 	}
 	r.current = policy
 	if persisted {
+		r.recoveryRequired = false
 		r.activationErr = ""
 	}
 	r.live = nodepolicy.Draining
@@ -204,6 +207,9 @@ func (b *Broker) pauseNode(ctx context.Context) (nodepolicy.Availability, error)
 	b.announceActivationChange(b.pushPolicyNow(context.Background(), pushAvailability))
 	b.notifyAvailability()
 	slog.Info("node paused")
+	if err != nil {
+		return nodepolicy.Paused, &policySaveError{err: err, revision: policy.Revision}
+	}
 	return nodepolicy.Paused, nil
 }
 
@@ -219,12 +225,13 @@ func (b *Broker) resumeNode() (nodepolicy.Availability, error) {
 		return nodepolicy.Available, nil
 	}
 	policy, persisted, err := r.persistAvailabilityLocked(nodepolicy.Available)
-	if err != nil {
+	if err != nil && !persisted {
 		r.mu.Unlock()
 		return "", fmt.Errorf("the available state could not be saved: %w", err)
 	}
 	r.current = policy
 	if persisted {
+		r.recoveryRequired = false
 		r.activationErr = ""
 	}
 	r.live = nodepolicy.Available
@@ -243,6 +250,9 @@ func (b *Broker) resumeNode() (nodepolicy.Availability, error) {
 	b.notifyAvailability()
 	slog.Info("node resumed", "waking", slept, "restore", restore)
 	go b.wakeAfterResume(slept, restore)
+	if err != nil {
+		return nodepolicy.Available, &policySaveError{err: err, revision: policy.Revision}
+	}
 	return nodepolicy.Available, nil
 }
 

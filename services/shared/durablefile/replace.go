@@ -14,8 +14,10 @@
 //
 // Any failure before the replacement removes the temporary file and leaves the
 // target byte-identical. A directory-sync failure happens after the
-// replacement: the error is returned and the target already holds the complete
-// new bytes. The parent directory must already exist.
+// replacement: the error wraps ErrReplaced and the target already holds the
+// complete new bytes. Callers should adopt those bytes while reporting the
+// durability failure; they may not survive a power loss. The parent directory
+// must already exist.
 //
 // Replacer exposes each filesystem step as a replaceable function so callers in
 // other modules can inject a failure at any boundary from their own tests.
@@ -24,6 +26,7 @@ package durablefile
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -35,6 +38,10 @@ const (
 	replaceMaxAttempts = 10
 	replaceRetryBase   = 50 * time.Millisecond
 )
+
+// ErrReplaced marks a failure after the target was replaced with the complete
+// new bytes. errors.Is also continues to match the underlying failure.
+var ErrReplaced = errors.New("durablefile: replacement landed but durability is uncertain")
 
 // File is the temporary file a Replacer writes, syncs and closes.
 type File interface {
@@ -52,7 +59,8 @@ type Replacer struct {
 	// base and is unique, with the given permissions.
 	CreateTemp func(dir, base string, perm os.FileMode) (File, error)
 	// Replace atomically moves tmp over target. It is retried while
-	// IsTransient reports its error.
+	// IsTransient reports its error. If it fails after moving the file, its
+	// error must wrap ErrReplaced; that failure is never retried.
 	Replace func(tmp, target string) error
 	// SyncDir makes a completed replacement in dir durable. It is a no-op on
 	// Windows, where Replace writes through.
@@ -94,7 +102,7 @@ func (r Replacer) WriteFile(path string, data []byte, perm os.FileMode) error {
 		return fmt.Errorf("durablefile: replace %s with %s: %w", path, tmp, err)
 	}
 	if err := r.SyncDir(dir); err != nil {
-		return fmt.Errorf("durablefile: sync directory %s: %w", dir, err)
+		return fmt.Errorf("durablefile: sync directory %s: %w: %w", dir, ErrReplaced, err)
 	}
 	return nil
 }
@@ -106,7 +114,7 @@ func (r Replacer) replaceWithRetry(tmp, target string) error {
 		if err == nil {
 			return nil
 		}
-		if !r.IsTransient(err) || attempt == replaceMaxAttempts {
+		if errors.Is(err, ErrReplaced) || !r.IsTransient(err) || attempt == replaceMaxAttempts {
 			break
 		}
 		r.Sleep(replaceRetryBase * time.Duration(attempt))

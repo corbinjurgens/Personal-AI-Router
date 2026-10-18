@@ -163,11 +163,7 @@ func TestPeerPolicySetRejectsDeploymentAndExistingAccountCeilingChanges(t *testi
 }
 
 func TestCeilingReductionPublicationFaultBoundariesRestartWholeDocument(t *testing.T) {
-	boundaries := append(publicationBoundaries(),
-		publicationBoundary{"after file sync", faultingTemp(faultTemp{afterSyncErr: errPublish}), false},
-		publicationBoundary{"after directory or platform flush", durablefile.Replacer{SyncDir: failAfterPolicyDirectoryFlush}, true},
-	)
-	for _, boundary := range boundaries {
+	for _, boundary := range publicationBoundariesWithFlushes() {
 		t.Run(boundary.name, func(t *testing.T) {
 			rb := newRoutedBroker(t)
 			setClock(rb.b, 5)
@@ -180,6 +176,15 @@ func TestCeilingReductionPublicationFaultBoundariesRestartWholeDocument(t *testi
 			}
 			wantNew.Revision = "13"
 			setReplacer(rb.b, boundary.rep)
+			if boundary.landed {
+				_, err := setCurrent(rb.b, reduction)
+				setReplacer(rb.b, durablefile.Replacer{})
+				if !errors.Is(err, errPublish) || !errors.Is(err, durablefile.ErrReplaced) {
+					t.Fatalf("landed reduction error = %v, want landed replacement wrapping the publication failure", err)
+				}
+				requireLandedPolicy(t, rb, wantNew)
+				return
+			}
 			// Holding the push slot keeps a push that a failed publication wrongly
 			// scheduled marked pending, so it is visible without waiting for it.
 			r := rb.b.nodePolicyRuntime()

@@ -300,8 +300,9 @@ func (r *policyRuntime) nextRevisionLocked() (string, error) {
 }
 
 // publishLocked stamps policy with the next revision and publishes it
-// durably, returning the stamped document. r.current is the caller's to update
-// after this succeeds; on error nothing is changed. Caller holds r.mu.
+// durably, returning the stamped document on success or an ErrReplaced failure.
+// r.current is the caller's to update when the replacement landed, even if its
+// durability is uncertain. Caller holds r.mu.
 func (r *policyRuntime) publishLocked(policy nodepolicy.Policy) (nodepolicy.Policy, error) {
 	revision, err := r.nextRevisionLocked()
 	if err != nil {
@@ -309,6 +310,9 @@ func (r *policyRuntime) publishLocked(policy nodepolicy.Policy) (nodepolicy.Poli
 	}
 	policy.Revision = revision
 	if err := r.saveLocked(policy); err != nil {
+		if errors.Is(err, durablefile.ErrReplaced) {
+			return policy, err
+		}
 		return nodepolicy.Policy{}, err
 	}
 	return policy, nil
@@ -563,12 +567,13 @@ func withoutRevision(raw json.RawMessage) json.RawMessage {
 // persistPolicy persists and applies the policy that build derives from the
 // stored one. build runs in the same critical section as the save, so a policy
 // derived from the stored document can never be saved over a newer one. The
-// saved document carries the next revision. A build or save error persists,
-// pushes and announces nothing and leaves the previous document in memory. A
-// successful save ends policy recovery, and is followed by one push whose
+// saved document carries the next revision. A build or pre-replacement error
+// pushes and announces nothing and leaves the previous document in memory.
+// Every landed replacement ends policy recovery and is followed by one push whose
 // acknowledgement, within policyActivationTimeout in all, activates the
 // revision; a push that fails or does not finish in time leaves the revision
-// persisted and not active.
+// persisted and not active. A landed replacement whose durability failed is
+// adopted and applied the same way, then reported to the caller as a server error.
 func (b *Broker) persistPolicy(build func(stored nodepolicy.Policy) (nodepolicy.Policy, error)) (nodepolicy.Policy, error) {
 	r := b.nodePolicyRuntime()
 	r.mu.Lock()
@@ -578,9 +583,9 @@ func (b *Broker) persistPolicy(build func(stored nodepolicy.Policy) (nodepolicy.
 		return nodepolicy.Policy{}, err
 	}
 	policy, err = r.publishLocked(policy)
-	if err != nil {
+	if err != nil && !errors.Is(err, durablefile.ErrReplaced) {
 		r.mu.Unlock()
-		return nodepolicy.Policy{}, &policySaveError{err}
+		return nodepolicy.Policy{}, &policySaveError{err: err}
 	}
 	listenerChanged := policy.Routing.Listener.Enabled != r.current.Routing.Listener.Enabled ||
 		policy.Routing.Listener.Port != r.current.Routing.Listener.Port
@@ -596,6 +601,9 @@ func (b *Broker) persistPolicy(build func(stored nodepolicy.Policy) (nodepolicy.
 	}
 	b.activatePolicyNow()
 	b.notifyPolicyChanged(policy)
+	if err != nil {
+		return policy, &policySaveError{err: err, revision: policy.Revision}
+	}
 	return policy, nil
 }
 
@@ -691,11 +699,20 @@ type invalidParamsError struct{ err error }
 
 func (e *invalidParamsError) Error() string { return e.err.Error() }
 
-// policySaveError marks a save the broker could not publish. The request was
-// fine, so it is an ordinary server error, not invalid params.
-type policySaveError struct{ err error }
+// policySaveError marks a publication or durability failure. A nonempty revision
+// identifies the document already saved and being applied. The request was fine,
+// so either failure is an ordinary server error, not invalid params.
+type policySaveError struct {
+	err      error
+	revision string
+}
 
-func (e *policySaveError) Error() string { return "the policy could not be saved: " + e.err.Error() }
+func (e *policySaveError) Error() string {
+	if e.revision != "" {
+		return fmt.Sprintf("the policy document with revision %s was saved and is being applied but may not survive a power loss: %v", e.revision, e.err)
+	}
+	return "the policy could not be saved: " + e.err.Error()
+}
 
 func (e *policySaveError) Unwrap() error { return e.err }
 
