@@ -70,7 +70,7 @@ func policyPeerServer(t *testing.T, peerDir string) (*httptest.Server, func() []
 		mu.Lock()
 		calls = append(calls, policyCall{method: method, caller: caller, params: p})
 		mu.Unlock()
-		return json.RawMessage(`{"availability":"paused"}`), nil
+		return json.RawMessage(`{"policy":{"revision":"9007199254740993123"},"availability":"paused"}`), nil
 	}
 	mesh := clustertrust.Open(peerDir)
 	server := httptest.NewUnstartedServer((&controlServer{exec: exec, mesh: mesh}).mux())
@@ -158,6 +158,70 @@ func TestRemotePolicyRelaysToPeerWithoutFurtherHop(t *testing.T) {
 		if f.Error != nil {
 			t.Errorf("client response error: %+v", f.Error)
 		}
+	}
+}
+
+func TestRemotePolicyGetPreservesRevisionString(t *testing.T) {
+	selfDir, peerDir := pairedPolicyDirs(t)
+	server, calls := policyPeerServer(t, peerDir)
+	host, portText, err := net.SplitHostPort(server.Listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	port, err := strconv.Atoi(portText)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	out := &syncBuffer{}
+	m := NewManager(NewCodec(out), &Executor{progress: newProgressHub()}, clustertrust.Open(selfDir), selfDir)
+	t.Cleanup(m.controlHTTP.CloseIdle)
+	t.Cleanup(m.controlReadyHTTP.CloseIdle)
+	m.peers.set([]noderec.DirectoryNode{{
+		HostUUID: "host-peer", Name: "peer", IP: host, ClusterUUID: "uuid-peer",
+		Services: map[noderec.ServiceKey]noderec.ServiceStatus{noderec.ServiceEngineControl: {Port: port}},
+	}})
+
+	id := json.RawMessage("1")
+	m.handleMessage(context.Background(), &Message{
+		JSONRPC: "2.0", ID: &id, Method: "engine:remote-policy-get",
+		Params: json.RawMessage(`{"nodeId":"host-peer"}`),
+	})
+
+	deadline := time.Now().Add(5 * time.Second)
+	var response *Message
+	for time.Now().Before(deadline) {
+		for _, frame := range out.frames() {
+			if frame.IsResponse() {
+				response = &frame
+				break
+			}
+		}
+		if response != nil {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if response == nil {
+		t.Fatal("remote policy get produced no response")
+	}
+	if response.Error != nil {
+		t.Fatalf("remote policy get failed: %+v", response.Error)
+	}
+	var result struct {
+		Policy struct {
+			Revision string `json:"revision"`
+		} `json:"policy"`
+	}
+	if err := json.Unmarshal(response.Result, &result); err != nil {
+		t.Fatalf("decode remote policy result: %v", err)
+	}
+	const wantRevision = "9007199254740993123"
+	if result.Policy.Revision != wantRevision {
+		t.Fatalf("remote policy revision = %q, want unchanged %q (result %s)", result.Policy.Revision, wantRevision, response.Result)
+	}
+	if got := calls(); len(got) != 1 || got[0].method != "get" {
+		t.Fatalf("peer broker calls = %+v, want one get", got)
 	}
 }
 

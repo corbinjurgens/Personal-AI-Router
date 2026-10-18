@@ -1681,6 +1681,7 @@ var errPublish = errors.New("injected publication failure")
 type faultTemp struct {
 	durablefile.File
 	writeErr, syncErr, closeErr error
+	afterSyncErr                error
 }
 
 func (f faultTemp) Write(p []byte) (int, error) {
@@ -1694,7 +1695,10 @@ func (f faultTemp) Sync() error {
 	if f.syncErr != nil {
 		return f.syncErr
 	}
-	return f.File.Sync()
+	if err := f.File.Sync(); err != nil {
+		return err
+	}
+	return f.afterSyncErr
 }
 
 func (f faultTemp) Close() error {

@@ -80,6 +80,43 @@ func TestParseAcceptsDisabledProviderConfiguration(t *testing.T) {
 	}
 }
 
+func TestParseV2RejectsUnknownTierEntryKind(t *testing.T) {
+	doc := `{"version":2,"tiers":{"weak":[{"kind":"remote","engine":"ollama","model":"m"}]}}`
+	if _, err := Parse([]byte(doc)); err == nil || !strings.Contains(err.Error(), "kind") {
+		t.Fatalf("Parse(unknown tier-entry kind) err = %v, want a kind error", err)
+	}
+}
+
+// A suffixed alias names a fixed mode, so it cannot be configured as a tier.
+func TestRoutingRejectsSuffixedAliasAsTierKey(t *testing.T) {
+	doc := `{"version":2,"routing":{"tiers":{"weak-api":{"bareMode":"local"}}}}`
+	if _, err := Parse([]byte(doc)); err == nil || !strings.Contains(err.Error(), `unknown tier "weak-api"`) {
+		t.Fatalf("Parse(suffixed tier key) err = %v, want unknown-tier rejection", err)
+	}
+}
+
+func TestDefaultAndMigratedTierFamiliesAreEmpty(t *testing.T) {
+	checkEmptyFamilies := func(t *testing.T, p Policy) {
+		t.Helper()
+		for _, tier := range TierOrder {
+			if got := p.Routing.Tiers[tier].AllowedFamilies; len(got) != 0 {
+				t.Errorf("tier %s allowed families = %v, want none", tier, got)
+			}
+		}
+	}
+
+	t.Run("default", func(t *testing.T) {
+		checkEmptyFamilies(t, Default())
+	})
+	t.Run("migrated v1", func(t *testing.T) {
+		p, err := Parse([]byte(`{"version":1,"tiers":{"weak":[{"engine":"ollama","model":"m"}]}}`))
+		if err != nil {
+			t.Fatalf("Parse(v1): %v", err)
+		}
+		checkEmptyFamilies(t, p)
+	})
+}
+
 func TestValidateRoutingRejects(t *testing.T) {
 	test := func(name string, mutate func(*Policy), wantErr string) {
 		t.Helper()
@@ -119,6 +156,11 @@ func TestValidateRoutingRejects(t *testing.T) {
 	}, "duplicate allowed family")
 
 	// Cross references.
+	test("allowed family no deployment belongs to", func(p *Policy) {
+		tr := p.Routing.Tiers["weak"]
+		tr.AllowedFamilies = []string{"alpha", "gamma"}
+		p.Routing.Tiers["weak"] = tr
+	}, `allowed family "gamma" is not the family of any deployment`)
 	test("deployment names a missing account", func(p *Policy) {
 		p.Routing.Deployments[0].Account = "ghost"
 	}, `account "ghost" is not defined`)

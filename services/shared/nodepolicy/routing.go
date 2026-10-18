@@ -250,6 +250,7 @@ func (r Routing) validate() error {
 	}
 
 	deployments := map[string]bool{}
+	families := map[string]bool{}
 	for i, d := range r.Deployments {
 		if err := validateDeployment(d, accounts); err != nil {
 			return fmt.Errorf("routing.deployments[%d] %q: %w", i, d.ID, err)
@@ -258,6 +259,7 @@ func (r Routing) validate() error {
 			return fmt.Errorf("routing.deployments[%d]: duplicate id %q", i, d.ID)
 		}
 		deployments[d.ID] = true
+		families[d.Family] = true
 	}
 
 	for t := range r.Tiers {
@@ -270,7 +272,7 @@ func (r Routing) validate() error {
 		if !ok {
 			return fmt.Errorf("routing.tiers.%s is required", t)
 		}
-		if err := tr.validate(); err != nil {
+		if err := tr.validate(families); err != nil {
 			return fmt.Errorf("routing.tiers.%s: %w", t, err)
 		}
 	}
@@ -330,7 +332,9 @@ func validateDeployment(d Deployment, accounts map[string]bool) error {
 	return nil
 }
 
-func (t TierRouting) validate() error {
+// validate checks one tier's routing; families are those the deployments use,
+// so an allowed family must name one of them.
+func (t TierRouting) validate(families map[string]bool) error {
 	switch t.BareMode {
 	case BareHybrid, BareAPI, BareLocal:
 	default:
@@ -349,6 +353,9 @@ func (t TierRouting) validate() error {
 		}
 		if seen[f] {
 			return fmt.Errorf("duplicate allowed family %q", f)
+		}
+		if !families[f] {
+			return fmt.Errorf("allowed family %q is not the family of any deployment", f)
 		}
 		seen[f] = true
 	}

@@ -22,6 +22,18 @@ type faultFile struct {
 	writeErr, syncErr, closeErr error
 }
 
+type syncThenFailFile struct {
+	File
+	err error
+}
+
+func (f syncThenFailFile) Sync() error {
+	if err := f.File.Sync(); err != nil {
+		return err
+	}
+	return f.err
+}
+
 func (f faultFile) Write(p []byte) (int, error) {
 	if f.writeErr != nil {
 		return 0, f.writeErr
@@ -167,6 +179,87 @@ func TestWriteFileDirectorySyncFailureLeavesNewBytes(t *testing.T) {
 		t.Fatalf("target = %q, want the complete new bytes", got)
 	}
 	assertOnlyTarget(t, dir, path)
+}
+
+func TestWriteFileSyncBoundaryFailuresLeaveWholeOldTarget(t *testing.T) {
+	const original = "original bytes"
+	for _, boundary := range []string{"before sync", "after sync"} {
+		t.Run(boundary, func(t *testing.T) {
+			dir := t.TempDir()
+			path := writeTarget(t, dir, original)
+			r := Replacer{
+				CreateTemp: func(dir, base string, perm os.FileMode) (File, error) {
+					real, err := createTemp(dir, base, perm)
+					if err != nil {
+						return nil, err
+					}
+					if boundary == "before sync" {
+						return faultFile{File: real, syncErr: errInjected}, nil
+					}
+					return syncThenFailFile{File: real, err: errInjected}, nil
+				},
+			}
+			if err := r.WriteFile(path, []byte("replacement"), 0o600); !errors.Is(err, errInjected) {
+				t.Fatalf("WriteFile error = %v, want injected sync failure", err)
+			}
+			if got := readString(t, path); got != original {
+				t.Fatalf("target = %q, want complete old bytes %q", got, original)
+			}
+		})
+	}
+}
+
+func TestWriteFileReplaceBoundaryFailuresLeaveWholeOldOrNewTarget(t *testing.T) {
+	const original = "original bytes"
+	for _, boundary := range []string{"before replace", "after replace"} {
+		t.Run(boundary, func(t *testing.T) {
+			dir := t.TempDir()
+			path := writeTarget(t, dir, original)
+			r := Replacer{Replace: func(tmp, target string) error {
+				if boundary == "before replace" {
+					return errInjected
+				}
+				if err := replaceFile(tmp, target); err != nil {
+					return err
+				}
+				return errInjected
+			}}
+			if err := r.WriteFile(path, []byte("replacement"), 0o600); !errors.Is(err, errInjected) {
+				t.Fatalf("WriteFile error = %v, want injected replace failure", err)
+			}
+			want := original
+			if boundary == "after replace" {
+				want = "replacement"
+			}
+			if got := readString(t, path); got != want {
+				t.Fatalf("target = %q, want complete bytes %q", got, want)
+			}
+		})
+	}
+}
+
+func TestWriteFileDirectoryFlushBoundaryFailuresLeaveWholeNewTarget(t *testing.T) {
+	for _, boundary := range []string{"before directory flush", "after directory flush"} {
+		t.Run(boundary, func(t *testing.T) {
+			dir := t.TempDir()
+			path := writeTarget(t, dir, "original bytes")
+			r := Replacer{SyncDir: func(dir string) error {
+				if boundary == "before directory flush" {
+					return errInjected
+				}
+				if err := syncDir(dir); err != nil {
+					return err
+				}
+				return errInjected
+			}}
+			if err := r.WriteFile(path, []byte("replacement"), 0o600); !errors.Is(err, errInjected) {
+				t.Fatalf("WriteFile error = %v, want injected directory-flush failure", err)
+			}
+			if got := readString(t, path); got != "replacement" {
+				t.Fatalf("target = %q, want complete new bytes %q", got, "replacement")
+			}
+		})
+	}
 }
 
 func TestWriteFileOrdersSteps(t *testing.T) {
