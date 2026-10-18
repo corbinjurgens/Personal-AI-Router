@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"nvpair-shared/nodepolicy"
+	"nvpair-shared/schedulerwire"
 )
 
 func TestParseRequestNeeds(t *testing.T) {
@@ -621,5 +622,305 @@ func TestModelList_OffersEveryTierWithEntriesAndBothVariants(t *testing.T) {
 	want := []string{"weak", "weak-api", "weak-local", "medium", "medium-api", "medium-local"}
 	if !slices.Equal(ids, want) {
 		t.Fatalf("tier model entries = %v, want %v (weak has only an API entry; strong has none)", ids, want)
+	}
+}
+
+// declare gives a fixture node an advertised role declaration, the way the
+// relay overlay carries a peer's policy advertisement.
+func (fx *tierFixture) declare(t *testing.T, id string, roles map[string]nodepolicy.AdvertisedRole) {
+	t.Helper()
+	f := fx.p.soleFacade()
+	for _, n := range f.discovery.Nodes() {
+		if n.ID == id {
+			n.Roles = roles
+			n.PolicyRevision = "1"
+			f.discovery.AddManual(n)
+			return
+		}
+	}
+	t.Fatalf("no fixture node %q", id)
+}
+
+func ollamaRole(model string) nodepolicy.AdvertisedRole {
+	return nodepolicy.AdvertisedRole{Engine: "ollama", Model: model}
+}
+
+// tierCand is the part of a candidate that tier resolution decides.
+type tierCand struct {
+	node, model string
+	rank        int
+	declared    bool
+}
+
+func resolvedTier(f *facade, tier string, needs requestNeeds, crossEngine bool) []tierCand {
+	var out []tierCand
+	for _, c := range f.resolveTierCandidates(tier, needs, crossEngine) {
+		out = append(out, tierCand{c.id, c.model, c.tierRank, c.declared})
+	}
+	return out
+}
+
+// A node that declares roles is authoritative for itself: its declared role
+// replaces the router's entries on that node, a tier it omits offers nothing
+// even when the router's entry names a model it has, and an undeclared node
+// still receives the router's entries.
+func TestTierRoles_DeclaringNodeIsAuthoritative(t *testing.T) {
+	pol := ollamaTierPolicy(map[string][]nodepolicy.TierEntry{
+		"weak":   {{Kind: nodepolicy.EntryLocal, Engine: "ollama", Model: "router-weak:1b"}},
+		"medium": {{Kind: nodepolicy.EntryLocal, Engine: "ollama", Model: "router-mid:7b"}},
+	})
+	pol.TierPolicy.AllowStronger = false
+	fx := newTierFixture(t, ollamaCase(t), pol, map[string][]string{
+		"a": {"router-weak:1b", "router-mid:7b", "own-weak:1b"},
+		"b": {"router-weak:1b", "router-mid:7b"},
+	}, nil)
+	f := fx.p.soleFacade()
+
+	t.Run("no declaration keeps router entries", func(t *testing.T) {
+		want := []tierCand{{"a", "router-weak:1b", 0, false}, {"b", "router-weak:1b", 0, false}}
+		if got := resolvedTier(f, "weak", requestNeeds{}, false); !slices.Equal(got, want) {
+			t.Fatalf("candidates = %+v, want %+v", got, want)
+		}
+	})
+
+	fx.declare(t, "a", map[string]nodepolicy.AdvertisedRole{"weak": ollamaRole("own-weak:1b")})
+
+	t.Run("declared role replaces router entries on that node", func(t *testing.T) {
+		want := []tierCand{{"a", "own-weak:1b", 0, true}, {"b", "router-weak:1b", 0, false}}
+		if got := resolvedTier(f, "weak", requestNeeds{}, false); !slices.Equal(got, want) {
+			t.Fatalf("candidates = %+v, want %+v", got, want)
+		}
+	})
+	t.Run("omitted tier offers nothing", func(t *testing.T) {
+		want := []tierCand{{"b", "router-mid:7b", 0, false}}
+		if got := resolvedTier(f, "medium", requestNeeds{}, false); !slices.Equal(got, want) {
+			t.Fatalf("candidates = %+v, want %+v (a declares no medium role)", got, want)
+		}
+	})
+	t.Run("request is sent the declared model", func(t *testing.T) {
+		rec := fx.do(t, "/v1/chat/completions", `{"model":"weak"}`)
+		if rec.Code != http.StatusOK || fx.servedBy(t) != "a" {
+			t.Fatalf("status %d served by %q, want a", rec.Code, fx.servedBy(t))
+		}
+		if got := fx.eng["a"].lastBody(); got != `{"model":"own-weak:1b"}` {
+			t.Fatalf("engine got %s", got)
+		}
+	})
+}
+
+// Two peers may declare different models for the same tier; each offers its
+// own, and a request to either is sent that node's model.
+func TestTierRoles_PeersDeclareDifferentModelsForOneTier(t *testing.T) {
+	fx := newTierFixture(t, ollamaCase(t), ollamaTierPolicy(nil), map[string][]string{
+		"a": {"alpha:1b", "beta:1b"}, "b": {"alpha:1b", "beta:1b"},
+	}, nil)
+	fx.declare(t, "a", map[string]nodepolicy.AdvertisedRole{"weak": ollamaRole("beta:1b")})
+	fx.declare(t, "b", map[string]nodepolicy.AdvertisedRole{"weak": ollamaRole("alpha:1b")})
+	want := []tierCand{{"b", "alpha:1b", 0, true}, {"a", "beta:1b", 0, true}}
+	if got := resolvedTier(fx.p.soleFacade(), "weak", requestNeeds{}, false); !slices.Equal(got, want) {
+		t.Fatalf("candidates = %+v, want %+v", got, want)
+	}
+	// Equal load: reservation takes the first scheduler-listed node, a.
+	if rec := fx.do(t, "/v1/chat/completions", `{"model":"weak"}`); rec.Code != http.StatusOK || fx.servedBy(t) != "a" {
+		t.Fatalf("status %d served by %q, want a", rec.Code, fx.servedBy(t))
+	}
+	if got := fx.eng["a"].lastBody(); got != `{"model":"beta:1b"}` {
+		t.Fatalf("engine got %s, want a's declared model", got)
+	}
+}
+
+// A declaration never bypasses inventory: a role whose model the node does
+// not have is no candidate, and the node does not fall back to the router's
+// entries for that tier either.
+func TestTierRoles_DeclaredModelMissingFromInventory(t *testing.T) {
+	pol := ollamaTierPolicy(map[string][]nodepolicy.TierEntry{
+		"weak": {{Kind: nodepolicy.EntryLocal, Engine: "ollama", Model: "have:1b"}},
+	})
+	pol.TierPolicy.AllowStronger = false
+	fx := newTierFixture(t, ollamaCase(t), pol, map[string][]string{"a": {"have:1b"}}, nil)
+	fx.declare(t, "a", map[string]nodepolicy.AdvertisedRole{"weak": ollamaRole("missing:1b")})
+	if got := resolvedTier(fx.p.soleFacade(), "weak", requestNeeds{}, false); len(got) != 0 {
+		t.Fatalf("candidates = %+v, want none", got)
+	}
+	if rec := fx.do(t, "/v1/chat/completions", `{"model":"weak"}`); rec.Code != http.StatusNotFound || fx.servedBy(t) != "" {
+		t.Fatalf("status %d served by %q, want 404 and no engine request", rec.Code, fx.servedBy(t))
+	}
+}
+
+// A declared role carries its node's advertised bounds, filtered like an
+// entry's.
+func TestTierRoles_AdvertisedBoundsFilter(t *testing.T) {
+	fx := newTierFixture(t, ollamaCase(t), ollamaTierPolicy(nil), map[string][]string{
+		"a": {"small:1b"}, "b": {"tools:1b"},
+	}, nil)
+	fx.declare(t, "a", map[string]nodepolicy.AdvertisedRole{"weak": {Engine: "ollama", Model: "small:1b", ContextTokens: 100}})
+	fx.declare(t, "b", map[string]nodepolicy.AdvertisedRole{"weak": {Engine: "ollama", Model: "tools:1b", Capabilities: []nodepolicy.Capability{nodepolicy.CapTools}}})
+	f := fx.p.soleFacade()
+	if got, want := resolvedTier(f, "weak", requestNeeds{caps: []nodepolicy.Capability{nodepolicy.CapTools}}, false), []tierCand{{"b", "tools:1b", 0, true}}; !slices.Equal(got, want) {
+		t.Errorf("tools candidates = %+v, want %+v", got, want)
+	}
+	if got, want := resolvedTier(f, "weak", requestNeeds{contextTokens: 1000}, false), []tierCand{{"b", "tools:1b", 0, true}}; !slices.Equal(got, want) {
+		t.Errorf("long-context candidates = %+v, want %+v", got, want)
+	}
+}
+
+// allowStronger and allowWeaker are the router's, applied to declared roles
+// as to entries.
+func TestTierRoles_StrongerAndWeakerFallback(t *testing.T) {
+	pol := ollamaTierPolicy(nil)
+	fx := newTierFixture(t, ollamaCase(t), pol, map[string][]string{"a": {"big:70b"}, "b": {"small:1b"}}, nil)
+	fx.declare(t, "a", map[string]nodepolicy.AdvertisedRole{"strong": ollamaRole("big:70b")})
+	fx.declare(t, "b", map[string]nodepolicy.AdvertisedRole{"weak": ollamaRole("small:1b")})
+	f := fx.p.soleFacade()
+	set := func(stronger, weaker bool) {
+		pol.TierPolicy.AllowStronger, pol.TierPolicy.AllowWeaker = stronger, weaker
+		fx.p.admission.setPolicy(pol)
+	}
+
+	set(false, false)
+	if got, want := resolvedTier(f, "weak", requestNeeds{}, false), []tierCand{{"b", "small:1b", 0, true}}; !slices.Equal(got, want) {
+		t.Errorf("weak, no fallback = %+v, want %+v", got, want)
+	}
+	if got := resolvedTier(f, "medium", requestNeeds{}, false); len(got) != 0 {
+		t.Errorf("medium, no fallback = %+v, want none", got)
+	}
+	set(true, false)
+	if got, want := resolvedTier(f, "medium", requestNeeds{}, false), []tierCand{{"a", "big:70b", 1, true}}; !slices.Equal(got, want) {
+		t.Errorf("medium, allowStronger = %+v, want %+v", got, want)
+	}
+	set(false, true)
+	if got, want := resolvedTier(f, "medium", requestNeeds{}, false), []tierCand{{"b", "small:1b", 1, true}}; !slices.Equal(got, want) {
+		t.Errorf("medium, allowWeaker = %+v, want %+v", got, want)
+	}
+}
+
+// Warmth orders declared candidates exactly as it orders entries, and of equal
+// rank and warmth a declared candidate leads a router entry.
+func TestTierRoles_WarmOrdering(t *testing.T) {
+	nodes := map[string][]string{"a": {"entry:1b"}, "d": {"declared:1b"}, "m": {"mid:7b"}}
+	tiers := map[string][]nodepolicy.TierEntry{"weak": {{Kind: nodepolicy.EntryLocal, Engine: "ollama", Model: "entry:1b"}}}
+	order := func(t *testing.T, preferLoaded string, loaded map[string][]string) []string {
+		t.Helper()
+		pol := ollamaTierPolicy(tiers)
+		pol.TierPolicy.PreferLoaded = preferLoaded
+		fx := newTierFixture(t, ollamaCase(t), pol, nodes, loaded)
+		fx.declare(t, "d", map[string]nodepolicy.AdvertisedRole{"weak": ollamaRole("declared:1b")})
+		fx.declare(t, "m", map[string]nodepolicy.AdvertisedRole{"medium": ollamaRole("mid:7b")})
+		var out []string
+		for _, c := range resolvedTier(fx.p.soleFacade(), "weak", requestNeeds{}, false) {
+			out = append(out, c.node)
+		}
+		return out
+	}
+
+	if got, want := order(t, "tier", nil), []string{"d", "a", "m"}; !slices.Equal(got, want) {
+		t.Errorf("all cold = %v, want %v (declared before entry, then the stronger tier)", got, want)
+	}
+	if got, want := order(t, "tier", map[string][]string{"a": {"entry:1b"}}), []string{"a", "d", "m"}; !slices.Equal(got, want) {
+		t.Errorf("entry warm = %v, want %v", got, want)
+	}
+	if got, want := order(t, "tier", map[string][]string{"m": {"mid:7b"}}), []string{"d", "a", "m"}; !slices.Equal(got, want) {
+		t.Errorf("tier mode, stronger warm = %v, want %v", got, want)
+	}
+	if got, want := order(t, "any", map[string][]string{"m": {"mid:7b"}}), []string{"m", "d", "a"}; !slices.Equal(got, want) {
+		t.Errorf("any mode, stronger warm = %v, want %v", got, want)
+	}
+}
+
+// Load balancing among declared candidates reserves only within the leading
+// class, so the least-loaded declared node of the requested tier leads and an
+// idle node of a fallback tier is never promoted.
+func TestTierRoles_LoadBalancingKeepsLeadingClass(t *testing.T) {
+	fx := newTierFixture(t, ollamaCase(t), ollamaTierPolicy(nil), map[string][]string{
+		"a": {"x:1b"}, "b": {"y:1b"}, "c": {"z:7b"},
+	}, nil)
+	fx.declare(t, "a", map[string]nodepolicy.AdvertisedRole{"weak": ollamaRole("x:1b")})
+	fx.declare(t, "b", map[string]nodepolicy.AdvertisedRole{"weak": ollamaRole("y:1b")})
+	fx.declare(t, "c", map[string]nodepolicy.AdvertisedRole{"medium": ollamaRole("z:7b")})
+	applySnapshot(fx.p, schedulerwire.Priority{
+		Nodes: []string{"c", "a", "b"},
+		Ranks: []schedulerwire.NodeRank{{ID: "c", Pending: 0}, {ID: "a", Pending: 3, Rank: 1}, {ID: "b", Pending: 2, Rank: 2}},
+	})
+	f := fx.p.soleFacade()
+	ordered, held := f.reserveRound(f.resolveTierCandidates("weak", requestNeeds{}, false), true)
+	defer fx.p.releaseReservation(held)
+	var got []string
+	for _, c := range ordered {
+		got = append(got, c.id)
+	}
+	if want := []string{"b", "a", "c"}; !slices.Equal(got, want) {
+		t.Fatalf("reserved order = %v, want %v", got, want)
+	}
+}
+
+// The router's own node follows the same rule through its policy's roles: a
+// self declaration replaces the router's entries for this node, crosses
+// engines only on an OpenAI-compatible route, and stays on its engine on a
+// native one.
+func TestTierRoles_SelfDeclarationCrossEngineAndNative(t *testing.T) {
+	w := &recordingWriter{}
+	p, oll, lm := twoEngineProxy(t, w)
+	lmEngine := newRecordingEngine(t, http.StatusOK)
+	ollEngine := newRecordingEngine(t, http.StatusOK)
+	lm.discovery.AddManual(selfNode("self", lm.profile.FacadePort, "qwen3-8b"))
+	setBackend(t, lm, lmEngine.URL, true)
+	oll.discovery.AddManual(selfNode("self", oll.profile.FacadePort, "llama3:latest"))
+	setBackend(t, oll, ollEngine.URL, true)
+
+	pol := nodepolicy.Default()
+	pol.Tiers = map[string][]nodepolicy.TierEntry{"strong": {{Kind: nodepolicy.EntryLocal, Engine: "ollama", Model: "llama3"}}}
+	p.admission.setPolicy(pol)
+
+	// Undeclared: the router entry serves this node.
+	if got, want := resolvedTier(oll, "strong", requestNeeds{}, true), []tierCand{{"self", "llama3", 0, false}}; !slices.Equal(got, want) {
+		t.Fatalf("undeclared self = %+v, want %+v", got, want)
+	}
+
+	pol.Roles = map[string]nodepolicy.Role{"strong": {Engine: "lmstudio", Model: "qwen3-8b"}}
+	if err := pol.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	p.admission.setPolicy(pol)
+
+	cands := oll.resolveTierCandidates("strong", requestNeeds{}, true)
+	if len(cands) != 1 || cands[0].engine != "lmstudio" || cands[0].fac != lm || !cands[0].declared || cands[0].model != "qwen3-8b" {
+		t.Fatalf("declared self candidates = %+v, want only the lmstudio role", cands)
+	}
+	rec := httptest.NewRecorder()
+	oll.handleHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"strong"}`)))
+	if rec.Code != http.StatusOK || lmEngine.hits() != 1 || ollEngine.hits() != 0 {
+		t.Fatalf("status %d, lmstudio hits %d, ollama hits %d", rec.Code, lmEngine.hits(), ollEngine.hits())
+	}
+
+	// A native route never crosses engines, and the router's ollama entry no
+	// longer applies to this node.
+	rec = httptest.NewRecorder()
+	oll.handleHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/chat", strings.NewReader(`{"model":"strong"}`)))
+	if rec.Code != http.StatusNotFound || ollEngine.hits() != 0 {
+		t.Fatalf("native route: status %d, ollama hits %d, want 404 and none", rec.Code, ollEngine.hits())
+	}
+}
+
+// A peer's declared role on another engine is reached through that engine's
+// facade on an OpenAI-compatible route, and not at all on a native one.
+func TestTierRoles_PeerCrossEngineRole(t *testing.T) {
+	w := &recordingWriter{}
+	p, oll, lm := twoEngineProxy(t, w)
+	peerLM := newRecordingEngine(t, http.StatusOK)
+	n := nodeForModel(t, "peer", peerLM.URL, "qwen3-8b")
+	n.Roles = map[string]nodepolicy.AdvertisedRole{"weak": {Engine: "lmstudio", Model: "qwen3-8b"}}
+	lm.discovery.AddManual(n)
+	p.admission.setPolicy(nodepolicy.Default())
+
+	cands := oll.resolveTierCandidates("weak", requestNeeds{}, true)
+	if len(cands) != 1 || cands[0].fac != lm || cands[0].engine != "lmstudio" || !cands[0].declared ||
+		cands[0].url.Host != strings.TrimPrefix(peerLM.URL, "http://") {
+		t.Fatalf("cross-engine candidates = %+v", cands)
+	}
+	if got := oll.resolveTierCandidates("weak", requestNeeds{}, false); len(got) != 0 {
+		t.Fatalf("native candidates = %+v, want none", got)
+	}
+	if got := lm.resolveTierCandidates("weak", requestNeeds{}, false); len(got) != 1 || !got[0].declared {
+		t.Fatalf("own-engine candidates = %+v, want the declared role", got)
 	}
 }

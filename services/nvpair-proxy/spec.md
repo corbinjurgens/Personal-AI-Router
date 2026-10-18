@@ -803,22 +803,38 @@ is resolved by the node it enters.
   `embeddings` (`/v1/embeddings`, `/api/embed`, `/api/embeddings`), and a
   context estimate of body bytes / 4 plus `max_tokens`,
   `max_completion_tokens` or a positive `options.num_predict`.
-- **Entries**: the requested tier's, then stronger tiers nearest first with
-  `allowStronger`, then weaker tiers nearest first with `allowWeaker`. An entry
+- **Search order**: the requested tier, then stronger tiers nearest first with
+  `allowStronger`, then weaker tiers nearest first with `allowWeaker`, all from
+  this router's `tierPolicy`.
+- **Declared roles**: a node's `roles` (for a peer, the `roles` of the `policy`
+  object in its inventory document as carried by the discovery overlay; for
+  this node, its own policy's `roles` with the bounds of its matching profile,
+  never its published document) name one engine and model per tier. A node
+  that declares at least one role is authoritative for itself: for each tier in
+  the search order it offers only the role it declared for that tier, and for a
+  tier it omits it offers nothing. A node that declares no role (no `policy`
+  object, or an empty `roles`) receives this router's tier entries as below.
+  There is no migration from entries to roles.
+- **Entries**: for each tier in the search order, first the declared roles,
+  then the tier's entries for the nodes that declare nothing. A role or entry
   lacking a needed capability, or whose `contextTokens` is set and below the
-  estimate, is dropped.
-- **Candidates**: each entry expands through its engine's facade in this
+  estimate, is dropped; a role is judged by the bounds its node advertises.
+- **Candidates**: each role and entry expands through its engine's facade in this
   process with the ordinary owner filter and order (§5): node/select pin,
   scheduler priority, ID, self mapped to that engine's local backend, peers over
   cluster mTLS to the port that facade's discovery overlay carries — the peer's
-  facade port for that engine. A node whose `loadedByEngine` (or, for this node,
+  facade port for that engine. A role keeps only the nodes that declare it, and
+  each is sent the model as its node spells it. The owner filter applies to
+  roles too, so a declared model missing from the node's inventory is no
+  candidate. A node whose `loadedByEngine` (or, for this node,
   the reported residency) contains the model is warm.
 - **Engines**: `/v1/chat/completions`, `/v1/completions` and `/v1/embeddings`
   may cross engines. Every other inference route resolves only to its own
   engine. An engine without a facade enabled in this process contributes no
   candidates, because the process has no routing view of it.
 - **Order**: `preferLoaded: "tier"` sorts by tier rank, then warm before cold;
-  `"any"` by warm first, then tier rank. Entry order and the per-entry owner
+  `"any"` by warm first, then tier rank. Declared roles (ordered by engine,
+  then model) before entries, entry order, and the per-role or per-entry owner
   order break ties. Reservations (§6) are taken only among the candidates
   sharing the leading tier rank and warmth.
 - **Body**: the top-level `model` is replaced by splicing its value's bytes;
@@ -859,16 +875,19 @@ is resolved by the node it enters.
 - **Model lists**: an OpenAI-shape model list (`/v1/models`, llama.cpp's
   `/models`) gains `{"id":"<alias>","object":"model","created":0,"owned_by":"pair"}`
   for the bare tier and its `-api` and `-local` variants, for each tier with at
-  least one entry of either kind, including a tier whose entries are all `api`.
-  The records are built from the policy alone (`configuredAliases`,
-  `hybridAliasRecords`) and carry no credential, account, deployment or
-  endpoint. An upstream model already named like an alias is left alone. When no
+  least one entry of either kind (including a tier whose entries are all
+  `api`), each tier this node's own `roles` declare, and each tier a node in
+  any facade overlay of this process declares. The records are built from the
+  policy and those declarations (`configuredAliases`, `hybridAliasRecords`) and
+  carry no credential, account, deployment or endpoint. An upstream model already named like an alias is left alone. When no
   upstream yields a list and at least one alias is configured, the aliases are
   returned with `200` instead of `503`; without a configured tier the statuses
   are unchanged, and the browser `Origin` checks of §5.8 still apply. The
   native Ollama list does not carry aliases.
 - **Readiness**: listed `-api` and `-local` aliases are not inference-ready
-  until Phase 4 of the hybrid routing plan; they are refused as above.
+  until Phase 4 of the hybrid routing plan; they are refused as above. Declared
+  roles are local destinations: when dispatch exists, `-api` excludes them and
+  `-local` and the bare tier include them.
 
 ### 12.4 Routing metadata
 
@@ -976,7 +995,8 @@ discovery or node notification names its port.
     `Access-Control-Allow-Origin: <origin>` on every response; `Vary: Origin` is
     always set. Engine CORS is not consulted.
   - `GET /v1/models` answers `200` `{"object":"list","data":[...]}` from
-    `hybridAliasRecords` over the active policy, `[]` when none; a query string
+    `hybridAliasRecords` over the active policy (its entries and this node's
+    own `roles`; peers' declarations are not seen), `[]` when none; a query string
     on it is ignored.
   - A route is an inference route when any engine profile classifies the path as
     a `POST` inference route (`isInferenceRequest`), so the set is the facades'
