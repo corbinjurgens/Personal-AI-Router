@@ -4,8 +4,10 @@
 import type { EngineStatusData, EngineType, ModelItem } from '@/shared/types/engines'
 import type { NodeItemMetrics } from '@/shared/types/metrics'
 import type { NodeItem } from '@/shared/types/nodes'
+import type { NodePolicyAdvertisement } from '@/shared/types/node-roles'
 import { MODULAR_NODE_INFO_SELF_HOST } from '@/shared/constants/modular-runtime'
 import { engineManagerName } from '@/shared/utils/engines'
+import { parsePolicyAdvertisement, samePolicyAdvertisement } from '@/shared/utils/node-roles'
 import { currentPlatform, platformDisplayName } from '@/shared/utils/platform'
 import type { JsonObject, JsonValue } from './json-rpc-client'
 import {
@@ -114,6 +116,11 @@ interface ModularNode {
     // reported. Drives {@link ModelItem.status} `'loaded'`. Empty object when no
     // engine reports loaded state. Mirrors noderec.DirectoryNode.LoadedByEngine.
     loadedByEngine: Record<string, string[]>
+    // The node's policy advertisement (declared roles, pause origin), carried
+    // on `AvailableNode.policy` from the same inventory fetch as the models.
+    // Absent when the node published none, which declares nothing. Only the
+    // broker reports it; a proxy-sourced update keeps the broker's value.
+    policy?: NodePolicyAdvertisement
     engines: Record<ProxyEngine, EnginePresence>
     lastSeen: number
 }
@@ -668,6 +675,9 @@ function parseBrokerNode(params: JsonValue | undefined): ModularNode | null {
         // `/v1/models`. `omitempty` on the wire — absent for a peer that reports
         // no loaded state, which stamps every model `idle`.
         loadedByEngine: parseModelsByEngine(obj.loadedByEngine),
+        // Broker `AvailableNode.policy`: `omitempty` on the wire, absent until
+        // the node's broker has published one.
+        policy: parsePolicyAdvertisement(obj.policy),
         engines: emptyEngines(),
         lastSeen: normalizeLastSeen(numberValue(obj.lastSeen) || numberValue(obj.last_seen))
     }
@@ -719,6 +729,8 @@ function sameNode(left: ModularNode, right: ModularNode): boolean {
         // A residency-only change (a model loaded/evicted with the installed set
         // unchanged) must still count as a node change so the loaded dot updates.
         sameModelsByEngine(left.loadedByEngine, right.loadedByEngine) &&
+        // A role edit changes nothing else on the node, so it must count alone.
+        samePolicyAdvertisement(left.policy, right.policy) &&
         sameEngines(left.engines, right.engines) &&
         left.lastSeen === right.lastSeen
     )

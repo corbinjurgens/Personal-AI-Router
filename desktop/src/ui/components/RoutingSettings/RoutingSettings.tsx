@@ -20,7 +20,9 @@ import type {
 } from '@/shared/types/node-policy'
 import getErrorString from '@/shared/utils/get-error-string'
 import { InlineErrorBanner } from '@/ui/components/InlineErrorBanner'
+import RoleEditor from '@/ui/components/RoutingSettings/RoleEditor'
 import { useConnectionStore } from '@/ui/stores/connection.store'
+import { useNodeConfigurationStore } from '@/ui/stores/node-configuration.store'
 import { useNodesStore } from '@/ui/stores/nodes.store'
 
 const THIS_PC = 'This PC'
@@ -94,6 +96,15 @@ export default function RoutingSettings() {
     // The id the broker uses for the selected node; this PC's is the self id.
     const targetId = nodeId ?? selfId
 
+    // The role editor substitutes into the newest document the node reported,
+    // whatever the policy text editor holds.
+    const adoptRoles = useCallback(
+        (saved: NodePolicySnapshot) => {
+            if (targetId !== null) useNodeConfigurationStore.getState().adopt(targetId, saved)
+        },
+        [targetId]
+    )
+
     const load = useCallback(async () => {
         latestLoad.current += 1
         const ticket = latestLoad.current
@@ -105,6 +116,7 @@ export default function RoutingSettings() {
         try {
             const document = await window.pairApi.nodePolicy.get(nodeId ?? undefined)
             if (ticket !== latestLoad.current) return
+            adoptRoles(document)
             savedTextRef.current = document.policy
             baseRevisionRef.current = document.revision
             setText(document.policy)
@@ -117,7 +129,7 @@ export default function RoutingSettings() {
         } finally {
             if (ticket === latestLoad.current) setLoading(false)
         }
-    }, [nodeId])
+    }, [nodeId, adoptRoles])
 
     useEffect(() => {
         if (!connected) return
@@ -145,13 +157,14 @@ export default function RoutingSettings() {
     const adopt = useCallback(
         (saved: NodePolicySnapshot) => {
             noteStatus(saved)
+            adoptRoles(saved)
             if (textRef.current !== savedTextRef.current) return
             if (isOlder(saved.revision, baseRevisionRef.current)) return
             baseRevisionRef.current = saved.revision
             savedTextRef.current = saved.policy
             setText(saved.policy)
         },
-        [noteStatus]
+        [noteStatus, adoptRoles]
     )
 
     // Live updates from the broker.
@@ -203,6 +216,7 @@ export default function RoutingSettings() {
                 expectedPersistedRevision: base
             })
             if (ticket !== latestLoad.current) return
+            adoptRoles(result)
             // Show the policy as persisted: the service fills in omitted fields.
             savedTextRef.current = result.policy
             baseRevisionRef.current = result.revision
@@ -226,6 +240,7 @@ export default function RoutingSettings() {
                 )
             } else if (latest.revision !== base) {
                 noteStatus(latest)
+                adoptRoles(latest)
                 setConflict({ latest, message })
             } else {
                 setSaveError(message)
@@ -233,7 +248,7 @@ export default function RoutingSettings() {
         } finally {
             setSaving(false)
         }
-    }, [text, nodeId, noteStatus])
+    }, [text, nodeId, noteStatus, adoptRoles])
 
     const nodeItems: DropdownEntry[] = useMemo(
         () => [
@@ -287,6 +302,14 @@ export default function RoutingSettings() {
                             {availability === 'paused' ? 'Resume' : 'Pause'}
                         </Button>
                     </Flex>
+
+                    {targetId !== null && availability !== null && (
+                        <RoleEditor
+                            targetId={targetId}
+                            nodeId={nodeId ?? undefined}
+                            onSaved={adopt}
+                        />
+                    )}
 
                     <Stack gap="2">
                         <Text kind="body/semibold/sm">Policy</Text>
