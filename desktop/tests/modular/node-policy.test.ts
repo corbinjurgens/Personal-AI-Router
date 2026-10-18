@@ -3,6 +3,8 @@
 // @vitest-environment jsdom
 
 import { act, createElement } from 'react'
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { parseWorkloadsInitial } from '@/electron/service-bridge/workload-projection'
@@ -16,7 +18,10 @@ import {
     parsePolicySetResult,
     parsePolicyText,
     policySetParams,
-    workloadCancelParams
+    workloadCancelParams,
+    parseStrictAdmissionCapability,
+    parseStrictAdmissionRequest,
+    parseAdvertisementStrictAdmission
 } from '@/electron/service-bridge/node-policy'
 import type {
     NodeAvailabilityChange,
@@ -30,6 +35,160 @@ import type { INodePolicyApi } from '@/ui/api/pair-api'
 import RoutingSettings from '@/ui/components/RoutingSettings/RoutingSettings'
 import { useConnectionStore } from '@/ui/stores/connection.store'
 import { workloadModelLabel } from '@/ui/utils/workload-labels'
+import type { JsonObject, JsonValue } from '@/electron/service-bridge/json-rpc-client'
+
+function strictFixtureObject(value: JsonValue | undefined): JsonObject {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) {
+        throw new Error('Invalid strict-admission test fixture')
+    }
+    return value
+}
+
+function loadStrictFixtures(): JsonObject {
+    const value: JsonValue = JSON.parse(
+        readFileSync(
+            resolve(process.cwd(), '../services/shared/nodepolicy/testdata/strict-admission.json'),
+            'utf8'
+        )
+    )
+    return strictFixtureObject(value)
+}
+
+describe('strict-admission shared Go/TypeScript parity corpus', () => {
+    const cases = loadStrictFixtures().cases
+    if (!Array.isArray(cases)) throw new Error('Missing strict-admission corpus')
+    for (const value of cases) {
+        const testCase = strictFixtureObject(value)
+        if (typeof testCase.name !== 'string') throw new Error('Missing corpus case name')
+        it(testCase.name, () => {
+            const fixtures = loadStrictFixtures()
+            const request = strictFixtureObject(fixtures.request)
+            const identity = strictFixtureObject(fixtures.identity)
+            const model = strictFixtureObject(fixtures.model)
+            request.identity = identity
+            model.identity = identity
+            const capability: JsonObject = { version: 1, models: [model] }
+            const targets: Record<string, JsonObject> = { request, identity, model, capability }
+            if (
+                typeof testCase.kind !== 'string' ||
+                !targets[testCase.kind] ||
+                !Array.isArray(testCase.path)
+            ) {
+                throw new Error('Invalid corpus mutation')
+            }
+            let target = targets[testCase.kind]
+            const path = testCase.path
+            for (let i = 0; i < path.length; i++) {
+                const key = path[i]
+                if (typeof key !== 'string') throw new Error('Invalid corpus path')
+                if (i < path.length - 1) target = strictFixtureObject(target[key])
+                else if (testCase.remove === true) delete target[key]
+                else {
+                    if (testCase.value === undefined) throw new Error('Missing corpus value')
+                    target[key] = testCase.value
+                }
+            }
+            const isCapability = testCase.kind === 'capability' || testCase.kind === 'model'
+            const parse = () =>
+                isCapability
+                    ? parseStrictAdmissionCapability(capability)
+                    : parseStrictAdmissionRequest(request)
+            if (testCase.valid !== true) {
+                expect(parse).toThrow()
+            } else {
+                const got = parse()
+                if (isCapability) expect(got).toHaveProperty('state', testCase.state ?? 'valid')
+                const encoded: JsonValue = JSON.parse(
+                    JSON.stringify(isCapability ? capability : request)
+                )
+                const again = isCapability
+                    ? parseStrictAdmissionCapability(encoded)
+                    : parseStrictAdmissionRequest(encoded)
+                expect(again).toEqual(got)
+            }
+        })
+    }
+
+    it('distinguishes absent from null', () => {
+        expect(parseStrictAdmissionCapability(undefined)).toEqual({ state: 'absent' })
+        expect(() => parseStrictAdmissionCapability(null)).toThrow()
+    })
+
+    it('preserves unsupported versions without interpreting their fields', () => {
+        expect(parseStrictAdmissionCapability({ version: 2, future: true })).toEqual({
+            state: 'unsupported',
+            version: 2
+        })
+    })
+
+    it('rejects duplicate engine/model entries', () => {
+        const fixtures = loadStrictFixtures()
+        const model = strictFixtureObject(fixtures.model)
+        model.identity = fixtures.identity
+        expect(() =>
+            parseStrictAdmissionCapability({ version: 1, models: [model, model] })
+        ).toThrow()
+    })
+
+    it('rejects excess model entries', () => {
+        expect(() =>
+            parseStrictAdmissionCapability({
+                version: 1,
+                models: Array.from({ length: 1025 }, () => null)
+            })
+        ).toThrow()
+    })
+
+    it.each(['1.0', '1e0'])('accepts integral JSON spelling %s', spelling => {
+        const fixtures = loadStrictFixtures()
+        const request = strictFixtureObject(fixtures.request)
+        request.identity = fixtures.identity
+        const input: JsonValue = JSON.parse(
+            JSON.stringify(request).replace('"version":1', `"version":${spelling}`)
+        )
+        expect(parseStrictAdmissionRequest(input).version).toBe(1)
+    })
+})
+
+describe('Advertisement raw Go/TypeScript parity corpus', () => {
+    const cases: JsonValue = JSON.parse(
+        readFileSync(
+            resolve(
+                process.cwd(),
+                '../services/shared/nodepolicy/testdata/strict-admission-raw.json'
+            ),
+            'utf8'
+        )
+    )
+    if (!Array.isArray(cases)) throw new Error('Missing raw Advertisement corpus')
+    for (const value of cases) {
+        const testCase = strictFixtureObject(value)
+        if (typeof testCase.name !== 'string') throw new Error('Missing raw case name')
+        it(testCase.name, () => {
+            if (typeof testCase.document !== 'string') throw new Error('Missing raw document')
+            const input: JsonValue = JSON.parse(testCase.document)
+            const parse = () => parseAdvertisementStrictAdmission(input)
+            if (typeof testCase.error === 'string') {
+                expect(parse).toThrow(testCase.error)
+                return
+            }
+            const got = parse()
+            expect(got.state).toBe(testCase.state)
+            if (testCase.model !== undefined) {
+                expect(got.state).toBe('valid')
+                if (got.state !== 'valid') throw new Error('Expected valid capability')
+                expect(got.models[0].model).toBe(testCase.model)
+                // Serialize the decoded contract, so normalized names must survive.
+                const roundTrip: JsonValue = JSON.parse(
+                    JSON.stringify({
+                        strictAdmission: { version: got.version, models: got.models }
+                    })
+                )
+                expect(parseAdvertisementStrictAdmission(roundTrip)).toEqual(got)
+            }
+        })
+    }
+})
 
 describe('parseWorkloadsInitial', () => {
     const base = { id: '7', engine: 'ollama', state: 'running', model: 'qwen3:4b', createdAt: 1 }

@@ -3,7 +3,13 @@
 
 package nodepolicy
 
-import "slices"
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"slices"
+	"strings"
+)
 
 // AdvertisedRole is a role as a router sees it: the reference plus the bounds
 // of the node's profile for it, resolved by the declaring node.
@@ -22,6 +28,183 @@ type Advertisement struct {
 	Roles    map[string]AdvertisedRole `json:"roles"`
 	// PausedBy lets a remote UI show "paused on that node" before it tries.
 	PausedBy PauseOrigin `json:"pausedBy,omitempty"`
+	// StrictAdmission is absent until destination enforcement and identity
+	// reconciliation are ready. Policy.Advertisement never sets it.
+	StrictAdmission *StrictAdmissionCapability `json:"strictAdmission,omitempty"`
+}
+
+// StrictCapabilityState keeps old peers, future peers and usable contracts
+// distinct. Valid describes the schema, not current capacity or qualification.
+type StrictCapabilityState string
+
+const (
+	StrictCapabilityAbsent      StrictCapabilityState = "absent"
+	StrictCapabilityUnsupported StrictCapabilityState = "unsupported"
+	StrictCapabilityValid       StrictCapabilityState = "valid"
+	StrictCapabilityInvalid     StrictCapabilityState = "invalid"
+)
+
+// StrictAdmissionCapability belongs only in the inventory's policy object.
+// Unknown versions retain their complete JSON for forward-compatible concrete
+// routing; their Models must never be interpreted by hybrid consumers.
+type StrictAdmissionCapability struct {
+	Version     int                    `json:"version"`
+	Models      []StrictAdmissionModel `json:"models"`
+	unsupported json.RawMessage
+}
+
+// StrictAdmissionModel describes finite destination-owned capacity. Engine and
+// model must already use the destination's normalization (A1 owns it).
+type StrictAdmissionModel struct {
+	Engine        string              `json:"engine"`
+	Model         string              `json:"model"`
+	MaxConcurrent int                 `json:"maxConcurrent"`
+	Identity      StrictModelIdentity `json:"identity"`
+}
+
+func (c *StrictAdmissionCapability) State() StrictCapabilityState {
+	if c == nil {
+		return StrictCapabilityAbsent
+	}
+	err := c.Validate()
+	if errors.Is(err, ErrStrictAdmissionVersion) {
+		return StrictCapabilityUnsupported
+	}
+	if err != nil {
+		return StrictCapabilityInvalid
+	}
+	return StrictCapabilityValid
+}
+
+func (c StrictAdmissionCapability) Validate() error {
+	if c.Version < 1 || c.Version > 2147483647 {
+		return errors.New("version must be between 1 and 2147483647")
+	}
+	if c.Version != StrictAdmissionVersion {
+		return ErrStrictAdmissionVersion
+	}
+	if len(c.Models) < 1 || len(c.Models) > 1024 {
+		return errors.New("models must contain between 1 and 1024 entries")
+	}
+	seen := map[string]bool{}
+	for n, m := range c.Models {
+		if err := m.Validate(); err != nil {
+			return fmt.Errorf("models[%d]: %w", n, err)
+		}
+		key := m.Engine + "\x00" + m.Model
+		if seen[key] {
+			return fmt.Errorf("models[%d]: duplicate engine/model", n)
+		}
+		seen[key] = true
+	}
+	return nil
+}
+
+func (m StrictAdmissionModel) Validate() error {
+	if err := checkModelRef(m.Engine, m.Model, 0, nil); err != nil {
+		return err
+	}
+	if m.MaxConcurrent < 1 || m.MaxConcurrent > 1048576 {
+		return errors.New("maxConcurrent must be between 1 and 1048576")
+	}
+	if err := m.Identity.Validate(); err != nil {
+		return fmt.Errorf("identity: %w", err)
+	}
+	return nil
+}
+
+func (m *StrictAdmissionModel) UnmarshalJSON(data []byte) error {
+	type wire StrictAdmissionModel
+	var next wire
+	if err := decodeStrictContract(data, &next, "engine", "model", "maxConcurrent", "identity"); err != nil {
+		return err
+	}
+	if err := StrictAdmissionModel(next).Validate(); err != nil {
+		return err
+	}
+	*m = StrictAdmissionModel(next)
+	return nil
+}
+
+func (c *StrictAdmissionCapability) UnmarshalJSON(data []byte) error {
+	// Envelope parsing permits unknown fields only for unsupported versions.
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return err
+	}
+	if fields == nil {
+		return errors.New("strictAdmission must be an object")
+	}
+	var version float64
+	if err := json.Unmarshal(fields["version"], &version); err != nil {
+		return errors.New("version must be a number")
+	}
+	if version < 1 || version > 2147483647 || version != float64(int(version)) {
+		return errors.New("version must be between 1 and 2147483647")
+	}
+	if int(version) != StrictAdmissionVersion {
+		*c = StrictAdmissionCapability{Version: int(version), unsupported: append(json.RawMessage(nil), data...)}
+		return nil
+	}
+	type wire StrictAdmissionCapability
+	var next wire
+	if err := decodeStrictContract(data, &next, "version", "models"); err != nil {
+		return err
+	}
+	if err := StrictAdmissionCapability(next).Validate(); err != nil {
+		return err
+	}
+	*c = StrictAdmissionCapability(next)
+	return nil
+}
+
+func (c StrictAdmissionCapability) MarshalJSON() ([]byte, error) {
+	if len(c.unsupported) != 0 {
+		return c.unsupported, nil
+	}
+	if err := c.Validate(); err != nil {
+		return nil, err
+	}
+	type wire StrictAdmissionCapability
+	return json.Marshal(wire(c))
+}
+
+// UnmarshalJSON distinguishes an absent capability from explicit null. Existing
+// advertisement fields retain their R1 decoding and encoding behavior.
+func (a *Advertisement) UnmarshalJSON(data []byte) error {
+	type wire Advertisement
+	var next wire
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return err
+	}
+	for key := range fields {
+		if key != "strictAdmission" && strings.EqualFold(key, "strictAdmission") {
+			return fmt.Errorf("%q must use the exact field name strictAdmission", key)
+		}
+	}
+	if v, ok := fields["strictAdmission"]; ok && string(v) == "null" {
+		return errors.New("strictAdmission must not be null")
+	}
+	// Shadow only the new field so legacy fields keep encoding/json's existing
+	// case folding and document-order behavior. Decode the capability separately
+	// from its exact map entry, never through struct-field folding.
+	legacy := struct {
+		*wire
+		StrictAdmission json.RawMessage `json:"strictAdmission"`
+	}{wire: &next}
+	if err := json.Unmarshal(data, &legacy); err != nil {
+		return err
+	}
+	if v, ok := fields["strictAdmission"]; ok {
+		var capability StrictAdmissionCapability
+		if err := json.Unmarshal(v, &capability); err != nil {
+			return err
+		}
+		next.StrictAdmission = &capability
+	}
+	*a = Advertisement(next)
+	return nil
 }
 
 // Advertisement returns what p publishes to paired peers. Each declared role

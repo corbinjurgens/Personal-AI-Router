@@ -5,6 +5,7 @@ package nodepolicy
 
 import (
 	"encoding/json"
+	"os"
 	"reflect"
 	"strings"
 	"testing"
@@ -88,5 +89,101 @@ func TestAdvertisementWithoutRoles(t *testing.T) {
 	}
 	if want := `{"revision":"0","roles":{}}`; string(data) != want {
 		t.Errorf("advertisement JSON = %s, want %s", data, want)
+	}
+}
+
+func TestAdvertisementStrictCapabilityCompatibility(t *testing.T) {
+	for _, original := range []string{
+		`{"revision":"0","roles":{}}`,
+		`{"revision":"12","roles":{"weak":{"engine":"ollama","model":"m","contextTokens":1024,"capabilities":["tools"]}},"pausedBy":"peer"}`,
+		`{"revision":"0","roles":{},"strictAdmission":{"version":2,"future":{"newField":true}}}`,
+	} {
+		t.Run(original, func(t *testing.T) {
+			var got Advertisement
+			if err := json.Unmarshal([]byte(original), &got); err != nil {
+				t.Fatal(err)
+			}
+			wantState := StrictCapabilityAbsent
+			if strings.Contains(original, "strictAdmission") {
+				wantState = StrictCapabilityUnsupported
+			}
+			if got.StrictAdmission.State() != wantState {
+				t.Fatalf("state = %q, want %q", got.StrictAdmission.State(), wantState)
+			}
+			encoded, err := json.Marshal(got)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(encoded) != original {
+				t.Fatalf("re-encoded = %s, want %s", encoded, original)
+			}
+		})
+	}
+}
+
+func TestAdvertisementStrictCapabilityRejectsNull(t *testing.T) {
+	var got Advertisement
+	if err := json.Unmarshal([]byte(`{"revision":"0","roles":{},"strictAdmission":null}`), &got); err == nil {
+		t.Fatal("accepted explicit null capability")
+	}
+}
+
+// Both languages decode Document as raw JSON, preserving escape spellings until
+// the actual Advertisement decoder runs (not a fixture mutation/re-encoding).
+func TestAdvertisementStrictRawParityCorpus(t *testing.T) {
+	data, err := os.ReadFile("testdata/strict-admission-raw.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cases []struct {
+		Name, Document, Error, Model string
+		State                        StrictCapabilityState
+	}
+	if err := json.Unmarshal(data, &cases); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range cases {
+		t.Run(tc.Name, func(t *testing.T) {
+			var got Advertisement
+			err := json.Unmarshal([]byte(tc.Document), &got)
+			if tc.Error != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.Error) {
+					t.Fatalf("decode error = %v, want %q", err, tc.Error)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.StrictAdmission.State() != tc.State {
+				t.Fatalf("state = %q, want %q", got.StrictAdmission.State(), tc.State)
+			}
+			if tc.Model != "" && got.StrictAdmission.Models[0].Model != tc.Model {
+				t.Fatalf("model = %q, want %q", got.StrictAdmission.Models[0].Model, tc.Model)
+			}
+			encoded, err := json.Marshal(got)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var again Advertisement
+			if err := json.Unmarshal(encoded, &again); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(got, again) {
+				t.Fatalf("unstable round trip: %+v / %+v", got, again)
+			}
+		})
+	}
+}
+
+func TestAdvertisementLegacyCaseFolding(t *testing.T) {
+	var got Advertisement
+	input := `{"revision":"1","Revision":"2","ROLES":{"weak":{"ENGINE":"ollama","MODEL":"m"}},"PAUSEDBY":"peer"}`
+	if err := json.Unmarshal([]byte(input), &got); err != nil {
+		t.Fatal(err)
+	}
+	want := Advertisement{Revision: "2", Roles: map[string]AdvertisedRole{"weak": {Engine: "ollama", Model: "m"}}, PausedBy: PausedByPeer}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("decoded = %+v, want %+v", got, want)
 	}
 }

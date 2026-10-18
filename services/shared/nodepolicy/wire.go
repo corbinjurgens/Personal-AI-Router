@@ -3,7 +3,33 @@
 
 package nodepolicy
 
-import "errors"
+import (
+	"errors"
+	"fmt"
+)
+
+// StrictAdmissionReadiness is the future proxy -> broker A1/A2 handoff, not a
+// registered method or notification. Only the broker can match its fences to
+// the acknowledged proxy incarnation and desired/active policy revision before
+// publishing Capability in Advertisement. Nil withdraws previous readiness.
+type StrictAdmissionReadiness struct {
+	PolicyRevision string                     `json:"policyRevision"`
+	ProxyRunID     string                     `json:"proxyRunId"`
+	Capability     *StrictAdmissionCapability `json:"capability,omitempty"`
+}
+
+func (r StrictAdmissionReadiness) Validate() error {
+	if err := validateRevision(r.PolicyRevision); err != nil {
+		return fmt.Errorf("policyRevision: %w", err)
+	}
+	if !strictID.MatchString(r.ProxyRunID) {
+		return errors.New("proxyRunId must be a nonempty identity of at most 128 ASCII characters")
+	}
+	if r.Capability != nil {
+		return r.Capability.Validate()
+	}
+	return nil
+}
 
 // Broker → proxy requests. Each is answered with {"ok":true} or a JSON-RPC
 // error, except MethodSetPolicy, which answers with a PolicyAck. The broker
