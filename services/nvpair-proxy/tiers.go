@@ -5,7 +5,8 @@ package main
 
 // Tier routing (FORK_DESIGN.md §3.7): a request whose model is "weak",
 // "medium" or "strong" is resolved by the node it enters, to a concrete
-// (node, engine, model) chosen from the policy's tier entries.
+// (node, engine, model) chosen from the roles nodes declare for themselves and,
+// for nodes that declare none, the policy's tier entries.
 //
 // An OpenAI-compatible route can be served by any engine, so its candidates
 // may cross engines; a native route resolves only to its own engine. A
@@ -163,49 +164,164 @@ func tierSearchOrder(tier string, tp nodepolicy.TierPolicy) []string {
 	return order
 }
 
-// entryEligible reports whether a tier entry can answer a request with needs.
-func entryEligible(e nodepolicy.TierEntry, needs requestNeeds) bool {
-	for _, c := range needs.caps {
-		if !slices.Contains(e.Capabilities, c) {
+// metBy reports whether a model with these declared bounds can answer the
+// request: every needed capability present, and either no context bound or
+// one at least the estimate. Tier entries and declared roles share it.
+func (n requestNeeds) metBy(caps []nodepolicy.Capability, contextTokens int) bool {
+	for _, c := range n.caps {
+		if !slices.Contains(caps, c) {
 			return false
 		}
 	}
-	return e.ContextTokens == 0 || e.ContextTokens >= needs.contextTokens
+	return contextTokens == 0 || contextTokens >= n.contextTokens
+}
+
+// declaredRoles is what the nodes a tier request can reach declare they serve
+// per tier. A node that declares at least one role is authoritative for
+// itself: it offers exactly its declared role for each tier it names and
+// nothing for a tier it omits, and this router's tier entries never apply to
+// it. A node that declares nothing receives the router's tier entries.
+type declaredRoles struct {
+	// self is this node's own declaration, read from its policy and never
+	// from the inventory document it publishes.
+	self map[string]nodepolicy.AdvertisedRole
+	// peers maps a peer's node ID to its advertised declaration. A peer that
+	// declares nothing is absent.
+	peers map[string]map[string]nodepolicy.AdvertisedRole
+}
+
+// declaredRoles collects the declarations visible to a request entering f:
+// this node's own roles, and the advertisements in every facade overlay of
+// this process. A node's advertisement is the same in every overlay it
+// appears in.
+func (f *facade) declaredRoles(pol nodepolicy.Policy) declaredRoles {
+	d := declaredRoles{
+		self:  pol.Advertisement().Roles,
+		peers: map[string]map[string]nodepolicy.AdvertisedRole{},
+	}
+	selfID, _ := f.host.selfIdentity(f.profile.Name)
+	for _, g := range append([]*facade{f}, f.host.enabledFacades()...) {
+		for _, n := range g.discovery.Nodes() {
+			if len(n.Roles) > 0 && (selfID == "" || n.ID != selfID) {
+				d.peers[n.ID] = n.Roles
+			}
+		}
+	}
+	return d
+}
+
+// of returns the declaration of a candidate's node, empty when it declares
+// nothing.
+func (d declaredRoles) of(c candidate) map[string]nodepolicy.AdvertisedRole {
+	if c.self {
+		return d.self
+	}
+	return d.peers[c.id]
+}
+
+// forTier lists the distinct (engine, model) pairs declared for tier t by any
+// node, ordered by engine and then model so resolution is stable.
+func (d declaredRoles) forTier(t string) []nodepolicy.AdvertisedRole {
+	var out []nodepolicy.AdvertisedRole
+	add := func(roles map[string]nodepolicy.AdvertisedRole) {
+		r, ok := roles[t]
+		if ok && !slices.ContainsFunc(out, func(o nodepolicy.AdvertisedRole) bool {
+			return o.Engine == r.Engine && o.Model == r.Model
+		}) {
+			out = append(out, nodepolicy.AdvertisedRole{Engine: r.Engine, Model: r.Model})
+		}
+	}
+	add(d.self)
+	for _, roles := range d.peers {
+		add(roles)
+	}
+	slices.SortFunc(out, func(a, b nodepolicy.AdvertisedRole) int {
+		if c := strings.Compare(a.Engine, b.Engine); c != 0 {
+			return c
+		}
+		return strings.Compare(a.Model, b.Model)
+	})
+	return out
+}
+
+// peerTiers reports every tier at least one peer declares.
+func (d declaredRoles) peerTiers() map[string]bool {
+	out := map[string]bool{}
+	for _, roles := range d.peers {
+		for t := range roles {
+			out[t] = true
+		}
+	}
+	return out
+}
+
+// tierFacade is the facade that builds candidates on engine for a tier request
+// entering f: f itself for its own engine, another engine's facade only when
+// the route may cross engines, and nil when there is none.
+func (f *facade) tierFacade(engine string, crossEngine bool) *facade {
+	if engine == f.profile.Name {
+		return f
+	}
+	if !crossEngine {
+		return nil
+	}
+	return f.host.facadeFor(engine)
 }
 
 // resolveTierCandidates builds the ordered (node, engine, model) candidates for
-// a tier request from the tier's local entries; API entries are skipped until
-// hybrid dispatch exists. Within an entry, candidates keep resolveCandidates'
-// order (node/select pin, scheduler priority, ID); across entries the policy's
-// preferLoaded decides whether tier rank or warmth leads.
+// a tier request. For each tier in the search order it takes first the role
+// each declaring node names for that tier, then the tier's local entries for
+// the nodes that declare nothing (declaredRoles). API entries are skipped
+// until hybrid dispatch exists. A declared role, like an entry, resolves only
+// on nodes whose inventory has its model. Within a role or an entry,
+// candidates keep resolveCandidates' order (node/select pin, scheduler
+// priority, ID); across them the policy's preferLoaded decides whether tier
+// rank or warmth leads, and declared candidates stay ahead of entries of equal
+// rank and warmth.
 func (f *facade) resolveTierCandidates(tier string, needs requestNeeds, crossEngine bool) []candidate {
-	p := f.host
-	pol := p.admission.currentPolicy()
+	pol := f.host.admission.currentPolicy()
+	declared := f.declaredRoles(pol)
 	var out []candidate
 	seen := map[string]bool{}
+	add := func(c candidate, g *facade, model string, rank int, fromRole bool) {
+		key := c.id + "\x00" + c.engine + "\x00" + g.profile.normalizeModel(model)
+		if seen[key] {
+			return
+		}
+		seen[key] = true
+		c.model = model
+		c.tierRank = rank
+		c.declared = fromRole
+		out = append(out, c)
+	}
 	for rank, t := range tierSearchOrder(tier, pol.TierPolicy) {
-		for _, e := range pol.Tiers[t] {
-			if !e.IsLocal() || !entryEligible(e, needs) {
+		for _, role := range declared.forTier(t) {
+			g := f.tierFacade(role.Engine, crossEngine)
+			if g == nil {
 				continue
 			}
-			g := f
-			if e.Engine != f.profile.Name {
-				if !crossEngine {
+			want := g.profile.normalizeModel(role.Model)
+			for _, c := range g.resolveCandidates(role.Model) {
+				r, ok := declared.of(c)[t]
+				if !ok || r.Engine != role.Engine || g.profile.normalizeModel(r.Model) != want ||
+					!needs.metBy(r.Capabilities, r.ContextTokens) {
 					continue
 				}
-				if g = p.facadeFor(e.Engine); g == nil {
-					continue
-				}
+				add(c, g, r.Model, rank, true)
+			}
+		}
+		for _, e := range pol.Tiers[t] {
+			if !e.IsLocal() || !needs.metBy(e.Capabilities, e.ContextTokens) {
+				continue
+			}
+			g := f.tierFacade(e.Engine, crossEngine)
+			if g == nil {
+				continue
 			}
 			for _, c := range g.resolveCandidates(e.Model) {
-				key := c.id + "\x00" + c.engine + "\x00" + g.profile.normalizeModel(e.Model)
-				if seen[key] {
-					continue
+				if len(declared.of(c)) == 0 {
+					add(c, g, e.Model, rank, false)
 				}
-				seen[key] = true
-				c.model = e.Model
-				c.tierRank = rank
-				out = append(out, c)
 			}
 		}
 	}
@@ -246,18 +362,22 @@ func (f *facade) reserveRound(cands []candidate, tier bool) ([]candidate, reserv
 // list, so a client can pick a tier from it. An upstream model already named
 // like an alias is left alone.
 func (f *facade) tierModelEntries(seen map[string]modelListItem) []json.RawMessage {
-	return hybridAliasRecords(f.host.admission.currentPolicy(), seen)
+	pol := f.host.admission.currentPolicy()
+	return hybridAliasRecords(pol, f.declaredRoles(pol).peerTiers(), seen)
 }
 
-// configuredAliases lists the reserved hybrid alias names a policy offers:
-// every tier with at least one entry of any kind, each as the bare tier and
-// both variants, weakest tier first. A tier whose entries are all API
-// deployments is listed like any other. It reads only the policy, so a
-// listener with no facade and no upstream can serve it.
-func configuredAliases(pol nodepolicy.Policy) []string {
+// configuredAliases lists the reserved hybrid alias names offered here: every
+// tier that has at least one policy entry of any kind, that this node's own
+// roles declare, or that is in peerTiers (the tiers peers visible here
+// declare), each as the bare tier and both variants, weakest tier first. A
+// tier whose entries are all API deployments is listed like any other.
+// peerTiers may be nil: a listener with no facade overlay reads only the
+// policy, so only this node's own roles count there.
+func configuredAliases(pol nodepolicy.Policy, peerTiers map[string]bool) []string {
 	var out []string
 	for _, t := range nodepolicy.TierOrder {
-		if len(pol.Tiers[t]) == 0 {
+		_, own := pol.Roles[t]
+		if len(pol.Tiers[t]) == 0 && !own && !peerTiers[t] {
 			continue
 		}
 		out = append(out, t, t+"-api", t+"-local")
@@ -266,11 +386,12 @@ func configuredAliases(pol nodepolicy.Policy) []string {
 }
 
 // hybridAliasRecords returns one synthetic OpenAI model record per configured
-// alias, skipping any id present in skip (which may be nil). The record names
-// no policy detail: never a credential, account, endpoint or deployment.
-func hybridAliasRecords(pol nodepolicy.Policy, skip map[string]modelListItem) []json.RawMessage {
+// alias (configuredAliases), skipping any id present in skip (which may be
+// nil). The record names no policy detail: never a credential, account,
+// endpoint or deployment.
+func hybridAliasRecords(pol nodepolicy.Policy, peerTiers map[string]bool, skip map[string]modelListItem) []json.RawMessage {
 	var out []json.RawMessage
-	for _, id := range configuredAliases(pol) {
+	for _, id := range configuredAliases(pol, peerTiers) {
 		if _, dup := skip[id]; dup {
 			continue
 		}

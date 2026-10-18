@@ -102,9 +102,11 @@ type Policy struct {
 	// up by (engine, model); a model with no profile is admitted with the
 	// node-wide defaults.
 	Profiles []Profile `json:"profiles"`
-	// Roles is this node's declaration of what it serves per tier. A tier
-	// absent from the map is undeclared: routers fall back to their own tier
-	// entries for this node. Routers never read Tiers of another node.
+	// Roles is this node's declaration of what it serves per tier. A node
+	// with at least one role is authoritative for itself: routers offer it
+	// only its declared role for each tier it names, and nothing for a tier
+	// absent from the map. Only a node that declares no role at all receives
+	// a router's own tier entries. Routers never read Tiers of another node.
 	Roles map[string]Role `json:"roles"`
 	// Tiers map each tier name to its candidates, most preferred first. Tiers
 	// are resolved by the node a request enters, across every node in the

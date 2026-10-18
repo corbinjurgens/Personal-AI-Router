@@ -597,6 +597,9 @@ type candidate struct {
 	// position of its tier in the search order. Both order tier candidates.
 	warm     bool
 	tierRank int
+	// declared marks a tier candidate offered by its node's own role
+	// declaration rather than by this router's tier entries.
+	declared bool
 }
 
 // resolveCandidates returns the ordered list of nodes to try for the current
@@ -1239,8 +1242,7 @@ func subscribedToNode(p engineProfile, n noderec.DirectoryNode) (Node, bool) {
 		Models: append([]string(nil), n.EngineModels(p.Name)...),
 		Loaded: append([]string(nil), n.LoadedByEngine[p.Name]...),
 	}
-	// The node's own declaration, carried for tier routing; no routing reads
-	// it yet.
+	// The node's own declaration, read by tier routing (declaredRoles).
 	if n.Policy != nil {
 		node.Roles = maps.Clone(n.Policy.Roles)
 		node.PolicyRevision = n.Policy.Revision

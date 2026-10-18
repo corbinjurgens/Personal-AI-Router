@@ -265,7 +265,7 @@ func TestConfiguredAliases(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			pol := nodepolicy.Default()
 			pol.Tiers = tiers
-			if got := configuredAliases(pol); !slices.Equal(got, want) {
+			if got := configuredAliases(pol, nil); !slices.Equal(got, want) {
 				t.Errorf("configuredAliases = %v, want %v", got, want)
 			}
 		})
@@ -276,12 +276,69 @@ func TestConfiguredAliases(t *testing.T) {
 	test("api only", map[string][]nodepolicy.TierEntry{"strong": {api}}, aliasesOf("strong"))
 	test("weakest first", map[string][]nodepolicy.TierEntry{"strong": {local}, "weak": {api}, "medium": {local, api}},
 		aliasesOf("weak", "medium", "strong"))
+
+	// A declared tier is listed without any entry: by this node's own roles,
+	// or by a peer's.
+	t.Run("declared tiers", func(t *testing.T) {
+		pol := nodepolicy.Default()
+		pol.Tiers = map[string][]nodepolicy.TierEntry{"weak": {local}}
+		pol.Roles = map[string]nodepolicy.Role{"strong": {Engine: "ollama", Model: "m"}}
+		if got, want := configuredAliases(pol, nil), aliasesOf("weak", "strong"); !slices.Equal(got, want) {
+			t.Errorf("self roles: configuredAliases = %v, want %v", got, want)
+		}
+		if got, want := configuredAliases(pol, map[string]bool{"medium": true}), aliasesOf("weak", "medium", "strong"); !slices.Equal(got, want) {
+			t.Errorf("peer tiers: configuredAliases = %v, want %v", got, want)
+		}
+	})
+}
+
+// A facade's model list adds the tiers peers in its overlays declare; the
+// routing listener, which has no overlay, lists this node's own roles only.
+func TestModelListOffersDeclaredTiers(t *testing.T) {
+	pol := nodepolicy.Default()
+	pol.Roles = map[string]nodepolicy.Role{"strong": {Engine: "lmstudio", Model: "qwen3-8b"}}
+	fx := listFixture(t, pol, true)
+	f := fx.p.soleFacade()
+	for _, n := range f.discovery.Nodes() {
+		n.Roles = map[string]nodepolicy.AdvertisedRole{"medium": {Engine: "lmstudio", Model: "not-installed"}}
+		f.discovery.AddManual(n)
+	}
+	if got, want := modelIDs(t, fx.listModels(t, "/v1/models")), append([]string{"qwen3-8b"}, aliasesOf("medium", "strong")...); !slices.Equal(got, want) {
+		t.Errorf("facade model list = %v, want %v", got, want)
+	}
+	var ids []string
+	for _, raw := range hybridAliasRecords(fx.p.admission.currentPolicy(), nil, nil) {
+		var item struct {
+			ID string `json:"id"`
+		}
+		if err := json.Unmarshal(raw, &item); err != nil {
+			t.Fatalf("decode %s: %v", raw, err)
+		}
+		ids = append(ids, item.ID)
+	}
+	if want := aliasesOf("strong"); !slices.Equal(ids, want) {
+		t.Errorf("policy-only aliases = %v, want %v", ids, want)
+	}
+}
+
+// Declared roles are local candidates: a -api alias never reaches them, and
+// the suffixed aliases stay refused until hybrid dispatch exists.
+func TestSuffixedAliasesNeverReachDeclaredRoles(t *testing.T) {
+	tc := ollamaCase(t)
+	for _, alias := range []string{"weak-api", "weak-local"} {
+		t.Run(alias, func(t *testing.T) {
+			fx := newTierFixture(t, tc, nodepolicy.Default(), map[string][]string{"a": {"small:1b"}}, nil)
+			fx.declare(t, "a", map[string]nodepolicy.AdvertisedRole{"weak": {Engine: "ollama", Model: "small:1b"}})
+			rec := fx.do(t, "/v1/chat/completions", `{"model":"`+alias+`"}`)
+			assertRefusedWithoutSideEffects(t, tc, fx, rec, alias, aliasReasonNotInferenceReady)
+		})
+	}
 }
 
 // The records are synthetic and carry nothing of the policy beyond the name.
 func TestHybridAliasRecordsNameOnlyTheAlias(t *testing.T) {
 	pol := stagedHybridPolicy(t)
-	records := hybridAliasRecords(pol, nil)
+	records := hybridAliasRecords(pol, nil, nil)
 	if len(records) != len(aliasesOf("weak", "medium", "strong")) {
 		t.Fatalf("got %d records, want one per alias", len(records))
 	}
@@ -299,7 +356,7 @@ func TestHybridAliasRecordsNameOnlyTheAlias(t *testing.T) {
 			t.Errorf("record %s has fields %v, want %v", raw, keys, want)
 		}
 	}
-	skipped := hybridAliasRecords(pol, map[string]modelListItem{"weak-api": {}})
+	skipped := hybridAliasRecords(pol, nil, map[string]modelListItem{"weak-api": {}})
 	if len(skipped) != len(records)-1 {
 		t.Errorf("skipping a seen id left %d records, want %d", len(skipped), len(records)-1)
 	}

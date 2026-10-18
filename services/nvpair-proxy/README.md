@@ -235,9 +235,18 @@ the previous policy stays. Until the first request arrives the proxy runs on `no
   sets to `0` while a round has other candidates. It reports
   `admission/state` (active, queued, last activity per engine) to the broker.
 - **Tiers.** A request for model `weak`, `medium` or `strong` is resolved to a
-  concrete model from the policy's local tier entries, filtered by what the request
-  needs (tools, vision, structured output, embeddings, context) and ordered by
-  tier and by whether the model is already loaded. OpenAI-compatible routes may
+  concrete model from the roles nodes declare and the policy's local tier
+  entries, filtered by what the request needs (tools, vision, structured
+  output, embeddings, context) and ordered by tier and by whether the model is
+  already loaded. A node that declares at least one role (a peer's `policy`
+  advertisement, or this node's own `roles`) is authoritative for itself: for a
+  tier it declares it offers only its declared engine and model, with the
+  bounds it advertises, and for a tier it omits it offers nothing. The local
+  tier entries apply only to nodes that declare no role. A declared model the
+  node does not have in its inventory is not a candidate. Declared candidates
+  precede entry candidates of the same tier rank and warmth; `allowStronger`,
+  `allowWeaker` and `preferLoaded` are this router's and apply to both.
+  OpenAI-compatible routes may
   be served by another engine; native routes stay on their own. The body's
   `model` is rewritten in place. Nothing eligible is a `404` naming the needs.
   A tier entry is
@@ -255,9 +264,10 @@ the previous policy stays. Until the first request arrives the proxy runs on `no
   byte-for-byte after trimming surrounding whitespace, so `weak-api:latest`,
   `Weak-API` and `org/weak-api` are ordinary model names. The Ollama implied
   `:latest` tag is never appended to a reserved name. `/v1/models` on a facade
-  lists every tier that has at least one entry of either kind as the bare tier
-  and both variants, including a tier whose entries are all API deployments, as
-  synthetic records that name nothing of the policy. They are merged with the
+  lists every tier that has at least one entry of either kind, that this node's
+  roles declare, or that a node in one of this process's facade overlays
+  declares, as the bare tier and both variants, including a tier whose entries
+  are all API deployments, as synthetic records that name nothing of the policy. They are merged with the
   upstream models; when no upstream answers and tiers are configured the
   synthetic records are still returned instead of `503`, and without
   configured tiers the statuses are unchanged. The native Ollama list gains
@@ -291,7 +301,8 @@ the previous policy stays. Until the first request arrives the proxy runs on `no
   listener binds or is disabled); the policy still activates, and replaying it
   retries the bind. It serves only:
   - `GET /v1/models`: the synthetic alias records, built from the policy alone,
-    including a tier whose entries are all API. No upstream request is made.
+    including a tier whose entries are all API and a tier this node's own roles
+    declare; peers' declarations are not seen here. No upstream request is made.
   - Every inference route any engine profile declares (`POST /v1/chat/completions`,
     `/v1/completions`, `/v1/embeddings`, `/v1/messages`, `/api/generate`,
     `/api/chat`, `/api/embeddings`, `/api/embed`): `501`
