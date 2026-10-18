@@ -4,7 +4,8 @@
 // Package nodepolicy is the fork's node policy contract: whether this machine
 // accepts inference work (availability), how it admits work (resident models,
 // concurrency, memory), how idle engines are unloaded or stopped, the model
-// profiles it serves, and the weak/medium/strong tiers it routes by.
+// profiles it serves, the weak/medium/strong roles it declares for itself, and
+// the tiers it routes by.
 //
 // Schema version 2 adds hybrid routing. A tier entry is tagged: a local entry
 // names an engine and model on a cluster node, an API entry names a provider
@@ -101,6 +102,10 @@ type Policy struct {
 	// up by (engine, model); a model with no profile is admitted with the
 	// node-wide defaults.
 	Profiles []Profile `json:"profiles"`
+	// Roles is this node's declaration of what it serves per tier. A tier
+	// absent from the map is undeclared: routers fall back to their own tier
+	// entries for this node. Routers never read Tiers of another node.
+	Roles map[string]Role `json:"roles"`
 	// Tiers map each tier name to its candidates, most preferred first. Tiers
 	// are resolved by the node a request enters, across every node in the
 	// cluster that has a candidate model installed.
@@ -108,6 +113,28 @@ type Policy struct {
 	TierPolicy TierPolicy             `json:"tierPolicy"`
 	// Routing is the origin-only hybrid routing configuration.
 	Routing Routing `json:"routing"`
+	// PausedBy records who paused the node: "local" or "peer". Empty while
+	// available. A paused node with no provenance, such as one paused before
+	// the field existed, counts as paused locally. Only node:set-availability
+	// writes it; policy:set keeps it.
+	PausedBy PauseOrigin `json:"pausedBy,omitempty"`
+}
+
+// PauseOrigin says who paused a node.
+type PauseOrigin string
+
+const (
+	// PausedLocally is a pause made on the node itself.
+	PausedLocally PauseOrigin = "local"
+	// PausedByPeer is a pause relayed from a paired node.
+	PausedByPeer PauseOrigin = "peer"
+)
+
+// Role is the engine and model this node serves one tier with. Bounds and
+// capabilities come from the node's Profile for the same (engine, model).
+type Role struct {
+	Engine string `json:"engine"`
+	Model  string `json:"model"`
 }
 
 // PauseConfig controls what pausing does.
@@ -251,6 +278,7 @@ func Default() Policy {
 			WakeTimeoutSeconds:     90,
 		},
 		Profiles: []Profile{},
+		Roles:    map[string]Role{},
 		Tiers:    map[string][]TierEntry{},
 		TierPolicy: TierPolicy{
 			AllowStronger: true,
@@ -279,6 +307,12 @@ func (p Policy) Validate() error {
 		return fmt.Errorf("availability %q is transient and cannot be saved", p.Availability)
 	default:
 		return fmt.Errorf("unknown availability %q", p.Availability)
+	}
+	switch {
+	case p.Availability == Available && p.PausedBy != "":
+		return fmt.Errorf("pausedBy must be empty while the node is available")
+	case p.PausedBy != "" && p.PausedBy != PausedLocally && p.PausedBy != PausedByPeer:
+		return fmt.Errorf("pausedBy must be %q or %q", PausedLocally, PausedByPeer)
 	}
 	switch p.Pause.OnActive {
 	case FinishActive, CancelActive:
@@ -331,6 +365,14 @@ func (p Policy) Validate() error {
 			if _, ok := obj["model"]; ok {
 				return fmt.Errorf("profiles[%d] %q: requestOptions may not set model", i, pr.Name)
 			}
+		}
+	}
+	for tier, role := range p.Roles {
+		if !slices.Contains(TierOrder, tier) {
+			return fmt.Errorf("roles: unknown tier %q (want one of %v)", tier, TierOrder)
+		}
+		if err := checkModelRef(role.Engine, role.Model, 0, nil); err != nil {
+			return fmt.Errorf("roles[%s]: %w", tier, err)
 		}
 	}
 	if err := p.Routing.validate(); err != nil {
@@ -489,6 +531,9 @@ func (p *Policy) normalize() {
 				pr.RequestOptions = canonical
 			}
 		}
+	}
+	if p.Roles == nil {
+		p.Roles = map[string]Role{}
 	}
 	if p.Tiers == nil {
 		p.Tiers = map[string][]TierEntry{}

@@ -108,6 +108,72 @@ func TestMergePeerSetAcceptsUnchangedProjection(t *testing.T) {
 	test("explicit empty tier equals an absent tier", func(doc map[string]any) {
 		doc["tiers"].(map[string]any)["medium"] = []any{}
 	}, func(*Policy) {})
+	test("declared roles", func(doc map[string]any) {
+		doc["roles"] = map[string]any{
+			"weak":   map[string]any{"engine": "ollama", "model": "qwen3:8b"},
+			"strong": map[string]any{"engine": "lmstudio", "model": "big"},
+		}
+	}, func(p *Policy) {
+		p.Roles = map[string]Role{TierWeak: {Engine: "ollama", Model: "qwen3:8b"}, TierStrong: {Engine: "lmstudio", Model: "big"}}
+	})
+	test("peer pausedBy is ignored", func(doc map[string]any) {
+		doc["pausedBy"] = "peer"
+	}, func(*Policy) {})
+	test("peer pause with provenance is ignored", func(doc map[string]any) {
+		doc["availability"] = "paused"
+		doc["PausedBy"] = "local"
+	}, func(*Policy) {})
+}
+
+func TestPeerProjectionCarriesRolesAndPausedBy(t *testing.T) {
+	stored := stagedPolicy(t)
+	stored.Roles = map[string]Role{TierMedium: {Engine: "ollama", Model: "qwen3:8b"}}
+	stored.Availability = Paused
+	stored.PausedBy = PausedLocally
+
+	got := stored.PeerProjection()
+	if !reflect.DeepEqual(got.Roles, stored.Roles) || got.PausedBy != PausedLocally {
+		t.Errorf("projection roles/pausedBy = %+v/%q, want %+v/%q", got.Roles, got.PausedBy, stored.Roles, PausedLocally)
+	}
+	data, err := json.Marshal(got)
+	if err != nil {
+		t.Fatalf("marshal projection: %v", err)
+	}
+	if !strings.Contains(string(data), `"roles":{"medium":{"engine":"ollama","model":"qwen3:8b"}}`) || !strings.Contains(string(data), `"pausedBy":"local"`) {
+		t.Errorf("projection JSON lacks roles or pausedBy: %s", data)
+	}
+}
+
+// A peer cannot change who paused the node: the stored availability and its
+// provenance survive whatever the document says about either.
+func TestMergePeerSetKeepsStoredPausedBy(t *testing.T) {
+	test := func(name string, edit func(doc map[string]any)) {
+		t.Helper()
+		t.Run(name, func(t *testing.T) {
+			stored := stagedPolicy(t)
+			stored.Availability = Paused
+			stored.PausedBy = PausedLocally
+			merged, err := MergePeerSet(stored, peerDocument(t, stored, edit))
+			if err != nil {
+				t.Fatalf("MergePeerSet: %v", err)
+			}
+			if merged.Availability != Paused || merged.PausedBy != PausedLocally {
+				t.Errorf("merged availability/pausedBy = %q/%q, want the stored paused/local", merged.Availability, merged.PausedBy)
+			}
+		})
+	}
+
+	test("unchanged projection", nil)
+	test("resumed and provenance cleared", func(doc map[string]any) {
+		doc["availability"] = "available"
+		delete(doc, "pausedBy")
+	})
+	test("provenance changed to peer", func(doc map[string]any) { doc["pausedBy"] = "peer" })
+	test("provenance changed under a capitalized key", func(doc map[string]any) {
+		delete(doc, "pausedBy")
+		doc["PAUSEDBY"] = "peer"
+	})
+	test("unknown provenance", func(doc map[string]any) { doc["pausedBy"] = "remote" })
 }
 
 func TestMergePeerSetAcceptsLegacyDocumentOnDefaultTiers(t *testing.T) {
@@ -209,6 +275,15 @@ func TestMergePeerSetRejectsProtectedChanges(t *testing.T) {
 	test("invalid device field", func(doc map[string]any) {
 		doc["idle"].(map[string]any)["unloadAfterMinutes"] = -1
 	}, "idle.unloadAfterMinutes")
+	test("role for an unknown tier", func(doc map[string]any) {
+		doc["roles"] = map[string]any{"huge": map[string]any{"engine": "ollama", "model": "m"}}
+	}, `unknown tier "huge"`)
+	test("role naming a reserved alias", func(doc map[string]any) {
+		doc["roles"] = map[string]any{"weak": map[string]any{"engine": "ollama", "model": "strong-local"}}
+	}, "reserved alias")
+	test("role for an unknown engine", func(doc map[string]any) {
+		doc["roles"] = map[string]any{"weak": map[string]any{"engine": "nope", "model": "m"}}
+	}, `unknown engine "nope"`)
 }
 
 func TestMergePeerSetRejectsMalformedDocuments(t *testing.T) {
