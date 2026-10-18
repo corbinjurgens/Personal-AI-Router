@@ -5,7 +5,7 @@ import { describe, expect, it } from 'vitest'
 import type { NodeItem } from '@/shared/types/nodes'
 import type { NodeMetricsHistory } from '@/ui/stores/metrics.store'
 import { getMetricReading } from '@/ui/utils/build-radial-chart-metrics'
-import { buildPerformanceHardwareInfo } from '@/ui/components/NodeList/NodePerformance'
+import { buildPerformanceHardwareInfo } from '@/ui/utils/performance-hardware-info'
 
 describe('metric display freshness', () => {
     it('renders missing history as unknown rather than zero', () => {

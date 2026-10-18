@@ -81,6 +81,9 @@ interface ModularNode {
     gpus: ModularGpu[]
     cpu: ModularCpu | null
     memory: ModularMemory | null
+    // Validity and observation time apply only to GPU telemetry, not CPU/RAM.
+    telemetryValid?: boolean
+    observedAt?: number
     // Node-level list of inference-ready hardware ids from /v1/node-info, mapped
     // straight to SystemTopology.inferenceHardwareIds. undefined = the backend
     // does not report readiness yet (UI shows all GPUs). See the routing
@@ -495,6 +498,7 @@ function toNodeItem(node: ModularNode, selfId: string | null): NodeItem {
 }
 
 function toMetrics(node: ModularNode): NodeItemMetrics {
+    const gpus = node.telemetryValid && node.observedAt !== undefined ? node.gpus : []
     const memoryUsage =
         node.memory && node.memory.totalBytes > 0 && node.memory.usedBytes !== undefined
             ? (node.memory.usedBytes / node.memory.totalBytes) * 100
@@ -503,12 +507,14 @@ function toMetrics(node: ModularNode): NodeItemMetrics {
         timestamp: Date.now(),
         cpuUtilization: node.cpu?.utilizationPercent,
         memoryUsage,
-        gpuUtilization: node.gpus.map((gpu, index) => ({
+        gpuUtilization: gpus.map((gpu, index) => ({
             id: `${node.id}:gpu:${index}`,
+            timestamp: node.observedAt,
             value: gpu.utilizationPercent
         })),
-        gpuVramUsage: node.gpus.map((gpu, index) => ({
+        gpuVramUsage: gpus.map((gpu, index) => ({
             id: `${node.id}:gpu:${index}`,
+            timestamp: node.observedAt,
             value:
                 gpu.vramBytes > 0 && gpu.vramUsedBytes !== undefined
                     ? (gpu.vramUsedBytes / gpu.vramBytes) * 100

@@ -3,46 +3,14 @@
 
 import { useCallback, useMemo, useState } from 'react'
 import { Flex, Stack, Text } from '@nvidia/foundations-react-core'
-import SvgLineChart, { type MetricDataset } from '@/ui/components/SvgLineChart'
+import SvgLineChart from '@/ui/components/SvgLineChart'
+import type { MetricDataset } from '@/ui/utils/line-chart-path'
 import type { NodeItem } from '@/shared/types/nodes'
 import { useMetricsStore } from '@/ui/stores/metrics.store'
-import type { NodeMetricsHistory } from '@/ui/stores/metrics.store'
 import { getGpuColor, getVramColor } from '@/ui/utils/colors'
 import { formatBytes } from '@/ui/utils/formatters'
 import { CHART_COLORS } from '@/ui/constants/colors'
-import { getMetricReading } from '@/ui/utils/build-radial-chart-metrics'
-
-export function buildPerformanceHardwareInfo(
-    topology: NodeItem['topology'],
-    nodeMetrics: NodeMetricsHistory | undefined,
-    now: number
-) {
-    return {
-        // Detailed view includes all GPUs; the radial filters inference-ready GPUs.
-        gpus: topology.gpus.map((gpu, index) => ({
-            id: gpu.id,
-            name: gpu.name,
-            vramTotal: gpu.vramTotal,
-            vramFormatted: formatBytes(gpu.vramTotal, 1),
-            utilization: getMetricReading(
-                nodeMetrics?.gpuUtilization.find(entry => entry.id === gpu.id)?.data,
-                now
-            ),
-            vramUsage: getMetricReading(
-                nodeMetrics?.gpuVramUsage.find(entry => entry.id === gpu.id)?.data,
-                now
-            ),
-            color: getGpuColor(index),
-            vramColor: getVramColor(index)
-        })),
-        cpuCores: topology.cpu.cores,
-        cpuModel: topology.cpu.model,
-        cpuUtilization: getMetricReading(nodeMetrics?.cpuUtilization, now),
-        memory: formatBytes(topology.ram, 1),
-        memoryTotal: topology.ram,
-        memoryUsage: getMetricReading(nodeMetrics?.memoryUsage, now)
-    }
-}
+import { buildPerformanceHardwareInfo } from '@/ui/utils/performance-hardware-info'
 
 export default function NodePerformance({
     node,

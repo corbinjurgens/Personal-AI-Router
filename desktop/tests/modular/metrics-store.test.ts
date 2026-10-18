@@ -58,6 +58,23 @@ afterEach(() => {
 })
 
 describe('observed metrics history', () => {
+    it('uses GPU observation time when supplied and receipt time for unaged valid sources', () => {
+        publish(2000, {
+            gpuUtilization: [{ id: 'gpu', value: 40, timestamp: 1000 }],
+            gpuVramUsage: [{ id: 'gpu', value: 50, timestamp: 1000 }]
+        })
+        publish(3000)
+        expect(history().gpuUtilization[0].data).toEqual([
+            { timestamp: 1000, value: 40 },
+            { timestamp: 3000, value: 40 }
+        ])
+        expect(history().gpuVramUsage[0].data).toEqual([
+            { timestamp: 1000, value: 50 },
+            { timestamp: 3000, value: 50 }
+        ])
+        expect(history().cpuUtilization.map(sample => sample.timestamp)).toEqual([2000, 3000])
+    })
+
     it('starts with only the received sample', () => {
         publish(1000)
         expect(history().cpuUtilization).toEqual([{ timestamp: 1000, value: 20 }])

@@ -3,6 +3,7 @@
 
 export interface GpuMetricValue {
     id: string // GPU ID from topology
+    timestamp?: number // GPU observation time; absent for receipt-timed sources
     value?: number // percentage; absent when no observation is available
 }
 

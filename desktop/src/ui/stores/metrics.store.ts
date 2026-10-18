@@ -88,7 +88,7 @@ export const useMetricsStore = create<MetricsStore>((set, get) => ({
                         entry = { id: gpu.id, data: [] }
                         history.gpuUtilization.push(entry)
                     }
-                    pushMetric(entry.data, gpu.value, ts)
+                    pushMetric(entry.data, gpu.value, gpu.timestamp ?? ts)
                 }
 
                 for (const gpu of metrics.current.gpuVramUsage) {
@@ -97,7 +97,7 @@ export const useMetricsStore = create<MetricsStore>((set, get) => ({
                         entry = { id: gpu.id, data: [] }
                         history.gpuVramUsage.push(entry)
                     }
-                    pushMetric(entry.data, gpu.value, ts)
+                    pushMetric(entry.data, gpu.value, gpu.timestamp ?? ts)
                 }
 
                 pushMetric(history.cpuUtilization, metrics.current.cpuUtilization, ts)

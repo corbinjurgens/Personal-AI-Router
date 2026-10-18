@@ -70,6 +70,8 @@ it('preserves missing node-info dynamic fields as unknown through projection', (
     const node = parseProxyNode({ id: 'node', name: 'Node' }, 'ollama')
     if (!node) throw new Error('fixture node was not parsed')
     node.gpus = gpuArrayValue([{ name: 'GPU', vram_bytes: 1024 }])
+    node.telemetryValid = true
+    node.observedAt = Date.now()
     const metrics = toMetrics(node).current
     expect(metrics.cpuUtilization).toBeUndefined()
     expect(metrics.memoryUsage).toBeUndefined()

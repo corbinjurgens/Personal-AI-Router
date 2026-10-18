@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { expect, it } from 'vitest'
-import { buildLineChartPaths, type MetricDataset } from '@/ui/components/SvgLineChart'
+import { buildLineChartPaths, type MetricDataset } from '@/ui/utils/line-chart-path'
 
 function dataset(timestamps: number[], key = 'cpu'): MetricDataset {
     return {
