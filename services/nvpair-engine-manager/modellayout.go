@@ -36,6 +36,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"nvpair-shared/durablefile"
 )
 
 // errModelCopyUnsupported marks an engine whose model layout this service does
@@ -735,19 +737,17 @@ func (e *Executor) reloadLlamaModels(ctx context.Context, st *engineState) {
 	}
 }
 
-// writeFileAtomic writes data to a temporary file beside path and renames it
-// into place.
+// writeFileAtomic durably replaces path. A landed replacement with uncertain
+// durability is adopted and reported as a warning.
 func writeFileAtomic(path string, data []byte) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
-		return err
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		_ = os.Remove(tmp)
-		return err
+	if err := engineFileReplacer.WriteFile(path, data, 0o644); err != nil {
+		if !errors.Is(err, durablefile.ErrReplaced) {
+			return err
+		}
+		slog.Warn("engine file replacement landed with uncertain durability", "path", path, "err", err)
 	}
 	return nil
 }

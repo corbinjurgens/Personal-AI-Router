@@ -9,10 +9,15 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"runtime"
+
+	"nvpair-shared/durablefile"
 )
+
+var engineFileReplacer durablefile.Replacer
 
 func canMoveAdoptedEngine(rt Runtime) bool {
 	return rt.modeOrDefault() == "command" && rt.Stop != nil && len(rt.Stop.Cmd) > 0
@@ -217,29 +222,19 @@ func setOverrideObject(parent map[string]any, key string, object map[string]any)
 	}
 }
 
-// writeJSONAtomic marshals v and writes it to path via a tmp file + rename so
-// a crash mid-write can't leave a truncated manifest behind.
+// writeJSONAtomic durably replaces path with the indented JSON for v. A landed
+// replacement with uncertain durability is adopted and reported as a warning.
 func writeJSONAtomic(path string, v any) error {
 	data, err := json.MarshalIndent(v, "", "  ")
 	if err != nil {
 		return err
 	}
-	file, err := os.CreateTemp(filepath.Dir(path), ".override-*.tmp")
-	if err != nil {
-		return fmt.Errorf("create override: %w", err)
-	}
-	tmp := file.Name()
-	defer os.Remove(tmp)
-	if _, err := file.Write(data); err != nil {
-		_ = file.Close()
-		return fmt.Errorf("write override: %w", err)
-	}
-	if err := file.Close(); err != nil {
-		return fmt.Errorf("close override: %w", err)
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		_ = os.Remove(tmp)
-		return fmt.Errorf("rename override: %w", err)
+	// Match os.CreateTemp's owner-only mode, before umask.
+	if err := engineFileReplacer.WriteFile(path, data, 0o600); err != nil {
+		if !errors.Is(err, durablefile.ErrReplaced) {
+			return err
+		}
+		slog.Warn("engine JSON replacement landed with uncertain durability", "path", path, "err", err)
 	}
 	return nil
 }
