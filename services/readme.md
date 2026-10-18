@@ -230,8 +230,15 @@ after any change to a JSON-RPC method, payload, or notification.
 
 Some tests need something the machine may not have, and skip rather than fail:
 
-- Tests that bind a well-known port (`11434`, `14319`, `14321`) skip when it is
-  already in use — so quit PAIR before running them, or expect gaps.
+- Broker fixtures reserve their own ephemeral ports for the six broker-owned
+  services and pass them through the broker's port flags, so they do not use
+  an installed PAIR's `14318`–`14323`. Tests that still need a product default
+  port, such as the fixed manual-node probe ports or the default engine facade
+  ports (`11434`, `1234`, `8080`), skip when that port is held on IPv4 or IPv6,
+  so quit PAIR before running them, or expect gaps.
+- Every fixture scanner still browses and advertises `_nvpair-node` over mDNS.
+  Beside an installed PAIR, it discovers that node and contacts its advertised
+  ports, so run the broker tests on a machine where PAIR is stopped.
 - Tests needing a real mDNS responder skip when one is unavailable.
 - Live engine tests only run when you opt in:
 

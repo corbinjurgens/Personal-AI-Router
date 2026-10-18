@@ -13,7 +13,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"net"
 	"os"
 	"os/exec"
 	"regexp"
@@ -68,7 +67,17 @@ func startBrokerWithConfigDirAndEnv(t *testing.T, configDir string, extraEnv []s
 
 func startBrokerWithDirsAndEnv(t *testing.T, configDir, clusterDir string, extraEnv []string, extraArgs ...string) (stdin io.WriteCloser, msgs <-chan jsonrpc.Message, stderrLines <-chan string, cleanup func()) {
 	t.Helper()
-	args := append([]string{"--scanner-path", scannerBin, "--cluster-dir", clusterDir}, extraArgs...)
+	return startBrokerWithPorts(t, configDir, clusterDir, extraEnv, reserveFixtureServicePorts(t), extraArgs...)
+}
+
+// startBrokerWithPorts is the common broker fixture. Every fixture broker gets
+// its own nondefault service ports, so its workers neither collide with nor
+// impersonate an installed PAIR's listeners. A caller that dials a worker
+// reserves the plan itself and passes it here.
+func startBrokerWithPorts(t *testing.T, configDir, clusterDir string, extraEnv []string, ports fixtureServicePorts, extraArgs ...string) (stdin io.WriteCloser, msgs <-chan jsonrpc.Message, stderrLines <-chan string, cleanup func()) {
+	t.Helper()
+	args := append([]string{"--scanner-path", scannerBin, "--cluster-dir", clusterDir}, ports.args()...)
+	args = append(args, extraArgs...)
 	cmd := exec.Command(brokerBin, args...)
 	// Every supervised worker must use disposable per-test config. In
 	// particular, managed-port startup can persist an Ollama backend port; a
@@ -192,19 +201,6 @@ const methodErrorsUpdate = "errors:update"
 
 var proxyPidRe = regexp.MustCompile(`proxy started.*\bpid=(\d+)`)
 
-// portBusy reports whether a TCP port on localhost is already bound — used
-// to skip tests whose supervised workers need a fatal-on-conflict listener
-// (nvpair-errors --peer-sync on 14319, ollama-proxy on 11435) when something
-// else on the host already holds it.
-func portBusy(port int) bool {
-	ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
-	if err != nil {
-		return true
-	}
-	ln.Close()
-	return false
-}
-
 // TestBrokerCrashSurfacingAndRestart kills the broker's supervised proxy and
 // asserts the crash is surfaced through the nvpair-errors pipeline
 // (errors:update relay + errors:get-initial), and that the supervisor restarts
@@ -215,9 +211,6 @@ func portBusy(port int) bool {
 // naming a single engine would claim that only that engine went down when in
 // fact all of them did.
 func TestBrokerCrashSurfacingAndRestart(t *testing.T) {
-	if portBusy(14319) {
-		t.Skip("nvpair-errors --peer-sync port 14319 already in use; skipping")
-	}
 	if portBusy(11435) {
 		t.Skip("ollama-proxy port 11435 already in use; skipping")
 	}
@@ -285,8 +278,9 @@ func mustPid(t *testing.T, line string) int {
 // an implementation detail and "one OS process serving every engine" is the
 // thing that actually makes the reservation map whole.
 func TestAllDefaultEnginesAreServedByOneProxyProcess(t *testing.T) {
-	if portBusy(11435) || portBusy(1234) {
-		t.Skip("ollama-proxy (11435) or lmstudio-proxy (1234) default port already in use; skipping")
+	// The complete default facade set starts on the engines' product ports.
+	for _, port := range []int{11434, 11435, 1234, 8080} {
+		skipIfDefaultPortOccupied(t, port, "the default engine facade set")
 	}
 
 	stdin, msgs, stderr, cleanup := startBrokerWith(t,
@@ -344,11 +338,12 @@ func TestAllDefaultEnginesAreServedByOneProxyProcess(t *testing.T) {
 // workers during teardown. This guards the regression where Ctrl+C left
 // the broker hung and self-restarting its children.
 func TestBrokerShutsDownOnSignal(t *testing.T) {
-	cmd := exec.Command(brokerBin,
+	args := append([]string{
 		"--scanner-path", scannerBin,
 		"--proxy-path", proxyBin, "--proxy-engines", "ollama",
 		"--cluster-dir", t.TempDir(),
-	)
+	}, reserveFixtureServicePorts(t).args()...)
+	cmd := exec.Command(brokerBin, args...)
 	configureBrokerSignalTarget(cmd)
 	cmd.Stderr = os.Stderr
 	// Keep stdin OPEN for the lifetime of the test so shutdown is driven
@@ -496,11 +491,12 @@ func TestBrokerProxySetPortRebinds(t *testing.T) {
 		t.Skip("ollama-proxy default port 11435 already in use; skipping")
 	}
 	cfg := t.TempDir()
-	cmd := exec.Command(brokerBin,
+	args := append([]string{
 		"--scanner-path", scannerBin,
 		"--proxy-path", proxyBin, "--proxy-engines", "ollama",
 		"--engine-manager-path", engineMgrBin,
-	)
+	}, reserveFixtureServicePorts(t).args()...)
+	cmd := exec.Command(brokerBin, args...)
 	// Isolate per-user state (proxy-port.json, any engine override) to a
 	// temp dir so the test leaves the real config untouched.
 	cmd.Env = append(os.Environ(),
@@ -595,10 +591,12 @@ func TestBrokerManualNodeMergedIntoDiscovery(t *testing.T) {
 
 	waitForMethod(t, msgs, "app:ready", 10*time.Second)
 
-	// Add a manual node with a unique name (which becomes its id) at a
-	// loopback address so the probe resolves quickly whether or not a
-	// local service answers.
-	addReq := fmt.Sprintf(`{"jsonrpc":"2.0","id":800,"method":"node/add","params":{"address":"127.0.0.1","name":%q}}`, nodeName) + "\n"
+	// Add a manual node with a unique name (which becomes its id). The manual
+	// prober dials fixed product ports (Ollama, LM Studio, node-info), so a
+	// loopback address would reach an installed PAIR's listeners and could
+	// rename the node to that service's host UUID. A documentation address
+	// (RFC 5737) owns no listener; each probe fails within its bounded timeout.
+	addReq := fmt.Sprintf(`{"jsonrpc":"2.0","id":800,"method":"node/add","params":{"address":"192.0.2.1","name":%q}}`, nodeName) + "\n"
 	if _, err := stdin.Write([]byte(addReq)); err != nil {
 		t.Fatalf("write node/add: %v", err)
 	}
