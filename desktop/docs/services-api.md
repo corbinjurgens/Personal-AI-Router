@@ -260,6 +260,7 @@
 | `cluster:invite-received` | request (we call) | ✅ yes |
 | `discovery:nodes-changed` | request (we call) | ✅ yes |
 | `engine:install-progress` | request (we call) | ✅ yes |
+| `engine:intent-changed` | request (we call) | ➖ ignored |
 | `engine:models-changed` | request (we call) | ✅ yes |
 | `engine:pull-progress` | request (we call) | ✅ yes |
 | `engine:remote-progress` | request (we call) | ✅ yes |
@@ -268,8 +269,10 @@
 | `engine:state-changed` | request (we call) | ✅ yes |
 | `error` | request (we call) | ✅ yes |
 | `errors:update` | request (we call) | ✅ yes |
+| `node:availability-changed` | request (we call) | ✅ yes |
 | `nodes:changed` | request (we call) | ✅ yes |
 | `performance:changed` | request (we call) | ✅ yes |
+| `policy:changed` | request (we call) | ✅ yes |
 | `service/broker-restarted` | request (we call) | ✅ yes |
 | `workloads:remove` | request (we call) | ✅ yes |
 | `workloads:upsert` | request (we call) | ✅ yes |
