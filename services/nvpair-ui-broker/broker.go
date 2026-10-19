@@ -1039,6 +1039,25 @@ func (b *Broker) pushClusterIdentityToNodeInfo() {
 // pipeline; the rest of each worker's notification stream is logged and
 // dropped until its control-plane relay is wired in.
 func (b *Broker) forwardEngineNotification(method string, params json.RawMessage) {
+	b.forwardEngineNotificationFrom(nil, method, params)
+}
+
+func (b *Broker) forwardEngineNotificationFrom(source *engineManagerSource, method string, params json.RawMessage) {
+	if method == engineModelIdentityMethod {
+		b.observeModelIdentity(source, params)
+		return
+	}
+	if method == engineStateChangedMethod {
+		var st struct {
+			Engine  string `json:"engine"`
+			Running bool   `json:"running"`
+		}
+		if json.Unmarshal(params, &st) == nil && st.Engine != "" {
+			if !b.observeEngineRunningFrom(source, st.Engine, st.Running) {
+				return
+			}
+		}
+	}
 	if b.handleSwitchEngineNotification(method, params) {
 		return
 	}
@@ -1672,7 +1691,7 @@ func (b *Broker) Serve(ctx context.Context) error {
 		defer b.settingsSup.Stop()
 	}
 	b.prepareOllamaHostAliasCandidate()
-	b.engineMgrSup = b.startOptionalWorker("engine-manager", b.engineMgrPath, b.spawnEngineMgr, func() { b.setEngineMgr(nil); b.clearEngineRelaySub(); b.clearEngineManagerIdentity() })
+	b.engineMgrSup = b.startOptionalWorker("engine-manager", b.engineMgrPath, b.spawnEngineMgr, func() { b.setEngineMgr(nil); b.clearEngineRelaySub() })
 	if b.engineMgrSup != nil {
 		defer b.engineMgrSup.Stop()
 	}

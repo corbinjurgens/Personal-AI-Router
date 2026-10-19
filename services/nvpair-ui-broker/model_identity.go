@@ -36,9 +36,28 @@ type engineManagerIdentity struct {
 // method with. Such a proxy has no strict capacity to withdraw.
 const rpcMethodNotFound = -32601
 
+// A nonzero-sized allocation gives each worker a distinct, immutable source,
+// including before startRPCWorker has returned its handle.
+type engineManagerSource struct{ marker byte }
+
+func (b *Broker) activateEngineManagerSource() *engineManagerSource {
+	source := &engineManagerSource{}
+	r := b.nodePolicyRuntime()
+	r.mu.Lock()
+	r.engineManagerSource = source
+	r.engineIdentity = nil
+	r.mu.Unlock()
+	b.identityChanged()
+	return source
+}
+
 // observeModelIdentity takes engine-manager's whole identity snapshot. It runs
 // on engine-manager's read pump, so the proxy push goes out on its own.
-func (b *Broker) observeModelIdentity(params json.RawMessage) {
+func (b *Broker) observeModelIdentity(source *engineManagerSource, params json.RawMessage) {
+	b.acceptModelIdentity(source, decodeModelIdentity(params))
+}
+
+func decodeModelIdentity(params json.RawMessage) map[string]engineManagerIdentity {
 	var p struct {
 		Engines map[string]engineManagerIdentity `json:"engines"`
 	}
@@ -47,18 +66,31 @@ func (b *Broker) observeModelIdentity(params json.RawMessage) {
 		slog.Warn("engine-manager sent an unreadable model identity; withdrawing it", "err", err)
 		p.Engines = nil
 	}
+	return p.Engines
+}
+
+func (b *Broker) acceptModelIdentity(source *engineManagerSource, engines map[string]engineManagerIdentity) {
 	r := b.nodePolicyRuntime()
 	r.mu.Lock()
-	r.engineIdentity = p.Engines
+	if source == nil || r.engineManagerSource != source {
+		r.mu.Unlock()
+		return
+	}
+	r.engineIdentity = engines
 	r.mu.Unlock()
 	b.identityChanged()
 }
 
-// clearEngineManagerIdentity withdraws every run identity when engine-manager
+// retireEngineManagerSource withdraws every run identity when engine-manager
 // exits: the processes it reported may stop or be replaced without it.
-func (b *Broker) clearEngineManagerIdentity() {
+func (b *Broker) retireEngineManagerSource(source *engineManagerSource) {
 	r := b.nodePolicyRuntime()
 	r.mu.Lock()
+	if source == nil || r.engineManagerSource != source {
+		r.mu.Unlock()
+		return
+	}
+	r.engineManagerSource = nil
 	r.engineIdentity = nil
 	r.mu.Unlock()
 	b.identityChanged()

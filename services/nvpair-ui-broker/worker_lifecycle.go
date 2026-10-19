@@ -489,8 +489,15 @@ func (b *Broker) spawnEngineMgr() (supervisedHandle, error) {
 		args = append(args, "--reserved-port", fmt.Sprintf("%d", aliasPort))
 	}
 	args = append(args, b.clusterDirArgs()...)
-	w, err := startRPCWorker("engine-manager", b.engineMgrPath, args, b.forwardEngineNotification, b.engineManagerExited)
+	source := b.activateEngineManagerSource()
+	w, err := startRPCWorker("engine-manager", b.engineMgrPath, args, func(method string, params json.RawMessage) {
+		b.forwardEngineNotificationFrom(source, method, params)
+	}, func(exited *rpcWorker) {
+		b.retireEngineManagerSource(source)
+		b.engineManagerExited(exited)
+	})
 	if err != nil {
+		b.retireEngineManagerSource(source)
 		return nil, err
 	}
 	b.workersMu.Lock()
@@ -505,7 +512,7 @@ func (b *Broker) spawnEngineMgr() (supervisedHandle, error) {
 	}
 	// The recovery loop owns all retries; this continuation runs once, only
 	// after successful cleanup of this still-current replacement.
-	go b.refreshEnginePolicySnapshot(w)
+	go b.refreshEnginePolicySnapshotFrom(w, source)
 	// Re-push the alias reservation before anything can drive this worker: a
 	// respawned engine-manager starts with an empty reservation and must not
 	// adopt or start a backend on the port the proxy alias owns.
