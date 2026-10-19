@@ -343,7 +343,7 @@ func (b *Broker) setProxyProcessHandle(pp *proxyProcess) {
 // clearProxyHandles withdraws the process handle and every engine's handle.
 func (b *Broker) clearProxyHandles() {
 	b.setProxyProcessHandle(nil)
-	for _, profile := range engineProxyProfiles {
+	for _, profile := range b.frontedEngineProfiles() {
 		b.setEngineProxyHandle(profile, nil)
 	}
 }
