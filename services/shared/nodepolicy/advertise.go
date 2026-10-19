@@ -216,7 +216,7 @@ func (c StrictAdmissionCapability) MarshalJSON() ([]byte, error) {
 // UnmarshalJSON distinguishes an absent capability from explicit null. Existing
 // advertisement fields retain their R1 decoding and encoding behavior.
 func (a *Advertisement) UnmarshalJSON(data []byte) error {
-	if err := checkModelListKeys(data); err != nil {
+	if err := CheckModelListKeys(data); err != nil {
 		return err
 	}
 	type wire Advertisement

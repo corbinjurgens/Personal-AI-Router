@@ -131,7 +131,7 @@ type Policy struct {
 // UnmarshalJSON retains omitted defaults and validates the new fields' raw
 // member names before encoding/json can discard duplicate occurrences.
 func (p *Policy) UnmarshalJSON(data []byte) error {
-	if err := checkModelListKeys(data); err != nil {
+	if err := CheckModelListKeys(data); err != nil {
 		return err
 	}
 	type wire Policy
@@ -219,6 +219,10 @@ func decodeModelList(name string, data []byte) ([]Role, error) {
 	return refs, validateModelList(name, refs)
 }
 
+// maxModelReferenceBytes bounds the JSON-encoded engine/model object, including
+// escaping. Both 256-entry lists leave room in the 256 KiB remote policy body.
+const maxModelReferenceBytes = 256
+
 func validateModelList(name string, refs []Role) error {
 	if len(refs) > 256 {
 		return fmt.Errorf("%s must contain at most 256 entries", name)
@@ -228,6 +232,13 @@ func validateModelList(name string, refs []Role) error {
 		if err := checkModelRef(ref.Engine, ref.Model, 0, nil); err != nil {
 			return fmt.Errorf("%s[%d]: %w", name, i, err)
 		}
+		encoded, err := json.Marshal(ref)
+		if err != nil {
+			return err
+		}
+		if len(encoded) > maxModelReferenceBytes {
+			return fmt.Errorf("%s[%d]: encoded model reference must be at most %d bytes", name, i, maxModelReferenceBytes)
+		}
 		if seen[ref] {
 			return fmt.Errorf("%s[%d]: duplicate engine/model", name, i)
 		}
@@ -236,9 +247,10 @@ func validateModelList(name string, refs []Role) error {
 	return nil
 }
 
-// checkModelListKeys checks raw keys before JSON decoding collapses duplicates
-// or folds case. Legacy fields retain their existing decoding rules.
-func checkModelListKeys(data []byte) error {
+// CheckModelListKeys checks raw servedModels and residentModels keys before JSON
+// decoding collapses duplicates or folds case. Call it before preprocessing a
+// policy object. Legacy fields retain their existing decoding rules.
+func CheckModelListKeys(data []byte) error {
 	dec := json.NewDecoder(bytes.NewReader(data))
 	if tok, err := dec.Token(); err != nil || tok != json.Delim('{') {
 		return errors.New("policy must be a JSON object")
@@ -647,7 +659,7 @@ func validateRevision(rev string) error {
 // execution stay off. Parsing the marshaled result of Parse gives the same
 // policy.
 func Parse(data []byte) (Policy, error) {
-	if err := checkModelListKeys(data); err != nil {
+	if err := CheckModelListKeys(data); err != nil {
 		return Policy{}, fmt.Errorf("parse policy: %w", err)
 	}
 	var head struct {

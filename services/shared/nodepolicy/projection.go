@@ -36,7 +36,7 @@ type PeerPolicy struct {
 }
 
 func (p *PeerPolicy) UnmarshalJSON(data []byte) error {
-	if err := checkModelListKeys(data); err != nil {
+	if err := CheckModelListKeys(data); err != nil {
 		return err
 	}
 	type wire PeerPolicy
