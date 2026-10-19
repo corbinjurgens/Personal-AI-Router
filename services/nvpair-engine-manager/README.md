@@ -49,6 +49,45 @@ namespace is the surface the orchestrator/broker forwards from the UI.
 
 ## JSON-RPC surface
 
+### Automatic resident loads (internal)
+
+`engine:reconcile-resident` is a parent-IPC-only broker operation. It consumes
+the strict `nodepolicy.ReconcileResidentParams` DTO, including the current
+manager incarnation, process-bound reservation, identity, policy revision,
+absolute operation budget (`timeoutMs`, at most 60 seconds), and finite
+`load.contextLength` / `load.keepAliveSeconds`. Clients and peers must not
+invoke it. The broker owns policy, qualification and capacity; the manager
+does not infer a grant from saved intent.
+
+Only an explicit Ollama-family semantic load binding to prompt-free
+`POST /api/generate` is supported. The manager sends the normalized installed
+model, `stream:false`, `options.num_ctx = contextLength` and numeric
+`keep_alive = keepAliveSeconds` (seconds). Other fixed load parameters,
+restart-after bindings, implicit bindings and other engine families are
+`unsupported-load`. No prompt, download, delete, copy, engine start, restore,
+generic action fallback or inference is performed. This path takes E3
+admission and the lifecycle lock, never B2's content guard.
+
+Before and after admission, unknown projection, local pause/Off, switch busy,
+engine Off, missing installed model, stale/withdrawn identity or unsupported
+load refuse execution. Immediately before loading the manager emits
+`engine:dispatch-resident-request` with `{id, params}`; the broker relays the
+`node/dispatch-resident` params to the proxy and returns an internal
+`engine:dispatch-resident-reply` notification with `{id, result}` or
+`{id, error}`. Only a correlated live `dispatched:true` grants permission.
+See [spec.md](spec.md#automatic-residency-internal-parent-ipc) for the exact hop.
+
+The result is `not-dispatched`, `loaded`, `failed`, `timeout`, `cancelled` or
+`unknown`. This DTO has no reason field; local refusal conditions and typed
+proxy reasons are documented in the spec. `loaded` requires a new authoritative
+post-call inventory observation with the current manager/model identity;
+even a lost load response can converge through that readback. Missing inventory
+is unknown, while an explicit empty list is observed absence. Every dispatched
+call pokes the loaded watcher. Desired residents never become observed inventory
+or new desired-state-file fields. Duplicate operation IDs coalesce for their
+original lifetime; changed payloads conflict. Idle unload protection belongs to
+the broker.
+
 Requests (caller → service):
 
 | Method | Params | Result |
