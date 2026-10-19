@@ -269,7 +269,9 @@ func TestPublicTransportHeaders(t *testing.T) {
 				if r.Body != nil {
 					t.Fatal("raw error body exposed")
 				}
-				if !r.FirstBodyAt().After(r.HeaderAt) {
+				// Windows clock resolution can make both reads equal, so require a
+				// recorded time that is not before the headers rather than a later one.
+				if r.FirstBodyAt().IsZero() || r.FirstBodyAt().Before(r.HeaderAt) {
 					t.Fatal("discarded error body timing lost")
 				}
 			} else {
@@ -527,7 +529,7 @@ func TestPublicTransportCancel(t *testing.T) {
 				allowed = 500 * time.Millisecond
 			}
 			if mode == "bytes reset idle" {
-				if err != nil || string(body) != "xxx" || !r.FirstBodyAt().After(r.HeaderAt) {
+				if err != nil || string(body) != "xxx" || r.FirstBodyAt().IsZero() || r.FirstBodyAt().Before(r.HeaderAt) {
 					t.Fatalf("idle was not reset: %q %v", body, err)
 				}
 			} else if err == nil || time.Since(start) > allowed {
