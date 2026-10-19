@@ -30,6 +30,7 @@
 - ⚠️ nvpair-engine-manager → engine:restart
 - ⚠️ nvpair-engine-manager → engine:set-port
 - ⚠️ nvpair-engine-manager → engine:sleep
+- ⚠️ nvpair-engine-manager → engine:switch-recovery-ready
 - ⚠️ nvpair-engine-manager → engine:wake
 - ⚠️ nvpair-engine-manager → internal:set-reserved-port
 - ⚠️ nvpair-job-scheduler → scheduler:get-interval
@@ -46,6 +47,7 @@
 - ⚠️ nvpair-proxy → node/set-local-backend
 - ⚠️ nvpair-ui-broker → discovery:unsubscribe
 - ⚠️ nvpair-ui-broker → engine:configure-launch
+- ⚠️ nvpair-ui-broker → engine:restart
 - ⚠️ nvpair-ui-broker → engine:set-port
 - ⚠️ nvpair-ui-broker → engine:set-reserved-port
 - ⚠️ nvpair-ui-broker → engine:unsubscribe
@@ -137,6 +139,7 @@
 | `engine:start` | request (we call) | ✅ yes |
 | `engine:status` | request (we call) | ✅ yes |
 | `engine:stop` | request (we call) | ✅ yes |
+| `engine:switch-recovery-ready` | request (we call) | ⚠️ not called |
 | `engine:uninstall` | request (we call) | ✅ yes |
 | `engine:uninstall-managed` | request (we call) | ✅ yes |
 | `engine:unload-model` | request (we call) | ✅ yes |
@@ -290,6 +293,7 @@
 | `engine:settings-changed` | notification (we consume) | ✅ yes |
 | `engine:settings-projection` | notification (we consume) | ➖ ignored |
 | `engine:settings-reply` | notification (we consume) | ➖ ignored |
+| `engine:switch-reply` | notification (we consume) | ➖ ignored |
 | `errors:clear` | notification (we consume) | ✅ yes |
 | `errors:report` | notification (we consume) | ✅ yes |
 | `errors:update` | notification (we consume) | ✅ yes |
@@ -311,11 +315,16 @@
 | `engine:model-identity` | request (we call) | ➖ ignored |
 | `engine:models-changed` | request (we call) | ✅ yes |
 | `engine:preview-settings` | request (we call) | ✅ yes |
+| `engine:restart` | request (we call) | ⚠️ not called |
 | `engine:set-port` | request (we call) | ⚠️ not called |
 | `engine:set-reserved-port` | request (we call) | ⚠️ not called |
 | `engine:start` | request (we call) | ✅ yes |
 | `engine:state-changed` | request (we call) | ✅ yes |
 | `engine:subscribe` | request (we call) | ✅ yes |
+| `engine:switch` | request (we call) | ✅ yes |
+| `engine:switch-cancel` | request (we call) | ➖ ignored |
+| `engine:switch-request` | request (we call) | ➖ ignored |
+| `engine:switch-status` | request (we call) | ✅ yes |
 | `engine:unsubscribe` | request (we call) | ⚠️ not called |
 | `engine:wake` | request (we call) | ⚠️ not called |
 | `errors:get-initial` | request (we call) | ✅ yes |
