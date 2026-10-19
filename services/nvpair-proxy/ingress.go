@@ -272,6 +272,10 @@ func (f *facade) serveStrictLocal(w http.ResponseWriter, r *http.Request, body [
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
 	validated, err := f.host.admission.qualifyStrict(f.profile.Name, model, r.URL.Path, body, req.Identity)
+	if errors.Is(err, errAmbiguousModel) {
+		writeIngressError(w, http.StatusBadRequest, "ambiguous-model", ambiguousModelMessage)
+		return
+	}
 	var invalid *strictQualificationError
 	if errors.As(err, &invalid) {
 		writeIngressError(w, http.StatusBadRequest, "strict-qualification", err.Error())

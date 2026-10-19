@@ -312,14 +312,12 @@
 | `engine:get-settings` | request (we call) | ✅ yes |
 | `engine:install` | request (we call) | ✅ yes |
 | `engine:intent-changed` | request (we call) | ➖ ignored |
-| `engine:model-identity` | request (we call) | ➖ ignored |
 | `engine:models-changed` | request (we call) | ✅ yes |
 | `engine:preview-settings` | request (we call) | ✅ yes |
 | `engine:restart` | request (we call) | ⚠️ not called |
 | `engine:set-port` | request (we call) | ⚠️ not called |
 | `engine:set-reserved-port` | request (we call) | ⚠️ not called |
 | `engine:start` | request (we call) | ✅ yes |
-| `engine:state-changed` | request (we call) | ✅ yes |
 | `engine:subscribe` | request (we call) | ✅ yes |
 | `engine:switch` | request (we call) | ✅ yes |
 | `engine:switch-cancel` | request (we call) | ➖ ignored |
