@@ -4,7 +4,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Position = 0, Mandatory = $true)]
-    [ValidateSet('list', 'rules', 'run')][string]$Command,
+    [ValidateSet('list', 'rules', 'run', 'install')][string]$Command,
     [switch]$Remove,
     [string]$Module,
     [string]$Package = '.',
@@ -19,6 +19,21 @@ if (!$root -or $root -notmatch '^(?:[A-Za-z]:[\\/]|\\\\[^\\/]+[\\/][^\\/]+(?:[\\
 }
 $root = [IO.Path]::GetFullPath($root)
 $services = Join-Path (Split-Path $PSScriptRoot -Parent) 'services'
+
+if ($Command -eq 'install') {
+    $wrapper = Join-Path $root 'bin\nvpair-test-exec.exe'
+    New-Item -ItemType Directory -Force -Path (Split-Path $wrapper -Parent) | Out-Null
+    & go -C (Join-Path $services 'shared') build -o $wrapper ./testbin/cmd/nvpair-test-exec
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    # Go tokenizes both GOFLAGS and the -exec command, requiring two quote layers.
+    $execFlag = '-exec=' + $wrapper
+    if ($execFlag -match '\s') { $execFlag = "'" + '-exec="' + $wrapper + '"' + "'" }
+    $flags = ($env:GOFLAGS + ' ' + $execFlag).Trim()
+    "NVPAIR_TEST_BIN_DIR=$root"
+    "GOFLAGS=$flags"
+    'Apply these user environment settings, then open a new shell. No settings were changed.'
+    exit 0
+}
 
 function Get-TestPackages([IO.DirectoryInfo]$ModuleDir) {
     $lines = & go -C $ModuleDir.FullName list -f '{{if or .TestGoFiles .XTestGoFiles}}{{.Dir}}{{end}}' ./...
