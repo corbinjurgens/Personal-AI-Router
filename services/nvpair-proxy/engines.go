@@ -12,14 +12,19 @@ package main
 // declaration here could drift from theirs without failing to compile. What
 // remains below is what only the proxy needs to know.
 //
-// Adding an engine is one entry here plus one in the broker's table. The
-// values that are derivable are derived: the applog component and the error-ID
-// prefix both come from Name via ComponentName, so they cannot disagree with
-// each other. The persisted-port filename is declared instead, because
-// Ollama's predates the multi-engine world — see PortFile in
+// The built-in engines are one fixed entry each here plus one in the broker's
+// table. The values that are derivable are derived: the applog component and
+// the error-ID prefix both come from Name via ComponentName, so they cannot
+// disagree with each other. The persisted-port filename is declared instead,
+// because Ollama's predates the multi-engine world — see PortFile in
 // nvpair-shared/engines.
+//
+// Any other engine is fronted from its descriptor (dynamicProfile): its
+// declared protocols select route sets from protocolRoutes, which is the
+// proxy's finite, coded protocol registry. Nothing is added here per engine.
 
 import (
+	"fmt"
 	"slices"
 	"strings"
 
@@ -122,22 +127,27 @@ type engineProfile struct {
 	SupportsHostAlias bool
 }
 
-// ollamaBaseRoutes is the engine-specific surface that Ollama exposes before
-// the shared compatibility routes are added.
-var ollamaBaseRoutes = []route{
+// ollamaNativeRoutes is Ollama's native /api surface: the ollama-api protocol.
+var ollamaNativeRoutes = []route{
 	{Path: "/api/generate", Role: roleInferencePOST},
 	{Path: "/api/chat", Role: roleInferencePOST},
 	{Path: "/api/embeddings", Role: roleInferencePOST},
 	{Path: "/api/embed", Role: roleInferencePOST},
 	{Path: "/api/tags", Role: roleModelListNativeGET},
+}
+
+// openAIModelListRoutes is the OpenAI-compatible /v1/models list.
+var openAIModelListRoutes = []route{
 	{Path: "/v1/models", Role: roleModelListOpenAIGET},
 }
 
+// ollamaBaseRoutes is the engine-specific surface that Ollama exposes before
+// the shared compatibility routes are added.
+var ollamaBaseRoutes = slices.Concat(ollamaNativeRoutes, openAIModelListRoutes)
+
 // lmStudioBaseRoutes is the engine-specific surface that LM Studio exposes
 // before the shared compatibility routes are added.
-var lmStudioBaseRoutes = []route{
-	{Path: "/v1/models", Role: roleModelListOpenAIGET},
-}
+var lmStudioBaseRoutes = slices.Clone(openAIModelListRoutes)
 
 // llamaCPPBaseRoutes serves both model-list paths through the fleet inventory,
 // querying llama.cpp's router endpoint. Its response uses the OpenAI envelope.
@@ -156,6 +166,67 @@ var openAIInferenceRoutes = []route{
 // anthropicInferenceRoutes is the Anthropic-compatible inference surface.
 var anthropicInferenceRoutes = []route{
 	{Path: "/v1/messages", Role: roleInferencePOST},
+}
+
+// protocolRoutes is the proxy's protocol registry: the route set each
+// descriptor protocol selects for a dynamic facade. It is finite and coded; a
+// protocol missing here cannot be fronted, and engines.ProxyCanFront refuses it
+// before a facade is built. TestProtocolRoutesCoverFacadeProtocols keeps this
+// table and engines.FacadeProtocols in step.
+var protocolRoutes = map[string][]route{
+	engines.ProtocolOllamaAPI:         ollamaNativeRoutes,
+	engines.ProtocolOpenAIV1:          slices.Concat(openAIModelListRoutes, openAIInferenceRoutes),
+	engines.ProtocolOpenAIChat:        slices.Concat(openAIModelListRoutes, []route{{Path: "/v1/chat/completions", Role: roleInferencePOST}}),
+	engines.ProtocolAnthropicMessages: anthropicInferenceRoutes,
+	engines.ProtocolLlamaCPPRouter:    llamaCPPBaseRoutes,
+}
+
+// dynamicProfile builds the facade profile of a descriptor engine that is not
+// built in. It fails closed: a descriptor ProxyCanFront rejects, or a built-in
+// engine (whose facade is fixed), has no dynamic profile.
+//
+// llama.cpp's router list is applied first because it serves /v1/models from
+// the router's /models; a later protocol's plain /v1/models must not shadow
+// that rewrite. Otherwise routes keep the descriptor's protocol order, and a
+// path already classified for its method is not added twice.
+func dynamicProfile(d engines.Descriptor) (engineProfile, error) {
+	if err := engines.ProxyCanFront(d); err != nil {
+		return engineProfile{}, err
+	}
+	identity, ok := engines.DynamicEngine(d.Engine, d.Label)
+	if !ok {
+		return engineProfile{}, fmt.Errorf("engine %q is built in; its facade takes no descriptor", d.Engine)
+	}
+	ordered := slices.Clone(d.Protocols)
+	if i := slices.Index(ordered, engines.ProtocolLlamaCPPRouter); i > 0 {
+		ordered = slices.Concat([]string{engines.ProtocolLlamaCPPRouter}, slices.Delete(ordered, i, i+1))
+	}
+	var routes []route
+	for _, protocol := range ordered {
+		set, ok := protocolRoutes[protocol]
+		if !ok {
+			return engineProfile{}, fmt.Errorf("engine %q: no routes for protocol %q", d.Engine, protocol)
+		}
+		for _, r := range set {
+			if !slices.ContainsFunc(routes, func(have route) bool {
+				return have.Path == r.Path && have.Role.method() == r.Role.method()
+			}) {
+				routes = append(routes, r)
+			}
+		}
+	}
+	naming := exactID
+	if d.ModelNaming == engines.ModelNamingImpliedLatestTag {
+		naming = impliedLatestTag
+	}
+	return engineProfile{Engine: identity, Routes: routes, ModelNaming: naming}, nil
+}
+
+// dynamic reports whether the profile was built from a descriptor rather than
+// the built-in table.
+func (p engineProfile) dynamic() bool {
+	_, builtin := engines.ByName(p.Name)
+	return !builtin
 }
 
 var profiles = buildProfiles()

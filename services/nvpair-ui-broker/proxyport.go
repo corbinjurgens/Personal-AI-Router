@@ -156,7 +156,7 @@ func (b *Broker) finishOllamaProxyTerminal() {
 // waiting on LM Studio's gate must not be held by Ollama's state.
 func (b *Broker) configureProxySupervisorCallbacks(sup *supervisor) {
 	sup.onCrash, sup.onRecovered = b.supervisedWorkerCallbacks(engines.ProxyComponent, func() {
-		for _, profile := range engineProxyProfiles {
+		for _, profile := range b.frontedEngineProfiles() {
 			b.setEngineProxyHandle(profile, nil)
 		}
 	})

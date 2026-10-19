@@ -156,8 +156,11 @@ func decodeStrict(params json.RawMessage, v any) error {
 	return nil
 }
 
+// knownEngine accepts a built-in engine or a valid descriptor engine ID. Policy
+// state may name an engine this process does not front; it then has no
+// candidates here rather than invalidating the whole message.
 func knownEngine(name string) error {
-	if _, ok := engines.ByName(name); !ok {
+	if !engines.ValidRoutingID(name) {
 		return fmt.Errorf("unknown engine %q", name)
 	}
 	return nil
@@ -170,6 +173,16 @@ func normalizeEngineModel(engine, model string) string {
 		return prof.normalizeModel(model)
 	}
 	return strings.TrimSpace(model)
+}
+
+// normalizeEngineModel is normalizeEngineModel extended to the descriptor
+// engines this process fronts, whose naming rule lives on their facade. An
+// engine without a facade here keeps exact naming.
+func (p *Proxy) normalizeEngineModel(engine, model string) string {
+	if f := p.facadeFor(engine); f != nil {
+		return f.profile.normalizeModel(model)
+	}
+	return normalizeEngineModel(engine, model)
 }
 
 // localEngineHealthy reports whether this node's engine is up, as

@@ -6,9 +6,12 @@ package noderec
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"strings"
 	"testing"
+
+	"nvpair-shared/engines"
 )
 
 func validPeerServices() PeerServicesDescriptor {
@@ -45,6 +48,39 @@ func TestPeerServicesDescriptorRejectsInvalidSnapshot(t *testing.T) {
 	test("URL", func(d *PeerServicesDescriptor) { d.Addresses = []string{"http://192.168.1.5"} })
 	test("duplicate address", func(d *PeerServicesDescriptor) { d.Addresses = []string{"192.168.1.5", "192.168.1.5"} })
 	test("name control character", func(d *PeerServicesDescriptor) { d.Name = "host\nforged" })
+}
+
+// A descriptor-backed engine's service key travels on this authenticated
+// path; a malformed or excess dynamic key does not.
+func TestPeerServicesDescriptorCarriesDynamicEngineKeys(t *testing.T) {
+	d := validPeerServices()
+	d.Services = append(d.Services, PeerService{Service: "e-llamacpp-custom", Port: 18180}, PeerService{Service: "e-strata", Port: 18181})
+	if err := ValidatePeerServicesDescriptor(d, "peer-a"); err != nil {
+		t.Fatalf("dynamic engine keys rejected: %v", err)
+	}
+	for _, key := range []ServiceKey{"e-", "e-ollama", "e-a/b", "e-a:b", ServiceKey("e-" + strings.Repeat("a", engines.MaxDynamicIDLen+1))} {
+		t.Run(string(key), func(t *testing.T) {
+			d := validPeerServices()
+			d.Services = append(d.Services, PeerService{Service: key, Port: 18180})
+			if err := ValidatePeerServicesDescriptor(d, "peer-a"); err == nil {
+				t.Fatal("malformed dynamic key accepted")
+			}
+		})
+	}
+	t.Run("too many dynamic keys", func(t *testing.T) {
+		d := validPeerServices()
+		d.Services = nil
+		for i := range engines.MaxDynamicEngines + 1 {
+			d.Services = append(d.Services, PeerService{Service: ServiceKey(fmt.Sprintf("e-engine%d", i)), Port: 18180 + i})
+		}
+		if err := ValidatePeerServicesDescriptor(d, "peer-a"); err == nil {
+			t.Fatal("more than MaxDynamicEngines dynamic keys accepted")
+		}
+		d.Services = d.Services[:engines.MaxDynamicEngines]
+		if err := ValidatePeerServicesDescriptor(d, "peer-a"); err != nil {
+			t.Fatalf("MaxDynamicEngines dynamic keys rejected: %v", err)
+		}
+	})
 }
 
 func TestPeerServicesCompleteWithdrawal(t *testing.T) {

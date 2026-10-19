@@ -110,7 +110,7 @@ func TestPolicyMethods_SetPolicyValidatesAndKeepsPrevious(t *testing.T) {
 	bad.Version = 99
 	rpcErr(t, p, w, nodepolicy.MethodSetPolicy, bad)
 	bad = pol
-	bad.Tiers = map[string][]nodepolicy.TierEntry{"weak": {{Kind: nodepolicy.EntryLocal, Engine: "nope", Model: "m"}}}
+	bad.Tiers = map[string][]nodepolicy.TierEntry{"weak": {{Kind: nodepolicy.EntryLocal, Engine: "no/pe", Model: "m"}}}
 	rpcErr(t, p, w, nodepolicy.MethodSetPolicy, bad)
 	if got := p.admission.currentPolicy().Admission.MaxResidentModels; got != 3 {
 		t.Fatalf("an invalid policy replaced the previous one: maxResidentModels = %d", got)
@@ -133,7 +133,7 @@ func TestPolicyMethods_Availability(t *testing.T) {
 func TestPolicyMethods_DrainResidencyIntent(t *testing.T) {
 	p, w := policyProxy(t)
 	rpcOK(t, p, w, nodepolicy.MethodSetEngineDrain, nodepolicy.SetEngineDrainParams{Engine: "ollama", Drain: true})
-	rpcErr(t, p, w, nodepolicy.MethodSetEngineDrain, nodepolicy.SetEngineDrainParams{Engine: "vllm", Drain: true})
+	rpcErr(t, p, w, nodepolicy.MethodSetEngineDrain, nodepolicy.SetEngineDrainParams{Engine: "v/llm", Drain: true})
 	if !p.admission.drain["ollama"] {
 		t.Fatal("drain not applied")
 	}
@@ -145,7 +145,7 @@ func TestPolicyMethods_DrainResidencyIntent(t *testing.T) {
 		t.Fatal("residency not applied under the engine's naming")
 	}
 	rpcErr(t, p, w, nodepolicy.MethodSetResidency, nodepolicy.SetResidencyParams{
-		LoadedByEngine: map[string][]string{"vllm": {"x"}},
+		LoadedByEngine: map[string][]string{"v/llm": {"x"}},
 	})
 	rpcErr(t, p, w, nodepolicy.MethodSetResidency, map[string]any{})
 	if !p.admission.isLoaded("ollama", "qwen3") {
@@ -159,11 +159,37 @@ func TestPolicyMethods_DrainResidencyIntent(t *testing.T) {
 		t.Fatal("intent not applied")
 	}
 	rpcErr(t, p, w, nodepolicy.MethodSetEngineIntent, nodepolicy.SetEngineIntentParams{
-		EnabledByEngine: map[string]bool{"vllm": true},
+		EnabledByEngine: map[string]bool{"v/llm": true},
 	})
 	if on, _ := p.admission.engineIntent("ollama"); !on {
 		t.Fatal("invalid intent replaced the previous one")
 	}
+}
+
+// engine-manager reports every registered engine, so a descriptor engine in
+// a drain, residency or intent message is ordinary state, not a reason to
+// reject the whole message.
+func TestPolicyMethods_AcceptDescriptorEngineIDs(t *testing.T) {
+	p, w := policyProxy(t)
+	rpcOK(t, p, w, nodepolicy.MethodSetEngineDrain, nodepolicy.SetEngineDrainParams{Engine: "llamacpp-custom", Drain: true})
+	if !p.admission.drain["llamacpp-custom"] {
+		t.Fatal("descriptor engine drain not applied")
+	}
+	rpcOK(t, p, w, nodepolicy.MethodSetResidency, nodepolicy.SetResidencyParams{
+		LoadedByEngine: map[string][]string{"ollama": {"qwen3"}, "llamacpp-custom": {"org/model:Q4_K_M"}},
+	})
+	if !p.admission.isLoaded("llamacpp-custom", "org/model:Q4_K_M") || !p.admission.isLoaded("ollama", "qwen3:latest") {
+		t.Fatal("residency with a descriptor engine not applied")
+	}
+	rpcOK(t, p, w, nodepolicy.MethodSetEngineIntent, nodepolicy.SetEngineIntentParams{
+		EnabledByEngine: map[string]bool{"ollama": true, "strata": false},
+	})
+	if on, known := p.admission.engineIntent("strata"); !known || on {
+		t.Fatal("descriptor engine intent not applied")
+	}
+	policy := nodepolicy.Default()
+	policy.Tiers = map[string][]nodepolicy.TierEntry{"weak": {{Kind: nodepolicy.EntryLocal, Engine: "llamacpp-custom", Model: "m"}}}
+	rpcOK(t, p, w, nodepolicy.MethodSetPolicy, policy)
 }
 
 // The node policy methods are process-scoped: an engine-addressed copy is not

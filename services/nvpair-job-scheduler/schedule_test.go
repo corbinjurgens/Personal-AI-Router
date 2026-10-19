@@ -312,6 +312,44 @@ func TestRank_NodeWideMixedEngineSynthetic(t *testing.T) {
 	}
 }
 
+// A descriptor engine's work counts toward its node's load like a built-in
+// engine's, and the engine gets its own priority output and status entry while
+// it has work. An ID that is not a routing identity gets no output.
+func TestRank_DescriptorEngineIdentity(t *testing.T) {
+	rec := &capRW{}
+	m := mgrWith(rec, []string{"a", "b"},
+		workload{ID: "1", Engine: "llamacpp-custom", RunID: "c1", State: "running", OriginatedFrom: "x", ScheduledOn: "a"},
+		workload{ID: "2", Engine: "llamacpp-custom", RunID: "c2", State: "queued", OriginatedFrom: "x", ScheduledOn: "a"},
+		workload{ID: "5", Engine: "llamacpp-custom", RunID: "c3", State: "queued", OriginatedFrom: "x", ScheduledOn: "a"},
+		workload{ID: "3", Engine: "ollama", RunID: "o1", State: "running", OriginatedFrom: "x", ScheduledOn: "b"},
+		workload{ID: "4", Engine: "bad/engine", RunID: "x1", State: "running", OriginatedFrom: "x", ScheduledOn: "b"},
+	)
+	order, ranks := m.rank()
+	assertStrs(t, order, []string{"b", "a"})
+	if pendingOf(ranks, "a") != 3 || pendingOf(ranks, "b") != 2 {
+		t.Fatalf("descriptor work not counted node-wide: %+v", ranks)
+	}
+
+	m.recomputeAll(false)
+	for _, engine := range append(append([]string(nil), schedulerEngines...), "llamacpp-custom") {
+		got := rec.orders(engine)
+		if len(got) != 1 {
+			t.Fatalf("%s emissions = %d, want 1", engine, len(got))
+		}
+		assertStrs(t, got[0], []string{"b", "a"})
+	}
+	if got := rec.orders("bad/engine"); len(got) != 0 {
+		t.Fatalf("invalid engine id got %d emissions", len(got))
+	}
+	status := m.status()
+	if s, ok := status.Engines["llamacpp-custom"]; !ok || len(s.Emitted) != 2 {
+		t.Fatalf("status for the descriptor engine = %+v, %v", s, ok)
+	}
+	if _, ok := status.Engines["bad/engine"]; ok {
+		t.Fatal("status reports an invalid engine id")
+	}
+}
+
 // upsertJSON / removeJSON build the wire params applyUpsert / applyRemove parse,
 // so these tests exercise the real ingestion path (and its catalog keying), not
 // a hand-seeded catalog.

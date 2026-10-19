@@ -9,6 +9,8 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"nvpair-shared/engines"
 )
 
 func TestDefaultIsValid(t *testing.T) {
@@ -30,10 +32,25 @@ func TestParseFillsOmittedFieldsFromDefault(t *testing.T) {
 	}
 }
 
+// A descriptor engine ID is a policy identity like a built-in name: profiles,
+// tiers and roles may name it whether or not this node runs it.
+func TestValidateAcceptsDescriptorEngineIDs(t *testing.T) {
+	p := Default()
+	p.Profiles = []Profile{{Name: "custom", Engine: "llamacpp-custom", Model: "org/model:Q4_K_M"}}
+	p.Tiers = map[string][]TierEntry{"weak": {{Kind: EntryLocal, Engine: "strata", Model: "qwen-next"}}}
+	p.Roles = map[string]Role{TierStrong: {Engine: "llamacpp-custom", Model: "org/model:Q4_K_M"}}
+	if err := p.Validate(); err != nil {
+		t.Fatalf("descriptor engine ids rejected: %v", err)
+	}
+}
+
 func TestValidateRejects(t *testing.T) {
 	cases := map[string]func(*Policy){
 		"draining saved": func(p *Policy) { p.Availability = Draining },
-		"unknown engine": func(p *Policy) { p.Profiles = []Profile{{Name: "a", Engine: "nope", Model: "m"}} },
+		"unknown engine": func(p *Policy) { p.Profiles = []Profile{{Name: "a", Engine: "no/pe", Model: "m"}} },
+		"overlong engine": func(p *Policy) {
+			p.Profiles = []Profile{{Name: "a", Engine: strings.Repeat("e", engines.MaxDynamicIDLen+1), Model: "m"}}
+		},
 		"duplicate profile": func(p *Policy) {
 			p.Profiles = []Profile{{Name: "a", Engine: "ollama", Model: "m"}, {Name: "a", Engine: "ollama", Model: "n"}}
 		},
@@ -420,7 +437,8 @@ func TestValidateRoles(t *testing.T) {
 	test("role without a profile", map[string]Role{TierStrong: {Engine: "ollama", Model: "not-profiled"}}, "")
 	test("unknown tier", map[string]Role{"huge": {Engine: "ollama", Model: "m"}}, `unknown tier "huge"`)
 	test("suffixed alias as tier", map[string]Role{"weak-local": {Engine: "ollama", Model: "m"}}, `unknown tier "weak-local"`)
-	test("unknown engine", map[string]Role{TierWeak: {Engine: "nope", Model: "m"}}, `unknown engine "nope"`)
+	test("unknown engine", map[string]Role{TierWeak: {Engine: "no:pe", Model: "m"}}, `unknown engine "no:pe"`)
+	test("descriptor engine", map[string]Role{TierWeak: {Engine: "llamacpp-custom", Model: "m"}}, "")
 	test("missing model", map[string]Role{TierWeak: {Engine: "ollama"}}, "model is required")
 	test("tier name as model", map[string]Role{TierWeak: {Engine: "ollama", Model: "strong"}}, "reserved alias")
 	test("suffixed alias as model", map[string]Role{TierWeak: {Engine: "ollama", Model: "medium-api"}}, "reserved alias")

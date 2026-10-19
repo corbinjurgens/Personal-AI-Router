@@ -216,7 +216,7 @@ func TestCancel_LookupRules(t *testing.T) {
 		t.Fatalf("unknown workload: %+v %s", f.Error, f.Result)
 	}
 	rpcErr(t, p, w, nodepolicy.MethodWorkloadCancel, map[string]any{})
-	rpcErr(t, p, w, nodepolicy.MethodWorkloadCancel, map[string]any{"workloadId": "1", "engine": "vllm"})
+	rpcErr(t, p, w, nodepolicy.MethodWorkloadCancel, map[string]any{"workloadId": "1", "engine": "v/llm"})
 
 	// Two facades can hold the same id; without an engine that is ambiguous.
 	a, b := newWorkloadCtl(func(string) {}), newWorkloadCtl(func(string) {})

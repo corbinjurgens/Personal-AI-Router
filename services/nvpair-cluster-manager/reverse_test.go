@@ -530,6 +530,66 @@ func TestReverseServicesRequireBrokerStdio(t *testing.T) {
 	}
 }
 
+// A descriptor-backed engine is reachable over reverse exactly while the broker
+// has it registered: registration admits it as pinned TLS, the next snapshot
+// without it withdraws it, and a malformed dynamic key never registers.
+func TestReverseDynamicEngineServiceRegistrationAndWithdrawal(t *testing.T) {
+	const custom = noderec.ServiceKey("e-llamacpp-custom")
+	a, b := newReverseTestManager(t), newReverseTestManager(t)
+	pairReverseManagers(t, a, b)
+	peer, ok := a.reversePeer(b.identity.NodeUUID)
+	if !ok {
+		t.Fatal("paired fixture not admitted")
+	}
+	resolve := func() (clustertrust.ReverseTarget, error) {
+		t.Helper()
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		return a.resolveReverseService(ctx, peer, custom)
+	}
+
+	setReverseServices(t, a, 1, noderec.RegisterParams{Service: noderec.ServiceNodeInfo, Port: 22441})
+	if _, err := resolve(); err == nil {
+		t.Fatal("unregistered dynamic engine resolved")
+	}
+
+	setReverseServices(t, a, 2, noderec.RegisterParams{Service: noderec.ServiceNodeInfo, Port: 22441}, noderec.RegisterParams{Service: custom, Port: 18180})
+	target, err := resolve()
+	if err != nil {
+		t.Fatalf("registered dynamic engine did not resolve: %v", err)
+	}
+	if target.Protocol != clustertrust.ReverseTLS {
+		t.Fatalf("dynamic engine protocol = %v, want pinned TLS", target.Protocol)
+	}
+	setDescriptorSelf(t, a)
+	d, err := a.selfServicesDescriptor()
+	if err != nil {
+		t.Fatalf("self descriptor with a dynamic engine: %v", err)
+	}
+	advertised := false
+	for _, service := range d.Services {
+		advertised = advertised || service == noderec.PeerService{Service: custom, Port: 18180}
+	}
+	if !advertised {
+		t.Fatalf("authenticated descriptor omits the dynamic engine: %+v", d.Services)
+	}
+
+	setReverseServices(t, a, 3, noderec.RegisterParams{Service: noderec.ServiceNodeInfo, Port: 22441})
+	if _, err := resolve(); err == nil {
+		t.Fatal("withdrawn dynamic engine still resolved")
+	}
+
+	for _, key := range []string{"e-ollama", "e-", "e-a/b", "e-" + strings.Repeat("a", 41)} {
+		params := `{"generation":4,"services":[{"service":"` + key + `","port":18180}]}`
+		if err := a.applyLocalServices(json.RawMessage(params)); err == nil {
+			t.Errorf("malformed dynamic key %q registered", key)
+		}
+	}
+	if a.reverse.generation != 3 {
+		t.Fatalf("rejected snapshots moved the generation to %d", a.reverse.generation)
+	}
+}
+
 func TestReversePeerRequiresCurrentAdmission(t *testing.T) {
 	test := func(name string, change func(*Manager, *Manager)) {
 		t.Run(name, func(t *testing.T) {

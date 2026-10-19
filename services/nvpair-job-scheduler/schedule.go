@@ -6,6 +6,7 @@ package main
 import (
 	"context"
 	"log/slog"
+	"slices"
 	"sort"
 	"time"
 
@@ -13,9 +14,29 @@ import (
 	"nvpair-shared/schedulerwire"
 )
 
-// schedulerEngines is the set of engine-specific output contracts. Every engine
-// receives the same node-wide ranking because their work shares node resources.
+// schedulerEngines is the set of built-in engine-specific output contracts.
+// Every engine receives the same node-wide ranking because their work shares
+// node resources. Descriptor engines join them through engineOutputsLocked.
 var schedulerEngines = engines.Names()
+
+// engineOutputsLocked returns every engine that gets a schedule:priority output:
+// the built-in engines, then each descriptor engine ID that has work in the
+// catalog, sorted and bounded by engines.MaxDynamicEngines. An engine ID that is
+// not a valid routing identity gets no output of its own, although its work
+// still counts toward its node's load. Caller holds m.mu.
+func (m *Manager) engineOutputsLocked() []string {
+	var dynamic []string
+	for _, w := range m.catalog {
+		if engines.ValidDynamicID(w.Engine) && !slices.Contains(dynamic, w.Engine) {
+			dynamic = append(dynamic, w.Engine)
+		}
+	}
+	sort.Strings(dynamic)
+	if len(dynamic) > engines.MaxDynamicEngines {
+		dynamic = dynamic[:engines.MaxDynamicEngines]
+	}
+	return append(slices.Clone(schedulerEngines), dynamic...)
+}
 
 // NodeRank is retained as the scheduler's public status type while the wire
 // definition is shared with the broker and proxies.
@@ -67,7 +88,10 @@ func (m *Manager) recomputeAll(force bool) {
 	defer m.recomputeMu.Unlock()
 
 	order, ranks := m.rank()
-	for _, e := range schedulerEngines {
+	m.mu.Lock()
+	outputs := m.engineOutputsLocked()
+	m.mu.Unlock()
+	for _, e := range outputs {
 		m.emitIfChanged(e, order, ranks, force)
 	}
 }
@@ -157,8 +181,9 @@ func (m *Manager) emitIfChanged(engine string, order []string, ranks []NodeRank,
 func (m *Manager) status() statusResult {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	engines := make(map[string]EngineSchedule, len(schedulerEngines))
-	for _, e := range schedulerEngines {
+	outputs := m.engineOutputsLocked()
+	engines := make(map[string]EngineSchedule, len(outputs))
+	for _, e := range outputs {
 		st := m.emitted[e]
 		emitted := st.ranks
 		if emitted == nil {

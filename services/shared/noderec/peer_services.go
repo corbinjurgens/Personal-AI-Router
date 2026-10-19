@@ -12,6 +12,8 @@ import (
 	"strings"
 	"unicode"
 	"unicode/utf8"
+
+	"nvpair-shared/engines"
 )
 
 const PeerServicesMaxBytes = 8192
@@ -59,19 +61,26 @@ func ValidatePeerServicesDescriptor(d PeerServicesDescriptor, expectedUUID strin
 		}
 		seenAddresses[ip.Unmap()] = true
 	}
-	if d.Services == nil || len(d.Services) > len(serviceKeyOrder) {
+	if d.Services == nil || len(d.Services) > len(serviceKeyOrder)+engines.MaxDynamicEngines {
 		return errors.New("incomplete or oversized descriptor services")
 	}
 	seen := make(map[ServiceKey]bool)
+	dynamic := 0
 	for _, service := range d.Services {
-		known := false
+		// A dynamic engine key is admitted by syntax and count only. It is
+		// carried on this authenticated path, never in TXT, and a transport to
+		// it still needs the peer's live registration.
+		known := engines.IsDynamicServiceKey(service.Service)
+		if known {
+			dynamic++
+		}
 		for _, key := range serviceKeyOrder {
 			if service.Service == key {
 				known = true
 				break
 			}
 		}
-		if !known || seen[service.Service] || service.Port < 1 || service.Port > 65535 {
+		if !known || dynamic > engines.MaxDynamicEngines || seen[service.Service] || service.Port < 1 || service.Port > 65535 {
 			return errors.New("invalid or duplicate descriptor service")
 		}
 		seen[service.Service] = true
