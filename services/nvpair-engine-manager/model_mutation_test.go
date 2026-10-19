@@ -777,9 +777,11 @@ func TestModelMutationSameEngineSerializesAndOtherEnginesProceed(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if st.contentMu.TryLock() {
-		st.contentMu.Unlock()
+	select {
+	case st.contentMu <- struct{}{}:
+		<-st.contentMu
 		t.Fatal("first mutation did not hold the content mutex across confirmation")
+	default:
 	}
 
 	firstRelease <- nil
@@ -971,6 +973,168 @@ func assertNoPending(t *testing.T, relay *modelMutationRelay) {
 	defer relay.mu.Unlock()
 	if len(relay.pending) != 0 {
 		t.Fatalf("%d pending model mutation entries survived", len(relay.pending))
+	}
+}
+
+func TestModelMutationCancelledQueuedOKNeverDeletes(t *testing.T) {
+	ex, engine := mutationEngineFixture(t, "fake")
+	for i := 0; i < 128; i++ {
+		ctx, cancel := context.WithCancel(context.Background())
+		relay := &modelMutationRelay{}
+		relay.send = func(_ string, params any) error {
+			req, ok := params.(nodepolicy.ModelMutationRequest)
+			if !ok {
+				return fmt.Errorf("unexpected request type %T", params)
+			}
+			cancel()
+			relay.reply(replyMessage(t, nodepolicy.ModelMutationReply{
+				RequestID: req.RequestID, Engine: req.Engine, OK: true,
+			}).Params)
+			return nil
+		}
+		ex.modelMutationParent = relay.call
+		_, err := ex.ModelDelete(ctx, "fake", "m:1")
+		cancel()
+		if !errors.Is(err, context.Canceled) || !strings.Contains(err.Error(), "cannot change its models: the withdrawal confirmation was cancelled") {
+			t.Fatalf("iteration %d: delete error = %v, want typed cancellation failure", i, err)
+		}
+		assertNoPending(t, relay)
+	}
+	if got := engine.seen(); len(got) != 0 {
+		t.Fatalf("cancelled deletes caused engine effects: %v", got)
+	}
+}
+
+type mutationBlockedWriter struct {
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (w *mutationBlockedWriter) Read([]byte) (int, error) { return 0, io.EOF }
+
+func (w *mutationBlockedWriter) Write([]byte) (int, error) {
+	w.once.Do(func() { close(w.entered) })
+	<-w.release
+	return 0, io.ErrClosedPipe
+}
+
+func TestModelMutationCancelledWaiterEscapesBlockedNotify(t *testing.T) {
+	ex, engine := mutationEngineFixture(t, "fake")
+	writer := &mutationBlockedWriter{entered: make(chan struct{}), release: make(chan struct{})}
+	var release sync.Once
+	unblock := func() { release.Do(func() { close(writer.release) }) }
+	defer unblock()
+	relay := &modelMutationRelay{send: NewCodec(writer).Notify}
+	ex.modelMutationParent = relay.call
+	first := make(chan error, 1)
+	go func() {
+		_, err := ex.ModelDelete(context.Background(), "fake", "m:1")
+		first <- err
+	}()
+	select {
+	case <-writer.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("first mutation never entered Notify")
+	}
+	ex.inventoryMu.Lock()
+	before := ex.inventoryDigests["fake"]
+	ex.inventoryMu.Unlock()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	second := make(chan error, 1)
+	started := make(chan struct{})
+	go func() {
+		close(started)
+		_, err := ex.ModelDelete(ctx, "fake", "m:1")
+		second <- err
+	}()
+	<-started
+	cancel()
+	select {
+	case err := <-second:
+		if !errors.Is(err, context.Canceled) || !strings.Contains(err.Error(), "cannot change its models: the withdrawal confirmation was cancelled") {
+			t.Fatalf("waiting mutation error = %v, want typed cancellation failure", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("cancelled waiter remained blocked behind synchronous Notify")
+	}
+	ex.inventoryMu.Lock()
+	after := ex.inventoryDigests["fake"]
+	ex.inventoryMu.Unlock()
+	if after.epoch != before.epoch || after.suppressed != before.suppressed {
+		t.Fatalf("waiter changed suppression/epoch: before=%+v after=%+v", before, after)
+	}
+	if got := engine.seen(); len(got) != 0 {
+		t.Fatalf("blocked/cancelled mutations caused engine effects: %v", got)
+	}
+	unblock()
+	select {
+	case err := <-first:
+		if !errors.Is(err, io.ErrClosedPipe) {
+			t.Fatalf("Notify failure = %v, want closed pipe", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("first mutation did not return after releasing Notify")
+	}
+	assertNoPending(t, relay)
+	st, err := ex.state("fake")
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case st.contentMu <- struct{}{}:
+		<-st.contentMu
+	default:
+		t.Fatal("content lock remained held")
+	}
+	ex.inventoryMu.Lock()
+	suppressed := ex.inventoryDigests["fake"].suppressed
+	ex.inventoryMu.Unlock()
+	if suppressed {
+		t.Fatal("suppression remained active after Notify failed")
+	}
+	if got := engine.seen(); len(got) != 0 {
+		t.Fatalf("failed Notify caused engine effects: %v", got)
+	}
+}
+
+func TestModelMutationPublicationJoinObservesDeadline(t *testing.T) {
+	ex, engine := mutationEngineFixture(t, "fake")
+	ex.publishMu.Lock()
+	var release sync.Once
+	unblock := func() { release.Do(ex.publishMu.Unlock) }
+	defer unblock()
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		_, err := ex.ModelDelete(ctx, "fake", "m:1")
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.DeadlineExceeded) || !strings.Contains(err.Error(), "cannot change its models: the withdrawal was not confirmed before the deadline") {
+			t.Fatalf("publication join error = %v, want typed deadline failure", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("publication join ignored deadline")
+	}
+	if got := engine.seen(); len(got) != 0 {
+		t.Fatalf("expired join caused engine effects: %v", got)
+	}
+	ex.inventoryMu.Lock()
+	current := ex.inventoryDigests["fake"]
+	ex.inventoryMu.Unlock()
+	if current.epoch != 2 || current.suppressed {
+		t.Fatalf("join cancellation cleanup = %+v, want completed begin/end epochs", current)
+	}
+	unblock()
+	// A later publication and mutation must be able to acquire both locks.
+	ctx, cancelNext := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancelNext()
+	if _, err := ex.ModelDelete(ctx, "fake", "m:1"); err != nil {
+		t.Fatalf("mutation after abandoned publication join: %v", err)
 	}
 }
 

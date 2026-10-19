@@ -60,7 +60,7 @@ type engineState struct {
 	// engine's model store) for this engine, separate from opMu: a model change
 	// must not be blocked by, nor block, an install/start/stop/restart, and
 	// opMu is never held while contentMu is taken. See model_mutation.go.
-	contentMu sync.Mutex
+	contentMu chan struct{}
 
 	mu        sync.Mutex
 	installed bool
@@ -300,6 +300,7 @@ func (e *Executor) state(engine string) (*engineState, error) {
 		return nil, fmt.Errorf("engine %q has no platform block for %s/%s", engine, runtime.GOOS, runtime.GOARCH)
 	}
 	st := &engineState{
+		contentMu:  make(chan struct{}, 1),
 		manifest:   m,
 		plat:       plat,
 		logs:       newLogBuffer(),

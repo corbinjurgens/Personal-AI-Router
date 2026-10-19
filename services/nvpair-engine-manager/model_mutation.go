@@ -89,13 +89,20 @@ func (r *modelMutationRelay) call(ctx context.Context, engine string) error {
 		if !reply.OK {
 			return fmt.Errorf("engine %q cannot change its models: the destination did not confirm the withdrawal: %s", engine, reply.Error)
 		}
+		if err := ctx.Err(); err != nil {
+			return modelMutationContextError(engine, err)
+		}
 		return nil
 	case <-ctx.Done():
-		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-			return fmt.Errorf("engine %q cannot change its models: the withdrawal was not confirmed before the deadline: %w", engine, ctx.Err())
-		}
-		return fmt.Errorf("engine %q cannot change its models: the withdrawal confirmation was cancelled: %w", engine, ctx.Err())
+		return modelMutationContextError(engine, ctx.Err())
 	}
+}
+
+func modelMutationContextError(engine string, err error) error {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return fmt.Errorf("engine %q cannot change its models: the withdrawal was not confirmed before the deadline: %w", engine, err)
+	}
+	return fmt.Errorf("engine %q cannot change its models: the withdrawal confirmation was cancelled: %w", engine, err)
 }
 
 // reply hands one decoded reply to the request waiting for it. A reply nobody
@@ -132,8 +139,27 @@ func (e *Executor) beginModelMutation(ctx context.Context, engine string) error 
 	current.suppressed = true
 	e.inventoryDigests[engine] = current
 	e.inventoryMu.Unlock()
-	e.publishMu.Lock()
+	// A previous synchronous publication can remain blocked in Notify. Hand
+	// ownership over only while this caller is waiting; otherwise release the
+	// mutex when the earlier publication eventually finishes.
+	joined := make(chan struct{})
+	go func() {
+		e.publishMu.Lock()
+		select {
+		case joined <- struct{}{}:
+		case <-ctx.Done():
+			e.publishMu.Unlock()
+		}
+	}()
+	select {
+	case <-joined:
+	case <-ctx.Done():
+		return modelMutationContextError(engine, ctx.Err())
+	}
 	e.publishMu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return modelMutationContextError(engine, err)
+	}
 	parent := e.modelMutationParent
 	if parent == nil {
 		return fmt.Errorf("engine %q cannot change its models: this engine manager is not attached to a broker", engine)
@@ -157,7 +183,7 @@ func (e *Executor) endModelMutation(engine string, _ error) {
 }
 
 // withModelMutation runs fn as the only content mutation of engine in flight:
-// it holds that engine's content mutex (separate from the lifecycle opMu), asks
+// it holds that engine's content semaphore (separate from the lifecycle opMu), asks
 // the broker to withdraw the engine's model identity, and runs fn only once
 // that withdrawal is confirmed. Every exit releases the mutex and ends the
 // mutation. No engine-visible effect of fn happens before the confirmation.
@@ -166,8 +192,15 @@ func (e *Executor) withModelMutation(ctx context.Context, engine string, fn func
 	if err != nil {
 		return err
 	}
-	st.contentMu.Lock()
-	defer st.contentMu.Unlock()
+	select {
+	case st.contentMu <- struct{}{}:
+	case <-ctx.Done():
+		return modelMutationContextError(engine, ctx.Err())
+	}
+	defer func() { <-st.contentMu }()
+	if err := ctx.Err(); err != nil {
+		return modelMutationContextError(engine, err)
+	}
 	defer func() { e.endModelMutation(engine, err) }()
 	if err = e.beginModelMutation(ctx, engine); err != nil {
 		return err
