@@ -12,9 +12,11 @@ import (
 	"math"
 	"net/http"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
+	"unsafe"
 
 	"nvpair-shared/nodepolicy"
 )
@@ -968,6 +970,178 @@ func TestChatBudget(t *testing.T) {
 		r, e := q.parseResponse(context.Background(), reader, false, 100, 100, time.Time{}, b.acquire, func([]byte) error { return nil })
 		if !errors.Is(e, errChatBudget) || r.Complete || reader.Len() != len(body) || b.held != 0 {
 			t.Fatalf("over-budget parse: err=%v complete=%t unread=%d held=%d", e, r.Complete, reader.Len(), b.held)
+		}
+	})
+}
+
+func TestChatBudgetDenseChoices(t *testing.T) {
+	test := func(name string, stream bool, count int) {
+		t.Run(name, func(t *testing.T) {
+			q, _ := chatFixture()
+			array := "[" + strings.Repeat("0,", count-1) + "0]"
+			body := `{"id":"a","object":"chat.completion","created":1,"model":"synthetic-v1","choices":` + array + `}`
+			q.MaxBodyBytes = int64(len(body))
+			// Round-2 review's finite budgets admitted arrays whose descriptors
+			// alone exceeded the entire budget, before cardinality rejection.
+			limit := int64(32<<10) + 8*q.MaxBodyBytes
+			if stream {
+				body = chatEvent(strings.Replace(body, `"chat.completion"`, `"chat.completion.chunk"`, 1))
+				q.MaxBodyBytes = 2 << 20
+				q.MaxEventBytes = 1 << 20
+				q.MaxLineBytes = 1 << 20
+				q.MaxToolBytes = 1
+				limit = q.MaxLineBytes + 10*q.MaxEventBytes + 2*q.MaxToolBytes + 1024
+			}
+			var choices []json.RawMessage
+			if err := json.Unmarshal([]byte(array), &choices); err != nil {
+				t.Fatal(err)
+			}
+			minimum := int64(len(choices)) * int64(unsafe.Sizeof(json.RawMessage{}))
+			if minimum <= limit {
+				t.Fatalf("invalid fixture: descriptor bytes=%d budget=%d", minimum, limit)
+			}
+			budget := &chatTestBudget{limit: limit}
+			result, err := q.parseResponse(context.Background(), strings.NewReader(body), stream, 100, 100, time.Time{}, budget.acquire, func([]byte) error {
+				t.Error("invalid dense choices exposed")
+				return nil
+			})
+			if !errors.Is(err, errChatBudget) || result.Complete || budget.held != 0 {
+				t.Fatalf("dense decode was not refused before allocation: err=%v complete=%t held=%d peak=%d limit=%d", err, result.Complete, budget.held, budget.peak, limit)
+			}
+		})
+	}
+	test("nonstream", false, 200000)
+	test("SSE", true, 510000)
+}
+
+func TestChatBudgetAcquisitionBeforeAllocation(t *testing.T) {
+	test := func(name string, refuseAt int) {
+		t.Run(name, func(t *testing.T) {
+			q, _ := chatFixture()
+			body := strings.Repeat(" ", 2*chatParseChunk) + "{}"
+			reader := strings.NewReader(body)
+			var baseline, atAcquire runtime.MemStats
+			calls := 0
+			budget := &chatTestBudget{}
+			runtime.GC()
+			runtime.ReadMemStats(&baseline)
+			acquire := func(n int64) (func(), error) {
+				calls++
+				runtime.ReadMemStats(&atAcquire)
+				if calls == refuseAt {
+					return nil, errChatBudget
+				}
+				release, err := budget.acquire(n)
+				baseline = atAcquire
+				return release, err
+			}
+			_, err := q.parseResponse(context.Background(), reader, false, 100, 100, time.Time{}, acquire, func([]byte) error { return nil })
+			if !errors.Is(err, errChatBudget) || calls != refuseAt || budget.held != 0 {
+				t.Fatalf("refusal: err=%v calls=%d held=%d", err, calls, budget.held)
+			}
+			if allocated := atAcquire.TotalAlloc - baseline.TotalAlloc; allocated >= 2*chatParseChunk {
+				t.Fatalf("allocated %d bytes before admission (two raw buffers total %d)", allocated, 2*chatParseChunk)
+			}
+			if reader.Len() != len(body) {
+				t.Fatal("read after initial admission refusal")
+			}
+		})
+	}
+	test("first admission", 1)
+	test("raw buffer admission", 2)
+}
+
+func TestChatRequestWholeDocumentDepth(t *testing.T) {
+	test := func(name string, nested int, accepted bool) {
+		t.Run(name, func(t *testing.T) {
+			q, target := chatFixture()
+			schema := `{"type":"string","enum":[` + strings.Repeat("[", nested) + `"x"` + strings.Repeat("]", nested) + `]}`
+			body := strings.Replace(chatHistory, `{"type":"object","properties":{"value":{"type":"string"}}}`, schema, 1)
+			budget := &chatTestBudget{}
+			prepared, err := q.prepare(context.Background(), target, http.MethodPost, routeChatCompletions, []byte(body), budget.acquire)
+			if prepared != nil {
+				prepared.close()
+			}
+			// Request, response_format, json_schema, schema and enum add five.
+			if (err == nil) != accepted || (prepared != nil) != accepted || budget.held != 0 {
+				t.Fatalf("document depth=%d accepted=%t want=%t err=%v held=%d", nested+5, prepared != nil, accepted, err, budget.held)
+			}
+		})
+	}
+	test("exact maximum 64", 59, true)
+	test("next level 65", 60, false)
+}
+
+func TestChatBudgetDenseArgumentData(t *testing.T) {
+	q, target := chatFixture()
+	// The outer document has few tokens; the serialized argument has many.
+	// Its token allowance must be admitted separately before its key map.
+	arguments := `{"values":[` + strings.Repeat("0,", 9999) + `0]}`
+	encoded, err := json.Marshal(arguments)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := strings.Replace(chatHistory, `"arguments":"{}"`, `"arguments":`+string(encoded), 1)
+	budget := &chatTestBudget{limit: 1 << 20}
+	prepared, err := q.prepare(context.Background(), target, http.MethodPost, routeChatCompletions, []byte(body), budget.acquire)
+	if prepared != nil {
+		prepared.close()
+	}
+	if !errors.Is(err, errChatBudget) || prepared != nil || budget.held != 0 {
+		t.Fatalf("opaque argument admission: err=%v held=%d", err, budget.held)
+	}
+}
+
+func TestChatBudgetReleaseOnce(t *testing.T) {
+	test := func(name string, run func(*testing.T, chatByteBudget)) {
+		t.Run(name, func(t *testing.T) {
+			var releases []*int
+			budget := func(n int64) (func(), error) {
+				if n <= 0 {
+					t.Fatalf("nonpositive acquisition: %d", n)
+				}
+				calls := new(int)
+				releases = append(releases, calls)
+				return func() { *calls = *calls + 1 }, nil
+			}
+			run(t, budget)
+			if len(releases) == 0 {
+				t.Fatal("fixture acquired no reservations")
+			}
+			for i, calls := range releases {
+				if *calls != 1 {
+					t.Errorf("reservation %d released %d times", i, *calls)
+				}
+			}
+		})
+	}
+	test("prepared body closed twice", func(t *testing.T, budget chatByteBudget) {
+		q, target := chatFixture()
+		prepared, err := q.prepare(context.Background(), target, http.MethodPost, routeChatCompletions, []byte(chatSimple), budget)
+		if err != nil {
+			t.Fatal(err)
+		}
+		prepared.close()
+		prepared.close()
+	})
+	test("SSE sink panic", func(t *testing.T, budget chatByteBudget) {
+		q, _ := chatFixture()
+		defer func() {
+			if recover() == nil {
+				t.Error("panic swallowed")
+			}
+		}()
+		_, _ = q.parseResponse(context.Background(), strings.NewReader(chatCompleteStream()), true, 100, 100, time.Time{}, budget, func([]byte) error { panic("synthetic sink panic") })
+	})
+	t.Run("refusal returning a release", func(t *testing.T) {
+		q, _ := chatFixture()
+		releases := 0
+		budget := func(int64) (func(), error) {
+			return func() { releases++ }, errChatBudget
+		}
+		_, err := q.parseResponse(context.Background(), strings.NewReader("{}"), false, 100, 100, time.Time{}, budget, func([]byte) error { return nil })
+		if !errors.Is(err, errChatBudget) || releases != 1 {
+			t.Fatalf("refusal cleanup: err=%v releases=%d", err, releases)
 		}
 	})
 }

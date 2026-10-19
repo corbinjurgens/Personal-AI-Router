@@ -15,6 +15,7 @@ import (
 	"math"
 	"net/http"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -93,14 +94,88 @@ func chatAcquire(b chatByteBudget, n int64) (func(), error) {
 	return sync.OnceFunc(r), nil
 }
 
-// chatJSONHeadroom bounds the decoded copies a JSON value can need per serialized
-// byte: the raw buffer itself plus the simultaneously live protocol objects
-// (top-level response, choices slice, one choice, one message, the tool-call
-// list and one function). Opaque data such as schema properties and function
-// arguments is checked by a streaming decoder, so a dense user object adds no
-// decoded map. Multiplying actual capacity by this constant replaces the former
-// reservation against a configured ceiling.
-const chatJSONHeadroom = 8
+// JSON containers below hold views into the input, never nested serialized
+// copies. Before decoding, chatDecodeStorage counts tokens without allocating.
+// Its bound is 16 bytes per wire byte plus 512 bytes per token: decoded strings,
+// unescaping scratch, decoded keys and string-to-byte argument copies need at
+// most eight input-sized copies; 16 also covers allocator rounding and overlap.
+// A token pays for a 24-byte RawMessage descriptor, 16-byte string key and map
+// control/entry storage, including old/new map and slice backing arrays during
+// growth (under 256 bytes per member), doubled for simultaneous validation and
+// protocol/history maps. Every member/key/container/scalar is counted, including
+// opaque schemas and strings containing serialized arguments (charged again
+// before those arguments are parsed). No depth multiplier is needed: container
+// values are views, and total live key maps are bounded by the token count.
+// Fixed storage covers decoder/encoder scalar state, depth <=64, lease records,
+// tiny maps and allocation size classes. Qualification callbacks and emit are
+// caller-owned; emit only borrows bytes for its duration.
+const chatFixedStorage = 96 << 10
+
+func chatDecodeStorage(raw []byte) (int64, error) {
+	depth, tokens := 0, int64(0)
+	for i := 0; i < len(raw); {
+		switch raw[i] {
+		case ' ', '\t', '\r', '\n', ':', ',':
+			i++
+		case '"':
+			tokens++
+			i++
+			for i < len(raw) && raw[i] != '"' {
+				if raw[i] == '\\' {
+					i++
+				}
+				i++
+			}
+			if i >= len(raw) {
+				return 0, errChat
+			}
+			i++
+		case '{', '[':
+			depth++
+			if depth > maxStrictBodyDepth {
+				return 0, errChat
+			}
+			tokens++
+			i++
+		case '}', ']':
+			depth--
+			if depth < 0 {
+				return 0, errChat
+			}
+			i++
+		default:
+			tokens++
+			start := i
+			for i < len(raw) && !strings.ContainsRune(" \t\r\n,:{}[]\"", rune(raw[i])) {
+				i++
+			}
+			if i == start {
+				return 0, errChat
+			}
+		}
+	}
+	if depth != 0 {
+		return 0, errChat
+	}
+	// Inputs have an independent <=64 MiB ceiling, so this cannot overflow.
+	return 16*int64(len(raw)) + 512*tokens, nil
+}
+
+func (l *chatLease) decode(raw []byte) error {
+	n, err := chatDecodeStorage(raw)
+	if err != nil {
+		return err
+	}
+	if n > 0 {
+		if err := l.grow(n); err != nil {
+			return err
+		}
+	}
+	if !utf8.Valid(raw) || !json.Valid(raw) {
+		return errChat
+	}
+	return nil
+}
 
 // chatParseChunk is one nonblocking growth step while a nonstream body arrives,
 // so a large configured ceiling reserves nothing before its bytes are read.
@@ -110,8 +185,13 @@ const chatParseChunk = 32 << 10
 // as it grows and can drop transient headroom while keeping the bytes it
 // returns; every segment release is idempotent and runs on failure or panic.
 type chatLease struct {
-	budget   chatByteBudget
-	releases []func()
+	budget chatByteBudget
+	head   *chatReservation
+}
+
+type chatReservation struct {
+	release func()
+	next    *chatReservation
 }
 
 func newChatLease(budget chatByteBudget) *chatLease {
@@ -120,19 +200,21 @@ func newChatLease(budget chatByteBudget) *chatLease {
 
 // grow charges n bytes before the caller allocates them.
 func (l *chatLease) grow(n int64) error {
-	release, err := chatAcquire(l.budget, n)
+	// The release closure/once wrapper is itself admitted before allocation.
+	release, err := chatAcquire(l.budget, n+256)
 	if err != nil {
 		return err
 	}
-	l.releases = append(l.releases, release)
+	l.head = &chatReservation{release: release, next: l.head}
 	return nil
 }
 
 func (l *chatLease) release() {
-	for _, release := range l.releases {
-		release()
+	for l.head != nil {
+		head := l.head
+		l.head = head.next
+		head.release()
 	}
-	l.releases = nil
 }
 
 func chatAdd(a, b int64) (int64, error) {
@@ -168,16 +250,16 @@ func (q *chatQualification) fresh() error {
 	return nil
 }
 
-// Case-folded duplicate detection belongs to protocol objects because a JSON
-// decoder may match field names case-insensitively. Property names and function
-// arguments are opaque data: they keep depth and exact-duplicate rejection, and
-// case-distinct keys stay valid.
+// Protocol envelopes require exact canonical field spellings. Together with
+// exact duplicate rejection this also rejects every case-folded duplicate.
+// Property names and function arguments are opaque data: case-distinct keys
+// stay valid, while exact duplicates and excess depth are still rejected.
 func chatObject(raw []byte, keys ...string) (map[string]json.RawMessage, error) {
-	if !utf8.Valid(raw) || !chatUniqueObject(raw) {
+	if !chatExactUnique(raw) {
 		return nil, errChat
 	}
-	var f map[string]json.RawMessage
-	if json.Unmarshal(raw, &f) != nil || f == nil {
+	f, err := chatMembers(raw)
+	if err != nil {
 		return nil, errChat
 	}
 	for k := range f {
@@ -188,95 +270,120 @@ func chatObject(raw []byte, keys ...string) (map[string]json.RawMessage, error) 
 	return f, nil
 }
 
-// chatUniqueObject checks one protocol object. Its own member spellings must be
-// unique even when case-folded; its values, which may be user data, must only be
-// free of exact duplicate keys.
-func chatUniqueObject(raw []byte) bool {
-	dec := json.NewDecoder(bytes.NewReader(raw))
-	dec.UseNumber()
-	tok, err := dec.Token()
-	if err != nil || tok != json.Delim('{') {
-		return false
-	}
-	keys := map[string]bool{}
-	for dec.More() {
-		kt, err := dec.Token()
-		key, ok := kt.(string)
-		if err != nil || !ok {
-			return false
-		}
-		// Upper then lower case folds the special cases the way JSON field
-		// matching does, matching uniqueKeys.
-		folded := strings.ToLower(strings.ToUpper(key))
-		if keys[folded] {
-			return false
-		}
-		keys[folded] = true
-		var value json.RawMessage
-		if dec.Decode(&value) != nil || !chatExactUnique(value) {
-			return false
-		}
-	}
-	if _, err := dec.Token(); err != nil {
-		return false
-	}
-	_, err = dec.Token()
-	return err == io.EOF
-}
-
 // chatExactUnique reports whether data is one JSON value nested at most
 // maxStrictBodyDepth deep with no exact duplicate object key at any depth.
+// Callers admit decode storage before entering this allocating validation.
 func chatExactUnique(data []byte) bool {
-	dec := json.NewDecoder(bytes.NewReader(data))
-	dec.UseNumber()
-	if !chatExactValue(dec, 0) {
-		return false
-	}
-	_, err := dec.Token()
-	return err == io.EOF
+	return json.Valid(data) && chatExactValue(bytes.TrimSpace(data), 0)
 }
 
-func chatExactValue(dec *json.Decoder, depth int) bool {
-	tok, err := dec.Token()
-	if err != nil {
-		return false
-	}
-	d, isDelim := tok.(json.Delim)
-	if !isDelim {
+func chatExactValue(raw []byte, depth int) bool {
+	if raw[0] != '{' && raw[0] != '[' {
 		return true
 	}
 	if depth >= maxStrictBodyDepth {
 		return false
 	}
-	switch d {
-	case '{':
-		keys := map[string]bool{}
-		for dec.More() {
-			kt, err := dec.Token()
-			key, ok := kt.(string)
-			if err != nil || !ok || keys[key] {
+	keys := map[string]bool{}
+	rest := bytes.TrimSpace(raw[1 : len(raw)-1])
+	for len(rest) > 0 {
+		if raw[0] == '{' {
+			keyRaw, tail := chatValueView(rest)
+			key, err := chatString(keyRaw)
+			if err != nil || keys[key] {
 				return false
 			}
 			keys[key] = true
-			if !chatExactValue(dec, depth+1) {
-				return false
-			}
+			rest = bytes.TrimSpace(bytes.TrimSpace(tail)[1:]) // colon
 		}
-	case '[':
-		for dec.More() {
-			if !chatExactValue(dec, depth+1) {
-				return false
-			}
+		value, tail := chatValueView(rest)
+		if !chatExactValue(value, depth+1) {
+			return false
 		}
-	default:
-		return false
+		rest = bytes.TrimSpace(tail)
+		if len(rest) > 0 {
+			rest = bytes.TrimSpace(rest[1:]) // comma
+		}
 	}
-	_, err = dec.Token()
-	return err == nil
+	return true
 }
 
-// chatExactObject reports whether data is one JSON object under the exact
-// duplicate and depth rules, without decoding a map.
+// chatValueView splits already syntax-validated JSON without allocating or
+// copying. Containers and strings are scanned with bounded integer state.
+func chatValueView(raw []byte) (json.RawMessage, []byte) {
+	depth := 0
+	for i := 0; i < len(raw); i++ {
+		switch raw[i] {
+		case '"':
+			i++
+			for raw[i] != '"' {
+				if raw[i] == '\\' {
+					i++
+				}
+				i++
+			}
+			if depth == 0 {
+				return raw[:i+1], raw[i+1:]
+			}
+		case '{', '[':
+			depth++
+		case '}', ']':
+			depth--
+			if depth == 0 {
+				return raw[:i+1], raw[i+1:]
+			}
+		case ',', ':', ' ', '\t', '\r', '\n':
+			if depth == 0 {
+				return raw[:i], raw[i:]
+			}
+		}
+	}
+	return raw, nil
+}
+
+func chatMembers(raw []byte) (map[string]json.RawMessage, error) {
+	raw = bytes.TrimSpace(raw)
+	if len(raw) == 0 || raw[0] != '{' {
+		return nil, errChat
+	}
+	f := map[string]json.RawMessage{}
+	rest := bytes.TrimSpace(raw[1 : len(raw)-1])
+	for len(rest) > 0 {
+		keyRaw, tail := chatValueView(rest)
+		key, err := chatString(keyRaw)
+		if err != nil {
+			return nil, err
+		}
+		rest = bytes.TrimSpace(bytes.TrimSpace(tail)[1:])
+		f[key], tail = chatValueView(rest)
+		rest = bytes.TrimSpace(tail)
+		if len(rest) > 0 {
+			rest = bytes.TrimSpace(rest[1:])
+		}
+	}
+	return f, nil
+}
+
+func chatArray(raw []byte) ([]json.RawMessage, error) {
+	raw = bytes.TrimSpace(raw)
+	if len(raw) == 0 || raw[0] != '[' {
+		return nil, errChat
+	}
+	values := []json.RawMessage{}
+	rest := bytes.TrimSpace(raw[1 : len(raw)-1])
+	for len(rest) > 0 {
+		value, tail := chatValueView(rest)
+		values = append(values, value)
+		rest = bytes.TrimSpace(tail)
+		if len(rest) > 0 {
+			rest = bytes.TrimSpace(rest[1:])
+		}
+	}
+	return values, nil
+}
+
+// chatExactObject checks opaque arguments with exact duplicate/depth rules.
+// Its key maps are covered by the separately admitted argument token count.
 func chatExactObject(data []byte) bool {
 	trimmed := bytes.TrimLeft(data, " \t\r\n")
 	return len(trimmed) > 0 && trimmed[0] == '{' && chatExactUnique(data)
@@ -313,7 +420,7 @@ func (q *chatQualification) prepare(ctx context.Context, target chatTarget, meth
 	if len(body) > 16<<20 || len(q.Defaults) > 16<<20 {
 		return nil, errChat
 	}
-	// Transient parsing is charged from the actual input capacity it decodes and
+	// Transient parsing is charged from the actual input and token count and
 	// dropped once the effective body exists; only that body stays leased. A
 	// configured ceiling reserves nothing, and no unlimited fallback exists.
 	transient := newChatLease(budget)
@@ -325,8 +432,16 @@ func (q *chatQualification) prepare(ctx context.Context, target chatTarget, meth
 		}
 		transient.release()
 	}()
-	if err := transient.grow(chatJSONHeadroom*(int64(len(body))+int64(len(q.Defaults))) + 1024); err != nil {
+	if err := transient.grow(chatFixedStorage); err != nil {
 		return nil, err
+	}
+	if err := transient.decode(body); err != nil {
+		return nil, err
+	}
+	if len(q.Defaults) > 0 {
+		if err := transient.decode(q.Defaults); err != nil {
+			return nil, err
+		}
 	}
 	keys := append(append([]string(nil), chatRequestKeys...), "parallel_tool_calls")
 	f, err := chatObject(body, keys...)
@@ -356,7 +471,7 @@ func (q *chatQualification) prepare(ctx context.Context, target chatTarget, meth
 	if err := chatScalars(f); err != nil {
 		return nil, err
 	}
-	messages, tools, schemas, err := q.requestGrammar(f)
+	messages, tools, schemas, err := q.requestGrammar(f, transient)
 	if err != nil {
 		return nil, err
 	}
@@ -375,23 +490,34 @@ func (q *chatQualification) prepare(ctx context.Context, target chatTarget, meth
 			return nil, errChat
 		}
 		output = q.DefaultOutput
-		f[q.OutputField], err = json.Marshal(output)
-		if err != nil {
-			return nil, errChat
-		}
+		f[q.OutputField] = strconv.AppendInt(nil, output, 10)
 	}
 	if output > min(q.MaxOutputTokens, target.MaxOutputTokens) {
 		return nil, errChat
 	}
-	effective, err := json.Marshal(f)
-	if err != nil {
-		return nil, errChat
+	// Every key is a canonical protocol spelling. Serialize the borrowed values
+	// directly into an exactly sized buffer, admitting it BEFORE allocation.
+	size := 1
+	for key, value := range f {
+		size += len(key) + len(value) + 4 // quotes, colon, comma (or final brace)
 	}
-	// Keep only the bytes handed to the caller; the transient decode lease is
-	// released on return.
-	if err := retained.grow(int64(cap(effective))); err != nil {
+	if err := retained.grow(2 * int64(size)); err != nil {
 		return nil, err
 	}
+	effective := make([]byte, 0, size)
+	effective = append(effective, '{')
+	for _, key := range keys {
+		if value, ok := f[key]; ok {
+			if len(effective) > 1 {
+				effective = append(effective, ',')
+			}
+			effective = append(effective, '"')
+			effective = append(effective, key...)
+			effective = append(effective, '"', ':')
+			effective = append(effective, value...)
+		}
+	}
+	effective = append(effective, '}')
 	input, err := q.InputBound(effective)
 	if err != nil || input < 0 {
 		return nil, errChat
@@ -456,8 +582,8 @@ func chatScalars(f map[string]json.RawMessage) error {
 	}
 	if raw, ok := f["stop"]; ok {
 		if _, err := chatString(raw); err != nil {
-			var stops []json.RawMessage
-			if json.Unmarshal(raw, &stops) != nil || len(stops) == 0 || len(stops) > 4 {
+			stops, e := chatArray(raw)
+			if e != nil || len(stops) == 0 || len(stops) > 4 {
 				return errChat
 			}
 			for _, s := range stops {
@@ -488,7 +614,7 @@ func chatName(s string) bool {
 	return true
 }
 
-func chatFunction(raw []byte, declaration bool, schema func(json.RawMessage) error) (string, error) {
+func chatFunction(raw []byte, declaration bool, schema func(json.RawMessage) error, lease *chatLease) (string, error) {
 	keys := []string{"name", "arguments"}
 	if declaration {
 		keys = []string{"name", "description", "parameters", "strict"}
@@ -515,7 +641,13 @@ func chatFunction(raw []byte, declaration bool, schema func(json.RawMessage) err
 		}
 	} else {
 		args, err := chatString(f["arguments"])
-		if err != nil || !utf8.ValidString(args) || !chatExactObject([]byte(args)) {
+		if err != nil {
+			return "", errChat
+		}
+		if err := lease.decode([]byte(args)); err != nil {
+			return "", err
+		}
+		if !chatExactObject([]byte(args)) {
 			return "", errChat
 		}
 	}
@@ -553,8 +685,8 @@ func chatSchema(raw json.RawMessage) error {
 		return errChat
 	}
 	if raw, ok := f["properties"]; ok {
-		var p map[string]json.RawMessage
-		if json.Unmarshal(raw, &p) != nil || p == nil {
+		p, e := chatMembers(raw)
+		if e != nil {
 			return errChat
 		}
 		for _, s := range p {
@@ -567,8 +699,8 @@ func chatSchema(raw json.RawMessage) error {
 		return errChat
 	}
 	if raw, ok := f["required"]; ok {
-		var names []json.RawMessage
-		if json.Unmarshal(raw, &names) != nil || names == nil {
+		names, e := chatArray(raw)
+		if e != nil {
 			return errChat
 		}
 		seen := map[string]bool{}
@@ -581,19 +713,21 @@ func chatSchema(raw json.RawMessage) error {
 		}
 	}
 	if raw, ok := f["enum"]; ok {
-		var v []json.RawMessage
-		if json.Unmarshal(raw, &v) != nil || len(v) == 0 {
+		v, e := chatArray(raw)
+		if e != nil || len(v) == 0 {
 			return errChat
 		}
 	}
 	return nil
 }
 
-func (q *chatQualification) requestGrammar(f map[string]json.RawMessage) (int, int, int, error) {
+func (q *chatQualification) requestGrammar(f map[string]json.RawMessage, lease *chatLease) (int, int, int, error) {
 	var tools []json.RawMessage
 	declared := map[string]bool{}
 	if raw, ok := f["tools"]; ok {
-		if json.Unmarshal(raw, &tools) != nil || len(tools) == 0 || len(tools) > q.MaxToolCalls {
+		var e error
+		tools, e = chatArray(raw)
+		if e != nil || len(tools) == 0 || len(tools) > q.MaxToolCalls {
 			return 0, 0, 0, errChat
 		}
 		for _, raw := range tools {
@@ -601,7 +735,7 @@ func (q *chatQualification) requestGrammar(f map[string]json.RawMessage) (int, i
 			if e != nil || string(t["type"]) != `"function"` {
 				return 0, 0, 0, errChat
 			}
-			name, e := chatFunction(t["function"], true, q.schema)
+			name, e := chatFunction(t["function"], true, q.schema, lease)
 			if e != nil || declared[name] {
 				return 0, 0, 0, errChat
 			}
@@ -671,8 +805,8 @@ func (q *chatQualification) requestGrammar(f map[string]json.RawMessage) (int, i
 		}
 		schemas++
 	}
-	var messages []json.RawMessage
-	if json.Unmarshal(f["messages"], &messages) != nil || len(messages) == 0 {
+	messages, e := chatArray(f["messages"])
+	if e != nil || len(messages) == 0 {
 		return 0, 0, 0, errChat
 	}
 	pending, seen := map[string]bool{}, map[string]bool{}
@@ -711,8 +845,8 @@ func (q *chatQualification) requestGrammar(f map[string]json.RawMessage) (int, i
 			return 0, 0, 0, errChat
 		}
 		if hasCalls {
-			var list []json.RawMessage
-			if json.Unmarshal(calls, &list) != nil || len(list) == 0 || len(list) > q.MaxToolCalls {
+			list, e := chatArray(calls)
+			if e != nil || len(list) == 0 || len(list) > q.MaxToolCalls {
 				return 0, 0, 0, errChat
 			}
 			for _, raw := range list {
@@ -724,7 +858,7 @@ func (q *chatQualification) requestGrammar(f map[string]json.RawMessage) (int, i
 				if e != nil || id == "" || seen[id] {
 					return 0, 0, 0, errChat
 				}
-				if _, e := chatFunction(c["function"], false, nil); e != nil {
+				if _, e := chatFunction(c["function"], false, nil, lease); e != nil {
 					return 0, 0, 0, e
 				}
 				seen[id] = true
@@ -780,17 +914,20 @@ func (q *chatQualification) parseResponse(ctx context.Context, reader io.Reader,
 	if q.responseLimits() != nil || reader == nil || emit == nil || input < 0 || output <= 0 {
 		return result, errChat
 	}
-	// Storage is charged at the capacity actually allocated: an SSE parser owns
-	// its line/event/data buffers and one event's decoded copies, while a
-	// nonstream body pays per growth step as its bytes arrive.
 	lease := newChatLease(budget)
+	defer lease.release()
+	if err := lease.grow(chatFixedStorage); err != nil {
+		return result, err
+	}
 	if stream {
-		fixed := q.MaxLineBytes + 2*q.MaxEventBytes + chatJSONHeadroom*q.MaxEventBytes + 2*q.MaxToolBytes + 1024
+		// Line/event/data, retained envelope strings, old+replacement tool
+		// strings, and bounded tool-map entries. Decode headroom is acquired
+		// separately for each actual event, before any decoding.
+		fixed := 2*q.MaxLineBytes + 6*q.MaxEventBytes + 4*q.MaxToolBytes + 512*int64(q.MaxToolCalls)
 		if err := lease.grow(fixed); err != nil {
 			return result, err
 		}
 	}
-	defer lease.release()
 	defer func() {
 		if !result.Complete {
 			result.Usage = nil
@@ -819,11 +956,12 @@ func (q *chatQualification) parseResponse(ctx context.Context, reader io.Reader,
 	}
 	if !stream {
 		readSize := min(int64(chatParseChunk), q.MaxBodyBytes)
-		scratch := make([]byte, int(readSize))
-		body := make([]byte, 0, int(readSize))
-		if err := lease.grow(readSize + chatJSONHeadroom*readSize); err != nil {
+		// Double each raw capacity to cover allocator size-class rounding.
+		if err := lease.grow(4 * readSize); err != nil {
 			return result, err
 		}
+		scratch := make([]byte, int(readSize))
+		body := make([]byte, 0, int(readSize))
 		for {
 			if ctx.Err() != nil {
 				return result, errChat
@@ -840,7 +978,10 @@ func (q *chatQualification) parseResponse(ctx context.Context, reader io.Reader,
 					if next < need {
 						next = need
 					}
-					if err := lease.grow(chatJSONHeadroom * (next - int64(cap(body)))); err != nil {
+					// Keep every old allocation charged through return. Charging
+					// the FULL new capacity covers old/new overlap without relying
+					// on GC or reusing the old buffer's allowance.
+					if err := lease.grow(2 * next); err != nil {
 						return result, errChatBudget
 					}
 					grown := make([]byte, len(body), int(next))
@@ -859,7 +1000,10 @@ func (q *chatQualification) parseResponse(ctx context.Context, reader io.Reader,
 				return result, errChat
 			}
 		}
-		meaningful, e := q.responseEvent(body, false, &state)
+		if err := lease.decode(body); err != nil {
+			return result, err
+		}
+		meaningful, e := q.responseEvent(body, false, &state, lease)
 		if e != nil {
 			return result, e
 		}
@@ -897,7 +1041,12 @@ func (q *chatQualification) parseResponse(ctx context.Context, reader io.Reader,
 						if state.done {
 							return errChat
 						}
-						meaningful, e := q.responseEvent(data, true, &state)
+						eventLease := newChatLease(budget)
+						defer eventLease.release()
+						if err := eventLease.decode(data); err != nil {
+							return err
+						}
+						meaningful, e := q.responseEvent(data, true, &state, eventLease)
 						if e != nil {
 							return e
 						}
@@ -987,7 +1136,7 @@ func (q *chatQualification) parseResponse(ctx context.Context, reader io.Reader,
 	return result, nil
 }
 
-func (q *chatQualification) responseEvent(raw []byte, stream bool, state *chatResponseState) (bool, error) {
+func (q *chatQualification) responseEvent(raw []byte, stream bool, state *chatResponseState, lease *chatLease) (bool, error) {
 	f, err := chatObject(raw, "id", "object", "created", "model", "choices", "usage")
 	if err != nil {
 		return false, err
@@ -1019,8 +1168,8 @@ func (q *chatQualification) responseEvent(raw []byte, stream bool, state *chatRe
 	state.reportedModel = model
 	state.created = created
 	state.hasEnvelope = true
-	var choices []json.RawMessage
-	if json.Unmarshal(f["choices"], &choices) != nil || choices == nil || len(choices) > 1 || (!stream && len(choices) != 1) {
+	choices, e := chatArray(f["choices"])
+	if e != nil || len(choices) > 1 || (!stream && len(choices) != 1) {
 		return false, errChat
 	}
 	meaningful := false
@@ -1059,6 +1208,9 @@ func (q *chatQualification) responseEvent(raw []byte, stream bool, state *chatRe
 			seen := map[string]bool{}
 			for i := int64(0); i < int64(len(state.tools)); i++ {
 				t := state.tools[i]
+				if err := lease.decode([]byte(t.arguments)); err != nil {
+					return false, err
+				}
 				if t.id == "" || seen[t.id] || !chatName(t.name) || !chatExactObject([]byte(t.arguments)) {
 					return false, errChat
 				}
@@ -1141,8 +1293,8 @@ func (q *chatQualification) responseMessage(raw []byte, stream bool, state *chat
 		if !q.Fields["tools"] {
 			return false, errChat
 		}
-		var calls []json.RawMessage
-		if json.Unmarshal(raw, &calls) != nil || len(calls) == 0 || len(calls) > q.MaxToolCalls {
+		calls, e := chatArray(raw)
+		if e != nil || len(calls) == 0 || len(calls) > q.MaxToolCalls {
 			return false, errChat
 		}
 		for i, raw := range calls {
