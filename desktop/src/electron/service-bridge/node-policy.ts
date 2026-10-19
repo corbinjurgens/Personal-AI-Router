@@ -15,7 +15,13 @@ import type {
     StrictModelIdentity,
     StrictAdmissionRequest,
     StrictAdmissionModel,
-    StrictAdmissionCapability
+    StrictAdmissionCapability,
+    NanoUsd,
+    DeploymentCapability,
+    DeploymentTransport,
+    DeploymentPrices,
+    QualificationRef,
+    RoutingDeployment
 } from '@/shared/types/node-policy'
 import { engineManagerName, isValidRoutingEngineId } from '@/shared/utils/engines'
 import getErrorString from '@/shared/utils/get-error-string'
@@ -155,6 +161,192 @@ export function parseAdvertisementStrictAdmission(
     }
     if (body.strictAdmission === null) throw new Error('strictAdmission must not be null')
     return parseStrictAdmissionCapability(body.strictAdmission)
+}
+
+const ROUTING_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/
+// Shared character for character with nodepolicy's endpointPattern.
+const ENDPOINT =
+    /^https:\/\/((?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?)(:[1-9][0-9]{0,4})?((?:\/[A-Za-z0-9._~-]+)+)$/
+const LOCAL_NAME_SUFFIXES = ['localhost', 'local', 'localdomain', 'internal', 'arpa']
+const NANO_USD = /^(0|[1-9][0-9]*)$/
+const INT64_MAX = 9223372036854775807n
+const MAX_TOKEN_BOUND = 1 << 24
+const CAPABILITIES: DeploymentCapability[] = ['tools', 'vision', 'structured', 'embeddings']
+
+function routingObject(
+    value: JsonValue | undefined,
+    required: string[],
+    optional: string[] = []
+): JsonObject {
+    const body = objectValue(value)
+    if (
+        !body ||
+        Object.keys(body).some(key => !required.includes(key) && !optional.includes(key)) ||
+        required.some(key => body[key] === undefined)
+    ) {
+        throw new Error('Invalid routing object fields')
+    }
+    return body
+}
+
+function routingInteger(value: JsonValue | undefined, min: number, max: number): number {
+    if (typeof value !== 'number' || !Number.isInteger(value) || value < min || value > max) {
+        throw new Error('Invalid routing integer')
+    }
+    return value
+}
+
+function routingIdentifier(value: JsonValue | undefined): string {
+    if (typeof value !== 'string' || !ROUTING_ID.test(value)) throw new Error('Invalid routing id')
+    return value
+}
+
+/** Canonical nano-USD digits within the signed 64-bit range, kept as a string. */
+function nanoUsd(value: JsonValue | undefined): NanoUsd {
+    if (typeof value !== 'string' || !NANO_USD.test(value) || BigInt(value) > INT64_MAX) {
+        throw new Error('Invalid nano-USD amount')
+    }
+    return value
+}
+
+function endpointValue(value: JsonValue | undefined): string {
+    const match = typeof value === 'string' && value.length <= 2048 ? ENDPOINT.exec(value) : null
+    if (!match) throw new Error('Invalid deployment endpoint')
+    const [, host, port, path] = match
+    const labels = host.split('.')
+    if (
+        host.length > 253 ||
+        LOCAL_NAME_SUFFIXES.includes(labels[labels.length - 1]) ||
+        port === ':443' ||
+        (port !== undefined && Number(port.slice(1)) > 65535) ||
+        path
+            .slice(1)
+            .split('/')
+            .some(segment => segment === '.' || segment === '..')
+    ) {
+        throw new Error('Invalid deployment endpoint')
+    }
+    return match[0]
+}
+
+function deploymentTransport(value: JsonValue | undefined): DeploymentTransport {
+    const body = routingObject(value, [
+        'connectTimeoutSeconds',
+        'headerTimeoutSeconds',
+        'idleTimeoutSeconds',
+        'maxResponseBytes',
+        'maxErrorBodyBytes',
+        'maxEventBytes'
+    ])
+    const maxResponseBytes = routingInteger(body.maxResponseBytes, 1, 64 * 1024 * 1024)
+    return {
+        connectTimeoutSeconds: routingInteger(body.connectTimeoutSeconds, 1, 60),
+        headerTimeoutSeconds: routingInteger(body.headerTimeoutSeconds, 1, 600),
+        idleTimeoutSeconds: routingInteger(body.idleTimeoutSeconds, 1, 600),
+        maxResponseBytes,
+        maxErrorBodyBytes: routingInteger(body.maxErrorBodyBytes, 1, 1024 * 1024),
+        maxEventBytes: routingInteger(body.maxEventBytes, 1, maxResponseBytes)
+    }
+}
+
+function deploymentPrices(value: JsonValue | undefined): DeploymentPrices {
+    const body = routingObject(value, ['currency', 'unit', 'inputPerMillion', 'outputPerMillion'])
+    if (body.currency !== 'USD' || body.unit !== 'nanoUSDPerMillionTokens') {
+        throw new Error('Deployment prices must be USD nano-USD per million tokens')
+    }
+    return {
+        currency: 'USD',
+        unit: 'nanoUSDPerMillionTokens',
+        inputPerMillion: nanoUsd(body.inputPerMillion),
+        outputPerMillion: nanoUsd(body.outputPerMillion)
+    }
+}
+
+function qualificationRef(value: JsonValue | undefined): QualificationRef {
+    const body = routingObject(value, ['id', 'revision'])
+    const revision = typeof body.revision === 'string' ? body.revision : ''
+    if (!NANO_USD.test(revision) || revision === '0' || BigInt(revision) > INT64_MAX) {
+        throw new Error('Invalid qualification revision')
+    }
+    return { id: strictString(body.id, STRICT_ID), revision }
+}
+
+function routingDeployment(value: JsonValue | undefined, accounts: Set<string>): RoutingDeployment {
+    const body = routingObject(
+        value,
+        ['id', 'account', 'model', 'family', 'contextTokens', 'maxOutputTokens', 'enabled'],
+        ['capabilities', 'prices', 'endpoint', 'protocol', 'transport', 'qualification']
+    )
+    const account = routingIdentifier(body.account)
+    if (!accounts.has(account)) throw new Error('Deployment names an undefined account')
+    // Match encoding/json's replacement of unpaired UTF-16 surrogates.
+    const model = typeof body.model === 'string' ? body.model.toWellFormed() : ''
+    if (model === '' || /^(weak|medium|strong)(-api|-local)?$/.exec(model)?.[0] === model) {
+        throw new Error('Invalid deployment model')
+    }
+    const capabilities = body.capabilities === undefined ? [] : body.capabilities
+    if (!Array.isArray(capabilities)) throw new Error('Invalid deployment capabilities')
+    const contextTokens = routingInteger(body.contextTokens, 1, MAX_TOKEN_BOUND)
+    if (body.protocol !== undefined && body.protocol !== 'openai-chat-completions') {
+        throw new Error('Unsupported deployment protocol')
+    }
+    if (typeof body.enabled !== 'boolean') throw new Error('Invalid deployment enabled flag')
+    const deployment: RoutingDeployment = {
+        id: routingIdentifier(body.id),
+        account,
+        model,
+        family: routingIdentifier(body.family),
+        capabilities: capabilities.map(capability => {
+            const known = CAPABILITIES.find(c => c === capability)
+            if (!known) throw new Error('Unknown deployment capability')
+            return known
+        }),
+        contextTokens,
+        maxOutputTokens: routingInteger(body.maxOutputTokens, 1, contextTokens),
+        prices: body.prices === undefined ? null : deploymentPrices(body.prices),
+        endpoint: body.endpoint === undefined ? null : endpointValue(body.endpoint),
+        protocol: body.protocol === undefined ? null : 'openai-chat-completions',
+        transport: body.transport === undefined ? null : deploymentTransport(body.transport),
+        qualification:
+            body.qualification === undefined ? null : qualificationRef(body.qualification),
+        enabled: body.enabled
+    }
+    if (
+        deployment.enabled &&
+        (!deployment.endpoint ||
+            !deployment.protocol ||
+            !deployment.transport ||
+            !deployment.qualification ||
+            !deployment.prices)
+    ) {
+        throw new Error(
+            'An enabled deployment needs an endpoint, protocol, transport, qualification and prices'
+        )
+    }
+    return deployment
+}
+
+/**
+ * Parse the deployments of a policy's origin-only `routing` section as the
+ * broker returns it (canonical keys, no unknown fields). Money stays exact
+ * strings; this grants no permission and does not decide whether remote
+ * execution is available.
+ */
+export function parseRoutingDeployments(routing: JsonValue | undefined): RoutingDeployment[] {
+    const body = objectValue(routing)
+    if (!body || !Array.isArray(body.accounts) || !Array.isArray(body.deployments)) {
+        throw new Error('Invalid routing section')
+    }
+    const accounts = new Set(
+        body.accounts.map(account => routingIdentifier(objectValue(account)?.id))
+    )
+    const seen = new Set<string>()
+    return body.deployments.map(value => {
+        const deployment = routingDeployment(value, accounts)
+        if (seen.has(deployment.id)) throw new Error('Duplicate deployment id')
+        seen.add(deployment.id)
+        return deployment
+    })
 }
 
 /** Broker params that name a node; an omitted id means this PC. */

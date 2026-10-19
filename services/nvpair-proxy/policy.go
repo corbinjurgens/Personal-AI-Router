@@ -96,6 +96,11 @@ func (p *Proxy) applySetPolicy(params json.RawMessage) (string, error) {
 	if err := p.admission.activatePolicy(policy); err != nil {
 		return "", err
 	}
+	// The account ledger never blocks activation: local routing must follow
+	// the policy even when the store is unavailable, and spending fails closed.
+	if err := p.accounts.applyRouting(policy.Routing, policy.Revision); err != nil {
+		slog.Error("provider account ledger unavailable; provider spending is refused", "reason", "ledger-unavailable")
+	}
 	p.routing.reconcile()
 	slog.Info("node policy applied", "revision", policy.Revision,
 		"profiles", len(policy.Profiles), "tiers", len(policy.Tiers),
