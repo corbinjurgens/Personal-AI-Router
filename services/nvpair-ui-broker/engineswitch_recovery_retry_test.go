@@ -410,14 +410,34 @@ func TestSwitchRecoveryStorageFailureSurvivesDrainReleaseFailure(t *testing.T) {
 	if !r.RecoveryRequired || !switchRecoveryPermanent(h.b.engineSwitch.err) || drainReleases.Load() != 1 {
 		t.Fatalf("lost storage fence: receipt %+v, error %v, drain failures %d", r, h.b.engineSwitch.err, drainReleases.Load())
 	}
+	// receipt waits for the switch's operation lock, but the fake worker may
+	// still be recording its final settings notification after Notify returns.
+	// Observe that notification before sampling calls attributed to recovery.
+	h.engine.waitFor("switch settlement settings projection", func(calls []policyCall) bool {
+		for _, call := range calls {
+			if call.method == "engine:settings-projection" && call.notify {
+				return true
+			}
+		}
+		return false
+	})
 	// Even after the proxy/manager would answer successfully, the observed
 	// storage uncertainty must prevent any later recovery RPC or publication.
 	h.engine.setAnswer(baseEngine)
 	h.proxy.setAnswer(baseProxy)
 	before := len(h.engine.snapshot())
 	w := hideSwitchRecoveryManager(t, h.b)
-	if h.b.recoverReplacementEngineMgr(w) || len(h.engine.snapshot()) != before || h.b.getEngineMgr() != nil {
-		t.Fatal("later recovery retried past permanent storage uncertainty")
+	recovered := h.b.recoverReplacementEngineMgr(w)
+	calls := h.engine.snapshot()
+	manager := h.b.getEngineMgr()
+	if recovered {
+		t.Error("later recovery succeeded past permanent storage uncertainty")
+	}
+	if len(calls) != before {
+		t.Errorf("later recovery issued RPCs past permanent storage uncertainty: %+v", calls[before:])
+	}
+	if manager != nil {
+		t.Errorf("later recovery published manager %p past permanent storage uncertainty", manager)
 	}
 }
 
