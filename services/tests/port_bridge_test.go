@@ -21,6 +21,42 @@ import (
 	"nvpair-shared/testbin"
 )
 
+func TestCopyPortBridgeSucceedsImmediately(t *testing.T) {
+	writes, sleeps := 0, 0
+	err := copyPortBridge(func() error {
+		writes++
+		return nil
+	}, func(time.Duration) { sleeps++ })
+	if err != nil {
+		t.Fatalf("copy port bridge: %v", err)
+	}
+	if writes != 1 || sleeps != 0 {
+		t.Fatalf("writes/sleeps = %d/%d, want 1/0", writes, sleeps)
+	}
+}
+
+func TestCopyPortBridgeReturnsOtherErrorsImmediately(t *testing.T) {
+	test := func(name string, copyError error) {
+		t.Run(name, func(t *testing.T) {
+			writes, sleeps := 0, 0
+			err := copyPortBridge(func() error {
+				writes++
+				return copyError
+			}, func(time.Duration) { sleeps++ })
+			if err != copyError {
+				t.Fatalf("copy error = %v, want original error %v", err, copyError)
+			}
+			if writes != 1 || sleeps != 0 {
+				t.Fatalf("writes/sleeps = %d/%d, want 1/0", writes, sleeps)
+			}
+		})
+	}
+	test("permission denied", os.ErrPermission)
+	test("wrapped permission denied", &os.PathError{Op: "open", Path: "port-bridge", Err: os.ErrPermission})
+	test("missing directory", os.ErrNotExist)
+	test("other copy failure", errors.New("copy failure"))
+}
+
 func init() {
 	if worker := os.Getenv("NVPAIR_TEST_STALLED_PORT_WORKER"); worker != "" && worker == os.Args[0] {
 		if err := runStalledPortWorker(); err != nil {
