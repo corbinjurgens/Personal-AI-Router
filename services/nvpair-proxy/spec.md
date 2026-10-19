@@ -1198,7 +1198,8 @@ qualification classification (`recordQualification` or `quarantine`) afterwards.
   caps, cross references) and leaves the file untouched; the ledger is then
   unavailable. State: `lastObservedMs`, `bindings` (credential reference to
   account, cap 1024), `accounts` (spend per period key `d:YYYY-MM-DD` and
-  `m:YYYY-MM`, `generation`, `cooldown`, `credentialFailure`, `frozen`,
+  `m:YYYY-MM`, `generation`, `lastConfiguredCredential`, `cooldown`,
+  `credentialFailure`, `frozen`,
   `probe`; cap 1024), `holds` (at most 4096, of which at most 256 fully completed),
   `quarantine` (cap 1024). Records hold names, never secret values.
 - **Writes.** A mutation is applied to a copy, written, then adopted. A write
@@ -1254,6 +1255,8 @@ qualification classification (`recordQualification` or `quarantine`) afterwards.
   Call only when classification is complete; a violation calls `quarantine`
   instead. The hold persists `qualificationChecked`; an absent marker means
   classification is unfinished.
+  Unfinished-classification holds from a previous process cannot currently be
+  reclaimed and require a future owner recovery operation before dispatch activation.
 - **quarantine(attempt)** records the identity the attempt was reserved under:
   `(endpoint, model, qualification id, revision)`. Deployment names, deletion,
   re-addition and restart do not clear it; a new qualification revision is a
@@ -1266,6 +1269,12 @@ qualification classification (`recordQualification` or `quarantine`) afterwards.
   makes that account refuse reservations, and activation still succeeds. An
   account absent from the policy is retired: its holds, spend, cooldown,
   freeze, bindings and quarantines persist and resume when the same ID returns.
+  Its last configured credential reference also persists: delayed obsolete-reference
+  failures cannot replace that reference's failure, while that reference's own
+  failure supersedes an obsolete failure during retirement. Re-adding with a
+  different reference is an ordinary reference edit. `lastConfiguredCredential`
+  is optional for existing stores and is recorded when routing next configures
+  the account.
   Price and ceiling edits apply to new holds only.
 - **Recovery.** On open, `reserved` holds of an earlier process become
   `uncertain` and stay outstanding until an owner releases them; a probe left

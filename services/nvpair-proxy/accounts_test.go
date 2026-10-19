@@ -816,6 +816,118 @@ func TestCredentialFailuresAcrossReferenceEditKeepCurrentSuppression(t *testing.
 	test("obsolete failure then current failure", false)
 }
 
+func TestCredentialFailuresDuringRetirementKeepConfiguredSuppression(t *testing.T) {
+	test := func(name string, currentFirst bool, readdedCredential nodepolicy.CredentialRef) {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			clock := newLedgerClock()
+			routing := testRouting("1000000", "1000000", "1000000")
+			l := openTestLedger(t, dir, clock, routing)
+			old := mustReserve(t, l, "chat-a", 1, 1)
+			routing.Accounts[0].Credential = otherCredential
+			if err := l.applyRouting(routing, "8"); err != nil {
+				t.Fatal(err)
+			}
+			current := mustReserve(t, l, "chat-a", 1, 1)
+			if err := l.applyRouting(nodepolicy.Routing{}, "9"); err != nil {
+				t.Fatal(err)
+			}
+			retired, err := readAccountStore(filepath.Join(dir, accountStoreFileName))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if retired.account("paid").LastConfiguredCredential != otherCredential {
+				t.Fatal("retirement did not durably retain the configured reference")
+			}
+			attempts := []string{old.Attempt, current.Attempt}
+			if currentFirst {
+				attempts = []string{current.Attempt, old.Attempt}
+			}
+			for _, attempt := range attempts {
+				if err := l.recordOutcome(attempt, outcomeCredentialFailure, 0, time.Time{}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			// Reopen while retired as well: the identity must survive without
+			// active routing to reconstruct it from.
+			l = reopen(t, l, dir, clock, nodepolicy.Routing{})
+			if err := l.ensureOpenLocked(); err != nil {
+				t.Fatal(err)
+			}
+			if l.state.account("paid").LastConfiguredCredential != otherCredential {
+				t.Fatal("retired reference lost on reopen")
+			}
+			routing.Accounts[0].Credential = readdedCredential
+			if err := l.applyRouting(routing, "10"); err != nil {
+				t.Fatal(err)
+			}
+			l = reopen(t, l, dir, clock, routing)
+			failure := l.state.account("paid").CredentialFailure
+			if failure == nil || failure.Credential != otherCredential {
+				t.Fatal("configured reference failure lost during retirement")
+			}
+			grant, err := l.reserve("chat-a", 1, 1)
+			if readdedCredential == otherCredential {
+				wantErr(t, "re-added configured reference remains suppressed", err, errAccountCredential)
+				if grant.Probe || l.state.account("paid").Probe != "" {
+					t.Fatal("suppressed reference granted a probe")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !grant.Probe {
+				t.Fatal("re-added different reference did not get a half-open probe")
+			}
+			if err := l.recordOutcome(grant.Attempt, outcomeOK, 0, time.Time{}); err != nil {
+				t.Fatal(err)
+			}
+			if l.state.account("paid").CredentialFailure != nil {
+				t.Fatal("successful probe did not clear credential suppression")
+			}
+		})
+	}
+	test("current then obsolete while retired, same reference returns", true, otherCredential)
+	test("obsolete then current while retired, same reference returns", false, otherCredential)
+	test("current then obsolete while retired, different reference returns", true, testCredential)
+	test("obsolete then current while retired, different reference returns", false, testCredential)
+}
+
+func TestLastConfiguredCredentialStoreCompatibility(t *testing.T) {
+	test := func(name string, credential nodepolicy.CredentialRef, wantInvalid bool) {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			clock := newLedgerClock()
+			routing := testRouting("1000000", "1000000", "1000000")
+			l := openTestLedger(t, dir, clock, routing)
+			next := l.state.clone()
+			next.account("paid").LastConfiguredCredential = credential
+			data, err := encodeLedger(next)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = decodeLedger(data)
+			if wantInvalid {
+				wantErr(t, "invalid configured reference", err, errAccountStoreInvalid)
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := l.commitLocked(next); err != nil {
+				t.Fatal(err)
+			}
+			l = reopen(t, l, dir, clock, routing)
+			if l.state.account("paid").LastConfiguredCredential != testCredential {
+				t.Fatal("routing did not populate the absent configured reference")
+			}
+		})
+	}
+	test("legacy store without configured reference loads", "", false)
+	test("invalid configured reference is refused", "invalid reference", true)
+}
+
 // Usage above the reserved bound freezes the account and quarantines the
 // deployment identity for good: restart, rename, retirement and re-addition
 // keep it, and only a new qualification revision is admitted.

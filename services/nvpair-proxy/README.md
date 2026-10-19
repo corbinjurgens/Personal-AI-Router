@@ -409,7 +409,10 @@ the previous policy stays. Until the first request arrives the proxy runs on `no
   in exact nano-USD with each hold's price, policy revision and qualification,
   spend per UTC day and month, credential-reference bindings that outlive
   account deletion, cooldowns with one half-open probe, credential-failure
-  suppression, freezes, and quarantined deployment identities. Reconciled holds
+  suppression, freezes, and quarantined deployment identities. The last configured
+  credential reference persists through retirement so delayed obsolete-reference
+  failures cannot replace its failure; re-adding with a different reference is
+  an ordinary reference edit. Reconciled holds
   remain retained and count against admission capacity until both the account
   outcome and qualification classification are durably recorded. Every failure
   refuses spending and never blocks policy activation or local routing. No

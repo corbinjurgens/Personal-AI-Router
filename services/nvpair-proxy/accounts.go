@@ -279,6 +279,11 @@ func (l *accountLedger) syncBindingsLocked() error {
 			next.Bindings = append(next.Bindings, ledgerBinding{Credential: a.Credential, Account: a.ID})
 			changed = true
 		}
+		rec := next.account(a.ID)
+		if rec.LastConfiguredCredential != a.Credential {
+			rec.LastConfiguredCredential = a.Credential
+			changed = true
+		}
 	}
 	if changed {
 		if err := l.commitLocked(next); err != nil {
@@ -690,10 +695,9 @@ func (l *accountLedger) recordOutcome(attempt string, outcome accountOutcome, re
 		rec.Cooldown = laterCooldown(rec.Cooldown, &accountCooldown{UntilMs: resetAt.UnixMilli(), Reason: cooldownExhausted})
 	case outcomeCredentialFailure:
 		// A late failure under an obsolete reference must not lift an
-		// existing suppression of the currently configured reference.
-		currentFailed := slices.ContainsFunc(l.routing.Accounts, func(a nodepolicy.Account) bool {
-			return a.ID == nh.Account && rec.CredentialFailure != nil && rec.CredentialFailure.Credential == a.Credential
-		})
+		// existing suppression of the last configured reference, even while
+		// the account is retired.
+		currentFailed := rec.CredentialFailure != nil && rec.CredentialFailure.Credential == rec.LastConfiguredCredential
 		if !currentFailed {
 			rec.CredentialFailure = &credentialFailure{Credential: nh.Credential}
 		}

@@ -102,6 +102,9 @@ type ledgerBinding struct {
 
 type ledgerAccount struct {
 	ID string `json:"id"`
+	// LastConfiguredCredential survives retirement so delayed outcomes keep
+	// the configured reference's failure. Absent in stores written before it.
+	LastConfiguredCredential nodepolicy.CredentialRef `json:"lastConfiguredCredential,omitempty"`
 	// Spent is the reconciled amount per UTC period key ("d:2006-01-02",
 	// "m:2006-01"); only the current day and month are kept.
 	Spent map[string]nodepolicy.NanoUSD `json:"spent"`
@@ -337,6 +340,11 @@ func (s ledgerState) validate() error {
 			return fmt.Errorf("accounts[%d]: invalid or duplicate id", i)
 		}
 		accounts[a.ID] = true
+		if a.LastConfiguredCredential != "" {
+			if _, err := nodepolicy.ParseCredentialRef(string(a.LastConfiguredCredential)); err != nil {
+				return fmt.Errorf("accounts[%d]: invalid last configured credential", i)
+			}
+		}
 		if a.Spent == nil || a.Generation < 0 {
 			return fmt.Errorf("accounts[%d]: spent and a nonnegative generation are required", i)
 		}
