@@ -19,6 +19,7 @@ package main
 
 import (
 	"log/slog"
+	"reflect"
 
 	"nvpair-shared/nodepolicy"
 )
@@ -68,6 +69,23 @@ type nodeProjection struct {
 // under its own lock, so a projection that read older state can never reach
 // engine-manager after one that read newer state.
 func (b *Broker) publishNodeProjection() {
+	b.sendNodeProjection(false)
+}
+
+// refreshStrictAdvertisement publishes the projection only when the strict
+// admission capability it would carry differs from the one last published.
+// Callers refresh after every change to what the capability rests on that
+// does not publish already: a readiness report, an acknowledgement, a proxy
+// start or exit, and saved engine intent.
+func (b *Broker) refreshStrictAdvertisement() {
+	b.sendNodeProjection(true)
+}
+
+// sendNodeProjection builds the projection from the stored policy and the
+// strict readiness authoritative now (readiness.go). The proxy handle is read
+// under the projection lock too, so a projection that saw a running proxy can
+// never follow one that saw it gone.
+func (b *Broker) sendNodeProjection(onlyOnStrictChange bool) {
 	r := b.nodePolicyRuntime()
 	r.projectionMu.Lock()
 	defer r.projectionMu.Unlock()
@@ -75,8 +93,16 @@ func (b *Broker) publishNodeProjection() {
 	if worker == nil {
 		return
 	}
+	running := b.policyProxy()
 	r.mu.Lock()
-	projection := nodeProjection{Policy: r.current.Advertisement(), PausedLocally: pausedLocally(r.current)}
+	advertisement := r.current.Advertisement()
+	advertisement.StrictAdmission = r.strictReadinessLocked(running).Capability
+	if onlyOnStrictChange && reflect.DeepEqual(advertisement.StrictAdmission, r.strictPublished) {
+		r.mu.Unlock()
+		return
+	}
+	r.strictPublished = advertisement.StrictAdmission
+	projection := nodeProjection{Policy: advertisement, PausedLocally: pausedLocally(r.current)}
 	r.mu.Unlock()
 	if err := worker.Notify(engineNodeProjectionMethod, projection); err != nil {
 		slog.Warn("could not publish the node projection to engine-manager", "err", err)

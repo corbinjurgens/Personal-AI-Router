@@ -130,6 +130,11 @@ type policyRuntime struct {
 	// availability inside node/set-policy, so while this is set no revision is
 	// enforced as the policy says and none is reported active.
 	availabilityErr string
+	// strictReadiness is the newest strict admission readiness the proxy
+	// reported (readiness.go), held until its fences match; replay clears it.
+	// strictPublished is the capability the last node projection carried.
+	strictReadiness nodepolicy.StrictAdmissionReadiness
+	strictPublished *nodepolicy.StrictAdmissionCapability
 	// live is the availability the node is actually in. It differs from
 	// current.Availability only while draining.
 	live         nodepolicy.Availability
@@ -1057,6 +1062,8 @@ func (b *Broker) observeIntent(enabledByEngine map[string]bool) {
 	}
 	r.mu.Unlock()
 	b.schedulePolicyPush(pushIntent)
+	// An engine saved Off leaves the strict capability. Off the read pump.
+	go b.refreshStrictAdvertisement()
 }
 
 func containsString(list []string, s string) bool {
@@ -1229,11 +1236,16 @@ func (b *Broker) replayPolicyToProxy(ctx context.Context, pp *proxyProcess) {
 	r.haveAdmission = false
 	r.signalAdmissionLocked()
 	r.incarnation, r.runID, r.activeRevision, r.activationErr, r.availabilityErr = pp, "", "", "", ""
+	// So did its strict readiness. The new process reports its own once it
+	// has acknowledged the policy replayed below.
+	r.strictReadiness = nodepolicy.StrictAdmissionReadiness{}
 	kinds := []string{pushAvailability, pushPolicy, pushIntent, pushResidency}
 	for engine := range r.drains {
 		kinds = append(kinds, pushDrainPrefix+engine)
 	}
 	r.mu.Unlock()
+	b.refreshStrictAdvertisement()
+	b.withdrawStrictReadinessOnExit(pp)
 	for _, kind := range kinds {
 		b.sendPolicyStateLocked(ctx, pp, kind)
 	}
@@ -1315,11 +1327,17 @@ func (b *Broker) sendPolicyStateLocked(ctx context.Context, pp *proxyProcess, ki
 	case rpcErr != nil:
 		slog.Warn("proxy refused node policy state", "method", method, "code", rpcErr.Code, "err", rpcErr.Message)
 	}
+	// The answer can make a held strict readiness report current or stale, so
+	// the capability is reconsidered once it is recorded.
 	switch {
 	case activates != "":
-		return b.recordActivation(pp, activates, result, rpcErr, err) || activationChanged
+		changed := b.recordActivation(pp, activates, result, rpcErr, err)
+		b.refreshStrictAdvertisement()
+		return changed || activationChanged
 	case kind == pushAvailability:
-		return b.recordAvailability(pp, availability, rpcErr, err) || activationChanged
+		changed := b.recordAvailability(pp, availability, rpcErr, err)
+		b.refreshStrictAdvertisement()
+		return changed || activationChanged
 	}
 	return activationChanged
 }
@@ -1421,6 +1439,9 @@ func (b *Broker) handleAdmissionNotification(method string, params json.RawMessa
 			return true
 		}
 		go b.wakeOnDemand(req.Engine)
+		return true
+	case notifyStrictReadiness:
+		b.observeStrictReadiness(params)
 		return true
 	}
 	return false
