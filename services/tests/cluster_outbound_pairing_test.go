@@ -5,10 +5,13 @@ package tests
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
+	"syscall"
 	"testing"
 	"time"
 
@@ -148,6 +151,32 @@ func TestClusterOutboundPairingBlockedInviter(t *testing.T) {
 		t.Fatalf("joiner response state = %q, want paired", response.State)
 	}
 	waitInviteState(t, f.a, f.invite.InviteID, "paired")
+	// Paired precedes the joiner's post-commit roster publication. The
+	// inviter publishes both confirmed members only after confirming the
+	// joiner and completing its own acknowledgement-time roster write.
+	f.a.pump(func(msg jsonrpc.Message) bool {
+		if msg.Method != "nodes:changed" {
+			return false
+		}
+		var snapshot struct {
+			Nodes []struct {
+				NodeUUID string `json:"nodeUuid"`
+				State    string `json:"state"`
+			} `json:"nodes"`
+		}
+		if err := json.Unmarshal(msg.Params, &snapshot); err != nil {
+			t.Fatalf("decode inviter membership notification: %v", err)
+		}
+		if len(snapshot.Nodes) != 2 {
+			return false
+		}
+		self, peer := false, false
+		for _, node := range snapshot.Nodes {
+			self = self || node.NodeUUID == f.aID.NodeUUID && node.State == "member"
+			peer = peer || node.NodeUUID == f.bID.NodeUUID && node.State == "member"
+		}
+		return self && peer
+	}, 15*time.Second)
 	assertClusterListenerRejects(t, f.aPort)
 	assertOutboundDurablePair(t, f)
 }
@@ -232,12 +261,33 @@ func TestClusterOutboundPairingReceiptFailureClearsPublicMembership(t *testing.T
 	waitInviteState(t, f.a, f.invite.InviteID, "failed")
 }
 
+// renameOutboundFaultFile changes a fault under a live cluster manager. Neither
+// paired nor rollback-pending parks its background authority readers or rollback
+// retries. Unlike product durable writes, os.Rename does not retry Windows
+// ERROR_ACCESS_DENIED (5) / ERROR_SHARING_VIOLATION (32) while those handles close.
+func renameOutboundFaultFile(t *testing.T, from, to string) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		err := os.Rename(from, to)
+		if err == nil {
+			return
+		}
+		var errno syscall.Errno
+		if runtime.GOOS != "windows" || !errors.As(err, &errno) || (errno != 5 && errno != 32) {
+			t.Fatal(err)
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("rename fault file after transient Windows sharing conflicts: %v", err)
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+}
+
 func TestClusterOutboundPairingRollbackWaitsForDurableCleanup(t *testing.T) {
 	f := newBlockedPairingFixtureEnv(t, []string{"NVPAIR_TEST_INVITE_EXPIRY_INTERVAL_MS=25"}, []string{"NVPAIR_TEST_PAIR_CONFIRMATION_DELAY_MS=1000"})
 	admissionPath := filepath.Join(f.bDir, "cluster", "admission.json")
-	if err := os.Rename(admissionPath, admissionPath+".fault-backup"); err != nil {
-		t.Fatal(err)
-	}
+	renameOutboundFaultFile(t, admissionPath, admissionPath+".fault-backup")
 	if err := os.Mkdir(admissionPath, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -250,9 +300,7 @@ func TestClusterOutboundPairingRollbackWaitsForDurableCleanup(t *testing.T) {
 		t.Fatalf("joiner commit fault status = %+v", result)
 	}
 	waitInviteState(t, f.a, f.invite.InviteID, "paired")
-	if err := os.Rename(memberPath, backup); err != nil {
-		t.Fatal(err)
-	}
+	renameOutboundFaultFile(t, memberPath, backup)
 	if err := os.Mkdir(memberPath, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -264,9 +312,9 @@ func TestClusterOutboundPairingRollbackWaitsForDurableCleanup(t *testing.T) {
 	if err := os.Remove(memberPath); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Rename(backup, memberPath); err != nil {
-		t.Fatal(err)
-	}
+	// Let the retry recreate members.json from the compensated live roster.
+	// Restoring the pre-rollback backup could overwrite a successful retry
+	// with the old peer admission (and races its readers on Windows).
 	waitInviteState(t, f.a, f.invite.InviteID, "failed")
 	if count := memberCount(t, f.a); count != 1 {
 		t.Fatalf("completed compensation retained %d inviter rows, want self only", count)
