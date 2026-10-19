@@ -9,6 +9,13 @@
  */
 import type { ServiceTransport } from '@/shared/types/service-bridge'
 import type {
+    SwitchRequest,
+    SwitchStatusRequest,
+    SwitchStatus,
+    SwitchReceipt,
+    SwitchChanged
+} from '@/shared/types/engine-switch'
+import type {
     EngineHubSearchResponse,
     EngineInitialState,
     EngineStatePatch,
@@ -25,6 +32,9 @@ import type {
 } from '@/shared/types/engine-settings'
 
 export interface IEngineApi {
+    switchEngine(request: SwitchRequest): Promise<{ receipt: SwitchReceipt }>
+    switchStatus(request: SwitchStatusRequest): Promise<SwitchStatus>
+    onSwitchChanged(callback: (change: SwitchChanged) => void): () => void
     /** Read the owning node's authoritative settings snapshot for one engine. */
     getSettings(target: EngineSettingsTarget): Promise<EngineSettingsSnapshot>
     /**
@@ -89,6 +99,9 @@ function fireCommand(transport: ServiceTransport, payload: EngineCommandPayload)
 
 export function createEngineApi(transport: ServiceTransport): IEngineApi {
     return {
+        switchEngine: request => transport.invoke('engines:switch', request),
+        switchStatus: request => transport.invoke('engines:switch-status', request),
+        onSwitchChanged: cb => transport.subscribePush('engines:switch-changed', cb),
         getSettings: target => transport.invoke('engines:get-settings', target),
         previewSettings: request => transport.invoke('engines:preview-settings', request),
         applySettings: request => transport.invoke('engines:apply-settings', request),

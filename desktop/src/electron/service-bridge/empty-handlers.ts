@@ -6,6 +6,7 @@ import type { ClusterInitialSnapshot } from '@/shared/types/bootstrap'
 import type { ClusterNode, ClusterNodeIdentity, Invite } from '@/shared/types/cluster'
 import type { EngineType } from '@/shared/types/engines'
 import type { ServiceError } from '@/shared/types/errors'
+import { parseEngineSwitchResult, parseEngineSwitchStatus } from './engine-switch'
 import {
     MODULAR_CLUSTER_MANAGER_PORT,
     MODULAR_ENGINE_LIFECYCLE_CALL_TIMEOUT_MS
@@ -687,6 +688,24 @@ const EMPTY_SERVICE_BRIDGE_HANDLERS: BridgeHandlerMap = {
     'cluster:abandon-if-solo': () => handleClusterAbandonIfSolo(),
 
     'engines:get-initial': () => getModularBridgeState().getEngineInitialState(),
+    'engines:switch': async payload =>
+        parseEngineSwitchResult(
+            await getModularSupervisor().callProcess(
+                'broker',
+                'engine:switch',
+                payload ? { ...payload } : undefined,
+                MODULAR_ENGINE_LIFECYCLE_CALL_TIMEOUT_MS
+            )
+        ),
+    'engines:switch-status': async payload =>
+        parseEngineSwitchStatus(
+            await getModularSupervisor().callProcess(
+                'broker',
+                'engine:switch-status',
+                payload ? { ...payload } : undefined,
+                MODULAR_ENGINE_LIFECYCLE_CALL_TIMEOUT_MS
+            )
+        ),
     'engines:get-settings': async payload =>
         parseEngineSettings(
             await getModularSupervisor().callProcess(

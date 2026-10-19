@@ -1,6 +1,9 @@
 {
     "$comment": "Intentionally unintegrated JSON-RPC methods for desktop ↔ services contract checks. Each ignoredMethods entry needs a current technical reason. Edit by hand; run npm run service-contracts:write to refresh docs/services-api.md after services/ changes.",
     "ignoredMethods": {
+        "engine:switch-reply": "Private correlated broker-to-engine-manager switch relay reply. Consumed by switchRelay.reply; renderer clients use engine:switch, engine:switch-status and engine:switch-changed.",
+        "engine:switch-request": "Private authenticated engine-manager-to-broker apply/status relay. Consumed by Broker.handleSwitchRelay; never a renderer request.",
+        "engine:switch-cancel": "Private engine-manager-to-broker relay waiter cancellation. Consumed by Broker.cancelSwitchRelay; accepted switching remains target-owned.",
         "engine:settings-projection": "Broker-to-engine-manager full settings projection for the pinned peer subscription hub. Consumed by Manager.handleSettingsMessage; the desktop consumes engine:settings-changed instead.",
         "engine:node-projection": "Broker-to-engine-manager push of this node's policy advertisement (revision, declared roles, pause origin) after every policy or availability save and on engine:ready. Consumed by Manager.applyNodeProjection and served to pinned peers as policy in /v1/models; the desktop reads it as policy on discovery nodes instead.",
         "engine:settings-reply": "Correlated broker-to-engine-manager reply to the pinned peer settings relay and the configure operation's narrow proxy rebind callback. Consumed by settingsRelay.reply, never a renderer event.",
