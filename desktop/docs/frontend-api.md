@@ -224,7 +224,13 @@ show a stopped state with a Start control rather than an open-ended spinner, and
 the renderer re-reads every snapshot when the connector returns to `connected`.
 
 Every invoke is declared in `IpcChannelMap` and handled through `safeHandle()`.
-IPC responses use the typed `IpcResult<T>` envelope.
+IPC responses use the typed `IpcResult<T>` envelope. A failure a service
+answered with a JSON-RPC error also carries its `code`. The preload's service
+transport resolves to the envelope, because an Error crossing the context
+bridge keeps only its message; the renderer's transport
+(`src/ui/api/service-transport.ts`) rejects a failure with a `ServiceCallError`
+whose `code` callers classify by, for example `-32010` for a policy conflict
+and `-32011` for the local veto.
 
 ## Subscription lifecycle
 

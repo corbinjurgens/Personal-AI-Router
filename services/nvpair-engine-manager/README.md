@@ -363,9 +363,13 @@ veto under the engine's lifecycle lock, and remote starts and loads already
 running when a local pause or a local stop of that engine arrives are canceled
 and answer the same 409; during an install with `start` only the start is
 canceled, reported as an error frame with `"code": "local_veto"`. Stop, unload,
-delete, pull, model copy and settings edits are not vetoed. At the origin, the
-409 and the coded error frame become JSON-RPC `-32011` on `engine:remote-start`,
-`engine:remote-install` and `engine:remote-load-model`.
+delete, pull, model copy and settings edits are not vetoed, but a settings
+apply that would resume a stopped engine while the node is paused locally is:
+the broker refuses it, its `engine:settings-reply` carries `errorCode: -32011`,
+and the settings route answers the same 409. At the origin, the 409 and the
+coded error frame become JSON-RPC `-32011` on `engine:remote-start`,
+`engine:remote-install`, `engine:remote-load-model` and
+`engine:remote-apply-settings`.
 
 The streaming routes emit zero or more `{"type":"progress",...}` frames followed
 by exactly one terminal `{"type":"result",...}` or `{"type":"error",...}` frame.

@@ -25,7 +25,13 @@ import type {
     NodeRoles,
     RoleTier
 } from '@/shared/types/node-roles'
+import {
+    INVALID_PARAMS_CODE,
+    LOCAL_VETO_CODE,
+    POLICY_CONFLICT_CODE
+} from '@/shared/constants/service-errors'
 import { engineLabel, engineManagerName, engineTypeFromManagerName } from '@/shared/utils/engines'
+import { serviceErrorCode } from '@/ui/api/service-transport'
 import getErrorString from '@/shared/utils/get-error-string'
 import {
     pauseOriginValue,
@@ -186,7 +192,7 @@ export function roleDifferences(mine: NodeRoles, theirs: NodeRoles): RoleDiffere
     ).map(tier => ({ tier, mine: mine[tier], theirs: theirs[tier] }))
 }
 
-/** How the service refused a save. The bridge carries the JSON-RPC code ahead of the message. */
+/** How the service refused a save. */
 type Refusal = 'conflict' | 'vetoed' | 'rejected' | 'unreachable' | 'other'
 
 /**
@@ -197,10 +203,19 @@ type Refusal = 'conflict' | 'vetoed' | 'rejected' | 'unreachable' | 'other'
 const UNREACHABLE =
     /engine manager unavailable|not a discovered ec peer|device is offline|is not running|connection refused|no route to host|network is unreachable/i
 
-export function policyRefusal(message: string): Refusal {
-    if (/-32010\b/.test(message) || message.includes('policy conflict')) return 'conflict'
-    if (/-32011\b/.test(message)) return 'vetoed'
-    if (/-32602\b/.test(message)) return 'rejected'
+/**
+ * Classify a refusal by the service's JSON-RPC `code`. Only a failure without
+ * one (a call that never got a service's answer) is matched on its message.
+ */
+export function policyRefusal(message: string, code?: number): Refusal {
+    if (code === POLICY_CONFLICT_CODE) return 'conflict'
+    if (code === LOCAL_VETO_CODE) return 'vetoed'
+    if (code === INVALID_PARAMS_CODE) return 'rejected'
+    if (code === undefined) {
+        if (/-32010\b/.test(message) || message.includes('policy conflict')) return 'conflict'
+        if (/-32011\b/.test(message)) return 'vetoed'
+        if (/-32602\b/.test(message)) return 'rejected'
+    }
     if (UNREACHABLE.test(message)) return 'unreachable'
     return 'other'
 }
@@ -486,7 +501,7 @@ export const useNodeConfigurationStore = create<NodeConfigurationState>((set, ge
                 return result
             } catch (err) {
                 const message = getErrorString(err)
-                const refusal = policyRefusal(message)
+                const refusal = policyRefusal(message, serviceErrorCode(err))
                 // Vetoed, rejected and unreachable are definite: the target
                 // refused it, or it never got there. The draft is kept.
                 if (refusal === 'vetoed' || refusal === 'rejected' || refusal === 'unreachable') {

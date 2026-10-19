@@ -113,7 +113,7 @@ describe('migrateManualNodes', () => {
 
     it('drops an entry the broker rejected rather than retrying it forever', async () => {
         const { deps, removeFile } = fakeDeps(JSON.stringify([{ address: 'bad' }]), () =>
-            Promise.reject(new JsonRpcResponseError('-32602: invalid address'))
+            Promise.reject(new JsonRpcResponseError(-32602, 'invalid address'))
         )
 
         await migrateManualNodes(deps)

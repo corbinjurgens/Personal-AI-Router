@@ -21,7 +21,10 @@ import type { DemoState } from '@/shared/types/inference-demo'
  * map.
  */
 
-export type IpcResult<T = void> = { success: true; data: T } | { success: false; error: string }
+/** A failure carries the service's JSON-RPC `code` when a service refused the call. */
+export type IpcResult<T = void> =
+    | { success: true; data: T }
+    | { success: false; error: string; code?: number }
 
 /**
  * Lifecycle of the Electron-owned modular service connector.

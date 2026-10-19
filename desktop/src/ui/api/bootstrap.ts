@@ -3,8 +3,9 @@
 
 import { createPairApi, type IPairApi } from '@/ui/api/pair-api'
 import type { IWindowApi } from '@/preload/api/index'
-import type { PreloadServiceTransport } from '@/shared/types/service-bridge'
+import type { PreloadServiceTransport, ServiceTransport } from '@/shared/types/service-bridge'
 import { APP_DISPLAY_NAME } from '@/shared/constants/app'
+import { serviceTransport as unwrappedTransport } from '@/ui/api/service-transport'
 
 declare global {
     interface Window {
@@ -25,9 +26,9 @@ declare global {
 export const isElectron: boolean =
     typeof window !== 'undefined' && typeof window.windowApi !== 'undefined'
 
-let serviceTransport: PreloadServiceTransport | null = null
+let serviceTransport: ServiceTransport | null = null
 
-export function getPairTransport(): PreloadServiceTransport | null {
+export function getPairTransport(): ServiceTransport | null {
     return serviceTransport
 }
 
@@ -40,7 +41,7 @@ export function getPairTransport(): PreloadServiceTransport | null {
  */
 export function setupApis(): void {
     if (isElectron && window.__PAIR_TRANSPORT__) {
-        serviceTransport = window.__PAIR_TRANSPORT__
+        serviceTransport = unwrappedTransport(window.__PAIR_TRANSPORT__)
         window.pairApi = createPairApi(serviceTransport)
         return
     }

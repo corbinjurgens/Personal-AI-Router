@@ -20,6 +20,7 @@ import (
 	"nvpair-shared/clustertrust"
 	"nvpair-shared/engines"
 	settings "nvpair-shared/enginesettings"
+	"nvpair-shared/nodepolicy"
 	"nvpair-shared/noderec"
 )
 
@@ -379,7 +380,11 @@ func (b *Broker) runSettingsOperationLocked(ctx context.Context, engine string, 
 	b.activeSettings[id] = activeSettingsOperation{Engine: engine, Port: record.Snapshot.Settings.ProxyPort}
 	b.settingsRelayMu.Unlock()
 	defer func() { b.settingsRelayMu.Lock(); delete(b.activeSettings, id); b.settingsRelayMu.Unlock() }()
-	configure := settings.Configure{Engine: engine, Settings: record.Snapshot.Settings, OperationID: id, Resume: record.Resume}
+	// A paused node stays paused: an apply never resumes a stopped engine
+	// while it is, from any caller or from recovery; resuming the node does.
+	// A running engine whose launch changed is still restarted.
+	paused, _ := b.settingsPause()
+	configure := settings.Configure{Engine: engine, Settings: record.Snapshot.Settings, OperationID: id, Resume: record.Resume && !paused}
 
 	launch, err := func() (settings.LaunchState, error) {
 		b.engineConfigMu.Unlock()
@@ -443,6 +448,17 @@ func (b *Broker) runSettingsOperationLocked(ctx context.Context, engine string, 
 	}
 	b.publishSettingsLocked()
 	return err
+}
+
+// settingsPause reports whether this node is paused, and whether by itself. A
+// local pause accepted and not yet saved already counts as local, as it does
+// for a paired node's resume (setAvailability).
+func (b *Broker) settingsPause() (paused, local bool) {
+	r := b.nodePolicyRuntime()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	local = pausedLocally(r.current) || r.localPauseRequested
+	return local || r.current.Availability == nodepolicy.Paused, local
 }
 
 // authorizeSettingsCallerLocked rejects a peer this node no longer pins. A
@@ -557,6 +573,15 @@ func (b *Broker) applyEngineSettings(ctx context.Context, p settings.Request, ca
 		}
 		b.publishSettingsLocked()
 		return record.Receipts[p.RequestID], nil
+	}
+	// The local veto: a paired node's apply that would finish a pending resume
+	// of a stopped engine is refused while this node is paused on the node
+	// itself, before anything is accepted. Only a restart of a running engine
+	// sets preview.Restart, so a stopped one starts only from record.Resume.
+	if caller != "" && record.Resume && !record.Snapshot.Running {
+		if _, local := b.settingsPause(); local {
+			return settingsReceipt{}, &localVetoError{}
+		}
 	}
 	record.Previous = record.Snapshot.Settings
 	record.Resume = record.Resume || preview.Restart
@@ -678,12 +703,14 @@ func (b *Broker) handleSettingsRelay(raw json.RawMessage) {
 			result, err = b.dispatchEngineSettings(ctx, relay.Method, relay.Request, relay.Caller)
 		}
 		reply := struct {
-			ID     string `json:"id"`
-			Result any    `json:"result"`
-			Error  string `json:"error,omitempty"`
+			ID        string `json:"id"`
+			Result    any    `json:"result"`
+			Error     string `json:"error,omitempty"`
+			ErrorCode int    `json:"errorCode,omitempty"`
 		}{ID: relay.ID, Result: result}
 		if err != nil {
 			reply.Error = err.Error()
+			reply.ErrorCode = policyErrorCode(err)
 		}
 		_ = worker.Notify("engine:settings-reply", reply)
 	}()

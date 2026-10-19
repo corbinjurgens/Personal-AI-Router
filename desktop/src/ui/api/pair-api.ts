@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { type IEngineApi, createEngineApi } from '@/ui/api/engine-api'
-import type { PreloadServiceTransport as ServiceTransport } from '@/shared/types/service-bridge'
+import type { ServiceTransport } from '@/shared/types/service-bridge'
 import type {
     AvailableNode,
     ClusterIdentityPayload,

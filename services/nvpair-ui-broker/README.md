@@ -438,7 +438,12 @@ proxy enforces it.
   `local`. Only a local resume lifts it. A paired node may resume a peer pause.
   Configuration edits through `policy:set` stay allowed while vetoed.
   engine-manager applies the same veto to paired nodes' engine starts and model
-  loads from the projected `pausedLocally`.
+  loads from the projected `pausedLocally`. While the node is paused, whoever
+  paused it, `engine:apply-settings` (and journal recovery) applies the
+  settings but never resumes a stopped engine; the local user resumes the node
+  first. A paired node's apply that would resume one while the node is paused
+  locally is refused with `-32011` before it is accepted, and its
+  `engine:settings-reply` carries `errorCode` like `policy:reply`.
 - **Startup.** A persisted `paused` reaches the proxy before it can admit
   anything. With `pause.stopEngines` set, `engine:restore-enabled` is skipped
   (also when engine-manager restarts while paused) and sent on resume instead.
