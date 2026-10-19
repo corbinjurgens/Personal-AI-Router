@@ -204,13 +204,18 @@ metadata-only release and clearing recovery ownership share the local admission
 lock; long physical cleanup runs outside that lock. Failure retains recovery.
 
 The broker durably owns every admitted local Off/pause. Internal journal
-`localObligations[operationId]` records `sourceOff`, `targetOff`, `pause`, and
-`discharged`; public receipts are unchanged. Admission persists before latching
+`localObligations[operationId]` records `sourceOff`, `targetOff`, `pause`, optional
+`pauseApplied`, and `discharged`; public receipts are unchanged. Admission persists before latching
 or returning to the local handler, and a failed write visibly refuses the request.
 After reconcile, while still holding `settingsApplyMu`, cleanup sends ordinary
 unscoped `engine:stop` with internal `verifyStop: true` to the current worker for
 each obligated engine. Its `SwitchEngineState` reply must prove saved Off and
-termination. Pause must already be persisted and applied. Discharge is saved
+termination. A successful local Pause durably records `pauseApplied` for its
+pending obligations before a later Resume can run. Cleanup relies on that proof
+independently of current availability, preserving the owner's later Resume while
+still reconciling the operation's target veto. Older journals without this proof
+retain the requirement that the node currently be locally paused, with no pending
+pause or policy recovery. An unapplied Pause remains unresolved. Discharge is saved
 durably before terminal release or recovery resolution; failure keeps recovery.
 Broker restart and manager replacement replay undischarged obligations even
 when inspection returns no checkpoint, before restore/readiness. An older direct

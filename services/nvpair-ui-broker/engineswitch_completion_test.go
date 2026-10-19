@@ -873,13 +873,158 @@ func TestSwitchUnappliedPauseRetainsDurableObligation(t *testing.T) {
 	release()
 	r := h.receipt(t, p.RequestID)
 	o := switchStoreDisk(t, h.b.engineSwitch.store).LocalObligations[p.RequestID]
-	if !r.RecoveryRequired || !o.Pause || o.Discharged {
+	if !r.RecoveryRequired || !o.Pause || o.PauseApplied || o.Discharged {
 		t.Fatalf("unapplied pause: receipt=%+v obligation=%+v", r, o)
 	}
 	for _, step := range switchSteps(t, h.engine) {
 		if step == settings.SwitchStepRelease {
 			t.Fatal("released before pause applied")
 		}
+	}
+}
+
+func TestSwitchPauseResumeBeforeCleanupSettles(t *testing.T) {
+	h, p := pauseResumeBeforeSwitchCleanup(t)
+	h.engine.releaseHeld()
+	requireSwitchPauseResumeSettled(t, h, p.RequestID)
+}
+
+func TestSwitchPauseResumeBeforeCleanupJournalReloadSettles(t *testing.T) {
+	h, p := pauseResumeBeforeSwitchCleanup(t)
+	h.b.engineConfigMu.Lock()
+	c := h.b.switchCoordinator()
+	c.store = newEngineSwitchStore(c.store.path)
+	err := h.b.loadEngineSwitchLocked()
+	h.b.engineConfigMu.Unlock()
+	if err != nil {
+		t.Fatalf("reload obligation journal: %v", err)
+	}
+	h.engine.releaseHeld()
+	requireSwitchPauseResumeSettled(t, h, p.RequestID)
+}
+
+func TestSwitchPauseResumeBeforeCleanupBrokerRecoverySettles(t *testing.T) {
+	h, p := pauseResumeBeforeSwitchCleanup(t)
+	// Snapshot both durable owners while the old broker is still waiting for
+	// reconciliation. A fresh broker has no transition or veto completion state.
+	journal, err := os.ReadFile(h.b.engineSwitch.store.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy, err := os.ReadFile(h.b.nodePolicyRuntime().path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	restarted := newSwitchHarness(t)
+	if err := os.WriteFile(restarted.b.engineSwitch.store.path, journal, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	restarted.b.engineSwitch.store = newEngineSwitchStore(restarted.b.engineSwitch.store.path)
+	policyPath := filepath.Join(t.TempDir(), "node-policy.json")
+	if err := os.WriteFile(policyPath, policy, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	restarted.b.loadNodePolicy(policyPath)
+	h.mu.Lock()
+	cp := *h.cp
+	h.mu.Unlock()
+	restarted.mu.Lock()
+	restarted.cp = &cp
+	restarted.mu.Unlock()
+	if !restarted.b.recoverEngineSwitch() {
+		t.Fatal("restarted broker could not settle an already applied Pause after Resume")
+	}
+	// Restart interruption receipts are immutable historical recovery records;
+	// successful recovery resolves their fence rather than rewriting them.
+	r := restarted.receipt(t, p.RequestID)
+	if !r.Terminal || r.Phase != settings.SwitchFailedInterrupted || !restarted.b.engineSwitch.resolved[p.RequestID] {
+		t.Fatalf("restart receipt was not resolved: %+v", r)
+	}
+	requireSwitchPauseResumeReleased(t, restarted, p.RequestID)
+}
+
+// Reuse the review probe's real availability paths and nonblocking delayed
+// reconciliation reply, allowing Resume to finish while cleanup is waiting.
+func pauseResumeBeforeSwitchCleanup(t *testing.T) (*switchHarness, settings.SwitchRequest) {
+	t.Helper()
+	h := newSwitchHarness(t)
+	clustertrusttest.Join(t, h.b.clusterDir, "cluster", "target", "peer")
+	runtime := h.b.nodePolicyRuntime()
+	runtime.mu.Lock()
+	runtime.path = filepath.Join(t.TempDir(), "node-policy.json")
+	runtime.mu.Unlock()
+	h.b.observeAdmission(nodepolicy.AdmissionState{Active: 0, ActiveByEngine: map[string]int{}})
+	p := h.request(t, "pause-resume-cleanup")
+	base := h.engine.answer
+	starting, reconciling := make(chan struct{}), make(chan struct{})
+	var reconciles atomic.Int32
+	h.engine.setAnswer(func(method string, raw json.RawMessage) (any, string) {
+		if method == settings.SwitchStepMethod {
+			var step settings.SwitchStepRequest
+			if err := json.Unmarshal(raw, &step); err != nil {
+				return nil, err.Error()
+			}
+			if step.Step == settings.SwitchStepTargetStart {
+				close(starting)
+				return nil, holdReply
+			}
+		}
+		result, errText := base(method, raw)
+		if method == settings.SwitchReconcileMethod && reconciles.Add(1) == 1 {
+			close(reconciling)
+			return result, holdSuccessReply
+		}
+		return result, errText
+	})
+	t.Cleanup(h.engine.releaseHeld)
+	if _, err := h.b.acceptEngineSwitch(context.Background(), p, "peer"); err != nil {
+		t.Fatal(err)
+	}
+	requireGateOpens(t, starting, "target start")
+	if state, err := h.b.setAvailability(context.Background(), nodepolicy.Paused, nodepolicy.PausedLocally); err != nil || state != nodepolicy.Paused {
+		t.Fatalf("pause = %s, %v", state, err)
+	}
+	requireGateOpens(t, reconciling, "switch reconciliation")
+	if state, err := h.b.setAvailability(context.Background(), nodepolicy.Available, nodepolicy.PausedLocally); err != nil || state != nodepolicy.Available {
+		t.Fatalf("resume = %s, %v", state, err)
+	}
+	return h, p
+}
+
+func requireSwitchPauseResumeSettled(t *testing.T, h *switchHarness, id string) {
+	t.Helper()
+	r := h.receipt(t, id)
+	if !r.Terminal || r.RecoveryRequired || r.Error == nil || r.Error.Kind != settings.SwitchErrorRemoteVeto || r.Target.Intent != settings.SwitchIntentOff || !r.Target.TerminationVerified {
+		t.Fatalf("Pause/Resume cleanup did not settle: %+v", r)
+	}
+	requireSwitchPauseResumeReleased(t, h, id)
+}
+
+func requireSwitchPauseResumeReleased(t *testing.T, h *switchHarness, id string) {
+	t.Helper()
+	o := switchStoreDisk(t, h.b.engineSwitch.store).LocalObligations[id]
+	if !o.Pause || !o.PauseApplied || !o.Discharged {
+		t.Fatalf("Pause was not durably applied and discharged: %+v", o)
+	}
+	h.mu.Lock()
+	cp := *h.cp
+	h.mu.Unlock()
+	if cp.Phase != settings.SwitchCheckpointReleased || cp.Target.Intent != settings.SwitchIntentOff || !cp.Target.TerminationVerified {
+		t.Fatalf("target cleanup or release not verified: %+v", cp)
+	}
+	runtime := h.b.nodePolicyRuntime()
+	runtime.mu.Lock()
+	policy, live := runtime.current, runtime.live
+	runtime.mu.Unlock()
+	if policy.Availability != nodepolicy.Available || policy.PausedBy != "" || live != nodepolicy.Available {
+		t.Fatalf("cleanup overrode Resume: policy=%+v live=%s", policy, live)
+	}
+	h.b.engineConfigMu.Lock()
+	err := h.b.pendingSwitchLocked("")
+	recoveryErr := h.b.switchCoordinator().recoveryErr
+	h.b.engineConfigMu.Unlock()
+	if err != nil || recoveryErr != nil {
+		t.Fatalf("settled switch still fenced: pending=%v recovery=%v", err, recoveryErr)
 	}
 }
 
