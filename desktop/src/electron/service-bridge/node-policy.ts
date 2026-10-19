@@ -17,11 +17,10 @@ import type {
     StrictAdmissionModel,
     StrictAdmissionCapability
 } from '@/shared/types/node-policy'
-import { engineManagerName } from '@/shared/utils/engines'
+import { engineManagerName, isValidRoutingEngineId } from '@/shared/utils/engines'
 import getErrorString from '@/shared/utils/get-error-string'
 import { availabilityValue } from './node-availability'
 import type { JsonObject, JsonValue } from './json-rpc-client'
-import { EngineManagerNames } from '@/shared/constants/engines'
 
 function objectValue(value: JsonValue | undefined): JsonObject | null {
     if (value === null || typeof value !== 'object' || Array.isArray(value)) return null
@@ -122,7 +121,7 @@ export function parseStrictAdmissionCapability(
         const name = typeof model.model === 'string' ? model.model.toWellFormed() : null
         if (
             engine === null ||
-            !Object.values(EngineManagerNames).some(value => value === engine) ||
+            !isValidRoutingEngineId(engine) ||
             name === null ||
             name === '' ||
             /^(weak|medium|strong)(-api|-local)?$/.exec(name)?.[0] === name
