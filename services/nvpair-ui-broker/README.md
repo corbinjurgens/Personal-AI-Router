@@ -387,6 +387,28 @@ proxy enforces it.
   pinned `GET /v1/models` document and enforces `pausedLocally`. Each send reads
   the policy current at send time under one lock, so an older projection never
   follows a newer one.
+- **Strict admission readiness.** The proxy reports its strict admission
+  controller's readiness with the notification `admission/strict-readiness`,
+  whose params are `nodepolicy.StrictAdmissionReadiness`
+  (`{policyRevision, proxyRunId, capability?}`), after acknowledging each
+  `node/set-policy` and whenever that readiness changes (`readiness_contract.go`).
+  The broker discards a report from another proxy run than the one that
+  acknowledged the policy, and an invalid report withdraws what it held. It
+  holds the newest report and adds its capability to the projection's
+  `policy.strictAdmission` only while the report is authoritative: the proxy
+  that sent it still runs and is the incarnation the policy was replayed to,
+  `proxyRunId` is the run of that incarnation's acknowledgements, and
+  `policyRevision` is both the active and the persisted revision, with the
+  availability push acknowledged and the node `available`. Models of an engine
+  saved Off are left out, and a capability with no model left is withdrawn.
+  Anything else withdraws it: proxy exit or stop, a replay to a new proxy run
+  (which clears the held report until the new run reports), a saved policy
+  pending acknowledgement, and a pause or drain. A report may arrive before
+  the acknowledgement it follows; it is advertised once that is recorded.
+  Readiness is reconsidered, under the projection lock, after every report,
+  acknowledgement, proxy start or exit and intent change, and a projection is
+  sent only when the capability changes. `Policy.Advertisement()` never sets
+  it. Peers without the capability keep concrete routing.
 - **Admission.** The proxy's `admission/state` (active, per-engine active, last
   activity) feeds the drains below; `admission/unload` unloads the named models
   through `engine:unload-model`; `admission/wake` calls `engine:wake` unless the
