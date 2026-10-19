@@ -345,10 +345,7 @@ func TestReverseModelCopyPhase04(t *testing.T) {
 	testAuthority := func(name, model string, destination, source *task1Node) {
 		t.Run(name, func(t *testing.T) {
 			pin := filepath.Join(destination.base, "cluster", "trusted", source.uuid+".json")
-			original, err := os.ReadFile(pin)
-			if err != nil {
-				t.Fatal(err)
-			}
+			original := readLiveDurableFile(t, pin)
 			defer func() {
 				if err := os.WriteFile(pin, original, 0o600); err != nil {
 					t.Error(err)

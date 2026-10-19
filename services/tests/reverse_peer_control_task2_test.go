@@ -527,10 +527,7 @@ func TestReversePeerControlTask2(t *testing.T) {
 			t.Fatalf("wrong inner leaf status=%d want=403", inner.StatusCode)
 		}
 		pin := filepath.Join(f.b.base, "cluster", "trusted", f.a.uuid+".json")
-		original, err := os.ReadFile(pin)
-		if err != nil {
-			t.Fatal(err)
-		}
+		original := readLiveDurableFile(t, pin)
 		removeAuthorityFile(t, pin)
 		t.Cleanup(func() {
 			if err := os.WriteFile(pin, original, 0o600); err != nil {

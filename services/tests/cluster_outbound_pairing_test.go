@@ -5,13 +5,10 @@ package tests
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net"
 	"os"
 	"path/filepath"
-	"runtime"
-	"syscall"
 	"testing"
 	"time"
 
@@ -94,10 +91,7 @@ func newBlockedPairingFixtureEnv(t *testing.T, inviterEnv, joinerEnv []string) b
 
 func readOutboundJSON[T any](t *testing.T, path string) T {
 	t.Helper()
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("read %s: %v", path, err)
-	}
+	data := readLiveDurableFile(t, path)
 	var result T
 	if err := json.Unmarshal(data, &result); err != nil {
 		t.Fatalf("decode %s: %v", path, err)
@@ -273,8 +267,7 @@ func renameOutboundFaultFile(t *testing.T, from, to string) {
 		if err == nil {
 			return
 		}
-		var errno syscall.Errno
-		if runtime.GOOS != "windows" || !errors.As(err, &errno) || (errno != 5 && errno != 32) {
+		if !isWindowsSharingError(err) {
 			t.Fatal(err)
 		}
 		if time.Now().After(deadline) {
@@ -318,6 +311,12 @@ func TestClusterOutboundPairingRollbackWaitsForDurableCleanup(t *testing.T) {
 	waitInviteState(t, f.a, f.invite.InviteID, "failed")
 	if count := memberCount(t, f.a); count != 1 {
 		t.Fatalf("completed compensation retained %d inviter rows, want self only", count)
+	}
+	members := readOutboundJSON[[]struct {
+		NodeUUID string `json:"nodeUuid"`
+	}](t, memberPath)
+	if len(members) != 1 || members[0].NodeUUID != f.aID.NodeUUID {
+		t.Fatalf("completed compensation durable inviter roster = %+v, want only self %s", members, f.aID.NodeUUID)
 	}
 	if _, err := os.Stat(filepath.Join(f.aDir, "cluster", "trusted", f.bID.NodeUUID+".json")); !os.IsNotExist(err) {
 		t.Fatalf("completed compensation retained durable peer pin: %v", err)
