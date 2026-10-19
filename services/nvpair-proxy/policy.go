@@ -211,6 +211,23 @@ func normalizeEngineModel(engine, model string) string {
 	return strings.TrimSpace(model)
 }
 
+// modelServed is the permission comparison seam. B2 can replace normalization
+// here with the shared descriptor naming helper when it lands.
+func modelServed(served nodepolicy.ServedModels, engine, model string, normalize func(string, string) string) bool {
+	if served == nil {
+		return true
+	}
+	want := normalize(engine, model)
+	for _, ref := range served {
+		if ref.Engine == engine && normalize(engine, ref.Model) == want {
+			return true
+		}
+	}
+	return false
+}
+
+const rejectNotServed nodepolicy.RejectReason = "not-served"
+
 // normalizeEngineModel is normalizeEngineModel extended to the descriptor
 // engines this process fronts, whose naming rule lives on their facade. An
 // engine without a facade here keeps exact naming.

@@ -24,6 +24,21 @@ func servedResidentPolicy() Policy {
 	return p
 }
 
+func TestReviewR2PolicyModelDefaults(t *testing.T) {
+	for _, key := range []string{`model`, `Model`, `MODEL`, `mo\u0064el`, `Mo\u0064el`} {
+		t.Run(key, func(t *testing.T) {
+			p := servedResidentPolicy()
+			if err := p.Validate(); err != nil {
+				t.Fatal(err)
+			}
+			p.Profiles[0].RequestOptions = json.RawMessage(`{"` + key + `":"forbidden"}`)
+			if err := p.Validate(); err == nil || !strings.Contains(err.Error(), "requestOptions may not set model") {
+				t.Fatalf("model-equivalent defaults validation: %v", err)
+			}
+		})
+	}
+}
+
 func TestServedResidentParityFixtures(t *testing.T) {
 	data, err := os.ReadFile("testdata/served-resident.json")
 	if err != nil {

@@ -536,8 +536,10 @@ func (p Policy) Validate() error {
 			if err := json.Unmarshal(pr.RequestOptions, &obj); err != nil {
 				return fmt.Errorf("profiles[%d] %q: requestOptions must be a JSON object", i, pr.Name)
 			}
-			if _, ok := obj["model"]; ok {
-				return fmt.Errorf("profiles[%d] %q: requestOptions may not set model", i, pr.Name)
+			for key := range obj {
+				if strings.EqualFold(key, "model") {
+					return fmt.Errorf("profiles[%d] %q: requestOptions may not set model", i, pr.Name)
+				}
 			}
 		}
 	}
