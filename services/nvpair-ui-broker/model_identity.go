@@ -20,7 +20,9 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 
+	"nvpair-shared/engines"
 	settings "nvpair-shared/enginesettings"
 	"nvpair-shared/nodepolicy"
 )
@@ -167,18 +169,30 @@ func (r *policyRuntime) modelIdentityLocked() nodepolicy.SetModelIdentityParams 
 
 // identityCurrentLocked reports whether m's identity is the one this broker
 // knows for its engine now: the same run and settings fingerprint, and a model
-// digest among those the engine lists. Caller holds r.mu.
-func (r *policyRuntime) identityCurrentLocked(m nodepolicy.StrictAdmissionModel) bool {
+// digest for the same normalized model name. Caller holds r.mu.
+func (r *policyRuntime) identityCurrentLocked(m nodepolicy.StrictAdmissionModel, naming string) bool {
 	id, ok := r.modelIdentityLocked().Engines[m.Engine]
 	if !ok || id.EngineRunID != m.Identity.EngineRunID || id.SettingsFingerprint != m.Identity.SettingsFingerprint {
 		return false
 	}
-	for _, digest := range id.ModelDigests {
-		if digest == m.Identity.ModelDigest {
-			return true
+	normalize := func(model string) string {
+		model = strings.TrimSpace(model)
+		if nodepolicy.IsReservedAlias(model) {
+			return model
+		}
+		return engines.NormalizeModelName(model, naming)
+	}
+	want := normalize(m.Model)
+	found := false
+	for model, digest := range id.ModelDigests {
+		if normalize(model) == want {
+			if digest != m.Identity.ModelDigest {
+				return false
+			}
+			found = true
 		}
 	}
-	return false
+	return found
 }
 
 // withdrawSettingsIdentity removes engine's settings fingerprint and returns

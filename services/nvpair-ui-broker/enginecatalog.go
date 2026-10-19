@@ -51,6 +51,22 @@ type dynamicEngineCatalog struct {
 	runtimes    map[string]*engineProxyRuntime
 }
 
+// engineModelNaming resolves the built-in profiles or the installed catalog.
+// The catalog lock is a leaf: this may be called while policy state is locked.
+func (b *Broker) engineModelNaming(engine string) (string, bool) {
+	if profile, ok := engineProxyProfileFor(engine); ok {
+		if profile.Name == engines.NameOllama {
+			return engines.ModelNamingImpliedLatestTag, true
+		}
+		return engines.ModelNamingExact, true
+	}
+	c := &b.dynamicEngines
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	d, ok := c.descriptors[engine]
+	return d.ModelNaming, ok && (d.ModelNaming == engines.ModelNamingExact || d.ModelNaming == engines.ModelNamingImpliedLatestTag)
+}
+
 // loadDynamicEngines reads engine-manager's descriptors and fronts the ones
 // this node can. With no proxy binary there is nothing to front them with.
 func (b *Broker) loadDynamicEngines() {
