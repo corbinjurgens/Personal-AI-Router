@@ -19,6 +19,7 @@ import (
 	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/table"
 	"github.com/charmbracelet/bubbles/textinput"
+	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 )
 
@@ -65,6 +66,15 @@ type nodeDetail struct {
 	// telemetrySelf follows the merged route without changing the engine/proxy
 	// structure chosen from node.self when the detail screen opened.
 	telemetrySelf bool
+
+	performanceLease       *performanceLease
+	performance            *performanceProjection
+	performanceUnavailable bool
+	performanceOpen        bool
+	performanceRoute       int
+	performancePushes      int
+	performanceRefresh     bool
+	performanceViewport    viewport.Model
 
 	engines     []engineStatus
 	engineTable table.Model
@@ -237,15 +247,16 @@ func newNodeDetail(client *rpc.Client, node nodeRow) *nodeDetail {
 	ti := textinput.New()
 	telemetryChains++
 	d := &nodeDetail{
-		client:         client,
-		node:           node,
-		hostUUID:       telemetryIdentity(node),
-		telemetrySelf:  node.self,
-		engineTable:    newTable(detailEngineColumns(defaultTableWidth, !node.self)),
-		modelTable:     newTable(detailModelColumns(defaultTableWidth)),
-		input:          ti,
-		telemetryGen:   telemetryChains,
-		telemetryFound: true,
+		client:              client,
+		node:                node,
+		hostUUID:            telemetryIdentity(node),
+		telemetrySelf:       node.self,
+		engineTable:         newTable(detailEngineColumns(defaultTableWidth, !node.self)),
+		modelTable:          newTable(detailModelColumns(defaultTableWidth)),
+		input:               ti,
+		telemetryGen:        telemetryChains,
+		telemetryFound:      true,
+		performanceViewport: viewport.New(0, 0),
 	}
 	if node.self {
 		d.proxy = newProxyTracker()
@@ -324,7 +335,7 @@ func (d *nodeDetail) Init() tea.Cmd {
 	// The telemetry chain is started by this first poll, not by a tick: each
 	// reading schedules the next one when it lands, so there is exactly one
 	// chain and it cannot outrun a slow node.
-	cmds := []tea.Cmd{d.enginesCmd(), d.modelsCmd(), d.telemetryCmd(), d.own(descriptorsCmd(d.client))}
+	cmds := []tea.Cmd{d.enginesCmd(), d.modelsCmd(), d.telemetryCmd(), d.own(descriptorsCmd(d.client)), d.startPerformance()}
 	if d.proxy != nil {
 		cmds = append(cmds, d.proxy.init(d.client))
 	}
@@ -485,6 +496,11 @@ func (d *nodeDetail) followNode(row nodeRow, found bool) {
 		d.node.membership = membershipNone
 	}
 	d.telemetryFound = found
+	if oldFound != found || oldHostUUID != d.hostUUID || oldSelf != d.telemetrySelf {
+		d.performanceRoute++
+		d.performance = nil
+		d.performanceRefresh = found
+	}
 	newMember := d.node.membership == membershipMember
 	if oldFound != d.telemetryFound || oldHostUUID != d.hostUUID ||
 		oldSelf != d.telemetrySelf || oldMember != newMember ||
@@ -660,6 +676,25 @@ func (d *nodeDetail) update(msg tea.Msg) (tea.Cmd, bool) {
 	}
 
 	switch msg := msg.(type) {
+	case detailPerformanceMsg:
+		if msg.lease != d.performanceLease || msg.lease == nil || msg.lease.retired.Load() ||
+			msg.host != d.hostUUID || msg.route != d.performanceRoute || msg.pushes != d.performancePushes {
+			return nil, true
+		}
+		d.performance, d.performanceUnavailable = msg.projection, msg.err != nil
+		return nil, true
+
+	case DisconnectedMsg:
+		d.closePerformance()
+		return nil, true
+
+	case TickMsg:
+		if d.performanceRefresh {
+			d.performanceRefresh = false
+			return d.performanceCmd(false), true
+		}
+		return nil, true
+
 	case detailReply:
 		// Replies are not cancelled when a screen closes, so one sent from
 		// another node's screen can land here. Taken, a late engine list or
@@ -857,6 +892,25 @@ func (d *nodeDetail) update(msg tea.Msg) (tea.Cmd, bool) {
 
 func (d *nodeDetail) handleNotification(msg *rpc.Message) tea.Cmd {
 	switch msg.Method {
+	case "performance:changed":
+		if d.performanceLease == nil || d.performanceLease.retired.Load() {
+			return nil
+		}
+		d.performancePushes++
+		p, err := decodePerformanceProjection(msg.Params)
+		d.performance, d.performanceUnavailable = p, err != nil
+		return nil
+
+	case "service/broker-restarted":
+		d.closePerformance()
+		return nil
+
+	case "app:ready":
+		if d.performanceLease == nil {
+			return d.startPerformance()
+		}
+		return nil
+
 	case "engine:state-changed":
 		var e engineStatus
 		decodeOrLog(msg.Method, msg.Params, &e)
@@ -1102,7 +1156,17 @@ func (d *nodeDetail) handleKey(msg tea.KeyMsg) (tea.Cmd, bool) {
 	}
 
 	if key.Matches(msg, detailBackKey) {
+		d.closePerformance()
 		return nil, false
+	}
+	if key.Matches(msg, detailPerformanceKey) {
+		d.performanceOpen = !d.performanceOpen
+		return nil, true
+	}
+	if d.performanceOpen {
+		var cmd tea.Cmd
+		d.performanceViewport, cmd = d.performanceViewport.Update(msg)
+		return cmd, true
 	}
 	if key.Matches(msg, detailPaneKey) {
 		if d.pane == detailEngines {
@@ -1937,6 +2001,9 @@ func (d *nodeDetail) View() string {
 	identity := titleStyle.Render(d.node.name) + footerStyle.Render(fmt.Sprintf(
 		"   %s:%d   %s   %s   %s",
 		d.node.address, d.node.port, d.node.presence, d.node.membership, scope))
+	if d.performanceOpen {
+		return d.performanceView(identity)
+	}
 
 	editor := ""
 	if d.mode != detailInputNone {
@@ -2215,7 +2282,10 @@ func (d *nodeDetail) Help() []key.Binding {
 	if d.pending != nil || d.settingsConfirm != nil {
 		return []key.Binding{detailConfirmKey}
 	}
-	bindings := []key.Binding{detailBackKey, detailPaneKey}
+	if d.performanceOpen {
+		return []key.Binding{detailBackKey, detailPerformanceKey, performanceScrollKey}
+	}
+	bindings := []key.Binding{detailBackKey, detailPaneKey, detailPerformanceKey}
 	if d.pane == detailEngines {
 		bindings = append(bindings, detailInstallKey, detailStartKey, detailStopKey)
 		// The settings keys are offered on a peer too: the engine manager
