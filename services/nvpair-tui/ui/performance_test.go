@@ -279,7 +279,9 @@ func TestPerformanceNodeDetailRPCAndRender(t *testing.T) {
 		t.Fatal("detail Init did not fetch performance")
 	}
 	d.update(runeKey("v"))
-	assertPerformanceText(t, d.View(), "Cached performance", "TTFT: median 0 / p95 14", "Decode: 0 tokens/s", "hardware: unavailable")
+	// The self row reads this host's own hardware, so expect whatever its block renders.
+	hardware := strings.SplitN(d.hardwareBlock(), "\n", 2)[0]
+	assertPerformanceText(t, d.View(), "Cached performance", "TTFT: median 0 / p95 14", "Decode: 0 tokens/s", hardware)
 	if cmd, _ := d.update(runeKey("s")); cmd != nil {
 		t.Fatal("performance view dispatched an engine start")
 	}
