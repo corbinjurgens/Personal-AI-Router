@@ -16,6 +16,7 @@ import (
 
 	"nvpair-shared/applog"
 	"nvpair-shared/clustertrust"
+	"nvpair-shared/nodepolicy"
 	"nvpair-shared/noderec"
 	"nvpair-shared/reach"
 )
@@ -70,6 +71,7 @@ type Manager struct {
 	switchRelay      switchRelay
 	settingsRelay    settingsRelay
 	policyRelay      policyRelay
+	modelMutation    modelMutationRelay
 	codec            *Codec
 	exec             *Executor
 	peers            *peerDirectory
@@ -118,6 +120,8 @@ func NewManager(codec *Codec, exec *Executor, mesh *clustertrust.Mesh, clusterDi
 	exec.settingsParent = m.settingsRelay.call
 	m.policyRelay.send = codec.Notify
 	exec.policyParent = m.policyRelay.call
+	m.modelMutation.send = codec.Notify
+	exec.modelMutationParent = m.modelMutation.call
 	return m
 }
 
@@ -200,6 +204,14 @@ func (m *Manager) handleMessage(ctx context.Context, msg *Message) {
 
 	if msg.Method == noderec.NotifyNodes {
 		m.applyDiscovery(msg)
+		return
+	}
+	// The broker's answer to this service's model-mutation request
+	// (model_mutation.go). It is consumed as an internal notification here and
+	// never treated as a client request, so a public request with the same name
+	// cannot complete a pending wait.
+	if msg.Method == nodepolicy.MethodModelMutationReply && msg.IsNotification() {
+		m.modelMutation.reply(msg.Params)
 		return
 	}
 	if msg.Method == nodeProjectionMethod && msg.IsNotification() {

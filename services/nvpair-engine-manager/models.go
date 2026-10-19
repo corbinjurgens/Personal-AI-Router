@@ -146,6 +146,9 @@ func (e *Executor) modelsSweep(ctx context.Context, fullInventory bool) ModelsRe
 				perEngine[i] = inv
 				listOK[i] = true
 			} else if listSpec != nil {
+				e.inventoryMu.Lock()
+				epoch := e.inventoryDigests[name].epoch
+				e.inventoryMu.Unlock()
 				run := e.engineRunID(name)
 				listRaw, listErr = e.Action(ctx, name, "list_models", nil)
 				if listErr != nil {
@@ -155,7 +158,7 @@ func (e *Executor) modelsSweep(ctx context.Context, fullInventory bool) ModelsRe
 					listOK[i] = true
 					// Digests are labelled with the run read before the request,
 					// so a run that changed meanwhile never inherits them.
-					digests[i] = observedDigests{runID: run, models: extractDigests(listRaw, listSpec)}
+					digests[i] = observedDigests{runID: run, models: extractDigests(listRaw, listSpec), epoch: epoch}
 				} else {
 					slog.Debug("engine:models list_models returned an invalid inventory", "engine", name)
 				}
@@ -369,6 +372,19 @@ func (e *Executor) storeInventory(fresh map[string][]string, digests map[string]
 	e.inventory = fresh
 	if sweep > e.digestSweep {
 		e.digestSweep = sweep
-		e.inventoryDigests = digests
+		if e.inventoryDigests == nil {
+			e.inventoryDigests = make(map[string]observedDigests)
+		}
+		for name, current := range e.inventoryDigests {
+			current.models = nil
+			current.runID = ""
+			e.inventoryDigests[name] = current
+		}
+		for name, observed := range digests {
+			current := e.inventoryDigests[name]
+			if !current.suppressed && observed.epoch == current.epoch {
+				e.inventoryDigests[name] = observed
+			}
+		}
 	}
 }

@@ -30,6 +30,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"nvpair-shared/nodepolicy"
 )
 
 // TestLiveOllamaCleanRoom installs NVPAIR's own standalone Ollama — the
@@ -248,6 +250,22 @@ func startManager(t *testing.T, env map[string]string) (chan frame, io.WriteClos
 			line := sc.Text()
 			var f frame
 			_ = json.Unmarshal([]byte(line), &f)
+			if f.Method == nodepolicy.MethodModelMutationRequest {
+				var req nodepolicy.ModelMutationRequest
+				if err := json.Unmarshal(f.Params, &req); err != nil {
+					t.Errorf("decode model mutation request: %v", err)
+					continue
+				}
+				// This gated harness owns the parent pipe and acts as the broker.
+				// Its clean-room engine has no strict proxy admission to withdraw.
+				if err := json.NewEncoder(stdin).Encode(map[string]any{
+					"jsonrpc": "2.0", "method": nodepolicy.MethodModelMutationReply,
+					"params": nodepolicy.ModelMutationReply{RequestID: req.RequestID, Engine: req.Engine, OK: true},
+				}); err != nil {
+					t.Errorf("answer model mutation request: %v", err)
+				}
+				continue
+			}
 			t.Logf("[%6dms] %s", time.Since(start).Milliseconds(), line)
 			frames <- f
 		}

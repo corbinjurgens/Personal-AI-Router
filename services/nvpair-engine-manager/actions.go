@@ -34,6 +34,12 @@ func (e *ActionHTTPError) Error() string {
 
 // Action runs a manifest-declared action against the engine and, when the
 // action declares restart_after, restarts the engine on success.
+//
+// An action the manifest binds to the delete or pull operation changes the
+// engine's installed models: it takes the engine's content-mutation guard
+// (model_mutation.go), so the broker withdraws that engine's model identity
+// from the destination before the action's first engine-visible effect and the
+// change runs only once the withdrawal is confirmed.
 func (e *Executor) Action(ctx context.Context, engine, action string, params json.RawMessage) (json.RawMessage, error) {
 	st, err := e.state(engine)
 	if err != nil {
@@ -50,16 +56,34 @@ func (e *Executor) Action(ctx context.Context, engine, action string, params jso
 		}
 		defer done()
 	}
-	res, err := e.dispatchAction(ctx, st, engine, action, act, params)
-	if err != nil {
-		return nil, err
-	}
-	// The restart gets the caller's context, not the action's: it is a stop plus
-	// a readiness-probed start, which the action timeout does not budget for.
-	if act.RestartAfter {
-		if err := e.restartAfterAction(ctx, st, engine, action); err != nil {
+	run := func() (json.RawMessage, error) {
+		res, err := e.dispatchAction(ctx, st, engine, action, act, params)
+		if err != nil {
 			return nil, err
 		}
+		// The restart gets the caller's context, not the action's: it is a stop
+		// plus a readiness-probed start, which the action timeout does not
+		// budget for.
+		if act.RestartAfter {
+			if err := e.restartAfterAction(ctx, st, engine, action); err != nil {
+				return nil, err
+			}
+		}
+		return res, nil
+	}
+	if !st.manifest.mutatesModelContent(action) {
+		return run()
+	}
+	// The action deletes or pulls models: the withdrawal must be confirmed
+	// before the action starts, and the restart that makes the change visible
+	// belongs to the same mutation.
+	var res json.RawMessage
+	if err := e.withModelMutation(ctx, engine, func() error {
+		var runErr error
+		res, runErr = run()
+		return runErr
+	}); err != nil {
+		return nil, err
 	}
 	return res, nil
 }

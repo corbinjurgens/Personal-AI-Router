@@ -56,6 +56,11 @@ type engineState struct {
 	// st.mu is released around probes, and the background health loop
 	// never takes opMu.
 	opMu sync.Mutex
+	// contentMu serializes content mutations (delete / pull / copy into the
+	// engine's model store) for this engine, separate from opMu: a model change
+	// must not be blocked by, nor block, an install/start/stop/restart, and
+	// opMu is never held while contentMu is taken. See model_mutation.go.
+	contentMu sync.Mutex
 
 	mu        sync.Mutex
 	installed bool
@@ -95,10 +100,15 @@ type Executor struct {
 	// policyParent relays a paired node's node-policy call to the broker
 	// (policyrelay.go). nil until a Manager wires it.
 	policyParent func(ctx context.Context, method string, params json.RawMessage, caller string) (json.RawMessage, error)
-	reg          *Registry
-	reporter     *Reporter
-	emit         func(method string, params any)
-	client       *http.Client
+	// modelMutationParent asks the broker to withdraw an engine's model
+	// identity before this service changes that engine's content, and waits
+	// for the confirmed reply (model_mutation.go). nil until a Manager wires
+	// it; an unwired executor fails closed.
+	modelMutationParent func(ctx context.Context, engine string) error
+	reg                 *Registry
+	reporter            *Reporter
+	emit                func(method string, params any)
+	client              *http.Client
 	// budgetClients holds one engine client per operation response budget a
 	// manifest declares (OperationBinding.ResponseTimeoutS), created on first
 	// use and reused so its connections are too. Guarded by budgetMu.

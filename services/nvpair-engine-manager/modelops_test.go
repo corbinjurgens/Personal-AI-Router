@@ -24,7 +24,9 @@ func bundledTestExecutor(t *testing.T) *Executor {
 	if err := reg.LoadFS(bundledManifests, "manifests"); err != nil {
 		t.Fatalf("LoadFS bundled: %v", err)
 	}
-	return NewExecutor(reg, NewReporter(nil), func(string, any) {}, t.TempDir())
+	ex := NewExecutor(reg, NewReporter(nil), func(string, any) {}, t.TempDir())
+	acceptModelMutations(ex)
+	return ex
 }
 
 // The bundled bindings must produce exactly the action and params the model
@@ -155,6 +157,7 @@ func TestTypedModelOperationRPCs(t *testing.T) {
 	ex, seen := modelOperationEngine(t)
 	var out bytes.Buffer
 	m := NewManager(NewCodec(&out), ex, nil, "")
+	acceptModelMutations(ex)
 	id := json.RawMessage("1")
 	for _, method := range []string{loadModelMethod, unloadModelMethod, deleteModelMethod} {
 		out.Reset()
@@ -200,6 +203,7 @@ func TestTypedModelOperationsAreDispatched(t *testing.T) {
 	ex, seen := modelOperationEngine(t)
 	var out lockedBuffer
 	m := NewManager(NewCodec(&out), ex, nil, "")
+	acceptModelMutations(ex)
 	id := json.RawMessage("7")
 	m.handleMessage(context.Background(), &Message{JSONRPC: "2.0", ID: &id, Method: deleteModelMethod,
 		Params: json.RawMessage(`{"engine":"variant","model":"m"}`)})

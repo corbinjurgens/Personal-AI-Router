@@ -1,6 +1,8 @@
 {
     "$comment": "Intentionally unintegrated JSON-RPC methods for desktop ↔ services contract checks. Each ignoredMethods entry needs a current technical reason. Edit by hand; run npm run service-contracts:write to refresh docs/services-api.md after services/ changes.",
     "ignoredMethods": {
+        "engine:model-mutation-request": "Private engine-manager-to-broker correlated request to withdraw the destination engine's model identity before a supported content mutation. Consumed by Broker.observeModelMutationRequest through forwardEngineNotificationFrom with the bound source; never forwarded to clients.",
+        "engine:model-mutation-reply": "Private broker-to-engine-manager correlated withdrawal confirmation. Consumed by modelMutationRelay.reply through Manager.handleMessage; sent only through the bound worker/source pair, never forwarded to clients.",
         "engine:switch-reply": "Private correlated broker-to-engine-manager switch relay reply. Consumed by switchRelay.reply; renderer clients use engine:switch, engine:switch-status and engine:switch-changed.",
         "engine:switch-request": "Private authenticated engine-manager-to-broker apply/status relay. Consumed by Broker.handleSwitchRelay; never a renderer request.",
         "engine:switch-cancel": "Private engine-manager-to-broker relay waiter cancellation. Consumed by Broker.cancelSwitchRelay; accepted switching remains target-owned.",

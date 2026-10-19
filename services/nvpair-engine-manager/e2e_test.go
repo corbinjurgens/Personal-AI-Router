@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"io"
 	settings "nvpair-shared/enginesettings"
+	"nvpair-shared/nodepolicy"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -264,7 +265,39 @@ func startE2EManager(t *testing.T, cfg, home string, args ...string) *e2eManager
 			_ = manager.cmd.Wait()
 		}
 	})
-	go readFrames(stdout, manager.frames)
+	// This parent explicitly acts as a broker that confirms model withdrawal.
+	// Consume internal requests before exposing ordinary frames to the test.
+	go func() {
+		sc := bufio.NewScanner(stdout)
+		sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+		for sc.Scan() {
+			var f frame
+			if err := json.Unmarshal(sc.Bytes(), &f); err != nil {
+				t.Errorf("decode manager frame: %v", err)
+				return
+			}
+			if f.Method == nodepolicy.MethodModelMutationRequest {
+				var req nodepolicy.ModelMutationRequest
+				if err := json.Unmarshal(f.Params, &req); err != nil {
+					t.Errorf("decode mutation request: %v", err)
+					return
+				}
+				err := json.NewEncoder(stdin).Encode(map[string]any{
+					"jsonrpc": "2.0", "method": nodepolicy.MethodModelMutationReply,
+					"params": nodepolicy.ModelMutationReply{RequestID: req.RequestID, Engine: req.Engine, OK: true},
+				})
+				if err != nil {
+					t.Errorf("reply to mutation request: %v", err)
+					return
+				}
+				continue
+			}
+			manager.frames <- f
+		}
+		if err := sc.Err(); err != nil {
+			t.Errorf("read manager frames: %v", err)
+		}
+	}()
 	waitNotify(t, manager.frames, "engine:ready", 5*time.Second)
 	return manager
 }

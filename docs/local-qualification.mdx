@@ -184,15 +184,17 @@ Invalidation happens before the change it guards wherever PAIR makes the change:
 | Event | Effect |
 | --- | --- |
 | A settings operation (apply or recovery) | The broker withdraws the engine's settings identity and waits for the proxy to acknowledge it before `engine:configure-launch` runs; if that cannot be confirmed the operation fails before the engine is touched. A new applied revision has a new fingerprint. |
+| A PAIR model mutation (manifest-bound delete/pull, streaming pull or destination copy, including typed delete and `ec` callers) | Like settings, the mutation waits for confirmed destination withdrawal before changing content. The whole engine's model identity is withdrawn; it returns only from fresh post-completion inventory, including after failure. |
 | Lower context, changed template flag, other launch arguments or an engine upgrade | New launch digest; not covered by the evidence, so not installed. |
 | Engine restart or adoption | New run id; requests naming the old one are refused. |
 | Same-name model replacement or a changed template layer | New content digest; not installed until evidence names it. |
 | Profile bounds above the evidence, other defaults, or a stale qualification revision | Not installed. |
 | Stale origin metadata | The destination revalidates identity and body. |
 
-Two windows remain: a request already admitted before a change keeps running, and
-a model replaced outside PAIR is noticed at the next watcher tick (5 seconds by
-default) rather than at dispatch.
+Withdrawal rejects cached strict envelopes and tickets that have not passed
+their final dispatch check; it does not cancel already dispatched inference.
+The remaining polling window is for models changed outside PAIR: replacement is
+noticed at the next watcher tick (5 seconds by default) rather than at dispatch.
 
 ## Not covered here
 
