@@ -81,6 +81,9 @@ type scannerReverseFixture struct {
 	connections       []net.Conn
 	wg                sync.WaitGroup
 	listeners         []net.Listener
+
+	// policy, when set, is served instead of scannerFixturePolicy.
+	policy atomic.Pointer[json.RawMessage]
 }
 
 // scannerFixturePolicy is the policy advertisement the fixture's peer serves
@@ -229,7 +232,11 @@ func newScannerReverseFixture(t *testing.T) *scannerReverseFixture {
 		if f.responseEnding.Load() == scannerIncompleteFraming {
 			model = "uncommitted model"
 		}
-		writeScannerFixtureResponse(t, w, map[string]any{"models": []string{model}, "modelsByEngine": map[string][]string{"ollama": {model}}, "loadedByEngine": map[string][]string{"ollama": {model}}, "policy": scannerFixturePolicy}, f.responseEnding.Load())
+		var policy any = scannerFixturePolicy
+		if raw := f.policy.Load(); raw != nil {
+			policy = *raw
+		}
+		writeScannerFixtureResponse(t, w, map[string]any{"models": []string{model}, "modelsByEngine": map[string][]string{"ollama": {model}}, "loadedByEngine": map[string][]string{"ollama": {model}}, "policy": policy}, f.responseEnding.Load())
 	}))
 	models.TLS = peerMesh.ServerTLSConfig()
 	models.StartTLS()

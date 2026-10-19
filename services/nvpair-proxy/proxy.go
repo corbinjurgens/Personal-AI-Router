@@ -1242,10 +1242,12 @@ func subscribedToNode(p engineProfile, n noderec.DirectoryNode) (Node, bool) {
 		Models: append([]string(nil), n.EngineModels(p.Name)...),
 		Loaded: append([]string(nil), n.LoadedByEngine[p.Name]...),
 	}
-	// The node's own declaration, read by tier routing (declaredRoles).
+	// The node's own declaration, read by tier routing (declaredRoles), and
+	// its strict admission capability, read only by Node.strictModel.
 	if n.Policy != nil {
 		node.Roles = maps.Clone(n.Policy.Roles)
 		node.PolicyRevision = n.Policy.Revision
+		node.StrictAdmission = n.Policy.StrictAdmission
 	}
 	return node, true
 }

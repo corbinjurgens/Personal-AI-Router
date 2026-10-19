@@ -329,7 +329,8 @@ func TestRoutingListener_RejectsInferenceWithoutSideEffects(t *testing.T) {
 		}
 		settled(t, p)
 		for _, f := range frames(t, w) {
-			if f.ID == nil && f.Method != "errors:clear" {
+			// The strict readiness report follows the policy acknowledgement.
+			if f.ID == nil && f.Method != "errors:clear" && f.Method != nodepolicy.NotifyStrictReadiness {
 				t.Errorf("proxy emitted %q for an inference attempt, want only the listener's error clear", f.Method)
 			}
 		}
@@ -792,6 +793,8 @@ func TestRoutingListener_IsNeverAnnouncedBeyondTheErrorPipeline(t *testing.T) {
 				t.Errorf("a clear names the listener port: %s", line)
 			}
 		case "errors:report":
+		case nodepolicy.NotifyStrictReadiness:
+			// The report that follows each node/set-policy acknowledgement.
 		default:
 			t.Errorf("the listener caused a %q notification: %s", f.Method, line)
 		}

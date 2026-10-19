@@ -27,11 +27,10 @@ required. The capability limit must equal the finite effective policy/profile
 concurrency limit for the normalized engine/model, which is also enforced for
 concrete traffic. Unlimited or mismatched limits reject installation. Policy
 activation withdraws installed entries that no longer match. Caller fields never
-establish destination capability. A1a exposes an
-internal capability-install seam but wires no broker feed and returns a nil
-capability from `StrictReadiness`. No strict readiness is advertised. Production
-strict admission remains disabled pending authoritative identity/qualification
-integration. Strict dispatch is terminal-local and never enters concrete route
+establish destination capability. The capability installs only through the
+internal `installStrictCapability` seam, which nothing calls in production until
+qualification (B) supplies authoritative identity, so production strict admission
+remains disabled. Strict dispatch is terminal-local and never enters concrete route
 selection or retries. Headerless concrete admission retains its prior semantics,
 including its switch timeout behavior.
 
@@ -88,6 +87,34 @@ document is validated before any counters or markers are adopted; invalid later
 slots cannot leave partially restored state. A1b/A2 must provide actual
 authoritative reconciliation and the qualification owner must prove terminal
 evidence before activation.
+
+### Strict readiness and peer capability (A2)
+
+After answering each successful `node/set-policy` with its `PolicyAck`, the proxy
+sends the broker `admission/strict-readiness`
+(`nodepolicy.NotifyStrictReadiness`) with `nodepolicy.StrictAdmissionReadiness`:
+the revision it just acknowledged, the `runId` of that acknowledgement, and the
+installed capability, its models under their normalized keys sorted by engine
+and model. The capability is omitted when nothing is installed (always, until B)
+or when the strict capacity document is untrusted; activation has already
+withdrawn entries whose limit no longer matches. Nothing is sent before a policy
+is active or after a refused one. The install owner sends a report after each
+install. Reports leave from the control read loop only, so a report computed from
+older state never follows a newer one. The broker owns the fences and the
+publication (its README).
+
+A peer's capability reaches routing from its pinned inventory document through
+the scanner and the broker relay: `subscribedToNode` copies
+`DirectoryNode.Policy.StrictAdmission` onto the internal `Node.StrictAdmission`,
+which `nodeEqual` ignores, so readiness changes announce no `node/updated`.
+`Node.strictModel(engine, model)` is the hybrid exclusion rule: a peer is a hybrid
+local candidate for a model only when it advertises a valid capability of the
+supported version naming that engine and the model as the engine's facade
+normalizes it. A peer with no policy, no capability or an unsupported version is
+excluded from hybrid candidates only. Concrete routing never consults it, so such
+peers stay concrete candidates. The capability is a hint; the destination
+revalidates every strict request. No hybrid request path calls the rule yet:
+qualification (B) and hybrid dispatch (Phase 4) add the callers.
 
 Before forwarding to an engine, ingress and self dispatch strip every
 `X-PAIR-*` header (strict, admission wait/result and routing model/engine/node/tier

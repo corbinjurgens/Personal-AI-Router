@@ -5,7 +5,7 @@ package main
 
 // readiness.go is the broker side of strict local admission readiness. The
 // proxy's admission controller reports what it can admit under the strict
-// contract (notifyStrictReadiness); the broker, which owns the policy and knows
+// contract (nodepolicy.NotifyStrictReadiness); the broker, which owns the policy and knows
 // which proxy run acknowledged which revision, decides whether that report is
 // authoritative right now and publishes its capability in the node projection.
 // engine-manager only publishes what it is sent and never owns admission.
@@ -23,7 +23,7 @@ import (
 	"nvpair-shared/nodepolicy"
 )
 
-// observeStrictReadiness takes one notifyStrictReadiness report. It runs on the
+// observeStrictReadiness takes one nodepolicy.NotifyStrictReadiness report. It runs on the
 // proxy's read pump, so the projection goes out on its own goroutine.
 func (b *Broker) observeStrictReadiness(params json.RawMessage) {
 	var report nodepolicy.StrictAdmissionReadiness

@@ -46,6 +46,14 @@ rejects with 503 and releases the undispatched slot. Once cold work is needed,
 its deadline bounds every later wait, including capacity waits. Exhaustion rejects
 before allocating a ticket.
 
+After each acknowledged `node/set-policy` the proxy reports its strict readiness
+to the broker (`admission/strict-readiness`), naming the acknowledged revision and
+run and carrying the installed capability, which stays empty until qualification
+installs one. Each peer's advertised capability arrives on its discovery node and
+is kept as internal routing metadata. Only a valid capability naming the engine
+and normalized model makes a peer a hybrid local candidate; peers without one keep
+concrete routing.
+
 The destination requires an authoritative finite capability and matching engine,
 settings and model identity. Capability concurrency must equal the finite
 effective policy/profile limit shared with concrete admission; policy changes

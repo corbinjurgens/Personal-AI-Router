@@ -49,6 +49,10 @@ func (p *Proxy) handlePolicyMethod(msg *Message, method string) bool {
 		return true
 	}
 	_ = p.codec.Respond(msg.ID, result)
+	if method == nodepolicy.MethodSetPolicy {
+		// The broker reads readiness against the acknowledgement just sent.
+		p.reportStrictReadiness()
+	}
 	return true
 }
 

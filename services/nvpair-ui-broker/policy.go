@@ -1440,7 +1440,7 @@ func (b *Broker) handleAdmissionNotification(method string, params json.RawMessa
 		}
 		go b.wakeOnDemand(req.Engine)
 		return true
-	case notifyStrictReadiness:
+	case nodepolicy.NotifyStrictReadiness:
 		b.observeStrictReadiness(params)
 		return true
 	}
