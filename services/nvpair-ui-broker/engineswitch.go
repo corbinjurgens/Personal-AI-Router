@@ -13,6 +13,7 @@ import (
 
 	"nvpair-shared/engines"
 	settings "nvpair-shared/enginesettings"
+	"nvpair-shared/nodepolicy"
 	"nvpair-shared/noderec"
 )
 
@@ -285,7 +286,7 @@ func (b *Broker) dischargeSwitchLocalObligationLocked(ctx context.Context, id st
 		if !current {
 			return switchError(settings.SwitchErrorInterrupted, "Manager changed during local Off discharge.")
 		}
-		if o.Pause {
+		if o.Pause && !o.PauseApplied {
 			runtime := b.nodePolicyRuntime()
 			runtime.mu.Lock()
 			applied := pausedLocally(runtime.current) && !runtime.recoveryRequired && !runtime.localPauseRequested
@@ -304,6 +305,34 @@ func (b *Broker) dischargeSwitchLocalObligationLocked(ctx context.Context, id st
 		}
 		return nil
 	}
+}
+
+// Caller holds the availability transition lock after a successful local Pause.
+// Record completion per operation before Resume can replace the current policy.
+func (b *Broker) completeSwitchPauseObligations() error {
+	b.engineConfigMu.Lock()
+	defer b.engineConfigMu.Unlock()
+	runtime := b.nodePolicyRuntime()
+	runtime.mu.Lock()
+	applied := pausedLocally(runtime.current) && runtime.live == nodepolicy.Paused && !runtime.recoveryRequired
+	runtime.mu.Unlock()
+	if !applied {
+		return nil
+	}
+	if err := b.loadEngineSwitchLocked(); err != nil {
+		return err
+	}
+	c := b.switchCoordinator()
+	for id, o := range c.store.journal.LocalObligations {
+		if o.Pause && !o.PauseApplied && !o.Discharged {
+			o.PauseApplied = true
+			if err := c.store.SaveLocalObligation(id, o); err != nil {
+				b.latchSwitchStorageLocked(err)
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 // Recheck reservations while waiting for ordinary settings work. Lookup and

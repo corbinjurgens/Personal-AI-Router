@@ -103,6 +103,9 @@ func TestSwitchWireFields(t *testing.T) {
 		checkSwitchWire(t, SwitchJournal{Version: 1, Receipts: map[string]SwitchReceipt{}, LocalObligations: map[string]SwitchLocalObligation{"operation": {SourceOff: true}}}, "version generation activeRequestId receipts localObligations")
 		checkSwitchWire(t, SwitchLocalObligation{SourceOff: true}, "sourceOff targetOff pause discharged")
 	})
+	t.Run("applied pause obligation", func(t *testing.T) {
+		checkSwitchWire(t, SwitchLocalObligation{Pause: true, PauseApplied: true}, "sourceOff targetOff pause pauseApplied discharged")
+	})
 	t.Run("changed", func(t *testing.T) {
 		checkSwitchWire(t, SwitchChanged{NodeID: r.NodeID, RequestID: r.RequestID, Sequence: r.Sequence}, "nodeId requestId sequence")
 	})
@@ -560,6 +563,33 @@ func TestSwitchJournalLocalObligationValidation(t *testing.T) {
 	test("local operation cannot own remote veto", true, false, false, false)
 	test("obligation requires its receipt", false, true, false, false)
 	test("empty obligation refused", false, false, true, false)
+}
+
+func TestSwitchJournalPauseAppliedValidation(t *testing.T) {
+	test := func(name string, obligation SwitchLocalObligation, valid bool) {
+		t.Run(name, func(t *testing.T) {
+			r := switchReceiptFixture()
+			r.Caller = "peer"
+			r.PayloadHash = SwitchPayloadHash(r.Caller, r.NodeID, r.Request)
+			j := SwitchJournal{Version: SwitchVersion, Generation: 1, ActiveRequestID: r.RequestID, Receipts: map[string]SwitchReceipt{r.RequestID: r}, LocalObligations: map[string]SwitchLocalObligation{r.RequestID: obligation}}
+			data, err := json.Marshal(j)
+			if err != nil {
+				t.Fatal(err)
+			}
+			decoded, err := DecodeSwitchJournal(data)
+			if (err == nil) != valid {
+				t.Fatalf("decode = %v; want valid %v", err, valid)
+			}
+			if valid && decoded.LocalObligations[r.RequestID] != obligation {
+				t.Fatalf("obligation changed on reload: %+v", decoded.LocalObligations[r.RequestID])
+			}
+		})
+	}
+	test("old unapplied pause without completion field", SwitchLocalObligation{Pause: true}, true)
+	test("old discharged pause without completion field", SwitchLocalObligation{Pause: true, Discharged: true}, true)
+	test("applied pause", SwitchLocalObligation{Pause: true, PauseApplied: true}, true)
+	test("discharged applied pause", SwitchLocalObligation{Pause: true, PauseApplied: true, Discharged: true}, true)
+	test("completion without pause", SwitchLocalObligation{SourceOff: true, PauseApplied: true}, false)
 }
 
 func TestSwitchStrictDecode(t *testing.T) {

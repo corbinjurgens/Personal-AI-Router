@@ -118,7 +118,13 @@ func (b *Broker) runAvailabilityTransition(ctx context.Context, gen uint64, stat
 		return "", errAvailabilitySuperseded
 	}
 	if state == nodepolicy.Paused {
-		return b.pauseNode(ctx, origin)
+		availability, err := b.pauseNode(ctx, origin)
+		if err == nil && origin == nodepolicy.PausedLocally {
+			// transitionMu keeps a later Resume behind the durable completion
+			// proof, even when switch reconciliation is still waiting.
+			err = b.completeSwitchPauseObligations()
+		}
+		return availability, err
 	}
 	return b.resumeNode(origin)
 }

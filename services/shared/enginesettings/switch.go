@@ -178,10 +178,13 @@ type SwitchJournal struct {
 // SwitchLocalObligation is internal broker journal state, never a public receipt.
 // Discharged is durable evidence that cleanup completed before releasing ownership.
 type SwitchLocalObligation struct {
-	SourceOff  bool `json:"sourceOff"`
-	TargetOff  bool `json:"targetOff"`
-	Pause      bool `json:"pause"`
-	Discharged bool `json:"discharged"`
+	SourceOff bool `json:"sourceOff"`
+	TargetOff bool `json:"targetOff"`
+	Pause     bool `json:"pause"`
+	// PauseApplied survives a later owner Resume; it proves this obligation's
+	// local Pause was persisted and completed before that transition.
+	PauseApplied bool `json:"pauseApplied,omitempty"`
+	Discharged   bool `json:"discharged"`
 }
 
 type SwitchChanged struct {
@@ -412,6 +415,9 @@ func (j SwitchJournal) Validate() error {
 		r, ok := j.Receipts[id]
 		if !ok || r.Caller == SwitchOriginLocal || (!obligation.SourceOff && !obligation.TargetOff && !obligation.Pause) {
 			return errors.New("invalid operation-specific local obligation")
+		}
+		if obligation.PauseApplied && !obligation.Pause {
+			return errors.New("applied pause requires a pause obligation")
 		}
 	}
 	active := 0

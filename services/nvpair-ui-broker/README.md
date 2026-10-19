@@ -36,7 +36,10 @@ Admission first persists an internal operation-keyed local obligation in the
 switch journal; failure visibly refuses the local request. Before terminal release
 or recovery resolution, the broker holds the operation lock while discharging
 every obligated engine through a verified ordinary stop on the current manager.
-Pause must be persisted and applied too. Discharge is durably recorded; failure
+Pause must be persisted and applied too; its operation-specific completion proof
+is saved before a later local Resume can run. Cleanup preserves that Resume and
+uses the saved proof without re-pausing. Older journals without the proof retain
+the current local-pause check. Discharge is durably recorded; failure
 retains recovery ownership. Restart replays undischarged obligations even with no
 manager checkpoint, before restoration/readiness. An older direct peer start loses
 to the subsequently admitted local Off; later local On waits for this discharge.
