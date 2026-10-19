@@ -4,19 +4,661 @@
 package main
 
 import (
+	"context"
 	"errors"
+	"io"
 	"math"
+	"net/http"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strconv"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"nvpair-shared/durablefile"
 	"nvpair-shared/nodepolicy"
 )
+
+// Synthetic-only integration fixture: a RoundTripper cannot resolve DNS or
+// reach a provider. Each call verifies a confirmed on-disk hold before replying.
+type chatAccountFixture struct {
+	ledger         *accountLedger
+	clock          *ledgerClock
+	routing        nodepolicy.Routing
+	profile        *chatQualification
+	transport      *publicClient
+	budget         *publicTestBudget
+	ctx            context.Context
+	guard          func(context.Context) error
+	resolve        func(nodepolicy.CredentialRef) (string, bool)
+	emit           func([]byte) error
+	body, response string
+	status         int
+	retry          string
+	calls          atomic.Int64
+}
+
+func newChatAccountFixture(t *testing.T) *chatAccountFixture {
+	t.Helper()
+	q, _ := chatFixture()
+	c := newLedgerClock()
+	q.Now = c.now
+	r := testRouting("1000000", "10000000", "10000000")
+	for i := range r.Deployments {
+		d := &r.Deployments[i]
+		d.Endpoint, d.Model = q.Endpoint, q.Model
+		d.Qualification = &q.Ref
+		d.ContextTokens, d.MaxOutputTokens = int(q.ContextTokens), int(q.MaxOutputTokens)
+		d.Transport.MaxResponseBytes, d.Transport.MaxEventBytes = q.MaxBodyBytes, q.MaxEventBytes
+	}
+	l := openTestLedger(t, t.TempDir(), c, r)
+	client, err := newPublicClient(q.Endpoint, *r.Deployments[0].Transport)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := &chatAccountFixture{ledger: l, clock: c, routing: r, profile: q, transport: client,
+		budget: &publicTestBudget{ceiling: 64 << 20}, ctx: context.Background(), body: chatSimple,
+		guard: func(context.Context) error { return nil }, emit: func([]byte) error { return nil },
+		response: chatResponse("synthetic-v1", `{"role":"assistant","content":"ok"}`, `"stop"`, chatUsageOK, false), status: http.StatusOK}
+	f.resolve = func(ref nodepolicy.CredentialRef) (string, bool) {
+		if ref != testCredential {
+			t.Errorf("wrong synthetic reference selected")
+		}
+		return "synthetic-selected-key", true
+	}
+	client.client.Transport = publicTestRoundTrip(func(req *http.Request) (*http.Response, error) {
+		f.calls.Add(1)
+		state, err := readAccountStore(l.storePath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(state.Holds) == 0 || state.Holds[len(state.Holds)-1].State != holdReserved {
+			t.Fatal("provider called without a durable reservation")
+		}
+		if req.URL.String() != q.Endpoint || req.Header.Get("Authorization") != "Bearer synthetic-selected-key" {
+			t.Error("endpoint or selected synthetic key changed")
+		}
+		return &http.Response{StatusCode: f.status, Header: http.Header{"Retry-After": {f.retry}},
+			Body: io.NopCloser(strings.NewReader(f.response)), ContentLength: -1}, nil
+	})
+	t.Cleanup(func() {
+		if n := f.budget.used.Load(); n != 0 {
+			t.Errorf("leaked bytes: %d", n)
+		}
+	})
+	return f
+}
+
+func (f *chatAccountFixture) run(t *testing.T) (chatParseResult, error) {
+	t.Helper()
+	s, err := f.ledger.prepareChatAccount("chat-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return runChatAccountAttempt(f.ctx, s, []byte(f.body), f.profile, f.ledger, f.transport, f.resolve, f.budget.acquire, f.guard, f.emit)
+}
+
+func TestChatAccountAttemptPreSend(t *testing.T) {
+	tests := []struct {
+		name   string
+		change func(*chatAccountFixture)
+	}{
+		{"missing guard", func(f *chatAccountFixture) { f.guard = nil }},
+		{"missing profile", func(f *chatAccountFixture) { f.profile = nil }},
+		{"expired evidence", func(f *chatAccountFixture) { f.clock.advance(2 * time.Hour) }},
+		{"invalid endpoint", func(f *chatAccountFixture) { f.transport.endpoint += "?secret" }},
+		{"invalid request", func(f *chatAccountFixture) { f.body = `{"store":true}` }},
+		{"budget refusal", func(f *chatAccountFixture) { f.budget.ceiling = 1 }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := newChatAccountFixture(t)
+			tt.change(f)
+			lookups := 0
+			f.resolve = func(nodepolicy.CredentialRef) (string, bool) { lookups++; return "synthetic", true }
+			if _, err := f.run(t); err == nil {
+				t.Fatal("pre-send refusal accepted")
+			}
+			if lookups != 0 || f.calls.Load() != 0 || len(f.ledger.state.Holds) != 0 {
+				t.Fatal("pre-send refusal crossed lookup/reserve/send boundary")
+			}
+		})
+	}
+	t.Run("missing budget", func(t *testing.T) {
+		f := newChatAccountFixture(t)
+		s, err := f.ledger.prepareChatAccount("chat-a")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := runChatAccountAttempt(f.ctx, s, []byte(f.body), f.profile, f.ledger, f.transport, f.resolve, nil, f.guard, f.emit); err == nil {
+			t.Fatal("missing budget accepted")
+		}
+		if f.calls.Load() != 0 || len(f.ledger.state.Holds) != 0 {
+			t.Fatal("missing budget crossed reservation boundary")
+		}
+	})
+}
+
+func TestChatAccountAttemptGuardAndCancellation(t *testing.T) {
+	for _, name := range []string{"guard refusal", "cancel before lookup", "cancel after reserve", "evidence expires in guard"} {
+		t.Run(name, func(t *testing.T) {
+			f := newChatAccountFixture(t)
+			ctx, cancel := context.WithCancel(f.ctx)
+			defer cancel()
+			f.ctx = ctx
+			f.guard = func(context.Context) error {
+				switch name {
+				case "guard refusal":
+					return errors.New("synthetic-key-body-sentinel")
+				case "cancel after reserve":
+					cancel()
+				case "evidence expires in guard":
+					f.clock.advance(2 * time.Hour)
+				}
+				return nil
+			}
+			if name == "cancel before lookup" {
+				cancel()
+			}
+			_, err := f.run(t)
+			if err == nil || f.calls.Load() != 0 {
+				t.Fatal("guard/cancellation allowed a send")
+			}
+			if strings.Contains(err.Error(), "sentinel") {
+				t.Fatal("guard diagnostic leaked")
+			}
+			if name != "cancel before lookup" && (len(f.ledger.state.Holds) != 1 || !f.ledger.state.Holds[0].outstanding()) {
+				t.Fatal("guard failure released liability")
+			}
+		})
+	}
+}
+
+func TestChatAccountAttemptPinnedSnapshot(t *testing.T) {
+	tests := []struct {
+		name string
+		edit func(*nodepolicy.Deployment, *nodepolicy.Account)
+	}{
+		{"endpoint", func(d *nodepolicy.Deployment, _ *nodepolicy.Account) {
+			d.Endpoint = "https://other.invalid/v1/chat/completions"
+		}},
+		{"model", func(d *nodepolicy.Deployment, _ *nodepolicy.Account) { d.Model = "changed" }},
+		{"reference", func(_ *nodepolicy.Deployment, a *nodepolicy.Account) { a.Credential = otherCredential }},
+		{"price", func(d *nodepolicy.Deployment, _ *nodepolicy.Account) { d.Prices.InputPerMillion = "3000000" }},
+		{"qualification", func(d *nodepolicy.Deployment, _ *nodepolicy.Account) {
+			ref := *d.Qualification
+			ref.Revision = "2"
+			d.Qualification = &ref
+		}},
+		{"transport", func(d *nodepolicy.Deployment, _ *nodepolicy.Account) { d.Transport.IdleTimeoutSeconds++ }},
+		{"bounds", func(d *nodepolicy.Deployment, _ *nodepolicy.Account) { d.ContextTokens++ }},
+		{"ceiling", func(_ *nodepolicy.Deployment, a *nodepolicy.Account) { a.DailyCeiling = "20000000" }},
+		{"revision", func(*nodepolicy.Deployment, *nodepolicy.Account) {}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := newChatAccountFixture(t)
+			s, err := f.ledger.prepareChatAccount("chat-a")
+			if err != nil {
+				t.Fatal(err)
+			}
+			original := s.deployment.Endpoint
+			tt.edit(&f.routing.Deployments[0], &f.routing.Accounts[0])
+			revision := "7"
+			if tt.name == "revision" {
+				revision = "8"
+			}
+			if err := f.ledger.applyRouting(f.routing, revision); err != nil {
+				t.Fatal(err)
+			}
+			if s.deployment.Endpoint != original {
+				t.Fatal("snapshot aliases mutable routing")
+			}
+			_, err = runChatAccountAttempt(f.ctx, s, []byte(f.body), f.profile, f.ledger, f.transport, f.resolve, f.budget.acquire, f.guard, f.emit)
+			if err == nil || f.calls.Load() != 0 || len(f.ledger.state.Holds) != 0 {
+				t.Fatal("stale snapshot allowed provider request")
+			}
+		})
+	}
+}
+
+func TestChatAccountAttemptStoreRefusals(t *testing.T) {
+	for _, name := range []string{"write failure", "replaced", "unavailable", "locked", "corrupt"} {
+		t.Run(name, func(t *testing.T) {
+			f := newChatAccountFixture(t)
+			switch name {
+			case "write failure":
+				f.ledger.write = func(string, []byte, os.FileMode) error { return errors.New("synthetic-secret-body-sentinel") }
+			case "replaced":
+				f.ledger.write = func(path string, data []byte, mode os.FileMode) error {
+					if err := durablefile.WriteFile(path, data, mode); err != nil {
+						return err
+					}
+					return durablefile.ErrReplaced
+				}
+			case "unavailable":
+				f.ledger.close()
+				f.ledger.storePath = ""
+			case "locked":
+				other := newAccountLedger()
+				other.setDir(filepath.Dir(f.ledger.storePath), nil)
+				other.routing, other.policyRevision = f.routing, "7"
+				t.Cleanup(other.close)
+				f.ledger = other
+			case "corrupt":
+				f.ledger.close()
+				if err := os.WriteFile(f.ledger.storePath, []byte("corrupt"), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			_, err := f.run(t)
+			if err == nil || f.calls.Load() != 0 {
+				t.Fatal("unconfirmed store allowed provider request")
+			}
+			if strings.Contains(err.Error(), "sentinel") {
+				t.Fatal("ledger failure leaked diagnostic")
+			}
+			if name == "replaced" && (len(f.ledger.state.Holds) != 1 || f.ledger.state.Holds[0].State != holdUncertain) {
+				t.Fatal("uncertain landed hold lost")
+			}
+		})
+	}
+}
+
+func TestChatAccountAttemptClassification(t *testing.T) {
+	tests := []struct {
+		name     string
+		status   int
+		retry    string
+		outcome  accountOutcome
+		cooldown time.Duration
+	}{
+		{"unauthorized", http.StatusUnauthorized, "", outcomeCredentialFailure, 0},
+		{"forbidden", http.StatusForbidden, "", outcomeCredentialFailure, 0},
+		{"bad request", http.StatusBadRequest, "", outcomeTransient, 0},
+		{"not found", http.StatusNotFound, "", outcomeTransient, 0},
+		{"unprocessable", http.StatusUnprocessableEntity, "", outcomeTransient, 0},
+		{"rate limit seconds", http.StatusTooManyRequests, "5", outcomeRateLimited, 5 * time.Second},
+		{"rate limit date", http.StatusTooManyRequests, "Mon, 19 Oct 2026 12:00:10 GMT", outcomeRateLimited, 10 * time.Second},
+		{"rate limit overflow", http.StatusTooManyRequests, "9223372036854775807", outcomeRateLimited, defaultCooldown},
+		{"rate limit signed", http.StatusTooManyRequests, "+5", outcomeRateLimited, defaultCooldown},
+		{"rate limit date overflow", http.StatusTooManyRequests, "Fri, 31 Dec 9999 23:59:59 GMT", outcomeRateLimited, defaultCooldown},
+		{"rate limit invalid", http.StatusTooManyRequests, "synthetic-body-key-sentinel", outcomeRateLimited, defaultCooldown},
+		{"rate limit past", http.StatusTooManyRequests, "Mon, 19 Oct 2026 11:59:59 GMT", outcomeRateLimited, defaultCooldown},
+		{"rate limit clamp", http.StatusTooManyRequests, "999999", outcomeRateLimited, maxCooldown},
+		{"request timeout", http.StatusRequestTimeout, "", outcomeTransient, 0},
+		{"server failure", http.StatusInternalServerError, "", outcomeTransient, 0},
+		{"unsupported status", http.StatusCreated, "", outcomeTransient, 0},
+		{"redirect", http.StatusTemporaryRedirect, "", outcomeTransient, 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := newChatAccountFixture(t)
+			f.status, f.retry, f.response = tt.status, tt.retry, "synthetic-body-key-sentinel"
+			_, err := f.run(t)
+			if err == nil || strings.Contains(err.Error(), "sentinel") {
+				t.Fatal("status classification exposed provider material or succeeded")
+			}
+			h, a := f.ledger.state.Holds[0], f.ledger.state.Accounts[0]
+			if h.Outcome != tt.outcome || !h.QualificationChecked || !h.outstanding() {
+				t.Fatalf("wrong closed classification: %+v", h)
+			}
+			if tt.cooldown > 0 && (a.Cooldown == nil || a.Cooldown.Reason != cooldownRateLimited || a.Cooldown.UntilMs != f.clock.now().Add(tt.cooldown).UnixMilli()) {
+				t.Fatal("generic rate limit lost bounded cooldown or became exhaustion")
+			}
+			if tt.cooldown == 0 && a.Cooldown != nil {
+				t.Fatal("invented cooldown")
+			}
+			if (a.CredentialFailure != nil) != (tt.outcome == outcomeCredentialFailure) {
+				t.Fatal("guessed credential failure")
+			}
+			if tt.outcome == outcomeCredentialFailure || tt.cooldown > 0 {
+				if _, err := f.run(t); err == nil || f.calls.Load() != 1 {
+					t.Fatal("restriction did not suppress next send")
+				}
+			}
+		})
+	}
+}
+
+func TestChatAccountAttemptCredentialBoundary(t *testing.T) {
+	for _, key := range []string{"", "synthetic\rkey", "synthetic\nkey"} {
+		t.Run(strconv.Quote(key), func(t *testing.T) {
+			f := newChatAccountFixture(t)
+			f.resolve = func(ref nodepolicy.CredentialRef) (string, bool) {
+				if ref != testCredential {
+					t.Fatal("wrong reference")
+				}
+				return key, true
+			}
+			if _, err := f.run(t); !errors.Is(err, errChatCredential) {
+				t.Fatal("unsafe synthetic key accepted")
+			}
+			if f.calls.Load() != 0 || len(f.ledger.state.Holds) != 0 {
+				t.Fatal("unsafe credential reached reserve/send")
+			}
+		})
+	}
+	t.Run("lookup edits selected identity", func(t *testing.T) {
+		f := newChatAccountFixture(t)
+		f.resolve = func(ref nodepolicy.CredentialRef) (string, bool) {
+			if ref != testCredential {
+				t.Fatal("wrong selected reference")
+			}
+			f.routing.Accounts[0].Credential = otherCredential
+			f.routing.Deployments[0].Endpoint = "https://changed.invalid/v1/chat/completions"
+			if err := f.ledger.applyRouting(f.routing, "8"); err != nil {
+				t.Fatal(err)
+			}
+			return "synthetic-selected-key", true
+		}
+		if _, err := f.run(t); err == nil || f.calls.Load() != 0 {
+			t.Fatal("lookup/config race sent stale key")
+		}
+	})
+}
+
+func TestChatAccountAttemptParallelAliases(t *testing.T) {
+	f := newChatAccountFixture(t)
+	f.routing.Accounts[0].DailyCeiling = "326"
+	if err := f.ledger.applyRouting(f.routing, "8"); err != nil {
+		t.Fatal(err)
+	}
+	f.response = "truncated"
+	var wg sync.WaitGroup
+	for _, id := range []string{"chat-a", "chat-b"} {
+		s, err := f.ledger.prepareChatAccount(id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, err := runChatAccountAttempt(f.ctx, s, []byte(f.body), f.profile, f.ledger, f.transport, f.resolve, f.budget.acquire, f.guard, f.emit)
+			if err == nil {
+				t.Error("truncated fixture unexpectedly succeeded")
+			}
+		}()
+	}
+	wg.Wait()
+	if f.calls.Load() != 1 || len(f.ledger.state.Holds) != 1 {
+		t.Fatal("aliases exceeded shared account ceiling")
+	}
+}
+
+func TestChatAccountAttemptRestrictivePersistence(t *testing.T) {
+	for _, name := range []string{"quarantine", "credential outcome", "rate limit outcome", "above bound"} {
+		t.Run(name, func(t *testing.T) {
+			f := newChatAccountFixture(t)
+			switch name {
+			case "quarantine":
+				f.response = chatResponse("wrong", `{"role":"assistant","content":"ok"}`, `"stop"`, "", false)
+			case "credential outcome":
+				f.status = http.StatusUnauthorized
+				f.response = "failure"
+			case "rate limit outcome":
+				f.status = http.StatusTooManyRequests
+				f.response = "failure"
+			case "above bound":
+				f.response = chatResponse("synthetic-v1", `{"role":"assistant","content":"ok"}`, `"stop"`, `{"prompt_tokens":10,"completion_tokens":101,"total_tokens":111}`, false)
+			}
+			f.ledger.write = func(path string, data []byte, mode os.FileMode) error {
+				s, err := decodeLedger(data)
+				if err != nil {
+					return err
+				}
+				if len(s.Quarantine) > 0 || s.Accounts[0].CredentialFailure != nil || s.Accounts[0].Cooldown != nil {
+					return errors.New("synthetic-key-body-sentinel")
+				}
+				return durablefile.WriteFile(path, data, mode)
+			}
+			if _, err := f.run(t); !errors.Is(err, errChatAccounting) {
+				t.Fatalf("restrictive persistence failure not propagated: %v", err)
+			}
+			f.ledger.write = durablefile.WriteFile
+			if _, err := f.run(t); err == nil || f.calls.Load() != 1 {
+				t.Fatal("failed restrictive write permitted another send")
+			}
+		})
+	}
+}
+
+func TestChatAccountAttemptQuarantineIdentityLifecycle(t *testing.T) {
+	f := newChatAccountFixture(t)
+	s, err := f.ledger.prepareChatAccount("chat-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.response = chatResponse("wrong", `{"role":"assistant","content":"ok"}`, `"stop"`, "", false)
+	f.emit = func([]byte) error { t.Fatal("identity-invalid response exposed"); return nil }
+	f.guard = func(context.Context) error {
+		// Both aliases are retired while this reserved response is outstanding.
+		if err := f.ledger.applyRouting(nodepolicy.Routing{}, "8"); err != nil {
+			t.Fatal(err)
+		}
+		return nil
+	}
+	if _, err := runChatAccountAttempt(f.ctx, s, []byte(f.body), f.profile, f.ledger, f.transport, f.resolve, f.budget.acquire, f.guard, f.emit); !errors.Is(err, errChatIdentity) {
+		t.Fatal(err)
+	}
+	f.routing.Deployments[0].ID = "renamed"
+	dir := filepath.Dir(f.ledger.storePath)
+	f.ledger = reopen(t, f.ledger, dir, f.clock, f.routing)
+	renamed, err := f.ledger.prepareChatAccount("renamed")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runChatAccountAttempt(f.ctx, renamed, []byte(f.body), f.profile, f.ledger, f.transport, f.resolve, f.budget.acquire, func(context.Context) error { return nil }, f.emit); err == nil || f.calls.Load() != 1 {
+		t.Fatal("rename/retirement/reopen cleared quarantine")
+	}
+}
+
+func TestChatAccountAttemptRetentionAndPriorProcess(t *testing.T) {
+	f := newChatAccountFixture(t)
+	if _, err := f.run(t); err != nil {
+		t.Fatal(err)
+	}
+	completed := f.ledger.state.Holds[0].Attempt
+	if !f.ledger.state.Holds[0].evictable() {
+		t.Fatal("normal completion remains unfinished")
+	}
+	// Simulate a classification interrupted after money and outcome completed.
+	pending := mustReserve(t, f.ledger, "chat-a", 0, 1)
+	if err := f.ledger.reconcile(pending.Attempt, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.ledger.recordOutcome(pending.Attempt, outcomeOK, 0, time.Time{}); err != nil {
+		t.Fatal(err)
+	}
+	completeOtherLedgerAttempts(t, f.ledger)
+	if f.ledger.state.hold(completed) != nil {
+		t.Fatal("completed attempt did not become evictable")
+	}
+	if h := f.ledger.state.hold(pending.Attempt); h == nil || h.QualificationChecked {
+		t.Fatal("delayed classification lost immutable hold")
+	}
+	f.ledger = reopen(t, f.ledger, filepath.Dir(f.ledger.storePath), f.clock, f.routing)
+	wantErr(t, "prior-process classification", f.ledger.recordQualification(pending.Attempt), errAttemptUnknown)
+	if h := f.ledger.state.hold(pending.Attempt); h == nil || h.QualificationChecked || h.evictable() {
+		t.Fatal("silently reclaimed prior-process classification")
+	}
+}
+
+func TestChatAccountAttemptIndependentCompletionFailures(t *testing.T) {
+	for _, name := range []string{"outcome", "reconcile", "qualification"} {
+		t.Run(name, func(t *testing.T) {
+			f := newChatAccountFixture(t)
+			failed := false
+			f.ledger.write = func(path string, data []byte, mode os.FileMode) error {
+				s, err := decodeLedger(data)
+				if err != nil {
+					return err
+				}
+				if len(s.Holds) > 0 {
+					h := s.Holds[0]
+					fail := name == "outcome" && h.Outcome != "" || name == "reconcile" && h.State == holdReconciled || name == "qualification" && h.QualificationChecked
+					if fail && !failed {
+						failed = true
+						return errors.New("synthetic-write-sentinel")
+					}
+				}
+				return durablefile.WriteFile(path, data, mode)
+			}
+			if _, err := f.run(t); !errors.Is(err, errChatAccounting) || !failed {
+				t.Fatal("completion write failure hidden")
+			}
+			h := f.ledger.state.Holds[0]
+			switch name {
+			case "outcome":
+				if h.Outcome != "" || h.State != holdReconciled || !h.QualificationChecked {
+					t.Fatal("outcome failure skipped independent completions")
+				}
+			case "reconcile":
+				if !h.outstanding() || h.Outcome != outcomeOK || !h.QualificationChecked {
+					t.Fatal("money failure released hold or skipped classification")
+				}
+			case "qualification":
+				if h.QualificationChecked || h.State != holdReconciled || h.Outcome != outcomeOK || h.evictable() {
+					t.Fatal("failed classification became complete")
+				}
+			}
+		})
+	}
+}
+
+func TestChatAccountAttemptDelayedClassification(t *testing.T) {
+	f := newChatAccountFixture(t)
+	f.response = chatResponse("wrong", `{"role":"assistant","content":"ok"}`, `"stop"`, "", false)
+	f.guard = func(context.Context) error { completeOtherLedgerAttempts(t, f.ledger); return nil }
+	// Use a custom synthetic transport because the fixture's newest hold is now
+	// a completed unrelated attempt, rather than this delayed attempt.
+	f.transport.client.Transport = publicTestRoundTrip(func(*http.Request) (*http.Response, error) {
+		f.calls.Add(1)
+		return &http.Response{StatusCode: http.StatusOK, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(f.response)), ContentLength: -1}, nil
+	})
+	if _, err := f.run(t); !errors.Is(err, errChatIdentity) {
+		t.Fatal(err)
+	}
+	if len(f.ledger.state.Quarantine) != 1 || !f.ledger.state.Holds[0].QualificationChecked {
+		t.Fatal("delayed classification lost reserved identity")
+	}
+}
+
+func TestChatAccountAttemptHeadroomBeforeLookup(t *testing.T) {
+	for _, name := range []string{"parser", "transport", "profile event cap"} {
+		t.Run(name, func(t *testing.T) {
+			f := newChatAccountFixture(t)
+			s, err := f.ledger.prepareChatAccount("chat-a")
+			if err != nil {
+				t.Fatal(err)
+			}
+			lookups := 0
+			f.resolve = func(nodepolicy.CredentialRef) (string, bool) { lookups++; return "synthetic-selected-key", true }
+			if name == "profile event cap" {
+				f.profile.MaxEventBytes++
+				f.profile.MaxLineBytes = 4096
+			}
+			budget := func(n int64) (func(), error) {
+				if name == "parser" && n == chatFixedStorage || name == "transport" && n == 3*(f.transport.bounds.MaxResponseBytes+1) {
+					return nil, errChatBudget
+				}
+				return f.budget.acquire(n)
+			}
+			if _, err := runChatAccountAttempt(f.ctx, s, []byte(f.body), f.profile, f.ledger, f.transport, f.resolve, budget, f.guard, f.emit); err == nil {
+				t.Fatal("headroom refusal accepted")
+			}
+			if lookups != 0 || f.calls.Load() != 0 || len(f.ledger.state.Holds) != 0 {
+				t.Fatal("resource refusal occurred after lookup/reservation/send")
+			}
+		})
+	}
+}
+
+func TestChatAccountAttemptTransportFailure(t *testing.T) {
+	f := newChatAccountFixture(t)
+	f.transport.client.Transport = publicTestRoundTrip(func(*http.Request) (*http.Response, error) {
+		f.calls.Add(1)
+		return nil, errors.New("synthetic-key-body-sentinel")
+	})
+	if _, err := f.run(t); !errors.Is(err, errChatTransient) {
+		t.Fatal("transport error not sanitized")
+	}
+	h := f.ledger.state.Holds[0]
+	if f.calls.Load() != 1 || h.Outcome != outcomeTransient || !h.QualificationChecked || !h.outstanding() {
+		t.Fatal("connection failure lost classification/liability or retried")
+	}
+}
+
+func TestChatAccountAttemptCompletion(t *testing.T) {
+	for _, name := range []string{"trusted", "missing usage", "malformed usage", "identity", "above bound", "truncated", "post-exposure disconnect"} {
+		t.Run(name, func(t *testing.T) {
+			f := newChatAccountFixture(t)
+			switch name {
+			case "missing usage":
+				f.response = chatResponse("synthetic-v1", `{"role":"assistant","content":"ok"}`, `"stop"`, "", false)
+			case "malformed usage":
+				f.response = chatResponse("synthetic-v1", `{"role":"assistant","content":"ok"}`, `"stop"`, `{"prompt_tokens":0,"completion_tokens":-1,"total_tokens":-1}`, false)
+			case "identity":
+				f.response = chatResponse("wrong", `{"role":"assistant","content":"ok"}`, `"stop"`, `{"prompt_tokens":0,"completion_tokens":0,"total_tokens":0}`, false)
+			case "above bound":
+				f.response = chatResponse("synthetic-v1", `{"role":"assistant","content":"ok"}`, `"stop"`, `{"prompt_tokens":10,"completion_tokens":101,"total_tokens":111}`, false)
+			case "truncated":
+				f.response = `{"model":"synthetic-v1"`
+			case "post-exposure disconnect":
+				f.body = strings.TrimSuffix(chatSimple, "}") + `,"stream":true}`
+				f.response = chatEvent(chatChunk(`{"content":"partial"}`, `null`)) + chatEvent(chatChunk(`{}`, `"stop"`)) + chatEvent(chatUsageEvent(`{"prompt_tokens":0,"completion_tokens":0,"total_tokens":0}`))
+			}
+			result, err := f.run(t)
+			if f.calls.Load() != 1 {
+				t.Fatal("attempt did not dispatch exactly once")
+			}
+			if name == "above bound" {
+				if _, nextErr := f.run(t); nextErr == nil || f.calls.Load() != 1 {
+					t.Fatal("above-bound violation permitted another send")
+				}
+			}
+			h := f.ledger.state.Holds[0]
+			if !h.QualificationChecked || h.Outcome == "" {
+				t.Fatal("closed classification left unfinished")
+			}
+			switch name {
+			case "trusted":
+				if err != nil || !h.evictable() || h.Actual != "14" || h.Outcome != outcomeOK {
+					t.Fatalf("trusted completion: %v, %+v", err, h)
+				}
+			case "missing usage":
+				if err != nil || h.Actual != h.Reserved || !h.evictable() {
+					t.Fatal("missing usage did not charge full bound")
+				}
+			case "above bound":
+				if !errors.Is(err, errChatBound) || f.ledger.state.Accounts[0].Frozen == nil || !f.ledger.state.quarantined(h.key()) {
+					t.Fatal("above-bound usage did not freeze and quarantine")
+				}
+			default:
+				if err == nil || !h.outstanding() || h.Usage != nil || h.Actual != "" {
+					t.Fatal("untrusted/incomplete usage released liability")
+				}
+				if name == "identity" && !f.ledger.state.quarantined(h.key()) {
+					t.Fatal("identity failure did not quarantine")
+				}
+				if name == "post-exposure disconnect" && !result.Exposed {
+					t.Fatal("fixture did not expose metadata/data")
+				}
+			}
+			state, readErr := readAccountStore(f.ledger.storePath)
+			if readErr != nil {
+				t.Fatal(readErr)
+			}
+			if !reflect.DeepEqual(state.Holds[0], h) {
+				t.Fatal("completion not durable")
+			}
+		})
+	}
+}
 
 // ledgerClock is a controllable wall clock; tests never sleep for periods or
 // cooldowns.
