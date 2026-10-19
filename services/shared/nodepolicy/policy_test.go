@@ -6,12 +6,248 @@ package nodepolicy
 import (
 	"encoding/json"
 	"fmt"
+	"os"
 	"reflect"
 	"strings"
 	"testing"
 
 	"nvpair-shared/engines"
 )
+
+func servedResidentPolicy() Policy {
+	p := Default()
+	p.ServedModels = ServedModels{{Engine: "ollama", Model: "m"}}
+	p.ResidentModels = ResidentModels{{Engine: "ollama", Model: "m"}}
+	p.Profiles = []Profile{{Name: "m", Engine: "ollama", Model: "m", ContextTokens: 4096,
+		MaxOutputTokens: 512, MaxConcurrent: 1, MemoryBytes: 1024,
+		Qualification: &QualificationRef{ID: "q", Revision: "1"}}}
+	return p
+}
+
+func TestServedResidentParityFixtures(t *testing.T) {
+	data, err := os.ReadFile("testdata/served-resident.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fixture struct {
+		Cases []struct {
+			Name          string          `json:"name"`
+			Input         json.RawMessage `json:"input"`
+			Raw           string          `json:"raw"`
+			Valid         bool            `json:"valid"`
+			ServedPresent bool            `json:"servedPresent"`
+			Served        []Role          `json:"served"`
+			Residents     []Role          `json:"residents"`
+		} `json:"cases"`
+	}
+	if err := json.Unmarshal(data, &fixture); err != nil {
+		t.Fatal(err)
+	}
+	if len(fixture.Cases) == 0 {
+		t.Fatal("no parity cases")
+	}
+	for _, c := range fixture.Cases {
+		t.Run(c.Name, func(t *testing.T) {
+			input := c.Input
+			if c.Raw != "" {
+				input = []byte(c.Raw)
+			}
+			p, err := Parse(input)
+			if !c.Valid {
+				if err == nil {
+					t.Fatal("invalid policy accepted")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if (p.ServedModels != nil) != c.ServedPresent || !reflect.DeepEqual([]Role(p.ServedModels), c.Served) || !reflect.DeepEqual([]Role(p.ResidentModels), c.Residents) {
+				t.Fatalf("unexpected permission/preference: %+v / %+v", p.ServedModels, p.ResidentModels)
+			}
+		})
+	}
+}
+
+func TestServedResidentNull(t *testing.T) {
+	for _, field := range []string{"servedModels", "residentModels"} {
+		t.Run(field, func(t *testing.T) {
+			if _, err := Parse([]byte(`{"` + field + `":null}`)); err == nil {
+				t.Fatal("null accepted")
+			}
+		})
+	}
+}
+
+func TestServedResidentPolicyOwnedSlices(t *testing.T) {
+	caller := servedResidentPolicy()
+	stored := caller
+	if err := json.Unmarshal([]byte(`{}`), &stored); err != nil {
+		t.Fatal(err)
+	}
+	caller.ServedModels[0].Model = "caller change"
+	caller.ResidentModels[0].Model = "caller change"
+	if stored.ServedModels[0].Model != "m" || stored.ResidentModels[0].Model != "m" {
+		t.Fatal("decoded policy aliases caller slices")
+	}
+}
+
+func TestServedResidentPolicyRawKeys(t *testing.T) {
+	for _, raw := range []string{
+		`{"servedModels":[],"servedModels":[]}`, `{"servedModels":[],"ServedModels":[]}`,
+		`{"residentModels":[],"ResidentModels":[]}`, `{"residentModels":null}`,
+		`{"servedModels":[{"engine":"ollama","engine":"ollama","model":"m"}]}`,
+	} {
+		var p Policy
+		if err := json.Unmarshal([]byte(raw), &p); err == nil {
+			t.Fatalf("policy decoder accepted %s", raw)
+		}
+	}
+}
+
+func TestServedResidentSubset(t *testing.T) {
+	p := servedResidentPolicy()
+	if err := p.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	p.ServedModels = nil
+	if err := p.Validate(); err != nil {
+		t.Fatalf("unrestricted residents: %v", err)
+	}
+	p.ServedModels = ServedModels{}
+	if err := p.Validate(); err == nil {
+		t.Fatal("resident outside empty served set accepted")
+	}
+	p.ServedModels = ServedModels{{Engine: "ollama", Model: "other"}}
+	if err := p.Validate(); err == nil {
+		t.Fatal("resident outside served set accepted")
+	}
+}
+
+func TestServedResidentProfileBounds(t *testing.T) {
+	reject := func(name string, edit func(*Policy)) {
+		t.Run(name, func(t *testing.T) {
+			p := servedResidentPolicy()
+			edit(&p)
+			if err := p.Validate(); err == nil {
+				t.Fatal("invalid resident accepted")
+			}
+		})
+	}
+	reject("missing profile", func(p *Policy) { p.Profiles = nil })
+	reject("wrong model", func(p *Policy) { p.Profiles[0].Model = "other" })
+	reject("wrong engine", func(p *Policy) { p.Profiles[0].Engine = "lmstudio" })
+	reject("no context", func(p *Policy) { p.Profiles[0].ContextTokens = 0 })
+	reject("no output", func(p *Policy) { p.Profiles[0].MaxOutputTokens = 0 })
+	reject("output reaches context", func(p *Policy) { p.Profiles[0].MaxOutputTokens = 4096 })
+	reject("no concurrency", func(p *Policy) { p.Profiles[0].MaxConcurrent = 0 })
+	reject("unknown memory", func(p *Policy) { p.Profiles[0].MemoryBytes = 0 })
+	reject("unqualified", func(p *Policy) { p.Profiles[0].Qualification = nil })
+	reject("invalid qualification", func(p *Policy) { p.Profiles[0].Qualification.Revision = "0" })
+}
+
+func TestServedResidentListBounds(t *testing.T) {
+	for _, field := range []string{"servedModels", "residentModels"} {
+		t.Run(field, func(t *testing.T) {
+			p := Default()
+			var refs []Role
+			for i := range 256 {
+				model := fmt.Sprintf("m%d", i)
+				refs = append(refs, Role{Engine: "ollama", Model: model})
+				pr := servedResidentPolicy().Profiles[0]
+				pr.Name, pr.Model = model, model
+				p.Profiles = append(p.Profiles, pr)
+			}
+			set := func() {
+				if field == "servedModels" {
+					p.ServedModels = ServedModels(refs)
+				} else {
+					p.ResidentModels = ResidentModels(refs)
+				}
+			}
+			set()
+			if err := p.Validate(); err != nil {
+				t.Fatalf("256 entries: %v", err)
+			}
+			refs = append(refs, Role{Engine: "ollama", Model: "extra"})
+			set()
+			if err := p.Validate(); err == nil {
+				t.Fatal("257 entries accepted")
+			}
+			raw, err := json.Marshal(refs)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := Parse([]byte(`{"` + field + `":` + string(raw) + `}`)); err == nil {
+				t.Fatal("oversized JSON list accepted")
+			}
+		})
+	}
+}
+
+func TestServedResidentPolicyRoundTrip(t *testing.T) {
+	test := func(name, input string, present bool) {
+		t.Run(name, func(t *testing.T) {
+			p, err := Parse([]byte(input))
+			if err != nil {
+				t.Fatal(err)
+			}
+			for range 3 {
+				raw, err := json.Marshal(p)
+				if err != nil {
+					t.Fatal(err)
+				}
+				var fields map[string]json.RawMessage
+				if err := json.Unmarshal(raw, &fields); err != nil {
+					t.Fatal(err)
+				}
+				_, has := fields["servedModels"]
+				if has != present {
+					t.Fatalf("served presence = %v, want %v", has, present)
+				}
+				next, err := Parse(raw)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !reflect.DeepEqual(p, next) {
+					t.Fatal("unstable policy round trip")
+				}
+				p = next
+			}
+		})
+	}
+	test("absent", `{}`, false)
+	test("empty", `{"servedModels":[],"residentModels":[]}`, true)
+	test("restricted", `{"servedModels":[{"engine":"ollama","model":"m"}]}`, true)
+	raw, err := json.Marshal(servedResidentPolicy())
+	if err != nil {
+		t.Fatal(err)
+	}
+	test("qualified subset", string(raw), true)
+}
+
+func TestServedResidentLegacyDefaults(t *testing.T) {
+	for _, raw := range []string{`{}`, v1Document, `{"version":2}`} {
+		p, err := Parse([]byte(raw))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if p.Version != 2 || p.ServedModels != nil || len(p.ResidentModels) != 0 {
+			t.Fatal("legacy semantics changed")
+		}
+		data, err := json.Marshal(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal(data, &fields); err != nil {
+			t.Fatal(err)
+		}
+		if fields["servedModels"] != nil || fields["residentModels"] != nil {
+			t.Fatal("legacy document gained fields")
+		}
+	}
+}
 
 func TestDefaultIsValid(t *testing.T) {
 	if err := Default().Validate(); err != nil {
