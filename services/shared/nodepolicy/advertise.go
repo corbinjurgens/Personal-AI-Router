@@ -67,8 +67,9 @@ func (r AdvertisedRole) HybridQualified() bool {
 // its inventory document. It carries no tier entries, no routing section, no
 // profiles beyond the bounds of the declared roles.
 type Advertisement struct {
-	Revision string                    `json:"revision"`
-	Roles    map[string]AdvertisedRole `json:"roles"`
+	ServedModels ServedModels              `json:"servedModels,omitzero"`
+	Revision     string                    `json:"revision"`
+	Roles        map[string]AdvertisedRole `json:"roles"`
 	// PausedBy lets a remote UI show "paused on that node" before it tries.
 	PausedBy PauseOrigin `json:"pausedBy,omitempty"`
 	// StrictAdmission is absent until destination enforcement and identity
@@ -215,6 +216,9 @@ func (c StrictAdmissionCapability) MarshalJSON() ([]byte, error) {
 // UnmarshalJSON distinguishes an absent capability from explicit null. Existing
 // advertisement fields retain their R1 decoding and encoding behavior.
 func (a *Advertisement) UnmarshalJSON(data []byte) error {
+	if err := checkModelListKeys(data); err != nil {
+		return err
+	}
 	type wire Advertisement
 	var next wire
 	var fields map[string]json.RawMessage
@@ -268,5 +272,5 @@ func (p Policy) Advertisement() Advertisement {
 		}
 		roles[tier] = adv
 	}
-	return Advertisement{Revision: p.Revision, Roles: roles, PausedBy: p.PausedBy}
+	return Advertisement{Revision: p.Revision, Roles: roles, PausedBy: p.PausedBy, ServedModels: slices.Clone(p.ServedModels)}
 }

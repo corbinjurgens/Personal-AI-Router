@@ -9,6 +9,7 @@ import (
 	"errors"
 	"io"
 	"reflect"
+	"slices"
 	"strings"
 )
 
@@ -19,17 +20,32 @@ import (
 // deployments nor reconfigure what spends money. Revision is the revision of
 // the protected source document.
 type PeerPolicy struct {
-	Version      int                    `json:"version"`
-	Revision     string                 `json:"revision"`
-	Availability Availability           `json:"availability"`
-	Pause        PauseConfig            `json:"pause"`
-	Admission    Admission              `json:"admission"`
-	Idle         IdleConfig             `json:"idle"`
-	Profiles     []Profile              `json:"profiles"`
-	Roles        map[string]Role        `json:"roles"`
-	Tiers        map[string][]TierEntry `json:"tiers"`
-	TierPolicy   TierPolicy             `json:"tierPolicy"`
-	PausedBy     PauseOrigin            `json:"pausedBy,omitempty"`
+	Version        int                    `json:"version"`
+	Revision       string                 `json:"revision"`
+	Availability   Availability           `json:"availability"`
+	Pause          PauseConfig            `json:"pause"`
+	Admission      Admission              `json:"admission"`
+	Idle           IdleConfig             `json:"idle"`
+	Profiles       []Profile              `json:"profiles"`
+	ServedModels   ServedModels           `json:"servedModels,omitzero"`
+	ResidentModels ResidentModels         `json:"residentModels,omitempty"`
+	Roles          map[string]Role        `json:"roles"`
+	Tiers          map[string][]TierEntry `json:"tiers"`
+	TierPolicy     TierPolicy             `json:"tierPolicy"`
+	PausedBy       PauseOrigin            `json:"pausedBy,omitempty"`
+}
+
+func (p *PeerPolicy) UnmarshalJSON(data []byte) error {
+	if err := checkModelListKeys(data); err != nil {
+		return err
+	}
+	type wire PeerPolicy
+	var next wire
+	if err := json.Unmarshal(data, &next); err != nil {
+		return err
+	}
+	*p = PeerPolicy(next)
+	return nil
 }
 
 // PeerProjection returns the part of p a paired node may see. Tiers keep their
@@ -37,17 +53,19 @@ type PeerPolicy struct {
 // does not reveal that it holds API entries.
 func (p Policy) PeerProjection() PeerPolicy {
 	return PeerPolicy{
-		Version:      p.Version,
-		Revision:     p.Revision,
-		Availability: p.Availability,
-		Pause:        p.Pause,
-		Admission:    p.Admission,
-		Idle:         p.Idle,
-		Profiles:     p.Profiles,
-		Roles:        p.Roles,
-		Tiers:        localTiers(p.Tiers),
-		TierPolicy:   p.TierPolicy,
-		PausedBy:     p.PausedBy,
+		Version:        p.Version,
+		Revision:       p.Revision,
+		Availability:   p.Availability,
+		Pause:          p.Pause,
+		Admission:      p.Admission,
+		Idle:           p.Idle,
+		Profiles:       p.Profiles,
+		ServedModels:   slices.Clone(p.ServedModels),
+		ResidentModels: slices.Clone(p.ResidentModels),
+		Roles:          p.Roles,
+		Tiers:          localTiers(p.Tiers),
+		TierPolicy:     p.TierPolicy,
+		PausedBy:       p.PausedBy,
 	}
 }
 
