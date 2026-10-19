@@ -9,6 +9,7 @@ import type {
     IpcHandlerFn
 } from '@/shared/types/ipc-channels'
 import getErrorString from '@/shared/utils/get-error-string'
+import { JsonRpcResponseError } from '@/electron/service-bridge/json-rpc-client'
 
 function isKnownSender(event: IpcMainInvokeEvent): boolean {
     const senderWindow = BrowserWindow.fromWebContents(event.sender)
@@ -45,6 +46,11 @@ export function safeHandle<K extends IpcChannelKey>(
             return { success: true, data }
         } catch (err) {
             const errorString = getErrorString(err) ?? String(err)
+            // A service's refusal keeps its code: an Error crossing the
+            // context bridge keeps only its message.
+            if (err instanceof JsonRpcResponseError) {
+                return { success: false, error: errorString, code: err.code }
+            }
             return { success: false, error: errorString }
         }
     })

@@ -31,6 +31,8 @@ import { usePendingActionsStore } from '@/ui/stores/pending-actions.store'
 import { ConfirmModal } from '@/ui/components/ConfirmModal'
 import getErrorString from '@/shared/utils/get-error-string'
 import { engineManagerName } from '@/shared/utils/engines'
+import { LOCAL_VETO_CODE, localVetoMessage } from '@/shared/constants/service-errors'
+import { serviceErrorCode } from '@/ui/api/service-transport'
 
 interface Draft {
     serverPort: string
@@ -203,7 +205,13 @@ export function EngineSettingsSection({
             await useEngineSettingsStore.getState().apply({ ...request, requestId })
         } catch (cause) {
             pending.endSettings(nodeId, engineType, requestId)
-            reportError(getErrorString(cause))
+            // A paired node refuses an apply that would start its stopped
+            // engine while it is paused on the node itself.
+            reportError(
+                serviceErrorCode(cause) === LOCAL_VETO_CODE
+                    ? localVetoMessage(`apply these settings, which would start ${engine}`)
+                    : getErrorString(cause)
+            )
         }
     }
 

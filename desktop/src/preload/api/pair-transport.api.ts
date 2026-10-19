@@ -2,18 +2,14 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { ipcRenderer } from 'electron'
-import { invokeAndUnwrap } from '@/preload/api/unwrap'
+import type { IpcResult } from '@/shared/types/ipc-channels'
 import type {
     PreloadServiceTransport,
     ServiceBridgeInvokeRequest,
-    ServiceBridgePushMessage
+    ServiceBridgePushMessage,
+    ServiceInvokeArgs
 } from '@/shared/types/service-bridge'
-import type {
-    WsInvokeChannel,
-    WsInvokeRequest,
-    WsInvokeResponse,
-    WsPushChannel
-} from '@/shared/types/ws-channels'
+import type { WsInvokeChannel, WsInvokeResponse, WsPushChannel } from '@/shared/types/ws-channels'
 
 const PUSH_CHANNEL = 'service-bridge:push'
 
@@ -56,15 +52,11 @@ export const pairTransport: PreloadServiceTransport = {
     },
 
     invoke<C extends WsInvokeChannel>(
-        ...args: WsInvokeRequest<C> extends void
-            ? [channel: C]
-            : [channel: C, payload: WsInvokeRequest<C>]
-    ): Promise<WsInvokeResponse<C>> {
+        ...args: ServiceInvokeArgs<C>
+    ): Promise<IpcResult<WsInvokeResponse<C>>> {
         const [channel, payload] = args
         const request: ServiceBridgeInvokeRequest<C> = { channel, payload }
-        return invokeAndUnwrap<WsInvokeResponse<C>>(
-            ipcRenderer.invoke('service-bridge:invoke', request)
-        )
+        return ipcRenderer.invoke('service-bridge:invoke', request)
     },
 
     subscribePush(channel, fn) {

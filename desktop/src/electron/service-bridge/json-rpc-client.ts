@@ -20,7 +20,18 @@ interface JsonRpcError {
     data?: JsonValue
 }
 
-export class JsonRpcResponseError extends Error {}
+/**
+ * A JSON-RPC error response. The message reads `<code>: <message>`; `code`
+ * carries the code itself, so callers classify by code, not by text.
+ */
+export class JsonRpcResponseError extends Error {
+    readonly code: number
+
+    constructor(code: number, message: string) {
+        super(`${code}: ${message}`)
+        this.code = code
+    }
+}
 
 type JsonRpcId = number | string
 
@@ -421,9 +432,7 @@ export class JsonRpcSocketClient extends EventEmitter<JsonRpcClientEvents> {
         if (pending.timeout) clearTimeout(pending.timeout)
 
         if (message.error) {
-            pending.reject(
-                new JsonRpcResponseError(`${message.error.code}: ${message.error.message}`)
-            )
+            pending.reject(new JsonRpcResponseError(message.error.code, message.error.message))
             return
         }
 

@@ -27,7 +27,8 @@ responses.
 
 Every `ipcMain.handle` uses `safeHandle()` from `safe-handle.ts` which
 validates the sender and wraps responses in `IpcResult<T>`. IPC handlers
-must never throw — they return `{ success: false, error }` via the envelope.
+must never throw — they return `{ success: false, error }` via the envelope,
+with the service's JSON-RPC `code` added when a service refused the call.
 
 ## Always use safeHandle
 

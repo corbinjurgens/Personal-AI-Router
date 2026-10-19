@@ -10,6 +10,12 @@ vi.mock('electron', () => ({ BrowserWindow: { getAllWindows: () => [] } }))
 vi.mock('@/electron/window', () => ({ createOverviewWindow: vi.fn() }))
 
 import { getModularBridgeState } from '@/electron/service-bridge/modular-state'
+import {
+    INVALID_PARAMS_CODE,
+    LOCAL_VETO_CODE,
+    POLICY_CONFLICT_CODE
+} from '@/shared/constants/service-errors'
+import { ServiceCallError } from '@/ui/api/service-transport'
 import type { EngineModels, ModelItem } from '@/shared/types/engines'
 import type { JsonValue } from '@/shared/types/json'
 import type { NodePolicyDocument, NodePolicySnapshot } from '@/shared/types/node-policy'
@@ -281,7 +287,36 @@ describe('conflicts', () => {
         expect(set).toHaveBeenCalledTimes(1)
     })
 
-    it('classifies refusals by code', () => {
+    it('classifies a refusal by its JSON-RPC code, not by its text', () => {
+        expect(policyRefusal('the persisted revision is 6', POLICY_CONFLICT_CODE)).toBe('conflict')
+        expect(policyRefusal('paused on the node itself', LOCAL_VETO_CODE)).toBe('vetoed')
+        expect(policyRefusal('roles[weak]: unknown engine', INVALID_PARAMS_CODE)).toBe('rejected')
+        expect(policyRefusal('-32011: policy conflict: misleading text', -32000)).toBe('other')
+        expect(policyRefusal('-32000: engine manager unavailable', -32000)).toBe('unreachable')
+    })
+
+    it('shows a coded local veto whose message names no code', async () => {
+        set.mockRejectedValue(new ServiceCallError('paused on the node itself', LOCAL_VETO_CODE))
+        const store = useNodeConfigurationStore.getState()
+        store.adopt(PEER, snapshot('5'))
+        store.setRole(PEER, 'weak', { engine: 'ollama', model: 'qwen3:4b' })
+        await store.save(PEER, PEER)
+        expect(entry().phase).toBe('vetoed')
+        expect(get).not.toHaveBeenCalled()
+    })
+
+    it('does not read a code out of the text of a coded failure', async () => {
+        set.mockRejectedValue(new ServiceCallError('-32011: the policy could not be saved', -32000))
+        get.mockResolvedValue(policyDocument('5'))
+        const store = useNodeConfigurationStore.getState()
+        store.adopt(PEER, snapshot('5'))
+        store.setRole(PEER, 'weak', { engine: 'ollama', model: 'qwen3:4b' })
+        await store.save(PEER, PEER)
+        expect(entry().phase).toBe('rejected')
+        expect(get).toHaveBeenCalledTimes(1)
+    })
+
+    it('falls back to the message only when a failure carries no code', () => {
         expect(policyRefusal('-32602: roles[weak]: unknown engine "x"')).toBe('rejected')
         expect(policyRefusal('-32011: vetoed')).toBe('vetoed')
         expect(policyRefusal('-32000: the policy could not be saved')).toBe('other')

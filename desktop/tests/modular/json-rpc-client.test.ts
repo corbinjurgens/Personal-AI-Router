@@ -8,6 +8,7 @@ import path from 'path'
 import readline from 'readline'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
+    JsonRpcResponseError,
     JsonRpcSocketClient,
     type JsonRpcNotification
 } from '@/electron/service-bridge/json-rpc-client'
@@ -41,7 +42,10 @@ class FakeService {
             readline.createInterface({ input: socket }).on('line', line => {
                 const frame: Frame = JSON.parse(line)
                 this.received.push(frame)
-                if (frame.id !== undefined && frame.method !== 'hang') {
+                if (frame.method === 'refuse') {
+                    const error = { code: -32011, message: 'paused on the node itself' }
+                    socket.write(JSON.stringify({ jsonrpc: '2.0', id: frame.id, error }) + '\n')
+                } else if (frame.id !== undefined && frame.method !== 'hang') {
                     const result = frame.method === 'echo' ? frame.params : null
                     socket.write(JSON.stringify({ jsonrpc: '2.0', id: frame.id, result }) + '\n')
                 }
@@ -125,6 +129,17 @@ describeUnix('JsonRpcSocketClient', () => {
             method: 'app:ready',
             params: { ok: true }
         })
+    })
+
+    it('rejects an error response with its code beside the message', async () => {
+        const rpc = attach()
+        rpc.start()
+        await until(() => rpc.running)
+
+        const failure = await rpc.call('refuse').catch((err: unknown) => err)
+        expect(failure).toBeInstanceOf(JsonRpcResponseError)
+        expect(failure).toHaveProperty('code', -32011)
+        expect(failure).toHaveProperty('message', '-32011: paused on the node itself')
     })
 
     it('rejects calls while not connected', async () => {

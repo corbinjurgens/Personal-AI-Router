@@ -7,7 +7,7 @@
  * Commands are void (fire-and-forget). Errors arrive via errors:update push events.
  * All state flows via push events, not command responses.
  */
-import type { PreloadServiceTransport as ServiceTransport } from '@/shared/types/service-bridge'
+import type { ServiceTransport } from '@/shared/types/service-bridge'
 import type {
     EngineHubSearchResponse,
     EngineInitialState,

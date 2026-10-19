@@ -15,6 +15,7 @@ import {
 } from './json-rpc-client'
 import { createStructuredLogger } from '@/shared/utils/log'
 import getErrorString from '@/shared/utils/get-error-string'
+import { LOCAL_VETO_CODE, localVetoMessage } from '@/shared/constants/service-errors'
 import { currentPlatform } from '@/shared/utils/platform'
 import {
     getModularBridgeState,
@@ -259,6 +260,15 @@ export function pullModelParams(family: string, model: string): JsonObject {
  */
 function isRestartAfterFailure(detail: string | undefined): boolean {
     return /failed to restart/i.test(detail ?? '')
+}
+
+/**
+ * Whether a paired node refused a remote start, install with start or model
+ * load with its local veto: it is paused, or the engine is Off, on the node
+ * itself. Retrying from here cannot succeed until it is lifted there.
+ */
+function isLocalVeto(err: unknown): boolean {
+    return err instanceof JsonRpcResponseError && err.code === LOCAL_VETO_CODE
 }
 
 /**
@@ -2066,9 +2076,13 @@ class ModularSupervisor {
         } catch (err) {
             // Use engine-manager's canonical error identity so a rejection here
             // upserts the backend's own report (and offers retry) rather than
-            // duplicating it under a UI-synthesized id.
+            // duplicating it under a UI-synthesized id. A local veto offers no
+            // retry: only that node can lift it.
+            const vetoed = start && isLocalVeto(err)
             this.reportError(
-                `Failed to install ${engine} on ${nodeId}: ${getErrorString(err)}`,
+                vetoed
+                    ? localVetoMessage(`install and start ${engine} on ${nodeId}`)
+                    : `Failed to install ${engine} on ${nodeId}: ${getErrorString(err)}`,
                 'error',
                 `engine-remote-install:${nodeId}:${engine}`,
                 {
@@ -2076,7 +2090,7 @@ class ModularSupervisor {
                     nodeId,
                     engineType: engine,
                     operation: 'install',
-                    action: 'retry'
+                    ...(vetoed ? {} : { action: 'retry' })
                 }
             )
         } finally {
@@ -2110,7 +2124,9 @@ class ModularSupervisor {
         } catch (err) {
             state.clearPendingRemoteEngineOp(nodeId, engineType)
             this.reportError(
-                `Failed to ${running ? 'stop' : 'start'} ${engine} on ${nodeId}: ${getErrorString(err)}`,
+                !running && isLocalVeto(err)
+                    ? localVetoMessage(`start ${engine} on ${nodeId}`)
+                    : `Failed to ${running ? 'stop' : 'start'} ${engine} on ${nodeId}: ${getErrorString(err)}`,
                 'error',
                 `engine-remote-toggle:${nodeId}:${engine}`
             )
@@ -2156,7 +2172,9 @@ class ModularSupervisor {
             this.reportError(
                 restartFailed
                     ? `Deleted ${model} on ${nodeId}, but ${engine} failed to restart: ${detail}`
-                    : `Failed to ${verb} ${model} on ${nodeId}: ${detail}`,
+                    : command === 'loadModel' && isLocalVeto(err)
+                      ? localVetoMessage(`load ${model} on ${nodeId}`)
+                      : `Failed to ${verb} ${model} on ${nodeId}: ${detail}`,
                 'error',
                 `engine-remote-model:${nodeId}:${engineType}:${model}:${verb}`,
                 { nodeId, engineType, operation: verb, modelName: model }
