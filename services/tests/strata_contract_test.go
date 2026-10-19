@@ -728,6 +728,13 @@ func (f *strataContractFixture) strataContractStartManager(t *testing.T) {
 	f.Manager = strataContractStartChild(t, engineMgrBin, f.Env, "--cluster-dir", f.ClusterDir, "--control-port", strconv.Itoa(f.ControlPort), "--http-port", "0", "--loaded-poll-interval", "1", "--log-level", "warn")
 	t.Cleanup(func() { f.strataContractCleanupRuntime(t) })
 	f.Manager.strataContractNotificationWithin(t, "engine:ready", nil, strataContractStartup)
+	completeEngineManagerRecovery(t, func(method string, params any) jsonrpc.Message {
+		response, err := f.Manager.strataContractCallWithin(method, params, strataContractStartup)
+		if err != nil {
+			t.Fatalf("%s: %v", method, err)
+		}
+		return response
+	})
 	// Check the merged host block before any explicit inventory/status request.
 	for _, engine := range engines.All() {
 		var manifest struct {
