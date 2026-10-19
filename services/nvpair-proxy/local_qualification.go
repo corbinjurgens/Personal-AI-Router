@@ -260,6 +260,9 @@ func (q *localQualification) validateRequest(profile nodepolicy.Profile, route s
 		}
 	}
 	effective := mergeDefaults(body, profile.RequestOptions)
+	if !uniqueKeys(effective) {
+		return nil, strictBound{}, rejectBody("the request with its defaults repeats a key or is not JSON")
+	}
 	var fields map[string]json.RawMessage
 	if json.Unmarshal(effective, &fields) != nil {
 		return nil, strictBound{}, rejectBody("the request with its defaults is not a JSON object")
