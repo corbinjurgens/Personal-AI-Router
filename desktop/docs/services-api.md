@@ -44,6 +44,7 @@
 - ⚠️ nvpair-proxy → facade/enable
 - ⚠️ nvpair-proxy → node/selected
 - ⚠️ nvpair-proxy → node/set-local-backend
+- ⚠️ nvpair-ui-broker → admission/strict-readiness
 - ⚠️ nvpair-ui-broker → discovery:unsubscribe
 - ⚠️ nvpair-ui-broker → engine:configure-launch
 - ⚠️ nvpair-ui-broker → engine:set-port
@@ -290,6 +291,7 @@
 | `policy:reply` | notification (we consume) | ➖ ignored |
 | `workloads:remove` | notification (we consume) | ✅ yes |
 | `workloads:upsert` | notification (we consume) | ✅ yes |
+| `admission/strict-readiness` | request (we call) | ⚠️ not called |
 | `connection/cluster-auto-sync` | request (we call) | ➖ ignored |
 | `connection/cluster-identity` | request (we call) | ✅ yes |
 | `discovery:get-node-info` | request (we call) | ✅ yes |
