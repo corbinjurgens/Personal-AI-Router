@@ -435,8 +435,33 @@ Engine switching also has two internal process-scoped requests:
   remain retained and count against admission capacity until both the account
   outcome and qualification classification are durably recorded. Every failure
   refuses spending and never blocks policy activation or local routing. No
-  dispatch path calls it until hybrid dispatch exists. See `spec.md` section
-  12.7.
+  user-traffic path calls it. The private `runChatAccountAttempt` library runner
+  now reserves and completes ledger attempts, but has no production caller.
+  See `spec.md` sections 12.7–12.8.
+
+### Strict Chat adapter library (E; inactive)
+
+`chatQualification.prepare` and `parseResponse` implement bounded, stateless text
+Chat Completions, including qualified function tools, structured output and SSE.
+Acceptance is the intersection of the strict grammar and a supplied qualification;
+unknown/stateful fields, multimodal input, opaque reasoning, Responses, Anthropic
+Messages, native engine protocols and embeddings are unsupported. Input accounting
+covers the final body and qualified framing overhead, with finite output/context
+bounds. `newPublicClient` uses the configured HTTPS URL, public-address-checked
+numeric dials and verified TLS; it rejects redirects and compressed responses,
+ignores environment proxies, and never forwards raw provider headers or trailers.
+
+`runChatAccountAttempt` ties one send to a pinned account snapshot, selected-reference
+resolver, mandatory pre-send guard and finite byte-budget hooks. It neither selects
+targets nor retries. Ledger outcome, money and qualification completion remain
+independent; incomplete or untrusted responses retain their money hold.
+
+This adds no route or RPC exposure, configured provider or real qualification.
+`remoteDispatchAvailable` remains false. F must supply real evidence and freshness,
+G the lease, and I the dispatch wiring and aggregate buffer owner. D's native
+lock/crash-window acceptance and owner recovery controls remain activation gates.
+Synthetic profiles and successful test guards activate nothing. The normative
+matrix, limits and completion rules are in `spec.md` section 12.8.
 
 ### IPC Transport
 
