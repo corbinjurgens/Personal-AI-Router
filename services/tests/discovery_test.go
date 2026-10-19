@@ -12,7 +12,6 @@ import (
 	"net"
 	"os"
 	"os/exec"
-	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -42,10 +41,7 @@ func init() {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}
-		// Register's address enumeration omits loopback addresses. Supply the
-		// fixture's loopback A record through the library's proxy registration.
-		server, err := zeroconf.RegisterProxy(fixture.Instance, fixture.Service, testDomain, fixture.Port,
-			fixture.Instance, []string{"127.0.0.1"}, fixture.TXT, []net.Interface{*iface})
+		shutdown, err := registerMDNSFixture(fixture, *iface)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
@@ -55,74 +51,12 @@ func init() {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}
-		server.Shutdown()
+		if err := shutdown(); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
 		os.Exit(0)
 	}
-}
-
-func mdnsFixtureInterface(t *testing.T) net.Interface {
-	t.Helper()
-	ifaces, err := net.Interfaces()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if runtime.GOOS == "windows" {
-		// x/net's Windows WriteTo ignores zeroconf's IfIndex control message.
-		// Join the interface used by the OS multicast route so queries and
-		// responses arrive on the same interface. DialUDP selects that route
-		// without sending a packet; choosing the first adapter is ambiguous
-		// on hosts with Ethernet, Wi-Fi and virtual adapters.
-		conn, err := net.DialUDP("udp4", nil, &net.UDPAddr{IP: net.IPv4(224, 0, 0, 251), Port: 5353})
-		if err != nil {
-			t.Fatalf("select mDNS multicast route: %v; interfaces: %v", err, ifaces)
-		}
-		source := conn.LocalAddr().(*net.UDPAddr).IP
-		if err := conn.Close(); err != nil {
-			t.Fatalf("close mDNS route probe: %v", err)
-		}
-		for _, iface := range ifaces {
-			if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagMulticast == 0 || iface.Flags&net.FlagLoopback != 0 {
-				continue
-			}
-			addrs, err := iface.Addrs()
-			if err != nil {
-				t.Fatalf("addresses for mDNS interface %s: %v", iface.Name, err)
-			}
-			for _, addr := range addrs {
-				ip, _, err := net.ParseCIDR(addr.String())
-				if err != nil {
-					t.Fatalf("parse mDNS interface %s address %q: %v", iface.Name, addr, err)
-				}
-				if ip.Equal(source) {
-					t.Logf("mDNS fixture interface: %s index=%d flags=%s multicast source=%s", iface.Name, iface.Index, iface.Flags, source)
-					return iface
-				}
-			}
-		}
-		t.Fatalf("no active multicast interface owns mDNS route source %s; interfaces: %v", source, ifaces)
-	}
-	for _, iface := range ifaces {
-		if iface.Flags&net.FlagUp != 0 && iface.Flags&net.FlagLoopback != 0 {
-			t.Logf("mDNS fixture interface: %s index=%d flags=%s", iface.Name, iface.Index, iface.Flags)
-			return iface
-		}
-	}
-	t.Fatal("no active loopback interface for multicast fixture")
-	return net.Interface{}
-}
-
-func mdnsResolverOptions(ifaces []net.Interface) []zeroconf.ClientOption {
-	if ifaces == nil {
-		return nil
-	}
-	options := []zeroconf.ClientOption{zeroconf.SelectIfaces(ifaces)}
-	if runtime.GOOS == "windows" {
-		// The fixture selects Windows' IPv4 multicast route and publishes an
-		// A record. IPv6 need not be enabled on that adapter. Unix retains
-		// both transports, including IPv6 multicast over macOS loopback.
-		options = append(options, zeroconf.SelectIPTraffic(zeroconf.IPv4))
-	}
-	return options
 }
 
 // Keep zeroconf's goodbye writes out of the test process. A stalled multicast
@@ -173,6 +107,7 @@ func startMDNSAdvertiser(t *testing.T, fixture mdnsAdvertiserFixture) func() {
 					t.Errorf("advertiser did not exit after kill; stderr: %s", output.String())
 				}
 			}
+			mdnsFixtureAdvertiserOutput(t, output.String())
 		})
 	}
 	t.Cleanup(stop)
@@ -223,7 +158,7 @@ func TestInProcessDiscovery(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if err := resolver.Browse(ctx, service, testDomain, entries); err != nil {
+	if err := mdnsBrowse(t, resolver, ctx, service, entries, []net.Interface{iface}); err != nil {
 		t.Fatalf("browse: %v", err)
 	}
 
@@ -276,7 +211,7 @@ func TestInProcessMultipleInstances(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if err := resolver.Browse(ctx, service, testDomain, entries); err != nil {
+	if err := mdnsBrowse(t, resolver, ctx, service, entries, []net.Interface{iface}); err != nil {
 		t.Fatalf("browse: %v", err)
 	}
 	<-ctx.Done()
@@ -349,7 +284,7 @@ func browseForInstanceOnInterfaces(t *testing.T, service, instance string, timeo
 
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	if err := resolver.Browse(ctx, service, testDomain, entries); err != nil {
+	if err := mdnsBrowse(t, resolver, ctx, service, entries, ifaces); err != nil {
 		t.Fatalf("browse: %v", err)
 	}
 

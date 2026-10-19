@@ -118,7 +118,7 @@ func browseForNodeRecord(t *testing.T, instance, hostUUID string, timeout time.D
 	}()
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	if err := resolver.Browse(ctx, "_nvpair-node._tcp", testDomain, entries); err != nil {
+	if err := mdnsBrowse(t, resolver, ctx, "_nvpair-node._tcp", entries, nil); err != nil {
 		t.Fatalf("browse: %v", err)
 	}
 	select {

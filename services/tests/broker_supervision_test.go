@@ -132,7 +132,9 @@ func startLineReader(r io.Reader) <-chan string {
 		sc := bufio.NewScanner(r)
 		sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 		for sc.Scan() {
-			ch <- sc.Text()
+			line := sc.Text()
+			mdnsFixtureLogLine(line)
+			ch <- line
 		}
 	}()
 	return ch
