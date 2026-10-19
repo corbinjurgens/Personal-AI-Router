@@ -223,6 +223,11 @@ type strictQualificationError struct{ reason string }
 
 func (e *strictQualificationError) Error() string { return "strict qualification: " + e.reason }
 
+// errAmbiguousModel rejects an effective body whose defaults add a
+// model-equivalent member; callers answer it as ambiguous-model, as on every
+// other path.
+var errAmbiguousModel = errors.New(ambiguousModelMessage)
+
 func rejectBody(format string, args ...any) error {
 	return &strictQualificationError{reason: fmt.Sprintf(format, args...)}
 }
@@ -260,6 +265,9 @@ func (q *localQualification) validateRequest(profile nodepolicy.Profile, route s
 		}
 	}
 	effective := mergeDefaults(body, profile.RequestOptions)
+	if ambiguousModelMember(effective) {
+		return nil, strictBound{}, errAmbiguousModel
+	}
 	if !uniqueKeys(effective) {
 		return nil, strictBound{}, rejectBody("the request with its defaults repeats a key or is not JSON")
 	}
