@@ -11,6 +11,87 @@ SPDX-License-Identifier: Apache-2.0
 
 ## 1. Purpose
 
+### Strict destination admission (A1a)
+
+Strict requests carry exactly one shared-parser-validated
+`X-PAIR-Strict-Admission` envelope. Both paired ingress and local self dispatch
+use the existing process-wide admission controller, including its mutex,
+in-flight counters, residency, notifications and cancellation registry. Engine
+IDs are canonical built-in names. Model keys use `normalizeEngineModel`:
+Ollama's omitted tag becomes `:latest`; other engine model IDs keep their
+existing adapter semantics. Equivalent normalized capability entries reject.
+
+Finite `maxConcurrent` and the matching authoritative model identity are
+required. The capability limit must equal the finite effective policy/profile
+concurrency limit for the normalized engine/model, which is also enforced for
+concrete traffic. Unlimited or mismatched limits reject installation. Policy
+activation withdraws installed entries that no longer match. Caller fields never
+establish destination capability. A1a exposes an
+internal capability-install seam but wires no broker feed and returns a nil
+capability from `StrictReadiness`. No strict readiness is advertised. Production
+strict admission remains disabled pending authoritative identity/qualification
+integration. Strict dispatch is terminal-local and never enters concrete route
+selection or retries. Headerless concrete admission retains its prior semantics,
+including its switch timeout behavior.
+
+Queue and cold deadlines derive from remaining durations on a monotonic clock,
+share the pre-output cap, and never reset on wake, switch or state changes.
+Zero cold allowance forbids wake/unload and excludes unloaded models and models
+with an unload pending authoritative residency acknowledgement. Tickets admitted
+warm-only (including already-warm requests with nonzero cold allowance) revalidate
+loaded residency and absence of pending unload before dispatch; failure returns
+the typed cold-residency error and releases the undispatched slot. In-flight
+models, including admitted/dispatched strict tickets, are excluded from eviction.
+Recovery of a pending unload requires authoritative unload completion; timeout clearing is deliberately absent.
+Once cold work is required, its original deadline also bounds subsequent capacity
+or other waits and is checked before any ticket allocation. Budget expiry
+rejects, including when capacity becomes available at the deadline. Context
+cancellation removes queued waiters without allocating a slot. The same deadline
+covers connection, headers and first response body; active generation after the
+first byte is outside the selection timer. Typed errors support `errors.Is/As`:
+unavailable/off and cold residency map to HTTP 503, occupied capacity to 429;
+malformed/duplicate envelopes map to 400. A context deadline maps to 504.
+The ticket deadline watcher uses the injected timer; `awaitFirstBody` also retains
+its existing real-time timer, so first-body timing is not wholly clock-injected.
+
+Tickets are allocated/released under the controller mutex. Before dispatch,
+`BeforeStrictDispatch` revalidates identity/availability and durably writes a
+version-1 JSON capacity document through `shared/durablefile`. The canonical
+`appdir` file `proxy-strict-capacity.json` holds slots with numeric ticket ID,
+engine and normalized model only. Startup restores slots into the same in-flight
+counters. Slot IDs continue above recovered IDs. No request content is persisted.
+Capability withdrawal or replacement advances a per-key generation, invalidating
+undispatched tickets even if the same identity is reinstalled; dispatched work
+keeps its accounting. Installation, marker writing and recovery share one model
+key contract: known engine, nonempty normalized key, no reserved alias or control
+characters; internal spaces are supported. The writer and loader share a total
+slot bound, enforced before adding a dispatch marker.
+
+`Finish` is idempotent. Not-dispatched and qualified-complete evidence, or
+authoritative-idle/verified-replacement evidence, release a ticket only after a
+needed durable clear succeeds. Uncertain terminal paths retain the slot and its
+marker. HTTP EOF supplies no qualified termination evidence in A1a and remains
+uncertain. The destination-owned reconciliation seam clears recovered or
+quarantined slots only on authoritative-idle/verified-replacement evidence; it
+cannot remove a live HTTP ticket. Elapsed time does not clear capacity.
+
+Failed dispatch persistence prevents inference. `ErrReplaced` means marker bytes
+landed and are retained, but uncertain durability still prevents dispatch.
+Pre-replacement failures retain quarantine in memory and are logged. Failed
+clears retain capacity in memory. Corrupt/unreadable state disables strict
+admission. Reconciliation returns the recovery error without writing while state
+is untrusted, and skips persistence when no entries were removed. Marker loading
+requires nonnull version and slots, positive unique slot IDs, built-in engine IDs
+and valid normalized model keys. The complete
+document is validated before any counters or markers are adopted; invalid later
+slots cannot leave partially restored state. A1b/A2 must provide actual
+authoritative reconciliation and the qualification owner must prove terminal
+evidence before activation.
+
+Before forwarding to an engine, ingress and self dispatch strip every
+`X-PAIR-*` header (strict, admission wait/result and routing model/engine/node/tier
+metadata) and `X-NVPAIR-Engine-Identity-Probe`. Other engine headers are preserved.
+
 Carries inference **to** the node that should serve it. One process hosts a
 **facade** per enabled engine: each facade is an HTTP reverse proxy speaking its
 engine's own dialect, filtering to nodes that advertise the requested model,

@@ -48,7 +48,8 @@ type notification struct {
 
 // admissionController is the node-wide admission state and decision.
 type admissionController struct {
-	mu sync.Mutex
+	mu     sync.Mutex
+	strict strictAdmissionState
 	// changed is closed and replaced on every state change, waking every
 	// waiter to re-evaluate. A condition variable cannot be selected on
 	// together with a deadline and a request context; a channel can.
@@ -106,7 +107,7 @@ func newAdmissionController(notify func(string, any), healthy func(string) bool,
 	// carry no revision: the broker's first acknowledged one is the first.
 	initial := nodepolicy.Default()
 	initial.Revision = ""
-	return &admissionController{
+	a := &admissionController{
 		changed:        make(chan struct{}),
 		policy:         initial,
 		availability:   nodepolicy.Available,
@@ -124,6 +125,8 @@ func newAdmissionController(notify func(string, any), healthy func(string) bool,
 		healthy:        healthy,
 		normalize:      normalize,
 	}
+	a.initStrictCapacity()
+	return a
 }
 
 // signalLocked wakes every waiter. Caller holds mu.
@@ -149,6 +152,7 @@ func (a *admissionController) activatePolicy(p nodepolicy.Policy) error {
 		return fmt.Errorf("revision %s is older than the active revision %s", p.Revision, a.policy.Revision)
 	}
 	a.policy = p
+	a.revalidateStrictCapabilitiesLocked()
 	a.signalLocked()
 	return nil
 }
@@ -403,10 +407,7 @@ func (a *admissionController) admit(ctx context.Context, req admissionRequest) a
 
 		if model != "" {
 			// 4. Per-model concurrency.
-			limit := pol.Admission.MaxConcurrentPerModel
-			if hasProfile && profile.MaxConcurrent > 0 {
-				limit = profile.MaxConcurrent
-			}
+			limit := a.concurrencyLimitLocked(key)
 			if limit > 0 && a.inflight[key] >= limit {
 				if queueDeadline.IsZero() {
 					queueDeadline = start.Add(bounded(pol.Admission.QueueTimeoutSeconds, req.waitCap))
@@ -611,6 +612,13 @@ func (a *admissionController) memoryLocked(k admKey) int64 {
 		return pr.MemoryBytes
 	}
 	return 0
+}
+
+func (a *admissionController) concurrencyLimitLocked(k admKey) int {
+	if pr, ok := a.profileLocked(k); ok && pr.MaxConcurrent > 0 {
+		return pr.MaxConcurrent
+	}
+	return a.policy.Admission.MaxConcurrentPerModel
 }
 
 // profileLocked looks a model's profile up by engine and normalized model, so

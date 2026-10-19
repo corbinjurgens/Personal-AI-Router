@@ -363,6 +363,21 @@ func (f *facade) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	isInf := isInferenceRequest(f.profile, r.Method, r.URL.Path)
+	strict, strictErr := parseStrictAdmission(r.Header)
+	if strictErr != nil {
+		writeIngressError(w, http.StatusBadRequest, "strict-admission", strictErr.Error())
+		return
+	}
+	if strict != nil {
+		if !isInf {
+			writeIngressError(w, http.StatusBadRequest, "strict-admission", "strict admission requires inference")
+			return
+		}
+		// The internal strict envelope names destination-local execution. It
+		// cannot grant onward routing or inherit concrete retry loops.
+		f.serveStrictLocal(w, r, bodyBytes, model, *strict)
+		return
+	}
 	// A reserved hybrid alias the legacy tier path does not serve is refused
 	// here, before candidates, admission, reservation, workload or upstream.
 	if alias, reason, rejected := requestAliasRejection(r, bodyBytes, model, isInf); rejected {
@@ -1122,6 +1137,9 @@ func (f *facade) handleHTTP(w http.ResponseWriter, r *http.Request) {
 
 		proxy := &httputil.ReverseProxy{
 			Director: func(req *http.Request) {
+				if cand.self {
+					stripInternalRoutingHeaders(req.Header)
+				}
 				req.URL.Scheme = target.Scheme
 				req.URL.Host = target.Host
 				req.Host = target.Host

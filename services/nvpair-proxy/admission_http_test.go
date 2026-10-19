@@ -7,7 +7,9 @@ package main
 // sends here, and handleHTTP's self candidate, for work this node runs itself.
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -22,6 +24,230 @@ import (
 	"nvpair-shared/clustertrusttest"
 	"nvpair-shared/nodepolicy"
 )
+
+func strictHTTPFixture(t *testing.T) (*Proxy, *recordingEngine) {
+	t.Helper()
+	profile, ok := profileFor("ollama")
+	if !ok {
+		t.Fatal("missing ollama profile")
+	}
+	p := testProxy(profile, NewDiscovery(), profile.FacadePort)
+	configureStrict(t, p.admission, filepath.Join(t.TempDir(), "capacity.json"))
+	e := newRecordingEngine(t, http.StatusOK)
+	setBackend(t, p.soleFacade(), e.URL, true)
+	return p, e
+}
+func strictHTTPRequest(t *testing.T) *http.Request {
+	t.Helper()
+	r := httptest.NewRequest(http.MethodPost, "/api/chat", strings.NewReader(`{"model":"m","stream":false}`))
+	b, err := json.Marshal(strictRequest())
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.Header.Set(nodepolicy.StrictAdmissionHeader, string(b))
+	return r
+}
+func serveStrictHTTP(p *Proxy, path string, w http.ResponseWriter, r *http.Request) {
+	if path == "ingress" {
+		p.soleFacade().serveIngress(w, r, "peer")
+	} else {
+		p.soleFacade().handleHTTP(w, r)
+	}
+}
+
+func TestStrictHTTPStripsInternalHeaders(t *testing.T) {
+	for _, path := range []string{"ingress", "self"} {
+		t.Run(path, func(t *testing.T) {
+			p, e := strictHTTPFixture(t)
+			r := strictHTTPRequest(t)
+			for _, h := range []string{nodepolicy.AdmissionWaitHeader, "X-PAIR-Admission", "X-PAIR-Model", "X-PAIR-Engine", "X-PAIR-Node", "X-PAIR-Tier", engineIdentityProbeHeader} {
+				r.Header.Set(h, "internal")
+			}
+			r.Header.Set("X-Custom-Engine-Option", "keep")
+			w := httptest.NewRecorder()
+			serveStrictHTTP(p, path, w, r)
+			if w.Code != http.StatusOK || e.hits() != 1 {
+				t.Fatalf("status=%d hits=%d body=%s", w.Code, e.hits(), w.Body)
+			}
+			for h := range e.lastHeader() {
+				if strings.HasPrefix(strings.ToLower(h), "x-pair-") || strings.EqualFold(h, engineIdentityProbeHeader) {
+					t.Fatalf("leaked header %s", h)
+				}
+			}
+			if e.lastHeader().Get("X-Custom-Engine-Option") != "keep" {
+				t.Fatal("engine header lost")
+			}
+			if p.admission.currentActive() != 1 {
+				t.Fatal("HTTP EOF incorrectly released uncertain capacity")
+			}
+			if len(readCapacity(t, p.admission.strict.path).Slots) != 1 {
+				t.Fatal("missing dispatch marker")
+			}
+		})
+	}
+}
+
+func TestStrictHTTPRejectsMalformedAndDuplicateHeaders(t *testing.T) {
+	for _, path := range []string{"ingress", "self"} {
+		t.Run(path, func(t *testing.T) {
+			for _, scenario := range []string{"malformed", "duplicate", "empty"} {
+				t.Run(scenario, func(t *testing.T) {
+					p, e := strictHTTPFixture(t)
+					r := strictHTTPRequest(t)
+					switch scenario {
+					case "malformed":
+						r.Header.Set(nodepolicy.StrictAdmissionHeader, "{")
+					case "duplicate":
+						r.Header.Add(nodepolicy.StrictAdmissionHeader, r.Header.Get(nodepolicy.StrictAdmissionHeader))
+					case "empty":
+						r.Header.Set(nodepolicy.StrictAdmissionHeader, "")
+					}
+					w := httptest.NewRecorder()
+					serveStrictHTTP(p, path, w, r)
+					if w.Code != http.StatusBadRequest || e.hits() != 0 || p.admission.currentActive() != 0 {
+						t.Fatalf("status=%d hits=%d active=%d", w.Code, e.hits(), p.admission.currentActive())
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestStrictHTTPPersistenceFailureSendsNoInference(t *testing.T) {
+	for _, path := range []string{"ingress", "self"} {
+		t.Run(path, func(t *testing.T) {
+			p, e := strictHTTPFixture(t)
+			p.admission.strict.write = func(string, []byte, os.FileMode) error { return errors.New("injected disk failure") }
+			w := httptest.NewRecorder()
+			serveStrictHTTP(p, path, w, strictHTTPRequest(t))
+			if w.Code != http.StatusServiceUnavailable || e.hits() != 0 {
+				t.Fatalf("status=%d hits=%d", w.Code, e.hits())
+			}
+		})
+	}
+}
+
+func TestStrictHTTPCancellationIgnoringEngineQuarantines(t *testing.T) {
+	for _, path := range []string{"ingress", "self"} {
+		t.Run(path, func(t *testing.T) {
+			p, _ := strictHTTPFixture(t)
+			received := make(chan struct{})
+			release := make(chan struct{})
+			e := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { close(received); <-release; w.WriteHeader(http.StatusOK) }))
+			defer e.Close()
+			defer close(release)
+			setBackend(t, p.soleFacade(), e.URL, true)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			r := strictHTTPRequest(t).WithContext(ctx)
+			done := make(chan struct{})
+			go func() { defer close(done); serveStrictHTTP(p, path, httptest.NewRecorder(), r) }()
+			waitChan(t, received, "engine request")
+			cancel()
+			waitChan(t, done, "cancelled handler")
+			if p.admission.currentActive() != 1 || len(readCapacity(t, p.admission.strict.path).Slots) != 1 {
+				t.Fatal("cancel released unproved engine capacity")
+			}
+		})
+	}
+}
+
+func TestStrictHTTPPreOutputDeadlineQuarantines(t *testing.T) {
+	for _, path := range []string{"ingress", "self"} {
+		t.Run(path, func(t *testing.T) {
+			p, _ := strictHTTPFixture(t)
+			c := useStrictClock(p.admission)
+			received := make(chan struct{})
+			release := make(chan struct{})
+			e := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusOK)
+				w.(http.Flusher).Flush()
+				close(received)
+				<-release
+			}))
+			defer e.Close()
+			defer close(release)
+			setBackend(t, p.soleFacade(), e.URL, true)
+			done := make(chan struct{})
+			w := httptest.NewRecorder()
+			go func() { defer close(done); serveStrictHTTP(p, path, w, strictHTTPRequest(t)) }()
+			awaitStrictTimer(t, c)
+			waitChan(t, received, "headers before body")
+			c.Advance(time.Second)
+			waitChan(t, done, "pre-output deadline")
+			if w.Code != http.StatusGatewayTimeout {
+				t.Fatalf("status=%d", w.Code)
+			}
+			if p.admission.currentActive() != 1 {
+				t.Fatal("timeout released uncertain slot")
+			}
+		})
+	}
+}
+
+func TestStrictHTTPStatusMapping(t *testing.T) {
+	for _, tc := range []struct {
+		err    error
+		status int
+	}{{errStrictUnavailable, http.StatusServiceUnavailable}, {errStrictOccupied, http.StatusTooManyRequests}, {errStrictCold, http.StatusServiceUnavailable}, {context.DeadlineExceeded, http.StatusGatewayTimeout}} {
+		t.Run(tc.err.Error(), func(t *testing.T) {
+			w := httptest.NewRecorder()
+			writeStrictAdmissionError(w, tc.err)
+			if w.Code != tc.status {
+				t.Fatalf("status=%d want=%d", w.Code, tc.status)
+			}
+			var typed *strictAdmissionError
+			if !errors.Is(tc.err, context.DeadlineExceeded) && !errors.As(tc.err, &typed) {
+				t.Fatal("missing typed outcome")
+			}
+		})
+	}
+}
+
+type strictFirstByteWriter struct {
+	*httptest.ResponseRecorder
+	first chan struct{}
+	once  sync.Once
+}
+
+func (w *strictFirstByteWriter) Write(b []byte) (int, error) {
+	n, err := w.ResponseRecorder.Write(b)
+	if n > 0 {
+		w.once.Do(func() { close(w.first) })
+	}
+	return n, err
+}
+
+func TestStrictHTTPHealthyGenerationOutlivesSelectionBudget(t *testing.T) {
+	p, _ := strictHTTPFixture(t)
+	c := useStrictClock(p.admission)
+	release := make(chan struct{})
+	e := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, "first")
+		w.(http.Flusher).Flush()
+		<-release
+		_, _ = io.WriteString(w, "last")
+	}))
+	defer e.Close()
+	setBackend(t, p.soleFacade(), e.URL, true)
+	w := &strictFirstByteWriter{ResponseRecorder: httptest.NewRecorder(), first: make(chan struct{})}
+	done := make(chan struct{})
+	r := strictHTTPRequest(t)
+	go func() { defer close(done); serveStrictHTTP(p, "self", w, r) }()
+	awaitStrictTimer(t, c)
+	waitChan(t, w.first, "committed first body")
+	c.Advance(2 * time.Second)
+	select {
+	case <-done:
+		t.Fatal("selection budget interrupted active generation")
+	default:
+	}
+	close(release)
+	waitChan(t, done, "healthy generation completion")
+	if w.Body.String() != "firstlast" {
+		t.Fatalf("body=%q", w.Body.String())
+	}
+}
 
 // selfNode is a discovery node that resolves to the facade's own listener, so
 // resolveCandidates maps it to the local backend.

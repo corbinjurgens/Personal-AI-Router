@@ -35,6 +35,36 @@ below is shared behavior unless a section says otherwise.
 
 ## Build
 
+Strict destination admission is opt-in through one `X-PAIR-Strict-Admission`
+JSON header on paired ingress or local dispatch. It shares the process-wide
+controller with concrete admission. Invalid/duplicate envelopes return 400;
+unavailable/off and cold-residency refusals return 503, occupied capacity 429.
+Queue and cold allowances consume the same monotonic pre-output cap. Zero cold
+allowance causes no wake/unload and excludes unloaded models and pending unloads.
+Warm-only tickets recheck residency and pending unloads before dispatch; loss
+rejects with 503 and releases the undispatched slot. Once cold work is needed,
+its deadline bounds every later wait, including capacity waits. Exhaustion rejects
+before allocating a ticket.
+
+The destination requires an authoritative finite capability and matching engine,
+settings and model identity. Capability concurrency must equal the finite
+effective policy/profile limit shared with concrete admission; policy changes
+withdraw capabilities that no longer match. A1a installs no production feed and
+publishes no readiness, so strict requests currently fail closed. Concrete requests retain
+their existing admission and retry behavior. A1b/A2 own feed/publication and
+qualification remains required before activation.
+
+Before strict inference bytes, the proxy durably writes a slot to
+`proxy-strict-capacity.json` in the shared `appdir` directory. Cancellation,
+transport failure and HTTP EOF retain uncertain capacity across restart; HTTP
+completion alone is not qualified termination. Authoritative reconciliation is
+required to clear it. No timeout releases quarantine. Storage failures prevent
+dispatch or retain the slot and log the failure. Corrupt marker documents disable
+strict admission without restoring partial state: version and slots are required
+and nonnull, with positive unique IDs, built-in engines and valid normalized models.
+All `X-PAIR-*` request headers
+and `X-NVPAIR-Engine-Identity-Probe` are stripped before local engine forwarding.
+
 ```bash
 go build -o nvpair-proxy .
 ```
