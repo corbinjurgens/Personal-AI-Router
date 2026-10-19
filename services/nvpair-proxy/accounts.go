@@ -192,10 +192,11 @@ func (l *accountLedger) recoverLocked(s *ledgerState) {
 // lands without confirmed durability is adopted, sets the unconfirmed latch,
 // and still fails, so no permission rests on it.
 func (l *accountLedger) commitLocked(next ledgerState) error {
-	nowMs := l.now().UnixMilli()
+	now := l.now()
+	nowMs := now.UnixMilli()
 	if nowMs >= next.LastObservedMs {
 		next.LastObservedMs = nowMs
-		prunePeriods(&next, l.now())
+		prunePeriods(&next, now)
 	}
 	pruneResolved(&next)
 	data, err := encodeLedger(next)
@@ -440,9 +441,9 @@ func (l *accountLedger) reserve(deploymentID string, inputTokens, outputTokens i
 	if err := checkCeilings(next, rec, acct, amount, now); err != nil {
 		return accountHold{}, err
 	}
-	// Leave room for the retained resolved holds, so pruning keeps the total
-	// within maxLedgerHolds.
-	if next.outstandingCount() >= maxLedgerHolds-maxResolvedHolds {
+	// Pending money, outcome or qualification processing must retain its
+	// immutable hold. Leave room for the bounded completed-history window.
+	if next.unfinishedCount() >= maxLedgerHolds-maxResolvedHolds {
 		return accountHold{}, errLedgerFull
 	}
 	attempt := l.newAttemptLocked()
@@ -520,10 +521,10 @@ func (l *accountLedger) ownsLocked(attempt string) bool {
 	return l.nonce != "" && strings.HasPrefix(attempt, l.nonce+"-")
 }
 
-func (s *ledgerState) outstandingCount() int {
+func (s *ledgerState) unfinishedCount() int {
 	n := 0
 	for _, h := range s.Holds {
-		if h.outstanding() {
+		if !h.evictable() {
 			n++
 		}
 	}
@@ -604,6 +605,7 @@ func (l *accountLedger) reconcile(attempt string, usage *tokenUsage) error {
 		l.broken = fmt.Errorf("%w: quarantine limit reached", errLedgerUnavailable)
 		return l.broken
 	}
+	nh.QualificationChecked = true
 	if err := l.commitRestrictiveLocked(next); err != nil {
 		return err
 	}
@@ -687,7 +689,14 @@ func (l *accountLedger) recordOutcome(attempt string, outcome accountOutcome, re
 		}
 		rec.Cooldown = laterCooldown(rec.Cooldown, &accountCooldown{UntilMs: resetAt.UnixMilli(), Reason: cooldownExhausted})
 	case outcomeCredentialFailure:
-		rec.CredentialFailure = &credentialFailure{Credential: nh.Credential}
+		// A late failure under an obsolete reference must not lift an
+		// existing suppression of the currently configured reference.
+		currentFailed := slices.ContainsFunc(l.routing.Accounts, func(a nodepolicy.Account) bool {
+			return a.ID == nh.Account && rec.CredentialFailure != nil && rec.CredentialFailure.Credential == a.Credential
+		})
+		if !currentFailed {
+			rec.CredentialFailure = &credentialFailure{Credential: nh.Credential}
+		}
 	case outcomeTransient:
 		restrictive = false
 	default:
@@ -710,6 +719,28 @@ func laterCooldown(a, b *accountCooldown) *accountCooldown {
 	return a
 }
 
+// recordQualification marks an attempt's qualification classification complete
+// with no violation. Call only after all identity and bound checks finish;
+// violations instead call quarantine. Until then its immutable hold is retained,
+// even if reconciliation and the account outcome have already completed.
+func (l *accountLedger) recordQualification(attempt string) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if err := l.ensureOpenLocked(); err != nil {
+		return err
+	}
+	h := l.state.hold(attempt)
+	if h == nil || !l.ownsLocked(attempt) || h.State == holdUncertain {
+		return errAttemptUnknown
+	}
+	if h.QualificationChecked {
+		return nil
+	}
+	next := l.state.clone()
+	next.hold(attempt).QualificationChecked = true
+	return l.commitLocked(next)
+}
+
 // quarantine records a qualification failure of the deployment identity the
 // attempt was reserved under, whatever the deployment is called or configured
 // as now. Rename, retirement, re-addition and restart keep it; only a new
@@ -724,10 +755,11 @@ func (l *accountLedger) quarantine(attempt string) error {
 	if h == nil || !l.ownsLocked(attempt) {
 		return errAttemptUnknown
 	}
-	if l.state.quarantined(h.key()) {
+	if l.state.quarantined(h.key()) && h.QualificationChecked {
 		return nil
 	}
 	next := l.state.clone()
+	next.hold(attempt).QualificationChecked = true
 	if !next.quarantine(h.key(), quarantineQualification, l.now().UnixMilli()) {
 		l.broken = fmt.Errorf("%w: quarantine limit reached", errLedgerUnavailable)
 		return l.broken
@@ -807,12 +839,13 @@ func prunePeriods(s *ledgerState, now time.Time) {
 }
 
 // pruneResolved keeps at most maxResolvedHolds resolved holds, dropping the
-// oldest first. Their amounts are already in Spent; only their duplicate
-// memory goes. Outstanding holds are never dropped.
+// oldest first. Their amounts are already in Spent and both account outcome
+// and qualification classification are recorded; only duplicate memory goes.
+// Unfinished holds are never dropped.
 func pruneResolved(s *ledgerState) {
 	resolved := 0
 	for _, h := range s.Holds {
-		if !h.outstanding() {
+		if h.evictable() {
 			resolved++
 		}
 	}
@@ -822,7 +855,7 @@ func pruneResolved(s *ledgerState) {
 	}
 	kept := s.Holds[:0:0]
 	for _, h := range s.Holds {
-		if drop > 0 && !h.outstanding() {
+		if drop > 0 && h.evictable() {
 			drop--
 			continue
 		}

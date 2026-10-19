@@ -1177,7 +1177,7 @@ discovery or node notification names its port.
 The proxy owns provider account state (`accounts.go`, `accountstore.go`,
 `accountlock_*.go`). Nothing in this build sends to a provider; hybrid dispatch
 calls `reserve` before it sends and `reconcile`, `recordOutcome` and
-`quarantine` afterwards.
+qualification classification (`recordQualification` or `quarantine`) afterwards.
 
 - **Owner and lock.** One `accountLedger` per process, one mutex for every
   operation from lazy open to adoption. `main` places the store in the app data
@@ -1199,7 +1199,7 @@ calls `reserve` before it sends and `reconcile`, `recordOutcome` and
   unavailable. State: `lastObservedMs`, `bindings` (credential reference to
   account, cap 1024), `accounts` (spend per period key `d:YYYY-MM-DD` and
   `m:YYYY-MM`, `generation`, `cooldown`, `credentialFailure`, `frozen`,
-  `probe`; cap 1024), `holds` (at most 4096, of which at most 256 resolved),
+  `probe`; cap 1024), `holds` (at most 4096, of which at most 256 fully completed),
   `quarantine` (cap 1024). Records hold names, never secret values.
 - **Writes.** A mutation is applied to a copy, written, then adopted. A write
   that fails before replacement changes nothing. One that lands without
@@ -1208,6 +1208,8 @@ calls `reserve` before it sends and `reconcile`, `recordOutcome` and
   rewrite is confirmed. A restrictive transition (rate limit, exhaustion,
   credential failure, freeze, quarantine) that is not confirmed durable stops
   all reservations for the process lifetime.
+  Each commit samples the clock once for both the rollback fence and period
+  pruning, so a clock change between reads cannot erase current-period spend.
 - **Arithmetic.** Money is integer nano-USD. A charge is
   `ceil(tokens * perMillion / 1,000,000)` with a 128-bit product; a hold is the
   input charge at the maximum uncached input rate plus the output charge, with
@@ -1244,11 +1246,20 @@ calls `reserve` before it sends and `reconcile`, `recordOutcome` and
   not moved since its reservation; `rate-limited` (Retry-After clamped to
   1 s - 1 h, default 60 s) and `exhausted` (reset within 32 days) merge to the
   later deadline; `credential-failure` suppresses the account until its
-  reference changes; `transient` only releases the probe. Money is untouched.
+  reference changes; a delayed failure for an obsolete reference cannot replace
+  an existing failure for the configured reference. `transient` only releases
+  the probe. Money is untouched.
+- **recordQualification(attempt)** records successful completion of all identity
+  and bound checks, independently of reconciliation and the account outcome.
+  Call only when classification is complete; a violation calls `quarantine`
+  instead. The hold persists `qualificationChecked`; an absent marker means
+  classification is unfinished.
 - **quarantine(attempt)** records the identity the attempt was reserved under:
   `(endpoint, model, qualification id, revision)`. Deployment names, deletion,
   re-addition and restart do not clear it; a new qualification revision is a
-  different identity.
+  different identity. Quarantine also records completion of qualification
+  classification, including when the same key was already quarantined.
+  Above-bound reconciliation records that classification in its atomic write.
 - **Configuration.** After each activated `node/set-policy` the ledger adopts the
   routing section. A configured account's reference is bound to its ID if
   unbound (written before any reservation); a reference bound to another ID
@@ -1260,9 +1271,12 @@ calls `reserve` before it sends and `reconcile`, `recordOutcome` and
   `uncertain` and stay outstanding until an owner releases them; a probe left
   taken becomes a `probe-lost` cooldown of 60 s or the existing later deadline.
   Releasing uncertain holds and unfreezing an account are owner controls not
-  wired yet. Only the latest 256 resolved holds retain idempotency records;
-  older resolved records are pruned. Reservations stop at 3840 outstanding
-  holds, leaving room for those resolved records within the store's hold cap.
+  wired yet. A hold becomes eligible for eviction only after reconciliation,
+  its account outcome, and its qualification classification are all recorded.
+  Only the latest 256 fully completed holds retain idempotency records; older
+  completed records are pruned. Reservations stop at 3840 unfinished holds,
+  including reconciled holds awaiting outcome or qualification classification,
+  leaving room for completed history within the store's hold cap.
 - **Not covered here.** Native lock and crash-window evidence on macOS and
   Windows, power-loss durability and the broker-driven proxy restart on a
   credential-reference change are activation gates; equivalent provider

@@ -734,6 +734,88 @@ func TestClockRollbackRefusesReservations(t *testing.T) {
 	mustReserve(t, l, "chat-a", 1, 1)
 }
 
+func TestCommitClockRollbackKeepsCurrentPeriodSpend(t *testing.T) {
+	dir := t.TempDir()
+	clock := newLedgerClock()
+	routing := testRouting("100", "100", "100")
+	l := openTestLedger(t, dir, clock, routing)
+	h := mustReserve(t, l, "chat-a", 0, 50)
+	if err := l.reconcile(h.Attempt, nil); err != nil {
+		t.Fatal(err)
+	}
+	_, err := l.reserve("chat-a", 0, 1)
+	wantErr(t, "spent ceiling before rollback", err, errAccountCeiling)
+
+	present := clock.now()
+	past := present.AddDate(0, -1, 0)
+	calls := 0
+	l.now = func() time.Time {
+		calls++
+		// The outcome observes the present, then commit observes it.
+		// A second sample inside commit would cross both period boundaries.
+		if calls >= 3 {
+			return past
+		}
+		return present
+	}
+	if err := l.recordOutcome(h.Attempt, outcomeTransient, 0, time.Time{}); err != nil {
+		t.Fatal(err)
+	}
+	l.now = clock.now
+	spent := l.state.account("paid").Spent
+	_, err = l.reserve("chat-a", 0, 50)
+	if spent[dayKey(present)] != "100" || spent[monthKey(present)] != "100" || !errors.Is(err, errAccountCeiling) {
+		t.Fatalf("spend = %v, full-ceiling reserve = %v; want both periods at 100 and ceiling refusal", spent, err)
+	}
+	l = reopen(t, l, dir, clock, routing)
+	_, err = l.reserve("chat-a", 0, 50)
+	wantErr(t, "spent ceiling after reopen", err, errAccountCeiling)
+}
+
+func TestCredentialFailuresAcrossReferenceEditKeepCurrentSuppression(t *testing.T) {
+	test := func(name string, currentFirst bool) {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			clock := newLedgerClock()
+			routing := testRouting("1000000", "1000000", "1000000")
+			l := openTestLedger(t, dir, clock, routing)
+			old := mustReserve(t, l, "chat-a", 1, 1)
+			routing.Accounts[0].Credential = otherCredential
+			if err := l.applyRouting(routing, "8"); err != nil {
+				t.Fatal(err)
+			}
+			current := mustReserve(t, l, "chat-a", 1, 1)
+			attempts := []string{old.Attempt, current.Attempt}
+			if currentFirst {
+				attempts = []string{current.Attempt, old.Attempt}
+			}
+			for _, attempt := range attempts {
+				if err := l.recordOutcome(attempt, outcomeCredentialFailure, 0, time.Time{}); err != nil {
+					t.Fatal(err)
+				}
+				if attempt == current.Attempt {
+					_, err := l.reserve("chat-a", 1, 1)
+					wantErr(t, "current reference failure", err, errAccountCredential)
+				}
+			}
+			assertSuppressed := func() {
+				t.Helper()
+				failure := l.state.account("paid").CredentialFailure
+				if failure == nil || failure.Credential != otherCredential {
+					t.Fatalf("failure = %+v, want the configured reference", failure)
+				}
+				_, err := l.reserve("chat-a", 1, 1)
+				wantErr(t, "configured reference remains suppressed", err, errAccountCredential)
+			}
+			assertSuppressed()
+			l = reopen(t, l, dir, clock, routing)
+			assertSuppressed()
+		})
+	}
+	test("current failure then obsolete failure", true)
+	test("obsolete failure then current failure", false)
+}
+
 // Usage above the reserved bound freezes the account and quarantines the
 // deployment identity for good: restart, rename, retirement and re-addition
 // keep it, and only a new qualification revision is admitted.
@@ -751,8 +833,8 @@ func TestUsageAboveBoundFreezesAndQuarantines(t *testing.T) {
 	l := openTestLedger(t, dir, clock, routing)
 	h := mustReserve(t, l, "chat-a", 100, 200)
 	wantErr(t, "reconcile above the bound", l.reconcile(h.Attempt, &tokenUsage{InputTokens: 100, OutputTokens: 201}), errUsageAboveBound)
-	if got := l.state.hold(h.Attempt); got.State != holdReconciled || got.Actual != "502" {
-		t.Fatalf("hold = %+v, want reconciled at the actual 502", got)
+	if got := l.state.hold(h.Attempt); got.State != holdReconciled || got.Actual != "502" || !got.QualificationChecked {
+		t.Fatalf("hold = %+v, want reconciled at the actual 502 with qualification classified", got)
 	}
 
 	l = reopen(t, l, dir, clock, routing)
@@ -849,12 +931,24 @@ func TestRetainedReconcilesAreBoundedAndEvictedAttemptsAreUnknown(t *testing.T) 
 	if err := l.reconcile(first.Attempt, nil); err != nil {
 		t.Fatal(err)
 	}
+	if err := l.recordOutcome(first.Attempt, outcomeOK, 0, time.Time{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := l.recordQualification(first.Attempt); err != nil {
+		t.Fatal(err)
+	}
 	for range maxResolvedHolds {
 		h := mustReserve(t, l, "chat-b", 0, 1)
 		if h.Attempt == first.Attempt {
 			t.Fatal("reserve reused an attempt id")
 		}
 		if err := l.reconcile(h.Attempt, nil); err != nil {
+			t.Fatal(err)
+		}
+		if err := l.recordOutcome(h.Attempt, outcomeOK, 0, time.Time{}); err != nil {
+			t.Fatal(err)
+		}
+		if err := l.recordQualification(h.Attempt); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -874,6 +968,127 @@ func TestRetainedReconcilesAreBoundedAndEvictedAttemptsAreUnknown(t *testing.T) 
 	}
 }
 
+func completeOtherLedgerAttempts(t *testing.T, l *accountLedger) {
+	t.Helper()
+	for range maxResolvedHolds + 1 {
+		h := mustReserve(t, l, "chat-b", 0, 1)
+		if err := l.reconcile(h.Attempt, nil); err != nil {
+			t.Fatal(err)
+		}
+		if err := l.recordOutcome(h.Attempt, outcomeOK, 0, time.Time{}); err != nil {
+			t.Fatal(err)
+		}
+		if err := l.recordQualification(h.Attempt); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func TestPendingOutcomeSurvivesCompletedHoldRetention(t *testing.T) {
+	test := func(name string, outcome accountOutcome, want error) {
+		t.Run(name, func(t *testing.T) {
+			clock := newLedgerClock()
+			l := openTestLedger(t, t.TempDir(), clock, testRouting("1000000", "1000000", "1000000"))
+			first := mustReserve(t, l, "chat-a", 0, 1)
+			if err := l.reconcile(first.Attempt, nil); err != nil {
+				t.Fatal(err)
+			}
+			if err := l.recordQualification(first.Attempt); err != nil {
+				t.Fatal(err)
+			}
+			completeOtherLedgerAttempts(t, l)
+			if err := l.recordOutcome(first.Attempt, outcome, time.Minute, clock.now().Add(time.Hour)); err != nil {
+				t.Fatalf("first restrictive outcome after retention window: %v", err)
+			}
+			_, err := l.reserve("chat-a", 0, 1)
+			wantErr(t, "late restriction must apply", err, want)
+		})
+	}
+	test("credential failure", outcomeCredentialFailure, errAccountCredential)
+	test("rate limit", outcomeRateLimited, errAccountCooldown)
+	test("exhaustion", outcomeExhausted, errAccountCooldown)
+}
+
+func TestPendingQualificationSurvivesCompletedHoldRetention(t *testing.T) {
+	dir := t.TempDir()
+	clock := newLedgerClock()
+	routing := testRouting("1000000", "1000000", "1000000")
+	l := openTestLedger(t, dir, clock, routing)
+	first := mustReserve(t, l, "chat-a", 0, 1)
+	key := l.state.hold(first.Attempt).key()
+	if err := l.reconcile(first.Attempt, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := l.recordOutcome(first.Attempt, outcomeOK, 0, time.Time{}); err != nil {
+		t.Fatal(err)
+	}
+	completeOtherLedgerAttempts(t, l)
+	routing.Deployments[0].Endpoint = "https://other.example.com/v1/chat/completions"
+	routing.Deployments[1].ID = "renamed"
+	if err := l.applyRouting(routing, "8"); err != nil {
+		t.Fatal(err)
+	}
+	if err := l.quarantine(first.Attempt); err != nil {
+		t.Fatalf("first qualification failure after retention window: %v", err)
+	}
+	if !l.state.quarantined(key) {
+		t.Fatal("quarantine lost the immutable reservation identity")
+	}
+	_, err := l.reserve("renamed", 0, 1)
+	wantErr(t, "reserved identity after delayed quarantine", err, errDeploymentQuarantined)
+	mustReserve(t, l, "chat-a", 0, 1)
+	l = reopen(t, l, dir, clock, routing)
+	_, err = l.reserve("renamed", 0, 1)
+	wantErr(t, "delayed quarantine after reopen", err, errDeploymentQuarantined)
+}
+
+func TestUnfinishedReconciledHoldsCountAgainstAdmissionCapacity(t *testing.T) {
+	test := func(name string, outcome accountOutcome, qualificationChecked bool) {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			clock := newLedgerClock()
+			routing := testRouting("1000000", "1000000", "1000000")
+			l := openTestLedger(t, dir, clock, routing)
+			first := mustReserve(t, l, "chat-a", 0, 1)
+			next := l.state.clone()
+			seed := *next.hold(first.Attempt)
+			seed.State, seed.Actual = holdReconciled, seed.Reserved
+			seed.Outcome, seed.QualificationChecked = outcome, qualificationChecked
+			next.Holds[0] = seed
+			for i := 1; i < maxLedgerHolds-maxResolvedHolds; i++ {
+				seed.Attempt = "seed-" + strconv.Itoa(i)
+				next.Holds = append(next.Holds, seed)
+			}
+			if err := addSpend(next.account("paid"), clock.now(), int64(2*len(next.Holds))); err != nil {
+				t.Fatal(err)
+			}
+			if err := l.commitLocked(next); err != nil {
+				t.Fatal(err)
+			}
+			before := readLedgerBytes(t, dir)
+			_, err := l.reserve("chat-a", 0, 1)
+			wantErr(t, "unfinished terminal processing fills admission capacity", err, errLedgerFull)
+			if len(l.state.Holds) != maxLedgerHolds-maxResolvedHolds || string(readLedgerBytes(t, dir)) != string(before) {
+				t.Fatal("full admission evicted unfinished holds or changed the store")
+			}
+			// Completing the missing classification frees one admission slot.
+			if outcome == "" {
+				if err := l.recordOutcome(first.Attempt, outcomeOK, 0, time.Time{}); err != nil {
+					t.Fatal(err)
+				}
+			} else if err := l.recordQualification(first.Attempt); err != nil {
+				t.Fatal(err)
+			}
+			mustReserve(t, l, "chat-a", 0, 1)
+			l = reopen(t, l, dir, clock, routing)
+			_, err = l.reserve("chat-a", 0, 1)
+			wantErr(t, "unfinished capacity after reopen", err, errLedgerFull)
+		})
+	}
+	test("pending account outcome", "", true)
+	test("pending qualification classification", outcomeOK, false)
+}
+
 func TestQuarantineWriteFailureStopsAllReservations(t *testing.T) {
 	dir := t.TempDir()
 	l := openTestLedger(t, dir, newLedgerClock(), testRouting("1000000", "1000000", "1000000"))
@@ -889,6 +1104,44 @@ func TestQuarantineWriteFailureStopsAllReservations(t *testing.T) {
 	l.write = durablefile.WriteFile
 	_, err := l.reserve("chat-b", 1, 1)
 	wantErr(t, "reserve after quarantine storage recovers", err, errLedgerUnavailable)
+}
+
+func TestQualificationCompletionPersistsForEachAttempt(t *testing.T) {
+	dir := t.TempDir()
+	clock := newLedgerClock()
+	routing := testRouting("1000000", "1000000", "1000000")
+	l := openTestLedger(t, dir, clock, routing)
+	passed := mustReserve(t, l, "chat-a", 0, 1)
+	failed := mustReserve(t, l, "chat-a", 0, 1)
+	sameKey := mustReserve(t, l, "chat-b", 0, 1)
+	if err := l.recordQualification(passed.Attempt); err != nil {
+		t.Fatal(err)
+	}
+	if err := l.quarantine(failed.Attempt); err != nil {
+		t.Fatal(err)
+	}
+	// The key is already quarantined, but this attempt still needs its own
+	// durable completion marker.
+	if err := l.quarantine(sameKey.Attempt); err != nil {
+		t.Fatal(err)
+	}
+	before := readLedgerBytes(t, dir)
+	if err := l.recordQualification(passed.Attempt); err != nil {
+		t.Fatal(err)
+	}
+	if err := l.quarantine(sameKey.Attempt); err != nil {
+		t.Fatal(err)
+	}
+	if string(readLedgerBytes(t, dir)) != string(before) {
+		t.Fatal("duplicate classification changed the store")
+	}
+	l = reopen(t, l, dir, clock, routing)
+	for _, attempt := range []string{passed.Attempt, failed.Attempt, sameKey.Attempt} {
+		h := l.state.hold(attempt)
+		if h == nil || !h.QualificationChecked {
+			t.Fatalf("attempt %s lost its classification on reopen", attempt)
+		}
+	}
 }
 
 // Quarantine names the identity the attempt was reserved under, whatever the

@@ -409,7 +409,9 @@ the previous policy stays. Until the first request arrives the proxy runs on `no
   in exact nano-USD with each hold's price, policy revision and qualification,
   spend per UTC day and month, credential-reference bindings that outlive
   account deletion, cooldowns with one half-open probe, credential-failure
-  suppression, freezes, and quarantined deployment identities. Every failure
+  suppression, freezes, and quarantined deployment identities. Reconciled holds
+  remain retained and count against admission capacity until both the account
+  outcome and qualification classification are durably recorded. Every failure
   refuses spending and never blocks policy activation or local routing. No
   dispatch path calls it until hybrid dispatch exists. See `spec.md` section
   12.7.

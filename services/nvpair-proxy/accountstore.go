@@ -160,6 +160,9 @@ type ledgerHold struct {
 	Outcome accountOutcome     `json:"outcome,omitempty"`
 	Usage   *tokenUsage        `json:"usage,omitempty"`
 	Actual  nodepolicy.NanoUSD `json:"actual,omitempty"`
+	// QualificationChecked records completed identity/bound classification,
+	// either without a violation or with a durably recorded quarantine.
+	QualificationChecked bool `json:"qualificationChecked,omitempty"`
 }
 
 // quarantineKey identifies a deployment by what it is, not by its name.
@@ -181,6 +184,10 @@ func (h ledgerHold) key() quarantineKey {
 
 func (h ledgerHold) outstanding() bool {
 	return h.State == holdReserved || h.State == holdUncertain
+}
+
+func (h ledgerHold) evictable() bool {
+	return h.State == holdReconciled && h.Outcome != "" && h.QualificationChecked
 }
 
 // maxAccountStoreBytes bounds the store both when it is written and when it is
@@ -384,7 +391,7 @@ func (s ledgerState) validate() error {
 			return fmt.Errorf("holds[%d]: duplicate attempt or unknown account", i)
 		}
 		attempts[h.Attempt] = true
-		if !h.outstanding() {
+		if h.evictable() {
 			resolved++
 		}
 	}
