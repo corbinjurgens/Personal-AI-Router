@@ -217,6 +217,12 @@ func attachFakeProxy(t *testing.T, b *Broker) (*proxyProcess, *fakeWorker) {
 func attachFakeEngine(t *testing.T, b *Broker) *fakeWorker {
 	t.Helper()
 	peer, f := newFakeWorkerPipe(t)
+	f.setAnswer(func(method string, _ json.RawMessage) (any, string) {
+		if method == "engine:switch-prepare" {
+			return emptySwitchManagerSnapshot(), ""
+		}
+		return map[string]bool{"ok": true}, ""
+	})
 	b.setEngineMgr(&rpcWorker{peer: peer})
 	return f
 }
@@ -854,7 +860,12 @@ func TestStartupPausedWithoutStopEnginesStillRestores(t *testing.T) {
 	engine := attachFakeEngine(t, b)
 	b.restoreEnabledEngines(b.getEngineMgr())
 	engine.waitFor("engine:restore-enabled", func(calls []policyCall) bool {
-		return len(calls) > 0 && calls[0].method == restoreEnabledEnginesMethod
+		for _, call := range calls {
+			if call.method == restoreEnabledEnginesMethod {
+				return true
+			}
+		}
+		return false
 	})
 }
 

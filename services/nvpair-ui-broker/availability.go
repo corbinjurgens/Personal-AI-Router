@@ -61,6 +61,10 @@ func (b *Broker) setAvailability(ctx context.Context, state nodepolicy.Availabil
 	r.transitionCancel = cancel
 	r.mu.Unlock()
 
+	if state == nodepolicy.Paused && origin == nodepolicy.PausedLocally {
+		b.cancelRemoteSwitch()
+	}
+
 	type outcome struct {
 		availability nodepolicy.Availability
 		err          error

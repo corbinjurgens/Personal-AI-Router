@@ -157,6 +157,8 @@ type Broker struct {
 	// before engineConfigMu, never the reverse.
 	settingsApplyMu      sync.Mutex
 	engineConfigMu       sync.Mutex
+	switchInit           sync.Once
+	engineSwitch         *engineSwitchCoordinator
 	engineSettingsLoaded bool
 	engineSettingsError  error
 	engineSettingsEpoch  string
@@ -591,6 +593,9 @@ func (b *Broker) restoreEnabledEngines(w *rpcWorker) {
 	}
 	// An unreadable journal must not discard the component stores' enabled
 	// intent. Recovery logs the failure; restore still uses the saved runtime.
+	if !b.recoverEngineSwitch() {
+		return
+	}
 	b.recoverEngineSettings()
 	if b.skipRestoreWhilePaused() {
 		slog.Info("node is paused with stopEngines; engines are restored when it resumes")
@@ -947,6 +952,9 @@ func (b *Broker) pushClusterIdentityToNodeInfo() {
 // pipeline; the rest of each worker's notification stream is logged and
 // dropped until its control-plane relay is wired in.
 func (b *Broker) forwardEngineNotification(method string, params json.RawMessage) {
+	if b.handleSwitchEngineNotification(method, params) {
+		return
+	}
 	if b.handlePolicyEngineNotification(method, params) {
 		return
 	}

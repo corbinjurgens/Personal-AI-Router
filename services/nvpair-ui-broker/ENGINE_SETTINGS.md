@@ -132,3 +132,75 @@ proxy persistence failure preserving its listener, renderer ordering and log
 redaction. The rendered editor is also exercised with isolated browser fixtures.
 Native vendor and Linux/macOS runtime verification remain release-platform
 checks; Windows fixture results do not certify vendor-option compatibility.
+
+## Engine switching
+
+The target broker coordinates `engine:switch` independently of settings Apply.
+Submit `{nodeId?, requestId, sourceEngine, targetEngine, expectedRevision}`;
+the result is `{receipt}` after durable acceptance. The target must be prepared,
+stopped and supported by a ready inference facade. A running target fails
+validation before drain. No download, provisioning, model loading or role/tier
+change is implied. Completion means server readiness and facade publication.
+
+Read `engine:switch-status {nodeId?, requestId?, afterSequence?}` for
+`{configurationRevision, activeRequestId?, receipt?, observed?}`. Omit requestId
+to obtain the opaque `e3v1:` configuration token for a new request. It combines
+node identity, journal generation, manager incarnation, registry/runtime and
+engine configuration digests, settings revisions and desired intent/provenance.
+Runtime health and idle Wake/Sleep do not change the token. The manager's own
+configuration fence is separate and passes unchanged in internal envelopes.
+The same caller and payload under the same request ID retrieve the original
+operation before revision checking; another caller or payload cannot reuse it.
+
+`afterSequence` requires requestId and waits at most 25 seconds for a newer
+receipt, without holding operation/configuration locks. A timeout returns the
+unchanged receipt. Each durable sequence emits
+`engine:switch-changed {nodeId, requestId, sequence}`. Paired requests use pinned
+engine-control routes and authenticated caller identity. Manager-originated progress notifications
+retain the remote target node ID when forwarded to local clients. Relay
+`engine:switch-cancel` retires only its waiter. Accepted execution belongs to
+the target and continues after caller disconnect, with a 15-minute total bound.
+
+The normal persisted phases are `accepted`, `validating`, `draining`,
+`source-stopping`, `source-off`, `target-starting`, `target-ready`, `completed`.
+Each phase is saved before its effect and manager observations are saved after
+the effect. Source Off is committed before stopping; target On is committed by
+the manager only after readiness. A failed target start never restores source.
+One switch runs per node under the shared settings operation lock. Settings and
+legacy lifecycle/port mutations respect switch reservations. Local pause cancels
+remote execution before waiting on transition locks; a switch never resumes the
+node. Local Off of an involved engine also cancels remote switch work.
+
+Switch drain is strict and separate from the settings restart drain. Withdraw
+source discovery and its local inference endpoint, acknowledge source drain,
+then invalidate source and target through `node/invalidate-engine` with the
+operation ID. Both `{ok, runId}` acknowledgements must match the live proxy.
+Only a fresh `node/admission-snapshot` requested afterward, from that same run,
+with zero source active/held work permits source-stop. Missing evidence, lost
+acknowledgement, proxy replacement, push-slot contention or the 60-second drain
+deadline fails without stopping source. Pending invalidations replay before any
+facade enables after proxy restart. Invalidation does not grant strict readiness
+or erase uncertain capacity markers.
+
+The sibling `engine-switch-operations.json` journal keeps immutable terminal
+receipts with no automatic eviction. A full journal visibly rejects new IDs;
+reserved space permits progress, terminal writes, recovery and identical retries.
+Write failure halts effects; a landed but uncertain replacement is adopted for
+readback while fresh mutations remain fenced. Terminal receipts are durable
+before manager reservation release. Release/cleanup failure retains a recovery
+fence; completion receipts are never rewritten to describe later runtime.
+
+Failures terminate as `failed-validation`, `failed-drain`, `failed-source-stop`,
+`failed-target-start`, `failed-publication` or `failed-interrupted`; pre-acceptance
+refusals may have a durable `rejected` receipt. Errors carry a stable kind and
+numeric code: invalid/reused ID `-32602`, configuration conflict `-32010`, local
+remote veto `-32011`, and other operational/storage/full/busy errors `-32000`.
+Manager result envelopes are inspected even when JSON-RPC itself succeeds.
+
+Startup loads the switch journal, marks nonterminal operations
+`failed-interrupted`, and conservatively reconciles manager reservations before
+settings replay and enabled-intent restoration. It never resumes switch steps
+or starts target as recovery. Conflicting pending settings/switch journals fail
+closed. A committed target On is preserved; an uncommitted partial target launch
+is cleaned up. Unknown cleanup remains visibly recovery-required. Terminal
+receipts remain historical facts; current observations are reported separately.

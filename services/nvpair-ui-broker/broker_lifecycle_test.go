@@ -42,16 +42,30 @@ func TestEngineAvailabilityWaitsForBothProxyOutcomes(t *testing.T) {
 	engine := &rpcWorker{peer: NewPeer(NewCodec(engineClient))}
 
 	b := &Broker{
+		clusterDir:        filepath.Join(t.TempDir(), "cluster"),
 		ollamaPortReady:   make(chan struct{}),
 		lmstudioPortReady: make(chan struct{}),
 	}
 	b.setEngineMgr(engine)
+	go engine.peer.Serve(nil, nil)
 
 	restore := make(chan string, 1)
 	go func() {
-		msg, err := NewCodec(engineServer).Read()
-		if err == nil {
+		codec := NewCodec(engineServer)
+		for {
+			msg, err := codec.Read()
+			if err != nil {
+				return
+			}
+			if msg.Method == "engine:switch-prepare" {
+				if err := codec.Respond(msg.ID, emptySwitchManagerSnapshot()); err != nil {
+					t.Error(err)
+					return
+				}
+				continue
+			}
 			restore <- msg.Method
+			return
 		}
 	}()
 	advertised := make(chan string, 3)

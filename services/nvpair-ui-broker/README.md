@@ -7,6 +7,11 @@ SPDX-License-Identifier: Apache-2.0
 
 The [engine settings protocol](ENGINE_SETTINGS.md) documents local/paired
 launch and port editing, revision checks, serialized application and recovery.
+Its [engine switching contract](ENGINE_SETTINGS.md#engine-switching) covers
+`engine:switch`, status/progress, acknowledged source drain, durable receipts
+and interrupted-operation reconciliation. The broker owns transaction order;
+the engine manager owns process lifecycle and intent. Switch recovery precedes
+settings replay and enabled-engine restoration.
 
 A Go service that exposes the NVIDIA Personal AI Router API to **UI processes**
 and other clients (CLIs, dashboards, mobile companions, scripts, tests, etc.).

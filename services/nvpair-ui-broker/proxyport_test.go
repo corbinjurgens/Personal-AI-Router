@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"net"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -18,18 +19,30 @@ func TestEnabledEngineRestoreWaitsForBothPortGates(t *testing.T) {
 	defer server.Close()
 	worker := &rpcWorker{peer: NewPeer(NewCodec(client))}
 	broker := &Broker{
+		clusterDir:        filepath.Join(t.TempDir(), "cluster"),
 		ollamaPortReady:   make(chan struct{}),
 		lmstudioPortReady: make(chan struct{}),
 	}
 	broker.setEngineMgr(worker)
+	go worker.peer.Serve(nil, nil)
 
 	method := make(chan string, 1)
 	go func() {
-		var msg struct {
-			Method string `json:"method"`
-		}
-		if json.NewDecoder(server).Decode(&msg) == nil {
+		codec := NewCodec(server)
+		for {
+			msg, err := codec.Read()
+			if err != nil {
+				return
+			}
+			if msg.Method == "engine:switch-prepare" {
+				if err := codec.Respond(msg.ID, emptySwitchManagerSnapshot()); err != nil {
+					t.Error(err)
+					return
+				}
+				continue
+			}
 			method <- msg.Method
+			return
 		}
 	}()
 	done := make(chan bool, 1)

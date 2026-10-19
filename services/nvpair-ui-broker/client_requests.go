@@ -131,6 +131,8 @@ func (b *Broker) handleMessage(msg *Message) {
 	}
 
 	switch msg.Method {
+	case "engine:switch", "engine:switch-status":
+		go b.handleEngineSwitch(msg)
 	case "engine:get-settings", "engine:preview-settings", "engine:apply-settings":
 		go b.handleEngineSettings(msg)
 	case "ping":
@@ -343,8 +345,26 @@ func (b *Broker) relayToEngineNow(msg *Message) {
 
 	requestedEngine, requestedPort, isEnginePortAssignment := enginePortAssignmentRequest(msg.Method, msg.Params)
 	if isEnginePortAssignment || msg.Method == "engine:stop" || msg.Method == "engine:start" || msg.Method == "engine:restart" {
+		// Explicit local Off vetoes remote work before waiting on its lock.
+		if msg.Method == "engine:stop" {
+			var target struct {
+				Engine string `json:"engine"`
+			}
+			if json.Unmarshal(msg.Params, &target) == nil && target.Engine != "" {
+				b.cancelRemoteEngineSwitch(target.Engine)
+			}
+		}
+		b.settingsApplyMu.Lock()
+		defer b.settingsApplyMu.Unlock()
 		b.engineConfigMu.Lock()
 		defer b.engineConfigMu.Unlock()
+		var target struct {
+			Engine string `json:"engine"`
+		}
+		if err := json.Unmarshal(msg.Params, &target); err != nil || b.pendingSwitchLocked(target.Engine) != nil {
+			_ = b.codec.RespondError(msg.ID, -32000, "Engine switch recovery reserves this engine.")
+			return
+		}
 		defer b.reconcileLegacySettingsLocked()
 	}
 	isOllamaPortAssignment := isEnginePortAssignment && requestedEngine == "ollama"

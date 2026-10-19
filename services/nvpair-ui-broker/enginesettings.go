@@ -547,6 +547,9 @@ func (b *Broker) applyEngineSettings(ctx context.Context, p settings.Request, ca
 			return receipt, nil
 		}
 	}
+	if err := b.pendingSwitchLocked(p.Engine); err != nil {
+		return settingsReceipt{}, err
+	}
 	// Recheck CORS after acquiring the target's apply lock. An HTTP ingress
 	// check alone can become stale while another accepted apply is running.
 	p.PreserveCORS = caller != ""

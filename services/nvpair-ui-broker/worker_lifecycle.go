@@ -346,7 +346,11 @@ func (b *Broker) spawnProxy() (supervisedHandle, error) {
 
 	// Node policy first, before any facade listens, so a paused node is never
 	// briefly admitting work after a proxy restart.
-	b.replayPolicyToProxy(bringUp, pp)
+	if !b.replayPolicyToProxy(bringUp, pp) {
+		pp.Stop()
+		b.clearProxyHandles()
+		return nil, fmt.Errorf("engine switch invalidations could not be replayed before facade enable")
+	}
 
 	enabled := 0
 	var failed []engineProxyProfile
