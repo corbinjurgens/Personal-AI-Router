@@ -5,7 +5,13 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
+	"path/filepath"
+	"reflect"
+	"slices"
 	"strconv"
+	"strings"
 	"testing"
 
 	"nvpair-shared/nodepolicy"
@@ -110,7 +116,7 @@ func TestPolicyMethods_SetPolicyValidatesAndKeepsPrevious(t *testing.T) {
 	bad.Version = 99
 	rpcErr(t, p, w, nodepolicy.MethodSetPolicy, bad)
 	bad = pol
-	bad.Tiers = map[string][]nodepolicy.TierEntry{"weak": {{Kind: nodepolicy.EntryLocal, Engine: "nope", Model: "m"}}}
+	bad.Tiers = map[string][]nodepolicy.TierEntry{"weak": {{Kind: nodepolicy.EntryLocal, Engine: "no/pe", Model: "m"}}}
 	rpcErr(t, p, w, nodepolicy.MethodSetPolicy, bad)
 	if got := p.admission.currentPolicy().Admission.MaxResidentModels; got != 3 {
 		t.Fatalf("an invalid policy replaced the previous one: maxResidentModels = %d", got)
@@ -133,7 +139,7 @@ func TestPolicyMethods_Availability(t *testing.T) {
 func TestPolicyMethods_DrainResidencyIntent(t *testing.T) {
 	p, w := policyProxy(t)
 	rpcOK(t, p, w, nodepolicy.MethodSetEngineDrain, nodepolicy.SetEngineDrainParams{Engine: "ollama", Drain: true})
-	rpcErr(t, p, w, nodepolicy.MethodSetEngineDrain, nodepolicy.SetEngineDrainParams{Engine: "vllm", Drain: true})
+	rpcErr(t, p, w, nodepolicy.MethodSetEngineDrain, nodepolicy.SetEngineDrainParams{Engine: "v/llm", Drain: true})
 	if !p.admission.drain["ollama"] {
 		t.Fatal("drain not applied")
 	}
@@ -145,7 +151,7 @@ func TestPolicyMethods_DrainResidencyIntent(t *testing.T) {
 		t.Fatal("residency not applied under the engine's naming")
 	}
 	rpcErr(t, p, w, nodepolicy.MethodSetResidency, nodepolicy.SetResidencyParams{
-		LoadedByEngine: map[string][]string{"vllm": {"x"}},
+		LoadedByEngine: map[string][]string{"v/llm": {"x"}},
 	})
 	rpcErr(t, p, w, nodepolicy.MethodSetResidency, map[string]any{})
 	if !p.admission.isLoaded("ollama", "qwen3") {
@@ -159,11 +165,37 @@ func TestPolicyMethods_DrainResidencyIntent(t *testing.T) {
 		t.Fatal("intent not applied")
 	}
 	rpcErr(t, p, w, nodepolicy.MethodSetEngineIntent, nodepolicy.SetEngineIntentParams{
-		EnabledByEngine: map[string]bool{"vllm": true},
+		EnabledByEngine: map[string]bool{"v/llm": true},
 	})
 	if on, _ := p.admission.engineIntent("ollama"); !on {
 		t.Fatal("invalid intent replaced the previous one")
 	}
+}
+
+// engine-manager reports every registered engine, so a descriptor engine in
+// a drain, residency or intent message is ordinary state, not a reason to
+// reject the whole message.
+func TestPolicyMethods_AcceptDescriptorEngineIDs(t *testing.T) {
+	p, w := policyProxy(t)
+	rpcOK(t, p, w, nodepolicy.MethodSetEngineDrain, nodepolicy.SetEngineDrainParams{Engine: "llamacpp-custom", Drain: true})
+	if !p.admission.drain["llamacpp-custom"] {
+		t.Fatal("descriptor engine drain not applied")
+	}
+	rpcOK(t, p, w, nodepolicy.MethodSetResidency, nodepolicy.SetResidencyParams{
+		LoadedByEngine: map[string][]string{"ollama": {"qwen3"}, "llamacpp-custom": {"org/model:Q4_K_M"}},
+	})
+	if !p.admission.isLoaded("llamacpp-custom", "org/model:Q4_K_M") || !p.admission.isLoaded("ollama", "qwen3:latest") {
+		t.Fatal("residency with a descriptor engine not applied")
+	}
+	rpcOK(t, p, w, nodepolicy.MethodSetEngineIntent, nodepolicy.SetEngineIntentParams{
+		EnabledByEngine: map[string]bool{"ollama": true, "strata": false},
+	})
+	if on, known := p.admission.engineIntent("strata"); !known || on {
+		t.Fatal("descriptor engine intent not applied")
+	}
+	policy := nodepolicy.Default()
+	policy.Tiers = map[string][]nodepolicy.TierEntry{"weak": {{Kind: nodepolicy.EntryLocal, Engine: "llamacpp-custom", Model: "m"}}}
+	rpcOK(t, p, w, nodepolicy.MethodSetPolicy, policy)
 }
 
 // The node policy methods are process-scoped: an engine-addressed copy is not
@@ -262,4 +294,145 @@ func TestPolicyActivation_AvailabilityAnswersOkAndNeverMovesTheRevision(t *testi
 	if p.admission.currentAvailability() != nodepolicy.Paused {
 		t.Fatal("the availability was not applied")
 	}
+}
+
+// strictReports decodes every admission/strict-readiness notification sent so
+// far, failing on one that does not validate.
+func strictReports(t *testing.T, w *recordingWriter) []nodepolicy.StrictAdmissionReadiness {
+	t.Helper()
+	var out []nodepolicy.StrictAdmissionReadiness
+	for _, raw := range notificationsOf(t, w, nodepolicy.NotifyStrictReadiness) {
+		var r nodepolicy.StrictAdmissionReadiness
+		if err := json.Unmarshal(raw, &r); err != nil {
+			t.Fatalf("decode strict readiness %s: %v", raw, err)
+		}
+		if err := r.Validate(); err != nil {
+			t.Fatalf("strict readiness %s does not validate: %v", raw, err)
+		}
+		out = append(out, r)
+	}
+	return out
+}
+
+func TestStrictReadiness_ReportedAfterEachAcknowledgement(t *testing.T) {
+	p, w := policyProxy(t)
+	if got := strictReports(t, w); len(got) != 0 {
+		t.Fatalf("reports before any policy = %+v, want none", got)
+	}
+	rpcOK(t, p, w, nodepolicy.MethodSetPolicy, policyAt("1700"))
+	got := strictReports(t, w)
+	if len(got) != 1 {
+		t.Fatalf("reports after one acknowledgement = %d, want 1", len(got))
+	}
+	if got[0].PolicyRevision != "1700" || got[0].ProxyRunID != p.runID || got[0].Capability != nil {
+		t.Fatalf("report = %+v, want revision 1700 from run %q with no capability", got[0], p.runID)
+	}
+
+	rpcErr(t, p, w, nodepolicy.MethodSetPolicy, policyAt("1600"))
+	rpcOK(t, p, w, nodepolicy.MethodSetAvailability, nodepolicy.SetAvailabilityParams{State: nodepolicy.Paused})
+	if got := strictReports(t, w); len(got) != 1 {
+		t.Fatalf("reports after a refused policy and an availability change = %d, want still 1", len(got))
+	}
+}
+
+func TestStrictReadiness_ReportsTheInstalledCapability(t *testing.T) {
+	p, w := policyProxy(t)
+	a := p.admission
+	a.mu.Lock()
+	a.strict.path = filepath.Join(t.TempDir(), "capacity.json")
+	a.strict.storageErr = nil
+	refOllama := nodepolicy.QualificationRef{ID: "q-ollama", Revision: "1"}
+	refLMStudio := nodepolicy.QualificationRef{ID: "q-lmstudio", Revision: "1"}
+	a.strict.registry = qualificationRegistry{
+		refOllama:   testQualification(refOllama.ID, "ollama", "m"),
+		refLMStudio: testQualification(refLMStudio.ID, "lmstudio", "Exact Name"),
+	}
+	a.mu.Unlock()
+	qualified := func(revision string, limit int) nodepolicy.Policy {
+		pol := policyAt(revision)
+		pol.Admission.MaxConcurrentPerModel = limit
+		pol.Profiles = []nodepolicy.Profile{
+			{Name: "o", Engine: "ollama", Model: "m", ContextTokens: 4096, MaxOutputTokens: 1024, Qualification: &refOllama},
+			{Name: "l", Engine: "lmstudio", Model: "Exact Name", ContextTokens: 4096, MaxOutputTokens: 1024, Qualification: &refLMStudio},
+		}
+		return pol
+	}
+	identity := func(engines map[string]nodepolicy.EngineIdentity) nodepolicy.SetModelIdentityParams {
+		return nodepolicy.SetModelIdentityParams{Engines: engines}
+	}
+	both := map[string]nodepolicy.EngineIdentity{"ollama": testIdentity("m"), "lmstudio": testIdentity("Exact Name")}
+	last := func(t *testing.T) nodepolicy.StrictAdmissionReadiness {
+		t.Helper()
+		got := strictReports(t, w)
+		if len(got) == 0 {
+			t.Fatal("no strict readiness report")
+		}
+		return got[len(got)-1]
+	}
+	models := func(r nodepolicy.StrictAdmissionReadiness) []string {
+		var out []string
+		if r.Capability != nil {
+			for _, m := range r.Capability.Models {
+				out = append(out, fmt.Sprintf("%s/%s/%d", m.Engine, m.Model, m.MaxConcurrent))
+			}
+		}
+		return out
+	}
+
+	rpcOK(t, p, w, nodepolicy.MethodSetPolicy, qualified("10", 1))
+	if report := last(t); report.Capability != nil {
+		t.Fatalf("report before any engine identity = %+v, want no capability", report)
+	}
+	rpcOK(t, p, w, nodepolicy.MethodSetModelIdentity, identity(both))
+	report := last(t)
+	want := []nodepolicy.StrictAdmissionModel{
+		{Engine: "lmstudio", Model: "Exact Name", MaxConcurrent: 1, Identity: strictRequest().Identity},
+		{Engine: "ollama", Model: "m:latest", MaxConcurrent: 1, Identity: strictRequest().Identity},
+	}
+	if report.PolicyRevision != "10" || report.ProxyRunID != p.runID || report.Capability == nil ||
+		report.Capability.Version != nodepolicy.StrictAdmissionVersion || !reflect.DeepEqual(report.Capability.Models, want) {
+		t.Fatalf("report after the identity = %+v (capability %+v), want revision 10 with %+v", report, report.Capability, want)
+	}
+
+	t.Run("a changed limit is reinstalled under the new revision", func(t *testing.T) {
+		rpcOK(t, p, w, nodepolicy.MethodSetPolicy, qualified("11", 2))
+		if report := last(t); report.PolicyRevision != "11" || !slices.Equal(models(report), []string{"lmstudio/Exact Name/2", "ollama/m:latest/2"}) {
+			t.Fatalf("report after the limit changed = %+v, want revision 11 with both at 2", report)
+		}
+	})
+	t.Run("an identity without an engine withdraws its model", func(t *testing.T) {
+		rpcOK(t, p, w, nodepolicy.MethodSetModelIdentity, identity(map[string]nodepolicy.EngineIdentity{"lmstudio": testIdentity("Exact Name")}))
+		if got := models(last(t)); !slices.Equal(got, []string{"lmstudio/Exact Name/2"}) {
+			t.Fatalf("models after ollama lost its identity = %v", got)
+		}
+	})
+	t.Run("a same-name replacement withdraws the model", func(t *testing.T) {
+		replaced := testIdentity()
+		replaced.ModelDigests["Exact Name"] = strings.Repeat("f", 64)
+		rpcOK(t, p, w, nodepolicy.MethodSetModelIdentity, identity(map[string]nodepolicy.EngineIdentity{"ollama": testIdentity("m"), "lmstudio": replaced}))
+		if got := models(last(t)); !slices.Equal(got, []string{"ollama/m:latest/2"}) {
+			t.Fatalf("models after the lmstudio model was replaced = %v", got)
+		}
+	})
+	t.Run("an invalid identity is refused and the previous one kept", func(t *testing.T) {
+		before := len(strictReports(t, w))
+		bad := testIdentity("m")
+		bad.LaunchDigest = "not-a-digest"
+		rpcErr(t, p, w, nodepolicy.MethodSetModelIdentity, identity(map[string]nodepolicy.EngineIdentity{"ollama": bad}))
+		if got := strictReports(t, w); len(got) != before {
+			t.Fatalf("a refused identity sent a report: %+v", got[len(got)-1])
+		}
+		if got := models(p.admission.StrictReadiness()); !slices.Equal(got, []string{"ollama/m:latest/2"}) {
+			t.Fatalf("models after a refused identity = %v", got)
+		}
+	})
+	t.Run("untrusted strict storage withdraws it", func(t *testing.T) {
+		a.mu.Lock()
+		a.strict.storageErr = errors.New("unreadable capacity document")
+		a.mu.Unlock()
+		rpcOK(t, p, w, nodepolicy.MethodSetModelIdentity, identity(both))
+		if report := last(t); report.Capability != nil {
+			t.Fatalf("report with untrusted storage = %+v, want no capability", report)
+		}
+	})
 }

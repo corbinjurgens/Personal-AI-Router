@@ -37,6 +37,11 @@ export function isValidEngineId(v: string): boolean {
     return ENGINE_ID_RE.test(v) && v !== '.' && v !== '..'
 }
 
+/** Go `engines.ValidRoutingID`: a built-in wire name or a bounded dynamic ID. */
+export function isValidRoutingEngineId(v: string): boolean {
+    return BUILTIN_MANAGER_NAME_SET.has(v) || (v.length <= 40 && isValidEngineId(v))
+}
+
 /**
  * Runtime type guard for a descriptor-known engine identifier. Refuses both
  * spellings of the built-in engines, so a built-in engine has exactly one

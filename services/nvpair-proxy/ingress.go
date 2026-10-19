@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -248,13 +249,28 @@ func (f *facade) newLocalReverseProxy(target *url.URL) *httputil.ReverseProxy {
 }
 
 // serveStrictLocal is shared by authenticated ingress and local self dispatch.
-// No protocol-qualified completion signal exists in A1a; even an HTTP EOF is
-// conservatively uncertain until the qualification/reconciliation owner proves
-// termination. It must never be interpreted as engine-idle evidence.
+// The body is validated against the model's local qualification first, so an
+// unqualified, oversized or unsupported request is refused before any wake,
+// unload, slot or inference; the engine then receives the validated body with
+// the profile's defaults merged in. No protocol-qualified completion signal
+// exists yet; even an HTTP EOF is conservatively uncertain until the
+// reconciliation owner proves termination. It must never be interpreted as
+// engine-idle evidence.
 func (f *facade) serveStrictLocal(w http.ResponseWriter, r *http.Request, body []byte, model string, req nodepolicy.StrictAdmissionRequest) {
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
-	ticket, err := f.host.admission.AdmitStrict(ctx, f.profile.Name, model, req)
+	validated, err := f.host.admission.qualifyStrict(f.profile.Name, model, r.URL.Path, body, req.Identity)
+	var invalid *strictQualificationError
+	if errors.As(err, &invalid) {
+		writeIngressError(w, http.StatusBadRequest, "strict-qualification", err.Error())
+		return
+	}
+	if err != nil {
+		writeStrictAdmissionError(w, err)
+		return
+	}
+	body = validated.body
+	ticket, err := f.host.admission.AdmitStrict(ctx, f.profile.Name, model, req, validated.generation)
 	if err != nil {
 		writeStrictAdmissionError(w, err)
 		return

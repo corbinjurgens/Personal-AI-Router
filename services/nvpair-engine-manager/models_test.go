@@ -10,7 +10,10 @@ import (
 	"fmt"
 	"net/http"
 	"reflect"
+	"strings"
 	"testing"
+
+	"nvpair-shared/nodepolicy"
 )
 
 func TestExtractStrings(t *testing.T) {
@@ -503,5 +506,40 @@ func TestSweepQueriesInventoryOnCacheMiss(t *testing.T) {
 	}
 	if res := ex.modelsSweep(ctx, false); !reflect.DeepEqual(res.ByEngine, map[string][]string{"fake": {"llama3.2:1b"}}) {
 		t.Fatalf("ByEngine = %v, want the queried inventory", res.ByEngine)
+	}
+}
+
+// TestModelsResultCarriesAndWithdrawsTheStrictCapability covers the
+// engine-manager hop of the strict admission capability: the inventory serves
+// the capability the broker last pushed, on /v1/models and engine:models, and a
+// push without one withdraws it instead of keeping the previous value.
+func TestModelsResultCarriesAndWithdrawsTheStrictCapability(t *testing.T) {
+	var out bytes.Buffer
+	ex := NewExecutor(NewRegistry(), NewReporter(nil), func(string, any) {}, t.TempDir())
+	m := NewManager(NewCodec(&out), ex, nil, "")
+	ready := nodepolicy.Advertisement{
+		Revision: "21",
+		Roles:    map[string]nodepolicy.AdvertisedRole{},
+		StrictAdmission: &nodepolicy.StrictAdmissionCapability{Version: nodepolicy.StrictAdmissionVersion, Models: []nodepolicy.StrictAdmissionModel{{
+			Engine: "ollama", Model: "m:latest", MaxConcurrent: 2,
+			Identity: nodepolicy.StrictModelIdentity{EngineRunID: "engine-run-1", SettingsFingerprint: strings.Repeat("a", 64), ModelDigest: strings.Repeat("b", 64)},
+		}}},
+	}
+	pushProjection(t, m, string(mustMarshal(t, map[string]any{"policy": ready, "pausedLocally": false})))
+	fromHTTP, fromRPC, _, _ := servedPolicy(t, m, &out)
+	for name, got := range map[string]*nodepolicy.Advertisement{"/v1/models": fromHTTP, "engine:models": fromRPC} {
+		if got == nil || got.StrictAdmission.State() != nodepolicy.StrictCapabilityValid || !reflect.DeepEqual(got.StrictAdmission.Models, ready.StrictAdmission.Models) {
+			t.Fatalf("%s policy = %+v, want the pushed capability %+v", name, got, ready.StrictAdmission)
+		}
+	}
+
+	withdrawn := ready
+	withdrawn.StrictAdmission = nil
+	pushProjection(t, m, string(mustMarshal(t, map[string]any{"policy": withdrawn, "pausedLocally": false})))
+	fromHTTP, fromRPC, _, _ = servedPolicy(t, m, &out)
+	for name, got := range map[string]*nodepolicy.Advertisement{"/v1/models": fromHTTP, "engine:models": fromRPC} {
+		if got == nil || got.Revision != "21" || got.StrictAdmission != nil {
+			t.Fatalf("%s policy after withdrawal = %+v, want revision 21 without a capability", name, got)
+		}
 	}
 }

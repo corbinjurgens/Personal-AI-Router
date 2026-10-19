@@ -19,6 +19,7 @@ import (
 	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/table"
 	"github.com/charmbracelet/bubbles/textinput"
+	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 )
 
@@ -65,6 +66,15 @@ type nodeDetail struct {
 	// telemetrySelf follows the merged route without changing the engine/proxy
 	// structure chosen from node.self when the detail screen opened.
 	telemetrySelf bool
+
+	performanceLease       *performanceLease
+	performance            *performanceProjection
+	performanceUnavailable bool
+	performanceOpen        bool
+	performanceRoute       int
+	performancePushes      int
+	performanceRefresh     bool
+	performanceViewport    viewport.Model
 
 	engines     []engineStatus
 	engineTable table.Model
@@ -146,7 +156,14 @@ type nodeDetail struct {
 	// enginesStale marks the engine list as last-known rather than current,
 	// because the most recent read of it failed. Held as state rather than
 	// announced, since the read repeats on a timer.
-	enginesStale bool
+	enginesStale       bool
+	policy             targetPolicy
+	policyFresh        bool
+	policyRoute        int
+	policyDisconnected bool
+	policyRefresh      bool
+	intentGeneration   int
+	enabledByEngine    map[string]bool
 	// enginesHidden and modelsHidden record that the last frame had no room
 	// for that list. Its keys are refused while it is off screen, or they act
 	// on a row the operator cannot see.
@@ -237,15 +254,16 @@ func newNodeDetail(client *rpc.Client, node nodeRow) *nodeDetail {
 	ti := textinput.New()
 	telemetryChains++
 	d := &nodeDetail{
-		client:         client,
-		node:           node,
-		hostUUID:       telemetryIdentity(node),
-		telemetrySelf:  node.self,
-		engineTable:    newTable(detailEngineColumns(defaultTableWidth, !node.self)),
-		modelTable:     newTable(detailModelColumns(defaultTableWidth)),
-		input:          ti,
-		telemetryGen:   telemetryChains,
-		telemetryFound: true,
+		client:              client,
+		node:                node,
+		hostUUID:            telemetryIdentity(node),
+		telemetrySelf:       node.self,
+		engineTable:         newTable(detailEngineColumns(defaultTableWidth, !node.self)),
+		modelTable:          newTable(detailModelColumns(defaultTableWidth)),
+		input:               ti,
+		telemetryGen:        telemetryChains,
+		telemetryFound:      true,
+		performanceViewport: viewport.New(0, 0),
 	}
 	if node.self {
 		d.proxy = newProxyTracker()
@@ -324,7 +342,7 @@ func (d *nodeDetail) Init() tea.Cmd {
 	// The telemetry chain is started by this first poll, not by a tick: each
 	// reading schedules the next one when it lands, so there is exactly one
 	// chain and it cannot outrun a slow node.
-	cmds := []tea.Cmd{d.enginesCmd(), d.modelsCmd(), d.telemetryCmd(), d.own(descriptorsCmd(d.client))}
+	cmds := []tea.Cmd{d.enginesCmd(), d.modelsCmd(), d.telemetryCmd(), d.own(descriptorsCmd(d.client)), d.startPerformance(), d.policyCmd(), d.intentCmd()}
 	if d.proxy != nil {
 		cmds = append(cmds, d.proxy.init(d.client))
 	}
@@ -485,7 +503,17 @@ func (d *nodeDetail) followNode(row nodeRow, found bool) {
 		d.node.membership = membershipNone
 	}
 	d.telemetryFound = found
+	if oldFound != found || oldHostUUID != d.hostUUID || oldSelf != d.telemetrySelf {
+		d.performanceRoute++
+		d.performance = nil
+		d.performanceRefresh = found
+	}
 	newMember := d.node.membership == membershipMember
+	if oldFound != found || oldHostUUID != d.hostUUID || oldSelf != d.telemetrySelf || oldMember != newMember || (!found || d.node.presence == presenceOffline) {
+		d.policyRoute++
+		d.policyFresh = false
+		d.invalidateIntent()
+	}
 	if oldFound != d.telemetryFound || oldHostUUID != d.hostUUID ||
 		oldSelf != d.telemetrySelf || oldMember != newMember ||
 		oldTLS != d.node.nodeInfoTLS || oldAddress != d.node.address ||
@@ -586,10 +614,10 @@ func (d *nodeDetail) sizeEngineTable() {
 }
 
 // detailChromeRows is the fixed furniture on the detail screen: the identity
-// line, the two section headings, and the blank line between the sections. The
+// and availability lines, the two section headings, and the blank line between the sections. The
 // editor and status line come and go, so View measures those directly rather
 // than reserving for them here.
-const detailChromeRows = 4
+const detailChromeRows = 5
 
 // hardwareHeight is the rows the hardware block occupies, so the model table can
 // be sized without rendering it first.
@@ -660,6 +688,33 @@ func (d *nodeDetail) update(msg tea.Msg) (tea.Cmd, bool) {
 	}
 
 	switch msg := msg.(type) {
+	case detailPerformanceMsg:
+		if msg.lease != d.performanceLease || msg.lease == nil || msg.lease.retired.Load() ||
+			msg.host != d.hostUUID || msg.route != d.performanceRoute || msg.pushes != d.performancePushes {
+			return nil, true
+		}
+		d.performance, d.performanceUnavailable = msg.projection, msg.err != nil
+		return nil, true
+
+	case DisconnectedMsg:
+		d.policyRoute++
+		d.policyFresh = false
+		d.policyDisconnected = true
+		d.invalidateIntent()
+		d.closePerformance()
+		return nil, true
+
+	case TickMsg:
+		if d.performanceRefresh {
+			d.performanceRefresh = false
+			return d.performanceCmd(false), true
+		}
+		if d.policyRefresh {
+			d.policyRefresh = false
+			return tea.Batch(d.policyCmd(), d.intentCmd()), true
+		}
+		return nil, true
+
 	case detailReply:
 		// Replies are not cancelled when a screen closes, so one sent from
 		// another node's screen can land here. Taken, a late engine list or
@@ -672,6 +727,24 @@ func (d *nodeDetail) update(msg tea.Msg) (tea.Cmd, bool) {
 
 	case descriptorsMsg:
 		d.descriptors = msg.descriptors
+		return nil, true
+
+	case detailPolicyMsg:
+		if msg.visit != d.telemetryGen || msg.route != d.policyRoute || d.policyDisconnected || !d.enginesQueryable() || (d.remote() && d.node.presence == presenceOffline) {
+			return nil, true
+		}
+		d.policyFresh = msg.err == nil && msg.policy.Availability != ""
+		d.policy = msg.policy
+		return nil, true
+
+	case detailIntentMsg:
+		if msg.visit == d.telemetryGen && msg.generation == d.intentGeneration && !d.remote() && !d.policyDisconnected {
+			d.enabledByEngine = msg.enabled
+			if msg.err != nil {
+				d.enabledByEngine = nil
+			}
+			d.refreshEngines()
+		}
 		return nil, true
 
 	case detailEnginesMsg:
@@ -708,7 +781,7 @@ func (d *nodeDetail) update(msg tea.Msg) (tea.Cmd, bool) {
 		}
 		switch {
 		case msg.err != nil:
-			d.status.error("%s failed: %s", what, msg.err)
+			d.status.error("%s failed: %s", what, commandFailure(msg.err))
 		case msg.detached:
 			d.status.info("%s is continuing in the background - watch for progress", what)
 		default:
@@ -719,7 +792,7 @@ func (d *nodeDetail) update(msg tea.Msg) (tea.Cmd, bool) {
 	case engineSettingsMsg:
 		if msg.err != nil {
 			d.settingsWanted = nil
-			d.status.error("read engine settings failed: %s", msg.err)
+			d.status.error("read engine settings failed: %s", commandFailure(msg.err))
 			return nil, true
 		}
 		if d.settings == nil {
@@ -828,7 +901,7 @@ func (d *nodeDetail) update(msg tea.Msg) (tea.Cmd, bool) {
 		if msg.gen != d.telemetryGen || !d.remote() {
 			return nil, true
 		}
-		return tea.Batch(d.enginesCmd(), detailEnginesTickCmd(d.telemetryGen)), true
+		return tea.Batch(d.enginesCmd(), d.policyCmd(), detailEnginesTickCmd(d.telemetryGen)), true
 
 	case nodeTelemetryTickMsg:
 		// Only this screen's own chain continues. A tick from a previous visit
@@ -857,6 +930,46 @@ func (d *nodeDetail) update(msg tea.Msg) (tea.Cmd, bool) {
 
 func (d *nodeDetail) handleNotification(msg *rpc.Message) tea.Cmd {
 	switch msg.Method {
+	case "policy:changed", "node:availability-changed":
+		var p struct {
+			NodeID string `json:"nodeId"`
+		}
+		if !decodeOrLog(msg.Method, msg.Params, &p) || p.NodeID != d.node.key {
+			return nil
+		}
+		d.policyRoute++
+		d.policyFresh = false
+		return d.policyCmd()
+	case "engine:intent-changed":
+		if !d.remote() && !d.policyDisconnected {
+			d.invalidateIntent()
+			return d.intentCmd()
+		}
+		return nil
+	case "performance:changed":
+		if d.performanceLease == nil || d.performanceLease.retired.Load() {
+			return nil
+		}
+		d.performancePushes++
+		p, err := decodePerformanceProjection(msg.Params)
+		d.performance, d.performanceUnavailable = p, err != nil
+		return nil
+
+	case "service/broker-restarted":
+		d.policyRoute++
+		d.policyFresh = false
+		d.invalidateIntent()
+		d.closePerformance()
+		return nil
+
+	case "app:ready":
+		d.policyDisconnected = false
+		d.policyRefresh = true
+		if d.performanceLease == nil {
+			return d.startPerformance()
+		}
+		return nil
+
 	case "engine:state-changed":
 		var e engineStatus
 		decodeOrLog(msg.Method, msg.Params, &e)
@@ -1102,7 +1215,17 @@ func (d *nodeDetail) handleKey(msg tea.KeyMsg) (tea.Cmd, bool) {
 	}
 
 	if key.Matches(msg, detailBackKey) {
+		d.closePerformance()
 		return nil, false
+	}
+	if key.Matches(msg, detailPerformanceKey) {
+		d.performanceOpen = !d.performanceOpen
+		return nil, true
+	}
+	if d.performanceOpen {
+		var cmd tea.Cmd
+		d.performanceViewport, cmd = d.performanceViewport.Update(msg)
+		return cmd, true
 	}
 	if key.Matches(msg, detailPaneKey) {
 		if d.pane == detailEngines {
@@ -1405,7 +1528,7 @@ const (
 // replay the backend recognizes instead of a second write.
 func judgeSettingsPreview(msg enginePreviewMsg) (settingsVerdict, enginesettings.Request, string) {
 	if msg.err != nil {
-		return settingsRefuse, enginesettings.Request{}, msg.err.Error()
+		return settingsRefuse, enginesettings.Request{}, commandFailure(msg.err)
 	}
 	// A conflict is the one outcome a resolution was supposed to prevent, so
 	// reaching here means the two ports disagree in a way the backend will not
@@ -1450,18 +1573,13 @@ func (d *nodeDetail) applySettingsPreview(msg enginePreviewMsg) tea.Cmd {
 	return d.own(applyEngineSettingsCmd(d.client, req))
 }
 
-// settingsFailure puts a failed save in terms of what the operator should do.
-//
-// The backend's own wording for a revision mismatch — "settings changed on
-// this device; reload before applying" — describes a step this screen has
-// already taken by the time it is shown, so on its own it reads as an
-// instruction with nothing to act on.
+// settingsFailure shares typed refusal feedback with the other controls.
 func settingsFailure(err error) string {
-	text := err.Error()
-	if strings.Contains(text, "reload before applying") {
-		return "changed somewhere else while you were editing - reloaded, try again"
+	var refusal *rpc.RPCError
+	if errors.As(err, &refusal) {
+		return commandFailure(err)
 	}
-	return text
+	return commandFailure(err) + " - try again"
 }
 
 // joinSettingsErrors renders the backend's per-field errors as one line.
@@ -1771,6 +1889,11 @@ func (d *nodeDetail) refreshEngines() {
 			port = strconv.Itoa(e.Port)
 		}
 		row := table.Row{e.label(), yesNo(e.Installed), yesNo(e.Running), yesNo(e.Healthy), port}
+		// offBy has no client projection yet; saved Off reports intent only,
+		// without inferring an origin or deriving intent from runtime state.
+		if enabled, present := d.enabledByEngine[e.Engine]; !d.remote() && present && !enabled {
+			row[0] += " (saved Off)"
+		}
 		if d.proxy != nil {
 			row = append(row, d.proxyPortCell(e.Engine))
 		}
@@ -1937,6 +2060,10 @@ func (d *nodeDetail) View() string {
 	identity := titleStyle.Render(d.node.name) + footerStyle.Render(fmt.Sprintf(
 		"   %s:%d   %s   %s   %s",
 		d.node.address, d.node.port, d.node.presence, d.node.membership, scope))
+	identity += "\n" + footerStyle.Render(d.policyLabel())
+	if d.performanceOpen {
+		return d.performanceView(identity)
+	}
 
 	editor := ""
 	if d.mode != detailInputNone {
@@ -2215,7 +2342,10 @@ func (d *nodeDetail) Help() []key.Binding {
 	if d.pending != nil || d.settingsConfirm != nil {
 		return []key.Binding{detailConfirmKey}
 	}
-	bindings := []key.Binding{detailBackKey, detailPaneKey}
+	if d.performanceOpen {
+		return []key.Binding{detailBackKey, detailPerformanceKey, performanceScrollKey}
+	}
+	bindings := []key.Binding{detailBackKey, detailPaneKey, detailPerformanceKey}
 	if d.pane == detailEngines {
 		bindings = append(bindings, detailInstallKey, detailStartKey, detailStopKey)
 		// The settings keys are offered on a peer too: the engine manager

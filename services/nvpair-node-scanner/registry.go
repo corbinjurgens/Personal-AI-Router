@@ -7,6 +7,7 @@ import (
 	"slices"
 	"sync"
 
+	"nvpair-shared/engines"
 	"nvpair-shared/noderec"
 )
 
@@ -133,4 +134,17 @@ func (r *registry) record() noderec.NodeRecord {
 }
 
 // txt builds the current _nvpair-node TXT strings.
-func (r *registry) txt() []string { return r.record().TXT() }
+//
+// A descriptor engine's service key stays out of TXT: it is in the record, so
+// this node's own directory entry routes it locally, but peers learn it only
+// over the authenticated peer-services path. The TXT record is unchanged by
+// dynamic engines.
+func (r *registry) txt() []string {
+	rec := r.record()
+	for key := range rec.Services {
+		if engines.IsDynamicServiceKey(key) {
+			delete(rec.Services, key)
+		}
+	}
+	return rec.TXT()
+}

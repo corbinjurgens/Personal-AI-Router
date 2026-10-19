@@ -56,6 +56,7 @@ import { connectOrStart, serviceConnectionDeps } from './service-connection'
 import { defaultServiceEndpointEnvironment, resolveServiceEndpoint } from './service-endpoint'
 import { parseAvailabilityChange, parsePolicyChange } from './node-policy'
 import { NodeAvailabilityState, type AvailabilityMenuItem } from './node-availability'
+import { PerformanceSubscription } from './performance'
 import {
     legacyManualNodesPath,
     manualNodesFileOps,
@@ -383,6 +384,15 @@ class ModularSupervisor {
     // This default only applies if start() runs before the connector seeds.
     private logLevel: ModularLogLevel = MODULAR_DEFAULT_LOG_LEVEL
     private brokerReady = false
+    private readonly performance = new PerformanceSubscription(
+        method => this.callProcess('broker', method),
+        params =>
+            getModularBridgeState().handleNotification({
+                source: 'broker',
+                method: 'performance:changed',
+                params
+            })
+    )
     private isReady = false
     // True only while stop() is intentionally tearing down the subprocess tree.
     // Used to tell a deliberate broker shutdown (SIGKILL / stdin close) apart
@@ -540,6 +550,7 @@ class ModularSupervisor {
         if (this.isReady) return
 
         this.shuttingDown = false
+        this.performance.reset()
         this.brokerReady = false
         this.brokerHydrationDone = false
         this.readinessReported = false
@@ -620,6 +631,7 @@ class ModularSupervisor {
         // Mark teardown first so the connection closing during teardown is
         // treated as deliberate, not a crash.
         this.shuttingDown = true
+        await this.performance.stop()
         stopNodeInfoPoller()
         if (this.remoteStatusDebounceTimer) {
             clearTimeout(this.remoteStatusDebounceTimer)
@@ -831,6 +843,7 @@ class ModularSupervisor {
 
     /** Forget what a broker that is gone told us, until the next `app:ready`. */
     private resetBrokerSession(): void {
+        this.performance.reset()
         this.brokerReady = false
         this.brokerHydrationDone = false
         this.readinessReported = false
@@ -878,6 +891,7 @@ class ModularSupervisor {
             if (!isCurrent()) return
             this.processes.delete(child.name as ModularProcessName)
             if (child.name === 'broker') {
+                this.performance.reset()
                 this.brokerReady = false
                 this.brokerHydrationDone = false
                 this.isReady = false
@@ -1393,6 +1407,10 @@ class ModularSupervisor {
         }
 
         const event = this.normalizeBrokerProxy(notification)
+        if (event.source === 'broker' && event.method === 'performance:changed') {
+            this.performance.changed(event.params)
+            return
+        }
         // Apply to bridge state first so the side-effects below (reconcile,
         // refresh) observe the fresh proxy port / node set this event carries —
         // a `<proxy>:ready` updates the bound proxy port, which the self-forward
@@ -1414,6 +1432,7 @@ class ModularSupervisor {
             this.emitStateRefreshIfHydrated()
         }
         if (event.source === 'broker' && event.method === 'app:ready') {
+            this.performance.ready()
             this.brokerReady = true
             for (const engine of PROXY_ENGINES) void this.reconcileLocalNodeBridge(engine)
             void this.onBrokerReady().then(() => {

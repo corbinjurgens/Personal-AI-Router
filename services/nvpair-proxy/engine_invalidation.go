@@ -33,12 +33,14 @@ func (a *admissionController) invalidateEngine(in nodepolicy.InvalidateEnginePar
 	for k := range a.strict.models {
 		if k.engine == in.Engine {
 			delete(a.strict.models, k)
+			delete(a.strict.qualified, k)
 			a.strict.generation[k]++
 		}
 	}
 	a.invalidations[in] = struct{}{}
-	// StrictReadiness remains withdrawn globally until an authoritative feed
-	// exists; removing installed models also removes this engine's eligibility.
+	// Qualification and installed capacity are withdrawn together. A later
+	// authoritative identity/policy update may derive fresh capacity, but the
+	// advanced generation still fences tickets from before this operation.
 	a.signalLocked()
 }
 

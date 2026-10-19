@@ -3,7 +3,7 @@
 
 package main
 
-// The broker → proxy node policy requests (nodepolicy/wire.go) are
+// The broker → proxy node policy requests (nodepolicy/wire.go). All are
 // process-scoped: the policy is the machine's, not an engine's, so none of
 // them is addressed to a facade. Each validates before applying, keeps the
 // previous state on invalid input, and answers {"ok":true} or a JSON-RPC
@@ -44,6 +44,8 @@ func (p *Proxy) handlePolicyMethod(msg *Message, method string) bool {
 		result, err = p.applyAdmissionSnapshot(msg.Params)
 	case nodepolicy.MethodSetEngineIntent:
 		err = p.applySetEngineIntent(msg.Params)
+	case nodepolicy.MethodSetModelIdentity:
+		err = p.applySetModelIdentity(msg.Params)
 	default:
 		return false
 	}
@@ -53,7 +55,32 @@ func (p *Proxy) handlePolicyMethod(msg *Message, method string) bool {
 		return true
 	}
 	_ = p.codec.Respond(msg.ID, result)
+	if method == nodepolicy.MethodSetPolicy || method == nodepolicy.MethodSetModelIdentity {
+		// The broker reads readiness against the acknowledgement just sent; a
+		// new identity can install or withdraw the capability.
+		p.reportStrictReadiness()
+	}
 	return true
+}
+
+// applySetModelIdentity replaces the engine identity strict capacity and
+// qualification are bound to, rederiving the capability.
+func (p *Proxy) applySetModelIdentity(params json.RawMessage) error {
+	var in nodepolicy.SetModelIdentityParams
+	if err := decodeStrict(params, &in); err != nil {
+		return err
+	}
+	if err := in.Validate(); err != nil {
+		return err
+	}
+	for engine := range in.Engines {
+		if err := knownEngine(engine); err != nil {
+			return err
+		}
+	}
+	changed := p.admission.setModelIdentity(in.Engines)
+	slog.Info("engine identity set", "engines", len(in.Engines), "strict_capability_changed", changed)
+	return nil
 }
 
 // applySetPolicy activates the policy and returns its revision. A revision
@@ -160,8 +187,11 @@ func decodeStrict(params json.RawMessage, v any) error {
 	return nil
 }
 
+// knownEngine accepts a built-in engine or a valid descriptor engine ID. Policy
+// state may name an engine this process does not front; it then has no
+// candidates here rather than invalidating the whole message.
 func knownEngine(name string) error {
-	if _, ok := engines.ByName(name); !ok {
+	if !engines.ValidRoutingID(name) {
 		return fmt.Errorf("unknown engine %q", name)
 	}
 	return nil
@@ -174,6 +204,16 @@ func normalizeEngineModel(engine, model string) string {
 		return prof.normalizeModel(model)
 	}
 	return strings.TrimSpace(model)
+}
+
+// normalizeEngineModel is normalizeEngineModel extended to the descriptor
+// engines this process fronts, whose naming rule lives on their facade. An
+// engine without a facade here keeps exact naming.
+func (p *Proxy) normalizeEngineModel(engine, model string) string {
+	if f := p.facadeFor(engine); f != nil {
+		return f.profile.normalizeModel(model)
+	}
+	return normalizeEngineModel(engine, model)
 }
 
 // localEngineHealthy reports whether this node's engine is up, as

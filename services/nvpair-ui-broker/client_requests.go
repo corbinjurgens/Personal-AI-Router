@@ -537,6 +537,24 @@ func (b *Broker) relayToEngineNow(msg *Message) {
 			_ = b.codec.RespondError(id, -32000, err.Error())
 			return
 		}
+		b.engineConfigMu.Lock()
+		// A delayed scoped stop is a no-op after durable discharge. Do not
+		// withdraw the identity of a later local On or switch in that case.
+		c := b.switchCoordinator()
+		withdrawn := c.withdrawnIdentityID == localOffOperationID && c.withdrawnIdentityProxy == b.policyProxy()
+		confirmWithdrawal := false
+		if obligation, ok := c.store.journal.LocalObligations[localOffOperationID]; ok && !obligation.Discharged && !withdrawn {
+			b.forgetSettingsIdentity(localOffEngine)
+			confirmWithdrawal = true
+		}
+		b.engineConfigMu.Unlock()
+		if confirmWithdrawal {
+			err = b.pushModelIdentityConfirmed(context.Background())
+		}
+		if err != nil {
+			_ = b.codec.RespondError(id, -32000, err.Error())
+			return
+		}
 	}
 	if lifecycleLocked {
 		b.engineConfigMu.Unlock()

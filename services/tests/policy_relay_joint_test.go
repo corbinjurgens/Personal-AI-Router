@@ -444,7 +444,7 @@ func (f *policyJointFixture) cloudDraft(t *testing.T, params map[string]any, clo
 func jointExpectedPeer(p nodepolicy.Policy) nodepolicy.PeerPolicy {
 	return nodepolicy.PeerPolicy{
 		Version: 2, Revision: p.Revision, Availability: nodepolicy.Paused,
-		Pause: p.Pause, Admission: p.Admission, Idle: p.Idle, Profiles: p.Profiles, TierPolicy: p.TierPolicy,
+		Pause: p.Pause, Admission: p.Admission, Idle: p.Idle, Profiles: p.Profiles, Roles: map[string]nodepolicy.Role{}, TierPolicy: p.TierPolicy,
 		Tiers: map[string][]nodepolicy.TierEntry{"weak": {{Kind: "local", Engine: "ollama", Model: "joint-local", ContextTokens: 8192, Capabilities: []nodepolicy.Capability{"tools"}}}},
 	}
 }

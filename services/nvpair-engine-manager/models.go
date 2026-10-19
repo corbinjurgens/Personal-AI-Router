@@ -99,12 +99,14 @@ const inventoryReconcileInterval = 60 * time.Second
 func (e *Executor) modelsSweep(ctx context.Context, fullInventory bool) ModelsResult {
 	ctx, cancel := context.WithTimeout(ctx, modelsTimeout)
 	defer cancel()
+	sweep := e.sweeps.Add(1)
 	cached := e.cachedInventory()
 
 	engineNames := e.reg.Names()
 	// Results indexed by engine position so the flattened output stays
 	// deterministic (registration order) despite concurrent completion.
 	perEngine := make([][]string, len(engineNames))
+	digests := make([]observedDigests, len(engineNames))
 	listOK := make([]bool, len(engineNames))
 	loaded := make([][]string, len(engineNames))
 	loadedOK := make([]bool, len(engineNames))
@@ -128,7 +130,9 @@ func (e *Executor) modelsSweep(ctx context.Context, fullInventory bool) ModelsRe
 		}
 		shared := listSpec != nil && loadedSpec != nil && sameReadRequest(listAct, loadedAct)
 		inv, haveInv := cached[name]
-		reuseInv := !fullInventory && !shared && haveInv
+		// An inventory that carries content digests is read on every sweep:
+		// strict admission identity must not wait for the reconcile interval.
+		reuseInv := !fullInventory && !shared && haveInv && (listSpec == nil || listSpec.Digest == "")
 		wg.Add(1)
 		go func(i int, name string, listSpec, loadedSpec *ActionResult, shared bool) {
 			defer wg.Done()
@@ -142,12 +146,16 @@ func (e *Executor) modelsSweep(ctx context.Context, fullInventory bool) ModelsRe
 				perEngine[i] = inv
 				listOK[i] = true
 			} else if listSpec != nil {
+				run := e.engineRunID(name)
 				listRaw, listErr = e.Action(ctx, name, "list_models", nil)
 				if listErr != nil {
 					slog.Debug("engine:models list_models failed", "engine", name, "err", listErr)
 				} else if models, ok := extractStringsResult(listRaw, listSpec); ok {
 					perEngine[i] = models
 					listOK[i] = true
+					// Digests are labelled with the run read before the request,
+					// so a run that changed meanwhile never inherits them.
+					digests[i] = observedDigests{runID: run, models: extractDigests(listRaw, listSpec)}
 				} else {
 					slog.Debug("engine:models list_models returned an invalid inventory", "engine", name)
 				}
@@ -174,12 +182,16 @@ func (e *Executor) modelsSweep(ctx context.Context, fullInventory bool) ModelsRe
 	wg.Wait()
 
 	fresh := make(map[string][]string)
+	freshDigests := make(map[string]observedDigests)
 	for i, ok := range listOK {
 		if ok {
 			fresh[engineNames[i]] = perEngine[i]
 		}
+		if digests[i].models != nil {
+			freshDigests[engineNames[i]] = digests[i]
+		}
 	}
-	e.storeInventory(fresh)
+	e.storeInventory(fresh, freshDigests, sweep)
 
 	res := ModelsResult{Models: []string{}}
 	seen := map[string]bool{}
@@ -348,9 +360,15 @@ func (e *Executor) cachedInventory() map[string][]string {
 
 // storeInventory replaces the cache with the engines answered this sweep. An
 // engine missing from the sweep (stopped, or its query failed) loses its entry,
-// so a restarted engine is always queried afresh rather than served stale.
-func (e *Executor) storeInventory(fresh map[string][]string) {
+// so a restarted engine is always queried afresh rather than served stale. The
+// content digests are replaced the same way, unless a sweep that began later
+// already stored its own: an older listing never replaces a newer one.
+func (e *Executor) storeInventory(fresh map[string][]string, digests map[string]observedDigests, sweep uint64) {
 	e.inventoryMu.Lock()
 	defer e.inventoryMu.Unlock()
 	e.inventory = fresh
+	if sweep > e.digestSweep {
+		e.digestSweep = sweep
+		e.inventoryDigests = digests
+	}
 }

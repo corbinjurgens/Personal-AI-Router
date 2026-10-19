@@ -139,6 +139,62 @@ describe('strict-admission shared Go/TypeScript parity corpus', () => {
         ).toThrow()
     })
 
+    it.each([
+        'ollama',
+        'lmstudio',
+        'llamacpp',
+        'llamacpp-custom',
+        'strata',
+        'errors',
+        'e-x',
+        'lm-studio',
+        'llama-cpp',
+        'A_1.-',
+        '-engine',
+        '_engine',
+        '.engine',
+        '...',
+        'a'.repeat(40)
+    ])('preserves routing engine ID %j in the parsed capability', engine => {
+        const fixtures = loadStrictFixtures()
+        const model = strictFixtureObject(fixtures.model)
+        model.identity = fixtures.identity
+        model.engine = engine
+        const capability = parseStrictAdmissionCapability({ version: 1, models: [model] })
+        if (capability.state !== 'valid') throw new Error('Expected valid capability')
+        expect(capability.models).toEqual([model])
+        expect(capability.models[0].engine).toBe(engine)
+    })
+
+    it.each([
+        { name: 'empty', engine: '' },
+        { name: 'dot', engine: '.' },
+        { name: 'dotdot', engine: '..' },
+        { name: 'slash', engine: 'a/b' },
+        { name: 'backslash', engine: 'a\\b' },
+        { name: 'colon', engine: 'a:b' },
+        { name: 'space', engine: 'a b' },
+        { name: 'overlong', engine: 'a'.repeat(41) },
+        { name: 'final newline', engine: 'a\n' },
+        { name: 'embedded newline', engine: 'a\nb' },
+        { name: 'carriage return', engine: 'a\r' },
+        { name: 'CRLF', engine: 'a\r\n' },
+        { name: 'line separator', engine: 'a\u2028' },
+        { name: 'paragraph separator', engine: 'a\u2029' },
+        { name: 'unicode', engine: 'engin\u00e9' },
+        { name: 'unpaired surrogate', engine: 'a\ud800' },
+        { name: 'tab', engine: 'a\t' },
+        { name: 'NUL', engine: 'a\0' }
+    ])('rejects a $name routing engine ID in the capability', ({ engine }) => {
+        const fixtures = loadStrictFixtures()
+        const model = strictFixtureObject(fixtures.model)
+        model.identity = fixtures.identity
+        model.engine = engine
+        expect(() => parseStrictAdmissionCapability({ version: 1, models: [model] })).toThrow(
+            'Invalid strict-admission engine/model'
+        )
+    })
+
     it.each(['1.0', '1e0'])('accepts integral JSON spelling %s', spelling => {
         const fixtures = loadStrictFixtures()
         const request = strictFixtureObject(fixtures.request)

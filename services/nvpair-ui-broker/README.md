@@ -220,6 +220,8 @@ with the scanner daemon:
 
 The daemon folds those registrations into this host's single `_nvpair-node` record, so a peer discovers the engine through the shared channel. The model list is not part of that registration — it's served over HTTP by `nvpair-engine-manager` (the `em` service, `GET /v1/models`) and enriched onto each node by the peer's daemon. There is no separate advertiser subprocess and no manual-advertise RPC.
 
+**Descriptor engines.** After engine-manager starts and before facades are prepared, the broker reads `engine:descriptors` once and fronts every descriptor engine (any engine ID that is not built in, such as a `llamacpp-custom` fork manifest or a Strata user manifest) that is available on this host and that `engines.ProxyCanFront` accepts, at most `engines.MaxDynamicEngines` of them in ID order (`enginecatalog.go`). Each gets a facade in the one proxy process, enabled with its descriptor so the proxy can build its routes; a facade port planned from `engines.DynamicFacadePortBase` clear of every built-in engine port and every other descriptor engine's persisted or planned port (the proxy then persists where it landed); and the default advertisement loop, which reads its backend port from engine-manager's `engine:status` and probes its OpenAI or Ollama model list. While it is up the broker registers its `e-<id>` service: cluster-manager publishes it on the authenticated peer-services path and admits it on the reverse transport, and the scanner adds it to this node's own directory entry but keeps it out of the mDNS TXT record. When it stops, the registration is withdrawn from both. `--proxy-engines` names built-in engines only. The set is fixed for the broker's lifetime; a new manifest takes effect at the next start. Unknown, malformed, unavailable or unfrontable descriptors are not fronted, and descriptor engines have no engine settings or `<id>-proxy:` client relay yet.
+
 **`nvpair-proxy`** is one process that fronts every enabled engine. It starts with no engine and no listener; the broker then sends it a `facade/enable` per engine, carrying that engine's port and any alias addresses. A flag could not express this, because the broker plans a different port for each engine. Each facade forwards inference to a node it discovers on the network and speaks its own engine's dialect.
 
 One process for all of them is deliberate. Between scheduler snapshots a facade
@@ -419,15 +421,16 @@ proxy enforces it.
   availability push the proxy refused (Activation). A relayed
   `policy:set` from a paired node is refused during recovery.
 - **Proxy state.** The broker pushes `node/set-policy`, `node/set-availability`,
-  `node/set-residency`, `node/set-engine-intent` and `node/set-engine-drain`
-  (methods and payloads in `nodepolicy/wire.go`). Residency comes from
+  `node/set-residency`, `node/set-engine-intent`, `node/set-engine-drain` and
+  `node/set-model-identity` (Engine identity below; methods and payloads in
+  `nodepolicy/wire.go`). Residency comes from
   engine-manager's `engine:models-changed` (`loadedByEngine`) and
   `engine:state-changed` (a stopped engine is absent); saved intent from
   `engine:intent` and `engine:intent-changed`. Both are seeded from
   `engine:intent`, `engine:get-installed` and `engine:models` whenever
   engine-manager (re)starts. Each push sends the state current at send time and
   pushes are serialized, so an older state can never overwrite a newer one.
-  When the proxy (re)starts, all five are re-sent from its spawn hook **before
+  When the proxy (re)starts, all of them are re-sent from its spawn hook **before
   any facade is enabled**, availability first, so a paused node is never briefly
   admitting work, and `policy:changed` then reports the activation the replay
   reached.
@@ -453,7 +456,8 @@ proxy enforces it.
   `proxyRunId` is the run of that incarnation's acknowledgements, and
   `policyRevision` is both the active and the persisted revision, with the
   availability push acknowledged and the node `available`. Models of an engine
-  saved Off are left out, and a capability with no model left is withdrawn.
+  saved Off are left out, and so are models whose identity is not the engine
+  identity below, and a capability with no model left is withdrawn.
   Anything else withdraws it: proxy exit or stop, a replay to a new proxy run
   (which clears the held report until the new run reports), a saved policy
   pending acknowledgement, and a pause or drain. A report may arrive before
@@ -462,6 +466,21 @@ proxy enforces it.
   acknowledgement, proxy start or exit and intent change, and a projection is
   sent only when the capability changes. `Policy.Advertisement()` never sets
   it. Peers without the capability keep concrete routing.
+- **Engine identity** (`model_identity.go`, `docs/local-qualification.mdx`).
+  engine-manager's `engine:model-identity` notification (consumed, never
+  forwarded to clients) is a whole snapshot of each engine it launched and
+  owns: run id, launch digest and model content digests. The broker joins it
+  with the SHA-256 fingerprint of each engine's applied settings revision
+  (journal epoch, applied revision and settings; none while a revision is
+  applying, failed or unapplied) and pushes the result to the proxy with
+  `node/set-model-identity`, one more coalesced push kind replayed to a
+  restarted proxy. An engine lacking either part is left out. `running:false`
+  removes an engine's run identity at once, and engine-manager exit removes
+  all of it. Before every settings operation calls `engine:configure-launch`,
+  the broker removes that engine's fingerprint and waits for the proxy to
+  acknowledge the identity without it; with no proxy running nothing needs
+  withdrawing, and a proxy without the method holds no capability. Any other
+  failure fails the operation before the engine is touched.
 - **Admission.** The proxy's `admission/state` (active, per-engine active, last
   activity) feeds the drains below; `admission/unload` unloads the named models
   through `engine:unload-model`; `admission/wake` calls `engine:wake` unless the

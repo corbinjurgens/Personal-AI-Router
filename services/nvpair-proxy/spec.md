@@ -17,22 +17,19 @@ Strict requests carry exactly one shared-parser-validated
 `X-PAIR-Strict-Admission` envelope. Both paired ingress and local self dispatch
 use the existing process-wide admission controller, including its mutex,
 in-flight counters, residency, notifications and cancellation registry. Engine
-IDs are canonical built-in names. Model keys use `normalizeEngineModel`:
-Ollama's omitted tag becomes `:latest`; other engine model IDs keep their
-existing adapter semantics. Equivalent normalized capability entries reject.
+IDs are built-in names or valid descriptor engine IDs (`engines.ValidRoutingID`).
+Model keys use the engine's facade naming: Ollama's omitted tag becomes
+`:latest`, a descriptor engine follows its declared naming, and an engine with
+no facade here keeps its model ID exact. Equivalent normalized capability entries reject.
 
 Finite `maxConcurrent` and the matching authoritative model identity are
-required. The capability limit must equal the finite effective policy/profile
-concurrency limit for the normalized engine/model, which is also enforced for
-concrete traffic. Unlimited or mismatched limits reject installation. Policy
-activation withdraws installed entries that no longer match. Caller fields never
-establish destination capability. A1a exposes an
-internal capability-install seam but wires no broker feed and returns a nil
-capability from `StrictReadiness`. No strict readiness is advertised. Production
-strict admission remains disabled pending authoritative identity/qualification
-integration. Strict dispatch is terminal-local and never enters concrete route
-selection or retries. Headerless concrete admission retains its prior semantics,
-including its switch timeout behavior.
+required. The capability is derived (local qualification, B, below) with the
+finite effective policy/profile concurrency limit for the normalized
+engine/model, which is also enforced for concrete traffic; an unlimited limit
+installs nothing. Caller fields never establish destination capability. Strict
+dispatch is terminal-local and never enters concrete route selection or retries.
+Headerless concrete admission retains its prior semantics, including its switch
+timeout behavior.
 
 Queue and cold deadlines derive from remaining durations on a monotonic clock,
 share the pre-output cap, and never reset on wake, switch or state changes.
@@ -60,9 +57,10 @@ version-1 JSON capacity document through `shared/durablefile`. The canonical
 `appdir` file `proxy-strict-capacity.json` holds slots with numeric ticket ID,
 engine and normalized model only. Startup restores slots into the same in-flight
 counters. Slot IDs continue above recovered IDs. No request content is persisted.
-Capability withdrawal or replacement advances a per-key generation, invalidating
-undispatched tickets even if the same identity is reinstalled; dispatched work
-keeps its accounting. Installation, marker writing and recovery share one model
+A change to a key's installed entry or qualification, including withdrawal and
+reinstallation, advances its per-key generation, invalidating undispatched
+tickets even if the same identity is reinstalled; a rederivation that leaves the
+entry unchanged keeps the generation. Dispatched work keeps its accounting. Installation, marker writing and recovery share one model
 key contract: known engine, nonempty normalized key, no reserved alias or control
 characters; internal spaces are supported. The writer and loader share a total
 slot bound, enforced before adding a dispatch marker.
@@ -87,6 +85,77 @@ document is validated before any counters or markers are adopted; invalid later
 slots cannot leave partially restored state. A1b/A2 must provide actual
 authoritative reconciliation and the qualification owner must prove terminal
 evidence before activation.
+
+### Strict readiness and peer capability (A2)
+
+After answering each successful `node/set-policy` with its `PolicyAck`, and each
+successful `node/set-model-identity`, the proxy sends the broker
+`admission/strict-readiness` (`nodepolicy.NotifyStrictReadiness`) with
+`nodepolicy.StrictAdmissionReadiness`: the active revision, the proxy's `runId`,
+and the installed capability, its models under their normalized keys sorted by
+engine and model. The capability is omitted when nothing is installed or when the
+strict capacity document is untrusted. Nothing is sent before a policy is active
+or after a refused request. Reports leave from the control read loop only, so a
+report computed from older state never follows a newer one. The broker owns the
+fences and the publication (its README).
+
+A peer's capability reaches routing from its pinned inventory document through
+the scanner and the broker relay: `subscribedToNode` copies
+`DirectoryNode.Policy.StrictAdmission` onto the internal `Node.StrictAdmission`,
+which `nodeEqual` ignores, so readiness changes announce no `node/updated`.
+`Node.strictModel(engine, model)` is the hybrid exclusion rule: a peer is a hybrid
+local candidate for a model only when it advertises a valid capability of the
+supported version naming that engine and the model as the engine's facade
+normalizes it. A peer with no policy, no capability or an unsupported version is
+excluded from hybrid candidates only. Concrete routing never consults it, so such
+peers stay concrete candidates. The capability is a hint; the destination
+revalidates every strict request. `hybridLocalCandidates(tier, needs,
+crossEngine)` is the role eligibility built on it: of `resolveTierCandidates`'
+candidates, in order, only those offered by their node's own declared role,
+whose advertised role carries finite qualification
+(`AdvertisedRole.HybridQualified`), and whose node has a strict entry for the
+role's normalized model (`Node.strictModel`; this node's own installed
+capability for itself). Router tier entries never make a node hybrid eligible.
+Hybrid dispatch (Phase 4) is its caller; none exists yet.
+
+### Local qualification and identity (B)
+
+`node/set-model-identity` (`nodepolicy.SetModelIdentityParams`) replaces the
+engine identity: per engine the run id, applied-settings fingerprint, launch
+digest and model content digests. It is decoded strictly, validated, answered
+`{"ok":true}`, and rederives the capability; an invalid one is refused and the
+previous identity kept. The capability is derived from the active policy, that
+identity and the qualification registry read once at start from the `appdir`
+artifact `local-qualification.json` (absent: empty; invalid: empty and logged).
+A profile with `qualification {id, revision}` installs its normalized model only
+when the registry entry exists for the same engine and model, its
+`launchDigests` and `modelDigests` contain the identity's launch digest and the
+model's digest (looked up under every name normalizing to it; disagreeing names
+give none), the profile's `requestOptions` equal the qualified ones, its
+`contextTokens` and `maxOutputTokens` do not exceed the qualified ones, and the
+effective concurrency is finite. Two profiles normalizing to one model install
+neither. The installed identity is `{engineRunId, settingsFingerprint,
+modelDigest}`.
+
+`serveStrictLocal` calls `qualifyStrict` before `AdmitStrict`: the model must be
+installed under the request's identity (else 503 `strict-admission`), and the
+body is validated against the installed qualification (else 400
+`strict-qualification`, naming fields and bounds only). Only the
+`/v1/chat/completions` shape is supported: allowlisted top-level fields, text
+content, function tools, `json_object`/`json_schema` formats, no repeated or
+case-variant keys, nesting at most 64. The profile's `requestOptions` are merged
+in first and the effective body is what is accounted and forwarded; a request
+may not send a field outside the allowlist, so it cannot override a qualified
+default or the context length. One finite output bound is required
+(`max_tokens`/`max_completion_tokens`, equal if both) and may not exceed the
+lower of the profile's and the qualification's ceilings. The input bound is
+computed by the qualification's accounting method (`utf8-bytes`: request,
+message, tool and schema overheads plus the UTF-8 bytes of role, name, tool call
+id and text and of the compact tool call, tool, tool choice and schema JSON; the
+qualified context is at most 2^24 tokens); input plus
+output must not exceed the profile's context. `AdmitStrict` takes the
+generation `qualifyStrict` validated against and refuses a model reinstalled
+since. All of this happens before any wake, unload, slot or inference.
 
 Before forwarding to an engine, ingress and self dispatch strip every
 `X-PAIR-*` header (strict, admission wait/result and routing model/engine/node/tier
@@ -179,7 +248,8 @@ is a genuine limitation, not a safety margin (§5.6).
 ## 3. Process model
 
 The process starts with **no engine and no listener**. The broker then sends one
-`facade/enable` per engine, carrying that engine's port and any alias addresses.
+`facade/enable` per engine, carrying that engine's port and any alias addresses,
+and for a descriptor engine its descriptor (README, "Descriptor engines").
 
 A flag cannot express this. The broker plans a different port for each engine —
 Ollama's managed facade wants `:11434`, LM Studio's wants `:1234`, and
@@ -221,8 +291,10 @@ Every facade-scoped message carries the engine it concerns, in both directions.
 Without it the engine would be implied by which process a message travelled
 through, which is precisely the property one process destroys.
 
-The address is a bare engine id (`ollama:ready`), deliberately **not** the
-component name (`ollama-proxy:ready`). The component form is how a client
+The address is a bare built-in engine id (`ollama:ready`), deliberately **not**
+the component name (`ollama-proxy:ready`). A descriptor engine is addressed by
+its service key, `e-<id>:ready`, because its user-chosen id could otherwise
+spell a process-scoped namespace such as `errors`. The component form is how a client
 addresses the component through the broker; the two meet in the broker's relay,
 which takes one off and puts the other on.
 
@@ -233,7 +305,7 @@ which takes one off and puts the other on.
 | Bootstrap | names its engine in the payload | `facade/enable` |
 
 `facade/enable` is unaddressed because it runs *before* the facade it names
-exists. Only a known engine id counts as an address: plenty of unaddressed
+exists. Only a built-in engine id or a well-formed `e-<id>` counts as an address: plenty of unaddressed
 methods contain a colon, so treating `errors:report` as engine `errors` would
 strip a real method down to `report`.
 
@@ -751,7 +823,8 @@ state in force. The broker re-sends policy state whenever the proxy starts; unti
 | `node/admission-snapshot` | `{}` | answers `{runId, active, activeByEngine, queued, lastActivityMs}` from current admission state (§12.1.2) |
 | `workload/cancel` | `{workloadId, engine?, runId?, regenerate?}` | §12.5; answers `{found}` |
 
-Unknown fields and unknown engines are errors for policy state requests.
+Unknown fields and engine IDs that are not `engines.ValidRoutingID` are errors. A
+valid descriptor engine ID with no facade here is accepted state.
 Invalidation accepts engine ID syntax independently of registry membership.
 
 #### 12.1.1 Activation acknowledgement

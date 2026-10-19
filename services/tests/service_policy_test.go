@@ -200,6 +200,7 @@ func TestServicePolicy(t *testing.T) {
 		assertNextRevision(t, want.Revision, paused.Policy.Revision, started, finished)
 		want.Revision = paused.Policy.Revision
 		want.Availability = nodepolicy.Paused
+		want.PausedBy = nodepolicy.PausedLocally
 		assertPolicyChanged(t, observer, nodeID, want)
 		assertAvailabilityChanged(t, observer, nodeID, nodepolicy.Paused)
 		assertPolicySnapshot(t, fetchServicePolicy(t, command), want, nodepolicy.Paused)
@@ -219,6 +220,7 @@ func TestServicePolicy(t *testing.T) {
 		assertNextRevision(t, want.Revision, resumed.Policy.Revision, started, finished)
 		want.Revision = resumed.Policy.Revision
 		want.Availability = nodepolicy.Available
+		want.PausedBy = ""
 		assertPolicyChanged(t, observer, nodeID, want)
 		assertAvailabilityChanged(t, observer, nodeID, nodepolicy.Available)
 		assertPolicySnapshot(t, fetchServicePolicy(t, command), want, nodepolicy.Available)

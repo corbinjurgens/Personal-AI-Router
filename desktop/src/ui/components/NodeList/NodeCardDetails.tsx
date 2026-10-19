@@ -320,7 +320,7 @@ function NodeCardDetails({ node }: NodeCardDetailsProps) {
                 <div
                     style={{
                         display: 'grid',
-                        gridTemplateRows: isExpanded && metricsReady ? '1fr' : '0fr',
+                        gridTemplateRows: isExpanded ? '1fr' : '0fr',
                         transition: 'grid-template-rows 0.25s ease'
                     }}
                 >

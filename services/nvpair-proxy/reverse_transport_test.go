@@ -48,6 +48,14 @@ func newProxyReverseFixture(t *testing.T, engine string, handler http.Handler) *
 	if !ok {
 		t.Fatalf("unknown fixture engine %q", engine)
 	}
+	return newProxyReverseFixtureFor(t, profile, handler)
+}
+
+// newProxyReverseFixtureFor builds the fixture for any profile, including a
+// descriptor engine's dynamic one.
+func newProxyReverseFixtureFor(t *testing.T, profile engineProfile, handler http.Handler) *proxyReverseFixture {
+	t.Helper()
+	engine := profile.Name
 	f := &proxyReverseFixture{selfDir: filepath.Join(t.TempDir(), "cluster"), peerDir: filepath.Join(t.TempDir(), "cluster")}
 	clustertrusttest.WriteKeypair(t, f.selfDir, "uuid-self")
 	clustertrusttest.WriteKeypair(t, f.peerDir, "uuid-peer")

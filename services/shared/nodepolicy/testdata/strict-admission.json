@@ -67,7 +67,7 @@
     {"name": "null models", "kind": "capability", "path": ["models"], "value": null, "valid": false},
     {"name": "empty models", "kind": "capability", "path": ["models"], "value": [], "valid": false},
     {"name": "unknown capability field", "kind": "capability", "path": ["extra"], "value": true, "valid": false},
-    {"name": "unknown engine", "kind": "model", "path": ["engine"], "value": "unknown", "valid": false},
+    {"name": "unknown engine", "kind": "model", "path": ["engine"], "value": "un/known", "valid": false},
     {"name": "empty model", "kind": "model", "path": ["model"], "value": "", "valid": false},
     {"name": "reserved alias", "kind": "model", "path": ["model"], "value": "strong-local", "valid": false},
     {"name": "zero concurrency", "kind": "model", "path": ["maxConcurrent"], "value": 0, "valid": false},

@@ -5,6 +5,7 @@ package nodepolicy
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -46,5 +47,49 @@ func TestStrictReadinessWithdrawalOmitsCapability(t *testing.T) {
 	}
 	if again != r {
 		t.Fatalf("round trip = %+v, want %+v", again, r)
+	}
+}
+
+func TestSetModelIdentityParamsValidate(t *testing.T) {
+	digest := strings.Repeat("a", 64)
+	valid := func() EngineIdentity {
+		return EngineIdentity{EngineRunID: "run-1", SettingsFingerprint: digest, LaunchDigest: digest, ModelDigests: map[string]string{"m:latest": digest}}
+	}
+	for _, tc := range []struct {
+		name    string
+		edit    func(*EngineIdentity)
+		params  *SetModelIdentityParams
+		wantErr string
+	}{
+		{name: "valid", edit: func(*EngineIdentity) {}},
+		{name: "no models", edit: func(i *EngineIdentity) { i.ModelDigests = map[string]string{} }},
+		{name: "no engines", params: &SetModelIdentityParams{Engines: map[string]EngineIdentity{}}},
+		{name: "missing engines", params: &SetModelIdentityParams{}, wantErr: "engines is required"},
+		{name: "missing run", edit: func(i *EngineIdentity) { i.EngineRunID = "" }, wantErr: "engineRunId"},
+		{name: "invalid run", edit: func(i *EngineIdentity) { i.EngineRunID = "run/1" }, wantErr: "engineRunId"},
+		{name: "uppercase fingerprint", edit: func(i *EngineIdentity) { i.SettingsFingerprint = strings.Repeat("A", 64) }, wantErr: "settingsFingerprint"},
+		{name: "short launch digest", edit: func(i *EngineIdentity) { i.LaunchDigest = "abc" }, wantErr: "launchDigest"},
+		{name: "missing model map", edit: func(i *EngineIdentity) { i.ModelDigests = nil }, wantErr: "modelDigests is required"},
+		{name: "empty model", edit: func(i *EngineIdentity) { i.ModelDigests = map[string]string{" ": digest} }, wantErr: "empty model"},
+		{name: "prefixed model digest", edit: func(i *EngineIdentity) { i.ModelDigests = map[string]string{"m": "sha256:" + digest} }, wantErr: "modelDigests"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			params := tc.params
+			if params == nil {
+				id := valid()
+				tc.edit(&id)
+				params = &SetModelIdentityParams{Engines: map[string]EngineIdentity{"ollama": id}}
+			}
+			err := params.Validate()
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("Validate() = %v, want nil", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("Validate() = %v, want an error containing %q", err, tc.wantErr)
+			}
+		})
 	}
 }

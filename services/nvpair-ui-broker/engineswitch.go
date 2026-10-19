@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"nvpair-shared/engines"
 	settings "nvpair-shared/enginesettings"
 	"nvpair-shared/noderec"
 )
@@ -19,17 +20,19 @@ import (
 // lock lets a local pause veto remote work without waiting for either operation
 // lock. Accepted work belongs to this node, never to a relay waiter.
 type engineSwitchCoordinator struct {
-	store              *engineSwitchStore
-	err                error
-	recoveryErr        error // retryable cleanup failure; engineConfigMu
-	changed            chan struct{}
-	resolved           map[string]bool
-	recoveryCheckpoint *settings.SwitchCheckpoint // engineConfigMu; includes orphan reservations
-	waitMu             sync.Mutex
-	waiters            map[string]context.CancelFunc
-	remoteCancel       context.CancelFunc
-	remoteSource       string
-	remoteTarget       string
+	store                  *engineSwitchStore
+	err                    error
+	recoveryErr            error // retryable cleanup failure; engineConfigMu
+	changed                chan struct{}
+	resolved               map[string]bool
+	recoveryCheckpoint     *settings.SwitchCheckpoint // engineConfigMu; includes orphan reservations
+	withdrawnIdentityID    string                     // engineConfigMu; acknowledged withdrawal for this proxy incarnation
+	withdrawnIdentityProxy *proxyProcess
+	waitMu                 sync.Mutex
+	waiters                map[string]context.CancelFunc
+	remoteCancel           context.CancelFunc
+	remoteSource           string
+	remoteTarget           string
 	// Active execution is fenced under workersMu, together with manager replacement.
 	activeManager *rpcWorker
 	activeCancel  context.CancelFunc
@@ -73,11 +76,21 @@ func switchErrorDetail(err error, kind string) *settings.SwitchError {
 	return &value
 }
 
-// switchTargetRoutable is the single target routability predicate. The Mac's
-// dynamic-facade routability predicate replaces this body at the join.
+// switchTargetRoutable checks protocol support and the current facade at both
+// acceptance and publication.
 func (b *Broker) switchTargetRoutable(engine string) error {
-	if _, ok := engineProxyProfileFor(engine); !ok {
+	profile, ok := b.frontedEngineProfile(engine)
+	if !ok {
 		return switchError(settings.SwitchErrorUnroutable, "The target has no supported inference facade.")
+	}
+	d := engines.Descriptor{Version: engines.DescriptorVersion, Engine: engine, Family: engine, Label: profile.DisplayName, ModelNaming: engines.ModelNamingExact}
+	b.dynamicEngines.mu.RLock()
+	if dynamic, ok := b.dynamicEngines.descriptors[engine]; ok {
+		d = dynamic
+	}
+	b.dynamicEngines.mu.RUnlock()
+	if err := engines.ProxyCanFront(d); err != nil {
+		return switchError(settings.SwitchErrorUnroutable, err.Error())
 	}
 	p := b.settingsProxy(engine)
 	if p == nil {
@@ -233,6 +246,10 @@ func (b *Broker) dischargeSwitchLocalObligationLocked(ctx context.Context, id st
 				continue
 			}
 			var result settings.SwitchEngineState
+			stopErr = b.withdrawSettingsIdentity(ctx, pair.engine)
+			if stopErr != nil {
+				break
+			}
 			stopErr = switchManagerCallOn(ctx, w, "engine:stop", struct {
 				Engine     string `json:"engine"`
 				VerifyStop bool   `json:"verifyStop"`
@@ -322,6 +339,11 @@ func (b *Broker) admitLocalEngineOff(engine string) (remote, reserved bool, oper
 // Preserve manager error envelopes and numeric RPC errors; settingsWorkerCall
 // deliberately flattens errors and must not be used by this transaction.
 func (b *Broker) switchManagerCall(ctx context.Context, method string, params any, out any) error {
+	if p, ok := params.(settings.SwitchReconcileRequest); ok && method == settings.SwitchReconcileMethod {
+		if err := b.withdrawSwitchIdentities(ctx, p.SwitchPrepareRequest); err != nil {
+			return err
+		}
+	}
 	w := b.getEngineMgr()
 	cleanup := method == settings.SwitchReconcileMethod
 	if p, ok := params.(settings.SwitchPrepareRequest); ok && method == settings.SwitchPrepareMethod && p.OperationID == "" {
@@ -545,6 +567,13 @@ func (b *Broker) acceptEngineSwitch(ctx context.Context, p settings.SwitchReques
 			c.remoteCancel = nil
 			c.remoteSource, c.remoteTarget = "", ""
 			c.waitMu.Unlock()
+			b.engineConfigMu.Lock()
+			if b.engineSettingsLoaded && b.engineSettingsError == nil && b.getEngineMgr() != nil {
+				// Reuse B's normal observation path even when a failed drain
+				// left the applied snapshots unchanged. Unsettled rows stay fenced.
+				b.publishSettingsLocked()
+			}
+			b.engineConfigMu.Unlock()
 		}()
 		b.runEngineSwitch(operationCtx, envelope)
 	}()
@@ -683,6 +712,10 @@ func (b *Broker) runEngineSwitch(ctx context.Context, p settings.SwitchPrepareRe
 		return
 	}
 	drainedProxy := b.policyProxy()
+	if err := b.withdrawSwitchIdentities(ctx, p); err != nil {
+		b.finishEngineSwitch(p, settings.SwitchFailedDrain, nil, err)
+		return
+	}
 	if err := b.drainEngineForSwitch(ctx, p); err != nil {
 		b.finishEngineSwitch(p, settings.SwitchFailedDrain, nil, err)
 		return
@@ -907,7 +940,7 @@ func (b *Broker) publishSwitchTarget(ctx context.Context, engine string) error {
 	if err := b.switchProxySetLocal(ctx, p, engine, launch.EffectivePort, true); err != nil {
 		return err
 	}
-	profile, _ := engineProxyProfileFor(engine)
+	profile, _ := b.frontedEngineProfile(engine)
 	b.engineProxy(profile).backendPort.Store(int32(launch.EffectivePort))
 	if b.regCache != nil {
 		b.registerService(noderec.RegisterParams{Service: profile.DiscoveryService, Port: port})

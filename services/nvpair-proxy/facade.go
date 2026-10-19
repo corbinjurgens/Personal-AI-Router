@@ -193,6 +193,9 @@ type enableFacadeParams struct {
 	AliasAddresses []string `json:"aliasAddresses,omitempty"`
 	// IgnorePersistedPort uses Port even when this engine has a persisted one.
 	IgnorePersistedPort bool `json:"ignorePersistedPort,omitempty"`
+	// Descriptor fronts an engine that is not built in. It is required for
+	// such an engine and refused for a built-in one, whose facade is fixed.
+	Descriptor *engines.Descriptor `json:"descriptor,omitempty"`
 }
 
 // facadeWithdrawGrace bounds the teardown of a facade whose bring-up failed.
@@ -227,9 +230,13 @@ type enableFacadeResult struct {
 // enable request's context would cancel every request the facade later serves
 // the moment this returns.
 func (p *Proxy) enableFacade(params enableFacadeParams) (enableFacadeResult, error) {
-	profile, ok := profileFor(params.Engine)
-	if !ok {
-		return enableFacadeResult{}, fmt.Errorf("unknown engine %q; want one of %s", params.Engine, engineNames())
+	profile, err := enableProfile(params)
+	if err != nil {
+		return enableFacadeResult{}, err
+	}
+	if profile.dynamic() && params.Port == 0 {
+		// A descriptor engine has no standalone default to fall back on.
+		return enableFacadeResult{}, fmt.Errorf("engine %q needs an explicit facade port", profile.Name)
 	}
 	if params.Port != 0 && (params.Port < 1 || params.Port > 65535) {
 		// Zero means "the standalone default", so it is the one out-of-range
@@ -311,7 +318,35 @@ func (p *Proxy) enableFacade(params enableFacadeParams) (enableFacadeResult, err
 		return enableFacadeResult{}, err
 	}
 	started = true
+	// A descriptor engine has no stock client port, so the port its facade
+	// first lands on is persisted: clients configured against it keep working
+	// after a restart, whatever the broker would plan next time.
+	if profile.dynamic() && (!hasPersisted || persisted != port) {
+		if err := savePersistedPort(profile, port); err != nil {
+			slog.Warn("could not persist descriptor engine facade port", "engine", profile.Name, "port", port, "err", err)
+		}
+	}
 	return enableFacadeResult{Engine: profile.Name, Port: f.port}, nil
+}
+
+// enableProfile resolves the profile a facade/enable asks for. A built-in
+// engine uses its fixed profile and must not carry a descriptor; any other
+// engine needs one, and it must name the same engine and be frontable. Every
+// other case fails closed.
+func enableProfile(params enableFacadeParams) (engineProfile, error) {
+	if profile, ok := profileFor(params.Engine); ok {
+		if params.Descriptor != nil {
+			return engineProfile{}, fmt.Errorf("engine %q is built in; its facade takes no descriptor", params.Engine)
+		}
+		return profile, nil
+	}
+	if params.Descriptor == nil {
+		return engineProfile{}, fmt.Errorf("unknown engine %q; want one of %s, or a descriptor", params.Engine, engineNames())
+	}
+	if params.Descriptor.Engine != params.Engine {
+		return engineProfile{}, fmt.Errorf("descriptor names engine %q, not %q", params.Descriptor.Engine, params.Engine)
+	}
+	return dynamicProfile(*params.Descriptor)
 }
 
 func (f *facade) SelectedID() string {

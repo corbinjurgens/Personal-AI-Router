@@ -46,13 +46,27 @@ rejects with 503 and releases the undispatched slot. Once cold work is needed,
 its deadline bounds every later wait, including capacity waits. Exhaustion rejects
 before allocating a ticket.
 
-The destination requires an authoritative finite capability and matching engine,
-settings and model identity. Capability concurrency must equal the finite
-effective policy/profile limit shared with concrete admission; policy changes
-withdraw capabilities that no longer match. A1a installs no production feed and
-publishes no readiness, so strict requests currently fail closed. Concrete requests retain
-their existing admission and retry behavior. A1b/A2 own feed/publication and
-qualification remains required before activation.
+After each acknowledged `node/set-policy` or `node/set-model-identity` the proxy
+reports its strict readiness to the broker (`admission/strict-readiness`), naming
+the acknowledged revision and run and carrying the installed capability. Each
+peer's advertised capability arrives on its discovery node and is kept as internal
+routing metadata. Hybrid role eligibility (`hybridLocalCandidates`) offers only a
+node's own declared role with finite qualification on a node advertising a valid
+capability for its engine and normalized model; peers without one keep concrete
+routing. No hybrid request path calls it yet.
+
+The capability is derived, never set: a profile's model is installed only when the
+profile names a local qualification that `local-qualification.json` in the shared
+`appdir` directory holds for the same engine and model, the broker's engine identity
+(`node/set-model-identity`) carries a launch digest and model content digest the
+qualification covers, the profile's defaults and bounds are within it, and the
+effective concurrency is finite. Without that evidence nothing is installed and
+strict requests fail closed. A strict request is validated against the
+qualification (finite output bound, accounted input plus output within the served
+context, supported request shape, no request-level context override) before any
+wake, unload, slot or inference, and the engine receives it with the profile's
+defaults merged in. See `docs/local-qualification.mdx`. Concrete requests retain
+their existing admission and retry behavior.
 
 Before strict inference bytes, the proxy durably writes a slot to
 `proxy-strict-capacity.json` in the shared `appdir` directory. Cancellation,
@@ -104,15 +118,35 @@ parameter, because one flag cannot carry multiple engines' plans.
 
 | Field | Default | Description |
 |-------|---------|-------------|
-| `engine` | *(required)* | Which engine to front: `ollama`, `lmstudio`, or `llamacpp`. An unknown name is rejected with the accepted values. |
+| `engine` | *(required)* | Which engine to front: a built-in `ollama`, `lmstudio` or `llamacpp`, or a descriptor engine ID together with `descriptor`. An unknown name without a descriptor is rejected with the accepted values. |
 | `port` | per engine, see below | HTTP listen port for request forwarding. Must be 1–65535, or omitted for the engine's standalone default. `0` means "the default" rather than "pick an ephemeral port", and any other out-of-range value is rejected, because the facade announces the requested port in its `ready` notification and the broker would be told `0`. |
 | `aliasAddresses` | *(empty)* | Optional secondary `host:port` values for the same routing handler, one per loopback family so `localhost` resolves either way. Only literal loopback addresses are accepted; the broker uses this for a safe inherited local `OLLAMA_HOST`, and the aliases are not advertised to peers. Accepted only for an engine with an inherited host variable — today Ollama alone — and rejected for any other. |
 | `ignorePersistedPort` | `false` | Use `port` even when a saved port exists (used by broker-managed startup) |
+| `descriptor` | *(none)* | The engine's `nvpair-shared/engines.Descriptor`, required for a descriptor engine and refused for a built-in one. The facade is built from its protocols (see below); a descriptor that `engines.ProxyCanFront` rejects, or one naming another engine, is refused. A descriptor engine also needs an explicit `port`. |
 
 ### What differs per engine
 
 Everything engine-specific is one entry in `engines.go`, plus the shared
 identity in `nvpair-shared/engines`.
+
+### Descriptor engines
+
+An engine that is not built in, such as a llama.cpp fork registered as
+`llamacpp-custom` or a Strata user manifest, needs no entry here. Its facade
+profile is built from its descriptor: each declared protocol selects a coded
+route set (`protocolRoutes` in `engines.go`), with `llamacpp-router`'s
+`/v1/models` rewrite applied before a plain `/v1/models`. `ollama-api`,
+`openai-v1` or `openai-chat` must be among them, because each supplies an
+inference route and a model list; `anthropic-messages` and `llamacpp-router`
+only add routes. The descriptor's model naming selects exact or implied-tag
+normalization. The engine has no standalone or reserved port and no host alias.
+Its discovery service key is `e-<id>`, its facade-scoped messages are addressed
+`e-<id>:<method>`, and the port its facade first binds is persisted in
+`<id>-proxy-port.json` so it stays there across restarts. Peers that advertise
+the same engine ID are routed over the pinned direct and reverse paths like a
+built-in engine. Node policy, drain, residency, intent and strict capacity
+accept any `engines.ValidRoutingID`; an engine with no facade here simply has no
+local candidates.
 
 | | `"engine":"ollama"` | `"engine":"lmstudio"` | `"engine":"llamacpp"` |
 |---|---|---|---|

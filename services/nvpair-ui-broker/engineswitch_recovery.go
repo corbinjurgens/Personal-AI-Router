@@ -154,7 +154,10 @@ func (b *Broker) recoverEngineSwitchOn(w *rpcWorker) bool {
 			}
 			b.engineConfigMu.Unlock()
 			var result settings.SwitchReconcileResult
-			err := switchManagerCallOn(ctx, w, settings.SwitchReconcileMethod, settings.SwitchReconcileRequest{SwitchPrepareRequest: cp.SwitchPrepareRequest, LocalVeto: veto}, &result)
+			err := b.withdrawSwitchIdentities(ctx, cp.SwitchPrepareRequest)
+			if err == nil {
+				err = switchManagerCallOn(ctx, w, settings.SwitchReconcileMethod, settings.SwitchReconcileRequest{SwitchPrepareRequest: cp.SwitchPrepareRequest, LocalVeto: veto}, &result)
+			}
 			b.engineConfigMu.Lock()
 			if err == nil && result.Error != nil && !switchCleanupSettled(result) {
 				err = &switchRPCError{*result.Error}
@@ -226,6 +229,9 @@ func (b *Broker) recoverEngineSwitchOn(w *rpcWorker) bool {
 		return fail(err)
 	}
 	c.recoveryErr = nil
+	if len(reserved) > 0 && b.engineSettingsLoaded && b.engineSettingsError == nil {
+		b.publishSettingsLocked()
+	}
 	return true
 }
 

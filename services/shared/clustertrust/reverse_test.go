@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/hashicorp/yamux"
+	"nvpair-shared/engines"
 	"nvpair-shared/noderec"
 )
 
@@ -309,6 +310,49 @@ func TestReverseRevocationClosesActiveForwarding(t *testing.T) {
 	}
 }
 
+// A descriptor-backed engine's service key crosses the session and reaches the
+// far side's resolver unchanged, including the longest one; the resolver is
+// what decides whether it is registered.
+func TestReverseCarriesDynamicEngineServiceKeys(t *testing.T) {
+	longest, _ := engines.DynamicEngine(strings.Repeat("a", engines.MaxDynamicIDLen), "")
+	for _, key := range []noderec.ServiceKey{"e-llamacpp-custom", longest.DiscoveryService} {
+		t.Run(string(key), func(t *testing.T) {
+			resolved := make(chan noderec.ServiceKey, 1)
+			resolve := func(_ context.Context, _ ReversePeer, service noderec.ServiceKey) (ReverseTarget, error) {
+				resolved <- service
+				// Engine facades are pinned inner TLS; admission is acknowledged
+				// before the ClientHello, so no local dial is needed here.
+				return ReverseTarget{Protocol: ReverseTLS, Dial: func(context.Context) (net.Conn, error) {
+					return nil, errors.New("not dialed by this test")
+				}}, nil
+			}
+			a := reverseTestManager(t, ReverseOptions{LocalUUID: "a"})
+			b := reverseTestManager(t, ReverseOptions{LocalUUID: "b", ResolveService: resolve})
+			reverseTestConnect(t, a, b, "a", reverseTestID)
+			conn, err := a.Open(context.Background(), ReversePeer{"b", "v1"}, key)
+			if err != nil {
+				t.Fatalf("open dynamic engine stream: %v", err)
+			}
+			defer conn.Close()
+			select {
+			case got := <-resolved:
+				if got != key {
+					t.Fatalf("resolver saw %q, want %q", got, key)
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatal("dynamic engine key never reached the resolver")
+			}
+		})
+	}
+	a := reverseTestManager(t, ReverseOptions{LocalUUID: "a"})
+	for _, key := range []noderec.ServiceKey{"e-ollama", "e-", "e-a/b", noderec.ServiceKey("e-" + strings.Repeat("a", engines.MaxDynamicIDLen+1))} {
+		if conn, err := a.Open(context.Background(), ReversePeer{"b", "v1"}, key); err == nil {
+			conn.Close()
+			t.Errorf("Open(%q) admitted a malformed dynamic key", key)
+		}
+	}
+}
+
 func TestReverseExplicitRevokePreservesOtherPeer(t *testing.T) {
 	b := reverseTestManager(t, ReverseOptions{LocalUUID: "b"})
 	a := reverseTestManager(t, ReverseOptions{LocalUUID: "a"})
@@ -559,6 +603,9 @@ func TestReverseRejectsMalformedServiceHeaders(t *testing.T) {
 		{"third peer", "PAIR-REVERSE/1 ni/a\n"},
 		{"missing prefix", "ni\n"},
 		{"oversized", strings.Repeat("a", 64)},
+		{"built-in name as dynamic key", "PAIR-REVERSE/1 e-ollama\n"},
+		{"dynamic key with separator", "PAIR-REVERSE/1 e-a/b\n"},
+		{"empty dynamic key", "PAIR-REVERSE/1 e-\n"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var calls atomic.Int32

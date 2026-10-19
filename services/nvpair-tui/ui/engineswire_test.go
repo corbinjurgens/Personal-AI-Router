@@ -5,12 +5,17 @@ package ui
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
+	tea "github.com/charmbracelet/bubbletea"
 	"nvpair-shared/engines"
+	"nvpair-shared/enginesettings"
+	"nvpair-tui/rpc"
 )
 
 // localRequest builds a local model operation's method and params for an
@@ -272,5 +277,403 @@ func TestLifecycleRemoteCoverageMatchesManager(t *testing.T) {
 		if engineOps[name].localOnly {
 			t.Errorf("%s has a remote variant and should not be local-only", name)
 		}
+	}
+}
+
+func terminalControlsReply(t *testing.T, broker *rpc.Codec, cmd tea.Cmd, response *rpc.Message) (*rpc.Message, tea.Msg) {
+	t.Helper()
+	if cmd == nil {
+		t.Fatal("missing command")
+	}
+	done := make(chan tea.Msg, 1)
+	go func() { done <- cmd() }()
+	request, err := broker.Read()
+	if err != nil {
+		t.Fatalf("read request: %v", err)
+	}
+	response.JSONRPC, response.ID = "2.0", request.ID
+	if err := broker.Write(response); err != nil {
+		t.Fatalf("write response: %v", err)
+	}
+	select {
+	case result := <-done:
+		return request, result
+	case <-time.After(time.Second):
+		t.Fatal("command did not finish")
+		return nil, nil
+	}
+}
+
+func TestTerminalControlsCanonicalFrames(t *testing.T) {
+	for _, tc := range []struct{ name, node, op, method string }{
+		{"local load", "", "load", "engine:load-model"},
+		{"local eject", "", "unload", "engine:unload-model"},
+		{"local delete", "", "delete", "engine:delete-model"},
+		{"remote load", "peer", "load", "engine:remote-load-model"},
+		{"remote eject", "peer", "unload", "engine:remote-unload-model"},
+		{"remote delete", "peer", "delete", "engine:remote-delete-model"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			client, broker := nodeInfoRPCFixture(t)
+			request, result := terminalControlsReply(t, broker, modelCmd(client, tc.node, "ollama", "ollama", modelActions[tc.op], "model"), &rpc.Message{Result: []byte(`{}`)})
+			var params map[string]string
+			if err := json.Unmarshal(request.Params, &params); err != nil {
+				t.Fatal(err)
+			}
+			want := map[string]string{"engine": "ollama", "model": "model"}
+			if tc.node != "" {
+				want["node"] = "peer"
+			}
+			if request.Method != tc.method || !reflect.DeepEqual(params, want) {
+				t.Fatalf("frame = %s %v, want %s %v", request.Method, params, tc.method, want)
+			}
+			if op, ok := result.(engineOpMsg); !ok || op.err != nil || op.detached {
+				t.Fatalf("result = %#v", result)
+			}
+		})
+	}
+}
+
+func TestTerminalControlsLifecycleFrames(t *testing.T) {
+	for _, tc := range []struct{ name, node, method, want string }{
+		{"local start", "", "engine:start", "engine:start"},
+		{"remote start", "peer", "engine:start", "engine:remote-start"},
+		{"remote stop", "peer", "engine:stop", "engine:remote-stop"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			client, broker := nodeInfoRPCFixture(t)
+			request, _ := terminalControlsReply(t, broker, engineCmd(client, tc.node, "ollama", tc.method, "start", "start"), &rpc.Message{Result: []byte(`{}`)})
+			var params map[string]string
+			if err := json.Unmarshal(request.Params, &params); err != nil {
+				t.Fatal(err)
+			}
+			want := map[string]string{"engine": "ollama"}
+			if tc.node != "" {
+				want["node"] = "peer"
+			}
+			if request.Method != tc.want || !reflect.DeepEqual(params, want) {
+				t.Fatalf("frame = %s %v", request.Method, params)
+			}
+		})
+	}
+}
+
+func TestTerminalControlsTypedRefusals(t *testing.T) {
+	for _, refusal := range []struct {
+		name string
+		code int
+		want string
+	}{
+		{"veto", -32011, "local veto (-32011): paused on target"},
+		{"conflict", -32010, "revision conflict (-32010): paused on target - reload and retry"},
+	} {
+		for _, family := range []string{"lifecycle", "model", "settings read", "settings preview", "settings apply", "availability"} {
+			t.Run(refusal.name+"/"+family, func(t *testing.T) {
+				client, broker := nodeInfoRPCFixture(t)
+				var cmd tea.Cmd
+				switch family {
+				case "lifecycle":
+					cmd = engineCmd(client, "peer", "ollama", "engine:start", "start", "start")
+				case "model":
+					cmd = modelCmd(client, "peer", "ollama", "ollama", modelActions["load"], "model")
+				case "settings read":
+					cmd = getEngineSettingsCmd(client, "peer", "ollama")
+				case "settings preview":
+					cmd = previewEngineSettingsCmd(client, enginesettings.Request{NodeID: "peer", Engine: "ollama"})
+				case "settings apply":
+					cmd = applyEngineSettingsCmd(client, enginesettings.Request{NodeID: "peer", Engine: "ollama"})
+				case "availability":
+					cmd = setAvailabilityCmd(client, availAvailable)
+				}
+				_, result := terminalControlsReply(t, broker, cmd, &rpc.Message{Error: &rpc.RPCError{Code: refusal.code, Message: "paused on target"}})
+				d := newNodeDetail(client, nodeRow{key: "peer", membership: membershipMember})
+				if msg, ok := result.(setAvailabilityMsg); ok {
+					a := availabilityState{value: availPaused, pending: availAvailable}
+					a.update(msg)
+					if a.err != refusal.want || a.value != availPaused || a.pending != "" {
+						t.Fatalf("availability = %+v", a)
+					}
+					return
+				}
+				d.update(result)
+				if d.status.kind != toastError || !strings.Contains(d.status.text, refusal.want) {
+					t.Fatalf("status = %+v, want %q", d.status, refusal.want)
+				}
+				if d.settingsAwaited != nil || d.settingsConfirm != nil {
+					t.Fatal("refusal armed settings work")
+				}
+			})
+		}
+	}
+}
+
+func TestTerminalControlsTargetPolicy(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		self   bool
+		origin string
+	}{{"local", true, "local"}, {"peer", false, "peer"}} {
+		t.Run(tc.name, func(t *testing.T) {
+			client, broker := nodeInfoRPCFixture(t)
+			d := newNodeDetail(client, nodeRow{key: "target", self: tc.self, membership: membershipMember})
+			request, reply := terminalControlsReply(t, broker, d.policyCmd(), &rpc.Message{Result: []byte(`{"availability":"paused","policy":{"pausedBy":"` + tc.origin + `"}}`)})
+			var params map[string]string
+			if err := json.Unmarshal(request.Params, &params); err != nil {
+				t.Fatal(err)
+			}
+			want := map[string]string{}
+			if !tc.self {
+				want["nodeId"] = "target"
+			}
+			if request.Method != "policy:get" || !reflect.DeepEqual(params, want) {
+				t.Fatalf("policy frame = %s %v", request.Method, params)
+			}
+			d.update(reply)
+			if !d.policyFresh || d.policyLabel() != "Availability: paused (paused by "+tc.origin+")" {
+				t.Fatalf("policy = %+v, fresh %v", d.policy, d.policyFresh)
+			}
+			d.SetSize(100, 40)
+			if !strings.Contains(d.View(), "paused by "+tc.origin) {
+				t.Fatal("target provenance absent from view")
+			}
+			d.update(detailReply{node: "other", msg: detailPolicyMsg{policy: targetPolicy{Availability: "available"}}})
+			if d.policy.Availability != "paused" {
+				t.Fatal("wrong-target reply applied")
+			}
+			if cmd := d.handleNotification(&rpc.Message{Method: "policy:changed", Params: []byte(`{"nodeId":"other","policy":{"pausedBy":"local"}}`)}); cmd != nil || !d.policyFresh {
+				t.Fatal("wrong-target push changed policy")
+			}
+			d.update(DisconnectedMsg{})
+			d.update(reply)
+			if d.policyFresh || d.policyLabel() != "Availability unavailable" {
+				t.Fatal("late reply restored disconnected target")
+			}
+		})
+	}
+}
+
+func TestTerminalControlsPolicyRouteLoss(t *testing.T) {
+	d := newNodeDetail(nil, nodeRow{key: "peer", membership: membershipMember})
+	late := detailReply{node: "peer", msg: detailPolicyMsg{visit: d.telemetryGen, route: d.policyRoute, policy: targetPolicy{Availability: "available"}}}
+	d.followNode(nodeRow{}, false)
+	d.followNode(nodeRow{key: "peer", membership: membershipMember}, true)
+	d.update(late)
+	if d.policyFresh {
+		t.Fatal("pre-removal reply restored recreated route")
+	}
+	d.update(detailPolicyMsg{visit: d.telemetryGen, route: d.policyRoute, err: errors.New("read failed")})
+	if d.policyFresh {
+		t.Fatal("failed read became fresh")
+	}
+}
+
+func TestTerminalControlsSavedOff(t *testing.T) {
+	for _, tc := range []struct {
+		name                  string
+		intent                map[string]bool
+		running, remote, want bool
+	}{
+		{"explicit Off stopped", map[string]bool{"ollama": false}, false, false, true},
+		{"explicit Off running", map[string]bool{"ollama": false}, true, false, true},
+		{"missing intent", nil, false, false, false},
+		{"missing entry", map[string]bool{"other": false}, false, false, false},
+		{"saved On stopped", map[string]bool{"ollama": true}, false, false, false},
+		{"no peer intent", map[string]bool{"ollama": false}, false, true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d := newNodeDetail(nil, nodeRow{self: !tc.remote})
+			d.engines = []engineStatus{{Engine: "ollama", Running: tc.running}}
+			d.enabledByEngine = tc.intent
+			d.refreshEngines()
+			rows := d.engineTable.Rows()
+			if len(rows) != 1 || strings.Contains(rows[0][0], "saved Off") != tc.want {
+				t.Fatalf("rows = %v", rows)
+			}
+			if rows[0][2] != yesNo(tc.running) {
+				t.Fatalf("runtime changed: %v", rows[0])
+			}
+		})
+	}
+}
+
+func TestTerminalControlsLocalPauseProvenance(t *testing.T) {
+	client, broker := nodeInfoRPCFixture(t)
+	_, msg := terminalControlsReply(t, broker, policyGetCmd(client), &rpc.Message{Result: []byte(`{"availability":"paused","policy":{"pausedBy":"local"}}`)})
+	a := availabilityState{selfID: "me"}
+	a.update(msg)
+	if a.label() != "Paused (local)" {
+		t.Fatalf("label = %q", a.label())
+	}
+	a.update(availNote("other", availAvailable))
+	if a.label() != "Paused (local)" {
+		t.Fatal("wrong-target push changed local pause")
+	}
+	a.update(availNote("me", availPaused))
+	if a.pausedBy != "" {
+		t.Fatal("provenance-less push retained origin")
+	}
+	a.update(NotificationMsg{Msg: &rpc.Message{Method: "policy:changed", Params: []byte(`{"nodeId":"me","policy":{"pausedBy":"peer"}}`)}})
+	if a.label() != "Paused (peer)" {
+		t.Fatalf("policy provenance = %q", a.label())
+	}
+}
+
+func TestTerminalControlsDescriptorRestrictions(t *testing.T) {
+	client, broker := nodeInfoRPCFixture(t)
+	request, result := terminalControlsReply(t, broker, descriptorsCmd(client), &rpc.Message{Result: []byte(`{"engines":[{"version":1,"engine":"strata","family":"strata","label":"Strata","modelNaming":"exact","operations":{"load":{}}},{"version":999,"engine":"invalid","family":"strata","label":"Invalid","modelNaming":"exact"}]}`)})
+	if request.Method != "engine:descriptors" {
+		t.Fatalf("method = %s", request.Method)
+	}
+	msg, ok := result.(descriptorsMsg)
+	if !ok || len(msg.descriptors) != 1 {
+		t.Fatalf("descriptors = %#v", result)
+	}
+	d := newNodeDetail(nil, nodeRow{self: true})
+	d.descriptors = msg.descriptors
+	if d.refuseModelOp("strata", modelActions["load"]) {
+		t.Fatal("declared operation refused")
+	}
+	if !d.refuseModelOp("strata", modelActions["delete"]) || d.status.kind != toastError {
+		t.Fatal("undeclared delete offered")
+	}
+	if _, present := d.descriptors["invalid"]; present {
+		t.Fatal("invalid descriptor accepted")
+	}
+}
+
+func TestTerminalControlsTimeoutContracts(t *testing.T) {
+	load := classifyOpResult("load", "ollama", "load", context.DeadlineExceeded).(engineOpMsg)
+	if !load.detached || load.err != nil {
+		t.Fatalf("load deadline = %+v", load)
+	}
+	stop := classifyOpResult("stop", "ollama", "stop", context.DeadlineExceeded).(engineOpMsg)
+	if stop.detached || !errors.Is(stop.err, context.DeadlineExceeded) {
+		t.Fatalf("stop deadline = %+v", stop)
+	}
+	if got := commandFailure(errors.New("reload before applying")); got != "reload before applying" {
+		t.Fatalf("uncoded error rewritten: %q", got)
+	}
+}
+
+func TestTerminalControlsRestartRefreshUsesExistingTick(t *testing.T) {
+	d := newNodeDetail(nil, nodeRow{key: "self", self: true})
+	d.handleNotification(&rpc.Message{Method: "app:ready"})
+	if !d.policyRefresh {
+		t.Fatal("restart did not request a status refresh")
+	}
+	cmd, _ := d.update(TickMsg{})
+	if cmd == nil || d.policyRefresh {
+		t.Fatal("existing tick did not consume the status refresh")
+	}
+	batch, ok := cmd().(tea.BatchMsg)
+	if !ok || len(batch) != 2 {
+		t.Fatalf("refresh = %T, want policy and intent reads", batch)
+	}
+}
+
+func TestTerminalControlsLateIntentAfterRestart(t *testing.T) {
+	client, broker := nodeInfoRPCFixture(t)
+	d := newNodeDetail(client, nodeRow{key: "self", self: true})
+	_, old := terminalControlsReply(t, broker, d.intentCmd(), &rpc.Message{Result: []byte(`{"enabledByEngine":{"ollama":false}}`)})
+	d.handleNotification(&rpc.Message{Method: "service/broker-restarted"})
+	d.update(old)
+	if d.enabledByEngine != nil {
+		t.Fatal("pre-restart intent restored a saved-Off assertion")
+	}
+	_, current := terminalControlsReply(t, broker, d.intentCmd(), &rpc.Message{Result: []byte(`{"enabledByEngine":{"ollama":true}}`)})
+	d.update(current)
+	if enabled, present := d.enabledByEngine["ollama"]; !present || !enabled {
+		t.Fatal("current intent did not replace the retired read")
+	}
+}
+
+func TestTerminalControlsIntentInvalidationRows(t *testing.T) {
+	for _, event := range []string{"disconnect", "broker restart", "intent changed"} {
+		t.Run(event, func(t *testing.T) {
+			d := newNodeDetail(nil, nodeRow{key: "self", self: true})
+			d.SetSize(100, 40)
+			d.engines = []engineStatus{{Engine: "ollama", Installed: true}}
+			d.update(detailIntentMsg{visit: d.telemetryGen, generation: d.intentGeneration, enabled: map[string]bool{"ollama": false}})
+			if !strings.Contains(d.View(), "saved Off") {
+				t.Fatal("positive control did not render reported Off")
+			}
+			switch event {
+			case "disconnect":
+				d.update(DisconnectedMsg{})
+			case "broker restart":
+				d.handleNotification(&rpc.Message{Method: "service/broker-restarted"})
+			case "intent changed":
+				d.handleNotification(&rpc.Message{Method: "engine:intent-changed"})
+			}
+			if d.enabledByEngine != nil {
+				t.Fatal("intent was not cleared")
+			}
+			if strings.Contains(d.engineTable.Rows()[0][0], "saved Off") || strings.Contains(d.View(), "saved Off") {
+				t.Fatal("retired intent remains in cached rows or rendered view")
+			}
+		})
+	}
+}
+
+func TestTerminalControlsPolicyPushPreservesIntentRead(t *testing.T) {
+	client, broker := nodeInfoRPCFixture(t)
+	d := newNodeDetail(client, nodeRow{key: "self", self: true})
+	_, reply := terminalControlsReply(t, broker, d.intentCmd(), &rpc.Message{Result: []byte(`{"enabledByEngine":{"ollama":false}}`)})
+	d.handleNotification(&rpc.Message{Method: "policy:changed", Params: []byte(`{"nodeId":"self","policy":{"pausedBy":"local"}}`)})
+	d.update(reply)
+	if enabled, present := d.enabledByEngine["ollama"]; !present || enabled {
+		t.Fatal("unrelated policy push discarded the current intent read")
+	}
+	_, current := terminalControlsReply(t, broker, d.intentCmd(), &rpc.Message{Result: []byte(`{"enabledByEngine":{"ollama":true}}`)})
+	d.update(current)
+	if enabled, present := d.enabledByEngine["ollama"]; !present || !enabled {
+		t.Fatal("current On reply was not applied")
+	}
+}
+
+func TestTerminalControlsIntentReadsUseNewestRequest(t *testing.T) {
+	client, broker := nodeInfoRPCFixture(t)
+	d := newNodeDetail(client, nodeRow{key: "self", self: true})
+	_, old := terminalControlsReply(t, broker, d.intentCmd(), &rpc.Message{Result: []byte(`{"enabledByEngine":{"ollama":false}}`)})
+	_, current := terminalControlsReply(t, broker, d.intentCmd(), &rpc.Message{Result: []byte(`{"enabledByEngine":{"ollama":true}}`)})
+	d.update(current)
+	d.update(old)
+	if enabled, present := d.enabledByEngine["ollama"]; !present || !enabled {
+		t.Fatal("older request replaced the newest reported intent")
+	}
+}
+
+func TestTerminalControlsReopenedNodeRejectsOldVisit(t *testing.T) {
+	for _, family := range []string{"policy", "intent"} {
+		t.Run(family, func(t *testing.T) {
+			client, broker := nodeInfoRPCFixture(t)
+			row := nodeRow{key: "self", self: true}
+			oldDetail := newNodeDetail(client, row)
+			oldCmd := oldDetail.policyCmd()
+			oldBody := `{"availability":"paused","policy":{"pausedBy":"local"}}`
+			if family == "intent" {
+				oldCmd = oldDetail.intentCmd()
+				oldBody = `{"enabledByEngine":{"ollama":false}}`
+			}
+			_, oldReply := terminalControlsReply(t, broker, oldCmd, &rpc.Message{Result: []byte(oldBody)})
+			oldDetail.update(DisconnectedMsg{})
+			currentDetail := newNodeDetail(client, row)
+			currentCmd := currentDetail.policyCmd()
+			currentBody := `{"availability":"available","policy":{}}`
+			if family == "intent" {
+				currentCmd = currentDetail.intentCmd()
+				currentBody = `{"enabledByEngine":{"ollama":true}}`
+			}
+			_, currentReply := terminalControlsReply(t, broker, currentCmd, &rpc.Message{Result: []byte(currentBody)})
+			currentDetail.update(currentReply)
+			currentDetail.update(oldReply)
+			if family == "policy" {
+				if !currentDetail.policyFresh || currentDetail.policy.Availability != "available" || currentDetail.policy.Policy.PausedBy != "" {
+					t.Fatalf("previous visit replaced current policy: %+v", currentDetail.policy)
+				}
+			} else if enabled, present := currentDetail.enabledByEngine["ollama"]; !present || !enabled {
+				t.Fatal("previous visit replaced current intent")
+			}
+		})
 	}
 }

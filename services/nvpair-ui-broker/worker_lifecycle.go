@@ -194,6 +194,15 @@ func (b *Broker) enableEngineFacadeWithPortCheck(
 	case lmstudioProxyProfile.Name:
 		return b.enableProxyFacadeWithFallback(ctx, pp, b.lmstudioFacadeSpec(), b.lmstudioFallbackPort)
 	default:
+		if _, dynamic := b.dynamicEngineProfile(profile.Name); dynamic {
+			spec, err := b.dynamicEngineFacadeSpec(profile)
+			if err != nil {
+				return err
+			}
+			return b.enableProxyFacadeWithFallback(ctx, pp, spec, func(failed int) int {
+				return b.dynamicEngineFallbackPort(profile, failed, available)
+			})
+		}
 		return b.enableProxyFacadeWithFallback(
 			ctx,
 			pp,
@@ -329,7 +338,7 @@ func (b *Broker) spawnProxy() (supervisedHandle, error) {
 	// is published even for a node with no facade: the policy and the routing
 	// listener reach the proxy through it.
 	b.setProxyProcessHandle(pp)
-	for _, profile := range engineProxyProfiles {
+	for _, profile := range b.frontedEngineProfiles() {
 		if b.proxyEnabled(profile) {
 			b.setEngineProxyHandle(profile, pp)
 		}
@@ -354,7 +363,7 @@ func (b *Broker) spawnProxy() (supervisedHandle, error) {
 
 	enabled := 0
 	var failed []engineProxyProfile
-	for _, profile := range engineProxyProfiles {
+	for _, profile := range b.frontedEngineProfiles() {
 		if !b.proxyEnabled(profile) {
 			continue
 		}

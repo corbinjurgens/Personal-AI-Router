@@ -36,8 +36,7 @@ const maxStrictCapacitySlots = 1048576
 
 // Internal spaces are valid model identifiers; controls are rejected uniformly.
 func (a *admissionController) validStrictModelKey(k admKey) bool {
-	_, known := engines.ByName(k.engine)
-	return known && k.model != "" && !nodepolicy.IsReservedAlias(k.model) &&
+	return engines.ValidRoutingID(k.engine) && k.model != "" && !nodepolicy.IsReservedAlias(k.model) &&
 		strings.IndexFunc(k.model, unicode.IsControl) < 0 && a.normalize(k.engine, k.model) == k.model
 }
 
@@ -45,11 +44,19 @@ func (a *admissionController) initStrictCapacity() {
 	path, err := appdir.Path("proxy-strict-capacity.json")
 	a.strict = strictAdmissionState{
 		path: path, storageErr: err, markers: make(map[uint64]capacityMarker),
-		models: make(map[admKey]nodeStrictModel), generation: make(map[admKey]uint64), now: timeNow,
+		models: make(map[admKey]nodeStrictModel), qualified: make(map[admKey]installedQualification),
+		generation: make(map[admKey]uint64), registry: qualificationRegistry{}, now: timeNow,
 		timer: newStrictTimer, write: durablefile.WriteFile, read: os.ReadFile,
 	}
 	if err == nil {
 		a.loadStrictCapacity()
+	}
+	if qpath, err := appdir.Path(qualificationFileName); err == nil {
+		registry, err := loadQualificationRegistry(qpath, os.ReadFile)
+		if err != nil {
+			slog.Error("local qualification evidence is unusable; no model is qualified for strict admission", "err", err)
+		}
+		a.strict.registry = registry
 	}
 }
 

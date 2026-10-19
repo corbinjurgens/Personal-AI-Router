@@ -144,7 +144,10 @@ func (b *Broker) engineProxy(p engineProxyProfile) *engineProxyRuntime {
 			b.engineProxies[profile.Name] = &engineProxyRuntime{profile: profile}
 		}
 	})
-	return b.engineProxies[p.Name]
+	if rt := b.engineProxies[p.Name]; rt != nil {
+		return rt
+	}
+	return b.dynamicEngineRuntime(p.Name)
 }
 
 // ollamaState and lmstudioState are shorthands for code that is inherently
@@ -183,6 +186,8 @@ type enableFacadeRequest struct {
 	Port                int      `json:"port,omitempty"`
 	AliasAddresses      []string `json:"aliasAddresses,omitempty"`
 	IgnorePersistedPort bool     `json:"ignorePersistedPort,omitempty"`
+	// Descriptor accompanies a descriptor engine only; see enginecatalog.go.
+	Descriptor *engines.Descriptor `json:"descriptor,omitempty"`
 }
 
 // enableFacadeReply is where the facade actually landed. The bound port is read
@@ -375,9 +380,16 @@ func engineProxyProfileFor(name string) (engineProxyProfile, bool) {
 // A disabled engine still runs the not-resolved branch at its call site, which
 // is what settles its ownership gate. Skipping the branch entirely would leave
 // the gate closed and strand every engine request behind it.
+//
+// A fronted descriptor engine is enabled whenever the binary resolves:
+// --proxy-engines names built-in engines only, and loadDynamicEngines has
+// already applied the fronting rule.
 func (b *Broker) proxyEnabled(p engineProxyProfile) bool {
 	if b.proxyPath == "" {
 		return false
+	}
+	if _, dynamic := b.dynamicEngineProfile(p.Name); dynamic {
+		return true
 	}
 	for _, name := range b.proxyEngines {
 		if name == p.Name {

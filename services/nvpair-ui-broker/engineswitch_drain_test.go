@@ -46,7 +46,7 @@ func TestSwitchDrainActiveSourceMustReachFreshZero(t *testing.T) {
 	for _, call := range h.proxy.snapshot() {
 		order = append(order, call.method)
 	}
-	wantPrefix := []string{"llamacpp:node/set-local-backend", nodepolicy.MethodSetEngineDrain, nodepolicy.MethodInvalidateEngine, nodepolicy.MethodInvalidateEngine, nodepolicy.MethodAdmissionSnapshot}
+	wantPrefix := []string{nodepolicy.MethodSetModelIdentity, nodepolicy.MethodSetModelIdentity, "llamacpp:node/set-local-backend", nodepolicy.MethodSetEngineDrain, nodepolicy.MethodInvalidateEngine, nodepolicy.MethodInvalidateEngine, nodepolicy.MethodAdmissionSnapshot}
 	if len(order) < len(wantPrefix) || !reflect.DeepEqual(order[:len(wantPrefix)], wantPrefix) {
 		t.Fatalf("drain order = %v", order)
 	}

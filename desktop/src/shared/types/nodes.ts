@@ -4,6 +4,7 @@
 import { NodeStatuses } from '@/shared/constants/nodes'
 import { SystemTopology } from '@/shared/types/hardware'
 import { PlatformDisplayName } from '@/shared/types/platform'
+import type { NodePerformance } from '@/shared/types/performance'
 
 export type NodeStatus = (typeof NodeStatuses)[number]
 
@@ -16,4 +17,5 @@ export interface NodeItem {
     allIpAddresses: string[]
     topology: SystemTopology
     os: PlatformDisplayName
+    performance?: NodePerformance
 }

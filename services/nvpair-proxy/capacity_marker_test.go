@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"nvpair-shared/durablefile"
-	"nvpair-shared/nodepolicy"
 )
 
 func readCapacity(t *testing.T, path string) capacityDocument {
@@ -49,7 +48,7 @@ func TestStrictQuarantineSurvivesRestartUntilEvidence(t *testing.T) {
 			c.Advance(24 * time.Hour)
 			req := strictRequest()
 			req.QueueBudgetMs = 0
-			if _, err := restarted.a.AdmitStrict(context.Background(), "ollama", "m", req); !errors.Is(err, errStrictOccupied) {
+			if _, err := restarted.a.admitStrictNow(context.Background(), "ollama", "m", req); !errors.Is(err, errStrictOccupied) {
 				t.Fatalf("error=%v", err)
 			}
 			if err := restarted.a.reconcileStrictCapacity("ollama", "m", strictQualifiedComplete); err == nil {
@@ -117,6 +116,24 @@ func TestStrictClearFailureRetainsCapacity(t *testing.T) {
 	}
 }
 
+// A durable slot held by a descriptor engine is ordinary capacity, not a
+// corrupt document: restarting must keep it counted rather than quarantining
+// strict admission for every engine.
+func TestStrictCapacityAdoptsDescriptorEngineSlot(t *testing.T) {
+	h := newStrictHarness(t)
+	doc := `{"version":1,"slots":[{"id":4,"engine":"llamacpp-custom","model":"org/model:Q4_K_M"}]}`
+	if err := os.WriteFile(h.a.strict.path, []byte(doc), 0600); err != nil {
+		t.Fatal(err)
+	}
+	h.a.loadStrictCapacity()
+	if h.a.strict.storageErr != nil {
+		t.Fatalf("descriptor engine slot treated as corrupt: %v", h.a.strict.storageErr)
+	}
+	if h.a.currentActive() != 1 || h.a.activeByEngine["llamacpp-custom"] != 1 || h.a.nextTicket != 4 {
+		t.Fatalf("slot not adopted: active=%d byEngine=%v next=%d", h.a.currentActive(), h.a.activeByEngine, h.a.nextTicket)
+	}
+}
+
 func TestStrictCorruptCapacityFailsClosed(t *testing.T) {
 	for _, tc := range []struct{ name, document string }{
 		{"unsupported version", `{"version":99,"slots":[]}`},
@@ -124,13 +141,13 @@ func TestStrictCorruptCapacityFailsClosed(t *testing.T) {
 		{"null version", `{"version":null,"slots":[]}`},
 		{"missing slots", `{"version":1}`},
 		{"null slots", `{"version":1,"slots":null}`},
-		{"unknown engine", `{"version":1,"slots":[{"id":1,"engine":"unknown","model":"m:latest"}]}`},
+		{"unknown engine", `{"version":1,"slots":[{"id":1,"engine":"un/known","model":"m:latest"}]}`},
 		{"duplicate id", `{"version":1,"slots":[{"id":1,"engine":"ollama","model":"m:latest"},{"id":1,"engine":"ollama","model":"n:latest"}]}`},
 		{"zero id", `{"version":1,"slots":[{"id":0,"engine":"ollama","model":"m:latest"}]}`},
 		{"invalid model", `{"version":1,"slots":[{"id":1,"engine":"ollama","model":" "}]}`},
 		{"unnormalized model", `{"version":1,"slots":[{"id":1,"engine":"ollama","model":"m"}]}`},
 		{"reserved model", `{"version":1,"slots":[{"id":1,"engine":"lmstudio","model":"weak"}]}`},
-		{"invalid later slot", `{"version":1,"slots":[{"id":1,"engine":"ollama","model":"m:latest"},{"id":2,"engine":"unknown","model":"n"}]}`},
+		{"invalid later slot", `{"version":1,"slots":[{"id":1,"engine":"ollama","model":"m:latest"},{"id":2,"engine":"un/known","model":"n"}]}`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h := newStrictHarness(t)
@@ -138,7 +155,7 @@ func TestStrictCorruptCapacityFailsClosed(t *testing.T) {
 				t.Fatal(err)
 			}
 			h.a.loadStrictCapacity()
-			if _, err := h.a.AdmitStrict(context.Background(), "ollama", "m", strictRequest()); !errors.Is(err, errStrictUnavailable) {
+			if _, err := h.a.admitStrictNow(context.Background(), "ollama", "m", strictRequest()); !errors.Is(err, errStrictUnavailable) {
 				t.Fatalf("error=%v", err)
 			}
 			if h.a.currentActive() != 0 || len(h.a.strict.markers) != 0 || len(h.a.inflight) != 0 || h.a.nextTicket != 0 {
@@ -162,12 +179,9 @@ func TestStrictValidCapacityRestoresAllSlots(t *testing.T) {
 func TestStrictSpacedModelWriterRecoveryRoundTrip(t *testing.T) {
 	h := newStrictHarness(t)
 	const model = "folder/model name"
-	capability := nodepolicy.StrictAdmissionCapability{Version: 1, Models: []nodepolicy.StrictAdmissionModel{{Engine: "lmstudio", Model: model, MaxConcurrent: 1, Identity: strictRequest().Identity}}}
-	if err := h.a.installStrictCapability(capability); err != nil {
-		t.Fatal(err)
-	}
+	installQualified(t, h.a, admKey{engine: "lmstudio", model: model})
 	h.a.setResidency(map[string][]string{"lmstudio": {model}})
-	ticket, err := h.a.AdmitStrict(context.Background(), "lmstudio", model, strictRequest())
+	ticket, err := h.a.admitStrictNow(context.Background(), "lmstudio", model, strictRequest())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -176,9 +190,7 @@ func TestStrictSpacedModelWriterRecoveryRoundTrip(t *testing.T) {
 	}
 	restarted := newStrictHarness(t)
 	restarted.a.strict.path = h.a.strict.path
-	if err := restarted.a.installStrictCapability(capability); err != nil {
-		t.Fatal(err)
-	}
+	installQualified(t, restarted.a, admKey{engine: "lmstudio", model: model})
 	restarted.a.setResidency(map[string][]string{"lmstudio": {model}})
 	restarted.a.loadStrictCapacity()
 	if restarted.a.strict.storageErr != nil || restarted.a.currentActive() != 1 {
@@ -186,7 +198,7 @@ func TestStrictSpacedModelWriterRecoveryRoundTrip(t *testing.T) {
 	}
 	req := strictRequest()
 	req.QueueBudgetMs = 0
-	if next, err := restarted.a.AdmitStrict(context.Background(), "lmstudio", model, req); next != nil || !errors.Is(err, errStrictOccupied) {
+	if next, err := restarted.a.admitStrictNow(context.Background(), "lmstudio", model, req); next != nil || !errors.Is(err, errStrictOccupied) {
 		t.Fatalf("ticket=%v error=%v", next, err)
 	}
 	ticket.Finish(strictQualifiedComplete)
@@ -195,8 +207,9 @@ func TestStrictSpacedModelWriterRecoveryRoundTrip(t *testing.T) {
 func TestStrictModelControlsRejectedConsistently(t *testing.T) {
 	h := newStrictHarness(t)
 	const model = "folder/model\x01name"
-	if err := h.a.installStrictCapability(nodepolicy.StrictAdmissionCapability{Version: 1, Models: []nodepolicy.StrictAdmissionModel{{Engine: "lmstudio", Model: model, MaxConcurrent: 1, Identity: strictRequest().Identity}}}); err == nil {
-		t.Fatal("control accepted by installer")
+	installQualified(t, h.a, admKey{engine: "lmstudio", model: model})
+	if len(h.a.strict.models) != 0 {
+		t.Fatalf("control accepted by the installer: %+v", h.a.strict.models)
 	}
 	h.a.strict.markers[1] = capacityMarker{ID: 1, Engine: "lmstudio", Model: model}
 	if err := h.a.persistStrictCapacityLocked(); err == nil {
@@ -270,7 +283,7 @@ func TestStrictFailedRecoveryReconciliationPreservesBytes(t *testing.T) {
 			if writes != 0 || !bytes.Equal(got, original) {
 				t.Fatal("reconciliation rewrote untrusted storage")
 			}
-			if _, err := h.a.AdmitStrict(context.Background(), "ollama", "m", strictRequest()); !errors.Is(err, errStrictUnavailable) {
+			if _, err := h.a.admitStrictNow(context.Background(), "ollama", "m", strictRequest()); !errors.Is(err, errStrictUnavailable) {
 				t.Fatalf("admission error=%v", err)
 			}
 			restarted := newStrictHarness(t)
@@ -278,7 +291,7 @@ func TestStrictFailedRecoveryReconciliationPreservesBytes(t *testing.T) {
 			restarted.a.loadStrictCapacity()
 			req := strictRequest()
 			req.QueueBudgetMs = 0
-			_, err = restarted.a.AdmitStrict(context.Background(), "ollama", "m", req)
+			_, err = restarted.a.admitStrictNow(context.Background(), "ollama", "m", req)
 			if scenario == "corrupt document" {
 				if !errors.Is(err, errStrictUnavailable) {
 					t.Fatalf("restart admission error=%v", err)

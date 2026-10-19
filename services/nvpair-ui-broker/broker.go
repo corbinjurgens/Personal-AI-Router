@@ -316,6 +316,10 @@ type Broker struct {
 	engineProxiesOnce sync.Once
 	engineProxies     map[string]*engineProxyRuntime
 
+	// dynamicEngines is the descriptor engines fronted beyond the built-in
+	// table; see enginecatalog.go.
+	dynamicEngines dynamicEngineCatalog
+
 	// workloadsMu guards workloadsSubscribed. The workloads:* stream is
 	// opt-in too: emitWorkloadEvent (called on the proxy reader goroutine
 	// for local echoes and on the workload-manager reader goroutine for
@@ -791,6 +795,9 @@ func (b *Broker) forwardProxyProcessNotification(
 		}
 	default:
 		profile, known := engineProxyProfileFor(engine)
+		if !known {
+			profile, known = b.dynamicEngineProfile(engine)
+		}
 		if known {
 			b.forwardDefaultEngineProxyNotification(profile, method, params)
 			return
@@ -1665,11 +1672,12 @@ func (b *Broker) Serve(ctx context.Context) error {
 		defer b.settingsSup.Stop()
 	}
 	b.prepareOllamaHostAliasCandidate()
-	b.engineMgrSup = b.startOptionalWorker("engine-manager", b.engineMgrPath, b.spawnEngineMgr, func() { b.setEngineMgr(nil); b.clearEngineRelaySub() })
+	b.engineMgrSup = b.startOptionalWorker("engine-manager", b.engineMgrPath, b.spawnEngineMgr, func() { b.setEngineMgr(nil); b.clearEngineRelaySub(); b.clearEngineManagerIdentity() })
 	if b.engineMgrSup != nil {
 		defer b.engineMgrSup.Stop()
 	}
 	b.migrateLegacyEngineSettings()
+	b.loadDynamicEngines()
 	b.prepareEnabledFacades()
 
 	// node-info is an auxiliary worker: spawning it lets the broker's own
@@ -1723,7 +1731,7 @@ func (b *Broker) Serve(ctx context.Context) error {
 		}
 		b.finishEngineProxyStartup(profile)
 	}
-	b.startProxySupervision(anyProxyEnabled)
+	b.startProxySupervision(anyProxyEnabled || len(b.dynamicEngineProfiles()) > 0)
 	defer b.shutdownProxySupervision()
 
 	// Restore engines and begin advertising only after both managed proxy
@@ -1743,6 +1751,7 @@ func (b *Broker) Serve(ctx context.Context) error {
 			b.runAutoAdvertiseEngine(ctx, profile)
 		})
 	}
+	availabilityRunners = append(availabilityRunners, b.dynamicEngineAvailabilityRunners()...)
 	go b.runEngineAvailabilityAfterPortGates(ctx, availabilityRunners...)
 
 	// nvpair-workload-manager is another auxiliary worker: it relays local

@@ -27,14 +27,9 @@ func TestInvalidateEngineFencesHeldTicketsAndPreservesQuarantine(t *testing.T) {
 	}
 	quarantined.Finish(strictUncertain)
 	// A second model permits a held ticket alongside uncertain capacity.
-	if err := h.a.installStrictCapability(nodepolicy.StrictAdmissionCapability{Version: 1, Models: []nodepolicy.StrictAdmissionModel{
-		{Engine: "ollama", Model: "m", MaxConcurrent: 1, Identity: strictRequest().Identity},
-		{Engine: "ollama", Model: "n", MaxConcurrent: 1, Identity: strictRequest().Identity},
-	}}); err != nil {
-		t.Fatal(err)
-	}
+	installQualified(t, h.a, admKey{engine: "ollama", model: "m"}, admKey{engine: "ollama", model: "n"})
 	h.a.setResidency(map[string][]string{"ollama": {"m", "n"}})
-	held, err := h.a.AdmitStrict(context.Background(), "ollama", "n", strictRequest())
+	held, err := h.a.admitStrictNow(context.Background(), "ollama", "n", strictRequest())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -70,14 +65,9 @@ func TestInvalidateEngineFencesHeldTicketsAndPreservesQuarantine(t *testing.T) {
 
 func TestInvalidateEnginePreservesOtherEngineEligibility(t *testing.T) {
 	h := newStrictHarness(t)
-	if err := h.a.installStrictCapability(nodepolicy.StrictAdmissionCapability{Version: 1, Models: []nodepolicy.StrictAdmissionModel{
-		{Engine: "ollama", Model: "m", MaxConcurrent: 1, Identity: strictRequest().Identity},
-		{Engine: "lmstudio", Model: "m", MaxConcurrent: 1, Identity: strictRequest().Identity},
-	}}); err != nil {
-		t.Fatal(err)
-	}
+	installQualified(t, h.a, admKey{engine: "ollama", model: "m"}, admKey{engine: "lmstudio", model: "m"})
 	h.a.setResidency(map[string][]string{"ollama": {"m"}, "lmstudio": {"m"}})
-	held, err := h.a.AdmitStrict(context.Background(), "lmstudio", "m", strictRequest())
+	held, err := h.a.admitStrictNow(context.Background(), "lmstudio", "m", strictRequest())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -92,14 +82,14 @@ func TestInvalidateEnginePreservesOtherEngineEligibility(t *testing.T) {
 		t.Fatalf("other engine's held ticket rejected: %v", err)
 	}
 	held.Finish(strictQualifiedComplete)
-	next, err := h.a.AdmitStrict(context.Background(), "lmstudio", "m", strictRequest())
+	next, err := h.a.admitStrictNow(context.Background(), "lmstudio", "m", strictRequest())
 	if err != nil {
 		t.Fatalf("other engine lost eligibility: %v", err)
 	}
 	next.Finish(strictNotDispatched)
 	// The same switch operation can invalidate the target independently.
 	h.a.invalidateEngine(engineInvalidation("lmstudio", "switch-1"))
-	if _, err := h.a.AdmitStrict(context.Background(), "lmstudio", "m", strictRequest()); !errors.Is(err, errStrictUnavailable) {
+	if _, err := h.a.admitStrictNow(context.Background(), "lmstudio", "m", strictRequest()); !errors.Is(err, errStrictUnavailable) {
 		t.Fatalf("target engine not invalidated: %v", err)
 	}
 }
@@ -127,6 +117,33 @@ func TestInvalidateEngineRepeatDoesNotFenceFreshCapability(t *testing.T) {
 	h.a.invalidateEngine(engineInvalidation("ollama", "switch-2"))
 	if h.a.strict.generation[key] != generation+1 {
 		t.Fatal("fresh operation did not invalidate")
+	}
+}
+
+func TestIdentityWithdrawalAndSwitchInvalidationShareCapacityFence(t *testing.T) {
+	h := newStrictHarness(t)
+	held := mustStrictTicket(t, h.a)
+	defer held.Finish(strictNotDispatched)
+	key := admKey{engine: "ollama", model: "m:latest"}
+	generation := h.a.strict.generation[key]
+	h.a.setModelIdentity(nil)
+	if h.a.strict.generation[key] != generation+1 {
+		t.Fatal("identity withdrawal did not fence the old installation")
+	}
+	h.a.invalidateEngine(engineInvalidation("ollama", "switch-1"))
+	if h.a.strict.generation[key] != generation+1 {
+		t.Fatal("switch invalidation counted the withdrawn installation again")
+	}
+	h.a.setPolicy(h.a.currentPolicy())
+	if got := h.a.StrictReadiness(); got.Capability != nil {
+		t.Fatalf("policy refresh restored withdrawn identity: %+v", got)
+	}
+	h.a.setModelIdentity(map[string]nodepolicy.EngineIdentity{"ollama": testIdentity("m")})
+	if err := held.BeforeStrictDispatch(); !errors.Is(err, errStrictUnavailable) {
+		t.Fatalf("old ticket survived identity re-observation: %v", err)
+	}
+	if got := h.a.StrictReadiness(); got.Capability == nil || len(got.Capability.Models) != 1 {
+		t.Fatalf("fresh qualified identity was not restored: %+v", got)
 	}
 }
 
@@ -160,7 +177,7 @@ func TestInvalidateEngineLeavesDispatchedWorkRunning(t *testing.T) {
 	h := newStrictHarness(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	ticket, err := h.a.AdmitStrict(ctx, "ollama", "m", strictRequest())
+	ticket, err := h.a.admitStrictNow(ctx, "ollama", "m", strictRequest())
 	if err != nil {
 		t.Fatal(err)
 	}

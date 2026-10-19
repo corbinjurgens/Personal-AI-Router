@@ -44,7 +44,6 @@
 - ⚠️ nvpair-proxy → facade/enable
 - ⚠️ nvpair-proxy → node/selected
 - ⚠️ nvpair-proxy → node/set-local-backend
-- ⚠️ nvpair-ui-broker → admission/strict-readiness
 - ⚠️ nvpair-ui-broker → discovery:unsubscribe
 - ⚠️ nvpair-ui-broker → engine:configure-launch
 - ⚠️ nvpair-ui-broker → engine:set-port
@@ -93,6 +92,7 @@
 |---|---|---|
 | `engine:install-progress` | notification (we consume) | ✅ yes |
 | `engine:intent-changed` | notification (we consume) | ➖ ignored |
+| `engine:model-identity` | notification (we consume) | ➖ ignored |
 | `engine:models-changed` | notification (we consume) | ✅ yes |
 | `engine:pull-progress` | notification (we consume) | ✅ yes |
 | `engine:ready` | notification (we consume) | ✅ yes |
@@ -251,6 +251,7 @@
 
 | Method | Direction | In bridge? |
 |---|---|---|
+| `app:ready` | request (we call) | ✅ yes |
 | `cluster:identity-changed` | request (we call) | ✅ yes |
 | `cluster:invite-canceled` | request (we call) | ✅ yes |
 | `cluster:invite-declined` | request (we call) | ✅ yes |
@@ -259,6 +260,7 @@
 | `cluster:invite-received` | request (we call) | ✅ yes |
 | `discovery:nodes-changed` | request (we call) | ✅ yes |
 | `engine:install-progress` | request (we call) | ✅ yes |
+| `engine:intent-changed` | request (we call) | ➖ ignored |
 | `engine:models-changed` | request (we call) | ✅ yes |
 | `engine:pull-progress` | request (we call) | ✅ yes |
 | `engine:remote-progress` | request (we call) | ✅ yes |
@@ -267,7 +269,11 @@
 | `engine:state-changed` | request (we call) | ✅ yes |
 | `error` | request (we call) | ✅ yes |
 | `errors:update` | request (we call) | ✅ yes |
+| `node:availability-changed` | request (we call) | ✅ yes |
 | `nodes:changed` | request (we call) | ✅ yes |
+| `performance:changed` | request (we call) | ✅ yes |
+| `policy:changed` | request (we call) | ✅ yes |
+| `service/broker-restarted` | request (we call) | ✅ yes |
 | `workloads:remove` | request (we call) | ✅ yes |
 | `workloads:upsert` | request (we call) | ✅ yes |
 
@@ -287,11 +293,10 @@
 | `errors:clear` | notification (we consume) | ✅ yes |
 | `errors:report` | notification (we consume) | ✅ yes |
 | `errors:update` | notification (we consume) | ✅ yes |
-| `performance:changed` | notification (we consume) | ➖ ignored |
+| `performance:changed` | notification (we consume) | ✅ yes |
 | `policy:reply` | notification (we consume) | ➖ ignored |
 | `workloads:remove` | notification (we consume) | ✅ yes |
 | `workloads:upsert` | notification (we consume) | ✅ yes |
-| `admission/strict-readiness` | request (we call) | ⚠️ not called |
 | `connection/cluster-auto-sync` | request (we call) | ➖ ignored |
 | `connection/cluster-identity` | request (we call) | ✅ yes |
 | `discovery:get-node-info` | request (we call) | ✅ yes |
@@ -303,6 +308,7 @@
 | `engine:get-settings` | request (we call) | ✅ yes |
 | `engine:install` | request (we call) | ✅ yes |
 | `engine:intent-changed` | request (we call) | ➖ ignored |
+| `engine:model-identity` | request (we call) | ➖ ignored |
 | `engine:models-changed` | request (we call) | ✅ yes |
 | `engine:preview-settings` | request (we call) | ✅ yes |
 | `engine:set-port` | request (we call) | ⚠️ not called |

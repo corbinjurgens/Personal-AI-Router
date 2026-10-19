@@ -95,6 +95,13 @@ the engine's lifecycle lock like `engine:restart` but only act on that record.
 
 Notifications (service → caller): `engine:ready{version}`,
 `engine:state-changed{EngineStatus}`,
+`engine:model-identity{engines}` (a whole snapshot keyed by engine, each entry
+`{engineRunId, launchDigest, modelDigests}` with `modelDigests` keyed by model
+name; emitted after the loaded-model watcher's first sweep and whenever the
+snapshot changes; absent engines have no current identity. Only running owned
+processes with a known launch digest are included, excluding adopted services
+and command-mode daemons; model digests must come from an inventory of the same
+run and contain lowercase SHA-256 hex),
 `engine:models-changed{engine, models}` — pushed when an engine's set of
 loaded (in-memory) models changes (explicit load/unload, JIT auto-load, or
 TTL/idle eviction); `models` is the full `engine:models` shape (incl.

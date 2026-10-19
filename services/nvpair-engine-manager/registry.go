@@ -291,6 +291,11 @@ type Action struct {
 type ActionResult struct {
 	Array string `json:"array"` // top-level array field, e.g. "models" / "data"
 	Field string `json:"field"` // string field per element, e.g. "name" / "id"
+	// Digest, when set on list_models, names the per-element string field that
+	// holds the model's immutable content identity as lowercase SHA-256 hex
+	// (Ollama /api/tags "digest"). Engines without one report no content
+	// identity, which keeps their models out of strict admission.
+	Digest string `json:"digest,omitempty"`
 	// Match, when set, keeps only array elements that pass the ResultMatch
 	// filter. It lets loaded_models reuse the same extractor as list_models
 	// across engines whose list endpoint tags residency (LM Studio's
@@ -945,6 +950,9 @@ func (a *Action) validate(name string) error {
 	}
 	if a.Result != nil && (strings.TrimSpace(a.Result.Array) == "" || strings.TrimSpace(a.Result.Field) == "") {
 		return fmt.Errorf("action %q: result.array and result.field are required when result is set", name)
+	}
+	if a.Result != nil && a.Result.Digest != "" && (name != "list_models" || strings.TrimSpace(a.Result.Digest) != a.Result.Digest) {
+		return fmt.Errorf("action %q: result.digest is only valid on list_models and must name a field", name)
 	}
 	if a.Result != nil && a.Result.Match != nil {
 		m := a.Result.Match

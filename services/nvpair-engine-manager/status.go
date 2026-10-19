@@ -177,6 +177,7 @@ func (e *Executor) reconcilePresence(ctx context.Context, engine string, st *eng
 		}
 		st.installed = pathInstalled
 		st.running = false
+		st.runID = ""
 		st.healthy = false
 		st.adopted = false
 		st.proc = nil
@@ -235,6 +236,11 @@ func (e *Executor) reconcilePresence(ctx context.Context, engine string, st *eng
 	// internal refresh as a state transition for an already-adopted service,
 	// or every status poll would emit a duplicate state-changed event.
 	changed := !st.running || !st.healthy || !st.adopted || st.port != port
+	// A service that was not running, healthy and adopted on this port may be
+	// another process now, so its adoption is a new run.
+	if changed || st.runID == "" {
+		st.runID = newEngineRunID()
+	}
 	st.installed = true
 	st.running = true
 	st.healthy = true
@@ -260,5 +266,10 @@ func (e *Executor) emitState(engine string) {
 	if err != nil {
 		return
 	}
+	e.publishMu.Lock()
 	e.notify("engine:state-changed", e.snapshot(engine, st))
+	e.publishMu.Unlock()
+	// A start, stop or adoption may have changed the engine's run identity;
+	// the watcher's next sweep reports it (model_identity.go).
+	e.pokeLoaded()
 }

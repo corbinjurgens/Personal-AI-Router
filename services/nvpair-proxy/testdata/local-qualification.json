@@ -1,0 +1,145 @@
+{
+  "artifact": {
+    "version": 1,
+    "qualifications": [
+      {
+        "id": "synthetic-fixture",
+        "revision": "1",
+        "engine": "ollama",
+        "model": "fixture-model:latest",
+        "modelDigests": ["1111111111111111111111111111111111111111111111111111111111111111"],
+        "launchDigests": ["2222222222222222222222222222222222222222222222222222222222222222"],
+        "requestOptions": {"options": {"num_ctx": 4096}, "keep_alive": "5m"},
+        "tokenizer": "synthetic-byte-level-bpe",
+        "chatTemplate": "synthetic-chatml",
+        "contextTokens": 4096,
+        "maxOutputTokens": 1024,
+        "routes": ["/v1/chat/completions"],
+        "accounting": {
+          "method": "utf8-bytes",
+          "requestOverheadTokens": 8,
+          "messageOverheadTokens": 4,
+          "toolOverheadTokens": 16,
+          "schemaOverheadTokens": 16
+        },
+        "evidence": "Synthetic test fixture. It qualifies no real model, engine, tokenizer or chat template, and its digests name no real content or launch. Actual qualification evidence is produced on the MSI and is not represented here."
+      }
+    ]
+  },
+  "cases": [
+    {
+      "name": "english",
+      "body": {"model": "fixture-model", "messages": [{"role": "user", "content": "Hello, world"}], "max_tokens": 64},
+      "inputTokens": 28,
+      "outputTokens": 64
+    },
+    {
+      "name": "japanese with a system message",
+      "body": {"model": "fixture-model", "messages": [{"role": "system", "content": "You are concise."}, {"role": "user", "content": "日本語で答えてください。"}], "max_completion_tokens": 256, "stream": true, "stream_options": {"include_usage": true}},
+      "inputTokens": 78,
+      "outputTokens": 256
+    },
+    {
+      "name": "tool call and tool result",
+      "body": {
+        "model": "fixture-model",
+        "messages": [
+          {"role": "user", "content": "東京の天気は？"},
+          {"role": "assistant", "content": null, "tool_calls": [{"id": "call_1", "type": "function", "function": {"name": "get_weather", "arguments": "{\"city\":\"東京\"}"}}]},
+          {"role": "tool", "tool_call_id": "call_1", "content": "{\"temp_c\":21}"}
+        ],
+        "tools": [{"type": "function", "function": {"name": "get_weather", "description": "Current weather", "parameters": {"type": "object", "properties": {"city": {"type": "string"}}, "required": ["city"]}}}],
+        "tool_choice": "auto",
+        "max_tokens": 128,
+        "temperature": 0
+      },
+      "inputTokens": 376,
+      "outputTokens": 128
+    },
+    {
+      "name": "repeated tool calls with escaped arguments",
+      "body": {
+        "model": "fixture-model",
+        "messages": [
+          {"role": "user", "content": "hi"},
+          {"role": "assistant", "content": null, "tool_calls": [
+            {"id": "c0", "type": "function", "function": {"name": "f", "arguments": "{\"q\": \"\\\"x\\\"\\n\"}"}},
+            {"id": "c1", "type": "function", "function": {"name": "f", "arguments": "{\"q\": \"\\\"x\\\"\\n\"}"}},
+            {"id": "c2", "type": "function", "function": {"name": "f", "arguments": "{\"q\": \"\\\"x\\\"\\n\"}"}}
+          ]}
+        ],
+        "max_tokens": 8
+      },
+      "inputTokens": 310,
+      "outputTokens": 8
+    },
+    {
+      "name": "json schema",
+      "body": {"model": "fixture-model", "messages": [{"role": "user", "content": "Reply in JSON."}], "response_format": {"type": "json_schema", "json_schema": {"name": "answer", "schema": {"type": "object", "properties": {"answer": {"type": "string"}}, "required": ["answer"]}}}, "max_tokens": 32, "max_completion_tokens": 32},
+      "inputTokens": 133,
+      "outputTokens": 32
+    },
+    {
+      "name": "text parts",
+      "body": {"model": "fixture-model", "messages": [{"role": "user", "content": [{"type": "text", "text": "First part. "}, {"type": "text", "text": "二番目。"}]}], "max_tokens": 16, "seed": 7, "stop": ["\n\n"]},
+      "inputTokens": 40,
+      "outputTokens": 16
+    },
+    {
+      "name": "no output bound",
+      "body": {"model": "fixture-model", "messages": [{"role": "user", "content": "hi"}]},
+      "reject": "needs max_tokens"
+    },
+    {
+      "name": "contradictory output bounds",
+      "body": {"model": "fixture-model", "messages": [{"role": "user", "content": "hi"}], "max_tokens": 10, "max_completion_tokens": 20},
+      "reject": "disagree"
+    },
+    {
+      "name": "output above the qualified ceiling",
+      "body": {"model": "fixture-model", "messages": [{"role": "user", "content": "hi"}], "max_tokens": 1025},
+      "reject": "exceeds the qualified ceiling"
+    },
+    {
+      "name": "request context override",
+      "body": {"model": "fixture-model", "messages": [{"role": "user", "content": "hi"}], "max_tokens": 8, "options": {"num_ctx": 32768}},
+      "reject": "field \"options\" is not supported"
+    },
+    {
+      "name": "image part",
+      "body": {"model": "fixture-model", "messages": [{"role": "user", "content": [{"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}}]}], "max_tokens": 8},
+      "reject": "only text parts"
+    },
+    {
+      "name": "several choices",
+      "body": {"model": "fixture-model", "messages": [{"role": "user", "content": "hi"}], "max_tokens": 8, "n": 2},
+      "reject": "field \"n\" is not supported"
+    },
+    {
+      "name": "unknown message field",
+      "body": {"model": "fixture-model", "messages": [{"role": "user", "content": "hi", "images": ["AAAA"]}], "max_tokens": 8},
+      "reject": "unsupported shape"
+    },
+    {
+      "name": "tool call from a user",
+      "body": {"model": "fixture-model", "messages": [{"role": "user", "content": "hi", "tool_calls": [{"id": "c", "type": "function", "function": {"name": "f", "arguments": "{}"}}]}], "max_tokens": 8},
+      "reject": "belong to an assistant message"
+    },
+    {
+      "name": "repeated key",
+      "rawBody": "{\"model\":\"fixture-model\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"max_tokens\":8,\"max_tokens\":9}",
+      "reject": "repeats a key"
+    },
+    {
+      "name": "case-variant key",
+      "rawBody": "{\"model\":\"fixture-model\",\"messages\":[{\"role\":\"user\",\"Role\":\"system\",\"content\":\"hi\"}],\"max_tokens\":8}",
+      "reject": "repeats a key"
+    },
+    {
+      "name": "unsupported route",
+      "route": "/api/chat",
+      "body": {"model": "fixture-model", "messages": [{"role": "user", "content": "hi"}], "max_tokens": 8},
+      "reject": "is not qualified"
+    }
+  ]
+}

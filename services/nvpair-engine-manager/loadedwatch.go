@@ -56,6 +56,7 @@ func (e *Executor) watchLoaded(ctx context.Context) {
 
 	var prev map[string][]string
 	var lastInventory time.Time
+	var identity *modelIdentityParams
 	seeded := false
 	for {
 		poked := false
@@ -74,6 +75,9 @@ func (e *Executor) watchLoaded(ctx context.Context) {
 		}
 		changed, next, res := e.sweepLoaded(ctx, prev, fullInventory)
 		prev = next
+		// Identity is reported from the first sweep on: its consumer starts
+		// with none, so it must never wait for a change.
+		identity = e.publishModelIdentity(identity)
 		if !seeded {
 			seeded = true
 			continue // first sweep only seeds the baseline

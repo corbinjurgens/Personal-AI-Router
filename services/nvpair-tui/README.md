@@ -112,6 +112,26 @@ Both panes work on remote cluster peers through the engine manager's
 ownership on the target host, so they are hidden on a peer rather than offered
 and then failed.
 
+Load, eject and delete use the canonical `engine:load-model`,
+`engine:unload-model` and `engine:delete-model` methods and their remote
+counterparts. The validated `engine:descriptors` projection restricts model
+operations to those declared by each engine.
+
+The detail header reports the selected target's live availability and reported
+`policy.pausedBy` provenance. Failed reads, disconnection and loss of cluster
+admission mark availability unavailable; another target's replies and pushes
+cannot refresh it. The local header also retains reported pause provenance.
+Engine rows continue to show actual installed, running and healthy state.
+`saved Off` appears only for an explicit false local `enabledByEngine` intent
+entry. A stopped engine alone does not establish saved Off. There is no remote
+intent projection or `offBy` client projection, so saved-Off origin is not shown.
+
+Lifecycle, model, settings and availability refusals retain the target's message
+and RPC code. `-32011` means a local veto; `-32010` means a revision conflict
+requiring reload and retry. Refusals do not retry or resume work automatically.
+Existing long-operation timeouts still report continuing work rather than
+success, while quick-operation timeouts remain failures.
+
 A remote node's models come from the discovery snapshot, which the broker
 enriches from each peer's engine manager — no extra request. This machine's come
 from `engine:models` and stay live through `engine:models-changed`.

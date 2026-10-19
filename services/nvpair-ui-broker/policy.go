@@ -53,6 +53,7 @@ const (
 	engineStateChangedMethod   = "engine:state-changed"
 	engineModelsChangedMethod  = "engine:models-changed"
 	engineNodeProjectionMethod = "engine:node-projection"
+	engineModelIdentityMethod  = "engine:model-identity"
 	policyRelayRequestMethod   = "policy:request"
 	policyRelayReplyMethod     = "policy:reply"
 	policyRelayCancelMethod    = "policy:cancel"
@@ -157,6 +158,12 @@ type policyRuntime struct {
 	loaded  map[string][]string
 	intent  map[string]bool
 	drains  map[string]bool
+
+	// Strict admission identity (model_identity.go): engine-manager's run,
+	// launch and model content identity per engine, and this broker's
+	// applied-settings fingerprint per engine. The proxy gets their join.
+	engineIdentity   map[string]engineManagerIdentity
+	settingsIdentity map[string]string
 
 	// Idle bookkeeping: when an engine was seen to start, when it last gained a
 	// loaded model, and the baseline the idle policy last acted on.
@@ -980,6 +987,9 @@ func (b *Broker) handlePolicyEngineNotification(method string, params json.RawMe
 		if json.Unmarshal(params, &st) == nil && st.Engine != "" {
 			b.observeEngineRunning(st.Engine, st.Running)
 		}
+	case engineModelIdentityMethod:
+		b.observeModelIdentity(params)
+		return true
 	case engineModelsChangedMethod:
 		var p struct {
 			Models struct {
@@ -1019,9 +1029,18 @@ func (b *Broker) observeEngineRunning(engine string, running bool) {
 		delete(r.loaded, engine)
 	}
 	changed := was != running
+	// A stopped engine's run identity is void now, before engine-manager's
+	// next snapshot says so.
+	_, identified := r.engineIdentity[engine]
+	if !running {
+		delete(r.engineIdentity, engine)
+	}
 	r.mu.Unlock()
 	if changed {
 		b.schedulePolicyPush(pushResidency)
+	}
+	if !running && identified {
+		b.identityChanged()
 	}
 }
 
@@ -1124,6 +1143,7 @@ const (
 	pushAvailability = "availability"
 	pushResidency    = "residency"
 	pushIntent       = "intent"
+	pushIdentity     = "identity"
 	pushDrainPrefix  = "drain:"
 )
 
@@ -1241,7 +1261,7 @@ func (b *Broker) replayPolicyToProxy(ctx context.Context, pp *proxyProcess) bool
 	// So did its strict readiness. The new process reports its own once it
 	// has acknowledged the policy replayed below.
 	r.strictReadiness = nodepolicy.StrictAdmissionReadiness{}
-	kinds := []string{pushAvailability, pushPolicy, pushIntent, pushResidency}
+	kinds := []string{pushAvailability, pushPolicy, pushIntent, pushResidency, pushIdentity}
 	for engine := range r.drains {
 		kinds = append(kinds, pushDrainPrefix+engine)
 	}
@@ -1336,6 +1356,8 @@ func (b *Broker) sendPolicyStateLocked(ctx context.Context, pp *proxyProcess, ki
 			intent[k] = v
 		}
 		method, params = nodepolicy.MethodSetEngineIntent, nodepolicy.SetEngineIntentParams{EnabledByEngine: intent}
+	case kind == pushIdentity:
+		method, params = nodepolicy.MethodSetModelIdentity, r.modelIdentityLocked()
 	case len(kind) > len(pushDrainPrefix) && kind[:len(pushDrainPrefix)] == pushDrainPrefix:
 		engine := kind[len(pushDrainPrefix):]
 		method, params = nodepolicy.MethodSetEngineDrain, nodepolicy.SetEngineDrainParams{Engine: engine, Drain: r.drains[engine]}
@@ -1474,7 +1496,7 @@ func (b *Broker) handleAdmissionNotification(method string, params json.RawMessa
 		}
 		go b.wakeOnDemand(req.Engine)
 		return true
-	case notifyStrictReadiness:
+	case nodepolicy.NotifyStrictReadiness:
 		b.observeStrictReadiness(params)
 		return true
 	}

@@ -1,0 +1,56 @@
+{/*
+SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+*/}
+
+# Measured run performance
+
+Expand a node's performance view to see measured runs below its hardware chart.
+In the TUI, open node detail and press `v` for the measured-performance view.
+Scroll with the arrow or Page Up/Page Down keys; press `v` to return to the
+engine and model controls.
+These are broker-owned cached aggregates of actual local engine executions,
+grouped by measuring host, actual serving engine, concrete model and effective
+serving profile fingerprint. Quantization, engine family and context tokens
+describe that profile when known. Different profiles stay separate.
+
+This view only displays reported measurements. It does not run benchmarks,
+estimate throughput, rank nodes, sort by speed or change scheduling. The
+production execution-sample producer has not landed yet, so an empty measured-run
+section is expected. Hardware utilization history is independent and does not
+stand in for execution measurements.
+
+Fresh, Stale and Unknown describe the broker's knowledge of the measuring host's
+summary. A missing summary is Unknown. Last seen age describes host reachability;
+the newest and oldest sample ages describe the measurements themselves. A fresh
+host can still report old samples. Clock uncertain marks a source whose sample
+clock cannot be treated as reliable. The UI displays the broker's snapshot ages
+and does not run a separate aging timer.
+
+Latency rows show median and p95 with their contributing sample coverage. TTFT
+means the first protocol-defined output token; response headers and the first
+body byte are separate observations and are not token evidence. Admission wait
+is measured before an execution ticket is granted; engine load comes from the
+engine's reported duration. Latencies are displayed in milliseconds.
+
+Prefill and decode rates are qualified, engine-reported token and phase-duration
+aggregates supplied by the broker, with coverage shown separately for each rate.
+The UI never divides estimated token counts by wall-clock latency. `--` means
+unknown or absent; a measured zero remains `0`. Coverage shows contributing
+samples over all samples for the profile. Completed, failed and cancelled are
+transport outcomes; protocol incomplete separately counts completed transports
+whose expected protocol end was known to be missing.
+
+Each summary replaces that host's previous aggregates. Repeated snapshots do not
+add to totals. Omitted profiles were excluded from the published summary;
+expired profiles were removed from its current projection. Local eviction
+counters, when available, describe profiles, samples and expired samples removed
+from the local store. These limits mean the displayed totals are a retained
+window, not lifetime request counts.
+
+Persistence degraded warns that cached measurements may not survive restart.
+Publication blocked means the local summary cannot currently be published.
+Peer summaries are accepted only through the admitted-peer trust boundary;
+admission establishes the source identity, not the honesty or comparability of
+its benchmark claims. No prompts, response bodies or pairing secrets are shown
+in this section.

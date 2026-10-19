@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"time"
 
+	"nvpair-shared/engines"
 	settings "nvpair-shared/enginesettings"
 	"nvpair-shared/nodepolicy"
 )
@@ -19,7 +20,7 @@ func (b *Broker) drainEngineForSwitch(parent context.Context, p settings.SwitchP
 	ctx, cancel := context.WithTimeout(parent, settings.SwitchDrainBudget)
 	defer cancel()
 	b.engineConfigMu.Lock()
-	profile, ok := engineProxyProfileFor(p.SourceEngine)
+	profile, ok := b.frontedEngineProfile(p.SourceEngine)
 	if !ok {
 		b.engineConfigMu.Unlock()
 		return fmt.Errorf("source has no inference facade")
@@ -156,7 +157,7 @@ func (b *Broker) switchProxySetLocal(ctx context.Context, pp *proxyProcess, engi
 	if pp == nil {
 		return fmt.Errorf("proxy unavailable")
 	}
-	raw, rpcErr, err := pp.Call(ctx, engine+":node/set-local-backend", settingsJSON(proxyLocalBackend{Engine: engine, Host: "127.0.0.1", Port: port, Healthy: healthy}))
+	raw, rpcErr, err := pp.Call(ctx, engines.AddressMethod(engine, "node/set-local-backend"), settingsJSON(proxyLocalBackend{Engine: engine, Host: "127.0.0.1", Port: port, Healthy: healthy}))
 	if err != nil {
 		return err
 	}
@@ -169,6 +170,25 @@ func (b *Broker) switchProxySetLocal(ctx context.Context, pp *proxyProcess, engi
 	if json.Unmarshal(raw, &ack) != nil || !ack.OK {
 		return fmt.Errorf("local inference endpoint was not acknowledged")
 	}
+	return nil
+}
+
+// Withdrawal is acknowledged before any switch-owned lifecycle mutation,
+// including conservative reconciliation after failure or restart.
+func (b *Broker) withdrawSwitchIdentities(ctx context.Context, p settings.SwitchPrepareRequest) error {
+	pp := b.policyProxy()
+	for _, engine := range []string{p.SourceEngine, p.TargetEngine} {
+		if err := b.withdrawSettingsIdentity(ctx, engine); err != nil {
+			return err
+		}
+	}
+	if b.policyProxy() != pp {
+		return fmt.Errorf("proxy changed during identity withdrawal")
+	}
+	b.engineConfigMu.Lock()
+	c := b.switchCoordinator()
+	c.withdrawnIdentityID, c.withdrawnIdentityProxy = p.OperationID, pp
+	b.engineConfigMu.Unlock()
 	return nil
 }
 

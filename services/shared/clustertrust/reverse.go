@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/hashicorp/yamux"
+	"nvpair-shared/engines"
 	"nvpair-shared/noderec"
 )
 
@@ -452,7 +453,9 @@ func reverseServiceAllowed(service noderec.ServiceKey) bool {
 		noderec.ServiceCluster, noderec.ServiceEngineManager, noderec.ServiceEngineControl:
 		return true
 	}
-	return false
+	// A descriptor-backed engine facade. Syntax admits it here; the far side
+	// still resolves only a service its broker has live-registered.
+	return engines.IsDynamicServiceKey(service)
 }
 
 func (m *ReverseManager) current(s *reverseSession) bool {

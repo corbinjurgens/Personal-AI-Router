@@ -50,7 +50,30 @@ func newStrictFixtureWithFile(t *testing.T, data []byte) *strictFixture {
 	b.replayPolicyToProxy(context.Background(), pp)
 	ab := &activatedBroker{b: b, out: out, pp: pp, proxy: proxy, acks: acks, path: path}
 	ab.wantActivation(t, "0", activationActive, "")
+	seedStrictIdentity(b, "ollama", "lmstudio")
 	return &strictFixture{activatedBroker: ab, done: done, engine: engine}
+}
+
+// seedStrictIdentity gives each engine the identity strictCapability names, so
+// the identity fence (model_identity.go) passes its reports.
+func seedStrictIdentity(b *Broker, engines ...string) {
+	r := b.nodePolicyRuntime()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.engineIdentity == nil {
+		r.engineIdentity = map[string]engineManagerIdentity{}
+	}
+	if r.settingsIdentity == nil {
+		r.settingsIdentity = map[string]string{}
+	}
+	for _, engine := range engines {
+		r.engineIdentity[engine] = engineManagerIdentity{
+			EngineRunID:  "engine-run-1",
+			LaunchDigest: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+			ModelDigests: map[string]string{"m:latest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},
+		}
+		r.settingsIdentity[engine] = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	}
 }
 
 // strictCapability is a valid version 1 capability, one model per name, each
@@ -83,8 +106,8 @@ func reportStrict(t *testing.T, b *Broker, revision, runID string, capability *n
 	if err != nil {
 		t.Fatalf("encode readiness: %v", err)
 	}
-	if !b.routeProcessScopedProxyNotification(notifyStrictReadiness, params) {
-		t.Fatalf("%s was not taken as a process-scoped proxy notification", notifyStrictReadiness)
+	if !b.routeProcessScopedProxyNotification(nodepolicy.NotifyStrictReadiness, params) {
+		t.Fatalf("%s was not taken as a process-scoped proxy notification", nodepolicy.NotifyStrictReadiness)
 	}
 }
 
@@ -188,8 +211,8 @@ func TestStrictReadinessWithdrawn(t *testing.T) {
 	})
 	withdrawn("by an invalid report", func(t *testing.T, f *strictFixture) {
 		params := json.RawMessage(`{"policyRevision":"0","proxyRunId":"` + f.acks.runID + `","capability":{"version":1,"models":[]}}`)
-		if !f.b.routeProcessScopedProxyNotification(notifyStrictReadiness, params) {
-			t.Fatalf("%s was not taken", notifyStrictReadiness)
+		if !f.b.routeProcessScopedProxyNotification(nodepolicy.NotifyStrictReadiness, params) {
+			t.Fatalf("%s was not taken", nodepolicy.NotifyStrictReadiness)
 		}
 	})
 	withdrawn("on proxy exit", func(t *testing.T, f *strictFixture) {

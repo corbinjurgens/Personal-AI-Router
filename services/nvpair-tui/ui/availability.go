@@ -27,18 +27,20 @@ const setAvailabilityTimeout = 30 * time.Minute
 // availabilityState is the shell's view of this node's pause switch.
 type availabilityState struct {
 	// value is the last availability the broker reported; empty until known.
-	value string
+	value    string
+	pausedBy string
 	// pending is the target of a node:set-availability call in flight, or empty.
 	pending string
 	// err is the last failure, shown in the header until the next attempt.
 	err string
 	// selfID and selfUUID identify this node, to filter availability-changed
-	// notifications. Both empty means unknown: every notification is accepted.
+	// notifications. Both empty means unknown: availability-only pushes are accepted.
 	selfID, selfUUID string
 }
 
 type policyGetMsg struct {
 	availability string
+	pausedBy     string
 	err          error
 }
 
@@ -55,11 +57,9 @@ func policyGetCmd(client *rpc.Client) tea.Cmd {
 		if err != nil {
 			return policyGetMsg{err: err}
 		}
-		var r struct {
-			Availability string `json:"availability"`
-		}
+		var r targetPolicy
 		decodeOrLog("policy:get", msg.Result, &r)
-		return policyGetMsg{availability: r.Availability}
+		return policyGetMsg{availability: r.Availability, pausedBy: r.Policy.PausedBy}
 	})
 }
 
@@ -93,6 +93,9 @@ func (a availabilityState) label() string {
 	case a.pending == availAvailable:
 		return "Resuming…"
 	case a.value == availPaused:
+		if a.pausedBy != "" {
+			return "Paused (" + a.pausedBy + ")"
+		}
 		return "Paused"
 	case a.value == availAvailable:
 		return "Available"
@@ -115,6 +118,7 @@ func (a *availabilityState) notify(params json.RawMessage) {
 		return
 	}
 	a.value = p.Availability
+	a.pausedBy = ""
 }
 
 // update applies the availability-related messages.
@@ -125,20 +129,34 @@ func (a *availabilityState) update(msg tea.Msg) {
 	case policyGetMsg:
 		if msg.err == nil && msg.availability != "" {
 			a.value = msg.availability
+			a.pausedBy = msg.pausedBy
+		} else if msg.err != nil {
+			a.value, a.pausedBy = "", ""
 		}
 	case setAvailabilityMsg:
 		a.pending = ""
 		switch {
 		case msg.err != nil:
-			a.err = msg.err.Error()
+			a.err = commandFailure(msg.err)
 		case msg.availability != "":
 			a.value = msg.availability
+			a.pausedBy = ""
 		default:
 			a.value = msg.target
+			a.pausedBy = ""
 		}
 	case NotificationMsg:
 		if msg.Msg != nil && msg.Msg.Method == "node:availability-changed" {
 			a.notify(msg.Msg.Params)
+		}
+		if msg.Msg != nil && msg.Msg.Method == "policy:changed" {
+			var p struct {
+				NodeID string `json:"nodeId"`
+				targetPolicy
+			}
+			if decodeOrLog(msg.Msg.Method, msg.Msg.Params, &p) && p.NodeID != "" && (p.NodeID == a.selfID || p.NodeID == a.selfUUID) {
+				a.pausedBy = p.Policy.PausedBy
+			}
 		}
 	}
 }

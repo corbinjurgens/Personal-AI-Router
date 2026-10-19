@@ -212,6 +212,39 @@ while a component with one test file may still hold twenty test functions in it.
 File count is a poor proxy for coverage, so read the suite rather than counting
 files.
 
+### Windows fixed test paths
+
+Windows Firewall rules match exact executable paths. To keep plain `go test`
+off changing `go-build` paths, set `NVPAIR_TEST_BIN_DIR` to an absolute directory
+in your current shell, then run `scripts/windows-test-bin.ps1 install` from the
+repository root. This non-elevated command builds `bin/nvpair-test-exec.exe`
+beneath that directory and prints the user environment settings to apply:
+`NVPAIR_TEST_BIN_DIR` and `GOFLAGS` with an appended `-exec=<wrapper>` flag.
+It does not apply those settings. Preserve the printed quoting for paths with
+spaces, and open a new shell after applying them.
+
+With these settings, ordinary `go test` in any checkout runs package binaries at
+`<root>\go-test\<module>\<module>[-<package-path-with-dashes>].test.exe`.
+`go run` passes through unchanged; `go build` and `go vet` ignore `-exec`.
+The wrapper passes through non-test executables, packages outside a service
+module, and an unset or relative root. On other platforms it uses `.test`
+and only stages binaries when an absolute root is set.
+
+Use `scripts/windows-test-bin.ps1 list` to inventory paths and `rules` from an
+elevated shell to create the corresponding inbound block rules. Rerun `rules`
+after adding packages or testbin manifest entries. The existing `run` command
+still compiles one package with `go test -c` and runs its fixed binary directly.
+Keep machine-wide test invocations serialized: fixture programs are shared too,
+and `run` does not acquire the wrapper lock.
+
+The wrapper locks each package destination for up to 30 minutes, including the
+child's lifetime. After a crash, remove a leftover `.lock` file only after
+checking no process uses that destination. Failed replacement retries for five
+seconds before reporting an earlier process may still be running. On Windows
+a kill-on-close job object cleans up the child and assigned descendants when
+the wrapper exits; the child starts suspended until assigned to the job.
+On other platforms cancellation kills the direct child only.
+
 ### Cross-process tests
 
 `tests/` has its own `go.mod` and exercises real binaries talking to each other.

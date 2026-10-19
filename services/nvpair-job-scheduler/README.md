@@ -66,8 +66,11 @@ the order, pending counts, or pressure actually changed.
 
 ## Output
 
-One `schedule:priority` notification per engine (`ollama`, `lmstudio`,
-`llamacpp`):
+One `schedule:priority` notification per engine: the built-in `ollama`,
+`lmstudio` and `llamacpp`, plus each descriptor engine ID (for example
+`llamacpp-custom`) that has work in the catalogue, sorted and capped at
+`engines.MaxDynamicEngines`. `scheduler:get-status` reports the same set. Work
+under any engine ID counts toward its node's load:
 
 ```json
 {

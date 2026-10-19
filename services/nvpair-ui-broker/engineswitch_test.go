@@ -405,8 +405,13 @@ func TestSwitchCoordinatorRejectsRunningTargetBeforeDrain(t *testing.T) {
 	if r.Phase != settings.SwitchFailedValidation || r.Error.Kind != settings.SwitchErrorTargetRunning {
 		t.Fatalf("receipt = %+v", r)
 	}
-	if len(h.proxy.snapshot()) != 0 || len(switchSteps(t, h.engine)) != 0 {
-		t.Fatal("running target caused drain or lifecycle effects")
+	for _, call := range h.proxy.snapshot() {
+		if call.method != nodepolicy.MethodSetModelIdentity {
+			t.Fatalf("running target caused proxy effect %s", call.method)
+		}
+	}
+	if len(switchSteps(t, h.engine)) != 0 {
+		t.Fatal("running target caused lifecycle effects")
 	}
 }
 
