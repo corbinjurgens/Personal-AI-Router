@@ -335,6 +335,11 @@ type Proxy struct {
 	// activated policy and is owned by the process, not by any facade.
 	routing *routingListener
 
+	// accounts is the process's single durable provider account writer. It has
+	// no store until main gives it the appdir, so an in-process proxy never
+	// touches a real data directory.
+	accounts *accountLedger
+
 	// selfMu guards what this process has learned about its own node from
 	// discovery: its node id and, per engine, the models it last advertised.
 	// A stopped engine is unregistered from discovery, so this memory is the
@@ -356,6 +361,7 @@ func NewProxy(codec *Codec) *Proxy {
 		codec:    codec,
 		runID:    newRunID(),
 		activity: nodeactivity.NewReporter(activityReportInterval),
+		accounts: newAccountLedger(),
 	}
 	p.routing = &routingListener{host: p}
 	p.admission = newAdmissionController(

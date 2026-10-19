@@ -336,3 +336,31 @@ func TestMergePeerSetErrorsDoNotEchoRoutingContent(t *testing.T) {
 		t.Errorf("error echoes a credential reference: %q", err)
 	}
 }
+
+// The deployment endpoint schema lives inside routing, so a peer never sees an
+// endpoint, protocol, transport bound or provider qualification.
+func TestPeerProjectionOmitsDeploymentEndpointSchema(t *testing.T) {
+	stored := stagedPolicy(t)
+	completeDeployment(&stored.Routing.Deployments[0])
+	if err := stored.Validate(); err != nil {
+		t.Fatalf("Validate(complete deployment) = %v", err)
+	}
+	data, err := json.Marshal(stored.PeerProjection())
+	if err != nil {
+		t.Fatalf("marshal projection: %v", err)
+	}
+	for _, leak := range []string{
+		"api.example.com", "https://", "openai-chat-completions", "transport", "maxResponseBytes",
+		"provider-q", "qualification", "endpoint", "protocol",
+	} {
+		if strings.Contains(string(data), leak) {
+			t.Errorf("projection contains %q: %s", leak, data)
+		}
+	}
+	doc := peerDocument(t, stored, func(doc map[string]any) {
+		doc["routing"] = map[string]any{"deployments": []any{map[string]any{"endpoint": "https://evil.example.com/v1"}}}
+	})
+	if _, err := MergePeerSet(stored, doc); err == nil || !strings.Contains(err.Error(), "routing") {
+		t.Fatalf("MergePeerSet(routing with an endpoint) err = %v, want a routing rejection", err)
+	}
+}

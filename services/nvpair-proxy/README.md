@@ -334,7 +334,14 @@ Engine switching also has two internal process-scoped requests:
   `model` is rewritten in place. Nothing eligible is a `404` naming the needs.
   A tier entry is
   tagged `local` (an engine and model) or `api` (a provider deployment from the
-  policy's origin-only `routing` section). Until hybrid dispatch exists the
+  policy's origin-only `routing` section). A deployment names its `endpoint`
+  (the full `https` request URL with a lower-case public DNS host and a path;
+  no IP literal, local name, userinfo, query, fragment, percent-encoding or
+  explicit `:443`), its `protocol` (`openai-chat-completions` only), its
+  finite `transport` bounds (connect, header and idle timeouts, response,
+  error-body and streamed-event byte caps) and its provider `qualification`
+  revision; enabling a deployment requires all four and prices. Peers never
+  see any of them. Until hybrid dispatch exists the
   proxy resolves only local entries and skips `api` entries, so a tier with only
   API entries has no candidate. A version 1 policy is migrated to
   version 2 with every entry local (an exact repeat within a tier, same
@@ -410,6 +417,26 @@ Engine switching also has two internal process-scoped requests:
   in-flight workload this node originated. Before the response commits,
   `regenerate` re-dispatches it to another node; otherwise, or after the
   commit, it ends as `cancelled`.
+- **Provider account ledger.** The proxy is the only writer of provider
+  account state, kept in `proxy-accounts.json` under the app data directory and
+  guarded by an exclusive lock on `proxy-accounts.lock` (`flock` on macOS and
+  Linux, `LockFileEx` on Windows) held for the process lifetime, so a second
+  proxy on the same data directory refuses it. Both files are created only once
+  an activated policy names a provider account. The store is one versioned,
+  checksummed document replaced through `durablefile` on every change, and a
+  damaged store is never rewritten. It records money holds and reconciliation
+  in exact nano-USD with each hold's price, policy revision and qualification,
+  spend per UTC day and month, credential-reference bindings that outlive
+  account deletion, cooldowns with one half-open probe, credential-failure
+  suppression, freezes, and quarantined deployment identities. The last configured
+  credential reference persists through retirement so delayed obsolete-reference
+  failures cannot replace its failure; re-adding with a different reference is
+  an ordinary reference edit. Reconciled holds
+  remain retained and count against admission capacity until both the account
+  outcome and qualification classification are durably recorded. Every failure
+  refuses spending and never blocks policy activation or local routing. No
+  dispatch path calls it until hybrid dispatch exists. See `spec.md` section
+  12.7.
 
 ### IPC Transport
 

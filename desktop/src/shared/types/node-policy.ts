@@ -39,6 +39,62 @@ export type StrictAdmissionCapability =
     | { state: 'unsupported'; version: number }
     | { state: 'valid'; version: 1; models: StrictAdmissionModel[] }
 
+/**
+ * An exact amount in nano-USD (10^-9 USD): canonical decimal digits within the
+ * signed 64-bit range. It stays a string and is never converted to a number.
+ */
+export type NanoUsd = string
+
+/** The only request protocol a provider deployment may declare. */
+export type ProviderProtocol = 'openai-chat-completions'
+
+export type DeploymentCapability = 'tools' | 'vision' | 'structured' | 'embeddings'
+
+/** The finite bounds of requests to a deployment's endpoint. */
+export interface DeploymentTransport {
+    connectTimeoutSeconds: number
+    headerTimeoutSeconds: number
+    idleTimeoutSeconds: number
+    maxResponseBytes: number
+    maxErrorBodyBytes: number
+    maxEventBytes: number
+}
+
+export interface DeploymentPrices {
+    currency: 'USD'
+    unit: 'nanoUSDPerMillionTokens'
+    /** The maximum uncached input rate per million tokens. */
+    inputPerMillion: NanoUsd
+    outputPerMillion: NanoUsd
+}
+
+/** One revision of a qualification; the revision is a positive decimal string. */
+export interface QualificationRef {
+    id: string
+    revision: string
+}
+
+/**
+ * A provider deployment from the origin-only routing section of this node's
+ * own policy. Optional parts are null while the deployment is staged disabled.
+ */
+export interface RoutingDeployment {
+    id: string
+    account: string
+    model: string
+    family: string
+    capabilities: DeploymentCapability[]
+    contextTokens: number
+    maxOutputTokens: number
+    prices: DeploymentPrices | null
+    /** The full HTTPS request URL. */
+    endpoint: string | null
+    protocol: ProviderProtocol | null
+    transport: DeploymentTransport | null
+    qualification: QualificationRef | null
+    enabled: boolean
+}
+
 /** A node's live availability. `draining` is a pause in progress. */
 export type NodeAvailability = 'available' | 'draining' | 'paused'
 

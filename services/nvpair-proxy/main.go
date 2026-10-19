@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"syscall"
 
+	"nvpair-shared/appdir"
 	"nvpair-shared/applog"
 	"nvpair-shared/clustertrust"
 	"nvpair-shared/engines"
@@ -74,6 +75,9 @@ func main() {
 	codec := NewCodec(transport)
 	proxy := NewProxy(codec)
 	proxy.maxRequestBytes = *maxRequestBytes
+	// The account store opens on first use, when an activated policy names a
+	// provider account; a node without one creates no account files.
+	proxy.accounts.setDir(appdir.Dir())
 	// Open a live view of this node's cluster mTLS trust fabric. While unclustered
 	// the proxy serves only the loopback plaintext personality; once this node is
 	// a member the same listener also serves the pin-gated LAN mTLS ingress, and
