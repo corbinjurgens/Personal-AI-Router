@@ -382,6 +382,15 @@ func (b *Broker) spawnProxy() (supervisedHandle, error) {
 	// A process with no facade is kept only for the routing listener, which
 	// belongs to the process and is served from the policy replayed above.
 	if enabled == 0 && !b.routingListenerEnabled() {
+		// A policy change can withdraw the listener after replay but before
+		// bring-up finishes. Retire this deliberately stopped incarnation
+		// before closing its pipe, just as stopProxySupervisorLocked does.
+		r := b.nodePolicyRuntime()
+		r.mu.Lock()
+		if r.incarnation == pp {
+			r.incarnation = nil
+		}
+		r.mu.Unlock()
 		// The whole spawn failed, so the supervisor will retry it. Leave every
 		// engine's managed claim and its OLLAMA_HOST alias reservation exactly
 		// as they are: the retry needs them, and releasing the alias here would
