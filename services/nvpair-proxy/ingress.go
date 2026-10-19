@@ -136,6 +136,15 @@ func (f *facade) handleClusterIngress(w http.ResponseWriter, r *http.Request) {
 // requestOptions are merged in, and only then is the request forwarded. Every
 // other route is forwarded as before.
 func (f *facade) serveIngress(w http.ResponseWriter, r *http.Request, peer string) {
+	strict, strictErr := parseStrictAdmission(r.Header)
+	if strictErr != nil {
+		writeIngressError(w, http.StatusBadRequest, "strict-admission", strictErr.Error())
+		return
+	}
+	if strict != nil && !isInferenceRequest(f.profile, r.Method, r.URL.Path) {
+		writeIngressError(w, http.StatusBadRequest, "strict-admission", "strict admission requires inference")
+		return
+	}
 	if !isInferenceRequest(f.profile, r.Method, r.URL.Path) {
 		target, ok := f.localBackendTarget()
 		if !ok {
@@ -153,6 +162,10 @@ func (f *facade) serveIngress(w http.ResponseWriter, r *http.Request, peer strin
 	if err != nil {
 		writeIngressError(w, http.StatusRequestEntityTooLarge, "body-too-large",
 			"request body exceeds the proxy's size limit")
+		return
+	}
+	if strict != nil {
+		f.serveStrictLocal(w, r, body, model, *strict)
 		return
 	}
 	// The execution's own context, so cancelActive can stop it without the
@@ -221,6 +234,7 @@ func (f *facade) reverseProxyToLocal(w http.ResponseWriter, r *http.Request, tar
 func (f *facade) newLocalReverseProxy(target *url.URL) *httputil.ReverseProxy {
 	return &httputil.ReverseProxy{
 		Director: func(req *http.Request) {
+			stripInternalRoutingHeaders(req.Header)
 			req.URL.Scheme = target.Scheme
 			req.URL.Host = target.Host
 			req.Host = target.Host
@@ -231,6 +245,69 @@ func (f *facade) newLocalReverseProxy(target *url.URL) *httputil.ReverseProxy {
 			writeIngressError(ew, http.StatusBadGateway, "backend-error", "local inference backend error")
 		},
 	}
+}
+
+// serveStrictLocal is shared by authenticated ingress and local self dispatch.
+// No protocol-qualified completion signal exists in A1a; even an HTTP EOF is
+// conservatively uncertain until the qualification/reconciliation owner proves
+// termination. It must never be interpreted as engine-idle evidence.
+func (f *facade) serveStrictLocal(w http.ResponseWriter, r *http.Request, body []byte, model string, req nodepolicy.StrictAdmissionRequest) {
+	ctx, cancel := context.WithCancel(r.Context())
+	defer cancel()
+	ticket, err := f.host.admission.AdmitStrict(ctx, f.profile.Name, model, req)
+	if err != nil {
+		writeStrictAdmissionError(w, err)
+		return
+	}
+	evidence := strictNotDispatched
+	defer func() { ticket.Finish(evidence) }()
+	t := ticket.(*strictTicket)
+	f.host.admission.mu.Lock()
+	t.base.cancel = cancel
+	f.host.admission.mu.Unlock()
+	stop := t.watchPreOutput(cancel)
+	defer stop()
+	target, ok := f.localBackendTarget()
+	if !ok {
+		writeStrictAdmissionError(w, errStrictUnavailable)
+		return
+	}
+	if err = ticket.BeforeStrictDispatch(); err != nil {
+		writeStrictAdmissionError(w, err)
+		return
+	}
+	evidence = strictUncertain
+	out := r.WithContext(ctx)
+	out.Header = r.Header.Clone()
+	stripInternalRoutingHeaders(out.Header)
+	setReplayBody(out, body)
+	p := f.newLocalReverseProxy(target)
+	p.ErrorHandler = func(ew http.ResponseWriter, _ *http.Request, _ error) {
+		f.host.admission.mu.Lock()
+		exhausted := !f.host.admission.strict.now().Before(t.deadline)
+		f.host.admission.mu.Unlock()
+		if exhausted {
+			writeStrictAdmissionError(ew, context.DeadlineExceeded)
+			return
+		}
+		writeIngressError(ew, http.StatusBadGateway, "backend-error", "local inference backend error")
+	}
+	p.ModifyResponse = func(resp *http.Response) error {
+		f.host.admission.mu.Lock()
+		remaining := t.deadline.Sub(f.host.admission.strict.now())
+		f.host.admission.mu.Unlock()
+		if remaining <= 0 {
+			return context.DeadlineExceeded
+		}
+		b, err := awaitFirstBody(resp.Body, remaining)
+		if err != nil {
+			return err
+		}
+		resp.Body = b
+		stop()
+		return nil
+	}
+	p.ServeHTTP(w, out)
 }
 
 // isLoopbackRemote reports whether an http.Request RemoteAddr (host:port) is a
