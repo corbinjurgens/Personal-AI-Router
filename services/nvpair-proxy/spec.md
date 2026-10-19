@@ -1208,9 +1208,10 @@ discovery or node notification names its port.
 ### 12.7 Provider account ledger (D)
 
 The proxy owns provider account state (`accounts.go`, `accountstore.go`,
-`accountlock_*.go`). Nothing in this build sends to a provider; hybrid dispatch
-calls `reserve` before it sends and `reconcile`, `recordOutcome` and
-qualification classification (`recordQualification` or `quarantine`) afterwards.
+`accountlock_*.go`). The private, unwired `runChatAccountAttempt` library runner
+uses `reserveChatAccount` before sending and independently calls `reconcile`,
+`recordOutcome` and qualification classification (`recordQualification` or
+`quarantine`) afterwards (§12.8). No user-traffic path calls this runner.
 
 - **Owner and lock.** One `accountLedger` per process, one mutex for every
   operation from lazy open to adoption. `main` places the store in the app data
@@ -1323,3 +1324,159 @@ qualification classification (`recordQualification` or `quarantine`) afterwards.
   Windows, power-loss durability and the broker-driven proxy restart on a
   credential-reference change are activation gates; equivalent provider
   credentials under different references are outside the local guarantee.
+
+### 12.8 Strict Chat adapter library (E; inactive)
+
+`chat_adapter.go`, `api_transport.go` and `runChatAccountAttempt` in `accounts.go`
+provide a private single-attempt library. No HTTP handler, listener or JSON-RPC
+method exposes it; no production caller or provider profile is configured here.
+`remoteDispatchAvailable` in `shared/nodepolicy/routing.go` remains false:
+enabled deployments and remote/paid tier permissions are refused. This section
+does not change concrete engine routing or the unavailable API aliases.
+
+#### Request and qualification contract
+
+`chatQualification.prepare` requires `ProtocolOpenAIChatCompletions`, POST and
+exactly `/v1/chat/completions`. The supplied `chatTarget` must match the profile's
+endpoint, model and qualification ID/revision. Profile callbacks are trusted
+in-memory inputs, not policy-configurable code or a production registry.
+
+| Form | Implemented acceptance boundary | Owner |
+| --- | --- | --- |
+| Envelope | `chatRequestKeys` plus `parallel_tool_calls`, intersected with `chatQualification.Fields`; unknown keys fail rather than being dropped. Defaults fill absent fields, then undergo the same validation. | `prepare`, `chatObject` |
+| Messages | Nonempty ordered history; profile-approved `system`, `developer`, `user`, `assistant`, `tool` roles and string content. Null content is allowed for an assistant with tool calls. Names and tool IDs are validated; every pending call needs one matching result before another non-tool message or history end. | `requestGrammar`, `chatName` |
+| Function tools | Function declarations, unique names, validated schemas; `tool_choice` is `auto`, `none`, `required` or a declared function. `parallel_tool_calls` requires tools. Historical calls require unique nonempty IDs and JSON-object argument strings. | `requestGrammar`, `chatFunction` |
+| Structured output | Profile-approved `text`, `json_object`, `json_schema`. Schemas additionally require the profile validator and the finite keyword subset: `type`, `properties`, `required`, `additionalProperties`, `items`, `enum`, `description`; references/recursive schemas are unsupported. | `requestGrammar`, `schema`, `chatSchema` |
+| Scalars | Profile-approved booleans for streaming/parallel tools; temperature 0–2, top-p 0–1, penalties −2–2, integer seed, string stop or an array of 1–4 strings. `stream_options` contains only boolean `include_usage` and requires streaming. | `chatScalars` |
+| Output/context | Positive integer `max_tokens` or `max_completion_tokens`; if both appear they must agree. Omission requires a positive qualified default. Output and input-plus-output must fit both deployment and qualification bounds. | `prepare`, `chatAdd` |
+
+`chatObject`, `chatExactUnique` and `chatDecodeStorage` reject malformed JSON/UTF-8,
+exact duplicate keys, noncanonical protocol field spelling, trailing JSON and
+whole-document nesting beyond `maxStrictBodyDepth` (64). Case-distinct property
+and argument data keys remain distinct. Supported message/tool/schema values
+and array order are preserved; top-level serialization uses canonical key order.
+Request body and profile defaults each have a 16 MiB input ceiling.
+
+`chatQualification.fresh` requires nonreasoning billing evidence, named accounting,
+tokenizer and template proof, accepted reported-model mappings to one canonical
+model, positive framing overheads, finite limits and `finish-then-done` termination.
+Evidence must have `CheckedAt <= now < ValidUntil` and age strictly below `MaxAge`,
+which cannot exceed seven days. `InputBound` covers the entire final serialized
+body, including UTF-8, history, arguments/results, tools and schemas; request,
+message, tool and schema overheads are added with checked arithmetic. There is no
+bytes-per-token guess or unknown/unlimited output fallback.
+
+Responses, Anthropic Messages, legacy Completions, native engine protocols,
+embeddings, image/audio content and opaque reasoning are unsupported.
+`n` (even one), `store`, metadata/user tracking, previous-response/conversation
+state, logprobs, reasoning fields, context overrides and unknown extensions are
+rejected even if a profile lists them. Stateful SSE fields are unsupported.
+
+#### Public transport and resource ownership
+
+`newPublicClient` uses `nodepolicy.CheckEndpoint`: a full HTTPS URL with a
+lower-case DNS hostname and nonempty unreserved path segments. It refuses IP
+literals, local-name suffixes, userinfo, query (including bare `?`), fragments,
+percent encoding, dot/empty path segments and explicit default `:443`. Other
+valid explicit ports are allowed. The configured URL is used unchanged; ingress
+URLs and headers are not inputs.
+
+`dialPublic` resolves on every connection, rejects empty or mixed public/nonpublic
+answer sets, then dials one checked numeric address without re-resolution or
+retry. `publicAddress` unmapped-address validation and `publicDeniedPrefixes`
+exclude private, loopback, link-local/metadata, unspecified, multicast, CGNAT,
+documentation, benchmarking and reserved ranges; IPv6 must also lie in `2000::/3`
+outside the denied prefixes. Host and TLS identity remain the configured origin.
+The fresh transport uses system roots, hostname/certificate verification and TLS
+1.2 minimum, with no client certificate, cluster trust or cookie jar. Environment
+proxies, redirects, connection reuse, automatic compression and HTTP/2 attempts
+are disabled. Requests specify `Accept-Encoding: identity`; nonidentity or multiple
+Content-Encoding declarations are refused without decompression.
+
+`publicClient.post` builds only protocol headers and the selected bearer credential;
+it accepts no caller request/header object. Raw provider headers/trailers and error
+bodies are never downstream material. Returned metadata is status, synthesized
+content type, timing and an initial Retry-After value bounded to 128 bytes for
+internal classification. Errors do not echo credentials or provider content.
+
+| Limit | Enforced boundary | Owner |
+| --- | --- | --- |
+| Network phases | Connect/DNS and TLS handshake 1–60 s; response headers and body idle 1–600 s; response headers 64 KiB. Caller context must supply the overall pre-output deadline; there is no whole-generation client timeout. | `newPublicClient`, `dialPublic`, `publicBody` |
+| Body bytes | Explicit positive successful-response ceiling up to 64 MiB and independent error-body ceiling up to 1 MiB; declared overflow refuses before reading, otherwise reads probe at most one overflow byte. No implicit library default is installed. | `newPublicClient`, `post`, `publicBody.Read` |
+| Parser | Positive profile body ceiling up to 64 MiB; event up to 1 MiB and no larger than body; line no larger than event; reconstructed tool bytes no larger than body; tool-call cap 1–128. Runner also requires profile body/event limits within transport limits. | `responseLimits`, `runChatAccountAttempt` |
+| Admission | Nonblocking `publicBudget`/`chatByteBudget` with idempotent releases; absent/refused hooks fail closed. Transport reserves `3 * (max(success cap, error cap) + 1)`; parser admits fixed storage, raw growth and actual decode/token storage before allocation. | `post`, `chatAcquire`, `chatLease`, `chatDecodeStorage`, `parseResponse` |
+
+Reservations bound live adapter-owned representations, not Go process heap or
+cumulative allocations. Conservative decode headroom can refuse a body below its
+wire ceiling. `publicBody.Close` cancels upstream and releases headroom once;
+EOF alone retains its lease until Close. Prepared bodies retain their lease until
+`chatPrepared.close`. Parser leases release on return, failure and panic unwinding.
+The `emit` callback borrows bytes only during the call; retained output and
+qualification callback storage require caller-owned budgeting. I must supply the
+aggregate process-wide owner; no unlimited production budget is provided.
+
+#### Response and ledger completion
+
+`chatParseResult` separates headers, first body byte, first meaningful text/function
+delta, protocol terminal, exposure and trusted usage. `responseEvent` checks every
+envelope's reported model against `AcceptedModels` and requires stable response ID,
+creation time and reported model across the stream. This validates profile-declared
+identity, not model attestation. Only choice index zero is supported. Nonstream
+completion requires a qualified finish reason; SSE requires a finish followed by
+`[DONE]`, terminated events and clean EOF. EOF/truncation cannot substitute for
+terminal completion. Validated SSE metadata/comments can set `Exposed` before any
+meaningful delta; exposure forbids replay, and the library performs no retries.
+
+`chatUsage` accepts only nonnegative integer prompt/completion/total token fields
+with checked, equal total. Usage is trusted only when the profile permits it and
+identity and protocol completion succeed. Missing usage on a complete response is
+distinct from malformed, partial or mismatched usage. Complete above-bound usage
+returns `errChatBound` with trusted usage for ledger enforcement.
+
+`prepareChatAccount` copies configuration and revision; `reserveChatAccount`
+compares the entire snapshot under the ledger mutex before durable reservation.
+`runChatAccountAttempt` validates/prepares and admits parser/transport headroom
+before invoking the resolver for only the selected canonical credential reference.
+There is no built-in environment lookup, secret cache or credential-value identity.
+Empty/control-character credentials refuse. It then reserves, invokes a mandatory
+guard, rechecks freshness/cancellation and sends once. A guard refusal after reserve
+retains the hold. The future I/G guard must recheck permission, lease and revision;
+a successful synthetic guard is not an egress lease.
+
+| Observation | Sanitized runner category / ledger outcome |
+| --- | --- |
+| Validated HTTP 200 completion | Success / `outcomeOK` |
+| 401/403 | `errChatCredential` / `outcomeCredentialFailure` |
+| 400/404/422 | `errChatConfiguration` / nonrestrictive `outcomeTransient` |
+| 429 | `errChatRateLimit` / `outcomeRateLimited` |
+| Connection/TLS/redirect failure, 408/5xx or unsupported status | `errChatTransient` / `outcomeTransient` |
+
+Observed 401/403/429 restrictions survive error-body overflow, encoding refusal or
+drain failure. `chatRetryAfter` parses initial header seconds/date only; invalid,
+past or overflowing values use D's 60 s default, valid delays clamp to 1 s–1 h.
+Generic 429 never becomes `outcomeExhausted`; provider bodies cannot invent account
+state. Classification grants no retry permission or zero-cost conclusion.
+
+The runner attempts `recordOutcome`, money reconciliation and qualification
+classification independently, even after a sibling write fails. Only complete,
+identity-valid results reconcile: missing usage charges the full reserved bound;
+trusted above-bound usage goes through `reconcile` to freeze/quarantine atomically.
+Identity violations call `quarantine` using the reserved immutable identity, never
+reconcile untrusted usage. `recordQualification` marks finished classification,
+including classified failed attempts, not successful inference. Budget refusal
+leaves classification unfinished; panic unwinding does not fabricate completion.
+Cancellation, timeout, interruption, malformed usage and failed persistence do not
+refund uncertain money. Ledger failures surface as `errChatAccounting`; restrictive
+write failures preserve D's admission latch.
+
+#### Activation gates
+
+F must supply real provider qualification artifacts, tokenizer/billing/model and
+terminal evidence, and evidence acquisition/freshness. G must supply the egress
+lease. I must supply route/permission/cancellation integration, overall pre-output
+deadline and the aggregate buffer owner. D's native lock/crash-window acceptance,
+uncertain-hold/unfreeze controls and previous-process unfinished-classification
+recovery remain pending gates (§12.7); broker credential-reference restart also
+needs acceptance. Synthetic profiles/tests prove library boundaries only and
+cannot enable providers, establish vendor-wide ceilings or close native/live
+acceptance. No default fake profile or activation path is supplied.
