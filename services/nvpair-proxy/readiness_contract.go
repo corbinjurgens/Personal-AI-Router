@@ -4,6 +4,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -11,6 +12,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -48,8 +50,17 @@ func newStrictTimer(d time.Duration) strictTimer { return realStrictTimer{time.N
 
 type nodeStrictModel = nodepolicy.StrictAdmissionModel
 type strictAdmissionState struct {
+	// models is the installed capability and qualified what each model was
+	// qualified under. Both are derived together by refreshStrictCapabilityLocked
+	// from the policy, the engine identity and the qualification registry, and
+	// never set otherwise. A key's generation changes whenever its entry does.
 	models     map[admKey]nodeStrictModel
+	qualified  map[admKey]installedQualification
 	generation map[admKey]uint64
+	// identity is the broker's node/set-model-identity, by engine; registry
+	// is the node's qualification evidence, read at start.
+	identity   map[string]nodepolicy.EngineIdentity
+	registry   qualificationRegistry
 	markers    map[uint64]capacityMarker
 	path       string
 	storageErr error
@@ -59,60 +70,164 @@ type strictAdmissionState struct {
 	read       func(string) ([]byte, error)
 }
 
-// installStrictCapability is an internal authoritative input seam, deliberately
-// not exposed as an RPC or derived from the caller's header. The feed and
-// qualification owner are subsequent slices. Until installed, strict fails closed.
-func (a *admissionController) installStrictCapability(c nodepolicy.StrictAdmissionCapability) error {
-	if err := c.Validate(); err != nil {
-		return err
-	}
+// refreshStrictCapabilityLocked derives the strict capability from what it
+// rests on: the active policy's qualified profiles, the qualification registry
+// and the broker's engine identity. A profile's model is installed only when
+// its qualification exists for the same engine and normalized model, the
+// engine's identity is present, its launch and the model's content digest are
+// ones the qualification covers, the profile's defaults are the qualified ones,
+// its context and output bounds are within the qualified ones, and its
+// effective concurrency is finite. Two profiles normalizing to one model
+// install neither. Only keys whose installed entry changed get a new
+// generation, which fences tickets admitted under the old one. It reports
+// whether the capability changed. Caller holds a.mu.
+func (a *admissionController) refreshStrictCapabilityLocked() bool {
 	models := make(map[admKey]nodeStrictModel)
-	for _, m := range c.Models {
-		k := admKey{engine: m.Engine, model: a.normalize(m.Engine, m.Model)}
-		if !a.validStrictModelKey(k) {
-			return errors.New("invalid strict model key")
-		}
-		if _, exists := models[k]; exists {
-			return errors.New("duplicate normalized strict model")
-		}
-		m.Model = k.model
-		models[k] = m
+	qualified := make(map[admKey]installedQualification)
+	profiles := make(map[admKey]int)
+	for _, pr := range a.policy.Profiles {
+		profiles[admKey{engine: pr.Engine, model: a.normalize(pr.Engine, pr.Model)}]++
 	}
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	for k, m := range models {
-		if limit := a.concurrencyLimitLocked(k); limit <= 0 || limit != m.MaxConcurrent {
-			return errors.New("strict capacity must match finite effective policy/profile concurrency")
+	for _, pr := range a.policy.Profiles {
+		k := admKey{engine: pr.Engine, model: a.normalize(pr.Engine, pr.Model)}
+		// Any second profile for the model, qualified or not, makes its
+		// bounds ambiguous.
+		if pr.Qualification == nil || profiles[k] != 1 {
+			continue
+		}
+		if m, q, ok := a.qualifiedModelLocked(k, pr); ok {
+			models[k], qualified[k] = m, installedQualification{q: q, profile: pr}
 		}
 	}
+	changed := false
 	for k := range a.strict.models {
-		a.strict.generation[k]++
-	}
-	for k := range models {
-		if _, replacing := a.strict.models[k]; !replacing {
+		if _, kept := models[k]; !kept {
 			a.strict.generation[k]++
+			changed = true
 		}
 	}
-	a.strict.models = models
-	a.signalLocked()
-	return nil
+	for k, m := range models {
+		old, had := a.strict.models[k]
+		if !had || old != m || !sameInstalledQualification(a.strict.qualified[k], qualified[k]) {
+			a.strict.generation[k]++
+			changed = true
+		}
+	}
+	a.strict.models, a.strict.qualified = models, qualified
+	if changed {
+		a.signalLocked()
+	}
+	return changed
 }
 
-func (a *admissionController) revalidateStrictCapabilitiesLocked() {
-	for k, m := range a.strict.models {
-		if limit := a.concurrencyLimitLocked(k); limit <= 0 || limit != m.MaxConcurrent {
-			delete(a.strict.models, k)
-			a.strict.generation[k]++
-		}
+// qualifiedModelLocked is the strict entry for profile pr at key k, when every
+// condition of refreshStrictCapabilityLocked holds. Caller holds a.mu.
+func (a *admissionController) qualifiedModelLocked(k admKey, pr nodepolicy.Profile) (nodeStrictModel, *localQualification, bool) {
+	q, ok := a.strict.registry.lookup(*pr.Qualification)
+	if !ok || q.Engine != k.engine || a.normalize(q.Engine, q.Model) != k.model || !a.validStrictModelKey(k) {
+		return nodeStrictModel{}, nil, false
 	}
+	id, ok := a.strict.identity[k.engine]
+	if !ok || !slices.Contains(q.LaunchDigests, id.LaunchDigest) {
+		return nodeStrictModel{}, nil, false
+	}
+	digest, ok := a.modelDigestLocked(id, k)
+	if !ok || !slices.Contains(q.ModelDigests, digest) {
+		return nodeStrictModel{}, nil, false
+	}
+	if !sameJSONObject(pr.RequestOptions, q.RequestOptions) || pr.ContextTokens > q.ContextTokens || pr.MaxOutputTokens > q.MaxOutputTokens {
+		return nodeStrictModel{}, nil, false
+	}
+	m := nodeStrictModel{
+		Engine:        k.engine,
+		Model:         k.model,
+		MaxConcurrent: a.concurrencyLimitLocked(k),
+		Identity:      nodepolicy.StrictModelIdentity{EngineRunID: id.EngineRunID, SettingsFingerprint: id.SettingsFingerprint, ModelDigest: digest},
+	}
+	if m.Validate() != nil {
+		return nodeStrictModel{}, nil, false
+	}
+	return m, q, true
+}
+
+// modelDigestLocked finds the content digest the identity lists for k's model
+// under any name the engine normalizes to it. Names that disagree give none.
+func (a *admissionController) modelDigestLocked(id nodepolicy.EngineIdentity, k admKey) (string, bool) {
+	found := ""
+	for name, digest := range id.ModelDigests {
+		if a.normalize(k.engine, name) != k.model {
+			continue
+		}
+		if found != "" && found != digest {
+			return "", false
+		}
+		found = digest
+	}
+	return found, found != ""
+}
+
+func sameInstalledQualification(x, y installedQualification) bool {
+	return x.q == y.q && x.profile.ContextTokens == y.profile.ContextTokens &&
+		x.profile.MaxOutputTokens == y.profile.MaxOutputTokens && sameJSONObject(x.profile.RequestOptions, y.profile.RequestOptions)
+}
+
+// sameJSONObject compares two optional JSON objects by content; absent and
+// empty are the same.
+func sameJSONObject(x, y json.RawMessage) bool {
+	var a, b map[string]any
+	if len(bytes.TrimSpace(x)) > 0 && json.Unmarshal(x, &a) != nil {
+		return false
+	}
+	if len(bytes.TrimSpace(y)) > 0 && json.Unmarshal(y, &b) != nil {
+		return false
+	}
+	return len(a) == 0 && len(b) == 0 || reflect.DeepEqual(a, b)
+}
+
+// setModelIdentity replaces the engine identity (nodepolicy.MethodSetModelIdentity)
+// and reinstalls the capability. It reports whether the capability changed.
+func (a *admissionController) setModelIdentity(engines map[string]nodepolicy.EngineIdentity) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.strict.identity = engines
+	return a.refreshStrictCapabilityLocked()
+}
+
+// strictValidation is a request body validated against the qualification its
+// model is installed under, and the generation of that installation.
+type strictValidation struct {
+	body       []byte
+	bound      strictBound
+	generation uint64
+}
+
+// qualifyStrict validates a strict request before anything else happens for
+// it: the model must be installed under the identity the request names, and
+// the body, with the profile's defaults merged in, must fit the qualification.
+// AdmitStrict then admits only while that installation is unchanged.
+func (a *admissionController) qualifyStrict(engine, model, route string, body []byte, identity nodepolicy.StrictModelIdentity) (strictValidation, error) {
+	a.mu.Lock()
+	k := admKey{engine: engine, model: a.normalize(engine, model)}
+	m, ok := a.strict.models[k]
+	installed := a.strict.qualified[k]
+	generation := a.strict.generation[k]
+	a.mu.Unlock()
+	if !ok || m.Identity != identity {
+		return strictValidation{}, errStrictUnavailable
+	}
+	effective, bound, err := installed.q.validateRequest(installed.profile, route, body)
+	if err != nil {
+		return strictValidation{}, err
+	}
+	return strictValidation{body: effective, bound: bound, generation: generation}, nil
 }
 
 // StrictReadiness is what the controller can admit under the strict contract
 // for the active policy revision: the installed capability, its models under
 // the normalized keys they were installed with and sorted by engine and model,
 // or none when nothing is installed or strict storage is untrusted (AdmitStrict
-// fails closed then). Policy activation has already withdrawn entries whose
-// limit no longer matches. ProxyRunID is the process's; reportStrictReadiness
+// fails closed then). Policy activation and identity changes have already
+// rederived the capability. ProxyRunID is the process's; reportStrictReadiness
 // stamps it.
 func (a *admissionController) StrictReadiness() nodepolicy.StrictAdmissionReadiness {
 	a.mu.Lock()
@@ -154,7 +269,10 @@ func (p *Proxy) reportStrictReadiness() {
 // AdmitStrict shares the concrete path's lock, in-flight counts, residency,
 // notifications and tickets. Engine IDs are canonical built-in IDs; models use
 // the existing engine adapter normalization (Ollama adds :latest, LM Studio exact).
-func (a *admissionController) AdmitStrict(ctx context.Context, engine, model string, req nodepolicy.StrictAdmissionRequest) (strictAdmissionTicket, error) {
+// generation is the installation qualifyStrict validated the request against;
+// a model reinstalled since, by a policy, identity or qualification change,
+// is unavailable to it.
+func (a *admissionController) AdmitStrict(ctx context.Context, engine, model string, req nodepolicy.StrictAdmissionRequest, generation uint64) (strictAdmissionTicket, error) {
 	if err := req.Validate(); err != nil {
 		return nil, err
 	}
@@ -180,7 +298,7 @@ func (a *admissionController) AdmitStrict(ctx context.Context, engine, model str
 			return nil, err
 		}
 		m, ok := a.strict.models[k]
-		if !ok || m.MaxConcurrent < 1 || m.Identity != req.Identity || a.strict.storageErr != nil || a.availability != nodepolicy.Available || a.drain[engine] {
+		if !ok || a.strict.generation[k] != generation || m.MaxConcurrent < 1 || m.Identity != req.Identity || a.strict.storageErr != nil || a.availability != nodepolicy.Available || a.drain[engine] {
 			return nil, errStrictUnavailable
 		}
 		if on, known := a.intent[engine]; known && !on {
@@ -499,15 +617,17 @@ func writeStrictAdmissionError(w http.ResponseWriter, err error) {
 }
 
 // strictDestinationAdmission is A1's process-wide admission seam, shared by all
-// facades and paired ingress. ingress.go:serveIngress and http_handler.go:handleHTTP's
-// self dispatch will call it after trusted-contract parsing and model
-// normalization, before wake/unload or inference. A1a implements the controller;
-// the authoritative capability/qualification feed remains withdrawn until A1b/A2.
-// Identity, availability, finite capacity and current qualification must all be
-// revalidated atomically. Deadlines are monotonic, derived from remaining
-// durations, and may only shrink. Concrete requests keep their existing path.
+// facades and paired ingress. ingress.go:serveStrictLocal, reached from
+// serveIngress and handleHTTP's self dispatch, calls qualifyStrict and then
+// AdmitStrict after trusted-contract parsing, before wake/unload or inference.
+// The capability is derived from local qualification and the broker's engine
+// identity (B). Identity, availability, finite capacity and the qualified
+// installation are all revalidated atomically. Deadlines are monotonic, derived
+// from remaining durations, and may only shrink. Concrete requests keep their
+// existing path.
 type strictDestinationAdmission interface {
-	AdmitStrict(context.Context, string, string, nodepolicy.StrictAdmissionRequest) (strictAdmissionTicket, error)
+	qualifyStrict(engine, model, route string, body []byte, identity nodepolicy.StrictModelIdentity) (strictValidation, error)
+	AdmitStrict(ctx context.Context, engine, model string, req nodepolicy.StrictAdmissionRequest, generation uint64) (strictAdmissionTicket, error)
 	StrictReadiness() nodepolicy.StrictAdmissionReadiness
 }
 

@@ -255,6 +255,7 @@ func (b *Broker) publishSettingsLocked() {
 	if worker := b.getEngineMgr(); worker != nil {
 		_ = worker.Notify("engine:settings-projection", all)
 	}
+	b.observeSettingsIdentity(all)
 }
 
 func (b *Broker) validateSettingsPortsLocked(ctx context.Context, engine string, config settings.Config, current settings.Snapshot) error {
@@ -390,7 +391,11 @@ func (b *Broker) runSettingsOperationLocked(ctx context.Context, engine string, 
 		b.engineConfigMu.Unlock()
 		defer b.engineConfigMu.Lock()
 		var launch settings.LaunchState
-		err := b.settingsWorkerCall(ctx, "engine:configure-launch", configure, &launch)
+		// No strict request may be admitted under settings about to change.
+		err := b.withdrawSettingsIdentity(ctx, engine)
+		if err == nil {
+			err = b.settingsWorkerCall(ctx, "engine:configure-launch", configure, &launch)
+		}
 		if err != nil {
 			// A failed RPC carries no result, so read the observed facts back
 			// here too and keep the whole worker round trip off the lock.

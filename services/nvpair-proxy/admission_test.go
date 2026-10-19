@@ -36,9 +36,7 @@ func configureStrict(t *testing.T, a *admissionController, path string) {
 	p := a.currentPolicy()
 	p.Admission.MaxConcurrentPerModel = 1
 	a.setPolicy(p)
-	if err := a.installStrictCapability(nodepolicy.StrictAdmissionCapability{Version: 1, Models: []nodepolicy.StrictAdmissionModel{{Engine: "ollama", Model: "m", MaxConcurrent: 1, Identity: strictRequest().Identity}}}); err != nil {
-		t.Fatal(err)
-	}
+	installQualified(t, a, admKey{engine: "ollama", model: "m"})
 	a.setResidency(map[string][]string{"ollama": {"m"}})
 }
 
@@ -108,7 +106,7 @@ type strictResult struct {
 
 func asyncStrict(a *admissionController, ctx context.Context, req nodepolicy.StrictAdmissionRequest) <-chan strictResult {
 	ch := make(chan strictResult, 1)
-	go func() { ticket, err := a.AdmitStrict(ctx, "ollama", "m", req); ch <- strictResult{ticket, err} }()
+	go func() { ticket, err := a.admitStrictNow(ctx, "ollama", "m", req); ch <- strictResult{ticket, err} }()
 	return ch
 }
 func awaitStrict(t *testing.T, ch <-chan strictResult) strictResult {
@@ -123,7 +121,7 @@ func awaitStrict(t *testing.T, ch <-chan strictResult) strictResult {
 }
 func mustStrictTicket(t *testing.T, a *admissionController) strictAdmissionTicket {
 	t.Helper()
-	ticket, err := a.AdmitStrict(context.Background(), "ollama", "m", strictRequest())
+	ticket, err := a.admitStrictNow(context.Background(), "ollama", "m", strictRequest())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -149,7 +147,7 @@ func TestStrictSharesConcreteCapacity(t *testing.T) {
 		defer first.ticket.release()
 		req := strictRequest()
 		req.QueueBudgetMs = 0
-		if ticket, err := h.a.AdmitStrict(context.Background(), "ollama", "m", req); ticket != nil || !errors.Is(err, errStrictOccupied) {
+		if ticket, err := h.a.admitStrictNow(context.Background(), "ollama", "m", req); ticket != nil || !errors.Is(err, errStrictOccupied) {
 			t.Fatalf("ticket=%v error=%v", ticket, err)
 		}
 		if h.a.currentActive() != 1 {
@@ -158,34 +156,36 @@ func TestStrictSharesConcreteCapacity(t *testing.T) {
 	})
 }
 
-func TestStrictCapabilityMatchesEffectivePolicy(t *testing.T) {
-	for _, scenario := range []string{"unlimited", "global mismatch", "profile mismatch", "matching profile"} {
-		t.Run(scenario, func(t *testing.T) {
+func TestStrictCapabilityTakesTheEffectiveConcurrency(t *testing.T) {
+	for _, tc := range []struct {
+		name            string
+		perModel, local int
+		want            int
+	}{
+		{"unlimited", 0, 0, 0},
+		{"policy limit", 2, 0, 2},
+		{"profile limit", 1, 2, 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
 			h := newStrictHarness(t)
 			p := h.a.currentPolicy()
-			p.Admission.MaxConcurrentPerModel = 2
-			switch scenario {
-			case "unlimited":
-				p.Admission.MaxConcurrentPerModel = 0
-			case "profile mismatch":
-				p.Admission.MaxConcurrentPerModel = 1
-				p.Profiles = []nodepolicy.Profile{{Engine: "ollama", Model: "m", MaxConcurrent: 2}}
-			case "matching profile":
-				p.Profiles = []nodepolicy.Profile{{Engine: "ollama", Model: "m", MaxConcurrent: 1}}
-			}
+			p.Admission.MaxConcurrentPerModel = tc.perModel
+			p.Profiles[0].MaxConcurrent = tc.local
 			if err := h.a.activatePolicy(p); err != nil {
 				t.Fatal(err)
 			}
-			err := h.a.installStrictCapability(nodepolicy.StrictAdmissionCapability{Version: 1, Models: []nodepolicy.StrictAdmissionModel{{Engine: "ollama", Model: "m:latest", MaxConcurrent: 1, Identity: strictRequest().Identity}}})
-			if scenario == "matching profile" {
-				if err != nil {
-					t.Fatal(err)
+			m, ok := h.a.strict.models[admKey{engine: "ollama", model: "m:latest"}]
+			if tc.want == 0 {
+				if ok {
+					t.Fatalf("unbounded concurrency installed %+v", m)
 				}
-				ticket := mustStrictTicket(t, h.a)
-				ticket.Finish(strictNotDispatched)
-			} else if err == nil {
-				t.Fatal("mismatched capability installed")
+				return
 			}
+			if !ok || m.MaxConcurrent != tc.want {
+				t.Fatalf("installed %+v, %v; want concurrency %d", m, ok, tc.want)
+			}
+			ticket := mustStrictTicket(t, h.a)
+			ticket.Finish(strictNotDispatched)
 		})
 	}
 }
@@ -194,7 +194,7 @@ func TestStrictPolicyChangeWithdrawsCapability(t *testing.T) {
 	h := newStrictHarness(t)
 	ticket := mustStrictTicket(t, h.a)
 	p := h.a.currentPolicy()
-	p.Admission.MaxConcurrentPerModel = 2
+	p.Profiles[0].Qualification = nil
 	if err := h.a.activatePolicy(p); err != nil {
 		t.Fatal(err)
 	}
@@ -202,13 +202,14 @@ func TestStrictPolicyChangeWithdrawsCapability(t *testing.T) {
 		t.Fatalf("dispatch error=%v", err)
 	}
 	ticket.Finish(strictNotDispatched)
-	if next, err := h.a.AdmitStrict(context.Background(), "ollama", "m", strictRequest()); next != nil || !errors.Is(err, errStrictUnavailable) {
+	if next, err := h.a.admitStrictNow(context.Background(), "ollama", "m", strictRequest()); next != nil || !errors.Is(err, errStrictUnavailable) {
 		t.Fatalf("ticket=%v error=%v", next, err)
 	}
 }
 
 func TestStrictCapabilityGenerationFencesHeldTickets(t *testing.T) {
-	for _, scenario := range []string{"policy withdrawal and reinstall", "same capability replacement", "explicit withdrawal and reinstall"} {
+	identity := map[string]nodepolicy.EngineIdentity{"ollama": testIdentity("m")}
+	for _, scenario := range []string{"policy withdrawal and reinstall", "identity withdrawal and reinstall"} {
 		t.Run(scenario, func(t *testing.T) {
 			h := newStrictHarness(t)
 			p := h.a.currentPolicy()
@@ -216,25 +217,20 @@ func TestStrictCapabilityGenerationFencesHeldTickets(t *testing.T) {
 			if err := h.a.activatePolicy(p); err != nil {
 				t.Fatal(err)
 			}
-			capability := nodepolicy.StrictAdmissionCapability{Version: 1, Models: []nodepolicy.StrictAdmissionModel{{Engine: "ollama", Model: "m", MaxConcurrent: 2, Identity: strictRequest().Identity}}}
-			if err := h.a.installStrictCapability(capability); err != nil {
-				t.Fatal(err)
-			}
 			first, second := mustStrictTicket(t, h.a), mustStrictTicket(t, h.a)
-			if scenario == "policy withdrawal and reinstall" {
-				p.Admission.MaxConcurrentPerModel = 1
-				if err := h.a.activatePolicy(p); err != nil {
-					t.Fatal(err)
+			// reinstall withdraws the installation and restores it unchanged.
+			reinstall := func() {
+				if scenario == "policy withdrawal and reinstall" {
+					withdrawn := h.a.currentPolicy()
+					withdrawn.Profiles = nil
+					h.a.setPolicy(withdrawn)
+					h.a.setPolicy(p)
+					return
 				}
-				capability.Models[0].MaxConcurrent = 1
-			} else if scenario == "explicit withdrawal and reinstall" {
-				if err := h.a.installStrictCapability(nodepolicy.StrictAdmissionCapability{Version: 1, Models: []nodepolicy.StrictAdmissionModel{{Engine: "lmstudio", Model: "other", MaxConcurrent: 2, Identity: strictRequest().Identity}}}); err != nil {
-					t.Fatal(err)
-				}
+				h.a.setModelIdentity(map[string]nodepolicy.EngineIdentity{})
+				h.a.setModelIdentity(identity)
 			}
-			if err := h.a.installStrictCapability(capability); err != nil {
-				t.Fatal(err)
-			}
+			reinstall()
 			for _, ticket := range []strictAdmissionTicket{first, second} {
 				if err := ticket.BeforeStrictDispatch(); !errors.Is(err, errStrictUnavailable) {
 					t.Fatalf("dispatch error=%v", err)
@@ -250,9 +246,7 @@ func TestStrictCapabilityGenerationFencesHeldTickets(t *testing.T) {
 				t.Fatal(err)
 			}
 			// Replacement must leave already-dispatched ownership intact.
-			if err := h.a.installStrictCapability(capability); err != nil {
-				t.Fatal(err)
-			}
+			reinstall()
 			if err := next.BeforeStrictDispatch(); err != nil || h.a.currentActive() != 1 {
 				t.Fatalf("dispatched ownership changed: %v", err)
 			}
@@ -269,12 +263,12 @@ func TestStrictPendingUnloadBlocksZeroCold(t *testing.T) {
 	h.a.mu.Unlock()
 	req := strictRequest()
 	req.ColdStartBudgetMs = 0
-	if ticket, err := h.a.AdmitStrict(context.Background(), "ollama", "m", req); ticket != nil || !errors.Is(err, errStrictCold) {
+	if ticket, err := h.a.admitStrictNow(context.Background(), "ollama", "m", req); ticket != nil || !errors.Is(err, errStrictCold) {
 		t.Fatalf("ticket=%v error=%v", ticket, err)
 	}
 	// A still-loaded report does not acknowledge the outstanding unload.
 	h.a.setResidency(map[string][]string{"ollama": {"m"}})
-	if ticket, err := h.a.AdmitStrict(context.Background(), "ollama", "m", req); ticket != nil || !errors.Is(err, errStrictCold) {
+	if ticket, err := h.a.admitStrictNow(context.Background(), "ollama", "m", req); ticket != nil || !errors.Is(err, errStrictCold) {
 		t.Fatalf("ticket=%v error=%v", ticket, err)
 	}
 }
@@ -287,7 +281,7 @@ func TestStrictWarmTicketRechecksResidency(t *testing.T) {
 			if scenario != "warm with cold allowance" {
 				req.ColdStartBudgetMs = 0
 			}
-			ticket, err := h.a.AdmitStrict(context.Background(), "ollama", "m", req)
+			ticket, err := h.a.admitStrictNow(context.Background(), "ollama", "m", req)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -391,7 +385,7 @@ func TestStrictTwoOriginsShareLastSlot(t *testing.T) {
 			req := strictRequest()
 			req.Request.OriginNodeID = origin
 			<-start
-			ticket, err := h.a.AdmitStrict(context.Background(), "ollama", "m:latest", req)
+			ticket, err := h.a.admitStrictNow(context.Background(), "ollama", "m:latest", req)
 			results <- strictResult{ticket, err}
 		}(origin)
 	}
@@ -484,7 +478,7 @@ func TestStrictZeroColdHasNoWakeOrUnload(t *testing.T) {
 				h.setHealthy("ollama", false)
 			}
 			if scenario == "switch" {
-				h.policy(func(p *nodepolicy.Policy) {
+				h.strictPolicy(func(p *nodepolicy.Policy) {
 					p.Admission.MaxConcurrentPerModel = 1
 					p.Admission.MaxResidentModels = 1
 					p.Admission.SwitchModels = true
@@ -496,7 +490,7 @@ func TestStrictZeroColdHasNoWakeOrUnload(t *testing.T) {
 			}
 			req := strictRequest()
 			req.ColdStartBudgetMs = 0
-			_, err := h.a.AdmitStrict(context.Background(), "ollama", "m", req)
+			_, err := h.a.admitStrictNow(context.Background(), "ollama", "m", req)
 			if !errors.Is(err, errStrictCold) {
 				t.Fatalf("error=%v", err)
 			}
@@ -510,7 +504,7 @@ func TestStrictZeroColdHasNoWakeOrUnload(t *testing.T) {
 func TestStrictSwitchTimeoutRejects(t *testing.T) {
 	h := newStrictHarness(t)
 	c := useStrictClock(h.a)
-	h.policy(func(p *nodepolicy.Policy) {
+	h.strictPolicy(func(p *nodepolicy.Policy) {
 		p.Admission.MaxConcurrentPerModel = 1
 		p.Admission.MaxResidentModels = 1
 		p.Admission.SwitchModels = true
@@ -535,14 +529,17 @@ func TestStrictCapabilityRequiresFiniteCapacityAndIdentity(t *testing.T) {
 	for _, limit := range []int{0, -1, 1048577} {
 		t.Run(fmt.Sprint(limit), func(t *testing.T) {
 			h := newStrictHarness(t)
-			if err := h.a.installStrictCapability(nodepolicy.StrictAdmissionCapability{Version: 1, Models: []nodepolicy.StrictAdmissionModel{{Engine: "ollama", Model: "m", MaxConcurrent: limit, Identity: strictRequest().Identity}}}); err == nil {
-				t.Fatal("invalid limit accepted")
+			p := h.a.currentPolicy()
+			p.Admission.MaxConcurrentPerModel = limit
+			h.a.setPolicy(p)
+			if len(h.a.strict.models) != 0 {
+				t.Fatalf("invalid limit installed %+v", h.a.strict.models)
 			}
 		})
 	}
 	t.Run("absent", func(t *testing.T) {
 		h := newAdmHarness(t)
-		_, err := h.a.AdmitStrict(context.Background(), "ollama", "m", strictRequest())
+		_, err := h.a.admitStrictNow(context.Background(), "ollama", "m", strictRequest())
 		if !errors.Is(err, errStrictUnavailable) {
 			t.Fatal(err)
 		}
@@ -551,7 +548,7 @@ func TestStrictCapabilityRequiresFiniteCapacityAndIdentity(t *testing.T) {
 		h := newStrictHarness(t)
 		req := strictRequest()
 		req.Identity.EngineRunID = "stale"
-		_, err := h.a.AdmitStrict(context.Background(), "ollama", "m", req)
+		_, err := h.a.admitStrictNow(context.Background(), "ollama", "m", req)
 		if !errors.Is(err, errStrictUnavailable) {
 			t.Fatal(err)
 		}
@@ -654,7 +651,7 @@ func TestStrictAvailabilityAndOffAreTyped(t *testing.T) {
 			case "off":
 				h.a.setIntent(map[string]bool{"ollama": false})
 			}
-			_, err := h.a.AdmitStrict(context.Background(), "ollama", "m", strictRequest())
+			_, err := h.a.admitStrictNow(context.Background(), "ollama", "m", strictRequest())
 			var typed *strictAdmissionError
 			if !errors.Is(err, errStrictUnavailable) || !errors.As(err, &typed) {
 				t.Fatalf("error=%v", err)
@@ -670,15 +667,12 @@ func TestStrictInFlightDoesNotProveWarmResidency(t *testing.T) {
 	if err := h.a.activatePolicy(p); err != nil {
 		t.Fatal(err)
 	}
-	if err := h.a.installStrictCapability(nodepolicy.StrictAdmissionCapability{Version: 1, Models: []nodepolicy.StrictAdmissionModel{{Engine: "ollama", Model: "m", MaxConcurrent: 2, Identity: strictRequest().Identity}}}); err != nil {
-		t.Fatal(err)
-	}
 	h.a.setResidency(map[string][]string{})
 	first := mustStrictTicket(t, h.a)
 	defer first.Finish(strictNotDispatched)
 	req := strictRequest()
 	req.ColdStartBudgetMs = 0
-	if _, err := h.a.AdmitStrict(context.Background(), "ollama", "m", req); !errors.Is(err, errStrictCold) {
+	if _, err := h.a.admitStrictNow(context.Background(), "ollama", "m", req); !errors.Is(err, errStrictCold) {
 		t.Fatalf("error=%v", err)
 	}
 }
@@ -708,7 +702,7 @@ func (a *admissionController) setPolicy(p nodepolicy.Policy) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.policy = p
-	a.revalidateStrictCapabilitiesLocked()
+	a.refreshStrictCapabilityLocked()
 	a.signalLocked()
 }
 
@@ -766,6 +760,14 @@ func (h *admHarness) policy(mutate func(*nodepolicy.Policy)) {
 	if err := p.Validate(); err != nil {
 		panic(err)
 	}
+	h.a.setPolicy(p)
+}
+
+// strictPolicy is policy for a strict harness: it edits the active policy,
+// keeping the qualified profiles the strict capability is installed under.
+func (h *admHarness) strictPolicy(mutate func(*nodepolicy.Policy)) {
+	p := h.a.currentPolicy()
+	mutate(&p)
 	h.a.setPolicy(p)
 }
 

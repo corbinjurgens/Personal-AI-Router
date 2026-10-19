@@ -187,3 +187,105 @@ func TestAdvertisementLegacyCaseFolding(t *testing.T) {
 		t.Fatalf("decoded = %+v, want %+v", got, want)
 	}
 }
+
+func TestAdvertisementCarriesProfileQualification(t *testing.T) {
+	p := Default()
+	p.Profiles = []Profile{{
+		Name: "q", Engine: "ollama", Model: "q:latest", ContextTokens: 8192, MaxOutputTokens: 2048,
+		Qualification: &QualificationRef{ID: "msi-qwen3-8b", Revision: "3"},
+	}}
+	p.Roles = map[string]Role{TierWeak: {Engine: "ollama", Model: "q:latest"}, TierStrong: {Engine: "ollama", Model: "unprofiled"}}
+	if err := p.Validate(); err != nil {
+		t.Fatalf("fixture policy is invalid: %v", err)
+	}
+
+	got := p.Advertisement()
+	weak := got.Roles[TierWeak]
+	want := AdvertisedRole{Engine: "ollama", Model: "q:latest", ContextTokens: 8192, MaxOutputTokens: 2048,
+		Qualification: &QualificationRef{ID: "msi-qwen3-8b", Revision: "3"}}
+	if !reflect.DeepEqual(weak, want) {
+		t.Fatalf("weak role = %+v, want %+v", weak, want)
+	}
+	if !weak.HybridQualified() {
+		t.Errorf("the qualified role is not hybrid qualified")
+	}
+	if strong := got.Roles[TierStrong]; strong.Qualification != nil || strong.MaxOutputTokens != 0 || strong.HybridQualified() {
+		t.Errorf("a role without a profile = %+v, want no qualification", strong)
+	}
+
+	weak.Qualification.Revision = "4"
+	if p.Profiles[0].Qualification.Revision != "3" {
+		t.Errorf("editing the advertisement changed the policy's profile")
+	}
+
+	data, err := json.Marshal(p.Advertisement().Roles[TierWeak])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := `{"engine":"ollama","model":"q:latest","contextTokens":8192,"maxOutputTokens":2048,"qualification":{"id":"msi-qwen3-8b","revision":"3"}}`; string(data) != want {
+		t.Errorf("role JSON = %s, want %s", data, want)
+	}
+}
+
+func TestAdvertisedRoleHybridQualified(t *testing.T) {
+	ref := &QualificationRef{ID: "q", Revision: "1"}
+	for _, tc := range []struct {
+		name string
+		role AdvertisedRole
+		want bool
+	}{
+		{"finite and qualified", AdvertisedRole{ContextTokens: 4096, MaxOutputTokens: 1024, Qualification: ref}, true},
+		{"no qualification", AdvertisedRole{ContextTokens: 4096, MaxOutputTokens: 1024}, false},
+		{"no context", AdvertisedRole{MaxOutputTokens: 1024, Qualification: ref}, false},
+		{"no output ceiling", AdvertisedRole{ContextTokens: 4096, Qualification: ref}, false},
+		{"output filling the context", AdvertisedRole{ContextTokens: 1024, MaxOutputTokens: 1024, Qualification: ref}, false},
+		{"negative output", AdvertisedRole{ContextTokens: 4096, MaxOutputTokens: -1, Qualification: ref}, false},
+		{"malformed reference", AdvertisedRole{ContextTokens: 4096, MaxOutputTokens: 1024, Qualification: &QualificationRef{ID: "q", Revision: "x"}}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.role.HybridQualified(); got != tc.want {
+				t.Fatalf("HybridQualified() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestAdvertisementDecodesMalformedQualificationLeniently(t *testing.T) {
+	// A peer's malformed qualification must not fail the inventory decode; it
+	// only leaves the role ineligible for hybrid requests.
+	for _, tc := range []struct {
+		name, role string
+	}{
+		{"invalid values", `"maxOutputTokens":9999,"qualification":{"id":"","revision":"0","extra":true}`},
+		{"output of the wrong type", `"maxOutputTokens":"many","qualification":{"id":"q","revision":"1"}`},
+		{"qualification of the wrong type", `"maxOutputTokens":1024,"qualification":"q@1"`},
+		{"qualification fields of the wrong type", `"maxOutputTokens":1024,"qualification":{"id":7,"revision":["1"]}`},
+		{"null qualification", `"maxOutputTokens":1024,"qualification":null`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var adv Advertisement
+			doc := `{"revision":"1","roles":{"weak":{"engine":"ollama","model":"m","contextTokens":4096,` + tc.role + `}}}`
+			if err := json.Unmarshal([]byte(doc), &adv); err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			role := adv.Roles[TierWeak]
+			if role.Engine != "ollama" || role.Model != "m" || role.ContextTokens != 4096 {
+				t.Fatalf("role = %+v, want its engine, model and context kept", role)
+			}
+			if role.HybridQualified() {
+				t.Fatalf("malformed role = %+v counts as hybrid qualified", role)
+			}
+		})
+	}
+}
+
+func TestAdvertisedRoleKeepsLegacyCaseFolding(t *testing.T) {
+	var role AdvertisedRole
+	if err := json.Unmarshal([]byte(`{"ENGINE":"ollama","Model":"m","CONTEXTTOKENS":4096,"maxoutputtokens":1024,"Qualification":{"ID":"q","REVISION":"1"}}`), &role); err != nil {
+		t.Fatal(err)
+	}
+	want := AdvertisedRole{Engine: "ollama", Model: "m", ContextTokens: 4096, MaxOutputTokens: 1024, Qualification: &QualificationRef{ID: "q", Revision: "1"}}
+	if !reflect.DeepEqual(role, want) {
+		t.Fatalf("decoded = %+v, want %+v", role, want)
+	}
+}

@@ -203,6 +203,7 @@ func (e *Executor) doStart(ctx context.Context, st *engineState, engine string, 
 
 	st.mu.Lock()
 	st.running = true
+	st.runID = newEngineRunID()
 	st.healthy = true
 	st.adopted = false
 	st.gen++
@@ -266,8 +267,10 @@ func (e *Executor) bringUpProcess(ctx context.Context, st *engineState, engine s
 		e.reportStartFailedUnlessShuttingDown(ctx, engine, werr)
 		return werr
 	}
+	digest := launchDigest(launch)
 	st.mu.Lock()
 	st.proc = proc
+	st.launchDigest = digest
 	st.mu.Unlock()
 
 	readyCtx, readyCancel := context.WithCancel(ctx)
@@ -391,6 +394,7 @@ func (e *Executor) watch(st *engineState, engine string, proc *managedProc) {
 		if current {
 			st.proc = nil
 			st.running = false
+			st.runID = ""
 			st.healthy = false
 			if st.healthStop != nil {
 				st.healthStop()
@@ -595,6 +599,7 @@ func (e *Executor) markStopped(st *engineState, engine string) {
 		st.healthStop = nil
 	}
 	st.running = false
+	st.runID = ""
 	st.healthy = false
 	st.stopping = true
 	st.adopted = false
@@ -726,6 +731,10 @@ func (e *Executor) reconcileFailedCommandStop(st *engineState, engine string, ru
 	st.mu.Lock()
 	port = st.port
 	st.running = true
+	// The stop did not take effect: the same process keeps its run id.
+	if st.runID == "" {
+		st.runID = newEngineRunID()
+	}
 	st.healthy = true
 	st.stopping = false
 	if rt.Health != nil {

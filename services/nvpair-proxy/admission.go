@@ -152,7 +152,7 @@ func (a *admissionController) activatePolicy(p nodepolicy.Policy) error {
 		return fmt.Errorf("revision %s is older than the active revision %s", p.Revision, a.policy.Revision)
 	}
 	a.policy = p
-	a.revalidateStrictCapabilitiesLocked()
+	a.refreshStrictCapabilityLocked()
 	a.signalLocked()
 	return nil
 }

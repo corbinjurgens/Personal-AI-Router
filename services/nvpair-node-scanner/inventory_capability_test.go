@@ -105,6 +105,24 @@ func TestDecodeInventoryPolicy(t *testing.T) {
 	}
 }
 
+// A peer's malformed role qualification hint costs the node neither its
+// advertisement nor its capability: the hint alone is dropped, and the role
+// is then not hybrid eligible.
+func TestDecodeInventoryPolicyKeepsRolesWithMalformedQualification(t *testing.T) {
+	raw := json.RawMessage(`{"revision":"31","roles":{"medium":{"engine":"ollama","model":"model","contextTokens":16384,` +
+		`"maxOutputTokens":"lots","qualification":["q","1"]}},"strictAdmission":` + validStrictJSON("m:latest") + `}`)
+	adv, rejected, err := decodeInventoryPolicy(raw)
+	if err != nil || rejected != "" || adv == nil {
+		t.Fatalf("decode = %+v, %q, %v; want the advertisement kept", adv, rejected, err)
+	}
+	if !reflect.DeepEqual(adv.Roles, capabilityTestRoles) || adv.Roles[nodepolicy.TierMedium].HybridQualified() {
+		t.Fatalf("roles = %+v, want the fixture's without the malformed hints", adv.Roles)
+	}
+	if adv.StrictAdmission.State() != nodepolicy.StrictCapabilityValid {
+		t.Fatalf("capability state = %s, want valid", adv.StrictAdmission.State())
+	}
+}
+
 // TestDecodeInventoryPolicyKeepsTheSharedDecodingOfOtherFields checks that
 // dropping a malformed capability leaves every other member to decode exactly as
 // the shared decoder decodes the same document without the capability, keeping

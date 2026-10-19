@@ -6,9 +6,12 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strconv"
+	"strings"
 	"testing"
 
 	"nvpair-shared/nodepolicy"
@@ -338,24 +341,26 @@ func TestStrictReadiness_ReportsTheInstalledCapability(t *testing.T) {
 	a.mu.Lock()
 	a.strict.path = filepath.Join(t.TempDir(), "capacity.json")
 	a.strict.storageErr = nil
+	refOllama := nodepolicy.QualificationRef{ID: "q-ollama", Revision: "1"}
+	refLMStudio := nodepolicy.QualificationRef{ID: "q-lmstudio", Revision: "1"}
+	a.strict.registry = qualificationRegistry{
+		refOllama:   testQualification(refOllama.ID, "ollama", "m"),
+		refLMStudio: testQualification(refLMStudio.ID, "lmstudio", "Exact Name"),
+	}
 	a.mu.Unlock()
-	limited := func(revision string, limit int) nodepolicy.Policy {
+	qualified := func(revision string, limit int) nodepolicy.Policy {
 		pol := policyAt(revision)
 		pol.Admission.MaxConcurrentPerModel = limit
+		pol.Profiles = []nodepolicy.Profile{
+			{Name: "o", Engine: "ollama", Model: "m", ContextTokens: 4096, MaxOutputTokens: 1024, Qualification: &refOllama},
+			{Name: "l", Engine: "lmstudio", Model: "Exact Name", ContextTokens: 4096, MaxOutputTokens: 1024, Qualification: &refLMStudio},
+		}
 		return pol
 	}
-	install := func(t *testing.T) {
-		t.Helper()
-		capability := nodepolicy.StrictAdmissionCapability{Version: 1, Models: []nodepolicy.StrictAdmissionModel{
-			{Engine: "ollama", Model: "m", MaxConcurrent: 1, Identity: strictRequest().Identity},
-			{Engine: "lmstudio", Model: "Exact Name", MaxConcurrent: 1, Identity: strictRequest().Identity},
-		}}
-		if err := a.installStrictCapability(capability); err != nil {
-			t.Fatal(err)
-		}
-		// The future install owner reports after each install.
-		p.reportStrictReadiness()
+	identity := func(engines map[string]nodepolicy.EngineIdentity) nodepolicy.SetModelIdentityParams {
+		return nodepolicy.SetModelIdentityParams{Engines: engines}
 	}
+	both := map[string]nodepolicy.EngineIdentity{"ollama": testIdentity("m"), "lmstudio": testIdentity("Exact Name")}
 	last := func(t *testing.T) nodepolicy.StrictAdmissionReadiness {
 		t.Helper()
 		got := strictReports(t, w)
@@ -364,9 +369,21 @@ func TestStrictReadiness_ReportsTheInstalledCapability(t *testing.T) {
 		}
 		return got[len(got)-1]
 	}
+	models := func(r nodepolicy.StrictAdmissionReadiness) []string {
+		var out []string
+		if r.Capability != nil {
+			for _, m := range r.Capability.Models {
+				out = append(out, fmt.Sprintf("%s/%s/%d", m.Engine, m.Model, m.MaxConcurrent))
+			}
+		}
+		return out
+	}
 
-	rpcOK(t, p, w, nodepolicy.MethodSetPolicy, limited("10", 1))
-	install(t)
+	rpcOK(t, p, w, nodepolicy.MethodSetPolicy, qualified("10", 1))
+	if report := last(t); report.Capability != nil {
+		t.Fatalf("report before any engine identity = %+v, want no capability", report)
+	}
+	rpcOK(t, p, w, nodepolicy.MethodSetModelIdentity, identity(both))
 	report := last(t)
 	want := []nodepolicy.StrictAdmissionModel{
 		{Engine: "lmstudio", Model: "Exact Name", MaxConcurrent: 1, Identity: strictRequest().Identity},
@@ -374,32 +391,48 @@ func TestStrictReadiness_ReportsTheInstalledCapability(t *testing.T) {
 	}
 	if report.PolicyRevision != "10" || report.ProxyRunID != p.runID || report.Capability == nil ||
 		report.Capability.Version != nodepolicy.StrictAdmissionVersion || !reflect.DeepEqual(report.Capability.Models, want) {
-		t.Fatalf("report = %+v (capability %+v), want revision 10 with %+v", report, report.Capability, want)
+		t.Fatalf("report after the identity = %+v (capability %+v), want revision 10 with %+v", report, report.Capability, want)
 	}
 
-	t.Run("a policy whose limit no longer matches withdraws it", func(t *testing.T) {
-		rpcOK(t, p, w, nodepolicy.MethodSetPolicy, limited("11", 2))
-		if report := last(t); report.PolicyRevision != "11" || report.Capability != nil {
-			t.Fatalf("report after the limit changed = %+v, want revision 11 with no capability", report)
+	t.Run("a changed limit is reinstalled under the new revision", func(t *testing.T) {
+		rpcOK(t, p, w, nodepolicy.MethodSetPolicy, qualified("11", 2))
+		if report := last(t); report.PolicyRevision != "11" || !slices.Equal(models(report), []string{"lmstudio/Exact Name/2", "ollama/m:latest/2"}) {
+			t.Fatalf("report after the limit changed = %+v, want revision 11 with both at 2", report)
 		}
 	})
-
-	t.Run("an unchanged limit keeps it under the new revision", func(t *testing.T) {
-		rpcOK(t, p, w, nodepolicy.MethodSetPolicy, limited("12", 1))
-		install(t)
-		rpcOK(t, p, w, nodepolicy.MethodSetPolicy, limited("13", 1))
-		if report := last(t); report.PolicyRevision != "13" || report.Capability == nil || len(report.Capability.Models) != 2 {
-			t.Fatalf("report after an unrelated policy change = %+v, want revision 13 with both models", report)
+	t.Run("an identity without an engine withdraws its model", func(t *testing.T) {
+		rpcOK(t, p, w, nodepolicy.MethodSetModelIdentity, identity(map[string]nodepolicy.EngineIdentity{"lmstudio": testIdentity("Exact Name")}))
+		if got := models(last(t)); !slices.Equal(got, []string{"lmstudio/Exact Name/2"}) {
+			t.Fatalf("models after ollama lost its identity = %v", got)
 		}
 	})
-
+	t.Run("a same-name replacement withdraws the model", func(t *testing.T) {
+		replaced := testIdentity()
+		replaced.ModelDigests["Exact Name"] = strings.Repeat("f", 64)
+		rpcOK(t, p, w, nodepolicy.MethodSetModelIdentity, identity(map[string]nodepolicy.EngineIdentity{"ollama": testIdentity("m"), "lmstudio": replaced}))
+		if got := models(last(t)); !slices.Equal(got, []string{"ollama/m:latest/2"}) {
+			t.Fatalf("models after the lmstudio model was replaced = %v", got)
+		}
+	})
+	t.Run("an invalid identity is refused and the previous one kept", func(t *testing.T) {
+		before := len(strictReports(t, w))
+		bad := testIdentity("m")
+		bad.LaunchDigest = "not-a-digest"
+		rpcErr(t, p, w, nodepolicy.MethodSetModelIdentity, identity(map[string]nodepolicy.EngineIdentity{"ollama": bad}))
+		if got := strictReports(t, w); len(got) != before {
+			t.Fatalf("a refused identity sent a report: %+v", got[len(got)-1])
+		}
+		if got := models(p.admission.StrictReadiness()); !slices.Equal(got, []string{"ollama/m:latest/2"}) {
+			t.Fatalf("models after a refused identity = %v", got)
+		}
+	})
 	t.Run("untrusted strict storage withdraws it", func(t *testing.T) {
 		a.mu.Lock()
 		a.strict.storageErr = errors.New("unreadable capacity document")
 		a.mu.Unlock()
-		rpcOK(t, p, w, nodepolicy.MethodSetPolicy, limited("14", 1))
-		if report := last(t); report.PolicyRevision != "14" || report.Capability != nil {
-			t.Fatalf("report with untrusted storage = %+v, want revision 14 with no capability", report)
+		rpcOK(t, p, w, nodepolicy.MethodSetModelIdentity, identity(both))
+		if report := last(t); report.Capability != nil {
+			t.Fatalf("report with untrusted storage = %+v, want no capability", report)
 		}
 	})
 }

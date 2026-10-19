@@ -104,7 +104,7 @@
     "list_models": {
       "description": "List models installed on this engine.",
       "http": { "method": "GET", "path": "/api/tags" },
-      "result": { "array": "models", "field": "name" }
+      "result": { "array": "models", "field": "name", "digest": "digest" }
     },
     "loaded_models": {
       "description": "List models currently loaded in memory (every /api/ps entry is resident).",

@@ -4,6 +4,7 @@
 package nodepolicy
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -18,6 +19,48 @@ type AdvertisedRole struct {
 	Model         string       `json:"model"`
 	ContextTokens int          `json:"contextTokens,omitempty"`
 	Capabilities  []Capability `json:"capabilities,omitempty"`
+	// MaxOutputTokens and Qualification come from the profile. A router may
+	// offer the role for a hybrid request only when both are present and
+	// finite; they are hints, and the destination revalidates every request
+	// against its own installed qualification.
+	MaxOutputTokens int               `json:"maxOutputTokens,omitempty"`
+	Qualification   *QualificationRef `json:"qualification,omitempty"`
+}
+
+// UnmarshalJSON keeps a role whose maxOutputTokens or qualification is
+// malformed, dropping only that field: they are hints a router validates, and
+// a peer's bad hint must not cost the node its advertisement and inventory.
+// The other fields keep their R1 decoding, letter-case folding included.
+func (r *AdvertisedRole) UnmarshalJSON(data []byte) error {
+	type wire AdvertisedRole
+	var next wire
+	legacy := struct {
+		*wire
+		MaxOutputTokens json.RawMessage `json:"maxOutputTokens"`
+		Qualification   json.RawMessage `json:"qualification"`
+	}{wire: &next}
+	if err := json.Unmarshal(data, &legacy); err != nil {
+		return err
+	}
+	var output int
+	if json.Unmarshal(legacy.MaxOutputTokens, &output) == nil {
+		next.MaxOutputTokens = output
+	}
+	var ref QualificationRef
+	if q := bytes.TrimSpace(legacy.Qualification); len(q) > 0 && !bytes.Equal(q, []byte("null")) && json.Unmarshal(q, &ref) == nil {
+		next.Qualification = &ref
+	}
+	*r = AdvertisedRole(next)
+	return nil
+}
+
+// HybridQualified reports whether the role carries finite qualification
+// metadata: a valid reference, a served context and an output ceiling below
+// it. It never decodes strictly, so a malformed role from a peer is only
+// ineligible for hybrid requests.
+func (r AdvertisedRole) HybridQualified() bool {
+	return r.Qualification != nil && r.Qualification.Validate() == nil &&
+		r.ContextTokens > 0 && r.MaxOutputTokens > 0 && r.MaxOutputTokens < r.ContextTokens
 }
 
 // Advertisement is the part of a policy a node publishes to paired peers in
@@ -208,8 +251,8 @@ func (a *Advertisement) UnmarshalJSON(data []byte) error {
 }
 
 // Advertisement returns what p publishes to paired peers. Each declared role
-// carries the context bound and capabilities of the profile for the same
-// (engine, model); a role with no profile carries neither.
+// carries the context bound, capabilities, output ceiling and qualification of
+// the profile for the same (engine, model); a role with no profile carries none.
 func (p Policy) Advertisement() Advertisement {
 	roles := make(map[string]AdvertisedRole, len(p.Roles))
 	for tier, role := range p.Roles {
@@ -217,6 +260,11 @@ func (p Policy) Advertisement() Advertisement {
 		if pr, ok := p.ProfileFor(role.Engine, role.Model); ok {
 			adv.ContextTokens = pr.ContextTokens
 			adv.Capabilities = nilIfEmpty(slices.Clone(pr.Capabilities))
+			adv.MaxOutputTokens = pr.MaxOutputTokens
+			if pr.Qualification != nil {
+				q := *pr.Qualification
+				adv.Qualification = &q
+			}
 		}
 		roles[tier] = adv
 	}

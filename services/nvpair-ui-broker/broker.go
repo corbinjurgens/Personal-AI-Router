@@ -1580,7 +1580,7 @@ func (b *Broker) Serve(ctx context.Context) error {
 		defer b.settingsSup.Stop()
 	}
 	b.prepareOllamaHostAliasCandidate()
-	b.engineMgrSup = b.startOptionalWorker("engine-manager", b.engineMgrPath, b.spawnEngineMgr, func() { b.setEngineMgr(nil); b.clearEngineRelaySub() })
+	b.engineMgrSup = b.startOptionalWorker("engine-manager", b.engineMgrPath, b.spawnEngineMgr, func() { b.setEngineMgr(nil); b.clearEngineRelaySub(); b.clearEngineManagerIdentity() })
 	if b.engineMgrSup != nil {
 		defer b.engineMgrSup.Stop()
 	}

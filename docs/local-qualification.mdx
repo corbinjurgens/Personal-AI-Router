@@ -1,0 +1,206 @@
+{/*
+SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+*/}
+
+# Local qualification and freshness
+
+A hybrid request may run on a local model only within bounds that were measured
+for that exact model, engine launch and chat template. This page describes the
+qualification evidence a node holds, how each strict request is checked against
+it, and the identity that keeps that evidence current. It builds on
+[Strict local admission](strict-local-admission.mdx).
+
+Hybrid inference is still disabled: no origin sends the strict envelope yet, and
+the `-local` and `-api` aliases are refused. No node ships with qualification
+evidence. Until an actual model has been qualified on its machine, the evidence
+file is absent, nothing is installed, and every strict request is refused. The
+synthetic fixture in `services/nvpair-proxy/testdata/local-qualification.json`
+qualifies nothing real.
+
+## Qualification evidence
+
+Each node reads `local-qualification.json` from the per-user application data
+directory (the same directory as `node-policy.json`) once when its proxy starts.
+A missing file means no model is qualified. A file that cannot be read or that
+fails validation is ignored as a whole and logged; nothing is qualified from it.
+
+```json
+{
+  "version": 1,
+  "qualifications": [{
+    "id": "msi-example",
+    "revision": "1",
+    "engine": "ollama",
+    "model": "example:8b",
+    "modelDigests": ["<64 lowercase hex>"],
+    "launchDigests": ["<64 lowercase hex>"],
+    "requestOptions": {"options": {"num_ctx": 8192}},
+    "tokenizer": "example-byte-level-bpe",
+    "chatTemplate": "example-template@sha256-prefix",
+    "contextTokens": 8192,
+    "maxOutputTokens": 2048,
+    "routes": ["/v1/chat/completions"],
+    "accounting": {
+      "method": "utf8-bytes",
+      "requestOverheadTokens": 16,
+      "messageOverheadTokens": 8,
+      "toolOverheadTokens": 32,
+      "schemaOverheadTokens": 32
+    },
+    "evidence": "Where and how the bounds and overheads were measured."
+  }]
+}
+```
+
+| Field | Meaning |
+| --- | --- |
+| `id`, `revision` | Identity of this qualification. A profile names exactly one id and revision. |
+| `engine`, `model` | The engine and model; the model is compared after the engine's naming normalization. |
+| `modelDigests` | Content identities of the model the bounds hold for. For Ollama this is the `/api/tags` digest, which covers the weights and the template and parameter layers. |
+| `launchDigests` | Launches the bounds hold for (Identity, below). |
+| `requestOptions` | The profile defaults the bounds were measured with. The profile's `requestOptions` must be equal. |
+| `tokenizer`, `chatTemplate` | Names of the tokenizer and template the accounting was verified against. |
+| `contextTokens` | The served context the bounds hold for, at most 16777216. Each overhead is below it. |
+| `maxOutputTokens` | The largest output a request may ask for; below `contextTokens`. |
+| `routes` | Request shapes covered. Only `/v1/chat/completions` is supported. |
+| `accounting` | How input tokens are bounded (below). |
+| `evidence` | Nonsecret provenance of the measurement. |
+
+Unknown fields, an unsupported version, method or route, or a repeated id and
+revision reject the whole document.
+
+### Accounting
+
+The only method is `utf8-bytes`. It bounds input tokens by the UTF-8 bytes of
+everything the template renders, which holds for a byte-level BPE tokenizer: each
+token covers at least one byte. The template's own tokens are covered by the
+declared overheads. For one request the input bound is the request overhead, plus
+for each message its overhead and the bytes of its role, name, tool call id and
+text content and the compact JSON of each of its tool calls, plus for each tool
+its overhead and the bytes of its compact JSON, plus the compact `tool_choice`,
+plus, for a structured response, the schema overhead and the bytes of its name,
+description and compact schema. A qualification is valid only when its evidence
+shows the tokenizer is byte-level and the overheads cover the template's rendering
+of every allowed shape, including tools and schemas. An estimate such as bytes
+divided by four is never used.
+
+## Profiles
+
+A model opts in through its profile in the node policy:
+
+```json
+{"name": "example", "engine": "ollama", "model": "example:8b",
+ "contextTokens": 8192, "maxOutputTokens": 2048, "maxConcurrent": 1,
+ "qualification": {"id": "msi-example", "revision": "1"},
+ "requestOptions": {"options": {"num_ctx": 8192}}}
+```
+
+A profile with a qualification needs nonzero `contextTokens` and
+`maxOutputTokens`, with the output ceiling below the context. The node's
+advertisement copies `maxOutputTokens` and `qualification` onto each declared role
+served by that profile. A router offers a role for a hybrid request only when the
+role carries a valid qualification reference, a served context and an output
+ceiling below it, and the node advertises a valid strict entry for the role's
+model. These advertised values are hints; the destination checks every request
+itself.
+
+## Installing strict capacity
+
+The proxy derives its strict capability whenever the policy or the engine identity
+changes, and reports it to the broker. A profile's model is installed only when
+all of the following hold:
+
+- the evidence holds the profile's qualification id and revision, for the same
+  engine and normalized model;
+- the engine has an identity, its launch digest is in `launchDigests` and the
+  model's content digest is in `modelDigests`;
+- the profile's `requestOptions` equal the qualified ones, and its `contextTokens`
+  and `maxOutputTokens` do not exceed the qualified ones;
+- the model's effective concurrency is finite.
+
+The installed entry carries the identity `{engineRunId, settingsFingerprint,
+modelDigest}` that a strict request must name. When any input changes, the entry
+is withdrawn or replaced, and tickets admitted under the previous entry can no
+longer dispatch.
+
+## Validating a strict request
+
+Before any wake, unload, slot or inference, the destination:
+
+1. requires the model to be installed under exactly the identity the request
+   names (otherwise 503 `strict-admission`);
+2. merges the profile's `requestOptions` into the body; the merged body is what is
+   checked and what the engine receives;
+3. rejects (400 `strict-qualification`) a body with a field outside the supported
+   shape, a repeated or letter-case variant key, an image or other non-text part,
+   or a request-level setting such as a context length, so a request cannot
+   override a qualified default;
+4. requires one finite output bound (`max_tokens` or `max_completion_tokens`,
+   equal when both are sent), no larger than the profile's and the
+   qualification's output ceilings;
+5. requires the input bound plus the output bound to fit the profile's served
+   context.
+
+Rejections name fields and bounds only, never request content.
+
+## Identity and freshness
+
+The identity binds a qualification to what is actually running:
+
+| Part | Producer | Changes when |
+| --- | --- | --- |
+| `engineRunId` | engine-manager | the engine is started or adopted, or engine-manager restarts |
+| launch digest | engine-manager | the launch changes: the executable's path, size or modification time (so an engine upgrade), its arguments, or its explicit environment |
+| model content digest | engine-manager | the model's content changes, including a same-name replacement |
+| `settingsFingerprint` | broker | a settings revision is applied, or the broker restarts |
+
+engine-manager reports identity only for engines it launched itself as an owned
+process. An adopted service or a command-mode daemon was not started from a launch
+it can name, so it has no identity and stays ineligible. The launch digest is the
+SHA-256 of a JSON document holding the executable path, size and modification
+time, the argument list and the sorted explicit environment assignments;
+engine-manager logs it as `launch_digest` whenever an engine's identity changes,
+which is how a qualifying operator records it. The inherited environment of the
+service is not part of it.
+
+Model content digests come from the engine's own inventory when its manifest's
+`list_models` result declares a `digest` field (Ollama does). Other engines report
+none, so their models are not installed. Engines that declare one are listed on
+every watcher tick, and each digest is reported only with the run it was listed
+under.
+
+engine-manager sends the broker `engine:model-identity`, a whole snapshot
+`{engines: {<engine>: {engineRunId, launchDigest, modelDigests}}}`, after its first
+sweep and whenever it changes; every start, stop or adoption triggers a sweep. The
+broker joins it with the SHA-256 fingerprint of each engine's applied settings
+revision and pushes `node/set-model-identity` to the proxy; it also drops an
+engine at once when it stops, drops all of them when engine-manager exits, and
+withholds from its advertisement any reported model whose identity is no longer
+the current one.
+
+Invalidation happens before the change it guards wherever PAIR makes the change:
+
+| Event | Effect |
+| --- | --- |
+| A settings operation (apply or recovery) | The broker withdraws the engine's settings identity and waits for the proxy to acknowledge it before `engine:configure-launch` runs; if that cannot be confirmed the operation fails before the engine is touched. A new applied revision has a new fingerprint. |
+| Lower context, changed template flag, other launch arguments or an engine upgrade | New launch digest; not covered by the evidence, so not installed. |
+| Engine restart or adoption | New run id; requests naming the old one are refused. |
+| Same-name model replacement or a changed template layer | New content digest; not installed until evidence names it. |
+| Profile bounds above the evidence, other defaults, or a stale qualification revision | Not installed. |
+| Stale origin metadata | The destination revalidates identity and body. |
+
+Two windows remain: a request already admitted before a change keeps running, and
+a model replaced outside PAIR is noticed at the next watcher tick (5 seconds by
+default) rather than at dispatch.
+
+## Not covered here
+
+- Actual qualification evidence. It must come from the target machine: the model
+  and engine version, measured tokenizer behavior and template overheads covering
+  every allowed shape, the served context, and the launch and content digests.
+- Termination evidence. Strict work still counts as uncertain after it finishes
+  until reconciliation proves the engine stopped generating; releasing that
+  capacity belongs to hybrid dispatch together with actual engine evidence.
+- Hybrid dispatch itself, which will call the role eligibility and send the
+  strict envelope.

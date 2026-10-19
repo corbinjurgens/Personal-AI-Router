@@ -924,3 +924,89 @@ func TestTierRoles_PeerCrossEngineRole(t *testing.T) {
 		t.Fatalf("own-engine candidates = %+v, want the declared role", got)
 	}
 }
+
+// qualifiedRole is an Ollama role advertising finite qualification.
+func qualifiedRole(model string) nodepolicy.AdvertisedRole {
+	return nodepolicy.AdvertisedRole{Engine: "ollama", Model: model, ContextTokens: 4096, MaxOutputTokens: 1024,
+		Qualification: &nodepolicy.QualificationRef{ID: "q", Revision: "1"}}
+}
+
+// advertise gives a fixture node a role declaration and a strict capability,
+// as its relayed policy advertisement would.
+func (fx *tierFixture) advertise(t *testing.T, id string, roles map[string]nodepolicy.AdvertisedRole, capability *nodepolicy.StrictAdmissionCapability) {
+	t.Helper()
+	fx.declare(t, id, roles)
+	f := fx.p.soleFacade()
+	n, ok := discoveredNode(f, id)
+	if !ok {
+		t.Fatalf("no fixture node %q", id)
+	}
+	n.StrictAdmission = capability
+	f.discovery.AddManual(n)
+}
+
+func strictCapabilityFor(engine string, models ...string) *nodepolicy.StrictAdmissionCapability {
+	c := &nodepolicy.StrictAdmissionCapability{Version: nodepolicy.StrictAdmissionVersion}
+	for _, m := range models {
+		c.Models = append(c.Models, nodepolicy.StrictAdmissionModel{Engine: engine, Model: m, MaxConcurrent: 1, Identity: strictRequest().Identity})
+	}
+	return c
+}
+
+// Hybrid role eligibility admits only a declared role with finite
+// qualification on a node that advertises a valid strict entry for it; legacy
+// tier resolution of the same request is unchanged.
+func TestHybridLocalCandidatesRequireQualifiedDeclaredRoles(t *testing.T) {
+	pol := ollamaTierPolicy(map[string][]nodepolicy.TierEntry{"weak": {{Kind: nodepolicy.EntryLocal, Engine: "ollama", Model: "q:1b"}}})
+	pol.TierPolicy.AllowStronger = false
+	nodes := map[string][]string{}
+	for _, id := range []string{"eligible", "unqualified", "no-capability", "unsupported", "other-model", "undeclared", "malformed"} {
+		nodes[id] = []string{"q:1b"}
+	}
+	fx := newTierFixture(t, ollamaCase(t), pol, nodes, nil)
+	f := fx.p.soleFacade()
+	var unsupported nodepolicy.StrictAdmissionCapability
+	if err := json.Unmarshal([]byte(`{"version":2,"models":[{"engine":"ollama","model":"q:1b"}]}`), &unsupported); err != nil {
+		t.Fatal(err)
+	}
+	malformed := qualifiedRole("q:1b")
+	malformed.MaxOutputTokens = 4096
+	fx.advertise(t, "eligible", map[string]nodepolicy.AdvertisedRole{"weak": qualifiedRole("q:1b")}, strictCapabilityFor("ollama", "q:1b"))
+	fx.advertise(t, "unqualified", map[string]nodepolicy.AdvertisedRole{"weak": ollamaRole("q:1b")}, strictCapabilityFor("ollama", "q:1b"))
+	fx.advertise(t, "no-capability", map[string]nodepolicy.AdvertisedRole{"weak": qualifiedRole("q:1b")}, nil)
+	fx.advertise(t, "unsupported", map[string]nodepolicy.AdvertisedRole{"weak": qualifiedRole("q:1b")}, &unsupported)
+	fx.advertise(t, "other-model", map[string]nodepolicy.AdvertisedRole{"weak": qualifiedRole("q:1b")}, strictCapabilityFor("ollama", "r:1b"))
+	fx.advertise(t, "malformed", map[string]nodepolicy.AdvertisedRole{"weak": malformed}, strictCapabilityFor("ollama", "q:1b"))
+
+	got := f.hybridLocalCandidates("weak", requestNeeds{}, true)
+	if len(got) != 1 || got[0].id != "eligible" || got[0].strict.Identity != strictRequest().Identity || !got[0].role.HybridQualified() {
+		t.Fatalf("hybrid candidates = %+v, want only the qualified, capable declared role", got)
+	}
+	if legacy := resolvedTier(f, "weak", requestNeeds{}, true); len(legacy) != len(nodes) {
+		t.Fatalf("legacy tier candidates = %+v, want every node unchanged", legacy)
+	}
+}
+
+// For itself the router reads its own installed capability, so a withdrawn
+// identity removes it at once.
+func TestHybridLocalCandidatesSelfUsesItsOwnCapability(t *testing.T) {
+	w := &recordingWriter{}
+	p, oll, _ := twoEngineProxy(t, w)
+	e := newRecordingEngine(t, http.StatusOK)
+	oll.discovery.AddManual(selfNode("self", oll.profile.FacadePort, "llama3:latest"))
+	setBackend(t, oll, e.URL, true)
+	installQualified(t, p.admission, admKey{engine: "ollama", model: "llama3:latest"})
+	pol := p.admission.currentPolicy()
+	pol.Roles = map[string]nodepolicy.Role{"weak": {Engine: "ollama", Model: "llama3:latest"}}
+	pol.Admission.MaxConcurrentPerModel = 1
+	p.admission.setPolicy(pol)
+
+	got := oll.hybridLocalCandidates("weak", requestNeeds{}, false)
+	if len(got) != 1 || !got[0].self || got[0].strict.Identity != strictRequest().Identity {
+		t.Fatalf("hybrid candidates = %+v, want this node with its installed identity", got)
+	}
+	p.admission.setModelIdentity(map[string]nodepolicy.EngineIdentity{})
+	if got := oll.hybridLocalCandidates("weak", requestNeeds{}, false); len(got) != 0 {
+		t.Fatalf("hybrid candidates after the identity was withdrawn = %+v, want none", got)
+	}
+}

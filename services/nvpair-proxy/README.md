@@ -46,21 +46,27 @@ rejects with 503 and releases the undispatched slot. Once cold work is needed,
 its deadline bounds every later wait, including capacity waits. Exhaustion rejects
 before allocating a ticket.
 
-After each acknowledged `node/set-policy` the proxy reports its strict readiness
-to the broker (`admission/strict-readiness`), naming the acknowledged revision and
-run and carrying the installed capability, which stays empty until qualification
-installs one. Each peer's advertised capability arrives on its discovery node and
-is kept as internal routing metadata. Only a valid capability naming the engine
-and normalized model makes a peer a hybrid local candidate; peers without one keep
-concrete routing.
+After each acknowledged `node/set-policy` or `node/set-model-identity` the proxy
+reports its strict readiness to the broker (`admission/strict-readiness`), naming
+the acknowledged revision and run and carrying the installed capability. Each
+peer's advertised capability arrives on its discovery node and is kept as internal
+routing metadata. Hybrid role eligibility (`hybridLocalCandidates`) offers only a
+node's own declared role with finite qualification on a node advertising a valid
+capability for its engine and normalized model; peers without one keep concrete
+routing. No hybrid request path calls it yet.
 
-The destination requires an authoritative finite capability and matching engine,
-settings and model identity. Capability concurrency must equal the finite
-effective policy/profile limit shared with concrete admission; policy changes
-withdraw capabilities that no longer match. A1a installs no production feed and
-publishes no readiness, so strict requests currently fail closed. Concrete requests retain
-their existing admission and retry behavior. A1b/A2 own feed/publication and
-qualification remains required before activation.
+The capability is derived, never set: a profile's model is installed only when the
+profile names a local qualification that `local-qualification.json` in the shared
+`appdir` directory holds for the same engine and model, the broker's engine identity
+(`node/set-model-identity`) carries a launch digest and model content digest the
+qualification covers, the profile's defaults and bounds are within it, and the
+effective concurrency is finite. Without that evidence nothing is installed and
+strict requests fail closed. A strict request is validated against the
+qualification (finite output bound, accounted input plus output within the served
+context, supported request shape, no request-level context override) before any
+wake, unload, slot or inference, and the engine receives it with the profile's
+defaults merged in. See `docs/local-qualification.mdx`. Concrete requests retain
+their existing admission and retry behavior.
 
 Before strict inference bytes, the proxy durably writes a slot to
 `proxy-strict-capacity.json` in the shared `appdir` directory. Cancellation,
