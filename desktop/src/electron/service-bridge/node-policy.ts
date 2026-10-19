@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import type {
+    NodeModelReference,
     NodeAvailability,
     NodeAvailabilityChange,
     NodePolicyChange,
@@ -404,6 +405,7 @@ function activationStatus(body: JsonObject): PolicyActivationStatus | null {
 function policySnapshot(body: JsonObject | null): NodePolicySnapshot {
     const policy = objectValue(body?.policy)
     if (!body || !policy) throw new Error('The service returned no node policy')
+    validateModelPreferences(policy)
     const revision = revisionValue(policy.revision)
     if (revision === null) throw new Error('The service returned a node policy without a revision')
     return {
@@ -466,8 +468,8 @@ export function parsePolicyChange(params: JsonValue | undefined): NodePolicyChan
 
 /**
  * Read the policy the editor sends back. The broker validates the content; this
- * only rejects text that is not a JSON object, so the user sees a parse error
- * rather than a vague rejection.
+ * rejects malformed presence-sensitive model preferences at this boundary too.
+ * Go remains authoritative for the complete policy and raw duplicate keys.
  */
 export function parsePolicyText(text: string): JsonObject {
     let parsed: JsonValue
@@ -478,7 +480,62 @@ export function parsePolicyText(text: string): JsonObject {
     }
     const policy = objectValue(parsed)
     if (!policy) throw new Error('The policy must be a JSON object')
+    validateModelPreferences(policy)
     return policy
+}
+
+function modelReferences(value: JsonValue | undefined): NodeModelReference[] | undefined {
+    if (value === undefined) return undefined
+    if (!Array.isArray(value) || value.length > 256) throw new Error('Invalid model list')
+    const seen = new Set<string>()
+    return value.map(entry => {
+        const ref = strictObject(entry, ['engine', 'model'])
+        const engine = typeof ref.engine === 'string' ? ref.engine.toWellFormed() : ''
+        const model = typeof ref.model === 'string' ? ref.model.toWellFormed() : ''
+        if (
+            !isValidRoutingEngineId(engine) ||
+            model === '' ||
+            /^(weak|medium|strong)(-api|-local)?$/.exec(model)?.[0] === model
+        ) {
+            throw new Error('Invalid model reference')
+        }
+        const key = JSON.stringify([engine, model])
+        if (seen.has(key)) throw new Error('Duplicate model reference')
+        seen.add(key)
+        return { engine, model }
+    })
+}
+
+// JSON.parse collapses exact duplicate keys; Go validates raw duplicate keys.
+// Validate decoded SR fields without reconstructing the policy or losing [].
+function validateModelPreferences(policy: JsonObject): void {
+    for (const key of Object.keys(policy)) {
+        for (const name of ['servedModels', 'residentModels']) {
+            if (key !== name && new RegExp(`^${name}$`, 'iu').test(key)) {
+                throw new Error(`${key} must use the exact field name ${name}`)
+            }
+        }
+    }
+    const served = modelReferences(policy.servedModels)
+    const residents = modelReferences(policy.residentModels)
+    for (const ref of residents ?? []) {
+        if (
+            served !== undefined &&
+            !served.some(s => s.engine === ref.engine && s.model === ref.model)
+        ) {
+            throw new Error('residentModels must be a subset of servedModels')
+        }
+        const profile = Array.isArray(policy.profiles)
+            ? policy.profiles
+                  .map(objectValue)
+                  .find(p => p?.engine === ref.engine && p.model === ref.model)
+            : undefined
+        if (!profile) throw new Error('Resident model requires a qualified profile')
+        for (const field of ['contextTokens', 'maxOutputTokens', 'maxConcurrent', 'memoryBytes']) {
+            routingInteger(profile[field], 1, Number.MAX_SAFE_INTEGER)
+        }
+        qualificationRef(profile.qualification)
+    }
 }
 
 /** `policy:set` params: the edited policy, checked against the revision it was edited from. */

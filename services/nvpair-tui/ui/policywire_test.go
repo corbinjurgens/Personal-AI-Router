@@ -4,10 +4,60 @@
 package ui
 
 import (
+	"encoding/json"
+	"reflect"
 	"testing"
 
 	"nvpair-shared/nodepolicy"
 )
+
+func TestServedResidentPolicyWirePermission(t *testing.T) {
+	for _, tc := range []struct {
+		name, input string
+		want        nodepolicy.ServedModels
+	}{
+		{"legacy absent", `{}`, nil},
+		{"deny all", `{"servedModels":[]}`, nodepolicy.ServedModels{}},
+		{"restricted", `{"servedModels":[{"engine":"ollama","model":"m"}]}`, nodepolicy.ServedModels{{Engine: "ollama", Model: "m"}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := decodePolicyAdvertisement([]byte(tc.input))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(got.ServedModels, tc.want) {
+				t.Fatalf("served = %#v, want %#v", got.ServedModels, tc.want)
+			}
+			wire, err := json.Marshal(got)
+			if err != nil {
+				t.Fatal(err)
+			}
+			back, err := decodePolicyAdvertisement(wire)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(back.ServedModels, tc.want) {
+				t.Fatalf("round-trip served = %#v, want %#v", back.ServedModels, tc.want)
+			}
+		})
+	}
+}
+
+func TestServedResidentPolicyWireRejectsInvalidPermission(t *testing.T) {
+	for _, tc := range []struct{ name, input string }{
+		{"null", `{"servedModels":null}`},
+		{"alias", `{"ServedModels":[]}`},
+		{"duplicate key", `{"servedModels":[],"servedModels":[]}`},
+		{"duplicate reference key", `{"servedModels":[{"engine":"ollama","engine":"ollama","model":"m"}]}`},
+		{"malformed reference", `{"servedModels":[{"engine":"ollama"}]}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := decodePolicyAdvertisement([]byte(tc.input)); err == nil {
+				t.Fatal("accepted invalid served permission")
+			}
+		})
+	}
+}
 
 func TestStrictPolicyWireCapabilityStates(t *testing.T) {
 	for _, tc := range []struct {

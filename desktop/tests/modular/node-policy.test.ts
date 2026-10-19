@@ -55,6 +55,94 @@ function loadStrictFixtures(): JsonObject {
     return strictFixtureObject(value)
 }
 
+describe('served/resident policy contract', () => {
+    const corpus: JsonValue = JSON.parse(
+        readFileSync(
+            resolve(process.cwd(), '../services/shared/nodepolicy/testdata/served-resident.json'),
+            'utf8'
+        )
+    )
+    const cases = strictFixtureObject(corpus).cases
+    if (!Array.isArray(cases)) throw new Error('Missing served/resident corpus')
+    for (const value of cases) {
+        const fixture = strictFixtureObject(value)
+        if (typeof fixture.name !== 'string') throw new Error('Missing fixture name')
+        // Exact duplicate keys are a raw Go boundary: JSON.parse has already
+        // collapsed them before a decoded-object consumer can inspect them.
+        if (fixture.raw !== undefined) continue
+        it(fixture.name, () => {
+            const input = strictFixtureObject(fixture.input)
+            const text = JSON.stringify({ ...input, revision: '31' })
+            if (fixture.valid !== true) {
+                expect(() => parsePolicyText(text)).toThrow()
+                expect(() =>
+                    parsePolicySetResult({ policy: { ...input, revision: '31' } })
+                ).toThrow()
+                return
+            }
+            const draft = parsePolicyText(text)
+            expect(Object.hasOwn(draft, 'servedModels')).toBe(fixture.servedPresent)
+            expect(draft.servedModels).toEqual(fixture.served)
+            const saved = parsePolicySetResult({ policy: draft })
+            const params = policySetParams({
+                policy: saved.policy,
+                expectedPersistedRevision: saved.revision,
+                nodeId: 'peer'
+            })
+            expect(params).toEqual({
+                nodeId: 'peer',
+                policy: draft,
+                expectedPersistedRevision: '31'
+            })
+            const readback = parsePolicyDocument({ policy: params.policy, availability: 'paused' })
+            expect(parsePolicyText(readback.policy)).toEqual(draft)
+        })
+    }
+
+    it('retains deny-all and private routing through notifications, stringify and CAS', () => {
+        const policy = {
+            revision: '9',
+            servedModels: [],
+            residentModels: [],
+            routing: { accounts: [] }
+        }
+        const changed = parsePolicyChange({ nodeId: 'self', policy })
+        expect(changed).not.toBeNull()
+        if (!changed) throw new Error('Missing policy change')
+        expect(
+            policySetParams({ policy: changed.policy, expectedPersistedRevision: '9' }).policy
+        ).toEqual({
+            revision: '9',
+            servedModels: [],
+            residentModels: [],
+            routing: { accounts: [] }
+        })
+    })
+
+    it('rejects resident permission outside the served set', () => {
+        expect(() =>
+            parsePolicyText(
+                JSON.stringify({
+                    servedModels: [],
+                    residentModels: [{ engine: 'ollama', model: 'm' }]
+                })
+            )
+        ).toThrow('subset')
+    })
+
+    it('documents the raw duplicate-key boundary', () => {
+        expect(
+            parsePolicyText('{"servedModels":[{"engine":"ollama","model":"m"}],"servedModels":[]}')
+        ).toEqual({ servedModels: [] })
+        expect(() => parsePolicyText('{"servedModels":[],"ServedModels":[]}')).toThrow()
+    })
+
+    it('rejects Unicode case-folded model preference keys like Go', () => {
+        expect(() => parsePolicyText('{"ſervedModels":[]}')).toThrow()
+        expect(() => parsePolicyText('{"reſidentModels":[]}')).toThrow()
+    })
+})
+
 describe('strict-admission shared Go/TypeScript parity corpus', () => {
     const cases = loadStrictFixtures().cases
     if (!Array.isArray(cases)) throw new Error('Missing strict-admission corpus')
@@ -702,7 +790,7 @@ describe('routing settings editor', () => {
     const CONFLICT = 'The saved policy changed after you loaded it'
 
     const policyText = (revision: string, tier = 'weak'): string =>
-        JSON.stringify({ revision, tier }, null, 2)
+        JSON.stringify({ revision, tier, servedModels: [], residentModels: [] }, null, 2)
     const activation = (
         state: PolicyActivationStatus['state'],
         activeRevision: string
@@ -1026,7 +1114,7 @@ describe('routing settings editor', () => {
     })
 
     describe('stale draft', () => {
-        const draft = '{"draft": true}'
+        const draft = '{"servedModels": [], "residentModels": [], "draft": true}'
 
         async function staleSave(): Promise<void> {
             get.mockResolvedValueOnce(savedDocument('5')).mockResolvedValue(
