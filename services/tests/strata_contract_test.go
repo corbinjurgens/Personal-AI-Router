@@ -8,11 +8,13 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net"
 	"net/http"
 	"os"
@@ -118,7 +120,7 @@ func strataContractRunRuntime(path string) error {
 	if err != nil {
 		failure, encodeErr := json.Marshal(struct {
 			BindCollision bool `json:"bindCollision"`
-		}{errors.Is(err, syscall.EADDRINUSE)})
+		}{strataContractAddressInUse(err)})
 		if encodeErr != nil {
 			return encodeErr
 		}
@@ -790,41 +792,11 @@ func (f *strataContractFixture) strataContractStartRuntime(t *testing.T) {
 	for attempt := 0; attempt < 8; attempt++ {
 		f.strataContractWriteRuntime(t)
 		response, err := f.Manager.strataContractCallWithin("engine:start", map[string]any{"engine": "strata", "port": f.Port, "bind": "127.0.0.1"}, strataContractStartup)
-		// Retain a handle before health assertions, including failed starts that
-		// reached the fake. The private marker is written only after its bind.
-		if data, readErr := os.ReadFile(filepath.Join(f.Root, "runtime-pid.json")); readErr == nil {
-			var owned struct {
-				PID      int    `json:"pid"`
-				Identity string `json:"identity"`
-			}
-			strataContractDecode(t, data, &owned)
-			if owned.Identity != f.Identity || owned.PID <= 0 {
-				t.Fatal("private runtime ownership marker mismatch")
-			}
-			f.runtimeStarted = true
-			f.runtimeProcess, readErr = os.FindProcess(owned.PID)
-			if readErr != nil {
-				t.Fatalf("retain owned runtime handle: %v", readErr)
-			}
-		} else if !errors.Is(readErr, os.ErrNotExist) {
-			t.Fatalf("read private runtime ownership marker: %v", readErr)
-		}
 		if err != nil {
 			t.Fatal(err)
 		}
 		if response.Error == nil {
-			if f.runtimeProcess == nil {
-				t.Fatal("runtime started without a private ownership marker")
-			}
-			var health struct {
-				Service, Fixture string
-				PID              int
-			}
-			status, _, body := strataContractHTTP(t, http.MethodGet, f.Port, "/health", nil)
-			strataContractDecode(t, body, &health)
-			if status != http.StatusOK || health.Service != "strata" || health.Fixture != f.Identity || health.PID != f.runtimeProcess.Pid {
-				t.Fatal("runtime health did not identify this fixture")
-			}
+			f.strataContractRetainRuntime(t)
 			f.strataContractWaitStatus(t, true)
 			return
 		}
@@ -841,6 +813,58 @@ func (f *strataContractFixture) strataContractStartRuntime(t *testing.T) {
 		f.Port = strataContractPort(t)
 	}
 	t.Fatal("runtime bind collisions exhausted bounded retry")
+}
+
+func (f *strataContractFixture) strataContractRetainRuntime(t *testing.T) {
+	t.Helper()
+	// A marker can outlive the process that wrote it. Failed starts remain the
+	// manager's cleanup responsibility; only a live handshake grants ownership.
+	data, err := os.ReadFile(filepath.Join(f.Root, "runtime-pid.json"))
+	if err != nil {
+		t.Fatalf("read private runtime ownership marker: %v", err)
+	}
+	var hint struct {
+		PID      int    `json:"pid"`
+		Identity string `json:"identity"`
+	}
+	strataContractDecode(t, data, &hint)
+	if hint.Identity != f.Identity || hint.PID <= 0 {
+		t.Fatal("private runtime ownership marker mismatch")
+	}
+	candidate, err := os.FindProcess(hint.PID)
+	if err != nil {
+		t.Fatalf("acquire candidate runtime handle: %v", err)
+	}
+	defer func() {
+		if f.runtimeProcess != candidate {
+			if err := candidate.Release(); err != nil {
+				t.Errorf("release unverified runtime handle: %v", err)
+			}
+		}
+	}()
+	if err := f.strataContractRuntimeIdentity(candidate.Pid); err != nil {
+		t.Fatalf("verify candidate runtime after handle acquisition: %v", err)
+	}
+	f.runtimeProcess = candidate
+	f.runtimeStarted = true
+}
+
+func (f *strataContractFixture) strataContractRuntimeIdentity(pid int) error {
+	status, _, body, err := strataContractRequestHTTP(http.MethodGet, f.Port, "/health", nil)
+	if err != nil {
+		return err
+	}
+	var health struct {
+		Service, Fixture string
+		PID              int
+	}
+	if err := json.Unmarshal(body, &health); err != nil {
+		return errors.New("runtime health identity is not valid JSON")
+	}
+	if status != http.StatusOK || health.Service != "strata" || health.Fixture != f.Identity || health.PID != pid {
+		return errors.New("runtime health did not identify this fixture and PID")
+	}
+	return nil
 }
 
 func (f *strataContractFixture) strataContractWaitStatus(t *testing.T, running bool) strataContractStatus {
@@ -890,26 +914,54 @@ func (f *strataContractFixture) strataContractCleanupRuntime(t *testing.T) {
 		}
 	}
 	f.Manager.strataContractClose(t)
-	if f.ControlPort != 0 {
-		strataContractWaitClosed(t, f.ControlPort)
-	}
 	if f.runtimeProcess != nil {
-		connection, err := net.DialTimeout("tcp4", net.JoinHostPort("127.0.0.1", strconv.Itoa(f.Port)), 200*time.Millisecond)
-		if err == nil {
-			connection.Close()
+		// An unrelated listener must never authorize termination, even with a
+		// previously verified handle. Recheck the nonce and PID before killing.
+		if err := f.strataContractRuntimeIdentity(f.runtimeProcess.Pid); err == nil {
 			if killErr := f.runtimeProcess.Kill(); killErr != nil && !errors.Is(killErr, os.ErrProcessDone) {
 				t.Errorf("kill retained owned runtime: %v", killErr)
 			}
 			t.Error("owned runtime listener survived manager shutdown")
+		} else if !strataContractConnectionRefused(err) {
+			t.Errorf("cannot authenticate runtime during cleanup: %v", err)
 		}
 		if err := f.runtimeProcess.Release(); err != nil {
 			t.Errorf("release owned runtime handle: %v", err)
 		}
 		f.runtimeProcess = nil
 	}
+	// Finalize the runtime handle before any fatal listener assertion.
+	if f.ControlPort != 0 {
+		strataContractWaitClosed(t, f.ControlPort)
+	}
 	if f.runtimeStarted {
 		strataContractWaitClosed(t, f.Port)
+		f.runtimeStarted = false
 	}
+}
+
+func strataContractConnectionRefused(err error) bool {
+	var errno syscall.Errno
+	if !errors.As(err, &errno) {
+		return false
+	}
+	if runtime.GOOS == "windows" {
+		const wsaeconnrefused syscall.Errno = 10061
+		return errno == wsaeconnrefused
+	}
+	return errno == syscall.ECONNREFUSED
+}
+
+func strataContractAddressInUse(err error) bool {
+	var errno syscall.Errno
+	if !errors.As(err, &errno) {
+		return false
+	}
+	if runtime.GOOS == "windows" {
+		const wsaeaddrinuse syscall.Errno = 10048
+		return errno == wsaeaddrinuse
+	}
+	return errno == syscall.EADDRINUSE
 }
 
 func strataContractWaitClosed(t *testing.T, port int) {
@@ -922,8 +974,10 @@ func strataContractWaitClosed(t *testing.T, port int) {
 	tick := time.NewTicker(25 * time.Millisecond)
 	defer tick.Stop()
 	for {
-		connection, err := net.DialTimeout("tcp4", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)), 200*time.Millisecond)
-		if err != nil && errors.Is(err, syscall.ECONNREFUSED) {
+		// Windows retries a refused loopback SYN for about two seconds before
+		// reporting WSAECONNREFUSED, so a shorter dial timeout never observes it.
+		connection, err := net.DialTimeout("tcp4", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)), 3*time.Second)
+		if strataContractConnectionRefused(err) {
 			return
 		}
 		if connection != nil {
@@ -941,14 +995,23 @@ func strataContractWaitClosed(t *testing.T, port int) {
 
 func strataContractHTTP(t *testing.T, method string, port int, path string, value any) (int, http.Header, []byte) {
 	t.Helper()
+	status, header, body, err := strataContractRequestHTTP(method, port, path, value)
+	if err != nil {
+		t.Fatalf("fixture HTTP %s %s: %v", method, path, err)
+	}
+	return status, header, body
+}
+
+// Cleanup must record failed identity probes without aborting handle release.
+func strataContractRequestHTTP(method string, port int, path string, value any) (int, http.Header, []byte, error) {
 	if !strataContractSafePort(port) || !strings.HasPrefix(path, "/") {
-		t.Fatal("unsafe fixture HTTP target")
+		return 0, nil, nil, errors.New("unsafe fixture HTTP target")
 	}
 	var body io.Reader
 	if value != nil {
 		data, err := json.Marshal(value)
 		if err != nil {
-			t.Fatal(err)
+			return 0, nil, nil, err
 		}
 		body = bytes.NewReader(data)
 	}
@@ -956,7 +1019,7 @@ func strataContractHTTP(t *testing.T, method string, port int, path string, valu
 	defer cancel()
 	request, err := http.NewRequestWithContext(ctx, method, "http://127.0.0.1:"+strconv.Itoa(port)+path, body)
 	if err != nil {
-		t.Fatal(err)
+		return 0, nil, nil, err
 	}
 	request.Header.Set("Content-Type", "application/json")
 	transport := &http.Transport{Proxy: nil}
@@ -964,17 +1027,53 @@ func strataContractHTTP(t *testing.T, method string, port int, path string, valu
 	client := &http.Client{Transport: transport, Timeout: strataContractTimeout, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	response, err := client.Do(request)
 	if err != nil {
-		t.Fatalf("fixture HTTP %s %s: %v", method, path, err)
+		return 0, nil, nil, err
 	}
 	data, readErr := io.ReadAll(io.LimitReader(response.Body, strataContractLimit+1))
 	closeErr := response.Body.Close()
 	if readErr != nil || closeErr != nil {
-		t.Fatalf("fixture HTTP read=%v close=%v", readErr, closeErr)
+		return 0, nil, nil, fmt.Errorf("fixture HTTP read=%v close=%v", readErr, closeErr)
 	}
 	if len(data) > strataContractLimit {
-		t.Fatal("fixture HTTP response exceeds limit")
+		return 0, nil, nil, errors.New("fixture HTTP response exceeds limit")
 	}
-	return response.StatusCode, response.Header, data
+	return response.StatusCode, response.Header, data, nil
+}
+
+// Exclusions omit exact entries, never their children. Callers name every
+// permitted mutation; all other files are hashed and directories recorded.
+func strataContractArtifacts(t *testing.T, root string, excluded ...string) map[string]string {
+	t.Helper()
+	artifacts := make(map[string]string)
+	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if slices.Contains(excluded, path) {
+			return nil
+		}
+		relative, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() {
+			artifacts[relative] = "directory"
+			return nil
+		}
+		if !entry.Type().IsRegular() {
+			return fmt.Errorf("unexpected private artifact type at %s: %s", relative, entry.Type())
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		artifacts[relative] = fmt.Sprintf("%x", sha256.Sum256(data))
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("snapshot private fixture artifacts: %v", err)
+	}
+	return artifacts
 }
 
 func (f *strataContractFixture) strataContractControl(t *testing.T, nextLoadStatus int) strataContractControl {
@@ -1014,7 +1113,7 @@ type strataContractProxy struct {
 	Port                     int
 }
 
-func strataContractStartProxy(t *testing.T) *strataContractProxy {
+func strataContractStartProxy(t *testing.T, prepare func(*strataContractProxy)) *strataContractProxy {
 	t.Helper()
 	strataContractPlatform(t)
 	p := &strataContractProxy{Root: t.TempDir()}
@@ -1022,6 +1121,9 @@ func strataContractStartProxy(t *testing.T) *strataContractProxy {
 	p.ClusterDir = filepath.Join(p.AppDir, "cluster")
 	if err := os.MkdirAll(p.ClusterDir, 0o700); err != nil {
 		t.Fatal(err)
+	}
+	if prepare != nil {
+		prepare(p)
 	}
 	p.RPC = strataContractStartChild(t, proxyBin, p.Env, "--cluster-dir", p.ClusterDir, "--log-level", "warn")
 	t.Cleanup(func() {

@@ -5,9 +5,7 @@ package tests
 
 import (
 	"encoding/json"
-	"io/fs"
 	"net/http"
-	"path/filepath"
 	"reflect"
 	"testing"
 
@@ -67,7 +65,7 @@ func TestStrataContractRemoteUnsupported(t *testing.T) {
 		t.Fatalf("authenticated peer Strata inventory = %+v, want %+v", strata, want)
 	}
 
-	assertPreserved := func(t *testing.T, f *strataContractFixture, files []string) {
+	assertPreserved := func(t *testing.T, f *strataContractFixture, files map[string]string) {
 		t.Helper()
 		control := f.strataContractControl(t, 0)
 		wantModels := map[string]string{
@@ -84,7 +82,8 @@ func TestStrataContractRemoteUnsupported(t *testing.T) {
 				t.Fatalf("runtime received a request beyond health/inventory reads: %+v", request)
 			}
 		}
-		if got := strataContractU5Files(t, f.Root); !reflect.DeepEqual(got, files) {
+		// Remote rejection permits no private artifact changes or exclusions.
+		if got := strataContractArtifacts(t, f.Root); !reflect.DeepEqual(got, files) {
 			t.Fatalf("private fixture files changed; model copy/delete must create no files: got %v, want %v", got, files)
 		}
 		f.strataContractWaitStatus(t, true)
@@ -92,7 +91,7 @@ func TestStrataContractRemoteUnsupported(t *testing.T) {
 	params := map[string]string{"node": nodeB, "engine": "strata", "model": "Org/Strata-Loaded:Q4_K_M"}
 
 	t.Run("remote delete propagates peer capability rejection", func(t *testing.T) {
-		filesA, filesB := strataContractU5Files(t, a.Root), strataContractU5Files(t, b.Root)
+		filesA, filesB := strataContractArtifacts(t, a.Root), strataContractArtifacts(t, b.Root)
 		response := a.Manager.strataContractCall(t, "engine:remote-delete-model", params)
 		const diagnostic = `remote /v1/models/delete: HTTP 500: engine "strata" does not support the model delete operation`
 		if response.Error == nil || response.Error.Code != -32000 || response.Error.Message != diagnostic {
@@ -103,7 +102,7 @@ func TestStrataContractRemoteUnsupported(t *testing.T) {
 	})
 
 	t.Run("remote copy rejects destination without a model store", func(t *testing.T) {
-		filesA, filesB := strataContractU5Files(t, a.Root), strataContractU5Files(t, b.Root)
+		filesA, filesB := strataContractArtifacts(t, a.Root), strataContractArtifacts(t, b.Root)
 		const diagnostic = `model copy is not supported for this engine: "strata"`
 		type copyProgress struct {
 			OpID    string `json:"opId"`
@@ -136,25 +135,4 @@ func TestStrataContractRemoteUnsupported(t *testing.T) {
 		assertPreserved(t, a, filesA)
 		assertPreserved(t, b, filesB)
 	})
-}
-
-// Snapshot every private entry, including directories and extensionless files,
-// so a new model artifact cannot evade the assertion by its filename.
-func strataContractU5Files(t *testing.T, root string) []string {
-	t.Helper()
-	var files []string
-	if err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		relative, err := filepath.Rel(root, path)
-		if err != nil {
-			return err
-		}
-		files = append(files, relative)
-		return nil
-	}); err != nil {
-		t.Fatalf("snapshot private fixture files: %v", err)
-	}
-	return files
 }

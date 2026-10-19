@@ -22,7 +22,7 @@ import (
 )
 
 // Relay real manager state explicitly: this fixture starts no broker or scanner.
-func strataContractU4Front(t *testing.T) (*strataContractFixture, *strataContractProxy) {
+func strataContractU4Front(t *testing.T, prepareProxy func(*strataContractProxy)) (*strataContractFixture, *strataContractProxy) {
 	t.Helper()
 	fixture := strataContractNew(t, true)
 	fixture.strataContractStartManager(t)
@@ -40,7 +40,7 @@ func strataContractU4Front(t *testing.T) (*strataContractFixture, *strataContrac
 		t.Fatalf("manager inventory/residency = %v / %v", inventory, models.LoadedByEngine["strata"])
 	}
 
-	proxy := strataContractStartProxy(t)
+	proxy := strataContractStartProxy(t, prepareProxy)
 	proxy.strataContractEnable(t, descriptor)
 	data, err := os.ReadFile(filepath.Join(proxy.AppDir, "strata-proxy-port.json"))
 	if err != nil {
@@ -111,7 +111,7 @@ func strataContractU4Chat(t *testing.T, fixture *strataContractFixture, proxy *s
 
 func TestStrataContractFacade(t *testing.T) {
 	strataContractPlatform(t)
-	fixture, proxy := strataContractU4Front(t)
+	fixture, proxy := strataContractU4Front(t, nil)
 
 	t.Run("serves exact model inventory", func(t *testing.T) {
 		before := strataContractCount(fixture.strataContractControl(t, 0), http.MethodGet, "/v1/models", "")
@@ -236,24 +236,6 @@ func TestStrataContractFacade(t *testing.T) {
 
 func TestStrataContractRequiresLocalQualification(t *testing.T) {
 	strataContractPlatform(t)
-	fixture, proxy := strataContractU4Front(t)
-	qualificationPath := filepath.Join(proxy.AppDir, "local-qualification.json")
-	if _, err := os.Stat(qualificationPath); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("qualification evidence must be absent before policy: %v", err)
-	}
-	frame := fixture.Manager.strataContractNotification(t, "engine:model-identity", func(raw json.RawMessage) bool {
-		var identity strataContractIdentity
-		strataContractDecode(t, raw, &identity)
-		_, present := identity.Engines["strata"]
-		return present
-	})
-	var observed strataContractIdentity
-	strataContractDecode(t, frame.Params, &observed)
-	actual := observed.Engines["strata"]
-	if actual.EngineRunID == "" || len(actual.LaunchDigest) != 64 || len(actual.ModelDigests) != 0 {
-		t.Fatal("real manager must identify its owned run without manufacturing model digests")
-	}
-
 	// These values are synthetic inputs, not model or hardware evidence. A
 	// complete identity prevents missing identity from masking the evidence gate.
 	identity := nodepolicy.SetModelIdentityParams{Engines: map[string]nodepolicy.EngineIdentity{"strata": {
@@ -263,38 +245,94 @@ func TestStrataContractRequiresLocalQualification(t *testing.T) {
 	if err := identity.Validate(); err != nil {
 		t.Fatalf("synthetic identity is invalid: %v", err)
 	}
-	proxy.RPC.strataContractOK(t, nodepolicy.MethodSetModelIdentity, identity, nil)
 	policy := nodepolicy.Default()
 	policy.Revision = "41"
 	policy.Admission.MaxConcurrentPerModel = 1
 	policy.Profiles = []nodepolicy.Profile{{
 		Name: "strata-contract", Engine: "strata", Model: "Org/Strata-Loaded:Q4_K_M",
 		ContextTokens: 4096, MaxOutputTokens: 1024, MaxConcurrent: 1,
-		Qualification: &nodepolicy.QualificationRef{ID: "synthetic-missing-evidence", Revision: "1"},
+		Qualification: &nodepolicy.QualificationRef{ID: "synthetic-strata-contract", Revision: "1"},
 	}}
 	if err := policy.Validate(); err != nil {
 		t.Fatalf("qualification policy is invalid: %v", err)
 	}
-	var ack nodepolicy.PolicyAck
-	proxy.RPC.strataContractOK(t, nodepolicy.MethodSetPolicy, policy, &ack)
-	if ack.Revision != "41" || ack.RunID == "" {
-		t.Fatalf("policy acknowledgment = %+v, want revision 41 and a process run ID", ack)
+	check := func(t *testing.T, prepare func(*strataContractProxy)) (*strataContractFixture, *strataContractProxy, nodepolicy.StrictAdmissionReadiness) {
+		t.Helper()
+		fixture, proxy := strataContractU4Front(t, prepare)
+		frame := fixture.Manager.strataContractNotification(t, "engine:model-identity", func(raw json.RawMessage) bool {
+			var identity strataContractIdentity
+			strataContractDecode(t, raw, &identity)
+			_, present := identity.Engines["strata"]
+			return present
+		})
+		var observed strataContractIdentity
+		strataContractDecode(t, frame.Params, &observed)
+		actual := observed.Engines["strata"]
+		if actual.EngineRunID == "" || len(actual.LaunchDigest) != 64 || len(actual.ModelDigests) != 0 {
+			t.Fatal("real manager must identify its owned run without manufacturing model digests")
+		}
+		proxy.RPC.strataContractOK(t, nodepolicy.MethodSetModelIdentity, identity, nil)
+		var ack nodepolicy.PolicyAck
+		proxy.RPC.strataContractOK(t, nodepolicy.MethodSetPolicy, policy, &ack)
+		if ack.Revision != "41" || ack.RunID == "" {
+			t.Fatalf("policy acknowledgment = %+v, want revision 41 and a process run ID", ack)
+		}
+		readyFrame := proxy.RPC.strataContractNotification(t, nodepolicy.NotifyStrictReadiness, func(raw json.RawMessage) bool {
+			var report nodepolicy.StrictAdmissionReadiness
+			strataContractDecode(t, raw, &report)
+			return report.PolicyRevision == ack.Revision && report.ProxyRunID == ack.RunID
+		})
+		var readiness nodepolicy.StrictAdmissionReadiness
+		strataContractDecode(t, readyFrame.Params, &readiness)
+		if err := readiness.Validate(); err != nil {
+			t.Fatalf("strict readiness report is invalid: %v", err)
+		}
+		return fixture, proxy, readiness
 	}
-	readyFrame := proxy.RPC.strataContractNotification(t, nodepolicy.NotifyStrictReadiness, func(raw json.RawMessage) bool {
-		var report nodepolicy.StrictAdmissionReadiness
-		strataContractDecode(t, raw, &report)
-		return report.PolicyRevision == ack.Revision && report.ProxyRunID == ack.RunID
+
+	t.Run("withholds capability without evidence", func(t *testing.T) {
+		fixture, proxy, readiness := check(t, func(proxy *strataContractProxy) {
+			if _, err := os.Stat(filepath.Join(proxy.AppDir, "local-qualification.json")); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("qualification evidence must be absent before startup: %v", err)
+			}
+		})
+		if readiness.Capability != nil {
+			t.Fatal("strict capability was granted without local qualification evidence")
+		}
+		strataContractU4Chat(t, fixture, proxy)
+		if _, err := os.Stat(filepath.Join(proxy.AppDir, "local-qualification.json")); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("ordinary chat must not create qualification evidence: %v", err)
+		}
 	})
-	var readiness nodepolicy.StrictAdmissionReadiness
-	strataContractDecode(t, readyFrame.Params, &readiness)
-	if err := readiness.Validate(); err != nil {
-		t.Fatalf("strict readiness report is invalid: %v", err)
-	}
-	if readiness.Capability != nil {
-		t.Fatal("strict capability was granted without local qualification evidence")
-	}
-	strataContractU4Chat(t, fixture, proxy)
-	if _, err := os.Stat(qualificationPath); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("ordinary chat must not create qualification evidence: %v", err)
-	}
+	t.Run("reports capability with matching synthetic evidence", func(t *testing.T) {
+		// The proxy reads evidence only at startup. This separate proxy receives
+		// synthetic test data in its private directory before the child starts.
+		fixture, proxy, readiness := check(t, func(proxy *strataContractProxy) {
+			profile := policy.Profiles[0]
+			engineIdentity := identity.Engines[profile.Engine]
+			strataContractWriteJSON(t, filepath.Join(proxy.AppDir, "local-qualification.json"), map[string]any{
+				"version": 1,
+				"qualifications": []any{map[string]any{
+					"id": profile.Qualification.ID, "revision": profile.Qualification.Revision,
+					"engine": profile.Engine, "model": profile.Model,
+					"modelDigests": []string{engineIdentity.ModelDigests[profile.Model]}, "launchDigests": []string{engineIdentity.LaunchDigest},
+					"tokenizer": "synthetic-test-tokenizer", "chatTemplate": "synthetic-test-template",
+					"contextTokens": profile.ContextTokens, "maxOutputTokens": profile.MaxOutputTokens,
+					"routes": []string{"/v1/chat/completions"},
+					"accounting": map[string]any{"method": "utf8-bytes", "requestOverheadTokens": 8, "messageOverheadTokens": 4,
+						"toolOverheadTokens": 0, "schemaOverheadTokens": 0},
+					"evidence": "Synthetic test data for the Strata contract positive control; no model or hardware qualification was performed.",
+				}},
+			})
+		})
+		want := &nodepolicy.StrictAdmissionCapability{Version: 1, Models: []nodepolicy.StrictAdmissionModel{{
+			Engine: "strata", Model: "Org/Strata-Loaded:Q4_K_M", MaxConcurrent: 1,
+			Identity: nodepolicy.StrictModelIdentity{EngineRunID: "synthetic-strata-contract-run",
+				SettingsFingerprint: strings.Repeat("a", 64), ModelDigest: strings.Repeat("c", 64)},
+		}}}
+		if !reflect.DeepEqual(readiness.Capability, want) {
+			t.Fatalf("strict capability with synthetic evidence = %+v, want %+v", readiness.Capability, want)
+		}
+		strataContractU4Chat(t, fixture, proxy)
+	})
 }

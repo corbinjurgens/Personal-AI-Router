@@ -4,11 +4,8 @@
 package tests
 
 import (
-	"crypto/sha256"
 	"encoding/json"
 	"errors"
-	"fmt"
-	"io/fs"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -27,8 +24,15 @@ func TestStrataContractUnsupportedManagement(t *testing.T) {
 			t.Fatalf("RPC error = %+v, want code -32000 and message %q", response.Error, diagnostic)
 		}
 	}
+	assertNoInstall := func(t *testing.T, f *strataContractFixture) {
+		t.Helper()
+		if _, err := os.Stat(filepath.Join(f.AppDir, "engine-bin", "strata")); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("private Strata install directory: %v, want not exist", err)
+		}
+	}
 	assertAbsent := func(t *testing.T, f *strataContractFixture) {
 		t.Helper()
+		assertNoInstall(t, f)
 		var status strataContractStatus
 		f.Manager.strataContractOK(t, "engine:status", map[string]string{"engine": "strata"}, &status)
 		want := strataContractStatus{Engine: "strata", Port: f.Port}
@@ -45,11 +49,11 @@ func TestStrataContractUnsupportedManagement(t *testing.T) {
 		f := strataContractNew(t, false)
 		f.strataContractStartManager(t)
 		assertAbsent(t, f)
-		before := strataContractU3Artifacts(t, f, "")
+		before := strataContractArtifacts(t, f.Root, filepath.Join(f.AppDir, "engine-bin"))
 		response := f.Manager.strataContractCall(t, "engine:install", map[string]string{"engine": "strata"})
 		assertError(t, response, `engine "strata" has no install block for this platform`)
 		assertAbsent(t, f)
-		if after := strataContractU3Artifacts(t, f, ""); !reflect.DeepEqual(after, before) {
+		if after := strataContractArtifacts(t, f.Root, filepath.Join(f.AppDir, "engine-bin")); !reflect.DeepEqual(after, before) {
 			t.Fatalf("rejected install changed private artifacts: before=%v after=%v", before, after)
 		}
 	})
@@ -61,7 +65,7 @@ func TestStrataContractUnsupportedManagement(t *testing.T) {
 		// The no-op legitimately saves Off intent, but creates no installation
 		// or model store. Compare every other private file and directory.
 		intentPath := filepath.Join(f.AppDir, "engine-bin", "engine-state.json")
-		before := strataContractU3Artifacts(t, f, intentPath)
+		before := strataContractArtifacts(t, f.Root, filepath.Join(f.AppDir, "engine-bin"), intentPath)
 		var status strataContractStatus
 		f.Manager.strataContractOK(t, "engine:uninstall", map[string]string{"engine": "strata"}, &status)
 		want := strataContractStatus{Engine: "strata", Port: f.Port}
@@ -69,7 +73,7 @@ func TestStrataContractUnsupportedManagement(t *testing.T) {
 			t.Fatalf("uninstall status = %+v, want %+v", status, want)
 		}
 		assertAbsent(t, f)
-		if after := strataContractU3Artifacts(t, f, intentPath); !reflect.DeepEqual(after, before) {
+		if after := strataContractArtifacts(t, f.Root, filepath.Join(f.AppDir, "engine-bin"), intentPath); !reflect.DeepEqual(after, before) {
 			t.Fatalf("absent uninstall changed private artifacts: before=%v after=%v", before, after)
 		}
 		data, err := os.ReadFile(intentPath)
@@ -92,7 +96,8 @@ func TestStrataContractUnsupportedManagement(t *testing.T) {
 			f := strataContractNew(t, true)
 			f.strataContractStartManager(t)
 			f.strataContractStartRuntime(t)
-			before := strataContractU3Artifacts(t, f, "")
+			assertNoInstall(t, f)
+			before := strataContractArtifacts(t, f.Root, filepath.Join(f.AppDir, "engine-bin"))
 			action(t, f)
 			f.strataContractWaitStatus(t, true)
 			status, _, body := strataContractHTTP(t, http.MethodGet, f.Port, "/health", nil)
@@ -120,7 +125,8 @@ func TestStrataContractUnsupportedManagement(t *testing.T) {
 					t.Errorf("unsupported management reached runtime: %+v", request)
 				}
 			}
-			if after := strataContractU3Artifacts(t, f, ""); !reflect.DeepEqual(after, before) {
+			assertNoInstall(t, f)
+			if after := strataContractArtifacts(t, f.Root, filepath.Join(f.AppDir, "engine-bin")); !reflect.DeepEqual(after, before) {
 				t.Fatalf("management changed private artifacts: before=%v after=%v", before, after)
 			}
 		})
@@ -193,43 +199,4 @@ func TestStrataContractUnsupportedManagement(t *testing.T) {
 			t.Fatalf("terminal pull progress = %+v, want Strata pull error, percent -1 and message %q", progress, diagnostic)
 		}
 	})
-}
-
-// Snapshot the whole private tree so an unexpected install/model-store path
-// cannot evade a check that only knows conventional engine directories.
-func strataContractU3Artifacts(t *testing.T, f *strataContractFixture, allowedIntent string) map[string]string {
-	t.Helper()
-	artifacts := make(map[string]string)
-	err := filepath.WalkDir(f.Root, func(path string, entry fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if path == allowedIntent || path == filepath.Join(f.AppDir, "engine-bin") {
-			return nil
-		}
-		relative, err := filepath.Rel(f.Root, path)
-		if err != nil {
-			return err
-		}
-		if entry.IsDir() {
-			artifacts[relative] = "directory"
-			return nil
-		}
-		if !entry.Type().IsRegular() {
-			return fmt.Errorf("unexpected private artifact type at %s: %s", relative, entry.Type())
-		}
-		data, err := os.ReadFile(path)
-		if err != nil {
-			return err
-		}
-		artifacts[relative] = fmt.Sprintf("%x", sha256.Sum256(data))
-		return nil
-	})
-	if err != nil {
-		t.Fatalf("snapshot private install/model artifacts: %v", err)
-	}
-	if _, err := os.Stat(filepath.Join(f.AppDir, "engine-bin", "strata")); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("private Strata install directory: %v, want not exist", err)
-	}
-	return artifacts
 }
