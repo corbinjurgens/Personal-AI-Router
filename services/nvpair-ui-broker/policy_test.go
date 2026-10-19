@@ -34,9 +34,9 @@ type policyCall struct {
 
 // fakeWorker records what the broker sends one worker and answers requests.
 type fakeWorker struct {
-	t      *testing.T
-	conn   net.Conn
-	codec  *Codec
+	t     *testing.T
+	conn  net.Conn
+	codec *Codec
 	mu    sync.Mutex
 	calls []policyCall
 	// projections holds the engine:node-projection notifications apart from
@@ -44,7 +44,7 @@ type fakeWorker struct {
 	// the engine actions the tests that read calls assert on.
 	projections []policyCall
 	answer      func(method string, params json.RawMessage) (any, string)
-	signal chan struct{}
+	signal      chan struct{}
 	// held is closed by releaseHeld; a request whose answer is holdReply is
 	// answered only then, while the worker keeps reading, as a slow proxy does.
 	held     chan struct{}
