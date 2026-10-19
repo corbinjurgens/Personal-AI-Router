@@ -134,18 +134,3 @@ func TestEngineManagerIdentityIncarnationCurrentStopWithdraws(t *testing.T) {
 	f.b.forwardEngineNotificationFrom(source, engineStateChangedMethod, json.RawMessage(`{"engine":"ollama","running":false}`))
 	requireIncarnationIdentity(t, f.b, nil, false)
 }
-
-func TestEngineManagerIdentityIncarnationUnboundEventsCannotChangeIdentity(t *testing.T) {
-	f := newStrictFixture(t)
-	f.b.activateEngineManagerSource()
-	seedStrictIdentity(f.b, "ollama")
-	f.advertise(t, strictCapability(t, "ollama", "m:latest"))
-	r := f.b.nodePolicyRuntime()
-	r.mu.Lock()
-	want := r.engineIdentity
-	r.mu.Unlock()
-	f.b.forwardEngineNotification(engineModelIdentityMethod, engineManagerSnapshot("ollama"))
-	requireIncarnationIdentity(t, f.b, want, true)
-	f.b.forwardEngineNotification(engineStateChangedMethod, json.RawMessage(`{"engine":"ollama","running":false}`))
-	requireIncarnationIdentity(t, f.b, want, true)
-}

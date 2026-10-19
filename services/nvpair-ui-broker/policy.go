@@ -1000,18 +1000,12 @@ func (b *Broker) handlePolicyEngineNotification(method string, params json.RawMe
 	return false
 }
 
-// observeEngineRunning records a running/stopped transition. A stopped engine
-// has nothing loaded, which is what the proxy must see.
-func (b *Broker) observeEngineRunning(engine string, running bool) {
-	b.observeEngineRunningFrom(nil, engine, running)
-}
-
-// Only a current source can withdraw identity. The generic observer retains
-// residency-only observation for callers without an engine-manager source.
+// observeEngineRunningFrom records a running/stopped transition only from the
+// current source. A stopped engine has no loaded models or run identity.
 func (b *Broker) observeEngineRunningFrom(source *engineManagerSource, engine string, running bool) bool {
 	r := b.nodePolicyRuntime()
 	r.mu.Lock()
-	if source != nil && r.engineManagerSource != source {
+	if source == nil || r.engineManagerSource != source {
 		r.mu.Unlock()
 		return false
 	}
@@ -1032,14 +1026,14 @@ func (b *Broker) observeEngineRunningFrom(source *engineManagerSource, engine st
 	// A stopped engine's run identity is void now, before engine-manager's
 	// next snapshot says so.
 	_, identified := r.engineIdentity[engine]
-	if !running && source != nil {
+	if !running {
 		delete(r.engineIdentity, engine)
 	}
 	r.mu.Unlock()
 	if changed {
 		b.schedulePolicyPush(pushResidency)
 	}
-	if !running && source != nil && identified {
+	if !running && identified {
 		b.identityChanged()
 	}
 	return true
@@ -1095,18 +1089,11 @@ func containsString(list []string, s string) bool {
 	return false
 }
 
-// refreshEnginePolicySnapshot seeds running engines, residency and saved
+// refreshEnginePolicySnapshotFrom seeds running engines, residency and saved
 // intent from a (re)started engine-manager, whose watcher pushes only changes,
 // and sends it the node projection. engine:ready sends the projection too, but
 // it can be read before the new worker's handle is installed; this runs after.
-func (b *Broker) refreshEnginePolicySnapshot(w *rpcWorker) {
-	r := b.nodePolicyRuntime()
-	r.mu.Lock()
-	source := r.engineManagerSource
-	r.mu.Unlock()
-	b.refreshEnginePolicySnapshotFrom(w, source)
-}
-
+// The worker's bound source fences running-state observations during replay.
 func (b *Broker) refreshEnginePolicySnapshotFrom(w *rpcWorker, source *engineManagerSource) {
 	if w == nil {
 		return

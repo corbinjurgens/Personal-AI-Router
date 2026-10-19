@@ -345,7 +345,7 @@ type Broker struct {
 	performance *performanceRuntime
 
 	// engineMu guards engineSubscribed. The engine:<event> stream is
-	// opt-in like proxy's: forwardEngineNotification (engine-manager reader
+	// opt-in like proxy's: forwardEngineNotificationFrom (engine-manager reader
 	// goroutine) reads the flag while the engine:subscribe /
 	// engine:unsubscribe handlers (read-loop goroutine) flip it.
 	engineMu         sync.Mutex
@@ -1033,15 +1033,9 @@ func (b *Broker) pushClusterIdentityToNodeInfo() {
 	}
 }
 
-// forwardEngineNotification / forwardManualNodesNotification /
-// forwardSettingsNotification are the per-worker notification hooks. For
-// now they only demux errors:report / errors:clear into the nvpair-errors
-// pipeline; the rest of each worker's notification stream is logged and
-// dropped until its control-plane relay is wired in.
-func (b *Broker) forwardEngineNotification(method string, params json.RawMessage) {
-	b.forwardEngineNotificationFrom(nil, method, params)
-}
-
+// forwardEngineNotificationFrom handles the bound engine-manager's notifications.
+// Identity and running-state observations are fenced by its source; control-plane
+// requests and subscribed client notifications follow their respective relays.
 func (b *Broker) forwardEngineNotificationFrom(source *engineManagerSource, method string, params json.RawMessage) {
 	if method == engineModelIdentityMethod {
 		b.observeModelIdentity(source, params)

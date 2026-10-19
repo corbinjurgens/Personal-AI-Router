@@ -675,7 +675,7 @@ projectionWait:
 func TestSwitchManagerProgressNotificationKeepsRemoteIdentity(t *testing.T) {
 	h := newSwitchHarness(t)
 	want := settings.SwitchChanged{NodeID: "remote-target", RequestID: "remote-operation", Sequence: 9}
-	h.b.forwardEngineNotification(settings.SwitchChangedNotification, settingsJSON(want))
+	h.b.forwardEngineNotificationFrom(h.b.activateEngineManagerSource(), settings.SwitchChangedNotification, settingsJSON(want))
 	frames := h.output.frames()
 	if len(frames) != 1 || frames[0].Method != settings.SwitchChangedNotification {
 		t.Fatalf("forwarded frames = %+v", frames)
@@ -1091,7 +1091,7 @@ func TestSwitchRelayUsesAuthenticatedCallerAndCodedReply(t *testing.T) {
 	p := h.request(t, "relay-revision")
 	// A valid but stale token exercises the coded refusal path.
 	p.ExpectedRevision = settings.SwitchConfigurationToken(settings.SwitchConfigurationSnapshot{NodeID: "stale"})
-	h.b.forwardEngineNotification("engine:switch-request", settingsJSON(struct {
+	h.b.forwardEngineNotificationFrom(h.b.activateEngineManagerSource(), "engine:switch-request", settingsJSON(struct {
 		ID     string                 `json:"id"`
 		Method string                 `json:"method"`
 		Caller string                 `json:"caller"`
