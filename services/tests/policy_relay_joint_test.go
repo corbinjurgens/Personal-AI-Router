@@ -135,11 +135,11 @@ func TestPolicyRelayJoint(t *testing.T) {
 		{"noncanonical revision", func(t *testing.T, p map[string]any) { p["expectedPersistedRevision"] = "01" }, http.StatusBadRequest, -32602, malformed},
 		{"nonnumeric revision", func(t *testing.T, p map[string]any) { p["expectedPersistedRevision"] = "invalid" }, http.StatusBadRequest, -32602, malformed},
 		{"overflow revision", func(t *testing.T, p map[string]any) { p["expectedPersistedRevision"] = "9223372036854775808" }, http.StatusBadRequest, -32602, malformed},
-		{"stale revision", func(t *testing.T, p map[string]any) { p["expectedPersistedRevision"] = "0" }, http.StatusConflict, -32000, conflict},
+		{"stale revision", func(t *testing.T, p map[string]any) { p["expectedPersistedRevision"] = "0" }, http.StatusConflict, -32010, conflict},
 		{"stale revision precedes protected draft rejection", func(t *testing.T, p map[string]any) {
 			p["expectedPersistedRevision"] = "0"
 			f.cloudDraft(t, p, map[string]any{})
-		}, http.StatusConflict, -32000, conflict},
+		}, http.StatusConflict, -32010, conflict},
 	}
 	for _, tc := range cases {
 		before := assertStoredPolicy(t, f.path, f.want)
@@ -147,7 +147,16 @@ func TestPolicyRelayJoint(t *testing.T) {
 			params := map[string]any{"policy": jointExpectedPeer(f.want), "expectedPersistedRevision": f.want.Revision}
 			tc.change(t, params)
 			body := f.http(t, "/v1/node-policy/set", params, tc.status)
-			if string(body) != tc.text+"\n" {
+			wantBody := tc.text + "\n"
+			if tc.code == -32010 {
+				// A revision conflict is a typed refusal the origin maps back
+				// to its code.
+				wantBody = string(mustMarshal(t, struct {
+					Error string `json:"error"`
+					Code  string `json:"code"`
+				}{tc.text, "policy_conflict"})) + "\n"
+			}
+			if string(body) != wantBody {
 				t.Fatal("HTTP rejection text differs from the independently specified error")
 			}
 			f.assertUnchanged(t, before)
@@ -188,6 +197,35 @@ func TestPolicyRelayJoint(t *testing.T) {
 			t.Fatal("numeric revision origin RPC decoder classification mismatch")
 		}
 		f.assertUnchanged(t, before)
+	})
+	// The seeded pause predates pausedBy, so it counts as local: a paired
+	// node cannot resume it, and the node's own resume still can. This runs
+	// last because it leaves the target available.
+	t.Run("local pause vetoes a relayed resume until the node resumes itself", func(t *testing.T) {
+		before := assertStoredPolicy(t, f.path, f.want)
+		const veto = "this node was paused on the node itself; resume it there"
+		body := f.http(t, "/v1/node-availability/set", map[string]any{"state": "available"}, http.StatusConflict)
+		var refusal struct {
+			Error string `json:"error"`
+			Code  string `json:"code"`
+		}
+		if json.Unmarshal(body, &refusal) != nil || refusal.Code != "local_veto" || refusal.Error != veto {
+			t.Fatalf("relayed resume refusal = %s, want a local_veto body", body)
+		}
+		f.assertUnchanged(t, before)
+		response := f.originCall(t, "engine:remote-availability-set", map[string]any{"state": "available"})
+		if response.Error == nil || response.Error.Code != -32011 || response.Error.Message != "remote node policy: HTTP 409: "+veto {
+			t.Fatalf("origin resume of a local pause = %+v, want code -32011", response.Error)
+		}
+		f.assertUnchanged(t, before)
+		local := callRPC(t, f.target.in, f.target.msgs, "node:set-availability", map[string]any{"state": "available"}, 15*time.Second)
+		if local.Error != nil {
+			t.Fatalf("local resume after a vetoed relayed resume: %+v", local.Error)
+		}
+		var stored nodepolicy.Policy
+		if err := json.Unmarshal(readPolicyBytes(t, f.path), &stored); err != nil || stored.Availability != nodepolicy.Available || stored.PausedBy != "" {
+			t.Fatalf("local resume stored availability %q pausedBy %q (%v), want available with no provenance", stored.Availability, stored.PausedBy, err)
+		}
 	})
 }
 

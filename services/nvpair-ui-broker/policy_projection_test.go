@@ -83,7 +83,7 @@ func TestNodeProjectionPublishedOnPersistAvailabilityAndReady(t *testing.T) {
 
 	t.Run("pause", func(t *testing.T) {
 		before := len(nodeProjections(t, engine))
-		if _, err := ab.b.setAvailability(context.Background(), nodepolicy.Paused); err != nil {
+		if _, err := ab.b.setAvailability(context.Background(), nodepolicy.Paused, nodepolicy.PausedLocally); err != nil {
 			t.Fatalf("pause: %v", err)
 		}
 		got := waitProjections(t, engine, before+1)
@@ -95,7 +95,7 @@ func TestNodeProjectionPublishedOnPersistAvailabilityAndReady(t *testing.T) {
 	t.Run("resume", func(t *testing.T) {
 		before := len(nodeProjections(t, engine))
 		paused := ab.b.localPolicy().Policy.Revision
-		if _, err := ab.b.setAvailability(context.Background(), nodepolicy.Available); err != nil {
+		if _, err := ab.b.setAvailability(context.Background(), nodepolicy.Available, nodepolicy.PausedLocally); err != nil {
 			t.Fatalf("resume: %v", err)
 		}
 		got := waitProjections(t, engine, before+1)

@@ -153,7 +153,7 @@ func TestPolicyAnnouncementsFollowTheStoredPolicyUnderConcurrentWriters(t *testi
 	}
 	paused := make(chan error, 1)
 	go func() {
-		_, err := ab.b.setAvailability(context.Background(), nodepolicy.Paused)
+		_, err := ab.b.setAvailability(context.Background(), nodepolicy.Paused, nodepolicy.PausedLocally)
 		paused <- err
 	}()
 	waitUntil(t, "the pause to persist revision 5002", func() bool {

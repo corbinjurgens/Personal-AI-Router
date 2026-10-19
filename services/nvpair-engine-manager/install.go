@@ -156,7 +156,7 @@ func (e *Executor) Uninstall(ctx context.Context, engine string) error {
 		// claim with it: left behind, it would authorise removing a copy the
 		// user installs later, which PAIR has no right to touch.
 		clearInstallMarker(st.installDir)
-		return e.setDesiredEnabled(engine, false)
+		return e.setDesiredEnabled(engine, false, intentLocal)
 	}
 	un := st.plat.Uninstall
 	if un == nil || (len(un.Run) == 0 && len(un.Remove) == 0) {
@@ -263,7 +263,7 @@ func (e *Executor) Uninstall(ctx context.Context, engine string) error {
 	clearInstallMarker(st.installDir)
 	e.reporter.clear(uninstallFailedID(engine))
 	e.emitState(engine)
-	return e.setDesiredEnabled(engine, false)
+	return e.setDesiredEnabled(engine, false, intentLocal)
 }
 
 // maxDownloadBytes caps a single engine download (engine installers /

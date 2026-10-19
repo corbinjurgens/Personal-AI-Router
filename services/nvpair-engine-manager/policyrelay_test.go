@@ -428,6 +428,41 @@ func TestPolicyRoutesMapReplyErrorCodesToHTTPStatus(t *testing.T) {
 	}
 }
 
+func TestPolicyRoutesAnswerTypedCodesAsConflictBodies(t *testing.T) {
+	cases := []struct {
+		name, path, body, message, wire string
+		code                            int
+	}{
+		{"revision conflict", controlPolicySetPath, `{"policy":{},"expectedPersistedRevision":"11"}`, "policy conflict: the persisted revision is 12", "policy_conflict", codePolicyConflict},
+		{"local veto", controlAvailabilitySetPath, `{"state":"available"}`, "this node was paused on the node itself; resume it there", "local_veto", codeLocalVeto},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			selfDir, peerDir := pairedPolicyDirs(t)
+			server := policyReplyPeerServer(t, peerDir, c.code, c.message)
+			config, ok := clustertrust.Open(selfDir).ClientTLSConfig("uuid-peer")
+			if !ok {
+				t.Fatal("peer pin unavailable")
+			}
+			transport := &http.Transport{TLSClientConfig: config}
+			t.Cleanup(transport.CloseIdleConnections)
+			client := &http.Client{Transport: transport, Timeout: 5 * time.Second}
+			resp, err := client.Post(server.URL+c.path, "application/json", strings.NewReader(c.body))
+			if err != nil {
+				t.Fatalf("post policy: %v", err)
+			}
+			defer resp.Body.Close()
+			var body codedBody
+			if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+				t.Fatalf("decode typed refusal: %v", err)
+			}
+			if resp.StatusCode != http.StatusConflict || body.Code != c.wire || body.Error != c.message {
+				t.Fatalf("typed refusal = %d %+v, want 409 code %q with the broker diagnostic", resp.StatusCode, body, c.wire)
+			}
+		})
+	}
+}
+
 func TestRemotePolicyPreservesHTTPErrorClassification(t *testing.T) {
 	cases := []struct {
 		name, method, params, message string
@@ -439,6 +474,8 @@ func TestRemotePolicyPreservesHTTPErrorClassification(t *testing.T) {
 		{"revision conflict", "engine:remote-policy-set", `{"nodeId":"host-peer","policy":{},"expectedPersistedRevision":"11"}`, "invalid params: deliberately misleading text", -32000, -32000},
 		{"save failure", "engine:remote-policy-set", `{"nodeId":"host-peer","policy":{},"expectedPersistedRevision":"12"}`, "the policy could not be saved", -32000, -32000},
 		{"other broker failure", "engine:remote-policy-get", `{"nodeId":"host-peer"}`, "coordinator failed", -32603, -32000},
+		{"typed revision conflict", "engine:remote-policy-set", `{"nodeId":"host-peer","policy":{},"expectedPersistedRevision":"11"}`, "policy conflict: the persisted revision is 12", codePolicyConflict, codePolicyConflict},
+		{"local veto of a resume", "engine:remote-availability-set", `{"nodeId":"host-peer","state":"available"}`, "this node was paused on the node itself; resume it there", codeLocalVeto, codeLocalVeto},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

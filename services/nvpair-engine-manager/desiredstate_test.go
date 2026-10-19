@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -28,18 +29,83 @@ func TestDesiredStateStoresExplicitOffAndLeavesLegacyUnknown(t *testing.T) {
 	if enabled, known, err := store.get("fake"); err != nil || known || enabled {
 		t.Fatalf("legacy state = (%v, %v, %v), want unknown", enabled, known, err)
 	}
-	if err := store.set("fake", false); err != nil {
+	if err := store.set("fake", false, intentLocal); err != nil {
 		t.Fatal(err)
 	}
 	if enabled, known, err := store.get("fake"); err != nil || !known || enabled {
 		t.Fatalf("saved OFF = (%v, %v, %v), want known false", enabled, known, err)
 	}
-	if err := store.set("fake", true); err != nil {
+	if err := store.set("fake", true, intentLocal); err != nil {
 		t.Fatal(err)
 	}
 	if enabled, known, err := store.get("fake"); err != nil || !known || !enabled {
 		t.Fatalf("saved ON = (%v, %v, %v), want known true", enabled, known, err)
 	}
+}
+
+func TestDesiredStateRecordsOffProvenance(t *testing.T) {
+	requireOffLocally := func(t *testing.T, store *desiredStateStore, want bool) {
+		t.Helper()
+		if got, err := store.offLocally("fake"); err != nil || got != want {
+			t.Fatalf("offLocally = (%v, %v), want %v", got, err, want)
+		}
+	}
+	t.Run("unknown intent is not a local Off", func(t *testing.T) {
+		requireOffLocally(t, newDesiredStateStore(t.TempDir()), false)
+	})
+	t.Run("local Off vetoes until a start clears it", func(t *testing.T) {
+		store := newDesiredStateStore(t.TempDir())
+		if err := store.set("fake", false, intentLocal); err != nil {
+			t.Fatal(err)
+		}
+		requireOffLocally(t, store, true)
+		if err := store.set("fake", true, intentPeer); err != nil {
+			t.Fatal(err)
+		}
+		requireOffLocally(t, store, false)
+		if state, err := store.load(); err != nil || len(state.OffBy) != 0 {
+			t.Fatalf("saving On left Off provenance %v (%v)", state.OffBy, err)
+		}
+	})
+	t.Run("peer Off does not veto", func(t *testing.T) {
+		store := newDesiredStateStore(t.TempDir())
+		if err := store.set("fake", false, intentPeer); err != nil {
+			t.Fatal(err)
+		}
+		requireOffLocally(t, store, false)
+	})
+	t.Run("peer Off never downgrades a local Off", func(t *testing.T) {
+		store := newDesiredStateStore(t.TempDir())
+		if err := store.set("fake", false, intentLocal); err != nil {
+			t.Fatal(err)
+		}
+		if err := store.set("fake", false, intentPeer); err != nil {
+			t.Fatal(err)
+		}
+		requireOffLocally(t, store, true)
+	})
+	t.Run("local Off replaces a peer Off", func(t *testing.T) {
+		store := newDesiredStateStore(t.TempDir())
+		if err := store.set("fake", false, intentPeer); err != nil {
+			t.Fatal(err)
+		}
+		if err := store.set("fake", false, intentLocal); err != nil {
+			t.Fatal(err)
+		}
+		requireOffLocally(t, store, true)
+	})
+	t.Run("legacy Off without provenance counts as local", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, desiredStateFileName), []byte(`{"engines":{"fake":false}}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		store := newDesiredStateStore(dir)
+		requireOffLocally(t, store, true)
+		if err := store.set("fake", false, intentPeer); err != nil {
+			t.Fatal(err)
+		}
+		requireOffLocally(t, store, true)
+	})
 }
 
 func TestDesiredOnSurvivesShutdownAndExplicitOffDoesNot(t *testing.T) {

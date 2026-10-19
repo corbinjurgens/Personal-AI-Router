@@ -84,8 +84,8 @@ func TestServicePolicy(t *testing.T) {
 		draft.Admission.MaxConcurrentPerModel = 8
 		m := b.mustPolicyCall(t, "204", draft)
 		wantMessage := "policy conflict: the persisted revision is " + next.Revision + ", not the expected " + draft.Revision + "; reload the policy and review it before saving"
-		if m.Error == nil || m.Error.Code != -32000 || m.Error.Message != wantMessage || len(m.Result) != 0 {
-			t.Fatalf("stale policy:set response: error=%+v result_bytes=%d, want code -32000 and %q", m.Error, len(m.Result), wantMessage)
+		if m.Error == nil || m.Error.Code != -32010 || m.Error.Message != wantMessage || len(m.Result) != 0 {
+			t.Fatalf("stale policy:set response: error=%+v result_bytes=%d, want code -32010 and %q", m.Error, len(m.Result), wantMessage)
 		}
 		if !reflect.DeepEqual(fetchServicePolicy(t, b), before) {
 			t.Fatal("conflicting policy:set changed the policy/live snapshot")

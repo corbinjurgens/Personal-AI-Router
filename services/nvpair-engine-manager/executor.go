@@ -102,6 +102,9 @@ type Executor struct {
 	// nodeProjection is the broker's last node projection, served with the
 	// model inventory (nodeprojection.go).
 	nodeProjection nodeProjectionStore
+	// remoteWork holds the paired nodes' accepted starts and loads, which a
+	// local veto cancels (nodeprojection.go).
+	remoteWork remoteWork
 	// overrideDir is the per-user manifest-override directory (the same
 	// engines/ dir buildRegistry overlays). engine:set-port persists the
 	// chosen port here as a manifest override. Empty disables persistence.

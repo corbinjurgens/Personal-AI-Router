@@ -57,7 +57,7 @@ func TestWakeRefusesUnknownAndOffIntent(t *testing.T) {
 	if err := e.Wake(context.Background(), "fake"); !errors.Is(err, errIntentOff) {
 		t.Fatalf("wake with no saved intent = %v, want errIntentOff", err)
 	}
-	if err := e.setDesiredEnabled("fake", false); err != nil {
+	if err := e.setDesiredEnabled("fake", false, intentLocal); err != nil {
 		t.Fatal(err)
 	}
 	if err := e.Wake(context.Background(), "fake"); !errors.Is(err, errIntentOff) {
@@ -115,7 +115,7 @@ func TestSleepAndWakeKeepSavedIntent(t *testing.T) {
 
 func TestWakeRefusedAfterShutdown(t *testing.T) {
 	e := wakeTestExecutor(t, t.TempDir(), nil)
-	if err := e.setDesiredEnabled("fake", true); err != nil {
+	if err := e.setDesiredEnabled("fake", true, intentLocal); err != nil {
 		t.Fatal(err)
 	}
 	e.StopAll()

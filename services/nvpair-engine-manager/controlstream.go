@@ -13,6 +13,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -41,6 +42,9 @@ type streamFrame struct {
 	Message string          `json:"message,omitempty"`
 	Status  *EngineStatus   `json:"status,omitempty"`
 	Result  json.RawMessage `json:"result,omitempty"`
+	// Code is the wire name of a typed error code on an error frame, such as
+	// "local_veto"; empty for an untyped failure.
+	Code string `json:"code,omitempty"`
 }
 
 // installRequest is the POST /v1/engines/install body.
@@ -77,13 +81,26 @@ func (s *controlServer) handleInstall(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `"engine" is required`, http.StatusBadRequest)
 		return
 	}
+	// Install with start is refused up front, as a 409, when a local veto
+	// forbids the start; a veto arriving during the install cancels only the
+	// start, and the start rechecks it under the lifecycle lock.
+	startCtx := r.Context()
+	if req.Start {
+		ctx, done, err := s.exec.beginRemote(r.Context(), req.Engine)
+		if err != nil {
+			writeRemoteError(w, err)
+			return
+		}
+		defer done()
+		startCtx = ctx
+	}
 	s.streamOp(w, r, req.OpID, req.Engine, "install", func(ctx context.Context) (streamFrame, error) {
 		if err := s.exec.Install(ctx, req.Engine); err != nil {
 			return streamFrame{}, err
 		}
 		if req.Start {
-			if err := s.exec.StartWith(ctx, req.Engine, startOpts{}); err != nil {
-				return streamFrame{}, err
+			if err := s.exec.StartWith(startCtx, req.Engine, startOpts{Origin: intentPeer}); err != nil {
+				return streamFrame{}, vetoCause(startCtx, err)
 			}
 		}
 		st, err := s.exec.Status(req.Engine)
@@ -187,6 +204,10 @@ func (s *controlServer) streamOp(w http.ResponseWriter, r *http.Request, opID, e
 			frame := res.frame
 			if res.err != nil {
 				frame = streamFrame{Type: "error", OpID: opID, Engine: engine, Op: op, Message: res.err.Error()}
+				var veto *localVetoError
+				if errors.As(res.err, &veto) {
+					frame.Code = wireCodes[codeLocalVeto]
+				}
 			}
 			_ = enc.Encode(frame)
 			flusher.Flush()

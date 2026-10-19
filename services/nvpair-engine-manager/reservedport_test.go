@@ -17,6 +17,9 @@ func TestReservedAliasPortBlocksLocalAndRemoteStarts(t *testing.T) {
 	reg.engines[manifest.Engine] = manifest
 	exec := NewExecutor(reg, NewReporter(nil), func(string, any) {}, t.TempDir())
 	exec.overrideDir = t.TempDir()
+	// The broker's projection says the node is available, so the remote start
+	// reaches the port check.
+	exec.nodeProjection.set(nodeProjection{})
 	if err := exec.SetReservedPort(15555); err != nil {
 		t.Fatal(err)
 	}
