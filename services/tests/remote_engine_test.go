@@ -28,8 +28,43 @@ import (
 	"testing"
 	"time"
 
+	settings "nvpair-shared/enginesettings"
 	"nvpair-shared/jsonrpc"
 )
+
+// completeEngineManagerRecovery plays the parent broker's startup role for
+// fixtures that own a manager directly and have no switch journal to recover.
+func completeEngineManagerRecovery(t *testing.T, call func(string, any) jsonrpc.Message) {
+	t.Helper()
+	response := call(settings.SwitchPrepareMethod, settings.SwitchPrepareRequest{})
+	if response.Error != nil {
+		t.Fatalf("inspect manager recovery: %+v", response.Error)
+	}
+	var inspected struct {
+		settings.SwitchPrepareResult
+		Configuration settings.SwitchConfigurationSnapshot `json:"configuration"`
+	}
+	if err := json.Unmarshal(response.Result, &inspected); err != nil {
+		t.Fatalf("decode manager recovery inspection: %v", err)
+	}
+	incarnation := inspected.Configuration.ManagerIncarnation
+	if inspected.Error != nil || inspected.Checkpoint != nil || incarnation == "" {
+		t.Fatalf("unexpected manager startup recovery state: %+v", inspected)
+	}
+	response = call("engine:switch-recovery-ready", map[string]string{"managerIncarnation": incarnation})
+	if response.Error != nil {
+		t.Fatalf("acknowledge manager recovery: %+v", response.Error)
+	}
+	var ready struct {
+		ManagerIncarnation string `json:"managerIncarnation"`
+	}
+	if err := json.Unmarshal(response.Result, &ready); err != nil {
+		t.Fatalf("decode manager recovery acknowledgement: %v", err)
+	}
+	if ready.ManagerIncarnation != incarnation {
+		t.Fatalf("manager recovery acknowledgement = %+v, want incarnation %q", ready, incarnation)
+	}
+}
 
 // mintClusterIdentity writes a self-signed cluster leaf (node.crt + node.key)
 // for uuid into dir and returns the certificate PEM (for cross-pinning).
@@ -143,15 +178,12 @@ func TestRemoteEngineGetInstalled(t *testing.T) {
 	// Node B: serve the ec surface over mTLS. Give it a live stdin so it stays
 	// up (EOF would shut it down) and drain its stdout so it can't block.
 	portB := freePort(t)
-	_, bCleanup := startEngineManagerServer(t, dirB, portB)
-	t.Cleanup(bCleanup)
+	startEngineManagerServer(t, dirB, portB)
 	waitForPort(t, "127.0.0.1", portB, 10*time.Second)
 
 	// Node A: the client. It resolves targets from its ec peer directory, which
 	// we seed by pushing a discovery:nodes snapshot (below) rather than a broker.
-	aStdin, aMsgs, aCleanup := startEngineManagerStdio(t, dirA)
-	t.Cleanup(aCleanup)
-	waitForMethod(t, aMsgs, "engine:ready", 10*time.Second)
+	aStdin, aMsgs := startEngineManagerStdio(t, dirA)
 
 	// Seed A's ec peer directory with node B. handleMessage processes this
 	// synchronously before the next frame, so the directory is populated by the
@@ -197,13 +229,10 @@ func TestRemoteEngineRejectsUntrusted(t *testing.T) {
 	// Deliberately do NOT pin A into B: B must reject A at the per-request gate.
 
 	portB := freePort(t)
-	_, bCleanup := startEngineManagerServer(t, dirB, portB)
-	t.Cleanup(bCleanup)
+	startEngineManagerServer(t, dirB, portB)
 	waitForPort(t, "127.0.0.1", portB, 10*time.Second)
 
-	aStdin, aMsgs, aCleanup := startEngineManagerStdio(t, dirA)
-	t.Cleanup(aCleanup)
-	waitForMethod(t, aMsgs, "engine:ready", 10*time.Second)
+	aStdin, aMsgs := startEngineManagerStdio(t, dirA)
 
 	snapshot := fmt.Sprintf(`{"jsonrpc":"2.0","method":"discovery:nodes","params":{"nodes":[`+
 		`{"hostUuid":"nodeB","name":"nodeB","ip":"127.0.0.1","clusterUuid":%q,"trusted":true,`+
@@ -220,8 +249,8 @@ func TestRemoteEngineRejectsUntrusted(t *testing.T) {
 
 // startEngineManagerServer launches an engine-manager serving the ec surface on
 // controlPort with the given cluster dir. It keeps stdin open (so the process
-// stays alive) and drains stdout. Returns stdin and a cleanup.
-func startEngineManagerServer(t *testing.T, clusterDir string, controlPort int) (io.WriteCloser, func()) {
+// stays alive) and drains stdout after completing recovery readiness.
+func startEngineManagerServer(t *testing.T, clusterDir string, controlPort int) {
 	t.Helper()
 	cmd := exec.Command(engineMgrBin,
 		"--control-port", fmt.Sprintf("%d", controlPort),
@@ -240,8 +269,7 @@ func startEngineManagerServer(t *testing.T, clusterDir string, controlPort int) 
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start engine-manager (server): %v", err)
 	}
-	go func() { _, _ = io.Copy(io.Discard, stdout) }()
-	return stdin, func() {
+	t.Cleanup(func() {
 		_ = stdin.Close()
 		done := make(chan error, 1)
 		go func() { done <- cmd.Wait() }()
@@ -251,12 +279,21 @@ func startEngineManagerServer(t *testing.T, clusterDir string, controlPort int) 
 			_ = cmd.Process.Kill()
 			<-done
 		}
-	}
+	})
+	msgs := startMsgReader(stdout)
+	waitForMethod(t, msgs, "engine:ready", 10*time.Second)
+	completeEngineManagerRecovery(t, func(method string, params any) jsonrpc.Message {
+		return callRPC(t, stdin, msgs, method, params, 10*time.Second)
+	})
+	go func() {
+		for range msgs {
+		}
+	}()
 }
 
 // startEngineManagerStdio launches an engine-manager as a JSON-RPC-over-stdio
-// client. Returns its stdin, a reader over its stdout frames, and a cleanup.
-func startEngineManagerStdio(t *testing.T, clusterDir string) (io.WriteCloser, <-chan jsonrpc.Message, func()) {
+// client. Returns its stdin and stdout frames after completing recovery readiness.
+func startEngineManagerStdio(t *testing.T, clusterDir string) (io.WriteCloser, <-chan jsonrpc.Message) {
 	t.Helper()
 	cmd := exec.Command(engineMgrBin, "--cluster-dir", clusterDir, "--log-level", "warn")
 	cmd.Stderr = os.Stderr
@@ -271,8 +308,7 @@ func startEngineManagerStdio(t *testing.T, clusterDir string) (io.WriteCloser, <
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start engine-manager (client): %v", err)
 	}
-	msgs := startMsgReader(stdout)
-	return stdin, msgs, func() {
+	t.Cleanup(func() {
 		_ = stdin.Close()
 		done := make(chan error, 1)
 		go func() { done <- cmd.Wait() }()
@@ -282,5 +318,11 @@ func startEngineManagerStdio(t *testing.T, clusterDir string) (io.WriteCloser, <
 			_ = cmd.Process.Kill()
 			<-done
 		}
-	}
+	})
+	msgs := startMsgReader(stdout)
+	waitForMethod(t, msgs, "engine:ready", 10*time.Second)
+	completeEngineManagerRecovery(t, func(method string, params any) jsonrpc.Message {
+		return callRPC(t, stdin, msgs, method, params, 10*time.Second)
+	})
+	return stdin, msgs
 }

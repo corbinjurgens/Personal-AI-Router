@@ -237,6 +237,9 @@ func newTask2Fixture(t *testing.T) *task2Fixture {
 		}
 		task1WriteJSON(t, filepath.Join(n.base, "cluster", "members.json"), members)
 		f.engines[n.uuid] = startTask1Process(t, n.base, engineMgrBin, "--cluster-dir", filepath.Join(n.base, "cluster"), "--control-port", strconv.Itoa(n.ports[noderec.ServiceEngineControl]), "--http-port", strconv.Itoa(n.ports[noderec.ServiceEngineManager]), "--loaded-poll-interval", "0")
+		completeEngineManagerRecovery(t, func(method string, params any) jsonrpc.Message {
+			return f.engines[n.uuid].call(t, method, params)
+		})
 		f.engines[n.uuid].call(t, "engine:configured-ports", nil)
 		n.cm = startTask1Process(t, n.base, clusterMgrBin, "--config-dir", n.base, "--port", strconv.Itoa(n.ports[noderec.ServiceCluster]))
 		n.cm.call(t, "cluster:get-node-id", nil)
