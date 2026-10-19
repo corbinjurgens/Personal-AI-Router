@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"nvpair-shared/applog"
+	settings "nvpair-shared/enginesettings"
 )
 
 // forwardLogLevel pushes an already-validated log level down to every
@@ -225,7 +226,10 @@ func (b *Broker) handleMessage(msg *Message) {
 	case "node/add", "node/remove", "nodes/list":
 		b.relayToManualNodes(msg)
 
-	case "engine:set-reserved-port", "internal:set-reserved-port":
+	// Switch executor calls belong to the coordinator, which retains the
+	// operation lock. Relaying a client's target-start step would bypass it.
+	case "engine:set-reserved-port", "internal:set-reserved-port",
+		settings.SwitchPrepareMethod, settings.SwitchStepMethod, settings.SwitchReconcileMethod:
 		if err := b.codec.RespondError(msg.ID, -32601, "method not found: "+msg.Method); err != nil {
 			log.Printf("failed to reject private engine method %s: %v", msg.Method, err)
 		}
@@ -317,6 +321,22 @@ func (b *Broker) relayToEngine(msg *Message) {
 	go b.relayToEngineNow(msg)
 }
 
+// Explicit local On must serialize with switch obligation discharge even when
+// the caller leaves the engine's port unchanged.
+func engineLocalOnRequest(method string, params json.RawMessage) bool {
+	switch method {
+	case "engine:start", "engine:restart":
+		return true
+	case "engine:install":
+		var request struct {
+			Start bool `json:"start"`
+		}
+		return json.Unmarshal(params, &request) == nil && request.Start
+	default:
+		return false
+	}
+}
+
 func (b *Broker) relayToEngineNow(msg *Message) {
 	if needsOllamaPortGate(msg.Method, msg.Params) && b.ollamaFacadeIsPendingBackend() {
 		go func() {
@@ -374,7 +394,7 @@ func (b *Broker) relayToEngineNow(msg *Message) {
 			}
 		}
 	}
-	if localOffEngine == "" && (isEnginePortAssignment || msg.Method == "engine:stop" || msg.Method == "engine:start" || msg.Method == "engine:restart") {
+	if localOffEngine == "" && (isEnginePortAssignment || msg.Method == "engine:stop" || engineLocalOnRequest(msg.Method, msg.Params)) {
 		if !offOperationLocked {
 			b.settingsApplyMu.Lock()
 			defer b.settingsApplyMu.Unlock()

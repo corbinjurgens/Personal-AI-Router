@@ -40,6 +40,11 @@ Pause must be persisted and applied too. Discharge is durably recorded; failure
 retains recovery ownership. Restart replays undischarged obligations even with no
 manager checkpoint, before restoration/readiness. An older direct peer start loses
 to the subsequently admitted local Off; later local On waits for this discharge.
+Explicit local start, restart and install with `start: true` share the operation
+lock and recovery reservation check, including installs without a port override
+and the desktop install, installAll and update commands that send them.
+Clients cannot relay the manager's private switch prepare, step or reconcile
+methods; only the coordinator dispatches those under its operation lock.
 Worker exit is fenced before supervisor
 notification, with already-closed worker
 channels checked again at completion. Transient conservative recovery failures
