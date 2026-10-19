@@ -19,10 +19,143 @@ const (
 	MethodPrepareResident        = "node/prepare-resident"
 	MethodReconcileResident      = "engine:reconcile-resident"
 	MethodFinishResident         = "node/finish-resident"
+	MethodDispatchResident       = "node/dispatch-resident"
 	MaxResidentTimeoutMs         = 60_000
 	MaxModelConfigurationEntries = 256
 	MaxResidentModelBytes        = 1024
 )
+
+// MaxResidentKeepAliveSeconds caps each load's idle retention at one day so a
+// request cannot pin engine memory indefinitely. Policy has no equivalent bound.
+const MaxResidentKeepAliveSeconds = 86_400
+
+// ResidentLoadOptions comes from the resident profile at PolicyRevision.
+// ContextLength uses the same positive int range as Profile.ContextTokens in
+// Policy.Validate; that policy defines no smaller maximum. Integer decoding
+// rejects fractional, non-finite and overflowing values for both options.
+type ResidentLoadOptions struct {
+	ContextLength    int `json:"contextLength"`
+	KeepAliveSeconds int `json:"keepAliveSeconds"`
+}
+
+func (o ResidentLoadOptions) Validate() error {
+	if o.ContextLength <= 0 {
+		return errors.New("contextLength must be positive")
+	}
+	if o.KeepAliveSeconds <= 0 || o.KeepAliveSeconds > MaxResidentKeepAliveSeconds {
+		return errors.New("keepAliveSeconds must be in 1..86400")
+	}
+	return nil
+}
+
+func (o *ResidentLoadOptions) UnmarshalJSON(data []byte) error {
+	type plain ResidentLoadOptions
+	var next plain
+	if err := decodeResident(data, &next, []string{"contextLength", "keepAliveSeconds"}); err != nil {
+		return err
+	}
+	if err := ResidentLoadOptions(next).Validate(); err != nil {
+		return err
+	}
+	*o = ResidentLoadOptions(next)
+	return nil
+}
+
+// DispatchResidentParams requests the final grant immediately before loading.
+// The proxy verifies every binding and the deadline under its admission mutex
+// and marks the reservation dispatched. Invalidation then cannot free it until
+// finish or observation. ManagerIncarnation is required to bind that grant.
+type DispatchResidentParams struct {
+	ReservationID      string              `json:"reservationId"`
+	ProxyRunID         string              `json:"proxyRunId"`
+	ManagerIncarnation string              `json:"managerIncarnation"`
+	OperationID        string              `json:"operationId"`
+	PolicyRevision     string              `json:"policyRevision"`
+	Engine             string              `json:"engine"`
+	Model              string              `json:"model"`
+	Identity           StrictModelIdentity `json:"identity"`
+}
+
+func (p DispatchResidentParams) Validate() error {
+	if !strictID.MatchString(p.ReservationID) || !strictID.MatchString(p.ProxyRunID) ||
+		!strictID.MatchString(p.ManagerIncarnation) || !strictID.MatchString(p.OperationID) {
+		return errors.New("reservationId, proxyRunId, managerIncarnation and operationId must be ASCII identities of 1-128 bytes")
+	}
+	if err := validateRevision(p.PolicyRevision); err != nil {
+		return err
+	}
+	if err := validateResidentRef(p.Engine, p.Model); err != nil {
+		return err
+	}
+	return p.Identity.Validate()
+}
+
+// DispatchResidentReason reuses resident refusal codes, with final-grant codes
+// for a reservation that was invalidated or is not known to this proxy run.
+type DispatchResidentReason string
+
+const (
+	DispatchReasonReservationRevoked DispatchResidentReason = "reservation-revoked"
+	DispatchReasonReservationUnknown DispatchResidentReason = "reservation-unknown"
+)
+
+func (r DispatchResidentReason) Validate() error {
+	if r == DispatchReasonReservationRevoked || r == DispatchReasonReservationUnknown {
+		return nil
+	}
+	return ModelConfigurationReason(r).Validate()
+}
+
+// DispatchResidentResult is an explicit final grant or a typed refusal.
+// A refusal means nothing may be dispatched to the engine.
+type DispatchResidentResult struct {
+	Dispatched bool                   `json:"dispatched"`
+	Reason     DispatchResidentReason `json:"reason,omitempty"`
+}
+
+func (r DispatchResidentResult) Validate() error {
+	if r.Reason != "" {
+		if err := r.Reason.Validate(); err != nil {
+			return err
+		}
+	}
+	if r.Dispatched {
+		if r.Reason != "" {
+			return errors.New("dispatch success must not carry a reason")
+		}
+		return nil
+	}
+	if r.Reason == "" {
+		return errors.New("dispatch refusal requires a reason")
+	}
+	return nil
+}
+
+func (p *DispatchResidentParams) UnmarshalJSON(data []byte) error {
+	type plain DispatchResidentParams
+	var next plain
+	if err := decodeResident(data, &next, []string{"reservationId", "proxyRunId", "managerIncarnation", "operationId", "policyRevision", "engine", "model", "identity"}); err != nil {
+		return err
+	}
+	if err := DispatchResidentParams(next).Validate(); err != nil {
+		return err
+	}
+	*p = DispatchResidentParams(next)
+	return nil
+}
+
+func (r *DispatchResidentResult) UnmarshalJSON(data []byte) error {
+	type plain DispatchResidentResult
+	var next plain
+	if err := decodeResident(data, &next, []string{"dispatched"}, "reason"); err != nil {
+		return err
+	}
+	if err := DispatchResidentResult(next).Validate(); err != nil {
+		return err
+	}
+	*r = DispatchResidentResult(next)
+	return nil
+}
 
 // PrepareResidentParams asks the current proxy to evaluate and reserve under
 // its admission mutex. TimeoutMs is a remaining budget, avoiding clock skew;
@@ -162,9 +295,13 @@ type ReconcileResidentParams struct {
 	Identity       StrictModelIdentity         `json:"identity"`
 	TimeoutMs      int                         `json:"timeoutMs"`
 	Reservation    ResidentReservationEvidence `json:"reservation"`
+	Load           ResidentLoadOptions         `json:"load"`
 }
 
 func (p ReconcileResidentParams) Validate() error {
+	if err := p.Load.Validate(); err != nil {
+		return err
+	}
 	if err := p.Reservation.Validate(); err != nil {
 		return err
 	}
@@ -399,7 +536,7 @@ func (p *ResidentReservationEvidence) UnmarshalJSON(data []byte) error {
 func (p *ReconcileResidentParams) UnmarshalJSON(data []byte) error {
 	type plain ReconcileResidentParams
 	var next plain
-	if err := decodeResident(data, &next, []string{"operationId", "policyRevision", "engine", "model", "identity", "timeoutMs", "reservation"}); err != nil {
+	if err := decodeResident(data, &next, []string{"operationId", "policyRevision", "engine", "model", "identity", "timeoutMs", "reservation", "load"}); err != nil {
 		return err
 	}
 	if err := ReconcileResidentParams(next).Validate(); err != nil {

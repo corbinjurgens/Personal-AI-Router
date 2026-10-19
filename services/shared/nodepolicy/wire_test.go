@@ -170,8 +170,9 @@ func TestResidentReservationEvidenceWire(t *testing.T) {
 }
 
 func TestReconcileResidentWire(t *testing.T) {
-	valid := ReconcileResidentParams{OperationID: "op-1", PolicyRevision: "1", Engine: "ollama", Model: "m:latest", Identity: residentIdentity(), TimeoutMs: 60_000, Reservation: ResidentReservationEvidence{ReservationID: "r-1", ProxyRunID: "p-1"}}
-	testResidentWire(t, valid, "operationId policyRevision engine model identity timeoutMs reservation",
+	valid := ReconcileResidentParams{OperationID: "op-1", PolicyRevision: "1", Engine: "ollama", Model: "m:latest", Identity: residentIdentity(), TimeoutMs: 60_000, Reservation: ResidentReservationEvidence{ReservationID: "r-1", ProxyRunID: "p-1"}, Load: ResidentLoadOptions{ContextLength: 4096, KeepAliveSeconds: 300}}
+	testResidentWire(t, valid, "operationId policyRevision engine model identity timeoutMs reservation load",
+		residentWireRejection{"invalid load", "load", ResidentLoadOptions{}},
 		residentWireRejection{"invalid reservation", "reservation", ResidentReservationEvidence{}},
 		residentWireRejection{"stale syntax revision", "policyRevision", "01"},
 		residentWireRejection{"timeout over cap", "timeoutMs", 60_001},
@@ -179,6 +180,64 @@ func TestReconcileResidentWire(t *testing.T) {
 		residentWireRejection{"invalid identity", "identity", StrictModelIdentity{}},
 		residentWireRejection{"invalid reference", "model", ""},
 		residentWireRejection{"invalid operation", "operationId", ""})
+}
+
+func TestResidentLoadOptionsWire(t *testing.T) {
+	testResidentWire(t, ResidentLoadOptions{ContextLength: 4096, KeepAliveSeconds: 300}, "contextLength keepAliveSeconds",
+		residentWireRejection{"zero context", "contextLength", 0},
+		residentWireRejection{"negative context", "contextLength", -1},
+		residentWireRejection{"context over int bound", "contextLength", json.Number("18446744073709551616")},
+		residentWireRejection{"fractional context", "contextLength", 1.5},
+		residentWireRejection{"nonfinite context", "contextLength", json.Number("1e1000")},
+		residentWireRejection{"zero keep alive", "keepAliveSeconds", 0},
+		residentWireRejection{"negative keep alive", "keepAliveSeconds", -1},
+		residentWireRejection{"keep alive over bound", "keepAliveSeconds", MaxResidentKeepAliveSeconds + 1},
+		residentWireRejection{"fractional keep alive", "keepAliveSeconds", 1.5},
+		residentWireRejection{"nonfinite keep alive", "keepAliveSeconds", json.Number("1e1000")})
+	t.Run("lower bounds", func(t *testing.T) {
+		testResidentWire(t, ResidentLoadOptions{ContextLength: 1, KeepAliveSeconds: 1}, "contextLength keepAliveSeconds")
+	})
+	t.Run("upper bounds", func(t *testing.T) {
+		testResidentWire(t, ResidentLoadOptions{ContextLength: int(^uint(0) >> 1), KeepAliveSeconds: MaxResidentKeepAliveSeconds}, "contextLength keepAliveSeconds")
+	})
+}
+
+func TestDispatchResidentParamsWire(t *testing.T) {
+	valid := DispatchResidentParams{ReservationID: "r-1", ProxyRunID: "p-1", ManagerIncarnation: "m-1", OperationID: "op-1", PolicyRevision: "1", Engine: "ollama", Model: "m:latest", Identity: residentIdentity()}
+	testResidentWire(t, valid, "reservationId proxyRunId managerIncarnation operationId policyRevision engine model identity",
+		residentWireRejection{"empty reservation", "reservationId", ""},
+		residentWireRejection{"invalid reservation", "reservationId", "r/1"},
+		residentWireRejection{"long reservation", "reservationId", strings.Repeat("r", 129)},
+		residentWireRejection{"invalid proxy", "proxyRunId", "p/1"},
+		residentWireRejection{"empty manager", "managerIncarnation", ""},
+		residentWireRejection{"invalid manager", "managerIncarnation", "m/1"},
+		residentWireRejection{"long manager", "managerIncarnation", strings.Repeat("m", 129)},
+		residentWireRejection{"invalid operation", "operationId", "op/1"},
+		residentWireRejection{"invalid revision", "policyRevision", "01"},
+		residentWireRejection{"invalid engine", "engine", "bad engine"},
+		residentWireRejection{"untrimmed model", "model", " m"},
+		residentWireRejection{"long model", "model", strings.Repeat("m", 1025)},
+		residentWireRejection{"invalid identity", "identity", StrictModelIdentity{}})
+}
+
+func TestDispatchResidentResultWire(t *testing.T) {
+	t.Run("success", func(t *testing.T) {
+		testResidentWire(t, DispatchResidentResult{Dispatched: true}, "dispatched",
+			residentWireRejection{"success with reason", "reason", DispatchReasonReservationRevoked})
+	})
+	t.Run("refusal", func(t *testing.T) {
+		testResidentWire(t, DispatchResidentResult{Reason: DispatchReasonReservationRevoked}, "dispatched reason",
+			residentWireRejection{"refusal without reason", "reason", ""},
+			residentWireRejection{"unknown reason", "reason", "raw error"})
+	})
+	for _, reason := range []DispatchResidentReason{DispatchReasonReservationUnknown, DispatchResidentReason(ModelReasonNoFit), DispatchResidentReason(ModelReasonEngineOff), DispatchResidentReason(ModelReasonOperationTimeout)} {
+		t.Run(string(reason), func(t *testing.T) {
+			testResidentWire(t, DispatchResidentResult{Reason: reason}, "dispatched reason")
+		})
+	}
+	if err := (DispatchResidentResult{}).Validate(); err == nil {
+		t.Fatal("Validate accepted refusal without reason")
+	}
 }
 
 func TestResidentLoadedObservationWire(t *testing.T) {
