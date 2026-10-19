@@ -435,6 +435,24 @@ func (r *publicCountingReader) Read(p []byte) (int, error) {
 	return n, err
 }
 
+type publicErrorTestBody struct {
+	io.Reader
+	interrupted bool
+	closes      atomic.Int64
+}
+
+func (b *publicErrorTestBody) Read(p []byte) (int, error) {
+	if b.interrupted {
+		return 0, io.ErrUnexpectedEOF
+	}
+	return b.Reader.Read(p)
+}
+
+func (b *publicErrorTestBody) Close() error {
+	b.closes.Add(1)
+	return nil
+}
+
 func TestPublicTransportErrorBodyBounds(t *testing.T) {
 	for _, tc := range []struct {
 		name          string
@@ -455,7 +473,7 @@ func TestPublicTransportErrorBodyBounds(t *testing.T) {
 				return &http.Response{
 					StatusCode:    http.StatusInternalServerError,
 					ContentLength: tc.contentLength,
-					Header:        make(http.Header),
+					Header:        http.Header{"Retry-After": {"5"}},
 					Body:          io.NopCloser(strings.NewReader(strings.Repeat("x", tc.bodyBytes))),
 				}, nil
 			})
@@ -467,6 +485,9 @@ func TestPublicTransportErrorBodyBounds(t *testing.T) {
 				}
 			} else if err != nil || response == nil || response.Body != nil {
 				t.Fatalf("exact error bound failed: response=%+v err=%v", response, err)
+			}
+			if response == nil || response.Status != http.StatusInternalServerError || response.RetryAfter != "5" || response.HeaderAt.IsZero() || response.Body != nil {
+				t.Fatalf("bounded classification metadata lost: response=%+v err=%v", response, err)
 			}
 			if budget.used.Load() != 0 {
 				t.Fatalf("error body leaked budget: %d", budget.used.Load())

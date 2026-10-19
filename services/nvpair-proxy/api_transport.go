@@ -137,8 +137,9 @@ func (r *publicResponse) FirstBodyAt() time.Time {
 	return r.timing.firstByte
 }
 
-// post makes one attempt. The returned body owns its reservation until Close;
-// consumers must defer Close, including parser failures and panic unwinding.
+// post makes one attempt. Bounded classification metadata survives body errors.
+// A returned body owns its reservation until Close; consumers must defer Close,
+// including parser failures and panic unwinding.
 func (c *publicClient) post(ctx context.Context, prepared io.Reader, authorization string, stream bool, budget publicBudget) (*publicResponse, error) {
 	if authorization == "" || strings.ContainsFunc(authorization, unicode.IsControl) {
 		return nil, errors.New("public credential refused")
@@ -183,10 +184,15 @@ func (c *publicClient) post(ctx context.Context, prepared io.Reader, authorizati
 	if err != nil {
 		return nil, errors.New("public connection failed")
 	}
-	headerAt := time.Now()
+	timing := &publicBodyTiming{}
+	result := &publicResponse{Status: resp.StatusCode, HeaderAt: time.Now(), ContentType: req.Header.Get("Accept"), timing: timing}
+	// Retry-After is classification data only, never downstream header material.
+	if value := resp.Header.Get("Retry-After"); len(value) <= 128 {
+		result.RetryAfter = value
+	}
 	if encodings := resp.Header.Values("Content-Encoding"); len(encodings) > 1 || (len(encodings) == 1 && !strings.EqualFold(encodings[0], "identity")) {
 		resp.Body.Close()
-		return nil, errors.New("public encoding refused")
+		return result, errors.New("public encoding refused")
 	}
 	cap := c.bounds.MaxResponseBytes
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
@@ -194,27 +200,21 @@ func (c *publicClient) post(ctx context.Context, prepared io.Reader, authorizati
 	}
 	if resp.ContentLength > cap {
 		resp.Body.Close()
-		return nil, errors.New("public response too large")
+		return result, errors.New("public response too large")
 	}
-	timing := &publicBodyTiming{}
 	b := &publicBody{source: resp.Body, remaining: cap, cancel: cancel, release: free, idle: time.Duration(c.bounds.IdleTimeoutSeconds) * time.Second, timing: timing}
 	b.mu.Lock()
 	b.timer = time.AfterFunc(b.idle, func() { b.Close() })
 	b.stopContext = context.AfterFunc(requestCtx, func() { b.Close() })
 	b.mu.Unlock()
-	result := &publicResponse{Status: resp.StatusCode, HeaderAt: headerAt, ContentType: req.Header.Get("Accept"), Body: b, timing: timing}
-	// Retry-After is classification data only, never downstream header material.
-	if value := resp.Header.Get("Retry-After"); len(value) <= 128 {
-		result.RetryAfter = value
-	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		defer b.Close()
 		if _, err := io.Copy(io.Discard, b); err != nil {
-			return nil, errors.New("public error body failed")
+			return result, errors.New("public error body failed")
 		}
-		result.Body = nil
 		return result, nil
 	}
+	result.Body = b
 	owned = true
 	return result, nil
 }
