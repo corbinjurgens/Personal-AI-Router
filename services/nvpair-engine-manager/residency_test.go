@@ -4,10 +4,12 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"reflect"
 	"runtime"
@@ -359,6 +361,56 @@ func TestResidentSwitchExclusion(t *testing.T) {
 	if result := f.run(t); result.Outcome != nodepolicy.ResidentLoaded {
 		t.Fatalf("result = %+v", result)
 	}
+}
+
+func TestResidentRefusalLogging(t *testing.T) {
+	const prompt = "private prompt sentinel"
+	const body = "private response body sentinel"
+	test := func(name, reason, level string, setup func(*testing.T, *residentFixture)) {
+		t.Run(name, func(t *testing.T) {
+			f := newResidentFixture(t)
+			setup(t, f)
+			var logs bytes.Buffer
+			previous := slog.Default()
+			slog.SetDefault(slog.New(slog.NewJSONHandler(&logs, nil)))
+			t.Cleanup(func() { slog.SetDefault(previous) })
+
+			if result := f.run(t); result.Outcome != nodepolicy.ResidentNotDispatched {
+				t.Fatalf("result = %+v", result)
+			}
+			f.noCalls(t)
+			var entry struct {
+				Level       string `json:"level"`
+				OperationID string `json:"operationId"`
+				Engine      string `json:"engine"`
+				Model       string `json:"model"`
+				Reason      string `json:"reason"`
+			}
+			// Unmarshal also rejects multiple log lines for the same refusal.
+			if err := json.Unmarshal(logs.Bytes(), &entry); err != nil {
+				t.Fatalf("decode refusal log: %v", err)
+			}
+			if entry.Level != level || entry.OperationID != f.p.OperationID || entry.Engine != f.p.Engine || entry.Model != f.p.Model || entry.Reason != reason {
+				t.Fatalf("refusal log = %+v, want %s with operation/ref and reason %q", entry, level, reason)
+			}
+			for _, private := range []string{prompt, body, f.p.Identity.ModelDigest, f.p.Identity.SettingsFingerprint} {
+				if strings.Contains(logs.String(), private) {
+					t.Fatal("refusal log contains private content")
+				}
+			}
+		})
+	}
+	test("pre-lock not installed", "not-installed", "INFO", func(_ *testing.T, f *residentFixture) {
+		f.ex.inventory["ollama"] = nil
+	})
+	test("final grant reservation revoked", "reservation-revoked", "INFO", func(t *testing.T, f *residentFixture) {
+		f.grant = func(req residentDispatchRequest) {
+			f.reply(t, req.ID, nodepolicy.DispatchResidentResult{Reason: nodepolicy.DispatchReasonReservationRevoked})
+		}
+	})
+	test("relay error omits private content", "dispatch-relay-failed", "WARN", func(_ *testing.T, f *residentFixture) {
+		f.m.residentDispatch.send = func(string, any) error { return errors.New(prompt + "\n" + body) }
+	})
 }
 
 func TestResidentDispatchRefusal(t *testing.T) {

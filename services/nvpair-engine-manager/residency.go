@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"reflect"
 	"sync"
@@ -35,6 +36,13 @@ type residentDispatchReply struct {
 	Result *nodepolicy.DispatchResidentResult `json:"result,omitempty"`
 	Error  *RPCError                          `json:"error,omitempty"`
 }
+
+// Keep validated final-grant reasons internal; the reconcile wire is unchanged.
+type residentDispatchRefusal struct {
+	reason nodepolicy.DispatchResidentReason
+}
+
+func (residentDispatchRefusal) Error() string { return "dispatch-refused" }
 
 // The parent codec sends synchronously. No inventory, publication or content
 // lock is held while it sends or waits. Only an internal notification can reply.
@@ -70,6 +78,9 @@ func (r *residentDispatchRelay) call(ctx context.Context, p nodepolicy.DispatchR
 	select {
 	case reply := <-ch:
 		if reply.Error != nil || reply.Result == nil || reply.Result.Validate() != nil || !reply.Result.Dispatched {
+			if reply.Error == nil && reply.Result != nil && reply.Result.Validate() == nil {
+				return residentDispatchRefusal{reason: reply.Result.Reason}
+			}
 			return errors.New("dispatch-refused")
 		}
 		// A queued grant cannot authorize a cancelled or expired operation.
@@ -344,44 +355,86 @@ func residentLock(ctx context.Context, mu *sync.Mutex) bool {
 
 func (e *Executor) executeResident(ctx context.Context, p nodepolicy.ReconcileResidentParams) nodepolicy.ReconcileResidentResult {
 	refused := nodepolicy.ReconcileResidentResult{Outcome: nodepolicy.ResidentNotDispatched}
-	if ctx.Err() != nil || e.residentCheck(p) != "" {
+	logRefusal := func(reason string, level slog.Level) {
+		slog.Log(ctx, level, "resident operation refused", "operationId", p.OperationID, "engine", p.Engine, "model", p.Model, "reason", reason)
+	}
+	contextReason := func() string {
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return string(nodepolicy.ModelReasonOperationTimeout)
+		}
+		return "operation-cancelled"
+	}
+	if ctx.Err() != nil {
+		logRefusal(contextReason(), slog.LevelInfo)
+		return refused
+	}
+	if reason := e.residentCheck(p); reason != "" {
+		logRefusal(reason, slog.LevelInfo)
 		return refused
 	}
 	ctx, end, err := e.beginRemote(ctx, p.Engine)
 	if err != nil {
+		logRefusal("remote-veto", slog.LevelInfo)
 		return refused
 	}
 	defer end()
 	done, err := e.admitMutation(p.Engine)
 	if err != nil {
+		logRefusal("mutation-refused", slog.LevelInfo)
 		return refused
 	}
 	defer done()
 	st, err := e.state(p.Engine)
 	if err != nil {
+		logRefusal(string(nodepolicy.ModelReasonEngineOff), slog.LevelInfo)
 		return refused
 	}
 	// E3 tracks us while waiting for the lifecycle lock. No content guard:
 	// residency never changes installed content or withdraws B2 identity.
 	if !residentLock(ctx, &st.opMu) {
+		logRefusal(contextReason(), slog.LevelInfo)
 		return refused
 	}
 	defer st.opMu.Unlock()
-	if e.residentCheck(p) != "" || ctx.Err() != nil {
+	if reason := e.residentCheck(p); reason != "" {
+		logRefusal(reason, slog.LevelInfo)
+		return refused
+	}
+	if ctx.Err() != nil {
+		logRefusal(contextReason(), slog.LevelInfo)
 		return refused
 	}
 	a, action, body, ok := e.residentLoadCall(p)
 	if !ok || e.residentParent == nil {
+		if !ok {
+			logRefusal(string(nodepolicy.ModelReasonUnsupportedLoad), slog.LevelInfo)
+		} else {
+			logRefusal("dispatch-unavailable", slog.LevelWarn)
+		}
 		return refused
 	}
 	grant := nodepolicy.DispatchResidentParams{ReservationID: p.Reservation.ReservationID, ProxyRunID: p.Reservation.ProxyRunID,
 		ManagerIncarnation: e.switchIncarnation, OperationID: p.OperationID, PolicyRevision: p.PolicyRevision, Engine: p.Engine, Model: p.Model, Identity: p.Identity}
-	if e.residentParent(ctx, grant) != nil || ctx.Err() != nil {
+	if err := e.residentParent(ctx, grant); err != nil {
+		var refusal residentDispatchRefusal
+		switch {
+		case errors.As(err, &refusal):
+			logRefusal(string(refusal.reason), slog.LevelInfo)
+		case errors.Is(err, context.DeadlineExceeded), errors.Is(err, context.Canceled):
+			logRefusal(contextReason(), slog.LevelInfo)
+		default:
+			logRefusal("dispatch-relay-failed", slog.LevelWarn)
+		}
+		return refused
+	}
+	if ctx.Err() != nil {
+		logRefusal(contextReason(), slog.LevelInfo)
 		return refused
 	}
 	// Veto may have arrived during the relay. Never use a queued grant to
 	// bypass the local authority or dispatch under withdrawn identity.
-	if e.residentCheck(p) != "" {
+	if reason := e.residentCheck(p); reason != "" {
+		logRefusal(reason, slog.LevelInfo)
 		return refused
 	}
 	_, loadErr := e.dispatchAction(ctx, st, p.Engine, action, a, body)
@@ -411,8 +464,10 @@ func (e *Executor) executeResident(ctx context.Context, p nodepolicy.ReconcileRe
 	}
 	switch {
 	case errors.Is(ctx.Err(), context.DeadlineExceeded):
+		logRefusal(contextReason(), slog.LevelInfo)
 		result.Outcome = nodepolicy.ResidentTimeout
 	case ctx.Err() != nil:
+		logRefusal(contextReason(), slog.LevelInfo)
 		result.Outcome = nodepolicy.ResidentCancelled
 	case result.Observation != nil:
 		result.Outcome = nodepolicy.ResidentFailed
