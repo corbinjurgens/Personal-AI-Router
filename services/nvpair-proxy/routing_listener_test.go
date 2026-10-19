@@ -168,6 +168,63 @@ func listedIDs(t *testing.T, a answer) []string {
 	return ids
 }
 
+func TestRoutingListener_StopClosesListenerBeforeServeStarts(t *testing.T) {
+	test := func(name string, stop func(*testing.T, *Proxy, *recordingWriter)) {
+		t.Run(name, func(t *testing.T) {
+			p, w := zeroFacadeProxy(t)
+			entered := make(chan struct{}, 2)
+			release := make(chan struct{})
+			t.Cleanup(func() { close(release) })
+			p.routing.beforeServe = func() {
+				entered <- struct{}{}
+				<-release
+			}
+			port := freeRoutingPort(t)
+			activate(t, p, w, listenerPolicy(t, "1", nodepolicy.Listener{Enabled: true, Port: port}))
+			if got := boundPort(p); got != port {
+				t.Fatalf("bound port = %d, want %d", got, port)
+			}
+			select {
+			case <-entered:
+			case <-time.After(5 * time.Second):
+				t.Fatal("Serve goroutine did not reach the gate")
+			}
+
+			stop(t, p, w)
+
+			conn, err := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)), time.Second)
+			if err == nil {
+				if closeErr := conn.Close(); closeErr != nil {
+					t.Errorf("close unexpected connection: %v", closeErr)
+				}
+				t.Errorf("port %d still accepts connections after stop while Serve is gated", port)
+			}
+			if !refuses(port) {
+				t.Errorf("refuses(%d) = false after stop while Serve is gated", port)
+			}
+		})
+	}
+	test("final shutdown", func(t *testing.T, p *Proxy, _ *recordingWriter) {
+		p.shutdown(context.Background())
+		if port := boundPort(p); port != 0 {
+			t.Errorf("bound port after shutdown = %d, want 0", port)
+		}
+	})
+	test("policy disables listener", func(t *testing.T, p *Proxy, w *recordingWriter) {
+		activate(t, p, w, listenerPolicy(t, "2", nodepolicy.Listener{}))
+		if port := boundPort(p); port != 0 {
+			t.Errorf("bound port after disable = %d, want 0", port)
+		}
+	})
+	test("policy moves port", func(t *testing.T, p *Proxy, w *recordingWriter) {
+		port := freeRoutingPort(t)
+		activate(t, p, w, listenerPolicy(t, "2", nodepolicy.Listener{Enabled: true, Port: port}))
+		if got := boundPort(p); got != port {
+			t.Errorf("bound port after move = %d, want %d", got, port)
+		}
+	})
+}
+
 func TestRoutingListener_ListsAliasesWithNoEngineRunning(t *testing.T) {
 	p, w := zeroFacadeProxy(t)
 	activate(t, p, w, listenerPolicy(t, "1", nodepolicy.Listener{Enabled: true, Port: freeRoutingPort(t)}))

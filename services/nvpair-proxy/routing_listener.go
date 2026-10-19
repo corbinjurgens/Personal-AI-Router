@@ -67,8 +67,9 @@ const routingDrainGrace = 250 * time.Millisecond
 // allowed preflight.
 const routingPreflightMaxAge = "600"
 
-// routingListener owns at most one listener, bound to the loopback address on
-// the port the activated policy names.
+// routingListener owns at most one raw listener and its HTTP server, bound to
+// the loopback address on the port the activated policy names. It retains the
+// raw listener so a stop closes the socket even before Serve registers it.
 type routingListener struct {
 	host *Proxy
 
@@ -76,7 +77,10 @@ type routingListener struct {
 	mu     sync.Mutex
 	closed bool
 	srv    *http.Server
+	ln     net.Listener
 	port   int
+	// beforeServe is an optional per-instance hook, captured before launch.
+	beforeServe func()
 	// cleared records that this process has told the pipeline the listener is
 	// not blocked. It starts false so the first outcome after a (re)start also
 	// clears an error a previous proxy process left behind.
@@ -124,12 +128,16 @@ func (l *routingListener) reconcile() {
 		IdleTimeout:       proxyServerIdleTimeout,
 		MaxHeaderBytes:    64 << 10,
 	}
+	beforeServe := l.beforeServe
 	go func() {
+		if beforeServe != nil {
+			beforeServe()
+		}
 		if err := srv.Serve(ln); err != nil && !stderrors.Is(err, http.ErrServerClosed) {
 			slog.Error("routing listener exited", "address", address, "err", err)
 		}
 	}()
-	l.srv, l.port = srv, want.Port
+	l.srv, l.ln, l.port = srv, ln, want.Port
 	l.clearBlockedLocked()
 	slog.Info("routing listener listening", "address", address)
 }
@@ -203,9 +211,9 @@ func (l *routingListener) stopLocked() {
 	l.stopLockedWith(ctx)
 }
 
-// stopLockedWith drains the listener this code owns, then forces it closed if
-// the drain outlasts ctx. Nothing else is touched: facades keep their own
-// listeners.
+// stopLockedWith drains the HTTP server, then forces it closed if the drain
+// outlasts ctx. It always closes the owned raw listener, including before Serve
+// registers it. Nothing else is touched: facades keep their own listeners.
 func (l *routingListener) stopLockedWith(ctx context.Context) {
 	if l.srv == nil {
 		return
@@ -213,8 +221,11 @@ func (l *routingListener) stopLockedWith(ctx context.Context) {
 	if err := l.srv.Shutdown(ctx); err != nil {
 		_ = l.srv.Close()
 	}
+	if err := l.ln.Close(); err != nil && !stderrors.Is(err, net.ErrClosed) {
+		slog.Warn("routing listener close failed", "port", l.port, "err", err)
+	}
 	slog.Info("routing listener stopped", "port", l.port)
-	l.srv, l.port = nil, 0
+	l.srv, l.ln, l.port = nil, nil, 0
 }
 
 func (l *routingListener) reportBlockedLocked(address string, bindErr error) {
