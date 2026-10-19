@@ -55,6 +55,9 @@ type fakeWorker struct {
 // until releaseHeld.
 const holdReply = "\x00hold"
 
+// holdSuccessReply keeps reading requests while a successful reply is held.
+const holdSuccessReply = "\x00hold-success"
+
 func (f *fakeWorker) releaseHeld() { f.holdOnce.Do(func() { close(f.held) }) }
 
 func (f *fakeWorker) serve() {
@@ -83,6 +86,13 @@ func (f *fakeWorker) serve() {
 		errText := ""
 		if answer != nil {
 			result, errText = answer(msg.Method, msg.Params)
+		}
+		if errText == holdSuccessReply {
+			go func() {
+				<-f.held
+				_ = f.codec.Respond(msg.ID, result)
+			}()
+			continue
 		}
 		if errText == holdReply {
 			go func() {

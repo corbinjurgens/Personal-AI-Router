@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -463,8 +464,14 @@ func TestSwitchLocalOnRelayOwnsOperationLock(t *testing.T) {
 				if !locked {
 					h.b.settingsApplyMu.Unlock()
 				}
-				if locked != scenario.wantLocked {
-					t.Errorf("%s operation lock held = %v, want %v", method, locked, scenario.wantLocked)
+				wantLocked := scenario.wantLocked && method != "engine:install"
+				if locked != wantLocked {
+					t.Errorf("%s operation lock held = %v, want %v", method, locked, wantLocked)
+				}
+				if !h.b.engineConfigMu.TryLock() {
+					t.Error("worker wait holds journal lock")
+				} else {
+					h.b.engineConfigMu.Unlock()
 				}
 				return map[string]bool{"ok": true}, ""
 			})
@@ -477,11 +484,10 @@ func TestSwitchLocalOnRelayOwnsOperationLock(t *testing.T) {
 	}
 }
 
-func TestSwitchInstallStartBoundaryOrdersOlderOnBeforeOff(t *testing.T) {
+func TestSwitchInstallStartBoundaryPreservesNewerOff(t *testing.T) {
 	h := newSwitchHarness(t)
-	installed, resume, installDone, offDone := make(chan struct{}), make(chan struct{}), make(chan struct{}), make(chan struct{})
-	var once sync.Once
-	open := func() { once.Do(func() { close(resume) }) }
+	installed, installDone, offDone := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	open := h.engine.releaseHeld
 	t.Cleanup(open)
 	var running atomic.Bool
 	h.engine.setAnswer(func(method string, raw json.RawMessage) (any, string) {
@@ -495,13 +501,12 @@ func TestSwitchInstallStartBoundaryOrdersOlderOnBeforeOff(t *testing.T) {
 			if err := json.Unmarshal(raw, &request); err != nil {
 				return nil, err.Error()
 			}
-			if request.Engine != "llamacpp" || !request.Start || request.Port != 0 {
-				return nil, "expected real portless install-with-start request"
+			if request.Engine != "llamacpp" || request.Start || request.Port != 0 {
+				return nil, "expected preparation-only install"
 			}
-			// Model the manager's gap after Install releases opMu and before
-			// StartWith takes it. The broker must still own its operation lock.
 			close(installed)
-			<-resume
+			return map[string]bool{"ok": true}, holdSuccessReply
+		case "engine:start":
 			running.Store(true)
 		case "engine:stop":
 			running.Store(false)
@@ -514,25 +519,170 @@ func TestSwitchInstallStartBoundaryOrdersOlderOnBeforeOff(t *testing.T) {
 		close(installDone)
 	}()
 	requireGateOpens(t, installed, "install/start boundary")
-	if h.b.settingsApplyMu.TryLock() {
+	if !h.b.settingsApplyMu.TryLock() {
+		t.Error("installer holds broker operation lock")
+	} else {
 		h.b.settingsApplyMu.Unlock()
-		t.Error("portless install released broker operation lock before start")
 	}
 	go func() {
 		id := json.RawMessage(`112`)
 		h.b.relayToEngineNow(&Message{ID: &id, Method: "engine:stop", Params: json.RawMessage(`{"engine":"llamacpp"}`)})
 		close(offDone)
 	}()
+	requireGateOpens(t, offDone, "newer Off completion")
 	open()
 	requireGateOpens(t, installDone, "older install/start completion")
-	requireGateOpens(t, offDone, "newer Off completion")
 	if running.Load() {
 		t.Fatal("older install continuation overrode newer Off")
 	}
 	for _, response := range h.output.frames() {
-		if response.Error != nil {
-			t.Fatalf("local lifecycle request failed: %+v", response)
+		if response.ID != nil && string(*response.ID) == "111" {
+			if response.Error == nil || response.Error.Code != -32000 {
+				t.Fatalf("superseded install must return busy: %+v", response)
+			}
+		} else if response.Error != nil {
+			t.Fatalf("Off failed: %+v", response)
 		}
+	}
+}
+
+func TestSwitchHeldInstallAllowsOffStatusAndAcceptanceAndPreservesDischarge(t *testing.T) {
+	h := newSwitchHarness(t)
+	clustertrusttest.Join(t, h.b.clusterDir, "cluster", "target", "peer")
+	p := h.request(t, "held-install-discharge")
+	installed, installDone, offDone, prepare, resume := make(chan struct{}), make(chan struct{}), make(chan struct{}), make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	openPrepare := func() { once.Do(func() { close(resume) }) }
+	t.Cleanup(h.engine.releaseHeld)
+	t.Cleanup(openPrepare)
+	var running atomic.Bool
+	running.Store(true)
+	base := h.engine.answer
+	h.engine.setAnswer(func(method string, raw json.RawMessage) (any, string) {
+		switch method {
+		case "engine:install":
+			close(installed)
+			return map[string]bool{"ok": true}, holdSuccessReply
+		case "engine:start":
+			running.Store(true)
+		case "engine:stop":
+			var request struct {
+				Engine string `json:"engine"`
+			}
+			if err := json.Unmarshal(raw, &request); err != nil {
+				return nil, err.Error()
+			}
+			if request.Engine == "llamacpp" {
+				running.Store(false)
+			}
+		case settings.SwitchPrepareMethod:
+			var request settings.SwitchPrepareRequest
+			if err := json.Unmarshal(raw, &request); err != nil {
+				return nil, err.Error()
+			}
+			if request.OperationID != "" {
+				close(prepare)
+				<-resume
+				return settings.SwitchPrepareResult{Error: &settings.SwitchError{Code: settings.SwitchOperationErrorCode, Kind: settings.SwitchErrorBusy, Message: "installer mutation active"}}, ""
+			}
+		case settings.SwitchReconcileMethod:
+			return settings.SwitchReconcileResult{Observed: settings.SwitchObserved{Source: switchTestState(true, true, settings.SwitchIntentOn), Target: switchTestState(false, false, settings.SwitchIntentOff)}, Error: &settings.SwitchError{Code: settings.SwitchInvalidParamsCode, Kind: settings.SwitchErrorInvalidRequest, Message: "no checkpoint"}}, ""
+		}
+		return base(method, raw)
+	})
+	go func() {
+		id := json.RawMessage(`116`)
+		h.b.relayToEngineNow(&Message{ID: &id, Method: "engine:install", Params: json.RawMessage(`{"engine":"llamacpp","start":true}`)})
+		close(installDone)
+	}()
+	requireGateOpens(t, installed, "held installer")
+	go func() {
+		id := json.RawMessage(`117`)
+		h.b.relayToEngineNow(&Message{ID: &id, Method: "engine:stop", Params: json.RawMessage(`{"engine":"lmstudio"}`)})
+		close(offDone)
+	}()
+	requireGateOpens(t, offDone, "unrelated Off while installer held")
+	accepted := make(chan struct{})
+	go func() {
+		if _, err := h.b.engineSwitchStatus(context.Background(), settings.SwitchStatusRequest{}, "peer"); err != nil {
+			t.Error(err)
+		}
+		if _, err := h.b.acceptEngineSwitch(context.Background(), p, "peer"); err != nil {
+			t.Error(err)
+		}
+		close(accepted)
+	}()
+	requireGateOpens(t, accepted, "status and acceptance while installer held")
+	requireGateOpens(t, prepare, "prepare during held install")
+	if remote, reserved, id, err := h.b.admitLocalEngineOff("llamacpp"); err != nil || !remote || !reserved || id != p.RequestID {
+		t.Fatalf("Off admission: %v %v %s %v", remote, reserved, id, err)
+	}
+	openPrepare()
+	r := h.receipt(t, p.RequestID)
+	if r.RecoveryRequired || r.Source.Intent != settings.SwitchIntentOff || !r.Source.TerminationVerified {
+		t.Fatalf("discharged receipt = %+v", r)
+	}
+	if disk := switchStoreDisk(t, h.b.engineSwitch.store); !disk.LocalObligations[p.RequestID].Discharged {
+		t.Fatal("Off was not durably discharged")
+	}
+	h.engine.releaseHeld()
+	requireGateOpens(t, installDone, "superseded start after discharge")
+	if running.Load() {
+		t.Fatal("older install start overrode discharged Off")
+	}
+	for _, response := range h.output.frames() {
+		if response.ID != nil && string(*response.ID) == "116" && (response.Error == nil || response.Error.Code != -32000) {
+			t.Fatalf("older install response = %+v", response)
+		}
+	}
+}
+
+func TestSwitchInstallStartPreservesOptionsAndStatusResponse(t *testing.T) {
+	for _, params := range []string{`{"engine":"llamacpp","start":true}`, `{"engine":"llamacpp","start":true,"port":12345,"bind":"127.0.0.1"}`} {
+		t.Run(params, func(t *testing.T) {
+			h := newSwitchHarness(t)
+			want := json.RawMessage(`{"engine":"llamacpp","running":true,"port":12345,"version":"test"}`)
+			calls := 0
+			h.engine.setAnswer(func(method string, raw json.RawMessage) (any, string) {
+				calls++
+				var got, original map[string]json.RawMessage
+				if err := json.Unmarshal(raw, &got); err != nil {
+					return nil, err.Error()
+				}
+				if err := json.Unmarshal([]byte(params), &original); err != nil {
+					return nil, err.Error()
+				}
+				if method == "engine:install" {
+					original["start"] = json.RawMessage(`false`)
+				}
+				if !reflect.DeepEqual(got, original) {
+					t.Errorf("%s params = %s, original = %s", method, raw, params)
+				}
+				if calls == 1 && method != "engine:install" || calls == 2 && method != "engine:start" {
+					t.Errorf("call %d = %s", calls, method)
+				}
+				if method == "engine:install" {
+					return map[string]bool{"preparation": true}, ""
+				}
+				return want, ""
+			})
+			id := json.RawMessage(`118`)
+			h.b.relayToEngineNow(&Message{ID: &id, Method: "engine:install", Params: json.RawMessage(params)})
+			responses := h.output.frames()
+			if calls != 2 || len(responses) != 1 || responses[0].Error != nil {
+				t.Fatalf("calls=%d responses=%+v", calls, responses)
+			}
+			var got, expected map[string]any
+			if err := json.Unmarshal(responses[0].Result, &got); err != nil {
+				t.Fatal(err)
+			}
+			if err := json.Unmarshal(want, &expected); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(got, expected) {
+				t.Fatalf("response=%v want=%v", got, expected)
+			}
+		})
 	}
 }
 
@@ -559,17 +709,20 @@ func TestSwitchInstallWithStartRefusesRetainedReservation(t *testing.T) {
 	// lost. Install-with-start must apply the same reservation check as start.
 	r := switchStoreReceipt("install-reserved")
 	switchStoreAccept(t, h.b.engineSwitch.store, r)
-	var installed atomic.Bool
+	var installed, started atomic.Bool
 	h.engine.setAnswer(func(method string, raw json.RawMessage) (any, string) {
 		if method == "engine:install" {
 			installed.Store(true)
+		}
+		if method == "engine:start" {
+			started.Store(true)
 		}
 		return map[string]bool{"ok": true}, ""
 	})
 	id := json.RawMessage(`114`)
 	h.b.relayToEngineNow(&Message{ID: &id, Method: "engine:install", Params: settingsJSON(map[string]any{"engine": r.Request.SourceEngine, "start": true})})
-	if installed.Load() {
-		t.Fatal("install-with-start bypassed accepted switch reservation")
+	if !installed.Load() || started.Load() {
+		t.Fatal("expected completed preparation and refused start")
 	}
 	response := h.output.frames()
 	if len(response) != 1 || response[0].Error == nil || response[0].Error.Code != -32000 {
@@ -607,7 +760,7 @@ func TestSwitchInstallWithStartAfterAdmittedOffDischargeStaysOn(t *testing.T) {
 			running.Store(false)
 			discharged.Store(true)
 		}
-		if method == "engine:install" {
+		if method == "engine:start" {
 			if !discharged.Load() {
 				t.Error("install reached manager before admitted Off discharge")
 			}

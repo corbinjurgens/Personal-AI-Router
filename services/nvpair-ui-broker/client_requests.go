@@ -337,6 +337,20 @@ func engineLocalOnRequest(method string, params json.RawMessage) bool {
 	}
 }
 
+type pendingInstallStart struct {
+	engine     string
+	superseded bool
+}
+
+// Called only after local Off admission succeeds, under engineConfigMu.
+func (b *Broker) supersedeInstallStartsLocked(engine string) {
+	for pending := range b.pendingInstallStarts {
+		if pending.engine == engine {
+			pending.superseded = true
+		}
+	}
+}
+
 func (b *Broker) relayToEngineNow(msg *Message) {
 	if needsOllamaPortGate(msg.Method, msg.Params) && b.ollamaFacadeIsPendingBackend() {
 		go func() {
@@ -367,7 +381,65 @@ func (b *Broker) relayToEngineNow(msg *Message) {
 		return
 	}
 
+	var installStart *pendingInstallStart
+	if msg.Method == "engine:install" && engineLocalOnRequest(msg.Method, msg.Params) {
+		// Preserve early proxy-port refusal before doing installation work.
+		// Normal start admission rechecks after preparation has completed.
+		if engine, port, assigned := enginePortAssignmentRequest(msg.Method, msg.Params); assigned && b.rejectProxyHeldPort(msg, port, engine) {
+			return
+		}
+		// Preparation can take minutes. It must not hold either global lock,
+		// and must never leave a manager-owned unguarded start continuation.
+		var params map[string]json.RawMessage
+		var engine string
+		if err := json.Unmarshal(msg.Params, &params); err != nil {
+			_ = b.codec.RespondError(msg.ID, -32602, err.Error())
+			return
+		}
+		if err := json.Unmarshal(params["engine"], &engine); err != nil {
+			_ = b.codec.RespondError(msg.ID, -32602, "engine is required")
+			return
+		}
+		installStart = &pendingInstallStart{engine: engine}
+		b.engineConfigMu.Lock()
+		if b.pendingInstallStarts == nil {
+			b.pendingInstallStarts = make(map[*pendingInstallStart]struct{})
+		}
+		b.pendingInstallStarts[installStart] = struct{}{}
+		b.engineConfigMu.Unlock()
+		defer func() {
+			b.engineConfigMu.Lock()
+			delete(b.pendingInstallStarts, installStart)
+			b.engineConfigMu.Unlock()
+		}()
+		params["start"] = json.RawMessage(`false`)
+		preparation, err := json.Marshal(params)
+		if err != nil {
+			_ = b.codec.RespondError(msg.ID, -32602, err.Error())
+			return
+		}
+		em := b.getEngineMgr()
+		if em == nil {
+			_ = b.codec.RespondError(msg.ID, -32000, "engine-manager not available")
+			return
+		}
+		_, rpcErr, err := em.CallNoTimeout(context.Background(), "engine:install", preparation)
+		if err != nil {
+			_ = b.codec.RespondError(msg.ID, -32000, fmt.Sprintf("engine call failed: %v", err))
+			return
+		}
+		if rpcErr != nil {
+			_ = b.codec.RespondError(msg.ID, rpcErr.Code, rpcErr.Message)
+			return
+		}
+		// Start and combined install/start both return Manager.runOp's Status.
+		// Preserve every original option (including port and bind) for start.
+		start := *msg
+		start.Method = "engine:start"
+		msg = &start
+	}
 	requestedEngine, requestedPort, isEnginePortAssignment := enginePortAssignmentRequest(msg.Method, msg.Params)
+	lifecycleLocked := false
 	localOffEngine := ""
 	localOffOperationID := ""
 	offOperationLocked := false
@@ -401,11 +473,16 @@ func (b *Broker) relayToEngineNow(msg *Message) {
 		}
 		b.engineConfigMu.Lock()
 		defer b.engineConfigMu.Unlock()
+		lifecycleLocked = true
 		var target struct {
 			Engine string `json:"engine"`
 		}
 		if err := json.Unmarshal(msg.Params, &target); err != nil || b.pendingSwitchLocked(target.Engine) != nil {
 			_ = b.codec.RespondError(msg.ID, -32000, "Engine switch recovery reserves this engine.")
+			return
+		}
+		if installStart != nil && installStart.superseded {
+			_ = b.codec.RespondError(msg.ID, -32000, "Engine install start superseded by local Off (busy).")
 			return
 		}
 		defer b.reconcileLegacySettingsLocked()
@@ -460,7 +537,13 @@ func (b *Broker) relayToEngineNow(msg *Message) {
 			return
 		}
 	}
+	if lifecycleLocked {
+		b.engineConfigMu.Unlock()
+	}
 	result, rpcErr, err := em.CallNoTimeout(context.Background(), method, params)
+	if lifecycleLocked {
+		b.engineConfigMu.Lock()
+	}
 	if localOffEngine != "" {
 		// The manager has now persisted the veto and cancelled its startup;
 		// only then cancel the coordinator's drain/response wait.

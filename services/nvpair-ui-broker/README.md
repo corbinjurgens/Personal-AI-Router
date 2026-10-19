@@ -43,6 +43,11 @@ to the subsequently admitted local Off; later local On waits for this discharge.
 Explicit local start, restart and install with `start: true` share the operation
 lock and recovery reservation check, including installs without a port override
 and the desktop install, installAll and update commands that send them.
+Install preparation runs without either global lock; only its separate start
+uses lifecycle admission. A local Off admitted during preparation supersedes
+that older start even after switch discharge. The install remains completed,
+but its start returns busy. A later On retains normal lifecycle ordering.
+The journal lock is released during lifecycle worker waits.
 Clients cannot relay the manager's private switch prepare, step or reconcile
 methods; only the coordinator dispatches those under its operation lock.
 Worker exit is fenced before supervisor

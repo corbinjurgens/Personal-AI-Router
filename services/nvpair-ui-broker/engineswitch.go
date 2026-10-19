@@ -297,10 +297,14 @@ func (b *Broker) admitLocalEngineOff(engine string) (remote, reserved bool, oper
 		b.engineConfigMu.Lock()
 		remote, reserved, operationID, err = b.switchLocalOffReservationLocked(engine)
 		if reserved || err != nil {
+			if remote && err == nil {
+				b.supersedeInstallStartsLocked(engine)
+			}
 			b.engineConfigMu.Unlock()
 			return remote, reserved, operationID, err
 		}
 		if b.settingsApplyMu.TryLock() {
+			b.supersedeInstallStartsLocked(engine)
 			b.engineConfigMu.Unlock()
 			return false, false, "", nil // caller owns settingsApplyMu
 		}

@@ -155,8 +155,10 @@ type Broker struct {
 	// is released while an engine restarts, so this is what keeps two applies —
 	// which may compete for the same port — from interleaving. Always take it
 	// before engineConfigMu, never the reverse.
-	settingsApplyMu      sync.Mutex
-	engineConfigMu       sync.Mutex
+	settingsApplyMu sync.Mutex
+	engineConfigMu  sync.Mutex
+	// Only live install continuations are retained, under engineConfigMu.
+	pendingInstallStarts map[*pendingInstallStart]struct{}
 	switchInit           sync.Once
 	engineSwitch         *engineSwitchCoordinator
 	engineSettingsLoaded bool
