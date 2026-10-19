@@ -5,10 +5,12 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"nvpair-shared/nodepolicy"
@@ -50,6 +52,7 @@ func TestServedModelsConcrete(t *testing.T) {
 		test("subset included", nodepolicy.ServedModels{{Engine: tc.profile.Name, Model: tc.advertisedModel}}, true)
 		test("subset excluded", nodepolicy.ServedModels{{Engine: tc.profile.Name, Model: "other"}}, false)
 		test("wrong engine", nodepolicy.ServedModels{{Engine: "other", Model: tc.advertisedModel}}, false)
+		test("case-variant model", nodepolicy.ServedModels{{Engine: tc.profile.Name, Model: strings.ToUpper(tc.requestedModel)}}, false)
 	})
 }
 
@@ -80,6 +83,101 @@ func TestServedModelsStrict(t *testing.T) {
 	test("empty", nodepolicy.ServedModels{}, false)
 	test("normalized subset", nodepolicy.ServedModels{{Engine: "ollama", Model: "m:latest"}}, true)
 	test("excluded subset", nodepolicy.ServedModels{{Engine: "ollama", Model: "other"}}, false)
+	test("case-variant model", nodepolicy.ServedModels{{Engine: "ollama", Model: "M"}}, false)
+	test("case-variant tag", nodepolicy.ServedModels{{Engine: "ollama", Model: "m:LATEST"}}, false)
+}
+
+// TestServedModelsCaseSensitivity pins the permission comparison itself:
+// after each side is normalized by its engine's naming rule, the engine's
+// spelling decides permission, so a case-folded comparison would serve "M"
+// for a policy that serves only "m".
+func TestServedModelsCaseSensitivity(t *testing.T) {
+	test := func(name, engine, servedModel, requestModel string, want bool) {
+		t.Run(name, func(t *testing.T) {
+			served := nodepolicy.ServedModels{{Engine: engine, Model: servedModel}}
+			if got := modelServed(served, engine, requestModel, normalizeEngineModel); got != want {
+				t.Fatalf("modelServed(%q, served %q, request %q) = %v, want %v",
+					engine, servedModel, requestModel, got, want)
+			}
+		})
+	}
+	test("ollama model case", "ollama", "m", "M", false)
+	test("ollama tag case", "ollama", "m:latest", "m:LATEST", false)
+	test("lmstudio model case", "lmstudio", "qwen3-8b", "QWEN3-8B", false)
+	test("ollama exact", "ollama", "m:latest", "m:latest", true)
+	test("ollama untagged request", "ollama", "m", "m:latest", true)
+	test("lmstudio exact", "lmstudio", "qwen3-8b", "qwen3-8b", true)
+}
+
+// assertAmbiguousModelRejection checks the structured client error a body
+// with two top-level "model" members gets.
+func assertAmbiguousModelRejection(t *testing.T, rec *httptest.ResponseRecorder) {
+	t.Helper()
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400: %s", rec.Code, rec.Body)
+	}
+	var body struct {
+		Error string `json:"error"`
+		Code  string `json:"code"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode rejection body %q: %v", rec.Body, err)
+	}
+	if body.Code != "ambiguous-model" {
+		t.Fatalf("code = %q, want ambiguous-model", body.Code)
+	}
+}
+
+// A body naming "model" twice is ambiguous: the proxy decodes the last member
+// for admission while the tier rewrite replaces the first, so the model
+// admitted ("m") and the model an engine decodes from the forwarded body
+// ("weak") could disagree and a model outside the served set could run. The
+// ambiguous body is refused before admission; the ordinary body still works.
+func TestServedModelsTierDuplicateModel(t *testing.T) {
+	tc := ollamaCase(t)
+	pol := ollamaTierPolicy(map[string][]nodepolicy.TierEntry{
+		"weak": {{Kind: nodepolicy.EntryLocal, Engine: "ollama", Model: "m"}},
+	})
+	pol.ServedModels = nodepolicy.ServedModels{{Engine: "ollama", Model: "m"}}
+	if err := pol.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	e := newRecordingEngine(t, http.StatusOK)
+	d := NewDiscovery()
+	d.AddManual(selfNode("self", tc.profile.FacadePort, "m", "weak"))
+	p := testProxy(tc.profile, d, tc.profile.FacadePort)
+	setBackend(t, p.soleFacade(), e.URL, true)
+	p.admission.setPolicy(pol)
+	f := p.soleFacade()
+	post := func(body string) *httptest.ResponseRecorder {
+		rec := httptest.NewRecorder()
+		f.handleHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/chat", strings.NewReader(body)))
+		return rec
+	}
+
+	// Control: the ordinary tier body rewrites to the served concrete model
+	// and reaches the engine.
+	rec := post(`{"model":"weak"}`)
+	if rec.Code != http.StatusOK || e.hits() != 1 || e.lastBody() != `{"model":"m"}` {
+		t.Fatalf("control: status=%d hits=%d body=%s", rec.Code, e.hits(), e.lastBody())
+	}
+
+	// The ambiguous body is refused on both local inference entry points,
+	// before admission, and nothing from it reaches the engine.
+	for _, body := range []string{`{"model":"unused","model":"weak"}`, `{"model":"unused","Model":"weak"}`} {
+		rec = post(body)
+		assertAmbiguousModelRejection(t, rec)
+		if e.hits() != 1 {
+			t.Fatalf("duplicate-model body %s reached the engine: hits=%d", body, e.hits())
+		}
+	}
+	ingressRec := httptest.NewRecorder()
+	f.serveIngress(ingressRec, httptest.NewRequest(http.MethodPost, "/api/chat",
+		strings.NewReader(`{"model":"unused","model":"weak"}`)), "peer")
+	assertAmbiguousModelRejection(t, ingressRec)
+	if e.hits() != 1 {
+		t.Fatalf("duplicate-model ingress body reached the engine: hits=%d", e.hits())
+	}
 }
 
 func TestServedModelsStrictRoutes(t *testing.T) {
@@ -260,5 +358,63 @@ func TestServedModelsStrictActivationAfterAdmission(t *testing.T) {
 	}
 	if next, err := h.a.admitStrictNow(context.Background(), "ollama", "m", strictRequest()); next != nil || !errors.Is(err, errStrictUnavailable) {
 		t.Fatalf("new ticket=%v err=%v", next, err)
+	}
+}
+
+// A restrictive activation recompiles what this node advertises: a served-excluded
+// model leaves the outward strict capability, while the internal installation
+// and the already-admitted ticket stay intact (admission is the linearization
+// point, and later restriction does not revoke admitted work).
+func TestServedModelsStrictReadinessAfterDenyAll(t *testing.T) {
+	h := newStrictHarness(t)
+	before := h.a.StrictReadiness()
+	if before.Capability == nil || len(before.Capability.Models) != 1 {
+		t.Fatalf("installed capability missing: %+v", before)
+	}
+	ticket, err := h.a.admitStrictNow(context.Background(), "ollama", "m", strictRequest())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ticket.Finish(strictQualifiedComplete)
+	pol := h.a.currentPolicy()
+	pol.Revision = "1"
+	pol.ServedModels = nodepolicy.ServedModels{}
+	if err := h.a.activatePolicy(pol); err != nil {
+		t.Fatal(err)
+	}
+	if report := h.a.StrictReadiness(); report.Capability != nil {
+		t.Fatalf("deny-all still advertises strict model capability: %+v", report)
+	}
+	if err := ticket.BeforeStrictDispatch(); err != nil {
+		t.Fatalf("admitted ticket revoked by serving-only change: %v", err)
+	}
+	if next, err := h.a.admitStrictNow(context.Background(), "ollama", "m", strictRequest()); next != nil || !errors.Is(err, errStrictUnavailable) {
+		t.Fatalf("new ticket=%v err=%v", next, err)
+	}
+}
+
+// Both strict-ticket constructors snapshot the admission-time served set, so a
+// cold ticket fences the same permission a warm one does.
+func TestServedModelsStrictColdTicketCarriesServedSnapshot(t *testing.T) {
+	h := newStrictHarness(t)
+	pol := h.a.currentPolicy()
+	pol.ServedModels = nodepolicy.ServedModels{{Engine: "ollama", Model: "m"}}
+	h.a.setPolicy(pol)
+	// Installed but not resident: admission takes the cold constructor.
+	h.a.setResidency(map[string][]string{})
+	ticket, err := h.a.admitStrictNow(context.Background(), "ollama", "m", strictRequest())
+	if err != nil {
+		t.Fatalf("cold admission: %v", err)
+	}
+	defer ticket.Finish(strictNotDispatched)
+	st, ok := ticket.(*strictTicket)
+	if !ok {
+		t.Fatalf("ticket type %T, want *strictTicket", ticket)
+	}
+	if st.warmOnly {
+		t.Fatal("expected a cold ticket, got a warm one")
+	}
+	if len(st.servedModels) != 1 || st.servedModels[0].Engine != "ollama" || st.servedModels[0].Model != "m" {
+		t.Fatalf("cold ticket servedModels = %+v, want the admission snapshot", st.servedModels)
 	}
 }

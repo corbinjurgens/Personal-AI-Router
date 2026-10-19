@@ -16,6 +16,7 @@ import (
 	"encoding/json"
 	"io"
 	"slices"
+	"strings"
 )
 
 // jsonMember is one top-level member of a JSON object, located by the byte
@@ -71,6 +72,37 @@ func objectMembers(data []byte) (members []jsonMember, closeBrace int, ok bool) 
 		return nil, 0, false
 	}
 	return members, closeBrace, true
+}
+
+// ambiguousModelMessage is the client error for a body with more than one
+// top-level "model" member.
+const ambiguousModelMessage = `the request body contains more than one top-level "model" member`
+
+// ambiguousModelMember reports whether body is exactly one JSON object holding
+// two or more top-level "model" members. Such a body names a different model
+// depending on where a reader stops: the struct decode in bufferBodyAndModel
+// and encoding/json keep the last member, while replaceModel rewrites the
+// first, so the model admitted and the model the engine decodes could disagree
+// and an unserved model could reach an engine. encoding/json also matches
+// struct fields case-insensitively, so case variants such as "Model" count. A body that is not one object
+// has no model member to select and reports false; parsing its shape is
+// somebody else's rejection.
+func ambiguousModelMember(body []byte) bool {
+	members, _, ok := objectMembers(body)
+	if !ok {
+		return false
+	}
+	seen := false
+	for _, m := range members {
+		if !strings.EqualFold(m.key, "model") {
+			continue
+		}
+		if seen {
+			return true
+		}
+		seen = true
+	}
+	return false
 }
 
 // replaceModel returns body with its top-level "model" replaced by model, and

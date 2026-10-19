@@ -165,6 +165,16 @@ func (f *facade) serveIngress(w http.ResponseWriter, r *http.Request, peer strin
 			"request body exceeds the proxy's size limit")
 		return
 	}
+	// A body naming "model" twice is ambiguous: what admission here accepts
+	// (the last member) is not what a rewrite or another reader may act on
+	// (the first). Refuse before admission so the forwarded body can never
+	// name a model this node did not admit.
+	if ambiguousModelMember(body) {
+		slog.Debug("cluster ingress rejected ambiguous model member",
+			"peer", peer, "path", r.URL.Path)
+		writeIngressError(w, http.StatusBadRequest, "ambiguous-model", ambiguousModelMessage)
+		return
+	}
 	if strict != nil {
 		f.serveStrictLocal(w, r, body, model, *strict)
 		return
