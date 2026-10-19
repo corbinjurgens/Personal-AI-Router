@@ -4,12 +4,524 @@
 package nodepolicy
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 
 	"nvpair-shared/engines"
 )
+
+// Resident RPCs are internal broker calls, never client or peer commands.
+const (
+	MethodPrepareResident        = "node/prepare-resident"
+	MethodReconcileResident      = "engine:reconcile-resident"
+	MethodFinishResident         = "node/finish-resident"
+	MaxResidentTimeoutMs         = 60_000
+	MaxModelConfigurationEntries = 256
+	MaxResidentModelBytes        = 1024
+)
+
+// PrepareResidentParams asks the current proxy to evaluate and reserve under
+// its admission mutex. TimeoutMs is a remaining budget, avoiding clock skew;
+// the receiver fixes a deadline once, and retries must never extend it.
+// Model is already normalized by the authoritative engine descriptor. Syntax
+// validation here cannot establish normalization, qualification or permission.
+type PrepareResidentParams struct {
+	PolicyRevision     string              `json:"policyRevision"`
+	ProxyRunID         string              `json:"proxyRunId"`
+	ManagerIncarnation string              `json:"managerIncarnation,omitempty"`
+	Engine             string              `json:"engine"`
+	Model              string              `json:"model"`
+	Identity           StrictModelIdentity `json:"identity"`
+	OperationID        string              `json:"operationId"`
+	TimeoutMs          int                 `json:"timeoutMs"`
+}
+
+func (p PrepareResidentParams) Validate() error {
+	if err := validateRevision(p.PolicyRevision); err != nil {
+		return err
+	}
+	if !strictID.MatchString(p.ProxyRunID) || !strictID.MatchString(p.OperationID) {
+		return errors.New("proxyRunId and operationId must be ASCII identities of 1-128 bytes")
+	}
+	if p.ManagerIncarnation != "" && !strictID.MatchString(p.ManagerIncarnation) {
+		return errors.New("invalid managerIncarnation")
+	}
+	if p.TimeoutMs <= 0 || p.TimeoutMs > MaxResidentTimeoutMs {
+		return errors.New("timeoutMs must be in 1..60000")
+	}
+	if err := validateResidentRef(p.Engine, p.Model); err != nil {
+		return err
+	}
+	return p.Identity.Validate()
+}
+
+// ModelConfigurationReason contains codes only; raw engine errors and identity
+// digests must not be copied into derived status or refusal explanations.
+type ModelConfigurationReason string
+
+const (
+	ModelReasonEngineOff          ModelConfigurationReason = ModelConfigurationReason(RejectOff)
+	ModelReasonNoFit              ModelConfigurationReason = ModelConfigurationReason(RejectNoFit)
+	ModelReasonPausedLocal        ModelConfigurationReason = "paused-local"
+	ModelReasonEngineOffLocal     ModelConfigurationReason = "engine-off-local"
+	ModelReasonNotServed          ModelConfigurationReason = "not-served"
+	ModelReasonNotInstalled       ModelConfigurationReason = "not-installed"
+	ModelReasonUnqualified        ModelConfigurationReason = "unqualified"
+	ModelReasonUnsupportedLoad    ModelConfigurationReason = "unsupported-load"
+	ModelReasonSwitchBusy         ModelConfigurationReason = "switch-busy"
+	ModelReasonOperationTimeout   ModelConfigurationReason = "operation-timeout"
+	ModelReasonObservationUnknown ModelConfigurationReason = "observation-unknown"
+	ModelReasonProjectionUnknown  ModelConfigurationReason = "projection-unknown"
+)
+
+func (r ModelConfigurationReason) Validate() error {
+	switch r {
+	case ModelReasonEngineOff, ModelReasonNoFit, ModelReasonPausedLocal, ModelReasonEngineOffLocal,
+		ModelReasonNotServed, ModelReasonNotInstalled, ModelReasonUnqualified, ModelReasonUnsupportedLoad,
+		ModelReasonSwitchBusy, ModelReasonOperationTimeout, ModelReasonObservationUnknown, ModelReasonProjectionUnknown:
+		return nil
+	}
+	return errors.New("unknown model configuration reason")
+}
+
+type ResidentRefusal struct {
+	Engine string                   `json:"engine"`
+	Model  string                   `json:"model"`
+	Reason ModelConfigurationReason `json:"reason"`
+}
+
+func (r ResidentRefusal) Validate() error {
+	if err := validateResidentRef(r.Engine, r.Model); err != nil {
+		return err
+	}
+	return r.Reason.Validate()
+}
+
+// PrepareResidentResult is a disjoint grant/refusal: refusal never reserves.
+// EvidenceGeneration identifies the evaluation, including a refused one.
+type PrepareResidentResult struct {
+	ReservationID      string            `json:"reservationId,omitempty"`
+	EvidenceGeneration uint64            `json:"evidenceGeneration"`
+	Refusals           []ResidentRefusal `json:"refusals,omitempty"`
+}
+
+func (r PrepareResidentResult) Validate() error {
+	if len(r.Refusals) > MaxModelConfigurationEntries {
+		return errors.New("too many refusals")
+	}
+	if len(r.Refusals) == 0 {
+		if !strictID.MatchString(r.ReservationID) {
+			return errors.New("grant requires a reservationId of 1-128 ASCII bytes")
+		}
+	} else if r.ReservationID != "" {
+		return errors.New("refusal must not reserve")
+	}
+	seen := map[Role]bool{}
+	for _, refusal := range r.Refusals {
+		if err := refusal.Validate(); err != nil {
+			return err
+		}
+		ref := Role{Engine: refusal.Engine, Model: refusal.Model}
+		if seen[ref] {
+			return errors.New("duplicate refusal reference")
+		}
+		seen[ref] = true
+	}
+	return nil
+}
+
+// ResidentReservationEvidence is process-bound permission from the broker's
+// proxy session, not a credential. ManagerIncarnation is included when known.
+// The manager must revalidate every binding under E3 exclusion before dispatch;
+// an opaque ID alone is never authorization after revocation or replacement.
+type ResidentReservationEvidence struct {
+	ReservationID      string `json:"reservationId"`
+	ProxyRunID         string `json:"proxyRunId"`
+	ManagerIncarnation string `json:"managerIncarnation,omitempty"`
+}
+
+func (e ResidentReservationEvidence) Validate() error {
+	if !strictID.MatchString(e.ReservationID) || !strictID.MatchString(e.ProxyRunID) {
+		return errors.New("reservationId and proxyRunId must be ASCII identities of 1-128 bytes")
+	}
+	if e.ManagerIncarnation != "" && !strictID.MatchString(e.ManagerIncarnation) {
+		return errors.New("invalid managerIncarnation")
+	}
+	return nil
+}
+
+type ReconcileResidentParams struct {
+	OperationID    string                      `json:"operationId"`
+	PolicyRevision string                      `json:"policyRevision"`
+	Engine         string                      `json:"engine"`
+	Model          string                      `json:"model"`
+	Identity       StrictModelIdentity         `json:"identity"`
+	TimeoutMs      int                         `json:"timeoutMs"`
+	Reservation    ResidentReservationEvidence `json:"reservation"`
+}
+
+func (p ReconcileResidentParams) Validate() error {
+	if err := p.Reservation.Validate(); err != nil {
+		return err
+	}
+	return (PrepareResidentParams{PolicyRevision: p.PolicyRevision, ProxyRunID: p.Reservation.ProxyRunID,
+		ManagerIncarnation: p.Reservation.ManagerIncarnation, Engine: p.Engine, Model: p.Model,
+		Identity: p.Identity, OperationID: p.OperationID, TimeoutMs: p.TimeoutMs}).Validate()
+}
+
+type ResidentOutcome string
+
+const (
+	ResidentLoaded        ResidentOutcome = "loaded"
+	ResidentNotDispatched ResidentOutcome = "not-dispatched"
+	ResidentFailed        ResidentOutcome = "failed"
+	ResidentCancelled     ResidentOutcome = "cancelled"
+	ResidentTimeout       ResidentOutcome = "timeout"
+	ResidentUnknown       ResidentOutcome = "unknown"
+)
+
+func (o ResidentOutcome) Validate() error {
+	switch o {
+	case ResidentLoaded, ResidentNotDispatched, ResidentFailed, ResidentCancelled, ResidentTimeout, ResidentUnknown:
+		return nil
+	}
+	return errors.New("unknown resident outcome")
+}
+
+// ResidentLoadedObservation binds inventory to the manager source, engine
+// identity and normalized reference. Generation is scoped to that source.
+// Loaded=false is authoritative absence, not missing/unknown observation.
+type ResidentLoadedObservation struct {
+	ManagerIncarnation string              `json:"managerIncarnation"`
+	Generation         uint64              `json:"generation"`
+	Engine             string              `json:"engine"`
+	Model              string              `json:"model"`
+	Identity           StrictModelIdentity `json:"identity"`
+	Loaded             bool                `json:"loaded"`
+}
+
+func (o ResidentLoadedObservation) Validate() error {
+	if !strictID.MatchString(o.ManagerIncarnation) {
+		return errors.New("invalid managerIncarnation")
+	}
+	if err := validateResidentRef(o.Engine, o.Model); err != nil {
+		return err
+	}
+	return o.Identity.Validate()
+}
+
+type ReconcileResidentResult struct {
+	Outcome     ResidentOutcome            `json:"outcome"`
+	Observation *ResidentLoadedObservation `json:"observation,omitempty"`
+}
+
+func (r ReconcileResidentResult) Validate() error {
+	if err := r.Outcome.Validate(); err != nil {
+		return err
+	}
+	if r.Observation != nil {
+		if err := r.Observation.Validate(); err != nil {
+			return err
+		}
+	}
+	if r.Outcome == ResidentLoaded && (r.Observation == nil || !r.Observation.Loaded) {
+		return errors.New("loaded outcome requires a loaded observation")
+	}
+	if r.Outcome == ResidentNotDispatched && r.Observation != nil {
+		return errors.New("not-dispatched must not claim a load observation")
+	}
+	return nil
+}
+
+// FinishResidentParams consumes an exact reservation once. The owner retains
+// the terminal result for duplicate finishes; changed payloads conflict. IDs
+// must never be reused in a proxy run. A stale ID cannot release another hold.
+// Timeout/cancellation/failure alone is not evidence of engine termination.
+// Observation may be absent when no authoritative inventory is available.
+type FinishResidentParams struct {
+	ReservationID string                     `json:"reservationId"`
+	ProxyRunID    string                     `json:"proxyRunId"`
+	OperationID   string                     `json:"operationId"`
+	Outcome       ResidentOutcome            `json:"outcome"`
+	Observation   *ResidentLoadedObservation `json:"observation,omitempty"`
+}
+
+func (p FinishResidentParams) Validate() error {
+	if !strictID.MatchString(p.ReservationID) || !strictID.MatchString(p.ProxyRunID) || !strictID.MatchString(p.OperationID) {
+		return errors.New("reservationId, proxyRunId and operationId must be ASCII identities of 1-128 bytes")
+	}
+	return (ReconcileResidentResult{Outcome: p.Outcome, Observation: p.Observation}).Validate()
+}
+
+// FinishResidentResult is identical for the first and every duplicate finish.
+type FinishResidentResult struct {
+	ReservationID string          `json:"reservationId"`
+	Outcome       ResidentOutcome `json:"outcome"`
+}
+
+func (r FinishResidentResult) Validate() error {
+	if !strictID.MatchString(r.ReservationID) {
+		return errors.New("invalid reservationId")
+	}
+	return r.Outcome.Validate()
+}
+
+type ModelConfigurationState string
+
+const (
+	ModelStateSatisfied ModelConfigurationState = "satisfied"
+	ModelStatePending   ModelConfigurationState = "pending"
+	ModelStateBlocked   ModelConfigurationState = "blocked"
+	ModelStateUnknown   ModelConfigurationState = "unknown"
+)
+
+func (s ModelConfigurationState) Validate() error {
+	switch s {
+	case ModelStateSatisfied, ModelStatePending, ModelStateBlocked, ModelStateUnknown:
+		return nil
+	}
+	return errors.New("unknown model configuration state")
+}
+
+type ModelConfigurationEntry struct {
+	Engine          string                   `json:"engine"`
+	Model           string                   `json:"model"`
+	DesiredResident bool                     `json:"desiredResident"`
+	ObservedLoaded  *bool                    `json:"observedLoaded,omitempty"`
+	State           ModelConfigurationState  `json:"state"`
+	Reason          ModelConfigurationReason `json:"reason,omitempty"`
+}
+
+func (e ModelConfigurationEntry) Validate() error {
+	if err := validateResidentRef(e.Engine, e.Model); err != nil {
+		return err
+	}
+	if err := e.State.Validate(); err != nil {
+		return err
+	}
+	if e.Reason != "" {
+		if err := e.Reason.Validate(); err != nil {
+			return err
+		}
+	}
+	if e.State == ModelStateSatisfied && (e.ObservedLoaded == nil || !*e.ObservedLoaded || !e.DesiredResident || e.Reason != "") {
+		return errors.New("satisfied requires desired resident, loaded evidence and no reason")
+	}
+	return nil
+}
+
+// ModelConfiguration is derived from current desired policy, activation,
+// source-bound inventory/identity and the current/last attempt; never persisted
+// as a separate state machine. Missing ObservedLoaded means unknown.
+type ModelConfiguration struct {
+	PolicyRevision        string                    `json:"policyRevision"`
+	ObservationGeneration uint64                    `json:"observationGeneration"`
+	Models                []ModelConfigurationEntry `json:"models"`
+}
+
+func (c ModelConfiguration) Validate() error {
+	if err := validateRevision(c.PolicyRevision); err != nil {
+		return err
+	}
+	if c.Models == nil || len(c.Models) > MaxModelConfigurationEntries {
+		return errors.New("models must be a list of at most 256 entries")
+	}
+	seen := map[Role]bool{}
+	for _, e := range c.Models {
+		if err := e.Validate(); err != nil {
+			return err
+		}
+		ref := Role{Engine: e.Engine, Model: e.Model}
+		if seen[ref] {
+			return errors.New("duplicate model configuration reference")
+		}
+		seen[ref] = true
+	}
+	return nil
+}
+
+func (p *PrepareResidentParams) UnmarshalJSON(data []byte) error {
+	type plain PrepareResidentParams
+	var next plain
+	if err := decodeResident(data, &next, []string{"policyRevision", "proxyRunId", "engine", "model", "identity", "operationId", "timeoutMs"}, "managerIncarnation"); err != nil {
+		return err
+	}
+	if err := PrepareResidentParams(next).Validate(); err != nil {
+		return err
+	}
+	*p = PrepareResidentParams(next)
+	return nil
+}
+
+func (p *ResidentRefusal) UnmarshalJSON(data []byte) error {
+	type plain ResidentRefusal
+	var next plain
+	if err := decodeResident(data, &next, []string{"engine", "model", "reason"}); err != nil {
+		return err
+	}
+	if err := ResidentRefusal(next).Validate(); err != nil {
+		return err
+	}
+	*p = ResidentRefusal(next)
+	return nil
+}
+
+func (p *PrepareResidentResult) UnmarshalJSON(data []byte) error {
+	type plain PrepareResidentResult
+	var next plain
+	if err := decodeResident(data, &next, []string{"evidenceGeneration"}, "reservationId", "refusals"); err != nil {
+		return err
+	}
+	if err := PrepareResidentResult(next).Validate(); err != nil {
+		return err
+	}
+	*p = PrepareResidentResult(next)
+	return nil
+}
+
+func (p *ResidentReservationEvidence) UnmarshalJSON(data []byte) error {
+	type plain ResidentReservationEvidence
+	var next plain
+	if err := decodeResident(data, &next, []string{"reservationId", "proxyRunId"}, "managerIncarnation"); err != nil {
+		return err
+	}
+	if err := ResidentReservationEvidence(next).Validate(); err != nil {
+		return err
+	}
+	*p = ResidentReservationEvidence(next)
+	return nil
+}
+
+func (p *ReconcileResidentParams) UnmarshalJSON(data []byte) error {
+	type plain ReconcileResidentParams
+	var next plain
+	if err := decodeResident(data, &next, []string{"operationId", "policyRevision", "engine", "model", "identity", "timeoutMs", "reservation"}); err != nil {
+		return err
+	}
+	if err := ReconcileResidentParams(next).Validate(); err != nil {
+		return err
+	}
+	*p = ReconcileResidentParams(next)
+	return nil
+}
+
+func (p *ResidentLoadedObservation) UnmarshalJSON(data []byte) error {
+	type plain ResidentLoadedObservation
+	var next plain
+	if err := decodeResident(data, &next, []string{"managerIncarnation", "generation", "engine", "model", "identity", "loaded"}); err != nil {
+		return err
+	}
+	if err := ResidentLoadedObservation(next).Validate(); err != nil {
+		return err
+	}
+	*p = ResidentLoadedObservation(next)
+	return nil
+}
+
+func (p *ReconcileResidentResult) UnmarshalJSON(data []byte) error {
+	type plain ReconcileResidentResult
+	var next plain
+	if err := decodeResident(data, &next, []string{"outcome"}, "observation"); err != nil {
+		return err
+	}
+	if err := ReconcileResidentResult(next).Validate(); err != nil {
+		return err
+	}
+	*p = ReconcileResidentResult(next)
+	return nil
+}
+
+func (p *FinishResidentParams) UnmarshalJSON(data []byte) error {
+	type plain FinishResidentParams
+	var next plain
+	if err := decodeResident(data, &next, []string{"reservationId", "proxyRunId", "operationId", "outcome"}, "observation"); err != nil {
+		return err
+	}
+	if err := FinishResidentParams(next).Validate(); err != nil {
+		return err
+	}
+	*p = FinishResidentParams(next)
+	return nil
+}
+
+func (p *FinishResidentResult) UnmarshalJSON(data []byte) error {
+	type plain FinishResidentResult
+	var next plain
+	if err := decodeResident(data, &next, []string{"reservationId", "outcome"}); err != nil {
+		return err
+	}
+	if err := FinishResidentResult(next).Validate(); err != nil {
+		return err
+	}
+	*p = FinishResidentResult(next)
+	return nil
+}
+
+func (p *ModelConfigurationEntry) UnmarshalJSON(data []byte) error {
+	type plain ModelConfigurationEntry
+	var next plain
+	if err := decodeResident(data, &next, []string{"engine", "model", "desiredResident", "state"}, "observedLoaded", "reason"); err != nil {
+		return err
+	}
+	if err := ModelConfigurationEntry(next).Validate(); err != nil {
+		return err
+	}
+	*p = ModelConfigurationEntry(next)
+	return nil
+}
+
+func (p *ModelConfiguration) UnmarshalJSON(data []byte) error {
+	type plain ModelConfiguration
+	var next plain
+	if err := decodeResident(data, &next, []string{"policyRevision", "observationGeneration", "models"}); err != nil {
+		return err
+	}
+	if err := ModelConfiguration(next).Validate(); err != nil {
+		return err
+	}
+	*p = ModelConfiguration(next)
+	return nil
+}
+
+func validateResidentRef(engine, model string) error {
+	if err := checkModelRef(engine, model, 0, nil); err != nil {
+		return err
+	}
+	if len(model) > MaxResidentModelBytes || strings.TrimSpace(model) != model {
+		return errors.New("model must be trimmed and at most 1024 bytes")
+	}
+	return nil
+}
+
+// decodeResident rejects duplicate/case-variant/unknown keys, null fields and
+// missing required fields, preserving explicit false versus absent booleans.
+// Alias destinations prevent recursion through their own UnmarshalJSON.
+func decodeResident[T any](data []byte, dst *T, required []string, optional ...string) error {
+	fields, err := peerFields(data)
+	if err != nil {
+		return err
+	}
+	for _, key := range required {
+		if fields[key] == nil {
+			return fmt.Errorf("%s is required", key)
+		}
+	}
+	for key, value := range fields {
+		if !slices.Contains(required, key) && !slices.Contains(optional, key) {
+			return fmt.Errorf("unknown field %q", key)
+		}
+		if bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
+			return fmt.Errorf("%s must not be null", key)
+		}
+	}
+	d := json.NewDecoder(bytes.NewReader(data))
+	d.DisallowUnknownFields()
+	return d.Decode(dst)
+}
 
 // StrictAdmissionReadiness is the params of NotifyStrictReadiness: what the
 // proxy's admission controller can admit under the strict contract for the

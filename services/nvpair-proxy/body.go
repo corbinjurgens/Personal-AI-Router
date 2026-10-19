@@ -16,6 +16,7 @@ import (
 	"encoding/json"
 	"io"
 	"slices"
+	"strings"
 )
 
 // jsonMember is one top-level member of a JSON object, located by the byte
@@ -71,6 +72,48 @@ func objectMembers(data []byte) (members []jsonMember, closeBrace int, ok bool) 
 		return nil, 0, false
 	}
 	return members, closeBrace, true
+}
+
+// ambiguousModelMessage does not echo any request values.
+const ambiguousModelMessage = `the request body must use a single top-level "model" member with that exact spelling`
+
+// ambiguousModelMember rejects duplicate model members and spellings other
+// than decoded "model". encoding/json matches struct fields case-insensitively,
+// whereas body rewrites and other decoders may require exact spelling.
+// Non-object bodies are left to the caller's shape validation.
+func ambiguousModelMember(body []byte) bool {
+	members, _, ok := objectMembers(body)
+	if !ok {
+		return false
+	}
+	seen := false
+	for _, m := range members {
+		if !strings.EqualFold(m.key, "model") {
+			continue
+		}
+		if seen || m.key != "model" {
+			return true
+		}
+		seen = true
+	}
+	return false
+}
+
+// bodyModelMatches checks the effective body after transformations, without
+// consulting serving policy again. Admission remains the linearization point.
+func bodyModelMatches(body []byte, model string) bool {
+	members, _, ok := objectMembers(body)
+	if !ok || ambiguousModelMember(body) {
+		return false
+	}
+	for _, m := range members {
+		if m.key == "model" {
+			raw := bytes.TrimSpace(body[m.valueStart:m.valueEnd])
+			var selected string
+			return len(raw) > 0 && raw[0] == '"' && json.Unmarshal(raw, &selected) == nil && selected == model
+		}
+	}
+	return false
 }
 
 // replaceModel returns body with its top-level "model" replaced by model, and

@@ -22,11 +22,13 @@
 package nodepolicy
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"regexp"
 	"slices"
+	"strings"
 
 	"nvpair-shared/engines"
 )
@@ -102,6 +104,10 @@ type Policy struct {
 	// up by (engine, model); a model with no profile is admitted with the
 	// node-wide defaults.
 	Profiles []Profile `json:"profiles"`
+	// ServedModels is unrestricted when nil; a non-nil empty list serves nothing.
+	ServedModels ServedModels `json:"servedModels,omitzero"`
+	// ResidentModels names qualified models desired resident, not observed loads.
+	ResidentModels ResidentModels `json:"residentModels,omitempty"`
 	// Roles is this node's declaration of what it serves per tier. A node
 	// with at least one role is authoritative for itself: routers offer it
 	// only its declared role for each tier it names, and nothing for a tier
@@ -122,6 +128,23 @@ type Policy struct {
 	PausedBy PauseOrigin `json:"pausedBy,omitempty"`
 }
 
+// UnmarshalJSON retains omitted defaults and validates the new fields' raw
+// member names before encoding/json can discard duplicate occurrences.
+func (p *Policy) UnmarshalJSON(data []byte) error {
+	if err := CheckModelListKeys(data); err != nil {
+		return err
+	}
+	type wire Policy
+	next := wire(*p)
+	if err := json.Unmarshal(data, &next); err != nil {
+		return err
+	}
+	next.ServedModels = slices.Clone(next.ServedModels)
+	next.ResidentModels = slices.Clone(next.ResidentModels)
+	*p = Policy(next)
+	return nil
+}
+
 // PauseOrigin says who paused a node.
 type PauseOrigin string
 
@@ -137,6 +160,125 @@ const (
 type Role struct {
 	Engine string `json:"engine"`
 	Model  string `json:"model"`
+}
+
+// ServedModels preserves absent versus explicitly empty permission. Clone it
+// with slices.Clone when transferring ownership to preserve non-nil empties.
+type ServedModels []Role
+
+func (s ServedModels) MarshalJSON() ([]byte, error) {
+	if s == nil {
+		return nil, errors.New("absent servedModels must be omitted")
+	}
+	if err := validateModelList("servedModels", s); err != nil {
+		return nil, err
+	}
+	return json.Marshal([]Role(s))
+}
+
+func (s *ServedModels) UnmarshalJSON(data []byte) error {
+	refs, err := decodeModelList("servedModels", data)
+	if err == nil {
+		*s = ServedModels(refs)
+	}
+	return err
+}
+
+// ResidentModels treats absence and an empty list as no resident preference.
+type ResidentModels []Role
+
+func (r *ResidentModels) UnmarshalJSON(data []byte) error {
+	refs, err := decodeModelList("residentModels", data)
+	if err == nil {
+		*r = ResidentModels(nilIfEmpty(refs))
+	}
+	return err
+}
+
+func decodeModelList(name string, data []byte) ([]Role, error) {
+	if bytes.Equal(bytes.TrimSpace(data), []byte("null")) {
+		return nil, fmt.Errorf("%s must not be null", name)
+	}
+	var entries []json.RawMessage
+	if err := json.Unmarshal(data, &entries); err != nil {
+		return nil, err
+	}
+	refs := make([]Role, len(entries))
+	for i, entry := range entries {
+		fields, err := peerFields(entry)
+		if err != nil {
+			return nil, fmt.Errorf("%s[%d]: %w", name, i, err)
+		}
+		if len(fields) != 2 || fields["engine"] == nil || fields["model"] == nil {
+			return nil, fmt.Errorf("%s[%d]: expected engine and model", name, i)
+		}
+		if err := json.Unmarshal(entry, &refs[i]); err != nil {
+			return nil, err
+		}
+	}
+	return refs, validateModelList(name, refs)
+}
+
+// maxModelReferenceBytes bounds the JSON-encoded engine/model object, including
+// escaping. Both 256-entry lists leave room in the 256 KiB remote policy body.
+const maxModelReferenceBytes = 256
+
+func validateModelList(name string, refs []Role) error {
+	if len(refs) > 256 {
+		return fmt.Errorf("%s must contain at most 256 entries", name)
+	}
+	seen := map[Role]bool{}
+	for i, ref := range refs {
+		if err := checkModelRef(ref.Engine, ref.Model, 0, nil); err != nil {
+			return fmt.Errorf("%s[%d]: %w", name, i, err)
+		}
+		encoded, err := json.Marshal(ref)
+		if err != nil {
+			return err
+		}
+		if len(encoded) > maxModelReferenceBytes {
+			return fmt.Errorf("%s[%d]: encoded model reference must be at most %d bytes", name, i, maxModelReferenceBytes)
+		}
+		if seen[ref] {
+			return fmt.Errorf("%s[%d]: duplicate engine/model", name, i)
+		}
+		seen[ref] = true
+	}
+	return nil
+}
+
+// CheckModelListKeys checks raw servedModels and residentModels keys before JSON
+// decoding collapses duplicates or folds case. Call it before preprocessing a
+// policy object. Legacy fields retain their existing decoding rules.
+func CheckModelListKeys(data []byte) error {
+	dec := json.NewDecoder(bytes.NewReader(data))
+	if tok, err := dec.Token(); err != nil || tok != json.Delim('{') {
+		return errors.New("policy must be a JSON object")
+	}
+	seen := map[string]bool{}
+	for dec.More() {
+		tok, err := dec.Token()
+		if err != nil {
+			return err
+		}
+		key, ok := tok.(string)
+		if !ok {
+			return errors.New("invalid policy key")
+		}
+		for _, name := range []string{"servedModels", "residentModels"} {
+			if strings.EqualFold(key, name) {
+				if key != name || seen[name] {
+					return fmt.Errorf("duplicate or case-variant %s key", name)
+				}
+				seen[name] = true
+			}
+		}
+		var raw json.RawMessage
+		if err := dec.Decode(&raw); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // PauseConfig controls what pausing does.
@@ -394,8 +536,10 @@ func (p Policy) Validate() error {
 			if err := json.Unmarshal(pr.RequestOptions, &obj); err != nil {
 				return fmt.Errorf("profiles[%d] %q: requestOptions must be a JSON object", i, pr.Name)
 			}
-			if _, ok := obj["model"]; ok {
-				return fmt.Errorf("profiles[%d] %q: requestOptions may not set model", i, pr.Name)
+			for key := range obj {
+				if strings.EqualFold(key, "model") {
+					return fmt.Errorf("profiles[%d] %q: requestOptions may not set model", i, pr.Name)
+				}
 			}
 		}
 	}
@@ -405,6 +549,21 @@ func (p Policy) Validate() error {
 		}
 		if err := checkModelRef(role.Engine, role.Model, 0, nil); err != nil {
 			return fmt.Errorf("roles[%s]: %w", tier, err)
+		}
+	}
+	if err := validateModelList("servedModels", p.ServedModels); err != nil {
+		return err
+	}
+	if err := validateModelList("residentModels", p.ResidentModels); err != nil {
+		return err
+	}
+	for _, ref := range p.ResidentModels {
+		if p.ServedModels != nil && !slices.Contains(p.ServedModels, ref) {
+			return errors.New("residentModels must be a subset of servedModels")
+		}
+		pr, ok := p.ProfileFor(ref.Engine, ref.Model)
+		if !ok || pr.ContextTokens <= 0 || pr.MaxOutputTokens <= 0 || pr.MaxConcurrent <= 0 || pr.MemoryBytes <= 0 || pr.Qualification == nil {
+			return errors.New("residentModels require a profile with finite positive bounds and qualification")
 		}
 	}
 	if err := p.Routing.validate(); err != nil {
@@ -502,6 +661,9 @@ func validateRevision(rev string) error {
 // execution stay off. Parsing the marshaled result of Parse gives the same
 // policy.
 func Parse(data []byte) (Policy, error) {
+	if err := CheckModelListKeys(data); err != nil {
+		return Policy{}, fmt.Errorf("parse policy: %w", err)
+	}
 	var head struct {
 		Version *int `json:"version"`
 	}
@@ -539,14 +701,16 @@ type tierEntryV1 struct {
 // migrateV1 decodes a version 1 document onto the defaults and returns it as
 // version 2.
 func migrateV1(data []byte) (Policy, error) {
+	// An alias avoids promoting Policy.UnmarshalJSON over the legacy tiers.
+	type wire Policy
 	doc := struct {
-		Policy
+		wire
 		Tiers map[string][]tierEntryV1 `json:"tiers"`
-	}{Policy: Default()}
+	}{wire: wire(Default())}
 	if err := json.Unmarshal(data, &doc); err != nil {
 		return Policy{}, fmt.Errorf("parse policy: %w", err)
 	}
-	p := doc.Policy
+	p := Policy(doc.wire)
 	def := Default()
 	p.Version, p.Revision, p.Routing = def.Version, def.Revision, def.Routing
 	p.Tiers = make(map[string][]TierEntry, len(doc.Tiers))

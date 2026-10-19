@@ -14,10 +14,12 @@ package main
 // Every refusal fails closed: an unavailable, locked, corrupt or unwritable
 // store, an arithmetic overflow, a clock behind the last observed time and
 // any unrecorded restrictive transition refuse new reservations. Nothing here
-// reads a credential value, and nothing here sends a request: the dispatch
-// path calls reserve before it sends and reconcile/recordOutcome after.
+// resolves an environment credential. The private Chat attempt seam below is
+// unwired; its future caller supplies the selected-reference resolver and guard.
 
 import (
+	"bytes"
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
@@ -25,13 +27,16 @@ import (
 	"log/slog"
 	"math"
 	"math/bits"
+	"net/http"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"nvpair-shared/durablefile"
 	"nvpair-shared/nodepolicy"
@@ -382,6 +387,10 @@ type accountHold struct {
 func (l *accountLedger) reserve(deploymentID string, inputTokens, outputTokens int64) (accountHold, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	return l.reserveLocked(deploymentID, inputTokens, outputTokens)
+}
+
+func (l *accountLedger) reserveLocked(deploymentID string, inputTokens, outputTokens int64) (accountHold, error) {
 	if err := l.admissibleLocked(); err != nil {
 		return accountHold{}, err
 	}
@@ -472,6 +481,204 @@ func (l *accountLedger) reserve(deploymentID string, inputTokens, outputTokens i
 		return accountHold{}, fmt.Errorf("%w: the reservation was not confirmed durable: %w", errLedgerUnavailable, err)
 	}
 	return accountHold{Attempt: attempt, Reserved: nanoUSDString(amount), Probe: halfOpen}, nil
+}
+
+// chatAccountSnapshot owns copies, including every deployment pointer/slice.
+// It contains references only, never credential values or mutable routing state.
+type chatAccountSnapshot struct {
+	revision   string
+	deployment nodepolicy.Deployment
+	account    nodepolicy.Account
+}
+
+func (l *accountLedger) prepareChatAccount(id string) (chatAccountSnapshot, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.chatAccountLocked(id)
+}
+
+func (l *accountLedger) chatAccountLocked(id string) (chatAccountSnapshot, error) {
+	for _, d := range l.routing.Deployments {
+		if d.ID != id {
+			continue
+		}
+		for _, a := range l.routing.Accounts {
+			if a.ID != d.Account {
+				continue
+			}
+			d.Capabilities = slices.Clone(d.Capabilities)
+			if d.Transport != nil {
+				v := *d.Transport
+				d.Transport = &v
+			}
+			if d.Prices != nil {
+				v := *d.Prices
+				d.Prices = &v
+			}
+			if d.Qualification != nil {
+				v := *d.Qualification
+				d.Qualification = &v
+			}
+			return chatAccountSnapshot{l.policyRevision, d, a}, nil
+		}
+	}
+	return chatAccountSnapshot{}, errUnknownDeployment
+}
+
+var errChatAttempt = errors.New("qualified Chat attempt refused")
+var errChatAccounting = errors.New("qualified Chat accounting failed")
+var errChatCredential = errors.New("qualified Chat credential refused")
+var errChatConfiguration = errors.New("qualified Chat configuration refused")
+var errChatRateLimit = errors.New("qualified Chat account cooling down")
+var errChatTransient = errors.New("qualified Chat attempt failed")
+
+func (l *accountLedger) reserveChatAccount(expected chatAccountSnapshot, input, output int64) (accountHold, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	current, err := l.chatAccountLocked(expected.deployment.ID)
+	if err != nil || !reflect.DeepEqual(current, expected) {
+		return accountHold{}, errChatAttempt
+	}
+	return l.reserveLocked(expected.deployment.ID, input, output)
+}
+
+// runChatAccountAttempt is I's future single-attempt seam, not a route or a
+// selection/retry state machine. No production caller exists. The mandatory
+// guard belongs to I/G (permission, lease and revision); success is not a lease.
+// All callbacks are trusted in-memory inputs. The resolver must inspect only
+// its selected reference. There is no environment lookup or key cache here.
+func runChatAccountAttempt(ctx context.Context, snapshot chatAccountSnapshot, body []byte,
+	q *chatQualification, ledger *accountLedger, transport *publicClient,
+	resolve func(nodepolicy.CredentialRef) (string, bool), budget chatByteBudget,
+	guard func(context.Context) error, emit func([]byte) error) (chatParseResult, error) {
+	var result chatParseResult
+	d := snapshot.deployment
+	if ledger == nil || transport == nil || resolve == nil || budget == nil || guard == nil || emit == nil ||
+		ctx.Err() != nil || q.fresh() != nil || d.Transport == nil || d.Qualification == nil || d.Prices == nil ||
+		nodepolicy.CheckEndpoint(d.Endpoint) != nil || transport.endpoint != d.Endpoint || transport.bounds != *d.Transport {
+		return result, errChatAttempt
+	}
+	if q.MaxBodyBytes > d.Transport.MaxResponseBytes || q.MaxEventBytes > d.Transport.MaxEventBytes {
+		return result, errChatAttempt
+	}
+	ref, err := nodepolicy.ParseCredentialRef(string(snapshot.account.Credential))
+	if err != nil {
+		return result, errChatCredential
+	}
+	target := chatTarget{Protocol: d.Protocol, Endpoint: d.Endpoint, Model: d.Model, Qualification: *d.Qualification,
+		ContextTokens: int64(d.ContextTokens), MaxOutputTokens: int64(d.MaxOutputTokens)}
+	prepared, err := q.prepare(ctx, target, http.MethodPost, routeChatCompletions, body, budget)
+	if err != nil {
+		return result, err
+	}
+	defer prepared.close()
+	// Admit finite parser and transport headroom before lookup or reservation.
+	// The parser also admits each actual decoded representation as it grows.
+	parserBytes := int64(chatFixedStorage)
+	if prepared.Stream {
+		parserBytes += 2*q.MaxLineBytes + 6*q.MaxEventBytes + 4*q.MaxToolBytes + 512*int64(q.MaxToolCalls)
+	}
+	parserRelease, err := chatAcquire(budget, parserBytes)
+	if err != nil {
+		return result, err
+	}
+	defer parserRelease()
+	transportBytes := 3 * (max(d.Transport.MaxResponseBytes, d.Transport.MaxErrorBodyBytes) + 1)
+	transportRelease, err := chatAcquire(budget, transportBytes)
+	if err != nil {
+		return result, err
+	}
+	defer transportRelease()
+	key, ok := resolve(ref)
+	if !ok || key == "" || strings.ContainsFunc(key, unicode.IsControl) {
+		return result, errChatCredential
+	}
+	if ctx.Err() != nil {
+		return result, errChatAttempt
+	}
+	hold, err := ledger.reserveChatAccount(snapshot, prepared.Input, prepared.Output)
+	if err != nil {
+		return result, errChatAccounting
+	}
+	if guard(ctx) != nil || q.fresh() != nil || ctx.Err() != nil {
+		// No refund: even an unsent hold has no new recovery authority here.
+		return result, errChatAttempt
+	}
+	response, attemptErr := transport.post(ctx, bytes.NewReader(prepared.Body), key, prepared.Stream,
+		func(n int64) (func(), error) {
+			if n != transportBytes {
+				return nil, errChatBudget
+			}
+			return transportRelease, nil
+		})
+	outcome, retryAfter := outcomeTransient, time.Duration(0)
+	if attemptErr != nil {
+		attemptErr = errChatTransient
+	}
+	// Observed restrictive statuses remain authoritative if body handling fails.
+	if response != nil {
+		switch response.Status {
+		case http.StatusOK:
+			if attemptErr != nil {
+				break
+			}
+			defer response.Body.Close()
+			result, attemptErr = q.parseResponse(ctx, response.Body, prepared.Stream, prepared.Input, prepared.Output, response.HeaderAt, budget, emit)
+			if attemptErr == nil {
+				outcome = outcomeOK
+			}
+		case http.StatusUnauthorized, http.StatusForbidden:
+			outcome, attemptErr = outcomeCredentialFailure, errChatCredential
+		case http.StatusBadRequest, http.StatusNotFound, http.StatusUnprocessableEntity:
+			attemptErr = errChatConfiguration
+		case http.StatusTooManyRequests:
+			outcome, attemptErr = outcomeRateLimited, errChatRateLimit
+			retryAfter = chatRetryAfter(response.RetryAfter, q.Now())
+		default:
+			if response.Body != nil {
+				response.Body.Close()
+			}
+			attemptErr = errChatTransient
+		}
+	}
+	// Independent completions must still be attempted after a sibling fails.
+	outcomeErr := ledger.recordOutcome(hold.Attempt, outcome, retryAfter, time.Time{})
+	var moneyErr, qualificationErr error
+	if result.Complete && (attemptErr == nil || errors.Is(attemptErr, errChatBound)) {
+		moneyErr = ledger.reconcile(hold.Attempt, result.Usage)
+	}
+	switch {
+	case errors.Is(attemptErr, errChatIdentity):
+		qualificationErr = ledger.quarantine(hold.Attempt)
+	case result.AboveBound:
+		// reconcile atomically freezes and classifies the immutable identity.
+	case errors.Is(attemptErr, errChatBudget):
+		// Resource refusal prevented classification; leave it unfinished.
+	default:
+		qualificationErr = ledger.recordQualification(hold.Attempt)
+	}
+	if outcomeErr != nil || (moneyErr != nil && !errors.Is(moneyErr, errUsageAboveBound)) || qualificationErr != nil {
+		return result, errChatAccounting
+	}
+	return result, attemptErr
+}
+
+// Invalid, past and overflowing values select D's default; D clamps valid
+// durations. Provider strings never become diagnostics or downstream headers.
+func chatRetryAfter(raw string, now time.Time) time.Duration {
+	if seconds, err := strconv.ParseInt(raw, 10, 64); err == nil && raw != "" && raw[0] >= '0' && raw[0] <= '9' {
+		if seconds <= 0 || seconds > math.MaxInt64/int64(time.Second) {
+			return 0
+		}
+		return time.Duration(seconds) * time.Second
+	}
+	if at, err := http.ParseTime(raw); err == nil && at.After(now) {
+		delay := at.Sub(now)
+		if now.Add(delay).Equal(at) {
+			return delay
+		}
+	}
+	return 0
 }
 
 // checkCeilings admits amount against the per-request ceiling and against the

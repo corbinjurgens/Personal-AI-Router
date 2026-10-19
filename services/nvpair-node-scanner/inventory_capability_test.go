@@ -40,6 +40,80 @@ func policyWith(extra string) json.RawMessage {
 
 var capabilityTestRoles = map[string]nodepolicy.AdvertisedRole{nodepolicy.TierMedium: {Engine: "ollama", Model: "model", ContextTokens: 16384}}
 
+func TestServedResidentInventoryCacheRoundTrip(t *testing.T) {
+	for _, tc := range []struct{ name, extra string }{
+		{"absent permission", ""},
+		{"deny all", `"servedModels":[]`},
+		{"restricted permission", `"servedModels":[{"engine":"ollama","model":"model"}]`},
+		{"malformed capability retains deny all", `"servedModels":[],"strictAdmission":{"version":1,"models":[]}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newScannerReverseFixture(t)
+			f.direct.Store(true)
+			raw := policyWith(tc.extra)
+			f.policy.Store(&raw)
+			node := f.node
+			f.d.enrich(&node)
+			want, _, err := decodeInventoryPolicy(raw)
+			if err != nil || want == nil {
+				t.Fatalf("decode expected advertisement: %v, %+v", err, want)
+			}
+			if node.Policy == nil || !reflect.DeepEqual(*node.Policy, *want) {
+				t.Fatalf("enriched policy = %+v, want %+v", node.Policy, want)
+			}
+			cached := cachedPolicy(f.d, "peer")
+			if cached == nil || !reflect.DeepEqual(*cached, *want) {
+				t.Fatalf("cached policy = %+v, want %+v", cached, want)
+			}
+			wire, err := json.Marshal(noderec.DirectoryNode{HostUUID: "peer", Policy: cached})
+			if err != nil {
+				t.Fatalf("marshal cached advertisement: %v", err)
+			}
+			var back noderec.DirectoryNode
+			if err := json.Unmarshal(wire, &back); err != nil {
+				t.Fatalf("decode cached advertisement: %v", err)
+			}
+			if back.Policy == nil || !reflect.DeepEqual(*back.Policy, *want) {
+				t.Fatalf("round-trip policy = %+v, want %+v", back.Policy, want)
+			}
+		})
+	}
+}
+
+func TestServedResidentInvalidAdvertisementKeepsLastGood(t *testing.T) {
+	for _, tc := range []struct{ name, extra string }{
+		{"null permission", `"servedModels":null`},
+		{"case variant permission", `"ServedModels":[]`},
+		{"duplicate permission", `"servedModels":[],"servedModels":[]`},
+		{"malformed reference", `"servedModels":[{"engine":"ollama"}]`},
+		{"aliased capability with deny all", `"servedModels":[],"StrictAdmission":{"version":2}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newScannerReverseFixture(t)
+			f.direct.Store(true)
+			good := policyWith(`"servedModels":[]`)
+			f.policy.Store(&good)
+			node := f.node
+			f.d.enrich(&node)
+			want := cachedPolicy(f.d, "peer")
+			if want == nil || want.ServedModels == nil || len(want.ServedModels) != 0 {
+				t.Fatalf("initial cached policy = %+v, want deny all", want)
+			}
+			bad := policyWith(tc.extra)
+			f.policy.Store(&bad)
+			node = f.node
+			f.d.enrich(&node)
+			if node.Policy == nil || !reflect.DeepEqual(*node.Policy, *want) {
+				t.Fatalf("policy after invalid advertisement = %+v, want last good %+v", node.Policy, want)
+			}
+			cached := cachedPolicy(f.d, "peer")
+			if cached == nil || !reflect.DeepEqual(*cached, *want) {
+				t.Fatalf("cache after invalid advertisement = %+v, want last good %+v", cached, want)
+			}
+		})
+	}
+}
+
 func TestDecodeInventoryPolicy(t *testing.T) {
 	type want struct {
 		err        bool
@@ -62,8 +136,8 @@ func TestDecodeInventoryPolicy(t *testing.T) {
 		{"unknown version 1 field dropped", policyWith(`"strictAdmission":{"version":1,"models":[` + strictModelJSON("m") + `],"extra":1}`), want{policy: true, state: nodepolicy.StrictCapabilityAbsent, keepsRoles: true, rejected: rejectedCapability}},
 		{"invalid envelope dropped", policyWith(`"strictAdmission":{"version":"one"}`), want{policy: true, state: nodepolicy.StrictCapabilityAbsent, keepsRoles: true, rejected: rejectedCapability}},
 		{"null capability dropped", policyWith(`"strictAdmission":null`), want{policy: true, state: nodepolicy.StrictCapabilityAbsent, keepsRoles: true, rejected: rejectedCapability}},
-		{"case-variant key rejects the advertisement", policyWith(`"StrictAdmission":` + validStrictJSON("m:latest")), want{rejected: rejectedAdvertisement}},
-		{"mixed keys reject the advertisement", policyWith(`"strictAdmission":` + validStrictJSON("m:latest") + `,"STRICTADMISSION":{"version":2}`), want{rejected: rejectedAdvertisement}},
+		{"case-variant key rejects the advertisement", policyWith(`"StrictAdmission":` + validStrictJSON("m:latest")), want{err: true, rejected: rejectedAdvertisement}},
+		{"mixed keys reject the advertisement", policyWith(`"strictAdmission":` + validStrictJSON("m:latest") + `,"STRICTADMISSION":{"version":2}`), want{err: true, rejected: rejectedAdvertisement}},
 		{"invalid roles fail the document", json.RawMessage(`{"revision":"31","roles":[],"strictAdmission":{"version":1,"models":[]}}`), want{err: true}},
 		{"invalid revision fails the document", json.RawMessage(`{"revision":31,"roles":{}}`), want{err: true}},
 		{"not an object fails the document", json.RawMessage(`[]`), want{err: true}},
@@ -157,9 +231,8 @@ func TestDecodeInventoryPolicyKeepsTheSharedDecodingOfOtherFields(t *testing.T) 
 }
 
 // TestInvalidCapabilityKeepsTheInventory is the concrete-routing half of the
-// capability rule on the pinned peer fetch: a peer whose capability is
-// malformed, or whose advertisement uses an aliased capability key, keeps its
-// model inventory; only hybrid eligibility is lost.
+// capability rule on the pinned peer fetch: a peer whose canonical capability
+// is malformed keeps its model inventory; only hybrid eligibility is lost.
 func TestInvalidCapabilityKeepsTheInventory(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
@@ -168,7 +241,6 @@ func TestInvalidCapabilityKeepsTheInventory(t *testing.T) {
 	}{
 		{"malformed capability", policyWith(`"strictAdmission":{"version":1,"models":[]}`), true},
 		{"null capability", policyWith(`"strictAdmission":null`), true},
-		{"aliased capability key", policyWith(`"StrictAdmission":` + validStrictJSON("m:latest")), false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newScannerReverseFixture(t)

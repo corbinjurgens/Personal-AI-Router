@@ -69,6 +69,7 @@ type Node struct {
 	// publishes none, which means it declares nothing. Internal routing
 	// metadata like Loaded, so a role edit does not announce node/updated.
 	Roles          map[string]nodepolicy.AdvertisedRole `json:"-"`
+	ServedModels   nodepolicy.ServedModels              `json:"-"`
 	PolicyRevision string                               `json:"-"`
 	// StrictAdmission is the strict admission capability from the same
 	// advertisement, nil when the node publishes none. It is shared with the

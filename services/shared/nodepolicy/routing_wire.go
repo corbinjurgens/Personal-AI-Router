@@ -142,16 +142,15 @@ func (r *StrictAdmissionRequest) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-// decodeStrictContract rejects unknown fields and null/missing required fields.
-// Canonicalizing JSON numbers first accepts integral spellings such as 1.0 and
-// 1e0 exactly as the desktop's JSON parser does. All numeric bounds fit int32.
+// decodeStrictContract rejects duplicate keys, unknown fields and null/missing
+// required fields. peerFields scans keys before decoding so a repeated key
+// cannot silently collapse to the last occurrence. Canonicalizing JSON numbers
+// first accepts integral spellings such as 1.0 and 1e0 exactly as the desktop's
+// JSON parser does. All numeric bounds fit int32.
 func decodeStrictContract(data []byte, dst any, required ...string) error {
-	var fields map[string]json.RawMessage
-	if err := json.Unmarshal(data, &fields); err != nil {
+	fields, err := peerFields(data)
+	if err != nil {
 		return err
-	}
-	if fields == nil {
-		return errors.New("contract must be an object")
 	}
 	for key := range fields {
 		if !slices.Contains(required, key) {
