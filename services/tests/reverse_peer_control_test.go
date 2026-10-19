@@ -30,6 +30,7 @@ import (
 	"nvpair-shared/clustertrust"
 	errorswire "nvpair-shared/errors"
 	"nvpair-shared/jsonrpc"
+	"nvpair-shared/nodepolicy"
 	"nvpair-shared/noderec"
 )
 
@@ -40,9 +41,13 @@ const task1UpgradePath = "/cluster/reverse"
 
 // task1Process plays the broker's public stdio role. Every receiver notification
 // is retained, including duplicates, rather than hidden by a test-side dedup.
+// An engine manager's model-mutation request is confirmed as the broker would
+// after withdrawing the engine's identity; these fixtures run no broker, so
+// there is no identity to withdraw.
 type task1Process struct {
 	t        *testing.T
 	cmd      *exec.Cmd
+	writeMu  sync.Mutex
 	in       io.WriteCloser
 	output   serviceOutput
 	mu       sync.Mutex
@@ -93,6 +98,9 @@ func startTask1Process(t *testing.T, base, binary string, args ...string) *task1
 			}
 			p.frames = append(p.frames, *frame)
 			p.mu.Unlock()
+			if frame.Method == nodepolicy.MethodModelMutationRequest {
+				p.confirmModelMutation(frame.Params)
+			}
 		}
 	}()
 	go func() { <-p.readDone; p.waitErr = p.cmd.Wait(); close(p.done) }()
@@ -108,10 +116,30 @@ func (p *task1Process) send(t *testing.T, method string, params any, request boo
 	if request {
 		frame["id"] = id
 	}
-	if err := json.NewEncoder(p.in).Encode(frame); err != nil {
+	if err := p.write(frame); err != nil {
 		t.Fatal(err)
 	}
 	return id
+}
+
+func (p *task1Process) write(frame any) error {
+	p.writeMu.Lock()
+	defer p.writeMu.Unlock()
+	return json.NewEncoder(p.in).Encode(frame)
+}
+
+// confirmModelMutation runs on the read goroutine, so it records a failure
+// for the read loop's owner instead of calling t.Fatal.
+func (p *task1Process) confirmModelMutation(params json.RawMessage) {
+	var req nodepolicy.ModelMutationRequest
+	if err := json.Unmarshal(params, &req); err != nil {
+		p.t.Errorf("model mutation request: %v", err)
+		return
+	}
+	reply := nodepolicy.ModelMutationReply{RequestID: req.RequestID, Engine: req.Engine, OK: true}
+	if err := p.write(map[string]any{"jsonrpc": "2.0", "method": nodepolicy.MethodModelMutationReply, "params": reply}); err != nil {
+		p.t.Errorf("model mutation reply: %v", err)
+	}
 }
 
 func (p *task1Process) call(t *testing.T, method string, params any) jsonrpc.Message {
