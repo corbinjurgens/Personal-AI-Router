@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	settings "nvpair-shared/enginesettings"
 	"os"
 	"path/filepath"
 	"sync"
@@ -20,10 +21,20 @@ const (
 )
 
 type desiredStateFile struct {
-	Engines map[string]bool `json:"engines"`
+	PendingSwitch      *settings.SwitchCheckpoint `json:"pendingSwitch,omitempty"`
+	PendingSwitchPorts *switchCheckpointPorts     `json:"pendingSwitchPorts,omitempty"`
+	Engines            map[string]bool            `json:"engines"`
 	// OffBy records who saved each engine Off: intentLocal or intentPeer. An
 	// engine saved Off with no entry predates provenance and counts as local.
 	OffBy map[string]intentOrigin `json:"offBy,omitempty"`
+}
+
+// Allocated ports are execution evidence, excluded from configuration tokens.
+// Keep them beside the shared checkpoint so crash cleanup can find a port-zero
+// engine's actual listener after the in-memory lifecycle state is lost.
+type switchCheckpointPorts struct {
+	Source int `json:"source"`
+	Target int `json:"target"`
 }
 
 // intentOrigin says who saved an engine's intent: this node's own clients
@@ -87,6 +98,11 @@ func (s *desiredStateStore) set(engine string, enabled bool, origin intentOrigin
 	if err != nil {
 		return err
 	}
+	state.setIntent(engine, enabled, origin)
+	return s.save(state)
+}
+
+func (state *desiredStateFile) setIntent(engine string, enabled bool, origin intentOrigin) {
 	was, known := state.Engines[engine]
 	state.Engines[engine] = enabled
 	switch {
@@ -97,7 +113,6 @@ func (s *desiredStateStore) set(engine string, enabled bool, origin intentOrigin
 	default:
 		state.OffBy[engine] = origin
 	}
-	return s.save(state)
 }
 
 func (s *desiredStateStore) load() (desiredStateFile, error) {
@@ -120,6 +135,19 @@ func (s *desiredStateStore) load() (desiredStateFile, error) {
 	}
 	if state.OffBy == nil {
 		state.OffBy = make(map[string]intentOrigin)
+	}
+	if cp := state.PendingSwitch; cp != nil {
+		if ports := state.PendingSwitchPorts; ports != nil && (ports.Source < 0 || ports.Source > 65535 || ports.Target < 0 || ports.Target > 65535) {
+			return desiredStateFile{}, errors.New("invalid pending switch endpoint")
+		}
+		if err := validSwitchEnvelope(cp.SwitchPrepareRequest); err != nil {
+			return desiredStateFile{}, fmt.Errorf("invalid pending switch: %w", err)
+		}
+		switch cp.Phase {
+		case settings.SwitchCheckpointReserved, settings.SwitchCheckpointStopPending, settings.SwitchCheckpointSourceOff, settings.SwitchCheckpointStartPending, settings.SwitchCheckpointTargetCommitted, settings.SwitchCheckpointReleased:
+		default:
+			return desiredStateFile{}, errors.New("invalid pending switch phase")
+		}
 	}
 	return state, nil
 }
@@ -180,6 +208,16 @@ func (e *Executor) RestoreEnabled(ctx context.Context) error {
 }
 
 func (e *Executor) restoreEnabled(ctx context.Context, engine string) error {
+	done, err := e.admitMutation(engine)
+	if err != nil {
+		// A pending switch must be reconciled before automatic restore.
+		var busy *switchBusyError
+		if errors.As(err, &busy) {
+			return nil
+		}
+		return err
+	}
+	defer done()
 	st, err := e.state(engine)
 	if err != nil {
 		return err

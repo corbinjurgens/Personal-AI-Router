@@ -170,6 +170,14 @@ func (b *Broker) frontedEngineProfiles() []engineProxyProfile {
 	return slices.Concat(engineProxyProfiles, b.dynamicEngineProfiles())
 }
 
+// frontedEngineProfile resolves either a built-in or a fronted descriptor engine.
+func (b *Broker) frontedEngineProfile(engine string) (engineProxyProfile, bool) {
+	if p, ok := engineProxyProfileFor(engine); ok {
+		return p, true
+	}
+	return b.dynamicEngineProfile(engine)
+}
+
 // dynamicEngineProfile resolves a fronted descriptor engine by ID.
 func (b *Broker) dynamicEngineProfile(name string) (engineProxyProfile, bool) {
 	c := &b.dynamicEngines

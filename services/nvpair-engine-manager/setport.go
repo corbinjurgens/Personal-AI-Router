@@ -33,6 +33,11 @@ func canMoveAdoptedEngine(rt Runtime) bool {
 // A running, adopted process-mode engine is refused. An identified command-mode
 // engine may be moved only when its manifest provides an official stop command.
 func (e *Executor) SetPort(ctx context.Context, engine string, port int) (EngineStatus, error) {
+	done, err := e.admitMutation(engine)
+	if err != nil {
+		return EngineStatus{}, err
+	}
+	defer done()
 	if port < 1 || port > 65535 {
 		return EngineStatus{}, fmt.Errorf("port must be between 1 and 65535")
 	}

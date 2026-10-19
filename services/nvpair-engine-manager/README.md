@@ -95,6 +95,13 @@ the engine's lifecycle lock like `engine:restart` but only act on that record.
 
 Notifications (service → caller): `engine:ready{version}`,
 `engine:state-changed{EngineStatus}`,
+`engine:model-identity{engines}` (a whole snapshot keyed by engine, each entry
+`{engineRunId, launchDigest, modelDigests}` with `modelDigests` keyed by model
+name; emitted after the loaded-model watcher's first sweep and whenever the
+snapshot changes; absent engines have no current identity. Only running owned
+processes with a known launch digest are included, excluding adopted services
+and command-mode daemons; model digests must come from an inventory of the same
+run and contain lowercase SHA-256 hex),
 `engine:models-changed{engine, models}` — pushed when an engine's set of
 loaded (in-memory) models changes (explicit load/unload, JIT auto-load, or
 TTL/idle eviction); `models` is the full `engine:models` shape (incl.
@@ -517,7 +524,93 @@ Per-OS variance lives in the manifest first; OS primitives (process
 termination, console hiding) are the only build-tagged Go
 (`proc_windows.go` / `proc_unix.go`).
 
-## Shutdown
+## Target-owned engine switching
+
+The broker owns switch acceptance, drain, publication and the operation journal.
+The manager executes only broker-local `engine:switch-prepare`,
+`engine:switch-step` and `engine:switch-reconcile` requests using the shared
+`enginesettings` envelopes. These executor methods have no ec route. Results
+carry a durable `checkpoint`, current `observed` states and a coded `error`;
+callers must inspect that error rather than treating a JSON-RPC result as success.
+
+Prepare atomically reserves source and target, validates preparation and port
+ownership, and rejects a running target. An empty prepare request reads the
+manager configuration snapshot without reserving. Its additional `configuration`
+and `configurationFence` fields supply configuration digests, settings revisions,
+intent/provenance, registry/runtime fingerprint and manager incarnation. The
+broker combines these with node identity and journal generation for its public
+configuration token; it passes the manager fence back in the executor envelope.
+The envelope also carries `managerIncarnation` from the snapshot. Prepare and
+forward steps (`source-stop`, `target-start`) reject a different incarnation
+with a coded `interrupted` error, including inherited checkpoints after restart.
+Reconcile and release accept the original envelope to finish conservative cleanup.
+
+A broker-managed manager starts recovery-pending before binding its ec listener.
+All mutating authenticated ec requests return HTTP 503 until the parent sends
+`engine:switch-recovery-ready` with `{managerIncarnation}` after successful
+conservative recovery. The parent pins that request to the recovered worker;
+the manager checks its incarnation and refuses readiness while a checkpoint is
+unreleased. This gate is independent of local pause. Inventory, read-only
+queries, event streams, authoritative state deliveries and parent-only
+inspect/reconcile/release remain available during recovery.
+
+The optional `pendingSwitch` in `engine-state.json` shares the durable replacement
+with `engines` and `offBy`. Source Off and `stop-pending` are saved before stopping.
+Adjacent `pendingSwitchPorts` records source/target execution endpoints; a
+dynamic target port is allocated and checkpointed before launching its process.
+Target On and `target-committed` are saved together only after readiness. A failed
+start saves target Off, preserves a stronger local Off, and never restores the
+source. Termination evidence requires listener refusal as well as stopped owned
+state. Reconciliation cleans up interrupted work and never resumes target startup.
+The matching checkpoint remains reserved until the broker releases it after its
+terminal receipt is durable; a released checkpoint retains the last operation's
+retry identity until replaced by a new reservation.
+
+Reserved engines reject lifecycle/configuration/install/restart-after mutations
+with JSON-RPC `-32000` and `data.kind: busy`; automatic restore skips them.
+Wake/Sleep retain their intent-neutral behavior. Shutdown cancels starts and stops
+owned engines even during a reservation, without rewriting intent. A local Off
+during a remote reservation persists local provenance and cancels target startup
+before waiting for cleanup and returning the stop result. Remote switches honor
+local Off and local pause with `-32011`; local switches remain allowed.
+The veto takes neither the switch lock nor the engine operation lock, including
+for a remote reservation retained for recovery. Local Off of a reserved engine
+during a local switch remains a busy refusal.
+The parent may scope `engine:stop` with internal `switchOperationId` for an Off
+admitted during a remote reservation. Under the same admission lock, a settled
+or different reservation makes the scoped stop a no-op against newer work.
+Missing checkpoints, including rejected prepares, also make scoped stops no-ops.
+The broker durably journals the admitted Off before latching it, then discharges
+it through an ordinary unscoped stop before releasing its operation lock. Internal
+`verifyStop: true` on that parent stop returns `SwitchEngineState` with verified
+termination and saved Off, or an error; ordinary callers retain the status reply.
+This discharge replays after either process restarts, including without a manager
+checkpoint, before restoration or readiness. An older direct peer start loses to
+the subsequently admitted local Off; a later explicit local On waits for discharge.
+A provisional remote prepare refusal retains its reservation until final cleanup.
+Reconcile physically stops only engines whose local Off is recorded for this
+operation (`sourceLocalOff`/`targetLocalOff`), including the reserved phase. Old
+local-Off provenance on an adopted running source does not authorize physical
+cleanup after failed drain. Release refuses unverified operation-specific Off.
+Source is never restarted by reconciliation.
+While a remote reservation remains unreleased, local Off of either engine or
+local pause also vetoes an already-committed target. Reconciliation records
+target Off and pending cleanup before stopping it; source is never restored.
+Restart reconciliation without an explicit veto preserves committed target On.
+Reconcile can carry an internal operation-specific `localVeto` (the local Off
+engine or a pause). The manager records it durably before inspecting/cleaning
+the target, independent of a pending lifecycle stop request. Release shares the
+durable Off admission gate and refuses a committed target with an uncleaned
+veto, retaining its reservation until reconciliation verifies target Off.
+
+The existing pinned ec listener exposes `/v1/engine-switch/apply` and `/status`,
+relaying to the target broker with `engine:switch-request/reply/cancel`. The
+cancel notification retires only the wait, never accepted broker-owned work.
+Pending waits are bounded; settings relay correlation is separate.
+`engine:remote-switch` and `engine:remote-switch-status` use the existing pinned
+peer client. Neither route provisions engines or falls back to remote start/stop.
+
+## Shutdown behavior
 
 Shuts down on stdin EOF (parent closed the pipe), `SIGINT`/`SIGTERM`, or a
 `shutdown` JSON-RPC request — stopping any running engines first so none

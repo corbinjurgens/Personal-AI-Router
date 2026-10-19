@@ -22,6 +22,7 @@ import (
 	"syscall"
 	"time"
 
+	settings "nvpair-shared/enginesettings"
 	"nvpair-shared/httpcon"
 )
 
@@ -96,6 +97,11 @@ func (e *Executor) Start(ctx context.Context, engine string) error {
 // rechecks the local veto after taking the lifecycle lock, so a local Off that
 // finished while it waited wins.
 func (e *Executor) StartWith(ctx context.Context, engine string, opts startOpts) error {
+	done, err := e.admitMutation(engine)
+	if err != nil {
+		return err
+	}
+	defer done()
 	st, err := e.state(engine)
 	if err != nil {
 		return err
@@ -424,10 +430,29 @@ func (e *Executor) Stop(engine string) error {
 // loads of the engine, so one in progress does not hold the lifecycle lock
 // until it finishes.
 func (e *Executor) StopFrom(engine string, origin intentOrigin) error {
+	return e.stopFrom(engine, origin, "")
+}
+
+// StopForSwitch applies a broker-admitted local Off to its remote reservation,
+// after release or a rejected prepare it is a complete no-op. The broker owns
+// durable discharge before relinquishing the original operation lock.
+func (e *Executor) StopForSwitch(engine, operationID string) error {
+	return e.stopFrom(engine, intentLocal, operationID)
+}
+
+func (e *Executor) stopFrom(engine string, origin intentOrigin, operationID string) error {
 	st, err := e.state(engine)
 	if err != nil {
 		return err
 	}
+	done, err := e.admitStop(engine, origin, operationID)
+	if err != nil {
+		return err
+	}
+	if done == nil {
+		return nil
+	}
+	defer done()
 	if origin == intentLocal {
 		e.remoteWork.cancelEngine(engine, &localVetoError{reason: engineOffVeto(engine)})
 	}
@@ -441,6 +466,43 @@ func (e *Executor) StopFrom(engine string, origin intentOrigin) error {
 	// rewrite intent — shutdown must not erase the user's saved choice.
 	setErr := e.setDesiredEnabled(engine, false, origin)
 	return errors.Join(stopErr, setErr)
+}
+
+func (e *Executor) verifyStopped(engine string) (settings.SwitchEngineState, error) {
+	st, err := e.state(engine)
+	if err != nil {
+		return settings.SwitchEngineState{}, err
+	}
+	st.opMu.Lock()
+	defer st.opMu.Unlock()
+	e.desired.mu.Lock()
+	state, err := e.desired.load()
+	e.desired.mu.Unlock()
+	if err != nil {
+		return settings.SwitchEngineState{}, err
+	}
+	observed := e.switchObserved(st, switchIntent(state, engine), e.switchTerminated(st))
+	if observed.Intent != settings.SwitchIntentOff || !observed.TerminationVerified {
+		return observed, errors.New("local Off termination is unverified")
+	}
+	e.desired.mu.Lock()
+	defer e.desired.mu.Unlock()
+	state, err = e.desired.load()
+	if err != nil {
+		return observed, err
+	}
+	if cp := state.PendingSwitch; cp != nil && cp.Phase != settings.SwitchCheckpointReleased {
+		if engine == cp.SourceEngine && cp.SourceLocalOff {
+			cp.Source = observed
+		}
+		if engine == cp.TargetEngine && cp.TargetLocalOff {
+			cp.Target = observed
+		}
+		if err := e.desired.save(state); err != nil {
+			return observed, err
+		}
+	}
+	return observed, nil
 }
 
 // doStop performs the stop. Callers must hold st.opMu.
@@ -756,6 +818,11 @@ func (e *Executor) reconcileFailedCommandStop(st *engineState, engine string, ru
 // Restart stops then starts the engine, holding the op lock across both
 // so nothing can interleave between the stop and the start.
 func (e *Executor) Restart(ctx context.Context, engine string) error {
+	done, err := e.admitMutation(engine)
+	if err != nil {
+		return err
+	}
+	defer done()
 	st, err := e.state(engine)
 	if err != nil {
 		return err

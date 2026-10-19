@@ -7,6 +7,59 @@ SPDX-License-Identifier: Apache-2.0
 
 The [engine settings protocol](ENGINE_SETTINGS.md) documents local/paired
 launch and port editing, revision checks, serialized application and recovery.
+Its [engine switching contract](ENGINE_SETTINGS.md#engine-switching) covers
+`engine:switch`, status/progress, acknowledged source drain, durable receipts
+and interrupted-operation reconciliation. The broker owns transaction order;
+the engine manager owns process lifecycle and intent. Switch recovery precedes
+settings replay and enabled-engine restoration. Local Off reaches the manager's
+durable veto path during remote reservations without waiting for the transaction
+lock. Forward steps are pinned to the preparing manager incarnation; replacement
+interrupts the operation and gates the new manager until reconciliation finishes.
+The gate applies to forward operations, including on the initial spawn. The
+manager's discovery subscription and node/settings projections still reach the
+current worker during recovery, including authoritative local-pause state and
+log-level changes. Mutating direct peer control also remains fenced inside the
+manager until the broker acknowledges successful recovery for its incarnation.
+Off/pause admission and terminal completion share a gate, so an admitted veto
+cannot produce a successful receipt while a stop response is pending. Broker
+cleanup carries the operation-specific Off/pause veto to the manager before
+reconciling a committed target. A veto admitted during cleanup requires another
+reconcile or retained recovery ownership; checkpoint release refuses an
+uncleaned committed target with a durable veto. A delayed Off response cancels
+only its original operation. The internal local stop carries that operation ID;
+manager admission makes the entire delayed request a no-op once the reservation
+is released or belongs to another operation, preserving later explicit On intent.
+Off/pause during retained recovery latches against its checkpoint identity;
+recovery rechecks after reconciliation and drain release, repeats cleanup for a
+new veto, and orders checkpoint release with that admission gate.
+Admission first persists an internal operation-keyed local obligation in the
+switch journal; failure visibly refuses the local request. Before terminal release
+or recovery resolution, the broker holds the operation lock while discharging
+every obligated engine through a verified ordinary stop on the current manager.
+Pause must be persisted and applied too. Discharge is durably recorded; failure
+retains recovery ownership. Restart replays undischarged obligations even with no
+manager checkpoint, before restoration/readiness. An older direct peer start loses
+to the subsequently admitted local Off; later local On waits for this discharge.
+Explicit local start, restart and install with `start: true` share the operation
+lock and recovery reservation check, including installs without a port override
+and the desktop install, installAll and update commands that send them.
+Install preparation runs without either global lock; only its separate start
+uses lifecycle admission. A local Off of that engine, or a local pause, admitted during preparation supersedes
+that older start even after switch discharge. The install remains completed,
+but its start returns busy. A later On retains normal lifecycle ordering.
+The journal lock is released during lifecycle worker waits.
+Clients cannot relay the manager's private switch prepare, step or reconcile
+methods; only the coordinator dispatches those under its operation lock.
+Worker exit is fenced before supervisor
+notification, with already-closed worker
+channels checked again at completion. Transient conservative recovery failures
+retry with bounded backoff on the same replacement; exhausted recovery remains
+hidden and reports a sticky error. Journal/storage uncertainty stays blocked.
+Each of the three recovery attempts has a 60-second cleanup budget, plus
+one-/two-second backoffs: RPC budgets can occupy the synchronous spawn path for
+about 183 seconds. Entry lock waits precede those budgets, so this is not an
+unconditional end-to-end bound. A simultaneous drain-release failure cannot
+downgrade a permanent storage failure.
 
 A Go service that exposes the NVIDIA Personal AI Router API to **UI processes**
 and other clients (CLIs, dashboards, mobile companions, scripts, tests, etc.).

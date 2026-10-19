@@ -38,6 +38,11 @@ type intentParams struct {
 // explicit Stop either finishes first (and Wake then sees intent Off) or waits
 // for the start to finish. A shutting-down manager refuses, like every start.
 func (e *Executor) Wake(ctx context.Context, engine string) error {
+	done, err := e.admitMutation(engine)
+	if err != nil {
+		return err
+	}
+	defer done()
 	st, err := e.state(engine)
 	if err != nil {
 		return err
@@ -60,6 +65,11 @@ func (e *Executor) Wake(ctx context.Context, engine string) error {
 // Sleep stops an engine the way Restart and StopAll do, without recording Off
 // intent, so a later Wake (or restore at the next launch) can start it again.
 func (e *Executor) Sleep(engine string) error {
+	done, err := e.admitMutation(engine)
+	if err != nil {
+		return err
+	}
+	defer done()
 	st, err := e.state(engine)
 	if err != nil {
 		return err

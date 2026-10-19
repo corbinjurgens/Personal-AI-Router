@@ -348,6 +348,9 @@ func (f *policyJointFixture) startOrigin(t *testing.T) {
 	f.origin = startInteropProcess(t, f.originBase, f.originEngine, 0, []string{"OLLAMA_HOST="},
 		"--cluster-dir", f.originCluster, "--loaded-poll-interval", "0", "--log-level", "error")
 	waitForMethod(t, f.origin.msgs, "engine:ready", 10*time.Second)
+	completeEngineManagerRecovery(t, func(method string, params any) jsonrpc.Message {
+		return callRPC(t, f.origin.in, f.origin.msgs, method, params, 10*time.Second)
+	})
 	assertJointEngineIsolation(t, f.origin, f.inertPort)
 	sendLine(t, f.origin.in, jsonrpc.Message{JSONRPC: "2.0", Method: noderec.NotifyNodes, Params: mustMarshal(t, noderec.GetNodesResult{
 		Nodes: []noderec.DirectoryNode{{HostUUID: "policy-joint-target", ClusterUUID: "policy-joint-target", IP: "127.0.0.1", Trusted: true,

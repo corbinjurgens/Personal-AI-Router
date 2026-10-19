@@ -156,13 +156,25 @@ func (r *policyRuntime) identityCurrentLocked(m nodepolicy.StrictAdmissionModel)
 // withdrawn identity. Any other failure is returned, and the caller must not
 // change the engine.
 func (b *Broker) withdrawSettingsIdentity(ctx context.Context, engine string) error {
+	b.forgetSettingsIdentity(engine)
+	return b.pushModelIdentityConfirmed(ctx)
+}
+
+func (b *Broker) forgetSettingsIdentity(engine string) {
 	r := b.nodePolicyRuntime()
 	r.mu.Lock()
 	delete(r.settingsIdentity, engine)
-	bound := r.activationBoundLocked()
 	r.mu.Unlock()
 	go b.refreshStrictAdvertisement()
+}
 
+// Confirm the current identity without holding engineConfigMu across the push
+// slot: proxy replay takes that slot before reading the switch journal.
+func (b *Broker) pushModelIdentityConfirmed(ctx context.Context) error {
+	r := b.nodePolicyRuntime()
+	r.mu.Lock()
+	bound := r.activationBoundLocked()
+	r.mu.Unlock()
 	ctx, cancel := context.WithTimeout(ctx, bound)
 	defer cancel()
 	if !r.acquirePush(ctx) {

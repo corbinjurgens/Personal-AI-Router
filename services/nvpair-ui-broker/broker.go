@@ -155,8 +155,12 @@ type Broker struct {
 	// is released while an engine restarts, so this is what keeps two applies —
 	// which may compete for the same port — from interleaving. Always take it
 	// before engineConfigMu, never the reverse.
-	settingsApplyMu      sync.Mutex
-	engineConfigMu       sync.Mutex
+	settingsApplyMu sync.Mutex
+	engineConfigMu  sync.Mutex
+	// Only live install continuations are retained, under engineConfigMu.
+	pendingInstallStarts map[*pendingInstallStart]struct{}
+	switchInit           sync.Once
+	engineSwitch         *engineSwitchCoordinator
 	engineSettingsLoaded bool
 	engineSettingsError  error
 	engineSettingsEpoch  string
@@ -240,17 +244,18 @@ type Broker struct {
 	// spawn goroutine can be abandoned when the broker is shutting down.
 	// Guarded by workersMu because a respawn reads it off the monitor
 	// goroutine. See proxyBringUpContext.
-	serveCtx       context.Context
-	scanner        *scannerProcess
-	peerServicesMu sync.Mutex
-	nodeInfo       *nodeInfoProcess
-	workloadMgr    *workloadManagerProcess
-	errorsProc     *errorsProcess
-	engineMgr      *rpcWorker
-	manualNodes    *rpcWorker
-	settings       *rpcWorker
-	clusterMgr     *clusterManagerProcess
-	scheduler      *rpcWorker
+	serveCtx            context.Context
+	scanner             *scannerProcess
+	peerServicesMu      sync.Mutex
+	nodeInfo            *nodeInfoProcess
+	workloadMgr         *workloadManagerProcess
+	errorsProc          *errorsProcess
+	engineMgr           *rpcWorker
+	engineMgrRecovering bool // workersMu; replacement is unavailable until switch recovery settles
+	manualNodes         *rpcWorker
+	settings            *rpcWorker
+	clusterMgr          *clusterManagerProcess
+	scheduler           *rpcWorker
 	// proxyProc is the one proxy process whether or not any facade came up in
 	// it. The per-engine handles say which facades serve; this one is what the
 	// node policy and the routing listener, which belong to the process, talk
@@ -578,15 +583,92 @@ func (b *Broker) getErrors() *errorsProcess {
 }
 
 func (b *Broker) setEngineMgr(w *rpcWorker) {
+	c := b.switchCoordinator()
 	b.workersMu.Lock()
+	if b.engineMgr != w {
+		if c.activeCancel != nil {
+			b.engineMgrRecovering = true
+			c.interrupted = true
+			c.activeCancel()
+		}
+	}
 	b.engineMgr = w
 	b.workersMu.Unlock()
+}
+
+func (b *Broker) engineManagerExited(w *rpcWorker) {
+	c := b.switchCoordinator()
+	b.workersMu.Lock()
+	defer b.workersMu.Unlock()
+	if b.engineMgr == w {
+		b.engineMgrRecovering = true
+	}
+	if c.activeManager == w && c.activeCancel != nil {
+		c.interrupted = true
+		c.activeCancel()
+	}
 }
 
 func (b *Broker) getEngineMgr() *rpcWorker {
 	b.workersMu.Lock()
 	defer b.workersMu.Unlock()
+	if b.engineMgrRecovering {
+		return nil
+	}
 	return b.engineMgr
+}
+
+// The replacement stays hidden from ordinary callers until conservative switch
+// recovery has run. Cancellation above lets the active owner release its lock.
+func (b *Broker) recoverReplacementEngineMgr(w *rpcWorker) bool {
+	const attempts = 3
+	for attempt := 0; attempt < attempts; attempt++ {
+		b.workersMu.Lock()
+		current := b.engineMgr == w && w != nil
+		b.workersMu.Unlock()
+		if !current {
+			return false
+		}
+		select {
+		case <-w.Done():
+			return false
+		default:
+		}
+		if b.recoverEngineSwitchOn(w) {
+			b.workersMu.Lock()
+			current = b.engineMgr == w
+			select {
+			case <-w.Done():
+				current = false
+			default:
+			}
+			if current {
+				b.engineMgrRecovering = false
+			}
+			b.workersMu.Unlock()
+			if current {
+				b.forwardErrorsClear(engineSwitchRecoveryBlockedID)
+			}
+			return current
+		}
+		b.engineConfigMu.Lock()
+		permanent := b.switchCoordinator().err != nil
+		b.engineConfigMu.Unlock()
+		if permanent || attempt == attempts-1 {
+			b.reportEngineSwitchRecoveryBlocked()
+			return false
+		}
+		// Recovery retries only conservative inspection/reconcile/release on the
+		// pinned replacement. The ordinary manager surface remains fenced.
+		timer := time.NewTimer(time.Second << attempt)
+		select {
+		case <-w.Done():
+			timer.Stop()
+			return false
+		case <-timer.C:
+		}
+	}
+	return false
 }
 
 func (b *Broker) restoreEnabledEngines(w *rpcWorker) {
@@ -595,6 +677,9 @@ func (b *Broker) restoreEnabledEngines(w *rpcWorker) {
 	}
 	// An unreadable journal must not discard the component stores' enabled
 	// intent. Recovery logs the failure; restore still uses the saved runtime.
+	if !b.recoverEngineSwitch() {
+		return
+	}
 	b.recoverEngineSettings()
 	if b.skipRestoreWhilePaused() {
 		slog.Info("node is paused with stopEngines; engines are restored when it resumes")
@@ -954,6 +1039,9 @@ func (b *Broker) pushClusterIdentityToNodeInfo() {
 // pipeline; the rest of each worker's notification stream is logged and
 // dropped until its control-plane relay is wired in.
 func (b *Broker) forwardEngineNotification(method string, params json.RawMessage) {
+	if b.handleSwitchEngineNotification(method, params) {
+		return
+	}
 	if b.handlePolicyEngineNotification(method, params) {
 		return
 	}
@@ -1022,7 +1110,11 @@ func (b *Broker) handleEngineSubscribe(params json.RawMessage) {
 	if b.relayDir == nil {
 		return
 	}
-	em := b.getEngineMgr()
+	// The manager's own directory subscription must work during recovery;
+	// only forward operations are hidden by getEngineMgr.
+	b.workersMu.Lock()
+	em := b.engineMgr
+	b.workersMu.Unlock()
 	if em == nil {
 		return
 	}

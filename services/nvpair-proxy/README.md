@@ -273,7 +273,7 @@ One limit is outside the proxy's control: current Chromium-based browsers gate a
 
 ### Node policy: admission, tiers, cancel (fork)
 
-The broker pushes this node's policy (`nvpair-shared/nodepolicy`) with five
+The broker pushes this node's policy (`nvpair-shared/nodepolicy`) with
 process-scoped requests — `node/set-policy`, `node/set-availability`,
 `node/set-engine-drain`, `node/set-residency`, `node/set-engine-intent` — each
 validated and refused with the previous state kept when invalid. All but
@@ -284,6 +284,25 @@ active. It is the only request that activates a revision: the broker follows a
 persisted availability change with a `node/set-policy` of the same revision. A
 `node/set-policy` older than the active revision is refused as out of order and
 the previous policy stays. Until the first request arrives the proxy runs on `nodepolicy.Default()` with no active revision.
+
+Engine switching also has two internal process-scoped requests:
+
+- `node/invalidate-engine` takes `{engine, operationId, reason:"engine-switch"}`
+  and answers `{ok:true, runId}`. It removes the engine's installed strict
+  capabilities, advances their ticket generations and wakes queued admissions.
+  Held tickets fail their dispatch check; dispatched work and durable uncertain
+  capacity remain until normal terminal evidence or authoritative reconciliation.
+  Other engines retain eligibility. Repeats for the same engine and operation ID
+  have no further effect, including after fresh capability installation. The
+  broker must replay pending invalidations from its switch journal before
+  enabling facades after proxy restart. Strict readiness remains withdrawn.
+- `node/admission-snapshot` takes an explicit `{}` and answers
+  `{runId, active, activeByEngine, queued, lastActivityMs}`. It copies current
+  counts under the admission mutex, including held and quarantined slots. For
+  switch drain proof, the broker must request it after the drain acknowledgement
+  and match `runId` to the acknowledged proxy incarnation; a cached notification
+  zero is insufficient.
+
 `spec.md` §12 is normative; in short:
 
 - **Admission.** One controller for the whole process decides whether

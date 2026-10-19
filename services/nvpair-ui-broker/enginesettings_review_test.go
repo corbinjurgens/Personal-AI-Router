@@ -172,9 +172,23 @@ func TestEnabledEngineRestorationSurvivesInvalidSettingsJournal(t *testing.T) {
 		t.Fatal(err)
 	}
 	worker, codec := newTestRPCWorkerPipe(t)
+	b.setEngineMgr(worker)
 	restored := make(chan string, 1)
 	go func() {
 		msg, err := codec.Read()
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		if msg.Method != settings.SwitchPrepareMethod {
+			t.Errorf("recovery method=%q", msg.Method)
+			return
+		}
+		if err := codec.Respond(msg.ID, emptySwitchManagerSnapshot()); err != nil {
+			t.Error(err)
+			return
+		}
+		msg, err = codec.Read()
 		if err != nil {
 			t.Error(err)
 			return

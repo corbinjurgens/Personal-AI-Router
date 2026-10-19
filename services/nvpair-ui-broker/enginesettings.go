@@ -163,7 +163,7 @@ func (b *Broker) settingsWorkerCall(ctx context.Context, method string, params a
 }
 
 func (b *Broker) settingsProxy(engine string) *proxyProcess {
-	profile, ok := engineProxyProfileFor(engine)
+	profile, ok := b.frontedEngineProfile(engine)
 	if !ok {
 		return nil
 	}
@@ -252,10 +252,23 @@ func (b *Broker) publishSettingsLocked() {
 			}
 		}
 	}
-	if worker := b.getEngineMgr(); worker != nil {
+	// This is a state projection, not permission to execute forward work.
+	b.workersMu.Lock()
+	worker := b.engineMgr
+	b.workersMu.Unlock()
+	if worker != nil {
 		_ = worker.Notify("engine:settings-projection", all)
 	}
-	b.observeSettingsIdentity(all)
+	identities := make([]settings.Snapshot, 0, len(all))
+	c := b.switchCoordinator()
+	for _, snapshot := range all {
+		// A settings refresh must not undo an acknowledged switch withdrawal
+		// while forward work or conservative cleanup still reserves the engine.
+		if c.store == nil || b.pendingSwitchLocked(snapshot.Engine) == nil {
+			identities = append(identities, snapshot)
+		}
+	}
+	b.observeSettingsIdentity(identities)
 }
 
 func (b *Broker) validateSettingsPortsLocked(ctx context.Context, engine string, config settings.Config, current settings.Snapshot) error {
@@ -551,6 +564,9 @@ func (b *Broker) applyEngineSettings(ctx context.Context, p settings.Request, ca
 			}
 			return receipt, nil
 		}
+	}
+	if err := b.pendingSwitchLocked(p.Engine); err != nil {
+		return settingsReceipt{}, err
 	}
 	// Recheck CORS after acquiring the target's apply lock. An HTTP ingress
 	// check alone can become stale while another accepted apply is running.

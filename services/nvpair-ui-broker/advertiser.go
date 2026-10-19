@@ -95,6 +95,9 @@ func (b *Broker) runAutoAdvertise(ctx context.Context) {
 func (b *Broker) reconcileAdvertise(client *http.Client) {
 	b.engineConfigMu.Lock()
 	defer b.engineConfigMu.Unlock()
+	if b.pendingSwitchLocked("ollama") != nil {
+		return
+	}
 	// During the managed bind -> backend-move transition, engine:status would
 	// probe :11434 and could mistake the proxy (or a remote response forwarded
 	// through it) for an externally started Ollama. Do not query liveness until
@@ -163,6 +166,9 @@ func (b *Broker) runAutoAdvertiseLMStudio(ctx context.Context) {
 func (b *Broker) reconcileAdvertiseLMStudio(client *http.Client) {
 	b.engineConfigMu.Lock()
 	defer b.engineConfigMu.Unlock()
+	if b.pendingSwitchLocked("lmstudio") != nil {
+		return
+	}
 	enginePort, probe := b.localEnginePort("lmstudio", defaultLMStudioPort)
 	proxyPort := b.lmstudioProxyListenPort()
 	if proxyPort != 0 && enginePort == proxyPort {
@@ -215,6 +221,9 @@ func (b *Broker) runAutoAdvertiseEngine(ctx context.Context, profile engineProxy
 func (b *Broker) reconcileAdvertiseEngine(profile engineProxyProfile, client *http.Client) {
 	b.engineConfigMu.Lock()
 	defer b.engineConfigMu.Unlock()
+	if b.pendingSwitchLocked(profile.Name) != nil {
+		return
+	}
 
 	enginePort := int(b.engineProxy(profile).backendPort.Load())
 	proxyPort := b.engineProxyListenPort(profile)

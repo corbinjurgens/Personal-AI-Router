@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"nvpair-shared/applog"
+	settings "nvpair-shared/enginesettings"
 )
 
 // forwardLogLevel pushes an already-validated log level down to every
@@ -21,7 +22,7 @@ import (
 // never propagated: a child that won't take the new level (e.g. its pipe
 // is mid-teardown, or it never started) must not fail the caller's
 // log/set-level request, which has already succeeded for the broker
-// itself. Each handle is read through its workersMu-guarded getter because
+// itself. Each handle is read through a workersMu-guarded getter or snapshot because
 // a supervisor may swap it (on a restart) concurrently with this call.
 func (b *Broker) forwardLogLevel(level string) {
 	if s := b.getScanner(); s != nil {
@@ -53,7 +54,11 @@ func (b *Broker) forwardLogLevel(level string) {
 			slog.Warn("failed to forward log/set-level to nvpair-errors", "err", err)
 		}
 	}
-	if em := b.getEngineMgr(); em != nil {
+	// Configuration must also reach a current manager hidden by recovery.
+	b.workersMu.Lock()
+	em := b.engineMgr
+	b.workersMu.Unlock()
+	if em != nil {
 		if err := em.SetLogLevel(level); err != nil {
 			slog.Warn("failed to forward log/set-level to engine-manager", "err", err)
 		}
@@ -131,6 +136,8 @@ func (b *Broker) handleMessage(msg *Message) {
 	}
 
 	switch msg.Method {
+	case "engine:switch", "engine:switch-status":
+		go b.handleEngineSwitch(msg)
 	case "engine:get-settings", "engine:preview-settings", "engine:apply-settings":
 		go b.handleEngineSettings(msg)
 	case "ping":
@@ -219,7 +226,10 @@ func (b *Broker) handleMessage(msg *Message) {
 	case "node/add", "node/remove", "nodes/list":
 		b.relayToManualNodes(msg)
 
-	case "engine:set-reserved-port", "internal:set-reserved-port":
+	// Switch executor calls belong to the coordinator, which retains the
+	// operation lock. Relaying a client's target-start step would bypass it.
+	case "engine:set-reserved-port", "internal:set-reserved-port",
+		settings.SwitchPrepareMethod, settings.SwitchStepMethod, settings.SwitchReconcileMethod:
 		if err := b.codec.RespondError(msg.ID, -32601, "method not found: "+msg.Method); err != nil {
 			log.Printf("failed to reject private engine method %s: %v", msg.Method, err)
 		}
@@ -311,6 +321,37 @@ func (b *Broker) relayToEngine(msg *Message) {
 	go b.relayToEngineNow(msg)
 }
 
+// Explicit local On must serialize with switch obligation discharge even when
+// the caller leaves the engine's port unchanged.
+func engineLocalOnRequest(method string, params json.RawMessage) bool {
+	switch method {
+	case "engine:start", "engine:restart":
+		return true
+	case "engine:install":
+		var request struct {
+			Start bool `json:"start"`
+		}
+		return json.Unmarshal(params, &request) == nil && request.Start
+	default:
+		return false
+	}
+}
+
+type pendingInstallStart struct {
+	engine     string
+	superseded bool
+}
+
+// Called only after local Off (one engine) or local pause (engine "", every
+// engine) admission succeeds, under engineConfigMu.
+func (b *Broker) supersedeInstallStartsLocked(engine string) {
+	for pending := range b.pendingInstallStarts {
+		if engine == "" || pending.engine == engine {
+			pending.superseded = true
+		}
+	}
+}
+
 func (b *Broker) relayToEngineNow(msg *Message) {
 	if needsOllamaPortGate(msg.Method, msg.Params) && b.ollamaFacadeIsPendingBackend() {
 		go func() {
@@ -341,10 +382,110 @@ func (b *Broker) relayToEngineNow(msg *Message) {
 		return
 	}
 
+	var installStart *pendingInstallStart
+	if msg.Method == "engine:install" && engineLocalOnRequest(msg.Method, msg.Params) {
+		// Preserve early proxy-port refusal before doing installation work.
+		// Normal start admission rechecks after preparation has completed.
+		if engine, port, assigned := enginePortAssignmentRequest(msg.Method, msg.Params); assigned && b.rejectProxyHeldPort(msg, port, engine) {
+			return
+		}
+		// Preparation can take minutes. It must not hold either global lock,
+		// and must never leave a manager-owned unguarded start continuation.
+		var params map[string]json.RawMessage
+		var engine string
+		if err := json.Unmarshal(msg.Params, &params); err != nil {
+			_ = b.codec.RespondError(msg.ID, -32602, err.Error())
+			return
+		}
+		if err := json.Unmarshal(params["engine"], &engine); err != nil {
+			_ = b.codec.RespondError(msg.ID, -32602, "engine is required")
+			return
+		}
+		installStart = &pendingInstallStart{engine: engine}
+		b.engineConfigMu.Lock()
+		if b.pendingInstallStarts == nil {
+			b.pendingInstallStarts = make(map[*pendingInstallStart]struct{})
+		}
+		b.pendingInstallStarts[installStart] = struct{}{}
+		b.engineConfigMu.Unlock()
+		defer func() {
+			b.engineConfigMu.Lock()
+			delete(b.pendingInstallStarts, installStart)
+			b.engineConfigMu.Unlock()
+		}()
+		params["start"] = json.RawMessage(`false`)
+		preparation, err := json.Marshal(params)
+		if err != nil {
+			_ = b.codec.RespondError(msg.ID, -32602, err.Error())
+			return
+		}
+		em := b.getEngineMgr()
+		if em == nil {
+			_ = b.codec.RespondError(msg.ID, -32000, "engine-manager not available")
+			return
+		}
+		_, rpcErr, err := em.CallNoTimeout(context.Background(), "engine:install", preparation)
+		if err != nil {
+			_ = b.codec.RespondError(msg.ID, -32000, fmt.Sprintf("engine call failed: %v", err))
+			return
+		}
+		if rpcErr != nil {
+			_ = b.codec.RespondError(msg.ID, rpcErr.Code, rpcErr.Message)
+			return
+		}
+		// Start and combined install/start both return Manager.runOp's Status.
+		// Preserve every original option (including port and bind) for start.
+		start := *msg
+		start.Method = "engine:start"
+		msg = &start
+	}
 	requestedEngine, requestedPort, isEnginePortAssignment := enginePortAssignmentRequest(msg.Method, msg.Params)
-	if isEnginePortAssignment || msg.Method == "engine:stop" || msg.Method == "engine:start" || msg.Method == "engine:restart" {
+	lifecycleLocked := false
+	localOffEngine := ""
+	localOffOperationID := ""
+	offOperationLocked := false
+	if msg.Method == "engine:stop" {
+		var target struct {
+			Engine string `json:"engine"`
+		}
+		if json.Unmarshal(msg.Params, &target) == nil && target.Engine != "" {
+			remote, reserved, operationID, err := b.admitLocalEngineOff(target.Engine)
+			if err != nil {
+				_ = b.codec.RespondError(msg.ID, -32000, err.Error())
+				return
+			}
+			if reserved && !remote {
+				_ = b.codec.RespondError(msg.ID, -32000, "Engine switch reserves this engine (busy).")
+				return
+			}
+			if remote {
+				localOffEngine = target.Engine
+				localOffOperationID = operationID
+			} else {
+				offOperationLocked = true
+				defer b.settingsApplyMu.Unlock()
+			}
+		}
+	}
+	if localOffEngine == "" && (isEnginePortAssignment || msg.Method == "engine:stop" || engineLocalOnRequest(msg.Method, msg.Params)) {
+		if !offOperationLocked {
+			b.settingsApplyMu.Lock()
+			defer b.settingsApplyMu.Unlock()
+		}
 		b.engineConfigMu.Lock()
 		defer b.engineConfigMu.Unlock()
+		lifecycleLocked = true
+		var target struct {
+			Engine string `json:"engine"`
+		}
+		if err := json.Unmarshal(msg.Params, &target); err != nil || b.pendingSwitchLocked(target.Engine) != nil {
+			_ = b.codec.RespondError(msg.ID, -32000, "Engine switch recovery reserves this engine.")
+			return
+		}
+		if installStart != nil && installStart.superseded {
+			_ = b.codec.RespondError(msg.ID, -32000, "Engine install start superseded by local Off or pause (busy).")
+			return
+		}
 		defer b.reconcileLegacySettingsLocked()
 	}
 	isOllamaPortAssignment := isEnginePortAssignment && requestedEngine == "ollama"
@@ -366,6 +507,13 @@ func (b *Broker) relayToEngineNow(msg *Message) {
 	}
 
 	em := b.getEngineMgr()
+	if localOffEngine != "" {
+		// Recovery hides the replacement from forward callers; local Off must
+		// still reach its durable veto owner while that reservation is held.
+		b.workersMu.Lock()
+		em = b.engineMgr
+		b.workersMu.Unlock()
+	}
 	if em == nil {
 		if err := b.codec.RespondError(msg.ID, -32000, "engine-manager not available"); err != nil {
 			log.Printf("failed to respond to %s: %v", msg.Method, err)
@@ -376,7 +524,50 @@ func (b *Broker) relayToEngineNow(msg *Message) {
 	// read loop allocates a fresh Message per request so these are stable.
 	id := msg.ID
 	method := msg.Method
-	result, rpcErr, err := em.CallNoTimeout(context.Background(), method, msg.Params)
+	params := msg.Params
+	if localOffOperationID != "" {
+		// This Off was admitted against this remote reservation. Once it has
+		// settled, the delayed request must not stop a later local On or switch.
+		var err error
+		params, err = json.Marshal(struct {
+			Engine            string `json:"engine"`
+			SwitchOperationID string `json:"switchOperationId"`
+		}{localOffEngine, localOffOperationID})
+		if err != nil {
+			_ = b.codec.RespondError(id, -32000, err.Error())
+			return
+		}
+		b.engineConfigMu.Lock()
+		// A delayed scoped stop is a no-op after durable discharge. Do not
+		// withdraw the identity of a later local On or switch in that case.
+		c := b.switchCoordinator()
+		withdrawn := c.withdrawnIdentityID == localOffOperationID && c.withdrawnIdentityProxy == b.policyProxy()
+		confirmWithdrawal := false
+		if obligation, ok := c.store.journal.LocalObligations[localOffOperationID]; ok && !obligation.Discharged && !withdrawn {
+			b.forgetSettingsIdentity(localOffEngine)
+			confirmWithdrawal = true
+		}
+		b.engineConfigMu.Unlock()
+		if confirmWithdrawal {
+			err = b.pushModelIdentityConfirmed(context.Background())
+		}
+		if err != nil {
+			_ = b.codec.RespondError(id, -32000, err.Error())
+			return
+		}
+	}
+	if lifecycleLocked {
+		b.engineConfigMu.Unlock()
+	}
+	result, rpcErr, err := em.CallNoTimeout(context.Background(), method, params)
+	if lifecycleLocked {
+		b.engineConfigMu.Lock()
+	}
+	if localOffEngine != "" {
+		// The manager has now persisted the veto and cancelled its startup;
+		// only then cancel the coordinator's drain/response wait.
+		b.cancelRemoteEngineSwitchOperation(localOffEngine, localOffOperationID)
+	}
 	switch {
 	case err != nil:
 		if e := b.codec.RespondError(id, -32000, fmt.Sprintf("engine call failed: %v", err)); e != nil {

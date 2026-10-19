@@ -34,6 +34,7 @@ import {
 } from './proxy-engines'
 import { emitBridgePush } from './broadcaster'
 import { parseEngineSettings } from './engine-settings'
+import { parseEngineSwitchChanged } from './engine-switch'
 import { parseEngineDescriptors } from './engine-descriptors'
 import { resolvePullCatchError } from './pull-error-handling'
 import { isServiceLogLevelEnabled, serviceLogLevel } from './service-log-level'
@@ -1767,6 +1768,17 @@ class ModularSupervisor {
     }
 
     private handleEngineManagerNotification(notification: JsonRpcNotification): void {
+        if (notification.method === 'engine:switch-changed') {
+            try {
+                emitBridgePush(
+                    'engines:switch-changed',
+                    parseEngineSwitchChanged(notification.params)
+                )
+            } catch {
+                /* Ignore an invalid peer notification. */
+            }
+            return
+        }
         if (notification.method === 'engine:settings-changed') {
             try {
                 emitBridgePush('engines:settings-changed', parseEngineSettings(notification.params))

@@ -89,7 +89,10 @@ func (b *Broker) sendNodeProjection(onlyOnStrictChange bool) {
 	r := b.nodePolicyRuntime()
 	r.projectionMu.Lock()
 	defer r.projectionMu.Unlock()
-	worker := b.getEngineMgr()
+	// Recovery needs authoritative policy, including a pending local pause.
+	b.workersMu.Lock()
+	worker := b.engineMgr
+	b.workersMu.Unlock()
 	if worker == nil {
 		return
 	}
@@ -102,7 +105,7 @@ func (b *Broker) sendNodeProjection(onlyOnStrictChange bool) {
 		return
 	}
 	r.strictPublished = advertisement.StrictAdmission
-	projection := nodeProjection{Policy: advertisement, PausedLocally: pausedLocally(r.current)}
+	projection := nodeProjection{Policy: advertisement, PausedLocally: pausedLocally(r.current) || r.localPauseRequested}
 	r.mu.Unlock()
 	if err := worker.Notify(engineNodeProjectionMethod, projection); err != nil {
 		slog.Warn("could not publish the node projection to engine-manager", "err", err)

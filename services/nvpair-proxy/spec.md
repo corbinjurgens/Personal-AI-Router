@@ -301,7 +301,7 @@ which takes one off and puts the other on.
 | Class | Addressed? | Examples |
 | --- | --- | --- |
 | Facade-scoped | yes | `ready`, `error`, `node/*`, `errors:*`, `set-port`, `discovery:subscribe`, `discovery:nodes` |
-| Process-scoped | no | `log/set-level`, `node/set-priority`, `node/set-policy`, `node/set-availability`, `node/set-engine-drain`, `node/set-residency`, `node/set-engine-intent`, `workload/cancel`, `workload:*`, `admission/*`, `discovery:node-activity` |
+| Process-scoped | no | `log/set-level`, `node/set-priority`, `node/set-policy`, `node/set-availability`, `node/set-engine-drain`, `node/set-residency`, `node/set-engine-intent`, `node/invalidate-engine`, `node/admission-snapshot`, `workload/cancel`, `workload:*`, `admission/*`, `discovery:node-activity` |
 | Bootstrap | names its engine in the payload | `facade/enable` |
 
 `facade/enable` is unaddressed because it runs *before* the facade it names
@@ -807,9 +807,9 @@ source wins.
 ### 12.1 Broker → proxy requests
 
 All are process-scoped (§4) and answered `{"ok":true}` or with a JSON-RPC error,
-except `node/set-policy`, which answers an acknowledgement (§12.1.1). Input is
+except the typed acknowledgements and snapshot described below. Input is
 validated before anything is applied, and an invalid request leaves the previous
-state in force. The broker re-sends all five whenever the proxy starts; until it does, the proxy runs on
+state in force. The broker re-sends policy state whenever the proxy starts; until it does, the proxy runs on
 `nodepolicy.Default()` with availability `available` and no active revision.
 
 | Method | Params | Effect |
@@ -819,10 +819,13 @@ state in force. The broker re-sends all five whenever the proxy starts; until it
 | `node/set-engine-drain` | `{engine, drain}` | refuse new work for one engine during a settings restart |
 | `node/set-residency` | `{loadedByEngine}` | the models loaded per engine on this node, normalized per engine |
 | `node/set-engine-intent` | `{enabledByEngine}` | each managed engine's saved On/Off intent |
+| `node/invalidate-engine` | `{engine, operationId, reason:"engine-switch"}` | answers `{ok:true, runId}`; withdraws engine strict eligibility and fences held tickets (§12.1.2) |
+| `node/admission-snapshot` | `{}` | answers `{runId, active, activeByEngine, queued, lastActivityMs}` from current admission state (§12.1.2) |
 | `workload/cancel` | `{workloadId, engine?, runId?, regenerate?}` | §12.5; answers `{found}` |
 
 Unknown fields and engine IDs that are not `engines.ValidRoutingID` are errors. A
 valid descriptor engine ID with no facade here is accepted state.
+Invalidation accepts engine ID syntax independently of registry membership.
 
 #### 12.1.1 Activation acknowledgement
 
@@ -851,6 +854,36 @@ it last replayed to, with the run id that process first acknowledged under, and
 only for the exact revision it pushed, and it bounds its whole wait for one
 (`nvpair-ui-broker` README). The lease that gates public egress on the active
 revision belongs to hybrid dispatch and is not part of this contract.
+
+#### 12.1.2 Engine switch invalidation and fresh drain evidence
+
+These are internal broker requests. Invalidation requires every field, rejects
+nulls and unknown fields, validates `engine` with `engines.ValidID`, and requires
+`operationId` to match the switch request-ID rule: 1–128 ASCII bytes, first
+alphanumeric, remaining alphanumeric or `.`, `_`, `:`, `-`. The only reason is
+`engine-switch`. Under the admission mutex it removes every installed strict
+model for that engine, advances each generation, and wakes queued admissions.
+Held tickets fail `BeforeStrictDispatch`. Dispatched work is not cancelled;
+capacity markers and quarantine are not cleared. Other engines are unaffected.
+`StrictReadiness` remains withdrawn until the authoritative qualification feed
+exists; invalidation never grants readiness.
+
+Deduplication is per engine and operation ID for the lifetime of the proxy.
+Repeating an invalidation has no effect even if fresh capabilities have since
+been installed. Source and target may be invalidated independently using the
+same operation ID. The broker must replay pending invalidations from its switch
+journal before enabling facades after proxy restart; `runId` identifies the
+incarnation acknowledging the invalidation. The proxy does not persist switch
+journal state.
+
+The snapshot request requires an explicit empty object, rejects other fields,
+and copies current admission counts and activity maps under the admission mutex
+at request time. Active counts include held tickets, dispatched work and
+quarantined capacity, matching `admission/state`. The broker must request a fresh
+snapshot after the drain acknowledgement and validate the returned `runId`
+against that proxy incarnation. A cached zero, missing snapshot or changed
+incarnation cannot prove a drained engine. The response is a snapshot, not a
+subscription or a capacity-release operation.
 
 Proxy → broker notifications, also process-scoped:
 

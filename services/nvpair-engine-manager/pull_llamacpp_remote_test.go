@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"nvpair-shared/clustertrust"
+	settings "nvpair-shared/enginesettings"
 )
 
 func TestLlamaCPPPullRemoteDisconnectStopsDownload(t *testing.T) {
@@ -90,6 +91,26 @@ func TestE2ELlamaCPPPullRemoteDisconnectStopsDownload(t *testing.T) {
 	}
 	if !status.Running || status.Port != state.port {
 		t.Fatalf("engine status = %+v, want running fake router at %d", status, state.port)
+	}
+	// This fixture owns the parent pipe. Complete its conservative startup
+	// handshake before asking the independently authenticated ec mutation path.
+	send(t, manager.stdin, 2, settings.SwitchPrepareMethod, settings.SwitchPrepareRequest{})
+	var inspected switchExecutorResult
+	if err := json.Unmarshal(waitResult(t, manager.frames, "2", 10*time.Second), &inspected); err != nil {
+		t.Fatalf("decode recovery inspection: %v", err)
+	}
+	if inspected.Error != nil || inspected.Checkpoint != nil || inspected.Configuration.ManagerIncarnation == "" {
+		t.Fatalf("unexpected startup recovery state: %+v", inspected)
+	}
+	send(t, manager.stdin, 3, switchRecoveryReadyMethod, map[string]string{"managerIncarnation": inspected.Configuration.ManagerIncarnation})
+	var ready struct {
+		ManagerIncarnation string `json:"managerIncarnation"`
+	}
+	if err := json.Unmarshal(waitResult(t, manager.frames, "3", 10*time.Second), &ready); err != nil {
+		t.Fatalf("decode recovery acknowledgement: %v", err)
+	}
+	if ready.ManagerIncarnation != inspected.Configuration.ManagerIncarnation {
+		t.Fatalf("recovery acknowledgement = %+v", ready)
 	}
 	waitPortServing(t, controlPort)
 	tlsConfig, ok := clustertrust.Open(clientDir).ClientTLSConfig("pull-server")

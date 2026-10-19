@@ -16,7 +16,14 @@ import (
 	"net"
 	"testing"
 	"time"
+
+	settings "nvpair-shared/enginesettings"
 )
+
+func emptySwitchManagerSnapshot() switchManagerSnapshot {
+	configuration := settings.SwitchConfigurationSnapshot{ManagerIncarnation: "fixture-manager", RegistryRuntimeFingerprint: "fixture-runtime"}
+	return switchManagerSnapshot{Configuration: configuration, ConfigurationFence: settings.SwitchConfigurationToken(configuration)}
+}
 
 // Both engines' port tests assert on an ownership gate opening or staying
 // shut, and did it by hand with an inline select. Three shapes recurred, and

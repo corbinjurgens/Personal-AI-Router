@@ -61,6 +61,27 @@ func (b *Broker) setAvailability(ctx context.Context, state nodepolicy.Availabil
 	r.transitionCancel = cancel
 	r.mu.Unlock()
 
+	if state == nodepolicy.Paused && origin == nodepolicy.PausedLocally {
+		if err := b.vetoRemoteEngineSwitch("", false); err != nil {
+			cancel()
+			r.mu.Lock()
+			if r.transitionGen == gen {
+				r.localPauseRequested = false
+			}
+			r.mu.Unlock()
+			return "", err
+		}
+		// An install admitted before this pause must not start its engine
+		// afterwards; one submitted later is not affected.
+		b.engineConfigMu.Lock()
+		b.supersedeInstallStartsLocked("")
+		b.engineConfigMu.Unlock()
+		// Deliver the authoritative pending pause to the manager's veto owner
+		// before cancelling waits or waiting for the availability transition.
+		b.publishNodeProjection()
+		b.cancelRemoteSwitch()
+	}
+
 	type outcome struct {
 		availability nodepolicy.Availability
 		err          error

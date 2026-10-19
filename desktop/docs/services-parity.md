@@ -16,6 +16,9 @@ history.
 
 ## Status summary
 
+Engine switching has a typed invoke/status bridge and sequence notifications;
+desktop controls are not yet implemented. The target broker owns the operation.
+
 | Domain                     | Status                          | Current state                                                                                                                                   |
 | -------------------------- | ------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
 | Process supervision        | Complete                        | Electron attaches to `nvpair-service`, which owns `nvpair-ui-broker`; the broker supervises all workers                                                                   |

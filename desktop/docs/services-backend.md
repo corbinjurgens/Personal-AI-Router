@@ -169,6 +169,14 @@ remote control surface where supported.
 
 ### Engine settings
 
+The typed engine API also exposes `switchEngine` and `switchStatus`, mapped to
+`engine:switch` and `engine:switch-status`. The broker owns sequencing, drain,
+intent and recovery; the bridge validates the complete receipt and republishes
+`engine:switch-changed` as `engines:switch-changed` with node, request and sequence.
+Status accepts `afterSequence` for a bounded wait. Numeric refusal codes survive
+the IPC envelope, including configuration conflict (-32010) and local veto
+(-32011). These methods have no desktop controls yet.
+
 Ports and the engine arguments are one authoritative, revisioned record owned by
 the node running the engine. The broker exposes `engine:{get,preview,apply}-settings`
 and relays a request naming another node to that peer's engine manager, so a

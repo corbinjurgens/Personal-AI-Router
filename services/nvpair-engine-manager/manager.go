@@ -41,6 +41,10 @@ type opParam struct {
 	Port   int    `json:"port,omitempty"`
 	Bind   string `json:"bind,omitempty"`
 	Start  bool   `json:"start,omitempty"`
+	// SwitchOperationID scopes a delayed local Off to the admitted reservation.
+	SwitchOperationID string `json:"switchOperationId,omitempty"`
+	// VerifyStop requests internal cleanup evidence on an ordinary unscoped stop.
+	VerifyStop bool `json:"verifyStop,omitempty"`
 }
 
 type actionParam struct {
@@ -62,6 +66,8 @@ type setPortParam struct {
 // start, stop, restart, action) run in their own goroutine so the read
 // loop never blocks; the codec serializes the concurrent responses.
 type Manager struct {
+	switchWatchers   switchWatchers
+	switchRelay      switchRelay
 	settingsRelay    settingsRelay
 	policyRelay      policyRelay
 	codec            *Codec
@@ -78,6 +84,9 @@ type Manager struct {
 }
 
 func NewManager(codec *Codec, exec *Executor, mesh *clustertrust.Mesh, clusterDir string) *Manager {
+	// Set the gate before main starts the direct mTLS listener. State delivery
+	// and conservative stdio recovery remain available while it is closed.
+	exec.switchRecoveryPending.Store(true)
 	// cancel defaults to a no-op so the "shutdown" handler is safe even if
 	// handleMessage is reached before Run() installs the real CancelFunc
 	// (e.g. a unit test calling it directly); Run overwrites it.
@@ -104,6 +113,8 @@ func NewManager(codec *Codec, exec *Executor, mesh *clustertrust.Mesh, clusterDi
 		BaseConfigDir:     baseDir, ResolveRoute: m.resolveControlRoute,
 	})
 	m.settingsRelay.send = codec.Notify
+	m.switchRelay.send = codec.Notify
+	exec.switchParent = m.switchRelay.call
 	exec.settingsParent = m.settingsRelay.call
 	m.policyRelay.send = codec.Notify
 	exec.policyParent = m.policyRelay.call
@@ -167,7 +178,7 @@ func (m *Manager) readLoop(ctx context.Context) error {
 }
 
 func (m *Manager) handleMessage(ctx context.Context, msg *Message) {
-	if m.handleSettingsMessage(ctx, msg) || m.handlePolicyMessage(ctx, msg) {
+	if m.handleSwitchMessage(ctx, msg) || m.handleSettingsMessage(ctx, msg) || m.handlePolicyMessage(ctx, msg) {
 		return
 	}
 	if msg.Method == applog.SetLevelMethod {
@@ -212,6 +223,19 @@ func (m *Manager) handleMessage(ctx context.Context, msg *Message) {
 	}
 
 	switch msg.Method {
+	case switchRecoveryReadyMethod:
+		var p struct {
+			ManagerIncarnation string `json:"managerIncarnation"`
+		}
+		if !m.parse(msg, &p) {
+			return
+		}
+		if err := m.exec.completeSwitchRecovery(p.ManagerIncarnation); err != nil {
+			m.respondOrErr(msg, nil, err)
+			return
+		}
+		m.codec.Respond(msg.ID, map[string]string{"managerIncarnation": m.exec.switchIncarnation})
+
 	case "shutdown":
 		if err := m.codec.Respond(msg.ID, nil); err != nil {
 			log.Printf("failed to respond to shutdown: %v", err)
@@ -343,20 +367,31 @@ func (m *Manager) runOp(ctx context.Context, msg *Message) {
 	var err error
 	switch msg.Method {
 	case "engine:install":
-		if err = m.exec.Install(ctx, p.Engine); err == nil && p.Start {
-			err = start()
+		if p.Start {
+			err = m.exec.InstallWithStart(ctx, ctx, p.Engine, startOpts{Port: p.Port, Bind: p.Bind})
+		} else {
+			err = m.exec.Install(ctx, p.Engine)
 		}
 	case "engine:uninstall":
 		err = m.exec.Uninstall(ctx, p.Engine)
 	case "engine:start":
 		err = start()
 	case "engine:stop":
-		err = m.exec.Stop(p.Engine)
+		if p.SwitchOperationID != "" {
+			err = m.exec.StopForSwitch(p.Engine, p.SwitchOperationID)
+		} else {
+			err = m.exec.Stop(p.Engine)
+		}
 	case "engine:restart":
 		err = m.exec.Restart(ctx, p.Engine)
 	}
 	if err != nil {
-		m.codec.RespondError(msg.ID, -32000, err.Error())
+		m.respondOrErr(msg, nil, err)
+		return
+	}
+	if msg.Method == "engine:stop" && p.VerifyStop && p.SwitchOperationID == "" {
+		observed, err := m.exec.verifyStopped(p.Engine)
+		m.respondOrErr(msg, observed, err)
 		return
 	}
 	st, err := m.exec.Status(p.Engine)
@@ -442,7 +477,7 @@ func (m *Manager) runAction(ctx context.Context, msg *Message) {
 		res, err = m.exec.Action(ctx, p.Engine, p.Action, p.Params)
 	}
 	if err != nil {
-		m.codec.RespondError(msg.ID, -32000, err.Error())
+		m.respondOrErr(msg, nil, err)
 		return
 	}
 	// An action may have changed what's resident (load/unload/pull/delete/run, or
@@ -477,6 +512,11 @@ func (m *Manager) parse(msg *Message, v any) bool {
 
 func (m *Manager) respondOrErr(msg *Message, result any, err error) {
 	if err != nil {
+		var busy *switchBusyError
+		if errors.As(err, &busy) {
+			m.codec.RespondErrorData(msg.ID, -32000, err.Error(), map[string]string{"kind": "busy"})
+			return
+		}
 		m.codec.RespondError(msg.ID, rpcCode(err), err.Error())
 		return
 	}

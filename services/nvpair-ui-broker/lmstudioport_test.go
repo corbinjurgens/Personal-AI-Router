@@ -961,6 +961,13 @@ func TestEngineManagerRespawnReconcilesUnknownCustomBackendBeforeRestore(t *test
 			for {
 				msg, err := newEngineCodec.Read()
 				if err != nil || msg.Method != engineNodeProjectionMethod {
+					if err == nil && msg.Method == "engine:switch-prepare" {
+						if err := newEngineCodec.Respond(msg.ID, emptySwitchManagerSnapshot()); err != nil {
+							t.Error(err)
+							return nil, err
+						}
+						continue
+					}
 					return msg, err
 				}
 			}

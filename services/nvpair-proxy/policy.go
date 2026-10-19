@@ -7,7 +7,7 @@ package main
 // process-scoped: the policy is the machine's, not an engine's, so none of
 // them is addressed to a facade. Each validates before applying, keeps the
 // previous state on invalid input, and answers {"ok":true} or a JSON-RPC
-// error; node/set-policy answers a nodepolicy.PolicyAck instead. Until the
+// error, with typed acknowledgements and snapshot results where specified. Until the
 // broker sends anything the controller runs on the content of
 // nodepolicy.Default() with availability Available and no active revision, so
 // the broker's first acknowledged revision is the first the proxy holds.
@@ -38,6 +38,10 @@ func (p *Proxy) handlePolicyMethod(msg *Message, method string) bool {
 		err = p.applySetEngineDrain(msg.Params)
 	case nodepolicy.MethodSetResidency:
 		err = p.applySetResidency(msg.Params)
+	case nodepolicy.MethodInvalidateEngine:
+		result, err = p.applyInvalidateEngine(msg.Params)
+	case nodepolicy.MethodAdmissionSnapshot:
+		result, err = p.applyAdmissionSnapshot(msg.Params)
 	case nodepolicy.MethodSetEngineIntent:
 		err = p.applySetEngineIntent(msg.Params)
 	case nodepolicy.MethodSetModelIdentity:
