@@ -531,8 +531,15 @@ function validateModelPreferences(policy: JsonObject): void {
                   .find(p => p?.engine === ref.engine && p.model === ref.model)
             : undefined
         if (!profile) throw new Error('Resident model requires a qualified profile')
-        for (const field of ['contextTokens', 'maxOutputTokens', 'maxConcurrent', 'memoryBytes']) {
+        for (const field of ['maxConcurrent', 'memoryBytes']) {
             routingInteger(profile[field], 1, Number.MAX_SAFE_INTEGER)
+        }
+        // Mirror Go's validateOutputAndQualification: an output ceiling must be
+        // positive and below a nonzero contextTokens.
+        const contextTokens = routingInteger(profile.contextTokens, 1, Number.MAX_SAFE_INTEGER)
+        const maxOutputTokens = routingInteger(profile.maxOutputTokens, 1, Number.MAX_SAFE_INTEGER)
+        if (maxOutputTokens >= contextTokens) {
+            throw new Error('maxOutputTokens must be below a nonzero contextTokens')
         }
         qualificationRef(profile.qualification)
     }

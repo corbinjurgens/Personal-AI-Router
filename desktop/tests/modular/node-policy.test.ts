@@ -119,6 +119,55 @@ describe('served/resident policy contract', () => {
         })
     })
 
+    /** Resident policy with one qualified profile at the given token bounds. */
+    const residentPolicy = (contextTokens: number, maxOutputTokens: number): string =>
+        JSON.stringify({
+            revision: '31',
+            servedModels: [{ engine: 'ollama', model: 'm' }],
+            residentModels: [{ engine: 'ollama', model: 'm' }],
+            profiles: [
+                {
+                    engine: 'ollama',
+                    model: 'm',
+                    contextTokens,
+                    maxOutputTokens,
+                    maxConcurrent: 1,
+                    memoryBytes: 1024,
+                    qualification: { id: 'q', revision: '1' }
+                }
+            ]
+        })
+
+    const RESIDENT = [{ engine: 'ollama', model: 'm' }]
+
+    it('keeps a non-empty residentModels list through the bridge round trip', () => {
+        const draft = parsePolicyText(residentPolicy(4096, 512))
+        expect(draft).toHaveProperty('residentModels', RESIDENT)
+        const saved = parsePolicySetResult({ policy: draft })
+        const params = policySetParams({
+            policy: saved.policy,
+            expectedPersistedRevision: saved.revision
+        })
+        expect(params.policy).toEqual(draft)
+    })
+
+    it('accepts a resident output ceiling below a nonzero context bound', () => {
+        expect(() => parsePolicyText(residentPolicy(4096, 512))).not.toThrow()
+    })
+
+    it('rejects a resident output ceiling at or above the context bound', () => {
+        expect(() => parsePolicyText(residentPolicy(512, 512))).toThrow(
+            'maxOutputTokens must be below a nonzero contextTokens'
+        )
+        expect(() => parsePolicyText(residentPolicy(512, 1024))).toThrow(
+            'maxOutputTokens must be below a nonzero contextTokens'
+        )
+    })
+
+    it('rejects a positive resident output ceiling without a context bound', () => {
+        expect(() => parsePolicyText(residentPolicy(0, 512))).toThrow()
+    })
+
     it('rejects resident permission outside the served set', () => {
         expect(() =>
             parsePolicyText(
