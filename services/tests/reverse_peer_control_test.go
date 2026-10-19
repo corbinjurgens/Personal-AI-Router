@@ -11,7 +11,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
-	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -22,11 +21,9 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
-	"runtime"
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"testing"
 	"time"
 
@@ -393,8 +390,7 @@ func removeAuthorityFile(t *testing.T, path string) {
 		if err == nil || os.IsNotExist(err) {
 			return
 		}
-		var errno syscall.Errno
-		if runtime.GOOS != "windows" || !errors.As(err, &errno) || (errno != 5 && errno != 32) {
+		if !isWindowsSharingError(err) {
 			t.Fatal(err)
 		}
 		if time.Now().After(deadline) {

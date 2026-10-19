@@ -539,10 +539,7 @@ func TestPairedDirectoryBootstrap(t *testing.T) {
 			}
 			membership := func(node *task1Node) map[string]memberAuthority {
 				t.Helper()
-				data, err := os.ReadFile(filepath.Join(node.base, "cluster", "members.json"))
-				if err != nil {
-					t.Fatal(err)
-				}
+				data := readLiveDurableFile(t, filepath.Join(node.base, "cluster", "members.json"))
 				var members []task1Member
 				task2Decode(t, data, &members)
 				result := map[string]memberAuthority{}
@@ -566,10 +563,7 @@ func TestPairedDirectoryBootstrap(t *testing.T) {
 			}
 			before := map[string][]byte{}
 			for _, path := range paths {
-				data, err := os.ReadFile(path)
-				if err != nil {
-					t.Fatal(err)
-				}
+				data := readLiveDurableFile(t, path)
 				before[path] = data
 			}
 			outer := f.a.observers[noderec.ServiceCluster]
@@ -600,10 +594,7 @@ func TestPairedDirectoryBootstrap(t *testing.T) {
 				}
 			}
 			for _, path := range paths {
-				data, err := os.ReadFile(path)
-				if err != nil {
-					t.Fatal(err)
-				}
+				data := readLiveDurableFile(t, path)
 				if !reflect.DeepEqual(data, before[path]) {
 					t.Fatalf("transport outage altered durable authority: %s", filepath.Base(path))
 				}
@@ -622,10 +613,7 @@ func TestPairedDirectoryBootstrap(t *testing.T) {
 		assertAuthority := func(name string, replace func(*testing.T, string)) {
 			t.Run(name, func(t *testing.T) {
 				path := filepath.Join(f.a.base, "cluster", "trusted", f.b.uuid+".json")
-				original, err := os.ReadFile(path)
-				if err != nil {
-					t.Fatal(err)
-				}
+				original := readLiveDurableFile(t, path)
 				t.Cleanup(func() {
 					if err := os.WriteFile(path, original, 0o600); err != nil {
 						t.Error(err)

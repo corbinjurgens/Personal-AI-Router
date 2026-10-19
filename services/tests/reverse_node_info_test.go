@@ -445,10 +445,7 @@ func TestReverseNodeInfoPhase04(t *testing.T) {
 
 	testAuthority := func(name, path string) {
 		t.Run(name, func(t *testing.T) {
-			original, err := os.ReadFile(path)
-			if err != nil {
-				t.Fatal(err)
-			}
+			original := readLiveDurableFile(t, path)
 			t.Cleanup(func() {
 				if err := os.WriteFile(path, original, 0o600); err != nil {
 					t.Error(err)
