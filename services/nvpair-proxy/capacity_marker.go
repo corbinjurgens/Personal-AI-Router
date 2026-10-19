@@ -36,8 +36,7 @@ const maxStrictCapacitySlots = 1048576
 
 // Internal spaces are valid model identifiers; controls are rejected uniformly.
 func (a *admissionController) validStrictModelKey(k admKey) bool {
-	_, known := engines.ByName(k.engine)
-	return known && k.model != "" && !nodepolicy.IsReservedAlias(k.model) &&
+	return engines.ValidRoutingID(k.engine) && k.model != "" && !nodepolicy.IsReservedAlias(k.model) &&
 		strings.IndexFunc(k.model, unicode.IsControl) < 0 && a.normalize(k.engine, k.model) == k.model
 }
 

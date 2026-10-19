@@ -365,7 +365,7 @@ func NewProxy(codec *Codec) *Proxy {
 			}
 		},
 		p.localEngineHealthy,
-		normalizeEngineModel,
+		p.normalizeEngineModel,
 	)
 	return p
 }
@@ -1350,7 +1350,7 @@ func (p *Proxy) handleMessage(msg *Message) {
 	case "facade/enable":
 		var params enableFacadeParams
 		if err := json.Unmarshal(msg.Params, &params); err != nil {
-			p.codec.RespondError(msg.ID, -32602, "invalid params: expected {\"engine\",\"port\",\"aliasAddresses\",\"ignorePersistedPort\"}")
+			p.codec.RespondError(msg.ID, -32602, "invalid params: expected {\"engine\",\"port\",\"aliasAddresses\",\"ignorePersistedPort\",\"descriptor\"}")
 			return
 		}
 		result, err := p.enableFacade(params)

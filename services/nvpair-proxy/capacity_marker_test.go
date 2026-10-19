@@ -117,6 +117,24 @@ func TestStrictClearFailureRetainsCapacity(t *testing.T) {
 	}
 }
 
+// A durable slot held by a descriptor engine is ordinary capacity, not a
+// corrupt document: restarting must keep it counted rather than quarantining
+// strict admission for every engine.
+func TestStrictCapacityAdoptsDescriptorEngineSlot(t *testing.T) {
+	h := newStrictHarness(t)
+	doc := `{"version":1,"slots":[{"id":4,"engine":"llamacpp-custom","model":"org/model:Q4_K_M"}]}`
+	if err := os.WriteFile(h.a.strict.path, []byte(doc), 0600); err != nil {
+		t.Fatal(err)
+	}
+	h.a.loadStrictCapacity()
+	if h.a.strict.storageErr != nil {
+		t.Fatalf("descriptor engine slot treated as corrupt: %v", h.a.strict.storageErr)
+	}
+	if h.a.currentActive() != 1 || h.a.activeByEngine["llamacpp-custom"] != 1 || h.a.nextTicket != 4 {
+		t.Fatalf("slot not adopted: active=%d byEngine=%v next=%d", h.a.currentActive(), h.a.activeByEngine, h.a.nextTicket)
+	}
+}
+
 func TestStrictCorruptCapacityFailsClosed(t *testing.T) {
 	for _, tc := range []struct{ name, document string }{
 		{"unsupported version", `{"version":99,"slots":[]}`},
@@ -124,13 +142,13 @@ func TestStrictCorruptCapacityFailsClosed(t *testing.T) {
 		{"null version", `{"version":null,"slots":[]}`},
 		{"missing slots", `{"version":1}`},
 		{"null slots", `{"version":1,"slots":null}`},
-		{"unknown engine", `{"version":1,"slots":[{"id":1,"engine":"unknown","model":"m:latest"}]}`},
+		{"unknown engine", `{"version":1,"slots":[{"id":1,"engine":"un/known","model":"m:latest"}]}`},
 		{"duplicate id", `{"version":1,"slots":[{"id":1,"engine":"ollama","model":"m:latest"},{"id":1,"engine":"ollama","model":"n:latest"}]}`},
 		{"zero id", `{"version":1,"slots":[{"id":0,"engine":"ollama","model":"m:latest"}]}`},
 		{"invalid model", `{"version":1,"slots":[{"id":1,"engine":"ollama","model":" "}]}`},
 		{"unnormalized model", `{"version":1,"slots":[{"id":1,"engine":"ollama","model":"m"}]}`},
 		{"reserved model", `{"version":1,"slots":[{"id":1,"engine":"lmstudio","model":"weak"}]}`},
-		{"invalid later slot", `{"version":1,"slots":[{"id":1,"engine":"ollama","model":"m:latest"},{"id":2,"engine":"unknown","model":"n"}]}`},
+		{"invalid later slot", `{"version":1,"slots":[{"id":1,"engine":"ollama","model":"m:latest"},{"id":2,"engine":"un/known","model":"n"}]}`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h := newStrictHarness(t)

@@ -396,8 +396,11 @@ func (p Policy) Validate() error {
 	return nil
 }
 
+// checkModelRef accepts a built-in engine or a valid descriptor engine ID. A
+// policy may name an engine that only a peer runs, so the ID is checked for
+// syntax here and resolved to candidates only where a facade fronts it.
 func checkModelRef(engine, model string, contextTokens int, caps []Capability) error {
-	if _, ok := engines.ByName(engine); !ok {
+	if !engines.ValidRoutingID(engine) {
 		return fmt.Errorf("unknown engine %q", engine)
 	}
 	if model == "" {

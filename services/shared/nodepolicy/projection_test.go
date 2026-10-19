@@ -282,8 +282,8 @@ func TestMergePeerSetRejectsProtectedChanges(t *testing.T) {
 		doc["roles"] = map[string]any{"weak": map[string]any{"engine": "ollama", "model": "strong-local"}}
 	}, "reserved alias")
 	test("role for an unknown engine", func(doc map[string]any) {
-		doc["roles"] = map[string]any{"weak": map[string]any{"engine": "nope", "model": "m"}}
-	}, `unknown engine "nope"`)
+		doc["roles"] = map[string]any{"weak": map[string]any{"engine": "no/pe", "model": "m"}}
+	}, `unknown engine "no/pe"`)
 }
 
 func TestMergePeerSetRejectsMalformedDocuments(t *testing.T) {

@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"nvpair-shared/clustertrust"
+	"nvpair-shared/engines"
 	"nvpair-shared/noderec"
 )
 
@@ -205,6 +206,12 @@ func reverseProtocol(service noderec.ServiceKey) (clustertrust.ReverseProtocol, 
 		noderec.ServiceErrors, noderec.ServiceWorkload:
 		return clustertrust.ReverseTLS, true
 	default:
+		// A descriptor-backed engine facade is pinned TLS like the built-in
+		// ones. Only its syntax is fixed; resolveReverseService still requires
+		// the broker's live registration.
+		if engines.IsDynamicServiceKey(service) {
+			return clustertrust.ReverseTLS, true
+		}
 		return 0, false
 	}
 }

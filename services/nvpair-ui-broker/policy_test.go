@@ -454,7 +454,7 @@ func TestPolicySetValidatesPushesAndNotifies(t *testing.T) {
 	pp, proxy, _ := attachAckingProxy(t, b)
 	b.replayPolicyToProxy(context.Background(), pp)
 
-	bad := map[string]any{"version": 1, "profiles": []any{map[string]any{"name": "x", "engine": "nope", "model": "m"}}}
+	bad := map[string]any{"version": 1, "profiles": []any{map[string]any{"name": "x", "engine": "no/pe", "model": "m"}}}
 	b.handleMessage(clientRequest(1, methodPolicySet, map[string]any{"policy": bad, "expectedPersistedRevision": "0"}))
 	resp := out.waitFrame(t, "invalid policy:set response", isResponse(1))
 	if resp.Error == nil || resp.Error.Code != -32602 {
@@ -3573,7 +3573,7 @@ func TestPolicySetPublicationFailureIsAServerError(t *testing.T) {
 
 			setReplacer(rb.b, durablefile.Replacer{})
 			rb.b.handleMessage(clientRequest(2, methodPolicySet, map[string]any{
-				"policy":                    map[string]any{"version": 1, "profiles": []any{map[string]any{"name": "x", "engine": "nope", "model": "m"}}},
+				"policy":                    map[string]any{"version": 1, "profiles": []any{map[string]any{"name": "x", "engine": "no/pe", "model": "m"}}},
 				"expectedPersistedRevision": rb.b.localPolicy().Policy.Revision,
 			}))
 			resp = rb.out.waitFrame(t, "invalid policy:set response", isResponse(2))

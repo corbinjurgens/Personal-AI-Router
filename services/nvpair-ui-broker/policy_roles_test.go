@@ -91,7 +91,7 @@ func TestPeerPolicySetRejectsInvalidRolesWithoutEffect(t *testing.T) {
 
 	test("unknown tier", map[string]any{"huge": map[string]any{"engine": "ollama", "model": "m"}}, "unknown tier")
 	test("reserved alias model", map[string]any{"weak": map[string]any{"engine": "ollama", "model": "weak-api"}}, "reserved alias")
-	test("unknown engine", map[string]any{"weak": map[string]any{"engine": "nope", "model": "m"}}, "unknown engine")
+	test("unknown engine", map[string]any{"weak": map[string]any{"engine": "no/pe", "model": "m"}}, "unknown engine")
 }
 
 // A peer reads who paused the node but cannot change it through policy:set.

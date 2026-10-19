@@ -17,9 +17,10 @@ Strict requests carry exactly one shared-parser-validated
 `X-PAIR-Strict-Admission` envelope. Both paired ingress and local self dispatch
 use the existing process-wide admission controller, including its mutex,
 in-flight counters, residency, notifications and cancellation registry. Engine
-IDs are canonical built-in names. Model keys use `normalizeEngineModel`:
-Ollama's omitted tag becomes `:latest`; other engine model IDs keep their
-existing adapter semantics. Equivalent normalized capability entries reject.
+IDs are built-in names or valid descriptor engine IDs (`engines.ValidRoutingID`).
+Model keys use the engine's facade naming: Ollama's omitted tag becomes
+`:latest`, a descriptor engine follows its declared naming, and an engine with
+no facade here keeps its model ID exact. Equivalent normalized capability entries reject.
 
 Finite `maxConcurrent` and the matching authoritative model identity are
 required. The capability limit must equal the finite effective policy/profile
@@ -179,7 +180,8 @@ is a genuine limitation, not a safety margin (§5.6).
 ## 3. Process model
 
 The process starts with **no engine and no listener**. The broker then sends one
-`facade/enable` per engine, carrying that engine's port and any alias addresses.
+`facade/enable` per engine, carrying that engine's port and any alias addresses,
+and for a descriptor engine its descriptor (README, "Descriptor engines").
 
 A flag cannot express this. The broker plans a different port for each engine —
 Ollama's managed facade wants `:11434`, LM Studio's wants `:1234`, and
@@ -221,8 +223,10 @@ Every facade-scoped message carries the engine it concerns, in both directions.
 Without it the engine would be implied by which process a message travelled
 through, which is precisely the property one process destroys.
 
-The address is a bare engine id (`ollama:ready`), deliberately **not** the
-component name (`ollama-proxy:ready`). The component form is how a client
+The address is a bare built-in engine id (`ollama:ready`), deliberately **not**
+the component name (`ollama-proxy:ready`). A descriptor engine is addressed by
+its service key, `e-<id>:ready`, because its user-chosen id could otherwise
+spell a process-scoped namespace such as `errors`. The component form is how a client
 addresses the component through the broker; the two meet in the broker's relay,
 which takes one off and puts the other on.
 
@@ -233,7 +237,7 @@ which takes one off and puts the other on.
 | Bootstrap | names its engine in the payload | `facade/enable` |
 
 `facade/enable` is unaddressed because it runs *before* the facade it names
-exists. Only a known engine id counts as an address: plenty of unaddressed
+exists. Only a built-in engine id or a well-formed `e-<id>` counts as an address: plenty of unaddressed
 methods contain a colon, so treating `errors:report` as engine `errors` would
 strip a real method down to `report`.
 
@@ -749,7 +753,8 @@ state in force. The broker re-sends all five whenever the proxy starts; until it
 | `node/set-engine-intent` | `{enabledByEngine}` | each managed engine's saved On/Off intent |
 | `workload/cancel` | `{workloadId, engine?, runId?, regenerate?}` | §12.5; answers `{found}` |
 
-Unknown fields and unknown engines are errors.
+Unknown fields and engine IDs that are not `engines.ValidRoutingID` are errors. A
+valid descriptor engine ID with no facade here is accepted state.
 
 #### 12.1.1 Activation acknowledgement
 

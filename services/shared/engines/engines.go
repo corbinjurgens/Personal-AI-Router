@@ -18,7 +18,9 @@
 // accepts engines defined only by manifest data; what other processes may
 // know about any registered engine is its Descriptor (descriptor.go), which
 // engine-manager publishes. The built-in names double as the family names that
-// select engine-manager's coded adapters.
+// select engine-manager's coded adapters. A descriptor engine's routing
+// identity (service key, facade address, port file) is derived in dynamic.go,
+// whose ProxyCanFront is the one rule for whether the proxy can front it.
 //
 // Design decisions this package encodes:
 //
@@ -203,7 +205,15 @@ func ByName(name string) (Engine, bool) {
 // and reusing it here would leave two different meanings on one string. The
 // prefix matches the engine ids in facade/enable, so one message and its enable
 // name the facade the same way.
-func AddressMethod(engine, method string) string { return engine + ":" + method }
+//
+// A dynamic engine is addressed as "e-<id>:" instead (see dynamic.go): its ID is
+// user-chosen and could otherwise spell a process-scoped namespace.
+func AddressMethod(engine, method string) string {
+	if _, builtin := ByName(engine); builtin {
+		return engine + ":" + method
+	}
+	return dynamicKeyPrefix + engine + ":" + method
+}
 
 // SplitAddressedMethod separates a facade-scoped method's engine prefix from the
 // method itself.
@@ -212,14 +222,17 @@ func AddressMethod(engine, method string) string { return engine + ":" + method 
 // caller distinguishes the two by the engine rather than by guessing from the
 // method name. That matters because plenty of unaddressed methods contain a
 // colon already — "errors:report", "discovery:subscribe", "workload:started" —
-// and only a known engine id counts as an address.
+// and only a built-in engine id or a dynamic "e-<id>" address counts.
 func SplitAddressedMethod(method string) (engine, bare string) {
 	name, rest, found := strings.Cut(method, ":")
 	if !found {
 		return "", method
 	}
-	if _, ok := ByName(name); !ok {
-		return "", method
+	if _, ok := ByName(name); ok {
+		return name, rest
 	}
-	return name, rest
+	if id, ok := DynamicEngineForServiceKey(servicekey.Key(name)); ok {
+		return id, rest
+	}
+	return "", method
 }
