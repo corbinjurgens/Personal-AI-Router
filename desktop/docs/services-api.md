@@ -251,6 +251,7 @@
 
 | Method | Direction | In bridge? |
 |---|---|---|
+| `app:ready` | request (we call) | ✅ yes |
 | `cluster:identity-changed` | request (we call) | ✅ yes |
 | `cluster:invite-canceled` | request (we call) | ✅ yes |
 | `cluster:invite-declined` | request (we call) | ✅ yes |
@@ -268,6 +269,8 @@
 | `error` | request (we call) | ✅ yes |
 | `errors:update` | request (we call) | ✅ yes |
 | `nodes:changed` | request (we call) | ✅ yes |
+| `performance:changed` | request (we call) | ✅ yes |
+| `service/broker-restarted` | request (we call) | ✅ yes |
 | `workloads:remove` | request (we call) | ✅ yes |
 | `workloads:upsert` | request (we call) | ✅ yes |
 
@@ -287,7 +290,7 @@
 | `errors:clear` | notification (we consume) | ✅ yes |
 | `errors:report` | notification (we consume) | ✅ yes |
 | `errors:update` | notification (we consume) | ✅ yes |
-| `performance:changed` | notification (we consume) | ➖ ignored |
+| `performance:changed` | notification (we consume) | ✅ yes |
 | `policy:reply` | notification (we consume) | ➖ ignored |
 | `workloads:remove` | notification (we consume) | ✅ yes |
 | `workloads:upsert` | notification (we consume) | ✅ yes |
