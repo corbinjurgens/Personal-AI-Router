@@ -6,6 +6,7 @@ package nodepolicy
 import (
 	"errors"
 	"fmt"
+	"strings"
 )
 
 // StrictAdmissionReadiness is the params of NotifyStrictReadiness: what the
@@ -50,6 +51,11 @@ const (
 	MethodSetResidency = "node/set-residency"
 	// MethodSetEngineIntent carries SetEngineIntentParams.
 	MethodSetEngineIntent = "node/set-engine-intent"
+	// MethodSetModelIdentity carries SetModelIdentityParams: the identity
+	// the proxy binds strict capacity and qualification to. The broker sends
+	// it whenever an engine's identity changes, and synchronously when one is
+	// withdrawn, so withdrawal is in force before the change it guards.
+	MethodSetModelIdentity = "node/set-model-identity"
 )
 
 // Proxy → broker notifications.
@@ -168,6 +174,62 @@ type SetResidencyParams struct {
 // proxy can reject a request for an engine saved Off without asking to wake it.
 type SetEngineIntentParams struct {
 	EnabledByEngine map[string]bool `json:"enabledByEngine"`
+}
+
+// SetModelIdentityParams is the whole identity of every engine the proxy may
+// admit strict work for. An engine missing from the map has no identity, which
+// withdraws its strict capacity.
+type SetModelIdentityParams struct {
+	Engines map[string]EngineIdentity `json:"engines"`
+}
+
+// EngineIdentity is one running engine's identity. EngineRunID changes with
+// every engine start or adoption (engine-manager). SettingsFingerprint covers
+// the applied settings revision and its epoch, and LaunchDigest the effective
+// launch arguments (broker). ModelDigests maps each installed model, by the
+// engine's own name, to the lowercase SHA-256 hex identifying its content
+// (engine-manager). All are public configuration or content identity.
+type EngineIdentity struct {
+	EngineRunID         string            `json:"engineRunId"`
+	SettingsFingerprint string            `json:"settingsFingerprint"`
+	LaunchDigest        string            `json:"launchDigest"`
+	ModelDigests        map[string]string `json:"modelDigests"`
+}
+
+func (p SetModelIdentityParams) Validate() error {
+	if p.Engines == nil {
+		return errors.New("engines is required")
+	}
+	for engine, id := range p.Engines {
+		if err := id.Validate(); err != nil {
+			return fmt.Errorf("engines.%s: %w", engine, err)
+		}
+	}
+	return nil
+}
+
+func (i EngineIdentity) Validate() error {
+	if !strictID.MatchString(i.EngineRunID) {
+		return errors.New("engineRunId must be a nonempty identity of at most 128 ASCII characters")
+	}
+	if !strictDigest.MatchString(i.SettingsFingerprint) {
+		return errors.New("settingsFingerprint must be lowercase SHA-256 hex")
+	}
+	if !strictDigest.MatchString(i.LaunchDigest) {
+		return errors.New("launchDigest must be lowercase SHA-256 hex")
+	}
+	if i.ModelDigests == nil {
+		return errors.New("modelDigests is required")
+	}
+	for model, digest := range i.ModelDigests {
+		if strings.TrimSpace(model) == "" {
+			return errors.New("modelDigests contains an empty model")
+		}
+		if !strictDigest.MatchString(digest) {
+			return fmt.Errorf("modelDigests[%q] must be lowercase SHA-256 hex", model)
+		}
+	}
+	return nil
 }
 
 type AdmissionState struct {

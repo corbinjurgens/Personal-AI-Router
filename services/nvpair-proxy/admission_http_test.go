@@ -39,7 +39,13 @@ func strictHTTPFixture(t *testing.T) (*Proxy, *recordingEngine) {
 }
 func strictHTTPRequest(t *testing.T) *http.Request {
 	t.Helper()
-	r := httptest.NewRequest(http.MethodPost, "/api/chat", strings.NewReader(`{"model":"m","stream":false}`))
+	return strictHTTPRequestWith(t, strictBody("m"))
+}
+
+// strictHTTPRequestWith is a strict chat request carrying body.
+func strictHTTPRequestWith(t *testing.T, body string) *http.Request {
+	t.Helper()
+	r := httptest.NewRequest(http.MethodPost, routeChatCompletions, strings.NewReader(body))
 	b, err := json.Marshal(strictRequest())
 	if err != nil {
 		t.Fatal(err)

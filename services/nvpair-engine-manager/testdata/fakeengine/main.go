@@ -13,6 +13,8 @@
 package main
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -35,7 +37,22 @@ var (
 	modelsMu sync.Mutex
 	models   = map[string]bool{"llama3.2:1b": true}
 	loaded   = map[string]bool{"llama3.2:1b": true}
+	// digests overrides a model's content digest; the default is the SHA-256
+	// of its name.
+	digests = map[string]string{}
+	// tagsDelay holds every /api/tags answer back (/testctl/tags-delay).
+	tagsDelay time.Duration
 )
+
+func modelDigest(name string) string {
+	modelsMu.Lock()
+	defer modelsMu.Unlock()
+	if d, ok := digests[name]; ok {
+		return d
+	}
+	sum := sha256.Sum256([]byte(name))
+	return hex.EncodeToString(sum[:])
+}
 
 func modelNames() []string {
 	modelsMu.Lock()
@@ -193,9 +210,13 @@ func main() {
 	})
 	// Ollama-shape model API (stateful).
 	mux.HandleFunc("/api/tags", func(w http.ResponseWriter, r *http.Request) {
+		modelsMu.Lock()
+		delay := tagsDelay
+		modelsMu.Unlock()
+		time.Sleep(delay)
 		ms := make([]map[string]string, 0)
 		for _, n := range modelNames() {
-			ms = append(ms, map[string]string{"name": n, "model": n})
+			ms = append(ms, map[string]string{"name": n, "model": n, "digest": modelDigest(n)})
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{"models": ms})
@@ -301,6 +322,27 @@ func main() {
 		modelsMu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{"models": data})
+	})
+	// Test-control: delay every /api/tags answer by {"ms":N}, so a test can
+	// change state while an inventory request is in flight.
+	mux.HandleFunc("/testctl/tags-delay", func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Ms int `json:"ms"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		modelsMu.Lock()
+		tagsDelay = time.Duration(body.Ms) * time.Millisecond
+		modelsMu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	})
+	// Test-control: give a model new content under the same name from
+	// {"name":..., "digest":...}, as a same-name replacement would.
+	mux.HandleFunc("/testctl/digest", func(w http.ResponseWriter, r *http.Request) {
+		b := decodeBody(r)
+		modelsMu.Lock()
+		digests[bstr(b, "name")] = bstr(b, "digest")
+		modelsMu.Unlock()
+		w.WriteHeader(http.StatusOK)
 	})
 	// Test-control: replace the loaded set wholesale from {"names":[...]} so a
 	// test can simulate a load, an unload, or a TTL eviction without a real

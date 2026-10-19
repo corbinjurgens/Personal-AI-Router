@@ -209,6 +209,33 @@ type Profile struct {
 	// reaches the engine, e.g. {"options":{"num_ctx":16384}} for Ollama or
 	// {"keep_alive":"10m"}. Keys already present in the request win.
 	RequestOptions json.RawMessage `json:"requestOptions,omitempty"`
+	// MaxOutputTokens is the most output a request for this model may ask for
+	// under strict admission. 0 means unset. It must be below ContextTokens.
+	MaxOutputTokens int `json:"maxOutputTokens,omitempty"`
+	// Qualification names the local qualification this model is served under
+	// for hybrid requests. The destination proxy installs strict capacity only
+	// when its qualification registry holds this exact id and revision for the
+	// same engine, model, model content, launch configuration and request
+	// options. Concrete requests ignore it.
+	Qualification *QualificationRef `json:"qualification,omitempty"`
+}
+
+// QualificationRef names one revision of a local qualification. Revision is a
+// positive canonical decimal string.
+type QualificationRef struct {
+	ID       string `json:"id"`
+	Revision string `json:"revision"`
+}
+
+// Validate checks the reference's syntax.
+func (q QualificationRef) Validate() error {
+	if !strictID.MatchString(q.ID) {
+		return errors.New("qualification id must be a nonempty identity of at most 128 ASCII characters")
+	}
+	if n, err := NanoUSD(q.Revision).Int64(); err != nil || n < 1 {
+		return errors.New("qualification revision must be a positive canonical decimal string")
+	}
+	return nil
 }
 
 // EntryKind tags what a tier entry refers to.
@@ -359,6 +386,9 @@ func (p Policy) Validate() error {
 		if pr.MemoryBytes < 0 || pr.MaxConcurrent < 0 {
 			return fmt.Errorf("profiles[%d] %q: memoryBytes and maxConcurrent must not be negative", i, pr.Name)
 		}
+		if err := pr.validateOutputAndQualification(); err != nil {
+			return fmt.Errorf("profiles[%d] %q: %w", i, pr.Name, err)
+		}
 		if len(pr.RequestOptions) > 0 {
 			var obj map[string]json.RawMessage
 			if err := json.Unmarshal(pr.RequestOptions, &obj); err != nil {
@@ -416,6 +446,28 @@ func checkModelRef(engine, model string, contextTokens int, caps []Capability) e
 		if !slices.Contains(KnownCapabilities, c) {
 			return fmt.Errorf("unknown capability %q", c)
 		}
+	}
+	return nil
+}
+
+// validateOutputAndQualification checks the strict bounds of a profile: an
+// output ceiling must leave room for input within the served context, and a
+// qualification needs both bounds finite.
+func (pr Profile) validateOutputAndQualification() error {
+	if pr.MaxOutputTokens < 0 {
+		return fmt.Errorf("maxOutputTokens must not be negative")
+	}
+	if pr.MaxOutputTokens > 0 && (pr.ContextTokens == 0 || pr.MaxOutputTokens >= pr.ContextTokens) {
+		return fmt.Errorf("maxOutputTokens must be below a nonzero contextTokens")
+	}
+	if pr.Qualification == nil {
+		return nil
+	}
+	if err := pr.Qualification.Validate(); err != nil {
+		return err
+	}
+	if pr.ContextTokens == 0 || pr.MaxOutputTokens == 0 {
+		return fmt.Errorf("a qualified profile needs nonzero contextTokens and maxOutputTokens")
 	}
 	return nil
 }

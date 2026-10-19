@@ -57,17 +57,23 @@ type engineState struct {
 	// never takes opMu.
 	opMu sync.Mutex
 
-	mu         sync.Mutex
-	installed  bool
-	running    bool
-	healthy    bool
-	stopping   bool
-	adopted    bool  // started externally; we can't stop it
-	gen        int64 // bumped each start; gates stale health loops
-	port       int
-	binPath    string
-	proc       *managedProc
-	healthStop context.CancelFunc
+	mu        sync.Mutex
+	installed bool
+	running   bool
+	healthy   bool
+	stopping  bool
+	adopted   bool  // started externally; we can't stop it
+	gen       int64 // bumped each start; gates stale health loops
+	// runID names the engine process incarnation this manager observes:
+	// minted whenever the engine is marked running by a start or an adoption,
+	// cleared whenever it is marked stopped. launchDigest identifies the
+	// launch of the owned process, set with proc (model_identity.go).
+	runID        string
+	launchDigest string
+	port         int
+	binPath      string
+	proc         *managedProc
+	healthStop   context.CancelFunc
 	// startCancel lets StopAll unblock doStart before waiting on opMu.
 	startCancel context.CancelFunc
 }
@@ -138,6 +144,18 @@ type Executor struct {
 	// unchanged inventory (see modelsSweep).
 	inventoryMu sync.Mutex
 	inventory   map[string][]string
+	// inventoryDigests is, per engine whose list_models declares a digest
+	// field, each listed model's content digest from the same sweep and the
+	// run they were read under (model_identity.go). Sweeps can overlap, so
+	// digestSweep orders them: digests from a sweep that began before the one
+	// stored are discarded.
+	inventoryDigests map[string]observedDigests
+	digestSweep      uint64
+	sweeps           atomic.Uint64
+	// publishMu orders engine:state-changed and engine:model-identity: each
+	// is read and sent under it, so an identity read before a stop is never
+	// sent after that stop's state change.
+	publishMu sync.Mutex
 
 	reservedPort atomic.Int32
 	// StopAll is terminal for an Executor; the gate closes its start/snapshot race.

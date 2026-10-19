@@ -515,3 +515,62 @@ func TestParseKeepsRolesAndPausedBy(t *testing.T) {
 		t.Errorf("pausedBy = %q, want %q", p.PausedBy, PausedLocally)
 	}
 }
+
+func TestValidateProfileQualification(t *testing.T) {
+	ref := &QualificationRef{ID: "msi-qwen3-8b", Revision: "3"}
+	test := func(name string, pr Profile, wantErr string) {
+		t.Helper()
+		t.Run(name, func(t *testing.T) {
+			p := Default()
+			pr.Name, pr.Engine, pr.Model = "m", "ollama", "m:latest"
+			p.Profiles = []Profile{pr}
+			err := p.Validate()
+			if wantErr == "" {
+				if err != nil {
+					t.Fatalf("Validate() = %v, want nil", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), wantErr) {
+				t.Fatalf("Validate() = %v, want an error containing %q", err, wantErr)
+			}
+		})
+	}
+
+	test("no strict bounds", Profile{ContextTokens: 8192}, "")
+	test("output ceiling below the context", Profile{ContextTokens: 8192, MaxOutputTokens: 2048}, "")
+	test("qualified", Profile{ContextTokens: 8192, MaxOutputTokens: 2048, Qualification: ref}, "")
+	test("negative output ceiling", Profile{ContextTokens: 8192, MaxOutputTokens: -1}, "maxOutputTokens must not be negative")
+	test("output ceiling without a context", Profile{MaxOutputTokens: 2048}, "below a nonzero contextTokens")
+	test("output ceiling filling the context", Profile{ContextTokens: 2048, MaxOutputTokens: 2048}, "below a nonzero contextTokens")
+	test("qualified without an output ceiling", Profile{ContextTokens: 8192, Qualification: ref}, "nonzero contextTokens and maxOutputTokens")
+	test("qualified without a context", Profile{Qualification: ref}, "nonzero contextTokens and maxOutputTokens")
+	test("qualification without an id", Profile{ContextTokens: 8192, MaxOutputTokens: 1, Qualification: &QualificationRef{Revision: "1"}}, "qualification id")
+	test("qualification id with a slash", Profile{ContextTokens: 8192, MaxOutputTokens: 1, Qualification: &QualificationRef{ID: "a/b", Revision: "1"}}, "qualification id")
+	test("qualification revision zero", Profile{ContextTokens: 8192, MaxOutputTokens: 1, Qualification: &QualificationRef{ID: "q", Revision: "0"}}, "qualification revision")
+	test("noncanonical qualification revision", Profile{ContextTokens: 8192, MaxOutputTokens: 1, Qualification: &QualificationRef{ID: "q", Revision: "01"}}, "qualification revision")
+}
+
+func TestParseKeepsProfileQualification(t *testing.T) {
+	doc := `{"version":2,"profiles":[{"name":"m","engine":"ollama","model":"m:latest","contextTokens":8192,
+		"maxOutputTokens":2048,"qualification":{"id":"msi-qwen3-8b","revision":"3"}}]}`
+	p, err := Parse([]byte(doc))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	pr := p.Profiles[0]
+	if pr.MaxOutputTokens != 2048 || pr.Qualification == nil || *pr.Qualification != (QualificationRef{ID: "msi-qwen3-8b", Revision: "3"}) {
+		t.Fatalf("profile = %+v, want the output ceiling and qualification kept", pr)
+	}
+	data, err := json.Marshal(p)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	again, err := Parse(data)
+	if err != nil {
+		t.Fatalf("Parse(Marshal(Parse(x))): %v", err)
+	}
+	if !reflect.DeepEqual(again, p) {
+		t.Errorf("round trip changed the policy:\n got %+v\nwant %+v", again, p)
+	}
+}

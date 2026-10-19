@@ -44,11 +44,19 @@ func (a *admissionController) initStrictCapacity() {
 	path, err := appdir.Path("proxy-strict-capacity.json")
 	a.strict = strictAdmissionState{
 		path: path, storageErr: err, markers: make(map[uint64]capacityMarker),
-		models: make(map[admKey]nodeStrictModel), generation: make(map[admKey]uint64), now: timeNow,
+		models: make(map[admKey]nodeStrictModel), qualified: make(map[admKey]installedQualification),
+		generation: make(map[admKey]uint64), registry: qualificationRegistry{}, now: timeNow,
 		timer: newStrictTimer, write: durablefile.WriteFile, read: os.ReadFile,
 	}
 	if err == nil {
 		a.loadStrictCapacity()
+	}
+	if qpath, err := appdir.Path(qualificationFileName); err == nil {
+		registry, err := loadQualificationRegistry(qpath, os.ReadFile)
+		if err != nil {
+			slog.Error("local qualification evidence is unusable; no model is qualified for strict admission", "err", err)
+		}
+		a.strict.registry = registry
 	}
 }
 

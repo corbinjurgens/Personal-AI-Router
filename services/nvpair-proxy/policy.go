@@ -3,7 +3,7 @@
 
 package main
 
-// The broker → proxy node policy requests (nodepolicy/wire.go). All five are
+// The broker → proxy node policy requests (nodepolicy/wire.go). All are
 // process-scoped: the policy is the machine's, not an engine's, so none of
 // them is addressed to a facade. Each validates before applying, keeps the
 // previous state on invalid input, and answers {"ok":true} or a JSON-RPC
@@ -40,6 +40,8 @@ func (p *Proxy) handlePolicyMethod(msg *Message, method string) bool {
 		err = p.applySetResidency(msg.Params)
 	case nodepolicy.MethodSetEngineIntent:
 		err = p.applySetEngineIntent(msg.Params)
+	case nodepolicy.MethodSetModelIdentity:
+		err = p.applySetModelIdentity(msg.Params)
 	default:
 		return false
 	}
@@ -49,11 +51,32 @@ func (p *Proxy) handlePolicyMethod(msg *Message, method string) bool {
 		return true
 	}
 	_ = p.codec.Respond(msg.ID, result)
-	if method == nodepolicy.MethodSetPolicy {
-		// The broker reads readiness against the acknowledgement just sent.
+	if method == nodepolicy.MethodSetPolicy || method == nodepolicy.MethodSetModelIdentity {
+		// The broker reads readiness against the acknowledgement just sent; a
+		// new identity can install or withdraw the capability.
 		p.reportStrictReadiness()
 	}
 	return true
+}
+
+// applySetModelIdentity replaces the engine identity strict capacity and
+// qualification are bound to, rederiving the capability.
+func (p *Proxy) applySetModelIdentity(params json.RawMessage) error {
+	var in nodepolicy.SetModelIdentityParams
+	if err := decodeStrict(params, &in); err != nil {
+		return err
+	}
+	if err := in.Validate(); err != nil {
+		return err
+	}
+	for engine := range in.Engines {
+		if err := knownEngine(engine); err != nil {
+			return err
+		}
+	}
+	changed := p.admission.setModelIdentity(in.Engines)
+	slog.Info("engine identity set", "engines", len(in.Engines), "strict_capability_changed", changed)
+	return nil
 }
 
 // applySetPolicy activates the policy and returns its revision. A revision

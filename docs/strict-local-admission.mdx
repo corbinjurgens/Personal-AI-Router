@@ -8,7 +8,8 @@ SPDX-License-Identifier: Apache-2.0
 The A0 slice defines versioned contracts for future hybrid local admission.
 It does not enable hybrid inference, advertise readiness, add an endpoint, or
 change concrete-model admission. Destination enforcement belongs to A1 and
-inventory propagation belongs to A2. Qualification remains a separate contract.
+inventory propagation belongs to A2. Qualification is a separate contract,
+described in [Local qualification and freshness](local-qualification.mdx).
 
 ## Inventory capability
 
@@ -115,9 +116,10 @@ must precede future hybrid readiness; A0 adds no identity message handler.
 ## Frozen implementation seams
 
 `nvpair-proxy/readiness_contract.go` declares `strictDestinationAdmission`:
-`AdmitStrict(ctx, engine, model, request)` and `StrictReadiness()`. A1 connects
-`ingress.go:serveIngress` and `http_handler.go:handleHTTP` self dispatch to the same
-controller. It revalidates current identity, qualification, availability and
+`qualifyStrict(engine, model, route, body, identity)` (B),
+`AdmitStrict(ctx, engine, model, request, generation)` and `StrictReadiness()`.
+A1 connects `ingress.go:serveIngress` and `http_handler.go:handleHTTP` self
+dispatch to the same controller. It revalidates current identity, qualification, availability and
 capacity before local effects. `strictAdmissionTicket.BeforeStrictDispatch`
 must durably mark dirty capacity before inference bytes are sent; failure prevents
 dispatch. Idempotent `Finish` distinguishes not-dispatched, qualified completion,
@@ -136,16 +138,18 @@ capability.
 ## Inventory transport
 
 The proxy sends `admission/strict-readiness` (`nodepolicy.NotifyStrictReadiness`)
-after acknowledging each `node/set-policy`, carrying its installed capability for
-that revision (A2). The broker fences it and publishes the capability in the
+after acknowledging each `node/set-policy` and each `node/set-model-identity`,
+carrying its installed capability for the active revision (A2, B). The broker fences it and publishes the capability in the
 `engine:node-projection` it sends engine-manager (A1b), which serves it as
 `ModelsResult.Policy` on the pinned `/v1/models` document. The scanner reads that
 document on every path (browse, refresh and the authenticated claim of a peer known
 only through the pinned bootstrap), its caches and the directory carry the same
 policy object, and the broker relay and proxy routing overlay pass it on. The
-proxy's `Node.strictModel` is the hybrid exclusion rule. Nothing installs a
-capability in production until qualification (B) provides authoritative identity,
-so no readiness is advertised yet.
+proxy's `Node.strictModel` is the hybrid exclusion rule, used by its role
+eligibility for hybrid requests. The capability is installed only from local
+qualification evidence and the engine identity
+([Local qualification and freshness](local-qualification.mdx)); no node ships with
+evidence, so in practice none is advertised yet.
 
 The scanner is the only hop that reads the document from a peer, and the hops
 after it decode strictly, so it isolates the capability. An Invalid capability,

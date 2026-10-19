@@ -342,6 +342,66 @@ func (f *facade) resolveTierCandidates(tier string, needs requestNeeds, crossEng
 	return out
 }
 
+// hybridCandidate is a local candidate eligible for a hybrid request: its
+// node's declared role with finite qualification, and the strict entry the
+// node advertises for it, whose identity a strict request must carry.
+type hybridCandidate struct {
+	candidate
+	role   nodepolicy.AdvertisedRole
+	strict nodepolicy.StrictAdmissionModel
+}
+
+// hybridLocalCandidates is the router's role eligibility for a hybrid local
+// request: the candidates of resolveTierCandidates, in its order, that a node's
+// own role declares (a router's tier entries never make a node hybrid
+// eligible), whose advertised role carries finite qualification
+// (AdvertisedRole.HybridQualified), and whose node advertises a valid strict
+// entry for that model (Node.strictModel; this proxy's own installed
+// capability for itself). Everything here is a hint: the destination
+// revalidates identity, qualification and the body. Concrete and legacy tier
+// routing never call it; hybrid dispatch (Phase 4) is its caller.
+func (f *facade) hybridLocalCandidates(tier string, needs requestNeeds, crossEngine bool) []hybridCandidate {
+	pol := f.host.admission.currentPolicy()
+	declared := f.declaredRoles(pol)
+	order := tierSearchOrder(tier, pol.TierPolicy)
+	self := Node{StrictAdmission: f.host.admission.StrictReadiness().Capability}
+	var out []hybridCandidate
+	for _, c := range f.resolveTierCandidates(tier, needs, crossEngine) {
+		if c.tierRank >= len(order) {
+			continue
+		}
+		// A node that declares nothing has no role here, so a router tier
+		// entry alone never makes it eligible.
+		role, ok := declared.of(c)[order[c.tierRank]]
+		if !ok || !role.HybridQualified() {
+			continue
+		}
+		node, ok := self, c.self
+		if !c.self {
+			node, ok = discoveredNode(c.fac, c.id)
+		}
+		if !ok {
+			continue
+		}
+		m, ok := node.strictModel(c.engine, c.fac.profile.normalizeModel(c.model))
+		if !ok {
+			continue
+		}
+		out = append(out, hybridCandidate{candidate: c, role: role, strict: m})
+	}
+	return out
+}
+
+// discoveredNode is the node with id in g's discovery overlay.
+func discoveredNode(g *facade, id string) (Node, bool) {
+	for _, n := range g.discovery.Nodes() {
+		if n.ID == id {
+			return n, true
+		}
+	}
+	return Node{}, false
+}
+
 // reserveRound takes this request's reservation for a fresh round. A tier
 // round reserves only among the candidates that share the leading class —
 // tier rank and warmth — so load balancing never promotes a fallback tier or
