@@ -79,9 +79,12 @@ type engineState struct {
 type Executor struct {
 	// switchAdmission protects reservation admission and active mutation counts;
 	// switchMu serializes checkpoint steps without holding the admission gate.
-	switchAdmission   sync.Mutex
-	switchMu          sync.Mutex
-	switchMutations   map[string]int
+	switchAdmission sync.Mutex
+	switchMu        sync.Mutex
+	switchMutations map[string]int
+	// Rejected prepares have no checkpoint to own a delayed local Off. Keep
+	// eligibility only until newer engine work is admitted (bounded by engines).
+	switchRejectedOff map[string]string
 	switchIncarnation string
 	switchParent      switchBrokerCall
 	settingsHub       settings.Hub

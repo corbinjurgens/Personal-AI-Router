@@ -6,11 +6,181 @@ package main
 import (
 	"context"
 	"errors"
+	"net"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
 	settings "nvpair-shared/enginesettings"
 )
+
+func TestSwitchReservedSourceVetoStopsBeforeDelayedScopedStop(t *testing.T) {
+	ex, p := switchFixture(t)
+	if err := ex.Start(context.Background(), "source"); err != nil {
+		t.Fatalf("start source: %v", err)
+	}
+	p.Origin = settings.SwitchOriginRemote
+	p = prepareSwitch(t, ex, p)
+	// Broker admission holds the ordinary stop delivery. Drain fails before
+	// any source-stop step; terminal cleanup delivers only the admitted veto.
+	cleaned := ex.SwitchReconcile(context.Background(), settings.SwitchReconcileRequest{
+		SwitchPrepareRequest: p, LocalVeto: &settings.SwitchLocalVeto{Engine: "source"},
+	})
+	if cleaned.Error == nil || cleaned.Error.Kind != settings.SwitchErrorRemoteVeto || cleaned.Checkpoint == nil || cleaned.Checkpoint.Phase != settings.SwitchCheckpointReserved || !cleaned.Observed.Source.TerminationVerified {
+		t.Fatalf("pre-source-stop veto cleanup = %+v", cleaned)
+	}
+	switchStep(t, ex, p, settings.SwitchStepRelease)
+	if err := ex.StopForSwitch("source", p.OperationID); err != nil {
+		t.Fatalf("deliver held scoped stop: %v", err)
+	}
+	status, err := ex.Status("source")
+	if err != nil || status.Running {
+		t.Fatalf("source after release and delayed delivery = %+v, %v", status, err)
+	}
+	off, err := ex.desired.offLocally("source")
+	if err != nil || !off {
+		t.Fatalf("source local Off = %v, %v", off, err)
+	}
+}
+
+func TestSwitchRejectedPrepareDelayedScopedStop(t *testing.T) {
+	for _, scenario := range []string{"ordinary Off", "later local On", "later reservation"} {
+		t.Run(scenario, func(t *testing.T) {
+			ex, p := switchFixture(t)
+			snapshot := ex.SwitchPrepare(context.Background(), settings.SwitchPrepareRequest{})
+			if snapshot.Error != nil {
+				t.Fatalf("configuration snapshot: %+v", snapshot.Error)
+			}
+			p.ConfigurationFence = snapshot.ConfigurationFence
+			if err := ex.Start(context.Background(), "source"); err != nil {
+				t.Fatalf("start source: %v", err)
+			}
+			p.Origin = settings.SwitchOriginRemote
+			rejected := ex.SwitchPrepare(context.Background(), p)
+			if rejected.Error == nil || rejected.Error.Kind != settings.SwitchErrorConfigurationConflict || rejected.Checkpoint != nil {
+				t.Fatalf("prepare must reject before checkpoint = %+v", rejected)
+			}
+			if scenario == "later local On" {
+				// Reasserting On is newer work even though the saved boolean
+				// and its provenance do not change.
+				if err := ex.Start(context.Background(), "source"); err != nil {
+					t.Fatalf("later local On: %v", err)
+				}
+			}
+			var b settings.SwitchPrepareRequest
+			if scenario == "later reservation" {
+				b = p
+				b.OperationID = "later-switch"
+				b = prepareSwitch(t, ex, b)
+			}
+			if err := ex.StopForSwitch("source", p.OperationID); err != nil {
+				t.Fatalf("delayed scoped stop: %v", err)
+			}
+			wantRunning := scenario != "ordinary Off"
+			status, err := ex.Status("source")
+			if err != nil || status.Running != wantRunning {
+				t.Fatalf("source status = %+v, %v; want running %v", status, err, wantRunning)
+			}
+			on, known, err := ex.desired.get("source")
+			if err != nil || !known || on != wantRunning {
+				t.Fatalf("source intent = %v, %v, %v; want On %v", on, known, err, wantRunning)
+			}
+			if scenario == "ordinary Off" {
+				st, err := ex.state("source")
+				if err != nil || !ex.switchTerminated(st) {
+					t.Fatalf("source termination not verified: %v", err)
+				}
+			}
+			if scenario == "later reservation" {
+				switchStep(t, ex, b, settings.SwitchStepSourceStop)
+				switchStep(t, ex, b, settings.SwitchStepTargetStart)
+				switchStep(t, ex, b, settings.SwitchStepRelease)
+			}
+		})
+	}
+}
+
+func TestSwitchRejectedPrepareLatchedVetoOwnsCleanup(t *testing.T) {
+	ex, p := switchFixture(t)
+	snapshot := ex.SwitchPrepare(context.Background(), settings.SwitchPrepareRequest{})
+	if snapshot.Error != nil {
+		t.Fatalf("configuration snapshot: %+v", snapshot.Error)
+	}
+	p.ConfigurationFence = snapshot.ConfigurationFence
+	if err := ex.Start(context.Background(), "source"); err != nil {
+		t.Fatalf("start source: %v", err)
+	}
+	p.Origin = settings.SwitchOriginRemote
+	rejected := ex.SwitchPrepare(context.Background(), p)
+	if rejected.Error == nil || rejected.Error.Kind != settings.SwitchErrorConfigurationConflict || rejected.Checkpoint != nil {
+		t.Fatalf("prepare rejection = %+v", rejected)
+	}
+	cleaned := ex.SwitchReconcile(context.Background(), settings.SwitchReconcileRequest{
+		SwitchPrepareRequest: p, LocalVeto: &settings.SwitchLocalVeto{Engine: "source"},
+	})
+	if cleaned.Error == nil || cleaned.Error.Kind != settings.SwitchErrorRemoteVeto || cleaned.Checkpoint == nil || !cleaned.Observed.Source.TerminationVerified {
+		t.Fatalf("rejected prepare Off cleanup = %+v", cleaned)
+	}
+	switchStep(t, ex, p, settings.SwitchStepRelease)
+	if err := ex.StopForSwitch("source", p.OperationID); err != nil {
+		t.Fatalf("held stop after cleanup: %v", err)
+	}
+}
+
+func TestSwitchReservedSourceVetoRetainsUnverifiedCleanup(t *testing.T) {
+	ex, p := switchFixture(t)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+	}))
+	t.Cleanup(server.Close)
+	st, err := ex.state("source")
+	if err != nil {
+		t.Fatal(err)
+	}
+	st.port = server.Listener.Addr().(*net.TCPAddr).Port
+	p.Origin = settings.SwitchOriginRemote
+	p = prepareSwitch(t, ex, p)
+	cleaned := ex.SwitchReconcile(context.Background(), settings.SwitchReconcileRequest{
+		SwitchPrepareRequest: p, LocalVeto: &settings.SwitchLocalVeto{Engine: "source"},
+	})
+	if cleaned.Error == nil || cleaned.Error.Kind != settings.SwitchErrorInterrupted || cleaned.Checkpoint == nil || cleaned.Checkpoint.Phase == settings.SwitchCheckpointReleased || cleaned.Observed.Source.TerminationVerified {
+		t.Fatalf("unverified source cleanup = %+v", cleaned)
+	}
+	released := ex.SwitchStep(context.Background(), settings.SwitchStepRequest{SwitchPrepareRequest: p, Step: settings.SwitchStepRelease})
+	if released.Error == nil || released.Error.Kind != settings.SwitchErrorBusy || released.Checkpoint == nil || released.Checkpoint.Phase == settings.SwitchCheckpointReleased {
+		t.Fatalf("release without verified Off = %+v", released)
+	}
+}
+
+func TestSwitchProvisionalPrepareRefusalRetainsSourceVetoCleanup(t *testing.T) {
+	ex, p := switchFixture(t)
+	if err := ex.Start(context.Background(), "source"); err != nil {
+		t.Fatalf("start source: %v", err)
+	}
+	target, err := ex.state("target")
+	if err != nil {
+		t.Fatal(err)
+	}
+	target.plat.Runtime.Ready = nil
+	p.Origin = settings.SwitchOriginRemote
+	snapshot := ex.SwitchPrepare(context.Background(), settings.SwitchPrepareRequest{})
+	if snapshot.Error != nil {
+		t.Fatalf("configuration snapshot: %+v", snapshot.Error)
+	}
+	p.ConfigurationFence = snapshot.ConfigurationFence
+	rejected := ex.SwitchPrepare(context.Background(), p)
+	if rejected.Error == nil || rejected.Error.Kind != settings.SwitchErrorValidation || rejected.Checkpoint == nil || rejected.Checkpoint.Phase != settings.SwitchCheckpointReserved {
+		t.Fatalf("provisional prepare rejection = %+v", rejected)
+	}
+	cleaned := ex.SwitchReconcile(context.Background(), settings.SwitchReconcileRequest{
+		SwitchPrepareRequest: p, LocalVeto: &settings.SwitchLocalVeto{Engine: "source"},
+	})
+	if cleaned.Error == nil || cleaned.Error.Kind != settings.SwitchErrorRemoteVeto || !cleaned.Observed.Source.TerminationVerified {
+		t.Fatalf("provisional rejection source cleanup = %+v", cleaned)
+	}
+	switchStep(t, ex, p, settings.SwitchStepRelease)
+}
 
 func TestSwitchRemoteVetoAfterTargetCommitCleansTarget(t *testing.T) {
 	for _, scenario := range []string{"source Off", "target Off", "local pause"} {
