@@ -425,13 +425,26 @@ func (e *Executor) Stop(engine string) error {
 // loads of the engine, so one in progress does not hold the lifecycle lock
 // until it finishes.
 func (e *Executor) StopFrom(engine string, origin intentOrigin) error {
+	return e.stopFrom(engine, origin, "")
+}
+
+// StopForSwitch applies a broker-admitted local Off only while its remote
+// switch reservation still exists. A stale request is a complete no-op.
+func (e *Executor) StopForSwitch(engine, operationID string) error {
+	return e.stopFrom(engine, intentLocal, operationID)
+}
+
+func (e *Executor) stopFrom(engine string, origin intentOrigin, operationID string) error {
 	st, err := e.state(engine)
 	if err != nil {
 		return err
 	}
-	done, err := e.admitStop(engine, origin)
+	done, err := e.admitStop(engine, origin, operationID)
 	if err != nil {
 		return err
+	}
+	if done == nil {
+		return nil
 	}
 	defer done()
 	if origin == intentLocal {

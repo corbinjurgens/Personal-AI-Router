@@ -17,14 +17,22 @@ lock. Forward steps are pinned to the preparing manager incarnation; replacement
 interrupts the operation and gates the new manager until reconciliation finishes.
 The gate applies to forward operations, including on the initial spawn. The
 manager's discovery subscription and node/settings projections still reach the
-current worker during recovery, including authoritative local-pause state.
+current worker during recovery, including authoritative local-pause state and
+log-level changes. Mutating direct peer control also remains fenced inside the
+manager until the broker acknowledges successful recovery for its incarnation.
 Off/pause admission and terminal completion share a gate, so an admitted veto
 cannot produce a successful receipt while a stop response is pending. Broker
 cleanup carries the operation-specific Off/pause veto to the manager before
 reconciling a committed target. A veto admitted during cleanup requires another
 reconcile or retained recovery ownership; checkpoint release refuses an
 uncleaned committed target with a durable veto. A delayed Off response cancels
-only its original operation. Worker exit is fenced before supervisor
+only its original operation. The internal local stop carries that operation ID;
+manager admission makes the entire delayed request a no-op once the reservation
+is released or belongs to another operation, preserving later explicit On intent.
+Off/pause during retained recovery latches against its checkpoint identity;
+recovery rechecks after reconciliation and drain release, repeats cleanup for a
+new veto, and orders checkpoint release with that admission gate.
+Worker exit is fenced before supervisor
 notification, with already-closed worker
 channels checked again at completion. Transient conservative recovery failures
 retry with bounded backoff on the same replacement; exhausted recovery remains

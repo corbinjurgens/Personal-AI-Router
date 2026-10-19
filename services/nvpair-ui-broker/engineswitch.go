@@ -146,13 +146,19 @@ func (b *Broker) pendingSwitchLocked(engine string) error {
 
 // Local Off alone may bypass the operation lock for a remote reservation,
 // including an unresolved recovery row. The manager remains the veto owner.
-func (b *Broker) switchLocalOffReservationLocked(engine string) (remote, reserved bool) {
+func (b *Broker) switchLocalOffReservationLocked(engine string) (remote, reserved bool, operationID string) {
 	if b.loadEngineSwitchLocked() != nil {
-		return false, false
+		return false, false, ""
 	}
 	c := b.switchCoordinator()
 	if cp := c.recoveryCheckpoint; cp != nil && cp.Phase != settings.SwitchCheckpointReleased && (engine == cp.SourceEngine || engine == cp.TargetEngine) {
-		return cp.Origin == settings.SwitchOriginRemote, true
+		remote = cp.Origin == settings.SwitchOriginRemote
+		if remote {
+			b.workersMu.Lock()
+			c.vetoID, c.localVeto = cp.OperationID, &settings.SwitchLocalVeto{Engine: engine}
+			b.workersMu.Unlock()
+		}
+		return remote, true, cp.OperationID
 	}
 	for _, r := range c.store.journal.Receipts {
 		if (!r.Terminal || (r.RecoveryRequired && !c.resolved[r.RequestID])) && (engine == r.Request.SourceEngine || engine == r.Request.TargetEngine) {
@@ -161,15 +167,13 @@ func (b *Broker) switchLocalOffReservationLocked(engine string) (remote, reserve
 				// Admission and completion share workersMu. Latch before the
 				// lifecycle RPC can wait for physical stop or its response.
 				b.workersMu.Lock()
-				if c.activeID == r.RequestID {
-					c.localVeto = &settings.SwitchLocalVeto{Engine: engine}
-				}
+				c.vetoID, c.localVeto = r.RequestID, &settings.SwitchLocalVeto{Engine: engine}
 				b.workersMu.Unlock()
 			}
-			return remote, true
+			return remote, true, r.RequestID
 		}
 	}
-	return false, false
+	return false, false, ""
 }
 
 // Recheck reservations while waiting for ordinary settings work. Lookup and
@@ -178,11 +182,8 @@ func (b *Broker) switchLocalOffReservationLocked(engine string) (remote, reserve
 func (b *Broker) admitLocalEngineOff(engine string) (remote, reserved bool, operationID string) {
 	for {
 		b.engineConfigMu.Lock()
-		remote, reserved = b.switchLocalOffReservationLocked(engine)
+		remote, reserved, operationID = b.switchLocalOffReservationLocked(engine)
 		if reserved {
-			b.workersMu.Lock()
-			operationID = b.switchCoordinator().activeID
-			b.workersMu.Unlock()
 			b.engineConfigMu.Unlock()
 			return remote, reserved, operationID
 		}
@@ -850,9 +851,16 @@ func (b *Broker) cancelRemoteEngineSwitchOperation(engine, operationID string) {
 }
 
 func (b *Broker) vetoRemoteEngineSwitch(engine string, cancel bool) {
+	// Serialize recovery-time pause admission with its final reconcile/release
+	// decision, just like local Off. Never wait for physical cleanup here.
+	b.engineConfigMu.Lock()
+	defer b.engineConfigMu.Unlock()
 	c := b.switchCoordinator()
 	b.workersMu.Lock()
 	c.waitMu.Lock()
+	if cp := c.recoveryCheckpoint; cp != nil && cp.Phase != settings.SwitchCheckpointReleased && cp.Origin == settings.SwitchOriginRemote && (engine == "" || engine == cp.SourceEngine || engine == cp.TargetEngine) {
+		c.vetoID, c.localVeto = cp.OperationID, &settings.SwitchLocalVeto{Engine: engine, Pause: engine == ""}
+	}
 	if c.remoteCancel != nil && (engine == "" || engine == c.remoteSource || engine == c.remoteTarget) {
 		c.localVeto = &settings.SwitchLocalVeto{Engine: engine, Pause: engine == ""}
 		if cancel {

@@ -114,52 +114,84 @@ func (b *Broker) recoverEngineSwitchOn(w *rpcWorker) bool {
 			return fail(c.err)
 		}
 	}
-	// Do not hold engineConfigMu across a potentially long stop/cleanup.
-	if cp != nil && cp.Phase != settings.SwitchCheckpointReleased {
-		b.workersMu.Lock()
-		var veto *settings.SwitchLocalVeto
-		if c.vetoID == cp.OperationID {
-			veto = c.localVeto
-		}
-		b.workersMu.Unlock()
-		// After a broker restart the failure receipt still records that this
-		// operation was vetoed. A cleanup-only pause veto preserves that outcome;
-		// it does not change node availability or infer a local Off provenance.
-		if veto == nil && cp.Origin == settings.SwitchOriginRemote {
-			if r, ok := c.store.Lookup(cp.OperationID); ok && r.Error != nil && r.Error.Kind == settings.SwitchErrorRemoteVeto {
-				veto = &settings.SwitchLocalVeto{Pause: true}
+	releaseDrains := func() error {
+		for id, receipt := range c.store.journal.Receipts {
+			if !receipt.RecoveryRequired || c.resolved[id] {
+				continue
+			}
+			b.engineConfigMu.Unlock()
+			err := b.releaseSwitchDrain(ctx, receipt.Request.SourceEngine)
+			b.engineConfigMu.Lock()
+			if err != nil {
+				return err
 			}
 		}
-		b.engineConfigMu.Unlock()
-		var result settings.SwitchReconcileResult
-		err := switchManagerCallOn(ctx, w, settings.SwitchReconcileMethod, settings.SwitchReconcileRequest{SwitchPrepareRequest: cp.SwitchPrepareRequest, LocalVeto: veto}, &result)
-		if err == nil && result.Error != nil && !switchCleanupSettled(result) {
-			err = &switchRPCError{*result.Error}
-		}
-		if err == nil {
+		return nil
+	}
+	// Do not hold engineConfigMu across a potentially long stop/cleanup.
+	if cp != nil && cp.Phase != settings.SwitchCheckpointReleased {
+		for {
+			b.workersMu.Lock()
+			var veto *settings.SwitchLocalVeto
+			if c.vetoID == cp.OperationID {
+				veto = c.localVeto
+			}
+			b.workersMu.Unlock()
+			// Recover the durable veto outcome even if restart lost the latch.
+			if veto == nil && cp.Origin == settings.SwitchOriginRemote {
+				if r, ok := c.store.Lookup(cp.OperationID); ok && r.Error != nil && r.Error.Kind == settings.SwitchErrorRemoteVeto {
+					veto = &settings.SwitchLocalVeto{Pause: true}
+				}
+			}
+			b.engineConfigMu.Unlock()
+			var result settings.SwitchReconcileResult
+			err := switchManagerCallOn(ctx, w, settings.SwitchReconcileMethod, settings.SwitchReconcileRequest{SwitchPrepareRequest: cp.SwitchPrepareRequest, LocalVeto: veto}, &result)
+			b.engineConfigMu.Lock()
+			if err == nil && result.Error != nil && !switchCleanupSettled(result) {
+				err = &switchRPCError{*result.Error}
+			}
+			if err != nil {
+				return fail(err)
+			}
+			// Drain RPCs can also admit a late Off. Keep the checkpoint until
+			// they finish, then recheck the latch before releasing either owner.
+			if err := releaseDrains(); err != nil {
+				return fail(err)
+			}
+			b.workersMu.Lock()
+			latest := c.localVeto
+			changed := c.vetoID == cp.OperationID && latest != nil && (veto == nil || *latest != *veto)
+			b.workersMu.Unlock()
+			if changed {
+				// Off/pause admitted while reconcile was running must reach the
+				// cleanup owner before its reservation can be released.
+				continue
+			}
+			// Keep the admission lock through this metadata-only release and
+			// clearing recoveryCheckpoint. New local veto admission cannot slip
+			// between the recheck and release. No workersMu is held over RPC.
 			var release settings.SwitchStepResult
 			err = switchManagerCallOn(ctx, w, settings.SwitchStepMethod, settings.SwitchStepRequest{SwitchPrepareRequest: cp.SwitchPrepareRequest, Step: settings.SwitchStepRelease}, &release)
 			if err == nil && release.Error != nil {
 				err = &switchRPCError{*release.Error}
 			}
+			if err != nil {
+				return fail(err)
+			}
+			break
 		}
-		b.engineConfigMu.Lock()
-		if err != nil {
-			return fail(err)
-		}
+	} else if err := releaseDrains(); err != nil {
+		return fail(err)
 	}
 	c.recoveryCheckpoint = nil
 	for id, receipt := range c.store.journal.Receipts {
 		if !receipt.RecoveryRequired || c.resolved[id] {
 			continue
 		}
-		b.engineConfigMu.Unlock()
-		err := b.releaseSwitchDrain(ctx, receipt.Request.SourceEngine)
-		b.engineConfigMu.Lock()
-		if err != nil {
-			return fail(err)
-		}
 		c.resolved[id] = true
+	}
+	if err := b.notifyEngineSwitchRecoveryReady(ctx, w, manager.Configuration.ManagerIncarnation); err != nil {
+		return fail(err)
 	}
 	c.recoveryErr = nil
 	return true

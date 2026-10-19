@@ -411,6 +411,17 @@ checkpoint, observations and coded error; no settings-worker error flattening is
 permitted. Apply/status ec routes relay to the broker, never to those executor
 methods, and never provision or forward another hop.
 
+Construction of the broker-managed Manager closes its independent direct ec
+mutation gate before the listener starts. The broker opens it only after
+successful conservative recovery, using the parent-only
+`engine:switch-recovery-ready` request with `{managerIncarnation}`. The manager
+checks the current incarnation and absence of an unreleased checkpoint under
+the mutation-admission lock, then acknowledges the same incarnation. Mutating
+ec routes return HTTP 503 until then, including stop, install, settings apply,
+policy/availability changes and switch apply. Read-only queries and event
+streams remain available. This is separate from local pause, and neither blocks
+authoritative state deliveries nor conservative parent inspect/reconcile/release.
+
 Prepare's short mutation-admission gate snapshots configuration and durably
 reserves both IDs before probes. Competing admitted mutations refuse prepare;
 reservations refuse lifecycle, port/configuration, install/uninstall and
@@ -464,6 +475,12 @@ on the operation lock for cleanup; that vetoing stop returns its actual result.
 This admission does not acquire the switch lock or engine operation lock and
 also applies to recovery reservations. A local Off during a local switch is
 refused busy without changing intent.
+For parent-only `engine:stop`, optional `switchOperationId` binds a broker-admitted
+Off to its remote reservation. Stop admission checks the operation ID, origin,
+engine membership and unreleased phase atomically under the admission lock.
+If that scope has settled or changed, the entire request succeeds as a no-op,
+with no cancellation, physical stop or intent write against later work. An
+unscoped stop retains ordinary local Off semantics.
 The existing projection
 path cancels remote work on local pause. Local switching is allowed under these
 remote-only vetoes.

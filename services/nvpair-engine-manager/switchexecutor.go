@@ -61,11 +61,21 @@ func (e *Executor) trackMutationLocked(engine string) func() {
 // An explicit local Off is still a veto during a remote reservation. Persist
 // it before waiting for the reserved lifecycle lock. Track the stop so a newly
 // released reservation cannot be replaced while this veto finishes cleanup.
-func (e *Executor) admitStop(engine string, origin intentOrigin) (func(), error) {
+func (e *Executor) admitStop(engine string, origin intentOrigin, operationID string) (func(), error) {
 	e.switchAdmission.Lock()
 	defer e.switchAdmission.Unlock()
 	e.desired.mu.Lock()
 	state, err := e.desired.load()
+	if err == nil && operationID != "" {
+		cp := state.PendingSwitch
+		if origin != intentLocal || cp == nil || cp.OperationID != operationID || cp.Phase == settings.SwitchCheckpointReleased || cp.Origin != settings.SwitchOriginRemote || (cp.SourceEngine != engine && cp.TargetEngine != engine) {
+			// The broker admitted this Off against a particular reservation.
+			// Once that reservation is gone, neither its veto nor its physical
+			// stop may affect a later switch or an explicit local On.
+			e.desired.mu.Unlock()
+			return nil, nil
+		}
+	}
 	if err == nil && origin == intentLocal {
 		if cp := state.PendingSwitch; cp != nil && cp.Phase != settings.SwitchCheckpointReleased && cp.Origin == settings.SwitchOriginRemote && (cp.SourceEngine == engine || cp.TargetEngine == engine) {
 			state.setIntent(engine, false, intentLocal)

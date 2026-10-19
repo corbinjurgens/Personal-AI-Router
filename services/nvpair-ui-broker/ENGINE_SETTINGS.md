@@ -185,12 +185,23 @@ even when the local lifecycle request has not arrived. A veto latched during
 reconcile requires another cleanup pass before terminal release, or retained
 recovery ownership if cleanup cannot finish within its budget. Manager release
 refuses a committed target with a durable veto recorded after reconcile read
-its checkpoint. A delayed local Off response cancels only its original switch.
+its checkpoint. The broker-to-manager `engine:stop` request includes internal
+`switchOperationId` when Off is admitted against a remote switch. Under the
+manager's admission lock, a settled, released or different reservation makes
+that entire scoped stop a no-op, including physical stop and intent writes.
+Thus an earlier Off cannot stop a later explicit On or veto a newer switch.
+Ordinary unscoped Off retains its serialized local stop semantics. A delayed
+local Off response cancels only its original switch.
 Failed veto delivery retains the exact operation veto for conservative recovery.
 After broker restart, a durable remote-veto failure receipt also requires target
 cleanup; it does not change node availability or invent local Off provenance.
 Off admission rechecks reservations while waiting for ordinary settings work;
 negative lookup and operation-lock acquisition are ordered with acceptance.
+Off/pause admitted during retained recovery latches against that checkpoint's
+operation ID. Recovery rechecks the latch after reconcile and drain release,
+repeating cleanup for any new veto within the cleanup budget. Its final
+metadata-only release and clearing recovery ownership share the local admission
+lock; long physical cleanup runs outside that lock. Failure retains recovery.
 
 Switch drain is strict and separate from the settings restart drain. Withdraw
 source discovery and its local inference endpoint, acknowledge source drain,
@@ -251,6 +262,13 @@ stays hidden throughout. Success clears only the retryable error and permits the
 remaining bring-up continuation. This gate also applies on the initial spawn;
 the manager's discovery subscription and node/settings state projections bypass
 it so recovery receives the peer directory and authoritative local-pause state.
+Log-level changes also reach the current worker during this interval. The
+manager starts with its mutating authenticated peer-control surface fenced;
+read-only queries and state deliveries remain available. Only the broker's
+successful recovery sends internal `engine:switch-recovery-ready` with
+`managerIncarnation`. The manager verifies its incarnation and the absence of
+an unreleased checkpoint before acknowledging that same incarnation. Broker
+publication still rechecks the current worker and its exit fence after the ACK.
 Exhaustion keeps the manager unavailable and
 reports sticky `engine-switch:recovery-blocked`; it never resumes switch steps or
 silently treats the blocked replacement as usable. Corruption and uncertain

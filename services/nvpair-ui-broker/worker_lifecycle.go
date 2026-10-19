@@ -525,6 +525,54 @@ func (b *Broker) spawnEngineMgr() (supervisedHandle, error) {
 	return w, nil
 }
 
+// notifyEngineSwitchRecoveryReady opens the direct peer mutation surface only
+// for the worker whose conservative recovery just completed. The worker checks
+// its own incarnation before acknowledging; ordinary broker publication still
+// rechecks the worker identity and exit fence afterwards.
+func (b *Broker) notifyEngineSwitchRecoveryReady(ctx context.Context, w *rpcWorker, incarnation string) error {
+	b.workersMu.Lock()
+	current := w != nil && b.engineMgr == w
+	recovering := b.engineMgrRecovering
+	b.workersMu.Unlock()
+	if !current {
+		return fmt.Errorf("engine manager changed before recovery acknowledgement")
+	}
+	select {
+	case <-w.Done():
+		return fmt.Errorf("engine manager exited before recovery acknowledgement")
+	default:
+	}
+	// Restoration can re-inspect an already-published manager. Its direct
+	// surface was acknowledged at spawn; there is no startup gate to open.
+	if !recovering {
+		return nil
+	}
+	var result struct {
+		ManagerIncarnation string `json:"managerIncarnation"`
+	}
+	err := switchManagerCallOn(ctx, w, "engine:switch-recovery-ready", struct {
+		ManagerIncarnation string `json:"managerIncarnation"`
+	}{incarnation}, &result)
+	if err != nil {
+		return err
+	}
+	if incarnation == "" || result.ManagerIncarnation != incarnation {
+		return fmt.Errorf("engine manager recovery acknowledgement has a different incarnation")
+	}
+	b.workersMu.Lock()
+	current = b.engineMgr == w
+	b.workersMu.Unlock()
+	select {
+	case <-w.Done():
+		current = false
+	default:
+	}
+	if !current {
+		return fmt.Errorf("engine manager changed during recovery acknowledgement")
+	}
+	return nil
+}
+
 func (b *Broker) spawnManualNodes() (supervisedHandle, error) {
 	w, err := startRPCWorker("manual-nodes", b.manualNodesPath, append(b.logLevelArgs(), b.clusterDirArgs()...), b.forwardManualNodesNotification)
 	if err != nil {

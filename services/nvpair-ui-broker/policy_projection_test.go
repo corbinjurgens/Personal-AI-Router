@@ -13,10 +13,33 @@ import (
 
 	"nvpair-ui-broker/relay"
 
+	"nvpair-shared/applog"
 	settings "nvpair-shared/enginesettings"
 	"nvpair-shared/nodepolicy"
 	"nvpair-shared/noderec"
 )
+
+func TestRecoveringManagerReceivesLogLevel(t *testing.T) {
+	b := &Broker{}
+	engine := attachFakeEngine(t, b)
+	b.workersMu.Lock()
+	b.engineMgrRecovering = true
+	b.workersMu.Unlock()
+	b.forwardLogLevel("debug")
+	calls := engine.waitFor("recovering manager log level", func(calls []policyCall) bool {
+		return len(calls) > 0
+	})
+	var params applog.SetLevelParams
+	if err := json.Unmarshal(calls[0].params, &params); err != nil {
+		t.Fatal(err)
+	}
+	if calls[0].method != applog.SetLevelMethod || !calls[0].notify || params.Level != "debug" {
+		t.Fatalf("log level delivery = %+v, params = %+v", calls[0], params)
+	}
+	if b.getEngineMgr() != nil {
+		t.Fatal("log level delivery exposed recovering manager")
+	}
+}
 
 func TestRecoveringManagerDiscoverySubscribeReceivesDirectory(t *testing.T) {
 	b := &Broker{relayDir: relay.NewDirectory()}

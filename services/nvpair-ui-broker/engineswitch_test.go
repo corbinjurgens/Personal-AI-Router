@@ -151,6 +151,14 @@ func newSwitchHarness(t *testing.T) *switchHarness {
 			return result, ""
 		case "engine:get-launch":
 			return settings.LaunchState{Engine: "lmstudio", Running: true, EffectivePort: 12345}, ""
+		case "engine:switch-recovery-ready":
+			var p struct {
+				ManagerIncarnation string `json:"managerIncarnation"`
+			}
+			if err := json.Unmarshal(raw, &p); err != nil {
+				return nil, err.Error()
+			}
+			return p, ""
 		default:
 			return map[string]bool{"ok": true}, ""
 		}
@@ -176,6 +184,83 @@ func newSwitchHarness(t *testing.T) *switchHarness {
 	r.mu.Unlock()
 	t.Cleanup(func() { h.waitIdle(t) })
 	return h
+}
+
+func TestSwitchRecoveryReadyAcknowledgementPrecedesManagerPublication(t *testing.T) {
+	h := newSwitchHarness(t)
+	w := hideSwitchRecoveryManager(t, h.b)
+	base := h.engine.answer
+	reached, resume := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	open := func() { once.Do(func() { close(resume) }) }
+	t.Cleanup(open)
+	h.engine.setAnswer(func(method string, raw json.RawMessage) (any, string) {
+		if method == "engine:switch-recovery-ready" {
+			close(reached)
+			<-resume
+		}
+		return base(method, raw)
+	})
+	done := make(chan bool, 1)
+	go func() { done <- h.b.recoverReplacementEngineMgr(w) }()
+	requireGateOpens(t, reached, "manager readiness acknowledgement")
+	if h.b.getEngineMgr() != nil {
+		t.Fatal("broker published the manager before readiness was acknowledged")
+	}
+	open()
+	select {
+	case ok := <-done:
+		if !ok || h.b.getEngineMgr() != w {
+			t.Fatal("successful readiness acknowledgement did not publish the recovered manager")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("recovery did not return after readiness acknowledgement")
+	}
+}
+
+func TestSwitchRecoveryBlockedManagerDoesNotReceiveReadiness(t *testing.T) {
+	h := newSwitchHarness(t)
+	w := hideSwitchRecoveryManager(t, h.b)
+	base := h.engine.answer
+	var ready atomic.Int32
+	h.engine.setAnswer(func(method string, raw json.RawMessage) (any, string) {
+		if method == settings.SwitchPrepareMethod {
+			return settings.SwitchPrepareResult{Error: &settings.SwitchError{
+				Code: settings.SwitchOperationErrorCode, Kind: settings.SwitchErrorStorage, Message: "checkpoint unreadable",
+			}}, ""
+		}
+		if method == "engine:switch-recovery-ready" {
+			ready.Add(1)
+		}
+		return base(method, raw)
+	})
+	if h.b.recoverReplacementEngineMgr(w) || h.b.getEngineMgr() != nil {
+		t.Fatal("blocked recovery published the manager")
+	}
+	if got := ready.Load(); got != 0 {
+		t.Fatalf("blocked recovery sent %d readiness acknowledgements", got)
+	}
+}
+
+func TestSwitchRecoveryReadyRejectsDifferentAcknowledgementIncarnation(t *testing.T) {
+	h := newSwitchHarness(t)
+	w := hideSwitchRecoveryManager(t, h.b)
+	base := h.engine.answer
+	h.engine.setAnswer(func(method string, raw json.RawMessage) (any, string) {
+		if method == "engine:switch-recovery-ready" {
+			return map[string]string{"managerIncarnation": "another-manager"}, ""
+		}
+		return base(method, raw)
+	})
+	if h.b.recoverEngineSwitchOn(w) || h.b.getEngineMgr() != nil {
+		t.Fatal("a different acknowledgement incarnation published the manager")
+	}
+	h.b.engineConfigMu.Lock()
+	err := h.b.switchCoordinator().recoveryErr
+	h.b.engineConfigMu.Unlock()
+	if err == nil {
+		t.Fatal("missing recovery failure after mismatched readiness acknowledgement")
+	}
 }
 
 func switchTestState(running, healthy bool, intent string) settings.SwitchEngineState {

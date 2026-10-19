@@ -41,6 +41,8 @@ type opParam struct {
 	Port   int    `json:"port,omitempty"`
 	Bind   string `json:"bind,omitempty"`
 	Start  bool   `json:"start,omitempty"`
+	// SwitchOperationID scopes a delayed local Off to the admitted reservation.
+	SwitchOperationID string `json:"switchOperationId,omitempty"`
 }
 
 type actionParam struct {
@@ -80,6 +82,9 @@ type Manager struct {
 }
 
 func NewManager(codec *Codec, exec *Executor, mesh *clustertrust.Mesh, clusterDir string) *Manager {
+	// Set the gate before main starts the direct mTLS listener. State delivery
+	// and conservative stdio recovery remain available while it is closed.
+	exec.switchRecoveryPending.Store(true)
 	// cancel defaults to a no-op so the "shutdown" handler is safe even if
 	// handleMessage is reached before Run() installs the real CancelFunc
 	// (e.g. a unit test calling it directly); Run overwrites it.
@@ -216,6 +221,19 @@ func (m *Manager) handleMessage(ctx context.Context, msg *Message) {
 	}
 
 	switch msg.Method {
+	case switchRecoveryReadyMethod:
+		var p struct {
+			ManagerIncarnation string `json:"managerIncarnation"`
+		}
+		if !m.parse(msg, &p) {
+			return
+		}
+		if err := m.exec.completeSwitchRecovery(p.ManagerIncarnation); err != nil {
+			m.respondOrErr(msg, nil, err)
+			return
+		}
+		m.codec.Respond(msg.ID, map[string]string{"managerIncarnation": m.exec.switchIncarnation})
+
 	case "shutdown":
 		if err := m.codec.Respond(msg.ID, nil); err != nil {
 			log.Printf("failed to respond to shutdown: %v", err)
@@ -357,7 +375,11 @@ func (m *Manager) runOp(ctx context.Context, msg *Message) {
 	case "engine:start":
 		err = start()
 	case "engine:stop":
-		err = m.exec.Stop(p.Engine)
+		if p.SwitchOperationID != "" {
+			err = m.exec.StopForSwitch(p.Engine, p.SwitchOperationID)
+		} else {
+			err = m.exec.Stop(p.Engine)
+		}
 	case "engine:restart":
 		err = m.exec.Restart(ctx, p.Engine)
 	}

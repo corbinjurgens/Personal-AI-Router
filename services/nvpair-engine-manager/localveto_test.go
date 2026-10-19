@@ -14,7 +14,113 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"nvpair-shared/clustertrust"
+	settings "nvpair-shared/enginesettings"
 )
+
+func TestRemoteControlRecoveryGateWaitsForCurrentManagerAcknowledgement(t *testing.T) {
+	selfDir, peerDir := pairedPolicyDirs(t)
+	exec := newTestExecutor(t, testEngineManifest(fakeEngineBin))
+	t.Cleanup(exec.StopAll)
+	if err := exec.desired.set("fake", true, intentLocal); err != nil {
+		t.Fatalf("save installed engine On: %v", err)
+	}
+	mesh := clustertrust.Open(peerDir)
+	out := &syncBuffer{}
+	m := NewManager(NewCodec(out), exec, mesh, peerDir)
+	t.Cleanup(m.controlHTTP.CloseIdle)
+	t.Cleanup(m.controlReadyHTTP.CloseIdle)
+	// This is the startup projection delivered even while broker recovery is
+	// blocked. It must not itself enable the independent direct peer surface.
+	m.applyNodeProjection(&Message{Params: json.RawMessage(`{"policy":{"revision":"1","roles":{}},"pausedLocally":false}`)})
+	server := httptest.NewUnstartedServer((&controlServer{exec: exec, mesh: mesh}).mux())
+	server.TLS = mesh.ServerTLSConfig()
+	server.StartTLS()
+	t.Cleanup(server.Close)
+	peer := clustertrust.Open(selfDir)
+	tlsConfig, ok := peer.ClientTLSConfig("uuid-peer")
+	if !ok {
+		t.Fatal("paired client pin unavailable")
+	}
+	transport := &http.Transport{TLSClientConfig: tlsConfig}
+	t.Cleanup(transport.CloseIdleConnections)
+	client := &http.Client{Transport: transport, Timeout: 20 * time.Second}
+	request := func(method, path, body string) *http.Response {
+		t.Helper()
+		req, err := http.NewRequest(method, server.URL+path, strings.NewReader(body))
+		if err != nil {
+			t.Fatalf("build authenticated control request: %v", err)
+		}
+		res, err := client.Do(req)
+		if err != nil {
+			t.Fatalf("authenticated control request: %v", err)
+		}
+		t.Cleanup(func() { _ = res.Body.Close() })
+		return res
+	}
+	// Broker recovery has not acknowledged success. Every mutating direct
+	// route, including stop and install-without-start, remains unavailable.
+	for _, path := range []string{controlStartPath, controlStopPath, controlInstallPath,
+		controlPullPath, controlLoadPath, controlUnloadPath, controlDeletePath,
+		settingsPath + "apply", controlPolicySetPath, controlAvailabilitySetPath, settings.SwitchApplyPath} {
+		if res := request(http.MethodPost, path, `{"engine":"fake"}`); res.StatusCode != http.StatusServiceUnavailable {
+			t.Fatalf("%s while recovery pending = %d, want 503", path, res.StatusCode)
+		}
+	}
+	if res := request(http.MethodGet, controlEnginesPath, ""); res.StatusCode != http.StatusOK {
+		t.Fatalf("read-only inventory while recovery pending = %d, want 200", res.StatusCode)
+	}
+	if st, err := exec.Status("fake"); err != nil || st.Running {
+		t.Fatalf("hidden manager started the saved-On engine: %+v, %v", st, err)
+	}
+	ack := func(id, incarnation string) Message {
+		t.Helper()
+		params, err := json.Marshal(map[string]string{"managerIncarnation": incarnation})
+		if err != nil {
+			t.Fatalf("encode recovery acknowledgement: %v", err)
+		}
+		rawID := json.RawMessage(id)
+		m.handleMessage(context.Background(), &Message{JSONRPC: "2.0", ID: &rawID, Method: switchRecoveryReadyMethod, Params: params})
+		frames := out.frames()
+		if len(frames) == 0 {
+			t.Fatal("missing recovery acknowledgement reply")
+		}
+		return frames[len(frames)-1]
+	}
+	if reply := ack("1", "old-manager"); reply.Error == nil {
+		t.Fatal("a different incarnation opened the recovery gate")
+	}
+	if res := request(http.MethodPost, controlStartPath, `{"engine":"fake"}`); res.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("start after stale acknowledgement = %d, want 503", res.StatusCode)
+	}
+	if reply := ack("2", exec.switchIncarnation); reply.Error != nil {
+		t.Fatalf("current manager recovery acknowledgement: %+v", reply.Error)
+	}
+	res := request(http.MethodPost, controlStartPath, `{"engine":"fake"}`)
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("start after successful recovery = %d, want 200", res.StatusCode)
+	}
+	var status EngineStatus
+	if err := json.NewDecoder(res.Body).Decode(&status); err != nil {
+		t.Fatalf("decode started engine status: %v", err)
+	}
+	if status.Engine != "fake" || !status.Running {
+		t.Fatalf("start after successful recovery returned %+v", status)
+	}
+}
+
+func TestSwitchRecoveryReadyRetainsGateForUnreleasedCheckpoint(t *testing.T) {
+	exec, p := switchFixture(t)
+	prepareSwitch(t, exec, p)
+	exec.switchRecoveryPending.Store(true)
+	if err := exec.completeSwitchRecovery(exec.switchIncarnation); err == nil {
+		t.Fatal("recovery acknowledged an unreleased checkpoint")
+	}
+	if !exec.switchRecoveryPending.Load() {
+		t.Fatal("unreleased checkpoint opened the direct peer mutation gate")
+	}
+}
 
 // postControl drives one ec handler as a paired node's request does.
 func postControl(t *testing.T, handler func(http.ResponseWriter, *http.Request), path, body string) *httptest.ResponseRecorder {

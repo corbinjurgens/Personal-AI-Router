@@ -538,6 +538,15 @@ forward steps (`source-stop`, `target-start`) reject a different incarnation
 with a coded `interrupted` error, including inherited checkpoints after restart.
 Reconcile and release accept the original envelope to finish conservative cleanup.
 
+A broker-managed manager starts recovery-pending before binding its ec listener.
+All mutating authenticated ec requests return HTTP 503 until the parent sends
+`engine:switch-recovery-ready` with `{managerIncarnation}` after successful
+conservative recovery. The parent pins that request to the recovered worker;
+the manager checks its incarnation and refuses readiness while a checkpoint is
+unreleased. This gate is independent of local pause. Inventory, read-only
+queries, event streams, authoritative state deliveries and parent-only
+inspect/reconcile/release remain available during recovery.
+
 The optional `pendingSwitch` in `engine-state.json` shares the durable replacement
 with `engines` and `offBy`. Source Off and `stop-pending` are saved before stopping.
 Adjacent `pendingSwitchPorts` records source/target execution endpoints; a
@@ -560,6 +569,11 @@ local Off and local pause with `-32011`; local switches remain allowed.
 The veto takes neither the switch lock nor the engine operation lock, including
 for a remote reservation retained for recovery. Local Off of a reserved engine
 during a local switch remains a busy refusal.
+The parent may scope `engine:stop` with internal `switchOperationId` for an Off
+admitted during a remote reservation. Under the same admission lock, a missing,
+released or different reservation makes the entire scoped stop a no-op. It
+neither vetoes a newer switch nor stops or rewrites a later explicit local On.
+Unscoped local stops retain ordinary lifecycle semantics.
 While a remote reservation remains unreleased, local Off of either engine or
 local pause also vetoes an already-committed target. Reconciliation records
 target Off and pending cleanup before stopping it; source is never restored.

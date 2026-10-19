@@ -54,6 +54,16 @@ func TestSwitchLocalOffAfterPublicationFailsBeforeStopReply(t *testing.T) {
 	base := h.engine.answer
 	h.engine.setAnswer(func(method string, raw json.RawMessage) (any, string) {
 		if method == "engine:stop" {
+			var stop struct {
+				Engine            string `json:"engine"`
+				SwitchOperationID string `json:"switchOperationId"`
+			}
+			if err := json.Unmarshal(raw, &stop); err != nil {
+				return nil, err.Error()
+			}
+			if stop.Engine != "lmstudio" || stop.SwitchOperationID != p.RequestID {
+				t.Errorf("stop lost admitted switch identity: %+v", stop)
+			}
 			// Model admission's durable checkpoint/intent update separately
 			// from the lifecycle stop response, which remains held.
 			h.mu.Lock()
@@ -281,10 +291,10 @@ func TestSwitchLatchedOffCleanupPrecedesLocalStopAdmission(t *testing.T) {
 				t.Fatalf("manager released without verified target Off: %+v", cp)
 			}
 			// Deliver the held lifecycle request only after terminal cleanup and
-			// release. It is now an ordinary stop of the originally selected engine.
+			// release. Its original scope makes it harmless to newer intent.
 			w := h.b.getEngineMgr()
-			if _, rpcErr, err := w.CallNoTimeout(context.Background(), "engine:stop", settingsJSON(map[string]string{"engine": engine})); err != nil || rpcErr != nil {
-				t.Fatalf("late ordinary stop: %v, %+v", err, rpcErr)
+			if _, rpcErr, err := w.CallNoTimeout(context.Background(), "engine:stop", settingsJSON(map[string]string{"engine": engine, "switchOperationId": operationID})); err != nil || rpcErr != nil {
+				t.Fatalf("late scoped stop: %v, %+v", err, rpcErr)
 			}
 			h.b.cancelRemoteEngineSwitchOperation(engine, operationID)
 		})

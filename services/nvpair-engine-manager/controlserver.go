@@ -31,10 +31,34 @@ import (
 	"time"
 
 	"nvpair-shared/clustertrust"
+	settings "nvpair-shared/enginesettings"
 )
 
 // controlEnginesPath returns this node's engine install/run status.
 const controlEnginesPath = "/v1/engines"
+
+const switchRecoveryReadyMethod = "engine:switch-recovery-ready"
+
+// completeSwitchRecovery is parent-only: the pinned stdio worker handle and
+// incarnation prevent an acknowledgement for an old process opening a new one.
+func (e *Executor) completeSwitchRecovery(incarnation string) error {
+	e.switchAdmission.Lock()
+	defer e.switchAdmission.Unlock()
+	if incarnation == "" || incarnation != e.switchIncarnation {
+		return errors.New("switch recovery acknowledgement has a different manager incarnation")
+	}
+	e.desired.mu.Lock()
+	defer e.desired.mu.Unlock()
+	state, err := e.desired.load()
+	if err != nil {
+		return err
+	}
+	if cp := state.PendingSwitch; cp != nil && cp.Phase != settings.SwitchCheckpointReleased {
+		return errors.New("switch recovery still owns an unreleased checkpoint")
+	}
+	e.switchRecoveryPending.Store(false)
+	return nil
+}
 
 // controlServer holds the dependencies the ec handlers share.
 type controlServer struct {
@@ -46,13 +70,36 @@ type controlServer struct {
 // model surface uses (requirePinnedPeer in httpserver.go) so both of this
 // service's LAN surfaces make the same decision the same way.
 func (s *controlServer) requirePin(h http.HandlerFunc) http.HandlerFunc {
-	return requirePinnedPeer(s.mesh, h)
+	return requirePinnedPeer(s.mesh, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if s.allowControlDuringRecovery(w, r) {
+			h(w, r)
+		}
+	}))
 }
 
 // requirePinCaller is requirePin for a handler that also needs to know which
 // peer is calling.
 func (s *controlServer) requirePinCaller(h pinnedPeerHandler) http.HandlerFunc {
-	return requirePinnedCaller(s.mesh, h)
+	return requirePinnedCaller(s.mesh, func(w http.ResponseWriter, r *http.Request, caller string) {
+		if s.allowControlDuringRecovery(w, r) {
+			h(w, r, caller)
+		}
+	})
+}
+
+// Every mutation on the ec surface passes one of the pin wrappers above. Keep
+// read-only POST queries available along with inventory and event streams;
+// authoritative projections and conservative recovery use stdio, not ec.
+func (s *controlServer) allowControlDuringRecovery(w http.ResponseWriter, r *http.Request) bool {
+	if s.exec == nil || !s.exec.switchRecoveryPending.Load() || r.Method == http.MethodGet || r.Method == http.MethodHead {
+		return true
+	}
+	switch r.URL.Path {
+	case settingsPath + "get", settingsPath + "preview", controlPolicyGetPath, settings.SwitchStatusPath:
+		return true
+	}
+	http.Error(w, "engine manager switch recovery is pending; try again shortly", http.StatusServiceUnavailable)
+	return false
 }
 
 // mux builds the ec routes. Split from the listener so tests can exercise the

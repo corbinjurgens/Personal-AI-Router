@@ -21,7 +21,7 @@ import (
 // never propagated: a child that won't take the new level (e.g. its pipe
 // is mid-teardown, or it never started) must not fail the caller's
 // log/set-level request, which has already succeeded for the broker
-// itself. Each handle is read through its workersMu-guarded getter because
+// itself. Each handle is read through a workersMu-guarded getter or snapshot because
 // a supervisor may swap it (on a restart) concurrently with this call.
 func (b *Broker) forwardLogLevel(level string) {
 	if s := b.getScanner(); s != nil {
@@ -53,7 +53,11 @@ func (b *Broker) forwardLogLevel(level string) {
 			slog.Warn("failed to forward log/set-level to nvpair-errors", "err", err)
 		}
 	}
-	if em := b.getEngineMgr(); em != nil {
+	// Configuration must also reach a current manager hidden by recovery.
+	b.workersMu.Lock()
+	em := b.engineMgr
+	b.workersMu.Unlock()
+	if em != nil {
 		if err := em.SetLogLevel(level); err != nil {
 			slog.Warn("failed to forward log/set-level to engine-manager", "err", err)
 		}
@@ -418,7 +422,21 @@ func (b *Broker) relayToEngineNow(msg *Message) {
 	// read loop allocates a fresh Message per request so these are stable.
 	id := msg.ID
 	method := msg.Method
-	result, rpcErr, err := em.CallNoTimeout(context.Background(), method, msg.Params)
+	params := msg.Params
+	if localOffOperationID != "" {
+		// This Off was admitted against this remote reservation. Once it has
+		// settled, the delayed request must not stop a later local On or switch.
+		var err error
+		params, err = json.Marshal(struct {
+			Engine            string `json:"engine"`
+			SwitchOperationID string `json:"switchOperationId"`
+		}{localOffEngine, localOffOperationID})
+		if err != nil {
+			_ = b.codec.RespondError(id, -32000, err.Error())
+			return
+		}
+	}
+	result, rpcErr, err := em.CallNoTimeout(context.Background(), method, params)
 	if localOffEngine != "" {
 		// The manager has now persisted the veto and cancelled its startup;
 		// only then cancel the coordinator's drain/response wait.

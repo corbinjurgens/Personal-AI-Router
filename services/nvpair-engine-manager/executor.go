@@ -147,6 +147,9 @@ type Executor struct {
 	inventory   map[string][]string
 
 	reservedPort atomic.Int32
+	// A broker-managed executor's direct peer mutations stay fenced until the
+	// parent acknowledges conservative recovery for this process incarnation.
+	switchRecoveryPending atomic.Bool
 	// StopAll is terminal for an Executor; the gate closes its start/snapshot race.
 	shuttingDown atomic.Bool
 	mu           sync.Mutex

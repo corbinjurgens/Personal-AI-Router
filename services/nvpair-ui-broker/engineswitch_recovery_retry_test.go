@@ -8,13 +8,112 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"nvpair-shared/clustertrusttest"
 	settings "nvpair-shared/enginesettings"
 	"nvpair-shared/nodepolicy"
 )
+
+func TestSwitchRecoveryLateOffReconcilesBeforeRelease(t *testing.T) {
+	test := func(name, engine string, duringDrain bool) {
+		t.Run(name, func(t *testing.T) {
+			h := newSwitchHarness(t)
+			r := switchStoreReceipt("recovery-late-off")
+			r.Caller = "peer"
+			r.PayloadHash = settings.SwitchPayloadHash(r.Caller, r.NodeID, r.Request)
+			switchStoreAccept(t, h.b.engineSwitch.store, r)
+			h.mu.Lock()
+			h.cp = &settings.SwitchCheckpoint{
+				SwitchPrepareRequest: settings.SwitchPrepareRequest{OperationID: r.RequestID, SourceEngine: r.Request.SourceEngine, TargetEngine: r.Request.TargetEngine, Origin: settings.SwitchOriginRemote},
+				Phase:                settings.SwitchCheckpointTargetCommitted, TargetCommitted: true,
+				Source: switchTestState(false, false, settings.SwitchIntentOff),
+				Target: switchTestState(true, true, settings.SwitchIntentOn),
+			}
+			h.mu.Unlock()
+			w := hideSwitchRecoveryManager(t, h.b)
+			reached, resume := make(chan struct{}), make(chan struct{})
+			var once sync.Once
+			open := func() { once.Do(func() { close(resume) }) }
+			t.Cleanup(open)
+			base := h.engine.answer
+			var reconciles atomic.Int32
+			h.engine.setAnswer(func(method string, raw json.RawMessage) (any, string) {
+				if method == settings.SwitchReconcileMethod {
+					n := reconciles.Add(1)
+					result, errText := base(method, raw)
+					if n == 1 && !duringDrain {
+						// The manager already observed committed On, before Off.
+						close(reached)
+						<-resume
+					}
+					return result, errText
+				}
+				if method == settings.SwitchStepMethod {
+					var p settings.SwitchStepRequest
+					if err := json.Unmarshal(raw, &p); err != nil {
+						return nil, err.Error()
+					}
+					if p.Step == settings.SwitchStepRelease {
+						h.mu.Lock()
+						cp := *h.cp
+						h.mu.Unlock()
+						if cp.Target.Intent != settings.SwitchIntentOff || !cp.Target.TerminationVerified {
+							t.Errorf("release before verified target Off: %+v", cp)
+						}
+					}
+				}
+				return base(method, raw)
+			})
+			if duringDrain {
+				runtime := h.b.nodePolicyRuntime()
+				runtime.mu.Lock()
+				runtime.drains[r.Request.SourceEngine] = true
+				runtime.mu.Unlock()
+				proxyBase := h.proxy.answer
+				var drainOnce sync.Once
+				h.proxy.setAnswer(func(method string, raw json.RawMessage) (any, string) {
+					if method == nodepolicy.MethodSetEngineDrain {
+						drainOnce.Do(func() { close(reached); <-resume })
+					}
+					return proxyBase(method, raw)
+				})
+			}
+			done := make(chan bool, 1)
+			go func() { done <- h.b.recoverReplacementEngineMgr(w) }()
+			requireGateOpens(t, reached, "recovery reconcile/drain barrier")
+			// No ordinary stop request is delivered. Recovery owns the veto.
+			remote, reserved, id := h.b.admitLocalEngineOff(engine)
+			if !remote || !reserved || id != r.RequestID {
+				t.Fatalf("recovery Off admission = %v, %v, %q", remote, reserved, id)
+			}
+			open()
+			select {
+			case ok := <-done:
+				if !ok {
+					t.Fatal("recovery did not finish")
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("recovery did not return")
+			}
+			h.mu.Lock()
+			cp := *h.cp
+			h.mu.Unlock()
+			if reconciles.Load() != 2 || cp.Phase != settings.SwitchCheckpointReleased || cp.Target.Intent != settings.SwitchIntentOff || !cp.Target.TerminationVerified || cp.Source.Intent != settings.SwitchIntentOff {
+				t.Fatalf("recovered checkpoint = %+v, reconciles = %d", cp, reconciles.Load())
+			}
+			if got := h.receipt(t, r.RequestID); got.Phase != settings.SwitchFailedInterrupted {
+				t.Fatalf("recovery receipt = %+v", got)
+			}
+		})
+	}
+	test("source Off during reconcile", "llamacpp", false)
+	test("target Off during reconcile", "vllm", false)
+	test("source Off during drain release", "llamacpp", true)
+}
 
 func hideSwitchRecoveryManager(t *testing.T, b *Broker) *rpcWorker {
 	t.Helper()
