@@ -4,10 +4,12 @@
 package nodepolicy
 
 import (
+	"errors"
 	"fmt"
 	"net/url"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 )
 
@@ -94,9 +96,47 @@ type Deployment struct {
 	MaxOutputTokens int `json:"maxOutputTokens"`
 	// Prices is absent while unknown, which keeps paid use off.
 	Prices *Prices `json:"prices,omitempty"`
+	// Endpoint is the full HTTPS URL requests for this deployment are sent
+	// to, such as "https://api.example.com/v1/chat/completions". See
+	// endpointPattern for the accepted form.
+	Endpoint string `json:"endpoint,omitempty"`
+	// Protocol is the request protocol the endpoint speaks.
+	Protocol Protocol `json:"protocol,omitempty"`
+	// Transport holds the finite bounds every request to the endpoint is held
+	// to.
+	Transport *Transport `json:"transport,omitempty"`
+	// Qualification names the provider qualification revision this deployment
+	// is served under. The account ledger quarantines a deployment by its
+	// endpoint, model and this revision.
+	Qualification *QualificationRef `json:"qualification,omitempty"`
 	// Enabled makes the deployment eligible. Only a qualified deployment may be
-	// enabled.
+	// enabled: it needs an endpoint, a protocol, transport bounds, a
+	// qualification and prices.
 	Enabled bool `json:"enabled"`
+}
+
+// Protocol is a provider request protocol.
+type Protocol string
+
+// ProtocolOpenAIChatCompletions is stateless text OpenAI Chat Completions, the
+// only protocol a deployment may declare.
+const ProtocolOpenAIChatCompletions Protocol = "openai-chat-completions"
+
+// Transport is the finite bounds of requests to one deployment's endpoint.
+// Every field is required when the object is present.
+type Transport struct {
+	// ConnectTimeoutSeconds bounds dialing and the TLS handshake.
+	ConnectTimeoutSeconds int `json:"connectTimeoutSeconds"`
+	// HeaderTimeoutSeconds bounds the wait for response headers.
+	HeaderTimeoutSeconds int `json:"headerTimeoutSeconds"`
+	// IdleTimeoutSeconds bounds the wait between response body bytes.
+	IdleTimeoutSeconds int `json:"idleTimeoutSeconds"`
+	// MaxResponseBytes caps a successful response body.
+	MaxResponseBytes int64 `json:"maxResponseBytes"`
+	// MaxErrorBodyBytes caps the provider error body read.
+	MaxErrorBodyBytes int64 `json:"maxErrorBodyBytes"`
+	// MaxEventBytes caps one streamed event; it cannot exceed MaxResponseBytes.
+	MaxEventBytes int64 `json:"maxEventBytes"`
 }
 
 // Prices are a deployment's rates. Currency and Unit are declared so a
@@ -153,10 +193,86 @@ const (
 	minListenerPort   = 1024
 	maxListenerPort   = 65535
 	maxAllowedOrigins = 32
+
+	maxEndpointLength    = 2048
+	maxConnectSeconds    = 60
+	maxTransportSeconds  = 600
+	maxResponseBytes     = 64 << 20
+	maxErrorBodyBytesCap = 1 << 20
 )
 
 // routingID is the shape of account, deployment and family identifiers.
 var routingID = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
+
+// endpointPattern is the one accepted endpoint form, shared character for
+// character with the desktop parser: lower-case https, a lower-case DNS host of
+// at least two labels whose last label starts with a letter (so no IP
+// literal), an optional port, and a path of one or more nonempty segments of
+// unreserved characters. Userinfo, query, fragment, percent-encoding and empty
+// segments cannot match. Further rules are in checkEndpoint.
+var endpointPattern = regexp.MustCompile(`^https://((?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?)(:[1-9][0-9]{0,4})?((?:/[A-Za-z0-9._~-]+)+)$`)
+
+// localNameSuffixes are last host labels that name this machine or its local
+// network. The resolved address is checked again when dialing.
+var localNameSuffixes = []string{"localhost", "local", "localdomain", "internal", "arpa"}
+
+// checkEndpoint accepts only endpointPattern, with a host of at most 253
+// characters, a port of at most 65535 other than the implied :443, no "." or
+// ".." segment and no local name. The error does not echo the endpoint.
+func checkEndpoint(endpoint string) error {
+	m := endpointPattern.FindStringSubmatch(endpoint)
+	if len(endpoint) > maxEndpointLength || m == nil {
+		return errors.New("endpoint must be an https URL with a lower-case DNS host and a path, and no userinfo, query, fragment or percent-encoding")
+	}
+	host, port, path := m[1], m[2], m[3]
+	if len(host) > 253 {
+		return errors.New("endpoint host is too long")
+	}
+	labels := strings.Split(host, ".")
+	if slices.Contains(localNameSuffixes, labels[len(labels)-1]) {
+		return errors.New("endpoint host must be a public DNS name")
+	}
+	if port == ":443" {
+		return errors.New("endpoint must omit the default port :443")
+	}
+	if port != "" {
+		if n, err := strconv.Atoi(port[1:]); err != nil || n > 65535 {
+			return errors.New("endpoint port must be between 1 and 65535")
+		}
+	}
+	for _, segment := range strings.Split(path[1:], "/") {
+		if segment == "." || segment == ".." {
+			return errors.New(`endpoint path must not contain "." or ".." segments`)
+		}
+	}
+	return nil
+}
+
+func (t Transport) validate() error {
+	for _, c := range []struct {
+		field    string
+		value    int
+		min, max int
+	}{
+		{"connectTimeoutSeconds", t.ConnectTimeoutSeconds, 1, maxConnectSeconds},
+		{"headerTimeoutSeconds", t.HeaderTimeoutSeconds, 1, maxTransportSeconds},
+		{"idleTimeoutSeconds", t.IdleTimeoutSeconds, 1, maxTransportSeconds},
+	} {
+		if c.value < c.min || c.value > c.max {
+			return fmt.Errorf("transport.%s must be between %d and %d", c.field, c.min, c.max)
+		}
+	}
+	if t.MaxResponseBytes < 1 || t.MaxResponseBytes > maxResponseBytes {
+		return fmt.Errorf("transport.maxResponseBytes must be between 1 and %d", maxResponseBytes)
+	}
+	if t.MaxErrorBodyBytes < 1 || t.MaxErrorBodyBytes > maxErrorBodyBytesCap {
+		return fmt.Errorf("transport.maxErrorBodyBytes must be between 1 and %d", maxErrorBodyBytesCap)
+	}
+	if t.MaxEventBytes < 1 || t.MaxEventBytes > t.MaxResponseBytes {
+		return fmt.Errorf("transport.maxEventBytes must be between 1 and maxResponseBytes")
+	}
+	return nil
+}
 
 // defaultRouting is the routing section of Default(): no accounts, every tier
 // local-preferred with remote and paid execution off, and the finite limits.
@@ -324,6 +440,40 @@ func validateDeployment(d Deployment, accounts map[string]bool) error {
 		}
 		if _, err := d.Prices.OutputPerMillion.Int64(); err != nil {
 			return fmt.Errorf("prices.outputPerMillion: %w", err)
+		}
+	}
+	if d.Endpoint != "" {
+		if err := checkEndpoint(d.Endpoint); err != nil {
+			return err
+		}
+	}
+	if d.Protocol != "" && d.Protocol != ProtocolOpenAIChatCompletions {
+		return fmt.Errorf("protocol must be %q", ProtocolOpenAIChatCompletions)
+	}
+	if d.Transport != nil {
+		if err := d.Transport.validate(); err != nil {
+			return err
+		}
+	}
+	if d.Qualification != nil {
+		if err := d.Qualification.Validate(); err != nil {
+			return err
+		}
+	}
+	if d.Enabled {
+		for _, c := range []struct {
+			field   string
+			missing bool
+		}{
+			{"endpoint", d.Endpoint == ""},
+			{"protocol", d.Protocol == ""},
+			{"transport", d.Transport == nil},
+			{"qualification", d.Qualification == nil},
+			{"prices", d.Prices == nil},
+		} {
+			if c.missing {
+				return fmt.Errorf("an enabled deployment needs %s", c.field)
+			}
 		}
 	}
 	if d.Enabled && !remoteDispatchAvailable {

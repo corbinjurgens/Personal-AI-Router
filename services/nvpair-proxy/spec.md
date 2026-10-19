@@ -1171,3 +1171,99 @@ discovery or node notification names its port.
   code with the facades; `aliasRejection` and `requestAliasRejection` (§12.3)
   remain the only place a model name is judged. Phase 4 decides what the
   listener does with a named model.
+
+### 12.7 Provider account ledger (D)
+
+The proxy owns provider account state (`accounts.go`, `accountstore.go`,
+`accountlock_*.go`). Nothing in this build sends to a provider; hybrid dispatch
+calls `reserve` before it sends and `reconcile`, `recordOutcome` and
+`quarantine` afterwards.
+
+- **Owner and lock.** One `accountLedger` per process, one mutex for every
+  operation from lazy open to adoption. `main` places the store in the app data
+  directory; a proxy built without it (in-process tests) reports the ledger
+  unavailable. The store opens on first use, which is the activation of a
+  policy naming at least one account, or a reservation. Opening takes an
+  exclusive, nonblocking lock on `proxy-accounts.lock` (`flock`
+  `LOCK_EX|LOCK_NB`; `LockFileEx` with `LOCKFILE_FAIL_IMMEDIATELY` on Windows),
+  held until the process ends; the OS releases it on exit or crash. A lock taken
+  before a failed load is released, and a failed open is retried by the next
+  operation, so a replacement proxy takes the store once its predecessor exits.
+- **Store.** `proxy-accounts.json` is `{"version":1,"checksum":"<sha256 hex of the state bytes>","state":{...}}`,
+  at most 8 MiB, replaced whole through
+  `durablefile.WriteFile` on every change after an encoded-size check. Loading
+  refuses another version, a checksum mismatch, unknown fields, trailing data,
+  any invalid record (canonical money, identifiers, credential reference
+  syntax, enums, a hold's amount recomputed from its bounds and prices, record
+  caps, cross references) and leaves the file untouched; the ledger is then
+  unavailable. State: `lastObservedMs`, `bindings` (credential reference to
+  account, cap 1024), `accounts` (spend per period key `d:YYYY-MM-DD` and
+  `m:YYYY-MM`, `generation`, `cooldown`, `credentialFailure`, `frozen`,
+  `probe`; cap 1024), `holds` (at most 4096, of which at most 256 resolved),
+  `quarantine` (cap 1024). Records hold names, never secret values.
+- **Writes.** A mutation is applied to a copy, written, then adopted. A write
+  that fails before replacement changes nothing. One that lands without
+  confirmed durability (`durablefile.ErrReplaced`) is adopted, its new hold is
+  `uncertain`, the call fails, and no reservation succeeds until a complete
+  rewrite is confirmed. A restrictive transition (rate limit, exhaustion,
+  credential failure, freeze, quarantine) that is not confirmed durable stops
+  all reservations for the process lifetime.
+- **Arithmetic.** Money is integer nano-USD. A charge is
+  `ceil(tokens * perMillion / 1,000,000)` with a 128-bit product; a hold is the
+  input charge at the maximum uncached input rate plus the output charge, with
+  checked addition. Overflow refuses.
+- **reserve(deployment, inputTokens, outputTokens)** returns only after the hold
+  is durable, with a ledger-allocated attempt ID (`<per-open nonce>-<n>`). It
+  refuses: an unavailable store, an unconfirmed write that still
+  cannot be confirmed, a clock behind `lastObservedMs`, an unknown deployment
+  or account, an account whose reference is bound to another ID, a deployment
+  without endpoint, protocol, qualification or USD prices in nano-USD per
+  million tokens (no conversion), a quarantined identity, token bounds outside
+  `0 <= input`, `1 <= output <= maxOutputTokens`, `input + output <= contextTokens`,
+  a frozen account, a credential failure under the configured
+  reference, an active cooldown, a half-open account whose single probe is
+  taken, the per-request ceiling, `spent(today) + outstanding + hold > daily`
+  or the same for the month, and a full ledger. Outstanding holds (`reserved`
+  and `uncertain`) count in every period until resolved. A half-open account
+  (expired cooldown, or credential failure under a changed reference) admits
+  exactly one reservation as its probe. The hold records the account,
+  deployment, endpoint, model, qualification, credential reference name,
+  policy revision, currency, unit, rates, token bounds, amount, time and the
+  account generation.
+- **reconcile(attempt, usage)** resolves a `reserved` hold of this process with
+  trusted usage priced at the hold's own rates, adding the actual to the spend
+  of the hold's own day and month; nil usage charges the bound. A repeat with
+  the same usage is a no-op, different usage a conflict; recovered, unknown or
+  evicted attempts are refused without change. Negative usage is refused
+  without changing the hold. Usage above a token bound
+  freezes the account and quarantines the identity in one write and reports
+  the failure; when the cost or the spend sum overflows, the hold stays
+  outstanding.
+- **recordOutcome(attempt, outcome)** once per attempt: `ok` clears cooldown and
+  credential failure only for the probe and only if the account generation has
+  not moved since its reservation; `rate-limited` (Retry-After clamped to
+  1 s - 1 h, default 60 s) and `exhausted` (reset within 32 days) merge to the
+  later deadline; `credential-failure` suppresses the account until its
+  reference changes; `transient` only releases the probe. Money is untouched.
+- **quarantine(attempt)** records the identity the attempt was reserved under:
+  `(endpoint, model, qualification id, revision)`. Deployment names, deletion,
+  re-addition and restart do not clear it; a new qualification revision is a
+  different identity.
+- **Configuration.** After each activated `node/set-policy` the ledger adopts the
+  routing section. A configured account's reference is bound to its ID if
+  unbound (written before any reservation); a reference bound to another ID
+  makes that account refuse reservations, and activation still succeeds. An
+  account absent from the policy is retired: its holds, spend, cooldown,
+  freeze, bindings and quarantines persist and resume when the same ID returns.
+  Price and ceiling edits apply to new holds only.
+- **Recovery.** On open, `reserved` holds of an earlier process become
+  `uncertain` and stay outstanding until an owner releases them; a probe left
+  taken becomes a `probe-lost` cooldown of 60 s or the existing later deadline.
+  Releasing uncertain holds and unfreezing an account are owner controls not
+  wired yet. Only the latest 256 resolved holds retain idempotency records;
+  older resolved records are pruned. Reservations stop at 3840 outstanding
+  holds, leaving room for those resolved records within the store's hold cap.
+- **Not covered here.** Native lock and crash-window evidence on macOS and
+  Windows, power-loss durability and the broker-driven proxy restart on a
+  credential-reference change are activation gates; equivalent provider
+  credentials under different references are outside the local guarantee.

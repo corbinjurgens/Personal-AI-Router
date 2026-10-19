@@ -21,7 +21,8 @@ import {
     workloadCancelParams,
     parseStrictAdmissionCapability,
     parseStrictAdmissionRequest,
-    parseAdvertisementStrictAdmission
+    parseAdvertisementStrictAdmission,
+    parseRoutingDeployments
 } from '@/electron/service-bridge/node-policy'
 import type {
     NodeAvailabilityChange,
@@ -244,6 +245,135 @@ describe('Advertisement raw Go/TypeScript parity corpus', () => {
             }
         })
     }
+})
+
+function loadDeploymentCorpus(): JsonObject {
+    const value: JsonValue = JSON.parse(
+        readFileSync(
+            resolve(process.cwd(), '../services/shared/nodepolicy/testdata/deployment.json'),
+            'utf8'
+        )
+    )
+    return strictFixtureObject(value)
+}
+
+/** A routing section holding the corpus account and the given deployments. */
+function corpusRouting(...deployments: JsonValue[]): JsonObject {
+    return { accounts: [loadDeploymentCorpus().account ?? null], deployments }
+}
+
+describe('deployment endpoint schema Go/TypeScript parity corpus', () => {
+    const cases = loadDeploymentCorpus().cases
+    if (!Array.isArray(cases)) throw new Error('Missing deployment corpus')
+    for (const value of cases) {
+        const testCase = strictFixtureObject(value)
+        if (typeof testCase.name !== 'string' || !Array.isArray(testCase.path)) {
+            throw new Error('Invalid deployment corpus case')
+        }
+        it(testCase.name, () => {
+            const deployment = strictFixtureObject(loadDeploymentCorpus().deployment)
+            let target = deployment
+            const path = testCase.path
+            if (!Array.isArray(path)) throw new Error('Invalid corpus path')
+            for (let i = 0; i < path.length; i++) {
+                const key = path[i]
+                if (typeof key !== 'string') throw new Error('Invalid corpus path')
+                if (i < path.length - 1) target = strictFixtureObject(target[key])
+                else if (testCase.remove === true) delete target[key]
+                else {
+                    if (testCase.value === undefined) throw new Error('Missing corpus value')
+                    target[key] = testCase.value
+                }
+            }
+            if (testCase.enabled === true) deployment.enabled = true
+            const parse = () => parseRoutingDeployments(corpusRouting(deployment))
+            if (testCase.valid !== true) {
+                expect(parse).toThrow()
+                return
+            }
+            const [got] = parse()
+            // What the parser returns serializes back to an equal deployment.
+            const again = parseRoutingDeployments(
+                corpusRouting(JSON.parse(JSON.stringify(got, (_key, v) => v ?? undefined)))
+            )
+            expect(again).toEqual([got])
+        })
+    }
+
+    it('keeps money as exact strings, including the signed 64-bit maximum', () => {
+        const [deployment] = parseRoutingDeployments(
+            corpusRouting(loadDeploymentCorpus().deployment ?? null)
+        )
+        expect(deployment.prices).toEqual({
+            currency: 'USD',
+            unit: 'nanoUSDPerMillionTokens',
+            inputPerMillion: '150000000',
+            outputPerMillion: '9223372036854775807'
+        })
+        expect(deployment.endpoint).toBe('https://api.example.com/v1/chat/completions')
+        expect(deployment.transport?.maxResponseBytes).toBe(16777216)
+        expect(deployment.qualification).toEqual({ id: 'provider-q', revision: '3' })
+    })
+
+    it('reads absent optional parts as null and capabilities as empty', () => {
+        const deployment = strictFixtureObject(loadDeploymentCorpus().deployment)
+        for (const key of [
+            'capabilities',
+            'prices',
+            'endpoint',
+            'protocol',
+            'transport',
+            'qualification'
+        ]) {
+            delete deployment[key]
+        }
+        expect(parseRoutingDeployments(corpusRouting(deployment))).toEqual([
+            expect.objectContaining({
+                capabilities: [],
+                prices: null,
+                endpoint: null,
+                protocol: null,
+                transport: null,
+                qualification: null
+            })
+        ])
+    })
+
+    it('does not mirror the temporary refusal to enable a complete deployment', () => {
+        const deployment = strictFixtureObject(loadDeploymentCorpus().deployment)
+        deployment.enabled = true
+        expect(parseRoutingDeployments(corpusRouting(deployment))[0].enabled).toBe(true)
+    })
+
+    it.each([
+        ['an unknown deployment key', ['extra'], true],
+        ['a case-variant deployment key', ['Endpoint'], 'https://api.example.com/v1'],
+        ['an unknown transport key', ['transport', 'extra'], 1],
+        ['an unknown price key', ['prices', 'extra'], '1'],
+        ['an unknown qualification key', ['qualification', 'extra'], '1'],
+        ['a null endpoint', ['endpoint'], null],
+        ['a null protocol', ['protocol'], null],
+        ['a null prices', ['prices'], null],
+        ['a null capabilities', ['capabilities'], null],
+        ['a null transport', ['transport'], null],
+        ['a null qualification', ['qualification'], null],
+        ['an empty endpoint', ['endpoint'], '']
+    ])('refuses %s outside the canonical broker output', (_name, path, value) => {
+        const deployment = strictFixtureObject(loadDeploymentCorpus().deployment)
+        let target = deployment
+        for (const key of path.slice(0, -1)) target = strictFixtureObject(target[key])
+        target[path[path.length - 1]] = value
+        expect(() => parseRoutingDeployments(corpusRouting(deployment))).toThrow()
+    })
+
+    it('refuses duplicate deployment ids and a malformed routing section', () => {
+        const deployment = loadDeploymentCorpus().deployment ?? null
+        expect(() => parseRoutingDeployments(corpusRouting(deployment, deployment))).toThrow(
+            'Duplicate deployment id'
+        )
+        expect(() => parseRoutingDeployments(null)).toThrow('Invalid routing section')
+        expect(() => parseRoutingDeployments({ accounts: [] })).toThrow('Invalid routing section')
+    })
 })
 
 describe('parseWorkloadsInitial', () => {

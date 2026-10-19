@@ -4,6 +4,8 @@
 package nodepolicy
 
 import (
+	"encoding/json"
+	"os"
 	"reflect"
 	"strings"
 	"testing"
@@ -303,9 +305,172 @@ func TestValidateRoutingRejects(t *testing.T) {
 		tr.PaidAllowed = true
 		p.Routing.Tiers["weak"] = tr
 	}, "paidAllowed requires remoteAllowed")
-	test("enabled deployment", func(p *Policy) {
+	test("enabled complete deployment", func(p *Policy) {
+		completeDeployment(&p.Routing.Deployments[0])
 		p.Routing.Deployments[0].Enabled = true
 	}, "cannot be enabled")
+
+	// Endpoint, protocol, transport and qualification.
+	for name, endpoint := range map[string]string{
+		"http scheme":             "http://api.example.com/v1/chat/completions",
+		"upper-case scheme":       "HTTPS://api.example.com/v1/chat/completions",
+		"upper-case host":         "https://API.example.com/v1/chat/completions",
+		"userinfo":                "https://user@api.example.com/v1/chat/completions",
+		"password":                "https://user:pw@api.example.com/v1/chat/completions",
+		"query":                   "https://api.example.com/v1/chat/completions?key=1",
+		"empty query":             "https://api.example.com/v1/chat/completions?",
+		"fragment":                "https://api.example.com/v1/chat/completions#x",
+		"empty fragment":          "https://api.example.com/v1/chat/completions#",
+		"percent-encoding":        "https://api.example.com/v1/chat%2Fcompletions",
+		"no path":                 "https://api.example.com",
+		"root path":               "https://api.example.com/",
+		"trailing slash":          "https://api.example.com/v1/",
+		"empty segment":           "https://api.example.com/v1//chat",
+		"dot segment":             "https://api.example.com/./chat",
+		"dot-dot segment":         "https://api.example.com/v1/../chat",
+		"single-label host":       "https://api/v1/chat",
+		"IPv4 host":               "https://192.168.1.10/v1/chat",
+		"public IPv4 host":        "https://8.8.8.8/v1/chat",
+		"IPv6 host":               "https://[::1]/v1/chat",
+		"localhost":               "https://localhost/v1/chat",
+		"localhost subdomain":     "https://api.localhost/v1/chat",
+		"mDNS name":               "https://printer.local/v1/chat",
+		"internal name":           "https://llm.corp.internal/v1/chat",
+		"arpa name":               "https://router.home.arpa/v1/chat",
+		"localdomain name":        "https://box.localdomain/v1/chat",
+		"implied port":            "https://api.example.com:443/v1/chat",
+		"port zero":               "https://api.example.com:0/v1/chat",
+		"port above 65535":        "https://api.example.com:65536/v1/chat",
+		"leading zero port":       "https://api.example.com:0443/v1/chat",
+		"empty port":              "https://api.example.com:/v1/chat",
+		"whitespace":              "https://api.example.com/v1/chat completions",
+		"trailing newline":        "https://api.example.com/v1/chat\n",
+		"backslash":               "https://api.example.com\\v1/chat",
+		"label with leading dash": "https://-api.example.com/v1/chat",
+		"overlong label":          "https://" + strings.Repeat("a", 64) + ".example.com/v1/chat",
+		"overlong host":           "https://" + strings.Repeat("a.", 127) + "com/v1/chat",
+		"overlong endpoint":       "https://api.example.com/" + strings.Repeat("a", 2048),
+	} {
+		test("endpoint "+name, func(p *Policy) { p.Routing.Deployments[0].Endpoint = endpoint }, "endpoint")
+	}
+	test("unsupported protocol", func(p *Policy) { p.Routing.Deployments[0].Protocol = "openai-responses" }, "protocol")
+	test("protocol case variant", func(p *Policy) { p.Routing.Deployments[0].Protocol = "OpenAI-Chat-Completions" }, "protocol")
+	for name, c := range map[string]struct {
+		mutate func(*Transport)
+		field  string
+	}{
+		"zero connect timeout":     {func(t *Transport) { t.ConnectTimeoutSeconds = 0 }, "connectTimeoutSeconds"},
+		"connect above a minute":   {func(t *Transport) { t.ConnectTimeoutSeconds = 61 }, "connectTimeoutSeconds"},
+		"zero header timeout":      {func(t *Transport) { t.HeaderTimeoutSeconds = 0 }, "headerTimeoutSeconds"},
+		"header above ten minutes": {func(t *Transport) { t.HeaderTimeoutSeconds = 601 }, "headerTimeoutSeconds"},
+		"zero idle timeout":        {func(t *Transport) { t.IdleTimeoutSeconds = 0 }, "idleTimeoutSeconds"},
+		"idle above ten minutes":   {func(t *Transport) { t.IdleTimeoutSeconds = 601 }, "idleTimeoutSeconds"},
+		"zero response bytes":      {func(t *Transport) { t.MaxResponseBytes = 0 }, "maxResponseBytes"},
+		"response above 64 MiB":    {func(t *Transport) { t.MaxResponseBytes = 64<<20 + 1 }, "maxResponseBytes"},
+		"zero error bytes":         {func(t *Transport) { t.MaxErrorBodyBytes = 0 }, "maxErrorBodyBytes"},
+		"error above 1 MiB":        {func(t *Transport) { t.MaxErrorBodyBytes = 1<<20 + 1 }, "maxErrorBodyBytes"},
+		"zero event bytes":         {func(t *Transport) { t.MaxEventBytes = 0 }, "maxEventBytes"},
+		"event above response":     {func(t *Transport) { t.MaxEventBytes = t.MaxResponseBytes + 1 }, "maxEventBytes"},
+	} {
+		test("transport "+name, func(p *Policy) {
+			completeDeployment(&p.Routing.Deployments[0])
+			c.mutate(p.Routing.Deployments[0].Transport)
+		}, "transport."+c.field)
+	}
+	test("qualification without id", func(p *Policy) {
+		p.Routing.Deployments[0].Qualification = &QualificationRef{Revision: "1"}
+	}, "qualification id")
+	test("qualification revision zero", func(p *Policy) {
+		p.Routing.Deployments[0].Qualification = &QualificationRef{ID: "q", Revision: "0"}
+	}, "qualification revision")
+	for _, field := range []string{"endpoint", "protocol", "transport", "qualification", "prices"} {
+		test("enabled deployment without "+field, func(p *Policy) {
+			d := &p.Routing.Deployments[0]
+			completeDeployment(d)
+			switch field {
+			case "endpoint":
+				d.Endpoint = ""
+			case "protocol":
+				d.Protocol = ""
+			case "transport":
+				d.Transport = nil
+			case "qualification":
+				d.Qualification = nil
+			case "prices":
+				d.Prices = nil
+			}
+			d.Enabled = true
+		}, "an enabled deployment needs "+field)
+	}
+}
+
+// completeDeployment gives d every field an enabled deployment needs.
+func completeDeployment(d *Deployment) {
+	d.Endpoint = "https://api.example.com/v1/chat/completions"
+	d.Protocol = ProtocolOpenAIChatCompletions
+	d.Transport = &Transport{ConnectTimeoutSeconds: 10, HeaderTimeoutSeconds: 60, IdleTimeoutSeconds: 60,
+		MaxResponseBytes: 16 << 20, MaxErrorBodyBytes: 64 << 10, MaxEventBytes: 1 << 20}
+	d.Qualification = &QualificationRef{ID: "provider-q", Revision: "3"}
+	if d.Prices == nil {
+		d.Prices = &Prices{Currency: CurrencyUSD, Unit: PriceUnit, InputPerMillion: "100", OutputPerMillion: "200"}
+	}
+}
+
+func TestDeploymentEndpointTransportAndQualificationAreAccepted(t *testing.T) {
+	for _, endpoint := range []string{
+		"https://api.example.com/v1/chat/completions",
+		"https://api.example.com:8443/v1/chat/completions",
+		"https://api.example.com:65535/a",
+		"https://xn--bcher-kva.example/v1/chat",
+		"https://a-b.c-d.example.com/openai/deployments/gpt_4.1~x/chat",
+		"https://" + strings.Repeat("a", 63) + ".example.com/v1",
+	} {
+		p := stagedPolicy(t)
+		completeDeployment(&p.Routing.Deployments[0])
+		p.Routing.Deployments[0].Endpoint = endpoint
+		if err := p.Validate(); err != nil {
+			t.Errorf("Validate(endpoint %q) = %v, want nil", endpoint, err)
+		}
+	}
+
+	p := stagedPolicy(t)
+	completeDeployment(&p.Routing.Deployments[0])
+	tr := p.Routing.Deployments[0].Transport
+	tr.ConnectTimeoutSeconds, tr.HeaderTimeoutSeconds, tr.IdleTimeoutSeconds = 60, 600, 600
+	tr.MaxResponseBytes, tr.MaxErrorBodyBytes, tr.MaxEventBytes = 64<<20, 1<<20, 64<<20
+	data, err := json.Marshal(p)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	back, err := Parse(data)
+	if err != nil {
+		t.Fatalf("Parse(complete deployment at every bound) = %v", err)
+	}
+	if !reflect.DeepEqual(back, p) {
+		t.Fatalf("round trip changed the policy:\n got %+v\nwant %+v", back.Routing.Deployments[0], p.Routing.Deployments[0])
+	}
+}
+
+// A document saved before the endpoint schema existed has none of its fields
+// and must keep parsing, marshal without them and round-trip unchanged.
+func TestStagedDeploymentWithoutEndpointSchemaRoundTrips(t *testing.T) {
+	p := stagedPolicy(t)
+	data, err := json.Marshal(p)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	for _, key := range []string{`"endpoint"`, `"protocol"`, `"transport"`, `"qualification"`} {
+		if strings.Contains(string(data), key) {
+			t.Errorf("marshaled staged policy contains %s; absent fields must stay absent", key)
+		}
+	}
+	back, err := Parse(data)
+	if err != nil {
+		t.Fatalf("Parse(round trip) = %v", err)
+	}
+	if !reflect.DeepEqual(back, p) {
+		t.Fatal("round trip changed the staged policy")
+	}
 }
 
 func TestParseRoutingDocumentRefusals(t *testing.T) {
@@ -345,5 +510,77 @@ func TestParseErrorsDoNotEchoCredentialReferences(t *testing.T) {
 func TestLocalEntryClassification(t *testing.T) {
 	if !(TierEntry{Kind: EntryLocal}).IsLocal() || (TierEntry{Kind: EntryAPI}).IsLocal() || (TierEntry{}).IsLocal() {
 		t.Fatal("IsLocal misclassified an entry kind")
+	}
+}
+
+type deploymentCorpusCase struct {
+	Name    string   `json:"name"`
+	Path    []string `json:"path"`
+	Value   any      `json:"value"`
+	Remove  bool     `json:"remove"`
+	Enabled bool     `json:"enabled"`
+	Valid   bool     `json:"valid"`
+}
+
+type deploymentCorpus struct {
+	Account    map[string]any         `json:"account"`
+	Deployment map[string]any         `json:"deployment"`
+	Cases      []deploymentCorpusCase `json:"cases"`
+}
+
+func loadDeploymentCorpus(t *testing.T) deploymentCorpus {
+	t.Helper()
+	data, err := os.ReadFile("testdata/deployment.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var c deploymentCorpus
+	if err := json.Unmarshal(data, &c); err != nil {
+		t.Fatal(err)
+	}
+	return c
+}
+
+// The desktop parser consumes this exact corpus; both sides must agree on every
+// case. Each mutation is applied to a canonical deployment inside a whole policy
+// document, which is then parsed as the broker parses a saved policy.
+func TestDeploymentParityCorpus(t *testing.T) {
+	for _, tc := range loadDeploymentCorpus(t).Cases {
+		t.Run(tc.Name, func(t *testing.T) {
+			c := loadDeploymentCorpus(t)
+			target := c.Deployment
+			for _, key := range tc.Path[:max(len(tc.Path)-1, 0)] {
+				child, ok := target[key].(map[string]any)
+				if !ok {
+					t.Fatalf("corpus path %v does not name an object", tc.Path)
+				}
+				target = child
+			}
+			if len(tc.Path) > 0 {
+				key := tc.Path[len(tc.Path)-1]
+				if tc.Remove {
+					delete(target, key)
+				} else {
+					target[key] = tc.Value
+				}
+			}
+			if tc.Enabled {
+				c.Deployment["enabled"] = true
+			}
+			doc, err := json.Marshal(map[string]any{
+				"version": 2,
+				"routing": map[string]any{"accounts": []any{c.Account}, "deployments": []any{c.Deployment}},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = Parse(doc)
+			if tc.Valid && err != nil {
+				t.Fatalf("Parse() = %v, want valid", err)
+			}
+			if !tc.Valid && err == nil {
+				t.Fatal("Parse() = nil, want an error")
+			}
+		})
 	}
 }
