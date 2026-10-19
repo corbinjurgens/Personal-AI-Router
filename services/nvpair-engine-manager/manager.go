@@ -62,6 +62,7 @@ type setPortParam struct {
 // start, stop, restart, action) run in their own goroutine so the read
 // loop never blocks; the codec serializes the concurrent responses.
 type Manager struct {
+	switchWatchers   switchWatchers
 	switchRelay      switchRelay
 	settingsRelay    settingsRelay
 	policyRelay      policyRelay

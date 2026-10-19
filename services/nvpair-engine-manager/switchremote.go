@@ -86,14 +86,24 @@ func callRemoteSwitch(ctx context.Context, method string, params json.RawMessage
 	return client.postSwitch(ctx, path, params)
 }
 
-// remoteSwitch is deliberately not dispatched yet; switchRoutes registration
-// and manager dispatch happen in the integration unit.
+// remoteSwitch dispatches once; subsequent progress uses only status reads.
 func (m *Manager) remoteSwitch(ctx context.Context, msg *Message) {
 	if m.mesh == nil {
 		m.respondOrErr(msg, nil, fmt.Errorf("engine switch unavailable: node is not clustered"))
 		return
 	}
-	result, err := callRemoteSwitch(ctx, msg.Method, msg.Params, m.peers.lookup, m.remoteClient)
+	var identity switchWatchIdentity
+	result, err := callRemoteSwitch(ctx, msg.Method, msg.Params, m.peers.lookup,
+		func(ctx context.Context, peer ecPeer) (*remoteClient, error) {
+			client, err := m.remoteClient(ctx, peer)
+			if err == nil {
+				identity, _ = m.switchWatchIdentity(peer.nodeID)
+			}
+			return client, err
+		})
+	if err == nil {
+		m.switchWatchers.observe(ctx, identity, result, m.switchWatchIdentity, m.remoteClient, m.codec.Notify)
+	}
 	m.respondOrErr(msg, result, err)
 }
 
