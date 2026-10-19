@@ -3,6 +3,12 @@
 
 import type { EngineType } from '@/shared/types/engines'
 
+/** A concrete model reference in served permission or resident preference. */
+export interface NodeModelReference {
+    engine: string
+    model: string
+}
+
 /** Origin-private identity shared across facades; never a conversation key. */
 export interface RoutingRequestKey {
     originNodeId: string
