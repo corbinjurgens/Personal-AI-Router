@@ -5,28 +5,57 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
 
 	settings "nvpair-shared/enginesettings"
+	serviceerrors "nvpair-shared/errors"
 )
+
+const engineSwitchRecoveryBlockedID = "engine-switch:recovery-blocked"
+
+func switchRecoveryPermanent(err error) bool {
+	var journal *engineSwitchRecoveryError
+	var store *engineSwitchStoreError
+	var rpc *switchRPCError
+	return errors.As(err, &journal) || errors.As(err, &store) || (errors.As(err, &rpc) && rpc.detail.Kind == settings.SwitchErrorStorage)
+}
 
 // Recovery always precedes settings replay and enabled-intent restoration.
 // Interrupted switches never execute forward. A manager checkpoint is inspected
 // even without an active broker row (provisional reservation/terminal-write gap).
 func (b *Broker) recoverEngineSwitch() bool {
+	b.workersMu.Lock()
+	w := b.engineMgr
+	b.workersMu.Unlock()
+	return b.recoverEngineSwitchOn(w)
+}
+
+func (b *Broker) recoverEngineSwitchOn(w *rpcWorker) bool {
 	b.settingsApplyMu.Lock()
 	defer b.settingsApplyMu.Unlock()
 	b.engineConfigMu.Lock()
 	defer b.engineConfigMu.Unlock()
+	b.workersMu.Lock()
+	current := b.engineMgr == w && w != nil
+	b.workersMu.Unlock()
+	if !current {
+		return false
+	}
 	c := b.switchCoordinator()
 	fail := func(err error) bool {
-		c.err = err
+		if switchRecoveryPermanent(err) {
+			c.err = err
+		} else if c.err == nil {
+			c.recoveryErr = err
+		}
 		slog.Error("engine switch recovery required", "err", err)
 		return false
 	}
 	if err := b.loadEngineSwitchLocked(); err != nil {
+		c.err = err
 		return fail(err)
 	}
 	if c.err != nil {
@@ -46,12 +75,13 @@ func (b *Broker) recoverEngineSwitch() bool {
 		}
 	}
 	if err != nil {
+		c.err = err
 		return fail(err)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), settings.SwitchDrainBudget)
 	defer cancel()
 	var manager switchManagerSnapshot
-	if err := b.switchManagerCall(ctx, settings.SwitchPrepareMethod, settings.SwitchPrepareRequest{}, &manager); err != nil {
+	if err := switchManagerCallOn(ctx, w, settings.SwitchPrepareMethod, settings.SwitchPrepareRequest{}, &manager); err != nil {
 		return fail(err)
 	}
 	if manager.Error != nil {
@@ -64,24 +94,30 @@ func (b *Broker) recoverEngineSwitch() bool {
 	}
 	if len(reserved) > 0 {
 		if err := b.loadEngineSettingsLocked(); err != nil {
+			c.err = err
 			return fail(err)
 		}
 	}
 	for engine, record := range b.engineSettings {
 		if reserved[engine] && record.Snapshot.Phase == "applying" {
-			return fail(fmt.Errorf("conflicting settings and switch journals require recovery for %s", engine))
+			c.err = fmt.Errorf("conflicting settings and switch journals require recovery for %s", engine)
+			return fail(c.err)
 		}
 	}
 	// Do not hold engineConfigMu across a potentially long stop/cleanup.
 	if cp != nil && cp.Phase != settings.SwitchCheckpointReleased {
 		b.engineConfigMu.Unlock()
 		var result settings.SwitchReconcileResult
-		err := b.switchManagerCall(ctx, settings.SwitchReconcileMethod, settings.SwitchReconcileRequest{SwitchPrepareRequest: cp.SwitchPrepareRequest}, &result)
+		err := switchManagerCallOn(ctx, w, settings.SwitchReconcileMethod, settings.SwitchReconcileRequest{SwitchPrepareRequest: cp.SwitchPrepareRequest}, &result)
 		if err == nil && result.Error != nil && !switchCleanupSettled(result) {
 			err = &switchRPCError{*result.Error}
 		}
 		if err == nil {
-			_, err = b.switchStep(ctx, cp.SwitchPrepareRequest, settings.SwitchStepRelease)
+			var release settings.SwitchStepResult
+			err = switchManagerCallOn(ctx, w, settings.SwitchStepMethod, settings.SwitchStepRequest{SwitchPrepareRequest: cp.SwitchPrepareRequest, Step: settings.SwitchStepRelease}, &release)
+			if err == nil && release.Error != nil {
+				err = &switchRPCError{*release.Error}
+			}
 		}
 		b.engineConfigMu.Lock()
 		if err != nil {
@@ -101,5 +137,22 @@ func (b *Broker) recoverEngineSwitch() bool {
 		}
 		c.resolved[id] = true
 	}
+	c.recoveryErr = nil
 	return true
+}
+
+func (b *Broker) reportEngineSwitchRecoveryBlocked() {
+	b.engineConfigMu.Lock()
+	c := b.switchCoordinator()
+	err := c.err
+	if err == nil {
+		err = c.recoveryErr
+	}
+	b.engineConfigMu.Unlock()
+	message := "Engine manager remains unavailable because conservative switch recovery could not be verified."
+	slog.Error(message, "err", err)
+	b.forwardErrorsReport(serviceerrors.ServiceError{
+		ID: engineSwitchRecoveryBlockedID, Message: message,
+		Timestamp: nowMillis(), NodeID: b.nodeID, Severity: "error", Action: "none",
+	})
 }

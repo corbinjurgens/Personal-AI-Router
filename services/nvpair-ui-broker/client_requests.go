@@ -345,24 +345,30 @@ func (b *Broker) relayToEngineNow(msg *Message) {
 
 	requestedEngine, requestedPort, isEnginePortAssignment := enginePortAssignmentRequest(msg.Method, msg.Params)
 	localOffEngine := ""
+	offOperationLocked := false
 	if msg.Method == "engine:stop" {
 		var target struct {
 			Engine string `json:"engine"`
 		}
 		if json.Unmarshal(msg.Params, &target) == nil && target.Engine != "" {
-			remote, reserved := b.switchLocalOffReservation(target.Engine)
+			remote, reserved := b.admitLocalEngineOff(target.Engine)
 			if reserved && !remote {
 				_ = b.codec.RespondError(msg.ID, -32000, "Engine switch reserves this engine (busy).")
 				return
 			}
 			if remote {
 				localOffEngine = target.Engine
+			} else {
+				offOperationLocked = true
+				defer b.settingsApplyMu.Unlock()
 			}
 		}
 	}
 	if localOffEngine == "" && (isEnginePortAssignment || msg.Method == "engine:stop" || msg.Method == "engine:start" || msg.Method == "engine:restart") {
-		b.settingsApplyMu.Lock()
-		defer b.settingsApplyMu.Unlock()
+		if !offOperationLocked {
+			b.settingsApplyMu.Lock()
+			defer b.settingsApplyMu.Unlock()
+		}
 		b.engineConfigMu.Lock()
 		defer b.engineConfigMu.Unlock()
 		var target struct {

@@ -480,7 +480,7 @@ func (b *Broker) spawnEngineMgr() (supervisedHandle, error) {
 		args = append(args, "--reserved-port", fmt.Sprintf("%d", aliasPort))
 	}
 	args = append(args, b.clusterDirArgs()...)
-	w, err := startRPCWorker("engine-manager", b.engineMgrPath, args, b.forwardEngineNotification)
+	w, err := startRPCWorker("engine-manager", b.engineMgrPath, args, b.forwardEngineNotification, b.engineManagerExited)
 	if err != nil {
 		return nil, err
 	}
@@ -490,9 +490,12 @@ func (b *Broker) spawnEngineMgr() (supervisedHandle, error) {
 	b.setEngineMgr(w)
 	if !b.recoverReplacementEngineMgr(w) {
 		// Keep supervising the live replacement, but expose no forward surface
-		// while its inherited reservation cannot be reconciled.
+		// while its inherited reservation cannot be reconciled. Recovery has
+		// exhausted its bounded retries or reported permanent journal uncertainty.
 		return w, nil
 	}
+	// The recovery loop owns all retries; this continuation runs once, only
+	// after successful cleanup of this still-current replacement.
 	go b.refreshEnginePolicySnapshot(w)
 	// Re-push the alias reservation before anything can drive this worker: a
 	// respawned engine-manager starts with an empty reservation and must not

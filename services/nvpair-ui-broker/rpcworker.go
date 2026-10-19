@@ -85,7 +85,7 @@ func (w *rpcWorker) RelayRequest(method string, params json.RawMessage, respond 
 // emits. The worker's stderr goes to the broker's non-blocking sink (see
 // stderrsink.go), so its applog prefix still interleaves with the broker's own
 // lines but a stalled reader cannot block the worker's exit.
-func startRPCWorker(name, binaryPath string, args []string, onNotify func(method string, params json.RawMessage)) (*rpcWorker, error) {
+func startRPCWorker(name, binaryPath string, args []string, onNotify func(method string, params json.RawMessage), onExit ...func(*rpcWorker)) (*rpcWorker, error) {
 	cmd := exec.Command(binaryPath, args...)
 	configureSubprocess(cmd)
 	cmd.Env = workerEnv()
@@ -122,6 +122,12 @@ func startRPCWorker(name, binaryPath string, args []string, onNotify func(method
 	go w.peer.Serve(nil, w.handleNotify)
 	go func() {
 		_ = cmd.Wait()
+		// Fence at the exit owner, before closing the peer wakes RPC waiters
+		// and before the supervisor observes Done. The callback's gate defines
+		// ordering against terminal persistence, not an unobservable OS crash.
+		for _, fence := range onExit {
+			fence(w)
+		}
 		w.peer.Close()
 		close(w.done)
 	}()

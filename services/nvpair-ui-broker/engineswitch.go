@@ -21,6 +21,7 @@ import (
 type engineSwitchCoordinator struct {
 	store              *engineSwitchStore
 	err                error
+	recoveryErr        error // retryable cleanup failure; engineConfigMu
 	changed            chan struct{}
 	resolved           map[string]bool
 	recoveryCheckpoint *settings.SwitchCheckpoint // engineConfigMu; includes orphan reservations
@@ -33,6 +34,8 @@ type engineSwitchCoordinator struct {
 	activeManager *rpcWorker
 	activeCancel  context.CancelFunc
 	interrupted   bool
+	activeID      string
+	vetoed        bool // workersMu; belongs only to activeID
 }
 
 type switchRPCError struct{ detail settings.SwitchError }
@@ -129,6 +132,9 @@ func (b *Broker) pendingSwitchLocked(engine string) error {
 	if c.err != nil {
 		return c.err
 	}
+	if c.recoveryErr != nil {
+		return c.recoveryErr
+	}
 	for _, r := range c.store.journal.Receipts {
 		if (!r.Terminal || (r.RecoveryRequired && !c.resolved[r.RequestID])) && (engine == "" || engine == r.Request.SourceEngine || engine == r.Request.TargetEngine) {
 			return switchError(settings.SwitchErrorBusy, "An engine switch reserves this engine.")
@@ -139,9 +145,7 @@ func (b *Broker) pendingSwitchLocked(engine string) error {
 
 // Local Off alone may bypass the operation lock for a remote reservation,
 // including an unresolved recovery row. The manager remains the veto owner.
-func (b *Broker) switchLocalOffReservation(engine string) (remote, reserved bool) {
-	b.engineConfigMu.Lock()
-	defer b.engineConfigMu.Unlock()
+func (b *Broker) switchLocalOffReservationLocked(engine string) (remote, reserved bool) {
 	if b.loadEngineSwitchLocked() != nil {
 		return false, false
 	}
@@ -151,10 +155,46 @@ func (b *Broker) switchLocalOffReservation(engine string) (remote, reserved bool
 	}
 	for _, r := range c.store.journal.Receipts {
 		if (!r.Terminal || (r.RecoveryRequired && !c.resolved[r.RequestID])) && (engine == r.Request.SourceEngine || engine == r.Request.TargetEngine) {
-			return r.Caller != settings.SwitchOriginLocal, true
+			remote = r.Caller != settings.SwitchOriginLocal
+			if remote {
+				// Admission and completion share workersMu. Latch before the
+				// lifecycle RPC can wait for physical stop or its response.
+				b.workersMu.Lock()
+				if c.activeID == r.RequestID {
+					c.vetoed = true
+				}
+				b.workersMu.Unlock()
+			}
+			return remote, true
 		}
 	}
 	return false, false
+}
+
+// Recheck reservations while waiting for ordinary settings work. Lookup and
+// TryLock share engineConfigMu with acceptance, so a negative lookup can never
+// lead to a blocking Lock behind a newly accepted switch.
+func (b *Broker) admitLocalEngineOff(engine string) (remote, reserved bool) {
+	for {
+		b.engineConfigMu.Lock()
+		remote, reserved = b.switchLocalOffReservationLocked(engine)
+		if reserved {
+			b.engineConfigMu.Unlock()
+			return remote, reserved
+		}
+		if b.settingsApplyMu.TryLock() {
+			b.engineConfigMu.Unlock()
+			return false, false // caller owns settingsApplyMu
+		}
+		changed := b.switchCoordinator().changed
+		b.engineConfigMu.Unlock()
+		timer := time.NewTimer(10 * time.Millisecond)
+		select {
+		case <-changed:
+		case <-timer.C:
+		}
+		timer.Stop()
+	}
 }
 
 // Preserve manager error envelopes and numeric RPC errors; settingsWorkerCall
@@ -351,6 +391,7 @@ func (b *Broker) acceptEngineSwitch(ctx context.Context, p settings.SwitchReques
 	b.workersMu.Lock()
 	w := b.engineMgr
 	c.activeManager, c.activeCancel, c.interrupted = w, cancel, b.engineMgrRecovering || w == nil
+	c.activeID, c.vetoed = p.RequestID, false
 	if c.interrupted {
 		cancel()
 	}
@@ -375,6 +416,7 @@ func (b *Broker) acceptEngineSwitch(ctx context.Context, p settings.SwitchReques
 		defer func() {
 			b.workersMu.Lock()
 			c.activeManager, c.activeCancel = nil, nil
+			c.activeID, c.vetoed = "", false
 			b.workersMu.Unlock()
 			c.waitMu.Lock()
 			c.remoteCancel = nil
@@ -398,14 +440,26 @@ func (b *Broker) advanceEngineSwitch(id, phase string, observed *settings.Switch
 	// Completion and manager replacement have one ordering point. Hold the
 	// same gate while persisting completion so an already-observed restart
 	// cannot race a completed receipt into the journal.
-	interruptedCompletion := false
-	if phase == settings.SwitchCompleted {
+	interruptedTerminal := false
+	if settings.IsTerminal(phase) {
 		b.workersMu.Lock()
 		defer b.workersMu.Unlock()
+		if c.activeManager != nil {
+			select {
+			case <-c.activeManager.Done():
+				c.interrupted = true
+				if b.engineMgr == c.activeManager {
+					b.engineMgrRecovering = true
+				}
+			default:
+			}
+		}
 		if c.interrupted {
 			phase, recovery = settings.SwitchFailedInterrupted, true
 			failure = switchError(settings.SwitchErrorInterrupted, "Engine manager restarted during the switch.")
-			interruptedCompletion = true
+			interruptedTerminal = true
+		} else if phase == settings.SwitchCompleted && c.activeID == id && c.vetoed {
+			return switchError(settings.SwitchErrorRemoteVeto, "Local Off or pause vetoed the switch.")
 		}
 	}
 	r, ok := c.store.Lookup(id)
@@ -434,7 +488,7 @@ func (b *Broker) advanceEngineSwitch(id, phase string, observed *settings.Switch
 	if err != nil {
 		c.err = err
 	}
-	if err == nil && interruptedCompletion {
+	if err == nil && interruptedTerminal {
 		return failure
 	}
 	return err
@@ -549,7 +603,10 @@ func (b *Broker) runEngineSwitch(ctx context.Context, p settings.SwitchPrepareRe
 		b.finishEngineSwitch(p, settings.SwitchFailedPublication, &started.Observed, err)
 		return
 	}
-	if b.advanceEngineSwitch(p.OperationID, settings.SwitchCompleted, &started.Observed, nil, false) != nil {
+	if err := b.advanceEngineSwitch(p.OperationID, settings.SwitchCompleted, &started.Observed, nil, false); err != nil {
+		if switchErrorDetail(err, settings.SwitchErrorStorage).Kind == settings.SwitchErrorRemoteVeto {
+			b.finishEngineSwitch(p, settings.SwitchFailedPublication, &started.Observed, err)
+		}
 		return
 	}
 	// The manager's checkpoint outlives the broker's durable terminal receipt.
@@ -565,7 +622,11 @@ func (b *Broker) runEngineSwitch(ctx context.Context, p settings.SwitchPrepareRe
 
 func (b *Broker) blockEngineSwitch(err error) {
 	b.engineConfigMu.Lock()
-	b.switchCoordinator().err = err
+	if switchRecoveryPermanent(err) {
+		b.switchCoordinator().err = err
+	} else {
+		b.switchCoordinator().recoveryErr = err
+	}
 	b.engineConfigMu.Unlock()
 }
 
@@ -742,12 +803,21 @@ func (b *Broker) cancelRemoteSwitch() {
 }
 
 func (b *Broker) cancelRemoteEngineSwitch(engine string) {
+	b.vetoRemoteEngineSwitch(engine, true)
+}
+
+func (b *Broker) vetoRemoteEngineSwitch(engine string, cancel bool) {
 	c := b.switchCoordinator()
+	b.workersMu.Lock()
 	c.waitMu.Lock()
 	if c.remoteCancel != nil && (engine == "" || engine == c.remoteSource || engine == c.remoteTarget) {
-		c.remoteCancel()
+		c.vetoed = true
+		if cancel {
+			c.remoteCancel()
+		}
 	}
 	c.waitMu.Unlock()
+	b.workersMu.Unlock()
 }
 
 func (b *Broker) dispatchEngineSwitch(ctx context.Context, method string, raw json.RawMessage, caller string) (any, error) {
