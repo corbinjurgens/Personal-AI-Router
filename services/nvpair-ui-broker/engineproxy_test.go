@@ -7,6 +7,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -734,6 +735,77 @@ func TestProxySupervisionRunsTheListenerWithoutFacades(t *testing.T) {
 		again := b.proxyProcessHandle()
 		return again != nil && again != first
 	})
+}
+
+// observedProxyStop holds Stop before it closes stdin, keeping the process
+// published while the test delivers a failed activation from its closing peer.
+type observedProxyStop struct {
+	io.WriteCloser
+	beforeClose func()
+}
+
+func (s observedProxyStop) Close() error {
+	s.beforeClose()
+	return s.WriteCloser.Close()
+}
+
+func TestProxySpawnRetiresActivationWhenListenerDisabledDuringReplay(t *testing.T) {
+	sb := newSupervisedBroker(t, true)
+	b := sb.b
+	client := &stallingClient{entered: make(chan struct{}), resume: make(chan struct{})}
+	client.stall = func(frame []byte) bool {
+		var msg Message
+		return json.Unmarshal(frame, &msg) == nil && msg.Method == notifyPolicyChanged
+	}
+	b.codec = NewCodec(client)
+	var resumeOnce sync.Once
+	resume := func() { resumeOnce.Do(func() { close(client.resume) }) }
+	t.Cleanup(resume)
+	stopped, stopReached, releaseStop := publicationBarrier(t)
+	started := make(chan struct{})
+	go func() {
+		b.startProxySupervision(false)
+		close(started)
+	}()
+
+	// Replay has acknowledged the policy, but its final announcement holds
+	// spawn before the no-facade/no-listener decision.
+	awaitPublication(t, client.entered)
+	pp := b.policyProxy()
+	requireProxyRunning(t, pp, "replay has not finished bring-up")
+	if got := b.localPolicy(); got.Activation != activationActive {
+		t.Fatalf("replayed policy activation = %+v, want active", got.policyActivation)
+	}
+	// Publish the listener change at precisely this boundary. The policy
+	// persistence path sets current under this same lock before activation.
+	r := b.nodePolicyRuntime()
+	r.mu.Lock()
+	r.current.Routing.Listener.Enabled = false
+	r.current.Revision = "5000"
+	r.mu.Unlock()
+	pp.stdin = observedProxyStop{WriteCloser: pp.stdin, beforeClose: stopped}
+	resume()
+	awaitPublication(t, stopReached)
+
+	// The transport fails while Stop still owns the published process. Its
+	// answer must be discarded even before the process exits or is withdrawn.
+	pp.peer.Close()
+	b.activatePolicyNow()
+	got := b.localPolicy()
+	if got.Activation != activationPending || got.ActivationError != "" {
+		t.Errorf("activation during deliberate spawn teardown = %+v, want pending without an error", got.policyActivation)
+	}
+	r.mu.Lock()
+	failure := r.activationErr
+	r.mu.Unlock()
+	if failure != "" {
+		t.Errorf("recorded an activation failure from the deliberately stopped spawn: %s", failure)
+	}
+	releaseStop()
+	awaitPublication(t, started)
+	if b.getProxySupervisor() != nil || b.policyProxy() != nil {
+		t.Fatal("the aborted listener-only spawn is still published")
+	}
 }
 
 // A node restarted with the listener already enabled in its saved policy runs
