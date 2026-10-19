@@ -51,9 +51,14 @@ func (b *Broker) notifyAvailability() {
 }
 
 // nodeProjection is the engine:node-projection payload: what engine-manager
-// publishes about this node's policy in its pinned /v1/models document.
+// publishes about this node's policy in its pinned /v1/models document, and
+// whether the node is paused locally, which engine-manager enforces against
+// paired nodes' starts and loads.
 type nodeProjection struct {
 	Policy nodepolicy.Advertisement `json:"policy"`
+	// PausedLocally is pausedLocally of the policy. It counts a pause with no
+	// provenance as local, which the advertised pausedBy alone cannot say.
+	PausedLocally bool `json:"pausedLocally"`
 }
 
 // publishNodeProjection sends engine-manager this node's policy advertisement,
@@ -71,7 +76,7 @@ func (b *Broker) publishNodeProjection() {
 		return
 	}
 	r.mu.Lock()
-	projection := nodeProjection{Policy: r.current.Advertisement()}
+	projection := nodeProjection{Policy: r.current.Advertisement(), PausedLocally: pausedLocally(r.current)}
 	r.mu.Unlock()
 	if err := worker.Notify(engineNodeProjectionMethod, projection); err != nil {
 		slog.Warn("could not publish the node projection to engine-manager", "err", err)

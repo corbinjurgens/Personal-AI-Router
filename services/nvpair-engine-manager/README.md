@@ -118,14 +118,15 @@ node's node-policy call relayed to the broker, answered by the broker's
 pipeline — `errors:report` / `errors:clear` (consumed by `nvpair-errors`
 via the broker; see below).
 
-Notifications (caller → service): `engine:node-projection{policy}` is this
-node's policy advertisement (declared roles with their profile bounds, policy
-revision, pause origin). The broker sends it after every persisted policy or
-availability change and on every `engine:ready`. engine-manager keeps the last
-one in memory only and serves it as `policy` on `engine:models` and
-`GET /v1/models`, so paired peers learn this node's roles from the pinned
-inventory fetch they already make. It is never put in mDNS TXT or in the
-peer-services descriptor.
+Notifications (caller → service): `engine:node-projection{policy, pausedLocally}`
+is this node's policy advertisement (declared roles with their profile bounds,
+policy revision, pause origin) and whether the node is paused locally. The
+broker sends it after every persisted policy or availability change and on
+every `engine:ready`. engine-manager keeps the last one in memory only and
+serves `policy` on `engine:models` and `GET /v1/models`, so paired peers learn
+this node's roles from the pinned inventory fetch they already make. It is
+never put in mDNS TXT or in the peer-services descriptor. `pausedLocally`
+drives the local veto (Remote engine management).
 
 Streaming HTTP pulls have a 30-minute **inactivity** watchdog. Each increase in
 an Ollama layer's or llama.cpp file's completed byte count refreshes that
@@ -267,7 +268,8 @@ would only collide on the port. Consequences worth knowing:
   state as authoritative (the engine will not restore on restart) and surface
   the error as guidance, not as proof the OFF intent was lost. The same applies
   to cluster `POST /v1/engines/stop`, which may answer HTTP 500 even though OFF
-  was recorded.
+  was recorded. A local stop records the OFF as local, which vetoes paired
+  nodes' starts; a cluster stop records it as peer's.
 - **`engine:set-port` on a running adopted engine is refused** (returns an
   error, persists nothing). Moving it would mean killing the old listener and
   spawning a new one; since NVPAIR can't kill what it didn't start, it errors
@@ -334,15 +336,36 @@ itself and never forwards a further hop, and relays to the broker as
 pin, acts, and answers with `policy:reply {id, result, error?, errorCode?}`.
 Every error carries a JSON-RPC `errorCode`: `-32602` for invalid parameters,
 including missing `expectedPersistedRevision`, invalid policy or availability;
-`-32000` for a revision conflict, save failure or other operational failure.
-The route maps `-32602` to HTTP 400 and other failures to HTTP 409. The origin's
-remote-policy methods map HTTP 400 to JSON-RPC `-32602` and other HTTP failures,
-including 409, to `-32000`, preserving the diagnostic. No classification depends
+`-32010` for a revision conflict; `-32011` for a resume the local veto refuses;
+`-32000` for a save failure or other operational failure. The route maps
+`-32602` to HTTP 400, `-32010` and `-32011` to HTTP 409 with the body
+`{"error": <diagnostic>, "code": "policy_conflict" | "local_veto"}`, and other
+failures to a plain-text HTTP 409. The origin's remote-policy methods map HTTP
+400 to JSON-RPC `-32602`, a typed 409 to its code, and other HTTP failures to
+`-32000`, preserving the diagnostic. No classification depends
 on diagnostic text. A stale policy draft is a conflict before its policy is
 validated, including a draft that tries to enable remote or paid execution.
 The route abandons its wait (and sends
 `policy:cancel`) if the caller loses its pin or 15 minutes pass; a pause the broker
 already accepted still finishes.
+
+**Local veto.** A node's own pause or Off wins over paired nodes until it is
+lifted on the node itself. `POST /v1/engines/start`, `POST /v1/engines/install`
+with `start`, and `POST /v1/models/load` answer HTTP 409
+`{"error": <reason>, "code": "local_veto"}` while the broker's last projection
+says `pausedLocally`, or while the engine is saved Off locally, and HTTP 503
+before the first projection arrives. `engine-state.json` keeps the Off's origin
+in `offBy` (`local` or `peer`): a local `engine:stop` or uninstall writes
+`local`, a cluster stop writes `peer` unless the engine is already Off, and any
+start clears it. An Off with no `offBy` entry predates the field and counts as
+local; an engine with no saved intent is not vetoed. A remote start rechecks the
+veto under the engine's lifecycle lock, and remote starts and loads already
+running when a local pause or a local stop of that engine arrives are canceled
+and answer the same 409; during an install with `start` only the start is
+canceled, reported as an error frame with `"code": "local_veto"`. Stop, unload,
+delete, pull, model copy and settings edits are not vetoed. At the origin, the
+409 and the coded error frame become JSON-RPC `-32011` on `engine:remote-start`,
+`engine:remote-install` and `engine:remote-load-model`.
 
 The streaming routes emit zero or more `{"type":"progress",...}` frames followed
 by exactly one terminal `{"type":"result",...}` or `{"type":"error",...}` frame.

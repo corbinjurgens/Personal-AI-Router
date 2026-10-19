@@ -675,7 +675,7 @@ func TestPauseFinishWaitsForDrainThenUnloadsAndStops(t *testing.T) {
 
 	done := make(chan nodepolicy.Availability, 1)
 	go func() {
-		a, err := b.setAvailability(context.Background(), nodepolicy.Paused)
+		a, err := b.setAvailability(context.Background(), nodepolicy.Paused, nodepolicy.PausedLocally)
 		if err != nil {
 			t.Errorf("pause: %v", err)
 		}
@@ -723,7 +723,7 @@ func TestPauseFinishWaitsForDrainThenUnloadsAndStops(t *testing.T) {
 
 func TestPauseCancelPushesCancelActiveImmediately(t *testing.T) {
 	b, _, proxy, engine := pausingBroker(t, nodepolicy.PauseConfig{OnActive: nodepolicy.CancelActive, DrainTimeoutSeconds: 30})
-	if a, err := b.setAvailability(context.Background(), nodepolicy.Paused); err != nil || a != nodepolicy.Paused {
+	if a, err := b.setAvailability(context.Background(), nodepolicy.Paused, nodepolicy.PausedLocally); err != nil || a != nodepolicy.Paused {
 		t.Fatalf("pause = %q, %v", a, err)
 	}
 	p := availabilityPushes(proxy.snapshot())
@@ -741,7 +741,7 @@ func TestPauseDrainTimeoutCancelsActiveWork(t *testing.T) {
 	t.Cleanup(func() { pauseCancelSettle = prev })
 	b, _, proxy, _ := pausingBroker(t, nodepolicy.PauseConfig{OnActive: nodepolicy.FinishActive, DrainTimeoutSeconds: 0})
 	b.observeAdmission(nodepolicy.AdmissionState{Active: 2})
-	if a, err := b.setAvailability(context.Background(), nodepolicy.Paused); err != nil || a != nodepolicy.Paused {
+	if a, err := b.setAvailability(context.Background(), nodepolicy.Paused, nodepolicy.PausedLocally); err != nil || a != nodepolicy.Paused {
 		t.Fatalf("pause = %q, %v", a, err)
 	}
 	p := availabilityPushes(proxy.snapshot())
@@ -752,10 +752,10 @@ func TestPauseDrainTimeoutCancelsActiveWork(t *testing.T) {
 
 func TestResumeWakesEnginesThePauseStopped(t *testing.T) {
 	b, _, proxy, engine := pausingBroker(t, nodepolicy.PauseConfig{OnActive: nodepolicy.FinishActive, DrainTimeoutSeconds: 5, StopEngines: true})
-	if _, err := b.setAvailability(context.Background(), nodepolicy.Paused); err != nil {
+	if _, err := b.setAvailability(context.Background(), nodepolicy.Paused, nodepolicy.PausedLocally); err != nil {
 		t.Fatal(err)
 	}
-	if a, err := b.setAvailability(context.Background(), nodepolicy.Available); err != nil || a != nodepolicy.Available {
+	if a, err := b.setAvailability(context.Background(), nodepolicy.Available, nodepolicy.PausedLocally); err != nil || a != nodepolicy.Available {
 		t.Fatalf("resume = %q, %v", a, err)
 	}
 	engine.waitFor("engine:wake after resume", func(calls []policyCall) bool {
@@ -780,13 +780,13 @@ func TestLatestAvailabilityRequestWins(t *testing.T) {
 	b.observeAdmission(nodepolicy.AdmissionState{Active: 1})
 	pauseErr := make(chan error, 1)
 	go func() {
-		_, err := b.setAvailability(context.Background(), nodepolicy.Paused)
+		_, err := b.setAvailability(context.Background(), nodepolicy.Paused, nodepolicy.PausedLocally)
 		pauseErr <- err
 	}()
 	proxy.waitFor("draining push", func(calls []policyCall) bool { return len(availabilityPushes(calls)) > 0 })
 	resumed := make(chan nodepolicy.Availability, 1)
 	go func() {
-		a, err := b.setAvailability(context.Background(), nodepolicy.Available)
+		a, err := b.setAvailability(context.Background(), nodepolicy.Available, nodepolicy.PausedLocally)
 		if err != nil {
 			t.Errorf("resume: %v", err)
 		}
@@ -831,7 +831,7 @@ func TestStartupPausedWithStopEnginesSkipsRestoreUntilResume(t *testing.T) {
 			t.Fatal("a node paused with stopEngines restored its engines at startup")
 		}
 	}
-	if _, err := b.setAvailability(context.Background(), nodepolicy.Available); err != nil {
+	if _, err := b.setAvailability(context.Background(), nodepolicy.Available, nodepolicy.PausedLocally); err != nil {
 		t.Fatal(err)
 	}
 	engine.waitFor("engine:restore-enabled after resume", func(calls []policyCall) bool {
@@ -1684,8 +1684,8 @@ func TestStaleRemoteAllowedDraftIsConflictBeforeValidation(t *testing.T) {
 				reply := rb.relayReply(t, "set", params)
 				code, message = reply.ErrorCode, reply.Error
 			}
-			if code != -32000 || !strings.HasPrefix(message, "policy conflict:") || !strings.Contains(message, base.revision) {
-				t.Fatalf("stale dirty draft: code %d, error %q; want -32000 conflict naming revision %s", code, message, base.revision)
+			if code != codePolicyConflict || !strings.HasPrefix(message, "policy conflict:") || !strings.Contains(message, base.revision) {
+				t.Fatalf("stale dirty draft: code %d, error %q; want %d conflict naming revision %s", code, message, codePolicyConflict, base.revision)
 			}
 			base.requireUnchanged(t)
 			for tier, settings := range rb.b.localPolicy().Policy.Routing.Tiers {
@@ -1982,6 +1982,9 @@ func requireLandedPolicy(t *testing.T, rb *routedBroker, want nodepolicy.Policy)
 	var pushed nodepolicy.Policy
 	for _, call := range rb.proxy.snapshot() {
 		if call.method == nodepolicy.MethodSetPolicy {
+			// Decode each push whole: an omitted pausedBy must not keep the
+			// previous push's value.
+			pushed = nodepolicy.Policy{}
 			if err := json.Unmarshal(call.params, &pushed); err != nil {
 				t.Fatalf("decode pushed policy: %v", err)
 			}
@@ -2106,7 +2109,7 @@ func TestAvailabilityPublicationFailureLeavesOneWholeDocument(t *testing.T) {
 				setClock(rb.b, 5)
 				rb.b.replayPolicyToProxy(context.Background(), rb.b.policyProxy())
 				if from == nodepolicy.Paused {
-					if _, err := rb.b.setAvailability(context.Background(), from); err != nil {
+					if _, err := rb.b.setAvailability(context.Background(), from, nodepolicy.PausedLocally); err != nil {
 						t.Fatalf("acknowledged %s: %v", from, err)
 					}
 				}
@@ -2121,7 +2124,7 @@ func TestAvailabilityPublicationFailureLeavesOneWholeDocument(t *testing.T) {
 				changed := policyChangedRevisions(t, rb.out)
 
 				setReplacer(rb.b, rep)
-				_, err := rb.b.setAvailability(context.Background(), to)
+				_, err := rb.b.setAvailability(context.Background(), to, nodepolicy.PausedLocally)
 				setReplacer(rb.b, durablefile.Replacer{})
 				if !errors.Is(err, errPublish) {
 					t.Fatalf("setAvailability(%s) error = %v, want it to wrap the injected failure", to, err)
@@ -2132,12 +2135,13 @@ func TestAvailabilityPublicationFailureLeavesOneWholeDocument(t *testing.T) {
 				if landed {
 					want := before.Policy
 					want.Availability, want.Revision = to, attempted
+					want.PausedBy = pausedByFor(to, nodepolicy.PausedLocally)
 					requireLandedAvailability(t, rb, want, callStart, frameStart)
 					var save *policySaveError
 					if !errors.As(err, &save) || save.revision != attempted {
 						t.Errorf("landed availability error = %v, want save warning for revision %s", err, attempted)
 					}
-					if _, err := rb.b.setAvailability(context.Background(), to); err != nil {
+					if _, err := rb.b.setAvailability(context.Background(), to, nodepolicy.PausedLocally); err != nil {
 						t.Fatalf("repeat of completed %s: %v", to, err)
 					}
 					if got := rb.b.localPolicy().Policy.Revision; got != attempted {
@@ -2180,7 +2184,7 @@ func TestAvailabilityPublicationFailureLeavesOneWholeDocument(t *testing.T) {
 					t.Fatal(err)
 				}
 				retryRevision := strconv.FormatInt(attemptedNumber+1, 10)
-				if _, err := rb.b.setAvailability(context.Background(), to); err != nil {
+				if _, err := rb.b.setAvailability(context.Background(), to, nodepolicy.PausedLocally); err != nil {
 					t.Fatalf("retry of %s: %v", to, err)
 				}
 				if got := rb.b.localPolicy(); got.Policy.Revision != retryRevision || got.Availability != to {
@@ -2255,6 +2259,14 @@ func requireAvailabilityTransition(t *testing.T, rb *routedBroker, to nodepolicy
 	}
 }
 
+// pausedByFor is the pausedBy a transition to state requested by origin saves.
+func pausedByFor(state nodepolicy.Availability, origin nodepolicy.PauseOrigin) nodepolicy.PauseOrigin {
+	if state == nodepolicy.Paused {
+		return origin
+	}
+	return ""
+}
+
 func requireLandedAvailability(t *testing.T, rb *routedBroker, want nodepolicy.Policy, callStart, frameStart int) {
 	t.Helper()
 	requireLandedPolicy(t, rb, want)
@@ -2298,6 +2310,7 @@ func TestAvailabilityVersion1FirstSavePublicationFaultBoundaries(t *testing.T) {
 				if boundary.landed {
 					want := nodepolicy.Default()
 					want.Availability, want.Revision = to, "5"
+					want.PausedBy = pausedByFor(to, nodepolicy.PausedLocally)
 					want.Idle.UnloadAfterMinutes = 4
 					requireLandedAvailability(t, rb, want, callStart, frameStart)
 					var stored nodepolicy.Policy
@@ -2336,13 +2349,15 @@ func TestAvailabilityRelayedLandedReplacementAdoptsPolicy(t *testing.T) {
 				setClock(rb.b, 5)
 				rb.b.replayPolicyToProxy(context.Background(), rb.b.policyProxy())
 				if to == nodepolicy.Available {
-					if _, err := rb.b.setAvailability(context.Background(), nodepolicy.Paused); err != nil {
+					// A paired node may resume only a pause a paired node made.
+					if _, err := rb.b.setAvailability(context.Background(), nodepolicy.Paused, nodepolicy.PausedByPeer); err != nil {
 						t.Fatalf("prepare paused node: %v", err)
 					}
 				}
 				callStart, frameStart := len(rb.proxy.snapshot()), len(rb.out.frames())
 				want := rb.b.localPolicy().Policy
 				want.Availability, want.Revision = to, revision
+				want.PausedBy = pausedByFor(to, nodepolicy.PausedByPeer)
 				setReplacer(rb.b, boundary.rep)
 				_, errText := rb.relay(t, "set-availability", map[string]any{"state": to})
 				setReplacer(rb.b, durablefile.Replacer{})
@@ -2371,7 +2386,7 @@ func TestAvailabilityLandedReplacementCompletesEngineActions(t *testing.T) {
 			r.loaded["ollama"] = []string{"m1"}
 			r.mu.Unlock()
 			if to == nodepolicy.Available {
-				if _, err := rb.b.setAvailability(context.Background(), nodepolicy.Paused); err != nil {
+				if _, err := rb.b.setAvailability(context.Background(), nodepolicy.Paused, nodepolicy.PausedLocally); err != nil {
 					t.Fatalf("prepare paused engines: %v", err)
 				}
 				if !rb.b.skipRestoreWhilePaused() {
@@ -2382,8 +2397,9 @@ func TestAvailabilityLandedReplacementCompletesEngineActions(t *testing.T) {
 			engineStart := len(rb.engine.snapshot())
 			want := rb.b.localPolicy().Policy
 			want.Availability, want.Revision = to, revision
+			want.PausedBy = pausedByFor(to, nodepolicy.PausedLocally)
 			setReplacer(rb.b, durablefile.Replacer{SyncDir: func(string) error { return errPublish }})
-			got, err := rb.b.setAvailability(context.Background(), to)
+			got, err := rb.b.setAvailability(context.Background(), to, nodepolicy.PausedLocally)
 			setReplacer(rb.b, durablefile.Replacer{})
 			if got != to || !errors.Is(err, errPublish) {
 				t.Fatalf("landed transition = %q, %v, want completed %q and durability warning", got, err, to)
@@ -2428,7 +2444,7 @@ func TestAvailabilityDuringRecoveryPreservesFileUntilPolicyReplacementLands(t *t
 			rb := newBrokerOnFile(t, corrupt)
 			setClock(rb.b, 5)
 			if to == nodepolicy.Paused {
-				if _, err := rb.b.setAvailability(context.Background(), nodepolicy.Available); err != nil {
+				if _, err := rb.b.setAvailability(context.Background(), nodepolicy.Available, nodepolicy.PausedLocally); err != nil {
 					t.Fatalf("prepare available recovery state: %v", err)
 				}
 			}
@@ -2438,13 +2454,14 @@ func TestAvailabilityDuringRecoveryPreservesFileUntilPolicyReplacementLands(t *t
 				attempts++
 				return nil, errPublish
 			}})
-			got, err := rb.b.setAvailability(context.Background(), to)
+			got, err := rb.b.setAvailability(context.Background(), to, nodepolicy.PausedLocally)
 			setReplacer(rb.b, durablefile.Replacer{})
 			if err != nil || got != to {
 				t.Fatalf("recovery availability = %q, %v, want %q without saving", got, err, to)
 			}
 			want := nodepolicy.Default()
 			want.Availability = to
+			want.PausedBy = pausedByFor(to, nodepolicy.PausedLocally)
 			if current := rb.b.localPolicy(); !current.RecoveryRequired || !reflect.DeepEqual(current.Policy, want) {
 				t.Error("availability changed the recovery flag or the revision-zero recovery document")
 			}
@@ -2618,7 +2635,7 @@ func TestPolicyRevisionAssignment(t *testing.T) {
 			state nodepolicy.Availability
 			want  string
 		}{{nodepolicy.Paused, "13"}, {nodepolicy.Available, "14"}} {
-			if _, err := rb.b.setAvailability(context.Background(), step.state); err != nil {
+			if _, err := rb.b.setAvailability(context.Background(), step.state, nodepolicy.PausedLocally); err != nil {
 				t.Fatalf("set availability %s: %v", step.state, err)
 			}
 			got := rb.b.localPolicy().Policy
@@ -2642,7 +2659,7 @@ func TestPolicyRevisionAssignment(t *testing.T) {
 		rb := newRoutedBroker(t)
 		before := rb.b.localPolicy()
 		setReplacer(rb.b, durablefile.Replacer{Replace: func(string, string) error { return errPublish }})
-		if _, err := rb.b.setAvailability(context.Background(), nodepolicy.Paused); !errors.Is(err, errPublish) {
+		if _, err := rb.b.setAvailability(context.Background(), nodepolicy.Paused, nodepolicy.PausedLocally); !errors.Is(err, errPublish) {
 			t.Fatalf("pause error = %v, want the injected failure", err)
 		}
 		setReplacer(rb.b, durablefile.Replacer{})
@@ -2725,7 +2742,7 @@ func TestPolicyRecovery(t *testing.T) {
 		rb := newBrokerOnFile(t, corruptAvailable)
 		before := rb.fileBytes(t)
 		for _, state := range []nodepolicy.Availability{nodepolicy.Available, nodepolicy.Paused, nodepolicy.Available} {
-			if _, err := rb.b.setAvailability(context.Background(), state); err != nil {
+			if _, err := rb.b.setAvailability(context.Background(), state, nodepolicy.PausedLocally); err != nil {
 				t.Fatalf("set availability %s: %v", state, err)
 			}
 			got := rb.b.localPolicy()
@@ -2836,7 +2853,7 @@ func TestPolicyVersion1FileIsRewrittenByTheFirstSave(t *testing.T) {
 		t.Fatal("loading a v1 file rewrote it")
 	}
 	setClock(rb.b, 5)
-	if _, err := rb.b.setAvailability(context.Background(), nodepolicy.Paused); err != nil {
+	if _, err := rb.b.setAvailability(context.Background(), nodepolicy.Paused, nodepolicy.PausedLocally); err != nil {
 		t.Fatalf("pause: %v", err)
 	}
 	var stored nodepolicy.Policy
@@ -3124,7 +3141,7 @@ func TestPolicyActivationFollowsPauseAndResume(t *testing.T) {
 	ab := newActivatedBroker(t)
 	ab.setIdle(t, 5)
 
-	if a, err := ab.b.setAvailability(context.Background(), nodepolicy.Paused); err != nil || a != nodepolicy.Paused {
+	if a, err := ab.b.setAvailability(context.Background(), nodepolicy.Paused, nodepolicy.PausedLocally); err != nil || a != nodepolicy.Paused {
 		t.Fatalf("pause = %q, %v", a, err)
 	}
 	got := ab.wantActivation(t, "5001", activationActive, "")
@@ -3136,7 +3153,7 @@ func TestPolicyActivationFollowsPauseAndResume(t *testing.T) {
 		t.Fatalf("policy:changed after the pause = revision %q, %+v; want revision 5001 active at 5001", announced.Revision, activation)
 	}
 
-	if a, err := ab.b.setAvailability(context.Background(), nodepolicy.Available); err != nil || a != nodepolicy.Available {
+	if a, err := ab.b.setAvailability(context.Background(), nodepolicy.Available, nodepolicy.PausedLocally); err != nil || a != nodepolicy.Available {
 		t.Fatalf("resume = %q, %v", a, err)
 	}
 	got = ab.wantActivation(t, "5002", activationActive, "")
@@ -3160,7 +3177,7 @@ func TestPolicyActivationPauseAfterARefusedPushDeliversThePolicy(t *testing.T) {
 	// and only that policy push activates the revision.
 	ab.proxy.setAnswer(ab.acks.answer)
 	before := len(ab.proxy.snapshot())
-	if a, err := ab.b.setAvailability(context.Background(), nodepolicy.Paused); err != nil || a != nodepolicy.Paused {
+	if a, err := ab.b.setAvailability(context.Background(), nodepolicy.Paused, nodepolicy.PausedLocally); err != nil || a != nodepolicy.Paused {
 		t.Fatalf("pause = %q, %v", a, err)
 	}
 	got := ab.wantActivation(t, "5001", activationActive, "")
@@ -3186,7 +3203,7 @@ func TestPolicyActivationPauseWhileThePolicyIsStillRefusedStaysInError(t *testin
 	ab.refuseSetPolicy()
 	ab.setIdle(t, 5)
 
-	if a, err := ab.b.setAvailability(context.Background(), nodepolicy.Paused); err != nil || a != nodepolicy.Paused {
+	if a, err := ab.b.setAvailability(context.Background(), nodepolicy.Paused, nodepolicy.PausedLocally); err != nil || a != nodepolicy.Paused {
 		t.Fatalf("pause = %q, %v", a, err)
 	}
 	got := ab.wantActivation(t, "0", activationError, "refused")
@@ -3217,7 +3234,7 @@ func TestPolicyActivationInRecoveryReportsTheRevisionPushed(t *testing.T) {
 	// A resume during recovery is not saved, so no new revision is claimed and
 	// no policy follows the availability push.
 	policyPushesBefore := len(proxy.methods(nodepolicy.MethodSetPolicy))
-	if a, err := b.setAvailability(context.Background(), nodepolicy.Available); err != nil || a != nodepolicy.Available {
+	if a, err := b.setAvailability(context.Background(), nodepolicy.Available, nodepolicy.PausedLocally); err != nil || a != nodepolicy.Available {
 		t.Fatalf("resume = %q, %v", a, err)
 	}
 	got = ab.wantActivation(t, "0", activationActive, "")
@@ -3644,7 +3661,7 @@ func TestPolicyActivationAvailabilityPushFaults(t *testing.T) {
 			setActivationWait(ab.b, 500*time.Millisecond)
 			next := 5000
 			if c.pausedFirst {
-				if a, err := ab.b.setAvailability(context.Background(), nodepolicy.Paused); err != nil || a != nodepolicy.Paused {
+				if a, err := ab.b.setAvailability(context.Background(), nodepolicy.Paused, nodepolicy.PausedLocally); err != nil || a != nodepolicy.Paused {
 					t.Fatalf("healthy pause = %q, %v", a, err)
 				}
 				ab.wantActivation(t, "5000", activationActive, "")

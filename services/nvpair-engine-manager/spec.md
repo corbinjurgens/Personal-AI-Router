@@ -228,7 +228,7 @@ Requests (caller → service):
 
 Notifications (service → caller): `engine:intent-changed{enabledByEngine}` (after an explicit start/stop changes saved intent), `policy:request{id, method, caller, params}` / `policy:cancel{id}` (a paired node's node-policy call for the broker, which answers with the `policy:reply{id, result, error?, errorCode?}` notification), `ready{version}`, `engine:state-changed{EngineStatus}`, `engine:models-changed{engine, models}` (pushed when an engine's loaded-in-memory model set changes; `models` is the full `engine:models` shape incl. `loadedByEngine`), `engine:install-progress{engine, stage, percent?, error?}` (`error` on the terminal `failed` frame), `engine:pull-progress{engine, op, stage, percent?, message}` (live progress for a local model pull driven via `engine:action{action:"pull_model"}` — the local counterpart of `engine:remote-progress`), `engine:remote-progress{opId, node, engine, op, stage, percent?, message}` (live progress relayed from a remote install/pull; a model copy reports `op:"copy"` with `file?, bytesDone?, bytesTotal?`, §7.3), and `errors:report` / `errors:clear` (consumed by `nvpair-errors` via the Broker). `install` / `start` / `stop` / `restart` / `action` / `remote-*` each run in their own goroutine so the read loop never blocks; their responses arrive when the op completes.
 
-Notifications (caller → service): `engine:node-projection{policy}` carries this node's policy advertisement (`nvpair-shared/nodepolicy.Advertisement`: `revision`, `roles` per tier with the bounds of the matching profile, `pausedBy?`). The broker sends it after every persisted policy or availability change and again on every `engine:ready`, reading its current policy each time under one lock, so a later projection never carries older state. engine-manager keeps the last one in memory, replaced whole, never persisted; an undecodable one leaves the previous in place. `engine:models` and `GET /v1/models` return it as `policy`, omitted until the first push. `engine:models-changed` does not carry it.
+Notifications (caller → service): `engine:node-projection{policy, pausedLocally}` carries this node's policy advertisement (`nvpair-shared/nodepolicy.Advertisement`: `revision`, `roles` per tier with the bounds of the matching profile, `pausedBy?`) and whether the node is paused by its own clients, a pause without recorded provenance included (§7.2 Local veto). The broker sends it after every persisted policy or availability change and again on every `engine:ready`, reading its current policy each time under one lock, so a later projection never carries older state. engine-manager keeps the last one in memory, replaced whole, never persisted; an undecodable one leaves the previous in place. `engine:models` and `GET /v1/models` return it as `policy`, omitted until the first push. `engine:models-changed` does not carry it.
 
 `percent` on all three progress notifications follows one rule: it is present only when the step is measurable (download bytes, byte-progress pulls) or terminal (`100` on install `done` / `already-installed`, `-1` on install `failed` and pull `error`). An indeterminate step omits it — the install `verified` and `installing` stages always do, because the install command is opaque — and a consumer renders the stage alone rather than a percentage.
 
@@ -253,14 +253,39 @@ With `--control-port` and a clustered `--cluster-dir`, engine-manager serves a c
 The broker's `policy:reply {id, result, error?, errorCode?}` carries a JSON-RPC
 `errorCode` on every failure. Invalid parameters, including missing or malformed
 `expectedPersistedRevision`, invalid policy and invalid availability, use
-`-32602`; revision conflicts, save failures and other operational errors use
-`-32000`. Inbound policy routes return HTTP 400 for `-32602`, HTTP 409 for other
-broker or relay errors. At the origin, HTTP 400 becomes JSON-RPC `-32602` and
-other HTTP failures, including 409, become `-32000`; diagnostics are preserved
-without inferring a code from their text. A stale policy draft conflicts before
+`-32602`; revision conflicts use `-32010`; a resume the local veto refuses uses
+`-32011`; save failures and other operational errors use `-32000`. Inbound
+policy routes return HTTP 400 for `-32602`, HTTP 409 with the JSON body
+`{"error": <diagnostic>, "code": "policy_conflict" | "local_veto"}` for `-32010`
+and `-32011`, and a plain-text HTTP 409 for other broker or relay errors. At the
+origin, HTTP 400 becomes JSON-RPC `-32602`, a typed 409 becomes its code, and
+other HTTP failures become `-32000`; diagnostics are preserved without inferring
+a code from their text. A stale policy draft conflicts before
 policy validation, even if it tries to enable remote or paid execution.
 Successful replies have no error code. Body/shape validation still returns 400,
 unpaired callers 403, non-POST calls 405 and a missing coordinator 503.
+
+**Local veto.** A node's own pause or Off always wins over paired nodes. The
+`ec` start (`POST /engines/start`), install with `start`
+(`POST /engines/install`) and model load (`POST /models/load`) are refused with
+HTTP 409 `{"error", "code": "local_veto"}` while the last
+`engine:node-projection` says `pausedLocally`, or while the engine is saved Off
+by this node; before the first projection they are refused with HTTP 503 (fail
+closed). Saved intent lives in `engine-state.json` as
+`{engines: {<engine>: bool}, offBy?: {<engine>: "local" | "peer"}}`: a local `engine:stop` or uninstall records `local`, an `ec` stop
+records `peer` unless the engine is already saved Off, and any start (local or
+remote, or `engine:restart`) saves On and clears the entry. An Off without an
+`offBy` entry predates provenance and counts as local; an engine with no saved
+intent is not vetoed. Only a local start or resume lifts a veto. The start is
+checked again under the engine's lifecycle lock, and accepted remote starts and
+loads still running when a local veto arrives (a projection with
+`pausedLocally`, or a local `engine:stop` of that engine) are canceled and
+answer the typed 409; a veto during an install with `start` cancels only the
+start, reported as an error frame with `"code": "local_veto"`. Stop, unload,
+delete, pull, model copy and settings edits are never vetoed, and settings
+applies cannot resume an engine saved Off. At the origin, the typed 409 and the
+coded error frame become JSON-RPC `-32011` on `engine:remote-start`,
+`engine:remote-install` and `engine:remote-load-model`.
 
 The `engine:remote-*` methods are the client half: engine-manager resolves the target `node` in an `ec` peer directory (fed by its own `discovery:subscribe{services:[ec]}` to the broker relay), dials the peer's `ec` surface with the same pinned identity, relays each streamed progress frame up as `engine:remote-progress` (keyed by a minted `opId`), and settles the request on the terminal frame. Remote install/pull run for the operation's full duration (no broker-imposed timeout); remote stop and model unload/delete are fast request/response, remote Ollama model load uses the readiness-sized response budget, and remote start waits for the engine's bounded readiness result. They error if this node isn't clustered or the target isn't a pinned peer.
 
@@ -348,7 +373,7 @@ The operator opens the UI; the Broker calls `engine:get-installed`, which return
 
 The operator starts it: `engine:start {engine:"ollama"}` resolves the manifest runtime (`OLLAMA_HOST` = `{host}:{port}`, `{host}` from `runtime.bind` defaulting to `0.0.0.0`; per-call `port`/`bind` override either), spawns the process, and waits for the readiness probe before reporting `running:true, healthy:true` in the response and an `engine:state-changed` notification. A periodic health probe keeps the state current; an unexpected exit emits `engine:state-changed` + `errors:report`. If something is already serving the port, `start` **adopts** it instead of spawning a duplicate.
 
-The operator stops it: `engine:stop {engine:"ollama"}` signals a process the service owns. For an **adopted** engine (no owned process), it resolves the PID bound to the port and terminates it only when that process is running the binary we manage — reclaiming an orphan a prior run left on our own managed port; a genuinely foreign listener (a different image on a different port) is declined with an error naming its PID and image. A user-initiated `stop` records the OFF intent regardless (even when the RPC returns an error), so the health loop and restore-on-restart don't flip the engine back on — clients must not treat a stop error as proof the OFF choice was discarded. The cluster `ec` stop endpoint shares this semantics and may return HTTP 500 while OFF is persisted.
+The operator stops it: `engine:stop {engine:"ollama"}` signals a process the service owns. For an **adopted** engine (no owned process), it resolves the PID bound to the port and terminates it only when that process is running the binary we manage — reclaiming an orphan a prior run left on our own managed port; a genuinely foreign listener (a different image on a different port) is declined with an error naming its PID and image. A user-initiated `stop` records the OFF intent regardless (even when the RPC returns an error), so the health loop and restore-on-restart don't flip the engine back on — clients must not treat a stop error as proof the OFF choice was discarded. The cluster `ec` stop endpoint shares this semantics and may return HTTP 500 while OFF is persisted; its OFF records peer provenance, so a later remote start may undo it, while a local OFF vetoes remote starts (§7.2 Local veto).
 
 The operator pulls a model: `engine:action {engine:"ollama", action:"pull_model", params:{name:"llama3.2"}}` issues the manifest-declared `POST 127.0.0.1:{port}/api/pull`. Because the action is `pull_model`, the request is routed through the streaming pull path (not the buffered `engine:action` reader): each `/api/pull` status line is emitted as an `engine:pull-progress` notification — so a local pull shows live download progress just like a remote pull's `engine:remote-progress` — and the request settles with the pull's terminal result line. Frames are coalesced (only a change in `stage` or `percent` is emitted) so a chatty engine that streams many byte-progress lines per layer doesn't flood subscribers. Streaming Ollama and llama.cpp pulls use a 30-minute inactivity watchdog that is refreshed only when a layer/file completed-byte count advances, allowing active downloads to exceed 30 minutes without letting duplicate progress or heartbeat frames keep a stalled pull alive. The engine's terminal `{"status":"success"}` surfaces as a `stage:"success"` frame; a **failed** pull emits a terminal `stage:"error", percent:-1, message:<why>` frame in addition to the JSON-RPC error, so a UI whose synchronous call already timed out on a long download still converges off "pulling". A CLI-driven pull (LM Studio's `lms get`) has no line-level progress, so it emits one `stage:"pulling"` marker and retains the fixed 30-minute action timeout before returning the command's result. On `shutdown` (or stdin EOF) the service stops every running engine first, so none are orphaned.
 

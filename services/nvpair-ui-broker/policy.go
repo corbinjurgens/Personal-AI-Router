@@ -134,6 +134,11 @@ type policyRuntime struct {
 	// current.Availability only while draining.
 	live         nodepolicy.Availability
 	cancelActive bool
+	// localPauseRequested is set while the newest accepted availability
+	// request is a pause made on this node, from its acceptance until its
+	// transition ends, so a paired node's resume is refused even before that
+	// pause has been saved (setAvailability).
+	localPauseRequested bool
 
 	// Admission state from the proxy, and a channel closed on every update so
 	// waiters can block on a change without polling.
@@ -416,6 +421,17 @@ type policyParams struct {
 	ExpectedPersistedRevision json.RawMessage `json:"expectedPersistedRevision,omitempty"`
 }
 
+// Typed JSON-RPC error codes of the policy methods, the same on the local
+// methods and in the relay's policy:reply errorCode.
+const (
+	// codePolicyConflict is a policy:set whose expectedPersistedRevision is not
+	// the persisted revision.
+	codePolicyConflict = -32010
+	// codeLocalVeto is a paired node's resume of a node paused on the node
+	// itself.
+	codeLocalVeto = -32011
+)
+
 // policyConflictError reports a policy:set whose draft is based on a revision
 // other than the persisted one. The caller must reload and review the policy;
 // resubmitting the old draft would restore what a newer write removed.
@@ -480,10 +496,11 @@ func (b *Broker) peerPolicy() peerPolicyGetResult {
 	return peerPolicyGetResult{Policy: local.Policy.PeerProjection(), Availability: local.Availability}
 }
 
-// setLocalPolicy validates, persists and applies a new policy. Availability is
-// not part of what policy:set changes — node:set-availability owns it — so the
-// incoming value is ignored and the persisted one kept. The same holds for the
-// revision, which only the broker assigns. Omitted fields take their defaults,
+// setLocalPolicy validates, persists and applies a new policy. Availability and
+// its pausedBy provenance are not part of what policy:set changes —
+// node:set-availability owns them — so the incoming values are ignored and the
+// persisted ones kept. The same holds for the revision, which only the broker
+// assigns. Omitted fields take their defaults,
 // exactly as when the file is loaded. The write applies only when the persisted
 // revision is the one the caller's draft is based on (expected).
 func (b *Broker) setLocalPolicy(raw, expected json.RawMessage) (nodepolicy.Policy, error) {
@@ -502,8 +519,7 @@ func (b *Broker) setLocalPolicy(raw, expected json.RawMessage) (nodepolicy.Polic
 		if err := json.Unmarshal(raw, &fields); err != nil || fields == nil {
 			return nodepolicy.Policy{}, fmt.Errorf("policy must be a JSON object")
 		}
-		delete(fields, "availability")
-		dropRevision(fields)
+		dropFields(fields, "availability", "pausedBy", "revision")
 		stripped, err := json.Marshal(fields)
 		if err != nil {
 			return nodepolicy.Policy{}, err
@@ -513,6 +529,7 @@ func (b *Broker) setLocalPolicy(raw, expected json.RawMessage) (nodepolicy.Polic
 			return nodepolicy.Policy{}, err
 		}
 		policy.Availability = stored.Availability
+		policy.PausedBy = stored.PausedBy
 		if err := policy.Validate(); err != nil {
 			return nodepolicy.Policy{}, err
 		}
@@ -552,13 +569,15 @@ func (b *Broker) setPeerPolicy(raw, expected json.RawMessage) (nodepolicy.Policy
 	})
 }
 
-// dropRevision removes the revision a caller sent, whatever its spelling: the
-// policy parser matches keys case-insensitively, and only the broker assigns
-// revisions.
-func dropRevision(fields map[string]json.RawMessage) {
+// dropFields removes the named fields a caller sent, whatever their spelling:
+// the policy parser matches keys case-insensitively, and only the broker sets
+// these fields.
+func dropFields(fields map[string]json.RawMessage, names ...string) {
 	for key := range fields {
-		if strings.EqualFold(key, "revision") {
-			delete(fields, key)
+		for _, name := range names {
+			if strings.EqualFold(key, name) {
+				delete(fields, key)
+			}
 		}
 	}
 }
@@ -570,7 +589,7 @@ func withoutRevision(raw json.RawMessage) json.RawMessage {
 	if json.Unmarshal(raw, &fields) != nil || fields == nil {
 		return raw
 	}
-	dropRevision(fields)
+	dropFields(fields, "revision")
 	stripped, err := json.Marshal(fields)
 	if err != nil {
 		return raw
@@ -693,10 +712,32 @@ func (e *invalidParamsError) Error() string { return e.err.Error() }
 
 func policyErrorCode(err error) int {
 	var invalid *invalidParamsError
-	if errors.As(err, &invalid) {
+	var conflict *policyConflictError
+	var veto *localVetoError
+	switch {
+	case errors.As(err, &invalid):
 		return -32602
+	case errors.As(err, &conflict):
+		return codePolicyConflict
+	case errors.As(err, &veto):
+		return codeLocalVeto
 	}
 	return -32000
+}
+
+// localVetoError refuses a paired node's resume of a node paused on the node
+// itself. Only a resume made on this node lifts such a pause.
+type localVetoError struct{}
+
+func (*localVetoError) Error() string {
+	return "this node was paused on the node itself; resume it there"
+}
+
+// pausedLocally reports whether policy is paused by this node itself. A pause
+// with no provenance, such as one saved before pausedBy existed or the
+// recovery policy's, counts as local.
+func pausedLocally(policy nodepolicy.Policy) bool {
+	return policy.Availability == nodepolicy.Paused && policy.PausedBy != nodepolicy.PausedByPeer
 }
 
 // policySaveError marks a publication or durability failure. A nonempty revision
@@ -736,7 +777,7 @@ func (b *Broker) dispatchPolicy(ctx context.Context, method string, p policyPara
 		}
 		return policySetResult{Policy: policy, policyActivation: b.activationOf(policy.Revision)}, nil
 	case methodSetAvailability:
-		availability, err := b.setAvailabilityParams(ctx, p)
+		availability, err := b.setAvailabilityParams(ctx, p, nodepolicy.PausedLocally)
 		if err != nil {
 			return nil, err
 		}
@@ -748,13 +789,13 @@ func (b *Broker) dispatchPolicy(ctx context.Context, method string, p policyPara
 }
 
 // setAvailabilityParams is the node:set-availability request shared by the local
-// method and the paired node's relayed one.
-func (b *Broker) setAvailabilityParams(ctx context.Context, p policyParams) (nodepolicy.Availability, error) {
+// method and the paired node's relayed one; origin says which of the two made it.
+func (b *Broker) setAvailabilityParams(ctx context.Context, p policyParams, origin nodepolicy.PauseOrigin) (nodepolicy.Availability, error) {
 	state := nodepolicy.Availability(p.State)
 	if state != nodepolicy.Available && state != nodepolicy.Paused {
 		return "", &invalidParamsError{fmt.Errorf("state must be %q or %q", nodepolicy.Available, nodepolicy.Paused)}
 	}
-	return b.setAvailability(ctx, state)
+	return b.setAvailability(ctx, state, origin)
 }
 
 // relayPolicyToPeer forwards a policy call aimed at another node through
@@ -890,8 +931,9 @@ func (b *Broker) servePolicyRelay(ctx context.Context, req policyRelayRequest) (
 		return map[string]any{"policy": policy.PeerProjection()}, nil
 	}
 	// The peer sees what its policy:get shows of this node, which has no
-	// activation fields.
-	availability, err := b.setAvailabilityParams(ctx, p)
+	// activation fields. A resume of a node paused on the node itself is
+	// refused (setAvailability).
+	availability, err := b.setAvailabilityParams(ctx, p, nodepolicy.PausedByPeer)
 	if err != nil {
 		return nil, err
 	}

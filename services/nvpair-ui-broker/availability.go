@@ -35,9 +35,23 @@ var pauseCancelSettle = 10 * time.Second
 // setAvailability moves the node to state and returns once it is reached. The
 // transition itself does not depend on ctx: a caller that stops waiting (a
 // disconnected client or peer) does not abandon a half-finished pause.
-func (b *Broker) setAvailability(ctx context.Context, state nodepolicy.Availability) (nodepolicy.Availability, error) {
+//
+// origin is who asked: this node's own clients or a paired node. A node paused
+// locally, or with a local pause accepted and not yet finished, refuses a paired
+// node's resume with localVetoError, before the request can supersede anything.
+// A paired node's pause over a local one stays local, so it never downgrades
+// the veto.
+func (b *Broker) setAvailability(ctx context.Context, state nodepolicy.Availability, origin nodepolicy.PauseOrigin) (nodepolicy.Availability, error) {
 	r := b.nodePolicyRuntime()
 	r.mu.Lock()
+	if origin == nodepolicy.PausedByPeer && (pausedLocally(r.current) || r.localPauseRequested) {
+		if state == nodepolicy.Available {
+			r.mu.Unlock()
+			return "", &localVetoError{}
+		}
+		origin = nodepolicy.PausedLocally
+	}
+	r.localPauseRequested = state == nodepolicy.Paused && origin == nodepolicy.PausedLocally
 	r.transitionGen++
 	gen := r.transitionGen
 	if r.transitionCancel != nil {
@@ -54,7 +68,14 @@ func (b *Broker) setAvailability(ctx context.Context, state nodepolicy.Availabil
 	done := make(chan outcome, 1)
 	go func() {
 		defer cancel()
-		availability, err := b.runAvailabilityTransition(tctx, gen, state)
+		availability, err := b.runAvailabilityTransition(tctx, gen, state, origin)
+		// The transition saved its provenance or failed before saving any;
+		// either way the stored policy now says whether a local pause holds.
+		r.mu.Lock()
+		if r.transitionGen == gen {
+			r.localPauseRequested = false
+		}
+		r.mu.Unlock()
 		done <- outcome{availability, err}
 	}()
 	select {
@@ -65,7 +86,7 @@ func (b *Broker) setAvailability(ctx context.Context, state nodepolicy.Availabil
 	}
 }
 
-func (b *Broker) runAvailabilityTransition(ctx context.Context, gen uint64, state nodepolicy.Availability) (nodepolicy.Availability, error) {
+func (b *Broker) runAvailabilityTransition(ctx context.Context, gen uint64, state nodepolicy.Availability, origin nodepolicy.PauseOrigin) (nodepolicy.Availability, error) {
 	r := b.nodePolicyRuntime()
 	r.transitionMu.Lock()
 	defer r.transitionMu.Unlock()
@@ -76,13 +97,14 @@ func (b *Broker) runAvailabilityTransition(ctx context.Context, gen uint64, stat
 		return "", errAvailabilitySuperseded
 	}
 	if state == nodepolicy.Paused {
-		return b.pauseNode(ctx)
+		return b.pauseNode(ctx, origin)
 	}
-	return b.resumeNode()
+	return b.resumeNode(origin)
 }
 
 // persistAvailabilityLocked returns the current policy with state as its
-// availability, saved under the next revision. That revision is active once the
+// availability, saved under the next revision. A pause records origin as its
+// pausedBy provenance and a resume clears it. That revision is active once the
 // proxy has acknowledged the availability push and the policy push that follows
 // it. While policy recovery is
 // required nothing is saved, so the corrupt file and recoveryRequired stay as
@@ -90,9 +112,13 @@ func (b *Broker) runAvailabilityTransition(ctx context.Context, gen uint64, stat
 // A landed replacement is persisted even when durability failed; the caller
 // adopts it and completes the transition before returning the save warning.
 // Caller holds r.mu.
-func (r *policyRuntime) persistAvailabilityLocked(state nodepolicy.Availability) (policy nodepolicy.Policy, persisted bool, err error) {
+func (r *policyRuntime) persistAvailabilityLocked(state nodepolicy.Availability, origin nodepolicy.PauseOrigin) (policy nodepolicy.Policy, persisted bool, err error) {
 	policy = r.current
 	policy.Availability = state
+	policy.PausedBy = ""
+	if state == nodepolicy.Paused {
+		policy.PausedBy = origin
+	}
 	if r.recoveryRequired {
 		return policy, false, nil
 	}
@@ -114,15 +140,18 @@ func (b *Broker) pushAvailabilityAndActivate(persisted bool) {
 	b.announceActivationChange(changed)
 }
 
-// pauseNode drains, then unloads and stops engines as the policy says.
-func (b *Broker) pauseNode(ctx context.Context) (nodepolicy.Availability, error) {
+// pauseNode drains, then unloads and stops engines as the policy says. A node
+// already paused is paused again only when origin changes whether the pause is
+// local, which records the new provenance.
+func (b *Broker) pauseNode(ctx context.Context, origin nodepolicy.PauseOrigin) (nodepolicy.Availability, error) {
 	r := b.nodePolicyRuntime()
 	r.mu.Lock()
-	if r.live == nodepolicy.Paused && r.current.Availability == nodepolicy.Paused && r.availabilityErr == "" {
+	if r.live == nodepolicy.Paused && r.current.Availability == nodepolicy.Paused && r.availabilityErr == "" &&
+		pausedLocally(r.current) == (origin == nodepolicy.PausedLocally) {
 		r.mu.Unlock()
 		return nodepolicy.Paused, nil
 	}
-	policy, persisted, err := r.persistAvailabilityLocked(nodepolicy.Paused)
+	policy, persisted, err := r.persistAvailabilityLocked(nodepolicy.Paused, origin)
 	if err != nil && !persisted {
 		r.mu.Unlock()
 		return "", fmt.Errorf("the paused state could not be saved: %w", err)
@@ -217,15 +246,20 @@ func (b *Broker) pauseNode(ctx context.Context) (nodepolicy.Availability, error)
 // resumeNode makes the node available again and starts the engines a pause
 // stopped. Their saved intent was never changed, so engine:wake (and, after a
 // launch that skipped restoration, engine:restore-enabled) starts exactly the
-// ones saved On.
-func (b *Broker) resumeNode() (nodepolicy.Availability, error) {
+// ones saved On. A paired node's resume is checked against a local pause again
+// here, where it would take effect.
+func (b *Broker) resumeNode(origin nodepolicy.PauseOrigin) (nodepolicy.Availability, error) {
 	r := b.nodePolicyRuntime()
 	r.mu.Lock()
+	if origin == nodepolicy.PausedByPeer && pausedLocally(r.current) {
+		r.mu.Unlock()
+		return "", &localVetoError{}
+	}
 	if r.live == nodepolicy.Available && r.current.Availability == nodepolicy.Available && r.availabilityErr == "" {
 		r.mu.Unlock()
 		return nodepolicy.Available, nil
 	}
-	policy, persisted, err := r.persistAvailabilityLocked(nodepolicy.Available)
+	policy, persisted, err := r.persistAvailabilityLocked(nodepolicy.Available, origin)
 	if err != nil && !persisted {
 		r.mu.Unlock()
 		return "", fmt.Errorf("the available state could not be saved: %w", err)

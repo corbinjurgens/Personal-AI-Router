@@ -13,6 +13,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -28,6 +29,74 @@ const (
 	remoteResponseHeaderTimeout      = 30 * time.Second
 	remoteReadyResponseHeaderTimeout = 11 * time.Minute
 )
+
+// Typed JSON-RPC error codes both remote families carry end to end: the node
+// policy relay and the engine routes.
+const (
+	// codePolicyConflict is a policy set whose expected revision is not the
+	// persisted one.
+	codePolicyConflict = -32010
+	// codeLocalVeto is a start, load or resume the target node's own pause or
+	// Off forbids.
+	codeLocalVeto = -32011
+)
+
+// wireCodes names the typed codes in an ec 409 body and a stream error frame.
+var wireCodes = map[int]string{codePolicyConflict: "policy_conflict", codeLocalVeto: "local_veto"}
+
+// codedError reaches the JSON-RPC client with its own code: the broker's
+// classification of a relayed policy call, or a typed code a peer answered.
+type codedError struct {
+	code    int
+	message string
+}
+
+func (e *codedError) Error() string { return e.message }
+
+// codedBody is the body of an ec 409 that carries a typed code.
+type codedBody struct {
+	Error string `json:"error"`
+	Code  string `json:"code"`
+}
+
+// writeCodedError refuses an ec request with a typed code: HTTP 409 and
+// {"error": message, "code": <wire name>}.
+func writeCodedError(w http.ResponseWriter, code int, message string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusConflict)
+	_ = json.NewEncoder(w).Encode(codedBody{Error: message, Code: wireCodes[code]})
+}
+
+// remoteStatusError is the error for an ec response with a non-2xx status. A
+// 409 whose body names a typed code keeps that code; any other is plain text.
+func remoteStatusError(prefix string, status int, body []byte) error {
+	var coded codedBody
+	if status == http.StatusConflict && json.Unmarshal(body, &coded) == nil {
+		if code, ok := codeOfWire(coded.Code); ok {
+			return &codedError{code: code, message: fmt.Sprintf("%s: HTTP %d: %s", prefix, status, coded.Error)}
+		}
+	}
+	return fmt.Errorf("%s: HTTP %d: %s", prefix, status, strings.TrimSpace(string(body)))
+}
+
+// codeOfWire is the typed code a wire name stands for.
+func codeOfWire(name string) (int, bool) {
+	for code, wire := range wireCodes {
+		if name != "" && wire == name {
+			return code, true
+		}
+	}
+	return 0, false
+}
+
+// rpcCode is the JSON-RPC error code err reaches a client with.
+func rpcCode(err error) int {
+	var coded *codedError
+	if errors.As(err, &coded) && coded.code != 0 {
+		return coded.code
+	}
+	return -32000
+}
 
 // remoteClient talks to one peer's ec surface.
 type remoteClient struct {
@@ -181,7 +250,7 @@ func (c *remoteClient) postJSON(ctx context.Context, path, engine string, body a
 		return nil, fmt.Errorf("remote %s: read response; operation outcome may be uncertain: %w", path, err)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("remote %s: HTTP %d: %s", path, resp.StatusCode, strings.TrimSpace(string(data)))
+		return nil, remoteStatusError("remote "+path, resp.StatusCode, data)
 	}
 	return json.RawMessage(data), nil
 }
@@ -207,7 +276,7 @@ func (c *remoteClient) stream(ctx context.Context, path string, body any, onProg
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		data, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
-		return streamFrame{}, fmt.Errorf("remote %s: HTTP %d: %s", path, resp.StatusCode, strings.TrimSpace(string(data)))
+		return streamFrame{}, remoteStatusError("remote "+path, resp.StatusCode, data)
 	}
 
 	dec := json.NewDecoder(resp.Body)
@@ -230,6 +299,9 @@ func (c *remoteClient) stream(ctx context.Context, path string, body any, onProg
 			result = f
 			haveResult = true
 		case "error":
+			if code, ok := codeOfWire(f.Code); ok {
+				return streamFrame{}, &codedError{code: code, message: f.Message}
+			}
 			return streamFrame{}, fmt.Errorf("%s", f.Message)
 		}
 	}

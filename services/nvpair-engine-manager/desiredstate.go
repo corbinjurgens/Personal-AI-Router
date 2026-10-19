@@ -21,7 +21,19 @@ const (
 
 type desiredStateFile struct {
 	Engines map[string]bool `json:"engines"`
+	// OffBy records who saved each engine Off: intentLocal or intentPeer. An
+	// engine saved Off with no entry predates provenance and counts as local.
+	OffBy map[string]intentOrigin `json:"offBy,omitempty"`
 }
+
+// intentOrigin says who saved an engine's intent: this node's own clients
+// (stdio engine:start / engine:stop) or a paired node over the ec surface.
+type intentOrigin string
+
+const (
+	intentLocal intentOrigin = "local"
+	intentPeer  intentOrigin = "peer"
+)
 
 // desiredStateStore records explicit user intent. A missing engine key is a
 // legacy/unknown state and deliberately does not auto-start.
@@ -49,7 +61,23 @@ func (s *desiredStateStore) get(engine string) (enabled, known bool, err error) 
 	return enabled, known, nil
 }
 
-func (s *desiredStateStore) set(engine string, enabled bool) error {
+// offLocally reports whether engine is saved Off by this node itself: an Off
+// saved by a local client, or one saved before provenance was recorded.
+func (s *desiredStateStore) offLocally(engine string) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	state, err := s.load()
+	if err != nil {
+		return false, err
+	}
+	enabled, known := state.Engines[engine]
+	return known && !enabled && state.OffBy[engine] != intentPeer, nil
+}
+
+// set saves engine's intent. Saving On clears the Off provenance; saving Off
+// records origin, except that a paired node's Off never replaces the
+// provenance of an engine already saved Off, so it cannot downgrade a local Off.
+func (s *desiredStateStore) set(engine string, enabled bool, origin intentOrigin) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.path == "" {
@@ -59,12 +87,21 @@ func (s *desiredStateStore) set(engine string, enabled bool) error {
 	if err != nil {
 		return err
 	}
+	was, known := state.Engines[engine]
 	state.Engines[engine] = enabled
+	switch {
+	case enabled:
+		delete(state.OffBy, engine)
+	case origin == intentPeer && known && !was:
+		// A paired node's Off over an Off keeps the provenance it had.
+	default:
+		state.OffBy[engine] = origin
+	}
 	return s.save(state)
 }
 
 func (s *desiredStateStore) load() (desiredStateFile, error) {
-	state := desiredStateFile{Engines: make(map[string]bool)}
+	state := desiredStateFile{Engines: make(map[string]bool), OffBy: make(map[string]intentOrigin)}
 	if s.path == "" {
 		return state, nil
 	}
@@ -81,6 +118,9 @@ func (s *desiredStateStore) load() (desiredStateFile, error) {
 	if state.Engines == nil {
 		state.Engines = make(map[string]bool)
 	}
+	if state.OffBy == nil {
+		state.OffBy = make(map[string]intentOrigin)
+	}
 	return state, nil
 }
 
@@ -95,8 +135,10 @@ func (s *desiredStateStore) save(state desiredStateFile) error {
 	return nil
 }
 
-func (e *Executor) setDesiredEnabled(engine string, enabled bool) error {
-	if err := e.desired.set(engine, enabled); err != nil {
+// setDesiredEnabled saves engine's intent; origin is who asked, which an Off
+// records (desiredStateStore.set).
+func (e *Executor) setDesiredEnabled(engine string, enabled bool, origin intentOrigin) error {
+	if err := e.desired.set(engine, enabled, origin); err != nil {
 		return fmt.Errorf("persist %s desired state: %w", engine, err)
 	}
 	// The broker mirrors saved intent into the proxy so admission can refuse a

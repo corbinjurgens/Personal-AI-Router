@@ -198,13 +198,13 @@ func TestDurableSetPortAdoptsUncertainReplacement(t *testing.T) {
 
 func TestDurableDesiredStateAdoptsUncertainReplacement(t *testing.T) {
 	store := newDesiredStateStore(t.TempDir())
-	if err := store.set("test", false); err != nil {
+	if err := store.set("test", false, intentLocal); err != nil {
 		t.Fatal(err)
 	}
 	useEngineFileReplacer(t, durablefile.Replacer{
 		SyncDir: func(string) error { return errors.New("injected directory sync failure") },
 	})
-	if err := store.set("test", true); err != nil {
+	if err := store.set("test", true, intentLocal); err != nil {
 		t.Fatal(err)
 	}
 	enabled, known, err := store.get("test")

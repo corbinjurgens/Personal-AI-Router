@@ -8,10 +8,13 @@ package main
 // EngineStatus; start may run for the engine's bounded readiness allowance.
 // They map onto the same lifecycle the local engine:start / engine:stop use
 // (including adopted-orphan reclaim and foreign-listener decline, exactly as
-// local engine:stop).
+// local engine:stop). A remote start is refused while the node is paused
+// locally or the engine is saved Off locally (remoteVeto), and a remote stop
+// saves Off with peer provenance, which a later remote start may undo.
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 )
@@ -56,11 +59,32 @@ func (s *controlServer) handleStart(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "port must be between 0 and 65535", http.StatusBadRequest)
 		return
 	}
-	if err := s.exec.StartWith(r.Context(), req.Engine, startOpts{Port: req.Port, Bind: "127.0.0.1"}); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+	ctx, done, err := s.exec.beginRemote(r.Context(), req.Engine)
+	if err != nil {
+		writeRemoteError(w, err)
+		return
+	}
+	defer done()
+	if err := s.exec.StartWith(ctx, req.Engine, startOpts{Port: req.Port, Bind: "127.0.0.1", Origin: intentPeer}); err != nil {
+		writeRemoteError(w, vetoCause(ctx, err))
 		return
 	}
 	s.writeStatus(w, req.Engine)
+}
+
+// writeRemoteError answers a paired node's start or load that was refused or
+// failed: a local veto is a typed 409 (codeLocalVeto), an unknown node policy
+// a 503, anything else a 500.
+func writeRemoteError(w http.ResponseWriter, err error) {
+	var veto *localVetoError
+	switch {
+	case errors.As(err, &veto):
+		writeCodedError(w, codeLocalVeto, veto.Error())
+	case errors.Is(err, errNoProjection):
+		http.Error(w, err.Error(), http.StatusServiceUnavailable)
+	default:
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
 }
 
 func (s *controlServer) handleStop(w http.ResponseWriter, r *http.Request) {
@@ -78,7 +102,7 @@ func (s *controlServer) handleStop(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `"engine" is required`, http.StatusBadRequest)
 		return
 	}
-	if err := s.exec.Stop(req.Engine); err != nil {
+	if err := s.exec.StopFrom(req.Engine, intentPeer); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}

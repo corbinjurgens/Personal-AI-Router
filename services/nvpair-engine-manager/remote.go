@@ -84,7 +84,7 @@ func (m *Manager) runRemote(ctx context.Context, msg *Message) {
 		body := installRequest{OpID: opID, Engine: p.Engine, Start: p.Start}
 		terminal, err := client.stream(ctx, controlInstallPath, body, m.remoteProgressFn(opID, peer.nodeID))
 		if err != nil {
-			m.codec.RespondError(msg.ID, -32000, err.Error())
+			m.codec.RespondError(msg.ID, rpcCode(err), err.Error())
 			return
 		}
 		m.codec.Respond(msg.ID, map[string]any{"opId": opID, "status": terminal.Status})
@@ -102,7 +102,7 @@ func (m *Manager) runRemote(ctx context.Context, msg *Message) {
 		body := pullRequest{OpID: opID, Engine: p.Engine, Model: p.Model, Params: p.Params}
 		terminal, err := client.stream(ctx, controlPullPath, body, m.remoteProgressFn(opID, peer.nodeID))
 		if err != nil {
-			m.codec.RespondError(msg.ID, -32000, err.Error())
+			m.codec.RespondError(msg.ID, rpcCode(err), err.Error())
 			return
 		}
 		m.codec.Respond(msg.ID, map[string]any{"opId": opID, "result": terminal.Result})

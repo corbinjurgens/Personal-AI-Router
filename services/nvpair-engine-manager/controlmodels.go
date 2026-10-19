@@ -56,7 +56,19 @@ func (s *controlServer) handleModelAction(w http.ResponseWriter, r *http.Request
 	)
 	switch op {
 	case "load":
-		res, err = s.exec.ModelLoad(r.Context(), req.Engine, req.Model)
+		// A load makes a model resident, which a local veto forbids; unload
+		// and delete only free resources and are never vetoed.
+		ctx, done, verr := s.exec.beginRemote(r.Context(), req.Engine)
+		if verr != nil {
+			writeRemoteError(w, verr)
+			return
+		}
+		res, err = s.exec.ModelLoad(ctx, req.Engine, req.Model)
+		done()
+		if err != nil {
+			writeRemoteError(w, vetoCause(ctx, err))
+			return
+		}
 	case "unload":
 		res, err = s.exec.ModelUnload(r.Context(), req.Engine, req.Model)
 	case "delete":

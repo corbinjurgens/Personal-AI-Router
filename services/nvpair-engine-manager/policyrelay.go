@@ -90,14 +90,6 @@ type policyRelayReply struct {
 	ErrorCode int             `json:"errorCode,omitempty"`
 }
 
-// policyRelayError preserves the broker's classification across the relay.
-type policyRelayError struct {
-	code    int
-	message string
-}
-
-func (e *policyRelayError) Error() string { return e.message }
-
 // policyRelay correlates policy:request notifications with policy:reply ones.
 type policyRelay struct {
 	mu      sync.Mutex
@@ -130,7 +122,7 @@ func (r *policyRelay) call(ctx context.Context, method string, params json.RawMe
 	select {
 	case reply := <-ch:
 		if reply.Error != "" {
-			return nil, &policyRelayError{code: reply.ErrorCode, message: reply.Error}
+			return nil, &codedError{code: reply.ErrorCode, message: reply.Error}
 		}
 		return reply.Result, nil
 	case <-ctx.Done():
@@ -222,11 +214,11 @@ func (c *remoteClient) postPolicy(ctx context.Context, path string, body policyB
 		return nil, fmt.Errorf("remote node policy: read response; operation outcome may be uncertain: %w", err)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		message := fmt.Sprintf("remote node policy: HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(out)))
 		if resp.StatusCode == http.StatusBadRequest {
-			return nil, &policyRelayError{code: -32602, message: message}
+			message := fmt.Sprintf("remote node policy: HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(out)))
+			return nil, &codedError{code: -32602, message: message}
 		}
-		return nil, errors.New(message)
+		return nil, remoteStatusError("remote node policy", resp.StatusCode, out)
 	}
 	return json.RawMessage(out), nil
 }
@@ -282,12 +274,18 @@ func (s *controlServer) policyRoutes(mux *http.ServeMux) {
 			}()
 			result, err := s.exec.policyParent(ctx, method, params, caller)
 			if err != nil {
-				status := http.StatusConflict
-				var relayErr *policyRelayError
-				if errors.As(err, &relayErr) && relayErr.code == -32602 {
-					status = http.StatusBadRequest
+				// Invalid params are a 400; a revision conflict or a local veto
+				// is a typed 409 the caller maps back to its code; anything else
+				// is a plain 409.
+				var relayErr *codedError
+				switch {
+				case errors.As(err, &relayErr) && relayErr.code == -32602:
+					http.Error(w, err.Error(), http.StatusBadRequest)
+				case errors.As(err, &relayErr) && wireCodes[relayErr.code] != "":
+					writeCodedError(w, relayErr.code, err.Error())
+				default:
+					http.Error(w, err.Error(), http.StatusConflict)
 				}
-				http.Error(w, err.Error(), status)
 				return
 			}
 			w.Header().Set("Content-Type", "application/json")

@@ -43,11 +43,13 @@ type Settings struct {
 	// state; this setting never grants generic process-kill authority.
 	ForcePorts bool `json:"force_ports"`
 
-	// ClusterAutoSync: if true, this node accepts automatic syncs
-	// of cluster-managed state (model lists, engine settings, etc.)
-	// from peers. Set-from-another-node-capable in the eventual
-	// design; today the datastore doesn't distinguish remote vs.
-	// local callers.
+	// ClusterAutoSync is a stored preference that nothing acts on:
+	// no service synchronizes state from peers or grants them
+	// permission because of it. Remote management is governed
+	// elsewhere: a node's own pause or engine Off vetoes paired
+	// nodes' starts, loads and resumes (broker and engine-manager
+	// local veto), and configuration edits from paired nodes are
+	// authorized by pairing alone. Do not read it as a permission.
 	ClusterAutoSync bool `json:"cluster_auto_sync"`
 
 	// ClusterID is the stable identifier for the cluster this node
