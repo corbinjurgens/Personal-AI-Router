@@ -10,6 +10,10 @@ import (
 	"syscall"
 )
 
+func isPortBridgeSharingViolation(err error) bool {
+	return false
+}
+
 // Replace the adapter so the broker owns the worker's actual PID and inherited
 // stdio. A broker kill therefore cannot leave a wrapped worker behind.
 func runOwnedPortWorker(binary string, args []string) error {

@@ -58,13 +58,31 @@ func newPortInteropBridge(t *testing.T, binary string, port int) (string, []stri
 		t.Fatal(err)
 	}
 	bridge := filepath.Join(testbin.Dir(t, "tests", "port-bridge", "port-bridge"), testbin.Exe("port-bridge"))
-	if err := os.WriteFile(bridge, data, 0o700); err != nil {
+	if err := copyPortBridge(func() error { return os.WriteFile(bridge, data, 0o700) }, time.Sleep); err != nil {
 		t.Fatalf("copy port bridge to %q (a previous process may still be running): %v", bridge, err)
 	}
 	return bridge, []string{
 		"NVPAIR_TEST_PORT_BRIDGE=" + bridge,
 		"NVPAIR_TEST_PORT_BINARY=" + binary,
 		"NVPAIR_TEST_PORT=" + strconv.Itoa(port),
+	}
+}
+
+const (
+	portBridgeCopyAttempts = 41
+	portBridgeCopyDelay    = 50 * time.Millisecond
+)
+
+// The adapter is a broker child, so this fixture has no exec.Cmd to wait on.
+// Windows can retain its executable lock briefly after process cleanup. Allow
+// that lock two seconds to clear, while returning every other copy error at once.
+func copyPortBridge(write func() error, sleep func(time.Duration)) error {
+	for attempt := 1; ; attempt++ {
+		err := write()
+		if err == nil || !isPortBridgeSharingViolation(err) || attempt == portBridgeCopyAttempts {
+			return err
+		}
+		sleep(portBridgeCopyDelay)
 	}
 }
 

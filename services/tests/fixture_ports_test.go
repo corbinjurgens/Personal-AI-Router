@@ -103,10 +103,10 @@ func (p fixtureServicePorts) args() []string {
 }
 
 // portOccupant names the first address on which port is already bound, or ""
-// when it is free on IPv4 and IPv6. The wildcards are probed first: a probe
-// never dials, so an occupant receives no connection, and probing loopback only
-// after both wildcards bound means it cannot shadow a wildcard owner's loopback
-// traffic. IPv6 is skipped only on a host without IPv6 loopback.
+// when it is free on IPv4 and IPv6. Wildcards are probed first: a probe never
+// dials, so an occupant receives no connection, and probing loopback only after
+// the wildcards bind means it cannot shadow a wildcard owner's loopback traffic.
+// IPv6 is skipped only on a host without IPv6 loopback.
 //
 // Probing only 127.0.0.1 misses an IPv6-only owner, and on macOS a loopback
 // bind can succeed beside another process's IPv4 wildcard listener.
@@ -114,6 +114,7 @@ func portOccupant(port int) string {
 	addrs := []struct{ network, host string }{
 		{"tcp4", "0.0.0.0"},
 		{"tcp6", "::"},
+		{"tcp", ""},
 		{"tcp4", "127.0.0.1"},
 		{"tcp6", "::1"},
 	}
