@@ -154,7 +154,9 @@ func newSwitchProcessFixtureAt(t *testing.T, base string, ports fixtureServicePo
 		name string
 		port int
 	}{{"ollama", f.sourcePort}, {"llamacpp", f.targetPort}} {
-		probe := map[string]any{"http": "http://127.0.0.1:{port}/", "status": http.StatusOK, "timeout_s": 10, "interval_s": 60}
+		// Overrides deep-merge with bundled manifests. Clear llama.cpp's
+		// router-role predicate: this fixture serves only a generic HTTP probe.
+		probe := map[string]any{"http": "http://127.0.0.1:{port}/", "status": http.StatusOK, "timeout_s": 10, "interval_s": 60, "json_match": nil}
 		rt := map[string]any{"mode": "process", "bin": image, "port": engine.port, "bind": "127.0.0.1", "ready": probe, "health": probe,
 			"env":  map[string]string{"NVPAIR_TEST_SWITCH_ENGINE": image, "NVPAIR_TEST_SWITCH_NAME": engine.name, "NVPAIR_TEST_SWITCH_PORT": "{port}", "NVPAIR_TEST_SWITCH_CONTROL": f.control.URL},
 			"stop": map[string]any{"signal": "term", "grace_s": 1}}
@@ -175,7 +177,9 @@ func newSwitchProcessFixtureAt(t *testing.T, base string, ports fixtureServicePo
 			"settings": map[string]any{"serverPort": facade.server, "proxyPort": facade.port, "launchText": ""},
 		}}
 	}
-	jointWriteJSON(t, filepath.Join(jointAppDir(f.base), "engine-settings-operations.json"), journal)
+	// The broker keeps its settings journal beside --cluster-dir, not in the
+	// manager's application directory.
+	jointWriteJSON(t, filepath.Join(f.base, "engine-settings-operations.json"), journal)
 	f.start(t)
 	f.rpcOK(t, "engine:start", map[string]string{"engine": "ollama"})
 	return f
@@ -553,9 +557,14 @@ func TestEngineSwitchProcessBrokerDeathInterruptsWithoutRestore(t *testing.T) {
 	if receipt.Phase != settings.SwitchFailedInterrupted || receipt.Error == nil || receipt.Error.Kind != settings.SwitchErrorInterrupted {
 		t.Fatalf("recovered receipt = %+v", receipt)
 	}
-	// Restore is an acknowledged manager operation, so observing no new starts
-	// afterward tests restore admission rather than a quiet time interval.
-	f.rpcOK(t, "engine:restore-enabled", map[string]any{})
+	// Startup sends the internal restore notification after the proxy port
+	// gates. Advertisement starts afterward; observe its backend updates from
+	// this fresh broker rather than calling the notification as a public RPC.
+	task1Eventually(t, "post-restore startup advertisement", 10*time.Second, func() bool {
+		output := f.p.output.String()
+		return strings.Contains(output, "local backend updated engine=ollama") &&
+			strings.Contains(output, "local backend updated engine=llamacpp")
+	})
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if len(f.starts["ollama"]) != 1 || len(f.starts["llamacpp"]) != 1 {
