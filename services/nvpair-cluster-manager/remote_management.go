@@ -268,12 +268,22 @@ func (m *Manager) captureRemoteManagementMigrationLocked() error {
 		return fmt.Errorf("remote management document exists without migration marker")
 	}
 	cid, epoch := m.currentAdmission()
+	localFingerprint, err := certFingerprintFromPEM(m.identity.CertPEM)
+	if err != nil {
+		return fmt.Errorf("read local migration certificate: %w", err)
+	}
 	snapshot := clustertrust.RemoteManagementMigrationSnapshot{
-		Local: clustertrust.RemoteManagementMigrationAuthority{PeerUUID: m.identity.NodeUUID, CertFingerprint: m.identity.CertFingerprint, ClusterID: cid, AdmissionEpoch: epoch},
+		Local: clustertrust.RemoteManagementMigrationAuthority{PeerUUID: m.identity.NodeUUID, CertFingerprint: localFingerprint, ClusterID: cid, AdmissionEpoch: epoch},
 		Peers: make([]clustertrust.RemoteManagementMigrationAuthority, 0),
 	}
 	for _, pin := range m.trust.List() {
-		snapshot.Peers = append(snapshot.Peers, clustertrust.RemoteManagementMigrationAuthority{PeerUUID: pin.NodeUUID, CertFingerprint: pin.CertFingerprint, ClusterID: pin.ClusterID, AdmissionEpoch: pin.AdmissionEpoch})
+		// Pin fingerprint metadata is optional. Capture the actual pinned leaf,
+		// without modifying the existing trust document or its public schema.
+		fingerprint, err := remoteManagementPinFingerprint(pin)
+		if err != nil {
+			return fmt.Errorf("read peer migration certificate: %w", err)
+		}
+		snapshot.Peers = append(snapshot.Peers, clustertrust.RemoteManagementMigrationAuthority{PeerUUID: pin.NodeUUID, CertFingerprint: fingerprint, ClusterID: pin.ClusterID, AdmissionEpoch: pin.AdmissionEpoch})
 	}
 	sort.Slice(snapshot.Peers, func(i, j int) bool { return snapshot.Peers[i].PeerUUID < snapshot.Peers[j].PeerUUID })
 	id, err := clustertrust.RemoteManagementMigrationID(snapshot)
@@ -302,6 +312,14 @@ func remoteManagementAuthorityMatches(captured clustertrust.RemoteManagementMigr
 		return epoch == legacyAdmissionEpoch
 	}
 	return captured.AdmissionEpoch == epoch && captured.ClusterID == clusterID
+}
+
+func remoteManagementPinFingerprint(pin *TrustedPin) (string, error) {
+	der, err := validatePin(pin, pin.NodeUUID)
+	if err != nil {
+		return "", err
+	}
+	return certFingerprintFromDER(der), nil
 }
 
 // finalizeRemoteManagementMigrationLocked requires rosterMu and completed
@@ -369,11 +387,19 @@ func (m *Manager) finalizeRemoteManagementMigrationLocked() error {
 		return readErr
 	} else {
 		doc := clustertrust.RemoteManagementDocument{Version: 1, Revision: "1", MigrationID: marker.ID, Grants: make([]clustertrust.RemoteManagementGrant, 0)}
-		localMatches := !m.admissionWasRetired() && remoteManagementAuthorityMatches(marker.Snapshot.Local, m.identity.NodeUUID, m.identity.CertFingerprint, cid, epoch)
+		localFingerprint, err := certFingerprintFromPEM(m.identity.CertPEM)
+		if err != nil {
+			return fmt.Errorf("read local migration certificate: %w", err)
+		}
+		localMatches := !m.admissionWasRetired() && remoteManagementAuthorityMatches(marker.Snapshot.Local, m.identity.NodeUUID, localFingerprint, cid, epoch)
 		if localMatches {
 			for _, captured := range marker.Snapshot.Peers {
 				pin, ok := m.trust.Get(captured.PeerUUID)
-				if !ok || !remoteManagementAuthorityMatches(captured, pin.NodeUUID, pin.CertFingerprint, pin.ClusterID, pin.AdmissionEpoch) {
+				if !ok {
+					continue
+				}
+				fingerprint, err := remoteManagementPinFingerprint(pin)
+				if err != nil || !remoteManagementAuthorityMatches(captured, pin.NodeUUID, fingerprint, pin.ClusterID, pin.AdmissionEpoch) {
 					continue
 				}
 				incarnation, ok := m.mesh.PeerServiceIncarnation(pin.NodeUUID)

@@ -9,6 +9,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"nvpair-shared/clustertrust"
@@ -693,5 +694,193 @@ func TestRemoteManagementLeaveCreateReadmissionRetainsMarkerAndDeniesOldGrant(t 
 	}
 	if got := clustertrust.Open(m.clusterDir).RemoteManagement(pin.NodeUUID); got.Allowed || got.State != "unreviewed" {
 		t.Fatalf("old local-admission grant survived leave/create: %+v", got)
+	}
+}
+
+func TestRemoteManagementMigrationUsesCertificateDespiteOptionalFingerprintMetadata(t *testing.T) {
+	for _, metadata := range []string{"", "sha256:" + strings.Repeat("0", 64)} {
+		name := "omitted fingerprint"
+		if metadata != "" {
+			name = "incorrect canonical fingerprint"
+		}
+		t.Run(name, func(t *testing.T) {
+			m := remoteManagementUpgradeFixture(t)
+			peer := remoteManagementAddPeer(t, m)
+			pin, ok := m.trust.Get(peer.identity.NodeUUID)
+			if !ok {
+				t.Fatal("fixture pin missing")
+			}
+			pin.CertFingerprint = metadata
+			if err := m.trust.Remove(pin.NodeUUID); err != nil {
+				t.Fatal(err)
+			}
+			if err := m.trust.Pin(pin); err != nil {
+				t.Fatal(err)
+			}
+			// Prepare existing admission endorsements through their own owner so
+			// startup does not need an unrelated trust-document normalization.
+			cid, epoch := m.currentAdmission()
+			if err := m.migrateLegacyAdmissions(cid, epoch); err != nil {
+				t.Fatal(err)
+			}
+			beforePin := mustRemoteManagementRead(t, m.trust.pinPath(pin.NodeUUID))
+			if err := m.captureRemoteManagementMigrationLocked(); err != nil {
+				t.Fatal(err)
+			}
+			_, markerPath := m.remoteManagementPaths()
+			pending, err := clustertrust.DecodeRemoteManagementMigration(mustRemoteManagementRead(t, markerPath))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(pending.Snapshot.Peers) != 1 || pending.Snapshot.Peers[0].CertFingerprint != peer.identity.CertFingerprint {
+				t.Fatalf("snapshot used optional metadata: %+v", pending)
+			}
+			if !bytes.Equal(beforePin, mustRemoteManagementRead(t, m.trust.pinPath(pin.NodeUUID))) {
+				t.Fatal("capture rewrote optional pin metadata")
+			}
+			reopened, err := NewManager(m.codec, filepath.Dir(m.clusterDir), m.port)
+			if err != nil {
+				t.Fatal(err)
+			}
+			doc, completed, err := reopened.readRemoteManagementLocked()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if completed.ID != pending.ID || completed.State != "complete" || len(doc.Grants) != 1 || !doc.Grants[0].Allowed || doc.Grants[0].PeerUUID != pin.NodeUUID {
+				t.Fatalf("valid leaf not grandfathered after reopen: %+v %+v", doc, completed)
+			}
+			if got := clustertrust.Open(m.clusterDir).RemoteManagement(pin.NodeUUID); !got.Allowed {
+				t.Fatalf("valid optional-metadata pin denied: %+v", got)
+			}
+			if !bytes.Equal(beforePin, mustRemoteManagementRead(t, m.trust.pinPath(pin.NodeUUID))) {
+				t.Fatal("migration/reopen rewrote optional pin metadata")
+			}
+		})
+	}
+}
+
+func TestRemoteManagementPendingMigrationIgnoresFingerprintMetadataOnlyChange(t *testing.T) {
+	m := remoteManagementUpgradeFixture(t)
+	peer := remoteManagementAddPeer(t, m)
+	if err := m.captureRemoteManagementMigrationLocked(); err != nil {
+		t.Fatal(err)
+	}
+	_, markerPath := m.remoteManagementPaths()
+	pending, err := clustertrust.DecodeRemoteManagementMigration(mustRemoteManagementRead(t, markerPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pin, ok := m.trust.Get(peer.identity.NodeUUID)
+	if !ok {
+		t.Fatal("fixture pin missing")
+	}
+	pin.CertFingerprint = ""
+	if err := m.trust.Remove(pin.NodeUUID); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.trust.Pin(pin); err != nil {
+		t.Fatal(err)
+	}
+	beforePin := mustRemoteManagementRead(t, m.trust.pinPath(pin.NodeUUID))
+	if err := m.finalizeRemoteManagementMigrationLocked(); err != nil {
+		t.Fatal(err)
+	}
+	_, completed, err := m.readRemoteManagementLocked()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if completed.ID != pending.ID || completed.Snapshot.Peers[0].CertFingerprint != peer.identity.CertFingerprint {
+		t.Fatal("metadata-only change changed captured authority")
+	}
+	if got := clustertrust.Open(m.clusterDir).RemoteManagement(pin.NodeUUID); !got.Allowed {
+		t.Fatalf("unchanged certificate denied after metadata edit: %+v", got)
+	}
+	if !bytes.Equal(beforePin, mustRemoteManagementRead(t, m.trust.pinPath(pin.NodeUUID))) {
+		t.Fatal("finalization repaired metadata")
+	}
+}
+
+func TestRemoteManagementPendingMigrationRejectsChangedCertificateWithOldMetadata(t *testing.T) {
+	m := remoteManagementUpgradeFixture(t)
+	peer := remoteManagementAddPeer(t, m)
+	if err := m.captureRemoteManagementMigrationLocked(); err != nil {
+		t.Fatal(err)
+	}
+	pin, ok := m.trust.Get(peer.identity.NodeUUID)
+	if !ok {
+		t.Fatal("fixture pin missing")
+	}
+	newCert, _, err := generateLeaf(pin.NodeUUID, "replacement-peer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pin.CertPem = string(newCert)
+	if err := m.trust.Remove(pin.NodeUUID); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.trust.Pin(pin); err != nil {
+		t.Fatal(err)
+	}
+	beforePin := mustRemoteManagementRead(t, m.trust.pinPath(pin.NodeUUID))
+	m.mesh.Refresh()
+	if _, ok := m.mesh.PeerServiceIncarnation(pin.NodeUUID); !ok {
+		t.Fatal("replacement pin must have current authority to discriminate certificate comparison")
+	}
+	if err := m.finalizeRemoteManagementMigrationLocked(); err != nil {
+		t.Fatal(err)
+	}
+	doc, marker, err := m.readRemoteManagementLocked()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(doc.Grants) != 0 || marker.Snapshot.Peers[0].CertFingerprint != peer.identity.CertFingerprint {
+		t.Fatalf("replacement certificate inherited original grant: %+v %+v", doc, marker)
+	}
+	if got := clustertrust.Open(m.clusterDir).RemoteManagement(pin.NodeUUID); got.Allowed || got.State != "unreviewed" {
+		t.Fatalf("replacement certificate grandfathered by stale metadata: %+v", got)
+	}
+	if !bytes.Equal(beforePin, mustRemoteManagementRead(t, m.trust.pinPath(pin.NodeUUID))) {
+		t.Fatal("migration rewrote replacement pin")
+	}
+}
+
+func TestRemoteManagementLegacyAdmissionNormalizationKeepsCertificateEvidence(t *testing.T) {
+	m := remoteManagementUpgradeFixture(t)
+	peer := remoteManagementAddPeer(t, m)
+	pin, ok := m.trust.Get(peer.identity.NodeUUID)
+	if !ok {
+		t.Fatal("fixture pin missing")
+	}
+	pin.ClusterID, pin.AdmissionEpoch, pin.CertFingerprint = "", 0, ""
+	if err := m.trust.Remove(pin.NodeUUID); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.trust.Pin(pin); err != nil {
+		t.Fatal(err)
+	}
+	beforePin := mustRemoteManagementRead(t, m.trust.pinPath(pin.NodeUUID))
+	if err := m.captureRemoteManagementMigrationLocked(); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(beforePin, mustRemoteManagementRead(t, m.trust.pinPath(pin.NodeUUID))) {
+		t.Fatal("capture normalized legacy pin")
+	}
+	cid, epoch := m.currentAdmission()
+	if err := m.migrateLegacyAdmissions(cid, epoch); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.finalizeRemoteManagementMigrationLocked(); err != nil {
+		t.Fatal(err)
+	}
+	_, marker, err := m.readRemoteManagementLocked()
+	if err != nil {
+		t.Fatal(err)
+	}
+	captured := marker.Snapshot.Peers[0]
+	if captured.ClusterID != "" || captured.AdmissionEpoch != 0 || captured.CertFingerprint != peer.identity.CertFingerprint {
+		t.Fatalf("original legacy evidence changed: %+v", captured)
+	}
+	if got := clustertrust.Open(m.clusterDir).RemoteManagement(pin.NodeUUID); !got.Allowed {
+		t.Fatalf("normalized legacy leaf not grandfathered: %+v", got)
 	}
 }
