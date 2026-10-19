@@ -13,6 +13,7 @@ import type {
 } from '@/shared/types/engines'
 import type { LogEntry, LogPage } from '@/shared/types/log'
 import type { NodeItem } from '@/shared/types/nodes'
+import type { NodePerformance } from '@/shared/types/performance'
 import type { ServiceError, ServiceErrorAction, ServiceErrorSeverity } from '@/shared/types/errors'
 import type { Workload } from '@/shared/types/workloads'
 import type { ClusterNode, Invite } from '@/shared/types/cluster'
@@ -31,6 +32,7 @@ import { isModelCopyTerminal, modelCopyProgress, parseModelCopyFrame } from './m
 import { mergePullProgressPercent } from './pull-error-handling'
 import type { JsonRpcNotification, JsonValue } from './json-rpc-client'
 import { serviceLogLevel } from './service-log-level'
+import { parsePerformanceProjection } from './performance'
 import {
     isProxyEngine,
     PROXY_ENGINES,
@@ -180,6 +182,7 @@ function pendingEngineOpIdleTimeoutMs(status: EngineProcessStatus): number {
 
 class ModularBridgeState {
     private nodes = new Map<string, ModularNode>()
+    private performance = new Map<string, NodePerformance>()
     private brokerNodeIds = new Set<string>()
     private errors: ServiceError[] = []
     private workloads = new Map<string, Workload>()
@@ -1944,6 +1947,16 @@ class ModularBridgeState {
     }
 
     private handleBrokerNotification(notification: JsonRpcNotification): void {
+        if (notification.method === 'performance:changed') {
+            this.performance = parsePerformanceProjection(notification.params)
+            for (const [id, existing] of this.nodes) {
+                const next = { ...existing, performance: this.performance.get(id) }
+                if (sameNode(existing, next)) continue
+                this.nodes.set(id, next)
+                emitBridgePush('nodes:upsert', toNodeItem(next, this.selfId))
+            }
+            return
+        }
         if (notification.method !== 'discovery:nodes-changed') return
 
         const nodes = brokerNodesValue(notification.params)
@@ -2001,7 +2014,10 @@ class ModularBridgeState {
         // (`cluster:get-node-id`), which equals the discovery/proxy hostUuid key,
         // so there is no hostname guessing here — `setSelfId` is the sole source.
         const existing = this.nodes.get(node.id)
-        const merged = this.mergeNode(existing, node, source)
+        const merged = {
+            ...this.mergeNode(existing, node, source),
+            performance: this.performance.get(node.id)
+        }
         // Collapse a wiped-and-rejoined host onto its new UUID before storing,
         // so the pre-wipe record never reaches the map (see resolveAddressCollision).
         if (this.resolveAddressCollision(merged)) {

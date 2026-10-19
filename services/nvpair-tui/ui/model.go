@@ -267,7 +267,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case DisconnectedMsg:
 		m.disconnected = true
-		return m, nil
+		return m, tea.Batch(m.broadcast(msg)...)
 
 	case LogLineMsg:
 		cmds := m.broadcast(msg)
