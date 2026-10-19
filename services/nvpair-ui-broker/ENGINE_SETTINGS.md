@@ -179,6 +179,16 @@ switch remains a busy refusal; unrelated engines do not veto the switch.
 The broker latches the veto for that accepted operation before waiting for the
 stop response. Its terminal-completion gate checks the latch, including after
 facade publication, and conservative cleanup produces a failure receipt.
+The internal reconcile envelope carries that operation's local Off engine or
+pause veto, so the manager durably admits it before committed-target cleanup
+even when the local lifecycle request has not arrived. A veto latched during
+reconcile requires another cleanup pass before terminal release, or retained
+recovery ownership if cleanup cannot finish within its budget. Manager release
+refuses a committed target with a durable veto recorded after reconcile read
+its checkpoint. A delayed local Off response cancels only its original switch.
+Failed veto delivery retains the exact operation veto for conservative recovery.
+After broker restart, a durable remote-veto failure receipt also requires target
+cleanup; it does not change node availability or invent local Off provenance.
 Off admission rechecks reservations while waiting for ordinary settings work;
 negative lookup and operation-lock acquisition are ordered with acceptance.
 
@@ -242,3 +252,9 @@ remaining bring-up continuation. Exhaustion keeps the manager unavailable and
 reports sticky `engine-switch:recovery-blocked`; it never resumes switch steps or
 silently treats the blocked replacement as usable. Corruption and uncertain
 durability remain fenced.
+Every constituent cleanup error is classified: simultaneous manager storage
+and proxy drain-release failures retain the permanent storage fence. Recovery
+makes at most three attempts, each with a 60-second cleanup context, separated
+by one-/two-second backoffs. Their RPC budgets can occupy synchronous manager
+spawn for approximately 183 seconds. Operation/configuration lock waits happen
+before each context, so there is no unconditional end-to-end spawn-time bound.

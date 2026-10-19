@@ -564,6 +564,11 @@ While a remote reservation remains unreleased, local Off of either engine or
 local pause also vetoes an already-committed target. Reconciliation records
 target Off and pending cleanup before stopping it; source is never restored.
 Restart reconciliation without an explicit veto preserves committed target On.
+Reconcile can carry an internal operation-specific `localVeto` (the local Off
+engine or a pause). The manager records it durably before inspecting/cleaning
+the target, independent of a pending lifecycle stop request. Release shares the
+durable Off admission gate and refuses a committed target with an uncleaned
+veto, retaining its reservation until reconciliation verifies target Off.
 
 The existing pinned ec listener exposes `/v1/engine-switch/apply` and `/status`,
 relaying to the target broker with `engine:switch-request/reply/cancel`. The

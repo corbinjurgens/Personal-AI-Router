@@ -345,19 +345,21 @@ func (b *Broker) relayToEngineNow(msg *Message) {
 
 	requestedEngine, requestedPort, isEnginePortAssignment := enginePortAssignmentRequest(msg.Method, msg.Params)
 	localOffEngine := ""
+	localOffOperationID := ""
 	offOperationLocked := false
 	if msg.Method == "engine:stop" {
 		var target struct {
 			Engine string `json:"engine"`
 		}
 		if json.Unmarshal(msg.Params, &target) == nil && target.Engine != "" {
-			remote, reserved := b.admitLocalEngineOff(target.Engine)
+			remote, reserved, operationID := b.admitLocalEngineOff(target.Engine)
 			if reserved && !remote {
 				_ = b.codec.RespondError(msg.ID, -32000, "Engine switch reserves this engine (busy).")
 				return
 			}
 			if remote {
 				localOffEngine = target.Engine
+				localOffOperationID = operationID
 			} else {
 				offOperationLocked = true
 				defer b.settingsApplyMu.Unlock()
@@ -420,7 +422,7 @@ func (b *Broker) relayToEngineNow(msg *Message) {
 	if localOffEngine != "" {
 		// The manager has now persisted the veto and cancelled its startup;
 		// only then cancel the coordinator's drain/response wait.
-		b.cancelRemoteEngineSwitch(localOffEngine)
+		b.cancelRemoteEngineSwitchOperation(localOffEngine, localOffOperationID)
 	}
 	switch {
 	case err != nil:

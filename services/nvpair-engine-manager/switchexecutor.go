@@ -433,16 +433,22 @@ func (e *Executor) saveSwitch(cp *settings.SwitchCheckpoint, engine string, on b
 func (e *Executor) SwitchStep(ctx context.Context, p settings.SwitchStepRequest) settings.SwitchStepResult {
 	e.switchMu.Lock()
 	defer e.switchMu.Unlock()
-	return e.switchStepLocked(ctx, p, false)
+	return e.switchStepLocked(ctx, p, false, nil)
 }
 
 func (e *Executor) SwitchReconcile(ctx context.Context, p settings.SwitchReconcileRequest) settings.SwitchReconcileResult {
 	e.switchMu.Lock()
 	defer e.switchMu.Unlock()
-	return e.switchStepLocked(ctx, settings.SwitchStepRequest{SwitchPrepareRequest: p.SwitchPrepareRequest}, true)
+	return e.switchStepLocked(ctx, settings.SwitchStepRequest{SwitchPrepareRequest: p.SwitchPrepareRequest}, true, p.LocalVeto)
 }
 
-func (e *Executor) switchStepLocked(ctx context.Context, p settings.SwitchStepRequest, reconcile bool) settings.SwitchStepResult {
+func (e *Executor) switchStepLocked(ctx context.Context, p settings.SwitchStepRequest, reconcile bool, localVeto *settings.SwitchLocalVeto) settings.SwitchStepResult {
+	// Release must read and replace under the same gate as durable local Off
+	// admission. A veto written after an earlier reconcile cannot slip through.
+	if p.Step == settings.SwitchStepRelease {
+		e.switchAdmission.Lock()
+		defer e.switchAdmission.Unlock()
+	}
 	result := settings.SwitchStepResult{}
 	fail := func(kind string, err error) settings.SwitchStepResult {
 		code := switchCode(err)
@@ -480,6 +486,31 @@ func (e *Executor) switchStepLocked(ctx context.Context, p settings.SwitchStepRe
 	if cp == nil || cp.SwitchPrepareRequest != p.SwitchPrepareRequest {
 		return fail(settings.SwitchErrorInvalidRequest, &codedError{code: -32602, message: "switch checkpoint identity mismatch"})
 	}
+	if localVeto != nil && cp.Phase != settings.SwitchCheckpointReleased {
+		if cp.Origin != settings.SwitchOriginRemote || (localVeto.Pause && localVeto.Engine != "") || (!localVeto.Pause && localVeto.Engine != cp.SourceEngine && localVeto.Engine != cp.TargetEngine) {
+			return fail(settings.SwitchErrorInvalidRequest, &codedError{code: -32602, message: "invalid operation-specific local veto"})
+		}
+		// Reload while holding desired.mu so a concurrent local Off's intent
+		// cannot be lost when the broker's earlier latch is delivered.
+		e.desired.mu.Lock()
+		state, err = e.desired.load()
+		if err == nil {
+			cp = state.PendingSwitch
+			reason := nodePausedVeto
+			if !localVeto.Pause {
+				reason = engineOffVeto(localVeto.Engine)
+				state.setIntent(localVeto.Engine, false, intentLocal)
+			}
+			cp.Error = switchFailure(codeLocalVeto, settings.SwitchErrorRemoteVeto, &localVetoError{reason: reason})
+			err = e.desired.save(state)
+		}
+		e.desired.mu.Unlock()
+		if err != nil {
+			return fail(settings.SwitchErrorStorage, err)
+		}
+		result.Checkpoint = cp
+		e.emitIntent()
+	}
 	if !reconcile && (p.Step == settings.SwitchStepSourceStop || p.Step == settings.SwitchStepTargetStart) && p.ManagerIncarnation != e.switchIncarnation {
 		return fail(settings.SwitchErrorInterrupted, &codedError{code: -32000, message: "switch manager incarnation changed; reconcile before continuing"})
 	}
@@ -505,6 +536,10 @@ func (e *Executor) switchStepLocked(ctx context.Context, p settings.SwitchStepRe
 		return result
 	}
 	if p.Step == settings.SwitchStepRelease {
+		paused, _ := e.nodeProjection.pausedLocally()
+		if cp.Origin == settings.SwitchOriginRemote && cp.TargetCommitted && ((cp.Error != nil && cp.Error.Code == codeLocalVeto) || paused) {
+			return fail(settings.SwitchErrorBusy, errors.New("reconcile vetoed committed target before release; reservation retained"))
+		}
 		if cp.Phase == settings.SwitchCheckpointStopPending || cp.Phase == settings.SwitchCheckpointStartPending {
 			return fail(settings.SwitchErrorBusy, errors.New("reconcile incomplete switch step before release"))
 		}

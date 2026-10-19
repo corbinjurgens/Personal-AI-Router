@@ -471,6 +471,12 @@ Before a remote reservation is released, local Off of either engine or a local
 pause also cancels an already-committed target. Reconcile durably changes it to
 target Off with pending cleanup, then stops it without restoring source. In the
 absence of an explicit veto, restart reconciliation preserves committed On.
+The broker-local reconcile envelope may include `localVeto: {engine, pause}`
+for the matching remote operation. `pause: true` requires an empty engine;
+otherwise engine must be the reserved source or target. Reconcile durably saves
+the veto (and local Off provenance for an engine veto) before cleanup. Release
+serializes its checkpoint read/write with durable Off admission and refuses a
+vetoed committed target until reconciliation cleans it to verified Off.
 
 Switch relay requests use independent IDs and a bounded pending map. Replies
 preserve numeric error codes; waiter cancellation sends `engine:switch-cancel`

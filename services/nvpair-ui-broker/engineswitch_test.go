@@ -136,6 +136,18 @@ func newSwitchHarness(t *testing.T) *switchHarness {
 			}
 			return settings.SwitchPrepareResult{Checkpoint: h.cp, Observed: settings.SwitchObserved{Source: h.cp.Source, Target: h.cp.Target}}, ""
 		case settings.SwitchReconcileMethod:
+			var p settings.SwitchReconcileRequest
+			if err := json.Unmarshal(raw, &p); err != nil {
+				return nil, err.Error()
+			}
+			if p.LocalVeto != nil && h.cp != nil && h.cp.Phase != settings.SwitchCheckpointReleased {
+				h.cp.Error = &settings.SwitchError{Code: settings.SwitchRemoteVetoCode, Kind: settings.SwitchErrorRemoteVeto, Message: "Local Off or pause veto."}
+				h.cp.TargetCommitted = false
+				h.cp.Phase = settings.SwitchCheckpointSourceOff
+				h.cp.Target = switchTestState(false, false, settings.SwitchIntentOff)
+				copy := *h.cp
+				return settings.SwitchReconcileResult{Checkpoint: &copy, Observed: settings.SwitchObserved{Source: copy.Source, Target: copy.Target}, Error: copy.Error}, ""
+			}
 			return result, ""
 		case "engine:get-launch":
 			return settings.LaunchState{Engine: "lmstudio", Running: true, EffectivePort: 12345}, ""
