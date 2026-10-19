@@ -614,9 +614,14 @@ func runChatAccountAttempt(ctx context.Context, snapshot chatAccountSnapshot, bo
 	outcome, retryAfter := outcomeTransient, time.Duration(0)
 	if attemptErr != nil {
 		attemptErr = errChatTransient
-	} else {
+	}
+	// Observed restrictive statuses remain authoritative if body handling fails.
+	if response != nil {
 		switch response.Status {
 		case http.StatusOK:
+			if attemptErr != nil {
+				break
+			}
 			defer response.Body.Close()
 			result, attemptErr = q.parseResponse(ctx, response.Body, prepared.Stream, prepared.Input, prepared.Output, response.HeaderAt, budget, emit)
 			if attemptErr == nil {

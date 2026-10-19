@@ -325,6 +325,80 @@ func TestChatAccountAttemptClassification(t *testing.T) {
 	}
 }
 
+func TestChatAccountAttemptRestrictiveStatusSurvivesBodyFailure(t *testing.T) {
+	for _, status := range []int{http.StatusUnauthorized, http.StatusForbidden, http.StatusTooManyRequests} {
+		t.Run(strconv.Itoa(status), func(t *testing.T) {
+			for _, mode := range []string{"normal", "declared oversized", "chunked oversized", "interrupted", "encoding refused"} {
+				t.Run(mode, func(t *testing.T) {
+					f := newChatAccountFixture(t)
+					body := &publicErrorTestBody{Reader: strings.NewReader("synthetic-body-key-sentinel")}
+					length := int64(-1)
+					header := http.Header{"Retry-After": {"5"}}
+					switch mode {
+					case "declared oversized", "chunked oversized":
+						body.Reader = strings.NewReader(strings.Repeat("x", int(f.transport.bounds.MaxErrorBodyBytes)+1))
+						if mode == "declared oversized" {
+							length = f.transport.bounds.MaxErrorBodyBytes + 1
+						}
+					case "interrupted":
+						body.interrupted = true
+					case "encoding refused":
+						header.Set("Content-Encoding", "gzip")
+					}
+					f.transport.client.Transport = publicTestRoundTrip(func(*http.Request) (*http.Response, error) {
+						f.calls.Add(1)
+						return &http.Response{StatusCode: status, Header: header, Body: body, ContentLength: length}, nil
+					})
+					f.emit = func([]byte) error {
+						t.Error("restrictive response emitted provider data")
+						return nil
+					}
+					wantErr, wantOutcome := errChatCredential, outcomeCredentialFailure
+					if status == http.StatusTooManyRequests {
+						wantErr, wantOutcome = errChatRateLimit, outcomeRateLimited
+					}
+					result, err := f.run(t)
+					if !errors.Is(err, wantErr) || result.Complete || result.Usage != nil {
+						t.Errorf("first attempt: complete=%v usage=%v err=%v; want %v", result.Complete, result.Usage, err, wantErr)
+					}
+					if _, err := f.run(t); !errors.Is(err, errChatAccounting) {
+						t.Errorf("next attempt error=%v; want accounting refusal", err)
+					}
+					if calls := f.calls.Load(); calls != 1 {
+						t.Errorf("restrictive HTTP status lost: sends=%d; want 1", calls)
+					}
+					state, err := readAccountStore(f.ledger.storePath)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if len(state.Holds) != 1 {
+						t.Fatalf("durable holds=%d; want 1", len(state.Holds))
+					}
+					h, a := state.Holds[0], state.Accounts[0]
+					if h.Outcome != wantOutcome || !h.QualificationChecked || !h.outstanding() || h.Actual != "" {
+						t.Errorf("wrong durable classification: %+v", h)
+					}
+					if status == http.StatusTooManyRequests {
+						if a.CredentialFailure != nil || a.Cooldown == nil || a.Cooldown.Reason != cooldownRateLimited || a.Cooldown.UntilMs != f.clock.now().Add(5*time.Second).UnixMilli() {
+							t.Error("rate-limit restriction lost trusted Retry-After")
+						}
+					} else if a.Cooldown != nil || a.CredentialFailure == nil || a.CredentialFailure.Credential != testCredential {
+						t.Error("credential suppression lost")
+					}
+					for _, spent := range a.Spent {
+						if spent != "0" {
+							t.Errorf("error response reconciled spend: %s", spent)
+						}
+					}
+					if closes := body.closes.Load(); closes != 1 {
+						t.Errorf("body closes=%d; want 1", closes)
+					}
+				})
+			}
+		})
+	}
+}
+
 func TestChatAccountAttemptCredentialBoundary(t *testing.T) {
 	for _, key := range []string{"", "synthetic\rkey", "synthetic\nkey"} {
 		t.Run(strconv.Quote(key), func(t *testing.T) {
