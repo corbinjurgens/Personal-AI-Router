@@ -297,6 +297,9 @@ func (a *admissionController) AdmitStrict(ctx context.Context, engine, model str
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
+		if !modelServed(a.policy.ServedModels, engine, model, a.normalize) {
+			return nil, errStrictUnavailable
+		}
 		m, ok := a.strict.models[k]
 		if !ok || a.strict.generation[k] != generation || m.MaxConcurrent < 1 || m.Identity != req.Identity || a.strict.storageErr != nil || a.availability != nodepolicy.Available || a.drain[engine] {
 			return nil, errStrictUnavailable
@@ -353,7 +356,7 @@ func (a *admissionController) AdmitStrict(ctx context.Context, engine, model str
 				a.active++
 				a.activeByEngine[engine]++
 				a.lastActivity[engine] = now.UnixMilli()
-				return &strictTicket{base: base, generation: a.strict.generation[k], identity: req.Identity, deadline: dispatchDeadline, ctx: ctx, warmOnly: true}, nil
+				return &strictTicket{base: base, generation: a.strict.generation[k], identity: req.Identity, deadline: dispatchDeadline, ctx: ctx, warmOnly: true, servedModels: a.policy.ServedModels}, nil
 			}
 			if plan == fitWait {
 				if queue.Before(deadline) {
@@ -430,14 +433,17 @@ func (a *admissionController) AdmitStrict(ctx context.Context, engine, model str
 }
 
 type strictTicket struct {
-	base       *admissionTicket
-	identity   nodepolicy.StrictModelIdentity
-	generation uint64
-	deadline   time.Time
-	ctx        context.Context
-	dispatched bool
-	finished   bool
-	warmOnly   bool
+	// Permission belongs to the admission snapshot: restrictive activation
+	// does not revoke existing work. Policy slices are replaced, never mutated.
+	servedModels nodepolicy.ServedModels
+	base         *admissionTicket
+	identity     nodepolicy.StrictModelIdentity
+	generation   uint64
+	deadline     time.Time
+	ctx          context.Context
+	dispatched   bool
+	finished     bool
+	warmOnly     bool
 }
 
 func (t *strictTicket) BeforeStrictDispatch() error {
@@ -449,6 +455,9 @@ func (t *strictTicket) BeforeStrictDispatch() error {
 	}
 	if t.dispatched {
 		return nil
+	}
+	if !modelServed(t.servedModels, t.base.key.engine, t.base.key.model, a.normalize) {
+		return errStrictUnavailable
 	}
 	mc, ok := a.strict.models[t.base.key]
 	if !ok || a.strict.generation[t.base.key] != t.generation {
