@@ -34,6 +34,9 @@ navigation:
       - page: Engine Settings
         path: ../docs/engine-settings.mdx
         slug: engine-settings
+      - page: Prepared Strata Runtime
+        path: ../docs/strata.mdx
+        slug: strata
       - page: Terminal Interface
         path: ../docs/terminal-interface.mdx
         slug: terminal-interface

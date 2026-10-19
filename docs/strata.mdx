@@ -1,0 +1,147 @@
+{/*
+SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+*/}
+
+# Using a Prepared Strata Runtime
+
+[Strata](https://github.com/Niko1221/Strata) is a native inference engine with
+a Python HTTP server in front of it. This page describes how to point Personal
+AI Router (PAIR) at a Strata installation that you have already prepared by
+hand, and what PAIR does and does not do with it.
+
+This is an experimental, operator-driven setup. PAIR does not install,
+download or update Strata, and it has not been qualified on real hardware:
+launch, GPU use, cleanup on stop and cancellation behavior all still need
+owner-approved testing on the machine that will run it.
+
+## What PAIR does with Strata
+
+PAIR treats Strata as its own engine, not as a renamed llama.cpp. It is
+declared by a user manifest, which `nvpair-engine-manager` reads, rather than
+by a built-in entry. The manifest's descriptor is also what the proxy and the
+broker use to front it.
+
+| Area | Today |
+| --- | --- |
+| Start, stop, health | `nvpair-engine-manager` runs the prepared server as a process on `127.0.0.1` and waits for `/health` to return HTTP 200 with `service` equal to `strata`. |
+| Model inventory | `/v1/models` is read for `data[].id`. Only rows whose `status.value` is `loaded` count as resident. |
+| Load and unload | `POST /v1/load` and `POST /v1/unload` with `{"model":"<id>"}`, with response budgets of 600 and 30 seconds. |
+| Published protocol | `openai-chat`: `POST /v1/chat/completions` and `GET /v1/models`. No legacy completions, embeddings, Anthropic Messages or Responses. |
+| Model names | Exact. `name` and `name:latest` are different models. |
+
+Server health is not model residency. The template starts Strata with
+`--lazy`, so the server can be healthy and answering `/v1/models` while no
+model is loaded. A first load can take minutes; load and unload are separate
+operations from start and stop.
+
+### How the proxy fronts Strata
+
+`nvpair-proxy` has a compiled table for Ollama, LM Studio and llama.cpp only.
+Any other engine is fronted from its descriptor, and Strata takes that path.
+When PAIR starts, the broker reads the engine descriptors once. It fronts every
+engine that is available on the host (the manifest defines the host's platform)
+and that the proxy can serve, which for Strata means its `openai-chat` protocol.
+For Strata that gives:
+
+- A facade in the one proxy process. It has no stock client port. The broker
+  plans one upward from 18180, and the proxy persists where it landed in
+  `strata-proxy-port.json` in the per-user data directory, so the port stays put
+  across restarts. The broker logs `fronting descriptor engine` with the planned
+  port.
+- A cluster service key, `e-strata`. It is registered while engine-manager
+  reports Strata running, and withdrawn when it stops. It travels over the
+  authenticated peer-services path and the reverse transport, never in the mDNS
+  record, so peers can route to the node only once they are paired.
+- A model list read from `/v1/models`, which is also the health probe for the
+  advertisement.
+
+The set of fronted engines is fixed when PAIR starts: a new or edited manifest
+takes effect at the next start. There are no engine settings for Strata in the
+desktop application and no `strata-proxy:` client relay yet. Cross-machine
+routing of Strata requests has not been tried on real machines.
+
+`services/nvpair-proxy/strata_profile_test.go` builds the descriptor from the
+template and pins what the facade does with the `openai-chat` surface:
+
+- `POST /v1/chat/completions` is inference. It is routed only to a node that
+  advertises the requested model, forwarded byte for byte (streamed responses
+  included) and tracked as a workload. A model no node advertises is refused
+  with 502 and never reaches the engine.
+- `GET /v1/models` is merged across nodes in the OpenAI list shape, one row per
+  model id, keeping each engine's own row fields such as `status`.
+- Every other path is forwarded verbatim as ordinary traffic. The proxy does
+  not refuse it, does not check the model against a node's inventory and does
+  not track it as a workload. Whatever the engine answers, including its own
+  404 for an unsupported path, reaches the client. That includes `/v1/load` and
+  `/v1/unload`, so a client of the facade can load and unload the model.
+- Enabling the facade without a descriptor, without a port, or for a descriptor
+  with no chat and model-list protocol is refused.
+
+The inventory a node advertises is the configured model list, loaded or not.
+Load the model first; whether Strata loads an unloaded model on the first chat
+request under `--lazy` was not checked.
+
+## Unsupported actions
+
+These are not available for Strata, and no PAIR setting enables them:
+
+- Install, update and uninstall. Strata's own setup is interactive and
+  downloads files; PAIR does not run it.
+- Model pull (download), model delete and model copy between nodes. The model
+  files belong to the prepared installation. Each Strata server instance has
+  one configured model, so `/v1/load` selects that model rather than an
+  arbitrary one.
+- Legacy completions, embeddings, Anthropic Messages (`/v1/messages`) and
+  Responses (`/v1/responses`) as PAIR-classified inference. Strata serves some
+  of these upstream, but PAIR does not claim them for Strata.
+- Strata API keys. PAIR's engine actions cannot send an authorization header,
+  so leave Strata's `--api-key` and `STRATA_API_KEY` unset and keep the server
+  on loopback.
+- The optional Strata features: request monitoring, before-load hooks and MCP
+  hooks. Leave them disabled in the configuration.
+
+## Procedure
+
+1. Prepare Strata outside PAIR, using its own setup, until its generated launch
+   script runs the model from a terminal. Note the absolute path of the Python
+   interpreter for that environment, of `serve/server.py` and of the prepared
+   configuration file.
+2. Copy `services/nvpair-engine-manager/testdata/strata/strata.json` to
+   `strata.json` in the per-user `engines/` directory. The directory for each
+   operating system is listed in the
+   [manifest reference](../services/nvpair-engine-manager/MANIFEST.md#where-manifests-live).
+3. Replace every `/REPLACE_WITH_ABSOLUTE_PATH/` value:
+   - `runtime.bin` is the Python interpreter.
+   - The first `runtime.args` entry is `server.py`, and the argument after
+     `--config` is the configuration file.
+   - Each retained platform's `detect` entry is the `server.py` path. Delete
+     the platforms you do not use.
+
+   Arguments are literal strings. Do not use environment variables or `~`, and
+   escape backslashes in JSON on Windows. Keep `--host 127.0.0.1`,
+   `--port {port}` and `--lazy`, and choose a free `runtime.port` (the template
+   uses 18082).
+4. Restart PAIR so `nvpair-engine-manager` reads the manifest and the broker
+   fronts the engine. A manifest it cannot parse is logged and skipped rather
+   than stopping startup.
+5. Check the engine through engine-manager: `engine:descriptors` should list
+   `strata` as available with protocol `openai-chat`, `engine:start` should
+   return once `/health` reports the Strata service, and `engine:models`
+   should list the configured model under `modelsByEngine` but not under
+   `loadedByEngine` until you load it with `engine:load-model`.
+6. Find the facade port in the broker log line `fronting descriptor engine` or
+   in `strata-proxy-port.json`, then send a chat completion for the loaded
+   model to `/v1/chat/completions` on that port.
+
+The fixture tests check this contract against loopback fakes only. They do not
+start Strata, and the platform entries in the template are not evidence that a
+platform works. Strata documents Windows and Linux with NVIDIA CUDA as its
+primary path and macOS as an experimental Apple Silicon source build; confirm
+your hardware against its documentation first.
+
+## Related pages
+
+- [Managing engines](engine-lifecycle.mdx)
+- [Engine settings](engine-settings.mdx)
+- [Architecture](architecture.mdx)
