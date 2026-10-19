@@ -4,12 +4,14 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"io"
 	"log/slog"
 	"net"
 	"net/http"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -132,10 +134,10 @@ func (d *daemon) fetchModelsForPeer(hostUUID, ip string, port int, clusterUUID s
 		return modelInventory{}, false
 	}
 	var body struct {
-		Models         []string                  `json:"models"`
-		ModelsByEngine map[string][]string       `json:"modelsByEngine"`
-		LoadedByEngine map[string][]string       `json:"loadedByEngine"`
-		Policy         *nodepolicy.Advertisement `json:"policy"`
+		Models         []string            `json:"models"`
+		ModelsByEngine map[string][]string `json:"modelsByEngine"`
+		LoadedByEngine map[string][]string `json:"loadedByEngine"`
+		Policy         json.RawMessage     `json:"policy"`
 	}
 	decoder := json.NewDecoder(resp.Body)
 	if err := decoder.Decode(&body); err != nil {
@@ -145,10 +147,127 @@ func (d *daemon) fetchModelsForPeer(hostUUID, ip string, port int, clusterUUID s
 	if err := decoder.Decode(&trailing); err != io.EOF {
 		return modelInventory{}, false
 	}
+	// Decoder errors can quote the peer's field names, so only a fixed
+	// category is logged.
+	policy, rejected, err := decodeInventoryPolicy(body.Policy)
+	if err != nil {
+		slog.Debug("model enrichment: invalid policy advertisement", "ip", ip)
+		return modelInventory{}, false
+	}
+	if rejected != "" {
+		slog.Debug("model enrichment: ignoring part of a policy advertisement", "ip", ip, "rejected", rejected)
+	}
 	if !current() {
 		return modelInventory{}, false
 	}
-	return modelInventory{models: body.Models, byEngine: body.ModelsByEngine, loadedByEngine: body.LoadedByEngine, policy: body.Policy}, true
+	return modelInventory{models: body.Models, byEngine: body.ModelsByEngine, loadedByEngine: body.LoadedByEngine, policy: policy}, true
+}
+
+// decodeInventoryPolicy reads the policy object of a /v1/models document; nil
+// when it is absent or null, which means the node declares nothing. Its strict
+// admission capability only makes the node eligible for hybrid routing, so a
+// problem confined to that capability never costs the node its model
+// inventory, which concrete routing needs:
+//
+//   - A strictAdmission key in another letter case rejects the whole
+//     advertisement (the strict contract's rule against aliases): the node is
+//     kept, declaring nothing.
+//   - A malformed strictAdmission (invalid version 1 contents or envelope, or
+//     null) rejects only the capability: the advertisement is kept without it.
+//
+// A capability of an unsupported version decodes as such and is kept for the
+// consumers to exclude. Any other invalid advertisement fails the document, as
+// it did before the capability existed. rejected names what was dropped, for
+// the log: rejectedAdvertisement, rejectedCapability or empty.
+//
+// The capability is removed from the document's own bytes, keeping every other
+// member in its order, duplicates included, so the remaining fields decode
+// exactly as the shared decoder would decode them without it.
+func decodeInventoryPolicy(raw json.RawMessage) (adv *nodepolicy.Advertisement, rejected string, err error) {
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil, "", nil
+	}
+	var decoded nodepolicy.Advertisement
+	err = json.Unmarshal(raw, &decoded)
+	if err == nil {
+		return &decoded, "", nil
+	}
+	members, ok := objectMembers(raw)
+	if !ok {
+		return nil, "", err
+	}
+	var rest bytes.Buffer
+	rest.WriteByte('{')
+	found := false
+	for _, m := range members {
+		if m.key == strictAdmissionKey {
+			found = true
+			continue
+		}
+		if strings.EqualFold(m.key, strictAdmissionKey) {
+			return nil, rejectedAdvertisement, nil
+		}
+		key, keyErr := json.Marshal(m.key)
+		if keyErr != nil {
+			return nil, "", err
+		}
+		if rest.Len() > 1 {
+			rest.WriteByte(',')
+		}
+		rest.Write(key)
+		rest.WriteByte(':')
+		rest.Write(m.value)
+	}
+	rest.WriteByte('}')
+	if !found {
+		return nil, "", err
+	}
+	decoded = nodepolicy.Advertisement{}
+	if json.Unmarshal(rest.Bytes(), &decoded) != nil {
+		return nil, "", err
+	}
+	return &decoded, rejectedCapability, nil
+}
+
+const (
+	// strictAdmissionKey is the exact name of the capability in the advertisement.
+	strictAdmissionKey    = "strictAdmission"
+	rejectedAdvertisement = "advertisement with an aliased strictAdmission key"
+	rejectedCapability    = "invalid strictAdmission capability"
+)
+
+// objectMember is one member of a JSON object, in document order.
+type objectMember struct {
+	key   string
+	value json.RawMessage
+}
+
+// objectMembers lists the members of the JSON object raw in document order,
+// duplicates included; ok is false when raw is not one well-formed object.
+func objectMembers(raw []byte) (members []objectMember, ok bool) {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	if tok, err := dec.Token(); err != nil || tok != json.Delim('{') {
+		return nil, false
+	}
+	for dec.More() {
+		tok, err := dec.Token()
+		if err != nil {
+			return nil, false
+		}
+		key, isKey := tok.(string)
+		if !isKey {
+			return nil, false
+		}
+		var value json.RawMessage
+		if err := dec.Decode(&value); err != nil {
+			return nil, false
+		}
+		members = append(members, objectMember{key: key, value: value})
+	}
+	if tok, err := dec.Token(); err != nil || tok != json.Delim('}') {
+		return nil, false
+	}
+	return members, true
 }
 
 // modelsClient picks the transport for a model fetch: the plain client over

@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -106,8 +107,48 @@ func (a *admissionController) revalidateStrictCapabilitiesLocked() {
 	}
 }
 
+// StrictReadiness is what the controller can admit under the strict contract
+// for the active policy revision: the installed capability, its models under
+// the normalized keys they were installed with and sorted by engine and model,
+// or none when nothing is installed or strict storage is untrusted (AdmitStrict
+// fails closed then). Policy activation has already withdrawn entries whose
+// limit no longer matches. ProxyRunID is the process's; reportStrictReadiness
+// stamps it.
 func (a *admissionController) StrictReadiness() nodepolicy.StrictAdmissionReadiness {
-	return nodepolicy.StrictAdmissionReadiness{}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	out := nodepolicy.StrictAdmissionReadiness{PolicyRevision: a.policy.Revision}
+	if a.strict.storageErr != nil || len(a.strict.models) == 0 {
+		return out
+	}
+	models := make([]nodepolicy.StrictAdmissionModel, 0, len(a.strict.models))
+	for _, m := range a.strict.models {
+		models = append(models, m)
+	}
+	slices.SortFunc(models, func(x, y nodepolicy.StrictAdmissionModel) int {
+		if c := strings.Compare(x.Engine, y.Engine); c != 0 {
+			return c
+		}
+		return strings.Compare(x.Model, y.Model)
+	})
+	out.Capability = &nodepolicy.StrictAdmissionCapability{Version: nodepolicy.StrictAdmissionVersion, Models: models}
+	return out
+}
+
+// reportStrictReadiness sends the broker this process's strict readiness for
+// the active revision (nodepolicy.NotifyStrictReadiness), stamped with the run
+// id its PolicyAck carries. Before any policy is active there is no revision to
+// name and nothing is sent. Reports go out from the control read loop only,
+// which keeps a report computed from older state from following a newer one.
+func (p *Proxy) reportStrictReadiness() {
+	report := p.admission.StrictReadiness()
+	if report.PolicyRevision == "" {
+		return
+	}
+	report.ProxyRunID = p.runID
+	if err := p.codec.Notify(nodepolicy.NotifyStrictReadiness, report); err != nil {
+		slog.Debug("failed to send strict admission readiness", "err", err)
+	}
 }
 
 // AdmitStrict shares the concrete path's lock, in-flight counts, residency,

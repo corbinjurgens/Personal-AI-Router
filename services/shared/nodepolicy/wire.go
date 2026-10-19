@@ -8,10 +8,11 @@ import (
 	"fmt"
 )
 
-// StrictAdmissionReadiness is the future proxy -> broker A1/A2 handoff, not a
-// registered method or notification. Only the broker can match its fences to
-// the acknowledged proxy incarnation and desired/active policy revision before
-// publishing Capability in Advertisement. Nil withdraws previous readiness.
+// StrictAdmissionReadiness is the params of NotifyStrictReadiness: what the
+// proxy's admission controller can admit under the strict contract for the
+// revision it names. Only the broker can match its fences to the acknowledged
+// proxy incarnation and desired/active policy revision before publishing
+// Capability in Advertisement. Nil withdraws previous readiness.
 type StrictAdmissionReadiness struct {
 	PolicyRevision string                     `json:"policyRevision"`
 	ProxyRunID     string                     `json:"proxyRunId"`
@@ -64,6 +65,16 @@ const (
 	// engine. The broker starts it only if its saved intent is On and the node
 	// is not paused; the proxy learns the result from node/set-local-backend.
 	NotifyAdmissionWake = "admission/wake"
+	// NotifyStrictReadiness carries StrictAdmissionReadiness. The proxy sends
+	// it after acknowledging each MethodSetPolicy, naming the revision it
+	// acknowledged and the run id of that PolicyAck, and again whenever its
+	// readiness for that revision changes. An omitted capability means not
+	// ready. Order against the acknowledgement does not matter: the broker
+	// holds a report until its fences match what it has recorded, discards one
+	// from another proxy run than the acknowledged one, and withdraws on one
+	// that does not validate. It clears readiness itself on proxy restart,
+	// exit, pending activation and pause.
+	NotifyStrictReadiness = "admission/strict-readiness"
 )
 
 // HTTP headers.

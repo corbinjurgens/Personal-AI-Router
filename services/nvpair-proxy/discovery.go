@@ -70,6 +70,29 @@ type Node struct {
 	// metadata like Loaded, so a role edit does not announce node/updated.
 	Roles          map[string]nodepolicy.AdvertisedRole `json:"-"`
 	PolicyRevision string                               `json:"-"`
+	// StrictAdmission is the strict admission capability from the same
+	// advertisement, nil when the node publishes none. It is shared with the
+	// decoded advertisement and never modified. Read it through strictModel.
+	StrictAdmission *nodepolicy.StrictAdmissionCapability `json:"-"`
+}
+
+// strictModel returns the strict admission entry n advertises for engine and
+// model. model must already be named the way that engine's facade names it,
+// which is how the destination publishes it. Only a valid capability of the
+// supported version counts: a node that advertises none (an older build, or one
+// not ready now) or one of an unsupported version is never a hybrid local
+// candidate. Concrete routing does not consult it. The entry is an eligibility
+// hint; the destination revalidates every strict request.
+func (n Node) strictModel(engine, model string) (nodepolicy.StrictAdmissionModel, bool) {
+	if n.StrictAdmission.State() != nodepolicy.StrictCapabilityValid {
+		return nodepolicy.StrictAdmissionModel{}, false
+	}
+	for _, m := range n.StrictAdmission.Models {
+		if m.Engine == engine && m.Model == model {
+			return m, true
+		}
+	}
+	return nodepolicy.StrictAdmissionModel{}, false
 }
 
 // withPrimaryIP returns a copy of the node with IP resolved by the shared ranker
@@ -162,8 +185,8 @@ func (d *Discovery) SetSubscribed(nodes []Node) (discovered, updated, removed []
 
 // nodeEqual reports whether two routable Nodes carry the same routing/display
 // identity — the fields a consumer dials or renders. A change in any of them
-// warrants a node/updated. Loaded, ClusterUUID, Roles and PolicyRevision are
-// internal routing metadata and deliberately not compared.
+// warrants a node/updated. Loaded, ClusterUUID, Roles, PolicyRevision and
+// StrictAdmission are internal routing metadata and deliberately not compared.
 func nodeEqual(a, b Node) bool {
 	return a.ID == b.ID && a.Host == b.Host && a.Port == b.Port && a.IP == b.IP &&
 		slices.Equal(a.Addresses, b.Addresses) && slices.Equal(a.TXT, b.TXT) &&

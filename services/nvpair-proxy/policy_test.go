@@ -5,6 +5,9 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
+	"path/filepath"
+	"reflect"
 	"strconv"
 	"testing"
 
@@ -288,4 +291,115 @@ func TestPolicyActivation_AvailabilityAnswersOkAndNeverMovesTheRevision(t *testi
 	if p.admission.currentAvailability() != nodepolicy.Paused {
 		t.Fatal("the availability was not applied")
 	}
+}
+
+// strictReports decodes every admission/strict-readiness notification sent so
+// far, failing on one that does not validate.
+func strictReports(t *testing.T, w *recordingWriter) []nodepolicy.StrictAdmissionReadiness {
+	t.Helper()
+	var out []nodepolicy.StrictAdmissionReadiness
+	for _, raw := range notificationsOf(t, w, nodepolicy.NotifyStrictReadiness) {
+		var r nodepolicy.StrictAdmissionReadiness
+		if err := json.Unmarshal(raw, &r); err != nil {
+			t.Fatalf("decode strict readiness %s: %v", raw, err)
+		}
+		if err := r.Validate(); err != nil {
+			t.Fatalf("strict readiness %s does not validate: %v", raw, err)
+		}
+		out = append(out, r)
+	}
+	return out
+}
+
+func TestStrictReadiness_ReportedAfterEachAcknowledgement(t *testing.T) {
+	p, w := policyProxy(t)
+	if got := strictReports(t, w); len(got) != 0 {
+		t.Fatalf("reports before any policy = %+v, want none", got)
+	}
+	rpcOK(t, p, w, nodepolicy.MethodSetPolicy, policyAt("1700"))
+	got := strictReports(t, w)
+	if len(got) != 1 {
+		t.Fatalf("reports after one acknowledgement = %d, want 1", len(got))
+	}
+	if got[0].PolicyRevision != "1700" || got[0].ProxyRunID != p.runID || got[0].Capability != nil {
+		t.Fatalf("report = %+v, want revision 1700 from run %q with no capability", got[0], p.runID)
+	}
+
+	rpcErr(t, p, w, nodepolicy.MethodSetPolicy, policyAt("1600"))
+	rpcOK(t, p, w, nodepolicy.MethodSetAvailability, nodepolicy.SetAvailabilityParams{State: nodepolicy.Paused})
+	if got := strictReports(t, w); len(got) != 1 {
+		t.Fatalf("reports after a refused policy and an availability change = %d, want still 1", len(got))
+	}
+}
+
+func TestStrictReadiness_ReportsTheInstalledCapability(t *testing.T) {
+	p, w := policyProxy(t)
+	a := p.admission
+	a.mu.Lock()
+	a.strict.path = filepath.Join(t.TempDir(), "capacity.json")
+	a.strict.storageErr = nil
+	a.mu.Unlock()
+	limited := func(revision string, limit int) nodepolicy.Policy {
+		pol := policyAt(revision)
+		pol.Admission.MaxConcurrentPerModel = limit
+		return pol
+	}
+	install := func(t *testing.T) {
+		t.Helper()
+		capability := nodepolicy.StrictAdmissionCapability{Version: 1, Models: []nodepolicy.StrictAdmissionModel{
+			{Engine: "ollama", Model: "m", MaxConcurrent: 1, Identity: strictRequest().Identity},
+			{Engine: "lmstudio", Model: "Exact Name", MaxConcurrent: 1, Identity: strictRequest().Identity},
+		}}
+		if err := a.installStrictCapability(capability); err != nil {
+			t.Fatal(err)
+		}
+		// The future install owner reports after each install.
+		p.reportStrictReadiness()
+	}
+	last := func(t *testing.T) nodepolicy.StrictAdmissionReadiness {
+		t.Helper()
+		got := strictReports(t, w)
+		if len(got) == 0 {
+			t.Fatal("no strict readiness report")
+		}
+		return got[len(got)-1]
+	}
+
+	rpcOK(t, p, w, nodepolicy.MethodSetPolicy, limited("10", 1))
+	install(t)
+	report := last(t)
+	want := []nodepolicy.StrictAdmissionModel{
+		{Engine: "lmstudio", Model: "Exact Name", MaxConcurrent: 1, Identity: strictRequest().Identity},
+		{Engine: "ollama", Model: "m:latest", MaxConcurrent: 1, Identity: strictRequest().Identity},
+	}
+	if report.PolicyRevision != "10" || report.ProxyRunID != p.runID || report.Capability == nil ||
+		report.Capability.Version != nodepolicy.StrictAdmissionVersion || !reflect.DeepEqual(report.Capability.Models, want) {
+		t.Fatalf("report = %+v (capability %+v), want revision 10 with %+v", report, report.Capability, want)
+	}
+
+	t.Run("a policy whose limit no longer matches withdraws it", func(t *testing.T) {
+		rpcOK(t, p, w, nodepolicy.MethodSetPolicy, limited("11", 2))
+		if report := last(t); report.PolicyRevision != "11" || report.Capability != nil {
+			t.Fatalf("report after the limit changed = %+v, want revision 11 with no capability", report)
+		}
+	})
+
+	t.Run("an unchanged limit keeps it under the new revision", func(t *testing.T) {
+		rpcOK(t, p, w, nodepolicy.MethodSetPolicy, limited("12", 1))
+		install(t)
+		rpcOK(t, p, w, nodepolicy.MethodSetPolicy, limited("13", 1))
+		if report := last(t); report.PolicyRevision != "13" || report.Capability == nil || len(report.Capability.Models) != 2 {
+			t.Fatalf("report after an unrelated policy change = %+v, want revision 13 with both models", report)
+		}
+	})
+
+	t.Run("untrusted strict storage withdraws it", func(t *testing.T) {
+		a.mu.Lock()
+		a.strict.storageErr = errors.New("unreadable capacity document")
+		a.mu.Unlock()
+		rpcOK(t, p, w, nodepolicy.MethodSetPolicy, limited("14", 1))
+		if report := last(t); report.PolicyRevision != "14" || report.Capability != nil {
+			t.Fatalf("report with untrusted storage = %+v, want revision 14 with no capability", report)
+		}
+	})
 }

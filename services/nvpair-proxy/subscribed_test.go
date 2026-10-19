@@ -4,9 +4,14 @@
 package main
 
 import (
+	"encoding/json"
+	"fmt"
+	"path/filepath"
 	"reflect"
 	"testing"
 
+	"nvpair-shared/clustertrust"
+	"nvpair-shared/clustertrusttest"
 	"nvpair-shared/nodepolicy"
 	"nvpair-shared/noderec"
 )
@@ -249,4 +254,131 @@ func TestSubscribedCarriesPolicyWithoutChurn(t *testing.T) {
 			t.Fatalf("overlay did not take the declared node: %+v", nodes)
 		}
 	})
+}
+
+// strictTestCapability is a valid capability for model on ollama.
+func strictTestCapability(model string) *nodepolicy.StrictAdmissionCapability {
+	return &nodepolicy.StrictAdmissionCapability{Version: nodepolicy.StrictAdmissionVersion, Models: []nodepolicy.StrictAdmissionModel{
+		{Engine: "ollama", Model: model, MaxConcurrent: 2, Identity: strictRequest().Identity},
+	}}
+}
+
+// unsupportedStrictCapability is a capability of a future version, decoded the
+// way a newer peer's inventory would be.
+func unsupportedStrictCapability(t *testing.T) *nodepolicy.StrictAdmissionCapability {
+	t.Helper()
+	var c nodepolicy.StrictAdmissionCapability
+	if err := json.Unmarshal([]byte(`{"version":2,"models":"opaque"}`), &c); err != nil {
+		t.Fatal(err)
+	}
+	if c.State() != nodepolicy.StrictCapabilityUnsupported {
+		t.Fatalf("fixture state = %s, want unsupported", c.State())
+	}
+	return &c
+}
+
+// TestSubscribedCarriesStrictCapabilityWithoutChurn covers the proxy overlay hop
+// of the strict admission capability: subscribedToNode carries it as decoded,
+// whatever its version, a node without one carries none, and a readiness change
+// alone does not announce node/updated.
+func TestSubscribedCarriesStrictCapabilityWithoutChurn(t *testing.T) {
+	forEachEngine(t, func(t *testing.T, tc engineCase) {
+		n := noderec.DirectoryNode{
+			HostUUID: "host-uuid",
+			Name:     "host-a",
+			IP:       "10.0.0.5",
+			Services: map[noderec.ServiceKey]noderec.ServiceStatus{tc.profile.DiscoveryService: {Port: tc.profile.FacadePort}},
+			Policy:   &nodepolicy.Advertisement{Revision: "40"},
+		}
+		without, ok := subscribedToNode(tc.profile, n)
+		if !ok || without.StrictAdmission != nil {
+			t.Fatalf("node without a capability projected %+v (ok %v)", without.StrictAdmission, ok)
+		}
+		for name, capability := range map[string]*nodepolicy.StrictAdmissionCapability{
+			"valid":       strictTestCapability("m:latest"),
+			"unsupported": unsupportedStrictCapability(t),
+		} {
+			n.Policy = &nodepolicy.Advertisement{Revision: "40", StrictAdmission: capability}
+			with, ok := subscribedToNode(tc.profile, n)
+			if !ok || with.StrictAdmission != capability {
+				t.Fatalf("%s capability projected as %+v (ok %v), want the decoded value", name, with.StrictAdmission, ok)
+			}
+			d := NewDiscovery()
+			d.SetSubscribed([]Node{without})
+			if disc, upd, rem := d.SetSubscribed([]Node{with}); len(disc)+len(upd)+len(rem) != 0 {
+				t.Fatalf("a %s capability alone announced changes: disc=%v upd=%v rem=%v", name, disc, upd, rem)
+			}
+			if nodes := d.Nodes(); len(nodes) != 1 || nodes[0].StrictAdmission != capability {
+				t.Fatalf("overlay did not take the %s capability: %+v", name, nodes)
+			}
+		}
+	})
+}
+
+// TestStrictModelExcludesPeersWithoutAValidCapability covers the hybrid
+// exclusion rule: only a valid capability naming the engine and normalized
+// model makes a peer eligible, while every one of these peers stays a
+// concrete-routing candidate for the same model.
+func TestStrictModelExcludesPeersWithoutAValidCapability(t *testing.T) {
+	profile := ollamaOnlyProfile(t)
+	model := profile.normalizeModel("m")
+	cases := []struct {
+		name     string
+		policy   *nodepolicy.Advertisement
+		eligible bool
+	}{
+		{"older peer without a policy", nil, false},
+		{"policy without a capability", &nodepolicy.Advertisement{Revision: "3"}, false},
+		{"unsupported version", &nodepolicy.Advertisement{Revision: "3", StrictAdmission: unsupportedStrictCapability(t)}, false},
+		{"valid without that model", &nodepolicy.Advertisement{Revision: "3", StrictAdmission: strictTestCapability("other:latest")}, false},
+		{"valid for that model", &nodepolicy.Advertisement{Revision: "3", StrictAdmission: strictTestCapability(model)}, true},
+	}
+	port := freeTCPPort(t)
+	var nodes []Node
+	var principals []string
+	for i, tc := range cases {
+		principal := fmt.Sprintf("principal-%d", i)
+		principals = append(principals, principal)
+		n, ok := subscribedToNode(profile, noderec.DirectoryNode{
+			HostUUID:    fmt.Sprintf("peer-%d", i),
+			ClusterUUID: principal,
+			Name:        tc.name,
+			IP:          fmt.Sprintf("192.0.2.%d", 10+i),
+			Services:    map[noderec.ServiceKey]noderec.ServiceStatus{profile.DiscoveryService: {Port: port}},
+			Models:      []string{model},
+			Policy:      tc.policy,
+		})
+		if !ok {
+			t.Fatalf("%s did not project", tc.name)
+		}
+		nodes = append(nodes, n)
+		t.Run(tc.name, func(t *testing.T) {
+			entry, eligible := n.strictModel("ollama", model)
+			if eligible != tc.eligible {
+				t.Fatalf("eligible = %v, want %v", eligible, tc.eligible)
+			}
+			if eligible && (entry.Model != model || entry.MaxConcurrent != 2) {
+				t.Fatalf("entry = %+v, want %s with maxConcurrent 2", entry, model)
+			}
+			if _, other := n.strictModel("lmstudio", model); other {
+				t.Fatal("an entry for another engine made the node eligible")
+			}
+		})
+	}
+
+	disc := NewDiscovery()
+	disc.SetSubscribed(nodes)
+	p := testProxy(profile, disc, freeTCPPort(t))
+	clusterDir := filepath.Join(t.TempDir(), "cluster")
+	clustertrusttest.Join(t, clusterDir, "cluster-xyz", "principal-self", principals...)
+	p.mesh = clustertrust.Open(clusterDir)
+	got := map[string]bool{}
+	for _, c := range p.soleFacade().resolveCandidates("m") {
+		got[c.id] = true
+	}
+	for _, n := range nodes {
+		if !got[n.ID] {
+			t.Errorf("concrete candidates %v lost %s", got, n.Host)
+		}
+	}
 }

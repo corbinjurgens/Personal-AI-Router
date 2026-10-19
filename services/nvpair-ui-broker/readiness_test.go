@@ -83,8 +83,8 @@ func reportStrict(t *testing.T, b *Broker, revision, runID string, capability *n
 	if err != nil {
 		t.Fatalf("encode readiness: %v", err)
 	}
-	if !b.routeProcessScopedProxyNotification(notifyStrictReadiness, params) {
-		t.Fatalf("%s was not taken as a process-scoped proxy notification", notifyStrictReadiness)
+	if !b.routeProcessScopedProxyNotification(nodepolicy.NotifyStrictReadiness, params) {
+		t.Fatalf("%s was not taken as a process-scoped proxy notification", nodepolicy.NotifyStrictReadiness)
 	}
 }
 
@@ -188,8 +188,8 @@ func TestStrictReadinessWithdrawn(t *testing.T) {
 	})
 	withdrawn("by an invalid report", func(t *testing.T, f *strictFixture) {
 		params := json.RawMessage(`{"policyRevision":"0","proxyRunId":"` + f.acks.runID + `","capability":{"version":1,"models":[]}}`)
-		if !f.b.routeProcessScopedProxyNotification(notifyStrictReadiness, params) {
-			t.Fatalf("%s was not taken", notifyStrictReadiness)
+		if !f.b.routeProcessScopedProxyNotification(nodepolicy.NotifyStrictReadiness, params) {
+			t.Fatalf("%s was not taken", nodepolicy.NotifyStrictReadiness)
 		}
 	})
 	withdrawn("on proxy exit", func(t *testing.T, f *strictFixture) {

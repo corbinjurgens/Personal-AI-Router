@@ -44,7 +44,7 @@ It never belongs in mDNS TXT or the strictly decoded peer-services descriptor.
 | Absent | Older peer or enforcement not ready; exclude from hybrid only. |
 | Unsupported | Positive integer version other than 1; retain the envelope without interpreting its contents; exclude from hybrid only. |
 | Valid | Version 1 schema validates; current availability, capacity and qualification still require destination checks. |
-| Invalid | Malformed version 1 or invalid envelope; reject the contract. |
+| Invalid | Malformed version 1 or invalid envelope; reject the contract. The scanner drops it and keeps the inventory. |
 
 Versions are integers in 1..2147483647, independent of policy schema version 2.
 Unknown-version JSON is preserved by Go for round trips. TypeScript reports its
@@ -126,15 +126,33 @@ capacity through cancellation, transport loss, first-body timeout and restart;
 elapsed time alone cannot release it.
 
 `nvpair-ui-broker/readiness_contract.go` declares `strictReadinessSource`, a
-revision/proxy-incarnation-fenced snapshot, and `strictAdvertisementSink` for the
-whole advertisement. Both sides use shared `StrictAdmissionReadiness` with
-`policyRevision`, `proxyRunId` and optional `capability`; a nil capability
-withdraws readiness. Its validation checks syntax, while the broker must check
-the fences against current state. A2 connects acknowledged policy publication
-in `policy.go` to the inventory's future `ModelsResult.Policy`; scanner caches, directory
-and proxy overlays carry that same policy object. Missing/mismatched fences,
-disconnect, restart or pending activation withdraw the capability. These
-interfaces have no production implementation in A0, and no readiness is emitted.
+revision/proxy-incarnation-fenced snapshot. Both sides use shared
+`StrictAdmissionReadiness` with `policyRevision`, `proxyRunId` and optional
+`capability`; a nil capability withdraws readiness. Its validation checks syntax,
+while the broker must check the fences against current state. Missing or
+mismatched fences, disconnect, restart or pending activation withdraw the
+capability.
+
+## Inventory transport
+
+The proxy sends `admission/strict-readiness` (`nodepolicy.NotifyStrictReadiness`)
+after acknowledging each `node/set-policy`, carrying its installed capability for
+that revision (A2). The broker fences it and publishes the capability in the
+`engine:node-projection` it sends engine-manager (A1b), which serves it as
+`ModelsResult.Policy` on the pinned `/v1/models` document. The scanner reads that
+document on every path (browse, refresh and the authenticated claim of a peer known
+only through the pinned bootstrap), its caches and the directory carry the same
+policy object, and the broker relay and proxy routing overlay pass it on. The
+proxy's `Node.strictModel` is the hybrid exclusion rule. Nothing installs a
+capability in production until qualification (B) provides authoritative identity,
+so no readiness is advertised yet.
+
+The scanner is the only hop that reads the document from a peer, and the hops
+after it decode strictly, so it isolates the capability. An Invalid capability,
+including explicit null, is dropped and the advertisement and model inventory are
+kept. A case-variant key rejects the whole advertisement as above, and the node
+keeps its model inventory, declaring nothing. In both cases the node remains a
+concrete-routing candidate and is excluded from hybrid candidates.
 
 ## Parser compatibility
 
