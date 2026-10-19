@@ -169,7 +169,13 @@ the manager only after readiness. A failed target start never restores source.
 One switch runs per node under the shared settings operation lock. Settings and
 legacy lifecycle/port mutations respect switch reservations. Local pause cancels
 remote execution before waiting on transition locks; a switch never resumes the
-node. Local Off of an involved engine also cancels remote switch work.
+node. The pending local pause projection reaches the manager before cancellation
+or transition-lock waiting. Local Off of either involved engine bypasses the
+broker operation lock during a remote switch, including recovery reservations,
+and reaches the manager's existing stop admission. That owner durably saves
+local Off and cancels remote startup before waiting for lifecycle locks. The
+switch fails with target Off and never restores source. Local Off during a local
+switch remains a busy refusal; unrelated engines do not veto the switch.
 
 Switch drain is strict and separate from the settings restart drain. Withdraw
 source discovery and its local inference endpoint, acknowledge source drain,
@@ -204,3 +210,14 @@ or starts target as recovery. Conflicting pending settings/switch journals fail
 closed. A committed target On is preserved; an uncommitted partial target launch
 is cleaned up. Unknown cleanup remains visibly recovery-required. Terminal
 receipts remain historical facts; current observations are reported separately.
+
+Forward prepare/source-stop/target-start calls use the original worker handle
+and carry its explicit `managerIncarnation` in the internal operation envelope.
+A manager rejects inherited forward steps with a coded `interrupted` error,
+including retries of previously acknowledged steps; reconcile and release still
+accept the original envelope. Manager exit or replacement synchronously cancels
+active forward work. The broker persists `failed-interrupted`, releases its
+operation lock, then reconciles/releases authoritative checkpoint evidence on
+the replacement before exposing it to restore or other forward callers. Recovery
+never waits behind a live switch that is itself waiting for replacement recovery.
+Older checkpoints without the incarnation remain readable for cleanup only.

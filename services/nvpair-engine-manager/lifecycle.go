@@ -429,14 +429,14 @@ func (e *Executor) StopFrom(engine string, origin intentOrigin) error {
 	if err != nil {
 		return err
 	}
-	if origin == intentLocal {
-		e.remoteWork.cancelEngine(engine, &localVetoError{reason: engineOffVeto(engine)})
-	}
 	done, err := e.admitStop(engine, origin)
 	if err != nil {
 		return err
 	}
 	defer done()
+	if origin == intentLocal {
+		e.remoteWork.cancelEngine(engine, &localVetoError{reason: engineOffVeto(engine)})
+	}
 	st.opMu.Lock()
 	defer st.opMu.Unlock()
 	stopErr := e.doStop(st, engine)

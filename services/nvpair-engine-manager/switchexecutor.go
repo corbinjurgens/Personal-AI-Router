@@ -236,6 +236,9 @@ func (e *Executor) SwitchPrepare(ctx context.Context, p settings.SwitchPrepareRe
 		return fail(-32000, settings.SwitchErrorStorage, err)
 	}
 	result.Checkpoint = state.PendingSwitch
+	if p.OperationID != "" && p.ManagerIncarnation != e.switchIncarnation {
+		return fail(-32000, settings.SwitchErrorInterrupted, errors.New("switch manager incarnation changed; reconcile before continuing"))
+	}
 	if cp := state.PendingSwitch; p.OperationID != "" && cp != nil && cp.OperationID == p.OperationID {
 		if cp.SwitchPrepareRequest != p {
 			return fail(-32602, settings.SwitchErrorReusedID, errors.New("operation ID reused with different switch parameters"))
@@ -476,6 +479,9 @@ func (e *Executor) switchStepLocked(ctx context.Context, p settings.SwitchStepRe
 	result.Checkpoint = cp
 	if cp == nil || cp.SwitchPrepareRequest != p.SwitchPrepareRequest {
 		return fail(settings.SwitchErrorInvalidRequest, &codedError{code: -32602, message: "switch checkpoint identity mismatch"})
+	}
+	if !reconcile && (p.Step == settings.SwitchStepSourceStop || p.Step == settings.SwitchStepTargetStart) && p.ManagerIncarnation != e.switchIncarnation {
+		return fail(settings.SwitchErrorInterrupted, &codedError{code: -32000, message: "switch manager incarnation changed; reconcile before continuing"})
 	}
 	if reconcile && cp.Phase != settings.SwitchCheckpointReleased && state.PendingSwitchPorts != nil {
 		for _, pair := range []struct {

@@ -484,7 +484,15 @@ func (b *Broker) spawnEngineMgr() (supervisedHandle, error) {
 	if err != nil {
 		return nil, err
 	}
+	b.workersMu.Lock()
+	b.engineMgrRecovering = true
+	b.workersMu.Unlock()
 	b.setEngineMgr(w)
+	if !b.recoverReplacementEngineMgr(w) {
+		// Keep supervising the live replacement, but expose no forward surface
+		// while its inherited reservation cannot be reconciled.
+		return w, nil
+	}
 	go b.refreshEnginePolicySnapshot(w)
 	// Re-push the alias reservation before anything can drive this worker: a
 	// respawned engine-manager starts with an empty reservation and must not

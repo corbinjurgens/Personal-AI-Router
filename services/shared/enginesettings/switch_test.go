@@ -102,7 +102,7 @@ func TestSwitchWireFields(t *testing.T) {
 	t.Run("changed", func(t *testing.T) {
 		checkSwitchWire(t, SwitchChanged{NodeID: r.NodeID, RequestID: r.RequestID, Sequence: r.Sequence}, "nodeId requestId sequence")
 	})
-	const prepareKeys = "operationId caller origin sourceEngine targetEngine payloadHash configurationFence deadline"
+	const prepareKeys = "operationId caller origin sourceEngine targetEngine payloadHash configurationFence managerIncarnation deadline"
 	t.Run("prepare", func(t *testing.T) { checkSwitchWire(t, prepare, prepareKeys) })
 	t.Run("step", func(t *testing.T) {
 		checkSwitchWire(t, SwitchStepRequest{SwitchPrepareRequest: prepare, Step: SwitchStepSourceStop}, prepareKeys+" step")

@@ -62,6 +62,9 @@ func (b *Broker) setAvailability(ctx context.Context, state nodepolicy.Availabil
 	r.mu.Unlock()
 
 	if state == nodepolicy.Paused && origin == nodepolicy.PausedLocally {
+		// Deliver the authoritative pending pause to the manager's veto owner
+		// before cancelling waits or waiting for the availability transition.
+		b.publishNodeProjection()
 		b.cancelRemoteSwitch()
 	}
 

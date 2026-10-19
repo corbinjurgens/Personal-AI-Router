@@ -344,16 +344,23 @@ func (b *Broker) relayToEngineNow(msg *Message) {
 	}
 
 	requestedEngine, requestedPort, isEnginePortAssignment := enginePortAssignmentRequest(msg.Method, msg.Params)
-	if isEnginePortAssignment || msg.Method == "engine:stop" || msg.Method == "engine:start" || msg.Method == "engine:restart" {
-		// Explicit local Off vetoes remote work before waiting on its lock.
-		if msg.Method == "engine:stop" {
-			var target struct {
-				Engine string `json:"engine"`
+	localOffEngine := ""
+	if msg.Method == "engine:stop" {
+		var target struct {
+			Engine string `json:"engine"`
+		}
+		if json.Unmarshal(msg.Params, &target) == nil && target.Engine != "" {
+			remote, reserved := b.switchLocalOffReservation(target.Engine)
+			if reserved && !remote {
+				_ = b.codec.RespondError(msg.ID, -32000, "Engine switch reserves this engine (busy).")
+				return
 			}
-			if json.Unmarshal(msg.Params, &target) == nil && target.Engine != "" {
-				b.cancelRemoteEngineSwitch(target.Engine)
+			if remote {
+				localOffEngine = target.Engine
 			}
 		}
+	}
+	if localOffEngine == "" && (isEnginePortAssignment || msg.Method == "engine:stop" || msg.Method == "engine:start" || msg.Method == "engine:restart") {
 		b.settingsApplyMu.Lock()
 		defer b.settingsApplyMu.Unlock()
 		b.engineConfigMu.Lock()
@@ -386,6 +393,13 @@ func (b *Broker) relayToEngineNow(msg *Message) {
 	}
 
 	em := b.getEngineMgr()
+	if localOffEngine != "" {
+		// Recovery hides the replacement from forward callers; local Off must
+		// still reach its durable veto owner while that reservation is held.
+		b.workersMu.Lock()
+		em = b.engineMgr
+		b.workersMu.Unlock()
+	}
 	if em == nil {
 		if err := b.codec.RespondError(msg.ID, -32000, "engine-manager not available"); err != nil {
 			log.Printf("failed to respond to %s: %v", msg.Method, err)
@@ -397,6 +411,11 @@ func (b *Broker) relayToEngineNow(msg *Message) {
 	id := msg.ID
 	method := msg.Method
 	result, rpcErr, err := em.CallNoTimeout(context.Background(), method, msg.Params)
+	if localOffEngine != "" {
+		// The manager has now persisted the veto and cancelled its startup;
+		// only then cancel the coordinator's drain/response wait.
+		b.cancelRemoteEngineSwitch(localOffEngine)
+	}
 	switch {
 	case err != nil:
 		if e := b.codec.RespondError(id, -32000, fmt.Sprintf("engine call failed: %v", err)); e != nil {

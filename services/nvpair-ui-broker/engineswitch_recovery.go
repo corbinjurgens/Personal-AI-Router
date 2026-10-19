@@ -58,6 +58,7 @@ func (b *Broker) recoverEngineSwitch() bool {
 		return fail(&switchRPCError{*manager.Error})
 	}
 	cp := manager.Checkpoint
+	c.recoveryCheckpoint = cp
 	if cp != nil && cp.Phase != settings.SwitchCheckpointReleased {
 		reserved[cp.SourceEngine], reserved[cp.TargetEngine] = true, true
 	}
@@ -87,6 +88,7 @@ func (b *Broker) recoverEngineSwitch() bool {
 			return fail(err)
 		}
 	}
+	c.recoveryCheckpoint = nil
 	for id, receipt := range c.store.journal.Receipts {
 		if !receipt.RecoveryRequired || c.resolved[id] {
 			continue

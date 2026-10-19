@@ -190,6 +190,7 @@ type SwitchPrepareRequest struct {
 	TargetEngine       string    `json:"targetEngine"`
 	PayloadHash        string    `json:"payloadHash"`
 	ConfigurationFence string    `json:"configurationFence"`
+	ManagerIncarnation string    `json:"managerIncarnation"`
 	Deadline           time.Time `json:"deadline"`
 }
 

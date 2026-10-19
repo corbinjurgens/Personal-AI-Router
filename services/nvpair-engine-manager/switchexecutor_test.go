@@ -32,7 +32,7 @@ func switchFixture(t *testing.T) (*Executor, settings.SwitchPrepareRequest) {
 	ex := NewExecutor(reg, NewReporter(nil), nil, t.TempDir())
 	t.Cleanup(ex.StopAll)
 	ex.nodeProjection.set(nodeProjection{})
-	p := settings.SwitchPrepareRequest{OperationID: "switch-test", Caller: "local", Origin: settings.SwitchOriginLocal, SourceEngine: "source", TargetEngine: "target", PayloadHash: "sha256:0123456789012345678901234567890123456789012345678901234567890123", Deadline: time.Now().Add(time.Minute).UTC()}
+	p := settings.SwitchPrepareRequest{OperationID: "switch-test", Caller: "local", Origin: settings.SwitchOriginLocal, SourceEngine: "source", TargetEngine: "target", PayloadHash: "sha256:0123456789012345678901234567890123456789012345678901234567890123", ManagerIncarnation: ex.switchIncarnation, Deadline: time.Now().Add(time.Minute).UTC()}
 	return ex, p
 }
 
@@ -441,6 +441,128 @@ func TestSwitchRecoveryDoesNotResumeTargetStart(t *testing.T) {
 	}
 	switchStep(t, restarted, p, settings.SwitchStepRelease)
 	switchStep(t, restarted, p, settings.SwitchStepRelease)
+}
+
+func TestSwitchRestartRejectsForwardStepsBeforeReconciliation(t *testing.T) {
+	for _, step := range []string{settings.SwitchStepSourceStop, settings.SwitchStepTargetStart} {
+		t.Run(step, func(t *testing.T) {
+			ex, p := switchFixture(t)
+			p = prepareSwitch(t, ex, p)
+			if step == settings.SwitchStepTargetStart {
+				switchStep(t, ex, p, settings.SwitchStepSourceStop)
+			}
+			restarted := NewExecutor(ex.reg, NewReporter(nil), nil, ex.baseDir)
+			t.Cleanup(restarted.StopAll)
+			result := restarted.SwitchStep(context.Background(), settings.SwitchStepRequest{SwitchPrepareRequest: p, Step: step})
+			if result.Error == nil || result.Error.Code != -32000 || result.Error.Kind != settings.SwitchErrorInterrupted {
+				t.Fatalf("inherited forward step = %+v, want coded interrupted error", result)
+			}
+			if result.Checkpoint.TargetCommitted {
+				t.Fatal("replacement committed target")
+			}
+			repeated := restarted.SwitchPrepare(context.Background(), p)
+			if repeated.Error == nil || repeated.Error.Kind != settings.SwitchErrorInterrupted {
+				t.Fatalf("inherited prepare = %+v, want interrupted", repeated)
+			}
+			reconciled := restarted.SwitchReconcile(context.Background(), settings.SwitchReconcileRequest{SwitchPrepareRequest: p})
+			if reconciled.Error != nil || reconciled.Checkpoint.TargetCommitted {
+				t.Fatalf("reconcile inherited envelope = %+v", reconciled)
+			}
+			switchStep(t, restarted, p, settings.SwitchStepRelease)
+		})
+	}
+}
+
+func TestSwitchPrepareRejectsDifferentManagerIncarnation(t *testing.T) {
+	ex, p := switchFixture(t)
+	snapshot := ex.SwitchPrepare(context.Background(), settings.SwitchPrepareRequest{})
+	if snapshot.Error != nil {
+		t.Fatal(snapshot.Error)
+	}
+	p.ConfigurationFence = snapshot.ConfigurationFence
+	p.ManagerIncarnation = "previous-manager"
+	result := ex.SwitchPrepare(context.Background(), p)
+	if result.Error == nil || result.Error.Code != -32000 || result.Error.Kind != settings.SwitchErrorInterrupted || result.Checkpoint != nil {
+		t.Fatalf("stale incarnation prepare = %+v", result)
+	}
+}
+
+func TestSwitchRemoteOffVetoPrecedesHeldLifecycleLocks(t *testing.T) {
+	for _, engine := range []string{"source", "target"} {
+		t.Run(engine, func(t *testing.T) {
+			ex, p := switchFixture(t)
+			p.Origin = settings.SwitchOriginRemote
+			p = prepareSwitch(t, ex, p)
+			startCtx, done, err := ex.beginRemote(context.Background(), p.TargetEngine)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer done()
+			st, err := ex.state(engine)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ex.switchMu.Lock()
+			defer ex.switchMu.Unlock()
+			st.opMu.Lock()
+			locked := true
+			defer func() {
+				if locked {
+					st.opMu.Unlock()
+				}
+			}()
+			stopped := make(chan error, 1)
+			go func() { stopped <- ex.Stop(engine) }()
+			select {
+			case <-startCtx.Done():
+			case <-time.After(2 * time.Second):
+				t.Fatal("held lifecycle locks prevented startup veto")
+			}
+			data, err := os.ReadFile(ex.desired.path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var state desiredStateFile
+			if err := json.Unmarshal(data, &state); err != nil {
+				t.Fatal(err)
+			}
+			if on, known := state.Engines[engine]; !known || on || state.OffBy[engine] != intentLocal || state.PendingSwitch.Error == nil || state.PendingSwitch.Error.Code != codeLocalVeto {
+				t.Fatalf("veto not durable before cleanup: %+v", state)
+			}
+			select {
+			case err := <-stopped:
+				t.Fatalf("stop returned before lifecycle lock release: %v", err)
+			default:
+			}
+			st.opMu.Unlock()
+			locked = false
+			select {
+			case err := <-stopped:
+				if err != nil {
+					t.Fatal(err)
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatal("stop did not finish after lifecycle lock release")
+			}
+		})
+	}
+}
+
+func TestSwitchLocalOffDuringLocalReservationStaysBusy(t *testing.T) {
+	for _, engine := range []string{"source", "target"} {
+		t.Run(engine, func(t *testing.T) {
+			ex, p := switchFixture(t)
+			prepareSwitch(t, ex, p)
+			var busy *switchBusyError
+			if err := ex.Stop(engine); !errors.As(err, &busy) {
+				t.Fatalf("local switch stop = %v, want busy", err)
+			}
+			off, err := ex.desired.offLocally(engine)
+			if err != nil || off {
+				t.Fatalf("busy stop persisted local Off = %v, %v", off, err)
+			}
+		})
+	}
 }
 
 func TestSwitchStopStorageFailureDoesNotStopSource(t *testing.T) {

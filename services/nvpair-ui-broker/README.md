@@ -11,7 +11,10 @@ Its [engine switching contract](ENGINE_SETTINGS.md#engine-switching) covers
 `engine:switch`, status/progress, acknowledged source drain, durable receipts
 and interrupted-operation reconciliation. The broker owns transaction order;
 the engine manager owns process lifecycle and intent. Switch recovery precedes
-settings replay and enabled-engine restoration.
+settings replay and enabled-engine restoration. Local Off reaches the manager's
+durable veto path during remote reservations without waiting for the transaction
+lock. Forward steps are pinned to the preparing manager incarnation; replacement
+interrupts the operation and gates the new manager until reconciliation finishes.
 
 A Go service that exposes the NVIDIA Personal AI Router API to **UI processes**
 and other clients (CLIs, dashboards, mobile companions, scripts, tests, etc.).

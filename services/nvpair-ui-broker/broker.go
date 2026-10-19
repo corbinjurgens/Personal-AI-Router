@@ -242,17 +242,18 @@ type Broker struct {
 	// spawn goroutine can be abandoned when the broker is shutting down.
 	// Guarded by workersMu because a respawn reads it off the monitor
 	// goroutine. See proxyBringUpContext.
-	serveCtx       context.Context
-	scanner        *scannerProcess
-	peerServicesMu sync.Mutex
-	nodeInfo       *nodeInfoProcess
-	workloadMgr    *workloadManagerProcess
-	errorsProc     *errorsProcess
-	engineMgr      *rpcWorker
-	manualNodes    *rpcWorker
-	settings       *rpcWorker
-	clusterMgr     *clusterManagerProcess
-	scheduler      *rpcWorker
+	serveCtx            context.Context
+	scanner             *scannerProcess
+	peerServicesMu      sync.Mutex
+	nodeInfo            *nodeInfoProcess
+	workloadMgr         *workloadManagerProcess
+	errorsProc          *errorsProcess
+	engineMgr           *rpcWorker
+	engineMgrRecovering bool // workersMu; replacement is unavailable until switch recovery settles
+	manualNodes         *rpcWorker
+	settings            *rpcWorker
+	clusterMgr          *clusterManagerProcess
+	scheduler           *rpcWorker
 	// proxyProc is the one proxy process whether or not any facade came up in
 	// it. The per-engine handles say which facades serve; this one is what the
 	// node policy and the routing listener, which belong to the process, talk
@@ -576,7 +577,15 @@ func (b *Broker) getErrors() *errorsProcess {
 }
 
 func (b *Broker) setEngineMgr(w *rpcWorker) {
+	c := b.switchCoordinator()
 	b.workersMu.Lock()
+	if b.engineMgr != w {
+		if c.activeCancel != nil {
+			b.engineMgrRecovering = true
+			c.interrupted = true
+			c.activeCancel()
+		}
+	}
 	b.engineMgr = w
 	b.workersMu.Unlock()
 }
@@ -584,7 +593,25 @@ func (b *Broker) setEngineMgr(w *rpcWorker) {
 func (b *Broker) getEngineMgr() *rpcWorker {
 	b.workersMu.Lock()
 	defer b.workersMu.Unlock()
+	if b.engineMgrRecovering {
+		return nil
+	}
 	return b.engineMgr
+}
+
+// The replacement stays hidden from ordinary callers until conservative switch
+// recovery has run. Cancellation above lets the active owner release its lock.
+func (b *Broker) recoverReplacementEngineMgr(w *rpcWorker) bool {
+	if !b.recoverEngineSwitch() {
+		return false
+	}
+	b.workersMu.Lock()
+	defer b.workersMu.Unlock()
+	if b.engineMgr != w {
+		return false
+	}
+	b.engineMgrRecovering = false
+	return true
 }
 
 func (b *Broker) restoreEnabledEngines(w *rpcWorker) {

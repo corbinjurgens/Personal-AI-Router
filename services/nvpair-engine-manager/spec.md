@@ -427,6 +427,12 @@ its authoritative settings revisions, node identity and journal generation when
 computing the public `e3v1` revision; the manager fence goes unchanged into every
 matching executor envelope. Settings projections also supply last-published
 per-engine revisions in the manager snapshot.
+Every nonempty prepare envelope includes `managerIncarnation` copied from that
+snapshot. Prepare and forward steps (`source-stop`, `target-start`) compare it
+with the current executor incarnation before returning an idempotent success or
+performing effects. A mismatch returns `-32000` with error kind `interrupted`,
+even when the envelope matches an inherited checkpoint. Reconcile and release
+still accept that inherited envelope; restart never resumes forward execution.
 
 `engine-state.json` optionally contains `pendingSwitch` with the shared
 `SwitchCheckpoint` fields: exact operation envelope, phase, pre-intents and
@@ -455,6 +461,9 @@ restore admission closed.
 Remote prepare/start recheck local Off/pause (`-32011`). Explicit local Off
 cancels remote target work and durably records local provenance before waiting
 on the operation lock for cleanup; that vetoing stop returns its actual result.
+This admission does not acquire the switch lock or engine operation lock and
+also applies to recovery reservations. A local Off during a local switch is
+refused busy without changing intent.
 The existing projection
 path cancels remote work on local pause. Local switching is allowed under these
 remote-only vetoes.

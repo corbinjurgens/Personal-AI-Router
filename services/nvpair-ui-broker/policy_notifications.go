@@ -102,7 +102,7 @@ func (b *Broker) sendNodeProjection(onlyOnStrictChange bool) {
 		return
 	}
 	r.strictPublished = advertisement.StrictAdmission
-	projection := nodeProjection{Policy: advertisement, PausedLocally: pausedLocally(r.current)}
+	projection := nodeProjection{Policy: advertisement, PausedLocally: pausedLocally(r.current) || r.localPauseRequested}
 	r.mu.Unlock()
 	if err := worker.Notify(engineNodeProjectionMethod, projection); err != nil {
 		slog.Warn("could not publish the node projection to engine-manager", "err", err)

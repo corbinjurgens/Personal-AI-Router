@@ -512,6 +512,34 @@ func TestSwitchLocalPauseVetoDoesNotWaitForTransitionLocks(t *testing.T) {
 	if _, local := h.b.settingsPause(); !local {
 		t.Error("pending local pause was not authoritative")
 	}
+	var projections []policyCall
+	projectionDeadline := time.NewTimer(time.Second)
+	defer projectionDeadline.Stop()
+projectionWait:
+	for {
+		h.engine.mu.Lock()
+		projections = append([]policyCall(nil), h.engine.projections...)
+		h.engine.mu.Unlock()
+		if len(projections) > 0 {
+			break
+		}
+		select {
+		case <-h.engine.signal:
+		case <-projectionDeadline.C:
+			break projectionWait
+		}
+	}
+	if len(projections) == 0 {
+		t.Error("pending local pause did not reach the manager before transition-lock waiting")
+	} else {
+		var projection nodeProjection
+		if err := json.Unmarshal(projections[len(projections)-1].params, &projection); err != nil {
+			t.Fatal(err)
+		}
+		if !projection.PausedLocally {
+			t.Error("manager projection omitted the pending local pause veto")
+		}
+	}
 	stopWaiting()
 	<-done
 	r.mu.Lock()
@@ -668,6 +696,218 @@ func TestSwitchLocalOffVetoOnlyMatchesReservedEngines(t *testing.T) {
 	h.b.cancelRemoteEngineSwitch("lmstudio")
 	if ctx.Err() == nil {
 		t.Fatal("target local Off did not cancel remote switch")
+	}
+}
+
+func TestSwitchLocalOffReachesManagerWhileTargetReadinessIsHeld(t *testing.T) {
+	h := newSwitchHarness(t)
+	clustertrusttest.Join(t, h.b.clusterDir, "cluster", "target", "peer")
+	p := h.request(t, "held-readiness-off")
+	base := h.engine.answer
+	started := make(chan struct{})
+	vetoPath := filepath.Join(t.TempDir(), "local-off.json")
+	h.engine.setAnswer(func(method string, raw json.RawMessage) (any, string) {
+		if method == settings.SwitchStepMethod {
+			var step settings.SwitchStepRequest
+			if err := json.Unmarshal(raw, &step); err != nil {
+				return nil, err.Error()
+			}
+			if step.Step == settings.SwitchStepTargetStart {
+				// No clock or readiness completion can release this request. It
+				// outlives any cleanup budget unless the local veto reaches us.
+				close(started)
+				return nil, holdReply
+			}
+		}
+		if method == "engine:stop" {
+			if err := os.WriteFile(vetoPath, settingsJSON(map[string]string{"lmstudio": "off"}), 0600); err != nil {
+				return nil, err.Error()
+			}
+			h.mu.Lock()
+			h.cp.Target = switchTestState(false, false, settings.SwitchIntentOff)
+			h.cp.Error = &settings.SwitchError{Code: settings.SwitchRemoteVetoCode, Kind: settings.SwitchErrorRemoteVeto, Message: "Local Off veto."}
+			h.mu.Unlock()
+			h.engine.releaseHeld()
+			return map[string]bool{"ok": true}, ""
+		}
+		return base(method, raw)
+	})
+	if _, err := h.b.acceptEngineSwitch(context.Background(), p, "peer"); err != nil {
+		t.Fatal(err)
+	}
+	requireGateOpens(t, started, "target startup")
+	done := make(chan struct{})
+	go func() {
+		id := json.RawMessage(`91`)
+		h.b.relayToEngineNow(&Message{ID: &id, Method: "engine:stop", Params: settingsJSON(map[string]string{"engine": "lmstudio"})})
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		h.engine.releaseHeld()
+		t.Fatal("local Off waited behind the switch operation lock")
+	}
+	data, err := os.ReadFile(vetoPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var intents map[string]string
+	if err := json.Unmarshal(data, &intents); err != nil {
+		t.Fatal(err)
+	}
+	if intents["lmstudio"] != settings.SwitchIntentOff {
+		t.Fatalf("persisted intent = %v", intents)
+	}
+	r := h.receipt(t, p.RequestID)
+	if !r.Terminal || r.Phase != settings.SwitchFailedTargetStart || r.Target.Intent != settings.SwitchIntentOff || r.Source.Intent != settings.SwitchIntentOff {
+		t.Fatalf("veto receipt = %+v", r)
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.cp.TargetCommitted {
+		t.Fatal("target On committed after local Off")
+	}
+}
+
+func TestSwitchLocalOffDuringLocalSwitchIsBusy(t *testing.T) {
+	h := newSwitchHarness(t)
+	h.active.Store(1)
+	p := h.request(t, "local-switch-off")
+	if _, err := h.b.acceptEngineSwitch(context.Background(), p, ""); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	go func() {
+		id := json.RawMessage(`92`)
+		h.b.relayToEngineNow(&Message{ID: &id, Method: "engine:stop", Params: settingsJSON(map[string]string{"engine": "lmstudio"})})
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		h.active.Store(0)
+		t.Fatal("reserved local Off waited instead of refusing busy")
+	}
+	var response *Message
+	for _, frame := range h.output.frames() {
+		if frame.ID != nil && string(*frame.ID) == "92" {
+			copy := frame
+			response = &copy
+		}
+	}
+	if response == nil || response.Error == nil || response.Error.Code != settings.SwitchOperationErrorCode {
+		t.Fatalf("local Off response = %+v", response)
+	}
+	for _, call := range h.engine.snapshot() {
+		if call.method == "engine:stop" {
+			t.Fatal("local Off reached manager during local switch")
+		}
+	}
+	h.active.Store(0)
+	if r := h.receipt(t, p.RequestID); r.Phase != settings.SwitchCompleted {
+		t.Fatalf("local Off cancelled local switch: %+v", r)
+	}
+}
+
+func TestSwitchLocalOffReachesManagerDuringRecoveryReservation(t *testing.T) {
+	for _, scenario := range []string{"receipt", "orphan checkpoint"} {
+		t.Run(scenario, func(t *testing.T) {
+			h := newSwitchHarness(t)
+			r := switchStoreReceipt("remote-recovery-off")
+			r.Caller = "peer"
+			r.PayloadHash = settings.SwitchPayloadHash(r.Caller, r.NodeID, r.Request)
+			if scenario == "orphan checkpoint" {
+				h.b.engineSwitch.recoveryCheckpoint = &settings.SwitchCheckpoint{SwitchPrepareRequest: settings.SwitchPrepareRequest{Origin: settings.SwitchOriginRemote, SourceEngine: r.Request.SourceEngine, TargetEngine: r.Request.TargetEngine}, Phase: settings.SwitchCheckpointStartPending}
+			} else {
+				switchStoreAccept(t, h.b.engineSwitch.store, r)
+				if err := h.b.engineSwitch.store.InterruptNonterminal(time.Now().UTC()); err != nil {
+					t.Fatal(err)
+				}
+			}
+			h.b.settingsApplyMu.Lock()
+			h.b.workersMu.Lock()
+			h.b.engineMgrRecovering = true
+			h.b.workersMu.Unlock()
+			done := make(chan struct{})
+			go func() {
+				id := json.RawMessage(`93`)
+				h.b.relayToEngineNow(&Message{ID: &id, Method: "engine:stop", Params: settingsJSON(map[string]string{"engine": r.Request.TargetEngine})})
+				close(done)
+			}()
+			select {
+			case <-done:
+			case <-time.After(2 * time.Second):
+				h.b.settingsApplyMu.Unlock()
+				t.Fatal("recovery reservation blocked local Off")
+			}
+			h.b.settingsApplyMu.Unlock()
+			var found bool
+			for _, call := range h.engine.snapshot() {
+				found = found || call.method == "engine:stop"
+			}
+			if !found {
+				t.Fatal("local Off did not reach recovery manager")
+			}
+		})
+	}
+}
+
+func TestSwitchManagerReplacementAfterSourceOffNeverStartsTarget(t *testing.T) {
+	h := newSwitchHarness(t)
+	p := h.request(t, "manager-replacement")
+	base := h.engine.answer
+	peer, replacement := newFakeWorkerPipe(t)
+	w := &rpcWorker{peer: peer}
+	replacement.setAnswer(base)
+	// The durable source-off write is an exact barrier after the stop reply
+	// and before target-start dispatch, without a scheduler-dependent sleep.
+	h.b.engineSwitch.store.write = func(path string, data []byte, mode os.FileMode) error {
+		if err := durablefile.WriteFile(path, data, mode); err != nil {
+			return err
+		}
+		journal, err := settings.DecodeSwitchJournal(data)
+		if err != nil {
+			return err
+		}
+		if journal.Receipts[p.RequestID].Phase == settings.SwitchSourceOff {
+			h.b.setEngineMgr(w)
+		}
+		return nil
+	}
+	if _, err := h.b.acceptEngineSwitch(context.Background(), p, ""); err != nil {
+		t.Fatal(err)
+	}
+	r := h.receipt(t, p.RequestID)
+	if r.Phase != settings.SwitchFailedInterrupted || !r.RecoveryRequired || r.Error == nil || r.Error.Kind != settings.SwitchErrorInterrupted {
+		t.Fatalf("restart receipt = %+v", r)
+	}
+	if h.b.getEngineMgr() != nil {
+		t.Fatal("replacement exposed before recovery")
+	}
+	if len(replacement.snapshot()) != 0 {
+		t.Fatal("replacement received work before recovery")
+	}
+	if !h.b.recoverReplacementEngineMgr(w) {
+		t.Fatal("replacement recovery failed")
+	}
+	if h.b.getEngineMgr() != w {
+		t.Fatal("replacement remained fenced after successful recovery")
+	}
+	if got := switchSteps(t, replacement); !reflect.DeepEqual(got, []string{settings.SwitchStepRelease}) {
+		t.Fatalf("replacement steps = %v", got)
+	}
+	var reconciled bool
+	for _, call := range replacement.snapshot() {
+		reconciled = reconciled || call.method == settings.SwitchReconcileMethod
+	}
+	if !reconciled {
+		t.Fatal("replacement did not reconcile inherited reservation")
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.cp.TargetCommitted {
+		t.Fatal("replacement committed target On")
 	}
 }
 

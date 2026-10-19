@@ -19,15 +19,20 @@ import (
 // lock lets a local pause veto remote work without waiting for either operation
 // lock. Accepted work belongs to this node, never to a relay waiter.
 type engineSwitchCoordinator struct {
-	store        *engineSwitchStore
-	err          error
-	changed      chan struct{}
-	resolved     map[string]bool
-	waitMu       sync.Mutex
-	waiters      map[string]context.CancelFunc
-	remoteCancel context.CancelFunc
-	remoteSource string
-	remoteTarget string
+	store              *engineSwitchStore
+	err                error
+	changed            chan struct{}
+	resolved           map[string]bool
+	recoveryCheckpoint *settings.SwitchCheckpoint // engineConfigMu; includes orphan reservations
+	waitMu             sync.Mutex
+	waiters            map[string]context.CancelFunc
+	remoteCancel       context.CancelFunc
+	remoteSource       string
+	remoteTarget       string
+	// Active execution is fenced under workersMu, together with manager replacement.
+	activeManager *rpcWorker
+	activeCancel  context.CancelFunc
+	interrupted   bool
 }
 
 type switchRPCError struct{ detail settings.SwitchError }
@@ -118,6 +123,9 @@ func (b *Broker) pendingSwitchLocked(engine string) error {
 		return err
 	}
 	c := b.switchCoordinator()
+	if cp := c.recoveryCheckpoint; cp != nil && cp.Phase != settings.SwitchCheckpointReleased && (engine == "" || engine == cp.SourceEngine || engine == cp.TargetEngine) {
+		return switchError(settings.SwitchErrorBusy, "Switch recovery reserves this engine.")
+	}
 	if c.err != nil {
 		return c.err
 	}
@@ -129,10 +137,49 @@ func (b *Broker) pendingSwitchLocked(engine string) error {
 	return nil
 }
 
+// Local Off alone may bypass the operation lock for a remote reservation,
+// including an unresolved recovery row. The manager remains the veto owner.
+func (b *Broker) switchLocalOffReservation(engine string) (remote, reserved bool) {
+	b.engineConfigMu.Lock()
+	defer b.engineConfigMu.Unlock()
+	if b.loadEngineSwitchLocked() != nil {
+		return false, false
+	}
+	c := b.switchCoordinator()
+	if cp := c.recoveryCheckpoint; cp != nil && cp.Phase != settings.SwitchCheckpointReleased && (engine == cp.SourceEngine || engine == cp.TargetEngine) {
+		return cp.Origin == settings.SwitchOriginRemote, true
+	}
+	for _, r := range c.store.journal.Receipts {
+		if (!r.Terminal || (r.RecoveryRequired && !c.resolved[r.RequestID])) && (engine == r.Request.SourceEngine || engine == r.Request.TargetEngine) {
+			return r.Caller != settings.SwitchOriginLocal, true
+		}
+	}
+	return false, false
+}
+
 // Preserve manager error envelopes and numeric RPC errors; settingsWorkerCall
 // deliberately flattens errors and must not be used by this transaction.
 func (b *Broker) switchManagerCall(ctx context.Context, method string, params any, out any) error {
 	w := b.getEngineMgr()
+	cleanup := method == settings.SwitchReconcileMethod
+	if p, ok := params.(settings.SwitchPrepareRequest); ok && method == settings.SwitchPrepareMethod && p.OperationID == "" {
+		cleanup = true
+	}
+	if p, ok := params.(settings.SwitchStepRequest); ok && method == settings.SwitchStepMethod && p.Step == settings.SwitchStepRelease {
+		cleanup = true
+	}
+	if cleanup {
+		b.workersMu.Lock()
+		w = b.engineMgr
+		b.workersMu.Unlock()
+	}
+	return switchManagerCallOn(ctx, w, method, params, out)
+}
+
+func switchManagerCallOn(ctx context.Context, w *rpcWorker, method string, params any, out any) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if w == nil {
 		return switchError(settings.SwitchErrorBusy, "Engine manager unavailable.")
 	}
@@ -298,9 +345,16 @@ func (b *Broker) acceptEngineSwitch(ctx context.Context, p settings.SwitchReques
 	if caller != "" {
 		origin = settings.SwitchOriginRemote
 	}
-	envelope := settings.SwitchPrepareRequest{OperationID: p.RequestID, Caller: identity, Origin: origin, SourceEngine: p.SourceEngine, TargetEngine: p.TargetEngine, PayloadHash: hash, ConfigurationFence: snapshot.ConfigurationFence, Deadline: r.Deadline}
+	envelope := settings.SwitchPrepareRequest{OperationID: p.RequestID, Caller: identity, Origin: origin, SourceEngine: p.SourceEngine, TargetEngine: p.TargetEngine, PayloadHash: hash, ConfigurationFence: snapshot.ConfigurationFence, ManagerIncarnation: snapshot.Configuration.ManagerIncarnation, Deadline: r.Deadline}
 	operationCtx, cancel := context.WithDeadline(context.Background(), r.Deadline)
 	c := b.engineSwitch
+	b.workersMu.Lock()
+	w := b.engineMgr
+	c.activeManager, c.activeCancel, c.interrupted = w, cancel, b.engineMgrRecovering || w == nil
+	if c.interrupted {
+		cancel()
+	}
+	b.workersMu.Unlock()
 	c.waitMu.Lock()
 	if caller != "" {
 		c.remoteCancel = cancel
@@ -319,6 +373,9 @@ func (b *Broker) acceptEngineSwitch(ctx context.Context, p settings.SwitchReques
 		defer b.settingsApplyMu.Unlock()
 		defer cancel()
 		defer func() {
+			b.workersMu.Lock()
+			c.activeManager, c.activeCancel = nil, nil
+			b.workersMu.Unlock()
 			c.waitMu.Lock()
 			c.remoteCancel = nil
 			c.remoteSource, c.remoteTarget = "", ""
@@ -337,6 +394,19 @@ func (b *Broker) advanceEngineSwitch(id, phase string, observed *settings.Switch
 	c := b.engineSwitch
 	if c.err != nil {
 		return c.err
+	}
+	// Completion and manager replacement have one ordering point. Hold the
+	// same gate while persisting completion so an already-observed restart
+	// cannot race a completed receipt into the journal.
+	interruptedCompletion := false
+	if phase == settings.SwitchCompleted {
+		b.workersMu.Lock()
+		defer b.workersMu.Unlock()
+		if c.interrupted {
+			phase, recovery = settings.SwitchFailedInterrupted, true
+			failure = switchError(settings.SwitchErrorInterrupted, "Engine manager restarted during the switch.")
+			interruptedCompletion = true
+		}
 	}
 	r, ok := c.store.Lookup(id)
 	if !ok {
@@ -363,6 +433,9 @@ func (b *Broker) advanceEngineSwitch(id, phase string, observed *settings.Switch
 	}
 	if err != nil {
 		c.err = err
+	}
+	if err == nil && interruptedCompletion {
+		return failure
 	}
 	return err
 }
@@ -402,11 +475,14 @@ func (b *Broker) switchStep(ctx context.Context, p settings.SwitchPrepareRequest
 }
 
 func (b *Broker) runEngineSwitch(ctx context.Context, p settings.SwitchPrepareRequest) {
+	b.workersMu.Lock()
+	w := b.switchCoordinator().activeManager
+	b.workersMu.Unlock()
 	if b.advanceEngineSwitch(p.OperationID, settings.SwitchValidating, nil, nil, false) != nil {
 		return
 	}
 	var prepared switchManagerSnapshot
-	err := b.switchManagerCall(ctx, settings.SwitchPrepareMethod, p, &prepared)
+	err := switchManagerCallOn(ctx, w, settings.SwitchPrepareMethod, p, &prepared)
 	if err == nil && prepared.Error != nil {
 		err = &switchRPCError{*prepared.Error}
 	}
@@ -436,7 +512,7 @@ func (b *Broker) runEngineSwitch(ctx context.Context, p settings.SwitchPrepareRe
 	if b.advanceEngineSwitch(p.OperationID, settings.SwitchSourceStopping, nil, nil, false) != nil {
 		return
 	}
-	stopped, err := b.switchStep(ctx, p, settings.SwitchStepSourceStop)
+	stopped, err := switchForwardStep(ctx, w, p, settings.SwitchStepSourceStop)
 	if err == nil && !stopped.Observed.Source.TerminationVerified {
 		err = fmt.Errorf("source termination is unverified")
 	}
@@ -450,7 +526,7 @@ func (b *Broker) runEngineSwitch(ctx context.Context, p settings.SwitchPrepareRe
 	if b.advanceEngineSwitch(p.OperationID, settings.SwitchTargetStarting, nil, nil, false) != nil {
 		return
 	}
-	started, err := b.switchStep(ctx, p, settings.SwitchStepTargetStart)
+	started, err := switchForwardStep(ctx, w, p, settings.SwitchStepTargetStart)
 	if err == nil && (started.Checkpoint == nil || !started.Checkpoint.TargetCommitted || started.Observed.Target.Running == nil || !*started.Observed.Target.Running || started.Observed.Target.Healthy == nil || !*started.Observed.Target.Healthy) {
 		err = fmt.Errorf("target readiness/intent commit is unverified")
 	}
@@ -469,12 +545,21 @@ func (b *Broker) runEngineSwitch(ctx context.Context, p settings.SwitchPrepareRe
 		b.finishEngineSwitch(p, settings.SwitchFailedPublication, &started.Observed, err)
 		return
 	}
+	if err := ctx.Err(); err != nil {
+		b.finishEngineSwitch(p, settings.SwitchFailedPublication, &started.Observed, err)
+		return
+	}
 	if b.advanceEngineSwitch(p.OperationID, settings.SwitchCompleted, &started.Observed, nil, false) != nil {
 		return
 	}
 	// The manager's checkpoint outlives the broker's durable terminal receipt.
 	if _, err := b.switchStep(ctx, p, settings.SwitchStepRelease); err != nil {
-		b.blockEngineSwitch(err)
+		b.workersMu.Lock()
+		interrupted := b.switchCoordinator().interrupted
+		b.workersMu.Unlock()
+		if !interrupted {
+			b.blockEngineSwitch(err)
+		}
 	}
 }
 
@@ -485,6 +570,9 @@ func (b *Broker) blockEngineSwitch(err error) {
 }
 
 func (b *Broker) finishEngineSwitch(p settings.SwitchPrepareRequest, phase string, observed *settings.SwitchObserved, failure error) {
+	if b.finishInterruptedEngineSwitch(p, observed) {
+		return
+	}
 	// Cancellation never prevents bounded conservative cleanup or the durable
 	// terminal write. Reconcile never starts a target or restores a source.
 	cleanupDeadline := time.Now().Add(settings.SwitchDrainBudget)
@@ -511,6 +599,9 @@ func (b *Broker) finishEngineSwitch(p settings.SwitchPrepareRequest, phase strin
 	if drainErr := b.releaseSwitchDrain(ctx, p.SourceEngine); drainErr != nil {
 		err = drainErr
 	}
+	if b.finishInterruptedEngineSwitch(p, observed) {
+		return
+	}
 	if b.advanceEngineSwitch(p.OperationID, phase, observed, failure, err != nil) != nil {
 		return
 	}
@@ -523,6 +614,40 @@ func (b *Broker) finishEngineSwitch(p settings.SwitchPrepareRequest, phase strin
 			b.blockEngineSwitch(releaseErr)
 		}
 	}
+}
+
+func (b *Broker) finishInterruptedEngineSwitch(p settings.SwitchPrepareRequest, observed *settings.SwitchObserved) bool {
+	b.workersMu.Lock()
+	c := b.switchCoordinator()
+	if c.activeManager != nil {
+		select {
+		case <-c.activeManager.Done():
+			c.interrupted = true
+		default:
+		}
+	}
+	interrupted := c.interrupted
+	b.workersMu.Unlock()
+	if interrupted {
+		// Replacement recovery must own cleanup after this operation releases
+		// settingsApplyMu. Never wait for the replacement from inside that lock.
+		if observed != nil && (observed.Source.Intent == "" || observed.Target.Intent == "") {
+			observed = nil
+		}
+		_ = b.advanceEngineSwitch(p.OperationID, settings.SwitchFailedInterrupted, observed,
+			switchError(settings.SwitchErrorInterrupted, "Engine manager restarted during the switch."), true)
+		return true
+	}
+	return false
+}
+
+func switchForwardStep(ctx context.Context, w *rpcWorker, p settings.SwitchPrepareRequest, step string) (settings.SwitchStepResult, error) {
+	var result settings.SwitchStepResult
+	err := switchManagerCallOn(ctx, w, settings.SwitchStepMethod, settings.SwitchStepRequest{SwitchPrepareRequest: p, Step: step}, &result)
+	if err == nil && result.Error != nil {
+		err = &switchRPCError{*result.Error}
+	}
+	return result, err
 }
 
 // Reconcile may return the checkpoint's historical operation error even when

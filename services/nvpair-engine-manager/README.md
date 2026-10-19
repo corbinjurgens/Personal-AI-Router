@@ -533,6 +533,10 @@ and `configurationFence` fields supply configuration digests, settings revisions
 intent/provenance, registry/runtime fingerprint and manager incarnation. The
 broker combines these with node identity and journal generation for its public
 configuration token; it passes the manager fence back in the executor envelope.
+The envelope also carries `managerIncarnation` from the snapshot. Prepare and
+forward steps (`source-stop`, `target-start`) reject a different incarnation
+with a coded `interrupted` error, including inherited checkpoints after restart.
+Reconcile and release accept the original envelope to finish conservative cleanup.
 
 The optional `pendingSwitch` in `engine-state.json` shares the durable replacement
 with `engines` and `offBy`. Source Off and `stop-pending` are saved before stopping.
@@ -553,6 +557,9 @@ owned engines even during a reservation, without rewriting intent. A local Off
 during a remote reservation persists local provenance and cancels target startup
 before waiting for cleanup and returning the stop result. Remote switches honor
 local Off and local pause with `-32011`; local switches remain allowed.
+The veto takes neither the switch lock nor the engine operation lock, including
+for a remote reservation retained for recovery. Local Off of a reserved engine
+during a local switch remains a busy refusal.
 
 The existing pinned ec listener exposes `/v1/engine-switch/apply` and `/status`,
 relaying to the target broker with `engine:switch-request/reply/cancel`. The
