@@ -898,8 +898,34 @@ func TestReverseStreamBudgetsRejectExcessWithoutStallingOtherPeers(t *testing.T)
 	if _, err := io.WriteString(first, "PAIR-"); err != nil {
 		t.Fatalf("write first header: %v", err)
 	}
-	second := reverseTestStream(t, raw)
-	reverseTestClosed(t, second)
+	// Keep the first partial header in flight before exceeding the budget.
+	// No fixture action closes this live session before the excess stream.
+	deadline := time.Now().Add(time.Second)
+	for {
+		b.mu.Lock()
+		s := b.sessions["a"]
+		reserved := s != nil && b.current(s) && s.active == 1
+		b.mu.Unlock()
+		if reserved {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("first stream did not reserve the session budget")
+		}
+		runtime.Gosched()
+	}
+	// The receiver closes an over-budget session. That can reject the SYN
+	// before OpenStream returns, or close the stream immediately afterwards.
+	second, err := raw.OpenStream()
+	if err != nil {
+		if !errors.Is(err, yamux.ErrSessionShutdown) {
+			t.Fatalf("open excess stream: %v", err)
+		}
+		reverseTestClosed(t, first)
+	} else {
+		t.Cleanup(func() { abortReverseStream(second) })
+		reverseTestClosed(t, second)
+	}
 	if b.Has(ReversePeer{"a", "v1"}) {
 		t.Fatal("over-budget session still usable")
 	}
