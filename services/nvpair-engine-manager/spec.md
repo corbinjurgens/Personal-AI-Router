@@ -283,9 +283,14 @@ loads still running when a local veto arrives (a projection with
 answer the typed 409; a veto during an install with `start` cancels only the
 start, reported as an error frame with `"code": "local_veto"`. Stop, unload,
 delete, pull, model copy and settings edits are never vetoed, and settings
-applies cannot resume an engine saved Off. At the origin, the typed 409 and the
-coded error frame become JSON-RPC `-32011` on `engine:remote-start`,
-`engine:remote-install` and `engine:remote-load-model`.
+applies cannot resume an engine saved Off, nor, while the node is paused, a
+stopped one (the broker withholds `resume` from `engine:configure-launch`). The
+broker refuses a paired node's settings apply that would resume one while the
+node is paused locally; its `engine:settings-reply` carries `errorCode: -32011`
+and the settings route answers the same typed 409. At the origin, the typed 409
+and the coded error frame become JSON-RPC `-32011` on `engine:remote-start`,
+`engine:remote-install`, `engine:remote-load-model` and
+`engine:remote-apply-settings`.
 
 The `engine:remote-*` methods are the client half: engine-manager resolves the target `node` in an `ec` peer directory (fed by its own `discovery:subscribe{services:[ec]}` to the broker relay), dials the peer's `ec` surface with the same pinned identity, relays each streamed progress frame up as `engine:remote-progress` (keyed by a minted `opId`), and settles the request on the terminal frame. Remote install/pull run for the operation's full duration (no broker-imposed timeout); remote stop and model unload/delete are fast request/response, remote Ollama model load uses the readiness-sized response budget, and remote start waits for the engine's bounded readiness result. They error if this node isn't clustered or the target isn't a pinned peer.
 

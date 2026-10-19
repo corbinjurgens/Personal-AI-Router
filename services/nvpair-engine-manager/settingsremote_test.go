@@ -345,3 +345,45 @@ func TestSettingsRelayCorrelationCancellationAndCleanup(t *testing.T) {
 		t.Fatal("relay leaked requests")
 	}
 }
+
+// A broker settings reply with a typed code reaches the paired origin with that
+// code: the target answers a typed 409 and the origin's remote client maps it
+// back. Any other failure stays a plain 409 and -32000.
+func TestSettingsRelayErrorCodesReachThePairedOrigin(t *testing.T) {
+	cases := []struct {
+		name, message        string
+		brokerCode, wantCode int
+	}{
+		{"local veto", "this node was paused on the node itself; resume it there", codeLocalVeto, codeLocalVeto},
+		{"other failure", "settings changed on this device; reload before applying", -32000, -32000},
+		{"uncoded failure", "settings coordinator failed", 0, -32000},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			exec := settingsExecutor(t, false)
+			relay := &settingsRelay{}
+			relay.send = func(method string, params any) error {
+				request, ok := params.(settings.Relay)
+				if method != "engine:settings-request" || !ok {
+					return nil
+				}
+				data, err := json.Marshal(settingsReply{ID: request.ID, Error: c.message, ErrorCode: c.brokerCode})
+				if err != nil {
+					return err
+				}
+				go relay.reply(data)
+				return nil
+			}
+			exec.settingsParent = relay.call
+			f := newRemoteReverseFixture(t, func(mesh *clustertrust.Mesh) http.Handler { return (&controlServer{exec: exec, mesh: mesh}).mux() })
+			ctx := remoteFixtureContext(t)
+			_, err := f.client(t, ctx).postJSON(ctx, settingsPath+"apply", "ollama", settings.Request{Engine: "ollama", ExpectedRevision: 7, RequestID: "request"})
+			if err == nil {
+				t.Fatal("a refused remote apply succeeded")
+			}
+			if got := rpcCode(err); got != c.wantCode || !strings.Contains(err.Error(), "HTTP 409") || !strings.HasSuffix(err.Error(), c.message) {
+				t.Fatalf("remote apply error = code %d %q, want code %d, HTTP 409 and the broker diagnostic", got, err, c.wantCode)
+			}
+		})
+	}
+}

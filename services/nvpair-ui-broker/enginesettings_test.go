@@ -41,6 +41,9 @@ type settingsHarness struct {
 	// such as node/set-engine-drain, in arrival order.
 	proxyCallsMu sync.Mutex
 	proxyCalls   []policyCall
+	// settingsReplies receives the engine:settings-reply notifications the
+	// broker sends the fake engine-manager.
+	settingsReplies chan json.RawMessage
 }
 
 func (h *settingsHarness) unaddressedProxyCalls() []policyCall {
@@ -69,7 +72,7 @@ func newSettingsHarnessForEngine(t *testing.T, engine string) *settingsHarness {
 	for _, ln := range listeners {
 		_ = ln.Close()
 	}
-	h := &settingsHarness{b: &Broker{codec: NewCodec(&bytes.Buffer{}), nodeID: "target", clusterDir: filepath.Join(t.TempDir(), "cluster")}}
+	h := &settingsHarness{b: &Broker{codec: NewCodec(&bytes.Buffer{}), nodeID: "target", clusterDir: filepath.Join(t.TempDir(), "cluster")}, settingsReplies: make(chan json.RawMessage, 8)}
 	worker, codec := newTestRPCWorkerPipe(t)
 	h.b.setEngineMgr(worker)
 	proxyWorker, proxyCodec := newTestRPCWorkerPipe(t)
@@ -120,6 +123,13 @@ func newSettingsHarnessForEngine(t *testing.T, engine string) *settingsHarness {
 				return
 			}
 			if !msg.IsRequest() {
+				if msg.Method == "engine:settings-reply" {
+					select {
+					case h.settingsReplies <- msg.Params:
+					default:
+						t.Error("too many settings replies")
+					}
+				}
 				continue
 			}
 			switch msg.Method {

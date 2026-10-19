@@ -12,10 +12,14 @@ import (
 	settings "nvpair-shared/enginesettings"
 )
 
+// settingsReply is the broker's engine:settings-reply. Like policy:reply, a
+// failure carries its JSON-RPC errorCode, so a local veto (codeLocalVeto)
+// reaches a paired caller typed.
 type settingsReply struct {
-	ID     string          `json:"id"`
-	Result json.RawMessage `json:"result"`
-	Error  string          `json:"error,omitempty"`
+	ID        string          `json:"id"`
+	Result    json.RawMessage `json:"result"`
+	Error     string          `json:"error,omitempty"`
+	ErrorCode int             `json:"errorCode,omitempty"`
 }
 type settingsRelay struct {
 	mu      sync.Mutex
@@ -45,7 +49,7 @@ func (r *settingsRelay) call(ctx context.Context, method string, request setting
 	select {
 	case reply := <-ch:
 		if reply.Error != "" {
-			return nil, fmt.Errorf("%s", reply.Error)
+			return nil, &codedError{code: reply.ErrorCode, message: reply.Error}
 		}
 		return reply.Result, nil
 	case <-ctx.Done():

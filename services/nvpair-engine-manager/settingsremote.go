@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -67,7 +68,14 @@ func (s *controlServer) settingsRoutes(mux *http.ServeMux) {
 			}()
 			result, err := s.exec.settingsParent(ctx, method, p, caller)
 			if err != nil {
-				http.Error(w, err.Error(), 409)
+				// A local veto is a typed 409 the caller maps back to its
+				// code; anything else is a plain 409.
+				var relayErr *codedError
+				if errors.As(err, &relayErr) && wireCodes[relayErr.code] != "" {
+					writeCodedError(w, relayErr.code, err.Error())
+				} else {
+					http.Error(w, err.Error(), 409)
+				}
 				return
 			}
 			w.Header().Set("Content-Type", "application/json")

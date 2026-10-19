@@ -60,7 +60,11 @@ engines require their official stop path.
 
 A normalized no-op changes no runtime. Proxy-only edits do not restart the
 engine. A stopped engine remains stopped. Running launch/server changes stop
-and start once without rewriting explicit enabled intent. Advertisements and
+and start once without rewriting explicit enabled intent. While the node is
+paused, an Apply or a recovered operation never resumes a stopped engine, even
+one a failed Apply left with a pending resume; the settings are still applied.
+A paired node's Apply that would resume one while the node is paused on the
+node itself is refused with the local veto (`-32011`) before acceptance. Advertisements and
 proxy upstream eligibility are disabled during application and restored only
 after readiness. Polling advertisers share the node lock.
 
@@ -101,7 +105,9 @@ The existing engine-control listener exposes pinned-mTLS POST endpoints
 `/v1/engine-settings/get`, `/preview`, `/apply` and GET `/events`. Requests are
 limited to 64 KiB and cannot forward another hop. The authenticated caller ID is
 carried through correlated `engine:settings-request` / `engine:settings-reply`
-notifications to the local broker. Cancellation and pin removal cancel queued
+notifications to the local broker. A failed reply carries `errorCode`; the
+route answers `-32011` as HTTP 409 `{"error", "code": "local_veto"}`, which the
+origin returns as `-32011`, and any other failure as a plain-text 409. Cancellation and pin removal cancel queued
 work; the broker rechecks the caller after acquiring the node lock. Once
 durably accepted, the target completes under its own eleven-minute deadline even
 if the initiating peer disconnects.
