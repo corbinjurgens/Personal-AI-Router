@@ -12,6 +12,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"nvpair-shared/clustertrusttest"
 	"nvpair-shared/durablefile"
@@ -896,5 +897,69 @@ func TestSwitchLateOffResponseDoesNotCancelLaterOperation(t *testing.T) {
 	h.b.cancelRemoteEngineSwitchOperation("lmstudio", "later-switch")
 	if ctx.Err() == nil {
 		t.Fatal("matching Off response did not cancel its operation")
+	}
+}
+
+func TestSwitchInstallStartSupersededByLocalPause(t *testing.T) {
+	h := newSwitchHarness(t)
+	installed, installDone := make(chan struct{}), make(chan struct{})
+	open := h.engine.releaseHeld
+	t.Cleanup(open)
+	var started atomic.Bool
+	h.engine.setAnswer(func(method string, raw json.RawMessage) (any, string) {
+		switch method {
+		case "engine:install":
+			close(installed)
+			return map[string]bool{"ok": true}, holdSuccessReply
+		case "engine:start":
+			started.Store(true)
+		}
+		return map[string]bool{"ok": true}, ""
+	})
+	go func() {
+		id := json.RawMessage(`121`)
+		h.b.relayToEngineNow(&Message{ID: &id, Method: "engine:install", Params: json.RawMessage(`{"engine":"llamacpp","start":true}`)})
+		close(installDone)
+	}()
+	requireGateOpens(t, installed, "install/start boundary")
+
+	// Hold the transition so only pause admission runs; the projection it
+	// publishes follows the install supersession.
+	r := h.b.nodePolicyRuntime()
+	r.transitionMu.Lock()
+	waitCtx, stopWaiting := context.WithCancel(context.Background())
+	pauseDone := make(chan struct{})
+	go func() {
+		_, _ = h.b.setAvailability(waitCtx, nodepolicy.Paused, nodepolicy.PausedLocally)
+		close(pauseDone)
+	}()
+	deadline := time.Now().Add(time.Second)
+	for {
+		h.engine.mu.Lock()
+		published := len(h.engine.projections) > 0
+		h.engine.mu.Unlock()
+		if published {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("local pause admission did not publish its projection")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	stopWaiting()
+	r.transitionMu.Unlock()
+	requireGateOpens(t, pauseDone, "pause caller return")
+
+	open()
+	requireGateOpens(t, installDone, "older install/start completion")
+	if started.Load() {
+		t.Fatal("install admitted before a local pause started its engine")
+	}
+	for _, response := range h.output.frames() {
+		if response.ID != nil && string(*response.ID) == "121" {
+			if response.Error == nil || response.Error.Code != -32000 {
+				t.Fatalf("superseded install must return busy: %+v", response)
+			}
+		}
 	}
 }

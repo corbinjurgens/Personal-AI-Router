@@ -342,10 +342,11 @@ type pendingInstallStart struct {
 	superseded bool
 }
 
-// Called only after local Off admission succeeds, under engineConfigMu.
+// Called only after local Off (one engine) or local pause (engine "", every
+// engine) admission succeeds, under engineConfigMu.
 func (b *Broker) supersedeInstallStartsLocked(engine string) {
 	for pending := range b.pendingInstallStarts {
-		if pending.engine == engine {
+		if engine == "" || pending.engine == engine {
 			pending.superseded = true
 		}
 	}
@@ -482,7 +483,7 @@ func (b *Broker) relayToEngineNow(msg *Message) {
 			return
 		}
 		if installStart != nil && installStart.superseded {
-			_ = b.codec.RespondError(msg.ID, -32000, "Engine install start superseded by local Off (busy).")
+			_ = b.codec.RespondError(msg.ID, -32000, "Engine install start superseded by local Off or pause (busy).")
 			return
 		}
 		defer b.reconcileLegacySettingsLocked()

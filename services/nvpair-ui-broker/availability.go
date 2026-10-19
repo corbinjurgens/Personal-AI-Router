@@ -71,6 +71,11 @@ func (b *Broker) setAvailability(ctx context.Context, state nodepolicy.Availabil
 			r.mu.Unlock()
 			return "", err
 		}
+		// An install admitted before this pause must not start its engine
+		// afterwards; one submitted later is not affected.
+		b.engineConfigMu.Lock()
+		b.supersedeInstallStartsLocked("")
+		b.engineConfigMu.Unlock()
 		// Deliver the authoritative pending pause to the manager's veto owner
 		// before cancelling waits or waiting for the availability transition.
 		b.publishNodeProjection()

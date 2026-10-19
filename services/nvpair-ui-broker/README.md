@@ -44,7 +44,7 @@ Explicit local start, restart and install with `start: true` share the operation
 lock and recovery reservation check, including installs without a port override
 and the desktop install, installAll and update commands that send them.
 Install preparation runs without either global lock; only its separate start
-uses lifecycle admission. A local Off admitted during preparation supersedes
+uses lifecycle admission. A local Off of that engine, or a local pause, admitted during preparation supersedes
 that older start even after switch discharge. The install remains completed,
 but its start returns busy. A later On retains normal lifecycle ordering.
 The journal lock is released during lifecycle worker waits.
