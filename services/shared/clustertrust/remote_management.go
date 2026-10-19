@@ -29,6 +29,9 @@ type RemoteManagementGrant struct {
 	PeerUUID    string `json:"peerUuid"`
 	Incarnation string `json:"incarnation"`
 	Allowed     bool   `json:"allowed"`
+	// The document revision of this peer's last local decision, including a
+	// same-value choice. Unrelated peer decisions preserve it.
+	DecisionRevision string `json:"decisionRevision"`
 }
 
 type RemoteManagementDocument struct {
@@ -187,7 +190,9 @@ func DecodeRemoteManagementDocument(data []byte) (RemoteManagementDocument, erro
 	}
 	seen := make(map[string]bool)
 	for _, grant := range doc.Grants {
-		if !remoteManagementPrincipal(grant.PeerUUID) || !remoteManagementDigest(grant.Incarnation) || seen[grant.PeerUUID] {
+		decisionRevision, err := strconv.ParseUint(grant.DecisionRevision, 10, 64)
+		if !remoteManagementPrincipal(grant.PeerUUID) || !remoteManagementDigest(grant.Incarnation) || seen[grant.PeerUUID] ||
+			err != nil || decisionRevision == 0 || decisionRevision > revision || strconv.FormatUint(decisionRevision, 10) != grant.DecisionRevision {
 			return RemoteManagementDocument{}, fmt.Errorf("invalid grant")
 		}
 		seen[grant.PeerUUID] = true

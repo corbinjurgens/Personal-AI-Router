@@ -51,6 +51,16 @@ type pairingEnvelope struct {
 	JoinerEpoch  uint64      `json:"joinerEpoch,omitempty"`
 }
 
+func decodePairingEnvelope(data []byte, env *pairingEnvelope) error {
+	if _, err := decodeRemoteManagementParams(data, map[string]bool{
+		"inviteId": true, "phase": true, "msg": true, "rejected": true, "reason": true,
+		"state": true, "ready": true, "clusterId": true, "inviterEpoch": true, "joinerEpoch": true,
+	}); err != nil {
+		return err
+	}
+	return json.Unmarshal(data, env)
+}
+
 // runHTTP starts the inter-node listener on the configured port and blocks until
 // ctx is cancelled. The single port carries two transport modes distinguished
 // by the first byte of each connection (§7.2): the plain-HTTP pairing channel
@@ -91,7 +101,7 @@ func (m *Manager) handlePairing(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var env pairingEnvelope
-	if err := json.Unmarshal(body, &env); err != nil {
+	if err := decodePairingEnvelope(body, &env); err != nil {
 		http.Error(w, "invalid JSON", http.StatusBadRequest)
 		return
 	}
@@ -309,6 +319,7 @@ func (m *Manager) handlePairingCompletion(w http.ResponseWriter, env *pairingEnv
 		return
 	}
 	if out.Done && out.Success {
+		sess.completionResponse = append([]byte(nil), out.Send...)
 		if err := m.onInviterPaired(env.InviteID, sess); err != nil {
 			respondPairingCommit(w, out.Send, err)
 			return
@@ -427,7 +438,7 @@ func (m *Manager) ackPairing(env *pairingEnvelope, callerUUID string) {
 	matched := false
 	m.withClusterComposition(func() {
 		if sess.peerCert != nil {
-			matched = m.receiptCommitMatchesLocked(receipt, sess.peerPairing, sess.peerCert)
+			matched = m.receiptCommitMatchesLocked(receipt, sess.peerPairing, sess.peerCert) && m.pairingPermissionAvailableLocked(receipt)
 		}
 	})
 	if !matched {
@@ -707,8 +718,10 @@ func (m *Manager) finalizePairing(inviteID string, sess *pairingSession, pi *Pai
 	committed, pinErr := m.commitPairing(sess, pi, cert, now)
 	if pinErr != nil {
 		log.Printf("pairing %s: pin joiner: %v", inviteID, pinErr)
-		m.finishInvite(inviteID, inviteStateFailed)
-		m.deleteSession(inviteID)
+		if !sess.rollbackPending {
+			m.finishInvite(inviteID, inviteStateFailed)
+			m.deleteSession(inviteID)
+		}
 		return pinErr
 	}
 	if !committed {
@@ -762,6 +775,10 @@ func (m *Manager) commitPairing(sess *pairingSession, pi *PairingInfo, cert *x50
 		if cur, ok := m.getSession(sess.inviteID); !ok || cur != sess {
 			return
 		}
+		admissionCID, admissionEpoch := m.currentAdmission()
+		if admissionCID != sess.clusterID || admissionEpoch == 0 || (sess.localAdmissionEpoch != 0 && sess.localAdmissionEpoch != admissionEpoch) {
+			return
+		}
 		if m.removalProofBlocksAdmission(pi.NodeUUID, sess.clusterID, pi.AdmissionEpoch) {
 			err = fmt.Errorf("peer admission %d was already removed", pi.AdmissionEpoch)
 			return
@@ -771,6 +788,19 @@ func (m *Manager) commitPairing(sess *pairingSession, pi *PairingInfo, cert *x50
 		// clusterId. The inviter admits it into the session's authenticated
 		// cluster, never the untrusted pre-adoption value.
 		admitted.ClusterID = sess.clusterID
+		sess.peerPairing, sess.peerCert = &admitted, cert
+		inv, exists := m.getInvite(sess.inviteID)
+		if !exists {
+			err = errPairingCommitStale
+			return
+		}
+		receipt, stageErr := m.stagePairingReceiptLocked(sess, inv)
+		if err = stageErr; err != nil {
+			return
+		}
+		rollback := func(cause error) error {
+			return errors.Join(cause, m.rollbackPairingSessionCompositionLocked(sess, inv))
+		}
 		end := m.endorsePeer(admitted.NodeUUID, certFingerprintFromDER(cert.Raw), admitted.AdmissionEpoch)
 
 		// Persist membership before granting mTLS authority. A crash in between
@@ -778,14 +808,15 @@ func (m *Manager) commitPairing(sess *pairingSession, pi *PairingInfo, cert *x50
 		// leave an authorized pin that was never durably committed as a member.
 		m.recordMember(&admitted, stateMember, &now)
 		if err = m.persistMembersErr(); err != nil {
-			m.removeMemberByUUID(admitted.NodeUUID)
+			err = rollback(err)
 			return
 		}
 		if err = m.pinPeer(&admitted, cert, []Endorsement{end}); err != nil {
-			m.removeMemberByUUID(admitted.NodeUUID)
-			if rollbackErr := m.persistMembersErr(); rollbackErr != nil {
-				err = errors.Join(err, fmt.Errorf("persist pairing rollback: %w", rollbackErr))
-			}
+			err = rollback(err)
+			return
+		}
+		if err = m.completePairingReceiptLocked(receipt); err != nil {
+			err = rollback(err)
 			return
 		}
 		if clearErr := m.clearRemovalProofAfterAdmission(admitted.NodeUUID, admitted.AdmissionEpoch); clearErr != nil {

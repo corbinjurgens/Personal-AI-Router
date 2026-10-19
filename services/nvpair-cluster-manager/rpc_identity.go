@@ -77,6 +77,9 @@ func (m *Manager) handleSetIdentity(msg *Message) {
 			if admissionErr = m.pruneUnauthenticatedMembers(id, epoch); admissionErr != nil {
 				return
 			}
+			if admissionErr = m.finalizeRemoteManagementMigrationLocked(); admissionErr != nil {
+				return
+			}
 		}
 		m.setClusterIdentity(id, friendly)
 		restored = true

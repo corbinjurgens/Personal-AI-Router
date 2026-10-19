@@ -39,17 +39,22 @@ func managementFixture(t *testing.T) (incarnationFixture, RemoteManagementDocume
 	f := newIncarnationFixture(t)
 	marker := managementMarker(t)
 	doc := RemoteManagementDocument{Version: 1, Revision: "1", MigrationID: marker.ID,
-		Grants: []RemoteManagementGrant{{PeerUUID: "peer", Incarnation: requireIncarnation(t, f.mesh), Allowed: true}}}
+		Grants: []RemoteManagementGrant{{PeerUUID: "peer", Incarnation: requireIncarnation(t, f.mesh), Allowed: true, DecisionRevision: "1"}}}
 	writeIncarnationFile(t, filepath.Join(f.dir, RemoteManagementMigrationFile), managementEncode(t, marker))
 	writeIncarnationFile(t, filepath.Join(f.dir, RemoteManagementFile), managementEncode(t, doc))
 	return f, doc, marker
 }
 
 func TestRemoteManagementDocumentStrictFields(t *testing.T) {
-	valid := `{"version":1,"revision":"1","migrationId":"` + strings.Repeat("a", 64) + `","grants":[{"peerUuid":"peer","incarnation":"` + strings.Repeat("b", 64) + `","allowed":false}]}`
+	valid := `{"version":1,"revision":"1","migrationId":"` + strings.Repeat("a", 64) + `","grants":[{"peerUuid":"peer","incarnation":"` + strings.Repeat("b", 64) + `","allowed":false,"decisionRevision":"1"}]}`
 	doc, err := DecodeRemoteManagementDocument([]byte(valid))
 	if err != nil || len(doc.Grants) != 1 || doc.Grants[0].Allowed {
 		t.Fatalf("explicit false grant: %+v, %v", doc, err)
+	}
+	olderDecision := strings.Replace(valid, `"revision":"1"`, `"revision":"2"`, 1)
+	olderDoc, err := DecodeRemoteManagementDocument([]byte(olderDecision))
+	if err != nil || olderDoc.Revision != "2" || len(olderDoc.Grants) != 1 || olderDoc.Grants[0].DecisionRevision != "1" {
+		t.Fatalf("older per-peer decision in a newer document: %+v, %v", olderDoc, err)
 	}
 	reject := func(name, input string) {
 		t.Helper()
@@ -62,6 +67,13 @@ func TestRemoteManagementDocumentStrictFields(t *testing.T) {
 	reject("missing boolean", strings.Replace(valid, `,"allowed":false`, "", 1))
 	reject("null boolean", strings.Replace(valid, `false`, `null`, 1))
 	reject("string boolean", strings.Replace(valid, `false`, `"false"`, 1))
+	reject("missing decision revision", strings.Replace(valid, `,"decisionRevision":"1"`, "", 1))
+	reject("null decision revision", strings.Replace(valid, `"decisionRevision":"1"`, `"decisionRevision":null`, 1))
+	reject("numeric decision revision", strings.Replace(valid, `"decisionRevision":"1"`, `"decisionRevision":1`, 1))
+	reject("zero decision revision", strings.Replace(valid, `"decisionRevision":"1"`, `"decisionRevision":"0"`, 1))
+	reject("noncanonical decision revision", strings.Replace(valid, `"decisionRevision":"1"`, `"decisionRevision":"01"`, 1))
+	reject("future decision revision", strings.Replace(valid, `"decisionRevision":"1"`, `"decisionRevision":"2"`, 1))
+	reject("overflow decision revision", strings.Replace(valid, `"decisionRevision":"1"`, `"decisionRevision":"18446744073709551616"`, 1))
 	reject("duplicate nested field", strings.Replace(valid, `"allowed":false`, `"allowed":true,"allowed":false`, 1))
 	reject("duplicate root field", strings.Replace(valid, `"version":1`, `"version":2,"version":1`, 1))
 	reject("unknown field", strings.Replace(valid, `"allowed":false`, `"allowed":false,"other":0`, 1))
@@ -119,6 +131,7 @@ func TestMeshRemoteManagementFreshDecisions(t *testing.T) {
 		t.Fatalf("same admission lost grant: %+v", got)
 	}
 	doc.Revision, doc.Grants[0].Allowed = "2", false
+	doc.Grants[0].DecisionRevision = "2"
 	writeIncarnationFile(t, filepath.Join(f.dir, RemoteManagementFile), managementEncode(t, doc))
 	if got := f.mesh.RemoteManagement("peer"); got.Allowed || got.State != "denied" || got.Revision != "2" {
 		t.Fatalf("revoke = %+v", got)
