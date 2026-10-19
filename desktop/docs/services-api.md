@@ -92,6 +92,7 @@
 |---|---|---|
 | `engine:install-progress` | notification (we consume) | ✅ yes |
 | `engine:intent-changed` | notification (we consume) | ➖ ignored |
+| `engine:model-identity` | notification (we consume) | ➖ ignored |
 | `engine:models-changed` | notification (we consume) | ✅ yes |
 | `engine:pull-progress` | notification (we consume) | ✅ yes |
 | `engine:ready` | notification (we consume) | ✅ yes |
@@ -307,6 +308,7 @@
 | `engine:get-settings` | request (we call) | ✅ yes |
 | `engine:install` | request (we call) | ✅ yes |
 | `engine:intent-changed` | request (we call) | ➖ ignored |
+| `engine:model-identity` | request (we call) | ➖ ignored |
 | `engine:models-changed` | request (we call) | ✅ yes |
 | `engine:preview-settings` | request (we call) | ✅ yes |
 | `engine:set-port` | request (we call) | ⚠️ not called |
