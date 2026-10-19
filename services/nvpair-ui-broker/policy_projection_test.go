@@ -11,8 +11,95 @@ import (
 	"sync"
 	"testing"
 
+	"nvpair-ui-broker/relay"
+
+	settings "nvpair-shared/enginesettings"
 	"nvpair-shared/nodepolicy"
+	"nvpair-shared/noderec"
 )
+
+func TestRecoveringManagerDiscoverySubscribeReceivesDirectory(t *testing.T) {
+	b := &Broker{relayDir: relay.NewDirectory()}
+	engine := attachFakeEngine(t, b)
+	b.workersMu.Lock()
+	b.engineMgrRecovering = true
+	b.workersMu.Unlock()
+	peer := noderec.DirectoryNode{HostUUID: "bootstrap-serving", Services: map[noderec.ServiceKey]noderec.ServiceStatus{
+		noderec.ServiceEngineControl: {Port: 14322},
+	}}
+	b.relayDir.Apply(noderec.NotifyNodeDiscovered, peer)
+	params, err := json.Marshal(noderec.SubscribeParams{Services: []noderec.ServiceKey{noderec.ServiceEngineControl}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b.forwardEngineNotification(noderec.MethodSubscribe, params)
+	t.Cleanup(b.clearEngineRelaySub)
+	calls := engine.waitFor("recovery directory snapshot", func(calls []policyCall) bool { return len(calls) > 0 })
+	var snapshot noderec.GetNodesResult
+	if calls[0].method != noderec.NotifyNodes || !calls[0].notify {
+		t.Fatalf("directory delivery = %+v", calls[0])
+	}
+	if err := json.Unmarshal(calls[0].params, &snapshot); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(snapshot.Nodes, []noderec.DirectoryNode{peer}) {
+		t.Fatalf("directory = %+v, want %+v", snapshot.Nodes, peer)
+	}
+	if b.engineRelaySubID == 0 || b.getEngineMgr() != nil {
+		t.Fatal("subscription must be registered while forward access remains hidden")
+	}
+}
+
+func TestRecoveringManagerReadyReceivesStateProjections(t *testing.T) {
+	b := &Broker{codec: NewCodec(&syncBuffer{})}
+	engine := attachFakeEngine(t, b)
+	b.workersMu.Lock()
+	b.engineMgrRecovering = true
+	b.workersMu.Unlock()
+	r := b.nodePolicyRuntime()
+	r.mu.Lock()
+	r.localPauseRequested = true
+	r.mu.Unlock()
+	want := settings.Snapshot{Engine: "ollama", Revision: 7}
+	b.engineSettingsLoaded = true
+	b.engineSettings = map[string]*engineSettingsRecord{"ollama": {Snapshot: want}}
+	b.forwardEngineNotification("engine:ready", nil)
+	waitProjections(t, engine, 1)
+	engine.mu.Lock()
+	raw := append(json.RawMessage(nil), engine.projections[0].params...)
+	engine.mu.Unlock()
+	var projection nodeProjection
+	if err := json.Unmarshal(raw, &projection); err != nil {
+		t.Fatal(err)
+	}
+	if !projection.PausedLocally {
+		t.Fatal("recovering manager did not receive pending local pause")
+	}
+	calls := engine.waitFor("recovery settings projection", func(calls []policyCall) bool {
+		for _, call := range calls {
+			if call.method == "engine:settings-projection" {
+				return true
+			}
+		}
+		return false
+	})
+	for _, call := range calls {
+		if call.method != "engine:settings-projection" {
+			continue
+		}
+		var snapshots []settings.Snapshot
+		if err := json.Unmarshal(call.params, &snapshots); err != nil {
+			t.Fatal(err)
+		}
+		want.Sequence++
+		if !call.notify || !reflect.DeepEqual(snapshots, []settings.Snapshot{want}) {
+			t.Fatalf("settings projection = %+v, want %+v", snapshots, want)
+		}
+	}
+	if b.getEngineMgr() != nil {
+		t.Fatal("ready notification exposed recovering manager to forward callers")
+	}
+}
 
 // nodeProjections lists every engine:node-projection the fake engine-manager
 // received, in order.

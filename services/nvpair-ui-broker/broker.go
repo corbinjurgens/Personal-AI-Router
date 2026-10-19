@@ -1101,7 +1101,11 @@ func (b *Broker) handleEngineSubscribe(params json.RawMessage) {
 	if b.relayDir == nil {
 		return
 	}
-	em := b.getEngineMgr()
+	// The manager's own directory subscription must work during recovery;
+	// only forward operations are hidden by getEngineMgr.
+	b.workersMu.Lock()
+	em := b.engineMgr
+	b.workersMu.Unlock()
 	if em == nil {
 		return
 	}

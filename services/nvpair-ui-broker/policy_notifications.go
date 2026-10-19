@@ -89,7 +89,10 @@ func (b *Broker) sendNodeProjection(onlyOnStrictChange bool) {
 	r := b.nodePolicyRuntime()
 	r.projectionMu.Lock()
 	defer r.projectionMu.Unlock()
-	worker := b.getEngineMgr()
+	// Recovery needs authoritative policy, including a pending local pause.
+	b.workersMu.Lock()
+	worker := b.engineMgr
+	b.workersMu.Unlock()
 	if worker == nil {
 		return
 	}

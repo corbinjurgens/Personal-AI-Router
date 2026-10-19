@@ -252,7 +252,11 @@ func (b *Broker) publishSettingsLocked() {
 			}
 		}
 	}
-	if worker := b.getEngineMgr(); worker != nil {
+	// This is a state projection, not permission to execute forward work.
+	b.workersMu.Lock()
+	worker := b.engineMgr
+	b.workersMu.Unlock()
+	if worker != nil {
 		_ = worker.Notify("engine:settings-projection", all)
 	}
 }

@@ -15,6 +15,9 @@ settings replay and enabled-engine restoration. Local Off reaches the manager's
 durable veto path during remote reservations without waiting for the transaction
 lock. Forward steps are pinned to the preparing manager incarnation; replacement
 interrupts the operation and gates the new manager until reconciliation finishes.
+The gate applies to forward operations, including on the initial spawn. The
+manager's discovery subscription and node/settings projections still reach the
+current worker during recovery, including authoritative local-pause state.
 Off/pause admission and terminal completion share a gate, so an admitted veto
 cannot produce a successful receipt while a stop response is pending. Broker
 cleanup carries the operation-specific Off/pause veto to the manager before

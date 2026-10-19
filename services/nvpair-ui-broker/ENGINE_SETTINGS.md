@@ -248,7 +248,10 @@ Transient inspection, reconcile and drain-release errors are separate from
 permanent journal/storage uncertainty. Replacement recovery retries conservative
 cleanup on the same still-current worker with bounded backoff; the replacement
 stays hidden throughout. Success clears only the retryable error and permits the
-remaining bring-up continuation. Exhaustion keeps the manager unavailable and
+remaining bring-up continuation. This gate also applies on the initial spawn;
+the manager's discovery subscription and node/settings state projections bypass
+it so recovery receives the peer directory and authoritative local-pause state.
+Exhaustion keeps the manager unavailable and
 reports sticky `engine-switch:recovery-blocked`; it never resumes switch steps or
 silently treats the blocked replacement as usable. Corruption and uncertain
 durability remain fenced.
