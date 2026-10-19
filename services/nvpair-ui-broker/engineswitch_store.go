@@ -276,11 +276,29 @@ func switchStoreCapacity(j settings.SwitchJournal) error {
 
 func (s *engineSwitchStore) copyJournal() settings.SwitchJournal {
 	j := s.journal
+	if s.journal.LocalObligations != nil {
+		j.LocalObligations = make(map[string]settings.SwitchLocalObligation, len(s.journal.LocalObligations))
+		for id, obligation := range s.journal.LocalObligations {
+			j.LocalObligations[id] = obligation
+		}
+	}
 	j.Receipts = make(map[string]settings.SwitchReceipt, len(s.journal.Receipts))
 	for id, r := range s.journal.Receipts {
 		j.Receipts[id] = cloneSwitchReceipt(r)
 	}
 	return j
+}
+
+func (s *engineSwitchStore) SaveLocalObligation(id string, obligation settings.SwitchLocalObligation) error {
+	if err := s.trustError(); err != nil {
+		return err
+	}
+	next := s.copyJournal()
+	if next.LocalObligations == nil {
+		next.LocalObligations = make(map[string]settings.SwitchLocalObligation)
+	}
+	next.LocalObligations[id] = obligation
+	return s.persist(next)
 }
 
 func (s *engineSwitchStore) persist(next settings.SwitchJournal) error {

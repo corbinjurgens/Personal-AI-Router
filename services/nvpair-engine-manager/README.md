@@ -572,20 +572,20 @@ during a local switch remains a busy refusal.
 The parent may scope `engine:stop` with internal `switchOperationId` for an Off
 admitted during a remote reservation. Under the same admission lock, a settled
 or different reservation makes the scoped stop a no-op against newer work.
-If prepare rejected before reserving, the manager remembers Off eligibility
-per engine until any newer mutation or prepare involving it is admitted. Only
-that matching rejected operation may fall back to ordinary local Off. Boolean
-intent and Off provenance alone cannot detect a later reassertion of On;
-admission invalidation does, even when the saved value is unchanged. This
-eligibility is process-local; replacement managers conservatively ignore stale
-scoped requests. Unscoped local stops retain ordinary lifecycle semantics.
-Reconcile of a rejected prepare with a still-eligible latched engine Off first
-creates a durable cleanup reservation. A provisional remote prepare refusal
-also retains its reservation until final reconcile/release. Reconcile physically
-stops and verifies locally vetoed engines even at the reserved/pre-source-stop
-phase: this is the user's Off, independent of failed switch drain. Failed or
-unverified termination retains the reservation, and release refuses an
-unverified local Off. Source is never restarted.
+Missing checkpoints, including rejected prepares, also make scoped stops no-ops.
+The broker durably journals the admitted Off before latching it, then discharges
+it through an ordinary unscoped stop before releasing its operation lock. Internal
+`verifyStop: true` on that parent stop returns `SwitchEngineState` with verified
+termination and saved Off, or an error; ordinary callers retain the status reply.
+This discharge replays after either process restarts, including without a manager
+checkpoint, before restoration or readiness. An older direct peer start loses to
+the subsequently admitted local Off; a later explicit local On waits for discharge.
+A provisional remote prepare refusal retains its reservation until final cleanup.
+Reconcile physically stops only engines whose local Off is recorded for this
+operation (`sourceLocalOff`/`targetLocalOff`), including the reserved phase. Old
+local-Off provenance on an adopted running source does not authorize physical
+cleanup after failed drain. Release refuses unverified operation-specific Off.
+Source is never restarted by reconciliation.
 While a remote reservation remains unreleased, local Off of either engine or
 local pause also vetoes an already-committed target. Reconciliation records
 target Off and pending cleanup before stopping it; source is never restored.

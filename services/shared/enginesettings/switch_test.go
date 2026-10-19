@@ -99,6 +99,10 @@ func TestSwitchWireFields(t *testing.T) {
 	t.Run("journal", func(t *testing.T) {
 		checkSwitchWire(t, SwitchJournal{Version: 1, Generation: 1, ActiveRequestID: r.RequestID, Receipts: map[string]SwitchReceipt{r.RequestID: r}}, "version generation activeRequestId receipts")
 	})
+	t.Run("journal local obligations", func(t *testing.T) {
+		checkSwitchWire(t, SwitchJournal{Version: 1, Receipts: map[string]SwitchReceipt{}, LocalObligations: map[string]SwitchLocalObligation{"operation": {SourceOff: true}}}, "version generation activeRequestId receipts localObligations")
+		checkSwitchWire(t, SwitchLocalObligation{SourceOff: true}, "sourceOff targetOff pause discharged")
+	})
 	t.Run("changed", func(t *testing.T) {
 		checkSwitchWire(t, SwitchChanged{NodeID: r.NodeID, RequestID: r.RequestID, Sequence: r.Sequence}, "nodeId requestId sequence")
 	})
@@ -118,6 +122,11 @@ func TestSwitchWireFields(t *testing.T) {
 	checkpoint := SwitchCheckpoint{SwitchPrepareRequest: prepare, Phase: SwitchCheckpointReserved, PreSource: state, PreTarget: state, Source: state, Target: state}
 	t.Run("checkpoint", func(t *testing.T) {
 		checkSwitchWire(t, checkpoint, prepareKeys+" phase preSource preTarget sourceProvenance targetProvenance source target targetCommitted error")
+	})
+	t.Run("checkpoint operation local Off", func(t *testing.T) {
+		cp := checkpoint
+		cp.SourceLocalOff, cp.TargetLocalOff = true, true
+		checkSwitchWire(t, cp, prepareKeys+" phase preSource preTarget sourceProvenance targetProvenance source target targetCommitted sourceLocalOff targetLocalOff error")
 	})
 	t.Run("executor result", func(t *testing.T) {
 		checkSwitchWire(t, SwitchPrepareResult{Checkpoint: &checkpoint, Observed: SwitchObserved{Source: state, Target: state}, Error: &errValue}, "checkpoint observed error")
@@ -526,6 +535,31 @@ func TestSwitchJournalValidation(t *testing.T) {
 			t.Fatal("accepted too many receipts")
 		}
 	})
+}
+
+func TestSwitchJournalLocalObligationValidation(t *testing.T) {
+	test := func(name string, local, orphan, empty bool, valid bool) {
+		t.Run(name, func(t *testing.T) {
+			r := switchReceiptFixture()
+			if !local {
+				r.Caller = "peer"
+				r.PayloadHash = SwitchPayloadHash(r.Caller, r.NodeID, r.Request)
+			}
+			id := r.RequestID
+			if orphan {
+				id = "missing"
+			}
+			o := SwitchLocalObligation{SourceOff: !empty, TargetOff: !empty}
+			j := SwitchJournal{Version: SwitchVersion, Generation: 1, ActiveRequestID: r.RequestID, Receipts: map[string]SwitchReceipt{r.RequestID: r}, LocalObligations: map[string]SwitchLocalObligation{id: o}}
+			if err := j.Validate(); (err == nil) != valid {
+				t.Fatalf("Validate = %v; want valid %v", err, valid)
+			}
+		})
+	}
+	test("both engines on remote operation", false, false, false, true)
+	test("local operation cannot own remote veto", true, false, false, false)
+	test("obligation requires its receipt", false, true, false, false)
+	test("empty obligation refused", false, false, true, false)
 }
 
 func TestSwitchStrictDecode(t *testing.T) {

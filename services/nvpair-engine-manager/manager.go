@@ -43,6 +43,8 @@ type opParam struct {
 	Start  bool   `json:"start,omitempty"`
 	// SwitchOperationID scopes a delayed local Off to the admitted reservation.
 	SwitchOperationID string `json:"switchOperationId,omitempty"`
+	// VerifyStop requests internal cleanup evidence on an ordinary unscoped stop.
+	VerifyStop bool `json:"verifyStop,omitempty"`
 }
 
 type actionParam struct {
@@ -385,6 +387,11 @@ func (m *Manager) runOp(ctx context.Context, msg *Message) {
 	}
 	if err != nil {
 		m.respondOrErr(msg, nil, err)
+		return
+	}
+	if msg.Method == "engine:stop" && p.VerifyStop && p.SwitchOperationID == "" {
+		observed, err := m.exec.verifyStopped(p.Engine)
+		m.respondOrErr(msg, observed, err)
 		return
 	}
 	st, err := m.exec.Status(p.Engine)

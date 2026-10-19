@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -86,7 +87,10 @@ func TestSwitchRecoveryLateOffReconcilesBeforeRelease(t *testing.T) {
 			go func() { done <- h.b.recoverReplacementEngineMgr(w) }()
 			requireGateOpens(t, reached, "recovery reconcile/drain barrier")
 			// No ordinary stop request is delivered. Recovery owns the veto.
-			remote, reserved, id := h.b.admitLocalEngineOff(engine)
+			remote, reserved, id, err := h.b.admitLocalEngineOff(engine)
+			if err != nil {
+				t.Fatal(err)
+			}
 			if !remote || !reserved || id != r.RequestID {
 				t.Fatalf("recovery Off admission = %v, %v, %q", remote, reserved, id)
 			}
@@ -124,6 +128,96 @@ func hideSwitchRecoveryManager(t *testing.T, b *Broker) *rpcWorker {
 	}
 	b.engineMgrRecovering = true
 	return b.engineMgr
+}
+
+func TestSwitchRecoveryReplaysJournalOffWithoutCheckpoint(t *testing.T) {
+	test := func(name string, restart, verify bool) {
+		t.Run(name, func(t *testing.T) {
+			h := newSwitchHarness(t)
+			r := switchStoreReceipt("durable-off")
+			r.Caller = "peer"
+			r.PayloadHash = settings.SwitchPayloadHash(r.Caller, r.NodeID, r.Request)
+			switchStoreAccept(t, h.b.engineSwitch.store, r)
+			remote, reserved, id, err := h.b.admitLocalEngineOff(r.Request.SourceEngine)
+			if err != nil || !remote || !reserved || id != r.RequestID {
+				t.Fatalf("admit Off: %v %v %q %v", remote, reserved, id, err)
+			}
+			if disk := switchStoreDisk(t, h.b.engineSwitch.store); !disk.LocalObligations[id].SourceOff || disk.LocalObligations[id].Discharged {
+				t.Fatalf("undischarged disk obligation: %+v", disk.LocalObligations)
+			}
+			if restart {
+				// A fresh coordinator and store lose every latch/resolved bit.
+				path := h.b.engineSwitch.store.path
+				h.b.engineSwitch = &engineSwitchCoordinator{store: newEngineSwitchStore(path), changed: make(chan struct{}), resolved: make(map[string]bool)}
+			}
+			w := hideSwitchRecoveryManager(t, h.b)
+			base := h.engine.answer
+			var stopped, ready bool
+			h.engine.setAnswer(func(method string, raw json.RawMessage) (any, string) {
+				if method == "engine:stop" {
+					var p struct {
+						Engine      string `json:"engine"`
+						VerifyStop  bool   `json:"verifyStop"`
+						OperationID string `json:"switchOperationId"`
+					}
+					if err := json.Unmarshal(raw, &p); err != nil {
+						return nil, err.Error()
+					}
+					if p.Engine != r.Request.SourceEngine || !p.VerifyStop || p.OperationID != "" {
+						return nil, "discharge must be ordinary verified source Off"
+					}
+					stopped = true
+					if !verify {
+						return settings.SwitchEngineState{Intent: settings.SwitchIntentOff}, ""
+					}
+				}
+				if method == "engine:switch-recovery-ready" {
+					ready = true
+					if !stopped || !switchStoreDisk(t, h.b.engineSwitch.store).LocalObligations[id].Discharged {
+						t.Error("readiness preceded durable Off discharge")
+					}
+				}
+				return base(method, raw)
+			})
+			ok := h.b.recoverReplacementEngineMgr(w)
+			if ok != verify || ready != verify || !stopped {
+				t.Fatalf("recover=%v ready=%v stopped=%v", ok, ready, stopped)
+			}
+			o := switchStoreDisk(t, h.b.engineSwitch.store).LocalObligations[id]
+			if o.Discharged != verify {
+				t.Fatalf("discharge after recovery: %+v", o)
+			}
+			if !verify && (h.b.getEngineMgr() != nil || h.b.engineSwitch.resolved[id]) {
+				t.Fatal("unverified Off released recovery ownership")
+			}
+		})
+	}
+	test("manager replacement before cleanup", false, true)
+	test("broker restart before cleanup", true, true)
+	test("unverified stop retains recovery", true, false)
+}
+
+func TestSwitchVetoJournalWriteFailureRefusesLocalOff(t *testing.T) {
+	h := newSwitchHarness(t)
+	r := switchStoreReceipt("off-write-failure")
+	r.Caller = "peer"
+	r.PayloadHash = settings.SwitchPayloadHash(r.Caller, r.NodeID, r.Request)
+	switchStoreAccept(t, h.b.engineSwitch.store, r)
+	h.b.engineSwitch.store.write = func(string, []byte, os.FileMode) error { return errors.New("journal write refused") }
+	id := json.RawMessage(`190`)
+	h.b.relayToEngineNow(&Message{ID: &id, Method: "engine:stop", Params: settingsJSON(map[string]string{"engine": r.Request.SourceEngine})})
+	var refused bool
+	for _, frame := range h.output.frames() {
+		if frame.ID != nil && string(*frame.ID) == "190" && frame.Error != nil {
+			refused = true
+		}
+	}
+	if !refused || h.b.engineSwitch.localVeto != nil || len(h.engine.methods("engine:stop")) != 0 {
+		t.Fatal("failed durable admission latched or dispatched Off, or hid the refusal")
+	}
+	if len(switchStoreDisk(t, h.b.engineSwitch.store).LocalObligations) != 0 {
+		t.Fatal("failed write changed durable obligations")
+	}
 }
 
 func TestSwitchRecoveryRetriesInspectionBeforePublishingManager(t *testing.T) {
@@ -368,9 +462,6 @@ func TestSwitchRecoveryRetainsVetoUntilManagerAdmission(t *testing.T) {
 						return nil, err.Error()
 					}
 					want := settings.SwitchLocalVeto{Engine: "llamacpp"}
-					if forgetLatch {
-						want = settings.SwitchLocalVeto{Pause: true}
-					}
 					if cleanup.OperationID != p.RequestID || cleanup.LocalVeto == nil || *cleanup.LocalVeto != want {
 						t.Errorf("recovery lost operation veto: %+v", cleanup)
 					}
@@ -381,7 +472,7 @@ func TestSwitchRecoveryRetainsVetoUntilManagerAdmission(t *testing.T) {
 				t.Fatal(err)
 			}
 			requireGateOpens(t, reached, "post-publication barrier")
-			if remote, reserved, _ := h.b.admitLocalEngineOff("llamacpp"); !remote || !reserved {
+			if remote, reserved, _, err := h.b.admitLocalEngineOff("llamacpp"); err != nil || !remote || !reserved {
 				t.Fatalf("Off admission: remote %v, reserved %v", remote, reserved)
 			}
 			release()

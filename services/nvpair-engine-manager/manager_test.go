@@ -12,7 +12,37 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	settings "nvpair-shared/enginesettings"
 )
+
+func TestSwitchDischargeStopReturnsVerifiedInternalEvidence(t *testing.T) {
+	ex, _ := switchFixture(t)
+	if err := ex.desired.set("source", true, intentLocal); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	m := NewManager(NewCodec(&out), ex, nil, "")
+	id := json.RawMessage(`194`)
+	m.runOp(context.Background(), &Message{ID: &id, Method: "engine:stop", Params: json.RawMessage(`{"engine":"source","verifyStop":true}`)})
+	var reply Message
+	if err := json.Unmarshal(out.Bytes(), &reply); err != nil {
+		t.Fatal(err)
+	}
+	if reply.Error != nil {
+		t.Fatalf("discharge reply: %+v", reply.Error)
+	}
+	var result settings.SwitchEngineState
+	if err := json.Unmarshal(reply.Result, &result); err != nil {
+		t.Fatal(err)
+	}
+	if err := result.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if result.Intent != settings.SwitchIntentOff || !result.TerminationVerified {
+		t.Fatalf("discharge evidence: %+v", result)
+	}
+}
 
 // TestManagerErrorResponses drives handleMessage / runOp / runAction over
 // an in-memory codec and asserts the JSON-RPC error responses for the

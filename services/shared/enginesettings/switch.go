@@ -168,10 +168,20 @@ type SwitchReceipt struct {
 // SwitchJournal never evicts receipts. A full journal refuses fresh requests;
 // callers must also reserve space for terminal/recovery writes at acceptance.
 type SwitchJournal struct {
-	Version         int                      `json:"version"`
-	Generation      uint64                   `json:"generation"`
-	ActiveRequestID string                   `json:"activeRequestId"`
-	Receipts        map[string]SwitchReceipt `json:"receipts"`
+	Version          int                              `json:"version"`
+	Generation       uint64                           `json:"generation"`
+	ActiveRequestID  string                           `json:"activeRequestId"`
+	Receipts         map[string]SwitchReceipt         `json:"receipts"`
+	LocalObligations map[string]SwitchLocalObligation `json:"localObligations,omitempty"`
+}
+
+// SwitchLocalObligation is internal broker journal state, never a public receipt.
+// Discharged is durable evidence that cleanup completed before releasing ownership.
+type SwitchLocalObligation struct {
+	SourceOff  bool `json:"sourceOff"`
+	TargetOff  bool `json:"targetOff"`
+	Pause      bool `json:"pause"`
+	Discharged bool `json:"discharged"`
 }
 
 type SwitchChanged struct {
@@ -221,6 +231,8 @@ type SwitchCheckpoint struct {
 	Source           SwitchEngineState `json:"source"`
 	Target           SwitchEngineState `json:"target"`
 	TargetCommitted  bool              `json:"targetCommitted"`
+	SourceLocalOff   bool              `json:"sourceLocalOff,omitempty"`
+	TargetLocalOff   bool              `json:"targetLocalOff,omitempty"`
 	Error            *SwitchError      `json:"error"`
 }
 
@@ -395,6 +407,12 @@ func (j SwitchJournal) Validate() error {
 	}
 	if j.Receipts == nil || len(j.Receipts) > MaxSwitchReceipts {
 		return errors.New("switch journal requires a bounded receipts map")
+	}
+	for id, obligation := range j.LocalObligations {
+		r, ok := j.Receipts[id]
+		if !ok || r.Caller == SwitchOriginLocal || (!obligation.SourceOff && !obligation.TargetOff && !obligation.Pause) {
+			return errors.New("invalid operation-specific local obligation")
+		}
 	}
 	active := 0
 	for id, receipt := range j.Receipts {

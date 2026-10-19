@@ -137,6 +137,15 @@ func (b *Broker) recoverEngineSwitchOn(w *rpcWorker) bool {
 				veto = c.localVeto
 			}
 			b.workersMu.Unlock()
+			if o, ok := c.store.journal.LocalObligations[cp.OperationID]; ok && veto == nil {
+				if o.Pause {
+					veto = &settings.SwitchLocalVeto{Pause: true}
+				} else if o.SourceOff {
+					veto = &settings.SwitchLocalVeto{Engine: cp.SourceEngine}
+				} else if o.TargetOff {
+					veto = &settings.SwitchLocalVeto{Engine: cp.TargetEngine}
+				}
+			}
 			// Recover the durable veto outcome even if restart lost the latch.
 			if veto == nil && cp.Origin == settings.SwitchOriginRemote {
 				if r, ok := c.store.Lookup(cp.OperationID); ok && r.Error != nil && r.Error.Kind == settings.SwitchErrorRemoteVeto {
@@ -156,6 +165,9 @@ func (b *Broker) recoverEngineSwitchOn(w *rpcWorker) bool {
 			// Drain RPCs can also admit a late Off. Keep the checkpoint until
 			// they finish, then recheck the latch before releasing either owner.
 			if err := releaseDrains(); err != nil {
+				return fail(err)
+			}
+			if err := b.dischargeSwitchLocalObligationLocked(ctx, cp.OperationID, nil); err != nil {
 				return fail(err)
 			}
 			b.workersMu.Lock()
@@ -178,10 +190,30 @@ func (b *Broker) recoverEngineSwitchOn(w *rpcWorker) bool {
 			if err != nil {
 				return fail(err)
 			}
+			c.resolved[cp.OperationID] = true
+			c.recoveryCheckpoint = nil
 			break
 		}
-	} else if err := releaseDrains(); err != nil {
-		return fail(err)
+	} else {
+		if err := releaseDrains(); err != nil {
+			return fail(err)
+		}
+	}
+	// A rejected prepare or replacement can have no manager checkpoint at all.
+	// The journal, rather than manager-local admission history, owns this Off.
+	for {
+		pending := false
+		for id, o := range c.store.journal.LocalObligations {
+			if !o.Discharged {
+				pending = true
+				if err := b.dischargeSwitchLocalObligationLocked(ctx, id, nil); err != nil {
+					return fail(err)
+				}
+			}
+		}
+		if !pending {
+			break
+		}
 	}
 	c.recoveryCheckpoint = nil
 	for id, receipt := range c.store.journal.Receipts {

@@ -51,7 +51,6 @@ func (e *Executor) admitMutationLocked(engine string) (func(), error) {
 }
 
 func (e *Executor) trackMutationLocked(engine string) func() {
-	delete(e.switchRejectedOff, engine)
 	if e.switchMutations == nil {
 		e.switchMutations = make(map[string]int)
 	}
@@ -70,12 +69,6 @@ func (e *Executor) admitStop(engine string, origin intentOrigin, operationID str
 	if err == nil && operationID != "" {
 		cp := state.PendingSwitch
 		if origin != intentLocal || cp == nil || cp.OperationID != operationID || cp.Phase == settings.SwitchCheckpointReleased || cp.Origin != settings.SwitchOriginRemote || (cp.SourceEngine != engine && cp.TargetEngine != engine) {
-			if origin == intentLocal && e.switchRejectedOff[engine] == operationID && (cp == nil || cp.Phase == settings.SwitchCheckpointReleased) {
-				// Prepare rejected without reserving. No newer mutation or
-				// prepare has superseded this engine's admitted Off.
-				e.desired.mu.Unlock()
-				return e.admitMutationLocked(engine)
-			}
 			// The broker admitted this Off against a particular reservation.
 			// Once that reservation is gone, neither its veto nor its physical
 			// stop may affect a later switch or an explicit local On.
@@ -87,8 +80,10 @@ func (e *Executor) admitStop(engine string, origin intentOrigin, operationID str
 		if cp := state.PendingSwitch; cp != nil && cp.Phase != settings.SwitchCheckpointReleased && cp.Origin == settings.SwitchOriginRemote && (cp.SourceEngine == engine || cp.TargetEngine == engine) {
 			state.setIntent(engine, false, intentLocal)
 			if engine == cp.SourceEngine {
+				cp.SourceLocalOff = true
 				cp.Source.TerminationVerified = false
 			} else {
+				cp.TargetLocalOff = true
 				cp.Target.TerminationVerified = false
 			}
 			cp.Error = switchFailure(codeLocalVeto, settings.SwitchErrorRemoteVeto, &localVetoError{reason: engineOffVeto(engine)})
@@ -233,16 +228,6 @@ func (e *Executor) SwitchPrepare(ctx context.Context, p settings.SwitchPrepareRe
 	reserved := false
 	fail := func(code int, kind string, err error) switchExecutorResult {
 		result.Error = switchFailure(code, kind, err)
-		if !reserved && admissionHeld && p.Origin == settings.SwitchOriginRemote && p.ManagerIncarnation == e.switchIncarnation && validSwitchEnvelope(p) == nil && (result.Checkpoint == nil || result.Checkpoint.Phase == settings.SwitchCheckpointReleased) {
-			if e.switchRejectedOff == nil {
-				e.switchRejectedOff = make(map[string]string)
-			}
-			for _, engine := range []string{p.SourceEngine, p.TargetEngine} {
-				if _, ok := e.reg.Get(engine); ok && e.switchMutations[engine] == 0 {
-					e.switchRejectedOff[engine] = p.OperationID
-				}
-			}
-		}
 		if reserved {
 			// A remote prepare refusal still needs the broker's final veto
 			// reconciliation before releasing its provisional reservation.
@@ -282,10 +267,6 @@ func (e *Executor) SwitchPrepare(ctx context.Context, p settings.SwitchPrepareRe
 		result.Observed = settings.SwitchObserved{Source: cp.Source, Target: cp.Target}
 		result.Error = cp.Error
 		return result
-	}
-	if p.OperationID != "" {
-		delete(e.switchRejectedOff, p.SourceEngine)
-		delete(e.switchRejectedOff, p.TargetEngine)
 	}
 	config, err := e.switchConfiguration(state)
 	if err != nil {
@@ -453,6 +434,12 @@ func (e *Executor) saveSwitch(cp *settings.SwitchCheckpoint, engine string, on b
 	// Never overwrite that durable cancellation with the step's older copy.
 	if previous := state.PendingSwitch; previous != nil && previous.OperationID == cp.OperationID && previous.Error != nil && previous.Error.Code == codeLocalVeto {
 		cp.Error = previous.Error
+		if previous.SourceLocalOff && !cp.SourceLocalOff {
+			cp.SourceLocalOff, cp.Source = true, previous.Source
+		}
+		if previous.TargetLocalOff && !cp.TargetLocalOff {
+			cp.TargetLocalOff, cp.Target = true, previous.Target
+		}
 	}
 	state.PendingSwitch = cp
 	state.PendingSwitchPorts = e.switchPorts(cp)
@@ -483,29 +470,6 @@ func (e *Executor) SwitchStep(ctx context.Context, p settings.SwitchStepRequest)
 func (e *Executor) SwitchReconcile(ctx context.Context, p settings.SwitchReconcileRequest) settings.SwitchReconcileResult {
 	e.switchMu.Lock()
 	defer e.switchMu.Unlock()
-	// A veto can arrive before prepare reserved anything (or before its
-	// scoped stop was delivered). Give that Off a durable cleanup owner,
-	// provided newer engine work has not invalidated the rejected prepare.
-	if p.LocalVeto != nil && p.LocalVeto.Engine != "" && !p.LocalVeto.Pause {
-		e.switchAdmission.Lock()
-		e.desired.mu.Lock()
-		state, err := e.desired.load()
-		if err == nil && e.switchRejectedOff[p.LocalVeto.Engine] == p.OperationID && p.OperationID != "" && p.Origin == settings.SwitchOriginRemote && (p.LocalVeto.Engine == p.SourceEngine || p.LocalVeto.Engine == p.TargetEngine) && (state.PendingSwitch == nil || state.PendingSwitch.Phase == settings.SwitchCheckpointReleased) {
-			cp := &settings.SwitchCheckpoint{SwitchPrepareRequest: p.SwitchPrepareRequest, Phase: settings.SwitchCheckpointReserved}
-			cp.Source.Intent = switchIntent(state, p.SourceEngine)
-			cp.Target.Intent = switchIntent(state, p.TargetEngine)
-			state.PendingSwitch = cp
-			state.PendingSwitchPorts = e.switchPorts(cp)
-			state.setIntent(p.LocalVeto.Engine, false, intentLocal)
-			cp.Error = switchFailure(codeLocalVeto, settings.SwitchErrorRemoteVeto, &localVetoError{reason: engineOffVeto(p.LocalVeto.Engine)})
-			err = e.desired.save(state)
-		}
-		e.desired.mu.Unlock()
-		e.switchAdmission.Unlock()
-		if err != nil {
-			return settings.SwitchReconcileResult{Error: switchFailure(-32000, settings.SwitchErrorStorage, err)}
-		}
-	}
 	return e.switchStepLocked(ctx, settings.SwitchStepRequest{SwitchPrepareRequest: p.SwitchPrepareRequest}, true, p.LocalVeto)
 }
 
@@ -567,6 +531,11 @@ func (e *Executor) switchStepLocked(ctx context.Context, p settings.SwitchStepRe
 			if !localVeto.Pause {
 				reason = engineOffVeto(localVeto.Engine)
 				state.setIntent(localVeto.Engine, false, intentLocal)
+				if localVeto.Engine == cp.SourceEngine {
+					cp.SourceLocalOff = true
+				} else {
+					cp.TargetLocalOff = true
+				}
 			}
 			cp.Error = switchFailure(codeLocalVeto, settings.SwitchErrorRemoteVeto, &localVetoError{reason: reason})
 			err = e.desired.save(state)
@@ -606,10 +575,10 @@ func (e *Executor) switchStepLocked(ctx context.Context, p settings.SwitchStepRe
 		paused, _ := e.nodeProjection.pausedLocally()
 		if cp.Origin == settings.SwitchOriginRemote {
 			for _, pair := range []struct {
-				name        string
+				veto        bool
 				observation settings.SwitchEngineState
-			}{{cp.SourceEngine, cp.Source}, {cp.TargetEngine, cp.Target}} {
-				if on, known := state.Engines[pair.name]; known && !on && state.OffBy[pair.name] != intentPeer && !pair.observation.TerminationVerified {
+			}{{cp.SourceLocalOff, cp.Source}, {cp.TargetLocalOff, cp.Target}} {
+				if pair.veto && !pair.observation.TerminationVerified {
 					return fail(settings.SwitchErrorBusy, errors.New("reconcile local Off before release; reservation retained"))
 				}
 			}
@@ -631,10 +600,10 @@ func (e *Executor) switchStepLocked(ctx context.Context, p settings.SwitchStepRe
 	if reconcile && cp.Origin == settings.SwitchOriginRemote {
 		for _, pair := range []struct {
 			name        string
+			veto        bool
 			observation *settings.SwitchEngineState
-		}{{cp.SourceEngine, &cp.Source}, {cp.TargetEngine, &cp.Target}} {
-			on, known := state.Engines[pair.name]
-			if !known || on || state.OffBy[pair.name] == intentPeer {
+		}{{cp.SourceEngine, cp.SourceLocalOff, &cp.Source}, {cp.TargetEngine, cp.TargetLocalOff, &cp.Target}} {
+			if !pair.veto {
 				continue
 			}
 			st, stopErr := e.state(pair.name)
