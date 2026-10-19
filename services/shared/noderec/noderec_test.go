@@ -12,6 +12,37 @@ import (
 	"nvpair-shared/nodepolicy"
 )
 
+func TestServedResidentDirectoryRoundTrip(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		served nodepolicy.ServedModels
+	}{
+		{name: "absent"}, {name: "empty", served: nodepolicy.ServedModels{}},
+		{name: "restricted", served: nodepolicy.ServedModels{{Engine: "ollama", Model: "m"}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := nodepolicy.Default()
+			p.ServedModels = tc.served
+			adv := p.Advertisement()
+			node := DirectoryNode{Policy: &adv}
+			for range 3 {
+				raw, err := json.Marshal(node)
+				if err != nil {
+					t.Fatal(err)
+				}
+				var next DirectoryNode
+				if err := json.Unmarshal(raw, &next); err != nil {
+					t.Fatal(err)
+				}
+				if next.Policy == nil || !reflect.DeepEqual(next.Policy.ServedModels, tc.served) {
+					t.Fatal("directory lost served presence or references")
+				}
+				node = next
+			}
+		})
+	}
+}
+
 func TestEngineModels(t *testing.T) {
 	// Attribution present: each engine gets exactly its own list, never the union.
 	attributed := DirectoryNode{

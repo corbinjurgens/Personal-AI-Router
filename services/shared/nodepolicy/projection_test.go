@@ -10,6 +10,112 @@ import (
 	"testing"
 )
 
+func TestServedResidentPeerRoundTrip(t *testing.T) {
+	for _, name := range []string{"absent", "empty", "subset"} {
+		t.Run(name, func(t *testing.T) {
+			p := stagedPolicy(t)
+			if name == "empty" {
+				p.ServedModels = ServedModels{}
+			}
+			if name == "subset" {
+				desired := servedResidentPolicy()
+				p.ServedModels, p.ResidentModels, p.Profiles = desired.ServedModels, desired.ResidentModels, desired.Profiles
+			}
+			projection := p.PeerProjection()
+			for range 3 {
+				raw, err := json.Marshal(projection)
+				if err != nil {
+					t.Fatal(err)
+				}
+				var fields map[string]json.RawMessage
+				if err := json.Unmarshal(raw, &fields); err != nil {
+					t.Fatal(err)
+				}
+				if fields["routing"] != nil {
+					t.Fatal("private routing exposed")
+				}
+				if (fields["servedModels"] != nil) != (p.ServedModels != nil) {
+					t.Fatal("permission presence lost")
+				}
+				var next PeerPolicy
+				if err := json.Unmarshal(raw, &next); err != nil {
+					t.Fatal(err)
+				}
+				if !reflect.DeepEqual(projection, next) {
+					t.Fatal("unstable peer projection")
+				}
+				merged, err := MergePeerSet(p, raw)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !reflect.DeepEqual(merged.ServedModels, p.ServedModels) || !reflect.DeepEqual(merged.ResidentModels, p.ResidentModels) || !reflect.DeepEqual(merged.Routing, p.Routing) {
+					t.Fatal("merge lost desired fields or private routing")
+				}
+				projection = next
+			}
+		})
+	}
+}
+
+func TestServedResidentPeerOwnedSlices(t *testing.T) {
+	p := servedResidentPolicy()
+	peer := p.PeerProjection()
+	p.ServedModels[0].Model = "caller change"
+	p.ResidentModels[0].Model = "caller change"
+	if peer.ServedModels[0].Model != "m" || peer.ResidentModels[0].Model != "m" {
+		t.Fatal("projection aliases caller slices")
+	}
+	peer.ServedModels[0].Model = "projection change"
+	peer.ResidentModels[0].Model = "projection change"
+	if p.ServedModels[0].Model != "caller change" || p.ResidentModels[0].Model != "caller change" {
+		t.Fatal("caller slices alias projection")
+	}
+}
+
+func TestServedResidentPeerRawKeys(t *testing.T) {
+	for _, raw := range []string{
+		`{"servedModels":[],"servedModels":[]}`, `{"servedModels":[],"ServedModels":[]}`,
+		`{"residentModels":null}`, `{"servedModels":null}`,
+		`{"residentModels":[{"engine":"ollama","engine":"ollama","model":"m"}]}`,
+	} {
+		var peer PeerPolicy
+		if err := json.Unmarshal([]byte(raw), &peer); err == nil {
+			t.Fatalf("peer accepted %s", raw)
+		}
+		if _, err := MergePeerSet(Default(), []byte(raw)); err == nil {
+			t.Fatalf("merge accepted %s", raw)
+		}
+	}
+}
+
+func TestServedResidentRoleAuthority(t *testing.T) {
+	p := servedResidentPolicy()
+	p.ServedModels = ServedModels{}
+	p.ResidentModels = nil
+	p.Roles = map[string]Role{TierStrong: {Engine: "ollama", Model: "outside"}}
+	if err := p.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := json.Marshal(p.PeerProjection())
+	if err != nil {
+		t.Fatal(err)
+	}
+	merged, err := MergePeerSet(p, raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(merged.Roles, p.Roles) || !reflect.DeepEqual(p.PeerProjection().Roles, p.Roles) {
+		t.Fatal("roles rewritten outside served permission")
+	}
+	adv := p.Advertisement()
+	if len(adv.Roles) != 1 || adv.Roles[TierStrong].Model != "outside" {
+		t.Fatal("advertisement lost declaring role")
+	}
+	if _, ok := adv.Roles[TierWeak]; ok {
+		t.Fatal("omitted role invented")
+	}
+}
+
 // peerDocument is the JSON a peer sends back: the stored policy's projection
 // with edit applied to its top-level keys.
 func peerDocument(t *testing.T, stored Policy, edit func(doc map[string]any)) []byte {

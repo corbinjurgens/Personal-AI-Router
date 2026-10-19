@@ -11,6 +11,75 @@ import (
 	"testing"
 )
 
+func TestServedResidentAdvertisementRoundTrip(t *testing.T) {
+	for _, name := range []string{"absent", "empty", "subset"} {
+		t.Run(name, func(t *testing.T) {
+			p := servedResidentPolicy()
+			if name == "absent" {
+				p.ServedModels = nil
+			}
+			if name == "empty" {
+				p.ServedModels = ServedModels{}
+				p.ResidentModels = nil
+			}
+			adv := p.Advertisement()
+			for range 3 {
+				raw, err := json.Marshal(adv)
+				if err != nil {
+					t.Fatal(err)
+				}
+				var fields map[string]json.RawMessage
+				if err := json.Unmarshal(raw, &fields); err != nil {
+					t.Fatal(err)
+				}
+				if (fields["servedModels"] != nil) != (p.ServedModels != nil) {
+					t.Fatal("permission presence lost")
+				}
+				for _, private := range []string{"residentModels", "routing", "profiles", "tiers"} {
+					if fields[private] != nil {
+						t.Fatalf("advertisement exposed %s", private)
+					}
+				}
+				var next Advertisement
+				if err := json.Unmarshal(raw, &next); err != nil {
+					t.Fatal(err)
+				}
+				if !reflect.DeepEqual(adv, next) {
+					t.Fatal("unstable advertisement")
+				}
+				adv = next
+			}
+		})
+	}
+}
+
+func TestServedResidentAdvertisementOwnedSlices(t *testing.T) {
+	p := servedResidentPolicy()
+	adv := p.Advertisement()
+	p.ServedModels[0].Model = "caller change"
+	if adv.ServedModels[0].Model != "m" {
+		t.Fatal("advertisement aliases caller slices")
+	}
+	adv.ServedModels[0].Model = "advertisement change"
+	if p.ServedModels[0].Model != "caller change" {
+		t.Fatal("policy aliases advertisement")
+	}
+}
+
+func TestServedResidentAdvertisementRawKeys(t *testing.T) {
+	for _, raw := range []string{
+		`{"servedModels":null}`, `{"servedModels":[],"servedModels":[]}`,
+		`{"servedModels":[],"ServedModels":[]}`, `{"ServedModels":[]}`,
+		`{"servedModels":[{"engine":"ollama","model":"m","model":"m"}]}`,
+		`{"servedModels":[{"engine":"ollama","Model":"m"}]}`,
+	} {
+		var adv Advertisement
+		if err := json.Unmarshal([]byte(raw), &adv); err == nil {
+			t.Fatalf("advertisement accepted %s", raw)
+		}
+	}
+}
+
 func TestAdvertisementTakesBoundsFromProfiles(t *testing.T) {
 	p := stagedPolicy(t)
 	p.Profiles = []Profile{{

@@ -361,6 +361,12 @@ func (a *admissionController) admit(ctx context.Context, req admissionRequest) a
 	for {
 		pol := a.policy
 		var sends []notification
+		// Admission is the serving linearization point under the policy mutex.
+		// Already-admitted work drains across restrictive policy activation;
+		// queued requests must recheck permission before receiving a ticket.
+		if !modelServed(pol.ServedModels, req.engine, model, a.normalize) {
+			return reject(rejectNotServed)
+		}
 
 		// 1. Availability, then a settings-restart drain of this engine.
 		switch a.availability {

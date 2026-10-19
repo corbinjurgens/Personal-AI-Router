@@ -363,6 +363,32 @@ func (f *facade) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	isInf := isInferenceRequest(f.profile, r.Method, r.URL.Path)
+	// An inference body naming "model" twice is ambiguous: admission and
+	// workload tracking read the last member while the tier rewrite replaces
+	// the first, so the model admitted here and the model the engine decodes
+	// could disagree. rejectAmbiguous refuses such a body wherever this
+	// handler would otherwise read it — the strict branch, and, after the
+	// alias refusal keeps its precedence, the routing path — always before
+	// candidates, admission or any upstream sees it. Control endpoints keep
+	// their existing behavior.
+	rejectAmbiguous := func() bool {
+		if !isInf || !ambiguousModelMember(bodyBytes) {
+			return false
+		}
+		slog.Warn("proxy request rejected",
+			"id", reqID, "method", r.Method, "path", r.URL.Path,
+			"remote", r.RemoteAddr, "reason", "ambiguous model member")
+		writeIngressError(w, http.StatusBadRequest, "ambiguous-model", ambiguousModelMessage)
+		_ = f.notify("proxy/request", RequestEvent{
+			ID:       reqID,
+			Method:   r.Method,
+			Path:     r.URL.Path,
+			Status:   http.StatusBadRequest,
+			Duration: time.Since(start).Milliseconds(),
+			Error:    "ambiguous model member",
+		})
+		return true
+	}
 	strict, strictErr := parseStrictAdmission(r.Header)
 	if strictErr != nil {
 		writeIngressError(w, http.StatusBadRequest, "strict-admission", strictErr.Error())
@@ -371,6 +397,9 @@ func (f *facade) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	if strict != nil {
 		if !isInf {
 			writeIngressError(w, http.StatusBadRequest, "strict-admission", "strict admission requires inference")
+			return
+		}
+		if rejectAmbiguous() {
 			return
 		}
 		// The internal strict envelope names destination-local execution. It
@@ -393,6 +422,11 @@ func (f *facade) handleHTTP(w http.ResponseWriter, r *http.Request) {
 			Duration: time.Since(start).Milliseconds(),
 			Error:    reason,
 		})
+		return
+	}
+	// An alias-less ambiguous body is refused only now, so a reserved alias
+	// keeps the precedence its own test pins.
+	if rejectAmbiguous() {
 		return
 	}
 	routingModel := ""
@@ -982,10 +1016,18 @@ func (f *facade) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		// The body this attempt sends: the request's own, with a tier's concrete
 		// model in place of the tier name and every other byte untouched.
 		sendBody := bodyBytes
-		if cand.model != "" && bodyBytes != nil {
-			if rewritten, ok := replaceModel(bodyBytes, cand.model); ok {
-				sendBody = rewritten
+		if cand.model != "" {
+			rewritten, ok := replaceModel(bodyBytes, cand.model)
+			if !ok {
+				cancelAttempt()
+				ctl.setAttempt(nil)
+				respondedWithError = true
+				finalStatus = http.StatusBadRequest
+				proxyErr = "model rewrite failed"
+				writeIngressError(w, http.StatusBadRequest, "ambiguous-model", ambiguousModelMessage)
+				break
 			}
+			sendBody = rewritten
 		}
 		// How long the destination may queue this attempt: not at all while
 		// this round still has somewhere else to go, so a busy node hands the
@@ -1051,6 +1093,16 @@ func (f *facade) handleHTTP(w http.ResponseWriter, r *http.Request) {
 			curTicket = decision.ticket
 			if decision.hasProfile {
 				sendBody = mergeDefaults(sendBody, decision.profile.RequestOptions)
+				if !bodyModelMatches(sendBody, candModel) {
+					curTicket.release()
+					cancelAttempt()
+					ctl.setAttempt(nil)
+					respondedWithError = true
+					finalStatus = http.StatusBadRequest
+					proxyErr = "model defaults changed admitted model"
+					writeIngressError(w, http.StatusBadRequest, "ambiguous-model", ambiguousModelMessage)
+					break
+				}
 			}
 			if cand.dormant {
 				// Admission waited for the wake; the engine's address is the one

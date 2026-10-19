@@ -86,6 +86,9 @@ func (f *facade) dormantSelfCandidate(model string) (candidate, bool) {
 		return candidate{}, false
 	}
 	pol := p.admission.currentPolicy()
+	if !modelServed(pol.ServedModels, f.profile.Name, model, p.normalizeEngineModel) {
+		return candidate{}, false
+	}
 	if on, known := p.admission.engineIntent(f.profile.Name); !known || !on || !pol.Idle.StartOnDemand {
 		return candidate{}, false
 	}

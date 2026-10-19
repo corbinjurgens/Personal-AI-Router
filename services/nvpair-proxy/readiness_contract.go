@@ -225,10 +225,13 @@ func (a *admissionController) qualifyStrict(engine, model, route string, body []
 // StrictReadiness is what the controller can admit under the strict contract
 // for the active policy revision: the installed capability, its models under
 // the normalized keys they were installed with and sorted by engine and model,
-// or none when nothing is installed or strict storage is untrusted (AdmitStrict
-// fails closed then). Policy activation and identity changes have already
-// rederived the capability. ProxyRunID is the process's; reportStrictReadiness
-// stamps it.
+// filtered by the active served policy so a model this node may not serve is
+// not advertised, or none when nothing is installed, nothing is servable, or
+// strict storage is untrusted (AdmitStrict fails closed then). The filter is
+// outward only: installed, qualified and generation state stay in place so
+// already-admitted tickets keep their evidence. Policy activation and identity
+// changes have already rederived the capability. ProxyRunID is the process's;
+// reportStrictReadiness stamps it.
 func (a *admissionController) StrictReadiness() nodepolicy.StrictAdmissionReadiness {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -238,7 +241,17 @@ func (a *admissionController) StrictReadiness() nodepolicy.StrictAdmissionReadin
 	}
 	models := make([]nodepolicy.StrictAdmissionModel, 0, len(a.strict.models))
 	for _, m := range a.strict.models {
+		// Publication follows the active served policy: a model this node may
+		// not serve is not part of the capability it advertises, while the
+		// internal installation, qualification and generation state stays
+		// intact so already-admitted tickets keep their evidence.
+		if !modelServed(a.policy.ServedModels, m.Engine, m.Model, a.normalize) {
+			continue
+		}
 		models = append(models, m)
+	}
+	if len(models) == 0 {
+		return out
 	}
 	slices.SortFunc(models, func(x, y nodepolicy.StrictAdmissionModel) int {
 		if c := strings.Compare(x.Engine, y.Engine); c != 0 {
@@ -297,6 +310,9 @@ func (a *admissionController) AdmitStrict(ctx context.Context, engine, model str
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
+		if !modelServed(a.policy.ServedModels, engine, model, a.normalize) {
+			return nil, errStrictUnavailable
+		}
 		m, ok := a.strict.models[k]
 		if !ok || a.strict.generation[k] != generation || m.MaxConcurrent < 1 || m.Identity != req.Identity || a.strict.storageErr != nil || a.availability != nodepolicy.Available || a.drain[engine] {
 			return nil, errStrictUnavailable
@@ -353,7 +369,7 @@ func (a *admissionController) AdmitStrict(ctx context.Context, engine, model str
 				a.active++
 				a.activeByEngine[engine]++
 				a.lastActivity[engine] = now.UnixMilli()
-				return &strictTicket{base: base, generation: a.strict.generation[k], identity: req.Identity, deadline: dispatchDeadline, ctx: ctx, warmOnly: true}, nil
+				return &strictTicket{base: base, generation: a.strict.generation[k], identity: req.Identity, deadline: dispatchDeadline, ctx: ctx, warmOnly: true, servedModels: a.policy.ServedModels}, nil
 			}
 			if plan == fitWait {
 				if queue.Before(deadline) {
@@ -398,7 +414,7 @@ func (a *admissionController) AdmitStrict(ctx context.Context, engine, model str
 					a.active++
 					a.activeByEngine[engine]++
 					a.lastActivity[engine] = now.UnixMilli()
-					return &strictTicket{base: base, generation: a.strict.generation[k], identity: req.Identity, deadline: deadline, ctx: ctx}, nil
+					return &strictTicket{base: base, generation: a.strict.generation[k], identity: req.Identity, deadline: deadline, ctx: ctx, servedModels: a.policy.ServedModels}, nil
 				}
 			}
 		}
@@ -430,14 +446,17 @@ func (a *admissionController) AdmitStrict(ctx context.Context, engine, model str
 }
 
 type strictTicket struct {
-	base       *admissionTicket
-	identity   nodepolicy.StrictModelIdentity
-	generation uint64
-	deadline   time.Time
-	ctx        context.Context
-	dispatched bool
-	finished   bool
-	warmOnly   bool
+	// Permission belongs to the admission snapshot: restrictive activation
+	// does not revoke existing work. Policy slices are replaced, never mutated.
+	servedModels nodepolicy.ServedModels
+	base         *admissionTicket
+	identity     nodepolicy.StrictModelIdentity
+	generation   uint64
+	deadline     time.Time
+	ctx          context.Context
+	dispatched   bool
+	finished     bool
+	warmOnly     bool
 }
 
 func (t *strictTicket) BeforeStrictDispatch() error {
@@ -449,6 +468,9 @@ func (t *strictTicket) BeforeStrictDispatch() error {
 	}
 	if t.dispatched {
 		return nil
+	}
+	if !modelServed(t.servedModels, t.base.key.engine, t.base.key.model, a.normalize) {
+		return errStrictUnavailable
 	}
 	mc, ok := a.strict.models[t.base.key]
 	if !ok || a.strict.generation[t.base.key] != t.generation {

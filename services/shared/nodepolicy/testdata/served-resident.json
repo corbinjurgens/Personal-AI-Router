@@ -1,0 +1,28 @@
+{
+  "SPDX-FileCopyrightText": "Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.",
+  "SPDX-License-Identifier": "Apache-2.0",
+  "duplicateKeyBoundary": "Raw service JSON rejects duplicate keys. JSON.parse collapses exact duplicates; decoded-object consumers cannot recover them.",
+  "cases": [
+    {"name":"absent", "input":{}, "valid":true, "servedPresent":false},
+    {"name":"empty", "input":{"servedModels":[],"residentModels":[]}, "valid":true, "servedPresent":true,"served":[]},
+    {"name":"restricted", "input":{"servedModels":[{"engine":"ollama","model":"m"}]}, "valid":true,"servedPresent":true,"served":[{"engine":"ollama","model":"m"}]},
+    {"name":"qualified subset", "input":{"servedModels":[{"engine":"ollama","model":"m"}],"residentModels":[{"engine":"ollama","model":"m"}],"profiles":[{"name":"m","engine":"ollama","model":"m","contextTokens":4096,"maxOutputTokens":512,"maxConcurrent":1,"memoryBytes":1024,"qualification":{"id":"q","revision":"1"}}]},"valid":true,"servedPresent":true,"served":[{"engine":"ollama","model":"m"}],"residents":[{"engine":"ollama","model":"m"}]},
+    {"name":"served null", "input":{"servedModels":null}, "valid":false},
+    {"name":"resident null", "input":{"residentModels":null}, "valid":false},
+    {"name":"served duplicate entry", "input":{"servedModels":[{"engine":"ollama","model":"m"},{"engine":"ollama","model":"m"}]}, "valid":false},
+    {"name":"resident duplicate entry", "input":{"residentModels":[{"engine":"ollama","model":"m"},{"engine":"ollama","model":"m"}]}, "valid":false},
+    {"name":"invalid engine", "input":{"servedModels":[{"engine":"bad/id","model":"m"}]}, "valid":false},
+    {"name":"missing model", "input":{"servedModels":[{"engine":"ollama"}]}, "valid":false},
+    {"name":"reserved model", "input":{"servedModels":[{"engine":"ollama","model":"weak"}]}, "valid":false},
+    {"name":"empty model", "input":{"residentModels":[{"engine":"ollama","model":""}]}, "valid":false},
+    {"name":"wrong list type", "input":{"servedModels":{}}, "valid":false},
+    {"name":"case variant field", "input":{"ServedModels":[]}, "valid":false},
+    {"name":"case variant resident", "input":{"ResidentModels":[]}, "valid":false},
+    {"name":"raw duplicate served", "raw":"{\"servedModels\":[],\"servedModels\":[]}", "valid":false},
+    {"name":"raw duplicate resident", "raw":"{\"residentModels\":[],\"residentModels\":[]}", "valid":false},
+    {"name":"raw case duplicate", "raw":"{\"servedModels\":[],\"ServedModels\":[]}", "valid":false},
+    {"name":"raw duplicate reference key", "raw":"{\"servedModels\":[{\"engine\":\"ollama\",\"engine\":\"ollama\",\"model\":\"m\"}]}", "valid":false},
+    {"name":"raw case reference key", "raw":"{\"residentModels\":[{\"engine\":\"ollama\",\"Model\":\"m\",\"model\":\"m\"}]}", "valid":false},
+    {"name":"unqualified resident", "input":{"residentModels":[{"engine":"ollama","model":"m"}]}, "valid":false}
+  ]
+}

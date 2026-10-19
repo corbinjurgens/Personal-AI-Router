@@ -442,10 +442,7 @@ func TestReverseInferencePhase04(t *testing.T) {
 	testAuthority := func(name string, source, target *task1Node) {
 		t.Run(name, func(t *testing.T) {
 			pin := filepath.Join(source.base, "cluster", "trusted", target.uuid+".json")
-			original, err := os.ReadFile(pin)
-			if err != nil {
-				t.Fatal(err)
-			}
+			original := readLiveDurableFile(t, pin)
 			defer func() {
 				if err := os.WriteFile(pin, original, 0o600); err != nil {
 					t.Error(err)

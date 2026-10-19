@@ -156,6 +156,52 @@ func TestStrictAdmissionUnsupportedRequestError(t *testing.T) {
 	}
 }
 
+// decodeStrictContract must reject a duplicate key at its object level before
+// the map collapse silently keeps the last occurrence. The duplicate value is
+// listed first so a collapsing decode would accept the object.
+func TestStrictContractDuplicateObjectKeys(t *testing.T) {
+	identity := `{"engineRunId":"engine-1","settingsFingerprint":"` + strings.Repeat("a", 64) + `","modelDigest":"` + strings.Repeat("b", 64) + `"}`
+	duplicateIdentity := `{"engineRunId":"rogue-run","engineRunId":"engine-1","settingsFingerprint":"` + strings.Repeat("a", 64) + `","modelDigest":"` + strings.Repeat("b", 64) + `"}`
+	prepareResident := func(inner string) string {
+		return `{"policyRevision":"1","proxyRunId":"proxy-1","engine":"ollama","model":"m:latest","identity":` + inner + `,"operationId":"op-1","timeoutMs":60000}`
+	}
+	reject := func(t *testing.T, err error) {
+		t.Helper()
+		if err == nil {
+			t.Fatal("accepted a contract with a duplicated key")
+		}
+		if !strings.Contains(err.Error(), "duplicate field") {
+			t.Fatalf("error = %v, want a duplicate field error", err)
+		}
+	}
+	t.Run("prepare resident rejects nested duplicate identity field", func(t *testing.T) {
+		var got PrepareResidentParams
+		err := json.Unmarshal([]byte(prepareResident(duplicateIdentity)), &got)
+		reject(t, err)
+	})
+	t.Run("identity rejects duplicate field", func(t *testing.T) {
+		var got StrictModelIdentity
+		err := json.Unmarshal([]byte(duplicateIdentity), &got)
+		reject(t, err)
+	})
+	t.Run("control: duplicate-free objects decode", func(t *testing.T) {
+		var params PrepareResidentParams
+		if err := json.Unmarshal([]byte(prepareResident(identity)), &params); err != nil {
+			t.Fatal(err)
+		}
+		if params.Identity.EngineRunID != "engine-1" {
+			t.Fatalf("identity.engineRunId = %q, want engine-1", params.Identity.EngineRunID)
+		}
+		var direct StrictModelIdentity
+		if err := json.Unmarshal([]byte(identity), &direct); err != nil {
+			t.Fatal(err)
+		}
+		if direct.EngineRunID != "engine-1" {
+			t.Fatalf("engineRunId = %q, want engine-1", direct.EngineRunID)
+		}
+	})
+}
+
 func TestStrictCapabilityCardinalityAndDuplicates(t *testing.T) {
 	f := loadStrictFixtures(t)
 	f.Model["identity"] = f.Identity

@@ -209,17 +209,17 @@ var routingID = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
 // at least two labels whose last label starts with a letter (so no IP
 // literal), an optional port, and a path of one or more nonempty segments of
 // unreserved characters. Userinfo, query, fragment, percent-encoding and empty
-// segments cannot match. Further rules are in checkEndpoint.
+// segments cannot match. Further rules are in CheckEndpoint.
 var endpointPattern = regexp.MustCompile(`^https://((?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?)(:[1-9][0-9]{0,4})?((?:/[A-Za-z0-9._~-]+)+)$`)
 
 // localNameSuffixes are last host labels that name this machine or its local
 // network. The resolved address is checked again when dialing.
 var localNameSuffixes = []string{"localhost", "local", "localdomain", "internal", "arpa"}
 
-// checkEndpoint accepts only endpointPattern, with a host of at most 253
+// CheckEndpoint accepts only endpointPattern, with a host of at most 253
 // characters, a port of at most 65535 other than the implied :443, no "." or
 // ".." segment and no local name. The error does not echo the endpoint.
-func checkEndpoint(endpoint string) error {
+func CheckEndpoint(endpoint string) error {
 	m := endpointPattern.FindStringSubmatch(endpoint)
 	if len(endpoint) > maxEndpointLength || m == nil {
 		return errors.New("endpoint must be an https URL with a lower-case DNS host and a path, and no userinfo, query, fragment or percent-encoding")
@@ -443,7 +443,7 @@ func validateDeployment(d Deployment, accounts map[string]bool) error {
 		}
 	}
 	if d.Endpoint != "" {
-		if err := checkEndpoint(d.Endpoint); err != nil {
+		if err := CheckEndpoint(d.Endpoint); err != nil {
 			return err
 		}
 	}

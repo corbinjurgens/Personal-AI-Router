@@ -171,7 +171,7 @@ func (d *daemon) fetchModelsForPeer(hostUUID, ip string, port int, clusterUUID s
 //
 //   - A strictAdmission key in another letter case rejects the whole
 //     advertisement (the strict contract's rule against aliases): the node is
-//     kept, declaring nothing.
+//     kept with its last-good inventory under the existing freshness rules.
 //   - A malformed strictAdmission (invalid version 1 contents or envelope, or
 //     null) rejects only the capability: the advertisement is kept without it.
 //
@@ -205,7 +205,7 @@ func decodeInventoryPolicy(raw json.RawMessage) (adv *nodepolicy.Advertisement, 
 			continue
 		}
 		if strings.EqualFold(m.key, strictAdmissionKey) {
-			return nil, rejectedAdvertisement, nil
+			return nil, rejectedAdvertisement, err
 		}
 		key, keyErr := json.Marshal(m.key)
 		if keyErr != nil {

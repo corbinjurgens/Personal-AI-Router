@@ -528,6 +528,9 @@ func (b *Broker) setLocalPolicy(raw, expected json.RawMessage) (nodepolicy.Polic
 		if len(raw) == 0 {
 			return nodepolicy.Policy{}, fmt.Errorf("policy is required")
 		}
+		if err := nodepolicy.CheckModelListKeys(raw); err != nil {
+			return nodepolicy.Policy{}, fmt.Errorf("parse policy: %w", err)
+		}
 		var fields map[string]json.RawMessage
 		if err := json.Unmarshal(raw, &fields); err != nil || fields == nil {
 			return nodepolicy.Policy{}, fmt.Errorf("policy must be a JSON object")
@@ -573,6 +576,9 @@ func (b *Broker) setPeerPolicy(raw, expected json.RawMessage) (nodepolicy.Policy
 		}
 		if r.recoveryRequired {
 			return nodepolicy.Policy{}, errors.New("this node's policy needs recovery; set it from this node")
+		}
+		if err := nodepolicy.CheckModelListKeys(raw); err != nil {
+			return nodepolicy.Policy{}, &invalidParamsError{err}
 		}
 		policy, err := nodepolicy.MergePeerSet(stored, withoutRevision(raw))
 		if err != nil {

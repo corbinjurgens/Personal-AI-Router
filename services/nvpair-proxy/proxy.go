@@ -928,6 +928,9 @@ func (p *Proxy) moveReservation(r reservation, nodeID string) reservation {
 // Kept a free function taking the profile so the match is testable without a
 // Proxy.
 func nodeAdvertisesModel(p engineProfile, n Node, model string) bool {
+	if !modelServed(n.ServedModels, p.Name, model, func(_ string, m string) string { return p.normalizeModel(m) }) {
+		return false
+	}
 	requested := p.normalizeModel(model)
 	if requested == "" {
 		return false
@@ -1252,6 +1255,7 @@ func subscribedToNode(p engineProfile, n noderec.DirectoryNode) (Node, bool) {
 	// its strict admission capability, read only by Node.strictModel.
 	if n.Policy != nil {
 		node.Roles = maps.Clone(n.Policy.Roles)
+		node.ServedModels = slices.Clone(n.Policy.ServedModels)
 		node.PolicyRevision = n.Policy.Revision
 		node.StrictAdmission = n.Policy.StrictAdmission
 	}
