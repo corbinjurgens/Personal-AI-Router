@@ -401,6 +401,71 @@ payloads and do not terminate the entire engine when cleanup fails.
 
 ## 15. Current integration / wiring
 
+### Broker-local switch executor
+
+The broker owns ordering, strict drain and publication; engine-manager owns
+process lifecycle, intent, ownership checks and local veto. Only the parent
+stdio/IPC channel exposes `engine:switch-prepare`, `engine:switch-step` and
+`engine:switch-reconcile`. Internal execution results contain the shared durable
+checkpoint, observations and coded error; no settings-worker error flattening is
+permitted. Apply/status ec routes relay to the broker, never to those executor
+methods, and never provision or forward another hop.
+
+Prepare's short mutation-admission gate snapshots configuration and durably
+reserves both IDs before probes. Competing admitted mutations refuse prepare;
+reservations refuse lifecycle, port/configuration, install/uninstall and
+restart-after operations with busy (`-32000`). Validation failure durably
+releases its provisional reservation. Automatic restore skips reserved IDs;
+Wake/Sleep do not rewrite intent. Shutdown remains terminal cleanup and may stop
+reserved owned processes after cancelling their starts.
+
+An empty prepare envelope returns a read-only manager configuration snapshot.
+Prepare adds `configuration` (`SwitchConfigurationSnapshot`) and
+`configurationFence` to the shared result. The manager fence excludes dynamic
+running/health/allocated ports and contains its incarnation. The broker supplies
+its authoritative settings revisions, node identity and journal generation when
+computing the public `e3v1` revision; the manager fence goes unchanged into every
+matching executor envelope. Settings projections also supply last-published
+per-engine revisions in the manager snapshot.
+
+`engine-state.json` optionally contains `pendingSwitch` with the shared
+`SwitchCheckpoint` fields: exact operation envelope, phase, pre-intents and
+provenance, observations, target commit flag and latest error. The file
+also carries optional adjacent `pendingSwitchPorts: {source, target}` execution
+metadata. A port-zero target receives its port before `start-pending` is saved,
+and reconciliation restores those endpoints before probing or orphan cleanup.
+Missing interrupted-target endpoint evidence retains the reservation and refuses
+cleanup success. This metadata is excluded from configuration tokens. Old files
+without it and legacy local Off provenance retain their semantics. Source Off
+and `stop-pending` use one durable write before `doStop`; target On and
+`target-committed` use one durable write after `doStart` readiness. A failed stop
+never starts the target. A failed start never restores the source and saves
+target Off without downgrading a concurrent local Off. Other engines' intent is
+untouched. Runtime state and termination evidence remain separate from intent.
+
+Steps compare the whole operation envelope, serialize on the existing engine
+operation lock, and retain successful or failed checkpoints for idempotent
+retries. Interrupted work is reconciled toward cleanup, never forward startup.
+The broker must persist its terminal receipt before release. A pending stop or
+start cannot be released until cleanup is reconciled. Released checkpoints retain
+the last identity until a subsequent prepare replaces them; the broker's journal
+owns older receipt retention. Unreadable checkpoint metadata fails mutation and
+restore admission closed.
+
+Remote prepare/start recheck local Off/pause (`-32011`). Explicit local Off
+cancels remote target work and durably records local provenance before waiting
+on the operation lock for cleanup; that vetoing stop returns its actual result.
+The existing projection
+path cancels remote work on local pause. Local switching is allowed under these
+remote-only vetoes.
+
+Switch relay requests use independent IDs and a bounded pending map. Replies
+preserve numeric error codes; waiter cancellation sends `engine:switch-cancel`
+and does not cancel an accepted operation. The existing pin gate supplies caller
+identity and the target replaces the incoming node alias.
+
+### Product integration
+
 The engine manager builds standalone (`go build ./...`) and is tested end to
 end over stdio. Current product wiring is:
 

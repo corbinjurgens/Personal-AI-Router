@@ -19,9 +19,29 @@ import (
 	"time"
 )
 
+// InstallWithStart keeps mutation admission across the install/start boundary.
+// A remote local veto cancels only startCtx, preserving install's existing
+// preparation behavior while preventing a switch reservation between the pair.
+func (e *Executor) InstallWithStart(installCtx, startCtx context.Context, engine string, opts startOpts) error {
+	done, err := e.admitMutation(engine)
+	if err != nil {
+		return err
+	}
+	defer done()
+	if err := e.Install(installCtx, engine); err != nil {
+		return err
+	}
+	return e.StartWith(startCtx, engine, opts)
+}
+
 // Install obtains the engine in user mode: download (checksum-verified)
 // then run the declared command. No-op if already detected.
 func (e *Executor) Install(ctx context.Context, engine string) error {
+	done, err := e.admitMutation(engine)
+	if err != nil {
+		return err
+	}
+	defer done()
 	st, err := e.state(engine)
 	if err != nil {
 		return err
@@ -145,6 +165,11 @@ func (e *Executor) Install(ctx context.Context, engine string) error {
 // Uninstall runs the manifest's uninstall command (user-mode), stopping
 // the engine first. No-op if the engine isn't currently detected.
 func (e *Executor) Uninstall(ctx context.Context, engine string) error {
+	done, err := e.admitMutation(engine)
+	if err != nil {
+		return err
+	}
+	defer done()
 	st, err := e.state(engine)
 	if err != nil {
 		return err

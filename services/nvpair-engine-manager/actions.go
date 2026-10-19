@@ -43,6 +43,13 @@ func (e *Executor) Action(ctx context.Context, engine, action string, params jso
 	if !ok {
 		return nil, fmt.Errorf("engine %q has no action %q", engine, action)
 	}
+	if act.RestartAfter {
+		done, err := e.admitMutation(engine)
+		if err != nil {
+			return nil, err
+		}
+		defer done()
+	}
 	res, err := e.dispatchAction(ctx, st, engine, action, act, params)
 	if err != nil {
 		return nil, err
@@ -76,6 +83,11 @@ func (e *Executor) Action(ctx context.Context, engine, action string, params jso
 //     model must not rewrite the engine's saved ON/OFF intent. doStop/doStart
 //     are the intent-neutral pair (StopAll uses them for the same reason).
 func (e *Executor) restartAfterAction(ctx context.Context, st *engineState, engine, action string) error {
+	done, err := e.admitMutation(engine)
+	if err != nil {
+		return err
+	}
+	defer done()
 	st.opMu.Lock()
 	defer st.opMu.Unlock()
 	st.mu.Lock()

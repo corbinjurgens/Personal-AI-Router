@@ -95,13 +95,12 @@ func (s *controlServer) handleInstall(w http.ResponseWriter, r *http.Request) {
 		startCtx = ctx
 	}
 	s.streamOp(w, r, req.OpID, req.Engine, "install", func(ctx context.Context) (streamFrame, error) {
-		if err := s.exec.Install(ctx, req.Engine); err != nil {
-			return streamFrame{}, err
-		}
 		if req.Start {
-			if err := s.exec.StartWith(startCtx, req.Engine, startOpts{Origin: intentPeer}); err != nil {
+			if err := s.exec.InstallWithStart(ctx, startCtx, req.Engine, startOpts{Origin: intentPeer}); err != nil {
 				return streamFrame{}, vetoCause(startCtx, err)
 			}
+		} else if err := s.exec.Install(ctx, req.Engine); err != nil {
+			return streamFrame{}, err
 		}
 		st, err := s.exec.Status(req.Engine)
 		if err != nil {

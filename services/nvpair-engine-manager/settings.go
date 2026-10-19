@@ -388,6 +388,11 @@ func (e *Executor) previewLaunchLocked(st *engineState, request settings.Request
 // parent rebind callback. The parent already holds the node configuration lock;
 // that callback must not acquire it again. Explicit ON/OFF intent is untouched.
 func (e *Executor) ConfigureLaunch(ctx context.Context, p settings.Configure, rebind func() error) (settings.LaunchState, error) {
+	done, err := e.admitMutation(p.Engine)
+	if err != nil {
+		return settings.LaunchState{}, err
+	}
+	defer done()
 	st, err := e.state(p.Engine)
 	if err != nil {
 		return settings.LaunchState{}, err

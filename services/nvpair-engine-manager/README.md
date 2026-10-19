@@ -517,7 +517,51 @@ Per-OS variance lives in the manifest first; OS primitives (process
 termination, console hiding) are the only build-tagged Go
 (`proc_windows.go` / `proc_unix.go`).
 
-## Shutdown
+## Target-owned engine switching
+
+The broker owns switch acceptance, drain, publication and the operation journal.
+The manager executes only broker-local `engine:switch-prepare`,
+`engine:switch-step` and `engine:switch-reconcile` requests using the shared
+`enginesettings` envelopes. These executor methods have no ec route. Results
+carry a durable `checkpoint`, current `observed` states and a coded `error`;
+callers must inspect that error rather than treating a JSON-RPC result as success.
+
+Prepare atomically reserves source and target, validates preparation and port
+ownership, and rejects a running target. An empty prepare request reads the
+manager configuration snapshot without reserving. Its additional `configuration`
+and `configurationFence` fields supply configuration digests, settings revisions,
+intent/provenance, registry/runtime fingerprint and manager incarnation. The
+broker combines these with node identity and journal generation for its public
+configuration token; it passes the manager fence back in the executor envelope.
+
+The optional `pendingSwitch` in `engine-state.json` shares the durable replacement
+with `engines` and `offBy`. Source Off and `stop-pending` are saved before stopping.
+Adjacent `pendingSwitchPorts` records source/target execution endpoints; a
+dynamic target port is allocated and checkpointed before launching its process.
+Target On and `target-committed` are saved together only after readiness. A failed
+start saves target Off, preserves a stronger local Off, and never restores the
+source. Termination evidence requires listener refusal as well as stopped owned
+state. Reconciliation cleans up interrupted work and never resumes target startup.
+The matching checkpoint remains reserved until the broker releases it after its
+terminal receipt is durable; a released checkpoint retains the last operation's
+retry identity until replaced by a new reservation.
+
+Reserved engines reject lifecycle/configuration/install/restart-after mutations
+with JSON-RPC `-32000` and `data.kind: busy`; automatic restore skips them.
+Wake/Sleep retain their intent-neutral behavior. Shutdown cancels starts and stops
+owned engines even during a reservation, without rewriting intent. A local Off
+during a remote reservation persists local provenance and cancels target startup
+before waiting for cleanup and returning the stop result. Remote switches honor
+local Off and local pause with `-32011`; local switches remain allowed.
+
+The existing pinned ec listener exposes `/v1/engine-switch/apply` and `/status`,
+relaying to the target broker with `engine:switch-request/reply/cancel`. The
+cancel notification retires only the wait, never accepted broker-owned work.
+Pending waits are bounded; settings relay correlation is separate.
+`engine:remote-switch` and `engine:remote-switch-status` use the existing pinned
+peer client. Neither route provisions engines or falls back to remote start/stop.
+
+## Shutdown behavior
 
 Shuts down on stdin EOF (parent closed the pipe), `SIGINT`/`SIGTERM`, or a
 `shutdown` JSON-RPC request — stopping any running engines first so none

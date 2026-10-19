@@ -96,6 +96,11 @@ func (e *Executor) Start(ctx context.Context, engine string) error {
 // rechecks the local veto after taking the lifecycle lock, so a local Off that
 // finished while it waited wins.
 func (e *Executor) StartWith(ctx context.Context, engine string, opts startOpts) error {
+	done, err := e.admitMutation(engine)
+	if err != nil {
+		return err
+	}
+	defer done()
 	st, err := e.state(engine)
 	if err != nil {
 		return err
@@ -427,6 +432,11 @@ func (e *Executor) StopFrom(engine string, origin intentOrigin) error {
 	if origin == intentLocal {
 		e.remoteWork.cancelEngine(engine, &localVetoError{reason: engineOffVeto(engine)})
 	}
+	done, err := e.admitStop(engine, origin)
+	if err != nil {
+		return err
+	}
+	defer done()
 	st.opMu.Lock()
 	defer st.opMu.Unlock()
 	stopErr := e.doStop(st, engine)
@@ -747,6 +757,11 @@ func (e *Executor) reconcileFailedCommandStop(st *engineState, engine string, ru
 // Restart stops then starts the engine, holding the op lock across both
 // so nothing can interleave between the stop and the start.
 func (e *Executor) Restart(ctx context.Context, engine string) error {
+	done, err := e.admitMutation(engine)
+	if err != nil {
+		return err
+	}
+	defer done()
 	st, err := e.state(engine)
 	if err != nil {
 		return err
