@@ -15,6 +15,7 @@ import (
 	"math"
 	"net/http"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 	"unicode/utf8"
@@ -92,6 +93,48 @@ func chatAcquire(b chatByteBudget, n int64) (func(), error) {
 	return sync.OnceFunc(r), nil
 }
 
+// chatJSONHeadroom bounds the decoded copies a JSON value can need per serialized
+// byte: the raw buffer itself plus the simultaneously live protocol objects
+// (top-level response, choices slice, one choice, one message, the tool-call
+// list and one function). Opaque data such as schema properties and function
+// arguments is checked by a streaming decoder, so a dense user object adds no
+// decoded map. Multiplying actual capacity by this constant replaces the former
+// reservation against a configured ceiling.
+const chatJSONHeadroom = 8
+
+// chatParseChunk is one nonblocking growth step while a nonstream body arrives,
+// so a large configured ceiling reserves nothing before its bytes are read.
+const chatParseChunk = 32 << 10
+
+// chatLease charges a budget in nonblocking segments. A parser pays for storage
+// as it grows and can drop transient headroom while keeping the bytes it
+// returns; every segment release is idempotent and runs on failure or panic.
+type chatLease struct {
+	budget   chatByteBudget
+	releases []func()
+}
+
+func newChatLease(budget chatByteBudget) *chatLease {
+	return &chatLease{budget: budget}
+}
+
+// grow charges n bytes before the caller allocates them.
+func (l *chatLease) grow(n int64) error {
+	release, err := chatAcquire(l.budget, n)
+	if err != nil {
+		return err
+	}
+	l.releases = append(l.releases, release)
+	return nil
+}
+
+func (l *chatLease) release() {
+	for _, release := range l.releases {
+		release()
+	}
+	l.releases = nil
+}
+
 func chatAdd(a, b int64) (int64, error) {
 	if a < 0 || b < 0 || a > math.MaxInt64-b {
 		return 0, errChat
@@ -125,8 +168,12 @@ func (q *chatQualification) fresh() error {
 	return nil
 }
 
+// Case-folded duplicate detection belongs to protocol objects because a JSON
+// decoder may match field names case-insensitively. Property names and function
+// arguments are opaque data: they keep depth and exact-duplicate rejection, and
+// case-distinct keys stay valid.
 func chatObject(raw []byte, keys ...string) (map[string]json.RawMessage, error) {
-	if !utf8.Valid(raw) || !uniqueKeys(raw) {
+	if !utf8.Valid(raw) || !chatUniqueObject(raw) {
 		return nil, errChat
 	}
 	var f map[string]json.RawMessage
@@ -139,6 +186,100 @@ func chatObject(raw []byte, keys ...string) (map[string]json.RawMessage, error) 
 		}
 	}
 	return f, nil
+}
+
+// chatUniqueObject checks one protocol object. Its own member spellings must be
+// unique even when case-folded; its values, which may be user data, must only be
+// free of exact duplicate keys.
+func chatUniqueObject(raw []byte) bool {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	tok, err := dec.Token()
+	if err != nil || tok != json.Delim('{') {
+		return false
+	}
+	keys := map[string]bool{}
+	for dec.More() {
+		kt, err := dec.Token()
+		key, ok := kt.(string)
+		if err != nil || !ok {
+			return false
+		}
+		// Upper then lower case folds the special cases the way JSON field
+		// matching does, matching uniqueKeys.
+		folded := strings.ToLower(strings.ToUpper(key))
+		if keys[folded] {
+			return false
+		}
+		keys[folded] = true
+		var value json.RawMessage
+		if dec.Decode(&value) != nil || !chatExactUnique(value) {
+			return false
+		}
+	}
+	if _, err := dec.Token(); err != nil {
+		return false
+	}
+	_, err = dec.Token()
+	return err == io.EOF
+}
+
+// chatExactUnique reports whether data is one JSON value nested at most
+// maxStrictBodyDepth deep with no exact duplicate object key at any depth.
+func chatExactUnique(data []byte) bool {
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.UseNumber()
+	if !chatExactValue(dec, 0) {
+		return false
+	}
+	_, err := dec.Token()
+	return err == io.EOF
+}
+
+func chatExactValue(dec *json.Decoder, depth int) bool {
+	tok, err := dec.Token()
+	if err != nil {
+		return false
+	}
+	d, isDelim := tok.(json.Delim)
+	if !isDelim {
+		return true
+	}
+	if depth >= maxStrictBodyDepth {
+		return false
+	}
+	switch d {
+	case '{':
+		keys := map[string]bool{}
+		for dec.More() {
+			kt, err := dec.Token()
+			key, ok := kt.(string)
+			if err != nil || !ok || keys[key] {
+				return false
+			}
+			keys[key] = true
+			if !chatExactValue(dec, depth+1) {
+				return false
+			}
+		}
+	case '[':
+		for dec.More() {
+			if !chatExactValue(dec, depth+1) {
+				return false
+			}
+		}
+	default:
+		return false
+	}
+	_, err = dec.Token()
+	return err == nil
+}
+
+// chatExactObject reports whether data is one JSON object under the exact
+// duplicate and depth rules, without decoding a map.
+func chatExactObject(data []byte) bool {
+	trimmed := bytes.TrimLeft(data, " \t\r\n")
+	return len(trimmed) > 0 && trimmed[0] == '{' && chatExactUnique(data)
 }
 
 func chatString(raw json.RawMessage) (string, error) {
@@ -172,19 +313,21 @@ func (q *chatQualification) prepare(ctx context.Context, target chatTarget, meth
 	if len(body) > 16<<20 || len(q.Defaults) > 16<<20 {
 		return nil, errChat
 	}
-	// 256 bytes per serialized byte conservatively covers JSON maps/tokens, raw
-	// copies, defaults, accounting and the returned body simultaneously. These
-	// bounds also make the multiplication safe. No unlimited fallback exists.
-	release, err := chatAcquire(budget, 256*(int64(len(body))+int64(len(q.Defaults))+1024))
-	if err != nil {
-		return nil, err
-	}
+	// Transient parsing is charged from the actual input capacity it decodes and
+	// dropped once the effective body exists; only that body stays leased. A
+	// configured ceiling reserves nothing, and no unlimited fallback exists.
+	transient := newChatLease(budget)
+	retained := newChatLease(budget)
 	keep := false
 	defer func() {
 		if !keep {
-			release()
+			retained.release()
 		}
+		transient.release()
 	}()
+	if err := transient.grow(chatJSONHeadroom*(int64(len(body))+int64(len(q.Defaults))) + 1024); err != nil {
+		return nil, err
+	}
 	keys := append(append([]string(nil), chatRequestKeys...), "parallel_tool_calls")
 	f, err := chatObject(body, keys...)
 	if err != nil {
@@ -244,6 +387,11 @@ func (q *chatQualification) prepare(ctx context.Context, target chatTarget, meth
 	if err != nil {
 		return nil, errChat
 	}
+	// Keep only the bytes handed to the caller; the transient decode lease is
+	// released on return.
+	if err := retained.grow(int64(cap(effective))); err != nil {
+		return nil, err
+	}
 	input, err := q.InputBound(effective)
 	if err != nil || input < 0 {
 		return nil, errChat
@@ -267,7 +415,7 @@ func (q *chatQualification) prepare(ctx context.Context, target chatTarget, meth
 	if err != nil || total > min(q.ContextTokens, target.ContextTokens) || ctx.Err() != nil {
 		return nil, errChat
 	}
-	prepared = &chatPrepared{Body: effective, Input: input, Output: output, Stream: bytes.Equal(f["stream"], []byte("true")), release: release}
+	prepared = &chatPrepared{Body: effective, Input: input, Output: output, Stream: bytes.Equal(f["stream"], []byte("true")), release: retained.release}
 	keep = true
 	return prepared, nil
 }
@@ -367,7 +515,7 @@ func chatFunction(raw []byte, declaration bool, schema func(json.RawMessage) err
 		}
 	} else {
 		args, err := chatString(f["arguments"])
-		if err != nil || !utf8.ValidString(args) || !uniqueKeys([]byte(args)) || !isObject([]byte(args)) {
+		if err != nil || !utf8.ValidString(args) || !chatExactObject([]byte(args)) {
 			return "", errChat
 		}
 	}
@@ -632,15 +780,17 @@ func (q *chatQualification) parseResponse(ctx context.Context, reader io.Reader,
 	if q.responseLimits() != nil || reader == nil || emit == nil || input < 0 || output <= 0 {
 		return result, errChat
 	}
-	n := q.MaxBodyBytes
+	// Storage is charged at the capacity actually allocated: an SSE parser owns
+	// its line/event/data buffers and one event's decoded copies, while a
+	// nonstream body pays per growth step as its bytes arrive.
+	lease := newChatLease(budget)
 	if stream {
-		n = q.MaxEventBytes*3 + q.MaxLineBytes + q.MaxToolBytes
+		fixed := q.MaxLineBytes + 2*q.MaxEventBytes + chatJSONHeadroom*q.MaxEventBytes + 2*q.MaxToolBytes + 1024
+		if err := lease.grow(fixed); err != nil {
+			return result, err
+		}
 	}
-	release, err := chatAcquire(budget, 256*(n+1024))
-	if err != nil {
-		return result, err
-	}
-	defer release()
+	defer lease.release()
 	defer func() {
 		if !result.Complete {
 			result.Usage = nil
@@ -668,19 +818,36 @@ func (q *chatQualification) parseResponse(ctx context.Context, reader io.Reader,
 		return state.usage != nil && (state.usage.InputTokens > input || state.usage.OutputTokens > output)
 	}
 	if !stream {
-		body := make([]byte, 0, int(min(q.MaxBodyBytes, 4096)))
-		var one [1]byte
+		readSize := min(int64(chatParseChunk), q.MaxBodyBytes)
+		scratch := make([]byte, int(readSize))
+		body := make([]byte, 0, int(readSize))
+		if err := lease.grow(readSize + chatJSONHeadroom*readSize); err != nil {
+			return result, err
+		}
 		for {
 			if ctx.Err() != nil {
 				return result, errChat
 			}
-			n, e := reader.Read(one[:])
+			n, e := reader.Read(scratch)
 			if n > 0 {
 				observe()
-				if int64(len(body)) >= q.MaxBodyBytes {
+				need := int64(len(body)) + int64(n)
+				if need > q.MaxBodyBytes {
 					return result, errChat
 				}
-				body = append(body, one[0])
+				if int64(cap(body)) < need {
+					next := min(2*int64(cap(body)), q.MaxBodyBytes)
+					if next < need {
+						next = need
+					}
+					if err := lease.grow(chatJSONHeadroom * (next - int64(cap(body)))); err != nil {
+						return result, errChatBudget
+					}
+					grown := make([]byte, len(body), int(next))
+					copy(grown, body)
+					body = grown
+				}
+				body = append(body, scratch[:n]...)
 			}
 			if e != nil {
 				if e != io.EOF {
@@ -892,7 +1059,7 @@ func (q *chatQualification) responseEvent(raw []byte, stream bool, state *chatRe
 			seen := map[string]bool{}
 			for i := int64(0); i < int64(len(state.tools)); i++ {
 				t := state.tools[i]
-				if t.id == "" || seen[t.id] || !chatName(t.name) || !uniqueKeys([]byte(t.arguments)) || !isObject([]byte(t.arguments)) {
+				if t.id == "" || seen[t.id] || !chatName(t.name) || !chatExactObject([]byte(t.arguments)) {
 					return false, errChat
 				}
 				seen[t.id] = true

@@ -124,6 +124,7 @@ func TestChatRequest(t *testing.T) {
 	reject("duplicate", strings.Replace(chatSimple, `"model":`, `"model":"other","model":`, 1))
 	reject("case variant duplicate", strings.Replace(chatSimple, `"model":`, `"Model":"other","model":`, 1))
 	reject("case variant field", strings.Replace(chatSimple, `"model"`, `"Model"`, 1))
+	reject("duplicate schema property", strings.Replace(chatHistory, `"properties":{"value":{"type":"string"}}`, `"properties":{"foo":{"type":"string"},"foo":{"type":"string"}}`, 1))
 	reject("depth", strings.Replace(chatSimple, `"日本語 English 😀"`, strings.Repeat("[", 65)+`"x"`+strings.Repeat("]", 65), 1))
 	deepSchema := strings.Repeat(`{"type":"array","items":`, 65) + `{"type":"string"}` + strings.Repeat("}", 65)
 	reject("otherwise valid deep schema", strings.Replace(chatHistory, `"parameters":{"type":"object"}`, `"parameters":`+deepSchema, 1))
@@ -141,6 +142,31 @@ func TestChatRequest(t *testing.T) {
 		_, _, e := chatPrepare(t, q, target, strings.Replace(chatSimple, `"max_tokens":100`, `"temperature":0.5,"max_tokens":100`, 1))
 		if e == nil {
 			t.Fatal("unqualified optional scalar accepted")
+		}
+	})
+	t.Run("case-distinct schema properties are data", func(t *testing.T) {
+		q, target := chatFixture()
+		body := strings.Replace(chatHistory, `"properties":{"value":{"type":"string"}}`, `"properties":{"Foo":{"type":"string"},"foo":{"type":"string"}}`, 1)
+		p, _, e := chatPrepare(t, q, target, body)
+		if e != nil {
+			t.Fatalf("case-distinct schema properties rejected: %v", e)
+		}
+		var f struct {
+			ResponseFormat struct {
+				JSONSchema struct {
+					Schema struct {
+						Properties map[string]json.RawMessage `json:"properties"`
+					} `json:"schema"`
+				} `json:"json_schema"`
+			} `json:"response_format"`
+		}
+		if e := json.Unmarshal(p.Body, &f); e != nil {
+			t.Fatal(e)
+		}
+		for _, name := range []string{"Foo", "foo"} {
+			if _, ok := f.ResponseFormat.JSONSchema.Schema.Properties[name]; !ok {
+				t.Fatalf("schema property %q lost", name)
+			}
 		}
 	})
 }
@@ -232,6 +258,39 @@ func TestChatHistory(t *testing.T) {
 			}
 		}
 	})
+	t.Run("case-distinct function arguments are data", func(t *testing.T) {
+		q, target := chatFixture()
+		body := strings.Replace(chatHistory, `"function":{"name":"second","arguments":"{}"}`, `"function":{"name":"second","arguments":"{\"Foo\":1,\"foo\":2}"}`, 1)
+		p, _, e := chatPrepare(t, q, target, body)
+		if e != nil {
+			t.Fatalf("case-distinct function arguments rejected: %v", e)
+		}
+		var f struct {
+			Messages []struct {
+				ToolCalls []struct {
+					Function struct {
+						Arguments string `json:"arguments"`
+					} `json:"function"`
+				} `json:"tool_calls"`
+			} `json:"messages"`
+		}
+		if e := json.Unmarshal(p.Body, &f); e != nil {
+			t.Fatal(e)
+		}
+		if len(f.Messages) != 7 || len(f.Messages[3].ToolCalls) != 2 {
+			t.Fatalf("changed message shape: %d messages", len(f.Messages))
+		}
+		var keys map[string]json.RawMessage
+		args := f.Messages[3].ToolCalls[1].Function.Arguments
+		if e := json.Unmarshal([]byte(args), &keys); e != nil {
+			t.Fatal(e)
+		}
+		for _, name := range []string{"Foo", "foo"} {
+			if _, ok := keys[name]; !ok {
+				t.Fatalf("argument key %q lost in %s", name, args)
+			}
+		}
+	})
 	reject := func(name, body string) {
 		t.Run(name, func(t *testing.T) {
 			q, target := chatFixture()
@@ -259,6 +318,7 @@ func TestChatHistory(t *testing.T) {
 	reject("schema reference", strings.Replace(chatHistory, `"parameters":{"type":"object"}`, `"parameters":{"type":"object","$ref":"remote"}`, 1))
 	reject("schema recursion", strings.Replace(chatHistory, `"schema":{"type":"object",`, `"schema":{"$recursiveRef":"#","type":"object",`, 1))
 	reject("wrong strict type", strings.Replace(chatHistory, `"strict":true`, `"strict":"true"`, 1))
+	reject("duplicate argument key", strings.Replace(chatHistory, `"function":{"name":"second","arguments":"{}"}`, `"function":{"name":"second","arguments":"{\"foo\":1,\"foo\":2}"}`, 1))
 	t.Run("profile schema vocabulary", func(t *testing.T) {
 		q, target := chatFixture()
 		q.ValidateSchema = func(json.RawMessage) error { return errChat }
@@ -499,6 +559,22 @@ func TestChatResponse(t *testing.T) {
 		r, _, e := chatParse(t, q, chatResponse("synthetic-v1", `{"role":"assistant","content":null,"tool_calls":[{"id":"a","type":"function","function":{"name":"first","arguments":"{\"x\":\"東京\"}"}}]}`, `"tool_calls"`, "", false), false)
 		if e != nil || !r.Complete {
 			t.Fatalf("tool completion: %+v %v", r, e)
+		}
+	})
+	t.Run("case-distinct response arguments are data", func(t *testing.T) {
+		q, _ := chatFixture()
+		body := chatResponse("synthetic-v1", `{"role":"assistant","content":null,"tool_calls":[{"id":"a","type":"function","function":{"name":"first","arguments":"{\"Foo\":1,\"foo\":2}"}}]}`, `"tool_calls"`, "", false)
+		r, _, e := chatParse(t, q, body, false)
+		if e != nil || !r.Complete {
+			t.Fatalf("case-distinct response arguments rejected: %+v %v", r, e)
+		}
+	})
+	t.Run("duplicate response argument key", func(t *testing.T) {
+		q, _ := chatFixture()
+		body := chatResponse("synthetic-v1", `{"role":"assistant","content":null,"tool_calls":[{"id":"a","type":"function","function":{"name":"first","arguments":"{\"foo\":1,\"foo\":2}"}}]}`, `"tool_calls"`, "", false)
+		r, events, e := chatParse(t, q, body, false)
+		if e == nil || r.Complete || len(events) != 0 {
+			t.Fatalf("exact duplicate response argument accepted: %+v %v", r, e)
 		}
 	})
 }
@@ -837,6 +913,61 @@ func TestChatBudget(t *testing.T) {
 		p.close()
 		if b.held != 0 {
 			t.Fatal("retained allowance leaked")
+		}
+	})
+	t.Run("finite budget accepts tiny nonstream response", func(t *testing.T) {
+		q, _ := chatFixture()
+		q.MaxBodyBytes = 4 << 20
+		body := chatResponse("synthetic-v1", `{"role":"assistant","content":"small"}`, `"stop"`, "", false)
+		b := &chatTestBudget{limit: 64 << 20}
+		r, e := q.parseResponse(context.Background(), strings.NewReader(body), false, 100, 100, time.Time{}, b.acquire, func([]byte) error { return nil })
+		if e != nil || !r.Complete || b.held != 0 {
+			t.Fatalf("tiny response refused by a 64 MiB budget: complete=%t err=%v held=%d", r.Complete, e, b.held)
+		}
+	})
+	t.Run("finite budget accepts small stream", func(t *testing.T) {
+		q, _ := chatFixture()
+		b := &chatTestBudget{limit: 1 << 20}
+		r, e := q.parseResponse(context.Background(), strings.NewReader(chatCompleteStream()), true, 100, 100, time.Time{}, b.acquire, func([]byte) error { return nil })
+		if e != nil || !r.Complete || b.held != 0 {
+			t.Fatalf("small stream refused by a 1 MiB budget: complete=%t err=%v held=%d", r.Complete, e, b.held)
+		}
+	})
+	t.Run("near-limit body with retained request lease", func(t *testing.T) {
+		q, target := chatFixture()
+		b := &chatTestBudget{limit: 64 << 20}
+		p, e := q.prepare(context.Background(), target, http.MethodPost, routeChatCompletions, []byte(chatSimple), b.acquire)
+		if e != nil {
+			t.Fatal(e)
+		}
+		defer func() {
+			p.close()
+			if b.held != 0 {
+				t.Errorf("leaked budget %d", b.held)
+			}
+		}()
+		retained := b.held
+		content := strings.Repeat("a", 3<<20)
+		body := chatResponse("synthetic-v1", `{"role":"assistant","content":"`+content+`"}`, `"stop"`, "", false)
+		q.MaxBodyBytes = int64(len(body))
+		var exposed []byte
+		r, e := q.parseResponse(context.Background(), strings.NewReader(body), false, p.Input, p.Output, time.Time{}, b.acquire, func(raw []byte) error { exposed = raw; return nil })
+		if e != nil || !r.Complete || len(exposed) != len(body) {
+			t.Fatalf("near-limit body refused: complete=%t err=%v exposed=%d want=%d", r.Complete, e, len(exposed), len(body))
+		}
+		if b.held != retained {
+			t.Fatalf("parser did not release: held=%d want=%d", b.held, retained)
+		}
+	})
+	t.Run("over budget still refuses before read", func(t *testing.T) {
+		q, _ := chatFixture()
+		q.MaxBodyBytes = 4 << 20
+		body := chatResponse("synthetic-v1", `{"role":"assistant","content":"small"}`, `"stop"`, "", false)
+		reader := strings.NewReader(body)
+		b := &chatTestBudget{limit: 64 << 10}
+		r, e := q.parseResponse(context.Background(), reader, false, 100, 100, time.Time{}, b.acquire, func([]byte) error { return nil })
+		if !errors.Is(e, errChatBudget) || r.Complete || reader.Len() != len(body) || b.held != 0 {
+			t.Fatalf("over-budget parse: err=%v complete=%t unread=%d held=%d", e, r.Complete, reader.Len(), b.held)
 		}
 	})
 }
