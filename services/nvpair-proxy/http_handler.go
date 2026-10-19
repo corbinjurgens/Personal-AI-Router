@@ -1016,10 +1016,18 @@ func (f *facade) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		// The body this attempt sends: the request's own, with a tier's concrete
 		// model in place of the tier name and every other byte untouched.
 		sendBody := bodyBytes
-		if cand.model != "" && bodyBytes != nil {
-			if rewritten, ok := replaceModel(bodyBytes, cand.model); ok {
-				sendBody = rewritten
+		if cand.model != "" {
+			rewritten, ok := replaceModel(bodyBytes, cand.model)
+			if !ok {
+				cancelAttempt()
+				ctl.setAttempt(nil)
+				respondedWithError = true
+				finalStatus = http.StatusBadRequest
+				proxyErr = "model rewrite failed"
+				writeIngressError(w, http.StatusBadRequest, "ambiguous-model", ambiguousModelMessage)
+				break
 			}
+			sendBody = rewritten
 		}
 		// How long the destination may queue this attempt: not at all while
 		// this round still has somewhere else to go, so a busy node hands the
@@ -1085,6 +1093,16 @@ func (f *facade) handleHTTP(w http.ResponseWriter, r *http.Request) {
 			curTicket = decision.ticket
 			if decision.hasProfile {
 				sendBody = mergeDefaults(sendBody, decision.profile.RequestOptions)
+				if !bodyModelMatches(sendBody, candModel) {
+					curTicket.release()
+					cancelAttempt()
+					ctl.setAttempt(nil)
+					respondedWithError = true
+					finalStatus = http.StatusBadRequest
+					proxyErr = "model defaults changed admitted model"
+					writeIngressError(w, http.StatusBadRequest, "ambiguous-model", ambiguousModelMessage)
+					break
+				}
 			}
 			if cand.dormant {
 				// Admission waited for the wake; the engine's address is the one

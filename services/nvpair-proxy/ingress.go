@@ -165,10 +165,8 @@ func (f *facade) serveIngress(w http.ResponseWriter, r *http.Request, peer strin
 			"request body exceeds the proxy's size limit")
 		return
 	}
-	// A body naming "model" twice is ambiguous: what admission here accepts
-	// (the last member) is not what a rewrite or another reader may act on
-	// (the first). Refuse before admission so the forwarded body can never
-	// name a model this node did not admit.
+	// Reject duplicate and unsupported model spellings before admission:
+	// struct decoders and exact-key rewrites must select the same member.
 	if ambiguousModelMember(body) {
 		slog.Debug("cluster ingress rejected ambiguous model member",
 			"peer", peer, "path", r.URL.Path)
@@ -211,6 +209,10 @@ func (f *facade) serveIngress(w http.ResponseWriter, r *http.Request, peer strin
 	}
 	if decision.hasProfile {
 		body = mergeDefaults(body, decision.profile.RequestOptions)
+		if !bodyModelMatches(body, model) {
+			writeIngressError(w, http.StatusBadRequest, "ambiguous-model", ambiguousModelMessage)
+			return
+		}
 	}
 	out := r.WithContext(ctx)
 	out.Header = r.Header.Clone()
@@ -280,6 +282,10 @@ func (f *facade) serveStrictLocal(w http.ResponseWriter, r *http.Request, body [
 		return
 	}
 	body = validated.body
+	if !bodyModelMatches(body, model) {
+		writeIngressError(w, http.StatusBadRequest, "ambiguous-model", ambiguousModelMessage)
+		return
+	}
 	ticket, err := f.host.admission.AdmitStrict(ctx, f.profile.Name, model, req, validated.generation)
 	if err != nil {
 		writeStrictAdmissionError(w, err)

@@ -74,19 +74,13 @@ func objectMembers(data []byte) (members []jsonMember, closeBrace int, ok bool) 
 	return members, closeBrace, true
 }
 
-// ambiguousModelMessage is the client error for a body with more than one
-// top-level "model" member.
-const ambiguousModelMessage = `the request body contains more than one top-level "model" member`
+// ambiguousModelMessage does not echo any request values.
+const ambiguousModelMessage = `the request body must use a single top-level "model" member with that exact spelling`
 
-// ambiguousModelMember reports whether body is exactly one JSON object holding
-// two or more top-level "model" members. Such a body names a different model
-// depending on where a reader stops: the struct decode in bufferBodyAndModel
-// and encoding/json keep the last member, while replaceModel rewrites the
-// first, so the model admitted and the model the engine decodes could disagree
-// and an unserved model could reach an engine. encoding/json also matches
-// struct fields case-insensitively, so case variants such as "Model" count. A body that is not one object
-// has no model member to select and reports false; parsing its shape is
-// somebody else's rejection.
+// ambiguousModelMember rejects duplicate model members and spellings other
+// than decoded "model". encoding/json matches struct fields case-insensitively,
+// whereas body rewrites and other decoders may require exact spelling.
+// Non-object bodies are left to the caller's shape validation.
 func ambiguousModelMember(body []byte) bool {
 	members, _, ok := objectMembers(body)
 	if !ok {
@@ -97,10 +91,27 @@ func ambiguousModelMember(body []byte) bool {
 		if !strings.EqualFold(m.key, "model") {
 			continue
 		}
-		if seen {
+		if seen || m.key != "model" {
 			return true
 		}
 		seen = true
+	}
+	return false
+}
+
+// bodyModelMatches checks the effective body after transformations, without
+// consulting serving policy again. Admission remains the linearization point.
+func bodyModelMatches(body []byte, model string) bool {
+	members, _, ok := objectMembers(body)
+	if !ok || ambiguousModelMember(body) {
+		return false
+	}
+	for _, m := range members {
+		if m.key == "model" {
+			raw := bytes.TrimSpace(body[m.valueStart:m.valueEnd])
+			var selected string
+			return len(raw) > 0 && raw[0] == '"' && json.Unmarshal(raw, &selected) == nil && selected == model
+		}
 	}
 	return false
 }

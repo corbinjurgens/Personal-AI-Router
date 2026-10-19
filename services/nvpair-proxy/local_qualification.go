@@ -120,8 +120,10 @@ func (q localQualification) validate() error {
 		if json.Unmarshal(q.RequestOptions, &obj) != nil || obj == nil {
 			return errors.New("requestOptions must be a JSON object")
 		}
-		if _, ok := obj["model"]; ok {
-			return errors.New("requestOptions may not set model")
+		for key := range obj {
+			if strings.EqualFold(key, "model") {
+				return errors.New("requestOptions may not set model")
+			}
 		}
 	}
 	if !qualificationLabel.MatchString(q.Tokenizer) || !qualificationLabel.MatchString(q.ChatTemplate) {
