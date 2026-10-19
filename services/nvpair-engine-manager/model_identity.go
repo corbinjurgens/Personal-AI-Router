@@ -32,6 +32,8 @@ const modelIdentityMethod = "engine:model-identity"
 // identity now.
 type modelIdentityParams struct {
 	Engines map[string]engineModelIdentity `json:"engines"`
+	// Local publication generation; never part of the wire contract.
+	epochs map[string]uint64
 }
 
 type engineModelIdentity struct {
@@ -45,6 +47,10 @@ type engineModelIdentity struct {
 type observedDigests struct {
 	runID  string
 	models map[string]string
+	// epoch and suppressed belong to the inventory owner. Observations carry
+	// the epoch captured before I/O until storeInventory accepts them.
+	epoch      uint64
+	suppressed bool
 }
 
 var contentDigest = regexp.MustCompile(`^[0-9a-f]{64}$`)
@@ -132,10 +138,21 @@ func extractDigests(raw json.RawMessage, spec *ActionResult) map[string]string {
 // same run (none when the last listing belonged to another run).
 func (e *Executor) modelIdentity() modelIdentityParams {
 	e.inventoryMu.Lock()
+	defer e.inventoryMu.Unlock()
 	digests := e.inventoryDigests
-	e.inventoryMu.Unlock()
 	out := modelIdentityParams{Engines: map[string]engineModelIdentity{}}
+	for name, observed := range digests {
+		if observed.epoch != 0 {
+			if out.epochs == nil {
+				out.epochs = make(map[string]uint64)
+			}
+			out.epochs[name] = observed.epoch
+		}
+	}
 	for _, name := range e.reg.Names() {
+		if digests[name].suppressed {
+			continue
+		}
 		st, err := e.state(name)
 		if err != nil {
 			continue

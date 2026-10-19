@@ -568,7 +568,7 @@ func TestPolicyStateReplayedToRestartedProxy(t *testing.T) {
 	r.admission.Active = 4
 	r.mu.Unlock()
 	b.observeIntent(map[string]bool{"ollama": true, "lmstudio": false})
-	b.observeEngineRunning("ollama", true)
+	b.observeEngineRunningFrom(b.activateEngineManagerSource(), "ollama", true)
 	b.observeLoaded(map[string][]string{"ollama": {"qwen3:8b"}})
 
 	waitPushesSettled(t, b)
@@ -643,6 +643,7 @@ func TestProxyAdmissionNotificationsReachThePolicy(t *testing.T) {
 
 func TestResidencyFollowsEngineManager(t *testing.T) {
 	b, _ := newPolicyBroker(t)
+	source := b.activateEngineManagerSource()
 	_, proxy := attachFakeProxy(t, b)
 	residency := func(calls []policyCall) string {
 		last := ""
@@ -654,11 +655,11 @@ func TestResidencyFollowsEngineManager(t *testing.T) {
 		return last
 	}
 	models := `{"engine":"ollama","models":{"models":["a"],"loadedByEngine":{"ollama":["a"]}}}`
-	b.forwardEngineNotification(engineModelsChangedMethod, json.RawMessage(models))
+	b.forwardEngineNotificationFrom(source, engineModelsChangedMethod, json.RawMessage(models))
 	proxy.waitFor("residency with a", func(calls []policyCall) bool { return residency(calls) == `{"loadedByEngine":{"ollama":["a"]}}` })
-	b.forwardEngineNotification(engineStateChangedMethod, json.RawMessage(`{"engine":"ollama","running":false}`))
+	b.forwardEngineNotificationFrom(source, engineStateChangedMethod, json.RawMessage(`{"engine":"ollama","running":false}`))
 	proxy.waitFor("residency without ollama", func(calls []policyCall) bool { return residency(calls) == `{"loadedByEngine":{}}` })
-	b.forwardEngineNotification(engineIntentChanged, json.RawMessage(`{"enabledByEngine":{"ollama":true}}`))
+	b.forwardEngineNotificationFrom(source, engineIntentChanged, json.RawMessage(`{"enabledByEngine":{"ollama":true}}`))
 	proxy.waitFor("intent push", func(calls []policyCall) bool {
 		for _, c := range calls {
 			if c.method == nodepolicy.MethodSetEngineIntent && strings.Contains(string(c.params), `"ollama":true`) {
@@ -1034,6 +1035,7 @@ func TestRemotePolicyRelaysThroughEngineManager(t *testing.T) {
 func TestPolicyRelayFromPeerActsLocallyOnly(t *testing.T) {
 	b, _ := newPolicyBroker(t)
 	engine := attachFakeEngine(t, b)
+	source := b.activateEngineManagerSource()
 	clustertrusttest.Join(t, b.clusterDir, "cluster-1", "self-node", "pinned-peer")
 
 	reply := func(id string) map[string]any {
@@ -1050,7 +1052,7 @@ func TestPolicyRelayFromPeerActsLocallyOnly(t *testing.T) {
 		return out
 	}
 	// A relayed request naming another node acts here and never hops again.
-	b.forwardEngineNotification(policyRelayRequestMethod, mustJSON(map[string]any{
+	b.forwardEngineNotificationFrom(source, policyRelayRequestMethod, mustJSON(map[string]any{
 		"id": "r1", "method": "set-availability", "caller": "pinned-peer",
 		"params": map[string]any{"nodeId": "third-node", "state": "paused"},
 	}))
@@ -1066,7 +1068,7 @@ func TestPolicyRelayFromPeerActsLocallyOnly(t *testing.T) {
 		}
 	}
 
-	b.forwardEngineNotification(policyRelayRequestMethod, mustJSON(map[string]any{
+	b.forwardEngineNotificationFrom(source, policyRelayRequestMethod, mustJSON(map[string]any{
 		"id": "r2", "method": "set", "caller": "unpinned-peer",
 		"params": map[string]any{"policy": map[string]any{"version": 1}},
 	}))
@@ -1074,7 +1076,7 @@ func TestPolicyRelayFromPeerActsLocallyOnly(t *testing.T) {
 		t.Fatalf("relay from an unpinned caller accepted: %v", got)
 	}
 
-	b.forwardEngineNotification(policyRelayRequestMethod, mustJSON(map[string]any{
+	b.forwardEngineNotificationFrom(source, policyRelayRequestMethod, mustJSON(map[string]any{
 		"id": "r3", "method": "get", "caller": "pinned-peer", "params": map[string]any{},
 	}))
 	got := reply("r3")
@@ -1121,6 +1123,7 @@ type routedBroker struct {
 	out    *syncBuffer
 	proxy  *fakeWorker
 	engine *fakeWorker
+	source *engineManagerSource
 	path   string
 	relays int
 }
@@ -1139,6 +1142,8 @@ func newRoutedBroker(t *testing.T) *routedBroker {
 func newBrokerOnFile(t *testing.T, contents string) *routedBroker {
 	t.Helper()
 	b, out := newPolicyBroker(t)
+	source := b.activateEngineManagerSource()
+	waitPushesSettled(t, b)
 	_, proxy := attachFakeProxy(t, b)
 	engine := attachFakeEngine(t, b)
 	clustertrusttest.Join(t, b.clusterDir, "cluster-1", "self-node", "pinned-peer")
@@ -1147,7 +1152,7 @@ func newBrokerOnFile(t *testing.T, contents string) *routedBroker {
 		t.Fatalf("write policy file: %v", err)
 	}
 	b.loadNodePolicy(path)
-	return &routedBroker{b: b, out: out, proxy: proxy, engine: engine, path: path}
+	return &routedBroker{b: b, out: out, proxy: proxy, engine: engine, source: source, path: path}
 }
 
 func (rb *routedBroker) relay(t *testing.T, method string, params any) (result json.RawMessage, errText string) {
@@ -1167,7 +1172,7 @@ func (rb *routedBroker) relayReply(t *testing.T, method string, params any) peer
 	t.Helper()
 	rb.relays++
 	id := "relay-" + strings.Repeat("x", rb.relays)
-	rb.b.forwardEngineNotification(policyRelayRequestMethod, mustJSON(map[string]any{
+	rb.b.forwardEngineNotificationFrom(rb.source, policyRelayRequestMethod, mustJSON(map[string]any{
 		"id": id, "method": method, "caller": "pinned-peer", "params": params,
 	}))
 	calls := rb.engine.waitFor("policy:reply "+id, func(calls []policyCall) bool {

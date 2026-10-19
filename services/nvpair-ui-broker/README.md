@@ -484,6 +484,28 @@ proxy enforces it.
   acknowledge the identity without it; with no proxy running nothing needs
   withdrawing, and a proxy without the method holds no capability. Any other
   failure fails the operation before the engine is touched.
+- **Model content mutations** (`model_mutation.go`). The source-bound
+  `forwardEngineNotificationFrom` consumes the private engine-manager
+  `engine:model-mutation-request{requestId, engine}` notification, never
+  forwarding it to clients. It checks the current source and synchronously
+  removes the whole engine from `engineIdentity` under the policy lock,
+  retaining its settings fingerprint. Confirmation runs off the worker read
+  pump through `pushModelIdentityConfirmed`, shared with settings withdrawal.
+  The serialized push reads current identity and requires proxy acceptance;
+  the no-running-proxy and method-not-found exceptions remain the same.
+  Busy-slot timeout, transport failure and refusal fail closed even with
+  hybrid routing disabled or no advertised strict capacity.
+  The existing worker slot binds `(worker, source)` immediately after spawn.
+  A request read in the start window waits on the slot's change signal within
+  the confirmation budget (5 s by default); retirement wakes it to fail.
+  Success rechecks the current source, and replies go only through the still
+  bound pair, never a replacement fetched through `getEngineMgr`.
+  `engine:model-mutation-reply{requestId, engine, ok, error, code}` is internal:
+  success carries `ok:true`, empty error and code 0; unavailable pairing uses
+  code 1, failed proxy withdrawal code 2. If the pair is gone no reply is sent,
+  leaving engine-manager to fail closed on its own deadline. Fresh inventory
+  from engine-manager restores model identity after the mutation; already
+  dispatched inference is not cancelled.
 - **Admission.** The proxy's `admission/state` (active, per-engine active, last
   activity) feeds the drains below; `admission/unload` unloads the named models
   through `engine:unload-model`; `admission/wake` calls `engine:wake` unless the

@@ -99,7 +99,7 @@ func (b *Broker) sendNodeProjection(onlyOnStrictChange bool) {
 	running := b.policyProxy()
 	r.mu.Lock()
 	advertisement := r.current.Advertisement()
-	advertisement.StrictAdmission = r.strictReadinessLocked(running).Capability
+	advertisement.StrictAdmission = r.strictReadinessLocked(running, b.engineModelNaming).Capability
 	if onlyOnStrictChange && reflect.DeepEqual(advertisement.StrictAdmission, r.strictPublished) {
 		r.mu.Unlock()
 		return

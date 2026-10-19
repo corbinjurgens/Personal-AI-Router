@@ -55,7 +55,7 @@ func TestRecoveringManagerDiscoverySubscribeReceivesDirectory(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	b.forwardEngineNotification(noderec.MethodSubscribe, params)
+	b.forwardEngineNotificationFrom(b.activateEngineManagerSource(), noderec.MethodSubscribe, params)
 	t.Cleanup(b.clearEngineRelaySub)
 	calls := engine.waitFor("recovery directory snapshot", func(calls []policyCall) bool { return len(calls) > 0 })
 	var snapshot noderec.GetNodesResult
@@ -86,7 +86,7 @@ func TestRecoveringManagerReadyReceivesStateProjections(t *testing.T) {
 	want := settings.Snapshot{Engine: "ollama", Revision: 7}
 	b.engineSettingsLoaded = true
 	b.engineSettings = map[string]*engineSettingsRecord{"ollama": {Snapshot: want}}
-	b.forwardEngineNotification("engine:ready", nil)
+	b.forwardEngineNotificationFrom(b.activateEngineManagerSource(), "engine:ready", nil)
 	waitProjections(t, engine, 1)
 	engine.mu.Lock()
 	raw := append(json.RawMessage(nil), engine.projections[0].params...)
@@ -168,6 +168,7 @@ func requireLastProjectionIsStored(t *testing.T, b *Broker, got []nodepolicy.Adv
 func TestNodeProjectionPublishedOnPersistAvailabilityAndReady(t *testing.T) {
 	ab := newActivatedBroker(t)
 	engine := attachFakeEngine(t, ab.b)
+	source := ab.b.activateEngineManagerSource()
 
 	_, err := ab.b.dispatchPolicy(context.Background(), methodPolicySet, policyParams{
 		Policy: mustJSON(map[string]any{
@@ -216,12 +217,12 @@ func TestNodeProjectionPublishedOnPersistAvailabilityAndReady(t *testing.T) {
 	})
 	t.Run("engine-manager ready", func(t *testing.T) {
 		before := len(nodeProjections(t, engine))
-		ab.b.forwardEngineNotification("engine:ready", json.RawMessage(`{"version":"test"}`))
+		ab.b.forwardEngineNotificationFrom(source, "engine:ready", json.RawMessage(`{"version":"test"}`))
 		requireLastProjectionIsStored(t, ab.b, waitProjections(t, engine, before+1))
 	})
 	t.Run("engine-manager attached", func(t *testing.T) {
 		before := len(nodeProjections(t, engine))
-		ab.b.refreshEnginePolicySnapshot(ab.b.getEngineMgr())
+		ab.b.refreshEnginePolicySnapshotFrom(ab.b.getEngineMgr(), source)
 		requireLastProjectionIsStored(t, ab.b, waitProjections(t, engine, before+1))
 	})
 }
@@ -274,6 +275,6 @@ func TestNodeProjectionWithoutEngineManagerIsDropped(t *testing.T) {
 		t.Fatal("policy:set without an engine-manager returned no revision")
 	}
 	engine := attachFakeEngine(t, ab.b)
-	ab.b.forwardEngineNotification("engine:ready", json.RawMessage(`{}`))
+	ab.b.forwardEngineNotificationFrom(ab.b.activateEngineManagerSource(), "engine:ready", json.RawMessage(`{}`))
 	requireLastProjectionIsStored(t, ab.b, waitProjections(t, engine, 1))
 }

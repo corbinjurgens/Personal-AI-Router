@@ -76,9 +76,8 @@ func waitIdentity(t *testing.T, proxy *fakeWorker, what string, want func(nodepo
 func TestModelIdentityJoinsEngineManagerAndSettings(t *testing.T) {
 	ab := newActivatedBroker(t)
 	b := ab.b
-	if !b.handlePolicyEngineNotification(engineModelIdentityMethod, engineManagerSnapshot("ollama", "lmstudio")) {
-		t.Fatal("engine:model-identity was forwarded instead of consumed")
-	}
+	source := b.activateEngineManagerSource()
+	b.forwardEngineNotificationFrom(source, engineModelIdentityMethod, engineManagerSnapshot("ollama", "lmstudio"))
 	b.observeSettingsIdentity([]settings.Snapshot{appliedSnapshot("ollama", 3)})
 	fp, _ := settingsFingerprint(appliedSnapshot("ollama", 3))
 	got := waitIdentity(t, ab.proxy, "the joined identity", func(p nodepolicy.SetModelIdentityParams) bool { return len(p.Engines) == 1 })
@@ -89,17 +88,18 @@ func TestModelIdentityJoinsEngineManagerAndSettings(t *testing.T) {
 	}
 
 	t.Run("a stop withdraws the engine", func(t *testing.T) {
-		b.observeEngineRunning("ollama", false)
+		b.forwardEngineNotificationFrom(source, engineStateChangedMethod, json.RawMessage(`{"engine":"ollama","running":false}`))
 		waitIdentity(t, ab.proxy, "the stopped engine withdrawn", func(p nodepolicy.SetModelIdentityParams) bool { return len(p.Engines) == 0 })
 	})
 	t.Run("engine-manager exit withdraws every engine", func(t *testing.T) {
-		b.observeModelIdentity(engineManagerSnapshot("ollama"))
+		b.observeModelIdentity(source, engineManagerSnapshot("ollama"))
 		waitIdentity(t, ab.proxy, "the identity restored", func(p nodepolicy.SetModelIdentityParams) bool { return len(p.Engines) == 1 })
-		b.clearEngineManagerIdentity()
+		b.retireEngineManagerSource(source)
 		waitIdentity(t, ab.proxy, "every engine withdrawn", func(p nodepolicy.SetModelIdentityParams) bool { return len(p.Engines) == 0 })
 	})
 	t.Run("settings being applied withdraw the engine", func(t *testing.T) {
-		b.observeModelIdentity(engineManagerSnapshot("ollama"))
+		source = b.activateEngineManagerSource()
+		b.observeModelIdentity(source, engineManagerSnapshot("ollama"))
 		waitIdentity(t, ab.proxy, "the identity restored", func(p nodepolicy.SetModelIdentityParams) bool { return len(p.Engines) == 1 })
 		applying := appliedSnapshot("ollama", 4)
 		applying.Phase = "applying"
@@ -219,7 +219,7 @@ func replaceSettingsProxy(t *testing.T, h *settingsHarness, answer func(string, 
 
 func TestSettingsApplyWithdrawsStrictIdentityFirst(t *testing.T) {
 	h := newSettingsHarness(t)
-	h.b.observeModelIdentity(engineManagerSnapshot("ollama"))
+	h.b.observeModelIdentity(h.b.activateEngineManagerSource(), engineManagerSnapshot("ollama"))
 	p := h.request(t)
 	identities := func() []nodepolicy.SetModelIdentityParams { return identityCalls(t, h.unaddressedProxyCalls()) }
 	var before string

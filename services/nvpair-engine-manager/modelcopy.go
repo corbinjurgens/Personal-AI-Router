@@ -217,12 +217,20 @@ func (e *Executor) CopyModelFrom(ctx context.Context, src modelFileSource, engin
 	if err != nil {
 		return copyModelResult{}, err
 	}
-	res, err := runCopyPlan(ctx, src, engine, model, plan, emit)
-	if err != nil {
-		return res, err
-	}
-	stage("finalizing", "")
-	if err := plan.finalize(ctx); err != nil {
+	// Listing the source and planning the copy are read-only. Installing the
+	// downloaded files is not: the writes run under the engine's
+	// content-mutation guard (model_mutation.go), so the broker withdraws that
+	// engine's model identity before the first file is written.
+	var res copyModelResult
+	if err := e.withModelMutation(ctx, engine, func() error {
+		var copyErr error
+		res, copyErr = runCopyPlan(ctx, src, engine, model, plan, emit)
+		if copyErr != nil {
+			return copyErr
+		}
+		stage("finalizing", "")
+		return plan.finalize(ctx)
+	}); err != nil {
 		return res, err
 	}
 	e.pokeLoaded()

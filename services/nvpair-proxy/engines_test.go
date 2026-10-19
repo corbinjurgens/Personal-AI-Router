@@ -21,6 +21,23 @@ func TestProfilesMatchSharedEngines(t *testing.T) {
 	}
 }
 
+func TestNormalizeModelPreservesNamingAndAliases(t *testing.T) {
+	test := func(name, input, want string, naming modelNaming) {
+		t.Run(name, func(t *testing.T) {
+			profile := engineProfile{ModelNaming: naming}
+			if got := profile.normalizeModel(input); got != want {
+				t.Fatalf("normalizeModel(%q) = %q, want %q", input, got, want)
+			}
+		})
+	}
+	test("reserved weak alias", " weak ", "weak", impliedLatestTag)
+	test("reserved strong alias", "strong", "strong", impliedLatestTag)
+	test("registry name", " registry:5000/org/model ", "registry:5000/org/model:latest", impliedLatestTag)
+	test("explicit tag", "org/model:v1", "org/model:v1", impliedLatestTag)
+	test("explicit digest", "org/model@sha256:abc", "org/model@sha256:abc", impliedLatestTag)
+	test("exact identifier", " org/model ", "org/model", exactID)
+}
+
 func TestLlamaCPPProfile(t *testing.T) {
 	profile, ok := profileFor("llamacpp")
 	if !ok {

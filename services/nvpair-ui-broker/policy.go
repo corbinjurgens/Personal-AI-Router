@@ -162,8 +162,9 @@ type policyRuntime struct {
 	// Strict admission identity (model_identity.go): engine-manager's run,
 	// launch and model content identity per engine, and this broker's
 	// applied-settings fingerprint per engine. The proxy gets their join.
-	engineIdentity   map[string]engineManagerIdentity
-	settingsIdentity map[string]string
+	engineIdentity      map[string]engineManagerIdentity
+	engineManagerSource *engineManagerSource
+	settingsIdentity    map[string]string
 
 	// Idle bookkeeping: when an engine was seen to start, when it last gained a
 	// loaded model, and the baseline the idle policy last acted on.
@@ -985,17 +986,6 @@ func (b *Broker) handlePolicyEngineNotification(method string, params json.RawMe
 	case policyRelayCancelMethod:
 		b.cancelPolicyRelay(params)
 		return true
-	case engineStateChangedMethod:
-		var st struct {
-			Engine  string `json:"engine"`
-			Running bool   `json:"running"`
-		}
-		if json.Unmarshal(params, &st) == nil && st.Engine != "" {
-			b.observeEngineRunning(st.Engine, st.Running)
-		}
-	case engineModelIdentityMethod:
-		b.observeModelIdentity(params)
-		return true
 	case engineModelsChangedMethod:
 		var p struct {
 			Models struct {
@@ -1016,11 +1006,15 @@ func (b *Broker) handlePolicyEngineNotification(method string, params json.RawMe
 	return false
 }
 
-// observeEngineRunning records a running/stopped transition. A stopped engine
-// has nothing loaded, which is what the proxy must see.
-func (b *Broker) observeEngineRunning(engine string, running bool) {
+// observeEngineRunningFrom records a running/stopped transition only from the
+// current source. A stopped engine has no loaded models or run identity.
+func (b *Broker) observeEngineRunningFrom(source *engineManagerSource, engine string, running bool) bool {
 	r := b.nodePolicyRuntime()
 	r.mu.Lock()
+	if source == nil || r.engineManagerSource != source {
+		r.mu.Unlock()
+		return false
+	}
 	was := r.running[engine]
 	if running {
 		r.running[engine] = true
@@ -1048,6 +1042,7 @@ func (b *Broker) observeEngineRunning(engine string, running bool) {
 	if !running && identified {
 		b.identityChanged()
 	}
+	return true
 }
 
 // observeLoaded folds engine-manager's loadedByEngine into the residency. Only
@@ -1100,11 +1095,12 @@ func containsString(list []string, s string) bool {
 	return false
 }
 
-// refreshEnginePolicySnapshot seeds running engines, residency and saved
+// refreshEnginePolicySnapshotFrom seeds running engines, residency and saved
 // intent from a (re)started engine-manager, whose watcher pushes only changes,
 // and sends it the node projection. engine:ready sends the projection too, but
 // it can be read before the new worker's handle is installed; this runs after.
-func (b *Broker) refreshEnginePolicySnapshot(w *rpcWorker) {
+// The worker's bound source fences running-state observations during replay.
+func (b *Broker) refreshEnginePolicySnapshotFrom(w *rpcWorker, source *engineManagerSource) {
 	if w == nil {
 		return
 	}
@@ -1128,7 +1124,7 @@ func (b *Broker) refreshEnginePolicySnapshot(w *rpcWorker) {
 		}
 		if json.Unmarshal(result, &p) == nil {
 			for _, e := range p.Engines {
-				b.observeEngineRunning(e.Engine, e.Running)
+				b.observeEngineRunningFrom(source, e.Engine, e.Running)
 			}
 		}
 	}

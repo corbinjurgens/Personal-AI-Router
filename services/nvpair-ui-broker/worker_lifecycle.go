@@ -498,14 +498,26 @@ func (b *Broker) spawnEngineMgr() (supervisedHandle, error) {
 		args = append(args, "--reserved-port", fmt.Sprintf("%d", aliasPort))
 	}
 	args = append(args, b.clusterDirArgs()...)
-	w, err := startRPCWorker("engine-manager", b.engineMgrPath, args, b.forwardEngineNotification, b.engineManagerExited)
+	source := b.activateEngineManagerSource()
+	w, err := startRPCWorker("engine-manager", b.engineMgrPath, args, func(method string, params json.RawMessage) {
+		b.forwardEngineNotificationFrom(source, method, params)
+	}, func(exited *rpcWorker) {
+		// Retire the source first so a waiting confirmation already sees it
+		// gone when the binding wake below lets it run.
+		b.retireEngineManagerSource(source)
+		b.clearEngineMgrBinding(source)
+		b.engineManagerExited(exited)
+	})
 	if err != nil {
+		b.retireEngineManagerSource(source)
+		b.clearEngineMgrBinding(source)
 		return nil, err
 	}
 	b.workersMu.Lock()
 	b.engineMgrRecovering = true
 	b.workersMu.Unlock()
 	b.setEngineMgr(w)
+	b.bindEngineMgr(w, source)
 	if !b.recoverReplacementEngineMgr(w) {
 		// Keep supervising the live replacement, but expose no forward surface
 		// while its inherited reservation cannot be reconciled. Recovery has
@@ -514,7 +526,7 @@ func (b *Broker) spawnEngineMgr() (supervisedHandle, error) {
 	}
 	// The recovery loop owns all retries; this continuation runs once, only
 	// after successful cleanup of this still-current replacement.
-	go b.refreshEnginePolicySnapshot(w)
+	go b.refreshEnginePolicySnapshotFrom(w, source)
 	// Re-push the alias reservation before anything can drive this worker: a
 	// respawned engine-manager starts with an empty reservation and must not
 	// adopt or start a backend on the port the proxy alias owns.

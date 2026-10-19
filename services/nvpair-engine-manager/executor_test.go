@@ -58,7 +58,9 @@ func newTestExecutor(t *testing.T, m *Manifest) *Executor {
 	t.Helper()
 	reg := NewRegistry()
 	reg.engines[m.Engine] = m
-	return NewExecutor(reg, NewReporter(nil), func(string, any) {}, t.TempDir())
+	ex := NewExecutor(reg, NewReporter(nil), func(string, any) {}, t.TempDir())
+	acceptModelMutations(ex)
+	return ex
 }
 
 func responseHeaderTimeout(t *testing.T, client *http.Client) time.Duration {

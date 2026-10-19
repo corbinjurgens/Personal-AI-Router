@@ -109,6 +109,11 @@ func modelFromParams(params json.RawMessage) string {
 // the hub as it advances, and returns the action's final JSON result. When
 // params is empty they come from the engine's pull binding (modelops.go), so a
 // caller can pass just a model name.
+//
+// A pull downloads into the engine's model store: everything above the
+// download is read-only, and the download itself runs under the engine's
+// content-mutation guard (model_mutation.go), so the broker withdraws that
+// engine's model identity before the first byte is requested.
 func (e *Executor) PullModelStream(ctx context.Context, engine, model string, params json.RawMessage) (json.RawMessage, error) {
 	st, err := e.state(engine)
 	if err != nil {
@@ -123,7 +128,21 @@ func (e *Executor) PullModelStream(ctx context.Context, engine, model string, pa
 			return nil, err
 		}
 	}
+	var result json.RawMessage
+	if err := e.withModelMutation(ctx, engine, func() error {
+		var pullErr error
+		result, pullErr = e.runPullModel(ctx, st, engine, model, act, params)
+		return pullErr
+	}); err != nil {
+		return nil, err
+	}
+	return result, nil
+}
 
+// runPullModel runs the pull itself: the CLI action form or the engine's
+// streaming HTTP download. Its caller holds the engine's content-mutation
+// guard.
+func (e *Executor) runPullModel(ctx context.Context, st *engineState, engine, model string, act Action, params json.RawMessage) (json.RawMessage, error) {
 	// CLI action (e.g. lms get): no structured line progress; emit a start
 	// marker and return the final result via the existing runner.
 	if len(act.Cmd) > 0 {

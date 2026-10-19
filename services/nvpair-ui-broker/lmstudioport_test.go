@@ -1004,7 +1004,7 @@ func TestEngineManagerRespawnReconcilesUnknownCustomBackendBeforeRestore(t *test
 		}
 	}()
 
-	b.forwardEngineNotification("engine:ready", nil)
+	b.forwardEngineNotificationFrom(b.activateEngineManagerSource(), "engine:ready", nil)
 	requireGateOpens(t, b.lmstudioPortReady, "the engine-manager respawn")
 	if !<-restoreDone {
 		t.Fatal("restore waiter reported cancellation")

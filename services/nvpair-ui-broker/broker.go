@@ -252,10 +252,17 @@ type Broker struct {
 	errorsProc          *errorsProcess
 	engineMgr           *rpcWorker
 	engineMgrRecovering bool // workersMu; replacement is unavailable until switch recovery settles
-	manualNodes         *rpcWorker
-	settings            *rpcWorker
-	clusterMgr          *clusterManagerProcess
-	scheduler           *rpcWorker
+	// engineMgrSource is the source token spawnEngineMgr bound engineMgr to,
+	// and engineMgrBindCh wakes anyone waiting for that binding. The pair is
+	// the only place a model-mutation confirmation looks; getEngineMgr hides
+	// recovery and cannot name the worker that sent a request. See
+	// model_mutation.go.
+	engineMgrSource *engineManagerSource
+	engineMgrBindCh chan struct{}
+	manualNodes     *rpcWorker
+	settings        *rpcWorker
+	clusterMgr      *clusterManagerProcess
+	scheduler       *rpcWorker
 	// proxyProc is the one proxy process whether or not any facade came up in
 	// it. The per-engine handles say which facades serve; this one is what the
 	// node policy and the routing listener, which belong to the process, talk
@@ -345,7 +352,7 @@ type Broker struct {
 	performance *performanceRuntime
 
 	// engineMu guards engineSubscribed. The engine:<event> stream is
-	// opt-in like proxy's: forwardEngineNotification (engine-manager reader
+	// opt-in like proxy's: forwardEngineNotificationFrom (engine-manager reader
 	// goroutine) reads the flag while the engine:subscribe /
 	// engine:unsubscribe handlers (read-loop goroutine) flip it.
 	engineMu         sync.Mutex
@@ -586,6 +593,10 @@ func (b *Broker) setEngineMgr(w *rpcWorker) {
 	c := b.switchCoordinator()
 	b.workersMu.Lock()
 	if b.engineMgr != w {
+		// A different worker was installed, so any source the previous pair
+		// named is no longer that pair's. Only spawnEngineMgr binds again.
+		b.engineMgrSource = nil
+		b.wakeEngineMgrBindingLocked()
 		if c.activeCancel != nil {
 			b.engineMgrRecovering = true
 			c.interrupted = true
@@ -594,6 +605,50 @@ func (b *Broker) setEngineMgr(w *rpcWorker) {
 	}
 	b.engineMgr = w
 	b.workersMu.Unlock()
+}
+
+// bindEngineMgr records the worker spawnEngineMgr started for source. The pair
+// is what a model-mutation confirmation looks up: a harness or a replacement
+// installed by setEngineMgr alone has no bound source and cannot confirm one.
+func (b *Broker) bindEngineMgr(worker *rpcWorker, source *engineManagerSource) {
+	b.workersMu.Lock()
+	defer b.workersMu.Unlock()
+	if worker == nil || source == nil || b.engineMgr != worker {
+		return
+	}
+	b.engineMgrSource = source
+	b.wakeEngineMgrBindingLocked()
+}
+
+// clearEngineMgrBinding drops the pair when it still holds source and wakes
+// every waiter. Called after retirement, so a request read before the bind (or
+// before the worker exits) fails promptly instead of waiting out its budget.
+func (b *Broker) clearEngineMgrBinding(source *engineManagerSource) {
+	b.workersMu.Lock()
+	defer b.workersMu.Unlock()
+	if b.engineMgrSource == source {
+		b.engineMgrSource = nil
+	}
+	b.wakeEngineMgrBindingLocked()
+}
+
+// engineMgrBindingSignalLocked returns the channel closed by the next bind or
+// clear. It is created on first use because a test may construct a Broker
+// without NewBroker.
+func (b *Broker) engineMgrBindingSignalLocked() <-chan struct{} {
+	if b.engineMgrBindCh == nil {
+		b.engineMgrBindCh = make(chan struct{})
+	}
+	return b.engineMgrBindCh
+}
+
+// wakeEngineMgrBindingLocked closes the current signal and replaces it, so
+// every waiter re-reads the pair. Caller holds workersMu.
+func (b *Broker) wakeEngineMgrBindingLocked() {
+	if b.engineMgrBindCh != nil {
+		close(b.engineMgrBindCh)
+	}
+	b.engineMgrBindCh = make(chan struct{})
 }
 
 func (b *Broker) engineManagerExited(w *rpcWorker) {
@@ -1033,12 +1088,31 @@ func (b *Broker) pushClusterIdentityToNodeInfo() {
 	}
 }
 
-// forwardEngineNotification / forwardManualNodesNotification /
-// forwardSettingsNotification are the per-worker notification hooks. For
-// now they only demux errors:report / errors:clear into the nvpair-errors
-// pipeline; the rest of each worker's notification stream is logged and
-// dropped until its control-plane relay is wired in.
-func (b *Broker) forwardEngineNotification(method string, params json.RawMessage) {
+// forwardEngineNotificationFrom handles the bound engine-manager's notifications.
+// Identity and running-state observations are fenced by its source; control-plane
+// requests and subscribed client notifications follow their respective relays.
+func (b *Broker) forwardEngineNotificationFrom(source *engineManagerSource, method string, params json.RawMessage) {
+	if method == nodepolicy.MethodModelMutationRequest {
+		// Internal to engine-manager and the broker: answered below, never
+		// forwarded to engine:subscribe'd clients.
+		b.observeModelMutationRequest(source, params)
+		return
+	}
+	if method == engineModelIdentityMethod {
+		b.observeModelIdentity(source, params)
+		return
+	}
+	if method == engineStateChangedMethod {
+		var st struct {
+			Engine  string `json:"engine"`
+			Running bool   `json:"running"`
+		}
+		if json.Unmarshal(params, &st) == nil && st.Engine != "" {
+			if !b.observeEngineRunningFrom(source, st.Engine, st.Running) {
+				return
+			}
+		}
+	}
 	if b.handleSwitchEngineNotification(method, params) {
 		return
 	}
@@ -1672,7 +1746,7 @@ func (b *Broker) Serve(ctx context.Context) error {
 		defer b.settingsSup.Stop()
 	}
 	b.prepareOllamaHostAliasCandidate()
-	b.engineMgrSup = b.startOptionalWorker("engine-manager", b.engineMgrPath, b.spawnEngineMgr, func() { b.setEngineMgr(nil); b.clearEngineRelaySub(); b.clearEngineManagerIdentity() })
+	b.engineMgrSup = b.startOptionalWorker("engine-manager", b.engineMgrPath, b.spawnEngineMgr, func() { b.setEngineMgr(nil); b.clearEngineRelaySub() })
 	if b.engineMgrSup != nil {
 		defer b.engineMgrSup.Stop()
 	}

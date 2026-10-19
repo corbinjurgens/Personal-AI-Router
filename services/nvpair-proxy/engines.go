@@ -334,12 +334,12 @@ func (r routeRole) isModelList() bool {
 // the implied ":latest" tag never turns "weak" into the model "weak:latest".
 func (p engineProfile) normalizeModel(model string) string {
 	model = strings.TrimSpace(model)
-	if p.ModelNaming != impliedLatestTag || model == "" || nodepolicy.IsReservedAlias(model) {
+	if nodepolicy.IsReservedAlias(model) {
 		return model
 	}
-	name := model[strings.LastIndex(model, "/")+1:]
-	if name != "" && !strings.ContainsAny(name, ":@") {
-		return model + ":latest"
+	naming := engines.ModelNamingExact
+	if p.ModelNaming == impliedLatestTag {
+		naming = engines.ModelNamingImpliedLatestTag
 	}
-	return model
+	return engines.NormalizeModelName(model, naming)
 }

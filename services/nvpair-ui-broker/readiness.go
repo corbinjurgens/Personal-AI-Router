@@ -56,7 +56,7 @@ func (b *Broker) StrictReadiness() nodepolicy.StrictAdmissionReadiness {
 	running := b.policyProxy()
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return r.strictReadinessLocked(running)
+	return r.strictReadinessLocked(running, b.engineModelNaming)
 }
 
 // strictReadinessLocked applies the fences to the held report. running is the
@@ -66,7 +66,7 @@ func (b *Broker) StrictReadiness() nodepolicy.StrictAdmissionReadiness {
 // (model_identity.go), so a settings change, restart or replacement withdraws
 // them before the proxy reports again; a capability with no model left is
 // withdrawn. Caller holds r.mu.
-func (r *policyRuntime) strictReadinessLocked(running *proxyProcess) nodepolicy.StrictAdmissionReadiness {
+func (r *policyRuntime) strictReadinessLocked(running *proxyProcess, modelNaming func(string) (string, bool)) nodepolicy.StrictAdmissionReadiness {
 	held := r.strictReadiness
 	out := nodepolicy.StrictAdmissionReadiness{PolicyRevision: held.PolicyRevision, ProxyRunID: held.ProxyRunID}
 	authoritative := held.Capability != nil &&
@@ -88,7 +88,8 @@ func (r *policyRuntime) strictReadinessLocked(running *proxyProcess) nodepolicy.
 		if enabled, known := r.intent[m.Engine]; known && !enabled {
 			continue
 		}
-		if !r.identityCurrentLocked(m) {
+		naming, known := modelNaming(m.Engine)
+		if !known || !r.identityCurrentLocked(m, naming) {
 			continue
 		}
 		models = append(models, m)

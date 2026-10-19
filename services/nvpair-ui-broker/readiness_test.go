@@ -50,13 +50,17 @@ func newStrictFixtureWithFile(t *testing.T, data []byte) *strictFixture {
 	b.replayPolicyToProxy(context.Background(), pp)
 	ab := &activatedBroker{b: b, out: out, pp: pp, proxy: proxy, acks: acks, path: path}
 	ab.wantActivation(t, "0", activationActive, "")
-	seedStrictIdentity(b, "ollama", "lmstudio")
+	seedStrictIdentity(b, "ollama")
+	seedStrictIdentity(b, "lmstudio")
 	return &strictFixture{activatedBroker: ab, done: done, engine: engine}
 }
 
-// seedStrictIdentity gives each engine the identity strictCapability names, so
-// the identity fence (model_identity.go) passes its reports.
-func seedStrictIdentity(b *Broker, engines ...string) {
+// seedStrictIdentity adds current model identities for an engine, defaulting to
+// m:latest. Model names must follow the engine's naming rules.
+func seedStrictIdentity(b *Broker, engine string, models ...string) {
+	if len(models) == 0 {
+		models = []string{"m:latest"}
+	}
 	r := b.nodePolicyRuntime()
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -66,14 +70,17 @@ func seedStrictIdentity(b *Broker, engines ...string) {
 	if r.settingsIdentity == nil {
 		r.settingsIdentity = map[string]string{}
 	}
-	for _, engine := range engines {
-		r.engineIdentity[engine] = engineManagerIdentity{
-			EngineRunID:  "engine-run-1",
-			LaunchDigest: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
-			ModelDigests: map[string]string{"m:latest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},
-		}
-		r.settingsIdentity[engine] = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	identity := r.engineIdentity[engine]
+	identity.EngineRunID = "engine-run-1"
+	identity.LaunchDigest = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+	if identity.ModelDigests == nil {
+		identity.ModelDigests = map[string]string{}
 	}
+	for _, model := range models {
+		identity.ModelDigests[model] = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	}
+	r.engineIdentity[engine] = identity
+	r.settingsIdentity[engine] = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 }
 
 // strictCapability is a valid version 1 capability, one model per name, each
@@ -350,6 +357,7 @@ func TestStrictReadinessReadvertisedAfterResume(t *testing.T) {
 
 func TestStrictReadinessDropsModelsOfEnginesSavedOff(t *testing.T) {
 	f := newStrictFixture(t)
+	seedStrictIdentity(f.b, "lmstudio", "n")
 	both := strictCapability(t, "ollama", "m:latest")
 	both.Models = append(both.Models, strictCapability(t, "lmstudio", "n").Models...)
 	f.advertise(t, both)
@@ -389,6 +397,7 @@ func TestStrictReadinessReplayedAfterProxyRestart(t *testing.T) {
 func TestStrictReadinessConcurrentSavesNeverAdvertiseStale(t *testing.T) {
 	f := newStrictFixture(t)
 	forRevision := func(t *testing.T, revision string) *nodepolicy.StrictAdmissionCapability {
+		seedStrictIdentity(f.b, "ollama", "m-"+revision+":latest")
 		return strictCapability(t, "ollama", "m-"+revision)
 	}
 	const writers, saves = 4, 4
