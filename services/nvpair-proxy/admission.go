@@ -48,8 +48,9 @@ type notification struct {
 
 // admissionController is the node-wide admission state and decision.
 type admissionController struct {
-	mu     sync.Mutex
-	strict strictAdmissionState
+	mu            sync.Mutex
+	strict        strictAdmissionState
+	invalidations map[nodepolicy.InvalidateEngineParams]struct{}
 	// changed is closed and replaced on every state change, waking every
 	// waiter to re-evaluate. A condition variable cannot be selected on
 	// together with a deadline and a request context; a channel can.

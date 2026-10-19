@@ -6,6 +6,8 @@ package nodepolicy
 import (
 	"errors"
 	"fmt"
+
+	"nvpair-shared/engines"
 )
 
 // StrictAdmissionReadiness is the future proxy -> broker A1/A2 handoff, not a
@@ -32,8 +34,9 @@ func (r StrictAdmissionReadiness) Validate() error {
 }
 
 // Broker → proxy requests. Each is answered with {"ok":true} or a JSON-RPC
-// error, except MethodSetPolicy, which answers with a PolicyAck. The broker
-// re-sends all of them whenever the proxy (re)starts.
+// error, except the typed acknowledgements and snapshots below. The broker
+// re-sends policy state whenever the proxy (re)starts and replays pending switch
+// invalidations from its journal before enabling facades.
 const (
 	// MethodSetPolicy carries the whole Policy and is answered with a
 	// PolicyAck of its revision. Availability inside it is ignored by the
@@ -49,7 +52,71 @@ const (
 	MethodSetResidency = "node/set-residency"
 	// MethodSetEngineIntent carries SetEngineIntentParams.
 	MethodSetEngineIntent = "node/set-engine-intent"
+	// MethodInvalidateEngine withdraws strict eligibility for an engine switch.
+	MethodInvalidateEngine = "node/invalidate-engine"
+	// MethodAdmissionSnapshot reads current admission counts, without notification caching.
+	MethodAdmissionSnapshot = "node/admission-snapshot"
 )
+
+const InvalidationReasonEngineSwitch = "engine-switch"
+
+// InvalidateEngineParams identifies an engine within a switch operation. The
+// same operation may invalidate both source and target engines independently.
+type InvalidateEngineParams struct {
+	Engine      string `json:"engine"`
+	OperationID string `json:"operationId"`
+	Reason      string `json:"reason"`
+}
+
+func (p InvalidateEngineParams) Validate() error {
+	if !engines.ValidID(p.Engine) {
+		return errors.New("engine must be a valid engine ID")
+	}
+	// strictID is the shared switch request-id syntax: 1-128 ASCII bytes,
+	// alphanumeric first, then alphanumeric or . _ : -.
+	if !strictID.MatchString(p.OperationID) {
+		return errors.New("operationId must be a nonempty ASCII identity of at most 128 bytes")
+	}
+	if p.Reason != InvalidationReasonEngineSwitch {
+		return errors.New("reason must be engine-switch")
+	}
+	return nil
+}
+
+func (p *InvalidateEngineParams) UnmarshalJSON(data []byte) error {
+	type plain InvalidateEngineParams
+	var next plain
+	if err := decodeStrictContract(data, &next, "engine", "operationId", "reason"); err != nil {
+		return err
+	}
+	if err := InvalidateEngineParams(next).Validate(); err != nil {
+		return err
+	}
+	*p = InvalidateEngineParams(next)
+	return nil
+}
+
+type InvalidateEngineResult struct {
+	OK    bool   `json:"ok"`
+	RunID string `json:"runId"`
+}
+
+// AdmissionSnapshotParams is an explicit empty object. Request it after the
+// drain acknowledgement, and validate RunID before using zero as drain proof.
+type AdmissionSnapshotParams struct{}
+
+func (p *AdmissionSnapshotParams) UnmarshalJSON(data []byte) error {
+	type plain AdmissionSnapshotParams
+	var next plain
+	return decodeStrictContract(data, &next)
+}
+
+// AdmissionSnapshotResult includes held tickets and quarantined capacity in
+// its active counts, just like admission/state. Maps are copied at request time.
+type AdmissionSnapshotResult struct {
+	RunID string `json:"runId"`
+	AdmissionState
+}
 
 // Proxy → broker notifications.
 const (
