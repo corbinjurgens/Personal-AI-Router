@@ -416,6 +416,19 @@ func completeDeployment(d *Deployment) {
 	}
 }
 
+func TestCheckEndpoint(t *testing.T) {
+	if err := CheckEndpoint("https://example.com/v1/chat/completions"); err != nil {
+		t.Fatal(err)
+	}
+	for _, endpoint := range []string{"https://example.com/chat?", "https://example.com/chat?unknown=x", "https://example.com/chat#", "https://key@example.com/chat"} {
+		t.Run(endpoint, func(t *testing.T) {
+			if err := CheckEndpoint(endpoint); err == nil {
+				t.Fatal("forbidden endpoint accepted")
+			}
+		})
+	}
+}
+
 func TestDeploymentEndpointTransportAndQualificationAreAccepted(t *testing.T) {
 	for _, endpoint := range []string{
 		"https://api.example.com/v1/chat/completions",
