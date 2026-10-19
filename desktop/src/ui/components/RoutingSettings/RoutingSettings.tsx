@@ -20,6 +20,7 @@ import type {
 } from '@/shared/types/node-policy'
 import getErrorString from '@/shared/utils/get-error-string'
 import { InlineErrorBanner } from '@/ui/components/InlineErrorBanner'
+import BulkNodeConfiguration from '@/ui/components/RoutingSettings/BulkNodeConfiguration'
 import RoleEditor from '@/ui/components/RoutingSettings/RoleEditor'
 import { useConnectionStore } from '@/ui/stores/connection.store'
 import { useNodeConfigurationStore } from '@/ui/stores/node-configuration.store'
@@ -411,6 +412,10 @@ export default function RoutingSettings() {
                         and Resume button.
                     </Text>
                 </Stack>
+            </div>
+
+            <div className="settings-card pair-paper p-4">
+                <BulkNodeConfiguration />
             </div>
         </Stack>
     )

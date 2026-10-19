@@ -141,7 +141,7 @@ describe('role substitution', () => {
         })
         expect(saved?.revision).toBe('6')
         expect(entry().phase).toBe('applied')
-        expect(entry().baseline.revision).toBe('6')
+        expect(entry().baseline?.revision).toBe('6')
     })
 
     it('omits the node id for this PC', async () => {
@@ -256,7 +256,7 @@ describe('conflicts', () => {
         store.setRole(PEER, 'weak', { engine: 'ollama', model: 'qwen3:4b' })
         store.adopt(PEER, snapshot('6', { availability: 'paused' }))
         expect(entry().phase).toBe('draft')
-        expect(entry().baseline.revision).toBe('6')
+        expect(entry().baseline?.revision).toBe('6')
         expect(entry().draft.weak?.model).toBe('qwen3:4b')
     })
 
@@ -285,6 +285,21 @@ describe('conflicts', () => {
         expect(policyRefusal('-32602: roles[weak]: unknown engine "x"')).toBe('rejected')
         expect(policyRefusal('-32011: vetoed')).toBe('vetoed')
         expect(policyRefusal('-32000: the policy could not be saved')).toBe('other')
+        expect(policyRefusal('-32000: engine manager unavailable')).toBe('unreachable')
+        expect(policyRefusal('ui-broker policy:set timed out')).toBe('other')
+    })
+
+    it('keeps the draft and reads nothing back when the node was not reached', async () => {
+        set.mockRejectedValue(
+            new Error('-32000: node policy unavailable: device is offline or does not support it')
+        )
+        const store = useNodeConfigurationStore.getState()
+        store.adopt(PEER, snapshot('5'))
+        store.setRole(PEER, 'weak', { engine: 'ollama', model: 'qwen3:4b' })
+        await store.save(PEER, PEER)
+        expect(entry().phase).toBe('unreachable')
+        expect(entry().draft.weak?.model).toBe('qwen3:4b')
+        expect(get).not.toHaveBeenCalled()
     })
 })
 

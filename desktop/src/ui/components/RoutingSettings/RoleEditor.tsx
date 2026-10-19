@@ -11,16 +11,17 @@ import { InlineErrorBanner } from '@/ui/components/InlineErrorBanner'
 import { useEngineModelsStore } from '@/ui/stores/engine-models.store'
 import { useEngineStatusStore } from '@/ui/stores/engine-status.store'
 import {
+    chosenRole,
     inventoryChoices,
     pausedLocally,
     roleDifferences,
+    roleItems,
     roleKey,
     roleLabel,
     suggestRoles,
+    UNSET_ROLE,
     useNodeConfigurationStore
 } from '@/ui/stores/node-configuration.store'
-
-const UNSET = 'unset'
 
 const TIER_LABELS: Record<RoleTier, string> = {
     weak: 'Weak',
@@ -50,60 +51,45 @@ export default function RoleEditor({ targetId, nodeId, onSaved }: RoleEditorProp
     const [suggesting, setSuggesting] = useState(false)
     const [noSuggestion, setNoSuggestion] = useState(false)
 
+    const baseline = entry?.baseline
+
     const suggest = useCallback(async () => {
-        if (!entry) return
+        if (!baseline) return
         setSuggesting(true)
         setNoSuggestion(false)
         try {
             // This PC's own tier entries are the router's current guesses; a
             // paired node's document comes first.
             const own = nodeId ? await window.pairApi.nodePolicy.get().catch(() => null) : null
-            const policies = own ? [entry.baseline.policy, own.policy] : [entry.baseline.policy]
+            const policies = own ? [baseline.policy, own.policy] : [baseline.policy]
             const roles = suggestRoles(choices, policies)
             if (Object.keys(roles).length === 0) setNoSuggestion(true)
             else useNodeConfigurationStore.getState().setDraft(targetId, roles)
         } finally {
             setSuggesting(false)
         }
-    }, [entry, nodeId, choices, targetId])
+    }, [baseline, nodeId, choices, targetId])
 
     const save = useCallback(async () => {
         const saved = await useNodeConfigurationStore.getState().save(targetId, nodeId)
         if (saved) onSaved(saved)
     }, [targetId, nodeId, onSaved])
 
-    if (!entry) return null
+    if (!entry || !baseline) return null
 
-    const { baseline, draft, phase } = entry
+    const { draft, phase } = entry
     const edited = !sameNodeRoles(draft, baseline.roles)
-    const sending = phase === 'sending'
+    // A bulk attempt on this node reads before it sends; both hold the draft.
+    const sending = phase === 'sending' || phase === 'reading'
     const store = useNodeConfigurationStore.getState()
 
-    const itemsFor = (current: NodeRole | undefined) => {
-        const items = [
-            { value: UNSET, children: 'Unset' },
-            ...choices.map(choice => ({
-                value: choice.key,
-                children: roleLabel(choice, descriptors)
-            }))
-        ]
-        // A declared model the node no longer reports stays visible as the current value.
-        if (current && !choices.some(choice => choice.key === roleKey(current))) {
-            items.push({
-                value: roleKey(current),
-                children: `${roleLabel(current, descriptors)}, not installed`
-            })
-        }
-        return items
-    }
-
     const pick = (tier: RoleTier, value: string) => {
-        if (value === UNSET) {
+        if (value === UNSET_ROLE) {
             store.setRole(targetId, tier, undefined)
             return
         }
-        const choice = choices.find(candidate => candidate.key === value)
-        if (choice) store.setRole(targetId, tier, { engine: choice.engine, model: choice.model })
+        const role = chosenRole(choices, value)
+        if (role) store.setRole(targetId, tier, role)
     }
 
     const differences = entry.latest ? roleDifferences(draft, entry.latest.roles) : []
@@ -137,8 +123,8 @@ export default function RoleEditor({ targetId, nodeId, onSaved }: RoleEditorProp
                         <Select
                             size="small"
                             aria-label={`${TIER_LABELS[tier]} role`}
-                            items={itemsFor(draft[tier])}
-                            value={draft[tier] ? roleKey(draft[tier]) : UNSET}
+                            items={roleItems(choices, draft[tier], descriptors)}
+                            value={draft[tier] ? roleKey(draft[tier]) : UNSET_ROLE}
                             onValueChange={(value: string) => pick(tier, value)}
                             disabled={sending}
                         />
@@ -193,6 +179,12 @@ export default function RoleEditor({ targetId, nodeId, onSaved }: RoleEditorProp
             )}
             {phase === 'rejected' && entry.message && (
                 <InlineErrorBanner severity="error" message={entry.message} />
+            )}
+            {phase === 'unreachable' && (
+                <InlineErrorBanner
+                    severity="warning"
+                    message={`The node could not be reached, so the roles were not sent. Your draft is kept. ${entry.message ?? ''}`}
+                />
             )}
             {phase === 'unknown' && (
                 <InlineErrorBanner
