@@ -433,6 +433,46 @@ func (r *publicCountingReader) Read(p []byte) (int, error) {
 	return n, err
 }
 
+func TestPublicTransportErrorBodyBounds(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		bodyBytes     int
+		contentLength int64
+		wantError     bool
+	}{
+		{name: "exact error bound", bodyBytes: 16, contentLength: 16},
+		{name: "declared overflow", bodyBytes: 17, contentLength: 17, wantError: true},
+		{name: "unknown length overflow", bodyBytes: 17, contentLength: -1, wantError: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c, err := newPublicClient("https://example.com/chat", publicTestBounds())
+			if err != nil {
+				t.Fatal(err)
+			}
+			c.client.Transport = publicTestRoundTrip(func(*http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode:    http.StatusInternalServerError,
+					ContentLength: tc.contentLength,
+					Header:        make(http.Header),
+					Body:          io.NopCloser(strings.NewReader(strings.Repeat("x", tc.bodyBytes))),
+				}, nil
+			})
+			budget := &publicTestBudget{ceiling: 4096}
+			response, err := publicTestPost(c, context.Background(), budget.acquire)
+			if tc.wantError {
+				if err == nil {
+					t.Fatal("error body exceeded its cap but was accepted")
+				}
+			} else if err != nil || response == nil || response.Body != nil {
+				t.Fatalf("exact error bound failed: response=%+v err=%v", response, err)
+			}
+			if budget.used.Load() != 0 {
+				t.Fatalf("error body leaked budget: %d", budget.used.Load())
+			}
+		})
+	}
+}
+
 func TestPublicTransportCancel(t *testing.T) {
 	for _, mode := range []string{"idle", "cancel", "before send", "bytes reset idle"} {
 		t.Run(mode, func(t *testing.T) {
