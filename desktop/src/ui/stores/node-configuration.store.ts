@@ -2,19 +2,29 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * Role drafts for the role editor, one per node, for the app session.
+ * Role drafts for the role editor and the bulk panel, one per node, for the
+ * app session.
  *
  * `policy:set` replaces the whole document and fills omitted fields with
  * defaults, so a role edit never sends a document of its own: it takes the
  * target's own projection as last read, substitutes `roles` only, and sends it
  * back checked against that target's revision. A refused or uncertain save is
  * read back and shown; nothing is retried automatically.
+ *
+ * Bulk configuration is a bounded fan-out of the same per-node operation. There
+ * is no cluster-wide document: each target keeps its own baseline, result and
+ * readback, and a node that is offline keeps an unsent draft.
  */
 import { create } from 'zustand'
 import type { EngineDescriptor, EngineModels, EngineType } from '@/shared/types/engines'
 import type { JsonValue } from '@/shared/types/json'
 import type { NodePolicySnapshot } from '@/shared/types/node-policy'
-import type { NodeRole, NodeRoles, RoleTier } from '@/shared/types/node-roles'
+import type {
+    NodePolicyAdvertisement,
+    NodeRole,
+    NodeRoles,
+    RoleTier
+} from '@/shared/types/node-roles'
 import { engineLabel, engineManagerName, engineTypeFromManagerName } from '@/shared/utils/engines'
 import getErrorString from '@/shared/utils/get-error-string'
 import {
@@ -101,6 +111,37 @@ export function inventoryChoices(inventory: EngineModels[]): RoleChoice[] {
     )
 }
 
+/** The select value for an unset tier. */
+export const UNSET_ROLE = 'unset'
+
+/**
+ * Select items for one tier: unset, then each installed choice. A declared
+ * model the node no longer reports stays visible as the current value.
+ */
+export function roleItems(
+    choices: RoleChoice[],
+    current: NodeRole | undefined,
+    descriptors: ReadonlyMap<EngineType, EngineDescriptor>
+): { value: string; children: string }[] {
+    const items = [
+        { value: UNSET_ROLE, children: 'Unset' },
+        ...choices.map(choice => ({ value: choice.key, children: roleLabel(choice, descriptors) }))
+    ]
+    if (current && !choices.some(choice => choice.key === roleKey(current))) {
+        items.push({
+            value: roleKey(current),
+            children: `${roleLabel(current, descriptors)}, not installed`
+        })
+    }
+    return items
+}
+
+/** The role a select value names, or undefined for unset or a value no longer offered. */
+export function chosenRole(choices: RoleChoice[], value: string): NodeRole | undefined {
+    const choice = choices.find(candidate => candidate.key === value)
+    return choice ? { engine: choice.engine, model: choice.model } : undefined
+}
+
 /**
  * A suggestion for each tier: the first local tier entry, in the given
  * documents' order, whose engine and model the node has installed. A tier with
@@ -146,23 +187,34 @@ export function roleDifferences(mine: NodeRoles, theirs: NodeRoles): RoleDiffere
 }
 
 /** How the service refused a save. The bridge carries the JSON-RPC code ahead of the message. */
-type Refusal = 'conflict' | 'vetoed' | 'rejected' | 'other'
+type Refusal = 'conflict' | 'vetoed' | 'rejected' | 'unreachable' | 'other'
+
+/**
+ * Failures raised before the request reached the target: no engine manager to
+ * relay through, a node that is not a reachable peer, or a connection that was
+ * never made. A timeout or a reply lost after sending is not one of these.
+ */
+const UNREACHABLE =
+    /engine manager unavailable|not a discovered ec peer|device is offline|is not running|connection refused|no route to host|network is unreachable/i
 
 export function policyRefusal(message: string): Refusal {
     if (/-32010\b/.test(message) || message.includes('policy conflict')) return 'conflict'
     if (/-32011\b/.test(message)) return 'vetoed'
     if (/-32602\b/.test(message)) return 'rejected'
+    if (UNREACHABLE.test(message)) return 'unreachable'
     return 'other'
 }
 
 /** Where one node's role edit stands (the bulk UX contract's per-node states). */
 type RoleEditPhase =
     | 'draft'
+    | 'reading'
     | 'sending'
     | 'applied'
     | 'conflict'
     | 'vetoed'
     | 'rejected'
+    | 'unreachable'
     | 'unknown'
 
 interface RoleBaseline {
@@ -171,15 +223,25 @@ interface RoleBaseline {
     roles: NodeRoles
 }
 
-interface RoleEditorEntry {
-    /** The target's own document the draft substitutes into. */
-    baseline: RoleBaseline
+export interface RoleEditorEntry {
+    /**
+     * The target's own document the draft substitutes into. Absent only while
+     * the first read of the target is in flight or has failed; the draft then
+     * holds nothing the user chose.
+     */
+    baseline?: RoleBaseline
     draft: NodeRoles
     phase: RoleEditPhase
     /** The document read back after a conflict, for the diff. */
     latest?: RoleBaseline
     /** The service's message for the last refused or uncertain save. */
     message?: string
+    /**
+     * Names one bulk attempt, from its read through its send and read back. A
+     * retry is a new attempt. `policy:set` takes no request id, so it stays on
+     * this side; the expected revision is what keeps a resend from landing twice.
+     */
+    requestId?: string
 }
 
 function baselineOf(snapshot: Pick<NodePolicySnapshot, 'policy' | 'revision'>): RoleBaseline {
@@ -192,6 +254,81 @@ function baselineOf(snapshot: Pick<NodePolicySnapshot, 'policy' | 'revision'>): 
 
 function isOlder(revision: string, than: string): boolean {
     return BigInt(revision) < BigInt(than)
+}
+
+/** A target's state in the bulk panel: its edit phase, or `advertised` (see {@link targetState}). */
+export type TargetState = RoleEditPhase | 'advertised'
+
+/** The states a user can retry. */
+export const FAILED_STATES: ReadonlySet<TargetState> = new Set<TargetState>([
+    'conflict',
+    'rejected',
+    'vetoed',
+    'unreachable',
+    'unknown'
+])
+
+/**
+ * A target's bulk state. An applied save becomes `advertised` once this node's
+ * own discovery reports the target at that revision or a later one; until then
+ * the target has persisted the roles but routers here may not use them yet. A
+ * node never edited here is a draft.
+ */
+export function targetState(
+    entry: RoleEditorEntry | undefined,
+    advertised: NodePolicyAdvertisement | undefined
+): TargetState {
+    if (!entry) return 'draft'
+    if (
+        entry.phase === 'applied' &&
+        entry.baseline &&
+        advertised &&
+        /^\d+$/.test(advertised.revision) &&
+        !isOlder(advertised.revision, entry.baseline.revision)
+    ) {
+        return 'advertised'
+    }
+    return entry.phase
+}
+
+/** One target of a bulk send. */
+export interface BulkTarget {
+    /** The broker's id for the node. */
+    targetId: string
+    /** The id `policy:*` takes; undefined for this PC. */
+    nodeId: string | undefined
+}
+
+/** The most per-node operations a bulk send keeps in flight. */
+export const BULK_CONCURRENCY = 4
+
+/** Run `operation` for every item, never more than `limit` at once. */
+async function runBounded<T>(
+    items: readonly T[],
+    limit: number,
+    operation: (item: T) => Promise<void>
+): Promise<void> {
+    let next = 0
+    const worker = async () => {
+        while (next < items.length) {
+            const item = items[next]
+            next += 1
+            await operation(item)
+        }
+    }
+    await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker))
+}
+
+/** Same roles on every selected node, or a draft of its own for each. */
+type BulkMode = 'common' | 'per-node'
+
+/** The bulk panel's choices, kept for the app session with the drafts. */
+interface BulkSelection {
+    /** Selected targets, by the broker's node id. */
+    selected: string[]
+    mode: BulkMode
+    /** The roles every selected node is given in `common` mode. */
+    common: NodeRoles
 }
 
 interface NodeConfigurationState {
@@ -215,14 +352,40 @@ interface NodeConfigurationState {
      * with the persisted document on success, and null otherwise.
      */
     save(targetId: string, nodeId: string | undefined): Promise<NodePolicySnapshot | null>
+    /** Take a first baseline for a target that has none, for its preview. */
+    read(targetId: string, nodeId: string | undefined): Promise<void>
+    /**
+     * One bulk attempt on one target: read the target's own document, then send
+     * the draft over it. With `roles`, those roles are substituted into the
+     * document just read (the same roles on every node); without, the target's
+     * own draft is checked against its baseline, and a change to its roles
+     * stops at a conflict. A target already holding the roles is applied
+     * without a send. Never throws; the outcome is the entry's phase.
+     */
+    apply(targetId: string, nodeId: string | undefined, roles?: NodeRoles): Promise<void>
+    /**
+     * {@link apply} for each target, at most {@link BULK_CONCURRENCY} at once.
+     * `onSettled` is told as each target's attempt ends, for progress.
+     */
+    applyAll(
+        targets: readonly BulkTarget[],
+        roles?: NodeRoles,
+        onSettled?: (target: BulkTarget) => void
+    ): Promise<void>
+    bulk: BulkSelection
+    setBulk(change: Partial<BulkSelection>): void
 }
 
 export const useNodeConfigurationStore = create<NodeConfigurationState>((set, get) => {
     function update(targetId: string, change: (entry: RoleEditorEntry) => RoleEditorEntry): void {
         const entry = get().editors.get(targetId)
         if (!entry) return
+        put(targetId, change(entry))
+    }
+
+    function put(targetId: string, entry: RoleEditorEntry): void {
         const editors = new Map(get().editors)
-        editors.set(targetId, change(entry))
+        editors.set(targetId, entry)
         set({ editors })
     }
 
@@ -233,7 +396,7 @@ export const useNodeConfigurationStore = create<NodeConfigurationState>((set, ge
             const entry = get().editors.get(targetId)
             const next = baselineOf(snapshot)
             const editors = new Map(get().editors)
-            if (!entry) {
+            if (!entry?.baseline) {
                 editors.set(targetId, { baseline: next, draft: next.roles, phase: 'draft' })
                 set({ editors })
                 return
@@ -297,13 +460,15 @@ export const useNodeConfigurationStore = create<NodeConfigurationState>((set, ge
         discard: targetId =>
             update(targetId, entry => {
                 const baseline = entry.latest ?? entry.baseline
-                return { baseline, draft: baseline.roles, phase: 'draft' }
+                return baseline ? { baseline, draft: baseline.roles, phase: 'draft' } : entry
             }),
 
         save: async (targetId, nodeId) => {
             const entry = get().editors.get(targetId)
-            if (!entry || entry.phase === 'sending' || entry.phase === 'conflict') return null
-            const base = entry.baseline
+            const base = entry?.baseline
+            if (!entry || !base || entry.phase === 'sending' || entry.phase === 'conflict') {
+                return null
+            }
             update(targetId, current => ({ ...current, phase: 'sending', message: undefined }))
             try {
                 const result = await window.pairApi.nodePolicy.set({
@@ -312,12 +477,19 @@ export const useNodeConfigurationStore = create<NodeConfigurationState>((set, ge
                     expectedPersistedRevision: base.revision
                 })
                 const saved = baselineOf(result)
-                update(targetId, () => ({ baseline: saved, draft: saved.roles, phase: 'applied' }))
+                update(targetId, current => ({
+                    baseline: saved,
+                    draft: saved.roles,
+                    phase: 'applied',
+                    requestId: current.requestId
+                }))
                 return result
             } catch (err) {
                 const message = getErrorString(err)
                 const refusal = policyRefusal(message)
-                if (refusal === 'vetoed' || refusal === 'rejected') {
+                // Vetoed, rejected and unreachable are definite: the target
+                // refused it, or it never got there. The draft is kept.
+                if (refusal === 'vetoed' || refusal === 'rejected' || refusal === 'unreachable') {
                     update(targetId, current => ({ ...current, phase: refusal, message }))
                     return null
                 }
@@ -338,6 +510,83 @@ export const useNodeConfigurationStore = create<NodeConfigurationState>((set, ge
                 }
                 return null
             }
-        }
+        },
+
+        read: async (targetId, nodeId) => {
+            const prior = get().editors.get(targetId)
+            if (prior?.baseline || prior?.phase === 'reading') return
+            put(targetId, { draft: {}, phase: 'reading' })
+            try {
+                const latest = await window.pairApi.nodePolicy.get(nodeId)
+                // Another reader may have taken a baseline meanwhile; it stands.
+                if (get().editors.get(targetId)?.baseline) return
+                const next = baselineOf(latest)
+                put(targetId, { baseline: next, draft: next.roles, phase: 'draft' })
+            } catch (err) {
+                put(targetId, { draft: {}, phase: 'unreachable', message: getErrorString(err) })
+            }
+        },
+
+        apply: async (targetId, nodeId, roles) => {
+            const prior = get().editors.get(targetId)
+            if (prior?.phase === 'reading' || prior?.phase === 'sending') return
+            // Without roles of its own to send, an unread target is only read.
+            if (roles === undefined && !prior?.baseline) return get().read(targetId, nodeId)
+            const requestId = crypto.randomUUID()
+            put(targetId, {
+                ...(prior ?? { draft: {} }),
+                phase: 'reading',
+                message: undefined,
+                requestId
+            })
+            let latest: NodePolicySnapshot
+            try {
+                latest = await window.pairApi.nodePolicy.get(nodeId)
+            } catch (err) {
+                // Nothing was sent: the draft stays for an explicit retry.
+                update(targetId, current => ({
+                    ...current,
+                    phase: 'unreachable',
+                    message: getErrorString(err)
+                }))
+                return
+            }
+            const next = baselineOf(latest)
+            const draft = roles ?? get().editors.get(targetId)?.draft ?? {}
+            if (sameNodeRoles(draft, next.roles)) {
+                // Also settles an unknown outcome whose save did land.
+                put(targetId, { baseline: next, draft, phase: 'applied', requestId })
+                return
+            }
+            if (roles !== undefined) {
+                put(targetId, { baseline: next, draft, phase: 'reading', requestId })
+            } else {
+                get().adopt(targetId, latest)
+                update(targetId, current => ({ ...current, requestId }))
+            }
+            const entry = get().editors.get(targetId)
+            if (!entry?.baseline || entry.phase === 'conflict') return
+            if (sameNodeRoles(entry.draft, entry.baseline.roles)) {
+                // The draft was never edited and simply followed the node.
+                update(targetId, current => ({ ...current, phase: 'draft' }))
+                return
+            }
+            if (prior?.phase === 'vetoed' && pausedLocally(next.policy)) {
+                // Still paused on the node itself: the veto stands, so nothing is sent.
+                update(targetId, current => ({ ...current, phase: 'vetoed' }))
+                return
+            }
+            await get().save(targetId, nodeId)
+        },
+
+        applyAll: (targets, roles, onSettled) =>
+            runBounded(targets, BULK_CONCURRENCY, async target => {
+                await get().apply(target.targetId, target.nodeId, roles)
+                onSettled?.(target)
+            }),
+
+        bulk: { selected: [], mode: 'common', common: {} },
+
+        setBulk: change => set({ bulk: { ...get().bulk, ...change } })
     }
 })
