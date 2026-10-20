@@ -5,6 +5,7 @@ package tests
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"net"
@@ -12,6 +13,8 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
+	"runtime"
 	"strconv"
 	"sync"
 	"testing"
@@ -19,7 +22,10 @@ import (
 
 	"nvpair-shared/clustertrust"
 	settings "nvpair-shared/enginesettings"
+	"nvpair-shared/jsonrpc"
+	"nvpair-shared/nodepolicy"
 	"nvpair-shared/noderec"
+	"nvpair-shared/testbin"
 )
 
 type managementSnapshot struct {
@@ -148,7 +154,7 @@ func (f *managementFixture) startCM(t *testing.T) {
 	f.cm.call(t, "cluster:get-node-id", nil)
 }
 
-func managementHTTP(t *testing.T, client *http.Client, port int, method, path string, params any, status int) []byte {
+func managementHTTPResponse(t *testing.T, client *http.Client, port int, method, path string, params any) (int, string, []byte) {
 	t.Helper()
 	var body io.Reader
 	if params != nil {
@@ -168,8 +174,13 @@ func managementHTTP(t *testing.T, client *http.Client, port int, method, path st
 	if err != nil || len(data) > 256<<10 {
 		t.Fatal("ec response exceeds read bound or is unreadable")
 	}
-	if resp.StatusCode != status {
-		t.Fatalf("%s %s status=%d want=%d", method, path, resp.StatusCode, status)
+	return resp.StatusCode, resp.Header.Get("Content-Type"), data
+}
+
+func managementAssertHTTP(t *testing.T, method, path string, actual int, contentType string, data []byte, status int) {
+	t.Helper()
+	if actual != status {
+		t.Fatalf("%s %s status=%d want=%d", method, path, actual, status)
 	}
 	if status == http.StatusConflict {
 		var refusal struct {
@@ -182,10 +193,16 @@ func managementHTTP(t *testing.T, client *http.Client, port int, method, path st
 		if refusal.Code != "remote_management_denied" || refusal.Error != "Remote management is blocked on this device. Change permission locally on that device." {
 			t.Fatalf("permission refusal code=%q", refusal.Code)
 		}
-		if resp.Header.Get("Content-Type") == "application/x-ndjson" {
+		if contentType == "application/x-ndjson" {
 			t.Fatal("denial opened a progress stream")
 		}
 	}
+}
+
+func managementHTTP(t *testing.T, client *http.Client, port int, method, path string, params any, status int) []byte {
+	t.Helper()
+	actual, contentType, data := managementHTTPResponse(t, client, port, method, path, params)
+	managementAssertHTTP(t, method, path, actual, contentType, data, status)
 	return data
 }
 
@@ -313,7 +330,381 @@ func TestRemoteManagementRevokePersistsAcrossWorkerRestart(t *testing.T) {
 	assertDenied()
 }
 
+// managementPolicyAttempt reads the writer's current revision independently for
+// every attempt, so denial cannot be explained by stale CAS or invalid policy.
+func managementPolicyAttempt(t *testing.T, writer *interopProcess, path string, client *http.Client, port, status int) {
+	t.Helper()
+	response := callRPC(t, writer.in, writer.msgs, "policy:get", map[string]any{}, 10*time.Second)
+	var before struct {
+		Policy nodepolicy.Policy `json:"policy"`
+	}
+	if response.Error != nil {
+		t.Fatal("read actual policy writer")
+	}
+	task2Decode(t, response.Result, &before)
+	assertStoredPolicy(t, path, before.Policy)
+	beforeBytes := readPolicyBytes(t, path)
+	draft := before.Policy.PeerProjection()
+	draft.Idle.UnloadAfterMinutes++
+	data := managementHTTP(t, client, port, http.MethodPost, "/v1/node-policy/set", map[string]any{
+		"policy": draft, "expectedPersistedRevision": before.Policy.Revision,
+	}, status)
+	want := before.Policy
+	if status == http.StatusOK {
+		var result struct {
+			Policy nodepolicy.PeerPolicy `json:"policy"`
+		}
+		if err := json.Unmarshal(data, &result); err != nil {
+			t.Fatal(err)
+		}
+		if result.Policy.Revision == "" || result.Policy.Revision == before.Policy.Revision {
+			t.Fatal("allowed policy mutation did not advance revision")
+		}
+		want.Idle = draft.Idle
+		want.Revision = result.Policy.Revision
+		draft.Revision = result.Policy.Revision
+		if !reflect.DeepEqual(result.Policy, draft) {
+			t.Fatal("allowed policy result differs from the submitted device edit")
+		}
+	} else if !bytes.Equal(readPolicyBytes(t, path), beforeBytes) {
+		t.Fatal("denied mutation changed actual policy bytes")
+	}
+	response = callRPC(t, writer.in, writer.msgs, "policy:get", map[string]any{}, 10*time.Second)
+	if response.Error != nil {
+		t.Fatal("read policy after mutation")
+	}
+	var after struct {
+		Policy nodepolicy.Policy `json:"policy"`
+	}
+	task2Decode(t, response.Result, &after)
+	if !reflect.DeepEqual(after.Policy, want) {
+		t.Fatal("actual policy writer differs from the expected accepted or denied edit")
+	}
+	assertStoredPolicy(t, path, want)
+}
+
+// Reuse the registered joint images and empty scanner, but bind the real
+// broker/manager to an existing cluster-manager's actual profile.
+func managementPolicyWriterAt(t *testing.T, base string) *policyJointFixture {
+	t.Helper()
+	f := &policyJointFixture{base: base, cluster: filepath.Join(base, "cluster")}
+	inert := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	t.Cleanup(inert.Close)
+	f.inertPort = inert.Listener.Addr().(*net.TCPAddr).Port
+	jointIsolateEngines(t, base, f.inertPort)
+	f.path = filepath.Join(jointAppDir(base), nodepolicy.FileName)
+	f.want = nodepolicy.Default()
+	f.want.Revision = "12"
+	jointWriteJSON(t, f.path, f.want)
+	binDir := testbin.Dir(t, "tests", "policy-joint", "joint-target-engine", "joint-origin-engine", "joint-empty-scanner")
+	f.engine = filepath.Join(binDir, testbin.Exe("joint-target-engine"))
+	f.scanner = filepath.Join(binDir, testbin.Exe("joint-empty-scanner"))
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	jointCopyExecutable(t, engineMgrBin, f.engine)
+	jointCopyExecutable(t, self, f.scanner)
+	for range 3 {
+		f.ports = append(f.ports, temporaryClusterPort(t))
+	}
+	f.startTarget(t)
+	return f
+}
+
+// The switch fixture's synthetic engine and real proxy are retained, with the
+// registered empty scanner replacing discovery of installed peers.
+func managementSwitchWriterAt(t *testing.T, base string) *switchProcessFixture {
+	t.Helper()
+	f := &switchProcessFixture{base: base, ports: reserveFixtureServicePorts(t), sourcePort: temporaryClusterPort(t), targetPort: temporaryClusterPort(t), facadePort: temporaryClusterPort(t), release: make(chan struct{}), starts: make(map[string][]int32)}
+	f.control = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		pid, err := strconv.ParseInt(r.URL.Query().Get("pid"), 10, 32)
+		if err != nil || r.URL.Path != "/started" {
+			http.Error(w, "invalid synthetic engine event", http.StatusBadRequest)
+			return
+		}
+		f.mu.Lock()
+		f.starts[r.URL.Query().Get("engine")] = append(f.starts[r.URL.Query().Get("engine")], int32(pid))
+		f.mu.Unlock()
+	}))
+	t.Cleanup(f.control.Close)
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	jointIsolateEngines(t, base, temporaryClusterPort(t))
+	journal := make(map[string]any)
+	for _, engine := range []struct {
+		name           string
+		server, facade int
+	}{{"ollama", f.sourcePort, f.facadePort}, {"llamacpp", f.targetPort, temporaryClusterPort(t)}} {
+		probe := map[string]any{"http": "http://127.0.0.1:{port}/", "status": http.StatusOK, "timeout_s": 10, "interval_s": 60, "json_match": nil}
+		rt := map[string]any{"mode": "process", "bin": self, "port": engine.server, "bind": "127.0.0.1", "ready": probe, "health": probe,
+			"env":  map[string]string{"NVPAIR_TEST_SWITCH_ENGINE": self, "NVPAIR_TEST_SWITCH_NAME": engine.name, "NVPAIR_TEST_SWITCH_PORT": "{port}", "NVPAIR_TEST_SWITCH_CONTROL": f.control.URL},
+			"stop": map[string]any{"signal": "term", "grace_s": 1}}
+		jointWriteJSON(t, filepath.Join(jointAppDir(base), "engines", engine.name+".json"), map[string]any{
+			"engine": engine.name, "runtime": rt, "platforms": map[string]any{runtime.GOOS + "/" + runtime.GOARCH: map[string]any{"detect": []string{self}, "runtime": rt}},
+		})
+		journal[engine.name] = map[string]any{"explicit": true, "snapshot": map[string]any{
+			"engine": engine.name, "revision": 1, "appliedRevision": 1, "phase": "idle", "format": "pair-arguments-v1",
+			"settings": settings.Config{ServerPort: engine.server, ProxyPort: engine.facade},
+		}}
+	}
+	jointWriteJSON(t, filepath.Join(base, "engine-settings-operations.json"), journal)
+	jointWriteJSON(t, filepath.Join(base, "engine-switch-operations.json"), settings.SwitchJournal{Version: settings.SwitchVersion, Receipts: make(map[string]settings.SwitchReceipt)})
+	policy := nodepolicy.Default()
+	policy.Revision = "12"
+	jointWriteJSON(t, filepath.Join(jointAppDir(base), nodepolicy.FileName), policy)
+	binDir := testbin.Dir(t, "tests", "policy-joint", "joint-target-engine", "joint-origin-engine", "joint-empty-scanner")
+	enginePath := filepath.Join(binDir, testbin.Exe("joint-target-engine"))
+	scannerPath := filepath.Join(binDir, testbin.Exe("joint-empty-scanner"))
+	jointCopyExecutable(t, engineMgrBin, enginePath)
+	jointCopyExecutable(t, self, scannerPath)
+	scannerPort := temporaryClusterPort(t)
+	args := append([]string{"--scanner-path", scannerPath, "--engine-manager-path", enginePath, "--proxy-path", proxyBin, "--proxy-engines", "ollama,llamacpp", "--cluster-dir", filepath.Join(base, "cluster")}, f.ports.args()...)
+	f.p = startInteropProcess(t, base, brokerBin, f.ports.engineManagerHTTP, []string{"OLLAMA_HOST=", "NVPAIR_TEST_SUBSCRIPTION_SCANNER=" + scannerPath, "NVPAIR_TEST_SUBSCRIPTION_PORT=" + strconv.Itoa(scannerPort)}, args...)
+	for _, path := range []string{enginePath, scannerPath, proxyBin} {
+		canonical, err := canonicalServicePath(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		f.p.paths = append(f.p.paths, canonical)
+	}
+	f.p.ports = append(f.p.ports, f.ports.engineControl, scannerPort, f.sourcePort, f.targetPort)
+	waitForMethod(t, f.p.msgs, "app:ready", 20*time.Second)
+	if port := waitProxyReady(t, f.p.in, f.p.msgs, 20*time.Second); port != f.facadePort {
+		t.Fatal("synthetic source proxy did not use its explicit fixture port")
+	}
+	waitEngineProxyReady(t, "llamacpp-proxy", f.p.in, f.p.msgs, 20*time.Second)
+	f.rpcOK(t, "engine:start", map[string]string{"engine": "ollama"})
+	f.pid(t, "ollama")
+	return f
+}
+
 func TestRemoteManagementReverseMutationBoundary(t *testing.T) {
+	nodes, blockedPort := newTask1Nodes(t)
+	allowed, target, denied := nodes[0], nodes[1], nodes[2]
+	f := managementSwitchWriterAt(t, target.base)
+	target.ports[noderec.ServiceEngineControl] = f.ports.engineControl
+	ec := newTask1Observer(t, target, noderec.ServiceEngineControl, nodes)
+	target.cm.call(t, "cluster:set-local-services", map[string]any{"generation": 2, "services": []noderec.RegisterParams{
+		{Service: noderec.ServiceCluster, Port: target.observers[noderec.ServiceCluster].port},
+		{Service: noderec.ServiceEngineControl, Port: ec.port},
+	}})
+	managementSet(t, target.cm, allowed.uuid, true)
+	managementSet(t, target.cm, denied.uuid, false)
+	reverseClient := func(node *task1Node) *http.Client {
+		t.Helper()
+		task1Eventually(t, "authenticated reverse ec route for "+node.uuid, 15*time.Second, func() bool {
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			conn, err := clustertrust.DialReverse(ctx, node.base, target.uuid, noderec.ServiceEngineControl)
+			if err != nil {
+				return false
+			}
+			if err := conn.Close(); err != nil {
+				t.Fatal(err)
+			}
+			return true
+		})
+		adapter := clustertrust.NewPeerServiceClient(node.mesh, clustertrust.PeerServiceClientOptions{
+			BaseConfigDir: node.base, PeerClientOptions: clustertrust.PeerClientOptions{Timeout: 10 * time.Second},
+			ResolveRoute: func(uuid string, service noderec.ServiceKey) (clustertrust.PeerServiceRoute, bool) {
+				node.mesh.Refresh()
+				incarnation, ok := node.mesh.PeerServiceIncarnation(uuid)
+				return clustertrust.PeerServiceRoute{Incarnation: incarnation, Address: net.JoinHostPort("127.0.0.1", strconv.Itoa(blockedPort)), Protocol: clustertrust.ReverseTLS, Generation: 1}, ok && uuid == target.uuid && service == noderec.ServiceEngineControl
+			},
+		})
+		t.Cleanup(adapter.CloseIdle)
+		return adapter.Client(target.uuid, noderec.ServiceEngineControl)
+	}
+	allowedClient, deniedClient := reverseClient(allowed), reverseClient(denied)
+	jointIsolateEngines(t, denied.base, blockedPort)
+	deniedOrigin := startInteropProcess(t, denied.base, engineMgrBin, 0, []string{"OLLAMA_HOST="}, "--cluster-dir", filepath.Join(denied.base, "cluster"), "--loaded-poll-interval", "0")
+	waitForMethod(t, deniedOrigin.msgs, "engine:ready", 10*time.Second)
+	completeEngineManagerRecovery(t, func(method string, params any) jsonrpc.Message {
+		return callRPC(t, deniedOrigin.in, deniedOrigin.msgs, method, params, 10*time.Second)
+	})
+	sendLine(t, deniedOrigin.in, jsonrpc.Message{JSONRPC: "2.0", Method: noderec.NotifyNodes, Params: mustMarshal(t, noderec.GetNodesResult{Nodes: []noderec.DirectoryNode{{HostUUID: target.uuid, ClusterUUID: target.uuid, IP: "127.0.0.1", Trusted: true,
+		Services: map[noderec.ServiceKey]noderec.ServiceStatus{noderec.ServiceEngineControl: {Port: blockedPort}}}}})})
+	for _, caller := range []struct {
+		node    *task1Node
+		client  *http.Client
+		allowed bool
+	}{{allowed, allowedClient, true}, {denied, deniedClient, false}} {
+		data := managementHTTP(t, caller.client, blockedPort, http.MethodGet, "/v1/remote-management", nil, http.StatusOK)
+		var view struct {
+			Allowed bool   `json:"allowed"`
+			State   string `json:"state"`
+		}
+		task2Decode(t, data, &view)
+		wantState := "denied"
+		if caller.allowed {
+			wantState = "allowed"
+		}
+		if view.Allowed != caller.allowed || view.State != wantState || ec.count(caller.node.uuid, http.MethodGet, "/v1/remote-management") != 1 {
+			t.Fatal("reverse read did not authenticate each distinct caller with its opposite grant")
+		}
+	}
+	permissionPath := filepath.Join(target.base, "cluster", clustertrust.RemoteManagementFile)
+	grantBytes := readLiveDurableFile(t, permissionPath)
+	policyPath := filepath.Join(jointAppDir(target.base), nodepolicy.FileName)
+	assertForgedDenied := func(t *testing.T, path string, canonical any) {
+		t.Helper()
+		policyBytes := readPolicyBytes(t, policyPath)
+		settingsBytes := readLiveDurableFile(t, filepath.Join(target.base, "engine-settings-operations.json"))
+		switchBytes := readLiveDurableFile(t, filepath.Join(target.base, "engine-switch-operations.json"))
+		status := f.status(t, settings.SwitchStatusRequest{})
+		f.mu.Lock()
+		starts := make(map[string][]int32)
+		for engine, pids := range f.starts {
+			starts[engine] = append([]int32(nil), pids...)
+		}
+		f.mu.Unlock()
+		assertUnchanged := func() {
+			t.Helper()
+			afterStatus := f.status(t, settings.SwitchStatusRequest{})
+			if !bytes.Equal(readPolicyBytes(t, policyPath), policyBytes) || !bytes.Equal(readLiveDurableFile(t, filepath.Join(target.base, "engine-settings-operations.json")), settingsBytes) || !bytes.Equal(readLiveDurableFile(t, filepath.Join(target.base, "engine-switch-operations.json")), switchBytes) || afterStatus.ConfigurationRevision != status.ConfigurationRevision || afterStatus.ActiveRequestID != status.ActiveRequestID || !reflect.DeepEqual(afterStatus.Receipt, status.Receipt) {
+				t.Fatal("forged identity changed actual policy/settings/switch writer state")
+			}
+			beforePolicy, err := nodepolicy.Parse(policyBytes)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var actualPolicy struct {
+				Policy nodepolicy.Policy `json:"policy"`
+			}
+			task2Decode(t, f.rpcOK(t, "policy:get", map[string]any{}), &actualPolicy)
+			if !reflect.DeepEqual(actualPolicy.Policy, beforePolicy) {
+				t.Fatal("forged identity changed in-memory policy writer state")
+			}
+			f.mu.Lock()
+			unchanged := reflect.DeepEqual(f.starts, starts)
+			f.mu.Unlock()
+			if !unchanged || !bytes.Equal(readLiveDurableFile(t, permissionPath), grantBytes) {
+				t.Fatal("forged identity changed engine start counters or local grants")
+			}
+		}
+		// nodeId is recognized by each real decoder. Unlike the noisy body
+		// below, this request can reach the writer if authenticated identity
+		// is incorrectly replaced by the submitted allowed principal.
+		var validForged map[string]json.RawMessage
+		if err := json.Unmarshal(mustMarshal(t, canonical), &validForged); err != nil {
+			t.Fatal(err)
+		}
+		validForged["nodeId"] = mustMarshal(t, allowed.uuid)
+		count := ec.count(denied.uuid, http.MethodPost, path)
+		actual, contentType, data := managementHTTPResponse(t, deniedClient, blockedPort, http.MethodPost, path, validForged)
+		if ec.count(denied.uuid, http.MethodPost, path) != count+1 {
+			t.Fatal("valid forged request did not traverse denied caller's real reverse transport")
+		}
+		// Inspect effects before the refusal status so an identity-substitution
+		// control witnesses an actual writer change, not just parser ordering.
+		assertUnchanged()
+		managementAssertHTTP(t, http.MethodPost, path, actual, contentType, data, http.StatusConflict)
+		var forged map[string]json.RawMessage
+		if err := json.Unmarshal(mustMarshal(t, canonical), &forged); err != nil {
+			t.Fatal(err)
+		}
+		for _, key := range []string{"caller", "peerUuid", "nodeUuid", "nodeId"} {
+			forged[key] = mustMarshal(t, allowed.uuid)
+		}
+		count = ec.count(denied.uuid, http.MethodPost, path)
+		// The exact typed wire representation of RPC -32012 must precede body
+		// parsing, including strict settings/switch unknown-field validation.
+		managementHTTP(t, deniedClient, blockedPort, http.MethodPost, path, forged, http.StatusConflict)
+		if ec.count(denied.uuid, http.MethodPost, path) != count+1 {
+			t.Fatal("forged request did not traverse denied caller's real reverse transport")
+		}
+		method := map[string]string{"/v1/node-policy/set": "engine:remote-policy-set", "/v1/engine-settings/apply": "engine:remote-apply-settings", settings.SwitchApplyPath: settings.RemoteSwitchMethod}[path]
+		var rpcParams map[string]json.RawMessage
+		if err := json.Unmarshal(mustMarshal(t, canonical), &rpcParams); err != nil {
+			t.Fatal(err)
+		}
+		rpcParams["nodeId"] = mustMarshal(t, target.uuid)
+		response := callRPC(t, deniedOrigin.in, deniedOrigin.msgs, method, rpcParams, 15*time.Second)
+		if response.Error == nil || response.Error.Code != -32012 || len(response.Result) != 0 {
+			t.Fatal("reverse origin RPC did not retain typed -32012")
+		}
+		assertUnchanged()
+	}
+	assertAllowedRoute := func(t *testing.T, path string) {
+		t.Helper()
+		if ec.count(allowed.uuid, http.MethodPost, path) != 1 {
+			t.Fatal("canonical allowed control did not traverse its own authenticated reverse transport once")
+		}
+		if !bytes.Equal(readLiveDurableFile(t, permissionPath), grantBytes) {
+			t.Fatal("allowed control changed target-local grants")
+		}
+	}
+	t.Run("policy forged identity", func(t *testing.T) {
+		var view struct {
+			Policy nodepolicy.Policy `json:"policy"`
+		}
+		task2Decode(t, f.rpcOK(t, "policy:get", map[string]any{}), &view)
+		draft := view.Policy.PeerProjection()
+		draft.Idle.UnloadAfterMinutes++
+		assertForgedDenied(t, "/v1/node-policy/set", map[string]any{"policy": draft, "expectedPersistedRevision": view.Policy.Revision})
+		managementPolicyAttempt(t, f.p, policyPath, allowedClient, blockedPort, http.StatusOK)
+		assertAllowedRoute(t, "/v1/node-policy/set")
+	})
+	t.Run("settings forged identity", func(t *testing.T) {
+		var snapshot settings.Snapshot
+		task2Decode(t, managementHTTP(t, allowedClient, blockedPort, http.MethodPost, "/v1/engine-settings/get", settings.Request{Engine: "ollama"}, http.StatusOK), &snapshot)
+		request := settings.Request{Engine: "ollama", ExpectedRevision: snapshot.Revision, RequestID: "reverse-settings-control", Settings: snapshot.Settings}
+		assertForgedDenied(t, "/v1/engine-settings/apply", request)
+		var receipt struct {
+			Phase    string `json:"phase"`
+			Revision uint64 `json:"revision"`
+		}
+		task2Decode(t, managementHTTP(t, allowedClient, blockedPort, http.MethodPost, "/v1/engine-settings/apply", request, http.StatusOK), &receipt)
+		if receipt.Phase != "succeeded" || receipt.Revision != snapshot.Revision {
+			t.Fatal("canonical allowed settings control did not persist its successful receipt")
+		}
+		stored := readOutboundJSON[map[string]struct {
+			Receipts map[string]struct {
+				Phase    string `json:"phase"`
+				Revision uint64 `json:"revision"`
+			} `json:"receipts"`
+		}](t, filepath.Join(target.base, "engine-settings-operations.json"))
+		persisted := stored["ollama"].Receipts[request.RequestID]
+		if persisted.Phase != "succeeded" || persisted.Revision != snapshot.Revision {
+			t.Fatal("allowed settings receipt was not saved by the real writer")
+		}
+		assertAllowedRoute(t, "/v1/engine-settings/apply")
+	})
+	t.Run("switch forged identity", func(t *testing.T) {
+		request := f.request(t, "reverse-switch-control")
+		assertForgedDenied(t, settings.SwitchApplyPath, request)
+		var result settings.SwitchResult
+		task2Decode(t, managementHTTP(t, allowedClient, blockedPort, http.MethodPost, settings.SwitchApplyPath, request, http.StatusOK), &result)
+		if result.Receipt.Caller != allowed.uuid || result.Receipt.NodeID != target.uuid || result.Receipt.RequestID != request.RequestID {
+			t.Fatal("allowed switch control lost authenticated caller")
+		}
+		var terminal settings.SwitchStatus
+		task1Eventually(t, "allowed reverse switch completes", 45*time.Second, func() bool {
+			task2Decode(t, managementHTTP(t, allowedClient, blockedPort, http.MethodPost, settings.SwitchStatusPath, settings.SwitchStatusRequest{RequestID: request.RequestID}, http.StatusOK), &terminal)
+			return terminal.Receipt != nil && terminal.Receipt.Terminal
+		})
+		if terminal.Receipt.Phase != settings.SwitchCompleted || terminal.Receipt.Error != nil || terminal.Receipt.Caller != allowed.uuid || terminal.Receipt.NodeID != target.uuid {
+			t.Fatal("canonical allowed switch did not complete against the synthetic engines")
+		}
+		journal, err := settings.DecodeSwitchJournal(readLiveDurableFile(t, filepath.Join(target.base, "engine-switch-operations.json")))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(journal.Receipts[request.RequestID], *terminal.Receipt) {
+			t.Fatal("allowed reverse switch did not persist its terminal receipt")
+		}
+		assertSwitchProcessStopped(t, f.pid(t, "ollama"))
+		f.pid(t, "llamacpp")
+		assertAllowedRoute(t, settings.SwitchApplyPath)
+	})
+}
+
+func TestRemoteManagementReverseRevocationBoundary(t *testing.T) {
 	f := newTask2Fixture(t)
 	a := f.engines[f.a.uuid]
 	// Inventory reconciles the fixture-owned HTTP engine's presence before an
@@ -611,6 +1002,42 @@ func TestRemoteManagementEndorsementAndReadmission(t *testing.T) {
 		}
 		return view.State == "unreviewed"
 	})
+	writer := managementPolicyWriterAt(t, bDir)
+	newCaller := func() *http.Client {
+		t.Helper()
+		callerMesh := clustertrust.Open(filepath.Join(cDir, "cluster"))
+		cfg, ok := callerMesh.ClientTLSConfig(bID.NodeUUID)
+		if !ok || !callerMesh.Clustered() {
+			t.Fatal("endorsed caller lacks current target admission and TLS authority")
+		}
+		client := &http.Client{Timeout: 10 * time.Second, Transport: &http.Transport{TLSClientConfig: cfg}}
+		t.Cleanup(client.CloseIdleConnections)
+		return client
+	}
+	caller := newCaller()
+	readTarget := func(t *testing.T, client *http.Client) {
+		t.Helper()
+		data := managementHTTP(t, client, writer.ports[1], http.MethodPost, "/v1/node-policy/get", map[string]any{}, http.StatusOK)
+		var remote struct {
+			Policy nodepolicy.PeerPolicy `json:"policy"`
+		}
+		task2Decode(t, data, &remote)
+		var actual struct {
+			Policy nodepolicy.Policy `json:"policy"`
+		}
+		response := callRPC(t, writer.target.in, writer.target.msgs, "policy:get", map[string]any{}, 10*time.Second)
+		if response.Error != nil {
+			t.Fatal("read B's actual broker policy")
+		}
+		task2Decode(t, response.Result, &actual)
+		if remote.Policy.Revision == "" || !reflect.DeepEqual(remote.Policy, actual.Policy.PeerProjection()) {
+			t.Fatal("C's ec read is not B's actual broker policy")
+		}
+	}
+	t.Run("endorsed peer reads but cannot mutate before local grant", func(t *testing.T) {
+		readTarget(t, caller)
+		managementPolicyAttempt(t, writer.target, writer.path, caller, writer.ports[1], http.StatusConflict)
+	})
 	beforePin := readOutboundJSON[struct {
 		AdmissionEpoch uint64 `json:"admissionEpoch"`
 	}](t, filepath.Join(bDir, "cluster", "trusted", cID.NodeUUID+".json"))
@@ -619,12 +1046,21 @@ func TestRemoteManagementEndorsementAndReadmission(t *testing.T) {
 	if !mesh.RemoteManagement(cID.NodeUUID).Allowed {
 		t.Fatal("local grant positive control did not allow endorsed peer")
 	}
+	t.Run("local grant permits endorsed peer mutation", func(t *testing.T) {
+		readTarget(t, caller)
+		managementPolicyAttempt(t, writer.target, writer.path, caller, writer.ports[1], http.StatusOK)
+	})
 	a.call("nodes:remove", map[string]any{"nodeUuid": cID.NodeUUID})
 	waitMembers(t, b, 2)
 	waitMembers(t, c, 0)
 	if mesh.RemoteManagement(cID.NodeUUID).Allowed {
 		t.Fatal("removed peer retained effective management")
 	}
+	t.Run("removed peer cannot read or mutate target", func(t *testing.T) {
+		caller.CloseIdleConnections()
+		managementHTTP(t, caller, writer.ports[1], http.MethodPost, "/v1/node-policy/get", map[string]any{}, http.StatusForbidden)
+		managementPolicyAttempt(t, writer.target, writer.path, caller, writer.ports[1], http.StatusForbidden)
+	})
 	pairNodes(t, a, c, cPort, "management-c-readmitted")
 	waitMembers(t, b, 3)
 	waitMembers(t, c, 3)
@@ -657,6 +1093,21 @@ func TestRemoteManagementEndorsementAndReadmission(t *testing.T) {
 	if !memberUUIDs(t, c)[bID.NodeUUID] {
 		t.Fatal("readmitted peer did not receive the existing member endorsement")
 	}
+	caller.CloseIdleConnections()
+	caller = newCaller()
+	t.Run("fresh admission reads but cannot reuse old grant", func(t *testing.T) {
+		readTarget(t, caller)
+		managementPolicyAttempt(t, writer.target, writer.path, caller, writer.ports[1], http.StatusConflict)
+	})
+	snapshot = decodeResult[managementSnapshot](t, b.call("cluster:get-remote-management", map[string]any{}))
+	b.call("cluster:set-remote-management", map[string]any{"peerUuid": cID.NodeUUID, "allowed": true, "expectedRevision": snapshot.Revision})
+	if !mesh.RemoteManagement(cID.NodeUUID).Allowed {
+		t.Fatal("fresh local grant did not authorize new admission")
+	}
+	t.Run("fresh local grant permits readmitted peer mutation", func(t *testing.T) {
+		readTarget(t, caller)
+		managementPolicyAttempt(t, writer.target, writer.path, caller, writer.ports[1], http.StatusOK)
+	})
 }
 
 func TestRemoteManagementPersistsAcrossSeparateProcessRestarts(t *testing.T) {
@@ -679,40 +1130,108 @@ func TestRemoteManagementPersistsAcrossSeparateProcessRestarts(t *testing.T) {
 	jointIsolateEngines(t, f.configDir, inert.Listener.Addr().(*net.TCPAddr).Port)
 	peerDir := t.TempDir()
 	peerCert := mintClusterIdentity(t, peerDir, "management-service-peer")
+	allowedDir := t.TempDir()
+	allowedCert := mintClusterIdentity(t, allowedDir, "management-service-allowed")
 	targetCert := mintClusterIdentity(t, f.clusterDir, "management-service-target")
 	for _, member := range []struct{ dir, id, peer, cert string }{
 		{f.clusterDir, "management-service-target", "management-service-peer", peerCert},
 		{peerDir, "management-service-peer", "management-service-target", targetCert},
+		{allowedDir, "management-service-allowed", "management-service-target", targetCert},
 	} {
 		writeActiveAdmission(t, member.dir)
 		writePin(t, member.dir, member.peer, member.cert)
 		writeMembers(t, member.dir, member.id, member.peer)
 		jointWriteJSON(t, filepath.Join(member.dir, "identity.json"), map[string]any{"node_uuid": member.id})
 	}
+	writePin(t, f.clusterDir, "management-service-allowed", allowedCert)
+	writeMembers(t, f.clusterDir, "management-service-target", "management-service-peer", "management-service-allowed")
+	policy := nodepolicy.Default()
+	policy.Revision = "12"
+	jointWriteJSON(t, f.policyPath(), policy)
 	cfg, ok := clustertrust.Open(peerDir).ClientTLSConfig("management-service-target")
 	if !ok {
 		t.Fatal("service fixture has no peer TLS authority")
 	}
 	client := &http.Client{Timeout: 10 * time.Second, Transport: &http.Transport{TLSClientConfig: cfg}}
 	t.Cleanup(client.CloseIdleConnections)
+	allowedCFG, ok := clustertrust.Open(allowedDir).ClientTLSConfig("management-service-target")
+	if !ok {
+		t.Fatal("service fixture has no allowed peer TLS authority")
+	}
+	allowedClient := &http.Client{Timeout: 10 * time.Second, Transport: &http.Transport{TLSClientConfig: allowedCFG}}
+	t.Cleanup(allowedClient.CloseIdleConnections)
 	f.start()
 	c := f.readyClient()
 	view := decodeResult[managementSnapshot](t, *c.mustCall(t, "701", "cluster:get-remote-management", mustMarshal(t, map[string]any{})))
 	c.mustCall(t, "702", "cluster:set-remote-management", mustMarshal(t, map[string]any{
 		"peerUuid": "management-service-peer", "allowed": false, "expectedRevision": view.Revision,
 	}))
+	view = decodeResult[managementSnapshot](t, *c.mustCall(t, "704", "cluster:get-remote-management", mustMarshal(t, map[string]any{})))
+	c.mustCall(t, "705", "cluster:set-remote-management", mustMarshal(t, map[string]any{
+		"peerUuid": "management-service-allowed", "allowed": true, "expectedRevision": view.Revision,
+	}))
 	permissionPath := filepath.Join(f.clusterDir, clustertrust.RemoteManagementFile)
 	want := readLiveDurableFile(t, permissionPath)
-	assertDenied := func(t *testing.T) {
+	assertOppositeGrants := func(t *testing.T) {
 		t.Helper()
 		client.CloseIdleConnections()
+		allowedClient.CloseIdleConnections()
 		managementHTTP(t, client, f.ports.engineControl, http.MethodPost, "/v1/engines/stop", map[string]any{"engine": "ollama"}, http.StatusConflict)
 		managementHTTP(t, client, f.ports.engineControl, http.MethodGet, "/v1/engines", nil, http.StatusOK)
+		for _, caller := range []struct {
+			client  *http.Client
+			allowed bool
+		}{{client, false}, {allowedClient, true}} {
+			var capability struct {
+				Allowed bool `json:"allowed"`
+			}
+			task2Decode(t, managementHTTP(t, caller.client, f.ports.engineControl, http.MethodGet, "/v1/remote-management", nil, http.StatusOK), &capability)
+			if capability.Allowed != caller.allowed {
+				t.Fatal("restart changed an authenticated caller's effective grant")
+			}
+		}
+		before := decodeServicePolicy(t, c.mustCall(t, "706", "policy:get", nil))
+		assertStoredPolicy(t, f.policyPath(), before)
+		beforeBytes := readPolicyBytes(t, f.policyPath())
+		draft := before.PeerProjection()
+		draft.Idle.UnloadAfterMinutes++
+		params := map[string]any{"policy": draft, "expectedPersistedRevision": before.Revision}
+		managementHTTP(t, client, f.ports.engineControl, http.MethodPost, "/v1/node-policy/set", params, http.StatusConflict)
+		if !bytes.Equal(readPolicyBytes(t, f.policyPath()), beforeBytes) {
+			t.Fatal("denied otherwise-valid post-restart mutation changed policy")
+		}
+		var accepted struct {
+			Policy nodepolicy.PeerPolicy `json:"policy"`
+		}
+		task2Decode(t, managementHTTP(t, allowedClient, f.ports.engineControl, http.MethodPost, "/v1/node-policy/set", params, http.StatusOK), &accepted)
+		if accepted.Policy.Revision == "" || accepted.Policy.Revision == before.Revision {
+			t.Fatal("allowed post-restart mutation did not advance policy revision")
+		}
+		wantPolicy := before
+		wantPolicy.Idle = draft.Idle
+		wantPolicy.Revision = accepted.Policy.Revision
+		draft.Revision = accepted.Policy.Revision
+		if !reflect.DeepEqual(accepted.Policy, draft) {
+			t.Fatal("allowed post-restart mutation returned the wrong policy")
+		}
+		actual := decodeServicePolicy(t, c.mustCall(t, "707", "policy:get", nil))
+		if !reflect.DeepEqual(actual, wantPolicy) {
+			t.Fatal("allowed mutation did not reach the actual restarted broker writer")
+		}
+		assertStoredPolicy(t, f.policyPath(), wantPolicy)
+		// Try a fresh valid revision after the allowed writer, not its stale CAS.
+		draft.Idle.UnloadAfterMinutes++
+		managementHTTP(t, client, f.ports.engineControl, http.MethodPost, "/v1/node-policy/set", map[string]any{"policy": draft, "expectedPersistedRevision": actual.Revision}, http.StatusConflict)
+		actual = decodeServicePolicy(t, c.mustCall(t, "708", "policy:get", nil))
+		if !reflect.DeepEqual(actual, wantPolicy) {
+			t.Fatal("denied peer changed the restarted writer after the allowed control")
+		}
+		assertStoredPolicy(t, f.policyPath(), wantPolicy)
 		if !bytes.Equal(readLiveDurableFile(t, permissionPath), want) {
-			t.Fatal("process restart changed the explicit local denial")
+			t.Fatal("process restart or remote mutation changed the explicit opposite local grants")
 		}
 	}
-	assertDenied(t)
+	t.Run("before restart", func(t *testing.T) { assertOppositeGrants(t) })
 	for _, target := range []struct{ name, path string }{{"cluster-manager", clusterPath}, {"engine-manager", enginePath}, {"broker", f.brokerPath}} {
 		t.Run(target.name, func(t *testing.T) {
 			var old serviceProcessIdentity
@@ -736,18 +1255,37 @@ func TestRemoteManagementPersistsAcrossSeparateProcessRestarts(t *testing.T) {
 				return false
 			})
 			waitTCP(t, "127.0.0.1:"+strconv.Itoa(f.ports.engineControl), 10*time.Second)
-			assertDenied(t)
+			assertOppositeGrants(t)
 		})
 	}
-	c.mustClose(t)
-	c = f.readyClient()
-	assertServiceStoppedReply(t, c.mustCall(t, "703", "service/stop", nil))
-	f.waitChild(f.service, serviceStopTimeout)
-	if f.service.err != nil {
-		t.Fatalf("owned service stop: %v", f.service.err)
-	}
-	f.assertStopped()
-	f.start()
-	f.readyClient()
-	assertDenied(t)
+	t.Run("service", func(t *testing.T) {
+		c.mustClose(t)
+		c = f.readyClient()
+		var oldService serviceProcessIdentity
+		for _, identity := range f.scan() {
+			if identity.Path == f.servicePath {
+				oldService = identity
+			}
+		}
+		if oldService.PID == 0 {
+			t.Fatal("owned service restart target is absent")
+		}
+		assertServiceStoppedReply(t, c.mustCall(t, "703", "service/stop", nil))
+		f.waitChild(f.service, serviceStopTimeout)
+		if f.service.err != nil {
+			t.Fatalf("owned service stop: %v", f.service.err)
+		}
+		f.assertStopped()
+		f.start()
+		c = f.readyClient()
+		task1Eventually(t, "replacement service", 20*time.Second, func() bool {
+			for _, identity := range f.scan() {
+				if identity.Path == f.servicePath && identity != oldService {
+					return true
+				}
+			}
+			return false
+		})
+		assertOppositeGrants(t)
+	})
 }
