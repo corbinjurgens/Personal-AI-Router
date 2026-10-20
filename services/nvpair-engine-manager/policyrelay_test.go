@@ -289,7 +289,7 @@ func TestPolicyRoutesRejectStrangersAndBadBodies(t *testing.T) {
 func TestPolicyRelayCorrelatesReplies(t *testing.T) {
 	var relay policyRelay
 	sent := make(chan policyRelayRequest, 1)
-	relay.send = func(method string, params any) error {
+	relay.send = func(_ context.Context, method string, params any) error {
 		if method == policyRequestMethod {
 			sent <- params.(policyRelayRequest)
 		}
@@ -308,7 +308,7 @@ func TestPolicyRelayCorrelatesReplies(t *testing.T) {
 	}
 
 	cancelled := make(chan string, 1)
-	relay.send = func(method string, params any) error {
+	relay.send = func(_ context.Context, method string, params any) error {
 		if method == policyCancelMethod {
 			cancelled <- params.(map[string]string)["id"]
 		}
@@ -334,7 +334,7 @@ func TestPolicyRelayCorrelatesReplies(t *testing.T) {
 func policyReplyPeerServer(t *testing.T, peerDir string, code int, message string) *httptest.Server {
 	t.Helper()
 	peer := &Manager{}
-	peer.policyRelay.send = func(method string, params any) error {
+	peer.policyRelay.send = func(_ context.Context, method string, params any) error {
 		if method != policyRequestMethod {
 			return fmt.Errorf("unexpected relay notification %q", method)
 		}

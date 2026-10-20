@@ -245,7 +245,7 @@ func newMutationBroker() *mutationBroker {
 	return &mutationBroker{sent: make(chan nodepolicy.ModelMutationRequest, 16)}
 }
 
-func (b *mutationBroker) send(method string, params any) error {
+func (b *mutationBroker) send(_ context.Context, method string, params any) error {
 	if method != nodepolicy.MethodModelMutationRequest {
 		return fmt.Errorf("unexpected relay notification %q", method)
 	}
@@ -815,7 +815,7 @@ func TestModelMutationRelayAuthorizesOnlyAnAcceptedReply(t *testing.T) {
 	t.Run("accepted", func(t *testing.T) {
 		relay := &modelMutationRelay{}
 		sent := make(chan nodepolicy.ModelMutationRequest, 1)
-		relay.send = func(_ string, params any) error {
+		relay.send = func(_ context.Context, _ string, params any) error {
 			sent <- params.(nodepolicy.ModelMutationRequest)
 			return nil
 		}
@@ -833,7 +833,7 @@ func TestModelMutationRelayAuthorizesOnlyAnAcceptedReply(t *testing.T) {
 	t.Run("an unknown request id is not this waiter's reply", func(t *testing.T) {
 		relay := &modelMutationRelay{}
 		sent := make(chan nodepolicy.ModelMutationRequest, 1)
-		relay.send = func(_ string, params any) error {
+		relay.send = func(_ context.Context, _ string, params any) error {
 			stray := replyMessage(t, nodepolicy.ModelMutationReply{RequestID: "someone-elses", Engine: "fake", OK: true}).Params
 			relay.reply(stray)
 			sent <- params.(nodepolicy.ModelMutationRequest)
@@ -853,7 +853,7 @@ func TestModelMutationRelayAuthorizesOnlyAnAcceptedReply(t *testing.T) {
 
 	t.Run("a reply for another engine does not authorize", func(t *testing.T) {
 		relay := &modelMutationRelay{}
-		relay.send = func(_ string, params any) error {
+		relay.send = func(_ context.Context, _ string, params any) error {
 			req := params.(nodepolicy.ModelMutationRequest)
 			raw := replyMessage(t, nodepolicy.ModelMutationReply{RequestID: req.RequestID, Engine: "other", OK: true}).Params
 			relay.reply(raw)
@@ -868,7 +868,7 @@ func TestModelMutationRelayAuthorizesOnlyAnAcceptedReply(t *testing.T) {
 
 	t.Run("a malformed reply authorizes nothing", func(t *testing.T) {
 		relay := &modelMutationRelay{}
-		relay.send = func(_ string, _ any) error {
+		relay.send = func(_ context.Context, _ string, _ any) error {
 			relay.reply(json.RawMessage(`{"requestId":7,"engine":"fake","ok":true}`))
 			relay.reply(json.RawMessage(`{"requestId":"x","engine":"fake","ok":true,"extra":1}`))
 			return nil
@@ -885,7 +885,7 @@ func TestModelMutationRelayAuthorizesOnlyAnAcceptedReply(t *testing.T) {
 	t.Run("a reply after the waiter left is dropped", func(t *testing.T) {
 		relay := &modelMutationRelay{}
 		var req nodepolicy.ModelMutationRequest
-		relay.send = func(_ string, params any) error {
+		relay.send = func(_ context.Context, _ string, params any) error {
 			req = params.(nodepolicy.ModelMutationRequest)
 			return nil
 		}
@@ -907,7 +907,7 @@ func TestModelMutationRelayAuthorizesOnlyAnAcceptedReply(t *testing.T) {
 		for i := 0; i < maxPendingModelMutations; i++ {
 			relay.pending[fmt.Sprintf("m%d", i)] = make(chan nodepolicy.ModelMutationReply, 1)
 		}
-		relay.send = func(string, any) error { return nil }
+		relay.send = func(context.Context, string, any) error { return nil }
 		err := relay.call(context.Background(), "fake")
 		if err == nil || !strings.Contains(err.Error(), "too many model changes") {
 			t.Fatalf("call error = %v, want the pending bound", err)
@@ -981,7 +981,7 @@ func TestModelMutationCancelledQueuedOKNeverDeletes(t *testing.T) {
 	for i := 0; i < 128; i++ {
 		ctx, cancel := context.WithCancel(context.Background())
 		relay := &modelMutationRelay{}
-		relay.send = func(_ string, params any) error {
+		relay.send = func(_ context.Context, _ string, params any) error {
 			req, ok := params.(nodepolicy.ModelMutationRequest)
 			if !ok {
 				return fmt.Errorf("unexpected request type %T", params)
@@ -1025,7 +1025,7 @@ func TestModelMutationCancelledWaiterEscapesBlockedNotify(t *testing.T) {
 	var release sync.Once
 	unblock := func() { release.Do(func() { close(writer.release) }) }
 	defer unblock()
-	relay := &modelMutationRelay{send: NewCodec(writer).Notify}
+	relay := &modelMutationRelay{send: NewCodec(writer).NotifyContext}
 	ex.modelMutationParent = relay.call
 	first := make(chan error, 1)
 	go func() {
