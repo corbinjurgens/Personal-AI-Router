@@ -5,8 +5,13 @@ SPDX-License-Identifier: Apache-2.0
 
 # Execution plan: XA — remote configuration cross-process acceptance harness
 
-Planned against `fork/groundwork` at commit `17727f1c4786ece2524a4ac8d50c132f71da8388`.
-Every `path:line` below refers to that commit.
+Planned against e50f331 product code (`origin/integration/join9`, full SHA
+`e50f331cb7f69474d5e2fb584c18e4ec913c0a14`). Every `path:line` below refers
+to that snapshot. Join10 rebuilds this integration with a Windows fixture fix
+confined to NE Task 3; these product-code facts stand. Before dispatch, wait
+for join10 to land in `fork/groundwork`, record its exact SHA as the execution
+base, and revalidate fixture anchors and the external gates below. Do not
+execute XA against superseded join9 fixtures.
 
 ## Goal
 
@@ -15,9 +20,10 @@ that drives real PAIR binaries (broker, engine-manager, cluster-manager, proxy,
 nvpair-service) through the same JSON-RPC methods the desktop and terminal
 clients use for remote configuration, and proves with fake engines only:
 
-- **status**: a paired origin reads the target's policy projection, its
-  effective remote-management grant, its switch status and its engine intent,
-  and each read equals what the target's own broker reports;
+- **status**: a paired origin reads the target's policy projection, effective
+  allowed remote-management capability and switch status; the switch revision
+  equals the target-local read. Intent is target-local readback using OB
+  helpers, not a paired-origin intent API;
 - **conflict**: a stale `expectedPersistedRevision` on a remote policy set and a
   stale `expectedRevision` on a remote engine switch are refused with the typed
   conflict (`-32010`), nothing is persisted, and the switch refusal is readable
@@ -27,10 +33,11 @@ clients use for remote configuration, and proves with fake engines only:
   refuses a remote start with `-32011`;
 - **roles**: an allowed peer can set `roles` (a device field), the target
   persists and advertises them in its `engine:models` projection, and a denied
-  peer cannot (`-32012`, bytes unchanged);
+  peer cannot (typed HTTP management denial, bytes unchanged);
 - **serving/residency**: an allowed peer can set `servedModels` (absent, empty
-  and subset are distinct) and `residentModels`; the target persists, projects
-  and advertises them, and a running proxy enforces the served set at its
+  and subset are distinct) and `residentModels`; the target persists and
+  peer-projects both declarations, advertises the served set (no resident
+  advertisement field), and a running proxy enforces the served set at its
   facade (`503`, `X-PAIR-Admission: not-served`);
 - **idempotent switch**: an identical remote switch retry returns the stored
   receipt without a second attempt, a reused request ID with a different payload
@@ -46,7 +53,8 @@ never started by this suite.
 ## Change scope
 
 - **Intent / Scope:** Bounded improvement. Test code and one documentation
-  section only; no product code changes. New file
+  section only; no product code changes. External fixture-owner repairs are
+  prerequisites, not implicitly authorized XA edits. New file
   `services/tests/remote_configuration_test.go`; one fixture extraction in
   `services/tests/engine_switch_test.go` and one in
   `services/tests/service_harness_test.go` (with its single existing caller in
@@ -61,8 +69,9 @@ never started by this suite.
 - **Compatibility:** no wire change, no manifest change
   (`services/shared/testbin/programs/tests.txt` already registers every
   program these fixtures copy: `policy-joint/*`, `products/*`,
-  `service-bundle-1/*`), no new listener roles, so no new Windows firewall
-  rules. Existing tests keep passing; two of them are refactored without
+  `service-bundle-1/*`), no new listener roles. Exact-path firewall coverage
+  must be verified per machine; manifest presence does not prove rules.
+  Existing tests keep passing; two of them are refactored without
   behaviour change.
 - **Non-goals:** no live Ollama/LM Studio/llama.cpp/Strata runs; no OpenCode
   driving; no desktop or TUI code; no new JSON-RPC methods; no residency
@@ -78,7 +87,8 @@ Verified in the Go source at the SHA above.
   `TestMain` (`services/tests/main_test.go:41`) builds every product binary
   into a `testbin.MainDir` and redirects `HOME`/`XDG_CONFIG_HOME`/`APPDATA`/
   `LOCALAPPDATA`/`USERPROFILE` (`main_test.go:169-175`), so children never
-  touch a real install. `go test -list` still runs `TestMain`, so a Mac
+  use isolated persisted state. This does not prevent network discovery by
+  production scanners. `go test -list` still runs `TestMain`, so a Mac
   `-list` compiles the binaries and lists names without starting fixtures.
 - Platform gate pattern to copy: `strataContractPlatform`
   (`services/tests/strata_contract_test.go:276-286`) skips on darwin and on
@@ -123,7 +133,7 @@ Verified in the Go source at the SHA above.
 **Typed refusals and codes.**
 - Policy relay: HTTP 400 ↔ `-32602`; 409 JSON `{"error","code"}` with
   `policy_conflict` ↔ `-32010`, `local_veto` ↔ `-32011`,
-  `remote_management_denied` ↔ `-32012` (`services/nvpair-engine-manager/spec.md:531-545`).
+  `remote_management_denied` ↔ `-32012` (`services/nvpair-engine-manager/spec.md:584-598`).
   Origin message format: `remote node policy: HTTP <status>: <text>`
   (`policy_relay_joint_test.go:195`). Conflict text:
   `policy conflict: the persisted revision is <rev>, not the expected 0; reload the policy and review it before saving`
@@ -134,7 +144,7 @@ Verified in the Go source at the SHA above.
   `{"error","code":"configuration_conflict"}`; `-32011` and `-32012` →
   `writeCodedError` 409 (`services/nvpair-engine-manager/switchremote.go:178-200`).
   Broker refusal strings: `Engine configuration changed; reload before switching.`
-  (`engineswitch.go:544`), `A local pause vetoes remote switching.`
+  (`engineswitch.go:546`), `A local pause vetoes remote switching.`
   (`engineswitch.go:556`). `settings.SwitchConfigurationConflictCode = -32010`,
   `SwitchRemoteVetoCode = -32011`, kinds `configuration_conflict`,
   `remote_veto`, `reused_id` (`services/shared/enginesettings/switch.go:85-104`).
@@ -147,10 +157,11 @@ Verified in the Go source at the SHA above.
 - Remote-start veto: `engine:remote-start` params are `{node, engine}`
   (`services/nvpair-engine-manager/remote.go:22-29`, field `node`, not
   `nodeId`); a start vetoed by local pause or local Off answers HTTP 409
-  `local_veto` and reaches the origin as `-32011` (`spec.md:547-575`).
+  `local_veto` and reaches the origin as `-32011` (`spec.md:600-628`).
   `codeLocalVeto = -32011` (`services/nvpair-engine-manager/remoteclient.go:41`).
 - Remote management read: `engine:remote-management-get {nodeId}` →
-  `{version:1, allowed, revision, state}` (`remote_management.go:102-131`).
+  `{version:1, allowed, revision, state}` (`remote_management.go:102` params;
+  implementation from `:110`).
 
 **Policy shapes.**
 - `nodepolicy.Policy` fields incl. `ServedModels` (`servedModels,omitzero`: nil =
@@ -171,7 +182,7 @@ Verified in the Go source at the SHA above.
 - Advertisement: `nodepolicy.Advertisement{servedModels,omitzero; revision;
   roles; pausedBy}` (`advertise.go:67-79`). The broker pushes it to
   engine-manager as `engine:node-projection {policy, pausedLocally}` after
-  every persisted policy or availability change (`spec.md:463`;
+  every persisted policy or availability change (`spec.md:516`;
   `services/nvpair-engine-manager/nodeprojection.go:31-37`), and
   `engine:models` returns it as `policy` (`services/nvpair-engine-manager/models.go:54`).
   The push is asynchronous relative to the `policy:set` reply, so poll.
@@ -232,7 +243,7 @@ minted peer/allowed/target identities, pins, members, seeded policy, two
 pinned HTTP clients) before `f.start()` at `:1160`.
 
 **Residency at this SHA.** The engine-manager side (`engine:reconcile-resident`,
-`engine:dispatch-resident-request/-reply`, `spec.md:112-227`) and the proxy
+`engine:dispatch-resident-request/-reply`, `spec.md:165-280`) and the proxy
 side (`node/prepare-resident`, `node/dispatch-resident`, `node/finish-resident`,
 `node/observe-resident`, `node/set-residency`, `services/nvpair-proxy/policy.go:43-71`)
 are landed. The broker only rejects client-originated
@@ -240,14 +251,56 @@ are landed. The broker only rejects client-originated
 and pushes `node/set-residency` with loaded inventory
 (`services/nvpair-ui-broker/policy.go:1374`); **no broker code calls
 `node/prepare-resident`, `node/finish-resident` or `engine:reconcile-resident`**
-(verified by `rg -n -F` over `services/nvpair-ui-broker`), so a
+(verified by `git grep` at e50f331, including constant names), so a
 `residentModels` declaration produces no load. That is the SR 5a–5c gap.
 
 **Not verified.** Whether the local `go` toolchain on the executor's machine
 is ≥ 1.25 (required by the module); whether PC3's firewall rule set already
-covers the `policy-joint`, `products` and `service-bundle-1` programs (it must,
-since the reused tests run there today — confirm with
-`scripts/windows-test-bin.ps1 list` before the first run).
+covers the `policy-joint`, `products` and `service-bundle-1` programs. Confirm
+the wrapper configuration and exact executable rules using the preflight below.
+No Windows execution or new XA assertions were run in this amendment.
+
+## External gates and reservations (before dispatch)
+
+- Base gate: coordinator confirms join10 has landed on `fork/groundwork`,
+  records its exact SHA here, and re-reads SR/I joins for shared fixture and
+  activation-shape changes. E4 UI completion is not an XA prerequisite.
+- Fixture gate: coordinator reserves helper owners before Tasks 5–7 and their
+  Windows regressions. At e50f331, `engine_switch_test.go:190-208` starts
+  production `scannerBin`; `reverse_peer_control_task2_test.go:284-314` starts
+  a production scanner and mDNS responder. Temporary HOME and manual nodes
+  do not establish network isolation. The prerequisite owner must reuse the
+  registered empty scanner where discovery is unnecessary and separate the
+  pinned control mesh from unused scanner/advertiser setup. If the coordinator
+  supplies proof that an existing seam prevents external discovery, validate
+  that proof and reuse the seam instead of adding a second one. No product
+  flags or new harness.
+- The reserved fixture repair must ensure every XA listener allocation rejects
+  protected ports before starting/dialing. `freePort` (`tls_test.go:157-165`)
+  and `temporaryClusterPort` (`cluster_outbound_pairing_test.go:33-44`) do not;
+  compare `fixture_ports_test.go:54-94` and `jointListener`
+  (`policy_relay_joint_test.go:535-549`). Inventory engine, facade, observer,
+  worker and controller roles, including httptest listeners. Coordinator must
+  record exact helper Files and owning-package dependency after reservation;
+  XA must not silently expand its Files. Until repairs land and are verified,
+  dependent gates are pending; any separately authorized diagnostic run needs
+  an isolated network/host and is not hermetic evidence.
+- Harness reservation: before Task 8, coordinate with I Task 7's shared
+  service-harness owner and reserve `service_harness_test.go` and
+  `remote_management_test.go` for the extraction. Serialize overlapping edits
+  and re-read after the I join. No exact current Files collision warrants an
+  invented internal dependency or generic configurable fixture.
+- All task Go Verify commands run from `services/tests` unless explicitly
+  marked repository root. Machine executions are serialized, even when source
+  edits are independent. Every Windows command needs a reserved interval free
+  of other GPU/measurement sessions, `GOFLAGS` containing `nvpair-test-exec`,
+  absolute `NVPAIR_TEST_BIN_DIR`, and exact-path firewall rules for every
+  executable from `scripts/windows-test-bin.ps1 list`. Missing elevated rules
+  leave execution pending; never use temporary executable paths. Record
+  before/after firewall and survivor checks, executed names/skips and cleanup
+  logs with `-v`. Screen observation is UNMONITORED unless attended; unchanged
+  rules do not prove observed-none. No owner prompt report is required.
+  Stopping installed PAIR alone does not isolate LAN discovery.
 
 ## Decisions (settled — do not revisit)
 
@@ -257,7 +310,9 @@ since the reused tests run there today — confirm with
 - Reuse the existing `services/tests` fixtures; extract, do not duplicate.
   Not a new harness, because `policyJointFixture`, `switchProcessFixture`,
   `newTask2Fixture` and `serviceFixture` already own cleanup, port
-  reservation and process inventory for exactly these processes.
+  reservation and process inventory for these processes. Their reuse alone
+  does not establish network isolation or protected-port exclusion; apply the
+  external fixture gate above.
 - Mac only vets and lists; every execution is a PC3 Windows gate. Not Mac
   execution, because the Mac never runs `services/tests` cases (fleet rule).
 - Residency execution waits on SR 5a–5c. Not driving `node/prepare-resident`
@@ -265,6 +320,14 @@ since the reused tests run there today — confirm with
   product does not take and would be deleted when the broker relay lands.
 - Desktop and TUI are not touched. Not adding bridge or TUI assertions,
   because XA is the services slice; the clients relay these methods unchanged.
+- Coordinator-adopted answers (owner can veto): no interim direct proxy-hop
+  residency test; SR 6b owns execution acceptance. Live OpenCode/MSI/PC3
+  evidence stays a separate manual checklist with frozen NE records, intended
+  llama.cpp/Strata engines On, an exact reserved interval and explicit live
+  authorization. Do not add `NVPAIR_XA_LIVE`; fake XA completion does not
+  close the daily milestone. Do not add a native pause/resume cycle: existing
+  `TestServicePolicy` covers native availability; XA composes peer veto with
+  a seeded target policy, not a service-made pause.
 
 ## Decisions made while writing this plan
 
@@ -278,7 +341,8 @@ since the reused tests run there today — confirm with
   the joint fixture has no proxy and refuses switches as `unroutable`.
 - Served enforcement is proven on the local `switchProcessFixture` by adding a
   manual node at the proxy's own facade port (the `self` candidate), after a
-  positive control; no mDNS or node-info discovery is relied on.
+  positive control. Assertions do not rely on mDNS discovery; fixture network
+  isolation remains a prerequisite, not a property of manual selection.
 - The service-bundle setup of `TestRemoteManagementPersistsAcrossSeparateProcessRestarts`
   is extracted into `newRemoteServiceFixture` in `service_harness_test.go`
   and that test is updated to call it (touches
@@ -323,7 +387,8 @@ since the reused tests run there today — confirm with
      remote.ActiveRequestID == "" && remote.Receipt == nil`.
    - `"engine intent"`: `c := subscribeOBIntent(t, f.target)`;
      `assertOBIntent(t, decodeOBIntent(t, c.call(t, "engine:intent", nil)), obIntent(false, map[string]engineintent.Origin{}))`.
-4. Imports: `encoding/json`, `testing`, `time`, `nvpair-shared/engineintent`,
+4. Imports: `encoding/json`, `os`, `path/filepath`, `runtime`, `strings`,
+   `testing`, `time`, `nvpair-shared/engineintent`,
    `settings "nvpair-shared/enginesettings"`, `nvpair-shared/nodepolicy`.
 
 **Verify:**
@@ -331,14 +396,14 @@ since the reused tests run there today — confirm with
   — pass condition: vet prints nothing and the list contains
   `TestXARemoteConfigurationStatus`.
 - PC3 (Windows, serialized, wrapper configured):
-  `cd services/tests && go test -count=1 -run 'TestXARemoteConfigurationStatus$' .`
+  `cd services/tests && go test -v -count=1 -run 'TestXARemoteConfigurationStatus$' .`
   — pass condition: `ok` with all four subtests passed, no skip line.
 
 ### Task 2 — Policy conflict acceptance
 
 **Files:** `services/tests/remote_configuration_test.go`
 
-**Depends on:** Task 1
+**Depends on:** 1
 
 **Complexity:** mechanical
 
@@ -366,13 +431,13 @@ since the reused tests run there today — confirm with
 
 **Verify:**
 - Mac: `go vet ./...` clean; `go test -list 'TestXARemoteConfiguration' .` lists `TestXARemoteConfigurationConflict`.
-- PC3: `go test -count=1 -run 'TestXARemoteConfigurationConflict$' .` — `ok`.
+- PC3: `go test -v -count=1 -run 'TestXARemoteConfigurationConflict$' .` — `ok`.
 
 ### Task 3 — Local veto acceptance (pause and saved Off)
 
 **Files:** `services/tests/remote_configuration_test.go`
 
-**Depends on:** Task 2
+**Depends on:** 2
 
 **Complexity:** judgment
 
@@ -390,7 +455,7 @@ since the reused tests run there today — confirm with
      `m := callRPC(t, f.origin.in, f.origin.msgs, "engine:remote-start", map[string]any{"node": "policy-joint-target", "engine": "ollama"}, 30*time.Second)`;
      `return m.Error != nil && m.Error.Code == -32011 })`. The poll covers the
      fail-closed 503 the target answers before its first projection
-     (`spec.md:552-553`). (`engine:remote-start` takes `node`, not `nodeId`;
+     (`spec.md:605-606`). (`engine:remote-start` takes `node`, not `nodeId`;
      do not use `f.originCall`.)
    - `"local resume then local Off vetoes remote start"`:
      `local := callRPC(t, f.target.in, f.target.msgs, "node:set-availability", map[string]any{"state": "available"}, 15*time.Second)`;
@@ -402,33 +467,42 @@ since the reused tests run there today — confirm with
      `m.Error != nil && m.Error.Code == -32011 })`;
      finally `assertOBIntent(t, decodeOBIntent(t, c.call(t, "engine:intent", nil)), obIntent(false, map[string]engineintent.Origin{"ollama": engineintent.Local}))`
      and `assertOBStoredIntent(t, filepath.Join(jointAppDir(f.base), "engine-bin", "engine-state.json"), false, engineintent.Local)`.
-   - `"peer Off cannot clear a local Off"`: `f.http(t, "/v1/engines/stop", map[string]any{"engine": "ollama"}, http.StatusOK)`;
-     `c.assertIntent(t, obIntent(false, map[string]engineintent.Origin{"ollama": engineintent.Local}))`.
    Order the subtests exactly as listed; each depends on the previous state.
-2. Add `path/filepath` to imports.
+   Keep the subscribed intent client local to its subtest. Consume OB's
+   existing helpers and `TestOBOffOrigin` regression selector; do not reproduce
+   its peer-Off preservation matrix in XA. XA adds the remote-start veto
+   composition only. No new imports are needed.
 
 **Verify:**
 - Mac: vet clean; `-list` shows `TestXARemoteConfigurationVeto`.
-- PC3: `go test -count=1 -run 'TestXARemoteConfigurationVeto$' .` — `ok`,
-  four subtests passed. Also rerun the neighbour it shares semantics with:
-  `go test -count=1 -run 'TestOBOffOrigin$' .` — `ok`.
+- PC3: `go test -v -count=1 -run 'TestXARemoteConfigurationVeto$' .` — `ok`,
+  three subtests passed. Also rerun the neighbour it shares semantics with:
+  `go test -v -count=1 -run 'TestOBOffOrigin$' .` — `ok`.
 
 ### Task 4 — Roles acceptance (allowed peer sets, target advertises, denied peer cannot)
 
 **Files:** `services/tests/remote_configuration_test.go`
 
-**Depends on:** Task 3
+**Depends on:** 3
 
 **Complexity:** mechanical
 
 **Do:**
-1. Add helper `xaEngineModelsPolicy(t, p *interopProcess) *nodepolicy.Advertisement`:
+1. Add helper `xaEngineModelsPolicy(t *testing.T, p *interopProcess) *nodepolicy.Advertisement`:
    `callRPC(t, p.in, p.msgs, "engine:models", map[string]any{}, 10*time.Second)`,
    fail on error, decode `struct{ Policy *nodepolicy.Advertisement `json:"policy"` }`
    and return `Policy` (nil before the first projection push).
+   Add `xaPeerDraft(t, p nodepolicy.Policy) nodepolicy.PeerPolicy`: marshal
+   `p.PeerProjection()` and unmarshal into a fresh PeerPolicy, checking errors.
+   This detached copy preserves roles, profiles and served/resident presence
+   while avoiding shared maps/slices. Use it for every editable Task 4/5
+   draft, including rejected drafts. Keep seed-specific `jointExpectedPeer`
+   unchanged for its existing callers. Task 4/5 denied-peer cases assert the
+   typed HTTP management-denied body via `managementHTTP`, not an independent
+   origin JSON-RPC `-32012` assertion.
 2. Add `TestXARemoteConfigurationRoles` (gate, `f := newManagementFixture(t)`,
    `j := f.joint`):
-   - `"allowed peer sets roles"`: `draft := jointExpectedPeer(j.want)`;
+   - `"allowed peer sets roles"`: `draft := xaPeerDraft(t, j.want)`;
      `draft.Roles = map[string]nodepolicy.Role{"weak": {Engine: "ollama", Model: "joint-local"}}`;
      `res := j.rpc(t, "engine:remote-policy-set", map[string]any{"policy": draft, "expectedPersistedRevision": j.want.Revision}).Result`;
      decode `struct{ Policy nodepolicy.PeerPolicy `json:"policy"` }`; require
@@ -437,10 +511,10 @@ since the reused tests run there today — confirm with
    - `"target advertises roles"`: `task1Eventually(t, "roles projection", 10*time.Second, func() bool {`
      `adv := xaEngineModelsPolicy(t, j.target); return adv != nil && adv.Revision == j.want.Revision && adv.Roles["weak"].Engine == "ollama" && adv.Roles["weak"].Model == "joint-local" })`.
    - `"denied peer cannot change roles"`: `before := readPolicyBytes(t, j.path)`;
-     `draft.Roles = map[string]nodepolicy.Role{"strong": {Engine: "ollama", Model: "joint-local"}}`;
+     `draft := xaPeerDraft(t, j.want); draft.Roles = map[string]nodepolicy.Role{"strong": {Engine: "ollama", Model: "joint-local"}}`;
      `managementHTTP(t, f.denied, j.ports[1], http.MethodPost, "/v1/node-policy/set", map[string]any{"policy": draft, "expectedPersistedRevision": j.want.Revision}, http.StatusConflict)`;
      `j.assertUnchanged(t, before)`.
-   - `"peer cannot change tiers alongside roles"`: `draft := jointExpectedPeer(j.want); draft.Tiers["weak"][0].Model = "different-local"`;
+   - `"peer cannot change tiers alongside roles"`: `draft := xaPeerDraft(t, j.want); draft.Tiers["weak"][0].Model = "different-local"`;
      `m := j.originCall(t, "engine:remote-policy-set", map[string]any{"policy": draft, "expectedPersistedRevision": j.want.Revision})`;
      require `m.Error != nil && m.Error.Code == -32602 && m.Error.Message == "remote node policy: HTTP 400: a paired node cannot change the tiers"`;
      `j.assertPolicy(t)`.
@@ -448,20 +522,22 @@ since the reused tests run there today — confirm with
 
 **Verify:**
 - Mac: vet clean; `-list` shows `TestXARemoteConfigurationRoles`.
-- PC3: `go test -count=1 -run 'TestXARemoteConfigurationRoles$' .` — `ok`.
+- PC3: `go test -v -count=1 -run 'TestXARemoteConfigurationRoles$' .` — `ok`.
 
 ### Task 5 — Serving and residency declaration, and proxy served enforcement
 
 **Files:** `services/tests/remote_configuration_test.go`
 
-**Depends on:** Task 4
+**Depends on:** 4
 
 **Complexity:** judgment
 
 **Do:**
 1. Add `TestXARemoteConfigurationServing` (gate) with two independent halves.
+   External prerequisite: coordinator fixture/protected-port gate above must
+   be satisfied before Half B lands or executes; otherwise leave it pending.
 2. Half A, declaration (`f := newManagementFixture(t)`, `j := f.joint`):
-   - `"explicit empty served set persists"`: `draft := jointExpectedPeer(j.want)`;
+   - `"explicit empty served set persists"`: `draft := xaPeerDraft(t, j.want)`;
      `draft.ServedModels = nodepolicy.ServedModels{}`; set through
      `j.rpc(t, "engine:remote-policy-set", ...)`; decode the projection and
      require `Policy.ServedModels != nil && len(Policy.ServedModels) == 0`;
@@ -469,7 +545,7 @@ since the reused tests run there today — confirm with
      `j.assertPolicy(t)`; require the stored bytes
      `readPolicyBytes(t, j.path)` contain `"servedModels":[]`
      (`bytes.Contains`).
-   - `"served subset with resident declaration"`: `draft := jointExpectedPeer(j.want)`;
+   - `"served subset with resident declaration"`: `draft := xaPeerDraft(t, j.want)`;
      `draft.Profiles = append(draft.Profiles, nodepolicy.Profile{Name: "xa-resident", Engine: "ollama", Model: "joint-local", ContextTokens: 8192, MaxOutputTokens: 1024, MaxConcurrent: 1, MemoryBytes: 1, Qualification: &nodepolicy.QualificationRef{ID: "xa-qual", Revision: "1"}})`;
      `draft.ServedModels = nodepolicy.ServedModels{{Engine: "ollama", Model: "joint-local"}}`;
      `draft.ResidentModels = nodepolicy.ResidentModels{{Engine: "ollama", Model: "joint-local"}}`;
@@ -478,15 +554,23 @@ since the reused tests run there today — confirm with
      ServedModels, ResidentModels, Revision); `j.assertPolicy(t)`.
    - `"target advertises the served set"`: `task1Eventually(..., 10*time.Second, func() bool {`
      `adv := xaEngineModelsPolicy(t, j.target); return adv != nil && adv.Revision == j.want.Revision && reflect.DeepEqual(adv.ServedModels, j.want.ServedModels) })`.
-   - `"resident outside served is refused"`: `draft := jointExpectedPeer(j.want)`;
+   - `"resident outside served is refused"`: `draft := xaPeerDraft(t, j.want)`;
      `draft.ServedModels = nodepolicy.ServedModels{{Engine: "ollama", Model: "other"}}`
-     (resident stays `joint-local`); `m := j.originCall(t, "engine:remote-policy-set", ...)`;
+     (explicitly require the draft still contains resident `joint-local`
+     before sending); `m := j.originCall(t, "engine:remote-policy-set", ...)`;
      require `m.Error != nil && m.Error.Code == -32602 && m.Error.Message == "remote node policy: HTTP 400: residentModels must be a subset of servedModels"`;
      `j.assertPolicy(t)`.
    - `"denied peer cannot change the served set"`: `before := readPolicyBytes(t, j.path)`;
-     a draft clearing `ServedModels` to `nodepolicy.ServedModels{}` and
+     `draft := xaPeerDraft(t, j.want)`, clearing `ServedModels` to `nodepolicy.ServedModels{}` and
      `ResidentModels` to nil, posted with `managementHTTP(t, f.denied, j.ports[1], http.MethodPost, "/v1/node-policy/set", ..., http.StatusConflict)`;
      `j.assertUnchanged(t, before)`.
+   - `"absent served set restores unrestricted declaration"`: take a detached
+     draft, set `ServedModels = nil` and `ResidentModels = nil`, send with the
+     current revision, decode the returned PeerPolicy and require nil served
+     set. Update `j.want` and revision, assert persisted policy and absence
+     of the `servedModels` key in stored bytes and remote-policy-get result;
+     poll advertisement for current revision with nil ServedModels. This
+     positively distinguishes absent from the prior empty/subset declarations.
 3. Half B, enforcement (`s := newSwitchProcessFixture(t)`), as subtest
    `"proxy enforces served set at its facade"`:
    - `s.unblock()` first (the fake engine's `/api/generate` blocks on the
@@ -521,12 +605,12 @@ since the reused tests run there today — confirm with
         `generate()` → 200, `done == true`.
      5. `s.pid(t, "ollama")` still reports exactly one start and
         `s.mu.Lock(); len(s.starts["llamacpp"]) == 0; s.mu.Unlock()`.
-4. Add `bytes`, `io`, `strings` to imports as used.
+4. Add `bytes` and `io` to imports; `strings` is already imported by Task 1.
 
 **Verify:**
 - Mac: vet clean; `-list` shows `TestXARemoteConfigurationServing`.
-- PC3: `go test -count=1 -run 'TestXARemoteConfigurationServing$' .` — `ok`,
-  all subtests passed; then `go test -count=1 -run 'TestEngineSwitchProcessCompletesAndRetries$' .`
+- PC3: `go test -v -count=1 -run 'TestXARemoteConfigurationServing$' .` — `ok`,
+  all subtests passed; then `go test -v -count=1 -run 'TestEngineSwitchProcessCompletesAndRetries$' .`
   — `ok` (proves the switch fixture is unchanged by this task).
 
 ### Task 6 — Extract the pinned remote-switch fixture
@@ -550,6 +634,9 @@ since the reused tests run there today — confirm with
    }
    ```
    and `func newPinnedSwitchFixture(t *testing.T, reverse bool) *pinnedSwitchFixture`
+   only after the external fixture/protected-port prerequisite is reserved,
+   landed and verified; re-anchor the extraction after that repair. It is not
+   permission to edit unreserved helper owners.
    whose body is exactly lines `590-611` of `testEngineSwitchPinned` (mesh,
    stop B's manager, ports, `newSwitchProcessFixtureAt`, origin, the
    `t.Cleanup` that stops origin/scanner/f.p, directory, `ec`, the
@@ -558,27 +645,32 @@ since the reused tests run there today — confirm with
    `p := newPinnedSwitchFixture(t, reverse); mesh, f, origin, ec := p.mesh, p.f, p.origin, p.ec`
    so the remaining body (`:612-689`) is unchanged.
 3. Add `func (p *pinnedSwitchFixture) remoteStatus(t *testing.T, requestID string) settings.SwitchStatus`:
-   `origin.call(t, settings.RemoteSwitchStatusMethod, settings.SwitchStatusRequest{NodeID: p.mesh.b.uuid, RequestID: requestID})`,
+   `p.origin.call(t, settings.RemoteSwitchStatusMethod, settings.SwitchStatusRequest{NodeID: p.mesh.b.uuid, RequestID: requestID})`,
    fail on `Error != nil`, decode and return.
 4. Add `func (p *pinnedSwitchFixture) request(t *testing.T, id string) settings.SwitchRequest`:
    `settings.SwitchRequest{NodeID: p.mesh.b.uuid, RequestID: id, SourceEngine: "ollama", TargetEngine: "llamacpp", ExpectedRevision: p.remoteStatus(t, "").ConfigurationRevision}`.
 
 **Verify:**
 - Mac: `go vet ./...` clean; `go test -list 'TestEngineSwitchProcessPinned' .` lists both pinned tests.
-- PC3: `go test -count=1 -run 'TestEngineSwitchProcessPinned(Direct|Reverse)$' .` — `ok` for both (behaviour unchanged).
+- PC3: `go test -v -count=1 -run 'TestEngineSwitchProcessPinned(Direct|Reverse)$' .` — `ok` for both (behaviour unchanged).
 
 ### Task 7 — Remote switch conflict, veto and idempotency acceptance
 
 **Files:** `services/tests/remote_configuration_test.go`
 
-**Depends on:** Task 5, Task 6
+**Depends on:** 5, 6
 
 **Complexity:** judgment
 
 **Do:**
 1. Add `TestXARemoteConfigurationSwitch` (gate; `p := newPinnedSwitchFixture(t, false)`;
    `f, origin := p.f, p.origin`). Run the subtests in this order (shared
-   state):
+   state). Hoist the veto request/status and successful request/terminal
+   status to the enclosing test: `var vetoReq, successReq settings.SwitchRequest`
+   and `var vetoStatus, terminal settings.SwitchStatus`. Assign to these shared
+   variables in the producing closures and reference those exact variables
+   in replay/reused-ID closures; do not short-declare shared state inside a
+   `t.Run`. Local stale-case variables stay local:
    - `"stale revision is a typed conflict and a rejected receipt"`:
      `req := p.request(t, "xa-switch-stale"); req.ExpectedRevision = "e3v1:" + strings.Repeat("0", 64)`;
      `m := origin.call(t, settings.RemoteSwitchMethod, req)` — **note**
@@ -590,43 +682,49 @@ since the reused tests run there today — confirm with
      `f.pid(t, "ollama")`; require no `llamacpp` start.
    - `"local pause vetoes a remote switch"`:
      `f.rpcOK(t, "node:set-availability", map[string]string{"state": "paused"})`;
-     `req := p.request(t, "xa-switch-veto")`; send as above; require
-     `m.Error.Code == settings.SwitchRemoteVetoCode` (`-32011`);
-     `st := p.remoteStatus(t, "xa-switch-veto")`; require phase `rejected`,
+     `vetoReq = p.request(t, "xa-switch-veto")`; send `vetoReq` with
+     `origin.send`/`task2Response` as above; require
+     `m.Error != nil && m.Error.Code == settings.SwitchRemoteVetoCode` (`-32011`);
+     `vetoStatus = p.remoteStatus(t, "xa-switch-veto")`; require phase `rejected`,
      terminal, `Error.Kind == settings.SwitchErrorRemoteVeto`,
      `Error.Code == -32011`. Require no `llamacpp` start.
    - `"vetoed request replays as its stored receipt"`: resend the identical
-     `req` with `origin.call` (no error expected); decode
-     `settings.SwitchResult`; require `reflect.DeepEqual(result.Receipt, *st.Receipt)`.
+     `vetoReq` with `origin.call` (no error expected); decode
+     `settings.SwitchResult`; require `reflect.DeepEqual(result.Receipt, *vetoStatus.Receipt)`.
    - `"local resume then a fresh request completes"`:
      `f.rpcOK(t, "node:set-availability", map[string]string{"state": "available"})`;
-     `req := p.request(t, "xa-switch-ok")`; `origin.call(t, settings.RemoteSwitchMethod, req)`
+     `successReq = p.request(t, "xa-switch-ok")`; `origin.call(t, settings.RemoteSwitchMethod, successReq)`
      and decode `settings.SwitchResult` as `accepted`; require
      `accepted.Receipt.Caller == p.mesh.a.uuid && accepted.Receipt.NodeID == p.mesh.b.uuid`;
-     `var terminal settings.SwitchStatus; task1Eventually(t, "remote terminal receipt", 45*time.Second, func() bool { terminal = p.remoteStatus(t, "xa-switch-ok"); return terminal.Receipt != nil && terminal.Receipt.Terminal })`;
+     `task1Eventually(t, "remote terminal receipt", 45*time.Second, func() bool { terminal = p.remoteStatus(t, "xa-switch-ok"); return terminal.Receipt != nil && terminal.Receipt.Terminal })`;
      require `terminal.Receipt.Phase == settings.SwitchCompleted && terminal.Receipt.Error == nil`;
      `assertSwitchProcessStopped(t, f.pid(t, "ollama")); f.pid(t, "llamacpp")`.
    - `"identical retry returns the terminal receipt"`: `origin.call` the same
-     `req`; decode `settings.SwitchResult`; require
+     `successReq`; decode `settings.SwitchResult`; require
      `reflect.DeepEqual(replay.Receipt, *terminal.Receipt)`; require
      `p.ec.count(p.mesh.a.uuid, http.MethodPost, settings.SwitchApplyPath)` equals
      the count taken before this subtest plus 1 (the retry traversed `ec` once
      and was answered from the journal), and `f.pid(t, "llamacpp")` still
      exactly one start.
    - `"reused request ID with another payload is refused"`:
-     `bad := req; bad.SourceEngine, bad.TargetEngine = "llamacpp", "ollama"`
+     `bad := successReq; bad.SourceEngine, bad.TargetEngine = "llamacpp", "ollama"`
      (the engines are part of the payload hash; `ExpectedRevision` alone would
      also change the hash, but swapping engines keeps the request otherwise
-     valid); send with `origin.send`/`task2Response`; require `m.Error != nil`;
+     valid); send with `origin.send`/`task2Response`; require
+     `m.Error != nil && m.Error.Code == settings.SwitchInvalidParamsCode`
+     (`-32602`) and `m.Error.Message == "Request ID was already used by another caller or payload.\n"`.
+     This is the current broker diagnostic (`engineswitch.go:491,520`) through
+     HTTP 400 (`switchremote.go:137,178-182`); `http.Error` supplies the trailing
+     newline. Do not accept an unrelated error or invent a typed HTTP body;
      `after := p.remoteStatus(t, "xa-switch-ok")`; require
      `reflect.DeepEqual(after.Receipt, terminal.Receipt)`; require
      `f.pid(t, "llamacpp")` still one start and `f.mu`-guarded
      `len(f.starts["ollama"]) == 1`.
-2. Add `strings` to imports if Task 5 did not.
+2. `strings` is already imported by Task 1; no new import is needed.
 
 **Verify:**
 - Mac: vet clean; `-list` shows `TestXARemoteConfigurationSwitch`.
-- PC3: `go test -count=1 -run 'TestXARemoteConfigurationSwitch$' .` — `ok`,
+- PC3: `go test -v -count=1 -run 'TestXARemoteConfigurationSwitch$' .` — `ok`,
   six subtests passed, and the broker journal
   (`filepath.Join(p.mesh.b.base, "engine-switch-operations.json")`, read with
   `settings.DecodeSwitchJournal(readLiveDurableFile(...))` inside the last
@@ -647,7 +745,7 @@ since the reused tests run there today — confirm with
    // remoteServiceFixture is a serviceFixture whose bundle also runs
    // engine-manager and cluster-manager, with an empty-directory scanner, inert
    // engines, a pinned target identity and two pinned peers: one denied and one
-   // allowed remote management. Start it with f.start().
+   // intended to be allowed after a target-local grant. Start with f.start().
    type remoteServiceFixture struct {
        *serviceFixture
        enginePath, clusterPath string
@@ -665,38 +763,47 @@ since the reused tests run there today — confirm with
 2. In `TestRemoteManagementPersistsAcrossSeparateProcessRestarts`, replace
    lines `1111-1159` with
    `rf := newRemoteServiceFixture(t); f, client, allowedClient, enginePath, clusterPath := rf.serviceFixture, rf.peer, rf.allowed, rf.enginePath, rf.clusterPath`
-   and delete the local `permissionPath :=` at `:1163` in favour of
+   and replace the local `permissionPath :=` declaration (`:1170`) with
    `permissionPath := rf.permissionPath`. Nothing else in the test changes.
 3. Move the imports the extracted block needs (`net`, `net/http`,
    `net/http/httptest`, `strconv`, `nvpair-shared/clustertrust`,
    `nvpair-shared/nodepolicy`) into `service_harness_test.go`; remove any that
    become unused in `remote_management_test.go` (`go vet` reports them).
+4. External prerequisite: obtain the I Task 7 coordinator's harness reservation
+   before editing. Keep this extraction specific to this fixture. Retain
+   enginePath/clusterPath only because the existing restart caller uses them;
+   do not add unused state or a generic configurable fixture.
 
 **Verify:**
 - Mac: `go vet ./...` clean; `go test -list 'TestRemoteManagementPersistsAcrossSeparateProcessRestarts' .` lists it.
-- PC3: `go test -count=1 -run 'TestRemoteManagementPersistsAcrossSeparateProcessRestarts$' .` — `ok` (unchanged behaviour).
+- PC3: `go test -v -count=1 -run 'TestRemoteManagementPersistsAcrossSeparateProcessRestarts$' .` — `ok` (unchanged behaviour).
 
 ### Task 9 — Native (nvpair-service) remote configuration acceptance
 
 **Files:** `services/tests/remote_configuration_test.go`
 
-**Depends on:** Task 7, Task 8
+**Depends on:** 7, 8
 
 **Complexity:** mechanical
 
 **Do:**
 1. Add `TestXARemoteConfigurationService` (gate; `rf := newRemoteServiceFixture(t); rf.start(); c := rf.readyClient()`).
-   Request IDs for `c.mustCall` are strings; use `"xa1"`, `"xa2"`, … in order.
+   IDs are Go strings containing raw JSON: use the numeric IDs
+   as shown below. For each intent poll use `strconv.Itoa(nextID)`
+   with an enclosing counter starting at 1000 and increment after each call;
+   never send a bare symbolic token as JSON. Import `strconv`. Hoist
+   `var snap servicePolicySnapshot` to the enclosing test so the policy and
+   peer-read closures share it; assign with `snap =`, not `:=`.
    - `"local grants through the service"`:
-     `view := decodeResult[managementSnapshot](t, *c.mustCall(t, "xa1", "cluster:get-remote-management", mustMarshal(t, map[string]any{})))`;
-     `c.mustCall(t, "xa2", "cluster:set-remote-management", mustMarshal(t, map[string]any{"peerUuid": "management-service-peer", "allowed": false, "expectedRevision": view.Revision}))`;
+     `view := decodeResult[managementSnapshot](t, *c.mustCall(t, "901", "cluster:get-remote-management", mustMarshal(t, map[string]any{})))`;
+     `c.mustCall(t, "902", "cluster:set-remote-management", mustMarshal(t, map[string]any{"peerUuid": "management-service-peer", "allowed": false, "expectedRevision": view.Revision}))`;
      re-read and set `management-service-allowed` to `true` with the fresh
-     revision (`"xa3"`, `"xa4"`).
+     revision (`"903"`, `"904"`).
    - `"local policy edit with roles and served set"`:
-     `before := decodeServicePolicy(t, c.mustCall(t, "xa5", "policy:get", nil))`;
+     `before := decodeServicePolicy(t, c.mustCall(t, "905", "policy:get", nil))`;
      `draft := before; draft.Roles = map[string]nodepolicy.Role{"weak": {Engine: "ollama", Model: "xa-model"}}; draft.ServedModels = nodepolicy.ServedModels{{Engine: "ollama", Model: "xa-model"}}`;
-     `m := c.mustCall(t, "xa6", "policy:set", mustMarshal(t, map[string]any{"policy": draft, "expectedPersistedRevision": before.Revision}))`;
-     `snap := decodeServicePolicySnapshot(t, m)`; require
+     `m := c.mustCall(t, "906", "policy:set", mustMarshal(t, map[string]any{"policy": draft, "expectedPersistedRevision": before.Revision}))`;
+     `snap = decodeServicePolicySnapshot(t, m)`; require
      `snap.Policy.Revision != before.Revision && reflect.DeepEqual(snap.Policy.Roles, draft.Roles) && reflect.DeepEqual(snap.Policy.ServedModels, draft.ServedModels) && snap.Activation == "pending"`
      (no proxy in this bundle); `assertStoredPolicy(t, rf.policyPath(), snap.Policy)`.
    - `"peers see the service-made policy"`: allowed peer
@@ -708,10 +815,10 @@ since the reused tests run there today — confirm with
      `{"policy": snap.Policy.PeerProjection(), "expectedPersistedRevision": snap.Policy.Revision}`;
      `assertStoredPolicy(t, rf.policyPath(), snap.Policy)` afterwards.
    - `"engine intent through the service"`:
-     `m := c.mustCall(t, "xa7", "engine:intent", nil)`; `decodeOBIntent(t, m.Result)`
-     must validate; `c.mustCall(t, "xa8", "engine:stop", mustMarshal(t, map[string]string{"engine": "ollama"}))`;
+     `m := c.mustCall(t, "907", "engine:intent", nil)`; `decodeOBIntent(t, m.Result)`
+     must validate; `c.mustCall(t, "908", "engine:stop", mustMarshal(t, map[string]string{"engine": "ollama"}))`;
      `task1Eventually(t, "service intent push", 10*time.Second, func() bool {`
-     decode `c.mustCall(t, "xa9", "engine:intent", nil).Result` and return
+     decode `c.mustCall(t, strconv.Itoa(nextID), "engine:intent", nil).Result`, increment `nextID`, and return
      `OffByEngine["ollama"] == engineintent.Local })`;
      then the allowed peer's start is vetoed:
      `status, _, body := managementHTTPResponse(t, rf.allowed, rf.ports.engineControl, http.MethodPost, "/v1/engines/start", map[string]any{"engine": "ollama"})`;
@@ -719,20 +826,20 @@ since the reused tests run there today — confirm with
      `struct{ Code string `json:"code"` }` with `Code == "local_veto"`.
      (`managementHTTP` is not used here: its 409 assertion expects the
      management-denied body.)
-   - `"clean stop"`: `assertServiceStoppedReply(t, c.mustCall(t, "xa10", "service/stop", nil))`;
+   - `"clean stop"`: `assertServiceStoppedReply(t, c.mustCall(t, "910", "service/stop", nil))`;
      `rf.waitChild(rf.service, serviceStopTimeout)`; `rf.assertStopped()`.
-2. No new imports beyond those already present.
+2. Add `strconv` for fresh numeric poll IDs; no other new imports.
 
 **Verify:**
 - Mac: vet clean; `-list` shows `TestXARemoteConfigurationService`.
-- PC3: `go test -count=1 -run 'TestXARemoteConfigurationService$' .` — `ok`,
+- PC3: `go test -v -count=1 -run 'TestXARemoteConfigurationService$' .` — `ok`,
   and the log contains `fixture_cleanup endpoint=... owned_running=0 endpoint_rejected=true`.
 
 ### Task 10 — Document the XA suite in the services README
 
 **Files:** `services/readme.md`
 
-**Depends on:** Task 9
+**Depends on:** 9
 
 **Complexity:** mechanical
 
@@ -741,7 +848,7 @@ since the reused tests run there today — confirm with
    JSON-RPC method, payload, or notification.` (`services/readme.md:259-260`)
    and before `### Tests that skip themselves` (`:262`), insert:
 
-   ```markdown
+   ````markdown
    #### Remote configuration acceptance (XA)
 
    `tests/remote_configuration_test.go` is the acceptance suite for remote
@@ -755,54 +862,53 @@ since the reused tests run there today — confirm with
 
    ```bash
    cd tests
-   go test -count=1 -run 'TestXARemoteConfigurationStatus$' .
-   go test -count=1 -run 'TestXARemoteConfigurationConflict$' .
-   go test -count=1 -run 'TestXARemoteConfigurationVeto$' .
-   go test -count=1 -run 'TestXARemoteConfigurationRoles$' .
-   go test -count=1 -run 'TestXARemoteConfigurationServing$' .
-   go test -count=1 -run 'TestXARemoteConfigurationSwitch$' .
-   go test -count=1 -run 'TestXARemoteConfigurationService$' .
+   go test -v -count=1 -run 'TestXARemoteConfigurationStatus$' .
+   go test -v -count=1 -run 'TestXARemoteConfigurationConflict$' .
+   go test -v -count=1 -run 'TestXARemoteConfigurationVeto$' .
+   go test -v -count=1 -run 'TestXARemoteConfigurationRoles$' .
+   go test -v -count=1 -run 'TestXARemoteConfigurationServing$' .
+   go test -v -count=1 -run 'TestXARemoteConfigurationSwitch$' .
+   go test -v -count=1 -run 'TestXARemoteConfigurationService$' .
    ```
 
-   `go test -run 'TestXARemoteConfiguration' .` runs them all. On macOS,
+   `go test -v -run '^TestXARemoteConfiguration(Status|Conflict|Veto|Roles|Serving|Switch|Service)$' .` runs all XA cases. On macOS,
    `go vet ./...` and `go test -list 'TestXARemoteConfiguration' .` are the
-   only checks; the cases themselves do not run there. Automatic resident
-   loads are not covered until the broker's resident relay lands.
-   ```
+   only checks; the cases themselves do not run there. Network isolation and
+   protected-port repairs are coordinator-owned prerequisites; existing
+   fixtures alone do not establish hermetic execution. Automatic resident
+   execution belongs to SR Task 6b after NE Task 4 and SR 5a–5c; XA consumes
+   that evidence. Live MSI/PC3 OpenCode evidence remains a separate manual
+   checklist; passing fake XA cases does not close the daily milestone.
+   ````
 2. Do not edit `README.md` at the repository root (public scope rule) or any
    generated file.
 
 **Verify:**
 - Mac: `node scripts/spdx-headers.mjs` from the repository root exits 0;
   `grep -n 'TestXARemoteConfigurationService' services/readme.md` prints one
-  line; the seven `-run` selectors in the README match the seven top-level
+  line; the individual area selectors in the README match the seven top-level
   functions in `services/tests/remote_configuration_test.go`
   (`grep -c '^func TestXARemoteConfiguration' services/tests/remote_configuration_test.go` prints `7`).
 
-## Deferred until SR 5a–5c land (not a task now)
+## SR-owned residency acceptance handoff (not an XA task)
 
-Residency *execution* acceptance: an allowed peer declares `residentModels`,
-the broker relays `node/prepare-resident` → `engine:reconcile-resident` →
-`engine:dispatch-resident-request/-reply` → `node/finish-resident`, and the
-fake engine observes exactly one `POST /api/generate` with
-`{model, stream:false, keep_alive, options:{num_ctx}}` and no prompt
-(`services/nvpair-engine-manager/spec.md:199-212`), followed by a `GET /api/ps`
-readback. Known-now constraints the future task must honour: the switch
-fixture's fake engine (`engine_switch_test.go:41-86`) needs an `/api/ps`
-route and a loaded flag toggled by the keep-alive load; `residentModels`
-requires a qualified `Profile` (Task 5 half A shows the shape); the
-engine-manager refuses loads for a non-Ollama family, so the case must target
-`ollama`; the proxy's qualification registry must hold the profile's
-`qualification {id, revision}` for the same engine identity, which is
-proxy-side setup that SR 5a–5c define. Re-plan that task from the SR 5 spec
-sections once they are in `fork/groundwork`; its file is
-`services/tests/remote_configuration_test.go` and it depends on Task 5.
+SR Task 6b in `packages/sr5-rescope.md` owns
+`services/tests/served_resident_test.go` and both qualified llama.cpp/Strata
+adapter process coverage of permission, residency, veto, recovery and switch
+interaction after NE Task 4 and SR 5a–5c. Current Ollama-only residency code
+(`services/nvpair-engine-manager/spec.md:252-265`) is a reason to defer,
+not the successor acceptance contract. Do not assign future residency
+implementation to XA or add a direct proxy-hop interim test. XA consumes SR
+6b's selectors and evidence after integration; only a separately identified
+missing remote-configuration scenario, with coordinator reservation, can
+justify another XA task. Existing fake Ollama/llama.cpp wiring fixtures
+establish neither daily-engine readiness nor native live residency.
 
 ## Verification (whole-plan)
 
 Mac (vet and list only):
 ```bash
-cd services/tests && go vet ./... && go test -list 'TestXARemoteConfiguration|TestEngineSwitchProcessPinned|TestRemoteManagementPersistsAcrossSeparateProcessRestarts' .
+(cd services/tests && go vet ./... && go test -list 'TestXARemoteConfiguration|TestEngineSwitchProcessPinned|TestRemoteManagementPersistsAcrossSeparateProcessRestarts' .)
 node scripts/spdx-headers.mjs        # from the repository root
 ```
 Pass: vet silent; the list prints the seven `TestXARemoteConfiguration*`
@@ -811,14 +917,17 @@ names plus the three refactored neighbours; SPDX check exits 0.
 PC3 (Windows, wrapper configured, PAIR stopped, one `go test` at a time):
 ```bash
 cd services/tests
-go test -count=1 -run 'TestXARemoteConfiguration' .
-go test -count=1 -run 'TestEngineSwitchProcessPinned(Direct|Reverse)$|TestRemoteManagementPersistsAcrossSeparateProcessRestarts$|TestOBOffOrigin$|TestPolicyRelayJoint$|TestRemoteManagement' .
+go test -v -count=1 -run '^TestXARemoteConfiguration(Status|Conflict|Veto|Roles|Serving|Switch|Service)$' .
+go test -v -count=1 -run '^(TestEngineSwitchProcessPinned(Direct|Reverse)|TestOBOffOrigin|TestPolicyRelayJoint|TestRemoteManagement.*)$' .
 ```
-Pass: both commands print `ok`, no `--- SKIP` line for any `TestXA*` case
-(a skip is not a pass), and `scripts/windows-test-bin.ps1 list` shows no new
-program paths beyond those already ruled.
+Pass: both commands print `ok`, all selected named subtests execute with no
+skips, cleanup logs show no owned survivors, and before/after firewall and
+survivor checks satisfy the external preflight. Report actual executed names
+and skips; a skipped required case remains untested. The anchored regression
+selector includes the persistence case via `TestRemoteManagement.*`; do not
+repeat it separately. Manifest/list output alone is not firewall evidence.
 
-MSI (race evidence, optional for XA): `go test -race -count=1 -run 'TestXARemoteConfiguration' .`
+MSI (race evidence, optional for XA): `go test -v -race -count=1 -run '^TestXARemoteConfiguration(Status|Conflict|Veto|Roles|Serving|Switch|Service)$' .`
 — pass: `ok` with no `WARNING: DATA RACE`.
 
 Desktop checks are unaffected (no desktop file changes);
@@ -871,21 +980,20 @@ JSON-RPC contract changed.
 - After two failed attempts at any task, stop and report the task number,
   the exact command, and the first failing assertion with its log context.
 
-## Owner questions
+## Amendment 2026-10-21
 
-1. Residency execution: the plan defers the automatic-load acceptance until
-   SR 5a–5c land (no broker relay exists at this SHA). Do you want an interim
-   case that drives the proxy's `node/prepare-resident` → `engine:reconcile-resident`
-   hops directly from the test, knowing it exercises a path the product does
-   not take and will be replaced? Default: no.
-2. Live evidence: the daily milestone asks for real OpenCode/XA evidence on
-   MSI and PC3 with intended engines On. This plan never starts a real
-   engine. Do you want an opt-in `NVPAIR_XA_LIVE=1` variant of
-   `TestXARemoteConfigurationSwitch` that runs against the installed PAIR
-   bundle and real llama.cpp/Strata engines (it would stop and start engines
-   on that machine), or does the live evidence stay a manual checklist?
-   Default: manual checklist, no live test.
-3. Pause provenance in the native case: Task 9 pauses nothing; a relayed
-   resume of a service-made local pause is covered by the joint fixture only.
-   Is one service-path pause/resume cycle (which restarts no process but
-   drains the node) worth adding to the PC3 gate time? Default: not added.
+Applied review R1–R6 and L1–L3: complete gate imports, raw-JSON request IDs,
+detached policy drafts preserving resident/served fields, receiver-qualified
+switch status and shared closure state, precise reused-ID and HTTP-denial
+assertions, and visible Windows verification logs. Narrowed status and
+advertisement claims and added absent/unrestricted readback. Reused OB's
+intent helpers and regression matrix rather than duplicating its coverage.
+Re-anchored citations to e50f331 product code; join10/fork base confirmation,
+network/protected-port repairs and I Task 7 harness reservations are explicit
+external gates. Residency execution is handed to SR 6b; coordinator-adopted
+owner answers are recorded in Decisions to prevent live-suite scope drift.
+
+This private `packages/` file intentionally omits a Note lifecycle section
+under the coordinator's package exemption. The audit's lifecycle error is
+acceptable here; report its graph result separately, not a clean script exit.
+This amendment changes only this plan: no product code, commits or vault edits.
