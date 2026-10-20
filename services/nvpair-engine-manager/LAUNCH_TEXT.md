@@ -51,8 +51,9 @@ Unknown vendor option semantics are not decided by the tokenizer.
 The settings `serving` object is independent of argument text; port or text
 edits carry it unchanged. Its versioned declaration, artifact provenance and
 local binding fields are described in [MANIFEST.md](MANIFEST.md#serving-declaration-override).
-Preview checks structure without probing an engine, inspecting model files,
-writing settings or stopping a process. Invalid fields use keys such as
+Preview checks structure without probing an engine, writing settings or
+stopping a process. The llama adapter reads the small native preset and bounded
+model samples. Invalid fields use keys such as
 `serving.models.0.memory.vramBytes`. Missing serving keeps existing launches.
 Changing or explicitly removing a declaration changes the launch record and
 restarts a running engine through the existing settings operation. Persistence,
@@ -60,10 +61,111 @@ receipts and recovery share that operation; no second journal is introduced.
 
 Serving readback separates `configured`, `launchValidated` and `observed`
 envelopes, with `unconfigured`, `unverified` and `mismatch` status/reasons. A
-stored declaration currently reports `unverified`; it supplies no runtime
-verification, derived native bounds, qualification or residency claim. The
-native-source digest and local binding may be absent until adapter validation
-is implemented. The desktop and terminal preserve this object without an editor.
+llama declaration reports derived configured bounds and, for a matching owned
+process, launch-validated bounds. Loaded observations, content qualification and
+residency remain unverified. The desktop and terminal preserve this object
+without an editor.
+
+### Finite llama router launch
+
+With `serving` configured, select an absolute `--models-preset` INI path and a
+positive `--models-max` child capacity. Each declared model needs an exact
+section and an existing local `model` path. Relative model paths resolve against
+the source preset directory; snapshot paths are absolute and preserve symlinks.
+Declare artifacts in main-model shard order followed by draft-model shard order.
+Split GGUFs select the `-00001-of-` shard and require every remaining shard.
+
+NE removes the bundled router's implicit context, parallelism, retention and
+cache arguments. Finite defaults live in the generated preset instead:
+context 8192, one slot, non-unified KV, fitting off, 300-second idle sleep and
+512 MiB prompt cache. Model options override global `[*]` options; explicit
+router CLI options override model options. A native environment assignment
+fills a setting absent from both model and global source presets, because the
+child receives preset options as CLI arguments. Preview shows the resulting
+per-model allocation. Explicit user options remain in the launch text.
+Supported non-envelope CLI options and `LLAMA_ARG_` environment assignments pass
+through unchanged in the actual launch, including `--log-disable` and inherited
+`LLAMA_ARG_LOG_COLORS`. They are not copied into generated per-model presets.
+
+The supported subset includes context/parallelism, KV mode/per-slot cap,
+prediction default, GPU layers/device/split settings, idle sleep, prompt cache,
+local model/draft paths and disabled startup loading. Placement stays opaque;
+memory declarations are operator bounds, not inferred allocations. The adapter's
+explicit envelope-option set is `llamaServingOptions` in `serving_llamacpp.go`:
+
+- Context (`--ctx-size`/`-c`), slots (`--parallel`/`-np`), KV mode and per-slot
+  cap, prediction limit, router preset and capacity.
+- GPU layers, split mode, tensor split, main GPU and device (opaque placement).
+- Idle sleep, cache RAM, prompt caching, idle-slot caching and fitting off.
+- Unsupported allocation controls: logical/physical and continuous batch controls, K/V cache types,
+  full SWA cache, Flash Attention, context shift, RoPE/YaRN scaling and metadata
+  overrides. The adapter does not yet interpret their allocation semantics.
+- Unsupported placement controls: tensor overrides, CPU MoE/FFN, KV/operation
+  offload, main-model sampling offload, weight repacking, host buffers, load/lazy modes, NUMA and RPC devices;
+  draft K/V types, tensor/MoE/device/GPU/sampling placement and draft batch size;
+  projector auto-selection/offload/device and image token/batch allocation.
+- Unsupported startup controls: both router autoload switches, warmup switches,
+  speculative-type/default/sidecar selection and built-in model presets that also set
+  context, parallelism or batch sizes.
+- Unsupported launch selections: model/draft paths (use local preset entries),
+  model aliases, projector/LoRA/control-vector paths and control-vector layer
+  placement, models directory, model URL, HF repo/file,
+  Docker repo, draft HF repo, automatic-fit target/context, cache reuse,
+  context checkpoints/spacing, prompt-cache files/all/read-only, slot-save path
+  and startup loading.
+  Every native alias and associated environment name in that set is checked.
+  The table is pinned to llama.cpp `7fe450e1` `common/arg.cpp`, including its
+  paired-switch `LLAMA_ARG_NO_*` compatibility names. Such negative environment
+  names act by presence, even with an empty value. Positive/negative environment
+  aliases together are ambiguous. Projector placement's native
+  `MTMD_BACKEND_DEVICE` and internal preset startup control are also rejected.
+
+Only envelope controls receive duplicate-alias, conflicting-value and
+CLI-plus-environment rejection. Envelope forms, including underscore and mixed
+underscore/hyphen aliases, are classified after
+the pinned native long-option normalization. Supported normalized forms have
+canonical semantics; distinct spellings for the same setting are ambiguous.
+Unsupported forms,
+include/inheritance/substitution, startup loads, automatic fitting and ambiguous
+attached short envelope forms fail validation. Context, slots, router
+capacity and supported finite numeric settings reject auto, zero, negative and
+native integer overflow. An explicit CLI/preset difference follows native
+precedence; an insufficient resulting allocation is rejected.
+
+Non-unified total context must divide exactly across slots. Unified KV requires
+an explicit per-slot cap and enough total capacity for all slots. With a cap
+and no source context setting, total context is derived as slots times cap.
+Total context, non-unified per-slot allocation and any KV cap must already be
+256-token aligned, with rounding still within int32 capacity. Output must be
+strictly smaller than per-slot context. KV mode and cap are
+retained in the envelope's placement entries. These are cold configured bounds;
+native training-context caps and actual loaded properties still require runtime
+validation before qualification.
+
+Preview returns a source approval digest and candidate artifact bindings.
+Apply requires those exact reviewed values and prepares a private small
+snapshot before stopping or changing settings. Start rechecks source content,
+resolved targets, size, mtime and first/last 64 KiB samples immediately before
+spawn. A conflict requires renewed verification and preview. No GGUF copy or
+full-model hash occurs. Recovery rebuilds the same snapshot bytes from matching
+inputs. An active process owns its generation until exit; replacing or reading
+settings cannot remove it. Snapshot generation names are not content identities.
+Pending generations are released when superseded and at orderly shutdown.
+Model IDs/sections must already match native tag canonicalization; normalized
+collisions are rejected. Resolved absolute model/draft paths and all generated
+values must survive the native INI grammar exactly: `#`, `;`, CR/LF, NUL and
+leading/trailing spaces or tabs cannot be emitted as literal values. Errors name
+the model and field without exposing the path.
+Undeclared manual load targets fail at the manifest-bound load action before
+mutation admission or HTTP dispatch, including generic `engine:action` calls.
+Authorization and dispatch serialize with settings and lifecycle replacement.
+An unlocked declaration check rejects undeclared models before admission.
+Restart-after actions then enter mutation admission before taking the operation
+lock; the declaration is checked again under that lock and retained through
+dispatch. A replacement that wins before the second check causes rejection and
+releases admission. Operation-lock cleanup precedes mutation cleanup and the
+restart owner, preserving `switchAdmission` before `opMu` ordering.
+Unconfigured launches keep the existing 8192/1 router defaults.
 
 ## Launch resolution boundary
 

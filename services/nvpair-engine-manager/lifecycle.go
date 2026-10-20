@@ -15,6 +15,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -247,20 +248,81 @@ func (e *Executor) bringUp(ctx context.Context, st *engineState, engine string, 
 // bringUpProcess spawns the engine as a foreground process this service
 // owns, then waits for readiness.
 func (e *Executor) bringUpProcess(ctx context.Context, st *engineState, engine string, rt Runtime, port int, vars map[string]string) error {
+	return e.bringUpProcessWithSnapshot(ctx, st, engine, rt, port, vars, prepareServingSnapshot)
+}
+
+// Snapshot preparation is passed explicitly so fake-process tests can exercise
+// an input change between preparation and the final check without timing races.
+func (e *Executor) bringUpProcessWithSnapshot(ctx context.Context, st *engineState, engine string, rt Runtime, port int, vars map[string]string, prepareSnapshot func(string, []byte) (string, func(), error)) error {
+	serving := llamaServingRuntime(st, rt.Serving)
+	if serving {
+		rt = llamaServingBase(rt)
+	}
 	st.mu.Lock()
 	binPath := st.binPath
 	st.mu.Unlock()
 	launch, err := resolveProcessLaunch(rt, binPath, vars)
 	if err != nil {
+		if serving {
+			return servingError("NE launch resolution failed; check the launch options.")
+		}
 		return err
 	}
 	if err := validateEffectiveLaunch(rt, launch, vars["host"], vars["port"]); err != nil {
+		if serving {
+			return servingError("NE launch validation failed; check the launch options.")
+		}
 		return err
+	}
+	var prepared *llamaServingLaunch
+	var releaseSnapshot func()
+	if serving {
+		prepared, err = compileLlamaServing(launch, rt, true)
+		if err != nil {
+			return fmt.Errorf("NE preset validation: %w", err)
+		}
+		var snapshot string
+		if pending := rt.servingSnapshot; pending != nil && pending.Prepared.Digest == prepared.Digest {
+			snapshot, releaseSnapshot = pending.Path, pending.Release
+			st.mu.Lock()
+			st.plat.Runtime.servingSnapshot = nil
+			st.mu.Unlock()
+		} else {
+			st.mu.Lock()
+			pending := st.plat.Runtime.servingSnapshot
+			st.plat.Runtime.servingSnapshot = nil
+			st.mu.Unlock()
+			if pending != nil {
+				pending.Release()
+			}
+			snapshot, releaseSnapshot, err = prepareSnapshot(filepath.Join(e.baseDir, "serving", engine), prepared.Snapshot)
+			if err != nil {
+				return fmt.Errorf("NE snapshot preparation: %w", err)
+			}
+		}
+		defer func() {
+			if releaseSnapshot != nil {
+				releaseSnapshot()
+			}
+		}()
+		snapshotBytes, _, err := servingSource(snapshot)
+		if err != nil || string(snapshotBytes) != string(prepared.Snapshot) {
+			return servingError("NE snapshot validation: prepared snapshot changed before spawn.")
+		}
+		if err := recheckLlamaServing(launch, rt, prepared); err != nil {
+			return fmt.Errorf("NE source recheck: %w", err)
+		}
+		launch = llamaSnapshotCommand(launch, snapshot)
 	}
 
 	diagnostics := newStartupOutput(launchDiagnosticArgs(rt), launch.Env)
 	defer diagnostics.close()
 	proc, err := startManagedProc(launch.Bin, launch.Args, launch.Env, func(stream, line string) {
+		// Native NE output can name model paths read from the preset, which
+		// argument/environment redaction cannot know. Report safe stages instead.
+		if serving {
+			return
+		}
 		_, _ = diagnostics.Write([]byte(line + "\n"))
 		// Vendor diagnostics may echo arbitrary custom arguments. Keep those
 		// out of exported engine logs; report exit/readiness failures separately.
@@ -270,13 +332,25 @@ func (e *Executor) bringUpProcess(ctx context.Context, st *engineState, engine s
 	})
 	if err != nil {
 		werr := fmt.Errorf("start %s: %w", engine, err)
+		if serving {
+			werr = servingError("NE spawn: process could not be started.")
+		}
 		e.reportStartFailedUnlessShuttingDown(ctx, engine, werr)
 		return werr
+	}
+	if releaseSnapshot != nil {
+		release := releaseSnapshot
+		releaseSnapshot = nil
+		go func() {
+			<-proc.done
+			release()
+		}()
 	}
 	digest := launchDigest(launch)
 	st.mu.Lock()
 	st.proc = proc
 	st.launchDigest = digest
+	st.plat.Runtime.servingLaunch = prepared
 	st.mu.Unlock()
 
 	readyCtx, readyCancel := context.WithCancel(ctx)
@@ -292,7 +366,13 @@ func (e *Executor) bringUpProcess(ctx context.Context, st *engineState, engine s
 	select {
 	case <-proc.done:
 		readyErr = fmt.Errorf("process exited before readiness; check the launch options")
+		if serving {
+			readyErr = fmt.Errorf("NE readiness: process exited before readiness (exit code %d)", proc.cmd.ProcessState.ExitCode())
+		}
 	default:
+		if serving && readyErr != nil {
+			readyErr = fmt.Errorf("NE readiness: readiness wait failed: %w", readyErr)
+		}
 	}
 	if err := readyErr; err != nil {
 		// Clean up the failed start before returning its single readiness error.
@@ -456,6 +536,8 @@ func (e *Executor) stopFrom(engine string, origin intentOrigin, operationID stri
 	if origin == intentLocal {
 		e.remoteWork.cancelEngine(engine, &localVetoError{reason: engineOffVeto(engine)})
 	}
+	finishLoads := stopServingLoads(st)
+	defer finishLoads()
 	st.opMu.Lock()
 	defer st.opMu.Unlock()
 	stopErr := e.doStop(st, engine)
@@ -864,6 +946,8 @@ func (e *Executor) StopAll() {
 		wg.Add(1)
 		go func(st *engineState, n string) {
 			defer wg.Done()
+			finishLoads := stopServingLoads(st)
+			defer finishLoads()
 			st.mu.Lock()
 			cancel := st.startCancel
 			st.mu.Unlock()
@@ -874,6 +958,13 @@ func (e *Executor) StopAll() {
 			defer st.opMu.Unlock()
 			if err := e.doStop(st, n); err != nil {
 				slog.Warn("engine stop during shutdown failed", "engine", n, "err", err)
+			}
+			st.mu.Lock()
+			pending := st.plat.Runtime.servingSnapshot
+			st.plat.Runtime.servingSnapshot = nil
+			st.mu.Unlock()
+			if pending != nil {
+				pending.Release()
 			}
 		}(st, n)
 	}

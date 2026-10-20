@@ -5,8 +5,10 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
+	"path/filepath"
 	"reflect"
 	"slices"
 	"strconv"
@@ -98,6 +100,9 @@ func resolveRuntimeCommand(rt Runtime, index int, vars map[string]string) (launc
 // settings read probes ports, starts processes or writes configuration.
 func launchForState(st *engineState, port int) (launchCommand, error) {
 	rt := st.plat.Runtime
+	if llamaServingRuntime(st, rt.Serving) {
+		rt = llamaServingBase(rt)
+	}
 	vars := st.pathVars()
 	vars["host"] = effectiveBind(rt.Bind, "")
 	vars["port"] = strconv.Itoa(port)
@@ -128,7 +133,20 @@ func (e *Executor) launchStateLocked(engine string, st *engineState) settings.La
 	st.mu.Unlock()
 	command, err := launchForState(st, result.ServerPort)
 	if err == nil {
-		result.LaunchText, err = command.argumentText(st.plat.Runtime.EditableLaunch)
+		rt := st.plat.Runtime
+		if llamaServingRuntime(st, result.Serving) {
+			rt = llamaServingBase(rt)
+			prepared, servingErr := compileLlamaServing(command, rt, false)
+			if servingErr == nil {
+				result.ServingReadback = llamaServingReadback(prepared)
+				if result.Running && !result.Adopted && rt.servingLaunch != nil && rt.servingLaunch.Digest == prepared.Digest {
+					result.ServingReadback.LaunchValidated = llamaServingReadback(rt.servingLaunch).Configured
+				}
+			} else {
+				result.ServingReadback = &engines.ServingReadback{Status: "mismatch", Reason: servingErr.Error()}
+			}
+		}
+		result.LaunchText, err = command.argumentText(rt.EditableLaunch)
 	}
 	switch {
 	case err != nil:
@@ -254,6 +272,14 @@ func (e *Executor) previewLaunchLocked(st *engineState, request settings.Request
 		return result
 	}
 	rt := st.plat.Runtime
+	rt.Serving = request.Settings.Serving.Clone()
+	if llamaServingRuntime(st, rt.Serving) {
+		if rt.modeOrDefault() != "process" {
+			result.Errors["serving"] = "Finite llama serving requires an owned process launch."
+			return result
+		}
+		rt = llamaServingBase(rt)
+	}
 	policy := rt.EditableLaunch
 	if policy == nil {
 		return fail("This engine does not support launch settings.")
@@ -382,6 +408,20 @@ func (e *Executor) previewLaunchLocked(st *engineState, request settings.Request
 	if err != nil {
 		return fail(err.Error())
 	}
+	if llamaServingRuntime(st, rt.Serving) {
+		prepared, err := compileLlamaServing(command, rt, false)
+		if err != nil {
+			field := "serving"
+			var servingField *ServingFieldError
+			if errors.As(err, &servingField) {
+				field = servingField.Field
+			}
+			result.Errors[field] = err.Error()
+			return result
+		}
+		result.Settings.Serving = prepared.Config.Clone()
+		result.Serving = llamaServingReadback(prepared)
+	}
 	current := e.launchStateLocked(request.Engine, st)
 	result.Restart = current.Running && (current.ServerPort != result.Settings.ServerPort || current.LaunchText != result.Settings.LaunchText || !current.Serving.Equal(result.Settings.Serving))
 	if !current.Editable {
@@ -410,7 +450,15 @@ func (e *Executor) ConfigureLaunch(ctx context.Context, p settings.Configure, re
 	}
 	preview := e.previewLaunchLocked(st, settings.Request{Engine: p.Engine, Settings: p.Settings})
 	if len(preview.Errors) > 0 || preview.Conflict != nil {
+		for field, reason := range preview.Errors {
+			if field == "serving" || strings.HasPrefix(field, "serving.") {
+				return settings.LaunchState{}, &ServingFieldError{Field: field, Reason: reason}
+			}
+		}
 		return settings.LaunchState{}, fmt.Errorf("launch configuration failed authoritative validation")
+	}
+	if llamaServingRuntime(st, p.Settings.Serving) && !p.Settings.Serving.Equal(preview.Settings.Serving) {
+		return settings.LaunchState{}, servingError("Apply requires the exact reviewed native digest and artifact bindings.")
 	}
 	// This operation returns its one failure through the settings snapshot.
 	// Do not also open the global lifecycle error dialog for the same attempt.
@@ -419,6 +467,36 @@ func (e *Executor) ConfigureLaunch(ctx context.Context, p settings.Configure, re
 	e.reporter.clear(exitedID(p.Engine))
 	old := e.launchStateLocked(p.Engine, st)
 	changed := old.ServerPort != preview.Settings.ServerPort || old.LaunchText != preview.Settings.LaunchText || !old.Serving.Equal(preview.Settings.Serving)
+	var pending *llamaServingSnapshot
+	if llamaServingRuntime(st, preview.Settings.Serving) {
+		rt := st.plat.Runtime
+		rt.Serving = preview.Settings.Serving.Clone()
+		rt.LaunchArgs, rt.LaunchEnv = &preview.Args, &preview.Env
+		rt = llamaServingBase(rt)
+		vars := st.pathVars()
+		vars["host"], vars["port"] = effectiveBind(rt.Bind, ""), strconv.Itoa(preview.Settings.ServerPort)
+		command, err := resolveProcessLaunch(rt, "", vars)
+		if err != nil {
+			return settings.LaunchState{}, err
+		}
+		prepared, err := compileLlamaServing(command, rt, true)
+		if err != nil {
+			return settings.LaunchState{}, err
+		}
+		path, release, err := prepareServingSnapshot(filepath.Join(e.baseDir, "serving", p.Engine), prepared.Snapshot)
+		if err != nil {
+			return settings.LaunchState{}, err
+		}
+		pending = &llamaServingSnapshot{Prepared: prepared, Path: path, Release: release}
+		defer func() {
+			if pending != nil {
+				pending.Release()
+			}
+		}()
+		if err := recheckLlamaServing(command, rt, prepared); err != nil {
+			return settings.LaunchState{}, err
+		}
+	}
 	// Stop before writing the override file. A stop failure returns with the
 	// engine still on its old launch, so persisting first would leave disk on
 	// the new one and the next start would silently adopt a configuration the
@@ -434,12 +512,18 @@ func (e *Executor) ConfigureLaunch(ctx context.Context, p settings.Configure, re
 		}
 	}
 	st.mu.Lock()
+	previousSnapshot := st.plat.Runtime.servingSnapshot
 	st.plat.Runtime.Port = preview.Settings.ServerPort
 	st.plat.Runtime.LaunchArgs = &preview.Args
 	st.plat.Runtime.LaunchEnv = &preview.Env
 	st.plat.Runtime.Serving = preview.Settings.Serving.Clone()
+	st.plat.Runtime.servingSnapshot = pending
+	pending = nil // runtime owns this cold generation until start or replacement
 	st.port = preview.Settings.ServerPort
 	st.mu.Unlock()
+	if previousSnapshot != nil {
+		previousSnapshot.Release()
+	}
 	if err := rebind(); err != nil {
 		e.emitState(p.Engine)
 		return e.launchStateLocked(p.Engine, st), err

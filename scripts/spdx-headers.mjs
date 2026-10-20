@@ -85,6 +85,7 @@ const STYLE_BY_EXTENSION = new Map([
     ['.yml', HASH],
     ['.yaml', HASH],
     ['.toml', HASH],
+    ['.ini', HASH],
     // Vault agent HCL configs and the consul-template files they render. The CI
     // env parser skips `#` lines, so a header in a .tmpl does not reach the
     // rendered secrets file as data.
