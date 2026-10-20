@@ -163,7 +163,7 @@ func TestStrictContractDuplicateObjectKeys(t *testing.T) {
 	identity := `{"engineRunId":"engine-1","settingsFingerprint":"` + strings.Repeat("a", 64) + `","modelDigest":"` + strings.Repeat("b", 64) + `"}`
 	duplicateIdentity := `{"engineRunId":"rogue-run","engineRunId":"engine-1","settingsFingerprint":"` + strings.Repeat("a", 64) + `","modelDigest":"` + strings.Repeat("b", 64) + `"}`
 	prepareResident := func(inner string) string {
-		return `{"policyRevision":"1","proxyRunId":"proxy-1","engine":"ollama","model":"m:latest","identity":` + inner + `,"operationId":"op-1","timeoutMs":60000}`
+		return `{"policyRevision":"1","proxyRunId":"proxy-1","engine":"ollama","model":"m:latest","identity":` + inner + `,"operationId":"resident:1","timeoutMs":60000}`
 	}
 	reject := func(t *testing.T, err error) {
 		t.Helper()

@@ -50,6 +50,7 @@ type notification struct {
 type admissionController struct {
 	mu            sync.Mutex
 	strict        strictAdmissionState
+	resident      residentAdmissionState
 	invalidations map[nodepolicy.InvalidateEngineParams]struct{}
 	// changed is closed and replaced on every state change, waking every
 	// waiter to re-evaluate. A condition variable cannot be selected on
@@ -132,6 +133,13 @@ func newAdmissionController(notify func(string, any), healthy func(string) bool,
 
 // signalLocked wakes every waiter. Caller holds mu.
 func (a *admissionController) signalLocked() {
+	if a.invalidateResidentHoldsLocked() {
+		// Input updates can now release undispatched resident capacity. Publish
+		// those count changes without writing to the broker while holding mu.
+		if st := a.noteChangeLocked(); st != nil {
+			go a.sendState(st)
+		}
+	}
 	close(a.changed)
 	a.changed = make(chan struct{})
 }
@@ -444,6 +452,9 @@ func (a *admissionController) admit(ctx context.Context, req admissionRequest) a
 				}
 				sends = append(sends, a.unloadLocked(evict, pol)...)
 				if !time.Now().Before(evictDeadline) {
+					if a.engineHasProtectedResidentLocked(req.engine) {
+						return reject(nodepolicy.RejectNoFit)
+					}
 					// The switch timeout passed: admit anyway and let the
 					// engine's own memory handling take over.
 					plan = fitOK
@@ -565,6 +576,17 @@ func (a *admissionController) residentLocked() map[admKey]bool {
 // if it does not. Idle models are unloaded least recently used first.
 func (a *admissionController) fitLocked(key admKey, pol nodepolicy.Policy) (fitPlan, []admKey) {
 	resident := a.residentLocked()
+	protectedEngine := a.engineHasProtectedResidentLocked(key.engine)
+	if protectedEngine && pol.Admission.MemoryBudgetBytes > 0 {
+		if a.memoryLocked(key) <= 0 {
+			return fitNever, nil
+		}
+		for k := range resident {
+			if a.memoryLocked(k) <= 0 {
+				return fitNever, nil
+			}
+		}
+	}
 	if resident[key] {
 		return fitOK, nil
 	}
@@ -577,7 +599,11 @@ func (a *admissionController) fitLocked(key admKey, pol nodepolicy.Policy) (fitP
 	count := len(resident) + 1
 	mem := need
 	for k := range resident {
-		mem += a.memoryLocked(k)
+		memory := a.memoryLocked(k)
+		if memory > 0 && mem > (1<<63-1)-memory {
+			return fitWait, nil
+		}
+		mem += memory
 	}
 	fits := func() bool {
 		return (maxResident <= 0 || count <= maxResident) && (budget <= 0 || mem <= budget)
@@ -587,7 +613,7 @@ func (a *admissionController) fitLocked(key admKey, pol nodepolicy.Policy) (fitP
 	}
 	idle := make([]admKey, 0, len(resident))
 	for k := range resident {
-		if a.inflight[k] == 0 {
+		if a.inflight[k] == 0 && !a.protectedResidentLocked(k) {
 			idle = append(idle, k)
 		}
 	}
@@ -613,12 +639,21 @@ func (a *admissionController) fitLocked(key admKey, pol nodepolicy.Policy) (fitP
 	return fitWait, nil
 }
 
-// memoryLocked is a model's profile memoryBytes; unknown counts as 0.
+// memoryLocked keeps the greater of the profile and any unresolved resident
+// load's prepared bound. Unknown counts as 0 outside protected admission.
 func (a *admissionController) memoryLocked(k admKey) int64 {
+	memory := int64(0)
 	if pr, ok := a.profileLocked(k); ok {
-		return pr.MemoryBytes
+		memory = pr.MemoryBytes
 	}
-	return 0
+	// Policy edits cannot shrink the finite bound of a possibly dispatched
+	// resident load. Its original bound belongs to the same capacity owner.
+	for _, h := range a.resident.ops {
+		if h.counted && h.key == k && h.memory > memory {
+			memory = h.memory
+		}
+	}
+	return memory
 }
 
 func (a *admissionController) concurrencyLimitLocked(k admKey) int {
