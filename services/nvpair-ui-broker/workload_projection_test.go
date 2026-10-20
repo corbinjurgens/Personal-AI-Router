@@ -5,6 +5,7 @@ package main
 
 import (
 	"encoding/json"
+	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -291,6 +292,91 @@ func TestWorkloadPrivacyProjectionRestartInitial(t *testing.T) {
 		t.Fatal("missing projected historic record")
 	}
 	assertPrivacyInfo(t, result.Workloads[0], info)
+}
+
+func TestWorkloadPrivacyProjectionPersistedRetirement(t *testing.T) {
+	logs := captureLogs(t)
+	b, client, scheduler, manager := privacyBroker(t)
+	path := filepath.Join(t.TempDir(), "history.json")
+	// All records survive startup, then cross the age cap together. Include a
+	// valid retirement so silence cannot pass by disabling retirement entirely.
+	expires := time.Now().Add(2 * time.Second)
+	completed := expires.Add(-workloadstore.DefaultHistoryMaxAge).UnixMilli()
+	terminal := strings.Replace(privacyInfo, `"state":"running"`, `"state":"completed"`, 1)
+	terminal = strings.Replace(terminal, `"completedAt":null`, `"completedAt":`+jsonNumber(t, completed), 1)
+	badID := strings.Replace(terminal, `"id":"7"`, `"id":"private/body-sentinel"`, 1)
+	badOrigin := strings.Replace(terminal, `"originatedFrom":"host"`, `"originatedFrom":"private/origin-sentinel"`, 1)
+	if err := os.WriteFile(path, []byte("["+terminal+","+badID+","+badOrigin+"]"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	b.workloads = workloadstore.New().WithPersistence(path)
+	if err := b.workloads.Load(); err != nil {
+		t.Fatal(err)
+	}
+	if b.workloads.Len() != 3 {
+		t.Fatal("loaded fixtures must survive startup retention")
+	}
+	for _, input := range []string{
+		`{"workloadId":"private/body-sentinel","originatedFrom":"host"}`,
+		`{"workloadId":"7","originatedFrom":"private/origin-sentinel"}`,
+	} {
+		projected, category, count := projectWorkloadFrame("workloads:remove", json.RawMessage(input))
+		if projected != nil || category != "malformed" || count != 0 {
+			t.Fatal("malformed fixture must be rejected by the removal projection")
+		}
+	}
+	b.handleMessage(clientRequest(1, "workloads:get-initial", nil))
+	frames := client.frames()
+	if len(frames) != 1 {
+		t.Fatal("missing initial response")
+	}
+	var initial workloadsInitialResult
+	if err := json.Unmarshal(frames[0].Result, &initial); err != nil {
+		t.Fatal(err)
+	}
+	if len(initial.Workloads) != 1 {
+		t.Fatal("initial response must omit malformed persisted identities")
+	}
+	assertPrivacyInfo(t, initial.Workloads[0], terminal)
+	b.retireWorkloadHistory()
+	if b.workloads.Len() != 3 || len(client.frames()) != 1 || len(scheduler.frames()) != 0 {
+		t.Fatal("records within retention must not be retired")
+	}
+	time.Sleep(time.Until(expires.Add(time.Millisecond)))
+	b.retireWorkloadHistory()
+	if b.workloads.Len() != 0 {
+		t.Fatal("expired records must leave the store, including malformed identities")
+	}
+	frames = client.frames()
+	if len(frames) != 2 {
+		t.Fatalf("client frames = %d, want initial response and one valid retirement", len(frames))
+	}
+	want := privacyObject(t, json.RawMessage(`{"workloadId":"7","originatedFrom":"host"}`))
+	assertRemoval := func(frame Message) {
+		t.Helper()
+		if frame.Method != "workloads:remove" || !reflect.DeepEqual(privacyObject(t, frame.Params), want) {
+			t.Fatal("retirement must preserve only the valid removal identity")
+		}
+	}
+	assertRemoval(frames[1])
+	schedulerFrames := scheduler.frames()
+	if len(schedulerFrames) != 1 {
+		t.Fatalf("scheduler frames = %d, want one valid retirement", len(schedulerFrames))
+	}
+	assertRemoval(schedulerFrames[0])
+	if len(manager.frames()) != 0 {
+		t.Fatal("retirement must not be broadcast to peers")
+	}
+	if strings.Contains(bufferText(logs), "private/") {
+		t.Fatal("retirement diagnostics leaked a malformed identity")
+	}
+	if strings.Count(bufferText(logs), `msg="dropped workload history removal" category=malformed count=1`) != 2 {
+		t.Fatal("malformed retirements must report only fixed-category/count diagnostics")
+	}
+	b.retireWorkloadHistory()
+	if len(client.frames()) != 2 || len(scheduler.frames()) != 1 || len(manager.frames()) != 0 {
+		t.Fatal("a repeated retirement must be silent")
+	}
 }
 
 func jsonNumber(t *testing.T, n int64) string {

@@ -528,7 +528,13 @@ func (b *Broker) retireWorkloadHistory() {
 		if err != nil {
 			continue
 		}
-		params := json.RawMessage(raw)
+		// Persisted identities may predate the wire validation. Pruning has
+		// already removed them locally; validate before any outgoing removal.
+		params, category, _ := projectWorkloadFrame("workloads:remove", raw)
+		if params == nil {
+			slog.Debug("dropped workload history removal", "category", category, "count", 1)
+			continue
+		}
 		b.fanWorkloadToScheduler("workloads:remove", params)
 		if !subscribed {
 			continue
