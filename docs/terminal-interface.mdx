@@ -292,6 +292,14 @@ Each engine shows two ports, because they are easy to confuse:
 
 Both are changed here, on the engine they belong to.
 
+On this machine, a current false saved-intent entry adds ` (saved Off, local)`
+when its reported origin is local, or ` (saved Off, by peer)` when the reported
+origin is a peer. Without a valid reported origin it shows ` (saved Off)`.
+Remote rows do not show local intent or origin. The label identifies an origin
+class, not a particular peer, and stays separate from installed, running and
+healthy state. A stopped engine alone does not establish saved Off, and reading
+origin does not grant permission to start an engine.
+
 A port is a request rather than a promise. If a running engine already holds
 the port you asked for, PAIR binds elsewhere and tells you which port it ended
 up on — so a change you did not get is never reported as one you did.

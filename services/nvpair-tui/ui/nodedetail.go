@@ -1908,9 +1908,15 @@ func (d *nodeDetail) refreshEngines() {
 		}
 		row := table.Row{e.label(), yesNo(e.Installed), yesNo(e.Running), yesNo(e.Healthy), port}
 		// Saved Off reports intent without deriving it from runtime state.
-		// Origin wording is separate from carrying the reported snapshot.
 		if enabled, present := d.intent.EnabledByEngine[e.Engine]; !d.remote() && present && !enabled {
-			row[0] += " (saved Off)"
+			switch d.intent.OffByEngine[e.Engine] {
+			case engineintent.Local:
+				row[0] += " (saved Off, local)"
+			case engineintent.Peer:
+				row[0] += " (saved Off, by peer)"
+			default:
+				row[0] += " (saved Off)"
+			}
 		}
 		if d.proxy != nil {
 			row = append(row, d.proxyPortCell(e.Engine))

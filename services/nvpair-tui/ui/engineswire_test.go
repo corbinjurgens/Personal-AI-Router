@@ -497,7 +497,14 @@ func TestTerminalControlsSavedOff(t *testing.T) {
 			}
 			wantLabel := "ollama"
 			if tc.want {
-				wantLabel += " (saved Off)"
+				switch tc.name {
+				case "local Off stopped":
+					wantLabel += " (saved Off, local)"
+				case "peer Off running":
+					wantLabel += " (saved Off, by peer)"
+				default:
+					wantLabel += " (saved Off)"
+				}
 			}
 			if rows[0][0] != wantLabel {
 				t.Fatalf("label = %q, want %q", rows[0][0], wantLabel)
@@ -505,6 +512,127 @@ func TestTerminalControlsSavedOff(t *testing.T) {
 			if !reflect.DeepEqual(d.intent.OffByEngine, tc.origins) {
 				t.Fatalf("origins = %v, want %v", d.intent.OffByEngine, tc.origins)
 			}
+		})
+	}
+}
+
+func TestTerminalControlsOffOrigin(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		enabled map[string]bool
+		origin  engineintent.Origin
+		remote  bool
+		want    string
+	}{
+		{"local origin", map[string]bool{"ollama": false}, engineintent.Local, false, "ollama (saved Off, local)"},
+		{"peer origin", map[string]bool{"ollama": false}, engineintent.Peer, false, "ollama (saved Off, by peer)"},
+		{"missing origin", map[string]bool{"ollama": false}, "", false, "ollama (saved Off)"},
+		{"invalid origin", map[string]bool{"ollama": false}, "other", false, "ollama (saved Off)"},
+		{"unknown engine", map[string]bool{"other": false}, engineintent.Local, false, "ollama"},
+		{"On with stale origin", map[string]bool{"ollama": true}, engineintent.Local, false, "ollama"},
+		{"remote row", map[string]bool{"ollama": false}, engineintent.Local, true, "ollama"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d := newNodeDetail(nil, nodeRow{self: !tc.remote})
+			d.SetSize(100, 40)
+			d.engines = []engineStatus{{Engine: "ollama", Installed: true, Running: true, Healthy: true, Port: 11434}}
+			d.intent = engineintent.Snapshot{EnabledByEngine: tc.enabled, OffByEngine: map[string]engineintent.Origin{"ollama": tc.origin}}
+			d.refreshEngines()
+			want := []string{tc.want, "yes", "yes", "yes", "11434"}
+			if !tc.remote {
+				want = append(want, "?")
+			}
+			if got := []string(d.engineTable.Rows()[0]); !reflect.DeepEqual(got, want) {
+				t.Fatalf("row = %v, want %v", got, want)
+			}
+			if !strings.Contains(d.View(), tc.want) {
+				t.Fatalf("render missing %q:\n%s", tc.want, d.View())
+			}
+		})
+	}
+
+	for _, event := range []string{"On clearing", "failed read", "disconnect", "broker restart", "manager restart", "late reply after newer generation"} {
+		t.Run(event, func(t *testing.T) {
+			d := newNodeDetail(nil, nodeRow{self: true})
+			d.SetSize(100, 40)
+			d.engines = []engineStatus{{Engine: "ollama", Installed: true}}
+			old := detailIntentMsg{visit: d.telemetryGen, generation: d.intentGeneration, intent: engineintent.Snapshot{
+				EnabledByEngine: map[string]bool{"ollama": false},
+				OffByEngine:     map[string]engineintent.Origin{"ollama": engineintent.Local},
+			}}
+			d.update(old)
+			if !strings.Contains(d.View(), "ollama (saved Off, local)") {
+				t.Fatal("positive control did not render local Off origin")
+			}
+			want := "ollama"
+			switch event {
+			case "On clearing":
+				d.update(detailIntentMsg{visit: d.telemetryGen, generation: d.intentGeneration, intent: engineintent.Snapshot{
+					EnabledByEngine: map[string]bool{"ollama": true}, OffByEngine: map[string]engineintent.Origin{},
+				}})
+			case "failed read":
+				d.update(detailIntentMsg{visit: d.telemetryGen, generation: d.intentGeneration, err: errors.New("read failed")})
+			case "disconnect":
+				d.update(DisconnectedMsg{})
+				d.update(old)
+			case "broker restart":
+				d.handleNotification(&rpc.Message{Method: "service/broker-restarted"})
+				d.update(old)
+			case "manager restart":
+				d.handleNotification(&rpc.Message{Method: "engine:ready"})
+				d.update(old)
+			case "late reply after newer generation":
+				d.intentCmd()
+				d.update(detailIntentMsg{visit: d.telemetryGen, generation: d.intentGeneration, intent: engineintent.Snapshot{
+					EnabledByEngine: map[string]bool{"ollama": false}, OffByEngine: map[string]engineintent.Origin{"ollama": engineintent.Peer},
+				}})
+				d.update(old)
+				want = "ollama (saved Off, by peer)"
+			}
+			if got := d.engineTable.Rows()[0][0]; got != want {
+				t.Fatalf("label = %q, want %q", got, want)
+			}
+			view := d.View()
+			if !strings.Contains(view, want) || strings.Contains(view, "saved Off, local") {
+				t.Fatalf("stale origin in render:\n%s", view)
+			}
+		})
+	}
+
+	for _, tc := range []struct {
+		name  string
+		width int
+		label string
+	}{
+		{"narrow terminal", 80, "ollama"},
+		{"normal terminal", 100, "ollama"},
+		{"long engine label", 140, "Ollama custom engine with a long display name"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d := newNodeDetail(nil, nodeRow{self: true})
+			d.SetSize(tc.width, 40)
+			d.engines = []engineStatus{{Engine: "other"}, {Engine: "ollama", DisplayName: tc.label, Installed: true, Running: true, Port: 11434}}
+			d.intent = engineintent.Snapshot{EnabledByEngine: map[string]bool{"ollama": false}, OffByEngine: map[string]engineintent.Origin{"ollama": engineintent.Peer}}
+			d.refreshEngines()
+			d.engineTable.SetCursor(1)
+			d.refreshEngines()
+			d.SetSize(tc.width, 40)
+			if d.engineTable.Cursor() != 1 || d.selectedEngine().Engine != "ollama" {
+				t.Fatal("refresh lost selected engine")
+			}
+			view := d.engineTable.View()
+			for _, text := range []string{"ENGINE", "INSTALLED", "RUNNING", "HEALTHY", "ENGINE PORT", "ollama", "11434"} {
+				if text == "ollama" {
+					text = tc.label
+				}
+				if !strings.Contains(view, text) {
+					t.Fatalf("render missing %q:\n%s", text, view)
+				}
+			}
+			if tc.width >= 100 && !strings.Contains(view, tc.label+" (saved Off, by peer)") {
+				t.Fatalf("render clipped origin:\n%s", view)
+			}
+			t.Logf("width %d fixture:\n%s", tc.width, view)
 		})
 	}
 }
