@@ -72,6 +72,7 @@ type Manager struct {
 	settingsRelay    settingsRelay
 	policyRelay      policyRelay
 	modelMutation    modelMutationRelay
+	residentDispatch residentDispatchRelay
 	codec            *Codec
 	exec             *Executor
 	peers            *peerDirectory
@@ -122,6 +123,8 @@ func NewManager(codec *Codec, exec *Executor, mesh *clustertrust.Mesh, clusterDi
 	exec.policyParent = m.policyRelay.call
 	m.modelMutation.send = codec.Notify
 	exec.modelMutationParent = m.modelMutation.call
+	m.residentDispatch.send = codec.Notify
+	exec.residentParent = m.residentDispatch.call
 	return m
 }
 
@@ -182,6 +185,10 @@ func (m *Manager) readLoop(ctx context.Context) error {
 }
 
 func (m *Manager) handleMessage(ctx context.Context, msg *Message) {
+	if msg.Method == residentDispatchReplyMethod && msg.IsNotification() {
+		m.residentDispatch.reply(msg.Params)
+		return
+	}
 	if m.handleSwitchMessage(ctx, msg) || m.handleSettingsMessage(ctx, msg) || m.handlePolicyMessage(ctx, msg) {
 		return
 	}
@@ -235,6 +242,9 @@ func (m *Manager) handleMessage(ctx context.Context, msg *Message) {
 	}
 
 	switch msg.Method {
+	case nodepolicy.MethodReconcileResident:
+		go m.runResident(ctx, msg)
+
 	case switchRecoveryReadyMethod:
 		var p struct {
 			ManagerIncarnation string `json:"managerIncarnation"`

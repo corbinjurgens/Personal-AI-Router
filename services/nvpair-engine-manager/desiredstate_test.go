@@ -5,16 +5,22 @@ package main
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
+
+	"nvpair-shared/durablefile"
+	settings "nvpair-shared/enginesettings"
+	"nvpair-shared/nodepolicy"
 )
 
 func desiredTestExecutor(t *testing.T, manifest *Manifest, baseDir string) *Executor {
@@ -22,6 +28,49 @@ func desiredTestExecutor(t *testing.T, manifest *Manifest, baseDir string) *Exec
 	reg := NewRegistry()
 	reg.engines[manifest.Engine] = manifest
 	return NewExecutor(reg, NewReporter(nil), func(string, any) {}, baseDir)
+}
+
+func TestResidentPreservesDesiredStateAndFailedWrites(t *testing.T) {
+	f := newResidentFixture(t)
+	_, p := switchFixture(t)
+	p.SourceEngine, p.TargetEngine = "source", "target"
+	p.ConfigurationFence = "e3v1:" + nameDigest("configuration")
+	state := desiredStateFile{
+		PendingSwitch:      &settings.SwitchCheckpoint{SwitchPrepareRequest: p, Phase: settings.SwitchCheckpointSourceOff},
+		PendingSwitchPorts: &switchCheckpointPorts{Source: 17001, Target: 17002},
+		Engines:            map[string]bool{"ollama": true, "source": false, "target": true, "legacy": false},
+		OffBy:              map[string]intentOrigin{"source": intentLocal, "legacy": intentPeer},
+	}
+	if err := f.ex.desired.save(state); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(f.ex.desired.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	initial, err := f.ex.desired.load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result := f.run(t); result.Outcome != nodepolicy.ResidentLoaded {
+		t.Fatalf("result = %+v", result)
+	}
+	assertDurableFile(t, f.ex.desired.path, before)
+	// Inject failure at the existing atomic writer, not a residency-only seam.
+	useEngineFileReplacer(t, durablefile.Replacer{CreateTemp: func(string, string, os.FileMode) (durablefile.File, error) {
+		return nil, errors.New("injected desired write failure")
+	}})
+	if err := f.ex.desired.set("unrelated", false, intentLocal); err == nil {
+		t.Fatal("failed write reported success")
+	}
+	assertDurableFile(t, f.ex.desired.path, before)
+	after, err := f.ex.desired.load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(initial, after) {
+		t.Fatalf("desired state changed: before=%+v after=%+v", initial, after)
+	}
 }
 
 func TestDesiredStateStoresExplicitOffAndLeavesLegacyUnknown(t *testing.T) {

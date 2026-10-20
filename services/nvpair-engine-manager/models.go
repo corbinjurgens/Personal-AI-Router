@@ -364,13 +364,13 @@ func (e *Executor) cachedInventory() map[string][]string {
 // storeInventory replaces the cache with the engines answered this sweep. An
 // engine missing from the sweep (stopped, or its query failed) loses its entry,
 // so a restarted engine is always queried afresh rather than served stale. The
-// content digests are replaced the same way, unless a sweep that began later
-// already stored its own: an older listing never replaces a newer one.
+// installed lists and content digests are both replaced only when no sweep that
+// began later has stored its own: an older listing never replaces a newer one.
 func (e *Executor) storeInventory(fresh map[string][]string, digests map[string]observedDigests, sweep uint64) {
 	e.inventoryMu.Lock()
 	defer e.inventoryMu.Unlock()
-	e.inventory = fresh
 	if sweep > e.digestSweep {
+		e.inventory = fresh
 		e.digestSweep = sweep
 		if e.inventoryDigests == nil {
 			e.inventoryDigests = make(map[string]observedDigests)

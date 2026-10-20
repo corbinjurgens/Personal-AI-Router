@@ -5,6 +5,118 @@ SPDX-License-Identifier: Apache-2.0
 
 # Microservice: Engine Manager (`nvpair-engine-manager`)
 
+## Automatic residency (internal parent IPC)
+
+`engine:reconcile-resident` is an internal parent-codec request, with shared
+`nodepolicy.ReconcileResidentParams` / `ReconcileResidentResult`. There is no
+ec/HTTP route. The broker must reject client-originated requests before its
+generic engine relay. Shared decoding rejects duplicate, case-variant, unknown
+and null fields; invalid params return `-32602`. The reservation's incarnation
+must exactly equal this manager's incarnation, including when omitted on wire.
+
+The first request establishes an absolute deadline of `timeoutMs` (1..60000),
+including lifecycle-lock waiting, dispatch relay, load and readback. Identical
+operation IDs share the result and original deadline, including completion
+until that deadline. Changed payloads conflict with `-32010`. Completed entries
+expire lazily; the bounded operation table refuses new work when full. No
+persistent residency queue or restart replay is introduced.
+
+Checks before effects, after E3 admission and the lifecycle lock, and after
+the dispatch relay refuse these conditions with `outcome:"not-dispatched"`:
+
+- `projection-unknown`: no broker projection since startup.
+- `paused-local`, `engine-off-local`: R4 veto, including locally edited policy,
+  explicit local Off and legacy Off without provenance. `beginRemote` registers
+  accepted work for cancellation by a later local veto.
+- `switch-busy`: an unreleased E3 checkpoint reserves this engine.
+- `engine-off`: no saved On intent or running engine (including peer Off).
+- `not-installed`: normalized model absent from authoritative installed inventory.
+  Older sweeps cannot replace newer installed inventory.
+- `unqualified`: incarnation/run/requested-model digest mismatch, absent owned
+  launch identity, withdrawn identity or ambiguous normalized identities.
+- `unsupported-load`: non-Ollama family, implicit/restart-after/content-mutating
+  load binding, unsupported endpoint or fixed parameters. Readback must be a
+  side-effect-free `GET /api/ps` action with a result extraction spec.
+
+These are internal refusal conditions: `ReconcileResidentResult` has no reason
+field. No raw engine bodies, prompts or digest dumps are returned as explanations.
+
+### Final-grant hop for the broker's SR 5 relay
+
+Under E3 mutation admission and the engine lifecycle lock, immediately before
+the load, the manager synchronously sends an **internal notification**:
+
+```json
+{"jsonrpc":"2.0","method":"engine:dispatch-resident-request","params":{"id":"correlation-id","params":{"reservationId":"reservation-id","proxyRunId":"proxy-run","managerIncarnation":"manager-incarnation","operationId":"operation-id","policyRevision":"1","engine":"ollama","model":"m:latest","identity":{"engineRunId":"engine-run","settingsFingerprint":"sha256-hex","modelDigest":"sha256-hex"}}}}
+```
+
+`params.params` is exactly `nodepolicy.DispatchResidentParams`, built from the
+reconcile request. The broker routes `node/dispatch-resident` to the bound proxy
+run, preserving every field. The proxy atomically validates the grant and marks
+it dispatched under its admission mutex. The broker must return its result as an
+**internal notification**, with the same correlation ID:
+
+```json
+{"jsonrpc":"2.0","method":"engine:dispatch-resident-reply","params":{"id":"correlation-id","result":{"dispatched":true}}}
+```
+
+A refusal is `result:{"dispatched":false,"reason":"reservation-revoked"}`.
+Reasons are `reservation-revoked`, `reservation-unknown`, or any shared
+`ModelConfigurationReason`: `engine-off`, `no-fit`, `paused-local`,
+`engine-off-local`, `not-served`, `not-installed`, `unqualified`,
+`unsupported-load`, `switch-busy`, `operation-timeout`, `observation-unknown`,
+`projection-unknown`. A relay error instead has
+`error:{"code":-32000,"message":"bounded explanation"}`, with no result.
+Exactly one of result/error is required. Null, duplicate/case-variant/unknown
+envelope keys and malformed results cannot grant permission. A request named
+`engine:dispatch-resident-reply` cannot satisfy the pending notification hop.
+
+Only a correlated, valid `dispatched:true` from a live context authorizes a load.
+Refusal, timeout, cancellation, missing parent, send error and malformed or
+mismatched reply all mean `not-dispatched` with zero engine calls. The pending
+map is bounded and entries are removed on every terminal path. A queued grant
+is checked against `ctx.Err()` at authorization and again before execution.
+Sending is synchronous like existing parent relays: a parent that stops reading
+cannot authorize a load; the deadline is enforced when that send returns.
+No inventory, publication or content lock is held across the relay or load.
+
+Manager compares its own current run and normalized requested-model digest and
+requires an owned nonempty launch digest. `StrictModelIdentity` has no separate
+launch field; `settingsFingerprint` is broker-owned applied-settings identity.
+The proxy owns qualification against the full engine identity, including launch
+digest, and the final grant revalidates it. Manager does
+not synthesize it or treat request fields alone as proof of a current grant.
+
+### Load mapping and observation evidence
+
+Only an explicit Ollama-family manifest load binding to `POST /api/generate`
+with model parameter `model` is supported. The sole allowed fixed parameter is
+`stream:false`. No command/path/progress/resolver or restart side effect is
+accepted. The body contains only `{model,stream:false,keep_alive,options:{num_ctx}}`:
+the normalized installed model, integer `num_ctx = load.contextLength`, and
+numeric `keep_alive = load.keepAliveSeconds` in seconds (1..86400). No prompt
+is sent. LM Studio and llama.cpp are unsupported for automatic residency.
+There is no pull/install/copy/delete/start/restore, inference, arbitrary-action
+fallback, eviction or unload protection implementation here. Loads never take
+B2's content guard or withdraw identity.
+
+Every dispatched call, success or failure, pokes the loaded watcher. A fresh
+readback begins after the call, under the same deadline. `loaded` requires the
+requested normalized model and still-current identity. The observation contains
+`{managerIncarnation,generation,engine,model,identity,loaded}`; generation is a
+monotonic counter scoped to this manager's resident readbacks. The settings
+fingerprint is the one authorized by the proxy. No last-good watcher baseline
+or desired resident list supplies observation evidence.
+
+An explicit empty loaded array yields an observation with `loaded:false` and
+outcome `failed`; missing/null/malformed inventory yields no observation and
+`unknown`. Lost response followed by current authoritative loaded readback can
+return `loaded`; a lost response alone never proves absence. An explicit HTTP
+failure can return `failed` without an observation. Deadline/cancellation after
+dispatch returns `timeout`/`cancelled`; identity withdrawal yields `unknown`.
+Pending switch checkpoints/ports, Off provenance and intents stay untouched.
+No resident fields are added to `engine-state.json`; broker owns unload protection.
+
 ## 1. Purpose
 A declarative, config-driven control plane for **local inference engines**
 (currently Ollama, LM Studio, and llama.cpp). It owns an engine's entire

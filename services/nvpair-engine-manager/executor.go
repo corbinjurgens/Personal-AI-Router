@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/http"
 	settings "nvpair-shared/enginesettings"
+	"nvpair-shared/nodepolicy"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -105,6 +106,9 @@ type Executor struct {
 	// for the confirmed reply (model_mutation.go). nil until a Manager wires
 	// it; an unwired executor fails closed.
 	modelMutationParent func(ctx context.Context, engine string) error
+	residentParent      func(context.Context, nodepolicy.DispatchResidentParams) error
+	residents           residentOperations
+	residentGeneration  atomic.Uint64
 	reg                 *Registry
 	reporter            *Reporter
 	emit                func(method string, params any)
