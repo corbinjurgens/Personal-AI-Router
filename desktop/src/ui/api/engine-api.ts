@@ -18,6 +18,7 @@ import type {
 import type {
     EngineHubSearchResponse,
     EngineInitialState,
+    EngineIntentSnapshot,
     EngineStatePatch,
     EngineCommandPayload
 } from '@/shared/types/engine-api'
@@ -32,6 +33,10 @@ import type {
 } from '@/shared/types/engine-settings'
 
 export interface IEngineApi {
+    /** Local saved intent; null when the bridge has no current authoritative readback. */
+    getIntent(): Promise<EngineIntentSnapshot | null>
+    /** Replaces both intent maps together, including null on invalidation. */
+    onIntentChanged(callback: (snapshot: EngineIntentSnapshot | null) => void): () => void
     switchEngine(request: SwitchRequest): Promise<{ receipt: SwitchReceipt }>
     switchStatus(request: SwitchStatusRequest): Promise<SwitchStatus>
     onSwitchChanged(callback: (change: SwitchChanged) => void): () => void
@@ -99,6 +104,8 @@ function fireCommand(transport: ServiceTransport, payload: EngineCommandPayload)
 
 export function createEngineApi(transport: ServiceTransport): IEngineApi {
     return {
+        getIntent: () => transport.invoke('engines:get-intent'),
+        onIntentChanged: cb => transport.subscribePush('engines:intent-changed', cb),
         switchEngine: request => transport.invoke('engines:switch', request),
         switchStatus: request => transport.invoke('engines:switch-status', request),
         onSwitchChanged: cb => transport.subscribePush('engines:switch-changed', cb),

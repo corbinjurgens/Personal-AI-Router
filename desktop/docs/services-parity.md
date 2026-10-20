@@ -222,6 +222,15 @@ genuinely foreign listener (with an actionable error). Personal AI Router treats
 desired state as authoritative and surfaces a stop error as guidance, not as a
 sign the OFF choice was discarded.
 
+Desktop consumes local saved intent through `engine:intent` and
+`engine:intent-changed`, preserving required `enabledByEngine` booleans and
+`offByEngine` origins (`local`/`peer`, relative to the owning device). Only
+explicitly saved Off has an origin; legacy Off without provenance reports local,
+while default false and On have none. The typed `getIntent`/`onIntentChanged`
+API feeds the existing engine-status store. Unavailable or invalid readback,
+disconnect and restart clear both maps together to null. Origin does not change
+lifecycle status or authorize controls; no desktop origin controls are added.
+
 For ease of use, Personal AI Router issues starts in two additional cases and
 keeps no auto-start list of its own: every install sends `engine:install` with
 `start: true`, so a successful install (or managed update) starts the engine;
