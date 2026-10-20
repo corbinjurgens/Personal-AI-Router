@@ -62,8 +62,9 @@ func (b *Broker) authorizeRemoteManagement(caller, family, operation string) err
 	if caller == "" {
 		return nil
 	}
-	permission := clustertrust.Open(b.clusterDir).RemoteManagement(caller)
-	b.logRemoteManagementDecision(caller, family, operation, permission)
+	mesh := clustertrust.Open(b.clusterDir)
+	permission := mesh.RemoteManagement(caller)
+	b.logRemoteManagementDecision(caller, mesh.NodeUUID(), family, operation, permission)
 	if permission.Allowed {
 		return nil
 	}
@@ -72,13 +73,14 @@ func (b *Broker) authorizeRemoteManagement(caller, family, operation string) err
 
 // logRemoteManagementDecision records one permission decision. It carries no
 // prompts, policy bodies, certificates or key material.
-func (b *Broker) logRemoteManagementDecision(caller, family, operation string, permission clustertrust.RemoteManagementPermission) {
+func (b *Broker) logRemoteManagementDecision(caller, target, family, operation string, permission clustertrust.RemoteManagementPermission) {
 	outcome := "denied"
 	if permission.Allowed {
 		outcome = "allowed"
 	}
 	slog.Info("remote management decision",
 		"caller", caller,
+		"target", target,
 		"family", family,
 		"outcome", outcome,
 		"state", permission.State,

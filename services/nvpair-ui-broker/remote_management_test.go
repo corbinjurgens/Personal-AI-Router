@@ -913,7 +913,7 @@ func TestRemoteManagementDecisionAudit(t *testing.T) {
 	if err := json.Unmarshal(data, &record); err != nil {
 		t.Fatal(err)
 	}
-	if record["caller"] != "peer" || record["family"] != "settings" || record["outcome"] != "denied" || record["operation"] != "receipt-1" || record["revision"] != "1" || record["reason"] == "" {
+	if record["caller"] != "peer" || record["target"] != "self-node" || record["family"] != "settings" || record["outcome"] != "denied" || record["operation"] != "receipt-1" || record["revision"] != "1" || record["reason"] == "" {
 		t.Fatalf("decision fields = %+v", record)
 	}
 }
