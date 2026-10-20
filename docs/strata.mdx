@@ -101,6 +101,40 @@ These are not available for Strata, and no PAIR setting enables them:
 - The optional Strata features: request monitoring, before-load hooks and MCP
   hooks. Leave them disabled in the configuration.
 
+## Finite prepared serving record
+
+An optional version 1 `runtime.serving` record binds one exact model to reviewed
+native context, parallelism, placement, output and declared memory bounds. The
+adapter supports the narrow native subset inspected at `corbinjurgens/Strata`
+`f6726098`; that source does not identify an installed MSI executable. See the
+[adapter contract](../services/nvpair-engine-manager/spec.md#finite-prepared-strata-launch)
+for accepted config keys, flags and artifact roles. Unknown modes, automatic
+fitting, ambiguous clamping, duplicate options and undeclared explicit file
+dependencies are rejected before spawn or settings persistence.
+
+Declare every selected shard, pack/draft file, profile, tokenizer file, Python
+executable, server script, config, native executable and attested library.
+Runtime files use cached full SHA256 verification. Model artifacts keep the
+operator-supplied full SHA256 plus bounded samples, size, mtime and resolved
+target checks. Declared model targets and runtime paths ending in `.gguf`,
+including split GGUF names, are excluded from runtime hashing. Other declared
+runtime files are fully hashed before the lifecycle lock, with cancellation;
+under the lock only bounded bindings and cached file metadata are rechecked.
+Pack/draft enumeration is
+fixed, and `native_experts.txt` indirection is unsupported. All paths must be
+absolute and existing. The hashed config binds the `lib_dirs` list, but directory
+contents are never crawled or hashed. Undeclared libraries reached through those
+directories or inherited PATH/LD_LIBRARY_PATH and Python imports beyond declared
+files remain unattested, as readback states.
+
+Preview returns an approval digest without probing, loading, spawning or writing
+a snapshot. Apply requires that digest and unchanged file bindings; start
+rechecks them and launches from a small immutable config snapshot referencing
+the original model files. Lazy HTTP startup remains distinct from loading.
+Readback distinguishes configured and owned-launch-validated bounds; loaded
+observations, strict content qualification and real Windows/GPU acceptance remain
+unverified. This record does not implement automatic residency.
+
 ## Procedure
 
 1. Prepare Strata outside PAIR, using its own setup, until its generated launch
@@ -115,6 +149,7 @@ These are not available for Strata, and no PAIR setting enables them:
    - `runtime.bin` is the Python interpreter.
    - The first `runtime.args` entry is `server.py`, and the argument after
      `--config` is the configuration file.
+   - `runtime.editable_launch.fixed_args` uses that same `server.py` path.
    - Each retained platform's `detect` entry is the `server.py` path. Delete
      the platforms you do not use.
 

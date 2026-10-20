@@ -114,7 +114,7 @@ func (m *Manager) handleSettingsMessage(ctx context.Context, msg *Message) bool 
 			}
 			ports := []port{}
 			for _, name := range m.exec.reg.Names() {
-				if launch, err := m.exec.LaunchSettings(name); err == nil {
+				if launch, err := m.exec.LaunchSettings(name, ctx); err == nil {
 					ports = append(ports, port{name, launch.ServerPort})
 				}
 			}
@@ -129,10 +129,10 @@ func (m *Manager) handleSettingsMessage(ctx context.Context, msg *Message) bool 
 			}
 			switch msg.Method {
 			case "engine:get-launch":
-				result, err := m.exec.LaunchSettings(p.Engine)
+				result, err := m.exec.LaunchSettings(p.Engine, ctx)
 				m.respondOrErr(msg, result, err)
 			case "engine:preview-launch":
-				result, err := m.exec.PreviewLaunch(p)
+				result, err := m.exec.PreviewLaunch(p, ctx)
 				m.respondOrErr(msg, result, err)
 			case "engine:configure-launch":
 				configureCtx, cancel := context.WithTimeout(ctx, settings.ConfigureBudget)

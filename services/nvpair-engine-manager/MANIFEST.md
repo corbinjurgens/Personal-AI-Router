@@ -122,6 +122,7 @@ Before enabling it, replace every `/REPLACE_WITH_ABSOLUTE_PATH/` value:
 - Set `runtime.bin` to the absolute Python interpreter path for the Strata
   environment (including `python.exe` on Windows).
 - Set the first `runtime.args` entry to the absolute Strata `server.py` path,
+  and the matching `runtime.editable_launch.fixed_args` entry to the same path,
   and the argument after `--config` to the absolute configuration file path.
   Arguments are literal strings, not shell commands; do not rely on environment
   variable or tilde expansion in them. Escape backslashes in JSON on Windows.
@@ -142,6 +143,21 @@ embeddings, Messages or Responses.
 The fixture verifies the manifest contract against loopback HTTP fakes. Real
 Strata launch, GPU behavior and cleanup still require owner-approved runtime
 qualification; platform entries in this template do not establish that evidence.
+
+An optional `runtime.serving` record enables the finite prepared adapter
+described in [spec.md](spec.md#finite-prepared-strata-launch). It requires one
+exact model, explicit finite context/parallel/placement, lazy native startup and
+absolute existing dependencies. Every explicit file must match a declared
+artifact: runtime Python/server/config/native executable/profile/tokenizer and
+attested libraries are fully hashed with the existing cache; selected model
+shards, pack and draft files use operator-supplied full SHA256 plus bounded local
+binding checks. No full model hashing or model copying occurs during preparation.
+Pack/draft enumeration is fixed; `native_experts.txt` indirection is unsupported.
+The hashed config binds `lib_dirs`, whose entries must be absolute existing
+directories. Directories and Python imports are not crawled. Undeclared files
+found via library directories or inherited PATH/LD_LIBRARY_PATH, and Python
+imports beyond declared files, remain unattested in readback. Loaded bounds and
+strict content qualification remain unverified by this adapter.
 
 ## Top-level fields
 
