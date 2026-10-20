@@ -147,10 +147,11 @@ type serviceView struct {
 	// pinged is whether a ping has answered yet. Until one has, nothing is
 	// known about the service, and the worker table says so.
 	pinged bool
-	// logLevel is the fleet's level as this session knows it. applog has no
-	// getter, so it starts at the level the broker started at — it inherits
-	// this process's environment — and follows each set.
-	logLevel slog.Level
+	// logLevel starts with the environment-derived level and follows each set.
+	// applog has no getter, so after transport loss the effective level stays
+	// unknown until a new set is acknowledged.
+	logLevel        slog.Level
+	logLevelUnknown bool
 
 	crashed map[string]svcerrors.ServiceError
 	// localNodeUUID is this host's stable UUID. The broker stamps local-origin
@@ -275,10 +276,11 @@ type managedUninstall struct {
 // instead: the wipe deletes the only record that the engine is PAIR's, which
 // would leave its files on disk with nothing left that may remove them.
 func resetEngines(client *rpc.Client) tea.Cmd {
+	generation := clientGeneration(client)
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), engineResetBudget)
 		defer cancel()
-		msg, err := client.Call(ctx, "engine:uninstall-managed", map[string]any{})
+		msg, err := client.CallGeneration(ctx, generation, "engine:uninstall-managed", map[string]any{})
 		if err != nil {
 			slog.Error("could not remove PAIR-installed engines; the data reset stops", "err", err)
 			return resetHaltedMsg{reason: fmt.Sprintf("could not ask the engine manager to remove engines: %s", err)}
@@ -373,7 +375,11 @@ func serviceWorkerColumns(w int) []table.Column {
 func (v *serviceView) Title() string { return "Service" }
 
 func (v *serviceView) Init() tea.Cmd {
-	cmds := []tea.Cmd{v.pingCmd(), v.tickCmd(), v.nodeIDCmd(), v.errorsCmd()}
+	return tea.Batch(v.refreshSession(), v.tickCmd())
+}
+
+func (v *serviceView) refreshSession() tea.Cmd {
+	cmds := []tea.Cmd{v.pingCmd(), v.nodeIDCmd(), v.errorsCmd()}
 	for i := range v.items {
 		if c := v.loadCmd(i); c != nil {
 			cmds = append(cmds, c)
@@ -489,6 +495,27 @@ func (v *serviceView) CapturingInput() bool {
 
 func (v *serviceView) Update(msg tea.Msg) tea.Cmd {
 	switch msg := msg.(type) {
+	case DisconnectedMsg:
+		if v.resetting {
+			v.status.error("service disconnected; reset interrupted; engine removal outcome unknown")
+		} else {
+			v.status = toast{}
+		}
+		v.logLevelUnknown = true
+		v.pinged = false
+		v.pingErr = nil
+		v.brokerVersion, v.uptime = "", 0
+		v.localNodeUUID = ""
+		v.errsPushed, v.errsKnown = false, false
+		v.lastErrs, v.crashed = nil, nil
+		v.confirming, v.resetting = -1, false
+		for i := range v.items {
+			v.items[i].strV = ""
+		}
+		v.refreshWorkers()
+		return nil
+	case sessionReadyMsg:
+		return v.refreshSession()
 	case serviceTickMsg:
 		return tea.Batch(v.pingCmd(), v.tickCmd())
 
@@ -547,6 +574,7 @@ func (v *serviceView) Update(msg tea.Msg) tea.Cmd {
 			return nil
 		}
 		v.logLevel = msg.level
+		v.logLevelUnknown = false
 		// Not "for every service": the broker forwards the level to each
 		// worker best effort, and a worker that missed it keeps its own.
 		v.status.ok("log level set to %s", applog.LevelName(msg.level))
@@ -713,7 +741,7 @@ func (v *serviceView) commitChoice() tea.Cmd {
 		v.status.error("%s", err)
 		return nil
 	}
-	if chosen == v.logLevel {
+	if !v.logLevelUnknown && chosen == v.logLevel {
 		v.status.info("%s unchanged", it.label)
 		return nil
 	}
@@ -957,6 +985,9 @@ func (v *serviceView) itemList() string {
 func (v *serviceView) itemValue(it serviceItem) string {
 	switch it.kind {
 	case itemChoice:
+		if v.logLevelUnknown {
+			return "unknown"
+		}
 		return applog.LevelName(v.logLevel)
 	case itemAction:
 		return ""

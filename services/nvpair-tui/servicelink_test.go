@@ -20,6 +20,7 @@ import (
 	"nvpair-shared/ipc"
 	"nvpair-shared/secretenv/secretenvtest"
 	"nvpair-shared/servicectl"
+	"nvpair-tui/rpc"
 )
 
 // fakeServiceEnv makes the test binary stand in for nvpair-service, so the TUI's
@@ -122,12 +123,12 @@ func answering() bool {
 func waitReady(t *testing.T, link *serviceLink) {
 	t.Helper()
 	select {
-	case msg, ok := <-link.Client.Notifications():
+	case event, ok := <-link.Client.Events():
 		if !ok {
-			t.Fatal("notifications closed before app:ready")
+			t.Fatal("events closed before app:ready")
 		}
-		if msg.Method != "app:ready" {
-			t.Fatalf("first notification = %s, want app:ready (service/log must go to Logs)", msg.Method)
+		if event.Kind != rpc.EventNotification || event.Generation != 1 || event.Message == nil || event.Message.Method != "app:ready" {
+			t.Fatalf("first notification = %+v, want generation 1 app:ready (service/log must go to Logs)", event)
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("timed out waiting for app:ready")

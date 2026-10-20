@@ -363,21 +363,21 @@ func (w *sessionBlockedWriter) Write(p []byte) (int, error) {
 	return w.Conn.Write(p)
 }
 
-func TestReconnectLegacyAdapterDoesNotLeaveEventsUndrained(t *testing.T) {
+func TestReconnectEventsDeliverNotificationBurst(t *testing.T) {
 	conn, peer := sessionPipe(t)
 	client := NewReconnectingClient(conn, func(ctx context.Context) (io.ReadWriteCloser, error) {
 		<-ctx.Done()
 		return nil, ctx.Err()
 	})
 	t.Cleanup(client.Close)
-	notifications := client.Notifications()
+	events := client.Events()
 	go func() { _ = client.Run(context.Background()) }()
 	consumed := make(chan error, 1)
 	go func() {
 		for i := 0; i < 600; i++ {
-			msg, open := <-notifications
-			if !open || msg.Method != "burst:push" {
-				consumed <- errors.New("legacy adapter lost burst notification")
+			event, open := <-events
+			if !open || event.Kind != EventNotification || event.Generation != 1 || event.Message == nil || event.Message.Method != "burst:push" {
+				consumed <- errors.New("event stream lost burst notification")
 				return
 			}
 		}

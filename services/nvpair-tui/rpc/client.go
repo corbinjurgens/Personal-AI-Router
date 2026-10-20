@@ -66,12 +66,7 @@ type Client struct {
 	retryDelay func(int) time.Duration
 	nextID     atomic.Int64
 	events     chan Event
-	done       chan struct{}
 	filter     func(*Message) bool
-
-	consumerMu    sync.Mutex
-	consumer      string
-	notifications chan *Message
 }
 
 func newClient(r io.Reader, w io.Writer, closeTransport func()) *Client {
@@ -81,7 +76,7 @@ func newClient(r io.Reader, w io.Writer, closeTransport func()) *Client {
 	}
 	return &Client{
 		current: t, generation: 1, events: make(chan Event, notifyBuffer),
-		done: make(chan struct{}), retryDelay: reconnectDelay,
+		retryDelay: reconnectDelay,
 	}
 }
 
@@ -107,50 +102,9 @@ func NewReconnectingClient(conn io.ReadWriteCloser, dial func(context.Context) (
 	return c
 }
 
-// Events is the sole ordered event stream. Choose Events or Notifications,
-// never both. It closes only when Run finally exits.
+// Events is the sole ordered event stream. It closes only when Run finally exits.
 func (c *Client) Events() <-chan Event {
-	c.consumerMu.Lock()
-	defer c.consumerMu.Unlock()
-	if c.consumer == "notifications" {
-		panic("rpc.Client: Events and Notifications are mutually exclusive")
-	}
-	c.consumer = "events"
 	return c.events
-}
-
-// Notifications temporarily adapts Events for the pre-session UI. It consumes
-// the same queue, ignoring transient disconnects. Task 1b removes this adapter
-// when the UI starts consuming generation-tagged Events directly.
-func (c *Client) Notifications() <-chan *Message {
-	c.consumerMu.Lock()
-	defer c.consumerMu.Unlock()
-	if c.consumer == "events" {
-		panic("rpc.Client: Events and Notifications are mutually exclusive")
-	}
-	if c.consumer == "" {
-		c.consumer = "notifications"
-		c.notifications = make(chan *Message, notifyBuffer)
-		go func() {
-			defer close(c.notifications)
-			for event := range c.events {
-				if event.Kind != EventNotification {
-					continue
-				}
-				select {
-				case c.notifications <- event.Message:
-					continue
-				default:
-				}
-				select {
-				case c.notifications <- event.Message:
-				case <-c.done:
-					return
-				}
-			}
-		}()
-	}
-	return c.notifications
 }
 
 // SetNotificationFilter installs a nonblocking hook before Run. It survives
@@ -208,7 +162,6 @@ func (c *Client) Run(ctx context.Context) error {
 	c.mu.Unlock()
 	defer cancel()
 	defer close(c.events)
-	defer close(c.done)
 	defer c.Close()
 	if stopped {
 		return context.Canceled

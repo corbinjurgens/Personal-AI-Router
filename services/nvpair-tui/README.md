@@ -215,10 +215,15 @@ The log stream and its service/log filter survive transport replacement.
 Transport events carry a monotonically increasing generation in wire order,
 including disconnects. `CallGeneration` rejects commands captured for an old
 transport, and `IsCurrent` lets consumers reject obsolete asynchronous results.
-The current UI temporarily uses the exclusive `Notifications` adapter over that
-same event queue; view resubscription and authoritative state refresh belong to
-the subsequent UI migration to `Events`. Transport recovery alone does not
-establish that the views have refreshed.
+The shell consumes that event stream and marks the service disconnected on loss.
+Once a replacement reports ready, existing views resubscribe and reread their
+baselines once for that transport. Old rows, permissions and snapshot precedence
+are cleared; unavailable readings remain unknown. Local filters, presentation
+choices and unsent text survive, while pairing sessions and destructive
+confirmations are retired. Commands capture their transport when created, and
+the shell rejects obsolete results even if an old RPC completed before recovery.
+Performance cleanup cannot unsubscribe a replacement transport. UI timers retain
+one chain per owner rather than restarting with every ready notification.
 
 A service the TUI starts gets no broker arguments: the broker resolves its
 workers beside itself and inherits the environment the service was started

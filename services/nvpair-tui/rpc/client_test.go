@@ -141,12 +141,12 @@ func TestClientDeliversNotifications(t *testing.T) {
 	}()
 
 	select {
-	case msg, ok := <-client.Notifications():
+	case event, ok := <-client.Events():
 		if !ok {
-			t.Fatal("notifications channel closed")
+			t.Fatal("event stream closed")
 		}
-		if msg.Method != "errors:update" {
-			t.Fatalf("method = %s", msg.Method)
+		if event.Kind != EventNotification || event.Generation != 1 || event.Message == nil || event.Message.Method != "errors:update" {
+			t.Fatalf("notification event = %+v", event)
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for notification")
@@ -187,16 +187,16 @@ func TestNotificationFilterConsumesMatchingFrames(t *testing.T) {
 		t.Fatal("filter never ran")
 	}
 	select {
-	case msg := <-client.Notifications():
-		if msg.Method != "app:ready" {
-			t.Fatalf("first queued notification = %s; the filtered one leaked", msg.Method)
+	case event := <-client.Events():
+		if event.Kind != EventNotification || event.Generation != 1 || event.Message == nil || event.Message.Method != "app:ready" {
+			t.Fatalf("first queued notification = %+v; the filtered one leaked", event)
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("unfiltered notification not delivered")
 	}
 }
 
-func TestClientDisconnectClosesNotifications(t *testing.T) {
+func TestClientDisconnectClosesEvents(t *testing.T) {
 	client, _, srv := newPair(t)
 	srv.Close() // broker drops the connection -> client read loop hits EOF
 
@@ -204,7 +204,7 @@ func TestClientDisconnectClosesNotifications(t *testing.T) {
 	go func() {
 		// Drain until the channel closes; a closed channel yields the
 		// zero value with ok=false.
-		for range client.Notifications() {
+		for range client.Events() {
 		}
 		close(done)
 	}()
@@ -212,6 +212,6 @@ func TestClientDisconnectClosesNotifications(t *testing.T) {
 	select {
 	case <-done:
 	case <-time.After(2 * time.Second):
-		t.Fatal("notifications channel was not closed after disconnect")
+		t.Fatal("event stream was not closed after disconnect")
 	}
 }

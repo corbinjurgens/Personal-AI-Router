@@ -38,10 +38,11 @@ type Model struct {
 
 	width, height int
 
-	ready         bool
-	brokerVersion string
-	disconnected  bool
-	showFullHelp  bool
+	ready           bool
+	brokerVersion   string
+	disconnected    bool
+	readyGeneration uint64
+	showFullHelp    bool
 
 	// updateLatest is a published release newer than this build, and
 	// updateDismissed records the operator saying they have seen it.
@@ -101,13 +102,17 @@ type stopServiceMsg struct{}
 func New(client *rpc.Client, logCh <-chan string, views []View) Model {
 	h := help.New()
 	styleHelp(&h)
-	return Model{
+	m := Model{
 		client: client,
 		logCh:  logCh,
 		keys:   newGlobalKeyMap(len(views)),
 		help:   h,
 		views:  views,
 	}
+	if client != nil {
+		m.readyGeneration = client.Generation()
+	}
+	return m
 }
 
 // Init starts each view and arms the broker notification + log loops and the
@@ -128,11 +133,52 @@ func (m Model) Init() tea.Cmd {
 			cmds = append(cmds, c)
 		}
 	}
-	return tea.Batch(cmds...)
+	return sessionCommand(m.client, m.readyGeneration, tea.Batch(cmds...))
 }
 
-func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+func (m Model) Update(msg tea.Msg) (model tea.Model, cmd tea.Cmd) {
+	if m.client != nil {
+		generation := m.client.Generation()
+		defer func() { cmd = sessionCommand(m.client, generation, cmd) }()
+	}
+	if result, ok := msg.(sessionResult); ok {
+		if !m.client.IsCurrent(result.generation) {
+			return m, nil
+		}
+		msg = result.msg
+	}
 	switch msg := msg.(type) {
+	case serviceEventMsg:
+		event := msg.event
+		var cmds []tea.Cmd
+		if event.Kind == rpc.EventDisconnected {
+			m.ready, m.disconnected = false, true
+			m.confirmingStop = false
+			m.avail = availabilityState{}
+			cmds = m.broadcast(DisconnectedMsg{})
+		} else if event.Message != nil && m.client.IsCurrent(event.Generation) {
+			if event.Message.Method == "app:ready" && event.Generation != m.readyGeneration {
+				m.readyGeneration = event.Generation
+				m.ready, m.disconnected = true, false
+				m.brokerVersion = readyVersion(event.Message)
+				m.avail = availabilityState{}
+				cmds = append(cmds, policyGetCmd(m.client), nodeIdentityCmd(m.client,
+					func(id clusterIdentity, err error) tea.Msg { return selfIdentityMsg{id: id} }))
+				cmds = append(cmds, m.broadcast(sessionReadyMsg{})...)
+			} else if event.Message.Method != "app:ready" || !m.ready {
+				// Same-transport broker respawn retains its existing ready path.
+				updated, notificationCmd := m.Update(NotificationMsg{Msg: event.Message})
+				m = updated.(Model)
+				cmds = append(cmds, notificationCmd)
+			}
+		}
+		cmds = append(cmds, waitForNotification(m.client))
+		return m, tea.Batch(cmds...)
+	case serviceEventsClosedMsg:
+		m.ready, m.disconnected = false, true
+		m.confirmingStop = false
+		m.avail = availabilityState{}
+		return m, tea.Batch(m.broadcast(DisconnectedMsg{})...)
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
 		m.help.Width = msg.Width
@@ -220,6 +266,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.avail.update(msg)
 		if msg.Msg.Method == "app:ready" {
 			m.ready = true
+			m.disconnected = false
 			m.brokerVersion = readyVersion(msg.Msg)
 		}
 		// The service restarted a broker that died; it is not ready again
@@ -228,7 +275,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.ready = false
 		}
 		cmds := m.broadcast(msg)
-		cmds = append(cmds, waitForNotification(m.client))
 		return m, tea.Batch(cmds...)
 
 	case TickMsg:
@@ -266,7 +312,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Quit
 
 	case DisconnectedMsg:
-		m.disconnected = true
+		m.ready, m.disconnected = false, true
+		m.confirmingStop = false
+		m.avail = availabilityState{}
 		return m, tea.Batch(m.broadcast(msg)...)
 
 	case LogLineMsg:

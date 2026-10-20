@@ -323,7 +323,15 @@ func nodesColumns(w int) []table.Column {
 func (v *nodesView) Title() string { return "Nodes" }
 
 func (v *nodesView) Init() tea.Cmd {
-	return tea.Batch(
+	return tea.Batch(append(v.feedCommands(), v.manualTickCmd(), v.remoteManagementCmd())...)
+}
+
+func (v *nodesView) refreshSession() tea.Cmd {
+	return tea.Batch(append(v.feedCommands(), v.remoteManagementCmd())...)
+}
+
+func (v *nodesView) feedCommands() []tea.Cmd {
+	return []tea.Cmd{
 		call(v.client, "discovery:subscribe", nil, func(_ *rpc.Message, err error) tea.Msg {
 			return discoverySubscribedMsg{err: err}
 		}),
@@ -340,9 +348,7 @@ func (v *nodesView) Init() tea.Cmd {
 		v.clusterNameCmd(),
 		v.membersCmd(),
 		v.manualCmd(),
-		v.manualTickCmd(),
-		v.remoteManagementCmd(),
-	)
+	}
 }
 
 func (v *nodesView) clusterNameCmd() tea.Cmd {
@@ -453,8 +459,33 @@ func (v *nodesView) updateList(msg tea.Msg) tea.Cmd {
 	case remoteManagementSetMsg:
 		return v.handleRemoteManagementSet(msg)
 	case DisconnectedMsg:
+		if v.status.sticky && v.status.kind == toastInfo {
+			v.status.info("service disconnected; operation interrupted; outcome unknown")
+		} else {
+			v.status = toast{}
+		}
 		v.invalidateRemoteManagement()
+		v.feeds = nodeFeeds{}
+		v.feedFailures = nil
+		v.identity = clusterIdentity{}
+		v.clusterName = ""
+		v.membersPushes = 0
+		v.forgetPIN()
+		v.inboundAllow = false
+		v.inbound, v.queued = nil, nil
+		v.answering, v.pairingPollID = "", ""
+		v.awaitingPairing = false
+		v.inviteSending = false
+		v.clearOutboundInvite()
+		if v.mode == nodesInputInviteChoice {
+			v.mode = nodesInputNone
+			v.input.Blur()
+		}
+		v.confirmLeave, v.confirmRemove = false, ""
+		v.rebuild()
 		return nil
+	case sessionReadyMsg:
+		return v.refreshSession()
 	case discoverySubscribedMsg:
 		// Recorded as well as announced: without discovery the list simply stops
 		// filling, and by the time the operator wonders why, the toast is gone.

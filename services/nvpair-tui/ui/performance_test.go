@@ -480,6 +480,45 @@ func TestPerformanceBrokerRestartRequiresNewSnapshot(t *testing.T) {
 	assertPerformanceUnsubscribe(t, broker)
 }
 
+func TestPerformanceTransportGenerationRejectsOldResultAndCleanup(t *testing.T) {
+	f := newReconnectUIFixture(t)
+	d := newNodeDetail(f.client, nodeRow{key: "self", self: true})
+	old := performanceReplyFromRPC(t, f.broker, d.startPerformance())
+	lease := d.performanceLease
+	m := New(f.client, nil, nil)
+	f.replace(t, &m)
+	// Deliberately keep the same screen, visit, route and lease pointer. Those
+	// guards alone cannot reject a response completed on the old transport.
+	d.update(old)
+	if d.performance != nil {
+		t.Fatal("old completed performance response crossed transport generation")
+	}
+	f.serve(t, map[string]json.RawMessage{
+		"performance:subscribe": json.RawMessage(`{"subscribed":true}`),
+		"performance:get":       json.RawMessage(performanceFixtureJSON),
+	})
+	// A replacement subscriber can exist while the old screen is still the
+	// registry owner. The old lease may not unsubscribe this transport.
+	subscribe := call(f.client, "performance:subscribe", nil, func(_ *rpc.Message, err error) tea.Msg { return err })
+	if result := subscribe(); result != nil {
+		t.Fatalf("replacement subscribe failed: %v", result)
+	}
+	lease.release()
+	if got := f.count("performance:unsubscribe"); got != 0 {
+		t.Fatalf("old lease unsubscribed replacement %d time(s)", got)
+	}
+	current := d.startPerformance()
+	d.update(current())
+	if d.performance == nil {
+		t.Fatal("new performance baseline did not apply")
+	}
+	lease.release()
+	if got := f.count("performance:unsubscribe"); got != 0 {
+		t.Fatalf("delayed cleanup unsubscribed new lease %d time(s)", got)
+	}
+	d.closePerformance()
+}
+
 func TestPerformanceLeaveCancelsAnInFlightGet(t *testing.T) {
 	client, broker := nodeInfoRPCFixture(t)
 	d := newNodeDetail(client, nodeRow{key: "self", self: true})

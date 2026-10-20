@@ -122,6 +122,13 @@ func (v *errorsView) columns() []table.Column {
 
 func (v *errorsView) Update(msg tea.Msg) tea.Cmd {
 	switch msg := msg.(type) {
+	case DisconnectedMsg:
+		v.pushed = false
+		v.namer = newNodeNamer()
+		v.setErrors(nil)
+		return nil
+	case sessionReadyMsg:
+		return v.Init()
 	case errorsLoadedMsg:
 		if msg.err != nil {
 			v.status.error("failed to load errors: %s", msg.err)
