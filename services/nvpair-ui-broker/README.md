@@ -206,6 +206,25 @@ Logs go to **stderr** (shared `applog` format, same as every other NVPAIR binary
 
 ## Worker subprocesses
 
+Generic RPC worker notifications have a 60-second write budget, including
+waiting for the serialized write gate and writing the complete frame. A caller's
+earlier cancellation wins. `Notify` and log-level changes use this same path.
+Queued caller cancellation does not interrupt another active frame. Active
+cancellation or a write failure closes the owned child stdin pipe, joins the
+write and interruption callback, and permanently retires the partial stream.
+Send failures return their context/transport cause and log worker, method and
+error metadata at the owner, including for callers that discard the error.
+Success means the frame was written, without acknowledging receiver processing.
+
+Logical peer closure wakes RPC waiters; it does not mean the child has exited.
+Only the existing process watcher fences worker exit and closes its `Done`
+channel after `cmd.Wait`. Interruption does not call `Stop`, join the process,
+or force-kill engine-manager: stdin EOF retains its ordinary engine cleanup
+path and the broker's existing graceful engine-manager shutdown policy.
+The subscribed engine event relay still writes synchronously to the
+service-facing codec on the engine reader goroutine. A stalled downstream can
+therefore stop engine stdout draining; decoupling that relay is separate work.
+
 On startup — **before** emitting `app:ready` — the broker spawns the scanner and (when available) node-info, `nvpair-proxy`, the workload-manager, and the cluster-manager as child processes over stdio. The proxy is spawned up front but doesn't gate `app:ready` — each of its facades announces its listen port asynchronously (see below). None of the auxiliary workers gate `app:ready`.
 
 **`nvpair-node-scanner`** (the consolidated discovery daemon) is spawned first. It pushes `discovery:node-discovered`, `discovery:node-updated`, and `discovery:node-removed` notifications into the broker, which maintains them in an in-memory map keyed by `id`. Clients query that map via `discovery:get-nodes` and — once they've opted in via `discovery:subscribe` — receive a `discovery:nodes-changed` notification on every store mutation. The raw `discovery:node-*` notifications are never forwarded as-is. The scanner polls healthy node-info endpoints on a staggered two-second cadence, backs consecutive remote failures off to a 30-second cap, and emits compact `discovery:node-telemetry` observations containing maximum GPU utilization, validity, and age; these remain internal to broker scheduling. The broker registers this node's local service ports (`ni`/`er`/`wl`/`cl`/`em`, plus `ol`/`lm`/`lc` from the engine poller) with the daemon over the same link, so the daemon can advertise them all in one `_nvpair-node` record.

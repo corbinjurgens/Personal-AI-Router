@@ -134,12 +134,16 @@ function buildConstMap(files: string[]): Map<string, string> {
 
 const QUOTED_RE = /"([^"]+)"/g
 const IDENT_RE = /\b([A-Za-z_]\w*)\b/g
-const NOTIFY_LITERAL_RE = /(?:notify|emit|publish|broadcast)\(\s*"([^"]+)"/gi
-const NOTIFY_PREFIX_CONCAT_RE = /(?:notify|emit|publish|broadcast)\(\s*"([^"]+)"\s*\+/i
+// NotifyContext takes ctx before method; keep the method in capture group 1
+// for both bare and receiver-qualified calls, just like Notify.
+const NOTIFY_LITERAL_RE =
+    /(?:(?:notify|emit|publish|broadcast)\(|notifyContext\([^,]*,)\s*"([^"]+)"/gi
+const NOTIFY_PREFIX_CONCAT_RE =
+    /(?:(?:notify|emit|publish|broadcast)\(|notifyContext\([^,]*,)\s*"([^"]+)"\s*\+/i
 // Broadcast(ctx, frame) is HTTP fan-out, not a JSON-RPC notification. Keep
 // literal Broadcast methods above, but do not treat an identifier argument to
 // Broadcast as an unresolved JSON-RPC method.
-const NOTIFY_IDENT_RE = /(?:notify|emit|publish)\(\s*([A-Za-z_]\w*)\s*,/gi
+const NOTIFY_IDENT_RE = /(?:(?:notify|emit|publish)\(|notifyContext\([^,]*,)\s*([A-Za-z_]\w*)\s*,/gi
 
 /** A `| `nvpair-ui-broker` | 0.37.0 | … |` row — forbidden in hand-maintained docs. */
 const DOC_COMPONENT_ROW_RE = /^\|\s*`([a-z0-9-]+)`\s*\|\s*(\d+\.\d+\.\d+)\s*\|/gm
