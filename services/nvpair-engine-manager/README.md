@@ -47,6 +47,36 @@ domain socket or Windows named pipe instead. The service is
 same binary runs under any supervisor with zero code change. The `engine:*`
 namespace is the surface the orchestrator/broker forwards from the UI.
 
+Parent notifications have a 60-second write budget, including waiting for the
+shared write gate and writing the complete frame. Policy, settings, switch,
+model-mutation and resident relays use their caller's earlier cancellation or
+deadline for the initial send and retain their existing reply budgets. A queued
+caller cancellation emits no frame and leaves another active writer alone.
+Policy/settings/switch reply cancellation removes the pending entry first,
+then synchronously sends its cancellation frame with a fresh one-second budget;
+cleanup failure is logged without replacing the original caller error.
+
+An active write failure or interruption permanently retires the stream. Any
+default publication failure, including a queued default timeout, logs a terminal
+parent transport failure, cancels root work and closes both transport directions.
+The resulting read-loop exit follows `Manager.Run`'s existing `StopAll` cleanup;
+it can abort inference on PAIR-owned engines, including forced process-tree
+termination on Windows. Existing workload failure/interruption paths report
+interrupted inference; publication failure does not make it completed or roll
+back successful engine changes. Saved intent and recovery semantics remain.
+The budget bounds one send, not a whole lifecycle operation or shutdown.
+
+State and identity publication retain their ordering lock, and content/lifecycle
+serialization remains in place. Transport closure releases stalled writes so
+these locks and relay slots can be released. Unix stdio owns nonblocking,
+close-on-exec duplicates prepared before protocol I/O and requires successful
+deadline capability probes; unsupported descriptors fail startup. Windows uses
+the actual inherited pipe file owners. Closing output first interrupts the active
+writer, then closing input wakes the reader. Stderr stays independent. Root
+cancellation (including signals) closes the transport and joins its owner watcher.
+IPC sockets/named pipes use the same terminal-close policy. No queue, retry,
+delivery acknowledgement or runtime budget setting is introduced.
+
 ## JSON-RPC surface
 
 ### Automatic resident loads (internal)

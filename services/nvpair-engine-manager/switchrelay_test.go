@@ -17,7 +17,7 @@ func TestSwitchRelayCorrelatesCodedReply(t *testing.T) {
 	for _, code := range []int{-32010, -32011, -32000} {
 		t.Run(fmt.Sprint(code), func(t *testing.T) {
 			r := &switchRelay{}
-			r.send = func(method string, value any) error {
+			r.send = func(_ context.Context, method string, value any) error {
 				request, ok := value.(switchRelayRequest)
 				if !ok || method != "engine:switch-request" || request.Caller != "pinned-peer" || request.Method != settings.SwitchMethod {
 					t.Fatalf("relay request: %s %+v", method, value)
@@ -45,7 +45,7 @@ func TestSwitchRelayCancellationRetiresOnlyWaiter(t *testing.T) {
 	defer cancel()
 	r := &switchRelay{}
 	var sent []string
-	r.send = func(method string, _ any) error {
+	r.send = func(_ context.Context, method string, _ any) error {
 		sent = append(sent, method)
 		if method == "engine:switch-request" {
 			cancel()
@@ -62,7 +62,7 @@ func TestSwitchRelayCancellationRetiresOnlyWaiter(t *testing.T) {
 }
 
 func TestSwitchRelayBoundsPendingAndIgnoresUncorrelatedReplies(t *testing.T) {
-	r := &switchRelay{pending: map[string]chan switchRelayReply{}, send: func(string, any) error { t.Fatal("full relay sent request"); return nil }}
+	r := &switchRelay{pending: map[string]chan switchRelayReply{}, send: func(context.Context, string, any) error { t.Fatal("full relay sent request"); return nil }}
 	for i := 0; i < maxPendingSwitchCalls; i++ {
 		r.pending[fmt.Sprint(i)] = make(chan switchRelayReply, 1)
 	}
@@ -79,11 +79,11 @@ func TestSwitchRelayBoundsPendingAndIgnoresUncorrelatedReplies(t *testing.T) {
 }
 
 func TestSwitchRelaySendFailureAndSuccessReleaseSlot(t *testing.T) {
-	r := &switchRelay{send: func(string, any) error { return errors.New("pipe closed") }}
+	r := &switchRelay{send: func(context.Context, string, any) error { return errors.New("pipe closed") }}
 	if _, err := r.call(context.Background(), settings.SwitchStatusMethod, "peer", json.RawMessage(`{}`)); err == nil || len(r.pending) != 0 {
 		t.Fatalf("send failure = %v, pending=%d", err, len(r.pending))
 	}
-	r.send = func(_ string, value any) error {
+	r.send = func(_ context.Context, _ string, value any) error {
 		request, ok := value.(switchRelayRequest)
 		if !ok {
 			return errors.New("unexpected relay payload")

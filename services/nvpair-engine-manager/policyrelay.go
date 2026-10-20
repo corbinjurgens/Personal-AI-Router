@@ -94,7 +94,7 @@ type policyRelayReply struct {
 type policyRelay struct {
 	mu      sync.Mutex
 	pending map[string]chan policyRelayReply
-	send    func(string, any) error
+	send    func(context.Context, string, any) error
 }
 
 func (r *policyRelay) call(ctx context.Context, method string, params json.RawMessage, caller string) (json.RawMessage, error) {
@@ -103,9 +103,16 @@ func (r *policyRelay) call(ctx context.Context, method string, params json.RawMe
 	}
 	ctx, cancel := context.WithTimeout(ctx, policyRelayBudget)
 	defer cancel()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	id := newOpID()
 	ch := make(chan policyRelayReply, 1)
 	r.mu.Lock()
+	if err := ctx.Err(); err != nil {
+		r.mu.Unlock()
+		return nil, err
+	}
 	if len(r.pending) >= maxPendingPolicy {
 		r.mu.Unlock()
 		return nil, fmt.Errorf("too many policy requests")
@@ -116,19 +123,28 @@ func (r *policyRelay) call(ctx context.Context, method string, params json.RawMe
 	r.pending[id] = ch
 	r.mu.Unlock()
 	defer func() { r.mu.Lock(); delete(r.pending, id); r.mu.Unlock() }()
-	if err := r.send(policyRequestMethod, policyRelayRequest{ID: id, Method: method, Caller: caller, Params: params}); err != nil {
+	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	select {
-	case reply := <-ch:
-		if reply.Error != "" {
-			return nil, &codedError{code: reply.ErrorCode, message: reply.Error}
-		}
-		return reply.Result, nil
-	case <-ctx.Done():
-		_ = r.send(policyCancelMethod, map[string]string{"id": id})
-		return nil, ctx.Err()
+	if err := r.send(ctx, policyRequestMethod, policyRelayRequest{ID: id, Method: method, Caller: caller, Params: params}); err != nil {
+		return nil, err
 	}
+	var reply policyRelayReply
+	select {
+	case reply = <-ch:
+	case <-ctx.Done():
+	}
+	if err := ctx.Err(); err != nil {
+		r.mu.Lock()
+		delete(r.pending, id)
+		r.mu.Unlock()
+		cancelRelayWait(r.send, policyCancelMethod, id)
+		return nil, err
+	}
+	if reply.Error != "" {
+		return nil, &codedError{code: reply.ErrorCode, message: reply.Error}
+	}
+	return reply.Result, nil
 }
 
 func (r *policyRelay) reply(raw json.RawMessage) {

@@ -292,7 +292,7 @@ func TestSettingsRemoteOnlyCORSIsLocalOnly(t *testing.T) {
 func TestSettingsRelayCorrelationCancellationAndCleanup(t *testing.T) {
 	sent := make(chan settings.Relay, 2)
 	canceled := make(chan string, 1)
-	relay := &settingsRelay{send: func(method string, value any) error {
+	relay := &settingsRelay{send: func(_ context.Context, method string, value any) error {
 		data, _ := json.Marshal(value)
 		if method == "engine:settings-request" {
 			var p settings.Relay
@@ -362,7 +362,7 @@ func TestSettingsRelayErrorCodesReachThePairedOrigin(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			exec := settingsExecutor(t, false)
 			relay := &settingsRelay{}
-			relay.send = func(method string, params any) error {
+			relay.send = func(_ context.Context, method string, params any) error {
 				request, ok := params.(settings.Relay)
 				if method != "engine:settings-request" || !ok {
 					return nil

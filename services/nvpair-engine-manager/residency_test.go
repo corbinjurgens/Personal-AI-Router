@@ -409,7 +409,7 @@ func TestResidentRefusalLogging(t *testing.T) {
 		}
 	})
 	test("relay error omits private content", "dispatch-relay-failed", "WARN", func(_ *testing.T, f *residentFixture) {
-		f.m.residentDispatch.send = func(string, any) error { return errors.New(prompt + "\n" + body) }
+		f.m.residentDispatch.send = func(context.Context, string, any) error { return errors.New(prompt + "\n" + body) }
 	})
 }
 
@@ -455,7 +455,7 @@ func TestResidentDispatchFailure(t *testing.T) {
 	}
 	test("missing parent", func(f *residentFixture, _ context.CancelFunc) { f.ex.residentParent = nil }, false)
 	test("send failure", func(f *residentFixture, _ context.CancelFunc) {
-		f.m.residentDispatch.send = func(string, any) error { return io.ErrClosedPipe }
+		f.m.residentDispatch.send = func(context.Context, string, any) error { return io.ErrClosedPipe }
 	}, false)
 	test("timeout", func(f *residentFixture, _ context.CancelFunc) { f.grant = func(residentDispatchRequest) {} }, true)
 	test("cancel", func(f *residentFixture, cancel context.CancelFunc) {
