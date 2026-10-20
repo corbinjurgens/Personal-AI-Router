@@ -238,3 +238,27 @@ func TestCancel_LookupRules(t *testing.T) {
 		t.Fatalf("stale runId matched: %s", f.Result)
 	}
 }
+
+func TestAbortLocalIf_IgnoresEndedAttempt(t *testing.T) {
+	test := func(name string, end func(*workloadCtl)) {
+		t.Run(name, func(t *testing.T) {
+			var requestCancelled, attemptCancelled bool
+			ctl := newWorkloadCtl(func(string) { requestCancelled = true })
+			att := &attemptCtl{
+				claim:  &attemptClaim{},
+				cancel: func() { attemptCancelled = true },
+				nodeID: "self",
+			}
+			ctl.setAttempt(att)
+			end(ctl)
+
+			ctl.abortLocalIf(att)
+			if requestCancelled || attemptCancelled || att.claim.abandoned() || ctl.isExcluded("self") {
+				t.Fatalf("ended attempt callback acted: request cancelled=%t attempt cancelled=%t abandoned=%t excluded=%t",
+					requestCancelled, attemptCancelled, att.claim.abandoned(), ctl.isExcluded("self"))
+			}
+		})
+	}
+	test("between attempts", func(ctl *workloadCtl) { ctl.setAttempt(nil) })
+	test("finished request", func(ctl *workloadCtl) { ctl.finish() })
+}

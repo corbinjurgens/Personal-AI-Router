@@ -1251,7 +1251,7 @@ func (f *facade) handleHTTPWithStreamIdle(w http.ResponseWriter, r *http.Request
 				engine:  candEngine,
 				model:   candModel,
 				waitCap: time.Duration(admissionWait) * time.Second,
-				cancel:  ctl.abortLocal,
+				cancel:  func() { ctl.abortLocalIf(att) },
 			})
 			rejectSelf := func(errText string, answer func()) bool {
 				cancelAttempt()

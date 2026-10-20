@@ -145,7 +145,17 @@ func (c *workloadCtl) cancel(regenerate bool) bool {
 // node is executing itself: before the commit the attempt moves on to another
 // candidate, after it the request ends as cancelled.
 func (c *workloadCtl) abortLocal() {
+	c.abortLocalIf(nil)
+}
+
+// abortLocalIf ignores a delayed availability callback for an attempt that
+// ended or was replaced. A nil expected attempt keeps abortLocal unqualified.
+func (c *workloadCtl) abortLocalIf(expected *attemptCtl) {
 	c.mu.Lock()
+	if expected != nil && (c.done || c.attempt != expected) {
+		c.mu.Unlock()
+		return
+	}
 	a := c.attempt
 	if a != nil && a.abortForRedispatch() {
 		c.excluded[a.nodeID] = true
