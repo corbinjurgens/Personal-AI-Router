@@ -131,15 +131,14 @@ function parseMessage(line: string): JsonRpcMessage | null {
  * `connect` yields a connected stream (starting the service if need be). The
  * first connection is attempted once. After an unexpected drop the client
  * reconnects with the finite `connect` retry list, then keeps trying `dial`
- * without starting the service until deliberately detached. Without `dial`,
- * exhausting the finite retry list reports `exit`.
+ * without starting the service until deliberately detached.
  */
 export class JsonRpcSocketClient extends EventEmitter<JsonRpcClientEvents> {
     readonly name: string
 
     private readonly connect: () => Promise<Duplex>
     private readonly reconnectDelaysMs: readonly number[]
-    private readonly dial?: () => Promise<Duplex>
+    private readonly dial: () => Promise<Duplex>
     private cancelReconnectWait?: () => void
     private socket: Duplex | null = null
     private started = false
@@ -156,7 +155,7 @@ export class JsonRpcSocketClient extends EventEmitter<JsonRpcClientEvents> {
         name: string,
         connect: () => Promise<Duplex>,
         reconnectDelaysMs: readonly number[] = DEFAULT_RECONNECT_DELAYS_MS,
-        dial?: () => Promise<Duplex>
+        dial: () => Promise<Duplex>
     ) {
         super()
         this.name = name
@@ -340,16 +339,11 @@ export class JsonRpcSocketClient extends EventEmitter<JsonRpcClientEvents> {
             if (this.epoch !== epoch || this.closed) return
             if (await this.connectOnce(epoch)) return
         }
-        const dial = this.dial
-        if (dial) {
-            const delay = this.reconnectDelaysMs.at(-1) ?? 10_000
-            while (this.epoch === epoch && !this.closed) {
-                await this.waitToReconnect(delay)
-                if (this.epoch !== epoch || this.closed) return
-                if (await this.connectOnce(epoch, dial)) return
-            }
-        } else if (this.epoch === epoch && !this.closed) {
-            this.giveUp()
+        const delay = this.reconnectDelaysMs.at(-1) ?? 10_000
+        while (this.epoch === epoch && !this.closed) {
+            await this.waitToReconnect(delay)
+            if (this.epoch !== epoch || this.closed) return
+            if (await this.connectOnce(epoch, this.dial)) return
         }
     }
 

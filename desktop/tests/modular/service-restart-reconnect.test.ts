@@ -107,6 +107,7 @@ describe('broker session hydration', () => {
             methods.push(method)
             return response(method)
         })
+        state.setSelfId('self')
         vi.mocked(emitBridgePush).mockClear()
         supervisor.start()
         const startedClient = startedClients[0]
@@ -118,6 +119,114 @@ describe('broker session hydration', () => {
         await supervisor.stop()
         vi.restoreAllMocks()
         vi.useRealTimers()
+    })
+
+    it('coalesces readiness while the current hydration pass is in flight', async () => {
+        const pending = deferred()
+        const defaultResponse = response
+        response = method =>
+            method === 'workloads:get-initial' ? pending.promise : defaultResponse(method)
+        ready()
+        await flush()
+        ready()
+        await flush()
+        expect(methods.filter(method => method === 'workloads:get-initial')).toHaveLength(1)
+        expect(refreshCount()).toBe(0)
+        pending.resolve(baseline('fresh'))
+        await flush()
+        expect(refreshCount()).toBe(1)
+    })
+
+    it('readiness after completed replay hydrates once per session', async () => {
+        ready()
+        await flush()
+        expect(refreshCount()).toBe(1)
+        ready()
+        await flush()
+        expect(methods.filter(method => method === 'workloads:get-initial')).toHaveLength(1)
+        expect(refreshCount()).toBe(1)
+    })
+
+    it.each<{ event: 'disconnected' | 'broker-restarted' }>([
+        { event: 'disconnected' },
+        { event: 'broker-restarted' }
+    ])('hydrates a fresh pass after $event invalidates a completed session', async ({ event }) => {
+        ready()
+        await flush()
+        expect(refreshCount()).toBe(1)
+        client.emit(event)
+        ready()
+        await flush()
+        expect(methods.filter(method => method === 'workloads:get-initial')).toHaveLength(2)
+        expect(refreshCount()).toBe(2)
+    })
+
+    it.each(['exit', 'teardown'])(
+        'hydrates a new attachment after %s invalidates a completed session',
+        async invalidation => {
+            ready()
+            await flush()
+            expect(refreshCount()).toBe(1)
+            if (invalidation === 'exit') {
+                client.emit('exit', { source: 'broker', code: null })
+            } else {
+                await supervisor.stop()
+            }
+            const startedClients: JsonRpcSocketClient[] = []
+            vi.mocked(JsonRpcSocketClient.prototype.start).mockImplementation(function (
+                this: JsonRpcSocketClient
+            ) {
+                startedClients.push(this)
+            })
+            supervisor.start()
+            const startedClient = startedClients[0]
+            if (!startedClient) throw new Error('Supervisor did not start a new transport client')
+            client = startedClient
+            ready()
+            await flush()
+            expect(methods.filter(method => method === 'workloads:get-initial')).toHaveLength(2)
+            expect(refreshCount()).toBe(2)
+        }
+    )
+
+    it('obsolete discovery inventory does not apply after replacement', async () => {
+        const old = deferred()
+        const defaultResponse = response
+        response = method => (method === 'engine:action' ? old.promise : defaultResponse(method))
+        ready()
+        await flush()
+        supervisor.refreshDiscoveryEngineModels('ollama')
+        await flush()
+        expect(methods.filter(method => method === 'engine:action')).toHaveLength(1)
+        client.emit('disconnected')
+        ready()
+        await flush()
+        const applied = vi.spyOn(state, 'setLocalEngineModels')
+        old.resolve({ models: [{ name: 'obsolete' }] })
+        await flush()
+        expect(applied).not.toHaveBeenCalled()
+    })
+
+    it('obsolete discovery rejection does not schedule retries or change fallback after replacement', async () => {
+        const old = Promise.withResolvers<JsonValue>()
+        const defaultResponse = response
+        response = method => (method === 'engine:action' ? old.promise : defaultResponse(method))
+        ready()
+        await flush()
+        supervisor.refreshDiscoveryEngineModels('ollama')
+        await flush()
+        expect(methods.filter(method => method === 'engine:action')).toHaveLength(1)
+        client.emit('disconnected')
+        ready()
+        await flush()
+        const fallback = vi.spyOn(state, 'fallbackLocalEngineModelsToDiscovery')
+        const timers = vi.getTimerCount()
+        const calls = methods.length
+        old.reject(new Error('old engine:action failed'))
+        await flush()
+        expect(vi.getTimerCount()).toBe(timers)
+        expect(fallback).not.toHaveBeenCalled()
+        expect(methods).toHaveLength(calls)
     })
 
     it('drops an old baseline released after replacement hydration and removes absent rows', async () => {

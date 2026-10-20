@@ -242,7 +242,8 @@ describe('reported node build row', () => {
 class FakeClient extends JsonRpcSocketClient {
     override call = vi.fn<JsonRpcSocketClient['call']>()
     constructor() {
-        super('broker', () => Promise.reject(new Error('No real connection allowed')))
+        const refuse = (): Promise<never> => Promise.reject(new Error('No real connection allowed'))
+        super('broker', refuse, undefined, refuse)
     }
 }
 

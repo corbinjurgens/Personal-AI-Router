@@ -280,7 +280,7 @@ describeUnix('JsonRpcSocketClient', () => {
         connect: () => Promise<net.Socket> = () => service.connect(),
         delays: readonly number[] = [10, 10]
     ): JsonRpcSocketClient {
-        const attached = new JsonRpcSocketClient('broker', connect, delays)
+        const attached = new JsonRpcSocketClient('broker', connect, delays, () => service.connect())
         client = attached
         return attached
     }
@@ -423,7 +423,7 @@ describeUnix('JsonRpcSocketClient', () => {
         await expect(waiting).rejects.toThrow('broker connection closed before replying')
     })
 
-    it('reports exit once every reconnect attempt has failed', async () => {
+    it('dials the service after every connect-or-start retry has failed', async () => {
         let attempts = 0
         const rpc = attach(() => {
             attempts++
@@ -435,10 +435,11 @@ describeUnix('JsonRpcSocketClient', () => {
         await until(() => rpc.running)
 
         service.dropClients()
-        await until(() => exited.mock.calls.length === 1)
+        await until(() => attempts === 4 && rpc.running)
 
         expect(attempts).toBe(4)
-        expect(exited).toHaveBeenCalledWith({ source: 'broker', code: null })
+        expect(exited).not.toHaveBeenCalled()
+        await expect(rpc.call('echo', { recovered: true })).resolves.toEqual({ recovered: true })
     })
 
     it('reports exit when the first connection fails', async () => {

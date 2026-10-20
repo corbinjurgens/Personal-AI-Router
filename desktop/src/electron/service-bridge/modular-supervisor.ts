@@ -382,7 +382,7 @@ class ModularSupervisor {
     private stoppedModelSentinels = new Set<EngineType>()
     private stoppedModelEngines = new Set<EngineType>()
     private successfulModelInventories = new Set<EngineType>()
-    private modelRefreshGenerations = new Map<EngineType, number>()
+    private modelRefreshGenerations = new Map<EngineType, { sessionGeneration: number }>()
     private discoveryModelRetryTimers = new Map<ProxyEngine, ReturnType<typeof setTimeout>>()
     private discoveryModelRetryAttempts = new Map<ProxyEngine, number>()
     // Authoritative value is the persisted ui-config `modularLogLevel`; the
@@ -1532,7 +1532,7 @@ class ModularSupervisor {
             void this.reconcileLocalNodeBridge(proxyEngine)
             this.emitStateRefreshIfHydrated()
         }
-        if (event.source === 'broker' && event.method === 'app:ready') {
+        if (event.source === 'broker' && event.method === 'app:ready' && !this.brokerReady) {
             this.brokerSessionGeneration++
             this.brokerHydrationDone = false
             this.performance.ready()
@@ -2370,7 +2370,6 @@ class ModularSupervisor {
      * list when the engine is stopped/uninstalled.
      */
     refreshManagedEngineModels(params: JsonValue | undefined): void {
-        const sessionGeneration = this.brokerSessionGeneration
         const obj = objectValue(params)
         if (!obj) return
         const engine = stringValue(obj.engine)
@@ -2401,12 +2400,11 @@ class ModularSupervisor {
             action: 'list_models'
         })
             .then(result => {
-                if (sessionGeneration !== this.brokerSessionGeneration) return
                 const models = parseListModelNames(result)
                 this.commitModelInventory(engineType, models, generation)
             })
             .catch(err => {
-                if (sessionGeneration !== this.brokerSessionGeneration) return
+                if (!this.isCurrentModelRefresh(engineType, generation)) return
                 this.handleModelRefreshFailure(engineType, generation)
                 log.verbose({
                     sublevel: 'engine-manager',
@@ -2441,21 +2439,34 @@ class ModularSupervisor {
                 this.commitModelInventory(engine, models, generation)
             })
             .catch(() => {
-                if (this.modelRefreshGenerations.get(engine) === generation) {
-                    this.scheduleDiscoveryModelRefreshRetry(engine)
-                }
+                if (!this.isCurrentModelRefresh(engine, generation)) return
+                this.scheduleDiscoveryModelRefreshRetry(engine)
                 this.handleModelRefreshFailure(engine, generation)
             })
     }
 
-    private beginModelRefresh(engine: EngineType): number {
-        const generation = (this.modelRefreshGenerations.get(engine) ?? 0) + 1
+    private beginModelRefresh(engine: EngineType): { sessionGeneration: number } {
+        const generation = { sessionGeneration: this.brokerSessionGeneration }
         this.modelRefreshGenerations.set(engine, generation)
         return generation
     }
 
-    private commitModelInventory(engine: EngineType, models: string[], generation: number): void {
-        if (this.modelRefreshGenerations.get(engine) !== generation) return
+    private isCurrentModelRefresh(
+        engine: EngineType,
+        generation: { sessionGeneration: number }
+    ): boolean {
+        return (
+            generation.sessionGeneration === this.brokerSessionGeneration &&
+            this.modelRefreshGenerations.get(engine) === generation
+        )
+    }
+
+    private commitModelInventory(
+        engine: EngineType,
+        models: string[],
+        generation: { sessionGeneration: number }
+    ): void {
+        if (!this.isCurrentModelRefresh(engine, generation)) return
         this.stoppedModelSentinels.delete(engine)
         this.successfulModelInventories.add(engine)
         if (isProxyEngine(engine)) {
@@ -2492,8 +2503,11 @@ class ModularSupervisor {
         if (resetAttempt) this.discoveryModelRetryAttempts.delete(engine)
     }
 
-    private handleModelRefreshFailure(engine: EngineType, generation: number): void {
-        if (this.modelRefreshGenerations.get(engine) !== generation) return
+    private handleModelRefreshFailure(
+        engine: EngineType,
+        generation: { sessionGeneration: number }
+    ): void {
+        if (!this.isCurrentModelRefresh(engine, generation)) return
         if (!isProxyEngine(engine)) return
         const wasStoppedSentinel = this.stoppedModelSentinels.delete(engine)
         if (wasStoppedSentinel || !this.successfulModelInventories.has(engine)) {
