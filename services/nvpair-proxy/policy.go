@@ -46,6 +46,30 @@ func (p *Proxy) handlePolicyMethod(msg *Message, method string) bool {
 		err = p.applySetEngineIntent(msg.Params)
 	case nodepolicy.MethodSetModelIdentity:
 		err = p.applySetModelIdentity(msg.Params)
+	case nodepolicy.MethodPrepareResident:
+		var in nodepolicy.PrepareResidentParams
+		err = decodeStrict(msg.Params, &in)
+		if err == nil {
+			result, err = p.admission.prepareResident(p.runID, in)
+		}
+	case nodepolicy.MethodDispatchResident:
+		var in nodepolicy.DispatchResidentParams
+		err = decodeStrict(msg.Params, &in)
+		if err == nil {
+			result, err = p.admission.dispatchResident(p.runID, in)
+		}
+	case nodepolicy.MethodFinishResident:
+		var in nodepolicy.FinishResidentParams
+		err = decodeStrict(msg.Params, &in)
+		if err == nil {
+			result, err = p.admission.finishResident(p.runID, in)
+		}
+	case nodepolicy.MethodObserveResident:
+		var in nodepolicy.ObserveResidentParams
+		err = decodeStrict(msg.Params, &in)
+		if err == nil {
+			result, err = p.admission.observeResident(p.runID, in)
+		}
 	default:
 		return false
 	}

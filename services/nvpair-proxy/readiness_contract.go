@@ -190,7 +190,11 @@ func (a *admissionController) setModelIdentity(engines map[string]nodepolicy.Eng
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.strict.identity = engines
-	return a.refreshStrictCapabilityLocked()
+	changed := a.refreshStrictCapabilityLocked()
+	// Launch-only changes can leave strict model entries unchanged, but a
+	// resident final grant binds the complete engine identity.
+	a.signalLocked()
+	return changed
 }
 
 // strictValidation is a request body validated against the qualification its
