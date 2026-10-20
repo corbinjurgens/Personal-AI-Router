@@ -33,6 +33,150 @@ func xaPlatform(t *testing.T) {
 	}
 }
 
+func TestXARemoteConfigurationService(t *testing.T) {
+	xaPlatform(t)
+	rf := newRemoteServiceFixture(t)
+	rf.start()
+	c := rf.readyClient()
+	var snap servicePolicySnapshot
+
+	if !t.Run("local grants through the service", func(t *testing.T) {
+		assertGrant := func(view managementSnapshot, peer string, allowed bool) {
+			t.Helper()
+			if view.Version != 1 || view.Revision == "" {
+				t.Fatal("service management snapshot lacks a valid version or revision")
+			}
+			for _, grant := range view.Grants {
+				if grant.PeerUUID == peer {
+					wantState := "denied"
+					if allowed {
+						wantState = "allowed"
+					}
+					if grant.Allowed != allowed || grant.State != wantState {
+						t.Fatalf("service grant for %q = %t/%s, want %t/%s", peer, grant.Allowed, grant.State, allowed, wantState)
+					}
+					return
+				}
+			}
+			t.Fatalf("service management snapshot lacks peer %q", peer)
+		}
+		view := decodeResult[managementSnapshot](t, *c.mustCall(t, "901", "cluster:get-remote-management", mustMarshal(t, map[string]any{})))
+		if view.Version != 1 || view.Revision == "" {
+			t.Fatal("initial service management snapshot is unavailable")
+		}
+		denied := decodeResult[managementSnapshot](t, *c.mustCall(t, "902", "cluster:set-remote-management", mustMarshal(t, map[string]any{
+			"peerUuid": "management-service-peer", "allowed": false, "expectedRevision": view.Revision,
+		})))
+		assertGrant(denied, "management-service-peer", false)
+		if denied.Revision == view.Revision {
+			t.Fatal("explicit service denial did not advance management revision")
+		}
+		view = decodeResult[managementSnapshot](t, *c.mustCall(t, "903", "cluster:get-remote-management", mustMarshal(t, map[string]any{})))
+		assertGrant(view, "management-service-peer", false)
+		if view.Revision != denied.Revision {
+			t.Fatal("service management read differs from the accepted denial revision")
+		}
+		allowed := decodeResult[managementSnapshot](t, *c.mustCall(t, "904", "cluster:set-remote-management", mustMarshal(t, map[string]any{
+			"peerUuid": "management-service-allowed", "allowed": true, "expectedRevision": view.Revision,
+		})))
+		assertGrant(allowed, "management-service-peer", false)
+		assertGrant(allowed, "management-service-allowed", true)
+		if allowed.Revision == view.Revision {
+			t.Fatal("explicit service allowance did not advance management revision")
+		}
+	}) {
+		return
+	}
+
+	if !t.Run("local policy edit with roles and served set", func(t *testing.T) {
+		before := decodeServicePolicy(t, c.mustCall(t, "905", "policy:get", nil))
+		draft := before
+		draft.Roles = map[string]nodepolicy.Role{"weak": {Engine: "ollama", Model: "xa-model"}}
+		draft.ServedModels = nodepolicy.ServedModels{{Engine: "ollama", Model: "xa-model"}}
+		m := c.mustCall(t, "906", "policy:set", mustMarshal(t, map[string]any{"policy": draft, "expectedPersistedRevision": before.Revision}))
+		var accepted struct {
+			Policy          nodepolicy.Policy `json:"policy"`
+			ActiveRevision  string            `json:"activeRevision"`
+			Activation      string            `json:"activation"`
+			ActivationError string            `json:"activationError,omitempty"`
+		}
+		if err := json.Unmarshal(m.Result, &accepted); err != nil {
+			t.Fatalf("decode service policy:set result: %v", err)
+		}
+		if err := accepted.Policy.Validate(); err != nil {
+			t.Fatalf("service policy:set returned an invalid policy: %v", err)
+		}
+		if accepted.Policy.Revision == "" || accepted.Policy.Revision == before.Revision || !reflect.DeepEqual(accepted.Policy.Roles, draft.Roles) || !reflect.DeepEqual(accepted.Policy.ServedModels, draft.ServedModels) || accepted.Activation != "pending" || accepted.ActiveRevision != "" || accepted.ActivationError != "" {
+			t.Fatal("service policy edit lacks a new revision, exact roles and served set, or pending activation")
+		}
+		snap = decodeServicePolicySnapshot(t, c.mustCall(t, "909", "policy:get", nil))
+		if !reflect.DeepEqual(snap.Policy, accepted.Policy) || snap.Activation != accepted.Activation || snap.ActiveRevision != accepted.ActiveRevision {
+			t.Fatal("service policy:get differs from the accepted policy:set result")
+		}
+		assertStoredPolicy(t, rf.policyPath(), snap.Policy)
+	}) {
+		return
+	}
+
+	if !t.Run("peers see the service-made policy", func(t *testing.T) {
+		for _, peer := range []struct {
+			name   string
+			client *http.Client
+		}{{"allowed", rf.allowed}, {"denied", rf.peer}} {
+			data := managementHTTP(t, peer.client, rf.ports.engineControl, http.MethodPost, "/v1/node-policy/get", map[string]any{}, http.StatusOK)
+			var view struct {
+				Policy nodepolicy.PeerPolicy `json:"policy"`
+			}
+			if err := json.Unmarshal(data, &view); err != nil {
+				t.Fatalf("decode %s peer service policy: %v", peer.name, err)
+			}
+			if !reflect.DeepEqual(view.Policy, snap.Policy.PeerProjection()) {
+				t.Fatalf("%s peer policy differs from the full service-made projection", peer.name)
+			}
+		}
+		before := readPolicyBytes(t, rf.policyPath())
+		managementHTTP(t, rf.peer, rf.ports.engineControl, http.MethodPost, "/v1/node-policy/set", map[string]any{
+			"policy": snap.Policy.PeerProjection(), "expectedPersistedRevision": snap.Policy.Revision,
+		}, http.StatusConflict)
+		if string(readPolicyBytes(t, rf.policyPath())) != string(before) {
+			t.Fatal("denied peer changed stored service policy bytes")
+		}
+		assertStoredPolicy(t, rf.policyPath(), snap.Policy)
+	}) {
+		return
+	}
+
+	if !t.Run("engine intent through the service", func(t *testing.T) {
+		decodeOBIntent(t, c.mustCall(t, "907", "engine:intent", nil).Result)
+		c.mustCall(t, "908", "engine:stop", mustMarshal(t, map[string]string{"engine": "ollama"}))
+		nextID := 1000
+		task1Eventually(t, "service intent push", 10*time.Second, func() bool {
+			m := c.mustCall(t, strconv.Itoa(nextID), "engine:intent", nil)
+			nextID++
+			return decodeOBIntent(t, m.Result).OffByEngine["ollama"] == engineintent.Local
+		})
+		status, _, body := managementHTTPResponse(t, rf.allowed, rf.ports.engineControl, http.MethodPost, "/v1/engines/start", map[string]any{"engine": "ollama"})
+		var refusal struct {
+			Code  string `json:"code"`
+			Error string `json:"error"`
+		}
+		if err := json.Unmarshal(body, &refusal); err != nil {
+			t.Fatalf("decode service local-Off refusal: %v", err)
+		}
+		if status != http.StatusConflict || refusal.Code != "local_veto" || refusal.Error != "ollama was turned off on the node itself; start it there" {
+			t.Fatalf("service local-Off refusal = HTTP %d/%s/%q, want exact local veto", status, refusal.Code, refusal.Error)
+		}
+	}) {
+		return
+	}
+
+	t.Run("clean stop", func(t *testing.T) {
+		assertServiceStoppedReply(t, c.mustCall(t, "910", "service/stop", nil))
+		rf.waitChild(rf.service, serviceStopTimeout)
+		rf.assertStopped()
+	})
+}
+
 func TestXARemoteConfigurationStatus(t *testing.T) {
 	xaPlatform(t)
 	f := newPolicyJointFixture(t)
