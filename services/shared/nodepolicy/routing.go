@@ -14,10 +14,15 @@ import (
 )
 
 // remoteDispatchAvailable says whether this build can dispatch to a provider
-// API. It is false until the hybrid dispatch path exists, so validation refuses
-// every setting that would enable remote or paid execution while still
-// accepting disabled provider configuration for staging.
+// API. Activation requires reviewed source changes after provider qualification,
+// native ledger durability/recovery checks and complete ingress, attempt and
+// cancellation acceptance. Until then validation accepts disabled configuration
+// for staging but refuses enabled deployments and remote or paid permissions.
 const remoteDispatchAvailable = false
+
+// PublicDispatchAvailable is the build's single public-dispatch availability
+// decision, shared by policy validation and runtime permission gates.
+func PublicDispatchAvailable() bool { return remoteDispatchAvailable }
 
 // CurrencyUSD is the only denomination routing money is expressed in.
 const CurrencyUSD = "USD"

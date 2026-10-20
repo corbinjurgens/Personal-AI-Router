@@ -86,8 +86,10 @@ func publicTestClient(t *testing.T, s *httptest.Server) *publicClient {
 }
 
 func publicTestPost(c *publicClient, ctx context.Context, budget publicBudget) (*publicResponse, error) {
-	return c.post(ctx, strings.NewReader(`{"model":"synthetic"}`), "selected-synthetic-key", false, budget)
+	return c.post(ctx, strings.NewReader(`{"model":"synthetic"}`), "selected-synthetic-key", false, budget, publicTestGuard)
 }
+
+func publicTestGuard(context.Context) error { return nil }
 
 func publicTestRead(t *testing.T, c *publicClient) ([]byte, error) {
 	t.Helper()
@@ -254,7 +256,7 @@ func TestPublicTransportHeaders(t *testing.T) {
 			})
 			c := publicTestClient(t, s)
 			b := &publicTestBudget{ceiling: 4096}
-			r, err := c.post(context.Background(), strings.NewReader("{}"), "selected-synthetic-key", mode == "SSE", b.acquire)
+			r, err := c.post(context.Background(), strings.NewReader("{}"), "selected-synthetic-key", mode == "SSE", b.acquire, publicTestGuard)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -298,7 +300,7 @@ func TestPublicTransportHeaders(t *testing.T) {
 			if _, err := c.post(context.Background(), strings.NewReader("{}"), key, false, func(int64) (func(), error) {
 				t.Error("credential refusal happened after budget")
 				return func() {}, nil
-			}); err == nil || strings.Contains(err.Error(), "synthetic") {
+			}, publicTestGuard); err == nil || strings.Contains(err.Error(), "synthetic") {
 				t.Fatalf("unsafe credential error: %v", err)
 			}
 		}

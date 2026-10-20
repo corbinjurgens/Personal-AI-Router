@@ -340,6 +340,7 @@ type Proxy struct {
 	// no store until main gives it the appdir, so an in-process proxy never
 	// touches a real data directory.
 	accounts *accountLedger
+	egress   *egressLease
 
 	// selfMu guards what this process has learned about its own node from
 	// discovery: its node id and, per engine, the models it last advertised.
@@ -358,11 +359,13 @@ type Proxy struct {
 // NewProxy builds a facade-less process host. Facades arrive via
 // enableFacade, so nothing is listening when this returns.
 func NewProxy(codec *Codec) *Proxy {
+	epoch := time.Now()
 	p := &Proxy{
 		codec:       codec,
 		runID:       newRunID(),
 		activity:    nodeactivity.NewReporter(activityReportInterval),
 		accounts:    newAccountLedger(),
+		egress:      newEgressLease(func() time.Duration { return time.Since(epoch) }),
 		performance: performanceQueue{wake: make(chan struct{}, 1)},
 	}
 	p.routing = &routingListener{host: p}

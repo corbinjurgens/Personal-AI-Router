@@ -28,6 +28,10 @@ func (p *Proxy) handlePolicyMethod(msg *Message, method string) bool {
 	var err error
 	var result any = map[string]bool{"ok": true}
 	switch method {
+	case nodepolicy.MethodRenewEgressLease:
+		result, err = p.renewEgressLease(msg.Params)
+	case nodepolicy.MethodRevokeEgressLease:
+		result, err = p.revokeEgressLease(msg.Params)
 	case nodepolicy.MethodSetPolicy:
 		var revision string
 		revision, err = p.applySetPolicy(msg.Params)
@@ -117,14 +121,28 @@ func (p *Proxy) applySetPolicy(params json.RawMessage) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if err := p.admission.activatePolicy(policy); err != nil {
+	token, err := p.beginPublicActivation(policy)
+	if err != nil {
 		return "", err
+	}
+	// Only one ledger activation may run at once. A newer transition may
+	// already have replaced admission while an older durable write finishes.
+	// Obsolete waiters must not overwrite the newer account snapshot.
+	p.egress.activationMu.Lock()
+	defer p.egress.activationMu.Unlock()
+	p.egress.mu.Lock()
+	current := p.egress.transition == token
+	p.egress.mu.Unlock()
+	if !current {
+		return policy.Revision, nil
 	}
 	// The account ledger never blocks activation: local routing must follow
 	// the policy even when the store is unavailable, and spending fails closed.
-	if err := p.accounts.applyRouting(policy.Routing, policy.Revision); err != nil {
+	accountErr := p.accounts.applyRouting(policy.Routing, policy.Revision)
+	if accountErr != nil {
 		slog.Error("provider account ledger unavailable; provider spending is refused", "reason", "ledger-unavailable")
 	}
+	p.completePublicActivation(token, accountErr)
 	p.routing.reconcile()
 	slog.Info("node policy applied", "revision", policy.Revision,
 		"profiles", len(policy.Profiles), "tiers", len(policy.Tiers),

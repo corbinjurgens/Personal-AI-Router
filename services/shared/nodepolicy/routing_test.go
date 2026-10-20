@@ -56,6 +56,42 @@ func stagedPolicy(t *testing.T) Policy {
 	return p
 }
 
+func TestPublicDispatchAvailable(t *testing.T) {
+	if PublicDispatchAvailable() {
+		t.Fatal("shipped build must keep public dispatch unavailable")
+	}
+	t.Run("accepts disabled staging", func(t *testing.T) {
+		p := stagedPolicy(t)
+		completeDeployment(&p.Routing.Deployments[0])
+		if err := p.Validate(); err != nil {
+			t.Fatalf("disabled complete deployment: %v", err)
+		}
+	})
+	reject := func(name string, edit func(*Policy)) {
+		t.Run(name, func(t *testing.T) {
+			p := stagedPolicy(t)
+			edit(&p)
+			if err := p.Validate(); err == nil || !strings.Contains(err.Error(), "cannot be enabled") {
+				t.Fatalf("Validate() = %v, want unavailable-dispatch refusal", err)
+			}
+		})
+	}
+	reject("rejects enabled deployment", func(p *Policy) {
+		completeDeployment(&p.Routing.Deployments[0])
+		p.Routing.Deployments[0].Enabled = true
+	})
+	reject("rejects remote permission", func(p *Policy) {
+		tr := p.Routing.Tiers["weak"]
+		tr.RemoteAllowed = true
+		p.Routing.Tiers["weak"] = tr
+	})
+	reject("rejects paid permission", func(p *Policy) {
+		tr := p.Routing.Tiers["weak"]
+		tr.RemoteAllowed, tr.PaidAllowed = true, true
+		p.Routing.Tiers["weak"] = tr
+	})
+}
+
 func TestParseAcceptsDisabledProviderConfiguration(t *testing.T) {
 	p := stagedPolicy(t)
 	if p.Revision != "12" || len(p.Routing.Accounts) != 2 || len(p.Routing.Deployments) != 2 {

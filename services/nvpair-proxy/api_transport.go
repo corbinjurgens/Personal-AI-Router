@@ -140,7 +140,9 @@ func (r *publicResponse) FirstBodyAt() time.Time {
 // post makes one attempt. Bounded classification metadata survives body errors.
 // A returned body owns its reservation until Close; consumers must defer Close,
 // including parser failures and panic unwinding.
-func (c *publicClient) post(ctx context.Context, prepared io.Reader, authorization string, stream bool, budget publicBudget) (*publicResponse, error) {
+var errPublicFinalGuard = errors.New("public final pre-send guard refused")
+
+func (c *publicClient) post(ctx context.Context, prepared io.Reader, authorization string, stream bool, budget publicBudget, guard func(context.Context) error) (*publicResponse, error) {
 	if authorization == "" || strings.ContainsFunc(authorization, unicode.IsControl) {
 		return nil, errors.New("public credential refused")
 	}
@@ -179,6 +181,12 @@ func (c *publicClient) post(ctx context.Context, prepared io.Reader, authorizati
 	}
 	if stream {
 		req.Header.Set("Accept", "text/event-stream")
+	}
+	// The callback is the definitive permission/lease acceptance. All fallible
+	// construction and headroom acquisition precedes it; no work may block
+	// between its successful return and Do. Release its locks before IO.
+	if guard == nil || ctx.Err() != nil || guard(ctx) != nil {
+		return nil, errPublicFinalGuard
 	}
 	resp, err := c.client.Do(req)
 	if err != nil {
