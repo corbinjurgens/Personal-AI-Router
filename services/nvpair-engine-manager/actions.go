@@ -49,6 +49,9 @@ func (e *Executor) Action(ctx context.Context, engine, action string, params jso
 	if !ok {
 		return nil, fmt.Errorf("engine %q has no action %q", engine, action)
 	}
+	if err := e.checkServingLoad(st, action, params); err != nil {
+		return nil, err
+	}
 	if act.RestartAfter {
 		done, err := e.admitMutation(engine)
 		if err != nil {
@@ -57,7 +60,17 @@ func (e *Executor) Action(ctx context.Context, engine, action string, params jso
 		defer done()
 	}
 	run := func() (json.RawMessage, error) {
-		res, err := e.dispatchAction(ctx, st, engine, action, act, params)
+		loadCtx, releaseServingLoad, err := e.guardServingLoad(ctx, st, action, params)
+		if err != nil {
+			return nil, err
+		}
+		// Unlock before admission cleanup and before leaving an outer content
+		// mutation. A multiply-bound action never acquires contentMu under opMu.
+		defer releaseServingLoad()
+		res, err := e.dispatchAction(loadCtx, st, engine, action, act, params)
+		// Authorization and dispatch share opMu. The existing restart owner
+		// takes it itself, so release the load guard before that step.
+		releaseServingLoad()
 		if err != nil {
 			return nil, err
 		}
@@ -376,6 +389,9 @@ func (e *Executor) runCommandOutput(ctx context.Context, argv []string) (string,
 	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
 	cmd.Env = childEnv(nil)
 	configureSysProcAttr(cmd)
+	// CommandContext's default Cancel kills only the command. Bound pipe
+	// draining too: descendants may survive and retain the output pipes.
+	cmd.WaitDelay = stopGrace(Runtime{})
 	out, err := cmd.Output()
 	if err != nil {
 		if ee, ok := err.(*exec.ExitError); ok {

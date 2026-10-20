@@ -5,6 +5,110 @@ SPDX-License-Identifier: Apache-2.0
 
 # Microservice: Engine Manager (`nvpair-engine-manager`)
 
+## Finite llama serving launch
+
+An optional versioned `runtime.serving` declaration activates the finite llama
+adapter for the llama.cpp family. It derives per-model total/per-slot context,
+slots, opaque placement, idle retention and finite router child capacity from
+the supported local preset subset. The shared declaration supplies the output
+and memory bounds and artifact digest provenance. It does not enable automatic
+residency or publish strict content identities.
+
+NE builds a canonical router launch with no PAIR-implicit envelope flags. The
+legacy context 8192/parallel 1 and retention/cache defaults become finite preset
+defaults. Explicit CLI options override model presets, which override global
+`[*]` presets; native child environment supplies otherwise absent source
+settings. Preview reports the resulting effective envelopes. Supported native
+CLI and `LLAMA_ARG_` environment options outside the envelope controls pass
+through unchanged, including inherited logging preferences. Router-only options
+are not materialized into model presets. [LAUNCH_TEXT.md](LAUNCH_TEXT.md#finite-llama-router-launch)
+lists the envelope controls and unsupported selections. For those controls,
+duplicate aliases, conflicting repeated values, CLI plus environment for one
+setting and unsupported forms fail closed. Preset include/inheritance/substitution,
+startup loads and automatic fitting are unsupported. Finite numeric fields
+reject auto/zero/negative/overflow.
+The single `llamaServingOptions` table derives native spellings/environment names
+from pinned llama.cpp `7fe450e1` `common/arg.cpp`. Unsupported batch/ubatch, KV
+type/SWA/attention/scaling, tensor/MoE/offload/loading placement, draft/projector
+allocation, router autoload and built-in model preset controls are rejected on
+CLI, in environment and in source presets. Main-model sampling offload,
+continuous batching, control-vector artifacts/layer placement and the default
+speculative preset are unsupported too. Long CLI options normalize underscores
+to hyphens before envelope lookup, exactly as the pinned native parser does;
+the original spelling is retained for duplicate-alias rejection. Paired switches include native
+`LLAMA_ARG_NO_*` compatibility variables, whose presence (even empty) matters;
+configuring both environment aliases is ambiguous. Logging controls still pass
+through. See the launch-text document for the supported/rejected boundary.
+Non-unified context divides exactly across slots; unified KV requires an
+explicit cap backed by total capacity. A cap without explicit source context
+derives total as slots times cap with checked arithmetic. Output must remain
+strictly below per-slot context. Total context, non-unified sequence context and
+any per-slot cap must preserve the pinned runtime's 256-token padding, including
+the int32 limit after rounding. Model IDs and preset sections must already be
+native-canonical, with no normalized collisions. Generated values must survive
+the native INI grammar exactly; paths containing comment markers or line breaks
+are rejected after absolute resolution, with a model field error and no path.
+Actual loaded training-context caps and props
+are separate runtime evidence, not inferred from cold configuration.
+
+Preview performs no probe, spawn, load, persistence or snapshot creation. It
+reads bounded source/configuration data and model samples only, returning a
+native-source approval digest and candidate local bindings. Apply requires the
+exact reviewed digest/bindings, prepares an immutable small snapshot before
+stopping a process or saving settings, and rejects changed inputs. Snapshots
+reference absolute existing source model paths, preserving HF symlinks and
+requiring all selected shards; model files are neither copied nor fully hashed.
+Start re-reads source bytes, resolved targets, stat and bounded samples directly
+before spawn, without a manager/state/content lock over file I/O. Recovery
+regenerates identical bytes from matching approved inputs. Each owned process
+retains its generation until exit. Same-stat middle-only artifact changes
+outside the samples remain outside this cheap local binding's assurance.
+Superseded pending generations and unconsumed cold generations at orderly
+executor shutdown are released independently of running-process leases.
+
+NE process stdout/stderr is suppressed in exported startup diagnostics and the
+log ring because native output can expose preset model paths. Failures report
+the NE validation/launch stage, native early-exit code or readiness-wait duration
+without copying native output or paths. Unconfigured launches retain their
+existing native-output and diagnostic behavior. A local sanitized native
+diagnostic remains deferred to the live validation gate.
+
+Readback distinguishes configured, owned-launch-validated and loaded-observed
+values. This adapter supplies the first two; observed values and strict
+qualification remain unverified. All manual load entry points converge at the
+action bound to `operations.load`: an undeclared exact model ID returns a typed
+field error before mutation admission and dispatch, with zero engine calls.
+An unlocked pre-check precedes mutation admission; restart-after actions acquire
+admission before the operation lock. A second declaration check and load dispatch
+share the per-engine operation lock for every manifest-bound load, including
+when the current record is absent, so
+settings/lifecycle replacement cannot send a load authorized under an older
+configuration to a newer process. If replacement wins before that lock, rejection
+releases admission without dispatch or saved-settings changes. Operation-lock
+cleanup runs before mutation cleanup reacquires admission and before the restart
+owner reacquires the operation lock. This preserves `switchAdmission` before
+`opMu` ordering. Declaration rejection is active for every engine with an
+applied serving record; engines without one retain request bytes, responses and
+errors while serializing loads with their lifecycle. Once the operation lock is
+acquired, dispatch owns validation and error precedence, including for an
+already-cancelled caller. Queued loads honor caller cancellation without waiting
+for the operation holder; held dispatches honor caller cancellation. Stop and
+StopAll cancel queued/held loads on the same engine before waiting for the
+operation lock, independently of startup cancellation. This applies with or
+without NE, including a command load while its server is Off: Stop wins over
+the racing load. A stop fence also cancels loads arriving during that wait.
+Command actions use exec's default cancellation to kill the command and bound
+output-pipe draining with the default five-second stop grace as WaitDelay.
+Pipes are released after that bound; descendants are not guaranteed to be
+terminated.
+The dispatch path does not acquire the operation or content lock; any outer
+content mutation is entered before the
+load operation lock and the load releases it before restart/admission cleanup.
+Other legacy launch behavior is unchanged. See
+[LAUNCH_TEXT.md](LAUNCH_TEXT.md#finite-llama-router-launch) for supported options
+and precedence, and [MANIFEST.md](MANIFEST.md#serving-declaration-override) for
+the declaration and artifact ordering.
+
 ## Automatic residency (internal parent IPC)
 
 `engine:reconcile-resident` is an internal parent-codec request, with shared
