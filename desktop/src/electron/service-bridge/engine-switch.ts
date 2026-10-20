@@ -109,7 +109,7 @@ function switchError(value: JsonValue | undefined): SwitchError | null {
     if (value === null) return null
     const row = object(value, ['code', 'kind', 'message'])
     const kind = errorKind(row.kind)
-    const code =
+    const defaultCode =
         kind === 'invalid_request' || kind === 'reused_id'
             ? -32602
             : kind === 'configuration_conflict'
@@ -117,6 +117,8 @@ function switchError(value: JsonValue | undefined): SwitchError | null {
               : kind === 'remote_veto'
                 ? -32011
                 : -32000
+    // Broker switchErrorDetail preserves PG denial as validation/-32012.
+    const code = kind === 'validation' && row.code === -32012 ? -32012 : defaultCode
     const message = text(row.message)
     if (row.code !== code || Buffer.byteLength(message, 'utf8') > 1024) return invalid()
     return { code, kind, message }

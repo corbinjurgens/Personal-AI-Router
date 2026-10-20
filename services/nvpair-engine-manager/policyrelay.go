@@ -60,7 +60,9 @@ var policyRoutePaths = map[string]string{
 // policyRouteClasses classifies the inbound ec policy routes once, here, so the
 // registry has no second opinion about what changes target state.
 var policyRouteClasses = map[string]controlClass{
-	controlPolicyGetPath:       controlRead,
+	controlPolicyGetPath: controlRead,
+	// SR served/resident edits use policy-set's fresh PG2 authorization and
+	// authenticated caller relay. Resident grants remain internal, with no ec route.
 	controlPolicySetPath:       controlMutation,
 	controlAvailabilitySetPath: controlMutation,
 }

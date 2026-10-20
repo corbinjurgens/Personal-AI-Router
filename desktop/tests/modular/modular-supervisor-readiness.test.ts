@@ -19,6 +19,13 @@ const mocks = vi.hoisted(() => ({
         clearWorkloads: vi.fn(),
         setLocalDiscoveryModelRefresher:
             vi.fn<ReturnType<typeof getModularBridgeState>['setLocalDiscoveryModelRefresher']>(),
+        applyEngineIntent: vi.fn<ReturnType<typeof getModularBridgeState>['applyEngineIntent']>(),
+        beginEngineIntentRead: vi.fn<
+            ReturnType<typeof getModularBridgeState>['beginEngineIntentRead']
+        >(() => 0),
+        getEngineIntent: vi.fn<ReturnType<typeof getModularBridgeState>['getEngineIntent']>(
+            () => null
+        ),
         getProxyPort: vi.fn(() => null),
         getPendingInvites: () => Array.from(mocks.pendingInviteIds),
         addPendingInvite: (invite: { inviteId: string; state: string }) => {
@@ -98,7 +105,8 @@ interface ReadinessHarness {
 const supervisor = getModularSupervisor() as unknown as ReadinessHarness
 
 function unusedClient(): JsonRpcSocketClient {
-    return new JsonRpcSocketClient('broker', () => Promise.reject(new Error('not connected')))
+    const connect = () => Promise.reject(new Error('not connected'))
+    return new JsonRpcSocketClient('broker', connect, undefined, connect)
 }
 
 function notify(method: string, params?: JsonRpcNotification['params']): void {

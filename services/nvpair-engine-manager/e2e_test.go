@@ -240,29 +240,74 @@ func TestE2EPrepareShutdownCancelsStartingEngine(t *testing.T) {
 type e2eManager struct {
 	cmd        *exec.Cmd
 	stdin      io.WriteCloser
+	stdout     io.ReadCloser
 	frames     chan frame
 	readerDone chan struct{}
+	readerStop chan struct{}
 	stopped    bool
 }
 
+type e2eFrameEnqueue struct {
+	id      string
+	blocked bool
+}
+
 func TestE2EShutdownDrainsSaturatedFrames(t *testing.T) {
-	manager := startE2EManager(t, t.TempDir(), t.TempDir())
+	enqueues := make(chan e2eFrameEnqueue)
+	manager := startE2EManagerObserved(t, t.TempDir(), t.TempDir(), enqueues)
+	deadline := time.NewTimer(5 * time.Second)
+	defer deadline.Stop()
 	// Unknown requests return frames without detecting or starting any engine.
-	for id := 1; id <= 256; id++ {
-		send(t, manager.stdin, id, "unknown-saturation-request", nil)
-	}
-	deadline := time.After(5 * time.Second)
-	for len(manager.frames) != cap(manager.frames) {
+	// Wait for each response's enqueue before sending another request, so setup
+	// never depends on how many requests the OS stdin pipe can hold.
+	for id := 1; ; id++ {
+		written := make(chan error, 1)
+		go func() {
+			written <- json.NewEncoder(manager.stdin).Encode(map[string]any{
+				"jsonrpc": "2.0", "id": id, "method": "unknown-saturation-request",
+			})
+		}()
 		select {
-		case <-deadline:
-			t.Fatal("frame queue did not saturate")
-		case <-time.After(time.Millisecond):
+		case err := <-written:
+			if err != nil {
+				t.Fatalf("send saturation request %d: %v", id, err)
+			}
+		case <-deadline.C:
+			_ = manager.stdin.Close()
+			select {
+			case <-written:
+			case <-time.After(5 * time.Second):
+				t.Fatal("saturation request writer did not stop after stdin closed")
+			}
+			t.Fatal("timed out writing saturation request")
+		}
+		select {
+		case enqueue := <-enqueues:
+			if enqueue.id != strconv.Itoa(id) {
+				t.Fatalf("enqueue response ID=%s, want %d", enqueue.id, id)
+			}
+			if enqueue.blocked {
+				if len(manager.frames) != cap(manager.frames) {
+					t.Fatal("blocked frame reader did not have a saturated queue")
+				}
+				t.Logf("saturated frame queue: %d/%d queued, response ID %s blocked", len(manager.frames), cap(manager.frames), enqueue.id)
+				manager.stop(t)
+				return
+			}
+		case <-manager.readerDone:
+			t.Fatal("frame reader exited before saturation")
+		case <-deadline.C:
+			t.Fatal("frame reader did not witness saturation")
 		}
 	}
-	manager.stop(t)
 }
 
 func startE2EManager(t *testing.T, cfg, home string, args ...string) *e2eManager {
+	t.Helper()
+	return startE2EManagerObserved(t, cfg, home, nil, args...)
+}
+
+func startE2EManagerObserved(t *testing.T, cfg, home string, enqueues chan<- e2eFrameEnqueue, args ...string) *e2eManager {
 	t.Helper()
 	cmd := exec.Command(managerBin, args...)
 	cmd.Env = overrideEnv(map[string]string{"APPDATA": cfg, "LOCALAPPDATA": cfg, "XDG_CONFIG_HOME": cfg, "HOME": home})
@@ -277,11 +322,16 @@ func startE2EManager(t *testing.T, cfg, home string, args ...string) *e2eManager
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
-	manager := &e2eManager{cmd: cmd, stdin: stdin, frames: make(chan frame, 128), readerDone: make(chan struct{})}
+	manager := &e2eManager{
+		cmd: cmd, stdin: stdin, stdout: stdout, frames: make(chan frame, 128),
+		readerDone: make(chan struct{}), readerStop: make(chan struct{}),
+	}
 	t.Cleanup(func() {
 		if !manager.stopped {
 			manager.stopped = true
-			_ = manager.shutdown()
+			if err := manager.shutdown(); err != nil {
+				t.Errorf("cleanup manager: %v", err)
+			}
 		}
 	})
 	// This parent explicitly acts as a broker that confirms model withdrawal.
@@ -312,10 +362,33 @@ func startE2EManager(t *testing.T, cfg, home string, args ...string) *e2eManager
 				}
 				continue
 			}
-			manager.frames <- f
+			enqueue := e2eFrameEnqueue{id: string(f.ID)}
+			select {
+			case manager.frames <- f:
+			default:
+				enqueue.blocked = true
+			}
+			if enqueues != nil && enqueue.id != "" {
+				select {
+				case enqueues <- enqueue:
+				case <-manager.readerStop:
+					return
+				}
+			}
+			if enqueue.blocked {
+				select {
+				case manager.frames <- f:
+				case <-manager.readerStop:
+					return
+				}
+			}
 		}
 		if err := sc.Err(); err != nil {
-			t.Errorf("read manager frames: %v", err)
+			select {
+			case <-manager.readerStop:
+			default:
+				t.Errorf("read manager frames: %v", err)
+			}
 		}
 	}()
 	waitNotify(t, manager.frames, "engine:ready", 5*time.Second)
@@ -338,31 +411,43 @@ func (m *e2eManager) stop(t *testing.T) {
 // scanning would report a closed file.
 func (m *e2eManager) shutdown() error {
 	_ = m.stdin.Close()
-	deadline := time.After(10 * time.Second)
+	// One Wait owner, after the reader joins, on both normal and forced exits.
+	done := make(chan error, 1)
+	go func() {
+		<-m.readerDone
+		done <- m.cmd.Wait()
+	}()
+	abort := func(reason string) error {
+		close(m.readerStop)
+		_ = m.stdout.Close()
+		_ = m.cmd.Process.Kill()
+		select {
+		case <-done:
+			return errors.New(reason)
+		case <-time.After(5 * time.Second):
+			return fmt.Errorf("%s; manager reader and process cleanup did not join", reason)
+		}
+	}
+	deadline := time.NewTimer(10 * time.Second)
+	defer deadline.Stop()
 	reading := true
 	for reading {
 		select {
 		case <-m.frames:
 		case <-m.readerDone:
 			reading = false
-		case <-deadline:
-			_ = m.cmd.Process.Kill()
-			_ = m.cmd.Wait()
-			return errors.New("manager stdout stayed open after stdin closed")
+		case <-deadline.C:
+			return abort("manager stdout stayed open after stdin closed")
 		}
 	}
-	done := make(chan error, 1)
-	go func() { done <- m.cmd.Wait() }()
 	select {
 	case err := <-done:
 		if err != nil {
 			return fmt.Errorf("manager exit: %w", err)
 		}
 		return nil
-	case <-deadline:
-		_ = m.cmd.Process.Kill()
-		<-done
-		return errors.New("manager did not exit after stdin closed")
+	case <-deadline.C:
+		return abort("manager did not exit after stdin closed")
 	}
 }
 

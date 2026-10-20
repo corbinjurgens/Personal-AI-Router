@@ -153,6 +153,8 @@ describe('engine switch receipt parser', () => {
         [-32602, 'reused_id'],
         [-32010, 'configuration_conflict'],
         [-32011, 'remote_veto'],
+        [-32012, 'validation'],
+        [-32000, 'validation'],
         [-32000, 'busy']
     ])('preserves error code %s and kind %s', (code, kind) => {
         const error = { code, kind, message: 'refused' }
@@ -163,6 +165,30 @@ describe('engine switch receipt parser', () => {
 })
 
 describe('engine switch status and notification parsers', () => {
+    it('accepts remote management denial with validation kind in status', () => {
+        const error = { code: -32012, kind: 'validation', message: 'Remote management denied' }
+        expect(
+            parseEngineSwitchStatus({
+                configurationRevision: revision,
+                receipt: { ...fixture(), error }
+            }).receipt?.error
+        ).toEqual(error)
+    })
+    it.each([
+        [-32012, 'remote_veto'],
+        [-32012, 'busy'],
+        [-32010, 'validation'],
+        [-32000, 'configuration_conflict'],
+        [-32602, 'validation']
+    ])('rejects invalid code %s and kind %s in result and status', (code, kind) => {
+        const value = { ...fixture(), error: { code, kind, message: 'invalid pair' } }
+        expect(() => parseEngineSwitchResult({ receipt: value })).toThrow(
+            'Invalid engine switch response.'
+        )
+        expect(() =>
+            parseEngineSwitchStatus({ configurationRevision: revision, receipt: value })
+        ).toThrow('Invalid engine switch response.')
+    })
     it('accepts an idle status and separately observed states', () => {
         expect(parseEngineSwitchStatus({ configurationRevision: revision })).toEqual({
             configurationRevision: revision
@@ -202,7 +228,7 @@ describe('engine switch status and notification parsers', () => {
 })
 
 describe('typed engine switch transport', () => {
-    it.each([-32010, -32011, -32000, -32602])(
+    it.each([-32012, -32010, -32011, -32000, -32602])(
         'preserves numeric refusal %s without classifying message text',
         async code => {
             const preload: PreloadServiceTransport = {

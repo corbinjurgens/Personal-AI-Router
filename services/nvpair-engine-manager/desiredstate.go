@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"nvpair-shared/engineintent"
 	settings "nvpair-shared/enginesettings"
 	"os"
 	"path/filepath"
@@ -70,6 +71,36 @@ func (s *desiredStateStore) get(engine string) (enabled, known bool, err error) 
 	}
 	enabled, known = state.Engines[engine]
 	return enabled, known, nil
+}
+
+// snapshot projects registered engines from one read under the store lock.
+// It never writes the file, including when legacy Off needs a local origin.
+func (s *desiredStateStore) snapshot(names []string) (engineintent.Snapshot, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	state, err := s.load()
+	if err != nil {
+		return engineintent.Snapshot{}, err
+	}
+	out := engineintent.Snapshot{
+		EnabledByEngine: make(map[string]bool, len(names)),
+		OffByEngine:     make(map[string]engineintent.Origin),
+	}
+	for _, name := range names {
+		enabled, known := state.Engines[name]
+		out.EnabledByEngine[name] = known && enabled
+		if known && !enabled {
+			origin, present := state.OffBy[name]
+			if !present {
+				origin = intentLocal
+			}
+			out.OffByEngine[name] = engineintent.Origin(origin)
+		}
+	}
+	if err := out.Validate(); err != nil {
+		return engineintent.Snapshot{}, err
+	}
+	return out, nil
 }
 
 // offLocally reports whether engine is saved Off by this node itself: an Off
