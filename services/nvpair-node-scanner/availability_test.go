@@ -241,12 +241,12 @@ func TestPauseHintIsNeverFetchedWithoutAPin(t *testing.T) {
 			t.Fatalf("%s: loopback plaintext selection failed: scheme=%q ok=%v", phase, scheme, ok)
 		}
 	}
-	refused := func(phase string) {
+	refused := func(phase string, discovering bool) {
 		t.Helper()
-		if _, _, _, ok := d.modelsClient("untrusted-host", "192.0.2.42", port, "principal-stranger", true); ok {
+		if _, _, _, ok := d.modelsClient("untrusted-host", "192.0.2.42", port, "principal-stranger", discovering); ok {
 			t.Fatalf("%s: selected an unpinned LAN transport", phase)
 		}
-		if _, ok := d.fetchModelsForPeer("untrusted-host", "192.0.2.42", port, "principal-stranger", true); ok {
+		if _, ok := d.fetchModelsForPeer("untrusted-host", "192.0.2.42", port, "principal-stranger", discovering); ok {
 			t.Fatalf("%s: unpinned fetch succeeded", phase)
 		}
 		if got := plainCalls.Load(); got != 0 {
@@ -260,12 +260,14 @@ func TestPauseHintIsNeverFetchedWithoutAPin(t *testing.T) {
 		}
 	}
 	loopback("standalone")
-	refused("standalone")
+	refused("standalone discovery", true)
+	refused("standalone periodic refresh", false)
 	clustertrusttest.Join(t, clusterDir, "pause-cluster", "principal-self", "principal-peer")
 	writeScannerAdmissionPin(t, clusterDir, "principal-peer", "pause-cluster", 1)
 	d.mesh.Refresh()
 	loopback("joined")
-	refused("joined")
+	refused("joined discovery", true)
+	refused("joined periodic refresh", false)
 	if _, ok := d.fetchModelsForPeer("not-the-self-uuid", "127.0.0.1", port, "principal-stranger", true); ok {
 		t.Fatal("controlled loopback refusal unexpectedly succeeded")
 	}
