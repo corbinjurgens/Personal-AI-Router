@@ -264,6 +264,13 @@ func NewManager(codec *Codec, configDir string, port int) (*Manager, error) {
 	if err := mgr.loadAdmission(); err != nil {
 		return nil, fmt.Errorf("load admission state: %w", err)
 	}
+	// Capture before membership/receipt/recovery code can mutate authority.
+	mgr.rosterMu.Lock()
+	err = mgr.captureRemoteManagementMigrationLocked()
+	mgr.rosterMu.Unlock()
+	if err != nil {
+		return nil, fmt.Errorf("capture remote management migration: %w", err)
+	}
 	if cid, epoch := mgr.currentAdmission(); cid != "" && epoch != 0 {
 		// admission.json is the crash-consistent local authority. Restore it
 		// before the broker reflects node-settings so a crash after pairing but
@@ -311,6 +318,17 @@ func NewManager(codec *Codec, configDir string, port int) (*Manager, error) {
 	}
 	if err := mgr.replayRemovalProofs(); err != nil {
 		return nil, fmt.Errorf("replay removal proofs: %w", err)
+	}
+	mgr.rosterMu.Lock()
+	err = mgr.finalizeRemoteManagementMigrationLocked()
+	mgr.rosterMu.Unlock()
+	if err != nil {
+		if mgr.remoteManagementStartupMustStop(err) {
+			return nil, fmt.Errorf("finalize remote management migration: %w", err)
+		}
+		// Invalid or lost permission storage remains unavailable. Never repair
+		// it by taking another snapshot of the now-mutated pin set.
+		log.Printf("remote management storage unavailable")
 	}
 	if err := mgr.initReverse(); err != nil {
 		return nil, err
@@ -465,6 +483,10 @@ func (m *Manager) handleMessage(msg *Message) {
 		}
 	case "cluster:get-node-id":
 		m.handleGetNodeID(msg)
+	case "cluster:get-remote-management":
+		m.handleGetRemoteManagement(msg)
+	case "cluster:set-remote-management":
+		m.handleSetRemoteManagement(msg)
 	case "cluster:set-identity":
 		m.handleSetIdentity(msg)
 	case "cluster:create":

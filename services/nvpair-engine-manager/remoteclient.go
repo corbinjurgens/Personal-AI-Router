@@ -39,10 +39,18 @@ const (
 	// codeLocalVeto is a start, load or resume the target node's own pause or
 	// Off forbids.
 	codeLocalVeto = -32011
+	// codeRemoteManagementDenied is a pinned peer's management operation the
+	// target's local remote-management permission refused. It is distinct from
+	// an unpinned 403 and from codeLocalVeto.
+	codeRemoteManagementDenied = -32012
 )
 
 // wireCodes names the typed codes in an ec 409 body and a stream error frame.
-var wireCodes = map[int]string{codePolicyConflict: "policy_conflict", codeLocalVeto: "local_veto"}
+var wireCodes = map[int]string{
+	codePolicyConflict:         "policy_conflict",
+	codeLocalVeto:              "local_veto",
+	codeRemoteManagementDenied: remoteManagementWireCode,
+}
 
 // codedError reaches the JSON-RPC client with its own code: the broker's
 // classification of a relayed policy call, or a typed code a peer answered.
@@ -220,6 +228,48 @@ func (c *remoteClient) getEngines(ctx context.Context) (json.RawMessage, error) 
 		return nil, fmt.Errorf("remote engines: HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(data)))
 	}
 	return json.RawMessage(data), nil
+}
+
+// getRemoteManagement reads the target's effective remote-management permission
+// for this node (GET /v1/remote-management). It is a caller-only read: the
+// target answers for the authenticated certificate, never for a peer selector.
+// A target that predates the route answers 404 (or 405 on an unknown method) and
+// is reported unsupported — never as an allowed peer.
+func (c *remoteClient) getRemoteManagement(ctx context.Context) (remoteManagementCapability, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.base+controlRemoteManagementPath, nil)
+	if err != nil {
+		return remoteManagementCapability{}, err
+	}
+	resp, err := c.controlClient(false).Do(req)
+	if err != nil {
+		c.forgetAddress()
+		return remoteManagementCapability{}, err
+	}
+	defer resp.Body.Close()
+	data, err := readRemoteResponse(resp.Body, 64<<10)
+	if err != nil {
+		return remoteManagementCapability{}, fmt.Errorf("remote management: read response: %w", err)
+	}
+	if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusMethodNotAllowed {
+		return remoteManagementCapability{Version: remoteManagementVersion, State: remoteManagementStateUnsupported}, nil
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return remoteManagementCapability{}, remoteStatusError("remote management", resp.StatusCode, data)
+	}
+	var view remoteManagementView
+	if err := json.Unmarshal(data, &view); err != nil {
+		return remoteManagementCapability{}, fmt.Errorf("remote management: decode response: %w", err)
+	}
+	if !view.valid() {
+		return remoteManagementCapability{}, fmt.Errorf("remote management: unrecognized response")
+	}
+	// An inconsistent target answer never becomes an allow.
+	return remoteManagementCapability{
+		Version:  view.Version,
+		Allowed:  view.Allowed && view.State == remoteManagementStateAllowed,
+		Revision: view.Revision,
+		State:    view.State,
+	}, nil
 }
 
 // postJSON POSTs body to a non-streaming ec endpoint and returns the raw JSON

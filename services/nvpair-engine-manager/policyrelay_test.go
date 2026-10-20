@@ -100,6 +100,7 @@ func pairedPolicyDirs(t *testing.T) (selfDir, peerDir string) {
 
 func TestRemotePolicyRelaysToPeerWithoutFurtherHop(t *testing.T) {
 	selfDir, peerDir := pairedPolicyDirs(t)
+	grantRemoteManagement(t, peerDir, "1", map[string]bool{"uuid-self": true})
 	server, calls := policyPeerServer(t, peerDir)
 	host, portText, _ := net.SplitHostPort(server.Listener.Addr().String())
 	port, _ := strconv.Atoi(portText)
@@ -229,6 +230,10 @@ func TestRemotePolicyGetPreservesRevisionString(t *testing.T) {
 
 func TestPolicyRoutesRejectStrangersAndBadBodies(t *testing.T) {
 	selfDir, peerDir := pairedPolicyDirs(t)
+	// The paired caller keeps its body-validation expectations, so it needs
+	// the grant that would otherwise refuse it before the body is read; the
+	// stranger below stays unpinned and keeps its 403.
+	grantRemoteManagement(t, peerDir, "1", map[string]bool{"uuid-self": true})
 	strangerDir := t.TempDir()
 	clustertrusttest.WriteKeypair(t, strangerDir, "uuid-stranger")
 	clustertrusttest.WriteAdmission(t, strangerDir, "cluster-1", 1)
@@ -389,6 +394,7 @@ func TestPolicyRoutesMapReplyErrorCodesToHTTPStatus(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			selfDir, peerDir := pairedPolicyDirs(t)
+			grantRemoteManagement(t, peerDir, "1", map[string]bool{"uuid-self": true})
 			server := policyReplyPeerServer(t, peerDir, c.code, c.message)
 			config, ok := clustertrust.Open(selfDir).ClientTLSConfig("uuid-peer")
 			if !ok {
@@ -439,6 +445,7 @@ func TestPolicyRoutesAnswerTypedCodesAsConflictBodies(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			selfDir, peerDir := pairedPolicyDirs(t)
+			grantRemoteManagement(t, peerDir, "1", map[string]bool{"uuid-self": true})
 			server := policyReplyPeerServer(t, peerDir, c.code, c.message)
 			config, ok := clustertrust.Open(selfDir).ClientTLSConfig("uuid-peer")
 			if !ok {
@@ -480,6 +487,7 @@ func TestRemotePolicyPreservesHTTPErrorClassification(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			selfDir, peerDir := pairedPolicyDirs(t)
+			grantRemoteManagement(t, peerDir, "1", map[string]bool{"uuid-self": true})
 			server := policyReplyPeerServer(t, peerDir, c.brokerCode, c.message)
 			host, portText, err := net.SplitHostPort(server.Listener.Addr().String())
 			if err != nil {

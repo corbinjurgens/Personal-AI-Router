@@ -14,7 +14,10 @@ import type {
     ClusterNodeIdentity,
     Invite,
     InviteState,
-    MembershipState
+    MembershipState,
+    RemoteManagementCapability,
+    RemoteManagementSnapshot,
+    RemoteManagementState
 } from '@/shared/types/cluster'
 import type { JsonObject, JsonValue } from './json-rpc-client'
 
@@ -138,4 +141,115 @@ export function parseNodeIdentity(value: JsonValue | undefined): ClusterNodeIden
         certFingerprint: stringValue(obj?.certFingerprint),
         clusterId: stringValue(obj?.clusterId)
     }
+}
+
+function exactFields(obj: JsonObject, fields: string[]): boolean {
+    return (
+        Object.keys(obj).length === fields.length &&
+        fields.every(field => Object.hasOwn(obj, field))
+    )
+}
+
+function boundedPayload(value: JsonValue | undefined, maxBytes: number): boolean {
+    try {
+        const json = JSON.stringify(value)
+        return json !== undefined && Buffer.byteLength(json, 'utf8') <= maxBytes
+    } catch {
+        return false
+    }
+}
+
+function permissionRevision(value: JsonValue | undefined): value is string {
+    return (
+        typeof value === 'string' &&
+        /^[1-9][0-9]{0,19}$/.test(value) &&
+        (value.length < 20 || value <= '18446744073709551615')
+    )
+}
+
+function permissionPrincipal(value: JsonValue | undefined): value is string {
+    return (
+        typeof value === 'string' &&
+        value !== '' &&
+        Buffer.byteLength(value, 'utf8') <= 128 &&
+        value !== '.' &&
+        value !== '..' &&
+        !/[/\\:\p{White_Space}\p{Cc}]/u.test(value)
+    )
+}
+
+function permissionState(value: JsonValue | undefined): value is RemoteManagementState {
+    return (
+        value === 'allowed' ||
+        value === 'denied' ||
+        value === 'unreviewed' ||
+        value === 'unavailable'
+    )
+}
+
+/** Invalid input is an invalidation barrier, including on the live push path. */
+export function parseRemoteManagementSnapshot(
+    value: JsonValue | undefined
+): RemoteManagementSnapshot {
+    const unavailable: RemoteManagementSnapshot = { version: 1, revision: '', grants: [] }
+    if (!boundedPayload(value, 1 << 20)) return unavailable
+    const obj = objectValue(value)
+    if (
+        !obj ||
+        !exactFields(obj, ['version', 'revision', 'grants']) ||
+        obj.version !== 1 ||
+        (obj.revision !== '' && !permissionRevision(obj.revision)) ||
+        !Array.isArray(obj.grants) ||
+        obj.grants.length > 1024
+    )
+        return unavailable
+    const grants: RemoteManagementSnapshot['grants'] = []
+    const peers = new Set<string>()
+    for (const value of obj.grants) {
+        const grant = objectValue(value)
+        if (
+            !grant ||
+            !exactFields(grant, ['peerUuid', 'allowed', 'state']) ||
+            !permissionPrincipal(grant.peerUuid) ||
+            peers.has(grant.peerUuid) ||
+            typeof grant.allowed !== 'boolean' ||
+            !permissionState(grant.state) ||
+            grant.allowed !== (grant.state === 'allowed') ||
+            (obj.revision === '' && grant.state !== 'unavailable')
+        )
+            return unavailable
+        peers.add(grant.peerUuid)
+        grants.push({ peerUuid: grant.peerUuid, allowed: grant.allowed, state: grant.state })
+    }
+    return { version: 1, revision: obj.revision, grants }
+}
+
+/** Remote results never accept the local full-list shape or invent a usable revision. */
+export function parseRemoteManagementCapability(
+    value: JsonValue | undefined
+): RemoteManagementCapability {
+    const unavailable: RemoteManagementCapability = {
+        version: 1,
+        revision: '',
+        allowed: false,
+        state: 'unavailable'
+    }
+    if (!boundedPayload(value, 64 << 10)) return unavailable
+    const obj = objectValue(value)
+    if (
+        !obj ||
+        !exactFields(obj, ['version', 'revision', 'allowed', 'state']) ||
+        obj.version !== 1 ||
+        typeof obj.allowed !== 'boolean' ||
+        (!permissionState(obj.state) && obj.state !== 'unsupported') ||
+        obj.allowed !== (obj.state === 'allowed')
+    )
+        return unavailable
+    if (obj.state === 'unavailable' || obj.state === 'unsupported') {
+        return obj.revision === ''
+            ? { version: 1, revision: '', allowed: false, state: obj.state }
+            : unavailable
+    }
+    if (!permissionRevision(obj.revision)) return unavailable
+    return { version: 1, revision: obj.revision, allowed: obj.allowed, state: obj.state }
 }

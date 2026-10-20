@@ -112,6 +112,9 @@ func TestSettingsPairedMutationPushObserversAndRevocation(t *testing.T) {
 	for _, dir := range []string{b, c, stranger} {
 		settingsPin(t, dir, "a", certA)
 	}
+	// The paired peers mutate this target's settings, so both need the grant;
+	// the stranger is never pinned here and keeps its 403.
+	grantRemoteManagement(t, a, "1", map[string]bool{"b": true, "c": true})
 	mesh := clustertrust.Open(a)
 	exec := settingsExecutor(t, false)
 	snapshot := settings.Snapshot{NodeID: "a-host", Engine: "ollama", Revision: 1, Epoch: "epoch-a", Sequence: 1, Phase: "idle", Settings: settings.Config{ServerPort: 12000, ProxyPort: 12001, LaunchText: "managed serve"}}
@@ -229,6 +232,7 @@ func TestSettingsRemoteOnlyCORSIsLocalOnly(t *testing.T) {
 	b, certB := settingsMesh(t, "b")
 	settingsPin(t, a, "b", certB)
 	settingsPin(t, b, "a", certA)
+	grantRemoteManagement(t, a, "1", map[string]bool{"b": true})
 	mesh := clustertrust.Open(a)
 	exec := settingsExecutor(t, false)
 	exec.settingsParent = func(context.Context, string, settings.Request, string) (json.RawMessage, error) {
@@ -376,6 +380,7 @@ func TestSettingsRelayErrorCodesReachThePairedOrigin(t *testing.T) {
 			}
 			exec.settingsParent = relay.call
 			f := newRemoteReverseFixture(t, func(mesh *clustertrust.Mesh) http.Handler { return (&controlServer{exec: exec, mesh: mesh}).mux() })
+			grantRemoteManagement(t, f.peerDir, "1", map[string]bool{"uuid-self": true})
 			ctx := remoteFixtureContext(t)
 			_, err := f.client(t, ctx).postJSON(ctx, settingsPath+"apply", "ollama", settings.Request{Engine: "ollama", ExpectedRevision: 7, RequestID: "request"})
 			if err == nil {

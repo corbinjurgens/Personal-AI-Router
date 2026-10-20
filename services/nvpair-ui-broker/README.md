@@ -321,6 +321,34 @@ Shared lifecycle for all workers:
 
 ## Node policy
 
+Remote policy, availability, settings Apply and switch writes require this
+target's admission-bound remote-management grant. Engine-manager first gates
+the authenticated mTLS caller; the broker freshly rechecks the shared
+`clustertrust.Mesh.RemoteManagement` predicate under each owning acceptance
+lock, so revocation also blocks writes queued on those locks. Peer relays must
+carry a nonempty verified caller from the current engine-manager worker/source;
+public parameters cannot impersonate a local caller. Local callers and internal
+cleanup of already accepted work retain their existing paths. Reads and
+permitted inference remain available without a grant.
+
+Permission denial is `-32012/remote_management_denied`, independently of local
+veto `-32011` and revision conflict `-32010`. Local pause/Off and private-policy,
+CORS, served/resident and admission checks remain authoritative even for allowed
+peers. Revocation prevents new acceptance; it does not stop or unpair the node
+or undo accepted work, whose target-owned completion/recovery and receipt reads
+remain available. The broker logs caller/target UUID, family, decision/state,
+revision, bounded reason and known operation ID without request bodies or secrets.
+
+Cluster-manager alone owns grants, the one-time existing-pin migration and local
+CAS list/set/change notifications. Desktop Cluster Settings and TUI Nodes edit
+permission on the current device through the existing local service endpoint;
+neither exposes a remote setter. Each side's pairing boolean chooses authority
+over its own device. See the
+[cluster-manager contract](../nvpair-cluster-manager/README.md#remote-management-permission).
+Remote effective readback uses `engine:remote-management-get {nodeId}` and is
+read-only. Old targets report unsupported; pre-PG target downgrades restore
+that executable's unrestricted pinned-peer management behavior.
+
 The fork's node policy (see `FORK_DESIGN.md` §3 at the repository root) is owned
 by the broker. Its schema, defaults and validation live in
 `nvpair-shared/nodepolicy`; the broker is the only writer of the file and the

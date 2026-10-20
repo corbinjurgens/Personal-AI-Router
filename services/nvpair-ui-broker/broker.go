@@ -1088,10 +1088,28 @@ func (b *Broker) pushClusterIdentityToNodeInfo() {
 	}
 }
 
+// enginePeerRelayNotification reports whether method is a relay notification
+// engine-manager forwards for a paired node. Only the worker currently bound as
+// this broker's engine manager may serve or answer one: a retired worker's
+// request is stale and must not reach a broker-owned writer.
+func enginePeerRelayNotification(method string) bool {
+	switch method {
+	case policyRelayRequestMethod, policyRelayCancelMethod,
+		"engine:settings-request", "engine:settings-cancel",
+		"engine:switch-request", "engine:switch-cancel":
+		return true
+	}
+	return false
+}
+
 // forwardEngineNotificationFrom handles the bound engine-manager's notifications.
 // Identity and running-state observations are fenced by its source; control-plane
 // requests and subscribed client notifications follow their respective relays.
 func (b *Broker) forwardEngineNotificationFrom(source *engineManagerSource, method string, params json.RawMessage) {
+	if enginePeerRelayNotification(method) && !b.engineManagerSourceCurrent(source) {
+		slog.Debug("dropped a peer relay notification from a retired engine manager", "method", method)
+		return
+	}
 	if method == nodepolicy.MethodModelMutationRequest {
 		// Internal to engine-manager and the broker: answered below, never
 		// forwarded to engine:subscribe'd clients.
@@ -1113,14 +1131,14 @@ func (b *Broker) forwardEngineNotificationFrom(source *engineManagerSource, meth
 			}
 		}
 	}
-	if b.handleSwitchEngineNotification(method, params) {
+	if b.handleSwitchEngineNotification(source, method, params) {
 		return
 	}
-	if b.handlePolicyEngineNotification(method, params) {
+	if b.handlePolicyEngineNotification(source, method, params) {
 		return
 	}
 	if method == "engine:settings-request" {
-		b.handleSettingsRelay(params)
+		b.handleSettingsRelay(source, params)
 		return
 	}
 	if method == "engine:settings-cancel" {

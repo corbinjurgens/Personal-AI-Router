@@ -389,11 +389,50 @@ bound for the life of the process rather than only when clustered at startup —
 node joins and leaves a cluster while engine-manager runs, and a surface chosen
 at bind time would stay dark until the process was restarted.
 
+Pinning authenticates the caller; it does not authorize changes. The `ec`
+registry explicitly classifies every route as read or mutation, including POST
+reads such as policy get and settings get/preview. Before dispatching any
+mutation, the common gate freshly reads
+`clustertrust.Mesh.RemoteManagement` for the verified mTLS UUID. Install, pull,
+start/stop, load/unload/delete, settings apply, switch, policy edits and
+pause/resume all require an effective allow. Unclassified routes fail closed.
+Missing, corrupt, pending or changing permission state denies; an earlier UI
+read never authorizes a request. Broker-owned writes recheck at their locked
+acceptance point after queueing. Direct operations accept at this gate; later
+lifecycle/content lock waits are part of that accepted operation.
+
+Permission refusal is HTTP 409 with `code:"remote_management_denied"`, preserved
+as JSON-RPC `-32012` by ordinary and streaming clients, before progress headers
+or side effects. It is distinct from an unpinned 403, local veto
+`-32011/local_veto` and conflict `-32010`. Reads, status, model exports and
+permitted inference stay available without management permission. Pull-copy
+reads the source and writes the local requester; it grants no remote destination
+write authority. No inbound destination-copy route exists.
+
+`GET /v1/remote-management` returns only this authenticated caller's
+`{version:1, allowed, revision, state}`, without a peer selector or grant list.
+The local client method is `engine:remote-management-get {nodeId}` using the
+existing pinned direct/reverse client. States are `allowed`, `denied`,
+`unreviewed`, `unavailable`, or client-reported `unsupported` for an old target's
+404/405. Only a fresh `allowed` result reports permission; it is not a promise
+that a later mutation will pass. There is no remote setter. Grants and the
+one-time existing-pin migration belong to
+[cluster-manager](../nvpair-cluster-manager/README.md#remote-management-permission).
+
+Revocation blocks new acceptance, not already accepted target work, which can
+finish/reconcile and remains readable through existing progress/receipts. Local
+pause/Off cancellation still applies; grants cannot override it or private,
+CORS, served/resident and admission protections. Downgrading the target to
+pre-PG software restores that executable's old pinned-peer behavior. The gate
+logs caller/target UUID, bounded operation family/class, decision, permission
+revision and reason, without paths, queries, bodies or secrets.
+
 Endpoints (all under `/v1`):
 
 | Route | Shape | Purpose |
 |---|---|---|
 | `GET /v1/engines` | JSON | remote `engine:get-installed` |
+| `GET /v1/remote-management` | JSON | caller-only effective permission, no grant list or setter |
 | `POST /v1/engines/install` | NDJSON stream | remote install (+ optional start) with live progress |
 | `POST /v1/models/pull` | NDJSON stream | remote model pull with live progress |
 | `POST /v1/engines/start` | JSON | remote start → `EngineStatus` |
@@ -413,9 +452,10 @@ pin, acts, and answers with `policy:reply {id, result, error?, errorCode?}`.
 Every error carries a JSON-RPC `errorCode`: `-32602` for invalid parameters,
 including missing `expectedPersistedRevision`, invalid policy or availability;
 `-32010` for a revision conflict; `-32011` for a resume the local veto refuses;
+`-32012` for remote-management denial;
 `-32000` for a save failure or other operational failure. The route maps
-`-32602` to HTTP 400, `-32010` and `-32011` to HTTP 409 with the body
-`{"error": <diagnostic>, "code": "policy_conflict" | "local_veto"}`, and other
+`-32602` to HTTP 400, `-32010`, `-32011` and `-32012` to HTTP 409 with the body
+`{"error": <diagnostic>, "code": "policy_conflict" | "local_veto" | "remote_management_denied"}`, and other
 failures to a plain-text HTTP 409. The origin's remote-policy methods map HTTP
 400 to JSON-RPC `-32602`, a typed 409 to its code, and other HTTP failures to
 `-32000`, preserving the diagnostic. No classification depends

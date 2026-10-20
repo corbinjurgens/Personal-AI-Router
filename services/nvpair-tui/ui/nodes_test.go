@@ -12,7 +12,150 @@ import (
 	"time"
 
 	"nvpair-tui/rpc"
+
+	tea "github.com/charmbracelet/bubbletea"
 )
+
+func TestPairingCarriesLocalManagementChoice(t *testing.T) {
+	for _, tc := range []struct {
+		name, path string
+		allow      bool
+	}{
+		{"discovered defaults to block", "discovered", false},
+		{"discovered allows", "discovered", true},
+		{"manual defaults to block", "manual", false},
+		{"manual allows", "manual", true},
+		{"inbound defaults to block", "inbound", false},
+		{"inbound allows", "inbound", true},
+		{"decline omits choice", "decline", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			client, broker := nodeInfoRPCFixture(t)
+			v := newNodesView(client)
+			v.SetSize(180, 40)
+			v.feeds.discovered = []availableNode{{HostUUID: "peer", Name: "Peer", IPAddress: "192.0.2.1"}}
+			v.rebuild()
+			switch tc.path {
+			case "discovered":
+				v.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("p")})
+			case "manual":
+				v.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("n")})
+				v.input.SetValue("192.0.2.2:14322")
+			case "inbound", "decline":
+				v.receiveInvite(clusterInvite{InviteID: "inbound", FromNodeName: "Peer"})
+				v.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("a")})
+				v.input.SetValue("123456")
+			}
+			if !strings.Contains(v.View(), "(*) Block this peer from changing this device") {
+				t.Fatalf("choice did not default to Block: %s", v.View())
+			}
+			if tc.allow {
+				v.handleKey(tea.KeyMsg{Type: tea.KeyTab})
+			}
+			var cmd tea.Cmd
+			if tc.path == "decline" {
+				v.cancelInput()
+				cmd = v.respondToInvite(false, "")
+			} else {
+				cmd = v.handleKey(tea.KeyMsg{Type: tea.KeyEnter})
+			}
+			request, result := terminalControlsReply(t, broker, cmd, &rpc.Message{Result: []byte(`{"inviteId":"session","state":"pending","pin":"123456"}`)})
+			var params map[string]json.RawMessage
+			if err := json.Unmarshal(request.Params, &params); err != nil {
+				t.Fatal(err)
+			}
+			choice, present := params["allowRemoteManagement"]
+			if tc.path == "decline" {
+				if present {
+					t.Fatalf("decline carried choice: %s", request.Params)
+				}
+			} else {
+				var allowed bool
+				if !present {
+					t.Fatal("required allowRemoteManagement omitted")
+				}
+				if err := json.Unmarshal(choice, &allowed); err != nil {
+					t.Fatal(err)
+				}
+				if allowed != tc.allow {
+					t.Fatalf("allowRemoteManagement = %t, want %t", allowed, tc.allow)
+				}
+			}
+			if tc.path == "inbound" || tc.path == "decline" {
+				if request.Method != "cluster:respond-to-invite" || string(params["inviteId"]) != `"inbound"` || string(params["accept"]) != map[bool]string{true: "true", false: "false"}[tc.path != "decline"] {
+					t.Fatalf("wrong inbound frame: %s %s", request.Method, request.Params)
+				}
+				if tc.path == "inbound" && string(params["pin"]) != `"123456"` {
+					t.Fatalf("PIN lost: %s", request.Params)
+				}
+			} else {
+				if request.Method != "cluster:invite-node" {
+					t.Fatalf("method = %s", request.Method)
+				}
+				wantAddress := `"192.0.2.1"`
+				if tc.path == "manual" {
+					wantAddress = `"192.0.2.2"`
+				}
+				if string(params["address"]) != wantAddress {
+					t.Fatalf("address = %s", params["address"])
+				}
+				if tc.path == "discovered" && string(params["nodeId"]) != `"peer"` {
+					t.Fatal("discovered target identity lost")
+				}
+				if tc.path == "manual" && string(params["port"]) != "14322" {
+					t.Fatal("manual port lost")
+				}
+			}
+			// Submission freezes the choice even before its reply is delivered.
+			v.togglePairingChoice()
+			if tc.path == "inbound" && v.inboundAllow != tc.allow {
+				t.Fatal("submitted inbound choice changed")
+			}
+			if (tc.path == "manual" || tc.path == "discovered") && v.outboundAllow != tc.allow {
+				t.Fatal("submitted outbound choice changed")
+			}
+			v.Update(result)
+		})
+	}
+}
+
+func TestPairingChoiceResetsAndRejectsStaleGeneration(t *testing.T) {
+	v := newNodesView(nil)
+	v.beginInput(nodesInputInviteAddress, "host")
+	v.togglePairingChoice()
+	oldGeneration := v.inviteGeneration
+	v.handleKey(tea.KeyMsg{Type: tea.KeyEsc})
+	if v.outboundAllow {
+		t.Fatal("cancelled outbound choice retained Allow")
+	}
+	v.beginInput(nodesInputInviteAddress, "host")
+	if v.outboundAllow {
+		t.Fatal("new generation retained Allow")
+	}
+	v.Update(nodeInviteMsg{generation: oldGeneration, inviteID: "old", pin: "123456"})
+	if v.outboundInviteID != "" || v.outboundPIN != "" {
+		t.Fatal("stale reply restored old invite")
+	}
+	v.cancelInput()
+	v.receiveInvite(clusterInvite{InviteID: "one", FromNodeName: "First"})
+	v.beginInput(nodesInputPin, "PIN")
+	v.togglePairingChoice()
+	v.handleKey(tea.KeyMsg{Type: tea.KeyEsc})
+	if v.inboundAllow {
+		t.Fatal("cancelled PIN editor retained Allow")
+	}
+	v.beginInput(nodesInputPin, "PIN")
+	v.togglePairingChoice()
+	v.receiveInvite(clusterInvite{InviteID: "two", FromNodeName: "Second"})
+	v.dropInbound("one")
+	if v.inboundAllow || v.inbound == nil || v.inbound.InviteID != "two" {
+		t.Fatal("next invite did not reset to Block")
+	}
+	v.Update(pairingResultMsg{inviteID: "one", state: "paired"})
+	if v.inbound == nil || v.inbound.InviteID != "two" {
+		t.Fatal("stale pairing outcome removed next invite")
+	}
+}
 
 func TestPendingPINWaitsForExactInvite(t *testing.T) {
 	v := newNodesView(nil)

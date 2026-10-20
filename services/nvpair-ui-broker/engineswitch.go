@@ -69,6 +69,12 @@ func switchErrorDetail(err error, kind string) *settings.SwitchError {
 		value := coded.detail
 		return &value
 	}
+	var denied *remoteManagementDeniedError
+	if errors.As(err, &denied) {
+		// The permission refusal keeps its own code across every switch reply
+		// path; it is not a local veto (-32011) or a configuration conflict.
+		return &settings.SwitchError{Code: codeRemoteManagementDenied, Kind: settings.SwitchErrorValidation, Message: denied.Error()}
+	}
 	var storeErr *engineSwitchStoreError
 	if errors.As(err, &storeErr) {
 		kind = storeErr.Kind
@@ -465,6 +471,10 @@ func (b *Broker) acceptEngineSwitch(ctx context.Context, p settings.SwitchReques
 		b.engineConfigMu.Unlock()
 		return settings.SwitchResult{}, err
 	}
+	if err := b.authorizeRemoteManagement(caller, "switch", p.RequestID); err != nil {
+		b.engineConfigMu.Unlock()
+		return settings.SwitchResult{}, err
+	}
 	if err := b.loadEngineSwitchLocked(); err != nil {
 		b.engineConfigMu.Unlock()
 		return settings.SwitchResult{}, err
@@ -498,6 +508,11 @@ func (b *Broker) acceptEngineSwitch(ctx context.Context, p settings.SwitchReques
 		return settings.SwitchResult{}, err
 	}
 	if err := b.authorizeSettingsCallerLocked(caller); err != nil {
+		return settings.SwitchResult{}, err
+	}
+	// Recheck after the second lock acquisition: permission can change after
+	// the first check and before receipt acceptance.
+	if err := b.authorizeRemoteManagement(caller, "switch", p.RequestID); err != nil {
 		return settings.SwitchResult{}, err
 	}
 	if old, ok := b.engineSwitch.store.Lookup(p.RequestID); ok {
@@ -1143,7 +1158,7 @@ func (b *Broker) handleEngineSwitch(msg *Message) {
 	}
 }
 
-func (b *Broker) handleSwitchEngineNotification(method string, raw json.RawMessage) bool {
+func (b *Broker) handleSwitchEngineNotification(source *engineManagerSource, method string, raw json.RawMessage) bool {
 	switch method {
 	case settings.SwitchChangedNotification:
 		var changed settings.SwitchChanged
@@ -1165,13 +1180,16 @@ func (b *Broker) handleSwitchEngineNotification(method string, raw json.RawMessa
 		}
 		return true
 	case "engine:switch-request":
+		if !b.engineManagerSourceCurrent(source) {
+			return true
+		}
 		var p struct {
 			ID     string          `json:"id"`
 			Method string          `json:"method"`
 			Caller string          `json:"caller"`
 			Params json.RawMessage `json:"params"`
 		}
-		if json.Unmarshal(raw, &p) != nil || p.ID == "" || p.Caller == "" {
+		if json.Unmarshal(raw, &p) != nil || p.ID == "" {
 			return true
 		}
 		c := b.switchCoordinator()
@@ -1184,11 +1202,17 @@ func (b *Broker) handleSwitchEngineNotification(method string, raw json.RawMessa
 		}
 		c.waiters[p.ID] = cancel
 		c.waitMu.Unlock()
-		w := b.getEngineMgr()
 		go func() {
 			defer cancel()
 			defer func() { c.waitMu.Lock(); delete(c.waiters, p.ID); c.waitMu.Unlock() }()
-			result, err := b.dispatchEngineSwitch(ctx, p.Method, p.Params, p.Caller)
+			w, err := b.awaitEngineMgrPair(ctx, source)
+			if err != nil || !b.engineManagerSourceCurrent(source) {
+				return
+			}
+			var result any
+			if err = requireRemoteCaller(p.Caller); err == nil {
+				result, err = b.dispatchEngineSwitch(ctx, p.Method, p.Params, p.Caller)
+			}
 			reply := struct {
 				ID        string `json:"id"`
 				Result    any    `json:"result"`
@@ -1196,12 +1220,15 @@ func (b *Broker) handleSwitchEngineNotification(method string, raw json.RawMessa
 				ErrorCode int    `json:"errorCode,omitempty"`
 			}{ID: p.ID, Result: result}
 			if err != nil {
-				detail := switchErrorDetail(err, settings.SwitchErrorStorage)
-				reply.Error, reply.ErrorCode = detail.Message, detail.Code
+				var invalid *invalidParamsError
+				if errors.As(err, &invalid) {
+					reply.Error, reply.ErrorCode = err.Error(), settings.SwitchInvalidParamsCode
+				} else {
+					detail := switchErrorDetail(err, settings.SwitchErrorStorage)
+					reply.Error, reply.ErrorCode = detail.Message, detail.Code
+				}
 			}
-			if w != nil {
-				_ = w.Notify("engine:switch-reply", reply)
-			}
+			b.replyPeerRelay(source, w, "engine:switch-reply", reply)
 		}()
 		return true
 	}

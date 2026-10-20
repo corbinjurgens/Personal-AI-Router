@@ -17,6 +17,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"nvpair-shared/clustertrust"
 )
 
 func assertJoinerCompensationPending(t *testing.T, f outboundPairingFixture) {
@@ -261,8 +263,9 @@ func TestJoinerCompensationWithoutWritableJournalPreservesFallback(t *testing.T)
 	for _, restore := range restores {
 		restore()
 	}
-	// There is no durable rollback flag. The provisional self admission must
-	// still force startup cleanup, and survive a failed startup pin removal.
+	// A failed retry-intent write must preserve the provisional self admission
+	// for exact cleanup. PG's staged abort and guard also correlate restart
+	// recovery; a failed startup pin removal must still refuse authority.
 	restorePin := conflictPairingPath(t, f.joiner.trust.pinPath(f.inviter.identity.NodeUUID))
 	codec := NewCodec(struct {
 		io.Reader
@@ -342,11 +345,16 @@ func committedRollbackFixture(t *testing.T) outboundPairingFixture {
 	t.Helper()
 	f := newOutboundPairingFixture(t)
 	final := f.authenticatedSuccess(t)
-	inv, ok := f.inviter.getInvite(f.session.inviteID)
+	_, ok := f.inviter.getInvite(f.session.inviteID)
 	if !ok {
 		t.Fatal("inviter record missing")
 	}
-	if err := f.inviter.savePairingReceipt(f.inviter.newPairingReceipt(f.session, inv, final)); err != nil {
+	receipt, ok := f.inviter.getPairingReceipt(f.session.inviteID)
+	if !ok {
+		t.Fatal("inviter transaction receipt missing")
+	}
+	receipt.SuccessBlob = final
+	if err := f.inviter.savePairingReceipt(receipt); err != nil {
 		t.Fatal(err)
 	}
 	return f
@@ -527,24 +535,32 @@ func TestPairingRollbackWithoutWritableIntentDoesNotRepublishSuccess(t *testing.
 		t.Fatal("known failure retained exact pin in live authorization")
 	}
 	restore()
-	// The failed intent write left only the original unconfirmed receipt.
-	// Recovery may query that outcome; it must not claim a new paired success.
+	// The retry-intent write failed, but PG's durable pairing-owned guard still
+	// correlates the original receipt with a confirmed local abort. Recovery
+	// completes that exact compensation instead of querying a paired outcome.
 	restarted := testManagerAt(t, filepath.Dir(f.inviter.clusterDir), 8)
 	restarted.resumeOutboundPairings()
-	inv, ok := restarted.getInvite(f.session.inviteID)
-	if !ok || inv.State != "pending" || inv.Reason != "awaiting-confirmation" {
-		t.Fatalf("unconfirmed recovery republished a terminal outcome: %+v", inv)
+	receipt, ok := restarted.getPairingReceipt(f.session.inviteID)
+	if !ok || receipt.Rollback || receipt.State != inviteStateFailed {
+		t.Fatalf("guarded recovery did not complete exact failed compensation: found=%t state=%s rollback=%t", ok, receipt.State, receipt.Rollback)
 	}
-	// A repeated authenticated failure must compensate this committed pending
-	// tuple, not just delete the pending invitation/session.
-	f.inviter = restarted
-	failCommittedPairing(t, f)
-	inv, _ = restarted.getInvite(f.session.inviteID)
-	if inv.State != "failed" {
-		t.Fatalf("recovered committed pending tuple did not roll back: %+v", inv)
+	if inv, exists := restarted.getInvite(f.session.inviteID); exists {
+		t.Fatalf("completed abort recreated an outbound invite: %+v", inv)
+	}
+	if _, live := restarted.getSession(f.session.inviteID); live {
+		t.Fatal("completed abort recreated an outbound session")
 	}
 	if _, pinned := restarted.trust.Get(f.joiner.identity.NodeUUID); pinned {
-		t.Fatal("recovered committed pending tuple retained its pin")
+		t.Fatal("completed abort retained its peer pin")
+	}
+	if _, member := restarted.memberByNodeID(f.joiner.identity.NodeUUID); member {
+		t.Fatal("completed abort retained its peer member")
+	}
+	if _, err := os.Stat(restarted.remoteManagementInitializingPath()); !os.IsNotExist(err) {
+		t.Fatalf("completed abort did not release its publication guard: %v", err)
+	}
+	if permission := clustertrust.Open(restarted.clusterDir).RemoteManagement(f.joiner.identity.NodeUUID); permission.Allowed {
+		t.Fatalf("completed abort retained management authority: %+v", permission)
 	}
 }
 
