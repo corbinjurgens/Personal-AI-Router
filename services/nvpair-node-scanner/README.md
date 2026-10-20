@@ -42,6 +42,27 @@ Concretely, the daemon:
 - **A scan that loses everything is treated as our own fault:** when more than one node is known and a scan returns *none* of them, no node is penalized for it — for up to six consecutive scans (~30s), after which they count normally. Independent machines do not leave the network in the same five-second window, but a process too starved to drain its multicast socket within `scanTimeout` hears silence from all of them at once; without this, one saturated machine dropped its entire cluster, idle peers included, in a single reconcile. The suppression needs two or more known nodes to engage: losing a lone peer looks the same whether it left or we stopped listening, so that case falls through to the ordinary threshold.
 - **Converges without mDNS:** a 15s sweep re-reads each peer over HTTP and folds any change into the directory, independent of browse events. It covers facts that change without moving the mDNS record (a model pull/delete, a late engine start) and facts that did move it but whose announcement was never received. The second case is why a peer's cluster membership is re-read from its `ni` port (`clusterUuid` on `/v1/node-info`, which under the broker is served plain — so it answers whether or not the two nodes share a cluster; a node-info run standalone with `--cluster-dir` gates the endpoint while clustered and will not answer a non-pinned peer, which the sweep treats as no answer): membership otherwise arrives solely as the `cluster-uuid=` TXT key, read once per record change, and the anti-flap probe above deliberately keeps a still-reachable peer's entry alive — so a missed re-advertisement would leave a departed peer's principal in place for the life of the process, suppressing the invite that would bring it back. Membership is refreshed before models on each tick, since the model fetch is pinned mTLS keyed on that principal. Only a peer's explicit report is acted on: a failed fetch, or a peer too old to report the field, leaves the annotation untouched rather than inferring "unclustered" from silence.
 
+### Policy advertisement refresh
+
+The model refresh also compares the policy advertisement, including its revision
+and `pausedBy` provenance (`local` or `peer`). A policy-only change updates the
+directory and last-good cache and emits one `discovery:node-updated` with the full
+node, even when its model inventory is unchanged. An identical answer emits no
+update. A successful resume advertisement clears the pause hint.
+
+Refresh has a nominal 15-second cadence, with other refresh work and bounded
+fetch batches contributing to completion time. Observing a pause or resume
+requires a successful fetch; there is no one-sweep convergence guarantee. Failed
+fetches retain the last successful inventory and policy indefinitely, so a failed
+refresh can retain a pause hint until a later successful resume fetch.
+
+Non-loopback model fetches require an admitted, pinned cluster peer and select
+HTTPS through the cluster transport; an unpinned LAN peer is refused without a
+plaintext fallback. Loopback addresses select plaintext regardless of host UUID,
+including a non-self UUID. Loopback fixtures therefore prove propagation, not
+authenticated peer fetching. Availability is carried in the inventory policy,
+never in mDNS TXT data; policy changes require no mDNS record change.
+
 ## Communication
 
 Bidirectional newline-delimited JSON-RPC 2.0. Stdio by default; `--ipc <path>` switches to a Unix domain socket or Windows named pipe.
