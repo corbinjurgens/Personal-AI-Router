@@ -226,8 +226,9 @@ const modelsRefreshConcurrency = 16
 
 // newDaemon builds the daemon. tlsHTTP is nil unless the operator opted node-info
 // enrichment onto HTTPS via the --client-cert/--client-key/--ca-bundle flags; nil
-// keeps the default plain-HTTP fetch.
-func newDaemon(codec *Codec, mesh *clustertrust.Mesh, clusterDir string, tlsHTTP *http.Client) *daemon {
+// keeps the default plain-HTTP fetch. mdnsEnabled controls browser and responder
+// construction without disabling the directory or its independent refresh loops.
+func newDaemon(codec *Codec, mesh *clustertrust.Mesh, clusterDir string, tlsHTTP *http.Client, mdnsEnabled bool) *daemon {
 	// nodeid reads <base>/cluster/identity.json; --cluster-dir is that cluster
 	// subdir, so its parent is the base. Empty -> nodeid's shared default.
 	baseDir := ""
@@ -280,14 +281,16 @@ func newDaemon(codec *Codec, mesh *clustertrust.Mesh, clusterDir string, tlsHTTP
 	// holding distinct UUIDs must not collapse into one directory entry (matching
 	// cluster-manager's browser). Self re-stamps are handled separately in
 	// reloadIdentity, which moves this node's own directory entry to the new uuid.
-	d.browser = NewDiscovery(noderec.ServiceType, noderec.Domain,
-		WithLivenessProbe(func(n RawNode) bool { return d.reachable(n) }),
-		WithKeyFunc(func(n RawNode) string { return UUIDFromTXT(n.TXT) }),
-	)
-	if resp, err := mdns.NewResponder(instance, noderec.ServiceType, noderec.Domain, noderec.SRVPort, reg.txt()); err != nil {
-		slog.Warn("mDNS advertising disabled for _nvpair-node", "err", err)
-	} else {
-		d.responder = resp
+	if mdnsEnabled {
+		d.browser = NewDiscovery(noderec.ServiceType, noderec.Domain,
+			WithLivenessProbe(func(n RawNode) bool { return d.reachable(n) }),
+			WithKeyFunc(func(n RawNode) string { return UUIDFromTXT(n.TXT) }),
+		)
+		if resp, err := mdns.NewResponder(instance, noderec.ServiceType, noderec.Domain, noderec.SRVPort, reg.txt()); err != nil {
+			slog.Warn("mDNS advertising disabled for _nvpair-node", "err", err)
+		} else {
+			d.responder = resp
+		}
 	}
 	return d
 }
@@ -313,8 +316,13 @@ func (d *daemon) run(ctx context.Context) {
 	// makes it present the instant we start and immune to self-multicast loss.
 	d.publishSelf()
 
-	events := make(chan DiscoveryEvent, 32)
-	go d.browser.Run(ctx, events)
+	// A nil channel disables only the browse select arm; the daemon still waits
+	// for cancellation and keeps its mDNS-independent maintenance running.
+	var events chan DiscoveryEvent
+	if d.browser != nil {
+		events = make(chan DiscoveryEvent, 32)
+		go d.browser.Run(ctx, events)
+	}
 	// Converge peer model inventories independently of mDNS change events: the
 	// browse-driven enrichment above only re-runs when the raw mDNS record
 	// changes, but models live off the record (engine-manager's em /v1/models),
