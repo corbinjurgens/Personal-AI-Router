@@ -594,7 +594,12 @@ class ModularSupervisor {
             data: { binaryPath: this.serviceBinaryPath() }
         })
 
-        const broker = new JsonRpcSocketClient('broker', () => this.connectToService())
+        const broker = new JsonRpcSocketClient(
+            'broker',
+            () => this.connectToService(),
+            undefined,
+            () => this.dialService()
+        )
         broker.setProtocolTrace(this.logLevel === 'debug')
         this.processes.set('broker', broker)
         this.attachChildHandlers(broker)
@@ -862,6 +867,14 @@ class ModularSupervisor {
         return connectOrStart(
             { endpoint: resolveServiceEndpoint(defaultServiceEndpointEnvironment()) },
             serviceConnectionDeps(this.serviceBinaryPath(), this.brokerStartupArgs())
+        )
+    }
+
+    /** Retry an established attachment without starting a stopped service. */
+    private dialService(): Promise<Duplex> {
+        const endpoint = resolveServiceEndpoint(defaultServiceEndpointEnvironment())
+        return serviceConnectionDeps(this.serviceBinaryPath(), this.brokerStartupArgs()).connect(
+            endpoint
         )
     }
 

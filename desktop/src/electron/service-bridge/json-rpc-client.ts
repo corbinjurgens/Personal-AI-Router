@@ -130,14 +130,17 @@ function parseMessage(line: string): JsonRpcMessage | null {
  *
  * `connect` yields a connected stream (starting the service if need be). The
  * first connection is attempted once. After an unexpected drop the client
- * reconnects with backoff, calling `connect` again each time, and reports
- * `exit` only when every attempt has failed.
+ * reconnects with the finite `connect` retry list, then keeps trying `dial`
+ * without starting the service until deliberately detached. Without `dial`,
+ * exhausting the finite retry list reports `exit`.
  */
 export class JsonRpcSocketClient extends EventEmitter<JsonRpcClientEvents> {
     readonly name: string
 
     private readonly connect: () => Promise<Duplex>
     private readonly reconnectDelaysMs: readonly number[]
+    private readonly dial?: () => Promise<Duplex>
+    private cancelReconnectWait?: () => void
     private socket: Duplex | null = null
     private started = false
     private closed = false
@@ -152,12 +155,14 @@ export class JsonRpcSocketClient extends EventEmitter<JsonRpcClientEvents> {
     constructor(
         name: string,
         connect: () => Promise<Duplex>,
-        reconnectDelaysMs: readonly number[] = DEFAULT_RECONNECT_DELAYS_MS
+        reconnectDelaysMs: readonly number[] = DEFAULT_RECONNECT_DELAYS_MS,
+        dial?: () => Promise<Duplex>
     ) {
         super()
         this.name = name
         this.connect = connect
         this.reconnectDelaysMs = reconnectDelaysMs
+        this.dial = dial
     }
 
     /** Whether a connection to the service is currently open. */
@@ -252,6 +257,7 @@ export class JsonRpcSocketClient extends EventEmitter<JsonRpcClientEvents> {
         this.closed = true
         this.started = false
         this.epoch++
+        this.cancelReconnectWait?.()
         this.failPending(new Error(`${this.name} detached before replying`))
         const socket = this.socket
         this.socket = null
@@ -283,10 +289,13 @@ export class JsonRpcSocketClient extends EventEmitter<JsonRpcClientEvents> {
     }
 
     /** One connection attempt; true when connected. */
-    private async connectOnce(epoch: number): Promise<boolean> {
+    private async connectOnce(
+        epoch: number,
+        connect: () => Promise<Duplex> = this.connect
+    ): Promise<boolean> {
         let socket: Duplex
         try {
-            socket = await this.connect()
+            socket = await connect()
         } catch (err) {
             log.error({
                 sublevel: this.name,
@@ -294,7 +303,7 @@ export class JsonRpcSocketClient extends EventEmitter<JsonRpcClientEvents> {
             })
             return false
         }
-        if (this.epoch !== epoch) {
+        if (this.epoch !== epoch || this.closed) {
             socket.destroy()
             return true
         }
@@ -327,11 +336,33 @@ export class JsonRpcSocketClient extends EventEmitter<JsonRpcClientEvents> {
 
     private async reconnect(epoch: number): Promise<void> {
         for (const delay of this.reconnectDelaysMs) {
-            await new Promise<void>(resolve => setTimeout(resolve, delay))
-            if (this.epoch !== epoch) return
+            await this.waitToReconnect(delay)
+            if (this.epoch !== epoch || this.closed) return
             if (await this.connectOnce(epoch)) return
         }
-        if (this.epoch === epoch) this.giveUp()
+        const dial = this.dial
+        if (dial) {
+            const delay = this.reconnectDelaysMs.at(-1) ?? 10_000
+            while (this.epoch === epoch && !this.closed) {
+                await this.waitToReconnect(delay)
+                if (this.epoch !== epoch || this.closed) return
+                if (await this.connectOnce(epoch, dial)) return
+            }
+        } else if (this.epoch === epoch && !this.closed) {
+            this.giveUp()
+        }
+    }
+
+    private waitToReconnect(delay: number): Promise<void> {
+        return new Promise(resolve => {
+            const finish = (): void => {
+                clearTimeout(timer)
+                this.cancelReconnectWait = undefined
+                resolve()
+            }
+            const timer = setTimeout(finish, delay)
+            this.cancelReconnectWait = finish
+        })
     }
 
     private giveUp(): void {
