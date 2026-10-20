@@ -8,15 +8,20 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"os/exec"
 	"time"
 
 	"nvpair-shared/applog"
+	"nvpair-shared/jsonrpc"
 )
 
 // rpcWorkerCallTimeout bounds how long the broker waits for a relayed request
 // to be answered before giving up.
 const rpcWorkerCallTimeout = 5 * time.Second
+
+// A briefly busy reader must not terminate an otherwise healthy worker session.
+const rpcWorkerNotifyTimeout = 60 * time.Second
 
 // rpcWorker is a generic handle for a supervised child that speaks
 // bidirectional newline-delimited JSON-RPC over stdio: the broker can fire
@@ -26,12 +31,13 @@ const rpcWorkerCallTimeout = 5 * time.Second
 // nvpair-manual-nodes). The id-correlation + read pump live in the shared
 // jsonrpc.Peer; this handle owns the OS process lifecycle.
 type rpcWorker struct {
-	name     string
-	cmd      *exec.Cmd
-	stdin    io.WriteCloser
-	peer     *Peer
-	done     chan struct{}
-	onNotify func(method string, params json.RawMessage)
+	name          string
+	cmd           *exec.Cmd
+	stdin         io.WriteCloser
+	peer          *Peer
+	done          chan struct{}
+	onNotify      func(method string, params json.RawMessage)
+	notifyTimeout time.Duration
 }
 
 // Done implements supervisedHandle: the returned channel closes once the worker
@@ -41,12 +47,29 @@ func (w *rpcWorker) Done() <-chan struct{} { return w.done }
 // SetLogLevel forwards an already-validated log level as a log/set-level
 // notification (through the peer's codec).
 func (w *rpcWorker) SetLogLevel(level string) error {
-	return w.peer.Notify(applog.SetLevelMethod, applog.SetLevelParams{Level: level})
+	return w.Notify(applog.SetLevelMethod, applog.SetLevelParams{Level: level})
 }
 
 // Notify writes a fire-and-forget JSON-RPC notification to the worker.
 func (w *rpcWorker) Notify(method string, params any) error {
-	return w.peer.Notify(method, params)
+	return w.NotifyContext(context.Background(), method, params)
+}
+
+// NotifyContext bounds gate acquisition and the entire synchronous frame write.
+// An earlier caller deadline wins. Only an active failed/interrupted write
+// closes stdin; queued caller cancellation leaves the active writer alone.
+func (w *rpcWorker) NotifyContext(ctx context.Context, method string, params any) error {
+	budget := w.notifyTimeout
+	if budget <= 0 {
+		budget = rpcWorkerNotifyTimeout
+	}
+	ctx, cancel := context.WithTimeout(ctx, budget)
+	defer cancel()
+	if err := w.peer.NotifyContext(ctx, method, params); err != nil {
+		slog.Warn("worker notification failed", "worker", w.name, "method", method, "err", err)
+		return fmt.Errorf("notify %s %s: %w", w.name, method, err)
+	}
+	return nil
 }
 
 // Call issues an id-bearing request to the worker and blocks until the matching
@@ -86,6 +109,12 @@ func (w *rpcWorker) RelayRequest(method string, params json.RawMessage, respond 
 // stderrsink.go), so its applog prefix still interleaves with the broker's own
 // lines but a stalled reader cannot block the worker's exit.
 func startRPCWorker(name, binaryPath string, args []string, onNotify func(method string, params json.RawMessage), onExit ...func(*rpcWorker)) (*rpcWorker, error) {
+	return startRPCWorkerWithNotifyTimeout(name, binaryPath, args, onNotify, rpcWorkerNotifyTimeout, onExit...)
+}
+
+// The unexported budget parameter lets tests exercise owner teardown promptly;
+// production always uses rpcWorkerNotifyTimeout, with no runtime setting.
+func startRPCWorkerWithNotifyTimeout(name, binaryPath string, args []string, onNotify func(method string, params json.RawMessage), notifyTimeout time.Duration, onExit ...func(*rpcWorker)) (*rpcWorker, error) {
 	cmd := exec.Command(binaryPath, args...)
 	configureSubprocess(cmd)
 	cmd.Env = workerEnv()
@@ -107,17 +136,16 @@ func startRPCWorker(name, binaryPath string, args []string, onNotify func(method
 	}
 
 	w := &rpcWorker{
-		name:  name,
-		cmd:   cmd,
-		stdin: stdin,
-		// Worker replies can be far larger than a control message —
-		// engine:catalog's model list is megabytes — and an over-long frame is
-		// a terminal read error that silently takes this peer down while the
-		// child keeps running, so the cap has to match what workers send.
-		peer:     NewPeer(NewCodecMaxFrame(readWriter{stdout, stdin}, workerFrameBytes)),
-		done:     make(chan struct{}),
-		onNotify: onNotify,
+		name:          name,
+		cmd:           cmd,
+		stdin:         stdin,
+		done:          make(chan struct{}),
+		onNotify:      onNotify,
+		notifyTimeout: notifyTimeout,
 	}
+	// Keep the large-reply frame cap at every worker hop. The process owner
+	// closes only stdin here: cmd.Wait and source fencing stay with the watcher.
+	w.peer = jsonrpc.NewPeerWithWriteInterrupt(NewCodecMaxFrame(readWriter{stdout, stdin}, workerFrameBytes), w.interruptWrite)
 
 	go w.peer.Serve(nil, w.handleNotify)
 	go func() {
@@ -133,6 +161,13 @@ func startRPCWorker(name, binaryPath string, args []string, onNotify func(method
 	}()
 
 	return w, nil
+}
+
+// interruptWrite physically finishes a blocked pipe write without joining the
+// process or taking broker locks. In particular, engine-manager retains its
+// ordinary EOF/StopAll teardown and is never force-killed by this hook.
+func (w *rpcWorker) interruptWrite() {
+	_ = w.stdin.Close()
 }
 
 func (w *rpcWorker) handleNotify(method string, params json.RawMessage) {

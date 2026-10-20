@@ -10,6 +10,7 @@ import (
 	"errors"
 	"io"
 	"strings"
+	"sync/atomic"
 	"testing"
 )
 
@@ -21,6 +22,34 @@ type rw struct {
 
 func writeCodec(w io.Writer) *Codec { return NewCodec(rw{Reader: bytes.NewReader(nil), Writer: w}) }
 func readCodec(r io.Reader) *Codec  { return NewCodec(rw{Reader: r, Writer: io.Discard}) }
+
+func TestNotificationLifetimeCodecDirectFailureAndPeerOwner(t *testing.T) {
+	t.Run("direct write retires codec", func(t *testing.T) {
+		var interrupts atomic.Int32
+		c := NewCodecMaxFrameWithWriteInterrupt(rw{bytes.NewReader(nil), &failingFrameWriter{err: io.ErrClosedPipe}}, WorkerFrameBytes, func() { interrupts.Add(1) })
+		id := json.RawMessage("1")
+		if err := c.Respond(&id, nil); err == nil {
+			t.Fatal("failed writer succeeded")
+		}
+		if err := c.Notify("later", nil); !errors.Is(err, ErrPeerClosed) {
+			t.Fatalf("later write: %v", err)
+		}
+		if interrupts.Load() != 1 {
+			t.Fatalf("interrupts=%d", interrupts.Load())
+		}
+	})
+	t.Run("peer has sole interrupt ownership", func(t *testing.T) {
+		var codecInterrupts, peerInterrupts atomic.Int32
+		c := NewCodecMaxFrameWithWriteInterrupt(rw{bytes.NewReader(nil), &failingFrameWriter{err: io.ErrClosedPipe}}, WorkerFrameBytes, func() { codecInterrupts.Add(1) })
+		p := NewPeerWithWriteInterrupt(c, func() { peerInterrupts.Add(1) })
+		if err := p.NotifyContext(context.Background(), "failed", nil); err == nil {
+			t.Fatal("failed writer succeeded")
+		}
+		if codecInterrupts.Load() != 0 || peerInterrupts.Load() != 1 {
+			t.Fatalf("codec=%d peer=%d", codecInterrupts.Load(), peerInterrupts.Load())
+		}
+	})
+}
 
 func TestClassifiers(t *testing.T) {
 	id := json.RawMessage("1")
