@@ -31,6 +31,7 @@ import { usePendingActionsStore } from '@/ui/stores/pending-actions.store'
 import { ConfirmModal } from '@/ui/components/ConfirmModal'
 import getErrorString from '@/shared/utils/get-error-string'
 import { engineManagerName } from '@/shared/utils/engines'
+import { useEngineSwitchStore } from '@/ui/stores/engine-switch.store'
 import {
     LOCAL_VETO_CODE,
     REMOTE_MANAGEMENT_DENIED_CODE,
@@ -66,6 +67,9 @@ export function EngineSettingsSection({
     disabled: boolean
 }) {
     const engine = engineManagerName(engineType)
+    const switchPending = usePendingActionsStore(state => state.isSwitchPending(nodeId, engine))
+    const switchReserved =
+        useEngineSwitchStore(state => state.reserved(nodeId, engine)) || switchPending
     const target = { nodeId, engine }
     const entry = useEngineSettingsStore(state => state.entries[engineSettingsKey(target)])
     const snapshot = entry?.snapshot
@@ -98,7 +102,7 @@ export function EngineSettingsSection({
         !!entry?.unavailable ||
         !snapshot?.editable ||
         snapshot.format !== 'pair-arguments-v1'
-    const locked = readOnly || disabled || applying
+    const locked = readOnly || disabled || applying || switchReserved
 
     useEffect(() => watchEngineSettings(), [])
     useEffect(
@@ -216,6 +220,7 @@ export function EngineSettingsSection({
         void useEngineSettingsStore.getState().reload(target)
     }
     async function apply(request: EngineSettingsRequest): Promise<void> {
+        if (useEngineSwitchStore.getState().reserved(nodeId, engine)) return
         const requestId = request.requestId ?? crypto.randomUUID()
         submitted.current = requestId
         const pending = usePendingActionsStore.getState()
@@ -249,6 +254,12 @@ export function EngineSettingsSection({
                 <Text kind="body/semibold/sm">Settings</Text>
             </summary>
             <Stack gap="3" className="p-3">
+                {switchReserved && (
+                    <Text kind="body/regular/sm" role="status">
+                        This engine is reserved by a switch. Refresh switch readback to check its
+                        status.
+                    </Text>
+                )}
                 {permissionReadOnly && (
                     <Text kind="body/regular/sm" role="status">
                         {management?.message ||
