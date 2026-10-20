@@ -52,8 +52,10 @@ type engineState struct {
 	modelsDir string
 
 	// opMu serializes lifecycle operations (install / start / stop /
-	// restart / uninstall) for this engine, so concurrent calls can't
-	// double-spawn or interleave. Lock order is opMu → mu; the per-op
+	// restart / uninstall), settings replacement and manifest-bound load
+	// recheck/dispatch, including loads without a serving record. Ordinary
+	// mutation admission precedes opMu; lock order is switchAdmission -> opMu
+	// -> mu (the admission gate is released before waiting for opMu). The per-op
 	// st.mu is released around probes, and the background health loop
 	// never takes opMu.
 	opMu sync.Mutex
@@ -82,6 +84,9 @@ type engineState struct {
 	healthStop   context.CancelFunc
 	// startCancel lets StopAll unblock doStart before waiting on opMu.
 	startCancel context.CancelFunc
+	// loads registers queued/held load cancellation and stop fences under mu,
+	// independently of startup cancellation. Stop/StopAll cancel before opMu.
+	loads servingLoadControl
 }
 
 // Executor owns engine lifecycle for every engine known on this host.

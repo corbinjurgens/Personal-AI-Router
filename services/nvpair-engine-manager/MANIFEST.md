@@ -57,9 +57,11 @@ identifies the receipt or metadata source. A filename shaped like a digest is
 not proof of content. No assertion ID or separate acceptance permission exists.
 An optional local `binding` records `sourcePath`, `resolvedTarget`, `sizeBytes`,
 `mtimeNs` (canonical decimal int64 text to preserve nanoseconds in JSON clients),
-and `sampleSha256`. A binding is diagnostic declaration data until checked by
-the native adapter; no file is inspected by structural preview. The optional
-`expectedNativeSourceDigest` binds a later native-source validation.
+and `sampleSha256`. Structural validation does no file I/O. The llama adapter
+checks bounded samples and resolved targets during native preview, returning
+candidate bindings and `expectedNativeSourceDigest`; authoritative apply
+requires the exact reviewed values. A changed binding requires renewed
+verification rather than silently rebinding an existing digest.
 
 Serving settings use the existing revisioned preview/apply/journal route.
 Port-only persistence preserves serving and unrelated override fields. Settings
@@ -68,9 +70,45 @@ removes an inherited declaration. Empty/missing serving retains legacy launch
 behavior. Structural validation rejects unsupported versions, duplicate IDs,
 invalid digests, missing resource domains and invalid bounds before mutation.
 Any declaration change changes the launch record and requires a restart of a
-running engine. Readback is `unverified` at this stage; configured, validated
-launch and observed envelopes remain absent until native adapters supply them.
+running engine. The llama adapter supplies `configured` envelopes and matching
+owned-process `launchValidated` envelopes. Loaded observations and strict
+content qualification remain unverified in this launch adapter.
+
+Every action bound to `operations.load` holds the engine operation lock through
+the current declaration check and dispatch, even when `serving` is absent.
+Without a record, request bytes, response and dispatch error precedence retain
+their existing semantics, including an already-cancelled caller once the lock
+is acquired; lifecycle/settings operations serialize with the load. Ordinary
+lock order is `switchAdmission` (admit, then release the gate), `opMu`, `mu`.
+The admission-free declaration pre-check still rejects undeclared targets
+before admission. The dispatch path acquires neither `opMu` nor `contentMu`;
+any content-mutation wrapper runs before the load lock, never inside it.
+The load releases its lock before restart and admission cleanup. Caller
+cancellation interrupts both a queued load and held dispatch. Stop/StopAll
+cancel registered loads and fence new registrations before waiting for `opMu`,
+independently of the existing startup cancellation slot.
+Stop wins over racing loads on the same engine with or without NE, including
+command loads while the server is Off. Command actions use the existing forced
+process-tree kill for cancellation and the default five-second stop grace as
+their output-pipe WaitDelay. If the command has already exited, its PID cannot
+identify remaining descendants: pipe draining remains bounded, but descendant
+termination is not guaranteed in that case.
 Paths and raw launch material belong only on the authorized settings channel.
+
+For finite llama serving, `launch_args` must select an absolute native INI
+`--models-preset` and finite positive `--models-max` (or their native environment
+forms). The preset contains `[*]` defaults and exact declared model sections.
+Only the finite subset in [LAUNCH_TEXT.md](LAUNCH_TEXT.md#finite-llama-router-launch)
+is supported. Native CLI overrides model preset, which overrides global preset;
+child environment fills otherwise unspecified source settings. PAIR's implicit
+8192/1 arguments become finite preset defaults in this mode. Unsupported or
+ambiguous envelope options, CLI/environment duplication, startup loading and
+unprovable context allocation fail before launch. Existing models and HF
+symlinks stay in place; only small immutable launch snapshots are materialized.
+Recovery regenerates matching snapshot bytes and active generations survive
+until their owning process exits. Manual loads use the manifest's semantic
+load binding and reject undeclared models before admission/dispatch. Removing
+`serving` restores the unchanged legacy launch behavior.
 
 ## Strata user-manifest template
 
