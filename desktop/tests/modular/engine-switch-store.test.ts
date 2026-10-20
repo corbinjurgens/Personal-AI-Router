@@ -128,6 +128,73 @@ afterEach(async () => {
 })
 
 describe('node-scoped engine switch store', () => {
+    it.each([
+        { outcome: 'observed', sequence: 1 },
+        { outcome: 'error', sequence: 1 },
+        { outcome: 'missing', sequence: 1 },
+        { outcome: 'advanced receipt', sequence: 2 }
+    ])(
+        'r2 older equal-sequence wait $outcome cannot replace newer refresh evidence',
+        async ({ outcome, sequence }) => {
+            const waiting = deferred<Awaited<ReturnType<PreloadServiceTransport['invoke']>>>()
+            const first = receipt()
+            const old = { source: first.source, target: first.target }
+            const fresh = {
+                source: {
+                    ...first.source,
+                    running: true,
+                    observedAt: '2026-10-21T00:00:00Z'
+                },
+                target: first.target
+            }
+            const baseline = {
+                success: true,
+                data: { configurationRevision: revision, activeRequestId: request.requestId }
+            } satisfies Awaited<ReturnType<PreloadServiceTransport['invoke']>>
+            invoke.mockResolvedValueOnce(baseline)
+            invoke.mockResolvedValueOnce({
+                success: true,
+                data: { configurationRevision: revision, receipt: first, observed: old }
+            })
+            invoke.mockReturnValueOnce(waiting.promise)
+            stops.push(watchEngineSwitch('node-a'))
+            await flush()
+            const retained = store.getState().entries['node-a'].receipt
+            invoke.mockResolvedValueOnce(baseline)
+            invoke.mockResolvedValueOnce({
+                success: true,
+                data: { configurationRevision: revision, receipt: first, observed: fresh }
+            })
+            await store.getState().refresh('node-a')
+            expect(store.getState().entries['node-a'].observed).toEqual(fresh)
+            expect(store.getState().entries['node-a'].receipt).toBe(retained)
+            if (outcome === 'error') waiting.reject(new Error('older wait failed'))
+            else
+                waiting.resolve({
+                    success: true,
+                    data: {
+                        configurationRevision: revision,
+                        ...(outcome === 'observed' || outcome === 'advanced receipt'
+                            ? { receipt: receipt({ sequence }), observed: old }
+                            : {})
+                    }
+                })
+            await flush()
+            expect(store.getState().entries['node-a'].observed).toEqual(fresh)
+            expect(store.getState().entries['node-a'].unavailable).toBeUndefined()
+            expect(store.getState().entries['node-a'].receipt?.sequence).toBe(sequence)
+            if (sequence === first.sequence)
+                expect(store.getState().entries['node-a'].receipt).toBe(retained)
+            const calls = invoke.mock.calls.length
+            await vi.advanceTimersByTimeAsync(0)
+            expect(invoke.mock.calls.length).toBe(calls + 1)
+            expect(invoke).toHaveBeenLastCalledWith('engines:switch-status', {
+                nodeId: 'node-a',
+                requestId: request.requestId,
+                afterSequence: sequence
+            })
+        }
+    )
     it('permission refusal delivered after remount must not strand its original ID', async () => {
         useConnectionStore.setState({ selfId: 'self' })
         const permission = vi

@@ -31,12 +31,14 @@ interface Watch {
     consumers: number
     generation: number
     read: number
+    appliedReads: Map<string | undefined, number>
     timer?: ReturnType<typeof setTimeout>
 }
 const watches = new Map<string, Watch>()
 // Retain an outstanding RPC's slot even after retiring its callbacks. The
 // protocol has bounded waits but no cancellation channel.
 const waits = new Set<string>()
+let nextStatusRead = 0
 let unsubs: Array<() => void> = []
 
 function connected(nodeId: string): boolean {
@@ -61,6 +63,13 @@ function unresolved(entry: SwitchEntry | undefined): boolean {
         (entry?.receipt && !entry.receipt.terminal)
     )
 }
+// Receipt sequence orders immutable receipts, not the snapshot captured before
+// a bounded wait. Order readback evidence by send time, across both read paths.
+function applyRead(watch: Watch, requestId: string | undefined, token: number): boolean {
+    if (token <= (watch.appliedReads.get(requestId) ?? 0)) return false
+    watch.appliedReads.set(requestId, token)
+    return true
+}
 function matchesReceipt(nodeId: string, requestId: string, receipt: SwitchReceipt): boolean {
     const entry = useEngineSwitchStore.getState().entries[nodeId]
     return (
@@ -81,7 +90,7 @@ function merge(nodeId: string, requestId: string, receipt: SwitchReceipt): boole
         entry?.receipt?.sequence === receipt.sequence
     )
         return false
-    put(nodeId, { receipt, unknown: false, refused: undefined, unavailable: undefined })
+    put(nodeId, { receipt, unknown: false, refused: undefined })
     usePendingActionsStore.getState().endSwitch(nodeId, requestId)
     if (receipt.error?.code === -32012)
         void useNodeConfigurationStore
@@ -121,24 +130,27 @@ function scheduleWait(nodeId: string): void {
         )
     }
     waits.add(key)
+    const token = ++nextStatusRead
     void window.pairApi.engines
         .switchStatus({ nodeId, requestId, afterSequence: entry.receipt?.sequence })
         .then(status => {
             if (!currentWait()) return
             const merged = status.receipt && merge(nodeId, requestId, status.receipt)
+            const applied = applyRead(watch, requestId, token)
+            if (applied) {
+                if (!status.receipt)
+                    put(nodeId, { unavailable: 'Switch receipt unavailable. Refresh readback.' })
+                else if (matchesReceipt(nodeId, requestId, status.receipt))
+                    put(nodeId, {
+                        ...(status.observed ? { observed: status.observed } : {}),
+                        unavailable: undefined
+                    })
+            }
             if (merged && status.receipt?.terminal)
                 void useEngineSwitchStore.getState().refresh(nodeId)
-            if (!status.receipt)
-                put(nodeId, { unavailable: 'Switch receipt unavailable. Refresh readback.' })
-            if (
-                status.receipt &&
-                status.observed &&
-                matchesReceipt(nodeId, requestId, status.receipt)
-            )
-                put(nodeId, { observed: status.observed })
         })
         .catch(error => {
-            if (currentWait()) {
+            if (currentWait() && applyRead(watch, requestId, token)) {
                 put(nodeId, { unavailable: `Switch receipt unavailable: ${getErrorString(error)}` })
                 refreshPermission(nodeId, serviceErrorCode(error))
             }
@@ -186,24 +198,29 @@ export const useEngineSwitchStore = create<SwitchStore>((_set, get) => ({
         if (!watch?.consumers || !connected(nodeId)) return false
         const generation = watch.generation
         const read = ++watch.read
+        let requestId = get().entries[nodeId]?.request?.requestId
+        let token = ++nextStatusRead
         put(nodeId, { revision: undefined })
         try {
             const status = await window.pairApi.engines.switchStatus({ nodeId })
             if (!current(nodeId, watch, generation) || watch.read !== read) return false
             put(nodeId, {
                 revision: status.configurationRevision || undefined,
-                activeRequestId: status.activeRequestId,
-                unavailable: status.configurationRevision
-                    ? undefined
-                    : 'Switch readback unavailable.'
+                activeRequestId: status.activeRequestId
             })
+            if (applyRead(watch, requestId, token))
+                put(nodeId, {
+                    unavailable: status.configurationRevision
+                        ? undefined
+                        : 'Switch readback unavailable.'
+                })
             const entry = get().entries[nodeId]
             const ownUnresolved =
                 entry?.own &&
                 (entry.unknown ||
                     entry.receipt?.recoveryRequired ||
                     (entry.receipt && !entry.receipt.terminal))
-            const requestId = ownUnresolved
+            requestId = ownUnresolved
                 ? entry.request?.requestId
                 : (status.activeRequestId ??
                   (entry?.refused ? undefined : entry?.request?.requestId))
@@ -221,13 +238,16 @@ export const useEngineSwitchStore = create<SwitchStore>((_set, get) => ({
                         unknown: false,
                         refused: undefined
                     })
+                token = ++nextStatusRead
                 const result = await window.pairApi.engines.switchStatus({ nodeId, requestId })
                 if (!current(nodeId, watch, generation) || watch.read !== read) return false
+                const applied = applyRead(watch, requestId, token)
                 const receipt = result.receipt
                 if (!receipt || receipt.nodeId !== nodeId || receipt.requestId !== requestId) {
-                    put(nodeId, {
-                        unavailable: 'Switch busy; receipt unavailable. Refresh readback.'
-                    })
+                    if (applied)
+                        put(nodeId, {
+                            unavailable: 'Switch busy; receipt unavailable. Refresh readback.'
+                        })
                     return false
                 }
                 if (entry?.request?.requestId !== requestId)
@@ -238,15 +258,22 @@ export const useEngineSwitchStore = create<SwitchStore>((_set, get) => ({
                         unknown: false
                     })
                 merge(nodeId, requestId, receipt)
-                if (result.observed && matchesReceipt(nodeId, requestId, receipt))
-                    put(nodeId, { observed: result.observed })
+                if (applied && matchesReceipt(nodeId, requestId, receipt))
+                    put(nodeId, {
+                        ...(result.observed ? { observed: result.observed } : {}),
+                        unavailable: undefined
+                    })
                 scheduleWait(nodeId)
             } else if (entry?.request && (entry.unknown || entry.receipt?.recoveryRequired)) {
                 scheduleWait(nodeId)
             }
             return !!status.configurationRevision
         } catch (error) {
-            if (current(nodeId, watch, generation) && watch.read === read) {
+            if (
+                current(nodeId, watch, generation) &&
+                watch.read === read &&
+                applyRead(watch, requestId, token)
+            ) {
                 put(nodeId, {
                     revision: undefined,
                     unavailable: `Switch readback unavailable: ${getErrorString(error)}`
@@ -308,7 +335,8 @@ export const useEngineSwitchStore = create<SwitchStore>((_set, get) => ({
                 const result = await window.pairApi.engines.switchEngine(request)
                 // Submission evidence belongs to the retained node/request,
                 // independently of the editor that initiated the send.
-                merge(nodeId, requestId, result.receipt)
+                if (merge(nodeId, requestId, result.receipt))
+                    put(nodeId, { unavailable: undefined })
             } catch (error) {
                 const latest = get().entries[nodeId]
                 if (latest?.request?.requestId !== requestId || latest.receipt) return
@@ -349,7 +377,7 @@ export const useEngineSwitchStore = create<SwitchStore>((_set, get) => ({
 export function watchEngineSwitch(nodeId: string): () => void {
     let watch = watches.get(nodeId)
     if (!watch) {
-        watch = { consumers: 0, generation: 0, read: 0 }
+        watch = { consumers: 0, generation: 0, read: 0, appliedReads: new Map() }
         watches.set(nodeId, watch)
     }
     watch.consumers++
