@@ -60,6 +60,52 @@ func managementSet(t *testing.T, cm *task1Process, peer string, allowed bool) ma
 	return after
 }
 
+// managementGrantFixture gives an existing synthetic caller an explicit local
+// grant through the real writer before the fixture starts its control clients.
+func managementGrantFixture(t *testing.T, clusterDir, targetUUID, peerUUID string) {
+	t.Helper()
+	mesh := clustertrust.Open(clusterDir)
+	before, ok := mesh.PeerServiceIncarnation(peerUUID)
+	if !ok || mesh.NodeUUID() != targetUUID {
+		t.Fatal("permission fixture requires a coherent target and peer admission")
+	}
+	// Certificate-only fixtures need matching metadata so cluster-manager
+	// adopts their existing identity instead of minting a replacement leaf.
+	identityPath := filepath.Join(clusterDir, "identity.json")
+	identityData, err := os.ReadFile(identityPath)
+	if os.IsNotExist(err) {
+		jointWriteJSON(t, identityPath, map[string]string{"node_uuid": targetUUID})
+	} else if err != nil {
+		t.Fatalf("read fixture identity metadata: %v", err)
+	} else {
+		var identity struct {
+			NodeUUID string `json:"node_uuid"`
+		}
+		if err := json.Unmarshal(identityData, &identity); err != nil || identity.NodeUUID != targetUUID {
+			t.Fatal("fixture identity metadata disagrees with its certificate")
+		}
+	}
+	listener := jointListener(t)
+	port := listener.Addr().(*net.TCPAddr).Port
+	if err := listener.Close(); err != nil {
+		t.Fatal(err)
+	}
+	base := filepath.Dir(clusterDir)
+	cm := startTask1Process(t, base, clusterMgrBin, "--config-dir", base, "--port", strconv.Itoa(port))
+	defer cm.stop()
+	identity := decodeResult[cmNodeID](t, cm.call(t, "cluster:get-node-id", nil))
+	if identity.NodeUUID != targetUUID {
+		t.Fatal("permission writer replaced the fixture identity")
+	}
+	managementSet(t, cm, peerUUID, true)
+	mesh.Refresh()
+	after, ok := mesh.PeerServiceIncarnation(peerUUID)
+	permission := mesh.RemoteManagement(peerUUID)
+	if !ok || after != before || !permission.Allowed || permission.Incarnation != before {
+		t.Fatal("fixture grant did not preserve and authorize the original admission")
+	}
+}
+
 // This fixture keeps the real broker/engine-manager policy writer and the
 // existing absent-engine overrides. A second independently pinned certificate
 // supplies the opposite grant; target-local changes use a real cluster-manager.

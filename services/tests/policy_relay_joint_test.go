@@ -262,6 +262,7 @@ func newPolicyJointFixture(t *testing.T) *policyJointFixture {
 		writeMembers(t, member.dir, targetID, originID)
 		jointWriteJSON(t, filepath.Join(member.dir, "identity.json"), map[string]any{"node_uuid": member.id})
 	}
+	managementGrantFixture(t, f.cluster, targetID, originID)
 	mesh := clustertrust.Open(f.originCluster)
 	cfg, ok := mesh.ClientTLSConfig(targetID)
 	if !ok || !mesh.Clustered() {
