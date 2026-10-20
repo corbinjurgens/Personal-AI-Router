@@ -610,7 +610,17 @@ func runChatAccountAttempt(ctx context.Context, snapshot chatAccountSnapshot, bo
 				return nil, errChatBudget
 			}
 			return transportRelease, nil
+		}, func(ctx context.Context) error {
+			if q.fresh() != nil || ctx.Err() != nil {
+				return errChatAttempt
+			}
+			return guard(ctx)
 		})
+	if errors.Is(attemptErr, errPublicFinalGuard) {
+		// Proven unsent: leave the hold unclassified and retained. There is no
+		// provider outcome, cooldown, qualification or money reconciliation.
+		return result, errPublicFinalGuard
+	}
 	outcome, retryAfter := outcomeTransient, time.Duration(0)
 	if attemptErr != nil {
 		attemptErr = errChatTransient
