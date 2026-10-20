@@ -1,14 +1,20 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
+// @vitest-environment jsdom
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { act, createElement } from 'react'
+import { createRoot } from 'react-dom/client'
 import {
     useEngineSettingsStore,
     engineSettingsKey,
     watchEngineSettings
 } from '@/ui/stores/engine-settings.store'
 import { usePendingActionsStore } from '@/ui/stores/pending-actions.store'
-import type { EngineSettingsSnapshot } from '@/shared/types/engine-settings'
+import type { EngineSettingsSnapshot, EngineServingConfig } from '@/shared/types/engine-settings'
+import type { IEngineApi } from '@/ui/api/engine-api'
+import { EngineSettingsSection } from '@/ui/components/BackendRow/EngineSettingsSection'
+import { useConnectionStore } from '@/ui/stores/connection.store'
 import { redactSensitiveLogText } from '@/electron/redact-log'
 
 const target = { nodeId: 'remote', engine: 'ollama' } as const
@@ -34,6 +40,133 @@ const key = engineSettingsKey(target)
 const store = useEngineSettingsStore
 const getSettings = vi.fn()
 const applySettings = vi.fn()
+
+const serving: EngineServingConfig = {
+    version: 1,
+    models: [
+        {
+            modelId: 'exact/model',
+            maxOutputTokens: 128,
+            memory: { hostRamBytes: 4096, vramBytes: 0 },
+            artifacts: [
+                {
+                    role: 'model',
+                    sha256: 'a'.repeat(64),
+                    provenance: { kind: 'supplied-sha256' },
+                    binding: {
+                        sourcePath: 'fixture-link',
+                        resolvedTarget: 'fixture-blob',
+                        sizeBytes: 64,
+                        mtimeNs: '1729000000000000001',
+                        sampleSha256: 'b'.repeat(64)
+                    }
+                }
+            ]
+        }
+    ]
+}
+
+describe('serving preservation in the settings editor', () => {
+    afterEach(() => {
+        vi.unstubAllGlobals()
+        vi.restoreAllMocks()
+    })
+
+    it('carries serving through an actual unrelated form edit and failed apply', async () => {
+        const snapshot: EngineSettingsSnapshot = {
+            ...baseline,
+            settings: { ...baseline.settings, serving: structuredClone(serving) }
+        }
+        const get = vi.fn<IEngineApi['getSettings']>().mockResolvedValue(snapshot)
+        const preview = vi
+            .fn<IEngineApi['previewSettings']>()
+            .mockImplementation(async request => ({
+                settings: request.settings,
+                revision: 1,
+                errors: {},
+                restart: false,
+                rebind: false
+            }))
+        const apply = vi
+            .fn<IEngineApi['applySettings']>()
+            .mockRejectedValue(new Error('synthetic failure'))
+        Object.defineProperty(window, 'pairApi', {
+            configurable: true,
+            value: {
+                engines: {
+                    getSettings: get,
+                    previewSettings: preview,
+                    applySettings: apply,
+                    onSettingsChanged: () => () => {},
+                    onSettingsDisconnected: () => () => {}
+                }
+            }
+        })
+        vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
+        vi.stubGlobal('CSS', { supports: () => false })
+        Object.defineProperty(HTMLDialogElement.prototype, 'showModal', {
+            configurable: true,
+            value: function (this: HTMLDialogElement) {
+                this.open = true
+            }
+        })
+        Object.defineProperty(HTMLDialogElement.prototype, 'close', {
+            configurable: true,
+            value: function (this: HTMLDialogElement) {
+                this.open = false
+            }
+        })
+        useConnectionStore.setState({ connected: true, selfId: 'remote' })
+        store.setState({ entries: {} })
+        usePendingActionsStore.setState({ pending: new Map() })
+        const container = document.createElement('div')
+        document.body.appendChild(container)
+        const root = createRoot(container)
+        try {
+            await act(async () =>
+                root.render(
+                    createElement(EngineSettingsSection, {
+                        nodeId: 'remote',
+                        engineType: 'ollama',
+                        disabled: false
+                    })
+                )
+            )
+            const input = container.querySelector('input[aria-label="Proxy port"]')
+            const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set
+            if (!input || !setter) throw new Error('Proxy port input missing')
+            await act(async () => {
+                setter.call(input, '12500')
+                input.dispatchEvent(new Event('input', { bubbles: true }))
+            })
+            const button = container.querySelector('button[aria-label="Apply"]')
+            if (!(button instanceof HTMLButtonElement)) throw new Error('Apply button missing')
+            await act(async () => button.click())
+            expect(preview).toHaveBeenCalledWith(
+                expect.objectContaining({ settings: { ...snapshot.settings, proxyPort: 12500 } })
+            )
+            expect(apply).toHaveBeenCalledWith(
+                expect.objectContaining({ settings: { ...snapshot.settings, proxyPort: 12500 } })
+            )
+            expect(store.getState().entries[key].snapshot?.settings.serving).toEqual(serving)
+        } finally {
+            await act(async () => root.unmount())
+            container.remove()
+        }
+    })
+
+    it('owns nested serving values received from a caller', () => {
+        const snapshot: EngineSettingsSnapshot = {
+            ...baseline,
+            settings: { ...baseline.settings, serving: structuredClone(serving) }
+        }
+        store.setState({ entries: {} })
+        store.getState().receive(snapshot)
+        if (!snapshot.settings.serving) throw new Error('Missing fixture serving')
+        snapshot.settings.serving.models[0].artifacts[0].provenance.kind = 'changed'
+        expect(store.getState().entries[key].snapshot?.settings.serving).toEqual(serving)
+    })
+})
 
 describe('engine settings snapshot ordering and pending operations', () => {
     beforeEach(() => {

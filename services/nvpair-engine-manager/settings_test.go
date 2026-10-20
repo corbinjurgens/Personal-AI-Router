@@ -9,15 +9,19 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
 	"runtime"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"nvpair-shared/engines"
 	settings "nvpair-shared/enginesettings"
 )
 
@@ -68,7 +72,98 @@ func settingsRequest(t *testing.T, e *Executor) settings.Request {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return settings.Request{Engine: "fake", Settings: settings.Config{ServerPort: s.ServerPort, ProxyPort: 54301, LaunchText: s.LaunchText}}
+	return settings.Request{Engine: "fake", Settings: settings.ConfigFromLaunch(s, 54301)}
+}
+
+func servingSettingsFixture() *engines.ServingConfig {
+	ram, vram := int64(4096), int64(0)
+	return &engines.ServingConfig{Version: 1, Models: []engines.ServingModel{{ModelID: "exact/model", MaxOutputTokens: 128, Memory: engines.ServingMemory{HostRAMBytes: &ram, VRAMBytes: &vram}, Artifacts: []engines.ServingArtifact{{Role: "model", SHA256: strings.Repeat("a", 64), Provenance: engines.ServingProvenance{Kind: "supplied-sha256"}, Binding: &engines.ServingBinding{SourcePath: "synthetic-link", ResolvedTarget: "synthetic-target", SizeBytes: 64, MtimeNS: "1729000000000000001", SampleSHA256: strings.Repeat("b", 64)}}}}}}
+}
+
+func TestSettingsServingPreviewApplyAndUnrelatedEdit(t *testing.T) {
+	e := settingsExecutor(t, false)
+	p := settingsRequest(t, e)
+	p.Settings.Serving = servingSettingsFixture()
+	preview := previewSettings(t, e, p)
+	if len(preview.Errors) != 0 || !preview.Settings.Serving.Equal(p.Settings.Serving) || preview.Serving == nil || preview.Serving.Status != "unverified" || len(preview.Serving.LaunchValidated) != 0 || len(preview.Serving.Observed) != 0 {
+		t.Fatal("preview lost declaration or claimed runtime verification")
+	}
+	assertNoSettingsOverride(t, e)
+	launch, err := e.ConfigureLaunch(context.Background(), settings.Configure{Engine: "fake", Settings: preview.Settings}, func() error { return nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !launch.Serving.Equal(p.Settings.Serving) || !readSettingsOverride(t, e).Serving.Equal(p.Settings.Serving) {
+		t.Fatal("apply did not persist declaration")
+	}
+	p = settingsRequest(t, e)
+	p.Settings.LaunchText += " --unrelated"
+	_, err = e.ConfigureLaunch(context.Background(), settings.Configure{Engine: "fake", Settings: p.Settings}, func() error { return fmt.Errorf("synthetic bind failure") })
+	if err == nil {
+		t.Fatal("expected failed apply")
+	}
+	if !readSettingsOverride(t, e).Serving.Equal(p.Settings.Serving) {
+		t.Fatal("failed unrelated edit erased serving")
+	}
+	got, err := e.LaunchSettings("fake")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got.Serving.Models[0].Artifacts[0].Binding.MtimeNS = "1"
+	if settingsState(t, e).plat.Runtime.Serving.Models[0].Artifacts[0].Binding.MtimeNS == "1" {
+		t.Fatal("launch readback aliases runtime")
+	}
+}
+
+func TestSettingsServingDuplicateRejectedBeforeEffects(t *testing.T) {
+	e := settingsExecutor(t, true)
+	st := settingsState(t, e)
+	stopMarker := filepath.Join(t.TempDir(), "stop-marker")
+	st.plat.Runtime.Stop = &StopSpec{Cmd: []string{fakeEngineBin, "touch", stopMarker}}
+	var probes atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { probes.Add(1); w.WriteHeader(http.StatusOK) }))
+	t.Cleanup(server.Close)
+	st.plat.Runtime.Ready = &Probe{HTTP: server.URL}
+	p := settingsRequest(t, e)
+	p.Settings.Serving = servingSettingsFixture()
+	p.Settings.Serving.Models = append(p.Settings.Serving.Models, p.Settings.Serving.Models[0])
+	st.mu.Lock()
+	st.running = true
+	st.adopted = true
+	st.mu.Unlock()
+	t.Cleanup(func() { st.mu.Lock(); st.running = false; st.adopted = false; st.mu.Unlock() })
+	preview := previewSettings(t, e, p)
+	if preview.Errors["serving.models.1.modelId"] == "" {
+		t.Error("duplicate declaration has no field error")
+	}
+	if _, err := e.ConfigureLaunch(context.Background(), settings.Configure{Engine: "fake", Settings: p.Settings}, func() error { t.Error("invalid serving rebound proxy"); return nil }); err == nil {
+		t.Error("invalid serving applied")
+	}
+	if _, err := os.Stat(stopMarker); !os.IsNotExist(err) {
+		t.Fatal("invalid declaration invoked stop")
+	}
+	if probes.Load() != 0 {
+		t.Fatal("invalid declaration probed engine")
+	}
+	assertNoSettingsOverride(t, e)
+}
+
+func TestSettingsServingChangeRequiresRestart(t *testing.T) {
+	e := settingsExecutor(t, false)
+	st := settingsState(t, e)
+	st.plat.Runtime.Serving = servingSettingsFixture()
+	p := settingsRequest(t, e)
+	st.mu.Lock()
+	st.running = true
+	st.mu.Unlock()
+	t.Cleanup(func() { st.mu.Lock(); st.running = false; st.mu.Unlock() })
+	if previewSettings(t, e, p).Restart {
+		t.Fatal("equivalent serving restarts")
+	}
+	p.Settings.Serving.Models[0].MaxOutputTokens++
+	if !previewSettings(t, e, p).Restart {
+		t.Fatal("changed serving launch record did not require restart")
+	}
 }
 
 // eachEngineMode runs test against both Runtime.Mode lifecycles: "process",

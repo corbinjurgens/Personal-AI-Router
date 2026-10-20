@@ -203,7 +203,7 @@ func (b *Broker) settingsSnapshotLocked(ctx context.Context, engine string) (set
 	if !ready && record != nil {
 		configuredProxy = record.Snapshot.Settings.ProxyPort
 	}
-	current := settings.Config{ServerPort: launch.ServerPort, ProxyPort: configuredProxy, LaunchText: launch.LaunchText}
+	current := settings.ConfigFromLaunch(launch, configuredProxy)
 	if record == nil {
 		record = &engineSettingsRecord{Snapshot: settings.Snapshot{NodeID: b.nodeID, Engine: engine, Revision: 1, AppliedRevision: 1, Epoch: b.engineSettingsEpoch, Phase: "idle", Settings: current}, Receipts: make(map[string]settingsReceipt)}
 		b.engineSettings[engine] = record
@@ -211,7 +211,7 @@ func (b *Broker) settingsSnapshotLocked(ctx context.Context, engine string) (set
 			delete(b.engineSettings, engine)
 			return settings.Snapshot{}, err
 		}
-	} else if record.Snapshot.Phase != "applying" && record.Snapshot.Phase != "failed" && record.Snapshot.Settings != current {
+	} else if record.Snapshot.Phase != "applying" && record.Snapshot.Phase != "failed" && !record.Snapshot.Settings.Equal(current) {
 		record.Snapshot.Settings = current
 		record.Snapshot.Revision++
 		record.Snapshot.AppliedRevision = record.Snapshot.Revision
@@ -219,7 +219,8 @@ func (b *Broker) settingsSnapshotLocked(ctx context.Context, engine string) (set
 			return settings.Snapshot{}, err
 		}
 	}
-	snapshot := record.Snapshot
+	snapshot := record.Snapshot.Clone()
+	snapshot.Serving = launch.ServingReadback.Clone()
 	snapshot.EffectiveServerPort = launch.EffectivePort
 	snapshot.EffectiveProxyPort = proxyPort
 	snapshot.Running = launch.Running
@@ -236,7 +237,7 @@ func (b *Broker) settingsSnapshotLocked(ctx context.Context, engine string) (set
 	}
 	if !reflect.DeepEqual(snapshot, record.Snapshot) {
 		snapshot.Sequence++
-		record.Snapshot = snapshot
+		record.Snapshot = snapshot.Clone()
 	}
 	return snapshot, nil
 }
@@ -246,7 +247,7 @@ func (b *Broker) publishSettingsLocked() {
 	for _, profile := range engineProxyProfiles {
 		if record := b.engineSettings[profile.Name]; record != nil {
 			record.Snapshot.Sequence++
-			all = append(all, record.Snapshot)
+			all = append(all, record.Snapshot.Clone())
 			if b.codec != nil {
 				_ = b.codec.Notify("engine:settings-changed", record.Snapshot)
 			}
@@ -398,7 +399,7 @@ func (b *Broker) runSettingsOperationLocked(ctx context.Context, engine string, 
 	// while it is, from any caller or from recovery; resuming the node does.
 	// A running engine whose launch changed is still restarted.
 	paused, _ := b.settingsPause()
-	configure := settings.Configure{Engine: engine, Settings: record.Snapshot.Settings, OperationID: id, Resume: record.Resume && !paused}
+	configure := settings.Configure{Engine: engine, Settings: record.Snapshot.Settings.Clone(), OperationID: id, Resume: record.Resume && !paused}
 
 	launch, err := func() (settings.LaunchState, error) {
 		b.engineConfigMu.Unlock()
@@ -429,6 +430,7 @@ func (b *Broker) runSettingsOperationLocked(ctx context.Context, engine string, 
 	// Refresh observed facts without replacing the accepted desired revision;
 	// never publish the pre-operation running state.
 	if launch.Engine != "" {
+		record.Snapshot.Serving = launch.ServingReadback.Clone()
 		record.Snapshot.Running = launch.Running
 		record.Snapshot.Adopted = launch.Adopted
 		record.Snapshot.EffectiveServerPort = launch.EffectivePort
@@ -580,11 +582,13 @@ func (b *Broker) applyEngineSettings(ctx context.Context, p settings.Request, ca
 	}
 	record := b.engineSettings[p.Engine]
 	previous := *record
+	previous.Snapshot = record.Snapshot.Clone()
+	previous.Previous = record.Previous.Clone()
 	previous.Receipts = make(map[string]settingsReceipt, len(record.Receipts))
 	for k, v := range record.Receipts {
 		previous.Receipts[k] = v
 	}
-	if preview.Settings == record.Snapshot.Settings && record.Snapshot.Phase != "failed" {
+	if preview.Settings.Equal(record.Snapshot.Settings) && record.Snapshot.Phase != "failed" {
 		record.Snapshot.RequestID = p.RequestID
 		record.Snapshot.Phase = "succeeded"
 		record.Receipts[p.RequestID] = settingsReceipt{Hash: hash, Revision: record.Snapshot.Revision, Phase: "succeeded"}
@@ -604,10 +608,10 @@ func (b *Broker) applyEngineSettings(ctx context.Context, p settings.Request, ca
 			return settingsReceipt{}, &localVetoError{}
 		}
 	}
-	record.Previous = record.Snapshot.Settings
+	record.Previous = record.Snapshot.Settings.Clone()
 	record.Resume = record.Resume || preview.Restart
 	record.Explicit = true
-	record.Snapshot.Settings = preview.Settings
+	record.Snapshot.Settings = preview.Settings.Clone()
 	record.Snapshot.Revision++
 	record.Snapshot.RequestID = p.RequestID
 	record.Snapshot.Phase = "applying"
@@ -780,10 +784,10 @@ func (b *Broker) refreshEngineSettings(ctx context.Context) {
 				for _, engine := range engines.Names() {
 					var before settings.Snapshot
 					if r := b.engineSettings[engine]; r != nil {
-						before = r.Snapshot
+						before = r.Snapshot.Clone()
 					}
 					after, err := b.settingsSnapshotLocked(readCtx, engine)
-					if err == nil && before != after {
+					if err == nil && !reflect.DeepEqual(before, after) {
 						changed = true
 					}
 				}

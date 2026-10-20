@@ -9,8 +9,73 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 )
+
+func TestSetPortPreservesServingOverrideAndExplicitRemoval(t *testing.T) {
+	e := settingsExecutor(t, false)
+	serving := servingSettingsFixture()
+	port := settingsRequest(t, e).Settings.ServerPort
+	if err := e.persistRuntimeServing("fake", port, nil, nil, &serving); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.persistPort("fake", port+1); err != nil {
+		t.Fatal(err)
+	}
+	if !readSettingsOverride(t, e).Serving.Equal(serving) {
+		t.Fatal("port-only persistence erased serving")
+	}
+	path := filepath.Join(e.overrideDir, "fake.json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded map[string]json.RawMessage
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	decoded["custom"] = json.RawMessage(`{"integer":9007199254740993}`)
+	if err := writeJSONAtomic(path, decoded); err != nil {
+		t.Fatal(err)
+	}
+	serving = nil
+	if err := e.persistRuntimeServing("fake", port, nil, nil, &serving); err != nil {
+		t.Fatal(err)
+	}
+	if readSettingsOverride(t, e).Serving != nil {
+		t.Fatal("explicit removal retained serving")
+	}
+	data, err = os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	var custom struct {
+		Integer json.Number `json:"integer"`
+	}
+	if err := json.Unmarshal(decoded["custom"], &custom); err != nil {
+		t.Fatal(err)
+	}
+	if custom.Integer.String() != "9007199254740993" {
+		t.Fatal("unrelated integer changed")
+	}
+	var override struct {
+		Platforms map[string]struct {
+			Runtime map[string]json.RawMessage `json:"runtime"`
+		} `json:"platforms"`
+	}
+	if err := json.Unmarshal(data, &override); err != nil {
+		t.Fatal(err)
+	}
+	for _, platform := range override.Platforms {
+		if strings.TrimSpace(string(platform.Runtime["serving"])) != "null" {
+			t.Fatal("removal cannot mask inherited serving")
+		}
+	}
+}
 
 // loadWithOverrides builds a registry the same way buildRegistry does at
 // startup: bundled manifests first, then the per-user override dir deep-merged

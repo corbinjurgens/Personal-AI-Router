@@ -32,6 +32,38 @@ vi.mock('@/electron/service-bridge/model-catalog', () => ({ getEngineHubModels: 
 
 import { handleServiceBridgeInvoke } from '@/electron/service-bridge/empty-handlers'
 import { MODULAR_ENGINE_LIFECYCLE_CALL_TIMEOUT_MS } from '@/shared/constants/modular-runtime'
+import type { EngineServingConfig } from '@/shared/types/engine-settings'
+import type { JsonValue } from '@/electron/service-bridge/json-rpc-client'
+import {
+    parseEngineSettings,
+    parseEngineSettingsPreview
+} from '@/electron/service-bridge/engine-settings'
+
+const serving = {
+    version: 1,
+    models: [
+        {
+            modelId: 'exact/model',
+            maxOutputTokens: 128,
+            memory: { hostRamBytes: 4096, vramBytes: 0 },
+            expectedNativeSourceDigest: 'a'.repeat(64),
+            artifacts: [
+                {
+                    role: 'model',
+                    sha256: 'b'.repeat(64),
+                    provenance: { kind: 'hf-lfs-sha256', reference: 'pinned metadata' },
+                    binding: {
+                        sourcePath: 'fixture-link',
+                        resolvedTarget: 'fixture-blob',
+                        sizeBytes: 64,
+                        mtimeNs: '1729000000000000001',
+                        sampleSha256: 'c'.repeat(64)
+                    }
+                }
+            ]
+        }
+    ]
+} satisfies EngineServingConfig
 
 const baseline = {
     nodeId: 'local-node',
@@ -56,6 +88,101 @@ describe('unified settings bridge', () => {
         mocks.supervisor.callProcess.mockImplementation(async (_name: string, method: string) =>
             method === 'engine:get-settings' ? baseline : { revision: 5, phase: 'succeeded' }
         )
+    })
+
+    it('keeps a manager-accepted blank provenance reference readable', () => {
+        const [model] = serving.models
+        const [artifact] = model.artifacts
+        const blank = {
+            ...serving,
+            models: [
+                {
+                    ...model,
+                    artifacts: [
+                        { ...artifact, provenance: { ...artifact.provenance, reference: ' ' } }
+                    ]
+                }
+            ]
+        }
+        expect(
+            parseEngineSettings({ ...baseline, settings: { ...baseline.settings, serving: blank } })
+                .settings.serving
+        ).toEqual(blank)
+    })
+
+    it('preserves complete serving declarations in readback, preview and unrelated apply', async () => {
+        const settings = { ...baseline.settings, serving }
+        const parsed = parseEngineSettings({
+            ...baseline,
+            settings,
+            serving: { status: 'unverified', reason: 'Native validation pending' }
+        })
+        expect(parsed.settings.serving).toEqual(serving)
+        expect(parsed.serving).toEqual({
+            status: 'unverified',
+            reason: 'Native validation pending'
+        })
+        expect(
+            parseEngineSettingsPreview({ settings, revision: 4, restart: false, rebind: false })
+                .settings.serving
+        ).toEqual(serving)
+        await handleServiceBridgeInvoke('engines:apply-settings', {
+            nodeId: 'local-node',
+            engine: 'ollama',
+            expectedRevision: 4,
+            requestId: 'serving-edit',
+            settings: { ...parsed.settings, proxyPort: 12000 }
+        })
+        expect(mocks.supervisor.callProcess).toHaveBeenCalledWith(
+            'broker',
+            'engine:apply-settings',
+            expect.objectContaining({ settings: { ...settings, proxyPort: 12000 } }),
+            MODULAR_ENGINE_LIFECYCLE_CALL_TIMEOUT_MS
+        )
+    })
+
+    it('rejects malformed serving records instead of projecting them away', () => {
+        const invalid = (value: JsonValue): void => {
+            expect(() =>
+                parseEngineSettings({
+                    ...baseline,
+                    settings: { ...baseline.settings, serving: value }
+                })
+            ).toThrow()
+        }
+        invalid({ ...serving, version: 2 })
+        invalid({ ...serving, models: [serving.models[0], serving.models[0]] })
+        invalid({ ...serving, models: [{ ...serving.models[0], memory: { hostRamBytes: 4096 } }] })
+        invalid({
+            ...serving,
+            models: [{ ...serving.models[0], maxOutputTokens: Number.MAX_SAFE_INTEGER + 1 }]
+        })
+        invalid({
+            ...serving,
+            models: [
+                {
+                    ...serving.models[0],
+                    artifacts: [{ ...serving.models[0].artifacts[0], sha256: 'bad' }]
+                }
+            ]
+        })
+        invalid({
+            ...serving,
+            models: [
+                {
+                    ...serving.models[0],
+                    artifacts: [
+                        {
+                            ...serving.models[0].artifacts[0],
+                            binding: {
+                                ...serving.models[0].artifacts[0].binding,
+                                mtimeNs: '9223372036854775808'
+                            }
+                        }
+                    ]
+                }
+            ]
+        })
     })
 
     // Applying settings can stop, rebind, and restart an engine, so it needs

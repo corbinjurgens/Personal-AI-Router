@@ -6,6 +6,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"net"
 	"os"
@@ -58,6 +60,11 @@ func newSettingsHarness(t *testing.T) *settingsHarness {
 }
 
 func newSettingsHarnessForEngine(t *testing.T, engine string) *settingsHarness {
+	t.Helper()
+	return newServingSettingsHarness(t, engine, nil)
+}
+
+func newServingSettingsHarness(t *testing.T, engine string, serving *engines.ServingConfig) *settingsHarness {
 	t.Helper()
 	ports := make([]int, 4)
 	listeners := []net.Listener{}
@@ -115,7 +122,7 @@ func newSettingsHarnessForEngine(t *testing.T, engine string) *settingsHarness {
 			_ = proxyCodec.Respond(msg.ID, map[string]int{"port": p.Port})
 		}
 	}()
-	launch := settings.LaunchState{Engine: engine, ServerPort: ports[0], EffectivePort: ports[0], LaunchText: "--fixture-option", Running: true, Editable: true, Format: "pair-arguments-v1"}
+	launch := settings.LaunchState{Engine: engine, ServerPort: ports[0], EffectivePort: ports[0], LaunchText: "--fixture-option", Running: true, Editable: true, Format: "pair-arguments-v1", Serving: serving.Clone()}
 	go func() {
 		for {
 			msg, err := codec.Read()
@@ -177,6 +184,7 @@ func newSettingsHarnessForEngine(t *testing.T, engine string) *settingsHarness {
 					h.launchMu.Lock()
 					launch.ServerPort = p.Settings.ServerPort
 					launch.LaunchText = p.Settings.LaunchText
+					launch.Serving = p.Settings.Serving.Clone()
 					launch.Running = false
 					h.launchMu.Unlock()
 					if err := h.b.rebindSettingsProxy(p.Engine, p.Settings.ProxyPort); err != nil {
@@ -218,6 +226,125 @@ func (h *settingsHarness) request(t *testing.T) settings.Request {
 		t.Fatal(err)
 	}
 	return settings.Request{Engine: "ollama", ExpectedRevision: s.Revision, RequestID: settingsID(), Settings: s.Settings}
+}
+
+func brokerServingFixture() *engines.ServingConfig {
+	ram, vram := int64(4096), int64(0)
+	return &engines.ServingConfig{Version: 1, Models: []engines.ServingModel{{ModelID: "exact/model", MaxOutputTokens: 128, Memory: engines.ServingMemory{HostRAMBytes: &ram, VRAMBytes: &vram}, Artifacts: []engines.ServingArtifact{{Role: "model", SHA256: strings.Repeat("a", 64), Provenance: engines.ServingProvenance{Kind: "hf-lfs-sha256"}, Binding: &engines.ServingBinding{SourcePath: "fixture-link", ResolvedTarget: "fixture-blob", SizeBytes: 64, MtimeNS: "1729000000000000001", SampleSHA256: strings.Repeat("b", 64)}}}}}}
+}
+
+func TestSettingsServingReceiptRecoveryAndSwitchPublication(t *testing.T) {
+	serving := brokerServingFixture()
+	h := newServingSettingsHarness(t, "ollama", serving)
+	p := h.request(t)
+	if !p.Settings.Serving.Equal(serving) {
+		t.Fatal("baseline reconstruction lost serving")
+	}
+	p.Settings.LaunchText += " --unrelated"
+	preview, err := h.b.previewEngineSettings(context.Background(), p, "")
+	if err != nil || !preview.Settings.Serving.Equal(serving) {
+		t.Fatal("preview lost serving")
+	}
+	receipt, err := h.b.applyEngineSettings(context.Background(), p, "")
+	if err != nil || receipt.Phase != "succeeded" {
+		t.Fatalf("apply receipt %v: %v", receipt.Phase, err)
+	}
+	if !h.b.engineSettings["ollama"].Previous.Serving.Equal(serving) {
+		t.Fatal("journal previous lost serving")
+	}
+	h.failBeforeStop.Store(true)
+	p = h.request(t)
+	p.Settings.LaunchText += " --failed-edit"
+	receipt, err = h.b.applyEngineSettings(context.Background(), p, "")
+	if err != nil || receipt.Phase != "failed" {
+		t.Fatal("expected failed receipt")
+	}
+	h.failBeforeStop.Store(false)
+	// Crash after durable acceptance of the next retry, before worker apply.
+	record := h.b.engineSettings["ollama"]
+	record.Snapshot.Phase = "applying"
+	record.Snapshot.RequestID = "interrupted-retry"
+	record.Receipts["interrupted-retry"] = settingsReceipt{Revision: record.Snapshot.Revision, Phase: "applying"}
+	if err := h.b.saveEngineSettingsLocked(); err != nil {
+		t.Fatal(err)
+	}
+	beforeRecovery := h.applies.Load()
+	h.b.engineSettingsLoaded = false
+	if !h.b.recoverEngineSettings() {
+		t.Fatal("recovery failed")
+	}
+	if h.applies.Load() != beforeRecovery+1 {
+		t.Fatal("interrupted recovery did not replay the accepted settings")
+	}
+	config, ok := h.b.explicitEngineSettings("ollama")
+	if !ok || !config.Serving.Equal(serving) {
+		t.Fatal("recovered config lost serving")
+	}
+	*config.Serving.Models[0].Memory.HostRAMBytes = 1
+	again, ok := h.b.explicitEngineSettings("ollama")
+	if !ok || !again.Serving.Equal(serving) {
+		t.Fatal("recovery config aliases journal")
+	}
+	if err := h.b.publishSwitchTarget(context.Background(), "ollama"); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := h.b.getEngineSettings(context.Background(), settings.Request{Engine: "ollama"}, "")
+	if err != nil || !snapshot.Settings.Serving.Equal(serving) {
+		t.Fatal("switch publication/readback lost serving")
+	}
+	h.b.engineConfigMu.Lock()
+	beforeRefresh := h.b.engineSettings["ollama"].Snapshot.Sequence
+	h.b.reconcileLegacySettingsLocked()
+	afterRefresh := h.b.engineSettings["ollama"].Snapshot.Sequence
+	h.b.engineConfigMu.Unlock()
+	if beforeRefresh != afterRefresh {
+		t.Fatal("equivalent serving republished an unchanged refresh")
+	}
+	*snapshot.Settings.Serving.Models[0].Memory.VRAMBytes = 2
+	if !h.b.engineSettings["ollama"].Snapshot.Settings.Serving.Equal(serving) {
+		t.Fatal("readback aliases journal")
+	}
+	duplicate, err := h.b.applyEngineSettings(context.Background(), p, "")
+	if err != nil || duplicate != receipt {
+		t.Fatal("recovery changed immutable failed receipt")
+	}
+}
+
+func TestSettingsServingJournalWriteFailureRestoresDeclaration(t *testing.T) {
+	serving := brokerServingFixture()
+	h := newServingSettingsHarness(t, "ollama", serving)
+	p := h.request(t)
+	p.Settings.Serving.Models[0].MaxOutputTokens++
+	path, err := h.b.engineSettingsPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(path, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.b.applyEngineSettings(context.Background(), p, ""); err == nil {
+		t.Fatal("journal write succeeded unexpectedly")
+	}
+	if h.applies.Load() != 0 || !h.b.engineSettings["ollama"].Snapshot.Settings.Serving.Equal(serving) {
+		t.Fatal("failed journal write changed declaration/runtime")
+	}
+}
+
+func TestSettingsServingLegacyFingerprintByteStability(t *testing.T) {
+	s := settings.Snapshot{Epoch: "fixed-epoch", Revision: 7, AppliedRevision: 7, Phase: "succeeded", Settings: settings.Config{ServerPort: 8080, ProxyPort: 8081, LaunchText: "--opaque"}}
+	legacy := sha256.Sum256([]byte(`{"version":1,"epoch":"fixed-epoch","appliedRevision":7,"settings":{"serverPort":8080,"proxyPort":8081,"launchText":"--opaque"}}`))
+	fingerprint, ok := settingsFingerprint(s)
+	if !ok || fingerprint != hex.EncodeToString(legacy[:]) {
+		t.Fatal("unset serving changed pre-NE fingerprint bytes")
+	}
+	s.Settings.Serving = brokerServingFixture()
+	withServing, ok := settingsFingerprint(s)
+	if !ok || withServing == fingerprint {
+		t.Fatal("serving omitted from applied identity")
+	}
 }
 
 func TestSettingsCoordinatorRevisionDedupNoopAndFailure(t *testing.T) {

@@ -46,6 +46,25 @@ The executable and optional startup subcommand come from the trusted manifest.
 The `--` terminator and vendor flags retain their token positions for that layer.
 Unknown vendor option semantics are not decided by the tokenizer.
 
+## Serving records
+
+The settings `serving` object is independent of argument text; port or text
+edits carry it unchanged. Its versioned declaration, artifact provenance and
+local binding fields are described in [MANIFEST.md](MANIFEST.md#serving-declaration-override).
+Preview checks structure without probing an engine, inspecting model files,
+writing settings or stopping a process. Invalid fields use keys such as
+`serving.models.0.memory.vramBytes`. Missing serving keeps existing launches.
+Changing or explicitly removing a declaration changes the launch record and
+restarts a running engine through the existing settings operation. Persistence,
+receipts and recovery share that operation; no second journal is introduced.
+
+Serving readback separates `configured`, `launchValidated` and `observed`
+envelopes, with `unconfigured`, `unverified` and `mismatch` status/reasons. A
+stored declaration currently reports `unverified`; it supplies no runtime
+verification, derived native bounds, qualification or residency claim. The
+native-source digest and local binding may be absent until adapter validation
+is implemented. The desktop and terminal preserve this object without an editor.
+
 ## Launch resolution boundary
 
 `resolveProcessLaunch` returns the executable, argv and explicit environment

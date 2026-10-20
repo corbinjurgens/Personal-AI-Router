@@ -15,6 +15,7 @@ import (
 	"runtime"
 
 	"nvpair-shared/durablefile"
+	"nvpair-shared/engines"
 )
 
 var engineFileReplacer durablefile.Replacer
@@ -118,6 +119,12 @@ func (e *Executor) persistPort(engine string, port int) error {
 // argument and environment overrides. A nil slice pointer leaves that override
 // exactly as it is on disk; an empty slice clears it to "declared, but empty".
 func (e *Executor) persistRuntimeConfig(engine string, port int, args, environment *[]string) error {
+	return e.persistRuntimeServing(engine, port, args, environment, nil)
+}
+
+// A nil outer pointer preserves serving; a pointer to nil explicitly removes
+// it, including any inherited shared-platform declaration.
+func (e *Executor) persistRuntimeServing(engine string, port int, args, environment *[]string, serving **engines.ServingConfig) error {
 	if e.overrideDir == "" {
 		return fmt.Errorf("no config directory available to persist the port")
 	}
@@ -193,6 +200,9 @@ func (e *Executor) persistRuntimeConfig(engine string, port int, args, environme
 	}
 	if environment != nil {
 		hostRuntime["launch_env"] = append([]string{}, (*environment)...)
+	}
+	if serving != nil {
+		hostRuntime["serving"] = (*serving).Clone()
 	}
 	setOverrideObject(platform, "runtime", hostRuntime)
 	setOverrideObject(platforms, host, platform)
