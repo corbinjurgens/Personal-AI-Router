@@ -16,14 +16,23 @@ type Hub struct {
 func (h *Hub) Publish(value []Snapshot) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	h.latest = append([]Snapshot{}, value...)
+	h.latest = cloneSnapshots(value)
 	for ch := range h.readers {
 		select {
 		case <-ch:
 		default:
 		}
-		ch <- append([]Snapshot{}, value...)
+		ch <- cloneSnapshots(value)
 	}
+}
+
+// Each reader owns its snapshots, including nested serving records.
+func cloneSnapshots(value []Snapshot) []Snapshot {
+	out := make([]Snapshot, len(value))
+	for i, s := range value {
+		out[i] = s.Clone()
+	}
+	return out
 }
 
 func (h *Hub) Subscribe() (<-chan []Snapshot, func(), bool) {
@@ -37,6 +46,6 @@ func (h *Hub) Subscribe() (<-chan []Snapshot, func(), bool) {
 	}
 	ch := make(chan []Snapshot, 1)
 	h.readers[ch] = true
-	ch <- append([]Snapshot{}, h.latest...)
+	ch <- cloneSnapshots(h.latest)
 	return ch, func() { h.mu.Lock(); delete(h.readers, ch); h.mu.Unlock() }, true
 }
