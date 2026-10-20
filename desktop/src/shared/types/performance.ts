@@ -14,6 +14,12 @@ export interface PerformanceRate {
     tokensPerSecond: number
 }
 
+export interface PerformanceReportedRate {
+    samples: number
+    durationNs: number
+    tokensPerSecond: number
+}
+
 export interface PerformanceEntry {
     key: { host: string; engine: string; model: string; fingerprint: string }
     profile: { engineFamily: string; quantization: string; contextTokens: number | null }
@@ -34,10 +40,11 @@ export interface PerformanceEntry {
     loadNs: PerformanceDistribution | null
     prefill: PerformanceRate | null
     decode: PerformanceRate | null
+    engineDecode: PerformanceReportedRate | null
 }
 
 export interface PerformanceSummary {
-    version: 1
+    version: 2
     measuringHost: string
     admissionIncarnation: string
     revision: number

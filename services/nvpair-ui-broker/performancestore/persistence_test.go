@@ -302,6 +302,85 @@ func TestLoadOldSnapshotUsesConservativeAgeFloor(t *testing.T) {
 	}
 }
 
+func TestLoadV1HistoryPreservesLegacyDecode(t *testing.T) {
+	path := snapshotPath(t)
+	data := []byte(`{"schemaVersion":1,"host":"host-a","revision":1760000000000,"keys":[{"key":{"host":"host-a","engine":"llamacpp-custom","model":"m","fingerprint":"fp-1"},"profile":{},"samples":[{"observedAtMs":1760000000000,"outcome":"completed","protocolComplete":true,"outputTokens":20,"decodeNs":400000000}]}]}`)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatalf("mkdir legacy fixture: %v", err)
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatalf("write legacy fixture: %v", err)
+	}
+	s, _ := newTestStore(t, path)
+	if err := s.Load(); err != nil {
+		t.Fatalf("load v1 history: %v", err)
+	}
+	got := mustPublished(t, s)
+	if got.Version != 2 || len(got.Entries) != 1 {
+		t.Fatalf("upgraded summary = %+v, want v2 with legacy entry", got)
+	}
+	want := performancewire.Rate{Samples: 1, Tokens: 20, DurationNs: 400_000_000, TokensPerSecond: 50}
+	if e := got.Entries[0]; e.Decode == nil || *e.Decode != want || e.EngineDecode != nil {
+		t.Fatalf("legacy entry = %+v, want original count-derived decode %+v", e, want)
+	}
+	preserved, err := os.ReadFile(path)
+	if err != nil || !bytes.Equal(preserved, data) {
+		t.Fatalf("load changed original history: equal=%t error=%v", bytes.Equal(preserved, data), err)
+	}
+}
+
+func TestReportedRateMeasurementsRoundTripWithoutChangingFileSchema(t *testing.T) {
+	path := snapshotPath(t)
+	s, _ := newTestStore(t, path)
+	r := &recorder{t: t, s: s}
+	for _, rate := range []float64{55, 0} {
+		m := completed()
+		m.EngineDecodeNs = ptr[int64](400_000_000)
+		m.EngineDecodeTokensPerSecond = ptr(rate)
+		r.record(testKey("m"), m)
+	}
+	intervalOnly := completed()
+	intervalOnly.EngineDecodeNs = ptr[int64](600_000_000)
+	r.record(testKey("m"), intervalOnly)
+	mustSave(t, s)
+	saved := readFileSnapshot(t, path)
+	if saved.SchemaVersion != 1 || len(saved.Keys) != 1 || len(saved.Keys[0].Samples) != 3 {
+		t.Fatalf("snapshot layout = %+v, want unchanged v1 with three samples", saved)
+	}
+	for i, wantRate := range []float64{55, 0} {
+		got := saved.Keys[0].Samples[i]
+		if got.EngineDecodeNs == nil || *got.EngineDecodeNs != 400_000_000 ||
+			got.EngineDecodeTokensPerSecond == nil || *got.EngineDecodeTokensPerSecond != wantRate || got.DecodeNs != nil {
+			t.Fatalf("persisted sample %d = %+v, want original reported pair and nil legacy duration", i, got)
+		}
+	}
+	if got := saved.Keys[0].Samples[2]; got.EngineDecodeNs == nil || *got.EngineDecodeNs != 600_000_000 || got.EngineDecodeTokensPerSecond != nil {
+		t.Fatalf("interval-only sample = %+v, want preserved unknown rate", got)
+	}
+	restarted, _ := newTestStore(t, path)
+	if err := restarted.Load(); err != nil {
+		t.Fatalf("load reported-rate history: %v", err)
+	}
+	want := performancewire.ReportedRate{Samples: 2, DurationNs: 800_000_000, TokensPerSecond: 27.5}
+	if got := mustPublished(t, restarted).Entries[0].EngineDecode; got == nil || *got != want {
+		t.Fatalf("reloaded reported rate = %+v, want %+v", got, want)
+	}
+}
+
+func TestSnapshotCopiesOwnReportedRatePointers(t *testing.T) {
+	m := completed()
+	m.EngineDecodeNs = ptr[int64](400_000_000)
+	m.EngineDecodeTokensPerSecond = ptr(55.0)
+	snap := snapshot{Keys: []snapshotKey{{Key: testKey("m"), Samples: []record{{Measurement: m}}}}}
+	keys := snap.keyStates()
+	got := &keys[testKey("m")].samples[0]
+	*got.EngineDecodeNs = 1
+	*got.EngineDecodeTokensPerSecond = 0
+	if *m.EngineDecodeNs != 400_000_000 || *m.EngineDecodeTokensPerSecond != 55 {
+		t.Fatalf("snapshot pointers changed through copied keys: %+v", m)
+	}
+}
+
 func TestRevisionExhaustionLeavesSavedSnapshotIntact(t *testing.T) {
 	path := snapshotPath(t)
 	s, _ := newTestStore(t, path)
@@ -624,6 +703,8 @@ func TestLoadQuarantinesCorruptSnapshots(t *testing.T) {
 		}
 	}, "")
 	reject("invalid measurement", func(s *snapshot) { s.Keys[0].Samples[0].TotalMs = ptr[int64](-1) }, "")
+	reject("invalid reported rate", func(s *snapshot) { s.Keys[0].Samples[0].EngineDecodeTokensPerSecond = ptr(-1.0) }, "")
+	reject("invalid reported interval", func(s *snapshot) { s.Keys[0].Samples[0].EngineDecodeNs = ptr(performancewire.MaxPhaseNs + 1) }, "")
 	reject("missing observation time", func(s *snapshot) { s.Keys[0].Samples[0].ObservedAtMs = 0 }, "")
 }
 

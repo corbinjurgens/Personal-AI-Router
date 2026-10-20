@@ -17,7 +17,7 @@ import (
 
 const performanceFixtureJSON = `{
 	"local":{"measuringHost":"local-host","status":"fresh","lastSeenAgeMs":0,"expiredEntries":2,
-		"summary":{"version":1,"measuringHost":"local-host","admissionIncarnation":"","revision":0,
+		"summary":{"version":2,"measuringHost":"local-host","admissionIncarnation":"","revision":0,
 			"window":{"maxAgeMs":604800000,"maxSamplesPerKey":64},"omittedEntries":3,"entries":[
 				{"key":{"host":"local-host","engine":"llamacpp-custom","model":"actual-model","fingerprint":"profile-a"},
 				"profile":{"quantization":"Q4_K_M","contextTokens":8192},
@@ -91,6 +91,62 @@ func TestPerformanceAdditionalProfileMetricsMatchDesktop(t *testing.T) {
 		"Engine load: median -- / p95 -- ms | coverage 0/5")
 }
 
+func TestPerformanceEngineReportedDecodePresentation(t *testing.T) {
+	test := func(name string, rate float64, want string) {
+		t.Run(name, func(t *testing.T) {
+			d := localDetail()
+			d.performance = performanceFixture(t)
+			d.performance.Local.Summary.Entries[0].EngineDecode = &performancewire.ReportedRate{
+				Samples: 2, DurationNs: 1_000_000_000, TokensPerSecond: rate,
+			}
+			decoded, err := decodePerformanceProjection(performanceJSON(t, d.performance))
+			if err != nil {
+				t.Fatalf("decode reported rate: %v", err)
+			}
+			d.performance = decoded
+			text := d.performanceText()
+			assertPerformanceText(t, text, want,
+				"Duration-weighted mean of reported rates, which may be rounded by the engine; no reconstructed token total.",
+				"Host local-host | engine llamacpp-custom | model actual-model", "Profile profile-a")
+			if strings.Contains(text, "Decode: 0 tokens/s") {
+				t.Fatal("reported and legacy decode populations were mixed")
+			}
+		})
+	}
+	test("reported rate and coverage", 49.125, "Engine-reported decode: 49.125 tokens/s | qualified 2/5")
+	test("measured zero", 0, "Engine-reported decode: 0 tokens/s | qualified 2/5")
+}
+
+func TestPerformanceUnknownDecodeWithoutEitherAggregate(t *testing.T) {
+	d := localDetail()
+	d.performance = performanceFixture(t)
+	d.performance.Local.Summary.Entries[0].Decode = nil
+	assertPerformanceText(t, d.performanceText(), "Decode: -- tokens/s | qualified 0/5")
+}
+
+func TestPerformanceProjectionRejectsInvalidReportedDecode(t *testing.T) {
+	test := func(name, metric string) {
+		t.Run(name, func(t *testing.T) {
+			raw := strings.Replace(performanceFixtureJSON, `"decode":`, `"engineDecode":`+metric+`,"decode":`, 1)
+			if p, err := decodePerformanceProjection([]byte(raw)); err == nil || p != nil {
+				t.Fatal("invalid reported rate was accepted")
+			}
+		})
+	}
+	test("missing samples", `{"durationNs":100,"tokensPerSecond":0}`)
+	test("null samples", `{"samples":null,"durationNs":100,"tokensPerSecond":0}`)
+	test("missing duration", `{"samples":1,"tokensPerSecond":0}`)
+	test("null duration", `{"samples":1,"durationNs":null,"tokensPerSecond":0}`)
+	test("zero duration", `{"samples":1,"durationNs":0,"tokensPerSecond":0}`)
+	test("excessive duration", `{"samples":1,"durationNs":86400000000001,"tokensPerSecond":0}`)
+	test("missing rate", `{"samples":1,"durationNs":100}`)
+	test("null rate", `{"samples":1,"durationNs":100,"tokensPerSecond":null}`)
+	test("negative rate", `{"samples":1,"durationNs":100,"tokensPerSecond":-1}`)
+	test("excessive rate", `{"samples":1,"durationNs":100,"tokensPerSecond":10000001}`)
+	test("incomplete coverage", `{"samples":3,"durationNs":100,"tokensPerSecond":1}`)
+	test("invented tokens", `{"samples":1,"durationNs":100,"tokensPerSecond":1,"tokens":1}`)
+}
+
 func TestPerformanceProjectionAllowsDisplayOnlyLocalAndAgedValues(t *testing.T) {
 	p := performanceFixture(t)
 	if p.Local.Summary.Revision != 0 || p.Local.Summary.AdmissionIncarnation != "" || p.Local.Summary.Entries[0].OldestAgeMs != 604801000 {
@@ -114,6 +170,7 @@ func TestPerformanceProjectionRejectsMalformedAndPrivateFrames(t *testing.T) {
 		})
 	}
 	test("null", []byte("null"))
+	test("v1 summary", []byte(strings.Replace(performanceFixtureJSON, `"version":2`, `"version":1`, 1)))
 	test("missing local", []byte(`{"peers":[]}`))
 	test("private field", []byte(strings.Replace(performanceFixtureJSON, `"model":"actual-model"`, `"model":"actual-model","prompt":"private"`, 1)))
 	test("invalid counts", []byte(strings.Replace(performanceFixtureJSON, `"samples":5`, `"samples":6`, 1)))

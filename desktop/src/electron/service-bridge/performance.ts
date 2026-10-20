@@ -6,6 +6,7 @@ import type {
     PerformanceDistribution,
     PerformanceEntry,
     PerformanceRate,
+    PerformanceReportedRate,
     PerformanceSummary
 } from '@/shared/types/performance'
 import type { JsonObject, JsonValue } from './json-rpc-client'
@@ -76,6 +77,23 @@ function rate(value: JsonValue | undefined, completed: number): PerformanceRate 
     }
 }
 
+function reportedRate(
+    value: JsonValue | undefined,
+    completed: number
+): PerformanceReportedRate | null {
+    if (value == null) return null
+    const obj = object(value, ['samples', 'durationNs', 'tokensPerSecond'])
+    const samples = count(obj.samples, completed, 1)
+    const speed = obj.tokensPerSecond
+    if (typeof speed !== 'number' || !Number.isFinite(speed) || speed < 0 || speed > 10_000_000)
+        throw new Error('reported rate')
+    return {
+        samples,
+        durationNs: count(obj.durationNs, samples * phaseNs, 1),
+        tokensPerSecond: speed
+    }
+}
+
 function entry(value: JsonValue, host: string, maxSamples: number): PerformanceEntry {
     const obj = object(value, [
         'key',
@@ -96,13 +114,15 @@ function entry(value: JsonValue, host: string, maxSamples: number): PerformanceE
         'totalMs',
         'loadNs',
         'prefill',
-        'decode'
+        'decode',
+        'engineDecode'
     ])
     const key = object(obj.key, ['host', 'engine', 'model', 'fingerprint'])
     if (id(key.host) !== host) throw new Error('host')
     const profile = object(obj.profile, ['engineFamily', 'quantization', 'contextTokens'])
     const samples = count(obj.samples, maxSamples, 1)
     const completed = count(obj.completed, samples)
+    const incomplete = count(obj.incomplete, completed)
     const failed = count(obj.failed, samples)
     const cancelled = count(obj.cancelled, samples)
     if (completed + failed + cancelled !== samples) throw new Error('outcomes')
@@ -127,7 +147,7 @@ function entry(value: JsonValue, host: string, maxSamples: number): PerformanceE
         completed,
         failed,
         cancelled,
-        incomplete: count(obj.incomplete, completed),
+        incomplete,
         newestAgeMs,
         // Broker-aged display summaries can have an oldest sample beyond retention.
         oldestAgeMs: count(obj.oldestAgeMs, Number.MAX_SAFE_INTEGER, newestAgeMs),
@@ -140,7 +160,8 @@ function entry(value: JsonValue, host: string, maxSamples: number): PerformanceE
         totalMs: distribution(obj.totalMs, completed, latencyMs),
         loadNs: distribution(obj.loadNs, completed, phaseNs),
         prefill: rate(obj.prefill, completed),
-        decode: rate(obj.decode, completed)
+        decode: rate(obj.decode, completed),
+        engineDecode: reportedRate(obj.engineDecode, completed - incomplete)
     }
 }
 
@@ -155,7 +176,7 @@ function summary(value: JsonValue, host: string, local: boolean): PerformanceSum
         'entries',
         'omittedEntries'
     ])
-    if (obj.version !== 1 || id(obj.measuringHost) !== host) throw new Error('summary host/version')
+    if (obj.version !== 2 || id(obj.measuringHost) !== host) throw new Error('summary host/version')
     const epoch = local && obj.admissionIncarnation === '' ? '' : id(obj.admissionIncarnation)
     const window = object(obj.window, ['maxAgeMs', 'maxSamplesPerKey'])
     const maxAgeMs = count(window.maxAgeMs, retentionMs, 1)
@@ -166,7 +187,7 @@ function summary(value: JsonValue, host: string, local: boolean): PerformanceSum
     const keys = new Set(entries.map(value => JSON.stringify(value.key)))
     if (keys.size !== entries.length) throw new Error('duplicate key')
     return {
-        version: 1,
+        version: 2,
         measuringHost: host,
         admissionIncarnation: epoch,
         revision: count(obj.revision, Number.MAX_SAFE_INTEGER, local ? 0 : 1),
