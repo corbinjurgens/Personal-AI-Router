@@ -632,52 +632,140 @@ describe('node-scoped engine switch store', () => {
         expect(store.getState().entries['node-a'].revision).toBeUndefined()
         expect(invoke).toHaveBeenCalledTimes(1)
     })
-    it('lost submit response retains original request for readback and never resends', async () => {
-        await idle()
-        invoke.mockResolvedValueOnce({ success: true, data: { configurationRevision: revision } })
-        invoke.mockResolvedValueOnce({ success: false, error: 'lost response' })
-        await store.getState().submit('node-a', 'ollama', 'llamacpp')
-        const original = store.getState().entries['node-a'].request
-        if (!original) throw new Error('Missing original identity')
-        expect(store.getState().entries['node-a'].unknown).toBe(true)
-        expect(store.getState().entries['node-a'].unavailable).toContain('outcome unknown')
-        invoke.mockResolvedValueOnce({ success: true, data: { configurationRevision: revision } })
-        invoke.mockResolvedValueOnce({
-            success: true,
-            data: {
-                configurationRevision: revision,
-                receipt: receipt({
-                    request: original,
-                    requestId: original.requestId,
-                    phase: 'completed',
-                    terminal: true,
-                    sequence: 8
-                })
-            }
-        })
-        await store.getState().refresh('node-a')
-        expect(invoke).toHaveBeenLastCalledWith('engines:switch-status', {
-            nodeId: 'node-a',
-            requestId: original.requestId
-        })
-        expect(store.getState().entries['node-a'].receipt?.phase).toBe('completed')
-        expect(store.getState().entries['node-a'].unknown).toBe(false)
-        expect(invoke.mock.calls.filter(([channel]) => channel === 'engines:switch')).toHaveLength(
-            1
-        )
-    })
+    it.each([undefined, -32000])(
+        'indeterminate submit failure %s retains original recovery through absence and remount',
+        async code => {
+            await idle()
+            invoke.mockResolvedValueOnce({
+                success: true,
+                data: { configurationRevision: revision }
+            })
+            invoke.mockResolvedValueOnce({ success: false, error: 'lost response', code })
+            await store.getState().submit('node-a', 'ollama', 'llamacpp')
+            const original = store.getState().entries['node-a'].request
+            if (!original) throw new Error('Missing original identity')
+            expect(store.getState().entries['node-a'].unknown).toBe(true)
+            expect(store.getState().entries['node-a'].unavailable).toContain('outcome unknown')
+            stops.splice(0).forEach(stop => stop())
+            invoke.mockResolvedValueOnce({
+                success: true,
+                data: { configurationRevision: revision }
+            })
+            invoke.mockResolvedValueOnce({
+                success: false,
+                code: -32000,
+                error: 'Unknown switch receipt for this caller.'
+            })
+            stops.push(watchEngineSwitch('node-a'))
+            await flush()
+            expect(store.getState().entries['node-a'].unknown).toBe(true)
+            expect(store.getState().entries['node-a'].request).toBe(original)
+            expect(store.getState().reserved('node-a', 'ollama')).toBe(true)
+            expect(store.getState().reserved('node-a', 'llamacpp')).toBe(true)
+            const beforeRetry = invoke.mock.calls.length
+            await store.getState().submit('node-a', 'ollama', 'llamacpp')
+            expect(invoke).toHaveBeenCalledTimes(beforeRetry)
+            invoke.mockResolvedValueOnce({
+                success: true,
+                data: { configurationRevision: revision }
+            })
+            invoke.mockResolvedValueOnce({
+                success: true,
+                data: {
+                    configurationRevision: revision,
+                    receipt: receipt({
+                        request: original,
+                        requestId: original.requestId,
+                        phase: 'completed',
+                        terminal: true,
+                        sequence: 8
+                    })
+                }
+            })
+            await store.getState().refresh('node-a')
+            expect(invoke).toHaveBeenLastCalledWith('engines:switch-status', {
+                nodeId: 'node-a',
+                requestId: original.requestId
+            })
+            expect(store.getState().entries['node-a'].receipt?.phase).toBe('completed')
+            expect(store.getState().entries['node-a'].unknown).toBe(false)
+            expect(store.getState().entries['node-a'].refused).toBeUndefined()
+            expect(
+                invoke.mock.calls.filter(([channel]) => channel === 'engines:switch')
+            ).toHaveLength(1)
+        }
+    )
     it.each([
         [-32012, 'Remote management permission denied'],
         [-32011, 'Local Off veto'],
-        [-32010, 'Configuration conflict']
-    ])('preserves typed refusal %s', async (code, label) => {
-        await idle()
-        invoke.mockResolvedValueOnce({ success: true, data: { configurationRevision: revision } })
-        invoke.mockResolvedValueOnce({ success: false, error: 'refused', code: Number(code) })
-        await store.getState().submit('node-a', 'ollama', 'llamacpp')
-        expect(store.getState().entries['node-a'].unavailable).toContain(String(label))
-        expect(store.getState().entries['node-a'].request?.sourceEngine).toBe('ollama')
-    })
+        [-32010, 'Configuration conflict'],
+        [-32602, 'Invalid switch request']
+    ])(
+        'resolves typed refusal %s across readback and remount without stranding the draft',
+        async (code, label) => {
+            await idle()
+            const permission = vi
+                .spyOn(useNodeConfigurationStore.getState(), 'readManagement')
+                .mockResolvedValue()
+            invoke.mockResolvedValueOnce({
+                success: true,
+                data: { configurationRevision: revision }
+            })
+            invoke.mockResolvedValueOnce({ success: false, error: 'refused', code: Number(code) })
+            await store.getState().submit('node-a', 'ollama', 'llamacpp')
+            const original = store.getState().entries['node-a'].request
+            expect(original).toMatchObject({ sourceEngine: 'ollama', targetEngine: 'llamacpp' })
+            expect(store.getState().entries['node-a'].unknown).toBe(false)
+            expect(store.getState().entries['node-a'].refused).toContain(
+                `${label}: refused before acceptance: refused`
+            )
+            expect(store.getState().reserved('node-a', 'ollama')).toBe(false)
+            expect(store.getState().reserved('node-a', 'llamacpp')).toBe(false)
+            expect(permission).toHaveBeenCalledTimes(code === -32012 ? 1 : 0)
+            // The audit probe's unknown-receipt response must never be needed for
+            // a definitely refused ID, even after repeated readback and remount.
+            for (let round = 0; round < 3; round++) {
+                invoke.mockResolvedValueOnce({
+                    success: true,
+                    data: { configurationRevision: revision }
+                })
+                await store.getState().refresh('node-a')
+            }
+            stops.splice(0).forEach(stop => stop())
+            await idle()
+            expect(store.getState().entries['node-a'].request).toBe(original)
+            expect(store.getState().entries['node-a'].refused).toContain(String(label))
+            expect(store.getState().entries['node-a'].unavailable).toBeUndefined()
+            expect(
+                invoke.mock.calls.filter(([channel]) => channel === 'engines:switch')
+            ).toHaveLength(1)
+            expect(
+                invoke.mock.calls.filter(
+                    ([channel, payload]) =>
+                        channel === 'engines:switch-status' &&
+                        typeof payload === 'object' &&
+                        payload !== null &&
+                        'requestId' in payload
+                )
+            ).toHaveLength(0)
+            invoke.mockResolvedValueOnce({
+                success: true,
+                data: { configurationRevision: revision }
+            })
+            invoke.mockResolvedValueOnce({
+                success: false,
+                error: String(label),
+                code: Number(code)
+            })
+            await store.getState().submit('node-a', 'ollama', 'llamacpp')
+            expect(
+                invoke.mock.calls.filter(([channel]) => channel === 'engines:switch')
+            ).toHaveLength(2)
+            expect(store.getState().entries['node-a'].request?.requestId).not.toBe(
+                original?.requestId
+            )
+        }
+    )
     it('terminal failure and recoveryRequired remain independent and reserve both engines', async () => {
         await active(
             receipt({

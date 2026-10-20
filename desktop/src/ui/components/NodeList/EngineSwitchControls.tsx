@@ -138,6 +138,11 @@ export function EngineSwitchControls({
                         {errorLabel}: {error.message} ({error.code}, {error.kind})
                     </Text>
                 )}
+                {entry?.refused && (
+                    <Text kind="body/regular/sm" role="alert">
+                        {entry.refused}
+                    </Text>
+                )}
                 {receipt?.recoveryRequired && (
                     <Text kind="body/regular/sm" role="alert">
                         Recovery required. Readback does not perform recovery.

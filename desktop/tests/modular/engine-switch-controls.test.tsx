@@ -228,6 +228,63 @@ describe('engine switch controls in node settings', () => {
             0
         )
     })
+    it('pre-acceptance denial shows the actual refusal and permits a deliberate retry after permission readback', async () => {
+        useConnectionStore.setState({ selfId: 'self' })
+        await mount()
+        await select(0, 'ollama')
+        await select(1, 'llamacpp')
+        permission.mockResolvedValueOnce({
+            version: 1,
+            allowed: true,
+            state: 'allowed',
+            revision: '1'
+        })
+        permission.mockResolvedValueOnce({
+            version: 1,
+            allowed: false,
+            state: 'denied',
+            revision: '2'
+        })
+        invoke.mockResolvedValueOnce({ success: true, data: { configurationRevision: revision } })
+        invoke.mockResolvedValueOnce({
+            success: false,
+            error: 'remote management not permitted',
+            code: -32012
+        })
+        await act(async () => submit().click())
+        const original = useEngineSwitchStore.getState().entries['node-a'].request?.requestId
+        expect(container.textContent).toContain(
+            'refused before acceptance: remote management not permitted'
+        )
+        expect(container.textContent).not.toContain('outcome unknown')
+        expect(container.querySelector('[aria-label="From"]')?.textContent).toBe('Ollama')
+        expect(container.querySelector('[aria-label="To"]')?.textContent).toBe('llama.cpp')
+        expect(submit().disabled).toBe(true)
+        expect(permission).toHaveBeenCalledTimes(3)
+        expect(useEngineSwitchStore.getState().reserved('node-a', 'ollama')).toBe(false)
+        expect(useEngineSwitchStore.getState().reserved('node-a', 'llamacpp')).toBe(false)
+        permission.mockResolvedValue({ version: 1, allowed: true, state: 'allowed', revision: '3' })
+        await act(async () =>
+            useNodeConfigurationStore.getState().readManagement('node-a', 'node-a')
+        )
+        expect(submit().disabled).toBe(false)
+        expect(invoke.mock.calls.filter(([channel]) => channel === 'engines:switch')).toHaveLength(
+            1
+        )
+        invoke.mockResolvedValueOnce({ success: true, data: { configurationRevision: revision } })
+        invoke.mockResolvedValueOnce({
+            success: false,
+            error: 'remote management not permitted',
+            code: -32012
+        })
+        await act(async () => submit().click())
+        expect(invoke.mock.calls.filter(([channel]) => channel === 'engines:switch')).toHaveLength(
+            2
+        )
+        expect(useEngineSwitchStore.getState().entries['node-a'].request?.requestId).not.toBe(
+            original
+        )
+    })
     it('source and target identity survives engine list reorder', async () => {
         await mount()
         await select(0, 'ollama')

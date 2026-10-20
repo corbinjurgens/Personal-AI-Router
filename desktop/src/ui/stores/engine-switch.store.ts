@@ -18,6 +18,7 @@ interface SwitchEntry {
     observed?: SwitchStatus['observed']
     own?: boolean
     unknown?: boolean
+    refused?: string
     unavailable?: string
 }
 interface SwitchStore {
@@ -73,7 +74,7 @@ function merge(nodeId: string, requestId: string, receipt: SwitchReceipt): boole
         (entry.receipt && receipt.sequence <= entry.receipt.sequence)
     )
         return false
-    put(nodeId, { receipt, unknown: false, unavailable: undefined })
+    put(nodeId, { receipt, unknown: false, refused: undefined, unavailable: undefined })
     usePendingActionsStore.getState().endSwitch(nodeId, requestId)
     if (receipt.error?.code === -32012)
         void useNodeConfigurationStore
@@ -97,7 +98,7 @@ function scheduleWait(nodeId: string): void {
     const watch = watches.get(nodeId)
     const entry = useEngineSwitchStore.getState().entries[nodeId]
     if (!watch?.consumers || !connected(nodeId) || !entry?.request || entry.unavailable) return
-    if (entry.receipt?.terminal) return
+    if (entry.receipt?.terminal || entry.refused) return
     const requestId = entry.request.requestId
     const key = JSON.stringify([nodeId, requestId])
     if (waits.has(key) || watch.timer !== undefined) return
@@ -192,7 +193,8 @@ export const useEngineSwitchStore = create<SwitchStore>((_set, get) => ({
                     (entry.receipt && !entry.receipt.terminal))
             const requestId = ownUnresolved
                 ? entry.request?.requestId
-                : (status.activeRequestId ?? entry?.request?.requestId)
+                : (status.activeRequestId ??
+                  (entry?.refused ? undefined : entry?.request?.requestId))
             if (requestId) {
                 if (
                     !ownUnresolved &&
@@ -204,7 +206,8 @@ export const useEngineSwitchStore = create<SwitchStore>((_set, get) => ({
                         receipt: undefined,
                         observed: undefined,
                         own: false,
-                        unknown: false
+                        unknown: false,
+                        refused: undefined
                     })
                 const result = await window.pairApi.engines.switchStatus({ nodeId, requestId })
                 if (!current(nodeId, watch, generation) || watch.read !== read) return false
@@ -289,6 +292,7 @@ export const useEngineSwitchStore = create<SwitchStore>((_set, get) => ({
                 observed: undefined,
                 own: true,
                 unknown: true,
+                refused: undefined,
                 unavailable: undefined
             })
             try {
@@ -304,13 +308,29 @@ export const useEngineSwitchStore = create<SwitchStore>((_set, get) => ({
                 )
                     return
                 const code = serviceErrorCode(error)
+                // These codes establish refusal, unlike generic RPC/storage or
+                // transport errors which may follow durable acceptance. Keep
+                // the draft and diagnostic without inventing a broker receipt.
+                if (code === -32012 || code === -32011 || code === -32010 || code === -32602) {
+                    const label =
+                        code === -32012
+                            ? 'Remote management permission denied'
+                            : code === -32011
+                              ? 'Local Off veto'
+                              : code === -32010
+                                ? 'Configuration conflict'
+                                : 'Invalid switch request'
+                    put(nodeId, {
+                        unknown: false,
+                        refused: `${label}: refused before acceptance: ${getErrorString(error)} (${code}).`,
+                        unavailable: undefined
+                    })
+                    refreshPermission(nodeId, code)
+                    return
+                }
                 put(nodeId, {
-                    unavailable: `${code === -32012 ? 'Remote management permission denied' : code === -32011 ? 'Local Off veto' : code === -32010 ? 'Configuration conflict' : 'Switch outcome unknown'}: ${getErrorString(error)}. Refresh readback; the request will not be resent.`
+                    unavailable: `Switch outcome unknown: ${getErrorString(error)}. Refresh readback; the request will not be resent.`
                 })
-                if (code === -32012)
-                    void useNodeConfigurationStore
-                        .getState()
-                        .readManagement(nodeId, local ? undefined : nodeId)
             }
             scheduleWait(nodeId)
         } finally {
