@@ -42,8 +42,20 @@ var pauseCancelSettle = 10 * time.Second
 // A paired node's pause over a local one stays local, so it never downgrades
 // the veto.
 func (b *Broker) setAvailability(ctx context.Context, state nodepolicy.Availability, origin nodepolicy.PauseOrigin) (nodepolicy.Availability, error) {
+	return b.setAvailabilityAs(ctx, state, origin, "")
+}
+
+// setAvailabilityAs is setAvailability for a verified caller. An empty caller
+// is this node's own client path. r.mu owns transition acceptance: permission
+// is checked before registration can supersede an in-flight transition.
+// transitionMu serializes execution of work already accepted here.
+func (b *Broker) setAvailabilityAs(ctx context.Context, state nodepolicy.Availability, origin nodepolicy.PauseOrigin, caller string) (nodepolicy.Availability, error) {
 	r := b.nodePolicyRuntime()
 	r.mu.Lock()
+	if err := b.authorizeRemoteManagement(caller, "availability", ""); err != nil {
+		r.mu.Unlock()
+		return "", err
+	}
 	if origin == nodepolicy.PausedByPeer && (pausedLocally(r.current) || r.localPauseRequested) {
 		if state == nodepolicy.Available {
 			r.mu.Unlock()

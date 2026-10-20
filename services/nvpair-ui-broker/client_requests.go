@@ -14,7 +14,49 @@ import (
 
 	"nvpair-shared/applog"
 	settings "nvpair-shared/enginesettings"
+	"nvpair-shared/nodepolicy"
 )
+
+// internalClientMethods are worker- and broker-internal methods a public
+// client must never call. The generic engine:* / cluster:* relays below would
+// otherwise hand them to engine-manager, which serves several of them as its
+// own broker-side surface. One list so a new internal method is added once.
+var internalClientMethods = map[string]struct{}{
+	// Peer relay notifications: only engine-manager relays these, with a
+	// verified caller.
+	policyRelayRequestMethod:       {},
+	policyRelayReplyMethod:         {},
+	policyRelayCancelMethod:        {},
+	"engine:settings-request":      {},
+	"engine:settings-reply":        {},
+	"engine:settings-cancel":       {},
+	"engine:settings-projection":   {},
+	"engine:switch-request":        {},
+	"engine:switch-reply":          {},
+	"engine:switch-cancel":         {},
+	"engine:switch-changed":        {},
+	"engine:switch-recovery-ready": {},
+	// Switch executor calls belong to the coordinator, which retains the
+	// operation lock. Relaying a client's target-start step would bypass it.
+	settings.SwitchPrepareMethod:   {},
+	settings.SwitchStepMethod:      {},
+	settings.SwitchReconcileMethod: {},
+	"engine:set-reserved-port":     {},
+	"internal:set-reserved-port":   {},
+	// Broker/engine-manager coordination.
+	nodepolicy.MethodModelMutationRequest: {},
+	nodepolicy.MethodModelMutationReply:   {},
+	nodepolicy.MethodReconcileResident:    {},
+	"engine:dispatch-resident-request":    {},
+	"engine:dispatch-resident-reply":      {},
+	"engine:node-projection":              {},
+	"engine:restore-enabled":              {},
+	"engine:prepare-shutdown":             {},
+	"engine:get-launch":                   {},
+	"engine:preview-launch":               {},
+	"engine:configured-ports":             {},
+	"engine:configure-launch":             {},
+}
 
 // forwardLogLevel pushes an already-validated log level down to every
 // running child subprocess over its stdin. Each child applies it through
@@ -131,6 +173,18 @@ func (b *Broker) handleMessage(msg *Message) {
 			return
 		}
 	}
+	// Reject worker-internal methods before any generic relay can reach a
+	// worker that would serve them.
+	if _, internal := internalClientMethods[msg.Method]; internal {
+		message := "method not found: " + msg.Method
+		if msg.Method == "engine:configure-launch" {
+			message = "use engine:apply-settings for launch configuration"
+		}
+		if err := b.codec.RespondError(msg.ID, -32601, message); err != nil {
+			log.Printf("failed to reject private method %s: %v", msg.Method, err)
+		}
+		return
+	}
 	if b.handlePolicyRequest(msg) {
 		return
 	}
@@ -225,24 +279,6 @@ func (b *Broker) handleMessage(msg *Message) {
 
 	case "node/add", "node/remove", "nodes/list":
 		b.relayToManualNodes(msg)
-
-	// Switch executor calls belong to the coordinator, which retains the
-	// operation lock. Relaying a client's target-start step would bypass it.
-	case "engine:set-reserved-port", "internal:set-reserved-port",
-		settings.SwitchPrepareMethod, settings.SwitchStepMethod, settings.SwitchReconcileMethod:
-		if err := b.codec.RespondError(msg.ID, -32601, "method not found: "+msg.Method); err != nil {
-			log.Printf("failed to reject private engine method %s: %v", msg.Method, err)
-		}
-
-	// Reached only because the default branch relays every other engine:*
-	// method straight to the engine manager. Configuring a launch that way
-	// would skip the journal entry, the port reservation, and the proxy
-	// rebind that engine:apply-settings owns, leaving the broker's recorded
-	// settings describing an engine it no longer matches.
-	case "engine:configure-launch":
-		if err := b.codec.RespondError(msg.ID, -32601, "use engine:apply-settings for launch configuration"); err != nil {
-			log.Printf("failed to reject direct %s: %v", msg.Method, err)
-		}
 
 	case "engine:subscribe":
 		b.engineMu.Lock()
