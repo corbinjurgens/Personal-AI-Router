@@ -149,8 +149,10 @@ func (e *Executor) doStart(ctx context.Context, st *engineState, engine string, 
 	st.mu.Unlock()
 
 	pathInstalled, _ := e.Detect(engine)
+	st.mu.Lock()
 	rt := st.plat.Runtime
 	port := st.port
+	st.mu.Unlock()
 	if opts.Port > 0 {
 		port = opts.Port
 	}
@@ -604,7 +606,9 @@ func (e *Executor) verifyStopped(engine string) (settings.SwitchEngineState, err
 
 // doStop performs the stop. Callers must hold st.opMu.
 func (e *Executor) doStop(st *engineState, engine string) error {
+	st.mu.Lock()
 	rt := st.plat.Runtime
+	st.mu.Unlock()
 	mode := rt.modeOrDefault()
 	st.mu.Lock()
 	if !st.running {
@@ -882,7 +886,9 @@ func (e *Executor) reconcileFailedCommandStop(st *engineState, engine string, ru
 		slog.Warn("engine stop command returned an error, but the endpoint is confirmed down", "engine", engine, "err", stopErr)
 		return nil
 	}
+	st.mu.Lock()
 	rt := st.plat.Runtime
+	st.mu.Unlock()
 	var port int
 	var healthCtx context.Context
 	var gen int64

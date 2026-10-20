@@ -71,8 +71,15 @@ behavior. Structural validation rejects unsupported versions, duplicate IDs,
 invalid digests, missing resource domains and invalid bounds before mutation.
 Any declaration change changes the launch record and requires a restart of a
 running engine. The llama adapter supplies `configured` envelopes and matching
-owned-process `launchValidated` envelopes. Loaded observations and strict
-content qualification remain unverified in this launch adapter.
+owned-process `launchValidated` envelopes. The existing model sweep also supplies
+`observed` context/slots for freshly loaded llama models via model-specific
+`/props` with `autoload=false`; cold models receive no props request. Matching
+observations never imply measured memory or content qualification. Unknown or
+mismatched loaded allocation withdraws identity through the run-bound drift
+reason. Unload/action pokes, input withdrawal and run/config replacement
+invalidate observed proof. See [loaded observation](spec.md#loaded-llama-allocation-observation)
+for freshness, cancellation and the SR lookup contract. Further Strata observation
+remains deferred.
 
 Owned current launches additionally publish aggregate `contentDigest` values
 and path-free envelopes in `engine:model-identity.serving`, keyed by exact model

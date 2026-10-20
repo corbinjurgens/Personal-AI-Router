@@ -186,6 +186,19 @@ func (e *Executor) sweepLoaded(ctx context.Context, prevLoaded map[string][]stri
 // Called after an action that may change residency (load/unload/pull/…) so the
 // engine:models-changed push doesn't wait up to a full poll interval.
 func (e *Executor) pokeLoaded() {
+	// Residency-changing actions invalidate proof immediately, including any
+	// in-flight pre-action sweep. The next sweep supplies fresh loaded names.
+	sweep := e.sweeps.Add(1)
+	for _, name := range e.reg.Names() {
+		if st, err := e.state(name); err == nil {
+			st.mu.Lock()
+			if sweep > st.plat.Runtime.servingObservationSweep {
+				st.plat.Runtime.servingObservationSweep = sweep
+				st.plat.Runtime.servingObserved = nil
+			}
+			st.mu.Unlock()
+		}
+	}
 	select {
 	case e.loadedPoke <- struct{}{}:
 	default:

@@ -99,7 +99,10 @@ func resolveRuntimeCommand(rt Runtime, index int, vars map[string]string) (launc
 // launchForState is read-only; callers hold opMu, and neither preview nor a
 // settings read probes ports, starts processes or writes configuration.
 func launchForState(st *engineState, port int) (launchCommand, error) {
+	st.mu.Lock()
 	rt := st.plat.Runtime
+	bin := st.binPath
+	st.mu.Unlock()
 	if llamaServingRuntime(st, rt.Serving) {
 		rt = llamaServingBase(rt)
 	}
@@ -109,9 +112,6 @@ func launchForState(st *engineState, port int) (launchCommand, error) {
 	if rt.CLI != "" {
 		vars["cli"] = expandPath(rt.CLI)
 	}
-	st.mu.Lock()
-	bin := st.binPath
-	st.mu.Unlock()
 	if rt.modeOrDefault() == "process" {
 		return resolveProcessLaunch(rt, bin, vars)
 	}
@@ -134,7 +134,9 @@ func (e *Executor) launchStateLocked(engine string, st *engineState) settings.La
 	st.mu.Unlock()
 	command, err := launchForState(st, result.ServerPort)
 	if err == nil {
+		st.mu.Lock()
 		rt := st.plat.Runtime
+		st.mu.Unlock()
 		if preparedServingRuntime(st, result.Serving) {
 			if llamaServingRuntime(st, result.Serving) {
 				rt = llamaServingBase(rt)
@@ -145,6 +147,13 @@ func (e *Executor) launchStateLocked(engine string, st *engineState) settings.La
 				if result.Running && !result.Adopted && rt.servingLaunch != nil {
 					if drift == "" && rt.servingLaunch.Digest == prepared.Digest {
 						result.ServingReadback.LaunchValidated = servingEnvelopes(rt.servingLaunch)
+						st.mu.Lock()
+						result.ServingReadback.Observed = e.servingObservationsLocked(st)
+						st.mu.Unlock()
+						if len(result.ServingReadback.Observed) > 0 {
+							result.ServingReadback.Status = "observed"
+							result.ServingReadback.Reason = "Loaded models match validated context and slots; memory bounds remain operator declarations."
+						}
 					} else {
 						result.ServingReadback.Status = "mismatch"
 						result.ServingReadback.Reason = "Serving inputs no longer match the owned launch; explicit apply or restart is required."
@@ -305,7 +314,9 @@ func (e *Executor) previewLaunch(st *engineState, request settings.Request, prep
 		result.Errors["serverPort"] = err.Error()
 		return result
 	}
+	st.mu.Lock()
 	rt := st.plat.Runtime
+	st.mu.Unlock()
 	rt.Serving = request.Settings.Serving.Clone()
 	if llamaServingRuntime(st, rt.Serving) {
 		if rt.modeOrDefault() != "process" {
@@ -515,7 +526,9 @@ func (e *Executor) ConfigureLaunch(ctx context.Context, p settings.Configure, re
 	changed := old.ServerPort != preview.Settings.ServerPort || old.LaunchText != preview.Settings.LaunchText || !old.Serving.Equal(preview.Settings.Serving)
 	var pending *llamaServingSnapshot
 	if preparedServingRuntime(st, preview.Settings.Serving) {
+		st.mu.Lock()
 		rt := st.plat.Runtime
+		st.mu.Unlock()
 		rt.Serving = preview.Settings.Serving.Clone()
 		rt.LaunchArgs, rt.LaunchEnv = &preview.Args, &preview.Env
 		if llamaServingRuntime(st, rt.Serving) {

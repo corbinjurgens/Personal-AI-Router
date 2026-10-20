@@ -367,6 +367,10 @@ func TestServingRunSnapshotRejectsReplacement(t *testing.T) {
 
 func TestServingDriftWithdrawsOnFullSweepAndLatches(t *testing.T) {
 	f := ownedServingFixture(t)
+	st := settingsState(t, f.ex)
+	ownedPort := st.port
+	server := attachLoadedLlamaFake(t, f, "medium")
+	server.loaded = `{"data":[]}`
 	path := filepath.Join(f.root, "medium.gguf")
 	before, err := os.Stat(path)
 	if err != nil {
@@ -405,6 +409,10 @@ func TestServingDriftWithdrawsOnFullSweepAndLatches(t *testing.T) {
 	if err != nil || readback.ServingReadback.Status != "mismatch" || len(readback.ServingReadback.LaunchValidated) != 0 {
 		t.Fatalf("missing latched mismatch readback: %+v %v", readback.ServingReadback, err)
 	}
+	// The HTTP observation fixture owns a separate loopback listener.
+	st.mu.Lock()
+	st.port = ownedPort
+	st.mu.Unlock()
 	if err := f.ex.Stop("fake"); err != nil {
 		t.Fatal(err)
 	}

@@ -76,8 +76,9 @@ existing native-output and diagnostic behavior. A local sanitized native
 diagnostic remains deferred to the live validation gate.
 
 Readback distinguishes configured, owned-launch-validated and loaded-observed
-values. This adapter supplies the first two; observed values and strict
-qualification remain unverified. All manual load entry points converge at the
+values. The existing loaded-model sweep supplies llama observations as described
+below; strict qualification remains a separate gate. All manual load entry points
+converge at the
 action bound to `operations.load`: an undeclared exact model ID returns a typed
 field error before mutation admission and dispatch, with zero engine calls.
 An unlocked pre-check precedes mutation admission; restart-after actions acquire
@@ -150,10 +151,46 @@ configuration. SR owns requested context/output/slot comparisons. The helper
 retention enforcement and capacity comparison against its revision-bound
 resident set. Declaration count is not the resident set.
 
-This identity does not establish loaded observations, qualification, strict
+This identity alone does not establish loaded observations, qualification, strict
 readiness envelope enforcement, or plain direct-model output enforcement.
 Those remain separate gates. See [Local qualification](../../docs/local-qualification.mdx)
 for the operator digest and binding trust contract.
+
+### Loaded llama allocation observation
+
+For a current owned llama launch, each existing model sweep captures the run and
+configuration before reading `loaded_models`. Only freshly reported loaded exact
+IDs are queried with `GET /props?model=<URL-encoded-ID>&autoload=false`. There is
+no generic manifest action, router-placeholder observation, cold-model probe,
+load or wake. Requests use the existing HTTP client, the five-second sweep
+deadline, an 8 MiB response bound and no redirects. Network and bounded local
+input validation run outside state locks.
+
+Model-specific `default_generation_settings.n_ctx` is already per-slot context;
+it is never divided by `total_slots`. Both positive integer values must equal
+the current launch envelope. Unknown residency, undeclared loaded IDs, invalid
+props and allocation mismatch clear proof and latch the owned-run drift reason,
+withdrawing strict model identity until successful explicit apply/start. An
+authoritative cold/unloaded set clears observations without withdrawing launch
+validation. Strata has no observation producer here.
+
+Settings readback uses the existing `observed` array and status only for matching
+fresh loaded values; configured and launch-validated cold bounds remain distinct.
+Observations are fenced against process/run/configuration replacement, later
+sweeps and residency-changing action pokes. They expire after one configured
+poll interval plus the sweep budget (at least five seconds). A failed sweep
+cannot retain last-good observed proof. Source withdrawal hides proof immediately;
+every loaded observation also revalidates the bounded approved inputs. Cold sets
+retain the full-inventory cadence for local input drift checks.
+
+SR's internal non-loading lookup contract is
+`currentServingObservation(ctx context.Context, engine, model string) (engines.ServingObservation, error)`.
+After requesting a fresh model sweep following load, SR can use this helper to
+revalidate current local inputs and retrieve the exact model's fresh observation.
+It returns `*ServingIdentityRefusal` when proof is absent, expired, withdrawn or
+stale. It never performs HTTP I/O, loads, edits settings or establishes residency
+grants. These observations establish context and slots only, not measured memory,
+content qualification or live-host acceptance.
 
 ## Finite prepared Strata launch
 
