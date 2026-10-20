@@ -13,6 +13,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -945,6 +946,88 @@ func TestPerformanceV1CapabilityNeverReceivesV2Summary(t *testing.T) {
 	}
 	if probes.Load() != performanceProbeAttempts || summaries.Load() != 0 {
 		t.Fatalf("v1 peer probes=%d summaries=%d, want bounded %d probes and no v2 delivery", probes.Load(), summaries.Load(), performanceProbeAttempts)
+	}
+}
+
+type performanceLogHandler struct {
+	mu      sync.Mutex
+	records []slog.Record
+}
+
+func (*performanceLogHandler) Enabled(context.Context, slog.Level) bool { return true }
+
+func (h *performanceLogHandler) Handle(_ context.Context, record slog.Record) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.records = append(h.records, record.Clone())
+	return nil
+}
+
+func (h *performanceLogHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
+func (h *performanceLogHandler) WithGroup(string) slog.Handler      { return h }
+
+func (h *performanceLogHandler) snapshot() []slog.Record {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return append([]slog.Record(nil), h.records...)
+}
+
+func TestPerformanceV1CapabilityWarnsOncePerAdmission(t *testing.T) {
+	f := newPerformanceFixture(t)
+	performanceAddPeer(f.manager)
+	handler := &performanceLogHandler{}
+	previousLogger := slog.Default()
+	slog.SetDefault(slog.New(handler))
+	t.Cleanup(func() { slog.SetDefault(previousLogger) })
+	var probes, summaries atomic.Int32
+	performancePipeClient(t, f.manager.performance.broadcaster, clustertrust.Open(f.peerDir), func(w http.ResponseWriter, r *http.Request) {
+		msg := performanceReadFrame(t, r)
+		if msg.Method == methodPerformanceCapabilities {
+			probes.Add(1)
+			_, _ = io.WriteString(w, `{"version":1}`)
+			return
+		}
+		summaries.Add(1)
+	})
+	if err := f.manager.performance.publish(performanceEncode(t, performanceSummary("uuid-self", 1))); err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+	for range performanceProbeAttempts + 3 {
+		f.manager.performance.sendRound(context.Background())
+	}
+	if probes.Load() != performanceProbeAttempts || summaries.Load() != 0 {
+		t.Fatalf("initial admission probes=%d summaries=%d", probes.Load(), summaries.Load())
+	}
+	if records := handler.snapshot(); len(records) != 1 {
+		t.Fatalf("initial warnings = %d, want 1", len(records))
+	}
+
+	f.peerEpoch(t, 2)
+	for range performanceProbeAttempts + 3 {
+		f.manager.performance.sendRound(context.Background())
+	}
+	if probes.Load() != 2*performanceProbeAttempts || summaries.Load() != 0 {
+		t.Fatalf("after new admission probes=%d summaries=%d", probes.Load(), summaries.Load())
+	}
+	records := handler.snapshot()
+	if len(records) != 2 {
+		t.Fatalf("warnings after new admission = %d, want 2", len(records))
+	}
+	for _, record := range records {
+		if record.Message != "peer performance schema version mismatch" || record.Level != slog.LevelWarn {
+			t.Fatalf("warning = level %s message %q", record.Level, record.Message)
+		}
+		fields := make(map[string]slog.Value)
+		record.Attrs(func(attr slog.Attr) bool {
+			fields[attr.Key] = attr.Value
+			return true
+		})
+		if fields["nodeId"].String() != "uuid-peer" || fields["expectedVersion"].Int64() != performancewire.SchemaVersion || fields["receivedVersion"].Int64() != 1 {
+			t.Fatalf("warning fields = %+v", fields)
+		}
+		if fields["routeGeneration"].Uint64() == 0 || fields["consequence"].String() != "performance summaries not exchanged until both nodes run the same build" {
+			t.Fatalf("warning route/consequence fields = %+v", fields)
+		}
 	}
 }
 
