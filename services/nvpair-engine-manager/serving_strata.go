@@ -20,6 +20,7 @@ import (
 	"sync"
 
 	"nvpair-shared/engines"
+	settings "nvpair-shared/enginesettings"
 )
 
 type strataRuntimeHash struct {
@@ -80,11 +81,15 @@ func strataRuntimePaths(config *engines.ServingConfig) ([]string, error) {
 
 // Only this preparation phase may stream runtime files. It runs without opMu;
 // compilation under opMu only checks the resulting size/mtime/file identity.
-func prepareStrataRuntimeHashes(ctx context.Context, config *engines.ServingConfig) error {
-	if config == nil {
+func prepareStrataRuntimeHashes(ctx context.Context, command launchCommand, rt Runtime) error {
+	if rt.Serving == nil {
 		return nil
 	}
-	paths, err := strataRuntimePaths(config)
+	prepared, err := deriveStrataServing(command, rt)
+	if err != nil {
+		return err
+	}
+	paths, err := strataRuntimePaths(prepared.Config)
 	if err != nil {
 		return err
 	}
@@ -151,20 +156,44 @@ func strataRuntimeDigest(path string) (string, error) {
 	return cached.sum, nil
 }
 
-// A supplied config, including nil to disable serving, is the proposed state.
-// Without one, prepare the current state for a lifecycle operation or readback.
-func prepareStrataState(ctx context.Context, st *engineState, requested ...*engines.ServingConfig) error {
+// Snapshot only launch inputs under mu; never carry a lifecycle lock into I/O.
+func strataPreparationState(st *engineState) *engineState {
 	st.mu.Lock()
-	current := st.plat.Runtime.Serving.Clone()
-	strata := st.manifest.FamilyOrDefault() == "strata"
-	st.mu.Unlock()
-	if !strata {
+	defer st.mu.Unlock()
+	plat := *st.plat
+	plat.Runtime.Serving = plat.Runtime.Serving.Clone()
+	return &engineState{manifest: st.manifest, plat: &plat, binPath: st.binPath, installDir: st.installDir, modelsDir: st.modelsDir}
+}
+
+func prepareStrataState(ctx context.Context, st *engineState) error {
+	snapshot := strataPreparationState(st)
+	if snapshot.manifest.FamilyOrDefault() != "strata" || snapshot.plat.Runtime.Serving == nil {
 		return nil
 	}
-	if len(requested) > 0 {
-		current = requested[0]
+	command, err := launchForState(snapshot, snapshot.plat.Runtime.Port)
+	if err != nil {
+		return err
 	}
-	return prepareStrataRuntimeHashes(ctx, current)
+	return prepareStrataRuntimeHashes(ctx, command, snapshot.plat.Runtime)
+}
+
+func (e *Executor) prepareStrataRequest(ctx context.Context, st *engineState, request settings.Request) error {
+	snapshot := strataPreparationState(st)
+	if snapshot.manifest.FamilyOrDefault() != "strata" || request.Settings.Serving == nil {
+		return nil
+	}
+	var command launchCommand
+	var rt Runtime
+	preview := e.previewLaunch(snapshot, request, func(candidate launchCommand, proposed Runtime) (*llamaServingLaunch, error) {
+		command, rt = candidate, proposed
+		return deriveStrataServing(candidate, proposed)
+	})
+	if len(preview.Errors) > 0 || preview.Conflict != nil {
+		// Nothing may be hashed. The ordinary locked preview repeats the same
+		// validation and preserves its field errors and port-conflict response.
+		return nil
+	}
+	return prepareStrataRuntimeHashes(ctx, command, rt)
 }
 
 // Prepared subset of corbinjurgens/Strata f6726098 serve/server.py and
@@ -293,6 +322,34 @@ func parseStrataServingConfig(data []byte) (strataServingConfig, error) {
 }
 
 func compileStrataServing(command launchCommand, rt Runtime, approved bool) (*llamaServingLaunch, error) {
+	result, err := deriveStrataServing(command, rt)
+	if err != nil {
+		return nil, err
+	}
+	for _, artifact := range result.Config.Models[0].Artifacts {
+		if !strings.HasPrefix(artifact.Role, "runtime:") {
+			continue
+		}
+		path := artifact.Binding.SourcePath
+		sum, err := strataRuntimeDigest(path)
+		if err != nil {
+			return nil, err
+		}
+		after, bindingErr := servingFileBinding(path)
+		if sum != artifact.SHA256 || bindingErr != nil || *after != *artifact.Binding {
+			return nil, servingError("Strata runtime full SHA256 mismatch or unstable file.")
+		}
+	}
+	expected := rt.Serving.Models[0].ExpectedNativeSourceDigest
+	if (approved && expected == "") || (expected != "" && expected != result.Digest) {
+		return nil, servingError("Strata native source conflict; obtain a fresh preview.")
+	}
+	return result, nil
+}
+
+// Derive and validate the complete selected-file closure using only bounded
+// reads. Both pre-lock hashing and locked compilation use this role check.
+func deriveStrataServing(command launchCommand, rt Runtime) (*llamaServingLaunch, error) {
 	if rt.modeOrDefault() != "process" || rt.Serving == nil || len(rt.Serving.Validate()) != 0 || len(rt.Serving.Models) != 1 {
 		return nil, servingError("Prepared Strata requires one declared model and an owned process launch.")
 	}
@@ -334,10 +391,14 @@ func compileStrataServing(command launchCommand, rt Runtime, approved bool) (*ll
 		if !filepath.IsAbs(path) || filepath.Clean(path) != path {
 			return servingError("Explicit Strata file paths must be absolute and unambiguous.")
 		}
-		if previous, exists := paths[path]; exists && previous != role {
+		target, err := strataTarget(path)
+		if err != nil {
+			return err
+		}
+		if previous, exists := paths[target]; exists && previous != role {
 			return servingError("Strata file has ambiguous artifact roles.")
 		}
-		paths[path] = role
+		paths[target] = role
 		return nil
 	}
 	for _, entry := range []struct{ path, role string }{{command.Bin, "runtime:python"}, {command.Args[0], "runtime:server"}, {source, "runtime:config"}, {config.Exe, "runtime:native-exe"}} {
@@ -449,11 +510,15 @@ func compileStrataServing(command launchCommand, rt Runtime, approved bool) (*ll
 	declared := map[string]bool{}
 	for i := range model.Artifacts {
 		artifact := &model.Artifacts[i]
-		if artifact.Binding == nil || !filepath.IsAbs(artifact.Binding.SourcePath) || declared[artifact.Binding.SourcePath] {
+		if artifact.Binding == nil || !filepath.IsAbs(artifact.Binding.SourcePath) {
 			return nil, servingError("Every Strata artifact requires a unique absolute declared file binding.")
 		}
 		path := artifact.Binding.SourcePath
-		role, selected := paths[path]
+		target, err := strataTarget(path)
+		if err != nil || declared[target] {
+			return nil, servingError("Every Strata artifact requires a unique resolved file binding.")
+		}
+		role, selected := paths[target]
 		if selected && ((role == "model" && artifact.Role != "model" && artifact.Role != "model-shard" && !strings.HasPrefix(artifact.Role, "model:")) || (role != "model" && artifact.Role != role)) {
 			return nil, servingError("Selected Strata file has an incorrect artifact role.")
 		}
@@ -464,17 +529,7 @@ func compileStrataServing(command launchCommand, rt Runtime, approved bool) (*ll
 		if err != nil || *current != *artifact.Binding {
 			return nil, servingError("Strata artifact binding changed or is missing.")
 		}
-		if strings.HasPrefix(artifact.Role, "runtime:") {
-			sum, err := strataRuntimeDigest(path)
-			if err != nil {
-				return nil, err
-			}
-			after, bindingErr := servingFileBinding(path)
-			if err != nil || sum != artifact.SHA256 || bindingErr != nil || *after != *current {
-				return nil, servingError("Strata runtime full SHA256 mismatch or unstable file.")
-			}
-		}
-		declared[path] = true
+		declared[target] = true
 	}
 	for path := range paths {
 		if !declared[path] {
@@ -498,10 +553,6 @@ func compileStrataServing(command launchCommand, rt Runtime, approved bool) (*ll
 	}
 	digest := sha256.Sum256(encoded)
 	result.Digest = hex.EncodeToString(digest[:])
-	expected := rt.Serving.Models[0].ExpectedNativeSourceDigest
-	if (approved && expected == "") || (expected != "" && expected != result.Digest) {
-		return nil, servingError("Strata native source conflict; obtain a fresh preview.")
-	}
 	model.ExpectedNativeSourceDigest = result.Digest
 	result.Envelopes = []engines.ServingEnvelope{{ModelID: model.ModelID, PerSlotContextTokens: contextTokens, TotalContextTokens: contextTokens * slots, Slots: slots, MaxOutputTokens: model.MaxOutputTokens, Memory: model.Memory, Placement: placement, Retention: strconv.FormatInt(config.IdleUnloadS, 10), RouterCapacity: 1, NativeSourceDigest: result.Digest}}
 	return result, nil

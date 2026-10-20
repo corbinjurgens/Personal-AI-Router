@@ -266,7 +266,7 @@ func (e *Executor) PreviewLaunch(p settings.Request, contexts ...context.Context
 	}
 	ctx, cancel := strataPreparationContext(contexts)
 	defer cancel()
-	if err := prepareStrataState(ctx, st, p.Settings.Serving); err != nil {
+	if err := e.prepareStrataRequest(ctx, st, p); err != nil {
 		return settings.Preview{Settings: p.Settings.Clone(), Errors: map[string]string{"serving": err.Error()}}, nil
 	}
 	st.opMu.Lock()
@@ -280,6 +280,12 @@ func (e *Executor) PreviewLaunch(p settings.Request, contexts ...context.Context
 }
 
 func (e *Executor) previewLaunchLocked(st *engineState, request settings.Request) settings.Preview {
+	return e.previewLaunch(st, request, nil)
+}
+
+// Preparation supplies a bounded compiler on a state snapshot, sharing the
+// exact proposed-launch parser without reading current runtime digests.
+func (e *Executor) previewLaunch(st *engineState, request settings.Request, prepare func(launchCommand, Runtime) (*llamaServingLaunch, error)) settings.Preview {
 	result := settings.Preview{Settings: request.Settings.Clone(), Args: []string{}, Env: []string{}, Errors: request.Settings.Serving.Validate(), Serving: servingDeclarationReadback(request.Settings.Serving)}
 	if len(result.Errors) > 0 {
 		return result
@@ -431,7 +437,13 @@ func (e *Executor) previewLaunchLocked(st *engineState, request settings.Request
 		return fail(err.Error())
 	}
 	if preparedServingRuntime(st, rt.Serving) {
-		prepared, err := compilePreparedServing(st, command, rt, false)
+		compile := func(command launchCommand, rt Runtime) (*llamaServingLaunch, error) {
+			return compilePreparedServing(st, command, rt, false)
+		}
+		if prepare != nil {
+			compile = prepare
+		}
+		prepared, err := compile(command, rt)
 		if err != nil {
 			field := "serving"
 			var servingField *ServingFieldError
@@ -443,6 +455,9 @@ func (e *Executor) previewLaunchLocked(st *engineState, request settings.Request
 		}
 		result.Settings.Serving = prepared.Config.Clone()
 		result.Serving = preparedServingReadback(st, prepared)
+	}
+	if prepare != nil {
+		return result
 	}
 	current := e.launchStateLocked(request.Engine, st)
 	result.Restart = current.Running && (current.ServerPort != result.Settings.ServerPort || current.LaunchText != result.Settings.LaunchText || !current.Serving.Equal(result.Settings.Serving))
@@ -465,7 +480,7 @@ func (e *Executor) ConfigureLaunch(ctx context.Context, p settings.Configure, re
 	if err != nil {
 		return settings.LaunchState{}, err
 	}
-	if err := prepareStrataState(ctx, st, p.Settings.Serving); err != nil {
+	if err := e.prepareStrataRequest(ctx, st, settings.Request{Engine: p.Engine, Settings: p.Settings}); err != nil {
 		return settings.LaunchState{}, servingError(err.Error())
 	}
 	st.opMu.Lock()

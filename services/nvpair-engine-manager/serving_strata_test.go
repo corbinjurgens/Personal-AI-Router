@@ -29,6 +29,70 @@ type strataServingFixture struct {
 	config strataServingConfig
 }
 
+func (f *strataServingFixture) prepareRuntimeHashes(t *testing.T, ctx context.Context, config *engines.ServingConfig) error {
+	t.Helper()
+	st := settingsState(t, f.ex)
+	command, err := launchForState(st, f.request.Settings.ServerPort)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rt := st.plat.Runtime
+	rt.Serving = config
+	return prepareStrataRuntimeHashes(ctx, command, rt)
+}
+
+func TestStrataRuntimeRejectsMisclassifiedSelectedFilesBeforeHashing(t *testing.T) {
+	for _, name := range []string{"pack/dense.bin", "draft/dense.bin"} {
+		t.Run(name, func(t *testing.T) {
+			f := newStrataServingFixture(t)
+			path := filepath.Join(f.root, filepath.FromSlash(name))
+			for i := range f.request.Settings.Serving.Models[0].Artifacts {
+				artifact := &f.request.Settings.Serving.Models[0].Artifacts[i]
+				if artifact.Binding.SourcePath == path {
+					artifact.Role = "runtime:lib:misclassified-pack"
+				}
+			}
+			p := previewSettings(t, f.ex, f.request)
+			if !strings.Contains(p.Errors["serving"], "incorrect artifact role") {
+				t.Fatalf("role rejection = %v", p.Errors)
+			}
+			// No declared file may have been streamed before the role rejection,
+			// even if its own role was valid and sorted before the bad pack.
+			for _, artifact := range f.request.Settings.Serving.Models[0].Artifacts {
+				path := artifact.Binding.SourcePath
+				if path == fakeEngineBin {
+					continue // Shared by fixtures; its cache may already be warm.
+				}
+				fileHashes.mu.Lock()
+				_, hashed := fileHashes.done[path]
+				fileHashes.mu.Unlock()
+				if hashed {
+					t.Errorf("file fully hashed before role rejection: %s", path)
+				}
+			}
+			assertNoLlamaSpawn(t, f.llamaServingFixture)
+			assertNoSettingsOverride(t, f.ex)
+		})
+	}
+}
+
+func TestStrataPreparationPreservesPreviewPortConflict(t *testing.T) {
+	f := newStrataServingFixture(t)
+	launchPort := f.request.Settings.ServerPort
+	f.request.Settings.ServerPort++
+	p := previewSettings(t, f.ex, f.request)
+	if len(p.Errors) != 0 || p.Conflict == nil || p.Conflict.ServerPort != f.request.Settings.ServerPort || p.Conflict.LaunchPort != launchPort {
+		t.Fatalf("port conflict preview = %+v", p)
+	}
+	path := filepath.Join(f.root, "server.py")
+	fileHashes.mu.Lock()
+	_, hashed := fileHashes.done[path]
+	fileHashes.mu.Unlock()
+	if hashed {
+		t.Fatal("unresolved launch conflict caused runtime hashing")
+	}
+}
+
 func TestStrataRuntimeRejectsModelAliases(t *testing.T) {
 	for _, name := range []string{"model-00001-of-00002.gguf", "pack/dense.bin", "draft/dense.bin"} {
 		t.Run(name, func(t *testing.T) {
@@ -179,7 +243,7 @@ func TestStrataRuntimeHashOutsideOperationLock(t *testing.T) {
 
 func TestStrataRuntimeChangedAfterPreparation(t *testing.T) {
 	f := newStrataServingFixture(t)
-	if err := prepareStrataRuntimeHashes(context.Background(), f.request.Settings.Serving); err != nil {
+	if err := f.prepareRuntimeHashes(t, context.Background(), f.request.Settings.Serving); err != nil {
 		t.Fatal(err)
 	}
 	path := filepath.Join(f.root, "lib", "attested.so")
@@ -209,7 +273,7 @@ func TestStrataRuntimeChangedAfterPreparation(t *testing.T) {
 
 func TestStrataLockedCompilerRejectsColdRuntimeHash(t *testing.T) {
 	f := newStrataServingFixture(t)
-	if err := prepareStrataRuntimeHashes(context.Background(), f.request.Settings.Serving); err != nil {
+	if err := f.prepareRuntimeHashes(t, context.Background(), f.request.Settings.Serving); err != nil {
 		t.Fatal(err)
 	}
 	path := filepath.Join(f.root, "lib", "attested.so")
@@ -239,7 +303,7 @@ func TestStrataLockedCompilerRejectsColdRuntimeHash(t *testing.T) {
 
 func TestStrataRuntimeReplacedWithSameMetadata(t *testing.T) {
 	f := newStrataServingFixture(t)
-	if err := prepareStrataRuntimeHashes(context.Background(), f.request.Settings.Serving); err != nil {
+	if err := f.prepareRuntimeHashes(t, context.Background(), f.request.Settings.Serving); err != nil {
 		t.Fatal(err)
 	}
 	path := filepath.Join(f.root, "lib", "attested.so")
@@ -258,7 +322,15 @@ func TestStrataRuntimeReplacedWithSameMetadata(t *testing.T) {
 	if _, err := strataRuntimeDigest(path); err == nil {
 		t.Fatal("replaced runtime passed file identity recheck")
 	}
-	if err := prepareStrataRuntimeHashes(context.Background(), f.request.Settings.Serving); err != nil {
+	// Re-attest the replacement before preparing it; preparation now checks
+	// the entire declaration before it can refresh any full-file hash.
+	for i := range f.request.Settings.Serving.Models[0].Artifacts {
+		artifact := &f.request.Settings.Serving.Models[0].Artifacts[i]
+		if artifact.Binding.SourcePath == path {
+			*artifact = strataArtifact(t, path, artifact.Role)
+		}
+	}
+	if err := f.prepareRuntimeHashes(t, context.Background(), f.request.Settings.Serving); err != nil {
 		t.Fatal(err)
 	}
 	sum, err := strataRuntimeDigest(path)
@@ -273,13 +345,13 @@ func TestStrataRuntimeReplacedWithSameMetadata(t *testing.T) {
 
 func TestStrataRuntimeChangesWhileHashing(t *testing.T) {
 	f := newStrataServingFixture(t)
-	if err := prepareStrataRuntimeHashes(context.Background(), f.request.Settings.Serving); err != nil {
+	if err := f.prepareRuntimeHashes(t, context.Background(), f.request.Settings.Serving); err != nil {
 		t.Fatal(err)
 	}
 	path := filepath.Join(f.root, "lib", "attested.so")
 	artifact := strataArtifact(t, path, "runtime:lib:attested")
 	config := f.request.Settings.Serving.Clone()
-	config.Models[0].Artifacts = []engines.ServingArtifact{artifact}
+	// Keep the complete declared closure so role validation precedes the hash.
 	info, err := os.Stat(path)
 	if err != nil {
 		t.Fatal(err)
@@ -301,7 +373,7 @@ func TestStrataRuntimeChangesWhileHashing(t *testing.T) {
 		fileHashes.mu.Unlock()
 	}()
 	done := make(chan error, 1)
-	go func() { done <- prepareStrataRuntimeHashes(context.Background(), config) }()
+	go func() { done <- f.prepareRuntimeHashes(t, context.Background(), config) }()
 	select {
 	case err := <-done:
 		t.Fatalf("hash finished before release: %v", err)
