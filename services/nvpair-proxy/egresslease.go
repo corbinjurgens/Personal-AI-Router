@@ -121,6 +121,10 @@ func (p *Proxy) publicAttemptPermitted(tier string, snapshot chatAccountSnapshot
 // lease withdrawal. Synthetic E tests exercise this mechanism without enabling
 // the production wrapper. No permission/grant escapes this call.
 func (p *Proxy) publicPermission(tier string, snapshot chatAccountSnapshot) error {
+	return p.publicPermissionAccept(tier, snapshot, nil)
+}
+
+func (p *Proxy) publicPermissionAccept(tier string, snapshot chatAccountSnapshot, accept func() error) error {
 	l := p.egress
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -145,6 +149,9 @@ func (p *Proxy) publicPermission(tier string, snapshot chatAccountSnapshot) erro
 		!slices.ContainsFunc(policy.Tiers[tier], func(v nodepolicy.TierEntry) bool { return v.Kind == nodepolicy.EntryAPI && v.Deployment == d.ID }) {
 		return errPublicPermission
 	}
+	if accept != nil {
+		return accept()
+	}
 	return nil
 }
 
@@ -161,25 +168,49 @@ type publicAttemptRefusal struct{ Stage publicRefusalStage }
 func (e *publicAttemptRefusal) Error() string { return "public attempt refused: " + string(e.Stage) }
 func (e *publicAttemptRefusal) Unwrap() error { return errPublicPermission }
 
+// A refused snapshot can predate an account edit. G observes the account's
+// current policy under its lock; D's snapshot and any existing hold stay intact.
+// Lock order remains G lease -> admission -> request, with no IO here.
+func (p *Proxy) observePublicAccount(snapshot chatAccountSnapshot, lifecycle *publicAttemptLifecycle) error {
+	l := p.egress
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	policy := p.admission.currentPolicy()
+	for _, account := range policy.Routing.Accounts {
+		if account.ID == snapshot.account.ID {
+			_, err := lifecycle.tryAccount(account)
+			return err
+		}
+	}
+	return errPublicPermission
+}
+
 // runPublicChatAttempt is the sole future production public-attempt entry point.
 // It is deliberately unwired from HTTP ingress. Every invocation is one new
 // attempt; D owns durable holds and E owns preparation, transport and accounting.
 func (p *Proxy) runPublicChatAttempt(ctx context.Context, tier string,
 	snapshot chatAccountSnapshot, body []byte, q *chatQualification,
 	transport *publicClient, resolve func(nodepolicy.CredentialRef) (string, bool),
-	budget chatByteBudget, emit func([]byte) error) (chatParseResult, error) {
+	budget chatByteBudget, lifecycle *publicAttemptLifecycle, emit func([]byte) error) (chatParseResult, error) {
 	if p.publicAttemptPermitted(tier, snapshot) != nil {
-		return chatParseResult{}, &publicAttemptRefusal{Stage: publicBeforeReserve}
+		err := &publicAttemptRefusal{Stage: publicBeforeReserve}
+		if lifecycle != nil && lifecycle.request != nil {
+			// Trying a refused paid candidate still tightens the same request.
+			// This is an in-memory observation, never a grant or ledger write.
+			allowanceErr := p.observePublicAccount(snapshot, lifecycle)
+			lifecycle.finished(publicAttemptTerminal{Accounting: publicAccountingRetained, Err: errors.Join(err, allowanceErr)})
+		}
+		return chatParseResult{}, err
 	}
 	refused := false
-	guard := func(ctx context.Context) error {
-		if p.publicAttemptPermitted(tier, snapshot) != nil || ctx.Err() != nil {
+	guard := func(ctx context.Context, accept func() error) error {
+		if !nodepolicy.PublicDispatchAvailable() || ctx.Err() != nil || p.publicPermissionAccept(tier, snapshot, accept) != nil {
 			refused = true
 			return errPublicPermission
 		}
 		return nil
 	}
-	result, err := runChatAccountAttempt(ctx, snapshot, body, q, p.accounts, transport, resolve, budget, guard, emit)
+	result, err := runChatAccountAttempt(ctx, snapshot, body, q, p.accounts, transport, resolve, budget, guard, lifecycle, emit)
 	if errors.Is(err, errPublicFinalGuard) {
 		return result, &publicAttemptRefusal{Stage: publicFinalGuard}
 	}

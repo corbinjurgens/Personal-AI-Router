@@ -910,24 +910,76 @@ func (q *chatQualification) responseLimits() error {
 // panic propagates after releasing headroom, never becomes a successful response.
 // Header is transport-observed; the other milestones are independently sampled.
 func (q *chatQualification) parseResponse(ctx context.Context, reader io.Reader, stream bool, input, output int64, header time.Time, budget chatByteBudget, emit func([]byte) error) (result chatParseResult, err error) {
+	allowance, err := q.acquireParserAllowance(budget, stream)
+	if err != nil {
+		return result, err
+	}
+	defer allowance.release()
+	return q.parseResponseWithAllowance(ctx, reader, stream, input, output, header, allowance, emit)
+}
+
+// One ownership record transfers pre-admitted parser storage to exactly one
+// parser. Standalone callers acquire their own through parseResponse.
+type chatParserAllowance struct {
+	mu     sync.Mutex
+	lease  *chatLease
+	owner  *chatQualification
+	stream bool
+}
+
+func (q *chatQualification) acquireParserAllowance(budget chatByteBudget, stream bool) (*chatParserAllowance, error) {
+	if budget == nil || q.responseLimits() != nil {
+		return nil, errChatBudget
+	}
+	lease := newChatLease(budget)
+	if err := lease.grow(chatFixedStorage); err != nil {
+		return nil, err
+	}
+	if stream {
+		fixed := 2*q.MaxLineBytes + 6*q.MaxEventBytes + 4*q.MaxToolBytes + 512*int64(q.MaxToolCalls)
+		if err := lease.grow(fixed); err != nil {
+			lease.release()
+			return nil, err
+		}
+	}
+	return &chatParserAllowance{lease: lease, owner: q, stream: stream}, nil
+}
+
+func (a *chatParserAllowance) release() {
+	a.mu.Lock()
+	lease := a.lease
+	a.lease = nil
+	a.mu.Unlock()
+	if lease != nil {
+		lease.release()
+	}
+}
+
+func (a *chatParserAllowance) take(q *chatQualification, stream bool) *chatLease {
+	if a == nil {
+		return nil
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.owner != q || a.stream != stream {
+		return nil
+	}
+	lease := a.lease
+	a.lease = nil
+	return lease
+}
+
+func (q *chatQualification) parseResponseWithAllowance(ctx context.Context, reader io.Reader, stream bool, input, output int64, header time.Time, allowance *chatParserAllowance, emit func([]byte) error) (result chatParseResult, err error) {
 	result.Header = header
 	if q.responseLimits() != nil || reader == nil || emit == nil || input < 0 || output <= 0 {
 		return result, errChat
 	}
-	lease := newChatLease(budget)
+	lease := allowance.take(q, stream)
+	if lease == nil {
+		return result, errChatBudget
+	}
 	defer lease.release()
-	if err := lease.grow(chatFixedStorage); err != nil {
-		return result, err
-	}
-	if stream {
-		// Line/event/data, retained envelope strings, old+replacement tool
-		// strings, and bounded tool-map entries. Decode headroom is acquired
-		// separately for each actual event, before any decoding.
-		fixed := 2*q.MaxLineBytes + 6*q.MaxEventBytes + 4*q.MaxToolBytes + 512*int64(q.MaxToolCalls)
-		if err := lease.grow(fixed); err != nil {
-			return result, err
-		}
-	}
+	budget := lease.budget
 	defer func() {
 		if !result.Complete {
 			result.Usage = nil

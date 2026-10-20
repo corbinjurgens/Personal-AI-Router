@@ -304,7 +304,7 @@ func TestEgressLeaseDisabled(t *testing.T) {
 	if p.publicAttemptPermitted("weak", snapshot) == nil {
 		t.Error("disabled advisory predicate accepted a candidate before body construction")
 	}
-	_, err := p.runPublicChatAttempt(f.ctx, "weak", snapshot, []byte(f.body), f.profile, f.transport, poison, f.budget.acquire, f.emit)
+	_, err := p.runPublicChatAttempt(f.ctx, "weak", snapshot, []byte(f.body), f.profile, f.transport, poison, f.budget.acquire, chatTestLifecycle(t), f.emit)
 	var refusal *publicAttemptRefusal
 	if !errors.As(err, &refusal) || refusal.Stage != publicBeforeReserve {
 		t.Errorf("disabled wrapper refusal = %v, want before-reserve", err)
@@ -329,7 +329,9 @@ func TestEgressLeaseReserveRace(t *testing.T) {
 			done := make(chan error, 1)
 			go func() {
 				_, err := runChatAccountAttempt(f.ctx, snapshot, []byte(f.body), f.profile, f.ledger, f.transport, f.resolve, f.budget.acquire,
-					func(context.Context) error { return p.publicPermission("weak", snapshot) }, f.emit)
+					func(_ context.Context, accept func() error) error {
+						return p.publicPermissionAccept("weak", snapshot, accept)
+					}, chatTestLifecycle(t), f.emit)
 				done <- err
 			}()
 			<-entered
@@ -365,7 +367,7 @@ func TestEgressLeaseFinalGuard(t *testing.T) {
 		}
 		return p.publicPermission("weak", snapshot)
 	}
-	_, err := runChatAccountAttempt(f.ctx, snapshot, []byte(f.body), f.profile, f.ledger, f.transport, f.resolve, f.budget.acquire, guard, f.emit)
+	_, err := runChatAccountAttempt(f.ctx, snapshot, []byte(f.body), f.profile, f.ledger, f.transport, f.resolve, f.budget.acquire, chatTestGuard(guard), chatTestLifecycle(t), f.emit)
 	if !errors.Is(err, errPublicFinalGuard) || checks != 2 {
 		t.Fatalf("final refusal = %v after %d checks, want distinct final sentinel and two checks", err, checks)
 	}
@@ -387,7 +389,9 @@ func TestEgressLeaseAcceptedStream(t *testing.T) {
 	done := make(chan error, 1)
 	go func() {
 		_, err := runChatAccountAttempt(f.ctx, snapshot, []byte(f.body), f.profile, f.ledger, f.transport, f.resolve, f.budget.acquire,
-			func(context.Context) error { return p.publicPermission("weak", snapshot) }, f.emit)
+			func(_ context.Context, accept func() error) error {
+				return p.publicPermissionAccept("weak", snapshot, accept)
+			}, chatTestLifecycle(t), f.emit)
 		done <- err
 	}()
 	<-accepted
@@ -411,7 +415,7 @@ func TestEgressLeaseWrapperStages(t *testing.T) {
 	if !nodepolicy.PublicDispatchAvailable() {
 		p, f, _, snapshot := egressFixture(t)
 		egressGrant(t, p, 1, 6*time.Second)
-		_, err := p.runPublicChatAttempt(f.ctx, "weak", snapshot, []byte(f.body), f.profile, f.transport, f.resolve, f.budget.acquire, f.emit)
+		_, err := p.runPublicChatAttempt(f.ctx, "weak", snapshot, []byte(f.body), f.profile, f.transport, f.resolve, f.budget.acquire, chatTestLifecycle(t), f.emit)
 		var refusal *publicAttemptRefusal
 		if !errors.As(err, &refusal) || refusal.Stage != publicBeforeReserve || len(f.ledger.state.Holds) != 0 {
 			t.Fatalf("before-reserve effects = %v, holds %d", err, len(f.ledger.state.Holds))
@@ -439,7 +443,7 @@ func TestEgressLeaseWrapperStages(t *testing.T) {
 				}
 				return err
 			}
-			_, err := p.runPublicChatAttempt(f.ctx, "weak", snapshot, []byte(f.body), f.profile, f.transport, f.resolve, f.budget.acquire, f.emit)
+			_, err := p.runPublicChatAttempt(f.ctx, "weak", snapshot, []byte(f.body), f.profile, f.transport, f.resolve, f.budget.acquire, chatTestLifecycle(t), f.emit)
 			var refusal *publicAttemptRefusal
 			if !errors.As(err, &refusal) || refusal.Stage != stage {
 				t.Fatalf("wrapper refusal = %v, want stage %s", err, stage)
