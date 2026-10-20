@@ -319,8 +319,12 @@ func (q *localQualification) validateRequest(profile nodepolicy.Profile, route s
 		return nil, strictBound{}, rejectBody("the request must be a JSON object")
 	}
 	var fieldError error
-	visitObject(body, func(key []byte, _, _ int) {
+	visitObject(body, func(key []byte, start, end int) {
 		if fieldError != nil {
+			return
+		}
+		if jsonStringEquals(key, "store") {
+			fieldError = checkQualificationStore(body[start:end])
 			return
 		}
 		for _, name := range chatRequestKeys {
@@ -355,6 +359,10 @@ func (q *localQualification) validateRequest(profile nodepolicy.Profile, route s
 	if !isJSONObject(effective) {
 		return nil, strictBound{}, rejectBody("the request with its defaults is not a JSON object")
 	}
+	effective, err = stripQualificationStore(ctx, effective)
+	if err != nil {
+		return nil, strictBound{}, err
+	}
 	w := newBodyWorkspace(ctx)
 	defer w.close()
 	var bound strictBound
@@ -388,6 +396,60 @@ func (q *localQualification) validateRequest(profile nodepolicy.Profile, route s
 		return nil, strictBound{}, rejectBody("the input bound %d and output bound %d exceed the qualified context %d", bound.input, bound.output, context)
 	}
 	return effective, bound, nil
+}
+
+func checkQualificationStore(raw []byte) error {
+	if bytes.Equal(raw, []byte("true")) {
+		return rejectBody("store:true is not supported because PAIR does not store requests")
+	}
+	if !bytes.Equal(raw, []byte("false")) {
+		return rejectBody("store must be the JSON boolean false")
+	}
+	return nil
+}
+
+// Remove only the validated no-op, after defaults have had their normal merge
+// precedence. The new forwarding buffer stays charged until its borrowers join.
+func stripQualificationStore(ctx context.Context, body []byte) ([]byte, error) {
+	previousEnd := bytes.IndexByte(body, '{') + 1
+	first := true
+	removeStart, removeEnd := 0, 0
+	var fieldError error
+	visitObject(body, func(key []byte, start, end int) {
+		if jsonStringEquals(key, "store") {
+			fieldError = checkQualificationStore(body[start:end])
+			removeStart, removeEnd = previousEnd, end
+			if first {
+				for removeEnd < len(body) && (body[removeEnd] == ' ' || body[removeEnd] == '\t' || body[removeEnd] == '\r' || body[removeEnd] == '\n') {
+					removeEnd++
+				}
+				if removeEnd < len(body) && body[removeEnd] == ',' {
+					removeEnd++
+				}
+			}
+		}
+		previousEnd, first = end, false
+	})
+	if fieldError != nil {
+		return nil, fieldError
+	}
+	if removeEnd == 0 {
+		return body, nil
+	}
+	size := len(body) - (removeEnd - removeStart)
+	if ctx != nil {
+		if owner := inferenceBuffers(ctx); owner != nil {
+			lease, err := owner.scope.acquire(ctx, int64(size)+256)
+			if err != nil {
+				return nil, err
+			}
+			owner.retain(lease)
+		}
+	}
+	out := make([]byte, 0, size)
+	out = append(out, body[:removeStart]...)
+	out = append(out, body[removeEnd:]...)
+	return out, nil
 }
 
 // Strict request views borrow the effective body. They reproduce struct
