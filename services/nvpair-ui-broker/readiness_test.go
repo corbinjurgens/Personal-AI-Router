@@ -118,6 +118,39 @@ func reportStrict(t *testing.T, b *Broker, revision, runID string, capability *n
 	}
 }
 
+func TestPolicyIdentityReplacedSourceCannotChangeReadiness(t *testing.T) {
+	fx := newStrictFixture(t)
+	old := fx.pp
+	current, _, acks := attachAckingProxy(t, fx.b)
+	if !fx.b.replayPolicyToProxy(context.Background(), current) {
+		t.Fatal("replacement replay failed")
+	}
+	params, err := json.Marshal(nodepolicy.StrictAdmissionReadiness{PolicyRevision: "0", ProxyRunID: acks.runID, Capability: strictCapability(t, "ollama", "m:latest")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fx.b.observeStrictReadinessFrom(current, params)
+	if fx.b.StrictReadiness().Capability == nil {
+		t.Fatal("current source did not establish readiness")
+	}
+	fx.b.forwardProxyNotificationFrom(old, 0, 0, nodepolicy.NotifyStrictReadiness, json.RawMessage(`{}`))
+	if fx.b.StrictReadiness().Capability == nil {
+		t.Fatal("old process callback withdrew current readiness")
+	}
+	fx.b.observeStrictReadinessFrom(old, json.RawMessage(`{}`))
+	if fx.b.StrictReadiness().Capability == nil {
+		t.Fatal("late invalid report from replaced process withdrew readiness")
+	}
+	fx.b.observeStrictReadinessFrom(old, params)
+	fx.b.nodePolicy.mu.Lock()
+	fx.b.nodePolicy.strictReadiness = nodepolicy.StrictAdmissionReadiness{}
+	fx.b.nodePolicy.mu.Unlock()
+	fx.b.observeStrictReadinessFrom(old, params)
+	if fx.b.StrictReadiness().Capability != nil {
+		t.Fatal("replaced process established readiness for another process")
+	}
+}
+
 // waitLastProjection waits until the newest node projection satisfies want and
 // returns it.
 func waitLastProjection(t *testing.T, engine *fakeWorker, what string, want func(nodepolicy.Advertisement) bool) nodepolicy.Advertisement {

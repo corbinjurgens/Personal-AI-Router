@@ -167,9 +167,10 @@ func newFakeWorkerPipe(t *testing.T) (*Peer, *fakeWorker) {
 // revision, refuses a policy older than it, and acknowledges with its run id.
 // Everything else, node/set-availability included, is answered {"ok":true}.
 type proxyAcks struct {
-	runID string
-	mu    sync.Mutex
-	held  string
+	runID        string
+	originNodeID string
+	mu           sync.Mutex
+	held         string
 }
 
 func (a *proxyAcks) heldRevision() string {
@@ -183,23 +184,75 @@ func (a *proxyAcks) answer(method string, params json.RawMessage) (any, string) 
 	defer a.mu.Unlock()
 	switch method {
 	case nodepolicy.MethodSetPolicy:
-		var in struct {
-			Revision string `json:"revision"`
-		}
+		var in nodepolicy.SetPolicyParams
 		if err := json.Unmarshal(params, &in); err != nil {
 			return nil, "unreadable policy"
 		}
-		if cmp, err := nodepolicy.CompareRevisions(in.Revision, a.held); err != nil || cmp < 0 {
-			return nil, "revision " + in.Revision + " is older than the active revision"
+		if cmp, err := nodepolicy.CompareRevisions(in.Policy.Revision, a.held); err != nil || cmp < 0 {
+			return nil, "revision " + in.Policy.Revision + " is older than the active revision"
 		}
-		a.held = in.Revision
+		a.held = in.Policy.Revision
+		a.originNodeID = in.OriginNodeID
 	default:
 		return map[string]bool{"ok": true}, ""
 	}
-	return nodepolicy.PolicyAck{Revision: a.held, RunID: a.runID}, ""
+	return nodepolicy.PolicyAck{OriginNodeID: a.originNodeID, Revision: a.held, RunID: a.runID}, ""
 }
 
 var fakeProxyRuns atomic.Int64
+
+func decodePushedPolicy(data json.RawMessage, out any) error {
+	var envelope nodepolicy.SetPolicyParams
+	if err := json.Unmarshal(data, &envelope); err != nil {
+		return err
+	}
+	policy, err := json.Marshal(envelope.Policy)
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(policy, out)
+}
+
+func TestPolicyIdentityRejectsWrongOrigin(t *testing.T) {
+	ab := newActivatedBroker(t)
+	ab.proxy.setAnswer(func(method string, params json.RawMessage) (any, string) {
+		if method == nodepolicy.MethodSetPolicy {
+			return nodepolicy.PolicyAck{OriginNodeID: "other-node", RunID: ab.acks.runID, Revision: "5000"}, ""
+		}
+		return ab.acks.answer(method, params)
+	})
+	result := ab.setIdle(t, 5)
+	if result.ActiveRevision != "0" || result.Activation != activationError || !strings.Contains(result.ActivationError, "different origin") {
+		t.Fatalf("wrong-origin acknowledgement activated policy: %+v", result)
+	}
+}
+
+func TestPolicyIdentityEnvelopeIsPrivateToProxyChannel(t *testing.T) {
+	ab := newActivatedBroker(t)
+	result := ab.setIdle(t, 5)
+	data, err := os.ReadFile(ab.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var persisted map[string]json.RawMessage
+	if err := json.Unmarshal(data, &persisted); err != nil {
+		t.Fatal(err)
+	}
+	if persisted["originNodeId"] != nil || persisted["policy"] != nil {
+		t.Fatal("private origin envelope leaked into persisted policy")
+	}
+	var last nodepolicy.SetPolicyParams
+	for _, call := range ab.proxy.snapshot() {
+		if call.method == nodepolicy.MethodSetPolicy {
+			if err := json.Unmarshal(call.params, &last); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if last.OriginNodeID != "self-node" || last.Policy.Revision != result.Policy.Revision || ab.acks.heldRevision() != result.Policy.Revision {
+		t.Fatalf("policy activation did not carry bound origin envelope: %+v", last)
+	}
+}
 
 // attachAckingProxy publishes a fake proxy process for every engine, with a run
 // id of its own, that acknowledges like the real one. It does not replay the
@@ -511,7 +564,7 @@ func TestPolicySetValidatesPushesAndNotifies(t *testing.T) {
 	var pushed nodepolicy.Policy
 	for _, c := range proxy.snapshot() {
 		if c.method == nodepolicy.MethodSetPolicy {
-			if err := json.Unmarshal(c.params, &pushed); err != nil {
+			if err := decodePushedPolicy(c.params, &pushed); err != nil {
 				t.Fatalf("decode node/set-policy push %s: %v", c.params, err)
 			}
 		}
@@ -1518,7 +1571,7 @@ func TestPeerPolicySetRoundTripKeepsProtectedSections(t *testing.T) {
 	var pushed nodepolicy.Policy
 	for _, c := range calls {
 		if c.method == nodepolicy.MethodSetPolicy {
-			if err := json.Unmarshal(c.params, &pushed); err != nil {
+			if err := decodePushedPolicy(c.params, &pushed); err != nil {
 				t.Fatalf("decode pushed policy: %v", err)
 			}
 		}
@@ -2139,7 +2192,7 @@ func requireLandedPolicy(t *testing.T, rb *routedBroker, want nodepolicy.Policy)
 			// Decode each push whole: an omitted pausedBy must not keep the
 			// previous push's value.
 			pushed = nodepolicy.Policy{}
-			if err := json.Unmarshal(call.params, &pushed); err != nil {
+			if err := decodePushedPolicy(call.params, &pushed); err != nil {
 				t.Fatalf("decode pushed policy: %v", err)
 			}
 		}
@@ -3176,7 +3229,7 @@ func TestPolicyActivationFailureLeavesTheSavedRevisionAheadOfTheActiveOne(t *tes
 	test("acknowledgement is from another proxy run", "different proxy run", func(t *testing.T, ab *activatedBroker) {
 		ab.proxy.setAnswer(func(method string, params json.RawMessage) (any, string) {
 			if method == nodepolicy.MethodSetPolicy {
-				return nodepolicy.PolicyAck{Revision: "5000", RunID: "run-earlier-process"}, ""
+				return nodepolicy.PolicyAck{OriginNodeID: "self-node", Revision: "5000", RunID: "run-earlier-process"}, ""
 			}
 			return ab.acks.answer(method, params)
 		})
@@ -3184,7 +3237,7 @@ func TestPolicyActivationFailureLeavesTheSavedRevisionAheadOfTheActiveOne(t *tes
 	test("acknowledgement names another revision", "not the revision 5000", func(t *testing.T, ab *activatedBroker) {
 		ab.proxy.setAnswer(func(method string, params json.RawMessage) (any, string) {
 			if method == nodepolicy.MethodSetPolicy {
-				return nodepolicy.PolicyAck{Revision: "4999", RunID: ab.acks.runID}, ""
+				return nodepolicy.PolicyAck{OriginNodeID: "self-node", Revision: "4999", RunID: ab.acks.runID}, ""
 			}
 			return ab.acks.answer(method, params)
 		})
@@ -3262,7 +3315,7 @@ func TestPolicyActivationDiscardsAnAnswerFromAnEarlierProxyProcess(t *testing.T)
 
 	// A push to the earlier process answers late, naming exactly the saved
 	// revision with a well-formed acknowledgement. It must not activate it.
-	late, err := json.Marshal(nodepolicy.PolicyAck{Revision: "5000", RunID: "run-1-late"})
+	late, err := json.Marshal(nodepolicy.PolicyAck{OriginNodeID: "self-node", Revision: "5000", RunID: "run-1-late"})
 	if err != nil {
 		t.Fatalf("encode the late acknowledgement: %v", err)
 	}

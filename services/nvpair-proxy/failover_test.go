@@ -34,10 +34,16 @@ func (rwNop) Write(p []byte) (int, error) { return len(p), nil }
 // announces ready, and subscribes for routing targets. A test that needs any of
 // that calls facade.start itself — see the alias and port-store tests.
 func newTestProxy(profile engineProfile, codec *Codec, disc *Discovery, port int) *Proxy {
-	p := NewProxy(codec)
+	p := newBoundProxy(codec)
 	p.facades = map[string]*facade{
 		profile.Name: newFacade(p, profile, disc, port),
 	}
+	return p
+}
+
+func newBoundProxy(codec *Codec) *Proxy {
+	p := NewProxy(codec)
+	p.originNodeID = "test-origin"
 	return p
 }
 

@@ -327,8 +327,8 @@ func (b *Broker) spawnProxy() (supervisedHandle, error) {
 	lmstudioGeneration := b.lmstudioProxyGeneration.Add(1)
 
 	pp, err := startProxy(engines.ProxyComponent, b.proxyPath, applog.LevelString(), b.proxyCredentialRefs(), b.relayDir,
-		func(method string, params json.RawMessage) {
-			b.forwardProxyProcessNotification(ollamaGeneration, lmstudioGeneration, method, params)
+		func(source *proxyProcess, method string, params json.RawMessage) {
+			b.forwardProxyNotificationFrom(source, ollamaGeneration, lmstudioGeneration, method, params)
 		}, b.proxyArgs()...)
 	if err != nil {
 		return nil, err

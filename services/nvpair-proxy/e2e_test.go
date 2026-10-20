@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"nvpair-shared/engines"
+	"nvpair-shared/nodepolicy"
 	"nvpair-shared/testbin"
 )
 
@@ -318,6 +319,31 @@ func TestE2EFailoverOverRealBinary(t *testing.T) {
 		source := make(chan e2eFrame, 256)
 		go e2eReadFrames(stdout, source)
 		frames := &e2eInbox{frames: source}
+
+		// Bind the child's origin before enabling a facade, as the broker does.
+		policy := nodepolicy.Default()
+		policy.Revision = "1"
+		params := nodepolicy.SetPolicyParams{OriginNodeID: "e2e-origin", Policy: policy}
+		var bound nodepolicy.PolicyAck
+		for _, id := range []int{4, 5} {
+			e2eSend(t, stdin, id, "node/set-policy", params)
+			f := frames.wait(t, func(f e2eFrame) bool { return string(f.ID) == strconv.Itoa(id) }, "node/set-policy response", 5*time.Second)
+			if len(f.Error) > 0 && string(f.Error) != "null" {
+				t.Fatalf("node/set-policy returned error: %s", f.Error)
+			}
+			var ack nodepolicy.PolicyAck
+			if err := json.Unmarshal(f.Result, &ack); err != nil {
+				t.Fatalf("parse node/set-policy acknowledgement: %v", err)
+			}
+			if ack.OriginNodeID != params.OriginNodeID || ack.Revision != policy.Revision {
+				t.Fatalf("node/set-policy acknowledgement = %+v, want origin %q revision %q", ack, params.OriginNodeID, policy.Revision)
+			}
+			if id == 4 {
+				bound = ack
+			} else if ack != bound {
+				t.Fatalf("repeated node/set-policy acknowledgement = %+v, want same process acknowledgement %+v", ack, bound)
+			}
+		}
 
 		// Retried on a bind race: e2eFreePort can only probe-then-close, and a
 		// process spawn sits between the probe and the child's bind, so the

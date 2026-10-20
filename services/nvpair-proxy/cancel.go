@@ -166,21 +166,6 @@ func (c *workloadCtl) abortLocalIf(expected *attemptCtl) {
 	c.cancelRequest("cancelled: this node stopped accepting work")
 }
 
-func (p *Proxy) registerWorkload(key workloadKey, c *workloadCtl) {
-	p.workloadsMu.Lock()
-	defer p.workloadsMu.Unlock()
-	if p.workloads == nil {
-		p.workloads = map[workloadKey]*workloadCtl{}
-	}
-	p.workloads[key] = c
-}
-
-func (p *Proxy) unregisterWorkload(key workloadKey) {
-	p.workloadsMu.Lock()
-	defer p.workloadsMu.Unlock()
-	delete(p.workloads, key)
-}
-
 // handleWorkloadCancel answers workload/cancel.
 func (p *Proxy) handleWorkloadCancel(msg *Message) {
 	var in nodepolicy.WorkloadCancelParams
@@ -202,14 +187,7 @@ func (p *Proxy) handleWorkloadCancel(msg *Message) {
 		_ = p.codec.Respond(msg.ID, nodepolicy.WorkloadCancelResult{Found: false})
 		return
 	}
-	p.workloadsMu.Lock()
-	var matches []*workloadCtl
-	for key, c := range p.workloads {
-		if key.id == in.WorkloadID && (in.Engine == "" || key.engine == in.Engine) {
-			matches = append(matches, c)
-		}
-	}
-	p.workloadsMu.Unlock()
+	matches := p.workloadControls(in.Engine, in.WorkloadID)
 	if len(matches) > 1 {
 		_ = p.codec.RespondError(msg.ID, -32602,
 			"ambiguous workload id; pass engine")

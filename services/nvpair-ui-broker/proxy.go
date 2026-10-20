@@ -136,7 +136,7 @@ func (p *proxyProcess) ReadyParams(engine string) json.RawMessage {
 // the broker can forward its event stream. Proxy stderr goes to the broker's
 // non-blocking sink (see stderrsink.go), so a stalled reader cannot block the
 // proxy's exit.
-func startProxy(name, binaryPath, logLevel string, refs []nodepolicy.CredentialRef, relayDir *relay.Directory, onNotify func(method string, params json.RawMessage), extraArgs ...string) (*proxyProcess, error) {
+func startProxy(name, binaryPath, logLevel string, refs []nodepolicy.CredentialRef, relayDir *relay.Directory, onNotify func(*proxyProcess, string, json.RawMessage), extraArgs ...string) (*proxyProcess, error) {
 	env, err := proxyEnv(os.Environ(), refs)
 	if err != nil {
 		return nil, err
@@ -167,10 +167,12 @@ func startProxy(name, binaryPath, logLevel string, refs []nodepolicy.CredentialR
 		cmd:      cmd,
 		stdin:    stdin,
 		done:     make(chan struct{}),
-		onNotify: onNotify,
 		relayDir: relayDir,
 		// Compared with the policy by proxyCredentialsStale.
 		credentialRefs: refs,
+	}
+	if onNotify != nil {
+		pp.onNotify = func(method string, params json.RawMessage) { onNotify(pp, method, params) }
 	}
 	pp.attachPeer(readWriter{stdout, stdin})
 
@@ -192,6 +194,17 @@ func startProxy(name, binaryPath, logLevel string, refs []nodepolicy.CredentialR
 	}()
 
 	return pp, nil
+}
+
+func (b *Broker) forwardProxyNotificationFrom(source *proxyProcess, ollamaGeneration, lmstudioGeneration uint64, method string, params json.RawMessage) {
+	if source == nil || b.proxyProcessHandle() != source {
+		return
+	}
+	if method == nodepolicy.NotifyStrictReadiness {
+		b.observeStrictReadinessFrom(source, params)
+		return
+	}
+	b.forwardProxyProcessNotification(ollamaGeneration, lmstudioGeneration, method, params)
 }
 
 // attachPeer builds the JSON-RPC peer over the proxy's pipes. A Call whose

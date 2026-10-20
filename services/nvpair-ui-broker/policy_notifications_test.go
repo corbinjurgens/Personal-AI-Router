@@ -154,7 +154,7 @@ func TestPolicyAnnouncementsFollowTheStoredPolicyUnderConcurrentWriters(t *testi
 			var pushed struct {
 				Revision string `json:"revision"`
 			}
-			if json.Unmarshal(params, &pushed) == nil && pushed.Revision == "5000" {
+			if decodePushedPolicy(params, &pushed) == nil && pushed.Revision == "5000" {
 				<-releaseA
 			}
 		}
@@ -168,7 +168,7 @@ func TestPolicyAnnouncementsFollowTheStoredPolicyUnderConcurrentWriters(t *testi
 			var pushed struct {
 				Revision string `json:"revision"`
 			}
-			if c.method == nodepolicy.MethodSetPolicy && json.Unmarshal(c.params, &pushed) == nil && pushed.Revision == "5000" {
+			if c.method == nodepolicy.MethodSetPolicy && decodePushedPolicy(c.params, &pushed) == nil && pushed.Revision == "5000" {
 				return true
 			}
 		}

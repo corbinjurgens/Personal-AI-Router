@@ -510,6 +510,7 @@ func (f *facade) handleHTTP(w http.ResponseWriter, r *http.Request) {
 func (f *facade) handleHTTPWithStreamIdle(w http.ResponseWriter, r *http.Request, streamIdle time.Duration) {
 	p := f.host
 	start := time.Now()
+	isInf := isInferenceRequest(f.profile, r.Method, r.URL.Path)
 
 	// Allocate the request ID up front so both code paths (rejection
 	// and forward) can stamp the same value into their notification.
@@ -536,6 +537,17 @@ func (f *facade) handleHTTPWithStreamIdle(w http.ResponseWriter, r *http.Request
 		}
 		return def
 	}
+	ctl := newWorkloadCtl(cancelRequest)
+	var requestOwner *routingRequest
+	if isInf {
+		var err error
+		requestOwner, err = p.registerRoutingRequest(ctl)
+		if err != nil {
+			writeIngressError(w, http.StatusServiceUnavailable, "identity-unavailable", "routing request identity or capacity is unavailable")
+			return
+		}
+		defer p.unregisterRoutingRequest(requestOwner)
+	}
 	// curTicket is the admission held for a self dispatch. Released after each
 	// attempt and, by this defer, on every other way out, including the
 	// ErrAbortHandler unwind of a mid-stream copy error.
@@ -561,7 +573,6 @@ func (f *facade) handleHTTPWithStreamIdle(w http.ResponseWriter, r *http.Request
 		})
 		return
 	}
-	isInf := isInferenceRequest(f.profile, r.Method, r.URL.Path)
 	// An inference body naming "model" twice is ambiguous: admission and
 	// workload tracking read the last member while the tier rewrite replaces
 	// the first, so the model admitted here and the model the engine decodes
@@ -654,7 +665,6 @@ func (f *facade) handleHTTPWithStreamIdle(w http.ResponseWriter, r *http.Request
 		needs = parseRequestNeeds(bodyBytes, r.URL.Path)
 		crossEngine = openAICompatibleInference[r.URL.Path]
 	}
-	ctl := newWorkloadCtl(cancelRequest)
 	resolve := func() []candidate {
 		var cands []candidate
 		if tier != "" {
@@ -844,11 +854,12 @@ func (f *facade) handleHTTPWithStreamIdle(w http.ResponseWriter, r *http.Request
 			CreatedAt:      createdMs,
 			Seq:            nextWlSeq(),
 		}
-		p.emitWorkload(workloadSubmittedMethod, *wl)
 		key := workloadKey{engine: f.profile.Name, id: reqID}
-		p.registerWorkload(key, ctl)
-		defer p.unregisterWorkload(key)
-		defer ctl.finish()
+		if err := p.registerWorkload(requestOwner, key); err != nil {
+			writeIngressError(w, http.StatusServiceUnavailable, "request-unavailable", "routing request workload is unavailable")
+			return
+		}
+		p.emitWorkload(workloadSubmittedMethod, *wl)
 	}
 
 	// The terminal workload transition (completed/errored) can be reached from
@@ -867,6 +878,7 @@ func (f *facade) handleHTTPWithStreamIdle(w http.ResponseWriter, r *http.Request
 			return
 		}
 		terminalOnce.Do(func() {
+			p.unregisterWorkload(requestOwner)
 			now := time.Now().UnixMilli()
 			wlMu.Lock()
 			terminated = true

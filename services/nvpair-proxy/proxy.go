@@ -5,8 +5,6 @@ package main
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	stderrors "errors"
 	"fmt"
@@ -324,8 +322,13 @@ type Proxy struct {
 	// separates two facades' records and only the process needs the nonce. It
 	// exists because each facade's request counter restarts at 1, so without it
 	// a reused id after a restart would collide in the broker's store.
-	runID       string
-	performance performanceQueue
+	runID            string
+	identityMu       sync.Mutex
+	originNodeID     string
+	requestSequence  int64
+	requests         map[string]*routingRequest
+	workloadRequests map[workloadKey]string
+	performance      performanceQueue
 
 	// admission is the node-wide admission controller every facade shares
 	// (FORK_DESIGN.md §3.3). Process-wide for the same reason as the
@@ -349,11 +352,6 @@ type Proxy struct {
 	selfMu     sync.RWMutex
 	selfNodeID string
 	selfModels map[string][]string
-
-	// workloadsMu guards workloads, the in-flight workloads this process
-	// originated, keyed by engine and id, so workload/cancel can reach them.
-	workloadsMu sync.Mutex
-	workloads   map[workloadKey]*workloadCtl
 }
 
 // NewProxy builds a facade-less process host. Facades arrive via
@@ -439,17 +437,6 @@ func (p *Proxy) reportActivity(nodeID string) {
 	if err := p.codec.Notify(noderec.NotifyNodeActivity, noderec.NodeActivityParams{HostUUID: nodeID}); err != nil {
 		slog.Debug("failed to report node activity", "node_id", nodeID, "err", err)
 	}
-}
-
-// newRunID returns a short random per-process nonce (hex). A crypto/rand read
-// failure falls back to a timestamp — uniqueness matters more than
-// unpredictability here.
-func newRunID() string {
-	var b [8]byte
-	if _, err := rand.Read(b[:]); err != nil {
-		return strconv.FormatInt(time.Now().UnixNano(), 16)
-	}
-	return hex.EncodeToString(b[:])
 }
 
 func (p *Proxy) Run(ctx context.Context) error {

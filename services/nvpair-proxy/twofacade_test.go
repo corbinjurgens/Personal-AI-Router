@@ -84,7 +84,7 @@ func twoFacadeProxy(t *testing.T) *Proxy {
 	t.Helper()
 	redirectConfigDir(t)
 
-	p := NewProxy(NewCodec(rwNop{}))
+	p := newBoundProxy(NewCodec(rwNop{}))
 	p.serveCtx = t.Context()
 	for _, e := range engines.All() {
 		enableOnFreePort(t, p, e.Name)
@@ -158,7 +158,7 @@ func TestOneFacadeFailingToBindLeavesTheOthersServing(t *testing.T) {
 	}
 	surviving, failing := all[0], all[1]
 
-	p := NewProxy(NewCodec(rwNop{}))
+	p := newBoundProxy(NewCodec(rwNop{}))
 	p.serveCtx = t.Context()
 	t.Cleanup(func() { p.shutdown(t.Context()) })
 
@@ -332,7 +332,7 @@ func TestPanicDuringEnableWithdrawsOnlyThatFacade(t *testing.T) {
 	}
 	surviving, panicking := all[0], all[1]
 
-	p := NewProxy(NewCodec(rwNop{}))
+	p := newBoundProxy(NewCodec(rwNop{}))
 	p.serveCtx = t.Context()
 	t.Cleanup(func() { p.shutdown(t.Context()) })
 
@@ -417,7 +417,7 @@ func TestEnableFacadeRejectsUnsafeAliasAddresses(t *testing.T) {
 		{"an engine with no inherited host variable", plainEngine.Name, "127.0.0.1:11433"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			p := NewProxy(NewCodec(rwNop{}))
+			p := newBoundProxy(NewCodec(rwNop{}))
 			p.serveCtx = t.Context()
 			t.Cleanup(func() { p.shutdown(t.Context()) })
 
@@ -444,7 +444,7 @@ func TestBothFacadesAddressTheirNotifications(t *testing.T) {
 	redirectConfigDir(t)
 
 	recorded := &recordingWriter{}
-	p := NewProxy(NewCodec(recorded))
+	p := newBoundProxy(NewCodec(recorded))
 	p.serveCtx = t.Context()
 	t.Cleanup(func() { p.shutdown(t.Context()) })
 
