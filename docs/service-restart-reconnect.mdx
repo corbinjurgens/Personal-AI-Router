@@ -1,0 +1,95 @@
+{/*
+SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+*/}
+
+# Recovering an attached client after service restart
+
+The TUI keeps its existing RPC client when an established service connection
+breaks. Pending calls fail; they are never queued or replayed. Calls made during
+the outage fail too. After loss the TUI only dials the same service endpoint,
+with capped, cancellable retry delays. It does not start a replacement service.
+Initial connect-or-start behavior is unchanged. Detaching or explicitly stopping
+the service ends that session's reconnection attempts.
+
+When the replacement service reports readiness, the TUI renews subscriptions and
+reads authoritative state. Disconnected facts remain unavailable until refreshed.
+Old asynchronous results cannot overwrite the replacement session's state.
+Presentation choices and valid unsent drafts survive; drafts require a new user
+action to submit. A failed in-flight operation can have taken effect before the
+connection broke, so inspect current state before deciding to submit it again.
+
+## Automated proof
+
+`TestServiceRestartReconnect` in `services/tests` retains one production TUI
+`rpc.NewReconnectingClient` throughout an abrupt restart of an isolated service.
+It uses the private fixture's real service, broker, scanner, engine manager and
+llama.cpp proxy. PID, executable path and creation time identify owned processes.
+It reaps the recorded old descendants before changing only the fixture's private
+persisted policy and restarting at the same endpoint and profile.
+
+A private process-mode manifest identifies a loopback HTTP fixture without
+starting an engine executable. A public model read checks adoption. Bundled
+engines have private manifest overrides with absent executable paths and owned
+loopback endpoints that return unavailable; their status and
+model reads must remain empty. The fixture also isolates the Windows user profile
+and clears its inherited Ollama address.
+
+A tokenized public HTTP action is held at the custom fixture while the exact
+service is killed. The pending call must fail promptly, and its POST must appear
+only once.
+The retained session must reconnect, renew a discovery subscription, read the
+changed policy, receive a new policy push and route a fresh HTTP inference through
+the replacement proxy to the loopback fixture. Cleanup checks for owned survivors
+and rejects a still-listening private service endpoint.
+
+This process test joins the production RPC transport to private service
+processes. Separate headless TUI tests cover view rebootstrap and stale-result
+fencing. It does not establish installed-service, packaged desktop, terminal
+rendering, real-engine, GPU or multi-machine acceptance. Desktop real-process
+bridge proof remains deferred; desktop deterministic transport/state tests are
+separate evidence.
+
+## Owner-run Windows installed-service acceptance: NOT RUN
+
+The following procedure requires an owner-approved profile, exact executable
+paths and a safe time with no active inference, downloads, other test invocation
+or measurement interval. It has **NOT RUN** as part of this delivery. Fixture
+results do not clear this native acceptance requirement.
+
+1. Record the chosen service endpoint and profile/configuration paths. Resolve
+   the installed service controller and client executable paths; record each
+   process's PID, executable path and creation time, including service and broker.
+   Use the reviewed controller for that installation. Never select a termination
+   target by process name or stop another PAIR installation.
+2. Capture firewall rules and relevant listeners before the interval. Record
+   attached TUI and desktop process identities, connection status and a nonsecret
+   baseline such as node identity, policy revision and visible collections.
+   Keep both client processes open throughout the remaining steps.
+3. With the owner present, stop the exact selected service using that reviewed
+   controller. Observe disconnected/unavailable client state. Record any pending
+   operation's visible failure, and inspect its authoritative outcome after
+   recovery before resubmitting anything. Do not infer cancellation of work from
+   a broken connection.
+4. Restart the same service profile at the same endpoint through the reviewed
+   controller. Record the new service and broker identities. Confirm the original
+   TUI and desktop PIDs remain alive, their state refreshes and subscriptions
+   deliver new updates. Check a fresh authoritative baseline against the service;
+   an early connected indicator alone is insufficient.
+5. Submit only an owner-approved fresh request against already approved routing
+   and engine state. Confirm that the replacement broker/proxy actually forwards
+   it and that the retained clients display its new result. Starting an engine,
+   loading a model, contacting a live peer or changing policy requires separate
+   authorization for that action.
+6. Capture firewall rules and listeners after the interval. Record prompt
+   observations, exact times, client/service identity changes, state evidence and
+   any unexpected surviving process. Preserve nonsecret command output and logs;
+   do not record prompts, messages, inference bodies, pairing PINs or key material.
+   Do not alter routes, adapters or firewall rules to make this check pass. If
+   recovery fails, retain the evidence and use the installation's reviewed normal
+   recovery procedure with the owner.
+
+On Windows, automated tests use the documented fixed binary root and matching
+exact-program firewall rules. Run native process tests serially under the
+project's approved test wrapper; do not run from new temporary executable paths
+or during another session's GPU or measurement interval.
