@@ -160,6 +160,11 @@ type Executor struct {
 	// immediate out-of-cycle loaded-set check instead of waiting for the next
 	// tick. Buffered depth 1: a coalesced signal is enough.
 	loadedPoke chan struct{}
+	// memoryEvidence is the bounded local memory-qualification producer
+	// (memory_evidence.go). Its zero value performs no I/O and starts no
+	// goroutine; the later Manager hook supplies hostUUID from the existing
+	// cluster Mesh identity.
+	memoryEvidence memoryEvidenceProducer
 	// inventoryMu guards inventory, the last installed model list per engine,
 	// which lets the watcher check residency every tick without re-reading an
 	// unchanged inventory (see modelsSweep).
