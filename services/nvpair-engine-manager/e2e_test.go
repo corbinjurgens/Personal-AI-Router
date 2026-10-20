@@ -245,6 +245,23 @@ type e2eManager struct {
 	stopped    bool
 }
 
+func TestE2EShutdownDrainsSaturatedFrames(t *testing.T) {
+	manager := startE2EManager(t, t.TempDir(), t.TempDir())
+	// Unknown requests return frames without detecting or starting any engine.
+	for id := 1; id <= 256; id++ {
+		send(t, manager.stdin, id, "unknown-saturation-request", nil)
+	}
+	deadline := time.After(5 * time.Second)
+	for len(manager.frames) != cap(manager.frames) {
+		select {
+		case <-deadline:
+			t.Fatal("frame queue did not saturate")
+		case <-time.After(time.Millisecond):
+		}
+	}
+	manager.stop(t)
+}
+
 func startE2EManager(t *testing.T, cfg, home string, args ...string) *e2eManager {
 	t.Helper()
 	cmd := exec.Command(managerBin, args...)
@@ -322,12 +339,17 @@ func (m *e2eManager) stop(t *testing.T) {
 func (m *e2eManager) shutdown() error {
 	_ = m.stdin.Close()
 	deadline := time.After(10 * time.Second)
-	select {
-	case <-m.readerDone:
-	case <-deadline:
-		_ = m.cmd.Process.Kill()
-		_ = m.cmd.Wait()
-		return errors.New("manager stdout stayed open after stdin closed")
+	reading := true
+	for reading {
+		select {
+		case <-m.frames:
+		case <-m.readerDone:
+			reading = false
+		case <-deadline:
+			_ = m.cmd.Process.Kill()
+			_ = m.cmd.Wait()
+			return errors.New("manager stdout stayed open after stdin closed")
+		}
 	}
 	done := make(chan error, 1)
 	go func() { done <- m.cmd.Wait() }()

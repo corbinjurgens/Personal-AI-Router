@@ -758,6 +758,9 @@ func (m *Manifest) Validate() error {
 }
 
 func (p *Platform) validate(key string) error {
+	if fields := p.Runtime.Serving.Validate(); len(fields) > 0 {
+		return fmt.Errorf("platform %q: invalid serving declaration: %v", key, fields)
+	}
 	if policy := p.Runtime.EditableLaunch; policy != nil {
 		if policy.StartIndex < 0 || (p.Runtime.modeOrDefault() == "command" && policy.StartIndex >= len(p.Runtime.Start)) {
 			return fmt.Errorf("platform %q: invalid editable launch definition", key)
