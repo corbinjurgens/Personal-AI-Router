@@ -57,6 +57,14 @@ var policyRoutePaths = map[string]string{
 	controlAvailabilitySetPath: "set-availability",
 }
 
+// policyRouteClasses classifies the inbound ec policy routes once, here, so the
+// registry has no second opinion about what changes target state.
+var policyRouteClasses = map[string]controlClass{
+	controlPolicyGetPath:       controlRead,
+	controlPolicySetPath:       controlMutation,
+	controlAvailabilitySetPath: controlMutation,
+}
+
 // policyRemoteMethods maps each client method to the target's ec route.
 var policyRemoteMethods = map[string]string{
 	"engine:remote-policy-get":       controlPolicyGetPath,
@@ -225,71 +233,80 @@ func (c *remoteClient) postPolicy(ctx context.Context, path string, body policyB
 
 // policyRoutes registers the inbound ec policy routes. Each is pin-gated with
 // the caller's identity, body-capped, and stripped of nodeId before it reaches
-// the broker.
-func (s *controlServer) policyRoutes(mux *http.ServeMux) {
+// the broker. The registry owns the read/mutation decision.
+func (s *controlServer) policyRoutes() []controlRoute {
+	routes := make([]controlRoute, 0, len(policyRoutePaths))
 	for path, method := range policyRoutePaths {
-		mux.HandleFunc(path, s.requirePinCaller(func(w http.ResponseWriter, r *http.Request, caller string) {
-			if r.Method != http.MethodPost {
-				w.Header().Set("Allow", "POST")
-				http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-				return
-			}
-			if s.exec.policyParent == nil {
-				http.Error(w, "policy coordinator unavailable", http.StatusServiceUnavailable)
-				return
-			}
-			var p policyBody
-			decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, policyBodyLimit))
-			decoder.DisallowUnknownFields()
-			if decoder.Decode(&p) != nil || decoder.Decode(&struct{}{}) != io.EOF {
-				http.Error(w, "invalid policy request", http.StatusBadRequest)
-				return
-			}
-			// A peer can only address this node, never forward another hop.
-			p.NodeID = ""
-			params, err := json.Marshal(p)
-			if err != nil {
-				http.Error(w, "invalid policy request", http.StatusBadRequest)
-				return
-			}
-			ctx, cancel := context.WithCancel(r.Context())
-			defer cancel()
-			// Abandon the wait as soon as the caller is no longer pinned. An
-			// accepted availability change still completes on the target.
-			go func() {
-				ticker := time.NewTicker(time.Second)
-				defer ticker.Stop()
-				for {
-					select {
-					case <-ctx.Done():
+		routes = append(routes, controlRoute{
+			path:   path,
+			method: http.MethodPost,
+			class:  policyRouteClasses[path],
+			family: "policy-" + method,
+			handle: s.policyHandler(method),
+		})
+	}
+	return routes
+}
+
+// policyHandler relays one policy method for a pinned peer. The registry has
+// already validated the method and, for a mutation, the caller's grant.
+func (s *controlServer) policyHandler(method string) pinnedPeerHandler {
+	return func(w http.ResponseWriter, r *http.Request, caller string) {
+		if s.exec.policyParent == nil {
+			http.Error(w, "policy coordinator unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		var p policyBody
+		decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, policyBodyLimit))
+		decoder.DisallowUnknownFields()
+		if decoder.Decode(&p) != nil || decoder.Decode(&struct{}{}) != io.EOF {
+			http.Error(w, "invalid policy request", http.StatusBadRequest)
+			return
+		}
+		// A peer can only address this node, never forward another hop.
+		p.NodeID = ""
+		params, err := json.Marshal(p)
+		if err != nil {
+			http.Error(w, "invalid policy request", http.StatusBadRequest)
+			return
+		}
+		ctx, cancel := context.WithCancel(r.Context())
+		defer cancel()
+		// Abandon the wait as soon as the caller is no longer pinned. An
+		// accepted availability change still completes on the target.
+		go func() {
+			ticker := time.NewTicker(time.Second)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					s.mesh.Refresh()
+					if _, ok := s.mesh.VerifyClientPin(r); !ok {
+						cancel()
 						return
-					case <-ticker.C:
-						s.mesh.Refresh()
-						if _, ok := s.mesh.VerifyClientPin(r); !ok {
-							cancel()
-							return
-						}
 					}
 				}
-			}()
-			result, err := s.exec.policyParent(ctx, method, params, caller)
-			if err != nil {
-				// Invalid params are a 400; a revision conflict or a local veto
-				// is a typed 409 the caller maps back to its code; anything else
-				// is a plain 409.
-				var relayErr *codedError
-				switch {
-				case errors.As(err, &relayErr) && relayErr.code == -32602:
-					http.Error(w, err.Error(), http.StatusBadRequest)
-				case errors.As(err, &relayErr) && wireCodes[relayErr.code] != "":
-					writeCodedError(w, relayErr.code, err.Error())
-				default:
-					http.Error(w, err.Error(), http.StatusConflict)
-				}
-				return
 			}
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write(result)
-		}))
+		}()
+		result, err := s.exec.policyParent(ctx, method, params, caller)
+		if err != nil {
+			// Invalid params are a 400; a revision conflict, a local veto or a
+			// refused management operation is a typed 409 the caller maps back
+			// to its code; anything else is a plain 409.
+			var relayErr *codedError
+			switch {
+			case errors.As(err, &relayErr) && relayErr.code == -32602:
+				http.Error(w, err.Error(), http.StatusBadRequest)
+			case errors.As(err, &relayErr) && wireCodes[relayErr.code] != "":
+				writeCodedError(w, relayErr.code, err.Error())
+			default:
+				http.Error(w, err.Error(), http.StatusConflict)
+			}
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(result)
 	}
 }

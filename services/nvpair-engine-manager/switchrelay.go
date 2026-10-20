@@ -99,17 +99,31 @@ func (r *switchRelay) reply(raw json.RawMessage) {
 	}
 }
 
-func (s *controlServer) switchRoutes(mux *http.ServeMux) {
-	// Read the live stable identity per request, including after joining a mesh.
+func (s *controlServer) switchRoutes() []controlRoute {
+	routes := make([]controlRoute, 0, len(switchRouteMethods))
 	for path := range switchRouteMethods {
-		mux.HandleFunc(path, func(w http.ResponseWriter, r *http.Request) {
+		route := controlRoute{
+			path:   path,
+			method: http.MethodPost,
+			class:  controlMutation,
+			family: "engine-switch",
+		}
+		if path == settings.SwitchStatusPath {
+			// Receipt status is a read; it never accepts or changes work.
+			route.class, route.family = controlRead, "engine-switch-status"
+		}
+		route.handle = func(w http.ResponseWriter, r *http.Request, caller string) {
+			// Read the live stable identity per request, including after
+			// joining a mesh. The registry already authenticated the caller.
 			target := ""
 			if s.mesh != nil {
 				target = s.mesh.NodeUUID()
 			}
-			switchHandler(target, s.requirePinCaller, s.exec.switchParent)(w, r)
-		})
+			switchHandler(target, pinnedCallerGate(caller), s.exec.switchParent)(w, r)
+		}
+		routes = append(routes, route)
 	}
+	return routes
 }
 
 func (m *Manager) handleSwitchMessage(ctx context.Context, msg *Message) bool {

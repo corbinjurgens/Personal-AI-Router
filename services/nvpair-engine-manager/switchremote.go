@@ -191,6 +191,12 @@ func switchHandler(target string, requirePinCaller func(pinnedPeerHandler) http.
 				writeCodedError(w, code, err.Error())
 				return
 			}
+			if code == codeRemoteManagementDenied {
+				// The target refused a management operation; the origin maps
+				// this back to -32012, distinct from the local veto above.
+				writeCodedError(w, code, err.Error())
+				return
+			}
 			http.Error(w, err.Error(), http.StatusConflict)
 			return
 		}
