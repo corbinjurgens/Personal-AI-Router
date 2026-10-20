@@ -957,7 +957,7 @@ func (d *nodeDetail) handleNotification(msg *rpc.Message) tea.Cmd {
 		d.policyRoute++
 		d.policyFresh = false
 		return d.policyCmd()
-	case "engine:intent-changed":
+	case "engine:intent-changed", "engine:ready":
 		if !d.remote() && !d.policyDisconnected {
 			d.invalidateIntent()
 			return d.intentCmd()

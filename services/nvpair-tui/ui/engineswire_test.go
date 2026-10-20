@@ -600,6 +600,33 @@ func TestTerminalControlsLateIntentAfterRestart(t *testing.T) {
 	}
 }
 
+func TestTerminalControlsLateIntentAfterManagerReady(t *testing.T) {
+	client, broker := nodeInfoRPCFixture(t)
+	d := newNodeDetail(client, nodeRow{key: "self", self: true})
+	_, old := terminalControlsReply(t, broker, d.intentCmd(), &rpc.Message{Result: []byte(`{"enabledByEngine":{"ollama":false},"offByEngine":{"ollama":"local"}}`)})
+	d.update(old)
+	if d.intent.OffByEngine["ollama"] != engineintent.Local {
+		t.Fatal("positive control did not retain local origin")
+	}
+	refresh := d.handleNotification(&rpc.Message{Method: "engine:ready"})
+	d.update(old)
+	if d.intent.EnabledByEngine != nil || d.intent.OffByEngine != nil {
+		t.Fatal("pre-manager-restart reply restored intent")
+	}
+	if refresh == nil {
+		t.Fatal("manager readiness did not issue a fresh intent read")
+	}
+	request, current := terminalControlsReply(t, broker, refresh, &rpc.Message{Result: []byte(`{"enabledByEngine":{"ollama":false},"offByEngine":{"ollama":"peer"}}`)})
+	if request.Method != "engine:intent" {
+		t.Fatalf("method = %q, want engine:intent", request.Method)
+	}
+	d.update(current)
+	want := engineintent.Snapshot{EnabledByEngine: map[string]bool{"ollama": false}, OffByEngine: map[string]engineintent.Origin{"ollama": engineintent.Peer}}
+	if !reflect.DeepEqual(d.intent, want) {
+		t.Fatalf("intent = %+v, want %+v", d.intent, want)
+	}
+}
+
 func TestTerminalControlsIntentSnapshotRead(t *testing.T) {
 	client, broker := nodeInfoRPCFixture(t)
 	d := newNodeDetail(client, nodeRow{key: "self", self: true})
