@@ -128,6 +128,188 @@ afterEach(async () => {
 })
 
 describe('node-scoped engine switch store', () => {
+    it('permission refusal delivered after remount must not strand its original ID', async () => {
+        useConnectionStore.setState({ selfId: 'self' })
+        const permission = vi
+            .spyOn(useNodeConfigurationStore.getState(), 'readManagement')
+            .mockImplementation(async () => {
+                useNodeConfigurationStore.setState({
+                    management: new Map([['node-a', { state: 'allowed', revision: '2' }]])
+                })
+            })
+        const sent = deferred<Awaited<ReturnType<PreloadServiceTransport['invoke']>>>()
+        invoke.mockImplementation(async (channel, payload) => {
+            if (channel === 'engines:switch') return sent.promise
+            if (typeof payload === 'object' && payload !== null && 'requestId' in payload)
+                return {
+                    success: false,
+                    code: -32000,
+                    error: 'Unknown switch receipt for this caller.'
+                }
+            return { success: true, data: { configurationRevision: revision } }
+        })
+        stops.push(watchEngineSwitch('node-a'))
+        await flush()
+        const submit = store.getState().submit('node-a', 'ollama', 'llamacpp')
+        await flush()
+        const original = store.getState().entries['node-a'].request
+        expect(original).toBeDefined()
+        stops.splice(0).forEach(stop => stop())
+        stops.push(watchEngineSwitch('node-a'))
+        await flush()
+        sent.resolve({
+            success: false,
+            error: 'permission revoked before acceptance',
+            code: -32012
+        })
+        await submit
+        expect(store.getState().entries['node-a'].unknown).toBe(false)
+        expect(permission).toHaveBeenCalledTimes(2)
+        expect(store.getState().entries['node-a'].refused).toContain('refused before acceptance')
+        expect(store.getState().entries['node-a'].request).toBe(original)
+        expect(store.getState().reserved('node-a', 'ollama')).toBe(false)
+        expect(store.getState().reserved('node-a', 'llamacpp')).toBe(false)
+        for (let round = 0; round < 3; round++) await store.getState().refresh('node-a')
+        expect(invoke.mock.calls.filter(([channel]) => channel === 'engines:switch')).toHaveLength(
+            1
+        )
+        await store.getState().submit('node-a', 'ollama', 'llamacpp')
+        expect(invoke.mock.calls.filter(([channel]) => channel === 'engines:switch')).toHaveLength(
+            2
+        )
+        expect(store.getState().entries['node-a'].request?.requestId).not.toBe(original?.requestId)
+    })
+    it('unchanged wait refreshes separate current observations', async () => {
+        const waiting = deferred<Awaited<ReturnType<PreloadServiceTransport['invoke']>>>()
+        const first = receipt()
+        const old = { source: first.source, target: first.target }
+        const fresh = {
+            source: { ...first.source, running: true, observedAt: '2026-10-21T00:00:00Z' },
+            target: first.target
+        }
+        invoke.mockResolvedValueOnce({
+            success: true,
+            data: { configurationRevision: revision, activeRequestId: request.requestId }
+        })
+        invoke.mockResolvedValueOnce({
+            success: true,
+            data: { configurationRevision: revision, receipt: first, observed: old }
+        })
+        invoke.mockReturnValueOnce(waiting.promise)
+        stops.push(watchEngineSwitch('node-a'))
+        await flush()
+        const retained = store.getState().entries['node-a'].receipt
+        expect(store.getState().entries['node-a'].observed).toEqual(old)
+        waiting.resolve({
+            success: true,
+            data: { configurationRevision: revision, receipt: first, observed: fresh }
+        })
+        await flush()
+        expect(store.getState().entries['node-a'].observed).toEqual(fresh)
+        expect(store.getState().entries['node-a'].receipt).toBe(retained)
+    })
+    it.each(['accepted receipt', 'typed refusal'])(
+        'retains a late %s without restarting retired view reads',
+        async outcome => {
+            await idle()
+            const sent = deferred<Awaited<ReturnType<PreloadServiceTransport['invoke']>>>()
+            invoke.mockResolvedValueOnce({
+                success: true,
+                data: { configurationRevision: revision }
+            })
+            invoke.mockReturnValueOnce(sent.promise)
+            const submit = store.getState().submit('node-a', 'ollama', 'llamacpp')
+            await flush()
+            const original = store.getState().entries['node-a'].request
+            if (!original) throw new Error('Missing submitted request')
+            stops.splice(0).forEach(stop => stop())
+            const calls = invoke.mock.calls.length
+            sent.resolve(
+                outcome === 'typed refusal'
+                    ? { success: false, error: 'refused', code: -32011 }
+                    : {
+                          success: true,
+                          data: {
+                              receipt: receipt({ request: original, requestId: original.requestId })
+                          }
+                      }
+            )
+            await submit
+            await vi.advanceTimersByTimeAsync(1)
+            expect(store.getState().entries['node-a'].unknown).toBe(false)
+            expect(store.getState().entries['node-a'].revision).toBeUndefined()
+            expect(invoke).toHaveBeenCalledTimes(calls)
+        }
+    )
+    it.each([
+        { outcome: 'typed refusal', newer: 'request' },
+        { outcome: 'typed refusal', newer: 'receipt' },
+        { outcome: 'accepted receipt', newer: 'request' },
+        { outcome: 'accepted receipt', newer: 'receipt' }
+    ])('ignores late $outcome after retirement with a newer $newer', async ({ outcome, newer }) => {
+        await idle()
+        const sent = deferred<Awaited<ReturnType<PreloadServiceTransport['invoke']>>>()
+        invoke.mockResolvedValueOnce({ success: true, data: { configurationRevision: revision } })
+        invoke.mockReturnValueOnce(sent.promise)
+        const submit = store.getState().submit('node-a', 'ollama', 'llamacpp')
+        await flush()
+        const original = store.getState().entries['node-a'].request
+        if (!original) throw new Error('Missing submitted request')
+        stops.splice(0).forEach(stop => stop())
+        const retainedRequest = newer === 'request' ? request : original
+        const retained = {
+            request: retainedRequest,
+            receipt: receipt({
+                request: retainedRequest,
+                requestId: retainedRequest.requestId,
+                sequence: 9
+            }),
+            unknown: false
+        }
+        store.setState({ entries: { 'node-a': retained } })
+        sent.resolve(
+            outcome === 'typed refusal'
+                ? { success: false, error: 'refused', code: -32011 }
+                : {
+                      success: true,
+                      data: {
+                          receipt: receipt({ request: original, requestId: original.requestId })
+                      }
+                  }
+        )
+        await submit
+        expect(store.getState().entries['node-a']).toBe(retained)
+    })
+    it.each([
+        { name: 'wrong node', change: { nodeId: 'node-b' } },
+        { name: 'wrong request', change: { requestId: 'unrelated' } },
+        { name: 'lower sequence', change: { sequence: 0 } }
+    ])('rejects observations from a wait with $name', async ({ change: changes }) => {
+        const waiting = deferred<Awaited<ReturnType<PreloadServiceTransport['invoke']>>>()
+        invoke.mockResolvedValueOnce({
+            success: true,
+            data: { configurationRevision: revision, activeRequestId: request.requestId }
+        })
+        invoke.mockResolvedValueOnce({
+            success: true,
+            data: { configurationRevision: revision, receipt: receipt() }
+        })
+        invoke.mockReturnValueOnce(waiting.promise)
+        stops.push(watchEngineSwitch('node-a'))
+        await flush()
+        const before = store.getState().entries['node-a']
+        const invalid = receipt(changes)
+        waiting.resolve({
+            success: true,
+            data: {
+                configurationRevision: revision,
+                receipt: invalid,
+                observed: { source: invalid.source, target: invalid.target }
+            }
+        })
+        await flush()
+        expect(store.getState().entries['node-a']).toBe(before)
+    })
     it.each([
         { phase: 'completed', terminal: true, outcome: 'rejects', read: 'refresh' },
         { phase: 'completed', terminal: true, outcome: 'missing receipt', read: 'notification' },

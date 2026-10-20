@@ -61,17 +61,24 @@ function unresolved(entry: SwitchEntry | undefined): boolean {
         (entry?.receipt && !entry.receipt.terminal)
     )
 }
+function matchesReceipt(nodeId: string, requestId: string, receipt: SwitchReceipt): boolean {
+    const entry = useEngineSwitchStore.getState().entries[nodeId]
+    return (
+        receipt.nodeId === nodeId &&
+        receipt.requestId === requestId &&
+        receipt.request.requestId === requestId &&
+        entry?.request?.requestId === requestId &&
+        receipt.request.sourceEngine === entry.request.sourceEngine &&
+        receipt.request.targetEngine === entry.request.targetEngine &&
+        receipt.expectedRevision === entry.request.expectedRevision &&
+        (!entry.receipt || receipt.sequence >= entry.receipt.sequence)
+    )
+}
 function merge(nodeId: string, requestId: string, receipt: SwitchReceipt): boolean {
     const entry = useEngineSwitchStore.getState().entries[nodeId]
     if (
-        receipt.nodeId !== nodeId ||
-        receipt.requestId !== requestId ||
-        receipt.request.requestId !== requestId ||
-        entry?.request?.requestId !== requestId ||
-        receipt.request.sourceEngine !== entry.request.sourceEngine ||
-        receipt.request.targetEngine !== entry.request.targetEngine ||
-        receipt.expectedRevision !== entry.request.expectedRevision ||
-        (entry.receipt && receipt.sequence <= entry.receipt.sequence)
+        !matchesReceipt(nodeId, requestId, receipt) ||
+        entry?.receipt?.sequence === receipt.sequence
     )
         return false
     put(nodeId, { receipt, unknown: false, refused: undefined, unavailable: undefined })
@@ -123,7 +130,12 @@ function scheduleWait(nodeId: string): void {
                 void useEngineSwitchStore.getState().refresh(nodeId)
             if (!status.receipt)
                 put(nodeId, { unavailable: 'Switch receipt unavailable. Refresh readback.' })
-            if (merged && status.observed) put(nodeId, { observed: status.observed })
+            if (
+                status.receipt &&
+                status.observed &&
+                matchesReceipt(nodeId, requestId, status.receipt)
+            )
+                put(nodeId, { observed: status.observed })
         })
         .catch(error => {
             if (currentWait()) {
@@ -226,10 +238,7 @@ export const useEngineSwitchStore = create<SwitchStore>((_set, get) => ({
                         unknown: false
                     })
                 merge(nodeId, requestId, receipt)
-                if (
-                    result.observed &&
-                    (get().entries[nodeId].receipt?.sequence ?? 0) <= receipt.sequence
-                )
+                if (result.observed && matchesReceipt(nodeId, requestId, receipt))
                     put(nodeId, { observed: result.observed })
                 scheduleWait(nodeId)
             } else if (entry?.request && (entry.unknown || entry.receipt?.recoveryRequired)) {
@@ -297,16 +306,12 @@ export const useEngineSwitchStore = create<SwitchStore>((_set, get) => ({
             })
             try {
                 const result = await window.pairApi.engines.switchEngine(request)
-                if (!current(nodeId, watch, generation)) return
+                // Submission evidence belongs to the retained node/request,
+                // independently of the editor that initiated the send.
                 merge(nodeId, requestId, result.receipt)
             } catch (error) {
                 const latest = get().entries[nodeId]
-                if (
-                    !current(nodeId, watch, generation) ||
-                    latest?.request?.requestId !== requestId ||
-                    latest.receipt
-                )
-                    return
+                if (latest?.request?.requestId !== requestId || latest.receipt) return
                 const code = serviceErrorCode(error)
                 // These codes establish refusal, unlike generic RPC/storage or
                 // transport errors which may follow durable acceptance. Keep
@@ -328,11 +333,12 @@ export const useEngineSwitchStore = create<SwitchStore>((_set, get) => ({
                     refreshPermission(nodeId, code)
                     return
                 }
+                if (!current(nodeId, watch, generation)) return
                 put(nodeId, {
                     unavailable: `Switch outcome unknown: ${getErrorString(error)}. Refresh readback; the request will not be resent.`
                 })
             }
-            scheduleWait(nodeId)
+            if (current(nodeId, watch, generation)) scheduleWait(nodeId)
         } finally {
             pending.endSwitch(nodeId, requestId)
         }
