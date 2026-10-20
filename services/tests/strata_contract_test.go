@@ -660,9 +660,12 @@ func strataContractNew(t *testing.T, installed bool) *strataContractFixture {
 	strataContractDecode(t, data, &manifest)
 	var rt map[string]json.RawMessage
 	strataContractDecode(t, manifest["runtime"], &rt)
+	// The fake executable reads host/port from runtime.json and accepts only
+	// the dispatch marker and config path. It has no editable Python CLI.
 	for key, value := range map[string]any{
 		"bin": executable, "args": []string{strataContractRuntimeArg, filepath.Join(f.Root, "runtime.json")},
-		"env": map[string]string{strataContractRuntimeEnv: executable}, "port": f.Port,
+		"editable_launch": nil,
+		"env":             map[string]string{strataContractRuntimeEnv: executable}, "port": f.Port,
 		"ready": map[string]any{"http": "http://127.0.0.1:{port}/health", "status": 200, "timeout_s": 8, "json_match": map[string]string{"field": "service", "value": "strata"}},
 		"stop":  map[string]any{"signal": "term", "grace_s": 1},
 	} {
