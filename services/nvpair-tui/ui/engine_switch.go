@@ -27,22 +27,151 @@ var detailSwitchKey = key.NewBinding(key.WithKeys("w"), key.WithHelp("w", "switc
 // All mutable switch state belongs to the update loop. Commands capture only
 // immutable scope and a cancellable context, independently of performance.
 type detailSwitch struct {
-	ctx                                         context.Context
-	cancel                                      context.CancelFunc
-	epoch                                       int
-	open                                        bool
-	field                                       int
-	source, target                              string
-	revision, active, requestID                 string
-	fresh, inFlight, submitting, unknown, dirty bool
-	brokerRestart                               bool
-	started                                     bool
-	localRequest                                bool
-	receipt                                     *enginesettings.SwitchReceipt
-	observed                                    *enginesettings.SwitchObserved
-	err                                         error
-	refusal                                     error
-	viewport                                    viewport.Model
+	retainedSwitchRequest
+	ctx                    context.Context
+	cancel                 context.CancelFunc
+	epoch                  int
+	open                   bool
+	field                  int
+	source, target         string
+	revision, active       string
+	fresh, inFlight, dirty bool
+	brokerRestart          bool
+	started                bool
+	err                    error
+	viewport               viewport.Model
+}
+
+type switchRequestState int
+
+const (
+	switchNone switchRequestState = iota
+	switchSubmitting
+	switchRefused
+	switchUncertain
+	// A definite absent receipt still requires a subsequent fresh idle baseline.
+	switchAbsent
+	switchAccepted
+	switchObservedOther
+)
+
+type switchEvent int
+
+const (
+	switchSubmit switchEvent = iota
+	switchSubmitOK
+	switchSubmitRefused
+	switchSubmitLost
+	switchRetire
+	switchBaseline
+	switchReadOK
+	switchReadAbsent
+	switchReadError
+	switchReset
+	switchClose
+)
+
+type switchTransition struct {
+	event    switchEvent
+	id       string
+	receipt  *enginesettings.SwitchReceipt
+	observed *enginesettings.SwitchObserved
+	err      error
+}
+
+type switchEffect int
+
+const (
+	switchNoRead switchEffect = iota
+	switchReadRequest
+	switchReadBaseline
+)
+
+// Correlation and its evidence have one owner. Transport/UI flags never decide
+// whether a retained request was accepted. Refusal is kept as display evidence
+// when following another client's activity, and cleared by a deliberate submit.
+type retainedSwitchRequest struct {
+	state     switchRequestState
+	requestID string
+	receipt   *enginesettings.SwitchReceipt
+	observed  *enginesettings.SwitchObserved
+	refusal   error
+}
+
+func (r *retainedSwitchRequest) unresolved() bool {
+	return r.state == switchSubmitting || r.state == switchUncertain || r.state == switchAbsent ||
+		(r.state == switchAccepted && r.receipt != nil && !r.receipt.Terminal)
+}
+
+func (r *retainedSwitchRequest) outcomeUnknown() bool {
+	return r.state == switchUncertain || r.state == switchAbsent ||
+		(r.state == switchObservedOther && r.receipt == nil)
+}
+
+// transition handles every event affecting retained identity. The caller fences
+// visit/route/transport/epoch and validates receipt identity before dispatch.
+func (r *retainedSwitchRequest) transition(e switchTransition) switchEffect {
+	switch e.event {
+	case switchSubmit:
+		*r = retainedSwitchRequest{state: switchSubmitting, requestID: e.id}
+	case switchSubmitRefused:
+		if r.state == switchSubmitting {
+			r.state, r.refusal = switchRefused, e.err
+			return switchReadBaseline
+		}
+	case switchSubmitLost:
+		if r.state == switchSubmitting {
+			r.state = switchUncertain
+			return switchReadRequest
+		}
+	case switchRetire:
+		if r.state == switchSubmitting || (r.state == switchAccepted && r.receipt != nil && !r.receipt.Terminal) || r.state == switchAbsent {
+			r.state = switchUncertain
+		}
+	case switchReset, switchClose:
+		*r = retainedSwitchRequest{}
+	case switchBaseline:
+		if r.state == switchAbsent && e.id == "" {
+			r.state = switchRefused
+			r.refusal = errors.New("switch not accepted: receipt absent and fresh baseline reports no active request")
+		}
+		if r.state == switchNone || (e.id != "" && e.id != r.requestID && !r.unresolved()) {
+			r.state, r.requestID = switchNone, e.id
+			r.receipt, r.observed = nil, nil
+			if e.id != "" {
+				r.state = switchObservedOther
+			}
+		}
+		if r.requestID != "" && (r.state != switchRefused || e.id == r.requestID) {
+			return switchReadRequest
+		}
+	case switchReadAbsent:
+		// Never erase an accepted receipt or infer anything about a foreign
+		// caller's receipt. Broker receipts are durable across restart.
+		if r.state == switchUncertain && r.receipt == nil {
+			r.state = switchAbsent
+			return switchReadBaseline
+		}
+	case switchReadError:
+		// Read failure changes availability, not acceptance evidence.
+	case switchSubmitOK, switchReadOK:
+		if r.requestID == "" {
+			return switchNoRead
+		}
+		if e.event == switchSubmitOK && r.state != switchSubmitting {
+			return switchNoRead
+		}
+		if r.receipt == nil || e.receipt.Sequence > r.receipt.Sequence {
+			r.receipt = e.receipt
+		}
+		if e.event == switchReadOK {
+			r.observed = e.observed
+		}
+		if r.state != switchObservedOther {
+			r.state = switchAccepted
+		}
+	}
+	return switchNoRead
 }
 
 type detailSwitchMsg struct {
@@ -61,11 +190,9 @@ func (d *nodeDetail) retireSwitch() {
 	}
 	s.ctx, s.cancel = nil, nil
 	s.epoch++
-	s.fresh, s.inFlight, s.submitting, s.dirty = false, false, false, false
+	s.fresh, s.inFlight, s.dirty = false, false, false
 	s.err = nil
-	if s.requestID != "" {
-		s.unknown = true
-	}
+	s.transition(switchTransition{event: switchRetire})
 }
 
 func (d *nodeDetail) switchConnected() bool {
@@ -109,7 +236,7 @@ func (d *nodeDetail) switchStatusCmd(baseline bool) tea.Cmd {
 	p := enginesettings.SwitchStatusRequest{NodeID: d.nodeArg()}
 	if !baseline {
 		p.RequestID = s.requestID
-		if s.receipt != nil && !s.receipt.Terminal && !s.unknown {
+		if s.receipt != nil && !s.receipt.Terminal && !s.outcomeUnknown() {
 			sequence := s.receipt.Sequence
 			p.AfterSequence = &sequence
 		}
@@ -128,9 +255,9 @@ func (d *nodeDetail) switchReason() string {
 		return "remote management denied on target"
 	case !s.fresh || s.revision == "":
 		return "revision unavailable; readback required"
-	case s.inFlight || s.submitting:
+	case s.inFlight || s.state == switchSubmitting:
 		return "switch readback or submission pending"
-	case s.unknown:
+	case s.outcomeUnknown():
 		return "outcome unknown; readback required"
 	case s.receipt != nil && s.receipt.RecoveryRequired:
 		return "recovery required; readback does not perform recovery"
@@ -151,11 +278,8 @@ func (d *nodeDetail) submitSwitch() tea.Cmd {
 	if reason := d.switchReason(); reason != "" {
 		return nil
 	}
-	s.requestID = rand.Text()
-	s.localRequest = true
-	s.receipt, s.observed, s.err = nil, nil, nil
-	s.refusal = nil
-	s.submitting, s.unknown = true, true
+	s.transition(switchTransition{event: switchSubmit, id: rand.Text()})
+	s.err = nil
 	s.fresh = false
 	p := enginesettings.SwitchRequest{NodeID: d.nodeArg(), RequestID: s.requestID,
 		SourceEngine: s.source, TargetEngine: s.target, ExpectedRevision: s.revision}
@@ -166,22 +290,21 @@ func (d *nodeDetail) applySwitch(msg detailSwitchMsg) tea.Cmd {
 	s := &d.engineSwitch
 	if msg.visit != d.telemetryGen || msg.route != d.telemetryRoute || msg.epoch != s.epoch ||
 		!d.switchConnected() || (d.client != nil && !d.client.IsCurrent(msg.transport)) ||
-		(msg.requestID != "" && msg.requestID != s.requestID) {
+		(msg.requestID != "" && msg.requestID != s.requestID) ||
+		(msg.submit && s.state != switchSubmitting) {
 		return nil
 	}
-	s.inFlight, s.submitting = false, false
+	s.inFlight = false
 	s.err = msg.err
 	if msg.err != nil {
 		if msg.requestID == "" {
 			s.fresh = false
-		} else {
-			s.unknown = true
 		}
 		var refusal *rpc.RPCError
 		if msg.submit && errors.As(msg.err, &refusal) &&
 			(refusal.Code == -32010 || refusal.Code == -32011 || refusal.Code == -32012 || refusal.Code == -32602) {
-			s.refusal = msg.err
-			s.unknown, s.fresh = false, false
+			s.transition(switchTransition{event: switchSubmitRefused, err: msg.err})
+			s.fresh = false
 			if refusal.Code == -32012 {
 				d.remotePermissionFresh = false
 				return tea.Batch(d.remotePermissionCmd(), d.switchStatusCmd(true))
@@ -191,7 +314,22 @@ func (d *nodeDetail) applySwitch(msg detailSwitchMsg) tea.Cmd {
 		// A transport failure cannot establish whether the broker accepted the
 		// request. Read it once under its original identity; never resend it.
 		if msg.submit {
+			s.transition(switchTransition{event: switchSubmitLost})
 			return d.switchStatusCmd(false)
+		}
+		if msg.requestID != "" {
+			event := switchReadError
+			// The broker's stdio and peer relays send code/message, without
+			// SwitchError.Kind. Only this exact public refusal proves absence
+			// for our own unacknowledged ID; generic -32000 stays uncertain.
+			if errors.As(msg.err, &refusal) && refusal.Code == enginesettings.SwitchOperationErrorCode &&
+				refusal.Message == "Unknown switch receipt for this caller." {
+				event = switchReadAbsent
+			}
+			if s.transition(switchTransition{event: event}) == switchReadBaseline {
+				s.fresh = false
+				return d.switchStatusCmd(true)
+			}
 		}
 		return nil
 	}
@@ -202,17 +340,10 @@ func (d *nodeDetail) applySwitch(msg detailSwitchMsg) tea.Cmd {
 		}
 		s.revision, s.active = msg.status.ConfigurationRevision, msg.status.ActiveRequestID
 		s.fresh = s.revision != ""
-		// Only an unresolved local submission needs its original identity for
-		// recovery. Definite refusals and terminal receipts resolve that duty;
-		// observed activity can always follow the currently advertised request.
-		unresolvedLocal := s.localRequest && s.refusal == nil && (s.receipt == nil || !s.receipt.Terminal)
-		if s.requestID == "" || (s.active != "" && s.active != s.requestID && !unresolvedLocal) {
-			s.requestID = s.active
-			s.localRequest = false
-			s.receipt, s.observed = nil, nil
-			s.unknown = s.requestID != ""
+		if !s.fresh {
+			return nil
 		}
-		if s.requestID != "" && (s.unknown || s.receipt != nil || s.active == s.requestID) {
+		if s.transition(switchTransition{event: switchBaseline, id: s.active}) == switchReadRequest {
 			return d.switchStatusCmd(false)
 		}
 		return nil
@@ -220,19 +351,17 @@ func (d *nodeDetail) applySwitch(msg detailSwitchMsg) tea.Cmd {
 	r := msg.status.Receipt
 	if r == nil || r.RequestID != s.requestID || !d.switchNodeMatches(r.NodeID) ||
 		r.Request.RequestID != r.RequestID || r.Request.NodeID != r.NodeID {
-		s.unknown = true
 		s.err = errors.New("receipt unavailable or identity mismatch; outcome unknown")
+		if msg.submit {
+			s.transition(switchTransition{event: switchSubmitLost})
+		}
 		return nil
 	}
-	if s.receipt == nil || r.Sequence > s.receipt.Sequence {
-		s.receipt = r
+	event := switchReadOK
+	if msg.submit {
+		event = switchSubmitOK
 	}
-	// Runtime observations describe this read, independently of the immutable
-	// receipt sequence, including after the transaction has finished.
-	if !msg.submit {
-		s.observed = msg.status.Observed
-	}
-	s.unknown = false
+	s.transition(switchTransition{event: event, receipt: r, observed: msg.status.Observed})
 	var permission tea.Cmd
 	if s.receipt.Error != nil && s.receipt.Error.Code == -32012 && d.remotePermissionFresh {
 		d.remotePermissionFresh = false
@@ -349,7 +478,7 @@ func (d *nodeDetail) switchView() string {
 	if s.requestID != "" {
 		lines = append(lines, "Request: "+s.requestID)
 	}
-	if s.unknown {
+	if s.outcomeUnknown() {
 		lines = append(lines, "Outcome unknown; readback required")
 	}
 	if s.err != nil {

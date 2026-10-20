@@ -482,6 +482,7 @@ func (d *nodeDetail) own(cmd tea.Cmd) tea.Cmd {
 // close retires the detail's independent command and subscription lifetimes.
 func (d *nodeDetail) close() {
 	d.retireSwitch()
+	d.engineSwitch.transition(switchTransition{event: switchClose})
 	d.closePerformance()
 }
 
