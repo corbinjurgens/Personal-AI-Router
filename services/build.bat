@@ -101,57 +101,57 @@ echo.
 
 echo [1/14] Building nvpair-proxy (v%V_PROXY%)...
 cd /d "%ROOT%nvpair-proxy"
-go build -ldflags "-X main.Version=%V_PROXY%" -o nvpair-proxy.exe . || goto :fail
+go build -buildvcs=true -ldflags "-X main.Version=%V_PROXY%" -o nvpair-proxy.exe . || goto :fail
 echo       OK
 
 echo [2/14] Building nvpair-node-info (v%V_NINFO%)...
 cd /d "%ROOT%nvpair-node-info"
-go build -ldflags "-X main.Version=%V_NINFO%" -o nvpair-node-info.exe . || goto :fail
+go build -buildvcs=true -ldflags "-X main.Version=%V_NINFO%" -o nvpair-node-info.exe . || goto :fail
 echo       OK
 
 echo [3/14] Building nvpair-node-scanner (v%V_NSCAN%)...
 cd /d "%ROOT%nvpair-node-scanner"
-go build -ldflags "-X main.Version=%V_NSCAN%" -o nvpair-node-scanner.exe . || goto :fail
+go build -buildvcs=true -ldflags "-X main.Version=%V_NSCAN%" -o nvpair-node-scanner.exe . || goto :fail
 echo       OK
 
 echo [4/14] Building nvpair-manual-nodes (v%V_MNODES%)...
 cd /d "%ROOT%nvpair-manual-nodes"
-go build -ldflags "-X main.Version=%V_MNODES%" -o nvpair-manual-nodes.exe . || goto :fail
+go build -buildvcs=true -ldflags "-X main.Version=%V_MNODES%" -o nvpair-manual-nodes.exe . || goto :fail
 echo       OK
 
 echo [5/14] Building nvpair-workload-manager (v%V_WLMGR%)...
 cd /d "%ROOT%nvpair-workload-manager"
-go build -ldflags "-X main.Version=%V_WLMGR%" -o nvpair-workload-manager.exe . || goto :fail
+go build -buildvcs=true -ldflags "-X main.Version=%V_WLMGR%" -o nvpair-workload-manager.exe . || goto :fail
 echo       OK
 
 echo [6/14] Building nvpair-errors (v%V_ERRORS%)...
 cd /d "%ROOT%nvpair-errors"
-go build -ldflags "-X main.Version=%V_ERRORS%" -o nvpair-errors.exe . || goto :fail
+go build -buildvcs=true -ldflags "-X main.Version=%V_ERRORS%" -o nvpair-errors.exe . || goto :fail
 echo       OK
 
 echo [7/14] Building nvpair-engine-manager (v%V_ENGMGR%)...
 cd /d "%ROOT%nvpair-engine-manager"
-go build -ldflags "-X main.Version=%V_ENGMGR%" -o nvpair-engine-manager.exe . || goto :fail
+go build -buildvcs=true -ldflags "-X main.Version=%V_ENGMGR%" -o nvpair-engine-manager.exe . || goto :fail
 echo       OK
 
 echo [8/14] Building nvpair-node-settings (v%V_NSETTINGS%)...
 cd /d "%ROOT%nvpair-node-settings"
-go build -ldflags "-X main.Version=%V_NSETTINGS%" -o nvpair-node-settings.exe . || goto :fail
+go build -buildvcs=true -ldflags "-X main.Version=%V_NSETTINGS%" -o nvpair-node-settings.exe . || goto :fail
 echo       OK
 
 echo [9/14] Building nvpair-ui-broker (v%V_BROKER%)...
 cd /d "%ROOT%nvpair-ui-broker"
-go build -ldflags "-X main.Version=%V_BROKER%" -o nvpair-ui-broker.exe . || goto :fail
+go build -buildvcs=true -ldflags "-X main.Version=%V_BROKER%" -o nvpair-ui-broker.exe . || goto :fail
 echo       OK
 
 echo [10/14] Building nvpair-cluster-manager (v%V_CLUMGR%)...
 cd /d "%ROOT%nvpair-cluster-manager"
-go build -ldflags "-X main.Version=%V_CLUMGR%" -o nvpair-cluster-manager.exe . || goto :fail
+go build -buildvcs=true -ldflags "-X main.Version=%V_CLUMGR%" -o nvpair-cluster-manager.exe . || goto :fail
 echo       OK
 
 echo [11/14] Building nvpair-job-scheduler (v%V_SCHED%)...
 cd /d "%ROOT%nvpair-job-scheduler"
-go build -ldflags "-X main.Version=%V_SCHED%" -o nvpair-job-scheduler.exe . || goto :fail
+go build -buildvcs=true -ldflags "-X main.Version=%V_SCHED%" -o nvpair-job-scheduler.exe . || goto :fail
 echo       OK
 
 REM nvpair-tui also carries the release version: that is what the update notice
@@ -160,14 +160,14 @@ REM nothing to that comparison. A -X on a symbol path that does not exist fails
 REM silently, so verify the stamp rather than assuming it.
 echo [12/14] Building nvpair-tui (v%V_TUI%)...
 cd /d "%ROOT%nvpair-tui"
-go build -ldflags "-X main.Version=%V_TUI% -X nvpair-tui/ui.ReleaseVersion=%V_RELEASE%" -o nvpair-tui.exe . || goto :fail
+go build -buildvcs=true -ldflags "-X main.Version=%V_TUI% -X nvpair-tui/ui.ReleaseVersion=%V_RELEASE%" -o nvpair-tui.exe . || goto :fail
 echo       OK
 
 REM nvpair-service owns the broker for every client; nvpair-tui starts it from
 REM beside its own executable, so it is staged with the rest.
 echo [13/14] Building nvpair-service (v%V_SERVICE%)...
 cd /d "%ROOT%nvpair-service"
-go build -ldflags "-X main.Version=%V_SERVICE%" -o nvpair-service.exe . || goto :fail
+go build -buildvcs=true -ldflags "-X main.Version=%V_SERVICE%" -o nvpair-service.exe . || goto :fail
 echo       OK
 
 REM inference-dispatcher is built here but is not a worker: it speaks no
@@ -184,7 +184,7 @@ if not exist "%ROOT%..\scripts\inference-dispatcher" (
     goto :fail
 )
 cd /d "%ROOT%..\scripts\inference-dispatcher"
-go build -ldflags "-X main.Version=%V_SERVICES%" -o inference-dispatcher.exe . || goto :fail
+go build -buildvcs=true -ldflags "-X main.Version=%V_SERVICES%" -o inference-dispatcher.exe . || goto :fail
 echo       OK
 
 echo.

@@ -20,6 +20,7 @@ import (
 	"sync"
 	"time"
 
+	"nvpair-shared/buildinfo"
 	"nvpair-shared/ipc"
 	"nvpair-shared/jsonrpc"
 	"nvpair-shared/servicectl"
@@ -59,8 +60,9 @@ var errAlreadyRunning = errors.New("already running")
 
 // config is everything a Service needs. Tests replace spawn and backoff.
 type config struct {
-	endpoint string
-	version  string
+	endpoint       string
+	version        string
+	serviceBuildID buildinfo.ID
 	// logPath is the broker log file; empty disables the file.
 	logPath    string
 	logMaxSize int64
@@ -352,12 +354,13 @@ func (s *Service) handleClientRequest(c *client, msg *jsonrpc.Message) bool {
 
 // statusResult is the service/status reply.
 type statusResult struct {
-	PID            int    `json:"pid"`
-	BrokerPID      int    `json:"brokerPid"`
-	Clients        int    `json:"clients"`
-	StartedAt      string `json:"startedAt"`
-	Version        string `json:"version"`
-	BrokerRestarts int    `json:"brokerRestarts"`
+	PID            int          `json:"pid"`
+	BrokerPID      int          `json:"brokerPid"`
+	Clients        int          `json:"clients"`
+	StartedAt      string       `json:"startedAt"`
+	Version        string       `json:"version"`
+	ServiceBuildID buildinfo.ID `json:"serviceBuildId,omitempty"`
+	BrokerRestarts int          `json:"brokerRestarts"`
 }
 
 func (s *Service) status() statusResult {
@@ -368,6 +371,7 @@ func (s *Service) status() statusResult {
 		Clients:        len(s.clients),
 		StartedAt:      s.startedAt.UTC().Format(time.RFC3339),
 		Version:        s.cfg.version,
+		ServiceBuildID: s.cfg.serviceBuildID,
 		BrokerRestarts: s.restarts,
 	}
 	if s.broker != nil {

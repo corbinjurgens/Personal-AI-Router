@@ -1,0 +1,46 @@
+{/*
+SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+*/}
+
+# Service build identity
+
+PAIR reports source build identities for diagnosis independently of semantic
+component versions. Bundled versions describe the installed components; they
+do not establish which executable is currently running.
+
+**Running service build** in desktop About comes from the attached
+`nvpair-service` process's own embedded Go VCS metadata through `service/status`.
+Replacing a binary on disk does not change the identity of an existing process.
+
+**Reported service build** in desktop and TUI node details comes from the
+existing node snapshot. The peer-visible value is the serving `nvpair-node-info`
+executable's own build, normally identical to the service's build. A mismatch
+indicates mixed binaries. TUI header and Service-tab versions read from
+`app:ready` and `ping` are labelled **broker**; they describe the broker.
+
+The optional wire field is `serviceBuildId`: `git:` followed by a full lowercase
+hexadecimal Git revision (40 or 64 characters), optionally followed by `+dirty`.
+The entire value is at most 74 ASCII characters. Missing VCS metadata or unknown
+modification state produces no ID. Missing or invalid values display as `--`,
+without a semantic-version `v` prefix.
+
+`+dirty` identifies a modified source checkout, not an artifact hash or proof
+that two dirty binaries are equivalent. Even a clean revision identifies source,
+not compiler, dependency, or artifact equivalence. A reused build-cache binary
+retains the identity embedded when it was compiled.
+
+Build metadata travels with existing enrichment, refresh and directory fences.
+A successful response with missing or invalid metadata clears only the build
+field; identity, hardware, models and policy remain intact. Failed reads retain
+the last report where the existing source lifecycle retains it. Discovery owns
+the TUI baseline for discovered nodes, including an absent build; manual-only
+nodes use the manual worker's report. Cached and offline values remain labelled
+**Reported service build**; the TUI marks retained offline values as cached.
+Briefly stale diagnostics from the same endpoint are accepted. This field adds
+no cache, ordering token, request loop or polling owner.
+
+Public `/v1/node-info` metadata is a reported diagnostic claim, not authenticated
+build attestation or authorization. It does not affect trust, routing,
+availability, ranking or compatibility. Only the bounded ID is exposed, never
+full `BuildInfo`, filesystem paths, environment values or secrets.

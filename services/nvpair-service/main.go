@@ -31,6 +31,7 @@ import (
 
 	"nvpair-shared/appdir"
 	"nvpair-shared/applog"
+	"nvpair-shared/buildinfo"
 	"nvpair-shared/servicectl"
 )
 
@@ -200,6 +201,7 @@ func serve(opts *runOptions, stdout io.Writer) int {
 	svc := newService(config{
 		endpoint:               endpoint,
 		version:                Version,
+		serviceBuildID:         buildinfo.Current(),
 		logPath:                filepath.Join(logDir, "broker.log"),
 		logMaxSize:             defaultLogMaxSize,
 		spawn:                  execSpawner(brokerPath, opts.brokerArgs),

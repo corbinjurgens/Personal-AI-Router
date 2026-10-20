@@ -18,6 +18,7 @@ import (
 
 	"nvpair-shared/appdir"
 	"nvpair-shared/applog"
+	"nvpair-shared/buildinfo"
 	"nvpair-shared/clustertrust"
 	"nvpair-shared/engines"
 	"nvpair-shared/errors"
@@ -117,6 +118,8 @@ type AvailableNode struct {
 	// revision, pause origin) from the same /v1/models fetch. Omitted when the
 	// node publishes none, which means it declares nothing.
 	Policy *nodepolicy.Advertisement `json:"policy,omitempty"`
+
+	ServiceBuildID buildinfo.ID `json:"serviceBuildId,omitempty"`
 }
 
 // GetNodesResult is the response to "discovery:get-nodes". Wrapped in an

@@ -118,7 +118,7 @@ echo
 build_subbinary() {
     local idx="$1" name="$2" version="$3"
     echo "[$idx/14] Building $name (v$version)..."
-    (cd "$ROOT/$name" && go build -ldflags "-X main.Version=$version" -o "$name" .)
+    (cd "$ROOT/$name" && go build -buildvcs=true -ldflags "-X main.Version=$version" -o "$name" .)
     echo "      OK"
 }
 build_subbinary 1 nvpair-proxy       "$V_PROXY"
@@ -137,7 +137,7 @@ build_subbinary 11 nvpair-job-scheduler   "$V_SCHED"
 # nothing to that comparison. A -X on a symbol path that does not exist fails
 # silently, so verify the stamp rather than assuming it.
 echo "[12/14] Building nvpair-tui (v$V_TUI)..."
-(cd "$ROOT/nvpair-tui" && go build \
+(cd "$ROOT/nvpair-tui" && go build -buildvcs=true \
     -ldflags "-X main.Version=$V_TUI -X nvpair-tui/ui.ReleaseVersion=$V_RELEASE" \
     -o nvpair-tui .)
 echo "      OK"
@@ -165,7 +165,7 @@ if [ ! -d "$DISPATCHER_SRC" ]; then
     echo "       in the monorepo root; this bundle cannot be built without it." >&2
     exit 1
 fi
-(cd "$DISPATCHER_SRC" && go build -ldflags "-X main.Version=$V_SERVICES" -o inference-dispatcher .)
+(cd "$DISPATCHER_SRC" && go build -buildvcs=true -ldflags "-X main.Version=$V_SERVICES" -o inference-dispatcher .)
 echo "      OK"
 
 BIN_OUT="$ROOT/build/bin"
