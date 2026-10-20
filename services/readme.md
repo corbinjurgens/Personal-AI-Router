@@ -259,6 +259,37 @@ go test ./...
 Expect this to take a few minutes. Run it before opening a pull request, and
 after any change to a JSON-RPC method, payload, or notification.
 
+#### Remote configuration acceptance (XA)
+
+`tests/remote_configuration_test.go` is the acceptance suite for remote
+configuration between paired nodes: status reads, revision conflicts,
+local veto, roles, served and resident model declarations, served-set
+enforcement at a proxy facade, idempotent engine switches, and the same
+calls through `nvpair-service`. It drives real binaries through public
+JSON-RPC methods with fake engines only and never starts an installed engine.
+It skips on macOS and, on Windows, requires the fixed-path wrapper above.
+Run one area at a time on a Windows gate machine:
+
+```bash
+cd tests
+go test -v -count=1 -run 'TestXARemoteConfigurationStatus$' .
+go test -v -count=1 -run 'TestXARemoteConfigurationConflict$' .
+go test -v -count=1 -run 'TestXARemoteConfigurationVeto$' .
+go test -v -count=1 -run 'TestXARemoteConfigurationRoles$' .
+go test -v -count=1 -run 'TestXARemoteConfigurationServing$' .
+go test -v -count=1 -run 'TestXARemoteConfigurationSwitch$' .
+go test -v -count=1 -run 'TestXARemoteConfigurationService$' .
+```
+
+`go test -v -count=1 -run '^TestXARemoteConfiguration(Status|Conflict|Veto|Roles|Serving|Switch|Service)$' .` runs all XA cases. On macOS,
+`go vet ./...` and `go test -list 'TestXARemoteConfiguration' .` are the
+only checks; the cases themselves do not run there. Network isolation and
+protected-port repairs are coordinator-owned prerequisites; existing
+fixtures alone do not establish hermetic execution. Automatic resident
+execution belongs to SR Task 6b after NE Task 4 and SR 5a–5c; XA consumes
+that evidence. Live MSI/PC3 OpenCode evidence remains a separate manual
+checklist; passing fake XA cases does not close the daily milestone.
+
 ### Tests that skip themselves
 
 Some tests need something the machine may not have, and skip rather than fail:
