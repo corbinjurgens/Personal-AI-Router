@@ -17,6 +17,7 @@ import (
 	"testing"
 
 	"nvpair-shared/engines"
+	"nvpair-shared/performancewire"
 )
 
 func strataManifest(t *testing.T) *Manifest {
@@ -160,10 +161,28 @@ func TestStrataModelsAndResidency(t *testing.T) {
 		}
 	})
 	got := ex.ModelsResult(context.Background())
+	managerIncarnation := ex.switchIncarnation
 	want := ModelsResult{
 		Models:         []string{"resident", "cold", "unknown", "loading"},
 		ByEngine:       map[string][]string{"strata": {"resident", "cold", "unknown", "loading"}},
 		LoadedByEngine: map[string][]string{"strata": {"resident"}},
+		MemoryEvidence: &performancewire.MemoryEvidence{
+			Version: 1, OmittedEntries: 0,
+			Entries: []performancewire.MemoryEvidenceEntry{{
+				Engine: "strata", Model: "resident", State: performancewire.MemoryStateUnknown,
+				Uncertainty: []performancewire.MemoryUncertainty{
+					performancewire.MemoryUncertaintyUnsupported,
+					performancewire.MemoryUncertaintyQualificationMissing,
+				},
+				Source:          performancewire.MemorySource{ManagerIncarnation: &managerIncarnation},
+				AppliedSettings: performancewire.MemoryAppliedSettings{},
+				Envelope:        performancewire.MemoryEnvelope{},
+				Observed:        performancewire.MemoryObservation{},
+				Qualification:   performancewire.MemoryQualification{},
+				Provenance:      performancewire.MemoryProvenance{},
+				Freshness:       performancewire.MemoryFreshness{ReadingValidForMs: 15000},
+			}},
+		},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("models = %+v, want %+v", got, want)
