@@ -751,6 +751,11 @@ func requireProxyIntent(t *testing.T, proxy *fakeWorker, want string) {
 
 func TestEnginePolicyIntentRejectsMalformedSnapshot(t *testing.T) {
 	cases := []struct{ name, raw string }{
+		{"case variants without canonical maps", `{"EnabledByEngine":{"ollama":false},"OffByEngine":{"ollama":"local"}}`},
+		{"case variant without canonical enabled map", `{"EnabledByEngine":{"ollama":false},"offByEngine":{"ollama":"local"}}`},
+		{"case variant without canonical origins", `{"enabledByEngine":{"ollama":false},"OffByEngine":{"ollama":"local"}}`},
+		{"case variant cannot hide origin for On", `{"enabledByEngine":{"ollama":true},"EnabledByEngine":{"ollama":false},"offByEngine":{"ollama":"local"}}`},
+		{"last enabled object leaves unreported origin", `{"enabledByEngine":{"ollama":false},"enabledByEngine":{},"offByEngine":{"ollama":"local"}}`},
 		{"missing origins", `{"enabledByEngine":{"ollama":false}}`},
 		{"null origins", `{"enabledByEngine":{"ollama":false},"offByEngine":null}`},
 		{"missing booleans", `{"offByEngine":{}}`},

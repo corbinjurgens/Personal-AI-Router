@@ -5,6 +5,7 @@ package engineintent
 
 import (
 	"encoding/json"
+	"reflect"
 	"testing"
 )
 
@@ -83,5 +84,32 @@ func TestSnapshotJSONPreservesIntent(t *testing.T) {
 	}
 	if len(snapshot.OffByEngine) != 1 || snapshot.OffByEngine["off"] != "peer" {
 		t.Fatalf("offByEngine = %v, want off=peer", snapshot.OffByEngine)
+	}
+}
+
+func TestSnapshotJSONCanonicalKeys(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		raw  string
+		want Snapshot
+	}{
+		{"case variants do not supply required maps", `{"EnabledByEngine":{"ollama":false},"OffByEngine":{"ollama":"local"}}`, Snapshot{}},
+		{"enabled case variant cannot override canonical On", `{"enabledByEngine":{"ollama":true},"EnabledByEngine":{"ollama":false},"offByEngine":{}}`, Snapshot{EnabledByEngine: map[string]bool{"ollama": true}, OffByEngine: map[string]Origin{}}},
+		{"origin case variant cannot override canonical origin", `{"enabledByEngine":{"ollama":false},"offByEngine":{"ollama":"local"},"OffByEngine":{"ollama":"peer"}}`, Snapshot{EnabledByEngine: map[string]bool{"ollama": false}, OffByEngine: map[string]Origin{"ollama": Local}}},
+		{"last enabled object replaces earlier object", `{"enabledByEngine":{"ollama":false},"enabledByEngine":{},"offByEngine":{}}`, Snapshot{EnabledByEngine: map[string]bool{}, OffByEngine: map[string]Origin{}}},
+		{"last origin object replaces earlier object", `{"enabledByEngine":{"ollama":false},"offByEngine":{"ollama":"local"},"offByEngine":{}}`, Snapshot{EnabledByEngine: map[string]bool{"ollama": false}, OffByEngine: map[string]Origin{}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var snapshot Snapshot
+			if err := json.Unmarshal([]byte(tc.raw), &snapshot); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(snapshot, tc.want) {
+				t.Fatalf("snapshot = %+v, want %+v", snapshot, tc.want)
+			}
+			if err := snapshot.Validate(); (err == nil) != (tc.want.EnabledByEngine != nil) {
+				t.Fatalf("Validate() = %v, snapshot = %+v", err, snapshot)
+			}
+		})
 	}
 }

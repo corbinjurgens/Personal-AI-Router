@@ -28,24 +28,31 @@ type Snapshot struct {
 	OffByEngine     map[string]Origin `json:"offByEngine"`
 }
 
-// UnmarshalJSON rejects null enabled values instead of treating them as false.
+// UnmarshalJSON reads exact canonical keys and rejects null enabled values.
 func (s *Snapshot) UnmarshalJSON(data []byte) error {
-	type snapshot Snapshot
-	var decoded Snapshot
-	wire := struct {
-		*snapshot
-		EnabledByEngine map[string]*bool `json:"enabledByEngine"`
-	}{snapshot: (*snapshot)(&decoded)}
-	if err := json.Unmarshal(data, &wire); err != nil {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
 		return err
 	}
-	if wire.EnabledByEngine != nil {
-		decoded.EnabledByEngine = make(map[string]bool, len(wire.EnabledByEngine))
-		for engine, enabled := range wire.EnabledByEngine {
+	var decoded Snapshot
+	var enabledByEngine map[string]*bool
+	if raw, present := fields["enabledByEngine"]; present {
+		if err := json.Unmarshal(raw, &enabledByEngine); err != nil {
+			return err
+		}
+	}
+	if enabledByEngine != nil {
+		decoded.EnabledByEngine = make(map[string]bool, len(enabledByEngine))
+		for engine, enabled := range enabledByEngine {
 			if enabled == nil {
 				return fmt.Errorf("intent enabled value for %s must be a boolean", engine)
 			}
 			decoded.EnabledByEngine[engine] = *enabled
+		}
+	}
+	if raw, present := fields["offByEngine"]; present {
+		if err := json.Unmarshal(raw, &decoded.OffByEngine); err != nil {
+			return err
 		}
 	}
 	*s = decoded
