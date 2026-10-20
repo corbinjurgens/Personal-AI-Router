@@ -98,6 +98,12 @@ func (pi *PairingInfo) toMap() (map[string]any, error) {
 // nodeUuid (§7.2: a PairingInfo whose cert CN/URI != nodeUuid is rejected).
 func parsePairingInfo(raw []byte) (*PairingInfo, *x509.Certificate, error) {
 	var pi PairingInfo
+	if _, err := decodeRemoteManagementParams(raw, map[string]bool{
+		"v": true, "nodeUuid": true, "nodeId": true, "name": true, "clusterId": true,
+		"admissionEpoch": true, "clusterFriendlyName": true, "addr": true, "cert": true, "completion": true,
+	}); err != nil {
+		return nil, nil, fmt.Errorf("invalid PairingInfo fields: %w", err)
+	}
 	if err := json.Unmarshal(raw, &pi); err != nil {
 		return nil, nil, fmt.Errorf("decode PairingInfo: %w", err)
 	}
@@ -199,6 +205,9 @@ type pairingSession struct {
 	// (inviter), for pinning and cluster adoption.
 	peerPairing *PairingInfo
 	peerCert    *x509.Certificate
+	// allowRemoteManagement is this device owner's choice for whether its paired
+	// peer may manage this device. It is local transaction state, not peer data.
+	allowRemoteManagement *bool
 	// localAdmissionEpoch is this node's reserved admission incarnation carried
 	// in its authenticated PairingInfo. It is activated only if the joiner
 	// successfully commits the inviter's cluster.

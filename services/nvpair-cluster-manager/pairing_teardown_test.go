@@ -46,7 +46,14 @@ func pairingInfoFor(t *testing.T, f pinFixture) (*PairingInfo, *x509.Certificate
 // Completion lands.
 func putInviterSession(t *testing.T, m *Manager, inviteID, clusterID string) *pairingSession {
 	t.Helper()
-	sess := &pairingSession{inviteID: inviteID, role: roleInviter, clusterID: clusterID}
+	allow := false
+	_, epoch := m.currentAdmission()
+	sess := &pairingSession{inviteID: inviteID, role: roleInviter, clusterID: clusterID,
+		localAdmissionEpoch: epoch, allowRemoteManagement: &allow}
+	if _, ok := m.getInvite(inviteID); !ok {
+		m.putInvite(&Invite{InviteID: inviteID, FromNodeUUID: m.identity.NodeUUID,
+			ClusterID: clusterID, State: inviteStatePending, CreatedAt: time.Now().UnixMilli()})
+	}
 	m.putSession(sess)
 	return sess
 }

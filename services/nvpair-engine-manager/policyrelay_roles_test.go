@@ -30,6 +30,7 @@ const rolesPolicyDocument = `{"version":2,"revision":"9007199254740993123","avai
 // broker answered.
 func TestRemotePolicyRelaysRolesUnchanged(t *testing.T) {
 	selfDir, peerDir := pairedPolicyDirs(t)
+	grantRemoteManagement(t, peerDir, "1", map[string]bool{"uuid-self": true})
 
 	var mu sync.Mutex
 	var relayed []policyBody

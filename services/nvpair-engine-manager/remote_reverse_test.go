@@ -312,6 +312,7 @@ func TestRemoteReverseSafeStopAndSettingsPolicyOwners(t *testing.T) {
 		return json.RawMessage(`{"availability":"paused"}`), nil
 	}
 	f := newRemoteReverseFixture(t, func(mesh *clustertrust.Mesh) http.Handler { return (&controlServer{exec: exec, mesh: mesh}).mux() })
+	grantRemoteManagement(t, f.peerDir, "1", map[string]bool{"uuid-self": true})
 	ctx := remoteFixtureContext(t)
 	client := f.client(t, ctx)
 	raw, err := client.postJSON(ctx, controlStopPath, "fake", stopRequest{Engine: "fake"})

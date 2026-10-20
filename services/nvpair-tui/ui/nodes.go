@@ -34,6 +34,7 @@ const (
 	nodesInputInviteAddress
 	nodesInputPin
 	nodesInputFilter
+	nodesInputInviteChoice
 )
 
 // nodesView is the Nodes tab: every machine PAIR knows about — discovered on
@@ -103,9 +104,20 @@ type nodesView struct {
 	outboundInviteID string
 	// inviteSending is an invite awaiting its reply, and outboundName and
 	// outboundPIN describe the one outstanding — see refuseSecondInvite.
-	inviteSending bool
-	outboundName  string
-	outboundPIN   string
+	inviteSending           bool
+	outboundName            string
+	outboundPIN             string
+	outboundAllow           bool
+	inboundAllow            bool
+	inviteGeneration        int
+	inviteChoiceKey         string
+	remoteManagement        remoteManagementSnapshot
+	remoteManagementFresh   bool
+	remoteManagementEpoch   int
+	remoteManagementSetting bool
+	remoteManagementWriteID int
+	grantsOpen              bool
+	grantCursor             int
 	// confirmLeave and confirmRemove gate the two trust teardowns behind a
 	// second keystroke. Both keys are lowercase and sit beside the navigation
 	// keys, so a single press is too easy to hit by accident — and removing a
@@ -223,7 +235,8 @@ type nodeActionMsg struct {
 // nodeInviteMsg carries the outcome of a cluster:invite-node: the PIN to read
 // to the joining node, an explicit rejection, or the failure to surface.
 type nodeInviteMsg struct {
-	name string
+	generation int
+	name       string
 	// inviteID identifies the session, so a later terminal notification can be
 	// matched to the PIN this result pinned.
 	inviteID string
@@ -279,7 +292,7 @@ var (
 
 func newNodesView(client *rpc.Client) *nodesView {
 	ti := textinput.New()
-	v := &nodesView{client: client, input: ti}
+	v := &nodesView{client: client, input: ti, inviteGeneration: 1}
 	v.table = newTable(nodesColumns(defaultTableWidth))
 	return v
 }
@@ -328,6 +341,7 @@ func (v *nodesView) Init() tea.Cmd {
 		v.membersCmd(),
 		v.manualCmd(),
 		v.manualTickCmd(),
+		v.remoteManagementCmd(),
 	)
 }
 
@@ -408,7 +422,7 @@ func (v *nodesView) CapturingInput() bool {
 	// bindings still fired, so tab or a digit switched away and left the action
 	// armed behind a prompt no longer on screen — to be confirmed by whatever
 	// the operator pressed on returning to the tab.
-	return v.mode != nodesInputNone || v.confirmLeave || v.confirmRemove != ""
+	return v.grantsOpen || v.mode != nodesInputNone || v.confirmLeave || v.confirmRemove != ""
 }
 
 func (v *nodesView) Update(msg tea.Msg) tea.Cmd {
@@ -434,6 +448,13 @@ func (v *nodesView) Update(msg tea.Msg) tea.Cmd {
 
 func (v *nodesView) updateList(msg tea.Msg) tea.Cmd {
 	switch msg := msg.(type) {
+	case remoteManagementMsg:
+		return v.handleRemoteManagement(msg)
+	case remoteManagementSetMsg:
+		return v.handleRemoteManagementSet(msg)
+	case DisconnectedMsg:
+		v.invalidateRemoteManagement()
+		return nil
 	case discoverySubscribedMsg:
 		// Recorded as well as announced: without discovery the list simply stops
 		// filling, and by the time the operator wonders why, the toast is gone.
@@ -568,6 +589,9 @@ func (v *nodesView) updateList(msg tea.Msg) tea.Cmd {
 }
 
 func (v *nodesView) handleInviteResult(msg nodeInviteMsg) tea.Cmd {
+	if msg.generation != 0 && msg.generation != v.inviteGeneration {
+		return nil
+	}
 	v.inviteSending = false
 	switch {
 	case msg.err != nil:
@@ -610,6 +634,9 @@ func (v *nodesView) handleInviteResult(msg nodeInviteMsg) tea.Cmd {
 
 // clearOutboundInvite forgets the pending outbound pairing session.
 func (v *nodesView) clearOutboundInvite() {
+	v.inviteGeneration++
+	v.outboundAllow = false
+	v.inviteChoiceKey = ""
 	v.invitedKey = ""
 	v.invitedAddress = ""
 	v.outboundInviteID = ""
@@ -642,6 +669,18 @@ func (v *nodesView) refuseSecondInvite() bool {
 
 func (v *nodesView) handleNotification(msg *rpc.Message) tea.Cmd {
 	switch msg.Method {
+	case "cluster:remote-management-changed":
+		var snapshot remoteManagementSnapshot
+		if decodeOrLog(msg.Method, msg.Params, &snapshot) {
+			v.remoteManagementEpoch++
+			v.adoptRemoteManagement(snapshot)
+		}
+		return v.remoteManagementCmd()
+	case "app:ready":
+		return v.remoteManagementCmd()
+	case "service/broker-restarted":
+		v.invalidateRemoteManagement()
+		return nil
 	case "discovery:nodes-changed":
 		var nodes []availableNode
 		decodeOrLog(msg.Method, msg.Params, &nodes)
@@ -690,6 +729,7 @@ func (v *nodesView) handleNotification(msg *rpc.Message) tea.Cmd {
 // The prompt is a row of the frame, not a status line — see inboundPrompt.
 func (v *nodesView) receiveInvite(inv clusterInvite) {
 	if v.inbound == nil {
+		v.inboundAllow = false
 		v.inbound = &inv
 		return
 	}
@@ -709,6 +749,7 @@ func (v *nodesView) receiveInvite(inv clusterInvite) {
 func (v *nodesView) dropInbound(id string) bool {
 	if v.inbound != nil && v.inbound.InviteID == id {
 		v.forgetPIN()
+		v.inboundAllow = false
 		v.inbound = nil
 		if v.answering == id {
 			v.answering = ""
@@ -818,12 +859,29 @@ func (v *nodesView) retireInvite(params []byte, outcome inviteResolution) {
 }
 
 func (v *nodesView) handleKey(msg tea.KeyMsg) tea.Cmd {
+	if v.grantsOpen {
+		return v.handleGrantKey(msg)
+	}
 	if v.mode != nodesInputNone {
+		if v.pairingChoiceActive() && (msg.String() == "tab" || msg.String() == "shift+tab" ||
+			(v.mode == nodesInputInviteChoice && (msg.String() == "up" || msg.String() == "down" || msg.String() == " "))) {
+			v.togglePairingChoice()
+			return nil
+		}
 		switch msg.String() {
 		case "enter":
 			return v.submitInput()
 		case "esc":
+			if v.mode == nodesInputPin {
+				v.inboundAllow = false
+			} else {
+				v.outboundAllow = false
+				v.inviteChoiceKey = ""
+			}
 			v.cancelInput()
+			return nil
+		}
+		if v.mode == nodesInputInviteChoice {
 			return nil
 		}
 		var cmd tea.Cmd
@@ -852,13 +910,20 @@ func (v *nodesView) handleKey(msg tea.KeyMsg) tea.Cmd {
 	}
 
 	switch {
+	case msg.String() == "g":
+		v.grantsOpen = true
+		return v.remoteManagementCmd()
 	case key.Matches(msg, nodeDetailKey):
 		return v.openDetail()
 	case key.Matches(msg, nodeInviteKey):
 		if v.refuseSecondInvite() {
 			return nil
 		}
-		return v.inviteSelected()
+		v.beginInput(nodesInputInviteChoice, "")
+		if row := v.selectedRow(); row != nil {
+			v.inviteChoiceKey = row.key
+		}
+		return nil
 	case key.Matches(msg, nodeInviteAddrKey):
 		// Refused before the field opens, not after an address has been typed.
 		if v.refuseSecondInvite() {
@@ -952,6 +1017,11 @@ func (v *nodesView) openDetail() tea.Cmd {
 }
 
 func (v *nodesView) beginInput(mode nodesInputMode, placeholder string) {
+	if mode == nodesInputInviteAddress || mode == nodesInputInviteChoice {
+		v.inviteGeneration++
+		v.outboundAllow = false
+		v.inviteChoiceKey = ""
+	}
 	v.mode = mode
 	v.input.SetValue("")
 	v.input.Placeholder = placeholder
@@ -971,6 +1041,13 @@ func (v *nodesView) submitInput() tea.Cmd {
 	v.cancelInput()
 
 	switch mode {
+	case nodesInputInviteChoice:
+		if row := v.selectedRow(); row == nil || row.key != v.inviteChoiceKey {
+			v.outboundAllow = false
+			v.status.error("pairing target changed - select the device again")
+			return nil
+		}
+		return v.inviteSelected()
 	case nodesInputFilter:
 		// Applied on submit rather than per keystroke: the list re-sorts as
 		// nodes come and go, and narrowing it under the cursor while the
@@ -1023,7 +1100,7 @@ func (v *nodesView) inviteAddress(val string) tea.Cmd {
 		}
 	}
 
-	params := map[string]any{"address": val}
+	params := map[string]any{"address": val, "allowRemoteManagement": v.outboundAllow}
 	if host, portStr, err := net.SplitHostPort(val); err == nil {
 		// A malformed or out-of-range port is rejected rather than folded back
 		// into the host. Passing "host:notaport" through as an address sends a
@@ -1039,8 +1116,11 @@ func (v *nodesView) inviteAddress(val string) tea.Cmd {
 	}
 	v.inviteSending, v.outboundName = true, val
 	v.status.busy("inviting %s...", val)
+	generation := v.inviteGeneration
 	return inviteNodeCmd(v.client, params, func(res inviteNodeResult, err error) tea.Msg {
-		return inviteResultMsg(val, val, res, err)
+		result := inviteResultMsg(val, val, res, err).(nodeInviteMsg)
+		result.generation = generation
+		return result
 	})
 }
 
@@ -1074,13 +1154,16 @@ func (v *nodesView) inviteSelected() tea.Cmd {
 		return nil
 	}
 
-	params := map[string]any{"address": row.address, "nodeId": row.key}
+	params := map[string]any{"address": row.address, "nodeId": row.key, "allowRemoteManagement": v.outboundAllow}
 	name := row.name
 	v.invitedKey = row.key
 	v.inviteSending, v.outboundName = true, name
 	v.status.busy("inviting %s...", name)
+	generation := v.inviteGeneration
 	return inviteNodeCmd(v.client, params, func(res inviteNodeResult, err error) tea.Msg {
-		return inviteResultMsg(name, "", res, err)
+		result := inviteResultMsg(name, "", res, err).(nodeInviteMsg)
+		result.generation = generation
+		return result
 	})
 }
 
@@ -1183,6 +1266,9 @@ func (v *nodesView) respondToInvite(accept bool, pin string) tea.Cmd {
 	}
 	id, from := v.inbound.InviteID, v.inbound.FromNodeName
 	params := map[string]any{"inviteId": id, "accept": accept}
+	if accept {
+		params["allowRemoteManagement"] = v.inboundAllow
+	}
 	if accept && pin != "" {
 		params["pin"] = pin
 	}
@@ -1306,7 +1392,7 @@ func (v *nodesView) handlePairingResult(msg pairingResultMsg) tea.Cmd {
 	v.dropInbound(msg.inviteID)
 	// Membership is what actually changed, so re-read it rather than trusting
 	// this reply.
-	cmds := []tea.Cmd{v.membersCmd(), v.identityCmd()}
+	cmds := []tea.Cmd{v.membersCmd(), v.identityCmd(), v.remoteManagementCmd()}
 	switch {
 	case msg.state == inviteStatePaired:
 		declines := v.declineWaiting()
@@ -1653,10 +1739,13 @@ func (v *nodesView) View() string {
 		v.detail.SetSize(v.width, h)
 		return joinLines(line, v.detail.View())
 	}
+	if v.grantsOpen {
+		return v.grantsView()
+	}
 
 	// Everything that is not the table, gathered before the table is sized so
 	// its height can be whatever is left. Empty entries cost nothing.
-	above := v.clusterLine()
+	above := joinLines(v.clusterLine(), v.selectedGrantLine())
 
 	filterNote := ""
 	if v.filter != "" && len(v.rows) > 0 {
@@ -1677,6 +1766,15 @@ func (v *nodesView) View() string {
 	editor := ""
 	if v.mode != nodesInputNone {
 		editor = v.inputLabel() + v.input.View()
+		if v.mode == nodesInputInviteChoice {
+			editor = "Pair with " + v.inviteChoiceName() + " - enter to send, esc to cancel"
+		}
+	}
+	editor = joinLines(editor, v.pairingChoiceView())
+	if v.pairingChoiceActive() {
+		// Give the permission and its scope the whole view while choosing it.
+		// The node table must not push consent text below the terminal frame.
+		return joinLines(inboundNote, editor, v.status.render())
 	}
 
 	body := ""
@@ -1754,7 +1852,20 @@ func (v *nodesView) Help() []key.Binding {
 	if v.detail != nil {
 		return v.detail.Help()
 	}
+	if v.grantsOpen {
+		return []key.Binding{grantMoveKey, grantToggleKey, detailBackKey}
+	}
 	if v.mode != nodesInputNone {
+		if v.pairingChoiceActive() {
+			label := "send invite"
+			if v.mode == nodesInputPin {
+				label = "submit PIN"
+			}
+			if v.mode == nodesInputInviteAddress {
+				label = "submit address"
+			}
+			return append(inputHelp(label), pairingChoiceKey)
+		}
 		switch v.mode {
 		case nodesInputFilter:
 			return inputHelp("apply filter")
@@ -1767,7 +1878,7 @@ func (v *nodesView) Help() []key.Binding {
 	if v.confirmLeave || v.confirmRemove != "" {
 		return []key.Binding{nodeConfirmKey}
 	}
-	bindings := []key.Binding{nodeDetailKey, nodeInviteKey, nodeInviteAddrKey, nodeAddKey, nodeRemoveKey, nodeFilterKey}
+	bindings := []key.Binding{nodeDetailKey, nodeInviteKey, nodeInviteAddrKey, nodeAddKey, nodeRemoveKey, nodeFilterKey, localGrantsKey}
 	if v.filter != "" {
 		bindings = append(bindings, nodeClearKey)
 	}

@@ -76,6 +76,7 @@ func TestSettingsApplyWhilePausedNeverResumesAStoppedEngine(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			h := newSettingsHarness(t)
 			clustertrusttest.Join(t, h.b.clusterDir, "cluster-1", "self-node", settingsPeer)
+			grantRemoteManagement(t, h.b.clusterDir, "cluster-1", "self-node", settingsPeer, true)
 			h.pendingResume(t)
 			h.pause(c.origin)
 			applies := h.applies.Load()
@@ -100,6 +101,7 @@ func TestSettingsApplyWhilePausedNeverResumesAStoppedEngine(t *testing.T) {
 func TestSettingsPairedApplyIsVetoedWhilePausedLocally(t *testing.T) {
 	h := newSettingsHarness(t)
 	clustertrusttest.Join(t, h.b.clusterDir, "cluster-1", "self-node", settingsPeer)
+	grantRemoteManagement(t, h.b.clusterDir, "cluster-1", "self-node", settingsPeer, true)
 	h.pendingResume(t)
 	h.pause(nodepolicy.PausedLocally)
 	before := h.snapshot()
@@ -122,7 +124,8 @@ func TestSettingsPairedApplyIsVetoedWhilePausedLocally(t *testing.T) {
 		t.Fatal("vetoed apply left a receipt")
 	}
 
-	h.b.handleSettingsRelay(settingsJSON(settings.Relay{ID: "relay-1", Method: "apply", Caller: settingsPeer, Request: h.changedRequest(t, "--relayed")}))
+	source := bindRemoteManagementTestSource(h.b)
+	h.b.handleSettingsRelay(source, settingsJSON(settings.Relay{ID: "relay-1", Method: "apply", Caller: settingsPeer, Request: h.changedRequest(t, "--relayed")}))
 	select {
 	case raw := <-h.settingsReplies:
 		var reply struct {
@@ -157,6 +160,7 @@ func TestSettingsPairedApplyIsVetoedWhilePausedLocally(t *testing.T) {
 func TestSettingsPairedApplyWithoutAResumeIsAllowedWhilePausedLocally(t *testing.T) {
 	h := newSettingsHarness(t)
 	clustertrusttest.Join(t, h.b.clusterDir, "cluster-1", "self-node", settingsPeer)
+	grantRemoteManagement(t, h.b.clusterDir, "cluster-1", "self-node", settingsPeer, true)
 	h.pause(nodepolicy.PausedLocally)
 	p := h.changedRequest(t, "--edit-only")
 	receipt, err := h.b.applyEngineSettings(context.Background(), p, settingsPeer)

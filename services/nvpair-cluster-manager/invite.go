@@ -39,9 +39,10 @@ func (e *pairingRejectedError) Error() string {
 }
 
 type inviteNodeParams struct {
-	Address string  `json:"address"`
-	Port    *int    `json:"port"`
-	NodeID  *string `json:"nodeId"`
+	Address               string  `json:"address"`
+	Port                  *int    `json:"port"`
+	NodeID                *string `json:"nodeId"`
+	AllowRemoteManagement *bool   `json:"allowRemoteManagement"`
 }
 
 // handleInviteNode starts a pairing: it runs the EAP-NOOB Initial Exchange as
@@ -52,6 +53,17 @@ func (m *Manager) handleInviteNode(msg *Message) {
 	var p inviteNodeParams
 	if err := json.Unmarshal(msg.Params, &p); err != nil {
 		m.codec.RespondErrorData(msg.ID, codeInvalidParams, "invalid params: "+err.Error(), nil)
+		return
+	}
+	if p.AllowRemoteManagement == nil {
+		m.codec.RespondErrorData(msg.ID, codeInvalidParams, "allowRemoteManagement is required", map[string]string{"field": "allowRemoteManagement"})
+		return
+	}
+	m.rosterMu.Lock()
+	_, marker, permissionErr := m.readRemoteManagementLocked()
+	m.rosterMu.Unlock()
+	if permissionErr != nil || marker.State != "complete" {
+		m.codec.RespondError(msg.ID, codeInternalError, "remote management unavailable for pairing")
 		return
 	}
 	port := m.port
@@ -159,7 +171,7 @@ func (m *Manager) handleInviteNode(msg *Message) {
 		return
 	}
 
-	sess, pin, err := m.pairAtFirstWorkingEndpoint(inviteID, endpoints, cid, sessGen0)
+	sess, pin, err := m.pairAtFirstWorkingEndpoint(inviteID, endpoints, cid, sessGen0, *p.AllowRemoteManagement)
 	if err != nil {
 		var rej *pairingRejectedError
 		rejected := errors.As(err, &rej)
@@ -261,7 +273,7 @@ var errPairingAbandoned = errors.New("pairing abandoned: invite is no longer pen
 // intervened (see registerInviterSession). The session is returned in every case
 // (even on error) so the caller can gate the invite's terminal/PIN bookkeeping on
 // its liveness.
-func (m *Manager) runInitialExchange(inviteID, target, cid0 string, sessGen0 uint64) (*pairingSession, string, error) {
+func (m *Manager) runInitialExchange(inviteID, target, cid0 string, sessGen0 uint64, allowRemoteManagement bool) (*pairingSession, string, error) {
 	myAddr := net.JoinHostPort(outboundIP(target), strconv.Itoa(m.port))
 	localInfo := m.localPairingInfo(myAddr)
 	info, err := localInfo.toMap()
@@ -275,7 +287,8 @@ func (m *Manager) runInitialExchange(inviteID, target, cid0 string, sessGen0 uin
 	sess := &pairingSession{
 		inviteID: inviteID, role: roleInviter, createdAt: time.Now().UnixMilli(),
 		server: server, addr: myAddr, clusterID: cid0, joinerAddr: target,
-		localAdmissionEpoch: localInfo.AdmissionEpoch,
+		localAdmissionEpoch:   localInfo.AdmissionEpoch,
+		allowRemoteManagement: &allowRemoteManagement,
 	}
 	// Register under the teardown boundary: if the cluster was torn down (or
 	// rejoined, bumping the session generation) since the invite began, abandon
@@ -359,7 +372,7 @@ func postPairingBlob(client *http.Client, target, inviteID, phase string, blob [
 		// report state:"rejected"; a plain-text 409 (session/phase mismatch)
 		// won't set Rejected and falls through to the generic error below.
 		var out pairingEnvelope
-		if json.Unmarshal(rb, &out) == nil && out.Rejected {
+		if decodePairingEnvelope(rb, &out) == nil && out.Rejected {
 			return nil, &pairingRejectedError{reason: out.Reason}
 		}
 	}
@@ -367,7 +380,7 @@ func postPairingBlob(client *http.Client, target, inviteID, phase string, blob [
 		return nil, fmt.Errorf("pairing %s: status %d: %s", phase, resp.StatusCode, string(rb))
 	}
 	var out pairingEnvelope
-	if err := json.Unmarshal(rb, &out); err != nil {
+	if err := decodePairingEnvelope(rb, &out); err != nil {
 		return nil, fmt.Errorf("decode pairing response: %w", err)
 	}
 	if out.Msg == "" {
@@ -444,14 +457,14 @@ func reachableEndpointFirst(endpoints []string) []string {
 // arriving between two addresses still finds the live inviter session it requires
 // — without it, the user's cancel is refused as "not pending" in exactly the
 // window this walk introduced, while the walk carries on to pair.
-func (m *Manager) pairAtFirstWorkingEndpoint(inviteID string, endpoints []string, cid0 string, sessGen0 uint64) (*pairingSession, string, error) {
+func (m *Manager) pairAtFirstWorkingEndpoint(inviteID string, endpoints []string, cid0 string, sessGen0 uint64, allowRemoteManagement bool) (*pairingSession, string, error) {
 	var lastSess *pairingSession
 	lastErr := errors.New("no pairing endpoint")
 	for i, target := range endpoints {
 		if !m.invitePending(inviteID) {
 			return lastSess, "", errPairingAbandoned
 		}
-		sess, pin, err := m.runInitialExchange(inviteID, target, cid0, sessGen0)
+		sess, pin, err := m.runInitialExchange(inviteID, target, cid0, sessGen0, allowRemoteManagement)
 		if err == nil {
 			return sess, pin, nil
 		}

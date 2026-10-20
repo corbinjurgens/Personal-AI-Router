@@ -21,6 +21,9 @@ import (
 
 func TestRemoteControlRecoveryGateWaitsForCurrentManagerAcknowledgement(t *testing.T) {
 	selfDir, peerDir := pairedPolicyDirs(t)
+	// The recovery gate is what this test exercises, so the mutating peer
+	// needs the grant that otherwise refuses it before the handler runs.
+	grantRemoteManagement(t, peerDir, "1", map[string]bool{"uuid-self": true})
 	exec := newTestExecutor(t, testEngineManifest(fakeEngineBin))
 	t.Cleanup(exec.StopAll)
 	if err := exec.desired.set("fake", true, intentLocal); err != nil {

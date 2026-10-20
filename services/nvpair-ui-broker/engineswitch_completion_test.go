@@ -49,6 +49,7 @@ func holdSwitchCompletion(t *testing.T, h *switchHarness) (<-chan struct{}, func
 func TestSwitchLocalOffAfterPublicationFailsBeforeStopReply(t *testing.T) {
 	h := newSwitchHarness(t)
 	clustertrusttest.Join(t, h.b.clusterDir, "cluster", "target", "peer")
+	grantRemoteManagement(t, h.b.clusterDir, "cluster", "target", "peer", true)
 	p := h.request(t, "published-off")
 	reached, release := holdSwitchCompletion(t, h)
 	vetoDurable := make(chan struct{})
@@ -260,6 +261,7 @@ func TestSwitchLatchedOffCleanupPrecedesLocalStopAdmission(t *testing.T) {
 		t.Run(engine, func(t *testing.T) {
 			h := newSwitchHarness(t)
 			clustertrusttest.Join(t, h.b.clusterDir, "cluster", "target", "peer")
+			grantRemoteManagement(t, h.b.clusterDir, "cluster", "target", "peer", true)
 			p := h.request(t, "latched-off")
 			reached, release := holdSwitchCompletion(t, h)
 			base := h.engine.answer
@@ -316,6 +318,7 @@ func TestSwitchLatchedOffCleanupPrecedesLocalStopAdmission(t *testing.T) {
 func TestSwitchDrainFailureReconcilesReservedSourceOffBeforeDelayedStop(t *testing.T) {
 	h := newSwitchHarness(t)
 	clustertrusttest.Join(t, h.b.clusterDir, "cluster", "target", "peer")
+	grantRemoteManagement(t, h.b.clusterDir, "cluster", "target", "peer", true)
 	p := h.request(t, "reserved-source-off")
 	reached, resume := make(chan struct{}), make(chan struct{})
 	var once sync.Once
@@ -382,6 +385,7 @@ func TestSwitchDrainFailureReconcilesReservedSourceOffBeforeDelayedStop(t *testi
 func TestSwitchPrepareRejectedByOlderPeerStartDischargesAdmittedOff(t *testing.T) {
 	h := newSwitchHarness(t)
 	clustertrusttest.Join(t, h.b.clusterDir, "cluster", "target", "peer")
+	grantRemoteManagement(t, h.b.clusterDir, "cluster", "target", "peer", true)
 	p := h.request(t, "older-peer-start-off")
 	prepare, reject, stop, peerSettled := make(chan struct{}), make(chan struct{}), make(chan struct{}), make(chan struct{})
 	var rejectOnce, peerOnce sync.Once
@@ -550,6 +554,7 @@ func TestSwitchInstallStartBoundaryPreservesNewerOff(t *testing.T) {
 func TestSwitchHeldInstallAllowsOffStatusAndAcceptanceAndPreservesDischarge(t *testing.T) {
 	h := newSwitchHarness(t)
 	clustertrusttest.Join(t, h.b.clusterDir, "cluster", "target", "peer")
+	grantRemoteManagement(t, h.b.clusterDir, "cluster", "target", "peer", true)
 	p := h.request(t, "held-install-discharge")
 	installed, installDone, offDone, prepare, resume := make(chan struct{}), make(chan struct{}), make(chan struct{}), make(chan struct{}), make(chan struct{})
 	var once sync.Once
@@ -734,6 +739,7 @@ func TestSwitchInstallWithStartRefusesRetainedReservation(t *testing.T) {
 func TestSwitchInstallWithStartAfterAdmittedOffDischargeStaysOn(t *testing.T) {
 	h := newSwitchHarness(t)
 	clustertrusttest.Join(t, h.b.clusterDir, "cluster", "target", "peer")
+	grantRemoteManagement(t, h.b.clusterDir, "cluster", "target", "peer", true)
 	p := h.request(t, "install-after-discharge")
 	prepare, resume, installDone := make(chan struct{}), make(chan struct{}), make(chan struct{})
 	var once sync.Once
@@ -804,6 +810,7 @@ func TestSwitchInstallWithStartAfterAdmittedOffDischargeStaysOn(t *testing.T) {
 func TestSwitchVetoDuringReconcileRepeatsCleanupBeforeTerminal(t *testing.T) {
 	h := newSwitchHarness(t)
 	clustertrusttest.Join(t, h.b.clusterDir, "cluster", "target", "peer")
+	grantRemoteManagement(t, h.b.clusterDir, "cluster", "target", "peer", true)
 	h.publicationFailure = true
 	p := h.request(t, "veto-during-cleanup")
 	read, resume := make(chan struct{}), make(chan struct{})
@@ -837,6 +844,7 @@ func TestSwitchVetoDuringReconcileRepeatsCleanupBeforeTerminal(t *testing.T) {
 func TestSwitchLatchedPauseReconcileCleansCommittedTarget(t *testing.T) {
 	h := newSwitchHarness(t)
 	clustertrusttest.Join(t, h.b.clusterDir, "cluster", "target", "peer")
+	grantRemoteManagement(t, h.b.clusterDir, "cluster", "target", "peer", true)
 	p := h.request(t, "latched-pause")
 	reached, release := holdSwitchCompletion(t, h)
 	if _, err := h.b.acceptEngineSwitch(context.Background(), p, "peer"); err != nil {
@@ -861,6 +869,7 @@ func TestSwitchLatchedPauseReconcileCleansCommittedTarget(t *testing.T) {
 func TestSwitchUnappliedPauseRetainsDurableObligation(t *testing.T) {
 	h := newSwitchHarness(t)
 	clustertrusttest.Join(t, h.b.clusterDir, "cluster", "target", "peer")
+	grantRemoteManagement(t, h.b.clusterDir, "cluster", "target", "peer", true)
 	p := h.request(t, "unapplied-pause")
 	reached, release := holdSwitchCompletion(t, h)
 	if _, err := h.b.acceptEngineSwitch(context.Background(), p, "peer"); err != nil {
@@ -949,6 +958,7 @@ func pauseResumeBeforeSwitchCleanup(t *testing.T) (*switchHarness, settings.Swit
 	t.Helper()
 	h := newSwitchHarness(t)
 	clustertrusttest.Join(t, h.b.clusterDir, "cluster", "target", "peer")
+	grantRemoteManagement(t, h.b.clusterDir, "cluster", "target", "peer", true)
 	runtime := h.b.nodePolicyRuntime()
 	runtime.mu.Lock()
 	runtime.path = filepath.Join(t.TempDir(), "node-policy.json")
