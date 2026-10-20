@@ -157,6 +157,147 @@ func TestQualificationFixtureCases(t *testing.T) {
 	}
 }
 
+func TestQualificationBorrowedViewsPreserveScalarAndStructDecoding(t *testing.T) {
+	q, profile, _ := qualificationFixture(t)
+	profile.RequestOptions = nil
+	for _, tc := range []struct {
+		name, message, extras, reject string
+	}{
+		{name: "nested field case folding", message: `{"RoLe":"user","CoNtEnT":"hi"}`},
+		{name: "optional null zero values", message: `{"role":"user","content":"hi","name":null,"tool_call_id":null,"tool_calls":null}`, extras: `,"stream":null,"stream_options":null,"stop":[null,"x"],"seed":null,"temperature":null`},
+		{name: "int64 minimum", extras: `,"seed":-9223372036854775808`},
+		{name: "int64 maximum", extras: `,"seed":9223372036854775807`},
+		{name: "int64 overflow", extras: `,"seed":9223372036854775808`, reject: "seed must be an integer"},
+		{name: "int64 underflow", extras: `,"seed":-9223372036854775809`, reject: "seed must be an integer"},
+		{name: "finite float", extras: `,"temperature":1e308`},
+		{name: "overflowing float", extras: `,"temperature":1e309`, reject: "temperature must be a number"},
+		{name: "null function parameters rejected", extras: `,"tools":[{"type":"function","function":{"name":"f","parameters":null}}]`, reject: "parameters must be an object"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			message := tc.message
+			if message == "" {
+				message = `{"role":"user","content":"hi"}`
+			}
+			body := []byte(`{"model":"m","messages":[` + message + `],"max_tokens":16` + tc.extras + `}`)
+			_, bound, err := q.validateRequest(profile, routeChatCompletions, body)
+			if tc.reject != "" {
+				var rejected *strictQualificationError
+				if !errors.As(err, &rejected) || !strings.Contains(rejected.reason, tc.reject) {
+					t.Fatalf("error = %v, want qualification rejection containing %q", err, tc.reject)
+				}
+				return
+			}
+			if err != nil || bound.input != 18 || bound.output != 16 {
+				t.Fatalf("bound = %+v, error = %v; want 18 input and 16 output", bound, err)
+			}
+		})
+	}
+}
+
+func TestQualificationUniqueKeyWorkspaceIsChargedAndReleased(t *testing.T) {
+	body := []byte(`{"a":1}`)
+	for _, tc := range []struct {
+		name     string
+		capacity int64
+		limit    bool
+	}{
+		{name: "refuses member storage before allocation", capacity: 288, limit: true},
+		{name: "releases completed member storage", capacity: 289},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			budget := bufferTestBudget(t, tc.capacity, 0)
+			scope, err := budget.newRequest(tc.capacity)
+			if err != nil {
+				t.Fatal(err)
+			}
+			owner := &ownedInferenceBuffers{scope: scope}
+			defer owner.close()
+			ctx := context.WithValue(context.Background(), ownedInferenceContextKey{}, owner)
+			ok, err := uniqueKeysContext(body, ctx)
+			if tc.limit {
+				bufferAssertLimit(t, err)
+				if ok {
+					t.Fatal("a refused scan reported unique keys")
+				}
+			} else if err != nil || !ok {
+				t.Fatalf("unique = %v, error = %v; want a completed scan", ok, err)
+			}
+			bufferAssertTotals(t, budget, 0, 0, 0)
+		})
+	}
+}
+
+func TestQualificationFloatRepresentationRefusesBeforeParsing(t *testing.T) {
+	q, profile, _ := qualificationFixture(t)
+	profile.RequestOptions = nil
+	number := "0." + strings.Repeat("0", 1024)
+	body := []byte(`{"model":"m","messages":[{"role":"user","content":"hi"}],"max_tokens":16,"temperature":` + number + `}`)
+	// The number conversion, possible error clone, and workspace bookkeeping
+	// need 2*len(number)+512 bytes even when its numeric value is simply zero.
+	capacity := 2*int64(len(number)) + 511
+	budget := bufferTestBudget(t, capacity, 0)
+	scope, err := budget.newRequest(capacity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner := &ownedInferenceBuffers{scope: scope}
+	defer owner.close()
+	ctx := context.WithValue(context.Background(), ownedInferenceContextKey{}, owner)
+	_, _, err = q.validateRequest(profile, routeChatCompletions, body, ctx)
+	bufferAssertLimit(t, err)
+	bufferAssertTotals(t, budget, 0, 0, 0)
+}
+
+func TestQualificationDynamicFieldErrorRetainsMeasuredStorage(t *testing.T) {
+	q, profile, _ := qualificationFixture(t)
+	key := strings.Repeat("\n\u0085", 4096)
+	quoted, err := json.Marshal(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := []byte(`{"model":"m","messages":[{"role":"user","content":"hi"}],"max_tokens":16,` + string(quoted) + `:0}`)
+	budget := bufferTestBudget(t, 1<<20, 0)
+	scope, err := budget.newRequest(1 << 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner := &ownedInferenceBuffers{scope: scope}
+	defer owner.close()
+	ctx := context.WithValue(context.Background(), ownedInferenceContextKey{}, owner)
+	_, _, err = q.validateRequest(profile, routeChatCompletions, body, ctx)
+	var rejected *strictQualificationError
+	if !errors.As(err, &rejected) {
+		t.Fatalf("error = %v, want an unsupported-field qualification rejection", err)
+	}
+	want := fmt.Sprintf("field %q is not supported", key)
+	if rejected.reason != want || rejected.Error() != "strict qualification: "+want {
+		t.Fatal("the retained error changed Go quoted field spelling")
+	}
+	bufferAssertTotals(t, budget, 3*int64(len(want))+int64(len("strict qualification: "))+256, 1, 0)
+	owner.close()
+	bufferAssertTotals(t, budget, 0, 0, 0)
+}
+
+func TestQualificationUniqueKeysPreservesUnicodeAndDepthRules(t *testing.T) {
+	for _, tc := range []struct {
+		name, raw string
+		unique    bool
+	}{
+		{name: "Kelvin sign", raw: `{"K":0,"\u212a":1}`},
+		{name: "long s", raw: `{"S":0,"\u017f":1}`},
+		{name: "dotless i follows upper then lower rule", raw: `{"i":0,"\u0131":1}`},
+		{name: "distinct Unicode keys", raw: `{"é":0,"e":1}`, unique: true},
+		{name: "exact strict nesting", raw: strings.Repeat("[", maxStrictBodyDepth) + "0" + strings.Repeat("]", maxStrictBodyDepth), unique: true},
+		{name: "excess strict nesting", raw: strings.Repeat("[", maxStrictBodyDepth+1) + "0" + strings.Repeat("]", maxStrictBodyDepth+1)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := uniqueKeys([]byte(tc.raw)); got != tc.unique {
+				t.Fatalf("unique = %v, want %v", got, tc.unique)
+			}
+		})
+	}
+}
+
 // The input bound plus the output headroom must fit the served context: a
 // request exactly at the context is accepted and one byte more is not.
 func TestQualificationContextBoundary(t *testing.T) {

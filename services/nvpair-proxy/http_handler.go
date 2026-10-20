@@ -6,7 +6,6 @@ package main
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	stderrors "errors"
 	"fmt"
 	"io"
@@ -391,27 +390,17 @@ func parseOriginStreamRequest(path string, body []byte) (originStreamRequest, er
 	}
 	// Invalid JSON remains the engine's responsibility. A stream member in a
 	// valid object, however, must be an unambiguous JSON boolean or null.
-	if !json.Valid(body) {
-		return s, nil
-	}
-	dec := json.NewDecoder(bytes.NewReader(body))
-	opening, err := dec.Token()
-	if err != nil || opening != json.Delim('{') {
+	if !ownedJSONValid(body) {
 		return s, nil
 	}
 	seen := false
-	for dec.More() {
-		key, err := dec.Token()
-		if err != nil {
-			return s, err
-		}
-		var value json.RawMessage
-		if err := dec.Decode(&value); err != nil {
-			return s, err
-		}
-		if key == "stream" {
+	var invalid error
+	visitObject(body, func(key []byte, start, end int) {
+		value := body[start:end]
+		if jsonKeyEqual(key, "stream", false) {
 			if seen || (string(value) != "true" && string(value) != "false" && string(value) != "null") {
-				return s, fmt.Errorf("stream must be a single boolean or null member")
+				invalid = fmt.Errorf("stream must be a single boolean or null member")
+				return
 			}
 			seen = true
 			if string(value) != "null" {
@@ -419,14 +408,13 @@ func parseOriginStreamRequest(path string, body []byte) (originStreamRequest, er
 				s.disabled = !s.declared
 			}
 		}
-		if key == "n" {
-			var n int
-			if json.Unmarshal(value, &n) == nil && n > 0 {
+		if jsonKeyEqual(key, "n", false) {
+			if n, ok := positiveJSONInt(value); ok {
 				s.choices = n
 			}
 		}
-	}
-	return s, nil
+	})
+	return s, invalid
 }
 
 func (s originStreamRequest) manages(contentType string) (bool, bool) {
@@ -540,6 +528,10 @@ func (f *facade) handleHTTPWithStreamIdle(w http.ResponseWriter, r *http.Request
 	ctl := newWorkloadCtl(cancelRequest)
 	var requestOwner *routingRequest
 	if isInf {
+		var buffers *ownedInferenceBuffers
+		r, buffers = p.ownInferenceBuffers(r)
+		w = &inferenceErrorWriter{ResponseWriter: w, ctx: r.Context()}
+		defer buffers.close()
 		var err error
 		requestOwner, err = p.registerRoutingRequest(ctl)
 		if err != nil {
@@ -559,18 +551,29 @@ func (f *facade) handleHTTPWithStreamIdle(w http.ResponseWriter, r *http.Request
 	// routing behavior even when their JSON happens to contain a model field.
 	bodyBytes, model, err := bufferBodyAndModel(w, r, p.requestBodyLimit())
 	if err != nil {
+		status := bufferRequestStatus(err)
+		reason := "request body read failed"
+		if status == http.StatusRequestEntityTooLarge {
+			reason = "request body too large"
+		} else if status == http.StatusServiceUnavailable {
+			reason = "inference buffer capacity is busy"
+		}
 		slog.Warn("proxy request rejected",
 			"id", reqID, "method", r.Method, "path", r.URL.Path,
-			"remote", r.RemoteAddr, "reason", "request body too large", "limit", p.requestBodyLimit())
-		http.Error(w, `{"error":"request body exceeds the proxy's size limit"}`, http.StatusRequestEntityTooLarge)
+			"remote", r.RemoteAddr, "reason", reason, "limit", p.requestBodyLimit())
+		writeIngressError(w, status, "request-body", "request body could not be buffered")
 		_ = f.notify("proxy/request", RequestEvent{
 			ID:       reqID,
 			Method:   r.Method,
 			Path:     r.URL.Path,
-			Status:   http.StatusRequestEntityTooLarge,
+			Status:   status,
 			Duration: time.Since(start).Milliseconds(),
-			Error:    "request body too large",
+			Error:    reason,
 		})
+		return
+	}
+	if err := validateRequestIdentifiers(r, bodyBytes); err != nil {
+		writeIngressError(w, bufferRequestStatus(err), "request-identifier", err.Error())
 		return
 	}
 	// An inference body naming "model" twice is ambiguous: admission and
@@ -662,7 +665,11 @@ func (f *facade) handleHTTPWithStreamIdle(w http.ResponseWriter, r *http.Request
 	crossEngine := false
 	if isInf && nodepolicy.IsTier(model) {
 		tier = model
-		needs = parseRequestNeeds(bodyBytes, r.URL.Path)
+		needs, err = parseRequestNeedsOwned(r.Context(), bodyBytes, r.URL.Path)
+		if err != nil {
+			writeIngressError(w, bufferRequestStatus(err), "inference-buffer", "inference request could not be prepared")
+			return
+		}
 		crossEngine = openAICompatibleInference[r.URL.Path]
 	}
 	resolve := func() []candidate {
@@ -701,9 +708,73 @@ func (f *facade) handleHTTPWithStreamIdle(w http.ResponseWriter, r *http.Request
 		resMu sync.Mutex
 		held  reservation
 	)
-	if isInf && model != "" {
-		candidates, held = f.reserveRound(candidates, tier != "")
+	sendBody := bodyBytes
+	preparedCtx := r.Context()
+	var preparedCandidate candidate
+	var preparedDefaults []byte
+	var preparedGeneration uint64
+	preparedValid := false
+	releaseSendBody, releasePreparation := func() {}, func() {}
+	dropPrepared := func() {
+		releasePreparation()
+		releaseSendBody()
+		releaseSendBody, releasePreparation = func() {}, func() {}
+		preparedValid = false
 	}
+	defer dropPrepared()
+	var beforeRebuild func()
+	prepareCandidate := func(ctx context.Context, c candidate, profile nodepolicy.Profile, hasProfile bool, generation uint64) error {
+		var defaults []byte
+		if hasProfile {
+			defaults = profile.RequestOptions
+		}
+		if preparedValid && preparedCandidate == c && generation == preparedGeneration && bytes.Equal(defaults, preparedDefaults) {
+			allowance := preparedCtx.Value(performancePreparationKey{})
+			preparedCtx = ctx
+			if allowance != nil {
+				preparedCtx = context.WithValue(ctx, performancePreparationKey{}, allowance)
+			}
+			return nil
+		}
+		if beforeRebuild != nil {
+			beforeRebuild()
+		}
+		dropPrepared()
+		var err error
+		sendBody, releaseSendBody, err = transformBody(ctx, bodyBytes, c.model, c.model != "", defaults)
+		if err != nil {
+			releaseSendBody = func() {}
+			return err
+		}
+		concrete := model
+		if c.model != "" {
+			concrete = c.model
+		}
+		if hasProfile && !bodyModelMatches(sendBody, concrete) {
+			return errAmbiguousModel
+		}
+		preparedCtx = ctx
+		if c.self && isInf {
+			preparedCtx, releasePreparation, err = preparePerformanceBuffers(ctx, sendBody)
+			if err != nil {
+				releasePreparation = func() {}
+				return err
+			}
+		}
+		preparedCandidate, preparedDefaults, preparedGeneration, preparedValid = c, defaults, generation, true
+		return nil
+	}
+	if isInf && model != "" {
+		candidates, held, err = f.reserveRoundPrepared(r.Context(), candidates, tier != "", model, prepareCandidate, resolve)
+		if err != nil {
+			if r.Context().Err() == nil {
+				writeInferencePreparationError(w, err)
+			}
+			return
+		}
+	}
+	roundReservations := held.held
+	roundGeneration := preparedGeneration
 	// Released exactly once, whichever way the request ends: normal unwind,
 	// client disconnect, or an early return below. Without this a node stays
 	// counted as loaded until the next scheduler snapshot, so a steady trickle
@@ -744,20 +815,10 @@ func (f *facade) handleHTTPWithStreamIdle(w http.ResponseWriter, r *http.Request
 	if len(candidates) == 0 && tier != "" {
 		// Nothing anywhere can answer this tier for this request, which waiting
 		// will not change.
-		body, mErr := json.Marshal(struct {
-			Error string   `json:"error"`
-			Needs []string `json:"needs"`
-		}{Error: "no eligible model for tier " + tier, Needs: needs.names()})
-		if mErr != nil {
-			body = []byte(`{"error":"no eligible model for tier"}`)
-		}
 		slog.Warn("proxy request rejected",
 			"id", reqID, "method", r.Method, "path", r.URL.Path,
 			"remote", r.RemoteAddr, "reason", "no eligible model for tier", "tier", tier)
-		w.Header().Set("Content-Type", "application/json")
-		w.Header().Set("X-Content-Type-Options", "nosniff")
-		w.WriteHeader(http.StatusNotFound)
-		_, _ = w.Write(body)
+		writeProxyError(w, http.StatusNotFound, []string{"no eligible model for tier ", tier}, needs.names(), true)
 		_ = f.notify("proxy/request", RequestEvent{
 			ID:       reqID,
 			Method:   r.Method,
@@ -1083,14 +1144,17 @@ func (f *facade) handleHTTPWithStreamIdle(w http.ResponseWriter, r *http.Request
 	// takeHeld re-reserves for a fresh round, replacing any claim still held.
 	// reserveCandidate both orders the round and takes the claim, so a retry
 	// that re-resolves has to go back through it.
-	takeHeld := func(cands []candidate) []candidate {
+	takeHeld := func(cands []candidate) ([]candidate, error) {
+		releaseHeld()
+		out, proposal, err := f.reserveRoundPrepared(r.Context(), cands, tier != "", model, prepareCandidate, resolve)
 		resMu.Lock()
-		defer resMu.Unlock()
-		p.releaseReservation(held)
-		var out []candidate
-		out, held = f.reserveRound(cands, tier != "")
-		return out
+		held = proposal
+		resMu.Unlock()
+		roundReservations = proposal.held
+		roundGeneration = preparedGeneration
+		return out, err
 	}
+	beforeRebuild = func() { repointWorkload("", ""); releaseHeld() }
 
 	// Retry loop. Each iteration dispatches to one candidate; when a round's
 	// candidates are exhausted it backs off and re-resolves, so a node that
@@ -1133,8 +1197,14 @@ func (f *facade) handleHTTPWithStreamIdle(w http.ResponseWriter, r *http.Request
 	var selfRejection nodepolicy.RejectReason
 	round := candidates
 	next := 0
+	firstAttempt := true
 
 	for !committed {
+		if !firstAttempt {
+			beforeRebuild()
+			dropPrepared()
+		}
+		firstAttempt = false
 		if dispatches >= maxDispatches {
 			break
 		}
@@ -1148,6 +1218,26 @@ func (f *facade) handleHTTPWithStreamIdle(w http.ResponseWriter, r *http.Request
 		// from also inventing a reason for a client that stopped listening.
 		if r.Context().Err() != nil {
 			break
+		}
+		if isInf && model != "" {
+			p.admission.mu.Lock()
+			stale := roundGeneration != p.admission.policyGeneration
+			p.admission.mu.Unlock()
+			if stale {
+				beforeRebuild()
+				var err error
+				round, err = takeHeld(resolve())
+				if err != nil {
+					respondedWithError = true
+					finalStatus = bufferRequestStatus(err)
+					proxyErr = "inference request preparation failed"
+					if r.Context().Err() == nil {
+						writeInferencePreparationError(w, err)
+					}
+					break
+				}
+				next = 0
+			}
 		}
 		if next >= len(round) {
 			if !retryRounds {
@@ -1173,7 +1263,17 @@ func (f *facade) handleHTTPWithStreamIdle(w http.ResponseWriter, r *http.Request
 			}
 			round = resolve()
 			if isInf && model != "" {
-				round = takeHeld(round)
+				var err error
+				round, err = takeHeld(round)
+				if err != nil {
+					respondedWithError = true
+					finalStatus = bufferRequestStatus(err)
+					proxyErr = "inference request preparation failed"
+					if r.Context().Err() == nil {
+						writeInferencePreparationError(w, err)
+					}
+					break
+				}
 			}
 			next = 0
 			if len(round) == 0 && ctl.hasExclusions() {
@@ -1222,12 +1322,6 @@ func (f *facade) handleHTTPWithStreamIdle(w http.ResponseWriter, r *http.Request
 		if candFacade == nil {
 			candFacade = f
 		}
-		repointWorkload(cand.id, candModel)
-		// The claim follows the node we are about to try, not the one
-		// reserveCandidate happened to pick for the round — an attempt can hold
-		// a node for the whole first-content budget, and for that time it is
-		// the node under load. A same-node move is a no-op.
-		moveHeld(cand.id)
 
 		// Each attempt runs on its own context, a child of the request's, so we
 		// can abandon this dispatch without touching the request itself. The
@@ -1243,19 +1337,25 @@ func (f *facade) handleHTTPWithStreamIdle(w http.ResponseWriter, r *http.Request
 
 		// The body this attempt sends: the request's own, with a tier's concrete
 		// model in place of the tier name and every other byte untouched.
-		sendBody := bodyBytes
-		if cand.model != "" {
-			rewritten, ok := replaceModel(bodyBytes, cand.model)
-			if !ok {
-				cancelAttempt()
-				ctl.setAttempt(nil)
-				respondedWithError = true
-				finalStatus = http.StatusBadRequest
-				proxyErr = "model rewrite failed"
-				writeIngressError(w, http.StatusBadRequest, "ambiguous-model", ambiguousModelMessage)
+		prepare := func(ctx context.Context, profile nodepolicy.Profile, hasProfile bool, generation uint64) error {
+			return prepareCandidate(ctx, cand, profile, hasProfile, generation)
+		}
+		preparationFailed := func(err error) {
+			cancelAttempt()
+			ctl.setAttempt(nil)
+			respondedWithError = true
+			finalStatus = bufferRequestStatus(err)
+			proxyErr = "inference request preparation failed"
+			writeInferencePreparationError(w, err)
+		}
+		if !cand.self || !isInf {
+			p.admission.mu.Lock()
+			generation := p.admission.policyGeneration
+			p.admission.mu.Unlock()
+			if err := prepare(attemptCtx, nodepolicy.Profile{}, false, generation); err != nil {
+				preparationFailed(err)
 				break
 			}
-			sendBody = rewritten
 		}
 		// How long the destination may queue this attempt: not at all while
 		// this round still has somewhere else to go, so a busy node hands the
@@ -1274,10 +1374,12 @@ func (f *facade) handleHTTPWithStreamIdle(w http.ResponseWriter, r *http.Request
 		var performanceWait time.Duration
 		if cand.self && isInf {
 			decision := p.admission.admit(attemptCtx, admissionRequest{
-				engine:  candEngine,
-				model:   candModel,
-				waitCap: time.Duration(admissionWait) * time.Second,
-				cancel:  func() { ctl.abortLocalIf(att) },
+				resolvedInventory: true,
+				engine:            candEngine,
+				model:             candModel,
+				waitCap:           time.Duration(admissionWait) * time.Second,
+				cancel:            func() { ctl.abortLocalIf(att) },
+				prepare:           prepare,
 			})
 			rejectSelf := func(errText string, answer func()) bool {
 				cancelAttempt()
@@ -1296,6 +1398,10 @@ func (f *facade) handleHTTPWithStreamIdle(w http.ResponseWriter, r *http.Request
 				return true
 			}
 			if decision.err != nil {
+				if attemptCtx.Err() == nil {
+					preparationFailed(decision.err)
+					break
+				}
 				cancelAttempt()
 				ctl.setAttempt(nil)
 				if att.redispatched() {
@@ -1322,19 +1428,7 @@ func (f *facade) handleHTTPWithStreamIdle(w http.ResponseWriter, r *http.Request
 			}
 			curTicket = decision.ticket
 			performanceWait = time.Since(admissionStarted)
-			if decision.hasProfile {
-				sendBody = mergeDefaults(sendBody, decision.profile.RequestOptions)
-				if !bodyModelMatches(sendBody, candModel) {
-					curTicket.release()
-					cancelAttempt()
-					ctl.setAttempt(nil)
-					respondedWithError = true
-					finalStatus = http.StatusBadRequest
-					proxyErr = "model defaults changed admitted model"
-					writeIngressError(w, http.StatusBadRequest, "ambiguous-model", ambiguousModelMessage)
-					break
-				}
-			}
+			attemptCtx = preparedCtx
 			if cand.dormant {
 				// Admission waited for the wake; the engine's address is the one
 				// it came up on.
@@ -1352,6 +1446,30 @@ func (f *facade) handleHTTPWithStreamIdle(w http.ResponseWriter, r *http.Request
 				target = u
 			}
 		}
+		if isInf && model != "" {
+			resMu.Lock()
+			hasClaim := held.held
+			resMu.Unlock()
+			if !hasClaim {
+				var proposal reservation
+				stable := preparedGeneration == roundGeneration
+				if stable {
+					proposal, stable = p.claimPreparedTarget(attemptCtx, cand.id, preparedGeneration, roundReservations)
+				}
+				if !stable {
+					curTicket.release()
+					cancelAttempt()
+					ctl.setAttempt(nil)
+					next--
+					dispatches--
+					continue // Rebuild in this same driver without spending a dispatch.
+				}
+				resMu.Lock()
+				held = proposal
+				resMu.Unlock()
+			}
+		}
+		repointWorkload(cand.id, candModel)
 
 		// Framing follows this attempt's effective body, including local profile
 		// defaults. Ingress validation above still rejects ambiguous client flags
@@ -1442,7 +1560,13 @@ func (f *facade) handleHTTPWithStreamIdle(w http.ResponseWriter, r *http.Request
 		sc := &statusCapture{ResponseWriter: w, status: http.StatusOK, idle: idleClientWriteTimeout}
 		var performance *performanceAttempt
 		if cand.self && isInf {
-			performance = candFacade.newPerformanceAttempt(r.Context(), candModel, r.URL.Path, sendBody, performanceWait)
+			var err error
+			performance, err = candFacade.newPerformanceAttemptOwned(preparedCtx, candModel, r.URL.Path, sendBody, performanceWait)
+			if err != nil {
+				curTicket.release()
+				preparationFailed(err)
+				break
+			}
 		}
 
 		proxy := &httputil.ReverseProxy{
@@ -1657,22 +1781,13 @@ func (f *facade) handleHTTPWithStreamIdle(w http.ResponseWriter, r *http.Request
 					"id", reqID, "node_id", cand.id, "target", target.Host,
 					"method", r.Method, "path", r.URL.Path,
 					"duration_ms", time.Since(start).Milliseconds(), "err", err)
-				body, mErr := json.Marshal(map[string]string{
-					"error": "upstream error: " + err.Error(),
-				})
-				if mErr != nil {
-					body = []byte(`{"error":"upstream error"}`)
-				}
 				// A node that answered but never produced content timed out
 				// rather than failed to be reached, and 504 says so.
 				status := http.StatusBadGateway
 				if stderrors.Is(err, errFirstBodyTimeout) {
 					status = http.StatusGatewayTimeout
 				}
-				ew.Header().Set("Content-Type", "application/json")
-				ew.Header().Set("X-Content-Type-Options", "nosniff")
-				ew.WriteHeader(status)
-				ew.Write(body)
+				writeProxyError(ew, status, []string{"upstream error: ", proxyErr}, nil, false)
 			},
 		}
 
@@ -1737,18 +1852,81 @@ func (f *facade) handleHTTPWithStreamIdle(w http.ResponseWriter, r *http.Request
 			"id", reqID, "method", r.Method, "path", r.URL.Path,
 			"dispatches", dispatches, "duration_ms", time.Since(start).Milliseconds(),
 			"reason", reason)
-		body, mErr := json.Marshal(map[string]string{"error": reason})
-		if mErr != nil {
-			body = []byte(`{"error":"retry budget exhausted"}`)
-		}
-		w.Header().Set("Content-Type", "application/json")
-		w.Header().Set("X-Content-Type-Options", "nosniff")
 		// Advisory only: the caller knows its own patience better than we do.
 		w.Header().Set("Retry-After", "1")
-		w.WriteHeader(http.StatusServiceUnavailable)
-		w.Write(body)
+		writeProxyError(w, http.StatusServiceUnavailable, []string{reason}, nil, false)
 	}
 
 	// Reporting happens in the deferred finalize above, so it survives the
 	// ErrAbortHandler panic that a mid-copy error raises.
+}
+
+func writeInferencePreparationError(w http.ResponseWriter, err error) {
+	if stderrors.Is(err, errAmbiguousModel) {
+		writeIngressError(w, http.StatusBadRequest, "ambiguous-model", ambiguousModelMessage)
+		return
+	}
+	writeIngressError(w, bufferRequestStatus(err), "inference-buffer", "inference request could not be prepared")
+}
+
+// writeProxyError retains its exact response capacity through the final Write.
+// Parts avoid a second concatenated error string and no encoder pool keeps the
+// representation alive after the request releases its lease.
+func writeProxyError(w http.ResponseWriter, status int, parts, needs []string, includeNeeds bool) {
+	size := len(`{"error":""}`)
+	for _, part := range parts {
+		size += quotedJSONStringSize(part) - 2
+	}
+	if includeNeeds {
+		size += len(`,"needs":[]`)
+		if needs == nil {
+			size += 2 // null instead of []
+		} else {
+			for i, need := range needs {
+				size += quotedJSONStringSize(need)
+				if i > 0 {
+					size++
+				}
+			}
+		}
+	}
+	if ctx := errorBufferContext(w); ctx != nil {
+		if owner := inferenceBuffers(ctx); owner != nil {
+			lease, err := owner.scope.tryAcquire(ctx, int64(size))
+			if err != nil {
+				w.Header().Set("Content-Type", "application/json")
+				w.Header().Set("X-Content-Type-Options", "nosniff")
+				w.WriteHeader(bufferRequestStatus(err))
+				_, _ = w.Write(inferenceBufferRefusalJSON)
+				return
+			}
+			defer lease.close()
+		}
+	}
+	body := make([]byte, 0, size)
+	body = append(body, `{"error":"`...)
+	for _, part := range parts {
+		body = appendJSONStringContent(body, part)
+	}
+	body = append(body, '"')
+	if includeNeeds {
+		body = append(body, `,"needs":`...)
+		if needs == nil {
+			body = append(body, "null"...)
+		} else {
+			body = append(body, '[')
+			for i, need := range needs {
+				if i > 0 {
+					body = append(body, ',')
+				}
+				body = appendJSONString(body, need)
+			}
+			body = append(body, ']')
+		}
+	}
+	body = append(body, '}')
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.WriteHeader(status)
+	_, _ = w.Write(body)
 }

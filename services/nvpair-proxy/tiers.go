@@ -19,11 +19,14 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"slices"
 	"sort"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"nvpair-shared/nodepolicy"
 )
@@ -62,45 +65,38 @@ func (n requestNeeds) names() []string {
 // Ollama shape, for the capabilities and context it needs. A body that is not
 // JSON needs nothing beyond its size.
 func parseRequestNeeds(body []byte, path string) requestNeeds {
-	var probe struct {
-		Tools     json.RawMessage `json:"tools"`
-		Functions json.RawMessage `json:"functions"`
-		Messages  []struct {
-			Content json.RawMessage   `json:"content"`
-			Images  []json.RawMessage `json:"images"`
-		} `json:"messages"`
-		Images         []json.RawMessage `json:"images"`
-		ResponseFormat *struct {
-			Type string `json:"type"`
-		} `json:"response_format"`
-		Format              json.RawMessage `json:"format"`
-		MaxTokens           *int            `json:"max_tokens"`
-		MaxCompletionTokens *int            `json:"max_completion_tokens"`
-		Options             *struct {
-			NumPredict *int `json:"num_predict"`
-		} `json:"options"`
-	}
-	needs := requestNeeds{contextTokens: len(body) / 4}
-	_ = json.Unmarshal(body, &probe)
+	needs, _ := parseRequestNeedsOwned(nil, body, path)
+	return needs
+}
 
+func parseRequestNeedsOwned(ctx context.Context, body []byte, path string) (requestNeeds, error) {
+	needs := requestNeeds{contextTokens: len(body) / 4}
 	has := map[nodepolicy.Capability]bool{}
-	if nonEmptyArray(probe.Tools) || nonEmptyArray(probe.Functions) {
-		has[nodepolicy.CapTools] = true
-	}
-	if len(probe.Images) > 0 {
-		has[nodepolicy.CapVision] = true
-	}
-	for _, m := range probe.Messages {
-		if len(m.Images) > 0 || contentHasImage(m.Content) {
-			has[nodepolicy.CapVision] = true
-			break
+	if ownedJSONValid(body) && isJSONObject(body) {
+		if nonEmptyArray(requestJSONField(body, "tools")) || nonEmptyArray(requestJSONField(body, "functions")) {
+			has[nodepolicy.CapTools] = true
 		}
-	}
-	if probe.ResponseFormat != nil && (probe.ResponseFormat.Type == "json_schema" || probe.ResponseFormat.Type == "json_object") {
-		has[nodepolicy.CapStructured] = true
-	}
-	if f := bytes.TrimSpace(probe.Format); len(f) > 0 && !bytes.Equal(f, []byte("null")) && !bytes.Equal(f, []byte(`""`)) {
-		has[nodepolicy.CapStructured] = true
+		if nonEmptyArray(requestJSONArrayField(body, "images")) {
+			has[nodepolicy.CapVision] = true
+		}
+		vision, err := requestMessagesHaveImage(ctx, body)
+		if err != nil {
+			return requestNeeds{}, err
+		}
+		has[nodepolicy.CapVision] = has[nodepolicy.CapVision] || vision
+		typeValue := requestNestedString(body, "response_format", "type")
+		if jsonStringEquals(typeValue, "json_schema") || jsonStringEquals(typeValue, "json_object") {
+			has[nodepolicy.CapStructured] = true
+		}
+		if format := bytes.TrimSpace(requestJSONField(body, "format")); len(format) > 0 && !bytes.Equal(format, []byte("null")) && !bytes.Equal(format, []byte(`""`)) {
+			has[nodepolicy.CapStructured] = true
+		}
+		for _, n := range []int{requestStructPositiveInt(body, "max_tokens", 0), requestStructPositiveInt(body, "max_completion_tokens", 0), requestNestedPositiveInt(body, "options", "num_predict")} {
+			if n > 0 {
+				needs.contextTokens += n
+				break
+			}
+		}
 	}
 	if embeddingsRoutes[path] {
 		has[nodepolicy.CapEmbeddings] = true
@@ -111,37 +107,123 @@ func parseRequestNeeds(body []byte, path string) requestNeeds {
 		}
 	}
 
-	switch {
-	case probe.MaxTokens != nil && *probe.MaxTokens > 0:
-		needs.contextTokens += *probe.MaxTokens
-	case probe.MaxCompletionTokens != nil && *probe.MaxCompletionTokens > 0:
-		needs.contextTokens += *probe.MaxCompletionTokens
-	case probe.Options != nil && probe.Options.NumPredict != nil && *probe.Options.NumPredict > 0:
-		needs.contextTokens += *probe.Options.NumPredict
+	return needs, nil
+}
+
+// Repeated messages arrays decode into reused struct elements in encoding/json.
+// An omitted field, null element, or mistyped element retains that element's
+// previous fields, including elements hidden by an intermediate shorter array.
+// An empty or null array discards the backing storage. Track only the fields
+// capability inference reads, borrowing content rather than copying it.
+func requestMessagesHaveImage(ctx context.Context, body []byte) (bool, error) {
+	maxMessages := 0
+	visitObject(body, func(key []byte, start, end int) {
+		if !jsonKeyEqual(key, "messages", true) {
+			return
+		}
+		count := 0
+		visitArray(body[start:end], func([]byte) { count++ })
+		maxMessages = max(maxMessages, count)
+	})
+	if maxMessages == 0 {
+		return false, nil
 	}
-	return needs
+	type messageState struct {
+		content    []byte
+		generation uint64
+		images     bool
+	}
+	w := newBodyWorkspace(ctx)
+	defer w.close()
+	// A borrowed slice header, generation, boolean and alignment total 40
+	// bytes per element on the supported 64-bit architectures. One exact-cap
+	// vector suffices across every repeated array; no decoder/growth copies.
+	if err := w.acquire(40 * int64(maxMessages)); err != nil {
+		return false, err
+	}
+	messages := make([]messageState, maxMessages)
+	generation, count := uint64(1), 0
+	visitObject(body, func(key []byte, start, end int) {
+		if !jsonKeyEqual(key, "messages", true) {
+			return
+		}
+		raw := body[start:end]
+		if bytes.Equal(raw, []byte("null")) {
+			generation++
+			count = 0
+			return
+		}
+		if len(raw) == 0 || raw[0] != '[' {
+			return // A type error leaves the old slice and its elements intact.
+		}
+		count = 0
+		visitArray(raw, func(message []byte) {
+			state := &messages[count]
+			count++
+			if state.generation != generation {
+				*state = messageState{generation: generation}
+			}
+			visitObject(message, func(key []byte, start, end int) {
+				if jsonKeyEqual(key, "content", true) {
+					state.content = message[start:end]
+				} else if jsonKeyEqual(key, "images", true) {
+					images := message[start:end]
+					if bytes.Equal(images, []byte("null")) {
+						state.images = false
+					} else if len(images) > 0 && images[0] == '[' {
+						state.images = false
+						visitArray(images, func([]byte) { state.images = true })
+					}
+				}
+			})
+		})
+		if count == 0 {
+			generation++
+		}
+	})
+	for _, message := range messages[:count] {
+		if message.images || contentHasImage(message.content) {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func nonEmptyArray(raw json.RawMessage) bool {
-	var arr []json.RawMessage
-	return json.Unmarshal(raw, &arr) == nil && len(arr) > 0
+	if !ownedJSONValid(raw) {
+		return false
+	}
+	nonempty := false
+	visitArray(raw, func([]byte) { nonempty = true })
+	return nonempty
 }
 
 // contentHasImage reports whether an OpenAI message content array carries an
 // image part. A string content never does.
 func contentHasImage(raw json.RawMessage) bool {
-	var parts []struct {
-		Type string `json:"type"`
-	}
-	if json.Unmarshal(raw, &parts) != nil {
+	if !ownedJSONValid(raw) {
 		return false
 	}
-	for _, p := range parts {
-		if p.Type == "image_url" || p.Type == "image" || p.Type == "input_image" {
-			return true
+	found, valid := false, true
+	visitArray(raw, func(part []byte) {
+		if bytes.Equal(part, []byte("null")) {
+			return
 		}
-	}
-	return false
+		if !isJSONObject(part) {
+			valid = false
+			return
+		}
+		visitObject(part, func(key []byte, start, end int) {
+			if jsonKeyEqual(key, "type", true) && part[start] != '"' && !bytes.Equal(part[start:end], []byte("null")) {
+				valid = false
+			}
+		})
+		value := requestStructString(part, "type", nil)
+		if jsonStringEquals(value, "image_url") || jsonStringEquals(value, "image") || jsonStringEquals(value, "input_image") {
+			found = true
+		}
+	})
+	return found && valid
 }
 
 // tierSearchOrder is the order tiers are searched in for a request: the
@@ -418,6 +500,29 @@ func (f *facade) reserveRound(cands []candidate, tier bool) ([]candidate, reserv
 	return cands, held
 }
 
+func (f *facade) reserveRoundPrepared(ctx context.Context, cands []candidate, tier bool, model string, prepare candidatePreparation, refresh ...func() []candidate) ([]candidate, reservation, error) {
+	for {
+		f.host.admission.mu.Lock()
+		generation := f.host.admission.policyGeneration
+		f.host.admission.mu.Unlock()
+		if len(refresh) > 0 {
+			cands = refresh[0]()
+		}
+		n := len(cands)
+		if tier && n > 0 {
+			n = 1
+			for n < len(cands) && cands[n].tierRank == cands[0].tierRank && cands[n].warm == cands[0].warm {
+				n++
+			}
+		}
+		_, held, err := f.host.reserveCandidatePrepared(ctx, f, cands[:n], model, prepare, &generation)
+		if err == errCandidatePreparationStale {
+			continue // Re-resolve the policy's candidate class before rebuilding.
+		}
+		return cands, held, err
+	}
+}
+
 // tierModelEntries appends the synthetic alias records to a merged /v1/models
 // list, so a client can pick a tier from it. An upstream model already named
 // like an alias is left alone.
@@ -525,70 +630,253 @@ func requestAliasRejection(r *http.Request, body []byte, model string, inference
 	if reason, rejected := aliasRejection(model, inference); rejected {
 		return strings.TrimSpace(model), reason, true
 	}
-	names := jsonModelNames(body)
-	names = append(names, r.URL.Query()["model"]...)
-	for _, prefix := range modelDetailPrefixes {
-		if rest, ok := strings.CutPrefix(r.URL.Path, prefix); ok {
-			names = append(names, rest)
+	if name := jsonModelAlias(body); name != "" {
+		return name, aliasReasonNotInferenceReady, true
+	}
+	for rest := r.URL.RawQuery; rest != ""; {
+		var field string
+		field, rest, _ = strings.Cut(rest, "&")
+		if strings.Contains(field, ";") {
+			continue // Preserve URL.Query's rejection of semicolon-bearing fields.
+		}
+		key, value, _ := strings.Cut(field, "=")
+		if queryModelKey(key) {
+			decoder := aliasQueryDecoder{raw: value}
+			if name := borrowedAlias(decoder.nextRune); name != "" && !decoder.bad {
+				return name, aliasReasonNotInferenceReady, true
+			}
 		}
 	}
-	for _, name := range names {
-		name = strings.TrimSpace(name)
-		if _, mode, ok := nodepolicy.ParseAlias(name); ok && mode != nodepolicy.AliasBare {
-			return name, aliasReasonNotInferenceReady, true
+	for _, prefix := range modelDetailPrefixes {
+		if rest, ok := strings.CutPrefix(r.URL.Path, prefix); ok {
+			if _, mode, ok := nodepolicy.ParseAlias(strings.TrimSpace(rest)); ok && mode != nodepolicy.AliasBare {
+				return strings.TrimSpace(rest), aliasReasonNotInferenceReady, true
+			}
 		}
 	}
 	return "", "", false
 }
 
-// jsonModelNames returns the string values of every top-level key of a JSON
-// object body that equals "model" or "name" under strings.EqualFold. A body
-// that is not a JSON object yields none.
-func jsonModelNames(body []byte) []string {
-	dec := json.NewDecoder(bytes.NewReader(body))
-	if tok, err := dec.Token(); err != nil || tok != json.Delim('{') {
-		return nil
+func queryModelKey(raw string) bool {
+	decoder := aliasQueryDecoder{raw: raw}
+	for _, want := range []byte("model") {
+		got, ok := decoder.nextByte()
+		if !ok || got != want {
+			return false
+		}
 	}
-	var out []string
-	for dec.More() {
-		tok, err := dec.Token()
-		key, isString := tok.(string)
-		if err != nil || !isString {
-			return out
+	_, more := decoder.nextByte()
+	return !more && !decoder.bad
+}
+
+// The validation guard measures decoded bytes before any alias trimming or
+// model normalization. Values remain borrowed, including malformed-prefix
+// completed members and query fields whose percent decoding later fails.
+func validateRequestIdentifiers(r *http.Request, body []byte) error {
+	tooLong := false
+	visitCompletedRequestMembers(body, func(key, raw []byte) bool {
+		if len(raw) > 0 && raw[0] == '"' && (jsonKeyEqual(key, "model", true) || jsonKeyEqual(key, "name", true)) && requestJSONStringTooLong(raw) {
+			tooLong = true
+			return false
 		}
-		var raw json.RawMessage
-		if dec.Decode(&raw) != nil {
-			return out
-		}
-		if !strings.EqualFold(key, "model") && !strings.EqualFold(key, "name") {
+		return true
+	})
+	if tooLong {
+		return &requestIdentifierError{}
+	}
+	for rest := r.URL.RawQuery; rest != ""; {
+		var field string
+		field, rest, _ = strings.Cut(rest, "&")
+		if strings.Contains(field, ";") {
 			continue
 		}
-		var value string
-		if json.Unmarshal(raw, &value) == nil {
-			out = append(out, value)
+		key, value, _ := strings.Cut(field, "=")
+		if !queryModelKey(key) {
+			continue
+		}
+		decoder := aliasQueryDecoder{raw: value}
+		n := 0
+		for _, more := decoder.nextByte(); more; _, more = decoder.nextByte() {
+			if n <= maxRequestIdentifierBytes {
+				n++
+			}
+		}
+		if !decoder.bad && n > maxRequestIdentifierBytes {
+			return &requestIdentifierError{}
 		}
 	}
-	return out
+	for _, prefix := range modelDetailPrefixes {
+		if rest, ok := strings.CutPrefix(r.URL.Path, prefix); ok && len(rest) > maxRequestIdentifierBytes {
+			return &requestIdentifierError{}
+		}
+	}
+	return nil
+}
+
+// Completed members retain the old decoder's partial-prefix behavior even
+// when a later member is malformed. Only JSON's four whitespace bytes are
+// skipped, matching encoding/json rather than Unicode strings.TrimSpace.
+func visitCompletedRequestMembers(body []byte, visit func([]byte, []byte) bool) {
+	trim := func(raw []byte) []byte { return bytes.Trim(raw, " \t\r\n") }
+	rest := trim(body)
+	if len(rest) == 0 || rest[0] != '{' {
+		return
+	}
+	rest = trim(rest[1:])
+	for len(rest) > 0 && rest[0] != '}' {
+		keyEnd, ok := ownedJSONStringEnd(rest, 0)
+		if !ok {
+			return
+		}
+		key := rest[:keyEnd]
+		rest = trim(rest[keyEnd:])
+		if len(rest) == 0 || rest[0] != ':' {
+			return
+		}
+		rest = trim(rest[1:])
+		if len(rest) == 0 {
+			return
+		}
+		end := streamJSONValueEnd(rest)
+		if rest[0] == '"' {
+			var ok bool
+			end, ok = ownedJSONStringEnd(rest, 0)
+			if !ok {
+				return
+			}
+		}
+		if end == 0 || !ownedJSONValid(rest[:end]) {
+			return
+		}
+		if !visit(key, rest[:end]) {
+			return
+		}
+		rest = trim(rest[end:])
+		if len(rest) == 0 || rest[0] != ',' {
+			return
+		}
+		rest = trim(rest[1:])
+	}
+}
+
+func jsonModelAlias(body []byte) string {
+	var name string
+	visitCompletedRequestMembers(body, func(key, raw []byte) bool {
+		if raw[0] != '"' || (!jsonKeyEqual(key, "model", true) && !jsonKeyEqual(key, "name", true)) {
+			return true
+		}
+		pos := 1
+		name = borrowedAlias(func() (rune, bool) {
+			if pos >= len(raw)-1 {
+				return 0, false
+			}
+			r, next := ownedJSONRune(raw, pos)
+			pos = next
+			return r, true
+		})
+		return name == ""
+	})
+	return name
+}
+
+func borrowedAlias(next func() (rune, bool)) string {
+	var name [16]byte
+	n, trailing, invalid := 0, false, false
+	for r, more := next(); more; r, more = next() {
+		if unicode.IsSpace(r) {
+			trailing = n > 0
+			continue
+		}
+		if trailing || r > 127 || n == len(name) {
+			invalid = true
+			continue
+		}
+		name[n], n = byte(r), n+1
+	}
+	if !invalid {
+		for _, alias := range [...]string{"weak-api", "weak-local", "medium-api", "medium-local", "strong-api", "strong-local"} {
+			if len(alias) == n {
+				matched := true
+				for i := range n {
+					matched = matched && name[i] == alias[i]
+				}
+				if matched {
+					return alias
+				}
+			}
+		}
+	}
+	return ""
+}
+
+type aliasQueryDecoder struct {
+	raw string
+	pos int
+	bad bool
+}
+
+func (d *aliasQueryDecoder) nextByte() (byte, bool) {
+	if d.bad || d.pos == len(d.raw) {
+		return 0, false
+	}
+	b := d.raw[d.pos]
+	d.pos++
+	if b == '+' {
+		return ' ', true
+	}
+	if b != '%' {
+		return b, true
+	}
+	if len(d.raw)-d.pos < 2 {
+		d.bad = true
+		return 0, false
+	}
+	var decoded byte
+	for range 2 {
+		x := d.raw[d.pos]
+		d.pos++
+		switch {
+		case x >= '0' && x <= '9':
+			x -= '0'
+		case x >= 'a' && x <= 'f':
+			x -= 'a' - 10
+		case x >= 'A' && x <= 'F':
+			x -= 'A' - 10
+		default:
+			d.bad = true
+			return 0, false
+		}
+		decoded = decoded*16 + x
+	}
+	return decoded, true
+}
+
+func (d *aliasQueryDecoder) nextRune() (rune, bool) {
+	var raw [utf8.UTFMax]byte
+	n := 0
+	for n < len(raw) {
+		b, more := d.nextByte()
+		if !more {
+			if n == 0 {
+				return 0, false
+			}
+			return utf8.RuneError, true
+		}
+		raw[n], n = b, n+1
+		if utf8.FullRune(raw[:n]) {
+			r, _ := utf8.DecodeRune(raw[:n])
+			return r, true
+		}
+	}
+	return utf8.RuneError, true
 }
 
 // writeAliasRejection answers a refused alias request with a structured 400.
 func writeAliasRejection(w http.ResponseWriter, alias, reason string) {
-	body, err := json.Marshal(struct {
-		Error  string `json:"error"`
-		Code   string `json:"code"`
-		Reason string `json:"reason"`
-		Model  string `json:"model"`
-	}{
-		Error:  "hybrid routing alias is not available on this request",
-		Code:   "feature_unavailable",
-		Reason: reason,
-		Model:  strings.TrimSpace(alias),
-	})
-	if err != nil {
-		body = []byte(`{"error":"hybrid routing alias is not available on this request","code":"feature_unavailable"}`)
-	}
-	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("X-Content-Type-Options", "nosniff")
-	w.WriteHeader(http.StatusBadRequest)
-	_, _ = w.Write(body)
+	writeInferenceErrorFields(w, http.StatusBadRequest,
+		inferenceErrorField{"error", []string{"hybrid routing alias is not available on this request"}},
+		inferenceErrorField{"code", []string{"feature_unavailable"}},
+		inferenceErrorField{"reason", []string{reason}},
+		inferenceErrorField{"model", []string{strings.TrimSpace(alias)}},
+	)
 }

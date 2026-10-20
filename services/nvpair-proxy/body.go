@@ -3,228 +3,733 @@
 
 package main
 
-// Request-body edits: rewriting a tier request's model to the concrete one,
-// and merging a profile's requestOptions into a request.
-//
-// Both splice bytes rather than decode and re-encode the body. A round trip
-// through a Go map reorders keys and rewrites numbers and escapes, and an
-// engine is entitled to see the request its client sent; only the member being
-// changed is touched, and every other byte goes through as it arrived.
-
+// Body edits preserve untouched bytes. The iterative plan measures member/key
+// storage before allocation and writes directly into one final send body.
 import (
 	"bytes"
-	"encoding/json"
-	"io"
-	"slices"
+	"context"
+	"net/http"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 )
 
-// jsonMember is one top-level member of a JSON object, located by the byte
-// offsets of its value.
 type jsonMember struct {
-	key        string
-	valueStart int
-	valueEnd   int
+	key                  string
+	valueStart, valueEnd int
 }
 
-// objectMembers parses data as one JSON object and returns its members in
-// order, plus the offset of its closing brace. ok is false when data is not
-// exactly one object.
-func objectMembers(data []byte) (members []jsonMember, closeBrace int, ok bool) {
-	dec := json.NewDecoder(bytes.NewReader(data))
-	dec.UseNumber()
-	tok, err := dec.Token()
-	if err != nil {
-		return nil, 0, false
-	}
-	if d, isDelim := tok.(json.Delim); !isDelim || d != '{' {
-		return nil, 0, false
-	}
-	for dec.More() {
-		keyTok, err := dec.Token()
-		if err != nil {
-			return nil, 0, false
-		}
-		key, isString := keyTok.(string)
-		if !isString {
-			return nil, 0, false
-		}
-		var raw json.RawMessage
-		if err := dec.Decode(&raw); err != nil {
-			return nil, 0, false
-		}
-		end := int(dec.InputOffset())
-		members = append(members, jsonMember{key: key, valueStart: end - len(raw), valueEnd: end})
-	}
-	tok, err = dec.Token()
-	if err != nil {
-		return nil, 0, false
-	}
-	if d, isDelim := tok.(json.Delim); !isDelim || d != '}' {
-		return nil, 0, false
-	}
-	closeBrace = int(dec.InputOffset()) - 1
-	// Nothing but whitespace may follow the object.
-	if _, err := dec.Token(); err != io.EOF {
-		return nil, 0, false
-	}
-	if closeBrace < 0 || closeBrace >= len(data) || data[closeBrace] != '}' {
-		return nil, 0, false
-	}
-	return members, closeBrace, true
+// Identifiers become bounded control metadata only after this decoded-byte
+// check. Padding counts before normalization, and escaped strings are measured
+// without allocating their decoded representation.
+const maxRequestIdentifierBytes = 256
+
+type requestIdentifierError struct{}
+
+func (*requestIdentifierError) Error() string {
+	return "model or tier alias exceeds 256 decoded UTF-8 bytes"
 }
+func (*requestIdentifierError) HTTPStatus() int { return http.StatusBadRequest }
 
-// ambiguousModelMessage does not echo any request values.
-const ambiguousModelMessage = `the request body must use a single top-level "model" member with that exact spelling`
-
-// ambiguousModelMember rejects duplicate model members and spellings other
-// than decoded "model". encoding/json matches struct fields case-insensitively,
-// whereas body rewrites and other decoders may require exact spelling.
-// Non-object bodies are left to the caller's shape validation.
-func ambiguousModelMember(body []byte) bool {
-	members, _, ok := objectMembers(body)
-	if !ok {
-		return false
-	}
-	seen := false
-	for _, m := range members {
-		if !strings.EqualFold(m.key, "model") {
-			continue
-		}
-		if seen || m.key != "model" {
+func requestJSONStringTooLong(raw []byte) bool {
+	n := 0
+	for i := 1; i < len(raw)-1; {
+		r, next := ownedJSONRune(raw, i)
+		n += utf8.RuneLen(r)
+		if n > maxRequestIdentifierBytes {
 			return true
 		}
-		seen = true
+		i = next
 	}
 	return false
 }
 
-// bodyModelMatches checks the effective body after transformations, without
-// consulting serving policy again. Admission remains the linearization point.
-func bodyModelMatches(body []byte, model string) bool {
-	members, _, ok := objectMembers(body)
-	if !ok || ambiguousModelMember(body) {
+func validateBodyModelIdentifier(body []byte) error {
+	if !ownedJSONValid(body) {
+		return nil
+	}
+	tooLong := false
+	visitObject(body, func(key []byte, start, end int) {
+		if jsonKeyEqual(key, "model", true) && end > start && body[start] == '"' && requestJSONStringTooLong(body[start:end]) {
+			tooLong = true
+		}
+	})
+	if tooLong {
+		return &requestIdentifierError{}
+	}
+	return nil
+}
+
+// visitObject takes validated JSON and visits borrowed top-level values.
+func visitObject(data []byte, visit func([]byte, int, int)) (int, bool) {
+	i := 0
+	space := func() {
+		for i < len(data) && (data[i] == ' ' || data[i] == '\t' || data[i] == '\r' || data[i] == '\n') {
+			i++
+		}
+	}
+	space()
+	if i == len(data) || data[i] != '{' {
+		return 0, false
+	}
+	i++
+	for {
+		space()
+		if i < len(data) && data[i] == '}' {
+			return i, true
+		}
+		keyStart := i
+		keyEnd, ok := ownedJSONStringEnd(data, i)
+		if !ok {
+			return 0, false
+		}
+		i = keyEnd
+		space()
+		if i == len(data) || data[i] != ':' {
+			return 0, false
+		}
+		i++
+		space()
+		start := i
+		end := i + streamJSONValueEnd(data[i:])
+		for end > start && (data[end-1] == ' ' || data[end-1] == '\t' || data[end-1] == '\r' || data[end-1] == '\n') {
+			end--
+		}
+		if visit != nil {
+			visit(data[keyStart:keyEnd], start, end)
+		}
+		i = end
+		space()
+		if i < len(data) && data[i] == ',' {
+			i++
+			continue
+		}
+		if i < len(data) && data[i] == '}' {
+			return i, true
+		}
+		return 0, false
+	}
+}
+
+func decodedJSONStringBytes(raw []byte) int {
+	n := 0
+	for i := 1; i < len(raw)-1; {
+		r, next := ownedJSONRune(raw, i)
+		n += utf8.RuneLen(r)
+		i = next
+	}
+	return n
+}
+func decodedJSONStringCapacity(raw []byte) int64 {
+	if bytes.IndexByte(raw, '\\') < 0 && utf8.Valid(raw) {
+		return int64(len(raw) - 2)
+	}
+	n := int64(decodedJSONStringBytes(raw))
+	if n <= 1024 {
+		return 2*n + 16
+	}
+	if n <= 32768 {
+		return n + 4096
+	}
+	return n + 8192
+}
+func decodeJSONString(raw []byte) string {
+	if bytes.IndexByte(raw, '\\') < 0 && utf8.Valid(raw) {
+		return string(raw[1 : len(raw)-1])
+	}
+	var b strings.Builder
+	b.Grow(decodedJSONStringBytes(raw))
+	for i := 1; i < len(raw)-1; {
+		r, next := ownedJSONRune(raw, i)
+		b.WriteRune(r)
+		i = next
+	}
+	return b.String()
+}
+func jsonKeyEqual(raw []byte, name string, fold bool) bool {
+	if len(raw) > 6*len(name)+2 {
 		return false
 	}
-	for _, m := range members {
-		if m.key == "model" {
-			raw := bytes.TrimSpace(body[m.valueStart:m.valueEnd])
-			var selected string
-			return len(raw) > 0 && raw[0] == '"' && json.Unmarshal(raw, &selected) == nil && selected == model
+	pos := 0
+	for i := 1; i < len(raw)-1; {
+		if pos == len(name) {
+			return false
 		}
-	}
-	return false
-}
-
-// replaceModel returns body with its top-level "model" replaced by model, and
-// false when body is not an object with a model member. Every other byte is
-// preserved.
-func replaceModel(body []byte, model string) ([]byte, bool) {
-	members, _, ok := objectMembers(body)
-	if !ok {
-		return nil, false
-	}
-	value, err := json.Marshal(model)
-	if err != nil {
-		return nil, false
-	}
-	for _, m := range members {
-		if m.key != "model" {
-			continue
-		}
-		out := make([]byte, 0, len(body)-(m.valueEnd-m.valueStart)+len(value))
-		out = append(out, body[:m.valueStart]...)
-		out = append(out, value...)
-		out = append(out, body[m.valueEnd:]...)
-		return out, true
-	}
-	return nil, false
-}
-
-// mergeDefaults merges a profile's requestOptions object into body. Keys
-// already in the request win; where both sides hold an object the merge
-// recurses, so a profile's {"options":{"num_ctx":16384}} still applies to a
-// request that sets only options.temperature. Missing members are appended
-// before the object's closing brace and everything else is preserved. A body
-// or defaults that is not a JSON object leaves body unchanged.
-func mergeDefaults(body, defaults []byte) []byte {
-	if len(bytes.TrimSpace(defaults)) == 0 {
-		return body
-	}
-	merged, ok := mergeObject(body, defaults)
-	if !ok {
-		return body
-	}
-	return merged
-}
-
-func mergeObject(body, defaults []byte) ([]byte, bool) {
-	members, closeBrace, ok := objectMembers(body)
-	if !ok {
-		return nil, false
-	}
-	defMembers, _, ok := objectMembers(defaults)
-	if !ok {
-		return nil, false
-	}
-	byKey := make(map[string]jsonMember, len(members))
-	for _, m := range members {
-		// A duplicate key resolves to the last occurrence, as encoding/json
-		// and most engines read it.
-		byKey[m.key] = m
-	}
-	type splice struct {
-		start, end int
-		with       []byte
-	}
-	var splices []splice
-	var appended [][]byte
-	for _, d := range defMembers {
-		defValue := defaults[d.valueStart:d.valueEnd]
-		existing, present := byKey[d.key]
-		if !present {
-			key, err := json.Marshal(d.key)
-			if err != nil {
-				return nil, false
+		r, next := ownedJSONRune(raw, i)
+		other, n := utf8.DecodeRuneInString(name[pos:])
+		if r != other {
+			if !fold {
+				return false
 			}
-			appended = append(appended, slices.Concat(key, []byte(":"), defValue))
+			folded := unicode.SimpleFold(r)
+			for folded != r && folded != other {
+				folded = unicode.SimpleFold(folded)
+			}
+			if folded != other {
+				return false
+			}
+		}
+		i, pos = next, pos+n
+	}
+	return pos == len(name)
+}
+func jsonStringEquals(raw []byte, want string) bool {
+	if len(raw) < 2 || raw[0] != '"' {
+		return false
+	}
+	pos := 0
+	for i := 1; i < len(raw)-1; {
+		if pos == len(want) {
+			return false
+		}
+		r, next := ownedJSONRune(raw, i)
+		other, n := utf8.DecodeRuneInString(want[pos:])
+		if r != other {
+			return false
+		}
+		pos += n
+		i = next
+	}
+	return pos == len(want)
+}
+
+type bodyWorkspace struct {
+	ctx    context.Context
+	owner  *ownedInferenceBuffers
+	leases []*bufferLease
+}
+
+func newBodyWorkspace(ctx context.Context) *bodyWorkspace {
+	w := &bodyWorkspace{ctx: ctx}
+	if ctx != nil {
+		w.owner = inferenceBuffers(ctx)
+	}
+	return w
+}
+func (w *bodyWorkspace) acquire(n int64) error {
+	if w.owner == nil {
+		return nil
+	}
+	// Includes lease records and old/new bookkeeping slice capacity.
+	l, err := w.owner.scope.acquire(w.ctx, n+256)
+	if err != nil {
+		return err
+	}
+	w.leases = append(w.leases, l)
+	return nil
+}
+func (w *bodyWorkspace) close() {
+	for _, l := range w.leases {
+		l.close()
+	}
+	w.leases = nil
+}
+func (w *bodyWorkspace) members(data []byte) ([]jsonMember, int, bool, error) {
+	count := 0
+	keyBytes := int64(0)
+	close, ok := visitObject(data, func(key []byte, _, _ int) { count++; keyBytes += decodedJSONStringCapacity(key) })
+	if !ok {
+		return nil, 0, false, nil
+	}
+	if err := w.acquire(32*int64(count) + keyBytes); err != nil {
+		return nil, 0, false, err
+	}
+	members := make([]jsonMember, 0, count)
+	visitObject(data, func(key []byte, start, end int) {
+		members = append(members, jsonMember{decodeJSONString(key), start, end})
+	})
+	return members, close, true, nil
+}
+func objectMembers(data []byte) ([]jsonMember, int, bool) {
+	if !ownedJSONValid(data) {
+		return nil, 0, false
+	}
+	w := newBodyWorkspace(nil)
+	defer w.close()
+	m, c, ok, _ := w.members(data)
+	return m, c, ok
+}
+
+const ambiguousModelMessage = `the request body must use a single top-level "model" member with that exact spelling`
+
+func ambiguousModelMember(body []byte) bool {
+	if !ownedJSONValid(body) {
+		return false
+	}
+	seen, bad := false, false
+	visitObject(body, func(key []byte, _, _ int) {
+		if jsonKeyEqual(key, "model", true) {
+			if seen || !jsonKeyEqual(key, "model", false) {
+				bad = true
+			}
+			seen = true
+		}
+	})
+	return bad
+}
+func bodyModelMatches(body []byte, model string) bool {
+	if !ownedJSONValid(body) || ambiguousModelMember(body) {
+		return false
+	}
+	matched := false
+	_, ok := visitObject(body, func(key []byte, start, end int) {
+		if jsonKeyEqual(key, "model", false) {
+			matched = jsonStringEquals(body[start:end], model)
+		}
+	})
+	return ok && matched
+}
+
+// Match encoding/json string spelling without its retained encoder pool.
+func appendJSONString(out []byte, s string) []byte {
+	out = append(out, '"')
+	out = appendJSONStringContent(out, s)
+	return append(out, '"')
+}
+func appendJSONStringContent(out []byte, s string) []byte {
+	const hex = "0123456789abcdef"
+	for i := 0; i < len(s); {
+		r, width := utf8.DecodeRuneInString(s[i:])
+		i += width
+		if r == utf8.RuneError && width == 1 {
+			out = append(out, `\ufffd`...)
 			continue
 		}
-		reqValue := body[existing.valueStart:existing.valueEnd]
-		if isJSONObject(reqValue) && isJSONObject(defValue) {
-			inner, ok := mergeObject(reqValue, defValue)
-			if !ok {
+		switch r {
+		case '"', '\\':
+			out = append(out, '\\', byte(r))
+		case '\n':
+			out = append(out, '\\', 'n')
+		case '\r':
+			out = append(out, '\\', 'r')
+		case '\t':
+			out = append(out, '\\', 't')
+		case '\b':
+			out = append(out, '\\', 'b')
+		case '\f':
+			out = append(out, '\\', 'f')
+		default:
+			if r < 0x20 || r == '<' || r == '>' || r == '&' || r == 0x2028 || r == 0x2029 {
+				out = append(out, '\\', 'u', hex[(r>>12)&15], hex[(r>>8)&15], hex[(r>>4)&15], hex[r&15])
+			} else {
+				out = utf8.AppendRune(out, r)
+			}
+		}
+	}
+	return out
+}
+func quotedJSONStringSize(s string) int {
+	n := 2
+	for i := 0; i < len(s); {
+		r, width := utf8.DecodeRuneInString(s[i:])
+		i += width
+		if r == utf8.RuneError && width == 1 {
+			n += 6
+			continue
+		}
+		switch r {
+		case '"', '\\', '\n', '\r', '\t', '\b', '\f':
+			n += 2
+		default:
+			if r < 0x20 || r == '<' || r == '>' || r == '&' || r == 0x2028 || r == 0x2029 {
+				n += 6
+			} else {
+				n += utf8.RuneLen(r)
+			}
+		}
+	}
+	return n
+}
+
+type bodyMergePlan struct {
+	body, defaults          []byte
+	members, defaultMembers []jsonMember
+	byKey                   map[string]int
+	children                []*bodyMergePlan
+	parent, next, work      *bodyMergePlan
+	close, size, modelIndex int
+	changed                 bool
+	emitIndex, pos          int
+}
+
+// The caller closes release after its final transport borrower joins. No
+// intermediate rewrite, recursive merge output, or appended-default copy exists.
+func transformBody(ctx context.Context, body []byte, model string, rewrite bool, defaults []byte) ([]byte, func(), error) {
+	if !isJSONObject(defaults) {
+		defaults = nil
+	}
+	if trimmed := bytes.TrimSpace(defaults); len(trimmed) >= 2 && trimmed[len(trimmed)-1] == '}' && len(bytes.TrimSpace(trimmed[1:len(trimmed)-1])) == 0 {
+		defaults = nil
+	}
+	if !rewrite && len(defaults) == 0 {
+		return body, func() {}, nil
+	}
+	w := newBodyWorkspace(ctx)
+	defer w.close()
+	if err := w.acquire(96 << 10); err != nil {
+		return nil, nil, err
+	}
+	if !ownedJSONValid(body) {
+		if rewrite {
+			return nil, nil, errAmbiguousModel
+		}
+		return body, func() {}, nil
+	}
+	if len(bytes.TrimSpace(defaults)) > 0 && !ownedJSONValid(defaults) {
+		defaults = nil
+	}
+	if len(defaults) == 0 {
+		if !rewrite {
+			return body, func() {}, nil
+		}
+		start, end, found := 0, 0, false
+		visitObject(body, func(key []byte, s, e int) {
+			if !found && jsonKeyEqual(key, "model", false) {
+				start, end, found = s, e, true
+			}
+		})
+		if !found {
+			return nil, nil, errAmbiguousModel
+		}
+		size := len(body) - (end - start) + quotedJSONStringSize(model)
+		var lease *bufferLease
+		var err error
+		if w.owner != nil {
+			lease, err = w.owner.scope.acquire(ctx, int64(size)+256)
+			if err != nil {
+				return nil, nil, err
+			}
+		}
+		release := func() {}
+		if lease != nil {
+			release = lease.close
+		}
+		out := make([]byte, 0, size)
+		out = append(out, body[:start]...)
+		out = appendJSONString(out, model)
+		out = append(out, body[end:]...)
+		return out, release, nil
+	}
+	var all, pending *bodyMergePlan
+	newNode := func(body, defs []byte, parent *bodyMergePlan) (*bodyMergePlan, error) {
+		if err := w.acquire(256); err != nil {
+			return nil, err
+		}
+		members, close, ok, err := w.members(body)
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			return nil, nil
+		}
+		defMembers, _, _, err := w.members(defs)
+		if err != nil {
+			return nil, err
+		}
+		// 128 bytes/member covers map entries/control groups and old/new
+		// map growth plus the exact-capacity child pointer array.
+		if err := w.acquire(128*int64(len(members)) + 512); err != nil {
+			return nil, err
+		}
+		n := &bodyMergePlan{body: body, defaults: defs, members: members, defaultMembers: defMembers, close: close, size: len(body), modelIndex: -1, parent: parent, next: all, work: pending, byKey: make(map[string]int, len(members)), children: make([]*bodyMergePlan, len(members))}
+		for i, m := range members {
+			n.byKey[m.key] = i
+		}
+		all, pending = n, n
+		return n, nil
+	}
+	root, err := newNode(body, defaults, nil)
+	if err != nil {
+		return nil, nil, err
+	}
+	if root == nil {
+		if rewrite {
+			return nil, nil, errAmbiguousModel
+		}
+		return body, func() {}, nil
+	}
+	if rewrite {
+		for i, m := range root.members {
+			if m.key == "model" {
+				root.modelIndex = i
+				root.changed = true
+				break
+			}
+		}
+		if root.modelIndex < 0 {
+			return nil, nil, errAmbiguousModel
+		}
+	}
+	for pending != nil {
+		node := pending
+		pending = node.work
+		for _, d := range node.defaultMembers {
+			i, present := node.byKey[d.key]
+			if !present {
+				node.changed = true
 				continue
 			}
-			splices = append(splices, splice{existing.valueStart, existing.valueEnd, inner})
+			if node == root && i == root.modelIndex {
+				continue
+			}
+			m := node.members[i]
+			req, def := node.body[m.valueStart:m.valueEnd], node.defaults[d.valueStart:d.valueEnd]
+			if !isJSONObject(req) || !isJSONObject(def) {
+				continue
+			}
+			child, e := newNode(req, def, node)
+			if e != nil {
+				return nil, nil, e
+			}
+			node.children[i] = child
 		}
 	}
-	if len(splices) == 0 && len(appended) == 0 {
-		return body, true
-	}
-	var tail []byte
-	if len(appended) > 0 {
-		if len(members) > 0 {
-			tail = append(tail, ',')
+	// Children are newer than parents: this linked traversal is postorder.
+	for node := all; node != nil; node = node.next {
+		for i, child := range node.children {
+			if child != nil && child.changed {
+				m := node.members[i]
+				node.size += child.size - (m.valueEnd - m.valueStart)
+				node.changed = true
+			}
 		}
-		tail = append(tail, bytes.Join(appended, []byte(","))...)
+		appended := len(node.members) > 0
+		for _, d := range node.defaultMembers {
+			if _, present := node.byKey[d.key]; !present {
+				if appended {
+					node.size++
+				}
+				appended = true
+				node.size += quotedJSONStringSize(d.key) + 1 + d.valueEnd - d.valueStart
+			}
+		}
+		if node == root && node.modelIndex >= 0 {
+			m := node.members[node.modelIndex]
+			node.size += quotedJSONStringSize(model) - (m.valueEnd - m.valueStart)
+		}
 	}
-	out := make([]byte, 0, len(body)+len(tail)+64)
-	pos := 0
-	// Splices are in member order, so offsets only grow.
-	slices.SortFunc(splices, func(a, b splice) int { return a.start - b.start })
-	for _, s := range splices {
-		out = append(out, body[pos:s.start]...)
-		out = append(out, s.with...)
-		pos = s.end
+	if !root.changed {
+		return body, func() {}, nil
 	}
-	out = append(out, body[pos:closeBrace]...)
-	out = append(out, tail...)
-	out = append(out, body[closeBrace:]...)
-	return out, true
+	var lease *bufferLease
+	if w.owner != nil {
+		lease, err = w.owner.scope.acquire(ctx, int64(root.size)+256)
+		if err != nil {
+			return nil, nil, err
+		}
+	}
+	release := func() {}
+	if lease != nil {
+		release = lease.close
+	}
+	out := make([]byte, 0, root.size)
+	for node := root; node != nil; {
+		if node.emitIndex < len(node.members) {
+			i := node.emitIndex
+			m := node.members[i]
+			node.emitIndex++
+			out = append(out, node.body[node.pos:m.valueStart]...)
+			node.pos = m.valueEnd
+			if node == root && i == node.modelIndex {
+				out = appendJSONString(out, model)
+				continue
+			}
+			if child := node.children[i]; child != nil && child.changed {
+				node = child
+				continue
+			}
+			out = append(out, node.body[m.valueStart:m.valueEnd]...)
+			continue
+		}
+		out = append(out, node.body[node.pos:node.close]...)
+		appended := len(node.members) > 0
+		for _, d := range node.defaultMembers {
+			if _, present := node.byKey[d.key]; !present {
+				if appended {
+					out = append(out, ',')
+				}
+				appended = true
+				out = appendJSONString(out, d.key)
+				out = append(out, ':')
+				out = append(out, node.defaults[d.valueStart:d.valueEnd]...)
+			}
+		}
+		out = append(out, node.body[node.close:]...)
+		node = node.parent
+	}
+	if len(out) != root.size || cap(out) != root.size {
+		release()
+		return nil, nil, errBufferInvalid
+	}
+	return out, release, nil
 }
 
-func isJSONObject(raw []byte) bool {
-	t := bytes.TrimSpace(raw)
-	return len(t) > 0 && t[0] == '{'
+func replaceModel(body []byte, model string) ([]byte, bool) {
+	out, release, err := transformBody(nil, body, model, true, nil)
+	if release != nil {
+		defer release()
+	}
+	return out, err == nil && out != nil
+}
+func mergeDefaults(body, defaults []byte) []byte {
+	out, release, err := transformBody(nil, body, "", false, defaults)
+	if release != nil {
+		defer release()
+	}
+	if err != nil {
+		return body
+	}
+	return out
+}
+func mergeObject(body, defaults []byte) ([]byte, bool) {
+	if !isJSONObject(body) || !isJSONObject(defaults) || !ownedJSONValid(body) || !ownedJSONValid(defaults) {
+		return nil, false
+	}
+	return mergeDefaults(body, defaults), true
+}
+func isJSONObject(raw []byte) bool { t := bytes.TrimSpace(raw); return len(t) > 0 && t[0] == '{' }
+
+func visitArray(raw []byte, visit func([]byte)) bool {
+	raw = bytes.TrimSpace(raw)
+	if len(raw) < 2 || raw[0] != '[' {
+		return false
+	}
+	for rest := bytes.TrimSpace(raw[1:]); len(rest) > 0 && rest[0] != ']'; {
+		end := streamJSONValueEnd(rest)
+		if end == 0 {
+			return false
+		}
+		if visit != nil {
+			visit(bytes.TrimSpace(rest[:end]))
+		}
+		rest = bytes.TrimSpace(rest[end:])
+		if len(rest) > 0 && rest[0] == ',' {
+			rest = bytes.TrimSpace(rest[1:])
+		}
+	}
+	return true
+}
+
+func requestJSONField(object []byte, name string) []byte {
+	var result []byte
+	visitObject(object, func(key []byte, start, end int) {
+		if jsonKeyEqual(key, name, true) {
+			result = object[start:end]
+		}
+	})
+	return result
+}
+
+func positiveJSONInt(raw []byte) (int, bool) {
+	if len(raw) == 0 {
+		return 0, false
+	}
+	n := 0
+	limit := int(^uint(0) >> 1)
+	for _, c := range raw {
+		if c < '0' || c > '9' || n > (limit-int(c-'0'))/10 {
+			return 0, false
+		}
+		n = n*10 + int(c-'0')
+	}
+	return n, n > 0
+}
+
+// Struct decoding preserves an earlier value on a later type error, and
+// merges repeated object members. These views retain those existing semantics.
+func requestJSONArrayField(object []byte, name string) []byte {
+	var result []byte
+	visitObject(object, func(key []byte, start, end int) {
+		if !jsonKeyEqual(key, name, true) {
+			return
+		}
+		raw := object[start:end]
+		if bytes.Equal(raw, []byte("null")) {
+			result = nil
+		} else if len(raw) > 0 && raw[0] == '[' {
+			result = raw
+		}
+	})
+	return result
+}
+func requestStructString(object []byte, name string, previous []byte) []byte {
+	visitObject(object, func(key []byte, start, end int) {
+		if jsonKeyEqual(key, name, true) && object[start] == '"' {
+			previous = object[start:end]
+		}
+	})
+	return previous
+}
+func requestNestedString(object []byte, parent, name string) []byte {
+	var result []byte
+	visitObject(object, func(key []byte, start, end int) {
+		if !jsonKeyEqual(key, parent, true) {
+			return
+		}
+		raw := object[start:end]
+		if bytes.Equal(raw, []byte("null")) {
+			result = nil
+		} else if isJSONObject(raw) {
+			result = requestStructString(raw, name, result)
+		}
+	})
+	return result
+}
+func requestStructPositiveInt(object []byte, name string, previous int) int {
+	visitObject(object, func(key []byte, start, end int) {
+		if !jsonKeyEqual(key, name, true) {
+			return
+		}
+		raw := object[start:end]
+		if bytes.Equal(raw, []byte("null")) {
+			previous = 0
+			return
+		}
+		if n, ok := jsonInteger(raw); ok {
+			previous = n
+		}
+	})
+	return previous
+}
+func requestNestedPositiveInt(object []byte, parent, name string) int {
+	result := 0
+	visitObject(object, func(key []byte, start, end int) {
+		if !jsonKeyEqual(key, parent, true) {
+			return
+		}
+		raw := object[start:end]
+		if bytes.Equal(raw, []byte("null")) {
+			result = 0
+		} else if isJSONObject(raw) {
+			result = requestStructPositiveInt(raw, name, result)
+		}
+	})
+	return result
+}
+func jsonInteger(raw []byte) (int, bool) {
+	if len(raw) == 0 {
+		return 0, false
+	}
+	negative := raw[0] == '-'
+	if negative {
+		raw = raw[1:]
+	}
+	if len(raw) == 0 {
+		return 0, false
+	}
+	limit := -int(^uint(0) >> 1)
+	if negative {
+		limit--
+	}
+	n := 0
+	for _, c := range raw {
+		if c < '0' || c > '9' || n < (limit+int(c-'0'))/10 {
+			return 0, false
+		}
+		n = n*10 - int(c-'0')
+	}
+	if negative {
+		return n, true
+	}
+	return -n, true
 }

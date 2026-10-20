@@ -233,12 +233,15 @@ func (p *Proxy) requestBodyLimit() int64 {
 // (so each failover attempt can replay it — see the loop in handleHTTP) along
 // with the JSON "model" field for workload tracking. The read is capped at
 // limit bytes; a larger body returns a *http.MaxBytesError, which the caller
-// answers with 413 instead of forwarding a truncated request. Any other read
-// error keeps the previous behavior of forwarding what arrived. Returns
+// answers with 413 instead of forwarding a truncated request. Other read
+// errors also fail before forwarding. Returns
 // (nil, "", nil) when the body is absent and an empty model when none is
 // parseable. The caller restores r.Body from the returned bytes before each
 // forward attempt.
 func bufferBodyAndModel(w http.ResponseWriter, r *http.Request, limit int64) ([]byte, string, error) {
+	if owner := inferenceBuffers(r.Context()); owner != nil {
+		return owner.readBody(r, limit)
+	}
 	if r.Body == nil {
 		return nil, "", nil
 	}
@@ -249,7 +252,10 @@ func bufferBodyAndModel(w http.ResponseWriter, r *http.Request, limit int64) ([]
 		if stderrors.As(err, &tooLarge) {
 			return nil, "", err
 		}
-		return body, "", nil
+		return nil, "", err
+	}
+	if err := validateBodyModelIdentifier(body); err != nil {
+		return nil, "", err
 	}
 	var probe struct {
 		Model string `json:"model"`
@@ -806,37 +812,112 @@ type reservation struct {
 // Process-wide is the point: two facades bursting at once are competing for the
 // same GPU, so a dispatch through either has to be visible to the other.
 func (p *Proxy) reserveCandidate(f *facade, candidates []candidate) ([]candidate, reservation) {
+	out, held, _ := p.reserveCandidatePrepared(context.Background(), f, candidates, "", nil, nil)
+	return out, held
+}
+
+type candidatePreparation func(context.Context, candidate, nodepolicy.Profile, bool, uint64) error
+
+var errCandidatePreparationStale = stderrors.New("candidate preparation policy changed")
+
+// Selection has no effect until preparation succeeds. Both checks use the
+// original ranking owner; no placement/admission lock covers a storage wait.
+func (p *Proxy) reserveCandidatePrepared(ctx context.Context, f *facade, candidates []candidate, model string, prepare candidatePreparation, expected *uint64) ([]candidate, reservation, error) {
 	if len(candidates) == 0 {
-		return candidates, reservation{}
+		return candidates, reservation{}, nil
 	}
-	if selectedID := f.SelectedID(); selectedID != "" {
-		for _, cand := range candidates {
-			if cand.id == selectedID {
-				return candidates, reservation{}
+	for {
+		var generation uint64
+		var profile nodepolicy.Profile
+		var hasProfile bool
+		if prepare != nil {
+			p.admission.mu.Lock()
+			generation = p.admission.policyGeneration
+			if expected != nil && generation != *expected {
+				p.admission.mu.Unlock()
+				return candidates, reservation{}, errCandidatePreparationStale
+			}
+		}
+		f.selectedMu.RLock()
+		p.priorityMu.Lock()
+		index, reserve := p.candidateChoiceLocked(candidates, f.selectedID)
+		p.priorityMu.Unlock()
+		f.selectedMu.RUnlock()
+		if prepare != nil {
+			c := candidates[index]
+			if c.self {
+				m := model
+				if c.model != "" {
+					m = c.model
+				}
+				profile, hasProfile = p.admission.profileLocked(admKey{engine: c.engineOr(f.profile.Name), model: p.admission.normalize(c.engineOr(f.profile.Name), m)})
+			}
+			p.admission.mu.Unlock()
+		}
+		var err error
+		if prepare != nil {
+			err = prepare(ctx, candidates[index], profile, hasProfile, generation)
+			p.admission.mu.Lock()
+		}
+		f.selectedMu.RLock()
+		p.priorityMu.Lock()
+		current, currentReserve := p.candidateChoiceLocked(candidates, f.selectedID)
+		policyStale := prepare != nil && generation != p.admission.policyGeneration
+		stale := current != index || currentReserve != reserve || policyStale
+		if stale || err != nil || ctx.Err() != nil {
+			p.priorityMu.Unlock()
+			f.selectedMu.RUnlock()
+			if prepare != nil {
+				p.admission.mu.Unlock()
+			}
+			if ctx.Err() != nil {
+				return candidates, reservation{}, ctx.Err()
+			}
+			if policyStale {
+				return candidates, reservation{}, errCandidatePreparationStale
+			}
+			if stale {
+				continue // The next preparation releases/rebuilds its stale storage.
+			}
+			return candidates, reservation{}, err
+		}
+		var held reservation
+		chosen := candidates[index]
+		if reserve {
+			held = p.claimReservationLocked(chosen.id)
+		}
+		if index > 0 {
+			copy(candidates[1:index+1], candidates[:index])
+			candidates[0] = chosen
+		}
+		p.priorityMu.Unlock()
+		f.selectedMu.RUnlock()
+		if prepare != nil {
+			p.admission.mu.Unlock()
+		}
+		return candidates, held, nil
+	}
+}
+
+func (p *Proxy) candidateChoiceLocked(candidates []candidate, selectedID string) (int, bool) {
+	if selectedID != "" {
+		for _, c := range candidates {
+			if c.id == selectedID {
+				return 0, false
 			}
 		}
 	}
-
-	candidateIndex := make(map[string]int, len(candidates))
-	for i, cand := range candidates {
-		candidateIndex[cand.id] = i
-	}
-
-	p.priorityMu.Lock()
-	defer p.priorityMu.Unlock()
-	if len(p.priority) == 0 {
-		return candidates, reservation{}
-	}
-	if p.priorityReservations == nil {
-		p.priorityReservations = make(map[string]int)
-	}
-
 	bestIndex := -1
 	bestOrder := len(p.priority)
 	var bestLoad uint64
 	for order, id := range p.priority {
-		index, ok := candidateIndex[id]
-		if !ok {
+		index := -1
+		for i, c := range candidates {
+			if c.id == id {
+				index = i // Preserve the previous index map's last-ID entry.
+			}
+		}
+		if index < 0 {
 			continue
 		}
 		load := uint64(p.priorityPending[id]) +
@@ -849,20 +930,37 @@ func (p *Proxy) reserveCandidate(f *facade, candidates []candidate) ([]candidate
 		}
 	}
 	if bestIndex < 0 {
-		return candidates, reservation{}
+		return 0, false
 	}
+	return bestIndex, true
+}
 
-	chosen := candidates[bestIndex]
-	p.priorityReservations[chosen.id]++
-	if bestIndex > 0 {
-		copy(candidates[1:bestIndex+1], candidates[:bestIndex])
-		candidates[0] = chosen
+func (p *Proxy) claimReservationLocked(nodeID string) reservation {
+	if p.priorityReservations == nil {
+		p.priorityReservations = make(map[string]int)
 	}
-	return candidates, reservation{
-		nodeID:     chosen.id,
+	p.priorityReservations[nodeID]++
+	return reservation{
+		nodeID:     nodeID,
 		generation: p.appliedPriorityGeneration,
 		held:       true,
 	}
+}
+
+// A later attempt keeps its existing failover position. Its preparation must
+// still match the policy before the original placement owner takes its claim.
+func (p *Proxy) claimPreparedTarget(ctx context.Context, nodeID string, generation uint64, enabled bool) (reservation, bool) {
+	p.admission.mu.Lock()
+	defer p.admission.mu.Unlock()
+	if ctx.Err() != nil || generation != p.admission.policyGeneration {
+		return reservation{}, false
+	}
+	if !enabled {
+		return reservation{}, true
+	}
+	p.priorityMu.Lock()
+	defer p.priorityMu.Unlock()
+	return p.claimReservationLocked(nodeID), true
 }
 
 // releaseReservation drops an in-flight dispatch's reservation once its request

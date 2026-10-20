@@ -6,7 +6,6 @@ package main
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -164,10 +163,16 @@ func (f *facade) serveIngress(w http.ResponseWriter, r *http.Request, peer strin
 		return
 	}
 
+	r, buffers := f.host.ownInferenceBuffers(r)
+	w = &inferenceErrorWriter{ResponseWriter: w, ctx: r.Context()}
+	defer buffers.close()
 	body, model, err := bufferBodyAndModel(w, r, f.host.requestBodyLimit())
 	if err != nil {
-		writeIngressError(w, http.StatusRequestEntityTooLarge, "body-too-large",
-			"request body exceeds the proxy's size limit")
+		writeIngressError(w, bufferRequestStatus(err), "request-body", "request body could not be buffered")
+		return
+	}
+	if err := validateRequestIdentifiers(r, body); err != nil {
+		writeIngressError(w, bufferRequestStatus(err), "request-identifier", err.Error())
 		return
 	}
 	// Reject duplicate and unsupported model spellings before admission:
@@ -190,14 +195,49 @@ func (f *facade) serveIngress(w http.ResponseWriter, r *http.Request, peer strin
 	// peer having gone anywhere.
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
+	rawBody := body
+	preparedCtx := ctx
+	releaseBody, releasePreparation := func() {}, func() {}
+	defer func() { releasePreparation(); releaseBody() }()
 	admissionStarted := time.Now()
 	decision := f.host.admission.admit(ctx, admissionRequest{
 		engine:  f.profile.Name,
 		model:   model,
 		waitCap: parseAdmissionWait(r.Header),
 		cancel:  cancel,
+		prepare: func(ctx context.Context, profile nodepolicy.Profile, hasProfile bool, _ uint64) error {
+			releasePreparation()
+			releasePreparation = func() {}
+			releaseBody()
+			releaseBody = func() {}
+			var defaults []byte
+			if hasProfile {
+				defaults = profile.RequestOptions
+			}
+			var err error
+			body, releaseBody, err = transformBody(ctx, rawBody, "", false, defaults)
+			if err != nil {
+				releaseBody = func() {}
+				return err
+			}
+			if hasProfile && !bodyModelMatches(body, model) {
+				return errAmbiguousModel
+			}
+			preparedCtx, releasePreparation, err = preparePerformanceBuffers(ctx, body)
+			if err != nil {
+				releasePreparation = func() {}
+			}
+			return err
+		},
 	})
 	if decision.err != nil {
+		if ctx.Err() == nil {
+			if errors.Is(decision.err, errAmbiguousModel) {
+				writeIngressError(w, http.StatusBadRequest, "ambiguous-model", ambiguousModelMessage)
+			} else {
+				writeIngressError(w, bufferRequestStatus(decision.err), "inference-buffer", "inference request could not be prepared")
+			}
+		}
 		// The peer gave up while the request waited; nobody is left to answer.
 		return
 	}
@@ -218,19 +258,12 @@ func (f *facade) serveIngress(w http.ResponseWriter, r *http.Request, peer strin
 			"no local inference backend is available on this node")
 		return
 	}
-	if decision.hasProfile {
-		body = mergeDefaults(body, decision.profile.RequestOptions)
-		if !bodyModelMatches(body, model) {
-			writeIngressError(w, http.StatusBadRequest, "ambiguous-model", ambiguousModelMessage)
-			return
-		}
-	}
 	streamRequest, err := parseOriginStreamRequest(r.URL.Path, body)
 	if err != nil {
 		writeIngressError(w, http.StatusBadRequest, "invalid-stream", "invalid effective stream flag")
 		return
 	}
-	out := r.WithContext(ctx)
+	out := r.WithContext(preparedCtx)
 	out.Header = r.Header.Clone()
 	out.Header.Del(nodepolicy.AdmissionWaitHeader)
 	setReplayBody(out, body)
@@ -240,7 +273,11 @@ func (f *facade) serveIngress(w http.ResponseWriter, r *http.Request, peer strin
 	slog.Debug("cluster ingress forwarding to local backend",
 		"peer", peer, "method", r.Method, "path", r.URL.Path, "target", target.Host, "model", model)
 	p := f.newLocalReverseProxy(target)
-	performance := f.newPerformanceAttempt(r.Context(), model, r.URL.Path, body, performanceWait)
+	performance, err := f.newPerformanceAttemptOwned(preparedCtx, model, r.URL.Path, body, performanceWait)
+	if err != nil {
+		writeIngressError(w, bufferRequestStatus(err), "inference-buffer", "inference request could not be prepared")
+		return
+	}
 	p.Transport = performanceTransport{RoundTripper: p.Transport, attempt: performance}
 	sc := &statusCapture{ResponseWriter: w, status: http.StatusOK, idle: idleClientWriteTimeout}
 	p.ModifyResponse = func(resp *http.Response) error {
@@ -327,7 +364,7 @@ func (f *facade) serveStrictLocal(w http.ResponseWriter, r *http.Request, body [
 	}
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
-	validated, err := f.host.admission.qualifyStrict(f.profile.Name, model, r.URL.Path, body, req.Identity)
+	validated, err := f.host.admission.qualifyStrict(f.profile.Name, model, r.URL.Path, body, req.Identity, ctx)
 	if errors.Is(err, errAmbiguousModel) {
 		writeIngressError(w, http.StatusBadRequest, "ambiguous-model", ambiguousModelMessage)
 		return
@@ -338,6 +375,11 @@ func (f *facade) serveStrictLocal(w http.ResponseWriter, r *http.Request, body [
 		return
 	}
 	if err != nil {
+		var capacity interface{ HTTPStatus() int }
+		if errors.As(err, &capacity) {
+			writeIngressError(w, capacity.HTTPStatus(), "inference-buffer", "inference request could not be prepared")
+			return
+		}
 		writeStrictAdmissionError(w, err)
 		return
 	}
@@ -351,6 +393,12 @@ func (f *facade) serveStrictLocal(w http.ResponseWriter, r *http.Request, body [
 		writeIngressError(w, http.StatusBadRequest, "ambiguous-model", ambiguousModelMessage)
 		return
 	}
+	preparedCtx, releasePreparation, err := preparePerformanceBuffers(ctx, body)
+	if err != nil {
+		writeIngressError(w, bufferRequestStatus(err), "inference-buffer", "inference request could not be prepared")
+		return
+	}
+	defer releasePreparation()
 	ticket, err := f.host.admission.AdmitStrict(ctx, f.profile.Name, model, req, validated.generation)
 	if err != nil {
 		writeStrictAdmissionError(w, err)
@@ -375,7 +423,7 @@ func (f *facade) serveStrictLocal(w http.ResponseWriter, r *http.Request, body [
 		return
 	}
 	evidence = strictUncertain
-	out := r.WithContext(ctx)
+	out := r.WithContext(preparedCtx)
 	out.Header = r.Header.Clone()
 	stripInternalRoutingHeaders(out.Header)
 	setReplayBody(out, body)
@@ -383,7 +431,11 @@ func (f *facade) serveStrictLocal(w http.ResponseWriter, r *http.Request, body [
 		out.Header.Set("Accept-Encoding", "identity")
 	}
 	p := f.newLocalReverseProxy(target)
-	performance := f.newPerformanceAttempt(r.Context(), model, r.URL.Path, body, performanceWait)
+	performance, err := f.newPerformanceAttemptOwned(preparedCtx, model, r.URL.Path, body, performanceWait)
+	if err != nil {
+		writeIngressError(w, bufferRequestStatus(err), "inference-buffer", "inference request could not be prepared")
+		return
+	}
 	p.Transport = performanceTransport{RoundTripper: p.Transport, attempt: performance}
 	p.ErrorHandler = func(ew http.ResponseWriter, _ *http.Request, _ error) {
 		f.host.admission.mu.Lock()
@@ -442,12 +494,30 @@ func isLoopbackRemote(remoteAddr string) bool {
 
 // writeIngressError returns the actual failure without granting browser permissions.
 func writeIngressError(w http.ResponseWriter, status int, code, msg string) {
+	size := len(`{"code":,"error":}`) + quotedJSONStringSize(msg) + quotedJSONStringSize(code)
+	var lease *bufferLease
+	if ctx := errorBufferContext(w); ctx != nil {
+		if owner := inferenceBuffers(ctx); owner != nil {
+			var err error
+			lease, err = owner.scope.tryAcquire(ctx, int64(size))
+			if err != nil {
+				w.Header().Set("Content-Type", "application/json")
+				w.Header().Set("X-Content-Type-Options", "nosniff")
+				w.WriteHeader(bufferRequestStatus(err))
+				_, _ = w.Write(inferenceBufferRefusalJSON)
+				return
+			}
+			defer lease.close()
+		}
+	}
+	body := make([]byte, 0, size)
+	body = append(body, `{"code":`...)
+	body = appendJSONString(body, code)
+	body = append(body, `,"error":`...)
+	body = appendJSONString(body, msg)
+	body = append(body, '}')
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.WriteHeader(status)
-	body, err := json.Marshal(map[string]string{"error": msg, "code": code})
-	if err != nil {
-		body = []byte(`{"error":"ingress error"}`)
-	}
 	_, _ = w.Write(body)
 }

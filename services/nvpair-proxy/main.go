@@ -19,7 +19,19 @@ import (
 	"nvpair-shared/applog"
 	"nvpair-shared/clustertrust"
 	"nvpair-shared/engines"
+	"nvpair-shared/nodepolicy"
 )
+
+// initializeProxy validates the effective CLI body limit before startup gives
+// the proxy account paths, cluster trust, listeners, or dispatch work.
+func initializeProxy(codec *Codec, maxRequestBytes int64) (*Proxy, error) {
+	proxy := NewProxy(codec)
+	proxy.maxRequestBytes = maxRequestBytes
+	if _, _, err := proxy.bufferSettings(nodepolicy.Default()); err != nil {
+		return nil, fmt.Errorf("invalid --max-request-bytes: %w", err)
+	}
+	return proxy, nil
+}
 
 func main() {
 	ipcPath := flag.String("ipc", "", "IPC endpoint: Unix domain socket path or Windows named pipe (default: stdin/stdout)")
@@ -73,8 +85,10 @@ func main() {
 	}()
 
 	codec := NewCodec(transport)
-	proxy := NewProxy(codec)
-	proxy.maxRequestBytes = *maxRequestBytes
+	proxy, err := initializeProxy(codec, *maxRequestBytes)
+	if err != nil {
+		log.Fatal(err)
+	}
 	// The account store opens on first use, when an activated policy names a
 	// provider account; a node without one creates no account files.
 	proxy.accounts.setDir(appdir.Dir())

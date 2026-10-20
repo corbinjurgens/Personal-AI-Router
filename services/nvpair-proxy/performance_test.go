@@ -6,19 +6,26 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
+	"math"
+	"math/big"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"reflect"
+	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+	"unsafe"
 
 	"nvpair-shared/nodepolicy"
 	"nvpair-shared/performancewire"
@@ -267,6 +274,557 @@ func TestPerformanceOptionNumbers(t *testing.T) {
 	// Outside the lexical bound, retain the exact JSON number without expansion.
 	if performanceCanonicalNumber(json.Number("0e999999999")) != json.Number("0e999999999") {
 		t.Fatal("unbounded exponent expanded")
+	}
+}
+
+func TestPerformanceFixedDecimalCanonicalBoundaries(t *testing.T) {
+	for _, raw := range []string{strings.Repeat("9", 64), "0." + strings.Repeat("1", 62), "1e308", "1e-308", "-1e-308", "0e-308", "-0", "123.4500", "1.234567890123456789e-308"} {
+		t.Run(raw, func(t *testing.T) {
+			rat, ok := new(big.Rat).SetString(raw)
+			if !ok {
+				t.Fatal("invalid oracle fixture")
+			}
+			want := json.Number(strings.TrimRight(strings.TrimRight(rat.FloatString(372), "0"), "."))
+			if got := performanceCanonicalNumber(json.Number(raw)); got != want {
+				t.Fatalf("canonical decimal=%v want %v", got, want)
+			}
+		})
+	}
+	for _, raw := range []string{strings.Repeat("9", 65), "1e309", "1e-309", "0e999999999"} {
+		if got := performanceCanonicalNumber(json.Number(raw)); got != json.Number(raw) {
+			t.Fatal("outside-bound number changed lexical form")
+		}
+	}
+}
+
+func TestPerformanceFixedDecimalExtractionMatchesLegacy(t *testing.T) {
+	legacy := func(raw string) (*int64, *float64) {
+		if len(raw) == 0 || len(raw) > 64 || raw[0] < '0' || raw[0] > '9' || !json.Valid([]byte(raw)) {
+			return nil, nil
+		}
+		if i := strings.IndexAny(raw, "eE"); i >= 0 {
+			e, err := strconv.Atoi(raw[i+1:])
+			if err != nil || e < -308 || e > 308 {
+				return nil, nil
+			}
+		}
+		r, ok := new(big.Rat).SetString(raw)
+		if !ok || r.Sign() < 0 {
+			return nil, nil
+		}
+		var ns *int64
+		scaled := new(big.Rat).Mul(new(big.Rat).Set(r), big.NewRat(1_000_000, 1))
+		if scaled.Cmp(big.NewRat(86_400_000_000_000, 1)) <= 0 {
+			q, rem := new(big.Int), new(big.Int)
+			q.QuoRem(scaled.Num(), scaled.Denom(), rem)
+			if rem.Lsh(rem, 1).Cmp(scaled.Denom()) >= 0 {
+				q.Add(q, big.NewInt(1))
+			}
+			v := q.Int64()
+			ns = &v
+		}
+		var rate *float64
+		if r.Cmp(big.NewRat(10_000_000, 1)) <= 0 {
+			v, _ := r.Float64()
+			if !(v == 0 && r.Sign() > 0) {
+				rate = &v
+			}
+		}
+		return ns, rate
+	}
+	for _, raw := range []string{"0", "0.0000005", "0.000000499999999999999999", "0.000000500000000000000001", "86400000", "86400000.000000000000000000000000001", "10000000", "10000000.0000000000000000000000000001", "1e-308", "1e308", "1e309", "1e-309", "0." + strings.Repeat("1", 62), "0." + strings.Repeat("1", 63), "0." + strings.Repeat("0", 55) + "1e-308", "-0", "null", "01", "1e", "{}"} {
+		t.Run(raw, func(t *testing.T) {
+			wantNs, wantRate := legacy(raw)
+			gotNs := performanceExtractMilliseconds(json.RawMessage(raw))
+			gotRate := performanceExtractRate(json.RawMessage(raw))
+			if !reflect.DeepEqual(gotNs, wantNs) || !reflect.DeepEqual(gotRate, wantRate) {
+				t.Fatalf("decimal extraction differs from exact oracle: ns=%v/%v rate=%v/%v", gotNs, wantNs, gotRate, wantRate)
+			}
+		})
+	}
+}
+
+func TestPerformanceFixedDecimalInvalidEvidenceIsSticky(t *testing.T) {
+	q := performanceExtractQualification{EngineFamily: "llamacpp", APIPath: routeChatCompletions, Streaming: true, SchemaID: performanceExtractLlamaSchema}
+	var numbers performanceNumbers
+	numbers.merge(extractPerformanceObserved([]byte(`{"timings":{"predicted_n":11,"predicted_ms":250,"predicted_per_second":40}}`), q))
+	if first := numbers.snapshot(); first.EngineDecodeNs == nil || *first.EngineDecodeNs != 250_000_000 {
+		t.Fatal("fixture valid duration absent")
+	}
+	numbers.merge(extractPerformanceObserved([]byte(`{"timings":{"predicted_ms":null}}`), q))
+	numbers.merge(extractPerformanceObserved([]byte(`{"timings":{"predicted_n":11,"predicted_ms":250,"predicted_per_second":40}}`), q))
+	got := numbers.snapshot()
+	if got.EngineDecodeNs != nil || got.EngineDecodeTokensPerSecond != nil || got.OutputTokens == nil || *got.OutputTokens != 11 {
+		t.Fatal("invalid decimal evidence was restored or damaged independent count")
+	}
+}
+
+func TestPerformanceFixedDecimalExactBinaryMaximum(t *testing.T) {
+	for _, maximum := range []float64{0, 0.1, 0.5, math.SmallestNonzeroFloat64, 1e-308, math.MaxFloat64} {
+		for _, raw := range []string{"0", "0.1", "0.1000000000000000055511151231257827021181583404541015625", "0.1000000000000000055511151231257827021181583404541015626", "0.5", "1e-308", "1e308", "0.000000000000001e-308", "0.0000000000000001e-308"} {
+			rat, ok := new(big.Rat).SetString(raw)
+			if !ok {
+				t.Fatal("invalid oracle fixture")
+			}
+			var want *float64
+			if rat.Cmp(new(big.Rat).SetFloat64(maximum)) <= 0 {
+				v, _ := rat.Float64()
+				if !(v == 0 && rat.Sign() > 0) {
+					want = &v
+				}
+			}
+			got := performanceExtractDecimal(json.RawMessage(raw), maximum)
+			if !reflect.DeepEqual(got, want) {
+				t.Fatalf("exact binary maximum comparison differs: raw=%s maximum=%.17g got=%v want=%v", raw, maximum, got, want)
+			}
+		}
+	}
+}
+
+func TestPerformancePreparationAllowanceTransfer(t *testing.T) {
+	p := performanceProxy(t, "llamacpp")
+	body := []byte(`{"model":"m","stream":true,"temperature":1}`)
+	// Seven lexical tokens; only the decoded keys (22 bytes) are retained.
+	// The ignored model value has no decoded arena allocation.
+	const wantStorage int64 = 136*7 + 22 + 24*3 + 4*8192
+	n, err := performancePreparationBytes(body)
+	if err != nil || n != wantStorage {
+		t.Fatalf("preparation capacity=%d err=%v, want %d", n, err, wantStorage)
+	}
+	root, err := newBufferBudget(96<<10+wantStorage, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scope, err := root.newRequest(1 << 30)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.WithValue(context.Background(), ownedInferenceContextKey{}, &ownedInferenceBuffers{scope: scope})
+	ctx, release, err := preparePerformanceBuffers(ctx, body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	a, err := p.soleFacade().newPerformanceAttemptOwned(ctx, "m", routeChatCompletions, body, 0)
+	if err != nil || a == nil {
+		t.Fatalf("transferred full-root allowance was recharged: attempt=%v err=%v", a != nil, err)
+	}
+	if root.used != 96<<10+wantStorage {
+		t.Fatalf("live charge=%d", root.used)
+	}
+	release()
+	if root.used != 0 || root.live != 0 {
+		t.Fatalf("released preparation retained bytes=%d leases=%d", root.used, root.live)
+	}
+}
+
+func TestPerformanceQueueOwnsScalarSnapshot(t *testing.T) {
+	p := performanceProxy(t, "llamacpp")
+	key, _, ok := p.soleFacade().performanceFingerprint("m", routeChatCompletions, []byte(`{"model":"m","stream":true}`))
+	if !ok {
+		t.Fatal("fixture identity refused")
+	}
+	upstreamCount := int64(7)
+	frame := []byte("data: {\"choices\":[]}\n\ndata: [DONE]\n\n")
+	r, err := newStreamFrameReader(streamFrameConfig{
+		Protocol: streamProtocolSSE, Upstream: io.NopCloser(bytes.NewReader(frame)), Budget: newFrameBudget(64 << 20),
+		Extract: func([]byte) performanceExtractMetadata {
+			return performanceExtractMetadata{OutputTokens: &upstreamCount}
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	var prefix [1]byte
+	if n, err := r.Read(prefix[:]); err != nil || n != 1 {
+		t.Fatalf("first frame read=%d err=%v", n, err)
+	}
+	r.mu.Lock()
+	reusedFrame := r.buf
+	r.mu.Unlock()
+	if len(reusedFrame) == 0 {
+		t.Fatal("fixture did not retain frame storage")
+	}
+	if _, err := io.Copy(io.Discard, r); err != nil {
+		t.Fatal(err)
+	}
+	snapshot := r.Result()
+	if snapshot.Numeric.OutputTokens == nil || *snapshot.Numeric.OutputTokens != 7 {
+		t.Fatal("fixture numeric snapshot absent")
+	}
+	suppliedCount := *snapshot.Numeric.OutputTokens
+	supplied := performancewire.Sample{
+		Key: key, Profile: performancewire.Profile{EngineFamily: "llamacpp"},
+		Measurement: performancewire.Measurement{Outcome: performancewire.OutcomeCompleted, OutputTokens: &suppliedCount},
+	}
+	p.enqueuePerformance(supplied)
+	if err := r.Close(); err != nil {
+		t.Fatal(err)
+	}
+	upstreamCount = 91
+	*supplied.OutputTokens = 93
+	*snapshot.Numeric.OutputTokens = 94
+	r.mu.Lock()
+	if r.numeric.value.OutputTokens == nil {
+		r.mu.Unlock()
+		t.Fatal("fixture reader numeric state absent")
+	}
+	*r.numeric.value.OutputTokens = 92
+	r.mu.Unlock()
+	for i := range reusedFrame {
+		reusedFrame[i] = 'x'
+	}
+	for i := range frame {
+		frame[i] = 'y'
+	}
+	samples := performanceSamples(p)
+	if len(samples) != 1 || samples[0].OutputTokens == nil || *samples[0].OutputTokens != 7 {
+		t.Fatalf("queue scalar changed after upstream/reader/frame reuse: samples=%+v", samples)
+	}
+}
+
+func TestPerformanceQueueCopiesEveryNullableScalar(t *testing.T) {
+	p := performanceProxy(t, "llamacpp")
+	key, _, ok := p.soleFacade().performanceFingerprint("m", routeChatCompletions, []byte(`{"model":"m"}`))
+	if !ok {
+		t.Fatal("fixture identity refused")
+	}
+	complete := true
+	one := int64(1)
+	phase := int64(1_000_000_000)
+	rate := float64(1)
+	s := performancewire.Sample{Key: key, Profile: performancewire.Profile{EngineFamily: "llamacpp"}, Measurement: performancewire.Measurement{
+		Outcome: performancewire.OutcomeCompleted, ProtocolComplete: &complete, AdmissionWaitMs: &one, HeaderMs: &one, FirstBodyMs: &one, FirstTokenMs: &one, TotalMs: &one,
+		PromptTokens: &one, CachedPromptTokens: &one, OutputTokens: &one, PrefillNs: &phase, DecodeNs: &phase, EngineDecodeNs: &phase, LoadNs: &phase, EngineDecodeTokensPerSecond: &rate,
+	}}
+	if err := s.Measurement.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	p.enqueuePerformance(s)
+	complete = false
+	one = 99
+	phase = 99
+	rate = 99
+	samples := performanceSamples(p)
+	if len(samples) != 1 {
+		t.Fatalf("queued samples=%d", len(samples))
+	}
+	got := samples[0].Measurement
+	if got.ProtocolComplete == nil || !*got.ProtocolComplete || got.EngineDecodeTokensPerSecond == nil || *got.EngineDecodeTokensPerSecond != 1 {
+		t.Fatal("queue retained boolean/rate alias")
+	}
+	for _, v := range []*int64{got.AdmissionWaitMs, got.HeaderMs, got.FirstBodyMs, got.FirstTokenMs, got.TotalMs, got.PromptTokens, got.CachedPromptTokens, got.OutputTokens} {
+		if v == nil || *v != 1 {
+			t.Fatal("queue retained integer scalar alias")
+		}
+	}
+	for _, v := range []*int64{got.PrefillNs, got.DecodeNs, got.EngineDecodeNs, got.LoadNs} {
+		if v == nil || *v != 1_000_000_000 {
+			t.Fatal("queue retained phase scalar alias")
+		}
+	}
+}
+
+func TestPerformanceQueueOwnsProfileContextScalar(t *testing.T) {
+	p := performanceProxy(t, "llamacpp")
+	key, _, ok := p.soleFacade().performanceFingerprint("m", routeChatCompletions, []byte(`{"model":"m"}`))
+	if !ok {
+		t.Fatal("fixture identity refused")
+	}
+	contextTokens := int64(4096)
+	supplied := performancewire.Sample{
+		Key:         key,
+		Profile:     performancewire.Profile{EngineFamily: "llamacpp", ContextTokens: &contextTokens},
+		Measurement: performancewire.Measurement{Outcome: performancewire.OutcomeCompleted},
+	}
+	p.enqueuePerformance(supplied)
+	*supplied.Profile.ContextTokens = 8192
+	got := performanceOne(t, p)
+	if got.Profile.ContextTokens == nil || *got.Profile.ContextTokens != 4096 {
+		t.Fatalf("queued profile context=%v, want entry-owned 4096", got.Profile.ContextTokens)
+	}
+	if got.Profile.ContextTokens == supplied.Profile.ContextTokens {
+		t.Fatal("queued profile retained supplied context pointer")
+	}
+}
+
+func TestPerformanceQueueIdentifiersOwnDecodedStorage(t *testing.T) {
+	p := performanceProxy(t, "llamacpp")
+	budget := bufferTestBudget(t, 192<<20, 0)
+	p.buffers = budget
+	// The decoded identifier is exactly the admitted 256-byte boundary. Its
+	// normalized view points inside real request-owned decoded storage.
+	padded := strings.Repeat(" ", 125) + "m" + strings.Repeat(" ", 130)
+	r, owner := p.ownInferenceBuffers(httptest.NewRequest(http.MethodPost, routeChatCompletions, strings.NewReader(`{"model":"`+padded+`"}`)))
+	defer owner.close()
+	_, model, err := bufferBodyAndModel(httptest.NewRecorder(), r, 64<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(model) != 256 || model != padded {
+		t.Fatalf("decoded fixture length=%d, want preserved 256-byte identifier", len(model))
+	}
+	view := strings.TrimSpace(model)
+	if view != "m" || unsafe.StringData(view) != unsafe.StringData(model[125:]) {
+		t.Fatal("fixture normalized view does not borrow decoded model storage")
+	}
+	borrower := owner.borrowParserAllowance()
+	if borrower == nil {
+		t.Fatal("fixture parser allowance absent")
+	}
+	defer borrower.close()
+	// Every insertion field deliberately receives an actual input-derived view.
+	// Scope is a fixed protocol constant; Producer is stamped from the proxy.
+	p.runID = view
+	supplied := performancewire.Sample{
+		Key:         performancewire.ProfileKey{Host: view, Engine: view, Model: view, Fingerprint: view},
+		Profile:     performancewire.Profile{EngineFamily: view, Quantization: view},
+		Measurement: performancewire.Measurement{Outcome: performancewire.OutcomeCompleted},
+	}
+	p.enqueuePerformance(supplied)
+	cleaned := make(chan struct{})
+	go func() {
+		defer close(cleaned)
+		owner.close()
+		borrower.close()
+	}()
+	// Queue access may overlap borrower cleanup; all strings remain immutable.
+	got := performanceOne(t, p)
+	waitChan(t, cleaned, "request and parser borrower cleanup")
+	bufferAssertTotals(t, budget, 0, 0, 0)
+	for _, field := range []struct {
+		name string
+		got  string
+	}{
+		{"producer", got.Producer},
+		{"host", got.Key.Host},
+		{"engine", got.Key.Engine},
+		{"model", got.Key.Model},
+		{"fingerprint", got.Key.Fingerprint},
+		{"engine family", got.Profile.EngineFamily},
+		{"quantization", got.Profile.Quantization},
+	} {
+		if field.got != "m" {
+			t.Fatalf("queued %s changed value", field.name)
+		}
+		if unsafe.StringData(field.got) == unsafe.StringData(view) {
+			t.Fatalf("queued %s retains decoded request backing after root drain", field.name)
+		}
+	}
+	runtime.KeepAlive(model)
+}
+
+func TestPerformanceQueueOwnsSuppliedOutcomeStorage(t *testing.T) {
+	p := performanceProxy(t, "llamacpp")
+	budget := bufferTestBudget(t, 192<<20, 0)
+	p.buffers = budget
+	padded := strings.Repeat(" ", 125) + "completed" + strings.Repeat(" ", 122)
+	r, owner := p.ownInferenceBuffers(httptest.NewRequest(http.MethodPost, routeChatCompletions, strings.NewReader(`{"model":"`+padded+`"}`)))
+	defer owner.close()
+	_, model, err := bufferBodyAndModel(httptest.NewRecorder(), r, 64<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	view := strings.TrimSpace(model)
+	if len(model) != 256 || view != "completed" {
+		t.Fatalf("decoded outcome fixture bytes=%d value=%q", len(model), view)
+	}
+	key, _, ok := p.soleFacade().performanceFingerprint("m", routeChatCompletions, []byte(`{"model":"m"}`))
+	if !ok {
+		t.Fatal("performance identity unavailable")
+	}
+	// Production observers supply enum constants. The insertion seam also owns
+	// a validated supplied enum view, so its no-alias guarantee is complete.
+	p.enqueuePerformance(performancewire.Sample{
+		Key: key, Profile: performancewire.Profile{EngineFamily: "llamacpp"},
+		Measurement: performancewire.Measurement{Outcome: performancewire.Outcome(view)},
+	})
+	owner.close()
+	bufferAssertTotals(t, budget, 0, 0, 0)
+	got := performanceOne(t, p)
+	if got.Outcome != performancewire.OutcomeCompleted || unsafe.StringData(string(got.Outcome)) == unsafe.StringData(view) {
+		t.Fatal("queued supplied outcome changed value or retained request-owned storage")
+	}
+	runtime.KeepAlive(model)
+}
+
+// The oracle deliberately retains the old stdlib decoder/map/encoder path in
+// this fixture only. No production canonical writer or identity helper is used.
+func TestPerformanceFingerprintMatchesLegacyJSONHash(t *testing.T) {
+	legacy := func(t *testing.T, body []byte) string {
+		t.Helper()
+		dec := json.NewDecoder(bytes.NewReader(body))
+		dec.UseNumber()
+		var fields map[string]any
+		if err := dec.Decode(&fields); err != nil {
+			t.Fatal(err)
+		}
+		var canonical func(any) any
+		canonical = func(v any) any {
+			switch n := v.(type) {
+			case json.Number:
+				if len(n) > 64 {
+					return n
+				}
+				if i := strings.IndexAny(string(n), "eE"); i >= 0 {
+					e, err := strconv.Atoi(string(n[i+1:]))
+					if err != nil || e < -308 || e > 308 {
+						return n
+					}
+				}
+				if rat, ok := new(big.Rat).SetString(string(n)); ok {
+					return json.Number(strings.TrimRight(strings.TrimRight(rat.FloatString(372), "0"), "."))
+				}
+			case map[string]any:
+				for k, value := range n {
+					n[k] = canonical(value)
+				}
+			case []any:
+				for i, value := range n {
+					n[i] = canonical(value)
+				}
+			}
+			return v
+		}
+		options := map[string]any{}
+		for key, value := range fields {
+			switch key {
+			case "model", "messages", "prompt", "input":
+				continue
+			case "tools":
+				options["hasTools"] = value != nil
+			default:
+				options[key] = canonical(value)
+			}
+		}
+		encoded, err := json.Marshal(struct {
+			Run, Settings, Launch, Model, API, Schema string
+			Options                                   map[string]any
+		}{"runtime-1", strings.Repeat("a", 64), strings.Repeat("b", 64), strings.Repeat("c", 64), routeChatCompletions, "llamacpp:llamacpp-b11146-7fe450e1", options})
+		if err != nil {
+			t.Fatal(err)
+		}
+		sum := sha256.Sum256(encoded)
+		return hex.EncodeToString(sum[:])
+	}
+	cases := []struct {
+		name string
+		body []byte
+	}{
+		{"empty options", []byte(`{"model":"m","messages":[]}`)},
+		{"tools sort and exact numbers", []byte(`{"model":"m","temperature":1e0,"tools":[],"stream":true,"max_tokens":9007199254740993.0,"top_p":1e-20}`)},
+		{"nested escapes", []byte(`{"model":"m","tools":null,"response_format":{"type":"json_schema","json_schema":{"name":"x<>&\u2028\u2029","schema":{"b":[1.0,"a\"b\\c"],"a":"\ufffd"}}}}`)},
+		{"invalid UTF8 decoded by old decoder", append(append([]byte(`{"model":"m","stop":"`), 0xff), []byte(`"}`)...)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p := performanceProxy(t, "llamacpp")
+			key, _, ok := p.soleFacade().performanceFingerprint("m", routeChatCompletions, tc.body)
+			if !ok {
+				t.Fatal("valid fixture refused")
+			}
+			if want := legacy(t, tc.body); key.Fingerprint != want {
+				t.Fatalf("legacy fingerprint changed: got %s want %s", key.Fingerprint, want)
+			}
+		})
+	}
+}
+
+func TestPerformancePreparationManyTinyIgnoredValues(t *testing.T) {
+	makeBody := func(items int) []byte {
+		return []byte(`{"model":"m","messages":[` + strings.TrimSuffix(strings.Repeat(`{"role":"user","content":"x"},`, items), ",") + `],"tools":[{"type":"function","function":{"name":"f"}}],"stream":true}`)
+	}
+	short, long := makeBody(1), makeBody(20000)
+	a, err := performancePreparationBytes(short)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := performancePreparationBytes(long)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a != b {
+		t.Fatalf("ignored object count retained descriptors: short=%d long=%d", a, b)
+	}
+	x, ok := performanceOptionsDigest(short, "llamacpp")
+	if !ok {
+		t.Fatal("short ignored fixture refused")
+	}
+	y, ok := performanceOptionsDigest(long, "llamacpp")
+	if !ok || x != y {
+		t.Fatal("many ignored values changed options")
+	}
+	for _, raw := range []string{`{"model":"m","messages":[{"x":{"K":1,"\u212a":2}}]}`, `{"model":"m","tools":[{"function":{"x":1,"X":2}}]}`} {
+		if _, ok := performanceOptionsDigest([]byte(raw), "llamacpp"); ok {
+			t.Fatal("duplicate ignored subtree key accepted")
+		}
+	}
+}
+
+func TestPerformancePreparationSkipsIgnoredContent(t *testing.T) {
+	short := []byte(`{"model":"m","messages":[{"role":"user","content":"x"}],"stream":true}`)
+	long := []byte(`{"model":"` + strings.Repeat("m", 1<<20) + `","messages":[{"role":"user","content":"` + strings.Repeat("x", 1<<20) + `"}],"stream":true}`)
+	a, err := performancePreparationBytes(short)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := performancePreparationBytes(long)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a != b {
+		t.Fatalf("ignored payload changed arena capacity: short=%d long=%d", a, b)
+	}
+	x, ok := performanceOptionsDigest(short, "llamacpp")
+	if !ok {
+		t.Fatal("short request refused")
+	}
+	y, ok := performanceOptionsDigest(long, "llamacpp")
+	if !ok || x != y {
+		t.Fatal("ignored content changed option digest")
+	}
+}
+
+func TestPerformancePreparationPreservesNestedOptions(t *testing.T) {
+	a, ok := performanceOptionsDigest([]byte(`{"model":"m","options":{"b":[1e0,"a\u003cb"],"a":9007199254740993.0}}`), "ollama")
+	if !ok {
+		t.Fatal("valid nested options refused")
+	}
+	b, ok := performanceOptionsDigest([]byte(`{"options":{"a":9007199254740993,"b":[1,"a<b"]},"model":"alias"}`), "ollama")
+	if !ok || a != b {
+		t.Fatal("nested canonical options changed digest")
+	}
+	for _, raw := range []string{
+		`{"model":"m","messages":[{"role":"user","ROLE":"assistant"}]}`,
+		`{"model":"m","options":{"k":1,"\u006b":1}}`,
+		`{"model":"m","options":{"K":1,"\u212a":1}}`,
+	} {
+		if _, ok := performanceOptionsDigest([]byte(raw), "ollama"); ok {
+			t.Fatal("duplicate decoded/folded key accepted")
+		}
+	}
+}
+
+func TestPerformancePreparationImpossibleBeforeAllocation(t *testing.T) {
+	root, err := newBufferBudget(120000, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scope, err := root.newRequest(1 << 30)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.WithValue(context.Background(), ownedInferenceContextKey{}, &ownedInferenceBuffers{scope: scope})
+	_, release, err := preparePerformanceBuffers(ctx, []byte(`{"model":"m","stream":true,"temperature":1}`))
+	if release != nil {
+		release()
+	}
+	if bufferRequestStatus(err) != http.StatusRequestEntityTooLarge {
+		t.Fatalf("impossible preparation error=%v", err)
+	}
+	if root.used != 0 || root.live != 0 || root.waiters.Len() != 0 {
+		t.Fatalf("failed preparation retained storage or queued: bytes=%d leases=%d waiters=%d", root.used, root.live, root.waiters.Len())
 	}
 }
 
@@ -586,7 +1144,7 @@ func TestPerformanceDeliveryFailureExcludesRate(t *testing.T) {
 			defer cancel()
 			a := p.soleFacade().newPerformanceAttempt(ctx, "m", routeChatCompletions, []byte(`{"model":"m","stream":true}`), 0)
 			a.start = time.Now()
-			r, err := newStreamFrameReader(streamFrameConfig{Protocol: streamProtocolSSE, Upstream: io.NopCloser(strings.NewReader("data: " + performanceStrataFinal + "\n\ndata: [DONE]\n\n")), Extract: func(b []byte) performanceExtractMetadata { return extractPerformanceObserved(b, a.qualification) }})
+			r, err := newStreamFrameReader(streamFrameConfig{Budget: newFrameBudget(64 << 20), Protocol: streamProtocolSSE, Upstream: io.NopCloser(strings.NewReader("data: " + performanceStrataFinal + "\n\ndata: [DONE]\n\n")), Extract: func(b []byte) performanceExtractMetadata { return extractPerformanceObserved(b, a.qualification) }})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -636,7 +1194,7 @@ func TestPerformanceStreamNumericSeam(t *testing.T) {
 	test := func(name, payload string, check func(*testing.T, streamFrameResult)) {
 		t.Run(name, func(t *testing.T) {
 			read := func(observe bool) ([]byte, streamFrameResult) {
-				config := streamFrameConfig{Protocol: streamProtocolSSE, Upstream: io.NopCloser(strings.NewReader(payload))}
+				config := streamFrameConfig{Budget: newFrameBudget(64 << 20), Protocol: streamProtocolSSE, Upstream: io.NopCloser(strings.NewReader(payload))}
 				if observe {
 					config.Extract = func(b []byte) performanceExtractMetadata {
 						return extractPerformanceObserved(b, performanceExtractQualification{EngineFamily: "strata", APIPath: routeChatCompletions, Streaming: true, SchemaID: performanceExtractStrataSchema})
@@ -710,7 +1268,7 @@ func TestPerformanceStreamNumericSeam(t *testing.T) {
 }
 
 func TestPerformanceResultOwnsNumericCopy(t *testing.T) {
-	r, err := newStreamFrameReader(streamFrameConfig{Protocol: streamProtocolNDJSON, Upstream: io.NopCloser(strings.NewReader("{\"done\":true,\"eval_count\":3,\"eval_duration\":1000000000}\n")), Extract: func(b []byte) performanceExtractMetadata {
+	r, err := newStreamFrameReader(streamFrameConfig{Budget: newFrameBudget(64 << 20), Protocol: streamProtocolNDJSON, Upstream: io.NopCloser(strings.NewReader("{\"done\":true,\"eval_count\":3,\"eval_duration\":1000000000}\n")), Extract: func(b []byte) performanceExtractMetadata {
 		return extractPerformancePayload(b, performanceExtractQualification{EngineFamily: "ollama", APIPath: "/api/generate", Streaming: true})
 	}})
 	if err != nil {
@@ -769,7 +1327,7 @@ func TestPerformanceTimingReadFieldsInvalidateStickyEvidence(t *testing.T) {
 								patch = `{"usage":` + patch + `}`
 							}
 							body := "data: " + family.final + "\n\ndata: " + patch + "\n\ndata: " + family.final + "\n\ndata: [DONE]\n\n"
-							r, err := newStreamFrameReader(streamFrameConfig{Protocol: streamProtocolSSE, Upstream: io.NopCloser(strings.NewReader(body)), Extract: func(b []byte) performanceExtractMetadata {
+							r, err := newStreamFrameReader(streamFrameConfig{Budget: newFrameBudget(64 << 20), Protocol: streamProtocolSSE, Upstream: io.NopCloser(strings.NewReader(body)), Extract: func(b []byte) performanceExtractMetadata {
 								return extractPerformanceObserved(b, q)
 							}})
 							if err != nil {

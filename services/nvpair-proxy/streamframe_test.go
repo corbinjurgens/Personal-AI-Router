@@ -34,6 +34,7 @@ func TestStreamFrameNumericInputBoundary(t *testing.T) {
 		t.Run(ending, func(t *testing.T) {
 			var calls int
 			r, err := newStreamFrameReader(streamFrameConfig{
+				Budget:   newFrameBudget(64 << 20),
 				Protocol: streamProtocolSSE,
 				Upstream: io.NopCloser(strings.NewReader("data: {\"choices\":[]}\n\n" + ending)),
 				Extract: func(payload []byte) performanceExtractMetadata {
@@ -58,6 +59,61 @@ func TestStreamFrameNumericInputBoundary(t *testing.T) {
 	}
 }
 
+func TestStreamFrameNumericScratchRefusal(t *testing.T) {
+	for _, protocol := range []streamProtocol{streamProtocolSSE, streamProtocolNDJSON} {
+		t.Run(strconv.Itoa(int(protocol)), func(t *testing.T) {
+			input := "data: {\"choices\":[]}\n\ndata: [DONE]\n\n"
+			want := wantSSEInterruption(streamInterruptReasonBudget)
+			if protocol == streamProtocolNDJSON {
+				input = `{"done":true}`
+				want = wantNDJSONInterruption(streamInterruptReasonBudget)
+			}
+			budget := newFrameBudget(64 << 10)
+			calls := 0
+			r, err := newStreamFrameReader(streamFrameConfig{Protocol: protocol, Upstream: io.NopCloser(strings.NewReader(input)), Budget: budget, Extract: func([]byte) performanceExtractMetadata { calls++; return performanceExtractMetadata{} }})
+			if err != nil {
+				t.Fatal(err)
+			}
+			out, err := io.ReadAll(r)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(out, want) || calls != 0 {
+				t.Fatalf("scratch refusal delivered upstream bytes or invoked callback: bytes=%q calls=%d", out, calls)
+			}
+			assertOutcome(t, r.Result(), streamOutcomeInterrupted, streamInterruptReasonBudget)
+			if err := r.Close(); err != nil {
+				t.Fatal(err)
+			}
+			if budget.inUse() != 0 {
+				t.Fatalf("closed reader retained %d bytes", budget.inUse())
+			}
+		})
+	}
+}
+
+func TestStreamFrameFixedLeaseSlots(t *testing.T) {
+	budget := newFrameBudget(1 << 20)
+	for i := 0; i < 32; i++ {
+		if !budget.reserve(1) {
+			t.Fatalf("slot %d refused", i)
+		}
+	}
+	if budget.reserve(1) {
+		t.Fatal("fixed lease storage grew beyond its capacity")
+	}
+	for i := 0; i < 32; i++ {
+		budget.release(1)
+	}
+	if budget.inUse() != 0 {
+		t.Fatalf("released slots retained %d bytes", budget.inUse())
+	}
+	if !budget.reserve(2) {
+		t.Fatal("released slot was not reusable")
+	}
+	budget.release(2)
+}
+
 func TestStreamFramePeerInterruptionPreserved(t *testing.T) {
 	for reason, frames := range streamInterruptionFramesByReason {
 		for _, protocol := range []streamProtocol{streamProtocolSSE, streamProtocolNDJSON} {
@@ -72,6 +128,7 @@ func TestStreamFramePeerInterruptionPreserved(t *testing.T) {
 				}
 				var calls int
 				r, err := newStreamFrameReader(streamFrameConfig{
+					Budget:   newFrameBudget(64 << 20),
 					Protocol: protocol, PeerNormalized: true,
 					Upstream: newChunkedStreamBody(payload, 1),
 					Extract:  func([]byte) performanceExtractMetadata { calls++; return performanceExtractMetadata{} },
@@ -254,6 +311,9 @@ type streamFrameCase struct {
 
 func openStreamFrameReader(t *testing.T, c streamFrameCase) *streamFrameReader {
 	t.Helper()
+	if c.budget == nil {
+		c.budget = newFrameBudget(64 << 20)
+	}
 	idle := c.idle
 	if idle == 0 {
 		idle = time.Second
@@ -810,9 +870,6 @@ func TestStreamFrameFrameOverflowInterrupts(t *testing.T) {
 		t.Fatalf("forwarded bytes differ:\ngot  %q\nwant the frame-limit interruption", out)
 	}
 	assertOutcome(t, result, streamOutcomeInterrupted, streamInterruptReasonFrameTooLarge)
-	if used := sharedStreamFrameBudget.inUse(); used != 0 {
-		t.Fatalf("frame budget still holds %d bytes after the reader closed", used)
-	}
 }
 
 func TestStreamFrameBudgetExhaustionTerminates(t *testing.T) {
@@ -984,11 +1041,10 @@ func TestStreamFrameSharedBudgetSaturation(t *testing.T) {
 	if !budget.reserve(padding) {
 		t.Fatal("could not saturate remaining shared budget")
 	}
-	out, result := runStreamFrame(t, streamFrameCase{protocol: streamProtocolSSE, upstream: newChunkedStreamBody(content, 0), budget: budget})
-	if !bytes.Equal(out, wantSSEInterruption(streamInterruptReasonBudget)) {
-		t.Fatalf("second reader bypassed saturated shared budget: %q", out)
+	second, err := newStreamFrameReader(streamFrameConfig{Protocol: streamProtocolSSE, Upstream: newChunkedStreamBody(content, 0), Budget: budget})
+	if second != nil || err != errStreamFrameBudget {
+		t.Fatalf("detached reader allocated beyond saturated bootstrap: reader=%v err=%v", second != nil, err)
 	}
-	assertOutcome(t, result, streamOutcomeInterrupted, streamInterruptReasonBudget)
 	if got := budget.inUse(); got != budget.limit {
 		t.Fatalf("failed reader changed existing reservations: got %d, want %d", got, budget.limit)
 	}
@@ -1003,7 +1059,8 @@ func TestStreamFrameSharedBudgetSaturation(t *testing.T) {
 
 func TestStreamFrameDefaults(t *testing.T) {
 	body := newChunkedStreamBody([]byte("data: {\"choices\":[{\"index\":0,\"finish_reason\":\"stop\"}]}\n\n"), 0)
-	reader, err := newStreamFrameReader(streamFrameConfig{Protocol: streamProtocolSSE, Upstream: body})
+	budget := newFrameBudget(64 << 20)
+	reader, err := newStreamFrameReader(streamFrameConfig{Protocol: streamProtocolSSE, Upstream: body, Budget: budget})
 	if err != nil {
 		t.Fatalf("create default reader: %v", err)
 	}
@@ -1011,8 +1068,8 @@ func TestStreamFrameDefaults(t *testing.T) {
 	if reader.idleTimeout != 60*time.Second || defaultStreamFrameIdle != 60*time.Second {
 		t.Fatalf("idle default = %s, want 60s", reader.idleTimeout)
 	}
-	if reader.budget != sharedStreamFrameBudget || sharedStreamFrameBudget.limit != 64<<20 {
-		t.Fatal("default reader does not use shared 64 MiB budget")
+	if reader.budget != budget || budget.limit != 64<<20 {
+		t.Fatal("reader does not use the supplied 64 MiB category")
 	}
 	if streamFrameMaxBytes != 1<<20 {
 		t.Fatalf("frame limit = %d, want 1 MiB", streamFrameMaxBytes)

@@ -9,14 +9,15 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"hash"
 	"io"
-	"math/big"
 	"net/http"
 	"slices"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"nvpair-shared/performancewire"
 )
@@ -25,6 +26,11 @@ const performanceQueueCapacity = 128
 
 // The FIFO lock never covers codec IO. Counters saturate and have a fixed set
 // of reasons; neither pressure nor missing identity allocates drop records.
+// This existing fixed-capacity queue is scalar control storage, outside the
+// request-byte account. Insertion owns fresh nullable scalar copies and small
+// copies of every bounded identifier, including normalized views. Entries never
+// alias reader/request/frame/pooled storage. No inference content or additional
+// variable-size payload enters this exemption.
 type performanceQueue struct {
 	mu         sync.Mutex
 	items      [performanceQueueCapacity]performancewire.Sample
@@ -61,12 +67,43 @@ func (p *Proxy) enqueuePerformance(s performancewire.Sample) {
 		return
 	}
 	q.seq++
+	s.Producer = strings.Clone(s.Producer)
+	s.Key.Host = strings.Clone(s.Key.Host)
+	s.Key.Engine = strings.Clone(s.Key.Engine)
+	s.Key.Model = strings.Clone(s.Key.Model)
+	s.Key.Fingerprint = strings.Clone(s.Key.Fingerprint)
+	s.Profile.EngineFamily = strings.Clone(s.Profile.EngineFamily)
+	s.Profile.Quantization = strings.Clone(s.Profile.Quantization)
+	s.Profile.ContextTokens = performanceScalarCopy(s.Profile.ContextTokens)
+	s.Outcome = performancewire.Outcome(strings.Clone(string(s.Outcome)))
+	s.ProtocolComplete = performanceScalarCopy(s.ProtocolComplete)
+	s.AdmissionWaitMs = performanceScalarCopy(s.AdmissionWaitMs)
+	s.HeaderMs = performanceScalarCopy(s.HeaderMs)
+	s.FirstBodyMs = performanceScalarCopy(s.FirstBodyMs)
+	s.FirstTokenMs = performanceScalarCopy(s.FirstTokenMs)
+	s.TotalMs = performanceScalarCopy(s.TotalMs)
+	s.PromptTokens = performanceScalarCopy(s.PromptTokens)
+	s.CachedPromptTokens = performanceScalarCopy(s.CachedPromptTokens)
+	s.OutputTokens = performanceScalarCopy(s.OutputTokens)
+	s.PrefillNs = performanceScalarCopy(s.PrefillNs)
+	s.DecodeNs = performanceScalarCopy(s.DecodeNs)
+	s.EngineDecodeNs = performanceScalarCopy(s.EngineDecodeNs)
+	s.EngineDecodeTokensPerSecond = performanceScalarCopy(s.EngineDecodeTokensPerSecond)
+	s.LoadNs = performanceScalarCopy(s.LoadNs)
 	q.items[(q.head+q.size)%len(q.items)] = s
 	q.size++
 	select {
 	case q.wake <- struct{}{}:
 	default:
 	}
+}
+
+func performanceScalarCopy[T int64 | float64 | bool](value *T) *T {
+	if value == nil {
+		return nil
+	}
+	v := *value
+	return &v
 }
 
 func (p *Proxy) sendPerformance(ctx context.Context) {
@@ -103,10 +140,23 @@ func (p *Proxy) sendPerformance(ctx context.Context) {
 // joined identity is read under its owner's lock and reduced to this model's
 // digest. No filename, alias, response model or placeholder supplies identity.
 func (f *facade) performanceFingerprint(model, api string, body []byte) (performancewire.ProfileKey, performanceExtractQualification, bool) {
+	key, qualification, _, ok := f.performanceFingerprintOwned(model, api, body)
+	return key, qualification, ok
+}
+
+func (f *facade) performanceFamily() string {
 	family := f.profile.Family
 	if family == "" {
 		family = f.profile.Name
 	}
+	return family
+}
+
+type performanceIdentityTuple struct{ run, settings, launch, model, api, schema, host, engine, normalizedModel string }
+
+func (f *facade) performanceCurrentIdentity(model, api string) (performancewire.ProfileKey, performanceExtractQualification, performanceIdentityTuple, bool) {
+	var tuple performanceIdentityTuple
+	family := f.performanceFamily()
 	q := performanceExtractQualification{EngineFamily: family, APIPath: api, Streaming: true}
 	switch family {
 	case "llamacpp":
@@ -115,7 +165,7 @@ func (f *facade) performanceFingerprint(model, api string, body []byte) (perform
 		q.SchemaID = performanceExtractStrataSchema
 	case "ollama":
 	default:
-		return performancewire.ProfileKey{}, q, false
+		return performancewire.ProfileKey{}, q, tuple, false
 	}
 	a := f.host.admission
 	a.mu.Lock()
@@ -127,44 +177,375 @@ func (f *facade) performanceFingerprint(model, api string, body []byte) (perform
 	a.mu.Unlock()
 	host, _ := f.host.selfIdentity(f.profile.Name)
 	if !valid || host == "" {
-		return performancewire.ProfileKey{}, q, false
+		return performancewire.ProfileKey{}, q, tuple, false
 	}
-	options, ok := performanceOptions(body, family)
+	tuple = performanceIdentityTuple{run, settings, launch, digest, api, family + ":" + q.SchemaID, host, f.profile.Name, f.profile.normalizeModel(model)}
+	key := performancewire.ProfileKey{Host: host, Engine: tuple.engine, Model: tuple.normalizedModel}
+	return key, q, tuple, true
+}
+
+func (f *facade) performanceFingerprintOwned(model, api string, body []byte) (performancewire.ProfileKey, performanceExtractQualification, performanceIdentityTuple, bool) {
+	key, q, tuple, ok := f.performanceCurrentIdentity(model, api)
 	if !ok {
-		return performancewire.ProfileKey{}, q, false
+		return key, q, tuple, false
 	}
-	encoded, err := json.Marshal(struct {
-		Run, Settings, Launch, Model, API, Schema string
-		Options                                   map[string]any
-	}{run, settings, launch, digest, api, family + ":" + q.SchemaID, options})
-	if err != nil {
-		return performancewire.ProfileKey{}, q, false
+	h := sha256.New()
+	for i, field := range []struct{ name, value string }{{"Run", tuple.run}, {"Settings", tuple.settings}, {"Launch", tuple.launch}, {"Model", tuple.model}, {"API", tuple.api}, {"Schema", tuple.schema}} {
+		if i == 0 {
+			h.Write([]byte("{"))
+		} else {
+			h.Write([]byte(","))
+		}
+		performanceHashString(h, []byte(field.name))
+		h.Write([]byte(":"))
+		performanceHashString(h, []byte(field.value))
 	}
-	sum := sha256.Sum256(encoded)
-	key := performancewire.ProfileKey{Host: host, Engine: f.profile.Name, Model: f.profile.normalizeModel(model), Fingerprint: hex.EncodeToString(sum[:])}
-	return key, q, key.Validate() == nil
+	h.Write([]byte(`,"Options":`))
+	if !performanceOptionsWrite(body, q.EngineFamily, h) {
+		return key, q, tuple, false
+	}
+	h.Write([]byte("}"))
+	key.Fingerprint = hex.EncodeToString(h.Sum(nil))
+	return key, q, tuple, key.Validate() == nil
 }
 
 // Canonicalize the effective post-rewrite/default options, excluding inference
 // content. Unknown top-level overrides suppress observation. Numeric spellings
 // normalize exactly, including integers above float64's exact range.
-func performanceOptions(body []byte, family string) (map[string]any, bool) {
-	if !uniqueKeys(body) {
-		return nil, false
+type performanceJSONNode struct {
+	key, raw, text       []byte
+	parent, begin, count int
+	kind                 byte
+}
+
+type performancePreparationKey struct{}
+type performancePreparation struct{ bytes int64 }
+
+// One descriptor/index slot per lexical token (including keys) is a deliberate
+// upper capacity, not a body multiplier. A node is <=104 bytes on 64-bit Go;
+// 128 plus an 8-byte index covers either supported word size. Decoded strings
+// share one exact arena. A reusable borrowed-key arena covers the largest
+// current object, including ignored content. Four runtime pages cover rounding.
+func performancePreparationBytes(body []byte) (int64, error) {
+	if !ownedJSONValid(body) {
+		return 0, nil // malformed/unsupported options suppress observation
 	}
-	dec := json.NewDecoder(bytes.NewReader(body))
-	dec.UseNumber()
-	var fields map[string]any
-	if dec.Decode(&fields) != nil || fields == nil {
-		return nil, false
+	tokens, strings := performanceJSONMeasure(body)
+	if tokens == 0 {
+		return 0, nil
 	}
-	options := make(map[string]any)
-	for key, value := range fields {
-		switch key {
-		case "model", "messages", "prompt", "input":
-			continue
-		case "tools":
-			options["hasTools"] = value != nil
+	members, ok := performanceUniqueMembers(body)
+	if !ok {
+		return 0, nil
+	}
+	return 136*int64(tokens) + int64(strings) + 24*int64(members) + 4*8192, nil
+}
+
+func preparePerformanceBuffers(ctx context.Context, body []byte) (context.Context, func(), error) {
+	owner := inferenceBuffers(ctx)
+	if owner == nil {
+		return ctx, func() {}, nil
+	}
+	fixed, err := owner.scope.acquire(ctx, streamFrameNumericBytes)
+	if err != nil {
+		return ctx, nil, err
+	}
+	n, err := performancePreparationBytes(body)
+	if err != nil {
+		fixed.close()
+		return ctx, nil, err
+	}
+	storage, err := owner.scope.acquire(ctx, n)
+	if err != nil {
+		fixed.close()
+		return ctx, nil, err
+	}
+	release := sync.OnceFunc(func() { storage.close(); fixed.close() })
+	return context.WithValue(ctx, performancePreparationKey{}, performancePreparation{n}), release, nil
+}
+
+func performanceJSONMeasure(body []byte) (tokens, decoded int) {
+	valid := true
+	if _, ok := visitObject(body, func(key []byte, _, _ int) {
+		if !performanceKnownOptionKey(key) {
+			valid = false
+		}
+	}); !ok || !valid {
+		return 0, 0
+	}
+	var measure func([]byte, []byte, bool, int)
+	measure = func(raw, key []byte, observe bool, depth int) {
+		raw = bytes.TrimSpace(raw)
+		if depth > maxStrictBodyDepth || depth == maxStrictBodyDepth && (raw[0] == '{' || raw[0] == '[') {
+			valid = false
+			return
+		}
+		tokens++
+		if key != nil {
+			tokens++
+			decoded += decodedJSONStringBytes(key)
+		}
+		if observe && raw[0] == '"' {
+			decoded += decodedJSONStringBytes(raw)
+		}
+		if !observe {
+			return
+		}
+		switch raw[0] {
+		case '{':
+			visitObject(raw, func(k []byte, start, end int) {
+				measure(raw[start:end], k, observe && (depth != 0 || !performanceIgnoredKey(k)), depth+1)
+			})
+		case '[':
+			visitArray(raw, func(value []byte) { measure(value, nil, observe, depth+1) })
+		}
+	}
+	measure(body, nil, true, 0)
+	if !valid {
+		return 0, 0
+	}
+	return
+}
+
+// Only one object's borrowed-key descriptors are live at a time. Ignored
+// messages/tools never acquire a descriptor for every nested scalar/value.
+func performanceUniqueMembers(body []byte) (int, bool) {
+	maximum, depth := 0, 0
+	for i := 0; i < len(body); i++ {
+		switch body[i] {
+		case '"':
+			end, _ := ownedJSONStringEnd(body, i)
+			i = end - 1
+		case '{', '[':
+			if depth == maxStrictBodyDepth {
+				return 0, false
+			}
+			depth++
+			if body[i] == '{' {
+				count := 0
+				visitObject(body[i:], func([]byte, int, int) { count++ })
+				if count > maximum {
+					maximum = count
+				}
+			}
+		case '}', ']':
+			depth--
+		}
+	}
+	return maximum, true
+}
+
+func performanceUniqueKeys(body []byte, maximum int) bool {
+	keys := make([][]byte, 0, maximum)
+	for i := 0; i < len(body); i++ {
+		switch body[i] {
+		case '"':
+			end, _ := ownedJSONStringEnd(body, i)
+			i = end - 1
+		case '{':
+			keys = keys[:0]
+			visitObject(body[i:], func(key []byte, _, _ int) { keys = append(keys, key) })
+			slices.SortFunc(keys, performanceRawKeyCompare)
+			for j := 1; j < len(keys); j++ {
+				if performanceRawKeyCompare(keys[j-1], keys[j]) == 0 {
+					return false
+				}
+			}
+		}
+	}
+	return true
+}
+
+func performanceRawKeyCompare(a, b []byte) int {
+	i, j := 1, 1
+	for i < len(a)-1 && j < len(b)-1 {
+		x, nextI := ownedJSONRune(a, i)
+		y, nextJ := ownedJSONRune(b, j)
+		x = unicode.ToLower(unicode.ToUpper(x))
+		y = unicode.ToLower(unicode.ToUpper(y))
+		if x < y {
+			return -1
+		}
+		if x > y {
+			return 1
+		}
+		i, j = nextI, nextJ
+	}
+	return (len(a) - 1 - i) - (len(b) - 1 - j)
+}
+
+func performanceKnownOptionKey(key []byte) bool {
+	for _, name := range chatRequestKeys {
+		if jsonStringEquals(key, name) {
+			return true
+		}
+	}
+	for _, name := range []string{"prompt", "input", "n", "options", "keep_alive", "format", "raw", "think"} {
+		if jsonStringEquals(key, name) {
+			return true
+		}
+	}
+	return false
+}
+
+func performanceIgnoredKey(key []byte) bool {
+	return jsonStringEquals(key, "model") || jsonStringEquals(key, "messages") || jsonStringEquals(key, "prompt") || jsonStringEquals(key, "input") || jsonStringEquals(key, "tools")
+}
+
+func performanceOptionsDigest(body []byte, family string) ([32]byte, bool) {
+	var zero [32]byte
+	h := sha256.New()
+	if !performanceOptionsWrite(body, family, h) {
+		return zero, false
+	}
+	copy(zero[:], h.Sum(nil))
+	return zero, true
+}
+
+func performanceOptionsWrite(body []byte, family string, h hash.Hash) bool {
+	if !ownedJSONValid(body) {
+		return false
+	}
+	tokens, decoded := performanceJSONMeasure(body)
+	if tokens == 0 {
+		return false
+	}
+	maximum, ok := performanceUniqueMembers(body)
+	if !ok || !performanceUniqueKeys(body, maximum) {
+		return false
+	}
+	nodes := make([]performanceJSONNode, 0, tokens)
+	text := make([]byte, 0, decoded)
+	var build func([]byte, []byte, int, int, bool) int
+	build = func(raw, key []byte, parent, depth int, observe bool) int {
+		raw = bytes.TrimSpace(raw)
+		if depth > maxStrictBodyDepth || depth == maxStrictBodyDepth && (raw[0] == '{' || raw[0] == '[') {
+			return -1
+		}
+		idx := len(nodes)
+		nodes = append(nodes, performanceJSONNode{raw: raw, parent: parent, kind: raw[0]})
+		decode := func(quoted []byte) []byte {
+			start := len(text)
+			for i := 1; i < len(quoted)-1; {
+				r, next := ownedJSONRune(quoted, i)
+				text = utf8.AppendRune(text, r)
+				i = next
+			}
+			return text[start:len(text)]
+		}
+		if key != nil {
+			nodes[idx].key = decode(key)
+		}
+		if observe && raw[0] == '"' {
+			nodes[idx].text = decode(raw)
+		}
+		if !observe {
+			return idx
+		}
+		valid := true
+		switch raw[0] {
+		case '{':
+			visitObject(raw, func(k []byte, start, end int) {
+				if build(raw[start:end], k, idx, depth+1, observe && (depth != 0 || !performanceIgnoredKey(k))) < 0 {
+					valid = false
+				}
+			})
+		case '[':
+			visitArray(raw, func(value []byte) {
+				if build(value, nil, idx, depth+1, observe) < 0 {
+					valid = false
+				}
+			})
+		}
+		if !valid {
+			return -1
+		}
+		return idx
+	}
+	if build(body, nil, -1, 0, true) < 0 || len(nodes) == 0 || nodes[0].kind != '{' {
+		return false
+	}
+	order := make([]int, len(nodes)-1)
+	for i := range order {
+		order[i] = i + 1
+	}
+	compare := func(a, b int, fold bool) int {
+		if nodes[a].parent != nodes[b].parent {
+			return nodes[a].parent - nodes[b].parent
+		}
+		if nodes[nodes[a].parent].kind != '{' {
+			return a - b
+		}
+		if fold {
+			return performanceFoldCompare(nodes[a].key, nodes[b].key)
+		}
+		ak, bk := nodes[a].key, nodes[b].key
+		if nodes[a].parent == 0 {
+			if bytes.Equal(ak, []byte("tools")) {
+				ak = []byte("hasTools")
+			}
+			if bytes.Equal(bk, []byte("tools")) {
+				bk = []byte("hasTools")
+			}
+		}
+		return bytes.Compare(ak, bk)
+	}
+	slices.SortFunc(order, func(a, b int) int { return compare(a, b, true) })
+	for i := 1; i < len(order); i++ {
+		if compare(order[i-1], order[i], true) == 0 {
+			return false
+		}
+	}
+	slices.SortFunc(order, func(a, b int) int { return compare(a, b, false) })
+	for i, idx := range order {
+		p := nodes[idx].parent
+		if nodes[p].count == 0 {
+			nodes[p].begin = i
+		}
+		nodes[p].count++
+	}
+	var emit func(int)
+	emit = func(idx int) {
+		n := nodes[idx]
+		switch n.kind {
+		case '{', '[':
+			h.Write([]byte{n.kind})
+			for i := 0; i < n.count; i++ {
+				if i > 0 {
+					h.Write([]byte(","))
+				}
+				child := order[n.begin+i]
+				if n.kind == '{' {
+					performanceHashString(h, nodes[child].key)
+					h.Write([]byte(":"))
+				}
+				emit(child)
+			}
+			end := byte('}')
+			if n.kind == '[' {
+				end = ']'
+			}
+			h.Write([]byte{end})
+		case '"':
+			performanceHashString(h, n.text)
+		default:
+			if (n.kind == '-' || n.kind >= '0' && n.kind <= '9') && len(n.raw) <= 64 {
+				canonical := performanceCanonicalNumber(json.Number(string(n.raw)))
+				if number, ok := canonical.(json.Number); ok {
+					io.WriteString(h, string(number))
+				}
+			} else {
+				h.Write(n.raw)
+			}
+		}
+	}
+	h.Write([]byte("{"))
+	emitted := false
+	// hasTools sorts among the accepted options using its canonical spelling.
+	for i := 0; i < nodes[0].count; i++ {
+		idx := order[nodes[0].begin+i]
+		key := string(nodes[idx].key)
+		if key == "model" || key == "messages" || key == "prompt" || key == "input" {
 			continue
 		}
 		allowed := slices.Contains(chatRequestKeys, key) || key == "n"
@@ -172,30 +553,96 @@ func performanceOptions(body []byte, family string) (map[string]any, bool) {
 			allowed = allowed || key == "options" || key == "keep_alive" || key == "format" || key == "raw" || key == "think"
 		}
 		if !allowed {
-			return nil, false
+			return false
 		}
-		options[key] = performanceCanonicalNumber(value)
+		if emitted {
+			h.Write([]byte(","))
+		}
+		emitted = true
+		if key == "tools" {
+			performanceHashString(h, []byte("hasTools"))
+			h.Write([]byte(":"))
+			if bytes.Equal(nodes[idx].raw, []byte("null")) {
+				h.Write([]byte("false"))
+			} else {
+				h.Write([]byte("true"))
+			}
+		} else {
+			performanceHashString(h, nodes[idx].key)
+			h.Write([]byte(":"))
+			emit(idx)
+		}
 	}
-	return options, true
+	h.Write([]byte("}"))
+	return true
+}
+
+func performanceFoldCompare(a, b []byte) int {
+	for len(a) > 0 && len(b) > 0 {
+		ar, an := utf8.DecodeRune(a)
+		br, bn := utf8.DecodeRune(b)
+		ar = unicode.ToLower(unicode.ToUpper(ar))
+		br = unicode.ToLower(unicode.ToUpper(br))
+		if ar < br {
+			return -1
+		}
+		if ar > br {
+			return 1
+		}
+		a = a[an:]
+		b = b[bn:]
+	}
+	return len(a) - len(b)
+}
+
+func performanceHashString(h hash.Hash, value []byte) {
+	h.Write([]byte{'"'})
+	const hex = "0123456789abcdef"
+	var scratch [6]byte
+	for len(value) > 0 {
+		r, n := utf8.DecodeRune(value)
+		value = value[n:]
+		if r == utf8.RuneError && n == 1 {
+			h.Write([]byte(`\ufffd`))
+			continue
+		}
+		switch r {
+		case '"', '\\':
+			scratch[0], scratch[1] = '\\', byte(r)
+			h.Write(scratch[:2])
+		case '\n', '\r', '\t', '\b', '\f':
+			scratch[0] = '\\'
+			switch r {
+			case '\n':
+				scratch[1] = 'n'
+			case '\r':
+				scratch[1] = 'r'
+			case '\t':
+				scratch[1] = 't'
+			case '\b':
+				scratch[1] = 'b'
+			case '\f':
+				scratch[1] = 'f'
+			}
+			h.Write(scratch[:2])
+		default:
+			if r < 0x20 || r == '<' || r == '>' || r == '&' || r == 0x2028 || r == 0x2029 {
+				scratch = [6]byte{'\\', 'u', hex[(r>>12)&15], hex[(r>>8)&15], hex[(r>>4)&15], hex[r&15]}
+				h.Write(scratch[:])
+			} else {
+				n := utf8.EncodeRune(scratch[:], r)
+				h.Write(scratch[:n])
+			}
+		}
+	}
+	h.Write([]byte{'"'})
 }
 
 func performanceCanonicalNumber(v any) any {
 	switch n := v.(type) {
 	case json.Number:
-		if len(n) > 64 {
-			return n
-		}
-		if i := strings.IndexAny(string(n), "eE"); i >= 0 {
-			e, err := strconv.Atoi(string(n[i+1:]))
-			if err != nil || e < -308 || e > 308 {
-				return n
-			}
-		}
-		if r, ok := new(big.Rat).SetString(string(n)); ok {
-			// JSON decimal numbers have no prime factors other than 2 and 5
-			// in their denominator. This bound preserves every accepted digit.
-			decimal := strings.TrimRight(strings.TrimRight(r.FloatString(372), "0"), ".")
-			return json.Number(decimal)
+		if value, ok := parsePerformanceDecimal([]byte(n)); ok {
+			return json.Number(value.text())
 		}
 	case map[string]any:
 		for k, value := range n {
@@ -210,26 +657,50 @@ func performanceCanonicalNumber(v any) any {
 }
 
 type performanceAttempt struct {
-	mu                sync.Mutex // first-byte peek can outlive a timed-out attempt
-	f                 *facade
-	key               performancewire.ProfileKey
-	qualification     performanceExtractQualification
-	body              []byte // request-owned, released with the attempt; never published
-	api, model        string
-	parent            context.Context
-	wait              time.Duration
-	start             time.Time
-	header, firstBody *int64
-	reader            *streamFrameReader
+	mu                 sync.Mutex // first-byte peek can outlive a timed-out attempt
+	f                  *facade
+	key                performancewire.ProfileKey
+	qualification      performanceExtractQualification
+	identity           performanceIdentityTuple // immutable IDs, no request retention
+	preparationRelease func()
+	api, model         string
+	parent             context.Context
+	wait               time.Duration
+	start              time.Time
+	header, firstBody  *int64
+	reader             *streamFrameReader
 }
 
 func (f *facade) newPerformanceAttempt(parent context.Context, model, api string, body []byte, wait time.Duration) *performanceAttempt {
-	key, qualification, ok := f.performanceFingerprint(model, api, body)
-	if !ok {
-		f.host.dropPerformance(1)
-		return nil
+	a, _ := f.newPerformanceAttemptOwned(parent, model, api, body, wait)
+	return a
+}
+
+func (f *facade) newPerformanceAttemptOwned(parent context.Context, model, api string, body []byte, wait time.Duration) (*performanceAttempt, error) {
+	var release func()
+	if inferenceBuffers(parent) != nil {
+		if allowance, ok := parent.Value(performancePreparationKey{}).(performancePreparation); ok {
+			n, err := performancePreparationBytes(body)
+			if err != nil || n > allowance.bytes {
+				return nil, &bufferLimitError{}
+			}
+		} else {
+			var err error
+			parent, release, err = preparePerformanceBuffers(parent, body)
+			if err != nil {
+				return nil, err
+			}
+		}
 	}
-	return &performanceAttempt{f: f, key: key, qualification: qualification, body: body, api: api, model: model, parent: parent, wait: wait}
+	key, qualification, identity, ok := f.performanceFingerprintOwned(model, api, body)
+	if !ok {
+		if release != nil {
+			release()
+		}
+		f.host.dropPerformance(1)
+		return nil, nil
+	}
+	return &performanceAttempt{f: f, key: key, qualification: qualification, identity: identity, preparationRelease: release, api: api, model: model, parent: parent, wait: wait}, nil
 }
 
 type performanceTransport struct {
@@ -308,13 +779,19 @@ func installResponseStream(resp *http.Response, request originStreamRequest, par
 }
 
 func (a *performanceAttempt) finish(sc *statusCapture, returned bool) {
-	if a == nil || a.start.IsZero() {
+	if a == nil {
+		return
+	}
+	if a.preparationRelease != nil {
+		defer a.preparationRelease()
+	}
+	if a.start.IsZero() {
 		return
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	key, _, valid := a.f.performanceFingerprint(a.model, a.api, a.body)
-	if !valid || key != a.key {
+	_, _, identity, valid := a.f.performanceCurrentIdentity(a.model, a.api)
+	if !valid || identity != a.identity {
 		a.f.host.dropPerformance(2)
 		return
 	}
@@ -409,7 +886,7 @@ func (n *performanceNumbers) snapshot() performanceExtractMetadata {
 func extractPerformanceObserved(payload []byte, q performanceExtractQualification) performanceExtractMetadata {
 	v := extractPerformanceMetadata(payload, q)
 	f := performanceExtractObject(payload)
-	var fields map[string]json.RawMessage
+	var fields performanceExtractFields
 	if q.EngineFamily == "ollama" && (q.APIPath == "/api/chat" || q.APIPath == "/api/generate") {
 		fields = f
 		for _, check := range []struct {
@@ -419,18 +896,18 @@ func extractPerformanceObserved(payload []byte, q performanceExtractQualificatio
 		}{
 			{"eval_count", v.OutputTokens, 1 << 2}, {"eval_duration", v.DecodeNs, 1 << 4}, {"load_duration", v.LoadNs, 1 << 5}, {"prompt_eval_duration", v.PrefillNs, 1 << 3},
 		} {
-			if _, present := fields[check.key]; present && check.value == nil {
+			if _, present := fields.field(check.key); present && check.value == nil {
 				v.invalid |= check.bit
 			}
 		}
 		return v
 	}
 	if q.EngineFamily == "ollama" {
-		usage := performanceExtractObject(f["usage"])
-		if _, present := f["usage"]; present && usage == nil {
+		usage := performanceExtractObject(f.value("usage"))
+		if _, present := f.field("usage"); present && usage == nil {
 			v.invalid |= 1<<2 | 1<<1
 		}
-		if _, present := usage["completion_tokens"]; present && v.OutputTokens == nil {
+		if _, present := usage.field("completion_tokens"); present && v.OutputTokens == nil {
 			v.invalid |= 1 << 2
 		}
 	}

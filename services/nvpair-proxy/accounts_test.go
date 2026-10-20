@@ -680,6 +680,126 @@ func TestChatAccountAttemptHeadroomBeforeLookup(t *testing.T) {
 	}
 }
 
+func TestChatAccountAttemptInferenceRoot(t *testing.T) {
+	t.Run("all pre-send headroom is charged before credential lookup", func(t *testing.T) {
+		f := newChatAccountFixture(t)
+		ctx, root, _ := chatTestInferenceContext(t, 1<<20, 0)
+		f.ctx = ctx
+		lookups := 0
+		f.resolve = func(nodepolicy.CredentialRef) (string, bool) {
+			lookups++
+			root.mu.Lock()
+			used, queued := root.used, root.waiters.Len()
+			root.mu.Unlock()
+			// One retained send body, the existing parser fixed allowance, and
+			// transport's raw/error-body headroom must coexist before any effect.
+			if used != f.budget.used.Load() || used < 96<<10+3*(65536+1) || queued != 0 || len(f.ledger.state.Holds) != 0 {
+				t.Errorf("pre-send root=%d explicit=%d queued=%d holds=%d", used, f.budget.used.Load(), queued, len(f.ledger.state.Holds))
+			}
+			return "synthetic-selected-key", true
+		}
+		result, err := f.run(t)
+		if err != nil || !result.Complete || lookups != 1 || f.calls.Load() != 1 {
+			t.Fatalf("root-backed attempt: complete=%v lookups=%d sends=%d err=%v", result.Complete, lookups, f.calls.Load(), err)
+		}
+		bufferAssertTotals(t, root, 0, 0, 0)
+	})
+	testRefusal := func(name string, capacity, own, other int64, status int) {
+		t.Run(name, func(t *testing.T) {
+			f := newChatAccountFixture(t)
+			ctx, root, owner := chatTestInferenceContext(t, capacity, time.Hour)
+			f.ctx = ctx
+			if own > 0 {
+				lease, err := owner.scope.acquire(ctx, own)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer lease.close()
+			}
+			if other > 0 {
+				bufferMustAcquire(t, root, other)
+				if err := root.reconfigure(capacity, 0); err != nil {
+					t.Fatal(err)
+				}
+			}
+			lookups := 0
+			f.resolve = func(nodepolicy.CredentialRef) (string, bool) { lookups++; return "synthetic-selected-key", true }
+			_, err := f.run(t)
+			if !errors.Is(err, errChatBudget) || bufferRequestStatus(err) != status || lookups != 0 || f.calls.Load() != 0 || len(f.ledger.state.Holds) != 0 || f.budget.used.Load() != 0 {
+				t.Fatalf("pre-send refusal: status=%d want=%d lookups=%d sends=%d holds=%d explicit=%d err=%v", bufferRequestStatus(err), status, lookups, f.calls.Load(), len(f.ledger.state.Holds), f.budget.used.Load(), err)
+			}
+			bufferAssertTotals(t, root, own+other, 1, 0)
+		})
+	}
+	testRefusal("own live footprint is immediately 413", 100000, 2000, 0, http.StatusRequestEntityTooLarge)
+	testRefusal("transport overlap is immediately 413 before effects", 200000, 1, 0, http.StatusRequestEntityTooLarge)
+	testRefusal("other request contention is 503 before effects", 1<<20, 0, 1<<20, http.StatusServiceUnavailable)
+	t.Run("postcommit refusal interrupts without typed status or resend", func(t *testing.T) {
+		f := newChatAccountFixture(t)
+		ctx, root, _ := chatTestInferenceContext(t, 1<<20, time.Hour)
+		f.ctx = ctx
+		f.transport.client.Transport = publicTestRoundTrip(func(*http.Request) (*http.Response, error) {
+			f.calls.Add(1)
+			root.mu.Lock()
+			used := root.used
+			root.mu.Unlock()
+			if err := root.reconfigure(used, time.Hour); err != nil {
+				t.Fatal(err)
+			}
+			return &http.Response{StatusCode: http.StatusOK, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(f.response)), ContentLength: -1}, nil
+		})
+		result, err := f.run(t)
+		var typed interface{ HTTPStatus() int }
+		if !errors.Is(err, errChatBudget) || errors.As(err, &typed) || result.Complete || result.Exposed || result.Usage != nil || f.calls.Load() != 1 {
+			t.Fatalf("postcommit refusal: result=%+v sends=%d err=%v", result, f.calls.Load(), err)
+		}
+		if len(f.ledger.state.Holds) != 1 || !f.ledger.state.Holds[0].outstanding() || f.ledger.state.Holds[0].QualificationChecked {
+			t.Fatalf("resource interruption altered liability/classification: %+v", f.ledger.state.Holds)
+		}
+		bufferAssertTotals(t, root, 0, 0, 0)
+	})
+	t.Run("error body remains charged until its last transport read", func(t *testing.T) {
+		f := newChatAccountFixture(t)
+		ctx, root, _ := chatTestInferenceContext(t, 1<<20, 0)
+		f.ctx = ctx
+		reads := 0
+		body := &chatAccountRootBody{Reader: strings.NewReader("synthetic-restrictive-response"), inspect: func() {
+			reads++
+			root.mu.Lock()
+			used := root.used
+			root.mu.Unlock()
+			if used != f.budget.used.Load() || used < 3*(65536+1) {
+				t.Errorf("unaccounted error borrower: root=%d explicit=%d", used, f.budget.used.Load())
+			}
+		}}
+		f.transport.client.Transport = publicTestRoundTrip(func(*http.Request) (*http.Response, error) {
+			f.calls.Add(1)
+			return &http.Response{StatusCode: http.StatusTooManyRequests, Header: http.Header{}, Body: body, ContentLength: -1}, nil
+		})
+		_, err := f.run(t)
+		if !errors.Is(err, errChatRateLimit) || reads == 0 || body.closes.Load() != 1 || f.calls.Load() != 1 {
+			t.Fatalf("error-body lifetime: reads=%d closes=%d sends=%d err=%v", reads, body.closes.Load(), f.calls.Load(), err)
+		}
+		bufferAssertTotals(t, root, 0, 0, 0)
+	})
+}
+
+type chatAccountRootBody struct {
+	io.Reader
+	inspect func()
+	closes  atomic.Int64
+}
+
+func (b *chatAccountRootBody) Read(p []byte) (int, error) {
+	b.inspect()
+	return b.Reader.Read(p)
+}
+
+func (b *chatAccountRootBody) Close() error {
+	b.closes.Add(1)
+	return nil
+}
+
 func TestChatAccountAttemptTransportFailure(t *testing.T) {
 	f := newChatAccountFixture(t)
 	f.transport.client.Transport = publicTestRoundTrip(func(*http.Request) (*http.Response, error) {

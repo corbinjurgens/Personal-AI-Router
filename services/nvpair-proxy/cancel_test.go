@@ -122,15 +122,17 @@ func TestCancel_BeforeCommitWithRegenerateMovesOn(t *testing.T) {
 		if wl.State != "completed" || wl.ScheduledOn != "b" {
 			t.Fatalf("terminal = %s on %q, want completed on b", wl.State, wl.ScheduledOn)
 		}
-		// The regenerated job was visible moving: queued on a, then on b.
+		// The regenerated job clears its prior placement before preparing b.
 		var placements []string
 		for _, raw := range notificationsOf(t, fx.w, workloadSubmittedMethod) {
 			var params workloadParams
-			_ = json.Unmarshal(raw, &params)
+			if err := json.Unmarshal(raw, &params); err != nil {
+				t.Fatal(err)
+			}
 			placements = append(placements, params.WorkloadInfo.ScheduledOn)
 		}
-		if strings.Join(placements, ",") != ",a,b" {
-			t.Fatalf("queued placements = %v, want [\"\" a b]", placements)
+		if strings.Join(placements, ",") != ",a,,b" {
+			t.Fatalf("queued placements = %v, want [\"\" a \"\" b]", placements)
 		}
 	})
 }

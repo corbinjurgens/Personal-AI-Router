@@ -596,6 +596,7 @@ func runChatAccountAttempt(ctx context.Context, snapshot chatAccountSnapshot, bo
 	if lifecycle.bindCancel(cancel) != nil {
 		return result, errChatAttempt
 	}
+	budget, stopWaiting := chatInferenceBudget(ctx, budget)
 	if q.MaxBodyBytes > d.Transport.MaxResponseBytes || q.MaxEventBytes > d.Transport.MaxEventBytes {
 		return result, errChatAttempt
 	}
@@ -623,6 +624,9 @@ func runChatAccountAttempt(ctx context.Context, snapshot chatAccountSnapshot, bo
 		return result, err
 	}
 	defer transportRelease()
+	// All later growth belongs to this admitted attempt and must interrupt
+	// cleanly on refusal rather than waiting while a response is committed.
+	stopWaiting()
 	key, ok := resolve(ref)
 	if !ok || key == "" || strings.ContainsFunc(key, unicode.IsControl) {
 		return result, errChatCredential

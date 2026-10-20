@@ -45,6 +45,7 @@ type bufferBudget struct {
 	live     int
 	wait     time.Duration
 	waiters  list.List
+	streams  *bufferScope
 	// Clock functions are fixed before use; tests can supply controlled timers.
 	now      func() time.Time
 	newTimer func(time.Duration) *time.Timer
@@ -56,6 +57,7 @@ type bufferBudget struct {
 type bufferScope struct {
 	budget *bufferBudget
 	parent *bufferScope
+	shared *bufferScope
 	limit  int64
 	used   int64
 }
@@ -108,12 +110,17 @@ func (s *bufferScope) category(limit int64) (*bufferScope, error) {
 
 func (b *bufferBudget) acquire(ctx context.Context, capacity int64) (*bufferLease, error) {
 	b.mu.Lock()
-	return b.acquireLocked(ctx, capacity, nil)
+	return b.acquireLocked(ctx, capacity, nil, true)
 }
 
 func (s *bufferScope) acquire(ctx context.Context, capacity int64) (*bufferLease, error) {
 	s.budget.mu.Lock()
-	return s.budget.acquireLocked(ctx, capacity, s)
+	return s.budget.acquireLocked(ctx, capacity, s, true)
+}
+
+func (s *bufferScope) tryAcquire(ctx context.Context, capacity int64) (*bufferLease, error) {
+	s.budget.mu.Lock()
+	return s.budget.acquireLocked(ctx, capacity, s, false)
 }
 
 // grow acquires the entire replacement capacity, not a delta. The old lease
@@ -126,12 +133,12 @@ func (l *bufferLease) grow(ctx context.Context, capacity int64) (*bufferLease, e
 		b.mu.Unlock()
 		return nil, errBufferClosed
 	}
-	return b.acquireLocked(ctx, capacity, l.charge.scope)
+	return b.acquireLocked(ctx, capacity, l.charge.scope, true)
 }
 
 // acquireLocked consumes the lock and snapshots the wait for this call. Scope
 // limits and overflow are checked before any aggregate refusal or queue entry.
-func (b *bufferBudget) acquireLocked(ctx context.Context, n int64, scope *bufferScope) (*bufferLease, error) {
+func (b *bufferBudget) acquireLocked(ctx context.Context, n int64, scope *bufferScope, mayWait bool) (*bufferLease, error) {
 	started, wait := b.now(), b.wait
 	if n < 0 {
 		b.mu.Unlock()
@@ -142,14 +149,28 @@ func (b *bufferBudget) acquireLocked(ctx context.Context, n int64, scope *buffer
 			b.mu.Unlock()
 			return nil, &bufferLimitError{}
 		}
+		if s.shared != nil && (n > math.MaxInt64-s.shared.used || n > s.shared.limit-s.shared.used) {
+			b.mu.Unlock()
+			return nil, &bufferBusyError{}
+		}
 	}
 	if err := ctx.Err(); err != nil {
 		b.mu.Unlock()
 		return nil, &bufferBusyError{cause: err}
 	}
-	if n > b.capacity {
+	// An account cannot release its own live storage while waiting for this
+	// replacement. Classify that impossible footprint before joining the FIFO.
+	root := scope
+	for root != nil && root.parent != nil {
+		root = root.parent
+	}
+	own := int64(0)
+	if root != nil {
+		own = root.used
+	}
+	if n > b.capacity || own > b.capacity-n {
 		b.mu.Unlock()
-		return nil, &bufferBusyError{}
+		return nil, &bufferLimitError{}
 	}
 	if b.waiters.Len() == 0 && b.fitsLocked(n) {
 		reserveBufferScope(scope, n)
@@ -157,7 +178,7 @@ func (b *bufferBudget) acquireLocked(ctx context.Context, n int64, scope *buffer
 		b.mu.Unlock()
 		return lease, nil
 	}
-	if wait == 0 || b.waiters.Len() >= bufferBudgetMaxWaiters {
+	if !mayWait || wait == 0 || b.waiters.Len() >= bufferBudgetMaxWaiters {
 		b.mu.Unlock()
 		return nil, &bufferBusyError{}
 	}
@@ -203,6 +224,9 @@ func (b *bufferBudget) acquireLocked(ctx context.Context, n int64, scope *buffer
 func reserveBufferScope(scope *bufferScope, n int64) {
 	for s := scope; s != nil; s = s.parent {
 		s.used += n
+		if s.shared != nil {
+			s.shared.used += n
+		}
 	}
 }
 
@@ -259,8 +283,12 @@ func (b *bufferBudget) reconfigure(capacity int64, wait time.Duration) error {
 	for e := b.waiters.Front(); e != nil; {
 		next := e.Next()
 		w := e.Value.(*bufferWaiter)
-		if w.bytes > capacity {
-			b.removeLocked(w, &bufferBusyError{})
+		root := w.scope
+		for root != nil && root.parent != nil {
+			root = root.parent
+		}
+		if w.bytes > capacity || (root != nil && root.used > capacity) {
+			b.removeLocked(w, &bufferLimitError{})
 		}
 		e = next
 	}
