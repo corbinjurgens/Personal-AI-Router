@@ -259,8 +259,14 @@ func TestServiceRestartReconnect(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("service exit did not promptly fail the retained pending action")
 	}
-	if _, err := client.Call(ctx, "policy:get", nil); err == nil {
+	outageCtx, outageCancel := context.WithTimeout(ctx, 3*time.Second)
+	defer outageCancel()
+	if _, err := client.Call(outageCtx, "policy:get", nil); err == nil {
 		t.Fatal("retained session accepted a new call during service outage")
+	} else if errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("outage call blocked instead of failing fast: %v", err)
+	} else if errors.Is(err, context.Canceled) {
+		t.Fatalf("outage call was canceled instead of failing with a transport error: %v", err)
 	}
 	// Reap only recorded old PID/path/creation identities, keeping the production
 	// client alive. cleanupChecked would close clients and invalidate the proof.
