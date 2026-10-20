@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
@@ -191,5 +192,88 @@ func TestXARemoteConfigurationVeto(t *testing.T) {
 		})
 		assertOBIntent(t, decodeOBIntent(t, c.call(t, "engine:intent", nil)), want)
 		assertOBStoredIntent(t, filepath.Join(jointAppDir(f.base), "engine-bin", "engine-state.json"), false, engineintent.Local)
+	})
+}
+
+func xaEngineModelsPolicy(t *testing.T, p *interopProcess) *nodepolicy.Advertisement {
+	t.Helper()
+	m := callRPC(t, p.in, p.msgs, "engine:models", map[string]any{}, 10*time.Second)
+	if m.Error != nil {
+		t.Fatalf("engine models read failed: code=%d", m.Error.Code)
+	}
+	var result struct {
+		Policy *nodepolicy.Advertisement `json:"policy"`
+	}
+	if err := json.Unmarshal(m.Result, &result); err != nil {
+		t.Fatalf("decode engine models policy: %v", err)
+	}
+	return result.Policy
+}
+
+func xaPeerDraft(t *testing.T, p nodepolicy.Policy) nodepolicy.PeerPolicy {
+	t.Helper()
+	data, err := json.Marshal(p.PeerProjection())
+	if err != nil {
+		t.Fatalf("encode peer policy draft: %v", err)
+	}
+	var draft nodepolicy.PeerPolicy
+	if err := json.Unmarshal(data, &draft); err != nil {
+		t.Fatalf("decode peer policy draft: %v", err)
+	}
+	return draft
+}
+
+func TestXARemoteConfigurationRoles(t *testing.T) {
+	xaPlatform(t)
+	f := newManagementFixture(t)
+	j := f.joint
+
+	if !t.Run("allowed peer sets roles", func(t *testing.T) {
+		draft := xaPeerDraft(t, j.want)
+		draft.Roles = map[string]nodepolicy.Role{"weak": {Engine: "ollama", Model: "joint-local"}}
+		res := j.rpc(t, "engine:remote-policy-set", map[string]any{"policy": draft, "expectedPersistedRevision": j.want.Revision}).Result
+		var accepted struct {
+			Policy nodepolicy.PeerPolicy `json:"policy"`
+		}
+		if err := json.Unmarshal(res, &accepted); err != nil {
+			t.Fatalf("decode accepted roles edit: %v", err)
+		}
+		if !reflect.DeepEqual(accepted.Policy.Roles, draft.Roles) || accepted.Policy.Revision == "" || accepted.Policy.Revision == j.want.Revision {
+			t.Fatal("accepted roles edit differs from the requested roles or lacks a new revision")
+		}
+		j.want.Roles = draft.Roles
+		j.want.Revision = accepted.Policy.Revision
+		j.assertPolicy(t)
+	}) {
+		return
+	}
+
+	if !t.Run("target advertises roles", func(t *testing.T) {
+		task1Eventually(t, "roles projection", 10*time.Second, func() bool {
+			adv := xaEngineModelsPolicy(t, j.target)
+			return adv != nil && adv.Revision == j.want.Revision && adv.Roles["weak"].Engine == "ollama" && adv.Roles["weak"].Model == "joint-local"
+		})
+	}) {
+		return
+	}
+
+	if !t.Run("denied peer cannot change roles", func(t *testing.T) {
+		before := readPolicyBytes(t, j.path)
+		draft := xaPeerDraft(t, j.want)
+		draft.Roles = map[string]nodepolicy.Role{"strong": {Engine: "ollama", Model: "joint-local"}}
+		managementHTTP(t, f.denied, j.ports[1], http.MethodPost, "/v1/node-policy/set", map[string]any{"policy": draft, "expectedPersistedRevision": j.want.Revision}, http.StatusConflict)
+		j.assertUnchanged(t, before)
+	}) {
+		return
+	}
+
+	t.Run("peer cannot change tiers alongside roles", func(t *testing.T) {
+		draft := xaPeerDraft(t, j.want)
+		draft.Tiers["weak"][0].Model = "different-local"
+		m := j.originCall(t, "engine:remote-policy-set", map[string]any{"policy": draft, "expectedPersistedRevision": j.want.Revision})
+		if m.Error == nil || m.Error.Code != -32602 || m.Error.Message != "remote node policy: HTTP 400: a paired node cannot change the tiers" || len(m.Result) != 0 {
+			t.Fatalf("protected tier refusal mismatch: error_present=%t result_bytes=%d", m.Error != nil, len(m.Result))
+		}
+		j.assertPolicy(t)
 	})
 }
