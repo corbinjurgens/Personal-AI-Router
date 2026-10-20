@@ -76,8 +76,13 @@ Refusal, timeout, cancellation, missing parent, send error and malformed or
 mismatched reply all mean `not-dispatched` with zero engine calls. The pending
 map is bounded and entries are removed on every terminal path. A queued grant
 is checked against `ctx.Err()` at authorization and again before execution.
-Sending is synchronous like existing parent relays: a parent that stops reading
-cannot authorize a load; the deadline is enforced when that send returns.
+Sending is synchronous and bounded by the caller's remaining operation deadline
+and the parent codec's 60-second ceiling, including write-gate waiting. A queued
+cancellation emits nothing and leaves an active writer alone; an interrupted
+active write closes the parent session and finishes before returning. Send
+failure removes the pending entry and cannot authorize a load or accept a late
+grant. Default publication failure also closes the session and reaches the
+existing `Manager.Run`/`StopAll` engine cleanup path.
 No inventory, publication or content lock is held across the relay or load.
 
 Manager compares its own current run and normalized requested-model digest and

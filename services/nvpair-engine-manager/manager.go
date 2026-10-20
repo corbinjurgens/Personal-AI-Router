@@ -118,15 +118,15 @@ func NewManager(codec *Codec, exec *Executor, mesh *clustertrust.Mesh, clusterDi
 		PeerClientOptions: clustertrust.PeerClientOptions{ResponseHeaderTimeout: remoteReadyResponseHeaderTimeout},
 		BaseConfigDir:     baseDir, ResolveRoute: m.resolveControlRoute,
 	})
-	m.settingsRelay.send = codec.Notify
-	m.switchRelay.send = codec.Notify
+	m.settingsRelay.send = codec.NotifyContext
+	m.switchRelay.send = codec.NotifyContext
 	exec.switchParent = m.switchRelay.call
 	exec.settingsParent = m.settingsRelay.call
-	m.policyRelay.send = codec.Notify
+	m.policyRelay.send = codec.NotifyContext
 	exec.policyParent = m.policyRelay.call
-	m.modelMutation.send = codec.Notify
+	m.modelMutation.send = codec.NotifyContext
 	exec.modelMutationParent = m.modelMutation.call
-	m.residentDispatch.send = codec.Notify
+	m.residentDispatch.send = codec.NotifyContext
 	exec.residentParent = m.residentDispatch.call
 	return m
 }

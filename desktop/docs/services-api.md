@@ -147,6 +147,7 @@
 | `internal:set-reserved-port` | request (we call) | ⚠️ not called |
 
 **Dynamic / unresolved notify sites (verify by hand — `npm run service-contracts` prints the line numbers):**
+- `method (var)  (codec.go, 2 sites)`
 - `method (var)  (executor.go)`
 
 ## nvpair-errors

@@ -49,7 +49,7 @@ func (residentDispatchRefusal) Error() string { return "dispatch-refused" }
 type residentDispatchRelay struct {
 	mu      sync.Mutex
 	pending map[string]chan residentDispatchReply
-	send    func(string, any) error
+	send    func(context.Context, string, any) error
 }
 
 func (r *residentDispatchRelay) call(ctx context.Context, p nodepolicy.DispatchResidentParams) error {
@@ -62,6 +62,10 @@ func (r *residentDispatchRelay) call(ctx context.Context, p nodepolicy.DispatchR
 	id := newOpID()
 	ch := make(chan residentDispatchReply, 1)
 	r.mu.Lock()
+	if err := ctx.Err(); err != nil {
+		r.mu.Unlock()
+		return err
+	}
 	if len(r.pending) >= maxResidentPending {
 		r.mu.Unlock()
 		return errors.New("dispatch-busy")
@@ -72,7 +76,10 @@ func (r *residentDispatchRelay) call(ctx context.Context, p nodepolicy.DispatchR
 	r.pending[id] = ch
 	r.mu.Unlock()
 	defer func() { r.mu.Lock(); delete(r.pending, id); r.mu.Unlock() }()
-	if err := r.send(residentDispatchRequestMethod, residentDispatchRequest{ID: id, Params: p}); err != nil {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := r.send(ctx, residentDispatchRequestMethod, residentDispatchRequest{ID: id, Params: p}); err != nil {
 		return err
 	}
 	select {
