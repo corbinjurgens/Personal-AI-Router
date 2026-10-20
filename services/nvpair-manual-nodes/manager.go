@@ -361,7 +361,7 @@ func (m *Manager) probeNode(tn *trackedNode) {
 			"node_id", id, "addr", addr,
 			"ollama_up", newStatus.OllamaUp, "node_info_up", newStatus.NodeInfoUp,
 			"models", len(newStatus.OllamaModels), "gpus", len(newStatus.GPUs))
-		m.notifyIfCurrent(tn, "node/updated", newStatus)
+		m.ifCurrent(tn, func() error { return m.codec.Notify("node/updated", newStatus) })
 	} else {
 		slog.Debug("manual node probe stable",
 			"node_id", id, "addr", addr,
@@ -387,30 +387,36 @@ func (m *Manager) probeNode(tn *trackedNode) {
 		if net.ParseIP(addr) != nil {
 			msg += ". This node was added by IP address, so if the device was reassigned a new IP it will not recover automatically — re-add it with the current address, or add it by hostname so it can be re-resolved."
 		}
-		if err := m.notifyIfCurrent(tn, "errors:report", errors.ServiceError{
-			ID:       probeFailedID(id),
-			Message:  msg,
-			Severity: "warning",
-			Action:   "none",
+		if err := m.ifCurrent(tn, func() error {
+			return m.codec.Notify("errors:report", errors.ServiceError{
+				ID:       probeFailedID(id),
+				Message:  msg,
+				Severity: "warning",
+				Action:   "none",
+			})
 		}); err != nil {
 			log.Printf("failed to send errors:report for %s: %v", id, err)
 		}
 	case reachable && prevFails >= probeFailThreshold:
-		if err := m.notifyIfCurrent(tn, "errors:clear", errors.ClearParams{
-			ID: probeFailedID(id),
+		if err := m.ifCurrent(tn, func() error {
+			return m.codec.Notify("errors:clear", errors.ClearParams{ID: probeFailedID(id)})
 		}); err != nil {
 			log.Printf("failed to send errors:clear for %s: %v", id, err)
 		}
 	}
 }
 
-func (m *Manager) notifyIfCurrent(tn *trackedNode, method string, params any) error {
+// ifCurrent runs notify under the read lock only while tn is still the
+// tracked entry for its ID, so a replaced entry's probe announces nothing.
+// Callers pass a closure with a literal method name so the service-contracts
+// generator can see each notification.
+func (m *Manager) ifCurrent(tn *trackedNode, notify func() error) error {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	if m.nodes[nodeID(tn.entry)] != tn {
 		return nil
 	}
-	return m.codec.Notify(method, params)
+	return notify()
 }
 
 // probeFailedID is the canonical ServiceError id for a manual node
