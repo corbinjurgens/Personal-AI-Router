@@ -49,6 +49,9 @@ func (e *Executor) SetPort(ctx context.Context, engine string, port int) (Engine
 	if err != nil {
 		return EngineStatus{}, err
 	}
+	if err := prepareStrataState(ctx, st); err != nil {
+		return EngineStatus{}, err
+	}
 	st.opMu.Lock()
 	defer st.opMu.Unlock()
 

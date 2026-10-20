@@ -134,11 +134,13 @@ func (e *Executor) launchStateLocked(engine string, st *engineState) settings.La
 	command, err := launchForState(st, result.ServerPort)
 	if err == nil {
 		rt := st.plat.Runtime
-		if llamaServingRuntime(st, result.Serving) {
-			rt = llamaServingBase(rt)
-			prepared, servingErr := compileLlamaServing(command, rt, false)
+		if preparedServingRuntime(st, result.Serving) {
+			if llamaServingRuntime(st, result.Serving) {
+				rt = llamaServingBase(rt)
+			}
+			prepared, servingErr := compilePreparedServing(st, command, rt, false)
 			if servingErr == nil {
-				result.ServingReadback = llamaServingReadback(prepared)
+				result.ServingReadback = preparedServingReadback(st, prepared)
 				if result.Running && !result.Adopted && rt.servingLaunch != nil && rt.servingLaunch.Digest == prepared.Digest {
 					result.ServingReadback.LaunchValidated = llamaServingReadback(rt.servingLaunch).Configured
 				}
@@ -161,14 +163,29 @@ func (e *Executor) launchStateLocked(engine string, st *engineState) settings.La
 	return result
 }
 
-func (e *Executor) LaunchSettings(engine string) (settings.LaunchState, error) {
+func (e *Executor) LaunchSettings(engine string, contexts ...context.Context) (settings.LaunchState, error) {
 	st, err := e.state(engine)
 	if err != nil {
 		return settings.LaunchState{}, err
 	}
+	ctx, cancel := strataPreparationContext(contexts)
+	defer cancel()
+	preparationErr := prepareStrataState(ctx, st)
 	st.opMu.Lock()
 	defer st.opMu.Unlock()
-	return e.launchStateLocked(engine, st), nil
+	result := e.launchStateLocked(engine, st)
+	if preparationErr != nil {
+		result.ServingReadback = &engines.ServingReadback{Status: "mismatch", Reason: preparationErr.Error()}
+	}
+	return result, nil
+}
+
+func strataPreparationContext(contexts []context.Context) (context.Context, context.CancelFunc) {
+	ctx := context.Background()
+	if len(contexts) > 0 {
+		ctx = contexts[0]
+	}
+	return context.WithTimeout(ctx, settings.ConfigureBudget)
 }
 
 // launchCORSAssignments uses the same mandatory-control reader as preview.
@@ -242,10 +259,15 @@ func (e *Executor) rejectRemoteCORSChangeLocked(st *engineState, request setting
 	return nil
 }
 
-func (e *Executor) PreviewLaunch(p settings.Request) (settings.Preview, error) {
+func (e *Executor) PreviewLaunch(p settings.Request, contexts ...context.Context) (settings.Preview, error) {
 	st, err := e.state(p.Engine)
 	if err != nil {
 		return settings.Preview{}, err
+	}
+	ctx, cancel := strataPreparationContext(contexts)
+	defer cancel()
+	if err := e.prepareStrataRequest(ctx, st, p); err != nil {
+		return settings.Preview{Settings: p.Settings.Clone(), Errors: map[string]string{"serving": err.Error()}}, nil
 	}
 	st.opMu.Lock()
 	defer st.opMu.Unlock()
@@ -258,6 +280,12 @@ func (e *Executor) PreviewLaunch(p settings.Request) (settings.Preview, error) {
 }
 
 func (e *Executor) previewLaunchLocked(st *engineState, request settings.Request) settings.Preview {
+	return e.previewLaunch(st, request, nil)
+}
+
+// Preparation supplies a bounded compiler on a state snapshot, sharing the
+// exact proposed-launch parser without reading current runtime digests.
+func (e *Executor) previewLaunch(st *engineState, request settings.Request, prepare func(launchCommand, Runtime) (*llamaServingLaunch, error)) settings.Preview {
 	result := settings.Preview{Settings: request.Settings.Clone(), Args: []string{}, Env: []string{}, Errors: request.Settings.Serving.Validate(), Serving: servingDeclarationReadback(request.Settings.Serving)}
 	if len(result.Errors) > 0 {
 		return result
@@ -408,8 +436,14 @@ func (e *Executor) previewLaunchLocked(st *engineState, request settings.Request
 	if err != nil {
 		return fail(err.Error())
 	}
-	if llamaServingRuntime(st, rt.Serving) {
-		prepared, err := compileLlamaServing(command, rt, false)
+	if preparedServingRuntime(st, rt.Serving) {
+		compile := func(command launchCommand, rt Runtime) (*llamaServingLaunch, error) {
+			return compilePreparedServing(st, command, rt, false)
+		}
+		if prepare != nil {
+			compile = prepare
+		}
+		prepared, err := compile(command, rt)
 		if err != nil {
 			field := "serving"
 			var servingField *ServingFieldError
@@ -420,7 +454,10 @@ func (e *Executor) previewLaunchLocked(st *engineState, request settings.Request
 			return result
 		}
 		result.Settings.Serving = prepared.Config.Clone()
-		result.Serving = llamaServingReadback(prepared)
+		result.Serving = preparedServingReadback(st, prepared)
+	}
+	if prepare != nil {
+		return result
 	}
 	current := e.launchStateLocked(request.Engine, st)
 	result.Restart = current.Running && (current.ServerPort != result.Settings.ServerPort || current.LaunchText != result.Settings.LaunchText || !current.Serving.Equal(result.Settings.Serving))
@@ -443,6 +480,9 @@ func (e *Executor) ConfigureLaunch(ctx context.Context, p settings.Configure, re
 	if err != nil {
 		return settings.LaunchState{}, err
 	}
+	if err := e.prepareStrataRequest(ctx, st, settings.Request{Engine: p.Engine, Settings: p.Settings}); err != nil {
+		return settings.LaunchState{}, servingError(err.Error())
+	}
 	st.opMu.Lock()
 	defer st.opMu.Unlock()
 	if err := ctx.Err(); err != nil {
@@ -457,7 +497,7 @@ func (e *Executor) ConfigureLaunch(ctx context.Context, p settings.Configure, re
 		}
 		return settings.LaunchState{}, fmt.Errorf("launch configuration failed authoritative validation")
 	}
-	if llamaServingRuntime(st, p.Settings.Serving) && !p.Settings.Serving.Equal(preview.Settings.Serving) {
+	if preparedServingRuntime(st, p.Settings.Serving) && !p.Settings.Serving.Equal(preview.Settings.Serving) {
 		return settings.LaunchState{}, servingError("Apply requires the exact reviewed native digest and artifact bindings.")
 	}
 	// This operation returns its one failure through the settings snapshot.
@@ -468,18 +508,20 @@ func (e *Executor) ConfigureLaunch(ctx context.Context, p settings.Configure, re
 	old := e.launchStateLocked(p.Engine, st)
 	changed := old.ServerPort != preview.Settings.ServerPort || old.LaunchText != preview.Settings.LaunchText || !old.Serving.Equal(preview.Settings.Serving)
 	var pending *llamaServingSnapshot
-	if llamaServingRuntime(st, preview.Settings.Serving) {
+	if preparedServingRuntime(st, preview.Settings.Serving) {
 		rt := st.plat.Runtime
 		rt.Serving = preview.Settings.Serving.Clone()
 		rt.LaunchArgs, rt.LaunchEnv = &preview.Args, &preview.Env
-		rt = llamaServingBase(rt)
+		if llamaServingRuntime(st, rt.Serving) {
+			rt = llamaServingBase(rt)
+		}
 		vars := st.pathVars()
 		vars["host"], vars["port"] = effectiveBind(rt.Bind, ""), strconv.Itoa(preview.Settings.ServerPort)
 		command, err := resolveProcessLaunch(rt, "", vars)
 		if err != nil {
 			return settings.LaunchState{}, err
 		}
-		prepared, err := compileLlamaServing(command, rt, true)
+		prepared, err := compilePreparedServing(st, command, rt, true)
 		if err != nil {
 			return settings.LaunchState{}, err
 		}
@@ -493,7 +535,7 @@ func (e *Executor) ConfigureLaunch(ctx context.Context, p settings.Configure, re
 				pending.Release()
 			}
 		}()
-		if err := recheckLlamaServing(command, rt, prepared); err != nil {
+		if err := recheckPreparedServing(st, command, rt, prepared); err != nil {
 			return settings.LaunchState{}, err
 		}
 	}

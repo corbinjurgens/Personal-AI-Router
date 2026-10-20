@@ -1,0 +1,10 @@
+{
+  "exe": "/REPLACE_WITH_ABSOLUTE_PATH/strata",
+  "args": ["--serve", "--native", "/REPLACE_WITH_ABSOLUTE_PATH/model-00001-of-00002.gguf", "--pack", "/REPLACE_WITH_ABSOLUTE_PATH/pack", "--max-context", "4096", "--batch", "2", "--expert-profile", "/REPLACE_WITH_ABSOLUTE_PATH/profile.bin", "--mtp", "/REPLACE_WITH_ABSOLUTE_PATH/draft", "--prefill", "512", "--expert-cache", "64", "--spec", "4"],
+  "cwd": "/REPLACE_WITH_ABSOLUTE_PATH",
+  "tokenizer": "/REPLACE_WITH_ABSOLUTE_PATH/tokenizer",
+  "model_name": "prepared-model",
+  "parallel": 2,
+  "lib_dirs": ["/REPLACE_WITH_ABSOLUTE_PATH/lib"],
+  "idle_unload_s": 60
+}

@@ -125,6 +125,9 @@ func (e *Executor) restartAfterAction(ctx context.Context, st *engineState, engi
 		return err
 	}
 	defer done()
+	if err := prepareStrataState(ctx, st); err != nil {
+		return err
+	}
 	st.opMu.Lock()
 	defer st.opMu.Unlock()
 	st.mu.Lock()

@@ -41,6 +41,9 @@ func (e *Executor) Wake(ctx context.Context, engine string) error {
 	if err != nil {
 		return err
 	}
+	if err := prepareStrataState(ctx, st); err != nil {
+		return err
+	}
 	st.opMu.Lock()
 	defer st.opMu.Unlock()
 	if e.shuttingDown.Load() {
