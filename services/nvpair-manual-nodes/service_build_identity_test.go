@@ -39,7 +39,7 @@ func TestManualBuildOnlyUpdateAndOptionalClearing(t *testing.T) {
 			rt.set(http.MethodGet, "fixture.local:14318", "/v1/node-info", func(*http.Request) (*http.Response, error) {
 				return httpJSON(http.StatusOK, body)
 			})
-			m.probeNode(entry)
+			m.probeNode(m.nodes[nodeID(entry)])
 			if m.nodes[id].status.ServiceBuildID != manualCleanBuild {
 				t.Fatalf("initial build = %q", m.nodes[id].status.ServiceBuildID)
 			}
@@ -47,7 +47,7 @@ func TestManualBuildOnlyUpdateAndOptionalClearing(t *testing.T) {
 				<-rw.frames
 			}
 			body = base + tc.field + `}`
-			m.probeNode(entry)
+			m.probeNode(m.nodes[nodeID(entry)])
 			var update *ManualNodeStatus
 			for len(rw.frames) > 0 {
 				frame := <-rw.frames
@@ -84,7 +84,7 @@ func TestManualBuildFetchFailureKeepsExistingFailureSemantics(t *testing.T) {
 	rt.set(http.MethodGet, "fixture.local:14318", "/v1/node-info", func(*http.Request) (*http.Response, error) {
 		return httpJSON(http.StatusServiceUnavailable, `{}`)
 	})
-	m.probeNode(entry)
+	m.probeNode(m.nodes[nodeID(entry)])
 	got := m.nodes[id].status
 	if got.HostUUID != "host-a" || got.NodeInfoUp || got.ServiceBuildID != "" || len(got.GPUs) != 0 {
 		t.Fatalf("failed manual probe = %+v, want retained identity and absent current inventory", got)

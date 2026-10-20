@@ -246,21 +246,22 @@ func (m *Manager) probeLoop(ctx context.Context) {
 
 func (m *Manager) probeAll(ctx context.Context) {
 	m.mu.RLock()
-	entries := make([]ManualEntry, 0, len(m.nodes))
+	entries := make([]*trackedNode, 0, len(m.nodes))
 	for _, tn := range m.nodes {
-		entries = append(entries, tn.entry)
+		entries = append(entries, tn)
 	}
 	m.mu.RUnlock()
 
-	for _, entry := range entries {
+	for _, tn := range entries {
 		if ctx.Err() != nil {
 			return
 		}
-		m.probeNode(entry)
+		m.probeNode(tn)
 	}
 }
 
-func (m *Manager) probeNode(entry ManualEntry) {
+func (m *Manager) probeNode(tn *trackedNode) {
+	entry := tn.entry
 	addr := entry.Address
 	id := nodeID(entry)
 
@@ -319,8 +320,7 @@ func (m *Manager) probeNode(entry ManualEntry) {
 	reachable := newStatus.OllamaUp || newStatus.LMStudioUp || newStatus.NodeInfoUp
 
 	m.mu.Lock()
-	tn, exists := m.nodes[id]
-	if !exists {
+	if m.nodes[id] != tn {
 		m.mu.Unlock()
 		return
 	}
@@ -361,7 +361,7 @@ func (m *Manager) probeNode(entry ManualEntry) {
 			"node_id", id, "addr", addr,
 			"ollama_up", newStatus.OllamaUp, "node_info_up", newStatus.NodeInfoUp,
 			"models", len(newStatus.OllamaModels), "gpus", len(newStatus.GPUs))
-		m.codec.Notify("node/updated", newStatus)
+		m.notifyIfCurrent(tn, "node/updated", newStatus)
 	} else {
 		slog.Debug("manual node probe stable",
 			"node_id", id, "addr", addr,
@@ -387,7 +387,7 @@ func (m *Manager) probeNode(entry ManualEntry) {
 		if net.ParseIP(addr) != nil {
 			msg += ". This node was added by IP address, so if the device was reassigned a new IP it will not recover automatically — re-add it with the current address, or add it by hostname so it can be re-resolved."
 		}
-		if err := m.codec.Notify("errors:report", errors.ServiceError{
+		if err := m.notifyIfCurrent(tn, "errors:report", errors.ServiceError{
 			ID:       probeFailedID(id),
 			Message:  msg,
 			Severity: "warning",
@@ -396,12 +396,21 @@ func (m *Manager) probeNode(entry ManualEntry) {
 			log.Printf("failed to send errors:report for %s: %v", id, err)
 		}
 	case reachable && prevFails >= probeFailThreshold:
-		if err := m.codec.Notify("errors:clear", errors.ClearParams{
+		if err := m.notifyIfCurrent(tn, "errors:clear", errors.ClearParams{
 			ID: probeFailedID(id),
 		}); err != nil {
 			log.Printf("failed to send errors:clear for %s: %v", id, err)
 		}
 	}
+}
+
+func (m *Manager) notifyIfCurrent(tn *trackedNode, method string, params any) error {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if m.nodes[nodeID(tn.entry)] != tn {
+		return nil
+	}
+	return m.codec.Notify(method, params)
 }
 
 // probeFailedID is the canonical ServiceError id for a manual node
@@ -560,26 +569,29 @@ func (m *Manager) addNode(entry ManualEntry) ManualNodeStatus {
 		MTLSRequired: entry.TLSPort > 0 && entry.MTLS,
 	}
 
+	tn := &trackedNode{entry: entry, status: status}
 	m.mu.Lock()
-	m.nodes[id] = &trackedNode{entry: entry, status: status}
+	m.nodes[id] = tn
 	m.mu.Unlock()
 
 	go func() {
-		m.probeNode(entry)
-		m.mu.RLock()
-		tn, exists := m.nodes[id]
-		if !exists {
-			m.mu.RUnlock()
-			return
-		}
-		// A local of its own: assigning the captured status raced the
-		// caller's return of it.
-		probed := tn.status
-		m.mu.RUnlock()
-		m.codec.Notify("node/discovered", probed)
+		m.probeAndDiscover(tn)
 	}()
 
 	return status
+}
+
+func (m *Manager) probeAndDiscover(tn *trackedNode) {
+	m.probeNode(tn)
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if m.nodes[nodeID(tn.entry)] != tn {
+		return
+	}
+	// A local of its own: assigning the captured status raced the caller's
+	// return of it.
+	probed := tn.status
+	m.codec.Notify("node/discovered", probed)
 }
 
 func (m *Manager) removeNode(id string) bool {

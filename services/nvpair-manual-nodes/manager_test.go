@@ -442,19 +442,84 @@ func TestAddThenRemoveBeforeInitialProbeDoesNotRediscover(t *testing.T) {
 	}
 }
 
+func TestReplacedManualNodeDropsOldProbeResultAndDiscovery(t *testing.T) {
+	m, rw, rt := newTestManager()
+	oldEntry := ManualEntry{Name: "lab", Address: "old.local"}
+	oldInfo := sampleInfo()
+	oldInfo.HostUUID = "old-host"
+	oldInfo.ServiceBuildID = manualDirtyBuild
+	configureHealthyNode(rt, oldEntry.Address, []string{"old-model"}, oldInfo)
+	oldProbeStarted := make(chan struct{})
+	releaseOldProbe := make(chan struct{})
+	oldProbeDone := make(chan struct{})
+	rt.set(http.MethodGet, net.JoinHostPort(oldEntry.Address, "11434"), "/", func(*http.Request) (*http.Response, error) {
+		close(oldProbeStarted)
+		<-releaseOldProbe
+		return httpJSON(http.StatusOK, `{}`)
+	})
+	oldNode := &trackedNode{entry: oldEntry, status: ManualNodeStatus{ID: "lab", Address: oldEntry.Address, OllamaPort: 11434, NodeInfoPort: 14318}}
+	m.nodes["lab"] = oldNode
+	go func() {
+		m.probeAndDiscover(oldNode)
+		close(oldProbeDone)
+	}()
+	select {
+	case <-oldProbeStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("old probe did not start")
+	}
+
+	newEntry := ManualEntry{Name: "lab", Address: "new.local"}
+	newInfo := sampleInfo()
+	newInfo.HostUUID = "new-host"
+	newInfo.ServiceBuildID = manualCleanBuild
+	configureHealthyNode(rt, newEntry.Address, []string{"new-model"}, newInfo)
+	m.addNode(newEntry)
+	newDiscovery := decodeParams[ManualNodeStatus](t, readCaptureUntil(t, rw, methodIs("node/discovered")))
+	if newDiscovery.Address != newEntry.Address || newDiscovery.HostUUID != "new-host" || newDiscovery.ServiceBuildID != manualCleanBuild {
+		t.Fatalf("replacement discovery = %+v", newDiscovery)
+	}
+	for len(rw.frames) > 0 {
+		<-rw.frames
+	}
+
+	close(releaseOldProbe)
+	select {
+	case <-oldProbeDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("old probe did not finish")
+	}
+
+	m.mu.RLock()
+	got := m.nodes["lab"].status
+	m.mu.RUnlock()
+	if got.Address != newEntry.Address || got.HostUUID != "new-host" || got.ServiceBuildID != manualCleanBuild {
+		t.Fatalf("replacement status overwritten by old probe: %+v", got)
+	}
+	for len(rw.frames) > 0 {
+		var msg Message
+		if err := json.Unmarshal(<-rw.frames, &msg); err != nil {
+			t.Fatalf("decode post-replacement notification: %v", err)
+		}
+		if msg.Method == "node/updated" || msg.Method == "node/discovered" {
+			t.Fatalf("stale probe emitted %s notification: %+v", msg.Method, msg)
+		}
+	}
+}
+
 func TestProbeNodeEmitsUpdatedOnStateChange(t *testing.T) {
 	m, rw, rt := newTestManager()
 	m.nodes["lab"] = &trackedNode{entry: ManualEntry{Name: "lab", Address: "node.local"}, status: ManualNodeStatus{ID: "lab", Address: "node.local", OllamaPort: 11434, NodeInfoPort: 14318}}
 
 	configureHealthyNode(rt, "node.local", []string{"llama3"}, sampleInfo())
-	m.probeNode(ManualEntry{Name: "lab", Address: "node.local"})
+	m.probeNode(m.nodes["lab"])
 	first := decodeParams[ManualNodeStatus](t, readCaptureUntil(t, rw, methodIs("node/updated")))
 	if len(first.OllamaModels) != 1 || first.OllamaModels[0] != "llama3" {
 		t.Fatalf("first update models = %#v", first.OllamaModels)
 	}
 
 	configureHealthyNode(rt, "node.local", []string{"mistral"}, sampleInfo())
-	m.probeNode(ManualEntry{Name: "lab", Address: "node.local"})
+	m.probeNode(m.nodes["lab"])
 	second := decodeParams[ManualNodeStatus](t, readCaptureUntil(t, rw, methodIs("node/updated")))
 	if len(second.OllamaModels) != 1 || second.OllamaModels[0] != "mistral" {
 		t.Fatalf("second update models = %#v", second.OllamaModels)
@@ -467,9 +532,9 @@ func TestProbeNodeNoUpdateWhenStable(t *testing.T) {
 	m.nodes["lab"] = &trackedNode{entry: entry, status: ManualNodeStatus{ID: "lab", Address: "node.local", OllamaPort: 11434, NodeInfoPort: 14318}}
 	configureHealthyNode(rt, "node.local", []string{"llama3"}, sampleInfo())
 
-	m.probeNode(entry)
+	m.probeNode(m.nodes[nodeID(entry)])
 	_ = readCaptureUntil(t, rw, methodIs("node/updated"))
-	m.probeNode(entry)
+	m.probeNode(m.nodes[nodeID(entry)])
 
 	assertNoCaptureMethod(t, rw, "node/updated")
 }
@@ -499,7 +564,7 @@ func TestProbeFailuresClearAvailability(t *testing.T) {
 		return httpJSON(http.StatusOK, `{not json`)
 	})
 
-	m.probeNode(entry)
+	m.probeNode(m.nodes[nodeID(entry)])
 	updated := decodeParams[ManualNodeStatus](t, readCaptureUntil(t, rw, methodIs("node/updated")))
 	if updated.OllamaUp || updated.NodeInfoUp {
 		t.Fatalf("services should be down: %+v", updated)
@@ -522,7 +587,7 @@ func TestProbeFailurePreservesHostUUID(t *testing.T) {
 	configureHealthyNode(rt, "node.local", []string{"llama3"}, info)
 
 	// First probe learns the UUID.
-	m.probeNode(entry)
+	m.probeNode(m.nodes[nodeID(entry)])
 	first := decodeParams[ManualNodeStatus](t, readCaptureUntil(t, rw, methodIs("node/updated")))
 	if first.HostUUID != "node-uuid" {
 		t.Fatalf("first probe HostUUID = %q, want node-uuid", first.HostUUID)
@@ -532,7 +597,7 @@ func TestProbeFailurePreservesHostUUID(t *testing.T) {
 	rt.set(http.MethodGet, net.JoinHostPort("node.local", "14318"), "/v1/node-info", func(*http.Request) (*http.Response, error) {
 		return nil, errors.New("node-info down")
 	})
-	m.probeNode(entry)
+	m.probeNode(m.nodes[nodeID(entry)])
 	down := decodeParams[ManualNodeStatus](t, readCaptureUntil(t, rw, methodIs("node/updated")))
 	if down.NodeInfoUp {
 		t.Fatal("node-info should be down")
@@ -543,7 +608,7 @@ func TestProbeFailurePreservesHostUUID(t *testing.T) {
 
 	// node-info recovers: still the same UUID (no flap).
 	configureHealthyNode(rt, "node.local", []string{"llama3"}, info)
-	m.probeNode(entry)
+	m.probeNode(m.nodes[nodeID(entry)])
 	up := decodeParams[ManualNodeStatus](t, readCaptureUntil(t, rw, methodIs("node/updated")))
 	if up.HostUUID != "node-uuid" {
 		t.Fatalf("HostUUID after recovery = %q, want node-uuid", up.HostUUID)
