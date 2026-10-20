@@ -46,6 +46,18 @@ SPDX-License-Identifier: Apache-2.0
   backend services; PAIR relays control-plane requests through the broker.
 - Public inference clients connect to local Ollama- or OpenAI-compatible proxy
   endpoints.
+- Cluster-manager alone writes target-local, admission-bound remote-management
+  grants. Local invite initiation and acceptance require `allowRemoteManagement`;
+  each side chooses authority over its own device. The local grant list/setter
+  and change push travel through the existing service/broker cluster relay;
+  never expose them through a peer endpoint or trust gossip.
+- Engine-manager classifies every `ec` route as read or mutation after verifying
+  the mTLS caller. Mutations require a fresh shared
+  `clustertrust.Mesh.RemoteManagement` allow; broker-owned writes recheck at
+  acceptance under their existing locks. No UI readback or payload caller grants
+  authority. Preserve `-32012/remote_management_denied`, independently of
+  `-32011/local_veto` and `-32010` conflict. Reads and permitted inference remain
+  available; revocation does not undo already accepted work.
 
 ## Documentation
 

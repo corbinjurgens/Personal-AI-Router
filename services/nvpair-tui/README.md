@@ -87,6 +87,17 @@ ships in `cli-bin` and the app's updater replaces it.
 
 ### Node detail
 
+Pairing from **Nodes**, by discovered node or by address, and accepting an
+inbound PIN both offer **Remote management of this device**. `tab` switches
+allow/block, with block selected initially. This grants the named peer authority
+over the device running this TUI; the other device chooses independently.
+On Nodes, `g` opens this device's local permission list; up/down selects a peer,
+space/enter toggles permission, `r` reloads and `esc` returns. Saves use the
+reported revision and authoritative readback, including after errors; they are
+not automatically retried. `cluster_auto_sync` remains an inert stored
+preference and grants no authority. Local pause/Off still wins; revocation
+prevents new acceptance while already accepted work can finish or reconcile.
+
 `enter` on a node opens a full-screen drill-down with two panes, switched with
 `h`/`l`:
 
@@ -127,7 +138,11 @@ entry. A stopped engine alone does not establish saved Off. There is no remote
 intent projection or `offBy` client projection, so saved-Off origin is not shown.
 
 Lifecycle, model, settings and availability refusals retain the target's message
-and RPC code. `-32011` means a local veto; `-32010` means a revision conflict
+and RPC code. `-32012` means remote management is blocked and must be changed
+locally on the target. Its permission readback in remote detail is read-only;
+unknown, unavailable or unsupported is not a grant. Reads and permitted
+inference remain available. Downgraded pre-PG targets cannot enforce PG.
+`-32011` means a local veto; `-32010` means a revision conflict
 requiring reload and retry. Refusals do not retry or resume work automatically.
 Existing long-operation timeouts still report continuing work rather than
 success, while quick-operation timeouts remain failures.
