@@ -1156,6 +1156,7 @@ func (d *daemon) enrichInfoCandidates(node *noderec.DirectoryNode, hosts []strin
 	node.GPUs = info.GPUs
 	node.CPU = info.CPU
 	node.Memory = info.Memory
+	node.ServiceBuildID = info.ServiceBuildID
 }
 
 // noteNodeInfo reports a peer's node-info endpoint going quiet, and coming back,

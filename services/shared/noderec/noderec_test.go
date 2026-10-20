@@ -9,8 +9,57 @@ import (
 	"strings"
 	"testing"
 
+	"nvpair-shared/buildinfo"
 	"nvpair-shared/nodepolicy"
 )
+
+func TestDirectoryOptionalServiceBuild(t *testing.T) {
+	clean := "git:" + strings.Repeat("a", 40)
+	dirty := "git:" + strings.Repeat("b", 64) + "+dirty"
+	for _, tc := range []struct {
+		name, value string
+		want        buildinfo.ID
+	}{
+		{"clean", `"` + clean + `"`, buildinfo.ID(clean)},
+		{"dirty sha256", `"` + dirty + `"`, buildinfo.ID(dirty)},
+		{"absent", "", ""},
+		{"null", "null", ""},
+		{"number", "42", ""},
+		{"boolean", "true", ""},
+		{"object", `{ "revision": "secret" }`, ""},
+		{"array", `[]`, ""},
+		{"malformed", `"git:short"`, ""},
+		{"uppercase", `"git:` + strings.Repeat("A", 40) + `"`, ""},
+		{"oversize", `"git:` + strings.Repeat("a", 75) + `"`, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			raw := `{"hostUuid":"host-a","gpus":[{"name":"GPU"}],"cpu":{"cores":8},"memory":{"total_bytes":16384},"models":["m"]`
+			if tc.value != "" {
+				raw += `,"serviceBuildId":` + tc.value
+			}
+			raw += `}`
+			var got DirectoryNode
+			if err := json.Unmarshal([]byte(raw), &got); err != nil {
+				t.Fatalf("decode optional build: %v", err)
+			}
+			if got.ServiceBuildID != tc.want || got.HostUUID != "host-a" || len(got.GPUs) != 1 || got.GPUs[0].Name != "GPU" || got.CPU == nil || got.CPU.Cores != 8 || got.Memory == nil || got.Memory.TotalBytes != 16384 || !reflect.DeepEqual(got.Models, []string{"m"}) {
+				t.Fatalf("node = %+v, want build %q and intact identity/inventory", got, tc.want)
+			}
+			data, err := json.Marshal(got)
+			if err != nil {
+				t.Fatalf("marshal node: %v", err)
+			}
+			var wire map[string]json.RawMessage
+			if err := json.Unmarshal(data, &wire); err != nil {
+				t.Fatalf("decode wire: %v", err)
+			}
+			_, present := wire["serviceBuildId"]
+			if present != (tc.want != "") {
+				t.Fatalf("wire build presence = %v, want %v", present, tc.want != "")
+			}
+		})
+	}
+}
 
 func TestServedResidentDirectoryRoundTrip(t *testing.T) {
 	for _, tc := range []struct {

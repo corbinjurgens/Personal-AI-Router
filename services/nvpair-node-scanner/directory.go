@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"nvpair-shared/buildinfo"
 	"nvpair-shared/netpick"
 	"nvpair-shared/noderec"
 )
@@ -328,6 +329,24 @@ func (d *directory) applyClusterIdentity(hostUUID string, clusterUUID *string, t
 	n.Trusted = trusted
 	d.storeLocked(n)
 	return n, true
+}
+
+// applyServiceBuild updates only the diagnostic from a successful node-info
+// fetch. The existing route generation rejects removed/replaced endpoints;
+// same-endpoint diagnostic replies may arrive out of order.
+func (d *directory) applyServiceBuild(hostUUID string, generation uint64, id buildinfo.ID) (node noderec.DirectoryNode, changed, ok bool) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	n, present := d.nodes[hostUUID]
+	if !present || d.generations[hostUUID] != generation {
+		return n, false, false
+	}
+	if n.ServiceBuildID == id {
+		return n, false, true
+	}
+	n.ServiceBuildID = id
+	d.nodes[hostUUID] = n
+	return n, true, true
 }
 
 // sameByEngine reports whether two per-engine model maps are semantically equal:
