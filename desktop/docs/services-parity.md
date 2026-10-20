@@ -16,8 +16,10 @@ history.
 
 ## Status summary
 
-Engine switching has a typed invoke/status bridge and sequence notifications;
-desktop controls are not yet implemented. The target broker owns the operation.
+Desktop node settings expose **Switch engine**, **From**, **To**, **Switch** and
+**Refresh readback**; TUI node detail uses `w` / **switch engine**. Both expose
+existing E3 invoke/status methods and sequence notifications. The target broker
+owns the transaction; clients correlate receipts rather than coordinate engines.
 
 | Domain                     | Status                          | Current state                                                                                                                                   |
 | -------------------------- | ------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -29,6 +31,7 @@ desktop controls are not yet implemented. The target broker owns the operation.
 | LM Studio routing          | Complete                        | Parallel broker relay and scheduler path                                                                                                        |
 | llama.cpp backend          | Integrated                      | Desktop and TUI expose install, lifecycle, catalog pull, inventory, load/unload, endpoints, routing, and demo traffic                            |
 | Local engine lifecycle     | Complete                        | Install, start, stop, uninstall, update, and port configuration                                                                                 |
+| Engine switching           | Integrated; native acceptance pending | Explicit source/target, revision and request correlation; typed denial/veto/conflict and recovery readback in desktop and TUI |
 | Remote engine lifecycle    | Partial                         | Remote install, start, stop, status, and model pull are supported                                                                               |
 | Engine models              | Partial                         | Core list, pull, load, unload, and supported delete actions are wired                                                                           |
 | Engine version metadata    | Backend-limited                 | The backend status surface does not provide a complete version/install-owner/update contract                                                    |
@@ -38,6 +41,27 @@ desktop controls are not yet implemented. The target broker owns the operation.
 | Cluster transport security | Backend-owned                   | Node-to-node transport security, including the proxies' cluster-mTLS inference ingress, is entirely backend; Personal AI Router implements none |
 | Settings                   | Partial                         | Cluster identity plus per-engine ports and engine arguments, local and remote; inert backend settings are not surfaced                            |
 | Model catalog search       | Backend-owned                   | `engine:catalog` serves the locked Ollama list and the cached LM Studio and llama.cpp catalogs, and searches Hugging Face for llama.cpp         |
+
+## Engine switch recovery limits
+
+Only the authoritative `completed` receipt reports completion. Intermediate
+acceptance, source Off and target readiness are not success. Saved intent,
+runtime observations and verified termination remain separate, including the
+existing local/peer saved-Off origin labels. Permission denial (`-32012`), local
+veto (`-32011`) and configuration conflict (`-32010`) are distinct. Remote
+permission must be current; local pause/Off remains available during switching.
+
+Lost responses require original-ID readback, never automatic resubmission.
+Unknown outcomes and `recoveryRequired` stay explicit; refresh does not perform
+recovery, rollback, cancellation or source restart. The broker has no fence for
+a sent but absent request ID. An idle/absent read cannot rule out late acceptance.
+TUI correlation lasts for the node-detail visit: closing the panel retains it,
+leaving detail forgets it. Reopening can unblock submission without resolving
+the original outcome. See the [operator guide](../../docs/terminal-interface.mdx#switch-engine)
+and [frontend API](frontend-api.md) for controls and readback behavior.
+Process and native client acceptance require their own execution evidence;
+static checks and mocked client tests do not establish Windows or live-engine
+acceptance.
 
 ## Supervision
 

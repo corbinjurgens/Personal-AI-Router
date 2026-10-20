@@ -155,6 +155,33 @@ A remote node's models come from the discovery snapshot, which the broker
 enriches from each peer's engine manager — no extra request. This machine's come
 from `engine:models` and stay live through `engine:models-changed`.
 
+#### Engine switching
+
+Node detail offers `w` / **switch engine**. Use `tab` for **From**/**To**,
+up/down to select installed engines, `enter` to **Switch**, `r` for status and
+permission readback, and `esc` to close the panel. Blocked submission shows its
+reason. Existing local pause/Off controls remain reachable. The TUI invokes the
+existing E3 `engine:switch` and
+`engine:switch-status` methods through the broker, with a peer `nodeId` only for
+a peer; it never orchestrates separate stop/start calls.
+
+Readback keeps node/request identity and receipt sequence, reported phase,
+typed errors and `recoveryRequired`. Saved intent, runtime observations and
+termination evidence are separate; intermediate acknowledgement/readiness is
+not completion. Remote permission denial (`-32012`), local veto (`-32011`) and
+revision conflict (`-32010`) retain distinct meanings. Failed or unavailable
+reads do not grant permission or establish success. After a lost response,
+read the original ID rather than resubmitting; readback performs no recovery,
+rollback or source restart.
+
+Correlation is visit-scoped. An absent sent request can remain unresolved
+indefinitely: the broker does not fence/tombstone an ID it has not accepted.
+Closing the panel retains the ID; leaving node detail clears it. Reopening an
+idle node can permit a fresh submission, but forgetting the old ID does not
+resolve its outcome or prevent late acceptance. Reconnect/restart alone does
+not establish abandonment. See [Switch Engine](../../docs/terminal-interface.mdx#switch-engine)
+for the operator workflow and recovery limitations.
+
 The detail screen polls GPU, CPU and memory only for the open node, with the
 existing two-second interval between reads. Paired remote detail uses
 `discovery:get-node-info {hostUuid}` through the existing
