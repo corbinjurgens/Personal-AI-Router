@@ -1,0 +1,10 @@
+{
+  "choices": [{"index": 0, "message": {}, "finish_reason": "stop"}],
+  "usage": {"prompt_tokens": 15, "completion_tokens": 20, "prompt_tokens_details": {"cached_tokens": 5}},
+  "timings": {
+    "prompt_n": 10, "cache_n": 5, "prompt_ms": 12.3,
+    "prompt_per_second": 813, "prompt_per_token_ms": 1.23,
+    "predicted_n": 20, "predicted_ms": 400,
+    "predicted_per_second": 50, "predicted_per_token_ms": 20
+  }
+}

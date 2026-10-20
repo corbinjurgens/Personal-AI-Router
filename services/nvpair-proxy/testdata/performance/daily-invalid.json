@@ -1,0 +1,14 @@
+[
+  {"name":"fractional count","payload":{"timings":{"predicted_n":11.5}},"want":{}},
+  {"name":"exponent count","payload":{"timings":{"predicted_n":1e1}},"want":{}},
+  {"name":"negative duration","payload":{"timings":{"predicted_ms":-1}},"want":{}},
+  {"name":"huge exponent","payload":{"timings":{"predicted_ms":1e9999999}},"want":{}},
+  {"name":"duration above limit before rounding","payload":{"timings":{"predicted_ms":86400000.0000001}},"want":{}},
+  {"name":"duplicate timing container","payload":{"timings":{"predicted_n":11},"timings":{"predicted_n":12}},"want":{}},
+  {"name":"escaped duplicate number","payload":{"timings":{"predicted_n":11,"predicted_\u006e":12}},"want":{}},
+  {"name":"duplicate usage container","payload":{"usage":{"completion_tokens":11},"us\u0061ge":{"completion_tokens":12}},"want":{}},
+  {"name":"contradictory counts","payload":{"usage":{"completion_tokens":12},"timings":{"predicted_n":11,"predicted_ms":250.5,"predicted_per_second":39.92015968063872}},"want":{"EngineDecodeNs":250500000}},
+  {"name":"contradictory rate","payload":{"timings":{"predicted_n":11,"predicted_ms":250.5,"predicted_per_second":44}},"want":{"OutputTokens":11}},
+  {"name":"nonfinite numeric string","payload":{"timings":{"predicted_n":11,"predicted_ms":250.5,"predicted_per_second":"Infinity"}},"want":{"OutputTokens":11}},
+  {"name":"no native clock","payload":{"usage":{"prompt_tokens":15,"completion_tokens":20}},"want":{"OutputTokens":20}}
+]
