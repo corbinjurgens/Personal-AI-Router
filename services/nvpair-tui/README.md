@@ -133,9 +133,13 @@ The detail header reports the selected target's live availability and reported
 admission mark availability unavailable; another target's replies and pushes
 cannot refresh it. The local header also retains reported pause provenance.
 Engine rows continue to show actual installed, running and healthy state.
-`saved Off` appears only for an explicit false local `enabledByEngine` intent
-entry. A stopped engine alone does not establish saved Off. There is no remote
-intent projection or `offBy` client projection, so saved-Off origin is not shown.
+A false entry in the current local `enabledByEngine` snapshot adds
+` (saved Off, local)` when `offByEngine` reports `local`, or
+` (saved Off, by peer)` when it reports `peer`. Without a valid reported origin,
+the label remains ` (saved Off)`. A stopped engine alone does not establish saved
+Off. These labels appear only on this machine's rows; there is no remote intent
+projection. Origin identifies a class relative to the engine-owning device,
+not a particular peer, and does not change lifecycle or permission decisions.
 
 Lifecycle, model, settings and availability refusals retain the target's message
 and RPC code. `-32012` means remote management is blocked and must be changed
