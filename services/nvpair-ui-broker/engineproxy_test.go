@@ -524,9 +524,11 @@ func runFakeProxy() {
 		reply := map[string]any{"jsonrpc": "2.0", "id": req.ID}
 		switch req.Method {
 		case nodepolicy.MethodSetPolicy:
-			var pol nodepolicy.Policy
-			_ = json.Unmarshal(req.Params, &pol)
-			reply["result"] = nodepolicy.PolicyAck{Revision: pol.Revision, RunID: "fake-run"}
+			var pol nodepolicy.SetPolicyParams
+			if err := json.Unmarshal(req.Params, &pol); err != nil {
+				os.Exit(2)
+			}
+			reply["result"] = nodepolicy.PolicyAck{OriginNodeID: pol.OriginNodeID, Revision: pol.Policy.Revision, RunID: "fake-run"}
 		case "facade/enable":
 			if os.Getenv(fakeProxyEnv) == fakeProxyAcceptsFacades {
 				var spec enableFacadeRequest

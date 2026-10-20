@@ -391,6 +391,14 @@ func (l *accountLedger) reserve(deploymentID string, inputTokens, outputTokens i
 }
 
 func (l *accountLedger) reserveLocked(deploymentID string, inputTokens, outputTokens int64) (accountHold, error) {
+	hold, err := l.reserveLimitedLocked(deploymentID, inputTokens, outputTokens, math.MaxInt64)
+	if err != nil {
+		return accountHold{}, err
+	}
+	return hold, nil
+}
+
+func (l *accountLedger) reserveLimitedLocked(deploymentID string, inputTokens, outputTokens, remaining int64) (accountHold, error) {
 	if err := l.admissibleLocked(); err != nil {
 		return accountHold{}, err
 	}
@@ -426,6 +434,9 @@ func (l *accountLedger) reserveLocked(deploymentID string, inputTokens, outputTo
 	amount, err := reservationAmount(inputTokens, outputTokens, d.Prices.InputPerMillion, d.Prices.OutputPerMillion)
 	if err != nil {
 		return accountHold{}, err
+	}
+	if remaining < 0 || amount > remaining {
+		return accountHold{}, errRoutingSpend
 	}
 
 	next := l.state.clone()
@@ -477,6 +488,8 @@ func (l *accountLedger) reserveLocked(deploymentID string, inputTokens, outputTo
 			// The hold landed but may not survive: keep it outstanding as
 			// uncertain, never as one this process may still resolve.
 			l.state.hold(attempt).State = holdUncertain
+			return accountHold{Attempt: attempt, Reserved: nanoUSDString(amount), Probe: halfOpen},
+				fmt.Errorf("%w: the reservation was not confirmed durable: %w", errLedgerUnavailable, err)
 		}
 		return accountHold{}, fmt.Errorf("%w: the reservation was not confirmed durable: %w", errLedgerUnavailable, err)
 	}
@@ -532,14 +545,22 @@ var errChatConfiguration = errors.New("qualified Chat configuration refused")
 var errChatRateLimit = errors.New("qualified Chat account cooling down")
 var errChatTransient = errors.New("qualified Chat attempt failed")
 
-func (l *accountLedger) reserveChatAccount(expected chatAccountSnapshot, input, output int64) (accountHold, error) {
+func (l *accountLedger) reserveChatAccountAllowance(expected chatAccountSnapshot, input, output, remaining int64) (accountReservation, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	current, err := l.chatAccountLocked(expected.deployment.ID)
 	if err != nil || !reflect.DeepEqual(current, expected) {
-		return accountHold{}, errChatAttempt
+		return accountReservation{Durability: accountReserveNone}, errChatAttempt
 	}
-	return l.reserveLocked(expected.deployment.ID, input, output)
+	hold, err := l.reserveLimitedLocked(expected.deployment.ID, input, output, remaining)
+	durability := accountReserveNone
+	if hold.Attempt != "" {
+		durability = accountReserveDurable
+		if err != nil {
+			durability = accountReserveUncertain
+		}
+	}
+	return accountReservation{Hold: hold, Durability: durability}, err
 }
 
 // runChatAccountAttempt is I's future single-attempt seam, not a route or a
@@ -550,12 +571,29 @@ func (l *accountLedger) reserveChatAccount(expected chatAccountSnapshot, input, 
 func runChatAccountAttempt(ctx context.Context, snapshot chatAccountSnapshot, body []byte,
 	q *chatQualification, ledger *accountLedger, transport *publicClient,
 	resolve func(nodepolicy.CredentialRef) (string, bool), budget chatByteBudget,
-	guard func(context.Context) error, emit func([]byte) error) (chatParseResult, error) {
-	var result chatParseResult
+	guard publicAttemptGuard, lifecycle *publicAttemptLifecycle, emit func([]byte) error) (result chatParseResult, finalErr error) {
 	d := snapshot.deployment
+	if lifecycle == nil || lifecycle.request == nil {
+		return result, errChatAttempt
+	}
+	terminal := publicAttemptTerminal{Accounting: publicAccountingRetained}
+	defer func() {
+		terminal.ProtocolComplete, terminal.Exposed = result.Complete, result.Exposed
+		terminal.Err = finalErr
+		lifecycle.finished(terminal)
+	}()
+	remaining, err := lifecycle.tryAccount(snapshot.account)
+	if err != nil {
+		return result, errRoutingSpend
+	}
 	if ledger == nil || transport == nil || resolve == nil || budget == nil || guard == nil || emit == nil ||
 		ctx.Err() != nil || q.fresh() != nil || d.Transport == nil || d.Qualification == nil || d.Prices == nil ||
 		nodepolicy.CheckEndpoint(d.Endpoint) != nil || transport.endpoint != d.Endpoint || transport.bounds != *d.Transport {
+		return result, errChatAttempt
+	}
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	if lifecycle.bindCancel(cancel) != nil {
 		return result, errChatAttempt
 	}
 	if q.MaxBodyBytes > d.Transport.MaxResponseBytes || q.MaxEventBytes > d.Transport.MaxEventBytes {
@@ -574,15 +612,11 @@ func runChatAccountAttempt(ctx context.Context, snapshot chatAccountSnapshot, bo
 	defer prepared.close()
 	// Admit finite parser and transport headroom before lookup or reservation.
 	// The parser also admits each actual decoded representation as it grows.
-	parserBytes := int64(chatFixedStorage)
-	if prepared.Stream {
-		parserBytes += 2*q.MaxLineBytes + 6*q.MaxEventBytes + 4*q.MaxToolBytes + 512*int64(q.MaxToolCalls)
-	}
-	parserRelease, err := chatAcquire(budget, parserBytes)
+	parserAllowance, err := q.acquireParserAllowance(budget, prepared.Stream)
 	if err != nil {
 		return result, err
 	}
-	defer parserRelease()
+	defer parserAllowance.release()
 	transportBytes := 3 * (max(d.Transport.MaxResponseBytes, d.Transport.MaxErrorBodyBytes) + 1)
 	transportRelease, err := chatAcquire(budget, transportBytes)
 	if err != nil {
@@ -596,15 +630,17 @@ func runChatAccountAttempt(ctx context.Context, snapshot chatAccountSnapshot, bo
 	if ctx.Err() != nil {
 		return result, errChatAttempt
 	}
-	hold, err := ledger.reserveChatAccount(snapshot, prepared.Input, prepared.Output)
-	if err != nil {
+	reservation, err := ledger.reserveChatAccountAllowance(snapshot, prepared.Input, prepared.Output, remaining)
+	associationErr := lifecycle.associated(reservation)
+	if err != nil || associationErr != nil {
 		return result, errChatAccounting
 	}
-	if guard(ctx) != nil || q.fresh() != nil || ctx.Err() != nil {
+	hold := reservation.Hold
+	if guard(ctx, nil) != nil || q.fresh() != nil || ctx.Err() != nil {
 		// No refund: even an unsent hold has no new recovery authority here.
 		return result, errChatAttempt
 	}
-	response, attemptErr := transport.post(ctx, bytes.NewReader(prepared.Body), key, prepared.Stream,
+	response, attemptErr := transport.postObserved(ctx, bytes.NewReader(prepared.Body), key, prepared.Stream,
 		func(n int64) (func(), error) {
 			if n != transportBytes {
 				return nil, errChatBudget
@@ -614,8 +650,8 @@ func runChatAccountAttempt(ctx context.Context, snapshot chatAccountSnapshot, bo
 			if q.fresh() != nil || ctx.Err() != nil {
 				return errChatAttempt
 			}
-			return guard(ctx)
-		})
+			return guard(ctx, func() error { return lifecycle.acceptedByGuard(ctx) })
+		}, lifecycle.firstSuccessfulByte)
 	if errors.Is(attemptErr, errPublicFinalGuard) {
 		// Proven unsent: leave the hold unclassified and retained. There is no
 		// provider outcome, cooldown, qualification or money reconciliation.
@@ -633,7 +669,8 @@ func runChatAccountAttempt(ctx context.Context, snapshot chatAccountSnapshot, bo
 				break
 			}
 			defer response.Body.Close()
-			result, attemptErr = q.parseResponse(ctx, response.Body, prepared.Stream, prepared.Input, prepared.Output, response.HeaderAt, budget, emit)
+			result, attemptErr = q.parseResponseWithAllowance(ctx, response.Body, prepared.Stream, prepared.Input, prepared.Output, response.HeaderAt, parserAllowance, emit)
+			terminal.Delivered = attemptErr == nil && result.Complete
 			if attemptErr == nil {
 				outcome = outcomeOK
 			}
@@ -668,8 +705,10 @@ func runChatAccountAttempt(ctx context.Context, snapshot chatAccountSnapshot, bo
 		qualificationErr = ledger.recordQualification(hold.Attempt)
 	}
 	if outcomeErr != nil || (moneyErr != nil && !errors.Is(moneyErr, errUsageAboveBound)) || qualificationErr != nil {
+		terminal.Accounting = publicAccountingFailed
 		return result, errChatAccounting
 	}
+	terminal.Accounting = publicAccountingRecorded
 	return result, attemptErr
 }
 

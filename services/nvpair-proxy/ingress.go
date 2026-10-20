@@ -138,6 +138,10 @@ func (f *facade) handleClusterIngress(w http.ResponseWriter, r *http.Request) {
 // requestOptions are merged in, and only then is the request forwarded. Every
 // other route is forwarded as before.
 func (f *facade) serveIngress(w http.ResponseWriter, r *http.Request, peer string) {
+	if isInferenceRequest(f.profile, r.Method, r.URL.Path) && !f.host.routingIdentityReady() {
+		writeIngressError(w, http.StatusServiceUnavailable, "identity-unavailable", "routing identity is unavailable")
+		return
+	}
 	strict, strictErr := parseStrictAdmission(r.Header)
 	if strictErr != nil {
 		writeIngressError(w, http.StatusBadRequest, "strict-admission", strictErr.Error())

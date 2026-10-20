@@ -148,11 +148,11 @@ func TestSwitchReplayInvalidatesBeforeFacadeAndFailsClosed(t *testing.T) {
 	h.proxy.setAnswer(func(method string, raw json.RawMessage) (any, string) {
 		switch method {
 		case nodepolicy.MethodSetPolicy:
-			var policy nodepolicy.Policy
+			var policy nodepolicy.SetPolicyParams
 			if err := json.Unmarshal(raw, &policy); err != nil {
 				return nil, err.Error()
 			}
-			return nodepolicy.PolicyAck{RunID: "proxy-run", Revision: policy.Revision}, ""
+			return nodepolicy.PolicyAck{OriginNodeID: policy.OriginNodeID, RunID: "proxy-run", Revision: policy.Policy.Revision}, ""
 		case nodepolicy.MethodInvalidateEngine:
 			return nodepolicy.InvalidateEngineResult{OK: true, RunID: "proxy-run"}, ""
 		default:

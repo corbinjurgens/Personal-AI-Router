@@ -106,7 +106,7 @@ func TestCeilingReductionFailedPushReportsPersistedAndActiveRevisions(t *testing
 	var pushed nodepolicy.Policy
 	for _, call := range ab.proxy.snapshot() {
 		if call.method == nodepolicy.MethodSetPolicy {
-			if err := json.Unmarshal(call.params, &pushed); err != nil {
+			if err := decodePushedPolicy(call.params, &pushed); err != nil {
 				t.Fatalf("decode pushed policy: %v", err)
 			}
 		}

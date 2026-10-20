@@ -95,15 +95,22 @@ func publicAddress(addr netip.Addr) bool {
 	return true
 }
 
-func (c *publicClient) dialPublic(ctx context.Context, network, authority string) (net.Conn, error) {
+type publicDialPin struct {
+	authority, address string
+	deadline           time.Time
+}
+type publicDialPinKey struct{}
+
+func (c *publicClient) pinPublic(ctx context.Context) (context.Context, error) {
 	u, _ := url.Parse(c.endpoint) // constructor validated this immutable string
-	host, port, err := net.SplitHostPort(authority)
-	if err != nil || host != u.Hostname() || network != "tcp" {
-		return nil, errors.New("public dial refused")
+	port := u.Port()
+	if port == "" {
+		port = "443"
 	}
-	dialCtx, cancel := context.WithTimeout(ctx, time.Duration(c.bounds.ConnectTimeoutSeconds)*time.Second)
+	deadline := time.Now().Add(time.Duration(c.bounds.ConnectTimeoutSeconds) * time.Second)
+	dialCtx, cancel := context.WithDeadline(ctx, deadline)
 	defer cancel()
-	addresses, err := c.resolve(dialCtx, host)
+	addresses, err := c.resolve(dialCtx, u.Hostname())
 	if err != nil || len(addresses) == 0 {
 		return nil, errors.New("public DNS refused")
 	}
@@ -112,8 +119,20 @@ func (c *publicClient) dialPublic(ctx context.Context, network, authority string
 			return nil, errors.New("public address refused")
 		}
 	}
-	// One numeric dial, never a second hostname resolution or automatic retry.
-	return c.dial(dialCtx, network, net.JoinHostPort(addresses[0].Unmap().String(), port))
+	pin := publicDialPin{authority: net.JoinHostPort(u.Hostname(), port), address: net.JoinHostPort(addresses[0].Unmap().String(), port), deadline: deadline}
+	return context.WithValue(ctx, publicDialPinKey{}, pin), nil
+}
+
+func (c *publicClient) dialPublic(ctx context.Context, network, authority string) (net.Conn, error) {
+	pin, ok := ctx.Value(publicDialPinKey{}).(publicDialPin)
+	if !ok || network != "tcp" || pin.authority != authority {
+		return nil, errors.New("public dial refused")
+	}
+	// DNS and validation completed before final acceptance. One numeric dial,
+	// never a second hostname resolution or automatic retry.
+	dialCtx, cancel := context.WithDeadline(ctx, pin.deadline)
+	defer cancel()
+	return c.dial(dialCtx, network, pin.address)
 }
 
 type publicResponse struct {
@@ -143,8 +162,15 @@ func (r *publicResponse) FirstBodyAt() time.Time {
 var errPublicFinalGuard = errors.New("public final pre-send guard refused")
 
 func (c *publicClient) post(ctx context.Context, prepared io.Reader, authorization string, stream bool, budget publicBudget, guard func(context.Context) error) (*publicResponse, error) {
+	return c.postObserved(ctx, prepared, authorization, stream, budget, guard, nil)
+}
+
+func (c *publicClient) postObserved(ctx context.Context, prepared io.Reader, authorization string, stream bool, budget publicBudget, guard func(context.Context) error, firstSuccessfulByte func()) (*publicResponse, error) {
 	if authorization == "" || strings.ContainsFunc(authorization, unicode.IsControl) {
 		return nil, errors.New("public credential refused")
+	}
+	if guard == nil {
+		return nil, errPublicFinalGuard
 	}
 	if budget == nil || ctx.Err() != nil {
 		return nil, errors.New("public attempt refused")
@@ -169,6 +195,10 @@ func (c *publicClient) post(ctx context.Context, prepared io.Reader, authorizati
 			cancel()
 		}
 	}()
+	requestCtx, err = c.pinPublic(requestCtx)
+	if err != nil {
+		return nil, err
+	}
 	req, err := http.NewRequestWithContext(requestCtx, http.MethodPost, c.endpoint, prepared)
 	if err != nil {
 		return nil, errors.New("public request refused")
@@ -211,6 +241,9 @@ func (c *publicClient) post(ctx context.Context, prepared io.Reader, authorizati
 		return result, errors.New("public response too large")
 	}
 	b := &publicBody{source: resp.Body, remaining: cap, cancel: cancel, release: free, idle: time.Duration(c.bounds.IdleTimeoutSeconds) * time.Second, timing: timing}
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		b.firstSuccessfulByte = firstSuccessfulByte
+	}
 	b.mu.Lock()
 	b.timer = time.AfterFunc(b.idle, func() { b.Close() })
 	b.stopContext = context.AfterFunc(requestCtx, func() { b.Close() })
@@ -228,17 +261,19 @@ func (c *publicClient) post(ctx context.Context, prepared io.Reader, authorizati
 }
 
 type publicBody struct {
-	source      io.ReadCloser
-	remaining   int64
-	cancel      context.CancelFunc
-	release     func()
-	idle        time.Duration
-	mu          sync.Mutex
-	timer       *time.Timer
-	stopContext func() bool
-	closed      bool
-	closeOnce   sync.Once
-	timing      *publicBodyTiming
+	source              io.ReadCloser
+	remaining           int64
+	cancel              context.CancelFunc
+	release             func()
+	idle                time.Duration
+	mu                  sync.Mutex
+	timer               *time.Timer
+	stopContext         func() bool
+	closed              bool
+	closeOnce           sync.Once
+	timing              *publicBodyTiming
+	firstSuccessfulByte func()
+	observeOnce         sync.Once
 }
 
 func (b *publicBody) Read(p []byte) (int, error) {
@@ -257,6 +292,13 @@ func (b *publicBody) Read(p []byte) (int, error) {
 	}
 	n, err := b.source.Read(p)
 	if n > 0 {
+		// Commitment observes raw successful bytes, including overflow or bytes
+		// later rejected by framing/JSON validation. Error bodies never call it.
+		b.observeOnce.Do(func() {
+			if b.firstSuccessfulByte != nil {
+				b.firstSuccessfulByte()
+			}
+		})
 		b.timing.mu.Lock()
 		if b.timing.firstByte.IsZero() {
 			b.timing.firstByte = time.Now()

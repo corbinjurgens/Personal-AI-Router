@@ -1360,7 +1360,7 @@ func (b *Broker) sendPolicyStateLocked(ctx context.Context, pp *proxyProcess, ki
 	var availability nodepolicy.Availability
 	switch {
 	case kind == pushPolicy:
-		method, params, activates = nodepolicy.MethodSetPolicy, r.current, r.current.Revision
+		method, params, activates = nodepolicy.MethodSetPolicy, nodepolicy.SetPolicyParams{OriginNodeID: b.nodeID, Policy: r.current}, r.current.Revision
 	case kind == pushAvailability:
 		availability = r.live
 		method, params = nodepolicy.MethodSetAvailability, nodepolicy.SetAvailabilityParams{State: availability, CancelActive: r.cancelActive}
@@ -1472,6 +1472,8 @@ func (b *Broker) recordActivation(pp *proxyProcess, revision string, result json
 		failure = fmt.Sprintf("the proxy refused revision %s (code %d)", revision, rpcErr.Code)
 	case json.Unmarshal(result, &ack) != nil || ack.RunID == "":
 		failure = fmt.Sprintf("the proxy's acknowledgement of revision %s was unreadable", revision)
+	case ack.OriginNodeID != b.nodeID:
+		failure = fmt.Sprintf("the proxy acknowledged a different origin for revision %s", revision)
 	case r.runID != "" && ack.RunID != r.runID:
 		failure = fmt.Sprintf("an acknowledgement of revision %s came from a different proxy run", revision)
 	case ack.Revision != revision:

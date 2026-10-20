@@ -78,6 +78,9 @@ func observationDescriptor(engine string) engines.Descriptor {
 func observationStartProxy(t *testing.T, base, cluster, host, engine, upstream string) *observationProxy {
 	t.Helper()
 	p := &observationProxy{rpc: startTask1Process(t, base, proxyBin, "--cluster-dir", cluster), port: observationPort(t), engine: engine, host: host}
+	bindProxyFixtureIdentity(t, host, func(method string, params any) jsonrpc.Message {
+		return p.rpc.call(t, method, params)
+	})
 	params := map[string]any{"engine": engine, "port": p.port, "ignorePersistedPort": true}
 	if engine == "strata" {
 		params["descriptor"] = observationDescriptor(engine)
@@ -792,6 +795,38 @@ func observationStartBroker(t *testing.T, base, cluster, host, upstream string) 
 	}
 	b := &observationBroker{in: in, msgs: msgs, stop: stopBroker, proxy: fmt.Sprintf("http://127.0.0.1:%d", proxyControl), manager: fmt.Sprintf("http://127.0.0.1:%d", managerControl), client: &http.Client{Timeout: 15 * time.Second}}
 	t.Cleanup(b.client.CloseIdleConnections)
+	// This path has a real broker: observe its own activation, never inject a
+	// fixture policy that could conceal a broken broker-to-proxy handshake.
+	var activeRevision string
+	task1Eventually(t, "broker bound proxy routing identity", 10*time.Second, func() bool {
+		response := callRPC(t, b.in, b.msgs, "policy:get", nil, 10*time.Second)
+		if response.Error != nil {
+			t.Fatalf("broker policy:get: %+v", response.Error)
+		}
+		var state struct {
+			Policy         nodepolicy.Policy `json:"policy"`
+			Activation     string            `json:"activation"`
+			ActiveRevision string            `json:"activeRevision"`
+		}
+		if err := json.Unmarshal(response.Result, &state); err != nil {
+			t.Fatal(err)
+		}
+		activeRevision = state.ActiveRevision
+		return state.Activation == "active" && activeRevision == state.Policy.Revision
+	})
+	var frames []jsonrpc.Message
+	observationWorkerHTTP(t, b.client, b.proxy, "/frames", nil, &frames)
+	acknowledged := false
+	for _, frame := range frames {
+		var ack nodepolicy.PolicyAck
+		if frame.ID != nil && frame.Error == nil && json.Unmarshal(frame.Result, &ack) == nil && ack.OriginNodeID == host && ack.Revision == activeRevision {
+			acknowledged = true
+			break
+		}
+	}
+	if !acknowledged {
+		t.Fatal("real broker activation lacks the proxy's complete origin/revision/run acknowledgement")
+	}
 	// Enabling with an explicit port also provides a readiness barrier even if
 	// the broker's initial asynchronous facade enable has not finished yet.
 	b.control(t, "facade/enable", map[string]any{"engine": "llamacpp", "port": facadePort, "ignorePersistedPort": true})
@@ -1163,8 +1198,10 @@ func TestPerformanceObservationDestinationAndAuthenticatedReplacement(t *testing
 func TestPerformanceObservationOldCapabilityDoesNotAffectInference(t *testing.T) {
 	nodes, blockedPort := newTask1Nodes(t)
 	a, c := nodes[0], nodes[2]
+	const readinessID = "old-capability-readiness"
 	var mu sync.Mutex
 	probes, summaries := 0, 0
+	lifecycleReady := false
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -1182,6 +1219,28 @@ func TestPerformanceObservationOldCapabilityDoesNotAffectInference(t *testing.T)
 		}
 		mu.Lock()
 		defer mu.Unlock()
+		if frame.Method == "workload:started" {
+			var params struct {
+				WorkloadInfo struct {
+					wlInfo
+					RunID     string `json:"runId"`
+					Seq       int    `json:"seq"`
+					CreatedAt int64  `json:"createdAt"`
+				} `json:"workloadInfo"`
+			}
+			if err := json.Unmarshal(frame.Params, &params); err != nil {
+				t.Errorf("decode old telemetry readiness workload: %v", err)
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			info := params.WorkloadInfo
+			if info.ID != readinessID || info.OriginatedFrom != a.uuid || info.Engine != "ollama" || info.Model != "task1-model" || info.RunID != "task1-run" || info.State != "running" || info.Seq != 1 || info.CreatedAt != 1000 {
+				t.Errorf("old telemetry readiness workload=%+v", info)
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			lifecycleReady = true
+		}
 		if frame.Method == "performance:capabilities" {
 			probes++
 			w.Header().Set("Content-Type", "application/json")
@@ -1208,6 +1267,14 @@ func TestPerformanceObservationOldCapabilityDoesNotAffectInference(t *testing.T)
 	directory := task1Directory(c, blockedPort)
 	directory.Services[noderec.ServiceWorkload] = noderec.ServiceStatus{Port: ln.Addr().(*net.TCPAddr).Port}
 	a.workloads.send(t, noderec.NotifyNodes, noderec.GetNodesResult{Nodes: []noderec.DirectoryNode{directory}}, false)
+	// Discovery and admission metadata do not fence the asynchronous target
+	// refresh or prove that its authenticated HTTP service route is usable.
+	a.workloads.send(t, "workload:started", task1Workload(a.uuid, readinessID, "running", 1), false)
+	task1Eventually(t, "old telemetry authenticated workload route", 15*time.Second, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return lifecycleReady
+	})
 	upstream := observationUpstream(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		if _, err := io.WriteString(w, "data: "+observationLlamaFinal+"\n\ndata: [DONE]\n\n"); err != nil {

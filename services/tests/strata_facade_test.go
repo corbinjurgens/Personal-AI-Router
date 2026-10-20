@@ -41,6 +41,8 @@ func strataContractU4Front(t *testing.T, prepareProxy func(*strataContractProxy)
 	}
 
 	proxy := strataContractStartProxy(t, prepareProxy)
+	proxy.RPC.strataContractOK(t, nodepolicy.MethodSetPolicy,
+		nodepolicy.SetPolicyParams{OriginNodeID: "strata-contract-self", Policy: nodepolicy.Default()}, nil)
 	proxy.strataContractEnable(t, descriptor)
 	data, err := os.ReadFile(filepath.Join(proxy.AppDir, "strata-proxy-port.json"))
 	if err != nil {
@@ -273,7 +275,7 @@ func TestStrataContractRequiresLocalQualification(t *testing.T) {
 		}
 		proxy.RPC.strataContractOK(t, nodepolicy.MethodSetModelIdentity, identity, nil)
 		var ack nodepolicy.PolicyAck
-		proxy.RPC.strataContractOK(t, nodepolicy.MethodSetPolicy, policy, &ack)
+		proxy.RPC.strataContractOK(t, nodepolicy.MethodSetPolicy, nodepolicy.SetPolicyParams{OriginNodeID: "strata-contract-self", Policy: policy}, &ack)
 		if ack.Revision != "41" || ack.RunID == "" {
 			t.Fatalf("policy acknowledgment = %+v, want revision 41 and a process run ID", ack)
 		}

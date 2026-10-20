@@ -561,7 +561,7 @@ func TestResidentMethodNames(t *testing.T) {
 		t.Fatal("resident method names changed")
 	}
 	// Existing wire contracts remain exactly as before this additive change.
-	ack, err := json.Marshal(PolicyAck{Revision: "1", RunID: "p-1"})
+	ack, err := json.Marshal(PolicyAck{OriginNodeID: "origin", Revision: "1", RunID: "p-1"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -569,7 +569,7 @@ func TestResidentMethodNames(t *testing.T) {
 	if err := json.Unmarshal(ack, &fields); err != nil {
 		t.Fatal(err)
 	}
-	if len(fields) != 2 || fields["revision"] == nil || fields["runId"] == nil {
+	if len(fields) != 3 || fields["originNodeId"] == nil || fields["revision"] == nil || fields["runId"] == nil {
 		t.Fatalf("PolicyAck fields = %v", fields)
 	}
 	if MethodSetResidency != "node/set-residency" {
@@ -740,5 +740,37 @@ func TestSetModelIdentityParamsValidate(t *testing.T) {
 				t.Fatalf("Validate() = %v, want an error containing %q", err, tc.wantErr)
 			}
 		})
+	}
+}
+func TestRoutingPolicyIdentityEnvelope(t *testing.T) {
+	valid := `{"originNodeId":"origin-a","policy":{"revision":"7"}}`
+	var in SetPolicyParams
+	if err := json.Unmarshal([]byte(valid), &in); err != nil {
+		t.Fatal(err)
+	}
+	if in.OriginNodeID != "origin-a" || in.Policy.Revision != "7" || in.Policy.Admission != Default().Admission {
+		t.Fatalf("envelope = %+v", in)
+	}
+	for _, raw := range []string{
+		`{"revision":"7"}`, `{"originNodeId":"origin-a","policy":null}`,
+		`{"originNodeId":"origin-a","OriginNodeId":"origin-b","policy":{}}`,
+		`{"originNodeId":"origin-a","originNodeId":"origin-b","policy":{}}`,
+		`{"originNodeId":"bad identity","policy":{}}`,
+		`{"originNodeId":"origin-a","policy":{"admission":{"maxResidentModels":-1}}}`,
+	} {
+		if json.Unmarshal([]byte(raw), &in) == nil {
+			t.Fatalf("invalid envelope accepted: %s", raw)
+		}
+	}
+	var ack PolicyAck
+	for _, raw := range []string{
+		`{"revision":"7","runId":"run-a"}`,
+		`{"originNodeId":"origin-a","revision":"07","runId":"run-a"}`,
+		`{"originNodeId":"origin-a","revision":"7","runId":""}`,
+		`{"originNodeId":"origin-a","revision":"7","runId":"run-a","extra":true}`,
+	} {
+		if json.Unmarshal([]byte(raw), &ack) == nil {
+			t.Fatalf("invalid acknowledgement accepted: %s", raw)
+		}
 	}
 }

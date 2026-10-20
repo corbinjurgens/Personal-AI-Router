@@ -26,6 +26,10 @@ import (
 // observeStrictReadiness takes one nodepolicy.NotifyStrictReadiness report. It runs on the
 // proxy's read pump, so the projection goes out on its own goroutine.
 func (b *Broker) observeStrictReadiness(params json.RawMessage) {
+	b.observeStrictReadinessFrom(b.policyProxy(), params)
+}
+
+func (b *Broker) observeStrictReadinessFrom(source *proxyProcess, params json.RawMessage) {
 	var report nodepolicy.StrictAdmissionReadiness
 	err := json.Unmarshal(params, &report)
 	if err == nil {
@@ -33,6 +37,10 @@ func (b *Broker) observeStrictReadiness(params json.RawMessage) {
 	}
 	r := b.nodePolicyRuntime()
 	r.mu.Lock()
+	if source == nil || source != r.incarnation {
+		r.mu.Unlock()
+		return
+	}
 	switch {
 	case err != nil:
 		// The proxy's readiness is unknown now, so nothing is advertised.

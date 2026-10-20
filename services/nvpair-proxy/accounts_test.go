@@ -9,6 +9,7 @@ import (
 	"io"
 	"math"
 	"net/http"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -64,6 +65,9 @@ func newChatAccountFixture(t *testing.T) *chatAccountFixture {
 		budget: &publicTestBudget{ceiling: 64 << 20}, ctx: context.Background(), body: chatSimple,
 		guard: func(context.Context) error { return nil }, emit: func([]byte) error { return nil },
 		response: chatResponse("synthetic-v1", `{"role":"assistant","content":"ok"}`, `"stop"`, chatUsageOK, false), status: http.StatusOK}
+	client.resolve = func(context.Context, string) ([]netip.Addr, error) {
+		return []netip.Addr{netip.MustParseAddr("8.8.8.8")}, nil
+	}
 	f.resolve = func(ref nodepolicy.CredentialRef) (string, bool) {
 		if ref != testCredential {
 			t.Errorf("wrong synthetic reference selected")
@@ -99,7 +103,31 @@ func (f *chatAccountFixture) run(t *testing.T) (chatParseResult, error) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return runChatAccountAttempt(f.ctx, s, []byte(f.body), f.profile, f.ledger, f.transport, f.resolve, f.budget.acquire, f.guard, f.emit)
+	return runChatAccountAttempt(f.ctx, s, []byte(f.body), f.profile, f.ledger, f.transport, f.resolve, f.budget.acquire, chatTestGuard(f.guard), chatTestLifecycle(t), f.emit)
+}
+
+func chatTestLifecycle(t *testing.T) *publicAttemptLifecycle {
+	t.Helper()
+	a, err := (&routingSpend{}).newAttempt()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return a
+}
+
+func chatTestGuard(check func(context.Context) error) publicAttemptGuard {
+	if check == nil {
+		return nil
+	}
+	return func(ctx context.Context, accept func() error) error {
+		if err := check(ctx); err != nil {
+			return err
+		}
+		if accept != nil {
+			return accept()
+		}
+		return nil
+	}
 }
 
 func TestChatAccountAttemptPreSend(t *testing.T) {
@@ -134,7 +162,7 @@ func TestChatAccountAttemptPreSend(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := runChatAccountAttempt(f.ctx, s, []byte(f.body), f.profile, f.ledger, f.transport, f.resolve, nil, f.guard, f.emit); err == nil {
+		if _, err := runChatAccountAttempt(f.ctx, s, []byte(f.body), f.profile, f.ledger, f.transport, f.resolve, nil, chatTestGuard(f.guard), chatTestLifecycle(t), f.emit); err == nil {
 			t.Fatal("missing budget accepted")
 		}
 		if f.calls.Load() != 0 || len(f.ledger.state.Holds) != 0 {
@@ -218,7 +246,7 @@ func TestChatAccountAttemptPinnedSnapshot(t *testing.T) {
 			if s.deployment.Endpoint != original {
 				t.Fatal("snapshot aliases mutable routing")
 			}
-			_, err = runChatAccountAttempt(f.ctx, s, []byte(f.body), f.profile, f.ledger, f.transport, f.resolve, f.budget.acquire, f.guard, f.emit)
+			_, err = runChatAccountAttempt(f.ctx, s, []byte(f.body), f.profile, f.ledger, f.transport, f.resolve, f.budget.acquire, chatTestGuard(f.guard), chatTestLifecycle(t), f.emit)
 			if err == nil || f.calls.Load() != 0 || len(f.ledger.state.Holds) != 0 {
 				t.Fatal("stale snapshot allowed provider request")
 			}
@@ -452,7 +480,7 @@ func TestChatAccountAttemptParallelAliases(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			_, err := runChatAccountAttempt(f.ctx, s, []byte(f.body), f.profile, f.ledger, f.transport, f.resolve, f.budget.acquire, f.guard, f.emit)
+			_, err := runChatAccountAttempt(f.ctx, s, []byte(f.body), f.profile, f.ledger, f.transport, f.resolve, f.budget.acquire, chatTestGuard(f.guard), chatTestLifecycle(t), f.emit)
 			if err == nil {
 				t.Error("truncated fixture unexpectedly succeeded")
 			}
@@ -516,7 +544,7 @@ func TestChatAccountAttemptQuarantineIdentityLifecycle(t *testing.T) {
 		}
 		return nil
 	}
-	if _, err := runChatAccountAttempt(f.ctx, s, []byte(f.body), f.profile, f.ledger, f.transport, f.resolve, f.budget.acquire, f.guard, f.emit); !errors.Is(err, errChatIdentity) {
+	if _, err := runChatAccountAttempt(f.ctx, s, []byte(f.body), f.profile, f.ledger, f.transport, f.resolve, f.budget.acquire, chatTestGuard(f.guard), chatTestLifecycle(t), f.emit); !errors.Is(err, errChatIdentity) {
 		t.Fatal(err)
 	}
 	f.routing.Deployments[0].ID = "renamed"
@@ -526,7 +554,7 @@ func TestChatAccountAttemptQuarantineIdentityLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := runChatAccountAttempt(f.ctx, renamed, []byte(f.body), f.profile, f.ledger, f.transport, f.resolve, f.budget.acquire, func(context.Context) error { return nil }, f.emit); err == nil || f.calls.Load() != 1 {
+	if _, err := runChatAccountAttempt(f.ctx, renamed, []byte(f.body), f.profile, f.ledger, f.transport, f.resolve, f.budget.acquire, chatTestGuard(publicTestGuard), chatTestLifecycle(t), f.emit); err == nil || f.calls.Load() != 1 {
 		t.Fatal("rename/retirement/reopen cleared quarantine")
 	}
 }
@@ -637,12 +665,12 @@ func TestChatAccountAttemptHeadroomBeforeLookup(t *testing.T) {
 				f.profile.MaxLineBytes = 4096
 			}
 			budget := func(n int64) (func(), error) {
-				if name == "parser" && n == chatFixedStorage || name == "transport" && n == 3*(f.transport.bounds.MaxResponseBytes+1) {
+				if name == "parser" && n == chatFixedStorage+256 || name == "transport" && n == 3*(f.transport.bounds.MaxResponseBytes+1) {
 					return nil, errChatBudget
 				}
 				return f.budget.acquire(n)
 			}
-			if _, err := runChatAccountAttempt(f.ctx, s, []byte(f.body), f.profile, f.ledger, f.transport, f.resolve, budget, f.guard, f.emit); err == nil {
+			if _, err := runChatAccountAttempt(f.ctx, s, []byte(f.body), f.profile, f.ledger, f.transport, f.resolve, budget, chatTestGuard(f.guard), chatTestLifecycle(t), f.emit); err == nil {
 				t.Fatal("headroom refusal accepted")
 			}
 			if lookups != 0 || f.calls.Load() != 0 || len(f.ledger.state.Holds) != 0 {

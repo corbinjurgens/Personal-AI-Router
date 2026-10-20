@@ -866,12 +866,11 @@ func TestHandleHTTP_SelfAdmissionCancelStaysWithAttempt(t *testing.T) {
 		waitChan(t, local.cancelled, "the self attempt to be cancelled")
 		waitChan(t, peer.received, "the replacement attempt")
 
-		p.workloadsMu.Lock()
-		ctl := p.workloads[workloadKey{engine: tc.profile.Name, id: "1"}]
-		p.workloadsMu.Unlock()
-		if ctl == nil {
+		controls := p.workloadControls(tc.profile.Name, "1")
+		if len(controls) != 1 {
 			t.Fatal("replacement workload is missing")
 		}
+		ctl := controls[0]
 
 		// The same callback can outlive its released ticket. It must not
 		// abandon or exclude the replacement, even before that attempt commits.
