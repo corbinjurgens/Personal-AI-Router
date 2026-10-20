@@ -117,6 +117,51 @@ func TestStrataRuntimeRejectsModelAliases(t *testing.T) {
 	}
 }
 
+func TestStrataRuntimeRejectsHardlinkedModelAliasesBeforeHashing(t *testing.T) {
+	for _, name := range []string{"model-00001-of-00002.gguf", "pack/dense.bin", "draft/dense.bin"} {
+		t.Run(name, func(t *testing.T) {
+			f := newStrataServingFixture(t)
+			path := filepath.Join(f.root, filepath.FromSlash(name))
+			writeServingFixture(t, path, bytes.Repeat([]byte("x"), 256<<10))
+			model := &f.request.Settings.Serving.Models[0]
+			for i := range model.Artifacts {
+				artifact := &model.Artifacts[i]
+				if artifact.Binding.SourcePath == path {
+					*artifact = strataArtifact(t, path, artifact.Role)
+				}
+			}
+			alias := filepath.Join(f.root, "lib", "model-hardlink.so")
+			if err := os.Link(path, alias); err != nil {
+				t.Fatal(err)
+			}
+			modelInfo, err := os.Stat(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			aliasInfo, err := os.Stat(alias)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !os.SameFile(modelInfo, aliasInfo) {
+				t.Fatal("fixture alias does not name the same physical model file")
+			}
+			model.Artifacts = append(model.Artifacts, strataArtifact(t, alias, "runtime:lib:model-alias"))
+			p := previewSettings(t, f.ex, f.request)
+			if !strings.Contains(p.Errors["serving"], "model targets") {
+				t.Errorf("hard-link rejection = %v", p.Errors)
+			}
+			fileHashes.mu.Lock()
+			_, hashed := fileHashes.done[alias]
+			fileHashes.mu.Unlock()
+			if hashed {
+				t.Error("hard-linked model alias was fully hashed")
+			}
+			assertNoLlamaSpawn(t, f.llamaServingFixture)
+			assertNoSettingsOverride(t, f.ex)
+		})
+	}
+}
+
 func TestStrataRuntimeRejectsGGUFExtensions(t *testing.T) {
 	for _, name := range []string{"extra.gguf", "extra-00001-of-00002.GGUF"} {
 		t.Run(name, func(t *testing.T) {

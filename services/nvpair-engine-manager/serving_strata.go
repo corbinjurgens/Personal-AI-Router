@@ -45,6 +45,7 @@ func strataTarget(path string) (string, error) {
 // draft artifacts whose extensions do not identify them as model content.
 func strataRuntimePaths(config *engines.ServingConfig) ([]string, error) {
 	models := map[string]bool{}
+	var modelFiles []os.FileInfo
 	for _, model := range config.Models {
 		for _, artifact := range model.Artifacts {
 			if artifact.Binding == nil {
@@ -56,6 +57,11 @@ func strataRuntimePaths(config *engines.ServingConfig) ([]string, error) {
 					return nil, err
 				}
 				models[target] = true
+				info, err := os.Stat(target)
+				if err != nil {
+					return nil, err
+				}
+				modelFiles = append(modelFiles, info)
 			}
 		}
 	}
@@ -72,6 +78,16 @@ func strataRuntimePaths(config *engines.ServingConfig) ([]string, error) {
 			}
 			if models[target] || strings.EqualFold(filepath.Ext(path), ".gguf") || strings.EqualFold(filepath.Ext(target), ".gguf") {
 				return nil, servingError("Strata runtime artifacts must not reference model targets or GGUF files.")
+			}
+			info, err := os.Stat(target)
+			if err != nil {
+				return nil, err
+			}
+			// Hard links can name model content through an unrelated runtime path.
+			for _, modelFile := range modelFiles {
+				if os.SameFile(info, modelFile) {
+					return nil, servingError("Strata runtime artifacts must not reference model targets or GGUF files.")
+				}
 			}
 			paths = append(paths, path)
 		}
