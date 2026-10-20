@@ -144,9 +144,6 @@ func (s *controlServer) authorize(route controlRoute, h pinnedPeerHandler) pinne
 			http.Error(w, "engine control route is not classified", http.StatusInternalServerError)
 			return
 		}
-		if !s.allowControlDuringRecovery(w, r, route.class) {
-			return
-		}
 		request, method := r, r.Method
 		if method == http.MethodHead && route.class == controlRead && route.method == http.MethodGet {
 			// HEAD is a read of a registered read route; handlers only know GET.
@@ -177,6 +174,9 @@ func (s *controlServer) authorize(route controlRoute, h pinnedPeerHandler) pinne
 			// A pinned peer's refused management operation. Typed 409 and a
 			// bounded explanation; never raw filesystem state.
 			writeCodedError(w, codeRemoteManagementDenied, remoteManagementDeniedMessage)
+			return
+		}
+		if !s.allowControlDuringRecovery(w, r, route.class) {
 			return
 		}
 		h(w, request, caller)

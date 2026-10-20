@@ -27,6 +27,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -627,6 +628,16 @@ func TestRemoteManagementRegistryParity(t *testing.T) {
 	if len(routes) != len(want) {
 		t.Fatalf("registry has %d routes, classification spec has %d", len(routes), len(want))
 	}
+	// ServeMux has no public registration iterator. Count the patterns in its
+	// routing tree so an extra served path anywhere in mux() cannot escape
+	// parity by avoiding the registry or the unknown-path probe below.
+	tree := reflect.ValueOf(mux).Elem().FieldByName("tree")
+	if !tree.IsValid() || tree.Kind() != reflect.Struct {
+		t.Fatal("ServeMux routing tree changed; update the parity inspector")
+	}
+	if count := rmMuxPatternCount(tree); count != len(routes) {
+		t.Fatalf("mux serves %d registered patterns, registry has %d", count, len(routes))
+	}
 	seen := map[string]controlClass{}
 	for _, route := range routes {
 		if route.path == "" || route.method == "" || route.class == controlUnclassified || route.family == "" {
@@ -653,13 +664,56 @@ func TestRemoteManagementRegistryParity(t *testing.T) {
 	}
 }
 
+// rmMuxPatternCount reads only reflection metadata, never unexported values via
+// Interface or unsafe. A routing tree has one *http.pattern per served pattern;
+// its child maps/slices can change representation without changing this walk.
+func rmMuxPatternCount(v reflect.Value) int {
+	count := 0
+	switch v.Kind() {
+	case reflect.Pointer:
+		if !v.IsNil() {
+			if typ := v.Type().Elem(); typ.PkgPath() == "net/http" && typ.Name() == "pattern" {
+				return 1
+			}
+			return rmMuxPatternCount(v.Elem())
+		}
+	case reflect.Struct:
+		for i := 0; i < v.NumField(); i++ {
+			count += rmMuxPatternCount(v.Field(i))
+		}
+	case reflect.Slice:
+		for i := 0; i < v.Len(); i++ {
+			count += rmMuxPatternCount(v.Index(i))
+		}
+	case reflect.Map:
+		iter := v.MapRange()
+		for iter.Next() {
+			count += rmMuxPatternCount(iter.Value())
+		}
+	}
+	return count
+}
+
 func TestRemoteManagementRouteMatrixDeniesUngrantedMutation(t *testing.T) {
 	f := rmNewFixture(t, "uuid-self", "uuid-a", "uuid-b")
 	f.writePermissions("1", map[string]bool{"uuid-a": true, "uuid-b": false})
-	s := &controlServer{mesh: f.mesh}
-	spy := newRMHandlerSpy()
-	ts := rmTLSServer(t, f.mesh, rmRegistryMux(s, spy))
+	// An empty registry and unwired coordinators keep the real handlers inert.
+	// Reads must reach their handler's normal result or input/dependency error;
+	// mutations must be refused before any of those handlers run.
+	s := &controlServer{mesh: f.mesh, exec: &Executor{reg: &Registry{}}}
+	ts := rmTLSServer(t, f.mesh, s.mux())
 	denied := f.client("uuid-b")
+	readStatuses := map[string]int{
+		controlEnginesPath:          http.StatusOK,
+		controlModelFilesPath:       http.StatusBadRequest,
+		controlModelFilePath:        http.StatusBadRequest,
+		controlRemoteManagementPath: http.StatusOK,
+		settingsPath + "get":        http.StatusServiceUnavailable,
+		settingsPath + "preview":    http.StatusServiceUnavailable,
+		settingsPath + "events":     http.StatusServiceUnavailable,
+		controlPolicyGetPath:        http.StatusServiceUnavailable,
+		settings.SwitchStatusPath:   http.StatusBadRequest,
+	}
 
 	// The assertions follow the independent classification spec, never the
 	// registry's own answer, so a misclassified route is exercised as what it is
@@ -674,23 +728,19 @@ func TestRemoteManagementRouteMatrixDeniesUngrantedMutation(t *testing.T) {
 			t.Errorf("registry classifies %s as %s, want %s", route.path, route.class, class)
 		}
 		t.Run(class.String()+"_"+route.method+"_"+route.path, func(t *testing.T) {
-			before := spy.count(route.family)
 			status, header, body := rmRequest(t, denied, ts.URL, route.method, route.path, `{"engine":"fixture"}`)
-			reached := spy.count(route.family) - before
 			if class == controlRead {
-				if status != http.StatusOK {
-					t.Fatalf("denied peer read %s = %d, want 200: %s", route.path, status, body)
+				want, ok := readStatuses[route.path]
+				if !ok {
+					t.Fatalf("read %s has no expected inert-handler response", route.path)
 				}
-				if reached != 1 {
-					t.Fatalf("denied peer read %s reached its handler %d times, want 1", route.path, reached)
+				if status != want {
+					t.Fatalf("denied peer read %s = %d, want handler status %d: %s", route.path, status, want, body)
 				}
 				return
 			}
 			if status != http.StatusConflict {
 				t.Fatalf("ungranted mutation %s = %d, want 409: %s", route.path, status, body)
-			}
-			if reached != 0 {
-				t.Fatalf("ungranted mutation %s reached its handler %d times, want 0", route.path, reached)
 			}
 			// A refused mutation must not open a streaming 200 body.
 			if contentType := header.Get("Content-Type"); !strings.Contains(contentType, "application/json") ||
@@ -706,6 +756,49 @@ func TestRemoteManagementRouteMatrixDeniesUngrantedMutation(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestRemoteManagementRecoveryPermissionPrecedesFence(t *testing.T) {
+	test := func(name string, allowed, missingStore bool, wantStatus int) {
+		t.Run(name, func(t *testing.T) {
+			f := rmNewFixture(t, "uuid-self", "uuid-a")
+			f.writePermissions("1", map[string]bool{"uuid-a": allowed})
+			if missingStore {
+				f.removeStore()
+			}
+			s := &controlServer{mesh: f.mesh, exec: &Executor{}}
+			s.exec.switchRecoveryPending.Store(true)
+			spy := newRMHandlerSpy()
+			route := findRMRoute(t, s, controlInstallPath)
+			ts := rmTLSServer(t, f.mesh, s.requirePinCaller(s.authorize(route, spy.handle(route.family))))
+			status, header, body := rmRequest(t, f.client("uuid-a"), ts.URL,
+				route.method, route.path, `{"engine":"fixture"}`)
+			if status != wantStatus {
+				t.Fatalf("mutation during recovery = %d, want %d: %s", status, wantStatus, body)
+			}
+			if reached := spy.count(route.family); reached != 0 {
+				t.Fatalf("mutation during recovery reached its handler %d times, want 0", reached)
+			}
+			if contentType := header.Get("Content-Type"); strings.Contains(contentType, "ndjson") {
+				t.Fatalf("mutation during recovery opened an NDJSON stream: %q", contentType)
+			}
+			if wantStatus == http.StatusConflict {
+				if contentType := header.Get("Content-Type"); contentType != "application/json" {
+					t.Fatalf("denial content type = %q, want application/json", contentType)
+				}
+				code, message := rmCodedBody(t, body)
+				if code != remoteManagementWireCode || message != remoteManagementDeniedMessage {
+					t.Fatalf("recovery denial = (%q, %q), want typed remote-management refusal", code, message)
+				}
+				if got := rpcCode(remoteStatusError("recovery test", status, body)); got != codeRemoteManagementDenied {
+					t.Fatalf("recovery denial RPC code = %d, want %d", got, codeRemoteManagementDenied)
+				}
+			}
+		})
+	}
+	test("denied peer gets typed refusal", false, false, http.StatusConflict)
+	test("missing permission store gets typed refusal", false, true, http.StatusConflict)
+	test("granted peer waits for recovery", true, false, http.StatusServiceUnavailable)
 }
 
 func TestRemoteManagementRouteMatrixGrantsMutation(t *testing.T) {
