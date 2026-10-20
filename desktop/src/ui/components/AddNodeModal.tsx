@@ -76,7 +76,7 @@ export function AddNodeModal({ open, onOpenChange }: AddNodeModalProps) {
                                 onReset={pairing.reset}
                                 onCancel={() => void pairing.cancel()}
                                 onDone={() => handleOpenChange(false)}
-                                savedPermission={pairing.submittedPermission}
+                                savedPermission={pairing.savedPermission}
                             />
                         ) : (
                             <>

@@ -9,7 +9,7 @@ import type { JsonValue } from '@/shared/types/json'
 import type { NodePolicyDocument, NodePolicySnapshot } from '@/shared/types/node-policy'
 import type { NodeRoles } from '@/shared/types/node-roles'
 import type { NodeItem, NodeStatus } from '@/shared/types/nodes'
-import type { INodePolicyApi } from '@/ui/api/pair-api'
+import type { IClusterApi, INodePolicyApi } from '@/ui/api/pair-api'
 import { REMOTE_MANAGEMENT_DENIED_CODE } from '@/shared/constants/service-errors'
 import { ServiceCallError } from '@/ui/api/service-transport'
 import BulkNodeConfiguration from '@/ui/components/RoutingSettings/BulkNodeConfiguration'
@@ -49,16 +49,25 @@ function persisted(request: { policy: string; expectedPersistedRevision: string 
 
 const get = vi.fn<INodePolicyApi['get']>()
 const set = vi.fn<INodePolicyApi['set']>()
+const getRemoteManagementForNode = vi.fn<IClusterApi['getRemoteManagementForNode']>()
 
 beforeEach(() => {
     get.mockReset()
     set.mockReset()
+    getRemoteManagementForNode.mockReset()
+    getRemoteManagementForNode.mockResolvedValue({
+        version: 1,
+        state: 'allowed',
+        allowed: true,
+        revision: '1'
+    })
     Object.defineProperty(window, 'pairApi', {
         configurable: true,
-        value: { nodePolicy: { get, set } }
+        value: { nodePolicy: { get, set }, cluster: { getRemoteManagementForNode } }
     })
     useNodeConfigurationStore.setState({
         editors: new Map(),
+        management: new Map(),
         bulk: { selected: [], mode: 'common', common: {} }
     })
 })
@@ -162,6 +171,51 @@ describe('bulk fan-out', () => {
         expect(entry('offline').draft).toEqual(ROLES)
         expect(set.mock.calls.map(([request]) => request.nodeId)).toEqual(['allowed', 'denied'])
         expect(get.mock.calls.map(([nodeId]) => nodeId)).toEqual(['allowed', 'denied', 'offline'])
+    })
+
+    it('rejects denied and unsupported readbacks without sending and keeps their drafts', async () => {
+        get.mockResolvedValue(policyDocument('5'))
+        set.mockImplementation(async request => persisted(request))
+        getRemoteManagementForNode.mockImplementation(async nodeId => {
+            if (nodeId === 'denied')
+                return { version: 1, state: 'denied', allowed: false, revision: '2' }
+            if (nodeId === 'unsupported')
+                return { version: 1, state: 'unsupported', allowed: false, revision: '' }
+            return { version: 1, state: 'allowed', allowed: true, revision: '2' }
+        })
+        for (const id of ['denied', 'unsupported', 'allowed']) {
+            store().adopt(id, snapshot('4'))
+            store().setDraft(id, ROLES)
+        }
+
+        await store().applyAll(targets('denied', 'unsupported', 'allowed'))
+
+        expect(set.mock.calls.map(([request]) => request.nodeId)).toEqual(['allowed'])
+        expect(get.mock.calls.map(([nodeId]) => nodeId)).toEqual(['allowed'])
+        for (const id of ['denied', 'unsupported']) {
+            expect(entry(id).phase).toBe('rejected')
+            expect(entry(id).message).toBe(store().management.get(id)?.message)
+            expect(entry(id).draft).toEqual(ROLES)
+            expect(entry(id).baseline?.revision).toBe('4')
+        }
+        expect(entry('denied').message).toContain('blocked remote management')
+        expect(entry('unsupported').message).toContain('does not support')
+        expect(entry('allowed').phase).toBe('applied')
+        expect(entry('allowed').baseline?.revision).toBe('6')
+    })
+
+    it('applies local roles without requiring remote management capability', async () => {
+        get.mockResolvedValue(policyDocument('5'))
+        set.mockImplementation(async request => persisted(request))
+        useNodeConfigurationStore.setState({
+            management: new Map([['self', { state: 'denied', revision: '2' }]])
+        })
+
+        await store().applyAll([{ targetId: 'self', nodeId: undefined }], ROLES)
+
+        expect(getRemoteManagementForNode).not.toHaveBeenCalled()
+        expect(set).toHaveBeenCalledTimes(1)
+        expect(entry('self').phase).toBe('applied')
     })
 })
 
@@ -284,6 +338,7 @@ describe('per-node outcomes', () => {
         const id = entry('a').requestId
         expect(id).toMatch(/^[0-9a-f-]{36}$/)
 
+        await vi.waitFor(() => expect(get).toHaveBeenCalledTimes(1))
         release(policyDocument('5'))
         await vi.waitFor(() => expect(entry('a').phase).toBe('sending'))
         expect(entry('a').requestId).toBe(id)

@@ -754,6 +754,19 @@ export const useNodeConfigurationStore = create<NodeConfigurationState>((set, ge
                 message: undefined,
                 requestId
             })
+            if (nodeId !== undefined) {
+                await get().readManagement(targetId, nodeId)
+                const management = get().management.get(targetId)
+                if (management?.state !== 'allowed') {
+                    update(targetId, current => ({
+                        ...current,
+                        draft: roles ?? current.draft,
+                        phase: 'rejected',
+                        message: management?.message ?? MANAGEMENT_MESSAGES.unavailable
+                    }))
+                    return
+                }
+            }
             let latest: NodePolicySnapshot
             try {
                 latest = await window.pairApi.nodePolicy.get(nodeId)

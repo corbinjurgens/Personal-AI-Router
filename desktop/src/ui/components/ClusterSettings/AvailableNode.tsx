@@ -22,7 +22,7 @@ export default function AvailableNode({ node }: { node: AvailableNodeType }) {
                     error={pairing.error}
                     onReset={pairing.reset}
                     onCancel={() => void pairing.cancel()}
-                    savedPermission={pairing.submittedPermission}
+                    savedPermission={pairing.savedPermission}
                 />
             ) : (
                 <Stack gap="3">
