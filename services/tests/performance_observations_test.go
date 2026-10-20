@@ -169,6 +169,11 @@ func observationUpstream(t *testing.T, handler http.HandlerFunc) *httptest.Serve
 
 func observationRequest(t *testing.T, p *observationProxy, ctx context.Context, stream, usage bool) *http.Response {
 	t.Helper()
+	return observationRequestWithTimeout(t, p, ctx, stream, usage, 10*time.Second)
+}
+
+func observationRequestWithTimeout(t *testing.T, p *observationProxy, ctx context.Context, stream, usage bool, timeout time.Duration) *http.Response {
+	t.Helper()
 	body := map[string]any{"model": observationModel, "messages": []any{}, "stream": stream}
 	if usage {
 		body["stream_options"] = map[string]bool{"include_usage": true}
@@ -182,7 +187,7 @@ func observationRequest(t *testing.T, p *observationProxy, ctx context.Context, 
 		t.Fatal(err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	client := &http.Client{Timeout: 10 * time.Second}
+	client := &http.Client{Timeout: timeout}
 	t.Cleanup(client.CloseIdleConnections)
 	resp, err := client.Do(req)
 	if err != nil {
@@ -461,19 +466,31 @@ func TestPerformanceObservationFailedDispatchThenSuccess(t *testing.T) {
 	p := observationStartProxy(t, base, filepath.Join(base, "cluster"), "destination-b", "llamacpp", upstream.URL)
 	closedPort := observationPort(t)
 	p.backend(t, fmt.Sprintf("http://127.0.0.1:%d", closedPort))
-	resp := observationRequest(t, p, context.Background(), true, false)
+	// nvpair-proxy/http_handler.go: maxDispatchAttempts permits five dials,
+	// defaultRetryBackoff totals 15s and backoffFor adds at most 25% jitter.
+	// proxy.go: proxyDialTimeout bounds each refused dial at 10s. This is
+	// 68.75s, below jobDeadline (10m); allow another 10s for the response.
+	const failedDispatches = 5
+	const failureTimeout = failedDispatches*10*time.Second + 15*time.Second*5/4 + 10*time.Second
+	resp := observationRequestWithTimeout(t, p, context.Background(), true, false, failureTimeout)
 	observationRead(t, resp)
 	if resp.StatusCode == http.StatusOK {
 		t.Fatal("failed local dial returned success")
 	}
-	failed := observationWaitSamples(t, p.rpc, 1)[0]
+	failed := observationWaitSamples(t, p.rpc, failedDispatches)
 	p.backend(t, upstream.URL)
 	observationRead(t, observationRequest(t, p, context.Background(), true, false))
-	samples := observationWaitSamples(t, p.rpc, 2)
-	if failed.Outcome != performancewire.OutcomeFailed || failed.Key != samples[1].Key || failed.Producer != samples[1].Producer || failed.Seq != 1 || samples[1].Seq != 2 {
-		t.Fatalf("separate dispatches=%+v", samples)
+	samples := observationWaitSamples(t, p.rpc, failedDispatches+1)
+	success := samples[failedDispatches]
+	for i, sample := range failed {
+		if sample.Outcome != performancewire.OutcomeFailed || sample.Key != success.Key || sample.Producer != success.Producer || sample.Seq != uint64(i+1) {
+			t.Fatalf("failed dispatch %d=%+v, success=%+v", i+1, sample, success)
+		}
 	}
-	observationAssertRate(t, samples[1], "destination-b", "llamacpp", 40, 250000000)
+	if success.Seq != failedDispatches+1 {
+		t.Fatalf("success sequence=%d, want %d", success.Seq, failedDispatches+1)
+	}
+	observationAssertRate(t, success, "destination-b", "llamacpp", 40, 250000000)
 }
 
 // The broker has no public sample-injection RPC. This worker fixture preserves
@@ -843,6 +860,7 @@ func observationWaitBrokerCoverage(t *testing.T, b *observationBroker, key perfo
 		summary = b.projection(t).Local.Summary
 		return summary != nil && len(summary.Entries) == 1 && summary.Entries[0].Samples >= samples
 	})
+	observationAssertDisplaySummary(t, *summary, key)
 	e := summary.Entries[0]
 	if summary.MeasuringHost != key.Host || e.Key != key || e.Samples != samples || e.Completed != completed || e.Failed != failed || e.Cancelled != cancelled || e.Decode != nil || e.Prefill != nil {
 		t.Fatalf("broker execution/outcome counts=%+v", summary)
@@ -853,9 +871,6 @@ func observationWaitBrokerCoverage(t *testing.T, b *observationBroker, key perfo
 		}
 	} else if e.EngineDecode == nil || e.EngineDecode.Samples != rates || e.EngineDecode.DurationNs != int64(rates)*250000000 || e.EngineDecode.TokensPerSecond != 40 {
 		t.Fatalf("broker qualified-rate coverage=%+v, want %d", e.EngineDecode, rates)
-	}
-	if err := summary.Validate(); err != nil {
-		t.Fatal(err)
 	}
 }
 
@@ -872,14 +887,35 @@ func (b *observationBroker) projection(t *testing.T) observationProjection {
 	return projection
 }
 
-func observationAssertSummary(t *testing.T, summary performancewire.Summary, key performancewire.ProfileKey, samples int) {
+// Local display summaries from performance:get and performance:changed have no
+// publication revision or admission incarnation (performancestore.Store.Local).
+// Entry.validate is private, so check the display fields and public validators.
+func observationAssertDisplaySummary(t *testing.T, summary performancewire.Summary, key performancewire.ProfileKey) {
 	t.Helper()
-	if err := summary.Validate(); err != nil {
-		t.Fatal(err)
+	if summary.Version != performancewire.SchemaVersion || summary.MeasuringHost != key.Host || summary.Window.MaxAgeMs != performancewire.RetentionMs || summary.Window.MaxSamplesPerKey != performancewire.MaxSamplesPerKey || summary.OmittedEntries != 0 {
+		t.Fatalf("display summary metadata=%+v", summary)
 	}
 	if len(summary.Entries) != 1 {
 		t.Fatalf("summary entries=%+v", summary.Entries)
 	}
+	e := summary.Entries[0]
+	if err := e.Key.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.Profile.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if e.Key != key || e.Samples < 1 || e.Samples > summary.Window.MaxSamplesPerKey || e.Completed < 0 || e.Failed < 0 || e.Cancelled < 0 || e.Completed+e.Failed+e.Cancelled != e.Samples || e.Incomplete < 0 || e.Incomplete > e.Completed {
+		t.Fatalf("display entry identity/counts=%+v", e)
+	}
+	if e.NewestAgeMs < 0 || e.NewestAgeMs > e.OldestAgeMs || e.OldestAgeMs > summary.Window.MaxAgeMs || e.NewestObservedAtMs <= 0 {
+		t.Fatalf("display entry ages=%+v", e)
+	}
+}
+
+func observationAssertSummary(t *testing.T, summary performancewire.Summary, key performancewire.ProfileKey, samples int) {
+	t.Helper()
+	observationAssertDisplaySummary(t, summary, key)
 	entry := summary.Entries[0]
 	if summary.MeasuringHost != key.Host || entry.Key != key || entry.Samples != samples || entry.Completed != samples || entry.Decode != nil || entry.EngineDecode == nil || entry.EngineDecode.Samples != samples || entry.EngineDecode.DurationNs != int64(samples)*250000000 || entry.EngineDecode.TokensPerSecond != 40 {
 		t.Fatalf("summary destination/native rate=%+v", summary)
@@ -971,6 +1007,9 @@ func TestPerformanceObservationBrokerPersistenceAndPublication(t *testing.T) {
 		}
 		return false
 	})
+	if err := published.Validate(); err != nil {
+		t.Fatal(err)
+	}
 	observationAssertSummary(t, published, sample.Key, 2)
 	// Observe the existing save boundary, then restart only the isolated broker
 	// with the same config directory. No installed history is read or touched.
