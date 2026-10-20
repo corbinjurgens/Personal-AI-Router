@@ -780,12 +780,21 @@ func TestEngineSwitchProcessPinnedReverse(t *testing.T) {
 	testEngineSwitchPinned(t, true)
 }
 
+// pinnedSwitchFixture is node B's broker-supervised switch stack on the
+// task2 mesh, driven from node A's engine-manager over the pinned ec route.
+type pinnedSwitchFixture struct {
+	mesh   *task2Fixture
+	f      *switchProcessFixture
+	origin *task1Process
+	ec     *task1Observer
+}
+
 // Keep the existing fixture's production cluster-manager reverse gateway,
 // pins, private IPC, and observing inner mTLS proxy. Replace only B's manager
 // with a broker that supervises the same manager on those existing ports.
-func testEngineSwitchPinned(t *testing.T, reverse bool) {
+func newPinnedSwitchFixture(t *testing.T, reverse bool) *pinnedSwitchFixture {
 	t.Helper()
-	mesh := newTask2Fixture(t)
+	mesh := newTask2Fixture(t, task2WithoutScanner)
 	mesh.engines[mesh.b.uuid].stop()
 	ports := reserveFixtureServicePorts(t)
 	ports.engineManagerHTTP = mesh.b.ports[noderec.ServiceEngineManager]
@@ -796,7 +805,7 @@ func testEngineSwitchPinned(t *testing.T, reverse bool) {
 		// The ordinary interop inventory owns product image paths. Stop the
 		// other fixture instances of those images before its final scan.
 		origin.stop()
-		mesh.scanner.stop()
+		mesh.stopScanner()
 		f.p.cleanup()
 	})
 	directory := mesh.directory(mesh.b)
@@ -807,6 +816,29 @@ func testEngineSwitchPinned(t *testing.T, reverse bool) {
 		directory.Services[noderec.ServiceEngineControl] = noderec.ServiceStatus{Port: ec.port}
 	}
 	origin.send(t, noderec.NotifyNodes, noderec.GetNodesResult{Nodes: []noderec.DirectoryNode{directory}}, false)
+	return &pinnedSwitchFixture{mesh: mesh, f: f, origin: origin, ec: ec}
+}
+
+func (p *pinnedSwitchFixture) remoteStatus(t *testing.T, requestID string) settings.SwitchStatus {
+	t.Helper()
+	response := p.origin.call(t, settings.RemoteSwitchStatusMethod, settings.SwitchStatusRequest{NodeID: p.mesh.b.uuid, RequestID: requestID})
+	if response.Error != nil {
+		t.Fatalf("%s: %+v", settings.RemoteSwitchStatusMethod, response.Error)
+	}
+	var status settings.SwitchStatus
+	task2Decode(t, response.Result, &status)
+	return status
+}
+
+func (p *pinnedSwitchFixture) request(t *testing.T, id string) settings.SwitchRequest {
+	t.Helper()
+	return settings.SwitchRequest{NodeID: p.mesh.b.uuid, RequestID: id, SourceEngine: "ollama", TargetEngine: "llamacpp", ExpectedRevision: p.remoteStatus(t, "").ConfigurationRevision}
+}
+
+func testEngineSwitchPinned(t *testing.T, reverse bool) {
+	t.Helper()
+	p := newPinnedSwitchFixture(t, reverse)
+	mesh, f, origin, ec := p.mesh, p.f, p.origin, p.ec
 	var initial settings.SwitchStatus
 	task2Decode(t, origin.call(t, settings.RemoteSwitchStatusMethod, settings.SwitchStatusRequest{NodeID: mesh.b.uuid}).Result, &initial)
 	request := settings.SwitchRequest{NodeID: mesh.b.uuid, RequestID: "switch-pinned", SourceEngine: "ollama", TargetEngine: "llamacpp", ExpectedRevision: initial.ConfigurationRevision}
