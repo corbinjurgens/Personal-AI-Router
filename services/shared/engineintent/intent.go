@@ -5,7 +5,10 @@
 // engine manager and its clients. It describes intent, not runtime status.
 package engineintent
 
-import "fmt"
+import (
+	"encoding/json"
+	"fmt"
+)
 
 // Origin identifies who saved Off relative to the engine-owning device.
 type Origin string
@@ -23,6 +26,30 @@ const (
 type Snapshot struct {
 	EnabledByEngine map[string]bool   `json:"enabledByEngine"`
 	OffByEngine     map[string]Origin `json:"offByEngine"`
+}
+
+// UnmarshalJSON rejects null enabled values instead of treating them as false.
+func (s *Snapshot) UnmarshalJSON(data []byte) error {
+	type snapshot Snapshot
+	var decoded Snapshot
+	wire := struct {
+		*snapshot
+		EnabledByEngine map[string]*bool `json:"enabledByEngine"`
+	}{snapshot: (*snapshot)(&decoded)}
+	if err := json.Unmarshal(data, &wire); err != nil {
+		return err
+	}
+	if wire.EnabledByEngine != nil {
+		decoded.EnabledByEngine = make(map[string]bool, len(wire.EnabledByEngine))
+		for engine, enabled := range wire.EnabledByEngine {
+			if enabled == nil {
+				return fmt.Errorf("intent enabled value for %s must be a boolean", engine)
+			}
+			decoded.EnabledByEngine[engine] = *enabled
+		}
+	}
+	*s = decoded
+	return nil
 }
 
 // Validate rejects incomplete snapshots and origins inconsistent with the

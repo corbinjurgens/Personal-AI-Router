@@ -55,3 +55,33 @@ func TestSnapshotJSONRequiredMaps(t *testing.T) {
 		}
 	}
 }
+
+func TestSnapshotJSONRejectsNonBooleanEnabledValue(t *testing.T) {
+	for _, value := range []string{"null", `"false"`, "0", "[]", "{}"} {
+		t.Run(value, func(t *testing.T) {
+			var snapshot Snapshot
+			data := `{"enabledByEngine":{"ollama":` + value + `},"offByEngine":{}}`
+			if err := json.Unmarshal([]byte(data), &snapshot); err == nil {
+				t.Fatalf("accepted non-boolean enabled value: %s", value)
+			}
+		})
+	}
+}
+
+func TestSnapshotJSONPreservesIntent(t *testing.T) {
+	var snapshot Snapshot
+	data := `{"enabledByEngine":{"on":true,"off":false},"offByEngine":{"off":"peer"}}`
+	if err := json.Unmarshal([]byte(data), &snapshot); err != nil {
+		t.Fatal(err)
+	}
+	if err := snapshot.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	offEnabled, offReported := snapshot.EnabledByEngine["off"]
+	if len(snapshot.EnabledByEngine) != 2 || !snapshot.EnabledByEngine["on"] || !offReported || offEnabled {
+		t.Fatalf("enabledByEngine = %v, want on=true and off=false", snapshot.EnabledByEngine)
+	}
+	if len(snapshot.OffByEngine) != 1 || snapshot.OffByEngine["off"] != "peer" {
+		t.Fatalf("offByEngine = %v, want off=peer", snapshot.OffByEngine)
+	}
+}
