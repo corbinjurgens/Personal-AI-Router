@@ -5,1015 +5,638 @@ SPDX-License-Identifier: Apache-2.0
 
 # Execution plan: PA — paused-node authenticated advertisement
 
-Planned against `fork/groundwork` at commit
-`584e99242562df1cb19d2c7a318b7342e03cb7d2`. Every `path:line` below refers to
-that commit. Path shorthand: `B/` = `services/nvpair-ui-broker/`,
-`P/` = `services/nvpair-proxy/`, `E/` = `services/nvpair-engine-manager/`,
-`S/` = `services/nvpair-node-scanner/`, `N/` = `services/shared/`,
-`X/` = `services/tests/`.
+Planning baseline: `origin/integration/join12`,
+`81960f6201e296d7f78274b6e8515ed0c6a8d8d5`. Source verified with `git show`
+and `git grep`, without a checkout. References below use file/symbol names,
+not historical line offsets. Re-resolve them at the coordinator's integrated
+I/G landing before dependent implementation. Path shorthand: `P/` =
+`services/nvpair-proxy/`, `S/` = `services/nvpair-node-scanner/`, `B/` =
+`services/nvpair-ui-broker/`, `E/` = `services/nvpair-engine-manager/`,
+`N/` = `services/shared/`, `X/` = `services/tests/`.
 
 ## Goal
 
-A routing node never dispatches an inference request to a paired node that has
-advertised itself as paused, and still fails over correctly when that
-advertisement is stale:
-
-- The pause hint a node already publishes — `pausedBy` in its policy
-  advertisement, served only in its pinned-mTLS `GET /v1/models` document and
-  stamped with the policy revision that recorded the pause — reaches the
-  proxy's routable `Node` (today it is dropped at `subscribedToNode`,
-  `P/proxy.go:1230`).
-- `resolveCandidates` (`P/proxy.go:629`), which concrete and tier routing both
-  use, skips a non-self node carrying a pause hint whenever it is filtering
-  owners for a model. A paused peer therefore costs no dispatch, no 503 round
-  trip and no retry-budget. The self candidate, manual nodes and non-inference
-  routes (model list, pass-through) are unaffected.
-- A stale hint is harmless in both directions: a peer that paused after the
-  last fetch still answers `503 X-PAIR-Admission: paused` from its own
-  admission (`P/admission.go:382-383`), which the router treats as a failed
-  candidate; a peer that resumed after the last fetch is routed to again within
-  one scanner sweep (`peerRefreshInterval`, `S/daemon.go:218`, 15 s).
-- The destination's local veto is untouched: a local pause or Off still refuses
-  a paired node's resume, start, load and switch (`B/availability.go:59-65`,
-  `B/policy.go:772-774`, `E/nodeprojection.go:67-89`).
-- Nothing about the pause enters mDNS: the `_nvpair-node` TXT record keeps only
-  `v`, `uuid`, `cluster-uuid`, `ip`, `ips` and the service keys
-  (`N/noderec/noderec.go:59-69`, `S/registry.go:139-147`).
-- The behaviour is covered by proxy, scanner and broker unit tests, one
-  cross-process acceptance test, the proxy spec, the component READMEs and a
-  new product document `docs/node-availability.mdx`.
+Carry the existing revisioned `policy.pausedBy` advertisement into proxy
+routing metadata. When inference candidate resolution observes a paused remote
+peer, exclude that peer before host deduplication and admission to the result
+set, with zero dispatch attempts to it. A later available advertisement makes
+the same peer eligible again. Preserve destination admission and local veto
+for stale/missing hints, stable model catalogue and declared tier aliases,
+self/dormant-self, manual-no-hint, model-list and pass-through behavior.
+No availability data enters mDNS. Tests prove each hop and the dynamic proxy
+replacement; a PC3-only process gate proves scanner-to-broker propagation.
 
 ## Change scope
 
-- **Intent / Scope:** Bounded improvement. Product code changes are confined to
-  two functions and one struct in the proxy (`P/discovery.go` `Node`,
-  `P/proxy.go` `subscribedToNode` and `resolveCandidates`). Every other task is
-  tests or documentation. No JSON-RPC method, payload field, HTTP route, mDNS
-  key or persisted file changes; `Node.PausedBy` is `json:"-"` like
-  `Node.Roles`, so the proxy's outward `node/*` contract is unchanged and
-  `desktop/docs/services-api.md` needs no regeneration.
-- **Basis:** the advertisement pipeline that already exists end to end:
-  `Policy.Advertisement()` carries `PausedBy` and `Revision`
-  (`N/nodepolicy/advertise.go:275`); the broker publishes it to engine-manager
-  on every pause and resume (`B/availability.go:207`, `:322`,
-  `B/policy_notifications.go:88-113`); engine-manager serves it as `policy` in
-  `/v1/models` (`E/models.go:105-109`, `E/nodeprojection.go:55-65`); the
-  scanner fetches it over pinned mTLS only (`S/model_enrichment.go:278-284`),
-  compares the advertisement exactly (`S/directory.go:277`) and emits
-  `discovery:node-updated` on a change; the broker relays `DirectoryNode.Policy`
-  intact (`B/discovery.go:80`, `:94-122`); the proxy decodes the snapshot in
-  `replaceSubscribed` (`P/facade.go:419`).
-- **Compatibility:** an older peer that publishes no `policy`, or a policy
-  without `pausedBy`, keeps today's behaviour (no hint, dispatched, rejected by
-  its own admission if paused). No new listener roles, no Windows firewall
-  rules, no manifest (`services/shared/testbin/programs/tests.txt`) changes:
-  the cross-process test reuses the broker fixture and an `httptest` stub.
-- **Non-goals:** no faster propagation than the scanner's sweep (no new relay
-  message, no reverse-session payload change); no change to what the federated
-  model list or the hybrid tier aliases show for a paused peer; no change to
-  the 502/503 bodies the router answers with when no candidate remains; no
-  change to the self candidate, the dormant self candidate, manual nodes or the
-  destination veto; no desktop or TUI code (the desktop already reads
-  `policy.pausedBy` from discovery nodes,
-  `desktop/src/shared/utils/node-roles.ts:55`); no mDNS TXT key; no Ollama or
-  live-engine runs.
+Intent / Scope: **Bounded improvement**. Product edits add internal metadata
+to proxy `Node`, copy it in `subscribedToNode`, and exclude paused remote
+inference candidates at I's final common candidate-selection owner. At join12
+that owner is `facade.resolveCandidates` in `P/proxy.go`; do not assume I leaves
+it there. All other PA changes are focused tests and documentation.
+Basis: the handoff and R1 review retain the existing advertisement pipeline;
+I owns dispatch, attempts, retry, cancellation and hybrid activation.
+Compatibility: `Node.PausedBy` is `json:"-"`, ignored by `nodeEqual`, like other
+routing metadata. No JSON-RPC, HTTP, persisted-policy, descriptor or TXT shape
+changes. Peers without a policy/pause hint retain existing behavior. Concrete
+empty candidates retain 502; empty tiers retain 404. A PA-only patch requires
+no generated service-contract change.
+Non-goals: scanner push/cache/revision ordering, new all-paused 503, retry or
+cancellation redesign, destination veto changes, engine-manager/shared-wire
+product edits, UI work, SR residency, XA's remote-configuration matrix, OB
+Off-origin display, NE launch behavior, live engines in mandatory tests.
 
 ## Context the executor needs
 
-Verified in the Go source at the SHA above. The local Go toolchain used while
-writing this plan was 1.24 and the modules require 1.25 (`go 1.25.0` in each
-`go.mod`), so nothing below was compiled or run; every statement is from
-reading the source. Line numbers are exact where a single line is cited and
-approximate (±2) for ranges.
+Read the full `reviews/pa-plan-review-r1.md` and handoff
+`git show origin/plan/cloud-handoffs:plans/handoffs/pa-paused-advertisement.md`.
+The current coordinator instruction supersedes the handoff's historical
+branch/push instructions: this amendment changes only this package plan.
+Read sibling `i-unified-dispatch.md`, `sr5-rescope.md`, amended
+`xa-remote-config-acceptance.md` and `ob-off-origin.md` in `packages/`.
 
-**The hint and its provenance.**
-- `nodepolicy.Availability` is `available`, `draining` (never persisted) or
-  `paused` (`N/nodepolicy/policy.go:48-58`). `Policy.PausedBy` is `local` or
-  `peer`, empty while available, written only by `node:set-availability`
-  (`N/nodepolicy/policy.go:124-128`, `:149-156`); `Validate` rejects a
-  `pausedBy` on an available policy (`:483-486`).
-- `Policy.Advertisement()` returns `{Revision, Roles, PausedBy, ServedModels}`
-  (`N/nodepolicy/advertise.go:68-79`, `:258-276`). `PausedBy` is documented
-  there as "lets a remote UI show paused on that node before it tries"
-  (`:73`). The strict capability is added by the broker afterwards
-  (`B/policy_notifications.go:102`).
-- `persistAvailabilityLocked` saves the pause with `PausedBy = origin` under a
-  new revision before anything else happens (`B/availability.go:154-167`), and
-  `pauseNode` publishes the node projection right after adopting it
-  (`:174-207`): the hint therefore carries the revision of the pause itself and
-  is visible to peers while the node is still draining. `resumeNode` clears it
-  under the next revision (`:290-322`). A peer pause over a local pause stays
-  `local` (`:59-65`); `pausedLocally` counts a pause without provenance as local
-  (`B/policy.go:772-774`). These are covered by
-  `TestNodeProjectionPublishedOnPersistAvailabilityAndReady`
-  (`B/policy_projection_test.go:168`) and
-  `TestPauseProvenanceIsNeverDowngraded` (`B/policy_veto_test.go:96`).
-- engine-manager keeps the last projection whole (`E/nodeprojection.go:41-65`)
-  and serves it as `policy` in `/v1/models` and `engine:models`
-  (`E/models.go:105-109`); `TestNodeProjectionServedWithTheModelInventory`
-  already pushes a `PausedBy: local` projection and reads it back over HTTP
-  (`E/nodeprojection_test.go:67`, `:101`). `engine:models-changed` never
-  carries the policy (`E/models.go:46-50`). No engine-manager change is needed.
+Verified facts at join12:
 
-**Authenticated, revisioned, dynamic at the scanner.**
-- A peer's `/v1/models` is fetched only through `peerServiceClient`, pinned to
-  the cluster principal the peer advertises; there is no plaintext fallback for
-  a peer (`S/model_enrichment.go:278-284`, `:119-164`). Self is read over
-  loopback. `TestModelFetchTransportFollowsMembership`
-  (`S/cluster_membership_test.go:39-66`, daemon from
-  `newMembershipTestDaemon`, `:17`) proves an unpinned peer is never fetched.
-- The answer's `policy` is decoded by `decodeInventoryPolicy`
-  (`S/model_enrichment.go:186`); the whole `modelInventory` (`S/enrich_hosts.go:17-30`)
-  replaces the node's inventory fields in `applyModels`, which reports a change
-  when `reflect.DeepEqual(n.Policy, inventory.policy)` is false
-  (`S/directory.go:265-284`, `:277`), so a `pausedBy` flip alone emits one
-  `discovery:node-updated` (`S/model_enrichment.go:383-385`). A failed fetch
-  keeps the last-good advertisement (`:60-71`, `:350-352`, covered by
-  `TestRefreshPolicyAdvertisement`, `S/refresh_test.go:445`).
-- Peers are re-fetched every `peerRefreshInterval = 15 * time.Second`
-  (`S/daemon.go:218`) by `refreshPeersLoop` → `refreshModelsOnce`
-  (`S/daemon.go:1428-1444`, `S/model_enrichment.go:293-311`), and once more
-  when an authenticated peer-services claim first arrives or its route changes
-  (`S/peer_services.go:153-157`, `:161-220`). Stale-result guards:
-  `routeGeneration` (`S/model_enrichment.go:341`, `:355`) and the claim
-  incarnation check (`:358-366`). There is no revision-order guard: a reordered
-  pair of fetches for one peer is corrected by the next sweep.
-- The self record's TXT is built from `NodeRecord` fields only
-  (`S/registry.go:115-131`, `:139-147`; keys at `N/noderec/noderec.go:59-69`);
-  `NodeRecord` has no availability field, so the hint cannot enter mDNS without
-  a type change. PA adds none.
+- `N/nodepolicy/advertise.go`, `Policy.Advertisement`, already carries
+  `Revision`, `PausedBy`, roles and served models. Broker
+  `persistAvailabilityLocked`, `pauseNode`, `resumeNode` and
+  `publishNodeProjection` publish the adopted saved revision/provenance.
+  `B/availability.go::setAvailabilityAs` also publishes a pending local-pause
+  veto projection **before** persistence. A first notification/count threshold
+  alone does not prove the completed transition's advertisement.
+- `B/policy.go::pausedLocally` and `E/nodeprojection.go` retain local veto;
+  remote configuration edits remain permitted while paused. Reuse
+  `TestPauseProvenanceIsNeverDowngraded` and
+  `TestConfigurationEditsStayAllowedWhileLocallyPaused`; PA does not duplicate
+  OB/XA acceptance.
+- `E/models.go` serves the whole node projection as `policy` in `/v1/models`.
+  `TestNodeProjectionServedWithTheModelInventory` already reads a paused
+  projection back over HTTP. No engine-manager edit is needed.
+- `S/model_enrichment.go::modelsClient` selects pinned cluster mTLS for
+  non-loopback peers; unpinned LAN peers are refused. **Any loopback address**
+  selects the plaintext `modelsHTTP` client without checking self UUID.
+  `TestModelFetchTransportFollowsMembership` proves transport selection,
+  not an end-to-end authenticated advertisement fetch. The loopback process
+  case below proves propagation, not authentication.
+- `decodeInventoryPolicy`, `directory.applyModels` (`S/directory.go`) and
+  `refreshNodeModelsCandidates` compare policy with deep equality, update
+  caches/directory and emit `discovery:node-updated` for policy-only changes.
+  Failed fetches retain last good inventory/policy indefinitely. Existing
+  `TestRefreshPolicyAdvertisement` covers this retention.
+- `S/daemon.go::peerRefreshInterval` is 15 seconds. `refreshPeersLoop` does
+  other work before `refreshModelsOnce`; that function waits for its bounded
+  batches to finish. Periodic sweeps cannot overlap. Asynchronous
+  `enrichModelsCandidates` and peer-services-triggered enrichment can interact
+  with refresh; existing route-generation/incarnation guards remain. No hard
+  end-to-end propagation deadline follows from the ticker.
+- `B/discovery.go::directoryToEnriched` relays policy intact;
+  `P/facade.go::replaceSubscribed` decodes discovery snapshots.
+  `P/discovery.go::Node` has routing-only `PolicyRevision`, roles, served
+  models and strict capability but no `PausedBy`. `nodeEqual` ignores routing
+  metadata. `P/proxy.go::subscribedToNode` currently drops the pause hint.
+- `facade.resolveCandidates` handles concrete and tier eligibility; its `add`
+  closure classifies self, pinned peer, manual node, then excludes unsafe
+  self-targets and deduplicates hosts. Selected/priority ordering already
+  determines calls to `add`. `P/facade.go::targetURL` uses `targets.Prefer`,
+  not a blocking TCP probe; correct the stale nearby comment when editing
+  the owner. Empty-model enumeration must not apply the pause exclusion.
+- `P/tiers.go::declaredRoles` and catalogue construction preserve configured
+  intent. `hybridLocalCandidates` uses tier eligibility, but hybrid dispatch
+  is feature-unavailable at join12. Verify shared eligibility after I's hybrid
+  cutover; do not claim join12 exercises active hybrid dispatch.
+- `P/http_handler.go::handleHTTP` retains concrete-empty 502
+  `no available node advertises the requested model` and tier-empty 404
+  `no eligible model for tier`. `P/admission.go` retains destination 503,
+  `X-PAIR-Admission: paused`, `Retry-After: 30`. I3a's bound origin/run
+  identity must survive fixtures; reuse `newTestProxy`/`newBoundProxy`, not a
+  raw identity-less `NewProxy` handler.
+- `N/noderec/noderec.go::NodeRecord` and `S/registry.go` have no availability
+  TXT field. Desktop decoding/types know `pausedBy`; join12 does not establish
+  desktop node-card `Paused (local)` / `Paused (peer)` labels. TUI availability
+  copy does not justify a desktop claim.
+- `X/broker_test.go::startBroker` starts a production scanner without service
+  port overrides. `TestModelsRefreshConvergesWithoutMDNSChange` uses real mDNS.
+  Temporary state directories and stopping installed PAIR do not isolate LAN
+  discovery. `X/fixture_ports_test.go::reserveFixtureServicePorts` and its
+  `.args()` provide checked broker service ports, not discovery isolation.
 
-**Broker relay.** `directoryToEnriched` copies `DirectoryNode.Policy` onto
-`EnrichedNode.Policy` (`B/discovery.go:80`, `:94-122`), and the broker's
-`discovery:get-nodes` row documents `policy.pausedBy?` (`B/README.md:884`).
-The `discovery:nodes` snapshot the proxy subscribes to carries
-`noderec.DirectoryNode` values (`P/facade.go:419-431`).
+No Go, desktop, process, native Windows or live engine tests were executed
+while amending. Post-I owner layout, fixture isolation and Windows exact-path
+rule coverage remain execution gates, not verified facts.
 
-**Proxy, where the hint is dropped today.**
-- `Node` (`P/discovery.go:34-78`) carries `Roles`, `ServedModels`,
-  `PolicyRevision` and `StrictAdmission` as `json:"-"` routing metadata
-  (`:71-77`); `nodeEqual` (`:191-195`) ignores them so a policy edit announces no
-  `node/updated`. There is no `PausedBy` field.
-- `subscribedToNode` copies `Roles`, `ServedModels`, `Revision` and
-  `StrictAdmission` from `n.Policy` (`P/proxy.go:1262-1267`) and nothing else.
-- `resolveCandidates(model)` (`P/proxy.go:629`): with a model it first filters
-  the snapshot to owners (`:645-653`, `nodeAdvertisesModel` at `:936`); the
-  `add` closure (`:672`) resolves a dialable URL, then classifies the node as
-  self (`isSelfTarget`, `:684-695`, debug log at `:691`), a pinned cluster peer
-  (`p.mesh.HasPin(n.ClusterUUID)`, `:696-707`), a manual node (`:708-710`) or an
-  unpinned relay peer, which is dropped (`:711-718`, log at `:715`); the
-  self-target guard follows (`:720-724`, log at `:721`), then host dedup
-  (`:725-728`) and the append (`:734-743`). Selection, priority and ID order
-  call `add` (`:748-763`); the dormant self candidate comes last (`:768-771`);
-  the final debug line logs `selected`, `priority`, `candidates`, `eligible`
-  and `known` (`:772`).
-- Tier routing builds every candidate through `resolveCandidates(role.Model)`
-  and `resolveCandidates(e.Model)` (`P/tiers.go:304`, `:321`) inside
-  `resolveTierCandidates` (`:281`); `declaredRoles` (`:197-210`) reads
-  `Node.Roles` only. Hybrid eligibility is built on `resolveTierCandidates`
-  (`P/spec.md:170-172`). So one filter in `resolveCandidates` covers concrete,
-  tier and hybrid routing.
-- The model-list routes (`matchedRoute.Role.isModelList()`,
-  `P/http_handler.go:718-724`) also call `resolve()` → `resolveCandidates("")`
-  (`:658-676`), with an empty model. The filter must not apply there.
-- Empty candidate sets: a tier request answers `404 no eligible model for tier`
-  (`P/http_handler.go:734-759`); a model-bearing request answers
-  `502 {"error":"no available node advertises the requested model"}` (`:761-767`).
-  Candidates are re-resolved every retry round (`:1162`, `P/spec.md:499-501`),
-  so a hint that changes mid-request takes effect on the next round.
-- Destination fast rejection: admission rejects `paused` before anything else
-  (`P/admission.go:378-385`), answered as `503` with
-  `X-PAIR-Admission: paused` and `Retry-After: 30` (`writeAdmissionRejection`,
-  `P/admission.go:852`; `retryAfterSeconds`, `:838-847`; header constant
-  `N/nodepolicy/wire.go:1100-1101`, reason `:1116-1123`). A routing node treats
-  that 503 as a failed candidate and moves on (`P/spec.md:1090-1092`,
-  `TestHandleHTTP_FailoverOn503`, `P/failover_test.go:294`). The self candidate,
-  when rejected while this node is not available, is excluded for the rest of
-  the request (`P/http_handler.go:1297-1306`,
-  `TestHandleHTTP_SelfCandidateRejectedFailsOver`,
-  `P/admission_http_test.go:586`).
+### External reservations and transfer protocol
 
-**Test fixtures to reuse.**
-- Proxy: `forEachEngine` / `engineCase` (`P/enginecase_test.go:26`, fields
-  `profile`, `inferencePath`, `modelListPath`, `advertisedModel`,
-  `inferenceRequest()`), `newTestProxy`/`testProxy` (`P/failover_test.go:36`,
-  `:63`), `nodeFor`/`nodeForModel` (`:67`, `:84`), `newRecordingEngine`
-  (`P/admission_http_test.go:280`, with `hits()`), `selfNode`/`setBackend`
-  (`:258`, `:262`), `newTierFixture`/`ollamaTierPolicy`/`ollamaCase`
-  (`P/tiers_test.go:133`, `:173`), the pinned subscribed-peer pattern with
-  `clustertrusttest.Join` + `p.mesh = clustertrust.Open(clusterDir)`
-  (`P/subscribed_test.go:368-380`), `TestSubscribedCarriesPolicyWithoutChurn`
-  (`:214`) as the model for the projection test.
-- Scanner: `newRefreshTestDaemon` (`S/refresh_test.go:93`), `startModelsStub` /
-  `modelsStub.set` (`:65`, `:37`), `seedEMNode` (`:108`),
-  `d.refreshNodeModels` (`S/model_enrichment.go:329`), `d.dir.get`.
-- Broker: `newActivatedBroker` (`B/policy_test.go:396`), `attachFakeEngine`
-  (`:227`), `nodeProjections`/`waitProjections`/`requireLastProjectionIsStored`
-  (`B/policy_projection_test.go:129`, `:150`, `:158`), `b.setAvailability(ctx,
-  state, origin)` (`B/availability.go:43`).
-- Cross-process: `startBroker`, `sendReq`, `availableNode`,
-  `availableNodesResult` (`X/broker_test.go:66`, `:99`, `:47-60`);
-  `swapModels` stub, `pollForNode`, `findNode`, the mDNS responder setup and
-  `TestModelsRefreshConvergesWithoutMDNSChange` (`X/models_refresh_test.go:31`,
-  `:153`, `:57-80`). `availableNode` has no `Policy` field today (`:47-56`).
-  Platform gating pattern: `strataContractPlatform`
-  (`X/strata_contract_test.go:276-286`): skip on darwin; on Windows require
-  `GOFLAGS` to contain `nvpair-test-exec` and an absolute
-  `NVPAIR_TEST_BIN_DIR` (`services/readme.md:215-246`).
+I2/I3a and E4 Task 2 are in join12. I3b/4a/4b/5/6/8 are in flight on MSI.
+Before PA Tasks 1/2 write any proxy file, the coordinator must record the
+integrated successor SHA and release **all** of these reservations:
 
-**Seams that will move under other plans (rebase notes).**
-- I Tasks 3-5 (unified dispatch) edit `P/proxy.go`, `P/policy.go`,
-  `B/policy.go`, `B/proxy.go`, `N/nodepolicy/wire.go`. PA's only product edits
-  in `P/proxy.go` are the four-line block in `subscribedToNode`
-  (`:1262-1267`) and one guarded `return` inside the `add` closure of
-  `resolveCandidates` (between the self-target guard at `:720-724` and the
-  host dedup at `:725-728`), plus one field on the final debug line (`:772`).
-  If I has moved candidate construction into another file or type by the time
-  PA rebases, apply the same guard at the point where a non-self peer
-  candidate is appended, keeping the rule word for word from Task 2. PA does
-  not touch `P/policy.go`, `P/http_handler.go`, `B/policy.go`, `B/proxy.go` or
-  `N/nodepolicy/wire.go`.
-- G Task 3 (egress lease broker relay) edits broker files. PA's broker changes
-  are a new test file and one sentence in `B/README.md` under "Node
-  projection" (`B/README.md:496-504`); if that bullet moved, add the sentence
-  wherever `engine:node-projection` is described.
-- J (routing diagnostics) may restructure the rejection bodies in
-  `P/http_handler.go`; PA deliberately leaves them alone (Owner question 1).
-
-**Could not verify.** Compilation and tests (Go toolchain mismatch): no
-command in this plan was run. The `engineCase` struct was read only to
-`P/enginecase_test.go:48`; `tc.advertisedModel` is taken from its uses at
-`P/failover_test.go:315` and `P/admission_http_test.go:592`. Whether the
-scanner's `peerServiceClient` returns `ok == false` for an unpinned peer
-without touching the network was inferred from `modelsClient`
-(`S/model_enrichment.go:278-284`) and the test at
-`S/cluster_membership_test.go:50-66`, not executed.
+- I3b and I8/4a finish their proxy identity/buffer writes; I4b lands the sole
+  request owner and releases `P/proxy.go` and its final candidate owner
+  (`P/routing.go` when moved); I5 lands hybrid selection and releases
+  `P/tiers.go`, `P/routing.go` and candidate fixtures. I6 finishes any further
+  `P/proxy.go` writes and releases them. An explicit coordinator transfer of
+  these exact files/seams can substitute for a remaining task landing only
+  when that task's amended reservation excludes PA's write interval.
+- G3's integrated broker relay and I's completed broker contract join must be
+  recorded, following sibling order I3 -> G3 -> SR5c, with I8/6 overlapping
+  broker writes completed before transfer. PA does not reverse this order.
+- Reconcile I's stale prerequisite “PA before I3–5” before dispatch: it is
+  superseded by **I owner cutover/release -> PA**. The coordinator must remove
+  that contradictory gate in I's reservation ledger/plan. Do not dispatch
+  either side with a cross-package cycle. This amendment does not edit I.
+- PA Tasks 1/2 reserve metadata propagation and pause eligibility as one small
+  serial patch at the final owner; no second candidate/attempt path. Re-read
+  that owner, fixtures, identity envelope and newly occupied test filenames
+  at the recorded SHA. If I moved files, amend exact Files below and rerun
+  the graph audit **before** writing; no guessed extra-file permission.
+- Task 3 waits for I6 and SR6a to publish and release `P/README.md` and
+  `P/spec.md`. Task 5's `B/README.md` waits for I6/G3/SR documentation release.
+  Task 6 reserves `X/broker_test.go` against I7/XA/shared fixture lanes.
+  Tasks 4/5 and independent product-document authoring proceed only with
+  exact-file release; Task 7 finalizes after Task 2 semantics land.
 
 ## Decisions (settled — do not revisit)
 
-- **Local Off/pause wins over remote start/resume/residency.** The hint is
-  advisory for routers; the destination's admission and `pausedLocally` veto
-  remain authoritative and are not changed. Not "trust the hint and skip
-  admission at the destination", because a stale hint must never admit work a
-  local pause forbids.
-- **Remote configuration edits remain permitted** while paused
-  (`B/README.md:591-592`, `TestConfigurationEditsStayAllowedWhileLocallyPaused`,
-  `B/policy_veto_test.go:181`). PA changes nothing on the policy relay.
-- **Mac never serves models.** Mac runs proxy/scanner/broker unit tests (with
-  `-race`), never `services/tests`.
-- **No mDNS identity mutation.** The hint travels only in the pinned
-  `/v1/models` document. Not "a `paused=` TXT key", because TXT is unsigned,
-  size-limited and readable by any LAN host, and a pause must not re-announce
-  the mDNS record.
-- **Authenticated** means the existing pinned-mTLS fetch (`S/model_enrichment.go:278-284`);
-  PA adds no new authentication and no plaintext path.
-- **Revisioned** means the hint is the `pausedBy` of the advertisement whose
-  `revision` is the revision the pause or resume persisted; the proxy keeps
-  `Node.PolicyRevision` beside `Node.PausedBy` and logs it when it skips a
-  node. Not "a separate availability sequence number", because the policy
-  revision already moves on every pause and resume
-  (`X/service_policy_test.go:176-184`).
-- **Dynamic** means the hint follows the scanner's sweep: a pause or resume is
-  visible to peers within `peerRefreshInterval` (15 s) plus one fetch, and
-  reaches the proxy on the next `discovery:nodes` push. Not a push from the
-  pausing node to its peers (Owner question 2).
+- Local Off/pause veto and destination admission remain authoritative.
+  Remote configuration edits remain permitted; PA adds no permission path.
+- Mac never serves models. `services/tests` case execution is **PC3 only**,
+  never Mac, Linux or MSI. Mac can vet/compile/list that module; PC3 never
+  uses `-race`. MSI/Mac unit modules supply race evidence.
+- No availability in mDNS, no new wire format, no push, cache or configuration.
+  LAN hints use the existing authenticated path with the documented loopback
+  exception. Revisioned means persisted policy revision beside provenance.
+- Snapshot semantics: exclusion applies when the resolver observes the hint.
+  It cannot revoke a dispatch selected before an update. I retains attempt,
+  retry and cancellation ownership; stale available hints meet destination
+  rejection, and stale paused hints delay re-entry until successful refresh.
+
+Coordinator-adopted owner answers (2026-10-21; owner may veto):
+
+1. Keep existing empty-candidate responses: concrete 502, tier 404; no new
+   all-paused 503/header/body in PA.
+2. Accept advisory polling: nominal 15-second refresh cadence under healthy
+   successful refresh, with preceding work/batching/fetch time; no hard
+   one-sweep bound. Failed refresh retains last good state indefinitely.
+3. Keep a stable catalogue: paused peers stay in model lists and declared tier
+   aliases; pause changes dispatch eligibility only.
+4. Add no revision-order guard. Periodic sweeps are serialized; asynchronous
+   enrichment is the relevant interaction. A bare monotonic revision check
+   would need reset/incarnation semantics and is outside PA.
 
 ## Decisions made while writing this plan
 
-1. **Where the filter lives.** Inside `resolveCandidates`' `add` closure,
-   after the self/peer/manual classification and the self-target guard, before
-   `seenHost` dedup: `if model != "" && !self && n.PausedBy != "" { skip }`.
-   After the switch, so the self candidate (which carries the same hint when
-   this node is paused) keeps its admission path and its 503-with-reason answer
-   (`TestHandleHTTP_SelfOnlyRejectionAnswersWithAdmission503`,
-   `P/admission_http_test.go:624`); before dedup, so a manual duplicate of a
-   paused relay peer is still tried (manual nodes are a deliberate bypass and
-   never carry a hint). Alternative rejected: filtering in the owner loop
-   (`:645-653`) would also drop a paused self before it is recognized as self.
-2. **Only when a model is being resolved** (`model != ""`). Model-list and
-   pass-through routes keep querying paused peers: a paused node still answers
-   non-inference routes (they are not admitted, `P/spec.md:1088-1089`), and the
-   federated model list should not shrink and grow with pauses.
-3. **Any non-empty `pausedBy` counts** (`local` and `peer` alike); the proxy
-   never distinguishes them. A peer pause is as futile to dispatch to as a
-   local one.
-4. **`Node.PausedBy` is `json:"-"` and ignored by `nodeEqual`**, like `Roles`
-   and `PolicyRevision`, so a pause announces no `node/updated` from the
-   proxy. The desktop learns pauses from the broker's discovery feed, not from
-   `node/*`.
-5. **No revision-order guard in the scanner or proxy** (Owner question 4):
-   the last fetch wins, as today for roles and strict capability.
-6. **Logging.** One `slog.Debug` per skipped node with `node_id`, `paused_by`
-   and `policy_revision`, plus a `paused` count on the existing "resolved"
-   debug line. No new client-visible event; J owns diagnostics.
-7. **Tests live in new `availability_test.go` files** in `P/`, `S/` and `B/`
-   as the catalogue names them, rather than appended to the existing
-   `subscribed_test.go`, `refresh_test.go` and `policy_projection_test.go`, so
-   PA's tests rebase cleanly over I/G/J.
-8. **The cross-process test proves the directory hop, not a two-proxy
-   dispatch.** It reuses the plaintext loopback stub pattern of
-   `TestModelsRefreshConvergesWithoutMDNSChange`; the pinned-mTLS fetch, the
-   proxy filter and the destination veto are each proven by unit tests. A
-   two-node live dispatch acceptance is left to the existing Windows gates.
-9. **Documentation.** The proxy spec gets the rule (§5 step 1 and §12.2); the
-   scanner and broker READMEs each get one sentence; a new product page
-   `docs/node-availability.mdx` explains pausing, provenance, the veto and the
-   hint for operators, indexed from `fern/docs.yml` (Reference section) and the
-   root `README.md` reading order after Architecture.
+- Add `PausedBy nodepolicy.PauseOrigin` with `json:"-"`; do not compare it in
+  `nodeEqual`. Any nonempty advertised pause provenance excludes a remote
+  inference peer; both local and peer origin count.
+- Apply the guard after self/pin/manual classification and defensive self
+  checks, before host deduplication/result append. At join12 the condition is
+  `model != "" && !self && n.PausedBy != ""`. Production manual nodes carry no
+  advertisement. Do not manufacture paused manual records as a substitute
+  for the required pinned-peer test.
+- New focused tests live in the listed availability files. Reuse existing
+  helpers without modifying unrelated tests. Helper-created listeners used
+  by PA need the same checked-port discipline as direct listeners.
+- Per-candidate debug metadata (`node_id`, `paused_by`, `policy_revision`) is
+  optional diagnostics, not an acceptance oracle. No new metrics are needed.
+- Task 6 remains gated on coordinator-owned network/child-listener isolation;
+  PA does not invent scanner product flags or a new generic harness to unblock
+  it. Live engine evidence is a separate optional coordinated gate below.
 
 ## Tasks
 
-### Task 1 — The proxy's routable `Node` carries the pause hint
-
-**Files:** `services/nvpair-proxy/discovery.go` (modify),
-`services/nvpair-proxy/proxy.go` (modify, `subscribedToNode` only),
-`services/nvpair-proxy/availability_test.go` (create).
-
-**Depends on:** none.
-
-**Complexity:** mechanical.
-
-**Do:**
-
-1. In `services/nvpair-proxy/discovery.go`, inside `type Node struct`
-   (`:34-78`), after the `PolicyRevision string` field (`:73`) and before
-   `StrictAdmission` (`:74-77`), add:
-
-   ```go
-   	// PausedBy is the node's advertised pause provenance (DirectoryNode.Policy
-   	// .PausedBy): "local" or "peer" while the node says it is paused, empty
-   	// otherwise. It is an authenticated hint stamped with PolicyRevision:
-   	// resolveCandidates skips a peer that carries one when it resolves owners
-   	// for a model, and the destination's own admission remains the veto for a
-   	// hint that is stale. Internal routing metadata like Roles: not compared by
-   	// nodeEqual, so a pause announces no node/updated.
-   	PausedBy nodepolicy.PauseOrigin `json:"-"`
-   ```
-
-   Update the `nodeEqual` doc comment (`:187-190`) so its list reads
-   "Loaded, ClusterUUID, Roles, PolicyRevision, PausedBy and StrictAdmission
-   are internal routing metadata and deliberately not compared." Do not change
-   the function body.
-
-2. In `services/nvpair-proxy/proxy.go`, `subscribedToNode` (`:1230`), extend
-   the `if n.Policy != nil {` block (`:1262-1267`) with one line after
-   `node.PolicyRevision = n.Policy.Revision`:
-
-   ```go
-   		node.PausedBy = n.Policy.PausedBy
-   ```
-
-   Extend the comment above the block (`:1260-1261`) to: "The node's own
-   declaration, read by tier routing (declaredRoles), its pause hint, read by
-   resolveCandidates, and its strict admission capability, read only by
-   Node.strictModel."
-
-3. Create `services/nvpair-proxy/availability_test.go` with the two-line
-   SPDX comment header used by every Go file, `package main`, and:
-
-   - `TestSubscribedToNodeCarriesPausedBy`: with `forEachEngine`, build a
-     `noderec.DirectoryNode{HostUUID: "host-uuid", Name: "host-a", IP:
-     "10.0.0.5", Services: {tc.profile.DiscoveryService: {Port:
-     tc.profile.FacadePort}}}`. Subtests: `no advertisement` → `PausedBy == ""`;
-     `advertisement without a pause` (`Policy: &nodepolicy.Advertisement{Revision:
-     "40"}`) → `PausedBy == ""` and `PolicyRevision == "40"`; `paused locally`
-     (`PausedBy: nodepolicy.PausedLocally`, `Revision: "41"`) → `PausedBy ==
-     nodepolicy.PausedLocally` and `PolicyRevision == "41"`; `paused by a peer`
-     → `nodepolicy.PausedByPeer`.
-   - `TestPauseHintAnnouncesNoNodeUpdate`: `d := NewDiscovery()`;
-     `d.SetSubscribed([]Node{available})` then `d.SetSubscribed([]Node{paused})`
-     where `paused` differs only in `PausedBy` and `PolicyRevision`; assert the
-     second call returns `len(discovered)+len(updated)+len(removed) == 0` and
-     `d.Nodes()[0].PausedBy == nodepolicy.PausedLocally` (the overlay took the
-     hint silently). Model it on `TestSubscribedCarriesPolicyWithoutChurn`
-     (`P/subscribed_test.go:214`).
-
-**Verify:**
-
-- Mac: `cd services/nvpair-proxy && go vet ./... && go test -race -run
-  'TestSubscribedToNodeCarriesPausedBy|TestPauseHintAnnouncesNoNodeUpdate|TestSubscribed|TestStrictModel'
-  ./...` passes (exit 0, every named test reported `PASS`, none skipped).
-- Mac: `cd services/nvpair-proxy && go test -race ./...` passes.
-- `node scripts/spdx-headers.mjs` from the repository root reports no missing
-  header.
-- Windows (PC3 or MSI): not required for this task.
-
-### Task 2 — `resolveCandidates` skips peers that advertise a pause
-
-**Files:** `services/nvpair-proxy/proxy.go` (modify, `resolveCandidates`
-only), `services/nvpair-proxy/availability_test.go` (modify).
-
-**Depends on:** Task 1.
-
-**Complexity:** judgment.
-
-**Do:**
-
-1. In `resolveCandidates` (`P/proxy.go:629`), declare `pausedSkipped := 0`
-   next to `known := len(nodes)` (`:644`).
-
-2. Inside the `add` closure, immediately after the defensive self-target guard
-   (`:720-724`, the block ending `return` after the
-   `"resolveCandidates: skipping self-target node"` log) and before
-   `if seenHost[u.Host] {` (`:725`), insert exactly:
-
-   ```go
-   		// The node's own policy advertisement says it is paused. It reached us
-   		// through the scanner's pinned fetch with the revision that recorded
-   		// the pause, so dispatching to it would only buy a 503 from its
-   		// admission. Only owner resolution for a model is affected: model-list
-   		// and pass-through routes still reach a paused peer, and this node's own
-   		// engine keeps its admission path, whose rejection is the request's
-   		// answer when nothing else can take it. A hint that is stale in the
-   		// other direction is caught by the destination's admission.
-   		if model != "" && !self && n.PausedBy != "" {
-   			pausedSkipped++
-   			slog.Debug("resolveCandidates: skipping paused peer",
-   				"node_id", n.ID, "paused_by", n.PausedBy, "policy_revision", n.PolicyRevision)
-   			return
-   		}
-   ```
-
-3. Extend the final debug line (`:772-774`) with `"paused", pausedSkipped`
-   after `"known", known`.
-
-4. Update the `resolveCandidates` doc comment (`:617-628`): after the sentence
-   ending "advertised owners.", add "A peer whose advertisement says it is
-   paused (Node.PausedBy) is not an owner for a model; this node's own engine
-   is, and admission answers for it."
-
-5. Append to `services/nvpair-proxy/availability_test.go`:
-
-   - `TestResolveCandidatesSkipsPausedPeersForAModel`: `forEachEngine`; two
-     `newRecordingEngine(t, http.StatusOK)` upstreams; `disc := NewDiscovery()`;
-     `paused := nodeForModel(t, "paused", pausedEngine.URL, tc.advertisedModel)`
-     with `paused.PausedBy = nodepolicy.PausedLocally` and
-     `paused.PolicyRevision = "7"`; `good := nodeForModel(t, "good",
-     goodEngine.URL, tc.advertisedModel)`; `disc.AddManual(paused)`;
-     `disc.AddManual(good)`; `p := testProxy(tc.profile, disc,
-     tc.profile.FacadePort)`; `p.soleFacade().SetSelected("paused")`.
-     Subtests:
-     - `model owners exclude the paused peer`: ids of
-       `p.soleFacade().resolveCandidates(tc.advertisedModel)` equal `["good"]`.
-     - `model list still reaches it`: ids of
-       `p.soleFacade().resolveCandidates("")` contain both `paused` and `good`.
-     - `an inference request never dials it`: `rec := httptest.NewRecorder();
-       p.soleFacade().handleHTTP(rec, tc.inferenceRequest())`; assert
-       `rec.Code == http.StatusOK`, `goodEngine.hits() == 1`,
-       `pausedEngine.hits() == 0`, and `rec.Header().Get(nodepolicy.NodeHeader)
-       == "good"`.
-     - `a peer pause counts too`: set `paused.PausedBy =
-       nodepolicy.PausedByPeer`, `disc.AddManual(paused)` again (replaces), and
-       assert `resolveCandidates(tc.advertisedModel)` ids equal `["good"]`.
-     (Manual nodes never carry a hint in production; they are used here
-     because the rule reads the `Node` field and a manual node is dialable
-     without a cluster pin.)
-   - `TestResolveCandidatesSkipsPausedPinnedPeer`: copy the pinned fixture of
-     `TestStrictModelExcludesPeersWithoutAValidCapability`
-     (`P/subscribed_test.go:322`, lines `:368-380`: `profile :=
-     ollamaOnlyProfile(t)`, `subscribedToNode` from `noderec.DirectoryNode`
-     values with `ClusterUUID` principals, `clustertrusttest.Join`, `p.mesh =
-     clustertrust.Open(clusterDir)`), with two peers: `peer-0` whose `Policy` is
-     `&nodepolicy.Advertisement{Revision: "3", PausedBy:
-     nodepolicy.PausedLocally}` and `peer-1` with `Revision: "3"` and no pause.
-     Assert `resolveCandidates(model)` ids equal `["peer-1"]` and
-     `resolveCandidates("")` ids equal `["peer-0", "peer-1"]` (sorted).
-   - `TestAllOwnersPausedAnswersNoOwner`: as the first test but with only the
-     paused manual node; `handleHTTP` on `tc.inferenceRequest()` returns
-     `http.StatusBadGateway` with body
-     `{"error":"no available node advertises the requested model"}` followed
-     by a newline (`http.Error` appends one), and the paused engine has
-     `hits() == 0`.
-   - `TestPausedSelfKeepsItsAdmissionPath`: copy the setup of
-     `TestHandleHTTP_SelfCandidateRejectedFailsOver`
-     (`P/admission_http_test.go:586-600`: `selfNode("self", port,
-     tc.advertisedModel)` plus a manual `peer`, `setBackend`,
-     `p.SetPriority([]string{"self", "peer"})`), but give the self node
-     `PausedBy = nodepolicy.PausedLocally` while leaving
-     `p.admission` available. Assert the first request is served by the local
-     engine (`local.hits() == 1`): the hint never removes self. Then
-     `p.admission.setAvailability(nodepolicy.Paused, false)` and assert the next
-     request is served by `peer` with `rec.Code == http.StatusOK` (the existing
-     self-exclusion path, unchanged).
-   - `TestTierRoutingSkipsPausedPeer`: `tc := ollamaCase(t)`; `pol :=
-     ollamaTierPolicy(map[string][]nodepolicy.TierEntry{"weak": {{Kind:
-     nodepolicy.EntryLocal, Engine: "ollama", Model: "small:1b"}}})`; `fx :=
-     newTierFixture(t, tc, pol, map[string][]string{"a": {"small:1b"}, "b":
-     {"small:1b"}}, nil)`; then mark `a` paused: read `n := fx.p.soleFacade().
-     discovery` nodes, find id `a`, set `PausedBy = nodepolicy.PausedLocally`
-     and `AddManual` it back; `fx.p.SetPriority([]string{"a", "b"})`; `rec :=
-     fx.do(t, "/v1/chat/completions", `{"model":"weak"}`)`; assert `rec.Code ==
-     http.StatusOK`, `fx.servedBy(t) == "b"`, `fx.eng["a"].hits() == 0`.
-   - `TestStaleAvailableHintStillFailsOverOnDestinationRejection`: two manual
-     nodes with no hint; the first upstream answers like a paused destination:
-     `w.Header().Set(nodepolicy.AdmissionHeader, string(nodepolicy.RejectPaused));
-     w.Header().Set("Retry-After", "30"); w.WriteHeader(503)` with body
-     `{"error":"this node is not accepting the request (paused)","code":"admission"}`;
-     the second answers 200. `SetSelected` the first. Assert `rec.Code == 200`,
-     the first upstream was hit exactly once and the second once, and
-     `nodepolicy.NodeHeader` names the second. This pins the "stale metadata
-     still meets destination fast rejection" half of the outcome.
-
-**Verify:**
-
-- Mac: `cd services/nvpair-proxy && go vet ./... && go test -race -run
-  'TestResolveCandidates|TestAllOwnersPaused|TestPausedSelf|TestTierRoutingSkipsPausedPeer|TestStaleAvailableHint|TestSubscribedToNodeCarriesPausedBy|TestPauseHintAnnouncesNoNodeUpdate'
-  ./...` passes with every named test `PASS` and none skipped.
-- Mac: `cd services/nvpair-proxy && go test -race ./...` passes (no
-  regression in `TestTier_*`, `TestHandleHTTP_*`, `TestStrictModel*`,
-  `TestHybrid*`, `TestAlias*`).
-- Mac: `cd desktop && npm run service-contracts:check` passes unchanged (no
-  wire change; if it reports a diff, the change is wrong, not the check).
-- `git diff --stat` for this task touches only the two files listed.
-- Windows (PC3 or MSI): not required for this task.
-
-### Task 3 — Proxy specification and README name the rule
-
-**Files:** `services/nvpair-proxy/spec.md` (modify),
-`services/nvpair-proxy/README.md` (modify).
-
-**Depends on:** Task 2.
-
-**Complexity:** mechanical.
-
-**Do:**
-
-1. `services/nvpair-proxy/spec.md`, §5 "Request path", step 1 of the
-   model-bearing list (`:402-405`). After "An empty owner set returns a local
-   `502` without contacting an engine." add the sentence: "An owner whose own
-   policy advertisement says it is paused (`pausedBy` set, carried on the
-   routable node as `Node.PausedBy` with the revision that recorded it) is
-   dropped from the owner set before ordering, for concrete, tier and hybrid
-   resolution alike; this node's own engine is never dropped by the hint, and
-   model-list and pass-through routes still reach a paused peer."
-
-2. Same file, §12.2 "Admission", the paragraph "**A paused node and its own
-   requests.**" (`:1139-1142`). Append a new paragraph after it:
-
-   > **A paused peer and this node's requests.** A peer's pause reaches this
-   > node as the `pausedBy` of the policy advertisement in its pinned
-   > `/v1/models` document, fetched by the scanner over cluster mTLS and
-   > relayed in the `discovery:nodes` snapshot; it is never read from mDNS.
-   > `resolveCandidates` skips such a peer while resolving owners for a model
-   > (§5 step 1), so a paused peer costs no dispatch. The hint is advisory and
-   > bounded by the scanner's sweep: a peer that paused since the last fetch
-   > still answers its admission `503` (`X-PAIR-Admission: paused`), which is
-   > a failed candidate like any other, and a peer that resumed since the last
-   > fetch is routed to again after the next sweep. The destination's own
-   > admission and local veto always win over the hint.
-
-3. Same file, §1 "Strict readiness and peer capability (A2)" paragraph that
-   describes `subscribedToNode` copying `StrictAdmission` (`:160-163`): extend
-   the parenthetical list so it reads "`subscribedToNode` copies
-   `DirectoryNode.Policy.StrictAdmission` onto the internal
-   `Node.StrictAdmission` and `DirectoryNode.Policy.PausedBy` onto
-   `Node.PausedBy`, which `nodeEqual` ignores, so readiness and pause changes
-   announce no `node/updated`."
-
-4. `services/nvpair-proxy/README.md`: in the opening paragraph that says the
-   proxy "replaces its routing overlay from each pushed `discovery:nodes`"
-   (`:9-13`), add one sentence at its end: "A node whose advertised policy
-   says it is paused stays in the overlay but is not an inference owner until
-   its advertisement changes; see the spec, §5 and §12.2."
-
-**Verify:**
-
-- `node scripts/spdx-headers.mjs` passes (no header change expected).
-- `git diff --stat` touches only the two files listed; `grep -n "A paused
-  peer and this node's requests" services/nvpair-proxy/spec.md` finds exactly
-  one line; `grep -c "Node.PausedBy" services/nvpair-proxy/spec.md` is at
-  least 2.
-- Mac: `cd desktop && npm run service-contracts:check` still passes (spec
-  prose is not part of the generated API, so this confirms nothing else was
-  touched).
-- Windows: not required.
-
-### Task 4 — Scanner: prove the hint is authenticated, revisioned and dynamic
-
-**Files:** `services/nvpair-node-scanner/availability_test.go` (create),
-`services/nvpair-node-scanner/README.md` (modify).
-
-**Depends on:** none (tests existing scanner behaviour; no product change).
-
-**Complexity:** mechanical.
-
-**Do:**
-
-1. Create `services/nvpair-node-scanner/availability_test.go` (SPDX header,
-   `package main`) using `newRefreshTestDaemon`, `startModelsStub`,
-   `modelsStub.set`, `seedEMNode`, `d.refreshNodeModels` and `d.dir.get`
-   (`S/refresh_test.go:93`, `:65`, `:37`, `:108`):
-
-   - `TestPauseHintFollowsTheAdvertisement`: an `inventory(revision, pausedBy
-     string)` helper returning `{"models":["a"],"policy":{"revision":<rev>,
-     "roles":{}}}` plus `"pausedBy":<pausedBy>` when non-empty. Subtests, in
-     order on one daemon and stub for `peer-P` at `127.0.0.1`:
-     - `available at first`: stub `inventory("1", "")`; first refresh returns
-       true; `got.Policy.PausedBy == ""`, `got.Policy.Revision == "1"`.
-     - `a pause alone is a change`: stub `inventory("2", "local")`; refresh
-       returns true; `PausedBy == nodepolicy.PausedLocally`, `Revision == "2"`;
-       models unchanged (`[]string{"a"}`).
-     - `an identical paused answer is not`: refresh returns false.
-     - `a failed fetch keeps the pause`: stub `set(http.StatusInternalServerError,
-       nil)`; refresh returns false; `PausedBy` still `local`, `Revision` still
-       `"2"`; `d.lastPolicy["peer-P"]` (under `d.infoMu`) equals the stored
-       advertisement.
-     - `a resume clears it under a newer revision`: stub `inventory("3", "")`;
-       refresh returns true; `PausedBy == ""`, `Revision == "3"`.
-     - `a peer pause is carried as peer`: stub `inventory("4", "peer")`; refresh
-       returns true; `PausedBy == nodepolicy.PausedByPeer`.
-   - `TestPauseHintEmitsOneNodeUpdated`: `d := newRefreshTestDaemon()`, then
-     capture the codec output the way `peerServicesWithCapturedCodec` does
-     (`S/reachability_report_test.go:28-48`): `var out bytes.Buffer; d.codec =
-     NewCodec(&out)`, and a local `sent()` that decodes `out.Bytes()` with
-     `json.NewDecoder` into `[]Message`, keeping the frames whose `Method ==
-     noderec.NotifyNodeUpdated`. `emit` is nil-codec-safe
-     (`S/daemon.go:579-586`), so the codec must be set before the refresh.
-     Seed `peer-P`, populate with `inventory("1", "")` (one refresh), reset
-     `out`, then flip to `inventory("2", "local")` with one refresh and assert
-     `sent()` holds exactly one frame; decode its `Params` as
-     `noderec.NodeEvent` and assert `Node.HostUUID == "peer-P"` and
-     `Node.Policy.PausedBy == nodepolicy.PausedLocally`. A third refresh with
-     the same body must add no frame.
-   - `TestPauseHintIsNeverFetchedWithoutAPin`: `clusterDir :=
-     filepath.Join(t.TempDir(), "cluster"); d := newMembershipTestDaemon(clusterDir)`
-     (`S/cluster_membership_test.go:17`, the unclustered state of
-     `TestModelFetchTransportFollowsMembership`, `:39-55`); assert
-     `d.modelsClient("", "192.0.2.10", 14317, "principal-stranger", true)`
-     returns `ok == false`, and that `d.fetchModelsForPeer("peer-X",
-     "192.0.2.10", 14317, "principal-stranger", true)` returns `ok == false`
-     within one second (run it in a goroutine, `select` on its result and
-     `time.After(time.Second)`, fail on the timeout): the address is in
-     TEST-NET-1, so a return inside the deadline shows no dial was attempted.
-
-2. `services/nvpair-node-scanner/README.md:32`, the bullet beginning
-   "**Enriches** each discovered node": after "The same document carries the
-   node's policy advertisement (`policy`: declared roles, policy revision,
-   pause origin), which becomes the entry's `policy`;" insert "the pause origin
-   is the authenticated, revisioned hint a peer's proxy uses to stop dispatching
-   to a paused node, and it changes only through this fetch, never through the
-   mDNS record;" keeping the rest of the sentence.
-
-**Verify:**
-
-- Mac: `cd services/nvpair-node-scanner && go vet ./... && go test -race -run
-  'TestPauseHint' ./...` passes with the three tests `PASS` and none skipped.
-- Mac: `cd services/nvpair-node-scanner && go test -race ./...` passes.
-- `node scripts/spdx-headers.mjs` passes.
-- Windows: not required (the scanner tests listen on `127.0.0.1:0` through
-  `startModelsStub`; if PC3 runs the module anyway, run it serialized as
-  `services/readme.md:237` says).
-
-### Task 5 — Broker: pin the provenance and revision of the published hint
-
-**Files:** `services/nvpair-ui-broker/availability_test.go` (create),
-`services/nvpair-ui-broker/README.md` (modify).
-
-**Depends on:** none (tests existing broker behaviour; no product change).
-
-**Complexity:** mechanical.
-
-**Do:**
-
-1. Create `services/nvpair-ui-broker/availability_test.go` (SPDX header,
-   `package main`) with `TestPauseProjectionCarriesProvenanceAndRevision`:
-   `ab := newActivatedBroker(t)`; `engine := attachFakeEngine(t, ab.b)`;
-   `ctx := context.Background()`. Each subtest records `before :=
-   len(nodeProjections(t, engine))` and `prev := ab.b.localPolicy().Policy.Revision`,
-   performs one transition, then `got := waitProjections(t, engine, before+1)`,
-   `requireLastProjectionIsStored(t, ab.b, got)` and asserts on
-   `last := got[len(got)-1]`:
-   - `local pause advertises local under a new revision`:
-     `ab.b.setAvailability(ctx, nodepolicy.Paused, nodepolicy.PausedLocally)`
-     → `last.PausedBy == nodepolicy.PausedLocally`, `last.Revision != prev`,
-     `last.Revision == ab.b.localPolicy().Policy.Revision`.
-   - `a peer pause over a local pause stays local`:
-     `ab.b.setAvailability(ctx, nodepolicy.Paused, nodepolicy.PausedByPeer)`
-     returns no error and `nodepolicy.Paused`; the stored policy's `PausedBy`
-     is still `local` (`ab.b.localPolicy().Policy.PausedBy`) and its revision
-     equals `prev` (an already-paused node is not paused again when the
-     provenance class is unchanged, `B/availability.go:174-181`). The origin
-     is rewritten to local before acceptance (`:59-65`), so the local-pause
-     branch publishes the authoritative projection (`:87-93`):
-     `waitProjections(t, engine, before+1)` and assert the last one has
-     `PausedBy == nodepolicy.PausedLocally` and `Revision == prev`.
-   - `a peer resume of a local pause is vetoed and publishes nothing new`:
-     `_, err := ab.b.setAvailability(ctx, nodepolicy.Available,
-     nodepolicy.PausedByPeer)`; `var veto *localVetoError; errors.As(err,
-     &veto)` is true; `len(nodeProjections(t, engine)) == before`.
-   - `local resume clears the hint under a newer revision`:
-     `ab.b.setAvailability(ctx, nodepolicy.Available, nodepolicy.PausedLocally)`
-     → `last.PausedBy == ""`, `last.Revision != prev`.
-   - `peer pause advertises peer`: `ab.b.setAvailability(ctx, nodepolicy.Paused,
-     nodepolicy.PausedByPeer)` → `last.PausedBy == nodepolicy.PausedByPeer`;
-     then `ab.b.setAvailability(ctx, nodepolicy.Available,
-     nodepolicy.PausedByPeer)` succeeds and the next projection has
-     `PausedBy == ""`.
-   Use `t.Helper()` on any local assertion helper and `t.Fatalf` with the
-   projection printed on mismatch.
-
-2. `services/nvpair-ui-broker/README.md`, the "**Node projection.**" bullet
-   (`:496-504`): after "engine-manager serves `policy` to paired peers in its
-   pinned `GET /v1/models` document and enforces `pausedLocally`." add: "A
-   peer's proxy reads that `pausedBy` from its discovery snapshot and stops
-   offering this node as an inference owner while it is set; the hint is
-   advisory, and this node's admission and local veto still decide."
-
-**Verify:**
-
-- Mac: `cd services/nvpair-ui-broker && go vet ./... && go test -race -run
-  'TestPauseProjectionCarriesProvenanceAndRevision|TestNodeProjection|TestPause|TestPeer'
-  ./...` passes with the new test `PASS` and none skipped.
-- Mac: `cd services/nvpair-ui-broker && go test -race ./...` passes.
-- `node scripts/spdx-headers.mjs` passes.
-- Windows: not required.
-
-### Task 6 — Cross-process acceptance: a pause reaches the broker's directory without an mDNS change
-
-**Files:** `services/tests/paused_advertisement_test.go` (create),
-`services/tests/broker_test.go` (modify, `availableNode` only).
-
-**Depends on:** none (acceptance of existing scanner→broker behaviour).
-External prerequisite: a Windows machine configured per
-`services/readme.md:215-246` (PC3).
-
-**Complexity:** mechanical.
-
-**Do:**
-
-1. In `services/tests/broker_test.go`, add to `type availableNode struct`
-   (`:47-56`) the field
-
-   ```go
-   	Policy *nodepolicy.Advertisement `json:"policy,omitempty"`
-   ```
-
-   and the import `"nvpair-shared/nodepolicy"` (already required by the
-   module, `X/go.mod:8`). No other change to the file.
-
-2. Create `services/tests/paused_advertisement_test.go` (SPDX header,
-   `package tests`) with `TestPAPausedAdvertisementConvergesWithoutMDNSChange`.
-   Add a local gate `pausedAdvertisementPlatform(t)` identical in effect to
-   `strataContractPlatform` (`X/strata_contract_test.go:276-286`): skip on
-   darwin with the message "PA cross-process acceptance runs on Windows PC3;
-   the Mac runs no PAIR processes"; on Windows fail unless `GOFLAGS` contains
-   `nvpair-test-exec` and `NVPAIR_TEST_BIN_DIR` is absolute. Then copy the
-   structure of `TestModelsRefreshConvergesWithoutMDNSChange`
-   (`X/models_refresh_test.go:57-150`) with instance name
-   `xproc-paused-advertisement-1` and TXT
-   `{"v=1", "uuid=xproc-paused-advertisement-1-uuid", "ip=127.0.0.1", "em=<port>"}`:
-   - Phase 1: stub body `{"models":["llama3:8b"],"modelsByEngine":{"ollama":
-     ["llama3:8b"]},"policy":{"revision":"5","roles":{}}}`; `pollForNode(...,
-     30*time.Second, func(n availableNode) bool { return n.Policy != nil &&
-     n.Policy.Revision == "5" && n.Policy.PausedBy == "" })`.
-   - Phase 2 (pause, no mDNS change): swap the body to the same with
-     `"revision":"6","pausedBy":"local"`; poll 45 s until `n.Policy.Revision ==
-     "6" && n.Policy.PausedBy == nodepolicy.PausedLocally` and
-     `len(n.Models) == 1` (the inventory survives the pause).
-   - Phase 3 (resume): swap to `"revision":"7"` with no `pausedBy`; poll 45 s
-     until `n.Policy.Revision == "7" && n.Policy.PausedBy == ""`.
-   - Phase 4 (stale fetch keeps the last hint): make the stub answer
-     `http.StatusInternalServerError` (define a sibling stub type in this
-     file whose handler answers a settable status and body; do not modify
-     `models_refresh_test.go`), wait `20 * time.Second` (more than one
-     `peerRefreshInterval`), then one `discovery:get-nodes` must still show
-     `Revision == "7"` and `PausedBy == ""` for the node.
-   Record in the test's doc comment that the stub is dialed over loopback in
-   plaintext, which is the scanner's self path; the pinned-mTLS peer path is
-   covered by `S/cluster_membership_test.go` and Task 4.
-
-**Verify:**
-
-- Mac: `cd services/tests && go vet ./... && go test -run
-  TestPAPausedAdvertisementConvergesWithoutMDNSChange -list . ./...` prints the
-  test name (compiles and lists; the Mac never runs it).
-- PC3 (Windows, serialized, with the fixed-path wrapper and firewall rules
-  from `services/readme.md:215-246`): `cd services/tests && go test -run
-  TestPAPausedAdvertisementConvergesWithoutMDNSChange -count=1 -v ./...`
-  passes with `--- PASS` for the test and all four phases logged; the run
-  must not report `SKIP` on Windows.
-- PC3: `go test -run TestModelsRefreshConvergesWithoutMDNSChange -count=1
-  ./...` still passes (the shared `availableNode` change is additive).
-- `node scripts/spdx-headers.mjs` passes.
-
-### Task 7 — Product documentation: node availability
-
-**Files:** `docs/node-availability.mdx` (create), `fern/docs.yml` (modify),
-`README.md` (modify).
-
-**Depends on:** Task 2 (the page describes the shipped routing rule).
-
-**Complexity:** judgment.
-
-**Do:**
-
-1. Create `docs/node-availability.mdx` with the SPDX HTML comment header used
-   by the other `.mdx` files (copy the first four lines of
-   `docs/strict-local-admission.mdx`). Title: `# Node availability`. Sections
-   and the facts each must state (write in the voice of
-   `docs/strict-local-admission.mdx`; say "engine", never "backend"; no
-   host names, addresses or user names):
-   - **What pausing does**: a paused node runs no inference work and never
-     wakes an engine; requests entering a paused node are still routed to
-     other machines (`N/nodepolicy/policy.go:44-47`). Pause options: what to do
-     with running work, drain timeout, unload models, stop engines
-     (`policy.pause`, `B/availability.go:174-279`). `draining` is the
-     transition state and is never saved.
-   - **Who paused it (provenance)**: `pausedBy` is `local` for a pause made on
-     the node itself, `peer` for one relayed from a paired node; a resume clears
-     it; configuration edits never change it. A pause saved before the field
-     existed counts as local.
-   - **Local veto**: a node paused locally refuses a paired node's resume
-     (`-32011`, "this node was paused on the node itself; resume it there"),
-     and engine-manager refuses paired nodes' engine starts and model loads
-     while the node is paused locally; a paired node may resume a peer pause;
-     a local pause over a peer pause becomes local and is never downgraded;
-     remote configuration edits stay allowed. Point to
-     `services/nvpair-ui-broker/README.md` "Local veto" for the exact rules.
-   - **How paired nodes learn about a pause (the advertisement)**: the node's
-     engine-manager serves `policy.pausedBy` and `policy.revision` in its
-     pinned `GET /v1/models` document; a paired node's scanner fetches it over
-     cluster mTLS (only for nodes it holds a pin for), re-fetches every 15
-     seconds and on reconnect, keeps the last good answer across a failed
-     fetch, and never reads it from mDNS. State the latency bound plainly: a
-     pause or resume is visible to other nodes within about 15 seconds plus
-     one fetch.
-   - **What the router does with it**: a node that advertises a pause is not
-     offered as an owner for a model, so no request is sent to it; model lists
-     still include it; the router's own engine is governed by its own
-     admission, not the hint. When every owner of a model is paused the router
-     answers `502` "no available node advertises the requested model". A node
-     that paused since the last fetch still answers `503` with
-     `X-PAIR-Admission: paused` and the router moves to the next node; a node
-     that resumed since the last fetch is used again after the next fetch. The
-     destination's own admission and local veto always win.
-   - **Seeing it**: the desktop node card and the terminal interface show
-     "Paused (local)" / "Paused (peer)" from the same `pausedBy`
-     (`services/nvpair-tui/ui/availability.go:96-98`); the proxy logs
-     `resolveCandidates: skipping paused peer` at debug level with the node id,
-     provenance and policy revision.
-   - **Limits**: no push faster than the sweep; no revision-order guard; a
-     manual (user-added) node carries no advertisement and is always tried.
-
-2. `fern/docs.yml`: in the `Reference` section, after the `Local Qualification`
-   entry (`:64-66`), add
-
-   ```yaml
-         - page: Node Availability
-           path: ../docs/node-availability.mdx
-           slug: node-availability
-   ```
-
-3. `README.md`, the numbered reading order (`:226-262`): extend item 8
-   (Architecture) with a second sentence: "**[Node availability](docs/node-availability.mdx)**
-   explains pausing a node, who may resume it, and how paired nodes stop
-   routing to it." Keep the numbering unchanged. This follows
-   `.cursor/rules/readme-ownership.mdc` (a link, no implementation notes).
-
-**Verify:**
-
-- `node scripts/spdx-headers.mjs` passes (the new `.mdx` carries the header).
-- `grep -n "node-availability" fern/docs.yml README.md` shows exactly one hit
-  in each file.
-- `grep -c "backend" docs/node-availability.mdx` prints `0`.
-- Every relative link in the new page resolves: for each `](../services/...)`
-  or `](...)` target, `test -e docs/<target>` (or the repository-relative
-  path) succeeds.
-- If the Fern CLI is installed locally, `cd fern && fern check` passes;
-  otherwise record "fern check not run" in the task's commit message body.
-- Windows: not required.
+### Task 1 — The proxy's routable Node carries the pause hint
+
+**Files:** `services/nvpair-proxy/discovery.go`, `services/nvpair-proxy/proxy.go`, `services/nvpair-proxy/availability_test.go`
+
+**Depends on:** none
+
+**Complexity:** mechanical
+
+**Do:** After the proxy reservation transfer above, add
+`PausedBy nodepolicy.PauseOrigin` with tag `json:"-"` beside `PolicyRevision`
+in `Node`. Extend the routing-metadata comment on `nodeEqual`, leaving its
+body unchanged. In `subscribedToNode`'s nonnil policy block copy
+`node.PausedBy = n.Policy.PausedBy`; describe it as an advisory advertisement
+with a LAN authentication path and loopback exception, not universally pinned.
+Create `availability_test.go` with SPDX header and `package main`:
+
+- `TestSubscribedToNodeCarriesPausedBy`: independent engine-profile cases
+  for nil policy, revision without pause, local pause, peer pause; assert
+  complete expected provenance/revision and unchanged other metadata.
+- `TestPauseHintAnnouncesNoNodeUpdate`: `Discovery.SetSubscribed` transitions
+  available -> paused -> available, changing only revision/provenance.
+  Assert no discovered/updated/removed events on replacements and assert the
+  stored snapshot changes each time. Reuse
+  `TestSubscribedCarriesPolicyWithoutChurn` as precedent.
+
+Check setup/conversion/decode errors. Inspect filenames after integration;
+extend an existing PA-owned file instead of overwriting another owner's work.
+
+**Verify:** Mac: `go -C services/nvpair-proxy vet ./...` and
+`go -C services/nvpair-proxy test -race -count=1 -v -run '^(TestSubscribedToNodeCarriesPausedBy|TestPauseHintAnnouncesNoNodeUpdate)$' .`.
+Both named tests must execute and PASS without skips/races. Root
+`node scripts/spdx-headers.mjs` passes. Diff is confined to declared Files.
+
+### Task 2 — Shared inference eligibility excludes paused peers dynamically
+
+**Files:** `services/nvpair-proxy/proxy.go`, `services/nvpair-proxy/availability_test.go`
+
+**Depends on:** 1
+
+**Complexity:** judgment
+
+**Do:** Reconfirm I's final common owner/release and exact Files as above.
+Insert the agreed pause exclusion at that owner before host deduplication
+and result append, preserving self admission and empty-model enumeration.
+Correct the nearby stale “TCP-probed” targetURL comment to match
+`targets.Prefer`; do not introduce a probe. Update the function comment to
+say paused **remote peer inference** candidates are excluded, with self,
+manual-no-hint and non-inference exceptions. Preserve I's identity, response,
+request/attempt, retry, cancellation and hybrid mechanisms.
+
+In `availability_test.go`, use `forEachEngine`, bound-origin fixtures and
+`clustertrusttest.Join`/`clustertrust.Open` from the final subscribed-peer
+tests. Maintain pinned-peer fixtures; no manual-node fallback. All new HTTP,
+TLS, fake-engine and self-facade listeners bind `127.0.0.1:0` and reject ports
+8080, 11434, 1234, 14318–14323 before use. Build local checked listeners and
+start unstarted httptest servers on them. For helper-created listeners that
+cannot accept such a listener, keep a PA-local fixture in this file; do not
+alter unrelated helpers. Use the allocated facade port consistently for
+self identity, selfNode and proxy construction, never profile defaults.
+
+Add top-level tests with these mandatory assertions:
+
+- `TestPAPausedPinnedPeerEligibility`: selected/priority paused pinned peer
+  plus available pinned peer; concrete and tier resolution omit paused local
+  and peer origins. HTTP request counters show zero attempts to paused peer
+  and success through the eligible peer. Preserve bound origin/strict
+  capability setup so identity refusal cannot masquerade as pause exclusion.
+- `TestPAPausedPeerDynamicResume`: on the **same pinned peer**, replace the
+  subscribed advertisement available -> paused -> available with new
+  revisions, using the discovery replacement path. Next concrete and tier
+  requests skip while paused (zero counter delta) and dispatch after resume
+  (positive counter delta); metadata replacements emit no outward
+  `node/updated`. Compare catalogue models and declared tier aliases before,
+  during and after; they stay present. Run final I hybrid eligibility through
+  the same owner after cutover, without adding an alias implementation.
+- `TestPAPauseRouteExceptions`: manual node without hint remains eligible;
+  paused self and dormant-self still use local admission; model-list and
+  pass-through still reach paused peers. Assert route response and request
+  counters, not just resolver IDs. Self admission still rejects when locally
+  paused. An available duplicate destination remains eligible when an earlier
+  paused record has the same host: exclusion must precede deduplication.
+- `TestPAAllPausedResponses`: pinned paused owners, no self/dormant/manual
+  alternative; concrete 502 and tier 404 with their existing bodies and zero
+  upstream requests. No new terminal all-paused 503.
+- `TestPAStaleHintDestinationRejection`: use a pinned peer whose snapshot
+  still says available while its controlled destination returns admission
+  503/paused, then an available peer. Counters/barriers establish the stale
+  snapshot before the request and prove the failed candidate and successful
+  failover under I's actual retry contract. No timing race against a sweep;
+  reuse existing destination admission tests for the authoritative veto.
+
+Check fixture setup, transitions, reads and JSON decoding explicitly; use
+descriptive subtests and structured policy assertions. No prompts/body logs.
+
+**Verify:** Mac:
+`go -C services/nvpair-proxy test -race -count=1 -v -run '^TestPA' .`
+must execute every new named regression without skips, with required counter
+and replacement assertions passing. Then
+`go -C services/nvpair-proxy vet ./...` and
+`go -C services/nvpair-proxy test -race -count=1 ./...` pass. Run
+`npm --prefix desktop run service-contracts:check`; no PA wire diff is
+expected. An unrelated integrated I contract difference goes to I's owner
+for generation/check, not a hand edit or rejection of PA's metadata design.
+
+### Task 3 — Proxy specification and README publish the final eligibility rule
+
+**Files:** `services/nvpair-proxy/spec.md`, `services/nvpair-proxy/README.md`
+
+**Depends on:** 2
+
+**Complexity:** mechanical
+
+**Do:** External gate: I6 and SR6a documentation publication/release recorded.
+Re-read their integrated spec. Update Request path, Admission and the internal
+policy metadata description to name `Node.PausedBy` and the final owner symbol.
+Say exclusion is before deduplication/admission to the result set, not before
+ordering. Name the remote-peer inference restriction, self/dormant-self,
+manual-no-hint, model-list and pass-through exceptions. Describe snapshot
+semantics, 502 concrete/404 tier empty results, nominal healthy polling and
+indefinite last-good retention on failure; destination admission/local veto
+win over stale hints. Explain pinned LAN fetch and the loopback exception.
+Model catalogue and tier aliases retain declared intent while dispatch skips
+paused peers. Describe hybrid only as implemented at the final I join.
+README gets a concise link to those spec sections with the same exceptions.
+
+**Verify:** Root SPDX check passes; diff touches only Files. Read the changed
+paragraphs against Task 2's tests and final owner: every exception, response,
+freshness condition and hybrid claim agrees. `rg -n 'PausedBy|paused peer' services/nvpair-proxy/spec.md services/nvpair-proxy/README.md`
+finds the new explanation, without a hard convergence bound or a claim that
+all paused nodes cease to be catalogue owners.
+
+### Task 4 — Scanner tests prove dynamic policy retention and transport refusal
+
+**Files:** `services/nvpair-node-scanner/availability_test.go`, `services/nvpair-node-scanner/README.md`
+
+**Depends on:** none
+
+**Complexity:** judgment
+
+**Do:** External gate: exact Files released. Reuse `newRefreshTestDaemon`,
+`seedEMNode`, `refreshNodeModels`, `dir.get` and cache inspection. A PA-local
+stub uses a checked ephemeral loopback listener with the protected-port
+exclusions in Task 2; do not reuse an unchecked `httptest.NewServer` listener.
+
+- `TestPauseHintFollowsTheAdvertisement`: one explicit transition sequence
+  (not order-dependent nominally independent subtests): available revision 1,
+  local pause 2 with unchanged models, identical pause produces no change,
+  acknowledged failed fetch retains pause 2 and cached policy, resume 3
+  clears it, peer pause 4 preserves peer provenance. Check policy nonnil
+  before dereference and compare inventory/policy fields structurally.
+- `TestPauseHintEmitsOneNodeUpdated`: capture codec frames with synchronized
+  output as in `peerServicesWithCapturedCodec`; after initial population,
+  one pause-only refresh emits exactly one update with expected node and
+  policy, identical refresh emits none, resume emits the cleared hint.
+  Check every frame decode error; join concurrent writers before reading.
+- `TestPauseHintIsNeverFetchedWithoutAPin`: reuse membership fixture and
+  existing `peerServicesTestTransport` RoundTripper seam. Install a
+  counting/refusing transport on `d.modelsHTTP`, assert loopback selection
+  (including a non-self UUID) is plaintext, and assert an unpinned nonloopback
+  `modelsClient` refuses transport. Call `fetchModelsForPeer` synchronously
+  for that unpinned peer and require false plus **zero** plain transport calls
+  and no peer-client cache creation; nonloopback selection cannot fall back
+  to that client. A controlled loopback fetch is a positive control that
+  increments the counter. With joined/admitted pin setup, assert HTTPS
+  selection using `TestModelFetchTransportFollowsMembership` precedent.
+  No actual external dial, elapsed-time proof, orphan goroutine, production
+  transport abstraction or claim of end-to-end mTLS from this unit test.
+
+README explains policy-only refresh, nominal cadence/success requirement,
+last-good retention, pinned LAN transport/loopback exception and no mDNS
+availability. It must not promise one-sweep convergence.
+
+**Verify:** Mac:
+`go -C services/nvpair-node-scanner test -race -count=1 -v -run '^TestPauseHint' .`,
+`go -C services/nvpair-node-scanner vet ./...` and
+`go -C services/nvpair-node-scanner test -race -count=1 ./...` pass.
+All named tests execute without skips/races; transport counter's positive
+control executes and unpinned refusal stays zero. Root SPDX check passes.
+
+### Task 5 — Broker evidence distinguishes persisted advertisement from pending veto
+
+**Files:** `services/nvpair-ui-broker/availability_test.go`, `services/nvpair-ui-broker/README.md`
+
+**Depends on:** none
+
+**Complexity:** judgment
+
+**Do:** External gate: broker test filename and README released after I/G/SR
+overlaps. Use `newActivatedBroker`, `attachFakeEngine`, `nodeProjections` and
+existing provenance/veto coverage. Add
+`TestPauseProjectionCarriesProvenanceAndRevision` with independent fixtures
+for emission cases: local pause, local resume, peer pause/resume. Check
+`setAvailability` result and error before reading stored policy. Snapshot
+the expected saved advertisement after completion, require revision change
+where persistence occurs, and use the fake worker's bounded `waitFor`
+predicate to wait for that exact revision/provenance/roles, not `before+1`.
+Pending local-veto notifications do not satisfy the saved-advertisement
+predicate. Assert the matched advertisement equals stored policy.
+
+For peer resume veto of a local pause, first complete pause and drain pending
+frames via a request/reply barrier on the same fake engine reader. Capture
+baseline only after that barrier. Require typed `localVetoError`, unchanged
+stored policy/revision, then a second bounded reader barrier and no additional
+projection. Never wait for a projection on this no-emission path. Keep barrier
+helpers PA-local and use the fake worker's existing request/reply protocol;
+if the final fixture lacks a drain seam, stop for an exact-file reservation
+amendment rather than substitute an immediate count check. Reuse existing
+provenance tests for peer-pause-over-local behavior instead of repeating the
+whole OB/XA veto matrix.
+
+README's Node projection paragraph distinguishes pending veto from adopted
+saved policy; remote routers skip advertised paused peers for inference,
+subject to the exceptions and advisory freshness in Task 3.
+
+**Verify:** Mac:
+`go -C services/nvpair-ui-broker test -race -count=1 -v -run '^(TestPauseProjectionCarriesProvenanceAndRevision|TestNodeProjectionPublishedOnPersistAvailabilityAndReady|TestPauseProvenanceIsNeverDowngraded|TestConfigurationEditsStayAllowedWhileLocallyPaused)$' .`,
+`go -C services/nvpair-ui-broker vet ./...` and
+`go -C services/nvpair-ui-broker test -race -count=1 ./...` pass.
+New cases execute without skips; emission matches the persisted advertisement
+and veto proves no emission after drained baseline. Root SPDX check passes.
+
+### Task 6 — PC3 process acceptance proves policy propagation without TXT changes
+
+**Files:** `services/tests/paused_advertisement_test.go`, `services/tests/broker_test.go`
+
+**Depends on:** none
+
+**Complexity:** judgment
+
+**Do:** External gates: coordinator reserves Files against I7/XA and supplies
+integrated fixture isolation with exact helper Files/owning dependency recorded
+before dispatch. Read amended XA's external fixture/preflight gates. At join12
+the discovery isolation prerequisite is **not satisfied**. Do not copy
+`startBroker`/real-mDNS baseline unchanged or declare it hermetic. A harness
+repair outside these Files is a coordinator-owned prerequisite amendment,
+not PA permission to edit product flags/shared harnesses. The supplied seam
+must isolate the production scanner's discovery environment and prevent
+contact with installed/LAN nodes while retaining the real refresh path.
+Record its proof and listener inventory. If absent, leave process acceptance
+pending while disjoint unit/doc tasks proceed.
+
+After that gate, add `Policy *nodepolicy.Advertisement` with
+`json:"policy,omitempty"` and import to `availableNode` only. In the new file
+add `TestPAPausedAdvertisementConvergesWithoutMDNSChange`, using the released
+isolation seam and `reserveFixtureServicePorts(t).args()` for all six broker
+service overrides. Keep PA-specific startup/stub glue in this file and reuse
+existing message readers/cleanup. Inventory every child service, facade,
+engine, observer, scanner discovery listener and helper listener. All new
+listeners must be loopback on checked ephemeral ports outside
+8080, 11434, 1234, 14318–14323. Unisolated wildcard discovery or child default
+listeners leave this gate pending; stopping installed PAIR is insufficient.
+Do not start unrelated workers/real engines to satisfy a test fixture.
+
+`pausedAdvertisementPlatform` skips **all non-Windows** platforms before
+starting a fixture. On Windows require `GOFLAGS` containing `nvpair-test-exec`
+and absolute `NVPAIR_TEST_BIN_DIR`. OS gating is not machine authorization:
+the coordinator must reserve actual PC3 and verify the preflight below.
+
+Keep identity/TXT fixed throughout one explicit sequence, with checked status
+and JSON errors, bounded polling and request barriers:
+
+1. Available revision 5 with fixed model inventory reaches broker directory.
+2. Pause revision 6 (`local`) arrives with the same inventory and TXT.
+3. Switch stub to HTTP 500; wait for a **new failed request acknowledged after
+   the switch**, then read directory/cache evidence that pause 6 remains.
+   A sleep followed by unchanged data is not failure-path evidence.
+4. Resume revision 7 clears provenance through successful refresh without a
+   TXT update. Retained last-good pause clears only after this success.
+
+Every polling predicate checks `Policy != nil` before dereference. Use bounded
+test deadlines as harness timeouts, not product latency promises. Log each
+phase completion and fixture cleanup with owned PIDs. Comment explicitly that
+this loopback plaintext fixture proves propagation, not pinned authentication.
+
+**Verify:** Mac only:
+`go -C services/tests vet ./...` and
+`go -C services/tests test -list '^TestPAPausedAdvertisementConvergesWithoutMDNSChange$' .`
+compile/list the named test without case execution. PC3 only, after all gates:
+`go -C services/tests test -count=1 -v -run '^TestPAPausedAdvertisementConvergesWithoutMDNSChange$' .`.
+Require PASS, no skip, all phase logs including acknowledged failure, fixed
+TXT and successful owned-process cleanup. Run existing
+`TestModelsRefreshConvergesWithoutMDNSChange` with `-count=1 -v` only after
+the coordinator separately certifies its discovery/listener isolation; its
+additive decode compatibility can be vet/compiled meanwhile. Unsafe baseline
+execution is not a regression prerequisite. Root SPDX check passes.
+
+### Task 7 — Product documentation explains availability without timing/UI promises
+
+**Files:** `docs/node-availability.mdx`, `fern/docs.yml`, `README.md`
+
+**Depends on:** 2
+
+**Complexity:** judgment
+
+**Do:** External gate: exact documentation files released. Create the focused
+MDX page with the existing SPDX style; index under Fern Reference and add a
+concise user-facing link after Architecture in the root README reading order.
+Explain pause/provenance, draining, local veto, retained remote configuration,
+advertisement, stable catalogue/tier aliases and router exceptions. A pause
+blocks new admissions; existing work can still drain according to pause
+policy. Do not say a paused/draining node immediately runs no inference.
+Describe nominal healthy 15-second polling, successful-refresh requirement,
+preceding work/batching and indefinite last-good retention on failure.
+Concrete empty candidates return 502, tiers 404; stale available hints still
+meet destination 503/paused. Name the LAN authentication/loopback exception
+and snapshot semantics. No desktop node-card label claim; link established
+TUI behavior only after verifying its current symbols. Debug logs are optional
+operational diagnostics, never proof of zero dispatch. No live engine tutorial
+that implicitly authorizes a machine run.
+
+**Verify:** Root `node scripts/spdx-headers.mjs` passes.
+`rg -n 'node-availability' fern/docs.yml README.md` shows each intended link;
+resolve every relative link from its document directory. The new page's
+`rg -n '\bbackend\b' docs/node-availability.mdx` has no matches (scope is the
+page alone, not this plan's prohibition). Read claims against Tasks 2–6 and
+the final integrated source; no hard deadline or unsupported desktop label.
+When Fern CLI is installed, `fern check` from `fern/` passes; when absent,
+record that check as unrun, without claiming documentation-build evidence.
 
 ## Verification (whole-plan)
 
-Run after every task has landed on the branch, from the repository root:
+Mandatory unit/source gate on Mac, after file joins (no real engines):
 
-- `node scripts/spdx-headers.mjs` — no missing header.
-- Mac: `make test-services` (or `for m in services/nvpair-proxy
-  services/nvpair-node-scanner services/nvpair-ui-broker; do (cd $m && go
-  test -race ./...); done`) passes; Mac also compiles `services/tests` with
-  `go vet ./...` and `go test -list . ./...` but never runs its cases.
-- Mac: `cd desktop && npm run service-contracts:check && npm run lint && npm
-  run typecheck && npm run test:unit && npm run dead-code:check` pass with no
-  desktop diff (PA changes no desktop file).
-- PC3 (Windows, serialized): `cd services/tests && go test -run
-  'TestPAPausedAdvertisementConvergesWithoutMDNSChange|TestModelsRefreshConvergesWithoutMDNSChange'
-  -count=1 ./...` passes; `go test ./...` in `services/nvpair-proxy`,
-  `services/nvpair-node-scanner` and `services/nvpair-ui-broker` passes without
-  `-race`.
-- MSI (Windows + RTX): the three Go modules above with `-race` where the
-  toolchain allows it; no live engine is needed for PA.
-- Manual two-node check (MSI as destination, PC3 as router, both clustered;
-  no Mac): pause MSI from its own desktop; within 20 s a request on PC3 for a
-  model only MSI serves answers `502 no available node advertises the
-  requested model` without a request appearing in MSI's proxy log; resume MSI;
-  within 20 s the same request is served by MSI. Then pause MSI and, before
-  PC3's next sweep (within 15 s), send the request from PC3: it is answered
-  by MSI's `503 X-PAIR-Admission: paused` or by another owner, never hangs,
-  and PC3's proxy log shows the failed candidate. Record both observations in
-  the pull request description's `pair-release-intent:v1` block as the
-  user-facing change ("a paused node is no longer tried by paired routers")
-  and declare a bump for `nvpair-proxy` only.
-- `git log --oneline fork/groundwork..HEAD` shows one commit per task, each
-  made with `git commit --no-signoff` and a conventional subject
-  (`feat(proxy): ...`, `test(node-scanner): ...`, `test(broker): ...`,
-  `test(services): ...`, `docs(proxy): ...`, `docs: ...`).
+```bash
+for module in services/nvpair-proxy services/nvpair-node-scanner services/nvpair-ui-broker; do
+  go -C "$module" vet ./... || exit 1
+  go -C "$module" test -race -count=1 ./... || exit 1
+done
+go -C services/tests vet ./...
+go -C services/tests test -list '^TestPAPausedAdvertisementConvergesWithoutMDNSChange$' .
+node scripts/spdx-headers.mjs
+npm --prefix desktop run service-contracts:check
+```
+
+Run the named `-count=1 -v` selectors in Tasks 1/2/4/5 to record actual
+PASS/skip status, not a cached/silent selector match. All required names
+execute without skips/races. The unit loop fails on the first failure.
+Never use `make test-services`, `make test` or a module wildcard on Mac:
+they include `services/tests`. Mac process checks stop at vet/compile/list.
+PA changes no desktop code; integration desktop gates belong to the coordinator.
+I owns regeneration of unrelated integrated contract changes through
+`npm --prefix desktop run service-contracts:write`; rerun check afterward.
+
+Mandatory PC3-only process gate (can remain external-gated separately from
+the bounded patch): complete Task 6 at the exact integrated SHA. Import
+amended XA preflight and current `TESTING_ON_PC.md`: reserve PC3 free of
+other GPU/measurement sessions; serialize all listener tests machine-wide;
+inspect `scripts/windows-test-bin.ps1 list`, fixed executable destinations,
+user `GOFLAGS`, absolute `NVPAIR_TEST_BIN_DIR` and exact-path inbound rule
+coverage for every package image/copied child. Existing manifest membership
+does not prove rule coverage. No new manifest role is expected; if required,
+stop for reservation/Files amendment. Missing elevated setup leaves execution
+pending; never use temporary executable paths or bypass rules. Record
+before/after firewall and survivor checks, cleanup logs, actual names/skips,
+and screen observation **UNMONITORED** unless attended. Do not request a
+routine owner prompt report. PC3 uses no `-race`; MSI can supply serialized
+proxy/scanner/broker unit race evidence, never this package's process cases.
+
+### Separate optional live acceptance gate — XA/I coordinated, MSI and PC3
+
+This is not a prerequisite for the bounded PA patch or its mandatory fixture
+assertions. It requires a separate coordinator reservation **and explicit
+owner authorization** for actual MSI/PC3 engine/model operations, with engine,
+model, source SHA, machine roles, memory/launch envelope, observation limits
+and cleanup recorded before execution. Use an approved llama.cpp engine;
+Strata is optional and no Ollama/live Mac runs are authorized here. Coordinate
+with XA/I, SR/NE engine readiness and existing GPU/measurement reservations.
+
+After successful hint refresh is observed, exercise pause/resume on MSI with
+PC3 as router and record actual dispatch/result evidence and refresh times.
+Do not require a live request to beat an asynchronous sweep or impose a
+20-second success bound. Quiet default-level logs prove no zero-attempt
+claim; mandatory zero-dispatch/stale-hint assertions come from fixture
+counters/barriers in Task 2. Passing process fixtures does not close this live
+gate; absent authorization/reservation leaves it unperformed.
+
+Final diff must match Files and scope. Proxy is the only compiled product
+binary expected to change; eventual PR release intent declares proxy only,
+subject to actual diff. Do not hand-edit versions/changelog. Implementation
+commits follow repository policy with `git commit --no-signoff`; untracked
+paths need explicit staging authorization. This amendment makes no commits.
 
 ## Do not
 
-- Do not add a `paused`, `availability` or `pausedBy` key to the `_nvpair-node`
-  TXT record, to `noderec.NodeRecord`, or to the peer-services descriptor.
-- Do not make the proxy skip its own (self) candidate, the dormant self
-  candidate, or a manual node on the hint; do not consult the hint for
-  model-list or pass-through routes.
-- Do not change the destination veto (`B/availability.go`, `B/policy.go`,
-  `E/nodeprojection.go`), the policy relay, or any JSON-RPC method or payload.
-- Do not edit `P/http_handler.go`, `P/policy.go`, `B/policy.go`, `B/proxy.go`
-  or `N/nodepolicy/wire.go` (I and G own those seams right now).
-- Do not add a revision-order guard, a push notification, or a cache of
-  pause state anywhere; the scanner's last-good rule and sweep are the
-  freshness model.
-- Do not edit `desktop/docs/services-api.md`, `CHANGELOG.md` or
-  `services/versions.json` by hand; do not regenerate the services API (no
-  wire change).
-- Do not write the word "backend" in new copy or comments; do not log request
-  bodies, prompts, PINs or key material (the new debug line logs node id,
-  provenance and revision only).
-- Do not run `services/tests` on the Mac; do not run Windows listener tests in
-  parallel with another machine-wide invocation.
-- Do not fold tests into `P/subscribed_test.go`, `S/refresh_test.go` or
-  `B/policy_projection_test.go`; keep PA's tests in the three new
-  `availability_test.go` files.
+- Do not add mDNS availability, wire/persistence fields, a second routing
+  owner, push, revision-order guard, pause cache, metrics or configuration.
+- Do not alter I's retry/cancellation/attempt ownership or SR/XA/OB/E4/NE
+  mechanisms; do not refactor beyond the specified tasks.
+- Do not edit destination veto/admission, engine-manager/shared-wire product
+  code, desktop UI or generated APIs for PA's internal metadata.
+- Do not remove self/dormant-self/manual-no-hint/non-inference exceptions,
+  catalogue entries or declared tier aliases; do not add an all-paused 503.
+- Do not bind/dial installed/protected ports, infer discovery isolation from
+  temporary state, run process cases outside PC3, run PC3 race, overlap
+  machine listener/measurement intervals, or start a real engine via this plan.
+- Do not log prompts/messages/bodies/PINs/keys or use debug-log absence as a
+  request-count assertion. Say engine in new prose/comments.
+- Do not edit other packages, vault notes or product code during this plan
+  amendment. No branch, checkout, commit or push is part of this amendment.
 
 ## If stuck
 
-- **Go toolchain**: the modules need Go 1.25 (`go 1.25.0` in `go.mod`). If
-  `go test` refuses to build, run with `GOTOOLCHAIN=go1.25.0` set in the
-  environment (the Go command downloads that release); do not lower the `go`
-  directive.
-- **Task 1/2 compile errors around `nodepolicy.PauseOrigin`**: `P/discovery.go`
-  already imports `nvpair-shared/nodepolicy` (`:24`); if the type is reported
-  missing the import list was edited by mistake.
-- **`TestResolveCandidatesSkipsPausedPinnedPeer` yields no candidates at
-  all**: the pinned fixture needs the principals joined with
-  `clustertrusttest.Join` and `p.mesh` opened before `resolveCandidates`; copy
-  `P/subscribed_test.go:368-380` exactly, then re-run. If it still fails,
-  reduce the test to `TestResolveCandidatesSkipsPausedPeersForAModel` (manual
-  nodes) and report which assertion failed together with the
-  `resolveCandidates: ...` debug lines (add a temporary
-  `slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug})))`
-  at the top of the failing test while diagnosing; remove it before
-  committing).
-- **`TestPausedSelfKeepsItsAdmissionPath` routes to the peer first**: the
-  priority list is `["self","peer"]` and the self node must resolve to the
-  facade's own port; confirm the fixture uses `tc.profile.FacadePort` for both
-  `selfNode` and `testProxy`.
-- **Scanner notification capture decodes nothing** (Task 4, second test):
-  the captured frames are `jsonrpc.Message` values (`Params json.RawMessage`,
-  `N/jsonrpc/jsonrpc.go:28-32`), written by `NewCodec(&out)`; confirm the
-  codec was assigned before the refresh that flips the hint, and that `out`
-  was reset after the populating refresh so the first `node-updated` is not
-  counted. If `Message` is not visible in `package main`, use
-  `jsonrpc.Message` with the import `"nvpair-shared/jsonrpc"`.
-- **Task 6 phase 2 never converges on PC3**: confirm the broker's scanner
-  logs a `/v1/models` fetch against the stub port every 15 s; if fetches
-  stop, the mDNS responder was not kept running (check the `zsrv.Run`
-  goroutine and cleanup ordering copied from `models_refresh_test.go`). If the
-  broker's row lacks `policy` entirely, verify `availableNode.Policy` was
-  added with the exact JSON tag `policy`.
-- **Rebase conflicts in `P/proxy.go`** after I Tasks 3-5 land: re-apply the
-  Task 2 guard at the point where a non-self peer candidate is appended, with
-  the same three conditions (`model != ""`, not self, `PausedBy != ""`), and
-  re-run the Task 2 verify line. If `resolveCandidates` no longer exists under
-  that name, stop and report the new function and file instead of guessing.
-- **Stop and report** (do not improvise) if: the Task 2 tests show the
-  self candidate being skipped; `service-contracts:check` reports a diff;
-  `nodeEqual` has gained a comparison of policy fields; or any Windows gate
-  fails for a reason outside the files this plan names.
+Use Go 1.25 or newer without lowering module directives. If an external
+reservation, integrated owner, discovery isolation seam, fixed-path/rule
+coverage or machine reservation is absent, report that exact gate as pending;
+continue only released disjoint work. Reconcile contradictory PA/I ordering
+before dispatch, never by silently choosing one side.
 
-## Owner questions
+If I moves candidate ownership, identify the landed file/symbol, amend exact
+Files/dependencies and audit before edits. Never restore the old closure as
+a second path. Pinned-peer fixture failures require fixing pin/admission,
+identity and transport setup under the final I contract; do not replace or
+drop the test. A new fixture helper/file or non-loopback listener requirement
+needs coordinator scope/reservation amendment before implementation.
 
-1. **Answer when every owner of a model is paused.** With the hint, a request
-   for a model served only by paused nodes gets the existing immediate `502`
-   `no available node advertises the requested model` (`P/http_handler.go:761-767`)
-   instead of today's slower path (dispatch, `503 paused`, back-off,
-   re-resolve, final `503`). Keep the `502` (plan default, no change to
-   `P/http_handler.go` while I reworks dispatch), or add a distinct
-   `503 X-PAIR-Admission: paused` reply naming that every owner is paused?
-   The second is more informative to a client but is a new response shape and
-   touches I's seam.
-2. **Propagation latency.** The hint reaches peers within one scanner sweep
-   (`peerRefreshInterval`, 15 s) plus one fetch. Acceptable, or should PA add a
-   push (for example a `discovery:refresh-peer` nudge after a pause, or the
-   pause carried on the cluster-manager reverse session)? A push is a new wire
-   message across scanner, broker and cluster-manager and is out of PA's scope
-   as planned.
-3. **Model listing while paused.** The plan keeps a paused peer's models in
-   the federated model list and keeps its declared tiers in the hybrid alias
-   list, so clients see a stable catalogue; only dispatch skips it. Confirm,
-   or should a paused peer also disappear from the model list?
-4. **Revision-order guard.** The scanner applies the last fetch that lands;
-   two overlapping fetches for one peer could briefly re-apply an older
-   advertisement until the next sweep. The plan adds no guard, because a node
-   whose policy file is reset legitimately moves to a lower revision and a
-   guard would stick until eviction. Confirm no guard, or accept that risk for
-   a "revision never decreases" rule in `applyModels`?
+For notification failures, inspect decoded frames and use bounded predicates
+plus the reader barrier; do not weaken to counts/sleeps. For process failure,
+check post-switch stub acknowledgement and actual isolated scanner route;
+do not contact installed PAIR. Stop and report self exclusion, catalogue loss,
+policy comparisons added to `nodeEqual`, unexplained contract drift or a
+failure requiring writes outside declared Files. Preserve external evidence
+as unverified until its gate runs.
+
+## Amendment 2026-10-21
+
+Applied review R1–R7 and LOW corrections. Re-anchored to join12 with symbol
+references; repaired dependency syntax and task complexity; recorded the
+coordinator-adopted owner answers for veto. Replaced stale PA-before-I gates
+with explicit I/G integration and file-reservation transfer, including I6/SR6a
+documentation serialization and cross-package cycle reconciliation. Added
+dynamic pinned-peer resume/counter evidence, route exceptions, checked fixture
+ports, transport refusal instrumentation, persisted-projection synchronization
+and acknowledged failed-refresh retention. Process acceptance is PC3-only
+and externally gated on real isolation/fixed-path readiness; live MSI/PC3
+engine validation is a separate owner-authorized XA/I gate. Corrected cadence,
+loopback authentication, draining, catalogue, hybrid and desktop claims.
+No implementation or runtime validation is claimed by this amendment.
