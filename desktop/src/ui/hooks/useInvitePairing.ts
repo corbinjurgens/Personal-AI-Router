@@ -4,6 +4,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { Invite } from '@/shared/types/cluster'
 import { MODULAR_INVITE_STATUS_POLL_INTERVAL_MS } from '@/shared/constants/modular-runtime'
+import { useClusterInvitationsStore } from '@/ui/stores/cluster-invitations.store'
 import getErrorString from '@/shared/utils/get-error-string'
 import {
     formatClusterInviteError,
@@ -17,6 +18,9 @@ interface InvitePairing {
     /** True while the initial `cluster:invite-node` request is in flight. */
     submitting: boolean
     error: string | null
+    allowRemoteManagement: boolean
+    setAllowRemoteManagement: (allowed: boolean) => void
+    savedPermission: boolean | null
     /** Begin PIN pairing with a node, then poll its status until it resolves. */
     start: (ipAddress: string) => Promise<void>
     /**
@@ -39,6 +43,20 @@ export function useInvitePairing(): InvitePairing {
     const [invite, setInvite] = useState<Invite | null>(null)
     const [submitting, setSubmitting] = useState(false)
     const [error, setError] = useState<string | null>(null)
+    const [allowRemoteManagement, setAllowRemoteManagement] = useState(false)
+    const [targetAddress, setTargetAddress] = useState<string | null>(null)
+    const savedPermission = useClusterInvitationsStore(state => {
+        const peers = state.members.filter(
+            member => member.state === 'member' && member.ipAddress === targetAddress
+        )
+        if (peers.length !== 1) return null
+        const grant = state.remoteManagement?.grants.find(
+            entry => entry.peerUuid === peers[0].nodeUuid
+        )
+        return grant && (grant.state === 'allowed' || grant.state === 'denied')
+            ? grant.allowed
+            : null
+    })
     const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
     const inviteIdRef = useRef<string | null>(null)
     const generationRef = useRef(0)
@@ -57,6 +75,8 @@ export function useInvitePairing(): InvitePairing {
         setInvite(null)
         setSubmitting(false)
         setError(null)
+        setAllowRemoteManagement(false)
+        setTargetAddress(null)
     }, [stopPolling])
 
     useEffect(
@@ -93,9 +113,13 @@ export function useInvitePairing(): InvitePairing {
             setInvite(null)
             setSubmitting(true)
             setError(null)
+            setTargetAddress(ipAddress)
             stopPolling()
             try {
-                const result = await window.pairApi.cluster.inviteNode(ipAddress)
+                const result = await window.pairApi.cluster.inviteNode(
+                    ipAddress,
+                    allowRemoteManagement
+                )
                 if (generation !== generationRef.current) return
                 setInvite(result)
                 if (result.state === 'pending' && result.inviteId) {
@@ -154,8 +178,18 @@ export function useInvitePairing(): InvitePairing {
                 if (generation === generationRef.current) setSubmitting(false)
             }
         },
-        [stopPolling]
+        [stopPolling, allowRemoteManagement]
     )
 
-    return { invite, submitting, error, start, cancel, reset }
+    return {
+        invite,
+        submitting,
+        error,
+        start,
+        cancel,
+        reset,
+        allowRemoteManagement,
+        setAllowRemoteManagement,
+        savedPermission
+    }
 }

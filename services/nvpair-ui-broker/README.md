@@ -321,6 +321,34 @@ Shared lifecycle for all workers:
 
 ## Node policy
 
+Remote policy, availability, settings Apply and switch writes require this
+target's admission-bound remote-management grant. Engine-manager first gates
+the authenticated mTLS caller; the broker freshly rechecks the shared
+`clustertrust.Mesh.RemoteManagement` predicate under each owning acceptance
+lock, so revocation also blocks writes queued on those locks. Peer relays must
+carry a nonempty verified caller from the current engine-manager worker/source;
+public parameters cannot impersonate a local caller. Local callers and internal
+cleanup of already accepted work retain their existing paths. Reads and
+permitted inference remain available without a grant.
+
+Permission denial is `-32012/remote_management_denied`, independently of local
+veto `-32011` and revision conflict `-32010`. Local pause/Off and private-policy,
+CORS, served/resident and admission checks remain authoritative even for allowed
+peers. Revocation prevents new acceptance; it does not stop or unpair the node
+or undo accepted work, whose target-owned completion/recovery and receipt reads
+remain available. The broker logs caller/target UUID, family, decision/state,
+revision, bounded reason and known operation ID without request bodies or secrets.
+
+Cluster-manager alone owns grants, the one-time existing-pin migration and local
+CAS list/set/change notifications. Desktop Cluster Settings and TUI Nodes edit
+permission on the current device through the existing local service endpoint;
+neither exposes a remote setter. Each side's pairing boolean chooses authority
+over its own device. See the
+[cluster-manager contract](../nvpair-cluster-manager/README.md#remote-management-permission).
+Remote effective readback uses `engine:remote-management-get {nodeId}` and is
+read-only. Old targets report unsupported; pre-PG target downgrades restore
+that executable's unrestricted pinned-peer management behavior.
+
 The fork's node policy (see `FORK_DESIGN.md` §3 at the repository root) is owned
 by the broker. Its schema, defaults and validation live in
 `nvpair-shared/nodepolicy`; the broker is the only writer of the file and the
@@ -1248,8 +1276,14 @@ reached exactly once through the proxy's unaddressed, process-scoped
 `performance:sample` notification. It strictly decodes and validates
 `performancewire.Sample`, checks the measuring host through the store and
 deduplicates the producer/sequence pair. It never writes disk or worker stdin.
+Samples may retain a nullable native engine decode interval and reported rate,
+separate from exact visible output counts and their matching legacy decode
+interval. Version 2 summaries expose `engineDecode` as a duration-weighted mean
+of qualified reported rates, without inventing a native token total. The file
+layout remains version 1: old optional-field-free history stays readable, while
+new fields survive save/reload. Older binaries must not reopen upgraded history.
 No proxy extractor emits these samples yet. This projection has no scheduler or
-ranking input, and desktop/TUI bridge consumers and UI are later work. Public
+ranking input; desktop and TUI render the broker's aggregates. Public
 contract drift for these methods must be addressed by that integration; the
 private worker exceptions do not exempt the public surface. Unsubscribed clients
 receive neither performance changes nor private manager frames.

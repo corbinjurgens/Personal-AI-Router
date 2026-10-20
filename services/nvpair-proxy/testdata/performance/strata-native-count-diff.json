@@ -1,0 +1,8 @@
+{
+  "choices": [{"index": 0, "message": {}, "finish_reason": "stop"}],
+  "usage": {"completion_tokens": 20},
+  "timings": {
+    "predicted_n": 20, "predicted_ms": 400,
+    "predicted_per_second": 55, "predicted_per_token_ms": 18.182
+  }
+}

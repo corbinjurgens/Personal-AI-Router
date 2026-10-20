@@ -64,7 +64,10 @@ import type {
     AvailableNode,
     ClusterIdentityPayload,
     ClusterNode,
-    Invite
+    Invite,
+    RemoteManagementCapability,
+    RemoteManagementSetRequest,
+    RemoteManagementSnapshot
 } from '@/shared/types/cluster'
 
 // -----------------------------------------------------------------------------
@@ -100,11 +103,25 @@ export interface WsInvokeChannelMap {
 
     // Cluster — PIN-pairing handshake (nvpair-cluster-manager)
     'cluster:get-initial': { request: void; response: ClusterInitialSnapshot }
-    'cluster:invite-node': { request: { ipAddress: string }; response: Invite }
+    'cluster:invite-node': {
+        request: { ipAddress: string; allowRemoteManagement: boolean }
+        response: Invite
+    }
     'cluster:invite-status': { request: { inviteId: string }; response: Invite }
     'cluster:respond-to-invite': {
-        request: { inviteId: string; accept: boolean; pin?: string }
+        request:
+            | { inviteId: string; accept: true; pin: string; allowRemoteManagement: boolean }
+            | { inviteId: string; accept: false }
         response: Invite
+    }
+    'cluster:get-remote-management': { request: void; response: RemoteManagementSnapshot }
+    'cluster:set-remote-management': {
+        request: RemoteManagementSetRequest
+        response: RemoteManagementSnapshot
+    }
+    'engine:remote-management-get': {
+        request: { nodeId: string }
+        response: RemoteManagementCapability
     }
     // Abort a still-pending outbound invite (the inviter's counterpart to a
     // joiner decline): tears down the pairing session, invalidates the PIN, and
@@ -154,6 +171,7 @@ export type WsInvokeResponse<C extends WsInvokeChannel> = WsInvokeChannelMap[C][
 // -----------------------------------------------------------------------------
 
 export interface WsPushChannelMap {
+    'cluster:remote-management-changed': RemoteManagementSnapshot
     // Nodes / cluster state
     'nodes:upsert': NodeItem
     'nodes:remove': string

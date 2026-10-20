@@ -39,7 +39,8 @@ func TestInviteFailureResultRetainsConnectionReason(t *testing.T) {
 		io.Reader
 		io.Writer
 	}{strings.NewReader(""), &output})
-	params, err := json.Marshal(inviteNodeParams{Address: host, Port: &port})
+	allowRemoteManagement := false
+	params, err := json.Marshal(inviteNodeParams{Address: host, Port: &port, AllowRemoteManagement: &allowRemoteManagement})
 	if err != nil {
 		t.Fatal(err)
 	}

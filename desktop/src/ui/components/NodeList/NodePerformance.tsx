@@ -39,6 +39,7 @@ function latencyRow(
 }
 
 function MeasuredProfile({ entry }: { entry: PerformanceEntry }) {
+    const decode = entry.engineDecode ?? entry.decode
     return (
         <Stack gap="density-md" className="min-w-0 border-t border-base pt-3">
             <Text kind="body/semibold/sm" className="[overflow-wrap:anywhere]">
@@ -91,14 +92,20 @@ function MeasuredProfile({ entry }: { entry: PerformanceEntry }) {
                         {
                             id: 'decode',
                             cells: [
-                                'Decode',
-                                measurement(entry.decode?.tokensPerSecond),
-                                `${entry.decode?.samples ?? 0} / ${entry.samples}`
+                                entry.engineDecode ? 'Engine-reported decode' : 'Decode',
+                                measurement(decode?.tokensPerSecond),
+                                `${decode?.samples ?? 0} / ${entry.samples}`
                             ]
                         }
                     ]}
                 />
             </div>
+            {entry.engineDecode && (
+                <Text kind="body/regular/sm" className="text-subtle-color">
+                    Engine-reported decode is a duration-weighted mean of reported rates, which may
+                    be rounded by the engine; it does not reconstruct a token total.
+                </Text>
+            )}
         </Stack>
     )
 }

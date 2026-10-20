@@ -468,6 +468,7 @@ func TestSwitchRecoveryRetainsVetoUntilManagerAdmission(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			h := newSwitchHarness(t)
 			clustertrusttest.Join(t, h.b.clusterDir, "cluster", "target", "peer")
+			grantRemoteManagement(t, h.b.clusterDir, "cluster", "target", "peer", true)
 			p := h.request(t, "retry-latched-veto")
 			reached, release := holdSwitchCompletion(t, h)
 			base := h.engine.answer

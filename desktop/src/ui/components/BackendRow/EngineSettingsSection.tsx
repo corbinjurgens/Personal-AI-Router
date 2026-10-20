@@ -31,8 +31,16 @@ import { usePendingActionsStore } from '@/ui/stores/pending-actions.store'
 import { ConfirmModal } from '@/ui/components/ConfirmModal'
 import getErrorString from '@/shared/utils/get-error-string'
 import { engineManagerName } from '@/shared/utils/engines'
-import { LOCAL_VETO_CODE, localVetoMessage } from '@/shared/constants/service-errors'
+import {
+    LOCAL_VETO_CODE,
+    REMOTE_MANAGEMENT_DENIED_CODE,
+    localVetoMessage
+} from '@/shared/constants/service-errors'
 import { serviceErrorCode } from '@/ui/api/service-transport'
+import {
+    useNodeConfigurationStore,
+    watchNodeManagement
+} from '@/ui/stores/node-configuration.store'
 
 interface Draft {
     serverPort: string
@@ -63,6 +71,8 @@ export function EngineSettingsSection({
     const snapshot = entry?.snapshot
     const connected = useConnectionStore(state => state.connected)
     const isLocalNode = useConnectionStore(state => state.selfId === nodeId)
+    const management = useNodeConfigurationStore(state => state.management.get(nodeId))
+    const permissionReadOnly = !isLocalNode && management?.state !== 'allowed'
     const [base, setBase] = useState<EngineSettingsSnapshot>()
     const [draft, setDraft] = useState<Draft>({ serverPort: '', proxyPort: '', launchText: '' })
     const [errorDialog, setErrorDialog] = useState('')
@@ -84,12 +94,17 @@ export function EngineSettingsSection({
         snapshot?.phase === 'applying'
     const readOnly =
         !connected ||
+        permissionReadOnly ||
         !!entry?.unavailable ||
         !snapshot?.editable ||
         snapshot.format !== 'pair-arguments-v1'
     const locked = readOnly || disabled || applying
 
     useEffect(() => watchEngineSettings(), [])
+    useEffect(
+        () => watchNodeManagement(nodeId, isLocalNode ? undefined : nodeId),
+        [nodeId, isLocalNode]
+    )
     useEffect(() => {
         generation.current++
         if (connected) void useEngineSettingsStore.getState().reload({ nodeId, engine })
@@ -213,10 +228,17 @@ export function EngineSettingsSection({
             pending.endSettings(nodeId, engineType, requestId)
             // A paired node refuses an apply that would start its stopped
             // engine while it is paused on the node itself.
+            const code = serviceErrorCode(cause)
+            if (code === REMOTE_MANAGEMENT_DENIED_CODE)
+                void useNodeConfigurationStore
+                    .getState()
+                    .readManagement(nodeId, isLocalNode ? undefined : nodeId)
             reportError(
-                serviceErrorCode(cause) === LOCAL_VETO_CODE
-                    ? localVetoMessage(`apply these settings, which would start ${engine}`)
-                    : getErrorString(cause)
+                code === REMOTE_MANAGEMENT_DENIED_CODE
+                    ? 'This device refused remote management permission. Your settings draft is kept. Change the permission on that device before trying again.'
+                    : code === LOCAL_VETO_CODE
+                      ? localVetoMessage(`apply these settings, which would start ${engine}`)
+                      : getErrorString(cause)
             )
         }
     }
@@ -227,13 +249,22 @@ export function EngineSettingsSection({
                 <Text kind="body/semibold/sm">Settings</Text>
             </summary>
             <Stack gap="3" className="p-3">
-                {!applying && (entry?.unavailable || readOnly) && (
-                    <Text kind="body/regular/sm">
-                        {entry?.unavailable ||
-                            snapshot?.reason ||
-                            'Waiting for this device’s settings. Older devices require an update to support editing.'}
+                {permissionReadOnly && (
+                    <Text kind="body/regular/sm" role="status">
+                        {management?.message ||
+                            'Reading remote management permission for this device.'}
                     </Text>
                 )}
+                {!applying &&
+                    (entry?.unavailable ||
+                        !snapshot?.editable ||
+                        snapshot.format !== 'pair-arguments-v1') && (
+                        <Text kind="body/regular/sm">
+                            {entry?.unavailable ||
+                                snapshot?.reason ||
+                                'Waiting for this device’s settings. Older devices require an update to support editing.'}
+                        </Text>
+                    )}
                 {!readOnly && !isLocalNode && (
                     <Text kind="body/regular/sm">
                         Ports and options can be changed from here. Managed CORS origin settings

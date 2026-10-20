@@ -548,6 +548,11 @@ func (b *Broker) applyEngineSettings(ctx context.Context, p settings.Request, ca
 	if err := b.authorizeSettingsCallerLocked(caller); err != nil {
 		return settingsReceipt{}, err
 	}
+	// The acceptance recheck under the journal locks: the permission may have
+	// been revoked since the relay was read.
+	if err := b.authorizeRemoteManagement(caller, "settings", p.RequestID); err != nil {
+		return settingsReceipt{}, err
+	}
 	if p.RequestID == "" || len(p.RequestID) > 128 {
 		return settingsReceipt{}, fmt.Errorf("a request identifier is required")
 	}
@@ -688,13 +693,12 @@ func (b *Broker) handleEngineSettings(msg *Message) {
 	}
 }
 
-func (b *Broker) handleSettingsRelay(raw json.RawMessage) {
+func (b *Broker) handleSettingsRelay(source *engineManagerSource, raw json.RawMessage) {
 	var relay settings.Relay
-	if json.Unmarshal(raw, &relay) != nil {
+	if json.Unmarshal(raw, &relay) != nil || relay.ID == "" {
 		return
 	}
-	worker := b.getEngineMgr()
-	if worker == nil {
+	if !b.engineManagerSourceCurrent(source) {
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), settings.RelayBudget)
@@ -705,7 +709,7 @@ func (b *Broker) handleSettingsRelay(raw json.RawMessage) {
 	if len(b.settingsCancels) >= 128 {
 		b.settingsRelayMu.Unlock()
 		cancel()
-		_ = worker.Notify("engine:settings-reply", map[string]string{"id": relay.ID, "error": "too many settings requests"})
+		b.replyPeerRelay(source, b.getEngineMgr(), "engine:settings-reply", map[string]string{"id": relay.ID, "error": "too many settings requests"})
 		return
 	}
 	b.settingsCancels[relay.ID] = cancel
@@ -713,6 +717,10 @@ func (b *Broker) handleSettingsRelay(raw json.RawMessage) {
 	go func() {
 		defer cancel()
 		defer func() { b.settingsRelayMu.Lock(); delete(b.settingsCancels, relay.ID); b.settingsRelayMu.Unlock() }()
+		worker, pairErr := b.awaitEngineMgrPair(ctx, source)
+		if pairErr != nil || !b.engineManagerSourceCurrent(source) {
+			return
+		}
 		var result any
 		var err error
 		if relay.Method == "rebind" {
@@ -724,6 +732,10 @@ func (b *Broker) handleSettingsRelay(raw json.RawMessage) {
 			} else {
 				err = b.rebindSettingsProxy(operation.Engine, operation.Port)
 			}
+		} else if callerErr := requireRemoteCaller(relay.Caller); callerErr != nil {
+			// A peer relay must carry the caller engine-manager verified;
+			// otherwise it would take a local caller's empty-caller path.
+			err = callerErr
 		} else {
 			result, err = b.dispatchEngineSettings(ctx, relay.Method, relay.Request, relay.Caller)
 		}
@@ -737,7 +749,7 @@ func (b *Broker) handleSettingsRelay(raw json.RawMessage) {
 			reply.Error = err.Error()
 			reply.ErrorCode = policyErrorCode(err)
 		}
-		_ = worker.Notify("engine:settings-reply", reply)
+		b.replyPeerRelay(source, worker, "engine:settings-reply", reply)
 	}()
 }
 

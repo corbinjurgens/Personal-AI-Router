@@ -479,16 +479,53 @@ Example `engine:pull-progress` (stdout):
 - `manifest_version` gates manifest-schema evolution: unknown optional fields are ignored (backward-compatible growth); a version higher than supported is rejected.
 
 ### 7.2 Remote engine management (the `ec` surface)
+
+**Management authorization.** `controlServer.routes` is the single route/method
+classification registry. `controlServer.authorize` runs after pinned mTLS
+identity verification and requires a fresh
+`clustertrust.Mesh.RemoteManagement(caller)` allow for every mutation, including
+stop, unload, delete, pull, policy/role/served/resident edits and pause/resume.
+Read-only POST policy get and settings get/preview, GET inventories, model
+exports, events and switch status remain reads. Unclassified routes fail closed;
+denial precedes mutation handlers, streaming headers and side effects. The
+broker rechecks the same predicate at its owning locked acceptance points for
+policy, availability, settings and switch; relayed caller identity comes only
+from the current authenticated worker notification.
+
+HTTP 409 `{"error": "bounded explanation", "code":"remote_management_denied"}`
+maps to RPC `-32012`, independently of `-32010/policy_conflict`,
+`-32011/local_veto` and unpinned 403. Missing, invalid, unsupported, changing or
+incomplete authority denies without a cached allow. A grant does not override
+local veto, private/CORS policy, served/resident protection or target admission.
+Permitted inference is unchanged. Direct operations accept at the fresh `ec`
+gate; subsequent lifecycle/content lock waits belong to that accepted operation.
+Revocation blocks new acceptance, including queued broker writes, but does not
+cancel or roll back already accepted work; existing progress/receipt reads
+remain available. R4 local veto cancellation remains independent.
+An overlapping authorization may already hold a coherent allow snapshot before
+the denial replacement; authorization begun after successful revoke must deny.
+
+Pinned `GET /v1/remote-management` returns only the verified caller's
+`{version:1, allowed, revision, state}`; it cannot select a peer or set a grant.
+`engine:remote-management-get {nodeId}` uses the existing pinned direct/reverse
+client. Effective states are `allowed|denied|unreviewed|unavailable`; a target
+404/405 is reported as `unsupported`, never enforced permission. Only
+cluster-manager writes local grants and migration state. New targets enforce
+the gate against old clients; old pairing clients missing the required local
+boolean receive `-32602`. A pre-PG target or downgrade cannot enforce PG.
+Decision logs contain authenticated caller/target UUIDs, bounded operation
+family/class, decision, permission revision and reason, without request content.
+
 With `--control-port` and a clustered `--cluster-dir`, engine-manager serves a cluster-scoped remote-control surface over pin-based mTLS (`nvpair-shared/clustertrust`): it presents this node's cluster leaf, requires a client cert, and `403`s any caller that isn't a byte-for-byte pinned cluster peer. The listener is bound whenever `--control-port` is set and admits callers by live membership — its leaf is resolved per handshake, so an unclustered node presents none and every handshake is refused — so no restart is needed on `cluster:identity-changed`; the broker registers `ec` whenever a cluster dir is configured. Routes under `/v1`: `GET /engines`, streaming `POST /engines/install` and `/models/pull` (chunked NDJSON — zero+ `{"type":"progress"}` frames then one terminal `{"type":"result"}`/`{"type":"error"}` frame), non-streaming `POST /models/{load,unload,delete}`, non-streaming `POST /engines/{start,stop}` returning `EngineStatus`, and the model-copy source routes `GET /models/files?engine=&model=` (NDJSON: `hashing` progress frames, then a result frame carrying `{engine, model, revision?, files:[{path, size, sha256}]}`) and `GET /models/file?engine=&model=&path=` (one listed file, Range supported). The node-policy routes `POST /node-policy/get`, `POST /node-policy/set` and `POST /node-availability/set` (bodies `{}`, `{policy, expectedPersistedRevision}`, `{state}`; at most 256 KiB; unknown fields refused; the revision is the compare-and-set precondition of a policy set, forwarded unchanged for the broker to enforce) are pin-gated with the caller's identity, clear any `nodeId` so no further hop is possible, and relay to the local broker as `policy:request` carrying the authenticated `caller`; the broker owns and re-authorizes the call. `engine:remote-policy-get` / `-set` and `engine:remote-availability-set` are their client half, addressed by `nodeId`.
 
 The broker's `policy:reply {id, result, error?, errorCode?}` carries a JSON-RPC
 `errorCode` on every failure. Invalid parameters, including missing or malformed
 `expectedPersistedRevision`, invalid policy and invalid availability, use
 `-32602`; revision conflicts use `-32010`; a resume the local veto refuses uses
-`-32011`; save failures and other operational errors use `-32000`. Inbound
+`-32011`; remote-management denial uses `-32012`; save failures and other operational errors use `-32000`. Inbound
 policy routes return HTTP 400 for `-32602`, HTTP 409 with the JSON body
-`{"error": <diagnostic>, "code": "policy_conflict" | "local_veto"}` for `-32010`
-and `-32011`, and a plain-text HTTP 409 for other broker or relay errors. At the
+`{"error": <diagnostic>, "code": "policy_conflict" | "local_veto" | "remote_management_denied"}`
+for `-32010`, `-32011` and `-32012`, and a plain-text HTTP 409 for other broker or relay errors. At the
 origin, HTTP 400 becomes JSON-RPC `-32602`, a typed 409 becomes its code, and
 other HTTP failures become `-32000`; diagnostics are preserved without inferring
 a code from their text. A stale policy draft conflicts before
@@ -513,7 +550,8 @@ loads still running when a local veto arrives (a projection with
 `pausedLocally`, or a local `engine:stop` of that engine) are canceled and
 answer the typed 409; a veto during an install with `start` cancels only the
 start, reported as an error frame with `"code": "local_veto"`. Stop, unload,
-delete, pull, model copy and settings edits are never vetoed, and settings
+delete, pull, model copy and settings edits are not refused by this lifecycle
+veto (remote mutations still require a management grant), and settings
 applies cannot resume an engine saved Off, nor, while the node is paused, a
 stopped one (the broker withholds `resume` from `engine:configure-launch`). The
 broker refuses a paired node's settings apply that would resume one while the

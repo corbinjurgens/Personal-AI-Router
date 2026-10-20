@@ -650,7 +650,7 @@ func TestSwitchRelayCancellationRetiresOnlyWaiter(t *testing.T) {
 	c.waitMu.Lock()
 	c.remoteCancel = operationCancel
 	c.waitMu.Unlock()
-	if !h.b.handleSwitchEngineNotification("engine:switch-cancel", settingsJSON(map[string]string{"id": "waiter"})) {
+	if !h.b.handleSwitchEngineNotification(bindRemoteManagementTestSource(h.b), "engine:switch-cancel", settingsJSON(map[string]string{"id": "waiter"})) {
 		t.Fatal("cancel not handled")
 	}
 	if ctx.Err() == nil || operation.Err() != nil {
@@ -808,6 +808,7 @@ func TestSwitchUncertainAcceptanceStillAllowsIdenticalRetryAndStatus(t *testing.
 func TestSwitchAcceptedRemoteOperationIsCancelledByLocalPause(t *testing.T) {
 	h := newSwitchHarness(t)
 	clustertrusttest.Join(t, h.b.clusterDir, "cluster", "target", "peer")
+	grantRemoteManagement(t, h.b.clusterDir, "cluster", "target", "peer", true)
 	h.active.Store(1)
 	p := h.request(t, "remote-pause")
 	if _, err := h.b.acceptEngineSwitch(context.Background(), p, "peer"); err != nil {
@@ -869,6 +870,7 @@ func TestSwitchLocalOffVetoOnlyMatchesReservedEngines(t *testing.T) {
 func TestSwitchLocalOffReachesManagerWhileTargetReadinessIsHeld(t *testing.T) {
 	h := newSwitchHarness(t)
 	clustertrusttest.Join(t, h.b.clusterDir, "cluster", "target", "peer")
+	grantRemoteManagement(t, h.b.clusterDir, "cluster", "target", "peer", true)
 	p := h.request(t, "held-readiness-off")
 	base := h.engine.answer
 	started := make(chan struct{})
@@ -1133,10 +1135,11 @@ func TestSwitchPublicationRechecksRoutability(t *testing.T) {
 func TestSwitchRelayUsesAuthenticatedCallerAndCodedReply(t *testing.T) {
 	h := newSwitchHarness(t)
 	clustertrusttest.Join(t, h.b.clusterDir, "cluster", "target", "peer")
+	grantRemoteManagement(t, h.b.clusterDir, "cluster", "target", "peer", true)
 	p := h.request(t, "relay-revision")
 	// A valid but stale token exercises the coded refusal path.
 	p.ExpectedRevision = settings.SwitchConfigurationToken(settings.SwitchConfigurationSnapshot{NodeID: "stale"})
-	h.b.forwardEngineNotificationFrom(h.b.activateEngineManagerSource(), "engine:switch-request", settingsJSON(struct {
+	h.b.forwardEngineNotificationFrom(bindRemoteManagementTestSource(h.b), "engine:switch-request", settingsJSON(struct {
 		ID     string                 `json:"id"`
 		Method string                 `json:"method"`
 		Caller string                 `json:"caller"`

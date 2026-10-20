@@ -564,6 +564,13 @@ func (b *Broker) setLocalPolicy(raw, expected json.RawMessage) (nodepolicy.Polic
 // restored from the stored policy. Like a local set, it applies only against
 // the persisted revision the peer's draft is based on (expected).
 func (b *Broker) setPeerPolicy(raw, expected json.RawMessage) (nodepolicy.Policy, error) {
+	return b.setPeerPolicyAs(raw, expected, "")
+}
+
+// setPeerPolicyAs is setPeerPolicy for a verified caller. An empty caller is
+// this node's own path; a paired node's permission is rechecked inside the
+// policy lock, immediately before the merged document could be saved.
+func (b *Broker) setPeerPolicyAs(raw, expected json.RawMessage, caller string) (nodepolicy.Policy, error) {
 	want, err := parseExpectedRevision(expected)
 	if err != nil {
 		return nodepolicy.Policy{}, &invalidParamsError{err}
@@ -571,6 +578,9 @@ func (b *Broker) setPeerPolicy(raw, expected json.RawMessage) (nodepolicy.Policy
 	r := b.nodePolicyRuntime()
 	return b.persistPolicy(func(stored nodepolicy.Policy) (nodepolicy.Policy, error) {
 		// build runs under r.mu. Recovery is the owner's to complete.
+		if err := b.authorizeRemoteManagement(caller, "policy", ""); err != nil {
+			return nodepolicy.Policy{}, err
+		}
 		if err := checkExpectedRevision(stored, want); err != nil {
 			return nodepolicy.Policy{}, err
 		}
@@ -733,6 +743,7 @@ func policyErrorCode(err error) int {
 	var invalid *invalidParamsError
 	var conflict *policyConflictError
 	var veto *localVetoError
+	var denied *remoteManagementDeniedError
 	switch {
 	case errors.As(err, &invalid):
 		return -32602
@@ -740,6 +751,8 @@ func policyErrorCode(err error) int {
 		return codePolicyConflict
 	case errors.As(err, &veto):
 		return codeLocalVeto
+	case errors.As(err, &denied):
+		return codeRemoteManagementDenied
 	}
 	return -32000
 }
@@ -796,7 +809,7 @@ func (b *Broker) dispatchPolicy(ctx context.Context, method string, p policyPara
 		}
 		return policySetResult{Policy: policy, policyActivation: b.activationOf(policy.Revision)}, nil
 	case methodSetAvailability:
-		availability, err := b.setAvailabilityParams(ctx, p, nodepolicy.PausedLocally)
+		availability, err := b.setAvailabilityParams(ctx, p, nodepolicy.PausedLocally, "")
 		if err != nil {
 			return nil, err
 		}
@@ -808,13 +821,14 @@ func (b *Broker) dispatchPolicy(ctx context.Context, method string, p policyPara
 }
 
 // setAvailabilityParams is the node:set-availability request shared by the local
-// method and the paired node's relayed one; origin says which of the two made it.
-func (b *Broker) setAvailabilityParams(ctx context.Context, p policyParams, origin nodepolicy.PauseOrigin) (nodepolicy.Availability, error) {
+// method and the paired node's relayed one; origin says which of the two made it
+// and caller is the verified paired node (empty for a local caller).
+func (b *Broker) setAvailabilityParams(ctx context.Context, p policyParams, origin nodepolicy.PauseOrigin, caller string) (nodepolicy.Availability, error) {
 	state := nodepolicy.Availability(p.State)
 	if state != nodepolicy.Available && state != nodepolicy.Paused {
 		return "", &invalidParamsError{fmt.Errorf("state must be %q or %q", nodepolicy.Available, nodepolicy.Paused)}
 	}
-	return b.setAvailability(ctx, state, origin)
+	return b.setAvailabilityAs(ctx, state, origin, caller)
 }
 
 // relayPolicyToPeer forwards a policy call aimed at another node through
@@ -890,13 +904,12 @@ var relayedPolicyMethods = map[string]string{
 // be pinned, and the call always targets this node: a relayed request never
 // reaches relayPolicyToPeer, so it cannot be forwarded again. A peer sees and
 // changes the peer projection only (servePolicyRelay).
-func (b *Broker) handlePolicyRelay(raw json.RawMessage) {
+func (b *Broker) handlePolicyRelay(source *engineManagerSource, raw json.RawMessage) {
 	var req policyRelayRequest
 	if json.Unmarshal(raw, &req) != nil || req.ID == "" {
 		return
 	}
-	worker := b.getEngineMgr()
-	if worker == nil {
+	if !b.engineManagerSourceCurrent(source) {
 		return
 	}
 	r := b.nodePolicyRuntime()
@@ -905,7 +918,7 @@ func (b *Broker) handlePolicyRelay(raw json.RawMessage) {
 	if len(r.relayCancels) >= 64 {
 		r.mu.Unlock()
 		cancel()
-		_ = worker.Notify(policyRelayReplyMethod, policyRelayReply{ID: req.ID, Error: "too many policy requests", ErrorCode: -32000})
+		b.replyPeerRelay(source, b.getEngineMgr(), policyRelayReplyMethod, policyRelayReply{ID: req.ID, Error: "too many policy requests", ErrorCode: -32000})
 		return
 	}
 	r.relayCancels[req.ID] = cancel
@@ -913,6 +926,10 @@ func (b *Broker) handlePolicyRelay(raw json.RawMessage) {
 	go func() {
 		defer cancel()
 		defer func() { r.mu.Lock(); delete(r.relayCancels, req.ID); r.mu.Unlock() }()
+		worker, err := b.awaitEngineMgrPair(ctx, source)
+		if err != nil || !b.engineManagerSourceCurrent(source) {
+			return
+		}
 		reply := policyRelayReply{ID: req.ID}
 		result, err := b.servePolicyRelay(ctx, req)
 		if err != nil {
@@ -921,7 +938,7 @@ func (b *Broker) handlePolicyRelay(raw json.RawMessage) {
 		} else {
 			reply.Result = result
 		}
-		_ = worker.Notify(policyRelayReplyMethod, reply)
+		b.replyPeerRelay(source, worker, policyRelayReplyMethod, reply)
 	}()
 }
 
@@ -930,7 +947,13 @@ func (b *Broker) servePolicyRelay(ctx context.Context, req policyRelayRequest) (
 	if !ok {
 		return nil, fmt.Errorf("unsupported policy method")
 	}
-	if req.Caller != "" && !clustertrust.Open(b.clusterDir).HasPin(req.Caller) {
+	// A relay notification always carries the peer engine-manager verified.
+	// Without it there is no caller to recheck, so it must not be treated as a
+	// local request.
+	if err := requireRemoteCaller(req.Caller); err != nil {
+		return nil, err
+	}
+	if !clustertrust.Open(b.clusterDir).HasPin(req.Caller) {
 		return nil, fmt.Errorf("the requesting device is no longer paired")
 	}
 	var p policyParams
@@ -943,7 +966,7 @@ func (b *Broker) servePolicyRelay(ctx context.Context, req policyRelayRequest) (
 	case methodPolicyGet:
 		return b.peerPolicy(), nil
 	case methodPolicySet:
-		policy, err := b.setPeerPolicy(p.Policy, p.ExpectedPersistedRevision)
+		policy, err := b.setPeerPolicyAs(p.Policy, p.ExpectedPersistedRevision, req.Caller)
 		if err != nil {
 			return nil, err
 		}
@@ -952,7 +975,7 @@ func (b *Broker) servePolicyRelay(ctx context.Context, req policyRelayRequest) (
 	// The peer sees what its policy:get shows of this node, which has no
 	// activation fields. A resume of a node paused on the node itself is
 	// refused (setAvailability).
-	availability, err := b.setAvailabilityParams(ctx, p, nodepolicy.PausedByPeer)
+	availability, err := b.setAvailabilityParams(ctx, p, nodepolicy.PausedByPeer, req.Caller)
 	if err != nil {
 		return nil, err
 	}
@@ -978,10 +1001,10 @@ func (b *Broker) cancelPolicyRelay(raw json.RawMessage) {
 // handlePolicyEngineNotification observes engine-manager's stream for the
 // policy. It consumes the policy relay's own notifications and reports true for
 // them; everything else is only observed and continues to subscribed clients.
-func (b *Broker) handlePolicyEngineNotification(method string, params json.RawMessage) bool {
+func (b *Broker) handlePolicyEngineNotification(source *engineManagerSource, method string, params json.RawMessage) bool {
 	switch method {
 	case policyRelayRequestMethod:
-		b.handlePolicyRelay(params)
+		b.handlePolicyRelay(source, params)
 		return true
 	case policyRelayCancelMethod:
 		b.cancelPolicyRelay(params)

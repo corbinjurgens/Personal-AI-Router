@@ -239,7 +239,7 @@ Response: `200 OK`.
 ### 7.4 Performance summary transport
 
 This is a separate bounded transport for own performance aggregates, not a
-workload lifecycle event or sample stream. The unchanged schema and strict
+workload lifecycle event or sample stream. The version 2 schema and strict
 validation limits live in `shared/performancewire/wire.go`; the manager does not
 aggregate measurements, persist history, rank nodes or project a UI cache.
 
@@ -286,7 +286,11 @@ consumes connection slots from the lifecycle FIFO or direct cancel path.
 **Support exchange:** before the first summary per route generation and opaque
 Mesh admission identity, send `performance:capabilities` with params `{}` over
 the authenticated events endpoint. The response is `200` with exactly
-`{"version":1}` (bounded to 1024 bytes, strict JSON and no trailing data).
+`{"version":2}` (bounded to 1024 bytes, strict JSON and no trailing data).
+Version 1 summaries and capability replies are rejected; all machines deploy
+the coordinated telemetry version together, with no dual protocol. The manager
+preserves `engineDecode` reported-rate aggregates without recomputing them from
+visible output counts.
 `400` or `501` caches unsupported until the route/admission changes. All other
 failures, invalid replies and unsupported schema versions consume a probe
 budget of three, at most one probe per round; exhausted peers receive no more

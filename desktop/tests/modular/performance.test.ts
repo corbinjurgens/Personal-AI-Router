@@ -38,7 +38,7 @@ function entry(extra: JsonObject = {}): JsonObject {
 
 function summary(extra: JsonObject = {}): JsonObject {
     return {
-        version: 1,
+        version: 2,
         measuringHost: 'peer',
         admissionIncarnation: '42',
         revision: 2,
@@ -152,7 +152,8 @@ describe('bounded broker performance projection', () => {
             totalMs: null,
             loadNs: null,
             prefill: null,
-            decode: null
+            decode: null,
+            engineDecode: null
         })
         expect(result.get('local')).toMatchObject({
             status: 'missing',
@@ -199,6 +200,101 @@ describe('bounded broker performance projection', () => {
         })
     })
 
+    it.each([49, 0])('preserves reported decode rate %s separately from legacy decode', speed => {
+        const engineDecode = { samples: 1, durationNs: 1_000_000_000, tokensPerSecond: speed }
+        const decode = { samples: 1, tokens: 100, durationNs: 1_000_000_000, tokensPerSecond: 100 }
+        const measured = parsePerformanceProjection(
+            projection([peer({ summary: summary({ entries: [entry({ engineDecode, decode })] }) })])
+        ).get('peer')?.summary?.entries[0]
+        expect(measured?.engineDecode).toEqual(engineDecode)
+        expect(measured?.decode).toEqual(decode)
+        expect(measured?.key).toEqual({
+            host: 'peer',
+            engine: 'llamacpp-custom',
+            model: 'model.gguf',
+            fingerprint: 'profile-1'
+        })
+    })
+
+    it('normalizes explicit null reported decode to unknown', () => {
+        const measured = parsePerformanceProjection(
+            projection([peer({ summary: summary({ entries: [entry({ engineDecode: null })] }) })])
+        ).get('peer')?.summary?.entries[0]
+        expect(measured?.engineDecode).toBeNull()
+    })
+
+    it('retains destination Strata identity and fractional native interval without deriving output throughput', () => {
+        const key = {
+            host: 'peer',
+            engine: 'strata-custom',
+            model: 'resolved-child/model',
+            fingerprint: 'strata-runtime-config-profile'
+        }
+        const profile = { engineFamily: 'strata', quantization: 'Q6_K', contextTokens: 16384 }
+        const engineDecode = { samples: 1, durationNs: 400_500_000, tokensPerSecond: 55.1 }
+        const measured = parsePerformanceProjection(
+            projection([
+                peer({
+                    summary: summary({
+                        entries: [entry({ key, profile, engineDecode, decode: null })]
+                    })
+                })
+            ])
+        ).get('peer')?.summary?.entries[0]
+
+        expect(measured?.key).toEqual(key)
+        expect(measured?.profile).toEqual(profile)
+        expect(measured?.engineDecode).toEqual(engineDecode)
+        expect(measured?.decode).toBeNull()
+        expect(measured?.firstTokenMs).toBeNull()
+    })
+
+    const invalidReportedRates: [string, JsonObject][] = [
+        ['missing samples', { durationNs: 100, tokensPerSecond: 1 }],
+        ['null samples', { samples: null, durationNs: 100, tokensPerSecond: 1 }],
+        ['missing duration', { samples: 1, tokensPerSecond: 1 }],
+        ['null duration', { samples: 1, durationNs: null, tokensPerSecond: 1 }],
+        ['zero duration', { samples: 1, durationNs: 0, tokensPerSecond: 1 }],
+        ['excessive duration', { samples: 1, durationNs: 86_400_000_000_001, tokensPerSecond: 1 }],
+        ['missing rate', { samples: 1, durationNs: 100 }],
+        ['null rate', { samples: 1, durationNs: 100, tokensPerSecond: null }],
+        ['negative rate', { samples: 1, durationNs: 100, tokensPerSecond: -1 }],
+        ['nonfinite rate', { samples: 1, durationNs: 100, tokensPerSecond: Infinity }],
+        ['excessive rate', { samples: 1, durationNs: 100, tokensPerSecond: 10_000_001 }],
+        ['unqualified samples', { samples: 2, durationNs: 100, tokensPerSecond: 1 }],
+        ['invented tokens', { samples: 1, durationNs: 100, tokensPerSecond: 1, tokens: 1 }]
+    ]
+    it.each(invalidReportedRates)('rejects reported decode with %s', (_name, engineDecode) => {
+        expect(
+            parsePerformanceProjection(
+                projection([peer({ summary: summary({ entries: [entry({ engineDecode })] }) })])
+            ).size
+        ).toBe(0)
+    })
+
+    it('rejects reported decode coverage that includes protocol-incomplete samples', () => {
+        expect(
+            parsePerformanceProjection(
+                projection([
+                    peer({
+                        summary: summary({
+                            entries: [
+                                entry({
+                                    incomplete: 1,
+                                    engineDecode: {
+                                        samples: 1,
+                                        durationNs: 100,
+                                        tokensPerSecond: 1
+                                    }
+                                })
+                            ]
+                        })
+                    })
+                ])
+            ).size
+        ).toBe(0)
+    })
+
     const invalidEntries: [string, JsonObject][] = [
         ['nonfinite metric', { headerMs: { samples: 1, median: Infinity, p95: Infinity } }],
         ['negative count', { failed: -1 }],
@@ -231,6 +327,7 @@ describe('bounded broker performance projection', () => {
             projection([peer({ summary: summary({ entries: [entry(), entry()] }) })])
         ],
         ['peer revision zero', projection([peer({ summary: summary({ revision: 0 }) })])],
+        ['v1 summary', projection([peer({ summary: summary({ version: 1 }) })])],
         [
             'expired newest sample',
             projection([
@@ -392,6 +489,82 @@ describe('node snapshot performance attachment', () => {
             revision: 3,
             entries: [{ samples: 1, newestAgeMs: 110, oldestAgeMs: 210 }]
         })
+    })
+
+    it('replaces native rate summaries without summing counts or retaining a prior rate', () => {
+        const reported = (revision: number, engineDecode: JsonValue): JsonObject =>
+            projection([
+                peer({
+                    summary: summary({
+                        revision,
+                        entries: [
+                            entry({
+                                samples: 3,
+                                completed: 2,
+                                cancelled: 1,
+                                engineDecode,
+                                decode: null
+                            })
+                        ]
+                    })
+                })
+            ])
+        const first = reported(3, {
+            samples: 2,
+            durationNs: 1_000_000_000,
+            tokensPerSecond: 49
+        })
+        change(first)
+        change(first)
+        expect(state.getNodesInitial().nodes.peer?.performance?.summary?.entries[0]).toMatchObject({
+            samples: 3,
+            completed: 2,
+            cancelled: 1,
+            engineDecode: { samples: 2, durationNs: 1_000_000_000, tokensPerSecond: 49 }
+        })
+
+        change(reported(4, { samples: 1, durationNs: 400_500_000, tokensPerSecond: 0 }))
+        expect(state.getNodesInitial().nodes.peer?.performance?.summary?.entries[0]).toMatchObject({
+            samples: 3,
+            engineDecode: { samples: 1, durationNs: 400_500_000, tokensPerSecond: 0 }
+        })
+        change(reported(5, null))
+        expect(state.getNodesInitial().nodes.peer?.performance?.summary?.entries[0]).toMatchObject({
+            samples: 3,
+            engineDecode: null,
+            decode: null
+        })
+    })
+
+    it('keeps route inputs and engine selections unchanged by native performance replacements', () => {
+        const available = state.getAvailableNodes()
+        const pollTargets = state.getNodeInfoPollTargets()
+        const engines = state.getEngineInitialState()
+        const workloads = state.getWorkloads()
+        const snapshot = projection([
+            peer({
+                summary: summary({
+                    entries: [
+                        entry({
+                            engineDecode: {
+                                samples: 1,
+                                durationNs: 400_500_000,
+                                tokensPerSecond: 55.1
+                            }
+                        })
+                    ]
+                })
+            })
+        ])
+
+        change(snapshot)
+        change(snapshot)
+
+        expect(state.getAvailableNodes()).toEqual(available)
+        expect(state.getNodeInfoPollTargets()).toEqual(pollTargets)
+        expect(state.getEngineInitialState()).toEqual(engines)
+        expect(state.getWorkloads()).toEqual(workloads)
+        expect(vi.mocked(emitBridgePush).mock.calls.map(call => call[0])).toEqual(['nodes:upsert'])
     })
 
     it('attaches cached data to late discovery and never to a different replacement host', () => {

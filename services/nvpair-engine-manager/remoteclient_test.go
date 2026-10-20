@@ -168,3 +168,176 @@ func TestRemoteStartHeaderWaitRemainsBounded(t *testing.T) {
 		t.Fatalf("remote start took %s, want a prompt bounded failure", elapsed)
 	}
 }
+
+// rmTestClient is a remoteClient pointed at a plain httptest server: these tests
+// exercise the wire mapping, not the pin gate.
+func rmTestClient(srv *httptest.Server) *remoteClient {
+	base := http.DefaultTransport.(*http.Transport)
+	return &remoteClient{
+		controlHTTP:      newRemoteHTTPClient(base, time.Second),
+		controlReadyHTTP: newRemoteHTTPClient(base, time.Second),
+		base:             srv.URL,
+	}
+}
+
+func TestRemoteManagementGetReportsOldTargetUnsupported(t *testing.T) {
+	for _, status := range []int{http.StatusNotFound, http.StatusMethodNotAllowed} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				http.Error(w, "no such route", status)
+			}))
+			defer srv.Close()
+
+			capability, err := rmTestClient(srv).getRemoteManagement(context.Background())
+			if err != nil {
+				t.Fatalf("old target read error = %v, want unsupported without an error", err)
+			}
+			if capability.State != remoteManagementStateUnsupported || capability.Allowed {
+				t.Fatalf("old target capability = %+v, want unsupported and not allowed", capability)
+			}
+		})
+	}
+}
+
+func TestRemoteManagementGetPreservesTypedDenial(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		code int
+	}{
+		{name: "remote management denied", body: `{"error":"` + remoteManagementDeniedMessage + `","code":"remote_management_denied"}`, code: codeRemoteManagementDenied},
+		{name: "local veto stays distinct", body: `{"error":"this node was paused on the node itself; resume it there","code":"local_veto"}`, code: codeLocalVeto},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusConflict)
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer srv.Close()
+
+			_, err := rmTestClient(srv).getRemoteManagement(context.Background())
+			var coded *codedError
+			if !errors.As(err, &coded) || coded.code != tc.code {
+				t.Fatalf("permission read error = %v (code %d), want coded %d", err, rpcCode(err), tc.code)
+			}
+			if coded.message == "" {
+				t.Fatal("typed refusal carried no message")
+			}
+		})
+	}
+}
+
+func TestRemoteManagementGetRejectsInconsistentOrUnknownBody(t *testing.T) {
+	cases := []struct {
+		name    string
+		body    string
+		wantErr bool
+		allowed bool
+		state   string
+	}{
+		{
+			// An inconsistent target answer never becomes an allow.
+			name: "allowed flag with a denied state", body: `{"version":1,"allowed":true,"revision":"3","state":"denied"}`,
+			allowed: false, state: remoteManagementStateDenied,
+		},
+		{
+			name: "unrecognized version", body: `{"version":9,"allowed":true,"revision":"3","state":"allowed"}`,
+			wantErr: true,
+		},
+		{
+			name: "unrecognized state", body: `{"version":1,"allowed":true,"revision":"3","state":"maybe"}`,
+			wantErr: true,
+		},
+		{
+			name: "not an object", body: `[]`,
+			wantErr: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer srv.Close()
+
+			capability, err := rmTestClient(srv).getRemoteManagement(context.Background())
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("unrecognized body %s was accepted: %+v", tc.body, capability)
+				}
+				if capability.Allowed {
+					t.Fatalf("unrecognized body %s produced an allow", tc.body)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("body %s error = %v", tc.body, err)
+			}
+			if capability.Allowed != tc.allowed || capability.State != tc.state {
+				t.Fatalf("capability = %+v, want allowed=%v state=%q", capability, tc.allowed, tc.state)
+			}
+		})
+	}
+}
+
+func TestRemoteManagementTypedDenialSurvivesRegularAndStreamingClients(t *testing.T) {
+	deniedBody := `{"error":"` + remoteManagementDeniedMessage + `","code":"remote_management_denied"}`
+
+	// Regular (non-streaming) POST: remoteStatusError keeps the typed code.
+	t.Run("regular", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusConflict)
+			_, _ = w.Write([]byte(deniedBody))
+		}))
+		defer srv.Close()
+
+		_, err := rmTestClient(srv).postJSON(context.Background(), controlStartPath, "fixture", startRequest{Engine: "fixture"})
+		if code := rpcCode(err); code != codeRemoteManagementDenied {
+			t.Fatalf("regular typed error code = %d, want %d (%v)", code, codeRemoteManagementDenied, err)
+		}
+	})
+
+	// Streaming preflight: a typed 409 before any NDJSON header keeps the code.
+	t.Run("stream preflight", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusConflict)
+			_, _ = w.Write([]byte(deniedBody))
+		}))
+		defer srv.Close()
+
+		_, err := rmTestClient(srv).stream(context.Background(), controlInstallPath, map[string]string{"engine": "fixture"}, nil)
+		if code := rpcCode(err); code != codeRemoteManagementDenied {
+			t.Fatalf("stream preflight code = %d, want %d (%v)", code, codeRemoteManagementDenied, err)
+		}
+	})
+
+	// A stream error frame carrying the wire name keeps the code too.
+	t.Run("stream error frame", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/x-ndjson")
+			_, _ = w.Write([]byte(`{"type":"error","message":"` + remoteManagementDeniedMessage + `","code":"remote_management_denied"}` + "\n"))
+		}))
+		defer srv.Close()
+
+		_, err := rmTestClient(srv).stream(context.Background(), controlInstallPath, map[string]string{"engine": "fixture"}, nil)
+		if code := rpcCode(err); code != codeRemoteManagementDenied {
+			t.Fatalf("stream error frame code = %d, want %d (%v)", code, codeRemoteManagementDenied, err)
+		}
+	})
+
+	// The code is never confusable with the local veto or with generic failure.
+	if rpcCode(remoteStatusError("relay", http.StatusConflict, []byte(deniedBody))) != codeRemoteManagementDenied {
+		t.Fatal("remoteStatusError did not preserve the remote-management code")
+	}
+	if code, _ := codeOfWire(remoteManagementWireCode); code != codeRemoteManagementDenied {
+		t.Fatalf("wire name %q does not resolve to %d", remoteManagementWireCode, codeRemoteManagementDenied)
+	}
+	if code, _ := codeOfWire("local_veto"); code == codeRemoteManagementDenied {
+		t.Fatal("local_veto resolves to the remote-management code")
+	}
+}

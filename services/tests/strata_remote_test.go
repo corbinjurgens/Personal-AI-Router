@@ -25,6 +25,7 @@ func TestStrataContractRemoteUnsupported(t *testing.T) {
 	writePin(t, b.ClusterDir, uuidA, certA)
 	writeMembers(t, a.ClusterDir, uuidA, uuidB)
 	writeMembers(t, b.ClusterDir, uuidA, uuidB)
+	managementGrantFixture(t, b.ClusterDir, uuidB, uuidA)
 	// Keep the selected control port distinct from both not-yet-bound runtimes.
 	for attempt := 0; attempt < 8; attempt++ {
 		port := strataContractPort(t)

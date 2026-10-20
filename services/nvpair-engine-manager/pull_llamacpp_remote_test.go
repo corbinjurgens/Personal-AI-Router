@@ -55,6 +55,9 @@ func TestE2ELlamaCPPPullRemoteDisconnectStopsDownload(t *testing.T) {
 	clientCert, clientKey := mintLeaf(t, "pull-client")
 	serverDir := clusterDirFor(t, serverCert, serverKey, map[string][]byte{"pull-client": clientCert})
 	clientDir := clusterDirFor(t, clientCert, clientKey, map[string][]byte{"pull-server": serverCert})
+	// The ec listener runs in the compiled manager below, so the pinned pull
+	// client needs its grant on disk before it starts.
+	grantRemoteManagement(t, serverDir, "1", map[string]bool{"pull-client": true})
 	controlPort, err := freePort()
 	if err != nil {
 		t.Fatalf("allocate ec port: %v", err)

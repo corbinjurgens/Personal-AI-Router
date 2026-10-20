@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"eapnoob"
+	"nvpair-shared/clustertrust"
 )
 
 type outboundPairingFixture struct {
@@ -36,7 +37,7 @@ func newOutboundPairingFixture(t *testing.T) outboundPairingFixture {
 	id := "outbound-test-invite"
 	a.putInvite(&Invite{InviteID: id, FromNodeUUID: a.identity.NodeUUID,
 		ClusterID: "outbound-test-cluster", State: inviteStatePending, CreatedAt: time.Now().UnixMilli()})
-	sess, pin, err := a.runInitialExchange(id, strings.TrimPrefix(server.URL, "http://"), "outbound-test-cluster", a.sessGen.Load())
+	sess, pin, err := a.runInitialExchange(id, strings.TrimPrefix(server.URL, "http://"), "outbound-test-cluster", a.sessGen.Load(), false)
 	if err != nil {
 		t.Fatalf("initial exchange: %v", err)
 	}
@@ -44,6 +45,8 @@ func newOutboundPairingFixture(t *testing.T) outboundPairingFixture {
 	if !ok || sess.completionMode != "inviter-v1" || joinSession.completionMode != "inviter-v1" {
 		t.Fatal("initial exchange did not negotiate inviter-v1")
 	}
+	joinChoice := false
+	joinSession.allowRemoteManagement = &joinChoice
 	return outboundPairingFixture{a, b, sess, joinSession, pin}
 }
 
@@ -177,6 +180,27 @@ func TestOutboundPairingFinalReplyIsIdempotent(t *testing.T) {
 	}
 }
 
+func TestOutboundPairingRemoteManagementChoicesAreIndependent(t *testing.T) {
+	f := newOutboundPairingFixture(t)
+	inviterChoice, joinerChoice := true, false
+	f.session.allowRemoteManagement = &inviterChoice
+	f.joinSession.allowRemoteManagement = &joinerChoice
+	final := f.authenticatedSuccess(t)
+	rr := httptest.NewRecorder()
+	f.joiner.handleOutboundCompletion(rr, &pairingEnvelope{InviteID: f.session.inviteID}, final)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("completion status=%d, want 200", rr.Code)
+	}
+	inviterGrant := clustertrust.Open(f.inviter.clusterDir).RemoteManagement(f.joiner.identity.NodeUUID)
+	joinerGrant := clustertrust.Open(f.joiner.clusterDir).RemoteManagement(f.inviter.identity.NodeUUID)
+	if !inviterGrant.Allowed || inviterGrant.State != "allowed" {
+		t.Fatalf("inviter local allow = %+v", inviterGrant)
+	}
+	if joinerGrant.Allowed || joinerGrant.State != "denied" {
+		t.Fatalf("joiner local deny was overwritten by inviter: %+v", joinerGrant)
+	}
+}
+
 func TestOutboundPairingJoinCommitFailureCanConfirmWithoutPin(t *testing.T) {
 	test := func(name, boundary string) {
 		t.Run(name, func(t *testing.T) {
@@ -260,7 +284,7 @@ func TestOutboundPairingCompetingReadyCommitRechecksStandalone(t *testing.T) {
 	id := "competing-ready-invite"
 	c.putInvite(&Invite{InviteID: id, FromNodeUUID: c.identity.NodeUUID,
 		ClusterID: "other-cluster", State: inviteStatePending, CreatedAt: time.Now().UnixMilli()})
-	sess, pin, err := c.runInitialExchange(id, f.session.joinerAddr, "other-cluster", c.sessGen.Load())
+	sess, pin, err := c.runInitialExchange(id, f.session.joinerAddr, "other-cluster", c.sessGen.Load(), false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -322,7 +346,7 @@ func TestOutboundPairingReceiptRecoversCommitAndFailureAcrossRestart(t *testing.
 				}
 			} else {
 				inv, _ := f.joiner.getInvite(f.session.inviteID)
-				if err := f.joiner.savePairingReceipt(f.joiner.newPairingReceipt(f.joinSession, inv, nil)); err != nil {
+				if _, err := f.joiner.stagePairingReceiptLocked(f.joinSession, inv); err != nil {
 					t.Fatal(err)
 				}
 				// A process crash after receipt and provisional member persistence,

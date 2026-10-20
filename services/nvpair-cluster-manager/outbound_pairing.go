@@ -58,7 +58,8 @@ func (m *Manager) commitJoinerPairing(sess *pairingSession, inv *Invite) (commit
 		}
 		// Both completion transports persist the same authenticated receipt
 		// before the first provisional membership/pin mutation.
-		if commitErr = m.savePairingReceipt(m.newPairingReceipt(sess, inv, nil)); commitErr != nil {
+		receipt, stageErr := m.stagePairingReceiptLocked(sess, inv)
+		if commitErr = stageErr; commitErr != nil {
 			return
 		}
 		admitted := *pi
@@ -88,6 +89,10 @@ func (m *Manager) commitJoinerPairing(sess *pairingSession, inv *Invite) (commit
 			return
 		}
 		m.setClusterIdentity(inv.ClusterID, inv.ClusterFriendlyName)
+		if commitErr = m.completePairingReceiptLocked(receipt); commitErr != nil {
+			commitErr = rollback(commitErr)
+			return
+		}
 		if err := m.clearRemovalProofAfterAdmission(admitted.NodeUUID, admitted.AdmissionEpoch); err != nil {
 			log.Printf("pairing %s: clear removal proof: %v", sess.inviteID, err)
 		}
@@ -198,7 +203,6 @@ func (m *Manager) handleOutboundCompletion(w http.ResponseWriter, env *pairingEn
 		// Persist only after the completed EAP authenticates the transcript. A
 		// receipt confers authority solely to confirm this exact invite, even if
 		// its membership/pin transaction subsequently fails.
-		receipt := m.newPairingReceipt(sess, inv, nil)
 		err = m.commitJoinerPairing(sess, inv)
 		state := inviteStatePaired
 		if err != nil {
@@ -208,10 +212,6 @@ func (m *Manager) handleOutboundCompletion(w http.ResponseWriter, env *pairingEn
 		}
 		if !sess.rollbackPending {
 			m.finishInvite(env.InviteID, state)
-			receipt.State = state
-			if err := m.savePairingReceipt(receipt); err != nil {
-				log.Printf("pairing %s: persist terminal receipt: %v", env.InviteID, err)
-			}
 		} else {
 			state = inviteStatePending
 		}
@@ -256,7 +256,11 @@ func exchangePairingEnvelope(client *http.Client, scheme, addr string, env pairi
 	if resp.StatusCode != http.StatusOK {
 		return out, fmt.Errorf("pairing %s status %d", env.Phase, resp.StatusCode)
 	}
-	err = json.NewDecoder(io.LimitReader(resp.Body, maxBodyBytes)).Decode(&out)
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes))
+	if err != nil {
+		return out, err
+	}
+	err = decodePairingEnvelope(data, &out)
 	return out, err
 }
 
@@ -356,21 +360,22 @@ func (m *Manager) driveOutboundCompletion(sess *pairingSession) {
 		}
 		blob = out.Send
 		if out.Done && out.Success {
-			inv, _ := m.getInvite(sess.inviteID)
 			pi, cert, parseErr := parsePairingInfo(sess.server.PeerInfo())
 			if parseErr == nil && pi.Completion != sess.completionMode {
 				parseErr = fmt.Errorf("completion mode changed in transcript")
 			}
 			if parseErr == nil {
 				sess.peerPairing, sess.peerCert = pi, cert
-				parseErr = m.savePairingReceipt(m.newPairingReceipt(sess, inv, blob))
+				sess.completionResponse = append([]byte(nil), blob...)
 			}
 			if parseErr == nil {
 				parseErr = m.onInviterPaired(sess.inviteID, sess)
 			}
 			if parseErr != nil {
-				m.finishInvite(sess.inviteID, inviteStateFailed)
-				m.deleteSession(sess.inviteID)
+				if !sess.rollbackPending {
+					m.finishInvite(sess.inviteID, inviteStateFailed)
+					m.deleteSession(sess.inviteID)
+				}
 				sess.mu.Unlock()
 				m.maybeLeaveInviteCreatedClusterLocked()
 				m.inviteMu.Unlock()
@@ -471,6 +476,13 @@ func (m *Manager) handlePairingConfirmation(w http.ResponseWriter, r *http.Reque
 			if inv, ok := m.getInvite(env.InviteID); ok {
 				state = inv.State
 				reason = inv.Reason
+			}
+			if state == inviteStatePaired {
+				if receipt, ok := m.getPairingReceipt(env.InviteID); ok {
+					state = m.receiptOutcome(receipt, pi, cert)
+				} else {
+					state = ""
+				}
 			}
 			if env.JoinerEpoch != sess.localAdmissionEpoch {
 				pi = nil

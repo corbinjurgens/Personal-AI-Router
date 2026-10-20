@@ -1,0 +1,5 @@
+data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
+
+data: {"choices":[],"usage":{"prompt_tokens":15,"completion_tokens":11},"timings":{"prompt_n":10,"cache_n":5,"prompt_ms":0.125,"prompt_per_second":80000,"prompt_per_token_ms":0.0125,"predicted_n":11,"predicted_ms":250.5,"predicted_per_second":39.92015968063872,"predicted_per_token_ms":25.05}}
+
+data: [DONE]

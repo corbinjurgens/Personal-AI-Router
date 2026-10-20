@@ -89,8 +89,31 @@ func TestServingRejectsNonIntegerJSON(t *testing.T) {
 	for _, value := range []string{"1.5", "9223372036854775808", "1e100"} {
 		t.Run(value, func(t *testing.T) {
 			var c ServingConfig
-			if err := json.Unmarshal([]byte(`{"version":1,"models":[{"maxOutputTokens":`+value+`}]}`), &c); err == nil {
-				t.Fatal("invalid integer decoded")
+			raw := []byte(`{"version":1,"models":[{"maxOutputTokens":` + value + `}]}`)
+			if err := json.Unmarshal(raw, &c); err != nil {
+				t.Fatal(err)
+			}
+			if c.Validate()["serving.models.0.maxOutputTokens"] == "" {
+				t.Fatal("invalid integer has no field error")
+			}
+			copy := c.Clone()
+			data, err := json.Marshal(copy)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(data) != string(raw) {
+				t.Fatalf("relay changed rejected number: %s", data)
+			}
+			var relayed ServingConfig
+			if err := json.Unmarshal(data, &relayed); err != nil {
+				t.Fatal(err)
+			}
+			if relayed.Validate()["serving.models.0.maxOutputTokens"] == "" {
+				t.Fatal("relay lost numeric field error")
+			}
+			copy.invalidJSON[0] = ' '
+			if c.Validate()["serving.models.0.maxOutputTokens"] == "" || c.invalidJSON[0] != '{' {
+				t.Fatal("clone aliases invalid declaration state")
 			}
 		})
 	}

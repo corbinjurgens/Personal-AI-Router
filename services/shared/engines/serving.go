@@ -4,9 +4,12 @@
 package engines
 
 import (
+	"bytes"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"reflect"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -15,8 +18,67 @@ import (
 // ServingConfig is an operator-approved declaration, not runtime evidence.
 // Models are keyed by their exact served IDs; aliases are not normalized here.
 type ServingConfig struct {
-	Version int            `json:"version"`
-	Models  []ServingModel `json:"models"`
+	Version     int            `json:"version"`
+	Models      []ServingModel `json:"models"`
+	invalidJSON json.RawMessage
+}
+
+var servingIntegerField = regexp.MustCompile(`^serving\.(version|models\.[0-9]+\.(maxOutputTokens|memory\.(hostRamBytes|vramBytes)|artifacts\.[0-9]+\.binding\.sizeBytes))$`)
+
+// UnmarshalJSON keeps numeric range/precision failures in the field-error
+// contract. Other malformed JSON still fails ordinary request decoding.
+func (c *ServingConfig) UnmarshalJSON(data []byte) error {
+	type plain ServingConfig
+	var value plain
+	if err := json.Unmarshal(data, &value); err == nil {
+		*c = ServingConfig(value)
+		return nil
+	}
+	var raw any
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.UseNumber()
+	if err := decoder.Decode(&raw); err != nil {
+		return err
+	}
+	var repair func(any, string) any
+	repair = func(v any, path string) any {
+		switch v := v.(type) {
+		case map[string]any:
+			for key, child := range v {
+				v[key] = repair(child, path+"."+key)
+			}
+		case []any:
+			for i, child := range v {
+				v[i] = repair(child, fmt.Sprintf("%s.%d", path, i))
+			}
+		case json.Number:
+			if _, err := v.Int64(); err != nil && servingIntegerField.MatchString(path) {
+				// Every declared integer rejects negative values in Validate.
+				return json.Number("-1")
+			}
+		}
+		return v
+	}
+	repaired, err := json.Marshal(repair(raw, "serving"))
+	if err != nil {
+		return err
+	}
+	if err := json.Unmarshal(repaired, &value); err != nil {
+		return err
+	}
+	*c = ServingConfig(value)
+	c.invalidJSON = bytes.Clone(data)
+	return nil
+}
+
+// Preserve rejected numbers through broker relays rather than turning a bad
+// declaration into a different, valid one on the next decode.
+func (c ServingConfig) MarshalJSON() ([]byte, error) {
+	if c.invalidJSON != nil {
+		return bytes.Clone(c.invalidJSON), nil
+	}
+	type plain ServingConfig
+	return json.Marshal(plain(c))
 }
 
 type ServingModel struct {
@@ -86,8 +148,8 @@ type ServingReadback struct {
 }
 
 // Validate is structural and performs no file, network or process operations.
-// JSON integer decoding rejects fractional and overflowing int64 values; the
-// tighter safe-integer bound keeps declarations lossless in desktop clients.
+// Numeric decoding failures are retained as field errors; the tighter
+// safe-integer bound keeps declarations lossless in desktop clients.
 func (c *ServingConfig) Validate() map[string]string {
 	errors := map[string]string{}
 	if c == nil {
@@ -178,6 +240,7 @@ func (c *ServingConfig) Clone() *ServingConfig {
 		return nil
 	}
 	copy := *c
+	copy.invalidJSON = bytes.Clone(c.invalidJSON)
 	copy.Models = slices.Clone(c.Models)
 	for i := range copy.Models {
 		m := &copy.Models[i]

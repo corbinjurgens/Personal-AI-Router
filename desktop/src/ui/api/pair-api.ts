@@ -7,7 +7,10 @@ import type {
     AvailableNode,
     ClusterIdentityPayload,
     ClusterNode,
-    Invite
+    Invite,
+    RemoteManagementCapability,
+    RemoteManagementSetRequest,
+    RemoteManagementSnapshot
 } from '@/shared/types/cluster'
 import type { NodeItem } from '@/shared/types/nodes'
 import type { ServiceError } from '@/shared/types/errors'
@@ -61,11 +64,18 @@ export interface IClusterApi {
     /** Fetch cluster bootstrap state: identity, settings, and membership. */
     getInitial(): Promise<ClusterInitialSnapshot>
     /** Start PIN pairing with a remote node; the returned invite carries the PIN to display. */
-    inviteNode(ipAddress: string): Promise<Invite>
+    inviteNode(ipAddress: string, allowRemoteManagement: boolean): Promise<Invite>
     /** Poll the state of an outbound pairing session. */
     inviteStatus(inviteId: string): Promise<Invite>
     /** Respond to an inbound invite: accept with the PIN from the inviter, or decline. */
-    respondToInvite(inviteId: string, accept: boolean, pin?: string): Promise<Invite>
+    respondToInvite(
+        inviteId: string,
+        ...response: [accept: true, pin: string, allowRemoteManagement: boolean] | [accept: false]
+    ): Promise<Invite>
+    getRemoteManagement(): Promise<RemoteManagementSnapshot>
+    setRemoteManagement(request: RemoteManagementSetRequest): Promise<RemoteManagementSnapshot>
+    onRemoteManagementChanged(callback: (snapshot: RemoteManagementSnapshot) => void): () => void
+    getRemoteManagementForNode(nodeId: string): Promise<RemoteManagementCapability>
     /**
      * Abort a still-pending outbound invite this node sent: tears down the
      * pairing session and invalidates the PIN so it can no longer complete.
@@ -181,10 +191,28 @@ export function createPairApi(transport: ServiceTransport): IPairApi {
         },
         cluster: {
             getInitial: () => transport.invoke('cluster:get-initial'),
-            inviteNode: ipAddress => transport.invoke('cluster:invite-node', { ipAddress }),
+            inviteNode: (ipAddress, allowRemoteManagement) =>
+                transport.invoke('cluster:invite-node', { ipAddress, allowRemoteManagement }),
             inviteStatus: inviteId => transport.invoke('cluster:invite-status', { inviteId }),
-            respondToInvite: (inviteId, accept, pin) =>
-                transport.invoke('cluster:respond-to-invite', { inviteId, accept, pin }),
+            respondToInvite: (inviteId, ...response) =>
+                transport.invoke(
+                    'cluster:respond-to-invite',
+                    response[0]
+                        ? {
+                              inviteId,
+                              accept: true,
+                              pin: response[1],
+                              allowRemoteManagement: response[2]
+                          }
+                        : { inviteId, accept: false }
+                ),
+            getRemoteManagement: () => transport.invoke('cluster:get-remote-management'),
+            setRemoteManagement: request =>
+                transport.invoke('cluster:set-remote-management', request),
+            onRemoteManagementChanged: cb =>
+                transport.subscribePush('cluster:remote-management-changed', cb),
+            getRemoteManagementForNode: nodeId =>
+                transport.invoke('engine:remote-management-get', { nodeId }),
             cancelInvite: inviteId => transport.invoke('cluster:cancel-invite', { inviteId }),
             abandonIfSolo: async () => {
                 await transport.invoke('cluster:abandon-if-solo')

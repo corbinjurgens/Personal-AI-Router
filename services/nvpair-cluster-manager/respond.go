@@ -27,9 +27,10 @@ func (e *completionAuthError) Error() string {
 func (e *completionAuthError) Unwrap() error { return e.err }
 
 type respondParams struct {
-	InviteID string  `json:"inviteId"`
-	Accept   *bool   `json:"accept"`
-	Pin      *string `json:"pin"`
+	InviteID              string  `json:"inviteId"`
+	Accept                *bool   `json:"accept"`
+	Pin                   *string `json:"pin"`
+	AllowRemoteManagement *bool   `json:"allowRemoteManagement"`
 }
 
 // handleRespondToInvite submits the PIN (or a decline) for a pending-inbound
@@ -49,6 +50,19 @@ func (m *Manager) handleRespondToInvite(msg *Message) {
 	if p.Accept == nil {
 		m.codec.RespondErrorData(msg.ID, codeInvalidParams, "accept is required", map[string]string{"field": "accept"})
 		return
+	}
+	if *p.Accept && p.AllowRemoteManagement == nil {
+		m.codec.RespondErrorData(msg.ID, codeInvalidParams, "allowRemoteManagement is required", map[string]string{"field": "allowRemoteManagement"})
+		return
+	}
+	if *p.Accept {
+		m.rosterMu.Lock()
+		_, marker, permissionErr := m.readRemoteManagementLocked()
+		m.rosterMu.Unlock()
+		if permissionErr != nil || marker.State != "complete" {
+			m.codec.RespondError(msg.ID, codeInternalError, "remote management unavailable for pairing")
+			return
+		}
 	}
 
 	inv, ok := m.getInvite(p.InviteID)
@@ -145,6 +159,7 @@ func (m *Manager) handleRespondToInvite(msg *Message) {
 			m.codec.RespondErrorData(msg.ID, codeInternalError, "feed pin: "+err.Error(), nil)
 			return
 		}
+		sess.allowRemoteManagement = p.AllowRemoteManagement
 		sess.ready = true
 		sess.mu.Unlock()
 		// The inviter owns every network round trip. Wait only for local state;
@@ -162,6 +177,7 @@ func (m *Manager) handleRespondToInvite(msg *Message) {
 		return
 	}
 
+	sess.allowRemoteManagement = p.AllowRemoteManagement
 	if err := m.runCompletionExchangeLocked(sess, *p.Pin); err != nil {
 		log.Printf("invite %s: completion failed: %v", p.InviteID, err)
 		// Every completion failure is mirrored to the inviter (phase:"fail"),
