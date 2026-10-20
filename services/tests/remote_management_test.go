@@ -991,16 +991,13 @@ func TestRemoteManagementEndorsementAndReadmission(t *testing.T) {
 	waitMembers(t, b, 3)
 	waitMembers(t, c, 3)
 	mesh := clustertrust.Open(filepath.Join(bDir, "cluster"))
-	if !mesh.HasPin(cID.NodeUUID) || !memberUUIDs(t, b)[cID.NodeUUID] {
-		t.Fatal("third-party endorsement did not establish trust")
-	}
 	task1Eventually(t, "endorsed admission durable and unreviewed", 10*time.Second, func() bool {
 		mesh.Refresh()
 		view := mesh.RemoteManagement(cID.NodeUUID)
 		if view.Allowed {
 			t.Fatal("endorsement granted management")
 		}
-		return view.State == "unreviewed"
+		return mesh.HasPin(cID.NodeUUID) && memberUUIDs(t, b)[cID.NodeUUID] && view.State == "unreviewed"
 	})
 	writer := managementPolicyWriterAt(t, bDir)
 	newCaller := func() *http.Client {
