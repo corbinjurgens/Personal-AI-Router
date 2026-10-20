@@ -330,7 +330,7 @@ func TestProxyReverseInterruptedExposedStreamIsNotReplayed(t *testing.T) {
 	var calls atomic.Int32
 	f := newProxyReverseFixture(t, "ollama", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls.Add(1)
-		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Content-Type", "text/plain")
 		if _, err := io.WriteString(w, "first\n"); err != nil {
 			t.Error(err)
 			return
@@ -370,7 +370,7 @@ func TestProxyReverseCancellationEndsExposedStream(t *testing.T) {
 	cancelled := make(chan struct{})
 	f := newProxyReverseFixture(t, "ollama", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls.Add(1)
-		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Content-Type", "text/plain")
 		if _, err := io.WriteString(w, "first\n"); err != nil {
 			t.Error(err)
 			return
@@ -550,6 +550,8 @@ func proxyReverseRoundTrip(t *testing.T, transport http.RoundTripper, target str
 }
 
 func TestProxyReverseStreamsAllEngineServicesAndRuntimePorts(t *testing.T) {
+	const firstEvent = "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"first\"}}]}\n\n"
+	const remainingEvents = "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"second\"}}]}\n\ndata: [DONE]\n\n"
 	for _, engine := range []string{"ollama", "lmstudio", "llamacpp"} {
 		t.Run(engine, func(t *testing.T) {
 			release := make(chan struct{})
@@ -566,7 +568,7 @@ func TestProxyReverseStreamsAllEngineServicesAndRuntimePorts(t *testing.T) {
 				}
 				w.Header().Set("Content-Type", "text/event-stream")
 				w.Header().Set("X-Fixture", "preserved")
-				if _, err := io.WriteString(w, "first\n"); err != nil {
+				if _, err := io.WriteString(w, firstEvent); err != nil {
 					t.Error(err)
 					return
 				}
@@ -579,7 +581,7 @@ func TestProxyReverseStreamsAllEngineServicesAndRuntimePorts(t *testing.T) {
 				case <-r.Context().Done():
 					return
 				}
-				if _, err := io.WriteString(w, "second\n"); err != nil {
+				if _, err := io.WriteString(w, remainingEvents); err != nil {
 					t.Error(err)
 				}
 			}))
@@ -595,11 +597,11 @@ func TestProxyReverseStreamsAllEngineServicesAndRuntimePorts(t *testing.T) {
 			if response.StatusCode != http.StatusOK || response.Header.Get("X-Fixture") != "preserved" {
 				t.Fatalf("status/header = %d/%q", response.StatusCode, response.Header.Get("X-Fixture"))
 			}
-			first := make([]byte, len("first\n"))
+			first := make([]byte, len(firstEvent))
 			if _, err := io.ReadFull(response.Body, first); err != nil {
 				t.Fatal(err)
 			}
-			if string(first) != "first\n" {
+			if string(first) != firstEvent {
 				t.Fatalf("first chunk = %q", first)
 			}
 			close(release)
@@ -607,7 +609,7 @@ func TestProxyReverseStreamsAllEngineServicesAndRuntimePorts(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if string(remaining) != "second\n" {
+			if string(remaining) != remainingEvents {
 				t.Fatalf("remaining body = %q", remaining)
 			}
 			if f.directCalls.Load() != 1 || f.reverseCalls.Load() != 1 {

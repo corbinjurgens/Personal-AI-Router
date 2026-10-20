@@ -220,6 +220,45 @@ response bytes have been exposed, an interrupted stream terminates that attempt;
 new requests can use a restored session. The proxy's existing dispatch policy
 continues to own retries before its commitment point. No listener is added.
 
+**Origin stream integrity (SC-a).** After the first body byte commits an
+inference attempt, the origin forwards complete SSE events or NDJSON objects
+with their original bytes and delimiters. Supported routes are OpenAI
+`/v1/chat/completions` and `/v1/completions` with `stream:true` or an SSE response
+content type, and native Ollama `/api/chat` and `/api/generate` with
+`stream:true` or the native default of true. Explicit `stream:false` keeps the
+raw non-streaming path. OpenAI's omitted flag defaults false; SSE content type
+can still select management. Native streaming accepts `application/json` and
+`application/x-ndjson`. Other routes, including Responses and Anthropic, remain
+unmanaged even when they return SSE.
+
+Successful managed streaming requires protocol completion: OpenAI `[DONE]`, or
+all requested choices' finish reasons followed by clean EOF; Ollama `done:true`.
+The next complete valid event must arrive within 60 seconds, including SSE
+heartbeat comments; partial byte drips do not refresh that idle interval.
+Frames use volatile memory only, with a 1 MiB raw-frame limit and 64 MiB of live
+frame-buffer reservations shared across facades. No response content is logged
+or persisted, and no whole-response prefix is retained.
+
+An interrupted/malformed stream, idle expiry, overflow, exhausted frame budget,
+empty declared stream or wrong streaming media type ends with a protocol error.
+The origin discards a torn trailing frame, emits an OpenAI error event followed
+by `[DONE]` or an Ollama error object, and finishes HTTP framing normally.
+Already forwarded upstream error objects remain failures without a duplicate
+error. HTTP status remains committed (typically 200); the workload instead ends
+`failed` through `workload:errored`, with a bounded operational reason and node.
+Client cancellation/disconnect and failed client writes remain `cancelled`.
+An unmanaged inference copy abort also fails the workload, but its arbitrary
+protocol receives no synthetic error or framing repair. Managed bodies discard
+upstream Content-Length and integrity metadata that would no longer describe
+the body, while retaining endpoint content type, routing metadata and
+engine-owned CORS permissions.
+
+SC-a never dispatches again after commit. Qualified same-model continuation
+(SC-b), its attempt history and UI, and real-engine/native acceptance remain
+pending. Destination ingress remains local-only with no onward dispatch;
+recognizing a terminal frame does not resolve an uncertain strict admission
+hold. Non-streaming whole-body recovery remains outside SC-a.
+
 **Persisted port.** A port chosen at runtime via `set-port` is saved to the
 per-user data dir (`%LocalAppData%\Nvidia Corporation\Personal AI Router` on
 Windows, `~/.config/Nvidia Corporation/Personal AI Router` on Linux) and

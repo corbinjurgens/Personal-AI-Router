@@ -226,6 +226,7 @@ func TestHandleHTTP_RetriesTheOnlyOwner(t *testing.T) {
 	forEachEngine(t, func(t *testing.T, tc engineCase) {
 		var hits atomic.Int32
 		flaky := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
 			if hits.Add(1) <= 2 {
 				w.WriteHeader(http.StatusServiceUnavailable)
 				io.WriteString(w, `{"error":"loading model"}`)
@@ -484,6 +485,7 @@ func TestHandleHTTP_TargetLeavingDiscoveryAbortsAttempt(t *testing.T) {
 	stalled := newStalledEngine(t)
 
 	good := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		io.WriteString(w, `{"done":true}`)
 	}))

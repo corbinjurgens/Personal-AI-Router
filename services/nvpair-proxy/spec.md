@@ -181,14 +181,16 @@ serve it, and spends a bounded amount of effort doing so. Stated precisely:
 
 > While budget remains (§5.1), a failure that happens *before* the engine begins
 > producing output is retried rather than returned. Once output begins, the
-> request is committed to that node and is the caller's to finish with.
+> request is committed to that node. Supported streams then finish with valid
+> protocol completion or an explicit protocol error; no post-commit dispatch
+> occurs in SC-a.
 
 Failures absorbed that way include a retryable status, a transport error, an
 engine that answers its headers and then produces nothing, and a target that
 leaves discovery mid-request. Waiting for an owner to *exist* costs no attempt
 at all, so a node blinking out does not spend the budget.
 
-Four things bound that aim, and a caller should design for them.
+The following limits apply.
 
 **Effort is bounded, and which bound ran out changes what the caller gets.**
 Absorption holds only while budget remains. Past that there are two shapes, both
@@ -196,8 +198,8 @@ detailed in §5.4:
 
 - **The dispatch budget ran out.** The final permitted attempt is never
   retried, so its own failure is the answer: the upstream's status and body
-  passed through unchanged, or a `502` if it failed at the transport and a
-  `504` if it answered and produced nothing.
+  under §5.2's stream-integrity rules, or a `502` if it failed at the transport
+  and a `504` if it answered and produced nothing.
 - **The deadline passed between attempts, or no owner came back.** Nothing is
   in flight to answer, so the proxy generates a `503` with `Retry-After` that
   names which of those it was.
@@ -205,17 +207,19 @@ detailed in §5.4:
 Either way this is a persistent, bounded attempt to start — not an assurance
 that every submission eventually runs.
 
-**"Started" is the guarantee, not "finished".** Commitment ends at the first
-byte of response body (§5.2), so `completed` means the engine began generating,
-not that a whole answer arrived.
+**Commitment and successful completion are distinct.** The first body byte
+commits the destination (§5.2), including a byte of an incomplete frame.
+Supported SSE/NDJSON streams are then read in bounded volatile memory, with
+complete frames preserved and torn tails withheld. `completed` requires valid
+protocol completion and successful delivery. An unrecovered interruption is
+`failed` with an operational reason even though HTTP status remains committed,
+usually at 200. Client cancellation or failed delivery is `cancelled` (§5.4).
 
-**A truncated stream still reports `completed`**, for two reasons that compound.
-To the caller it is the same situation either way — it holds partial output and
-is the only party that can decide what to do with it, which is what the
-retrying harness above this layer is for. And the proxy genuinely cannot tell a
-truncated stream from a complete one: a streaming response carries no
-`Content-Length`, and the end-of-turn marker is engine-specific, so recognising
-it would mean parsing response bodies, which §9 forbids.
+**Protocol coverage is bounded.** SC-a manages OpenAI chat/completions SSE and
+native Ollama chat/generate NDJSON under §5.2's stream rules. Other protocols and
+explicit non-streaming responses retain raw forwarding; a copy abort fails
+their workload but receives no synthetic protocol repair. Qualified same-model
+continuation, private attempt history and its UI belong to pending SC-b.
 
 **A non-streaming request is the weakest case.** Its headers arrive only when
 the response is complete, so "queued inside the engine" and "generating right
@@ -368,6 +372,8 @@ not inventory scope. Its inference routes remain `/v1/*`.
 | `maxDispatchAttempts` | 5 | how many dispatches may fail |
 | `jobDeadline` | 10 minutes from request creation | how long new attempts may keep being started, including while waiting for an owner to exist |
 | `firstBodyTimeout` | `proxyResponseTimeout` (120s) | one attempt's wait for first content, measured from the arrival of headers |
+| `defaultStreamFrameIdle` | 60 seconds | after commit, wait for the next complete valid event on an SC-managed stream; independent of dispatch bounds |
+| `idleClientWriteTimeout` | 30 seconds | a single blocked client write or flush; independent of upstream read idle |
 
 The retry budget applies only to inference requests. Routes not classified in
 the engine's route table are still forwarded verbatim, and some perform
@@ -389,11 +395,12 @@ sequence: the dial (`proxyDialTimeout`, 10s), then headers
 can therefore occupy around 240s — the two 120s caps back to back, since a slow
 dial is a LAN rarity — and nothing caps their sum.
 
-Both bounds are checked before every dispatch and **never truncate an attempt
-already in flight**. Killing one seconds from its first token and then failing
-the job for being out of time would spend the entire wait and discard the
-result. `jobDeadline` is therefore a "no new attempts after" line rather than a
-ceiling on elapsed time, and the worst case is the deadline plus one whole
+The dispatch-count and job-deadline bounds are checked before every dispatch and
+**never truncate an attempt already in flight**. Killing one seconds from its
+first token and then failing the job for being out of time would spend the
+entire wait and discard the result. `jobDeadline` is therefore a "no new attempts
+after" line rather than a ceiling on elapsed time, and the worst case is the
+deadline plus one whole
 attempt: a last dispatch starting just under 600s and running its full 240s
 puts time to first content near fourteen minutes.
 
@@ -459,47 +466,85 @@ single slot:
 | streaming | 12ms, on accept | 35.5s, when the slot freed |
 | non-streaming | 38.9s, withheld until complete | with the headers |
 
-Nothing arrives during that wait — no SSE keepalive, no empty role delta — so a
-byte is real content rather than a heartbeat.
+Nothing arrived during that measured wait — no SSE keepalive or empty role
+delta. The commit gate itself also accepts heartbeat bytes; it does not require
+meaningful model output.
 
-**Only the existence of the byte matters, never its value.** The proxy does not
-look at it: inspecting content would make the gate engine-specific, and it
-would mean reading response data §9 forbids. Whatever the byte is, it is
-spliced back onto the front of the stream so the client receives the response
-intact.
+**Only the existence of the byte matters to the claim, never its value.** The
+gate does not parse it. It is spliced back onto the front of the body before
+the origin's frame reader is installed, so supported stream parsing does not
+move the existing commit/retry boundary.
 
 `EOF` with no bytes counts as a commit. This is defensive rather than expected
 — an inference route answering `200` with an empty body is an engine
 misbehaving — but treating it as a stall would spend the whole budget waiting
 for content that is never coming and then fail a request the engine considered
-answered.
+answered. An empty declared stream then fails protocol validation without
+retrying; an empty non-streaming response retains its raw transport behavior.
 
 A first-content timeout **never** commits, including on the final permitted
 attempt, where it is terminal with `504`. Committing there would leave the peek
 reader blocked on the same body, racing two readers on one stream, and against
 a silent upstream the copy would block with nothing left to interrupt it.
 
-The gate is scoped to inference, and costs a non-streaming response nothing,
-since its headers and body arrive together. That is why the request's own
-`stream` flag never has to be consulted and no per-dialect default has to be
-guessed, and it is what makes the boundary engine-independent — correct whether
-an engine withholds headers or sends them on accept.
+The gate is scoped to inference, and costs a non-streaming response nothing
+when its headers and body arrive together. It remains engine-independent;
+protocol selection happens after its winning commit claim.
 
-**After commit there is no retry.** A stream truncated from there is the
-caller's to finish with (§1.1).
+#### Managed streaming after commit (SC-a)
 
-#### Known gap: a silent upstream after commit
+| Route | Managed response | Non-streaming override |
+| --- | --- | --- |
+| `/v1/chat/completions`, `/v1/completions` | `stream:true`, or response `text/event-stream` when the flag is omitted | Explicit `stream:false`; omission otherwise defaults false |
+| Native Ollama `/api/chat`, `/api/generate` | `stream:true` or omitted flag (native default true); `application/json` or `application/x-ndjson` | Explicit `stream:false` |
 
-There is no upstream read or idle deadline. If a committed engine keeps the
-connection open and stops producing, nothing in this process ends the request:
-the client write deadline needs a write to trip, and a silent upstream produces
-nothing to write. A *crashed* engine is handled — the copy fails and §5.4's
-deferred reporter emits the terminal — but a *frozen* one holds the request
-until the client gives up.
+The stream member must be a single boolean when present; validation does not
+re-encode unrelated request bytes. SSE content type does not enable parsing for
+Responses, Anthropic or other routes. A declared/default stream with an empty
+body, wrong media type or malformed framing fails rather than becoming a raw
+success. Management applies to committed successful HTTP responses; upstream
+error statuses retain §5.4's handling.
 
-Closing it needs a read deadline refreshed on every chunk, and a value chosen
-so a slow-but-healthy generation is not cut off mid-answer. That judgement is
-not made here.
+The reader preserves complete raw frames and their delimiters across arbitrary
+read splits, including CRLF, multiline SSE and UTF-8. It withholds an incomplete
+tail. OpenAI `[DONE]` and Ollama `done:true` definitively terminate a stream.
+Finish-reason-only OpenAI completion requires every requested choice to finish
+and clean EOF. A valid final NDJSON object without a newline is accepted at clean
+EOF. An upstream protocol error is a failure, including one followed by a normal
+terminal marker.
+
+The 60-second complete-event idle interval starts after commit and refreshes on
+complete valid events, including SSE heartbeat comments. Partial byte drips do
+not refresh it. It is separate from the first-body, dispatch and client-write
+bounds. Each client write/flush retains its 30-second deadline, refreshed for
+each operation; it bounds a stuck client, not time spent waiting for generation.
+Frames are held in volatile memory only: at most 1 MiB per raw frame and
+64 MiB of live frame-buffer allocations process-wide across facades, reserved
+before allocation/growth. Exhaustion terminates explicitly rather than waiting
+for memory. No whole-response prefix is retained. The future I aggregate owner
+must absorb this backing accounting; it is not yet present. Real slow-model
+acceptance of the idle default remains pending.
+
+On premature EOF, read failure, idle expiry, malformed framing or a memory bound,
+the old body closes and the torn tail is discarded. OpenAI receives
+`data: {"error":{"message":"stream interrupted: <reason>","type":"server_error","code":"stream_interrupted"}}`
+as an SSE event, then a `[DONE]` event; Ollama receives
+`{"error":"stream interrupted: <reason>"}` as a newline-terminated object.
+Reasons are bounded operational categories, never copied engine error text.
+An already forwarded upstream error is retained without another error frame.
+Failure never fabricates a successful finish reason or `done:true`.
+
+The managed body returns normal EOF so ReverseProxy finishes HTTP framing.
+Before forwarding headers the origin removes Content-Length and body integrity
+metadata invalidated by possible error extension, leaving transfer framing to
+net/http. It preserves endpoint content type, concrete routing headers and
+engine-owned CORS. HTTP status is already committed and is never rewritten to
+502 for a later protocol failure.
+
+**After commit there is no retry or continuation in SC-a.** SC-b's qualified
+same-model continuation remains pending. Destination ingress remains local-only
+and gains no workload/attempt owner or onward route; parsing a terminal marker
+does not establish engine termination or release an uncertain strict hold.
 
 ### 5.3 Per-attempt cancellation
 
@@ -536,7 +581,7 @@ client's answer.
 
 | Upstream status | Pre-commit, budget remaining | Workload state if it is the answer |
 | --- | --- | --- |
-| `2xx` | commits (§5.2) | `completed` |
+| `2xx` | commits (§5.2) | `completed` only after managed protocol completion or successful raw copy; interruption is `failed` |
 | `3xx` | not retried; not expected from an engine, and forwarded verbatim if one sends it | `failed` |
 | `4xx` except `404`/`408`/`429` | not retried — the same request fails identically everywhere, so retrying only spends budget | `failed` |
 | `404` | retried on an inference route only: positive model inventory can be stale | `failed` |
@@ -551,7 +596,7 @@ These are the statuses the proxy itself returns:
 | Condition | Status |
 | --- | --- |
 | No owner advertises the model, nothing dispatched | `502` |
-| Final permitted attempt returned a status | that status and body, unchanged |
+| Final permitted attempt returned a status | that status; body follows §5.2's managed/raw rules |
 | Final permitted attempt failed at the transport | `502` |
 | Final permitted attempt answered but produced no content | `504` |
 | The loop ended between attempts, nothing in flight | `503` with `Retry-After` |
@@ -578,8 +623,10 @@ The resulting workload state:
 
 | Outcome | State |
 | --- | --- |
-| committed 2xx, streamed to the end | `completed` |
-| committed 2xx, truncated by the node dying | `completed` |
+| committed 2xx, managed stream reaches protocol completion and delivery succeeds | `completed` |
+| committed 2xx, managed stream interrupted or upstream reports a protocol error | `failed`, with operational node/reason |
+| committed 2xx, unmanaged raw copy completes | `completed`; protocol completeness is not inspected |
+| committed 2xx, unmanaged inference copy aborts | `failed`; no synthetic protocol repair |
 | committed non-2xx | `failed` |
 | client disconnected, or dead-client write deadline tripped | `cancelled` |
 | cancelled by our own shutdown | `cancelled` |
@@ -589,13 +636,22 @@ The resulting workload state:
 engine, node, or routing failure. Client disconnects and shutdown cancellation
 therefore do not appear in the failed bucket.
 
-**Reporting is deferred.** A mid-copy error is never returned to the handler:
-`httputil.ReverseProxy` converts it into `panic(http.ErrAbortHandler)` when
-running under a real server. That panic bypasses ordinary code following the
-proxy call, so terminal workload and request reporting must run in a `defer`.
-The deferred reporter records the abort as operational detail, emits the
-terminal event, and re-panics so `http.Server` still closes the connection.
-Reservation release is also deferred so it survives the same unwind.
+**Reporting is deferred.** A managed stream reports its explicit result to the
+finalizer separately from the successful HTTP body copy: clean EOF after a
+synthetic error must not become workload success. Failures use the existing
+`workload:errored` payload with state `failed` and
+`error = "stream interrupted after output began on <node>: <reason>"`.
+`proxy/request.Error` also carries the sanitized operational reason. Neither
+the protocol nor the workload schema gains a terminal state.
+
+An unmanaged mid-copy error is not returned to the handler:
+`httputil.ReverseProxy` converts it into `panic(http.ErrAbortHandler)` under a
+real server. Deferred reporting records failure and re-panics so `http.Server`
+closes that response. Client write/flush failure and parent cancellation take
+precedence as `cancelled`, including when an upstream failure races them.
+Managed idle cancellation is private to the reader and cannot cancel the parent
+request into a false `cancelled` result. Reservation and ticket releases remain
+deferred under their existing certainty rules.
 
 That panic is not the failure mode §3.2 describes, despite the shared word.
 `http.ErrAbortHandler` is a sentinel `net/http` defines to mean "abandon this
@@ -621,6 +677,12 @@ merges by state rank and rejects a lower one, so a job that claimed `running` at
 dispatch time could not return to `queued` for its next attempt and the retry
 would be invisible. Keeping the loop inside one state, with `scheduledOn`
 carrying the detail, is the only shape that store can represent.
+
+Terminal emission remains exactly once, including disconnect/copy-unwind races;
+an interrupted stream cannot later resurrect as `completed`. Its committed
+placement and workload identity are retained, with the bounded reason exposed
+through the existing failure display. The private continuation timeline and
+placement changes planned for SC-b are not shipped here.
 
 Every event carries `seq`, the producer's event counter from 1. The
 workload-manager's inter-node dedup is a permanent set, so a retry returning to
@@ -659,6 +721,12 @@ before the response is complete. A caller that cares should prefer a streaming
 request, where the first content byte gives the proxy the evidence it lacks
 here.
 
+SC-a does not buffer a whole non-streaming response or recover it after commit.
+Explicit `stream:false` and unsupported protocols keep raw copying and lack the
+managed complete-event idle bound and protocol-completion check. A transport
+abort is still reported as failed; a clean raw EOF cannot prove semantic
+completion for those protocols.
+
 ### 5.7 Accepted behavior
 
 **An abandoned attempt may still run inside the engine.** Neither engine PAIR
@@ -669,6 +737,11 @@ the abandoned copy keeps its node busy.
 Whether closing the connection cancels anything upstream is **unverified** —
 plausible, engine-specific, and never measured. The behavior above is stated as
 the pessimistic case for that reason.
+
+SC-a closes an interrupted stream's body and bounds its own reader lifetime;
+this is not proof that the engine stopped computing. Destination strict holds
+therefore retain their existing uncertain-termination handling. Neither a
+synthetic error nor a parsed model end marker creates new release authority.
 
 This is accepted rather than overlooked: those internal queues are invisible and
 un-retargetable, which is the problem the retry policy works around rather than
@@ -770,6 +843,12 @@ credentials, or pairing data. Operational metadata only — engine, model, job i
 node id, path, stream flag, normalized error text — and keep per-request routing
 detail below info level.
 
+Bounded volatile reads for first-body gating and SC-a frame validation are
+permitted (§5.2); persistence and logging of that content are prohibited. Frame
+buffers are released when their stream ends. Upstream protocol error text may
+remain in its forwarded frame but never enters logs or workload/request failure
+metadata; those use bounded operational reasons.
+
 The log component is the **process** (`nvpair-proxy`), because at process init
 there is no engine to name. Facade-scoped records carry an `engine` field, which
 is what keeps a line attributable when several facades share the sink.
@@ -790,6 +869,11 @@ new supervisor, and no new relay wiring.
 | No advertised owner for the model | Local `502`, no engine contacted |
 | All owners refuse retryably | Last upstream status surfaced |
 | Transport error with candidates left | Forget the node's confirmed address, fail over |
+| Supported stream cuts off after commit | Discard torn tail, send protocol error and clean HTTP EOF; committed status unchanged, workload `failed` with node/reason; no redispatch |
+| Supported stream stops completing events for 60 seconds | Close upstream, send protocol error, workload `failed`; partial drips do not extend the interval |
+| Declared/default stream empty, wrong media type, malformed, over frame limit or frame budget | Protocol error and workload `failed`, with bounded operational reason |
+| Upstream sends a protocol error | Preserve the error frame without a duplicate error; workload `failed` |
+| Unmanaged inference response copy aborts | Workload `failed`; HTTP connection aborts without protocol repair |
 | Client disconnects mid-stream | Terminal workload event emitted at once; upstream cancelled |
 | Broker link closed | Facades stop serving, then the shared transport pool closes |
 | Admission refuses work here | `503` with `X-PAIR-Admission` and `Retry-After`; a router fails over (§12.2) |

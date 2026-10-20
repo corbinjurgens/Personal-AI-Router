@@ -46,7 +46,7 @@ func TestLoopbackAliasUsesPrimaryRouterAndSurvivesPrimaryRebind(t *testing.T) {
 	rec := &recRW{}
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(w, `{"message":"from-upstream"}`)
+		_, _ = io.WriteString(w, `{"message":"from-upstream","done":true}`)
 	}))
 	defer upstream.Close()
 

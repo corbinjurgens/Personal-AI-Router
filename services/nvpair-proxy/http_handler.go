@@ -11,9 +11,11 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"mime"
 	"net/http"
 	"net/http/httputil"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -308,7 +310,98 @@ type retrySignal struct{}
 
 func (retrySignal) Error() string { return "nvpair-proxy: retry next candidate" }
 
+// originStreamRequest selects framing only for the supported inference routes.
+// It reads the stream flag without re-encoding any part of the request.
+type originStreamRequest struct {
+	protocol streamProtocol
+	declared bool
+	disabled bool
+	choices  int
+}
+
+func parseOriginStreamRequest(path string, body []byte) (originStreamRequest, error) {
+	s := originStreamRequest{choices: 1}
+	switch path {
+	case "/v1/chat/completions", "/v1/completions":
+		s.protocol = streamProtocolSSE
+	case "/api/chat", "/api/generate":
+		s.protocol, s.declared = streamProtocolNDJSON, true
+	default:
+		return s, nil
+	}
+	// Invalid JSON remains the engine's responsibility. A stream member in a
+	// valid object, however, must be an unambiguous JSON boolean.
+	if !json.Valid(body) {
+		return s, nil
+	}
+	dec := json.NewDecoder(bytes.NewReader(body))
+	opening, err := dec.Token()
+	if err != nil || opening != json.Delim('{') {
+		return s, nil
+	}
+	seen := false
+	for dec.More() {
+		key, err := dec.Token()
+		if err != nil {
+			return s, err
+		}
+		var value json.RawMessage
+		if err := dec.Decode(&value); err != nil {
+			return s, err
+		}
+		if key == "stream" {
+			if seen || (string(value) != "true" && string(value) != "false") {
+				return s, fmt.Errorf("stream must be a single boolean member")
+			}
+			seen = true
+			s.declared = string(value) == "true"
+			s.disabled = !s.declared
+		}
+		if key == "n" {
+			var n int
+			if json.Unmarshal(value, &n) == nil && n > 0 {
+				s.choices = n
+			}
+		}
+	}
+	return s, nil
+}
+
+func (s originStreamRequest) manages(contentType string) (bool, bool) {
+	media, _, _ := mime.ParseMediaType(contentType)
+	validMedia := media == "text/event-stream"
+	if s.protocol == streamProtocolNDJSON {
+		validMedia = media == "application/x-ndjson" || media == "application/json"
+	}
+	return s.protocol != streamProtocolUnknown && !s.disabled &&
+		(s.declared || (s.protocol == streamProtocolSSE && validMedia)), validMedia
+}
+
+func clearOriginStreamIntegrity(header http.Header) {
+	for _, name := range []string{"Content-Length", "Content-MD5", "Digest", "Content-Digest", "Repr-Digest", "ETag", "Content-Encoding"} {
+		header.Del(name)
+	}
+}
+
+type originStreamBody struct {
+	*streamFrameReader
+	response *http.Response
+}
+
+func (b *originStreamBody) Close() error {
+	err := b.streamFrameReader.Close()
+	// Transport populates trailers at EOF, after ModifyResponse. ReverseProxy
+	// closes the body before copying those trailers to the client.
+	clearOriginStreamIntegrity(b.response.Trailer)
+	return err
+}
+
 func (f *facade) handleHTTP(w http.ResponseWriter, r *http.Request) {
+	f.handleHTTPWithStreamIdle(w, r, defaultStreamFrameIdle)
+}
+
+// The idle interval belongs to this request's reader, never a mutable global.
+func (f *facade) handleHTTPWithStreamIdle(w http.ResponseWriter, r *http.Request, streamIdle time.Duration) {
 	p := f.host
 	start := time.Now()
 
@@ -428,6 +521,19 @@ func (f *facade) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	// keeps the precedence its own test pins.
 	if rejectAmbiguous() {
 		return
+	}
+	var streamRequest originStreamRequest
+	if isInf {
+		streamRequest, err = parseOriginStreamRequest(r.URL.Path, bodyBytes)
+		if err != nil {
+			writeIngressError(w, http.StatusBadRequest, "invalid-stream", "stream must be a single boolean member")
+			_ = f.notify("proxy/request", RequestEvent{
+				ID: reqID, Method: r.Method, Path: r.URL.Path,
+				Status: http.StatusBadRequest, Duration: time.Since(start).Milliseconds(),
+				Error: "invalid stream flag",
+			})
+			return
+		}
 	}
 	routingModel := ""
 	if isInf {
@@ -708,6 +814,7 @@ func (f *facade) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	// assigned at the commit point as well as after the loop, because the
 	// post-loop assignment does not always run — see finalize below.
 	var committedSC *statusCapture
+	var committedStream *streamFrameReader
 
 	// finalize reports this request's outcome, and it is deferred because a
 	// mid-copy error is never returned to us: ReverseProxy converts one into
@@ -730,14 +837,18 @@ func (f *facade) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	// first and the node is still counted as loaded while we report.
 	defer func() {
 		aborted := recover()
-		// An aborted copy is operational detail, not a verdict on the job. A
-		// stream that already committed a 2xx is a completion whether or not
-		// it reached its end, so this never feeds the terminal state below,
-		// and proxyErr is left untouched for that reason.
-		reportErr := proxyErr
-		if aborted != nil && reportErr == "" {
-			reportErr = "upstream stream aborted mid-response"
+		// A managed copy ends with normal HTTP EOF even on protocol failure;
+		// its separate result, rather than the committed status, is decisive.
+		if committedStream != nil {
+			result := committedStream.Result()
+			if result.Outcome == streamOutcomeInterrupted || result.Outcome == streamOutcomeUpstreamError {
+				proxyErr = fmt.Sprintf("stream interrupted after output began on %s: %s", servedNodeID, result.Reason)
+			}
 		}
+		if aborted != nil && proxyErr == "" {
+			proxyErr = fmt.Sprintf("stream interrupted after output began on %s: upstream response copy aborted", servedNodeID)
+		}
+		reportErr := proxyErr
 		if committedSC != nil && finalStatus == 0 {
 			// The panic skipped the post-loop assignment, but the committed
 			// capture still carries the status the upstream sent.
@@ -795,7 +906,7 @@ func (f *facade) handleHTTP(w http.ResponseWriter, r *http.Request) {
 				// without a FIN never cancels the context, so the write
 				// deadline is what surfaces it. Classified identically.
 				emitTerminal("cancelled", "client connection lost: "+committedSC.wroteErr.Error())
-			case proxyErr != "" || finalStatus >= http.StatusBadRequest:
+			case proxyErr != "" || finalStatus < http.StatusOK || finalStatus >= http.StatusMultipleChoices:
 				msg := proxyErr
 				if msg == "" {
 					msg = fmt.Sprintf("upstream returned HTTP %d", finalStatus)
@@ -876,8 +987,8 @@ func (f *facade) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	//
 	// Retrying is only possible before the first byte reaches the client; past
 	// the commit point we are bound to that node, and a stream truncated from
-	// there is the caller's to resume. proxy/request-started fires at the commit
-	// so it names the node that actually served. The self-forward guard lives in
+	// there fails explicitly for supported streams. proxy/request-started fires
+	// at the commit so it names the node that actually served. The self-forward guard lives in
 	// resolveCandidates.
 	// The budget is for inference only. Everything not in the engine's route
 	// table is forwarded verbatim, and some of those are state-changing: a
@@ -1213,10 +1324,8 @@ func (f *facade) handleHTTP(w http.ResponseWriter, r *http.Request) {
 				// Only for inference: a control endpoint's headers mean what
 				// they say, and the model-list fan-out has its own client.
 				// Waiting here costs a non-streaming response nothing, since
-				// its headers and body arrive together, so the request's own
-				// stream flag never has to be consulted — which also avoids
-				// guessing per-dialect defaults (Ollama streams by default,
-				// the OpenAI routes do not).
+				// its headers and body arrive together. Framing is selected
+				// separately, after the winning claim.
 				var peeked io.ReadCloser
 				if isInf {
 					body, err := awaitFirstBody(resp.Body, firstBodyTimeout)
@@ -1272,6 +1381,26 @@ func (f *facade) handleHTTP(w http.ResponseWriter, r *http.Request) {
 				// lost claim leaves the body untouched for ReverseProxy to close.
 				if peeked != nil {
 					resp.Body = peeked
+				}
+				if managed, validMedia := streamRequest.manages(resp.Header.Get("Content-Type")); isInf && managed && resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices {
+					reader, err := newStreamFrameReader(streamFrameConfig{
+						Protocol: streamRequest.protocol, Upstream: resp.Body,
+						Parent: r.Context(), IdleTimeout: streamIdle, Choices: streamRequest.choices,
+					})
+					if err != nil {
+						return err
+					}
+					if !validMedia || (resp.Header.Get("Content-Encoding") != "" && !strings.EqualFold(resp.Header.Get("Content-Encoding"), "identity")) {
+						// The frame reader still owns the protocol error and EOF.
+						reader.mu.Lock()
+						reader.finishInterruptedLocked(streamInterruptReasonMalformed)
+						reader.mu.Unlock()
+					}
+					resp.Body = &originStreamBody{streamFrameReader: reader, response: resp}
+					committedStream = reader
+					resp.ContentLength = -1
+					clearOriginStreamIntegrity(resp.Header)
+					clearOriginStreamIntegrity(resp.Trailer)
 				}
 				// Name what actually answered (FORK_DESIGN.md §3.8). Set on the
 				// committed response only, so a failed-over attempt's headers
