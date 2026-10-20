@@ -170,6 +170,7 @@ func newStreamingStallEngine(t *testing.T) *stallingEngine {
 	e := &stallingEngine{received: make(chan struct{}, 8), cancelled: make(chan struct{}, 8), release: make(chan struct{})}
 	e.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		_, _ = io.WriteString(w, `{"token":"first"}`+"\n")
 		w.(http.Flusher).Flush()

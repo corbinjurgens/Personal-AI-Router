@@ -4,9 +4,11 @@
 package main
 
 import (
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -80,6 +82,7 @@ func TestHandleHTTP_HeadersWithoutContentFailsOver(t *testing.T) {
 		good := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			b, _ := io.ReadAll(r.Body)
 			servedBody = string(b)
+			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusOK)
 			io.WriteString(w, `{"done":true}`)
 		}))
@@ -162,6 +165,7 @@ func TestHandleHTTP_FirstBytePreservedOnCommit(t *testing.T) {
 	forEachEngine(t, func(t *testing.T, tc engineCase) {
 		const payload = `{"response":"whole body intact","done":true}`
 		good := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusOK)
 			io.WriteString(w, payload)
 		}))
@@ -183,38 +187,78 @@ func TestHandleHTTP_FirstBytePreservedOnCommit(t *testing.T) {
 	})
 }
 
-// TestHandleHTTP_EmptyBodyCommits: a 200 with no body at all commits rather
-// than burning the budget waiting for content that is never coming (spec §5.2).
+// An empty 200 commits promptly, but only a non-streaming response can complete
+// without a protocol end marker.
 func TestHandleHTTP_EmptyBodyCommits(t *testing.T) {
 	// Long, so a wait would be unmistakable: if the empty body were treated as
 	// a stall, the guard below would trip well before this expires.
 	setForTest(t, &firstBodyTimeout, 30*time.Second)
 
 	forEachEngine(t, func(t *testing.T, tc engineCase) {
-		empty := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.WriteHeader(http.StatusOK)
-		}))
-		defer empty.Close()
+		test := func(name, streamFlag string, streaming bool) {
+			t.Run(name, func(t *testing.T) {
+				empty := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					mediaType := "application/json"
+					if streaming && tc.profile.Name != "ollama" {
+						mediaType = "text/event-stream"
+					}
+					w.Header().Set("Content-Type", mediaType)
+					w.WriteHeader(http.StatusOK)
+				}))
+				defer empty.Close()
 
-		disc := NewDiscovery()
-		disc.AddManual(nodeForModel(t, "empty", empty.URL, tc.advertisedModel))
-		p := testProxy(tc.profile, disc, tc.profile.FacadePort)
+				disc := NewDiscovery()
+				disc.AddManual(nodeForModel(t, "empty", empty.URL, tc.advertisedModel))
+				writer := &recordingWriter{}
+				p := newTestProxy(tc.profile, NewCodec(writer), disc, tc.profile.FacadePort)
+				rec := httptest.NewRecorder()
+				done := make(chan struct{})
+				go func() {
+					defer close(done)
+					body := strings.TrimSuffix(tc.inferenceBody(), "}") + `,"stream":` + streamFlag + `}`
+					p.soleFacade().handleHTTP(rec, httptest.NewRequest(http.MethodPost, tc.inferencePath, strings.NewReader(body)))
+				}()
 
-		done := make(chan int, 1)
-		go func() {
-			rec := httptest.NewRecorder()
-			p.soleFacade().handleHTTP(rec, tc.inferenceRequest())
-			done <- rec.Code
-		}()
-
-		select {
-		case code := <-done:
-			if code != http.StatusOK {
-				t.Fatalf("status = %d, want 200", code)
-			}
-		case <-time.After(5 * time.Second):
-			t.Fatal("an empty 200 body blocked on the first-byte wait instead of committing")
+				select {
+				case <-done:
+				case <-time.After(5 * time.Second):
+					t.Fatal("an empty 200 body blocked on the first-byte wait instead of committing")
+				}
+				if rec.Code != http.StatusOK {
+					t.Fatalf("status = %d, want committed 200", rec.Code)
+				}
+				terminals := append(notificationsOf(t, writer, workloadCompletedMethod), notificationsOf(t, writer, workloadErroredMethod)...)
+				if len(terminals) != 1 {
+					t.Fatalf("terminal notifications = %d, want exactly one", len(terminals))
+				}
+				var terminal workloadParams
+				if err := json.Unmarshal(terminals[0], &terminal); err != nil {
+					t.Fatalf("decode workload terminal: %v", err)
+				}
+				if !streaming {
+					if terminal.WorkloadInfo.State != "completed" || rec.Body.Len() != 0 {
+						t.Fatalf("empty non-streaming response: state = %q, bytes = %d", terminal.WorkloadInfo.State, rec.Body.Len())
+					}
+					return
+				}
+				if terminal.WorkloadInfo.State != "failed" || terminal.WorkloadInfo.Error == nil || *terminal.WorkloadInfo.Error == "" {
+					t.Fatalf("empty declared stream terminal = %+v, want failed with reason", terminal.WorkloadInfo)
+				}
+				errorFrame := strings.TrimSpace(rec.Body.String())
+				if tc.profile.Name != "ollama" {
+					events := strings.Split(errorFrame, "\n\n")
+					if len(events) != 2 || events[1] != "data: [DONE]" || !strings.HasPrefix(events[0], "data: ") {
+						t.Fatalf("empty stream SSE terminator = %q", errorFrame)
+					}
+					errorFrame = strings.TrimPrefix(events[0], "data: ")
+				}
+				if frame := decodeJSONBody(t, errorFrame); frame["error"] == nil {
+					t.Fatal("empty declared stream has no protocol error")
+				}
+			})
 		}
+		test("declared stream fails after commit", "true", true)
+		test("non-streaming empty body completes", "false", false)
 	})
 }
 

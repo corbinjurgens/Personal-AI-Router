@@ -353,7 +353,7 @@
 - `method (var)  (errors.go)`
 - `method (var)  (policy.go)`
 - `method (var)  (proxy.go, 2 sites)`
-- `method (var)  (rpcworker.go, 2 sites)`
+- `method (var)  (rpcworker.go, 3 sites)`
 - `method (var)  (workload_projection.go, 2 sites)`
 
 ## nvpair-workload-manager

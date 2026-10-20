@@ -286,6 +286,7 @@ func newRecordingEngine(t *testing.T, status int) *recordingEngine {
 		e.bodies = append(e.bodies, string(b))
 		e.headers = append(e.headers, r.Header.Clone())
 		e.mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(status)
 		_, _ = io.WriteString(w, `{"done":true}`)
 	}))

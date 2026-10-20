@@ -155,6 +155,7 @@ func TestHandlePlain_EngineCredentialedPreflightPreserved(t *testing.T) {
 func TestHandleHTTP_EngineCORSPolicyPreserved(t *testing.T) {
 	forEachEngine(t, func(t *testing.T, tc engineCase) {
 		engine := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
 			w.Header().Set("Access-Control-Allow-Origin", "https://app.example")
 			w.Header().Set("Access-Control-Allow-Credentials", "true")
 			w.WriteHeader(http.StatusOK)
@@ -182,6 +183,7 @@ func TestHandleHTTP_EngineCORSPolicyPreserved(t *testing.T) {
 func TestHandleHTTP_EngineCredentialsWithoutOriginPreserved(t *testing.T) {
 	forEachEngine(t, func(t *testing.T, tc engineCase) {
 		engine := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
 			w.Header().Set("Access-Control-Allow-Credentials", "true")
 			w.WriteHeader(http.StatusOK)
 			io.WriteString(w, `{"done":true}`)
@@ -212,6 +214,7 @@ func TestHandleHTTP_HappyPathSingleNode(t *testing.T) {
 		good := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			b, _ := io.ReadAll(r.Body)
 			gotBody = string(b)
+			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusOK)
 			io.WriteString(w, `{"done":true}`)
 		}))
@@ -300,6 +303,7 @@ func TestHandleHTTP_FailoverOn503(t *testing.T) {
 		good := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			b, _ := io.ReadAll(r.Body)
 			gotBody = string(b)
+			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusOK)
 			io.WriteString(w, `{"done":true}`)
 		}))
@@ -366,6 +370,7 @@ func TestHandleHTTP_404FailoverInferenceOnly(t *testing.T) {
 		}))
 		defer missing.Close()
 		has := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusOK)
 			io.WriteString(w, `{"done":true}`)
 		}))
@@ -684,7 +689,11 @@ func TestHandleHTTP_StrictModelRouting(t *testing.T) {
 			if string(body) != tc.inferenceBody() {
 				t.Errorf("matching node got body %q", body)
 			}
+			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusOK)
+			if _, err := io.WriteString(w, `{"done":true}`); err != nil {
+				t.Errorf("write matching-model response: %v", err)
+			}
 		}))
 		defer match.Close()
 
@@ -763,7 +772,11 @@ func TestHandleHTTP_InferenceRouting(t *testing.T) {
 						}
 						gotBody = string(body)
 						gotPath = r.URL.Path
+						w.Header().Set("Content-Type", "application/json")
 						w.WriteHeader(http.StatusOK)
+						if _, err := io.WriteString(w, `{"done":true}`); err != nil {
+							t.Errorf("write inference response: %v", err)
+						}
 					}))
 					defer good.Close()
 

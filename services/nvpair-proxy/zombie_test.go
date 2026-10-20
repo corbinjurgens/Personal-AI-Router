@@ -7,6 +7,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -75,7 +76,7 @@ func TestHandleHTTP_ClientWriteError_MarksCancelled(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		io.WriteString(w, `{"model":"llama","response":"partial tokens before the client vanished","done":false}`)
+		io.WriteString(w, `{"model":"llama","response":"partial tokens before the client vanished","done":false}`+"\n")
 	}))
 	defer upstream.Close()
 
@@ -340,10 +341,11 @@ func TestHandleHTTP_RealSocketWriteDeadline(t *testing.T) {
 	// unwinds when the proxy tears the connection down (write error or context
 	// cancel).
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Content-Type", "application/x-ndjson")
 		w.WriteHeader(http.StatusOK)
 		flusher, _ := w.(http.Flusher)
-		chunk := bytes.Repeat([]byte("x"), 64*1024)
+		chunk := append([]byte(`{"response":"`), bytes.Repeat([]byte("x"), 64*1024)...)
+		chunk = append(chunk, []byte("\",\"done\":false}\n")...)
 		for {
 			if _, err := w.Write(chunk); err != nil {
 				return
@@ -445,7 +447,8 @@ func TestHandleHTTP_RealSocketFlushDeadline(t *testing.T) {
 			t.Errorf("upstream ResponseWriter is not a Flusher")
 			return
 		}
-		chunk := bytes.Repeat([]byte("x"), 1500)
+		chunk := append([]byte(`{"response":"`), bytes.Repeat([]byte("x"), 1500)...)
+		chunk = append(chunk, []byte("\",\"done\":false}\n")...)
 		for {
 			if _, err := w.Write(chunk); err != nil {
 				return
@@ -520,29 +523,10 @@ func TestHandleHTTP_RealSocketFlushDeadline(t *testing.T) {
 	}
 }
 
-// TestHandleHTTP_UpstreamDiesMidStream_EmitsTerminal is the other half of the
-// zombie-job story, and the half no in-process test can express. Here the
-// CLIENT stays healthy — it reads everything the proxy sends — and the
-// UPSTREAM dies mid-body instead.
-//
-// That combination defeats both existing reporters. Nothing cancels the
-// request context, because no write to the client ever fails, so the
-// disconnect watcher never fires. And the copy error is never returned to us:
-// ReverseProxy converts a mid-copy failure into panic(http.ErrAbortHandler)
-// whenever it detects a real server, and that panic unwinds straight past the
-// end of handleHTTP. A terminal emitted inline is therefore lost outright and
-// the workload stays "running" for the life of the broker. The cost is not
-// just a stuck card: the scheduler counts queued and running by scheduledOn,
-// so the ghost permanently inflates that node's pending count and biases
-// routing away from a node whose only sin was a crashed engine.
-//
-// A real http.Server is essential. shouldPanicOnCopyError keys off
-// ServerContextKey, so calling handleHTTP directly — as the in-process tests
-// above do — suppresses the panic and cannot reach this path at all.
-//
-// The response committed a 2xx before truncating, so the terminal is a
-// COMPLETION: a cut-off stream is a success the caller resumes from whatever
-// it received, not a cluster failure.
+// A healthy client must receive a framed error and one failed workload when
+// the upstream dies mid-body, even though HTTP 200 has already committed.
+// A real http.Server also guards against ReverseProxy's ErrAbortHandler path:
+// managed framing must turn the read failure into a clean HTTP EOF instead.
 func TestHandleHTTP_UpstreamDiesMidStream_EmitsTerminal(t *testing.T) {
 	// A raw listener rather than httptest, so the abrupt close is exact: a
 	// chunked response that stops without its terminating zero-length chunk,
@@ -572,16 +556,25 @@ func TestHandleHTTP_UpstreamDiesMidStream_EmitsTerminal(t *testing.T) {
 						break
 					}
 				}
-				chunk := `{"response":"partial tokens","done":false}`
-				io.WriteString(c, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\n\r\n")
-				fmt.Fprintf(c, "%x\r\n%s\r\n", len(chunk), chunk)
-				c.Close()
+				defer c.Close()
+				chunk := "{\"response\":\"partial tokens\",\"done\":false}\n"
+				if _, err := io.WriteString(c, "HTTP/1.1 200 OK\r\nContent-Type: application/x-ndjson\r\nTransfer-Encoding: chunked\r\n\r\n"); err != nil {
+					t.Errorf("write upstream headers: %v", err)
+					return
+				}
+				if _, err := fmt.Fprintf(c, "%x\r\n%s\r\n", len(chunk), chunk); err != nil {
+					t.Errorf("write complete upstream event: %v", err)
+					return
+				}
+				if _, err := io.WriteString(c, "100\r\n{\"response\":\"torn"); err != nil {
+					t.Errorf("write torn upstream event: %v", err)
+				}
 			}(conn)
 		}
 	}()
 
 	tc := anyCase(t)
-	rec := &recRW{}
+	rec := &recordingWriter{}
 	disc := NewDiscovery()
 	disc.AddManual(nodeForModel(t, "node-a", "http://"+upLn.Addr().String(), tc.advertisedModel))
 	p := newTestProxy(tc.profile, NewCodec(rec), disc, tc.profile.FacadePort)
@@ -590,7 +583,11 @@ func TestHandleHTTP_UpstreamDiesMidStream_EmitsTerminal(t *testing.T) {
 	if err != nil {
 		t.Fatalf("listen proxy: %v", err)
 	}
-	srv := &http.Server{Handler: http.HandlerFunc(p.soleFacade().handleHTTP)}
+	handlerDone := make(chan struct{})
+	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer close(handlerDone)
+		p.soleFacade().handleHTTP(w, r)
+	})}
 	go func() { _ = srv.Serve(ln) }()
 	defer srv.Close()
 
@@ -599,6 +596,9 @@ func TestHandleHTTP_UpstreamDiesMidStream_EmitsTerminal(t *testing.T) {
 		t.Fatalf("dial proxy: %v", err)
 	}
 	defer conn.Close()
+	if err := conn.SetDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatalf("bound client I/O: %v", err)
+	}
 
 	body := tc.inferenceBody()
 	reqText := fmt.Sprintf("POST %s HTTP/1.1\r\n", tc.inferencePath) +
@@ -610,20 +610,43 @@ func TestHandleHTTP_UpstreamDiesMidStream_EmitsTerminal(t *testing.T) {
 		t.Fatalf("write request: %v", err)
 	}
 
-	// Keep the client healthy by draining until the proxy hangs up. A client
-	// that stopped reading would trip the write deadline and cancel the
-	// context, which is the case the tests above cover and would mask this one.
-	go func() { _, _ = io.Copy(io.Discard, conn) }()
-
-	deadline := time.Now().Add(5 * time.Second)
-	terminals := func() int { return rec.count("workload:completed") + rec.count("workload:errored") }
-	for time.Now().Before(deadline) && terminals() == 0 {
-		time.Sleep(10 * time.Millisecond)
+	response, err := http.ReadResponse(bufio.NewReader(conn), &http.Request{Method: http.MethodPost})
+	if err != nil {
+		t.Fatalf("read proxy response: %v", err)
 	}
-	if got := terminals(); got != 1 {
-		t.Fatalf("terminal workload events = %d, want exactly 1 (zombie: the ErrAbortHandler panic skipped the terminal)", got)
+	defer response.Body.Close()
+	clientBody, err := io.ReadAll(response.Body)
+	if err != nil {
+		t.Fatalf("read managed response through clean HTTP EOF: %v", err)
 	}
-	if !rec.has("workload:completed") {
-		t.Fatal("a truncated stream that had already committed 2xx must terminate as completed, not failed")
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want committed 200", response.StatusCode)
+	}
+	lines := strings.Split(strings.TrimSpace(string(clientBody)), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("response has %d NDJSON events, want complete event and error", len(lines))
+	}
+	if event := decodeJSONBody(t, lines[0]); event["response"] != "partial tokens" || event["done"] != false {
+		t.Fatalf("first complete event = %v", event)
+	}
+	if event := decodeJSONBody(t, lines[1]); event["error"] == nil {
+		t.Fatal("interrupted stream has no framed error")
+	}
+	select {
+	case <-handlerDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("origin handler did not finish after upstream interruption")
+	}
+	failed := notificationsOf(t, rec, workloadErroredMethod)
+	if len(failed) != 1 || len(notificationsOf(t, rec, workloadCompletedMethod)) != 0 {
+		t.Fatalf("terminal events: failed = %d, completed = %d; want exactly one failed", len(failed), len(notificationsOf(t, rec, workloadCompletedMethod)))
+	}
+	var terminal workloadParams
+	if err := json.Unmarshal(failed[0], &terminal); err != nil {
+		t.Fatalf("decode terminal workload: %v", err)
+	}
+	wl := terminal.WorkloadInfo
+	if wl.State != "failed" || wl.ScheduledOn != "node-a" || wl.Error == nil || !strings.Contains(*wl.Error, "stream interrupted after output began on node-a:") {
+		t.Fatalf("terminal = %+v, want failed on node-a with interruption reason", wl)
 	}
 }

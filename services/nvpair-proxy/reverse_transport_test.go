@@ -330,7 +330,7 @@ func TestProxyReverseInterruptedExposedStreamIsNotReplayed(t *testing.T) {
 	var calls atomic.Int32
 	f := newProxyReverseFixture(t, "ollama", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls.Add(1)
-		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Content-Type", "text/plain")
 		if _, err := io.WriteString(w, "first\n"); err != nil {
 			t.Error(err)
 			return
@@ -370,7 +370,7 @@ func TestProxyReverseCancellationEndsExposedStream(t *testing.T) {
 	cancelled := make(chan struct{})
 	f := newProxyReverseFixture(t, "ollama", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls.Add(1)
-		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Content-Type", "text/plain")
 		if _, err := io.WriteString(w, "first\n"); err != nil {
 			t.Error(err)
 			return
@@ -413,6 +413,302 @@ func TestProxyReverseCancellationEndsExposedStream(t *testing.T) {
 	}
 	if calls.Load() != 1 || f.reverseCalls.Load() != 1 {
 		t.Fatalf("cancelled handler/reverse = %d/%d, want 1/1", calls.Load(), f.reverseCalls.Load())
+	}
+}
+
+func reverseContinuityOrigin(t *testing.T, f *proxyReverseFixture) *continuityFixture {
+	t.Helper()
+	fx := &continuityFixture{p: f.p, w: &recordingWriter{}, returned: make(chan struct{}, 8), nodeID: "host-peer"}
+	f.p.codec = NewCodec(fx.w)
+	fx.origin = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer func() { fx.returned <- struct{}{} }()
+		f.p.soleFacade().handleHTTP(w, r)
+	}))
+	t.Cleanup(fx.origin.Close)
+	return fx
+}
+
+func TestProxyReverseManagedInterruption(t *testing.T) {
+	var calls atomic.Int32
+	f := newProxyReverseFixture(t, "ollama", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.Header().Set("Content-Type", "text/event-stream")
+		if _, err := io.WriteString(w, continuitySSEEvent+`data: {"TORN_SENTINEL":"`); err != nil {
+			t.Error(err)
+			return
+		}
+		if err := http.NewResponseController(w).Flush(); err != nil {
+			t.Error(err)
+			return
+		}
+		conn, _, err := http.NewResponseController(w).Hijack()
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		if err := conn.Close(); err != nil {
+			t.Error(err)
+		}
+	}))
+	fx := reverseContinuityOrigin(t, f)
+	resp, data, err := fx.request(t, "/v1/chat/completions", `{"model":"fixture-model","stream":true}`)
+	if err != nil || resp.StatusCode != http.StatusOK || !bytes.HasPrefix(data, []byte(continuitySSEEvent)) || bytes.Contains(data, []byte("TORN_SENTINEL")) {
+		t.Fatalf("status=%d length=%d read=%v", resp.StatusCode, len(data), err)
+	}
+	assertContinuityError(t, streamProtocolSSE, data, streamInterruptReasonReadFailed)
+	fx.terminal(t, "failed", streamInterruptReasonReadFailed)
+	if calls.Load() != 1 || f.reverseCalls.Load() != 1 {
+		t.Fatalf("engine/reverse calls=%d/%d, want 1/1", calls.Load(), f.reverseCalls.Load())
+	}
+}
+
+func TestProxyReverseManagedCancellation(t *testing.T) {
+	var calls atomic.Int32
+	cancelled := make(chan struct{})
+	f := newProxyReverseFixture(t, "ollama", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.Header().Set("Content-Type", "text/event-stream")
+		if _, err := io.WriteString(w, continuitySSEEvent); err != nil {
+			t.Error(err)
+			return
+		}
+		if err := http.NewResponseController(w).Flush(); err != nil {
+			t.Error(err)
+			return
+		}
+		<-r.Context().Done()
+		close(cancelled)
+	}))
+	fx := reverseContinuityOrigin(t, f)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, fx.origin.URL+"/v1/chat/completions", strings.NewReader(`{"model":"fixture-model","stream":true}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := fx.origin.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	data := make([]byte, len(continuitySSEEvent))
+	if _, err := io.ReadFull(resp.Body, data); err != nil || string(data) != continuitySSEEvent {
+		t.Fatalf("first frame length=%d read=%v", len(data), err)
+	}
+	cancel()
+	if _, err := io.ReadAll(resp.Body); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled read=%v", err)
+	}
+	waitChan(t, cancelled, "reverse cancellation at engine")
+	waitChan(t, fx.returned, "origin return")
+	fx.terminal(t, "cancelled", "")
+	if calls.Load() != 1 || f.reverseCalls.Load() != 1 {
+		t.Fatalf("engine/reverse calls=%d/%d, want 1/1", calls.Load(), f.reverseCalls.Load())
+	}
+}
+
+func TestProxyReverseEffectiveFramingDefaults(t *testing.T) {
+	test := func(name, path, request, defaults, media, payload, reason string) {
+		t.Run(name, func(t *testing.T) {
+			f := newProxyReverseFixture(t, "ollama", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				body, err := io.ReadAll(r.Body)
+				if err != nil {
+					t.Error(err)
+					return
+				}
+				if !bytes.Equal(body, mergeDefaults([]byte(request), []byte(defaults))) {
+					t.Error("peer engine did not receive effective defaults")
+				}
+				if r.Header.Get("Accept-Encoding") != "identity" {
+					t.Error("peer engine must receive identity encoding")
+				}
+				w.Header().Set("Content-Type", media)
+				w.Header().Set(peerStreamFramingHeader, "engine-spoof")
+				if _, err := io.WriteString(w, payload); err != nil {
+					t.Error(err)
+				}
+			}))
+			pol := nodepolicy.Default()
+			pol.Profiles = []nodepolicy.Profile{{Name: "m", Engine: "ollama", Model: "fixture-model", RequestOptions: json.RawMessage(defaults)}}
+			f.peer.admission.setPolicy(pol)
+			fx := reverseContinuityOrigin(t, f)
+			resp, data, err := fx.request(t, path, request)
+			if err != nil || resp.StatusCode != http.StatusOK || resp.Header.Get(peerStreamFramingHeader) != "" {
+				t.Fatalf("status=%d read=%v internal metadata=%q", resp.StatusCode, err, resp.Header.Get(peerStreamFramingHeader))
+			}
+			if reason != "" {
+				assertContinuityError(t, streamProtocolSSE, data, reason)
+				fx.terminal(t, "failed", reason)
+			} else {
+				if string(data) != payload {
+					t.Fatalf("raw response changed: length=%d want=%d", len(data), len(payload))
+				}
+				fx.terminal(t, "completed", "")
+			}
+			if f.reverseCalls.Load() != 1 {
+				t.Fatalf("reverse calls=%d, want 1", f.reverseCalls.Load())
+			}
+		})
+	}
+	test("destination n two truncated", "/v1/chat/completions", `{"model":"fixture-model","stream":true}`, `{"n":2}`, "text/event-stream", "data: {\"choices\":[{\"index\":0,\"finish_reason\":\"stop\"}]}\n\n", streamInterruptReasonPrematureEOF)
+	test("destination n two complete", "/v1/chat/completions", `{"model":"fixture-model","stream":true}`, `{"n":2}`, "text/event-stream", "data: {\"choices\":[{\"index\":0,\"finish_reason\":\"stop\"},{\"index\":1,\"finish_reason\":\"stop\"}]}\n\n", "")
+	test("destination disables streaming", "/api/generate", `{"model":"fixture-model"}`, `{"stream":false}`, "application/json", `{"response":"`+strings.Repeat("x", 1<<20)+`","done":true}`, "")
+}
+
+func TestProxyReverseRejectsIncompatibleFraming(t *testing.T) {
+	test := func(name string, metadata []string, fallback bool) {
+		t.Run(name, func(t *testing.T) {
+			setForTest(t, &retryBackoff, []time.Duration{time.Millisecond})
+			f := newProxyReverseFixture(t, "ollama", http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+				t.Error("incompatible peer must bypass updated ingress")
+			}))
+			var peerCalls atomic.Int32
+			// Simulate an older or incompatible, still pin-authenticated peer.
+			f.server.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				peerCalls.Add(1)
+				for _, value := range metadata {
+					w.Header().Add(peerStreamFramingHeader, value)
+				}
+				w.Header().Set("Content-Type", "text/event-stream")
+				if _, err := io.WriteString(w, "data: {\"LEAK_SENTINEL\":true}\n\n"); err != nil {
+					t.Error(err)
+				}
+			})
+			fx := reverseContinuityOrigin(t, f)
+			if fallback {
+				upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					w.Header().Set("Content-Type", "text/event-stream")
+					if _, err := io.WriteString(w, "data: [DONE]\n\n"); err != nil {
+						t.Error(err)
+					}
+				}))
+				defer upstream.Close()
+				f.p.soleFacade().discovery.AddManual(nodeForModel(t, "fallback", upstream.URL, "fixture-model"))
+				f.p.SetPriority([]string{"host-peer", "fallback"})
+				fx.nodeID = "fallback"
+			}
+			resp, data, err := fx.request(t, "/v1/chat/completions", `{"model":"fixture-model","stream":true}`)
+			if err != nil || bytes.Contains(data, []byte("LEAK_SENTINEL")) || resp.Header.Get(peerStreamFramingHeader) != "" {
+				t.Fatalf("read=%v leaked body=%v metadata=%q", err, bytes.Contains(data, []byte("LEAK_SENTINEL")), resp.Header.Get(peerStreamFramingHeader))
+			}
+			started := notificationsOf(t, fx.w, "ollama:proxy/request-started")
+			if fallback {
+				if resp.StatusCode != http.StatusOK || string(data) != "data: [DONE]\n\n" || peerCalls.Load() != 1 || len(started) != 1 {
+					t.Fatalf("failover status=%d peer calls=%d starts=%d", resp.StatusCode, peerCalls.Load(), len(started))
+				}
+				fx.terminal(t, "completed", "")
+			} else {
+				want := (&peerFramingMetadataError{invalid: len(metadata) != 0}).Error()
+				if resp.StatusCode != http.StatusBadGateway || len(started) != 0 || peerCalls.Load() != maxDispatchAttempts {
+					t.Fatalf("exhausted status=%d peer calls=%d starts=%d", resp.StatusCode, peerCalls.Load(), len(started))
+				}
+				var object struct{ Error string }
+				if err := json.Unmarshal(data, &object); err != nil || object.Error != "upstream error: "+want {
+					t.Fatalf("explicit failure=%+v decode=%v", object, err)
+				}
+				wl := fx.terminal(t, "failed", "")
+				if wl.Error == nil || *wl.Error != want {
+					t.Fatalf("terminal error=%v want=%s", wl.Error, want)
+				}
+				requests := notificationsOf(t, fx.w, "ollama:proxy/request")
+				var event RequestEvent
+				if len(requests) != 1 {
+					t.Fatalf("proxy/request count=%d", len(requests))
+				}
+				if err := json.Unmarshal(requests[0], &event); err != nil || event.Error != want || event.Status != http.StatusBadGateway {
+					t.Fatalf("proxy/request=%+v decode=%v", event, err)
+				}
+			}
+		})
+	}
+	test("missing fails over", nil, true)
+	test("missing fails explicitly", nil, false)
+	test("invalid fails over", []string{"v2;declared;1"}, true)
+	test("invalid fails explicitly", []string{"v1;declared;0"}, false)
+	test("duplicate fails explicitly", []string{"v1;declared;1", "v1;declared;1"}, false)
+}
+
+func TestProxyReverseFramingMetadataValidation(t *testing.T) {
+	request := originStreamRequest{protocol: streamProtocolSSE, choices: 1}
+	for _, value := range []string{"", "v2;declared;1", "v1;unknown;1", "v1;declared;-1", "v1;declared;+1", "v1;declared;9999999999999999999999", "v1;declared;1;extra"} {
+		t.Run(value, func(t *testing.T) {
+			_, err := request.withPeerMetadata([]string{value})
+			var typed *peerFramingMetadataError
+			if !errors.As(err, &typed) || !typed.invalid {
+				t.Fatalf("invalid metadata returned %v; want typed incompatibility", err)
+			}
+		})
+	}
+}
+
+func TestProxyReverseFramingExcludesUnsupportedRoutes(t *testing.T) {
+	f := newProxyReverseFixture(t, "ollama", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set(peerStreamFramingHeader, "engine-spoof")
+		if _, err := io.WriteString(w, "raw"); err != nil {
+			t.Error(err)
+		}
+	}))
+	proxy := httptest.NewServer(http.HandlerFunc(f.p.soleFacade().handleHTTP))
+	defer proxy.Close()
+	for _, path := range []string{"/v1/responses", "/api/version"} {
+		t.Run(path, func(t *testing.T) {
+			resp, err := proxy.Client().Post(proxy.URL+path, "application/json", strings.NewReader(`{"model":"fixture-model","stream":true}`))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer resp.Body.Close()
+			data, err := io.ReadAll(resp.Body)
+			if err != nil || resp.StatusCode != http.StatusOK || string(data) != "raw" || resp.Header.Get(peerStreamFramingHeader) != "" {
+				t.Fatalf("status=%d length=%d read=%v metadata=%q", resp.StatusCode, len(data), err, resp.Header.Get(peerStreamFramingHeader))
+			}
+		})
+	}
+}
+
+func TestStreamContinuityPreservesUpgrade(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, rw, err := http.NewResponseController(w).Hijack()
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		defer conn.Close()
+		if _, err := io.WriteString(rw, "HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: pair-fixture\r\nX-PAIR-Stream-Framing: engine-spoof\r\n\r\n"); err != nil {
+			t.Error(err)
+			return
+		}
+		if err := rw.Flush(); err != nil {
+			t.Error(err)
+			return
+		}
+		if _, err := io.CopyN(conn, rw, 1); err != nil {
+			t.Error(err)
+		}
+	}))
+	defer upstream.Close()
+	fx := newContinuityFixture(t, upstream.URL, time.Second)
+	proxy := fx.origin
+	req := proxyReverseRequest(t, http.MethodGet, proxy.URL+"/api/version", nil)
+	req.Header.Set("Connection", "Upgrade")
+	req.Header.Set("Upgrade", "pair-fixture")
+	resp, err := proxy.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusSwitchingProtocols || resp.Header.Get(peerStreamFramingHeader) != "" {
+		t.Fatalf("upgrade status=%d internal metadata=%q", resp.StatusCode, resp.Header.Get(peerStreamFramingHeader))
+	}
+	duplex, ok := resp.Body.(io.ReadWriteCloser)
+	if !ok {
+		t.Fatal("upgrade lost its bidirectional body")
+	}
+	if _, err := duplex.Write([]byte{'x'}); err != nil {
+		t.Fatal(err)
+	}
+	var echo [1]byte
+	if _, err := io.ReadFull(duplex, echo[:]); err != nil || echo[0] != 'x' {
+		t.Fatalf("upgrade echo read=%v", err)
 	}
 }
 
@@ -550,6 +846,8 @@ func proxyReverseRoundTrip(t *testing.T, transport http.RoundTripper, target str
 }
 
 func TestProxyReverseStreamsAllEngineServicesAndRuntimePorts(t *testing.T) {
+	const firstEvent = "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"first\"}}]}\n\n"
+	const remainingEvents = "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"second\"}}]}\n\ndata: [DONE]\n\n"
 	for _, engine := range []string{"ollama", "lmstudio", "llamacpp"} {
 		t.Run(engine, func(t *testing.T) {
 			release := make(chan struct{})
@@ -566,7 +864,7 @@ func TestProxyReverseStreamsAllEngineServicesAndRuntimePorts(t *testing.T) {
 				}
 				w.Header().Set("Content-Type", "text/event-stream")
 				w.Header().Set("X-Fixture", "preserved")
-				if _, err := io.WriteString(w, "first\n"); err != nil {
+				if _, err := io.WriteString(w, firstEvent); err != nil {
 					t.Error(err)
 					return
 				}
@@ -579,7 +877,7 @@ func TestProxyReverseStreamsAllEngineServicesAndRuntimePorts(t *testing.T) {
 				case <-r.Context().Done():
 					return
 				}
-				if _, err := io.WriteString(w, "second\n"); err != nil {
+				if _, err := io.WriteString(w, remainingEvents); err != nil {
 					t.Error(err)
 				}
 			}))
@@ -595,11 +893,11 @@ func TestProxyReverseStreamsAllEngineServicesAndRuntimePorts(t *testing.T) {
 			if response.StatusCode != http.StatusOK || response.Header.Get("X-Fixture") != "preserved" {
 				t.Fatalf("status/header = %d/%q", response.StatusCode, response.Header.Get("X-Fixture"))
 			}
-			first := make([]byte, len("first\n"))
+			first := make([]byte, len(firstEvent))
 			if _, err := io.ReadFull(response.Body, first); err != nil {
 				t.Fatal(err)
 			}
-			if string(first) != "first\n" {
+			if string(first) != firstEvent {
 				t.Fatalf("first chunk = %q", first)
 			}
 			close(release)
@@ -607,7 +905,7 @@ func TestProxyReverseStreamsAllEngineServicesAndRuntimePorts(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if string(remaining) != "second\n" {
+			if string(remaining) != remainingEvents {
 				t.Fatalf("remaining body = %q", remaining)
 			}
 			if f.directCalls.Load() != 1 || f.reverseCalls.Load() != 1 {

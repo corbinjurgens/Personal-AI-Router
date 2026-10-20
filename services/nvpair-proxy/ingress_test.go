@@ -132,11 +132,11 @@ func TestLocalReverseProxyUsesSharedPlainTransport(t *testing.T) {
 	shared := p.plainHTTPTransport()
 	target := &url.URL{Scheme: "http", Host: "127.0.0.1:1"}
 	rp := p.soleFacade().newLocalReverseProxy(target)
-	tr, ok := rp.Transport.(*http.Transport)
+	tr, ok := rp.Transport.(proxyResponseTransport)
 	if !ok {
-		t.Fatalf("Transport type = %T, want *http.Transport", rp.Transport)
+		t.Fatalf("Transport type = %T, want trailer-isolating transport", rp.Transport)
 	}
-	if tr != shared {
+	if tr.RoundTripper != shared {
 		t.Fatal("ingress reverse proxy did not use the shared plain Transport")
 	}
 }
