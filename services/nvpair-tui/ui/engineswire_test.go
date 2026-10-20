@@ -13,6 +13,7 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"nvpair-shared/engineintent"
 	"nvpair-shared/engines"
 	"nvpair-shared/enginesettings"
 	"nvpair-tui/rpc"
@@ -471,19 +472,21 @@ func TestTerminalControlsSavedOff(t *testing.T) {
 	for _, tc := range []struct {
 		name                  string
 		intent                map[string]bool
+		origins               map[string]engineintent.Origin
 		running, remote, want bool
 	}{
-		{"explicit Off stopped", map[string]bool{"ollama": false}, false, false, true},
-		{"explicit Off running", map[string]bool{"ollama": false}, true, false, true},
-		{"missing intent", nil, false, false, false},
-		{"missing entry", map[string]bool{"other": false}, false, false, false},
-		{"saved On stopped", map[string]bool{"ollama": true}, false, false, false},
-		{"no peer intent", map[string]bool{"ollama": false}, false, true, false},
+		{"local Off stopped", map[string]bool{"ollama": false}, map[string]engineintent.Origin{"ollama": engineintent.Local}, false, false, true},
+		{"peer Off running", map[string]bool{"ollama": false}, map[string]engineintent.Origin{"ollama": engineintent.Peer}, true, false, true},
+		{"Off without origin", map[string]bool{"ollama": false}, map[string]engineintent.Origin{}, false, false, true},
+		{"missing intent", nil, nil, false, false, false},
+		{"missing entry", map[string]bool{"other": false}, map[string]engineintent.Origin{"other": engineintent.Local}, false, false, false},
+		{"saved On stopped", map[string]bool{"ollama": true}, map[string]engineintent.Origin{}, false, false, false},
+		{"no peer intent", map[string]bool{"ollama": false}, map[string]engineintent.Origin{"ollama": engineintent.Peer}, false, true, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			d := newNodeDetail(nil, nodeRow{self: !tc.remote})
 			d.engines = []engineStatus{{Engine: "ollama", Running: tc.running}}
-			d.enabledByEngine = tc.intent
+			d.intent = engineintent.Snapshot{EnabledByEngine: tc.intent, OffByEngine: tc.origins}
 			d.refreshEngines()
 			rows := d.engineTable.Rows()
 			if len(rows) != 1 || strings.Contains(rows[0][0], "saved Off") != tc.want {
@@ -491,6 +494,16 @@ func TestTerminalControlsSavedOff(t *testing.T) {
 			}
 			if rows[0][2] != yesNo(tc.running) {
 				t.Fatalf("runtime changed: %v", rows[0])
+			}
+			wantLabel := "ollama"
+			if tc.want {
+				wantLabel += " (saved Off)"
+			}
+			if rows[0][0] != wantLabel {
+				t.Fatalf("label = %q, want %q", rows[0][0], wantLabel)
+			}
+			if !reflect.DeepEqual(d.intent.OffByEngine, tc.origins) {
+				t.Fatalf("origins = %v, want %v", d.intent.OffByEngine, tc.origins)
 			}
 		})
 	}
@@ -574,16 +587,107 @@ func TestTerminalControlsRestartRefreshUsesExistingTick(t *testing.T) {
 func TestTerminalControlsLateIntentAfterRestart(t *testing.T) {
 	client, broker := nodeInfoRPCFixture(t)
 	d := newNodeDetail(client, nodeRow{key: "self", self: true})
-	_, old := terminalControlsReply(t, broker, d.intentCmd(), &rpc.Message{Result: []byte(`{"enabledByEngine":{"ollama":false}}`)})
+	_, old := terminalControlsReply(t, broker, d.intentCmd(), &rpc.Message{Result: []byte(`{"enabledByEngine":{"ollama":false},"offByEngine":{"ollama":"local"}}`)})
 	d.handleNotification(&rpc.Message{Method: "service/broker-restarted"})
 	d.update(old)
-	if d.enabledByEngine != nil {
+	if d.intent.EnabledByEngine != nil || d.intent.OffByEngine != nil {
 		t.Fatal("pre-restart intent restored a saved-Off assertion")
 	}
-	_, current := terminalControlsReply(t, broker, d.intentCmd(), &rpc.Message{Result: []byte(`{"enabledByEngine":{"ollama":true}}`)})
+	_, current := terminalControlsReply(t, broker, d.intentCmd(), &rpc.Message{Result: []byte(`{"enabledByEngine":{"ollama":false},"offByEngine":{"ollama":"peer"}}`)})
 	d.update(current)
-	if enabled, present := d.enabledByEngine["ollama"]; !present || !enabled {
+	if enabled, present := d.intent.EnabledByEngine["ollama"]; !present || enabled || d.intent.OffByEngine["ollama"] != engineintent.Peer {
 		t.Fatal("current intent did not replace the retired read")
+	}
+}
+
+func TestTerminalControlsLateIntentAfterManagerReady(t *testing.T) {
+	client, broker := nodeInfoRPCFixture(t)
+	d := newNodeDetail(client, nodeRow{key: "self", self: true})
+	_, old := terminalControlsReply(t, broker, d.intentCmd(), &rpc.Message{Result: []byte(`{"enabledByEngine":{"ollama":false},"offByEngine":{"ollama":"local"}}`)})
+	d.update(old)
+	if d.intent.OffByEngine["ollama"] != engineintent.Local {
+		t.Fatal("positive control did not retain local origin")
+	}
+	refresh := d.handleNotification(&rpc.Message{Method: "engine:ready"})
+	d.update(old)
+	if d.intent.EnabledByEngine != nil || d.intent.OffByEngine != nil {
+		t.Fatal("pre-manager-restart reply restored intent")
+	}
+	if refresh == nil {
+		t.Fatal("manager readiness did not issue a fresh intent read")
+	}
+	request, current := terminalControlsReply(t, broker, refresh, &rpc.Message{Result: []byte(`{"enabledByEngine":{"ollama":false},"offByEngine":{"ollama":"peer"}}`)})
+	if request.Method != "engine:intent" {
+		t.Fatalf("method = %q, want engine:intent", request.Method)
+	}
+	d.update(current)
+	want := engineintent.Snapshot{EnabledByEngine: map[string]bool{"ollama": false}, OffByEngine: map[string]engineintent.Origin{"ollama": engineintent.Peer}}
+	if !reflect.DeepEqual(d.intent, want) {
+		t.Fatalf("intent = %+v, want %+v", d.intent, want)
+	}
+}
+
+func TestTerminalControlsIntentSnapshotRead(t *testing.T) {
+	client, broker := nodeInfoRPCFixture(t)
+	d := newNodeDetail(client, nodeRow{key: "self", self: true})
+	request, reply := terminalControlsReply(t, broker, d.intentCmd(), &rpc.Message{Result: []byte(`{
+		"enabledByEngine":{"ollama":false,"strata":false,"on":true,"unknown":false},
+		"offByEngine":{"ollama":"local","strata":"peer"}
+	}`)})
+	if request.Method != "engine:intent" {
+		t.Fatalf("method = %q, want engine:intent", request.Method)
+	}
+	d.update(reply)
+	want := engineintent.Snapshot{
+		EnabledByEngine: map[string]bool{"ollama": false, "strata": false, "on": true, "unknown": false},
+		OffByEngine:     map[string]engineintent.Origin{"ollama": engineintent.Local, "strata": engineintent.Peer},
+	}
+	if !reflect.DeepEqual(d.intent, want) {
+		t.Fatalf("intent = %+v, want %+v", d.intent, want)
+	}
+}
+
+func TestTerminalControlsFailedIntentReadClearsSnapshot(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		reply rpc.Message
+	}{
+		{"RPC error", rpc.Message{Error: &rpc.RPCError{Code: -32603, Message: "read failed"}}},
+		{"invalid snapshot shape", rpc.Message{Result: []byte(`[]`)}},
+		{"missing origins", rpc.Message{Result: []byte(`{"enabledByEngine":{"ollama":false}}`)}},
+		{"null origins", rpc.Message{Result: []byte(`{"enabledByEngine":{"ollama":false},"offByEngine":null}`)}},
+		{"missing enabled map", rpc.Message{Result: []byte(`{"offByEngine":{}}`)}},
+		{"invalid enabled value", rpc.Message{Result: []byte(`{"enabledByEngine":{"ollama":"false"},"offByEngine":{}}`)}},
+		{"invalid origin", rpc.Message{Result: []byte(`{"enabledByEngine":{"ollama":false},"offByEngine":{"ollama":"other"}}`)}},
+		{"origin for On", rpc.Message{Result: []byte(`{"enabledByEngine":{"ollama":true},"offByEngine":{"ollama":"local"}}`)}},
+		{"unreported origin", rpc.Message{Result: []byte(`{"enabledByEngine":{"ollama":false},"offByEngine":{"other":"peer"}}`)}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			client, broker := nodeInfoRPCFixture(t)
+			d := newNodeDetail(client, nodeRow{key: "self", self: true})
+			d.engines = []engineStatus{{Engine: "ollama"}}
+			_, initial := terminalControlsReply(t, broker, d.intentCmd(), &rpc.Message{Result: []byte(`{"enabledByEngine":{"ollama":false},"offByEngine":{"ollama":"peer"}}`)})
+			d.update(initial)
+			if d.intent.OffByEngine["ollama"] != engineintent.Peer {
+				t.Fatal("positive control did not retain peer origin")
+			}
+			_, reply := terminalControlsReply(t, broker, d.intentCmd(), &tc.reply)
+			scoped, ok := reply.(detailReply)
+			if !ok {
+				t.Fatalf("reply = %T, want detailReply", reply)
+			}
+			result, ok := scoped.msg.(detailIntentMsg)
+			if !ok || result.err == nil {
+				t.Fatalf("result = %+v, want intent error", scoped.msg)
+			}
+			d.update(reply)
+			if d.intent.EnabledByEngine != nil || d.intent.OffByEngine != nil {
+				t.Fatalf("failed read retained partial intent: %+v", d.intent)
+			}
+			if strings.Contains(d.engineTable.Rows()[0][0], "saved Off") {
+				t.Fatal("failed read retained saved-Off row")
+			}
+		})
 	}
 }
 
@@ -593,7 +697,14 @@ func TestTerminalControlsIntentInvalidationRows(t *testing.T) {
 			d := newNodeDetail(nil, nodeRow{key: "self", self: true})
 			d.SetSize(100, 40)
 			d.engines = []engineStatus{{Engine: "ollama", Installed: true}}
-			d.update(detailIntentMsg{visit: d.telemetryGen, generation: d.intentGeneration, enabled: map[string]bool{"ollama": false}})
+			initial := detailIntentMsg{visit: d.telemetryGen, generation: d.intentGeneration, intent: engineintent.Snapshot{
+				EnabledByEngine: map[string]bool{"ollama": false},
+				OffByEngine:     map[string]engineintent.Origin{"ollama": engineintent.Local},
+			}}
+			d.update(initial)
+			if d.intent.OffByEngine["ollama"] != engineintent.Local {
+				t.Fatal("positive control did not retain local origin")
+			}
 			if !strings.Contains(d.View(), "saved Off") {
 				t.Fatal("positive control did not render reported Off")
 			}
@@ -605,7 +716,8 @@ func TestTerminalControlsIntentInvalidationRows(t *testing.T) {
 			case "intent changed":
 				d.handleNotification(&rpc.Message{Method: "engine:intent-changed"})
 			}
-			if d.enabledByEngine != nil {
+			d.update(initial)
+			if d.intent.EnabledByEngine != nil || d.intent.OffByEngine != nil {
 				t.Fatal("intent was not cleared")
 			}
 			if strings.Contains(d.engineTable.Rows()[0][0], "saved Off") || strings.Contains(d.View(), "saved Off") {
@@ -618,28 +730,45 @@ func TestTerminalControlsIntentInvalidationRows(t *testing.T) {
 func TestTerminalControlsPolicyPushPreservesIntentRead(t *testing.T) {
 	client, broker := nodeInfoRPCFixture(t)
 	d := newNodeDetail(client, nodeRow{key: "self", self: true})
-	_, reply := terminalControlsReply(t, broker, d.intentCmd(), &rpc.Message{Result: []byte(`{"enabledByEngine":{"ollama":false}}`)})
+	_, reply := terminalControlsReply(t, broker, d.intentCmd(), &rpc.Message{Result: []byte(`{"enabledByEngine":{"ollama":false},"offByEngine":{"ollama":"peer"}}`)})
 	d.handleNotification(&rpc.Message{Method: "policy:changed", Params: []byte(`{"nodeId":"self","policy":{"pausedBy":"local"}}`)})
 	d.update(reply)
-	if enabled, present := d.enabledByEngine["ollama"]; !present || enabled {
+	if enabled, present := d.intent.EnabledByEngine["ollama"]; !present || enabled || d.intent.OffByEngine["ollama"] != engineintent.Peer {
 		t.Fatal("unrelated policy push discarded the current intent read")
 	}
-	_, current := terminalControlsReply(t, broker, d.intentCmd(), &rpc.Message{Result: []byte(`{"enabledByEngine":{"ollama":true}}`)})
+	_, current := terminalControlsReply(t, broker, d.intentCmd(), &rpc.Message{Result: []byte(`{"enabledByEngine":{"ollama":true},"offByEngine":{}}`)})
 	d.update(current)
-	if enabled, present := d.enabledByEngine["ollama"]; !present || !enabled {
+	if enabled, present := d.intent.EnabledByEngine["ollama"]; !present || !enabled || len(d.intent.OffByEngine) != 0 {
 		t.Fatal("current On reply was not applied")
 	}
 }
 
 func TestTerminalControlsIntentReadsUseNewestRequest(t *testing.T) {
-	client, broker := nodeInfoRPCFixture(t)
-	d := newNodeDetail(client, nodeRow{key: "self", self: true})
-	_, old := terminalControlsReply(t, broker, d.intentCmd(), &rpc.Message{Result: []byte(`{"enabledByEngine":{"ollama":false}}`)})
-	_, current := terminalControlsReply(t, broker, d.intentCmd(), &rpc.Message{Result: []byte(`{"enabledByEngine":{"ollama":true}}`)})
-	d.update(current)
-	d.update(old)
-	if enabled, present := d.enabledByEngine["ollama"]; !present || !enabled {
-		t.Fatal("older request replaced the newest reported intent")
+	for _, tc := range []struct {
+		name    string
+		current string
+		want    engineintent.Snapshot
+	}{
+		{"On clears origin", `{"enabledByEngine":{"ollama":true},"offByEngine":{}}`, engineintent.Snapshot{
+			EnabledByEngine: map[string]bool{"ollama": true},
+			OffByEngine:     map[string]engineintent.Origin{},
+		}},
+		{"newer origin with unchanged boolean", `{"enabledByEngine":{"ollama":false},"offByEngine":{"ollama":"peer"}}`, engineintent.Snapshot{
+			EnabledByEngine: map[string]bool{"ollama": false},
+			OffByEngine:     map[string]engineintent.Origin{"ollama": engineintent.Peer},
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			client, broker := nodeInfoRPCFixture(t)
+			d := newNodeDetail(client, nodeRow{key: "self", self: true})
+			_, old := terminalControlsReply(t, broker, d.intentCmd(), &rpc.Message{Result: []byte(`{"enabledByEngine":{"ollama":false},"offByEngine":{"ollama":"local"}}`)})
+			_, current := terminalControlsReply(t, broker, d.intentCmd(), &rpc.Message{Result: []byte(tc.current)})
+			d.update(current)
+			d.update(old)
+			if !reflect.DeepEqual(d.intent, tc.want) {
+				t.Fatalf("older request replaced the newest reported intent: %+v, want %+v", d.intent, tc.want)
+			}
+		})
 	}
 }
 
@@ -653,7 +782,7 @@ func TestTerminalControlsReopenedNodeRejectsOldVisit(t *testing.T) {
 			oldBody := `{"availability":"paused","policy":{"pausedBy":"local"}}`
 			if family == "intent" {
 				oldCmd = oldDetail.intentCmd()
-				oldBody = `{"enabledByEngine":{"ollama":false}}`
+				oldBody = `{"enabledByEngine":{"ollama":false},"offByEngine":{"ollama":"local"}}`
 			}
 			_, oldReply := terminalControlsReply(t, broker, oldCmd, &rpc.Message{Result: []byte(oldBody)})
 			oldDetail.update(DisconnectedMsg{})
@@ -662,7 +791,7 @@ func TestTerminalControlsReopenedNodeRejectsOldVisit(t *testing.T) {
 			currentBody := `{"availability":"available","policy":{}}`
 			if family == "intent" {
 				currentCmd = currentDetail.intentCmd()
-				currentBody = `{"enabledByEngine":{"ollama":true}}`
+				currentBody = `{"enabledByEngine":{"ollama":false},"offByEngine":{"ollama":"peer"}}`
 			}
 			_, currentReply := terminalControlsReply(t, broker, currentCmd, &rpc.Message{Result: []byte(currentBody)})
 			currentDetail.update(currentReply)
@@ -671,7 +800,7 @@ func TestTerminalControlsReopenedNodeRejectsOldVisit(t *testing.T) {
 				if !currentDetail.policyFresh || currentDetail.policy.Availability != "available" || currentDetail.policy.Policy.PausedBy != "" {
 					t.Fatalf("previous visit replaced current policy: %+v", currentDetail.policy)
 				}
-			} else if enabled, present := currentDetail.enabledByEngine["ollama"]; !present || !enabled {
+			} else if enabled, present := currentDetail.intent.EnabledByEngine["ollama"]; !present || enabled || currentDetail.intent.OffByEngine["ollama"] != engineintent.Peer {
 				t.Fatal("previous visit replaced current intent")
 			}
 		})

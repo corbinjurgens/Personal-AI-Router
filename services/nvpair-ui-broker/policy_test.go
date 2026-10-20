@@ -659,7 +659,7 @@ func TestResidencyFollowsEngineManager(t *testing.T) {
 	proxy.waitFor("residency with a", func(calls []policyCall) bool { return residency(calls) == `{"loadedByEngine":{"ollama":["a"]}}` })
 	b.forwardEngineNotificationFrom(source, engineStateChangedMethod, json.RawMessage(`{"engine":"ollama","running":false}`))
 	proxy.waitFor("residency without ollama", func(calls []policyCall) bool { return residency(calls) == `{"loadedByEngine":{}}` })
-	b.forwardEngineNotificationFrom(source, engineIntentChanged, json.RawMessage(`{"enabledByEngine":{"ollama":true}}`))
+	b.forwardEngineNotificationFrom(source, engineIntentChanged, json.RawMessage(`{"enabledByEngine":{"ollama":true},"offByEngine":{}}`))
 	proxy.waitFor("intent push", func(calls []policyCall) bool {
 		for _, c := range calls {
 			if c.method == nodepolicy.MethodSetEngineIntent && strings.Contains(string(c.params), `"ollama":true`) {
@@ -668,6 +668,130 @@ func TestResidencyFollowsEngineManager(t *testing.T) {
 		}
 		return false
 	})
+}
+
+func TestIntentRequestRelayPreservesSnapshot(t *testing.T) {
+	b, out := newPolicyBroker(t)
+	engine := attachFakeEngine(t, b)
+	raw := json.RawMessage(`{"enabledByEngine":{"ollama":false,"lmstudio":false,"llamacpp":true},"offByEngine":{"ollama":"peer","lmstudio":"local"},"relayMarker":"unchanged"}`)
+	engine.setAnswer(func(method string, _ json.RawMessage) (any, string) {
+		if method == engineIntentMethod {
+			return raw, ""
+		}
+		return map[string]bool{"ok": true}, ""
+	})
+	id := json.RawMessage(`42`)
+	b.handleMessage(&Message{JSONRPC: "2.0", ID: &id, Method: engineIntentMethod})
+	frame := out.waitFrame(t, "intent request reply", func(m Message) bool { return m.ID != nil && string(*m.ID) == "42" })
+	if frame.Error != nil {
+		t.Fatalf("intent request failed: %+v", frame.Error)
+	}
+	requireIntentRelayPayload(t, frame.Result, raw)
+}
+
+func TestEnginePolicyIntentHydrationAndChanges(t *testing.T) {
+	b, _ := newPolicyBroker(t)
+	engine := attachFakeEngine(t, b)
+	_, proxy := attachFakeProxy(t, b)
+	engine.setAnswer(func(method string, _ json.RawMessage) (any, string) {
+		if method == engineIntentMethod {
+			return json.RawMessage(`{"enabledByEngine":{"ollama":true,"lmstudio":false,"llamacpp":false},"offByEngine":{"lmstudio":"local","llamacpp":"peer"}}`), ""
+		}
+		return map[string]bool{"ok": true}, ""
+	})
+	source := b.activateEngineManagerSource()
+	b.refreshEnginePolicySnapshotFrom(b.getEngineMgr(), source)
+	waitPushesSettled(t, b)
+	requirePolicyIntent(t, b, map[string]bool{"ollama": true, "lmstudio": false, "llamacpp": false})
+	requireProxyIntent(t, proxy, `{"enabledByEngine":{"ollama":true,"lmstudio":false,"llamacpp":false}}`)
+
+	b.forwardEngineNotificationFrom(source, engineIntentChanged, json.RawMessage(`{"enabledByEngine":{"ollama":false,"lmstudio":true,"llamacpp":false},"offByEngine":{"ollama":"peer","llamacpp":"local"}}`))
+	waitPushesSettled(t, b)
+	requirePolicyIntent(t, b, map[string]bool{"ollama": false, "lmstudio": true, "llamacpp": false})
+	requireProxyIntent(t, proxy, `{"enabledByEngine":{"ollama":false,"lmstudio":true,"llamacpp":false}}`)
+}
+
+func requirePolicyIntent(t *testing.T, b *Broker, want map[string]bool) {
+	t.Helper()
+	r := b.nodePolicyRuntime()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if !reflect.DeepEqual(r.intent, want) {
+		t.Fatalf("policy intent = %v, want %v", r.intent, want)
+	}
+}
+
+func requireProxyIntent(t *testing.T, proxy *fakeWorker, want string) {
+	t.Helper()
+	var expected map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(want), &expected); err != nil {
+		t.Fatal(err)
+	}
+	var last json.RawMessage
+	for _, call := range proxy.snapshot() {
+		if call.method == nodepolicy.MethodSetEngineIntent {
+			last = call.params
+		}
+	}
+	var actual map[string]json.RawMessage
+	if err := json.Unmarshal(last, &actual); err != nil {
+		t.Fatalf("decode proxy intent: %v", err)
+	}
+	var actualEnabled, expectedEnabled map[string]bool
+	if err := json.Unmarshal(actual["enabledByEngine"], &actualEnabled); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(expected["enabledByEngine"], &expectedEnabled); err != nil {
+		t.Fatal(err)
+	}
+	if len(actual) != 1 || !reflect.DeepEqual(actualEnabled, expectedEnabled) {
+		t.Fatalf("proxy admission intent = %s, want only %s", last, want)
+	}
+}
+
+func TestEnginePolicyIntentRejectsMalformedSnapshot(t *testing.T) {
+	cases := []struct{ name, raw string }{
+		{"case variants without canonical maps", `{"EnabledByEngine":{"ollama":false},"OffByEngine":{"ollama":"local"}}`},
+		{"case variant without canonical enabled map", `{"EnabledByEngine":{"ollama":false},"offByEngine":{"ollama":"local"}}`},
+		{"case variant without canonical origins", `{"enabledByEngine":{"ollama":false},"OffByEngine":{"ollama":"local"}}`},
+		{"case variant cannot hide origin for On", `{"enabledByEngine":{"ollama":true},"EnabledByEngine":{"ollama":false},"offByEngine":{"ollama":"local"}}`},
+		{"last enabled object leaves unreported origin", `{"enabledByEngine":{"ollama":false},"enabledByEngine":{},"offByEngine":{"ollama":"local"}}`},
+		{"missing origins", `{"enabledByEngine":{"ollama":false}}`},
+		{"null origins", `{"enabledByEngine":{"ollama":false},"offByEngine":null}`},
+		{"missing booleans", `{"offByEngine":{}}`},
+		{"invalid boolean", `{"enabledByEngine":{"ollama":"off"},"offByEngine":{}}`},
+		{"null boolean", `{"enabledByEngine":{"ollama":null},"offByEngine":{}}`},
+		{"invalid origin", `{"enabledByEngine":{"ollama":false},"offByEngine":{"ollama":"other"}}`},
+		{"origin for On", `{"enabledByEngine":{"ollama":true},"offByEngine":{"ollama":"local"}}`},
+		{"unreported engine origin", `{"enabledByEngine":{"ollama":false},"offByEngine":{"lmstudio":"peer"}}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			b, _ := newPolicyBroker(t)
+			engine := attachFakeEngine(t, b)
+			_, proxy := attachFakeProxy(t, b)
+			source := b.activateEngineManagerSource()
+			want := map[string]bool{"retained": true}
+			b.observeIntent(want)
+			waitPushesSettled(t, b)
+			before := len(proxy.snapshot())
+			engine.setAnswer(func(method string, _ json.RawMessage) (any, string) {
+				if method == engineIntentMethod {
+					return json.RawMessage(tc.raw), ""
+				}
+				return map[string]bool{"ok": true}, ""
+			})
+			b.refreshEnginePolicySnapshotFrom(b.getEngineMgr(), source)
+			waitPushesSettled(t, b)
+			requirePolicyIntent(t, b, want)
+			b.forwardEngineNotificationFrom(source, engineIntentChanged, json.RawMessage(tc.raw))
+			waitPushesSettled(t, b)
+			requirePolicyIntent(t, b, want)
+			if calls := proxy.snapshot(); len(calls) != before {
+				t.Fatalf("malformed intent triggered proxy calls: %+v", calls[before:])
+			}
+		})
+	}
 }
 
 // pausingBroker is a broker with a fake proxy and engine-manager, ollama

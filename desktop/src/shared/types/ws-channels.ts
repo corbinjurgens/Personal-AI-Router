@@ -34,6 +34,7 @@ import type {
     EngineCommandPayload,
     EngineHubSearchResponse,
     EngineInitialState,
+    EngineIntentSnapshot,
     EngineStatePatch
 } from '@/shared/types/engine-api'
 import type { EngineDescriptor, EngineProgress, EngineType } from '@/shared/types/engines'
@@ -133,6 +134,7 @@ export interface WsInvokeChannelMap {
 
     // Engines
     'engines:get-initial': { request: void; response: EngineInitialState }
+    'engines:get-intent': { request: void; response: EngineIntentSnapshot | null }
     'engines:get-settings': { request: EngineSettingsTarget; response: EngineSettingsSnapshot }
     'engines:switch': { request: SwitchRequest; response: { receipt: SwitchReceipt } }
     'engines:switch-status': { request: SwitchStatusRequest; response: SwitchStatus }
@@ -180,6 +182,7 @@ export interface WsPushChannelMap {
 
     // Engines
     'engines:state-changed': EngineStatePatch
+    'engines:intent-changed': EngineIntentSnapshot | null
     'engines:settings-changed': EngineSettingsSnapshot
     'engines:switch-changed': SwitchChanged
     'engines:settings-disconnected': { nodeId: string }

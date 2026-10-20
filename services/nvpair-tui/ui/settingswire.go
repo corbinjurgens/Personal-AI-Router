@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 
+	"nvpair-shared/engineintent"
 	"nvpair-tui/rpc"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -46,7 +47,7 @@ type detailPolicyMsg struct {
 type detailIntentMsg struct {
 	visit      int
 	generation int
-	enabled    map[string]bool
+	intent     engineintent.Snapshot
 	err        error
 }
 
@@ -77,19 +78,20 @@ func (d *nodeDetail) intentCmd() tea.Cmd {
 	generation := d.intentGeneration
 	visit := d.telemetryGen
 	return d.own(call(d.client, "engine:intent", nil, func(msg *rpc.Message, err error) tea.Msg {
-		var result struct {
-			Enabled map[string]bool `json:"enabledByEngine"`
-		}
+		var result engineintent.Snapshot
 		if err == nil {
 			err = json.Unmarshal(msg.Result, &result)
 		}
-		return detailIntentMsg{visit: visit, generation: generation, enabled: result.Enabled, err: err}
+		if err == nil {
+			err = result.Validate()
+		}
+		return detailIntentMsg{visit: visit, generation: generation, intent: result, err: err}
 	}))
 }
 
 func (d *nodeDetail) invalidateIntent() {
 	d.intentGeneration++
-	d.enabledByEngine = nil
+	d.intent = engineintent.Snapshot{}
 	d.refreshEngines()
 }
 

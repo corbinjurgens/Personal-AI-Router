@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-import type { EngineInitialState } from '@/shared/types/engine-api'
+import type { EngineInitialState, EngineIntentSnapshot } from '@/shared/types/engine-api'
 import type {
     EngineDescriptor,
     EngineModels,
@@ -185,6 +185,8 @@ class ModularBridgeState {
     private performance = new Map<string, NodePerformance>()
     private brokerNodeIds = new Set<string>()
     private errors: ServiceError[] = []
+    private engineIntent: EngineIntentSnapshot | null = null
+    private engineIntentGeneration = 0
     private workloads = new Map<string, Workload>()
     /**
      * Ordering for baseline reconciliation. Every realtime workload event takes
@@ -424,6 +426,22 @@ class ModularBridgeState {
         }
         this.selfId = trimmed
         emitBridgePush('state:request-refresh', undefined)
+    }
+
+    getEngineIntent(): EngineIntentSnapshot | null {
+        return this.engineIntent
+    }
+
+    beginEngineIntentRead(): number {
+        return ++this.engineIntentGeneration
+    }
+
+    /** A newer read, push or invalidation supersedes an in-flight local read. */
+    applyEngineIntent(snapshot: EngineIntentSnapshot | null, generation?: number): void {
+        if (generation !== undefined && generation !== this.engineIntentGeneration) return
+        this.engineIntentGeneration++
+        this.engineIntent = snapshot
+        emitBridgePush('engines:intent-changed', snapshot)
     }
 
     /** Bound proxy port for an engine reported by the broker, or null if unknown. */

@@ -19,9 +19,125 @@ import (
 	"time"
 
 	"nvpair-shared/durablefile"
+	"nvpair-shared/engineintent"
 	settings "nvpair-shared/enginesettings"
 	"nvpair-shared/nodepolicy"
 )
+
+func TestDesiredStateSnapshotReadOnly(t *testing.T) {
+	test := func(name, content string) {
+		t.Run(name, func(t *testing.T) {
+			store := newDesiredStateStore(t.TempDir())
+			if content != "" {
+				if err := os.WriteFile(store.path, []byte(content), 0o400); err != nil {
+					t.Fatal(err)
+				}
+			}
+			before, err := os.Stat(store.path)
+			if err != nil && !os.IsNotExist(err) {
+				t.Fatal(err)
+			}
+			writes := 0
+			useEngineFileReplacer(t, durablefile.Replacer{CreateTemp: func(string, string, os.FileMode) (durablefile.File, error) {
+				writes++
+				return nil, errors.New("read must not write")
+			}})
+			if _, err := store.snapshot([]string{"fake"}); err != nil {
+				t.Fatal(err)
+			}
+			if writes != 0 {
+				t.Fatalf("snapshot attempted %d writes", writes)
+			}
+			after, err := os.Stat(store.path)
+			if content == "" {
+				if !os.IsNotExist(err) {
+					t.Fatalf("snapshot created missing file: stat error %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			data, err := os.ReadFile(store.path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(data) != content || !before.ModTime().Equal(after.ModTime()) || before.Mode() != after.Mode() {
+				t.Fatalf("snapshot changed desired file: content=%s before=%v after=%v", data, before, after)
+			}
+		})
+	}
+	test("missing file stays missing", "")
+	test("legacy Off stays byte-identical", `{"engines":{"fake":false}}`)
+	test("peer Off stays byte-identical", `{"engines":{"fake":false},"offBy":{"fake":"peer"}}`)
+}
+
+func TestDesiredStateSnapshotConcurrentConsistency(t *testing.T) {
+	store := newDesiredStateStore(t.TempDir())
+	states := []desiredStateFile{
+		{Engines: map[string]bool{"first": true, "second": false}, OffBy: map[string]intentOrigin{"second": intentLocal}},
+		{Engines: map[string]bool{"first": false, "second": true}, OffBy: map[string]intentOrigin{"first": intentPeer}},
+	}
+	want := []engineintent.Snapshot{
+		{EnabledByEngine: map[string]bool{"first": true, "second": false}, OffByEngine: map[string]engineintent.Origin{"second": "local"}},
+		{EnabledByEngine: map[string]bool{"first": false, "second": true}, OffByEngine: map[string]engineintent.Origin{"first": "peer"}},
+	}
+	if err := store.save(states[0]); err != nil {
+		t.Fatal(err)
+	}
+	start := make(chan struct{})
+	writer := make(chan error, 1)
+	go func() {
+		<-start
+		for i := 0; i < 100; i++ {
+			store.mu.Lock()
+			err := store.save(states[i%2])
+			store.mu.Unlock()
+			if err != nil {
+				writer <- err
+				return
+			}
+		}
+		writer <- nil
+	}()
+	close(start)
+	// Always join the writer before the temporary store is removed.
+	defer func() {
+		if err := <-writer; err != nil {
+			t.Error(err)
+		}
+	}()
+	for i := 0; i < 1000; i++ {
+		got, err := store.snapshot([]string{"first", "second"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(got, want[0]) && !reflect.DeepEqual(got, want[1]) {
+			t.Fatalf("snapshot combined different store revisions: %+v", got)
+		}
+	}
+}
+
+func TestDesiredStateOnClearsOffBy(t *testing.T) {
+	for _, origin := range []intentOrigin{intentLocal, intentPeer} {
+		t.Run(string(origin), func(t *testing.T) {
+			store := newDesiredStateStore(t.TempDir())
+			if err := store.set("fake", false, origin); err != nil {
+				t.Fatal(err)
+			}
+			if err := store.set("fake", true, intentLocal); err != nil {
+				t.Fatal(err)
+			}
+			state, err := store.load()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !state.Engines["fake"] || len(state.OffBy) != 0 {
+				t.Fatalf("saved On retained provenance: %+v", state)
+			}
+		})
+	}
+}
 
 func desiredTestExecutor(t *testing.T, manifest *Manifest, baseDir string) *Executor {
 	t.Helper()

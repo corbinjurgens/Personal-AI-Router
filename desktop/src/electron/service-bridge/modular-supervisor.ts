@@ -35,6 +35,7 @@ import {
 } from './proxy-engines'
 import { emitBridgePush } from './broadcaster'
 import { parseEngineSettings } from './engine-settings'
+import { parseEngineIntent } from './engine-intent'
 import { parseEngineSwitchChanged } from './engine-switch'
 import { parseEngineDescriptors } from './engine-descriptors'
 import { resolvePullCatchError } from './pull-error-handling'
@@ -557,6 +558,7 @@ class ModularSupervisor {
         if (this.isReady) return
 
         this.brokerSessionGeneration++
+        getModularBridgeState().applyEngineIntent(null)
         this.shuttingDown = false
         this.performance.reset()
         this.brokerReady = false
@@ -645,6 +647,7 @@ class ModularSupervisor {
         // treated as deliberate, not a crash.
         this.shuttingDown = true
         this.brokerSessionGeneration++
+        getModularBridgeState().applyEngineIntent(null)
         await this.performance.stop()
         stopNodeInfoPoller()
         if (this.remoteStatusDebounceTimer) {
@@ -898,6 +901,7 @@ class ModularSupervisor {
     /** Forget what a broker that is gone told us, until the next `app:ready`. */
     private resetBrokerSession(): void {
         this.brokerSessionGeneration++
+        getModularBridgeState().applyEngineIntent(null)
         this.performance.reset()
         this.brokerReady = false
         this.brokerHydrationDone = false
@@ -947,6 +951,7 @@ class ModularSupervisor {
             this.processes.delete(child.name as ModularProcessName)
             if (child.name === 'broker') {
                 this.brokerSessionGeneration++
+                getModularBridgeState().applyEngineIntent(null)
                 this.performance.reset()
                 this.brokerReady = false
                 this.brokerHydrationDone = false
@@ -1067,6 +1072,8 @@ class ModularSupervisor {
         }
         // Engine events are opt-in and replay no baseline — subscribe then hydrate.
         await subscribe('engine:subscribe', 'subscribe to broker engine relay')
+        if (generation !== this.brokerSessionGeneration) return
+        await this.hydrateEngineIntent()
         if (generation !== this.brokerSessionGeneration) return
         await subscribe('workloads:subscribe', 'subscribe to broker workloads stream')
         if (generation !== this.brokerSessionGeneration) return
@@ -1323,6 +1330,20 @@ class ModularSupervisor {
                 sublevel: proxySourceForEngine(engine),
                 message: `Unable to hydrate ${engine} proxy nodes: ${getErrorString(err)}`
             })
+        }
+    }
+
+    private async hydrateEngineIntent(): Promise<void> {
+        const session = this.brokerSessionGeneration
+        const state = getModularBridgeState()
+        const generation = state.beginEngineIntentRead()
+        try {
+            const result = await this.callProcess('broker', 'engine:intent')
+            if (session !== this.brokerSessionGeneration) return
+            state.applyEngineIntent(parseEngineIntent(result), generation)
+        } catch {
+            if (session !== this.brokerSessionGeneration) return
+            state.applyEngineIntent(null, generation)
         }
     }
 
@@ -1920,7 +1941,18 @@ class ModularSupervisor {
             return
         }
         if (notification.method === 'engine:ready') {
+            getModularBridgeState().applyEngineIntent(null)
+            void this.hydrateEngineIntent()
             void this.hydrateEngineManager()
+            return
+        }
+        if (notification.method === 'engine:intent-changed') {
+            const state = getModularBridgeState()
+            try {
+                state.applyEngineIntent(parseEngineIntent(notification.params))
+            } catch {
+                state.applyEngineIntent(null)
+            }
             return
         }
         if (notification.method === 'engine:state-changed') {

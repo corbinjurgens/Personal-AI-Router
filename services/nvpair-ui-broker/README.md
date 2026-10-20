@@ -478,7 +478,16 @@ proxy enforces it.
   `engine:state-changed` (a stopped engine is absent); saved intent from
   `engine:intent` and `engine:intent-changed`. Both are seeded from
   `engine:intent`, `engine:get-installed` and `engine:models` whenever
-  engine-manager (re)starts. Each push sends the state current at send time and
+  engine-manager (re)starts. Both intent payloads require `enabledByEngine`
+  (engine to boolean) and `offByEngine` (explicitly saved Off engine to `local`
+  or `peer`). Legacy saved Off without stored provenance is reported as `local`;
+  unknown intent and On engines have no origin entry. The broker validates the
+  shared snapshot before applying any intent to policy; malformed snapshots
+  leave the previous policy inputs intact. Only booleans reach
+  `node/set-engine-intent`: provenance is client display data, not admission
+  policy. Subscribed notifications and request replies relay the original
+  payload, including both maps, unchanged. Each push sends the state current at
+  send time and
   pushes are serialized, so an older state can never overwrite a newer one.
   When the proxy (re)starts, all of them are re-sent from its spawn hook **before
   any facade is enabled**, availability first, so a paused node is never briefly

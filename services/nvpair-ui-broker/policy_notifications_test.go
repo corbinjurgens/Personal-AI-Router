@@ -17,6 +17,36 @@ import (
 	"nvpair-shared/nodepolicy"
 )
 
+func TestIntentSubscribedRelayPreservesSnapshot(t *testing.T) {
+	b, out := newPolicyBroker(t)
+	source := b.activateEngineManagerSource()
+	id := json.RawMessage(`1`)
+	b.handleMessage(&Message{JSONRPC: "2.0", ID: &id, Method: "engine:subscribe"})
+	raw := json.RawMessage(`{"enabledByEngine":{"ollama":true,"lmstudio":false,"llamacpp":false},"offByEngine":{"lmstudio":"local","llamacpp":"peer"},"relayMarker":"unchanged"}`)
+	b.forwardEngineNotificationFrom(source, engineIntentChanged, raw)
+	frame := out.waitFrame(t, "subscribed intent snapshot", func(m Message) bool { return m.Method == engineIntentChanged })
+	requireIntentRelayPayload(t, frame.Params, raw)
+}
+
+// requireIntentRelayPayload compares the complete decoded payload so missing
+// maps or a relay that reconstructs only known fields cannot pass.
+func requireIntentRelayPayload(t *testing.T, got, want json.RawMessage) {
+	t.Helper()
+	var actual, expected map[string]json.RawMessage
+	if err := json.Unmarshal(got, &actual); err != nil {
+		t.Fatalf("decode relayed intent: %v", err)
+	}
+	if err := json.Unmarshal(want, &expected); err != nil {
+		t.Fatalf("decode expected intent: %v", err)
+	}
+	if _, present := actual["offByEngine"]; !present {
+		t.Fatal("relayed intent omits offByEngine")
+	}
+	if !reflect.DeepEqual(actual, expected) {
+		t.Fatalf("relayed intent = %s, want %s", got, want)
+	}
+}
+
 // policyChangedEvent is one policy:changed this node announced for itself.
 type policyChangedEvent struct {
 	Policy nodepolicy.Policy `json:"policy"`

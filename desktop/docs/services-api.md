@@ -21,7 +21,6 @@
 - ⚠️ nvpair-engine-manager → engine:describe
 - ⚠️ nvpair-engine-manager → engine:errors
 - ⚠️ nvpair-engine-manager → engine:get-launch
-- ⚠️ nvpair-engine-manager → engine:intent
 - ⚠️ nvpair-engine-manager → engine:logs
 - ⚠️ nvpair-engine-manager → engine:preview-launch
 - ⚠️ nvpair-engine-manager → engine:remote-apply-settings
@@ -92,7 +91,7 @@
 | Method | Direction | In bridge? |
 |---|---|---|
 | `engine:install-progress` | notification (we consume) | ✅ yes |
-| `engine:intent-changed` | notification (we consume) | ➖ ignored |
+| `engine:intent-changed` | notification (we consume) | ✅ yes |
 | `engine:model-identity` | notification (we consume) | ➖ ignored |
 | `engine:models-changed` | notification (we consume) | ✅ yes |
 | `engine:pull-progress` | notification (we consume) | ✅ yes |
@@ -114,7 +113,7 @@
 | `engine:get-installed` | request (we call) | ✅ yes |
 | `engine:get-launch` | request (we call) | ⚠️ not called |
 | `engine:install` | request (we call) | ✅ yes |
-| `engine:intent` | request (we call) | ⚠️ not called |
+| `engine:intent` | request (we call) | ✅ yes |
 | `engine:load-model` | request (we call) | ✅ yes |
 | `engine:logs` | request (we call) | ⚠️ not called |
 | `engine:models` | request (we call) | ✅ yes |
@@ -266,9 +265,10 @@
 | `cluster:remote-management-changed` | request (we call) | ✅ yes |
 | `discovery:nodes-changed` | request (we call) | ✅ yes |
 | `engine:install-progress` | request (we call) | ✅ yes |
-| `engine:intent-changed` | request (we call) | ➖ ignored |
+| `engine:intent-changed` | request (we call) | ✅ yes |
 | `engine:models-changed` | request (we call) | ✅ yes |
 | `engine:pull-progress` | request (we call) | ✅ yes |
+| `engine:ready` | request (we call) | ✅ yes |
 | `engine:remote-progress` | request (we call) | ✅ yes |
 | `engine:settings-changed` | request (we call) | ✅ yes |
 | `engine:settings-disconnected` | request (we call) | ✅ yes |
@@ -310,7 +310,7 @@
 | `engine:apply-settings` | request (we call) | ✅ yes |
 | `engine:get-settings` | request (we call) | ✅ yes |
 | `engine:install` | request (we call) | ✅ yes |
-| `engine:intent-changed` | request (we call) | ➖ ignored |
+| `engine:intent-changed` | request (we call) | ✅ yes |
 | `engine:models-changed` | request (we call) | ✅ yes |
 | `engine:preview-settings` | request (we call) | ✅ yes |
 | `engine:restart` | request (we call) | ⚠️ not called |

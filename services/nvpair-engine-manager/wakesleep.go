@@ -13,6 +13,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"nvpair-shared/engineintent"
 )
 
 const (
@@ -25,13 +26,6 @@ const (
 // errIntentOff is returned by Wake for an engine whose saved intent is not On.
 // An engine with no saved intent counts as Off, matching RestoreEnabled.
 var errIntentOff = errors.New("engine is not saved On")
-
-// intentParams is the engine:intent result and the engine:intent-changed
-// payload: every registered engine's saved On/Off intent. An engine with no
-// saved intent is reported Off, because nothing starts it automatically.
-type intentParams struct {
-	EnabledByEngine map[string]bool `json:"enabledByEngine"`
-}
 
 // Wake starts an engine only if its saved intent is On, without changing that
 // intent. It holds the engine's lifecycle lock like Restart, so a concurrent
@@ -82,20 +76,12 @@ func (e *Executor) Sleep(engine string) error {
 // Intent reports every registered engine's saved intent. It reads only the
 // intent file, never an engine's lifecycle lock, so it answers immediately even
 // while an engine is starting.
-func (e *Executor) Intent() (intentParams, error) {
-	out := intentParams{EnabledByEngine: make(map[string]bool)}
-	for _, name := range e.reg.Names() {
-		enabled, known, err := e.desired.get(name)
-		if err != nil {
-			return intentParams{}, err
-		}
-		out.EnabledByEngine[name] = known && enabled
-	}
-	return out, nil
+func (e *Executor) Intent() (engineintent.Snapshot, error) {
+	return e.desired.snapshot(e.reg.Names())
 }
 
-// emitIntent pushes the current saved intent after it changes. Best-effort: a
-// read failure is reported through the error the caller already returns.
+// emitIntent pushes the current saved intent after it changes. Best-effort:
+// unreadable or invalid snapshots are not published.
 func (e *Executor) emitIntent() {
 	if intent, err := e.Intent(); err == nil {
 		e.notify(intentChangedMethod, intent)

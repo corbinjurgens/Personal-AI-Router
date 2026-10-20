@@ -728,6 +728,7 @@ const EMPTY_SERVICE_BRIDGE_HANDLERS: BridgeHandlerMap = {
     'cluster:abandon-if-solo': () => handleClusterAbandonIfSolo(),
 
     'engines:get-initial': () => getModularBridgeState().getEngineInitialState(),
+    'engines:get-intent': () => getModularBridgeState().getEngineIntent(),
     'engines:switch': async payload =>
         parseEngineSwitchResult(
             await getModularSupervisor().callProcess(

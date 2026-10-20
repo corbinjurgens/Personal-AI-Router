@@ -169,6 +169,17 @@ remote control surface where supported.
 
 ### Engine settings
 
+The bridge subscribes to engine events before reading local `engine:intent`.
+The read and `engine:intent-changed` push carry required `enabledByEngine`
+and `offByEngine` maps. Origins are `local` or `peer`, relative to the owning
+device, and appear only for explicitly saved Off engines (legacy saved Off
+without provenance reports `local`). Default false and On have no origin.
+Strict parsing rejects missing maps, invalid values and origins for enabled or
+unreported engines. The nullable bridge snapshot is exposed through
+`engines:get-intent` and `engines:intent-changed`. Failed reads, malformed pushes
+and service/broker/manager restarts invalidate it to null. Local read generations
+and broker session fences prevent late reads from replacing newer state.
+
 The typed engine API also exposes `switchEngine` and `switchStatus`, mapped to
 `engine:switch` and `engine:switch-status`. The broker owns sequencing, drain,
 intent and recovery; the bridge validates the complete receipt and republishes

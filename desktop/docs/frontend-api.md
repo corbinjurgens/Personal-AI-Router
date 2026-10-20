@@ -75,6 +75,15 @@ They do not imply a WebSocket connection. Browser clients are not supported.
 
 ### `pairApi.engines`
 
+- `getIntent()` reads the local bridge's `EngineIntentSnapshot | null` through
+  `engines:get-intent`; `onIntentChanged(callback)` subscribes through
+  `engines:intent-changed`. Both maps are required: `enabledByEngine` contains
+  booleans and `offByEngine` contains only explicitly saved Off engines with
+  origin `local` or `peer`, relative to the engine-owning device. Legacy saved
+  Off without stored provenance reports `local`; default false has no origin.
+  Null means unavailable after disconnect, restart or failed read. The existing
+  engine-status store subscribes before fetching and clears intent on teardown.
+  Intent and origin are independent of runtime lifecycle status.
 - `getInitialState()` returns engine statuses, models, active progress, and available
   updates.
 - `toggle`, `install`, `uninstall`, and `update` manage engine lifecycle.

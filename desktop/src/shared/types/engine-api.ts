@@ -15,6 +15,12 @@ import type {
     EngineUpdateAvailable
 } from '@/shared/types/engines'
 
+/** Saved intent on the local engine-owning device, independent of lifecycle state. */
+export interface EngineIntentSnapshot {
+    enabledByEngine: Record<string, boolean>
+    offByEngine: Record<string, 'local' | 'peer'>
+}
+
 /**
  * One normalized model row returned by an engine-owned hub source (a committed
  * Ollama library list, the LM Studio community catalog, llama.cpp's Hugging Face

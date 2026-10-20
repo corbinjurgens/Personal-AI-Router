@@ -19,6 +19,13 @@ const mocks = vi.hoisted(() => ({
         clearWorkloads: vi.fn(),
         setLocalDiscoveryModelRefresher:
             vi.fn<ReturnType<typeof getModularBridgeState>['setLocalDiscoveryModelRefresher']>(),
+        applyEngineIntent: vi.fn<ReturnType<typeof getModularBridgeState>['applyEngineIntent']>(),
+        beginEngineIntentRead: vi.fn<
+            ReturnType<typeof getModularBridgeState>['beginEngineIntentRead']
+        >(() => 0),
+        getEngineIntent: vi.fn<ReturnType<typeof getModularBridgeState>['getEngineIntent']>(
+            () => null
+        ),
         getProxyPort: vi.fn(() => null),
         getPendingInvites: () => Array.from(mocks.pendingInviteIds),
         addPendingInvite: (invite: { inviteId: string; state: string }) => {
