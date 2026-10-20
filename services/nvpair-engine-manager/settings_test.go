@@ -25,6 +25,24 @@ import (
 	settings "nvpair-shared/enginesettings"
 )
 
+func TestServingDriftClearsOnlyAfterSuccessfulApply(t *testing.T) {
+	f := ownedServingFixture(t)
+	st := settingsState(t, f.ex)
+	st.mu.Lock()
+	st.plat.Runtime.servingDrift = "synthetic input drift"
+	st.mu.Unlock()
+	request := settingsRequest(t, f.ex)
+	bindFailure := fmt.Errorf("synthetic bind failure")
+	result, err := f.ex.ConfigureLaunch(context.Background(), settings.Configure{Engine: "fake", Settings: request.Settings}, func() error { return bindFailure })
+	if err != bindFailure || result.ServingReadback.Status != "mismatch" || len(f.ex.modelIdentity().Engines["fake"].ModelDigests) != 0 {
+		t.Fatalf("failed apply cleared drift: result=%+v err=%v", result.ServingReadback, err)
+	}
+	result, err = f.ex.ConfigureLaunch(context.Background(), settings.Configure{Engine: "fake", Settings: request.Settings}, func() error { return nil })
+	if err != nil || len(result.ServingReadback.LaunchValidated) != 2 || len(f.ex.modelIdentity().Engines["fake"].Serving) != 2 {
+		t.Fatalf("successful apply retained drift: result=%+v err=%v", result.ServingReadback, err)
+	}
+}
+
 // graftPlatform points the fake engine at a bundled platform's runtime.
 //
 // Both fields move together: a runtime referencing {models_dir} — llama.cpp's

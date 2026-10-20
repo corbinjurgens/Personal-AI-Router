@@ -167,6 +167,9 @@ func mergeMemoryChanges(names, memoryNames []string) []string {
 // prevLoaded. Split out of watchLoaded so the diff logic is unit-testable
 // without goroutines or timers.
 func (e *Executor) sweepLoaded(ctx context.Context, prevLoaded map[string][]string, fullInventory bool) (changed []string, next map[string][]string, res ModelsResult) {
+	if fullInventory {
+		e.refreshServingIdentity(ctx)
+	}
 	res = e.modelsSweep(ctx, fullInventory)
 	changed = changedEngines(prevLoaded, res.LoadedByEngine)
 	next = make(map[string][]string, len(prevLoaded)+len(res.LoadedByEngine))

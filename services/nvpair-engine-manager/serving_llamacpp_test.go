@@ -37,6 +37,96 @@ type llamaServingFixture struct {
 	root     string
 }
 
+func TestLlamaServingRetentionContract(t *testing.T) {
+	for _, location := range []string{"global preset", "model preset", "CLI", "environment"} {
+		t.Run(location, func(t *testing.T) {
+			for _, value := range []string{"-1", "17", "0", "-2", "-01"} {
+				t.Run(value, func(t *testing.T) {
+					f := newLlamaServingFixture(t)
+					data, err := os.ReadFile(f.source)
+					if err != nil {
+						t.Fatal(err)
+					}
+					text := strings.ReplaceAll(strings.ReplaceAll(string(data), "sleep-idle-seconds = 180\n", ""), "sleep-idle-seconds = 60\n", "")
+					switch location {
+					case "global preset":
+						text = strings.Replace(text, "[*]\n", "[*]\nsleep-idle-seconds = "+value+"\n", 1)
+					case "model preset":
+						text = strings.Replace(text, "[medium]\n", "[medium]\nsleep-idle-seconds = "+value+"\n", 1)
+					case "CLI":
+						f.request.Settings.LaunchText += " --sleep-idle-seconds " + value
+					case "environment":
+						f.request.Settings.LaunchText = "LLAMA_ARG_SLEEP_IDLE_SECONDS=" + value + " " + f.request.Settings.LaunchText
+					}
+					writeServingFixture(t, f.source, []byte(text))
+					preview := previewSettings(t, f.ex, f.request)
+					valid := value == "-1" || value == "17"
+					if (len(preview.Errors) == 0) != valid {
+						t.Fatalf("retention %s: errors=%v", value, preview.Errors)
+					}
+					if valid {
+						if preview.Serving.Configured[0].Retention != value {
+							t.Fatalf("retention lost string value: %+v", preview.Serving.Configured[0])
+						}
+						applyLlamaServing(t, f, preview)
+						state, err := f.ex.LaunchSettings("fake")
+						if err != nil || state.ServingReadback.Configured[0].Retention != value {
+							t.Fatalf("readback lost retention: %+v %v", state.ServingReadback, err)
+						}
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestServingRetentionDisabledIsExact(t *testing.T) {
+	for _, value := range []string{"-1", "0", "1", "-2", "", "-01", " -1"} {
+		t.Run(value, func(t *testing.T) {
+			if got := servingRetentionDisabled(engines.ServingEnvelope{Retention: value}); got != (value == "-1") {
+				t.Fatalf("disabled(%q)=%v", value, got)
+			}
+		})
+	}
+}
+
+func TestLlamaServingPreparedDigestChangesWithApprovedInputs(t *testing.T) {
+	test := func(name string, edit func(*llamaServingFixture)) {
+		t.Run(name, func(t *testing.T) {
+			f := newLlamaServingFixture(t)
+			before := approveLlamaServing(t, f).Serving.Configured[0].NativeSourceDigest
+			edit(&f)
+			after := approveLlamaServing(t, f).Serving.Configured[0].NativeSourceDigest
+			if before == after {
+				t.Fatal("approved input change omitted from prepared digest")
+			}
+		})
+	}
+	editSource := func(f *llamaServingFixture, old, new string) {
+		t.Helper()
+		data, err := os.ReadFile(f.source)
+		if err != nil {
+			t.Fatal(err)
+		}
+		text := strings.Replace(string(data), old, new, 1)
+		if text == string(data) {
+			t.Fatal("fixture replacement missed")
+		}
+		writeServingFixture(t, f.source, []byte(text))
+	}
+	test("source bytes", func(f *llamaServingFixture) { editSource(f, "fit = off", "# changed source\nfit = off") })
+	test("context envelope", func(f *llamaServingFixture) { editSource(f, "ctx-size = 16384", "ctx-size = 32768") })
+	test("retention", func(f *llamaServingFixture) { editSource(f, "sleep-idle-seconds = 180", "sleep-idle-seconds = -1") })
+	test("placement", func(f *llamaServingFixture) { editSource(f, "gpu-layers = 12", "gpu-layers = 13") })
+	test("router capacity", func(f *llamaServingFixture) {
+		f.request.Settings.LaunchText = strings.Replace(f.request.Settings.LaunchText, "--models-max 1", "--models-max 2", 1)
+	})
+	test("output declaration", func(f *llamaServingFixture) { f.request.Settings.Serving.Models[0].MaxOutputTokens++ })
+	test("content assertion", func(f *llamaServingFixture) {
+		f.request.Settings.Serving.Models[0].Artifacts[0].SHA256 = strings.Repeat("d", 64)
+	})
+}
+
 func newLlamaServingFixture(t *testing.T) llamaServingFixture {
 	t.Helper()
 	ex := settingsExecutor(t, false)

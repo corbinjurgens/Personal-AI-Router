@@ -21,6 +21,8 @@ import (
 	"reflect"
 	"regexp"
 	"sort"
+
+	"nvpair-shared/engines"
 )
 
 // modelIdentityMethod is the notification carrying modelIdentityParams. The
@@ -37,9 +39,10 @@ type modelIdentityParams struct {
 }
 
 type engineModelIdentity struct {
-	EngineRunID  string            `json:"engineRunId"`
-	LaunchDigest string            `json:"launchDigest"`
-	ModelDigests map[string]string `json:"modelDigests"`
+	EngineRunID  string                             `json:"engineRunId"`
+	LaunchDigest string                             `json:"launchDigest"`
+	ModelDigests map[string]string                  `json:"modelDigests"`
+	Serving      map[string]engines.ServingEnvelope `json:"serving,omitempty"`
 }
 
 // observedDigests are the content digests one inventory request returned,
@@ -160,11 +163,15 @@ func (e *Executor) modelIdentity() modelIdentityParams {
 		st.mu.Lock()
 		owned := st.running && !st.adopted && st.proc != nil && st.runID != "" && st.launchDigest != ""
 		id := engineModelIdentity{EngineRunID: st.runID, LaunchDigest: st.launchDigest, ModelDigests: map[string]string{}}
+		serving := st.plat.Runtime.Serving != nil
+		if owned && serving && st.plat.Runtime.servingDrift == "" {
+			id = servingIdentityLocked(st)
+		}
 		st.mu.Unlock()
 		if !owned {
 			continue
 		}
-		if observed, ok := digests[name]; ok && observed.runID == id.EngineRunID {
+		if observed, ok := digests[name]; !serving && ok && observed.runID == id.EngineRunID {
 			for model, digest := range observed.models {
 				id.ModelDigests[model] = digest
 			}

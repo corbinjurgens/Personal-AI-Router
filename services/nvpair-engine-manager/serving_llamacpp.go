@@ -218,6 +218,9 @@ func llamaPositive(value string) (int64, error) {
 }
 
 func validateLlamaValue(key, value string) error {
+	if key == "sleep-idle-seconds" && value == "-1" {
+		return nil
+	}
 	switch key {
 	case "ctx-size", "parallel", "kv-unified-per-slot", "n-predict", "models-max", "sleep-idle-seconds", "cache-ram":
 		_, err := llamaPositive(value)
@@ -718,6 +721,7 @@ func compileLlamaServing(command launchCommand, rt Runtime, requireApproved bool
 		}
 		result.Config.Models[i].ExpectedNativeSourceDigest = result.Digest
 		result.Envelopes[i].NativeSourceDigest = result.Digest
+		result.Envelopes[i].ContentDigest = servingContentDigest(result.Config.Models[i])
 	}
 	return result, nil
 }

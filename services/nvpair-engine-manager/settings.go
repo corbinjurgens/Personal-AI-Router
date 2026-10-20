@@ -130,6 +130,7 @@ func (e *Executor) launchStateLocked(engine string, st *engineState) settings.La
 	result := settings.LaunchState{Engine: engine, ServerPort: st.plat.Runtime.Port, EffectivePort: st.port, Running: st.running, Adopted: st.adopted, Format: launchTextFormat}
 	result.Serving = st.plat.Runtime.Serving.Clone()
 	result.ServingReadback = servingDeclarationReadback(result.Serving)
+	drift := st.plat.Runtime.servingDrift
 	st.mu.Unlock()
 	command, err := launchForState(st, result.ServerPort)
 	if err == nil {
@@ -141,8 +142,13 @@ func (e *Executor) launchStateLocked(engine string, st *engineState) settings.La
 			prepared, servingErr := compilePreparedServing(st, command, rt, false)
 			if servingErr == nil {
 				result.ServingReadback = preparedServingReadback(st, prepared)
-				if result.Running && !result.Adopted && rt.servingLaunch != nil && rt.servingLaunch.Digest == prepared.Digest {
-					result.ServingReadback.LaunchValidated = llamaServingReadback(rt.servingLaunch).Configured
+				if result.Running && !result.Adopted && rt.servingLaunch != nil {
+					if drift == "" && rt.servingLaunch.Digest == prepared.Digest {
+						result.ServingReadback.LaunchValidated = servingEnvelopes(rt.servingLaunch)
+					} else {
+						result.ServingReadback.Status = "mismatch"
+						result.ServingReadback.Reason = "Serving inputs no longer match the owned launch; explicit apply or restart is required."
+					}
 				}
 			} else {
 				result.ServingReadback = &engines.ServingReadback{Status: "mismatch", Reason: servingErr.Error()}
@@ -580,6 +586,9 @@ func (e *Executor) ConfigureLaunch(ctx context.Context, p settings.Configure, re
 			return e.launchStateLocked(p.Engine, st), err
 		}
 	}
+	st.mu.Lock()
+	st.plat.Runtime.servingDrift = ""
+	st.mu.Unlock()
 	e.emitState(p.Engine)
 	return e.launchStateLocked(p.Engine, st), nil
 }

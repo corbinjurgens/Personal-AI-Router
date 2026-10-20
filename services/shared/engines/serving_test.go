@@ -9,6 +9,51 @@ import (
 	"testing"
 )
 
+func TestServingEnvelopeValidation(t *testing.T) {
+	fixture := func() ServingEnvelope {
+		ram, vram := int64(4096), int64(0)
+		return ServingEnvelope{ModelID: "m", ContentDigest: strings.Repeat("a", 64), NativeSourceDigest: strings.Repeat("b", 64), PerSlotContextTokens: 4096, TotalContextTokens: 8192, Slots: 2, MaxOutputTokens: 128, Memory: ServingMemory{HostRAMBytes: &ram, VRAMBytes: &vram}}
+	}
+	e := fixture()
+	if err := e.Validate("m", e.ContentDigest); err != nil {
+		t.Fatal(err)
+	}
+	test := func(name string, edit func(*ServingEnvelope)) {
+		t.Run(name, func(t *testing.T) {
+			e := fixture()
+			edit(&e)
+			if e.Validate("m", strings.Repeat("a", 64)) == nil {
+				t.Fatal("invalid envelope accepted")
+			}
+		})
+	}
+	test("wrong model", func(e *ServingEnvelope) { e.ModelID = "other" })
+	test("wrong content", func(e *ServingEnvelope) { e.ContentDigest = strings.Repeat("c", 64) })
+	test("source digest", func(e *ServingEnvelope) { e.NativeSourceDigest = "invalid" })
+	test("zero context", func(e *ServingEnvelope) { e.PerSlotContextTokens = 0 })
+	test("unsafe context", func(e *ServingEnvelope) { e.TotalContextTokens = 1 << 53 })
+	test("zero slots", func(e *ServingEnvelope) { e.Slots = 0 })
+	test("unbacked slots", func(e *ServingEnvelope) { e.Slots = 3 })
+	test("zero output", func(e *ServingEnvelope) { e.MaxOutputTokens = 0 })
+	test("output consumes context", func(e *ServingEnvelope) { e.MaxOutputTokens = e.PerSlotContextTokens })
+	test("unknown RAM", func(e *ServingEnvelope) { e.Memory.HostRAMBytes = nil })
+	test("unknown VRAM", func(e *ServingEnvelope) { e.Memory.VRAMBytes = nil })
+	test("zero RAM", func(e *ServingEnvelope) { *e.Memory.HostRAMBytes = 0 })
+	test("negative VRAM", func(e *ServingEnvelope) { *e.Memory.VRAMBytes = -1 })
+}
+
+func TestServingEnvelopeCloneDetachesMemoryAndPlacement(t *testing.T) {
+	ram, vram := int64(100), int64(0)
+	original := ServingEnvelope{Memory: ServingMemory{HostRAMBytes: &ram, VRAMBytes: &vram}, Placement: []string{"gpu-layers=0"}}
+	copy := original.Clone()
+	*copy.Memory.HostRAMBytes = 200
+	*copy.Memory.VRAMBytes = 1
+	copy.Placement[0] = "changed"
+	if ram != 100 || vram != 0 || original.Placement[0] != "gpu-layers=0" {
+		t.Fatal("clone aliases source")
+	}
+}
+
 func servingFixture() *ServingConfig {
 	ram, vram := int64(4096), int64(0)
 	return &ServingConfig{Version: 1, Models: []ServingModel{{ModelID: "exact/model:Q4", MaxOutputTokens: 256,

@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"nvpair-shared/engines"
 	settings "nvpair-shared/enginesettings"
 	"nvpair-shared/nodepolicy"
 )
@@ -18,6 +19,57 @@ var (
 	launchDigestC = strings.Repeat("c", 64)
 	modelDigestB  = strings.Repeat("b", 64)
 )
+
+func TestModelIdentityServingPassThroughAndWithdrawal(t *testing.T) {
+	ab := newActivatedBroker(t)
+	b := ab.b
+	source := b.activateEngineManagerSource()
+	ram, vram := int64(4096), int64(0)
+	envelope := engines.ServingEnvelope{ModelID: "m:latest", ContentDigest: modelDigestB, NativeSourceDigest: launchDigestC, PerSlotContextTokens: 4096, TotalContextTokens: 4096, Slots: 1, MaxOutputTokens: 128, Memory: engines.ServingMemory{HostRAMBytes: &ram, VRAMBytes: &vram}, Placement: []string{"gpu-layers=0"}, Retention: "-1", RouterCapacity: 1}
+	input := map[string]engineManagerIdentity{"llamacpp": {EngineRunID: "run-llamacpp", LaunchDigest: launchDigestC, ModelDigests: map[string]string{"m:latest": modelDigestB}, Serving: map[string]engines.ServingEnvelope{"m:latest": envelope}}}
+	data, err := json.Marshal(struct {
+		Engines map[string]engineManagerIdentity `json:"engines"`
+	}{input})
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded := decodeModelIdentity(data)
+	b.acceptModelIdentity(source, decoded)
+	b.observeSettingsIdentity([]settings.Snapshot{appliedSnapshot("llamacpp", 3)})
+	got := waitIdentity(t, ab.proxy, "serving envelope", func(p nodepolicy.SetModelIdentityParams) bool { return len(p.Engines["llamacpp"].Serving) == 1 })
+	fp, ok := settingsFingerprint(appliedSnapshot("llamacpp", 3))
+	if !ok || got.Engines["llamacpp"].SettingsFingerprint != fp {
+		t.Fatal("serving projection lost applied settings fingerprint")
+	}
+	if e := got.Engines["llamacpp"].Serving["m:latest"]; e.ContentDigest != modelDigestB || e.Retention != "-1" || *e.Memory.HostRAMBytes != 4096 {
+		t.Fatalf("lost serving fields: %+v", e)
+	}
+	*decoded["llamacpp"].Serving["m:latest"].Memory.HostRAMBytes = 1
+	decoded["llamacpp"].Serving["m:latest"].Placement[0] = "mutated"
+	r := b.nodePolicyRuntime()
+	r.mu.Lock()
+	joined := r.modelIdentityLocked()
+	r.mu.Unlock()
+	if e := joined.Engines["llamacpp"].Serving["m:latest"]; *e.Memory.HostRAMBytes != 4096 || e.Placement[0] == "mutated" {
+		t.Fatal("accepted snapshot aliases sender")
+	}
+	*joined.Engines["llamacpp"].Serving["m:latest"].Memory.HostRAMBytes = 2
+	r.mu.Lock()
+	again := r.modelIdentityLocked()
+	r.mu.Unlock()
+	if *again.Engines["llamacpp"].Serving["m:latest"].Memory.HostRAMBytes != 4096 {
+		t.Fatal("joined snapshot aliases broker")
+	}
+	b.retireEngineManagerSource(source)
+	waitIdentity(t, ab.proxy, "serving source withdrawal", func(p nodepolicy.SetModelIdentityParams) bool { return len(p.Engines) == 0 })
+	b.acceptModelIdentity(source, input)
+	r.mu.Lock()
+	late := r.modelIdentityLocked()
+	r.mu.Unlock()
+	if len(late.Engines) != 0 {
+		t.Fatal("retired source restored serving")
+	}
+}
 
 // engineManagerSnapshot is engine:model-identity naming each engine with run
 // id run-<engine> and one model m:latest.
