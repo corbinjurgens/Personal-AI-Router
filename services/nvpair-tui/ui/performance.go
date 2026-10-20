@@ -196,7 +196,7 @@ func performanceFieldsPresent(raw []byte) bool {
 			if !ok {
 				return false
 			}
-			for _, name := range []string{"admissionWaitMs", "headerMs", "firstBodyMs", "firstTokenMs", "totalMs", "loadNs", "prefill", "decode"} {
+			for _, name := range []string{"admissionWaitMs", "headerMs", "firstBodyMs", "firstTokenMs", "totalMs", "loadNs", "prefill", "decode", "engineDecode"} {
 				metric := entry[name]
 				if len(metric) == 0 || bytes.Equal(bytes.TrimSpace(metric), []byte("null")) {
 					continue
@@ -204,6 +204,8 @@ func performanceFieldsPresent(raw []byte) bool {
 				required := []string{"samples", "median", "p95"}
 				if name == "prefill" || name == "decode" {
 					required = []string{"samples", "tokens", "durationNs", "tokensPerSecond"}
+				} else if name == "engineDecode" {
+					required = []string{"samples", "durationNs", "tokensPerSecond"}
 				}
 				if _, ok := performanceObject(metric, required...); !ok {
 					return false
@@ -413,6 +415,11 @@ func (d *nodeDetail) performanceText() string {
 			name  string
 			value *performancewire.Rate
 		}{{"Prefill", e.Prefill}, {"Decode", e.Decode}} {
+			if phase.name == "Decode" && e.EngineDecode != nil {
+				fmt.Fprintf(&b, "Engine-reported decode: %g tokens/s | qualified %d/%d\n", e.EngineDecode.TokensPerSecond, e.EngineDecode.Samples, e.Samples)
+				b.WriteString("Duration-weighted mean of reported rates, which may be rounded by the engine; no reconstructed token total.\n")
+				continue
+			}
 			if phase.value == nil {
 				fmt.Fprintf(&b, "%s: -- tokens/s | qualified 0/%d\n", phase.name, e.Samples)
 			} else {

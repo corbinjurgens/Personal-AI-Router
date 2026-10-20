@@ -38,7 +38,7 @@ function entry(extra: JsonObject = {}): JsonObject {
 
 function summary(extra: JsonObject = {}): JsonObject {
     return {
-        version: 1,
+        version: 2,
         measuringHost: 'peer',
         admissionIncarnation: '42',
         revision: 2,
@@ -152,7 +152,8 @@ describe('bounded broker performance projection', () => {
             totalMs: null,
             loadNs: null,
             prefill: null,
-            decode: null
+            decode: null,
+            engineDecode: null
         })
         expect(result.get('local')).toMatchObject({
             status: 'missing',
@@ -199,6 +200,75 @@ describe('bounded broker performance projection', () => {
         })
     })
 
+    it.each([49, 0])('preserves reported decode rate %s separately from legacy decode', speed => {
+        const engineDecode = { samples: 1, durationNs: 1_000_000_000, tokensPerSecond: speed }
+        const decode = { samples: 1, tokens: 100, durationNs: 1_000_000_000, tokensPerSecond: 100 }
+        const measured = parsePerformanceProjection(
+            projection([peer({ summary: summary({ entries: [entry({ engineDecode, decode })] }) })])
+        ).get('peer')?.summary?.entries[0]
+        expect(measured?.engineDecode).toEqual(engineDecode)
+        expect(measured?.decode).toEqual(decode)
+        expect(measured?.key).toEqual({
+            host: 'peer',
+            engine: 'llamacpp-custom',
+            model: 'model.gguf',
+            fingerprint: 'profile-1'
+        })
+    })
+
+    it('normalizes explicit null reported decode to unknown', () => {
+        const measured = parsePerformanceProjection(
+            projection([peer({ summary: summary({ entries: [entry({ engineDecode: null })] }) })])
+        ).get('peer')?.summary?.entries[0]
+        expect(measured?.engineDecode).toBeNull()
+    })
+
+    const invalidReportedRates: [string, JsonObject][] = [
+        ['missing samples', { durationNs: 100, tokensPerSecond: 1 }],
+        ['null samples', { samples: null, durationNs: 100, tokensPerSecond: 1 }],
+        ['missing duration', { samples: 1, tokensPerSecond: 1 }],
+        ['null duration', { samples: 1, durationNs: null, tokensPerSecond: 1 }],
+        ['zero duration', { samples: 1, durationNs: 0, tokensPerSecond: 1 }],
+        ['excessive duration', { samples: 1, durationNs: 86_400_000_000_001, tokensPerSecond: 1 }],
+        ['missing rate', { samples: 1, durationNs: 100 }],
+        ['null rate', { samples: 1, durationNs: 100, tokensPerSecond: null }],
+        ['negative rate', { samples: 1, durationNs: 100, tokensPerSecond: -1 }],
+        ['nonfinite rate', { samples: 1, durationNs: 100, tokensPerSecond: Infinity }],
+        ['excessive rate', { samples: 1, durationNs: 100, tokensPerSecond: 10_000_001 }],
+        ['unqualified samples', { samples: 2, durationNs: 100, tokensPerSecond: 1 }],
+        ['invented tokens', { samples: 1, durationNs: 100, tokensPerSecond: 1, tokens: 1 }]
+    ]
+    it.each(invalidReportedRates)('rejects reported decode with %s', (_name, engineDecode) => {
+        expect(
+            parsePerformanceProjection(
+                projection([peer({ summary: summary({ entries: [entry({ engineDecode })] }) })])
+            ).size
+        ).toBe(0)
+    })
+
+    it('rejects reported decode coverage that includes protocol-incomplete samples', () => {
+        expect(
+            parsePerformanceProjection(
+                projection([
+                    peer({
+                        summary: summary({
+                            entries: [
+                                entry({
+                                    incomplete: 1,
+                                    engineDecode: {
+                                        samples: 1,
+                                        durationNs: 100,
+                                        tokensPerSecond: 1
+                                    }
+                                })
+                            ]
+                        })
+                    })
+                ])
+            ).size
+        ).toBe(0)
+    })
+
     const invalidEntries: [string, JsonObject][] = [
         ['nonfinite metric', { headerMs: { samples: 1, median: Infinity, p95: Infinity } }],
         ['negative count', { failed: -1 }],
@@ -231,6 +301,7 @@ describe('bounded broker performance projection', () => {
             projection([peer({ summary: summary({ entries: [entry(), entry()] }) })])
         ],
         ['peer revision zero', projection([peer({ summary: summary({ revision: 0 }) })])],
+        ['v1 summary', projection([peer({ summary: summary({ version: 1 }) })])],
         [
             'expired newest sample',
             projection([

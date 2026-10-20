@@ -135,7 +135,7 @@ func New(host, path string) *Store {
 // returns ErrDuplicate, ignoring the sample, when its producer already
 // reported that sequence. A full ring drops its oldest sample, and a new key
 // beyond the cap evicts the key whose newest sample is oldest. The store takes
-// ownership of the sample's pointers; the caller must not modify them after.
+// an independent copy of the sample's nullable measurements and profile.
 func (s *Store) Record(sample performancewire.Sample) error {
 	if err := sample.Validate(); err != nil {
 		return fmt.Errorf("performancestore: %w", err)
@@ -158,12 +158,13 @@ func (s *Store) Record(sample performancewire.Sample) error {
 		s.keys[sample.Key] = st
 	}
 	st.profile = sample.Profile
+	st.profile.ContextTokens = cloneValue(sample.Profile.ContextTokens)
 	if len(st.samples) >= performancewire.MaxSamplesPerKey {
 		st.samples = slices.Delete(st.samples, 0, len(st.samples)-performancewire.MaxSamplesPerKey+1)
 		s.stats.EvictedSamples++
 	}
 	wallMs, ageMs := s.clockLocked()
-	st.samples = append(st.samples, record{ObservedAtMs: wallMs, AgeAtMs: ageMs, Measurement: sample.Measurement})
+	st.samples = append(st.samples, cloneRecord(record{ObservedAtMs: wallMs, AgeAtMs: ageMs, Measurement: sample.Measurement}))
 	s.changes++
 	return nil
 }
@@ -318,13 +319,15 @@ func keyLess(a, b performancewire.ProfileKey) bool {
 // reports false when no sample is retained.
 //
 // Latency distributions use completed samples whose protocol end was not
-// known to be missing. Phase rates additionally require a known protocol end,
-// a known token count and a positive matching phase duration, and are
-// token-weighted. Unknown values are skipped, never counted as zero.
+// known to be missing. Rates additionally require a known protocol end and a
+// positive matching phase duration. Legacy phase rates use known token counts;
+// engine-reported decode rates are weighted by their reported intervals.
+// Unknown values are skipped, never counted as zero.
 func aggregate(key performancewire.ProfileKey, st *keyState, wallMs, ageMs int64) (performancewire.Entry, bool) {
 	e := performancewire.Entry{Key: key, Profile: st.profile}
 	var admission, header, firstBody, firstToken, total, load []int64
 	var prefill, decode rateSum
+	var engineDecode reportedRateSum
 	for _, r := range st.samples {
 		if !retained(r, wallMs, ageMs) {
 			continue
@@ -367,6 +370,7 @@ func aggregate(key performancewire.ProfileKey, st *keyState, wallMs, ageMs int64
 		if r.ProtocolComplete != nil {
 			prefill.add(r.PromptTokens, r.PrefillNs)
 			decode.add(r.OutputTokens, r.DecodeNs)
+			engineDecode.add(r.EngineDecodeTokensPerSecond, r.EngineDecodeNs)
 		}
 	}
 	if e.Samples == 0 {
@@ -380,7 +384,42 @@ func aggregate(key performancewire.ProfileKey, st *keyState, wallMs, ageMs int64
 	e.LoadNs = distribution(load)
 	e.Prefill = prefill.rate()
 	e.Decode = decode.rate()
+	e.EngineDecode = engineDecode.rate()
 	return e, true
+}
+
+func cloneValue[T any](value *T) *T {
+	if value == nil {
+		return nil
+	}
+	copy := *value
+	return &copy
+}
+
+func cloneRecord(r record) record {
+	r.ProtocolComplete = cloneValue(r.ProtocolComplete)
+	r.AdmissionWaitMs = cloneValue(r.AdmissionWaitMs)
+	r.HeaderMs = cloneValue(r.HeaderMs)
+	r.FirstBodyMs = cloneValue(r.FirstBodyMs)
+	r.FirstTokenMs = cloneValue(r.FirstTokenMs)
+	r.TotalMs = cloneValue(r.TotalMs)
+	r.PromptTokens = cloneValue(r.PromptTokens)
+	r.CachedPromptTokens = cloneValue(r.CachedPromptTokens)
+	r.OutputTokens = cloneValue(r.OutputTokens)
+	r.PrefillNs = cloneValue(r.PrefillNs)
+	r.DecodeNs = cloneValue(r.DecodeNs)
+	r.EngineDecodeNs = cloneValue(r.EngineDecodeNs)
+	r.EngineDecodeTokensPerSecond = cloneValue(r.EngineDecodeTokensPerSecond)
+	r.LoadNs = cloneValue(r.LoadNs)
+	return r
+}
+
+func cloneRecords(records []record) []record {
+	copy := make([]record, len(records))
+	for i, r := range records {
+		copy[i] = cloneRecord(r)
+	}
+	return copy
 }
 
 func appendKnown(vs []int64, v *int64) []int64 {
@@ -433,6 +472,42 @@ func (r rateSum) rate() *performancewire.Rate {
 		Tokens:          r.tokens,
 		DurationNs:      r.ns,
 		TokensPerSecond: performancewire.TokensPerSecond(r.tokens, r.ns),
+	}
+}
+
+// reportedRateSum summarizes engine-reported rates by their native intervals.
+// Its weighted sum is not an exact token count and never uses OutputTokens.
+type reportedRateSum struct {
+	samples  int
+	ns       int64
+	weighted float64
+}
+
+func (r *reportedRateSum) add(rate *float64, ns *int64) {
+	if rate == nil || ns == nil || *ns <= 0 || *ns > performancewire.MaxPhaseNs ||
+		math.IsNaN(*rate) || math.IsInf(*rate, 0) || *rate < 0 || *rate > performancewire.MaxTokensPerSecond ||
+		r.samples >= performancewire.MaxSamplesPerKey ||
+		r.ns > performancewire.MaxPhaseNs*performancewire.MaxSamplesPerKey-*ns {
+		return
+	}
+	weighted := r.weighted + *rate*float64(*ns)
+	if math.IsNaN(weighted) || math.IsInf(weighted, 0) {
+		return
+	}
+	r.samples++
+	r.ns += *ns
+	r.weighted = weighted
+}
+
+func (r reportedRateSum) rate() *performancewire.ReportedRate {
+	if r.samples == 0 {
+		return nil
+	}
+	return &performancewire.ReportedRate{
+		// Floating-point accumulation can put a boundary mean slightly above
+		// the largest permitted input even though the exact mean cannot be.
+		Samples: r.samples, DurationNs: r.ns,
+		TokensPerSecond: min(performancewire.MaxTokensPerSecond, r.weighted/float64(r.ns)),
 	}
 }
 

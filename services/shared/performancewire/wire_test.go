@@ -138,7 +138,7 @@ func TestSummaryValidate(t *testing.T) {
 			}
 		})
 	}
-	reject("unsupported version", func(s *Summary) { s.Version = 2 }, "version")
+	reject("old protocol version", func(s *Summary) { s.Version = 1 }, "version")
 	reject("missing incarnation", func(s *Summary) { s.AdmissionIncarnation = "" }, "admissionIncarnation")
 	reject("zero revision", func(s *Summary) { s.Revision = 0 }, "revision")
 	reject("window beyond retention", func(s *Summary) { s.Window.MaxAgeMs = RetentionMs + 1 }, "maxAgeMs")
@@ -208,5 +208,136 @@ func TestEncodeSummaryRefusesInvalid(t *testing.T) {
 	s.Entries[0].Decode.TokensPerSecond = math.NaN()
 	if _, err := EncodeSummary(s); err == nil {
 		t.Fatal("EncodeSummary accepted a NaN rate")
+	}
+}
+
+func TestReportedMeasurementValidation(t *testing.T) {
+	test := func(name string, ns *int64, rate *float64, want string) {
+		t.Run(name, func(t *testing.T) {
+			m := Measurement{Outcome: OutcomeCompleted, EngineDecodeNs: ns, EngineDecodeTokensPerSecond: rate}
+			err := m.Validate()
+			if want == "" {
+				if err != nil {
+					t.Fatalf("Validate() = %v", err)
+				}
+			} else if err == nil || !strings.Contains(err.Error(), want) {
+				t.Fatalf("Validate() = %v, want %q", err, want)
+			}
+		})
+	}
+	test("unknown", nil, nil, "")
+	test("duration without rate", ptr[int64](400_000_000), nil, "")
+	test("rate without duration", nil, ptr(55.0), "")
+	test("measured zero", ptr[int64](400_000_000), ptr(0.0), "")
+	test("zero interval is retained but cannot qualify", ptr[int64](0), ptr(55.0), "")
+	test("maximum", ptr(MaxPhaseNs), ptr(MaxTokensPerSecond), "")
+	test("negative interval", ptr[int64](-1), nil, "engineDecodeNs")
+	test("interval over bound", ptr(MaxPhaseNs+1), nil, "engineDecodeNs")
+	test("negative rate", nil, ptr(-1.0), "engineDecodeTokensPerSecond")
+	test("rate over bound", nil, ptr(MaxTokensPerSecond+1), "engineDecodeTokensPerSecond")
+	test("NaN rate", nil, ptr(math.NaN()), "engineDecodeTokensPerSecond")
+	test("infinite rate", nil, ptr(math.Inf(1)), "engineDecodeTokensPerSecond")
+}
+
+func TestReportedMeasurementRoundTripKeepsZeroAndUnknown(t *testing.T) {
+	want := Measurement{Outcome: OutcomeCompleted, EngineDecodeNs: ptr[int64](400_000_000), EngineDecodeTokensPerSecond: ptr(0.0)}
+	data, err := json.Marshal(want)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var got Measurement
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if !reflect.DeepEqual(got, want) || got.DecodeNs != nil || got.OutputTokens != nil {
+		t.Fatalf("round trip = %+v, want %+v without invented legacy measurements", got, want)
+	}
+	want.EngineDecodeTokensPerSecond = nil
+	data, err = json.Marshal(want)
+	if err != nil {
+		t.Fatalf("marshal unknown: %v", err)
+	}
+	got = Measurement{}
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatalf("unmarshal unknown: %v", err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("unknown round trip = %+v, want %+v", got, want)
+	}
+}
+
+func TestReportedRateSummaryValidation(t *testing.T) {
+	test := func(name string, rate ReportedRate, want string) {
+		t.Run(name, func(t *testing.T) {
+			s := validSummary()
+			s.Entries[0].EngineDecode = &rate
+			err := s.Validate()
+			if want == "" {
+				if err != nil {
+					t.Fatalf("Validate() = %v", err)
+				}
+			} else if err == nil || !strings.Contains(err.Error(), want) {
+				t.Fatalf("Validate() = %v, want %q", err, want)
+			}
+		})
+	}
+	test("reported rate independent of legacy count", ReportedRate{Samples: 1, DurationNs: 400_000_000, TokensPerSecond: 55}, "")
+	test("measured zero", ReportedRate{Samples: 1, DurationNs: 400_000_000}, "")
+	test("maximum", ReportedRate{Samples: 1, DurationNs: MaxPhaseNs, TokensPerSecond: MaxTokensPerSecond}, "")
+	test("missing samples", ReportedRate{DurationNs: 1}, "samples")
+	test("includes incomplete sample", ReportedRate{Samples: 2, DurationNs: 1}, "samples")
+	test("zero duration", ReportedRate{Samples: 1}, "durationNs")
+	test("duration over bound", ReportedRate{Samples: 1, DurationNs: MaxPhaseNs + 1}, "durationNs")
+	test("negative rate", ReportedRate{Samples: 1, DurationNs: 1, TokensPerSecond: -1}, "tokensPerSecond")
+	test("rate over bound", ReportedRate{Samples: 1, DurationNs: 1, TokensPerSecond: MaxTokensPerSecond + 1}, "tokensPerSecond")
+	test("NaN", ReportedRate{Samples: 1, DurationNs: 1, TokensPerSecond: math.NaN()}, "tokensPerSecond")
+	test("infinity", ReportedRate{Samples: 1, DurationNs: 1, TokensPerSecond: math.Inf(1)}, "tokensPerSecond")
+}
+
+func TestReportedRateV2RoundTripAndV1Rejection(t *testing.T) {
+	want := validSummary()
+	want.Entries[0].EngineDecode = &ReportedRate{Samples: 1, DurationNs: 400_000_000, TokensPerSecond: 55}
+	data, err := EncodeSummary(want)
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	got, err := DecodeSummary(data)
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("round trip = %+v, want %+v", got, want)
+	}
+	want.Version = 1
+	want.Entries[0].EngineDecode = nil
+	old, err := json.Marshal(want)
+	if err != nil {
+		t.Fatalf("marshal v1: %v", err)
+	}
+	if _, err := DecodeSummary(old); err == nil || !strings.Contains(err.Error(), "version") {
+		t.Fatalf("DecodeSummary(v1) = %v, want version rejection", err)
+	}
+}
+
+func TestReportedRateDecodeRequiresMeasuredRate(t *testing.T) {
+	test := func(name, object string) {
+		t.Run(name, func(t *testing.T) {
+			var rate ReportedRate
+			if err := json.Unmarshal([]byte(object), &rate); err == nil {
+				t.Fatalf("accepted incomplete or unknown reported-rate fields: %+v", rate)
+			}
+		})
+	}
+	test("missing rate", `{"samples":1,"durationNs":400000000}`)
+	test("null rate", `{"samples":1,"durationNs":400000000,"tokensPerSecond":null}`)
+	test("missing interval", `{"samples":1,"tokensPerSecond":0}`)
+	test("missing coverage", `{"durationNs":400000000,"tokensPerSecond":0}`)
+	test("invented token total", `{"samples":1,"durationNs":400000000,"tokensPerSecond":0,"tokens":0}`)
+	var rate ReportedRate
+	if err := json.Unmarshal([]byte(`{"samples":1,"durationNs":400000000,"tokensPerSecond":0}`), &rate); err != nil {
+		t.Fatalf("measured zero rejected: %v", err)
+	}
+	if rate != (ReportedRate{Samples: 1, DurationNs: 400_000_000}) {
+		t.Fatalf("measured zero = %+v", rate)
 	}
 }

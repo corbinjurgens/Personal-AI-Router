@@ -33,13 +33,43 @@ body byte are separate observations and are not token evidence. Admission wait
 is measured before an execution ticket is granted; engine load comes from the
 engine's reported duration. Latencies are displayed in milliseconds.
 
-Prefill and decode rates are qualified, engine-reported token and phase-duration
-aggregates supplied by the broker, with coverage shown separately for each rate.
+Prefill and legacy decode rates divide exact engine-reported token totals by
+their matching phase-duration totals. **Engine-reported decode** instead shows
+the duration-weighted mean of qualified reported native rates:
+`sum(rate * engineDecodeNs) / sum(engineDecodeNs)`. It preserves rounded engine
+rates without reconstructing an integer native work count. For example, 400 ms
+at 55 tokens/s and 600 ms at 45 tokens/s produce 49 tokens/s, independently of
+visible output counts. Its coverage counts only samples with both a positive
+engine interval and a reported rate, completed transport and confirmed protocol
+completion. Failed, cancelled, incomplete and unknown-protocol samples do not
+contribute. A known interval without a rate remains unknown speed.
+
+The decode row prefers this reported aggregate when present; otherwise it shows
+the legacy count-derived aggregate. These populations are never combined.
+Each rate has its own coverage supplied by the broker.
 The UI never divides estimated token counts by wall-clock latency. `--` means
 unknown or absent; a measured zero remains `0`. Coverage shows contributing
 samples over all samples for the profile. Completed, failed and cancelled are
 transport outcomes; protocol incomplete separately counts completed transports
 whose expected protocol end was known to be missing.
+
+The coordinated telemetry schema is version 2 across the broker, peer relay,
+desktop and TUI. Samples add nullable `engineDecodeNs` and
+`engineDecodeTokensPerSecond`; summary entries add `engineDecode` with `samples`,
+`durationNs` and `tokensPerSecond`. Existing `outputTokens`, `decodeNs` and
+`decode` retain their exact count/matching-interval meanings. Native llama.cpp
+decode steps and Strata internal work can differ from visible output, so daily
+adapters must keep these separate and include timing semantics in the serving
+profile fingerprint. Older summary versions and peer capabilities are rejected;
+there is no dual protocol. All machines must update together.
+
+The persistence file layout remains version 1. The upgraded reader preserves
+valid history without the optional new fields and round-trips new measurements.
+Older binaries cannot safely reopen upgraded history: use separate candidate
+data for rollback validation, never the installed history. Production sample
+attachment and native MSI llama.cpp, MSI Strata and PC3 llama.cpp evidence are
+still pending; this contract extension does not establish daily-engine
+acceptance.
 
 Each summary replaces that host's previous aggregates. Repeated snapshots do not
 add to totals. Omitted profiles were excluded from the published summary;

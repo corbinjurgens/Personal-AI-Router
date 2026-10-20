@@ -1248,8 +1248,14 @@ reached exactly once through the proxy's unaddressed, process-scoped
 `performance:sample` notification. It strictly decodes and validates
 `performancewire.Sample`, checks the measuring host through the store and
 deduplicates the producer/sequence pair. It never writes disk or worker stdin.
+Samples may retain a nullable native engine decode interval and reported rate,
+separate from exact visible output counts and their matching legacy decode
+interval. Version 2 summaries expose `engineDecode` as a duration-weighted mean
+of qualified reported rates, without inventing a native token total. The file
+layout remains version 1: old optional-field-free history stays readable, while
+new fields survive save/reload. Older binaries must not reopen upgraded history.
 No proxy extractor emits these samples yet. This projection has no scheduler or
-ranking input, and desktop/TUI bridge consumers and UI are later work. Public
+ranking input; desktop and TUI render the broker's aggregates. Public
 contract drift for these methods must be addressed by that integration; the
 private worker exceptions do not exempt the public surface. Unsubscribed clients
 receive neither performance changes nor private manager frames.

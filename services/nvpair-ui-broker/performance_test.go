@@ -87,7 +87,7 @@ func performanceTestSample(seq uint64) performancewire.Sample {
 }
 
 func performanceTestSummary(revision int64) performancewire.Summary {
-	return performancewire.Summary{Version: 1, MeasuringHost: "peer", AdmissionIncarnation: "7", Revision: revision,
+	return performancewire.Summary{Version: 2, MeasuringHost: "peer", AdmissionIncarnation: "7", Revision: revision,
 		Window: performancewire.Window{MaxAgeMs: performancewire.RetentionMs, MaxSamplesPerKey: 64},
 		Entries: []performancewire.Entry{{Key: performancewire.ProfileKey{Host: "peer", Engine: "ollama", Model: "model", Fingerprint: "profile"},
 			Samples: 1, Completed: 1, NewestAgeMs: 100, OldestAgeMs: 100, NewestObservedAtMs: 1000}}}
@@ -269,6 +269,59 @@ func TestPerformanceSampleHookIsStrictAndDeduplicatesProcessSample(t *testing.T)
 	}
 	if err := f.b.ingestPerformanceSample(append(raw, []byte(" {}")...)); err == nil {
 		t.Fatal("trailing sample data accepted")
+	}
+}
+
+func TestPerformanceReportedRateSampleReachesLocalAndPublishedSummary(t *testing.T) {
+	f := newBrokerPerformanceFixture(t)
+	sample := performanceTestSample(1)
+	complete, duration, rate := true, int64(400_000_000), 55.0
+	sample.ProtocolComplete = &complete
+	sample.EngineDecodeNs = &duration
+	sample.EngineDecodeTokensPerSecond = &rate
+	if err := f.b.ingestPerformanceSample(performanceJSON(t, sample)); err != nil {
+		t.Fatalf("ingest reported-rate sample: %v", err)
+	}
+	want := performancewire.ReportedRate{Samples: 1, DurationNs: duration, TokensPerSecond: rate}
+	local := f.b.performance.projection().Local.Summary
+	if local == nil || local.Version != 2 || len(local.Entries) != 1 || local.Entries[0].EngineDecode == nil || *local.Entries[0].EngineDecode != want {
+		t.Fatalf("local summary = %+v, want v2 reported decode %+v", local, want)
+	}
+	f.b.performance.flush()
+	_, raw := f.b.performance.publication()
+	published, err := performancewire.DecodeSummary(raw)
+	if err != nil {
+		t.Fatalf("decode reported-rate publication: %v", err)
+	}
+	if len(published.Entries) != 1 || published.Entries[0].EngineDecode == nil || *published.Entries[0].EngineDecode != want || published.Entries[0].Decode != nil {
+		t.Fatalf("published entries = %+v, want reported decode only %+v", published.Entries, want)
+	}
+}
+
+func TestPerformancePeerReportedRateProjectionPreservesV2(t *testing.T) {
+	f := newBrokerPerformanceFixture(t)
+	summary := performanceTestSummary(10)
+	want := performancewire.ReportedRate{Samples: 1, DurationNs: 400_000_000, TokensPerSecond: 55}
+	summary.Entries[0].EngineDecode = &want
+	f.receive(t, summary, 300)
+	peer := requirePerformancePeer(t, f.b.performance)
+	if peer.Summary == nil || peer.Summary.Version != 2 || len(peer.Summary.Entries) != 1 ||
+		peer.Summary.Entries[0].EngineDecode == nil || *peer.Summary.Entries[0].EngineDecode != want {
+		t.Fatalf("projected peer summary = %+v, want v2 reported decode %+v", peer.Summary, want)
+	}
+}
+
+func TestPerformancePeerRejectsV1Summary(t *testing.T) {
+	f := newBrokerPerformanceFixture(t)
+	summary := performanceTestSummary(10)
+	summary.Version = 1
+	f.b.forwardWorkloadManagerNotification(methodPerformanceReceived, performanceJSON(t,
+		performanceReceived{Summary: performanceJSON(t, summary), AdmissionIdentity: f.identity}))
+	if peer := requirePerformancePeer(t, f.b.performance); peer.Summary != nil {
+		t.Fatalf("v1 summary entered peer projection: %+v", peer)
+	}
+	if len(f.b.performance.peers) != 0 {
+		t.Fatalf("v1 summary entered peer cache: %+v", f.b.performance.peers)
 	}
 }
 

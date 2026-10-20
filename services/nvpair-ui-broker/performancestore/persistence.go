@@ -14,7 +14,6 @@ import (
 	"math"
 	"os"
 	"path/filepath"
-	"slices"
 	"sort"
 
 	"nvpair-shared/durablefile"
@@ -62,7 +61,9 @@ type snapshotKey struct {
 func (sn *snapshot) keyStates() map[performancewire.ProfileKey]*keyState {
 	keys := make(map[performancewire.ProfileKey]*keyState, len(sn.Keys))
 	for _, k := range sn.Keys {
-		keys[k.Key] = &keyState{profile: k.Profile, samples: slices.Clone(k.Samples)}
+		profile := k.Profile
+		profile.ContextTokens = cloneValue(profile.ContextTokens)
+		keys[k.Key] = &keyState{profile: profile, samples: cloneRecords(k.Samples)}
 	}
 	return keys
 }
@@ -253,7 +254,9 @@ func (s *Store) encodeLocked(wallMs, ageMs int64) (*snapshot, []byte, error) {
 		Keys:          make([]snapshotKey, 0, len(s.keys)),
 	}
 	for k, st := range s.keys {
-		snap.Keys = append(snap.Keys, snapshotKey{Key: k, Profile: st.profile, Samples: slices.Clone(st.samples)})
+		profile := st.profile
+		profile.ContextTokens = cloneValue(profile.ContextTokens)
+		snap.Keys = append(snap.Keys, snapshotKey{Key: k, Profile: profile, Samples: cloneRecords(st.samples)})
 	}
 	// Most recently measured first, so eviction takes from the tail.
 	sort.Slice(snap.Keys, func(i, j int) bool {
