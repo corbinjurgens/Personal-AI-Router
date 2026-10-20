@@ -202,11 +202,14 @@ func (d *nodeDetail) applySwitch(msg detailSwitchMsg) tea.Cmd {
 		}
 		s.revision, s.active = msg.status.ConfigurationRevision, msg.status.ActiveRequestID
 		s.fresh = s.revision != ""
-		if s.requestID == "" || (s.active != "" && s.active != s.requestID &&
-			((s.receipt != nil && s.receipt.Terminal) || (!s.localRequest && s.unknown))) {
+		// Only an unresolved local submission needs its original identity for
+		// recovery. Definite refusals and terminal receipts resolve that duty;
+		// observed activity can always follow the currently advertised request.
+		unresolvedLocal := s.localRequest && s.refusal == nil && (s.receipt == nil || !s.receipt.Terminal)
+		if s.requestID == "" || (s.active != "" && s.active != s.requestID && !unresolvedLocal) {
 			s.requestID = s.active
 			s.localRequest = false
-			s.receipt, s.observed, s.refusal = nil, nil, nil
+			s.receipt, s.observed = nil, nil
 			s.unknown = s.requestID != ""
 		}
 		if s.requestID != "" && (s.unknown || s.receipt != nil || s.active == s.requestID) {

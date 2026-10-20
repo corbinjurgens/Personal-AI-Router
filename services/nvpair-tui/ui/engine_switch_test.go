@@ -180,15 +180,22 @@ func TestSwitchCurrentObservationsRefreshAtSameSequence(t *testing.T) {
 }
 
 func TestSwitchFollowNewActiveAfterPreviousCompletion(t *testing.T) {
-	for _, previous := range []string{"completed", "inaccessible other client", "unresolved local submission"} {
+	for _, previous := range []string{"completed", "inaccessible other client", "known active other client", "completed local with failed readback", "unresolved local submission", "accepted local submission"} {
 		t.Run(previous, func(t *testing.T) {
 			d, f := switchDetail(t, false)
 			s := &d.engineSwitch
 			s.requestID = "previous"
 			s.unknown = true
-			if previous == "completed" {
+			if previous == "completed" || previous == "completed local with failed readback" {
 				r := switchReceipt(d, 7, enginesettings.SwitchCompleted)
 				d.applySwitch(switchMessage(d, &r))
+				if previous == "completed local with failed readback" {
+					s.localRequest, s.unknown = true, true
+				}
+			} else if previous == "known active other client" || previous == "accepted local submission" {
+				r := switchReceipt(d, 7, enginesettings.SwitchDraining)
+				s.receipt, s.unknown = &r, false
+				s.localRequest = previous == "accepted local submission"
 			} else if previous == "unresolved local submission" {
 				s.requestID, s.unknown = "", false
 				cmd := d.submitSwitch()
@@ -203,13 +210,14 @@ func TestSwitchFollowNewActiveAfterPreviousCompletion(t *testing.T) {
 				switchResponse(t, enginesettings.SwitchStatus{ConfigurationRevision: "revision", ActiveRequestID: "new-active"}))
 			readback, _ := d.update(reply)
 			wantID := "new-active"
-			if previous == "unresolved local submission" {
+			retainLocal := previous == "unresolved local submission" || previous == "accepted local submission"
+			if retainLocal {
 				wantID = originalID
 			}
 			if s.requestID != wantID {
 				t.Fatalf("retained request = %q, want %q", s.requestID, wantID)
 			}
-			if previous != "unresolved local submission" && (s.receipt != nil || s.observed != nil) {
+			if !retainLocal && (s.receipt != nil || s.observed != nil) {
 				t.Fatal("new active request retained previous evidence")
 			}
 			req, reply := terminalControlsReply(t, f.broker, readback,
@@ -218,7 +226,8 @@ func TestSwitchFollowNewActiveAfterPreviousCompletion(t *testing.T) {
 			if err := json.Unmarshal(req.Params, &params); err != nil {
 				t.Fatal(err)
 			}
-			if req.Method != enginesettings.SwitchStatusMethod || params.RequestID != wantID || params.AfterSequence != nil {
+			wantWait := previous == "accepted local submission"
+			if req.Method != enginesettings.SwitchStatusMethod || params.RequestID != wantID || (params.AfterSequence != nil) != wantWait {
 				t.Fatalf("request-specific readback: %s %+v, want %q", req.Method, params, wantID)
 			}
 			d.update(reply)
@@ -226,6 +235,55 @@ func TestSwitchFollowNewActiveAfterPreviousCompletion(t *testing.T) {
 				t.Fatal("inaccessible receipt did not display explicit unavailability")
 			}
 		})
+	}
+}
+
+func TestSwitchFollowNewActiveAfterDefiniteRefusal(t *testing.T) {
+	d, f := switchDetail(t, true)
+	cmd := d.submitSwitch()
+	_, reply := terminalControlsReply(t, f.broker, cmd,
+		&rpc.Message{Error: &rpc.RPCError{Code: -32012, Message: "permission revoked before acceptance"}})
+	baseline, _ := d.update(reply)
+	if d.engineSwitch.unknown {
+		t.Fatal("definite refusal still marked unknown")
+	}
+	batch, ok := baseline().(tea.BatchMsg)
+	if !ok {
+		t.Fatal("missing capability and status refresh batch")
+	}
+	var readback tea.Cmd
+	for _, child := range batch {
+		req, result := terminalControlsReply(t, f.broker, child, switchResponse(t,
+			enginesettings.SwitchStatus{ConfigurationRevision: "revision", ActiveRequestID: "new-active"}))
+		next, _ := d.update(result)
+		if req.Method == enginesettings.SwitchStatusMethod {
+			readback = next
+		}
+	}
+	if readback == nil || d.engineSwitch.requestID != "new-active" {
+		t.Fatalf("resolved local refusal prevents active readback: request=%q active=%q readback=%t",
+			d.engineSwitch.requestID, d.engineSwitch.active, readback != nil)
+	}
+	r := switchReceipt(d, 3, enginesettings.SwitchCompleted)
+	r.Request.SourceEngine, r.Request.TargetEngine = "lmstudio", "ollama"
+	req, reply := terminalControlsReply(t, f.broker, readback,
+		switchResponse(t, enginesettings.SwitchStatus{Receipt: &r}))
+	var params enginesettings.SwitchStatusRequest
+	if err := json.Unmarshal(req.Params, &params); err != nil {
+		t.Fatal(err)
+	}
+	if req.Method != enginesettings.SwitchStatusMethod || params.RequestID != "new-active" || params.AfterSequence != nil {
+		t.Fatalf("new active readback: %s %+v", req.Method, params)
+	}
+	d.update(reply)
+	s := &d.engineSwitch
+	if s.source != "ollama" || s.target != "lmstudio" || s.refusal == nil {
+		t.Fatal("adopting active request lost draft or refusal")
+	}
+	for _, want := range []string{"remote management denied", "permission revoked before acceptance", "Request: new-active", "From lmstudio To ollama", "phase completed"} {
+		if !strings.Contains(d.switchView(), want) {
+			t.Fatalf("missing %q in switch view: %s", want, d.switchView())
+		}
 	}
 }
 
