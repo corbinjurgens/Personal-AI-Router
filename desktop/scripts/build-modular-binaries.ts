@@ -428,6 +428,7 @@ function buildBinary(
         'go',
         [
             'build',
+            '-buildvcs=true',
             '-trimpath',
             '-ldflags',
             `-s -w -X main.Version=${version}${extraLdflags}`,
@@ -477,7 +478,16 @@ function buildDispatcher(repo: string, options: BuildOptions, version: string): 
     const outFile = path.join(CLI_BIN_DIR, fileName)
     const res = spawnSync(
         'go',
-        ['build', '-trimpath', '-ldflags', `-s -w -X main.Version=${version}`, '-o', outFile, '.'],
+        [
+            'build',
+            '-buildvcs=true',
+            '-trimpath',
+            '-ldflags',
+            `-s -w -X main.Version=${version}`,
+            '-o',
+            outFile,
+            '.',
+        ],
         {
             cwd: sourceDir,
             env: {
