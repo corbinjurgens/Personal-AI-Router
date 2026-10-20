@@ -49,10 +49,11 @@ const (
 	switchSubmitting
 	switchRefused
 	switchUncertain
-	// A definite absent receipt still requires a subsequent fresh idle baseline.
+	// Absence is a point-in-time read, not a fence against later acceptance.
 	switchAbsent
 	switchAccepted
 	switchObservedOther
+	switchObservedInactive
 )
 
 type switchEvent int
@@ -96,6 +97,7 @@ type retainedSwitchRequest struct {
 	receipt   *enginesettings.SwitchReceipt
 	observed  *enginesettings.SwitchObserved
 	refusal   error
+	absentAt  time.Time
 }
 
 func (r *retainedSwitchRequest) unresolved() bool {
@@ -131,9 +133,15 @@ func (r *retainedSwitchRequest) transition(e switchTransition) switchEffect {
 	case switchReset, switchClose:
 		*r = retainedSwitchRequest{}
 	case switchBaseline:
-		if r.state == switchAbsent && e.id == "" {
-			r.state = switchRefused
-			r.refusal = errors.New("switch not accepted: receipt absent and fresh baseline reports no active request")
+		// Idle releases observed activity, never a sent local identity. Status
+		// reads do not fence late acceptance. A replacement may lose the
+		// acceptance race, leaving the original able to execute unobserved.
+		if (r.state == switchObservedOther || r.state == switchObservedInactive) && e.id == "" {
+			r.state = switchObservedInactive
+			return switchNoRead
+		}
+		if r.state == switchObservedInactive && e.id == r.requestID {
+			r.state = switchObservedOther
 		}
 		if r.state == switchNone || (e.id != "" && e.id != r.requestID && !r.unresolved()) {
 			r.state, r.requestID = switchNone, e.id
@@ -150,7 +158,11 @@ func (r *retainedSwitchRequest) transition(e switchTransition) switchEffect {
 		// caller's receipt. Broker receipts are durable across restart.
 		if r.state == switchUncertain && r.receipt == nil {
 			r.state = switchAbsent
+			r.absentAt = time.Now().UTC()
 			return switchReadBaseline
+		}
+		if r.state == switchAbsent {
+			r.absentAt = time.Now().UTC()
 		}
 	case switchReadError:
 		// Read failure changes availability, not acceptance evidence.
@@ -167,7 +179,7 @@ func (r *retainedSwitchRequest) transition(e switchTransition) switchEffect {
 		if e.event == switchReadOK {
 			r.observed = e.observed
 		}
-		if r.state != switchObservedOther {
+		if r.state != switchObservedOther && r.state != switchObservedInactive {
 			r.state = switchAccepted
 		}
 	}
@@ -259,9 +271,9 @@ func (d *nodeDetail) switchReason() string {
 		return "switch readback or submission pending"
 	case s.outcomeUnknown():
 		return "outcome unknown; readback required"
-	case s.receipt != nil && s.receipt.RecoveryRequired:
+	case s.state != switchObservedInactive && s.receipt != nil && s.receipt.RecoveryRequired:
 		return "recovery required; readback does not perform recovery"
-	case s.active != "" || (s.receipt != nil && !s.receipt.Terminal):
+	case s.active != "" || (s.state != switchObservedInactive && s.receipt != nil && !s.receipt.Terminal):
 		return "switch active; receipt may be unavailable to this caller"
 	case s.source == "" || s.target == "" || s.source == s.target:
 		return "select different installed From and To engines"
@@ -320,8 +332,8 @@ func (d *nodeDetail) applySwitch(msg detailSwitchMsg) tea.Cmd {
 		if msg.requestID != "" {
 			event := switchReadError
 			// The broker's stdio and peer relays send code/message, without
-			// SwitchError.Kind. Only this exact public refusal proves absence
-			// for our own unacknowledged ID; generic -32000 stays uncertain.
+			// SwitchError.Kind. This exact reply establishes only point-in-time
+			// absence for our unacknowledged ID, never future non-acceptance.
 			if errors.As(msg.err, &refusal) && refusal.Code == enginesettings.SwitchOperationErrorCode &&
 				refusal.Message == "Unknown switch receipt for this caller." {
 				event = switchReadAbsent
@@ -480,6 +492,16 @@ func (d *nodeDetail) switchView() string {
 	}
 	if s.outcomeUnknown() {
 		lines = append(lines, "Outcome unknown; readback required")
+	}
+	if s.state == switchAbsent {
+		lines = append(lines, "Not accepted as of "+s.absentAt.Format(time.RFC3339Nano)+"; it may still be accepted. Original request retained for readback.")
+	}
+	if s.state == switchObservedInactive {
+		if s.receipt == nil {
+			lines = append(lines, "Another client's switch is no longer active; its result is not visible to this client")
+		} else {
+			lines = append(lines, "Another client's switch is no longer active; last observed receipt follows")
+		}
 	}
 	if s.err != nil {
 		lines = append(lines, commandFailure(s.err))

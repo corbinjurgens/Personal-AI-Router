@@ -622,6 +622,7 @@ func TestSwitchRetainedRequestTransitionMatrix(t *testing.T) {
 		b = switchAbsent
 		a = switchAccepted
 		o = switchObservedOther
+		i = switchObservedInactive
 	)
 	events := []struct {
 		name  string
@@ -653,15 +654,16 @@ func TestSwitchRetainedRequestTransitionMatrix(t *testing.T) {
 		{"submitting", s, "", false, []switchRequestState{s, a, f, u, u, s, s, s, a, s, s, n, n}},
 		{"refused", f, "", false, []switchRequestState{s, f, f, f, f, f, f, o, a, f, f, n, n}},
 		{"uncertain", u, "", false, []switchRequestState{s, u, u, u, u, u, u, u, a, b, u, n, n}},
-		{"absent awaiting idle baseline", b, "", false, []switchRequestState{s, b, b, b, u, f, b, b, a, b, b, n, n}},
+		{"absent may still be accepted", b, "", false, []switchRequestState{s, b, b, b, u, b, b, b, a, b, b, n, n}},
 		{"accepted active", a, enginesettings.SwitchDraining, false, []switchRequestState{s, a, a, a, u, a, a, a, a, a, a, n, n}},
 		{"accepted terminal", a, enginesettings.SwitchCompleted, false, []switchRequestState{s, a, a, a, a, a, a, o, a, a, a, n, n}},
 		{"accepted recovery", a, enginesettings.SwitchFailedInterrupted, true, []switchRequestState{s, a, a, a, a, a, a, o, a, a, a, n, n}},
 		{"uncertain accepted active", u, enginesettings.SwitchDraining, false, []switchRequestState{s, u, u, u, u, u, u, u, a, u, u, n, n}},
-		{"observed inaccessible", o, "", false, []switchRequestState{s, o, o, o, o, o, o, o, o, o, o, n, n}},
-		{"observed active", o, enginesettings.SwitchDraining, false, []switchRequestState{s, o, o, o, o, o, o, o, o, o, o, n, n}},
-		{"observed terminal", o, enginesettings.SwitchCompleted, false, []switchRequestState{s, o, o, o, o, o, o, o, o, o, o, n, n}},
-		{"observed recovery", o, enginesettings.SwitchFailedInterrupted, true, []switchRequestState{s, o, o, o, o, o, o, o, o, o, o, n, n}},
+		{"observed inaccessible", o, "", false, []switchRequestState{s, o, o, o, o, i, o, o, o, o, o, n, n}},
+		{"observed active", o, enginesettings.SwitchDraining, false, []switchRequestState{s, o, o, o, o, i, o, o, o, o, o, n, n}},
+		{"observed terminal", o, enginesettings.SwitchCompleted, false, []switchRequestState{s, o, o, o, o, i, o, o, o, o, o, n, n}},
+		{"observed recovery", o, enginesettings.SwitchFailedInterrupted, true, []switchRequestState{s, o, o, o, o, i, o, o, o, o, o, n, n}},
+		{"observed inactive", i, "", false, []switchRequestState{s, i, i, i, i, i, o, o, i, i, i, n, n}},
 	}
 	for _, row := range rows {
 		for i, event := range events {
@@ -691,7 +693,7 @@ func TestSwitchRetainedRequestTransitionMatrix(t *testing.T) {
 					wantID = ""
 				}
 				adopt := event.event == switchBaseline && (row.state == switchNone ||
-					(event.id == "new" && (row.state == switchRefused || row.state == switchObservedOther ||
+					(event.id == "new" && (row.state == switchRefused || row.state == switchObservedOther || row.state == switchObservedInactive ||
 						(row.state == switchAccepted && previous.Terminal))))
 				if adopt {
 					wantID = event.id
@@ -706,7 +708,7 @@ func TestSwitchRetainedRequestTransitionMatrix(t *testing.T) {
 					t.Fatalf("identity = %q, want %q", r.requestID, wantID)
 				}
 				wantEffect := switchNoRead
-				if event.event == switchBaseline && wantID != "" && (r.state != switchRefused || event.id == wantID) {
+				if event.event == switchBaseline && wantID != "" && r.state != switchObservedInactive && (r.state != switchRefused || event.id == wantID) {
 					wantEffect = switchReadRequest
 				}
 				if event.event == switchSubmitRefused && row.state == switchSubmitting ||
@@ -733,8 +735,62 @@ func TestSwitchRetainedRequestTransitionMatrix(t *testing.T) {
 				if row.state == switchRefused && event.event != switchSubmit && event.event != switchReset && event.event != switchClose && r.refusal != refusal {
 					t.Fatal("refusal evidence lost")
 				}
+				assertSwitchIdleReadbackLiveness(t, r)
 			})
 		}
+	}
+}
+
+// Check the recovery property after every matrix edge, rather than merely
+// approving each edge independently. Idle baselines cannot resolve a sent local
+// request or a retained recoveryRequired receipt; neither may offer a new ID.
+func assertSwitchIdleReadbackLiveness(t *testing.T, retained retainedSwitchRequest) {
+	t.Helper()
+	d, f := switchDetail(t, false)
+	d.engineSwitch.retainedSwitchRequest = retained
+	localRecovery := retained.state == switchSubmitting || retained.state == switchUncertain || retained.state == switchAbsent ||
+		(retained.state == switchAccepted && retained.receipt != nil && (!retained.receipt.Terminal || retained.receipt.RecoveryRequired))
+	original := retained.requestID
+	for cycle := 0; cycle < 2; cycle++ {
+		_, reply := terminalControlsReply(t, f.broker, d.switchStatusCmd(true), switchResponse(t,
+			enginesettings.SwitchStatus{ConfigurationRevision: "fresh-idle"}))
+		read, _ := d.update(reply)
+		if localRecovery && read == nil {
+			t.Fatal("local recovery is blocked without offering original-ID readback")
+		}
+		if read != nil {
+			req, result := terminalControlsReply(t, f.broker, read,
+				&rpc.Message{Error: &rpc.RPCError{Code: -32000, Message: "Unknown switch receipt for this caller."}})
+			var params enginesettings.SwitchStatusRequest
+			if err := json.Unmarshal(req.Params, &params); err != nil {
+				t.Fatal(err)
+			}
+			if req.Method != enginesettings.SwitchStatusMethod || params.RequestID != original {
+				t.Fatalf("recovery frame = %s %+v, want original %q", req.Method, params, original)
+			}
+			next, _ := d.update(result)
+			// First absence asks for one baseline; it is followed on the next
+			// cycle, without creating an unbounded immediate read loop.
+			if next != nil {
+				_, result = terminalControlsReply(t, f.broker, next, switchResponse(t,
+					enginesettings.SwitchStatus{ConfigurationRevision: "fresh-idle"}))
+				read, _ = d.update(result)
+				if read != nil {
+					_, result = terminalControlsReply(t, f.broker, read,
+						&rpc.Message{Error: &rpc.RPCError{Code: -32000, Message: "Unknown switch receipt for this caller."}})
+					if further, _ := d.update(result); further != nil {
+						t.Fatal("idle absence created an unbounded automatic read loop")
+					}
+				}
+			}
+		}
+	}
+	if localRecovery {
+		if d.submitSwitch() != nil || d.engineSwitch.requestID != original || d.switchReason() == "" {
+			t.Fatal("uncertain local submission/recovery lost its exclusive recovery identity")
+		}
+	} else if reason := d.switchReason(); reason != "" {
+		t.Fatalf("fresh idle reads did not reach a non-blocked view: %q, state=%d", reason, d.engineSwitch.state)
 	}
 }
 
@@ -776,7 +832,7 @@ func TestSwitchDefiniteRefusalAfterRestartWithNoActive(t *testing.T) {
 	}
 }
 
-func TestSwitchAbsentReceiptRequiresFreshIdleBaseline(t *testing.T) {
+func TestSwitchAbsentReceiptPreservesUncertaintyAcrossBaselines(t *testing.T) {
 	for _, scenario := range []string{"idle", "active same", "active different", "baseline failed", "baseline empty revision", "retired before baseline", "notification during baseline", "generic error"} {
 		t.Run(scenario, func(t *testing.T) {
 			d, f := switchDetail(t, false)
@@ -831,12 +887,12 @@ func TestSwitchAbsentReceiptRequiresFreshIdleBaseline(t *testing.T) {
 				d.retireSwitch()
 			}
 			d.update(reply)
-			if scenario == "idle" {
-				if d.engineSwitch.state != switchRefused || d.switchReason() != "" || !strings.Contains(d.switchView(), "switch not accepted") {
-					t.Fatalf("absent idle request stranded: state=%d reason=%q", d.engineSwitch.state, d.switchReason())
-				}
-			} else if d.engineSwitch.state == switchRefused || d.switchReason() == "" {
+			if d.engineSwitch.state == switchRefused || d.switchReason() == "" {
 				t.Fatalf("%s incorrectly resolved uncertainty", scenario)
+			}
+			if scenario == "idle" && (!strings.Contains(d.switchView(), "Not accepted as of ") ||
+				!strings.Contains(d.switchView(), "; it may still be accepted") || d.engineSwitch.absentAt.IsZero()) {
+				t.Fatal("point-in-time absence is not explained")
 			}
 			if d.engineSwitch.requestID != original {
 				t.Fatal("readback replaced original identity")
@@ -857,6 +913,116 @@ func TestSwitchLateSubmitReplyCannotUndoRefusal(t *testing.T) {
 	d.applySwitch(msg)
 	if d.engineSwitch.state != switchRefused || d.engineSwitch.receipt != nil {
 		t.Fatal("late submit reply replaced definite refusal")
+	}
+}
+
+// Port of the r4 probe: foreign receipt inaccessibility must not strand the
+// view once the real producer clears its active ID on terminal advancement.
+func TestSwitchObservedForeignCompletionDoesNotStrandView(t *testing.T) {
+	d, f := switchDetail(t, false)
+	_, reply := terminalControlsReply(t, f.broker, d.switchStatusCmd(true), switchResponse(t,
+		enginesettings.SwitchStatus{ConfigurationRevision: "revision", ActiveRequestID: "foreign"}))
+	read, _ := d.update(reply)
+	absent := &rpc.Message{Error: &rpc.RPCError{Code: -32000, Message: "Unknown switch receipt for this caller."}}
+	_, reply = terminalControlsReply(t, f.broker, read, absent)
+	d.update(reply)
+	if d.engineSwitch.state != switchObservedOther || d.engineSwitch.active != "foreign" || d.submitSwitch() != nil {
+		t.Fatal("initial foreign activity was not blocked")
+	}
+	for cycle := 0; cycle < 2; cycle++ {
+		_, reply = terminalControlsReply(t, f.broker, d.switchStatusCmd(true), switchResponse(t,
+			enginesettings.SwitchStatus{ConfigurationRevision: "new-revision"}))
+		read, _ = d.update(reply)
+		if read != nil {
+			_, reply = terminalControlsReply(t, f.broker, read, absent)
+			d.update(reply)
+		}
+	}
+	if reason := d.switchReason(); reason != "" {
+		t.Fatalf("foreign activity finished but view remains blocked: reason=%q retained=%q state=%d active=%q",
+			reason, d.engineSwitch.requestID, d.engineSwitch.state, d.engineSwitch.active)
+	}
+	if !strings.Contains(d.switchView(), "Another client's switch is no longer active; its result is not visible to this client") || d.engineSwitch.receipt != nil {
+		t.Fatal("inactive foreign activity lost its diagnostic or invented a result")
+	}
+	_, reply = terminalControlsReply(t, f.broker, d.submitSwitch(),
+		&rpc.Message{Error: &rpc.RPCError{Code: -32602, Message: "fixture stops here"}})
+	d.update(reply)
+}
+
+// Port of r4's actually-sent mutation/route-cancellation probe. A cancelled
+// client wait does not cancel the broker handler or fence delayed acceptance.
+func TestSwitchCancelledSubmitAbsenceDoesNotProveNonAcceptance(t *testing.T) {
+	for _, later := range []string{"active", "readable after completion"} {
+		t.Run(later, func(t *testing.T) {
+			d, f := switchDetail(t, false)
+			cmd := d.submitSwitch()
+			original := d.engineSwitch.requestID
+			done := make(chan tea.Msg, 1)
+			go func() { done <- cmd() }()
+			sent, err := f.broker.Read()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if sent.Method != enginesettings.SwitchMethod {
+				t.Fatalf("method=%q", sent.Method)
+			}
+			row := d.node
+			row.address = "changed-route"
+			d.followNode(row, true)
+			select {
+			case late := <-done:
+				d.update(late)
+			case <-time.After(time.Second):
+				t.Fatal("cancellation did not return")
+			}
+			_, reply := terminalControlsReply(t, f.broker, d.switchStatusCmd(true), switchResponse(t,
+				enginesettings.SwitchStatus{ConfigurationRevision: "fresh"}))
+			read, _ := d.update(reply)
+			absent := &rpc.Message{Error: &rpc.RPCError{Code: -32000, Message: "Unknown switch receipt for this caller."}}
+			_, reply = terminalControlsReply(t, f.broker, read, absent)
+			baseline, _ := d.update(reply)
+			_, reply = terminalControlsReply(t, f.broker, baseline, switchResponse(t,
+				enginesettings.SwitchStatus{ConfigurationRevision: "fresh"}))
+			read, _ = d.update(reply)
+			if read != nil {
+				_, reply = terminalControlsReply(t, f.broker, read, absent)
+				d.update(reply)
+			}
+			if replacement := d.submitSwitch(); replacement != nil {
+				req, _ := terminalControlsReply(t, f.broker, replacement,
+					&rpc.Message{Error: &rpc.RPCError{Code: -32000, Message: "test stops here"}})
+				var params enginesettings.SwitchRequest
+				if err := json.Unmarshal(req.Params, &params); err != nil {
+					t.Fatal(err)
+				}
+				t.Fatalf("already sent submission can still be accepted, but absence sent replacement: original=%q replacement=%q method=%s",
+					original, params.RequestID, req.Method)
+			}
+			if d.engineSwitch.requestID != original || d.engineSwitch.state != switchAbsent ||
+				d.engineSwitch.refusal != nil || !strings.Contains(d.switchView(), "; it may still be accepted") {
+				t.Fatal("absence falsely resolved acceptance or lost recovery identity")
+			}
+			status := enginesettings.SwitchStatus{ConfigurationRevision: "later"}
+			if later == "active" {
+				status.ActiveRequestID = original
+			}
+			_, reply = terminalControlsReply(t, f.broker, d.switchStatusCmd(true), switchResponse(t, status))
+			read, _ = d.update(reply)
+			r := switchReceipt(d, 7, enginesettings.SwitchCompleted)
+			req, reply := terminalControlsReply(t, f.broker, read, switchResponse(t, enginesettings.SwitchStatus{Receipt: &r}))
+			var params enginesettings.SwitchStatusRequest
+			if err := json.Unmarshal(req.Params, &params); err != nil {
+				t.Fatal(err)
+			}
+			if req.Method != enginesettings.SwitchStatusMethod || params.RequestID != original {
+				t.Fatalf("late recovery read wrong identity: %s %+v", req.Method, params)
+			}
+			d.update(reply)
+			if d.engineSwitch.state != switchAccepted || d.engineSwitch.receipt == nil || d.engineSwitch.outcomeUnknown() {
+				t.Fatal("late original receipt not recovered")
+			}
+		})
 	}
 }
 
@@ -920,7 +1086,8 @@ func TestSwitchRetainedIdentityBaselineMatrix(t *testing.T) {
 				if row.state == switchNone || baseline.id == "new" && !row.retain {
 					wantID = baseline.id
 				}
-				wantRead := wantID != "" && (row.state != switchRefused || baseline.id != "")
+				wantRead := wantID != "" && (row.state != switchRefused || baseline.id != "") &&
+					!(row.state == switchObservedOther && baseline.id == "")
 				if s.requestID != wantID || (next != nil) != wantRead {
 					t.Fatalf("identity=%q read=%t, want identity=%q read=%t", s.requestID, next != nil, wantID, wantRead)
 				}
@@ -941,7 +1108,7 @@ func TestSwitchRetainedIdentityBaselineMatrix(t *testing.T) {
 				if row.state == switchRefused && s.refusal == nil {
 					t.Fatal("refusal lost")
 				}
-				if row.recovery && baseline.id != "new" && !strings.Contains(d.switchReason(), "recovery required") {
+				if row.recovery && baseline.id != "new" && !(row.state == switchObservedOther && baseline.id == "") && !strings.Contains(d.switchReason(), "recovery required") {
 					t.Fatal("terminal recovery no longer blocks")
 				}
 			})
