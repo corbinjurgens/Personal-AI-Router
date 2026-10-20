@@ -145,7 +145,7 @@ Requests (caller → service):
 | `engine:remote-stop` | `{ node, engine }` | `EngineStatus` from the remote node |
 | `engine:wake` | `{ engine }` | `EngineStatus` — starts the engine only if its saved intent is On (an engine with no saved intent counts as Off and is refused). Never changes the saved intent. Refused once shutdown has begun |
 | `engine:sleep` | `{ engine }` | `EngineStatus` — stops the engine the way `engine:restart` and shutdown do, without recording Off intent, so `engine:wake` or the next launch's restore can start it again |
-| `engine:intent` | — | `{ enabledByEngine: { <engine>: bool } }` — every registered engine's saved intent, read from the intent file without taking any engine's lifecycle lock |
+| `engine:intent` | — | `{ enabledByEngine: { <engine>: bool }, offByEngine: { <engine>: "local" \| "peer" } }` — one saved-intent snapshot for registered engines, without taking any engine's lifecycle lock |
 | `engine:load-model` | `{ engine, model }` | the engine's raw response — loads one model through the manifest's `load` binding, the same one the remote load uses (Ollama: `run_model` with `stream:false` and a 10-minute response budget) |
 | `engine:unload-model` | `{ engine, model }` | the engine's raw response — unloads one model through the manifest's `unload` binding, the same one the remote unload uses (Ollama: `keep_alive:0`) |
 | `engine:delete-model` | `{ engine, model }` | the engine's raw response — deletes one model through the manifest's `delete` binding, the same one the remote delete uses. LM Studio's restarts a running server before replying |
@@ -161,6 +161,18 @@ Requests (caller → service):
 policy (pause, idle stop, start on demand). `engine:start` and `engine:stop`
 remain the only operations that record what the user wants; wake and sleep take
 the engine's lifecycle lock like `engine:restart` but only act on that record.
+
+`engine:intent` and `engine:intent-changed` share the `engineintent.Snapshot`
+wire type. Both maps are always present and derived from one desired-store read.
+`enabledByEngine` includes every registered engine; never-persisted intent is
+`false`. `offByEngine` includes only registered engines explicitly saved Off:
+`local` means this device's client saved Off, and `peer` means a paired device
+did. Legacy saved Off without stored provenance projects `local`; unknown and
+On engines have no origin entry. Stale origins for other engines are excluded.
+Invalid saved Off origins and unreadable state fail the read; no guessed
+snapshot is pushed. Reading does not write or migrate the desired-state file
+(whose private provenance field remains `offBy`). Origins are display data,
+independent of runtime status and proxy admission booleans.
 
 Notifications (service → caller): `engine:ready{version}`,
 `engine:state-changed{EngineStatus}`,
@@ -186,7 +198,7 @@ UI converges even if its synchronous call already timed out),
 `engine:remote-progress{opId, node, engine, op, stage, percent?, message}`
 (relayed live progress for a remote install/pull; a model copy adds
 `file?, bytesDone?, bytesTotal?`),
-`engine:intent-changed{enabledByEngine}` (pushed after an explicit start, stop,
+`engine:intent-changed{enabledByEngine, offByEngine}` (pushed after an explicit start, stop,
 restart or install-and-start changes saved intent; wake and sleep never do), and
 `policy:request{id, method, caller, params}` / `policy:cancel{id}` (a paired
 node's node-policy call relayed to the broker, answered by the broker's

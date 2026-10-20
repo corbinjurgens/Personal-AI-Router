@@ -437,7 +437,7 @@ Requests (caller → service):
 | `engine:remote-stop` | `{ node, engine }` | `EngineStatus` from the remote node |
 | `engine:wake` | `{ engine }` | `EngineStatus` — starts the engine only if its saved intent is On; intent-neutral; holds the engine's lifecycle lock like `engine:restart`; refused once shutdown has begun |
 | `engine:sleep` | `{ engine }` | `EngineStatus` — the `doStop` that restart and shutdown use; intent-neutral |
-| `engine:intent` | — | `{ enabledByEngine }` — saved intent per registered engine; no saved intent reads as `false` |
+| `engine:intent` | — | `{ enabledByEngine, offByEngine }` — one saved-intent snapshot per registered engine; no saved intent reads as `false` without an origin |
 | `engine:load-model` | `{ engine, model }` | the engine's raw response, via the manifest's `load` operation binding |
 | `engine:unload-model` | `{ engine, model }` | the engine's raw response, via the manifest's `unload` operation binding |
 | `engine:delete-model` | `{ engine, model }` | the engine's raw response, via the manifest's `delete` operation binding |
@@ -447,7 +447,18 @@ Requests (caller → service):
 | `shutdown` | — | `null` |
 | `log/set-level` | `{ level }` | `{ level }` |
 
-Notifications (service → caller): `engine:intent-changed{enabledByEngine}` (after an explicit start/stop changes saved intent), `policy:request{id, method, caller, params}` / `policy:cancel{id}` (a paired node's node-policy call for the broker, which answers with the `policy:reply{id, result, error?, errorCode?}` notification), `ready{version}`, `engine:state-changed{EngineStatus}`, `engine:models-changed{engine, models}` (pushed when an engine's loaded-in-memory model set changes; `models` is the full `engine:models` shape incl. `loadedByEngine`), `engine:install-progress{engine, stage, percent?, error?}` (`error` on the terminal `failed` frame), `engine:pull-progress{engine, op, stage, percent?, message}` (live progress for a local model pull driven via `engine:action{action:"pull_model"}` — the local counterpart of `engine:remote-progress`), `engine:remote-progress{opId, node, engine, op, stage, percent?, message}` (live progress relayed from a remote install/pull; a model copy reports `op:"copy"` with `file?, bytesDone?, bytesTotal?`, §7.3), and `errors:report` / `errors:clear` (consumed by `nvpair-errors` via the Broker). `install` / `start` / `stop` / `restart` / `action` / `remote-*` each run in their own goroutine so the read loop never blocks; their responses arrive when the op completes.
+The `engineintent.Snapshot` shared wire type defines both intent payloads.
+`enabledByEngine` is a required object mapping every registered engine to a
+boolean. `offByEngine` is a required object mapping only registered engines
+explicitly saved Off to `"local"` or `"peer"`, relative to the engine-owning
+device. Legacy saved Off without provenance projects `"local"`; On and unknown
+intent have no origin entry. Both maps derive from one desired-store read under
+its mutex, without lifecycle locks or file writes. Unregistered stale origins
+are excluded. Invalid saved Off origins or unreadable state fail the read and
+suppress intent publication. The private disk field remains `offBy`; origins
+are display data and do not change proxy admission or lifecycle behavior.
+
+Notifications (service → caller): `engine:intent-changed{enabledByEngine, offByEngine}` (after an explicit start/stop changes saved intent), `policy:request{id, method, caller, params}` / `policy:cancel{id}` (a paired node's node-policy call for the broker, which answers with the `policy:reply{id, result, error?, errorCode?}` notification), `ready{version}`, `engine:state-changed{EngineStatus}`, `engine:models-changed{engine, models}` (pushed when an engine's loaded-in-memory model set changes; `models` is the full `engine:models` shape incl. `loadedByEngine`), `engine:install-progress{engine, stage, percent?, error?}` (`error` on the terminal `failed` frame), `engine:pull-progress{engine, op, stage, percent?, message}` (live progress for a local model pull driven via `engine:action{action:"pull_model"}` — the local counterpart of `engine:remote-progress`), `engine:remote-progress{opId, node, engine, op, stage, percent?, message}` (live progress relayed from a remote install/pull; a model copy reports `op:"copy"` with `file?, bytesDone?, bytesTotal?`, §7.3), and `errors:report` / `errors:clear` (consumed by `nvpair-errors` via the Broker). `install` / `start` / `stop` / `restart` / `action` / `remote-*` each run in their own goroutine so the read loop never blocks; their responses arrive when the op completes.
 
 Notifications (caller → service): `engine:node-projection{policy, pausedLocally}` carries this node's policy advertisement (`nvpair-shared/nodepolicy.Advertisement`: `revision`, `roles` per tier with the bounds of the matching profile, `pausedBy?`) and whether the node is paused by its own clients, a pause without recorded provenance included (§7.2 Local veto). The broker sends it after every persisted policy or availability change and again on every `engine:ready`, reading its current policy each time under one lock, so a later projection never carries older state. engine-manager keeps the last one in memory, replaced whole, never persisted; an undecodable one leaves the previous in place. `engine:models` and `GET /v1/models` return it as `policy`, omitted until the first push. `engine:models-changed` does not carry it.
 
