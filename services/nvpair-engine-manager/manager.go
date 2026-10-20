@@ -87,6 +87,9 @@ type Manager struct {
 }
 
 func NewManager(codec *Codec, exec *Executor, mesh *clustertrust.Mesh, clusterDir string) *Manager {
+	exec.memoryEvidence.mu.Lock()
+	exec.memoryEvidence.hostUUID = mesh.NodeUUID
+	exec.memoryEvidence.mu.Unlock()
 	// Set the gate before main starts the direct mTLS listener. State delivery
 	// and conservative stdio recovery remain available while it is closed.
 	exec.switchRecoveryPending.Store(true)

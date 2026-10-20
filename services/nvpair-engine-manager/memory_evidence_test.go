@@ -4,6 +4,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -19,6 +20,8 @@ import (
 	"testing"
 	"time"
 
+	"nvpair-shared/clustertrust"
+	"nvpair-shared/clustertrusttest"
 	"nvpair-shared/engines"
 	settings "nvpair-shared/enginesettings"
 	"nvpair-shared/performancewire"
@@ -177,6 +180,46 @@ func sameMemoryInt64(a, b *int64) bool {
 		return a == nil && b == nil
 	}
 	return *a == *b
+}
+
+func TestManagerMemoryEvidenceUsesLiveMeshIdentity(t *testing.T) {
+	h, _ := memoryModelsFixture(t)
+	clusterDir := t.TempDir()
+	clustertrusttest.WriteKeypair(t, clusterDir, "uuid-memory-first")
+	mesh := clustertrust.Open(clusterDir)
+	NewManager(NewCodec(&bytes.Buffer{}), h.ex, mesh, clusterDir)
+	h.host = "uuid-memory-first"
+	h.writeArtifact(t, h.artifact("2"))
+	entry := modelsMemoryEntry(t, h.ex.ModelsResult(context.Background()))
+	if memoryUpper(entry) == nil || entry.Source.HostUUID == nil || *entry.Source.HostUUID != mesh.NodeUUID() {
+		t.Fatalf("manager did not qualify using mesh identity: %+v", entry)
+	}
+
+	clustertrusttest.WriteKeypair(t, clusterDir, "uuid-memory-second")
+	mesh.Refresh()
+	if got := mesh.NodeUUID(); got != "uuid-memory-second" {
+		t.Fatalf("refreshed mesh UUID = %q, want uuid-memory-second", got)
+	}
+	entry = modelsMemoryEntry(t, h.ex.ModelsResult(context.Background()))
+	if memoryUpper(entry) != nil {
+		t.Fatalf("old host authority survived mesh identity refresh: %+v", entry)
+	}
+	h.host = "uuid-memory-second"
+	h.writeArtifact(t, h.artifact("3"))
+	entry = modelsMemoryEntry(t, h.ex.ModelsResult(context.Background()))
+	if memoryUpper(entry) == nil || entry.Source.HostUUID == nil || *entry.Source.HostUUID != mesh.NodeUUID() {
+		t.Fatalf("manager did not read refreshed mesh identity: %+v", entry)
+	}
+}
+
+func TestManagerMemoryEvidenceNilMeshOverridesInjectedIdentity(t *testing.T) {
+	h, _ := memoryModelsFixture(t)
+	h.writeArtifact(t, h.artifact("2"))
+	NewManager(NewCodec(&bytes.Buffer{}), h.ex, nil, "")
+	entry := modelsMemoryEntry(t, h.ex.ModelsResult(context.Background()))
+	if memoryUpper(entry) != nil || entry.Source.HostUUID != nil {
+		t.Fatalf("nil mesh retained injected host authority: %+v", entry)
+	}
 }
 
 func TestModelsMemoryEvidenceFirstAuthorityDisappearsDuringContradiction(t *testing.T) {
