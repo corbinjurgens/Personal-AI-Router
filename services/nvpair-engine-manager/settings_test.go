@@ -80,6 +80,111 @@ func servingSettingsFixture() *engines.ServingConfig {
 	return &engines.ServingConfig{Version: 1, Models: []engines.ServingModel{{ModelID: "exact/model", MaxOutputTokens: 128, Memory: engines.ServingMemory{HostRAMBytes: &ram, VRAMBytes: &vram}, Artifacts: []engines.ServingArtifact{{Role: "model", SHA256: strings.Repeat("a", 64), Provenance: engines.ServingProvenance{Kind: "supplied-sha256"}, Binding: &engines.ServingBinding{SourcePath: "synthetic-link", ResolvedTarget: "synthetic-target", SizeBytes: 64, MtimeNS: "1729000000000000001", SampleSHA256: strings.Repeat("b", 64)}}}}}}
 }
 
+func TestServingOverridesRejectInvalidDeclarations(t *testing.T) {
+	test := func(name, field string, mutate func(*engines.ServingConfig)) {
+		t.Run(name, func(t *testing.T) {
+			reg := NewRegistry()
+			base, err := json.Marshal(testEngineManifest(fakeEngineBin))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := reg.addManifest("bundled fake", base); err != nil {
+				t.Fatal(err)
+			}
+			reg.bundledRaw["fake"] = base
+			before, _ := reg.Get("fake")
+			serving := servingSettingsFixture()
+			mutate(serving)
+			override, err := json.Marshal(map[string]any{"engine": "fake", "runtime": map[string]any{"serving": serving}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			merged, err := reg.mergeOntoBundled(override)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := reg.addManifest("invalid override", merged); err == nil || !strings.Contains(err.Error(), field) {
+				t.Fatalf("diagnostic = %v, want field %s", err, field)
+			}
+			dir := t.TempDir()
+			path := filepath.Join(dir, "fake.json")
+			if err := os.WriteFile(path, override, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := reg.LoadOverrideDir(dir); err != nil {
+				t.Fatal(err)
+			}
+			after, _ := reg.Get("fake")
+			if after != before {
+				t.Fatal("invalid override replaced bundled manifest")
+			}
+			stored, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(stored, override) {
+				t.Fatal("loading rewrote invalid settings")
+			}
+		})
+	}
+	test("unknown version", "serving.version", func(c *engines.ServingConfig) { c.Version = 999; c.Models = nil })
+	test("duplicate model", "serving.models.1.modelId", func(c *engines.ServingConfig) { c.Models = append(c.Models, c.Models[0]) })
+	test("malformed digest", "serving.models.0.artifacts.0.sha256", func(c *engines.ServingConfig) { c.Models[0].Artifacts[0].SHA256 = "bad" })
+	test("missing memory domain", "serving.models.0.memory.vramBytes", func(c *engines.ServingConfig) { c.Models[0].Memory.VRAMBytes = nil })
+	test("invalid bound", "serving.models.0.maxOutputTokens", func(c *engines.ServingConfig) { c.Models[0].MaxOutputTokens = -1 })
+}
+
+func TestServingNumericErrorsThroughPreviewRPC(t *testing.T) {
+	fields := []struct{ literal, field string }{
+		{`"version":1`, "serving.version"},
+		{`"maxOutputTokens":128`, "serving.models.0.maxOutputTokens"},
+		{`"hostRamBytes":4096`, "serving.models.0.memory.hostRamBytes"},
+		{`"vramBytes":0`, "serving.models.0.memory.vramBytes"},
+		{`"sizeBytes":64`, "serving.models.0.artifacts.0.binding.sizeBytes"},
+	}
+	for _, field := range fields {
+		for _, number := range []string{"9223372036854775808", "1.5"} {
+			t.Run(field.field+"/"+number, func(t *testing.T) {
+				e := settingsExecutor(t, false)
+				request := settingsRequest(t, e)
+				request.Settings.Serving = servingSettingsFixture()
+				data, err := json.Marshal(request)
+				if err != nil {
+					t.Fatal(err)
+				}
+				key, _, _ := strings.Cut(field.literal, ":")
+				raw := strings.Replace(string(data), field.literal, key+":"+number, 1)
+				if raw == string(data) {
+					t.Fatal("numeric fixture was not replaced")
+				}
+				reader, writer := net.Pipe()
+				t.Cleanup(func() { _ = reader.Close(); _ = writer.Close() })
+				if err := reader.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+					t.Fatal(err)
+				}
+				manager := NewManager(NewCodec(writer), e, nil, "")
+				id := json.RawMessage("1")
+				manager.handleMessage(context.Background(), &Message{JSONRPC: "2.0", ID: &id, Method: "engine:preview-launch", Params: json.RawMessage(raw)})
+				var reply Message
+				if err := json.NewDecoder(reader).Decode(&reply); err != nil {
+					t.Fatal(err)
+				}
+				if reply.Error != nil {
+					t.Fatalf("preview RPC failed: %+v", reply.Error)
+				}
+				var preview settings.Preview
+				if err := json.Unmarshal(reply.Result, &preview); err != nil {
+					t.Fatal(err)
+				}
+				if preview.Errors[field.field] == "" {
+					t.Fatalf("missing field error: %+v", preview.Errors)
+				}
+				assertNoSettingsOverride(t, e)
+			})
+		}
+	}
+}
+
 func TestSettingsServingPreviewApplyAndUnrelatedEdit(t *testing.T) {
 	e := settingsExecutor(t, false)
 	p := settingsRequest(t, e)
