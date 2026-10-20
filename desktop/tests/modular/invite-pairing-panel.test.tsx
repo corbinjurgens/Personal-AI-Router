@@ -5,10 +5,11 @@
 import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import type { Invite } from '@/shared/types/cluster'
+import type { Invite, RemoteManagementSnapshot } from '@/shared/types/cluster'
 import type { IClusterApi } from '@/ui/api/pair-api'
 import { InvitePairingPanel, RemoteManagementChoice } from '@/ui/components/InvitePairingPanel'
 import { useInvitePairing } from '@/ui/hooks/useInvitePairing'
+import { useClusterInvitationsStore } from '@/ui/stores/cluster-invitations.store'
 import { MODULAR_INVITE_STATUS_POLL_INTERVAL_MS } from '@/shared/constants/modular-runtime'
 
 const invite: Invite = {
@@ -37,25 +38,106 @@ beforeEach(() => {
 afterEach(async () => {
     await act(async () => root.unmount())
     container.remove()
+    useClusterInvitationsStore.getState().cleanup()
     vi.useRealTimers()
     vi.unstubAllGlobals()
 })
 
 describe('failed invitation recovery', () => {
-    it.each([false, true])('shows the service-confirmed local permission %s', async allowed => {
-        await act(async () =>
-            root.render(
-                <InvitePairingPanel
-                    invite={{ ...invite, state: 'paired' }}
-                    error={null}
-                    onReset={reset}
-                    savedPermission={allowed}
-                />
+    it('shows the later authoritative denial instead of the submitted allowance', async () => {
+        let push: ((snapshot: RemoteManagementSnapshot) => void) | undefined
+        const inviteNode = vi.fn<IClusterApi['inviteNode']>().mockResolvedValue({
+            ...invite,
+            state: 'paired'
+        })
+        const getRemoteManagement = vi.fn<IClusterApi['getRemoteManagement']>().mockResolvedValue({
+            version: 1,
+            revision: '1',
+            grants: []
+        })
+        Object.defineProperty(window, 'pairApi', {
+            configurable: true,
+            value: {
+                cluster: {
+                    inviteNode,
+                    getRemoteManagement,
+                    onRemoteManagementChanged: (
+                        callback: (snapshot: RemoteManagementSnapshot) => void
+                    ) => {
+                        push = callback
+                        return () => {}
+                    },
+                    onInviteReceived: () => () => {},
+                    onPendingInvitesChanged: () => () => {}
+                },
+                nodes: { onMembersChanged: () => () => {} }
+            }
+        })
+        await useClusterInvitationsStore.getState().initialize({
+            info: { clusterId: 'cluster', isClustered: true, clusterFriendlyName: 'Home' },
+            identity: {
+                nodeUuid: 'self',
+                nodeId: 'self',
+                name: 'Self',
+                certFingerprint: 'cert',
+                clusterId: 'cluster'
+            },
+            pendingInvites: [],
+            members: [
+                {
+                    id: 'peer',
+                    nodeUuid: 'paired-peer',
+                    name: 'Peer',
+                    ipAddress: '127.0.0.1',
+                    port: 1,
+                    clusterId: 'cluster',
+                    state: 'member',
+                    joinedAt: 1,
+                    lastSeen: 1
+                }
+            ]
+        })
+        function Harness() {
+            const pairing = useInvitePairing()
+            return (
+                <>
+                    <RemoteManagementChoice
+                        allowed={pairing.allowRemoteManagement}
+                        onChange={pairing.setAllowRemoteManagement}
+                    />
+                    <button id="start" onClick={() => void pairing.start('127.0.0.1')}>
+                        Start
+                    </button>
+                    <InvitePairingPanel
+                        invite={pairing.invite}
+                        error={pairing.error}
+                        onReset={pairing.reset}
+                        savedPermission={pairing.savedPermission}
+                    />
+                </>
             )
+        }
+        await act(async () => root.render(<Harness />))
+        await act(async () =>
+            container.querySelector<HTMLInputElement>('input[value="allow"]')?.click()
         )
-        expect(container.textContent).toContain(
-            allowed ? 'may manage this device' : 'is blocked from changing this device'
+        await act(async () => container.querySelector<HTMLButtonElement>('#start')?.click())
+        expect(inviteNode).toHaveBeenCalledWith('127.0.0.1', true)
+        expect(container.textContent).toContain('Reading the saved remote-management permission')
+        expect(container.textContent).not.toContain('Pairing saved:')
+        if (!push) throw new Error('Missing permission push subscription')
+        await act(async () =>
+            push?.({
+                version: 1,
+                revision: '2',
+                grants: [
+                    { peerUuid: 'unrelated-peer', allowed: true, state: 'allowed' },
+                    { peerUuid: 'paired-peer', allowed: false, state: 'denied' }
+                ]
+            })
         )
+        expect(container.textContent).toContain('is blocked from changing this device')
+        expect(container.textContent).not.toContain('may manage this device')
         expect(container.textContent).toContain(
             'The other device chooses its own permission independently'
         )

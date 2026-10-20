@@ -132,6 +132,11 @@ export function InvitePairingPanel({
                         The other device chooses its own permission independently.
                     </Text>
                 )}
+                {typeof savedPermission !== 'boolean' && (
+                    <Text kind="body/regular/sm" role="status">
+                        Reading the saved remote-management permission for this device.
+                    </Text>
+                )}
                 <Button kind="primary" color="brand" size="small" onClick={onDone ?? onReset}>
                     Done
                 </Button>

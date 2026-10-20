@@ -884,8 +884,12 @@ describe('permission controls', () => {
             await act(async () => action.click())
             expect(inviteNode).toHaveBeenCalledExactlyOnceWith(peer.ipAddress, allowed)
             expect(document.body.textContent).toContain(
-                allowed ? 'may manage this device' : 'is blocked from changing this device'
+                'Reading the saved remote-management permission'
             )
+            expect(document.body.textContent).not.toContain('Pairing saved:')
+            await act(async () => initializeMembership())
+            expect(document.body.textContent).toContain('is blocked from changing this device')
+            expect(document.body.textContent).not.toContain('may manage this device')
         }
     )
 
