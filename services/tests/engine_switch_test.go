@@ -116,7 +116,7 @@ func newSwitchProcessFixture(t *testing.T) *switchProcessFixture {
 func newSwitchProcessFixtureAt(t *testing.T, base string, ports fixtureServicePorts) *switchProcessFixture {
 	t.Helper()
 	f := &switchProcessFixture{base: base, ports: ports, sourcePort: freePort(t), targetPort: freePort(t), facadePort: freePort(t), release: make(chan struct{}), inflight: make(chan struct{}, 1), starts: make(map[string][]int32), targetStarting: make(chan struct{}, 1)}
-	f.control = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	f.control = newFixtureHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		pid, err := strconv.ParseInt(r.URL.Query().Get("pid"), 10, 32)
 		if err != nil {
 			http.Error(w, "invalid fixture PID", http.StatusBadRequest)

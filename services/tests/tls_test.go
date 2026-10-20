@@ -153,15 +153,15 @@ func startNodeInfo(t *testing.T, instanceName string, extraArgs ...string) (clea
 // the listener, returning the port number. There's a tiny race
 // here — between Close() and the subprocess binding — but on a
 // quiet test host it's fine, and using a randomly-allocated port
-// avoids stomping on whatever the developer has running locally.
+// avoids stomping on whatever the developer has running locally. Installed
+// PAIR's service and engine facade ports are rejected before returning.
 func freePort(t *testing.T) int {
 	t.Helper()
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
+	l := listenFixtureLoopback(t)
 	port := l.Addr().(*net.TCPAddr).Port
-	l.Close()
+	if err := l.Close(); err != nil {
+		t.Fatalf("release fixture port: %v", err)
+	}
 	return port
 }
 

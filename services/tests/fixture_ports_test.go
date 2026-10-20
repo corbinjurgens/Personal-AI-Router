@@ -4,8 +4,11 @@
 package tests
 
 import (
+	"errors"
 	"fmt"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"strconv"
 	"sync"
 	"testing"
@@ -30,6 +33,40 @@ var installedServicePorts = map[int]string{
 	11434: "Ollama facade",
 	1234:  "LM Studio facade",
 	8080:  "llama.cpp facade",
+}
+
+// listenFixtureLoopback makes one bounded allocation attempt. A protected port
+// is closed and rejected before a fixture can serve or dial it.
+func listenFixtureLoopback(t *testing.T) net.Listener {
+	t.Helper()
+	ln, err := allocateFixtureLoopback(net.Listen)
+	if err != nil {
+		t.Fatalf("allocate fixture listener: %v", err)
+	}
+	return ln
+}
+
+func allocateFixtureLoopback(listen func(string, string) (net.Listener, error)) (net.Listener, error) {
+	ln, err := listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return nil, err
+	}
+	port := ln.Addr().(*net.TCPAddr).Port
+	if owner, installed := installedServicePorts[port]; installed {
+		err := fmt.Errorf("OS selected installed PAIR port %d (%s) for a fixture", port, owner)
+		if closeErr := ln.Close(); closeErr != nil {
+			err = errors.Join(err, fmt.Errorf("close rejected fixture listener: %w", closeErr))
+		}
+		return nil, err
+	}
+	return ln, nil
+}
+
+func newFixtureHTTPServer(t *testing.T, handler http.Handler) *httptest.Server {
+	t.Helper()
+	server := &httptest.Server{Listener: listenFixtureLoopback(t), Config: &http.Server{Handler: handler}}
+	server.Start()
+	return server
 }
 
 // fixtureServicePorts is one fixture broker's complete local service plan,
@@ -63,15 +100,9 @@ func reserveFixtureServicePorts(t *testing.T) fixtureServicePorts {
 		}
 	}()
 	for i := range ports {
-		ln, err := net.Listen("tcp", "127.0.0.1:0")
-		if err != nil {
-			t.Fatalf("reserve fixture service port: %v", err)
-		}
+		ln := listenFixtureLoopback(t)
 		listeners = append(listeners, ln)
 		ports[i] = ln.Addr().(*net.TCPAddr).Port
-		if owner, installed := installedServicePorts[ports[i]]; installed {
-			t.Fatalf("OS selected installed PAIR port %d (%s) for a fixture", ports[i], owner)
-		}
 	}
 	plan := fixtureServicePorts{
 		nodeInfo:          ports[0],
@@ -99,6 +130,69 @@ func (p fixtureServicePorts) args() []string {
 		"--cluster-manager-port", strconv.Itoa(p.clusterManager),
 		"--engine-manager-http-port", strconv.Itoa(p.engineManagerHTTP),
 		"--engine-manager-control-port", strconv.Itoa(p.engineControl),
+	}
+}
+
+type fixtureAllocationListener struct {
+	port     int
+	closes   int
+	closeErr error
+}
+
+func (l *fixtureAllocationListener) Accept() (net.Conn, error) {
+	return nil, errors.New("allocation guard must not accept connections")
+}
+
+func (l *fixtureAllocationListener) Close() error {
+	l.closes++
+	return l.closeErr
+}
+
+func (l *fixtureAllocationListener) Addr() net.Addr {
+	return &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: l.port}
+}
+
+func TestFixtureLoopbackRejectsInstalledPorts(t *testing.T) {
+	for _, port := range []int{8080, 11434, 1234, 14318, 14319, 14320, 14321, 14322, 14323} {
+		t.Run(strconv.Itoa(port), func(t *testing.T) {
+			candidate := &fixtureAllocationListener{port: port}
+			calls := 0
+			ln, err := allocateFixtureLoopback(func(network, address string) (net.Listener, error) {
+				calls++
+				if network != "tcp" || address != "127.0.0.1:0" {
+					t.Fatalf("allocation = %s %s, want tcp 127.0.0.1:0", network, address)
+				}
+				return candidate, nil
+			})
+			if err == nil || ln != nil || candidate.closes != 1 || calls != 1 {
+				t.Fatalf("rejected allocation: listener=%v err=%v closes=%d calls=%d, want nil, error, 1, 1", ln, err, candidate.closes, calls)
+			}
+		})
+	}
+}
+
+func TestFixtureLoopbackPreservesAllowedListener(t *testing.T) {
+	candidate := &fixtureAllocationListener{port: 24001}
+	ln, err := allocateFixtureLoopback(func(string, string) (net.Listener, error) { return candidate, nil })
+	if err != nil || ln != candidate || candidate.closes != 0 {
+		t.Fatalf("allowed allocation: listener=%v err=%v closes=%d, want original listener, nil, 0", ln, err, candidate.closes)
+	}
+}
+
+func TestFixtureLoopbackReportsAllocationFailure(t *testing.T) {
+	want := errors.New("allocation failed")
+	ln, err := allocateFixtureLoopback(func(string, string) (net.Listener, error) { return nil, want })
+	if ln != nil || !errors.Is(err, want) {
+		t.Fatalf("failed allocation: listener=%v err=%v, want nil and allocation error", ln, err)
+	}
+}
+
+func TestFixtureLoopbackReportsRejectedCloseFailure(t *testing.T) {
+	want := errors.New("close failed")
+	candidate := &fixtureAllocationListener{port: 14323, closeErr: want}
+	ln, err := allocateFixtureLoopback(func(string, string) (net.Listener, error) { return candidate, nil })
+	if ln != nil || !errors.Is(err, want) || candidate.closes != 1 {
+		t.Fatalf("rejected close failure: listener=%v err=%v closes=%d, want nil, close error, 1", ln, err, candidate.closes)
 	}
 }
 
