@@ -269,7 +269,7 @@ func (b *Broker) handleMessage(msg *Message) {
 		// historic workload as its full workloadInfo, so a (re)connecting or
 		// late-subscribing client can seed its view without waiting for the
 		// next transition. Ordered by createdAt (see Store.Snapshot).
-		snapshot := b.workloads.Snapshot()
+		snapshot := projectWorkloadSnapshot(b.workloads.Snapshot())
 		if snapshot == nil {
 			snapshot = []json.RawMessage{}
 		}
