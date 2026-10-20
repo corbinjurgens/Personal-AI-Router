@@ -1329,16 +1329,20 @@ func (f *facade) handleHTTPWithStreamIdle(w http.ResponseWriter, r *http.Request
 		// Framing follows this attempt's effective body, including local profile
 		// defaults. Ingress validation above still rejects ambiguous client flags
 		// before admission or any body rewrite.
-		streamRequest, streamErr := parseOriginStreamRequest(r.URL.Path, sendBody)
-		if streamErr != nil {
-			curTicket.release()
-			cancelAttempt()
-			ctl.setAttempt(nil)
-			respondedWithError = true
-			finalStatus = http.StatusBadRequest
-			proxyErr = "invalid effective stream flag"
-			writeIngressError(w, http.StatusBadRequest, "invalid-stream", "invalid effective stream flag")
-			break
+		var streamRequest originStreamRequest
+		if isInf {
+			var streamErr error
+			streamRequest, streamErr = parseOriginStreamRequest(r.URL.Path, sendBody)
+			if streamErr != nil {
+				curTicket.release()
+				cancelAttempt()
+				ctl.setAttempt(nil)
+				respondedWithError = true
+				finalStatus = http.StatusBadRequest
+				proxyErr = "invalid effective stream flag"
+				writeIngressError(w, http.StatusBadRequest, "invalid-stream", "invalid effective stream flag")
+				break
+			}
 		}
 
 		// Watch the target while the attempt is pre-commit. A node that has
@@ -1414,6 +1418,7 @@ func (f *facade) handleHTTPWithStreamIdle(w http.ResponseWriter, r *http.Request
 			Director: func(req *http.Request) {
 				if cand.self {
 					stripInternalRoutingHeaders(req.Header)
+					req.Header.Del(peerStreamFramingHeader)
 				}
 				req.URL.Scheme = target.Scheme
 				req.URL.Host = target.Host

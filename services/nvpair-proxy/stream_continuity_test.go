@@ -342,6 +342,57 @@ func TestStreamContinuityRejectsInvalidStreamFlag(t *testing.T) {
 	}
 }
 
+func TestNonInferenceRequestOnInferencePathPreservesRequest(t *testing.T) {
+	const requestBody = `{"stream":"engine-extension"}`
+	const responseBody = "engine control response"
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("read forwarded request: %v", err)
+			return
+		}
+		if r.Method != http.MethodGet || !bytes.Equal(body, []byte(requestBody)) {
+			t.Errorf("forwarded request = %s %q, want GET with original body %q", r.Method, body, requestBody)
+		}
+		if got := r.Header.Get(peerStreamFramingHeader); got != "" {
+			t.Errorf("forwarded internal framing header = %q, want absent", got)
+		}
+		w.WriteHeader(http.StatusTeapot)
+		_, _ = io.WriteString(w, responseBody)
+	}))
+	defer upstream.Close()
+
+	fx := newContinuityFixture(t, upstream.URL, time.Second)
+	fac := fx.p.soleFacade()
+	fac.port = fac.profile.FacadePort
+	fac.discovery.AddManual(selfNode("node-a", fac.port, "m"))
+	setBackend(t, fac, upstream.URL, true)
+
+	r, err := http.NewRequest(http.MethodGet, fx.origin.URL+"/api/chat", strings.NewReader(requestBody))
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.Header.Set("Content-Type", "application/json")
+	r.Header.Set(peerStreamFramingHeader, "client-spoof")
+	resp, err := fx.origin.Client().Do(r)
+	if err != nil {
+		t.Fatalf("request origin: %v", err)
+	}
+	data, readErr := io.ReadAll(resp.Body)
+	if err := resp.Body.Close(); err != nil {
+		t.Fatalf("close response: %v", err)
+	}
+	waitChan(t, fx.returned, "origin handler return")
+	if readErr != nil || resp.StatusCode != http.StatusTeapot || string(data) != responseBody {
+		t.Fatalf("response status=%d body=%q read=%v, want upstream 418 and %q", resp.StatusCode, data, readErr, responseBody)
+	}
+	for _, frame := range frames(t, fx.w) {
+		if frame.Method == workloadErroredMethod {
+			t.Fatalf("non-inference request emitted workload failure: %s", frame.Params)
+		}
+	}
+}
+
 func TestStreamContinuityEffectiveLocalDefaults(t *testing.T) {
 	test := func(name, path, request, defaults, media, payload, reason string) {
 		t.Run(name, func(t *testing.T) {
