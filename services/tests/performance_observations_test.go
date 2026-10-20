@@ -26,6 +26,7 @@ import (
 	"testing"
 	"time"
 
+	"nvpair-shared/clustertrusttest"
 	"nvpair-shared/engines"
 	"nvpair-shared/jsonrpc"
 	"nvpair-shared/nodepolicy"
@@ -930,6 +931,8 @@ func TestPerformanceObservationBrokerPersistenceAndPublication(t *testing.T) {
 	}
 	const host = "observation-broker-b"
 	task1WriteJSON(t, filepath.Join(cluster, "identity.json"), map[string]any{"node_uuid": host})
+	// Publication requires the admitted certificate principal, not just node metadata.
+	clustertrusttest.WriteKeypair(t, cluster, host)
 	task1WriteJSON(t, filepath.Join(cluster, "admission.json"), map[string]any{"counter": 1, "activated": 1, "clusterId": task1ClusterID, "epoch": 1})
 	upstream := observationUpstream(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
