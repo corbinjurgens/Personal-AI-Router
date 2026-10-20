@@ -142,6 +142,93 @@ func TestSwitchReceiptIdentityAndSequence(t *testing.T) {
 	}
 }
 
+func TestSwitchCurrentObservationsRefreshAtSameSequence(t *testing.T) {
+	for _, phase := range []string{enginesettings.SwitchDraining, enginesettings.SwitchCompleted} {
+		t.Run(phase, func(t *testing.T) {
+			d, _ := switchDetail(t, false)
+			d.engineSwitch.requestID = "request"
+			r := switchReceipt(d, 7, phase)
+			oldTime := time.Date(2026, 10, 21, 1, 0, 0, 0, time.UTC)
+			newTime := oldTime.Add(time.Minute)
+			running, stopped := true, false
+			msg := switchMessage(d, &r)
+			msg.status.Observed = &enginesettings.SwitchObserved{
+				Source: enginesettings.SwitchEngineState{Running: &running, ObservedAt: &oldTime},
+				Target: enginesettings.SwitchEngineState{Running: &running, ObservedAt: &oldTime},
+			}
+			d.applySwitch(msg)
+			retained := d.engineSwitch.receipt
+			duplicate := r
+			msg = switchMessage(d, &duplicate)
+			msg.status.Observed = &enginesettings.SwitchObserved{
+				Source: enginesettings.SwitchEngineState{Running: &stopped, ObservedAt: &newTime},
+				Target: enginesettings.SwitchEngineState{Running: &stopped, ObservedAt: &newTime},
+			}
+			d.applySwitch(msg)
+			if d.engineSwitch.receipt != retained {
+				t.Fatal("equal sequence replaced the retained receipt")
+			}
+			for name, state := range map[string]enginesettings.SwitchEngineState{
+				"From": d.engineSwitch.observed.Source, "To": d.engineSwitch.observed.Target,
+			} {
+				if state.Running == nil || *state.Running || state.ObservedAt == nil || !state.ObservedAt.Equal(newTime) {
+					t.Fatalf("%s current observation did not refresh: %+v", name, state)
+				}
+			}
+		})
+	}
+}
+
+func TestSwitchFollowNewActiveAfterPreviousCompletion(t *testing.T) {
+	for _, previous := range []string{"completed", "inaccessible other client", "unresolved local submission"} {
+		t.Run(previous, func(t *testing.T) {
+			d, f := switchDetail(t, false)
+			s := &d.engineSwitch
+			s.requestID = "previous"
+			s.unknown = true
+			if previous == "completed" {
+				r := switchReceipt(d, 7, enginesettings.SwitchCompleted)
+				d.applySwitch(switchMessage(d, &r))
+			} else if previous == "unresolved local submission" {
+				s.requestID, s.unknown = "", false
+				cmd := d.submitSwitch()
+				_, reply := terminalControlsReply(t, f.broker, cmd, &rpc.Message{Error: &rpc.RPCError{Code: -32000, Message: "reply lost"}})
+				readback, _ := d.update(reply)
+				_, reply = terminalControlsReply(t, f.broker, readback,
+					&rpc.Message{Error: &rpc.RPCError{Code: -32000, Message: "receipt unavailable"}})
+				d.update(reply)
+			}
+			originalID := s.requestID
+			_, reply := terminalControlsReply(t, f.broker, d.switchStatusCmd(true),
+				switchResponse(t, enginesettings.SwitchStatus{ConfigurationRevision: "revision", ActiveRequestID: "new-active"}))
+			readback, _ := d.update(reply)
+			wantID := "new-active"
+			if previous == "unresolved local submission" {
+				wantID = originalID
+			}
+			if s.requestID != wantID {
+				t.Fatalf("retained request = %q, want %q", s.requestID, wantID)
+			}
+			if previous != "unresolved local submission" && (s.receipt != nil || s.observed != nil) {
+				t.Fatal("new active request retained previous evidence")
+			}
+			req, reply := terminalControlsReply(t, f.broker, readback,
+				&rpc.Message{Error: &rpc.RPCError{Code: -32000, Message: "receipt unavailable"}})
+			var params enginesettings.SwitchStatusRequest
+			if err := json.Unmarshal(req.Params, &params); err != nil {
+				t.Fatal(err)
+			}
+			if req.Method != enginesettings.SwitchStatusMethod || params.RequestID != wantID || params.AfterSequence != nil {
+				t.Fatalf("request-specific readback: %s %+v, want %q", req.Method, params, wantID)
+			}
+			d.update(reply)
+			if !s.unknown || !strings.Contains(d.switchView(), "receipt unavailable") {
+				t.Fatal("inaccessible receipt did not display explicit unavailability")
+			}
+		})
+	}
+}
+
 func TestSwitchStaleReceiptAfterLeavingAndRevisiting(t *testing.T) {
 	d, f := switchDetail(t, false)
 	d.engineSwitch.requestID = "request"

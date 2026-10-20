@@ -37,6 +37,7 @@ type detailSwitch struct {
 	fresh, inFlight, submitting, unknown, dirty bool
 	brokerRestart                               bool
 	started                                     bool
+	localRequest                                bool
 	receipt                                     *enginesettings.SwitchReceipt
 	observed                                    *enginesettings.SwitchObserved
 	err                                         error
@@ -151,6 +152,7 @@ func (d *nodeDetail) submitSwitch() tea.Cmd {
 		return nil
 	}
 	s.requestID = rand.Text()
+	s.localRequest = true
 	s.receipt, s.observed, s.err = nil, nil, nil
 	s.refusal = nil
 	s.submitting, s.unknown = true, true
@@ -200,8 +202,12 @@ func (d *nodeDetail) applySwitch(msg detailSwitchMsg) tea.Cmd {
 		}
 		s.revision, s.active = msg.status.ConfigurationRevision, msg.status.ActiveRequestID
 		s.fresh = s.revision != ""
-		if s.requestID == "" {
+		if s.requestID == "" || (s.active != "" && s.active != s.requestID &&
+			((s.receipt != nil && s.receipt.Terminal) || (!s.localRequest && s.unknown))) {
 			s.requestID = s.active
+			s.localRequest = false
+			s.receipt, s.observed, s.refusal = nil, nil, nil
+			s.unknown = s.requestID != ""
 		}
 		if s.requestID != "" && (s.unknown || s.receipt != nil || s.active == s.requestID) {
 			return d.switchStatusCmd(false)
@@ -217,6 +223,10 @@ func (d *nodeDetail) applySwitch(msg detailSwitchMsg) tea.Cmd {
 	}
 	if s.receipt == nil || r.Sequence > s.receipt.Sequence {
 		s.receipt = r
+	}
+	// Runtime observations describe this read, independently of the immutable
+	// receipt sequence, including after the transaction has finished.
+	if !msg.submit {
 		s.observed = msg.status.Observed
 	}
 	s.unknown = false
