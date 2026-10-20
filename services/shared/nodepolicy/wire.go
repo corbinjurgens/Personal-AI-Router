@@ -1242,10 +1242,11 @@ type SetModelIdentityParams struct {
 // engine's own name, to the lowercase SHA-256 hex identifying its content
 // (engine-manager). All are public configuration or content identity.
 type EngineIdentity struct {
-	EngineRunID         string            `json:"engineRunId"`
-	SettingsFingerprint string            `json:"settingsFingerprint"`
-	LaunchDigest        string            `json:"launchDigest"`
-	ModelDigests        map[string]string `json:"modelDigests"`
+	EngineRunID         string                             `json:"engineRunId"`
+	SettingsFingerprint string                             `json:"settingsFingerprint"`
+	LaunchDigest        string                             `json:"launchDigest"`
+	ModelDigests        map[string]string                  `json:"modelDigests"`
+	Serving             map[string]engines.ServingEnvelope `json:"serving,omitempty"`
 }
 
 func (p SetModelIdentityParams) Validate() error {
@@ -1279,6 +1280,11 @@ func (i EngineIdentity) Validate() error {
 		}
 		if !strictDigest.MatchString(digest) {
 			return fmt.Errorf("modelDigests[%q] must be lowercase SHA-256 hex", model)
+		}
+	}
+	for model, envelope := range i.Serving {
+		if err := envelope.Validate(model, i.ModelDigests[model]); err != nil {
+			return fmt.Errorf("serving[%q]: %w", model, err)
 		}
 	}
 	return nil

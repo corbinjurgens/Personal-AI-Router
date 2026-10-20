@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"nvpair-shared/engines"
 )
 
 func TestWorkloadCancelWire(t *testing.T) {
@@ -752,6 +754,40 @@ func TestSetModelIdentityParamsValidate(t *testing.T) {
 				t.Fatalf("Validate() = %v, want an error containing %q", err, tc.wantErr)
 			}
 		})
+	}
+}
+
+func TestEngineIdentityServingProjection(t *testing.T) {
+	digest := strings.Repeat("a", 64)
+	ram, vram := int64(4096), int64(0)
+	id := EngineIdentity{EngineRunID: "run-1", SettingsFingerprint: digest, LaunchDigest: digest, ModelDigests: map[string]string{"m": digest}}
+	if err := id.Validate(); err != nil {
+		t.Fatalf("legacy nil serving: %v", err)
+	}
+	e := engines.ServingEnvelope{ModelID: "m", ContentDigest: digest, NativeSourceDigest: digest, PerSlotContextTokens: 4096, TotalContextTokens: 4096, Slots: 1, MaxOutputTokens: 128, Memory: engines.ServingMemory{HostRAMBytes: &ram, VRAMBytes: &vram}}
+	id.Serving = map[string]engines.ServingEnvelope{"m": e}
+	data, err := json.Marshal(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded EngineIdentity
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if err := decoded.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if decoded.Serving["m"].ContentDigest != digest {
+		t.Fatal("wire omitted serving")
+	}
+	id.Serving = map[string]engines.ServingEnvelope{"other": e}
+	if id.Validate() == nil {
+		t.Fatal("mismatched exact key accepted")
+	}
+	id.Serving = map[string]engines.ServingEnvelope{"m": e}
+	id.ModelDigests["m"] = strings.Repeat("b", 64)
+	if id.Validate() == nil {
+		t.Fatal("mismatched content accepted")
 	}
 }
 func TestRoutingPolicyIdentityEnvelope(t *testing.T) {

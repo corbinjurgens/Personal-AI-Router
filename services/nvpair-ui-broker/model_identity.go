@@ -29,9 +29,10 @@ import (
 
 // engineManagerIdentity is one engine's part of engine:model-identity.
 type engineManagerIdentity struct {
-	EngineRunID  string            `json:"engineRunId"`
-	LaunchDigest string            `json:"launchDigest"`
-	ModelDigests map[string]string `json:"modelDigests"`
+	EngineRunID  string                             `json:"engineRunId"`
+	LaunchDigest string                             `json:"launchDigest"`
+	ModelDigests map[string]string                  `json:"modelDigests"`
+	Serving      map[string]engines.ServingEnvelope `json:"serving,omitempty"`
 }
 
 // rpcMethodNotFound is the JSON-RPC code an older proxy answers an unknown
@@ -78,7 +79,16 @@ func (b *Broker) acceptModelIdentity(source *engineManagerSource, engines map[st
 		r.mu.Unlock()
 		return
 	}
-	r.engineIdentity = engines
+	r.engineIdentity = make(map[string]engineManagerIdentity, len(engines))
+	for name, id := range engines {
+		models := make(map[string]string, len(id.ModelDigests))
+		for model, digest := range id.ModelDigests {
+			models[model] = digest
+		}
+		id.ModelDigests = models
+		id.Serving = cloneIdentityServing(id.Serving)
+		r.engineIdentity[name] = id
+	}
 	r.mu.Unlock()
 	b.identityChanged()
 }
@@ -159,12 +169,24 @@ func (r *policyRuntime) modelIdentityLocked() nodepolicy.SetModelIdentityParams 
 		for model, digest := range em.ModelDigests {
 			id.ModelDigests[model] = digest
 		}
+		id.Serving = cloneIdentityServing(em.Serving)
 		if id.Validate() != nil {
 			continue
 		}
 		out.Engines[engine] = id
 	}
 	return out
+}
+
+func cloneIdentityServing(source map[string]engines.ServingEnvelope) map[string]engines.ServingEnvelope {
+	if source == nil {
+		return nil
+	}
+	result := make(map[string]engines.ServingEnvelope, len(source))
+	for model, envelope := range source {
+		result[model] = envelope.Clone()
+	}
+	return result
 }
 
 // identityCurrentLocked reports whether m's identity is the one this broker

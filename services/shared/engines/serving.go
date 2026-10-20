@@ -122,6 +122,7 @@ type ServingBinding struct {
 // A declaration alone must never populate LaunchValidated or Observed.
 type ServingEnvelope struct {
 	ModelID              string        `json:"modelId"`
+	ContentDigest        string        `json:"contentDigest"`
 	PerSlotContextTokens int64         `json:"perSlotContextTokens"`
 	TotalContextTokens   int64         `json:"totalContextTokens"`
 	Slots                int64         `json:"slots"`
@@ -131,6 +132,29 @@ type ServingEnvelope struct {
 	Placement            []string      `json:"placement,omitempty"`
 	Retention            string        `json:"retention,omitempty"`
 	RouterCapacity       int64         `json:"routerCapacity,omitempty"`
+}
+
+// Clone detaches mutable envelope fields from a publication or settings owner.
+func (e ServingEnvelope) Clone() ServingEnvelope {
+	e.Memory = cloneMemory(e.Memory)
+	e.Placement = slices.Clone(e.Placement)
+	return e
+}
+
+// Validate checks the path-free identity projection, without runtime I/O.
+func (e ServingEnvelope) Validate(model, content string) error {
+	const maxInteger = int64(1<<53 - 1)
+	digest := regexp.MustCompile(`^[0-9a-f]{64}$`)
+	if model == "" || e.ModelID != model || !digest.MatchString(e.ContentDigest) || e.ContentDigest != content || !digest.MatchString(e.NativeSourceDigest) {
+		return fmt.Errorf("serving model key or digest does not match its identity")
+	}
+	if e.PerSlotContextTokens <= 0 || e.PerSlotContextTokens > maxInteger || e.TotalContextTokens < e.PerSlotContextTokens || e.TotalContextTokens > maxInteger || e.Slots <= 0 || e.Slots > maxInteger || e.PerSlotContextTokens > e.TotalContextTokens/e.Slots || e.MaxOutputTokens <= 0 || e.MaxOutputTokens >= e.PerSlotContextTokens {
+		return fmt.Errorf("serving context, slots and output must form a finite allocation")
+	}
+	if e.Memory.HostRAMBytes == nil || *e.Memory.HostRAMBytes <= 0 || *e.Memory.HostRAMBytes > maxInteger || e.Memory.VRAMBytes == nil || *e.Memory.VRAMBytes < 0 || *e.Memory.VRAMBytes > maxInteger {
+		return fmt.Errorf("serving requires explicit valid host RAM and VRAM bounds")
+	}
+	return nil
 }
 
 type ServingObservation struct {

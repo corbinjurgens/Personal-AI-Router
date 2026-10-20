@@ -57,7 +57,7 @@ fails validation is ignored as a whole and logged; nothing is qualified from it.
 | --- | --- |
 | `id`, `revision` | Identity of this qualification. A profile names exactly one id and revision. |
 | `engine`, `model` | The engine and model; the model is compared after the engine's naming normalization. |
-| `modelDigests` | Content identities of the model the bounds hold for. For Ollama this is the `/api/tags` digest, which covers the weights and the template and parameter layers. |
+| `modelDigests` | Content identities of the model the bounds hold for. Ollama uses its `/api/tags` digest; NE uses the aggregate artifact manifest digest described below. |
 | `launchDigests` | Launches the bounds hold for (Identity, below). |
 | `requestOptions` | The profile defaults the bounds were measured with. The profile's `requestOptions` must be equal. |
 | `tokenizer`, `chatTemplate` | Names of the tokenizer and template the accounting was verified against. |
@@ -151,7 +151,7 @@ The identity binds a qualification to what is actually running:
 | Part | Producer | Changes when |
 | --- | --- | --- |
 | `engineRunId` | engine-manager | the engine is started or adopted, or engine-manager restarts |
-| launch digest | engine-manager | the launch changes: the executable's path, size or modification time (so an engine upgrade), its arguments, or its explicit environment |
+| launch digest | engine-manager | the executable, argv or explicit environment changes; NE also binds the approved prepared launch inputs |
 | model content digest | engine-manager | the model's content changes, including a same-name replacement |
 | `settingsFingerprint` | broker | a settings revision is applied, or the broker restarts |
 
@@ -164,20 +164,73 @@ engine-manager logs it as `launch_digest` whenever an engine's identity changes,
 which is how a qualifying operator records it. The inherited environment of the
 service is not part of it.
 
-Model content digests come from the engine's own inventory when its manifest's
+For engines without an NE serving declaration, model content digests come from the engine's own inventory when its manifest's
 `list_models` result declares a `digest` field (Ollama does). Other engines report
 none, so their models are not installed. Engines that declare one are listed on
 every watcher tick, and each digest is reported only with the run it was listed
-under.
+under. An approved NE owned launch instead derives content from its declared
+artifact manifest, as described below; inventory cannot replace that identity.
 
 engine-manager sends the broker `engine:model-identity`, a whole snapshot
-`{engines: {<engine>: {engineRunId, launchDigest, modelDigests}}}`, after its first
+`{engines: {<engine>: {engineRunId, launchDigest, modelDigests, serving?}}}`, after its first
 sweep and whenever it changes; every start, stop or adoption triggers a sweep. The
 broker joins it with the SHA-256 fingerprint of each engine's applied settings
 revision and pushes `node/set-model-identity` to the proxy; it also drops an
 engine at once when it stops, drops all of them when engine-manager exits, and
 withholds from its advertisement any reported model whose identity is no longer
 the current one.
+
+### NE artifact attestation
+
+For each consumed model, shard and draft artifact, obtain a trusted full-file
+SHA-256 from pinned HF LFS metadata where available. Record the pinned repository
+revision and metadata reference with `hf-lfs-sha256` provenance. A SHA-shaped
+blob filename alone is not verification. Otherwise run an external one-time
+`shasum -a 256 /absolute/path/to/artifact` and record `one-time-sha256`
+provenance and its receipt. PAIR does not perform this full model hash.
+Keep original locations and HF snapshot symlinks; no copy/import is required.
+
+Submit those digests in `serving.models[].artifacts` in native consumption/shard
+order through the existing authorized E settings preview/apply route. Review
+the returned bindings (source, resolved regular target, size, nanosecond mtime,
+first/last 64 KiB sample) and native-source digest before applying that exact
+preview. A shorter-than-128-KiB file is sampled once. Changed bindings require
+explicit renewed verification and apply; PAIR never silently re-attests bytes.
+
+The envelope's `contentDigest` is an aggregate manifest digest, not a GGUF's
+individual SHA-256. It hashes canonical JSON with version
+`pair-serving-content-v1` and ordered artifact entries of `role`, `sizeBytes`
+and lowercase `sha256`, excluding paths, timestamps, samples and operator
+labels. Renewed bindings after relocation preserve content identity. NE's
+`launchDigest` hashes a `pair-serving-launch-v1` document containing the existing
+pre-snapshot executable-stat/argv/environment digest and the approved prepared
+digest. It includes source/declaration/envelope/placement/retention/capacity
+changes but excludes random snapshot generation directories.
+
+After an owned validated launch, copy `serving[exactModelId].contentDigest`
+from `engine:model-identity` (also `launchValidated[].contentDigest` in authorized
+settings readback) into the existing B record's `modelDigests`. Copy the reported
+`launchDigest` (or its public `launch_digest` log value) into `launchDigests`.
+Record digest provenance and the exact runtime/envelope in qualification
+`evidence`; no new B provenance acceptance field or schema is added. This
+identity alone qualifies nothing: measurement and the existing B checks remain
+required. Cold configured envelopes are not measured effective runtime limits;
+declared memory is not an OS allocation limiter.
+
+Full inventory reconciliation and action pokes recheck bindings/native inputs
+without full model hashing. Drift publishes an empty model digest map, omits
+`serving`, and latches settings `mismatch` until successful explicit apply/start.
+The cheap binding cannot detect a deliberate middle-only change preserving
+size, mtime and both sampled regions. Trusted full-file assertions and operator
+control of the source remain part of this contract.
+
+For the pinned llama build, retention `"-1"` disables idle expiry; positive
+seconds remain valid and zero or values below -1 reject. SR 5b owns retention
+enforcement and router-capacity comparison with its revision-bound resident
+set. Plain direct-model output enforcement remains deferred until after I 4b;
+router-cached undeclared models and native output defaults retain their current
+behavior on that path. Strict readiness envelope checks and loaded observations
+are separate follow-up gates. Further Strata-specific work is deferred.
 
 Invalidation happens before the change it guards wherever PAIR makes the change:
 

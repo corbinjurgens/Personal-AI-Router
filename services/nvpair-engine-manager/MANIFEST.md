@@ -74,6 +74,24 @@ running engine. The llama adapter supplies `configured` envelopes and matching
 owned-process `launchValidated` envelopes. Loaded observations and strict
 content qualification remain unverified in this launch adapter.
 
+Owned current launches additionally publish aggregate `contentDigest` values
+and path-free envelopes in `engine:model-identity.serving`, keyed by exact model
+ID. The aggregate hashes artifact role, size and asserted full SHA-256 in native
+order; local paths, samples and provenance labels are excluded. Launch identity
+binds the original pre-snapshot command plus the approved compiler digest, so
+new snapshot generation directories do not invalidate an unchanged launch.
+Inventory cannot attest NE content. Full inventory reconciliation rechecks
+bounded bindings and native inputs outside locks; drift withdraws model digests
+and envelopes and latches `mismatch` readback until successful explicit
+apply/start. See [spec.md](spec.md#owned-serving-identity) for the wire and cold
+validation contract and [qualification procedure](../../docs/local-qualification.mdx#ne-artifact-attestation).
+
+In the pinned llama build, `sleep-idle-seconds` accepts positive integers or
+exactly `-1` (disabled retention) in global/model presets, CLI and environment.
+Zero and values below -1 are refused. `Retention` remains a string, including
+`"-1"`. Router capacity is not compared with declaration count; SR 5b owns its
+revision-bound resident-set comparison and retention enforcement.
+
 Every action bound to `operations.load` holds the engine operation lock through
 the current declaration check and dispatch, even when `serving` is absent.
 Without a record, request bytes, response and dispatch error precedence retain

@@ -12,7 +12,7 @@ adapter for the llama.cpp family. It derives per-model total/per-slot context,
 slots, opaque placement, idle retention and finite router child capacity from
 the supported local preset subset. The shared declaration supplies the output
 and memory bounds and artifact digest provenance. It does not enable automatic
-residency or publish strict content identities.
+residency. Owned validated runs publish declaration-derived content identities.
 
 NE builds a canonical router launch with no PAIR-implicit envelope flags. The
 legacy context 8192/parallel 1 and retention/cache defaults become finite preset
@@ -26,7 +26,9 @@ lists the envelope controls and unsupported selections. For those controls,
 duplicate aliases, conflicting repeated values, CLI plus environment for one
 setting and unsupported forms fail closed. Preset include/inheritance/substitution,
 startup loads and automatic fitting are unsupported. Finite numeric fields
-reject auto/zero/negative/overflow.
+reject auto/zero/negative/overflow, except `sleep-idle-seconds = -1`, which
+disables idle retention in the pinned build. Positive retention remains valid;
+zero and values below -1 are refused. Retention stays string-valued (`"-1"`).
 The single `llamaServingOptions` table derives native spellings/environment names
 from pinned llama.cpp `7fe450e1` `common/arg.cpp`. Unsupported batch/ubatch, KV
 type/SWA/attention/scaling, tensor/MoE/offload/loading placement, draft/projector
@@ -108,6 +110,50 @@ Other legacy launch behavior is unchanged. See
 [LAUNCH_TEXT.md](LAUNCH_TEXT.md#finite-llama-router-launch) for supported options
 and precedence, and [MANIFEST.md](MANIFEST.md#serving-declaration-override) for
 the declaration and artifact ordering.
+
+## Owned serving identity
+
+`engine:model-identity` carries whole engine snapshots. Each owned current run
+has `engineRunId`, `launchDigest`, `modelDigests`, and optional `serving`, a map
+from exact model ID to the shared path-free `ServingEnvelope`. Each envelope's
+`contentDigest` equals that model's `modelDigests` entry. Adopted and external
+runs publish no identity. Unconfigured engines retain inventory-based digests.
+
+NE content is SHA-256 of canonical JSON with version
+`pair-serving-content-v1` and ordered `artifacts` entries containing `role`,
+`sizeBytes`, and lowercase `sha256`. Order is the validated declaration/native
+shard order. Paths, stat timestamps, samples, model IDs and provenance labels
+are excluded. Explicit relocation/re-attestation preserves this aggregate
+content digest while changing the local launch/config identity. NE launch is
+SHA-256 of canonical JSON with version `pair-serving-launch-v1`, `launchDigest`
+(the existing executable-stat/argv/explicit-environment digest captured before
+snapshot rewriting), and `preparedDigest` (the approved compiler digest).
+Random snapshot generation directories never enter this hash.
+
+Only the owned launch-validated declaration produces these identities; native
+inventory cannot supply or restore NE digests. Full inventory watcher sweeps
+(60-second reconciliation and existing action pokes) validate the compiler and
+bounded file bindings outside state/content locks. On drift they latch a
+run-bound reason, publish an explicit empty `modelDigests` and omit `serving`;
+settings readback reports `mismatch`. Restored bytes or later inventory do not
+clear withdrawal. Successful explicit apply/start can clear it. A run/config
+replacement fences validation results from the preceding snapshot.
+
+The cold internal seam is
+`currentServingEnvelope(ctx context.Context, engine, model string) (engines.ServingEnvelope, engineModelIdentity, error)`.
+It requires the current owned run, exact declared model, matching approved
+compiler result and no latched drift. It performs bounded file validation
+outside locks and rechecks run/config before returning detached values. A
+`*ServingIdentityRefusal` reports refusal; it never probes, loads, or edits
+configuration. SR owns requested context/output/slot comparisons. The helper
+`servingRetentionDisabled` is true only for exact retention `"-1"`; SR 5b owns
+retention enforcement and capacity comparison against its revision-bound
+resident set. Declaration count is not the resident set.
+
+This identity does not establish loaded observations, qualification, strict
+readiness envelope enforcement, or plain direct-model output enforcement.
+Those remain separate gates. See [Local qualification](../../docs/local-qualification.mdx)
+for the operator digest and binding trust contract.
 
 ## Finite prepared Strata launch
 

@@ -282,6 +282,9 @@ func (e *Executor) bringUpProcessWithSnapshot(ctx context.Context, st *engineSta
 	}
 	var prepared *llamaServingLaunch
 	var releaseSnapshot func()
+	originalLaunch := launch
+	digest := launchDigest(launch)
+	baseDigest := digest
 	if serving {
 		prepared, err = compilePreparedServing(st, launch, rt, true)
 		if err != nil {
@@ -318,6 +321,7 @@ func (e *Executor) bringUpProcessWithSnapshot(ctx context.Context, st *engineSta
 		if err := recheckPreparedServing(st, launch, rt, prepared); err != nil {
 			return fmt.Errorf("NE source recheck: %w", err)
 		}
+		digest = servingLaunchDigest(originalLaunch, prepared.Digest)
 		launch = preparedSnapshotCommand(st, launch, snapshot)
 	}
 
@@ -352,11 +356,16 @@ func (e *Executor) bringUpProcessWithSnapshot(ctx context.Context, st *engineSta
 			release()
 		}()
 	}
-	digest := launchDigest(launch)
+	if !serving {
+		digest = launchDigest(launch)
+	}
 	st.mu.Lock()
 	st.proc = proc
 	st.launchDigest = digest
 	st.plat.Runtime.servingLaunch = prepared
+	st.plat.Runtime.servingCommand = originalLaunch
+	st.plat.Runtime.servingBaseDigest = baseDigest
+	st.plat.Runtime.servingDrift = ""
 	st.mu.Unlock()
 
 	readyCtx, readyCancel := context.WithCancel(ctx)
