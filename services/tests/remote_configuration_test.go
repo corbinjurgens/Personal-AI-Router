@@ -150,3 +150,46 @@ func TestXARemoteConfigurationConflict(t *testing.T) {
 	}
 	f.assertUnchanged(t, beforeRetry)
 }
+
+func TestXARemoteConfigurationVeto(t *testing.T) {
+	xaPlatform(t)
+	f := newPolicyJointFixture(t)
+
+	if !t.Run("relayed resume is vetoed", func(t *testing.T) {
+		before := assertStoredPolicy(t, f.path, f.want)
+		m := f.originCall(t, "engine:remote-availability-set", map[string]any{"state": "available"})
+		const message = "remote node policy: HTTP 409: this node was paused on the node itself; resume it there"
+		if m.Error == nil || m.Error.Code != -32011 || m.Error.Message != message || len(m.Result) != 0 {
+			t.Fatalf("relayed resume veto mismatch: error_present=%t result_bytes=%d", m.Error != nil, len(m.Result))
+		}
+		f.assertUnchanged(t, before)
+	}) {
+		return
+	}
+
+	if !t.Run("remote start is vetoed while paused", func(t *testing.T) {
+		task1Eventually(t, "remote start refused by local pause", 15*time.Second, func() bool {
+			m := callRPC(t, f.origin.in, f.origin.msgs, "engine:remote-start", map[string]any{"node": "policy-joint-target", "engine": "ollama"}, 30*time.Second)
+			return m.Error != nil && m.Error.Code == -32011
+		})
+	}) {
+		return
+	}
+
+	t.Run("local resume then local Off vetoes remote start", func(t *testing.T) {
+		local := callRPC(t, f.target.in, f.target.msgs, "node:set-availability", map[string]any{"state": "available"}, 15*time.Second)
+		if local.Error != nil {
+			t.Fatalf("local resume failed: code=%d", local.Error.Code)
+		}
+		c := subscribeOBIntent(t, f.target)
+		c.call(t, "engine:stop", map[string]string{"engine": "ollama"})
+		want := obIntent(false, map[string]engineintent.Origin{"ollama": engineintent.Local})
+		c.assertIntent(t, want)
+		task1Eventually(t, "remote start refused by local Off", 15*time.Second, func() bool {
+			m := callRPC(t, f.origin.in, f.origin.msgs, "engine:remote-start", map[string]any{"node": "policy-joint-target", "engine": "ollama"}, 30*time.Second)
+			return m.Error != nil && m.Error.Code == -32011
+		})
+		assertOBIntent(t, decodeOBIntent(t, c.call(t, "engine:intent", nil)), want)
+		assertOBStoredIntent(t, filepath.Join(jointAppDir(f.base), "engine-bin", "engine-state.json"), false, engineintent.Local)
+	})
+}
