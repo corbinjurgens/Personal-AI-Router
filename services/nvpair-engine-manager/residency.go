@@ -273,7 +273,7 @@ func (e *Executor) residentIdentity(p nodepolicy.ReconcileResidentParams) bool {
 	return found
 }
 
-func (e *Executor) residentCheck(p nodepolicy.ReconcileResidentParams) string {
+func (e *Executor) residentPrecheck(p nodepolicy.ReconcileResidentParams) string {
 	if p.Reservation.ManagerIncarnation != e.switchIncarnation {
 		return "unqualified"
 	}
@@ -326,6 +326,23 @@ func (e *Executor) residentCheck(p nodepolicy.ReconcileResidentParams) string {
 	if !e.residentIdentity(p) {
 		return "unqualified"
 	}
+	return ""
+}
+
+// Caller holds the engine lifecycle mutex. Cold configured envelopes bound a
+// load but establish neither observed allocation nor native resident support.
+func (e *Executor) residentCheck(p nodepolicy.ReconcileResidentParams) string {
+	if reason := e.residentPrecheck(p); reason != "" {
+		return reason
+	}
+	m, _ := e.reg.Get(p.Engine)
+	st, _ := e.state(p.Engine)
+	if st.plat.Runtime.Serving != nil {
+		readback := e.launchStateLocked(p.Engine, st).ServingReadback
+		if !residentConfiguredContext(p, m.ModelNamingOrDefault(), readback) {
+			return "unqualified"
+		}
+	}
 	if _, _, _, ok := e.residentLoadCall(p); !ok {
 		return "unsupported-load"
 	}
@@ -335,6 +352,25 @@ func (e *Executor) residentCheck(p nodepolicy.ReconcileResidentParams) string {
 		return "unsupported-load"
 	}
 	return ""
+}
+
+func residentConfiguredContext(p nodepolicy.ReconcileResidentParams, naming string, readback *engines.ServingReadback) bool {
+	if readback == nil {
+		return false
+	}
+	model := engines.NormalizeModelName(p.Model, naming)
+	count := 0
+	var bound int64
+	for _, envelope := range readback.Configured {
+		if engines.NormalizeModelName(envelope.ModelID, naming) == model {
+			count++
+			bound = envelope.PerSlotContextTokens
+		}
+	}
+	if count != 1 || bound <= 0 || uint64(bound) > uint64(^uint(0)>>1) {
+		return false
+	}
+	return nodepolicy.ValidateResidentContext(p.Load.ContextLength, int(bound)) == nil && int64(p.Load.ContextLength) == bound
 }
 
 // Join opMu without extending the caller's absolute deadline. A cancelled
@@ -375,7 +411,7 @@ func (e *Executor) executeResident(ctx context.Context, p nodepolicy.ReconcileRe
 		logRefusal(contextReason(), slog.LevelInfo)
 		return refused
 	}
-	if reason := e.residentCheck(p); reason != "" {
+	if reason := e.residentPrecheck(p); reason != "" {
 		logRefusal(reason, slog.LevelInfo)
 		return refused
 	}

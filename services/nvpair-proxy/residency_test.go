@@ -42,6 +42,109 @@ func residentHarness(t *testing.T, models ...string) (*admHarness, nodepolicy.Pr
 	return h, nodepolicy.PrepareResidentParams{PolicyRevision: "1", ProxyRunID: "proxy", ManagerIncarnation: "manager", Engine: "ollama", Model: models[0], Identity: strictRequest().Identity, OperationID: "resident:1", TimeoutMs: 10_000}
 }
 
+func TestResidentContextBoundPrepare(t *testing.T) {
+	test := func(name string, context, bound int, collision bool, wantGrant bool) {
+		t.Run(name, func(t *testing.T) {
+			h, in := residentHarness(t, "m:latest")
+			p := h.a.currentPolicy()
+			p.Profiles[0].ContextTokens = context
+			if collision {
+				alias := p.Profiles[0]
+				alias.Name, alias.Model = "alias", "m"
+				p.Profiles = append(p.Profiles, alias)
+			}
+			h.a.mu.Lock()
+			q := h.a.strict.registry[*p.Profiles[0].Qualification]
+			copy := *q
+			copy.ContextTokens = bound
+			h.a.strict.registry[*p.Profiles[0].Qualification] = &copy
+			h.a.mu.Unlock()
+			h.a.setPolicy(p)
+			result, err := h.a.prepareResident("proxy", in)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if wantGrant {
+				if result.ReservationID == "" || len(result.Refusals) != 0 || h.a.currentActive() != 1 {
+					t.Fatalf("expected counted grant: %+v, active=%d", result, h.a.currentActive())
+				}
+				if got := h.a.resident.ops[in.OperationID].context; got != context {
+					t.Fatalf("captured context=%d, want %d", got, context)
+				}
+				dispatchResidentOK(t, h.a, in, result)
+			} else {
+				if result.ReservationID != "" || len(result.Refusals) != 1 || result.Refusals[0].Reason != nodepolicy.ModelReasonUnqualified || h.a.currentActive() != 0 || len(h.a.inflight) != 0 {
+					t.Fatalf("expected uncounted refusal: %+v, active=%d inflight=%v", result, h.a.currentActive(), h.a.inflight)
+				}
+			}
+			if h.a.isLoaded(in.Engine, in.Model) || len(h.notes(nodepolicy.NotifyAdmissionUnload)) != 0 || len(h.notes(nodepolicy.NotifyAdmissionWake)) != 0 {
+				t.Fatal("context evaluation caused an engine effect")
+			}
+		})
+	}
+	test("exact bound", 4096, 4096, false, true)
+	test("bound plus one", 4097, 4096, false, false)
+	test("absent bound", 4096, 0, false, false)
+	test("negative bound", 4096, -1, false, false)
+	test("absent profile context", 0, 4096, false, false)
+	test("negative profile context", -1, 4096, false, false)
+	test("maximum integer", int(^uint(0)>>1), 4096, false, false)
+	test("below protocol ceiling above model limit", 8192, 4096, false, false)
+	test("normalized collision", 4096, 4096, true, false)
+}
+
+func TestResidentContextBoundPerModel(t *testing.T) {
+	h, in := residentHarness(t, "m:latest", "n:latest")
+	p := h.a.currentPolicy()
+	p.ResidentModels = append(p.ResidentModels, nodepolicy.Role{Engine: "ollama", Model: "n:latest"})
+	p.Profiles[1].ContextTokens = 2048
+	h.a.mu.Lock()
+	ref := *p.Profiles[1].Qualification
+	q := *h.a.strict.registry[ref]
+	q.ContextTokens = 2048
+	h.a.strict.registry[ref] = &q
+	h.a.mu.Unlock()
+	h.a.setPolicy(p)
+	first := prepareResidentOK(t, h.a, in)
+	dispatchResidentOK(t, h.a, in, first)
+	in.Model, in.OperationID = "n:latest", "resident:2"
+	second := prepareResidentOK(t, h.a, in)
+	dispatchResidentOK(t, h.a, in, second)
+	if h.a.resident.ops[in.OperationID].context != 2048 || h.a.currentActive() != 2 {
+		t.Fatal("model-specific bound was not captured independently")
+	}
+}
+
+func TestResidentContextBoundRevalidation(t *testing.T) {
+	test := func(name string, mutate func(*admissionController, admKey)) {
+		t.Run(name, func(t *testing.T) {
+			h, in := residentHarness(t, "m:latest")
+			prepared := prepareResidentOK(t, h.a, in)
+			h.a.mu.Lock()
+			// Deliberately replace evidence without a refresh signal: final grant
+			// must itself revalidate, rather than rely only on generation updates.
+			mutate(h.a, admKey{in.Engine, in.Model})
+			h.a.mu.Unlock()
+			result, err := h.a.dispatchResident("proxy", residentDispatch(in, prepared))
+			if err != nil || result.Dispatched || result.Reason != nodepolicy.DispatchReasonReservationRevoked || h.a.currentActive() != 0 || len(h.a.inflight) != 0 {
+				t.Fatalf("stale context grant=%+v error=%v active=%d", result, err, h.a.currentActive())
+			}
+			if len(h.notes(nodepolicy.NotifyAdmissionUnload)) != 0 || len(h.notes(nodepolicy.NotifyAdmissionWake)) != 0 || h.a.isLoaded(in.Engine, in.Model) {
+				t.Fatal("revoked context caused an engine effect")
+			}
+		})
+	}
+	test("profile replacement still below qualification", func(a *admissionController, _ admKey) {
+		a.policy.Profiles[0].ContextTokens = 2048
+	})
+	test("qualification replacement below profile", func(a *admissionController, k admKey) {
+		ref := *a.policy.Profiles[0].Qualification
+		q := *a.strict.registry[ref]
+		q.ContextTokens = 2048
+		a.strict.registry[ref] = &q
+	})
+}
+
 func prepareResidentOK(t *testing.T, a *admissionController, in nodepolicy.PrepareResidentParams) nodepolicy.PrepareResidentResult {
 	t.Helper()
 	result, err := a.prepareResident("proxy", in)

@@ -34,6 +34,7 @@ type residentHold struct {
 	identity     nodepolicy.EngineIdentity
 	generation   uint64
 	memory       int64
+	context      int
 	deadline     time.Time
 	counted      bool
 	dispatched   bool
@@ -85,10 +86,37 @@ func (a *admissionController) residentPermissionLocked(k admKey) nodepolicy.Mode
 	if _, ok := a.strict.models[k]; !ok || a.strict.storageErr != nil {
 		return nodepolicy.ModelReasonUnqualified
 	}
+	if _, ok := a.residentContextLocked(k); !ok {
+		return nodepolicy.ModelReasonUnqualified
+	}
 	if _, unloading := a.unloadSentAt[k]; unloading {
 		return nodepolicy.ModelReasonSwitchBusy
 	}
 	return ""
+}
+
+// Resolve a unique normalized profile against the current local qualification.
+// Caller holds the admission mutex; a global protocol ceiling is not a bound.
+func (a *admissionController) residentContextLocked(k admKey) (int, bool) {
+	policy := a.policy
+	policy.Profiles = append([]nodepolicy.Profile(nil), policy.Profiles...)
+	count := 0
+	for i := range policy.Profiles {
+		pr := &policy.Profiles[i]
+		pr.Model = a.normalize(pr.Engine, pr.Model)
+		if pr.Engine == k.engine && pr.Model == k.model {
+			count++
+		}
+	}
+	pr, ok := policy.ProfileFor(k.engine, k.model)
+	if !ok || count != 1 || pr.Qualification == nil {
+		return 0, false
+	}
+	_, q, ok := a.qualifiedModelLocked(k, pr)
+	if !ok || nodepolicy.ValidateResidentContext(pr.ContextTokens, q.ContextTokens) != nil {
+		return 0, false
+	}
+	return pr.ContextTokens, true
 }
 
 // Validate the whole desired set before reserving any member. Use the same
@@ -191,6 +219,7 @@ func (a *admissionController) prepareResident(run string, in nodepolicy.PrepareR
 	if reason != "" {
 		hold.result.Refusals = []nodepolicy.ResidentRefusal{{Engine: in.Engine, Model: in.Model, Reason: reason}}
 	} else {
+		hold.context, _ = a.residentContextLocked(k)
 		id := a.strict.identity[in.Engine]
 		hold.identity = id
 		hold.identity.ModelDigests = make(map[string]string, len(id.ModelDigests))
@@ -218,7 +247,8 @@ func (a *admissionController) prepareResident(run string, in nodepolicy.PrepareR
 }
 
 func (a *admissionController) residentBindingCurrentLocked(h *residentHold) bool {
-	return h.request.PolicyRevision == a.policy.Revision && a.strict.generation[h.key] == h.generation &&
+	context, ok := a.residentContextLocked(h.key)
+	return ok && context == h.context && h.request.PolicyRevision == a.policy.Revision && a.strict.generation[h.key] == h.generation &&
 		reflect.DeepEqual(h.identity, a.strict.identity[h.key.engine]) && a.residentPermissionLocked(h.key) == ""
 }
 

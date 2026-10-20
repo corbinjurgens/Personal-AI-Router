@@ -14,6 +14,30 @@ import (
 	"nvpair-shared/engines"
 )
 
+func TestResidentContextBound(t *testing.T) {
+	var maximum int
+	if err := json.Unmarshal([]byte(fmt.Sprint(int(^uint(0)>>1))), &maximum); err != nil {
+		t.Fatal(err)
+	}
+	test := func(name string, request, bound int, wantError bool) {
+		t.Run(name, func(t *testing.T) {
+			if err := ValidateResidentContext(request, bound); (err != nil) != wantError {
+				t.Fatalf("ValidateResidentContext(%d, %d) = %v, want error %v", request, bound, err, wantError)
+			}
+		})
+	}
+	test("exact bound", 4096, 4096, false)
+	test("below bound", 2048, 4096, false)
+	test("bound plus one", 4097, 4096, true)
+	test("absent bound", 4096, 0, true)
+	test("negative bound", 4096, -1, true)
+	test("absent request", 0, 4096, true)
+	test("negative request", -1, 4096, true)
+	test("maximum decoded request", maximum, 4096, true)
+	test("maximum exact bound without overflow", maximum, maximum, false)
+	test("below protocol ceiling above model bound", 8192, 4096, true)
+}
+
 func servedResidentPolicy() Policy {
 	p := Default()
 	p.ServedModels = ServedModels{{Engine: "ollama", Model: "m"}}

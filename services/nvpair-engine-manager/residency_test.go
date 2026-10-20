@@ -196,6 +196,67 @@ func (f *residentFixture) noCalls(t *testing.T) {
 	}
 }
 
+func TestResidentContextBoundConfigured(t *testing.T) {
+	test := func(name string, context int, envelopes []engines.ServingEnvelope, want bool) {
+		t.Run(name, func(t *testing.T) {
+			p := nodepolicy.ReconcileResidentParams{Model: "m", Load: nodepolicy.ResidentLoadOptions{ContextLength: context}}
+			readback := &engines.ServingReadback{Configured: envelopes}
+			if got := residentConfiguredContext(p, engines.ModelNamingImpliedLatestTag, readback); got != want {
+				t.Fatalf("configured context accepted=%v, want %v", got, want)
+			}
+		})
+	}
+	bound := []engines.ServingEnvelope{{ModelID: "m:latest", PerSlotContextTokens: 4096}}
+	test("exact native bound", 4096, bound, true)
+	test("bound plus one", 4097, bound, false)
+	test("smaller profile cannot shrink native allocation", 2048, bound, false)
+	test("absent bound", 4096, nil, false)
+	test("zero bound", 4096, []engines.ServingEnvelope{{ModelID: "m", PerSlotContextTokens: 0}}, false)
+	test("negative bound", 4096, []engines.ServingEnvelope{{ModelID: "m", PerSlotContextTokens: -1}}, false)
+	test("zero request", 0, bound, false)
+	test("negative request", -1, bound, false)
+	test("maximum integer request", int(^uint(0)>>1), bound, false)
+	test("below protocol ceiling above model limit", 8192, bound, false)
+	test("normalized collision", 4096, append(append([]engines.ServingEnvelope{}, bound...), engines.ServingEnvelope{ModelID: "m", PerSlotContextTokens: 4096}), false)
+	test("different per-model bounds", 4096, append(append([]engines.ServingEnvelope{}, bound...), engines.ServingEnvelope{ModelID: "other", PerSlotContextTokens: 2048}), true)
+	test("another model cannot supply bound", 4096, []engines.ServingEnvelope{{ModelID: "other", PerSlotContextTokens: 4096}}, false)
+	test("largest int64 native bound", 4096, []engines.ServingEnvelope{{ModelID: "m", PerSlotContextTokens: 1<<63 - 1}}, false)
+	if residentConfiguredContext(nodepolicy.ReconcileResidentParams{}, "", nil) {
+		t.Fatal("missing cold readback accepted")
+	}
+}
+
+func TestResidentContextBoundColdPreflight(t *testing.T) {
+	test := func(name string, context int, wantReason string) {
+		t.Run(name, func(t *testing.T) {
+			cold := newLlamaServingFixture(t)
+			applyLlamaServing(t, cold, approveLlamaServing(t, cold))
+			f := newResidentFixture(t)
+			st := f.ex.engines["ollama"]
+			st.manifest.Family = "llamacpp"
+			st.plat = settingsState(t, cold.ex).plat
+			st.binPath = fakeEngineBin
+			// Synthetic installed content/run identity; no engine is started.
+			f.ex.storeInventory(map[string][]string{"ollama": {"medium:latest"}}, map[string]observedDigests{"ollama": {runID: st.runID, models: map[string]string{"medium:latest": f.p.Identity.ModelDigest}}}, 2)
+			f.p.Model, f.p.Load.ContextLength = "medium:latest", context
+			st.opMu.Lock()
+			reason := f.ex.residentCheck(f.p)
+			st.opMu.Unlock()
+			if reason != wantReason {
+				t.Fatalf("cold preflight=%q, want %q", reason, wantReason)
+			}
+			if result := f.run(t); result.Outcome != nodepolicy.ResidentNotDispatched || f.dispatches != 0 {
+				t.Fatalf("native resident execution escaped restriction: %+v, grants=%d", result, f.dispatches)
+			}
+			f.noCalls(t)
+			assertNoLlamaSpawn(t, cold)
+		})
+	}
+	test("exact cold allocation still unsupported", 8192, "unsupported-load")
+	test("native allocation above requested profile", 4096, "unqualified")
+	test("request exceeds cold allocation", 8193, "unqualified")
+}
+
 func TestResidentLoadMappingAndObservation(t *testing.T) {
 	f := newResidentFixture(t)
 	f.grant = func(req residentDispatchRequest) {

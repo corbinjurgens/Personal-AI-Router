@@ -634,6 +634,15 @@ func (pr Profile) validateOutputAndQualification() error {
 // IsTier reports whether a request's model field names a tier.
 func IsTier(model string) bool { return slices.Contains(TierOrder, model) }
 
+// ValidateResidentContext compares a requested allocation with its finite,
+// model-specific context bound. Policy declarations alone do not supply evidence.
+func ValidateResidentContext(contextLength, qualifiedContextTokens int) error {
+	if contextLength <= 0 || qualifiedContextTokens <= 0 || contextLength > qualifiedContextTokens {
+		return errors.New("resident context must be positive and within the model context bound")
+	}
+	return nil
+}
+
 // ProfileFor returns the profile covering (engine, model), if any. model must
 // already be normalized the way the engine names it.
 func (p Policy) ProfileFor(engine, model string) (Profile, bool) {
