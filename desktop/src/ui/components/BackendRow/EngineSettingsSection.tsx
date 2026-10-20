@@ -46,6 +46,7 @@ interface Draft {
     serverPort: string
     proxyPort: string
     launchText: string
+    serving?: EngineSettingsConfig['serving']
 }
 const asDraft = (config: EngineSettingsConfig): Draft => ({
     ...config,
@@ -126,7 +127,7 @@ export function EngineSettingsSection({
         }
     }, [snapshot, base, dirty])
 
-    function change(field: keyof Draft, value: string): void {
+    function change(field: 'serverPort' | 'proxyPort' | 'launchText', value: string): void {
         generation.current++
         if (field === 'serverPort') serverPortEdited.current = true
         setDraft(current => ({ ...current, [field]: value }))
@@ -159,7 +160,12 @@ export function EngineSettingsSection({
         const request: EngineSettingsRequest = {
             ...target,
             expectedRevision: base.revision,
-            settings: { serverPort, proxyPort, launchText: draft.launchText },
+            settings: {
+                serverPort,
+                proxyPort,
+                launchText: draft.launchText,
+                ...(draft.serving ? { serving: draft.serving } : {})
+            },
             resolution: useServerPort ? 'server' : 'launch'
         }
         try {

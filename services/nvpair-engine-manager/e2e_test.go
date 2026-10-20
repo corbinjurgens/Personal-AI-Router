@@ -6,6 +6,8 @@ package main
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	settings "nvpair-shared/enginesettings"
 	"nvpair-shared/nodepolicy"
@@ -236,10 +238,28 @@ func TestE2EPrepareShutdownCancelsStartingEngine(t *testing.T) {
 }
 
 type e2eManager struct {
-	cmd     *exec.Cmd
-	stdin   io.WriteCloser
-	frames  chan frame
-	stopped bool
+	cmd        *exec.Cmd
+	stdin      io.WriteCloser
+	frames     chan frame
+	readerDone chan struct{}
+	stopped    bool
+}
+
+func TestE2EShutdownDrainsSaturatedFrames(t *testing.T) {
+	manager := startE2EManager(t, t.TempDir(), t.TempDir())
+	// Unknown requests return frames without detecting or starting any engine.
+	for id := 1; id <= 256; id++ {
+		send(t, manager.stdin, id, "unknown-saturation-request", nil)
+	}
+	deadline := time.After(5 * time.Second)
+	for len(manager.frames) != cap(manager.frames) {
+		select {
+		case <-deadline:
+			t.Fatal("frame queue did not saturate")
+		case <-time.After(time.Millisecond):
+		}
+	}
+	manager.stop(t)
 }
 
 func startE2EManager(t *testing.T, cfg, home string, args ...string) *e2eManager {
@@ -257,17 +277,17 @@ func startE2EManager(t *testing.T, cfg, home string, args ...string) *e2eManager
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
-	manager := &e2eManager{cmd: cmd, stdin: stdin, frames: make(chan frame, 128)}
+	manager := &e2eManager{cmd: cmd, stdin: stdin, frames: make(chan frame, 128), readerDone: make(chan struct{})}
 	t.Cleanup(func() {
 		if !manager.stopped {
-			_ = manager.stdin.Close()
-			_ = manager.cmd.Process.Kill()
-			_ = manager.cmd.Wait()
+			manager.stopped = true
+			_ = manager.shutdown()
 		}
 	})
 	// This parent explicitly acts as a broker that confirms model withdrawal.
 	// Consume internal requests before exposing ordinary frames to the test.
 	go func() {
+		defer close(manager.readerDone)
 		sc := bufio.NewScanner(stdout)
 		sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 		for sc.Scan() {
@@ -308,18 +328,41 @@ func (m *e2eManager) stop(t *testing.T) {
 		return
 	}
 	m.stopped = true
+	if err := m.shutdown(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// shutdown closes stdin and reaps the manager. Wait closes the stdout pipe,
+// so it runs only after the frame reader reaches EOF; a reader still
+// scanning would report a closed file.
+func (m *e2eManager) shutdown() error {
 	_ = m.stdin.Close()
+	deadline := time.After(10 * time.Second)
+	reading := true
+	for reading {
+		select {
+		case <-m.frames:
+		case <-m.readerDone:
+			reading = false
+		case <-deadline:
+			_ = m.cmd.Process.Kill()
+			_ = m.cmd.Wait()
+			return errors.New("manager stdout stayed open after stdin closed")
+		}
+	}
 	done := make(chan error, 1)
 	go func() { done <- m.cmd.Wait() }()
 	select {
 	case err := <-done:
 		if err != nil {
-			t.Fatalf("manager exit: %v", err)
+			return fmt.Errorf("manager exit: %w", err)
 		}
-	case <-time.After(10 * time.Second):
+		return nil
+	case <-deadline:
 		_ = m.cmd.Process.Kill()
 		<-done
-		t.Fatal("manager did not exit after stdin closed")
+		return errors.New("manager did not exit after stdin closed")
 	}
 }
 

@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"reflect"
 	"time"
 
 	settings "nvpair-shared/enginesettings"
@@ -24,15 +25,15 @@ func (b *Broker) migrateSettingsArgumentsLocked(ctx context.Context, engine stri
 	}
 	var preview settings.Preview
 	if err := b.settingsWorkerCall(ctx, "engine:preview-launch", settings.Request{
-		Engine: engine, Settings: record.Snapshot.Settings, Format: "pair-launch-v1",
+		Engine: engine, Settings: record.Snapshot.Settings.Clone(), Format: "pair-launch-v1",
 	}, &preview); err != nil {
 		return err
 	}
 	if len(preview.Errors) != 0 || preview.Conflict != nil {
 		return fmt.Errorf("saved full-command settings could not be converted; existing settings were preserved")
 	}
-	previous := record.Snapshot
-	record.Snapshot.Settings = preview.Settings
+	previous := record.Snapshot.Clone()
+	record.Snapshot.Settings = preview.Settings.Clone()
 	record.Snapshot.Format = "pair-arguments-v1"
 	record.Snapshot.Revision++
 	if previous.AppliedRevision == previous.Revision {
@@ -56,7 +57,7 @@ func (b *Broker) explicitEngineSettingsLocked(engine string) (settings.Config, b
 		return settings.Config{}, false
 	}
 	if record := b.engineSettings[engine]; record != nil && record.Explicit {
-		return record.Snapshot.Settings, true
+		return record.Snapshot.Settings.Clone(), true
 	}
 	return settings.Config{}, false
 }
@@ -124,7 +125,7 @@ func (b *Broker) migrateLegacyEngineSettings() {
 			cancel()
 			continue
 		}
-		config := settings.Config{ServerPort: launch.ServerPort, ProxyPort: saved.Port, LaunchText: launch.LaunchText}
+		config := settings.ConfigFromLaunch(launch, saved.Port)
 		current := settings.Snapshot{Running: launch.Running, EffectiveServerPort: launch.EffectivePort}
 		if proxy := b.settingsProxy(engine); proxy != nil {
 			_, current.EffectiveProxyPort = proxy.Status(engine)
@@ -134,7 +135,7 @@ func (b *Broker) migrateLegacyEngineSettings() {
 		if err != nil {
 			continue
 		}
-		b.engineSettings[engine] = &engineSettingsRecord{Explicit: true, Receipts: map[string]settingsReceipt{}, Snapshot: settings.Snapshot{NodeID: b.nodeID, Engine: engine, Revision: 1, AppliedRevision: 1, Epoch: b.engineSettingsEpoch, Phase: "idle", Settings: settings.Config{ServerPort: launch.ServerPort, ProxyPort: saved.Port, LaunchText: launch.LaunchText}}}
+		b.engineSettings[engine] = &engineSettingsRecord{Explicit: true, Receipts: map[string]settingsReceipt{}, Snapshot: settings.Snapshot{NodeID: b.nodeID, Engine: engine, Revision: 1, AppliedRevision: 1, Epoch: b.engineSettingsEpoch, Phase: "idle", Settings: config.Clone()}}
 		if err := b.saveEngineSettingsLocked(); err != nil {
 			delete(b.engineSettings, engine)
 			b.engineSettingsError = err
@@ -182,9 +183,9 @@ func (b *Broker) reconcileLegacySettingsLocked() {
 	defer cancel()
 	changed := false
 	for engine, record := range b.engineSettings {
-		before := record.Snapshot
+		before := record.Snapshot.Clone()
 		after, err := b.settingsSnapshotLocked(ctx, engine)
-		if err == nil && before != after {
+		if err == nil && !reflect.DeepEqual(before, after) {
 			changed = true
 		}
 	}

@@ -9,15 +9,19 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
 	"runtime"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"nvpair-shared/engines"
 	settings "nvpair-shared/enginesettings"
 )
 
@@ -68,7 +72,203 @@ func settingsRequest(t *testing.T, e *Executor) settings.Request {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return settings.Request{Engine: "fake", Settings: settings.Config{ServerPort: s.ServerPort, ProxyPort: 54301, LaunchText: s.LaunchText}}
+	return settings.Request{Engine: "fake", Settings: settings.ConfigFromLaunch(s, 54301)}
+}
+
+func servingSettingsFixture() *engines.ServingConfig {
+	ram, vram := int64(4096), int64(0)
+	return &engines.ServingConfig{Version: 1, Models: []engines.ServingModel{{ModelID: "exact/model", MaxOutputTokens: 128, Memory: engines.ServingMemory{HostRAMBytes: &ram, VRAMBytes: &vram}, Artifacts: []engines.ServingArtifact{{Role: "model", SHA256: strings.Repeat("a", 64), Provenance: engines.ServingProvenance{Kind: "supplied-sha256"}, Binding: &engines.ServingBinding{SourcePath: "synthetic-link", ResolvedTarget: "synthetic-target", SizeBytes: 64, MtimeNS: "1729000000000000001", SampleSHA256: strings.Repeat("b", 64)}}}}}}
+}
+
+func TestServingOverridesRejectInvalidDeclarations(t *testing.T) {
+	test := func(name, field string, mutate func(*engines.ServingConfig)) {
+		t.Run(name, func(t *testing.T) {
+			reg := NewRegistry()
+			base, err := json.Marshal(testEngineManifest(fakeEngineBin))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := reg.addManifest("bundled fake", base); err != nil {
+				t.Fatal(err)
+			}
+			reg.bundledRaw["fake"] = base
+			before, _ := reg.Get("fake")
+			serving := servingSettingsFixture()
+			mutate(serving)
+			override, err := json.Marshal(map[string]any{"engine": "fake", "runtime": map[string]any{"serving": serving}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			merged, err := reg.mergeOntoBundled(override)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := reg.addManifest("invalid override", merged); err == nil || !strings.Contains(err.Error(), field) {
+				t.Fatalf("diagnostic = %v, want field %s", err, field)
+			}
+			dir := t.TempDir()
+			path := filepath.Join(dir, "fake.json")
+			if err := os.WriteFile(path, override, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := reg.LoadOverrideDir(dir); err != nil {
+				t.Fatal(err)
+			}
+			after, _ := reg.Get("fake")
+			if after != before {
+				t.Fatal("invalid override replaced bundled manifest")
+			}
+			stored, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(stored, override) {
+				t.Fatal("loading rewrote invalid settings")
+			}
+		})
+	}
+	test("unknown version", "serving.version", func(c *engines.ServingConfig) { c.Version = 999; c.Models = nil })
+	test("duplicate model", "serving.models.1.modelId", func(c *engines.ServingConfig) { c.Models = append(c.Models, c.Models[0]) })
+	test("malformed digest", "serving.models.0.artifacts.0.sha256", func(c *engines.ServingConfig) { c.Models[0].Artifacts[0].SHA256 = "bad" })
+	test("missing memory domain", "serving.models.0.memory.vramBytes", func(c *engines.ServingConfig) { c.Models[0].Memory.VRAMBytes = nil })
+	test("invalid bound", "serving.models.0.maxOutputTokens", func(c *engines.ServingConfig) { c.Models[0].MaxOutputTokens = -1 })
+}
+
+func TestServingNumericErrorsThroughPreviewRPC(t *testing.T) {
+	fields := []struct{ literal, field string }{
+		{`"version":1`, "serving.version"},
+		{`"maxOutputTokens":128`, "serving.models.0.maxOutputTokens"},
+		{`"hostRamBytes":4096`, "serving.models.0.memory.hostRamBytes"},
+		{`"vramBytes":0`, "serving.models.0.memory.vramBytes"},
+		{`"sizeBytes":64`, "serving.models.0.artifacts.0.binding.sizeBytes"},
+	}
+	for _, field := range fields {
+		for _, number := range []string{"9223372036854775808", "1.5"} {
+			t.Run(field.field+"/"+number, func(t *testing.T) {
+				e := settingsExecutor(t, false)
+				request := settingsRequest(t, e)
+				request.Settings.Serving = servingSettingsFixture()
+				data, err := json.Marshal(request)
+				if err != nil {
+					t.Fatal(err)
+				}
+				key, _, _ := strings.Cut(field.literal, ":")
+				raw := strings.Replace(string(data), field.literal, key+":"+number, 1)
+				if raw == string(data) {
+					t.Fatal("numeric fixture was not replaced")
+				}
+				reader, writer := net.Pipe()
+				t.Cleanup(func() { _ = reader.Close(); _ = writer.Close() })
+				if err := reader.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+					t.Fatal(err)
+				}
+				manager := NewManager(NewCodec(writer), e, nil, "")
+				id := json.RawMessage("1")
+				manager.handleMessage(context.Background(), &Message{JSONRPC: "2.0", ID: &id, Method: "engine:preview-launch", Params: json.RawMessage(raw)})
+				var reply Message
+				if err := json.NewDecoder(reader).Decode(&reply); err != nil {
+					t.Fatal(err)
+				}
+				if reply.Error != nil {
+					t.Fatalf("preview RPC failed: %+v", reply.Error)
+				}
+				var preview settings.Preview
+				if err := json.Unmarshal(reply.Result, &preview); err != nil {
+					t.Fatal(err)
+				}
+				if preview.Errors[field.field] == "" {
+					t.Fatalf("missing field error: %+v", preview.Errors)
+				}
+				assertNoSettingsOverride(t, e)
+			})
+		}
+	}
+}
+
+func TestSettingsServingPreviewApplyAndUnrelatedEdit(t *testing.T) {
+	e := settingsExecutor(t, false)
+	p := settingsRequest(t, e)
+	p.Settings.Serving = servingSettingsFixture()
+	preview := previewSettings(t, e, p)
+	if len(preview.Errors) != 0 || !preview.Settings.Serving.Equal(p.Settings.Serving) || preview.Serving == nil || preview.Serving.Status != "unverified" || len(preview.Serving.LaunchValidated) != 0 || len(preview.Serving.Observed) != 0 {
+		t.Fatal("preview lost declaration or claimed runtime verification")
+	}
+	assertNoSettingsOverride(t, e)
+	launch, err := e.ConfigureLaunch(context.Background(), settings.Configure{Engine: "fake", Settings: preview.Settings}, func() error { return nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !launch.Serving.Equal(p.Settings.Serving) || !readSettingsOverride(t, e).Serving.Equal(p.Settings.Serving) {
+		t.Fatal("apply did not persist declaration")
+	}
+	p = settingsRequest(t, e)
+	p.Settings.LaunchText += " --unrelated"
+	_, err = e.ConfigureLaunch(context.Background(), settings.Configure{Engine: "fake", Settings: p.Settings}, func() error { return fmt.Errorf("synthetic bind failure") })
+	if err == nil {
+		t.Fatal("expected failed apply")
+	}
+	if !readSettingsOverride(t, e).Serving.Equal(p.Settings.Serving) {
+		t.Fatal("failed unrelated edit erased serving")
+	}
+	got, err := e.LaunchSettings("fake")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got.Serving.Models[0].Artifacts[0].Binding.MtimeNS = "1"
+	if settingsState(t, e).plat.Runtime.Serving.Models[0].Artifacts[0].Binding.MtimeNS == "1" {
+		t.Fatal("launch readback aliases runtime")
+	}
+}
+
+func TestSettingsServingDuplicateRejectedBeforeEffects(t *testing.T) {
+	e := settingsExecutor(t, true)
+	st := settingsState(t, e)
+	stopMarker := filepath.Join(t.TempDir(), "stop-marker")
+	st.plat.Runtime.Stop = &StopSpec{Cmd: []string{fakeEngineBin, "touch", stopMarker}}
+	var probes atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { probes.Add(1); w.WriteHeader(http.StatusOK) }))
+	t.Cleanup(server.Close)
+	st.plat.Runtime.Ready = &Probe{HTTP: server.URL}
+	p := settingsRequest(t, e)
+	p.Settings.Serving = servingSettingsFixture()
+	p.Settings.Serving.Models = append(p.Settings.Serving.Models, p.Settings.Serving.Models[0])
+	st.mu.Lock()
+	st.running = true
+	st.adopted = true
+	st.mu.Unlock()
+	t.Cleanup(func() { st.mu.Lock(); st.running = false; st.adopted = false; st.mu.Unlock() })
+	preview := previewSettings(t, e, p)
+	if preview.Errors["serving.models.1.modelId"] == "" {
+		t.Error("duplicate declaration has no field error")
+	}
+	if _, err := e.ConfigureLaunch(context.Background(), settings.Configure{Engine: "fake", Settings: p.Settings}, func() error { t.Error("invalid serving rebound proxy"); return nil }); err == nil {
+		t.Error("invalid serving applied")
+	}
+	if _, err := os.Stat(stopMarker); !os.IsNotExist(err) {
+		t.Fatal("invalid declaration invoked stop")
+	}
+	if probes.Load() != 0 {
+		t.Fatal("invalid declaration probed engine")
+	}
+	assertNoSettingsOverride(t, e)
+}
+
+func TestSettingsServingChangeRequiresRestart(t *testing.T) {
+	e := settingsExecutor(t, false)
+	st := settingsState(t, e)
+	st.plat.Runtime.Serving = servingSettingsFixture()
+	p := settingsRequest(t, e)
+	st.mu.Lock()
+	st.running = true
+	st.mu.Unlock()
+	t.Cleanup(func() { st.mu.Lock(); st.running = false; st.mu.Unlock() })
+	if previewSettings(t, e, p).Restart {
+		t.Fatal("equivalent serving restarts")
+	}
+	p.Settings.Serving.Models[0].MaxOutputTokens++
+	if !previewSettings(t, e, p).Restart {
+		t.Fatal("changed serving launch record did not require restart")
+	}
 }
 
 // eachEngineMode runs test against both Runtime.Mode lifecycles: "process",

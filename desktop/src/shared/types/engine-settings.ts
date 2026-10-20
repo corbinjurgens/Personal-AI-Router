@@ -6,6 +6,64 @@ export interface EngineSettingsConfig {
     proxyPort: number
     /** Arguments and leading environment assignments, without an executable/subcommand. */
     launchText: string
+    serving?: EngineServingConfig
+}
+
+type ServingMemory = {
+    hostRamBytes: number
+    vramBytes: number
+}
+
+type ServingArtifact = {
+    role: string
+    sha256: string
+    provenance: { kind: string; reference?: string }
+    binding?: {
+        sourcePath: string
+        resolvedTarget: string
+        sizeBytes: number
+        /** Decimal int64 text, preserving nanoseconds without rounding. */
+        mtimeNs: string
+        sampleSha256: string
+    }
+}
+
+export type EngineServingConfig = {
+    version: 1
+    models: Array<{
+        modelId: string
+        maxOutputTokens: number
+        memory: ServingMemory
+        artifacts: ServingArtifact[]
+        expectedNativeSourceDigest?: string
+    }>
+}
+
+type ServingEnvelope = {
+    modelId: string
+    perSlotContextTokens: number
+    totalContextTokens: number
+    slots: number
+    maxOutputTokens: number
+    memory: ServingMemory
+    nativeSourceDigest: string
+    placement?: string[]
+    retention?: string
+    routerCapacity?: number
+}
+
+export type EngineServingReadback = {
+    status:
+        | 'unconfigured'
+        | 'unverified'
+        | 'configured'
+        | 'launchValidated'
+        | 'observed'
+        | 'mismatch'
+    reason?: string
+    configured?: ServingEnvelope[]
+    launchValidated?: ServingEnvelope[]
+    observed?: Array<{ modelId: string; perSlotContextTokens: number; slots: number }>
 }
 
 import type { EngineManagerName } from '@/shared/types/engines'
@@ -24,6 +82,7 @@ export interface EngineSettingsRequest extends EngineSettingsTarget {
 }
 
 export interface EngineSettingsSnapshot extends EngineSettingsTarget {
+    serving?: EngineServingReadback
     revision: number
     appliedRevision: number
     sequence: number
@@ -42,6 +101,7 @@ export interface EngineSettingsSnapshot extends EngineSettingsTarget {
 }
 
 export interface EngineSettingsPreview {
+    serving?: EngineServingReadback
     settings: EngineSettingsConfig
     revision: number
     conflict?: { serverPort: number; launchPort: number }
