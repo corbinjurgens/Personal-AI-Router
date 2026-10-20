@@ -11,9 +11,155 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	"nvpair-shared/engines"
 )
+
+// Egress lease RPCs are trusted-parent process control, never client commands,
+// peer policy, engine-manager relays, desktop fields or persisted policy.
+const (
+	MethodRenewEgressLease     = "node/renew-egress-lease"
+	MethodRevokeEgressLease    = "node/revoke-egress-lease"
+	MaxEgressLeaseDuration     = 5 * time.Second
+	EgressLeaseRenewalInterval = time.Second
+)
+
+// RenewEgressLeaseParams binds a grant to one proxy run and active revision.
+// Sequence is a canonical positive decimal bounded by signed 64-bit maximum.
+// It increases for every renewal and withdrawal without wrapping; the receiver
+// retains its high-water across revision changes and withdrawals for its run.
+// NotAfterNanos is a canonical nonnegative decimal in the proxy's monotonic
+// clock domain. Zero is exclusively anchor-only: validate the binding, advance
+// sequence and sample the clock without changing existing authority. A grant
+// expires at now >= notAfter, with no grace, and may last at most five seconds.
+type RenewEgressLeaseParams struct {
+	RunID         string `json:"runId"`
+	Revision      string `json:"revision"`
+	Sequence      string `json:"sequence"`
+	NotAfterNanos string `json:"notAfterNanos"`
+}
+
+func (p RenewEgressLeaseParams) Validate() error {
+	if err := validateEgressLeaseBinding(p.RunID, p.Sequence); err != nil {
+		return err
+	}
+	if err := validateRevision(p.Revision); err != nil {
+		return err
+	}
+	return validateEgressLeaseDecimal("notAfterNanos", p.NotAfterNanos, false)
+}
+
+func (p *RenewEgressLeaseParams) UnmarshalJSON(data []byte) error {
+	type plain RenewEgressLeaseParams
+	var next plain
+	if err := decodeResident(data, &next, []string{"runId", "revision", "sequence", "notAfterNanos"}); err != nil {
+		return err
+	}
+	if err := RenewEgressLeaseParams(next).Validate(); err != nil {
+		return err
+	}
+	*p = RenewEgressLeaseParams(next)
+	return nil
+}
+
+// RenewEgressLeaseResult echoes the renewal binding and always samples the
+// proxy's monotonic clock, including anchor-only renewals. It does not activate
+// policy: only PolicyAck can acknowledge activation.
+type RenewEgressLeaseResult struct {
+	RunID    string `json:"runId"`
+	Revision string `json:"revision"`
+	Sequence string `json:"sequence"`
+	NowNanos string `json:"nowNanos"`
+}
+
+func (r RenewEgressLeaseResult) Validate() error {
+	if err := validateEgressLeaseBinding(r.RunID, r.Sequence); err != nil {
+		return err
+	}
+	if err := validateRevision(r.Revision); err != nil {
+		return err
+	}
+	return validateEgressLeaseDecimal("nowNanos", r.NowNanos, false)
+}
+
+func (r *RenewEgressLeaseResult) UnmarshalJSON(data []byte) error {
+	type plain RenewEgressLeaseResult
+	var next plain
+	if err := decodeResident(data, &next, []string{"runId", "revision", "sequence", "nowNanos"}); err != nil {
+		return err
+	}
+	if err := RenewEgressLeaseResult(next).Validate(); err != nil {
+		return err
+	}
+	*r = RenewEgressLeaseResult(next)
+	return nil
+}
+
+// RevokeEgressLeaseParams withdraws authority independently of policy revision.
+// Its sequence shares the renewal high-water for this process incarnation.
+type RevokeEgressLeaseParams struct {
+	RunID    string `json:"runId"`
+	Sequence string `json:"sequence"`
+}
+
+func (p RevokeEgressLeaseParams) Validate() error {
+	return validateEgressLeaseBinding(p.RunID, p.Sequence)
+}
+
+func (p *RevokeEgressLeaseParams) UnmarshalJSON(data []byte) error {
+	type plain RevokeEgressLeaseParams
+	var next plain
+	if err := decodeResident(data, &next, []string{"runId", "sequence"}); err != nil {
+		return err
+	}
+	if err := RevokeEgressLeaseParams(next).Validate(); err != nil {
+		return err
+	}
+	*p = RevokeEgressLeaseParams(next)
+	return nil
+}
+
+// RevokeEgressLeaseResult echoes the withdrawal binding without activating policy.
+type RevokeEgressLeaseResult struct {
+	RunID    string `json:"runId"`
+	Sequence string `json:"sequence"`
+}
+
+func (r RevokeEgressLeaseResult) Validate() error {
+	return validateEgressLeaseBinding(r.RunID, r.Sequence)
+}
+
+func (r *RevokeEgressLeaseResult) UnmarshalJSON(data []byte) error {
+	type plain RevokeEgressLeaseResult
+	var next plain
+	if err := decodeResident(data, &next, []string{"runId", "sequence"}); err != nil {
+		return err
+	}
+	if err := RevokeEgressLeaseResult(next).Validate(); err != nil {
+		return err
+	}
+	*r = RevokeEgressLeaseResult(next)
+	return nil
+}
+
+func validateEgressLeaseBinding(runID, sequence string) error {
+	if !strictID.MatchString(runID) {
+		return errors.New("runId must be an ASCII identity of 1-128 bytes")
+	}
+	return validateEgressLeaseDecimal("sequence", sequence, true)
+}
+
+func validateEgressLeaseDecimal(field, value string, positive bool) error {
+	n, err := NanoUSD(value).Int64()
+	if err != nil {
+		return fmt.Errorf("%s must be canonical decimal digits within the signed 64-bit range", field)
+	}
+	if positive && n == 0 {
+		return fmt.Errorf("%s must be positive", field)
+	}
+	return nil
+}
 
 // Resident RPCs are internal broker calls, never client or peer commands.
 const (

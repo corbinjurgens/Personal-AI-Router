@@ -9,7 +9,114 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
+
+func egressLeaseBindingRejections() []residentWireRejection {
+	return []residentWireRejection{
+		{"empty run identity", "runId", ""},
+		{"invalid run identity", "runId", "proxy/1"},
+		{"non ASCII run identity", "runId", "proxy-猫"},
+		{"long run identity", "runId", strings.Repeat("p", 129)},
+		{"empty sequence", "sequence", ""},
+		{"zero sequence", "sequence", "0"},
+		{"noncanonical sequence", "sequence", "01"},
+		{"signed sequence", "sequence", "+1"},
+		{"negative sequence", "sequence", "-1"},
+		{"spaced sequence", "sequence", "1 "},
+		{"fractional sequence", "sequence", "1.5"},
+		{"exponent sequence", "sequence", "1e1"},
+		{"numeric sequence", "sequence", 1},
+		{"overflow sequence", "sequence", "9223372036854775808"},
+	}
+}
+
+func TestEgressLeaseRenewWire(t *testing.T) {
+	invalid := append(egressLeaseBindingRejections(),
+		residentWireRejection{"empty revision", "revision", ""},
+		residentWireRejection{"noncanonical revision", "revision", "01"},
+		residentWireRejection{"numeric revision", "revision", 1},
+		residentWireRejection{"overflow revision", "revision", "9223372036854775808"},
+		residentWireRejection{"empty deadline", "notAfterNanos", ""},
+		residentWireRejection{"noncanonical deadline", "notAfterNanos", "01"},
+		residentWireRejection{"signed deadline", "notAfterNanos", "+1"},
+		residentWireRejection{"negative deadline", "notAfterNanos", "-1"},
+		residentWireRejection{"spaced deadline", "notAfterNanos", " 1"},
+		residentWireRejection{"fractional deadline", "notAfterNanos", "1.5"},
+		residentWireRejection{"exponent deadline", "notAfterNanos", "1e1"},
+		residentWireRejection{"numeric deadline", "notAfterNanos", 1},
+		residentWireRejection{"overflow deadline", "notAfterNanos", "9223372036854775808"},
+	)
+	testResidentWire(t, RenewEgressLeaseParams{RunID: "proxy-1", Revision: "12", Sequence: "9007199254740993", NotAfterNanos: "9223372036854775807"},
+		"runId revision sequence notAfterNanos", invalid...)
+}
+
+func TestEgressLeaseAnchorOnlyWire(t *testing.T) {
+	testResidentWire(t, RenewEgressLeaseParams{RunID: "proxy-1", Revision: "0", Sequence: "1", NotAfterNanos: "0"},
+		"runId revision sequence notAfterNanos")
+}
+
+func TestEgressLeaseRenewResultWire(t *testing.T) {
+	invalid := append(egressLeaseBindingRejections(),
+		residentWireRejection{"empty revision", "revision", ""},
+		residentWireRejection{"noncanonical revision", "revision", "01"},
+		residentWireRejection{"numeric revision", "revision", 1},
+		residentWireRejection{"overflow revision", "revision", "9223372036854775808"},
+		residentWireRejection{"empty clock sample", "nowNanos", ""},
+		residentWireRejection{"noncanonical clock sample", "nowNanos", "01"},
+		residentWireRejection{"signed clock sample", "nowNanos", "+1"},
+		residentWireRejection{"negative clock sample", "nowNanos", "-1"},
+		residentWireRejection{"spaced clock sample", "nowNanos", "1 "},
+		residentWireRejection{"fractional clock sample", "nowNanos", "1.5"},
+		residentWireRejection{"exponent clock sample", "nowNanos", "1e1"},
+		residentWireRejection{"numeric clock sample", "nowNanos", 1},
+		residentWireRejection{"overflow clock sample", "nowNanos", "9223372036854775808"},
+	)
+	testResidentWire(t, RenewEgressLeaseResult{RunID: "proxy-1", Revision: "9223372036854775807", Sequence: "9223372036854775807", NowNanos: "9223372036854775807"},
+		"runId revision sequence nowNanos", invalid...)
+}
+
+func TestEgressLeaseZeroClockSampleWire(t *testing.T) {
+	testResidentWire(t, RenewEgressLeaseResult{RunID: "proxy-1", Revision: "0", Sequence: "1", NowNanos: "0"},
+		"runId revision sequence nowNanos")
+}
+
+func TestEgressLeaseRevokeWire(t *testing.T) {
+	testResidentWire(t, RevokeEgressLeaseParams{RunID: "proxy-1", Sequence: "1"}, "runId sequence", egressLeaseBindingRejections()...)
+}
+
+func TestEgressLeaseRevokeResultWire(t *testing.T) {
+	testResidentWire(t, RevokeEgressLeaseResult{RunID: strings.Repeat("p", 128), Sequence: "9223372036854775807"}, "runId sequence", egressLeaseBindingRejections()...)
+}
+
+func TestEgressLeaseContractConstants(t *testing.T) {
+	if MethodRenewEgressLease != "node/renew-egress-lease" || MethodRevokeEgressLease != "node/revoke-egress-lease" {
+		t.Fatal("private lease method names changed")
+	}
+	if MaxEgressLeaseDuration != 5*time.Second || EgressLeaseRenewalInterval != time.Second {
+		t.Fatal("lease maximum or renewal interval changed")
+	}
+}
+
+func TestEgressLeaseDuplicateFields(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		raw    string
+		target any
+	}{
+		{"renewal sequence", `{"runId":"proxy-1","revision":"1","sequence":"1","sequence":"2","notAfterNanos":"0"}`, &RenewEgressLeaseParams{}},
+		{"renewal deadline", `{"runId":"proxy-1","revision":"1","sequence":"1","notAfterNanos":"0","notAfterNanos":"1"}`, &RenewEgressLeaseParams{}},
+		{"renewal result clock", `{"runId":"proxy-1","revision":"1","sequence":"1","nowNanos":"0","nowNanos":"1"}`, &RenewEgressLeaseResult{}},
+		{"withdrawal sequence", `{"runId":"proxy-1","sequence":"1","sequence":"2"}`, &RevokeEgressLeaseParams{}},
+		{"withdrawal result sequence", `{"runId":"proxy-1","sequence":"1","sequence":"2"}`, &RevokeEgressLeaseResult{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := json.Unmarshal([]byte(tc.raw), tc.target); err == nil {
+				t.Fatalf("accepted duplicate fields: %s", tc.raw)
+			}
+		})
+	}
+}
 
 func residentIdentity() StrictModelIdentity {
 	return StrictModelIdentity{EngineRunID: "engine-1", SettingsFingerprint: strings.Repeat("a", 64), ModelDigest: strings.Repeat("b", 64)}
