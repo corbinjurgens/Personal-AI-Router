@@ -253,7 +253,7 @@ func preparedServingReadback(st *engineState, prepared *llamaServingLaunch) *eng
 func strataDirectory(path string) error {
 	info, err := os.Stat(path)
 	if !filepath.IsAbs(path) || filepath.Clean(path) != path || err != nil || !info.IsDir() {
-		return servingError("Prepared Strata directories must be absolute existing directories.")
+		return servingError("Prepared Strata directories must be absolute, clean, existing directories in native platform form.")
 	}
 	return nil
 }

@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"slices"
 	"strings"
 	"sync/atomic"
@@ -472,9 +473,29 @@ func newStrataServingFixture(t *testing.T) strataServingFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	data = bytes.ReplaceAll(data, []byte("/REPLACE_WITH_ABSOLUTE_PATH"), []byte(filepath.ToSlash(root)))
 	var config strataServingConfig
 	if err := json.Unmarshal(data, &config); err != nil {
+		t.Fatal(err)
+	}
+	// Resolve template paths before JSON encoding so Windows gets clean native
+	// separators, including suffixes, with backslashes escaped by the encoder.
+	resolvePath := func(value string) string {
+		if suffix, ok := strings.CutPrefix(value, "/REPLACE_WITH_ABSOLUTE_PATH"); ok {
+			return filepath.Join(root, filepath.FromSlash(suffix))
+		}
+		return value
+	}
+	config.Exe = resolvePath(config.Exe)
+	config.CWD = resolvePath(config.CWD)
+	config.Tokenizer = resolvePath(config.Tokenizer)
+	for i, value := range config.Args {
+		config.Args[i] = resolvePath(value)
+	}
+	for i, value := range config.LibDirs {
+		config.LibDirs[i] = resolvePath(value)
+	}
+	data, err = json.Marshal(config)
+	if err != nil {
 		t.Fatal(err)
 	}
 	for _, dir := range []string{"pack", "draft", "tokenizer", "lib"} {
@@ -900,13 +921,34 @@ func TestStrataServingCommandLaunchRejectedBeforeEffects(t *testing.T) {
 	assertNoLlamaSpawn(t, f.llamaServingFixture)
 }
 
+func TestStrataDirectoryRequiresCleanNativeSpelling(t *testing.T) {
+	root := t.TempDir()
+	if err := strataDirectory(root); err != nil {
+		t.Fatalf("native directory rejected: %v", err)
+	}
+	reject := func(name, path string) {
+		t.Run(name, func(t *testing.T) {
+			if err := strataDirectory(path); err == nil || !strings.Contains(err.Error(), "absolute, clean, existing directories in native platform form") {
+				t.Fatalf("directory spelling error = %v", err)
+			}
+		})
+	}
+	reject("trailing separator", root+string(filepath.Separator))
+	reject("dot component", root+string(filepath.Separator)+".")
+	if runtime.GOOS == "windows" {
+		reject("forward slashes", filepath.ToSlash(root))
+	}
+}
+
 func TestStrataServingRejectsAmbiguousDependencyPaths(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
 		change func(*strataServingFixture)
 		want   string
 	}{
-		{"unclean native path", func(f *strataServingFixture) { f.config.Exe = f.root + "/lib/../strata" }, "absolute and unambiguous"},
+		{"unclean native path", func(f *strataServingFixture) {
+			f.config.Exe = f.root + string(filepath.Separator) + filepath.FromSlash("lib/../strata")
+		}, "absolute and unambiguous"},
 		{"conflicting file roles", func(f *strataServingFixture) { f.config.Exe = filepath.Join(f.root, "server.py") }, "ambiguous artifact roles"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

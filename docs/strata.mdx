@@ -122,10 +122,11 @@ runtime files are fully hashed before the lifecycle lock, with cancellation;
 under the lock only bounded bindings and cached file metadata are rechecked.
 Pack/draft enumeration is
 fixed, and `native_experts.txt` indirection is unsupported. All paths must be
-absolute and existing. The hashed config binds the `lib_dirs` list, but directory
-contents are never crawled or hashed. Undeclared libraries reached through those
-directories or inherited PATH/LD_LIBRARY_PATH and Python imports beyond declared
-files remain unattested, as readback states.
+absolute and existing; directory and selected file spellings must be clean and
+use the platform's native separators. The hashed config binds the `lib_dirs` list,
+but directory contents are never crawled or hashed. Undeclared libraries reached
+through those directories or inherited PATH/LD_LIBRARY_PATH and Python imports
+beyond declared files remain unattested, as readback states.
 
 Preview returns an approval digest without probing, loading, spawning or writing
 a snapshot. Apply requires that digest and unchanged file bindings; start
