@@ -4,6 +4,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -12,6 +13,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -362,6 +364,141 @@ func TestQualificationAppliesProfileDefaults(t *testing.T) {
 		tooLarge.RequestOptions = json.RawMessage(`{"max_tokens":5000}`)
 		if _, _, err := q.validateRequest(tooLarge, routeChatCompletions, []byte(`{"model":"m","messages":[{"role":"user","content":"hi"}]}`)); err == nil {
 			t.Fatal("a default output bound over the ceiling was accepted")
+		}
+	})
+}
+
+func TestQualificationStoreNoOp(t *testing.T) {
+	q, profile, _ := qualificationFixture(t)
+	const omitted = `{"model":"fixture-model","messages":[{"role":"user","content":"hi"}],"max_tokens":16,"stream":true,"stream_options":{"include_usage":true},"temperature":0.25,"stop":["done"]}`
+	const defaults = `{"options":{"num_ctx":4096},"keep_alive":"5m"}`
+	const merged = `{"model":"fixture-model","messages":[{"role":"user","content":"hi"}],"max_tokens":16,"stream":true,"stream_options":{"include_usage":true},"temperature":0.25,"stop":["done"],"options":{"num_ctx":4096},"keep_alive":"5m"}`
+	decode := func(t *testing.T, raw []byte) map[string]json.RawMessage {
+		t.Helper()
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &fields); err != nil {
+			t.Fatalf("decode forwarding body: %v", err)
+		}
+		return fields
+	}
+	accept := func(name, raw, requestDefaults, controlDefaults, want string, exact bool) {
+		t.Run(name, func(t *testing.T) {
+			p := profile
+			p.RequestOptions = json.RawMessage(requestDefaults)
+			got, bound, err := q.validateRequest(p, routeChatCompletions, []byte(raw))
+			if err != nil {
+				t.Fatalf("request rejected: %v", err)
+			}
+			control := profile
+			control.RequestOptions = json.RawMessage(controlDefaults)
+			controlBody, controlBound, err := q.validateRequest(control, routeChatCompletions, []byte(omitted))
+			if err != nil {
+				t.Fatalf("independent omitted-store control rejected: %v", err)
+			}
+			if bound != controlBound || bound.input != 18 || bound.output != 16 {
+				t.Fatalf("bound = %+v, omitted-store control = %+v; want 18 input and 16 output", bound, controlBound)
+			}
+			fields := decode(t, got)
+			if _, present := fields["store"]; present {
+				t.Fatal("forwarding body retains store")
+			}
+			wantFields := decode(t, []byte(want))
+			if !reflect.DeepEqual(fields, wantFields) || !reflect.DeepEqual(fields, decode(t, controlBody)) {
+				t.Fatalf("forwarded fields = %s; want every field in %s and the omitted-store control", got, want)
+			}
+			if exact && !bytes.Equal(got, []byte(want)) {
+				t.Fatalf("absent-store bytes = %q, want %q", got, want)
+			}
+		})
+	}
+	withFalse := strings.TrimSuffix(omitted, "}") + `,"store":false}`
+	accept("raw false stripped after merging defaults", withFalse, defaults, defaults, merged, false)
+	accept("first member false stripped", ` { "store" : false ,`+omitted[1:]+" ", "", "", omitted, false)
+	accept("middle member false stripped", strings.Replace(omitted, `,"max_tokens"`, `,"store":false,"max_tokens"`, 1), "", "", omitted, false)
+	accept("escaped store key stripped", strings.Replace(withFalse, `"store"`, `"\u0073tore"`, 1), "", "", omitted, false)
+	accept("absent preserves exact bytes", " \n"+omitted+"\t ", "", "", " \n"+omitted+"\t ", true)
+	accept("absent preserves merged bytes", omitted, defaults, defaults, merged, true)
+	accept("default false stripped", omitted, `{"store":false,"options":{"num_ctx":4096},"keep_alive":"5m"}`, defaults, merged, false)
+	accept("raw false overrides default true before stripping", withFalse, `{"store":true,"options":{"num_ctx":4096},"keep_alive":"5m"}`, defaults, merged, false)
+	accept("raw false overrides default null before stripping", withFalse, `{"store":null,"options":{"num_ctx":4096},"keep_alive":"5m"}`, defaults, merged, false)
+	reject := func(name, raw, requestDefaults, want string) {
+		t.Run(name, func(t *testing.T) {
+			p := profile
+			p.RequestOptions = json.RawMessage(requestDefaults)
+			_, _, err := q.validateRequest(p, routeChatCompletions, []byte(raw))
+			var invalid *strictQualificationError
+			if !errors.As(err, &invalid) || !strings.Contains(invalid.reason, want) {
+				t.Fatalf("error = %v; want qualification refusal containing %q", err, want)
+			}
+		})
+	}
+	for _, tc := range []struct{ name, value string }{
+		{"true", "true"},
+		{"null", "null"},
+		{"string", `"false"`},
+		{"number", "0"},
+		{"array", "[]"},
+		{"object", "{}"},
+	} {
+		want := "store must be the JSON boolean false"
+		if tc.value == "true" {
+			want = "PAIR does not store requests"
+		}
+		reject("raw "+tc.name+" refused", strings.TrimSuffix(omitted, "}")+`,"store":`+tc.value+`}`, "", want)
+		reject("default "+tc.name+" refused", omitted, `{"store":`+tc.value+`}`, want)
+	}
+	reject("raw true refused before default false", strings.TrimSuffix(omitted, "}")+`,"store":true}`, `{"store":false}`, "PAIR does not store requests")
+	reject("duplicate raw store refused before stripping", strings.TrimSuffix(withFalse, "}")+`,"store":false}`, "", "repeats a key")
+	reject("escaped duplicate store refused before stripping", strings.TrimSuffix(withFalse, "}")+`,"\u0073tore":false}`, "", "repeats a key")
+	reject("duplicate default store refused before stripping", omitted, `{"store":false,"store":false}`, "repeats a key")
+	reject("other incoming unsupported field still refused", strings.TrimSuffix(withFalse, "}")+`,"unqualified":false}`, "", `field "unqualified" is not supported`)
+	t.Run("forwarding copy owns its measured storage", func(t *testing.T) {
+		p := profile
+		p.RequestOptions = nil
+		control := strings.Replace(strictBody("fixture-model"), `"hi"`, `"`+strings.Repeat("a", 2048)+`"`, 1)
+		withStore := strings.TrimSuffix(control, "}") + `,"store":false}`
+		charge := int64(len(control)) + 256
+		for _, tc := range []struct {
+			name, body string
+			capacity   int64
+			retained   int64
+			limit      bool
+		}{
+			{name: "absent borrows without another grant", body: control, capacity: 1 << 20},
+			{name: "false retains exact forwarding capacity", body: withStore, capacity: 1 << 20, retained: charge},
+			{name: "copy footprint refused before allocation", body: withStore, capacity: charge - 1, limit: true},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				budget := bufferTestBudget(t, tc.capacity, 0)
+				scope, err := budget.newRequest(tc.capacity)
+				if err != nil {
+					t.Fatal(err)
+				}
+				owner := &ownedInferenceBuffers{scope: scope}
+				defer owner.close()
+				ctx := context.WithValue(context.Background(), ownedInferenceContextKey{}, owner)
+				forwarded, bound, err := q.validateRequest(p, routeChatCompletions, []byte(tc.body), ctx)
+				if tc.limit {
+					bufferAssertLimit(t, err)
+					if forwarded != nil || bound != (strictBound{}) {
+						t.Fatalf("refused copy returned body or bounds: %d bytes, %+v", len(forwarded), bound)
+					}
+				} else {
+					if err != nil || bound.input != 2064 || bound.output != 16 || string(forwarded) != control {
+						t.Fatalf("forwarding bytes preserved = %v, bound = %+v, error = %v", string(forwarded) == control, bound, err)
+					}
+					if tc.retained > 0 && int64(cap(forwarded))+256 != tc.retained {
+						t.Fatalf("forwarding capacity = %d; want measured charge %d", cap(forwarded), tc.retained)
+					}
+				}
+				live := 0
+				if tc.retained > 0 {
+					live = 1
+				}
+				bufferAssertTotals(t, budget, tc.retained, live, 0)
+				owner.close()
+				bufferAssertTotals(t, budget, 0, 0, 0)
+			})
 		}
 	})
 }
