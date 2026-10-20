@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -27,6 +28,70 @@ const (
 	tornOpenAIMarker = "TORN-OPENAI-FRAGMENT"
 	tornOllamaMarker = "TORN-OLLAMA-FRAGMENT"
 )
+
+func TestStreamFrameNumericInputBoundary(t *testing.T) {
+	for _, ending := range []string{"data: [DONE]\n\n", "data: {"} {
+		t.Run(ending, func(t *testing.T) {
+			var calls int
+			r, err := newStreamFrameReader(streamFrameConfig{
+				Protocol: streamProtocolSSE,
+				Upstream: io.NopCloser(strings.NewReader("data: {\"choices\":[]}\n\n" + ending)),
+				Extract: func(payload []byte) performanceExtractMetadata {
+					calls++
+					if string(payload) != `{"choices":[]}` {
+						t.Errorf("unexpected numeric input: %q", payload)
+					}
+					return performanceExtractMetadata{}
+				},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer r.Close()
+			if _, err := io.Copy(io.Discard, r); err != nil {
+				t.Fatal(err)
+			}
+			if calls != 1 {
+				t.Fatalf("callback calls=%d, want one upstream object only", calls)
+			}
+		})
+	}
+}
+
+func TestStreamFramePeerInterruptionPreserved(t *testing.T) {
+	for reason, frames := range streamInterruptionFramesByReason {
+		for _, protocol := range []streamProtocol{streamProtocolSSE, streamProtocolNDJSON} {
+			name := "SSE"
+			if protocol == streamProtocolNDJSON {
+				name = "NDJSON"
+			}
+			t.Run(reason+"/"+name, func(t *testing.T) {
+				payload := frames.sse
+				if protocol == streamProtocolNDJSON {
+					payload = frames.ndjson
+				}
+				var calls int
+				r, err := newStreamFrameReader(streamFrameConfig{
+					Protocol: protocol, PeerNormalized: true,
+					Upstream: newChunkedStreamBody(payload, 1),
+					Extract:  func([]byte) performanceExtractMetadata { calls++; return performanceExtractMetadata{} },
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer r.Close()
+				got, err := io.ReadAll(r)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !bytes.Equal(got, payload) || calls != 0 {
+					t.Fatalf("peer terminator changed: got=%q calls=%d", got, calls)
+				}
+				assertOutcome(t, r.Result(), streamOutcomeInterrupted, reason)
+			})
+		}
+	}
+}
 
 func mustReadFixture(t *testing.T, name string) []byte {
 	t.Helper()

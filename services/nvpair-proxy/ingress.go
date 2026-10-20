@@ -16,6 +16,7 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"strconv"
+	"time"
 
 	"nvpair-shared/nodepolicy"
 )
@@ -185,6 +186,7 @@ func (f *facade) serveIngress(w http.ResponseWriter, r *http.Request, peer strin
 	// peer having gone anywhere.
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
+	admissionStarted := time.Now()
 	decision := f.host.admission.admit(ctx, admissionRequest{
 		engine:  f.profile.Name,
 		model:   model,
@@ -204,6 +206,7 @@ func (f *facade) serveIngress(w http.ResponseWriter, r *http.Request, peer strin
 	// Deferred so it also runs when a mid-stream copy error unwinds this
 	// handler by panic (see spec.md §5.4).
 	defer decision.ticket.release()
+	performanceWait := time.Since(admissionStarted)
 
 	target, ok := f.localBackendTarget()
 	if !ok {
@@ -233,11 +236,23 @@ func (f *facade) serveIngress(w http.ResponseWriter, r *http.Request, peer strin
 	slog.Debug("cluster ingress forwarding to local backend",
 		"peer", peer, "method", r.Method, "path", r.URL.Path, "target", target.Host, "model", model)
 	p := f.newLocalReverseProxy(target)
+	performance := f.newPerformanceAttempt(r.Context(), model, r.URL.Path, body, performanceWait)
+	p.Transport = performanceTransport{RoundTripper: p.Transport, attempt: performance}
+	sc := &statusCapture{ResponseWriter: w, status: http.StatusOK, idle: idleClientWriteTimeout}
 	p.ModifyResponse = func(resp *http.Response) error {
+		reader, err := installResponseStream(resp, streamRequest, r.Context(), 0, performance)
+		if err != nil {
+			return err
+		}
 		setPeerStreamFraming(resp, streamRequest)
+		sc.upstreamBody = &originResponseBody{ReadCloser: resp.Body, response: resp, managed: reader != nil}
+		resp.Body = sc.upstreamBody
 		return nil
 	}
-	p.ServeHTTP(w, out)
+	returned := false
+	defer func() { performance.finish(sc, returned) }()
+	p.ServeHTTP(sc, out)
+	returned = true
 }
 
 func setPeerStreamFraming(resp *http.Response, s originStreamRequest) {
@@ -301,6 +316,7 @@ func (f *facade) newLocalReverseProxy(target *url.URL) *httputil.ReverseProxy {
 // reconciliation owner proves termination. It must never be interpreted as
 // engine-idle evidence.
 func (f *facade) serveStrictLocal(w http.ResponseWriter, r *http.Request, body []byte, model string, req nodepolicy.StrictAdmissionRequest, peer bool) {
+	admissionStarted := time.Now()
 	if _, err := parseOriginStreamRequest(r.URL.Path, body); err != nil {
 		writeIngressError(w, http.StatusBadRequest, "invalid-stream", "stream must be a single boolean or null member")
 		return
@@ -336,6 +352,7 @@ func (f *facade) serveStrictLocal(w http.ResponseWriter, r *http.Request, body [
 		writeStrictAdmissionError(w, err)
 		return
 	}
+	performanceWait := time.Since(admissionStarted)
 	evidence := strictNotDispatched
 	defer func() { ticket.Finish(evidence) }()
 	t := ticket.(*strictTicket)
@@ -362,6 +379,8 @@ func (f *facade) serveStrictLocal(w http.ResponseWriter, r *http.Request, body [
 		out.Header.Set("Accept-Encoding", "identity")
 	}
 	p := f.newLocalReverseProxy(target)
+	performance := f.newPerformanceAttempt(r.Context(), model, r.URL.Path, body, performanceWait)
+	p.Transport = performanceTransport{RoundTripper: p.Transport, attempt: performance}
 	p.ErrorHandler = func(ew http.ResponseWriter, _ *http.Request, _ error) {
 		f.host.admission.mu.Lock()
 		exhausted := !f.host.admission.strict.now().Before(t.deadline)
@@ -372,6 +391,7 @@ func (f *facade) serveStrictLocal(w http.ResponseWriter, r *http.Request, body [
 		}
 		writeIngressError(ew, http.StatusBadGateway, "backend-error", "local inference backend error")
 	}
+	sc := &statusCapture{ResponseWriter: w, status: http.StatusOK, idle: idleClientWriteTimeout}
 	p.ModifyResponse = func(resp *http.Response) error {
 		if peer {
 			setPeerStreamFraming(resp, streamRequest)
@@ -390,9 +410,18 @@ func (f *facade) serveStrictLocal(w http.ResponseWriter, r *http.Request, body [
 		}
 		resp.Body = b
 		stop()
+		reader, err := installResponseStream(resp, streamRequest, r.Context(), 0, performance)
+		if err != nil {
+			return err
+		}
+		sc.upstreamBody = &originResponseBody{ReadCloser: resp.Body, response: resp, managed: reader != nil}
+		resp.Body = sc.upstreamBody
 		return nil
 	}
-	p.ServeHTTP(w, out)
+	returned := false
+	defer func() { performance.finish(sc, returned) }()
+	p.ServeHTTP(sc, out)
+	returned = true
 }
 
 // isLoopbackRemote reports whether an http.Request RemoteAddr (host:port) is a

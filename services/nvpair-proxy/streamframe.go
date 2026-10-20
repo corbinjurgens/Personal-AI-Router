@@ -208,6 +208,7 @@ func buildStreamInterruptionFrames() map[string]streamInterruptionFrames {
 type streamFrameResult struct {
 	Outcome streamOutcome
 	Reason  string
+	Numeric performanceExtractMetadata
 }
 
 type streamFrameConfig struct {
@@ -219,6 +220,12 @@ type streamFrameConfig struct {
 	// Choices is the number of choices the request asked for. A finish_reason
 	// only completes the stream when every one of them has finished.
 	Choices int
+	// Extract consumes only validated upstream objects, synchronously, without
+	// retaining bytes or doing IO. Completion remains this reader's decision.
+	Extract func([]byte) performanceExtractMetadata
+	// PeerNormalized is set only after validating pinned ingress metadata.
+	// Preserve that reader's bounded interruption reason and full terminator.
+	PeerNormalized bool
 }
 
 type streamFrameReader struct {
@@ -255,6 +262,9 @@ type streamFrameReader struct {
 	reason          string
 	finished        bool
 	closed          bool
+	extract         func([]byte) performanceExtractMetadata
+	numeric         performanceNumbers
+	peerNormalized  bool
 }
 
 func newStreamFrameReader(config streamFrameConfig) (*streamFrameReader, error) {
@@ -282,14 +292,16 @@ func newStreamFrameReader(config streamFrameConfig) (*streamFrameReader, error) 
 	}
 
 	reader := &streamFrameReader{
-		protocol:    config.Protocol,
-		upstream:    config.Upstream,
-		idleTimeout: idleTimeout,
-		budget:      budget,
-		parent:      parent,
-		deadline:    time.Now().Add(idleTimeout),
-		stop:        make(chan struct{}),
-		stopped:     make(chan struct{}),
+		protocol:       config.Protocol,
+		upstream:       config.Upstream,
+		idleTimeout:    idleTimeout,
+		budget:         budget,
+		parent:         parent,
+		deadline:       time.Now().Add(idleTimeout),
+		stop:           make(chan struct{}),
+		stopped:        make(chan struct{}),
+		extract:        config.Extract,
+		peerNormalized: config.PeerNormalized,
 	}
 	if budget.reserve(int64(choices)) {
 		reader.choiceBytes = int64(choices)
@@ -311,7 +323,7 @@ func newStreamFrameReader(config streamFrameConfig) (*streamFrameReader, error) 
 func (r *streamFrameReader) Result() streamFrameResult {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return streamFrameResult{Outcome: r.outcome, Reason: r.reason}
+	return streamFrameResult{Outcome: r.outcome, Reason: r.reason, Numeric: r.numeric.snapshot()}
 }
 
 func (r *streamFrameReader) Read(p []byte) (int, error) {
@@ -565,6 +577,20 @@ func (r *streamFrameReader) parseLocked() {
 			return
 		}
 		frame := pending[:n]
+		if r.peerNormalized {
+			for reason, terminator := range streamInterruptionFramesByReason {
+				canonical := terminator.ndjson
+				if r.protocol == streamProtocolSSE {
+					canonical = bytes.TrimSuffix(terminator.sse, []byte("data: [DONE]\n\n"))
+				}
+				if bytes.Equal(frame, canonical) {
+					// Replace the peer's exact canonical record with the same
+					// full terminator, without re-observing synthetic metadata.
+					r.finishInterruptedLocked(reason)
+					return
+				}
+			}
+		}
 		var verdict frameVerdict
 		switch r.protocol {
 		case streamProtocolSSE:
@@ -676,6 +702,9 @@ func (r *streamFrameReader) assessSSEFrameLocked(frame []byte) frameVerdict {
 	}
 	if !validStreamObject(payload) {
 		return frameMalformed
+	}
+	if r.extract != nil {
+		r.numeric.merge(r.extract(payload))
 	}
 	if value := streamJSONField(payload, "error"); len(value) > 0 && !bytes.Equal(value, []byte("null")) {
 		return frameUpstreamError
@@ -804,6 +833,9 @@ func (r *streamFrameReader) assessNDJSONFrameLocked(frame []byte) frameVerdict {
 	}
 	if !validStreamObject(line) {
 		return frameMalformed
+	}
+	if r.extract != nil {
+		r.numeric.merge(r.extract(line))
 	}
 	if value := streamJSONField(line, "error"); len(value) > 0 && !bytes.Equal(value, []byte("null")) {
 		return frameUpstreamError

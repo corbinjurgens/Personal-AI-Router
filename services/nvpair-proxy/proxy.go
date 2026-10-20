@@ -324,7 +324,8 @@ type Proxy struct {
 	// separates two facades' records and only the process needs the nonce. It
 	// exists because each facade's request counter restarts at 1, so without it
 	// a reused id after a restart would collide in the broker's store.
-	runID string
+	runID       string
+	performance performanceQueue
 
 	// admission is the node-wide admission controller every facade shares
 	// (FORK_DESIGN.md §3.3). Process-wide for the same reason as the
@@ -358,10 +359,11 @@ type Proxy struct {
 // enableFacade, so nothing is listening when this returns.
 func NewProxy(codec *Codec) *Proxy {
 	p := &Proxy{
-		codec:    codec,
-		runID:    newRunID(),
-		activity: nodeactivity.NewReporter(activityReportInterval),
-		accounts: newAccountLedger(),
+		codec:       codec,
+		runID:       newRunID(),
+		activity:    nodeactivity.NewReporter(activityReportInterval),
+		accounts:    newAccountLedger(),
+		performance: performanceQueue{wake: make(chan struct{}, 1)},
 	}
 	p.routing = &routingListener{host: p}
 	p.admission = newAdmissionController(
@@ -452,6 +454,7 @@ func (p *Proxy) Run(ctx context.Context) error {
 	p.cancel = cancel
 	p.serveCtx = ctx
 	defer cancel()
+	go p.sendPerformance(ctx)
 
 	// Keep the "is this address local?" set fresh as interfaces come and go,
 	// so the loopback rewrite in nodeURL stays correct after VPN/dock changes

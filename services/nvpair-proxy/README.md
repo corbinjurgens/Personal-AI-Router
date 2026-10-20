@@ -33,6 +33,39 @@ the process was one engine.
 `spec.md` is normative; where it and this file disagree, it wins. Everything
 below is shared behavior unless a section says otherwise.
 
+## Local execution measurements
+
+The destination records each actual local inference dispatch, including a failed
+engine dial, through the existing unaddressed `performance:sample` notification.
+Self routing, ordinary peer ingress and strict local dispatch use the same
+producer. Peer forwarding at the origin, control requests and admission refusals
+create no local execution sample. Strict completion retains its existing
+uncertain-capacity reconciliation rules.
+
+Streaming measurements consume typed numeric metadata from the existing SC
+response reader. Its completion verdict remains authoritative. The llama.cpp
+and Strata Chat adapters preserve engine-reported decode rates and intervals
+separately from visible output tokens; Ollama retains its native count/duration
+semantics. Nonstream bodies pass through without numeric observation. No first
+token time is inferred from headers, body bytes or final timings.
+Unobserved responses count as completed only after the accepted response body
+reaches upstream EOF and delivery succeeds; protocol completion stays unknown.
+
+Samples require the joined engine run, settings, launch and model-content
+identity plus the measuring host. One proxy-local fingerprint includes that
+identity, effective request options, API and timing schema. Missing identity,
+unknown overrides or identity changes during execution suppress the sample.
+Descriptor family selects the reviewed extractor schema; native daily-engine
+acceptance still requires trustworthy installed identities and engine evidence.
+
+A process-wide FIFO holds at most 128 samples. Sequence numbers are assigned at
+enqueue in finalization order across facades. One sender writes notifications
+outside the queue lock; saturation drops telemetry with bounded counters rather
+than waiting on the codec. Normal shutdown cancellation stops the sender
+between writes or while waiting for the codec write gate. An active codec write
+has the same lifetime as existing proxy
+notifications; shutdown does not join or interrupt it.
+
 ## Build
 
 Strict destination admission is opt-in through one `X-PAIR-Strict-Admission`

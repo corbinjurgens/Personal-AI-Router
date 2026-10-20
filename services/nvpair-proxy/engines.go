@@ -95,6 +95,7 @@ type route struct {
 // engineProfile is everything the proxy needs to front one engine.
 type engineProfile struct {
 	engines.Engine
+	Family string
 
 	// StandalonePort is the port the proxy binds when nothing passes --port
 	// and no port has been persisted. It must be neither FacadePort (which
@@ -219,7 +220,7 @@ func dynamicProfile(d engines.Descriptor) (engineProfile, error) {
 	if d.ModelNaming == engines.ModelNamingImpliedLatestTag {
 		naming = impliedLatestTag
 	}
-	return engineProfile{Engine: identity, Routes: routes, ModelNaming: naming}, nil
+	return engineProfile{Engine: identity, Family: d.Family, Routes: routes, ModelNaming: naming}, nil
 }
 
 // dynamic reports whether the profile was built from a descriptor rather than

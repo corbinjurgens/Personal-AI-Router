@@ -25,6 +25,7 @@
         "node/selection-changed": "Automatic routing has no selected-node UI, so PAIR deliberately does not consume proxy selection changes.",
         "proxy/request": "Per-request proxy telemetry is not rendered; workload lifecycle uses the broker workloads stream.",
         "proxy/request-started": "Per-request proxy telemetry is not rendered; see proxy/request.",
+        "performance:sample": "Private nvpair-proxy-to-nvpair-ui-broker notification carrying the T1 performance sample. Broker.ingestPerformanceSample consumes it in the performancestore; it is never forwarded to clients. The desktop consumes the broker's performance read surface instead.",
         "workload:submitted": "Producer-to-broker lifecycle event. PAIR consumes the broker's translated workloads:upsert stream rather than raw workload events.",
         "workload:started": "Proxy-to-broker lifecycle event translated by the broker into workloads:upsert, which PAIR consumes.",
         "workload:completed": "Proxy-to-broker terminal lifecycle event translated by the broker into workloads:upsert.",

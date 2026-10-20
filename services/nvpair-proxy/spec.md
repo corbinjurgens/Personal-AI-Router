@@ -11,6 +11,64 @@ SPDX-License-Identifier: Apache-2.0
 
 ## 1. Purpose
 
+### Local execution observations (T2)
+
+Each actual engine-facing inference attempt may emit one `performance:sample`
+with `scope: localExecution`, the process `runID` as producer and a positive
+sequence assigned under the process-wide FIFO lock at finalization. A failed
+local dial is an attempt. Admission refusal and control traffic are not.
+Ordinary self routing, ordinary peer ingress and strict local dispatch share
+the producer. Strict self dispatch is instrumented once. Direct and reverse
+peer transports reach the destination producer; their origin creates no local
+execution sample.
+
+The profile key uses the measuring host, actual engine, normalized dispatched
+model and a hash from the existing joined `EngineIdentity` (engine run,
+settings fingerprint, launch digest and model-content digest), normalized
+effective request options, API and extractor schema. Request content is excluded.
+Unknown top-level overrides or missing required identity suppress observations;
+there is no placeholder digest. Finalization revalidates the identity/key and
+drops stale executions rather than relabeling them. Descriptor `Family` selects
+the pinned llama.cpp or Strata schema. Strengthened non-Ollama identity and
+native acceptance remain later gates owned by their respective units.
+
+The existing SC SSE/NDJSON reader invokes a synchronous numeric extractor only
+for validated genuine upstream JSON objects, including empty-choices usage
+objects. Neither `[DONE]` nor synthetic errors are extractor input. The callback
+does no IO, clock access, publication or external locking and retains no payload.
+The reader stores copied typed numbers; independent evidence merges, repeated
+counters never add, conflicts become unknown and Strata MCP disqualification
+is sticky. Result snapshots copy nullable fields. SC alone classifies stream
+completion. The same installation adapter supplies one reader per response at
+local dispatch and keeps origin peer normalization free of numeric production.
+On validated pinned peer hops it preserves an exact canonical interruption
+terminator and bounded reason without passing synthetic metadata to extraction.
+Existing media/encoding, integrity-header, allocation and cancellation rules
+apply. Nonstream responses are unobserved; pure nonstream extraction remains
+available without a production observation mode.
+
+Monotonic elapsed times measure admission entry to grant, local `RoundTrip` to
+headers, first genuine body byte (before any peek), and finalization. Unreached
+milestones and `FirstTokenMs` remain nil. Daily adapters preserve native rate
+and duration in `EngineDecodeTokensPerSecond` and `EngineDecodeNs`, leaving
+legacy `DecodeNs` nil. Ollama keeps its original count/duration mapping.
+Qualified completion requires successful delivery and SC completion. Errors,
+interruption or cancellation cannot qualify a terminal rate; unobserved
+protocol completion remains unknown. These results do not release strict
+capacity, change routing or alter workload reconciliation.
+An unobserved response counts as completed only when that attempt's response
+was accepted, its body reached upstream EOF and delivery had no write error.
+Discarded attempts and body read errors remain failed.
+
+The bounded FIFO has capacity 128, shared across facades. Its single sender
+performs codec IO outside the lock; producers never await codec writes or queue
+space. Saturating counters cover full/sequence-exhausted, missing identity or
+unsupported options, stale identity and invalid-sample drops. There is no
+durable queue, resend or retained request content. Normal shutdown cancellation
+stops the sender between writes or while waiting for the codec write gate,
+without joining an active codec write; physical
+write interruption is outside this producer's contract.
+
 ### Strict destination admission (A1a)
 
 Strict requests carry exactly one shared-parser-validated
