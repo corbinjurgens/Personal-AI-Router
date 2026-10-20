@@ -1021,7 +1021,7 @@ func (v *nodesView) reset() {
 	if v.detail == nil {
 		return
 	}
-	v.detail.closePerformance()
+	v.detail.close()
 	v.detail = nil
 	// The list was sized for the space the detail screen was using.
 	v.SetSize(v.width, v.height)
@@ -1029,7 +1029,7 @@ func (v *nodesView) reset() {
 
 func (v *nodesView) close() {
 	if v.detail != nil {
-		v.detail.closePerformance()
+		v.detail.close()
 	}
 }
 
