@@ -6,6 +6,7 @@ package tests
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -21,9 +22,11 @@ import (
 	"testing"
 	"time"
 
+	"nvpair-shared/clustertrust"
 	settings "nvpair-shared/enginesettings"
 	"nvpair-shared/jsonrpc"
 	"nvpair-shared/noderec"
+	"nvpair-shared/testbin"
 )
 
 // Use the running test executable, including its fixed windows-test-bin path,
@@ -101,6 +104,8 @@ type switchProcessFixture struct {
 	changes        []settings.SwitchChanged
 	holdTarget     bool
 	targetStarting chan struct{}
+	scanner        string
+	scannerPort    int
 }
 
 func newSwitchProcessFixture(t *testing.T) *switchProcessFixture {
@@ -149,6 +154,11 @@ func newSwitchProcessFixtureAt(t *testing.T, base string, ports fixtureServicePo
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Reuse the empty-directory scanner instead of browsing host multicast.
+	// The fixed executable role already has a Windows test-bin manifest entry.
+	f.scanner = filepath.Join(testbin.Dir(t, "tests", "subscription-scanner", "subscription-scanner"), testbin.Exe("subscription-scanner"))
+	jointCopyExecutable(t, image, f.scanner)
+	f.scannerPort = freePort(t)
 	jointIsolateEngines(t, f.base, freePort(t))
 	for _, engine := range []struct {
 		name string
@@ -189,9 +199,10 @@ func (f *switchProcessFixture) unblock() { f.releaseOne.Do(func() { close(f.rele
 
 func (f *switchProcessFixture) start(t *testing.T) {
 	t.Helper()
-	args := append([]string{"--scanner-path", scannerBin, "--engine-manager-path", engineMgrBin, "--proxy-path", proxyBin, "--proxy-engines", "ollama,llamacpp", "--cluster-dir", filepath.Join(f.base, "cluster")}, f.ports.args()...)
-	f.p = startInteropProcess(t, f.base, brokerBin, f.ports.engineManagerHTTP, []string{"OLLAMA_HOST="}, args...)
-	for _, path := range []string{scannerBin, engineMgrBin, proxyBin} {
+	args := append([]string{"--scanner-path", f.scanner, "--engine-manager-path", engineMgrBin, "--proxy-path", proxyBin, "--proxy-engines", "ollama,llamacpp", "--cluster-dir", filepath.Join(f.base, "cluster")}, f.ports.args()...)
+	f.p = startInteropProcess(t, f.base, brokerBin, f.ports.engineManagerHTTP, []string{"OLLAMA_HOST=", "NVPAIR_TEST_SUBSCRIPTION_SCANNER=" + f.scanner, "NVPAIR_TEST_SUBSCRIPTION_PORT=" + strconv.Itoa(f.scannerPort)}, args...)
+	f.p.ports = append(f.p.ports, f.scannerPort, f.sourcePort, f.targetPort, f.facadePort)
+	for _, path := range []string{f.scanner, engineMgrBin, proxyBin} {
 		canonical, err := canonicalServicePath(path)
 		if err != nil {
 			t.Fatal(err)
@@ -554,8 +565,12 @@ func TestEngineSwitchProcessBrokerDeathInterruptsWithoutRestore(t *testing.T) {
 	f.unblock()
 	f.start(t)
 	receipt := f.terminal(t, request.RequestID)
-	if receipt.Phase != settings.SwitchFailedInterrupted || receipt.Error == nil || receipt.Error.Kind != settings.SwitchErrorInterrupted {
+	if receipt.Phase != settings.SwitchFailedInterrupted || !receipt.RecoveryRequired || receipt.Error == nil || receipt.Error.Kind != settings.SwitchErrorInterrupted {
 		t.Fatalf("recovered receipt = %+v", receipt)
+	}
+	reattached := f.status(t, settings.SwitchStatusRequest{RequestID: request.RequestID, AfterSequence: &receipt.Sequence})
+	if reattached.Receipt == nil || !reflect.DeepEqual(*reattached.Receipt, receipt) {
+		t.Fatalf("reattach changed interrupted recovery receipt: %+v", reattached)
 	}
 	// Startup sends the internal restore notification after the proxy port
 	// gates. Advertisement starts afterward; observe its backend updates from
@@ -576,6 +591,189 @@ func TestEngineSwitchProcessBrokerDeathInterruptsWithoutRestore(t *testing.T) {
 
 func TestEngineSwitchProcessPinnedDirect(t *testing.T) {
 	testEngineSwitchPinned(t, false)
+}
+
+// Reuse the switch process fixture and the permission writer/pinned identity
+// helpers. Only the engine-control client reconnects; the transaction owner and
+// its fake engines stay alive. No discovery or vendor engine is needed.
+func newSwitchClientFixture(t *testing.T) (*switchProcessFixture, *task1Process, func() *http.Client) {
+	t.Helper()
+	base := t.TempDir()
+	cluster := filepath.Join(base, "cluster")
+	origin := t.TempDir()
+	const targetID, callerID = "e4-switch-target", "e4-switch-caller"
+	if err := os.MkdirAll(cluster, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	targetCert := mintClusterIdentity(t, cluster, targetID)
+	callerCert := mintClusterIdentity(t, origin, callerID)
+	for _, identity := range []struct{ dir, id, peer, cert string }{
+		{cluster, targetID, callerID, callerCert}, {origin, callerID, targetID, targetCert},
+	} {
+		writeActiveAdmission(t, identity.dir)
+		writePin(t, identity.dir, identity.peer, identity.cert)
+		writeMembers(t, identity.dir, targetID, callerID)
+		jointWriteJSON(t, filepath.Join(identity.dir, "identity.json"), map[string]string{"node_uuid": identity.id})
+	}
+	managementGrantFixture(t, cluster, targetID, callerID)
+	cm := startTask1Process(t, base, clusterMgrBin, "--config-dir", base, "--port", strconv.Itoa(freePort(t)))
+	cm.call(t, "cluster:get-node-id", nil)
+	f := newSwitchProcessFixtureAt(t, base, reserveFixtureServicePorts(t))
+	mesh := clustertrust.Open(origin)
+	newClient := func() *http.Client {
+		cfg, ok := mesh.ClientTLSConfig(targetID)
+		if !ok {
+			t.Fatal("switch caller has no pinned target TLS configuration")
+		}
+		client := &http.Client{Timeout: 35 * time.Second, Transport: &http.Transport{TLSClientConfig: cfg}}
+		t.Cleanup(client.CloseIdleConnections)
+		return client
+	}
+	return f, cm, newClient
+}
+
+type switchLostResponseTransport struct{ next http.RoundTripper }
+
+func (transport switchLostResponseTransport) RoundTrip(request *http.Request) (*http.Response, error) {
+	response, err := transport.next.RoundTrip(request)
+	if err != nil {
+		return nil, err
+	}
+	_, readErr := io.Copy(io.Discard, response.Body)
+	closeErr := response.Body.Close()
+	if readErr != nil || closeErr != nil || response.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("lost-response setup: HTTP %d read=%v close=%v", response.StatusCode, readErr, closeErr)
+	}
+	// Acceptance reached the real broker, but no response reaches the caller.
+	return nil, io.ErrUnexpectedEOF
+}
+
+func TestE4SwitchClientLostResponseReconnectReadback(t *testing.T) {
+	f, _, newClient := newSwitchClientFixture(t)
+	client := newClient()
+	request := f.request(t, "e4-lost-response")
+	f.mu.Lock()
+	f.holdTarget = true
+	f.mu.Unlock()
+	// Deliberately discard the entire apply response, including its receipt.
+	// Recovery below knows only the original client-generated request ID.
+	losingClient := &http.Client{Timeout: 35 * time.Second, Transport: switchLostResponseTransport{next: client.Transport}}
+	apply, err := http.NewRequest(http.MethodPost, fmt.Sprintf("https://127.0.0.1:%d%s", f.ports.engineControl, settings.SwitchApplyPath), strings.NewReader(string(mustMarshal(t, request))))
+	if err != nil {
+		t.Fatal(err)
+	}
+	apply.Header.Set("Content-Type", "application/json")
+	response, err := losingClient.Do(apply)
+	if response != nil || !errors.Is(err, io.ErrUnexpectedEOF) {
+		t.Fatalf("submit did not lose its response: response=%v err=%v", response, err)
+	}
+	select {
+	case <-f.targetStarting:
+	case <-time.After(20 * time.Second):
+		t.Fatal("switch did not reach held target startup")
+	}
+	client.CloseIdleConnections()
+	client = newClient()
+	read := func(after *uint64) settings.SwitchStatus {
+		t.Helper()
+		var status settings.SwitchStatus
+		task2Decode(t, managementHTTP(t, client, f.ports.engineControl, http.MethodPost, settings.SwitchStatusPath,
+			settings.SwitchStatusRequest{RequestID: request.RequestID, AfterSequence: after}, http.StatusOK), &status)
+		if status.Receipt == nil || status.Receipt.RequestID != request.RequestID || status.Receipt.NodeID != "e4-switch-target" || status.Receipt.Caller != "e4-switch-caller" || status.Receipt.Request.SourceEngine != request.SourceEngine || status.Receipt.Request.TargetEngine != request.TargetEngine || status.Receipt.ExpectedRevision != request.ExpectedRevision {
+			t.Fatalf("original-ID readback lost correlation: %+v", status)
+		}
+		return status
+	}
+	active := read(nil)
+	if active.ActiveRequestID != request.RequestID || active.Receipt.Terminal || active.Receipt.Phase != settings.SwitchTargetStarting {
+		t.Fatalf("reattached active receipt = %+v", active)
+	}
+	f.unblock()
+	var terminal settings.SwitchStatus
+	after := active.Receipt.Sequence
+	task1Eventually(t, "original request completes after client reconnect", 45*time.Second, func() bool {
+		terminal = read(&after)
+		if terminal.Receipt.Sequence < after {
+			t.Fatal("reconnected readback sequence regressed")
+		}
+		after = terminal.Receipt.Sequence
+		return terminal.Receipt.Terminal
+	})
+	if terminal.Receipt.Phase != settings.SwitchCompleted || terminal.Receipt.Error != nil || terminal.Receipt.RecoveryRequired || !terminal.Receipt.Source.TerminationVerified || terminal.Receipt.Source.Intent != settings.SwitchIntentOff || terminal.Receipt.Target.Intent != settings.SwitchIntentOn {
+		t.Fatalf("reconnected completion = %+v", terminal.Receipt)
+	}
+	client.CloseIdleConnections()
+	client = newClient()
+	if again := read(&after); !reflect.DeepEqual(again.Receipt, terminal.Receipt) {
+		t.Fatalf("terminal receipt changed after another reconnect: %+v", again)
+	}
+	assertSwitchProcessStopped(t, f.pid(t, "ollama"))
+	assertInteropListenerClosed(t, f.sourcePort)
+	f.pid(t, "llamacpp") // exactly one start, with no mutation replay
+}
+
+func TestE4SwitchClientDenialRevocationVetoConflict(t *testing.T) {
+	f, cm, newClient := newSwitchClientFixture(t)
+	client := newClient()
+	const caller = "e4-switch-caller"
+	managementSet(t, cm, caller, false)
+	assertDenied := func(id string) {
+		t.Helper()
+		request := f.request(t, id)
+		managementHTTP(t, client, f.ports.engineControl, http.MethodPost, settings.SwitchApplyPath, request, http.StatusConflict)
+		var status settings.SwitchStatus
+		task2Decode(t, managementHTTP(t, client, f.ports.engineControl, http.MethodPost, settings.SwitchStatusPath, settings.SwitchStatusRequest{}, http.StatusOK), &status)
+		if status.ActiveRequestID != "" || status.ConfigurationRevision != request.ExpectedRevision {
+			t.Fatalf("denied switch changed configuration or became active: %+v", status)
+		}
+	}
+	assertDenied("e4-denied")
+	managementSet(t, cm, caller, true)
+	// Read permission while granted, then revoke it before submitting. A
+	// previously allowed client snapshot cannot authorize the next mutation.
+	var permission struct {
+		Allowed bool   `json:"allowed"`
+		State   string `json:"state"`
+	}
+	task2Decode(t, managementHTTP(t, client, f.ports.engineControl, http.MethodGet, "/v1/remote-management", nil, http.StatusOK), &permission)
+	if !permission.Allowed || permission.State != "allowed" {
+		t.Fatalf("pre-revocation permission = %+v", permission)
+	}
+	managementSet(t, cm, caller, false)
+	assertDenied("e4-revoked")
+	managementSet(t, cm, caller, true)
+	f.rpcOK(t, "node:set-availability", map[string]string{"state": "paused"})
+	assertRefused := func(request settings.SwitchRequest, code int, kind string) {
+		t.Helper()
+		actual, _, data := managementHTTPResponse(t, client, f.ports.engineControl, http.MethodPost, settings.SwitchApplyPath, request)
+		var failure struct {
+			Code string `json:"code"`
+		}
+		task2Decode(t, data, &failure)
+		wireCode := kind
+		if code == settings.SwitchRemoteVetoCode {
+			wireCode = "local_veto"
+		}
+		if actual != http.StatusConflict || failure.Code != wireCode {
+			t.Fatalf("switch refusal status=%d body=%s, want code %d", actual, data, code)
+		}
+		var status settings.SwitchStatus
+		task2Decode(t, managementHTTP(t, client, f.ports.engineControl, http.MethodPost, settings.SwitchStatusPath,
+			settings.SwitchStatusRequest{RequestID: request.RequestID}, http.StatusOK), &status)
+		if status.Receipt == nil || status.Receipt.RequestID != request.RequestID || !status.Receipt.Terminal || status.Receipt.Phase != settings.SwitchRejected || status.Receipt.Error == nil || status.Receipt.Error.Code != code || status.Receipt.Error.Kind != kind {
+			t.Fatalf("typed refusal readback = %+v", status)
+		}
+	}
+	assertRefused(f.request(t, "e4-local-veto"), settings.SwitchRemoteVetoCode, settings.SwitchErrorRemoteVeto)
+	f.rpcOK(t, "node:set-availability", map[string]string{"state": "available"})
+	stale := f.request(t, "e4-conflict")
+	stale.ExpectedRevision = "e3v1:" + strings.Repeat("0", 64)
+	assertRefused(stale, settings.SwitchConfigurationConflictCode, settings.SwitchErrorConfigurationConflict)
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.starts["ollama"]) != 1 || len(f.starts["llamacpp"]) != 0 {
+		t.Fatalf("refusals changed engine execution: %v", f.starts)
+	}
 }
 
 func TestEngineSwitchProcessPinnedReverse(t *testing.T) {
