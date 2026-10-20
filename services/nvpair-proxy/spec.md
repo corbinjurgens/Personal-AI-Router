@@ -56,13 +56,17 @@ Qualified completion requires successful delivery and SC completion. Errors,
 interruption or cancellation cannot qualify a terminal rate; unobserved
 protocol completion remains unknown. These results do not release strict
 capacity, change routing or alter workload reconciliation.
+An unobserved response counts as completed only when that attempt's response
+was accepted, its body reached upstream EOF and delivery had no write error.
+Discarded attempts and body read errors remain failed.
 
 The bounded FIFO has capacity 128, shared across facades. Its single sender
 performs codec IO outside the lock; producers never await codec writes or queue
 space. Saturating counters cover full/sequence-exhausted, missing identity or
 unsupported options, stale identity and invalid-sample drops. There is no
 durable queue, resend or retained request content. Normal shutdown cancellation
-stops the sender between writes, without joining an active codec write; physical
+stops the sender between writes or while waiting for the codec write gate,
+without joining an active codec write; physical
 write interruption is outside this producer's contract.
 
 ### Strict destination admission (A1a)

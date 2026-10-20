@@ -238,18 +238,17 @@ func (f *facade) serveIngress(w http.ResponseWriter, r *http.Request, peer strin
 	p := f.newLocalReverseProxy(target)
 	performance := f.newPerformanceAttempt(r.Context(), model, r.URL.Path, body, performanceWait)
 	p.Transport = performanceTransport{RoundTripper: p.Transport, attempt: performance}
+	sc := &statusCapture{ResponseWriter: w, status: http.StatusOK, idle: idleClientWriteTimeout}
 	p.ModifyResponse = func(resp *http.Response) error {
 		reader, err := installResponseStream(resp, streamRequest, r.Context(), 0, performance)
 		if err != nil {
 			return err
 		}
 		setPeerStreamFraming(resp, streamRequest)
-		if reader != nil {
-			resp.Body = &originResponseBody{ReadCloser: resp.Body, response: resp, managed: true}
-		}
+		sc.upstreamBody = &originResponseBody{ReadCloser: resp.Body, response: resp, managed: reader != nil}
+		resp.Body = sc.upstreamBody
 		return nil
 	}
-	sc := &statusCapture{ResponseWriter: w, status: http.StatusOK, idle: idleClientWriteTimeout}
 	returned := false
 	defer func() { performance.finish(sc, returned) }()
 	p.ServeHTTP(sc, out)
@@ -392,6 +391,7 @@ func (f *facade) serveStrictLocal(w http.ResponseWriter, r *http.Request, body [
 		}
 		writeIngressError(ew, http.StatusBadGateway, "backend-error", "local inference backend error")
 	}
+	sc := &statusCapture{ResponseWriter: w, status: http.StatusOK, idle: idleClientWriteTimeout}
 	p.ModifyResponse = func(resp *http.Response) error {
 		if peer {
 			setPeerStreamFraming(resp, streamRequest)
@@ -414,12 +414,10 @@ func (f *facade) serveStrictLocal(w http.ResponseWriter, r *http.Request, body [
 		if err != nil {
 			return err
 		}
-		if reader != nil {
-			resp.Body = &originResponseBody{ReadCloser: resp.Body, response: resp, managed: true}
-		}
+		sc.upstreamBody = &originResponseBody{ReadCloser: resp.Body, response: resp, managed: reader != nil}
+		resp.Body = sc.upstreamBody
 		return nil
 	}
-	sc := &statusCapture{ResponseWriter: w, status: http.StatusOK, idle: idleClientWriteTimeout}
 	returned := false
 	defer func() { performance.finish(sc, returned) }()
 	p.ServeHTTP(sc, out)

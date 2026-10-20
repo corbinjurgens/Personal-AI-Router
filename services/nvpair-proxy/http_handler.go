@@ -39,6 +39,9 @@ type statusCapture struct {
 	// deadline tripping), so handleHTTP can mark the workload failed rather
 	// than misreporting the truncated stream as completed.
 	wroteErr error
+	// upstreamBody is installed only for the accepted response. Its read
+	// result distinguishes a full copy from a discarded or interrupted body.
+	upstreamBody *originResponseBody
 
 	// upstreamAlive is called after each successful body write, but only once the
 	// upstream has committed — handleHTTP sets it in ModifyResponse, so it stays
@@ -479,6 +482,13 @@ type originResponseBody struct {
 	io.ReadCloser
 	response *http.Response
 	managed  bool
+	complete bool
+}
+
+func (b *originResponseBody) Read(p []byte) (int, error) {
+	n, err := b.ReadCloser.Read(p)
+	b.complete = err == io.EOF
+	return n, err
 }
 
 func (b *originResponseBody) Close() error {
@@ -1526,7 +1536,8 @@ func (f *facade) handleHTTPWithStreamIdle(w http.ResponseWriter, r *http.Request
 					committedStream = reader
 				}
 				if resp.StatusCode != http.StatusSwitchingProtocols {
-					resp.Body = &originResponseBody{ReadCloser: resp.Body, response: resp, managed: committedStream != nil}
+					sc.upstreamBody = &originResponseBody{ReadCloser: resp.Body, response: resp, managed: committedStream != nil}
+					resp.Body = sc.upstreamBody
 				}
 				// Name what actually answered (FORK_DESIGN.md §3.8). Set on the
 				// committed response only, so a failed-over attempt's headers

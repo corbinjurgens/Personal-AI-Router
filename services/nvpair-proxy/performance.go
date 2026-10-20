@@ -90,13 +90,12 @@ func (p *Proxy) sendPerformance(ctx context.Context) {
 		q.head = (q.head + 1) % len(q.items)
 		q.size--
 		q.mu.Unlock()
-		// Like the proxy's other notifications, an active write belongs to the
-		// codec's lifetime. Cancellation is checked between writes, never joined
-		// by request handling or shutdown.
+		// Cancellation covers waiting for the shared write gate. An active
+		// write still belongs to the codec's lifetime, never request handling.
 		if ctx.Err() != nil {
 			return
 		}
-		_ = p.codec.Notify("performance:sample", s)
+		_ = p.codec.NotifyContext(ctx, "performance:sample", s)
 	}
 }
 
@@ -221,7 +220,6 @@ type performanceAttempt struct {
 	wait              time.Duration
 	start             time.Time
 	header, firstBody *int64
-	status            int
 	reader            *streamFrameReader
 }
 
@@ -248,7 +246,6 @@ func (t performanceTransport) RoundTrip(r *http.Request) (*http.Response, error)
 	resp, err := t.RoundTripper.RoundTrip(r)
 	if resp != nil {
 		a.header = performanceMilliseconds(time.Since(a.start))
-		a.status = resp.StatusCode
 		resp.Body = &performanceFirstBody{ReadCloser: resp.Body, attempt: a}
 	}
 	return resp, err
@@ -339,7 +336,7 @@ func (a *performanceAttempt) finish(sc *statusCapture, returned bool) {
 		if complete {
 			m.Outcome = performancewire.OutcomeCompleted
 		}
-	} else if returned && sc.wroteErr == nil && a.parent.Err() == nil && a.status >= 200 && a.status < 300 {
+	} else if returned && sc.upstreamBody != nil && sc.upstreamBody.complete && sc.wroteErr == nil && a.parent.Err() == nil && sc.status >= 200 && sc.status < 300 {
 		m.Outcome = performancewire.OutcomeCompleted // unobserved protocol stays nil
 	}
 	a.f.host.enqueuePerformance(performancewire.Sample{Key: a.key, Profile: performancewire.Profile{EngineFamily: a.qualification.EngineFamily}, Measurement: m})
@@ -410,7 +407,7 @@ func (n *performanceNumbers) snapshot() performanceExtractMetadata {
 // Mark present-but-unusable evidence as unknown even if an earlier object had
 // usable counters. Absence still permits independently split usage/timings.
 func extractPerformanceObserved(payload []byte, q performanceExtractQualification) performanceExtractMetadata {
-	v := extractPerformancePayload(payload, q)
+	v := extractPerformanceMetadata(payload, q)
 	f := performanceExtractObject(payload)
 	var fields map[string]json.RawMessage
 	if q.EngineFamily == "ollama" && (q.APIPath == "/api/chat" || q.APIPath == "/api/generate") {
@@ -428,40 +425,14 @@ func extractPerformanceObserved(payload []byte, q performanceExtractQualificatio
 		}
 		return v
 	}
-	timings := performanceExtractObject(f["timings"])
-	usage := performanceExtractObject(f["usage"])
-	if raw, present := f["timings"]; present && performanceExtractObject(raw) == nil {
-		v.invalid |= 0xcf
-	}
-	if raw, present := f["usage"]; present && performanceExtractObject(raw) == nil {
-		v.invalid |= 1<<2 | 1<<1
-	}
-	for _, check := range []struct {
-		key   string
-		value *int64
-		bit   uint16
-	}{
-		{"prompt_n", v.PromptTokens, 1 << 0}, {"cache_n", v.CachedPromptTokens, 1 << 1}, {"predicted_n", v.OutputTokens, 1 << 2},
-		{"prompt_ms", v.PrefillNs, 1 << 3}, {"predicted_ms", v.EngineDecodeNs, 1 << 6},
-	} {
-		if _, present := timings[check.key]; present && check.value == nil {
-			v.invalid |= check.bit
+	if q.EngineFamily == "ollama" {
+		usage := performanceExtractObject(f["usage"])
+		if _, present := f["usage"]; present && usage == nil {
+			v.invalid |= 1<<2 | 1<<1
 		}
-	}
-	if _, present := usage["completion_tokens"]; present && v.OutputTokens == nil {
-		v.invalid |= 1 << 2
-	}
-	if q.EngineFamily == "strata" {
-		details := performanceExtractObject(usage["prompt_tokens_details"])
-		if raw, present := usage["prompt_tokens_details"]; present && performanceExtractObject(raw) == nil {
-			v.invalid |= 1 << 1
+		if _, present := usage["completion_tokens"]; present && v.OutputTokens == nil {
+			v.invalid |= 1 << 2
 		}
-		if _, present := details["cached_tokens"]; present && v.CachedPromptTokens == nil {
-			v.invalid |= 1 << 1
-		}
-	}
-	if _, present := timings["predicted_per_second"]; present && v.EngineDecodeTokensPerSecond == nil {
-		v.invalid |= 1 << 7
 	}
 	return v
 }

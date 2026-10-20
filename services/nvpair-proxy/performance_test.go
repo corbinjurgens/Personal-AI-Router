@@ -357,7 +357,7 @@ func TestPerformanceNonstreamUnobserved(t *testing.T) {
 	w := httptest.NewRecorder()
 	p.soleFacade().serveIngress(w, httptest.NewRequest(http.MethodPost, routeChatCompletions, strings.NewReader(`{"model":"m","stream":false}`)), "peer")
 	s := performanceOne(t, p)
-	if w.Body.String() != body || s.ProtocolComplete != nil || s.EngineDecodeTokensPerSecond != nil || s.OutputTokens != nil {
+	if w.Body.String() != body || s.Outcome != performancewire.OutcomeCompleted || s.ProtocolComplete != nil || s.EngineDecodeTokensPerSecond != nil || s.OutputTokens != nil {
 		t.Fatalf("nonstream observed/rewritten: %+v", s)
 	}
 }
@@ -419,6 +419,111 @@ func TestPerformanceSenderNeverBlocksInference(t *testing.T) {
 	waitChan(t, shutdown, "proxy shutdown while telemetry write waits")
 }
 
+type performanceGateContext struct {
+	context.Context
+	waiting chan struct{}
+	checks  atomic.Int32
+}
+
+func (c *performanceGateContext) Err() error {
+	err := c.Context.Err()
+	if c.checks.Add(1) == 2 {
+		close(c.waiting)
+	}
+	return err
+}
+
+func TestPerformanceSenderCancelsAtWriteGate(t *testing.T) {
+	p := performanceProxy(t, "llamacpp")
+	writer := &performanceBlockedWriter{entered: make(chan struct{}), release: make(chan struct{})}
+	p.codec = NewCodec(writer)
+	holder := make(chan struct{})
+	go func() {
+		defer close(holder)
+		if err := p.codec.Notify("other", nil); err != nil {
+			t.Error(err)
+		}
+	}()
+	waitChan(t, writer.entered, "other notification holds write gate")
+	parent, cancel := context.WithCancel(context.Background())
+	ctx := &performanceGateContext{Context: parent, waiting: make(chan struct{})}
+	done := make(chan struct{})
+	defer func() {
+		cancel()
+		close(writer.release)
+		waitChan(t, holder, "other notification released")
+		waitChan(t, done, "sender cleaned up")
+	}()
+	// A queued sample avoids the idle select. Wait for the second Err check
+	// to capture nil, so cancellation cannot pass via an early loop return.
+	p.performance.items[0] = performancewire.Sample{}
+	p.performance.size = 1
+	go func() { defer close(done); p.sendPerformance(ctx) }()
+	select {
+	case <-ctx.waiting:
+	case <-time.After(time.Second):
+		t.Fatal("sender did not reach notification dispatch")
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("sender did not exit while another notification held the write gate")
+	}
+}
+
+func TestPerformanceUnobservedCopyOutcome(t *testing.T) {
+	for _, scenario := range []string{"headers then stall", "body read error", "normal body"} {
+		t.Run(scenario, func(t *testing.T) {
+			setForTest(t, &firstBodyTimeout, 20*time.Millisecond)
+			p := performanceProxy(t, "llamacpp")
+			var hits atomic.Int32
+			u := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				hits.Add(1)
+				w.Header().Set("Content-Type", "application/json")
+				if scenario == "body read error" {
+					w.Header().Set("Content-Length", "100")
+				}
+				w.WriteHeader(http.StatusOK)
+				if scenario == "headers then stall" {
+					w.(http.Flusher).Flush()
+					<-r.Context().Done()
+					return
+				}
+				if _, err := io.WriteString(w, `{}`); err != nil {
+					t.Error(err)
+				}
+			}))
+			defer u.Close()
+			setBackend(t, p.soleFacade(), u.URL, true)
+			w := httptest.NewRecorder()
+			p.soleFacade().handleHTTP(w, httptest.NewRequest(http.MethodPost, routeChatCompletions, strings.NewReader(`{"model":"m","stream":false}`)))
+			samples := performanceSamples(p)
+			wantAttempts, wantOutcome := 1, performancewire.OutcomeFailed
+			if scenario == "headers then stall" {
+				wantAttempts = maxDispatchAttempts
+				if w.Code != http.StatusGatewayTimeout {
+					t.Fatalf("status=%d, want 504", w.Code)
+				}
+			}
+			if scenario == "normal body" {
+				wantOutcome = performancewire.OutcomeCompleted
+				if w.Code != http.StatusOK || w.Body.String() != `{}` {
+					t.Fatalf("status/body=%d %q", w.Code, w.Body.String())
+				}
+			}
+			if len(samples) != wantAttempts || int(hits.Load()) != wantAttempts {
+				t.Fatalf("samples=%d dispatches=%d, want %d", len(samples), hits.Load(), wantAttempts)
+			}
+			for i, sample := range samples {
+				if sample.Outcome != wantOutcome || sample.ProtocolComplete != nil {
+					t.Errorf("attempt %d measurement=%+v, want outcome %s and unknown protocol", i, sample.Measurement, wantOutcome)
+				}
+			}
+		})
+	}
+}
+
 func TestPerformanceSenderStopsOutsideWrite(t *testing.T) {
 	p := performanceProxy(t, "llamacpp")
 	ctx, cancel := context.WithCancel(context.Background())
@@ -438,8 +543,6 @@ func TestPerformanceFIFOCompletionOrderAndIncarnation(t *testing.T) {
 	second := f.newPerformanceAttempt(context.Background(), "m", routeChatCompletions, body, 2*time.Millisecond)
 	first.start = time.Now()
 	second.start = time.Now()
-	first.status = 200
-	second.status = 200
 	second.finish(&statusCapture{}, true)
 	first.finish(&statusCapture{}, true)
 	s := performanceSamples(p)
@@ -483,7 +586,6 @@ func TestPerformanceDeliveryFailureExcludesRate(t *testing.T) {
 			defer cancel()
 			a := p.soleFacade().newPerformanceAttempt(ctx, "m", routeChatCompletions, []byte(`{"model":"m","stream":true}`), 0)
 			a.start = time.Now()
-			a.status = 200
 			r, err := newStreamFrameReader(streamFrameConfig{Protocol: streamProtocolSSE, Upstream: io.NopCloser(strings.NewReader("data: " + performanceStrataFinal + "\n\ndata: [DONE]\n\n")), Extract: func(b []byte) performanceExtractMetadata { return extractPerformanceObserved(b, a.qualification) }})
 			if err != nil {
 				t.Fatal(err)
@@ -626,5 +728,99 @@ func TestPerformanceResultOwnsNumericCopy(t *testing.T) {
 	*a.Numeric.OutputTokens = 99
 	if *r.Result().Numeric.OutputTokens != 3 {
 		t.Fatal("result aliases reader storage")
+	}
+}
+
+func TestPerformanceTimingReadFieldsInvalidateStickyEvidence(t *testing.T) {
+	families := []struct {
+		name, schema, final string
+	}{
+		{"llamacpp", performanceExtractLlamaSchema, `{"choices":[{"index":0,"finish_reason":"stop"}],"timings":{"prompt_n":10,"prompt_ms":200,"prompt_per_second":50,"prompt_per_token_ms":20,"cache_n":4,"predicted_n":11,"predicted_ms":250,"predicted_per_second":40,"predicted_per_token_ms":25},"usage":{"completion_tokens":11}}`},
+		{"strata", performanceExtractStrataSchema, `{"choices":[{"index":0,"finish_reason":"stop"}],"timings":{"prompt_n":10,"prompt_ms":200,"prompt_per_second":50,"prompt_per_token_ms":20,"cache_n":4,"predicted_n":20,"predicted_ms":400,"predicted_per_second":55,"predicted_per_token_ms":18.182},"usage":{"completion_tokens":20,"prompt_tokens_details":{"cached_tokens":4}}}`},
+	}
+	fields := []struct {
+		name, container, key, affected string
+		strataOnly                     bool
+	}{
+		{"prompt count", "timings", "prompt_n", "prompt", false},
+		{"prompt interval", "timings", "prompt_ms", "prefill", false},
+		{"prompt rate", "timings", "prompt_per_second", "prompt", false},
+		{"prompt reciprocal", "timings", "prompt_per_token_ms", "prompt", false},
+		{"cache count", "timings", "cache_n", "cache", false},
+		{"output count", "timings", "predicted_n", "output", false},
+		{"decode interval", "timings", "predicted_ms", "decode", false},
+		{"decode rate", "timings", "predicted_per_second", "rate", false},
+		{"decode reciprocal", "timings", "predicted_per_token_ms", "decode", false},
+		{"usage output count", "usage", "completion_tokens", "output", false},
+		{"usage cached count", "prompt_tokens_details", "cached_tokens", "cache", true},
+	}
+	for _, family := range families {
+		t.Run(family.name, func(t *testing.T) {
+			q := performanceExtractQualification{EngineFamily: family.name, APIPath: routeChatCompletions, Streaming: true, SchemaID: family.schema}
+			for _, field := range fields {
+				if field.strataOnly && family.name != "strata" {
+					continue
+				}
+				t.Run(field.name, func(t *testing.T) {
+					for _, invalid := range []string{`"bad"`, `null`, `-1`, `1e999`} {
+						t.Run(invalid, func(t *testing.T) {
+							patch := `{"` + field.container + `":{"` + field.key + `":` + invalid + `}}`
+							if field.container == "prompt_tokens_details" {
+								patch = `{"usage":` + patch + `}`
+							}
+							body := "data: " + family.final + "\n\ndata: " + patch + "\n\ndata: " + family.final + "\n\ndata: [DONE]\n\n"
+							r, err := newStreamFrameReader(streamFrameConfig{Protocol: streamProtocolSSE, Upstream: io.NopCloser(strings.NewReader(body)), Extract: func(b []byte) performanceExtractMetadata {
+								return extractPerformanceObserved(b, q)
+							}})
+							if err != nil {
+								t.Fatal(err)
+							}
+							defer r.Close()
+							if _, err := io.Copy(io.Discard, r); err != nil {
+								t.Fatal(err)
+							}
+							result := r.Result()
+							if result.Outcome != streamOutcomeCompleted {
+								t.Fatalf("outcome=%v, want completed", result.Outcome)
+							}
+							n := result.Numeric
+							switch field.affected {
+							case "prompt":
+								if n.PromptTokens != nil || n.PrefillNs != nil {
+									t.Fatalf("invalid prompt evidence restored: %+v", n)
+								}
+							case "prefill":
+								if n.PrefillNs != nil {
+									t.Fatalf("invalid prefill interval restored: %+v", n)
+								}
+							case "cache":
+								if n.CachedPromptTokens != nil {
+									t.Fatalf("invalid cache count restored: %+v", n)
+								}
+							case "output":
+								if n.OutputTokens != nil || n.EngineDecodeNs != nil || n.EngineDecodeTokensPerSecond != nil {
+									t.Fatalf("invalid output evidence restored: %+v", n)
+								}
+							case "decode":
+								if n.EngineDecodeNs != nil || n.EngineDecodeTokensPerSecond != nil {
+									t.Fatalf("invalid decode phase restored: %+v", n)
+								}
+							case "rate":
+								if n.EngineDecodeTokensPerSecond != nil {
+									t.Fatalf("invalid decode rate restored: %+v", n)
+								}
+							}
+							if field.affected == "prompt" || field.affected == "prefill" || field.affected == "cache" {
+								if n.EngineDecodeTokensPerSecond == nil {
+									t.Fatalf("unrelated decode rate removed: %+v", n)
+								}
+							} else if n.PromptTokens == nil || n.PrefillNs == nil || n.CachedPromptTokens == nil {
+								t.Fatalf("unrelated prompt/cache evidence removed: %+v", n)
+							}
+						})
+					}
+				})
+			}
+		})
 	}
 }

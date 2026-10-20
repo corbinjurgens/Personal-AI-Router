@@ -48,6 +48,14 @@ type performanceExtractMetadata struct {
 // extractPerformancePayload consumes one bounded JSON object synchronously. It
 // neither mutates nor retains payload, and returns no content or protocol verdict.
 func extractPerformancePayload(payload []byte, q performanceExtractQualification) performanceExtractMetadata {
+	result := extractPerformanceMetadata(payload, q)
+	// A standalone object has no prior evidence to invalidate. The observer
+	// retains these private bits when merging objects across a response.
+	result.invalid = 0
+	return result
+}
+
+func extractPerformanceMetadata(payload []byte, q performanceExtractQualification) performanceExtractMetadata {
 	var result performanceExtractMetadata
 	if int64(len(payload)) > streamFrameMaxBytes {
 		return result
@@ -142,33 +150,40 @@ func performanceExtractDaily(fields map[string]json.RawMessage, strata bool) per
 	var result performanceExtractMetadata
 	timings := performanceExtractObject(fields["timings"])
 	usage := performanceExtractObject(fields["usage"])
-	result.OutputTokens = performanceExtractReconcileCount(timings, "predicted_n", usage, "completion_tokens")
-	result.PromptTokens = performanceExtractNumber(timings["prompt_n"], performancewire.MaxTokens)
-	result.CachedPromptTokens = performanceExtractNumber(timings["cache_n"], performancewire.MaxTokens)
+	if _, present := fields["timings"]; present && timings == nil {
+		result.invalid |= 0xcf
+	}
+	result.OutputTokens = performanceExtractReconcileCount(timings, "predicted_n", usage, "completion_tokens", &result.invalid, 1<<2)
+	result.PromptTokens = performanceExtractRead(timings, "prompt_n", performanceExtractTokenCount, &result.invalid, 1<<0)
+	result.CachedPromptTokens = performanceExtractRead(timings, "cache_n", performanceExtractTokenCount, &result.invalid, 1<<1)
 	if strata {
 		details := performanceExtractObject(usage["prompt_tokens_details"])
-		result.CachedPromptTokens = performanceExtractReconcileCount(timings, "cache_n", details, "cached_tokens")
+		result.CachedPromptTokens = performanceExtractReconcileCount(timings, "cache_n", details, "cached_tokens", &result.invalid, 1<<1)
 		if raw, present := usage["prompt_tokens_details"]; present && performanceExtractObject(raw) == nil {
 			result.CachedPromptTokens = nil
+			result.invalid |= 1 << 1
 		}
 	}
 	// An ambiguous or malformed usage container cannot corroborate its counters.
 	if raw, present := fields["usage"]; present && performanceExtractObject(raw) == nil {
 		result.OutputTokens = nil
+		result.invalid |= 1 << 2
 		if strata {
 			result.CachedPromptTokens = nil
+			result.invalid |= 1 << 1
 		}
 	}
 	if strata && performanceExtractStrataMCP(fields) {
 		result.PhaseDisqualified = true
 		return result
 	}
-	result.PrefillNs = performanceExtractMilliseconds(timings["prompt_ms"])
-	result.EngineDecodeNs = performanceExtractMilliseconds(timings["predicted_ms"])
-	result.EngineDecodeTokensPerSecond = performanceExtractDecimal(timings["predicted_per_second"], performancewire.MaxTokensPerSecond)
-	promptRate := performanceExtractDecimal(timings["prompt_per_second"], performancewire.MaxTokensPerSecond)
+	result.PrefillNs = performanceExtractRead(timings, "prompt_ms", performanceExtractMilliseconds, &result.invalid, 1<<3)
+	result.EngineDecodeNs = performanceExtractRead(timings, "predicted_ms", performanceExtractMilliseconds, &result.invalid, 1<<6)
+	result.EngineDecodeTokensPerSecond = performanceExtractRead(timings, "predicted_per_second", performanceExtractRate, &result.invalid, 1<<7)
+	promptRate := performanceExtractRead(timings, "prompt_per_second", performanceExtractRate, &result.invalid, 1<<0|1<<3)
 	if !performanceExtractPhase(timings, "prompt", result.PromptTokens, result.PrefillNs, promptRate, strata) {
 		result.PromptTokens, result.PrefillNs = nil, nil
+		result.invalid |= 1<<0 | 1<<3
 	}
 	steps := result.OutputTokens
 	if !strata && steps != nil {
@@ -177,9 +192,13 @@ func performanceExtractDaily(fields map[string]json.RawMessage, strata bool) per
 	}
 	if !performanceExtractPhase(timings, "predicted", steps, result.EngineDecodeNs, result.EngineDecodeTokensPerSecond, strata) {
 		result.EngineDecodeNs, result.EngineDecodeTokensPerSecond = nil, nil
+		result.invalid |= 1<<6 | 1<<7
 	}
 	if result.EngineDecodeNs == nil || *result.EngineDecodeNs == 0 || (!strata && steps == nil) {
 		result.EngineDecodeTokensPerSecond = nil
+	}
+	if _, present := timings["predicted_per_second"]; present && result.EngineDecodeTokensPerSecond == nil {
+		result.invalid |= 1 << 7
 	}
 	return result
 }
@@ -203,8 +222,28 @@ func performanceExtractStrataMCP(fields map[string]json.RawMessage) bool {
 	return false
 }
 
-func performanceExtractReconcileCount(a map[string]json.RawMessage, ak string, b map[string]json.RawMessage, bk string) *int64 {
-	x, y := performanceExtractNumber(a[ak], performancewire.MaxTokens), performanceExtractNumber(b[bk], performancewire.MaxTokens)
+// Read and record validity together so auxiliary fields cannot be omitted from
+// a separate observer-maintained list of fields that invalidate prior evidence.
+func performanceExtractRead[T any](fields map[string]json.RawMessage, key string, parse func(json.RawMessage) *T, invalid *uint16, bit uint16) *T {
+	raw, present := fields[key]
+	value := parse(raw)
+	if present && value == nil {
+		*invalid |= bit
+	}
+	return value
+}
+
+func performanceExtractTokenCount(raw json.RawMessage) *int64 {
+	return performanceExtractNumber(raw, performancewire.MaxTokens)
+}
+
+func performanceExtractRate(raw json.RawMessage) *float64 {
+	return performanceExtractDecimal(raw, performancewire.MaxTokensPerSecond)
+}
+
+func performanceExtractReconcileCount(a map[string]json.RawMessage, ak string, b map[string]json.RawMessage, bk string, invalid *uint16, bit uint16) *int64 {
+	x := performanceExtractRead(a, ak, performanceExtractTokenCount, invalid, bit)
+	y := performanceExtractRead(b, bk, performanceExtractTokenCount, invalid, bit)
 	if _, present := a[ak]; present && x == nil {
 		return nil
 	}
@@ -212,6 +251,7 @@ func performanceExtractReconcileCount(a map[string]json.RawMessage, ak string, b
 		return nil
 	}
 	if x != nil && y != nil && *x != *y {
+		*invalid |= bit
 		return nil
 	}
 	if x != nil {
