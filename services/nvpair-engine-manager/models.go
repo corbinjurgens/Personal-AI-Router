@@ -55,6 +55,29 @@ type ModelsResult struct {
 	MemoryEvidence *performancewire.MemoryEvidence `json:"memoryEvidence,omitempty"`
 }
 
+// UnmarshalJSON keeps optional memory evidence from invalidating the model
+// inventory. The evidence decoder remains strict; rejected evidence is absent.
+func (m *ModelsResult) UnmarshalJSON(data []byte) error {
+	type inventory ModelsResult
+	next := inventory(*m)
+	next.MemoryEvidence = nil
+	wire := struct {
+		*inventory
+		MemoryEvidence json.RawMessage `json:"memoryEvidence"`
+	}{inventory: &next}
+	if err := json.Unmarshal(data, &wire); err != nil {
+		return err
+	}
+	if len(wire.MemoryEvidence) != 0 && !bytes.Equal(bytes.TrimSpace(wire.MemoryEvidence), []byte("null")) {
+		var evidence performancewire.MemoryEvidence
+		if err := json.Unmarshal(wire.MemoryEvidence, &evidence); err == nil {
+			next.MemoryEvidence = &evidence
+		}
+	}
+	*m = ModelsResult(next)
+	return nil
+}
+
 // Models returns the union of model names served by every installed, running
 // engine that declares a list_models action with a result-extraction spec —
 // the flat node-level list. It is a thin wrapper over {@link ModelsResult} kept

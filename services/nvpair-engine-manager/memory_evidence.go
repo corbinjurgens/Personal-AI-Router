@@ -108,9 +108,11 @@ type memoryReading struct {
 // conservative monotonic allocation-age anchor: source capture, the whole
 // sweep's I/O and buffering, and verification all count toward reading age.
 type memoryEvidenceCapture struct {
-	generation uint64
-	startedAt  time.Time
-	source     memoryEvidenceSourceSnapshot
+	generation             uint64
+	startedAt              time.Time
+	source                 memoryEvidenceSourceSnapshot
+	artifactDigest         string
+	retainedArtifactDigest string
 }
 
 type memoryEvidenceSourceSnapshot struct {
@@ -210,9 +212,29 @@ func (e *Executor) captureMemoryEvidence() memoryEvidenceCapture {
 	p.generation++
 	generation := p.generation
 	startedAt := p.clock()
+	retainedArtifactDigest := ""
+	if p.artifact != nil {
+		retainedArtifactDigest = p.artifact.digest
+	}
 	p.mu.Unlock()
 	source := e.memoryEvidenceSource(provider)
-	return memoryEvidenceCapture{generation: generation, startedAt: startedAt, source: source}
+	artifactDigest := ""
+	// Accept authority before engine I/O so even the first contradictory
+	// observation can withdraw it if the document disappears during the read.
+	// A document introduced during engine I/O waits for the next capture.
+	if data, present, err := readBoundedMemoryQualification(filepath.Join(e.baseDir, memoryQualificationFile)); present && err == nil {
+		sum := sha256.Sum256(data)
+		artifactDigest = hex.EncodeToString(sum[:])
+		if document, err := decodeMemoryQualification(data); err == nil && len(*document.Records) > 0 {
+			current := e.memoryEvidenceSource(e.memoryEvidenceHostProvider())
+			if sameMemoryEvidenceSource(source, current) {
+				p.mu.Lock()
+				p.acceptMemoryQualification(document, artifactDigest, recordEngine((*document.Records)[0]), source, p.clock())
+				p.mu.Unlock()
+			}
+		}
+	}
+	return memoryEvidenceCapture{generation: generation, startedAt: startedAt, source: source, artifactDigest: artifactDigest, retainedArtifactDigest: retainedArtifactDigest}
 }
 
 // memoryEvidenceEntries is the post-read verifier/producer. It rechecks the
@@ -230,12 +252,10 @@ func (e *Executor) memoryEvidenceEntries(capture memoryEvidenceCapture, engine s
 	path := filepath.Join(e.baseDir, memoryQualificationFile)
 	data, present, readErr := readBoundedMemoryQualification(path)
 
-	var document memoryQualificationArtifact
 	documentOK := false
 	if readErr == nil && present {
-		doc, err := decodeMemoryQualification(data)
+		_, err := decodeMemoryQualification(data)
 		if err == nil {
-			document = doc
 			documentOK = true
 		}
 	}
@@ -252,9 +272,6 @@ func (e *Executor) memoryEvidenceEntries(capture memoryEvidenceCapture, engine s
 	defer p.mu.Unlock()
 	now := p.clock()
 
-	if sourceUnchanged && documentOK && capture.generation == p.generation {
-		p.acceptMemoryQualification(document, digest, engine, capture.source, now)
-	}
 	if capture.startedAt.IsZero() || now.Before(capture.startedAt) || now.UnixMilli() < capture.startedAt.UnixMilli() {
 		p.authority.clockUncertain = true
 	}
@@ -289,17 +306,15 @@ func (e *Executor) memoryEvidenceEntries(capture memoryEvidenceCapture, engine s
 		return memoryEvidenceLoadedUnknown(capture, engine, rows, rowsOK, sourceUnchanged, qualificationAge, now)
 	}
 
-	// Compare every current same-domain observation with its bound first, so one
-	// exceedance invalidates every qualified entry in the document.
-	if sourceUnchanged && p.authority.withdrawn == false && capture.generation >= p.generation {
+	// Contradictions survive overlapping sweeps even when their observations
+	// are too old to publish. Bind them to authority retained or read before
+	// I/O so a late response cannot withdraw replacement authority.
+	if sourceUnchanged && state != nil && (capture.artifactDigest == state.digest || capture.retainedArtifactDigest == state.digest) && !p.authority.withdrawn && rowsOK {
 		for _, record := range relevant {
 			if !recordMatchesCapture(record, capture.source, engine) || !memoryRecordSupported(record, capture.source) {
 				continue
 			}
 			model := memoryCanonicalModel(recordModel(record), naming)
-			if prior, seen := p.readings[memoryReadingKey(engine, model)]; seen && prior.generation > capture.generation {
-				continue
-			}
 			reading, ok := rows[model]
 			if !ok || reading.ambiguous || reading.allocated == nil || reading.digest != recordModelDigest(record) {
 				continue

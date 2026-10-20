@@ -304,6 +304,71 @@ func TestModelsMemoryEvidenceWithdrawalCannotRevive(t *testing.T) {
 	}
 }
 
+func TestModelsResultDecodeDiscardsInvalidMemoryEvidence(t *testing.T) {
+	test := func(name, evidence string) {
+		t.Run(name, func(t *testing.T) {
+			payload := `{"models":["m"],"modelsByEngine":{"ollama":["m"]},"loadedByEngine":{"ollama":["m"]},"policy":{"revision":"21","roles":{}},"memoryEvidence":` + evidence + `}`
+			result := ModelsResult{MemoryEvidence: &performancewire.MemoryEvidence{Version: 2}}
+			if err := json.Unmarshal([]byte(payload), &result); err != nil {
+				t.Fatalf("decode inventory with invalid optional evidence: %v", err)
+			}
+			want := ModelsResult{
+				Models:         []string{"m"},
+				ByEngine:       map[string][]string{"ollama": {"m"}},
+				LoadedByEngine: map[string][]string{"ollama": {"m"}},
+				Policy:         &nodepolicy.Advertisement{Revision: "21", Roles: map[string]nodepolicy.AdvertisedRole{}},
+			}
+			if !reflect.DeepEqual(result, want) {
+				t.Fatalf("decoded result = %+v, want %+v", result, want)
+			}
+		})
+	}
+	test("unsupported version", `{"version":2,"entries":[],"omittedEntries":0}`)
+	test("missing required field", `{"version":1,"entries":[]}`)
+	test("wrong envelope type", `[]`)
+	test("wrong entries type", `{"version":1,"entries":{},"omittedEntries":0}`)
+	test("invalid entry", `{"version":1,"entries":[{}],"omittedEntries":0}`)
+	test("unknown envelope field", `{"version":1,"entries":[],"omittedEntries":0,"extra":true}`)
+	test("oversize envelope", `{"version":1,"entries":[],"omittedEntries":0,"extra":"`+strings.Repeat("x", performancewire.MaxMemoryEvidenceBytes)+`"}`)
+}
+
+func TestModelsResultDecodeOptionalMemoryEvidence(t *testing.T) {
+	test := func(name, payload string, want *performancewire.MemoryEvidence) {
+		t.Run(name, func(t *testing.T) {
+			result := ModelsResult{MemoryEvidence: &performancewire.MemoryEvidence{Version: 2}}
+			if err := json.Unmarshal([]byte(payload), &result); err != nil {
+				t.Fatalf("decode optional evidence: %v", err)
+			}
+			if !reflect.DeepEqual(result.Models, []string{"m"}) {
+				t.Fatalf("models = %v, want [m]", result.Models)
+			}
+			if !reflect.DeepEqual(result.MemoryEvidence, want) {
+				t.Fatalf("evidence = %+v, want %+v", result.MemoryEvidence, want)
+			}
+		})
+	}
+	test("valid replaces previous evidence", `{"models":["m"],"memoryEvidence":{"version":1,"entries":[],"omittedEntries":0}}`, &performancewire.MemoryEvidence{Version: 1, Entries: []performancewire.MemoryEvidenceEntry{}})
+	test("absent clears previous evidence", `{"models":["m"]}`, nil)
+	test("null clears previous evidence", `{"models":["m"],"memoryEvidence":null}`, nil)
+}
+
+func TestModelsResultDecodeRejectsMalformedInventory(t *testing.T) {
+	test := func(name, payload string) {
+		t.Run(name, func(t *testing.T) {
+			var result ModelsResult
+			if err := json.Unmarshal([]byte(payload), &result); err == nil {
+				t.Fatalf("decode malformed inventory %s succeeded", payload)
+			}
+		})
+	}
+	test("invalid JSON", `{"models":["m"],"memoryEvidence":`)
+	test("wrong result type", `[]`)
+	test("wrong models type", `{"models":{},"memoryEvidence":{"version":2}}`)
+	test("wrong attribution type", `{"models":["m"],"modelsByEngine":{"ollama":1}}`)
+	test("wrong residency type", `{"models":["m"],"loadedByEngine":{"ollama":1}}`)
+	test("wrong policy type", `{"models":["m"],"policy":[]}`)
+}
+
 func TestModelsMemoryEvidenceRPCCodec(t *testing.T) {
 	h, _ := memoryModelsFixture(t)
 	h.writeArtifact(t, h.artifact("2"))

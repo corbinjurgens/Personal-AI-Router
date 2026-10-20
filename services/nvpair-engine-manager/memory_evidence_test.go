@@ -4,13 +4,18 @@
 package main
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -172,6 +177,258 @@ func sameMemoryInt64(a, b *int64) bool {
 		return a == nil && b == nil
 	}
 	return *a == *b
+}
+
+func TestModelsMemoryEvidenceFirstAuthorityDisappearsDuringContradiction(t *testing.T) {
+	h, loaded := memoryModelsFixture(t)
+	original := h.writeArtifact(t, h.artifact("2"))
+	transport := h.ex.client.Transport
+	var removed atomic.Bool
+	h.ex.client.Transport = memoryModelsTransport(func(request *http.Request) (*http.Response, error) {
+		if request.URL.Path == "/api/ps" && removed.CompareAndSwap(false, true) {
+			h.removeArtifact(t)
+		}
+		return transport.RoundTrip(request)
+	})
+	*loaded = memoryPS(memoryTestModel, memoryTestDigest, 11000, 8192)
+	if entry := modelsMemoryEntry(t, h.ex.ModelsResult(context.Background())); memoryUpper(entry) != nil {
+		t.Fatalf("contradiction with missing document qualified: %+v", entry)
+	}
+	h.writeArtifactBytes(t, original)
+	*loaded = memoryPS(memoryTestModel, memoryTestDigest, 9000, 8192)
+	entry := modelsMemoryEntry(t, h.ex.ModelsResult(context.Background()))
+	if memoryUpper(entry) != nil || !slicesContain(entry.Uncertainty, performancewire.MemoryUncertaintyBoundExceeded) {
+		t.Fatalf("restored first authority forgot contradiction: %+v", entry)
+	}
+}
+
+func TestModelsMemoryEvidenceOlderContradictionCompletesBeforeNewerRead(t *testing.T) {
+	h, _ := memoryModelsFixture(t)
+	h.writeArtifact(t, h.artifact("2"))
+	entered := make(chan struct{}, 2)
+	olderRelease, newerRelease := make(chan struct{}), make(chan struct{})
+	var olderOnce, newerOnce sync.Once
+	unblockOlder := func() { olderOnce.Do(func() { close(olderRelease) }) }
+	unblockNewer := func() { newerOnce.Do(func() { close(newerRelease) }) }
+	t.Cleanup(unblockOlder)
+	t.Cleanup(unblockNewer)
+	transport := h.ex.client.Transport
+	var requests atomic.Int64
+	h.ex.client.Transport = memoryModelsTransport(func(request *http.Request) (*http.Response, error) {
+		if request.URL.Path != "/api/ps" {
+			return transport.RoundTrip(request)
+		}
+		n := requests.Add(1)
+		allocation := 9000
+		if n <= 2 {
+			release := newerRelease
+			if n == 1 {
+				release, allocation = olderRelease, 11000
+			}
+			entered <- struct{}{}
+			select {
+			case <-release:
+			case <-request.Context().Done():
+				return nil, request.Context().Err()
+			}
+		}
+		body := memoryPS(memoryTestModel, memoryTestDigest, allocation, 8192)
+		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body))}, nil
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	start := func() chan ModelsResult {
+		result := make(chan ModelsResult, 1)
+		go func() { result <- h.ex.ModelsResult(ctx) }()
+		select {
+		case <-entered:
+		case <-ctx.Done():
+			t.Fatal("loaded-model request did not enter fixture")
+		}
+		return result
+	}
+	older, newer := start(), start()
+	unblockOlder()
+	if entry := modelsMemoryEntry(t, <-older); memoryUpper(entry) != nil {
+		t.Fatal("older completion published a qualified upper")
+	}
+	unblockNewer()
+	for _, result := range []ModelsResult{<-newer, h.ex.ModelsResult(ctx)} {
+		entry := modelsMemoryEntry(t, result)
+		if memoryUpper(entry) != nil || !slicesContain(entry.Uncertainty, performancewire.MemoryUncertaintyBoundExceeded) {
+			t.Fatalf("lower reading forgot earlier completed contradiction: %+v", entry)
+		}
+	}
+}
+
+func TestModelsMemoryEvidenceRetainedAuthoritySurvivesUnavailableCapture(t *testing.T) {
+	test := func(name string, corrupt bool) {
+		t.Run(name, func(t *testing.T) {
+			h, loaded := memoryModelsFixture(t)
+			original := h.writeArtifact(t, h.artifact("2"))
+			if memoryUpper(modelsMemoryEntry(t, h.ex.ModelsResult(context.Background()))) == nil {
+				t.Fatal("initial authority did not qualify")
+			}
+			if corrupt {
+				h.writeArtifactBytes(t, []byte(`{"version":`))
+			} else {
+				h.removeArtifact(t)
+			}
+			transport := h.ex.client.Transport
+			var restored atomic.Bool
+			h.ex.client.Transport = memoryModelsTransport(func(request *http.Request) (*http.Response, error) {
+				if request.URL.Path == "/api/ps" && restored.CompareAndSwap(false, true) {
+					h.writeArtifactBytes(t, original)
+				}
+				return transport.RoundTrip(request)
+			})
+			*loaded = memoryPS(memoryTestModel, memoryTestDigest, 11000, 8192)
+			if entry := modelsMemoryEntry(t, h.ex.ModelsResult(context.Background())); memoryUpper(entry) != nil {
+				t.Fatalf("contradicting retained authority qualified: %+v", entry)
+			}
+			*loaded = memoryPS(memoryTestModel, memoryTestDigest, 9000, 8192)
+			entry := modelsMemoryEntry(t, h.ex.ModelsResult(context.Background()))
+			if memoryUpper(entry) != nil || !slicesContain(entry.Uncertainty, performancewire.MemoryUncertaintyBoundExceeded) {
+				t.Fatalf("restored identical document forgot retained contradiction: %+v", entry)
+			}
+		})
+	}
+	test("missing document at capture", false)
+	test("corrupt document at capture", true)
+}
+
+func TestModelsMemoryEvidenceDefersAuthorityChangedDuringRead(t *testing.T) {
+	test := func(name string, initiallyPresent bool) {
+		t.Run(name, func(t *testing.T) {
+			h, loaded := memoryModelsFixture(t)
+			if initiallyPresent {
+				h.writeArtifact(t, h.artifact("2"))
+				if memoryUpper(modelsMemoryEntry(t, h.ex.ModelsResult(context.Background()))) == nil {
+					t.Fatal("initial authority did not qualify")
+				}
+			}
+			prior := h.ex.memoryEvidence.authority
+			transport := h.ex.client.Transport
+			var changed atomic.Bool
+			h.ex.client.Transport = memoryModelsTransport(func(request *http.Request) (*http.Response, error) {
+				if request.URL.Path == "/api/ps" && changed.CompareAndSwap(false, true) {
+					h.writeArtifact(t, h.artifact("3"))
+				}
+				return transport.RoundTrip(request)
+			})
+			*loaded = memoryPS(memoryTestModel, memoryTestDigest, 11000, 8192)
+			entry := modelsMemoryEntry(t, h.ex.ModelsResult(context.Background()))
+			if memoryUpper(entry) != nil || entry.Qualification.ID != nil || entry.Qualification.ArtifactDigest != nil || entry.State == performancewire.MemoryStateQualified {
+				t.Fatalf("document changed during I/O supplied authority: %+v", entry)
+			}
+			// A same-capture contradiction may withdraw the retained document,
+			// but cannot accept the replacement document observed only after I/O.
+			prior.withdrawn = initiallyPresent
+			if got := h.ex.memoryEvidence.authority; got != prior {
+				t.Fatalf("document changed during I/O advanced authority: got %+v, want %+v", got, prior)
+			}
+			*loaded = memoryPS(memoryTestModel, memoryTestDigest, 9000, 8192)
+			if memoryUpper(modelsMemoryEntry(t, h.ex.ModelsResult(context.Background()))) == nil {
+				t.Fatal("fresh capture of replacement document did not qualify")
+			}
+		})
+	}
+	test("document appeared after capture", false)
+	test("accepted document replaced after capture", true)
+}
+
+func TestModelsMemoryEvidenceOverlappingContradictionBinding(t *testing.T) {
+	test := func(name string, replaceArtifact, replaceSource, removeArtifact bool, wantWithdrawn bool) {
+		t.Run(name, func(t *testing.T) {
+			h, _ := memoryModelsFixture(t)
+			original := h.writeArtifact(t, h.artifact("2"))
+			entered := make(chan struct{})
+			release := make(chan struct{})
+			var releaseOnce sync.Once
+			unblock := func() { releaseOnce.Do(func() { close(release) }) }
+			t.Cleanup(unblock)
+			var requests atomic.Int64
+			h.ex.client.Transport = memoryModelsTransport(func(request *http.Request) (*http.Response, error) {
+				body := ""
+				switch request.URL.Path {
+				case "/api/tags":
+					body = fmt.Sprintf(`{"models":[{"name":%q,"digest":%q}]}`, memoryTestModel, memoryTestDigest)
+				case "/api/ps":
+					allocation := 9000
+					if requests.Add(1) == 1 {
+						close(entered)
+						select {
+						case <-release:
+						case <-request.Context().Done():
+							return nil, request.Context().Err()
+						}
+						allocation = 11000
+					}
+					body = memoryPS(memoryTestModel, memoryTestDigest, allocation, 8192)
+				default:
+					return nil, fmt.Errorf("unexpected endpoint %s", request.URL.Path)
+				}
+				if request.Method != http.MethodGet {
+					return nil, fmt.Errorf("unexpected method %s", request.Method)
+				}
+				return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body))}, nil
+			})
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			older := make(chan ModelsResult, 1)
+			go func() { older <- h.ex.ModelsResult(ctx) }()
+			select {
+			case <-entered:
+			case <-ctx.Done():
+				t.Fatal("older loaded-model request did not enter fixture")
+			}
+			if replaceSource {
+				state := h.ex.engines["ollama"]
+				state.mu.Lock()
+				state.launchDigest = strings.Repeat("d", 64)
+				state.mu.Unlock()
+			}
+			if replaceArtifact {
+				h.writeArtifact(t, h.artifact("3"))
+			}
+			newer := modelsMemoryEntry(t, h.ex.ModelsResult(ctx))
+			if got := memoryUpper(newer) != nil; got == replaceSource {
+				t.Fatalf("newer lower reading qualified = %v, want %v", got, !replaceSource)
+			}
+			if removeArtifact {
+				h.removeArtifact(t)
+			}
+			unblock()
+			select {
+			case result := <-older:
+				if entry := modelsMemoryEntry(t, result); memoryUpper(entry) != nil {
+					t.Fatal("older completion published a positive upper")
+				}
+			case <-ctx.Done():
+				t.Fatal("older sweep did not complete")
+			}
+			if removeArtifact {
+				h.writeArtifactBytes(t, original)
+			}
+			if replaceSource {
+				state := h.ex.engines["ollama"]
+				state.mu.Lock()
+				state.launchDigest = memoryTestLaunch
+				state.mu.Unlock()
+			}
+			last := modelsMemoryEntry(t, h.ex.ModelsResult(ctx))
+			if got := memoryUpper(last) == nil; got != wantWithdrawn {
+				t.Fatalf("subsequent lower reading withdrawn = %v, want %v: %+v", got, wantWithdrawn, last)
+			}
+			if got := slicesContain(last.Uncertainty, performancewire.MemoryUncertaintyBoundExceeded); got != wantWithdrawn {
+				t.Fatalf("bound-exceeded = %v, want %v: %+v", got, wantWithdrawn, last)
+			}
+		})
+	}
+	test("same source and artifact retain contradiction", false, false, false, true)
+	test("absent artifact cannot erase contradiction", false, false, true, true)
+	test("replacement artifact excludes old contradiction", true, false, false, false)
+	test("replacement source excludes old contradiction", false, true, false, false)
 }
 
 func TestMemoryEvidenceQualifiedSyntheticPositive(t *testing.T) {
