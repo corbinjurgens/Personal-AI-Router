@@ -109,7 +109,7 @@ func testResidentWire[T interface{ Validate() error }](t *testing.T, valid T, re
 }
 
 func TestPrepareResidentWire(t *testing.T) {
-	valid := PrepareResidentParams{PolicyRevision: "1", ProxyRunID: "proxy-1", ManagerIncarnation: "manager-1", Engine: "ollama", Model: "m:latest", Identity: residentIdentity(), OperationID: "op-1", TimeoutMs: 60_000}
+	valid := PrepareResidentParams{PolicyRevision: "1", ProxyRunID: "proxy-1", ManagerIncarnation: "manager-1", Engine: "ollama", Model: "m:latest", Identity: residentIdentity(), OperationID: "resident:1", TimeoutMs: 60_000}
 	testResidentWire(t, valid, "policyRevision proxyRunId engine model identity operationId timeoutMs",
 		residentWireRejection{"noncanonical revision", "policyRevision", "01"},
 		residentWireRejection{"revision overflow", "policyRevision", strings.Repeat("9", 30)},
@@ -323,7 +323,7 @@ func TestResidentWireBoundsAccepted(t *testing.T) {
 	longID := strings.Repeat("i", 128)
 	for _, timeout := range []int{1, MaxResidentTimeoutMs} {
 		t.Run(fmt.Sprintf("timeout %d", timeout), func(t *testing.T) {
-			p := PrepareResidentParams{PolicyRevision: "9223372036854775807", ProxyRunID: longID, ManagerIncarnation: longID, Engine: "ollama", Model: strings.Repeat("m", MaxResidentModelBytes), Identity: residentIdentity(), OperationID: longID, TimeoutMs: timeout}
+			p := PrepareResidentParams{PolicyRevision: "9223372036854775807", ProxyRunID: longID, ManagerIncarnation: longID, Engine: "ollama", Model: strings.Repeat("m", MaxResidentModelBytes), Identity: residentIdentity(), OperationID: "resident:18446744073709551615", TimeoutMs: timeout}
 			testResidentWire(t, p, "policyRevision proxyRunId engine model identity operationId timeoutMs")
 		})
 	}
@@ -445,7 +445,7 @@ func TestResidentNestedValidation(t *testing.T) {
 }
 
 func TestPrepareResidentWithoutManagerIncarnation(t *testing.T) {
-	p := PrepareResidentParams{PolicyRevision: "1", ProxyRunID: "p-1", Engine: "ollama", Model: "m", Identity: residentIdentity(), OperationID: "op-1", TimeoutMs: 1}
+	p := PrepareResidentParams{PolicyRevision: "1", ProxyRunID: "p-1", Engine: "ollama", Model: "m", Identity: residentIdentity(), OperationID: "resident:1", TimeoutMs: 1}
 	testResidentWire(t, p, "policyRevision proxyRunId engine model identity operationId timeoutMs")
 }
 
@@ -467,6 +467,87 @@ func TestResidentMethodNames(t *testing.T) {
 	}
 	if MethodSetResidency != "node/set-residency" {
 		t.Fatal("set residency method changed")
+	}
+}
+
+func TestServedResidentOrderedOperationIDs(t *testing.T) {
+	for _, tc := range []struct {
+		sequence uint64
+		id       string
+	}{
+		{1, "resident:1"}, {42, "resident:42"}, {^uint64(0), "resident:18446744073709551615"},
+	} {
+		t.Run(tc.id, func(t *testing.T) {
+			id, err := ResidentOperationID(tc.sequence)
+			if err != nil || id != tc.id {
+				t.Fatalf("format=%q error=%v want=%q", id, err, tc.id)
+			}
+			sequence, err := ParseResidentOperationID(tc.id)
+			if err != nil || sequence != tc.sequence {
+				t.Fatalf("parse=%d error=%v want=%d", sequence, err, tc.sequence)
+			}
+		})
+	}
+	if _, err := ResidentOperationID(0); err == nil {
+		t.Fatal("formatted zero sequence")
+	}
+	for _, id := range []string{"", "op-1", "resident:0", "resident:01", "resident:+1", "resident:-1", "resident:1 ", "Resident:1", "resident:18446744073709551616"} {
+		t.Run("reject "+id, func(t *testing.T) {
+			if _, err := ParseResidentOperationID(id); err == nil {
+				t.Fatalf("accepted %q", id)
+			}
+		})
+	}
+}
+
+func TestServedResidentReconcileKeepsOpaqueManagerIDs(t *testing.T) {
+	valid := ReconcileResidentParams{OperationID: "legacy-opaque-op", PolicyRevision: "1", Engine: "ollama", Model: "m:latest", Identity: residentIdentity(), TimeoutMs: 1000,
+		Reservation: ResidentReservationEvidence{ReservationID: "reservation", ProxyRunID: "proxy", ManagerIncarnation: "manager"}, Load: ResidentLoadOptions{ContextLength: 4096, KeepAliveSeconds: 300}}
+	testResidentWire(t, valid, "operationId policyRevision engine model identity timeoutMs reservation load")
+	prepare := PrepareResidentParams{PolicyRevision: valid.PolicyRevision, ProxyRunID: valid.Reservation.ProxyRunID, ManagerIncarnation: valid.Reservation.ManagerIncarnation,
+		Engine: valid.Engine, Model: valid.Model, Identity: valid.Identity, OperationID: valid.OperationID, TimeoutMs: valid.TimeoutMs}
+	if err := prepare.Validate(); err == nil {
+		t.Fatal("proxy prepare accepted opaque manager ID")
+	}
+}
+
+func TestServedResidentRecoveryFinishResultWire(t *testing.T) {
+	testResidentWire(t, FinishResidentResult{ReservationID: "reservation", Outcome: ResidentUnknown, RecoveryID: "recovery-1"}, "reservationId outcome",
+		residentWireRejection{"empty recovery ID", "recoveryId", ""},
+		residentWireRejection{"invalid recovery ID", "recoveryId", "recovery/1"},
+		residentWireRejection{"long recovery ID", "recoveryId", strings.Repeat("r", 129)},
+		residentWireRejection{"settled loaded cannot recover", "outcome", ResidentLoaded})
+	testResidentWire(t, FinishResidentResult{ReservationID: "reservation", Outcome: ResidentUnknown}, "reservationId outcome")
+}
+
+func TestServedResidentCapacityObservationWire(t *testing.T) {
+	observation := ResidentCapacityObservation{ManagerIncarnation: "manager", Engine: "ollama", Model: "m:latest", Identity: residentIdentity(), Loaded: false}
+	testResidentWire(t, observation, "managerIncarnation engine model identity loaded",
+		residentWireRejection{"invalid manager", "managerIncarnation", ""},
+		residentWireRejection{"invalid reference", "model", " m"},
+		residentWireRejection{"invalid identity", "identity", StrictModelIdentity{}},
+		residentWireRejection{"false must be boolean", "loaded", "false"})
+}
+
+func TestServedResidentObserveWire(t *testing.T) {
+	valid := ObserveResidentParams{ReservationID: "reservation", ProxyRunID: "proxy", OperationID: "resident:1", RecoveryID: "recovery-1", Sequence: 1, OperationComplete: true,
+		Observation: ResidentCapacityObservation{ManagerIncarnation: "manager", Engine: "ollama", Model: "m:latest", Identity: residentIdentity(), Loaded: false}}
+	testResidentWire(t, valid, "reservationId proxyRunId operationId recoveryId sequence operationComplete observation",
+		residentWireRejection{"invalid reservation", "reservationId", ""},
+		residentWireRejection{"invalid proxy", "proxyRunId", "p/1"},
+		residentWireRejection{"invalid operation", "operationId", "op/1"},
+		residentWireRejection{"invalid recovery", "recoveryId", ""},
+		residentWireRejection{"zero sequence", "sequence", 0},
+		residentWireRejection{"negative sequence", "sequence", -1},
+		residentWireRejection{"fractional sequence", "sequence", 1.5},
+		residentWireRejection{"overflow sequence", "sequence", json.Number("18446744073709551616")},
+		residentWireRejection{"incomplete operation", "operationComplete", false},
+		residentWireRejection{"completion must be boolean", "operationComplete", "true"},
+		residentWireRejection{"invalid observation", "observation", ResidentCapacityObservation{}})
+	testResidentWire(t, ObserveResidentResult{ReservationID: "reservation", Settled: true}, "reservationId settled",
+		residentWireRejection{"unsettled success", "settled", false}, residentWireRejection{"invalid reservation", "reservationId", ""})
+	if MethodObserveResident != "node/observe-resident" {
+		t.Fatal("recovery method name changed")
 	}
 }
 

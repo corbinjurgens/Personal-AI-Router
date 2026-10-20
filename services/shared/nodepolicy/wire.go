@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strconv"
 	"strings"
 
 	"nvpair-shared/engines"
@@ -20,6 +21,7 @@ const (
 	MethodReconcileResident      = "engine:reconcile-resident"
 	MethodFinishResident         = "node/finish-resident"
 	MethodDispatchResident       = "node/dispatch-resident"
+	MethodObserveResident        = "node/observe-resident"
 	MaxResidentTimeoutMs         = 60_000
 	MaxModelConfigurationEntries = 256
 	MaxResidentModelBytes        = 1024
@@ -162,6 +164,11 @@ func (r *DispatchResidentResult) UnmarshalJSON(data []byte) error {
 // the receiver fixes a deadline once, and retries must never extend it.
 // Model is already normalized by the authoritative engine descriptor. Syntax
 // validation here cannot establish normalization, qualification or permission.
+// OperationID is resident:<positive uint64>, allocated sequentially by the
+// broker for the current proxy run. Retry uncertain preparations with the exact
+// same ID/payload. Manager replacement does not reset this allocator. The proxy
+// exits on broker EOF; attaching a future broker to a surviving proxy would
+// require explicit cursor readback rather than guessing a new sequence.
 type PrepareResidentParams struct {
 	PolicyRevision     string              `json:"policyRevision"`
 	ProxyRunID         string              `json:"proxyRunId"`
@@ -174,6 +181,16 @@ type PrepareResidentParams struct {
 }
 
 func (p PrepareResidentParams) Validate() error {
+	if err := p.validateFields(); err != nil {
+		return err
+	}
+	_, err := ParseResidentOperationID(p.OperationID)
+	return err
+}
+
+// ReconcileResidentParams shares these field checks, but keeps operation IDs
+// opaque: only the proxy grants execution and enforces its ordered ID stream.
+func (p PrepareResidentParams) validateFields() error {
 	if err := validateRevision(p.PolicyRevision); err != nil {
 		return err
 	}
@@ -190,6 +207,26 @@ func (p PrepareResidentParams) Validate() error {
 		return err
 	}
 	return p.Identity.Validate()
+}
+
+// ResidentOperationID formats the one canonical preparation sequence syntax.
+func ResidentOperationID(sequence uint64) (string, error) {
+	if sequence == 0 {
+		return "", errors.New("resident operation sequence must be positive")
+	}
+	return "resident:" + strconv.FormatUint(sequence, 10), nil
+}
+
+func ParseResidentOperationID(id string) (uint64, error) {
+	decimal, ok := strings.CutPrefix(id, "resident:")
+	if !ok {
+		return 0, errors.New("operationId must be resident:<positive uint64>")
+	}
+	sequence, err := strconv.ParseUint(decimal, 10, 64)
+	if err != nil || sequence == 0 || strconv.FormatUint(sequence, 10) != decimal {
+		return 0, errors.New("operationId must contain a canonical positive uint64")
+	}
+	return sequence, nil
 }
 
 // ModelConfigurationReason contains codes only; raw engine errors and identity
@@ -307,7 +344,7 @@ func (p ReconcileResidentParams) Validate() error {
 	}
 	return (PrepareResidentParams{PolicyRevision: p.PolicyRevision, ProxyRunID: p.Reservation.ProxyRunID,
 		ManagerIncarnation: p.Reservation.ManagerIncarnation, Engine: p.Engine, Model: p.Model,
-		Identity: p.Identity, OperationID: p.OperationID, TimeoutMs: p.TimeoutMs}).Validate()
+		Identity: p.Identity, OperationID: p.OperationID, TimeoutMs: p.TimeoutMs}).validateFields()
 }
 
 type ResidentOutcome string
@@ -375,7 +412,8 @@ func (r ReconcileResidentResult) Validate() error {
 }
 
 // FinishResidentParams consumes an exact reservation once. The owner retains
-// the terminal result for duplicate finishes; changed payloads conflict. IDs
+// the terminal result for duplicate finishes while retained; changed payloads
+// conflict. Retired operations are refused, never reopened. IDs
 // must never be reused in a proxy run. A stale ID cannot release another hold.
 // Timeout/cancellation/failure alone is not evidence of engine termination.
 // Observation may be absent when no authoritative inventory is available.
@@ -394,17 +432,81 @@ func (p FinishResidentParams) Validate() error {
 	return (ReconcileResidentResult{Outcome: p.Outcome, Observation: p.Observation}).Validate()
 }
 
-// FinishResidentResult is identical for the first and every duplicate finish.
+// FinishResidentResult is immutable while retained, including after recovery.
+// RecoveryID exists only for still-counted dispatched uncertainty. It binds a
+// later fresh observation; it is not a credential or proof of engine idleness.
 type FinishResidentResult struct {
 	ReservationID string          `json:"reservationId"`
 	Outcome       ResidentOutcome `json:"outcome"`
+	RecoveryID    string          `json:"recoveryId,omitempty"`
 }
 
 func (r FinishResidentResult) Validate() error {
 	if !strictID.MatchString(r.ReservationID) {
 		return errors.New("invalid reservationId")
 	}
+	if r.RecoveryID != "" && (!strictID.MatchString(r.RecoveryID) || r.Outcome == ResidentLoaded) {
+		return errors.New("invalid recoveryId for finish result")
+	}
 	return r.Outcome.Validate()
+}
+
+// ObserveResidentParams is an internal broker-owned recovery stream. Sequence
+// is scoped to RecoveryID; it is neither a manager residentGeneration nor a
+// proxy EvidenceGeneration. OperationComplete is a trusted assertion, not
+// cryptographic proof. SR5 may assert it only after the same-source executor
+// completion barrier and a subsequent fresh engine:models read, obtained after
+// receiving RecoveryID. A timeout or legacy cached loaded map is insufficient.
+// Retry an uncertain response with identical params before issuing another
+// read: the first accepted observation's settlement receipt is immutable.
+type ObserveResidentParams struct {
+	ReservationID     string                      `json:"reservationId"`
+	ProxyRunID        string                      `json:"proxyRunId"`
+	OperationID       string                      `json:"operationId"`
+	RecoveryID        string                      `json:"recoveryId"`
+	Sequence          uint64                      `json:"sequence"`
+	OperationComplete bool                        `json:"operationComplete"`
+	Observation       ResidentCapacityObservation `json:"observation"`
+}
+
+type ResidentCapacityObservation struct {
+	ManagerIncarnation string              `json:"managerIncarnation"`
+	Engine             string              `json:"engine"`
+	Model              string              `json:"model"`
+	Identity           StrictModelIdentity `json:"identity"`
+	Loaded             bool                `json:"loaded"`
+}
+
+func (o ResidentCapacityObservation) Validate() error {
+	if !strictID.MatchString(o.ManagerIncarnation) {
+		return errors.New("invalid managerIncarnation")
+	}
+	if err := validateResidentRef(o.Engine, o.Model); err != nil {
+		return err
+	}
+	return o.Identity.Validate()
+}
+
+func (p ObserveResidentParams) Validate() error {
+	if !strictID.MatchString(p.ReservationID) || !strictID.MatchString(p.ProxyRunID) || !strictID.MatchString(p.OperationID) || !strictID.MatchString(p.RecoveryID) {
+		return errors.New("reservationId, proxyRunId, operationId and recoveryId must be ASCII identities of 1-128 bytes")
+	}
+	if p.Sequence == 0 || !p.OperationComplete {
+		return errors.New("positive sequence and operationComplete true are required")
+	}
+	return p.Observation.Validate()
+}
+
+type ObserveResidentResult struct {
+	ReservationID string `json:"reservationId"`
+	Settled       bool   `json:"settled"`
+}
+
+func (r ObserveResidentResult) Validate() error {
+	if !strictID.MatchString(r.ReservationID) || !r.Settled {
+		return errors.New("valid reservationId and settled true are required")
+	}
+	return nil
 }
 
 type ModelConfigurationState string
@@ -588,13 +690,61 @@ func (p *FinishResidentParams) UnmarshalJSON(data []byte) error {
 func (p *FinishResidentResult) UnmarshalJSON(data []byte) error {
 	type plain FinishResidentResult
 	var next plain
-	if err := decodeResident(data, &next, []string{"reservationId", "outcome"}); err != nil {
+	if err := decodeResident(data, &next, []string{"reservationId", "outcome"}, "recoveryId"); err != nil {
 		return err
+	}
+	if next.RecoveryID == "" {
+		fields, err := peerFields(data)
+		if err != nil {
+			return err
+		}
+		if fields["recoveryId"] != nil {
+			return errors.New("recoveryId must be nonempty when present")
+		}
 	}
 	if err := FinishResidentResult(next).Validate(); err != nil {
 		return err
 	}
 	*p = FinishResidentResult(next)
+	return nil
+}
+
+func (p *ResidentCapacityObservation) UnmarshalJSON(data []byte) error {
+	type plain ResidentCapacityObservation
+	var next plain
+	if err := decodeResident(data, &next, []string{"managerIncarnation", "engine", "model", "identity", "loaded"}); err != nil {
+		return err
+	}
+	if err := ResidentCapacityObservation(next).Validate(); err != nil {
+		return err
+	}
+	*p = ResidentCapacityObservation(next)
+	return nil
+}
+
+func (p *ObserveResidentParams) UnmarshalJSON(data []byte) error {
+	type plain ObserveResidentParams
+	var next plain
+	if err := decodeResident(data, &next, []string{"reservationId", "proxyRunId", "operationId", "recoveryId", "sequence", "operationComplete", "observation"}); err != nil {
+		return err
+	}
+	if err := ObserveResidentParams(next).Validate(); err != nil {
+		return err
+	}
+	*p = ObserveResidentParams(next)
+	return nil
+}
+
+func (p *ObserveResidentResult) UnmarshalJSON(data []byte) error {
+	type plain ObserveResidentResult
+	var next plain
+	if err := decodeResident(data, &next, []string{"reservationId", "settled"}); err != nil {
+		return err
+	}
+	if err := ObserveResidentResult(next).Validate(); err != nil {
+		return err
+	}
+	*p = ObserveResidentResult(next)
 	return nil
 }
 
