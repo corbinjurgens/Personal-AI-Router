@@ -7,6 +7,13 @@
   "protocols": ["openai-chat"],
   "model_naming": "exact",
   "runtime": {
+    "editable_launch": {
+      "fixed_args": ["/REPLACE_WITH_ABSOLUTE_PATH/server.py"],
+      "controls": [
+        { "flags": ["--host"], "value": "{server.host}" },
+        { "flags": ["--port"], "value": "{server.port}" }
+      ]
+    },
     "mode": "process",
     "bin": "/REPLACE_WITH_ABSOLUTE_PATH/python",
     "args": ["/REPLACE_WITH_ABSOLUTE_PATH/server.py", "--engine", "strata", "--config", "/REPLACE_WITH_ABSOLUTE_PATH/config.json", "--host", "127.0.0.1", "--port", "{port}", "--lazy"],

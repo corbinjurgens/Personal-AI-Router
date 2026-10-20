@@ -239,6 +239,9 @@ func (e *Executor) doStart(ctx context.Context, st *engineState, engine string, 
 }
 
 func (e *Executor) bringUp(ctx context.Context, st *engineState, engine string, rt Runtime, port int, vars map[string]string) error {
+	if strataServingRuntime(st, rt.Serving) && rt.modeOrDefault() != "process" {
+		return servingError("Prepared Strata requires an owned process launch.")
+	}
 	if rt.modeOrDefault() == "command" {
 		return e.bringUpCommand(ctx, st, engine, rt, port, vars)
 	}
@@ -254,8 +257,8 @@ func (e *Executor) bringUpProcess(ctx context.Context, st *engineState, engine s
 // Snapshot preparation is passed explicitly so fake-process tests can exercise
 // an input change between preparation and the final check without timing races.
 func (e *Executor) bringUpProcessWithSnapshot(ctx context.Context, st *engineState, engine string, rt Runtime, port int, vars map[string]string, prepareSnapshot func(string, []byte) (string, func(), error)) error {
-	serving := llamaServingRuntime(st, rt.Serving)
-	if serving {
+	serving := preparedServingRuntime(st, rt.Serving)
+	if llamaServingRuntime(st, rt.Serving) {
 		rt = llamaServingBase(rt)
 	}
 	st.mu.Lock()
@@ -277,7 +280,7 @@ func (e *Executor) bringUpProcessWithSnapshot(ctx context.Context, st *engineSta
 	var prepared *llamaServingLaunch
 	var releaseSnapshot func()
 	if serving {
-		prepared, err = compileLlamaServing(launch, rt, true)
+		prepared, err = compilePreparedServing(st, launch, rt, true)
 		if err != nil {
 			return fmt.Errorf("NE preset validation: %w", err)
 		}
@@ -309,10 +312,10 @@ func (e *Executor) bringUpProcessWithSnapshot(ctx context.Context, st *engineSta
 		if err != nil || string(snapshotBytes) != string(prepared.Snapshot) {
 			return servingError("NE snapshot validation: prepared snapshot changed before spawn.")
 		}
-		if err := recheckLlamaServing(launch, rt, prepared); err != nil {
+		if err := recheckPreparedServing(st, launch, rt, prepared); err != nil {
 			return fmt.Errorf("NE source recheck: %w", err)
 		}
-		launch = llamaSnapshotCommand(launch, snapshot)
+		launch = preparedSnapshotCommand(st, launch, snapshot)
 	}
 
 	diagnostics := newStartupOutput(launchDiagnosticArgs(rt), launch.Env)

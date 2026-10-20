@@ -109,6 +109,55 @@ Other legacy launch behavior is unchanged. See
 and precedence, and [MANIFEST.md](MANIFEST.md#serving-declaration-override) for
 the declaration and artifact ordering.
 
+## Finite prepared Strata launch
+
+For family `strata`, `runtime.serving` activates a narrow adapter for the native
+config and server argument semantics inspected at `corbinjurgens/Strata`
+`f6726098`. It requires one exact model, an owned Python process, absolute Python,
+server and config paths, `--engine strata`, loopback host, explicit port and
+`--lazy`. Python switches, abbreviated/unknown/duplicate server options and
+inherited or explicit `STRATA_*`/`PYTHON*` overrides are rejected.
+
+The flat JSON config accepts only `exe`, `args`, `cwd`, `tokenizer`, `model_name`,
+`parallel`, `lib_dirs` and `idle_unload_s`. Duplicate keys, nulls and unknown
+fields fail closed. Context is an explicit positive `--max-context` per slot;
+`parallel` must be in 1..8. Explicit `--batch` or `--slots` must agree with
+parallel and be at least two; otherwise the server supplies parallelism.
+Total context is context times slots, checked against int32 overflow. Output
+must fit strictly below per-slot context. `--serve`, `--native`, `--pack`, fixed
+positive `--prefill`/`--expert-cache` and `--spec` in 2..8 are required. Optional
+`--vram-reserve-mib` is positive opaque placement. Automatic fitting, clamping,
+other native options, hooks and alternate Python/native modes are unsupported.
+
+Every selected GGUF shard, pack/draft file, profile, tokenizer file, Python
+executable, server script, config and native executable must have a matching
+declared artifact with an absolute unambiguous existing file binding. Runtime
+roles are `runtime:python`, `runtime:server`, `runtime:config`,
+`runtime:native-exe`, `runtime:profile`, `runtime:tokenizer:<filename>` and
+operator-selected `runtime:lib:<label>`. These files use cached full SHA256
+verification plus binding checks. Model/shard/pack and `draft` artifacts retain
+operator-supplied full SHA256 and bounded first/last samples, size, mtime and
+resolved-target checks; preview and start never fully hash model files.
+
+Pack enumeration is fixed: `index.txt`, `dense.bin`, `experts.bin`; draft uses
+`dense.txt`, `dense.bin`, `experts.bin`. Existing `embd.bin`, `extra.bin`,
+`manifest.json` and `draft_vocab.bin` are also bound. `native_experts.txt`
+indirection is unsupported and rejected. Tokenizer enumeration requires
+`vocab.json`, `merges.txt`, `token_type.json` and `chat_template.jinja`.
+`cwd`, tokenizer and each `lib_dirs` entry must be absolute existing directories.
+The hashed config binds the library directory list; directories are never
+crawled or hashed. Undeclared files reached through those directories or
+inherited PATH/LD_LIBRARY_PATH, and Python imports beyond declared files, remain
+unattested and are identified in readback. This is not a closed runtime closure.
+
+Preview, apply and start reuse the small immutable snapshot and input recheck
+lifecycle above. Only the config argument is replaced with a snapshot path;
+original model targets remain in the snapshot. Cold readback never calls load.
+Configured and owned-launch-validated bounds do not establish observed loaded
+limits or strict content qualification. Public source inspection does not
+establish the selected MSI native build; Windows/GPU/runtime acceptance remains
+an owner gate.
+
 ## Automatic residency (internal parent IPC)
 
 `engine:reconcile-resident` is an internal parent-codec request, with shared
