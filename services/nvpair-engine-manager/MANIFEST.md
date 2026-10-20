@@ -40,6 +40,38 @@ the engine identifier is all that remains. A host-platform port override is
 updated too if needed, so it cannot shadow the saved shared port at startup.
 An invalid existing override is left intact and the save fails.
 
+### Serving declaration override
+
+`runtime.serving` is an optional version 1 object on the authorized engine
+settings channel. Its `models` array is keyed by unique, exact `modelId` values.
+Each model declares positive `maxOutputTokens`, `memory.hostRamBytes` and an
+explicit nonnegative `memory.vramBytes`; zero VRAM deliberately means CPU-only,
+while omission means unknown and fails validation. These are conservative
+operator admission declarations, not measured usage or OS allocation limits.
+Integer bounds and artifact sizes must fit JSON's safe integer range.
+
+Each `artifacts` entry records `role`, full-file `sha256`, and `provenance.kind`:
+`hf-lfs-sha256`, `strata-source-verification`, `verified-manifest`,
+`one-time-sha256`, or `supplied-sha256`. An optional provenance `reference`
+identifies the receipt or metadata source. A filename shaped like a digest is
+not proof of content. No assertion ID or separate acceptance permission exists.
+An optional local `binding` records `sourcePath`, `resolvedTarget`, `sizeBytes`,
+`mtimeNs` (canonical decimal int64 text to preserve nanoseconds in JSON clients),
+and `sampleSha256`. A binding is diagnostic declaration data until checked by
+the native adapter; no file is inspected by structural preview. The optional
+`expectedNativeSourceDigest` binds a later native-source validation.
+
+Serving settings use the existing revisioned preview/apply/journal route.
+Port-only persistence preserves serving and unrelated override fields. Settings
+apply writes a complete host-platform serving value; JSON null explicitly
+removes an inherited declaration. Empty/missing serving retains legacy launch
+behavior. Structural validation rejects unsupported versions, duplicate IDs,
+invalid digests, missing resource domains and invalid bounds before mutation.
+Any declaration change changes the launch record and requires a restart of a
+running engine. Readback is `unverified` at this stage; configured, validated
+launch and observed envelopes remain absent until native adapters supply them.
+Paths and raw launch material belong only on the authorized settings channel.
+
 ## Strata user-manifest template
 
 [testdata/strata/strata.json](testdata/strata/strata.json) is a complete user

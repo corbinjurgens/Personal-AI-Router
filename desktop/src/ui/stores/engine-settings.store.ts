@@ -39,7 +39,7 @@ export const useEngineSettingsStore = create<SettingsStore>((set, get) => ({
         set(state => ({
             entries: {
                 ...state.entries,
-                [key]: { snapshot, arrival: (current?.arrival ?? 0) + 1 }
+                [key]: { snapshot: structuredClone(snapshot), arrival: (current?.arrival ?? 0) + 1 }
             }
         }))
     },

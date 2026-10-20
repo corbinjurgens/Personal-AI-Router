@@ -1102,6 +1102,21 @@ func TestPerformanceObservationDestinationAndAuthenticatedReplacement(t *testing
 		p.rpc.call(t, engines.AddressMethod("llamacpp", "node/select"), map[string]string{"id": peer.uuid})
 		node.workloads.send(t, noderec.NotifyNodes, noderec.GetNodesResult{Nodes: []noderec.DirectoryNode{task1Directory(peer, blockedPort)}}, false)
 	}
+	// A cluster upgrade does not fence the workload discovery tick or prove
+	// workload delivery. Backfilled lifecycle events exercise both service routes
+	// without consuming performance samples or negotiating performance support.
+	for _, node := range []*task1Node{a, b} {
+		node.workloads.send(t, "workload:started", task1Workload(node.uuid, "observation-readiness", "running", 1), false)
+	}
+	task1Eventually(t, "authenticated workload routes in both directions", 30*time.Second, func() bool {
+		a.mesh.Refresh()
+		b.mesh.Refresh()
+		_, aAdmitsB := a.mesh.PeerServiceIncarnation(b.uuid)
+		_, bAdmitsA := b.mesh.PeerServiceIncarnation(a.uuid)
+		return aAdmitsB && bAdmitsA &&
+			task1Upserts(t, a.workloads, b.uuid, "observation-readiness", "running") == 1 &&
+			task1Upserts(t, b.workloads, a.uuid, "observation-readiness", "running") == 1
+	})
 	test := func(name string, origin, destination *task1Node) {
 		t.Run(name, func(t *testing.T) {
 			observationRead(t, observationRequest(t, proxies[origin.uuid], context.Background(), true, false))
@@ -1116,7 +1131,9 @@ func TestPerformanceObservationDestinationAndAuthenticatedReplacement(t *testing
 			summary := observationSummary(t, sample, 1)
 			destination.workloads.call(t, "performance:publish", summary)
 			var received []performancewire.Summary
-			task1Eventually(t, "authenticated replacement", 15*time.Second, func() bool {
+			// A transient authority/read or HTTP failure defers the retained
+			// replacement to the manager's 30-second heartbeat. Allow that retry.
+			task1Eventually(t, "authenticated replacement", 45*time.Second, func() bool {
 				received = observationReceived(t, origin.workloads, destination.uuid)
 				return len(received) > 0
 			})
@@ -1125,7 +1142,7 @@ func TestPerformanceObservationDestinationAndAuthenticatedReplacement(t *testing
 			}
 			before := len(observationFrames(t, origin.workloads, "performance:status"))
 			destination.workloads.call(t, "performance:publish", summary)
-			task1Eventually(t, "replacement replay status acknowledgment", 15*time.Second, func() bool { return len(observationFrames(t, origin.workloads, "performance:status")) > before })
+			task1Eventually(t, "replacement replay status acknowledgment", 45*time.Second, func() bool { return len(observationFrames(t, origin.workloads, "performance:status")) > before })
 			if received := observationReceived(t, origin.workloads, destination.uuid); len(received) != 1 {
 				t.Fatalf("replayed replacement produced %d data mutations", len(received))
 			}

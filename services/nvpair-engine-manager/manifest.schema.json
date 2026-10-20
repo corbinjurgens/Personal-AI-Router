@@ -65,9 +65,72 @@
       "properties": {
         "editable_launch": {
           "$ref": "#/definitions/editableLaunch"
+        },
+        "serving": {
+          "anyOf": [{"type": "null"}, {"$ref": "#/definitions/serving"}]
         }
       }
     },
+    "serving": {
+      "type": "object",
+      "required": ["version", "models"],
+      "additionalProperties": false,
+      "properties": {
+        "version": {"const": 1},
+        "models": {
+          "type": "array", "minItems": 1,
+          "description": "Exact model IDs must be unique; engine-manager performs this cross-item validation.",
+          "items": {
+            "type": "object", "additionalProperties": false,
+            "required": ["modelId", "maxOutputTokens", "memory", "artifacts"],
+            "properties": {
+              "modelId": {"type": "string", "minLength": 1},
+              "maxOutputTokens": {"$ref": "#/definitions/positiveServingInteger"},
+              "expectedNativeSourceDigest": {"$ref": "#/definitions/sha256"},
+              "memory": {
+                "type": "object", "additionalProperties": false,
+                "required": ["hostRamBytes", "vramBytes"],
+                "properties": {
+                  "hostRamBytes": {"$ref": "#/definitions/positiveServingInteger"},
+                  "vramBytes": {"type": "integer", "minimum": 0, "maximum": 9007199254740991}
+                }
+              },
+              "artifacts": {
+                "type": "array", "minItems": 1,
+                "items": {
+                  "type": "object", "additionalProperties": false,
+                  "required": ["role", "sha256", "provenance"],
+                  "properties": {
+                    "role": {"type": "string", "minLength": 1},
+                    "sha256": {"$ref": "#/definitions/sha256"},
+                    "provenance": {
+                      "type": "object", "additionalProperties": false, "required": ["kind"],
+                      "properties": {
+                        "kind": {"enum": ["hf-lfs-sha256", "strata-source-verification", "verified-manifest", "one-time-sha256", "supplied-sha256"]},
+                        "reference": {"type": "string"}
+                      }
+                    },
+                    "binding": {
+                      "type": "object", "additionalProperties": false,
+                      "required": ["sourcePath", "resolvedTarget", "sizeBytes", "mtimeNs", "sampleSha256"],
+                      "properties": {
+                        "sourcePath": {"type": "string", "minLength": 1},
+                        "resolvedTarget": {"type": "string", "minLength": 1},
+                        "sizeBytes": {"$ref": "#/definitions/positiveServingInteger"},
+                        "mtimeNs": {"type": "string", "pattern": "^(0|-?[1-9][0-9]*)$", "description": "Canonical decimal int64 nanoseconds; checked by engine-manager."},
+                        "sampleSha256": {"$ref": "#/definitions/sha256"}
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "sha256": {"type": "string", "pattern": "^[a-fA-F0-9]{64}$"},
+    "positiveServingInteger": {"type": "integer", "minimum": 1, "maximum": 9007199254740991},
     "editableLaunch": {
       "type": "object",
       "additionalProperties": false,

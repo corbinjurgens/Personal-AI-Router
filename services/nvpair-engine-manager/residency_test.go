@@ -32,6 +32,32 @@ type residentTransport struct {
 	onLoad                  func(*http.Request)
 }
 
+type residentDeadlineContext struct {
+	context.Context
+	done     chan struct{}
+	deadline time.Time
+}
+
+func newResidentDeadlineContext() (*residentDeadlineContext, func()) {
+	ctx := &residentDeadlineContext{Context: context.Background(), done: make(chan struct{}), deadline: time.Now().Add(time.Hour)}
+	return ctx, func() { close(ctx.done) }
+}
+
+func (ctx *residentDeadlineContext) Deadline() (time.Time, bool) {
+	return ctx.deadline, true
+}
+
+func (ctx *residentDeadlineContext) Done() <-chan struct{} { return ctx.done }
+
+func (ctx *residentDeadlineContext) Err() error {
+	select {
+	case <-ctx.done:
+		return context.DeadlineExceeded
+	default:
+		return nil
+	}
+}
+
 func (r *residentTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -598,13 +624,14 @@ func TestResidentLoadCancellation(t *testing.T) {
 			f := newResidentFixture(t)
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
+			var expireDeadline func()
 			if deadline {
-				var end context.CancelFunc
-				ctx, end = context.WithTimeout(ctx, 20*time.Millisecond)
-				defer end()
+				ctx, expireDeadline = newResidentDeadlineContext()
 			}
 			f.transport.onLoad = func(req *http.Request) {
-				if !deadline {
+				if deadline {
+					expireDeadline()
+				} else {
 					cancel()
 				}
 				<-req.Context().Done()

@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 
+	"nvpair-shared/engines"
 	settings "nvpair-shared/enginesettings"
 )
 
@@ -122,6 +123,8 @@ func launchForState(st *engineState, port int) (launchCommand, error) {
 func (e *Executor) launchStateLocked(engine string, st *engineState) settings.LaunchState {
 	st.mu.Lock()
 	result := settings.LaunchState{Engine: engine, ServerPort: st.plat.Runtime.Port, EffectivePort: st.port, Running: st.running, Adopted: st.adopted, Format: launchTextFormat}
+	result.Serving = st.plat.Runtime.Serving.Clone()
+	result.ServingReadback = servingDeclarationReadback(result.Serving)
 	st.mu.Unlock()
 	command, err := launchForState(st, result.ServerPort)
 	if err == nil {
@@ -237,7 +240,10 @@ func (e *Executor) PreviewLaunch(p settings.Request) (settings.Preview, error) {
 }
 
 func (e *Executor) previewLaunchLocked(st *engineState, request settings.Request) settings.Preview {
-	result := settings.Preview{Settings: request.Settings, Args: []string{}, Env: []string{}, Errors: map[string]string{}}
+	result := settings.Preview{Settings: request.Settings.Clone(), Args: []string{}, Env: []string{}, Errors: request.Settings.Serving.Validate(), Serving: servingDeclarationReadback(request.Settings.Serving)}
+	if len(result.Errors) > 0 {
+		return result
+	}
 	fail := func(message string) settings.Preview { result.Errors["launchText"] = message; return result }
 	if request.Settings.ServerPort < 1 || request.Settings.ServerPort > 65535 {
 		result.Errors["serverPort"] = "Enter a server port from 1 to 65535."
@@ -377,7 +383,7 @@ func (e *Executor) previewLaunchLocked(st *engineState, request settings.Request
 		return fail(err.Error())
 	}
 	current := e.launchStateLocked(request.Engine, st)
-	result.Restart = current.Running && (current.ServerPort != result.Settings.ServerPort || current.LaunchText != result.Settings.LaunchText)
+	result.Restart = current.Running && (current.ServerPort != result.Settings.ServerPort || current.LaunchText != result.Settings.LaunchText || !current.Serving.Equal(result.Settings.Serving))
 	if !current.Editable {
 		return fail(current.Reason)
 	}
@@ -412,7 +418,7 @@ func (e *Executor) ConfigureLaunch(ctx context.Context, p settings.Configure, re
 	e.reporter.clear(startFailedID(p.Engine))
 	e.reporter.clear(exitedID(p.Engine))
 	old := e.launchStateLocked(p.Engine, st)
-	changed := old.ServerPort != preview.Settings.ServerPort || old.LaunchText != preview.Settings.LaunchText
+	changed := old.ServerPort != preview.Settings.ServerPort || old.LaunchText != preview.Settings.LaunchText || !old.Serving.Equal(preview.Settings.Serving)
 	// Stop before writing the override file. A stop failure returns with the
 	// engine still on its old launch, so persisting first would leave disk on
 	// the new one and the next start would silently adopt a configuration the
@@ -423,7 +429,7 @@ func (e *Executor) ConfigureLaunch(ctx context.Context, p settings.Configure, re
 		}
 	}
 	if changed || !reflect.DeepEqual(st.plat.Runtime.LaunchArgs, &preview.Args) || !reflect.DeepEqual(st.plat.Runtime.LaunchEnv, &preview.Env) {
-		if err := e.persistRuntimeConfig(p.Engine, preview.Settings.ServerPort, &preview.Args, &preview.Env); err != nil {
+		if err := e.persistRuntimeServing(p.Engine, preview.Settings.ServerPort, &preview.Args, &preview.Env, &preview.Settings.Serving); err != nil {
 			return e.launchStateLocked(p.Engine, st), err
 		}
 	}
@@ -431,6 +437,7 @@ func (e *Executor) ConfigureLaunch(ctx context.Context, p settings.Configure, re
 	st.plat.Runtime.Port = preview.Settings.ServerPort
 	st.plat.Runtime.LaunchArgs = &preview.Args
 	st.plat.Runtime.LaunchEnv = &preview.Env
+	st.plat.Runtime.Serving = preview.Settings.Serving.Clone()
 	st.port = preview.Settings.ServerPort
 	st.mu.Unlock()
 	if err := rebind(); err != nil {
@@ -452,3 +459,10 @@ func (e *Executor) ConfigureLaunch(ctx context.Context, p settings.Configure, re
 }
 
 type settingsApplyContextKey struct{}
+
+func servingDeclarationReadback(config *engines.ServingConfig) *engines.ServingReadback {
+	if config == nil {
+		return nil
+	}
+	return &engines.ServingReadback{Status: "unverified", Reason: "Serving declaration recorded; native launch and runtime validation are not available."}
+}

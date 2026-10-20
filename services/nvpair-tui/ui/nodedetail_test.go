@@ -25,6 +25,39 @@ func localDetail() *nodeDetail {
 	return d
 }
 
+func TestSettingsServingSurvivesUnrelatedEditAndFailedApply(t *testing.T) {
+	d := localDetail()
+	snapshot := ollamaSettings()
+	ram, vram := int64(4096), int64(0)
+	snapshot.Settings.Serving = &engines.ServingConfig{Version: 1, Models: []engines.ServingModel{{ModelID: "exact/model", MaxOutputTokens: 128, Memory: engines.ServingMemory{HostRAMBytes: &ram, VRAMBytes: &vram}, Artifacts: []engines.ServingArtifact{{Role: "model", SHA256: strings.Repeat("a", 64), Provenance: engines.ServingProvenance{Kind: "supplied-sha256"}}}}}}
+	request, ok := d.settingsRequest(snapshot, detailInputProxyPort, "12500")
+	if !ok || request.Settings.ProxyPort != 12500 || !request.Settings.Serving.Equal(snapshot.Settings.Serving) {
+		t.Fatal("unrelated terminal edit lost serving")
+	}
+	_, apply, _ := judgeSettingsPreview(enginePreviewMsg{request: request, preview: enginesettings.Preview{Settings: request.Settings}})
+	data, err := json.Marshal(apply)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wire enginesettings.Request
+	if err := json.Unmarshal(data, &wire); err != nil {
+		t.Fatal(err)
+	}
+	if !wire.Settings.Serving.Equal(snapshot.Settings.Serving) {
+		t.Fatal("terminal apply wire lost serving")
+	}
+	snapshot.Settings = wire.Settings
+	snapshot.Phase = settingsPhaseFailed
+	snapshot.RequestID = apply.RequestID
+	snapshot.Error = "synthetic apply failure"
+	d.settingsAwaited = &awaitedSettings{engine: "ollama", requestID: apply.RequestID}
+	d.reportSettingsOutcome(snapshot)
+	retry, ok := d.settingsRequest(snapshot, detailInputLaunchArgs, "--unrelated")
+	if !ok || !retry.Settings.Serving.Equal(wire.Settings.Serving) {
+		t.Fatal("failed apply retry lost serving")
+	}
+}
+
 func remoteDetail() *nodeDetail {
 	d := newNodeDetail(nil, nodeRow{key: "peer", name: "peer-host", presence: presenceOnline})
 	d.SetSize(100, 30)

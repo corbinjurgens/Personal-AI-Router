@@ -4,12 +4,32 @@
 // Package enginesettings is the node-owned engine settings wire contract.
 package enginesettings
 
+import "nvpair-shared/engines"
+
 type Config struct {
 	ServerPort int `json:"serverPort"`
 	ProxyPort  int `json:"proxyPort"`
 	// Arguments and leading environment assignments; excludes the executable
 	// and manifest-owned startup subcommand. Snapshot.Format identifies syntax.
-	LaunchText string `json:"launchText"`
+	LaunchText string                 `json:"launchText"`
+	Serving    *engines.ServingConfig `json:"serving,omitempty"`
+}
+
+func (c Config) Equal(other Config) bool {
+	return c.ServerPort == other.ServerPort && c.ProxyPort == other.ProxyPort && c.LaunchText == other.LaunchText && c.Serving.Equal(other.Serving)
+}
+
+func (c Config) Clone() Config { c.Serving = c.Serving.Clone(); return c }
+
+func (s Snapshot) Clone() Snapshot {
+	s.Settings = s.Settings.Clone()
+	s.Serving = s.Serving.Clone()
+	return s
+}
+
+// ConfigFromLaunch preserves the complete manager-owned declaration.
+func ConfigFromLaunch(s LaunchState, proxyPort int) Config {
+	return Config{ServerPort: s.ServerPort, ProxyPort: proxyPort, LaunchText: s.LaunchText, Serving: s.Serving.Clone()}
 }
 
 type Request struct {
@@ -27,23 +47,24 @@ type Request struct {
 }
 
 type Snapshot struct {
-	NodeID              string `json:"nodeId"`
-	Engine              string `json:"engine"`
-	Revision            uint64 `json:"revision"`
-	AppliedRevision     uint64 `json:"appliedRevision"`
-	Sequence            uint64 `json:"sequence"`
-	Epoch               string `json:"epoch"`
-	Settings            Config `json:"settings"`
-	EffectiveServerPort int    `json:"effectiveServerPort"`
-	EffectiveProxyPort  int    `json:"effectiveProxyPort"`
-	Running             bool   `json:"running"`
-	Adopted             bool   `json:"adopted"`
-	Editable            bool   `json:"editable"`
-	Reason              string `json:"reason,omitempty"`
-	Format              string `json:"format"`
-	Phase               string `json:"phase"`
-	Error               string `json:"error,omitempty"`
-	RequestID           string `json:"requestId,omitempty"`
+	Serving             *engines.ServingReadback `json:"serving,omitempty"`
+	NodeID              string                   `json:"nodeId"`
+	Engine              string                   `json:"engine"`
+	Revision            uint64                   `json:"revision"`
+	AppliedRevision     uint64                   `json:"appliedRevision"`
+	Sequence            uint64                   `json:"sequence"`
+	Epoch               string                   `json:"epoch"`
+	Settings            Config                   `json:"settings"`
+	EffectiveServerPort int                      `json:"effectiveServerPort"`
+	EffectiveProxyPort  int                      `json:"effectiveProxyPort"`
+	Running             bool                     `json:"running"`
+	Adopted             bool                     `json:"adopted"`
+	Editable            bool                     `json:"editable"`
+	Reason              string                   `json:"reason,omitempty"`
+	Format              string                   `json:"format"`
+	Phase               string                   `json:"phase"`
+	Error               string                   `json:"error,omitempty"`
+	RequestID           string                   `json:"requestId,omitempty"`
 }
 
 type Conflict struct {
@@ -52,12 +73,13 @@ type Conflict struct {
 }
 
 type Preview struct {
-	Settings Config            `json:"settings"`
-	Revision uint64            `json:"revision"`
-	Conflict *Conflict         `json:"conflict,omitempty"`
-	Errors   map[string]string `json:"errors,omitempty"`
-	Restart  bool              `json:"restart"`
-	Rebind   bool              `json:"rebind"`
+	Serving  *engines.ServingReadback `json:"serving,omitempty"`
+	Settings Config                   `json:"settings"`
+	Revision uint64                   `json:"revision"`
+	Conflict *Conflict                `json:"conflict,omitempty"`
+	Errors   map[string]string        `json:"errors,omitempty"`
+	Restart  bool                     `json:"restart"`
+	Rebind   bool                     `json:"rebind"`
 	// Named to match Runtime's persisted override keys: these carry the same
 	// user-supplied launch content, and a log sink redacts them by key. Plain
 	// "args"/"env" would collide with every worker-spawn diagnostic.
@@ -66,15 +88,17 @@ type Preview struct {
 }
 
 type LaunchState struct {
-	Engine        string `json:"engine"`
-	ServerPort    int    `json:"serverPort"`
-	EffectivePort int    `json:"effectivePort"`
-	LaunchText    string `json:"launchText"`
-	Running       bool   `json:"running"`
-	Adopted       bool   `json:"adopted"`
-	Editable      bool   `json:"editable"`
-	Reason        string `json:"reason,omitempty"`
-	Format        string `json:"format"`
+	Serving         *engines.ServingConfig   `json:"serving,omitempty"`
+	ServingReadback *engines.ServingReadback `json:"servingReadback,omitempty"`
+	Engine          string                   `json:"engine"`
+	ServerPort      int                      `json:"serverPort"`
+	EffectivePort   int                      `json:"effectivePort"`
+	LaunchText      string                   `json:"launchText"`
+	Running         bool                     `json:"running"`
+	Adopted         bool                     `json:"adopted"`
+	Editable        bool                     `json:"editable"`
+	Reason          string                   `json:"reason,omitempty"`
+	Format          string                   `json:"format"`
 }
 
 type Configure struct {
