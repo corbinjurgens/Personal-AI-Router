@@ -238,6 +238,9 @@ func newPhase04Fixture(t *testing.T) *phase04Fixture {
 		f.control.engines[n.uuid].call(t, "engine:configured-ports", nil)
 		f.files[n.uuid] = newPhase04FileObserver(t, n, f.peer(n))
 		p := startTask1Process(t, n.base, proxyBin, "--cluster-dir", filepath.Join(n.base, "cluster"))
+		bindProxyFixtureIdentity(t, n.uuid, func(method string, params any) jsonrpc.Message {
+			return p.call(t, method, params)
+		})
 		p.call(t, "facade/enable", map[string]any{"engine": "ollama", "port": n.ports[noderec.ServiceOllama], "ignorePersistedPort": true})
 		p.call(t, engines.AddressMethod("ollama", "node/set-local-backend"), map[string]any{"engine": "ollama", "host": "127.0.0.1", "port": f.engines[n.uuid].port, "healthy": true})
 		f.proxies[n.uuid] = p

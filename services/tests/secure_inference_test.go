@@ -22,6 +22,7 @@ import (
 
 	"nvpair-shared/engines"
 	"nvpair-shared/jsonrpc"
+	"nvpair-shared/nodepolicy"
 )
 
 // secure_inference_test.go is the cross-process proof that inference is gated on
@@ -58,7 +59,7 @@ type proxyProc struct {
 // port and blocks until it reports ready. Its persisted-port store is isolated
 // into a temp config dir so the test never reads or writes the developer's real
 // config.
-func startProxyProc(t *testing.T, clusterDir string, listenPort int) *proxyProc {
+func startProxyProc(t *testing.T, clusterDir, originNodeID string, listenPort int) *proxyProc {
 	t.Helper()
 	cfg := t.TempDir()
 	// The engine and its port arrive over facade/enable below; only the cluster
@@ -80,6 +81,7 @@ func startProxyProc(t *testing.T, clusterDir string, listenPort int) *proxyProc 
 		t.Fatalf("start proxy: %v", err)
 	}
 	p := &proxyProc{t: t, cmd: cmd, stdin: stdin, msgs: startMsgReader(stdout), nextID: 1}
+	bindProxyFixtureIdentity(t, originNodeID, p.call)
 
 	// The mTLS ingress under test is engine-agnostic; Ollama is an arbitrary
 	// pick. The bound port comes from the enable response rather than the ready
@@ -98,6 +100,21 @@ func startProxyProc(t *testing.T, clusterDir string, listenPort int) *proxyProc 
 	}
 	p.port = enabled.Port
 	return p
+}
+
+// Direct proxy fixtures stand in for the broker's private policy activation.
+// Bind routing identity before enabling any facade or dispatching inference.
+func bindProxyFixtureIdentity(t *testing.T, originNodeID string, call func(string, any) jsonrpc.Message) {
+	t.Helper()
+	policy := nodepolicy.Default()
+	response := call(nodepolicy.MethodSetPolicy, nodepolicy.SetPolicyParams{OriginNodeID: originNodeID, Policy: policy})
+	var ack nodepolicy.PolicyAck
+	if err := json.Unmarshal(response.Result, &ack); err != nil {
+		t.Fatalf("decode proxy fixture policy acknowledgement: %v", err)
+	}
+	if ack.OriginNodeID != originNodeID || ack.Revision != policy.Revision {
+		t.Fatalf("proxy fixture policy acknowledgement=%+v, want origin=%q revision=%q", ack, originNodeID, policy.Revision)
+	}
 }
 
 func (p *proxyProc) stop() {
@@ -273,11 +290,11 @@ func TestSecureInferenceClusterMTLS(t *testing.T) {
 	// backend for the A->B path; A routes out to B rather than serving locally.
 	bEngineHost, bEnginePort, bGenerates := startFakeOllama(t)
 
-	proxyB := startProxyProc(t, clusterB, freePort(t))
+	proxyB := startProxyProc(t, clusterB, bInfo.NodeUUID, freePort(t))
 	defer proxyB.stop()
 	proxyB.setLocalBackend("ollama", bEngineHost, bEnginePort, true)
 
-	proxyA := startProxyProc(t, clusterA, freePort(t))
+	proxyA := startProxyProc(t, clusterA, aInfo.NodeUUID, freePort(t))
 	defer proxyA.stop()
 	// Tell A that B runs ollama at B's promoted proxy port, as a trusted member.
 	proxyA.pushOllamaPeer("node-b", "127.0.0.1", bInfo.NodeUUID, proxyB.port, []string{"m:latest"})
