@@ -283,6 +283,9 @@
 | `workloads:remove` | request (we call) | ✅ yes |
 | `workloads:upsert` | request (we call) | ✅ yes |
 
+**Dynamic / unresolved notify sites (verify by hand — `npm run service-contracts` prints the line numbers):**
+- `ctx (var)  (client.go, 2 sites)`
+
 ## nvpair-ui-broker
 
 | Method | Direction | In bridge? |

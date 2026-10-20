@@ -37,9 +37,61 @@ func uiTick() tea.Cmd {
 // Tea update loop. Every view receives it.
 type NotificationMsg struct{ Msg *rpc.Message }
 
-// DisconnectedMsg is emitted once the broker's notification stream closes
-// (broker exited or the connection dropped).
+// DisconnectedMsg invalidates facts owned by a lost service transport.
 type DisconnectedMsg struct{}
+
+// sessionReadyMsg refreshes transport-owned facts without restarting UI timers.
+type sessionReadyMsg struct{}
+
+type serviceEventMsg struct{ event rpc.Event }
+type serviceEventsClosedMsg struct{}
+
+// sessionResult is owned by the shell. View commands keep their ordinary
+// message seam; only commands scheduled by the shell receive this envelope.
+type sessionResult struct {
+	generation uint64
+	msg        tea.Msg
+}
+
+// sessionInvocation guards work that starts outside the RPC client, such as a
+// queued demo dispatcher. Its lifetime is captured when that work is created.
+func sessionInvocation(client *rpc.Client, generation uint64, cmd tea.Cmd) tea.Cmd {
+	if cmd == nil || client == nil {
+		return cmd
+	}
+	return func() tea.Msg {
+		if !client.IsCurrent(generation) {
+			return nil
+		}
+		return cmd()
+	}
+}
+
+func sessionCommand(client *rpc.Client, generation uint64, cmd tea.Cmd) tea.Cmd {
+	if cmd == nil || client == nil {
+		return cmd
+	}
+	return func() tea.Msg {
+		msg := cmd()
+		switch msg := msg.(type) {
+		case tea.BatchMsg:
+			cmds := make([]tea.Cmd, len(msg))
+			for i, child := range msg {
+				cmds[i] = sessionCommand(client, generation, child)
+			}
+			return tea.BatchMsg(cmds)
+		case TickMsg, manualTickMsg, serviceTickMsg, updateCheckDueMsg,
+			updateCheckMsg, LogLineMsg, serviceEventMsg, serviceEventsClosedMsg, tea.QuitMsg, sessionResult:
+			// These belong to the UI lifetime, including the one timer chain
+			// per owner. RPC commands they schedule capture the new generation.
+			return msg
+		case nil:
+			return nil
+		default:
+			return sessionResult{generation: generation, msg: msg}
+		}
+	}
+}
 
 // LogLineMsg carries one log line into the update loop for the Logs view: the
 // broker's and its workers' stderr, and this program's own log.
@@ -56,16 +108,18 @@ func waitForLog(lines <-chan string) tea.Cmd {
 	}
 }
 
-// waitForNotification blocks on the next broker push and delivers it as a
-// NotificationMsg, re-arming itself after each one (the model returns this
-// command again from Update). A closed channel yields DisconnectedMsg.
+// waitForNotification consumes one ordered service event. The shell re-arms
+// this wait after every notification or transient disconnect, until final close.
 func waitForNotification(client *rpc.Client) tea.Cmd {
+	if client == nil {
+		return nil
+	}
 	return func() tea.Msg {
-		msg, ok := <-client.Notifications()
+		event, ok := <-client.Events()
 		if !ok {
-			return DisconnectedMsg{}
+			return serviceEventsClosedMsg{}
 		}
-		return NotificationMsg{Msg: msg}
+		return serviceEventMsg{event: event}
 	}
 }
 
@@ -85,10 +139,18 @@ func call(client *rpc.Client, method string, params any, decode func(*rpc.Messag
 // failure half a minute in, while the backend carried on and finished it.
 func callWithin(client *rpc.Client, budget time.Duration, method string, params any,
 	decode func(*rpc.Message, error) tea.Msg) tea.Cmd {
+	generation := clientGeneration(client)
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), budget)
 		defer cancel()
-		msg, err := client.Call(ctx, method, params)
+		msg, err := client.CallGeneration(ctx, generation, method, params)
 		return decode(msg, err)
 	}
+}
+
+func clientGeneration(client *rpc.Client) uint64 {
+	if client == nil {
+		return 0
+	}
+	return client.Generation()
 }

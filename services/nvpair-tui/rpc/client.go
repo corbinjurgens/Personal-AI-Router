@@ -12,166 +12,345 @@ import (
 	"strconv"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
-// notifyBuffer bounds the queue of server pushes awaiting consumption. A
-// healthy TUI drains it promptly; the buffer just absorbs bursts (e.g. a
-// flurry of discovery/workload events) without forcing the read loop to
-// block on the UI between frames.
 const notifyBuffer = 256
 
-// Client multiplexes requests and server pushes over a single Codec. It
-// assigns monotonic numeric ids to outbound requests, matches each
-// response back to its waiting caller, and fans notifications out on a
-// channel for the UI to consume. A Client is single-connection: create a
-// new one per broker process.
-type Client struct {
-	codec  *Codec
-	nextID atomic.Int64
+// EventKind identifies a notification or the loss of its transport.
+type EventKind uint8
 
-	pendingMu sync.Mutex
-	pending   map[int64]chan *Message
+const (
+	EventNotification EventKind = iota
+	EventDisconnected
+)
 
-	notifications chan *Message
-
-	// filter, when set, sees each notification before it is queued and keeps
-	// it off the channel by returning true.
-	filter func(*Message) bool
-
-	closeOnce sync.Once
-	closeErr  error
-	done      chan struct{}
+// Event preserves wire order across transports. Generation identifies the
+// transport that produced Message or disconnected with Err.
+type Event struct {
+	Kind       EventKind
+	Generation uint64
+	Message    *Message
+	Err        error
 }
 
-// NewClient builds a Client over the broker's stdout (r) and stdin (w).
-// Call Run to start the read loop before issuing requests.
-func NewClient(r io.Reader, w io.Writer) *Client {
-	return &Client{
-		codec:         NewCodec(r, w),
-		pending:       make(map[int64]chan *Message),
-		notifications: make(chan *Message, notifyBuffer),
-		done:          make(chan struct{}),
+type transport struct {
+	codec      *Codec
+	close      func()
+	generation uint64
+	pending    map[int64]chan *Message
+	done       chan struct{}
+	once       sync.Once
+	closeOnce  sync.Once
+}
+
+func (t *transport) connected() bool {
+	select {
+	case <-t.done:
+		return false
+	default:
+		return true
 	}
 }
 
-// Notifications returns the channel of server-pushed frames (broker
-// notifications such as app:ready, errors:update, discovery:nodes-changed).
-// The channel is closed when Run returns.
-func (c *Client) Notifications() <-chan *Message { return c.notifications }
+// Client multiplexes requests and pushes. NewClient is terminal after one
+// transport; NewReconnectingClient keeps the same handle across replacements.
+type Client struct {
+	mu         sync.Mutex
+	current    *transport
+	generation uint64
+	stopped    bool
+	reconnect  bool
+	cancel     context.CancelFunc
+	dial       func(context.Context) (io.ReadWriteCloser, error)
+	retryDelay func(int) time.Duration
+	nextID     atomic.Int64
+	events     chan Event
+	filter     func(*Message) bool
+}
 
-// SetNotificationFilter installs a hook that sees every notification before
-// it is queued; returning true consumes it. It must be called before Run. The
-// hook runs on the read loop, so it must not block.
+func newClient(r io.Reader, w io.Writer, closeTransport func()) *Client {
+	t := &transport{
+		codec: NewCodec(r, w), close: closeTransport, generation: 1,
+		pending: make(map[int64]chan *Message), done: make(chan struct{}),
+	}
+	return &Client{
+		current: t, generation: 1, events: make(chan Event, notifyBuffer),
+		retryDelay: reconnectDelay,
+	}
+}
+
+// NewClient builds a single-transport client. Run must be called once. When
+// either stream supports Close, cancellation closes it to interrupt blocked IO.
+func NewClient(r io.Reader, w io.Writer) *Client {
+	return newClient(r, w, func() {
+		if closer, ok := r.(io.Closer); ok {
+			_ = closer.Close()
+		}
+		if closer, ok := w.(io.Closer); ok {
+			_ = closer.Close()
+		}
+	})
+}
+
+// NewReconnectingClient owns conn and all later transports returned by dial.
+// Initial connect/start remains the caller's responsibility. After loss, dial
+// must only attach to an existing service; it must not launch one.
+func NewReconnectingClient(conn io.ReadWriteCloser, dial func(context.Context) (io.ReadWriteCloser, error)) *Client {
+	c := newClient(conn, conn, func() { _ = conn.Close() })
+	c.dial, c.reconnect = dial, true
+	return c
+}
+
+// Events is the sole ordered event stream. It closes only when Run finally exits.
+func (c *Client) Events() <-chan Event {
+	return c.events
+}
+
+// SetNotificationFilter installs a nonblocking hook before Run. It survives
+// transport replacement; returning true consumes the notification.
 func (c *Client) SetNotificationFilter(filter func(*Message) bool) { c.filter = filter }
 
-// Run drives the read loop until the stream closes or ctx is cancelled.
-// On exit it unblocks every pending Call and closes the notifications
-// channel so consumers observe the disconnect. It is safe to call once.
+// Generation returns the latest transport generation. IsCurrent additionally
+// checks that it is connected, for consumers applying asynchronous work.
+func (c *Client) Generation() uint64 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.generation
+}
+
+func (c *Client) IsCurrent(generation uint64) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return !c.stopped && c.current.connected() && c.current.generation == generation
+}
+
+// StopReconnecting suppresses reattachment before an explicit service/stop.
+// The current transport remains usable for that final request.
+func (c *Client) StopReconnecting() {
+	c.mu.Lock()
+	c.reconnect = false
+	disconnected := !c.current.connected()
+	c.mu.Unlock()
+	if disconnected {
+		c.Close()
+	}
+}
+
+// Close ends the session without stopping the service. It interrupts blocked
+// reads/writes and cancels any backoff or dial in progress.
+func (c *Client) Close() {
+	c.mu.Lock()
+	c.stopped = true
+	if c.cancel != nil {
+		c.cancel()
+	}
+	t := c.current
+	c.mu.Unlock()
+	if t != nil {
+		c.breakTransport(t)
+	}
+}
+
+// Run owns publication and replacement. It is safe to call once. No pending
+// request crosses a transport boundary and no request is replayed.
 func (c *Client) Run(ctx context.Context) error {
-	defer c.shutdown()
+	ctx, cancel := context.WithCancel(ctx)
+	c.mu.Lock()
+	c.cancel = cancel
+	stopped, t := c.stopped, c.current
+	c.mu.Unlock()
+	defer cancel()
+	defer close(c.events)
+	defer c.Close()
+	if stopped {
+		return context.Canceled
+	}
+	interrupt := context.AfterFunc(ctx, c.Close)
+	defer interrupt()
 	for {
+		err := c.readTransport(ctx, t)
+		c.breakTransport(t)
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		msg, err := c.codec.Read()
-		if err != nil {
-			if err == io.EOF {
+		if c.dial != nil && !c.publish(ctx, Event{Kind: EventDisconnected, Generation: t.generation, Err: err}) {
+			return ctx.Err()
+		}
+		c.mu.Lock()
+		retry := c.reconnect && !c.stopped
+		c.mu.Unlock()
+		if !retry {
+			if errors.Is(err, io.EOF) {
 				return nil
 			}
-			// A broken transport is terminal: the scanner is finished, so
-			// continuing here spins at full speed forever, never closes the
-			// notifications channel, and leaves the UI reporting a healthy
-			// service it can no longer reach.
-			if errors.Is(err, ErrStreamBroken) {
+			return err
+		}
+		conn, err := c.reattach(ctx)
+		if err != nil {
+			return err
+		}
+		c.mu.Lock()
+		if c.stopped || !c.reconnect || ctx.Err() != nil {
+			c.mu.Unlock()
+			_ = conn.Close()
+			return context.Canceled
+		}
+		c.generation++
+		t = &transport{
+			codec: NewCodec(conn, conn), close: func() { _ = conn.Close() },
+			generation: c.generation, pending: make(map[int64]chan *Message), done: make(chan struct{}),
+		}
+		c.current = t
+		c.mu.Unlock()
+	}
+}
+
+func (c *Client) readTransport(ctx context.Context, t *transport) error {
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		msg, err := t.codec.Read()
+		if err != nil {
+			if errors.Is(err, io.EOF) || errors.Is(err, ErrStreamBroken) {
 				return err
 			}
-			// A single malformed line should not kill the session; the
-			// broker may emit a frame we don't model. Skip and continue.
-			continue
+			continue // Skip malformed frames, never a finished scanner.
 		}
 		switch {
 		case msg.IsResponse():
-			c.deliverResponse(msg)
+			var id int64
+			if json.Unmarshal(*msg.ID, &id) != nil {
+				continue
+			}
+			c.mu.Lock()
+			ch := t.pending[id]
+			delete(t.pending, id)
+			c.mu.Unlock()
+			if ch != nil {
+				ch <- msg
+			}
 		case msg.IsNotification():
 			if c.filter != nil && c.filter(msg) {
 				continue
 			}
-			select {
-			case c.notifications <- msg:
-			case <-ctx.Done():
+			if !c.publish(ctx, Event{Kind: EventNotification, Generation: t.generation, Message: msg}) {
 				return ctx.Err()
-			case <-c.done:
-				return c.closeErr
 			}
 		}
 	}
 }
 
-func (c *Client) deliverResponse(msg *Message) {
-	var id int64
-	if err := json.Unmarshal(*msg.ID, &id); err != nil {
-		return
-	}
-	c.pendingMu.Lock()
-	ch := c.pending[id]
-	delete(c.pending, id)
-	c.pendingMu.Unlock()
-	if ch != nil {
-		ch <- msg
+func (c *Client) publish(ctx context.Context, event Event) bool {
+	select {
+	case c.events <- event:
+		return true
+	case <-ctx.Done():
+		return false
 	}
 }
 
-func (c *Client) shutdown() {
-	c.closeOnce.Do(func() {
-		close(c.done)
-		c.pendingMu.Lock()
-		for id, ch := range c.pending {
+func (c *Client) breakTransport(t *transport) {
+	c.mu.Lock()
+	t.once.Do(func() {
+		close(t.done)
+		for id, ch := range t.pending {
 			close(ch)
-			delete(c.pending, id)
+			delete(t.pending, id)
 		}
-		c.pendingMu.Unlock()
-		close(c.notifications)
 	})
+	c.mu.Unlock()
+	t.closeOnce.Do(t.close)
 }
 
-// Call sends a request and blocks until the matching response arrives,
-// ctx is cancelled, or the connection closes. A JSON-RPC error response
-// is returned as a non-nil error (*RPCError).
+func reconnectDelay(attempt int) time.Duration {
+	delay := 100 * time.Millisecond
+	for i := 0; i < attempt && delay < 2*time.Second; i++ {
+		delay *= 2
+	}
+	if delay > 2*time.Second {
+		delay = 2 * time.Second
+	}
+	return delay
+}
+
+func (c *Client) reattach(ctx context.Context) (io.ReadWriteCloser, error) {
+	for attempt := 0; ; attempt++ {
+		timer := time.NewTimer(c.retryDelay(attempt))
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil, ctx.Err()
+		case <-timer.C:
+		}
+		type dialResult struct {
+			conn io.ReadWriteCloser
+			err  error
+		}
+		result := make(chan dialResult)
+		go func() {
+			conn, err := c.dial(ctx)
+			select {
+			case result <- dialResult{conn, err}:
+			case <-ctx.Done():
+				if conn != nil {
+					_ = conn.Close()
+				}
+			}
+		}()
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case reply := <-result:
+			if reply.err == nil {
+				return reply.conn, nil
+			}
+			if reply.conn != nil {
+				_ = reply.conn.Close()
+			}
+		}
+	}
+}
+
+// Call uses the transport current at invocation. CallGeneration also refuses
+// stale queued commands before writing, even if a replacement is connected.
 func (c *Client) Call(ctx context.Context, method string, params any) (*Message, error) {
-	// Refused before it is written, not after. A request whose caller has
-	// already given up is still carried out once the broker has it, and for a
-	// mutation that means the work happens while the caller reports that it
-	// did not.
+	return c.CallGeneration(ctx, c.Generation(), method, params)
+}
+
+func (c *Client) CallGeneration(ctx context.Context, generation uint64, method string, params any) (*Message, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	select {
-	case <-c.done:
-		return nil, fmt.Errorf("connection closed before %q was sent", method)
-	default:
-	}
-
-	id := c.nextID.Add(1)
-	ch := make(chan *Message, 1)
-
-	c.pendingMu.Lock()
-	c.pending[id] = ch
-	c.pendingMu.Unlock()
-
-	if err := c.writeRequest(id, method, params); err != nil {
-		c.pendingMu.Lock()
-		delete(c.pending, id)
-		c.pendingMu.Unlock()
+	raw, err := marshalParams(params)
+	if err != nil {
 		return nil, err
 	}
-
+	c.mu.Lock()
+	t := c.current
+	if c.stopped || !t.connected() || t.generation != generation {
+		c.mu.Unlock()
+		return nil, fmt.Errorf("connection closed or generation changed before %q was sent", method)
+	}
+	id := c.nextID.Add(1)
+	ch := make(chan *Message, 1)
+	t.pending[id] = ch
+	c.mu.Unlock()
+	defer func() {
+		c.mu.Lock()
+		delete(t.pending, id)
+		c.mu.Unlock()
+	}()
+	rawID := json.RawMessage(strconv.FormatInt(id, 10))
+	if err := t.codec.Write(&Message{JSONRPC: "2.0", ID: &rawID, Method: method, Params: raw}); err != nil {
+		c.breakTransport(t)
+		return nil, err
+	}
 	select {
 	case <-ctx.Done():
-		c.pendingMu.Lock()
-		delete(c.pending, id)
-		c.pendingMu.Unlock()
 		return nil, ctx.Err()
-	case <-c.done:
+	case <-t.done:
 		return nil, fmt.Errorf("connection closed before response to %q", method)
 	case msg, ok := <-ch:
 		if !ok {
@@ -184,31 +363,23 @@ func (c *Client) Call(ctx context.Context, method string, params any) (*Message,
 	}
 }
 
-func (c *Client) writeRequest(id int64, method string, params any) error {
-	raw, err := marshalParams(params)
-	if err != nil {
-		return err
-	}
-	rawID := json.RawMessage(strconv.FormatInt(id, 10))
-	return c.codec.Write(&Message{
-		JSONRPC: "2.0",
-		ID:      &rawID,
-		Method:  method,
-		Params:  raw,
-	})
-}
-
-// Notify sends a fire-and-forget notification (no id, no response).
+// Notify sends a fire-and-forget notification on the current transport.
 func (c *Client) Notify(method string, params any) error {
 	raw, err := marshalParams(params)
 	if err != nil {
 		return err
 	}
-	return c.codec.Write(&Message{
-		JSONRPC: "2.0",
-		Method:  method,
-		Params:  raw,
-	})
+	c.mu.Lock()
+	t, stopped := c.current, c.stopped
+	c.mu.Unlock()
+	if stopped || !t.connected() {
+		return fmt.Errorf("connection closed before %q was sent", method)
+	}
+	if err := t.codec.Write(&Message{JSONRPC: "2.0", Method: method, Params: raw}); err != nil {
+		c.breakTransport(t)
+		return err
+	}
+	return nil
 }
 
 func marshalParams(params any) (json.RawMessage, error) {

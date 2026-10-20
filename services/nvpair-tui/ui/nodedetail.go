@@ -373,6 +373,10 @@ func detailEnginesTickCmd(gen int) tea.Cmd {
 }
 
 func (d *nodeDetail) telemetryCmd() tea.Cmd {
+	if d.policyDisconnected || !d.telemetryFound {
+		d.telemetryRunning = false
+		return nil
+	}
 	if d.node.nodeInfoTLS {
 		// Not polled from here; see nodeRow.nodeInfoTLS. A plain-HTTP poll to
 		// a TLS listener only ever fails, and it was made anyway.
@@ -408,8 +412,13 @@ func (d *nodeDetail) ownTelemetryRoute(cmd tea.Cmd) tea.Cmd {
 	}
 	route := d.telemetryRoute
 	self := d.telemetrySelf
+	generation := clientGeneration(d.client)
 	return func() tea.Msg {
+		if d.client != nil && !d.client.IsCurrent(generation) {
+			return nodeTelemetryMsg{transport: generation}
+		}
 		msg := cmd().(nodeTelemetryMsg)
+		msg.transport = generation
 		msg.route = route
 		msg.self = self
 		return msg
@@ -455,7 +464,7 @@ type detailReply struct {
 // For one call only, not a batch or a sequence: those return a message Bubble
 // Tea itself has to unpack, and wrapped they would never run.
 func (d *nodeDetail) own(cmd tea.Cmd) tea.Cmd {
-	if cmd == nil {
+	if cmd == nil || d.policyDisconnected {
 		return nil
 	}
 	node := d.node.key
@@ -700,6 +709,7 @@ func (d *nodeDetail) update(msg tea.Msg) (tea.Cmd, bool) {
 	switch msg := msg.(type) {
 	case detailPerformanceMsg:
 		if msg.lease != d.performanceLease || msg.lease == nil || msg.lease.retired.Load() ||
+			!msg.lease.client.IsCurrent(msg.lease.generation) ||
 			msg.host != d.hostUUID || msg.route != d.performanceRoute || msg.pushes != d.performancePushes {
 			return nil, true
 		}
@@ -707,13 +717,58 @@ func (d *nodeDetail) update(msg tea.Msg) (tea.Cmd, bool) {
 		return nil, true
 
 	case DisconnectedMsg:
+		if d.status.sticky && d.status.kind == toastInfo {
+			d.status.info("service disconnected; operation interrupted; outcome unknown")
+		} else {
+			d.status = toast{}
+		}
 		d.remotePermissionFresh = false
 		d.policyRoute++
 		d.policyFresh = false
 		d.policyDisconnected = true
 		d.invalidateIntent()
 		d.closePerformance()
+		d.performancePushes = 0
+		d.performanceRefresh, d.policyRefresh = false, false
+		telemetryChains++
+		d.telemetryGen = telemetryChains
+		d.telemetryRoute++
+		d.telemetryOK, d.telemetryRunning = false, false
+		d.telemetry = nodeTelemetry{}
+		// Retain names as presentation only; no old runtime fact remains known.
+		for i, engine := range d.engines {
+			d.engines[i] = engineStatus{Engine: engine.Engine, DisplayName: engine.DisplayName}
+		}
+		d.models = modelsResult{}
+		d.enginesStale = true
+		d.descriptors = nil
+		d.pending, d.settingsWanted, d.settingsConfirm, d.settingsAwaited = nil, nil, nil, nil
+		d.settings = map[string]enginesettings.Snapshot{}
+		if previous := d.catalog; previous != nil {
+			d.catalog = newCatalogBrowser(d.client, previous.engine, previous.engineLabel, previous.nodeLabel, previous.remote)
+			d.catalog.input, d.catalog.searching = previous.input, previous.searching
+			d.catalog.filter, d.catalog.query, d.catalog.sortBy = previous.filter, previous.query, previous.sortBy
+			d.catalog.gen = previous.gen + 1
+			d.catalog.SetSize(d.width, d.height)
+		}
+		if d.proxy != nil {
+			d.proxy = newProxyTracker()
+		}
+		d.refreshEngines()
+		d.refreshModels()
 		return nil, true
+	case sessionReadyMsg:
+		d.policyDisconnected = false
+		d.engines = nil
+		d.refreshEngines()
+		cmds := []tea.Cmd{d.Init()}
+		if d.settingsEngine != "" {
+			cmds = append(cmds, d.own(getEngineSettingsCmd(d.client, d.nodeArg(), d.settingsEngine)))
+		}
+		if d.catalog != nil {
+			cmds = append(cmds, d.catalog.Init())
+		}
+		return tea.Batch(cmds...), true
 
 	case TickMsg:
 		if d.performanceRefresh {
@@ -723,6 +778,9 @@ func (d *nodeDetail) update(msg tea.Msg) (tea.Cmd, bool) {
 		if d.policyRefresh {
 			d.policyRefresh = false
 			return tea.Batch(d.policyCmd(), d.intentCmd(), d.remotePermissionCmd()), true
+		}
+		if !d.telemetryRunning && d.telemetryFound && !d.policyDisconnected {
+			return d.telemetryCmd(), true
 		}
 		return nil, true
 
@@ -869,6 +927,9 @@ func (d *nodeDetail) update(msg tea.Msg) (tea.Cmd, bool) {
 		return nil, true
 
 	case nodeTelemetryMsg:
+		if msg.transport != 0 && (d.client == nil || !d.client.IsCurrent(msg.transport)) {
+			return nil, true
+		}
 		// Scoped to this screen's own chain, exactly as the tick is. This reply
 		// schedules the next poll, so accepting a superseded one would leave two
 		// chains running against the same node.
@@ -1451,6 +1512,10 @@ func (d *nodeDetail) handleModelKey(msg tea.KeyMsg) tea.Cmd {
 }
 
 func (d *nodeDetail) submitInput() tea.Cmd {
+	if d.policyDisconnected {
+		d.status.info("service disconnected - wait for recovery before submitting")
+		return nil
+	}
 	val := strings.TrimSpace(d.input.Value())
 	mode := d.mode
 	d.mode = detailInputNone
@@ -1921,6 +1986,11 @@ func (d *nodeDetail) refreshEngines() {
 		if d.proxy != nil {
 			row = append(row, d.proxyPortCell(e.Engine))
 		}
+		if d.policyDisconnected {
+			for i := 1; i < len(row); i++ {
+				row[i] = "?"
+			}
+		}
 		rows = append(rows, row)
 	}
 	d.engineTable.SetRows(rows)
@@ -1935,10 +2005,11 @@ func (d *nodeDetail) refreshEngines() {
 // engine no proxy fronts says so rather than showing a blank.
 func (d *nodeDetail) proxyPortCell(engine string) string {
 	port, ready := d.proxy.portForEngine(engine)
+	idx := d.proxy.indexForEngine(engine)
 	switch {
-	case d.proxy.indexForEngine(engine) < 0:
+	case idx < 0:
 		return "-"
-	case port == 0:
+	case !d.proxy.engines[idx].known || port == 0:
 		return "?"
 	case !ready:
 		return strconv.Itoa(port) + " down"

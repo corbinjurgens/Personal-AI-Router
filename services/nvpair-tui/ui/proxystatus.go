@@ -29,6 +29,7 @@ type proxyEngine struct {
 	// engine is the engine-manager engine name this facade fronts, used to line
 	// a facade up with the engine it serves.
 	engine string
+	known  bool
 	ready  bool
 	port   int
 }
@@ -156,22 +157,23 @@ func (p *proxyTracker) statusCmd(client *rpc.Client, idx int) tea.Cmd {
 
 // apply folds a status reply into the tracker.
 //
-// A failed read marks the facade down. It is not known to be listening, and
-// the strip exists to tell clients where they can connect.
+// A failed read makes readiness unknown and the endpoint unusable. Only a
+// successful read or an explicit push establishes whether the facade is down.
 //
-// The last known port is kept whenever the facade is down, from a failed read
-// or from the broker's {ready:false, port:0} for a facade it is not running,
-// as the error push keeps it: the configured port, shown as down, says more
-// than a blank.
+// The last known port is kept on failed reads and on the broker's
+// {ready:false, port:0}, as it is on an error push. Keeping that configured
+// value does not make it a usable endpoint.
 func (p *proxyTracker) apply(msg proxyStatusMsg) {
 	if msg.idx < 0 || msg.idx >= len(p.engines) {
 		return
 	}
 	e := p.engines[msg.idx]
 	if msg.err != nil {
+		e.known = false
 		e.ready = false
 		return
 	}
+	e.known = true
 	e.ready = msg.ready
 	if msg.port != 0 {
 		e.port = msg.port
@@ -210,6 +212,7 @@ func (p *proxyTracker) handleNotification(msg *rpc.Message) {
 			Port int `json:"port"`
 		}
 		decodeOrLog(msg.Method, msg.Params, &r)
+		p.engines[idx].known = true
 		p.engines[idx].ready = true
 		if r.Port != 0 {
 			p.engines[idx].port = r.Port
@@ -217,6 +220,7 @@ func (p *proxyTracker) handleNotification(msg *rpc.Message) {
 	case strings.HasSuffix(msg.Method, ":error"):
 		// The port is kept: it is still the configured value, and showing the
 		// proxy as down at a known port is more useful than blanking it.
+		p.engines[idx].known = true
 		p.engines[idx].ready = false
 	}
 }
@@ -241,6 +245,10 @@ func (p *proxyTracker) refreshCmd(client *rpc.Client) tea.Cmd {
 func (p *proxyTracker) strip() string {
 	parts := make([]string, 0, len(p.engines))
 	for _, e := range p.engines {
+		if !e.known {
+			parts = append(parts, fmt.Sprintf("%s %s", e.label, footerStyle.Render("unknown")))
+			continue
+		}
 		if e.ready {
 			parts = append(parts, fmt.Sprintf("%s %s", e.label, statusOKStyle.Render(fmt.Sprintf(":%d", e.port))))
 			continue

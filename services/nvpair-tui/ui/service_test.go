@@ -10,6 +10,7 @@ import (
 	"net"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/charmbracelet/bubbles/table"
 	tea "github.com/charmbracelet/bubbletea"
@@ -322,6 +323,160 @@ func TestLogLevelPickerAppliesSelection(t *testing.T) {
 	press(v, "enter")
 	if cmd := press(v, "enter"); cmd != nil {
 		t.Error("re-selecting the current level issued a command")
+	}
+}
+
+func chooseServiceLogLevel(t *testing.T, v *serviceView, level string) tea.Cmd {
+	t.Helper()
+	logLevelRow(t, v)
+	press(v, "enter")
+	for range logLevelNames() {
+		press(v, "h")
+	}
+	for _, option := range logLevelNames() {
+		if option == level {
+			return press(v, "enter")
+		}
+		press(v, "l")
+	}
+	t.Fatal("requested log level is absent from the picker")
+	return nil
+}
+
+func TestReplacementLogLevelNeedsFreshAcknowledgement(t *testing.T) {
+	f := newReconnectUIFixture(t)
+	v := newServiceView(f.client)
+	v.logLevel = slog.LevelInfo
+	m := New(f.client, nil, []View{v})
+	applyDebug := func() tea.Msg {
+		t.Helper()
+		cmd := chooseServiceLogLevel(t, v, "debug")
+		if cmd == nil {
+			t.Fatal("explicit debug selection did not send a service request")
+		}
+		if err := f.peer.SetDeadline(time.Now().Add(time.Second)); err != nil {
+			t.Fatal(err)
+		}
+		request, result := terminalControlsReply(t, f.broker,
+			sessionCommand(f.client, f.client.Generation(), cmd),
+			&rpc.Message{Result: []byte(`{"level":"debug"}`)})
+		var params applog.SetLevelParams
+		if err := json.Unmarshal(request.Params, &params); err != nil {
+			t.Fatal(err)
+		}
+		if request.Method != applog.SetLevelMethod || params.Level != "debug" {
+			t.Fatalf("log choice sent %q with level %q", request.Method, params.Level)
+		}
+		updated, _ := m.Update(result)
+		m = updated.(Model)
+		if got := v.itemValue(v.items[logLevelRow(t, v)]); got != "debug" {
+			t.Fatalf("acknowledged service level = %q, want debug", got)
+		}
+		return result
+	}
+	oldAck := applyDebug()
+	f.replace(t, &m)
+	assertUnavailable := func() {
+		t.Helper()
+		if _, err := applog.ParseLevel(v.itemValue(v.items[logLevelRow(t, v)])); err == nil {
+			t.Error("replacement shows an effective log level before any fresh acknowledgement")
+		}
+	}
+	assertUnavailable()
+	updated, _ := m.Update(oldAck)
+	m = updated.(Model)
+	assertUnavailable()
+	applyDebug()
+	if cmd := chooseServiceLogLevel(t, v, "debug"); cmd != nil {
+		t.Error("reselecting the freshly acknowledged level issued another request")
+	}
+}
+
+// Hold a submitted RPC without answering it. Replacement interrupts the local
+// wait; the server-side mutation may already have happened.
+func holdReplacementCommand(t *testing.T, f *reconnectUIFixture, cmd tea.Cmd, method string) <-chan tea.Msg {
+	t.Helper()
+	if cmd == nil {
+		t.Fatal("operation produced no command")
+	}
+	done := make(chan tea.Msg, 1)
+	guarded := sessionCommand(f.client, f.client.Generation(), cmd)
+	go func() { done <- guarded() }()
+	if err := f.peer.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	request, err := f.broker.Read()
+	if err != nil {
+		t.Fatalf("read submitted operation: %v", err)
+	}
+	if request.Method != method {
+		t.Fatalf("submitted method = %q, want %q", request.Method, method)
+	}
+	return done
+}
+
+func interruptedReplacementResult(t *testing.T, done <-chan tea.Msg, generation uint64) sessionResult {
+	t.Helper()
+	select {
+	case result := <-done:
+		envelope, ok := result.(sessionResult)
+		if !ok || envelope.generation != generation {
+			t.Fatal("interrupted operation lost its original session envelope")
+		}
+		return envelope
+	case <-time.After(time.Second):
+		t.Fatal("interrupted operation did not return")
+		return sessionResult{}
+	}
+}
+
+func TestReplacementInterruptsResetStatus(t *testing.T) {
+	f := newReconnectUIFixture(t)
+	v := armedResetView(t, f.client)
+	m := New(f.client, nil, []View{v})
+	generation := f.client.Generation()
+	done := holdReplacementCommand(t, f, press(v, "y"), "engine:uninstall-managed")
+	if !v.resetting || !v.status.sticky {
+		t.Fatal("submitted reset did not display persistent progress")
+	}
+	oldProgress := v.status.text
+	f.replace(t, &m)
+	if err := f.peer.SetDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	_, fresh := terminalControlsReply(t, f.broker,
+		sessionCommand(f.client, f.client.Generation(), v.pingCmd()),
+		&rpc.Message{Result: []byte(`{"version":"fresh-service","uptime_ms":10}`)})
+	updated, _ := m.Update(fresh)
+	m = updated.(Model)
+	if v.resetting || v.status.sticky || v.status.text == oldProgress {
+		t.Error("replacement retained the interrupted reset's busy state or progress")
+	}
+	status := v.status
+	late := interruptedReplacementResult(t, done, generation)
+	if halted, ok := late.msg.(resetHaltedMsg); !ok || halted.reason == "" {
+		t.Fatal("held reset did not return its interrupted failure")
+	}
+	updated, cmd := m.Update(late)
+	m = updated.(Model)
+	if cmd != nil || m.wipeOnExit || m.stopOnExit || v.resetting || v.brokerVersion != "fresh-service" || v.status != status {
+		t.Error("old reset failure changed recovered service state or scheduled follow-up work")
+	}
+}
+
+func TestReplacementRetiresServiceConfirmation(t *testing.T) {
+	f := newReconnectUIFixture(t)
+	v := armedResetView(t, f.client)
+	m := New(f.client, nil, []View{v})
+	if !v.status.sticky || !strings.Contains(v.status.render(), "press y to confirm") {
+		t.Fatal("reset confirmation was not visible before disconnect")
+	}
+	f.replace(t, &m)
+	if v.confirming >= 0 || v.status.sticky || strings.Contains(v.status.render(), "press y to confirm") {
+		t.Error("replacement retained the retired service confirmation")
+	}
+	if cmd := press(v, "y"); cmd != nil {
+		t.Error("retired confirmation still submitted an action")
 	}
 }
 

@@ -91,7 +91,8 @@ type jobsView struct {
 	// of the service controls because the proxy ports it needs are already here,
 	// and because the traffic it produces appears in the table below it — so
 	// starting it and seeing the result are the same screen.
-	demo *demoRunner
+	demo           *demoRunner
+	demoGeneration uint64
 
 	width, height int
 }
@@ -156,15 +157,11 @@ func (v *jobsView) Init() tea.Cmd {
 // workload that changes state between the two calls arrives as a push and is
 // merged by key rather than lost.
 func (v *jobsView) feedCmd() tea.Cmd {
-	// Sequenced, not batched. A batch runs its commands concurrently, so the
-	// snapshot could be read before the subscription existed and a change
-	// landing between the two was then in neither.
-	return tea.Sequence(
-		call(v.client, "workloads:subscribe", nil, func(_ *rpc.Message, err error) tea.Msg {
-			return workloadsSubscribedMsg{err: err}
-		}),
-		v.loadCmd(),
-	)
+	// The acknowledgement schedules the baseline in Update, so subscribing
+	// always precedes it and a stale acknowledgement cannot start a new read.
+	return call(v.client, "workloads:subscribe", nil, func(_ *rpc.Message, err error) tea.Msg {
+		return workloadsSubscribedMsg{err: err}
+	})
 }
 
 func (v *jobsView) identityCmd() tea.Cmd {
@@ -196,10 +193,25 @@ func (v *jobsView) SetSize(w, h int) {
 
 func (v *jobsView) Update(msg tea.Msg) tea.Cmd {
 	switch msg := msg.(type) {
+	case DisconnectedMsg:
+		v.demo.stop()
+		v.order, v.byKey = nil, map[string]workload{}
+		v.baselined, v.removedEarly = false, nil
+		v.subscribed, v.identified = false, false
+		v.trimmed, v.sinceProxyPoll = 0, 0
+		v.namer = newNodeNamer()
+		v.proxy = newProxyTracker()
+		v.refreshRows()
+		return nil
+	case sessionReadyMsg:
+		return v.Init()
 	case workloadsSubscribedMsg:
 		v.subscribed = msg.err == nil
 		if msg.err != nil {
 			v.status.error("job updates unavailable: %s - retrying", msg.err)
+		}
+		if msg.err == nil {
+			return v.loadCmd()
 		}
 		return nil
 
@@ -269,6 +281,9 @@ func (v *jobsView) Update(msg tea.Msg) tea.Cmd {
 		// is a whole number of seconds, so one second is enough resolution and
 		// the run needs no timer of its own.
 		demoCmds, finished := v.demo.tick()
+		for i, cmd := range demoCmds {
+			demoCmds[i] = sessionInvocation(v.client, v.demoGeneration, cmd)
+		}
 		if finished {
 			v.status.info("inference demo finished - the work it sent is in the table")
 		}
@@ -566,12 +581,14 @@ func (v *jobsView) toggleDemo() tea.Cmd {
 		v.status.info("inference demo stopped - requests already sent will still finish")
 		return nil
 	}
+	generation := clientGeneration(v.client)
 	cmd, err := v.demo.start(v.proxy)
 	if err != nil {
 		v.status.error("inference demo: %s", err)
 		return nil
 	}
-	return cmd
+	v.demoGeneration = generation
+	return sessionInvocation(v.client, generation, cmd)
 }
 
 func (v *jobsView) emptyHint() string {

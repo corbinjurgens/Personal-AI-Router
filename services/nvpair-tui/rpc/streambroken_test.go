@@ -22,7 +22,7 @@ func (discardWriter) Write(p []byte) (int, error) { return len(p), nil }
 // bufio.Scanner is finished after a read error and cannot resync past an
 // over-long line, so Scan returns false forever. The loop treated that like a
 // frame it could not parse and continued, which burned a core, never closed the
-// notifications channel, and left the UI reporting a service it could no longer
+// event channel, and left the UI reporting a service it could no longer
 // reach.
 func TestRunReturnsOnBrokenStream(t *testing.T) {
 	// One frame longer than the cap, which is exactly the failure the frame
@@ -46,12 +46,12 @@ func TestRunReturnsOnBrokenStream(t *testing.T) {
 
 	// Consumers must observe the disconnect.
 	select {
-	case _, open := <-c.Notifications():
+	case _, open := <-c.Events():
 		if open {
-			t.Error("notifications channel delivered after the stream broke")
+			t.Error("event channel delivered after the terminal disconnect")
 		}
 	case <-time.After(time.Second):
-		t.Error("notifications channel was never closed, so the UI never learns it is disconnected")
+		t.Error("event channel was never closed after terminal disconnect")
 	}
 }
 
@@ -66,12 +66,12 @@ func TestRunSkipsUnparseableFrame(t *testing.T) {
 	go func() { _ = c.Run(context.Background()) }()
 
 	select {
-	case msg, ok := <-c.Notifications():
+	case event, ok := <-c.Events():
 		if !ok {
 			t.Fatal("session ended on a malformed frame instead of skipping it")
 		}
-		if msg.Method != "app:ready" {
-			t.Errorf("first delivered notification = %q, want app:ready", msg.Method)
+		if event.Kind != EventNotification || event.Generation != 1 || event.Message == nil || event.Message.Method != "app:ready" {
+			t.Errorf("first delivered notification = %+v, want generation 1 app:ready", event)
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("timed out; a malformed frame stalled the loop")

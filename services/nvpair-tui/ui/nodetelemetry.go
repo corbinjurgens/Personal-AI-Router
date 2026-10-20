@@ -54,7 +54,8 @@ type nodeTelemetry struct {
 // toast: an unreachable node is an ordinary, expected state here, and the detail
 // screen simply says telemetry is unavailable.
 type nodeTelemetryMsg struct {
-	nodeKey string
+	transport uint64
+	nodeKey   string
 	// hostUUID is the identity expected when the request started, which can
 	// change after an open manual row joins discovery without changing its key.
 	hostUUID string
@@ -145,15 +146,16 @@ func pollTelemetryCmd(key string, gen int, addresses []string, port int, expect 
 // pollPairedTelemetryCmd asks by host identity only. The scanner owns endpoint
 // selection and reverse retry; a failed getter never falls back to direct HTTP.
 func pollPairedTelemetryCmd(client *rpc.Client, key string, gen int, hostUUID string) tea.Cmd {
+	generation := clientGeneration(client)
 	return func() tea.Msg {
-		result := nodeTelemetryMsg{nodeKey: key, hostUUID: hostUUID, gen: gen}
+		result := nodeTelemetryMsg{nodeKey: key, hostUUID: hostUUID, gen: gen, transport: generation}
 		if client == nil || hostUUID == "" {
 			result.err = fmt.Errorf("node information unavailable")
 			return result
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), nodeInfoPollTimeout)
 		defer cancel()
-		msg, err := client.Call(ctx, "discovery:get-node-info", struct {
+		msg, err := client.CallGeneration(ctx, generation, "discovery:get-node-info", struct {
 			HostUUID string `json:"hostUuid"`
 		}{HostUUID: hostUUID})
 		if err == nil {

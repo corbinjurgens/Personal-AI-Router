@@ -16,6 +16,65 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 )
 
+func TestReplacementClearsRetiredInboundPIN(t *testing.T) {
+	f := newReconnectUIFixture(t)
+	v := newNodesView(f.client)
+	v.SetSize(140, 35)
+	m := New(f.client, nil, []View{v})
+	v.receiveInvite(clusterInvite{InviteID: "retired-inbound", FromNodeName: "retired inviting peer"})
+	v.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("a")})
+	const syntheticPIN = "246810"
+	v.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(syntheticPIN)})
+	v.handleKey(tea.KeyMsg{Type: tea.KeyTab})
+	if v.mode != nodesInputPin || v.input.Value() != syntheticPIN || !v.inboundAllow {
+		t.Fatal("inbound acceptance did not retain the typed draft and Allow choice")
+	}
+	f.replace(t, &m)
+	// Do not print input or rendered state: failures may contain a pairing PIN.
+	if v.input.Value() != "" || v.inboundAllow {
+		t.Error("replacement retained the retired inbound PIN or Allow choice")
+	}
+	if v.mode == nodesInputPin || v.inbound != nil || v.inboundPrompt() != "" || strings.Contains(v.View(), syntheticPIN) || strings.Contains(v.View(), "retired inviting peer") {
+		t.Error("replacement retained an instruction for the retired inbound invitation")
+	}
+	v.receiveInvite(clusterInvite{InviteID: "fresh-inbound", FromNodeName: "fresh inviting peer"})
+	v.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("a")})
+	if v.mode != nodesInputPin || v.input.Value() != "" || v.inboundAllow {
+		t.Error("fresh invitation did not open with an empty PIN and Block choice")
+	}
+	if !strings.Contains(v.View(), "(*) Block this peer from changing this device") {
+		t.Error("fresh invitation did not render its default Block choice")
+	}
+}
+
+func TestReplacementRetiresPairingInstructions(t *testing.T) {
+	f := newReconnectUIFixture(t)
+	v := newNodesView(f.client)
+	v.SetSize(140, 35)
+	m := New(f.client, nil, []View{v})
+	const syntheticPIN = "654321"
+	v.handleInviteResult(nodeInviteMsg{
+		generation: v.inviteGeneration, name: "retired peer",
+		inviteID: "retired-invite", pin: syntheticPIN,
+	})
+	if !v.status.sticky || !strings.Contains(v.status.render(), syntheticPIN) {
+		t.Fatal("outbound invite did not display its persistent pairing instruction")
+	}
+	v.beginInput(nodesInputManualAddress, "host")
+	v.input.SetValue("192.0.2.20")
+	f.replace(t, &m)
+	// Do not print the rendered text: a failure may contain a pairing PIN.
+	if strings.Contains(v.View(), syntheticPIN) || strings.Contains(v.status.render(), "read it to that node") || v.status.sticky {
+		t.Error("replacement retained an instruction for the retired pairing session")
+	}
+	if v.outboundPIN != "" || v.outboundInviteID != "" {
+		t.Error("replacement retained retired outbound pairing credentials")
+	}
+	if v.mode != nodesInputManualAddress || v.input.Value() != "192.0.2.20" {
+		t.Error("replacement discarded the unsent manual-address draft")
+	}
+}
+
 func TestPairingCarriesLocalManagementChoice(t *testing.T) {
 	for _, tc := range []struct {
 		name, path string

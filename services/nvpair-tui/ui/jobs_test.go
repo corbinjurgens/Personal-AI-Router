@@ -4,11 +4,114 @@
 package ui
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
+	"net"
+	"os"
+	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"nvpair-tui/rpc"
 )
+
+func TestReplacementProxyReadinessStaysUnknownUntilReported(t *testing.T) {
+	f := newReconnectUIFixture(t)
+	v := newJobsView(f.client)
+	v.SetSize(180, 35)
+	m := New(f.client, nil, []View{v})
+	t.Cleanup(v.close)
+	idx := v.proxy.indexForEngine("ollama")
+	if idx < 0 {
+		t.Fatal("Ollama proxy missing from the tracker")
+	}
+	proxyRow := func() string {
+		t.Helper()
+		rows := strings.Split(v.proxy.strip(), "   ")
+		if idx >= len(rows) {
+			t.Fatal("proxy strip omitted the tracked facade")
+		}
+		row := rows[idx]
+		if !strings.Contains(v.View(), row) {
+			t.Fatal("Jobs did not render the tracked proxy status")
+		}
+		return row
+	}
+	assertUnknown := func(stage string, port int) {
+		t.Helper()
+		row := proxyRow()
+		if strings.Contains(row, "down") || (!strings.Contains(row, "unknown") && !strings.Contains(row, "?")) {
+			t.Errorf("%s: unconfirmed proxy rendered as %q, want unknown", stage, row)
+		}
+		if got, usable := v.proxy.portForEngine("ollama"); usable || got != port {
+			t.Errorf("%s: endpoint port=%d usable=%v, want %d/false", stage, got, usable, port)
+		}
+	}
+	readStatus := func(reply *rpc.Message) {
+		t.Helper()
+		if err := f.peer.SetDeadline(time.Now().Add(time.Second)); err != nil {
+			t.Fatal(err)
+		}
+		request, result := terminalControlsReply(t, f.broker,
+			sessionCommand(f.client, f.client.Generation(), v.proxy.statusCmd(f.client, idx)), reply)
+		if request.Method != "ollama-proxy:get-status" {
+			t.Fatalf("proxy status request = %q", request.Method)
+		}
+		updated, _ := m.Update(result)
+		m = updated.(Model)
+	}
+	readStatus(&rpc.Message{Result: []byte(`{"ready":true,"port":11434}`)})
+	if port, usable := v.proxy.portForEngine("ollama"); !usable || port != 11434 {
+		t.Fatal("initial successful status did not establish a usable endpoint")
+	}
+	if err := f.peer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	updated, _ := m.Update(f.event(t))
+	m = updated.(Model)
+	if !m.disconnected || m.ready {
+		t.Fatal("transport loss did not reach the retained shell")
+	}
+	assertUnknown("disconnected", 0)
+	conn, peer := net.Pipe()
+	f.peer, f.broker = peer, rpc.NewCodec(peer, peer)
+	select {
+	case f.dials <- conn:
+	case <-time.After(time.Second):
+		t.Fatal("client did not dial the replacement")
+	}
+	if err := f.broker.Write(&rpc.Message{JSONRPC: "2.0", Method: "app:ready", Params: []byte(`{"version":"replacement"}`)}); err != nil {
+		t.Fatal(err)
+	}
+	updated, _ = m.Update(f.event(t))
+	m = updated.(Model)
+	if m.disconnected || !m.ready {
+		t.Fatal("replacement ready did not recover the retained shell")
+	}
+	assertUnknown("ready before status", 0)
+	readStatus(&rpc.Message{Error: &rpc.RPCError{Code: -32000, Message: "status unavailable"}})
+	assertUnknown("failed status read", 0)
+	readStatus(&rpc.Message{Result: []byte(`{"ready":false,"port":0}`)})
+	if !strings.Contains(proxyRow(), "down") {
+		t.Error("explicit ready:false did not render the proxy down")
+	}
+	if _, usable := v.proxy.portForEngine("ollama"); usable {
+		t.Error("explicit ready:false exposed a usable endpoint")
+	}
+	readStatus(&rpc.Message{Result: []byte(`{"ready":true,"port":12999}`)})
+	if port, usable := v.proxy.portForEngine("ollama"); !usable || port != 12999 || !strings.Contains(proxyRow(), ":12999") {
+		t.Error("successful ready status did not render its usable endpoint")
+	}
+	readStatus(&rpc.Message{Error: &rpc.RPCError{Code: -32000, Message: "status unavailable"}})
+	assertUnknown("failed read after known endpoint", 12999)
+	readStatus(&rpc.Message{Result: []byte(`{"ready":false,"port":0}`)})
+	if port, usable := v.proxy.portForEngine("ollama"); usable || port != 12999 || !strings.Contains(proxyRow(), "down") {
+		t.Error("explicit down status did not preserve the unusable last-known port")
+	}
+}
 
 // TestJobsHistoryIsBounded is the guard for a leak in a program meant to be left
 // running. The broker never tells a client to forget a job, so without a cap
@@ -217,6 +320,90 @@ func TestFailedStartupReadsAreRetried(t *testing.T) {
 	if !v.subscribed || !v.baselined || !v.identified {
 		t.Errorf("after both reads succeeded: subscribed=%v baselined=%v identified=%v",
 			v.subscribed, v.baselined, v.identified)
+	}
+}
+
+func TestJobsBaselineWaitsForSuccessfulSubscription(t *testing.T) {
+	f := newReconnectUIFixture(t)
+	f.serve(t, map[string]json.RawMessage{
+		"workloads:get-initial": json.RawMessage(`{"workloads":[{"id":"fresh","originatedFrom":"self"}]}`),
+	})
+	v := newJobsView(f.client)
+	ack := v.feedCmd()()
+	if f.count("workloads:subscribe") != 1 || f.count("workloads:get-initial") != 0 {
+		t.Fatal("baseline was requested before subscription acknowledgement")
+	}
+	load := v.Update(ack)
+	if load == nil {
+		t.Fatal("successful subscription did not schedule baseline")
+	}
+	v.Update(load())
+	if !v.baselined || len(v.byKey) != 1 || v.byKey[v.order[0]].ID != "fresh" {
+		t.Fatal("acknowledged subscription did not load the fresh job")
+	}
+	if cmd := v.Update(workloadsSubscribedMsg{}); cmd == nil {
+		t.Fatal("successful resubscription did not schedule a fresh baseline")
+	}
+	if cmd := v.Update(workloadsSubscribedMsg{err: errFake{}}); cmd != nil {
+		t.Fatal("failed subscription scheduled an unordered baseline")
+	}
+}
+
+type observedDemoContext struct {
+	context.Context
+	starts atomic.Int32
+}
+
+func (c *observedDemoContext) Err() error {
+	c.starts.Add(1)
+	return c.Context.Err()
+}
+
+func TestSessionDisconnectStopsDemoWithoutCancellingSubmittedWork(t *testing.T) {
+	f := newReconnectUIFixture(t)
+	v := newJobsView(f.client)
+	runner := v.demo
+	submittedContext := runner.ctx
+	// A cancelled command context makes this probe safe even if the invocation
+	// guard regresses: exec checks Err before starting any dispatcher process.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	observed := &observedDemoContext{Context: ctx}
+	runner.ctx = observed
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner.executable = executable
+	runner.status = demoRunning
+	runner.started = time.Now()
+	runner.schedule = []demoRequest{{}, {at: time.Hour}}
+	v.demoGeneration = 1
+	queued := v.Update(TickMsg{})
+	if queued == nil || runner.next != 1 {
+		t.Fatal("Jobs did not queue the due demo submission")
+	}
+	m := New(f.client, nil, []View{v})
+	f.replace(t, &m)
+	if v.demo != runner || runner.status != demoIdle || len(runner.schedule) != 0 || submittedContext.Err() != nil {
+		t.Fatal("disconnect retained future demo schedule or cancelled submitted work")
+	}
+	if msg := queued(); msg != nil || observed.starts.Load() != 0 {
+		t.Fatal("queued old-session demo work started on replacement")
+	}
+	if msg := submitDemoRequest(observed, executable, demoRequest{}, 0)(); msg != nil || observed.starts.Load() != 1 {
+		t.Fatal("cancelled-context control did not detect an attempted dispatcher start")
+	}
+	if cmd := v.Update(TickMsg{}); cmd != nil {
+		t.Fatal("stopped demo scheduled another submission")
+	}
+	started := false
+	fresh := sessionInvocation(f.client, 2, func() tea.Msg {
+		started = true
+		return demoSpawnedMsg{}
+	})
+	if _, ok := fresh().(demoSpawnedMsg); !ok || !started {
+		t.Fatal("replacement session rejected freshly created demo work")
 	}
 }
 

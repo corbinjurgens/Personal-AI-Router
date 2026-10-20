@@ -7,9 +7,16 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
+	"nvpair-shared/engineintent"
 	"nvpair-shared/engines"
 	"nvpair-shared/enginesettings"
 	"nvpair-shared/noderec"
@@ -18,6 +25,226 @@ import (
 	"github.com/charmbracelet/bubbles/key"
 	tea "github.com/charmbracelet/bubbletea"
 )
+
+func TestReplacementInterruptsEngineOperationStatus(t *testing.T) {
+	f := newReconnectUIFixture(t)
+	v := newNodesView(f.client)
+	d := newNodeDetail(f.client, nodeRow{key: "self", name: "this-host", self: true, presence: presenceOnline})
+	d.SetSize(100, 30)
+	v.detail = d
+	m := New(f.client, nil, []View{v})
+	t.Cleanup(d.closePerformance)
+	d.engines = []engineStatus{{Engine: "ollama", DisplayName: "Ollama", Installed: true}}
+	d.refreshEngines()
+	generation := f.client.Generation()
+	done := holdReplacementCommand(t, f, d.lifecycle(d.selectedEngine(), "start"), "engine:start")
+	if !d.status.sticky || !strings.Contains(d.status.render(), "start") {
+		t.Fatal("submitted engine operation did not display persistent progress")
+	}
+	oldProgress := d.status.text
+	d.mode = detailInputLaunchArgs
+	d.input.SetValue("--unsent-draft")
+	f.replace(t, &m)
+	if err := f.peer.SetDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	// The replacement reports that the submitted operation took effect. Loss
+	// of its acknowledgement must not be treated as a server-side rollback.
+	request, fresh := terminalControlsReply(t, f.broker,
+		sessionCommand(f.client, f.client.Generation(), d.enginesCmd()),
+		&rpc.Message{Result: []byte(`{"engines":[{"engine":"ollama","display_name":"Ollama","installed":true,"running":true,"healthy":true,"port":11434}]}`)})
+	if request.Method != "engine:get-installed" {
+		t.Fatalf("fresh baseline method = %q", request.Method)
+	}
+	updated, _ := m.Update(fresh)
+	m = updated.(Model)
+	if d.status.sticky || d.status.text == oldProgress {
+		t.Error("replacement retained the interrupted engine operation's progress")
+	}
+	if len(d.engines) != 1 || !d.engines[0].Running || d.enginesStale {
+		t.Fatal("replacement engine baseline was not applied")
+	}
+	if d.mode != detailInputLaunchArgs || d.input.Value() != "--unsent-draft" {
+		t.Error("recovery discarded the unsent engine-settings draft")
+	}
+	status := d.status
+	late := interruptedReplacementResult(t, done, generation)
+	reply, ok := late.msg.(detailReply)
+	if !ok {
+		t.Fatal("interrupted engine operation lost its detail owner")
+	}
+	if op, ok := reply.msg.(engineOpMsg); !ok || op.err == nil {
+		t.Fatal("held engine operation did not return its interrupted failure")
+	}
+	updated, cmd := m.Update(late)
+	m = updated.(Model)
+	if cmd != nil || d.status != status || len(d.engines) != 1 || !d.engines[0].Running || d.enginesStale {
+		t.Error("old engine failure changed recovered status, baseline, or scheduled follow-up work")
+	}
+	if d.mode != detailInputLaunchArgs || d.input.Value() != "--unsent-draft" {
+		t.Error("old engine failure changed the unsent draft")
+	}
+}
+
+func TestReplacementRetiresDetailConfirmation(t *testing.T) {
+	f := newReconnectUIFixture(t)
+	v := newNodesView(f.client)
+	d := newNodeDetail(f.client, nodeRow{key: "self", name: "this-host", self: true, presence: presenceOnline})
+	v.detail = d
+	m := New(f.client, nil, []View{v})
+	t.Cleanup(d.closePerformance)
+	d.uninstallEngine(&engineStatus{Engine: "ollama", DisplayName: "Ollama", Installed: true})
+	if d.pending == nil || !d.status.sticky || !strings.Contains(d.status.render(), "press y to confirm") {
+		t.Fatal("uninstall confirmation was not visible before disconnect")
+	}
+	f.replace(t, &m)
+	if d.pending != nil || d.status.sticky || strings.Contains(d.status.render(), "press y to confirm") {
+		t.Error("replacement retained the retired engine confirmation")
+	}
+	if cmd := d.handleKeyForTest(t, "y"); cmd != nil {
+		t.Error("retired confirmation still submitted an engine operation")
+	}
+}
+
+func TestDirectTelemetryCannotCrossTransportGeneration(t *testing.T) {
+	f := newReconnectUIFixture(t)
+	var polls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		polls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		if _, err := w.Write([]byte(`{"hostUuid":"peer-host","telemetryValid":true,"msSince":0}`)); err != nil {
+			t.Errorf("write telemetry: %v", err)
+		}
+	}))
+	t.Cleanup(server.Close)
+	host, portText, err := net.SplitHostPort(strings.TrimPrefix(server.URL, "http://"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	port, err := strconv.Atoi(portText)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := newNodeDetail(f.client, nodeRow{key: "peer-host", address: host, port: port, presence: presenceOnline})
+	completed := d.telemetryCmd()()
+	delayed := d.telemetryCmd()
+	if polls.Load() != 1 {
+		t.Fatal("initial direct telemetry did not reach loopback HTTP fixture")
+	}
+	m := New(f.client, nil, nil)
+	f.replace(t, &m)
+	if cmd, _ := d.update(completed); cmd != nil || d.telemetryOK {
+		t.Fatal("old completed direct telemetry applied or restarted polling")
+	}
+	d.update(delayed())
+	if polls.Load() != 1 || d.telemetryOK {
+		t.Fatal("old scheduled direct telemetry polled or applied after replacement")
+	}
+}
+
+func TestSessionCatalogRefreshPreservesSearchDraft(t *testing.T) {
+	f := newReconnectUIFixture(t)
+	v := newNodesView(f.client)
+	d := newNodeDetail(f.client, nodeRow{key: "self", self: true})
+	v.detail = d
+	d.catalog = newCatalogBrowser(f.client, "ollama", "Ollama", "this host", false)
+	old := d.catalog
+	old.all = []catalogModel{{ID: "removed", Name: "removed"}}
+	old.browse = old.all
+	old.loading = false
+	old.gen = 7
+	old.filter, old.query, old.sortBy = "fresh", "previous query", catalogSortSize
+	old.input.SetValue("unsent search")
+	old.searching = true
+	old.refresh()
+	m := New(f.client, nil, []View{v})
+	cmd := f.replace(t, &m)
+	if d.catalog == old || len(d.catalog.all) != 0 || len(d.catalog.browse) != 0 || len(d.catalog.table.Rows()) != 0 {
+		t.Fatal("replacement catalog retained old authoritative rows")
+	}
+	if !d.catalog.searching || d.catalog.input.Value() != "unsent search" || d.catalog.filter != "fresh" || d.catalog.query != "previous query" || d.catalog.sortBy != catalogSortSize {
+		t.Fatal("replacement catalog discarded unsent search or presentation")
+	}
+	f.serve(t, map[string]json.RawMessage{
+		"performance:subscribe": json.RawMessage(`{"subscribed":true}`),
+		"performance:get":       json.RawMessage(performanceFixtureJSON),
+		"engine:catalog":        json.RawMessage(`{"models":[{"id":"fresh","name":"fresh model"}],"searchable":true}`),
+	})
+	batch := cmd().(tea.BatchMsg)
+	for _, child := range batch[:len(batch)-1] {
+		runSessionUICommand(t, &m, child)
+	}
+	if len(d.catalog.all) != 1 || d.catalog.all[0].ID != "fresh" || f.count("engine:catalog") != 1 {
+		t.Fatal("catalog did not load one fresh replacement baseline")
+	}
+	d.update(catalogLoadedMsg{engine: "ollama", gen: 7, models: []catalogModel{{ID: "obsolete"}}})
+	if len(d.catalog.all) != 1 || d.catalog.all[0].ID != "fresh" {
+		t.Fatal("old catalog reply replaced fresh rows")
+	}
+	d.closePerformance()
+}
+
+func TestSessionDetailWaitsForFreshTargetBeforeTelemetry(t *testing.T) {
+	f := newReconnectUIFixture(t)
+	v := newNodesView(f.client)
+	row := nodeRow{key: "peer-host", membership: membershipMember, presence: presenceOnline, address: "192.0.2.1"}
+	d := newNodeDetail(f.client, row)
+	v.detail = d
+	m := New(f.client, nil, []View{v})
+	f.replace(t, &m)
+	if d.telemetryFound || d.telemetryRunning || d.telemetryCmd() != nil {
+		t.Fatal("recovery polled a retained address before fresh feeds validated target")
+	}
+	d.followNode(row, true)
+	f.serve(t, map[string]json.RawMessage{
+		"discovery:get-node-info": json.RawMessage(`{"hostUuid":"peer-host","telemetryValid":true,"msSince":0}`),
+	})
+	cmd := d.telemetryCmd()
+	if cmd == nil {
+		t.Fatal("fresh target did not restore telemetry polling")
+	}
+	msg := cmd().(nodeTelemetryMsg)
+	if msg.err != nil || f.count("discovery:get-node-info") != 1 {
+		t.Fatalf("validated paired target did not use discovery getter: %v", msg.err)
+	}
+	d.update(msg)
+	if !d.telemetryOK {
+		t.Fatal("fresh paired telemetry was rejected")
+	}
+	d.closePerformance()
+}
+
+func TestSessionDetailKeepsOnlyUnknownEngineIdentityUntilReady(t *testing.T) {
+	d := localDetail()
+	d.engines = []engineStatus{{Engine: "ollama", DisplayName: "Ollama", Installed: true, Running: true, Healthy: true, Port: 12345}}
+	d.intent = engineintent.Snapshot{EnabledByEngine: map[string]bool{"ollama": false}, OffByEngine: map[string]engineintent.Origin{}}
+	d.refreshEngines()
+	d.mode = detailInputLaunchArgs
+	d.input.SetValue("unsent arguments")
+	d.update(DisconnectedMsg{})
+	if len(d.engines) != 1 || d.engines[0] != (engineStatus{Engine: "ollama", DisplayName: "Ollama"}) || d.intent.EnabledByEngine != nil || d.intent.OffByEngine != nil {
+		t.Fatal("disconnect retained runtime or intent facts beyond engine identity")
+	}
+	rows := d.engineTable.Rows()
+	if len(rows) != 1 || rows[0][0] != "Ollama" {
+		t.Fatalf("disconnected engine identity rows = %v", rows)
+	}
+	for _, cell := range rows[0][1:] {
+		if cell != "?" {
+			t.Fatalf("disconnected runtime cell = %q, want unknown", cell)
+		}
+	}
+	if cmd := d.own(func() tea.Msg { t.Fatal("disconnected detail started work"); return nil }); cmd != nil {
+		t.Fatal("disconnected detail scheduled an RPC command")
+	}
+	if cmd := d.submitInput(); cmd != nil || d.mode != detailInputLaunchArgs || d.input.Value() != "unsent arguments" {
+		t.Fatal("disconnected submit replayed or discarded the draft")
+	}
+	d.update(sessionReadyMsg{})
+	if len(d.engines) != 0 || len(d.engineTable.Rows()) != 0 {
+		t.Fatal("replacement ready retained phantom engine identity rows")
+	}
+}
 
 func localDetail() *nodeDetail {
 	d := newNodeDetail(nil, nodeRow{key: "self", name: "this-host", self: true, presence: presenceOnline})
@@ -254,6 +481,57 @@ func TestRemoteDetailHidesProxyPort(t *testing.T) {
 	if got := len(d.engineTable.Rows()[0]); got != 5 {
 		t.Errorf("remote row has %d cells, want 5", got)
 	}
+}
+
+func TestDetailProxyPortUnknownAfterFailedStatusRead(t *testing.T) {
+	d := localDetail()
+	d.engines = []engineStatus{{Engine: "ollama", Installed: true, Running: true, Port: 11434}}
+	idx := d.proxy.indexForEngine("ollama")
+	if idx < 0 {
+		t.Fatal("local detail has no Ollama proxy tracker")
+	}
+	cell := func() string {
+		t.Helper()
+		rows := d.engineTable.Rows()
+		if len(rows) != 1 || len(rows[0]) != 6 {
+			t.Fatal("local detail did not render its engine and proxy port columns")
+		}
+		return rows[0][5]
+	}
+	assertDown := func(stage string) {
+		t.Helper()
+		if got := cell(); !strings.Contains(got, "down") {
+			t.Errorf("%s: proxy cell = %q, want confirmed down", stage, got)
+		}
+		if port, usable := d.proxy.portForEngine("ollama"); usable || port != 11435 {
+			t.Errorf("%s: endpoint port=%d usable=%v, want 11435/false", stage, port, usable)
+		}
+	}
+	assertUsable := func(stage string) {
+		t.Helper()
+		if got := cell(); got != "11435" {
+			t.Errorf("%s: proxy cell = %q, want usable port 11435", stage, got)
+		}
+		if port, usable := d.proxy.portForEngine("ollama"); !usable || port != 11435 {
+			t.Errorf("%s: endpoint port=%d usable=%v, want 11435/true", stage, port, usable)
+		}
+	}
+	d.update(proxyStatusMsg{idx: idx, ready: true, port: 11435})
+	assertUsable("successful status read")
+	d.update(proxyStatusMsg{idx: idx, err: errors.New("status read unavailable")})
+	if got := cell(); strings.Contains(got, "down") || (!strings.Contains(got, "unknown") && !strings.Contains(got, "?")) {
+		t.Errorf("failed status read: proxy cell = %q, want unknown", got)
+	}
+	if port, usable := d.proxy.portForEngine("ollama"); usable || port != 11435 {
+		t.Errorf("failed status read: endpoint port=%d usable=%v, want retained 11435/false", port, usable)
+	}
+	d.update(proxyStatusMsg{idx: idx, ready: false, port: 0})
+	assertDown("successful ready:false read")
+	d.update(proxyStatusMsg{idx: idx, err: errors.New("status read unavailable")})
+	d.update(NotificationMsg{Msg: &rpc.Message{Method: "ollama-proxy:error", Params: []byte(`{}`)}})
+	assertDown("explicit error push")
+	d.update(NotificationMsg{Msg: &rpc.Message{Method: "ollama-proxy:ready", Params: []byte(`{"port":11435}`)}})
+	assertUsable("ready push")
 }
 
 // TestProxyPortCellStates checks the cell distinguishes a live endpoint from a

@@ -224,15 +224,16 @@ var performanceSubscriptions = struct {
 }{current: make(map[*rpc.Client]*performanceLease)}
 
 type performanceLease struct {
-	client  *rpc.Client
-	serial  *sync.Mutex
-	retired atomic.Bool
-	ctx     context.Context
-	cancel  context.CancelFunc
+	client     *rpc.Client
+	generation uint64
+	serial     *sync.Mutex
+	retired    atomic.Bool
+	ctx        context.Context
+	cancel     context.CancelFunc
 }
 
 func newPerformanceLease(client *rpc.Client) *performanceLease {
-	l := &performanceLease{client: client, serial: &sync.Mutex{}}
+	l := &performanceLease{client: client, generation: clientGeneration(client), serial: &sync.Mutex{}}
 	l.ctx, l.cancel = context.WithCancel(context.Background())
 	performanceSubscriptions.Lock()
 	if previous := performanceSubscriptions.current[client]; previous != nil {
@@ -258,7 +259,7 @@ func (l *performanceLease) release() {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), callTimeout)
 	defer cancel()
-	_, _ = l.client.Call(ctx, "performance:unsubscribe", nil)
+	_, _ = l.client.CallGeneration(ctx, l.generation, "performance:unsubscribe", nil)
 	performanceSubscriptions.Lock()
 	if performanceSubscriptions.current[l.client] == l {
 		delete(performanceSubscriptions.current, l.client)
@@ -293,13 +294,13 @@ func (d *nodeDetail) performanceCmd(subscribe bool) tea.Cmd {
 	return func() tea.Msg {
 		l.serial.Lock()
 		defer l.serial.Unlock()
-		if l.retired.Load() {
+		if l.retired.Load() || !l.client.IsCurrent(l.generation) {
 			return nil
 		}
 		ctx, cancel := context.WithTimeout(l.ctx, callTimeout)
 		defer cancel()
 		if subscribe {
-			msg, err := l.client.Call(ctx, "performance:subscribe", nil)
+			msg, err := l.client.CallGeneration(ctx, l.generation, "performance:subscribe", nil)
 			var ack struct {
 				Subscribed bool `json:"subscribed"`
 			}
@@ -308,7 +309,7 @@ func (d *nodeDetail) performanceCmd(subscribe bool) tea.Cmd {
 				return reply
 			}
 		}
-		msg, err := l.client.Call(ctx, "performance:get", nil)
+		msg, err := l.client.CallGeneration(ctx, l.generation, "performance:get", nil)
 		if err != nil || msg == nil {
 			reply.err = errors.New("performance unavailable")
 		} else {

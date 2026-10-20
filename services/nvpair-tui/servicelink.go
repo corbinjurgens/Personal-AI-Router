@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sync"
 	"time"
 
 	"nvpair-shared/servicectl"
@@ -43,13 +44,13 @@ const logLineBuffer = 2000
 // the views use, and the broker's stderr reassembled from service/log
 // notifications for the Logs view.
 type serviceLink struct {
-	conn   io.ReadWriteCloser
 	Client *rpc.Client
 	// Logs yields one broker stderr line per line, as the broker's stderr pipe
 	// did when the TUI owned the broker.
-	Logs  io.Reader
-	logsW *io.PipeWriter
-	lines chan string
+	Logs      io.Reader
+	logsW     *io.PipeWriter
+	lines     chan string
+	logsClose sync.Once
 }
 
 // resolveServicePath honours an explicit override, otherwise looks for the
@@ -81,18 +82,35 @@ func resolveServicePath(override string) (string, error) {
 // servicePath when it is not running, and starts the JSON-RPC read loop. ctx
 // governs the read loop; detach ends the session without stopping anything.
 func connectService(ctx context.Context, servicePath string) (*serviceLink, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	endpoint, err := servicectl.Endpoint()
+	if err != nil {
+		return nil, err
+	}
 	conn, err := servicectl.ConnectOrStart(ctx, servicePath, nil)
 	if err != nil {
 		return nil, err
 	}
-	return newServiceLink(ctx, conn), nil
+	if err := ctx.Err(); err != nil {
+		_ = conn.Close()
+		return nil, err
+	}
+	client := rpc.NewReconnectingClient(conn, func(ctx context.Context) (io.ReadWriteCloser, error) {
+		return servicectl.DialEndpoint(ctx, endpoint)
+	})
+	return startServiceLink(ctx, client), nil
 }
 
 func newServiceLink(ctx context.Context, conn io.ReadWriteCloser) *serviceLink {
+	return startServiceLink(ctx, rpc.NewClient(conn, conn))
+}
+
+func startServiceLink(ctx context.Context, client *rpc.Client) *serviceLink {
 	logsR, logsW := io.Pipe()
 	l := &serviceLink{
-		conn:   conn,
-		Client: rpc.NewClient(conn, conn),
+		Client: client,
 		Logs:   logsR,
 		logsW:  logsW,
 		lines:  make(chan string, logLineBuffer),
@@ -102,6 +120,7 @@ func newServiceLink(ctx context.Context, conn io.ReadWriteCloser) *serviceLink {
 	go func() {
 		_ = l.Client.Run(ctx)
 		close(l.lines)
+		l.closeLogs()
 	}()
 	return l
 }
@@ -131,21 +150,26 @@ func (l *serviceLink) pumpLogs() {
 			break
 		}
 	}
-	_ = l.logsW.Close()
+	l.closeLogs()
+}
+
+func (l *serviceLink) closeLogs() {
+	l.logsClose.Do(func() { _ = l.logsW.Close() })
 }
 
 // detach leaves the service and its broker running and closes this client's
 // connection. The service treats a closed connection exactly like a client
 // shutdown request.
 func (l *serviceLink) detach() {
-	_ = l.conn.Close()
-	_ = l.logsW.Close()
+	l.Client.Close()
+	l.closeLogs()
 }
 
 // stopService asks the service to stop its broker cleanly and exit, then waits
 // for it to release the endpoint. The broker tears its workers down in its own
 // order; nothing here gets ahead of it.
 func (l *serviceLink) stopService() error {
+	l.Client.StopReconnecting()
 	ctx, cancel := context.WithTimeout(context.Background(), stopServiceTimeout)
 	defer cancel()
 	if _, err := l.Client.Call(ctx, "service/stop", nil); err != nil {

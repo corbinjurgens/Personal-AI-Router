@@ -209,6 +209,26 @@ nvpair-tui --version
 Logging goes to stderr (the broker's logs are shown inside the **Logs**
 tab, not on the terminal), so it never corrupts the full-screen UI.
 
+The RPC session retains one client handle after an established transport is
+lost. It fails pending requests, rejects requests while disconnected and retries
+attachment to the same endpoint with cancellable delays capped at two seconds.
+These retries only dial; they never start a replacement service. Requests are
+never replayed. Detach and an explicit service stop suppress further attachment.
+The log stream and its service/log filter survive transport replacement.
+
+Transport events carry a monotonically increasing generation in wire order,
+including disconnects. `CallGeneration` rejects commands captured for an old
+transport, and `IsCurrent` lets consumers reject obsolete asynchronous results.
+The shell consumes that event stream and marks the service disconnected on loss.
+Once a replacement reports ready, existing views resubscribe and reread their
+baselines once for that transport. Old rows, permissions and snapshot precedence
+are cleared; unavailable readings remain unknown. Local filters, presentation
+choices and unsent text survive, while pairing sessions and destructive
+confirmations are retired. Commands capture their transport when created, and
+the shell rejects obsolete results even if an old RPC completed before recovery.
+Performance cleanup cannot unsubscribe a replacement transport. UI timers retain
+one chain per owner rather than restarting with every ready notification.
+
 A service the TUI starts gets no broker arguments: the broker resolves its
 workers beside itself and inherits the environment the service was started
 with, including `NVPAIR_LOG_LEVEL` and any provider credentials in the reserved
