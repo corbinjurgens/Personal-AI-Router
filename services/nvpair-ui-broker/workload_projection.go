@@ -4,14 +4,181 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"time"
 
+	"nvpair-shared/nodepolicy"
+
 	"nvpair-ui-broker/workloadstore"
 )
+
+// projectWorkloadFrame is the workload wire boundary. Diagnostics deliberately
+// contain only fixed categories and counts, never decoder errors or input keys.
+func projectWorkloadFrame(method string, params json.RawMessage) (json.RawMessage, string, int) {
+	d := json.NewDecoder(bytes.NewReader(params))
+	d.UseNumber()
+	if !walkWorkloadJSON(d) {
+		return nil, "malformed", 0
+	}
+	if _, err := d.Token(); err != io.EOF {
+		return nil, "malformed", 0
+	}
+	var env map[string]json.RawMessage
+	if json.Unmarshal(params, &env) != nil || env == nil {
+		return nil, "malformed", 0
+	}
+	fields := env
+	removal := method == "workloads:remove"
+	if !removal {
+		fields = nil
+		if method != "workloads:upsert" && !proxyWorkloadMethods[method] {
+			return nil, "method", 0
+		}
+		if json.Unmarshal(env["workloadInfo"], &fields) != nil || fields == nil {
+			return nil, "malformed", 0
+		}
+	}
+	out := make(map[string]json.RawMessage)
+	stripped := 0
+	for key, value := range fields {
+		kind := workloadFieldKinds[key]
+		if removal {
+			kind = ""
+			if key == "workloadId" || key == "originatedFrom" {
+				kind = "identity"
+			}
+		}
+		if kind == "" {
+			stripped++
+			continue
+		}
+		if !validWorkloadValue(kind, value) {
+			return nil, "malformed", 0
+		}
+		out[key] = value
+	}
+	id := "id"
+	if removal {
+		id = "workloadId"
+	}
+	var identifier string
+	if json.Unmarshal(out[id], &identifier) != nil || identifier == "" {
+		return nil, "malformed", 0
+	}
+	if !removal {
+		// Match the manager's required lifecycle metadata. runId/seq and
+		// nullable metadata remain additive; absence must survive projection.
+		for _, key := range []string{"engine", "model", "state"} {
+			if json.Unmarshal(out[key], &identifier) != nil || identifier == "" {
+				return nil, "malformed", 0
+			}
+		}
+		if _, ok := out["originatedFrom"]; !ok {
+			return nil, "malformed", 0
+		}
+		if value, ok := out["runId"]; ok && bytes.Equal(value, []byte(`""`)) {
+			return nil, "malformed", 0
+		}
+	}
+	raw, _ := json.Marshal(out) // RawMessages came from validated JSON.
+	if !removal {
+		stripped += len(env) - 1
+		raw, _ = json.Marshal(map[string]json.RawMessage{"workloadInfo": raw})
+	}
+	if stripped > 0 {
+		return raw, "stripped", stripped
+	}
+	return raw, "accepted", 0
+}
+
+var workloadFieldKinds = map[string]string{
+	"id": "identity", "model": "string", "engine": "identity",
+	"runId": "identity", "state": "string", "originatedFrom": "identity",
+	"scheduledOn": "identity", "createdAt": "integer", "seq": "integer",
+	"startedAt": "nullable-integer", "completedAt": "nullable-integer",
+	"error": "nullable-string", "requesterId": "nullable-string", "requestedModel": "string",
+}
+
+func validWorkloadValue(kind string, raw json.RawMessage) bool {
+	if bytes.Equal(raw, []byte("null")) {
+		return kind == "nullable-string" || kind == "nullable-integer"
+	}
+	if kind == "integer" || kind == "nullable-integer" {
+		var n int64
+		return json.Unmarshal(raw, &n) == nil && n >= 0
+	}
+	var s string
+	if json.Unmarshal(raw, &s) != nil {
+		return false
+	}
+	// Empty origin/placement is legitimate before node stamping/scheduling.
+	return kind != "identity" || s == "" || nodepolicy.ValidateRoutingIdentity(s, s) == nil
+}
+
+// Token walking detects duplicates even inside discarded unknown objects.
+func walkWorkloadJSON(d *json.Decoder) bool {
+	token, err := d.Token()
+	if err != nil {
+		return false
+	}
+	delim, container := token.(json.Delim)
+	if !container {
+		return true
+	}
+	if delim != '{' && delim != '[' {
+		return false
+	}
+	seen := make(map[string]bool)
+	for d.More() {
+		if delim == '{' {
+			key, err := d.Token()
+			if err != nil {
+				return false
+			}
+			name, ok := key.(string)
+			if !ok || seen[name] {
+				return false
+			}
+			seen[name] = true
+		}
+		if !walkWorkloadJSON(d) {
+			return false
+		}
+	}
+	end, err := d.Token()
+	return err == nil && ((delim == '{' && end == json.Delim('}')) || (delim == '[' && end == json.Delim(']')))
+}
+
+func projectedWorkloadInfo(info json.RawMessage) json.RawMessage {
+	params, err := json.Marshal(map[string]json.RawMessage{"workloadInfo": info})
+	if err != nil {
+		return nil
+	}
+	projected, _, _ := projectWorkloadFrame("workloads:upsert", params)
+	if projected == nil {
+		return nil
+	}
+	var env struct {
+		Info json.RawMessage `json:"workloadInfo"`
+	}
+	_ = json.Unmarshal(projected, &env)
+	return env.Info
+}
+
+func projectWorkloadSnapshot(infos []json.RawMessage) []json.RawMessage {
+	out := make([]json.RawMessage, 0, len(infos))
+	for _, info := range infos {
+		if projected := projectedWorkloadInfo(info); projected != nil {
+			out = append(out, projected)
+		}
+	}
+	return out
+}
 
 // workloadReplayFrame is a lifecycle notification replayed to a (re)started
 // workload-manager to rehydrate its re-sync set.
@@ -67,7 +234,10 @@ func (b *Broker) activeLocalReplayFrames() []workloadReplayFrame {
 		if err != nil {
 			continue
 		}
-		frames = append(frames, workloadReplayFrame{method: method, params: params})
+		projected, _, _ := projectWorkloadFrame(method, params)
+		if projected != nil {
+			frames = append(frames, workloadReplayFrame{method: method, params: projected})
+		}
 	}
 	return frames
 }
@@ -95,7 +265,7 @@ func (b *Broker) rehydrateWorkloadManager(wm *workloadManagerProcess) {
 // replay is an ordered prefix of subsequent live fanout.
 func (b *Broker) replayActiveWorkloadsToScheduler(w *rpcWorker) int {
 	replayed := 0
-	for _, info := range b.workloads.ActiveSnapshot() {
+	for _, info := range projectWorkloadSnapshot(b.workloads.ActiveSnapshot()) {
 		params := map[string]json.RawMessage{"workloadInfo": info}
 		if err := w.Notify("workloads:upsert", params); err != nil {
 			slog.Warn("replay active workload to scheduler failed", "err", err)
@@ -162,6 +332,10 @@ var proxyWorkloadMethods = map[string]bool{
 // keeps emitting regardless of whether a manager is present, so the echo
 // still happens with no manager supervised (the broadcast simply doesn't).
 func (b *Broker) routeProxyWorkload(method string, params json.RawMessage) {
+	params, _, _ = projectWorkloadFrame(method, params)
+	if params == nil {
+		return
+	}
 	stamped := stampNodeID(params, b.nodeID)
 	// Update the authoritative store (and echo to clients / fan to the
 	// scheduler) BEFORE forwarding to the workload-manager, so the store is
@@ -301,6 +475,10 @@ func (b *Broker) emitWorkloadEventStale(method string, params json.RawMessage, s
 var noSightingGuard time.Time
 
 func (b *Broker) emitWorkloadEventProvenance(method string, params json.RawMessage, inferred bool, unchangedSince time.Time) {
+	params, _, _ = projectWorkloadFrame(method, params)
+	if params == nil {
+		return
+	}
 	b.workloadEmitMu.Lock()
 	defer b.workloadEmitMu.Unlock()
 
@@ -384,7 +562,7 @@ func (b *Broker) fanWorkloadToScheduler(method string, params json.RawMessage) {
 }
 
 // workloadsInitialResult is the workloads:get-initial response: the store's
-// full-fidelity snapshot as a list of workloadInfo objects (the same shape
+// projected snapshot as a list of workloadInfo objects (the same shape
 // carried inside each workloads:upsert), so a client can key them however it
 // likes.
 type workloadsInitialResult struct {
