@@ -88,11 +88,10 @@ cancellation interrupts both a queued load and held dispatch. Stop/StopAll
 cancel registered loads and fence new registrations before waiting for `opMu`,
 independently of the existing startup cancellation slot.
 Stop wins over racing loads on the same engine with or without NE, including
-command loads while the server is Off. Command actions use the existing forced
-process-tree kill for cancellation and the default five-second stop grace as
-their output-pipe WaitDelay. If the command has already exited, its PID cannot
-identify remaining descendants: pipe draining remains bounded, but descendant
-termination is not guaranteed in that case.
+command loads while the server is Off. Command actions use exec's default
+cancellation to kill the command and the default five-second stop grace as
+their output-pipe WaitDelay. Pipes are released after that bound; descendants
+are not guaranteed to be terminated.
 Paths and raw launch material belong only on the authorized settings channel.
 
 For finite llama serving, `launch_args` must select an absolute native INI

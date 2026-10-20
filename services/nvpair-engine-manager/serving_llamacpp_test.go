@@ -1259,8 +1259,9 @@ func TestLlamaServingColdCommandLoadCancelledByStop(t *testing.T) {
 					stopped <- nil
 				}
 			}()
-			// Existing tree-kill timeout plus pipe-drain grace, with scheduling margin.
-			bound := time.NewTimer(2*stopGrace(Runtime{}) + 2*time.Second)
+			// Default Cancel kills the command; WaitDelay bounds descendant-held
+			// pipes. servingPipePID owns descendant cleanup for this fixture.
+			bound := time.NewTimer(stopGrace(Runtime{}) + 3*time.Second)
 			defer bound.Stop()
 			select {
 			case err := <-stopped:
@@ -1293,8 +1294,8 @@ func TestLlamaServingColdCommandLoadCancelledByStop(t *testing.T) {
 				<-loaded
 				t.Fatal("cancelled command retained the load lock beyond its bound")
 			}
-			if pidAlive(parent) || pidAlive(child) {
-				t.Fatal("cancelled live command tree retained a CLI process")
+			if pidAlive(parent) {
+				t.Fatal("cancelled command retained its CLI process")
 			}
 			if !st.opMu.TryLock() {
 				t.Fatal("cancelled command retained operation lock")
@@ -1312,13 +1313,16 @@ func TestLlamaServingColdCommandLoadCancelledByStop(t *testing.T) {
 
 // exec decides whether a command that finished as its context expired keeps
 // its own exit status from Cancel's error (os.ErrProcessDone keeps it). The
-// tree cancel must return what exec's default Process.Kill returns there, or
-// a command racing its deadline fails after success.
-func TestLlamaServingCommandTreeCancelAfterExitMatchesKill(t *testing.T) {
+// default Cancel must retain Process.Kill's error parity after exit so a
+// command racing its deadline can keep its successful exit status.
+func TestLlamaServingCommandCancelAfterExitMatchesKill(t *testing.T) {
 	bin := servingPipeCommand(t)
 	finished := func() *exec.Cmd {
-		cmd := exec.Command(bin) // no arguments: exits at once
-		_ = cmd.Run()
+		cmd := exec.CommandContext(context.Background(), bin) // no arguments: exits at once
+		var exitErr *exec.ExitError
+		if err := cmd.Run(); !errors.As(err, &exitErr) || exitErr.ExitCode() != 2 {
+			t.Fatalf("fixture without arguments = %v, want exit code 2", err)
+		}
 		if cmd.ProcessState == nil {
 			t.Fatal("fixture command did not run")
 		}
@@ -1328,7 +1332,7 @@ func TestLlamaServingCommandTreeCancelAfterExitMatchesKill(t *testing.T) {
 	if want == nil {
 		t.Fatal("Kill of a waited process succeeded")
 	}
-	if got := commandTreeCancel(finished())(); !errors.Is(got, want) {
+	if got := finished().Cancel(); !errors.Is(got, want) {
 		t.Fatalf("cancel after exit = %v, want %v", got, want)
 	}
 }

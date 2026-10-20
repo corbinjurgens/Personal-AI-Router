@@ -7,7 +7,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -18,7 +17,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 )
 
@@ -391,8 +389,9 @@ func (e *Executor) runCommandOutput(ctx context.Context, argv []string) (string,
 	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
 	cmd.Env = childEnv(nil)
 	configureSysProcAttr(cmd)
+	// CommandContext's default Cancel kills only the command. Bound pipe
+	// draining too: descendants may survive and retain the output pipes.
 	cmd.WaitDelay = stopGrace(Runtime{})
-	cmd.Cancel = commandTreeCancel(cmd)
 	out, err := cmd.Output()
 	if err != nil {
 		if ee, ok := err.(*exec.ExitError); ok {
@@ -401,22 +400,6 @@ func (e *Executor) runCommandOutput(ctx context.Context, argv []string) (string,
 		return "", err
 	}
 	return string(out), nil
-}
-
-// commandTreeCancel is runCommandOutput's exec Cancel. It force-kills the
-// command's process tree so a descendant holding the output pipe goes too,
-// then returns Process.Kill's result, exactly as exec's default Cancel does:
-// exec keeps a successful exit only when Cancel reports os.ErrProcessDone. A
-// process already waited (Signal reports done, or EINVAL once Windows has
-// released its handle) is not tree-signalled, since its PID may be reused.
-func commandTreeCancel(cmd *exec.Cmd) func() error {
-	return func() error {
-		err := cmd.Process.Signal(syscall.Signal(0))
-		if !errors.Is(err, os.ErrProcessDone) && !errors.Is(err, syscall.EINVAL) {
-			_ = signalPID(cmd.Process.Pid, true)
-		}
-		return cmd.Process.Kill()
-	}
 }
 
 // lmsGetResumeAttempts bounds how many times a transient `lms get` download

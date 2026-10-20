@@ -97,10 +97,10 @@ StopAll cancel queued/held loads on the same engine before waiting for the
 operation lock, independently of startup cancellation. This applies with or
 without NE, including a command load while its server is Off: Stop wins over
 the racing load. A stop fence also cancels loads arriving during that wait.
-Command actions reuse the existing forced process-tree kill on cancellation
-and bound output-pipe draining with the default five-second stop grace. If the
-command has already exited, that PID can no longer identify its descendants;
-pipe draining is still bounded, but descendant termination is not guaranteed.
+Command actions use exec's default cancellation to kill the command and bound
+output-pipe draining with the default five-second stop grace as WaitDelay.
+Pipes are released after that bound; descendants are not guaranteed to be
+terminated.
 The dispatch path does not acquire the operation or content lock; any outer
 content mutation is entered before the
 load operation lock and the load releases it before restart/admission cleanup.
