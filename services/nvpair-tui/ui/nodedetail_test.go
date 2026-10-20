@@ -26,6 +26,36 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 )
 
+func TestNodeDetailSwitchExitCancelsPendingRPC(t *testing.T) {
+	for _, action := range []string{"reset", "close", "escape"} {
+		t.Run(action, func(t *testing.T) {
+			d, f := switchDetail(t, false)
+			v := newNodesView(f.client)
+			v.detail = d
+			done := holdReplacementCommand(t, f, d.submitSwitch(), enginesettings.SwitchMethod)
+			ctx := d.engineSwitch.ctx
+			switch action {
+			case "reset":
+				v.reset()
+			case "close":
+				v.close()
+			case "escape":
+				d.handleKey(tea.KeyMsg{Type: tea.KeyEsc})
+			}
+			select {
+			case <-ctx.Done():
+			default:
+				t.Fatal("view exit left switch context alive")
+			}
+			select {
+			case <-done:
+			case <-time.After(time.Second):
+				t.Fatal("view exit left pending switch RPC")
+			}
+		})
+	}
+}
+
 func TestReplacementInterruptsEngineOperationStatus(t *testing.T) {
 	f := newReconnectUIFixture(t)
 	v := newNodesView(f.client)
