@@ -17,6 +17,9 @@ interface InvitePairing {
     /** True while the initial `cluster:invite-node` request is in flight. */
     submitting: boolean
     error: string | null
+    allowRemoteManagement: boolean
+    setAllowRemoteManagement: (allowed: boolean) => void
+    submittedPermission: boolean | null
     /** Begin PIN pairing with a node, then poll its status until it resolves. */
     start: (ipAddress: string) => Promise<void>
     /**
@@ -39,6 +42,8 @@ export function useInvitePairing(): InvitePairing {
     const [invite, setInvite] = useState<Invite | null>(null)
     const [submitting, setSubmitting] = useState(false)
     const [error, setError] = useState<string | null>(null)
+    const [allowRemoteManagement, setAllowRemoteManagement] = useState(false)
+    const [submittedPermission, setSubmittedPermission] = useState<boolean | null>(null)
     const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
     const inviteIdRef = useRef<string | null>(null)
     const generationRef = useRef(0)
@@ -57,6 +62,8 @@ export function useInvitePairing(): InvitePairing {
         setInvite(null)
         setSubmitting(false)
         setError(null)
+        setAllowRemoteManagement(false)
+        setSubmittedPermission(null)
     }, [stopPolling])
 
     useEffect(
@@ -93,9 +100,13 @@ export function useInvitePairing(): InvitePairing {
             setInvite(null)
             setSubmitting(true)
             setError(null)
+            setSubmittedPermission(allowRemoteManagement)
             stopPolling()
             try {
-                const result = await window.pairApi.cluster.inviteNode(ipAddress)
+                const result = await window.pairApi.cluster.inviteNode(
+                    ipAddress,
+                    allowRemoteManagement
+                )
                 if (generation !== generationRef.current) return
                 setInvite(result)
                 if (result.state === 'pending' && result.inviteId) {
@@ -154,8 +165,18 @@ export function useInvitePairing(): InvitePairing {
                 if (generation === generationRef.current) setSubmitting(false)
             }
         },
-        [stopPolling]
+        [stopPolling, allowRemoteManagement]
     )
 
-    return { invite, submitting, error, start, cancel, reset }
+    return {
+        invite,
+        submitting,
+        error,
+        start,
+        cancel,
+        reset,
+        allowRemoteManagement,
+        setAllowRemoteManagement,
+        submittedPermission
+    }
 }

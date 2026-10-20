@@ -154,3 +154,26 @@ export interface ClusterIdentityPayload {
     clusterId: string | null
     clusterFriendlyName: string
 }
+
+export type RemoteManagementState = 'allowed' | 'denied' | 'unreviewed' | 'unavailable'
+
+export interface RemoteManagementSnapshot {
+    version: 1
+    /** Empty means unavailable authority and must never be used for a write. */
+    revision: string
+    grants: { peerUuid: string; allowed: boolean; state: RemoteManagementState }[]
+}
+
+export interface RemoteManagementSetRequest {
+    peerUuid: string
+    allowed: boolean
+    expectedRevision: string
+}
+
+/** Only the authenticated caller's permission on the requested target. */
+export interface RemoteManagementCapability {
+    version: 1
+    allowed: boolean
+    revision: string
+    state: RemoteManagementState | 'unsupported'
+}

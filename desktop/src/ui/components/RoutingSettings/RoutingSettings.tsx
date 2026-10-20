@@ -23,8 +23,17 @@ import { InlineErrorBanner } from '@/ui/components/InlineErrorBanner'
 import BulkNodeConfiguration from '@/ui/components/RoutingSettings/BulkNodeConfiguration'
 import RoleEditor from '@/ui/components/RoutingSettings/RoleEditor'
 import { useConnectionStore } from '@/ui/stores/connection.store'
-import { useNodeConfigurationStore } from '@/ui/stores/node-configuration.store'
+import {
+    useNodeConfigurationStore,
+    watchNodeManagement
+} from '@/ui/stores/node-configuration.store'
 import { useNodesStore } from '@/ui/stores/nodes.store'
+import {
+    LOCAL_VETO_CODE,
+    REMOTE_MANAGEMENT_DENIED_CODE,
+    localVetoMessage
+} from '@/shared/constants/service-errors'
+import { serviceErrorCode } from '@/ui/api/service-transport'
 
 const THIS_PC = 'This PC'
 
@@ -96,6 +105,16 @@ export default function RoutingSettings() {
     textRef.current = text
     // The id the broker uses for the selected node; this PC's is the self id.
     const targetId = nodeId ?? selfId
+    const management = useNodeConfigurationStore(state =>
+        targetId === null ? undefined : state.management.get(targetId)
+    )
+    const permissionReadOnly = !connected || (nodeId !== null && management?.state !== 'allowed')
+    const previousTarget = useRef<string | null>(null)
+
+    useEffect(() => {
+        if (targetId === null) return
+        return watchNodeManagement(targetId, nodeId ?? undefined)
+    }, [targetId, nodeId])
 
     // The role editor substitutes into the newest document the node reported,
     // whatever the policy text editor holds.
@@ -106,42 +125,62 @@ export default function RoutingSettings() {
         [targetId]
     )
 
-    const load = useCallback(async () => {
-        latestLoad.current += 1
-        const ticket = latestLoad.current
-        setLoading(true)
-        setLoadError(null)
-        setSaveError(null)
-        setConflict(null)
-        setReviewing(false)
-        try {
-            const document = await window.pairApi.nodePolicy.get(nodeId ?? undefined)
-            if (ticket !== latestLoad.current) return
-            adoptRoles(document)
-            savedTextRef.current = document.policy
-            baseRevisionRef.current = document.revision
-            setText(document.policy)
-            setStatus({ revision: document.revision, activation: document.activation })
-            setRecoveryRequired(document.recoveryRequired)
-            setAvailability(document.availability)
-        } catch (err) {
-            if (ticket !== latestLoad.current) return
-            setLoadError(getErrorString(err))
-        } finally {
-            if (ticket === latestLoad.current) setLoading(false)
-        }
-    }, [nodeId, adoptRoles])
+    const load = useCallback(
+        async (preserveDraft = false) => {
+            latestLoad.current += 1
+            const ticket = latestLoad.current
+            setLoading(true)
+            setLoadError(null)
+            setSaveError(null)
+            setConflict(null)
+            setReviewing(false)
+            try {
+                const document = await window.pairApi.nodePolicy.get(nodeId ?? undefined)
+                if (ticket !== latestLoad.current) return
+                adoptRoles(document)
+                if (preserveDraft && textRef.current !== savedTextRef.current) {
+                    if (document.revision !== baseRevisionRef.current)
+                        setConflict({
+                            latest: document,
+                            message: 'The saved policy changed while this draft was unsent.'
+                        })
+                } else {
+                    savedTextRef.current = document.policy
+                    baseRevisionRef.current = document.revision
+                    setText(document.policy)
+                }
+                setStatus({ revision: document.revision, activation: document.activation })
+                setRecoveryRequired(document.recoveryRequired)
+                setAvailability(document.availability)
+            } catch (err) {
+                if (ticket !== latestLoad.current) return
+                setLoadError(getErrorString(err))
+            } finally {
+                if (ticket === latestLoad.current) setLoading(false)
+            }
+        },
+        [nodeId, adoptRoles]
+    )
 
     useEffect(() => {
-        if (!connected) return
-        setAvailability(null)
-        savedTextRef.current = ''
-        baseRevisionRef.current = ''
-        setStatus(null)
-        setRecoveryRequired(false)
-        setText('')
-        void load()
-    }, [connected, load])
+        setSaving(false)
+        setSwitching(false)
+        if (!connected) setLoading(false)
+        if (previousTarget.current !== targetId) {
+            previousTarget.current = targetId
+            setAvailability(null)
+            savedTextRef.current = ''
+            baseRevisionRef.current = ''
+            setStatus(null)
+            setRecoveryRequired(false)
+            setText('')
+            textRef.current = ''
+        }
+        if (connected) void load(true)
+        return () => {
+            latestLoad.current++
+        }
+    }, [connected, targetId, load])
 
     // A saved policy reported by the node. Changes can arrive out of order, so
     // the status only moves forward. The text and base revision follow only when
@@ -184,7 +223,8 @@ export default function RoutingSettings() {
     }, [targetId, adopt])
 
     const toggleAvailability = useCallback(async () => {
-        if (availability !== 'available' && availability !== 'paused') return
+        if (permissionReadOnly || (availability !== 'available' && availability !== 'paused'))
+            return
         const ticket = latestLoad.current
         setSwitching(true)
         setLoadError(null)
@@ -193,19 +233,33 @@ export default function RoutingSettings() {
                 availability === 'available' ? 'paused' : 'available',
                 nodeId ?? undefined
             )
+            if (ticket !== latestLoad.current) return
             setAvailability(result.availability)
             // The change took a new revision. This PC announces it; a paired
             // node does not, and the result carries none, so read it back.
             const document = await window.pairApi.nodePolicy.get(nodeId ?? undefined)
             if (ticket === latestLoad.current) adopt(document)
         } catch (err) {
-            setLoadError(getErrorString(err))
+            if (ticket !== latestLoad.current) return
+            const code = serviceErrorCode(err)
+            setLoadError(
+                code === REMOTE_MANAGEMENT_DENIED_CODE
+                    ? 'This device refused remote management permission. Change the permission on that device before trying again.'
+                    : code === LOCAL_VETO_CODE
+                      ? localVetoMessage('change availability')
+                      : getErrorString(err)
+            )
+            if (code === REMOTE_MANAGEMENT_DENIED_CODE && targetId !== null)
+                void useNodeConfigurationStore
+                    .getState()
+                    .readManagement(targetId, nodeId ?? undefined)
         } finally {
-            setSwitching(false)
+            if (ticket === latestLoad.current) setSwitching(false)
         }
-    }, [availability, nodeId, adopt])
+    }, [availability, nodeId, adopt, permissionReadOnly, targetId])
 
     const save = useCallback(async () => {
+        if (permissionReadOnly) return
         const ticket = latestLoad.current
         const base = baseRevisionRef.current
         setSaving(true)
@@ -227,6 +281,19 @@ export default function RoutingSettings() {
             setRecoveryRequired(false)
         } catch (err) {
             if (ticket !== latestLoad.current) return
+            const code = serviceErrorCode(err)
+            if (code === REMOTE_MANAGEMENT_DENIED_CODE || code === LOCAL_VETO_CODE) {
+                setSaveError(
+                    code === REMOTE_MANAGEMENT_DENIED_CODE
+                        ? 'This device refused remote management permission. Your policy draft is kept. Change the permission on that device before trying again.'
+                        : localVetoMessage('save this policy')
+                )
+                if (code === REMOTE_MANAGEMENT_DENIED_CODE && targetId !== null)
+                    void useNodeConfigurationStore
+                        .getState()
+                        .readManagement(targetId, nodeId ?? undefined)
+                return
+            }
             // Read the saved revision after errors: a durability warning means
             // the replacement landed, and a transport failure can leave the
             // outcome uncertain even though refusal codes survive the relay.
@@ -247,9 +314,9 @@ export default function RoutingSettings() {
                 setSaveError(message)
             }
         } finally {
-            setSaving(false)
+            if (ticket === latestLoad.current) setSaving(false)
         }
-    }, [text, nodeId, noteStatus, adoptRoles])
+    }, [text, nodeId, noteStatus, adoptRoles, permissionReadOnly, targetId])
 
     const nodeItems: DropdownEntry[] = useMemo(
         () => [
@@ -262,9 +329,13 @@ export default function RoutingSettings() {
         [peers]
     )
 
-    const canSwitch = (availability === 'available' || availability === 'paused') && !switching
+    const canSwitch =
+        !permissionReadOnly &&
+        (availability === 'available' || availability === 'paused') &&
+        !switching
     // Save needs the revision the draft is based on, which a loaded policy supplies.
-    const canSave = availability !== null && conflict === null && text.trim() !== ''
+    const canSave =
+        !permissionReadOnly && availability !== null && conflict === null && text.trim() !== ''
     const activation = status?.activation ?? null
 
     return (
@@ -283,6 +354,13 @@ export default function RoutingSettings() {
                             {nodeName}
                         </Dropdown>
                     </Flex>
+
+                    {nodeId !== null && permissionReadOnly && (
+                        <Text kind="body/regular/sm" role="status">
+                            {management?.message ||
+                                'Reading remote management permission for this device.'}
+                        </Text>
+                    )}
 
                     <Flex align="center" gap="3" wrap="wrap">
                         <Text kind="body/regular/sm" className="text-subtle-color">
@@ -346,7 +424,7 @@ export default function RoutingSettings() {
                                     resizeable="auto"
                                     rows={14}
                                     maxLength={65536}
-                                    disabled={loading || saving}
+                                    disabled={loading || saving || permissionReadOnly}
                                     className="font-mono"
                                 />
                             </div>

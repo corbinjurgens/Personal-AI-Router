@@ -28,8 +28,11 @@ import type {
 import {
     INVALID_PARAMS_CODE,
     LOCAL_VETO_CODE,
-    POLICY_CONFLICT_CODE
+    POLICY_CONFLICT_CODE,
+    REMOTE_MANAGEMENT_DENIED_CODE
 } from '@/shared/constants/service-errors'
+import { getPairTransport } from '@/ui/api/bootstrap'
+import { useClusterInvitationsStore } from '@/ui/stores/cluster-invitations.store'
 import { engineLabel, engineManagerName, engineTypeFromManagerName } from '@/shared/utils/engines'
 import { serviceErrorCode } from '@/ui/api/service-transport'
 import getErrorString from '@/shared/utils/get-error-string'
@@ -210,10 +213,12 @@ const UNREACHABLE =
 export function policyRefusal(message: string, code?: number): Refusal {
     if (code === POLICY_CONFLICT_CODE) return 'conflict'
     if (code === LOCAL_VETO_CODE) return 'vetoed'
+    if (code === REMOTE_MANAGEMENT_DENIED_CODE) return 'rejected'
     if (code === INVALID_PARAMS_CODE) return 'rejected'
     if (code === undefined) {
         if (/-32010\b/.test(message) || message.includes('policy conflict')) return 'conflict'
         if (/-32011\b/.test(message)) return 'vetoed'
+        if (/-32012\b/.test(message)) return 'rejected'
         if (/-32602\b/.test(message)) return 'rejected'
     }
     if (UNREACHABLE.test(message)) return 'unreachable'
@@ -347,6 +352,9 @@ interface BulkSelection {
 }
 
 interface NodeConfigurationState {
+    management: Map<string, NodeManagementEntry>
+    readManagement(targetId: string, nodeId: string | undefined): Promise<void>
+    disconnectManagement(targetId: string): void
     /** Keyed by the broker's node id; this PC's is the self id. */
     editors: Map<string, RoleEditorEntry>
     /**
@@ -391,6 +399,111 @@ interface NodeConfigurationState {
     setBulk(change: Partial<BulkSelection>): void
 }
 
+interface NodeManagementEntry {
+    state:
+        | 'local'
+        | 'loading'
+        | 'allowed'
+        | 'denied'
+        | 'unreviewed'
+        | 'unavailable'
+        | 'unsupported'
+        | 'unreachable'
+    revision: string
+    message?: string
+}
+
+const MANAGEMENT_MESSAGES: Partial<Record<NodeManagementEntry['state'], string>> = {
+    loading: 'Checking remote management permission on this device.',
+    denied: 'This device has blocked remote management. Allow it on that device to make changes.',
+    unreviewed:
+        'This device has not granted remote management. Allow it on that device to make changes.',
+    unavailable:
+        'Remote management permission is unavailable. Changes are disabled until it can be confirmed.',
+    unsupported:
+        'This device does not support remote management permissions. Update it before making remote changes.',
+    unreachable:
+        'Device disconnected or unreachable. Reconnect to confirm remote management permission.'
+}
+
+interface ManagementTarget {
+    nodeId: string | undefined
+    generation: number
+    consumers: number
+    request: Promise<void> | null
+}
+
+const managementTargets = new Map<string, ManagementTarget>()
+let managementUnsubs: Array<() => void> = []
+let managementContextUnsubscribe: (() => void) | null = null
+
+function managementTarget(targetId: string, nodeId: string | undefined): ManagementTarget {
+    const existing = managementTargets.get(targetId)
+    if (existing && existing.nodeId === nodeId) return existing
+    if (existing) useNodeConfigurationStore.getState().disconnectManagement(targetId)
+    const target = { nodeId, generation: 0, consumers: 0, request: null }
+    managementTargets.set(targetId, target)
+    return target
+}
+
+/** Open editors share target reads and transport listeners; reconnect only reads. */
+export function watchNodeManagement(targetId: string, nodeId: string | undefined): () => void {
+    const target = managementTarget(targetId, nodeId)
+    target.consumers++
+    if (!managementContextUnsubscribe)
+        managementContextUnsubscribe = useClusterInvitationsStore.subscribe((state, previous) => {
+            if (state.remoteManagementContext === previous.remoteManagementContext) return
+            for (const [id, watched] of managementTargets) {
+                if (watched.consumers === 0 || watched.nodeId === undefined) continue
+                useNodeConfigurationStore.getState().disconnectManagement(id)
+                if (
+                    state.remoteManagementContext !== null &&
+                    state.members.some(
+                        member => member.nodeUuid === watched.nodeId && member.state === 'member'
+                    )
+                )
+                    void useNodeConfigurationStore.getState().readManagement(id, watched.nodeId)
+            }
+        })
+    if (managementUnsubs.length === 0) {
+        const transport = getPairTransport()
+        if (transport)
+            managementUnsubs = [
+                transport.onDisconnect(() => {
+                    for (const id of managementTargets.keys())
+                        useNodeConfigurationStore.getState().disconnectManagement(id)
+                }),
+                transport.onConnect(() => {
+                    for (const [id, watched] of managementTargets)
+                        if (watched.consumers > 0) {
+                            useNodeConfigurationStore.getState().disconnectManagement(id)
+                            void useNodeConfigurationStore
+                                .getState()
+                                .readManagement(id, watched.nodeId)
+                        }
+                })
+            ]
+    }
+    if (target.consumers === 1)
+        void useNodeConfigurationStore.getState().readManagement(targetId, nodeId)
+    let stopped = false
+    return () => {
+        if (stopped) return
+        stopped = true
+        target.consumers--
+        if (target.consumers === 0 && managementTargets.get(targetId) === target) {
+            useNodeConfigurationStore.getState().disconnectManagement(targetId)
+            managementTargets.delete(targetId)
+        }
+        if (![...managementTargets.values()].some(watched => watched.consumers > 0)) {
+            managementUnsubs.forEach(stop => stop())
+            managementUnsubs = []
+            managementContextUnsubscribe?.()
+            managementContextUnsubscribe = null
+        }
+    }
+}
+
 export const useNodeConfigurationStore = create<NodeConfigurationState>((set, get) => {
     function update(targetId: string, change: (entry: RoleEditorEntry) => RoleEditorEntry): void {
         const entry = get().editors.get(targetId)
@@ -405,6 +518,83 @@ export const useNodeConfigurationStore = create<NodeConfigurationState>((set, ge
     }
 
     return {
+        management: new Map(),
+
+        disconnectManagement: targetId => {
+            const target = managementTargets.get(targetId)
+            if (target) {
+                target.generation++
+                target.request = null
+            }
+            const management = new Map(get().management)
+            management.set(targetId, {
+                state: 'unreachable',
+                revision: '',
+                message: MANAGEMENT_MESSAGES.unreachable
+            })
+            set({ management })
+        },
+
+        readManagement: (targetId, nodeId) => {
+            const target = managementTarget(targetId, nodeId)
+            if (target.request) return target.request
+            const currentGeneration = target.generation
+            const current = () =>
+                managementTargets.get(targetId) === target &&
+                target.generation === currentGeneration
+            const putManagement = (entry: NodeManagementEntry) => {
+                const management = new Map(get().management)
+                management.set(targetId, {
+                    ...entry,
+                    message: entry.message ?? MANAGEMENT_MESSAGES[entry.state]
+                })
+                set({ management })
+            }
+            if (nodeId === undefined) {
+                putManagement({ state: 'local', revision: '' })
+                return Promise.resolve()
+            }
+            if (getPairTransport()?.connected === false) {
+                get().disconnectManagement(targetId)
+                return Promise.resolve()
+            }
+            const previous = get().management.get(targetId)
+            putManagement({ state: 'loading', revision: previous?.revision ?? '' })
+            target.request = Promise.resolve()
+                .then(() =>
+                    current() ? window.pairApi.cluster.getRemoteManagementForNode(nodeId) : null
+                )
+                .then(capability => {
+                    if (!current() || !capability) return
+                    if (
+                        capability.revision &&
+                        previous?.revision &&
+                        BigInt(capability.revision) < BigInt(previous.revision)
+                    ) {
+                        putManagement({ state: 'unavailable', revision: previous.revision })
+                        return
+                    }
+                    const consistent = capability.allowed === (capability.state === 'allowed')
+                    const state =
+                        !consistent || (capability.state === 'allowed' && !capability.revision)
+                            ? 'unavailable'
+                            : capability.state
+                    putManagement({ state, revision: capability.revision })
+                })
+                .catch(error => {
+                    if (current())
+                        putManagement({
+                            state: 'unreachable',
+                            revision: '',
+                            message: getErrorString(error)
+                        })
+                })
+                .finally(() => {
+                    if (current()) target.request = null
+                })
+            return target.request
+        },
+
         editors: new Map(),
 
         adopt: (targetId, snapshot) => {
@@ -501,11 +691,21 @@ export const useNodeConfigurationStore = create<NodeConfigurationState>((set, ge
                 return result
             } catch (err) {
                 const message = getErrorString(err)
-                const refusal = policyRefusal(message, serviceErrorCode(err))
+                const code = serviceErrorCode(err)
+                const refusal = policyRefusal(message, code)
+                const explanation =
+                    code === REMOTE_MANAGEMENT_DENIED_CODE ||
+                    (code === undefined && /-32012\b/.test(message))
+                        ? `Remote management permission was refused by this device. ${message}`
+                        : message
                 // Vetoed, rejected and unreachable are definite: the target
                 // refused it, or it never got there. The draft is kept.
                 if (refusal === 'vetoed' || refusal === 'rejected' || refusal === 'unreachable') {
-                    update(targetId, current => ({ ...current, phase: refusal, message }))
+                    update(targetId, current => ({
+                        ...current,
+                        phase: refusal,
+                        message: explanation
+                    }))
                     return null
                 }
                 // A conflict, or an outcome the reply does not settle: read

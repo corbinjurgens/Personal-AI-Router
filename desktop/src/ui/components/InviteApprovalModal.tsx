@@ -14,6 +14,7 @@ import {
 } from '@nvidia/foundations-react-core'
 import { DialogHeader } from './DialogHeader'
 import { InlineErrorBanner } from './InlineErrorBanner'
+import { RemoteManagementChoice } from './InvitePairingPanel'
 import { useBlurOnOpen } from '@/ui/hooks/useBlurOnOpen'
 import getErrorString from '@/shared/utils/get-error-string'
 import { formatClusterInviteError, inviteFailureMessage } from '@/ui/utils/cluster-invite-error'
@@ -26,26 +27,26 @@ export function InviteApprovalModal() {
     const respondToInvite = useClusterInvitationsStore(state => state.respondToInvite)
     const pollInvite = useClusterInvitationsStore(state => state.pollInvite)
     const clearActiveInvite = useClusterInvitationsStore(state => state.clearActiveInvite)
+    const remoteManagement = useClusterInvitationsStore(state => state.remoteManagement)
+    const permissionLoading = useClusterInvitationsStore(state => state.remoteManagementLoading)
     const shown = activeInviteId
         ? (results[activeInviteId] ??
           pendingInvites.find(invite => invite.inviteId === activeInviteId))
         : null
     const submitted = Boolean(activeInviteId && results[activeInviteId])
     const terminal = Boolean(shown && shown.state !== 'pending')
-    const open = Boolean(shown && shown.state !== 'paired')
+    const open = Boolean(shown)
     const inputRef = useRef<HTMLInputElement>(null)
     const [pin, setPin] = useState('')
+    const [allowRemoteManagement, setAllowRemoteManagement] = useState(false)
     const [error, setError] = useState<string | null>(null)
     useBlurOnOpen(open)
 
     useEffect(() => {
         setPin('')
+        setAllowRemoteManagement(false)
         setError(null)
     }, [activeInviteId])
-    useEffect(() => {
-        if (shown?.state === 'paired') clearActiveInvite()
-    }, [shown?.state, clearActiveInvite])
-
     useEffect(() => {
         if (!activeInviteId || !submitted || terminal) return
         // The store owns retry cadence across modal dismissal and card reopening.
@@ -66,12 +67,12 @@ export function InviteApprovalModal() {
         }
         const id = shown.inviteId
         try {
-            await respondToInvite(id, true, pin)
+            await respondToInvite(id, true, pin, allowRemoteManagement)
         } catch (err) {
             if (useClusterInvitationsStore.getState().activeInviteId === id)
                 setError(formatClusterInviteError(getErrorString(err)))
         }
-    }, [shown, submitted, pin, respondToInvite])
+    }, [shown, submitted, pin, allowRemoteManagement, respondToInvite])
 
     const handleDismiss = useCallback(async () => {
         if (!shown || submitted || terminal) {
@@ -88,14 +89,17 @@ export function InviteApprovalModal() {
     }, [shown, submitted, terminal, respondToInvite, clearActiveInvite])
 
     if (!shown) return null
+    const savedGrant = remoteManagement?.grants.find(grant => grant.peerUuid === shown.fromNodeUuid)
     const message =
-        shown.state === 'failed'
-            ? inviteFailureMessage(shown, true)
-            : terminal
-              ? shown.reason === 'outcome-unknown'
-                  ? 'The invitation status is no longer available. Pairing could not be confirmed. Check the cluster on both devices.'
-                  : `Invitation ${shown.state}. Pairing was not confirmed; check the cluster on both devices.`
-              : null
+        shown.state === 'paired'
+            ? null
+            : shown.state === 'failed'
+              ? inviteFailureMessage(shown, true)
+              : terminal
+                ? shown.reason === 'outcome-unknown'
+                    ? 'The invitation status is no longer available. Pairing could not be confirmed. Check the cluster on both devices.'
+                    : `Invitation ${shown.state}. Pairing was not confirmed; check the cluster on both devices.`
+                : null
     const pendingMessage =
         shown.reason === 'rollback-pending'
             ? 'Pairing could not complete. Waiting for cleanup to finish...'
@@ -113,6 +117,18 @@ export function InviteApprovalModal() {
                     </DialogHeader>
                     <Stack gap="4" className="pt-2">
                         {(message || error) && <InlineErrorBanner message={message ?? error} />}
+                        {shown.state === 'paired' && (
+                            <Text kind="body/regular/sm" role="status">
+                                Node paired successfully.{' '}
+                                {savedGrant &&
+                                (savedGrant.state === 'allowed' || savedGrant.state === 'denied')
+                                    ? `${shown.fromNodeName || shown.fromNodeId} ${savedGrant.allowed ? 'may manage' : 'is blocked from changing'} this device.`
+                                    : permissionLoading
+                                      ? 'Reading the saved remote-management permission for this device.'
+                                      : 'The saved permission is unavailable. Check Cluster Settings on this device.'}{' '}
+                                The other device chooses its own permission independently.
+                            </Text>
+                        )}
                         <Text kind="body/regular/sm">You have been invited to join a cluster:</Text>
                         <Flex align="center" gap="2">
                             <Text kind="body/semibold/sm" className="min-w-15">
@@ -124,12 +140,18 @@ export function InviteApprovalModal() {
                         </Flex>
                         {!terminal && (
                             <Stack gap="1">
+                                <RemoteManagementChoice
+                                    allowed={allowRemoteManagement}
+                                    onChange={setAllowRemoteManagement}
+                                    disabled={submitted}
+                                />
                                 <Text kind="body/regular/sm" className="text-subtle-color">
                                     {submitted
                                         ? pendingMessage
                                         : `Enter the 6-digit PIN shown on ${shown.fromNodeName || 'the inviting node'}.`}
                                 </Text>
                                 <TextInput
+                                    aria-label="Pairing PIN"
                                     ref={inputRef}
                                     value={pin}
                                     onValueChange={value =>

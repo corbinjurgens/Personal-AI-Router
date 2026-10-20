@@ -1,7 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-import { Button, Flex, Stack, Text } from '@nvidia/foundations-react-core'
+import { Button, Flex, FormField, RadioGroup, Stack, Text } from '@nvidia/foundations-react-core'
+import { useId } from 'react'
 import { InlineErrorBanner } from './InlineErrorBanner'
 import {
     inviteFailureMessage,
@@ -9,6 +10,39 @@ import {
     REVERSE_INVITE_GUIDANCE
 } from '@/ui/utils/cluster-invite-error'
 import type { Invite } from '@/shared/types/cluster'
+
+export function RemoteManagementChoice({
+    allowed,
+    onChange,
+    disabled = false
+}: {
+    allowed: boolean
+    onChange: (allowed: boolean) => void
+    disabled?: boolean
+}) {
+    const name = useId()
+    return (
+        <FormField
+            slotLabel="Remote management of this device"
+            slotHelp="This choice applies to the device you are using. Reading status and using models this device serves remain available. Local pause and engine Off always win."
+        >
+            <RadioGroup
+                name={name}
+                orientation="vertical"
+                value={allowed ? 'allow' : 'block'}
+                onValueChange={value => onChange(value === 'allow')}
+                disabled={disabled}
+                items={[
+                    {
+                        value: 'allow',
+                        children: 'Allow this peer to manage this device (my own devices)'
+                    },
+                    { value: 'block', children: 'Block this peer from changing this device' }
+                ]}
+            />
+        </FormField>
+    )
+}
 
 interface InvitePairingPanelProps {
     invite: Invite | null
@@ -22,6 +56,7 @@ interface InvitePairingPanelProps {
     onCancel?: () => void
     /** Called from the success state; defaults to `onReset`. */
     onDone?: () => void
+    savedPermission?: boolean | null
 }
 
 /**
@@ -33,7 +68,8 @@ export function InvitePairingPanel({
     error,
     onReset,
     onCancel,
-    onDone
+    onDone,
+    savedPermission
 }: InvitePairingPanelProps) {
     if (error && !invite) {
         return (
@@ -89,6 +125,13 @@ export function InvitePairingPanel({
         return (
             <Stack gap="3" align="center">
                 <Text kind="body/semibold/md">Node paired successfully.</Text>
+                {typeof savedPermission === 'boolean' && (
+                    <Text kind="body/regular/sm" role="status">
+                        Pairing saved: this peer{' '}
+                        {savedPermission ? 'may manage' : 'is blocked from changing'} this device.
+                        The other device chooses its own permission independently.
+                    </Text>
+                )}
                 <Button kind="primary" color="brand" size="small" onClick={onDone ?? onReset}>
                     Done
                 </Button>
