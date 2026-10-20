@@ -5,12 +5,14 @@ package main
 
 import (
 	"bytes"
+	"compress/gzip"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -29,6 +31,7 @@ type continuityFixture struct {
 	w        *recordingWriter
 	origin   *httptest.Server
 	returned chan struct{}
+	nodeID   string
 }
 
 func newContinuityFixture(t *testing.T, upstream string, idle time.Duration) *continuityFixture {
@@ -64,6 +67,10 @@ func (fx *continuityFixture) request(t *testing.T, path, body string) (*http.Res
 
 func (fx *continuityFixture) terminal(t *testing.T, state, reason string) Workload {
 	t.Helper()
+	nodeID := fx.nodeID
+	if nodeID == "" {
+		nodeID = "node-a"
+	}
 	var terminal Workload
 	count := 0
 	lastSeq := int64(0)
@@ -88,11 +95,11 @@ func (fx *continuityFixture) terminal(t *testing.T, state, reason string) Worklo
 			}
 		}
 	}
-	if count != 1 || terminal.State != state || terminal.ScheduledOn != "node-a" || terminal.CompletedAt == nil {
-		t.Fatalf("terminal count=%d, workload=%+v; want one %s on node-a", count, terminal, state)
+	if count != 1 || terminal.State != state || terminal.ScheduledOn != nodeID || terminal.CompletedAt == nil {
+		t.Fatalf("terminal count=%d, workload=%+v; want one %s on %s", count, terminal, state, nodeID)
 	}
 	if reason != "" {
-		want := "stream interrupted after output began on node-a: " + reason
+		want := "stream interrupted after output began on " + nodeID + ": " + reason
 		if terminal.Error == nil || *terminal.Error != want {
 			t.Fatalf("workload failure = %v, want %q", terminal.Error, want)
 		}
@@ -104,7 +111,7 @@ func (fx *continuityFixture) terminal(t *testing.T, state, reason string) Worklo
 		if err := json.Unmarshal(requests[0], &event); err != nil {
 			t.Fatalf("decode proxy/request: %v", err)
 		}
-		if event.Error != want || event.Status != http.StatusOK || event.NodeID != "node-a" {
+		if event.Error != want || event.Status != http.StatusOK || event.NodeID != nodeID {
 			t.Fatalf("request result = %+v, want committed 200 with sanitized failure", event)
 		}
 	}
@@ -301,8 +308,12 @@ func TestStreamContinuityProtocolSelection(t *testing.T) {
 	test("OpenAI finish reason clean EOF", "/v1/chat/completions", explicitTrue, "text/event-stream", "data: {\"choices\":[{\"index\":0,\"finish_reason\":\"stop\"}]}\n\n", streamProtocolSSE, "")
 	test("OpenAI all choices required", "/v1/chat/completions", explicitTrue+`,"n":2`, "text/event-stream", "data: {\"choices\":[{\"index\":0,\"finish_reason\":\"stop\"}]}\n\n", streamProtocolSSE, streamInterruptReasonPrematureEOF)
 	test("OpenAI default raw", "/v1/chat/completions", "", "application/json", `{"choices":[]}`, streamProtocolUnknown, "")
+	test("OpenAI null raw", "/v1/chat/completions", `,"stream":null`, "application/json", `{"choices":[]}`, streamProtocolUnknown, "")
+	test("OpenAI null SSE", "/v1/completions", `,"stream":null`, "text/event-stream", continuitySSEEvent, streamProtocolSSE, streamInterruptReasonPrematureEOF)
 	test("OpenAI explicit false overrides media", "/v1/chat/completions", explicitFalse, "text/event-stream", "raw response", streamProtocolUnknown, "")
 	test("Ollama default json", "/api/chat", "", "application/json", continuityNDJSONEvent+`{"done":true}`, streamProtocolNDJSON, "")
+	test("Ollama chat null", "/api/chat", `,"stream":null`, "application/json", continuityNDJSONEvent, streamProtocolNDJSON, streamInterruptReasonPrematureEOF)
+	test("Ollama generate null", "/api/generate", `,"stream":null`, "application/x-ndjson", "{\"done\":true}\n", streamProtocolNDJSON, "")
 	test("Ollama generate declared", "/api/generate", explicitTrue, "application/x-ndjson", "{\"done\":true}\n", streamProtocolNDJSON, "")
 	test("Ollama explicit false", "/api/generate", explicitFalse, "application/json", `{"response":"single"}`, streamProtocolUnknown, "")
 	test("OpenAI wrong media", "/v1/chat/completions", explicitTrue, "application/json", `{"choices":[]}`, streamProtocolSSE, streamInterruptReasonMalformed)
@@ -317,7 +328,7 @@ func TestStreamContinuityProtocolSelection(t *testing.T) {
 }
 
 func TestStreamContinuityRejectsInvalidStreamFlag(t *testing.T) {
-	for _, flag := range []string{`null`, `"true"`, `1`, `[]`, `true,"stream":false`} {
+	for _, flag := range []string{`"true"`, `1`, `[]`, `true,"stream":false`, `null,"stream":null`} {
 		t.Run(flag, func(t *testing.T) {
 			var hits atomic.Int32
 			upstream := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { hits.Add(1) }))
@@ -328,6 +339,139 @@ func TestStreamContinuityRejectsInvalidStreamFlag(t *testing.T) {
 				t.Fatalf("status=%d read=%v dispatches=%d", resp.StatusCode, err, hits.Load())
 			}
 		})
+	}
+}
+
+func TestStreamContinuityEffectiveLocalDefaults(t *testing.T) {
+	test := func(name, path, request, defaults, media, payload, reason string) {
+		t.Run(name, func(t *testing.T) {
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				body, err := io.ReadAll(r.Body)
+				if err != nil {
+					t.Errorf("read effective request: %v", err)
+					return
+				}
+				if !bytes.Equal(body, mergeDefaults([]byte(request), []byte(defaults))) {
+					t.Error("engine did not receive effective defaults")
+				}
+				w.Header().Set("Content-Type", media)
+				w.Header().Set(peerStreamFramingHeader, "engine-spoof")
+				w.Header().Set("Trailer", peerStreamFramingHeader)
+				if _, err := io.WriteString(w, payload); err != nil {
+					t.Errorf("write response: %v", err)
+				}
+				w.Header().Set(peerStreamFramingHeader, "late-engine-spoof")
+			}))
+			defer upstream.Close()
+			fx := newContinuityFixture(t, upstream.URL, time.Second)
+			fac := fx.p.soleFacade()
+			fac.port = fac.profile.FacadePort
+			fac.discovery.AddManual(selfNode("node-a", fac.port, "m"))
+			setBackend(t, fac, upstream.URL, true)
+			pol := nodepolicy.Default()
+			pol.Profiles = []nodepolicy.Profile{{Name: "m", Engine: "ollama", Model: "m", RequestOptions: json.RawMessage(defaults)}}
+			fx.p.admission.setPolicy(pol)
+			resp, data, err := fx.request(t, path, request)
+			if err != nil || resp.StatusCode != http.StatusOK {
+				t.Fatalf("status=%d read=%v", resp.StatusCode, err)
+			}
+			if resp.Header.Get(peerStreamFramingHeader) != "" || resp.Trailer.Get(peerStreamFramingHeader) != "" {
+				t.Fatal("internal metadata leaked from non-peer engine")
+			}
+			if reason != "" {
+				assertContinuityError(t, streamProtocolSSE, data, reason)
+				fx.terminal(t, "failed", reason)
+			} else {
+				if string(data) != payload {
+					t.Fatalf("raw response changed: length=%d want=%d", len(data), len(payload))
+				}
+				fx.terminal(t, "completed", "")
+			}
+			if fx.p.admission.currentActive() != 0 {
+				t.Fatal("local admission ticket leaked")
+			}
+		})
+	}
+	test("all default choices required", "/v1/chat/completions", `{"model":"m","stream":true}`, `{"n":2}`, "text/event-stream", "data: {\"choices\":[{\"index\":0,\"finish_reason\":\"stop\"}]}\n\n", streamInterruptReasonPrematureEOF)
+	test("default disables native streaming", "/api/chat", `{"model":"m"}`, `{"stream":false}`, "application/json", `{"response":"`+strings.Repeat("x", 1<<20)+`","done":true}`, "")
+	test("default declares OpenAI streaming", "/v1/completions", `{"model":"m"}`, `{"stream":true}`, "application/json", `{"choices":[]}`, streamInterruptReasonMalformed)
+}
+
+func TestStreamContinuityRequestsIdentityEncoding(t *testing.T) {
+	const payload = continuitySSEEvent + "data: [DONE]\n\n"
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Accept-Encoding"); got != "identity" {
+			t.Errorf("engine Accept-Encoding=%q, want identity", got)
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		if _, err := io.WriteString(w, payload); err != nil {
+			t.Errorf("write response: %v", err)
+		}
+	}))
+	defer upstream.Close()
+	fx := newContinuityFixture(t, upstream.URL, time.Second)
+	req, err := http.NewRequest(http.MethodPost, fx.origin.URL+"/v1/chat/completions", strings.NewReader(`{"model":"m","stream":true}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Accept-Encoding", "gzip, deflate")
+	resp, err := fx.origin.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	data, err := io.ReadAll(resp.Body)
+	if err != nil || resp.StatusCode != http.StatusOK || string(data) != payload {
+		t.Fatalf("status=%d length=%d read=%v", resp.StatusCode, len(data), err)
+	}
+	waitChan(t, fx.returned, "origin return")
+	fx.terminal(t, "completed", "")
+}
+
+func TestStreamContinuityRejectsCompressedStream(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Content-Encoding", "gzip")
+		compressed := gzip.NewWriter(w)
+		if _, err := io.WriteString(compressed, continuitySSEEvent+"data: [DONE]\n\n"); err != nil {
+			t.Errorf("compress response: %v", err)
+		}
+		if err := compressed.Close(); err != nil {
+			t.Errorf("finish compressed response: %v", err)
+		}
+	}))
+	defer upstream.Close()
+	fx := newContinuityFixture(t, upstream.URL, time.Second)
+	resp, data, err := fx.request(t, "/v1/chat/completions", `{"model":"m","stream":true}`)
+	if err != nil || resp.StatusCode != http.StatusOK || resp.Header.Get("Content-Encoding") != "" {
+		t.Fatalf("status=%d read=%v encoding=%q", resp.StatusCode, err, resp.Header.Get("Content-Encoding"))
+	}
+	assertContinuityError(t, streamProtocolSSE, data, streamInterruptReasonMalformed)
+	fx.terminal(t, "failed", streamInterruptReasonMalformed)
+}
+
+func TestStreamContinuityStrictLocalHidesPeerMetadata(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set(peerStreamFramingHeader, "engine-spoof")
+		w.Header().Set("Trailer", peerStreamFramingHeader)
+		if _, err := io.WriteString(w, "data: [DONE]\n\n"); err != nil {
+			t.Error(err)
+		}
+		w.Header().Set(peerStreamFramingHeader, "late-engine-spoof")
+	}))
+	defer upstream.Close()
+	p := testProxy(ollamaOnlyProfile(t), NewDiscovery(), 0)
+	configureStrict(t, p.admission, filepath.Join(t.TempDir(), "capacity.json"))
+	setBackend(t, p.soleFacade(), upstream.URL, true)
+	rec := httptest.NewRecorder()
+	p.soleFacade().handleHTTP(rec, strictHTTPRequest(t))
+	resp := rec.Result()
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK || resp.Header.Get(peerStreamFramingHeader) != "" || resp.Trailer.Get(peerStreamFramingHeader) != "" {
+		t.Fatalf("status=%d internal header=%q trailer=%q", resp.StatusCode, resp.Header.Get(peerStreamFramingHeader), resp.Trailer.Get(peerStreamFramingHeader))
+	}
+	if p.admission.currentActive() != 1 {
+		t.Fatal("HTTP completion released uncertain strict capacity")
 	}
 }
 

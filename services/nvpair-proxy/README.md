@@ -225,11 +225,33 @@ inference attempt, the origin forwards complete SSE events or NDJSON objects
 with their original bytes and delimiters. Supported routes are OpenAI
 `/v1/chat/completions` and `/v1/completions` with `stream:true` or an SSE response
 content type, and native Ollama `/api/chat` and `/api/generate` with
-`stream:true` or the native default of true. Explicit `stream:false` keeps the
-raw non-streaming path. OpenAI's omitted flag defaults false; SSE content type
+`stream:true` or the native default of true. Framing uses the effective body
+dispatched by each attempt, after its profile defaults. Explicit `stream:false`
+keeps the raw non-streaming path. A single `stream:null` is accepted without rewriting
+request bytes and has the same framing meaning as omission on that route.
+OpenAI's omitted flag defaults false; SSE content type
 can still select management. Native streaming accepts `application/json` and
 `application/x-ndjson`. Other routes, including Responses and Anthropic, remain
 unmanaged even when they return SSE.
+
+Paired ingress reports its effective framing settings in the internal response
+header `X-PAIR-Stream-Framing: v1;<mode>;<choices>`, where mode is `declared`,
+`disabled` or OpenAI `auto`, and choices is a positive decimal integer. The
+destination derives it after its own defaults, overriding engine-supplied
+values. The origin requires valid metadata on successful peer responses to
+these supported inference routes, consumes it before body commit, and strips
+it from client headers and trailers. Direct engine responses never supply
+authoritative peer metadata. Older peers without the header are incompatible:
+the attempt fails with `peer framing metadata missing (version-incompatible peer)`
+and existing pre-commit failover tries another candidate. Invalid metadata has
+the corresponding `peer framing metadata invalid` reason. If attempts run out,
+the existing explicit upstream error reaches the client and the workload fails;
+no peer body bytes are exposed. Error statuses, unsupported routes and
+non-inference requests retain their existing handling.
+
+Supported inference routes explicitly request `Accept-Encoding: identity` on
+both origin and destination engine dispatch, including when the client asks
+for gzip. An engine that still compresses a managed stream fails closed.
 
 Successful managed streaming requires protocol completion: OpenAI `[DONE]`, or
 all requested choices' finish reasons followed by clean EOF; Ollama `done:true`.

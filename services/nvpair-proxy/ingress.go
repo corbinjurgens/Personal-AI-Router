@@ -173,8 +173,12 @@ func (f *facade) serveIngress(w http.ResponseWriter, r *http.Request, peer strin
 		writeIngressError(w, http.StatusBadRequest, "ambiguous-model", ambiguousModelMessage)
 		return
 	}
+	if _, err := parseOriginStreamRequest(r.URL.Path, body); err != nil {
+		writeIngressError(w, http.StatusBadRequest, "invalid-stream", "stream must be a single boolean or null member")
+		return
+	}
 	if strict != nil {
-		f.serveStrictLocal(w, r, body, model, *strict)
+		f.serveStrictLocal(w, r, body, model, *strict, true)
 		return
 	}
 	// The execution's own context, so cancelActive can stop it without the
@@ -214,13 +218,37 @@ func (f *facade) serveIngress(w http.ResponseWriter, r *http.Request, peer strin
 			return
 		}
 	}
+	streamRequest, err := parseOriginStreamRequest(r.URL.Path, body)
+	if err != nil {
+		writeIngressError(w, http.StatusBadRequest, "invalid-stream", "invalid effective stream flag")
+		return
+	}
 	out := r.WithContext(ctx)
 	out.Header = r.Header.Clone()
 	out.Header.Del(nodepolicy.AdmissionWaitHeader)
 	setReplayBody(out, body)
+	if streamRequest.protocol != streamProtocolUnknown {
+		out.Header.Set("Accept-Encoding", "identity")
+	}
 	slog.Debug("cluster ingress forwarding to local backend",
 		"peer", peer, "method", r.Method, "path", r.URL.Path, "target", target.Host, "model", model)
-	f.reverseProxyToLocal(w, out, target)
+	p := f.newLocalReverseProxy(target)
+	p.ModifyResponse = func(resp *http.Response) error {
+		setPeerStreamFraming(resp, streamRequest)
+		return nil
+	}
+	p.ServeHTTP(w, out)
+}
+
+func setPeerStreamFraming(resp *http.Response, s originStreamRequest) {
+	resp.Header.Del(peerStreamFramingHeader)
+	resp.Trailer.Del(peerStreamFramingHeader)
+	if resp.StatusCode != http.StatusSwitchingProtocols {
+		resp.Body = &originResponseBody{ReadCloser: resp.Body, response: resp}
+	}
+	if s.protocol != streamProtocolUnknown {
+		resp.Header.Set(peerStreamFramingHeader, s.peerMetadata())
+	}
 }
 
 // setReplayBody installs a buffered body on an outbound request, keeping its
@@ -252,7 +280,11 @@ func (f *facade) newLocalReverseProxy(target *url.URL) *httputil.ReverseProxy {
 			req.URL.Host = target.Host
 			req.Host = target.Host
 		},
-		Transport: f.host.plainHTTPTransport(),
+		Transport: proxyResponseTransport{f.host.plainHTTPTransport()},
+		ModifyResponse: func(resp *http.Response) error {
+			setPeerStreamFraming(resp, originStreamRequest{})
+			return nil
+		},
 		ErrorHandler: func(ew http.ResponseWriter, _ *http.Request, err error) {
 			slog.Warn("cluster ingress upstream error", "target", target.Host, "err", err)
 			writeIngressError(ew, http.StatusBadGateway, "backend-error", "local inference backend error")
@@ -268,7 +300,11 @@ func (f *facade) newLocalReverseProxy(target *url.URL) *httputil.ReverseProxy {
 // exists yet; even an HTTP EOF is conservatively uncertain until the
 // reconciliation owner proves termination. It must never be interpreted as
 // engine-idle evidence.
-func (f *facade) serveStrictLocal(w http.ResponseWriter, r *http.Request, body []byte, model string, req nodepolicy.StrictAdmissionRequest) {
+func (f *facade) serveStrictLocal(w http.ResponseWriter, r *http.Request, body []byte, model string, req nodepolicy.StrictAdmissionRequest, peer bool) {
+	if _, err := parseOriginStreamRequest(r.URL.Path, body); err != nil {
+		writeIngressError(w, http.StatusBadRequest, "invalid-stream", "stream must be a single boolean or null member")
+		return
+	}
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
 	validated, err := f.host.admission.qualifyStrict(f.profile.Name, model, r.URL.Path, body, req.Identity)
@@ -286,6 +322,11 @@ func (f *facade) serveStrictLocal(w http.ResponseWriter, r *http.Request, body [
 		return
 	}
 	body = validated.body
+	streamRequest, err := parseOriginStreamRequest(r.URL.Path, body)
+	if err != nil {
+		writeIngressError(w, http.StatusBadRequest, "invalid-stream", "invalid effective stream flag")
+		return
+	}
 	if !bodyModelMatches(body, model) {
 		writeIngressError(w, http.StatusBadRequest, "ambiguous-model", ambiguousModelMessage)
 		return
@@ -317,6 +358,9 @@ func (f *facade) serveStrictLocal(w http.ResponseWriter, r *http.Request, body [
 	out.Header = r.Header.Clone()
 	stripInternalRoutingHeaders(out.Header)
 	setReplayBody(out, body)
+	if streamRequest.protocol != streamProtocolUnknown {
+		out.Header.Set("Accept-Encoding", "identity")
+	}
 	p := f.newLocalReverseProxy(target)
 	p.ErrorHandler = func(ew http.ResponseWriter, _ *http.Request, _ error) {
 		f.host.admission.mu.Lock()
@@ -329,6 +373,11 @@ func (f *facade) serveStrictLocal(w http.ResponseWriter, r *http.Request, body [
 		writeIngressError(ew, http.StatusBadGateway, "backend-error", "local inference backend error")
 	}
 	p.ModifyResponse = func(resp *http.Response) error {
+		if peer {
+			setPeerStreamFraming(resp, streamRequest)
+		} else {
+			setPeerStreamFraming(resp, originStreamRequest{})
+		}
 		f.host.admission.mu.Lock()
 		remaining := t.deadline.Sub(f.host.admission.strict.now())
 		f.host.admission.mu.Unlock()

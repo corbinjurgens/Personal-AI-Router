@@ -319,6 +319,61 @@ type originStreamRequest struct {
 	choices  int
 }
 
+// Peer ingress reports the effective body it dispatched, never origin policy
+// or engine-supplied metadata. This header is consumed only on pinned peer hops.
+const peerStreamFramingHeader = "X-PAIR-Stream-Framing"
+
+type peerFramingMetadataError struct{ invalid bool }
+
+func (e *peerFramingMetadataError) Error() string {
+	if e.invalid {
+		return "peer framing metadata invalid (version-incompatible peer)"
+	}
+	return "peer framing metadata missing (version-incompatible peer)"
+}
+
+func (s originStreamRequest) peerMetadata() string {
+	mode := "auto"
+	if s.declared {
+		mode = "declared"
+	} else if s.disabled {
+		mode = "disabled"
+	}
+	return "v1;" + mode + ";" + strconv.Itoa(s.choices)
+}
+
+func (s originStreamRequest) withPeerMetadata(values []string) (originStreamRequest, error) {
+	if len(values) == 0 {
+		return s, &peerFramingMetadataError{}
+	}
+	invalid := &peerFramingMetadataError{invalid: true}
+	if len(values) != 1 {
+		return s, invalid
+	}
+	parts := strings.Split(values[0], ";")
+	if len(parts) != 3 || parts[0] != "v1" {
+		return s, invalid
+	}
+	n, err := strconv.Atoi(parts[2])
+	if err != nil || n <= 0 || strconv.Itoa(n) != parts[2] {
+		return s, invalid
+	}
+	s.declared, s.disabled, s.choices = false, false, n
+	switch parts[1] {
+	case "declared":
+		s.declared = true
+	case "disabled":
+		s.disabled = true
+	case "auto":
+		if s.protocol != streamProtocolSSE {
+			return s, invalid
+		}
+	default:
+		return s, invalid
+	}
+	return s, nil
+}
+
 func parseOriginStreamRequest(path string, body []byte) (originStreamRequest, error) {
 	s := originStreamRequest{choices: 1}
 	switch path {
@@ -330,7 +385,7 @@ func parseOriginStreamRequest(path string, body []byte) (originStreamRequest, er
 		return s, nil
 	}
 	// Invalid JSON remains the engine's responsibility. A stream member in a
-	// valid object, however, must be an unambiguous JSON boolean.
+	// valid object, however, must be an unambiguous JSON boolean or null.
 	if !json.Valid(body) {
 		return s, nil
 	}
@@ -350,12 +405,14 @@ func parseOriginStreamRequest(path string, body []byte) (originStreamRequest, er
 			return s, err
 		}
 		if key == "stream" {
-			if seen || (string(value) != "true" && string(value) != "false") {
-				return s, fmt.Errorf("stream must be a single boolean member")
+			if seen || (string(value) != "true" && string(value) != "false" && string(value) != "null") {
+				return s, fmt.Errorf("stream must be a single boolean or null member")
 			}
 			seen = true
-			s.declared = string(value) == "true"
-			s.disabled = !s.declared
+			if string(value) != "null" {
+				s.declared = string(value) == "true"
+				s.disabled = !s.declared
+			}
 		}
 		if key == "n" {
 			var n int
@@ -383,16 +440,53 @@ func clearOriginStreamIntegrity(header http.Header) {
 	}
 }
 
-type originStreamBody struct {
-	*streamFrameReader
+// Keep the proxy's trailer map separate from the transport's response. Closing
+// an interrupted body can start a background drain that still writes trailers.
+// Only a read through EOF makes the upstream trailers safe to copy.
+type proxyResponseTransport struct{ http.RoundTripper }
+
+func (t proxyResponseTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	upstream, err := t.RoundTripper.RoundTrip(r)
+	if err != nil {
+		return upstream, err
+	}
+	if upstream.StatusCode == http.StatusSwitchingProtocols {
+		return upstream, nil // Preserve the bidirectional upgrade body.
+	}
+	response := *upstream
+	response.Trailer = upstream.Trailer.Clone()
+	response.Body = &proxyResponseTrailerBody{ReadCloser: upstream.Body, upstream: upstream, response: &response}
+	return &response, nil
+}
+
+type proxyResponseTrailerBody struct {
+	io.ReadCloser
+	upstream *http.Response
 	response *http.Response
 }
 
-func (b *originStreamBody) Close() error {
-	err := b.streamFrameReader.Close()
+func (b *proxyResponseTrailerBody) Read(p []byte) (int, error) {
+	n, err := b.ReadCloser.Read(p)
+	if err == io.EOF {
+		b.response.Trailer = b.upstream.Trailer.Clone()
+	}
+	return n, err
+}
+
+type originResponseBody struct {
+	io.ReadCloser
+	response *http.Response
+	managed  bool
+}
+
+func (b *originResponseBody) Close() error {
+	err := b.ReadCloser.Close()
 	// Transport populates trailers at EOF, after ModifyResponse. ReverseProxy
 	// closes the body before copying those trailers to the client.
-	clearOriginStreamIntegrity(b.response.Trailer)
+	b.response.Trailer.Del(peerStreamFramingHeader)
+	if b.managed {
+		clearOriginStreamIntegrity(b.response.Trailer)
+	}
 	return err
 }
 
@@ -497,7 +591,7 @@ func (f *facade) handleHTTPWithStreamIdle(w http.ResponseWriter, r *http.Request
 		}
 		// The internal strict envelope names destination-local execution. It
 		// cannot grant onward routing or inherit concrete retry loops.
-		f.serveStrictLocal(w, r, bodyBytes, model, *strict)
+		f.serveStrictLocal(w, r, bodyBytes, model, *strict, false)
 		return
 	}
 	// A reserved hybrid alias the legacy tier path does not serve is refused
@@ -522,11 +616,10 @@ func (f *facade) handleHTTPWithStreamIdle(w http.ResponseWriter, r *http.Request
 	if rejectAmbiguous() {
 		return
 	}
-	var streamRequest originStreamRequest
 	if isInf {
-		streamRequest, err = parseOriginStreamRequest(r.URL.Path, bodyBytes)
+		_, err = parseOriginStreamRequest(r.URL.Path, bodyBytes)
 		if err != nil {
-			writeIngressError(w, http.StatusBadRequest, "invalid-stream", "stream must be a single boolean member")
+			writeIngressError(w, http.StatusBadRequest, "invalid-stream", "stream must be a single boolean or null member")
 			_ = f.notify("proxy/request", RequestEvent{
 				ID: reqID, Method: r.Method, Path: r.URL.Path,
 				Status: http.StatusBadRequest, Duration: time.Since(start).Milliseconds(),
@@ -1233,6 +1326,21 @@ func (f *facade) handleHTTPWithStreamIdle(w http.ResponseWriter, r *http.Request
 			}
 		}
 
+		// Framing follows this attempt's effective body, including local profile
+		// defaults. Ingress validation above still rejects ambiguous client flags
+		// before admission or any body rewrite.
+		streamRequest, streamErr := parseOriginStreamRequest(r.URL.Path, sendBody)
+		if streamErr != nil {
+			curTicket.release()
+			cancelAttempt()
+			ctl.setAttempt(nil)
+			respondedWithError = true
+			finalStatus = http.StatusBadRequest
+			proxyErr = "invalid effective stream flag"
+			writeIngressError(w, http.StatusBadRequest, "invalid-stream", "invalid effective stream flag")
+			break
+		}
+
 		// Watch the target while the attempt is pre-commit. A node that has
 		// dropped out of discovery is not coming back to answer a request
 		// already sent to it, and without this the attempt sat out the whole
@@ -1285,6 +1393,10 @@ func (f *facade) handleHTTPWithStreamIdle(w http.ResponseWriter, r *http.Request
 		// next.
 		attemptReq := r.WithContext(attemptCtx)
 		attemptReq.Header = r.Header.Clone()
+		if isInf && streamRequest.protocol != streamProtocolUnknown {
+			// Explicit identity also prevents Go's transport from negotiating gzip.
+			attemptReq.Header.Set("Accept-Encoding", "identity")
+		}
 		if bodyBytes != nil {
 			setReplayBody(attemptReq, sendBody)
 		}
@@ -1309,16 +1421,26 @@ func (f *facade) handleHTTPWithStreamIdle(w http.ResponseWriter, r *http.Request
 			},
 			// A remote cluster peer is dialed over mTLS (per-peer pinned config);
 			// self/manual candidates use the plain transport. See candidateTransport.
-			Transport: p.candidateTransport(cand),
+			Transport: proxyResponseTransport{p.candidateTransport(cand)},
 			// ModifyResponse fires when the upstream's status line + headers
 			// have arrived but before the body streams. That's both the retry
 			// decision point and, on commit, the time-to-first-byte boundary.
 			ModifyResponse: func(resp *http.Response) error {
+				metadata := resp.Header.Values(peerStreamFramingHeader)
+				resp.Header.Del(peerStreamFramingHeader)
+				resp.Trailer.Del(peerStreamFramingHeader)
 				if !last && shouldRetry(resp.StatusCode) {
 					// Abort before streaming: ReverseProxy closes resp.Body and
 					// calls ErrorHandler with our sentinel, then we try next.
 					retry = true
 					return retrySignal{}
+				}
+				if isInf && cand.peerUUID != "" && streamRequest.protocol != streamProtocolUnknown && resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices {
+					var err error
+					streamRequest, err = streamRequest.withPeerMetadata(metadata)
+					if err != nil {
+						return err // existing attempt failure path; never commit body bytes
+					}
 				}
 				// Hold the commit until the engine actually produces content.
 				// Only for inference: a control endpoint's headers mean what
@@ -1396,11 +1518,14 @@ func (f *facade) handleHTTPWithStreamIdle(w http.ResponseWriter, r *http.Request
 						reader.finishInterruptedLocked(streamInterruptReasonMalformed)
 						reader.mu.Unlock()
 					}
-					resp.Body = &originStreamBody{streamFrameReader: reader, response: resp}
+					resp.Body = reader
 					committedStream = reader
 					resp.ContentLength = -1
 					clearOriginStreamIntegrity(resp.Header)
 					clearOriginStreamIntegrity(resp.Trailer)
+				}
+				if resp.StatusCode != http.StatusSwitchingProtocols {
+					resp.Body = &originResponseBody{ReadCloser: resp.Body, response: resp, managed: committedStream != nil}
 				}
 				// Name what actually answered (FORK_DESIGN.md §3.8). Set on the
 				// committed response only, so a failed-over attempt's headers

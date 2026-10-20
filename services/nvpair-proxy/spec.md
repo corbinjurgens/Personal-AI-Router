@@ -498,12 +498,55 @@ protocol selection happens after its winning commit claim.
 | `/v1/chat/completions`, `/v1/completions` | `stream:true`, or response `text/event-stream` when the flag is omitted | Explicit `stream:false`; omission otherwise defaults false |
 | Native Ollama `/api/chat`, `/api/generate` | `stream:true` or omitted flag (native default true); `application/json` or `application/x-ndjson` | Explicit `stream:false` |
 
-The stream member must be a single boolean when present; validation does not
+The stream member must be a single boolean or null when present; duplicate
+members return 400 before defaults or dispatch, including duplicate nulls.
+Null has the same framing meaning as omission: OpenAI media selects management,
+while native Ollama declares streaming by default. Validation does not
 re-encode unrelated request bytes. SSE content type does not enable parsing for
 Responses, Anthropic or other routes. A declared/default stream with an empty
 body, wrong media type or malformed framing fails rather than becoming a raw
 success. Management applies to committed successful HTTP responses; upstream
 error statuses retain §5.4's handling.
+
+Framing settings (route protocol, declared/disabled state and requested choice
+count) are derived from the effective body dispatched by each attempt, after
+model rewriting and profile defaults. Defaults that add `n:2` require both
+choices at finish-reason-only EOF; defaults that set native `stream:false` keep
+even a single JSON response larger than the stream frame limit on raw copying.
+An existing null member remains unchanged and prevents a profile default from
+replacing that member, as with any existing request member.
+
+**Peer defaults and version compatibility.** A destination ingress can apply
+its own profile defaults, which the origin cannot infer. The destination sets
+`X-PAIR-Stream-Framing` from the effective body it actually sends to its local
+engine. The single header value is `v1;<mode>;<choices>`: mode is `declared`,
+`disabled` or `auto` (the last is valid only for OpenAI routes); choices is a
+positive canonical decimal integer, defaulting to 1. Protocol comes from the
+unchanged route. Both concrete and strict paired ingress use this contract;
+the header grants no engine-termination evidence or admission release.
+Engine-supplied header values are overwritten, and unsupported/non-inference
+routes never gain metadata. Local strict dispatch never emits peer metadata.
+
+On a pinned peer's successful supported inference response, the origin validates
+this metadata before the first-body gate and commit claim, then uses those
+settings for framing. Missing metadata returns the typed attempt error
+`peer framing metadata missing (version-incompatible peer)`; malformed,
+duplicate, unknown-version or invalid values return
+`peer framing metadata invalid (version-incompatible peer)`. No peer body
+bytes or started notification are exposed for that attempt. Existing pre-commit
+failover applies, and exhaustion returns the existing explicit upstream error
+with the reason recorded in `proxy/request` and the failed workload. There is
+no legacy inference branch: older peers must be upgraded for supported
+inference routes. Non-2xx/admission responses retain existing status handling.
+The origin strips this internal header from every client response and trailer,
+including non-peer engine responses; direct engines cannot supply authoritative
+framing metadata. Unsupported routes and non-inference forwarding are otherwise
+unaffected.
+
+Origin and destination dispatch explicitly set `Accept-Encoding: identity` on
+the supported inference routes, even when the client requests compression.
+The explicit value prevents Go's transport from negotiating gzip itself. A
+managed response with non-identity Content-Encoding still fails as malformed.
 
 The reader preserves complete raw frames and their delimiters across arbitrary
 read splits, including CRLF, multiline SSE and UTF-8. It withholds an incomplete
