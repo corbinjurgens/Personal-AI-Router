@@ -31,6 +31,52 @@ type loadedLlamaFake struct {
 	model   string
 }
 
+func TestLoadedServingInvalidationConcurrentAdoptedOperations(t *testing.T) {
+	test := func(name string, operation func(*testing.T, *Executor)) {
+		t.Run(name, func(t *testing.T) {
+			ex := settingsExecutor(t, false)
+			st := settingsState(t, ex)
+			st.mu.Lock()
+			st.running, st.adopted = true, true
+			st.mu.Unlock()
+			defer func() {
+				st.mu.Lock()
+				st.running, st.adopted = false, false
+				st.mu.Unlock()
+			}()
+
+			var wg sync.WaitGroup
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for range 10000 {
+					ex.pokeLoaded()
+				}
+			}()
+			defer wg.Wait()
+			for range 1000 {
+				operation(t, ex)
+			}
+		})
+	}
+	test("adopted settings read", func(t *testing.T, ex *Executor) {
+		t.Helper()
+		state, err := ex.LaunchSettings("fake")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if state.Editable || !state.Running || !state.Adopted {
+			t.Fatalf("adopted launch state = %+v, want running, adopted and uneditable", state)
+		}
+	})
+	test("refused adopted port change", func(t *testing.T, ex *Executor) {
+		t.Helper()
+		if _, err := ex.SetPort(context.Background(), "fake", 21093); err == nil {
+			t.Fatal("adopted engine accepted port mutation")
+		}
+	})
+}
+
 func (s *loadedLlamaFake) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	loaded, props, status, hook := s.loaded, s.props, s.status, s.onProps

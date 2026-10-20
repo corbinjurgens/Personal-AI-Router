@@ -170,7 +170,7 @@ func (e *Executor) launchStateLocked(engine string, st *engineState) settings.La
 		result.Reason = "The engine launch configuration cannot be displayed."
 	case st.plat.Runtime.EditableLaunch == nil:
 		result.Reason = "This engine does not support launch settings."
-	case result.Running && result.Adopted && !canMoveAdoptedEngine(st.plat.Runtime):
+	case result.Running && result.Adopted && !canMoveAdoptedEngine(st.plat.Runtime.Mode, st.plat.Runtime.Stop):
 		result.Reason = "Stop this engine in its own application before changing settings."
 	default:
 		result.Editable = true
