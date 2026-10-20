@@ -81,7 +81,7 @@ func newBlockedPairingFixtureEnv(t *testing.T, inviterEnv, joinerEnv []string) b
 	assertClusterListenerRejects(t, f.aPort)
 	f.a.call("cluster:create", map[string]any{"clusterFriendlyName": "isolated outbound regression"})
 	f.aID = decodeResult[cmNodeID](t, f.a.call("cluster:get-node-id", nil))
-	f.invite = decodeResult[outboundInviteResult](t, f.a.call("cluster:invite-node", map[string]any{"address": "127.0.0.1", "port": f.bPort}))
+	f.invite = decodeResult[outboundInviteResult](t, f.a.call("cluster:invite-node", map[string]any{"address": "127.0.0.1", "port": f.bPort, "allowRemoteManagement": false}))
 	if f.invite.State != "pending" || len(f.invite.Pin) != 6 {
 		t.Fatalf("initial invite = %+v, want pending with PIN", f.invite)
 	}
@@ -140,6 +140,7 @@ func TestClusterOutboundPairingBlockedInviter(t *testing.T) {
 	f := newBlockedPairingFixture(t, nil)
 	response := decodeResult[outboundInviteResult](t, f.b.call("cluster:respond-to-invite", map[string]any{
 		"inviteId": f.invite.InviteID, "accept": true, "pin": f.invite.Pin,
+		"allowRemoteManagement": false,
 	}))
 	if response.State != "paired" {
 		t.Fatalf("joiner response state = %q, want paired", response.State)
@@ -179,6 +180,7 @@ func TestClusterOutboundPairingLostFinalReplyAndConfirmation(t *testing.T) {
 	f := newBlockedPairingFixture(t, []string{"NVPAIR_TEST_PAIR_DROP_FINAL_REPLY=1", "NVPAIR_TEST_PAIR_DROP_CONFIRMATION=1"})
 	response := decodeResult[outboundInviteResult](t, f.b.call("cluster:respond-to-invite", map[string]any{
 		"inviteId": f.invite.InviteID, "accept": true, "pin": f.invite.Pin,
+		"allowRemoteManagement": false,
 	}))
 	if response.State != "paired" {
 		t.Fatalf("lost final reply changed joiner commit to %q", response.State)
@@ -209,6 +211,7 @@ func TestClusterOutboundPairingWrongPIN(t *testing.T) {
 	}
 	response := decodeResult[outboundInviteResult](t, f.b.call("cluster:respond-to-invite", map[string]any{
 		"inviteId": f.invite.InviteID, "accept": true, "pin": wrong,
+		"allowRemoteManagement": false,
 	}))
 	if response.State != "failed" || response.Reason != "incorrect-pin" {
 		t.Fatalf("wrong PIN outcome = %+v, want failed/incorrect-pin", response)
@@ -244,6 +247,7 @@ func TestClusterOutboundPairingReceiptFailureClearsPublicMembership(t *testing.T
 	}
 	result := decodeResult[outboundInviteResult](t, f.b.call("cluster:respond-to-invite", map[string]any{
 		"inviteId": f.invite.InviteID, "accept": true, "pin": f.invite.Pin,
+		"allowRemoteManagement": false,
 	}))
 	if result.State != "failed" {
 		t.Fatalf("receipt-writer fault status = %+v", result)
@@ -288,6 +292,7 @@ func TestClusterOutboundPairingRollbackWaitsForDurableCleanup(t *testing.T) {
 	backup := memberPath + ".fault-backup"
 	result := decodeResult[outboundInviteResult](t, f.b.call("cluster:respond-to-invite", map[string]any{
 		"inviteId": f.invite.InviteID, "accept": true, "pin": f.invite.Pin,
+		"allowRemoteManagement": false,
 	}))
 	if result.State != "failed" {
 		t.Fatalf("joiner commit fault status = %+v", result)
@@ -362,6 +367,7 @@ func TestClusterOutboundPairingAuthenticatedJoinerPinFailure(t *testing.T) {
 	request, err := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": id,
 		"method": "cluster:respond-to-invite", "params": map[string]any{
 			"inviteId": f.invite.InviteID, "accept": true, "pin": f.invite.Pin,
+			"allowRemoteManagement": false,
 		}})
 	if err != nil {
 		t.Fatal(err)
@@ -441,12 +447,12 @@ func TestClusterOutboundPairingLegacyBinary(t *testing.T) {
 			time.Sleep(200 * time.Millisecond)
 			a.call("cluster:create", map[string]any{"clusterFriendlyName": "isolated legacy regression"})
 			aID := decodeResult[cmNodeID](t, a.call("cluster:get-node-id", nil))
-			inv := decodeResult[outboundInviteResult](t, a.call("cluster:invite-node", map[string]any{"address": "127.0.0.1", "port": bPort}))
+			inv := decodeResult[outboundInviteResult](t, a.call("cluster:invite-node", map[string]any{"address": "127.0.0.1", "port": bPort, "allowRemoteManagement": false}))
 			if inv.State != "pending" || len(inv.Pin) != 6 {
 				t.Fatalf("mixed-version initial = %+v", inv)
 			}
 			b.waitNotify("cluster:invite-received")
-			response := decodeResult[outboundInviteResult](t, b.call("cluster:respond-to-invite", map[string]any{"inviteId": inv.InviteID, "accept": true, "pin": inv.Pin}))
+			response := decodeResult[outboundInviteResult](t, b.call("cluster:respond-to-invite", map[string]any{"inviteId": inv.InviteID, "accept": true, "pin": inv.Pin, "allowRemoteManagement": false}))
 			if response.State != "paired" {
 				t.Fatalf("mixed-version completion state = %q", response.State)
 			}

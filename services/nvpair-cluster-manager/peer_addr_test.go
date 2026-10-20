@@ -253,7 +253,7 @@ func TestPairingWalksPastAnEndpointThatAnswersButCannotPair(t *testing.T) {
 	wrongMachine, wrongHits := pairingProbeServer(t, http.StatusInternalServerError, `{}`)
 	alsoBroken, alsoHits := pairingProbeServer(t, http.StatusInternalServerError, `{}`)
 
-	_, pin, err := m.pairAtFirstWorkingEndpoint("inv-walk", []string{wrongMachine, alsoBroken}, cid, m.sessGen.Load())
+	_, pin, err := m.pairAtFirstWorkingEndpoint("inv-walk", []string{wrongMachine, alsoBroken}, cid, m.sessGen.Load(), false)
 	if err == nil {
 		t.Fatal("pairing reported success with every endpoint failing")
 	}
@@ -281,7 +281,7 @@ func TestPairingStopsAtAnExplicitRefusal(t *testing.T) {
 		`{"rejected":true,"reason":"already-clustered"}`)
 	second, secondHits := pairingProbeServer(t, http.StatusInternalServerError, `{}`)
 
-	_, _, err := m.pairAtFirstWorkingEndpoint("inv-refused", []string{refusing, second}, cid, m.sessGen.Load())
+	_, _, err := m.pairAtFirstWorkingEndpoint("inv-refused", []string{refusing, second}, cid, m.sessGen.Load(), false)
 	var rejected *pairingRejectedError
 	if !errors.As(err, &rejected) {
 		t.Fatalf("err = %v, want a pairing refusal", err)
@@ -309,7 +309,7 @@ func TestPairingDoesNotWalkAfterOurOwnClusterIsGone(t *testing.T) {
 	second, secondHits := pairingProbeServer(t, http.StatusInternalServerError, `{}`)
 
 	// A stale session generation is what a teardown leaves behind.
-	_, _, err := m.pairAtFirstWorkingEndpoint("inv-gone", []string{first, second}, cid, m.sessGen.Load()+1)
+	_, _, err := m.pairAtFirstWorkingEndpoint("inv-gone", []string{first, second}, cid, m.sessGen.Load()+1, false)
 	if !errors.Is(err, errPairingClusterGone) {
 		t.Fatalf("err = %v, want %v", err, errPairingClusterGone)
 	}
@@ -342,7 +342,7 @@ func TestPairingStopsWhenTheInviteIsCanceledMidWalk(t *testing.T) {
 	next, nextHits := pairingProbeServer(t, http.StatusInternalServerError, `{}`)
 
 	first := strings.TrimPrefix(canceling.URL, "http://")
-	_, pin, err := m.pairAtFirstWorkingEndpoint("inv-cancel", []string{first, next}, cid, m.sessGen.Load())
+	_, pin, err := m.pairAtFirstWorkingEndpoint("inv-cancel", []string{first, next}, cid, m.sessGen.Load(), false)
 	if !errors.Is(err, errPairingAbandoned) {
 		t.Fatalf("err = %v, want %v", err, errPairingAbandoned)
 	}

@@ -5,6 +5,7 @@ package main
 
 import (
 	"crypto/x509"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"time"
 )
 
@@ -22,16 +24,21 @@ const pairingReceiptsFile = "pairing-receipts.json"
 // Membership/pin/admission remain the authority for deciding whether commit
 // landed; the receipt only supplies correlation unavailable in those stores.
 type pairingReceipt struct {
-	InviteID    string          `json:"inviteId"`
-	Role        pairingRole     `json:"role"`
-	ClusterID   string          `json:"clusterId"`
-	LocalEpoch  uint64          `json:"localEpoch"`
-	PeerInfo    json.RawMessage `json:"peerInfo"`
-	Addr        string          `json:"addr,omitempty"`
-	SuccessBlob []byte          `json:"successBlob,omitempty"`
-	ExpiresAt   int64           `json:"expiresAt"`
-	State       InviteState     `json:"state,omitempty"`
-	Rollback    bool            `json:"rollback,omitempty"`
+	InviteID              string          `json:"inviteId"`
+	Role                  pairingRole     `json:"role"`
+	ClusterID             string          `json:"clusterId"`
+	LocalEpoch            uint64          `json:"localEpoch"`
+	PeerInfo              json.RawMessage `json:"peerInfo"`
+	Addr                  string          `json:"addr,omitempty"`
+	SuccessBlob           []byte          `json:"successBlob,omitempty"`
+	ExpiresAt             int64           `json:"expiresAt"`
+	State                 InviteState     `json:"state,omitempty"`
+	Rollback              bool            `json:"rollback,omitempty"`
+	AllowRemoteManagement *bool           `json:"allowRemoteManagement,omitempty"`
+	PermissionRevision    string          `json:"permissionRevision,omitempty"`
+	PermissionMigrationID string          `json:"permissionMigrationId,omitempty"`
+	PermissionIncarnation string          `json:"permissionIncarnation,omitempty"`
+	LocalCertFingerprint  string          `json:"localCertFingerprint,omitempty"`
 }
 
 func (m *Manager) newPairingReceipt(sess *pairingSession, inv *Invite, success []byte) pairingReceipt {
@@ -42,7 +49,9 @@ func (m *Manager) newPairingReceipt(sess *pairingSession, inv *Invite, success [
 	}
 	return pairingReceipt{InviteID: sess.inviteID, Role: sess.role, ClusterID: inv.ClusterID,
 		LocalEpoch: epoch, PeerInfo: info, Addr: sess.joinerAddr,
-		SuccessBlob: append([]byte(nil), success...), ExpiresAt: time.Now().Add(m.effectiveInviteTTL()).UnixMilli()}
+		AllowRemoteManagement: sess.allowRemoteManagement,
+		LocalCertFingerprint:  m.identity.CertFingerprint,
+		SuccessBlob:           append([]byte(nil), success...), ExpiresAt: time.Now().Add(m.effectiveInviteTTL()).UnixMilli()}
 }
 
 func (m *Manager) loadPairingReceipts() error {
@@ -68,6 +77,24 @@ func (m *Manager) loadPairingReceipts() error {
 		if _, _, err := parsePairingInfo(receipt.PeerInfo); err != nil {
 			return err
 		}
+		if receipt.AllowRemoteManagement != nil {
+			revision, err := strconv.ParseUint(receipt.PermissionRevision, 10, 64)
+			if err != nil || revision == 0 || strconv.FormatUint(revision, 10) != receipt.PermissionRevision || receipt.LocalCertFingerprint == "" {
+				return fmt.Errorf("invalid pairing permission revision")
+			}
+			migrationID, err := hex.DecodeString(receipt.PermissionMigrationID)
+			if err != nil || len(migrationID) != 32 || hex.EncodeToString(migrationID) != receipt.PermissionMigrationID {
+				return fmt.Errorf("invalid pairing permission migration identity")
+			}
+			if receipt.PermissionIncarnation != "" {
+				incarnation, err := hex.DecodeString(receipt.PermissionIncarnation)
+				if err != nil || len(incarnation) != 32 || hex.EncodeToString(incarnation) != receipt.PermissionIncarnation {
+					return fmt.Errorf("invalid pairing permission incarnation")
+				}
+			}
+		} else if receipt.PermissionRevision != "" || receipt.PermissionMigrationID != "" {
+			return fmt.Errorf("pairing permission revision without local choice")
+		}
 	}
 	m.pairingReceipts = receipts
 	return nil
@@ -90,10 +117,71 @@ func (m *Manager) savePairingReceipt(receipt pairingReceipt) error {
 	if err != nil {
 		return err
 	}
-	if err := atomicWrite(filepath.Join(m.clusterDir, pairingReceiptsFile), data, 0o600); err != nil {
+	if err := remoteManagementWrite(filepath.Join(m.clusterDir, pairingReceiptsFile), data); err != nil {
 		return err
 	}
 	m.pairingReceipts = next
+	return nil
+}
+
+// An incomplete PG transaction is an abort intent. Recovery compensates it,
+// rather than replaying a staged allow after a later local permission edit.
+// Caller holds rosterMu and sess.mu, before the first authority mutation.
+func (m *Manager) stagePairingReceiptLocked(sess *pairingSession, inv *Invite) (pairingReceipt, error) {
+	if sess.allowRemoteManagement == nil {
+		return pairingReceipt{}, fmt.Errorf("pairing requires a local remote management choice")
+	}
+	doc, marker, err := m.readRemoteManagementLocked()
+	if err != nil || marker.State != "complete" {
+		return pairingReceipt{}, fmt.Errorf("remote management unavailable for pairing")
+	}
+	receipt := m.newPairingReceipt(sess, inv, sess.completionResponse)
+	receipt.PermissionRevision = doc.Revision
+	receipt.PermissionMigrationID = doc.MigrationID
+	receipt.Rollback = true
+	if err := m.savePairingReceipt(receipt); err != nil {
+		return receipt, err
+	}
+	if err := m.ensurePairingGuardLocked(receipt); err != nil {
+		return receipt, errors.Join(err, m.rollbackPairingSessionCompositionLocked(sess, inv))
+	}
+	return receipt, nil
+}
+
+// The durable success record follows every authority and grant write. A failed
+// acknowledgement leaves the original abort intent for compensation/restart.
+func (m *Manager) completePairingReceiptLocked(receipt pairingReceipt) error {
+	pi, _, err := parsePairingInfo(receipt.PeerInfo)
+	if err != nil {
+		return err
+	}
+	if owner, err := m.pairingGuardOwner(); err != nil || owner != receipt.InviteID {
+		return fmt.Errorf("pairing publication guard mismatch: %w", err)
+	}
+	incarnation, ok := m.mesh.PeerServiceIncarnation(pi.NodeUUID)
+	if !ok {
+		return fmt.Errorf("paired peer has no current incarnation")
+	}
+	// Capture the existing Mesh token after admission exists, before any grant
+	// write. Cleanup can then identify this grant even after pin deletion.
+	receipt.PermissionIncarnation = incarnation
+	if err := m.savePairingReceipt(receipt); err != nil {
+		return err
+	}
+	if err := m.setRemoteManagementWithGuardLocked(pi.NodeUUID, *receipt.AllowRemoteManagement, receipt.PermissionRevision, receipt.PermissionMigrationID); err != nil {
+		return err
+	}
+	receipt.Rollback = false
+	receipt.State = inviteStatePaired
+	if err := m.savePairingReceipt(receipt); err != nil {
+		return err
+	}
+	if err := m.releasePairingGuardLocked(receipt); err != nil {
+		return err
+	}
+	if err := m.codec.Notify("cluster:remote-management-changed", m.remoteManagementSnapshotLocked()); err != nil {
+		log.Printf("emit paired remote management change failed")
+	}
 	return nil
 }
 
@@ -108,15 +196,12 @@ func (m *Manager) receiptOutcome(receipt pairingReceipt, pi *PairingInfo, cert *
 	if receipt.Rollback {
 		return inviteStatePending
 	}
-	if receipt.Role == roleInviter && receipt.State == inviteStateFailed {
+	if receipt.State == inviteStateFailed {
 		return inviteStateFailed
-	}
-	if receipt.Role == roleJoiner && (receipt.State == inviteStatePaired || receipt.State == inviteStateFailed) {
-		return receipt.State
 	}
 	m.rosterMu.Lock()
 	defer m.rosterMu.Unlock()
-	if m.receiptCommitMatchesLocked(receipt, pi, cert) {
+	if m.receiptCommitMatchesLocked(receipt, pi, cert) && m.pairingPermissionAvailableLocked(receipt) {
 		return inviteStatePaired
 	}
 	// The durable activated high-water mark can prove the exact join never
@@ -131,14 +216,31 @@ func (m *Manager) receiptOutcome(receipt pairingReceipt, pi *PairingInfo, cert *
 	return ""
 }
 
+func (m *Manager) pairingPermissionAvailableLocked(receipt pairingReceipt) bool {
+	doc, marker, err := m.readRemoteManagementLocked()
+	if err != nil || marker.State != "complete" {
+		return false
+	}
+	// Old receipts can confirm membership but never create a PG permission.
+	if receipt.AllowRemoteManagement == nil {
+		return true
+	}
+	current, err := strconv.ParseUint(doc.Revision, 10, 64)
+	expected, expectedErr := strconv.ParseUint(receipt.PermissionRevision, 10, 64)
+	return err == nil && expectedErr == nil && current > expected && receipt.State == inviteStatePaired && receipt.PermissionIncarnation != ""
+}
+
 // Caller holds the composition boundary. Recovery must use the same exact
 // tuple at inspection and at installation, because removal can race startup.
 func (m *Manager) receiptCommitMatchesLocked(receipt pairingReceipt, pi *PairingInfo, cert *x509.Certificate) bool {
+	if receipt.AllowRemoteManagement != nil && receipt.LocalCertFingerprint != m.identity.CertFingerprint {
+		return false
+	}
 	cid, epoch := m.currentAdmission()
 	member, memberOK := m.memberByNodeID(pi.NodeUUID)
 	pin, pinOK := m.trust.Get(pi.NodeUUID)
 	if !m.teardownPending.Load() && cid == receipt.ClusterID && epoch == receipt.LocalEpoch &&
-		memberOK && pinOK && member.ClusterID == cid && pin.ClusterID == cid &&
+		memberOK && pinOK && member.State == stateMember && member.ClusterID == cid && pin.ClusterID == cid &&
 		member.AdmissionEpoch == pi.AdmissionEpoch && pin.AdmissionEpoch == pi.AdmissionEpoch &&
 		m.trust.MatchDER(pi.NodeUUID, cert.Raw) {
 		return true
@@ -164,14 +266,15 @@ func (m *Manager) resumeOutboundPairings() {
 		// and pairing-only confirmation remain, both bound to the exact tuple.
 		sess := &pairingSession{inviteID: receipt.InviteID, role: roleInviter,
 			clusterID: receipt.ClusterID, joinerAddr: receipt.Addr,
-			localAdmissionEpoch: receipt.LocalEpoch,
-			peerPairing:         pi, peerCert: cert, awaitingAck: true,
+			localAdmissionEpoch:   receipt.LocalEpoch,
+			allowRemoteManagement: receipt.AllowRemoteManagement,
+			peerPairing:           pi, peerCert: cert, awaitingAck: true,
 			completionMode: inviterCompletionV1, completionResponse: receipt.SuccessBlob,
 			createdAt: time.Now().UnixMilli()}
 		m.inviteMu.Lock()
 		installed := false
 		m.withClusterComposition(func() {
-			if !m.receiptCommitMatchesLocked(receipt, pi, cert) {
+			if !m.receiptCommitMatchesLocked(receipt, pi, cert) || !m.pairingPermissionAvailableLocked(receipt) {
 				return
 			}
 			m.putInvite(&Invite{InviteID: receipt.InviteID, FromNodeUUID: m.identity.NodeUUID,
@@ -193,6 +296,20 @@ func (m *Manager) resumeOutboundPairings() {
 // Caller holds rosterMu. Both durable deletion and live pin denial use this
 // local-incarnation guard, including a newer provisional join admission.
 func (m *Manager) pairingRollbackMatchesAdmissionLocked(receipt pairingReceipt) (bool, error) {
+	if receipt.AllowRemoteManagement != nil && receipt.LocalCertFingerprint != m.identity.CertFingerprint {
+		return false, nil
+	}
+	if receipt.AllowRemoteManagement == nil {
+		marker, err := m.pairingGuardMigration(receipt)
+		if err != nil {
+			return false, err
+		}
+		local := marker.Snapshot.Local
+		if remoteManagementAuthorityMatches(local, local.PeerUUID, local.CertFingerprint, receipt.ClusterID, receipt.LocalEpoch) &&
+			(local.PeerUUID != m.identity.NodeUUID || local.CertFingerprint != m.identity.CertFingerprint) {
+			return false, nil // the migration proves a different local certificate
+		}
+	}
 	cid, epoch := m.currentAdmission()
 	if receipt.Role == roleInviter {
 		if cid != receipt.ClusterID || epoch != receipt.LocalEpoch {
@@ -201,6 +318,9 @@ func (m *Manager) pairingRollbackMatchesAdmissionLocked(receipt pairingReceipt) 
 	} else {
 		if cid != "" || epoch != 0 {
 			if cid == receipt.ClusterID && epoch == receipt.LocalEpoch {
+				if receipt.Rollback && receipt.AllowRemoteManagement != nil {
+					return true, nil
+				}
 				return false, fmt.Errorf("cannot compensate an activated join admission")
 			}
 			return false, nil // preserve a newer activated local admission
@@ -208,7 +328,7 @@ func (m *Manager) pairingRollbackMatchesAdmissionLocked(receipt pairingReceipt) 
 		m.admissionMu.Lock()
 		activated := m.admissionActivated
 		m.admissionMu.Unlock()
-		if activated >= receipt.LocalEpoch {
+		if activated >= receipt.LocalEpoch && !(receipt.Rollback && receipt.AllowRemoteManagement != nil && activated == receipt.LocalEpoch && m.admissionWasRetired()) {
 			return false, nil
 		}
 		if self, ok := m.memberByNodeID(m.identity.NodeUUID); ok && self.AdmissionEpoch != 0 &&
@@ -232,23 +352,39 @@ func (m *Manager) rollbackPairingPeerLocked(receipt pairingReceipt) error {
 		return err
 	}
 	var rollbackErr error
+	if err := m.removePairingRemoteManagementLocked(receipt, pi, certFingerprintFromDER(cert.Raw)); err != nil {
+		rollbackErr = err
+	}
+	// Grant failure is after join activation. Retire only this admission,
+	// retaining its monotonic counter and activated high-water mark. A newer
+	// admission was excluded by pairingRollbackMatchesAdmissionLocked above.
+	if receipt.Role == roleJoiner && receipt.Rollback && receipt.AllowRemoteManagement != nil {
+		cid, epoch := m.currentAdmission()
+		if cid == receipt.ClusterID && epoch == receipt.LocalEpoch {
+			if err := m.clearAdmission(); err != nil {
+				rollbackErr = errors.Join(rollbackErr, err)
+			} else {
+				m.setClusterIdentity("", "")
+			}
+		}
+	}
 	data, readErr := os.ReadFile(m.trust.pinPath(pi.NodeUUID))
 	if readErr != nil && !os.IsNotExist(readErr) {
-		rollbackErr = readErr
+		rollbackErr = errors.Join(rollbackErr, readErr)
 		if pin, ok := m.trust.Get(pi.NodeUUID); ok && pin.ClusterID == receipt.ClusterID &&
 			pin.AdmissionEpoch == pi.AdmissionEpoch && pin.CertFingerprint == certFingerprintFromDER(cert.Raw) {
-			rollbackErr = errors.Join(readErr, m.trust.Remove(pi.NodeUUID))
+			rollbackErr = errors.Join(rollbackErr, m.trust.Remove(pi.NodeUUID))
 			m.trust.Forget(pi.NodeUUID)
 		}
 	} else if readErr == nil {
 		var pin TrustedPin
 		if err := json.Unmarshal(data, &pin); err != nil {
-			rollbackErr = err
+			rollbackErr = errors.Join(rollbackErr, err)
 		} else if pin.NodeUUID == pi.NodeUUID && pin.ClusterID == receipt.ClusterID &&
 			pin.AdmissionEpoch == pi.AdmissionEpoch && pin.CertFingerprint == certFingerprintFromDER(cert.Raw) {
 			if err := m.trust.Remove(pi.NodeUUID); err != nil {
 				m.trust.Forget(pi.NodeUUID)
-				rollbackErr = err
+				rollbackErr = errors.Join(rollbackErr, err)
 			}
 		}
 	}
@@ -289,7 +425,10 @@ func (m *Manager) rollbackPairingSessionLocked(sess *pairingSession, inv *Invite
 func (m *Manager) rollbackPairingSessionCompositionLocked(sess *pairingSession, inv *Invite) (rollbackErr error) {
 	sess.rollbackPending = true
 	m.finishInviteReason(sess.inviteID, inviteStatePending, reasonRollbackPending)
-	receipt, exists := m.getPairingReceipt(sess.inviteID)
+	// Confirmation expiry cannot discard an existing abort correlation.
+	m.receiptMu.Lock()
+	receipt, exists := m.pairingReceipts[sess.inviteID]
+	m.receiptMu.Unlock()
 	if !exists {
 		receipt = m.newPairingReceipt(sess, inv, sess.completionResponse)
 		if sess.role == roleInviter {
@@ -300,6 +439,12 @@ func (m *Manager) rollbackPairingSessionCompositionLocked(sess *pairingSession, 
 	if current, live := m.getSession(sess.inviteID); !live || current != sess {
 		return errPairingCommitStale
 	}
+	guarded := receipt.PermissionMigrationID != "" || (receipt.AllowRemoteManagement == nil && exists)
+	if guarded {
+		if err := m.ensurePairingGuardLocked(receipt); err != nil {
+			return err // never compensate behind another transaction's guard
+		}
+	}
 	if err := m.savePairingReceipt(receipt); err != nil {
 		// There is no durable failure claim when even the intent cannot be
 		// saved. Deny the exact old pin in this process and retain the retry.
@@ -309,7 +454,18 @@ func (m *Manager) rollbackPairingSessionCompositionLocked(sess *pairingSession, 
 			pin.CertFingerprint == certFingerprintFromDER(sess.peerCert.Raw) {
 			m.trust.Forget(pin.NodeUUID)
 		}
+		// Keep provisional/composition evidence until the intent is confirmed.
+		// The durable guard denies independent readers and correlates an existing
+		// PG or legacy receipt for abort recovery, even if it was still paired.
 		return err
+	}
+	if receipt.AllowRemoteManagement == nil && !guarded {
+		// An old in-memory session without a receipt must first establish its
+		// durable correlation; never leave an orphaned publication guard.
+		if err := m.ensurePairingGuardLocked(receipt); err != nil {
+			return err
+		}
+		guarded = true
 	}
 	if err := m.rollbackPairingPeerLocked(receipt); err != nil {
 		return err
@@ -320,6 +476,11 @@ func (m *Manager) rollbackPairingSessionCompositionLocked(sess *pairingSession, 
 	if err := m.savePairingReceipt(receipt); err != nil {
 		return err
 	}
+	if guarded {
+		if err := m.releasePairingGuardLocked(receipt); err != nil {
+			return err
+		}
+	}
 	sess.rollbackPending = false
 	m.finishInvite(sess.inviteID, inviteStateFailed)
 	if sess.role == roleInviter {
@@ -329,17 +490,63 @@ func (m *Manager) rollbackPairingSessionCompositionLocked(sess *pairingSession, 
 }
 
 func (m *Manager) recoverPairingRollbacks() error {
-	for _, receipt := range m.pairingReceipts {
+	guardOwner, err := m.pairingGuardOwner()
+	if err != nil {
+		return err
+	}
+	if guardOwner != "" {
+		receipt, ok := m.pairingReceipts[guardOwner]
+		if !ok {
+			return fmt.Errorf("pairing publication guard has no receipt")
+		}
+		// A crash before unlink never publishes a grant, even if a terminal
+		// replacement landed. Abort the exact guarded transaction on restart.
+		receipt.Rollback = true
+		m.rosterMu.Lock()
+		if receipt.AllowRemoteManagement != nil && receipt.PermissionMigrationID == "" {
+			err = fmt.Errorf("pairing publication guard has no permission correlation")
+		}
+		if err == nil {
+			err = m.ensurePairingGuardLocked(receipt)
+		}
+		if err == nil {
+			err = m.savePairingReceipt(receipt)
+		}
+		m.rosterMu.Unlock()
+		if err != nil {
+			return err
+		}
+	}
+	var receipts []pairingReceipt
+	if guardOwner != "" {
+		receipts = append(receipts, m.pairingReceipts[guardOwner])
+	}
+	for id, receipt := range m.pairingReceipts {
+		if id != guardOwner {
+			receipts = append(receipts, receipt)
+		}
+	}
+	for _, receipt := range receipts {
 		if !receipt.Rollback {
 			continue
 		}
 		m.rosterMu.Lock()
-		err := m.rollbackPairingPeerLocked(receipt)
+		var err error
+		guarded := receipt.AllowRemoteManagement == nil || receipt.PermissionMigrationID != ""
+		if guarded {
+			err = m.ensurePairingGuardLocked(receipt)
+		}
+		if err == nil {
+			err = m.rollbackPairingPeerLocked(receipt)
+		}
 		if err == nil {
 			receipt.Rollback = false
 			receipt.State = inviteStateFailed
 			receipt.ExpiresAt = time.Now().Add(m.effectiveInviteTTL()).UnixMilli()
 			err = m.savePairingReceipt(receipt)
+		}
+		if err == nil && guarded {
+			err = m.releasePairingGuardLocked(receipt)
 		}
 		m.rosterMu.Unlock()
 		if err != nil {
