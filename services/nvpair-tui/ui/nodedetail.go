@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"nvpair-shared/engineintent"
 	"nvpair-shared/enginesettings"
 	"nvpair-tui/rpc"
 
@@ -166,7 +167,7 @@ type nodeDetail struct {
 	remotePermissionFresh      bool
 	remotePermissionGeneration int
 	intentGeneration           int
-	enabledByEngine            map[string]bool
+	intent                     engineintent.Snapshot
 	// enginesHidden and modelsHidden record that the last frame had no room
 	// for that list. Its keys are refused while it is off screen, or they act
 	// on a row the operator cannot see.
@@ -755,9 +756,9 @@ func (d *nodeDetail) update(msg tea.Msg) (tea.Cmd, bool) {
 
 	case detailIntentMsg:
 		if msg.visit == d.telemetryGen && msg.generation == d.intentGeneration && !d.remote() && !d.policyDisconnected {
-			d.enabledByEngine = msg.enabled
+			d.intent = msg.intent
 			if msg.err != nil {
-				d.enabledByEngine = nil
+				d.intent = engineintent.Snapshot{}
 			}
 			d.refreshEngines()
 		}
@@ -1906,9 +1907,9 @@ func (d *nodeDetail) refreshEngines() {
 			port = strconv.Itoa(e.Port)
 		}
 		row := table.Row{e.label(), yesNo(e.Installed), yesNo(e.Running), yesNo(e.Healthy), port}
-		// offBy has no client projection yet; saved Off reports intent only,
-		// without inferring an origin or deriving intent from runtime state.
-		if enabled, present := d.enabledByEngine[e.Engine]; !d.remote() && present && !enabled {
+		// Saved Off reports intent without deriving it from runtime state.
+		// Origin wording is separate from carrying the reported snapshot.
+		if enabled, present := d.intent.EnabledByEngine[e.Engine]; !d.remote() && present && !enabled {
 			row[0] += " (saved Off)"
 		}
 		if d.proxy != nil {
