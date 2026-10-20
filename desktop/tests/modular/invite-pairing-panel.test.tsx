@@ -7,7 +7,7 @@ import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Invite } from '@/shared/types/cluster'
 import type { IClusterApi } from '@/ui/api/pair-api'
-import { InvitePairingPanel } from '@/ui/components/InvitePairingPanel'
+import { InvitePairingPanel, RemoteManagementChoice } from '@/ui/components/InvitePairingPanel'
 import { useInvitePairing } from '@/ui/hooks/useInvitePairing'
 import { MODULAR_INVITE_STATUS_POLL_INTERVAL_MS } from '@/shared/constants/modular-runtime'
 
@@ -42,6 +42,24 @@ afterEach(async () => {
 })
 
 describe('failed invitation recovery', () => {
+    it.each([false, true])('shows the service-confirmed local permission %s', async allowed => {
+        await act(async () =>
+            root.render(
+                <InvitePairingPanel
+                    invite={{ ...invite, state: 'paired' }}
+                    error={null}
+                    onReset={reset}
+                    savedPermission={allowed}
+                />
+            )
+        )
+        expect(container.textContent).toContain(
+            allowed ? 'may manage this device' : 'is blocked from changing this device'
+        )
+        expect(container.textContent).toContain(
+            'The other device chooses its own permission independently'
+        )
+    })
     it.each(['rollback-pending', 'awaiting-confirmation'])(
         'shows %s without requesting another PIN entry',
         async reason => {
@@ -147,6 +165,48 @@ describe('failed invitation recovery', () => {
 })
 
 describe('outbound pairing hook lifecycle', () => {
+    it.each([false, true])(
+        'sends the selected local permission %s and resets to Block',
+        async allowed => {
+            const inviteNode = vi
+                .fn<IClusterApi['inviteNode']>()
+                .mockResolvedValue({ ...invite, state: 'paired' })
+            vi.stubGlobal('window', { pairApi: { cluster: { inviteNode } } })
+            function Harness() {
+                const pairing = useInvitePairing()
+                return (
+                    <>
+                        <RemoteManagementChoice
+                            allowed={pairing.allowRemoteManagement}
+                            onChange={pairing.setAllowRemoteManagement}
+                            disabled={pairing.submitting}
+                        />
+                        <button id="start" onClick={() => void pairing.start('127.0.0.1')}>
+                            Start
+                        </button>
+                        <button id="reset" onClick={pairing.reset}>
+                            Reset
+                        </button>
+                    </>
+                )
+            }
+            await act(async () => root.render(<Harness />))
+            expect(container.querySelector<HTMLInputElement>('input[value="block"]')?.checked).toBe(
+                true
+            )
+            if (allowed)
+                await act(async () =>
+                    container.querySelector<HTMLInputElement>('input[value="allow"]')?.click()
+                )
+            await act(async () => container.querySelector<HTMLButtonElement>('#start')?.click())
+            expect(inviteNode).toHaveBeenCalledWith('127.0.0.1', allowed)
+            await act(async () => container.querySelector<HTMLButtonElement>('#reset')?.click())
+            expect(container.querySelector<HTMLInputElement>('input[value="block"]')?.checked).toBe(
+                true
+            )
+        }
+    )
+
     it.each(['resolve', 'reject'])(
         'preserves replacement B and its polling after late cancellation A %s',
         async outcome => {

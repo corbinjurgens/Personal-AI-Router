@@ -10,6 +10,8 @@ import type { NodePolicyDocument, NodePolicySnapshot } from '@/shared/types/node
 import type { NodeRoles } from '@/shared/types/node-roles'
 import type { NodeItem, NodeStatus } from '@/shared/types/nodes'
 import type { INodePolicyApi } from '@/ui/api/pair-api'
+import { REMOTE_MANAGEMENT_DENIED_CODE } from '@/shared/constants/service-errors'
+import { ServiceCallError } from '@/ui/api/service-transport'
 import BulkNodeConfiguration from '@/ui/components/RoutingSettings/BulkNodeConfiguration'
 import { useConnectionStore } from '@/ui/stores/connection.store'
 import { useDiscoveredNodesStore } from '@/ui/stores/discovered-nodes.store'
@@ -136,6 +138,30 @@ describe('bulk fan-out', () => {
         await store().apply('a', 'a', ROLES)
         expect(set).not.toHaveBeenCalled()
         expect(entry('a').phase).toBe('applied')
+    })
+
+    it('retains successful rows and unsent drafts in a mixed permission refusal and unreachable attempt', async () => {
+        get.mockImplementation(async nodeId => {
+            if (nodeId === 'offline') throw new Error('device is offline')
+            return policyDocument('5')
+        })
+        set.mockImplementation(async request => {
+            if (request.nodeId === 'denied')
+                throw new ServiceCallError('not granted by target', REMOTE_MANAGEMENT_DENIED_CODE)
+            return persisted(request)
+        })
+        store().adopt('offline', snapshot('4'))
+        store().setDraft('offline', ROLES)
+        await store().applyAll(targets('allowed', 'denied', 'offline'), ROLES)
+        expect(entry('allowed').phase).toBe('applied')
+        expect(entry('allowed').baseline?.revision).toBe('6')
+        expect(entry('denied').phase).toBe('rejected')
+        expect(entry('denied').message).toContain('Remote management permission')
+        expect(entry('denied').draft).toEqual(ROLES)
+        expect(entry('offline').phase).toBe('unreachable')
+        expect(entry('offline').draft).toEqual(ROLES)
+        expect(set.mock.calls.map(([request]) => request.nodeId)).toEqual(['allowed', 'denied'])
+        expect(get.mock.calls.map(([nodeId]) => nodeId)).toEqual(['allowed', 'denied', 'offline'])
     })
 })
 

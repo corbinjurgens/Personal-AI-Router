@@ -37,7 +37,14 @@ import {
 import { parseWorkloadsInitial } from './workload-projection'
 
 import type { JsonObject, JsonValue } from './json-rpc-client'
-import { emptyInvite, parseClusterNodes, parseInvite, parseNodeIdentity } from './cluster-json'
+import {
+    emptyInvite,
+    parseClusterNodes,
+    parseInvite,
+    parseNodeIdentity,
+    parseRemoteManagementCapability,
+    parseRemoteManagementSnapshot
+} from './cluster-json'
 
 type BridgeHandler<C extends WsInvokeChannel> = (
     payload?: WsInvokeRequest<C>
@@ -507,7 +514,9 @@ function handleErrorsClear(id: string): null {
 async function handleClusterInviteNode(
     payload?: WsInvokeRequest<'cluster:invite-node'>
 ): Promise<Invite> {
-    if (!payload) return emptyInvite()
+    if (!payload || typeof payload.allowRemoteManagement !== 'boolean') {
+        throw new Error('An explicit remote management choice is required')
+    }
 
     // cluster-manager auto-founds a solo cluster on the first invite while
     // unclustered (under inviteMu, with invite-created provenance). Do not
@@ -524,7 +533,8 @@ async function handleClusterInviteNode(
             'cluster:invite-node',
             {
                 address: payload.ipAddress,
-                port: MODULAR_CLUSTER_MANAGER_PORT
+                port: MODULAR_CLUSTER_MANAGER_PORT,
+                allowRemoteManagement: payload.allowRemoteManagement
             },
             CLUSTER_PAIRING_CALL_TIMEOUT_MS
         )
@@ -571,9 +581,19 @@ async function handleClusterInviteStatus(
 async function handleClusterRespondToInvite(
     payload?: WsInvokeRequest<'cluster:respond-to-invite'>
 ): Promise<Invite> {
-    if (!payload) return emptyInvite()
+    if (
+        !payload ||
+        typeof payload.accept !== 'boolean' ||
+        (payload.accept &&
+            (typeof payload.pin !== 'string' || typeof payload.allowRemoteManagement !== 'boolean'))
+    ) {
+        throw new Error('Accepting an invite requires a PIN and explicit remote management choice')
+    }
     const params: JsonObject = { inviteId: payload.inviteId, accept: payload.accept }
-    if (payload.pin !== undefined) params.pin = payload.pin
+    if (payload.accept) {
+        params.pin = payload.pin
+        params.allowRemoteManagement = payload.allowRemoteManagement
+    }
     const result = parseInvite(
         await callCluster('cluster:respond-to-invite', params, CLUSTER_PAIRING_CALL_TIMEOUT_MS)
     )
@@ -681,6 +701,26 @@ const EMPTY_SERVICE_BRIDGE_HANDLERS: BridgeHandlerMap = {
     'discovery:get-nodes': () => getModularBridgeState().getAvailableNodes(),
 
     'cluster:get-initial': () => handleClusterGetInitial(),
+    'cluster:get-remote-management': async () =>
+        parseRemoteManagementSnapshot(await callCluster('cluster:get-remote-management', {})),
+    'cluster:set-remote-management': async payload => {
+        if (!payload) throw new Error('Missing remote management request')
+        return parseRemoteManagementSnapshot(
+            await callCluster('cluster:set-remote-management', {
+                peerUuid: payload.peerUuid,
+                allowed: payload.allowed,
+                expectedRevision: payload.expectedRevision
+            })
+        )
+    },
+    'engine:remote-management-get': async payload => {
+        if (!payload) throw new Error('Missing target node')
+        return parseRemoteManagementCapability(
+            await getModularSupervisor().callProcess('broker', 'engine:remote-management-get', {
+                nodeId: payload.nodeId
+            })
+        )
+    },
     'cluster:invite-node': payload => handleClusterInviteNode(payload),
     'cluster:invite-status': payload => handleClusterInviteStatus(payload),
     'cluster:respond-to-invite': payload => handleClusterRespondToInvite(payload),

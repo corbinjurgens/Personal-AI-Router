@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-import { useCallback, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import {
     Button,
     Divider,
@@ -15,7 +15,7 @@ import {
     TextInput
 } from '@nvidia/foundations-react-core'
 import { DialogHeader } from './DialogHeader'
-import { InvitePairingPanel } from './InvitePairingPanel'
+import { InvitePairingPanel, RemoteManagementChoice } from './InvitePairingPanel'
 import { useBlurOnOpen } from '@/ui/hooks/useBlurOnOpen'
 import { useInvitePairing } from '@/ui/hooks/useInvitePairing'
 import { useInvitablePeers } from '@/ui/hooks/useInvitablePeers'
@@ -29,7 +29,14 @@ export function AddNodeModal({ open, onOpenChange }: AddNodeModalProps) {
     useBlurOnOpen(open)
     const [manualIp, setManualIp] = useState('')
     const pairing = useInvitePairing()
+    const resetPairing = pairing.reset
     const nodesThatCanBeAdded = useInvitablePeers()
+    useEffect(() => {
+        if (!open) {
+            resetPairing()
+            setManualIp('')
+        }
+    }, [open, resetPairing])
 
     const handleOpenChange = useCallback(
         (next: boolean) => {
@@ -69,9 +76,15 @@ export function AddNodeModal({ open, onOpenChange }: AddNodeModalProps) {
                                 onReset={pairing.reset}
                                 onCancel={() => void pairing.cancel()}
                                 onDone={() => handleOpenChange(false)}
+                                savedPermission={pairing.submittedPermission}
                             />
                         ) : (
                             <>
+                                <RemoteManagementChoice
+                                    allowed={pairing.allowRemoteManagement}
+                                    onChange={pairing.setAllowRemoteManagement}
+                                    disabled={inviteInFlight}
+                                />
                                 <Flex align="end" gap="2">
                                     <FormField slotLabel="IP address" className="flex-1">
                                         <TextInput

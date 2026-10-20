@@ -67,7 +67,10 @@ describe('cluster pairing RPC timeouts', () => {
     })
 
     it('allows an outbound invite to finish beyond the default RPC timeout', async () => {
-        await handleServiceBridgeInvoke('cluster:invite-node', { ipAddress: '192.168.1.2' })
+        await handleServiceBridgeInvoke('cluster:invite-node', {
+            ipAddress: '192.168.1.2',
+            allowRemoteManagement: false
+        })
 
         expect(timeoutFor('cluster:invite-node')).toBe(35_000)
     })
@@ -76,7 +79,8 @@ describe('cluster pairing RPC timeouts', () => {
         await handleServiceBridgeInvoke('cluster:respond-to-invite', {
             inviteId: 'invite-1',
             accept: true,
-            pin: '123456'
+            pin: '123456',
+            allowRemoteManagement: false
         })
 
         expect(timeoutFor('cluster:respond-to-invite')).toBe(35_000)
