@@ -12,6 +12,18 @@ import (
 	"time"
 )
 
+func TestWorkloadCancelWire(t *testing.T) {
+	testResidentWire(t, WorkloadCancelParams{OriginatedFrom: "origin-1", WorkloadID: "7", Engine: "ollama", RunID: "run-1"},
+		"originatedFrom workloadId engine runId",
+		residentWireRejection{"missing origin value", "originatedFrom", ""},
+		residentWireRejection{"invalid origin", "originatedFrom", "other/origin"},
+		residentWireRejection{"missing run value", "runId", ""},
+		residentWireRejection{"invalid run", "runId", "old/run"},
+		residentWireRejection{"missing engine value", "engine", ""},
+		residentWireRejection{"invalid engine", "engine", "bad/engine"},
+		residentWireRejection{"missing workload value", "workloadId", ""})
+}
+
 func egressLeaseBindingRejections() []residentWireRejection {
 	return []residentWireRejection{
 		{"empty run identity", "runId", ""},

@@ -31,8 +31,10 @@ func TestWorkloadsCancelLocalAsksTheProxy(t *testing.T) {
 		t.Fatalf("proxy calls = %v", proxy.methods(""))
 	}
 	var p map[string]any
-	_ = json.Unmarshal(calls[0].params, &p)
-	if p["workloadId"] != "7" || p["regenerate"] != true || p["engine"] != "ollama" || p["runId"] != "r9" {
+	if err := json.Unmarshal(calls[0].params, &p); err != nil {
+		t.Fatal(err)
+	}
+	if p["originatedFrom"] != "self-node" || p["workloadId"] != "7" || p["regenerate"] != true || p["engine"] != "ollama" || p["runId"] != "r9" {
 		t.Fatalf("workload/cancel params = %s", calls[0].params)
 	}
 
@@ -56,7 +58,7 @@ func TestWorkloadsCancelForPeerGoesToWorkloadManager(t *testing.T) {
 		}
 	}()
 
-	b.handleMessage(clientRequest(1, methodWorkloadsCancel, map[string]any{"originatedFrom": "peer-node", "workloadId": "9"}))
+	b.handleMessage(clientRequest(1, methodWorkloadsCancel, map[string]any{"originatedFrom": "peer-node", "workloadId": "9", "engine": "ollama", "runId": "peer-run"}))
 	var frame Message
 	select {
 	case line := <-lines:
@@ -82,14 +84,100 @@ func TestPeerRelayedCancelActsOnlyOnOrigin(t *testing.T) {
 	_, proxy := attachFakeProxy(t, b)
 	proxy.setAnswer(func(string, json.RawMessage) (any, string) { return map[string]bool{"found": false}, "" })
 
-	b.forwardWorkloadManagerNotification(methodWorkloadsCancel, json.RawMessage(`{"originatedFrom":"other-node","workloadId":"3"}`))
+	b.forwardWorkloadManagerNotification(methodWorkloadsCancel, json.RawMessage(`{"originatedFrom":"other-node","workloadId":"3","engine":"ollama","runId":"r1"}`))
 	time.Sleep(50 * time.Millisecond)
 	if n := len(proxy.snapshot()); n != 0 {
 		t.Fatal("a node acted on a cancel for a job it did not originate")
 	}
-	b.forwardWorkloadManagerNotification(methodWorkloadsCancel, json.RawMessage(`{"originatedFrom":"self-node","workloadId":"3","regenerate":true}`))
+	b.forwardWorkloadManagerNotification(methodWorkloadsCancel, json.RawMessage(`{"originatedFrom":"self-node","workloadId":"3","engine":"ollama","runId":"r1","regenerate":true}`))
 	calls := proxy.waitFor("workload/cancel on the origin", func(calls []policyCall) bool { return len(calls) == 1 })
 	if calls[0].method != proxyWorkloadCancel || !strings.Contains(string(calls[0].params), `"regenerate":true`) {
 		t.Fatalf("origin proxy call = %s %s", calls[0].method, calls[0].params)
 	}
+}
+
+func TestWorkloadsCancelRejectsIncompleteTargetsAtClientAndPeer(t *testing.T) {
+	test := func(name, field, value string) {
+		t.Run(name, func(t *testing.T) {
+			b, out := newPolicyBroker(t)
+			_, proxy := attachFakeProxy(t, b)
+			params := map[string]any{"originatedFrom": "self-node", "workloadId": "7", "engine": "ollama", "runId": "r1"}
+			params[field] = value
+			b.handleMessage(clientRequest(1, methodWorkloadsCancel, params))
+			resp := out.waitFrame(t, "invalid target", isResponse(1))
+			if resp.Error == nil || resp.Error.Code != -32602 {
+				t.Fatalf("invalid target accepted: %+v", resp)
+			}
+			data, err := json.Marshal(params)
+			if err != nil {
+				t.Fatal(err)
+			}
+			b.handlePeerWorkloadCancel(data)
+			time.Sleep(20 * time.Millisecond)
+			if len(proxy.snapshot()) != 0 {
+				t.Fatal("incomplete target reached proxy")
+			}
+		})
+	}
+	test("missing origin", "originatedFrom", "")
+	test("malformed origin", "originatedFrom", "wrong/origin")
+	test("missing engine", "engine", "")
+	test("malformed engine", "engine", "wrong/engine")
+	test("missing run", "runId", "")
+	test("malformed run", "runId", "wrong/run")
+	test("missing workload", "workloadId", "")
+}
+
+func TestPeerCancelSaturationDropsBeforeProxyCallAndReleases(t *testing.T) {
+	b, _ := newPolicyBroker(t)
+	_, proxy := attachFakeProxy(t, b)
+	proxy.setAnswer(func(string, json.RawMessage) (any, string) { return map[string]bool{"found": false}, "" })
+	for range cap(peerCancelAdmission) {
+		peerCancelAdmission <- struct{}{}
+	}
+	defer func() {
+		for len(peerCancelAdmission) > 0 {
+			<-peerCancelAdmission
+		}
+	}()
+	params := json.RawMessage(`{"originatedFrom":"self-node","workloadId":"3","engine":"ollama","runId":"r1"}`)
+	b.handlePeerWorkloadCancel(params)
+	time.Sleep(50 * time.Millisecond)
+	if len(proxy.snapshot()) != 0 || len(peerCancelAdmission) != 32 {
+		t.Fatal("saturated cancel launched a proxy call")
+	}
+	for range 32 {
+		<-peerCancelAdmission
+	}
+	b.handlePeerWorkloadCancel(params)
+	proxy.waitFor("admitted cancel", func(calls []policyCall) bool { return len(calls) == 1 })
+	deadline := time.Now().Add(time.Second)
+	for len(peerCancelAdmission) != 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("completed proxy call retained admission")
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+func TestPeerCancelReleasesAdmissionAfterProxyError(t *testing.T) {
+	test := func(name string, attach bool) {
+		t.Run(name, func(t *testing.T) {
+			b, _ := newPolicyBroker(t)
+			if attach {
+				_, proxy := attachFakeProxy(t, b)
+				proxy.setAnswer(func(string, json.RawMessage) (any, string) { return nil, "cancel refused" })
+			}
+			b.handlePeerWorkloadCancel(json.RawMessage(`{"originatedFrom":"self-node","workloadId":"7","engine":"ollama","runId":"r1"}`))
+			deadline := time.Now().Add(time.Second)
+			for len(peerCancelAdmission) != 0 {
+				if time.Now().After(deadline) {
+					t.Fatal("proxy error retained peer cancel admission")
+				}
+				time.Sleep(time.Millisecond)
+			}
+		})
+	}
+	test("proxy unavailable", false)
+	test("proxy RPC error", true)
 }

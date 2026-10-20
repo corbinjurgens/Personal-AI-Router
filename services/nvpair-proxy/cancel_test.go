@@ -18,11 +18,12 @@ import (
 // cancelFixture routes one request to node a (which stalls) with node b behind
 // it, so a test can act while the request is pinned to a.
 type cancelFixture struct {
-	p    *Proxy
-	w    *recordingWriter
-	a    *stallingEngine
-	b    *recordingEngine
-	done chan *httptest.ResponseRecorder
+	p       *Proxy
+	w       *recordingWriter
+	a       *stallingEngine
+	b       *recordingEngine
+	done    chan *httptest.ResponseRecorder
+	control *workloadCtl
 }
 
 func startCancelFixture(t *testing.T, tc engineCase, a *stallingEngine) *cancelFixture {
@@ -39,13 +40,21 @@ func startCancelFixture(t *testing.T, tc engineCase, a *stallingEngine) *cancelF
 		fx.done <- rec
 	}()
 	waitChan(t, a.received, "the request at node a")
+	controls := fx.p.workloadControls(tc.profile.Name, "1")
+	if len(controls) != 1 {
+		t.Fatal("request has no canonical workload controller")
+	}
+	fx.control = controls[0]
 	return fx
 }
 
 func (fx *cancelFixture) cancel(t *testing.T, engine string, regenerate bool) nodepolicy.WorkloadCancelResult {
 	t.Helper()
+	if engine == "" {
+		engine = fx.p.soleFacade().profile.Name
+	}
 	f := rpc(t, fx.p, fx.w, nodepolicy.MethodWorkloadCancel, nodepolicy.WorkloadCancelParams{
-		WorkloadID: "1", Engine: engine, Regenerate: regenerate,
+		OriginatedFrom: "test-origin", RunID: fx.p.runID, WorkloadID: "1", Engine: engine, Regenerate: regenerate,
 	})
 	if f.Error != nil {
 		t.Fatalf("workload/cancel failed: %s", f.Error.Message)
@@ -61,6 +70,15 @@ func (fx *cancelFixture) result(t *testing.T) *httptest.ResponseRecorder {
 	t.Helper()
 	select {
 	case rec := <-fx.done:
+		fx.control.mu.Lock()
+		done := fx.control.done
+		fx.control.mu.Unlock()
+		if !done {
+			t.Fatal("finished request retained live cancellation controller")
+		}
+		if len(fx.p.activeRoutingRequests()) != 0 || len(fx.p.workloadControls(fx.p.soleFacade().profile.Name, "1")) != 0 {
+			t.Fatal("finished request retained registry or workload controller association")
+		}
 		return rec
 	case <-time.After(5 * time.Second):
 		t.Fatal("the request never finished")
@@ -133,7 +151,7 @@ func TestCancel_RegenerateWithNoOtherNodeEnds(t *testing.T) {
 		done <- rec
 	}()
 	waitChan(t, a.received, "the request at a")
-	rpcOK(t, p, w, nodepolicy.MethodWorkloadCancel, nodepolicy.WorkloadCancelParams{WorkloadID: "1", Regenerate: true})
+	rpcOK(t, p, w, nodepolicy.MethodWorkloadCancel, nodepolicy.WorkloadCancelParams{OriginatedFrom: "test-origin", RunID: p.runID, Engine: tc.profile.Name, WorkloadID: "1", Regenerate: true})
 	select {
 	case rec := <-done:
 		if rec.Code != http.StatusServiceUnavailable || !strings.Contains(rec.Body.String(), "excluded") {
@@ -212,15 +230,16 @@ func TestCancel_AfterCommitAbortsAndCancels(t *testing.T) {
 
 func TestCancel_LookupRules(t *testing.T) {
 	p, w := policyProxy(t)
-	f := rpc(t, p, w, nodepolicy.MethodWorkloadCancel, nodepolicy.WorkloadCancelParams{WorkloadID: "nope"})
+	f := rpc(t, p, w, nodepolicy.MethodWorkloadCancel, nodepolicy.WorkloadCancelParams{OriginatedFrom: "test-origin", RunID: p.runID, Engine: "ollama", WorkloadID: "nope"})
 	if f.Error != nil || !strings.Contains(string(f.Result), `"found":false`) {
 		t.Fatalf("unknown workload: %+v %s", f.Error, f.Result)
 	}
 	rpcErr(t, p, w, nodepolicy.MethodWorkloadCancel, map[string]any{})
 	rpcErr(t, p, w, nodepolicy.MethodWorkloadCancel, map[string]any{"workloadId": "1", "engine": "v/llm"})
 
-	// Two facades can hold the same id; without an engine that is ambiguous.
-	a, b := newWorkloadCtl(func(string) {}), newWorkloadCtl(func(string) {})
+	// Two facades can hold the same id; every complete target selects one.
+	var cancelledA, cancelledB int
+	a, b := newWorkloadCtl(func(string) { cancelledA++ }), newWorkloadCtl(func(string) { cancelledB++ })
 	ra, err := p.registerRoutingRequest(a)
 	if err != nil {
 		t.Fatal(err)
@@ -237,19 +256,37 @@ func TestCancel_LookupRules(t *testing.T) {
 	if err := p.registerWorkload(rb, workloadKey{engine: "lmstudio", id: "4"}); err != nil {
 		t.Fatal(err)
 	}
-	f = rpc(t, p, w, nodepolicy.MethodWorkloadCancel, nodepolicy.WorkloadCancelParams{WorkloadID: "4", Regenerate: true})
-	if f.Error == nil || f.Error.Code != -32602 || f.Error.Message != "ambiguous workload id; pass engine" {
-		t.Fatalf("ambiguous id answered %+v", f.Error)
+	valid := nodepolicy.WorkloadCancelParams{OriginatedFrom: "test-origin", RunID: p.runID, WorkloadID: "4", Engine: "ollama"}
+	test := func(name string, change func(*nodepolicy.WorkloadCancelParams), invalid bool) {
+		t.Run(name, func(t *testing.T) {
+			in := valid
+			change(&in)
+			response := rpc(t, p, w, nodepolicy.MethodWorkloadCancel, in)
+			if invalid {
+				if response.Error == nil || response.Error.Code != -32602 {
+					t.Fatalf("incomplete target accepted: %+v", response)
+				}
+			} else {
+				var result nodepolicy.WorkloadCancelResult
+				if response.Error != nil || json.Unmarshal(response.Result, &result) != nil || result.Found {
+					t.Fatalf("wrong target matched: %+v", response)
+				}
+			}
+			if cancelledA != 0 || cancelledB != 0 {
+				t.Fatalf("rejected target cancelled controls: a=%d b=%d", cancelledA, cancelledB)
+			}
+		})
 	}
-	if a.isExcluded("") || b.done || a.done {
-		t.Fatal("an ambiguous cancel acted on a workload")
-	}
-	rpcOK(t, p, w, nodepolicy.MethodWorkloadCancel, nodepolicy.WorkloadCancelParams{WorkloadID: "4", Engine: "lmstudio"})
-
-	// A runId from another proxy process finds nothing.
-	f = rpc(t, p, w, nodepolicy.MethodWorkloadCancel, nodepolicy.WorkloadCancelParams{WorkloadID: "4", Engine: "ollama", RunID: "other"})
-	if !strings.Contains(string(f.Result), `"found":false`) {
-		t.Fatalf("stale runId matched: %s", f.Result)
+	test("missing origin", func(p *nodepolicy.WorkloadCancelParams) { p.OriginatedFrom = "" }, true)
+	test("missing run", func(p *nodepolicy.WorkloadCancelParams) { p.RunID = "" }, true)
+	test("missing engine", func(p *nodepolicy.WorkloadCancelParams) { p.Engine = "" }, true)
+	test("wrong origin", func(p *nodepolicy.WorkloadCancelParams) { p.OriginatedFrom = "other" }, false)
+	test("old run with reused workload number", func(p *nodepolicy.WorkloadCancelParams) { p.RunID = "old-run" }, false)
+	test("wrong engine", func(p *nodepolicy.WorkloadCancelParams) { p.Engine = "vllm" }, false)
+	valid.Engine = "lmstudio"
+	rpcOK(t, p, w, nodepolicy.MethodWorkloadCancel, valid)
+	if cancelledA != 0 || cancelledB != 1 {
+		t.Fatalf("complete key selected wrong controller: a=%d b=%d", cancelledA, cancelledB)
 	}
 }
 

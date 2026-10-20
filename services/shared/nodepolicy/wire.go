@@ -1309,20 +1309,44 @@ type WakeRequest struct {
 const MethodWorkloadCancel = "workload/cancel"
 
 // WorkloadCancelParams names one in-flight workload this node's proxy
-// originated. Workload ids are counted per engine facade, so two facades can
-// hold the same id at once: Engine (the workload's engine field) picks one, and
-// the proxy refuses an ambiguous id without it. RunID, when set, must match
-// the proxy's run nonce, so a cancel aimed at an earlier proxy process finds
-// nothing.
+// originated. Every hop requires the complete target; an old process's workload
+// counter must never resolve to a request in a newer process.
 type WorkloadCancelParams struct {
-	WorkloadID string `json:"workloadId"`
-	Engine     string `json:"engine,omitempty"`
-	RunID      string `json:"runId,omitempty"`
+	OriginatedFrom string `json:"originatedFrom"`
+	WorkloadID     string `json:"workloadId"`
+	Engine         string `json:"engine"`
+	RunID          string `json:"runId"`
 	// Regenerate, before the response commits, aborts the current attempt,
 	// excludes its node for this request and continues dispatch elsewhere.
 	// Without it, or once the response has committed, the workload ends as
 	// cancelled. Two models' output is never spliced together.
 	Regenerate bool `json:"regenerate,omitempty"`
+}
+
+func (p WorkloadCancelParams) Validate() error {
+	if err := ValidateRoutingIdentity(p.OriginatedFrom, p.RunID); err != nil {
+		return err
+	}
+	if !engines.ValidID(p.Engine) {
+		return errors.New("engine must be a valid engine ID")
+	}
+	if !strictID.MatchString(p.WorkloadID) {
+		return errors.New("workloadId must be an ASCII identity of 1-128 bytes")
+	}
+	return nil
+}
+
+func (p *WorkloadCancelParams) UnmarshalJSON(data []byte) error {
+	type plain WorkloadCancelParams
+	var next plain
+	if err := decodeResident(data, &next, []string{"originatedFrom", "workloadId", "engine", "runId"}, "regenerate"); err != nil {
+		return err
+	}
+	if err := WorkloadCancelParams(next).Validate(); err != nil {
+		return err
+	}
+	*p = WorkloadCancelParams(next)
+	return nil
 }
 
 // WorkloadCancelResult reports whether an in-flight workload matched.

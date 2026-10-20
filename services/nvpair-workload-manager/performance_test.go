@@ -1139,7 +1139,7 @@ func TestPerformanceBlockedPeerDoesNotDelayLifecycleOrCancel(t *testing.T) {
 	if first.Method != "workload:started" || second.Method != MethodRemove {
 		t.Fatalf("FIFO methods = %s, %s", first.Method, second.Method)
 	}
-	f.manager.handleLocalCancel(&Message{Method: MethodCancel, Params: json.RawMessage(`{"originatedFrom":"uuid-peer","workloadId":"1"}`)})
+	f.manager.handleLocalCancel(&Message{Method: MethodCancel, Params: json.RawMessage(`{"originatedFrom":"uuid-peer","workloadId":"1","engine":"ollama","runId":"run-1"}`)})
 	if msg := performanceWaitFrame(t, lifecycle); msg.Method != MethodCancel {
 		t.Fatalf("cancel method = %s", msg.Method)
 	}

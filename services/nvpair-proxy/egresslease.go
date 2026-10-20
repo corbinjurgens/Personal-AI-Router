@@ -82,6 +82,10 @@ func (p *Proxy) revokeEgressLease(params json.RawMessage) (nodepolicy.RevokeEgre
 // beginPublicActivation validates order before withdrawing permission. Its
 // token prevents an obsolete ledger completion from reopening a later policy.
 func (p *Proxy) beginPublicActivation(policy nodepolicy.Policy) (*egressActivation, error) {
+	capacity, wait, err := p.bufferSettings(policy)
+	if err != nil {
+		return nil, err
+	}
 	l := p.egress
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -91,10 +95,15 @@ func (p *Proxy) beginPublicActivation(policy nodepolicy.Policy) (*egressActivati
 		return nil, errPublicPermission
 	}
 	token := &egressActivation{revision: policy.Revision}
-	l.transition, l.ready, l.notAfter, l.revision = token, false, 0, ""
 	if err := p.admission.activatePolicy(policy); err != nil {
 		return nil, err
 	}
+	// Install beside admission under the winning transition lock. An obsolete
+	// applySetPolicy waiter can finish later but cannot reconfigure this root.
+	if err := p.buffers.reconfigure(capacity, wait); err != nil {
+		panic(err) // bufferSettings checked the allocator's input domain.
+	}
+	l.transition, l.ready, l.notAfter, l.revision = token, false, 0, ""
 	return token, nil
 }
 

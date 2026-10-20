@@ -5,6 +5,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"net"
@@ -22,8 +23,14 @@ import (
 
 func cancelFrame(t *testing.T, p cancelParams) []byte {
 	t.Helper()
-	params, _ := json.Marshal(p)
-	frame, _ := json.Marshal(&Message{JSONRPC: "2.0", Method: MethodCancel, Params: params})
+	params, err := json.Marshal(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	frame, err := json.Marshal(&Message{JSONRPC: "2.0", Method: MethodCancel, Params: params})
+	if err != nil {
+		t.Fatal(err)
+	}
 	return frame
 }
 
@@ -44,7 +51,7 @@ func TestServerCancelValidatesAndDedupsByCancelID(t *testing.T) {
 	if code := post(cancelFrame(t, cancelParams{WorkloadID: "1"})); code != http.StatusBadRequest {
 		t.Fatalf("cancel without origin = %d, want 400", code)
 	}
-	first := cancelParams{OriginatedFrom: "uuid-self", WorkloadID: "1", Regenerate: true, CancelID: "c1"}
+	first := cancelParams{OriginatedFrom: "uuid-self", WorkloadID: "1", Engine: "ollama", RunID: "r1", Regenerate: true, CancelID: "c1"}
 	if code := post(cancelFrame(t, first)); code != http.StatusInternalServerError {
 		t.Fatalf("failed broker write = %d, want 500 so the sender retries", code)
 	}
@@ -62,6 +69,143 @@ func TestServerCancelValidatesAndDedupsByCancelID(t *testing.T) {
 	}
 	if len(got) != 2 || got[0] != first || got[1] != second {
 		t.Fatalf("broker saw %+v; want the first cancel once and the second once", got)
+	}
+}
+
+func TestCancelRequiresCompleteTargetAtLocalAndPeerHops(t *testing.T) {
+	self, peer := newPinnedPeerMeshes(t)
+	emitted := 0
+	srv := NewServer(0, newDedupIndex(64), self, func(*Workload) error { return nil }, func(string, string) error { return nil })
+	srv.emitCancel = func(cancelParams) error { emitted++; return nil }
+	post := serveEventsOverMTLS(t, srv, self, peer)
+	test := func(name string, change func(*cancelParams)) {
+		t.Run(name, func(t *testing.T) {
+			p := cancelParams{OriginatedFrom: "uuid-self", WorkloadID: "7", Engine: "ollama", RunID: "r1", CancelID: "c1"}
+			change(&p)
+			data, err := json.Marshal(p)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := parseCancel(data); err == nil {
+				t.Fatal("local parser accepted incomplete target")
+			}
+			if code := post(cancelFrame(t, p)); code != http.StatusBadRequest {
+				t.Fatalf("peer accepted incomplete target: status=%d", code)
+			}
+			if emitted != 0 {
+				t.Fatal("invalid target emitted to broker")
+			}
+		})
+	}
+	test("missing origin", func(p *cancelParams) { p.OriginatedFrom = "" })
+	test("malformed origin", func(p *cancelParams) { p.OriginatedFrom = "wrong/origin" })
+	test("missing run", func(p *cancelParams) { p.RunID = "" })
+	test("malformed run", func(p *cancelParams) { p.RunID = "wrong/run" })
+	test("missing engine", func(p *cancelParams) { p.Engine = "" })
+	test("malformed engine", func(p *cancelParams) { p.Engine = "wrong/engine" })
+}
+
+func TestCancelDedupIncludesCompleteTarget(t *testing.T) {
+	self, peer := newPinnedPeerMeshes(t)
+	var got []cancelParams
+	srv := NewServer(0, newDedupIndex(64), self, func(*Workload) error { return nil }, func(string, string) error { return nil })
+	srv.emitCancel = func(p cancelParams) error { got = append(got, p); return nil }
+	post := serveEventsOverMTLS(t, srv, self, peer)
+	first := cancelParams{OriginatedFrom: "uuid-self", WorkloadID: "7", Engine: "ollama", RunID: "r1", CancelID: "c1"}
+	otherEngine, otherRun, otherOrigin, otherWorkload := first, first, first, first
+	otherEngine.Engine = "lmstudio"
+	otherRun.RunID = "r2"
+	otherOrigin.OriginatedFrom = "uuid-peer"
+	otherWorkload.WorkloadID = "8"
+	for _, p := range []cancelParams{first, otherEngine, otherRun, otherOrigin, otherWorkload, first} {
+		if code := post(cancelFrame(t, p)); code != http.StatusOK {
+			t.Fatalf("cancel status=%d", code)
+		}
+	}
+	if len(got) != 5 {
+		t.Fatalf("distinct full targets delivered=%d, want 5", len(got))
+	}
+	// The cancellation ID is opaque peer input, so delimiters in it cannot
+	// alias any other target component.
+	a, b := first, first
+	a.WorkloadID, a.CancelID = "x", "y\x00z"
+	b.WorkloadID, b.CancelID = "x\x00y", "z"
+	if keyCancel(a) == keyCancel(b) {
+		t.Fatal("dedup composition aliases distinct tuples")
+	}
+}
+
+func TestCancelPeerRequiresCancellationID(t *testing.T) {
+	self, peer := newPinnedPeerMeshes(t)
+	emitted := 0
+	srv := NewServer(0, newDedupIndex(64), self, func(*Workload) error { return nil }, func(string, string) error { return nil })
+	srv.emitCancel = func(cancelParams) error { emitted++; return nil }
+	post := serveEventsOverMTLS(t, srv, self, peer)
+	for _, id := range []string{"", string(bytes.Repeat([]byte("c"), 129))} {
+		p := cancelParams{OriginatedFrom: "uuid-self", WorkloadID: "7", Engine: "ollama", RunID: "r1", CancelID: id}
+		if code := post(cancelFrame(t, p)); code != http.StatusBadRequest {
+			t.Fatalf("invalid cancel ID status=%d", code)
+		}
+	}
+	if emitted != 0 {
+		t.Fatal("invalid cancellation ID emitted to broker")
+	}
+}
+
+func TestCancelFanoutSaturationAndRelease(t *testing.T) {
+	selfDir, peerDir := newPinnedPeerDirs(t)
+	peer := startCancelPeer(t, clustertrust.Open(peerDir))
+	var out bytes.Buffer
+	m := NewManager(NewCodec(&out), 0, "uuid-self-host", selfDir)
+	m.peers.Replace([]PeerNode{{ID: "origin-host", Host: peer.host, Addresses: []string{peer.host}, Port: peer.port, TXT: []string{clustertrust.ClusterUUIDTXTKey + "=uuid-peer"}}})
+	params := cancelParams{OriginatedFrom: "origin-host", WorkloadID: "7", Engine: "ollama", RunID: "r1", CancelID: "c1"}
+	frame := cancelFrame(t, params)
+	data, err := json.Marshal(params)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range 32 {
+		cancelBroadcastAdmission <- struct{}{}
+	}
+	m.handleLocalCancel(&Message{Params: data})
+	time.Sleep(50 * time.Millisecond)
+	if peer.count() != 0 || len(cancelBroadcastAdmission) != 32 {
+		t.Fatal("saturated local fanout launched work")
+	}
+	for range 32 {
+		<-cancelBroadcastAdmission
+	}
+	for range 32 {
+		cancelDeliveryAdmission <- struct{}{}
+	}
+	m.broadcaster.BroadcastTo(context.Background(), frame, func(target) bool { return true })
+	if peer.count() != 0 || len(cancelDeliveryAdmission) != 32 {
+		t.Fatal("saturated peer delivery launched work")
+	}
+	for range 32 {
+		<-cancelDeliveryAdmission
+	}
+	m.handleLocalCancel(&Message{Params: data})
+	deadline := time.Now().Add(5 * time.Second)
+	for peer.count() != 1 || len(cancelBroadcastAdmission) != 0 || len(cancelDeliveryAdmission) != 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("admitted fanout did not deliver and release all admission")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	m.ctx = ctx
+	m.handleLocalCancel(&Message{Params: data})
+	deadline = time.Now().Add(time.Second)
+	for len(cancelBroadcastAdmission) != 0 || len(cancelDeliveryAdmission) != 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("cancelled fanout retained admission")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if peer.count() != 1 {
+		t.Fatal("cancelled fanout reached a peer")
 	}
 }
 
@@ -149,7 +293,10 @@ func TestLocalCancelGoesToTheOriginOrEveryPeer(t *testing.T) {
 		}
 	}
 
-	params, _ := json.Marshal(map[string]any{"originatedFrom": "origin-host", "workloadId": "5", "regenerate": true})
+	params, err := json.Marshal(map[string]any{"originatedFrom": "origin-host", "workloadId": "5", "engine": "ollama", "runId": "r1", "regenerate": true})
+	if err != nil {
+		t.Fatal(err)
+	}
 	m.handleMessage(&Message{JSONRPC: "2.0", Method: MethodCancel, Params: params})
 	wait("cancel at the origin", func() bool { return origin.count() == 1 })
 	time.Sleep(100 * time.Millisecond)
@@ -163,7 +310,10 @@ func TestLocalCancelGoesToTheOriginOrEveryPeer(t *testing.T) {
 		t.Fatalf("origin received %+v", got)
 	}
 
-	params, _ = json.Marshal(map[string]any{"originatedFrom": "unknown-host", "workloadId": "6"})
+	params, err = json.Marshal(map[string]any{"originatedFrom": "unknown-host", "workloadId": "6", "engine": "ollama", "runId": "r1"})
+	if err != nil {
+		t.Fatal(err)
+	}
 	m.handleMessage(&Message{JSONRPC: "2.0", Method: MethodCancel, Params: params})
 	wait("cancel at every peer", func() bool { return origin.count() == 2 && bystander.count() == 1 })
 

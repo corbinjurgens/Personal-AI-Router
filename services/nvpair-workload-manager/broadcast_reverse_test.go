@@ -218,7 +218,7 @@ func TestBroadcastReverseDeliversAndDeduplicates(t *testing.T) {
 	frame := reverseLifecycleFrame(t)
 	f.m.broadcaster.Broadcast(context.Background(), frame)
 	f.m.broadcaster.Broadcast(context.Background(), frame)
-	cancel := cancelFrame(t, cancelParams{OriginatedFrom: "peer-host", WorkloadID: "job-1", CancelID: "cancel-1"})
+	cancel := cancelFrame(t, cancelParams{OriginatedFrom: "peer-host", WorkloadID: "job-1", Engine: "ollama", RunID: "run-1", CancelID: "cancel-1"})
 	f.m.broadcaster.BroadcastTo(context.Background(), cancel, func(t target) bool { return t.id == "peer-host" })
 	f.m.broadcaster.BroadcastTo(context.Background(), cancel, func(t target) bool { return t.id == "peer-host" })
 	remove := []byte(`{"jsonrpc":"2.0","method":"workloads:remove","params":{"workloadId":"job-1","originatedFrom":"self-host"}}`)
@@ -296,7 +296,7 @@ func TestBroadcastReverseLostReplyReconnectDeduplicates(t *testing.T) {
 			b := f.m.broadcaster
 			client := b.clients.Client("uuid-peer", noderec.ServiceWorkload)
 			url := "https://127.0.0.1:1" + eventsPath
-			warm := cancelFrame(t, cancelParams{OriginatedFrom: "peer-host", WorkloadID: "warm", CancelID: "warm"})
+			warm := cancelFrame(t, cancelParams{OriginatedFrom: "peer-host", WorkloadID: "warm", Engine: "ollama", RunID: "run-1", CancelID: "warm"})
 			if err := b.post(context.Background(), client, url, warm); err != nil {
 				t.Fatal(err)
 			}
@@ -332,7 +332,7 @@ func TestBroadcastReverseLostReplyReconnectDeduplicates(t *testing.T) {
 		})
 	}
 	cancel := func(t *testing.T) []byte {
-		return cancelFrame(t, cancelParams{OriginatedFrom: "peer-host", WorkloadID: "job-1", CancelID: "cancel-1"})
+		return cancelFrame(t, cancelParams{OriginatedFrom: "peer-host", WorkloadID: "job-1", Engine: "ollama", RunID: "run-1", CancelID: "cancel-1"})
 	}
 	remove := func(t *testing.T) []byte {
 		return []byte(`{"jsonrpc":"2.0","method":"workloads:remove","params":{"workloadId":"job-1","originatedFrom":"self-host"}}`)
@@ -410,7 +410,7 @@ func TestCancelReverseCallerCancellationClosesActiveStream(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	done := make(chan struct{})
-	frame := cancelFrame(t, cancelParams{OriginatedFrom: "peer-host", WorkloadID: "job-1", CancelID: "cancel-1"})
+	frame := cancelFrame(t, cancelParams{OriginatedFrom: "peer-host", WorkloadID: "job-1", Engine: "ollama", RunID: "run-1", CancelID: "cancel-1"})
 	go func() {
 		f.m.broadcaster.BroadcastTo(ctx, frame, func(t target) bool { return t.id == "peer-host" })
 		close(done)
@@ -759,7 +759,7 @@ func TestBroadcastRevokedPinRetiresIdle(t *testing.T) {
 			frame := reverseLifecycleFrame(t)
 			send := func() { f.m.broadcaster.Broadcast(context.Background(), frame) }
 			if targeted {
-				frame = cancelFrame(t, cancelParams{OriginatedFrom: "peer-host", WorkloadID: "job-1", CancelID: "cancel-1"})
+				frame = cancelFrame(t, cancelParams{OriginatedFrom: "peer-host", WorkloadID: "job-1", Engine: "ollama", RunID: "run-1", CancelID: "cancel-1"})
 				send = func() {
 					f.m.broadcaster.BroadcastTo(context.Background(), frame, func(t target) bool { return t.id == "peer-host" })
 				}
@@ -907,7 +907,7 @@ func TestBroadcastPeerInvalidationPreservesActiveResponse(t *testing.T) {
 					return (&net.Dialer{}).DialContext(ctx, "tcp", f.endpoint)
 				}, nil)
 			}
-			frame := cancelFrame(t, cancelParams{OriginatedFrom: "peer-host", WorkloadID: "job-1", CancelID: "cancel-1"})
+			frame := cancelFrame(t, cancelParams{OriginatedFrom: "peer-host", WorkloadID: "job-1", Engine: "ollama", RunID: "run-1", CancelID: "cancel-1"})
 			done := make(chan struct{})
 			go func() {
 				f.m.broadcaster.BroadcastTo(context.Background(), frame, func(t target) bool { return t.id == "peer-host" })
@@ -994,7 +994,7 @@ func TestCancelReverseCancellationPreservesOtherActiveRequest(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	cancelDone := make(chan error, 1)
-	frame = cancelFrame(t, cancelParams{OriginatedFrom: "peer-host", WorkloadID: "job-1", CancelID: "cancel-1"})
+	frame = cancelFrame(t, cancelParams{OriginatedFrom: "peer-host", WorkloadID: "job-1", Engine: "ollama", RunID: "run-1", CancelID: "cancel-1"})
 	go func(payload []byte) { cancelDone <- b.post(ctx, client, url, payload) }(frame)
 	wait(cancelActive)
 	cancel()

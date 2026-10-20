@@ -29,7 +29,8 @@ import type {
     NodePolicyChange,
     NodePolicyDocument,
     NodePolicySnapshot,
-    PolicyActivationStatus
+    PolicyActivationStatus,
+    WorkloadCancelRequest
 } from '@/shared/types/node-policy'
 import { workloadCancelRequest } from '@/shared/utils/workloads'
 import type { INodePolicyApi } from '@/ui/api/pair-api'
@@ -56,6 +57,20 @@ function loadStrictFixtures(): JsonObject {
 }
 
 describe('served/resident policy contract', () => {
+    it('preserves custom buffers and zero wait through the generic policy bridge', () => {
+        const policy = { revision: '31', routing: { buffers: { capacityMiB: 384, waitSeconds: 0 } } }
+        const document = parsePolicyDocument({ policy, availability: 'available' })
+        const draft = parsePolicyText(document.policy)
+        expect(draft).toEqual(policy)
+        const params = policySetParams({ policy: document.policy, expectedPersistedRevision: document.revision })
+        expect(params).toEqual({ policy, expectedPersistedRevision: '31' })
+        const result = parsePolicySetResult({ policy: params.policy })
+        expect(parsePolicyText(result.policy)).toEqual(policy)
+        const changed = parsePolicyChange({ nodeId: 'self', policy: params.policy })
+        expect(changed).not.toBeNull()
+        if (!changed) throw new Error('Missing buffer policy change')
+        expect(parsePolicyText(changed.policy)).toEqual(policy)
+    })
     const corpus: JsonValue = JSON.parse(
         readFileSync(
             resolve(process.cwd(), '../services/shared/nodepolicy/testdata/served-resident.json'),
@@ -552,10 +567,10 @@ describe('workloadCancelRequest', () => {
         })
     })
 
-    it('omits runId when the job has none', () => {
-        expect(workloadCancelRequest({ ...job, runId: undefined }, false)).not.toHaveProperty(
-            'runId'
-        )
+    it('refuses incomplete target keys', () => {
+        expect(workloadCancelRequest({ ...job, runId: undefined }, false)).toBeNull()
+        expect(workloadCancelRequest({ ...job, runId: '' }, false)).toBeNull()
+        expect(workloadCancelRequest({ ...job, id: '' }, false)).toBeNull()
     })
 
     it('refuses finished jobs and jobs with no origin', () => {
@@ -570,14 +585,29 @@ describe('workloadCancelParams', () => {
             originatedFrom: 'node-a',
             workloadId: '7',
             engine: 'lm-studio',
+            runId: 'run-1',
             regenerate: false
         })
         expect(params).toEqual({
             originatedFrom: 'node-a',
             workloadId: '7',
             engine: 'lmstudio',
+            runId: 'run-1',
             regenerate: false
         })
+    })
+
+    it('rejects incomplete targets at the bridge', () => {
+        const request: WorkloadCancelRequest = {
+            originatedFrom: 'node-a',
+            workloadId: '7',
+            engine: 'ollama',
+            runId: 'run-1',
+            regenerate: false
+        }
+        expect(() => workloadCancelParams({ ...request, originatedFrom: '' })).toThrow()
+        expect(() => workloadCancelParams({ ...request, workloadId: '' })).toThrow()
+        expect(() => workloadCancelParams({ ...request, runId: '' })).toThrow()
     })
 })
 

@@ -357,13 +357,16 @@ export function nodeTargetParams(target: NodePolicyTarget): JsonObject {
 
 /** `workloads:cancel` params. The broker spells the engine the way engine-manager does. */
 export function workloadCancelParams(request: WorkloadCancelRequest): JsonObject {
+    if (!request.originatedFrom || !request.engine || !request.runId || !request.workloadId) {
+        throw new Error('Complete workload cancellation target is required')
+    }
     const params: JsonObject = {
         originatedFrom: request.originatedFrom,
         workloadId: request.workloadId,
         engine: engineManagerName(request.engine),
+        runId: request.runId,
         regenerate: request.regenerate
     }
-    if (request.runId) params.runId = request.runId
     return params
 }
 

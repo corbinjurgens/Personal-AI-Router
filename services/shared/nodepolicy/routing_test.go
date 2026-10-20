@@ -11,6 +11,54 @@ import (
 	"testing"
 )
 
+func TestRoutingBufferDefaultsAndRoundTrip(t *testing.T) {
+	for _, tc := range []struct {
+		name, raw string
+		want      BufferLimits
+	}{
+		{"omitted routing", `{}`, BufferLimits{256, 5}},
+		{"omitted buffers", `{"routing":{}}`, BufferLimits{256, 5}},
+		{"empty buffers", `{"routing":{"buffers":{}}}`, BufferLimits{256, 5}},
+		{"capacity only", `{"routing":{"buffers":{"capacityMiB":192}}}`, BufferLimits{192, 5}},
+		{"zero wait", `{"routing":{"buffers":{"waitSeconds":0}}}`, BufferLimits{256, 0}},
+		{"maximums", `{"routing":{"buffers":{"capacityMiB":1024,"waitSeconds":600}}}`, BufferLimits{1024, 600}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p, err := Parse([]byte(tc.raw))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if p.Routing.Buffers != tc.want {
+				t.Fatalf("buffers = %+v, want %+v", p.Routing.Buffers, tc.want)
+			}
+			raw, err := json.Marshal(p)
+			if err != nil {
+				t.Fatal(err)
+			}
+			next, err := Parse(raw)
+			if err != nil || !reflect.DeepEqual(next, p) {
+				t.Fatalf("round trip changed policy: error %v, buffers %+v", err, next.Routing.Buffers)
+			}
+		})
+	}
+}
+
+func TestRoutingBufferInvalidExplicitValues(t *testing.T) {
+	for _, buffers := range []string{
+		`null`, `[]`, `1`, `"settings"`,
+		`{"capacityMiB":null}`, `{"waitSeconds":null}`, `{"WaitSeconds":null}`,
+		`{"capacityMiB":-1}`, `{"capacityMiB":0}`, `{"capacityMiB":191}`, `{"capacityMiB":1025}`,
+		`{"capacityMiB":192.5}`, `{"capacityMiB":"256"}`, `{"capacityMiB":true}`,
+		`{"waitSeconds":-1}`, `{"waitSeconds":601}`, `{"waitSeconds":0.5}`, `{"waitSeconds":"0"}`,
+	} {
+		t.Run(buffers, func(t *testing.T) {
+			if _, err := Parse([]byte(`{"routing":{"buffers":` + buffers + `}}`)); err == nil {
+				t.Fatal("invalid explicit buffer settings accepted")
+			}
+		})
+	}
+}
+
 // stagedRoutingDocument is a disabled provider configuration: accounts, a
 // deployment and API tier entries, none of them enabled.
 const stagedRoutingDocument = `{

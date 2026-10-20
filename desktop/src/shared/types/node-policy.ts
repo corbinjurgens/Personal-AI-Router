@@ -170,7 +170,7 @@ export interface WorkloadCancelRequest {
     originatedFrom: string
     workloadId: string
     engine: EngineType
-    runId?: string
+    runId: string
     /** Re-dispatch to another device instead of ending the request. */
     regenerate: boolean
 }

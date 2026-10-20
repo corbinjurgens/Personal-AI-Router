@@ -110,7 +110,7 @@ func TestRequestRegistryWorkloadDetachesWithoutEndingRequest(t *testing.T) {
 		t.Fatal(err)
 	}
 	p.unregisterWorkload(first)
-	response := rpc(t, p, w, nodepolicy.MethodWorkloadCancel, nodepolicy.WorkloadCancelParams{WorkloadID: "7", Engine: "ollama", RunID: p.runID})
+	response := rpc(t, p, w, nodepolicy.MethodWorkloadCancel, nodepolicy.WorkloadCancelParams{OriginatedFrom: "test-origin", WorkloadID: "7", Engine: "ollama", RunID: p.runID})
 	var result nodepolicy.WorkloadCancelResult
 	if response.Error != nil || json.Unmarshal(response.Result, &result) != nil || result.Found {
 		t.Fatal("detached workload still cancelled its request")
