@@ -502,6 +502,20 @@ proxy enforces it.
   pinned `GET /v1/models` document and enforces `pausedLocally`. Each send reads
   the policy current at send time under one lock, so an older projection never
   follows a newer one.
+  A local pause also sends a pending `pausedLocally` veto before persistence;
+  its advertisement still describes the previously stored policy. The later
+  adopted projection carries the saved pause provenance and new revision.
+  A peer resume vetoed by a local pause changes neither the stored policy nor
+  its revision and emits no projection. Remote routers can use advertised
+  pauses to skip remote peers for inference; self/dormant-self admission,
+  manual nodes without hints, model lists and pass-through retain their own
+  behavior. Pause does not remove catalogue models or declared tier aliases.
+  This is advisory snapshot evidence: a previously selected dispatch cannot
+  be revoked by a later hint, and stale available hints still meet destination
+  admission. Healthy scanner refreshes have a nominal 15-second cadence plus
+  preceding work, batching and fetch time; failed refreshes retain the last
+  good hint indefinitely, so router re-entry requires a successful refresh.
+  LAN peer inventory uses pinned authentication; loopback inventory uses plaintext.
 - **Strict admission readiness.** The proxy reports its strict admission
   controller's readiness with the notification `admission/strict-readiness`,
   whose params are `nodepolicy.StrictAdmissionReadiness`
