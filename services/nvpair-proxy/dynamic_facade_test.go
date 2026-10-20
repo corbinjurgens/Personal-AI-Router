@@ -162,7 +162,7 @@ func TestDynamicProfileFromDescriptor(t *testing.T) {
 // listener exists.
 func TestEnableFacadeFailsClosed(t *testing.T) {
 	redirectConfigDir(t)
-	p := NewProxy(NewCodec(rwNop{}))
+	p := newBoundProxy(NewCodec(rwNop{}))
 	p.serveCtx = t.Context()
 	t.Cleanup(func() { p.shutdown(t.Context()) })
 	custom := customDescriptor()
@@ -208,7 +208,7 @@ func TestEnableFacadeFailsClosed(t *testing.T) {
 func TestDynamicFacadeRoutesLocally(t *testing.T) {
 	redirectConfigDir(t)
 	w := &recordingWriter{}
-	p := NewProxy(NewCodec(w))
+	p := newBoundProxy(NewCodec(w))
 	p.serveCtx = t.Context()
 	t.Cleanup(func() { p.shutdown(t.Context()) })
 

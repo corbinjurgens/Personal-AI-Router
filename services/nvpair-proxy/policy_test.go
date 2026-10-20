@@ -57,6 +57,11 @@ var rpcSeq int
 func rpc(t *testing.T, p *Proxy, w *recordingWriter, method string, params any) frame {
 	t.Helper()
 	rpcSeq++
+	if method == nodepolicy.MethodSetPolicy {
+		if _, envelope := params.(nodepolicy.SetPolicyParams); !envelope {
+			params = map[string]any{"originNodeId": "test-origin", "policy": params}
+		}
+	}
 	raw, err := json.Marshal(params)
 	if err != nil {
 		t.Fatal(err)

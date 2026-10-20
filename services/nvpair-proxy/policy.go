@@ -35,7 +35,9 @@ func (p *Proxy) handlePolicyMethod(msg *Message, method string) bool {
 	case nodepolicy.MethodSetPolicy:
 		var revision string
 		revision, err = p.applySetPolicy(msg.Params)
-		result = nodepolicy.PolicyAck{Revision: revision, RunID: p.runID}
+		p.identityMu.Lock()
+		result = nodepolicy.PolicyAck{OriginNodeID: p.originNodeID, Revision: revision, RunID: p.runID}
+		p.identityMu.Unlock()
 	case nodepolicy.MethodSetAvailability:
 		err = p.applySetAvailability(msg.Params)
 	case nodepolicy.MethodSetEngineDrain:
@@ -83,7 +85,7 @@ func (p *Proxy) handlePolicyMethod(msg *Message, method string) bool {
 		return true
 	}
 	_ = p.codec.Respond(msg.ID, result)
-	if method == nodepolicy.MethodSetPolicy || method == nodepolicy.MethodSetModelIdentity {
+	if (method == nodepolicy.MethodSetPolicy || method == nodepolicy.MethodSetModelIdentity) && p.routingIdentityReady() {
 		// The broker reads readiness against the acknowledgement just sent; a
 		// new identity can install or withdraw the capability.
 		p.reportStrictReadiness()
@@ -114,17 +116,24 @@ func (p *Proxy) applySetModelIdentity(params json.RawMessage) error {
 // applySetPolicy activates the policy and returns its revision. A revision
 // older than the active one is refused and the previous policy stays.
 func (p *Proxy) applySetPolicy(params json.RawMessage) (string, error) {
-	if len(params) == 0 {
-		return "", fmt.Errorf("params must be a node policy object")
-	}
-	policy, err := nodepolicy.Parse(params)
-	if err != nil {
+	var in nodepolicy.SetPolicyParams
+	if err := json.Unmarshal(params, &in); err != nil {
 		return "", err
+	}
+	policy := in.Policy
+	p.identityMu.Lock()
+	if nodepolicy.ValidateRoutingIdentity(in.OriginNodeID, p.runID) != nil ||
+		(p.originNodeID != "" && p.originNodeID != in.OriginNodeID) {
+		p.identityMu.Unlock()
+		return "", fmt.Errorf("proxy origin binding is unavailable or changed")
 	}
 	token, err := p.beginPublicActivation(policy)
 	if err != nil {
+		p.identityMu.Unlock()
 		return "", err
 	}
+	p.originNodeID = in.OriginNodeID
+	p.identityMu.Unlock()
 	// Only one ledger activation may run at once. A newer transition may
 	// already have replaced admission while an older durable write finishes.
 	// Obsolete waiters must not overwrite the newer account snapshot.

@@ -44,7 +44,7 @@ func egressFixture(t *testing.T) (*Proxy, *chatAccountFixture, *atomic.Int64, ch
 	pol.Routing.Listener = nodepolicy.Default().Routing.Listener
 	pol.Routing.Tiers = map[string]nodepolicy.TierRouting{"weak": {RemoteAllowed: true, PaidAllowed: true}}
 	pol.Tiers = map[string][]nodepolicy.TierEntry{"weak": {{Kind: nodepolicy.EntryAPI, Deployment: "chat-a"}}}
-	p := NewProxy(NewCodec(&recordingWriter{}))
+	p := newBoundProxy(NewCodec(&recordingWriter{}))
 	p.accounts = f.ledger
 	clock := &atomic.Int64{}
 	clock.Store(int64(time.Second))
@@ -106,7 +106,7 @@ func egressUnsentHold(t *testing.T, f *chatAccountFixture) {
 }
 
 func TestEgressLeaseStartup(t *testing.T) {
-	p := NewProxy(NewCodec(&recordingWriter{}))
+	p := newBoundProxy(NewCodec(&recordingWriter{}))
 	if p.egress == nil || p.egress.notAfter != 0 || p.egress.sequence != 0 || p.egress.ready || p.egress.now() < 0 {
 		t.Fatal("new proxy inherited public authority or lacks its monotonic epoch")
 	}

@@ -167,7 +167,7 @@ func TestStrataEnableIsRefusedWithoutAFrontableDescriptor(t *testing.T) {
 	d := strataDescriptor(t)
 	withoutBase := d
 	withoutBase.Protocols = []string{engines.ProtocolAnthropicMessages}
-	p := NewProxy(NewCodec(rwNop{}))
+	p := newBoundProxy(NewCodec(rwNop{}))
 	for _, tc := range []struct {
 		name   string
 		params enableFacadeParams
@@ -195,7 +195,7 @@ func TestStrataEnableIsRefusedWithoutAFrontableDescriptor(t *testing.T) {
 func TestStrataFacadeServesThroughEnable(t *testing.T) {
 	redirectConfigDir(t)
 	w := &recordingWriter{}
-	p := NewProxy(NewCodec(w))
+	p := newBoundProxy(NewCodec(w))
 	p.serveCtx = t.Context()
 	t.Cleanup(func() { p.shutdown(t.Context()) })
 

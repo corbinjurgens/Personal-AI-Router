@@ -46,7 +46,7 @@ func listenerPolicy(t *testing.T, revision string, listener nodepolicy.Listener)
 func zeroFacadeProxy(t *testing.T) (*Proxy, *recordingWriter) {
 	t.Helper()
 	w := &recordingWriter{}
-	p := NewProxy(NewCodec(w))
+	p := newBoundProxy(NewCodec(w))
 	t.Cleanup(func() { p.shutdown(context.Background()) })
 	return p, w
 }
@@ -480,7 +480,7 @@ func TestRoutingListener_RejectsMethodsAndPaths(t *testing.T) {
 func TestRoutingListener_RebindsAndDisablesOnlyItsOwnListener(t *testing.T) {
 	redirectConfigDir(t)
 	w := &recordingWriter{}
-	p := NewProxy(NewCodec(w))
+	p := newBoundProxy(NewCodec(w))
 	p.serveCtx = t.Context()
 	facadePort := enableOnFreePort(t, p, "ollama")
 	t.Cleanup(func() { p.shutdown(context.Background()) })
@@ -602,7 +602,7 @@ func facadeProxy(t *testing.T) (*Proxy, *recordingWriter, map[string]int) {
 	t.Helper()
 	redirectConfigDir(t)
 	w := &recordingWriter{}
-	p := NewProxy(NewCodec(w))
+	p := newBoundProxy(NewCodec(w))
 	p.serveCtx = t.Context()
 	ports := map[string]int{
 		"ollama":   enableOnFreePort(t, p, "ollama"),
@@ -779,7 +779,7 @@ func TestRoutingListener_RefusesAFacadeOnItsPort(t *testing.T) {
 	t.Run("enable", func(t *testing.T) {
 		redirectConfigDir(t)
 		w := &recordingWriter{}
-		p := NewProxy(NewCodec(w))
+		p := newBoundProxy(NewCodec(w))
 		p.serveCtx = t.Context()
 		t.Cleanup(func() { p.shutdown(context.Background()) })
 		port := freeRoutingPort(t)

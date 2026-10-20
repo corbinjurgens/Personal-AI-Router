@@ -221,8 +221,22 @@ func TestCancel_LookupRules(t *testing.T) {
 
 	// Two facades can hold the same id; without an engine that is ambiguous.
 	a, b := newWorkloadCtl(func(string) {}), newWorkloadCtl(func(string) {})
-	p.registerWorkload(workloadKey{engine: "ollama", id: "4"}, a)
-	p.registerWorkload(workloadKey{engine: "lmstudio", id: "4"}, b)
+	ra, err := p.registerRoutingRequest(a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p.unregisterRoutingRequest(ra)
+	rb, err := p.registerRoutingRequest(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p.unregisterRoutingRequest(rb)
+	if err := p.registerWorkload(ra, workloadKey{engine: "ollama", id: "4"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.registerWorkload(rb, workloadKey{engine: "lmstudio", id: "4"}); err != nil {
+		t.Fatal(err)
+	}
 	f = rpc(t, p, w, nodepolicy.MethodWorkloadCancel, nodepolicy.WorkloadCancelParams{WorkloadID: "4", Regenerate: true})
 	if f.Error == nil || f.Error.Code != -32602 || f.Error.Message != "ambiguous workload id; pass engine" {
 		t.Fatalf("ambiguous id answered %+v", f.Error)

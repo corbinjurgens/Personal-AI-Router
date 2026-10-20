@@ -985,7 +985,7 @@ func (r StrictAdmissionReadiness) Validate() error {
 // re-sends policy state whenever the proxy (re)starts and replays pending switch
 // invalidations from its journal before enabling facades.
 const (
-	// MethodSetPolicy carries the whole Policy and is answered with a
+	// MethodSetPolicy carries SetPolicyParams and is answered with a
 	// PolicyAck of its revision. Availability inside it is ignored by the
 	// proxy; MethodSetAvailability is authoritative.
 	MethodSetPolicy = "node/set-policy"
@@ -1130,13 +1130,53 @@ type SetAvailabilityParams struct {
 	CancelActive bool `json:"cancelActive,omitempty"`
 }
 
-// PolicyAck is the proxy's answer to MethodSetPolicy: Revision is the policy
-// revision it activated, the one it was sent. RunID names the proxy process, so
-// the broker can discard an acknowledgement from an earlier one. It is the only
-// acknowledgement that activates a revision.
+// SetPolicyParams binds the private policy activation to the local origin.
+// Only Policy is persisted; this envelope belongs to the parent-child channel.
+type SetPolicyParams struct {
+	OriginNodeID string `json:"originNodeId"`
+	Policy       Policy `json:"policy"`
+}
+
+func (p *SetPolicyParams) UnmarshalJSON(data []byte) error {
+	var in struct {
+		OriginNodeID string          `json:"originNodeId"`
+		Policy       json.RawMessage `json:"policy"`
+	}
+	if err := decodeResident(data, &in, []string{"originNodeId", "policy"}); err != nil {
+		return err
+	}
+	if !strictID.MatchString(in.OriginNodeID) {
+		return errors.New("originNodeId must be an ASCII identity of 1-128 bytes")
+	}
+	policy, err := Parse(in.Policy)
+	if err != nil {
+		return err
+	}
+	*p = SetPolicyParams{OriginNodeID: in.OriginNodeID, Policy: policy}
+	return nil
+}
+
+// PolicyAck is the activation acknowledgement for one origin and proxy run.
 type PolicyAck struct {
-	Revision string `json:"revision"`
-	RunID    string `json:"runId"`
+	OriginNodeID string `json:"originNodeId"`
+	Revision     string `json:"revision"`
+	RunID        string `json:"runId"`
+}
+
+func (a *PolicyAck) UnmarshalJSON(data []byte) error {
+	type plain PolicyAck
+	var next plain
+	if err := decodeResident(data, &next, []string{"originNodeId", "revision", "runId"}); err != nil {
+		return err
+	}
+	if err := ValidateRoutingIdentity(next.OriginNodeID, next.RunID); err != nil {
+		return err
+	}
+	if err := validateRevision(next.Revision); err != nil {
+		return err
+	}
+	*a = PolicyAck(next)
+	return nil
 }
 
 // CompareRevisions orders two revisions, each canonical decimal or empty;

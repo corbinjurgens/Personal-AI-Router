@@ -33,12 +33,17 @@ type RoutingRequestKey struct {
 var strictID = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$`)
 var strictDigest = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
-func (k RoutingRequestKey) Validate() error {
-	if !strictID.MatchString(k.OriginNodeID) {
-		return errors.New("originNodeId must be a nonempty identity of at most 128 ASCII characters")
+// ValidateRoutingIdentity checks the origin and process incarnation syntax.
+func ValidateRoutingIdentity(originNodeID, proxyRunID string) error {
+	if !strictID.MatchString(originNodeID) || !strictID.MatchString(proxyRunID) {
+		return errors.New("originNodeId and proxyRunId must be ASCII identities of 1-128 bytes")
 	}
-	if !strictID.MatchString(k.ProxyRunID) {
-		return errors.New("proxyRunId must be a nonempty identity of at most 128 ASCII characters")
+	return nil
+}
+
+func (k RoutingRequestKey) Validate() error {
+	if err := ValidateRoutingIdentity(k.OriginNodeID, k.ProxyRunID); err != nil {
+		return err
 	}
 	n, err := NanoUSD(k.RequestID).Int64()
 	if err != nil || n < 1 {
