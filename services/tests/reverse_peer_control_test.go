@@ -269,10 +269,7 @@ func (o *task1Observer) established(peer string) int {
 
 func newTask1Observer(t *testing.T, target *task1Node, service noderec.ServiceKey, nodes []*task1Node) *task1Observer {
 	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
+	ln := listenFixtureLoopback(t)
 	o := &task1Observer{port: ln.Addr().(*net.TCPAddr).Port, counts: make(map[task1RequestKey]int), upgrades: make(map[string][]net.Conn), readyUpgrades: make(map[string]int)}
 	proxies := make(map[string]*httputil.ReverseProxy)
 	for _, source := range nodes {

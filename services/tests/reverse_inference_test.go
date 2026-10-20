@@ -35,11 +35,16 @@ const phase04Model = "phase04:latest"
 // The broker boundary supplies discovery and current service registrations.
 // Every transport, private gateway and target handler runs its production main.
 type phase04Fixture struct {
-	control *task2Fixture
-	proxies map[string]*task1Process
-	engines map[string]*phase04Engine
-	stores  map[string]string
-	files   map[string]*phase04FileObserver
+	control           *task2Fixture
+	proxies           map[string]*task1Process
+	engines           map[string]*phase04Engine
+	stores            map[string]string
+	files             map[string]*phase04FileObserver
+	engineClusterDirs map[string]string
+}
+
+type phase04FixtureOptions struct {
+	isolateCopyAuthority bool
 }
 
 type phase04Engine struct {
@@ -139,10 +144,16 @@ func newPhase04Engine(t *testing.T) *phase04Engine {
 
 func newPhase04Fixture(t *testing.T) *phase04Fixture {
 	t.Helper()
+	return newPhase04FixtureWithOptions(t, phase04FixtureOptions{})
+}
+
+func newPhase04FixtureWithOptions(t *testing.T, options phase04FixtureOptions) *phase04Fixture {
+	t.Helper()
 	f := &phase04Fixture{
 		control: &task2Fixture{engines: map[string]*task1Process{}},
 		proxies: map[string]*task1Process{}, engines: map[string]*phase04Engine{},
 		stores: map[string]string{}, files: map[string]*phase04FileObserver{},
+		engineClusterDirs: map[string]string{},
 	}
 	blocked, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -231,7 +242,12 @@ func newPhase04Fixture(t *testing.T) *phase04Fixture {
 			members = append(members, task1Member{ID: peer.uuid, NodeUUID: peer.uuid, Name: peer.uuid, IPAddress: "127.0.0.1", Port: f.control.directory(peer).Services[noderec.ServiceCluster].Port, ClusterID: task1ClusterID, AdmissionEpoch: 1, State: "member"})
 		}
 		task1WriteJSON(t, filepath.Join(n.base, "cluster", "members.json"), members)
-		f.control.engines[n.uuid] = startTask1Process(t, n.base, engineMgrBin, "--cluster-dir", filepath.Join(n.base, "cluster"), "--control-port", strconv.Itoa(n.ports[noderec.ServiceEngineControl]), "--http-port", strconv.Itoa(n.ports[noderec.ServiceEngineManager]), "--loaded-poll-interval", "0")
+		engineClusterDir := filepath.Join(n.base, "cluster")
+		if options.isolateCopyAuthority {
+			engineClusterDir = phase04CopyAuthorityDirectory(t, n, f.peer(n))
+		}
+		f.engineClusterDirs[n.uuid] = engineClusterDir
+		f.control.engines[n.uuid] = startTask1Process(t, n.base, engineMgrBin, "--cluster-dir", engineClusterDir, "--control-port", strconv.Itoa(n.ports[noderec.ServiceEngineControl]), "--http-port", strconv.Itoa(n.ports[noderec.ServiceEngineManager]), "--loaded-poll-interval", "0")
 		completeEngineManagerRecovery(t, func(method string, params any) jsonrpc.Message {
 			return f.control.engines[n.uuid].call(t, method, params)
 		})

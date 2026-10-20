@@ -23,6 +23,7 @@ import (
 	"testing"
 	"time"
 
+	"nvpair-shared/clustertrust"
 	"nvpair-shared/noderec"
 )
 
@@ -206,8 +207,65 @@ func phase04SeedModel(t *testing.T, sourceRoot, destinationRoot, name string, se
 	return scenario
 }
 
+// The copy client's authority can be revoked without telling the live cluster
+// managers that either peer left. Keep the same identity and admissions, and a
+// sibling directory so the production reverse adapter still finds the CM's IPC.
+func phase04CopyAuthorityDirectory(t *testing.T, node, peer *task1Node) string {
+	t.Helper()
+	original := filepath.Join(node.base, "cluster")
+	isolated := filepath.Join(node.base, "copy-cluster")
+	if err := os.MkdirAll(filepath.Join(isolated, "trusted"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"node.crt", "node.key", "identity.json", "admission.json", "members.json", filepath.Join("trusted", peer.uuid+".json")} {
+		data := readLiveDurableFile(t, filepath.Join(original, name))
+		path := filepath.Join(isolated, name)
+		if err := os.WriteFile(path, data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(readLiveDurableFile(t, path), data) {
+			t.Fatalf("copy authority changed %s", name)
+		}
+	}
+	want, ok := node.mesh.PeerServiceIncarnation(peer.uuid)
+	got, cloned := clustertrust.Open(isolated).PeerServiceIncarnation(peer.uuid)
+	if !ok || !cloned || got != want {
+		t.Fatal("copy authority did not preserve current peer admission binding")
+	}
+	return isolated
+}
+
+// Await a real production CM roster request and its completed reply while the
+// copy authority is invalid. No sender or roster is synthesized by the test.
+func phase04AwaitRosterExchange(t *testing.T, destination, source *task1Node) {
+	t.Helper()
+	observer := destination.observers[noderec.ServiceCluster]
+	before := observer.count(source.uuid, http.MethodPost, task1RosterPath)
+	replied := make(chan struct{}, 1)
+	observer.mu.Lock()
+	observer.afterReply = func(peer, path string) {
+		if peer == source.uuid && path == task1RosterPath && observer.count(source.uuid, http.MethodPost, task1RosterPath) > before {
+			select {
+			case replied <- struct{}{}:
+			default:
+			}
+		}
+	}
+	observer.mu.Unlock()
+	defer func() {
+		observer.mu.Lock()
+		observer.afterReply = nil
+		observer.mu.Unlock()
+	}()
+	select {
+	case <-replied:
+	case <-time.After(45 * time.Second): // CM reconciles every 30 seconds.
+		t.Fatal("production CM roster exchange did not complete during invalid copy authority")
+	}
+}
+
 func TestReverseModelCopyPhase04(t *testing.T) {
-	f := newPhase04Fixture(t)
+	f := newPhase04FixtureWithOptions(t, phase04FixtureOptions{isolateCopyAuthority: true})
 	test := func(name, model string, source, destination *task1Node, seed byte) {
 		t.Run(name, func(t *testing.T) {
 			scenario := phase04SeedModel(t, f.stores[source.uuid], f.stores[destination.uuid], model, seed)
@@ -344,11 +402,46 @@ func TestReverseModelCopyPhase04(t *testing.T) {
 	test("reachable source resumes over direct while inference and control run", "from-reachable", f.control.a, f.control.b, 5)
 	testAuthority := func(name, model string, destination, source *task1Node) {
 		t.Run(name, func(t *testing.T) {
-			pin := filepath.Join(destination.base, "cluster", "trusted", source.uuid+".json")
+			pin := filepath.Join(f.engineClusterDirs[destination.uuid], "trusted", source.uuid+".json")
 			original := readLiveDurableFile(t, pin)
+			if filepath.Dir(filepath.Dir(pin)) == filepath.Join(destination.base, "cluster") {
+				t.Fatal("negative copy authority shares the CM directory")
+			}
+			// Snapshot only current identity/admission authority, not changing
+			// membership metadata such as last-seen timestamps.
+			authority := map[string][]byte{}
+			incarnations := map[string]string{}
+			for _, node := range []*task1Node{destination, source} {
+				peer := f.peer(node)
+				for _, name := range []string{"node.crt", "node.key", "admission.json", filepath.Join("trusted", peer.uuid+".json")} {
+					path := filepath.Join(node.base, "cluster", name)
+					authority[path] = readLiveDurableFile(t, path)
+				}
+				node.mesh.Refresh()
+				incarnation, ok := node.mesh.PeerServiceIncarnation(peer.uuid)
+				if !ok {
+					t.Fatal("CM lacks original current peer admission")
+				}
+				incarnations[node.uuid] = incarnation
+			}
+			copyMesh := clustertrust.Open(f.engineClusterDirs[destination.uuid])
 			defer func() {
 				if err := os.WriteFile(pin, original, 0o600); err != nil {
 					t.Error(err)
+					return
+				}
+				restored, err := os.ReadFile(pin)
+				if err != nil {
+					t.Errorf("read restored copy pin: %v", err)
+					return
+				}
+				if !bytes.Equal(restored, original) {
+					t.Error("restored copy pin differs from original")
+				}
+				copyMesh.Refresh()
+				got, ok := copyMesh.PeerServiceIncarnation(source.uuid)
+				if !ok || got != incarnations[destination.uuid] {
+					t.Error("restored copy authority changed original current peer admission binding")
 				}
 			}()
 			observer := f.files[source.uuid]
@@ -367,9 +460,39 @@ func TestReverseModelCopyPhase04(t *testing.T) {
 					t.Fatal("invalid pin reached source listing/bytes handler")
 				}
 			}
+			assertIsolated := func() {
+				for path, want := range authority {
+					if !bytes.Equal(readLiveDurableFile(t, path), want) {
+						t.Fatalf("negative copy authority changed CM %s", filepath.Base(path))
+					}
+				}
+				for _, node := range []*task1Node{destination, source} {
+					node.mesh.Refresh()
+					got, ok := node.mesh.PeerServiceIncarnation(f.peer(node).uuid)
+					if !ok || got != incarnations[node.uuid] {
+						t.Fatal("negative copy authority changed CM current membership/admission binding")
+					}
+				}
+			}
 			task1WriteJSON(t, pin, map[string]any{"nodeUuid": source.uuid, "nodeId": source.uuid, "certPem": destination.cert, "clusterId": task1ClusterID, "admissionEpoch": 1})
 			assertRejected()
+			wrongPin := readLiveDurableFile(t, pin)
+			if source == f.control.b {
+				// Exercise the former pruning race once, in the first reverse
+				// wrong-pin window. Every state still checks both CM bindings.
+				phase04AwaitRosterExchange(t, destination, source)
+			}
+			assertIsolated()
+			if !bytes.Equal(readLiveDurableFile(t, pin), wrongPin) {
+				t.Fatal("CM roster exchange repaired the wrong copy pin")
+			}
+			assertRejected()
 			removeAuthorityFile(t, pin)
+			assertRejected()
+			assertIsolated()
+			if _, err := os.Stat(pin); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("CM roster exchange restored removed copy pin: %v", err)
+			}
 			assertRejected()
 		})
 	}

@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"net"
 	"net/http"
-	"net/http/httptest"
 	"net/http/httputil"
 	"net/url"
 	"os"
@@ -44,6 +43,21 @@ type task2Fixture struct {
 	unloads     int
 	loaded      bool
 	listeners   []int
+	skipScanner bool
+}
+
+type task2FixtureOption func(*task2Fixture)
+
+// task2WithoutScanner keeps the owned mesh and its explicit directory snapshots
+// without browsing or advertising on the host's multicast network.
+func task2WithoutScanner(f *task2Fixture) {
+	f.skipScanner = true
+}
+
+func (f *task2Fixture) stopScanner() {
+	if f.scanner != nil {
+		f.scanner.stop()
+	}
 }
 
 func task2Response(t *testing.T, p *task1Process, id int) jsonrpc.Message {
@@ -88,9 +102,12 @@ func (f *task2Fixture) directory(n *task1Node) noderec.DirectoryNode {
 	return noderec.DirectoryNode{HostUUID: n.uuid, ClusterUUID: n.uuid, IP: "127.0.0.1", Name: n.uuid, Trusted: true, Services: services}
 }
 
-func newTask2Fixture(t *testing.T) *task2Fixture {
+func newTask2Fixture(t *testing.T, options ...task2FixtureOption) *task2Fixture {
 	t.Helper()
 	f := &task2Fixture{engines: map[string]*task1Process{}, loaded: true}
+	for _, option := range options {
+		option(f)
+	}
 	t.Cleanup(func() {
 		for _, port := range f.listeners {
 			conn, err := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)), time.Second)
@@ -104,10 +121,7 @@ func newTask2Fixture(t *testing.T) *task2Fixture {
 			}
 		}
 	})
-	blocked, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
+	blocked := listenFixtureLoopback(t)
 	f.blockedPort = blocked.Addr().(*net.TCPAddr).Port
 	f.listeners = append(f.listeners, f.blockedPort)
 	blockedDone := make(chan struct{})
@@ -166,7 +180,7 @@ func newTask2Fixture(t *testing.T) *task2Fixture {
 	}
 	// Only a fixture-owned loopback API can mutate. Every bundled engine's port
 	// and executable detection are overridden before either manager starts.
-	fake := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	fake := newFixtureHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
 		defer f.mu.Unlock()
 		var value any
@@ -259,7 +273,7 @@ func newTask2Fixture(t *testing.T) *task2Fixture {
 		t.Fatal(err)
 	}
 	proxy := httputil.NewSingleHostReverseProxy(u)
-	ni := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	ni := newFixtureHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
 		f.infoCalls++
 		f.mu.Unlock()
@@ -284,29 +298,31 @@ func newTask2Fixture(t *testing.T) *task2Fixture {
 	task1Eventually(t, "pinned outer reverse session", 15*time.Second, func() bool {
 		return f.a.observers[noderec.ServiceCluster].established(f.b.uuid) > 0
 	})
-	f.scanner = startTask1Process(t, f.a.base, scannerBin, "--cluster-dir", filepath.Join(f.a.base, "cluster"))
-	f.scanner.call(t, "discovery:get-nodes", nil)
-	responder, err := mdns.NewResponder("task2-"+filepath.Base(f.b.base), noderec.ServiceType, noderec.Domain, noderec.SRVPort, []string{
-		"v=1", "uuid=" + f.b.uuid, "cluster-uuid=" + f.b.uuid, "ip=127.0.0.1",
-		fmt.Sprintf("ni=%d", f.blockedPort), fmt.Sprintf("em=%d", f.blockedPort), fmt.Sprintf("ec=%d", f.blockedPort),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	advertiseDone := make(chan error, 1)
-	go func() { advertiseDone <- responder.Run(ctx) }()
-	t.Cleanup(func() {
-		cancel()
-		select {
-		case err := <-advertiseDone:
-			if err != nil {
-				t.Error(err)
-			}
-		case <-time.After(5 * time.Second):
-			t.Error("fixture advertiser did not stop")
+	if !f.skipScanner {
+		f.scanner = startTask1Process(t, f.a.base, scannerBin, "--cluster-dir", filepath.Join(f.a.base, "cluster"))
+		f.scanner.call(t, "discovery:get-nodes", nil)
+		responder, err := mdns.NewResponder("task2-"+filepath.Base(f.b.base), noderec.ServiceType, noderec.Domain, noderec.SRVPort, []string{
+			"v=1", "uuid=" + f.b.uuid, "cluster-uuid=" + f.b.uuid, "ip=127.0.0.1",
+			fmt.Sprintf("ni=%d", f.blockedPort), fmt.Sprintf("em=%d", f.blockedPort), fmt.Sprintf("ec=%d", f.blockedPort),
+		})
+		if err != nil {
+			t.Fatal(err)
 		}
-	})
+		ctx, cancel := context.WithCancel(context.Background())
+		advertiseDone := make(chan error, 1)
+		go func() { advertiseDone <- responder.Run(ctx) }()
+		t.Cleanup(func() {
+			cancel()
+			select {
+			case err := <-advertiseDone:
+				if err != nil {
+					t.Error(err)
+				}
+			case <-time.After(5 * time.Second):
+				t.Error("fixture advertiser did not stop")
+			}
+		})
+	}
 	for _, n := range nodes {
 		peer := f.a
 		if n == f.a {
@@ -410,6 +426,38 @@ func task2Event(t *testing.T, p *task1Process, node string, sequence uint64) boo
 		}
 	}
 	return false
+}
+
+func TestReversePeerControlTask2WithoutScannerReadsAuthenticatedTarget(t *testing.T) {
+	f := newTask2Fixture(t, task2WithoutScanner)
+	t.Cleanup(f.stopScanner)
+	if f.scanner != nil {
+		t.Fatal("scanner-free fixture launched a scanner")
+	}
+	var local, remote struct {
+		Engines []struct {
+			Engine  string `json:"engine"`
+			Running bool   `json:"running"`
+			Port    int    `json:"port"`
+		} `json:"engines"`
+	}
+	task2Decode(t, f.engines[f.b.uuid].call(t, "engine:get-installed", nil).Result, &local)
+	wantPort := 0
+	for _, engine := range local.Engines {
+		if engine.Engine == "ollama" && engine.Running {
+			wantPort = engine.Port
+		}
+	}
+	if wantPort <= 0 {
+		t.Fatalf("target-local fixture engine missing/running=false: %+v", local)
+	}
+	task2Decode(t, f.engines[f.a.uuid].call(t, "engine:remote-get-installed", map[string]string{"node": f.b.uuid}).Result, &remote)
+	if !reflect.DeepEqual(remote, local) {
+		t.Fatalf("authenticated target inventory = %+v, want target-local %+v", remote, local)
+	}
+	if count := f.b.observers[noderec.ServiceEngineControl].count(f.a.uuid, http.MethodGet, "/v1/engines"); count != 1 {
+		t.Fatalf("authenticated target inventory reads = %d, want 1", count)
+	}
 }
 
 func TestReversePeerControlTask2(t *testing.T) {

@@ -1108,55 +1108,8 @@ func TestRemoteManagementEndorsementAndReadmission(t *testing.T) {
 }
 
 func TestRemoteManagementPersistsAcrossSeparateProcessRestarts(t *testing.T) {
-	f := newServiceFixture(t)
-	// Reuse the registered bundle paths. Its scanner is the existing empty
-	// directory fixture, so this service cannot discover installed peers.
-	self, err := os.Executable()
-	if err != nil {
-		t.Fatal(err)
-	}
-	jointCopyExecutable(t, self, f.scannerPath)
-	enginePath := f.copyBinary(engineMgrBin)
-	clusterPath := f.copyBinary(clusterMgrBin)
-	f.inventory.paths = append(f.inventory.paths, enginePath, clusterPath)
-	scannerPort := temporaryClusterPort(t)
-	f.env = append(f.env, "NVPAIR_TEST_SUBSCRIPTION_SCANNER="+f.scannerPath,
-		"NVPAIR_TEST_SUBSCRIPTION_PORT="+strconv.Itoa(scannerPort), "OLLAMA_HOST=", "USERPROFILE="+f.configDir)
-	inert := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusServiceUnavailable) }))
-	t.Cleanup(inert.Close)
-	jointIsolateEngines(t, f.configDir, inert.Listener.Addr().(*net.TCPAddr).Port)
-	peerDir := t.TempDir()
-	peerCert := mintClusterIdentity(t, peerDir, "management-service-peer")
-	allowedDir := t.TempDir()
-	allowedCert := mintClusterIdentity(t, allowedDir, "management-service-allowed")
-	targetCert := mintClusterIdentity(t, f.clusterDir, "management-service-target")
-	for _, member := range []struct{ dir, id, peer, cert string }{
-		{f.clusterDir, "management-service-target", "management-service-peer", peerCert},
-		{peerDir, "management-service-peer", "management-service-target", targetCert},
-		{allowedDir, "management-service-allowed", "management-service-target", targetCert},
-	} {
-		writeActiveAdmission(t, member.dir)
-		writePin(t, member.dir, member.peer, member.cert)
-		writeMembers(t, member.dir, member.id, member.peer)
-		jointWriteJSON(t, filepath.Join(member.dir, "identity.json"), map[string]any{"node_uuid": member.id})
-	}
-	writePin(t, f.clusterDir, "management-service-allowed", allowedCert)
-	writeMembers(t, f.clusterDir, "management-service-target", "management-service-peer", "management-service-allowed")
-	policy := nodepolicy.Default()
-	policy.Revision = "12"
-	jointWriteJSON(t, f.policyPath(), policy)
-	cfg, ok := clustertrust.Open(peerDir).ClientTLSConfig("management-service-target")
-	if !ok {
-		t.Fatal("service fixture has no peer TLS authority")
-	}
-	client := &http.Client{Timeout: 10 * time.Second, Transport: &http.Transport{TLSClientConfig: cfg}}
-	t.Cleanup(client.CloseIdleConnections)
-	allowedCFG, ok := clustertrust.Open(allowedDir).ClientTLSConfig("management-service-target")
-	if !ok {
-		t.Fatal("service fixture has no allowed peer TLS authority")
-	}
-	allowedClient := &http.Client{Timeout: 10 * time.Second, Transport: &http.Transport{TLSClientConfig: allowedCFG}}
-	t.Cleanup(allowedClient.CloseIdleConnections)
+	rf := newRemoteServiceFixture(t)
+	f, client, allowedClient, enginePath, clusterPath := rf.serviceFixture, rf.peer, rf.allowed, rf.enginePath, rf.clusterPath
 	f.start()
 	c := f.readyClient()
 	view := decodeResult[managementSnapshot](t, *c.mustCall(t, "701", "cluster:get-remote-management", mustMarshal(t, map[string]any{})))
@@ -1167,7 +1120,7 @@ func TestRemoteManagementPersistsAcrossSeparateProcessRestarts(t *testing.T) {
 	c.mustCall(t, "705", "cluster:set-remote-management", mustMarshal(t, map[string]any{
 		"peerUuid": "management-service-allowed", "allowed": true, "expectedRevision": view.Revision,
 	}))
-	permissionPath := filepath.Join(f.clusterDir, clustertrust.RemoteManagementFile)
+	permissionPath := rf.permissionPath
 	want := readLiveDurableFile(t, permissionPath)
 	assertOppositeGrants := func(t *testing.T) {
 		t.Helper()
