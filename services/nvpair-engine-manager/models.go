@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"nvpair-shared/nodepolicy"
+	"nvpair-shared/performancewire"
 )
 
 // modelsTimeout bounds the whole engine:models sweep so one hung engine can't
@@ -47,10 +48,11 @@ const modelsTimeout = 5 * time.Second
 // never sends it; either way a reader treats the node as declaring nothing. The
 // engine:models-changed notification carries no Policy.
 type ModelsResult struct {
-	Models         []string                  `json:"models"`
-	ByEngine       map[string][]string       `json:"modelsByEngine,omitempty"`
-	LoadedByEngine map[string][]string       `json:"loadedByEngine,omitempty"`
-	Policy         *nodepolicy.Advertisement `json:"policy,omitempty"`
+	Models         []string                        `json:"models"`
+	ByEngine       map[string][]string             `json:"modelsByEngine,omitempty"`
+	LoadedByEngine map[string][]string             `json:"loadedByEngine,omitempty"`
+	Policy         *nodepolicy.Advertisement       `json:"policy,omitempty"`
+	MemoryEvidence *performancewire.MemoryEvidence `json:"memoryEvidence,omitempty"`
 }
 
 // Models returns the union of model names served by every installed, running
@@ -101,6 +103,7 @@ func (e *Executor) modelsSweep(ctx context.Context, fullInventory bool) ModelsRe
 	defer cancel()
 	sweep := e.sweeps.Add(1)
 	cached := e.cachedInventory()
+	memoryCapture := e.captureMemoryEvidence()
 
 	engineNames := e.reg.Names()
 	// Results indexed by engine position so the flattened output stays
@@ -110,6 +113,7 @@ func (e *Executor) modelsSweep(ctx context.Context, fullInventory bool) ModelsRe
 	listOK := make([]bool, len(engineNames))
 	loaded := make([][]string, len(engineNames))
 	loadedOK := make([]bool, len(engineNames))
+	loadedRaw := make([]json.RawMessage, len(engineNames))
 	var wg sync.WaitGroup
 	for i, name := range engineNames {
 		mf, ok := e.reg.Get(name)
@@ -171,6 +175,7 @@ func (e *Executor) modelsSweep(ctx context.Context, fullInventory bool) ModelsRe
 				if err != nil {
 					slog.Debug("engine:models loaded_models failed", "engine", name, "err", err)
 				} else if models, ok := extractStringsResult(raw, loadedSpec); ok {
+					loadedRaw[i] = raw
 					// A successful query — even an empty result — records the key
 					// so a consumer can tell "running, nothing loaded" apart from
 					// "unknown". An action or shape error leaves loadedOK[i] false.
@@ -195,8 +200,18 @@ func (e *Executor) modelsSweep(ctx context.Context, fullInventory bool) ModelsRe
 		}
 	}
 	e.storeInventory(fresh, freshDigests, sweep)
+	var memoryEntries []performancewire.MemoryEvidenceEntry
+	for i, name := range engineNames {
+		if !loadedOK[i] {
+			continue
+		}
+		entries := e.memoryEvidenceEntries(memoryCapture, name, loadedRaw[i])
+		entries = memoryUnknownLoadedNames(memoryCapture, name, loaded[i], entries)
+		memoryEntries = append(memoryEntries, entries...)
+	}
+	memoryEntries = e.finalizeMemoryEvidence(memoryCapture, memoryEntries)
 
-	res := ModelsResult{Models: []string{}}
+	res := ModelsResult{Models: []string{}, MemoryEvidence: boundedMemoryEvidence(memoryEntries)}
 	seen := map[string]bool{}
 	for i, models := range perEngine {
 		if listOK[i] {

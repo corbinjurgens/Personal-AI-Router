@@ -1,0 +1,287 @@
+{/*
+SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+*/}
+
+# Model memory evidence
+
+A loaded local model has an observed memory footprint. Memory evidence is the
+bounded, source-bound record of that observation and, where an operator has
+measured one, of a reviewed upper bound for an exact serving envelope. This page
+describes what the wire carries, the private operator document behind a
+qualification, and what remains unqualified.
+
+Memory evidence is not proxy strict token or account qualification. The strict
+path in [Local qualification and freshness](local-qualification.mdx) bounds input
+and output tokens for an exact model and template; memory evidence bounds
+resident bytes for an exact run. Neither substitutes for the other, and a
+qualified memory entry does not make a model eligible for strict admission.
+
+Memory evidence is producer-first. engine-manager produces it and publishes it
+as an optional field; consumer-side derivation, including the current
+fingerprint/profile join, follows later. It does not change ranking, admission
+or scheduling. It adds no RPC method, channel, mDNS record, public node-info
+field or poller.
+
+## Where it appears
+
+| Surface | Carries |
+| --- | --- |
+| `engine:models` RPC | `ModelsResult` with the optional `memoryEvidence` member |
+| `engine:models-changed` notification | The same `ModelsResult` shape, including optional memory evidence |
+| `/v1/models` | The same `ModelsResult` shape on the LAN HTTP surface |
+
+The member may contain an empty entries array when no loaded evidence is available.
+Its absence means "no evidence", never "zero bytes". Evidence is redacted: it carries engine
+and model names, digests, envelope values, ages, counts and reviewed provenance,
+and never prompts, messages, response bodies, file paths, tokens or key
+material.
+
+## Wire shape
+
+One payload is a versioned envelope of at most 128 entries, encoded within
+128 KiB.
+
+| Field | Meaning |
+| --- | --- |
+| `version` | `1`. Any other version is rejected. |
+| `entries` | Required array of entries, possibly empty. |
+| `omittedEntries` | Required nonnegative count of entries left out. It is separate from the retained-entry cap and may exceed it. |
+
+Each entry names one engine, concrete model and memory domain. Every group is
+structurally required, and every member that is not known is an explicit JSON
+`null` rather than a zero.
+
+| Group | Members | Meaning |
+| --- | --- | --- |
+| identity | `engine`, `model` | The engine and the concrete model name. |
+| `state` | `unknown`, `advisory`, `qualified` | How far the evidence has been established. |
+| `uncertainty` | Bounded reason codes | Qualified entries require an empty array; other states may include bounded reasons. |
+| `source` | `hostUuid`, `managerIncarnation`, `engineRunId`, `launchDigest`, `modelDigest` | The exact host, manager process, engine run, launch and model content the entry belongs to. |
+| `appliedSettings` | `epoch`, `revision` | The fully applied settings snapshot. It is not the broker's settings fingerprint. |
+| `envelope` | `domain`, `effectiveContextTokens`, `concurrentExecutions`, `offloadMode` | The serving envelope the entry covers. |
+| `observed` | `allocatedBytes`, `extractorRevision` | The current allocation reading and the extractor that produced it. |
+| `qualification` | `upperBytes`, `id`, `revision`, `artifactDigest`, `procedureDigest` | The reviewed upper bound and the document identity it came from. `upperBytes` is set only for `qualified`. |
+| `provenance` | `procedureId`, `procedureRevision`, `hardwareFingerprint`, `hardwareDescription`, `runtimeRevision`, `driverRevision`, `scope` | Operator-attested measurement provenance. |
+| `freshness` | `sampleAgeMs`, `qualificationAgeMs`, `observationGeneration`, `readingValidForMs` | Monotonic ages, the source observation generation and the fixed reading window. |
+
+A measured zero is the number `0`, and it means the engine reported zero bytes.
+A `null` allocation means the value is unknown. Consumers must never read a
+missing value as zero or as an upper bound. The observed allocation is not a
+qualified upper: it is one reading, and the upper is a separate positive review
+result. Memory domains are not summed; a dedicated device, host physical memory
+and unified physical memory are distinct budgets.
+
+## States
+
+| State | Meaning |
+| --- | --- |
+| `unknown` | The evidence is incomplete. Partial metadata may still be present, but there is no qualified upper bound. |
+| `advisory` | There are observations, but no current qualified upper bound. |
+| `qualified` | A current document bound this exact source, applied settings and envelope, and a fresh reading lies within the reviewed upper bound. |
+
+A `qualified` entry carries every binding, a positive `upperBytes`, the
+qualification and procedure digests, the full provenance, empty uncertainty and
+a non-null allocation and ages. `unknown` and `advisory` entries must leave
+`upperBytes` null. A stale reading can remain visible as `advisory` or
+`unknown`; it is not silently promoted.
+
+## Qualification document
+
+The upper bound comes from one fixed, read-only file under the engine-manager
+executor's base directory: `memory-qualification.json` (by default the
+application directory's `engine-bin` folder). It is absent by default. There is
+no flag, environment variable or alternate path, and engine-manager never
+creates or rewrites it. An operator writes it by hand after an approved
+measurement.
+
+The document is strict local JSON and is private to the machine:
+
+| Field | Meaning |
+| --- | --- |
+| `version` | `1`. |
+| `revision` | Canonical positive decimal revision of this document, for example `"7"`. Leading zeros, signs and non-digits are rejected. |
+| `measuredAt` | Unix wall-clock milliseconds of the measurement. It must be positive; a timestamp in the future is treated as clock uncertainty and never qualifies. |
+| `records` | Array of at most 128 records. |
+
+Each record has eight required groups: `source`, `config`, `envelope`,
+`qualification`, `procedure`, `hardware`, `runtime` and `driver`. Every member
+of every group is required; there are no optional or aliased keys.
+
+- `source`: `hostUuid`, `managerIncarnation`, `engine`, `engineRunId`,
+  `launchDigest`, `model`, `modelDigest`.
+- `config`: the applied settings `epoch` and positive `revision`.
+- `envelope`: `domain`, `effectiveContextTokens`, `concurrentExecutions`,
+  `offloadMode` and `extractorRevision`.
+- `qualification`: `id`, positive `upperBytes` and `scope`, which must be
+  `operator-attested-current-run`.
+- `procedure`: `id`, canonical positive decimal `revision` and `digest` of the
+  measurement procedure.
+- `hardware`: `fingerprint` and `description`.
+- `runtime`, `driver`: `revision` of each.
+
+The file is limited to 256 KiB and 128 records, and unknown, duplicate or
+case-variant keys at any depth, invalid UTF-8 and trailing data reject the whole
+document. A rejected document yields no qualified subset; nothing is salvaged
+from individual records. The artifact digest published in the wire entry is the
+SHA-256 of the document bytes as read. The document does not embed a hash of
+itself.
+
+### Illustrative document
+
+The following is a placeholder shape. It is not a qualification, it is not
+deployable, and its digests, identifiers and byte counts are invented. Copying
+it, or any synthetic fixture, qualifies nothing.
+
+```json
+{
+  "version": 1,
+  "revision": "1",
+  "measuredAt": 1790000000000,
+  "records": [
+    {
+      "source": {
+        "hostUuid": "example-host",
+        "managerIncarnation": "example-manager-incarnation",
+        "engine": "ollama",
+        "engineRunId": "example-engine-run",
+        "launchDigest": "0000000000000000000000000000000000000000000000000000000000000000",
+        "model": "example:8b",
+        "modelDigest": "0000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "config": {
+        "epoch": "example-settings-epoch",
+        "revision": 1
+      },
+      "envelope": {
+        "domain": "dedicated-device",
+        "effectiveContextTokens": 8192,
+        "concurrentExecutions": 1,
+        "offloadMode": "gpu",
+        "extractorRevision": "ollama-ps-v1"
+      },
+      "qualification": {
+        "id": "example-memory-upper",
+        "upperBytes": 8000000000,
+        "scope": "operator-attested-current-run"
+      },
+      "procedure": {
+        "id": "example-memory-procedure",
+        "revision": "1",
+        "digest": "0000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "hardware": {
+        "fingerprint": "example-gpu",
+        "description": "Illustrative 24 GiB discrete GPU"
+      },
+      "runtime": {
+        "revision": "example-runtime-0.0.0"
+      },
+      "driver": {
+        "revision": "example-driver-0.0.0"
+      }
+    }
+  ]
+}
+```
+
+Creating a real document is owner-gated: it requires an approved measurement of
+the exact machine, executable and model, as described below.
+
+## Revision and history authority
+
+The document revision is the memory history authority, and it is tracked
+document-wide for the lifetime of the manager process.
+
+- The same revision with identical bytes is a duplicate read: it retains the
+  existing qualification age and any withdrawal, and does not refresh either.
+- A different document with the same revision is rejected.
+- An older revision is rejected.
+- A bound exceedance or clock uncertainty is latched document-wide. Deleting
+  the file, letting it reappear, or evicting the entry does not clear the latch,
+  because the producer retains the rejected authority for its lifetime.
+- Only a new, valid, reviewed document with a higher revision recovers a
+  latched qualification.
+
+There is no automatic history, rollback window, peer artifact import or remote
+artifact fetch. A restarted manager starts with no authority and must read a
+valid document again.
+
+## Binding and invalidation
+
+A record applies only while every bound input still matches:
+
+| Input | Changes when |
+| --- | --- |
+| `hostUuid` | The node identity changes. |
+| `managerIncarnation` | engine-manager restarts. |
+| `engineRunId` | The engine is started or adopted. |
+| `launchDigest` | The launch changes: executable path, size or modification time, arguments or explicit environment. |
+| `modelDigest` | The model content changes, including a same-name replacement. |
+| applied settings `epoch` and `revision` | An apply or recovery produces a new fully applied revision. |
+
+Any mismatch leaves the entry unqualified and reports the matching uncertainty.
+Lowering context, changing concurrency or offload mode, or restarting the engine
+also leaves the measured envelope, so the old upper no longer applies.
+
+Hardware is operator-attested for the current run, not independently detected.
+The document records a fingerprint and description; PAIR does not authenticate
+them against the machine at runtime. Replacing a GPU inside a surviving process
+is not detected automatically. After any hardware change, stop the run and
+requalify. A document measured on another machine or GPU qualifies nothing here:
+in particular, RTX evidence is never inherited on the PC3 GTX 1060 target.
+
+## Observation and freshness
+
+There is one supported extractor revision, `ollama-ps-v1`, for actual
+Ollama-family runs owned by PAIR. It reads the official loaded-model shape
+described at <https://docs.ollama.com/api/ps>, using `size_vram` as the
+current allocation and `context_length` as the served context. Units, schema
+details and the exact runtime version must be verified during owner
+qualification; the name is not a runtime version acceptance claim.
+
+`size_vram` and the current allocation are advisory on their own. They are never
+a worst-case upper bound and never host-memory accounting, because the engine's
+other allocations, fragmentation and the host are not observed. No estimate from
+model file size or bytes per token is used.
+
+An entry can be qualified only from a fresh, same-source read of the loaded-model
+response, with no duplicate or ambiguous row, field or alias, and with context
+and envelope equal to the document. A malformed row, a repeated model name or
+two models sharing one digest makes the affected observation ambiguous and
+unusable for qualification.
+
+A reading is valid for a fixed 15000 ms. The source observation generation
+identifies an actual observation: replaying a cached or duplicate response never
+resets the age. Allocation age uses a conservative monotonic anchor taken before
+the whole model sweep captures source identity or starts I/O. Source capture,
+engine requests, waiting for other engine results, buffered-response delay and
+qualification verification therefore all count toward the reading's age. A
+genuinely new source read uses its new sweep's anchor, while the qualification
+age continues from the document. A reversed or unknown clock leaves the age
+unknown and prevents qualification. The receiver advances both ages from
+monotonic elapsed time. Queueing delay after publication in the local stdio path
+is not measured, so no end-to-end freshness bound is claimed.
+
+## Owner-gated measurement runbook
+
+A real upper bound requires an explicitly approved run. The runbook must
+require:
+
+- owner approval naming the exact machine, executable, model and current run;
+- an isolated application directory and isolated ports;
+- a memory-safe matrix of context, concurrency and offload values, including
+  the cases expected to run out of memory or be unsupported;
+- explicit cleanup and stop criteria, so an engine or measurement process is
+  never left running;
+- no prompts, messages or response bodies in logs;
+- a reviewed conservative upper for the actual envelope, justified from the
+  measurement rather than an arbitrary peak plus a percentage;
+- finite coverage of the supported memory domain, with out-of-memory and
+  unsupported cases left `unknown` rather than guessed.
+
+No real hardware qualification or artifact ships with PAIR. Synthetic fixtures
+and copies never establish an actual RTX or GTX qualification. The actual
+producer profile join, consumer-side derivation and positive live acceptance
+remain separate, gated integration work; this page does not claim that any
+test or benchmark was run.

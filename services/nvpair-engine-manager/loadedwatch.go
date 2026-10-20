@@ -4,9 +4,13 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"sort"
 	"time"
+
+	"nvpair-shared/performancewire"
 )
 
 // modelsChangedMethod is the push emitted whenever an engine's set of loaded
@@ -44,8 +48,8 @@ var residencyNeutralActions = map[string]bool{
 // nothing, so this internal poll is the only signal; keeping it here means a
 // push-driven consumer never has to poll. It runs until ctx is cancelled and is
 // pokeable (see Executor.pokeLoaded) for sub-tick latency after an explicit
-// action. The first sweep only seeds the baseline (no emit) so a consumer's
-// initial engine:models fetch isn't immediately shadowed by a redundant push.
+// action. The first sweep seeds loaded names and publishes any memory baseline;
+// later memory changes use the same notification even if names are unchanged.
 func (e *Executor) watchLoaded(ctx context.Context) {
 	interval := e.loadedPollInterval
 	if interval <= 0 {
@@ -55,6 +59,7 @@ func (e *Executor) watchLoaded(ctx context.Context) {
 	defer t.Stop()
 
 	var prev map[string][]string
+	var previousMemory *performancewire.MemoryEvidence
 	var lastInventory time.Time
 	var identity *modelIdentityParams
 	seeded := false
@@ -75,17 +80,81 @@ func (e *Executor) watchLoaded(ctx context.Context) {
 		}
 		changed, next, res := e.sweepLoaded(ctx, prev, fullInventory)
 		prev = next
+		memoryChanged := changedMemoryEngines(previousMemory, res.MemoryEvidence)
+		previousMemory = res.MemoryEvidence
 		// Identity is reported from the first sweep on: its consumer starts
 		// with none, so it must never wait for a change.
 		identity = e.publishModelIdentity(identity)
 		if !seeded {
 			seeded = true
-			continue // first sweep only seeds the baseline
+			changed = nil // loaded names retain their existing first-sweep behavior
 		}
+		changed = mergeMemoryChanges(changed, memoryChanged)
 		for _, name := range changed {
 			e.notify(modelsChangedMethod, modelsChangedParams{Engine: name, Models: res})
 		}
 	}
+}
+
+// A successful first memory baseline, memory-only changes and withdrawal use
+// the existing models notification. Elapsed ages and a new successful query's
+// generation alone do not constitute a changed memory status.
+func changedMemoryEngines(previous, current *performancewire.MemoryEvidence) []string {
+	before := memoryStatusByEngine(previous)
+	after := memoryStatusByEngine(current)
+	changed := make(map[string]bool)
+	for name, status := range before {
+		if !bytes.Equal(status, after[name]) {
+			changed[name] = true
+		}
+	}
+	for name, status := range after {
+		if !bytes.Equal(status, before[name]) {
+			changed[name] = true
+		}
+	}
+	var names []string
+	for name := range changed {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+func memoryStatusByEngine(evidence *performancewire.MemoryEvidence) map[string][]byte {
+	byEngine := make(map[string][]performancewire.MemoryEvidenceEntry)
+	if evidence != nil {
+		for _, entry := range evidence.Entries {
+			entry.Freshness.SampleAgeMs = nil
+			entry.Freshness.QualificationAgeMs = nil
+			entry.Freshness.Generation = nil
+			byEngine[entry.Engine] = append(byEngine[entry.Engine], entry)
+		}
+	}
+	status := make(map[string][]byte, len(byEngine))
+	for name, entries := range byEngine {
+		data, err := json.Marshal(entries)
+		if err == nil {
+			status[name] = data
+		}
+	}
+	return status
+}
+
+func mergeMemoryChanges(names, memoryNames []string) []string {
+	set := make(map[string]bool, len(names)+len(memoryNames))
+	for _, name := range names {
+		set[name] = true
+	}
+	for _, name := range memoryNames {
+		set[name] = true
+	}
+	result := make([]string, 0, len(set))
+	for name := range set {
+		result = append(result, name)
+	}
+	sort.Strings(result)
+	return result
 }
 
 // sweepLoaded performs one loaded-set poll: it fetches the current model result
