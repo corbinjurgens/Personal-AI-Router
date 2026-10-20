@@ -6,9 +6,12 @@ require (
 	github.com/grandcat/zeroconf v1.0.0
 	github.com/shirou/gopsutil/v4 v4.26.7
 	nvpair-shared v0.0.0-00010101000000-000000000000
+	nvpair-tui v0.0.0-00010101000000-000000000000
 )
 
 replace nvpair-shared => ../shared
+
+replace nvpair-tui => ../nvpair-tui
 
 require (
 	github.com/Microsoft/go-winio v0.6.2 // indirect
