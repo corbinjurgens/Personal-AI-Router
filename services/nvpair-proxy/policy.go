@@ -16,11 +16,29 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"math"
 	"strings"
+	"time"
 
 	"nvpair-shared/engines"
 	"nvpair-shared/nodepolicy"
 )
+
+// bufferSettings checks conversions and old/new body overlap plus the separate
+// overflow probe before a policy can change admission or process authority.
+func (p *Proxy) bufferSettings(policy nodepolicy.Policy) (int64, time.Duration, error) {
+	limits := policy.Routing.Buffers
+	mib, seconds := int64(limits.CapacityMiB), int64(limits.WaitSeconds)
+	if mib < 0 || mib > math.MaxInt64/(1<<20) || seconds < 0 || seconds > math.MaxInt64/int64(time.Second) {
+		return 0, 0, fmt.Errorf("buffer settings exceed integer bounds")
+	}
+	capacity := mib * (1 << 20)
+	individual := p.requestBodyLimit()
+	if individual > (math.MaxInt64-1)/2 || capacity < 2*individual+1 {
+		return 0, 0, fmt.Errorf("buffer capacity must cover twice the individual body limit plus one byte")
+	}
+	return capacity, time.Duration(seconds) * time.Second, nil
+}
 
 // handlePolicyMethod handles one node policy request, reporting false when the
 // method is not one of them.

@@ -344,6 +344,7 @@ type Proxy struct {
 	// touches a real data directory.
 	accounts *accountLedger
 	egress   *egressLease
+	buffers  *bufferBudget
 
 	// selfMu guards what this process has learned about its own node from
 	// discovery: its node id and, per engine, the models it last advertised.
@@ -367,6 +368,14 @@ func NewProxy(codec *Codec) *Proxy {
 		performance: performanceQueue{wake: make(chan struct{}, 1)},
 	}
 	p.routing = &routingListener{host: p}
+	capacity, wait, err := p.bufferSettings(nodepolicy.Default())
+	if err != nil {
+		panic(err) // Built-in defaults must satisfy the individual body limit.
+	}
+	p.buffers, err = newBufferBudget(capacity, wait)
+	if err != nil {
+		panic(err)
+	}
 	p.admission = newAdmissionController(
 		func(method string, params any) {
 			if err := p.codec.Notify(method, params); err != nil {

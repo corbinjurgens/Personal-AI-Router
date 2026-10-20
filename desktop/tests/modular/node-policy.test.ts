@@ -57,6 +57,20 @@ function loadStrictFixtures(): JsonObject {
 }
 
 describe('served/resident policy contract', () => {
+    it('preserves custom buffers and zero wait through the generic policy bridge', () => {
+        const policy = { revision: '31', routing: { buffers: { capacityMiB: 384, waitSeconds: 0 } } }
+        const document = parsePolicyDocument({ policy, availability: 'available' })
+        const draft = parsePolicyText(document.policy)
+        expect(draft).toEqual(policy)
+        const params = policySetParams({ policy: document.policy, expectedPersistedRevision: document.revision })
+        expect(params).toEqual({ policy, expectedPersistedRevision: '31' })
+        const result = parsePolicySetResult({ policy: params.policy })
+        expect(parsePolicyText(result.policy)).toEqual(policy)
+        const changed = parsePolicyChange({ nodeId: 'self', policy: params.policy })
+        expect(changed).not.toBeNull()
+        if (!changed) throw new Error('Missing buffer policy change')
+        expect(parsePolicyText(changed.policy)).toEqual(policy)
+    })
     const corpus: JsonValue = JSON.parse(
         readFileSync(
             resolve(process.cwd(), '../services/shared/nodepolicy/testdata/served-resident.json'),

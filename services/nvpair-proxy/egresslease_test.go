@@ -42,6 +42,7 @@ func egressFixture(t *testing.T) (*Proxy, *chatAccountFixture, *atomic.Int64, ch
 	pol.Routing = f.routing
 	pol.Routing.Limits = nodepolicy.Default().Routing.Limits
 	pol.Routing.Listener = nodepolicy.Default().Routing.Listener
+	pol.Routing.Buffers = nodepolicy.Default().Routing.Buffers
 	pol.Routing.Tiers = map[string]nodepolicy.TierRouting{"weak": {RemoteAllowed: true, PaidAllowed: true}}
 	pol.Tiers = map[string][]nodepolicy.TierEntry{"weak": {{Kind: nodepolicy.EntryAPI, Deployment: "chat-a"}}}
 	p := newBoundProxy(NewCodec(&recordingWriter{}))
@@ -530,6 +531,7 @@ func TestPolicyActivationEgressLedgerFailure(t *testing.T) {
 	p, w := policyProxy(t)
 	pol := policyAt("7")
 	pol.Routing = testRouting("1000000", "10000000", "10000000")
+	pol.Routing.Buffers = nodepolicy.Default().Routing.Buffers
 	// Disabled staged configuration parses, but there is no ledger directory.
 	pol.Routing.Tiers = nodepolicy.Default().Routing.Tiers
 	pol.Routing.Limits = nodepolicy.Default().Routing.Limits
@@ -623,5 +625,58 @@ func TestEgressLeaseRefusedRevokeKeepsAuthority(t *testing.T) {
 	}
 	if !reflect.DeepEqual(p.admission.currentPolicy().Routing.Accounts[0], snapshot.account) {
 		t.Fatal("lease withdrawal changed policy")
+	}
+}
+
+func TestPolicyBufferWinningTransitionOwnsReconfiguration(t *testing.T) {
+	p := newBoundProxy(NewCodec(&recordingWriter{}))
+	root := p.buffers
+	p.egress.activationMu.Lock()
+	locked := true
+	defer func() {
+		if locked {
+			p.egress.activationMu.Unlock()
+		}
+	}()
+	start := func(revision string, capacity, wait int) <-chan error {
+		t.Helper()
+		p.admission.mu.Lock()
+		changed := p.admission.changed
+		p.admission.mu.Unlock()
+		pol := policyAt(revision)
+		pol.Routing.Buffers = nodepolicy.BufferLimits{CapacityMiB: capacity, WaitSeconds: wait}
+		params := egressJSON(t, nodepolicy.SetPolicyParams{OriginNodeID: "test-origin", Policy: pol})
+		done := make(chan error, 1)
+		go func() { _, err := p.applySetPolicy(params); done <- err }()
+		select {
+		case <-changed:
+		case <-time.After(3 * time.Second):
+			t.Fatal("policy never entered admission activation")
+		}
+		// Admission's signal precedes root reconfiguration within the same G
+		// section; joining that section makes this an exact activation barrier.
+		p.egress.mu.Lock()
+		p.egress.mu.Unlock()
+		return done
+	}
+	older := start("7", 384, 8)
+	newer := start("8", 512, 0)
+	if capacity, wait := policyBufferState(root); capacity != 512<<20 || wait != 0 {
+		t.Fatalf("winning transition did not own the root before ledger completion: %d %s", capacity, wait)
+	}
+	p.egress.activationMu.Unlock()
+	locked = false
+	for _, done := range []<-chan error{older, newer} {
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Fatal(err)
+			}
+		case <-time.After(3 * time.Second):
+			t.Fatal("policy waiter never completed")
+		}
+	}
+	if capacity, wait := policyBufferState(root); p.buffers != root || capacity != 512<<20 || wait != 0 || p.admission.currentPolicy().Revision != "8" {
+		t.Fatalf("obsolete completion reverted the winning root: %d %s", capacity, wait)
 	}
 }

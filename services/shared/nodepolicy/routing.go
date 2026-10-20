@@ -4,6 +4,7 @@
 package nodepolicy
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/url"
@@ -68,6 +69,40 @@ type Routing struct {
 	Tiers    map[string]TierRouting `json:"tiers"`
 	Limits   Limits                 `json:"limits"`
 	Listener Listener               `json:"listener"`
+	Buffers  BufferLimits           `json:"buffers"`
+}
+
+// BufferLimits bounds process-owned inference storage and acquisition waits.
+// Existing storage drains after a decrease; zero wait refuses contention.
+type BufferLimits struct {
+	CapacityMiB int `json:"capacityMiB"`
+	WaitSeconds int `json:"waitSeconds"`
+}
+
+// UnmarshalJSON overlays omitted fields while refusing explicit null, which
+// encoding/json would otherwise treat as an omitted integer or object.
+func (b *BufferLimits) UnmarshalJSON(data []byte) error {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return err
+	}
+	if fields == nil {
+		return errors.New("routing.buffers must be an object")
+	}
+	for _, name := range []string{"capacityMiB", "waitSeconds"} {
+		for key, raw := range fields {
+			if strings.EqualFold(key, name) && strings.TrimSpace(string(raw)) == "null" {
+				return fmt.Errorf("routing.buffers.%s must be an integer", name)
+			}
+		}
+	}
+	type wire BufferLimits
+	next := wire(*b)
+	if err := json.Unmarshal(data, &next); err != nil {
+		return err
+	}
+	*b = BufferLimits(next)
+	return nil
 }
 
 // Account is one provider billing or quota bucket. It carries the credential
@@ -298,6 +333,7 @@ func defaultRouting() Routing {
 			MaxOutputTokens:        4096,
 		},
 		Listener: Listener{AllowedOrigins: []string{}},
+		Buffers:  BufferLimits{CapacityMiB: 256, WaitSeconds: 5},
 	}
 }
 
@@ -334,6 +370,12 @@ func nilIfEmpty[T any](s []T) []T {
 // validate reports the first problem with the routing section on its own.
 // References from tier entries are checked by Policy.Validate.
 func (r Routing) validate() error {
+	if r.Buffers.CapacityMiB < 192 || r.Buffers.CapacityMiB > 1024 {
+		return errors.New("routing.buffers.capacityMiB must be between 192 and 1024")
+	}
+	if r.Buffers.WaitSeconds < 0 || r.Buffers.WaitSeconds > maxLimitSeconds {
+		return fmt.Errorf("routing.buffers.waitSeconds must be between 0 and %d", maxLimitSeconds)
+	}
 	accounts := map[string]bool{}
 	credentials := map[CredentialRef]string{}
 	for i, a := range r.Accounts {

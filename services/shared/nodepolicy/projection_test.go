@@ -10,6 +10,31 @@ import (
 	"testing"
 )
 
+func TestPeerBufferSettingsStayOriginLocal(t *testing.T) {
+	stored := Default()
+	stored.Routing.Buffers = BufferLimits{CapacityMiB: 384, WaitSeconds: 0}
+	raw := peerDocument(t, stored, nil)
+	var doc map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatal(err)
+	}
+	if _, exists := doc["routing"]; exists {
+		t.Fatal("peer projection exposed origin routing")
+	}
+	merged, err := MergePeerSet(stored, raw)
+	if err != nil || merged.Routing.Buffers != (BufferLimits{384, 0}) {
+		t.Fatalf("peer round trip changed local buffers: %+v, %v", merged.Routing.Buffers, err)
+	}
+	for _, key := range []string{"routing", "Routing"} {
+		attempt := peerDocument(t, stored, func(doc map[string]any) {
+			doc[key] = map[string]any{"buffers": map[string]any{"capacityMiB": 1024, "waitSeconds": 600}}
+		})
+		if _, err := MergePeerSet(stored, attempt); err == nil {
+			t.Fatalf("peer changed protected buffers through %s", key)
+		}
+	}
+}
+
 func TestServedResidentPeerRoundTrip(t *testing.T) {
 	for _, name := range []string{"absent", "empty", "subset"} {
 		t.Run(name, func(t *testing.T) {

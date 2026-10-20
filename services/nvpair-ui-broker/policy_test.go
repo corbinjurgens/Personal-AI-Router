@@ -3344,6 +3344,69 @@ func TestPolicyReplayAfterProxyRestartActivatesThePersistedRevision(t *testing.T
 	}
 }
 
+func TestPolicyBuffersPersistCASAndReplay(t *testing.T) {
+	ab := newActivatedBroker(t)
+	base := ab.b.localPolicy().Policy.Revision
+	pol := ab.b.localPolicy().Policy
+	pol.Routing.Buffers = nodepolicy.BufferLimits{CapacityMiB: 384, WaitSeconds: 0}
+	result, err := ab.b.dispatchPolicy(context.Background(), methodPolicySet, policyParams{
+		Policy: mustJSON(pol), ExpectedPersistedRevision: mustJSON(base),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	set, ok := result.(policySetResult)
+	if !ok {
+		t.Fatalf("set result is %T", result)
+	}
+	if set.Policy.Routing.Buffers != (nodepolicy.BufferLimits{CapacityMiB: 384, WaitSeconds: 0}) || set.Activation != activationActive || set.ActiveRevision != set.Policy.Revision {
+		t.Fatalf("custom buffers were not acknowledged: %+v", set)
+	}
+	fresh := freshBroker(t, ab.path).localPolicy().Policy
+	if fresh.Routing.Buffers != (nodepolicy.BufferLimits{CapacityMiB: 384, WaitSeconds: 0}) || fresh.Revision != set.Policy.Revision {
+		t.Fatalf("reload changed buffers: %+v", fresh.Routing.Buffers)
+	}
+	before, err := os.ReadFile(ab.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pol.Routing.Buffers.CapacityMiB = 512
+	if _, err := ab.b.dispatchPolicy(context.Background(), methodPolicySet, policyParams{Policy: mustJSON(pol), ExpectedPersistedRevision: mustJSON(base)}); err == nil {
+		t.Fatal("stale buffer save accepted")
+	}
+	after, err := os.ReadFile(ab.path)
+	if err != nil || !bytes.Equal(before, after) || ab.b.localPolicy().Policy.Routing.Buffers != fresh.Routing.Buffers {
+		t.Fatalf("stale buffer save changed state: %v", err)
+	}
+	pp, proxy, acks := attachAckingProxy(t, ab.b)
+	if got := ab.b.activationOf(set.Policy.Revision); got.Activation != activationPending {
+		t.Fatalf("replacement started active: %+v", got)
+	}
+	ab.b.replayPolicyToProxy(context.Background(), pp)
+	ab.wantActivation(t, set.Policy.Revision, activationActive, "")
+	if acks.heldRevision() != set.Policy.Revision {
+		t.Fatal("replacement did not acknowledge persisted revision")
+	}
+	calls := proxy.snapshot()
+	seen := false
+	for _, call := range calls {
+		if call.method != nodepolicy.MethodSetPolicy {
+			continue
+		}
+		var in nodepolicy.SetPolicyParams
+		if err := json.Unmarshal(call.params, &in); err != nil {
+			t.Fatal(err)
+		}
+		if in.Policy.Routing.Buffers != (nodepolicy.BufferLimits{CapacityMiB: 384, WaitSeconds: 0}) {
+			t.Fatalf("replacement replay changed buffers: %+v", in.Policy.Routing.Buffers)
+		}
+		seen = true
+	}
+	if !seen {
+		t.Fatal("replacement received no policy")
+	}
+}
+
 func TestPolicyActivationFollowsPauseAndResume(t *testing.T) {
 	ab := newActivatedBroker(t)
 	ab.setIdle(t, 5)

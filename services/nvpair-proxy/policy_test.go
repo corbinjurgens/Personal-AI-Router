@@ -4,18 +4,183 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"path/filepath"
 	"reflect"
 	"slices"
 	"strconv"
 	"strings"
 	"testing"
+	"testing/synctest"
+	"time"
 
 	"nvpair-shared/nodepolicy"
 )
+
+type bufferAckWriter func([]byte) (int, error)
+
+func (w bufferAckWriter) Write(data []byte) (int, error) { return w(data) }
+func (w bufferAckWriter) Read([]byte) (int, error)       { return 0, errors.New("no input") }
+
+func policyBufferState(b *bufferBudget) (int64, time.Duration) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.capacity, b.wait
+}
+
+func TestPolicyBufferSettingsBeforeAck(t *testing.T) {
+	var p *Proxy
+	seen := false
+	w := bufferAckWriter(func(data []byte) (int, error) {
+		var out frame
+		if err := json.Unmarshal(data, &out); err != nil {
+			t.Fatal(err)
+		}
+		if out.ID != nil && out.Error == nil {
+			capacity, wait := policyBufferState(p.buffers)
+			if capacity != 384<<20 || wait != 0 || p.admission.currentPolicy().Revision != "7" {
+				t.Fatalf("ack preceded activation: capacity=%d wait=%s revision=%s", capacity, wait, p.admission.currentPolicy().Revision)
+			}
+			seen = true
+		}
+		return len(data), nil
+	})
+	p = NewProxy(NewCodec(w))
+	root := p.buffers
+	if capacity, wait := policyBufferState(root); capacity != 256<<20 || wait != 5*time.Second || len(p.enabledFacades()) != 0 {
+		t.Fatalf("facade-less defaults = capacity %d, wait %s", capacity, wait)
+	}
+	pol := policyAt("7")
+	pol.Routing.Buffers = nodepolicy.BufferLimits{CapacityMiB: 384, WaitSeconds: 0}
+	id := json.RawMessage(`1`)
+	p.handlePolicyMethod(&Message{ID: &id, Params: egressJSON(t, nodepolicy.SetPolicyParams{OriginNodeID: "buffer-origin", Policy: pol})}, nodepolicy.MethodSetPolicy)
+	if !seen || p.buffers != root {
+		t.Fatal("activation lacked an acknowledgement or replaced the process root")
+	}
+}
+
+func TestPolicyBufferHeadroomAndAtomicRejection(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		individual int64
+		capacity   int
+		valid      bool
+	}{
+		{"below schema minimum", 64 << 20, 191, false},
+		{"minimum at default body cap", 64 << 20, 192, true},
+		{"overlap without probe", 96 << 20, 192, false},
+		{"calculated next MiB", 96 << 20, 193, true},
+		{"largest fitting individual", (1024<<20 - 1) / 2, 1024, true},
+		{"impossible at maximum", 512 << 20, 1024, false},
+		{"integer overflow", math.MaxInt64, 1024, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p, w := policyProxy(t)
+			p.maxRequestBytes = tc.individual
+			root, previous := p.buffers, p.admission.currentPolicy()
+			p.egress.ready, p.egress.sequence, p.egress.notAfter, p.egress.revision = true, 12, 123, previous.Revision
+			pol := policyAt("7")
+			pol.Routing.Buffers = nodepolicy.BufferLimits{CapacityMiB: tc.capacity, WaitSeconds: 0}
+			out := rpc(t, p, w, nodepolicy.MethodSetPolicy, pol)
+			if tc.valid {
+				ack := ackOf(t, out)
+				capacity, wait := policyBufferState(root)
+				if ack.Revision != "7" || capacity != int64(tc.capacity)<<20 || wait != 0 {
+					t.Fatalf("accepted settings not installed: ack %+v capacity %d wait %s", ack, capacity, wait)
+				}
+			} else {
+				capacity, wait := policyBufferState(root)
+				if out.Error == nil || !reflect.DeepEqual(p.admission.currentPolicy(), previous) || capacity != 256<<20 || wait != 5*time.Second || !p.egress.ready || p.egress.sequence != 12 || p.egress.notAfter != 123 || p.egress.transition != nil || p.originNodeID != "test-origin" {
+					t.Fatalf("rejection changed policy/root/authority: error %+v capacity %d wait %s origin %q", out.Error, capacity, wait, p.originNodeID)
+				}
+			}
+			if p.buffers != root {
+				t.Fatal("policy activation replaced the root")
+			}
+		})
+	}
+}
+
+func TestPolicyBufferConversionsRejectOverflow(t *testing.T) {
+	p := NewProxy(NewCodec(&recordingWriter{}))
+	pol := nodepolicy.Default()
+	pol.Routing.Buffers.CapacityMiB = math.MaxInt
+	if _, _, err := p.bufferSettings(pol); err == nil {
+		t.Fatal("capacity multiplication overflow accepted")
+	}
+	pol.Routing.Buffers.CapacityMiB = (1 << 44) + 256
+	if _, _, err := p.bufferSettings(pol); err == nil {
+		t.Fatal("capacity overflow wrapping to a valid positive capacity accepted")
+	}
+	pol = nodepolicy.Default()
+	pol.Routing.Buffers.WaitSeconds = math.MaxInt
+	if _, _, err := p.bufferSettings(pol); err == nil {
+		t.Fatal("duration multiplication overflow accepted")
+	}
+}
+
+func TestPolicyBufferLeaseDrainAndIncreaseWake(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		p, w := policyProxy(t)
+		activate := func(revision string, capacity, wait int) {
+			t.Helper()
+			pol := policyAt(revision)
+			pol.Routing.Buffers = nodepolicy.BufferLimits{CapacityMiB: capacity, WaitSeconds: wait}
+			rpcOK(t, p, w, nodepolicy.MethodSetPolicy, pol)
+		}
+		activate("1", 384, 5)
+		root := p.buffers
+		owner := bufferMustAcquire(t, root, 300<<20)
+		borrower, err := owner.borrow()
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer borrower.close()
+		owner.close()
+		queued := bufferStartAcquire(t, root, context.Background(), 100<<20)
+		synctest.Wait()
+		activate("2", 192, 0)
+		bufferAssertTotals(t, root, 300<<20, 1, 1)
+		queued.pending(t)
+		if lease, err := root.acquire(context.Background(), 1); lease != nil || !errors.Is(err, errBufferBusy) {
+			t.Fatalf("cap decrease admitted bytes above ceiling: %v %v", lease, err)
+		}
+		activate("3", 512, 0)
+		synctest.Wait()
+		queued.success(t).close()
+		if p.buffers != root {
+			t.Fatal("activation replaced a borrowed root")
+		}
+		bufferAssertTotals(t, root, 300<<20, 1, 0)
+		borrower.close()
+		bufferAssertTotals(t, root, 0, 0, 0)
+	})
+}
+
+func TestPolicyBufferWaitOnlyChangesNewAcquisitions(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		p, w := policyProxy(t)
+		root := p.buffers
+		bufferMustAcquire(t, root, 256<<20)
+		queued := bufferStartAcquire(t, root, context.Background(), 1)
+		synctest.Wait()
+		pol := policyAt("1")
+		pol.Routing.Buffers.WaitSeconds = 0
+		rpcOK(t, p, w, nodepolicy.MethodSetPolicy, pol)
+		if lease, err := root.acquire(context.Background(), 1); lease != nil || !errors.Is(err, errBufferBusy) {
+			t.Fatalf("new wait=0 acquisition = %v %v", lease, err)
+		}
+		bufferAdvance(4 * time.Second)
+		queued.pending(t)
+		bufferAdvance(time.Second)
+		_, err := queued.result(t)
+		bufferAssertBusy(t, err)
+	})
+}
 
 // frame is one JSON-RPC line the proxy wrote upward.
 type frame struct {
