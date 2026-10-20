@@ -296,6 +296,29 @@ func phase04Request(t *testing.T, ctx context.Context, source *task1Node, mode s
 	return resp
 }
 
+// phase04AssertInterruptedTail checks the stream-continuity contract for an
+// interrupted managed stream after its first chunk: the proxy ends it with
+// exactly one protocol error frame and a clean EOF, never with more content.
+func phase04AssertInterruptedTail(t *testing.T, r io.Reader, label string) {
+	t.Helper()
+	remainder, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatalf("%s: read error %v, want clean EOF after an error frame (remainder=%q)", label, err, remainder)
+	}
+	line, rest, ok := bytes.Cut(remainder, []byte("\n"))
+	if !ok || len(rest) != 0 {
+		t.Fatalf("%s remainder=%q, want exactly one newline-terminated error frame", label, remainder)
+	}
+	var frame map[string]json.RawMessage
+	if err := json.Unmarshal(line, &frame); err != nil {
+		t.Fatalf("%s tail %q is not a JSON frame: %v", label, line, err)
+	}
+	var message string
+	if len(frame) != 1 || json.Unmarshal(frame["error"], &message) != nil || message == "" {
+		t.Fatalf("%s tail %q, want a single non-empty error member", label, line)
+	}
+}
+
 func phase04FirstChunk(t *testing.T, resp *http.Response) *bufio.Reader {
 	t.Helper()
 	if resp.StatusCode != http.StatusOK || resp.Header.Get("X-Phase04-Stream") != "preserved" || resp.Header.Get("Content-Type") != "application/x-ndjson" {
@@ -390,9 +413,7 @@ func TestReverseInferencePhase04(t *testing.T) {
 		case <-time.After(5 * time.Second):
 			t.Fatal("direct stream stopped before fault")
 		}
-		if remainder, err := io.ReadAll(reader); err == nil || len(remainder) != 0 {
-			t.Fatalf("dropped direct stream remainder=%q err=%v", remainder, err)
-		}
+		phase04AssertInterruptedTail(t, reader, "dropped direct stream")
 		phase04AssertOrdered(t, f, b, "direct-recovered")
 		if got := f.engines[a.uuid].count("direct-drop"); got != 1 {
 			t.Fatalf("exposed direct inference replayed: dispatches=%d", got)
@@ -405,10 +426,7 @@ func TestReverseInferencePhase04(t *testing.T) {
 		outer := a.observers[noderec.ServiceCluster]
 		before := outer.established(b.uuid)
 		outer.interrupt(b.uuid, true)
-		remainder, err := io.ReadAll(r)
-		if err == nil || len(remainder) != 0 {
-			t.Fatalf("dropped exposed stream remainder=%q err=%v", remainder, err)
-		}
+		phase04AssertInterruptedTail(t, r, "dropped exposed stream")
 		select {
 		case mode := <-f.engines[b.uuid].canceled:
 			if mode != "drop" {
