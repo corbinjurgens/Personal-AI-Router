@@ -827,3 +827,72 @@ func TestHandleHTTP_CancelActiveMovesSelfDispatchOn(t *testing.T) {
 		return p.admission.currentActive() == 0
 	})
 }
+
+func TestHandleHTTP_SelfAdmissionCancelStaysWithAttempt(t *testing.T) {
+	forEachEngine(t, func(t *testing.T, tc engineCase) {
+		local := newStallingEngine(t)
+		peer := newStallingEngine(t)
+		port := tc.profile.FacadePort
+		disc := NewDiscovery()
+		disc.AddManual(selfNode("self", port, tc.advertisedModel))
+		disc.AddManual(nodeForModel(t, "peer", peer.URL, tc.advertisedModel))
+		p := newTestProxy(tc.profile, NewCodec(&recordingWriter{}), disc, port)
+		setBackend(t, p.soleFacade(), local.URL, true)
+		p.SetPriority([]string{"self", "peer"})
+
+		done := make(chan *httptest.ResponseRecorder, 1)
+		go func() {
+			rec := httptest.NewRecorder()
+			p.soleFacade().handleHTTP(rec, tc.inferenceRequest())
+			done <- rec
+		}()
+		waitChan(t, local.received, "the self attempt")
+
+		// Collect the actual ticket callback as setAvailability does, then
+		// invoke it outside the admission lock at controlled attempt boundaries.
+		p.admission.mu.Lock()
+		var cancel func()
+		for _, ticket := range p.admission.tickets {
+			cancel = ticket.cancel
+		}
+		tickets := len(p.admission.tickets)
+		p.admission.mu.Unlock()
+		if tickets != 1 || cancel == nil {
+			t.Fatalf("self admission has %d tickets, callback present = %t", tickets, cancel != nil)
+		}
+
+		// While its attempt is current, the callback must still abort it.
+		cancel()
+		waitChan(t, local.cancelled, "the self attempt to be cancelled")
+		waitChan(t, peer.received, "the replacement attempt")
+
+		p.workloadsMu.Lock()
+		ctl := p.workloads[workloadKey{engine: tc.profile.Name, id: "1"}]
+		p.workloadsMu.Unlock()
+		if ctl == nil {
+			t.Fatal("replacement workload is missing")
+		}
+
+		// The same callback can outlive its released ticket. It must not
+		// abandon or exclude the replacement, even before that attempt commits.
+		cancel()
+		ctl.mu.Lock()
+		att := ctl.attempt
+		peerAbandoned := att != nil && att.claim.abandoned()
+		peerExcluded := ctl.excluded["peer"]
+		ctl.mu.Unlock()
+		if att == nil || peerAbandoned || peerExcluded {
+			t.Fatalf("stale callback changed replacement: missing=%t abandoned=%t excluded=%t", att == nil, peerAbandoned, peerExcluded)
+		}
+
+		peer.doRelease()
+		select {
+		case rec := <-done:
+			if rec.Code != http.StatusOK || rec.Header().Get(nodepolicy.NodeHeader) != "peer" {
+				t.Fatalf("replacement response: status=%d node=%q", rec.Code, rec.Header().Get(nodepolicy.NodeHeader))
+			}
+		case <-time.After(3 * time.Second):
+			t.Fatal("replacement attempt did not complete")
+		}
+	})
+}
