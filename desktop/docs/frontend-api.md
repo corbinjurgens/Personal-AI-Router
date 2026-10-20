@@ -107,6 +107,36 @@ They do not imply a WebSocket connection. Browser clients are not supported.
   only source of applied settings state.
 - `onSettingsDisconnected(callback)` reports that a node's settings authority
   became unreachable, so its cached snapshot is stale.
+- `switchStatus(request)` reads the E3 configuration revision and active request;
+  a request-specific read returns that caller's receipt and current observations.
+  `afterSequence` allows a bounded wait; an unchanged result is not completion.
+- `switchEngine(request)` submits the existing broker transaction with explicit
+  node, source, target, fresh request ID and the revision just read. It is not a
+  pair of lifecycle commands. `onSwitchChanged(callback)` invalidates status;
+  receipts are merged only for the matching node/request and increasing sequence.
+
+The expanded node engine settings expose **Switch engine**, **From**, **To**
+and **Switch**, plus **Refresh readback**. The node-scoped switch store owns
+correlation; pending actions interlock the source/target during submission.
+Missing revision, disconnect, active work/recovery, equal selections or remote
+permission not currently allowed disable submission with a visible reason.
+Other clients' receipts are observed activity. Local pause/Off remains available.
+
+The controls show node/request identity, sequence, phase, typed error and
+`recoveryRequired`, with saved intent, timestamped observations and termination
+evidence separately. Accepted, source-off and target-ready are not completed.
+Remote permission denial (`-32012`), local veto (`-32011`) and configuration
+conflict (`-32010`) remain distinct; denial refreshes permission and retains the
+draft. Permission changes belong on the target device.
+
+After an uncertain submit, read the original ID; no automatic resend occurs.
+Unknown/unreachable outcomes remain unknown. Refresh only reads: it cannot
+force, cancel, roll back, restart the source or perform recovery. An absent
+receipt is not proof of non-acceptance: the broker has no fence/tombstone for a
+sent request it has not accepted, so a late arrival remains possible. Clearing
+client state, reconnecting or seeing an idle baseline does not resolve that
+uncertainty. The TUI's visit-scoped limitation is described in the
+[operator guide](../../docs/terminal-interface.mdx#switch-engine).
 
 `EngineType` currently includes `ollama`, `lm-studio`, and `llama-cpp`.
 `searchHub(engineType, query?)` serves Ollama's locked local catalog and cached
@@ -172,6 +202,8 @@ Commands return no state. Renderer stores update from
 | `engines:get-settings`      | `EngineSettingsTarget`       | `EngineSettingsSnapshot`  |
 | `engines:preview-settings`  | `EngineSettingsRequest`      | `EngineSettingsPreview`   |
 | `engines:apply-settings`    | `EngineSettingsRequest`      | `EngineSettingsReceipt`   |
+| `engines:switch`            | `SwitchRequest`              | `{ receipt: SwitchReceipt }` |
+| `engines:switch-status`     | `SwitchStatusRequest`        | `SwitchStatus`            |
 | `engine:command`            | `EngineCommandPayload`       | `null`                    |
 | `engine:search-hub`         | `{ engineType, query? }`     | `EngineHubSearchResponse` |
 | `errors:get-initial`        | `void`                       | `ServiceError[]`          |
@@ -188,6 +220,7 @@ Commands return no state. Renderer stores update from
 | `engines:state-changed`           | `EngineStatePatch`               |
 | `engines:settings-changed`        | `EngineSettingsSnapshot`         |
 | `engines:settings-disconnected`   | `{ nodeId }`                     |
+| `engines:switch-changed`          | `SwitchChanged`                  |
 | `engines:progress-changed`        | `EngineProgress`                 |
 | `engines:progress-cleared`        | `{ key }`                        |
 | `metrics:update`                  | `NodeItemMetrics`                |
