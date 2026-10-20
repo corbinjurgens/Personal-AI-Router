@@ -41,6 +41,26 @@ func chatFixture() (*chatQualification, chatTarget) {
 	return q, target
 }
 
+func TestChatResponseStandaloneParserAllowance(t *testing.T) {
+	q, _ := chatFixture()
+	b := &chatTestBudget{}
+	fixed := 0
+	budget := func(n int64) (func(), error) {
+		if n == chatFixedStorage+256 {
+			fixed++
+		}
+		return b.acquire(n)
+	}
+	body := chatResponse("synthetic-v1", `{"role":"assistant","content":"ok"}`, `"stop"`, chatUsageOK, false)
+	result, err := q.parseResponse(context.Background(), strings.NewReader(body), false, 1000, 100, q.Now(), budget, func([]byte) error { return nil })
+	if err != nil || !result.Complete || fixed != 1 || b.held != 0 {
+		t.Fatalf("standalone parser: complete=%v fixed=%d held=%d err=%v", result.Complete, fixed, b.held, err)
+	}
+	if _, err := q.parseResponseWithAllowance(context.Background(), strings.NewReader(body), false, 1000, 100, q.Now(), nil, func([]byte) error { return nil }); !errors.Is(err, errChatBudget) {
+		t.Fatalf("nil parser allowance accepted: %v", err)
+	}
+}
+
 type chatTestBudget struct {
 	held, peak int64
 	calls      int

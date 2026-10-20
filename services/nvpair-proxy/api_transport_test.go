@@ -153,7 +153,7 @@ func TestPublicTransportAddress(t *testing.T) {
 				calls++
 				return nil, errors.New("synthetic dial")
 			}
-			if _, err := c.dialPublic(context.Background(), "tcp", "example.com:443"); err == nil || calls != 0 {
+			if _, err := c.pinPublic(context.Background()); err == nil || calls != 0 {
 				t.Fatalf("forbidden answer reached dial: %d, %v", calls, err)
 			}
 		})
@@ -168,7 +168,7 @@ func TestPublicTransportAddress(t *testing.T) {
 			t.Error("empty DNS reached dial")
 			return nil, errors.New("dial")
 		}
-		if _, err := c.dialPublic(context.Background(), "tcp", "example.com:443"); err == nil {
+		if _, err := c.pinPublic(context.Background()); err == nil {
 			t.Fatal("empty DNS accepted")
 		}
 	})
@@ -199,6 +199,71 @@ func TestPublicTransportAddress(t *testing.T) {
 			t.Fatalf("calls=%d resolves=%d", calls.Load(), resolves.Load())
 		}
 	})
+}
+
+func TestPublicTransportDNSBeforeAcceptance(t *testing.T) {
+	s := publicTestServer(t, func(w http.ResponseWriter, _ *http.Request) { fmt.Fprint(w, "ok") })
+	c := publicTestClient(t, s)
+	resolved, accepted, calls := false, false, 0
+	resolve := c.resolve
+	c.resolve = func(ctx context.Context, host string) ([]netip.Addr, error) {
+		if accepted {
+			t.Error("DNS after final acceptance")
+		}
+		resolved = true
+		calls++
+		return resolve(ctx, host)
+	}
+	b := &publicTestBudget{ceiling: 4096}
+	r, err := c.post(context.Background(), strings.NewReader("{}"), "synthetic", false, b.acquire, func(context.Context) error {
+		if !resolved {
+			t.Error("accepted before DNS pinning")
+		}
+		accepted = true
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Body.Close()
+	if _, err := io.ReadAll(r.Body); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 1 || !accepted {
+		t.Fatalf("DNS calls=%d accepted=%v", calls, accepted)
+	}
+}
+
+func TestPublicTransportDNSConnectDeadline(t *testing.T) {
+	c, err := newPublicClient("https://example.com/chat", publicTestBounds())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var dnsDeadline time.Time
+	c.resolve = func(ctx context.Context, _ string) ([]netip.Addr, error) {
+		var ok bool
+		dnsDeadline, ok = ctx.Deadline()
+		if !ok {
+			t.Fatal("DNS has no finite connect deadline")
+		}
+		return []netip.Addr{netip.MustParseAddr("8.8.8.8")}, nil
+	}
+	dialed := false
+	c.dial = func(ctx context.Context, _, address string) (net.Conn, error) {
+		dialed = true
+		deadline, ok := ctx.Deadline()
+		if !ok || !deadline.Equal(dnsDeadline) || address != "8.8.8.8:443" {
+			t.Errorf("connect deadline restarted or numeric pin lost: deadline=%v DNS=%v address=%s", deadline, dnsDeadline, address)
+		}
+		return nil, errors.New("synthetic dial")
+	}
+	ctx, err := c.pinPublic(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.dialPublic(ctx, "tcp", "example.com:443"); err == nil || !dialed {
+		t.Fatalf("numeric dial missing: %v", err)
+	}
 }
 
 func TestPublicTransportTLS(t *testing.T) {
