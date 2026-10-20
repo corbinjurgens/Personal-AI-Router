@@ -91,10 +91,11 @@ const WorkerFrameBytes = 8 << 20
 // Codec handles newline-delimited JSON-RPC 2.0 over an io.ReadWriter.
 // Writes are safe for concurrent use.
 type Codec struct {
-	scanner *bufio.Scanner
-	writer  io.Writer
-	wgate   chan struct{}
-	retired bool // guarded by wgate
+	scanner        *bufio.Scanner
+	writer         io.Writer
+	wgate          chan struct{}
+	retired        bool // guarded by wgate
+	interruptWrite func()
 }
 
 // NewCodec wraps rw with a Codec. Reads accept frames up to 1 MiB.
@@ -115,12 +116,24 @@ func NewCodec(rw io.ReadWriter) *Codec {
 // (bufio.Scanner cannot resync past an over-long line), so the read loop exits
 // cleanly rather than spinning.
 func NewCodecMaxFrame(rw io.ReadWriter, maxFrame int) *Codec {
+	return NewCodecMaxFrameWithWriteInterrupt(rw, maxFrame, nil)
+}
+
+// NewCodecMaxFrameWithWriteInterrupt gives the transport owner control over
+// active write cancellation and failure. interrupt must promptly and permanently
+// unblock Write, without waiting for the writer or acquiring its write gate.
+// NotifyContext joins both Write and interrupt before returning. An arbitrary
+// io.Writer is not intrinsically cancellable; without a hook, active writes
+// remain synchronous and may outlive their context. Queued cancellation and
+// marshal errors never invoke interrupt.
+func NewCodecMaxFrameWithWriteInterrupt(rw io.ReadWriter, maxFrame int, interrupt func()) *Codec {
 	scanner := bufio.NewScanner(rw)
 	scanner.Buffer(make([]byte, 0, 64*1024), maxFrame)
 	return &Codec{
-		scanner: scanner,
-		writer:  rw,
-		wgate:   make(chan struct{}, 1),
+		scanner:        scanner,
+		writer:         rw,
+		wgate:          make(chan struct{}, 1),
+		interruptWrite: interrupt,
 	}
 }
 
@@ -145,7 +158,7 @@ func (c *Codec) Read() (*Message, error) {
 }
 
 func (c *Codec) write(msg *Message) error {
-	return c.writeContext(context.Background(), nil, nil, msg)
+	return c.writeContext(context.Background(), nil, c.interruptWrite, msg)
 }
 
 // writeContext shares ownership with all codec writes. Only an active frame
@@ -247,7 +260,15 @@ func (c *Codec) writeContext(ctx context.Context, closed <-chan struct{}, interr
 
 // Notify sends a fire-and-forget notification (method, params, no id).
 func (c *Codec) Notify(method string, params any) error {
-	return notify(c.write, method, params)
+	return c.NotifyContext(context.Background(), method, params)
+}
+
+// NotifyContext sends a notification with ctx covering write-gate acquisition
+// and the complete frame. Active cancellation requires an owner interrupt hook.
+func (c *Codec) NotifyContext(ctx context.Context, method string, params any) error {
+	return notify(func(msg *Message) error {
+		return c.writeContext(ctx, nil, c.interruptWrite, msg)
+	}, method, params)
 }
 
 func notify(write func(*Message) error, method string, params any) error {

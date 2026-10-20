@@ -285,6 +285,236 @@ func assertPeerPending(t *testing.T, p *Peer, want int) {
 	}
 }
 
+// Each notification case exercises both public send paths against the same
+// synchronized writer, including raw codec rejection after peer retirement.
+func notificationLifetimeEndpoints(t *testing.T, test func(*testing.T, func(io.Writer, func()) (*Codec, func(context.Context, string, any) error))) {
+	t.Helper()
+	t.Run("codec", func(t *testing.T) {
+		test(t, func(w io.Writer, interrupt func()) (*Codec, func(context.Context, string, any) error) {
+			c := NewCodecMaxFrameWithWriteInterrupt(rw{bytes.NewReader(nil), w}, WorkerFrameBytes, interrupt)
+			return c, c.NotifyContext
+		})
+	})
+	t.Run("peer", func(t *testing.T) {
+		test(t, func(w io.Writer, interrupt func()) (*Codec, func(context.Context, string, any) error) {
+			c := writeCodec(w)
+			p := NewPeerWithWriteInterrupt(c, interrupt)
+			return c, p.NotifyContext
+		})
+	})
+}
+
+func TestNotificationLifetimePreCancelled(t *testing.T) {
+	notificationLifetimeEndpoints(t, func(t *testing.T, newEndpoint func(io.Writer, func()) (*Codec, func(context.Context, string, any) error)) {
+		var buf bytes.Buffer
+		var interrupts atomic.Int32
+		_, send := newEndpoint(&buf, func() { interrupts.Add(1) })
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		if err := send(ctx, "cancelled", nil); !errors.Is(err, context.Canceled) {
+			t.Fatalf("send: %v", err)
+		}
+		if buf.Len() != 0 || interrupts.Load() != 0 {
+			t.Fatalf("pre-cancelled send wrote %d bytes, interrupted %d times", buf.Len(), interrupts.Load())
+		}
+		if err := send(context.Background(), "healthy", nil); err != nil {
+			t.Fatalf("healthy send: %v", err)
+		}
+	})
+}
+
+func TestNotificationLifetimeQueuedCancellation(t *testing.T) {
+	notificationLifetimeEndpoints(t, func(t *testing.T, newEndpoint func(io.Writer, func()) (*Codec, func(context.Context, string, any) error)) {
+		w := newBlockedPeerWriter(t, 0, false)
+		var interrupts atomic.Int32
+		_, send := newEndpoint(w, func() { interrupts.Add(1); w.unblock() })
+		owner := make(chan error, 1)
+		go func() { owner <- send(context.Background(), "owner", nil) }()
+		awaitPeerSignal(t, w.entered, "active notification")
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+		defer cancel()
+		if err := send(ctx, "cancelled", nil); !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("queued send: %v", err)
+		}
+		if interrupts.Load() != 0 {
+			t.Fatal("queued send interrupted active owner")
+		}
+		w.unblock()
+		if err := awaitPeerError(t, owner); err != nil {
+			t.Fatalf("owner send: %v", err)
+		}
+		awaitPeerSignal(t, w.returned, "owner Write completion")
+		if err := send(context.Background(), "healthy", nil); err != nil {
+			t.Fatalf("later send: %v", err)
+		}
+		data, calls := w.snapshot()
+		if calls != 2 {
+			t.Fatalf("Write calls = %d, want 2", calls)
+		}
+		c := readCodec(bytes.NewReader(data))
+		for _, want := range []string{"owner", "healthy"} {
+			msg, err := c.Read()
+			if err != nil || msg.Method != want {
+				t.Fatalf("frame = %+v, error = %v, want %s", msg, err, want)
+			}
+		}
+		if _, err := c.Read(); !errors.Is(err, io.EOF) {
+			t.Fatalf("unexpected late bytes: %v", err)
+		}
+	})
+}
+
+func TestNotificationLifetimeActiveDeadline(t *testing.T) {
+	notificationLifetimeEndpoints(t, func(t *testing.T, newEndpoint func(io.Writer, func()) (*Codec, func(context.Context, string, any) error)) {
+		w := newBlockedPeerWriter(t, 0, true)
+		var interrupts atomic.Int32
+		c, send := newEndpoint(w, func() { interrupts.Add(1); w.unblock() })
+		ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+		defer cancel()
+		result := make(chan error, 1)
+		go func() { result <- send(ctx, "blocked", nil) }()
+		awaitPeerSignal(t, w.entered, "active Write")
+		if err := awaitPeerError(t, result); !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("active send: %v", err)
+		}
+		awaitPeerSignal(t, w.returned, "physical Write completion")
+		if err := send(context.Background(), "later", nil); !errors.Is(err, ErrPeerClosed) {
+			t.Fatalf("later send: %v", err)
+		}
+		id := json.RawMessage("9")
+		if err := c.Respond(&id, nil); !errors.Is(err, ErrPeerClosed) {
+			t.Fatalf("raw response on retired stream: %v", err)
+		}
+		data, calls := w.snapshot()
+		if len(data) != 0 || calls != 1 || interrupts.Load() != 1 {
+			t.Fatalf("bytes=%d writes=%d interrupts=%d", len(data), calls, interrupts.Load())
+		}
+	})
+}
+
+func TestNotificationLifetimePartialFrameJoinsCallback(t *testing.T) {
+	notificationLifetimeEndpoints(t, func(t *testing.T, newEndpoint func(io.Writer, func()) (*Codec, func(context.Context, string, any) error)) {
+		w := newBlockedPeerWriter(t, 7, true)
+		started, finish := make(chan struct{}), make(chan struct{})
+		var once sync.Once
+		release := func() { once.Do(func() { close(finish) }) }
+		t.Cleanup(release)
+		_, send := newEndpoint(w, func() { w.unblock(); close(started); <-finish })
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		result := make(chan error, 1)
+		go func() { result <- send(ctx, "partial", nil) }()
+		awaitPeerSignal(t, w.entered, "partial Write")
+		cancel()
+		awaitPeerSignal(t, started, "callback start")
+		awaitPeerSignal(t, w.returned, "physical Write completion")
+		select {
+		case err := <-result:
+			t.Fatalf("send returned before callback: %v", err)
+		case <-time.After(20 * time.Millisecond):
+		}
+		release()
+		if err := awaitPeerError(t, result); !errors.Is(err, context.Canceled) {
+			t.Fatalf("partial send: %v", err)
+		}
+		if err := send(context.Background(), "later", nil); !errors.Is(err, ErrPeerClosed) {
+			t.Fatalf("later send: %v", err)
+		}
+		data, calls := w.snapshot()
+		if string(data) != `{"jsonr` || calls != 2 {
+			t.Fatalf("partial bytes=%q writes=%d", data, calls)
+		}
+	})
+}
+
+func TestNotificationLifetimeShortWritesAndCompletedCancellation(t *testing.T) {
+	notificationLifetimeEndpoints(t, func(t *testing.T, newEndpoint func(io.Writer, func()) (*Codec, func(context.Context, string, any) error)) {
+		w := &oneByteWriter{}
+		var interrupts atomic.Int32
+		_, send := newEndpoint(w, func() { interrupts.Add(1) })
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		if err := send(ctx, "complete", map[string]int{"value": 7}); err != nil {
+			t.Fatalf("short-write send: %v", err)
+		}
+		cancel()
+		if err := send(context.Background(), "after", nil); err != nil {
+			t.Fatalf("completed cancellation damaged stream: %v", err)
+		}
+		if interrupts.Load() != 0 {
+			t.Fatal("completed send interrupted transport")
+		}
+		c := readCodec(&w.buf)
+		msg, err := c.Read()
+		if err != nil || msg.Method != "complete" {
+			t.Fatalf("complete frame=%+v error=%v", msg, err)
+		}
+		var params struct {
+			Value int `json:"value"`
+		}
+		if err := json.Unmarshal(msg.Params, &params); err != nil || params.Value != 7 {
+			t.Fatalf("params=%+v error=%v", params, err)
+		}
+		msg, err = c.Read()
+		if err != nil || msg.Method != "after" {
+			t.Fatalf("later frame=%+v error=%v", msg, err)
+		}
+	})
+}
+
+func TestNotificationLifetimeMarshalFailure(t *testing.T) {
+	notificationLifetimeEndpoints(t, func(t *testing.T, newEndpoint func(io.Writer, func()) (*Codec, func(context.Context, string, any) error)) {
+		var buf bytes.Buffer
+		var interrupts atomic.Int32
+		_, send := newEndpoint(&buf, func() { interrupts.Add(1) })
+		if err := send(context.Background(), "invalid", make(chan int)); err == nil {
+			t.Fatal("marshal succeeded")
+		}
+		if buf.Len() != 0 || interrupts.Load() != 0 {
+			t.Fatal("marshal failure touched transport")
+		}
+		if err := send(context.Background(), "healthy", nil); err != nil {
+			t.Fatalf("healthy send: %v", err)
+		}
+	})
+}
+
+type notificationCallWriter struct {
+	first chan struct{}
+	next  io.Writer
+	once  sync.Once
+}
+
+func (w *notificationCallWriter) Write(data []byte) (int, error) {
+	first := false
+	w.once.Do(func() { first = true; close(w.first) })
+	if first {
+		return len(data), nil
+	}
+	return w.next.Write(data)
+}
+
+func TestNotificationLifetimePendingCallReleased(t *testing.T) {
+	w := newBlockedPeerWriter(t, 0, true)
+	writer := &notificationCallWriter{first: make(chan struct{}), next: w}
+	p := NewPeerWithWriteInterrupt(writeCodec(writer), w.unblock)
+	call := make(chan error, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _, _, err := p.Call(ctx, "pending", nil); call <- err }()
+	awaitPeerSignal(t, writer.first, "Call frame")
+	deadline, stop := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer stop()
+	if err := p.NotifyContext(deadline, "blocked", nil); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("notification: %v", err)
+	}
+	awaitPeerSignal(t, w.returned, "notification Write completion")
+	if err := awaitPeerError(t, call); !errors.Is(err, ErrPeerClosed) {
+		t.Fatalf("pending Call: %v", err)
+	}
+	assertPeerPending(t, p, 0)
+}
+
 func TestPeerWriteInterruptQueuedCancellation(t *testing.T) {
 	w := newBlockedPeerWriter(t, 0, false)
 	var interrupts atomic.Int32

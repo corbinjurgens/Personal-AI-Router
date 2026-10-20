@@ -54,17 +54,17 @@ func NewPeer(codec *Codec) *Peer {
 	}
 }
 
-// NewPeerWithWriteInterrupt is NewPeer with context-bounded Call writes.
+// NewPeerWithWriteInterrupt is NewPeer with context-bounded writes.
 // interrupt must promptly and permanently unblock the codec's active Write
 // (for example by closing subprocess stdin and invalidating the subprocess).
-// It runs only after a Peer write owns the write gate, on active Call
+// It runs only after a Peer write owns the write gate, on active write
 // cancellation or any Peer write failure, and is never invoked for queued
 // cancellation or response-only timeout. The peer closes before interrupt
 // runs, and the codec is retired before ownership is released, because a
 // partial frame cannot be reused.
 //
 // interrupt must not wait for the Call or acquire the codec's write gate. It
-// may call Peer.Close. Call waits for both Write and interrupt to finish; its
+// may call Peer.Close. The send waits for both Write and interrupt to finish; its
 // time bound therefore depends on interrupt fulfilling this contract. A nil
 // interrupt preserves NewPeer's synchronous, non-interruptible writes.
 func NewPeerWithWriteInterrupt(codec *Codec, interrupt func()) *Peer {
@@ -86,7 +86,17 @@ func (p *Peer) Codec() *Codec { return p.codec }
 func (p *Peer) Done() <-chan struct{} { return p.closedCh }
 
 // Notify sends a fire-and-forget notification.
-func (p *Peer) Notify(method string, params any) error { return notify(p.write, method, params) }
+func (p *Peer) Notify(method string, params any) error {
+	return p.NotifyContext(context.Background(), method, params)
+}
+
+// NotifyContext sends a notification with ctx covering gate acquisition and
+// the complete synchronous write. Physical interruption requires the owner hook
+// supplied to NewPeerWithWriteInterrupt, which takes precedence over any codec
+// hook so one write has one interrupt owner.
+func (p *Peer) NotifyContext(ctx context.Context, method string, params any) error {
+	return notify(func(msg *Message) error { return p.writeContext(ctx, msg) }, method, params)
+}
 
 // Respond answers an inbound request with a result.
 func (p *Peer) Respond(id *json.RawMessage, result any) error { return respond(p.write, id, result) }
