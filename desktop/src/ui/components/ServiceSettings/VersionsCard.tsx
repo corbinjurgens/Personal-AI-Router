@@ -6,15 +6,24 @@ import { Flex, Stack, Text } from '@nvidia/foundations-react-core'
 import { version as appPackageVersion } from '@/../package.json'
 import type { ServiceVersions } from '@/shared/types/ipc-channels'
 import { isElectron } from '@/ui/api/bootstrap'
+import { parseServiceBuildId } from '@/shared/utils/service-build'
 import { OpenInNew } from '@/ui/components/icons'
 
-function VersionRow({ label, value }: { label: string; value: string }) {
+function VersionRow({
+    label,
+    value,
+    semantic = true
+}: {
+    label: string
+    value: string
+    semantic?: boolean
+}) {
     return (
         <Flex justify="between" align="center" gap="4">
             {label && <Text kind="body/regular/sm">{label}</Text>}
             {value && (
                 <Text kind="body/regular/sm" className="text-subtle-color">
-                    {`v${value}`}
+                    {semantic ? `v${value}` : value}
                 </Text>
             )}
         </Flex>
@@ -26,10 +35,26 @@ export default function VersionsCard() {
 
     useEffect(() => {
         if (!isElectron) return
-        window.windowApi.service
-            .getVersions()
-            .then(setVersions)
-            .catch(() => {})
+        let generation = 0
+        const refresh = (connected = true): void => {
+            const request = ++generation
+            setVersions(previous => (previous ? { ...previous, serviceBuildId: undefined } : null))
+            if (!connected) return
+            window.windowApi.service
+                .getVersions()
+                .then(value => {
+                    if (request === generation) setVersions(value)
+                })
+                .catch(() => {})
+        }
+        const unsubscribe = window.windowApi.service.onStatusChanged(status => {
+            refresh(status.connectorStatus === 'connected')
+        })
+        refresh()
+        return () => {
+            ++generation
+            unsubscribe()
+        }
     }, [])
 
     const appVersion = versions?.appVersion ?? appPackageVersion
@@ -79,6 +104,11 @@ export default function VersionsCard() {
                 <Stack gap="2">
                     <Stack gap="2">
                         <VersionRow label="Application" value={appVersion} />
+                        <VersionRow
+                            label="Running service build"
+                            value={parseServiceBuildId(versions?.serviceBuildId) ?? '--'}
+                            semantic={false}
+                        />
                         {versions?.modularServices && (
                             <VersionRow label="Services" value={versions.modularServices} />
                         )}

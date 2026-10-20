@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Button, Flex, Stack } from '@nvidia/foundations-react-core'
+import { Button, Flex, Stack, Text } from '@nvidia/foundations-react-core'
 import { BarChartOutlined, SettingsOutlined } from '@/ui/components/icons'
 import { DismissibleTooltip } from '@/ui/components/DismissibleTooltip/DismissibleTooltip'
 import type { NodeItem } from '@/shared/types/nodes'
@@ -304,6 +304,13 @@ function NodeCardDetails({ node }: NodeCardDetailsProps) {
                         <div className="ml-1 -mt-1 empty:hidden">
                             <NodeDeclaredRoles nodeId={node.id} />
                         </div>
+                        <Text kind="body/regular/sm" className="ml-1 text-subtle-color break-all">
+                            Reported service build: {node.serviceBuildId ?? '--'}
+                            {node.status === 'offline' &&
+                                (node.serviceBuildId
+                                    ? ' (cached; node offline)'
+                                    : ' (node offline)')}
+                        </Text>
                         {isNarrow && (
                             <Flex align="center" gap="2" className="ml-1 -mt-0.5">
                                 {expandButtons('top')}

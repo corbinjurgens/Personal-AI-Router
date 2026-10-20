@@ -7,6 +7,8 @@ import (
 	"net"
 	"sort"
 	"strings"
+
+	"nvpair-shared/buildinfo"
 )
 
 // Being listed and being reachable are different facts: a cluster member that
@@ -106,8 +108,9 @@ type nodeRow struct {
 	// addresses is every address the node published, ranked by the node itself
 	// with address first. Anything that dials the node walks this rather than
 	// assuming the first one is reachable from here.
-	addresses []string
-	port      int
+	addresses      []string
+	port           int
+	serviceBuildID buildinfo.ID
 
 	presence   nodePresence
 	membership nodeMembership
@@ -150,6 +153,7 @@ type nodeFeeds struct {
 func mergeNodes(in nodeFeeds) []nodeRow {
 	byKey := make(map[string]*nodeRow, len(in.discovered)+len(in.members)+len(in.manual))
 	order := make([]string, 0, len(byKey))
+	discoveredKeys := make(map[string]bool, len(in.discovered))
 
 	get := func(key string) *nodeRow {
 		if row, ok := byKey[key]; ok {
@@ -167,6 +171,8 @@ func mergeNodes(in nodeFeeds) []nodeRow {
 			key = "name:" + d.Name
 		}
 		row := get(key)
+		discoveredKeys[key] = true
+		row.serviceBuildID = d.ServiceBuildID
 		row.name = d.Name
 		row.address = d.IPAddress
 		row.addresses = candidateAddresses(d)
@@ -214,6 +220,11 @@ func mergeNodes(in nodeFeeds) []nodeRow {
 			row.address = m.Address
 		}
 		row.manualID = m.ID
+		// Discovery owns its baseline, including an absent build. Manual-only
+		// nodes use the manual worker's last report, even while offline.
+		if !discoveredKeys[row.key] {
+			row.serviceBuildID = m.ServiceBuildID
+		}
 		if row.name == "" {
 			row.name = m.Address
 		}

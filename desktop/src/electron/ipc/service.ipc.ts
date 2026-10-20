@@ -78,7 +78,10 @@ export function registerServiceIpc(): void {
         const licenseType = fs.existsSync(licensePath)
             ? detectLicenseType(fs.readFileSync(licensePath, 'utf8'))
             : ''
+        const supervisor = getModularSupervisor()
+        const serviceBuildId = await supervisor.getServiceBuildId()
         return {
+            serviceBuildId: getModularSupervisor() === supervisor ? serviceBuildId : undefined,
             appVersion: app.getVersion(),
             modularServices: manifest.services,
             binaries,

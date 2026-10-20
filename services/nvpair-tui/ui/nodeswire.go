@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"time"
 
+	"nvpair-shared/buildinfo"
 	"nvpair-shared/noderec"
 )
 
@@ -17,10 +18,11 @@ import (
 // availableNode mirrors the broker's discovery boundary shape (the
 // discovery:get-nodes element and discovery:nodes-changed payload entry).
 type availableNode struct {
-	ID        string `json:"id"`
-	HostUUID  string `json:"hostUuid"`
-	Name      string `json:"name"`
-	IPAddress string `json:"ipAddress"`
+	ID             string       `json:"id"`
+	HostUUID       string       `json:"hostUuid"`
+	ServiceBuildID buildinfo.ID `json:"serviceBuildId"`
+	Name           string       `json:"name"`
+	IPAddress      string       `json:"ipAddress"`
 	// IPAddresses is every address the node published, in its own ranked order
 	// with IPAddress first. A multi-homed node has no single address every peer
 	// can reach — a direct-connect link only works from the machine on its far
@@ -87,9 +89,10 @@ type clusterInvite struct {
 // (services/nvpair-manual-nodes/manager.go), the element of the broker's
 // nodes/list reply, that the Nodes tab uses.
 type manualNode struct {
-	ID      string `json:"id"`
-	Name    string `json:"name"`
-	Address string `json:"address"`
+	ID             string       `json:"id"`
+	Name           string       `json:"name"`
+	Address        string       `json:"address"`
+	ServiceBuildID buildinfo.ID `json:"serviceBuildId"`
 	// HostUUID is the machine's own identity, read from its node-info. It is
 	// what joins a hand-typed hostname to the same machine discovered by IP.
 	HostUUID   string `json:"hostUuid"`

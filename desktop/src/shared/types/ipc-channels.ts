@@ -48,6 +48,8 @@ export interface ServiceStatus {
  * time by `scripts/build-modular-binaries.ts`).
  */
 export interface ServiceVersions {
+    /** Source identity reported by the attached running service, independent of bundled versions. */
+    serviceBuildId?: string
     appVersion: string
     modularServices: string
     binaries: { name: string; version: string }[]

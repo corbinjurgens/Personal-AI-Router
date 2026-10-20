@@ -2003,6 +2003,7 @@ class ModularBridgeState {
             memory: null,
             // The advertisement came with the broker's record; none is left.
             policy: undefined,
+            serviceBuildId: undefined,
             lastSeen: Date.now()
         }
         this.nodes.set(next.id, next)
@@ -2245,6 +2246,7 @@ class ModularBridgeState {
             modelsByEngine: existing.modelsByEngine,
             loadedByEngine: existing.loadedByEngine,
             policy: existing.policy,
+            serviceBuildId: existing.serviceBuildId,
             engines: setEngine(existing.engines, engine, next.engines[engine]),
             lastSeen: Math.max(existing.lastSeen, next.lastSeen)
         }

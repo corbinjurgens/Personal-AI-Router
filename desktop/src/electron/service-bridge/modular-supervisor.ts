@@ -17,6 +17,7 @@ import { createStructuredLogger } from '@/shared/utils/log'
 import getErrorString from '@/shared/utils/get-error-string'
 import { LOCAL_VETO_CODE, localVetoMessage } from '@/shared/constants/service-errors'
 import { currentPlatform } from '@/shared/utils/platform'
+import { parseServiceBuildId } from '@/shared/utils/service-build'
 import {
     getModularBridgeState,
     isUpstreamUnreachableError,
@@ -698,6 +699,38 @@ class ModularSupervisor {
 
     hasProcess(name: ModularProcessName): boolean {
         return this.processes.has(name)
+    }
+
+    /** Read only the attached service; invalidate even if this client reconnects mid-request. */
+    async getServiceBuildId(): Promise<string | undefined> {
+        const child = this.processes.get('broker')
+        if (!child || !this.ready || this.shuttingDown) return undefined
+        let current = true
+        const invalidate = (): void => {
+            current = false
+        }
+        child.on('disconnected', invalidate)
+        child.on('broker-restarted', invalidate)
+        child.on('exit', invalidate)
+        try {
+            const result = await child.call('service/status')
+            if (
+                !current ||
+                this.processes.get('broker') !== child ||
+                !this.ready ||
+                this.shuttingDown
+            ) {
+                return undefined
+            }
+            if (!result || typeof result !== 'object' || Array.isArray(result)) return undefined
+            return parseServiceBuildId(result.serviceBuildId)
+        } catch {
+            return undefined
+        } finally {
+            child.off('disconnected', invalidate)
+            child.off('broker-restarted', invalidate)
+            child.off('exit', invalidate)
+        }
     }
 
     callProcess(
