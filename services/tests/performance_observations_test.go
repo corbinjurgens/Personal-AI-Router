@@ -7,6 +7,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
@@ -36,6 +37,7 @@ import (
 const observationModel = "observation-model"
 const observationLlamaFinal = `{"choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"timings":{"predicted_n":11,"predicted_ms":250,"predicted_per_second":40}}`
 const observationStrataFinal = `{"choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"completion_tokens":20},"timings":{"predicted_n":20,"predicted_ms":400,"predicted_per_second":55}}`
+const observationLlamaPartial = `{"choices":[{"index":0,"delta":{},"finish_reason":null}],"timings":{"predicted_n":11,"predicted_ms":250,"predicted_per_second":40}}`
 
 // These are process fixtures, never native-engine evidence. Every upstream is
 // a loopback HTTP handler and every identity/digest is explicitly synthetic.
@@ -240,6 +242,54 @@ func TestPerformanceObservationNativeRates(t *testing.T) {
 	test("Strata preserves native work rate without usage option", "strata", "data: "+observationStrataFinal+"\n\ndata: [DONE]\n\n", false, 55, 400000000)
 }
 
+func TestPerformanceObservationInvalidTimingRecovery(t *testing.T) {
+	test := func(name, invalidTimings string) {
+		t.Run(name, func(t *testing.T) {
+			var request int
+			var requestMu sync.Mutex
+			upstream := observationUpstream(t, func(w http.ResponseWriter, r *http.Request) {
+				requestMu.Lock()
+				request++
+				invalid := request == 2
+				requestMu.Unlock()
+				w.Header().Set("Content-Type", "text/event-stream")
+				payload := "data: " + observationLlamaFinal + "\n\ndata: [DONE]\n\n"
+				if invalid {
+					// Valid evidence on both sides of the invalid object must not
+					// revive this request's rate. The next request may qualify.
+					payload = "data: " + observationLlamaPartial + "\n\ndata: {\"choices\":[],\"timings\":" + invalidTimings + "}\n\n" + payload
+				}
+				if _, err := io.WriteString(w, payload); err != nil {
+					t.Error(err)
+				}
+			})
+			b, p := observationBrokerFixture(t, upstream.URL)
+			observationRead(t, observationRequest(t, p, context.Background(), true, false))
+			first := observationWaitBrokerSamples(t, b, 1)[0]
+			observationAssertRate(t, first, p.host, p.engine, 40, 250000000)
+			observationWaitBrokerCoverage(t, b, first.Key, 1, 1, 0, 0, 1)
+
+			observationRead(t, observationRequest(t, p, context.Background(), true, false))
+			invalid := observationWaitBrokerSamples(t, b, 2)[1]
+			if invalid.Key != first.Key || invalid.Seq != 2 || invalid.Outcome != performancewire.OutcomeCompleted || invalid.ProtocolComplete == nil || !*invalid.ProtocolComplete || invalid.EngineDecodeTokensPerSecond != nil || invalid.DecodeNs != nil {
+				t.Fatalf("invalid timing retained qualified rate: %+v", invalid)
+			}
+			observationWaitBrokerCoverage(t, b, first.Key, 2, 2, 0, 0, 1)
+
+			observationRead(t, observationRequest(t, p, context.Background(), true, false))
+			recovered := observationWaitBrokerSamples(t, b, 3)[2]
+			if recovered.Key != first.Key || recovered.Seq != 3 {
+				t.Fatalf("recovery profile/sequence=%+v", recovered)
+			}
+			observationAssertRate(t, recovered, p.host, p.engine, 40, 250000000)
+			observationWaitBrokerCoverage(t, b, first.Key, 3, 3, 0, 0, 2)
+		})
+	}
+	test("negative primary duration", `{"predicted_ms":-1}`)
+	test("non-numeric primary rate", `{"predicted_per_second":"invalid"}`)
+	test("invalid auxiliary with valid primary", `{"predicted_n":11,"predicted_ms":250,"predicted_per_second":40,"predicted_per_token_ms":"invalid"}`)
+}
+
 func TestPerformanceObservationNonstreamPassThrough(t *testing.T) {
 	test := func(name string, status int, body string, want performancewire.Outcome) {
 		t.Run(name, func(t *testing.T) {
@@ -286,8 +336,26 @@ func TestPerformanceObservationUnqualifiedStreams(t *testing.T) {
 		})
 	}
 	test("usage only has output count but unknown speed", "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"completion_tokens\":11}}\n\ndata: [DONE]\n\n", performancewire.OutcomeCompleted, true)
-	test("upstream EOF without terminal is failed", "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":null}]}\n\n", performancewire.OutcomeFailed, false)
 	test("upstream protocol error is failed", "data: {\"error\":{\"message\":\"synthetic error\"}}\n\n", performancewire.OutcomeFailed, false)
+}
+
+func TestPerformanceObservationInterruption(t *testing.T) {
+	upstream := observationUpstream(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		if _, err := io.WriteString(w, "data: "+observationLlamaPartial+"\n\n"); err != nil {
+			t.Error(err)
+		}
+	})
+	b, p := observationBrokerFixture(t, upstream.URL)
+	observationRead(t, observationRequest(t, p, context.Background(), true, false))
+	s := observationWaitBrokerSamples(t, b, 1)[0]
+	if s.Outcome != performancewire.OutcomeFailed || s.ProtocolComplete == nil || *s.ProtocolComplete {
+		t.Fatalf("EOF without terminal=%+v", s.Measurement)
+	}
+	if s.EngineDecodeTokensPerSecond == nil || *s.EngineDecodeTokensPerSecond != 40 || s.EngineDecodeNs == nil || *s.EngineDecodeNs != 250000000 || s.OutputTokens == nil || *s.OutputTokens != 11 {
+		t.Fatalf("interrupted stream lost valid numeric evidence: %+v", s.Measurement)
+	}
+	observationWaitBrokerCoverage(t, b, s.Key, 1, 0, 1, 0, 0)
 }
 
 func TestPerformanceObservationMissingIdentity(t *testing.T) {
@@ -305,21 +373,49 @@ func TestPerformanceObservationMissingIdentity(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("missing identity changed inference status=%d", resp.StatusCode)
 	}
+	// Request completion follows performance finalization. Keep identity absent
+	// until then so restoration cannot suppress a mistakenly queued first sample
+	// through the stale-identity guard.
+	task1Eventually(t, "identity-less dispatch finalized", 10*time.Second, func() bool {
+		frames := observationFrames(t, p.rpc, engines.AddressMethod(p.engine, "proxy/request"))
+		return len(frames) == 1
+	})
 	// Restore identity and complete a second request. Its positive observation
 	// supplies the asynchronous sender barrier; the first dispatch must not count.
 	p.identify(t, true)
 	observationRead(t, observationRequest(t, p, context.Background(), true, false))
-	s := observationWaitSamples(t, p.rpc, 1)[0]
-	if s.Seq != 1 {
-		t.Fatalf("missing identity consumed sequence: %d", s.Seq)
+	// Bind the barrier to the restored EngineIdentity, not just the first frame.
+	id := observationIdentity(p.engine).Engines[p.engine]
+	encoded, err := json.Marshal(struct {
+		Run, Settings, Launch, Model, API, Schema string
+		Options                                   map[string]any
+	}{id.EngineRunID, id.SettingsFingerprint, id.LaunchDigest, id.ModelDigests[observationModel], "/v1/chat/completions", "llamacpp:llamacpp-b11146-7fe450e1", map[string]any{"stream": true}})
+	if err != nil {
+		t.Fatal(err)
 	}
+	fingerprint := fmt.Sprintf("%x", sha256.Sum256(encoded))
+	expected := performancewire.ProfileKey{Host: p.host, Engine: p.engine, Model: observationModel, Fingerprint: fingerprint}
+	task1Eventually(t, "sample from restored identity", 10*time.Second, func() bool {
+		samples := observationSamples(t, p.rpc)
+		for i, sample := range samples {
+			if sample.Key != expected {
+				t.Fatalf("sample from identity-less request: %+v", sample)
+			}
+			if i != 0 || sample.Seq != 1 || len(samples) != 1 {
+				t.Fatalf("sample preceded restored identity or consumed sequence: %+v", samples)
+			}
+			observationAssertRate(t, sample, p.host, p.engine, 40, 250000000)
+			return true
+		}
+		return false
+	})
 }
 
 func TestPerformanceObservationCancellation(t *testing.T) {
 	canceled := make(chan struct{})
 	upstream := observationUpstream(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
-		if _, err := io.WriteString(w, "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":null}]}\n\n"); err != nil {
+		if _, err := io.WriteString(w, "data: "+observationLlamaPartial+"\n\n"); err != nil {
 			t.Error(err)
 			return
 		}
@@ -327,8 +423,7 @@ func TestPerformanceObservationCancellation(t *testing.T) {
 		<-r.Context().Done()
 		close(canceled)
 	})
-	base := t.TempDir()
-	p := observationStartProxy(t, base, filepath.Join(base, "cluster"), "destination-b", "llamacpp", upstream.URL)
+	b, p := observationBrokerFixture(t, upstream.URL)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	resp := observationRequest(t, p, ctx, true, false)
@@ -345,10 +440,14 @@ func TestPerformanceObservationCancellation(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("upstream did not receive cancellation")
 	}
-	s := observationWaitSamples(t, p.rpc, 1)[0]
+	s := observationWaitBrokerSamples(t, b, 1)[0]
 	if s.Outcome != performancewire.OutcomeCancelled || s.ProtocolComplete == nil || *s.ProtocolComplete {
 		t.Fatalf("cancellation=%+v", s.Measurement)
 	}
+	if s.EngineDecodeTokensPerSecond == nil || *s.EngineDecodeTokensPerSecond != 40 || s.EngineDecodeNs == nil || *s.EngineDecodeNs != 250000000 || s.OutputTokens == nil || *s.OutputTokens != 11 {
+		t.Fatalf("cancelled stream lost valid numeric evidence: %+v", s.Measurement)
+	}
+	observationWaitBrokerCoverage(t, b, s.Key, 1, 0, 0, 1, 0)
 }
 
 func TestPerformanceObservationFailedDispatchThenSuccess(t *testing.T) {
@@ -694,6 +793,70 @@ type observationProjection struct {
 		MeasuringHost string                   `json:"measuringHost"`
 		Summary       *performancewire.Summary `json:"summary"`
 	} `json:"peers"`
+}
+
+func observationBrokerFixture(t *testing.T, upstream string) (*observationBroker, *observationProxy) {
+	t.Helper()
+	base := t.TempDir()
+	cluster := filepath.Join(base, "cluster")
+	if err := os.MkdirAll(cluster, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	const host = "observation-broker-b"
+	task1WriteJSON(t, filepath.Join(cluster, "identity.json"), map[string]any{"node_uuid": host})
+	task1WriteJSON(t, filepath.Join(cluster, "admission.json"), map[string]any{"counter": 1, "activated": 1, "clusterId": task1ClusterID, "epoch": 1})
+	return observationStartBroker(t, base, cluster, host, upstream)
+}
+
+func observationWaitBrokerSamples(t *testing.T, b *observationBroker, n int) []performancewire.Sample {
+	t.Helper()
+	var samples []performancewire.Sample
+	task1Eventually(t, "real proxy samples at broker boundary", 10*time.Second, func() bool {
+		var frames []jsonrpc.Message
+		observationWorkerHTTP(t, b.client, b.proxy, "/frames", nil, &frames)
+		samples = nil
+		for _, frame := range frames {
+			if frame.Method != "performance:sample" {
+				continue
+			}
+			var sample performancewire.Sample
+			if err := json.Unmarshal(frame.Params, &sample); err != nil {
+				t.Fatal(err)
+			}
+			if err := sample.Validate(); err != nil {
+				t.Fatal(err)
+			}
+			samples = append(samples, sample)
+		}
+		return len(samples) >= n
+	})
+	if len(samples) != n {
+		t.Fatalf("observations=%d, want %d", len(samples), n)
+	}
+	return samples
+}
+
+func observationWaitBrokerCoverage(t *testing.T, b *observationBroker, key performancewire.ProfileKey, samples, completed, failed, cancelled, rates int) {
+	t.Helper()
+	var summary *performancewire.Summary
+	task1Eventually(t, "broker execution count", 10*time.Second, func() bool {
+		summary = b.projection(t).Local.Summary
+		return summary != nil && len(summary.Entries) == 1 && summary.Entries[0].Samples >= samples
+	})
+	e := summary.Entries[0]
+	if summary.MeasuringHost != key.Host || e.Key != key || e.Samples != samples || e.Completed != completed || e.Failed != failed || e.Cancelled != cancelled || e.Decode != nil || e.Prefill != nil {
+		t.Fatalf("broker execution/outcome counts=%+v", summary)
+	}
+	if rates == 0 {
+		if e.EngineDecode != nil {
+			t.Fatalf("unqualified sample contributed rate: %+v", e.EngineDecode)
+		}
+	} else if e.EngineDecode == nil || e.EngineDecode.Samples != rates || e.EngineDecode.DurationNs != int64(rates)*250000000 || e.EngineDecode.TokensPerSecond != 40 {
+		t.Fatalf("broker qualified-rate coverage=%+v, want %d", e.EngineDecode, rates)
+	}
+	if err := summary.Validate(); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func (b *observationBroker) projection(t *testing.T) observationProjection {
