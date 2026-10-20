@@ -62,7 +62,13 @@ func TestServingFileBindingKeepsHFSymlink(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if binding.SourcePath != link || binding.ResolvedTarget != blob || binding.SizeBytes != int64(len(data)) {
+	// The temp root may itself sit under a symlink (macOS /var -> /private/var),
+	// so compare against the blob's fully resolved path.
+	resolvedBlob, err := filepath.EvalSymlinks(blob)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if binding.SourcePath != link || binding.ResolvedTarget != resolvedBlob || binding.SizeBytes != int64(len(data)) {
 		t.Fatal("HF binding did not preserve the source symlink and resolved blob")
 	}
 	info, err := os.Lstat(link)
