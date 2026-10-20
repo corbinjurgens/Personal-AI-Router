@@ -116,7 +116,11 @@ Declare every selected shard, pack/draft file, profile, tokenizer file, Python
 executable, server script, config, native executable and attested library.
 Runtime files use cached full SHA256 verification. Model artifacts keep the
 operator-supplied full SHA256 plus bounded samples, size, mtime and resolved
-target checks; preview/start do not scan full models. Pack/draft enumeration is
+target checks. Declared model targets and runtime paths ending in `.gguf`,
+including split GGUF names, are excluded from runtime hashing. Other declared
+runtime files are fully hashed before the lifecycle lock, with cancellation;
+under the lock only bounded bindings and cached file metadata are rechecked.
+Pack/draft enumeration is
 fixed, and `native_experts.txt` indirection is unsupported. All paths must be
 absolute and existing. The hashed config binds the `lib_dirs` list, but directory
 contents are never crawled or hashed. Undeclared libraries reached through those

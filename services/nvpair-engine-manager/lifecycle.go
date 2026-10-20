@@ -107,6 +107,9 @@ func (e *Executor) StartWith(ctx context.Context, engine string, opts startOpts)
 	if err != nil {
 		return err
 	}
+	if err := prepareStrataState(ctx, st); err != nil {
+		return err
+	}
 	st.opMu.Lock()
 	defer st.opMu.Unlock()
 	if opts.Origin == intentPeer {
@@ -910,6 +913,9 @@ func (e *Executor) Restart(ctx context.Context, engine string) error {
 	defer done()
 	st, err := e.state(engine)
 	if err != nil {
+		return err
+	}
+	if err := prepareStrataState(ctx, st); err != nil {
 		return err
 	}
 	st.opMu.Lock()

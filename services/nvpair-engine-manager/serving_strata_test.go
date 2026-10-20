@@ -18,6 +18,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"nvpair-shared/engines"
 	settings "nvpair-shared/enginesettings"
@@ -26,6 +27,321 @@ import (
 type strataServingFixture struct {
 	llamaServingFixture
 	config strataServingConfig
+}
+
+func TestStrataRuntimeRejectsModelAliases(t *testing.T) {
+	for _, name := range []string{"model-00001-of-00002.gguf", "pack/dense.bin", "draft/dense.bin"} {
+		t.Run(name, func(t *testing.T) {
+			f := newStrataServingFixture(t)
+			alias := filepath.Join(f.root, "lib", "model-alias.so")
+			if err := os.Symlink(filepath.Join(f.root, filepath.FromSlash(name)), alias); err != nil {
+				t.Fatal(err)
+			}
+			m := &f.request.Settings.Serving.Models[0]
+			m.Artifacts = append(m.Artifacts, strataArtifact(t, alias, "runtime:lib:model-alias"))
+			p := previewSettings(t, f.ex, f.request)
+			if !strings.Contains(p.Errors["serving"], "model targets") {
+				t.Fatalf("alias error = %v", p.Errors)
+			}
+			fileHashes.mu.Lock()
+			_, hashed := fileHashes.done[alias]
+			fileHashes.mu.Unlock()
+			if hashed {
+				t.Fatal("model alias was fully hashed")
+			}
+		})
+	}
+}
+
+func TestStrataRuntimeRejectsGGUFExtensions(t *testing.T) {
+	for _, name := range []string{"extra.gguf", "extra-00001-of-00002.GGUF"} {
+		t.Run(name, func(t *testing.T) {
+			f := newStrataServingFixture(t)
+			path := filepath.Join(f.root, name)
+			writeServingFixture(t, path, []byte("synthetic undeclared model"))
+			m := &f.request.Settings.Serving.Models[0]
+			m.Artifacts = append(m.Artifacts, strataArtifact(t, path, "runtime:lib:extra"))
+			p := previewSettings(t, f.ex, f.request)
+			if !strings.Contains(p.Errors["serving"], "GGUF") {
+				t.Fatalf("extension error = %v", p.Errors)
+			}
+		})
+	}
+}
+
+func TestStrataSerialContextNativeMargin(t *testing.T) {
+	f := newStrataServingFixture(t)
+	f.config.Parallel = 1
+	i := slices.Index(f.config.Args, "--batch")
+	f.config.Args = append(f.config.Args[:i:i], f.config.Args[i+2:]...)
+	f.config.Args[slices.Index(f.config.Args, "--max-context")+1] = "2147483647"
+	f.saveConfig(t)
+	p := previewSettings(t, f.ex, f.request)
+	if len(p.Errors) == 0 {
+		t.Fatal("native overflow margin accepted")
+	}
+}
+
+func TestStrataTotalContextNativeMargin(t *testing.T) {
+	f := newStrataServingFixture(t)
+	f.config.Args[slices.Index(f.config.Args, "--max-context")+1] = "1073741820"
+	f.saveConfig(t)
+	p := previewSettings(t, f.ex, f.request)
+	if len(p.Errors) == 0 {
+		t.Fatal("native total context overflow margin accepted")
+	}
+}
+
+// An unfinished shared hash models a slow runtime read without allocating a
+// large fixture. Every public operation must leave Stop's lock available, and
+// cancellation must return while that hash is still unfinished.
+func TestStrataRuntimeHashOutsideOperationLock(t *testing.T) {
+	for _, operation := range []string{"preview", "readback", "apply", "start", "restart", "wake", "restore", "set port", "action"} {
+		t.Run(operation, func(t *testing.T) {
+			f := newStrataServingFixture(t)
+			p := approveLlamaServing(t, f.llamaServingFixture)
+			applyLlamaServing(t, f.llamaServingFixture, p)
+			st := settingsState(t, f.ex)
+			path := filepath.Join(f.root, "lib", "attested.so")
+			info, err := os.Stat(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			key := hashEntry{path: path, size: info.Size(), mtime: info.ModTime().UnixNano()}
+			call := &hashCall{}
+			call.wg.Add(1)
+			fileHashes.mu.Lock()
+			delete(fileHashes.done, path)
+			fileHashes.inflight[key] = call
+			fileHashes.mu.Unlock()
+			defer func() {
+				call.wg.Done()
+				fileHashes.mu.Lock()
+				delete(fileHashes.inflight, key)
+				fileHashes.mu.Unlock()
+			}()
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			done := make(chan error, 1)
+			go func() {
+				var err error
+				switch operation {
+				case "preview":
+					var result settings.Preview
+					result, err = f.ex.PreviewLaunch(f.request, ctx)
+					if len(result.Errors) > 0 {
+						err = errors.New(result.Errors["serving"])
+					}
+				case "readback":
+					var result settings.LaunchState
+					result, err = f.ex.LaunchSettings("fake", ctx)
+					if result.ServingReadback != nil && result.ServingReadback.Status == "mismatch" {
+						err = errors.New(result.ServingReadback.Reason)
+					}
+				case "apply":
+					_, err = f.ex.ConfigureLaunch(ctx, settings.Configure{Engine: "fake", Settings: p.Settings}, func() error { return nil })
+				case "start":
+					err = f.ex.Start(ctx, "fake")
+				case "restart":
+					err = f.ex.Restart(ctx, "fake")
+				case "wake":
+					err = f.ex.Wake(ctx, "fake")
+				case "restore":
+					err = f.ex.restoreEnabled(ctx, "fake")
+				case "set port":
+					_, err = f.ex.SetPort(ctx, "fake", f.request.Settings.ServerPort)
+				case "action":
+					err = f.ex.restartAfterAction(ctx, st, "fake", "test")
+				}
+				done <- err
+			}()
+			select {
+			case err := <-done:
+				t.Fatalf("operation finished before hash release: %v", err)
+			case <-time.After(100 * time.Millisecond):
+			}
+			if !st.opMu.TryLock() {
+				t.Fatal("runtime hash holds lifecycle operation lock")
+			}
+			st.opMu.Unlock()
+			cancel()
+			select {
+			case err := <-done:
+				if err == nil || !strings.Contains(err.Error(), "canceled") {
+					t.Fatalf("cancellation = %v", err)
+				}
+			case <-time.After(3 * time.Second):
+				t.Fatal("runtime hash did not cancel")
+			}
+		})
+	}
+}
+
+func TestStrataRuntimeChangedAfterPreparation(t *testing.T) {
+	f := newStrataServingFixture(t)
+	if err := prepareStrataRuntimeHashes(context.Background(), f.request.Settings.Serving); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(f.root, "lib", "attested.so")
+	writeServingFixture(t, path, []byte("changed after hashing"))
+	st := settingsState(t, f.ex)
+	command, err := launchForState(st, f.request.Settings.ServerPort)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rt := st.plat.Runtime
+	rt.Serving = f.request.Settings.Serving.Clone()
+	// Refresh the bounded binding so this specifically exercises the hash
+	// metadata guard, rather than the earlier attestation-binding guard.
+	for i := range rt.Serving.Models[0].Artifacts {
+		a := &rt.Serving.Models[0].Artifacts[i]
+		if a.Binding.SourcePath == path {
+			a.Binding, err = servingFileBinding(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if _, err := compileStrataServing(command, rt, false); err == nil {
+		t.Fatal("runtime changed during preparation accepted")
+	}
+}
+
+func TestStrataLockedCompilerRejectsColdRuntimeHash(t *testing.T) {
+	f := newStrataServingFixture(t)
+	if err := prepareStrataRuntimeHashes(context.Background(), f.request.Settings.Serving); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(f.root, "lib", "attested.so")
+	strataRuntimeHashes.Lock()
+	delete(strataRuntimeHashes.files, path)
+	strataRuntimeHashes.Unlock()
+	st := settingsState(t, f.ex)
+	command, err := launchForState(st, f.request.Settings.ServerPort)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rt := st.plat.Runtime
+	rt.Serving = f.request.Settings.Serving.Clone()
+	st.opMu.Lock()
+	_, err = compileStrataServing(command, rt, false)
+	st.opMu.Unlock()
+	if err == nil || !strings.Contains(err.Error(), "changed during preparation") {
+		t.Fatalf("cold hash error = %v", err)
+	}
+	strataRuntimeHashes.Lock()
+	_, cached := strataRuntimeHashes.files[path]
+	strataRuntimeHashes.Unlock()
+	if cached {
+		t.Fatal("locked compiler populated a cold runtime hash")
+	}
+}
+
+func TestStrataRuntimeReplacedWithSameMetadata(t *testing.T) {
+	f := newStrataServingFixture(t)
+	if err := prepareStrataRuntimeHashes(context.Background(), f.request.Settings.Serving); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(f.root, "lib", "attested.so")
+	before, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A rename preserves the old inode so the replacement cannot reuse it.
+	if err := os.Rename(path, path+".old"); err != nil {
+		t.Fatal(err)
+	}
+	writeServingFixture(t, path, bytes.Repeat([]byte("x"), int(before.Size())))
+	if err := os.Chtimes(path, before.ModTime(), before.ModTime()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := strataRuntimeDigest(path); err == nil {
+		t.Fatal("replaced runtime passed file identity recheck")
+	}
+	if err := prepareStrataRuntimeHashes(context.Background(), f.request.Settings.Serving); err != nil {
+		t.Fatal(err)
+	}
+	sum, err := strataRuntimeDigest(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := sha256.Sum256(bytes.Repeat([]byte("x"), int(before.Size())))
+	if sum != hex.EncodeToString(want[:]) {
+		t.Fatal("preparation reused hash of replaced runtime")
+	}
+}
+
+func TestStrataRuntimeChangesWhileHashing(t *testing.T) {
+	f := newStrataServingFixture(t)
+	if err := prepareStrataRuntimeHashes(context.Background(), f.request.Settings.Serving); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(f.root, "lib", "attested.so")
+	artifact := strataArtifact(t, path, "runtime:lib:attested")
+	config := f.request.Settings.Serving.Clone()
+	config.Models[0].Artifacts = []engines.ServingArtifact{artifact}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := hashEntry{path: path, size: info.Size(), mtime: info.ModTime().UnixNano()}
+	call := &hashCall{sum: artifact.SHA256}
+	call.wg.Add(1)
+	fileHashes.mu.Lock()
+	delete(fileHashes.done, path)
+	fileHashes.inflight[key] = call
+	fileHashes.mu.Unlock()
+	released := false
+	defer func() {
+		if !released {
+			call.wg.Done()
+		}
+		fileHashes.mu.Lock()
+		delete(fileHashes.inflight, key)
+		fileHashes.mu.Unlock()
+	}()
+	done := make(chan error, 1)
+	go func() { done <- prepareStrataRuntimeHashes(context.Background(), config) }()
+	select {
+	case err := <-done:
+		t.Fatalf("hash finished before release: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	writeServingFixture(t, path, []byte("replacement during runtime hash"))
+	call.wg.Done()
+	released = true
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), "changed during preparation") {
+			t.Fatalf("unstable hash error = %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("hash did not finish after release")
+	}
+}
+
+func TestStrataSettingsCanReplaceInvalidPriorDeclaration(t *testing.T) {
+	for _, operation := range []string{"replace", "disable"} {
+		t.Run(operation, func(t *testing.T) {
+			f := newStrataServingFixture(t)
+			p := approveLlamaServing(t, f.llamaServingFixture)
+			st := settingsState(t, f.ex)
+			st.plat.Runtime.Serving = p.Settings.Serving.Clone()
+			st.plat.Runtime.Serving.Models[0].Artifacts[0].Binding.SourcePath = filepath.Join(f.root, "missing-prior-artifact")
+			request := f.request
+			request.Settings = p.Settings.Clone()
+			if operation == "disable" {
+				request.Settings.Serving = nil
+			}
+			preview := previewSettings(t, f.ex, request)
+			if len(preview.Errors) != 0 {
+				t.Fatalf("valid replacement rejected: %v", preview.Errors)
+			}
+			if _, err := f.ex.ConfigureLaunch(context.Background(), settings.Configure{Engine: "fake", Settings: preview.Settings}, func() error { return nil }); err != nil {
+				t.Fatalf("valid replacement apply: %v", err)
+			}
+		})
+	}
 }
 
 func newStrataServingFixture(t *testing.T) strataServingFixture {

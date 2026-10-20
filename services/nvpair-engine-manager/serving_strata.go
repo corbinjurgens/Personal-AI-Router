@@ -14,11 +14,158 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 
 	"nvpair-shared/engines"
 )
+
+type strataRuntimeHash struct {
+	info os.FileInfo
+	sum  string
+}
+
+var strataRuntimeHashes = struct {
+	sync.Mutex
+	files map[string]strataRuntimeHash
+}{files: map[string]strataRuntimeHash{}}
+
+func strataTarget(path string) (string, error) {
+	target, err := filepath.EvalSymlinks(path)
+	if runtime.GOOS == "windows" {
+		target = strings.ToLower(target)
+	}
+	return target, err
+}
+
+// Check every declaration before any full read, including aliases of pack and
+// draft artifacts whose extensions do not identify them as model content.
+func strataRuntimePaths(config *engines.ServingConfig) ([]string, error) {
+	models := map[string]bool{}
+	for _, model := range config.Models {
+		for _, artifact := range model.Artifacts {
+			if artifact.Binding == nil {
+				return nil, servingError("Missing Strata artifact binding.")
+			}
+			if !strings.HasPrefix(artifact.Role, "runtime:") {
+				target, err := strataTarget(artifact.Binding.SourcePath)
+				if err != nil {
+					return nil, err
+				}
+				models[target] = true
+			}
+		}
+	}
+	var paths []string
+	for _, model := range config.Models {
+		for _, artifact := range model.Artifacts {
+			if !strings.HasPrefix(artifact.Role, "runtime:") {
+				continue
+			}
+			path := artifact.Binding.SourcePath
+			target, err := strataTarget(path)
+			if err != nil {
+				return nil, err
+			}
+			if models[target] || strings.EqualFold(filepath.Ext(path), ".gguf") || strings.EqualFold(filepath.Ext(target), ".gguf") {
+				return nil, servingError("Strata runtime artifacts must not reference model targets or GGUF files.")
+			}
+			paths = append(paths, path)
+		}
+	}
+	return paths, nil
+}
+
+// Only this preparation phase may stream runtime files. It runs without opMu;
+// compilation under opMu only checks the resulting size/mtime/file identity.
+func prepareStrataRuntimeHashes(ctx context.Context, config *engines.ServingConfig) error {
+	if config == nil {
+		return nil
+	}
+	paths, err := strataRuntimePaths(config)
+	if err != nil {
+		return err
+	}
+	for _, path := range paths {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		before, err := os.Stat(path)
+		if err != nil {
+			return err
+		}
+		strataRuntimeHashes.Lock()
+		previous, known := strataRuntimeHashes.files[path]
+		strataRuntimeHashes.Unlock()
+		replaced := !known || !os.SameFile(before, previous.info)
+		// A waiter on an existing shared hash must also be cancellable.
+		type result struct {
+			sum string
+			err error
+		}
+		done := make(chan result, 1)
+		go func() {
+			// The shared cache keys size/mtime, so a replaced inode must not
+			// reuse either its cached digest or an older in-flight read.
+			if replaced {
+				sum, err := hashFile(ctx, path, nil)
+				done <- result{sum, err}
+				return
+			}
+			sum, err := fileHashes.sum(ctx, path, nil)
+			done <- result{sum, err}
+		}()
+		var hashed result
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case hashed = <-done:
+		}
+		if hashed.err != nil {
+			return hashed.err
+		}
+		after, err := os.Stat(path)
+		if err != nil || !os.SameFile(before, after) || before.Size() != after.Size() || before.ModTime() != after.ModTime() {
+			return servingError("Strata runtime changed during preparation.")
+		}
+		if replaced {
+			fileHashes.remember(path, hashed.sum)
+		}
+		strataRuntimeHashes.Lock()
+		strataRuntimeHashes.files[path] = strataRuntimeHash{after, hashed.sum}
+		strataRuntimeHashes.Unlock()
+	}
+	return nil
+}
+
+func strataRuntimeDigest(path string) (string, error) {
+	info, err := os.Stat(path)
+	strataRuntimeHashes.Lock()
+	cached, ok := strataRuntimeHashes.files[path]
+	strataRuntimeHashes.Unlock()
+	if err != nil || !ok || !os.SameFile(info, cached.info) || info.Size() != cached.info.Size() || info.ModTime() != cached.info.ModTime() {
+		return "", servingError("Strata runtime changed during preparation; obtain a fresh preview.")
+	}
+	return cached.sum, nil
+}
+
+// A supplied config, including nil to disable serving, is the proposed state.
+// Without one, prepare the current state for a lifecycle operation or readback.
+func prepareStrataState(ctx context.Context, st *engineState, requested ...*engines.ServingConfig) error {
+	st.mu.Lock()
+	current := st.plat.Runtime.Serving.Clone()
+	strata := st.manifest.FamilyOrDefault() == "strata"
+	st.mu.Unlock()
+	if !strata {
+		return nil
+	}
+	if len(requested) > 0 {
+		current = requested[0]
+	}
+	return prepareStrataRuntimeHashes(ctx, current)
+}
 
 // Prepared subset of corbinjurgens/Strata f6726098 serve/server.py and
 // src/program/generate.cpp. Automatic fitting, mutable profiles, hooks, vision,
@@ -149,6 +296,9 @@ func compileStrataServing(command launchCommand, rt Runtime, approved bool) (*ll
 	if rt.modeOrDefault() != "process" || rt.Serving == nil || len(rt.Serving.Validate()) != 0 || len(rt.Serving.Models) != 1 {
 		return nil, servingError("Prepared Strata requires one declared model and an owned process launch.")
 	}
+	if _, err := strataRuntimePaths(rt.Serving); err != nil {
+		return nil, err
+	}
 	source, err := strataLaunchSource(command)
 	if err != nil {
 		return nil, err
@@ -278,7 +428,8 @@ func compileStrataServing(command launchCommand, rt Runtime, approved bool) (*ll
 			return nil, servingError("Native batch/slots must agree with config parallel without clamping.")
 		}
 	}
-	if ctxErr != nil || contextTokens > math.MaxInt32/slots || contextTokens <= model.MaxOutputTokens || options["--serve"] != "true" || options["--native"] == "" || options["--pack"] == "" {
+	// Pinned generate.cpp f6726098 rejects max_context > 2147483647LL - 8.
+	if ctxErr != nil || contextTokens > (math.MaxInt32-8)/slots || contextTokens <= model.MaxOutputTokens || options["--serve"] != "true" || options["--native"] == "" || options["--pack"] == "" {
 		return nil, servingError("Strata requires explicit finite context, native model, pack and serve mode; output must fit the per-slot context.")
 	}
 	if options["--expert-cache"] == "" || options["--prefill"] == "" {
@@ -314,7 +465,10 @@ func compileStrataServing(command launchCommand, rt Runtime, approved bool) (*ll
 			return nil, servingError("Strata artifact binding changed or is missing.")
 		}
 		if strings.HasPrefix(artifact.Role, "runtime:") {
-			sum, err := fileHashes.sum(context.Background(), path, nil)
+			sum, err := strataRuntimeDigest(path)
+			if err != nil {
+				return nil, err
+			}
 			after, bindingErr := servingFileBinding(path)
 			if err != nil || sum != artifact.SHA256 || bindingErr != nil || *after != *current {
 				return nil, servingError("Strata runtime full SHA256 mismatch or unstable file.")

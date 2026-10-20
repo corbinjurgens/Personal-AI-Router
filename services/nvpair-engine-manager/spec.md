@@ -137,7 +137,11 @@ roles are `runtime:python`, `runtime:server`, `runtime:config`,
 operator-selected `runtime:lib:<label>`. These files use cached full SHA256
 verification plus binding checks. Model/shard/pack and `draft` artifacts retain
 operator-supplied full SHA256 and bounded first/last samples, size, mtime and
-resolved-target checks; preview and start never fully hash model files.
+resolved-target checks. Runtime declarations cannot resolve to any declared
+model target or use GGUF paths (including split GGUF names). Full hashing of
+other declared runtime files occurs before the lifecycle lock with cancellation;
+locked compilation only rechecks bounded bindings and cached size/mtime/file
+identity, rejecting files changed during preparation without rehashing.
 
 Pack enumeration is fixed: `index.txt`, `dense.bin`, `experts.bin`; draft uses
 `dense.txt`, `dense.bin`, `experts.bin`. Existing `embd.bin`, `extra.bin`,

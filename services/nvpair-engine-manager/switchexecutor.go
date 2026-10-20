@@ -693,6 +693,14 @@ func (e *Executor) switchStepLocked(ctx context.Context, p settings.SwitchStepRe
 	if err != nil {
 		return fail(kind, err)
 	}
+	if startTarget && !reconcile {
+		prepareCtx, cancel := context.WithDeadline(ctx, cp.Deadline)
+		err := prepareStrataState(prepareCtx, st)
+		cancel()
+		if err != nil {
+			return fail(kind, err)
+		}
+	}
 	st.opMu.Lock()
 	defer st.opMu.Unlock()
 	if stopSource {

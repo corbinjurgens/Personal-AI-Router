@@ -163,14 +163,29 @@ func (e *Executor) launchStateLocked(engine string, st *engineState) settings.La
 	return result
 }
 
-func (e *Executor) LaunchSettings(engine string) (settings.LaunchState, error) {
+func (e *Executor) LaunchSettings(engine string, contexts ...context.Context) (settings.LaunchState, error) {
 	st, err := e.state(engine)
 	if err != nil {
 		return settings.LaunchState{}, err
 	}
+	ctx, cancel := strataPreparationContext(contexts)
+	defer cancel()
+	preparationErr := prepareStrataState(ctx, st)
 	st.opMu.Lock()
 	defer st.opMu.Unlock()
-	return e.launchStateLocked(engine, st), nil
+	result := e.launchStateLocked(engine, st)
+	if preparationErr != nil {
+		result.ServingReadback = &engines.ServingReadback{Status: "mismatch", Reason: preparationErr.Error()}
+	}
+	return result, nil
+}
+
+func strataPreparationContext(contexts []context.Context) (context.Context, context.CancelFunc) {
+	ctx := context.Background()
+	if len(contexts) > 0 {
+		ctx = contexts[0]
+	}
+	return context.WithTimeout(ctx, settings.ConfigureBudget)
 }
 
 // launchCORSAssignments uses the same mandatory-control reader as preview.
@@ -244,10 +259,15 @@ func (e *Executor) rejectRemoteCORSChangeLocked(st *engineState, request setting
 	return nil
 }
 
-func (e *Executor) PreviewLaunch(p settings.Request) (settings.Preview, error) {
+func (e *Executor) PreviewLaunch(p settings.Request, contexts ...context.Context) (settings.Preview, error) {
 	st, err := e.state(p.Engine)
 	if err != nil {
 		return settings.Preview{}, err
+	}
+	ctx, cancel := strataPreparationContext(contexts)
+	defer cancel()
+	if err := prepareStrataState(ctx, st, p.Settings.Serving); err != nil {
+		return settings.Preview{Settings: p.Settings.Clone(), Errors: map[string]string{"serving": err.Error()}}, nil
 	}
 	st.opMu.Lock()
 	defer st.opMu.Unlock()
@@ -444,6 +464,9 @@ func (e *Executor) ConfigureLaunch(ctx context.Context, p settings.Configure, re
 	st, err := e.state(p.Engine)
 	if err != nil {
 		return settings.LaunchState{}, err
+	}
+	if err := prepareStrataState(ctx, st, p.Settings.Serving); err != nil {
+		return settings.LaunchState{}, servingError(err.Error())
 	}
 	st.opMu.Lock()
 	defer st.opMu.Unlock()
