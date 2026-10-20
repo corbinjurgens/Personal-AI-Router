@@ -20,8 +20,8 @@ import (
 
 var engineFileReplacer durablefile.Replacer
 
-func canMoveAdoptedEngine(rt Runtime) bool {
-	return rt.modeOrDefault() == "command" && rt.Stop != nil && len(rt.Stop.Cmd) > 0
+func canMoveAdoptedEngine(mode string, stop *StopSpec) bool {
+	return mode == "command" && stop != nil && len(stop.Cmd) > 0
 }
 
 // SetPort persists an engine's chosen server port as a manifest override and
@@ -64,7 +64,7 @@ func (e *Executor) SetPort(ctx context.Context, engine string, port int) (Engine
 	// Adopted process-mode engines and command-mode engines without an official
 	// stop command remain externally managed. Refuse rather than killing an
 	// unknown process or spawning a duplicate listener on the new port.
-	if wasRunning && adopted && !canMoveAdoptedEngine(st.plat.Runtime) {
+	if wasRunning && adopted && !canMoveAdoptedEngine(st.plat.Runtime.Mode, st.plat.Runtime.Stop) {
 		return EngineStatus{}, fmt.Errorf("cannot change %s's port: it is running under external management (NVPAIR adopted it rather than starting it), so NVPAIR cannot move it — stop it in its own app first, then set the port", engine)
 	}
 

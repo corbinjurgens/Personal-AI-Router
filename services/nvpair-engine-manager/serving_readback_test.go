@@ -1,0 +1,494 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"strconv"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+)
+
+type loadedLlamaFake struct {
+	mu      sync.Mutex
+	loaded  string
+	props   string
+	status  int
+	onProps func()
+	gets    atomic.Int32
+	loads   atomic.Int32
+	models  atomic.Int32
+	model   string
+}
+
+func TestLoadedServingInvalidationConcurrentAdoptedOperations(t *testing.T) {
+	test := func(name string, operation func(*testing.T, *Executor)) {
+		t.Run(name, func(t *testing.T) {
+			ex := settingsExecutor(t, false)
+			st := settingsState(t, ex)
+			st.mu.Lock()
+			st.running, st.adopted = true, true
+			st.mu.Unlock()
+			defer func() {
+				st.mu.Lock()
+				st.running, st.adopted = false, false
+				st.mu.Unlock()
+			}()
+
+			var wg sync.WaitGroup
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for range 10000 {
+					ex.pokeLoaded()
+				}
+			}()
+			defer wg.Wait()
+			for range 1000 {
+				operation(t, ex)
+			}
+		})
+	}
+	test("adopted settings read", func(t *testing.T, ex *Executor) {
+		t.Helper()
+		state, err := ex.LaunchSettings("fake")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if state.Editable || !state.Running || !state.Adopted {
+			t.Fatalf("adopted launch state = %+v, want running, adopted and uneditable", state)
+		}
+	})
+	test("refused adopted port change", func(t *testing.T, ex *Executor) {
+		t.Helper()
+		if _, err := ex.SetPort(context.Background(), "fake", 21093); err == nil {
+			t.Fatal("adopted engine accepted port mutation")
+		}
+	})
+}
+
+func (s *loadedLlamaFake) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	s.mu.Lock()
+	loaded, props, status, hook := s.loaded, s.props, s.status, s.onProps
+	s.mu.Unlock()
+	if r.Method != http.MethodGet {
+		s.loads.Add(1)
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+	switch r.URL.Path {
+	case "/models":
+		s.models.Add(1)
+		fmt.Fprint(w, loaded)
+	case "/props":
+		s.gets.Add(1)
+		// Simulate llama's autoload default: an unsafe query records a load.
+		if r.URL.Query().Get("autoload") != "false" || r.URL.Query().Get("model") != s.model {
+			s.loads.Add(1)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if hook != nil {
+			hook()
+		}
+		if status == http.StatusFound {
+			w.Header().Set("Location", "/models/load")
+		}
+		w.WriteHeader(status)
+		fmt.Fprint(w, props)
+	default:
+		s.loads.Add(1)
+		w.WriteHeader(http.StatusNotFound)
+	}
+}
+
+func loadedReadbackFixture(t *testing.T, model string) (llamaServingFixture, *loadedLlamaFake) {
+	t.Helper()
+	f := newLlamaServingFixture(t)
+	if model != "medium" {
+		data, err := os.ReadFile(f.source)
+		if err != nil {
+			t.Fatal(err)
+		}
+		writeServingFixture(t, f.source, []byte(strings.Replace(string(data), "[medium]", "["+model+"]", 1)))
+		f.request.Settings.Serving.Models[0].ModelID = model
+	}
+	applyLlamaServing(t, f, approveLlamaServing(t, f))
+	if err := f.ex.Start(context.Background(), "fake"); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := f.ex.Stop("fake"); err != nil {
+			t.Error(err)
+		}
+	})
+	return f, attachLoadedLlamaFake(t, f, model)
+}
+
+func attachLoadedLlamaFake(t *testing.T, f llamaServingFixture, model string) *loadedLlamaFake {
+	t.Helper()
+	row, err := json.Marshal(map[string]any{"data": []any{map[string]any{"id": model, "status": map[string]string{"value": "loaded"}}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := &loadedLlamaFake{loaded: string(row), props: `{"default_generation_settings":{"n_ctx":8192},"total_slots":2}`, status: http.StatusOK, model: model}
+	server := httptest.NewServer(s)
+	t.Cleanup(server.Close)
+	_, portText, err := net.SplitHostPort(server.Listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	port, err := strconv.Atoi(portText)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reg := loadWithOverrides(t, t.TempDir())
+	m, ok := reg.Get("llamacpp")
+	if !ok {
+		t.Fatal("missing llama manifest")
+	}
+	st := settingsState(t, f.ex)
+	st.mu.Lock()
+	st.port = port
+	st.manifest.Actions = m.Actions
+	st.mu.Unlock()
+	return s
+}
+
+func readbackProof(t *testing.T, f llamaServingFixture, count int) {
+	t.Helper()
+	state, err := f.ex.LaunchSettings("fake")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(state.ServingReadback.Observed) != count {
+		t.Fatalf("readback: %+v", state.ServingReadback)
+	}
+}
+
+func TestLoadedServingEncodedNameNeverAutoloads(t *testing.T) {
+	const model = "org/model:Q4 + &?雪"
+	f, server := loadedReadbackFixture(t, model)
+	f.ex.sweepLoaded(context.Background(), nil, true)
+	value, err := f.ex.currentServingObservation(context.Background(), "fake", model)
+	if err != nil || value.PerSlotContextTokens != 8192 || value.Slots != 2 {
+		t.Fatalf("per-slot observation: %+v %v", value, err)
+	}
+	if server.gets.Load() != 1 || server.loads.Load() != 0 {
+		t.Fatalf("GETs=%d loads=%d", server.gets.Load(), server.loads.Load())
+	}
+	readbackProof(t, f, 1)
+	state, err := f.ex.LaunchSettings("fake")
+	if err != nil || state.ServingReadback.Status != "observed" {
+		t.Fatalf("state=%+v err=%v", state.ServingReadback, err)
+	}
+	if len(f.ex.modelIdentity().Engines["fake"].Serving) != 2 {
+		t.Fatal("matching observation withdrew identity")
+	}
+}
+
+func TestLoadedServingColdAndUnloadClearProof(t *testing.T) {
+	f, server := loadedReadbackFixture(t, "medium")
+	server.mu.Lock()
+	server.loaded = `{"data":[]}`
+	server.mu.Unlock()
+	f.ex.sweepLoaded(context.Background(), nil, true)
+	readbackProof(t, f, 0)
+	if server.gets.Load() != 0 || server.loads.Load() != 0 {
+		t.Fatal("cold model was probed or loaded")
+	}
+	if len(f.ex.modelIdentity().Engines["fake"].Serving) != 2 {
+		t.Fatal("cold model lost identity")
+	}
+	server.mu.Lock()
+	server.loaded = `{"data":[{"id":"medium","status":{"value":"loaded"}}]}`
+	server.mu.Unlock()
+	f.ex.sweepLoaded(context.Background(), nil, false)
+	readbackProof(t, f, 1)
+	server.mu.Lock()
+	server.loaded = `{"data":[{"id":"medium","status":{"value":"unloaded"}}]}`
+	server.mu.Unlock()
+	f.ex.sweepLoaded(context.Background(), nil, false)
+	readbackProof(t, f, 0)
+	if _, err := f.ex.currentServingObservation(context.Background(), "fake", "medium"); err == nil {
+		t.Fatal("unloaded model retained proof")
+	}
+	if server.gets.Load() != 1 || server.loads.Load() != 0 {
+		t.Fatal("unloaded model was probed or loaded")
+	}
+}
+
+func TestLoadedServingSleepingAndTransitionalModelsAreNotProbed(t *testing.T) {
+	for _, status := range []string{"unloaded", "loading", "sleeping", "downloading", "downloaded"} {
+		t.Run(status, func(t *testing.T) {
+			f, server := loadedReadbackFixture(t, "medium")
+			server.mu.Lock()
+			server.loaded = fmt.Sprintf(`{"data":[{"id":"medium","status":{"value":%q}}]}`, status)
+			server.mu.Unlock()
+			f.ex.sweepLoaded(context.Background(), nil, false)
+			readbackProof(t, f, 0)
+			if server.gets.Load() != 0 || server.loads.Load() != 0 {
+				t.Fatal("non-loaded model was probed or woken")
+			}
+			if len(f.ex.modelIdentity().Engines["fake"].Serving) != 2 {
+				t.Fatal("known non-loaded status withdrew identity")
+			}
+		})
+	}
+}
+
+func TestLoadedServingMissingEndpointWithdrawsProof(t *testing.T) {
+	f, _ := loadedReadbackFixture(t, "medium")
+	f.ex.sweepLoaded(context.Background(), nil, false)
+	readbackProof(t, f, 1)
+	settingsState(t, f.ex).manifest.Actions = nil
+	f.ex.sweepLoaded(context.Background(), nil, false)
+	readbackProof(t, f, 0)
+	if len(f.ex.modelIdentity().Engines["fake"].ModelDigests) != 0 {
+		t.Fatal("missing loaded endpoint retained identity")
+	}
+}
+
+func TestLoadedServingAmbiguousLoadedMappingCannotWake(t *testing.T) {
+	f, server := loadedReadbackFixture(t, "medium")
+	server.mu.Lock()
+	server.loaded = `{"data":[{"id":"medium","status":{"value":"sleeping"}}]}`
+	server.mu.Unlock()
+	st := settingsState(t, f.ex)
+	action := st.manifest.Actions["loaded_models"]
+	result := *action.Result
+	result.Match = nil
+	action.Result = &result
+	st.manifest.Actions["loaded_models"] = action
+	f.ex.sweepLoaded(context.Background(), nil, false)
+	if server.gets.Load() != 0 || server.loads.Load() != 0 {
+		t.Fatal("ambiguous mapping probed sleeping model")
+	}
+	if len(f.ex.modelIdentity().Engines["fake"].ModelDigests) != 0 {
+		t.Fatal("ambiguous residency retained identity")
+	}
+}
+
+func TestLoadedServingInvalidAllocationWithdrawsIdentity(t *testing.T) {
+	tests := []struct {
+		name, props, loaded string
+		status              int
+	}{
+		{name: "context mismatch", props: `{"default_generation_settings":{"n_ctx":4096},"total_slots":2}`},
+		{name: "slot mismatch", props: `{"default_generation_settings":{"n_ctx":8192},"total_slots":1}`},
+		{name: "malformed props", props: `{`},
+		{name: "unknown props", props: `{}`},
+		{name: "router placeholder", props: `{"default_generation_settings":{"n_ctx":0},"total_slots":2}`},
+		{name: "fractional context", props: `{"default_generation_settings":{"n_ctx":8192.5},"total_slots":2}`},
+		{name: "missing residency", loaded: `{"data":[{"id":"medium"}]}`},
+		{name: "unknown residency", loaded: `{"data":[{"id":"medium","status":{"value":"future"}}]}`},
+		{name: "invalid loaded result", loaded: `{"data":null}`},
+		{name: "unloaded during props", status: http.StatusNotFound},
+		{name: "redirect cannot drop autoload", status: http.StatusFound},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			f, server := loadedReadbackFixture(t, "medium")
+			f.ex.sweepLoaded(context.Background(), nil, true)
+			readbackProof(t, f, 1)
+			server.mu.Lock()
+			if tc.props != "" {
+				server.props = tc.props
+			}
+			if tc.loaded != "" {
+				server.loaded = tc.loaded
+			}
+			if tc.status != 0 {
+				server.status = tc.status
+			}
+			server.mu.Unlock()
+			f.ex.sweepLoaded(context.Background(), nil, false)
+			readbackProof(t, f, 0)
+			id := f.ex.modelIdentity().Engines["fake"]
+			if len(id.ModelDigests) != 0 || len(id.Serving) != 0 {
+				t.Fatalf("invalid observation retained identity: %+v", id)
+			}
+			state, err := f.ex.LaunchSettings("fake")
+			if err != nil || state.ServingReadback.Status != "mismatch" {
+				t.Fatalf("state=%+v err=%v", state.ServingReadback, err)
+			}
+			if _, err := f.ex.currentServingObservation(context.Background(), "fake", "medium"); err == nil {
+				t.Fatal("invalid observation returned proof")
+			}
+			if server.loads.Load() != 0 {
+				t.Fatal("observation triggered load")
+			}
+		})
+	}
+}
+
+func TestLoadedServingFencesReplacementDuringHTTP(t *testing.T) {
+	tests := []struct {
+		name    string
+		replace func(*engineState)
+	}{
+		{"run", func(st *engineState) { st.runID = newEngineRunID() }},
+		{"config", func(st *engineState) { st.plat.Runtime.Serving = st.plat.Runtime.Serving.Clone() }},
+		{"process", func(st *engineState) { st.running = false }},
+		{"source withdrawal", func(st *engineState) { st.plat.Runtime.servingDrift = "source withdrawn" }},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			f, server := loadedReadbackFixture(t, "medium")
+			st := settingsState(t, f.ex)
+			server.mu.Lock()
+			server.onProps = func() { st.mu.Lock(); defer st.mu.Unlock(); tc.replace(st) }
+			server.mu.Unlock()
+			f.ex.sweepLoaded(context.Background(), nil, false)
+			if _, err := f.ex.currentServingObservation(context.Background(), "fake", "medium"); err == nil {
+				t.Fatal("replacement inherited stale observation")
+			}
+			readbackProof(t, f, 0)
+		})
+	}
+}
+
+func TestLoadedServingSourceChangeWithdrawsProof(t *testing.T) {
+	f, _ := loadedReadbackFixture(t, "medium")
+	f.ex.sweepLoaded(context.Background(), nil, false)
+	readbackProof(t, f, 1)
+	data, err := os.ReadFile(f.source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeServingFixture(t, f.source, append(data, []byte("\n# changed source\n")...))
+	f.ex.sweepLoaded(context.Background(), nil, false)
+	readbackProof(t, f, 0)
+	if len(f.ex.modelIdentity().Engines["fake"].ModelDigests) != 0 {
+		t.Fatal("changed source retained identity")
+	}
+}
+
+func TestLoadedServingStaleMismatchCannotWithdrawReplacement(t *testing.T) {
+	f, server := loadedReadbackFixture(t, "medium")
+	st := settingsState(t, f.ex)
+	server.mu.Lock()
+	server.props = `{"default_generation_settings":{"n_ctx":4096},"total_slots":2}`
+	server.onProps = func() { st.mu.Lock(); st.plat.Runtime.Serving = st.plat.Runtime.Serving.Clone(); st.mu.Unlock() }
+	server.mu.Unlock()
+	f.ex.sweepLoaded(context.Background(), nil, false)
+	if len(f.ex.modelIdentity().Engines["fake"].Serving) != 2 {
+		t.Fatal("stale mismatch withdrew replacement identity")
+	}
+	readbackProof(t, f, 0)
+}
+
+func TestLoadedServingCancellationBoundsHTTP(t *testing.T) {
+	f, server := loadedReadbackFixture(t, "medium")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	server.mu.Lock()
+	server.onProps = cancel
+	server.mu.Unlock()
+	f.ex.sweepLoaded(ctx, nil, false)
+	readbackProof(t, f, 0)
+	if server.loads.Load() != 0 {
+		t.Fatal("cancelled observation loaded model")
+	}
+}
+
+func TestLoadedServingActionAndExpiryInvalidateProof(t *testing.T) {
+	f, _ := loadedReadbackFixture(t, "medium")
+	f.ex.sweepLoaded(context.Background(), nil, false)
+	f.ex.pokeLoaded()
+	readbackProof(t, f, 0)
+	f.ex.sweepLoaded(context.Background(), nil, false)
+	readbackProof(t, f, 1)
+	st := settingsState(t, f.ex)
+	st.mu.Lock()
+	st.plat.Runtime.servingObserved.at = time.Now().Add(-time.Hour)
+	st.mu.Unlock()
+	readbackProof(t, f, 0)
+}
+
+func TestLoadedServingOlderSweepCannotRestoreProof(t *testing.T) {
+	f, server := loadedReadbackFixture(t, "medium")
+	started, release := make(chan struct{}), make(chan struct{})
+	server.mu.Lock()
+	server.onProps = func() { close(started); <-release }
+	server.mu.Unlock()
+	done := make(chan struct{})
+	go func() { defer close(done); f.ex.sweepLoaded(context.Background(), nil, false) }()
+	<-started
+	server.mu.Lock()
+	server.onProps = nil
+	server.loaded = `{"data":[]}`
+	server.mu.Unlock()
+	f.ex.sweepLoaded(context.Background(), nil, false)
+	close(release)
+	<-done
+	readbackProof(t, f, 0)
+}
+
+// Runtime observation updates use mu independently of opMu. Lifecycle copies
+// must synchronize with them even when no serving declaration is configured.
+func TestLoadedServingInvalidationConcurrentLifecycle(t *testing.T) {
+	for _, operation := range []string{"start", "stop", "failed stop reconciliation"} {
+		t.Run(operation, func(t *testing.T) {
+			manifest := testEngineManifest(fakeEngineBin)
+			for platform, value := range manifest.Platforms {
+				value.Runtime.Health = nil
+				manifest.Platforms[platform] = value
+			}
+			ex := newTestExecutor(t, manifest)
+			st := settingsState(t, ex)
+			stop, done, started := make(chan struct{}), make(chan struct{}), make(chan struct{})
+			go func() {
+				defer close(done)
+				close(started)
+				for {
+					select {
+					case <-stop:
+						return
+					default:
+						ex.pokeLoaded()
+					}
+				}
+			}()
+			<-started
+			defer func() { close(stop); <-done }()
+			switch operation {
+			case "start":
+				t.Cleanup(ex.StopAll)
+				for range 8 {
+					if err := ex.Start(context.Background(), "fake"); err != nil {
+						t.Fatal(err)
+					}
+					if err := ex.Stop("fake"); err != nil {
+						t.Fatal(err)
+					}
+				}
+			case "stop":
+				for range 128 {
+					if err := ex.Stop("fake"); err != nil {
+						t.Fatal(err)
+					}
+				}
+			case "failed stop reconciliation":
+				stopErr := fmt.Errorf("injected fake stop refusal")
+				st.opMu.Lock()
+				defer st.opMu.Unlock()
+				for range 128 {
+					if err := ex.reconcileFailedCommandStop(st, "fake", true, stopErr); err != stopErr {
+						t.Fatalf("stop refusal = %v, want original refusal", err)
+					}
+				}
+			}
+		})
+	}
+}

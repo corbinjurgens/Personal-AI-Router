@@ -174,10 +174,12 @@ type InstallArtifact struct {
 //     and Stop.Cmd brings it down.
 type Runtime struct {
 	// Owned launch preparation is process-local, never manifest configuration.
-	servingLaunch     *llamaServingLaunch
-	servingSnapshot   *llamaServingSnapshot
-	servingCommand    launchCommand
-	servingBaseDigest string
+	servingLaunch           *llamaServingLaunch
+	servingSnapshot         *llamaServingSnapshot
+	servingCommand          launchCommand
+	servingBaseDigest       string
+	servingObserved         *servingObserved
+	servingObservationSweep uint64
 	// Latched for this owned launch; inventory cannot restore withdrawn identity.
 	servingDrift   string
 	Serving        *engines.ServingConfig `json:"serving,omitempty"`

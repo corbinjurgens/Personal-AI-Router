@@ -152,9 +152,6 @@ func (e *Executor) modelsSweep(ctx context.Context, fullInventory bool) ModelsRe
 		if hasLoaded {
 			loadedSpec = loadedAct.Result
 		}
-		if listSpec == nil && loadedSpec == nil {
-			continue
-		}
 		shared := listSpec != nil && loadedSpec != nil && sameReadRequest(listAct, loadedAct)
 		inv, haveInv := cached[name]
 		// An inventory that carries content digests is read on every sweep:
@@ -163,6 +160,12 @@ func (e *Executor) modelsSweep(ctx context.Context, fullInventory bool) ModelsRe
 		wg.Add(1)
 		go func(i int, name string, listSpec, loadedSpec *ActionResult, shared bool) {
 			defer wg.Done()
+			servingState, stateErr := e.state(name)
+			if stateErr == nil {
+				if run, err := snapshotLlamaObservation(servingState); err == nil {
+					defer func() { e.observeLlamaServing(ctx, servingState, run, sweep, loaded[i], loadedOK[i], loadedRaw[i]) }()
+				}
+			}
 			st, err := e.Status(name)
 			if err != nil || !st.Running {
 				return
