@@ -4,16 +4,234 @@
 package main
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"slices"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"nvpair-shared/nodepolicy"
 	"nvpair-shared/schedulerwire"
 )
+
+func TestOwnedInferenceBuffersPlacement(t *testing.T) {
+	assertNoPlacement := func(t *testing.T, fx *tierFixture) {
+		t.Helper()
+		fx.p.priorityMu.Lock()
+		claims := len(fx.p.priorityReservations)
+		fx.p.priorityMu.Unlock()
+		if claims != 0 || len(notificationsOf(t, fx.w, workloadSubmittedMethod)) != 0 || len(notificationsOf(t, fx.w, workloadStartedMethod)) != 0 {
+			t.Fatalf("preparation caused placement: claims=%d submitted=%d started=%d", claims, len(notificationsOf(t, fx.w, workloadSubmittedMethod)), len(notificationsOf(t, fx.w, workloadStartedMethod)))
+		}
+		if fx.eng["a"].hits() != 0 {
+			t.Fatal("preparation reached the upstream")
+		}
+	}
+	fixture := func(t *testing.T) *tierFixture {
+		t.Helper()
+		pol := ollamaTierPolicy(map[string][]nodepolicy.TierEntry{"weak": {{Kind: nodepolicy.EntryLocal, Engine: "ollama", Model: "small:1b"}}})
+		return newTierFixture(t, ollamaCase(t), pol, map[string][]string{"a": {"small:1b"}}, nil)
+	}
+	t.Run("impossible transformation has no claim or published placement", func(t *testing.T) {
+		fx := fixture(t)
+		fx.p.buffers = bufferTestBudget(t, 128<<10, time.Hour)
+		rec := fx.do(t, "/api/generate", `{"model":"weak"}`)
+		if rec.Code != http.StatusRequestEntityTooLarge {
+			t.Fatalf("impossible status=%d body=%s", rec.Code, rec.Body.String())
+		}
+		assertNoPlacement(t, fx)
+		bufferAssertTotals(t, fx.p.buffers, 0, 0, 0)
+	})
+	t.Run("queued transformation has no claim or published placement", func(t *testing.T) {
+		fx := fixture(t)
+		fx.p.buffers = bufferTestBudget(t, 256<<10, time.Hour)
+		hold := bufferMustAcquire(t, fx.p.buffers, 128<<10)
+		defer hold.close()
+		rec := httptest.NewRecorder()
+		done := make(chan struct{})
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		go func() {
+			defer close(done)
+			fx.p.soleFacade().handleHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/generate", strings.NewReader(`{"model":"weak"}`)).WithContext(ctx))
+		}()
+		waitForCond(t, 2*time.Second, "pre-send storage waiter", func() bool {
+			fx.p.buffers.mu.Lock()
+			defer fx.p.buffers.mu.Unlock()
+			return fx.p.buffers.waiters.Len() == 1
+		})
+		assertNoPlacement(t, fx)
+		hold.close()
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			t.Fatal("prepared request did not complete")
+		}
+		if rec.Code != http.StatusOK || fx.eng["a"].hits() != 1 || fx.eng["a"].lastBody() != `{"model":"small:1b"}` {
+			t.Fatalf("released preparation: status=%d hits=%d body=%q", rec.Code, fx.eng["a"].hits(), fx.eng["a"].lastBody())
+		}
+		fx.p.priorityMu.Lock()
+		claims := len(fx.p.priorityReservations)
+		fx.p.priorityMu.Unlock()
+		if claims != 0 {
+			t.Fatalf("completed request retained %d claims", claims)
+		}
+		bufferAssertTotals(t, fx.p.buffers, 0, 0, 0)
+	})
+	t.Run("retry clears prior placement and claim before storage wait", func(t *testing.T) {
+		pol := ollamaTierPolicy(map[string][]nodepolicy.TierEntry{"weak": {{Kind: nodepolicy.EntryLocal, Engine: "ollama", Model: "small:1b"}}})
+		fx := newTierFixture(t, ollamaCase(t), pol, map[string][]string{"a": {"small:1b"}, "b": {"small:1b"}}, nil)
+		fx.p.buffers = bufferTestBudget(t, 256<<10, time.Hour)
+		type heldResult struct {
+			lease *bufferLease
+			err   error
+		}
+		held := make(chan heldResult, 1)
+		var firstCalls atomic.Int32
+		first := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if firstCalls.Add(1) == 1 {
+				lease, err := fx.p.buffers.acquire(r.Context(), 128<<10)
+				held <- heldResult{lease, err}
+			}
+			w.WriteHeader(http.StatusServiceUnavailable)
+		}))
+		defer first.Close()
+		f := fx.p.soleFacade()
+		f.discovery.AddManual(nodeForModel(t, "a", first.URL, "small:1b"))
+		rec := httptest.NewRecorder()
+		done := make(chan struct{})
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		go func() {
+			defer close(done)
+			f.handleHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/generate", strings.NewReader(`{"model":"weak"}`)).WithContext(ctx))
+		}()
+		var hold *bufferLease
+		select {
+		case result := <-held:
+			if result.err != nil {
+				t.Fatal(result.err)
+			}
+			hold = result.lease
+			defer hold.close()
+		case <-time.After(2 * time.Second):
+			t.Fatal("first attempt did not establish contention")
+		}
+		waitForCond(t, 2*time.Second, "retry storage waiter", func() bool {
+			fx.p.buffers.mu.Lock()
+			defer fx.p.buffers.mu.Unlock()
+			return fx.p.buffers.waiters.Len() == 1
+		})
+		fx.p.priorityMu.Lock()
+		claims := len(fx.p.priorityReservations)
+		fx.p.priorityMu.Unlock()
+		publications := notificationsOf(t, fx.w, workloadSubmittedMethod)
+		if claims != 0 || len(publications) < 3 {
+			t.Fatalf("waiting retry: claims=%d history=%d", claims, len(publications))
+		}
+		var priorParams, currentParams workloadParams
+		if err := json.Unmarshal(publications[len(publications)-2], &priorParams); err != nil {
+			t.Fatal(err)
+		}
+		if err := json.Unmarshal(publications[len(publications)-1], &currentParams); err != nil {
+			t.Fatal(err)
+		}
+		prior, current := priorParams.WorkloadInfo, currentParams.WorkloadInfo
+		if prior.ScheduledOn != "a" || current.ScheduledOn != "" || prior.ID != current.ID || fx.eng["b"].hits() != 0 {
+			t.Fatalf("retry placement: prior=%+v current=%+v b hits=%d", prior, current, fx.eng["b"].hits())
+		}
+		hold.close()
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			t.Fatal("retry did not complete after contention released")
+		}
+		if rec.Code != http.StatusOK || firstCalls.Load() != 1 || fx.eng["b"].hits() != 1 {
+			t.Fatalf("retry result: status=%d a=%d b=%d", rec.Code, firstCalls.Load(), fx.eng["b"].hits())
+		}
+		bufferAssertTotals(t, fx.p.buffers, 0, 0, 0)
+	})
+}
+
+func TestOwnedInferenceBuffersReservationRecheck(t *testing.T) {
+	run := func(name string, change func(*Proxy), want []string) {
+		t.Run(name, func(t *testing.T) {
+			fx := newTierFixture(t, ollamaCase(t), nodepolicy.Default(), map[string][]string{"a": {"m"}, "b": {"m"}}, nil)
+			f := fx.p.soleFacade()
+			cands := f.resolveCandidates("m")
+			entered, resume := make(chan struct{}), make(chan struct{})
+			release := sync.OnceFunc(func() { close(resume) })
+			defer release()
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			type result struct {
+				out  []candidate
+				held reservation
+				err  error
+			}
+			done := make(chan result, 1)
+			var seen []string
+			go func() {
+				out, held, err := f.reserveRoundPrepared(ctx, cands, false, "m", func(_ context.Context, c candidate, _ nodepolicy.Profile, _ bool, _ uint64) error {
+					fx.p.priorityMu.Lock()
+					claims := len(fx.p.priorityReservations)
+					fx.p.priorityMu.Unlock()
+					if claims != 0 {
+						return fmt.Errorf("preparation observed %d premature claims", claims)
+					}
+					seen = append(seen, c.id)
+					if len(seen) == 1 {
+						close(entered)
+						select {
+						case <-resume:
+						case <-ctx.Done():
+							return ctx.Err()
+						}
+					}
+					return nil
+				})
+				done <- result{out, held, err}
+			}()
+			select {
+			case <-entered:
+			case <-time.After(2 * time.Second):
+				t.Fatal("preparation did not start")
+			}
+			changed := make(chan struct{})
+			go func() { change(fx.p); close(changed) }()
+			select {
+			case <-changed:
+			case <-time.After(2 * time.Second):
+				t.Fatal("storage wait held a selection or admission lock")
+			}
+			release()
+			var got result
+			select {
+			case got = <-done:
+			case <-time.After(2 * time.Second):
+				t.Fatal("selection did not finish")
+			}
+			defer fx.p.releaseReservation(got.held)
+			if got.err != nil || !slices.Equal(seen, want) || len(got.out) == 0 || got.out[0].id != want[len(want)-1] || got.held.nodeID != want[len(want)-1] {
+				t.Fatalf("selection: seen=%v held=%+v err=%v, want %v", seen, got.held, got.err, want)
+			}
+		})
+	}
+	run("changed least-load candidate is prepared before its claim", func(p *Proxy) { p.SetPriority([]string{"b", "a"}) }, []string{"a", "b"})
+	run("changed policy rebuilds the same candidate before its claim", func(p *Proxy) {
+		policy := p.admission.currentPolicy()
+		p.admission.setPolicy(policy)
+	}, []string{"a", "a"})
+}
 
 func TestParseRequestNeeds(t *testing.T) {
 	caps := func(body, path string) []string {
@@ -60,6 +278,248 @@ func TestParseRequestNeeds(t *testing.T) {
 	body = `{"model":"weak","options":{"num_predict":-1}}`
 	if got := parseRequestNeeds([]byte(body), "/api/generate").contextTokens; got != len(body)/4 {
 		t.Errorf("an unbounded num_predict must not inflate the estimate: %d", got)
+	}
+}
+
+func TestParseRequestNeedsDuplicateMessagesMatchesLegacyDecoder(t *testing.T) {
+	legacyVision := func(t *testing.T, body []byte) bool {
+		t.Helper()
+		var probe struct {
+			Messages []struct {
+				Content json.RawMessage   `json:"content"`
+				Images  []json.RawMessage `json:"images"`
+			} `json:"messages"`
+		}
+		if err := json.Unmarshal(body, &probe); err != nil {
+			var typeError *json.UnmarshalTypeError
+			if !errors.As(err, &typeError) {
+				t.Fatalf("legacy oracle syntax: %v", err)
+			}
+		}
+		for _, message := range probe.Messages {
+			if len(message.Images) > 0 {
+				return true
+			}
+			var parts []struct {
+				Type string `json:"type"`
+			}
+			if err := json.Unmarshal(message.Content, &parts); err == nil {
+				for _, part := range parts {
+					if part.Type == "image_url" || part.Type == "image" || part.Type == "input_image" {
+						return true
+					}
+				}
+			}
+		}
+		return false
+	}
+	for _, tc := range []struct{ name, body string }{
+		{"retained images", `{"messages":[{"images":[1]}],"messages":[{}]}`},
+		{"retained content", `{"messages":[{"content":[{"type":"image_url"}]}],"messages":[{}]}`},
+		{"images null clears", `{"messages":[{"images":[1]}],"messages":[{"images":null}]}`},
+		{"images empty clears", `{"messages":[{"images":[1]}],"messages":[{"images":[]}]}`},
+		{"content null clears", `{"messages":[{"content":[{"type":"image"}]}],"messages":[{"content":null}]}`},
+		{"content string replaces", `{"messages":[{"content":[{"type":"image"}]}],"messages":[{"content":"plain"}]}`},
+		{"null element retains", `{"messages":[{"images":[1]}],"messages":[null]}`},
+		{"mistyped element retains", `{"messages":[{"content":[{"type":"input_image"}]}],"messages":[17]}`},
+		{"mistyped images retain", `{"messages":[{"images":[1]}],"messages":[{"images":false,"content":"plain"}]}`},
+		{"partial object continues after image type error", `{"messages":[{}],"messages":[{"images":42,"content":[{"type":"image_url"}]}]}`},
+		{"partial object replaces content before image type error", `{"messages":[{"content":[{"type":"image"}]}],"messages":[{"content":0,"images":42}]}`},
+		{"mistyped outer slice retains", `{"messages":[{"images":[1]}],"messages":false}`},
+		{"empty outer slice discards backing", `{"messages":[{"images":[1]}],"messages":[],"messages":[{}]}`},
+		{"null outer slice discards backing", `{"messages":[{"images":[1]}],"messages":null,"messages":[{}]}`},
+		{"shorter slice retains hidden slots", `{"messages":[{},{"images":[1]}],"messages":[{}],"messages":[{},{}]}`},
+		{"folded field names retain", `{"MESSAGES":[{"IMAGES":[1]}],"messages":[{"images":42}]}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := []byte(tc.body)
+			want := legacyVision(t, body)
+			got := slices.Contains(parseRequestNeeds(body, "/v1/chat/completions").caps, nodepolicy.CapVision)
+			if got != want {
+				t.Fatalf("vision = %v, legacy decoder = %v, body = %s", got, want, body)
+			}
+		})
+	}
+}
+
+func TestParseRequestNeedsOwnedMessagesWorkspace(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		capacity int64
+		limit    bool
+	}{
+		{name: "refuses before state vector allocation", capacity: 295, limit: true},
+		{name: "exact state vector capacity releases", capacity: 296},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			budget := bufferTestBudget(t, tc.capacity, 0)
+			scope, err := budget.newRequest(tc.capacity)
+			if err != nil {
+				t.Fatal(err)
+			}
+			owner := &ownedInferenceBuffers{scope: scope}
+			defer owner.close()
+			ctx := context.WithValue(context.Background(), ownedInferenceContextKey{}, owner)
+			needs, err := parseRequestNeedsOwned(ctx, []byte(`{"messages":[{"images":[1]}],"messages":[{}]}`), "/api/chat")
+			if tc.limit {
+				bufferAssertLimit(t, err)
+			} else if err != nil || !slices.Contains(needs.caps, nodepolicy.CapVision) {
+				t.Fatalf("needs = %+v, error = %v; want retained vision", needs, err)
+			}
+			bufferAssertTotals(t, budget, 0, 0, 0)
+		})
+	}
+}
+
+// This is the former token/raw-message decoder, independent of the borrowed
+// scanner. Completed names survive a malformed later member in this oracle.
+func legacyTierJSONModelNames(body []byte) []string {
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	if token, err := decoder.Token(); err != nil || token != json.Delim('{') {
+		return nil
+	}
+	var names []string
+	for decoder.More() {
+		token, err := decoder.Token()
+		key, ok := token.(string)
+		if err != nil || !ok {
+			return names
+		}
+		var raw json.RawMessage
+		if err := decoder.Decode(&raw); err != nil {
+			return names
+		}
+		if strings.EqualFold(key, "model") || strings.EqualFold(key, "name") {
+			var value string
+			if err := json.Unmarshal(raw, &value); err == nil {
+				names = append(names, value)
+			}
+		}
+	}
+	return names
+}
+
+func TestTierAliasJSONMatchesLegacyCompletedMembers(t *testing.T) {
+	for _, tc := range []struct{ name, body string }{
+		{"NBSP before object", "\u00a0{\"name\":\"weak-api\"}"},
+		{"NBSP before key", "{\u00a0\"name\":\"weak-api\"}"},
+		{"NBSP before colon", "{\"name\"\u00a0:\"weak-api\"}"},
+		{"NBSP before value", "{\"name\":\u00a0\"weak-api\"}"},
+		{"JSON whitespace before object and key", " \t\r\n{ \t\r\n\"name\" \t\r\n: \t\r\n\"weak-api\"}"},
+		{"completed prefix survives malformed suffix", `{"model":"weak-api","later":`},
+		{"completed prefix before NBSP", "{\"name\":\"weak-api\",\u00a0\"later\":0}"},
+		{"escaped folded key and alias", `{"N\u0041ME":"\u0077eak-api"}`},
+		{"duplicate member", `{"model":"plain","model":"strong-local"}`},
+		{"wrong type ignored", `{"model":17,"name":"medium-api"}`},
+		{"null member ignored", `{"model":null,"name":"medium-local"}`},
+		{"uncompleted string ignored", `{"model":"weak-api`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			want := ""
+			for _, name := range legacyTierJSONModelNames([]byte(tc.body)) {
+				trimmed := strings.TrimSpace(name)
+				if _, mode, ok := nodepolicy.ParseAlias(trimmed); ok && mode != nodepolicy.AliasBare {
+					want = trimmed
+					break
+				}
+			}
+			if got := jsonModelAlias([]byte(tc.body)); got != want {
+				t.Fatalf("alias = %q, legacy decoder = %q, body = %q", got, want, tc.body)
+			}
+		})
+	}
+}
+
+func TestValidateRequestIdentifiersJSONBound(t *testing.T) {
+	quoted := func(value string) string {
+		t.Helper()
+		raw, err := json.Marshal(value)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(raw)
+	}
+	for _, tc := range []struct {
+		name, body string
+		reject     bool
+	}{
+		{name: "raw exact 256", body: `{"model":` + quoted(strings.Repeat("a", 256)) + `}`},
+		{name: "raw 257", body: `{"model":` + quoted(strings.Repeat("a", 257)) + `}`, reject: true},
+		{name: "escaped exact 256", body: `{"model":"` + strings.Repeat(`\u0061`, 256) + `"}`},
+		{name: "escaped 257", body: `{"model":"` + strings.Repeat(`\u0061`, 257) + `"}`, reject: true},
+		{name: "multibyte exact 256", body: `{"name":` + quoted(strings.Repeat("あ", 85)+"a") + `}`},
+		{name: "multibyte 257", body: `{"name":` + quoted(strings.Repeat("あ", 85)+"aa") + `}`, reject: true},
+		{name: "escaped multibyte exact 256", body: `{"name":"` + strings.Repeat(`\u3042`, 85) + `a"}`},
+		{name: "escaped multibyte 257", body: `{"name":"` + strings.Repeat(`\u3042`, 85) + `aa"}`, reject: true},
+		{name: "padded alias exact 256", body: `{"model":` + quoted(strings.Repeat(" ", 248)+"weak-api") + `}`},
+		{name: "padded alias 257 before trimming", body: `{"model":` + quoted(strings.Repeat(" ", 249)+"weak-api") + `}`, reject: true},
+		{name: "folded name 257", body: `{"N\u0041ME":` + quoted(strings.Repeat("a", 257)) + `}`, reject: true},
+		{name: "earlier duplicate 257", body: `{"model":` + quoted(strings.Repeat("a", 257)) + `,"model":"m"}`, reject: true},
+		{name: "completed prefix 257", body: `{"name":` + quoted(strings.Repeat("a", 257)) + `,"later":`, reject: true},
+		{name: "uncompleted member ignored", body: `{"name":"` + strings.Repeat("a", 257)},
+		{name: "NBSP before object ignored", body: "\u00a0{\"name\":" + quoted(strings.Repeat("a", 257)) + `}`},
+		{name: "NBSP before key ignored", body: "{\u00a0\"name\":" + quoted(strings.Repeat("a", 257)) + `}`},
+		{name: "nested model is outside top-level guard", body: `{"nested":{"model":` + quoted(strings.Repeat("a", 257)) + `}}`},
+		{name: "nonstring model ignored", body: `{"model":[` + quoted(strings.Repeat("a", 257)) + `]}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := httptest.NewRequest(http.MethodPost, "/api/show", nil)
+			err := validateRequestIdentifiers(r, []byte(tc.body))
+			var identifierError *requestIdentifierError
+			if tc.reject {
+				if !errors.As(err, &identifierError) {
+					t.Fatalf("error = %v, want typed identifier refusal", err)
+				}
+				if identifierError.HTTPStatus() != http.StatusBadRequest {
+					t.Fatalf("identifier status = %d, want 400", identifierError.HTTPStatus())
+				}
+			} else if err != nil {
+				t.Fatalf("exact or irrelevant identifier refused: %v", err)
+			}
+		})
+	}
+}
+
+func TestValidateRequestIdentifiersQueryAndPathBound(t *testing.T) {
+	for _, tc := range []struct {
+		name, target, query string
+		reject              bool
+	}{
+		{name: "query exact 256", target: "/props", query: "model=" + strings.Repeat("a", 256)},
+		{name: "query 257", target: "/props", query: "model=" + strings.Repeat("a", 257), reject: true},
+		{name: "escaped query exact 256", target: "/props", query: "mo%64el=" + strings.Repeat("%61", 256)},
+		{name: "escaped query 257", target: "/props", query: "mo%64el=" + strings.Repeat("%61", 257), reject: true},
+		{name: "multibyte query exact 256", target: "/props", query: "model=" + url.QueryEscape(strings.Repeat("あ", 85)+"a")},
+		{name: "multibyte query 257", target: "/props", query: "model=" + url.QueryEscape(strings.Repeat("あ", 85)+"aa"), reject: true},
+		{name: "padded query exact 256", target: "/props", query: "model=" + strings.Repeat("+", 248) + "weak-api"},
+		{name: "padded query 257 before trimming", target: "/props", query: "model=" + strings.Repeat("+", 249) + "weak-api", reject: true},
+		{name: "earlier duplicate query 257", target: "/props", query: "model=" + strings.Repeat("a", 257) + "&model=m", reject: true},
+		{name: "invalid percent field ignored", target: "/props", query: "model=" + strings.Repeat("a", 257) + "%zz"},
+		{name: "semicolon field ignored", target: "/props", query: "model=" + strings.Repeat("a", 257) + ";ignored"},
+		{name: "query key case remains exact", target: "/props", query: "Model=" + strings.Repeat("a", 257)},
+		{name: "model path exact 256", target: "/v1/models/" + strings.Repeat("a", 256)},
+		{name: "model path 257", target: "/v1/models/" + strings.Repeat("a", 257), reject: true},
+		{name: "native model path exact 256", target: "/api/v0/models/" + url.PathEscape(strings.Repeat("あ", 85)+"a")},
+		{name: "native model path 257", target: "/api/v0/models/" + url.PathEscape(strings.Repeat("あ", 85)+"aa"), reject: true},
+		{name: "padded alias path exact 256", target: "/v1/models/" + strings.Repeat("%20", 248) + "weak-api"},
+		{name: "padded alias path 257 before trimming", target: "/v1/models/" + strings.Repeat("%20", 249) + "weak-api", reject: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := httptest.NewRequest(http.MethodGet, tc.target, nil)
+			r.URL.RawQuery = tc.query
+			err := validateRequestIdentifiers(r, nil)
+			var identifierError *requestIdentifierError
+			if tc.reject {
+				if !errors.As(err, &identifierError) {
+					t.Fatalf("error = %v, want typed identifier refusal", err)
+				}
+				if identifierError.HTTPStatus() != http.StatusBadRequest {
+					t.Fatalf("identifier status = %d, want 400", identifierError.HTTPStatus())
+				}
+			} else if err != nil {
+				t.Fatalf("exact or irrelevant identifier refused: %v", err)
+			}
+		})
 	}
 }
 

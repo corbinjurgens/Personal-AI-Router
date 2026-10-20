@@ -155,7 +155,7 @@ func TestBufferBudget(t *testing.T) {
 		l.close()
 		bufferAssertTotals(t, b, 0, 0, 0)
 		_, err := b.acquire(context.Background(), 1)
-		bufferAssertBusy(t, err)
+		bufferAssertLimit(t, err)
 	})
 	t.Run("invalid and overflow", func(t *testing.T) {
 		if _, err := newBufferBudget(-1, 0); !errors.Is(err, errBufferInvalid) {
@@ -418,7 +418,7 @@ func TestBufferBudget(t *testing.T) {
 			call := bufferStartAcquire(t, b, context.Background(), 9)
 			synctest.Wait()
 			_, err := call.result(t)
-			bufferAssertBusy(t, err)
+			bufferAssertLimit(t, err)
 			bufferAssertTotals(t, b, 0, 0, 0)
 		})
 	})
@@ -699,9 +699,9 @@ func TestBufferBudget(t *testing.T) {
 			}
 			synctest.Wait()
 			_, err := head.result(t)
-			bufferAssertBusy(t, err)
+			bufferAssertLimit(t, err)
 			_, err = tail.result(t)
-			bufferAssertBusy(t, err)
+			bufferAssertLimit(t, err)
 			bufferAssertTotals(t, b, 10, 1, 1)
 			next.pending(t)
 			hold.close()

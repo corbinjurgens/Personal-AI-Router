@@ -33,6 +33,17 @@ the process was one engine.
 `spec.md` is normative; where it and this file disagree, it wins. Everything
 below is shared behavior unless a section says otherwise.
 
+Request model and tier-alias identifiers are limited to 256 decoded UTF-8
+bytes, measured before trimming whitespace or engine normalization. This applies
+to body model/name identifiers, model query parameters and model-detail paths.
+An identifier above the limit returns HTTP 400 before routing resolution,
+admission, preparation or workload placement. Escapes count as their decoded
+UTF-8 bytes. The independent request-body limit remains 64 MiB by default;
+body or required inference-storage overflow returns 413, and buffer contention
+returns 503. Bounded normalized identifiers and workload/control serialization
+are outside the inference byte root; queued identifiers and finished-model
+timestamps own small copies rather than retaining request storage.
+
 ## Local execution measurements
 
 The destination records each actual local inference dispatch, including a failed

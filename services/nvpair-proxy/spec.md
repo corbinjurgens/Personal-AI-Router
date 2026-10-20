@@ -1093,6 +1093,22 @@ machine's (the same reasoning as §3.1). It runs in two places:
 
 Decision order for `(engine, model)`, model normalized per engine (§5 step 1):
 
+Before routing resolution, admission, performance preparation or workload
+placement, request model and tier-alias identifiers must fit 256 decoded UTF-8
+bytes. Measure before whitespace trimming or normalization, including body
+model/name strings, model query parameters and model-detail path identifiers.
+Escaped Unicode counts as decoded UTF-8 bytes; an identifier above the limit
+returns typed HTTP `400` without allocating its oversized decoded form. Existing
+field/type and malformed-prefix behavior remains unchanged within this bound.
+This identifier limit is independent of `--max-request-bytes` and the inference
+root's `413` storage-impossibility / `503` contention distinction. Bounded
+normalization (including `:latest`), workload IPC and retained control identifiers
+are outside the inference byte root. Performance queue entries own scalar and
+identifier copies; finished-model timestamps own small keys and are created only
+for resolved inventory or known resident identities, not arbitrary terminal
+ingress names. Residency updates reconcile those timestamps at the existing
+admission owner.
+
 1. **Availability**: `paused` → `paused`, `draining` → `draining`; an engine
    drain → `draining`.
 2. **Engine running**, as `node/set-local-backend` last reported. A stopped

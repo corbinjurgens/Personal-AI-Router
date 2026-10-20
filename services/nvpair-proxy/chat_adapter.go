@@ -24,9 +24,51 @@ import (
 	"nvpair-shared/nodepolicy"
 )
 
-// chatByteBudget must acquire without waiting and return an idempotent release.
+// chatByteBudget acquires before allocation and returns an idempotent release.
+// Preparation may wait for the configured root; response parsing never waits.
 // It deliberately does not depend on the public transport's private types.
 type chatByteBudget func(int64) (func(), error)
+
+// chatInferenceBudget preserves the caller's explicit bound while charging the
+// existing request account. Standalone library callers still supply their own
+// bounded budget; this adapter never creates a process root or policy default.
+// stopWaiting is called once pre-send admission is complete, before transport.
+func chatInferenceBudget(ctx context.Context, budget chatByteBudget) (chatByteBudget, func()) {
+	owner := inferenceBuffers(ctx)
+	if owner == nil || budget == nil {
+		return budget, func() {}
+	}
+	wait := true
+	return func(n int64) (release func(), err error) {
+		var lease *bufferLease
+		if wait {
+			lease, err = owner.scope.acquire(ctx, n)
+		} else {
+			lease, err = owner.scope.tryAcquire(ctx, n)
+		}
+		if err != nil {
+			if !wait {
+				return nil, errChatBudget
+			}
+			return nil, err
+		}
+		keep := false
+		defer func() {
+			if !keep {
+				lease.close()
+			}
+		}()
+		bounded, err := chatAcquire(budget, n)
+		if err != nil {
+			if !wait {
+				return nil, errChatBudget
+			}
+			return nil, err
+		}
+		keep = true
+		return sync.OnceFunc(func() { bounded(); lease.close() }), nil
+	}, func() { wait = false }
+}
 
 type chatTarget struct {
 	Protocol                       nodepolicy.Protocol
@@ -88,6 +130,10 @@ func chatAcquire(b chatByteBudget, n int64) (func(), error) {
 	if err != nil || r == nil {
 		if r != nil {
 			r()
+		}
+		var status interface{ HTTPStatus() int }
+		if errors.As(err, &status) {
+			return nil, errors.Join(errChatBudget, err)
 		}
 		return nil, errChatBudget
 	}
@@ -171,7 +217,7 @@ func (l *chatLease) decode(raw []byte) error {
 			return err
 		}
 	}
-	if !utf8.Valid(raw) || !json.Valid(raw) {
+	if !utf8.Valid(raw) || !ownedJSONValid(raw) {
 		return errChat
 	}
 	return nil
@@ -274,7 +320,7 @@ func chatObject(raw []byte, keys ...string) (map[string]json.RawMessage, error) 
 // maxStrictBodyDepth deep with no exact duplicate object key at any depth.
 // Callers admit decode storage before entering this allocating validation.
 func chatExactUnique(data []byte) bool {
-	return json.Valid(data) && chatExactValue(bytes.TrimSpace(data), 0)
+	return ownedJSONValid(data) && chatExactValue(bytes.TrimSpace(data), 0)
 }
 
 func chatExactValue(raw []byte, depth int) bool {

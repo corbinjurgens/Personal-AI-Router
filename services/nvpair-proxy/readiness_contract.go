@@ -209,7 +209,7 @@ type strictValidation struct {
 // it: the model must be installed under the identity the request names, and
 // the body, with the profile's defaults merged in, must fit the qualification.
 // AdmitStrict then admits only while that installation is unchanged.
-func (a *admissionController) qualifyStrict(engine, model, route string, body []byte, identity nodepolicy.StrictModelIdentity) (strictValidation, error) {
+func (a *admissionController) qualifyStrict(engine, model, route string, body []byte, identity nodepolicy.StrictModelIdentity, contexts ...context.Context) (strictValidation, error) {
 	a.mu.Lock()
 	k := admKey{engine: engine, model: a.normalize(engine, model)}
 	m, ok := a.strict.models[k]
@@ -219,7 +219,7 @@ func (a *admissionController) qualifyStrict(engine, model, route string, body []
 	if !ok || m.Identity != identity {
 		return strictValidation{}, errStrictUnavailable
 	}
-	effective, bound, err := installed.q.validateRequest(installed.profile, route, body)
+	effective, bound, err := installed.q.validateRequest(installed.profile, route, body, contexts...)
 	if err != nil {
 		return strictValidation{}, err
 	}
@@ -295,7 +295,9 @@ func (a *admissionController) AdmitStrict(ctx context.Context, engine, model str
 	}
 	a.mu.Lock()
 	defer func() { st := a.noteChangeLocked(); a.mu.Unlock(); a.sendState(st) }()
-	k := admKey{engine: engine, model: a.normalize(engine, model)}
+	// Tickets, quarantine markers and completion history outlive the request's
+	// decoded storage. Share one owned bounded identifier across those borrowers.
+	k := admKey{engine: engine, model: strings.Clone(a.normalize(engine, model))}
 	start := a.strict.now()
 	pre := start.Add(time.Duration(req.PreOutputBudgetMs) * time.Millisecond)
 	queue := start.Add(time.Duration(req.QueueBudgetMs) * time.Millisecond)
@@ -652,7 +654,7 @@ func writeStrictAdmissionError(w http.ResponseWriter, err error) {
 // from remaining durations, and may only shrink. Concrete requests keep their
 // existing path.
 type strictDestinationAdmission interface {
-	qualifyStrict(engine, model, route string, body []byte, identity nodepolicy.StrictModelIdentity) (strictValidation, error)
+	qualifyStrict(engine, model, route string, body []byte, identity nodepolicy.StrictModelIdentity, contexts ...context.Context) (strictValidation, error)
 	AdmitStrict(ctx context.Context, engine, model string, req nodepolicy.StrictAdmissionRequest, generation uint64) (strictAdmissionTicket, error)
 	StrictReadiness() nodepolicy.StrictAdmissionReadiness
 }

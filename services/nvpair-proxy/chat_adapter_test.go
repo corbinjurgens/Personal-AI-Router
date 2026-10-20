@@ -15,6 +15,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 	"unsafe"
 
@@ -59,6 +60,187 @@ func TestChatResponseStandaloneParserAllowance(t *testing.T) {
 	if _, err := q.parseResponseWithAllowance(context.Background(), strings.NewReader(body), false, 1000, 100, q.Now(), nil, func([]byte) error { return nil }); !errors.Is(err, errChatBudget) {
 		t.Fatalf("nil parser allowance accepted: %v", err)
 	}
+}
+
+func chatTestInferenceContext(t *testing.T, capacity int64, wait time.Duration) (context.Context, *bufferBudget, *ownedInferenceBuffers) {
+	t.Helper()
+	b := bufferTestBudget(t, capacity, wait)
+	owner := &ownedInferenceBuffers{scope: bufferMustScope(t, b, math.MaxInt64)}
+	return context.WithValue(context.Background(), ownedInferenceContextKey{}, owner), b, owner
+}
+
+func TestChatInferenceBudget(t *testing.T) {
+	t.Run("typed refusal preserves budget classification and cleanup", func(t *testing.T) {
+		for _, refusal := range []error{&bufferLimitError{}, &bufferBusyError{cause: context.Canceled}} {
+			releases := 0
+			_, err := chatAcquire(func(int64) (func(), error) {
+				return func() { releases++ }, refusal
+			}, 1)
+			if !errors.Is(err, errChatBudget) || !errors.Is(err, refusal) || bufferRequestStatus(err) != bufferRequestStatus(refusal) || releases != 1 {
+				t.Fatalf("typed refusal lost: err=%v releases=%d", err, releases)
+			}
+		}
+	})
+	t.Run("prepared capacity remains charged through borrower close", func(t *testing.T) {
+		ctx, root, _ := chatTestInferenceContext(t, 1<<20, 0)
+		explicit := &chatTestBudget{limit: 1 << 20}
+		budget, _ := chatInferenceBudget(ctx, explicit.acquire)
+		q, target := chatFixture()
+		prepared, err := q.prepare(ctx, target, http.MethodPost, routeChatCompletions, []byte(chatSimple), budget)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer prepared.close()
+		want := 2*int64(cap(prepared.Body)) + 256
+		bufferAssertTotals(t, root, want, 1, 0)
+		if explicit.held != want || cap(prepared.Body) < len(prepared.Body) || want <= int64(len(prepared.Body)) {
+			t.Fatalf("retained capacity charge=%d explicit=%d len=%d cap=%d", want, explicit.held, len(prepared.Body), cap(prepared.Body))
+		}
+		prepared.close()
+		prepared.close()
+		bufferAssertTotals(t, root, 0, 0, 0)
+		if explicit.held != 0 {
+			t.Fatalf("explicit charge after close=%d", explicit.held)
+		}
+	})
+	t.Run("parser allowance transfers without a second fixed charge", func(t *testing.T) {
+		ctx, root, _ := chatTestInferenceContext(t, 1<<20, 0)
+		explicit := &chatTestBudget{limit: 1 << 20}
+		fixed := 0
+		budget, stopWaiting := chatInferenceBudget(ctx, func(n int64) (func(), error) {
+			if n == (96<<10)+256 {
+				fixed++
+			}
+			return explicit.acquire(n)
+		})
+		q, _ := chatFixture()
+		allowance, err := q.acquireParserAllowance(budget, true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer allowance.release()
+		bufferAssertTotals(t, root, 193024, 2, 0)
+		stopWaiting()
+		exposed := 0
+		result, err := q.parseResponseWithAllowance(ctx, strings.NewReader(chatCompleteStream()), true, 1000, 100, q.Now(), allowance, func([]byte) error {
+			exposed++
+			root.mu.Lock()
+			used := root.used
+			root.mu.Unlock()
+			if used != explicit.held || used < 193024 {
+				t.Errorf("unaccounted parser borrower: root=%d explicit=%d", used, explicit.held)
+			}
+			return nil
+		})
+		if err != nil || !result.Complete || exposed == 0 || fixed != 1 || explicit.held != 0 {
+			t.Fatalf("parser transfer: complete=%v exposed=%d fixed=%d held=%d err=%v", result.Complete, exposed, fixed, explicit.held, err)
+		}
+		bufferAssertTotals(t, root, 0, 0, 0)
+		if allowance.take(q, true) != nil {
+			t.Fatal("parser allowance transferred twice")
+		}
+	})
+	t.Run("explicit bound still refuses and releases the root", func(t *testing.T) {
+		ctx, root, _ := chatTestInferenceContext(t, 64, 0)
+		explicit := &chatTestBudget{limit: 7}
+		budget, _ := chatInferenceBudget(ctx, explicit.acquire)
+		if _, err := chatAcquire(budget, 8); !errors.Is(err, errChatBudget) || explicit.held != 0 {
+			t.Fatalf("explicit bound escaped: err=%v held=%d", err, explicit.held)
+		}
+		bufferAssertTotals(t, root, 0, 0, 0)
+	})
+	t.Run("preparation queues behind another request and resumes", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			ctx, root, _ := chatTestInferenceContext(t, 64, time.Hour)
+			other := bufferMustAcquire(t, root, 64)
+			explicit := &chatTestBudget{limit: 64}
+			budget, _ := chatInferenceBudget(ctx, explicit.acquire)
+			done := make(chan func(), 1)
+			go func() {
+				release, err := chatAcquire(budget, 8)
+				if err != nil {
+					t.Errorf("queued acquisition: %v", err)
+				}
+				done <- release
+			}()
+			synctest.Wait()
+			bufferAssertTotals(t, root, 64, 1, 1)
+			if explicit.calls != 0 {
+				t.Fatal("explicit allocation preceded process-root admission")
+			}
+			other.close()
+			release := <-done
+			if release == nil {
+				t.Fatal("queued acquisition returned no release")
+			}
+			bufferAssertTotals(t, root, 8, 1, 0)
+			release()
+			release()
+			bufferAssertTotals(t, root, 0, 0, 0)
+		})
+	})
+	t.Run("queued cancellation preserves typed busy and removes waiter", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			ctx, root, _ := chatTestInferenceContext(t, 64, time.Hour)
+			ctx, cancel := context.WithCancel(ctx)
+			defer cancel()
+			bufferMustAcquire(t, root, 64)
+			explicit := &chatTestBudget{limit: 64}
+			budget, _ := chatInferenceBudget(ctx, explicit.acquire)
+			done := make(chan error, 1)
+			go func() { _, err := chatAcquire(budget, 8); done <- err }()
+			synctest.Wait()
+			bufferAssertTotals(t, root, 64, 1, 1)
+			cancel()
+			err := <-done
+			bufferAssertBusy(t, err)
+			if !errors.Is(err, context.Canceled) || !errors.Is(err, errChatBudget) || explicit.calls != 0 {
+				t.Fatalf("cancellation classification: %v calls=%d", err, explicit.calls)
+			}
+			bufferAssertTotals(t, root, 64, 1, 0)
+		})
+	})
+	t.Run("queued expiry retains typed busy and releases proposal", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			ctx, root, _ := chatTestInferenceContext(t, 64, time.Second)
+			bufferMustAcquire(t, root, 64)
+			explicit := &chatTestBudget{limit: 64}
+			budget, _ := chatInferenceBudget(ctx, explicit.acquire)
+			_, err := chatAcquire(budget, 8)
+			bufferAssertBusy(t, err)
+			if !errors.Is(err, context.DeadlineExceeded) || !errors.Is(err, errChatBudget) || explicit.calls != 0 {
+				t.Fatalf("expiry classification: %v calls=%d", err, explicit.calls)
+			}
+			bufferAssertTotals(t, root, 64, 1, 0)
+		})
+	})
+	t.Run("post-admission contention never waits or returns a status", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			ctx, root, _ := chatTestInferenceContext(t, 64, time.Hour)
+			bufferMustAcquire(t, root, 64)
+			explicit := &chatTestBudget{limit: 64}
+			budget, stopWaiting := chatInferenceBudget(ctx, explicit.acquire)
+			stopWaiting()
+			start := time.Now()
+			_, err := chatAcquire(budget, 8)
+			var typed interface{ HTTPStatus() int }
+			if !errors.Is(err, errChatBudget) || errors.As(err, &typed) || time.Since(start) != 0 || explicit.calls != 0 {
+				t.Fatalf("post-admission refusal: err=%v elapsed=%v calls=%d", err, time.Since(start), explicit.calls)
+			}
+			bufferAssertTotals(t, root, 64, 1, 0)
+		})
+	})
+	t.Run("post-admission explicit refusal has no response status", func(t *testing.T) {
+		ctx, root, _ := chatTestInferenceContext(t, 64, 0)
+		budget, stopWaiting := chatInferenceBudget(ctx, func(int64) (func(), error) { return nil, &bufferLimitError{} })
+		stopWaiting()
+		_, err := chatAcquire(budget, 8)
+		var typed interface{ HTTPStatus() int }
+		if !errors.Is(err, errChatBudget) || errors.As(err, &typed) {
+			t.Fatalf("post-admission explicit refusal: %v", err)
+		}
+		bufferAssertTotals(t, root, 0, 0, 0)
+	})
 }
 
 type chatTestBudget struct {

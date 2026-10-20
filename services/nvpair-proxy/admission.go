@@ -19,7 +19,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -57,10 +56,11 @@ type admissionController struct {
 	// together with a deadline and a request context; a channel can.
 	changed chan struct{}
 
-	policy       nodepolicy.Policy
-	availability nodepolicy.Availability
-	drain        map[string]bool
-	intent       map[string]bool
+	policy           nodepolicy.Policy
+	policyGeneration uint64
+	availability     nodepolicy.Availability
+	drain            map[string]bool
+	intent           map[string]bool
 
 	// loaded is the broker-reported residency (node/set-residency), keyed by
 	// engine then normalized model. residencyKnown stays false until the first
@@ -161,6 +161,7 @@ func (a *admissionController) activatePolicy(p nodepolicy.Policy) error {
 		return fmt.Errorf("revision %s is older than the active revision %s", p.Revision, a.policy.Revision)
 	}
 	a.policy = p
+	a.policyGeneration++
 	a.refreshStrictCapabilityLocked()
 	a.signalLocked()
 	return nil
@@ -289,16 +290,22 @@ func (a *admissionController) backendChanged() {
 type admissionRequest struct {
 	engine string
 	model  string
+	// Only the existing routing owner may attest a resolved inventory model.
+	// Terminal ingress can forward arbitrary names without minting timestamps.
+	resolvedInventory bool
 	// waitCap is the X-PAIR-Admission-Wait bound. Negative means the caller
 	// set none, so the policy's own timeouts apply.
 	waitCap time.Duration
 	// cancel aborts the execution once admitted; node/set-availability with
 	// cancelActive calls it.
 	cancel func()
+	// prepare admits request storage before wake, unload, or grant. It runs
+	// outside mu and is retried if the authoritative policy changes.
+	prepare func(context.Context, nodepolicy.Profile, bool, uint64) error
 }
 
 // admissionDecision is the outcome. Exactly one of ticket, reject and err is
-// set: err means the request's context ended while it waited.
+// set: err means cancellation or a pre-effect request preparation refusal.
 type admissionDecision struct {
 	ticket     *admissionTicket
 	profile    nodepolicy.Profile
@@ -311,11 +318,12 @@ type admissionDecision struct {
 // when the execution ends; it is idempotent so a deferred release can back up
 // an explicit one.
 type admissionTicket struct {
-	a      *admissionController
-	id     uint64
-	key    admKey
-	cancel func()
-	once   sync.Once
+	a                 *admissionController
+	id                uint64
+	key               admKey
+	cancel            func()
+	once              sync.Once
+	resolvedInventory bool
 }
 
 // bounded returns the wait a policy timeout allows under the caller's cap.
@@ -334,10 +342,12 @@ func (a *admissionController) admit(ctx context.Context, req admissionRequest) a
 	key := admKey{engine: req.engine, model: model}
 	start := time.Now()
 	var (
-		queueDeadline time.Time
-		wakeDeadline  time.Time
-		evictDeadline time.Time
-		queuedHere    bool
+		queueDeadline      time.Time
+		wakeDeadline       time.Time
+		evictDeadline      time.Time
+		queuedHere         bool
+		prepared           bool
+		preparedGeneration uint64
 	)
 
 	a.mu.Lock()
@@ -386,6 +396,26 @@ func (a *admissionController) admit(ctx context.Context, req admissionRequest) a
 		}
 		if a.drain[req.engine] {
 			return reject(nodepolicy.RejectDraining)
+		}
+		if req.prepare != nil && (!prepared || preparedGeneration != a.policyGeneration) {
+			generation := a.policyGeneration
+			profile, hasProfile := a.profileLocked(key)
+			a.mu.Unlock()
+			err := req.prepare(ctx, profile, hasProfile, generation)
+			a.mu.Lock()
+			if err := ctx.Err(); err != nil {
+				return a.abandon(leave, err)
+			}
+			if generation != a.policyGeneration {
+				continue
+			}
+			if err != nil {
+				return a.abandon(leave, err)
+			}
+			prepared, preparedGeneration = true, generation
+			// Availability and drains may have changed while preparation waited
+			// outside the lock. Recheck all existing admission guards before effects.
+			continue
 		}
 
 		// 2. Is the engine running? Health is what node/set-local-backend
@@ -487,7 +517,7 @@ func (a *admissionController) admit(ctx context.Context, req admissionRequest) a
 			a.queued--
 		}
 		a.nextTicket++
-		t := &admissionTicket{a: a, id: a.nextTicket, key: key, cancel: req.cancel}
+		t := &admissionTicket{a: a, id: a.nextTicket, key: key, cancel: req.cancel, resolvedInventory: req.resolvedInventory}
 		a.tickets[t.id] = t
 		if model != "" {
 			a.inflight[key]++
@@ -722,7 +752,13 @@ func (t *admissionTicket) release() {
 			} else {
 				a.inflight[t.key]--
 			}
-			a.finishedAt[t.key] = now
+			if t.resolvedInventory || a.loaded[t.key.engine][t.key.model] {
+				// Bounded model IDs are control metadata only after validation.
+				// Own their storage: normalization may otherwise leave a view into
+				// decoded request storage after its inference lease has drained.
+				key := admKey{engine: t.key.engine, model: strings.Clone(t.key.model)}
+				a.finishedAt[key] = now
+			}
 		}
 		a.active--
 		if a.activeByEngine[t.key.engine] <= 1 {
@@ -852,16 +888,9 @@ func retryAfterSeconds(reason nodepolicy.RejectReason) int {
 func writeAdmissionRejection(w http.ResponseWriter, reason nodepolicy.RejectReason) {
 	w.Header().Set(nodepolicy.AdmissionHeader, string(reason))
 	w.Header().Set("Retry-After", strconv.Itoa(retryAfterSeconds(reason)))
-	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("X-Content-Type-Options", "nosniff")
-	w.WriteHeader(http.StatusServiceUnavailable)
-	body, err := json.Marshal(map[string]string{
-		"error":  fmt.Sprintf("this node is not accepting the request (%s)", reason),
-		"code":   "admission",
-		"reason": string(reason),
-	})
-	if err != nil {
-		body = []byte(`{"error":"admission rejected","code":"admission"}`)
-	}
-	_, _ = w.Write(body)
+	writeInferenceErrorFields(w, http.StatusServiceUnavailable,
+		inferenceErrorField{"code", []string{"admission"}},
+		inferenceErrorField{"error", []string{"this node is not accepting the request (", string(reason), ")"}},
+		inferenceErrorField{"reason", []string{string(reason)}},
+	)
 }

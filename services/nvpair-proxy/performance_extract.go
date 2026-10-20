@@ -7,9 +7,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"math"
-	"math/big"
 	"strconv"
-	"strings"
 
 	"nvpair-shared/performancewire"
 )
@@ -75,10 +73,10 @@ func extractPerformanceMetadata(payload []byte, q performanceExtractQualificatio
 		if !q.Streaming {
 			return result
 		}
-		result.OutputTokens = performanceExtractNumber(fields["eval_count"], performancewire.MaxTokens)
-		result.DecodeNs = performanceExtractNumber(fields["eval_duration"], performancewire.MaxPhaseNs)
-		result.LoadNs = performanceExtractNumber(fields["load_duration"], performancewire.MaxPhaseNs)
-		result.PrefillNs = performanceExtractNumber(fields["prompt_eval_duration"], performancewire.MaxPhaseNs)
+		result.OutputTokens = performanceExtractNumber(fields.value("eval_count"), performancewire.MaxTokens)
+		result.DecodeNs = performanceExtractNumber(fields.value("eval_duration"), performancewire.MaxPhaseNs)
+		result.LoadNs = performanceExtractNumber(fields.value("load_duration"), performancewire.MaxPhaseNs)
+		result.PrefillNs = performanceExtractNumber(fields.value("prompt_eval_duration"), performancewire.MaxPhaseNs)
 		if result.OutputTokens != nil && result.DecodeNs != nil {
 			// Preserve the independently valid count, but refuse a duration that
 			// would make the pair impossible or exceed the shared rate contract.
@@ -88,8 +86,8 @@ func extractPerformanceMetadata(payload []byte, q performanceExtractQualificatio
 			}
 		}
 	case "/v1/chat/completions", "/v1/completions":
-		usage := performanceExtractObject(fields["usage"])
-		result.OutputTokens = performanceExtractNumber(usage["completion_tokens"], performancewire.MaxTokens)
+		usage := performanceExtractObject(fields.value("usage"))
+		result.OutputTokens = performanceExtractNumber(usage.value("completion_tokens"), performancewire.MaxTokens)
 		// Compatibility timing extensions are deliberately unqualified.
 	}
 	return result
@@ -99,42 +97,45 @@ func extractPerformanceMetadata(payload []byte, q performanceExtractQualificatio
 // usual last-value-wins behavior. A repeated key stays present with a nil value,
 // including escaped spellings of the same key and duplicate usage containers.
 // Invalid JSON invalidates the object, never inference or an unrelated frame.
-func performanceExtractObject(payload []byte) map[string]json.RawMessage {
+type performanceExtractFields []byte
+
+func performanceExtractObject(payload []byte) performanceExtractFields {
 	payload = bytes.TrimSpace(payload)
-	if len(payload) == 0 || payload[0] != '{' || !json.Valid(payload) {
+	if len(payload) == 0 || payload[0] != '{' || !ownedJSONValid(payload) {
 		return nil
 	}
-	dec := json.NewDecoder(bytes.NewReader(payload))
-	if _, err := dec.Token(); err != nil {
-		return nil
+	return performanceExtractFields(payload)
+}
+
+// Only the fixed set of requested numeric fields is visited. Values borrow the
+// validated object; duplicate decoded spellings stay present but unusable.
+func (fields performanceExtractFields) field(name string) ([]byte, bool) {
+	if len(fields) == 0 {
+		return nil, false
 	}
-	fields := make(map[string]json.RawMessage)
-	for dec.More() {
-		token, err := dec.Token()
-		if err != nil {
-			return nil
+	var raw []byte
+	count := 0
+	visitObject(fields, func(key []byte, start, end int) {
+		if jsonStringEquals(key, name) {
+			count++
+			raw = fields[start:end]
 		}
-		key, ok := token.(string)
-		if !ok {
-			return nil
-		}
-		var value json.RawMessage
-		if err := dec.Decode(&value); err != nil {
-			return nil
-		}
-		if _, exists := fields[key]; exists {
-			fields[key] = nil
-		} else {
-			fields[key] = value
-		}
+	})
+	if count != 1 {
+		raw = nil
 	}
-	return fields
+	return raw, count > 0
+}
+
+func (fields performanceExtractFields) value(name string) []byte {
+	raw, _ := fields.field(name)
+	return raw
 }
 
 func performanceExtractNumber(raw json.RawMessage, max int64) *int64 {
 	// Integer JSON tokens only: strings, null, fractions and exponent notation
 	// do not establish an exact engine counter or nanosecond duration here.
-	if len(raw) == 0 || raw[0] < '0' || raw[0] > '9' {
+	if len(raw) == 0 || len(raw) > 19 || raw[0] < '0' || raw[0] > '9' {
 		return nil
 	}
 	value, err := strconv.ParseInt(string(raw), 10, 64)
@@ -146,26 +147,26 @@ func performanceExtractNumber(raw json.RawMessage, max int64) *int64 {
 
 // Daily schemas bind evaluated prompt work and engine-native decode semantics.
 // They never assign the legacy visible-output-count decode interval.
-func performanceExtractDaily(fields map[string]json.RawMessage, strata bool) performanceExtractMetadata {
+func performanceExtractDaily(fields performanceExtractFields, strata bool) performanceExtractMetadata {
 	var result performanceExtractMetadata
-	timings := performanceExtractObject(fields["timings"])
-	usage := performanceExtractObject(fields["usage"])
-	if _, present := fields["timings"]; present && timings == nil {
+	timings := performanceExtractObject(fields.value("timings"))
+	usage := performanceExtractObject(fields.value("usage"))
+	if _, present := fields.field("timings"); present && timings == nil {
 		result.invalid |= 0xcf
 	}
 	result.OutputTokens = performanceExtractReconcileCount(timings, "predicted_n", usage, "completion_tokens", &result.invalid, 1<<2)
 	result.PromptTokens = performanceExtractRead(timings, "prompt_n", performanceExtractTokenCount, &result.invalid, 1<<0)
 	result.CachedPromptTokens = performanceExtractRead(timings, "cache_n", performanceExtractTokenCount, &result.invalid, 1<<1)
 	if strata {
-		details := performanceExtractObject(usage["prompt_tokens_details"])
+		details := performanceExtractObject(usage.value("prompt_tokens_details"))
 		result.CachedPromptTokens = performanceExtractReconcileCount(timings, "cache_n", details, "cached_tokens", &result.invalid, 1<<1)
-		if raw, present := usage["prompt_tokens_details"]; present && performanceExtractObject(raw) == nil {
+		if raw, present := usage.field("prompt_tokens_details"); present && performanceExtractObject(raw) == nil {
 			result.CachedPromptTokens = nil
 			result.invalid |= 1 << 1
 		}
 	}
 	// An ambiguous or malformed usage container cannot corroborate its counters.
-	if raw, present := fields["usage"]; present && performanceExtractObject(raw) == nil {
+	if raw, present := fields.field("usage"); present && performanceExtractObject(raw) == nil {
 		result.OutputTokens = nil
 		result.invalid |= 1 << 2
 		if strata {
@@ -197,26 +198,31 @@ func performanceExtractDaily(fields map[string]json.RawMessage, strata bool) per
 	if result.EngineDecodeNs == nil || *result.EngineDecodeNs == 0 || (!strata && steps == nil) {
 		result.EngineDecodeTokensPerSecond = nil
 	}
-	if _, present := timings["predicted_per_second"]; present && result.EngineDecodeTokensPerSecond == nil {
+	if _, present := timings.field("predicted_per_second"); present && result.EngineDecodeTokensPerSecond == nil {
 		result.invalid |= 1 << 7
 	}
 	return result
 }
 
-func performanceExtractStrataMCP(fields map[string]json.RawMessage) bool {
-	if _, present := fields["strata_mcp"]; present {
+func performanceExtractStrataMCP(fields performanceExtractFields) bool {
+	if _, present := fields.field("strata_mcp"); present {
 		return true
 	}
 	// openai_collect places its internal-round marker on each collected message.
-	var choices []json.RawMessage
-	if err := json.Unmarshal(fields["choices"], &choices); err != nil {
+	choices := bytes.TrimSpace(fields.value("choices"))
+	if len(choices) == 0 || choices[0] != '[' {
 		return false
 	}
-	for _, choice := range choices {
-		object := performanceExtractObject(choice)
-		message := performanceExtractObject(object["message"])
-		if _, present := message["strata_mcp"]; present {
+	for rest := bytes.TrimSpace(choices[1:]); len(rest) > 0 && rest[0] != ']'; {
+		end := streamJSONValueEnd(rest)
+		object := performanceExtractObject(rest[:end])
+		message := performanceExtractObject(object.value("message"))
+		if _, present := message.field("strata_mcp"); present {
 			return true
+		}
+		rest = bytes.TrimSpace(rest[end:])
+		if len(rest) > 0 && rest[0] == ',' {
+			rest = bytes.TrimSpace(rest[1:])
 		}
 	}
 	return false
@@ -224,8 +230,8 @@ func performanceExtractStrataMCP(fields map[string]json.RawMessage) bool {
 
 // Read and record validity together so auxiliary fields cannot be omitted from
 // a separate observer-maintained list of fields that invalidate prior evidence.
-func performanceExtractRead[T any](fields map[string]json.RawMessage, key string, parse func(json.RawMessage) *T, invalid *uint16, bit uint16) *T {
-	raw, present := fields[key]
+func performanceExtractRead[T any](fields performanceExtractFields, key string, parse func(json.RawMessage) *T, invalid *uint16, bit uint16) *T {
+	raw, present := fields.field(key)
 	value := parse(raw)
 	if present && value == nil {
 		*invalid |= bit
@@ -241,13 +247,13 @@ func performanceExtractRate(raw json.RawMessage) *float64 {
 	return performanceExtractDecimal(raw, performancewire.MaxTokensPerSecond)
 }
 
-func performanceExtractReconcileCount(a map[string]json.RawMessage, ak string, b map[string]json.RawMessage, bk string, invalid *uint16, bit uint16) *int64 {
+func performanceExtractReconcileCount(a performanceExtractFields, ak string, b performanceExtractFields, bk string, invalid *uint16, bit uint16) *int64 {
 	x := performanceExtractRead(a, ak, performanceExtractTokenCount, invalid, bit)
 	y := performanceExtractRead(b, bk, performanceExtractTokenCount, invalid, bit)
-	if _, present := a[ak]; present && x == nil {
+	if _, present := a.field(ak); present && x == nil {
 		return nil
 	}
-	if _, present := b[bk]; present && y == nil {
+	if _, present := b.field(bk); present && y == nil {
 		return nil
 	}
 	if x != nil && y != nil && *x != *y {
@@ -260,57 +266,228 @@ func performanceExtractReconcileCount(a map[string]json.RawMessage, ak string, b
 	return y
 }
 
-// Bound lexical work before allocating arbitrary-precision numbers. Counts keep
-// their original integer-only parser; only the pinned decimal fields use this.
-func performanceExtractRational(raw json.RawMessage) *big.Rat {
-	if len(raw) == 0 || len(raw) > 64 || raw[0] < '0' || raw[0] > '9' || !json.Valid(raw) {
-		return nil
+// Decimal input has at most 64 wire characters and |exponent| <=308. Keep
+// exact base-ten digits in fixed state instead of math/big's retained nat pool.
+// These bounds also mean every accepted value has <=372 fractional places;
+// canonical text therefore equals the former Rat.FloatString(372), trimmed.
+type performanceDecimal struct {
+	digits   [64]byte
+	n, point int
+	negative bool
+}
+
+func parsePerformanceDecimal(raw []byte) (performanceDecimal, bool) {
+	var d performanceDecimal
+	if len(raw) == 0 || len(raw) > 64 || !ownedJSONValid(raw) {
+		return d, false
 	}
-	if i := strings.IndexAny(string(raw), "eE"); i >= 0 {
-		e, err := strconv.Atoi(string(raw[i+1:]))
-		if err != nil || e < -308 || e > 308 {
-			return nil
+	start, end := 0, len(raw)
+	if raw[0] == '-' {
+		d.negative = true
+		start++
+	}
+	if start == len(raw) || raw[start] < '0' || raw[start] > '9' {
+		return d, false
+	}
+	exponent := 0
+	if e := bytes.IndexAny(raw, "eE"); e >= 0 {
+		end = e
+		pos, sign := e+1, 1
+		if raw[pos] == '-' || raw[pos] == '+' {
+			if raw[pos] == '-' {
+				sign = -1
+			}
+			pos++
+		}
+		for ; pos < len(raw); pos++ {
+			exponent = exponent*10 + int(raw[pos]-'0')
+			if exponent > 308 {
+				return d, false
+			}
+		}
+		exponent *= sign
+	}
+	dot := false
+	for i := start; i < end; i++ {
+		if raw[i] == '.' {
+			d.point = d.n
+			dot = true
+		} else {
+			d.digits[d.n] = raw[i]
+			d.n++
 		}
 	}
-	value, ok := new(big.Rat).SetString(string(raw))
-	if !ok || value.Sign() < 0 {
-		return nil
+	if !dot {
+		d.point = d.n
 	}
-	return value
+	d.point += exponent
+	first := 0
+	for first < d.n && d.digits[first] == '0' {
+		first++
+	}
+	if first == d.n {
+		d.digits[0] = '0'
+		d.n, d.point, d.negative = 1, 1, false
+		return d, true
+	}
+	copy(d.digits[:], d.digits[first:d.n])
+	d.n -= first
+	d.point -= first
+	for d.n > 1 && d.digits[d.n-1] == '0' {
+		d.n--
+	}
+	return d, true
+}
+
+func (d performanceDecimal) text() string {
+	var out [768]byte
+	i := 0
+	if d.negative {
+		out[i] = '-'
+		i++
+	}
+	if d.point <= 0 {
+		out[i], out[i+1] = '0', '.'
+		i += 2
+		for j := 0; j < -d.point; j++ {
+			out[i] = '0'
+			i++
+		}
+		i += copy(out[i:], d.digits[:d.n])
+	} else if d.point >= d.n {
+		i += copy(out[i:], d.digits[:d.n])
+		for j := d.n; j < d.point; j++ {
+			out[i] = '0'
+			i++
+		}
+	} else {
+		i += copy(out[i:], d.digits[:d.point])
+		out[i] = '.'
+		i++
+		i += copy(out[i:], d.digits[d.point:d.n])
+	}
+	return string(out[:i])
+}
+
+// Compare against an integer maximum before rounding or float conversion, so
+// a tiny positive excess cannot disappear into the target representation.
+func (d performanceDecimal) floor(scale int, maximum int64) (int64, bool, bool) {
+	if d.digits[0] == '0' {
+		return 0, false, true
+	}
+	point := d.point + scale
+	if point > 19 {
+		return 0, false, false
+	}
+	value := int64(0)
+	for i := 0; i < point; i++ {
+		digit := int64(0)
+		if i < d.n {
+			digit = int64(d.digits[i] - '0')
+		}
+		if value > (maximum-digit)/10 {
+			return 0, false, false
+		}
+		value = value*10 + digit
+	}
+	fraction := point < d.n
+	if value > maximum || value == maximum && fraction {
+		return 0, false, false
+	}
+	return value, fraction, true
 }
 
 func performanceExtractMilliseconds(raw json.RawMessage) *int64 {
-	value := performanceExtractRational(raw)
-	if value == nil {
+	value, ok := parsePerformanceDecimal(raw)
+	if !ok || raw[0] < '0' || raw[0] > '9' {
 		return nil
 	}
-	value.Mul(value, big.NewRat(1_000_000, 1))
-	if value.Cmp(big.NewRat(performancewire.MaxPhaseNs, 1)) > 0 {
+	ns, _, ok := value.floor(6, performancewire.MaxPhaseNs)
+	if !ok {
 		return nil
 	}
-	quotient, remainder := new(big.Int), new(big.Int)
-	quotient.QuoRem(value.Num(), value.Denom(), remainder)
-	if remainder.Lsh(remainder, 1).Cmp(value.Denom()) >= 0 {
-		quotient.Add(quotient, big.NewInt(1))
+	point := value.point + 6
+	if point >= 0 && point < value.n && value.digits[point] >= '5' {
+		ns++
 	}
-	if !quotient.IsInt64() || quotient.Int64() > performancewire.MaxPhaseNs {
-		return nil
-	}
-	ns := quotient.Int64()
 	return &ns
 }
 
+// Expand the exact binary maximum in fixed base-ten state. A finite float64
+// has <=53 mantissa bits and denominator <=2^1074: multiplying the mantissa by
+// 5^1074 needs fewer than 800 decimal digits. No rounded decimal maximum and
+// no big-number pool participates in this comparison.
+func (d performanceDecimal) lessEqualFloat64(maximum float64) bool {
+	if math.IsNaN(maximum) || math.IsInf(maximum, 0) || maximum < 0 {
+		return false
+	}
+	if d.digits[0] == '0' {
+		return true
+	}
+	if maximum == 0 {
+		return false
+	}
+	bits := math.Float64bits(maximum)
+	exponent := int((bits >> 52) & 0x7ff)
+	mantissa := bits & ((uint64(1) << 52) - 1)
+	if exponent == 0 {
+		exponent = -1074
+	} else {
+		mantissa |= uint64(1) << 52
+		exponent -= 1023 + 52
+	}
+	var digits [800]byte
+	n := 0
+	for mantissa > 0 {
+		digits[n] = byte(mantissa % 10)
+		n++
+		mantissa /= 10
+	}
+	scale, factor, steps := 0, 2, exponent
+	if exponent < 0 {
+		scale, factor, steps = -exponent, 5, -exponent
+	}
+	for step := 0; step < steps; step++ {
+		carry := 0
+		for i := 0; i < n; i++ {
+			v := int(digits[i])*factor + carry
+			digits[i] = byte(v % 10)
+			carry = v / 10
+		}
+		if carry > 0 {
+			digits[n] = byte(carry)
+			n++
+		}
+	}
+	point := n - scale
+	if d.point != point {
+		return d.point < point
+	}
+	for i := 0; i < max(d.n, n); i++ {
+		x, y := byte(0), byte(0)
+		if i < d.n {
+			x = d.digits[i] - '0'
+		}
+		if i < n {
+			y = digits[n-1-i]
+		}
+		if x != y {
+			return x < y
+		}
+	}
+	return true
+}
+
 func performanceExtractDecimal(raw json.RawMessage, maximum float64) *float64 {
-	value := performanceExtractRational(raw)
-	if value == nil {
+	value, ok := parsePerformanceDecimal(raw)
+	if !ok || raw[0] < '0' || raw[0] > '9' {
 		return nil
 	}
-	limit := new(big.Rat).SetFloat64(maximum)
-	if value.Cmp(limit) > 0 {
+	if !value.lessEqualFloat64(maximum) {
 		return nil
 	}
-	n, _ := value.Float64()
-	if math.IsNaN(n) || math.IsInf(n, 0) || n < 0 || (n == 0 && value.Sign() > 0) {
+	n, err := strconv.ParseFloat(string(raw), 64)
+	if err != nil || math.IsNaN(n) || math.IsInf(n, 0) || n < 0 || (n == 0 && value.digits[0] != '0') {
 		return nil
 	}
 	return &n
@@ -319,8 +496,8 @@ func performanceExtractDecimal(raw json.RawMessage, maximum float64) *float64 {
 // Missing auxiliaries leave independent measurements intact. Present invalid or
 // contradictory auxiliaries disqualify only their phase. Strata's decode work
 // count is unavailable: it must never be inferred from output or rounded rates.
-func performanceExtractPhase(fields map[string]json.RawMessage, prefix string, count, ns *int64, rate *float64, strata bool) bool {
-	if raw, present := fields[prefix+"_per_second"]; present && rate == nil && !bytes.Equal(raw, []byte("null")) {
+func performanceExtractPhase(fields performanceExtractFields, prefix string, count, ns *int64, rate *float64, strata bool) bool {
+	if raw, present := fields.field(prefix + "_per_second"); present && rate == nil && !bytes.Equal(raw, []byte("null")) {
 		return false
 	}
 	countKnown := count != nil && !(strata && prefix == "predicted")
@@ -347,7 +524,7 @@ func performanceExtractPhase(fields map[string]json.RawMessage, prefix string, c
 			}
 		}
 	}
-	if raw, present := fields[prefix+"_per_token_ms"]; present {
+	if raw, present := fields.field(prefix + "_per_token_ms"); present {
 		perToken := performanceExtractDecimal(raw, float64(performancewire.MaxPhaseNs)/1e6)
 		if noWork && (bytes.Equal(raw, []byte("null")) || (perToken != nil && *perToken == 0)) {
 			return true

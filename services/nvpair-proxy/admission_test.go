@@ -702,6 +702,7 @@ func (a *admissionController) setPolicy(p nodepolicy.Policy) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.policy = p
+	a.policyGeneration++
 	a.refreshStrictCapabilityLocked()
 	a.signalLocked()
 }
@@ -742,6 +743,106 @@ func (h *admHarness) setHealthy(engine string, ok bool) {
 	h.a.backendChanged()
 }
 
+func TestOwnedInferenceBuffersAdmission(t *testing.T) {
+	t.Run("availability is rechecked after successful unlocked preparation", func(t *testing.T) {
+		h := newAdmHarness(t)
+		calls := 0
+		d := h.a.admit(context.Background(), admissionRequest{engine: "ollama", model: "m", waitCap: time.Second, prepare: func(context.Context, nodepolicy.Profile, bool, uint64) error {
+			calls++
+			h.a.setAvailability(nodepolicy.Paused, false)
+			return nil
+		}})
+		if d.ticket != nil {
+			defer d.ticket.release()
+			t.Fatal("paused request received a ticket after preparation")
+		}
+		if calls != 1 || d.reject != nodepolicy.RejectPaused || h.a.currentActive() != 0 {
+			t.Fatalf("calls=%d decision=%+v active=%d", calls, d, h.a.currentActive())
+		}
+	})
+	t.Run("storage refusal precedes wake and ticket", func(t *testing.T) {
+		h := newAdmHarness(t)
+		h.a.setIntent(map[string]bool{"ollama": true})
+		h.setHealthy("ollama", false)
+		calls := 0
+		d := h.a.admit(context.Background(), admissionRequest{engine: "ollama", model: "m", waitCap: time.Second, prepare: func(context.Context, nodepolicy.Profile, bool, uint64) error { calls++; return &bufferLimitError{} }})
+		if d.ticket != nil {
+			defer d.ticket.release()
+			t.Fatal("impossible storage received a ticket")
+		}
+		bufferAssertLimit(t, d.err)
+		if calls != 1 || h.a.currentActive() != 0 || len(h.notes(nodepolicy.NotifyAdmissionWake)) != 0 || len(h.notes(nodepolicy.NotifyAdmissionUnload)) != 0 {
+			t.Fatalf("preparation effects: calls=%d active=%d wake=%d unload=%d", calls, h.a.currentActive(), len(h.notes(nodepolicy.NotifyAdmissionWake)), len(h.notes(nodepolicy.NotifyAdmissionUnload)))
+		}
+	})
+	t.Run("policy changes while unlocked preparation waits", func(t *testing.T) {
+		h := newAdmHarness(t)
+		first := h.a.currentPolicy()
+		first.Revision = "1"
+		first.Profiles = []nodepolicy.Profile{{Engine: "ollama", Model: "m", RequestOptions: []byte(`{"a":1}`)}}
+		h.a.setPolicy(first)
+		entered, resume := make(chan struct{}), make(chan struct{})
+		release := sync.OnceFunc(func() { close(resume) })
+		defer release()
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		done := make(chan admissionDecision, 1)
+		var seen []string
+		go func() {
+			done <- h.a.admit(ctx, admissionRequest{engine: "ollama", model: "m", waitCap: time.Second, prepare: func(ctx context.Context, p nodepolicy.Profile, has bool, _ uint64) error {
+				if !has {
+					return errors.New("missing authoritative profile")
+				}
+				seen = append(seen, string(p.RequestOptions))
+				if len(seen) == 1 {
+					close(entered)
+					select {
+					case <-resume:
+					case <-ctx.Done():
+						return ctx.Err()
+					}
+					return &bufferLimitError{}
+				}
+				return &bufferLimitError{}
+			}})
+		}()
+		select {
+		case <-entered:
+		case <-time.After(2 * time.Second):
+			t.Fatal("preparation did not enter")
+		}
+		second := first
+		second.Revision = "2"
+		second.Profiles = []nodepolicy.Profile{{Engine: "ollama", Model: "m", RequestOptions: []byte(`{"b":2}`)}}
+		activated := make(chan error, 1)
+		go func() { activated <- h.a.activatePolicy(second) }()
+		select {
+		case err := <-activated:
+			if err != nil {
+				t.Fatal(err)
+			}
+		case <-time.After(2 * time.Second):
+			release()
+			t.Fatal("preparation held the admission mutex")
+		}
+		release()
+		var d admissionDecision
+		select {
+		case d = <-done:
+		case <-time.After(2 * time.Second):
+			t.Fatal("admission did not finish")
+		}
+		if d.ticket != nil {
+			defer d.ticket.release()
+			t.Fatal("stale prepared policy received a ticket")
+		}
+		bufferAssertLimit(t, d.err)
+		if len(seen) != 2 || seen[0] != `{"a":1}` || seen[1] != `{"b":2}` || h.a.currentActive() != 0 {
+			t.Fatalf("preparation revisions=%v active=%d", seen, h.a.currentActive())
+		}
+	})
+}
+
 func (h *admHarness) notes(method string) []notification {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -772,7 +873,9 @@ func (h *admHarness) strictPolicy(mutate func(*nodepolicy.Policy)) {
 }
 
 func (h *admHarness) admit(engine, model string, waitCap time.Duration) admissionDecision {
-	return h.a.admit(context.Background(), admissionRequest{engine: engine, model: model, waitCap: waitCap})
+	// Harness admissions represent inventory-resolved executions. Direct ingress
+	// coverage separately proves that arbitrary unresolved names mint no history.
+	return h.a.admit(context.Background(), admissionRequest{engine: engine, model: model, waitCap: waitCap, resolvedInventory: true})
 }
 
 // admitAsync starts an admission and returns its eventual decision.

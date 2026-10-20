@@ -19,6 +19,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -26,7 +27,10 @@ import (
 	"os"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"nvpair-shared/engines"
 	"nvpair-shared/nodepolicy"
@@ -219,9 +223,14 @@ type installedQualification struct {
 
 // strictQualificationError rejects a request body the qualification does not
 // cover. Its reason names fields and bounds only, never request content.
-type strictQualificationError struct{ reason string }
+type strictQualificationError struct{ reason, message string }
 
-func (e *strictQualificationError) Error() string { return "strict qualification: " + e.reason }
+func (e *strictQualificationError) Error() string {
+	if e.message != "" {
+		return e.message
+	}
+	return "strict qualification: " + e.reason
+}
 
 // errAmbiguousModel rejects an effective body whose defaults add a
 // model-equivalent member; callers answer it as ambiguous-model, as on every
@@ -229,7 +238,46 @@ func (e *strictQualificationError) Error() string { return "strict qualification
 var errAmbiguousModel = errors.New(ambiguousModelMessage)
 
 func rejectBody(format string, args ...any) error {
-	return &strictQualificationError{reason: fmt.Sprintf(format, args...)}
+	// Call sites format only fixed field names, fixed content diagnostics, and
+	// integer bounds/indices. Their small output lives in the request's parser
+	// allowance; avoid fmt's printer pool retaining it after the request ends.
+	argumentSize := func(arg any) int {
+		switch value := arg.(type) {
+		case string:
+			return len(value)
+		case error:
+			return len(value.Error())
+		case int:
+			var digits [20]byte
+			return len(strconv.AppendInt(digits[:0], int64(value), 10))
+		default:
+			panic("unsupported strict diagnostic argument")
+		}
+	}
+	size := len(format)
+	for _, arg := range args {
+		size += argumentSize(arg) - 2
+	}
+	out := make([]byte, 0, size)
+	arg := 0
+	for i := 0; i < len(format); i++ {
+		if format[i] != '%' {
+			out = append(out, format[i])
+			continue
+		}
+		i++
+		switch value := args[arg].(type) {
+		case string:
+			out = append(out, value...)
+		case error:
+			out = append(out, value.Error()...)
+		case int:
+			out = strconv.AppendInt(out, int64(value), 10)
+		}
+		arg++
+	}
+	reason := string(out)
+	return &strictQualificationError{reason: reason, message: "strict qualification: " + reason}
 }
 
 // strictBound is the accounted size of one validated request.
@@ -248,38 +296,72 @@ var chatRequestKeys = []string{
 // profile it is installed under, and returns the effective body (the request
 // with the profile's defaults merged in) with its bound. The effective body is
 // what is accounted and what the engine receives.
-func (q *localQualification) validateRequest(profile nodepolicy.Profile, route string, body []byte) ([]byte, strictBound, error) {
-	if !slices.Contains(q.Routes, route) {
-		return nil, strictBound{}, rejectBody("route %s is not qualified", route)
+func (q *localQualification) validateRequest(profile nodepolicy.Profile, route string, body []byte, contexts ...context.Context) ([]byte, strictBound, error) {
+	var ctx context.Context
+	if len(contexts) > 0 {
+		ctx = contexts[0]
 	}
-	if !uniqueKeys(body) {
+	if !slices.Contains(q.Routes, route) {
+		if err := retainStrictReason(ctx, len("route ")+len(route)+len(" is not qualified")); err != nil {
+			return nil, strictBound{}, err
+		}
+		reason := "route " + route + " is not qualified"
+		return nil, strictBound{}, &strictQualificationError{reason: reason, message: "strict qualification: " + reason}
+	}
+	unique, err := uniqueKeysContext(body, ctx)
+	if err != nil {
+		return nil, strictBound{}, err
+	}
+	if !unique {
 		return nil, strictBound{}, rejectBody("the request repeats a key or is not JSON")
 	}
-	var request map[string]json.RawMessage
-	if json.Unmarshal(body, &request) != nil || request == nil {
+	if !isJSONObject(body) {
 		return nil, strictBound{}, rejectBody("the request must be a JSON object")
 	}
-	for key := range request {
-		if !slices.Contains(chatRequestKeys, key) {
-			return nil, strictBound{}, rejectBody("field %q is not supported", key)
+	var fieldError error
+	visitObject(body, func(key []byte, _, _ int) {
+		if fieldError != nil {
+			return
 		}
+		for _, name := range chatRequestKeys {
+			if jsonStringEquals(key, name) {
+				return
+			}
+		}
+		fieldError = rejectStrictField(ctx, key)
+	})
+	if fieldError != nil {
+		return nil, strictBound{}, fieldError
 	}
-	effective := mergeDefaults(body, profile.RequestOptions)
+	effective, release, mergeErr := transformBody(ctx, body, "", false, profile.RequestOptions)
+	if mergeErr != nil {
+		return nil, strictBound{}, mergeErr
+	}
+	if ctx != nil && inferenceBuffers(ctx) != nil {
+		inferenceBuffers(ctx).retainRelease(release)
+	} else {
+		defer release()
+	}
 	if ambiguousModelMember(effective) {
 		return nil, strictBound{}, errAmbiguousModel
 	}
-	if !uniqueKeys(effective) {
-		return nil, strictBound{}, rejectBody("the request with its defaults repeats a key or is not JSON")
-	}
-	var fields map[string]json.RawMessage
-	if json.Unmarshal(effective, &fields) != nil {
-		return nil, strictBound{}, rejectBody("the request with its defaults is not a JSON object")
-	}
-	var bound strictBound
-	if err := checkChatScalars(fields); err != nil {
+	unique, err = uniqueKeysContext(effective, ctx)
+	if err != nil {
 		return nil, strictBound{}, err
 	}
-	output, err := outputBound(fields)
+	if !unique {
+		return nil, strictBound{}, rejectBody("the request with its defaults repeats a key or is not JSON")
+	}
+	if !isJSONObject(effective) {
+		return nil, strictBound{}, rejectBody("the request with its defaults is not a JSON object")
+	}
+	w := newBodyWorkspace(ctx)
+	defer w.close()
+	var bound strictBound
+	if err := checkChatScalars(effective, w); err != nil {
+		return nil, strictBound{}, err
+	}
+	output, err := outputBound(effective)
 	if err != nil {
 		return nil, strictBound{}, err
 	}
@@ -289,16 +371,16 @@ func (q *localQualification) validateRequest(profile nodepolicy.Profile, route s
 	bound.output = output
 	a := q.Accounting
 	bound.input = a.RequestOverheadTokens
-	n, err := accountMessages(fields["messages"], a)
+	n, err := accountMessages(strictField(effective, "messages", false), a)
 	if err != nil {
 		return nil, strictBound{}, err
 	}
 	bound.input += n
-	if n, err = accountTools(fields, a); err != nil {
+	if n, err = accountTools(effective, a); err != nil {
 		return nil, strictBound{}, err
 	}
 	bound.input += n
-	if n, err = accountResponseFormat(fields["response_format"], a); err != nil {
+	if n, err = accountResponseFormat(strictField(effective, "response_format", false), a); err != nil {
 		return nil, strictBound{}, err
 	}
 	bound.input += n
@@ -308,60 +390,182 @@ func (q *localQualification) validateRequest(profile nodepolicy.Profile, route s
 	return effective, bound, nil
 }
 
-func checkChatScalars(f map[string]json.RawMessage) error {
-	var model string
-	if json.Unmarshal(f["model"], &model) != nil || model == "" {
+// Strict request views borrow the effective body. They reproduce struct
+// decoding's case-insensitive field matching and null zero values without
+// allocating strings, raw-message copies, arrays, maps, or decoder buffers.
+func strictField(raw []byte, name string, fold bool) []byte {
+	var result []byte
+	visitObject(raw, func(key []byte, start, end int) {
+		if strictKeyEqual(key, name, fold) {
+			result = raw[start:end]
+		}
+	})
+	return result
+}
+
+func strictKeyEqual(raw []byte, name string, fold bool) bool {
+	if !fold {
+		return jsonStringEquals(raw, name)
+	}
+	pos := 0
+	for i := 1; i < len(raw)-1; {
+		if pos == len(name) {
+			return false
+		}
+		r, next := ownedJSONRune(raw, i)
+		other, n := utf8.DecodeRuneInString(name[pos:])
+		if strictFoldRune(r) != strictFoldRune(other) {
+			return false
+		}
+		i, pos = next, pos+n
+	}
+	return pos == len(name)
+}
+
+func strictFoldRune(r rune) rune {
+	for {
+		next := unicode.SimpleFold(r)
+		if next <= r {
+			return next
+		}
+		r = next
+	}
+}
+
+func strictNull(raw []byte) bool { return bytes.Equal(raw, []byte("null")) }
+
+func strictStringLen(raw []byte) (int, bool) {
+	if len(raw) == 0 || strictNull(raw) {
+		return 0, true
+	}
+	if raw[0] != '"' {
+		return 0, false
+	}
+	return decodedJSONStringBytes(raw), true
+}
+
+func strictBool(raw []byte) bool {
+	return len(raw) == 0 || strictNull(raw) || bytes.Equal(raw, []byte("true")) || bytes.Equal(raw, []byte("false"))
+}
+
+func strictObject(raw []byte, names ...string) bool {
+	if len(raw) == 0 || strictNull(raw) {
+		return true
+	}
+	valid := true
+	_, object := visitObject(raw, func(key []byte, _, _ int) {
+		for _, name := range names {
+			if strictKeyEqual(key, name, true) {
+				return
+			}
+		}
+		valid = false
+	})
+	return object && valid
+}
+
+func strictStrings(raw []byte, names ...string) bool {
+	for _, name := range names {
+		if _, ok := strictStringLen(strictField(raw, name, true)); !ok {
+			return false
+		}
+	}
+	return true
+}
+
+func strictArray(raw []byte, visit func(int, []byte) error) (int, error) {
+	if len(raw) == 0 || strictNull(raw) {
+		return 0, nil
+	}
+	n := 0
+	var err error
+	if !visitArray(raw, func(value []byte) {
+		if err == nil && visit != nil {
+			err = visit(n, value)
+		}
+		n++
+	}) {
+		return 0, errors.New("not an array")
+	}
+	return n, err
+}
+
+func checkChatScalars(f []byte, w *bodyWorkspace) error {
+	if n, ok := strictStringLen(strictField(f, "model", false)); !ok || n == 0 {
 		return rejectBody("model must be a nonempty string")
 	}
 	for _, key := range []string{"temperature", "top_p", "frequency_penalty", "presence_penalty"} {
-		if raw, ok := f[key]; ok {
-			var v float64
-			if json.Unmarshal(raw, &v) != nil {
+		if raw := strictField(f, key, false); len(raw) > 0 && !strictNull(raw) {
+			if raw[0] != '-' && (raw[0] < '0' || raw[0] > '9') {
+				return rejectBody("%s must be a number", key)
+			}
+			// ParseFloat's input conversion and its possible NumError clone
+			// each need len(raw) bytes. Its decimal workspace is fixed-size.
+			if err := w.acquire(2*int64(len(raw)) + 256); err != nil {
+				return err
+			}
+			if _, err := strconv.ParseFloat(string(raw), 64); err != nil {
 				return rejectBody("%s must be a number", key)
 			}
 		}
 	}
-	if raw, ok := f["seed"]; ok {
-		var v int64
-		if json.Unmarshal(raw, &v) != nil {
-			return rejectBody("seed must be an integer")
-		}
+	if raw := strictField(f, "seed", false); len(raw) > 0 && !strictNull(raw) && !strictInt64(raw) {
+		return rejectBody("seed must be an integer")
 	}
-	if raw, ok := f["stream"]; ok {
-		var v bool
-		if json.Unmarshal(raw, &v) != nil {
-			return rejectBody("stream must be a boolean")
-		}
+	if !strictBool(strictField(f, "stream", false)) {
+		return rejectBody("stream must be a boolean")
 	}
-	if raw, ok := f["stream_options"]; ok {
-		var v struct {
-			IncludeUsage bool `json:"include_usage"`
-		}
-		if decodeExact(raw, &v) != nil {
+	if raw := strictField(f, "stream_options", false); len(raw) > 0 {
+		if !strictObject(raw, "include_usage") || !strictBool(strictField(raw, "include_usage", true)) {
 			return rejectBody("stream_options supports include_usage only")
 		}
 	}
-	if raw, ok := f["stop"]; ok {
-		var one string
-		var many []string
-		if json.Unmarshal(raw, &one) != nil && (json.Unmarshal(raw, &many) != nil || len(many) > 4) {
-			return rejectBody("stop must be a string or at most four strings")
+	if raw := strictField(f, "stop", false); len(raw) > 0 {
+		if _, ok := strictStringLen(raw); !ok {
+			n, err := strictArray(raw, func(_ int, value []byte) error {
+				if _, ok := strictStringLen(value); !ok {
+					return errors.New("not a string")
+				}
+				return nil
+			})
+			if err != nil || n > 4 {
+				return rejectBody("stop must be a string or at most four strings")
+			}
 		}
 	}
 	return nil
 }
 
+func strictInt64(raw []byte) bool {
+	negative := raw[0] == '-'
+	if negative {
+		raw = raw[1:]
+	}
+	limit := uint64(1<<63 - 1)
+	if negative {
+		limit++
+	}
+	var n uint64
+	for _, c := range raw {
+		if c < '0' || c > '9' || n > (limit-uint64(c-'0'))/10 {
+			return false
+		}
+		n = n*10 + uint64(c-'0')
+	}
+	return len(raw) > 0
+}
+
 // outputBound is the single finite output request. Both spellings must agree
 // when both are sent; a request with neither has no bound and is rejected.
-func outputBound(f map[string]json.RawMessage) (int, error) {
+func outputBound(f []byte) (int, error) {
 	bound := 0
 	for _, key := range []string{"max_tokens", "max_completion_tokens"} {
-		raw, ok := f[key]
-		if !ok {
+		raw := strictField(f, key, false)
+		if len(raw) == 0 {
 			continue
 		}
-		var v int
-		if json.Unmarshal(raw, &v) != nil || v < 1 {
+		v, ok := positiveJSONInt(raw)
+		if !ok {
 			return 0, rejectBody("%s must be a positive integer", key)
 		}
 		if bound != 0 && v != bound {
@@ -375,140 +579,127 @@ func outputBound(f map[string]json.RawMessage) (int, error) {
 	return bound, nil
 }
 
-type chatMessage struct {
-	Role       string            `json:"role"`
-	Content    json.RawMessage   `json:"content"`
-	Name       *string           `json:"name"`
-	ToolCalls  []json.RawMessage `json:"tool_calls"`
-	ToolCallID *string           `json:"tool_call_id"`
-}
-
-type chatToolCall struct {
-	ID       string `json:"id"`
-	Type     string `json:"type"`
-	Function struct {
-		Name      string `json:"name"`
-		Arguments string `json:"arguments"`
-	} `json:"function"`
-}
-
 func accountMessages(raw json.RawMessage, a qualificationAccounting) (int, error) {
-	var messages []json.RawMessage
-	if json.Unmarshal(raw, &messages) != nil || len(messages) == 0 {
-		return 0, rejectBody("messages must be a nonempty array")
-	}
 	total := 0
-	for i, m := range messages {
-		var msg chatMessage
-		if decodeExact(m, &msg) != nil {
-			return 0, rejectBody("messages[%d] has an unsupported shape", i)
+	count, err := strictArray(raw, func(i int, m []byte) error {
+		calls := strictField(m, "tool_calls", true)
+		if !strictObject(m, "role", "content", "name", "tool_calls", "tool_call_id") || !strictStrings(m, "role", "name", "tool_call_id") {
+			return rejectBody("messages[%d] has an unsupported shape", i)
 		}
-		switch msg.Role {
-		case "system", "user", "assistant", "tool":
-		default:
-			return 0, rejectBody("messages[%d].role is not supported", i)
+		callCount, callErr := strictArray(calls, nil)
+		if callErr != nil {
+			return rejectBody("messages[%d] has an unsupported shape", i)
 		}
-		n := a.MessageOverheadTokens + len(msg.Role)
-		text, isNull, err := contentText(msg.Content)
+		role := strictField(m, "role", true)
+		if !jsonStringEquals(role, "system") && !jsonStringEquals(role, "user") && !jsonStringEquals(role, "assistant") && !jsonStringEquals(role, "tool") {
+			return rejectBody("messages[%d].role is not supported", i)
+		}
+		roleBytes, _ := strictStringLen(role)
+		n := a.MessageOverheadTokens + roleBytes
+		text, isNull, err := contentText(strictField(m, "content", true))
 		if err != nil {
-			return 0, rejectBody("messages[%d].content: %s", i, err)
+			return rejectBody("messages[%d].content: %s", i, err)
 		}
-		if isNull && (msg.Role != "assistant" || len(msg.ToolCalls) == 0) {
-			return 0, rejectBody("messages[%d].content is required", i)
+		if isNull && (!jsonStringEquals(role, "assistant") || callCount == 0) {
+			return rejectBody("messages[%d].content is required", i)
 		}
 		n += text
-		if msg.Name != nil {
-			n += len(*msg.Name)
-		}
-		if msg.ToolCallID != nil {
-			if msg.Role != "tool" {
-				return 0, rejectBody("messages[%d].tool_call_id belongs to a tool message", i)
+		name, _ := strictStringLen(strictField(m, "name", true))
+		n += name
+		if id := strictField(m, "tool_call_id", true); len(id) > 0 && !strictNull(id) {
+			if !jsonStringEquals(role, "tool") {
+				return rejectBody("messages[%d].tool_call_id belongs to a tool message", i)
 			}
-			n += len(*msg.ToolCallID)
+			idBytes, _ := strictStringLen(id)
+			n += idBytes
 		}
-		if len(msg.ToolCalls) > 0 && msg.Role != "assistant" {
-			return 0, rejectBody("messages[%d].tool_calls belong to an assistant message", i)
+		if callCount > 0 && !jsonStringEquals(role, "assistant") {
+			return rejectBody("messages[%d].tool_calls belong to an assistant message", i)
 		}
-		for j, raw := range msg.ToolCalls {
-			var call chatToolCall
-			if decodeExact(raw, &call) != nil || call.Type != "function" || call.Function.Name == "" {
-				return 0, rejectBody("messages[%d].tool_calls[%d] must call a named function", i, j)
+		_, err = strictArray(calls, func(j int, call []byte) error {
+			fn := strictField(call, "function", true)
+			name := strictField(fn, "name", true)
+			nameBytes, nameOK := strictStringLen(name)
+			if !strictObject(call, "id", "type", "function") || !strictStrings(call, "id", "type") || !strictObject(fn, "name", "arguments") || !strictStrings(fn, "name", "arguments") || !jsonStringEquals(strictField(call, "type", true), "function") || !nameOK || nameBytes == 0 {
+				return rejectBody("messages[%d].tool_calls[%d] must call a named function", i, j)
 			}
-			n += compactLen(raw)
+			n += compactLen(call)
+			return nil
+		})
+		if err != nil {
+			return err
 		}
 		total += n
+		return nil
+	})
+	if err != nil {
+		if len(raw) == 0 || strictNull(raw) || raw[0] != '[' {
+			return 0, rejectBody("messages must be a nonempty array")
+		}
+		return 0, err
+	}
+	if count == 0 {
+		return 0, rejectBody("messages must be a nonempty array")
 	}
 	return total, nil
 }
 
-// contentText counts the UTF-8 bytes of a message's text. Content is a string,
-// an array of text parts, or null; any other part (an image) is unsupported.
+// contentText counts decoded UTF-8 bytes directly in borrowed strings.
 func contentText(raw json.RawMessage) (n int, isNull bool, err error) {
-	if len(bytes.TrimSpace(raw)) == 0 || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+	raw = bytes.TrimSpace(raw)
+	if len(raw) == 0 || strictNull(raw) {
 		return 0, true, nil
 	}
-	var s string
-	if json.Unmarshal(raw, &s) == nil {
-		return len(s), false, nil
+	if raw[0] == '"' {
+		return decodedJSONStringBytes(raw), false, nil
 	}
-	var parts []json.RawMessage
-	if json.Unmarshal(raw, &parts) != nil {
+	_, err = strictArray(raw, func(_ int, part []byte) error {
+		if !strictObject(part, "type", "text") || !strictStrings(part, "type", "text") || !jsonStringEquals(strictField(part, "type", true), "text") {
+			return errors.New("only text parts are supported")
+		}
+		text, _ := strictStringLen(strictField(part, "text", true))
+		n += text
+		return nil
+	})
+	if raw[0] != '[' {
 		return 0, false, errors.New("must be a string or an array of text parts")
 	}
-	for _, p := range parts {
-		var part struct {
-			Type string `json:"type"`
-			Text string `json:"text"`
-		}
-		if decodeExact(p, &part) != nil || part.Type != "text" {
-			return 0, false, errors.New("only text parts are supported")
-		}
-		n += len(part.Text)
-	}
-	return n, false, nil
+	return n, false, err
 }
 
-func accountTools(f map[string]json.RawMessage, a qualificationAccounting) (int, error) {
+func accountTools(f []byte, a qualificationAccounting) (int, error) {
 	total := 0
-	if raw, ok := f["tools"]; ok {
-		var tools []json.RawMessage
-		if json.Unmarshal(raw, &tools) != nil {
-			return 0, rejectBody("tools must be an array")
-		}
-		for i, t := range tools {
-			var tool struct {
-				Type     string `json:"type"`
-				Function struct {
-					Name        string          `json:"name"`
-					Description string          `json:"description"`
-					Parameters  json.RawMessage `json:"parameters"`
-					Strict      bool            `json:"strict"`
-				} `json:"function"`
+	if raw := strictField(f, "tools", false); len(raw) > 0 {
+		_, err := strictArray(raw, func(i int, tool []byte) error {
+			fn := strictField(tool, "function", true)
+			name, nameOK := strictStringLen(strictField(fn, "name", true))
+			if !strictObject(tool, "type", "function") || !strictStrings(tool, "type") || !strictObject(fn, "name", "description", "parameters", "strict") || !strictStrings(fn, "name", "description") || !strictBool(strictField(fn, "strict", true)) || !jsonStringEquals(strictField(tool, "type", true), "function") || !nameOK || name == 0 {
+				return rejectBody("tools[%d] must be a named function", i)
 			}
-			if decodeExact(t, &tool) != nil || tool.Type != "function" || tool.Function.Name == "" {
-				return 0, rejectBody("tools[%d] must be a named function", i)
+			if parameters := strictField(fn, "parameters", true); len(parameters) > 0 && !isJSONObject(parameters) {
+				return rejectBody("tools[%d].function.parameters must be an object", i)
 			}
-			if len(tool.Function.Parameters) > 0 && !isObject(tool.Function.Parameters) {
-				return 0, rejectBody("tools[%d].function.parameters must be an object", i)
+			total += a.ToolOverheadTokens + compactLen(tool)
+			return nil
+		})
+		if err != nil {
+			if raw[0] != '[' && !strictNull(raw) {
+				return 0, rejectBody("tools must be an array")
 			}
-			total += a.ToolOverheadTokens + compactLen(t)
+			return 0, err
 		}
 	}
-	if raw, ok := f["tool_choice"]; ok {
-		var mode string
-		if json.Unmarshal(raw, &mode) == nil {
-			if mode != "none" && mode != "auto" && mode != "required" {
+	if raw := strictField(f, "tool_choice", false); len(raw) > 0 {
+		if raw[0] == '"' || strictNull(raw) {
+			if !jsonStringEquals(raw, "none") && !jsonStringEquals(raw, "auto") && !jsonStringEquals(raw, "required") {
 				return 0, rejectBody("tool_choice is not supported")
 			}
-			total += len(mode)
+			n, _ := strictStringLen(raw)
+			total += n
 		} else {
-			var choice struct {
-				Type     string `json:"type"`
-				Function struct {
-					Name string `json:"name"`
-				} `json:"function"`
-			}
-			if decodeExact(raw, &choice) != nil || choice.Type != "function" || choice.Function.Name == "" {
+			fn := strictField(raw, "function", true)
+			name, nameOK := strictStringLen(strictField(fn, "name", true))
+			if !strictObject(raw, "type", "function") || !strictStrings(raw, "type") || !strictObject(fn, "name") || !strictStrings(fn, "name") || !jsonStringEquals(strictField(raw, "type", true), "function") || !nameOK || name == 0 {
 				return 0, rejectBody("tool_choice is not supported")
 			}
 			total += compactLen(raw)
@@ -521,105 +712,209 @@ func accountResponseFormat(raw json.RawMessage, a qualificationAccounting) (int,
 	if len(raw) == 0 {
 		return 0, nil
 	}
-	var format struct {
-		Type       string `json:"type"`
-		JSONSchema *struct {
-			Name        string          `json:"name"`
-			Description string          `json:"description"`
-			Schema      json.RawMessage `json:"schema"`
-			Strict      bool            `json:"strict"`
-		} `json:"json_schema"`
-	}
-	if decodeExact(raw, &format) != nil {
+	schema := strictField(raw, "json_schema", true)
+	if !strictObject(raw, "type", "json_schema") || !strictStrings(raw, "type") || !strictObject(schema, "name", "description", "schema", "strict") || !strictStrings(schema, "name", "description") || !strictBool(strictField(schema, "strict", true)) {
 		return 0, rejectBody("response_format has an unsupported shape")
 	}
+	typ := strictField(raw, "type", true)
+	noSchema := len(schema) == 0 || strictNull(schema)
 	switch {
-	case format.Type == "text" && format.JSONSchema == nil:
+	case jsonStringEquals(typ, "text") && noSchema:
 		return 0, nil
-	case format.Type == "json_object" && format.JSONSchema == nil:
+	case jsonStringEquals(typ, "json_object") && noSchema:
 		return a.SchemaOverheadTokens, nil
-	case format.Type == "json_schema" && format.JSONSchema != nil && format.JSONSchema.Name != "" && isObject(format.JSONSchema.Schema):
-		return a.SchemaOverheadTokens + len(format.JSONSchema.Name) + len(format.JSONSchema.Description) + compactLen(format.JSONSchema.Schema), nil
+	case jsonStringEquals(typ, "json_schema") && !noSchema:
+		name, _ := strictStringLen(strictField(schema, "name", true))
+		if name > 0 && isJSONObject(strictField(schema, "schema", true)) {
+			description, _ := strictStringLen(strictField(schema, "description", true))
+			return a.SchemaOverheadTokens + name + description + compactLen(strictField(schema, "schema", true)), nil
+		}
 	}
 	return 0, rejectBody("response_format is not supported")
 }
 
-// decodeExact decodes one JSON value, refusing fields the target does not name.
-func decodeExact(raw json.RawMessage, v any) error {
-	dec := json.NewDecoder(bytes.NewReader(raw))
-	dec.DisallowUnknownFields()
-	return dec.Decode(v)
-}
-
-func isObject(raw json.RawMessage) bool {
-	var obj map[string]json.RawMessage
-	return json.Unmarshal(raw, &obj) == nil && obj != nil
-}
-
-// compactLen is the byte length of raw with insignificant whitespace removed.
+// compactLen counts bytes without a buffer or encoding/json's retained pool.
+// Request callers have already validated syntax; the public helper preserves
+// the former invalid-input result for its fixture callers.
 func compactLen(raw json.RawMessage) int {
-	var buf bytes.Buffer
-	if json.Compact(&buf, raw) != nil {
+	if !ownedJSONValid(raw) {
 		return len(raw)
 	}
-	return buf.Len()
+	n := 0
+	for i := 0; i < len(raw); {
+		if raw[i] == '"' {
+			end, _ := ownedJSONStringEnd(raw, i)
+			n += end - i
+			i = end
+			continue
+		}
+		if raw[i] != ' ' && raw[i] != '\t' && raw[i] != '\r' && raw[i] != '\n' {
+			n++
+		}
+		i++
+	}
+	return n
 }
 
-// maxStrictBodyDepth bounds the nesting a strict request may use.
 const maxStrictBodyDepth = 64
 
-// uniqueKeys reports whether data is one JSON value, nested at most
-// maxStrictBodyDepth deep, in which no object repeats a key at any depth, even
-// in another letter case. A repeated key could be read differently by the
-// engine than by this accounting, which decodes field names case-insensitively.
 func uniqueKeys(data []byte) bool {
-	dec := json.NewDecoder(bytes.NewReader(data))
-	dec.UseNumber()
-	if !uniqueValue(dec, 0) {
-		return false
-	}
-	_, err := dec.Token()
-	return err == io.EOF
+	ok, _ := uniqueKeysContext(data, nil)
+	return ok
 }
 
-func uniqueValue(dec *json.Decoder, depth int) bool {
-	tok, err := dec.Token()
+// The scan has fixed parser state. Each object's exact member/key storage is
+// acquired before allocation; sorting in place needs no map or folded strings.
+// All workspace leases remain held until this scan has dropped its views.
+func uniqueKeysContext(data []byte, ctx context.Context) (bool, error) {
+	if !ownedJSONValid(data) {
+		return false, nil
+	}
+	w := newBodyWorkspace(ctx)
+	defer w.close()
+	depth := 0
+	for i := 0; i < len(data); i++ {
+		switch data[i] {
+		case '"':
+			end, _ := ownedJSONStringEnd(data, i)
+			i = end - 1
+		case '{', '[':
+			if depth == maxStrictBodyDepth {
+				return false, nil
+			}
+			depth++
+			if data[i] == '{' {
+				members, _, _, err := w.members(data[i:])
+				if err != nil {
+					return false, err
+				}
+				slices.SortFunc(members, func(a, b jsonMember) int { return compareStrictKeys(a.key, b.key) })
+				for j := 1; j < len(members); j++ {
+					if compareStrictKeys(members[j-1].key, members[j].key) == 0 {
+						return false, nil
+					}
+				}
+			}
+		case '}', ']':
+			depth--
+		}
+	}
+	return true, nil
+}
+
+// Preserve the former strings.ToLower(strings.ToUpper(key)) duplicate rule,
+// including its Unicode cases, without materializing either folded string.
+func compareStrictKeys(a, b string) int {
+	for len(a) > 0 && len(b) > 0 {
+		x, xn := utf8.DecodeRuneInString(a)
+		y, yn := utf8.DecodeRuneInString(b)
+		x = unicode.ToLower(unicode.ToUpper(x))
+		y = unicode.ToLower(unicode.ToUpper(y))
+		if x < y {
+			return -1
+		}
+		if x > y {
+			return 1
+		}
+		a, b = a[xn:], b[yn:]
+	}
+	return len(a) - len(b)
+}
+
+// Dynamic qualification reasons survive the local scan. Charge their exact
+// construction capacity, retained string, and Error() prefix copy through the
+// request owner. The byte construction has an explicit capacity, avoiding a
+// strings.Builder's allocator-rounded spare capacity.
+func retainStrictReason(ctx context.Context, size int) error {
+	if ctx == nil {
+		return nil
+	}
+	owner := inferenceBuffers(ctx)
+	if owner == nil {
+		return nil
+	}
+	lease, err := owner.scope.acquire(ctx, 3*int64(size)+int64(len("strict qualification: "))+256)
 	if err != nil {
-		return false
+		return err
 	}
-	d, isDelim := tok.(json.Delim)
-	if !isDelim {
-		return true
+	owner.retain(lease)
+	return nil
+}
+
+func strictQuoteRuneSize(r rune) int {
+	switch r {
+	case '\a', '\b', '\f', '\n', '\r', '\t', '\v', '\\', '"':
+		return 2
 	}
-	if depth >= maxStrictBodyDepth {
-		return false
+	if r < ' ' || r == 0x7f {
+		return 4
 	}
-	switch d {
-	case '{':
-		keys := map[string]bool{}
-		for dec.More() {
-			kt, err := dec.Token()
-			key, isKey := kt.(string)
-			// Upper then lower case folds the special cases (the Kelvin sign,
-			// long s) the way JSON field matching does.
-			folded := strings.ToLower(strings.ToUpper(key))
-			if err != nil || !isKey || keys[folded] {
-				return false
+	if strconv.IsPrint(r) {
+		return utf8.RuneLen(r)
+	}
+	if r < 0x10000 {
+		return 6
+	}
+	return 10
+}
+
+func rejectStrictField(ctx context.Context, raw []byte) error {
+	size := len("field \"\" is not supported")
+	for i := 1; i < len(raw)-1; {
+		r, next := ownedJSONRune(raw, i)
+		size += strictQuoteRuneSize(r)
+		i = next
+	}
+	if err := retainStrictReason(ctx, size); err != nil {
+		return err
+	}
+	b := make([]byte, 0, size)
+	b = append(b, "field \""...)
+	const hex = "0123456789abcdef"
+	for i := 1; i < len(raw)-1; {
+		r, next := ownedJSONRune(raw, i)
+		i = next
+		escape := byte(0)
+		switch r {
+		case '\a':
+			escape = 'a'
+		case '\b':
+			escape = 'b'
+		case '\f':
+			escape = 'f'
+		case '\n':
+			escape = 'n'
+		case '\r':
+			escape = 'r'
+		case '\t':
+			escape = 't'
+		case '\v':
+			escape = 'v'
+		case '\\', '"':
+			escape = byte(r)
+		}
+		if escape != 0 {
+			b = append(b, '\\', escape)
+		} else if strconv.IsPrint(r) {
+			b = utf8.AppendRune(b, r)
+		} else {
+			b = append(b, '\\')
+			digits := 4
+			if r < ' ' || r == 0x7f {
+				b = append(b, 'x')
+				digits = 2
+			} else if r < 0x10000 {
+				b = append(b, 'u')
+			} else {
+				b = append(b, 'U')
+				digits = 8
 			}
-			keys[folded] = true
-			if !uniqueValue(dec, depth+1) {
-				return false
+			for shift := (digits - 1) * 4; shift >= 0; shift -= 4 {
+				b = append(b, hex[(r>>shift)&15])
 			}
 		}
-	case '[':
-		for dec.More() {
-			if !uniqueValue(dec, depth+1) {
-				return false
-			}
-		}
-	default:
-		return false
 	}
-	_, err = dec.Token()
-	return err == nil
+	b = append(b, "\" is not supported"...)
+	reason := string(b)
+	return &strictQualificationError{reason: reason, message: "strict qualification: " + reason}
 }

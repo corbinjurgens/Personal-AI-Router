@@ -18,47 +18,84 @@ package main
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
+	"strconv"
 	"sync"
 	"time"
 	"unicode/utf8"
 )
+
+var errStreamFrameBudget = errors.New("stream frame reader: bootstrap buffer unavailable")
+var errStreamFrameProtocol = errors.New("stream frame reader: unsupported protocol")
+var errStreamFrameAccount = errors.New("stream frame reader: an inference buffer account is required")
 
 const (
 	// streamFrameMaxBytes bounds one held raw frame. A frame larger than this
 	// is not an inference event this proxy is willing to buffer.
 	streamFrameMaxBytes int64 = 1 << 20
 
-	// streamFrameBudgetBytes bounds the total live frame-buffer allocations of
-	// the process, across every facade that reads streams.
+	// streamFrameBudgetBytes is a subordinate category of the inference root.
 	streamFrameBudgetBytes int64 = 64 << 20
 
 	// streamFrameReadChunk is the fixed read size for one upstream pull. It is
 	// a read scratch, not a frame buffer, and does not grow with a frame.
 	streamFrameReadChunk = 4 << 10
+	// Fixed state includes the reader, channels/timer, inline lease records and
+	// copied nullable numbers. Validation uses a 10000-byte scanner stack; the
+	// numeric path also covers a 64-digit mantissa, 768-byte canonical output,
+	// 800-digit exact binary-float comparison, copied scalars and call frames.
+	streamFrameMetadataBytes = 8 << 10
+	streamFrameSyntaxBytes   = 16 << 10
+	streamFrameNumericBytes  = 96 << 10
 
 	// defaultStreamFrameIdle bounds the wait for the next complete upstream
 	// event after the first body byte committed the attempt.
 	defaultStreamFrameIdle = 60 * time.Second
 )
 
-// sharedStreamFrameBudget is the process-wide reservation every reader uses
-// unless a caller injects its own, which tests do.
-var sharedStreamFrameBudget = newFrameBudget(streamFrameBudgetBytes)
-
 // frameBudget reserves frame-buffer bytes before they are allocated so that a
 // burst of streams terminates explicitly instead of waiting for memory.
 type frameBudget struct {
-	mu    sync.Mutex
-	limit int64
-	used  int64
+	mu     sync.Mutex
+	limit  int64
+	used   int64
+	scope  *bufferScope
+	leases [32]struct {
+		bytes int64
+		lease *bufferLease
+	}
 }
 
 func newFrameBudget(limit int64) *frameBudget {
-	return &frameBudget{limit: limit}
+	root, _ := newBufferBudget(limit, 0)
+	scope, _ := root.newRequest(limit)
+	return &frameBudget{limit: limit, scope: scope}
+}
+
+func ownedFrameBudget(ctx context.Context) *frameBudget {
+	if ctx == nil {
+		return nil
+	}
+	owner := inferenceBuffers(ctx)
+	if owner == nil {
+		return nil
+	}
+	bootstrap := owner.borrowParserAllowance()
+	if bootstrap == nil {
+		return nil
+	}
+	defer bootstrap.close() // Covers fixed wrapper/category bookkeeping below.
+	b := owner.scope.budget
+	b.mu.Lock()
+	if b.streams == nil {
+		b.streams = &bufferScope{budget: b, limit: streamFrameBudgetBytes}
+	}
+	shared := b.streams
+	b.mu.Unlock()
+	scope, _ := owner.scope.category(streamFrameBudgetBytes)
+	scope.shared = shared
+	return &frameBudget{limit: streamFrameBudgetBytes, scope: scope}
 }
 
 // reserve records n bytes against the budget. It reports false when the
@@ -72,6 +109,21 @@ func (b *frameBudget) reserve(n int64) bool {
 	if n > b.limit-b.used {
 		return false
 	}
+	slot := -1
+	for i := range b.leases {
+		if b.leases[i].lease == nil {
+			slot = i
+			break
+		}
+	}
+	if slot < 0 {
+		return false
+	}
+	lease, err := b.scope.tryAcquire(context.Background(), n)
+	if err != nil {
+		return false
+	}
+	b.leases[slot].bytes, b.leases[slot].lease = n, lease
 	b.used += n
 	return true
 }
@@ -82,10 +134,16 @@ func (b *frameBudget) release(n int64) {
 	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	b.used -= n
-	if b.used < 0 {
-		b.used = 0
+	for i, record := range b.leases {
+		if record.lease != nil && record.bytes == n {
+			b.leases[i].lease = nil
+			b.leases[i].bytes = 0
+			b.used -= n
+			record.lease.close()
+			return
+		}
 	}
+	panic("stream frame release without matching storage")
 }
 
 // inUse is the live reservation, which tests use to prove a closed reader gave
@@ -168,31 +226,11 @@ func buildStreamInterruptionFrames() map[string]streamInterruptionFrames {
 	frames := make(map[string]streamInterruptionFrames, len(streamInterruptionReasons))
 	for _, reason := range streamInterruptionReasons {
 		message := "stream interrupted: " + reason
-
-		sseEvent := struct {
-			Error struct {
-				Message string `json:"message"`
-				Type    string `json:"type"`
-				Code    string `json:"code"`
-			} `json:"error"`
-		}{}
-		sseEvent.Error.Message = message
-		sseEvent.Error.Type = "server_error"
-		sseEvent.Error.Code = "stream_interrupted"
-		payload, err := json.Marshal(sseEvent)
-		if err != nil {
-			// A struct of plain strings cannot fail to marshal; keep the
-			// terminator well-formed if that ever changes.
-			payload = []byte(`{"error":{"message":"stream interrupted","type":"server_error","code":"stream_interrupted"}}`)
-		}
-
-		ndjsonEvent := struct {
-			Error string `json:"error"`
-		}{Error: message}
-		ndjsonPayload, err := json.Marshal(ndjsonEvent)
-		if err != nil {
-			ndjsonPayload = []byte(`{"error":"stream interrupted"}`)
-		}
+		// Initialization-owned immutable templates use no encoding/json pool.
+		payload := appendJSONString([]byte(`{"error":{"message":`), message)
+		payload = append(payload, []byte(`,"type":"server_error","code":"stream_interrupted"}}`)...)
+		ndjsonPayload := appendJSONString([]byte(`{"error":`), message)
+		ndjsonPayload = append(ndjsonPayload, '}')
 
 		frames[reason] = streamInterruptionFrames{
 			sse:               append(append([]byte("data: "), payload...), []byte("\n\ndata: [DONE]\n\n")...),
@@ -235,16 +273,18 @@ type streamFrameReader struct {
 	budget      *frameBudget
 	scratch     []byte
 
-	parent       context.Context
-	deadline     time.Time
-	stop         chan struct{}
-	stopped      chan struct{}
-	closeOnce    sync.Once
-	closeErr     error
-	readMu       sync.Mutex // exactly one upstream read, also joined by Close
-	idleFired    bool
-	choiceBytes  int64
-	scratchBytes int64
+	parent        context.Context
+	deadline      time.Time
+	stop          chan struct{}
+	stopped       chan struct{}
+	closeOnce     sync.Once
+	closeErr      error
+	readMu        sync.Mutex // exactly one upstream read, also joined by Close
+	idleFired     bool
+	choiceBytes   int64
+	scratchBytes  int64
+	metadataBytes int64
+	bootstrap     *bufferLease
 
 	mu              sync.Mutex
 	buf             []byte
@@ -272,15 +312,31 @@ func newStreamFrameReader(config streamFrameConfig) (*streamFrameReader, error) 
 		return nil, errors.New("stream frame reader: an upstream body is required")
 	}
 	if config.Protocol != streamProtocolSSE && config.Protocol != streamProtocolNDJSON {
-		return nil, fmt.Errorf("stream frame reader: unsupported protocol %d", config.Protocol)
+		return nil, errStreamFrameProtocol
 	}
 	idleTimeout := config.IdleTimeout
 	if idleTimeout <= 0 {
 		idleTimeout = defaultStreamFrameIdle
 	}
 	budget := config.Budget
+	var setup *bufferLease
+	defer func() {
+		if setup != nil {
+			setup.close()
+		}
+	}()
 	if budget == nil {
-		budget = sharedStreamFrameBudget
+		if config.Parent == nil || inferenceBuffers(config.Parent) == nil {
+			return nil, errStreamFrameAccount
+		}
+		setup = inferenceBuffers(config.Parent).borrowParserAllowance()
+		if setup == nil {
+			return nil, errStreamFrameBudget
+		}
+		budget = ownedFrameBudget(config.Parent)
+		if budget == nil {
+			return nil, errStreamFrameBudget
+		}
 	}
 	choices := config.Choices
 	if choices <= 0 {
@@ -291,6 +347,22 @@ func newStreamFrameReader(config streamFrameConfig) (*streamFrameReader, error) 
 		parent = context.Background()
 	}
 
+	metadata := budget.reserve(streamFrameMetadataBytes)
+	var bootstrap *bufferLease
+	if !metadata {
+		bootstrap, setup = setup, nil
+		if owner := inferenceBuffers(parent); bootstrap == nil && owner != nil {
+			bootstrap = owner.borrowParserAllowance()
+		}
+		if bootstrap == nil {
+			// No preadmitted control grant: refuse before allocating a reader,
+			// channels, timer or watcher. Account presence alone grants nothing.
+			return nil, errStreamFrameBudget
+		}
+	}
+	// A production request retains its 96 KiB parser allowance through the
+	// joined transport. If the subordinate SC category is saturated, that
+	// preadmitted envelope owns this fixed <=8 KiB interruption-only reader.
 	reader := &streamFrameReader{
 		protocol:       config.Protocol,
 		upstream:       config.Upstream,
@@ -302,8 +374,12 @@ func newStreamFrameReader(config streamFrameConfig) (*streamFrameReader, error) 
 		stopped:        make(chan struct{}),
 		extract:        config.Extract,
 		peerNormalized: config.PeerNormalized,
+		bootstrap:      bootstrap,
 	}
-	if budget.reserve(int64(choices)) {
+	if metadata {
+		reader.metadataBytes = streamFrameMetadataBytes
+	}
+	if metadata && budget.reserve(int64(choices)) {
 		reader.choiceBytes = int64(choices)
 		if budget.reserve(streamFrameReadChunk) {
 			reader.scratchBytes = streamFrameReadChunk
@@ -314,7 +390,11 @@ func newStreamFrameReader(config streamFrameConfig) (*streamFrameReader, error) 
 	if reader.scratchBytes == 0 {
 		reader.finishInterruptedLocked(streamInterruptReasonBudget)
 	}
-	go reader.watch()
+	if reader.finished {
+		close(reader.stopped)
+	} else {
+		go reader.watch()
+	}
 	return reader, nil
 }
 
@@ -394,6 +474,12 @@ func (r *streamFrameReader) Close() error {
 	r.readMu.Lock()
 	r.mu.Lock()
 	r.releaseReadStorageLocked()
+	r.budget.release(r.metadataBytes)
+	r.metadataBytes = 0
+	if r.bootstrap != nil {
+		r.bootstrap.close()
+		r.bootstrap = nil
+	}
 	r.mu.Unlock()
 	r.readMu.Unlock()
 	return r.closeErr
@@ -519,6 +605,10 @@ func (r *streamFrameReader) handleCleanEOFLocked() {
 	pending := r.buf[r.readyEnd:]
 	if len(pending) > 0 && r.protocol == streamProtocolNDJSON {
 		verdict := r.assessNDJSONFrameLocked(pending)
+		if verdict == frameBudgetExhausted {
+			r.finishInterruptedLocked(streamInterruptReasonBudget)
+			return
+		}
 		if verdict == frameMalformed {
 			r.finishInterruptedLocked(streamInterruptReasonPrematureEOF)
 			return
@@ -700,6 +790,14 @@ func (r *streamFrameReader) assessSSEFrameLocked(frame []byte) frameVerdict {
 	if bytes.Equal(bytes.TrimSpace(payload), []byte("[DONE]")) {
 		return frameCompleted
 	}
+	scratch := int64(streamFrameSyntaxBytes)
+	if r.extract != nil {
+		scratch = streamFrameNumericBytes
+	}
+	if !r.budget.reserve(scratch) {
+		return frameBudgetExhausted
+	}
+	defer r.budget.release(scratch)
 	if !validStreamObject(payload) {
 		return frameMalformed
 	}
@@ -726,7 +824,12 @@ func (r *streamFrameReader) assessSSEFrameLocked(frame []byte) frameVerdict {
 		if len(finish) > 0 && !bytes.Equal(finish, []byte("null")) {
 			var index int
 			rawIndex := streamJSONField(choice, "index")
-			if len(finish) <= 2 || finish[0] != '"' || bytes.Equal(rawIndex, []byte("null")) || json.Unmarshal(rawIndex, &index) != nil || index < 0 || index >= len(r.finishedChoices) {
+			if len(rawIndex) > 20 {
+				return frameMalformed
+			}
+			var err error
+			index, err = strconv.Atoi(string(rawIndex))
+			if len(finish) <= 2 || finish[0] != '"' || bytes.Equal(rawIndex, []byte("null")) || err != nil || index < 0 || index >= len(r.finishedChoices) {
 				return frameMalformed
 			}
 			r.finishedChoices[index] = true
@@ -750,7 +853,7 @@ func (r *streamFrameReader) assessSSEFrameLocked(frame []byte) frameVerdict {
 // without allocating copies of content, errors, or an unbounded choices list.
 func validStreamObject(payload []byte) bool {
 	payload = bytes.TrimSpace(payload)
-	return len(payload) > 0 && payload[0] == '{' && json.Valid(payload)
+	return len(payload) > 0 && payload[0] == '{' && ownedJSONValid(payload)
 }
 
 func streamJSONValueEnd(b []byte) int {
@@ -806,11 +909,7 @@ func streamJSONField(object []byte, name string) []byte {
 		rest = bytes.TrimSpace(rest[end+1:])
 		rest = bytes.TrimSpace(rest[1:]) // colon
 		end = streamJSONValueEnd(rest)
-		var decoded string
-		matches := bytes.Equal(key[1:len(key)-1], []byte(name))
-		if !matches && bytes.IndexByte(key, '\\') >= 0 && len(key) <= 6*len(name)+2 {
-			matches = json.Unmarshal(key, &decoded) == nil && decoded == name
-		}
+		matches := jsonStringEquals(key, name)
 		if matches {
 			result = bytes.TrimSpace(rest[:end])
 		}
@@ -831,6 +930,14 @@ func (r *streamFrameReader) assessNDJSONFrameLocked(frame []byte) frameVerdict {
 	if len(bytes.TrimSpace(line)) == 0 {
 		return frameMalformed
 	}
+	scratch := int64(streamFrameSyntaxBytes)
+	if r.extract != nil {
+		scratch = streamFrameNumericBytes
+	}
+	if !r.budget.reserve(scratch) {
+		return frameBudgetExhausted
+	}
+	defer r.budget.release(scratch)
 	if !validStreamObject(line) {
 		return frameMalformed
 	}
@@ -917,7 +1024,8 @@ func (r *streamFrameReader) finishLocked(outcome streamOutcome, reason string, t
 }
 
 func (r *streamFrameReader) releaseReadStorageLocked() {
-	r.budget.release(r.choiceBytes + r.scratchBytes)
+	r.budget.release(r.choiceBytes)
+	r.budget.release(r.scratchBytes)
 	r.choiceBytes, r.scratchBytes = 0, 0
 	r.finishedChoices = nil
 	r.scratch = nil
