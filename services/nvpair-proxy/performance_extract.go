@@ -42,6 +42,7 @@ type performanceExtractMetadata struct {
 	EngineDecodeNs              *int64
 	EngineDecodeTokensPerSecond *float64
 	PhaseDisqualified           bool
+	invalid                     uint16 // sticky ambiguity/invalid evidence across upstream objects
 }
 
 // extractPerformancePayload consumes one bounded JSON object synchronously. It

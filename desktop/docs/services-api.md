@@ -53,7 +53,6 @@
 - ⚠️ nvpair-ui-broker → engine:unsubscribe
 - ⚠️ nvpair-ui-broker → engine:wake
 - ⚠️ nvpair-ui-broker → internal:set-reserved-port
-- ⚠️ nvpair-ui-broker → performance:sample
 - ⚠️ nvpair-ui-broker → workloads:unsubscribe
 - ⚠️ nvpair-workload-manager → performance:capabilities
 - ⚠️ nvpair-workload-manager → performance:publish
@@ -235,6 +234,7 @@
 | `node/removed` | notification (we consume) | ✅ yes |
 | `node/selection-changed` | notification (we consume) | ➖ ignored |
 | `node/updated` | notification (we consume) | ✅ yes |
+| `performance:sample` | notification (we consume) | ➖ ignored |
 | `proxy/request` | notification (we consume) | ✅ yes |
 | `proxy/request-started` | notification (we consume) | ➖ ignored |
 | `ready` | notification (we consume) | ✅ yes |
@@ -335,7 +335,7 @@
 | `node:set-availability` | request (we call) | ✅ yes |
 | `nodes/list` | request (we call) | ✅ yes |
 | `performance:received` | request (we call) | ➖ ignored |
-| `performance:sample` | request (we call) | ⚠️ not called |
+| `performance:sample` | request (we call) | ➖ ignored |
 | `performance:status` | request (we call) | ➖ ignored |
 | `policy:cancel` | request (we call) | ➖ ignored |
 | `policy:get` | request (we call) | ✅ yes |

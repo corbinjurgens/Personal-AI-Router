@@ -16,9 +16,25 @@ describe that profile when known. Different profiles stay separate.
 
 This view only displays reported measurements. It does not run benchmarks,
 estimate throughput, rank nodes, sort by speed or change scheduling. The
-production execution-sample producer has not landed yet, so an empty measured-run
-section is expected. Hardware utilization history is independent and does not
-stand in for execution measurements.
+proxy records actual local inference attempts at their executing destination,
+including direct and reverse peer ingress. The forwarding origin does not count
+another local execution. Missing required engine/model identity suppresses
+samples; an empty measured-run section can therefore remain expected. Hardware
+utilization history is independent of execution measurements.
+
+Streaming measurements use the proxy's existing response reader. llama.cpp and
+Strata Chat completions preserve reviewed engine-native timing semantics;
+Ollama native streaming retains its count/duration measurements. Nonstream
+responses have unknown protocol/numeric evidence in this milestone. The serving
+fingerprint includes the joined engine runtime, settings, launch and model-content
+identity, effective request options, API and timing schema. Identity changes
+separate profiles; changes during execution drop the observation. No placeholder
+identity or response model field qualifies a measurement.
+
+The proxy queues a bounded window of samples and drops telemetry when full.
+One sender writes notifications without holding the queue lock or making the
+inference producer wait for codec IO. Shutdown stops it between writes; an
+already active codec write follows the existing notification lifetime.
 
 Fresh, Stale and Unknown describe the broker's knowledge of the measuring host's
 summary. A missing summary is Unknown. Last seen age describes host reachability;
@@ -66,10 +82,10 @@ there is no dual protocol. All machines must update together.
 The persistence file layout remains version 1. The upgraded reader preserves
 valid history without the optional new fields and round-trips new measurements.
 Older binaries cannot safely reopen upgraded history: use separate candidate
-data for rollback validation, never the installed history. Production sample
-attachment and native MSI llama.cpp, MSI Strata and PC3 llama.cpp evidence are
-still pending; this contract extension does not establish daily-engine
-acceptance.
+data for rollback validation, never the installed history. Native MSI llama.cpp,
+MSI Strata and PC3 llama.cpp evidence, trustworthy non-Ollama identities and
+end-to-end propagation acceptance remain pending. Deterministic producer checks
+do not establish daily-engine acceptance.
 
 Each summary replaces that host's previous aggregates. Repeated snapshots do not
 add to totals. Omitted profiles were excluded from the published summary;
