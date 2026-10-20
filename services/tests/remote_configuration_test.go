@@ -5,6 +5,7 @@ package tests
 
 import (
 	"encoding/json"
+	"net/http"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -96,4 +97,56 @@ func TestXARemoteConfigurationStatus(t *testing.T) {
 		c := subscribeOBIntent(t, f.target)
 		assertOBIntent(t, decodeOBIntent(t, c.call(t, "engine:intent", nil)), obIntent(false, map[string]engineintent.Origin{}))
 	})
+}
+
+func TestXARemoteConfigurationConflict(t *testing.T) {
+	xaPlatform(t)
+	f := newPolicyJointFixture(t)
+	before := assertStoredPolicy(t, f.path, f.want)
+	params := map[string]any{"policy": jointExpectedPeer(f.want), "expectedPersistedRevision": "0"}
+	conflict := "policy conflict: the persisted revision is " + f.want.Revision + ", not the expected 0; reload the policy and review it before saving"
+	body := f.http(t, "/v1/node-policy/set", params, http.StatusConflict)
+	var refusal struct {
+		Error string `json:"error"`
+		Code  string `json:"code"`
+	}
+	if err := json.Unmarshal(body, &refusal); err != nil {
+		t.Fatalf("decode HTTP policy conflict: %v", err)
+	}
+	if refusal.Code != "policy_conflict" || refusal.Error != conflict {
+		t.Fatal("HTTP policy conflict differs from the specified code or diagnostic")
+	}
+	f.assertUnchanged(t, before)
+	m := f.originCall(t, "engine:remote-policy-set", params)
+	if m.Error == nil || m.Error.Code != -32010 || len(m.Result) != 0 || m.Error.Message != "remote node policy: HTTP 409: "+conflict {
+		t.Fatalf("origin policy conflict mismatch: error_present=%t result_bytes=%d", m.Error != nil, len(m.Result))
+	}
+	f.assertUnchanged(t, before)
+
+	draft := jointExpectedPeer(f.want)
+	draft.Idle.UnloadAfterMinutes++
+	oldRevision := f.want.Revision
+	controlParams := map[string]any{"policy": draft, "expectedPersistedRevision": oldRevision}
+	res := f.rpc(t, "engine:remote-policy-set", controlParams)
+	var accepted struct {
+		Policy nodepolicy.PeerPolicy `json:"policy"`
+	}
+	if err := json.Unmarshal(res.Result, &accepted); err != nil {
+		t.Fatalf("decode accepted policy edit: %v", err)
+	}
+	if accepted.Policy.Revision == "" || accepted.Policy.Revision == oldRevision {
+		t.Fatal("accepted policy edit did not return a new nonempty revision")
+	}
+	f.want.Idle = draft.Idle
+	f.want.Revision = accepted.Policy.Revision
+	assertJointPeer(t, res.Result, f.want)
+	f.assertPolicy(t)
+	beforeRetry := assertStoredPolicy(t, f.path, f.want)
+
+	m = f.originCall(t, "engine:remote-policy-set", controlParams)
+	conflict = "policy conflict: the persisted revision is " + f.want.Revision + ", not the expected " + oldRevision + "; reload the policy and review it before saving"
+	if m.Error == nil || m.Error.Code != -32010 || len(m.Result) != 0 || m.Error.Message != "remote node policy: HTTP 409: "+conflict {
+		t.Fatalf("stale control retry mismatch: error_present=%t result_bytes=%d", m.Error != nil, len(m.Result))
+	}
+	f.assertUnchanged(t, beforeRetry)
 }
