@@ -31,6 +31,7 @@ import (
 	"nvpair-shared/appdir"
 	"nvpair-shared/clustertrust"
 	"nvpair-shared/durablefile"
+	"nvpair-shared/engineintent"
 	"nvpair-shared/nodepolicy"
 )
 
@@ -1019,10 +1020,8 @@ func (b *Broker) handlePolicyEngineNotification(source *engineManagerSource, met
 			b.observeLoaded(p.Models.LoadedByEngine)
 		}
 	case engineIntentChanged:
-		var p struct {
-			EnabledByEngine map[string]bool `json:"enabledByEngine"`
-		}
-		if json.Unmarshal(params, &p) == nil && p.EnabledByEngine != nil {
+		var p engineintent.Snapshot
+		if json.Unmarshal(params, &p) == nil && p.Validate() == nil {
 			b.observeIntent(p.EnabledByEngine)
 		}
 	}
@@ -1131,10 +1130,8 @@ func (b *Broker) refreshEnginePolicySnapshotFrom(w *rpcWorker, source *engineMan
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 	if result, rpcErr, err := w.CallNoTimeout(ctx, engineIntentMethod, nil); err == nil && rpcErr == nil {
-		var p struct {
-			EnabledByEngine map[string]bool `json:"enabledByEngine"`
-		}
-		if json.Unmarshal(result, &p) == nil && p.EnabledByEngine != nil {
+		var p engineintent.Snapshot
+		if json.Unmarshal(result, &p) == nil && p.Validate() == nil {
 			b.observeIntent(p.EnabledByEngine)
 		}
 	}
