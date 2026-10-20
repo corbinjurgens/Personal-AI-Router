@@ -227,7 +227,7 @@ func TestResidentContextBoundConfigured(t *testing.T) {
 }
 
 func TestResidentContextBoundColdPreflight(t *testing.T) {
-	test := func(name string, context int, wantReason string) {
+	test := func(name string, context int, wantBound bool) {
 		t.Run(name, func(t *testing.T) {
 			cold := newLlamaServingFixture(t)
 			applyLlamaServing(t, cold, approveLlamaServing(t, cold))
@@ -236,14 +236,18 @@ func TestResidentContextBoundColdPreflight(t *testing.T) {
 			st.manifest.Family = "llamacpp"
 			st.plat = settingsState(t, cold.ex).plat
 			st.binPath = fakeEngineBin
-			// Synthetic installed content/run identity; no engine is started.
+			// Synthetic inventory identity; no owned NE launch is established.
 			f.ex.storeInventory(map[string][]string{"ollama": {"medium:latest"}}, map[string]observedDigests{"ollama": {runID: st.runID, models: map[string]string{"medium:latest": f.p.Identity.ModelDigest}}}, 2)
 			f.p.Model, f.p.Load.ContextLength = "medium:latest", context
 			st.opMu.Lock()
+			bounded := residentConfiguredContext(f.p, st.manifest.ModelNamingOrDefault(), f.ex.launchStateLocked(f.p.Engine, st).ServingReadback)
 			reason := f.ex.residentCheck(f.p)
 			st.opMu.Unlock()
-			if reason != wantReason {
-				t.Fatalf("cold preflight=%q, want %q", reason, wantReason)
+			if bounded != wantBound {
+				t.Fatalf("cold configured context accepted=%v, want %v", bounded, wantBound)
+			}
+			if reason != "unqualified" {
+				t.Fatalf("cold preflight=%q, want unqualified", reason)
 			}
 			if result := f.run(t); result.Outcome != nodepolicy.ResidentNotDispatched || f.dispatches != 0 {
 				t.Fatalf("native resident execution escaped restriction: %+v, grants=%d", result, f.dispatches)
@@ -252,9 +256,10 @@ func TestResidentContextBoundColdPreflight(t *testing.T) {
 			assertNoLlamaSpawn(t, cold)
 		})
 	}
-	test("exact cold allocation still unsupported", 8192, "unsupported-load")
-	test("native allocation above requested profile", 4096, "unqualified")
-	test("request exceeds cold allocation", 8193, "unqualified")
+	// NE identity requires an owned launch; an exact cold bound cannot bypass the earlier identity check.
+	test("exact cold allocation lacks owned identity", 8192, true)
+	test("native allocation above requested profile", 4096, false)
+	test("request exceeds cold allocation", 8193, false)
 }
 
 func TestResidentLoadMappingAndObservation(t *testing.T) {
