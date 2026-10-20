@@ -173,26 +173,7 @@ func (p *Proxy) handleWorkloadCancel(msg *Message) {
 		_ = p.codec.RespondError(msg.ID, -32602, err.Error())
 		return
 	}
-	if in.WorkloadID == "" {
-		_ = p.codec.RespondError(msg.ID, -32602, "workloadId is required")
-		return
-	}
-	if in.Engine != "" {
-		if err := knownEngine(in.Engine); err != nil {
-			_ = p.codec.RespondError(msg.ID, -32602, err.Error())
-			return
-		}
-	}
-	if in.RunID != "" && in.RunID != p.runID {
-		_ = p.codec.Respond(msg.ID, nodepolicy.WorkloadCancelResult{Found: false})
-		return
-	}
-	matches := p.workloadControls(in.Engine, in.WorkloadID)
-	if len(matches) > 1 {
-		_ = p.codec.RespondError(msg.ID, -32602,
-			"ambiguous workload id; pass engine")
-		return
-	}
-	found := len(matches) == 1 && matches[0].cancel(in.Regenerate)
+	control := p.workloadCancelControl(in)
+	found := control != nil && control.cancel(in.Regenerate)
 	_ = p.codec.Respond(msg.ID, nodepolicy.WorkloadCancelResult{Found: found})
 }

@@ -14,6 +14,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+
+	"nvpair-shared/nodepolicy"
 )
 
 const (
@@ -26,12 +28,17 @@ type workloadCancelParams struct {
 	OriginatedFrom string `json:"originatedFrom"`
 	WorkloadID     string `json:"workloadId"`
 	Regenerate     bool   `json:"regenerate,omitempty"`
-	// Engine and RunID narrow the target: workload ids are per-engine counters
-	// that restart with the proxy, so the id alone can name two jobs. The proxy
-	// refuses an ambiguous id rather than guess.
-	Engine string `json:"engine,omitempty"`
-	RunID  string `json:"runId,omitempty"`
+	Engine         string `json:"engine"`
+	RunID          string `json:"runId"`
 }
+
+func (p workloadCancelParams) target() nodepolicy.WorkloadCancelParams {
+	return nodepolicy.WorkloadCancelParams{OriginatedFrom: p.OriginatedFrom, WorkloadID: p.WorkloadID, Engine: p.Engine, RunID: p.RunID, Regenerate: p.Regenerate}
+}
+
+// Peer notifications cannot queue an unbounded number of proxy calls. The
+// existing proxyProcess.Call deadline bounds each admitted call's lifetime.
+var peerCancelAdmission = make(chan struct{}, 32)
 
 // handleWorkloadsCancel answers a client's workloads:cancel with {ok}. On the
 // origin, ok reports whether the proxy found the job still running. Elsewhere
@@ -39,8 +46,8 @@ type workloadCancelParams struct {
 // asynchronously and the outcome arrives on the workloads stream.
 func (b *Broker) handleWorkloadsCancel(msg *Message) {
 	var p workloadCancelParams
-	if json.Unmarshal(msg.Params, &p) != nil || p.OriginatedFrom == "" || p.WorkloadID == "" {
-		_ = b.codec.RespondError(msg.ID, -32602, "originatedFrom and workloadId are required")
+	if json.Unmarshal(msg.Params, &p) != nil || p.target().Validate() != nil {
+		_ = b.codec.RespondError(msg.ID, -32602, "complete workload cancellation target is required")
 		return
 	}
 	if p.OriginatedFrom == b.nodeID {
@@ -75,14 +82,7 @@ func (b *Broker) cancelLocalWorkload(p workloadCancelParams) (bool, error) {
 	if pp == nil {
 		return false, fmt.Errorf("proxy not available")
 	}
-	req := map[string]any{"workloadId": p.WorkloadID, "regenerate": p.Regenerate}
-	if p.Engine != "" {
-		req["engine"] = p.Engine
-	}
-	if p.RunID != "" {
-		req["runId"] = p.RunID
-	}
-	data, err := json.Marshal(req)
+	data, err := json.Marshal(p.target())
 	if err != nil {
 		return false, err
 	}
@@ -107,7 +107,7 @@ func (b *Broker) cancelLocalWorkload(p workloadCancelParams) (bool, error) {
 // origin's address sends it to all of them.
 func (b *Broker) handlePeerWorkloadCancel(params json.RawMessage) {
 	var p workloadCancelParams
-	if json.Unmarshal(params, &p) != nil || p.WorkloadID == "" {
+	if json.Unmarshal(params, &p) != nil || p.target().Validate() != nil {
 		slog.Warn("workload-manager relayed an invalid workload cancel")
 		return
 	}
@@ -115,7 +115,14 @@ func (b *Broker) handlePeerWorkloadCancel(params json.RawMessage) {
 		slog.Debug("ignoring workload cancel for another origin", "origin", p.OriginatedFrom)
 		return
 	}
+	select {
+	case peerCancelAdmission <- struct{}{}:
+	default:
+		slog.Warn("dropping peer workload cancel: control capacity exhausted")
+		return
+	}
 	go func() {
+		defer func() { <-peerCancelAdmission }()
 		found, err := b.cancelLocalWorkload(p)
 		if err != nil {
 			slog.Warn("peer-requested workload cancel failed", "workloadId", p.WorkloadID, "err", err)

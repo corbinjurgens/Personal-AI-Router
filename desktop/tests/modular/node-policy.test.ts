@@ -29,7 +29,8 @@ import type {
     NodePolicyChange,
     NodePolicyDocument,
     NodePolicySnapshot,
-    PolicyActivationStatus
+    PolicyActivationStatus,
+    WorkloadCancelRequest
 } from '@/shared/types/node-policy'
 import { workloadCancelRequest } from '@/shared/utils/workloads'
 import type { INodePolicyApi } from '@/ui/api/pair-api'
@@ -552,10 +553,10 @@ describe('workloadCancelRequest', () => {
         })
     })
 
-    it('omits runId when the job has none', () => {
-        expect(workloadCancelRequest({ ...job, runId: undefined }, false)).not.toHaveProperty(
-            'runId'
-        )
+    it('refuses incomplete target keys', () => {
+        expect(workloadCancelRequest({ ...job, runId: undefined }, false)).toBeNull()
+        expect(workloadCancelRequest({ ...job, runId: '' }, false)).toBeNull()
+        expect(workloadCancelRequest({ ...job, id: '' }, false)).toBeNull()
     })
 
     it('refuses finished jobs and jobs with no origin', () => {
@@ -570,14 +571,29 @@ describe('workloadCancelParams', () => {
             originatedFrom: 'node-a',
             workloadId: '7',
             engine: 'lm-studio',
+            runId: 'run-1',
             regenerate: false
         })
         expect(params).toEqual({
             originatedFrom: 'node-a',
             workloadId: '7',
             engine: 'lmstudio',
+            runId: 'run-1',
             regenerate: false
         })
+    })
+
+    it('rejects incomplete targets at the bridge', () => {
+        const request: WorkloadCancelRequest = {
+            originatedFrom: 'node-a',
+            workloadId: '7',
+            engine: 'ollama',
+            runId: 'run-1',
+            regenerate: false
+        }
+        expect(() => workloadCancelParams({ ...request, originatedFrom: '' })).toThrow()
+        expect(() => workloadCancelParams({ ...request, workloadId: '' })).toThrow()
+        expect(() => workloadCancelParams({ ...request, runId: '' })).toThrow()
     })
 })
 

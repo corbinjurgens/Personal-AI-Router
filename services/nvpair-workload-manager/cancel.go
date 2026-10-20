@@ -18,6 +18,8 @@ import (
 	"log/slog"
 	"net/http"
 	"sync"
+
+	"nvpair-shared/nodepolicy"
 )
 
 // MethodCancel is accepted on stdin from the broker and on the inter-node
@@ -33,8 +35,8 @@ type cancelParams struct {
 	Regenerate     bool   `json:"regenerate,omitempty"`
 	// Engine and RunID narrow the target: workload ids are per-engine counters
 	// that restart with the proxy, so the id alone can name two jobs.
-	Engine   string `json:"engine,omitempty"`
-	RunID    string `json:"runId,omitempty"`
+	Engine   string `json:"engine"`
+	RunID    string `json:"runId"`
 	CancelID string `json:"cancelId,omitempty"`
 }
 
@@ -43,19 +45,20 @@ func parseCancel(params json.RawMessage) (cancelParams, error) {
 	if err := json.Unmarshal(params, &p); err != nil {
 		return cancelParams{}, fmt.Errorf("invalid params: %w", err)
 	}
-	if p.OriginatedFrom == "" {
-		return cancelParams{}, fmt.Errorf("missing params.originatedFrom")
-	}
-	if p.WorkloadID == "" {
-		return cancelParams{}, fmt.Errorf("missing params.workloadId")
+	if err := (nodepolicy.WorkloadCancelParams{OriginatedFrom: p.OriginatedFrom, WorkloadID: p.WorkloadID, Engine: p.Engine, RunID: p.RunID}).Validate(); err != nil {
+		return cancelParams{}, err
 	}
 	return p, nil
 }
 
 // keyCancel is the receiver's dedup key for one cancel.
 func keyCancel(p cancelParams) string {
-	return "cx\x00" + p.OriginatedFrom + "\x00" + p.WorkloadID + "\x00" + p.CancelID
+	key, _ := json.Marshal([5]string{p.OriginatedFrom, p.Engine, p.RunID, p.WorkloadID, p.CancelID})
+	return "cx" + string(key)
 }
+
+var cancelBroadcastAdmission = make(chan struct{}, 32)
+var cancelDeliveryAdmission = make(chan struct{}, 32)
 
 func newCancelID() string {
 	var b [12]byte
@@ -88,7 +91,16 @@ func (m *Manager) handleLocalCancel(msg *Message) {
 	origin := p.OriginatedFrom
 	known := m.peers.has(origin)
 	slog.Info("relaying workload cancel", "origin", origin, "workloadId", p.WorkloadID, "direct", known)
-	go m.broadcaster.BroadcastTo(ctx, frame, func(t target) bool { return !known || t.id == origin })
+	select {
+	case cancelBroadcastAdmission <- struct{}{}:
+	default:
+		slog.Warn("dropping workload cancel: broadcast capacity exhausted")
+		return
+	}
+	go func() {
+		defer func() { <-cancelBroadcastAdmission }()
+		m.broadcaster.BroadcastTo(ctx, frame, func(t target) bool { return !known || t.id == origin })
+	}()
 }
 
 // handleCancel serves a peer's workloads:cancel: validate, dedup by cancel id,
@@ -98,6 +110,10 @@ func (s *Server) handleCancel(w http.ResponseWriter, msg *Message) {
 	p, err := parseCancel(msg.Params)
 	if err != nil {
 		s.badRequest(w, err.Error())
+		return
+	}
+	if p.CancelID == "" || len(p.CancelID) > 128 {
+		s.badRequest(w, "cancelId is required and must be at most 128 bytes")
 		return
 	}
 	if s.emitCancel == nil {
@@ -137,9 +153,16 @@ func (b *Broadcaster) BroadcastTo(ctx context.Context, frame []byte, keep func(t
 		if !keep(t) {
 			continue
 		}
+		select {
+		case cancelDeliveryAdmission <- struct{}{}:
+		default:
+			slog.Warn("dropping workload cancel delivery: control capacity exhausted")
+			continue
+		}
 		wg.Add(1)
 		go func(t target) {
 			defer wg.Done()
+			defer func() { <-cancelDeliveryAdmission }()
 			b.deliver(ctx, t, frame)
 		}(t)
 	}

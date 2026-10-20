@@ -48,13 +48,13 @@ export function workloadCancelRequest(
     regenerate: boolean
 ): WorkloadCancelRequest | null {
     if (workload.state !== 'queued' && workload.state !== 'running') return null
-    if (!workload.originatedFrom) return null
+    if (!workload.originatedFrom || !workload.engine || !workload.runId || !workload.id) return null
     const request: WorkloadCancelRequest = {
         originatedFrom: workload.originatedFrom,
         workloadId: workload.id,
         engine: workload.engine,
+        runId: workload.runId,
         regenerate
     }
-    if (workload.runId) request.runId = workload.runId
     return request
 }

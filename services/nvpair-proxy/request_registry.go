@@ -105,6 +105,19 @@ func (p *Proxy) workloadControls(engine, id string) []*workloadCtl {
 	return matches
 }
 
+func (p *Proxy) workloadCancelControl(target nodepolicy.WorkloadCancelParams) *workloadCtl {
+	p.identityMu.Lock()
+	defer p.identityMu.Unlock()
+	if target.Validate() != nil || p.routingIdentityLocked() != nil || target.OriginatedFrom != p.originNodeID || target.RunID != p.runID {
+		return nil
+	}
+	requestID := p.workloadRequests[workloadKey{engine: target.Engine, id: target.WorkloadID}]
+	if request := p.requests[requestID]; request != nil {
+		return request.control
+	}
+	return nil
+}
+
 func (p *Proxy) routingRequestControl(key nodepolicy.RoutingRequestKey) *workloadCtl {
 	p.identityMu.Lock()
 	defer p.identityMu.Unlock()
