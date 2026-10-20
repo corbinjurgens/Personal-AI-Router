@@ -24,15 +24,22 @@ type settingsReply struct {
 type settingsRelay struct {
 	mu      sync.Mutex
 	pending map[string]chan settingsReply
-	send    func(string, any) error
+	send    func(context.Context, string, any) error
 }
 
 func (r *settingsRelay) call(ctx context.Context, method string, request settings.Request, caller string) (json.RawMessage, error) {
 	ctx, cancel := context.WithTimeout(ctx, settings.RelayBudget)
 	defer cancel()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	id := newOpID()
 	ch := make(chan settingsReply, 1)
 	r.mu.Lock()
+	if err := ctx.Err(); err != nil {
+		r.mu.Unlock()
+		return nil, err
+	}
 	if len(r.pending) >= 64 {
 		r.mu.Unlock()
 		return nil, fmt.Errorf("too many settings requests")
@@ -43,19 +50,28 @@ func (r *settingsRelay) call(ctx context.Context, method string, request setting
 	r.pending[id] = ch
 	r.mu.Unlock()
 	defer func() { r.mu.Lock(); delete(r.pending, id); r.mu.Unlock() }()
-	if err := r.send("engine:settings-request", settings.Relay{ID: id, Method: method, Request: request, Caller: caller}); err != nil {
+	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	select {
-	case reply := <-ch:
-		if reply.Error != "" {
-			return nil, &codedError{code: reply.ErrorCode, message: reply.Error}
-		}
-		return reply.Result, nil
-	case <-ctx.Done():
-		_ = r.send("engine:settings-cancel", map[string]string{"id": id})
-		return nil, ctx.Err()
+	if err := r.send(ctx, "engine:settings-request", settings.Relay{ID: id, Method: method, Request: request, Caller: caller}); err != nil {
+		return nil, err
 	}
+	var reply settingsReply
+	select {
+	case reply = <-ch:
+	case <-ctx.Done():
+	}
+	if err := ctx.Err(); err != nil {
+		r.mu.Lock()
+		delete(r.pending, id)
+		r.mu.Unlock()
+		cancelRelayWait(r.send, "engine:settings-cancel", id)
+		return nil, err
+	}
+	if reply.Error != "" {
+		return nil, &codedError{code: reply.ErrorCode, message: reply.Error}
+	}
+	return reply.Result, nil
 }
 
 func (r *settingsRelay) reply(raw json.RawMessage) {

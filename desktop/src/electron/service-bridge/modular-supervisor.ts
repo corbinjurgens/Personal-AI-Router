@@ -41,7 +41,12 @@ import { isServiceLogLevelEnabled, serviceLogLevel } from './service-log-level'
 import { engineManagerName } from '@/shared/utils/engines'
 import { isFirstRun } from '@/electron/config/ui-config'
 import { createOverviewWindow } from '@/electron/window'
-import { parseClusterNodes, parseInvite, parseNodeIdentity } from './cluster-json'
+import {
+    parseClusterNodes,
+    parseInvite,
+    parseNodeIdentity,
+    parseRemoteManagementSnapshot
+} from './cluster-json'
 import { startNodeInfoPoller, stopNodeInfoPoller } from './node-info-poller'
 import {
     MODULAR_DEFAULT_LOG_LEVEL,
@@ -1377,6 +1382,7 @@ class ModularSupervisor {
             notification.method === 'cluster:invite-expired' ||
             notification.method === 'cluster:invite-failed' ||
             notification.method === 'cluster:identity-changed' ||
+            notification.method === 'cluster:remote-management-changed' ||
             notification.method === 'nodes:changed'
         ) {
             this.handleClusterManagerNotification(notification)
@@ -1529,7 +1535,9 @@ class ModularSupervisor {
     }
 
     /**
-     * Cluster-manager → broker → here. Six notifications:
+     * Cluster-manager → broker → here. Notifications:
+     * - `cluster:remote-management-changed`: authoritative local grants or an
+     *   unavailable projection that invalidates earlier authority.
      * - `cluster:invite-received`: an inbound pairing arrived; prompt for the PIN.
      * - `cluster:invite-canceled`: the inviter aborted a still-pending inbound
      *   invite; drop it so the receiver's PIN prompt dismisses at once.
@@ -1543,6 +1551,13 @@ class ModularSupervisor {
      *   tell the renderer.
      */
     private handleClusterManagerNotification(notification: JsonRpcNotification): void {
+        if (notification.method === 'cluster:remote-management-changed') {
+            emitBridgePush(
+                'cluster:remote-management-changed',
+                parseRemoteManagementSnapshot(notification.params)
+            )
+            return
+        }
         if (notification.method === 'cluster:invite-received') {
             const invite = parseInvite(notification.params)
             const state = getModularBridgeState()

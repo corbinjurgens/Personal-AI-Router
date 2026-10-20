@@ -83,7 +83,7 @@ func TestMissingMetricsLeaveAggregatesUnknown(t *testing.T) {
 		t.Fatalf("counts = samples %d completed %d, want 1 and 1", e.Samples, e.Completed)
 	}
 	if e.AdmissionWaitMs != nil || e.HeaderMs != nil || e.FirstBodyMs != nil || e.FirstTokenMs != nil ||
-		e.TotalMs != nil || e.LoadNs != nil || e.Prefill != nil || e.Decode != nil {
+		e.TotalMs != nil || e.LoadNs != nil || e.Prefill != nil || e.Decode != nil || e.EngineDecode != nil {
 		t.Fatalf("unmeasured metrics produced aggregates: %+v", e)
 	}
 }
@@ -169,6 +169,113 @@ func TestPhaseRatesAreTokenWeighted(t *testing.T) {
 	}
 	if e.Prefill == nil || e.Prefill.Samples != 2 || e.Prefill.TokensPerSecond != 2000 {
 		t.Fatalf("prefill = %+v, want 4000 tokens over 2 s", e.Prefill)
+	}
+}
+
+func TestEngineDecodeWeightsReportedRatesByDuration(t *testing.T) {
+	s, _ := newTestStore(t, "")
+	r := &recorder{t: t, s: s}
+	add := func(output, duration int64, rate float64) {
+		m := completed()
+		m.OutputTokens = ptr(output)
+		m.EngineDecodeNs = ptr(duration)
+		m.EngineDecodeTokensPerSecond = ptr(rate)
+		r.record(testKey("m"), m)
+	}
+	add(20, 400_000_000, 55)
+	add(200, 600_000_000, 45)
+
+	e := onlyEntry(t, s)
+	want := performancewire.ReportedRate{Samples: 2, DurationNs: 1_000_000_000, TokensPerSecond: 49}
+	if e.EngineDecode == nil || *e.EngineDecode != want {
+		t.Fatalf("engineDecode = %+v, want %+v independent of output tokens", e.EngineDecode, want)
+	}
+	if e.Decode != nil {
+		t.Fatalf("legacy decode = %+v, want unknown without legacy intervals", e.Decode)
+	}
+}
+
+func TestEngineDecodeExcludesUnqualifiedAndUnknownRates(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*performancewire.Measurement)
+	}{
+		{"failed", func(m *performancewire.Measurement) { m.Outcome = performancewire.OutcomeFailed }},
+		{"cancelled", func(m *performancewire.Measurement) { m.Outcome = performancewire.OutcomeCancelled }},
+		{"incomplete", func(m *performancewire.Measurement) { m.ProtocolComplete = ptr(false) }},
+		{"unknown protocol end", func(m *performancewire.Measurement) { m.ProtocolComplete = nil }},
+		{"unknown duration", func(m *performancewire.Measurement) { m.EngineDecodeNs = nil }},
+		{"zero duration", func(m *performancewire.Measurement) { m.EngineDecodeNs = ptr[int64](0) }},
+		{"unknown rate", func(m *performancewire.Measurement) { m.EngineDecodeTokensPerSecond = nil }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s, _ := newTestStore(t, "")
+			r := &recorder{t: t, s: s}
+			m := completed()
+			m.EngineDecodeNs = ptr[int64](400_000_000)
+			m.EngineDecodeTokensPerSecond = ptr(55.0)
+			tt.mutate(&m)
+			r.record(testKey("m"), m)
+			if e := onlyEntry(t, s); e.EngineDecode != nil {
+				t.Fatalf("engineDecode = %+v, want unknown", e.EngineDecode)
+			}
+		})
+	}
+}
+
+func TestEngineDecodePreservesMeasuredZero(t *testing.T) {
+	s, _ := newTestStore(t, "")
+	r := &recorder{t: t, s: s}
+	m := completed()
+	m.EngineDecodeNs = ptr[int64](400_000_000)
+	m.EngineDecodeTokensPerSecond = ptr(0.0)
+	r.record(testKey("m"), m)
+	r.record(testKey("m"), completed())
+	want := performancewire.ReportedRate{Samples: 1, DurationNs: 400_000_000, TokensPerSecond: 0}
+	if e := onlyEntry(t, s); e.EngineDecode == nil || *e.EngineDecode != want {
+		t.Fatalf("engineDecode = %+v, want measured zero %+v", e.EngineDecode, want)
+	}
+}
+
+func TestRecordOwnsReportedRatePointers(t *testing.T) {
+	s, _ := newTestStore(t, "")
+	r := &recorder{t: t, s: s}
+	m := completed()
+	m.EngineDecodeNs = ptr[int64](400_000_000)
+	m.EngineDecodeTokensPerSecond = ptr(55.0)
+	r.record(testKey("m"), m)
+	*m.EngineDecodeNs = 1
+	*m.EngineDecodeTokensPerSecond = 0
+	*m.ProtocolComplete = false
+	want := performancewire.ReportedRate{Samples: 1, DurationNs: 400_000_000, TokensPerSecond: 55}
+	if e := onlyEntry(t, s); e.EngineDecode == nil || *e.EngineDecode != want {
+		t.Fatalf("engineDecode after caller mutation = %+v, want %+v", e.EngineDecode, want)
+	}
+}
+
+func TestEngineDecodeMaximumWindowRemainsValid(t *testing.T) {
+	s, _ := newTestStore(t, "")
+	r := &recorder{t: t, s: s}
+	var duration int64
+	for i := range performancewire.MaxSamplesPerKey {
+		m := completed()
+		// Different intervals exercise rounding in the weighted sum at the
+		// maximum rate, where a slight overshoot would invalidate the summary.
+		m.EngineDecodeNs = ptr(performancewire.MaxPhaseNs - int64(i)*123_456_789)
+		m.EngineDecodeTokensPerSecond = ptr(performancewire.MaxTokensPerSecond)
+		duration += *m.EngineDecodeNs
+		r.record(testKey("m"), m)
+	}
+	e := onlyEntry(t, s)
+	if e.EngineDecode == nil || e.EngineDecode.DurationNs != duration ||
+		e.EngineDecode.TokensPerSecond != performancewire.MaxTokensPerSecond {
+		t.Fatalf("maximum window reported rate = %+v", e.EngineDecode)
+	}
+	summary := s.Local()
+	summary.AdmissionIncarnation, summary.Revision = "inc-1", 1
+	if err := summary.Validate(); err != nil {
+		t.Fatalf("maximum window summary is invalid: %v", err)
 	}
 }
 

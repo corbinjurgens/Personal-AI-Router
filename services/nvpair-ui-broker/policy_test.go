@@ -1036,7 +1036,9 @@ func TestPolicyRelayFromPeerActsLocallyOnly(t *testing.T) {
 	b, _ := newPolicyBroker(t)
 	engine := attachFakeEngine(t, b)
 	source := b.activateEngineManagerSource()
+	b.bindEngineMgr(b.getEngineMgr(), source)
 	clustertrusttest.Join(t, b.clusterDir, "cluster-1", "self-node", "pinned-peer")
+	grantRemoteManagement(t, b.clusterDir, "cluster-1", "self-node", "pinned-peer", true)
 
 	reply := func(id string) map[string]any {
 		var out map[string]any
@@ -1147,6 +1149,8 @@ func newBrokerOnFile(t *testing.T, contents string) *routedBroker {
 	_, proxy := attachFakeProxy(t, b)
 	engine := attachFakeEngine(t, b)
 	clustertrusttest.Join(t, b.clusterDir, "cluster-1", "self-node", "pinned-peer")
+	grantRemoteManagement(t, b.clusterDir, "cluster-1", "self-node", "pinned-peer", true)
+	b.bindEngineMgr(b.getEngineMgr(), source)
 	path := filepath.Join(t.TempDir(), nodepolicy.FileName)
 	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
 		t.Fatalf("write policy file: %v", err)

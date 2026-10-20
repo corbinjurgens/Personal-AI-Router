@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-import { useCallback, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Badge, Button, Flex, Select, Stack, Text } from '@nvidia/foundations-react-core'
 import { useShallow } from 'zustand/react/shallow'
 import type { NodePolicySnapshot } from '@/shared/types/node-policy'
@@ -10,6 +10,7 @@ import { ROLE_TIERS, sameNodeRoles } from '@/shared/utils/node-roles'
 import { InlineErrorBanner } from '@/ui/components/InlineErrorBanner'
 import { useEngineModelsStore } from '@/ui/stores/engine-models.store'
 import { useEngineStatusStore } from '@/ui/stores/engine-status.store'
+import { useConnectionStore } from '@/ui/stores/connection.store'
 import {
     chosenRole,
     inventoryChoices,
@@ -20,7 +21,8 @@ import {
     roleLabel,
     suggestRoles,
     UNSET_ROLE,
-    useNodeConfigurationStore
+    useNodeConfigurationStore,
+    watchNodeManagement
 } from '@/ui/stores/node-configuration.store'
 
 const TIER_LABELS: Record<RoleTier, string> = {
@@ -41,6 +43,10 @@ interface RoleEditorProps {
 /** Weak, medium and strong roles for one node, chosen from that node's installed models. */
 export default function RoleEditor({ targetId, nodeId, onSaved }: RoleEditorProps) {
     const entry = useNodeConfigurationStore(state => state.editors.get(targetId))
+    const management = useNodeConfigurationStore(state => state.management.get(targetId))
+    const connected = useConnectionStore(state => state.connected)
+    const readOnly = !connected || (nodeId !== undefined && management?.state !== 'allowed')
+    useEffect(() => watchNodeManagement(targetId, nodeId), [targetId, nodeId])
     const descriptors = useEngineStatusStore(state => state.descriptors)
     const inventory = useEngineModelsStore(
         useShallow(state =>
@@ -54,7 +60,7 @@ export default function RoleEditor({ targetId, nodeId, onSaved }: RoleEditorProp
     const baseline = entry?.baseline
 
     const suggest = useCallback(async () => {
-        if (!baseline) return
+        if (!baseline || readOnly) return
         setSuggesting(true)
         setNoSuggestion(false)
         try {
@@ -68,12 +74,13 @@ export default function RoleEditor({ targetId, nodeId, onSaved }: RoleEditorProp
         } finally {
             setSuggesting(false)
         }
-    }, [baseline, nodeId, choices, targetId])
+    }, [baseline, nodeId, choices, targetId, readOnly])
 
     const save = useCallback(async () => {
+        if (readOnly) return
         const saved = await useNodeConfigurationStore.getState().save(targetId, nodeId)
         if (saved) onSaved(saved)
-    }, [targetId, nodeId, onSaved])
+    }, [targetId, nodeId, onSaved, readOnly])
 
     if (!entry || !baseline) return null
 
@@ -114,6 +121,11 @@ export default function RoleEditor({ targetId, nodeId, onSaved }: RoleEditorProp
                 Declaring any tier makes this node authoritative: routers send it only its declared
                 tiers, and its unset tiers are not served.
             </Text>
+            {nodeId !== undefined && readOnly && (
+                <Text kind="body/regular/sm" role="status">
+                    {management?.message || 'Reading remote management permission for this device.'}
+                </Text>
+            )}
             {ROLE_TIERS.map(tier => (
                 <Flex key={tier} align="center" gap="3" wrap="wrap">
                     <Text kind="body/regular/sm" className="text-subtle-color w-16">
@@ -126,7 +138,7 @@ export default function RoleEditor({ targetId, nodeId, onSaved }: RoleEditorProp
                             items={roleItems(choices, draft[tier], descriptors)}
                             value={draft[tier] ? roleKey(draft[tier]) : UNSET_ROLE}
                             onValueChange={(value: string) => pick(tier, value)}
-                            disabled={sending}
+                            disabled={sending || readOnly}
                         />
                     </div>
                 </Flex>
@@ -196,7 +208,7 @@ export default function RoleEditor({ targetId, nodeId, onSaved }: RoleEditorProp
                 <Button
                     kind="secondary"
                     size="small"
-                    disabled={sending || suggesting || choices.length === 0}
+                    disabled={sending || readOnly || suggesting || choices.length === 0}
                     aria-busy={suggesting}
                     onClick={() => void suggest()}
                 >
@@ -214,7 +226,7 @@ export default function RoleEditor({ targetId, nodeId, onSaved }: RoleEditorProp
                     kind="primary"
                     color="brand"
                     size="small"
-                    disabled={sending || !edited || phase === 'conflict'}
+                    disabled={sending || readOnly || !edited || phase === 'conflict'}
                     aria-busy={sending}
                     onClick={() => void save()}
                 >

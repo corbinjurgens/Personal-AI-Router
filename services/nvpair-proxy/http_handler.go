@@ -39,6 +39,9 @@ type statusCapture struct {
 	// deadline tripping), so handleHTTP can mark the workload failed rather
 	// than misreporting the truncated stream as completed.
 	wroteErr error
+	// upstreamBody is installed only for the accepted response. Its read
+	// result distinguishes a full copy from a discarded or interrupted body.
+	upstreamBody *originResponseBody
 
 	// upstreamAlive is called after each successful body write, but only once the
 	// upstream has committed — handleHTTP sets it in ModifyResponse, so it stays
@@ -313,10 +316,11 @@ func (retrySignal) Error() string { return "nvpair-proxy: retry next candidate" 
 // originStreamRequest selects framing only for the supported inference routes.
 // It reads the stream flag without re-encoding any part of the request.
 type originStreamRequest struct {
-	protocol streamProtocol
-	declared bool
-	disabled bool
-	choices  int
+	protocol       streamProtocol
+	declared       bool
+	disabled       bool
+	choices        int
+	peerNormalized bool
 }
 
 // Peer ingress reports the effective body it dispatched, never origin policy
@@ -371,6 +375,7 @@ func (s originStreamRequest) withPeerMetadata(values []string) (originStreamRequ
 	default:
 		return s, invalid
 	}
+	s.peerNormalized = true
 	return s, nil
 }
 
@@ -477,6 +482,13 @@ type originResponseBody struct {
 	io.ReadCloser
 	response *http.Response
 	managed  bool
+	complete bool
+}
+
+func (b *originResponseBody) Read(p []byte) (int, error) {
+	n, err := b.ReadCloser.Read(p)
+	b.complete = err == io.EOF
+	return n, err
 }
 
 func (b *originResponseBody) Close() error {
@@ -1246,12 +1258,14 @@ func (f *facade) handleHTTPWithStreamIdle(w http.ResponseWriter, r *http.Request
 		// candidate like a peer's 503, and writes nothing to the client unless
 		// it is the answer.
 		target := cand.url
+		admissionStarted := time.Now()
+		var performanceWait time.Duration
 		if cand.self && isInf {
 			decision := p.admission.admit(attemptCtx, admissionRequest{
 				engine:  candEngine,
 				model:   candModel,
 				waitCap: time.Duration(admissionWait) * time.Second,
-				cancel:  ctl.abortLocal,
+				cancel:  func() { ctl.abortLocalIf(att) },
 			})
 			rejectSelf := func(errText string, answer func()) bool {
 				cancelAttempt()
@@ -1295,6 +1309,7 @@ func (f *facade) handleHTTPWithStreamIdle(w http.ResponseWriter, r *http.Request
 				continue
 			}
 			curTicket = decision.ticket
+			performanceWait = time.Since(admissionStarted)
 			if decision.hasProfile {
 				sendBody = mergeDefaults(sendBody, decision.profile.RequestOptions)
 				if !bodyModelMatches(sendBody, candModel) {
@@ -1413,6 +1428,10 @@ func (f *facade) handleHTTPWithStreamIdle(w http.ResponseWriter, r *http.Request
 		}
 		retry := false
 		sc := &statusCapture{ResponseWriter: w, status: http.StatusOK, idle: idleClientWriteTimeout}
+		var performance *performanceAttempt
+		if cand.self && isInf {
+			performance = candFacade.newPerformanceAttempt(r.Context(), candModel, r.URL.Path, sendBody, performanceWait)
+		}
 
 		proxy := &httputil.ReverseProxy{
 			Director: func(req *http.Request) {
@@ -1426,7 +1445,7 @@ func (f *facade) handleHTTPWithStreamIdle(w http.ResponseWriter, r *http.Request
 			},
 			// A remote cluster peer is dialed over mTLS (per-peer pinned config);
 			// self/manual candidates use the plain transport. See candidateTransport.
-			Transport: proxyResponseTransport{p.candidateTransport(cand)},
+			Transport: performanceTransport{RoundTripper: proxyResponseTransport{p.candidateTransport(cand)}, attempt: performance},
 			// ModifyResponse fires when the upstream's status line + headers
 			// have arrived but before the body streams. That's both the retry
 			// decision point and, on commit, the time-to-first-byte boundary.
@@ -1509,28 +1528,16 @@ func (f *facade) handleHTTPWithStreamIdle(w http.ResponseWriter, r *http.Request
 				if peeked != nil {
 					resp.Body = peeked
 				}
-				if managed, validMedia := streamRequest.manages(resp.Header.Get("Content-Type")); isInf && managed && resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices {
-					reader, err := newStreamFrameReader(streamFrameConfig{
-						Protocol: streamRequest.protocol, Upstream: resp.Body,
-						Parent: r.Context(), IdleTimeout: streamIdle, Choices: streamRequest.choices,
-					})
+				if isInf {
+					reader, err := installResponseStream(resp, streamRequest, r.Context(), streamIdle, performance)
 					if err != nil {
 						return err
 					}
-					if !validMedia || (resp.Header.Get("Content-Encoding") != "" && !strings.EqualFold(resp.Header.Get("Content-Encoding"), "identity")) {
-						// The frame reader still owns the protocol error and EOF.
-						reader.mu.Lock()
-						reader.finishInterruptedLocked(streamInterruptReasonMalformed)
-						reader.mu.Unlock()
-					}
-					resp.Body = reader
 					committedStream = reader
-					resp.ContentLength = -1
-					clearOriginStreamIntegrity(resp.Header)
-					clearOriginStreamIntegrity(resp.Trailer)
 				}
 				if resp.StatusCode != http.StatusSwitchingProtocols {
-					resp.Body = &originResponseBody{ReadCloser: resp.Body, response: resp, managed: committedStream != nil}
+					sc.upstreamBody = &originResponseBody{ReadCloser: resp.Body, response: resp, managed: committedStream != nil}
+					resp.Body = sc.upstreamBody
 				}
 				// Name what actually answered (FORK_DESIGN.md §3.8). Set on the
 				// committed response only, so a failed-over attempt's headers
@@ -1657,7 +1664,12 @@ func (f *facade) handleHTTPWithStreamIdle(w http.ResponseWriter, r *http.Request
 			},
 		}
 
-		proxy.ServeHTTP(sc, attemptReq)
+		func() {
+			returned := false
+			defer func() { performance.finish(sc, returned) }()
+			proxy.ServeHTTP(sc, attemptReq)
+			returned = true
+		}()
 		cancelAttempt()
 		// The admitted execution ends with the attempt: a retried attempt no
 		// longer occupies this node, and a committed one has finished copying.

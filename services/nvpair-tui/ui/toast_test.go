@@ -563,7 +563,11 @@ func TestSecondInviteWaitsForTheFirst(t *testing.T) {
 
 	v.selectedKey = "a"
 	v.restoreSelection()
-	if press(inviteKey) == nil {
+	press(inviteKey)
+	if v.mode != nodesInputInviteChoice {
+		t.Fatal("pairing did not open the local permission choice")
+	}
+	if v.handleKey(tea.KeyMsg{Type: tea.KeyEnter}) == nil {
 		t.Fatal("the first invite was not sent")
 	}
 
@@ -592,7 +596,8 @@ func TestSecondInviteWaitsForTheFirst(t *testing.T) {
 
 	// Cancelling frees the way.
 	press(nodeCancelKey.Help().Key)
-	if press(inviteKey) == nil {
+	press(inviteKey)
+	if v.mode != nodesInputInviteChoice || v.handleKey(tea.KeyMsg{Type: tea.KeyEnter}) == nil {
 		t.Error("an invite could not be sent after the pending one was cancelled")
 	}
 }

@@ -191,6 +191,7 @@ func TestClusterManagerPairing(t *testing.T) {
 	}
 	inv := decodeResult[inviteResult](t, a.call("cluster:invite-node", map[string]any{
 		"address": "127.0.0.1", "port": 14822, "nodeId": "node-b",
+		"allowRemoteManagement": false,
 	}))
 	if inv.State != "pending" {
 		t.Fatalf("invite-node state = %q, want pending", inv.State)
@@ -211,12 +212,20 @@ func TestClusterManagerPairing(t *testing.T) {
 		t.Fatalf("invite-received id %q != %q", rcvInvite.InviteID, inv.InviteID)
 	}
 
+	missingPermission := b.callExpectError("cluster:respond-to-invite", map[string]any{
+		"inviteId": inv.InviteID, "accept": true, "pin": inv.Pin,
+	})
+	if missingPermission.Error == nil || missingPermission.Error.Code != -32602 {
+		t.Fatalf("respond-to-invite without allowRemoteManagement: got %+v, want error code -32602", missingPermission.Error)
+	}
+
 	// B accepts with the PIN -> paired, adopts A's cluster.
 	type invite struct {
 		State string `json:"state"`
 	}
 	resp := decodeResult[invite](t, b.call("cluster:respond-to-invite", map[string]any{
 		"inviteId": inv.InviteID, "accept": true, "pin": inv.Pin,
+		"allowRemoteManagement": false,
 	}))
 	if resp.State != "paired" {
 		t.Fatalf("respond-to-invite state = %q, want paired", resp.State)
@@ -284,6 +293,7 @@ func TestInviteAutoFoundsClusterWhenUnclustered(t *testing.T) {
 	}
 	inv := decodeResult[inviteResult](t, a.call("cluster:invite-node", map[string]any{
 		"address": "127.0.0.1", "port": 14832, "nodeId": "node-b",
+		"allowRemoteManagement": false,
 	}))
 	if inv.State != "pending" || len(inv.Pin) != 6 {
 		t.Fatalf("invite-node = %+v, want pending + six-digit pin (invite must proceed after auto-found)", inv)
@@ -314,6 +324,7 @@ func TestInviteAutoFoundsClusterWhenUnclustered(t *testing.T) {
 	// Idempotency: a second invite reuses the existing cluster, never re-founds.
 	inv2 := decodeResult[inviteResult](t, a.call("cluster:invite-node", map[string]any{
 		"address": "127.0.0.1", "port": 14832, "nodeId": "node-b",
+		"allowRemoteManagement": false,
 	}))
 	if inv2.State != "pending" || len(inv2.Pin) != 6 {
 		t.Fatalf("second invite-node = %+v, want pending + six-digit pin", inv2)
@@ -344,6 +355,7 @@ func TestRepeatedInviteSameSenderSupersedesPrior(t *testing.T) {
 	invite := func() inviteResult {
 		return decodeResult[inviteResult](t, a.call("cluster:invite-node", map[string]any{
 			"address": "127.0.0.1", "port": 14912, "nodeId": "node-b",
+			"allowRemoteManagement": false,
 		}))
 	}
 
@@ -379,6 +391,7 @@ func TestRepeatedInviteSameSenderSupersedesPrior(t *testing.T) {
 	waitInviteState(t, b, first.InviteID, "canceled")
 	stale := b.callExpectError("cluster:respond-to-invite", map[string]any{
 		"inviteId": first.InviteID, "accept": true, "pin": first.Pin,
+		"allowRemoteManagement": false,
 	})
 	if stale.Error == nil {
 		t.Fatal("accepting superseded invite succeeded, want invalid-state error")
@@ -386,6 +399,7 @@ func TestRepeatedInviteSameSenderSupersedesPrior(t *testing.T) {
 
 	paired := decodeResult[inviteResult](t, b.call("cluster:respond-to-invite", map[string]any{
 		"inviteId": second.InviteID, "accept": true, "pin": second.Pin,
+		"allowRemoteManagement": false,
 	}))
 	if paired.State != "paired" {
 		t.Fatalf("accept newest invite state = %q, want paired", paired.State)
@@ -409,6 +423,7 @@ func pairNodes(t *testing.T, inviter, joiner *cmProc, joinerPort int, joinerNode
 	}
 	inv := decodeResult[inviteResult](t, inviter.call("cluster:invite-node", map[string]any{
 		"address": "127.0.0.1", "port": joinerPort, "nodeId": joinerNodeID,
+		"allowRemoteManagement": false,
 	}))
 	if inv.State != "pending" || len(inv.Pin) != 6 {
 		t.Fatalf("invite-node = %+v, want pending + six-digit pin", inv)
@@ -418,6 +433,7 @@ func pairNodes(t *testing.T, inviter, joiner *cmProc, joinerPort int, joinerNode
 		State string `json:"state"`
 	}](t, joiner.call("cluster:respond-to-invite", map[string]any{
 		"inviteId": inv.InviteID, "accept": true, "pin": inv.Pin,
+		"allowRemoteManagement": false,
 	}))
 	if resp.State != "paired" {
 		t.Fatalf("respond-to-invite state = %q, want paired", resp.State)
@@ -583,6 +599,7 @@ func TestClusterCancelInvite(t *testing.T) {
 	}
 	inv := decodeResult[inviteResult](t, a.call("cluster:invite-node", map[string]any{
 		"address": "127.0.0.1", "port": 14862, "nodeId": "node-b",
+		"allowRemoteManagement": false,
 	}))
 	if inv.State != "pending" || len(inv.Pin) != 6 {
 		t.Fatalf("invite-node = %+v, want pending + six-digit pin", inv)
@@ -608,6 +625,7 @@ func TestClusterCancelInvite(t *testing.T) {
 	// rejected — B must not join.
 	resp := b.callExpectError("cluster:respond-to-invite", map[string]any{
 		"inviteId": inv.InviteID, "accept": true, "pin": inv.Pin,
+		"allowRemoteManagement": false,
 	})
 	if resp.Error == nil {
 		t.Fatal("respond-to-invite after cancel should be rejected, but succeeded")
@@ -676,6 +694,7 @@ func TestClusterCancelInviteRace(t *testing.T) {
 
 		inv := decodeResult[inviteResult](t, a.call("cluster:invite-node", map[string]any{
 			"address": "127.0.0.1", "port": port, "nodeId": fmt.Sprintf("node-b-%d", i),
+			"allowRemoteManagement": false,
 		}))
 		if inv.State != "pending" || len(inv.Pin) != 6 {
 			b.stop()
@@ -694,6 +713,7 @@ func TestClusterCancelInviteRace(t *testing.T) {
 			defer wg.Done()
 			respMsg = b.callExpectError("cluster:respond-to-invite", map[string]any{
 				"inviteId": inv.InviteID, "accept": true, "pin": inv.Pin,
+				"allowRemoteManagement": false,
 			})
 		}()
 		go func() {
@@ -770,6 +790,7 @@ func TestClusterDeclineInvite(t *testing.T) {
 	}
 	inv := decodeResult[inviteResult](t, a.call("cluster:invite-node", map[string]any{
 		"address": "127.0.0.1", "port": 14872, "nodeId": "node-b",
+		"allowRemoteManagement": false,
 	}))
 	if inv.State != "pending" || len(inv.Pin) != 6 {
 		t.Fatalf("invite-node = %+v, want pending + six-digit pin", inv)
@@ -805,6 +826,7 @@ func TestClusterDeclineInvite(t *testing.T) {
 	// A late Completion with the still-known PIN must not pair either side.
 	resp := b.callExpectError("cluster:respond-to-invite", map[string]any{
 		"inviteId": inv.InviteID, "accept": true, "pin": inv.Pin,
+		"allowRemoteManagement": false,
 	})
 	if resp.Error == nil {
 		t.Fatal("respond-to-invite after decline should be rejected, but succeeded")
@@ -842,6 +864,7 @@ func TestClusterInviteExpiresBothSides(t *testing.T) {
 	}
 	inv := decodeResult[inviteResult](t, a.call("cluster:invite-node", map[string]any{
 		"address": "127.0.0.1", "port": 14912, "nodeId": "node-b",
+		"allowRemoteManagement": false,
 	}))
 	if inv.State != "pending" || len(inv.Pin) != 6 {
 		t.Fatalf("invite-node = %+v, want pending + six-digit pin", inv)
@@ -870,6 +893,7 @@ func TestClusterInviteExpiresBothSides(t *testing.T) {
 	// prompted anew.
 	inv2 := decodeResult[inviteResult](t, a.call("cluster:invite-node", map[string]any{
 		"address": "127.0.0.1", "port": 14912, "nodeId": "node-b",
+		"allowRemoteManagement": false,
 	}))
 	if inv2.State != "pending" || len(inv2.Pin) != 6 {
 		t.Fatalf("retry invite-node = %+v, want pending + six-digit pin", inv2)
@@ -902,6 +926,7 @@ func TestClusterDeclinePreservesIntentionalSolo(t *testing.T) {
 		Pin      string `json:"pin"`
 	}](t, a.call("cluster:invite-node", map[string]any{
 		"address": "127.0.0.1", "port": 14882, "nodeId": "node-b",
+		"allowRemoteManagement": false,
 	}))
 	if inv.State != "pending" {
 		t.Fatalf("invite-node state = %q, want pending", inv.State)
@@ -949,6 +974,7 @@ func TestClusterDeclineKeepsSiblingPendingInvite(t *testing.T) {
 	}
 	invB := decodeResult[inviteResult](t, a.call("cluster:invite-node", map[string]any{
 		"address": "127.0.0.1", "port": 14892, "nodeId": "node-b",
+		"allowRemoteManagement": false,
 	}))
 	// The first invite auto-founds A's provenance-tracked invite-created cluster.
 	before := decodeResult[cmNodeID](t, a.call("cluster:get-node-id", nil))
@@ -957,6 +983,7 @@ func TestClusterDeclineKeepsSiblingPendingInvite(t *testing.T) {
 	}
 	invC := decodeResult[inviteResult](t, a.call("cluster:invite-node", map[string]any{
 		"address": "127.0.0.1", "port": 14893, "nodeId": "node-c",
+		"allowRemoteManagement": false,
 	}))
 	if invB.State != "pending" || invC.State != "pending" {
 		t.Fatalf("want both pending, got B=%+v C=%+v", invB, invC)
@@ -1017,6 +1044,7 @@ func TestClusterWrongPinFailsBothSides(t *testing.T) {
 	}
 	inv := decodeResult[inviteResult](t, a.call("cluster:invite-node", map[string]any{
 		"address": "127.0.0.1", "port": portB, "nodeId": "node-b",
+		"allowRemoteManagement": false,
 	}))
 	if inv.State != "pending" || len(inv.Pin) != 6 {
 		t.Fatalf("invite-node = %+v, want pending + six-digit pin", inv)
@@ -1029,6 +1057,7 @@ func TestClusterWrongPinFailsBothSides(t *testing.T) {
 	// B responds with a wrong PIN (flip the first digit to guarantee a mismatch).
 	failed := decodeResult[inviteResult](t, b.call("cluster:respond-to-invite", map[string]any{
 		"inviteId": inv.InviteID, "accept": true, "pin": mutatePin(inv.Pin),
+		"allowRemoteManagement": false,
 	}))
 	if failed.State != "failed" {
 		t.Fatalf("respond-to-invite wrong-pin state = %q, want failed", failed.State)
@@ -1090,6 +1119,7 @@ func TestClusterWrongPinPreservesIntentionalSolo(t *testing.T) {
 	}
 	inv := decodeResult[inviteResult](t, a.call("cluster:invite-node", map[string]any{
 		"address": "127.0.0.1", "port": portB, "nodeId": "node-b",
+		"allowRemoteManagement": false,
 	}))
 	if inv.State != "pending" {
 		t.Fatalf("invite-node state = %q, want pending", inv.State)
@@ -1098,6 +1128,7 @@ func TestClusterWrongPinPreservesIntentionalSolo(t *testing.T) {
 
 	failed := decodeResult[inviteResult](t, b.call("cluster:respond-to-invite", map[string]any{
 		"inviteId": inv.InviteID, "accept": true, "pin": mutatePin(inv.Pin),
+		"allowRemoteManagement": false,
 	}))
 	if failed.State != "failed" {
 		t.Fatalf("wrong-pin state = %q, want failed", failed.State)
@@ -1424,6 +1455,7 @@ func TestClusterInviteAlreadyClusteredRejected(t *testing.T) {
 	// Re-inviting the already-paired node is rejected: no PIN, reason surfaced.
 	reinv := decodeResult[inviteResult](t, a.call("cluster:invite-node", map[string]any{
 		"address": "127.0.0.1", "port": 14882, "nodeId": "node-b",
+		"allowRemoteManagement": false,
 	}))
 	if reinv.State != "rejected" {
 		t.Fatalf("re-invite of a paired node: state = %q, want rejected", reinv.State)
@@ -1442,6 +1474,7 @@ func TestClusterInviteAlreadyClusteredRejected(t *testing.T) {
 
 	inv := decodeResult[inviteResult](t, a.call("cluster:invite-node", map[string]any{
 		"address": "127.0.0.1", "port": 14882, "nodeId": "node-b",
+		"allowRemoteManagement": false,
 	}))
 	if inv.State != "pending" || len(inv.Pin) != 6 {
 		t.Fatalf("post-leave invite = %+v, want pending + six-digit PIN", inv)
@@ -1488,6 +1521,7 @@ func TestClusterInviteTwoPendingThenClustered(t *testing.T) {
 	// ends up holding two pending-inbound invites (two live joiner sessions).
 	invA := decodeResult[inviteResult](t, a.call("cluster:invite-node", map[string]any{
 		"address": "127.0.0.1", "port": 14892, "nodeId": bInfo.NodeUUID,
+		"allowRemoteManagement": false,
 	}))
 	if invA.State != "pending" || len(invA.Pin) != 6 {
 		t.Fatalf("A invite = %+v, want pending + six-digit PIN", invA)
@@ -1496,6 +1530,7 @@ func TestClusterInviteTwoPendingThenClustered(t *testing.T) {
 
 	invC := decodeResult[inviteResult](t, c.call("cluster:invite-node", map[string]any{
 		"address": "127.0.0.1", "port": 14892, "nodeId": bInfo.NodeUUID,
+		"allowRemoteManagement": false,
 	}))
 	if invC.State != "pending" || len(invC.Pin) != 6 {
 		t.Fatalf("C invite = %+v, want pending + six-digit PIN", invC)
@@ -1505,6 +1540,7 @@ func TestClusterInviteTwoPendingThenClustered(t *testing.T) {
 	// B accepts A first -> paired, adopts A's cluster.
 	respA := decodeResult[inviteResult](t, b.call("cluster:respond-to-invite", map[string]any{
 		"inviteId": invA.InviteID, "accept": true, "pin": invA.Pin,
+		"allowRemoteManagement": false,
 	}))
 	if respA.State != "paired" {
 		t.Fatalf("B accept A = %q, want paired", respA.State)
@@ -1520,6 +1556,7 @@ func TestClusterInviteTwoPendingThenClustered(t *testing.T) {
 	// accept must be rejected -- the Completion Exchange must not run.
 	respC := decodeResult[inviteResult](t, b.call("cluster:respond-to-invite", map[string]any{
 		"inviteId": invC.InviteID, "accept": true, "pin": invC.Pin,
+		"allowRemoteManagement": false,
 	}))
 	if respC.State != "rejected" {
 		t.Fatalf("B accept C while clustered = %q, want rejected", respC.State)
@@ -1566,6 +1603,7 @@ func TestClusterInviteRejectedDissolvesAutoFoundedSolo(t *testing.T) {
 	}
 	inv := decodeResult[inviteResult](t, a.call("cluster:invite-node", map[string]any{
 		"address": "127.0.0.1", "port": 14902, "nodeId": "node-b",
+		"allowRemoteManagement": false,
 	}))
 	if inv.State != "rejected" || inv.Reason != "already-clustered" {
 		t.Fatalf("invite of an already-clustered node = %+v, want rejected/already-clustered", inv)

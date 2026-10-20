@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sync"
 	"syscall"
 	"time"
 
@@ -67,16 +68,23 @@ func main() {
 		transport = conn
 		log.Printf("using IPC transport: %s", *ipcPath)
 	} else {
-		transport = newStdioTransport()
+		var err error
+		transport, err = newStdioTransport()
+		if err != nil {
+			log.Fatalf("failed to prepare stdio transport: %v", err)
+		}
 		log.Print("using stdio transport")
 	}
 	defer transport.Close()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	failSession, joinSession := newTerminalSession(ctx, cancel, transport)
+	defer joinSession()
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	defer signal.Stop(sigCh)
 	go func() {
 		select {
 		case sig := <-sigCh:
@@ -86,7 +94,7 @@ func main() {
 		}
 	}()
 
-	codec := NewCodec(transport)
+	codec := newOwnedCodec(ctx, transport, failSession, notificationWriteBudget)
 	manifestDir, installBase := userPaths()
 	reg := buildRegistry(manifestDir)
 	log.Printf("loaded %d engine manifest(s): %v", len(reg.Names()), reg.Names())
@@ -144,6 +152,33 @@ func main() {
 		log.Fatalf("manager error: %v", err)
 	}
 	log.Print("shutdown complete")
+}
+
+// newTerminalSession owns closure independently of Manager's locks. Closing
+// both directions wakes readLoop; Run remains the sole StopAll owner.
+func newTerminalSession(ctx context.Context, cancel context.CancelFunc, transport io.ReadWriteCloser) (func(string, error), func()) {
+	var closeOnce, failOnce sync.Once
+	closeTransport := func() {
+		closeOnce.Do(func() {
+			if err := transport.Close(); err != nil {
+				slog.Warn("parent transport close failed", "err", err)
+			}
+		})
+	}
+	fail := func(method string, err error) {
+		failOnce.Do(func() {
+			slog.Error("terminal parent transport failure", "method", method, "err", err)
+			cancel()
+			closeTransport()
+		})
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		<-ctx.Done()
+		closeTransport()
+	}()
+	return fail, func() { cancel(); <-done }
 }
 
 // userPaths returns the per-user manifest-override directory and the

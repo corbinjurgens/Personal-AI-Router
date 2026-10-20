@@ -30,10 +30,9 @@ import (
 )
 
 const (
-	// modelMutationBudget sets a deadline before the synchronous send, enforced
-	// on the reply wait once that send returns. As with the other relays, a
-	// blocked send cannot authorize a mutation. The broker handles the same
-	// request within its own activation bound (proxyCallTimeout,
+	// modelMutationBudget covers both the synchronous send and reply wait.
+	// A failed or cancelled send cannot authorize a mutation. The broker handles
+	// the same request within its own activation bound (proxyCallTimeout,
 	// 5s; broker policy.go activationBoundLocked), which covers waiting for
 	// the bound worker and the confirmed proxy push. Three times that leaves
 	// the broker room to consume its whole budget and still answer here, so
@@ -47,11 +46,11 @@ const (
 // modelMutationRelay correlates engine:model-mutation-request notifications
 // with the broker's engine:model-mutation-reply ones, exactly as policyRelay
 // correlates policy:request with policy:reply. send is the parent codec's
-// synchronous Notify; a nil send means no broker is attached.
+// synchronous NotifyContext; a nil send means no broker is attached.
 type modelMutationRelay struct {
 	mu      sync.Mutex
 	pending map[string]chan nodepolicy.ModelMutationReply
-	send    func(string, any) error
+	send    func(context.Context, string, any) error
 }
 
 // call asks the broker to withdraw engine's model identity and waits for the
@@ -64,9 +63,16 @@ func (r *modelMutationRelay) call(ctx context.Context, engine string) error {
 	}
 	ctx, cancel := context.WithTimeout(ctx, modelMutationBudget)
 	defer cancel()
+	if err := ctx.Err(); err != nil {
+		return modelMutationContextError(engine, err)
+	}
 	id := newOpID()
 	ch := make(chan nodepolicy.ModelMutationReply, 1)
 	r.mu.Lock()
+	if err := ctx.Err(); err != nil {
+		r.mu.Unlock()
+		return modelMutationContextError(engine, err)
+	}
 	if len(r.pending) >= maxPendingModelMutations {
 		r.mu.Unlock()
 		return fmt.Errorf("engine %q cannot change its models: too many model changes are already waiting for confirmation", engine)
@@ -78,7 +84,10 @@ func (r *modelMutationRelay) call(ctx context.Context, engine string) error {
 	r.mu.Unlock()
 	defer func() { r.mu.Lock(); delete(r.pending, id); r.mu.Unlock() }()
 
-	if err := r.send(nodepolicy.MethodModelMutationRequest, nodepolicy.ModelMutationRequest{RequestID: id, Engine: engine}); err != nil {
+	if err := ctx.Err(); err != nil {
+		return modelMutationContextError(engine, err)
+	}
+	if err := r.send(ctx, nodepolicy.MethodModelMutationRequest, nodepolicy.ModelMutationRequest{RequestID: id, Engine: engine}); err != nil {
 		return fmt.Errorf("engine %q cannot change its models: the withdrawal request could not be sent: %w", engine, err)
 	}
 	select {

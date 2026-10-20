@@ -22,67 +22,72 @@ import (
 
 const settingsPath = "/v1/engine-settings/"
 
-func (s *controlServer) settingsRoutes(mux *http.ServeMux) {
-	for _, method := range []string{"get", "preview", "apply"} {
-		mux.HandleFunc(settingsPath+method, s.requirePinCaller(func(w http.ResponseWriter, r *http.Request, caller string) {
-			if r.Method != http.MethodPost {
-				http.Error(w, "method not allowed", 405)
+func (s *controlServer) settingsRoutes() []controlRoute {
+	return []controlRoute{
+		{settingsPath + "get", http.MethodPost, controlRead, "settings-get", s.settingsHandler("get")},
+		{settingsPath + "preview", http.MethodPost, controlRead, "settings-preview", s.settingsHandler("preview")},
+		{settingsPath + "apply", http.MethodPost, controlMutation, "settings-apply", s.settingsHandler("apply")},
+		{settingsPath + "events", http.MethodGet, controlRead, "settings-events", ignoreCaller(s.streamSettings)},
+	}
+}
+
+// settingsHandler relays one local broker settings method for a pinned peer.
+// The registry has already validated the method and, for apply, the caller's
+// remote-management grant.
+func (s *controlServer) settingsHandler(method string) pinnedPeerHandler {
+	return func(w http.ResponseWriter, r *http.Request, caller string) {
+		if s.exec.settingsParent == nil {
+			http.Error(w, "settings coordinator unavailable", 503)
+			return
+		}
+		var p settings.Request
+		decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64*1024))
+		decoder.DisallowUnknownFields()
+		if decoder.Decode(&p) != nil || decoder.Decode(&struct{}{}) != io.EOF {
+			http.Error(w, "invalid settings request", 400)
+			return
+		}
+		// A peer can only address this target node, never forward another hop.
+		p.NodeID = ""
+		if method != "get" {
+			if err := s.exec.RejectRemoteCORSChange(p); err != nil {
+				http.Error(w, err.Error(), 403)
 				return
 			}
-			if s.exec.settingsParent == nil {
-				http.Error(w, "settings coordinator unavailable", 503)
-				return
-			}
-			var p settings.Request
-			decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64*1024))
-			decoder.DisallowUnknownFields()
-			if decoder.Decode(&p) != nil || decoder.Decode(&struct{}{}) != io.EOF {
-				http.Error(w, "invalid settings request", 400)
-				return
-			}
-			// A peer can only address this target node, never forward another hop.
-			p.NodeID = ""
-			if method != "get" {
-				if err := s.exec.RejectRemoteCORSChange(p); err != nil {
-					http.Error(w, err.Error(), 403)
+		}
+		ctx, cancel := context.WithCancel(r.Context())
+		defer cancel()
+		go func() {
+			ticker := time.NewTicker(time.Second)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
 					return
-				}
-			}
-			ctx, cancel := context.WithCancel(r.Context())
-			defer cancel()
-			go func() {
-				ticker := time.NewTicker(time.Second)
-				defer ticker.Stop()
-				for {
-					select {
-					case <-ctx.Done():
+				case <-ticker.C:
+					s.mesh.Refresh()
+					if _, ok := s.mesh.VerifyClientPin(r); !ok {
+						cancel()
 						return
-					case <-ticker.C:
-						s.mesh.Refresh()
-						if _, ok := s.mesh.VerifyClientPin(r); !ok {
-							cancel()
-							return
-						}
 					}
 				}
-			}()
-			result, err := s.exec.settingsParent(ctx, method, p, caller)
-			if err != nil {
-				// A local veto is a typed 409 the caller maps back to its
-				// code; anything else is a plain 409.
-				var relayErr *codedError
-				if errors.As(err, &relayErr) && wireCodes[relayErr.code] != "" {
-					writeCodedError(w, relayErr.code, err.Error())
-				} else {
-					http.Error(w, err.Error(), 409)
-				}
-				return
 			}
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write(result)
-		}))
+		}()
+		result, err := s.exec.settingsParent(ctx, method, p, caller)
+		if err != nil {
+			// A local veto or a refused management operation is a typed 409
+			// the caller maps back to its code; anything else is a plain 409.
+			var relayErr *codedError
+			if errors.As(err, &relayErr) && wireCodes[relayErr.code] != "" {
+				writeCodedError(w, relayErr.code, err.Error())
+			} else {
+				http.Error(w, err.Error(), 409)
+			}
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(result)
 	}
-	mux.HandleFunc(settingsPath+"events", s.requirePin(s.streamSettings))
 }
 
 func (s *controlServer) streamSettings(w http.ResponseWriter, r *http.Request) {

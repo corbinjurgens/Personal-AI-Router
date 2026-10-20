@@ -105,12 +105,22 @@ The existing engine-control listener exposes pinned-mTLS POST endpoints
 `/v1/engine-settings/get`, `/preview`, `/apply` and GET `/events`. Requests are
 limited to 64 KiB and cannot forward another hop. The authenticated caller ID is
 carried through correlated `engine:settings-request` / `engine:settings-reply`
-notifications to the local broker. A failed reply carries `errorCode`; the
-route answers `-32011` as HTTP 409 `{"error", "code": "local_veto"}`, which the
-origin returns as `-32011`, and any other failure as a plain-text 409. Cancellation and pin removal cancel queued
+notifications to the local broker. Get, preview and events are reads; Apply
+requires the target's remote-management grant at the `ec` gate and again under
+the broker's journal locks immediately before acceptance. A failed reply
+carries `errorCode`; `-32011` and `-32012` become HTTP 409 with code
+`local_veto` and `remote_management_denied`, respectively, and retain those RPC
+codes at the origin. Permission denial means change permission locally on the
+target, independently of conflict (`-32010`) and local veto. Other failures use
+a plain-text 409. Cancellation and pin removal cancel queued
 work; the broker rechecks the caller after acquiring the node lock. Once
 durably accepted, the target completes under its own eleven-minute deadline even
-if the initiating peer disconnects.
+if the initiating peer disconnects. Revocation blocks new acceptance, including
+queued broker writes, but accepted Apply/switch work retains target-owned
+completion and reconciliation. Progress and receipts remain readable; revocation
+does not roll back effects or replace local pause/Off cancellation. The same
+fresh acceptance checks apply to switch receipt acceptance, and grants never
+override private/CORS, served/resident or target-admission restrictions.
 
 `engine:settings-projection` seeds the worker's subscription hub with full local
 snapshots. A subscription registers and receives its baseline under one lock.
@@ -248,7 +258,7 @@ Failures terminate as `failed-validation`, `failed-drain`, `failed-source-stop`,
 `failed-target-start`, `failed-publication` or `failed-interrupted`; pre-acceptance
 refusals may have a durable `rejected` receipt. Errors carry a stable kind and
 numeric code: invalid/reused ID `-32602`, configuration conflict `-32010`, local
-remote veto `-32011`, and other operational/storage/full/busy errors `-32000`.
+remote veto `-32011`, remote-management denial `-32012`, and other operational/storage/full/busy errors `-32000`.
 Manager result envelopes are inspected even when JSON-RPC itself succeeds.
 
 Startup loads the switch journal, marks nonterminal operations

@@ -13,6 +13,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -81,7 +82,7 @@ func newPerformanceFixture(t *testing.T) *performanceFixture {
 }
 
 func performanceSummary(host string, revision int64) performancewire.Summary {
-	return performancewire.Summary{Version: 1, MeasuringHost: host, AdmissionIncarnation: "1", Revision: revision,
+	return performancewire.Summary{Version: 2, MeasuringHost: host, AdmissionIncarnation: "1", Revision: revision,
 		Window: performancewire.Window{MaxAgeMs: performancewire.RetentionMs, MaxSamplesPerKey: 64}, Entries: []performancewire.Entry{}}
 }
 
@@ -416,6 +417,40 @@ func TestPerformanceStrictPayloadAndOuterFrameLimits(t *testing.T) {
 	test("invalid summary", func(raw []byte) []byte { return bytes.Replace(raw, []byte(`"revision":1`), []byte(`"revision":0`), 1) })
 }
 
+func TestPerformanceRejectsV1SummaryBeforeBrokerEmission(t *testing.T) {
+	f := newPerformanceFixture(t)
+	summary := performanceSummary("uuid-peer", 1)
+	summary.Version = 1
+	raw, err := json.Marshal(summary)
+	if err != nil {
+		t.Fatalf("encode v1 summary: %v", err)
+	}
+	if code := f.postRaw(raw); code != http.StatusBadRequest {
+		t.Fatalf("v1 summary status = %d, want %d", code, http.StatusBadRequest)
+	}
+	if len(f.emitted) != 0 {
+		t.Fatalf("v1 summary reached broker: %+v", f.emitted)
+	}
+}
+
+func TestPerformanceV2ReportedRateReachesBroker(t *testing.T) {
+	f := newPerformanceFixture(t)
+	summary := performanceSummary("uuid-peer", 1)
+	want := performancewire.ReportedRate{Samples: 1, DurationNs: 400_000_000, TokensPerSecond: 55}
+	summary.Entries = []performancewire.Entry{{
+		Key:     performancewire.ProfileKey{Host: "uuid-peer", Engine: "llamacpp-custom", Model: "model", Fingerprint: "profile"},
+		Samples: 1, Completed: 1, NewestObservedAtMs: 1000, EngineDecode: &want,
+	}}
+	if code := f.post(t, summary); code != http.StatusOK {
+		t.Fatalf("v2 summary status = %d, want %d", code, http.StatusOK)
+	}
+	received := f.summaries(t)
+	if len(received) != 1 || received[0].Summary.Version != 2 || len(received[0].Summary.Entries) != 1 ||
+		received[0].Summary.Entries[0].EngineDecode == nil || *received[0].Summary.Entries[0].EngineDecode != want || received[0].Summary.Entries[0].Decode != nil {
+		t.Fatalf("broker replacements = %+v, want v2 reported decode %+v", received, want)
+	}
+}
+
 func TestPerformanceDropsStaleRevisionsAndDeduplicatesHeartbeats(t *testing.T) {
 	f := newPerformanceFixture(t)
 	if code := f.post(t, performanceSummary("uuid-peer", 5)); code != http.StatusOK {
@@ -666,7 +701,7 @@ func TestPerformanceCoalescesNewestWholeSnapshotOutsideLifecycleFIFO(t *testing.
 	performancePipeClient(t, f.manager.performance.broadcaster, clustertrust.Open(f.peerDir), func(w http.ResponseWriter, r *http.Request) {
 		msg := performanceReadFrame(t, r)
 		if msg.Method == methodPerformanceCapabilities {
-			_, _ = io.WriteString(w, `{"version":1}`)
+			_, _ = io.WriteString(w, `{"version":2}`)
 			return
 		}
 		frames = append(frames, msg)
@@ -701,7 +736,7 @@ func TestPerformanceDelayedFirstSendPreservesPublicationAnchor(t *testing.T) {
 	performancePipeClient(t, f.manager.performance.broadcaster, clustertrust.Open(f.peerDir), func(w http.ResponseWriter, r *http.Request) {
 		msg := performanceReadFrame(t, r)
 		if msg.Method == methodPerformanceCapabilities {
-			_, _ = io.WriteString(w, `{"version":1}`)
+			_, _ = io.WriteString(w, `{"version":2}`)
 			return
 		}
 		sent = append(sent, sentSummary{msg, r.Header.Values(performanceElapsedHeader)})
@@ -741,7 +776,7 @@ func TestPerformanceSenderWithholdsExpiredPublicationUntilNewRevision(t *testing
 	performancePipeClient(t, f.manager.performance.broadcaster, clustertrust.Open(f.peerDir), func(w http.ResponseWriter, r *http.Request) {
 		msg := performanceReadFrame(t, r)
 		if msg.Method == methodPerformanceCapabilities {
-			_, _ = io.WriteString(w, `{"version":1}`)
+			_, _ = io.WriteString(w, `{"version":2}`)
 			return
 		}
 		summary, err := performancewire.DecodeSummary(msg.Params)
@@ -788,7 +823,7 @@ func TestPerformanceHeartbeat30SecondsAndLateJoinBackfill(t *testing.T) {
 	performancePipeClient(t, f.manager.performance.broadcaster, clustertrust.Open(f.peerDir), func(w http.ResponseWriter, r *http.Request) {
 		msg := performanceReadFrame(t, r)
 		if msg.Method == methodPerformanceCapabilities {
-			_, _ = io.WriteString(w, `{"version":1}`)
+			_, _ = io.WriteString(w, `{"version":2}`)
 			return
 		}
 		frames <- msg
@@ -843,7 +878,7 @@ func TestPerformanceNewestPublishDuringCapabilityProbeWinsDispatch(t *testing.T)
 			if err := f.manager.performance.publish(performanceEncode(t, performanceSummary("uuid-self", 2))); err != nil {
 				t.Errorf("new publish: %v", err)
 			}
-			_, _ = io.WriteString(w, `{"version":1}`)
+			_, _ = io.WriteString(w, `{"version":2}`)
 			return
 		}
 		frames <- msg
@@ -890,6 +925,146 @@ func TestPerformanceUnsupportedPeerNegotiatedOncePerRoute(t *testing.T) {
 	}
 }
 
+func TestPerformanceV1CapabilityNeverReceivesV2Summary(t *testing.T) {
+	f := newPerformanceFixture(t)
+	performanceAddPeer(f.manager)
+	var probes, summaries atomic.Int32
+	performancePipeClient(t, f.manager.performance.broadcaster, clustertrust.Open(f.peerDir), func(w http.ResponseWriter, r *http.Request) {
+		msg := performanceReadFrame(t, r)
+		if msg.Method == methodPerformanceCapabilities {
+			probes.Add(1)
+			_, _ = io.WriteString(w, `{"version":1}`)
+			return
+		}
+		summaries.Add(1)
+	})
+	if err := f.manager.performance.publish(performanceEncode(t, performanceSummary("uuid-self", 1))); err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+	for range performanceProbeAttempts + 2 {
+		f.manager.performance.sendRound(context.Background())
+	}
+	if probes.Load() != performanceProbeAttempts || summaries.Load() != 0 {
+		t.Fatalf("v1 peer probes=%d summaries=%d, want bounded %d probes and no v2 delivery", probes.Load(), summaries.Load(), performanceProbeAttempts)
+	}
+}
+
+type performanceLogHandler struct {
+	mu      sync.Mutex
+	records []slog.Record
+}
+
+func (*performanceLogHandler) Enabled(context.Context, slog.Level) bool { return true }
+
+func (h *performanceLogHandler) Handle(_ context.Context, record slog.Record) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.records = append(h.records, record.Clone())
+	return nil
+}
+
+func (h *performanceLogHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
+func (h *performanceLogHandler) WithGroup(string) slog.Handler      { return h }
+
+func (h *performanceLogHandler) snapshot() []slog.Record {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return append([]slog.Record(nil), h.records...)
+}
+
+func TestPerformanceV1CapabilityWarnsOncePerAdmission(t *testing.T) {
+	f := newPerformanceFixture(t)
+	performanceAddPeer(f.manager)
+	handler := &performanceLogHandler{}
+	previousLogger := slog.Default()
+	slog.SetDefault(slog.New(handler))
+	t.Cleanup(func() { slog.SetDefault(previousLogger) })
+	var probes, summaries atomic.Int32
+	performancePipeClient(t, f.manager.performance.broadcaster, clustertrust.Open(f.peerDir), func(w http.ResponseWriter, r *http.Request) {
+		msg := performanceReadFrame(t, r)
+		if msg.Method == methodPerformanceCapabilities {
+			probes.Add(1)
+			_, _ = io.WriteString(w, `{"version":1}`)
+			return
+		}
+		summaries.Add(1)
+	})
+	if err := f.manager.performance.publish(performanceEncode(t, performanceSummary("uuid-self", 1))); err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+	for range performanceProbeAttempts + 3 {
+		f.manager.performance.sendRound(context.Background())
+	}
+	if probes.Load() != performanceProbeAttempts || summaries.Load() != 0 {
+		t.Fatalf("initial admission probes=%d summaries=%d", probes.Load(), summaries.Load())
+	}
+	if records := handler.snapshot(); len(records) != 1 {
+		t.Fatalf("initial warnings = %d, want 1", len(records))
+	}
+
+	f.peerEpoch(t, 2)
+	for range performanceProbeAttempts + 3 {
+		f.manager.performance.sendRound(context.Background())
+	}
+	if probes.Load() != 2*performanceProbeAttempts || summaries.Load() != 0 {
+		t.Fatalf("after new admission probes=%d summaries=%d", probes.Load(), summaries.Load())
+	}
+	records := handler.snapshot()
+	if len(records) != 2 {
+		t.Fatalf("warnings after new admission = %d, want 2", len(records))
+	}
+	for _, record := range records {
+		if record.Message != "peer performance schema version mismatch" || record.Level != slog.LevelWarn {
+			t.Fatalf("warning = level %s message %q", record.Level, record.Message)
+		}
+		fields := make(map[string]slog.Value)
+		record.Attrs(func(attr slog.Attr) bool {
+			fields[attr.Key] = attr.Value
+			return true
+		})
+		if fields["nodeId"].String() != "uuid-peer" || fields["expectedVersion"].Int64() != performancewire.SchemaVersion || fields["receivedVersion"].Int64() != 1 {
+			t.Fatalf("warning fields = %+v", fields)
+		}
+		if fields["routeGeneration"].Uint64() == 0 || fields["consequence"].String() != "performance summaries not exchanged until both nodes run the same build" {
+			t.Fatalf("warning route/consequence fields = %+v", fields)
+		}
+	}
+}
+
+func TestPerformanceV2ReportedRateSurvivesPeerDispatch(t *testing.T) {
+	f := newPerformanceFixture(t)
+	performanceAddPeer(f.manager)
+	var frames []Message
+	performancePipeClient(t, f.manager.performance.broadcaster, clustertrust.Open(f.peerDir), func(w http.ResponseWriter, r *http.Request) {
+		msg := performanceReadFrame(t, r)
+		if msg.Method == methodPerformanceCapabilities {
+			_, _ = io.WriteString(w, `{"version":2}`)
+			return
+		}
+		frames = append(frames, msg)
+	})
+	summary := performanceSummary("uuid-self", 1)
+	want := performancewire.ReportedRate{Samples: 1, DurationNs: 400_000_000, TokensPerSecond: 55}
+	summary.Entries = []performancewire.Entry{{
+		Key:     performancewire.ProfileKey{Host: "uuid-self", Engine: "llamacpp-custom", Model: "model", Fingerprint: "profile"},
+		Samples: 1, Completed: 1, NewestObservedAtMs: 1000, EngineDecode: &want,
+	}}
+	if err := f.manager.performance.publish(performanceEncode(t, summary)); err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+	f.manager.performance.sendRound(context.Background())
+	if len(frames) != 1 || frames[0].Method != performancewire.MethodSummary {
+		t.Fatalf("peer frames = %+v, want one summary", frames)
+	}
+	got, err := performancewire.DecodeSummary(frames[0].Params)
+	if err != nil {
+		t.Fatalf("decode peer summary: %v", err)
+	}
+	if got.Version != 2 || len(got.Entries) != 1 || got.Entries[0].EngineDecode == nil || *got.Entries[0].EngineDecode != want {
+		t.Fatalf("peer summary = %+v, want v2 reported decode %+v", got, want)
+	}
+}
+
 func TestPerformanceCapabilityFailuresHaveBoundedRetryBudget(t *testing.T) {
 	f := newPerformanceFixture(t)
 	performanceAddPeer(f.manager)
@@ -898,7 +1073,7 @@ func TestPerformanceCapabilityFailuresHaveBoundedRetryBudget(t *testing.T) {
 		msg := performanceReadFrame(t, r)
 		if msg.Method == methodPerformanceCapabilities {
 			probes.Add(1)
-			_, _ = io.WriteString(w, `{"version":1,"unrecognized":true}`)
+			_, _ = io.WriteString(w, `{"version":2,"unrecognized":true}`)
 			return
 		}
 		summaries.Add(1)
@@ -924,7 +1099,7 @@ func TestPerformanceBlockedPeerDoesNotDelayLifecycleOrCancel(t *testing.T) {
 	closePerformance := performancePipeClient(t, f.manager.performance.broadcaster, clustertrust.Open(f.peerDir), func(w http.ResponseWriter, r *http.Request) {
 		msg := performanceReadFrame(t, r)
 		if msg.Method == methodPerformanceCapabilities {
-			_, _ = io.WriteString(w, `{"version":1}`)
+			_, _ = io.WriteString(w, `{"version":2}`)
 			return
 		}
 		close(blocked)
@@ -987,7 +1162,7 @@ func TestPerformanceFreshnessSweepRunsWhileNetworkSenderIsBlocked(t *testing.T) 
 	closePerformance := performancePipeClient(t, f.manager.performance.broadcaster, clustertrust.Open(f.peerDir), func(w http.ResponseWriter, r *http.Request) {
 		msg := performanceReadFrame(t, r)
 		if msg.Method == methodPerformanceCapabilities {
-			_, _ = io.WriteString(w, `{"version":1}`)
+			_, _ = io.WriteString(w, `{"version":2}`)
 			return
 		}
 		close(blocked)
@@ -1075,7 +1250,7 @@ func TestPerformanceAdmissionChangeDuringCapabilityProbePreventsSummaryDispatch(
 		msg := performanceReadFrame(t, r)
 		if msg.Method == methodPerformanceCapabilities {
 			f.peerEpoch(t, 2)
-			_, _ = io.WriteString(w, `{"version":1}`)
+			_, _ = io.WriteString(w, `{"version":2}`)
 			return
 		}
 		summaries.Add(1)
@@ -1182,7 +1357,7 @@ func TestPerformanceAuthenticatedCapabilityDispatch(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &capability); err != nil {
 		t.Fatalf("decode capability: %v", err)
 	}
-	if capability.Version != 1 || len(f.emitted) != 0 {
+	if capability.Version != 2 || len(f.emitted) != 0 {
 		t.Fatalf("capability = %+v, emitted=%d", capability, len(f.emitted))
 	}
 }

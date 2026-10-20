@@ -70,7 +70,8 @@ function entry(): PerformanceEntry {
         totalMs: { samples: 5, median: 100, p95: 150 },
         loadNs: { samples: 1, median: 1_500_000, p95: 2_500_000 },
         prefill: { samples: 3, tokens: 100, durationNs: 2_000_000_000, tokensPerSecond: 50 },
-        decode: { samples: 2, tokens: 20, durationNs: 1_000_000_000, tokensPerSecond: 20 }
+        decode: { samples: 2, tokens: 20, durationNs: 1_000_000_000, tokensPerSecond: 20 },
+        engineDecode: null
     }
 }
 
@@ -82,7 +83,7 @@ function performance(entries: PerformanceEntry[] = [entry()]): NodePerformanceDa
         lastSeenAgeMs: 100,
         expiredEntries: 2,
         summary: {
-            version: 1,
+            version: 2,
             measuringHost,
             admissionIncarnation: 'incarnation-one',
             revision: 1,
@@ -177,6 +178,86 @@ describe('measured run performance', () => {
         expect(cells('Prefill')).toEqual(['Prefill', '--', '0 / 8'])
         expect(cells('Decode')).toEqual(['Decode', '0', '2 / 8'])
         expect(text()).toContain('Family: -- · Quantization: -- · Context tokens: --')
+    })
+
+    it('shows the reported decode aggregate and its coverage without mixing legacy rates', () => {
+        const measured = entry()
+        measured.engineDecode = {
+            samples: 3,
+            durationNs: 1_000_000_000,
+            tokensPerSecond: 49.126
+        }
+        render(performance([measured]))
+        expect(cells('Engine-reported decode')).toEqual([
+            'Engine-reported decode',
+            '49.13',
+            '3 / 8'
+        ])
+        expect(text()).toContain('duration-weighted mean of reported rates')
+        expect(text()).toContain('may be rounded by the engine')
+        expect(text()).toContain('does not reconstruct a token total')
+        expect(text()).toContain('Source host: source-one · Profile: fp-one')
+        expect(() => cells('Decode')).toThrow('Missing metric row: Decode')
+    })
+
+    it('shows a measured zero engine-reported rate with its own coverage', () => {
+        const measured = entry()
+        measured.engineDecode = { samples: 1, durationNs: 1_000_000, tokensPerSecond: 0 }
+        render(performance([measured]))
+        expect(cells('Engine-reported decode')).toEqual(['Engine-reported decode', '0', '1 / 8'])
+    })
+
+    it('shows decode as unknown when neither aggregate is available', () => {
+        const measured = entry()
+        measured.decode = null
+        render(performance([measured]))
+        expect(cells('Decode')).toEqual(['Decode', '--', '0 / 8'])
+        expect(text()).not.toContain('Engine-reported decode')
+    })
+
+    it('replaces a destination native rate with measured zero and then unknown without accumulating coverage', () => {
+        const measured = entry()
+        measured.key = {
+            host: 'destination-b',
+            engine: 'strata-custom',
+            model: 'resolved-child/model',
+            fingerprint: 'strata-runtime-config-profile'
+        }
+        measured.profile = { engineFamily: 'strata', quantization: 'Q6_K', contextTokens: 16384 }
+        measured.engineDecode = {
+            samples: 2,
+            durationNs: 1_000_500_000,
+            tokensPerSecond: 49.126
+        }
+        measured.decode = null
+
+        render(performance([measured]))
+        render(performance([measured]))
+        expect(cells('Engine-reported decode')).toEqual([
+            'Engine-reported decode',
+            '49.13',
+            '2 / 8'
+        ])
+        expect(text().match(/Samples: 8/g)).toHaveLength(1)
+        expect(text()).toContain('Engine: strata-custom · Model: resolved-child/model')
+        expect(text()).toContain(
+            'Source host: destination-b · Profile: strata-runtime-config-profile'
+        )
+        expect(text()).toContain('Family: strata · Quantization: Q6_K · Context tokens: 16384')
+
+        measured.engineDecode = { samples: 1, durationNs: 400_500_000, tokensPerSecond: 0 }
+        render(performance([measured]))
+        expect(cells('Engine-reported decode')).toEqual(['Engine-reported decode', '0', '1 / 8'])
+        expect(text()).not.toContain('49.13')
+
+        measured.engineDecode = null
+        render(performance([measured]))
+        expect(cells('Decode')).toEqual(['Decode', '--', '0 / 8'])
+        expect(text()).not.toContain('Engine-reported decode')
+        expect(text()).toContain(
+            'Source host: destination-b · Profile: strata-runtime-config-profile'
+        )
+        expect(text().match(/Samples: 8/g)).toHaveLength(1)
     })
 
     const statuses: { status: NodePerformanceData['status']; label: string }[] = [

@@ -20,6 +20,7 @@ import (
 func TestSwitchWaitsForIdentityWithdrawalBeforeLifecycle(t *testing.T) {
 	h := newSwitchHarness(t)
 	clustertrusttest.Join(t, h.b.clusterDir, "cluster", "target", "peer")
+	grantRemoteManagement(t, h.b.clusterDir, "cluster", "target", "peer", true)
 	baseProxy, baseEngine := h.proxy.answer, h.engine.answer
 	var mu sync.Mutex
 	withdrawn := map[string]bool{}
@@ -240,6 +241,7 @@ func TestSwitchRecoveryWithdrawalRefusalRetainsReservation(t *testing.T) {
 func TestSwitchLocalOffWithdrawalRefusalPreventsStop(t *testing.T) {
 	h := newSwitchHarness(t)
 	clustertrusttest.Join(t, h.b.clusterDir, "cluster", "target", "peer")
+	grantRemoteManagement(t, h.b.clusterDir, "cluster", "target", "peer", true)
 	p := h.request(t, "local-off-withdrawal")
 	reached, resume := make(chan struct{}), make(chan struct{})
 	var once sync.Once

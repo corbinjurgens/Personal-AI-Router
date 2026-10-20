@@ -52,7 +52,7 @@ function button(label: string): HTMLButtonElement {
 }
 
 async function submitPIN(): Promise<void> {
-    const input = document.querySelector('input')
+    const input = document.querySelector('input[aria-label="Pairing PIN"]')
     if (!input) throw new Error('Missing PIN input')
     const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set
     if (!setter) throw new Error('Missing input value setter')
@@ -71,7 +71,15 @@ beforeEach(async () => {
         value: { cluster: { respondToInvite: respond, inviteStatus: status } }
     })
     status.mockResolvedValue(invite)
-    useClusterInvitationsStore.setState({ pendingInvites: [invite], activeInviteId: 'one' })
+    useClusterInvitationsStore.setState({
+        pendingInvites: [invite],
+        activeInviteId: 'one',
+        remoteManagement: {
+            version: 1,
+            revision: '1',
+            grants: [{ peerUuid: 'uuid', allowed: false, state: 'denied' }]
+        }
+    })
     container = document.createElement('div')
     document.body.append(container)
     root = createRoot(container)
@@ -86,7 +94,69 @@ afterEach(async () => {
 })
 
 describe('receiver pending pairing', () => {
-    it('does not reopen when matching terminal status arrives before the pending command response', async () => {
+    it('focuses the PIN while the management choices remain keyboard inputs', async () => {
+        await act(async () => vi.advanceTimersByTimeAsync(20))
+        expect(document.activeElement?.getAttribute('aria-label')).toBe('Pairing PIN')
+        expect(document.querySelectorAll('input[type="radio"]')).toHaveLength(2)
+    })
+    it.each([false, true])('submits the local management choice %s with the PIN', async allowed => {
+        respond.mockResolvedValue({ ...invite, reason: 'awaiting-confirmation' })
+        const blocked = document.querySelector<HTMLInputElement>(
+            'input[type="radio"][value="block"]'
+        )
+        expect(blocked?.checked).toBe(true)
+        if (allowed) {
+            const allow = document.querySelector<HTMLInputElement>(
+                'input[type="radio"][value="allow"]'
+            )
+            if (!allow) throw new Error('Missing Allow choice')
+            await act(async () => allow.click())
+        }
+        await submitPIN()
+        expect(respond).toHaveBeenCalledWith('one', true, '123456', allowed)
+        expect(document.body.textContent).toContain('Remote management of this device')
+        expect(document.body.textContent).toContain('Local pause and engine Off always win')
+    })
+
+    it('resets the permission and PIN for a different invitation', async () => {
+        const allow = document.querySelector<HTMLInputElement>('input[type="radio"][value="allow"]')
+        if (!allow) throw new Error('Missing Allow choice')
+        await act(async () => allow.click())
+        await act(async () =>
+            useClusterInvitationsStore.setState({
+                pendingInvites: [{ ...invite, inviteId: 'two' }],
+                activeInviteId: 'two'
+            })
+        )
+        expect(
+            document.querySelector<HTMLInputElement>('input[type="radio"][value="block"]')?.checked
+        ).toBe(true)
+        expect(
+            document.querySelector<HTMLInputElement>('input[aria-label="Pairing PIN"]')?.value
+        ).toBe('')
+    })
+
+    it('declines without sending a management choice', async () => {
+        respond.mockResolvedValue({ ...invite, state: 'declined' })
+        await act(async () => button('Decline').click())
+        expect(respond).toHaveBeenCalledWith('one', false)
+    })
+
+    it('keeps a confirmed pairing visible without inventing an unavailable saved permission', async () => {
+        await act(async () =>
+            useClusterInvitationsStore.setState({
+                inviteResults: { one: { ...invite, state: 'paired' } },
+                remoteManagement: { version: 1, revision: '', grants: [] },
+                remoteManagementLoading: false
+            })
+        )
+        expect(document.body.textContent).toContain('Node paired successfully')
+        expect(document.body.textContent).toContain('saved permission is unavailable')
+        expect(document.body.textContent).not.toContain('may manage this device')
+        expect(document.body.textContent).not.toContain('is blocked from changing this device')
+    })
+
+    it('keeps saved confirmation when matching terminal status arrives before the pending command response', async () => {
         let finish: ((value: Invite) => void) | undefined
         respond.mockImplementation(
             () =>
@@ -95,12 +165,21 @@ describe('receiver pending pairing', () => {
                 })
         )
         status.mockResolvedValue({ ...invite, state: 'paired' })
+        const allow = document.querySelector<HTMLInputElement>('input[type="radio"][value="allow"]')
+        if (!allow) throw new Error('Missing Allow choice')
+        await act(async () => allow.click())
         await submitPIN()
-        expect(useClusterInvitationsStore.getState().activeInviteId).toBeNull()
+        expect(respond).toHaveBeenCalledWith('one', true, '123456', true)
+        expect(useClusterInvitationsStore.getState().activeInviteId).toBe('one')
+        expect(document.body.textContent).toContain('is blocked from changing this device')
+        expect(document.body.textContent).not.toContain('may manage this device')
         expect(finish).toBeTypeOf('function')
         await act(async () => finish?.(invite))
-        expect(document.body.textContent).not.toContain('Cluster invitation')
+        expect(document.body.textContent).toContain('Node paired successfully')
+        expect(document.body.textContent).not.toContain('Waiting for pairing confirmation')
         expect(useClusterInvitationsStore.getState().inviteResults.one.state).toBe('paired')
+        await act(async () => button('Close').click())
+        expect(useClusterInvitationsStore.getState().activeInviteId).toBeNull()
     })
 
     it('preserves the replacement modal when the previous invitation reaches terminal status', async () => {
@@ -120,18 +199,28 @@ describe('receiver pending pairing', () => {
         )
         expect(status).toHaveBeenCalledTimes(calls + 1)
         expect(document.body.textContent).toContain('Second')
-        expect(document.querySelector('input')?.disabled).toBe(false)
+        expect(
+            document.querySelector<HTMLInputElement>('input[aria-label="Pairing PIN"]')?.disabled
+        ).toBe(false)
         expect(document.body.textContent).not.toContain('storage-write-failed')
         expect(useClusterInvitationsStore.getState().activeInviteId).toBe('two')
     })
-    it('keeps pending visible, disables another PIN, and closes only after matching paired status', async () => {
+    it('keeps pending visible, disables another PIN, and confirms only matching paired status', async () => {
         respond.mockResolvedValue({ ...invite, reason: 'awaiting-confirmation' })
         await submitPIN()
         expect(document.body.textContent).toContain('Waiting for pairing confirmation')
-        expect(document.querySelector('input')?.disabled).toBe(true)
+        expect(
+            document.querySelector<HTMLInputElement>('input[aria-label="Pairing PIN"]')?.disabled
+        ).toBe(true)
+        expect(document.querySelectorAll('input[type="radio"]')).toHaveLength(2)
+        expect(
+            Array.from(document.querySelectorAll<HTMLInputElement>('input[type="radio"]')).every(
+                input => input.disabled
+            )
+        ).toBe(true)
         await act(async () =>
             document
-                .querySelector('input')
+                .querySelector('input[aria-label="Pairing PIN"]')
                 ?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
         )
         expect(respond).toHaveBeenCalledTimes(1)
@@ -140,7 +229,8 @@ describe('receiver pending pairing', () => {
         expect(document.body.textContent).toContain('Waiting for pairing confirmation')
         status.mockResolvedValueOnce({ ...invite, state: 'paired' })
         await act(async () => vi.advanceTimersByTimeAsync(MODULAR_INVITE_STATUS_POLL_INTERVAL_MS))
-        expect(useClusterInvitationsStore.getState().activeInviteId).toBeNull()
+        expect(useClusterInvitationsStore.getState().activeInviteId).toBe('one')
+        expect(document.body.textContent).toContain('Node paired successfully')
         expect(document.body.textContent).not.toContain('Waiting for pairing confirmation')
         expect(status).toHaveBeenCalledWith('one')
     })
@@ -182,7 +272,9 @@ describe('receiver pending pairing', () => {
         )
         expect(button('Decline').disabled).toBe(true)
         await act(async () => button('View pairing status').click())
-        expect(document.querySelector('input')?.disabled).toBe(true)
+        expect(
+            document.querySelector<HTMLInputElement>('input[aria-label="Pairing PIN"]')?.disabled
+        ).toBe(true)
         expect(respond).toHaveBeenCalledTimes(1)
         await act(async () => root.render(null))
         const unmountedCalls = status.mock.calls.length

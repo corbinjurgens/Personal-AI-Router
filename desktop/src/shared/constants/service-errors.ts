@@ -9,6 +9,8 @@ export const INVALID_PARAMS_CODE = -32602
 export const POLICY_CONFLICT_CODE = -32010
 /** A start, load, resume or settings apply the target node's own pause or Off forbids. */
 export const LOCAL_VETO_CODE = -32011
+/** The target device has not granted this peer remote management permission. */
+export const REMOTE_MANAGEMENT_DENIED_CODE = -32012
 
 /**
  * The explanation for a paired node's action refused with LOCAL_VETO_CODE.

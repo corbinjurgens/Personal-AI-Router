@@ -156,14 +156,17 @@ type nodeDetail struct {
 	// enginesStale marks the engine list as last-known rather than current,
 	// because the most recent read of it failed. Held as state rather than
 	// announced, since the read repeats on a timer.
-	enginesStale       bool
-	policy             targetPolicy
-	policyFresh        bool
-	policyRoute        int
-	policyDisconnected bool
-	policyRefresh      bool
-	intentGeneration   int
-	enabledByEngine    map[string]bool
+	enginesStale               bool
+	policy                     targetPolicy
+	policyFresh                bool
+	policyRoute                int
+	policyDisconnected         bool
+	policyRefresh              bool
+	remotePermission           remotePermission
+	remotePermissionFresh      bool
+	remotePermissionGeneration int
+	intentGeneration           int
+	enabledByEngine            map[string]bool
 	// enginesHidden and modelsHidden record that the last frame had no room
 	// for that list. Its keys are refused while it is off screen, or they act
 	// on a row the operator cannot see.
@@ -347,6 +350,7 @@ func (d *nodeDetail) Init() tea.Cmd {
 		cmds = append(cmds, d.proxy.init(d.client))
 	}
 	if d.remote() {
+		cmds = append(cmds, d.remotePermissionCmd())
 		cmds = append(cmds, detailEnginesTickCmd(d.telemetryGen))
 	}
 	return tea.Batch(cmds...)
@@ -513,6 +517,7 @@ func (d *nodeDetail) followNode(row nodeRow, found bool) {
 		d.policyRoute++
 		d.policyFresh = false
 		d.invalidateIntent()
+		d.remotePermissionFresh = false
 	}
 	if oldFound != d.telemetryFound || oldHostUUID != d.hostUUID ||
 		oldSelf != d.telemetrySelf || oldMember != newMember ||
@@ -607,6 +612,9 @@ func (d *nodeDetail) sizeEngineTable() {
 	// Everything the engine table must not crowd out: the fixed furniture, the
 	// hardware block, and a minimal models table.
 	reserved := detailChromeRows + d.hardwareHeight() + (1 + tableHeaderRows)
+	if d.remote() {
+		reserved++ // The read-only permission row.
+	}
 	if room := d.height - reserved; room < want {
 		want = clampWidth(room, 1+tableHeaderRows)
 	}
@@ -697,6 +705,7 @@ func (d *nodeDetail) update(msg tea.Msg) (tea.Cmd, bool) {
 		return nil, true
 
 	case DisconnectedMsg:
+		d.remotePermissionFresh = false
 		d.policyRoute++
 		d.policyFresh = false
 		d.policyDisconnected = true
@@ -711,7 +720,7 @@ func (d *nodeDetail) update(msg tea.Msg) (tea.Cmd, bool) {
 		}
 		if d.policyRefresh {
 			d.policyRefresh = false
-			return tea.Batch(d.policyCmd(), d.intentCmd()), true
+			return tea.Batch(d.policyCmd(), d.intentCmd(), d.remotePermissionCmd()), true
 		}
 		return nil, true
 
@@ -735,6 +744,12 @@ func (d *nodeDetail) update(msg tea.Msg) (tea.Cmd, bool) {
 		}
 		d.policyFresh = msg.err == nil && msg.policy.Availability != ""
 		d.policy = msg.policy
+		return nil, true
+	case detailRemotePermissionMsg:
+		if msg.visit == d.telemetryGen && msg.route == d.policyRoute && msg.generation == d.remotePermissionGeneration && !d.policyDisconnected && d.remote() && d.enginesQueryable() && d.node.presence != presenceOffline {
+			d.remotePermission = msg.permission
+			d.remotePermissionFresh = msg.err == nil
+		}
 		return nil, true
 
 	case detailIntentMsg:
@@ -901,7 +916,7 @@ func (d *nodeDetail) update(msg tea.Msg) (tea.Cmd, bool) {
 		if msg.gen != d.telemetryGen || !d.remote() {
 			return nil, true
 		}
-		return tea.Batch(d.enginesCmd(), d.policyCmd(), detailEnginesTickCmd(d.telemetryGen)), true
+		return tea.Batch(d.enginesCmd(), d.policyCmd(), d.remotePermissionCmd(), detailEnginesTickCmd(d.telemetryGen)), true
 
 	case nodeTelemetryTickMsg:
 		// Only this screen's own chain continues. A tick from a previous visit
@@ -956,6 +971,7 @@ func (d *nodeDetail) handleNotification(msg *rpc.Message) tea.Cmd {
 		return nil
 
 	case "service/broker-restarted":
+		d.remotePermissionFresh = false
 		d.policyRoute++
 		d.policyFresh = false
 		d.invalidateIntent()
@@ -2061,6 +2077,9 @@ func (d *nodeDetail) View() string {
 		"   %s:%d   %s   %s   %s",
 		d.node.address, d.node.port, d.node.presence, d.node.membership, scope))
 	identity += "\n" + footerStyle.Render(d.policyLabel())
+	if d.remote() {
+		identity += "\n" + footerStyle.Render(d.remotePermissionLine())
+	}
 	if d.performanceOpen {
 		return d.performanceView(identity)
 	}
@@ -2198,6 +2217,9 @@ func (d *nodeDetail) hardwareBlock() string {
 // than an exhaustive device inventory — the operator came here to act on an
 // engine, not to audit GPUs.
 func (d *nodeDetail) hardwareBudget() int {
+	if d.remote() {
+		return clampWidth(d.height/2-1, 1)
+	}
 	return clampWidth(d.height/2, 1)
 }
 

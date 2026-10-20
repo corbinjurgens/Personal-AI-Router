@@ -45,11 +45,10 @@ type Settings struct {
 
 	// ClusterAutoSync is a stored preference that nothing acts on:
 	// no service synchronizes state from peers or grants them
-	// permission because of it. Remote management is governed
-	// elsewhere: a node's own pause or engine Off vetoes paired
-	// nodes' starts, loads and resumes (broker and engine-manager
-	// local veto), and configuration edits from paired nodes are
-	// authorized by pairing alone. Do not read it as a permission.
+	// permission because of it. Cluster-manager owns target-local,
+	// admission-bound remote-management grants; pinning alone does
+	// not authorize edits. Local pause and engine Off independently
+	// veto peers' starts, loads and resumes. Do not read this as a grant.
 	ClusterAutoSync bool `json:"cluster_auto_sync"`
 
 	// ClusterID is the stable identifier for the cluster this node

@@ -153,7 +153,7 @@ retention boundary are valid. The header leaves the shared summary wire schema
 and its source ages unchanged.
 
 Performance uses the existing pinned direct/reverse workload service and
-`POST /v1/workloads/events`, with `performance:summary` and the unchanged shared
+`POST /v1/workloads/events`, with `performance:summary` and the shared version 2
 summary schema. It has its own connection pool, a latest-summary slot and a
 coalesced wake token. A worker round covers all current admitted targets,
 using at most four simultaneous requests. No performance frame enters
@@ -168,7 +168,9 @@ cancel delivery retain their existing behavior.
 
 Support is negotiated once per authenticated admission and endpoint generation
 with `performance:capabilities`, `params: {}`, on the same endpoint. A compatible
-peer replies `200` with exactly `{"version":1}`. An older peer's `400` unknown
+peer replies `200` with exactly `{"version":2}`. Version 1 capability replies
+cannot receive summaries; the telemetry deployment updates all machines together
+without a dual protocol. An older peer's `400` unknown
 method or `501` disables further probes for that route/admission. Other failures,
 including malformed or unsupported-version replies, permit at most three probe
 attempts, one per round. Negotiation failures produce no repeated warnings or

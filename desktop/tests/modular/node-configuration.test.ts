@@ -13,13 +13,14 @@ import { getModularBridgeState } from '@/electron/service-bridge/modular-state'
 import {
     INVALID_PARAMS_CODE,
     LOCAL_VETO_CODE,
-    POLICY_CONFLICT_CODE
+    POLICY_CONFLICT_CODE,
+    REMOTE_MANAGEMENT_DENIED_CODE
 } from '@/shared/constants/service-errors'
 import { ServiceCallError } from '@/ui/api/service-transport'
 import type { EngineModels, ModelItem } from '@/shared/types/engines'
 import type { JsonValue } from '@/shared/types/json'
 import type { NodePolicyDocument, NodePolicySnapshot } from '@/shared/types/node-policy'
-import type { INodePolicyApi } from '@/ui/api/pair-api'
+import type { IClusterApi, INodePolicyApi } from '@/ui/api/pair-api'
 import NodeDeclaredRoles from '@/ui/components/NodeList/NodeDeclaredRoles'
 import RoleEditor from '@/ui/components/RoutingSettings/RoleEditor'
 import { useDiscoveredNodesStore } from '@/ui/stores/discovered-nodes.store'
@@ -94,13 +95,17 @@ function policyDocument(
 
 const get = vi.fn<INodePolicyApi['get']>()
 const set = vi.fn<INodePolicyApi['set']>()
+const management = vi.fn<IClusterApi['getRemoteManagementForNode']>()
 
 beforeEach(() => {
     get.mockReset()
     set.mockReset()
+    management
+        .mockReset()
+        .mockResolvedValue({ version: 1, allowed: true, state: 'allowed', revision: '1' })
     Object.defineProperty(window, 'pairApi', {
         configurable: true,
-        value: { nodePolicy: { get, set } }
+        value: { nodePolicy: { get, set }, cluster: { getRemoteManagementForNode: management } }
     })
     useNodeConfigurationStore.setState({ editors: new Map() })
 })
@@ -291,6 +296,9 @@ describe('conflicts', () => {
         expect(policyRefusal('the persisted revision is 6', POLICY_CONFLICT_CODE)).toBe('conflict')
         expect(policyRefusal('paused on the node itself', LOCAL_VETO_CODE)).toBe('vetoed')
         expect(policyRefusal('roles[weak]: unknown engine', INVALID_PARAMS_CODE)).toBe('rejected')
+        expect(
+            policyRefusal('device has blocked remote management', REMOTE_MANAGEMENT_DENIED_CODE)
+        ).toBe('rejected')
         expect(policyRefusal('-32011: policy conflict: misleading text', -32000)).toBe('other')
         expect(policyRefusal('-32000: engine manager unavailable', -32000)).toBe('unreachable')
     })
@@ -319,6 +327,7 @@ describe('conflicts', () => {
     it('falls back to the message only when a failure carries no code', () => {
         expect(policyRefusal('-32602: roles[weak]: unknown engine "x"')).toBe('rejected')
         expect(policyRefusal('-32011: vetoed')).toBe('vetoed')
+        expect(policyRefusal('-32012: permission denied')).toBe('rejected')
         expect(policyRefusal('-32000: the policy could not be saved')).toBe('other')
         expect(policyRefusal('-32000: engine manager unavailable')).toBe('unreachable')
         expect(policyRefusal('ui-broker policy:set timed out')).toBe('other')
@@ -335,6 +344,22 @@ describe('conflicts', () => {
         expect(entry().phase).toBe('unreachable')
         expect(entry().draft.weak?.model).toBe('qwen3:4b')
         expect(get).not.toHaveBeenCalled()
+    })
+
+    it('keeps a permission-refused draft rejected independently of local veto and misleading transport text', async () => {
+        set.mockRejectedValue(
+            new ServiceCallError('device is offline -32011', REMOTE_MANAGEMENT_DENIED_CODE)
+        )
+        const store = useNodeConfigurationStore.getState()
+        store.adopt(PEER, snapshot('5'))
+        store.setRole(PEER, 'weak', { engine: 'ollama', model: 'qwen3:4b' })
+        await store.save(PEER, PEER)
+        expect(entry().phase).toBe('rejected')
+        expect(entry().message).toContain('Remote management permission')
+        expect(entry().draft.weak).toEqual({ engine: 'ollama', model: 'qwen3:4b' })
+        expect(entry().baseline?.revision).toBe('5')
+        expect(get).not.toHaveBeenCalled()
+        expect(set).toHaveBeenCalledTimes(1)
     })
 })
 

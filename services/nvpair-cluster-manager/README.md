@@ -145,7 +145,7 @@ as a JSON-RPC `error`. See [Errors](#errors).
 //   (emits cluster:identity-changed with clusterId:"" and an empty nodes:changed).
 
 // --- pairing (inviter side) ---
-{"jsonrpc":"2.0","id":6,"method":"cluster:invite-node","params":{"address":"192.168.1.22","port":14321,"nodeId":"NODE-B"}}
+{"jsonrpc":"2.0","id":6,"method":"cluster:invite-node","params":{"address":"192.168.1.22","port":14321,"nodeId":"NODE-B","allowRemoteManagement":false}}
 //   -> {"inviteId":"inv-9f3a1c","state":"pending","pin":"402199"}   (show the PIN; "failed" + no pin if unreachable)
 //   -> {"inviteId":"inv-9f3a1c","state":"rejected","reason":"already-clustered"}   (no pin; target is already in a cluster - remove/leave first)
 //   if this node is unclustered, it auto-founds a cluster of one first (same as
@@ -155,7 +155,7 @@ as a JSON-RPC `error`. See [Errors](#errors).
 //   -> <Invite>   (poll the inviter's invite until state flips to "paired"/"failed"/"expired")
 
 // --- pairing (joiner side) ---
-{"jsonrpc":"2.0","id":8,"method":"cluster:respond-to-invite","params":{"inviteId":"inv-9f3a1c","accept":true,"pin":"402199"}}
+{"jsonrpc":"2.0","id":8,"method":"cluster:respond-to-invite","params":{"inviteId":"inv-9f3a1c","accept":true,"pin":"402199","allowRemoteManagement":false}}
 //   -> <Invite with state:"paired" or "pending">   (state:"failed" + reason:"incorrect-pin" on a wrong PIN; state:"declined" if accept:false)
 //   With negotiated inviter-v1 completion, the inviter polls the joiner and drives
 //   Completion plus authenticated confirmation; the joiner makes no pairing dial.
@@ -277,7 +277,7 @@ now a cluster of one and can invite. This explicit step is **optional** — its
 only value over the auto-found below is naming the cluster (`clusterFriendlyName`)
 before the first invite.
 
-**Invite a node (inviter).** `cluster:invite-node {address}` → show the
+**Invite a node (inviter).** `cluster:invite-node {address, allowRemoteManagement:false}` → show the
 returned `pin` → tell the user to read it to the other node's operator →
 watch for `state:"paired"` via `nodes:changed` (or poll
 `cluster:invite-status`). If this node isn't clustered yet the invite
@@ -286,8 +286,9 @@ emitting `cluster:identity-changed`), so a UI need not orchestrate a separate
 create step.
 
 **Receive & accept an invite (joiner).** Handle `cluster:invite-received` →
-prompt "enter the PIN shown on `fromNodeName`" → `cluster:respond-to-invite
-{inviteId, accept:true, pin}`. A `result` with `state:"paired"` means
+prompt "enter the PIN shown on `fromNodeName`" →
+`cluster:respond-to-invite {inviteId, accept:true, pin, allowRemoteManagement:false}`.
+A `result` with `state:"paired"` means
 joined (the manager also pinned the peer and emitted
 `cluster:identity-changed` with the adopted cluster — persist it). Decline
 with `accept:false`. A replacement invite from the same `fromNodeUuid`
@@ -298,6 +299,68 @@ notification before presenting the replacement.
 drops the peer locally, deletes its pin, and best-effort notifies the peer;
 removal is authoritative locally even if the peer is offline.
 
+## Remote-management permission
+
+`allowRemoteManagement` is a required boolean on invite initiation and on
+acceptance (`accept:true`); omission or null returns `-32602`. Declines need no
+permission choice. The inviter chooses whether the joiner may manage the
+inviter's device; the joiner independently chooses whether the inviter may
+manage the joiner's device. The choice stays local to that pairing transaction.
+Both completion transports persist its admission-bound decision before paired
+success; receipt replay cannot overwrite a later local decision. A failed or
+compensated pairing does not leave an effective grant.
+
+Only clients attached to this user's local `nvpair-service` endpoint can edit
+this device's grants. This relies on OS endpoint access, not physical presence;
+another process running as that user has the same access. No peer HTTP setter
+or peer grant-list endpoint exists. Local RPCs are:
+
+| Method | Params / result |
+| --- | --- |
+| `cluster:get-remote-management` | `{}` → `{version:1, revision, grants:[{peerUuid, allowed, state}]}` for current pinned members |
+| `cluster:set-remote-management` | `{peerUuid, allowed, expectedRevision}` → the fresh snapshot above |
+| `cluster:remote-management-changed` | Local notification carrying the same snapshot after a committed update or uncertain landed replacement |
+
+`allowed` must be a real boolean; `expectedRevision` is the snapshot's opaque
+canonical decimal string, never a JavaScript number. Malformed params return
+`-32602`; a stale revision returns `-32010`. States are `allowed`, `denied`,
+`unreviewed` or `unavailable`; only `allowed` grants authority. Fetch on attach
+and consume local pushes. An unavailable snapshot can have an empty revision;
+do not construct a CAS write from it. After a failed or uncertain save, fetch
+again rather than retrying a stale write or assuming rollback. Before-replacement failure
+retains the previous document; an uncertain landed denial already denies.
+
+Cluster-manager alone writes `cluster/remote-management.json`. On first PG
+startup it automatically captures existing pin/admission authorities in
+`remote-management-migration.json`, including an empty snapshot for a fresh
+profile. A pending migration resumes only that immutable snapshot; only still
+matching admissions are grandfathered. The completed marker survives leave and
+prevents resnapshotting or recreating grants after grant-file loss. The
+`remote-management-initializing.json` publication guard keeps incomplete or
+uncertain allows unavailable until durably confirmed. Missing, corrupt,
+unsupported, inconsistent or changing authority fails closed. If neither
+authority file nor publication guard survives, PG cannot distinguish profile
+loss from a first installation; this is not a supported automatic repair.
+
+Grants match both nodes' current admissions and certificates. Same-admission
+re-pinning preserves a choice; removal/re-pair, readmission, certificate
+replacement or local leave/rejoin invalidates it. Endorsements, roster gossip,
+pin presence and the inert `cluster_auto_sync` preference never grant it.
+Revocation prevents new acceptance; already accepted work can finish or
+reconcile, with its existing progress/receipts still readable. It does not stop,
+pause or unpair the node. Local pause/Off, private policy, CORS and served/resident
+restrictions remain independent. Reads and permitted inference remain available.
+An authorization overlapping revocation may already hold a coherent allow
+snapshot; authorization started after a successful revoke denies. Revocation
+does not claim that earlier subprocess or filesystem effects were undone.
+
+Downgrading the target to pre-PG software restores that executable's unrestricted
+pinned-peer management behavior. Old pairing clients without the required
+boolean must upgrade; an old target's missing permission read means unsupported,
+not protected. Local decision logs contain actor kind, peer UUID, attempted and
+previous revision, incarnation, old/new choice and outcome; no PIN, certificate,
+policy body, credential or inference content is part of this audit.
+
 ## Errors
 
 `result` vs `error` is the "did it apply?" vs "could I even process this?"
@@ -306,9 +369,10 @@ signal. Use the standard JSON-RPC `error` object `{code, message, data?}`.
 | Code | Meaning |
 |---|---|
 | `-32700` / `-32600` / `-32601` / `-32602` | parse error / invalid request / method not found / invalid params |
-| `-32603` | internal error — the change did **not** take effect |
+| `-32603` | internal error; a permission replacement may have landed with uncertain durability — read back before retrying |
 | `-32001` | unknown `inviteId` (`invite-status`, `respond-to-invite`) |
 | `-32002` | invalid invite state — e.g. `respond-to-invite` on an outbound or already-terminal invite (`data:{inviteId,state}`) |
+| `-32010` | remote-management revision conflict — fetch the local snapshot and retry with a current revision |
 | `-32004` | precondition not met — `create` while clustered (`{reason:"already-clustered"}`). `invite-node` while unclustered no longer errors: it auto-founds a cluster of one instead. |
 
 Note the deliberate splits: a **malformed** PIN (not six digits) is

@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"sync"
@@ -72,6 +73,7 @@ type performanceSupport struct {
 	attempts    int
 	supported   bool
 	unsupported bool
+	warned      bool
 }
 
 // performanceRelay has one latest outbound replacement and one wake token.
@@ -307,11 +309,21 @@ func (p *performanceRelay) sendPeer(ctx context.Context, t target, state perform
 			return state
 		}
 		var capability struct {
-			Version int `json:"version"`
+			Version *int `json:"version"`
 		}
 		decoder := json.NewDecoder(bytes.NewReader(body))
 		decoder.DisallowUnknownFields()
-		if readErr != nil || len(body) > 1024 || resp.StatusCode != http.StatusOK || decoder.Decode(&capability) != nil || decoder.Decode(&struct{}{}) != io.EOF || capability.Version != performancewire.SchemaVersion {
+		if readErr != nil || len(body) > 1024 || resp.StatusCode != http.StatusOK || decoder.Decode(&capability) != nil || decoder.Decode(&struct{}{}) != io.EOF || capability.Version == nil {
+			return state
+		}
+		if *capability.Version != performancewire.SchemaVersion {
+			if !state.warned {
+				state.warned = true
+				slog.Warn("peer performance schema version mismatch",
+					"nodeId", t.uuid, "routeGeneration", state.generation,
+					"expectedVersion", performancewire.SchemaVersion, "receivedVersion", *capability.Version,
+					"consequence", "performance summaries not exchanged until both nodes run the same build")
+			}
 			return state
 		}
 		state.supported = true

@@ -87,6 +87,9 @@ type Manager struct {
 }
 
 func NewManager(codec *Codec, exec *Executor, mesh *clustertrust.Mesh, clusterDir string) *Manager {
+	exec.memoryEvidence.mu.Lock()
+	exec.memoryEvidence.hostUUID = mesh.NodeUUID
+	exec.memoryEvidence.mu.Unlock()
 	// Set the gate before main starts the direct mTLS listener. State delivery
 	// and conservative stdio recovery remain available while it is closed.
 	exec.switchRecoveryPending.Store(true)
@@ -115,15 +118,15 @@ func NewManager(codec *Codec, exec *Executor, mesh *clustertrust.Mesh, clusterDi
 		PeerClientOptions: clustertrust.PeerClientOptions{ResponseHeaderTimeout: remoteReadyResponseHeaderTimeout},
 		BaseConfigDir:     baseDir, ResolveRoute: m.resolveControlRoute,
 	})
-	m.settingsRelay.send = codec.Notify
-	m.switchRelay.send = codec.Notify
+	m.settingsRelay.send = codec.NotifyContext
+	m.switchRelay.send = codec.NotifyContext
 	exec.switchParent = m.switchRelay.call
 	exec.settingsParent = m.settingsRelay.call
-	m.policyRelay.send = codec.Notify
+	m.policyRelay.send = codec.NotifyContext
 	exec.policyParent = m.policyRelay.call
-	m.modelMutation.send = codec.Notify
+	m.modelMutation.send = codec.NotifyContext
 	exec.modelMutationParent = m.modelMutation.call
-	m.residentDispatch.send = codec.Notify
+	m.residentDispatch.send = codec.NotifyContext
 	exec.residentParent = m.residentDispatch.call
 	return m
 }
@@ -358,6 +361,9 @@ func (m *Manager) handleMessage(ctx context.Context, msg *Message) {
 
 	case "engine:remote-copy-model":
 		go m.runRemoteCopy(ctx, msg)
+
+	case remoteManagementGetMethod:
+		go m.remoteManagementGet(ctx, msg)
 
 	default:
 		m.codec.RespondError(msg.ID, -32601, fmt.Sprintf("method not found: %s", msg.Method))

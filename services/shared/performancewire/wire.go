@@ -31,7 +31,7 @@ import (
 const MethodSummary = "performance:summary"
 
 // SchemaVersion is the Summary version this package produces and accepts.
-const SchemaVersion = 1
+const SchemaVersion = 2
 
 // Validation limits. They bound what a receiver caches per peer and what a
 // local store retains; they are contract values, not settings.
@@ -162,6 +162,12 @@ type Measurement struct {
 	PrefillNs *int64 `json:"prefillNs,omitempty"`
 	// DecodeNs is the engine-reported duration that generated OutputTokens.
 	DecodeNs *int64 `json:"decodeNs,omitempty"`
+	// EngineDecodeNs is the interval underlying the separately reported native
+	// decode rate. Its work count need not equal OutputTokens.
+	EngineDecodeNs *int64 `json:"engineDecodeNs,omitempty"`
+	// EngineDecodeTokensPerSecond preserves the engine's reported native rate,
+	// including rounding. It never implies an exact native token count.
+	EngineDecodeTokensPerSecond *float64 `json:"engineDecodeTokensPerSecond,omitempty"`
 	// LoadNs is an engine-reported model load duration.
 	LoadNs *int64 `json:"loadNs,omitempty"`
 }
@@ -188,10 +194,16 @@ func (m Measurement) Validate() error {
 		{"outputTokens", m.OutputTokens, MaxTokens},
 		{"prefillNs", m.PrefillNs, MaxPhaseNs},
 		{"decodeNs", m.DecodeNs, MaxPhaseNs},
+		{"engineDecodeNs", m.EngineDecodeNs, MaxPhaseNs},
 		{"loadNs", m.LoadNs, MaxPhaseNs},
 	} {
 		if f.v != nil && (*f.v < 0 || *f.v > f.max) {
 			return fmt.Errorf("%s %d is outside 0..%d", f.name, *f.v, f.max)
+		}
+	}
+	if m.EngineDecodeTokensPerSecond != nil {
+		if err := checkReportedRate("engineDecodeTokensPerSecond", *m.EngineDecodeTokensPerSecond); err != nil {
+			return err
 		}
 	}
 	if err := checkPhaseRate("prefill", m.PromptTokens, m.PrefillNs); err != nil {
@@ -268,6 +280,35 @@ type Rate struct {
 	TokensPerSecond float64 `json:"tokensPerSecond"`
 }
 
+// ReportedRate is the duration-weighted mean of qualified engine-reported
+// native rates: sum(rate_i * duration_i) / sum(duration_i). Rounded native
+// rates do not establish an exact integer token total.
+type ReportedRate struct {
+	Samples         int     `json:"samples"`
+	DurationNs      int64   `json:"durationNs"`
+	TokensPerSecond float64 `json:"tokensPerSecond"`
+}
+
+// UnmarshalJSON requires all reported-rate fields. In particular, an absent or
+// null rate must not become a measured zero through Go's numeric zero value.
+func (r *ReportedRate) UnmarshalJSON(data []byte) error {
+	var fields struct {
+		Samples         *int     `json:"samples"`
+		DurationNs      *int64   `json:"durationNs"`
+		TokensPerSecond *float64 `json:"tokensPerSecond"`
+	}
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&fields); err != nil {
+		return err
+	}
+	if fields.Samples == nil || fields.DurationNs == nil || fields.TokensPerSecond == nil {
+		return errors.New("engineDecode requires samples, durationNs and tokensPerSecond")
+	}
+	*r = ReportedRate{Samples: *fields.Samples, DurationNs: *fields.DurationNs, TokensPerSecond: *fields.TokensPerSecond}
+	return nil
+}
+
 // Entry is one profile key's aggregates. A nil aggregate means no retained
 // sample qualified for it.
 type Entry struct {
@@ -301,6 +342,7 @@ type Entry struct {
 	LoadNs          *Distribution `json:"loadNs,omitempty"`
 	Prefill         *Rate         `json:"prefill,omitempty"`
 	Decode          *Rate         `json:"decode,omitempty"`
+	EngineDecode    *ReportedRate `json:"engineDecode,omitempty"`
 }
 
 // Window describes the retention the aggregates were computed under.
@@ -363,6 +405,13 @@ func (s Summary) Validate() error {
 			return fmt.Errorf("entry %d repeats a key", i)
 		}
 		seen[e.Key] = true
+	}
+	return nil
+}
+
+func checkReportedRate(name string, rate float64) error {
+	if math.IsNaN(rate) || math.IsInf(rate, 0) || rate < 0 || rate > MaxTokensPerSecond {
+		return fmt.Errorf("%s %v is not a finite rate within 0..%.0f", name, rate, MaxTokensPerSecond)
 	}
 	return nil
 }
@@ -433,6 +482,17 @@ func (e Entry) validate(host string, w Window) error {
 		tps := r.r.TokensPerSecond
 		if math.IsNaN(tps) || math.IsInf(tps, 0) || tps < 0 || tps > MaxTokensPerSecond {
 			return fmt.Errorf("%s tokensPerSecond %v is not a finite rate within 0..%.0f", r.name, tps, MaxTokensPerSecond)
+		}
+	}
+	if r := e.EngineDecode; r != nil {
+		if r.Samples < 1 || r.Samples > e.Completed-e.Incomplete {
+			return fmt.Errorf("engineDecode samples %d is outside 1..%d", r.Samples, e.Completed-e.Incomplete)
+		}
+		if r.DurationNs <= 0 || r.DurationNs > int64(r.Samples)*MaxPhaseNs {
+			return fmt.Errorf("engineDecode durationNs %d is out of range", r.DurationNs)
+		}
+		if err := checkReportedRate("engineDecode tokensPerSecond", r.TokensPerSecond); err != nil {
+			return err
 		}
 	}
 	return nil

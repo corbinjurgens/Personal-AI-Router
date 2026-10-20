@@ -33,7 +33,7 @@ type switchRelayReply struct {
 type switchRelay struct {
 	mu      sync.Mutex
 	pending map[string]chan switchRelayReply
-	send    func(string, any) error
+	send    func(context.Context, string, any) error
 }
 
 func (r *switchRelay) call(ctx context.Context, method, caller string, params json.RawMessage) (json.RawMessage, error) {
@@ -51,6 +51,10 @@ func (r *switchRelay) call(ctx context.Context, method, caller string, params js
 	id := newOpID()
 	ch := make(chan switchRelayReply, 1)
 	r.mu.Lock()
+	if err := ctx.Err(); err != nil {
+		r.mu.Unlock()
+		return nil, err
+	}
 	if len(r.pending) >= maxPendingSwitchCalls {
 		r.mu.Unlock()
 		return nil, &switchBusyError{"switch relay"}
@@ -61,23 +65,32 @@ func (r *switchRelay) call(ctx context.Context, method, caller string, params js
 	r.pending[id] = ch
 	r.mu.Unlock()
 	defer func() { r.mu.Lock(); delete(r.pending, id); r.mu.Unlock() }()
-	if err := r.send("engine:switch-request", switchRelayRequest{ID: id, Method: method, Caller: caller, Params: params}); err != nil {
+	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	select {
-	case reply := <-ch:
-		if reply.Error != "" {
-			return nil, &codedError{code: reply.ErrorCode, message: reply.Error}
-		}
-		if !json.Valid(reply.Result) || len(reply.Result) > settings.MaxSwitchJournalBytes {
-			return nil, errors.New("invalid switch coordinator reply")
-		}
-		return reply.Result, nil
-	case <-ctx.Done():
-		// Only retires the waiter. Accepted operations belong to the broker.
-		_ = r.send("engine:switch-cancel", map[string]string{"id": id})
-		return nil, ctx.Err()
+	if err := r.send(ctx, "engine:switch-request", switchRelayRequest{ID: id, Method: method, Caller: caller, Params: params}); err != nil {
+		return nil, err
 	}
+	var reply switchRelayReply
+	select {
+	case reply = <-ch:
+	case <-ctx.Done():
+	}
+	if err := ctx.Err(); err != nil {
+		// Only retires the waiter. Accepted operations belong to the broker.
+		r.mu.Lock()
+		delete(r.pending, id)
+		r.mu.Unlock()
+		cancelRelayWait(r.send, "engine:switch-cancel", id)
+		return nil, err
+	}
+	if reply.Error != "" {
+		return nil, &codedError{code: reply.ErrorCode, message: reply.Error}
+	}
+	if !json.Valid(reply.Result) || len(reply.Result) > settings.MaxSwitchJournalBytes {
+		return nil, errors.New("invalid switch coordinator reply")
+	}
+	return reply.Result, nil
 }
 
 func (r *switchRelay) reply(raw json.RawMessage) {
@@ -99,17 +112,31 @@ func (r *switchRelay) reply(raw json.RawMessage) {
 	}
 }
 
-func (s *controlServer) switchRoutes(mux *http.ServeMux) {
-	// Read the live stable identity per request, including after joining a mesh.
+func (s *controlServer) switchRoutes() []controlRoute {
+	routes := make([]controlRoute, 0, len(switchRouteMethods))
 	for path := range switchRouteMethods {
-		mux.HandleFunc(path, func(w http.ResponseWriter, r *http.Request) {
+		route := controlRoute{
+			path:   path,
+			method: http.MethodPost,
+			class:  controlMutation,
+			family: "engine-switch",
+		}
+		if path == settings.SwitchStatusPath {
+			// Receipt status is a read; it never accepts or changes work.
+			route.class, route.family = controlRead, "engine-switch-status"
+		}
+		route.handle = func(w http.ResponseWriter, r *http.Request, caller string) {
+			// Read the live stable identity per request, including after
+			// joining a mesh. The registry already authenticated the caller.
 			target := ""
 			if s.mesh != nil {
 				target = s.mesh.NodeUUID()
 			}
-			switchHandler(target, s.requirePinCaller, s.exec.switchParent)(w, r)
-		})
+			switchHandler(target, pinnedCallerGate(caller), s.exec.switchParent)(w, r)
+		}
+		routes = append(routes, route)
 	}
+	return routes
 }
 
 func (m *Manager) handleSwitchMessage(ctx context.Context, msg *Message) bool {
