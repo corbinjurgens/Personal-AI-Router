@@ -382,7 +382,7 @@ class ModularSupervisor {
     private stoppedModelSentinels = new Set<EngineType>()
     private stoppedModelEngines = new Set<EngineType>()
     private successfulModelInventories = new Set<EngineType>()
-    private modelRefreshGenerations = new Map<EngineType, number>()
+    private modelRefreshGenerations = new Map<EngineType, { sessionGeneration: number }>()
     private discoveryModelRetryTimers = new Map<ProxyEngine, ReturnType<typeof setTimeout>>()
     private discoveryModelRetryAttempts = new Map<ProxyEngine, number>()
     // Authoritative value is the persisted ui-config `modularLogLevel`; the
@@ -445,6 +445,7 @@ class ModularSupervisor {
     // ready notifications during startup must not trigger a renderer store refresh
     // while remote peer facts are still unknown.
     private brokerHydrationDone = false
+    private brokerSessionGeneration = 0
     // Light interval that reconciles main's authoritative pending-invite set by
     // polling each invite's `cluster:invite-status` (pruning terminal or evicted
     // ones). The cluster-manager now pushes receiver-side teardown directly
@@ -555,6 +556,7 @@ class ModularSupervisor {
     start(): void {
         if (this.isReady) return
 
+        this.brokerSessionGeneration++
         this.shuttingDown = false
         this.performance.reset()
         this.brokerReady = false
@@ -592,7 +594,12 @@ class ModularSupervisor {
             data: { binaryPath: this.serviceBinaryPath() }
         })
 
-        const broker = new JsonRpcSocketClient('broker', () => this.connectToService())
+        const broker = new JsonRpcSocketClient(
+            'broker',
+            () => this.connectToService(),
+            undefined,
+            () => this.dialService()
+        )
         broker.setProtocolTrace(this.logLevel === 'debug')
         this.processes.set('broker', broker)
         this.attachChildHandlers(broker)
@@ -637,6 +644,7 @@ class ModularSupervisor {
         // Mark teardown first so the connection closing during teardown is
         // treated as deliberate, not a crash.
         this.shuttingDown = true
+        this.brokerSessionGeneration++
         await this.performance.stop()
         stopNodeInfoPoller()
         if (this.remoteStatusDebounceTimer) {
@@ -862,6 +870,14 @@ class ModularSupervisor {
         )
     }
 
+    /** Retry an established attachment without starting a stopped service. */
+    private dialService(): Promise<Duplex> {
+        const endpoint = resolveServiceEndpoint(defaultServiceEndpointEnvironment())
+        return serviceConnectionDeps(this.serviceBinaryPath(), this.brokerStartupArgs()).connect(
+            endpoint
+        )
+    }
+
     private validateRequiredBinaries(): void {
         if (!fs.existsSync(this.serviceBinaryPath())) {
             throw new Error(
@@ -881,6 +897,7 @@ class ModularSupervisor {
 
     /** Forget what a broker that is gone told us, until the next `app:ready`. */
     private resetBrokerSession(): void {
+        this.brokerSessionGeneration++
         this.performance.reset()
         this.brokerReady = false
         this.brokerHydrationDone = false
@@ -929,6 +946,7 @@ class ModularSupervisor {
             if (!isCurrent()) return
             this.processes.delete(child.name as ModularProcessName)
             if (child.name === 'broker') {
+                this.brokerSessionGeneration++
                 this.performance.reset()
                 this.brokerReady = false
                 this.brokerHydrationDone = false
@@ -994,10 +1012,18 @@ class ModularSupervisor {
      * this only sends the old file's entries as `node/add` and deletes it.
      */
     private async migrateManualNodes(): Promise<void> {
+        const generation = this.brokerSessionGeneration
         const filePath = legacyManualNodesPath(getPaths().getUserData())
+        const fileOps = manualNodesFileOps(filePath)
         await migrateManualNodes({
-            ...manualNodesFileOps(filePath),
+            ...fileOps,
+            removeFile: () => {
+                if (generation === this.brokerSessionGeneration) fileOps.removeFile()
+            },
             addNode: async entry => {
+                if (generation !== this.brokerSessionGeneration) {
+                    throw new Error('Broker session changed during manual node migration')
+                }
                 await this.callProcess('broker', 'node/add', {
                     address: entry.address,
                     name: entry.name
@@ -1008,8 +1034,11 @@ class ModularSupervisor {
 
     /** Read this node's pause state from the broker. */
     private async hydrateAvailability(): Promise<void> {
+        const generation = this.brokerSessionGeneration
         try {
-            this.availability.applyResult(await this.callProcess('broker', 'policy:get', {}))
+            const result = await this.callProcess('broker', 'policy:get', {})
+            if (generation !== this.brokerSessionGeneration) return
+            this.availability.applyResult(result)
         } catch (err) {
             log.warn({
                 sublevel: 'broker',
@@ -1019,6 +1048,7 @@ class ModularSupervisor {
     }
 
     private async onBrokerReady(): Promise<void> {
+        const generation = this.brokerSessionGeneration
         const subscribe = async (method: string, label: string): Promise<void> => {
             try {
                 await this.callProcess('broker', method)
@@ -1030,32 +1060,48 @@ class ModularSupervisor {
             }
         }
         await subscribe('discovery:subscribe', 'subscribe to broker discovery')
+        if (generation !== this.brokerSessionGeneration) return
         for (const source of PROXY_NODE_SOURCES) {
             await subscribe(`${source}:subscribe`, `subscribe to broker ${source} relay`)
+            if (generation !== this.brokerSessionGeneration) return
         }
         // Engine events are opt-in and replay no baseline — subscribe then hydrate.
         await subscribe('engine:subscribe', 'subscribe to broker engine relay')
+        if (generation !== this.brokerSessionGeneration) return
         await subscribe('workloads:subscribe', 'subscribe to broker workloads stream')
+        if (generation !== this.brokerSessionGeneration) return
         await this.seedWorkloadBaseline()
+        if (generation !== this.brokerSessionGeneration) return
 
         await this.syncClusterIdentityToManager()
+        if (generation !== this.brokerSessionGeneration) return
         await this.resolveSelfId()
+        if (generation !== this.brokerSessionGeneration) return
         await this.migrateManualNodes()
+        if (generation !== this.brokerSessionGeneration) return
         await this.hydrateAvailability()
+        if (generation !== this.brokerSessionGeneration) return
         await this.hydrateEngineManager()
+        if (generation !== this.brokerSessionGeneration) return
         this.startInstalledEnginesOnFirstOpen()
         await this.seedClusterPeerIds()
+        if (generation !== this.brokerSessionGeneration) return
         await this.refreshAllRemoteEngineStatus()
+        if (generation !== this.brokerSessionGeneration) return
         this.startRemoteStatusPolling()
         for (const engine of PROXY_ENGINES) {
             await this.hydrateProxyNodes(engine)
+            if (generation !== this.brokerSessionGeneration) return
             await this.pollProxyStatus(engine)
+            if (generation !== this.brokerSessionGeneration) return
         }
         // Discovery relay + proxy overlays can land after the first sweep; poll
         // again so clustered peers converge before the renderer refresh fires.
         await this.refreshAllRemoteEngineStatus()
+        if (generation !== this.brokerSessionGeneration) return
         this.brokerHydrationDone = true
         this.startPendingInviteSweep()
+        emitBridgePush('state:request-refresh', undefined)
     }
 
     /** Renderer store refresh — suppressed during the initial broker hydration pass. */
@@ -1088,6 +1134,7 @@ class ModularSupervisor {
      */
     private async sweepPendingInvites(): Promise<void> {
         if (!this.brokerReady) return
+        const generation = this.brokerSessionGeneration
         const state = getModularBridgeState()
         for (const invite of state.getPendingInvites()) {
             try {
@@ -1096,8 +1143,10 @@ class ModularSupervisor {
                         inviteId: invite.inviteId
                     })
                 )
+                if (generation !== this.brokerSessionGeneration) return
                 if (status.state !== 'pending') state.prunePendingInvite(invite.inviteId)
             } catch (err) {
+                if (generation !== this.brokerSessionGeneration) return
                 // `-32001` (unknown inviteId) means the cluster-manager evicted the
                 // session (terminal or process restart): the invite can never be
                 // answered, so drop it. Other errors are transient — leave it for
@@ -1131,8 +1180,10 @@ class ModularSupervisor {
      * peer engine inferred from mDNS presence alone.
      */
     private async seedClusterPeerIds(): Promise<void> {
+        const generation = this.brokerSessionGeneration
         try {
             const members = parseClusterNodes(await this.callProcess('broker', 'nodes:get-initial'))
+            if (generation !== this.brokerSessionGeneration) return
             this.setClusterPeerIds(members)
             log.info({
                 sublevel: 'broker',
@@ -1175,12 +1226,14 @@ class ModularSupervisor {
      */
     async refreshRemoteEngineStatus(nodeId: string): Promise<void> {
         if (!this.brokerReady) return
+        const generation = this.brokerSessionGeneration
         const selfId = getModularBridgeState().getSelfId()
         if (selfId && nodeId === selfId) return
         try {
             const result = await this.callProcess('broker', 'engine:remote-get-installed', {
                 node: nodeId
             })
+            if (generation !== this.brokerSessionGeneration) return
             getModularBridgeState().applyRemoteEngineFacts(nodeId, result)
             const engines = objectValue(result)?.engines
             log.info({
@@ -1227,11 +1280,13 @@ class ModularSupervisor {
     }
 
     private async pollProxyStatus(engine: ProxyEngine): Promise<void> {
+        const generation = this.brokerSessionGeneration
         try {
             const result = await this.callProcess(
                 'broker',
                 `${proxySourceForEngine(engine)}:get-status`
             )
+            if (generation !== this.brokerSessionGeneration) return
             const obj = objectValue(result)
             if (obj && booleanValue(obj.ready)) {
                 getModularBridgeState().handleNotification({
@@ -1250,8 +1305,10 @@ class ModularSupervisor {
     }
 
     private async hydrateProxyNodes(engine: ProxyEngine): Promise<void> {
+        const generation = this.brokerSessionGeneration
         try {
             const result = await this.callProxy(engine, 'nodes/list')
+            if (generation !== this.brokerSessionGeneration) return
             const obj = objectValue(result)
             if (!obj || !Array.isArray(obj.nodes)) return
             for (const node of obj.nodes) {
@@ -1271,11 +1328,14 @@ class ModularSupervisor {
 
     private async hydrateEngineManager(): Promise<void> {
         if (!this.processes.has('broker')) return
+        const generation = this.brokerSessionGeneration
         // Descriptors first, so the renderer can label and gate every engine
         // the status hydration below publishes.
         await this.hydrateEngineDescriptors()
+        if (generation !== this.brokerSessionGeneration) return
         try {
             const result = await this.callProcess('broker', 'engine:get-installed')
+            if (generation !== this.brokerSessionGeneration) return
             const obj = objectValue(result)
             if (!obj || !Array.isArray(obj.engines)) return
             for (const engine of obj.engines) {
@@ -1296,8 +1356,10 @@ class ModularSupervisor {
      * with safe defaults.
      */
     private async hydrateEngineDescriptors(): Promise<void> {
+        const generation = this.brokerSessionGeneration
         try {
             const result = await this.callProcess('broker', 'engine:descriptors')
+            if (generation !== this.brokerSessionGeneration) return
             getModularBridgeState().setEngineDescriptors(parseEngineDescriptors(result))
         } catch (err) {
             log.verbose({
@@ -1470,13 +1532,13 @@ class ModularSupervisor {
             void this.reconcileLocalNodeBridge(proxyEngine)
             this.emitStateRefreshIfHydrated()
         }
-        if (event.source === 'broker' && event.method === 'app:ready') {
+        if (event.source === 'broker' && event.method === 'app:ready' && !this.brokerReady) {
+            this.brokerSessionGeneration++
+            this.brokerHydrationDone = false
             this.performance.ready()
             this.brokerReady = true
             for (const engine of PROXY_ENGINES) void this.reconcileLocalNodeBridge(engine)
-            void this.onBrokerReady().then(() => {
-                emitBridgePush('state:request-refresh', undefined)
-            })
+            void this.onBrokerReady()
         }
         this.updateReadiness()
     }
@@ -1715,10 +1777,12 @@ class ModularSupervisor {
      * live jobs. Best-effort: the relay stream is the backstop if it fails.
      */
     private async seedWorkloadBaseline(): Promise<void> {
+        const generation = this.brokerSessionGeneration
         const state = getModularBridgeState()
         const since = state.beginWorkloadBaseline()
         try {
             const result = await this.callProcess('broker', 'workloads:get-initial')
+            if (generation !== this.brokerSessionGeneration) return
             state.seedWorkloads(parseWorkloadsInitial(result ?? null), since)
         } catch (err) {
             log.verbose({
@@ -1738,10 +1802,12 @@ class ModularSupervisor {
      * from the first tick. `setSelfId` is a no-op when unchanged.
      */
     private async resolveSelfId(): Promise<void> {
+        const generation = this.brokerSessionGeneration
         try {
             const identity = parseNodeIdentity(
                 await this.callProcess('broker', 'cluster:get-node-id')
             )
+            if (generation !== this.brokerSessionGeneration) return
             if (identity.nodeUuid) getModularBridgeState().setSelfId(identity.nodeUuid)
         } catch (err) {
             log.verbose({
@@ -1758,13 +1824,17 @@ class ModularSupervisor {
      * so this cannot loop with the persistence path above.
      */
     private async syncClusterIdentityToManager(): Promise<void> {
+        const generation = this.brokerSessionGeneration
         try {
             const idResult = objectValue(
                 await this.callProcess('broker', 'settings/get-cluster-id')
             )
+            if (generation !== this.brokerSessionGeneration) return
+            const clusterFriendlyName = await this.readClusterFriendlyName()
+            if (generation !== this.brokerSessionGeneration) return
             await this.callProcess('broker', 'cluster:set-identity', {
                 clusterId: stringValue(idResult?.value),
-                clusterFriendlyName: await this.readClusterFriendlyName()
+                clusterFriendlyName
             })
         } catch (err) {
             log.verbose({
@@ -1794,7 +1864,9 @@ class ModularSupervisor {
      * not displayed); see docs/services-parity.md §10.
      */
     private async onClusterIdentityChanged(clusterId: string): Promise<void> {
+        const generation = this.brokerSessionGeneration
         const clusterFriendlyName = await this.readClusterFriendlyName()
+        if (generation !== this.brokerSessionGeneration) return
         try {
             await this.callProcess('broker', 'cluster:set-identity', {
                 clusterId,
@@ -1808,6 +1880,7 @@ class ModularSupervisor {
         }
         // An empty clusterId means we left the cluster: drop peers' workloads so
         // they don't linger or get re-served on the next refresh.
+        if (generation !== this.brokerSessionGeneration) return
         if (!clusterId) getModularBridgeState().dropRemoteWorkloads()
         emitBridgePush('connection:cluster-identity', {
             clusterId: clusterId || null,
@@ -2331,6 +2404,7 @@ class ModularSupervisor {
                 this.commitModelInventory(engineType, models, generation)
             })
             .catch(err => {
+                if (!this.isCurrentModelRefresh(engineType, generation)) return
                 this.handleModelRefreshFailure(engineType, generation)
                 log.verbose({
                     sublevel: 'engine-manager',
@@ -2365,21 +2439,34 @@ class ModularSupervisor {
                 this.commitModelInventory(engine, models, generation)
             })
             .catch(() => {
-                if (this.modelRefreshGenerations.get(engine) === generation) {
-                    this.scheduleDiscoveryModelRefreshRetry(engine)
-                }
+                if (!this.isCurrentModelRefresh(engine, generation)) return
+                this.scheduleDiscoveryModelRefreshRetry(engine)
                 this.handleModelRefreshFailure(engine, generation)
             })
     }
 
-    private beginModelRefresh(engine: EngineType): number {
-        const generation = (this.modelRefreshGenerations.get(engine) ?? 0) + 1
+    private beginModelRefresh(engine: EngineType): { sessionGeneration: number } {
+        const generation = { sessionGeneration: this.brokerSessionGeneration }
         this.modelRefreshGenerations.set(engine, generation)
         return generation
     }
 
-    private commitModelInventory(engine: EngineType, models: string[], generation: number): void {
-        if (this.modelRefreshGenerations.get(engine) !== generation) return
+    private isCurrentModelRefresh(
+        engine: EngineType,
+        generation: { sessionGeneration: number }
+    ): boolean {
+        return (
+            generation.sessionGeneration === this.brokerSessionGeneration &&
+            this.modelRefreshGenerations.get(engine) === generation
+        )
+    }
+
+    private commitModelInventory(
+        engine: EngineType,
+        models: string[],
+        generation: { sessionGeneration: number }
+    ): void {
+        if (!this.isCurrentModelRefresh(engine, generation)) return
         this.stoppedModelSentinels.delete(engine)
         this.successfulModelInventories.add(engine)
         if (isProxyEngine(engine)) {
@@ -2416,8 +2503,11 @@ class ModularSupervisor {
         if (resetAttempt) this.discoveryModelRetryAttempts.delete(engine)
     }
 
-    private handleModelRefreshFailure(engine: EngineType, generation: number): void {
-        if (this.modelRefreshGenerations.get(engine) !== generation) return
+    private handleModelRefreshFailure(
+        engine: EngineType,
+        generation: { sessionGeneration: number }
+    ): void {
+        if (!this.isCurrentModelRefresh(engine, generation)) return
         if (!isProxyEngine(engine)) return
         const wasStoppedSentinel = this.stoppedModelSentinels.delete(engine)
         if (wasStoppedSentinel || !this.successfulModelInventories.has(engine)) {
@@ -2472,6 +2562,7 @@ class ModularSupervisor {
      */
     private async reconcileLocalNodeBridge(engine: ProxyEngine): Promise<void> {
         if (!this.processes.has('broker')) return
+        const generation = this.brokerSessionGeneration
         const selfId = getModularBridgeState().getSelfId()
         // selfId not resolved yet — reconcile re-runs on the next trigger
         // (engine:state-changed, proxy ready, broker ready).
@@ -2518,6 +2609,7 @@ class ModularSupervisor {
                     port: bridge.port,
                     addresses: ['127.0.0.1']
                 })
+                if (generation !== this.brokerSessionGeneration) return
                 bridge.bridgedId = selfId
                 bridge.bridgedPort = bridge.port
             } catch (err) {

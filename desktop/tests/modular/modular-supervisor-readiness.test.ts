@@ -98,7 +98,8 @@ interface ReadinessHarness {
 const supervisor = getModularSupervisor() as unknown as ReadinessHarness
 
 function unusedClient(): JsonRpcSocketClient {
-    return new JsonRpcSocketClient('broker', () => Promise.reject(new Error('not connected')))
+    const connect = () => Promise.reject(new Error('not connected'))
+    return new JsonRpcSocketClient('broker', connect, undefined, connect)
 }
 
 function notify(method: string, params?: JsonRpcNotification['params']): void {
