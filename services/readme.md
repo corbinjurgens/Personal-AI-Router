@@ -268,7 +268,8 @@ enforcement at a proxy facade, idempotent engine switches, and the same
 calls through `nvpair-service`. It drives real binaries through public
 JSON-RPC methods with fake engines only and never starts an installed engine.
 It skips on macOS and, on Windows, requires the fixed-path wrapper above.
-Run one area at a time on a Windows gate machine:
+On Linux, the cases run unguarded with real binaries. In this fork, run these
+process cases only on the designated Windows gate machine, one area at a time:
 
 ```bash
 cd tests
