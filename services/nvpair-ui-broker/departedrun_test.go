@@ -6,6 +6,8 @@ package main
 import (
 	"encoding/json"
 	"io"
+	"net"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
@@ -100,6 +102,31 @@ func waitDepartedRun(t *testing.T, done <-chan struct{}, what string) {
 	}
 }
 
+// Tests join the actual emitter with their own failure bound, independent of a
+// deliberately exhausted product shutdown budget.
+func joinDepartedRun(t *testing.T, b *Broker) {
+	t.Helper()
+	b.proxySupWorkMu.Lock()
+	done := b.proxyRetireDone
+	b.proxySupWorkMu.Unlock()
+	if done != nil {
+		waitDepartedRun(t, done, "retirement emitter cleanup")
+	}
+}
+
+type departedRunObservedPipe struct {
+	net.Conn
+	entered  chan struct{}
+	finished chan struct{}
+	once     sync.Once
+}
+
+func (p *departedRunObservedPipe) Write(raw []byte) (int, error) {
+	p.once.Do(func() { close(p.entered) })
+	defer close(p.finished)
+	return p.Conn.Write(raw)
+}
+
 type departedRunBlockingWriter struct {
 	output  *syncBuffer
 	entered chan struct{}
@@ -134,7 +161,8 @@ func TestDepartedRun(t *testing.T) {
 			seedDepartedRun(t, b, in)
 		}
 		before := time.Now().UnixMilli()
-		b.retireDepartedRunWorkloads("", "test departure")
+		b.captureDepartedRunWorkloads("test departure")
+		joinDepartedRun(t, b)
 		after := time.Now().UnixMilli()
 		want := map[string]string{"queued": "failed", "running": "failed", "other-run": "failed"}
 		for id := range want {
@@ -165,7 +193,8 @@ func TestDepartedRun(t *testing.T) {
 		departedRunFrames(t, client, "workloads:upsert", want)
 		departedRunFrames(t, scheduler, "workloads:upsert", want)
 		departedRunFrames(t, manager, "workload:errored", want)
-		b.retireDepartedRunWorkloads("", "duplicate departure")
+		b.captureDepartedRunWorkloads("duplicate departure")
+		joinDepartedRun(t, b)
 		departedRunFrames(t, manager, "workload:errored", want)
 		departedRunFrames(t, client, "workloads:upsert", want)
 		departedRunFrames(t, scheduler, "workloads:upsert", want)
@@ -180,11 +209,83 @@ func TestDepartedRun(t *testing.T) {
 		}
 	})
 
+	t.Run("node loss inferred failure becomes authoritative on actual departure", func(t *testing.T) {
+		b, client, scheduler, manager := privacyBroker(t)
+		path := filepath.Join(t.TempDir(), "retired-history.json")
+		b.workloads.WithPersistence(path)
+		pp := &proxyProcess{done: make(chan struct{})}
+		b.setProxyProcessHandle(pp)
+		in := departedRunInput(t, "one", "host", "r1", "running", "peer")
+		b.forwardProxyNotificationFrom(pp, 0, 0, "workload:started", departedRunEnvelope(t, in.Info))
+		b.failWorkloadsForNode("peer", "peer")
+		rec := departedRunRecord(t, b, "host", "one", "failed")
+		if !rec.Inferred || rec.Seq != 7 {
+			t.Fatalf("node loss did not create the inferred precondition: %+v", rec)
+		}
+		frames := manager.frames()
+		if len(frames) != 1 {
+			t.Fatal("inferred failure was broadcast authoritatively")
+		}
+		last, ok := workloadstore.ParseIncoming(privacyObject(t, frames[0].Params)["workloadInfo"])
+		if !ok || last.State != "running" || last.Seq != 7 {
+			t.Fatal("manager did not retain its last authoritative running record")
+		}
+		before := time.Now().UnixMilli()
+		crash := newSupervisor(engines.ProxyComponent, defaultRestartPolicy(), nil)
+		b.configureProxySupervisorCallbacks(crash)
+		close(pp.done)
+		crash.onCrash(1)
+		joinDepartedRun(t, b)
+		rec = departedRunRecord(t, b, "host", "one", "failed")
+		if rec.Inferred || !rec.Terminal || rec.Seq != 8 || rec.RunID != "r1" || rec.ScheduledOn != "peer" || rec.CompletedAt < before {
+			t.Fatalf("departure left inferred provenance or lost identity/sequence: %+v", rec)
+		}
+		for _, output := range []struct {
+			out    *syncBuffer
+			count  int
+			method string
+		}{
+			{client, 3, "workloads:upsert"}, {scheduler, 3, "workloads:upsert"}, {manager, 2, "workload:errored"},
+		} {
+			frames := output.out.frames()
+			if len(frames) != output.count {
+				t.Fatalf("%s count = %d, want %d", output.method, len(frames), output.count)
+			}
+			frame := frames[len(frames)-1]
+			info := privacyObject(t, frame.Params)["workloadInfo"]
+			last, ok := workloadstore.ParseIncoming(info)
+			if !ok || frame.Method != output.method || last.ID != "one" || last.Origin != "host" || last.RunID != "r1" || last.State != "failed" || last.Seq != 8 || last.ScheduledOn != "peer" {
+				t.Fatalf("authoritative departure did not converge: %+v", last)
+			}
+			if string(privacyObject(t, info)["error"]) != `"proxy exited before the request finished"` {
+				t.Fatal("wrong retirement error")
+			}
+		}
+		replay := b.workloads.ReplayForNode("host", workloadTerminalReplayWindowMs)
+		if len(replay) != 1 || replay[0].Inferred || replay[0].State != "failed" || replay[0].Seq != 8 {
+			t.Fatal("authoritative terminal missing from manager restart replay")
+		}
+		if err := b.workloads.Flush(); err != nil {
+			t.Fatal(err)
+		}
+		restored := workloadstore.New().WithPersistence(path)
+		if err := restored.Load(); err != nil {
+			t.Fatal(err)
+		}
+		saved, ok := restored.Get("host", "one")
+		if !ok || saved.Inferred || saved.State != "failed" || saved.Seq != 8 {
+			t.Fatal("authoritative retirement was not persisted")
+		}
+	})
+
 	t.Run("replacement run stays live and synthetic frames leave fence alone", func(t *testing.T) {
 		b, client, _, _ := privacyBroker(t)
 		seedDepartedRun(t, b, departedRunInput(t, "old", "host", "r1", "running", "peer"))
+		seedDepartedRun(t, b, departedRunInput(t, "already-live", "host", "r2", "running", "host"))
+		pp := &proxyProcess{done: make(chan struct{})}
+		b.setProxyProcessHandle(pp)
 		live := departedRunInput(t, "live", "host", "r2", "queued", "host")
-		b.routeProxyWorkload("workload:submitted", departedRunEnvelope(t, live.Info))
+		b.forwardProxyNotificationFrom(pp, 0, 0, "workload:submitted", departedRunEnvelope(t, live.Info))
 		frames := client.frames()
 		if len(frames) != 2 {
 			t.Fatalf("first event frames = %d, want old failure then new queued", len(frames))
@@ -195,17 +296,31 @@ func TestDepartedRun(t *testing.T) {
 				t.Fatalf("event %d = %+v, want %+v", index, in, expected)
 			}
 		}
+		departedRunRecord(t, b, "host", "already-live", "running")
 		// This sentinel would be retired by an unnecessary second r2 scan.
 		seedDepartedRun(t, b, departedRunInput(t, "sentinel", "host", "r3", "running", "peer"))
-		b.routeProxyWorkload("workload:started", departedRunEnvelope(t, departedRunInput(t, "live", "host", "r2", "running", "host").Info))
+		b.forwardProxyNotificationFrom(pp, 0, 0, "workload:started", departedRunEnvelope(t, departedRunInput(t, "live", "host", "r2", "running", "host").Info))
 		departedRunRecord(t, b, "host", "sentinel", "running")
 		if b.lastLocalRunID != "r2" {
 			t.Fatalf("fence = %s, want r2", b.lastLocalRunID)
 		}
-		b.retireDepartedRunWorkloads("r2", "synthetic departure")
-		departedRunRecord(t, b, "host", "live", "running")
+		// Capture the actual departure before a replacement's record arrives.
+		// Keep the emitter at its supervision barrier while publishing the fixture.
+		b.proxySupMu.Lock()
+		var releaseOnce sync.Once
+		releaseCapture := func() { releaseOnce.Do(b.proxySupMu.Unlock) }
+		t.Cleanup(func() { releaseCapture(); joinDepartedRun(t, b) })
+		b.clearProxyHandles()
+		b.captureDepartedRunWorkloads("synthetic departure")
+		b.setProxyProcessHandle(&proxyProcess{done: make(chan struct{})})
+		b.lastLocalRunID = "r4"
+		seedDepartedRun(t, b, departedRunInput(t, "replacement", "host", "r4", "running", "host"))
+		releaseCapture()
+		joinDepartedRun(t, b)
+		departedRunRecord(t, b, "host", "live", "failed")
 		departedRunRecord(t, b, "host", "sentinel", "failed")
-		if b.lastLocalRunID != "r2" {
+		departedRunRecord(t, b, "host", "replacement", "running")
+		if b.lastLocalRunID != "r4" {
 			t.Fatalf("synthetic retirement changed fence to %s", b.lastLocalRunID)
 		}
 	})
@@ -214,7 +329,8 @@ func TestDepartedRun(t *testing.T) {
 		b, _, _, manager := privacyBroker(t)
 		b.codec = NewCodec(departedRunFailedWriter{})
 		seedDepartedRun(t, b, departedRunInput(t, "one", "host", "r1", "running", "host"))
-		b.retireDepartedRunWorkloads("", "failed client output")
+		b.captureDepartedRunWorkloads("failed client output")
+		joinDepartedRun(t, b)
 		rec := departedRunRecord(t, b, "host", "one", "failed")
 		if rec.Inferred || len(b.workloads.ReplayForNode("host", workloadTerminalReplayWindowMs)) != 1 {
 			t.Fatal("failed client write lost authoritative replayable outcome")
@@ -240,6 +356,42 @@ func TestDepartedRun(t *testing.T) {
 		departedRunRecord(t, b, "host", "live", "running")
 		if b.lastLocalRunID != "r2" || len(manager.frames()) != 1 {
 			t.Fatal("legacy/manager frame advanced fence or rebroadcast remote input")
+		}
+	})
+
+	t.Run("nil source preserves merge semantics without fencing live process", func(t *testing.T) {
+		b, client, scheduler, manager := privacyBroker(t)
+		b.setProxyProcessHandle(&proxyProcess{done: make(chan struct{})})
+		b.lastLocalRunID = "r2"
+		seedDepartedRun(t, b, departedRunInput(t, "live", "host", "r2", "running", "host"))
+		b.routeProxyWorkload("workload:submitted", departedRunEnvelope(t, departedRunInput(t, "unscoped", "host", "r1", "queued", "peer").Info))
+		departedRunRecord(t, b, "host", "live", "running")
+		departedRunRecord(t, b, "host", "unscoped", "queued")
+		if b.lastLocalRunID != "r2" || len(client.frames()) != 1 || len(scheduler.frames()) != 1 || len(manager.frames()) != 1 {
+			t.Fatal("nil source fenced or changed direct merge semantics")
+		}
+	})
+
+	t.Run("model only queued repoint is rejected on every proxy output", func(t *testing.T) {
+		b, client, scheduler, manager := privacyBroker(t)
+		in := departedRunInput(t, "one", "host", "r1", "queued", "host")
+		b.routeProxyWorkload("workload:submitted", departedRunEnvelope(t, in.Info))
+		fields := privacyObject(t, in.Info)
+		fields["model"] = json.RawMessage(`"other-model"`)
+		fields["seq"] = json.RawMessage(`8`)
+		raw, err := json.Marshal(fields)
+		if err != nil {
+			t.Fatal(err)
+		}
+		b.routeProxyWorkload("workload:submitted", departedRunEnvelope(t, raw))
+		for _, out := range []*syncBuffer{client, scheduler, manager} {
+			if len(out.frames()) != 1 {
+				t.Fatal("store-rejected model-only repoint reached a proxy output")
+			}
+		}
+		rec := departedRunRecord(t, b, "host", "one", "queued")
+		if string(privacyObject(t, rec.Info)["model"]) != `"m"` || rec.Seq != 7 {
+			t.Fatal("same-rank same-placement model-only frame changed store")
 		}
 	})
 
@@ -279,7 +431,7 @@ func TestDepartedRun(t *testing.T) {
 		entered, release, done := make(chan struct{}), make(chan struct{}), make(chan struct{})
 		var once sync.Once
 		releaseOld := func() { once.Do(func() { close(release) }) }
-		t.Cleanup(releaseOld)
+		t.Cleanup(func() { releaseOld(); waitDepartedRun(t, done, "old callback cleanup") })
 		var calls atomic.Int32
 		b.beforeProxyWorkloadApply = func() {
 			if calls.Add(1) == 1 {
@@ -290,8 +442,7 @@ func TestDepartedRun(t *testing.T) {
 		late := departedRunEnvelope(t, departedRunInput(t, "late-old", "host", "r1", "queued", "host").Info)
 		go func() { defer close(done); b.forwardProxyNotificationFrom(old, 0, 0, "workload:submitted", late) }()
 		waitDepartedRun(t, entered, "callback past initial handle guard")
-		// Keep the fixture's old Done open to prove the source identity check;
-		// the retained-handle case separately proves the Done check.
+		close(old.done)
 		b.setProxyProcessHandle(replacement)
 		b.forwardProxyNotificationFrom(replacement, 0, 0, "workload:submitted", departedRunEnvelope(t, departedRunInput(t, "live", "host", "r2", "queued", "host").Info))
 		releaseOld()
@@ -307,14 +458,26 @@ func TestDepartedRun(t *testing.T) {
 	})
 
 	t.Run("captured identities preserve intervening terminals and placement", func(t *testing.T) {
-		b, client, _, manager := privacyBroker(t)
+		b, client, scheduler, manager := privacyBroker(t)
 		for _, id := range []string{"completed", "cancelled", "moved", "removed", "new-generation"} {
 			seedDepartedRun(t, b, departedRunInput(t, id, "host", "r1", "running", "host"))
 		}
-		pending := b.departedRunCandidates("", "captured")
+		b.proxySupMu.Lock()
+		var once sync.Once
+		releaseCapture := func() { once.Do(b.proxySupMu.Unlock) }
+		t.Cleanup(func() { releaseCapture(); joinDepartedRun(t, b) })
+		b.captureDepartedRunWorkloads("captured")
+		apply := func(params json.RawMessage) {
+			t.Helper()
+			in, ok := workloadstore.ParseIncoming(privacyObject(t, params)["workloadInfo"])
+			if !ok {
+				t.Fatal("invalid intervening fixture")
+			}
+			seedDepartedRun(t, b, in)
+		}
 		for _, state := range []string{"completed", "cancelled"} {
 			in := departedRunInput(t, state, "host", "r1", "running", "peer-final")
-			b.emitWorkloadEvent("workloads:upsert", markWorkloadTerminal(in.Info, state, time.UnixMilli(200), "actual outcome", 9))
+			apply(markWorkloadTerminal(in.Info, state, time.UnixMilli(200), "actual outcome", 9))
 		}
 		moved := departedRunInput(t, "moved", "host", "r1", "running", "peer-new")
 		movedFields := privacyObject(t, moved.Info)
@@ -323,22 +486,20 @@ func TestDepartedRun(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		b.emitWorkloadEvent("workloads:upsert", departedRunEnvelope(t, movedRaw))
-		b.emitWorkloadEvent("workloads:remove", json.RawMessage(`{"workloadId":"removed","originatedFrom":"host"}`))
+		apply(departedRunEnvelope(t, movedRaw))
+		if !b.workloads.Remove("host", "removed") {
+			t.Fatal("intervening removal rejected")
+		}
 		generation := privacyObject(t, departedRunInput(t, "new-generation", "host", "r1", "running", "host").Info)
 		generation["createdAt"] = json.RawMessage(`2`)
 		generationRaw, err := json.Marshal(generation)
 		if err != nil {
 			t.Fatal(err)
 		}
-		b.emitWorkloadEvent("workloads:upsert", departedRunEnvelope(t, generationRaw))
+		apply(departedRunEnvelope(t, generationRaw))
 		before := len(client.frames())
-		b.workloadEmitMu.Lock()
-		frames := b.applyDepartedRunWorkloadsLocked(pending)
-		for _, frame := range frames {
-			b.publishProxyWorkloadLocked(frame.method, frame.params)
-		}
-		b.workloadEmitMu.Unlock()
+		releaseCapture()
+		joinDepartedRun(t, b)
 		for _, state := range []string{"completed", "cancelled"} {
 			rec := departedRunRecord(t, b, "host", state, state)
 			if rec.Seq != 9 || rec.CompletedAt != 200 || rec.ScheduledOn != "peer-final" {
@@ -353,33 +514,80 @@ func TestDepartedRun(t *testing.T) {
 		if _, ok := b.workloads.Get("host", "removed"); ok {
 			t.Fatal("capture resurrected removal")
 		}
-		if len(frames) != 1 || len(client.frames()) != before+1 || len(manager.frames()) != 1 {
+		if len(client.frames()) != before+1 || len(scheduler.frames()) != 1 || len(manager.frames()) != 1 {
 			t.Fatal("stale candidates propagated")
 		}
 	})
 
-	t.Run("done handle is rechecked even before withdrawal", func(t *testing.T) {
-		b, client, _, manager := privacyBroker(t)
-		pp := &proxyProcess{done: make(chan struct{})}
-		b.setProxyProcessHandle(pp)
-		b.lastLocalRunID = "r1"
-		seedDepartedRun(t, b, departedRunInput(t, "one", "host", "r1", "running", "host"))
-		entered, release, done := make(chan struct{}), make(chan struct{}), make(chan struct{})
-		var once sync.Once
-		releaseCallback := func() { once.Do(func() { close(release) }) }
-		t.Cleanup(releaseCallback)
-		b.beforeProxyWorkloadApply = func() { close(entered); <-release }
-		params := departedRunEnvelope(t, departedRunInput(t, "late", "host", "r2", "queued", "host").Info)
-		go func() { defer close(done); b.forwardProxyNotificationFrom(pp, 0, 0, "workload:submitted", params) }()
-		waitDepartedRun(t, entered, "callback before Done")
-		close(pp.done)
-		releaseCallback()
-		waitDepartedRun(t, done, "callback after Done")
-		departedRunRecord(t, b, "host", "one", "running")
-		if b.lastLocalRunID != "r1" || b.workloads.Len() != 1 || len(client.frames()) != 0 || len(manager.frames()) != 0 {
-			t.Fatal("exited handle changed fence, store or output")
-		}
-	})
+	terminalTail := func(name, state string, replaced bool) {
+		t.Run(name, func(t *testing.T) {
+			b, client, scheduler, manager := privacyBroker(t)
+			pp := &proxyProcess{done: make(chan struct{})}
+			b.setProxyProcessHandle(pp)
+			in := departedRunInput(t, "one", "host", "r1", "running", "host")
+			b.forwardProxyNotificationFrom(pp, 0, 0, "workload:started", departedRunEnvelope(t, in.Info))
+			entered, release, done := make(chan struct{}), make(chan struct{}), make(chan struct{})
+			var once sync.Once
+			releaseTail := func() { once.Do(func() { close(release) }) }
+			t.Cleanup(func() { releaseTail(); waitDepartedRun(t, done, "terminal callback cleanup") })
+			var callbacks atomic.Int32
+			b.beforeProxyWorkloadApply = func() {
+				if callbacks.Add(1) == 1 {
+					close(entered)
+					<-release
+				}
+			}
+			method := "workload:completed"
+			if state == "cancelled" {
+				method = "workload:errored"
+			}
+			params := markWorkloadTerminal(in.Info, state, time.UnixMilli(200), "actual outcome", 8)
+			go func() { defer close(done); b.forwardProxyNotificationFrom(pp, 0, 0, method, params) }()
+			waitDepartedRun(t, entered, "delivered terminal past initial source guard")
+			close(pp.done)
+			if replaced {
+				b.clearProxyHandles()
+				next := &proxyProcess{done: make(chan struct{})}
+				b.setProxyProcessHandle(next)
+				b.forwardProxyNotificationFrom(next, 0, 0, "workload:submitted", departedRunEnvelope(t, departedRunInput(t, "replacement", "host", "r2", "queued", "host").Info))
+			}
+			releaseTail()
+			waitDepartedRun(t, done, "delivered terminal after Done")
+			if replaced {
+				departedRunRecord(t, b, "host", "one", "failed")
+				departedRunRecord(t, b, "host", "replacement", "queued")
+				if b.lastLocalRunID != "r2" || len(client.frames()) != 3 || len(scheduler.frames()) != 3 || len(manager.frames()) != 3 {
+					t.Fatal("withdrawn tail changed replacement fence or output")
+				}
+				return
+			}
+			rec := departedRunRecord(t, b, "host", "one", state)
+			if rec.Inferred || rec.Seq != 8 || rec.CompletedAt != 200 || b.lastLocalRunID != "r1" {
+				t.Fatalf("delivered terminal metadata lost: %+v", rec)
+			}
+			for _, out := range []*syncBuffer{client, scheduler, manager} {
+				frames := out.frames()
+				if len(frames) != 2 {
+					t.Fatalf("tail notifications = %d, want 2", len(frames))
+				}
+				last, ok := workloadstore.ParseIncoming(privacyObject(t, frames[1].Params)["workloadInfo"])
+				if !ok || last.State != state || last.RunID != "r1" || last.Seq != 8 {
+					t.Fatalf("delivered tail was not propagated: %+v", last)
+				}
+			}
+			b.clearProxyHandles()
+			b.captureDepartedRunWorkloads("tail already accepted")
+			joinDepartedRun(t, b)
+			departedRunRecord(t, b, "host", "one", state)
+			if len(manager.frames()) != 2 {
+				t.Fatal("departure rewrote real terminal")
+			}
+		})
+	}
+	terminalTail("completed tail retained before withdrawal", "completed", false)
+	terminalTail("cancelled tail retained before withdrawal", "cancelled", false)
+	terminalTail("completed tail rejected after replacement", "completed", true)
+	terminalTail("cancelled tail rejected after replacement", "cancelled", true)
 
 	t.Run("crash and deliberate stop hooks retire after unlock", func(t *testing.T) {
 		for _, action := range []string{"crash", "stop", "shutdown"} {
@@ -398,7 +606,7 @@ func TestDepartedRun(t *testing.T) {
 				case "shutdown":
 					b.shutdownProxySupervision()
 				}
-				b.waitProxyRetirements()
+				joinDepartedRun(t, b)
 				departedRunRecord(t, b, "host", "one", "failed")
 				departedRunFrames(t, manager, "workload:errored", map[string]string{"one": "failed"})
 			})
@@ -417,7 +625,7 @@ func TestDepartedRun(t *testing.T) {
 		b.lastLocalRunID = "r2"
 		seedDepartedRun(t, b, departedRunInput(t, "live", "host", "r2", "queued", "host"))
 		b.proxySupMu.Unlock()
-		b.waitProxyRetirements()
+		joinDepartedRun(t, b)
 		departedRunRecord(t, b, "host", "old", "failed")
 		departedRunRecord(t, b, "host", "live", "queued")
 		if b.lastLocalRunID != "r2" || len(manager.frames()) != 1 {
@@ -451,9 +659,82 @@ func TestDepartedRun(t *testing.T) {
 		}
 		b.stopProxySupervisorLocked()
 		b.proxySupMu.Unlock()
-		b.waitProxyRetirements()
+		joinDepartedRun(t, b)
 		departedRunFrames(t, manager, "workload:errored", map[string]string{"one": "failed"})
 	})
+
+	shutdownBudget := func(name, destination string, remaining time.Duration) {
+		t.Run(name, func(t *testing.T) {
+			logs := captureLogs(t)
+			b, _, _, _ := privacyBroker(t)
+			path := filepath.Join(t.TempDir(), "shutdown-history.json")
+			b.workloads.WithPersistence(path)
+			reader, conn := net.Pipe()
+			pipe := &departedRunObservedPipe{Conn: conn, entered: make(chan struct{}), finished: make(chan struct{})}
+			if destination == "client" {
+				b.codec = NewCodec(pipe)
+			} else {
+				b.setWorkloadMgr(&workloadManagerProcess{stdin: pipe})
+			}
+			seedDepartedRun(t, b, departedRunInput(t, "one", "host", "r1", "running", "peer"))
+			teardownClock.mu.Lock()
+			previous := teardownClock.start
+			teardownClock.mu.Unlock()
+			t.Cleanup(func() { setTeardownStart(previous) })
+			returned := make(chan struct{})
+			t.Cleanup(func() {
+				// This reader never drains. Closing the transport is the only
+				// cleanup escape for both the real emitter and unbounded-wait mutant.
+				if err := reader.Close(); err != nil {
+					t.Error(err)
+				}
+				if err := conn.Close(); err != nil {
+					t.Error(err)
+				}
+				waitDepartedRun(t, returned, "bounded shutdown cleanup")
+				joinDepartedRun(t, b)
+			})
+			setTeardownStart(time.Now().Add(-teardownBudget + remaining))
+			started := time.Now()
+			go func() { defer close(returned); b.shutdownProxySupervision() }()
+			waitDepartedRun(t, pipe.entered, "retirement write to never-draining reader")
+			select {
+			case <-returned:
+			case <-time.After(time.Second):
+				t.Fatal("shutdown retirement ignored the remaining shared teardown budget")
+			}
+			if time.Since(started) > time.Second {
+				t.Fatal("shutdown retirement did not remain bounded")
+			}
+			select {
+			case <-pipe.finished:
+				t.Fatal("reader unexpectedly drained before cleanup")
+			default:
+			}
+			if !strings.Contains(bufferText(logs), "proxy workload retirement exhausted the shared teardown budget") {
+				t.Fatal("shutdown budget exhaustion was not reported")
+			}
+			rec := departedRunRecord(t, b, "host", "one", "failed")
+			if rec.Inferred || rec.Seq != 8 {
+				t.Fatal("output blockage lost accepted authoritative terminal")
+			}
+			if err := b.workloads.Flush(); err != nil {
+				t.Fatal(err)
+			}
+			restored := workloadstore.New().WithPersistence(path)
+			if err := restored.Load(); err != nil {
+				t.Fatal(err)
+			}
+			saved, ok := restored.Get("host", "one")
+			if !ok || saved.State != "failed" || saved.Inferred || saved.Seq != 8 {
+				t.Fatal("blocked output lost accepted terminal history")
+			}
+		})
+	}
+	shutdownBudget("shutdown unread client uses nearly-spent shared budget", "client", 100*time.Millisecond)
+	shutdownBudget("shutdown unread manager uses nearly-spent shared budget", "manager", 100*time.Millisecond)
+	shutdownBudget("shutdown unread client honors exhausted shared budget", "client", -time.Millisecond)
+	shutdownBudget("shutdown unread manager honors exhausted shared budget", "manager", -time.Millisecond)
 
 	t.Run("blocked output leaves supervision and worker locks available", func(t *testing.T) {
 		for _, destination := range []string{"client", "manager"} {
@@ -462,22 +743,45 @@ func TestDepartedRun(t *testing.T) {
 				writer := &departedRunBlockingWriter{output: &syncBuffer{}, entered: make(chan struct{}), release: make(chan struct{})}
 				var once sync.Once
 				release := func() { once.Do(func() { close(writer.release) }) }
-				t.Cleanup(func() { release(); b.waitProxyRetirements() })
+				stopReturned, stopDone, unlock := make(chan struct{}), make(chan struct{}), make(chan struct{})
+				var unlockOnce sync.Once
+				allowUnlock := func() { unlockOnce.Do(func() { close(unlock) }) }
+				t.Cleanup(func() {
+					// Always release blocked I/O before joining the stop owner,
+					// including when an actual synchronous-stop mutant entered it.
+					release()
+					allowUnlock()
+					waitDepartedRun(t, stopDone, "stop owner cleanup")
+					joinDepartedRun(t, b)
+				})
 				if destination == "client" {
 					b.codec = NewCodec(writer)
 				} else {
 					b.setWorkloadMgr(&workloadManagerProcess{stdin: writer})
 				}
 				seedDepartedRun(t, b, departedRunInput(t, "one", "host", "r1", "running", "host"))
-				b.proxySupMu.Lock()
-				b.stopProxySupervisorLocked()
+				go func() {
+					defer close(stopDone)
+					b.proxySupMu.Lock()
+					defer b.proxySupMu.Unlock()
+					b.stopProxySupervisorLocked()
+					close(stopReturned)
+					<-unlock
+				}()
+				select {
+				case <-stopReturned:
+				case <-writer.entered:
+					t.Fatal("stop synchronously emitted retirement before returning")
+				case <-time.After(2 * time.Second):
+					t.Fatal("stop did not return within the bounded capture interval")
+				}
 				select {
 				case <-writer.entered:
-					b.proxySupMu.Unlock()
 					t.Fatal("retirement emitted under supervision lock")
 				default:
 				}
-				b.proxySupMu.Unlock()
+				allowUnlock()
+				waitDepartedRun(t, stopDone, "stop owner unlock")
 				waitDepartedRun(t, writer.entered, "blocked retirement output")
 				if !b.proxySupMu.TryLock() {
 					t.Fatal("retirement retained proxySupMu")
@@ -533,7 +837,7 @@ func TestDepartedRun(t *testing.T) {
 					runtime.Gosched()
 				}
 				release()
-				b.waitProxyRetirements()
+				joinDepartedRun(t, b)
 				departedRunRecord(t, b, "host", "one", "failed")
 			})
 		}
@@ -565,7 +869,7 @@ func TestDepartedRun(t *testing.T) {
 			}
 		}
 		b.proxySupMu.Unlock()
-		b.waitProxyRetirements()
+		joinDepartedRun(t, b)
 		if n == len(stack) {
 			t.Fatal("emitter stack evidence was truncated")
 		}

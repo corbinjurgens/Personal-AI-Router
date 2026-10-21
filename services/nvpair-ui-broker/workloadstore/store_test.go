@@ -65,6 +65,59 @@ func TestActiveLocalOutsideRun(t *testing.T) {
 	}
 }
 
+func TestActiveLocalOutsideRunInferred(t *testing.T) {
+	s := New()
+	input := func(id, origin, runID, state string) Incoming {
+		t.Helper()
+		raw, err := json.Marshal(map[string]any{
+			"id": id, "originatedFrom": origin, "engine": "ollama", "runId": runID,
+			"state": state, "scheduledOn": "host", "createdAt": 1, "seq": 7,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		in, ok := ParseIncoming(raw)
+		if !ok {
+			t.Fatal("invalid inferred fixture")
+		}
+		return in
+	}
+	for _, tc := range []struct{ id, origin, runID string }{
+		{"old", "host", "r1"}, {"live", "host", "r2"},
+		{"remote-old", "peer", "r1"}, {"remote-live", "peer", "r2"},
+	} {
+		if !s.Apply(input(tc.id, tc.origin, tc.runID, "running")) ||
+			!s.ApplyInferred(input(tc.id, tc.origin, tc.runID, "failed")) {
+			t.Fatalf("inferred setup rejected for %s", tc.id)
+		}
+	}
+	if !s.Apply(input("actual-terminal", "host", "r1", "completed")) {
+		t.Fatal("authoritative terminal setup rejected")
+	}
+	for _, tc := range []struct {
+		name, live string
+		want       map[string]string
+	}{
+		{"all departed inferred", "", map[string]string{"old": "r1", "live": "r2"}},
+		{"live inferred excluded", "r2", map[string]string{"old": "r1"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			records := s.ActiveLocalOutsideRun("host", tc.live)
+			if len(records) != len(tc.want) {
+				t.Fatalf("selected %d, want %d", len(records), len(tc.want))
+			}
+			seen := make(map[string]bool)
+			for _, rec := range records {
+				runID, ok := tc.want[rec.ID]
+				if !ok || seen[rec.ID] || rec.Origin != "host" || rec.RunID != runID || rec.Seq != 7 || !rec.Terminal || !rec.Inferred {
+					t.Fatalf("inferred selection = %+v", rec)
+				}
+				seen[rec.ID] = true
+			}
+		})
+	}
+}
+
 // mkIn builds an Incoming with a realistic full-fidelity Info payload.
 func mkIn(id, origin, state, scheduledOn string, createdAt int64) Incoming {
 	m := map[string]any{

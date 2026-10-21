@@ -31,6 +31,8 @@ func departedWorkloadIdentity(rec workloadstore.Record) departedWorkload {
 // supervisor can be replaced. Source validation and apply share workersMu, so
 // an admitted old callback either applied before this snapshot or is rejected.
 // It never waits for workloadEmitMu or output: Stop may be joining this monitor.
+// The spawnProxy bring-up failure stops are intentionally not hooked: no facade
+// was enabled, and the hybrid listener currently refuses inference at that head.
 func (b *Broker) captureDepartedRunWorkloads(cause string) {
 	if b.workloads == nil {
 		return
@@ -53,7 +55,7 @@ func (b *Broker) captureDepartedRunWorkloads(cause string) {
 // resumeProxyRetirementsLocked is the output stage of the existing coalesced
 // supervision owner. There is at most one emitter and one pending identity set.
 // While it is blocked, workloadEmitMu prevents new workload acceptance; repeated
-// crashes only coalesce the same still-open store identities, not more frames or
+// crashes only coalesce the same open-or-inferred identities, not more frames or
 // goroutines. Supervision can continue independently of the stalled output.
 // Caller holds proxySupWorkMu.
 func (b *Broker) resumeProxyRetirementsLocked() {
@@ -93,22 +95,17 @@ func (b *Broker) waitProxyRetirements() {
 	b.proxySupWorkMu.Lock()
 	done := b.proxyRetireDone
 	b.proxySupWorkMu.Unlock()
-	if done != nil {
-		<-done
+	if done == nil {
+		return
 	}
-}
-
-// retireDepartedRunWorkloads uses the same synchronous apply/publication path
-// as the new-run fence. Departure hooks instead capture exact identities before
-// a replacement is allowed to start.
-// The spawnProxy bring-up failure stops are intentionally not hooked: no facade
-// was enabled, and the hybrid listener currently refuses inference at that head.
-func (b *Broker) retireDepartedRunWorkloads(liveRunID, cause string) {
-	b.workloadEmitMu.Lock()
-	defer b.workloadEmitMu.Unlock()
-	pending := b.departedRunCandidates(liveRunID, cause)
-	for _, frame := range b.applyDepartedRunWorkloadsLocked(pending) {
-		b.publishProxyWorkloadLocked(frame.method, frame.params)
+	remaining, active := teardownRemaining()
+	if !active {
+		// Direct shutdown callers still use the existing teardown allowance;
+		// only shutdownInferenceStack arms its shared clock.
+		remaining = teardownBudget
+	}
+	if !waitClosed(done, remaining) {
+		slog.Warn("proxy workload retirement exhausted the shared teardown budget")
 	}
 }
 
@@ -120,11 +117,12 @@ func (b *Broker) departedRunCandidates(liveRunID, cause string) map[departedWork
 	return pending
 }
 
-// applyDepartedRunWorkloadsLocked reselects open records at the event owner.
-// Captures cannot overwrite completed/cancelled outcomes or a later generation,
-// nor restore an entry removed in the meantime. Use the current Info/Seq so a
-// placement update accepted since capture is preserved. Caller holds
-// workloadEmitMu; there is no output here, including on the replacement fence.
+// applyDepartedRunWorkloadsLocked reselects open-or-inferred records at the event
+// owner. Captures cannot overwrite authoritative completed/cancelled outcomes
+// or a later generation, nor restore an entry removed in the meantime. Use the
+// current Info/Seq so a placement update accepted since capture is preserved.
+// Caller holds workloadEmitMu; there is no output here, including on the
+// replacement fence.
 func (b *Broker) applyDepartedRunWorkloadsLocked(pending map[departedWorkload]string) []proxyWorkloadEvent {
 	var frames []proxyWorkloadEvent
 	if len(pending) == 0 {

@@ -351,6 +351,9 @@ var proxyWorkloadMethods = map[string]bool{
 // keeps emitting regardless of whether a manager is present, so the echo
 // still happens with no manager supervised (the broadcast simply doesn't).
 func (b *Broker) routeProxyWorkload(method string, params json.RawMessage) {
+	// Unscoped relay/test entry: real child workloads are intercepted with
+	// their source in forwardProxyNotificationFrom before facade dispatch.
+	// Keep projection/merge semantics here, but only a process can fence a run.
 	b.routeProxyWorkloadFrom(nil, method, params)
 }
 
@@ -380,18 +383,15 @@ func (b *Broker) routeProxyWorkloadFrom(source *proxyProcess, method string, par
 			b.workersMu.Unlock()
 			return
 		}
-		select {
-		case <-source.Done():
-			b.workersMu.Unlock()
-			return
-		default:
-		}
+		// Done does not withdraw this handle or join admitted callbacks. Keep
+		// a delivered terminal tail until actual withdrawal/capture; the exact
+		// source comparison above rejects it after a replacement is published.
 	}
 	var frames []proxyWorkloadEvent
 	var env struct {
 		Info json.RawMessage `json:"workloadInfo"`
 	}
-	if json.Unmarshal(stamped, &env) == nil {
+	if source != nil && json.Unmarshal(stamped, &env) == nil {
 		in, ok := workloadstore.ParseIncoming(env.Info)
 		if ok && in.Origin == b.nodeID && in.RunID != "" && in.RunID != b.lastLocalRunID {
 			// The current handle is the sole proxy process, and deliberate

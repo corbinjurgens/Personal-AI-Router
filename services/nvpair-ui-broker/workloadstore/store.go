@@ -413,14 +413,16 @@ func (s *Store) ActiveForNode(node string) []Record {
 	return out
 }
 
-// ActiveLocalOutsideRun returns independent copies of open records originated
-// here, excluding the live run. An empty liveRunID selects every open run.
+// ActiveLocalOutsideRun returns independent copies of open-or-inferred records
+// originated here, excluding the live run. Only authoritative terminals are
+// final: a local inferred failure still needs the departed origin's outcome.
+// An empty liveRunID selects every departed run.
 func (s *Store) ActiveLocalOutsideRun(origin, liveRunID string) []Record {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	var out []Record
 	for key, r := range s.records {
-		if r.Terminal || r.Origin != origin || (liveRunID != "" && key.RunID == liveRunID) {
+		if (r.Terminal && !r.Inferred) || r.Origin != origin || (liveRunID != "" && key.RunID == liveRunID) {
 			continue
 		}
 		r.Info = append(json.RawMessage(nil), r.Info...)
