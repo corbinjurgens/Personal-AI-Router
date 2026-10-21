@@ -132,6 +132,9 @@ type policyRuntime struct {
 	// availability inside node/set-policy, so while this is set no revision is
 	// enforced as the policy says and none is reported active.
 	availabilityErr string
+	// egress carries only process-scoped lease sequencing and clock anchoring.
+	// Persisted policy and the activation fields above remain authoritative.
+	egress brokerEgressLease
 	// strictReadiness is the newest strict admission readiness the proxy
 	// reported (readiness.go), held until its fences match; replay clears it.
 	// strictPublished is the capability the last node projection carried.
@@ -233,6 +236,7 @@ func (r *policyRuntime) initLocked() {
 	r.pendingPush = map[string]bool{}
 	r.pushSlot = make(chan struct{}, 1)
 	r.relayCancels = map[string]context.CancelFunc{}
+	r.egress.now = time.Now
 	if r.now == nil {
 		r.now = time.Now
 	}
@@ -1280,6 +1284,9 @@ func (b *Broker) replayPolicyToProxy(ctx context.Context, pp *proxyProcess) bool
 	r.haveAdmission = false
 	r.signalAdmissionLocked()
 	r.incarnation, r.runID, r.activeRevision, r.activationErr, r.availabilityErr = pp, "", "", "", ""
+	if r.egress.process != pp {
+		r.egress = brokerEgressLease{process: pp, now: r.egress.now}
+	}
 	// So did its strict readiness. The new process reports its own once it
 	// has acknowledged the policy replayed below.
 	r.strictReadiness = nodepolicy.StrictAdmissionReadiness{}
@@ -1360,8 +1367,10 @@ func (b *Broker) sendPolicyStateLocked(ctx context.Context, pp *proxyProcess, ki
 	var availability nodepolicy.Availability
 	switch {
 	case kind == pushPolicy:
+		r.egress.policyPending = true
 		method, params, activates = nodepolicy.MethodSetPolicy, nodepolicy.SetPolicyParams{OriginNodeID: b.nodeID, Policy: r.current}, r.current.Revision
 	case kind == pushAvailability:
+		r.egress.availabilityPending = true
 		availability = r.live
 		method, params = nodepolicy.MethodSetAvailability, nodepolicy.SetAvailabilityParams{State: availability, CancelActive: r.cancelActive}
 	case kind == pushResidency:
@@ -1440,6 +1449,7 @@ func (b *Broker) recordAvailability(pp *proxyProcess, state nodepolicy.Availabil
 		r.availabilityErr = fmt.Sprintf("the proxy refused availability %s (code %d)", state, rpcErr.Code)
 	default:
 		r.availabilityErr = ""
+		r.egress.availabilityPending = false
 	}
 	return was != r.availabilityErr
 }
@@ -1480,6 +1490,9 @@ func (b *Broker) recordActivation(pp *proxyProcess, revision string, result json
 		failure = fmt.Sprintf("the proxy acknowledged revision %q, not the revision %s that was sent", ack.Revision, revision)
 	default:
 		r.runID = ack.RunID
+		if revision == r.current.Revision {
+			r.egress.policyPending = false
+		}
 		if cmp, err := nodepolicy.CompareRevisions(revision, r.activeRevision); err == nil && cmp > 0 {
 			r.activeRevision = revision
 		}

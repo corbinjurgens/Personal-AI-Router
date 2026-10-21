@@ -456,11 +456,13 @@ func (b *Broker) startProxySupervisorLocked() {
 // stopProxySupervisorLocked stops the proxy and withdraws its handles. Caller
 // holds proxySupMu.
 func (b *Broker) stopProxySupervisorLocked() {
+	b.withdrawEgressLease()
 	// The process is stopped on purpose, so a push its closing pipe fails is
 	// not a failed activation: retire it first and such an answer is discarded.
 	r := b.nodePolicyRuntime()
 	r.mu.Lock()
 	r.incarnation = nil
+	r.egress.anchored = false
 	r.mu.Unlock()
 	if sup := b.getProxySupervisor(); sup != nil {
 		sup.Stop()
@@ -507,7 +509,6 @@ func (b *Broker) proxyCredentialsStale(pp *proxyProcess) bool {
 // holds proxySupMu.
 func (b *Broker) restartProxyForCredentialsLocked() {
 	slog.Info("restarting the proxy for a changed provider credential reference set")
-	// Phase 4 withdraws the egress lease here, before the old proxy stops.
 	b.stopProxySupervisorLocked()
 	b.startProxySupervisorLocked()
 }

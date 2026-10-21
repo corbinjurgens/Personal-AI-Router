@@ -1719,6 +1719,8 @@ func (b *Broker) Serve(ctx context.Context) error {
 		b.loadNodePolicy(path)
 	}
 	go b.runIdlePolicy(ctx)
+	stopEgressRenewal := b.startEgressRenewal(ctx)
+	defer stopEgressRenewal()
 
 	// The scanner is the broker's core worker. Its supervisor's first
 	// spawn is synchronous so a hard startup failure stays fatal — the
@@ -1827,7 +1829,10 @@ func (b *Broker) Serve(ctx context.Context) error {
 		b.finishEngineProxyStartup(profile)
 	}
 	b.startProxySupervision(anyProxyEnabled || len(b.dynamicEngineProfiles()) > 0)
-	defer b.shutdownProxySupervision()
+	defer func() {
+		stopEgressRenewal()
+		b.shutdownProxySupervision()
+	}()
 
 	// Restore engines and begin advertising only after both managed proxy
 	// startup attempts have established either readiness or a terminal outcome.
