@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 )
 
 const (
@@ -263,5 +264,46 @@ func (e *Executor) restoreEnabled(ctx context.Context, engine string) error {
 	if err != nil || !known || !enabled {
 		return err
 	}
+	// A hard manager death can leave an owned process listening on its configured
+	// port. Normal Start adopts an identified listener, but restore must
+	// relaunch an orphaned PAIR install cold. Check the same exact port,
+	// managed install and image predicate as Stop before probing readiness:
+	// an owned orphan may be listening but unhealthy. External listeners are
+	// never reclaimed.
+	st.mu.Lock()
+	port, owned := st.port, st.proc != nil
+	st.mu.Unlock()
+	if !owned && port > 0 {
+		_, _ = e.Detect(engine)
+		st.mu.Lock()
+		binPath, installDir, rt := st.binPath, st.installDir, st.plat.Runtime
+		st.mu.Unlock()
+		pid, image, found := pidOnPort(port)
+		if found && isManagedInstallPath(binPath, installDir) && isOurEngineImage(image, binPath) {
+			terminatePID(pid, stopGrace(rt))
+			if err := e.confirmOrphanStopped(engine, pid, port, rt); err != nil {
+				return err
+			}
+			e.markStopped(st, engine)
+			return e.doStart(ctx, st, engine, startOpts{RequireOwned: true})
+		}
+	}
 	return e.doStart(ctx, st, engine, startOpts{})
+}
+
+// confirmOrphanStopped checks termination separately from sending signals so
+// failure handling can be exercised without an unkillable process fixture.
+func (e *Executor) confirmOrphanStopped(engine string, pid, port int, rt Runtime) error {
+	var err error
+	if rt.Ready != nil {
+		if !e.waitUnavailable(rt.Ready, port, stopGrace(rt)+2*time.Second) {
+			err = fmt.Errorf("reclaim owned %s orphan: listener on port %d did not stop", engine, port)
+		}
+	} else if pidAlive(pid) {
+		err = fmt.Errorf("reclaim owned %s orphan: pid %d did not stop", engine, pid)
+	}
+	if err != nil {
+		e.reportStartFailed(engine, err)
+	}
+	return err
 }
