@@ -626,16 +626,22 @@ func TestServedResidentProcessResidency(t *testing.T) {
 	t.Run("per model finite output refuses before effects", func(t *testing.T) {
 		f.load(t, srNeighbor)
 		models := f.models(t)
-		for _, model := range models.Policy.StrictAdmission.Models {
+		for i, model := range models.Policy.StrictAdmission.Models {
 			limit := neOutput
 			if model.Model == srNeighbor {
 				limit = 64
 			}
-			request := nodepolicy.StrictAdmissionRequest{Version: 1, QueueBudgetMs: 0, ColdStartBudgetMs: 0, PreOutputBudgetMs: 2000, Request: nodepolicy.RoutingRequestKey{OriginNodeID: f.snapshot(t).NodeID, ProxyRunID: "sr-bound-origin", RequestID: model.Model}, Identity: model.Identity}
+			request := nodepolicy.StrictAdmissionRequest{Version: 1, QueueBudgetMs: 0, ColdStartBudgetMs: 0, PreOutputBudgetMs: 2000, Request: nodepolicy.RoutingRequestKey{OriginNodeID: f.snapshot(t).NodeID, ProxyRunID: "sr-bound-origin", RequestID: strconv.Itoa(i + 1)}, Identity: model.Identity}
 			before := f.control(t, "")
-			status, _ := f.chat(t, model.Model, limit+1, &request)
-			if status == http.StatusOK {
-				t.Fatalf("oversized output reached %s", model.Model)
+			status, data := f.chat(t, model.Model, limit+1, &request)
+			var refusal struct {
+				Code string `json:"code"`
+			}
+			if err := json.Unmarshal(data, &refusal); err != nil {
+				t.Fatal(err)
+			}
+			if status != http.StatusBadRequest || refusal.Code != "strict-qualification" {
+				t.Fatalf("oversized output %s status=%d code=%s", model.Model, status, refusal.Code)
 			}
 			srAssertNoEffects(t, before, f.control(t, ""))
 		}
@@ -650,10 +656,13 @@ func TestServedResidentProcessResidency(t *testing.T) {
 			p.Admission.MemoryBudgetBytes = neMemory
 			p.Admission.SwitchModels = true
 		})
+		request := f.strictRequest(t, srNeighbor, "3")
+		request.QueueBudgetMs = 100
+		request.ColdStartBudgetMs = 1000
 		before := f.control(t, "")
-		status, _ := f.chat(t, srNeighbor, 64, nil)
-		if status == http.StatusOK {
-			t.Fatal("neighbor admitted into resident-only capacity")
+		status, _ := f.chat(t, srNeighbor, 64, &request)
+		if status != http.StatusTooManyRequests {
+			t.Fatalf("protected resident contention status=%d, want occupied refusal", status)
 		}
 		srAssertNoEffects(t, before, f.control(t, ""))
 	})
