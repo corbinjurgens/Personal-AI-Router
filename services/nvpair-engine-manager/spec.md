@@ -169,11 +169,26 @@ input validation run outside state locks.
 
 Model-specific `default_generation_settings.n_ctx` is already per-slot context;
 it is never divided by `total_slots`. Both positive integer values must equal
-the current launch envelope. Unknown residency, undeclared loaded IDs, invalid
-props and allocation mismatch clear proof and latch the owned-run drift reason,
-withdrawing strict model identity until successful explicit apply/start. An
-authoritative cold/unloaded set clears observations without withdrawing launch
-validation. Strata has no observation producer here.
+the current launch envelope. Semantically unknown residency, undeclared loaded
+IDs, invalid props in a fully read 200 response and allocation mismatch clear
+proof and latch the owned-run drift reason, withdrawing strict model identity
+until successful explicit apply/start. An authoritative cold/unloaded set clears
+observations without withdrawing launch validation. Strata has no observation
+producer here.
+
+Connection errors, sweep/action deadlines, non-200 responses and response body
+read failures make loaded observation unknown for that sweep. They clear all
+previous observed proof without writing serving drift. Identity, readiness and
+resident eligibility that require observed proof are withheld for that sweep;
+the next successful sweep restores observation without apply or restart.
+Only exactly HTTP 200 succeeds for HTTP `list_models` and `loaded_models`
+inventory actions (including a shared response) and `/props`; other 2xx statuses
+are transport failures too. These observation reads never follow redirects:
+success must come from the requested URL, and every 3xx is transport unknown.
+Other actions retain their existing redirect policy and general 2xx success rule.
+Semantic disagreement from any model in a sweep latches even when another
+model's props read fails transport, independent of inventory ordering. A sweep
+with any transport failure publishes no observed proof.
 
 Settings readback uses the existing `observed` array and status only for matching
 fresh loaded values; configured and launch-validated cold bounds remain distinct.

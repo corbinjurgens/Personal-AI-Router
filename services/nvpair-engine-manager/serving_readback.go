@@ -6,6 +6,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -85,8 +86,11 @@ func (e *Executor) llamaServingProps(ctx context.Context, port int, model string
 	defer resp.Body.Close()
 	const limit = 8 * 1024 * 1024
 	data, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
-	if err != nil || len(data) > limit || resp.StatusCode != http.StatusOK {
+	if err != nil || resp.StatusCode != http.StatusOK {
 		return engines.ServingObservation{}, fmt.Errorf("loaded allocation read failed")
+	}
+	if len(data) > limit {
+		return engines.ServingObservation{}, &ServingIdentityRefusal{"Loaded allocation exceeds the response bound."}
 	}
 	var props struct {
 		Defaults struct {
@@ -95,14 +99,14 @@ func (e *Executor) llamaServingProps(ctx context.Context, port int, model string
 		Slots int64 `json:"total_slots"`
 	}
 	if json.Unmarshal(data, &props) != nil || props.Defaults.Context <= 0 || props.Slots <= 0 {
-		return engines.ServingObservation{}, fmt.Errorf("loaded allocation is unknown")
+		return engines.ServingObservation{}, &ServingIdentityRefusal{"Loaded allocation is unknown."}
 	}
 	return engines.ServingObservation{ModelID: model, PerSlotContextTokens: props.Defaults.Context, Slots: props.Slots}, nil
 }
 
 // Invoked only with the loaded_names response from this sweep. A cold set does
-// not query /props. Failures latch the same owned-run withdrawal as input drift.
-func (e *Executor) observeLlamaServing(ctx context.Context, st *engineState, s servingRunSnapshot, sweep uint64, loaded []string, known bool, raw json.RawMessage) {
+// not query /props. Only semantic failures latch owned-run withdrawal.
+func (e *Executor) observeLlamaServing(ctx context.Context, st *engineState, s servingRunSnapshot, sweep uint64, loaded []string, known bool, raw json.RawMessage, transportFailed bool) {
 	st.mu.Lock()
 	if !s.current(st) || sweep < st.plat.Runtime.servingObservationSweep {
 		st.mu.Unlock()
@@ -112,6 +116,9 @@ func (e *Executor) observeLlamaServing(ctx context.Context, st *engineState, s s
 	st.plat.Runtime.servingObserved = nil
 	port := st.port
 	st.mu.Unlock()
+	if transportFailed || ctx.Err() != nil {
+		return
+	}
 	var values []engines.ServingObservation
 	reason := ""
 	if !known || !llamaLoadedSemantics(raw, loaded) {
@@ -131,6 +138,13 @@ func (e *Executor) observeLlamaServing(ctx context.Context, st *engineState, s s
 				break
 			}
 			value, err := e.llamaServingProps(ctx, port, model)
+			var semantic *ServingIdentityRefusal
+			if err != nil && !errors.As(err, &semantic) {
+				// Keep checking the sweep: unavailable props cannot hide an
+				// undeclared ID or semantic disagreement in another model.
+				transportFailed = true
+				continue
+			}
 			if err != nil || value.PerSlotContextTokens != envelope.PerSlotContextTokens || value.Slots != envelope.Slots {
 				reason = "Loaded allocation does not match the validated serving envelope."
 				break
@@ -138,7 +152,13 @@ func (e *Executor) observeLlamaServing(ctx context.Context, st *engineState, s s
 			values = append(values, value)
 		}
 	}
+	if reason == "" && transportFailed {
+		return
+	}
 	if reason == "" && len(values) > 0 && validateServingSnapshot(ctx, st, s) != nil {
+		if ctx.Err() != nil {
+			return
+		}
 		reason = "Serving inputs no longer match the owned launch."
 	}
 	st.mu.Lock()
