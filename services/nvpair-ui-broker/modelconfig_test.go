@@ -2849,29 +2849,79 @@ func TestModelConfigAbsentEngineKeepsConfirmedProof(t *testing.T) {
 }
 
 func TestModelConfigContradictingPendingObservationIsUnknown(t *testing.T) {
-	f := newModelConfigFixture(t)
-	f.completedResidentLoad(t)
-	if entry := f.residentEntry(t); entry.State != nodepolicy.ModelStateSatisfied {
-		t.Fatalf("correlated load before any later inventory: %+v", entry)
+	ref := nodepolicy.Role{Engine: "llamacpp", Model: "resident"}
+	test := func(name string, inventory []string) {
+		t.Run(name, func(t *testing.T) {
+			f := newModelConfigFixture(t)
+			f.completedResidentLoad(t)
+			if entry := f.residentEntry(t); entry.State != nodepolicy.ModelStateSatisfied {
+				t.Fatalf("correlated load before any later inventory: %+v", entry)
+			}
+			r := f.b.nodePolicyRuntime()
+			r.mu.Lock()
+			window := r.models.pending[ref]
+			r.mu.Unlock()
+			if before, known := window.evidence.Loaded["llamacpp"]; !known || len(before) != 0 {
+				t.Fatalf("inventory before the load=%v known=%v, want known empty", before, known)
+			}
+			for range 2 {
+				f.b.observeLoadedFrom(f.source, map[string][]string{"llamacpp": inventory})
+				f.b.reconcileModelConfig(context.Background())
+				entry := f.residentEntry(t)
+				if entry.State != nodepolicy.ModelStateUnknown || entry.Reason != nodepolicy.ModelReasonObservationUnknown || entry.ObservedLoaded == nil || *entry.ObservedLoaded {
+					t.Fatalf("contradicting inventory during pending observation published %+v, want unknown observation with loaded=false", entry)
+				}
+			}
+			r.mu.Lock()
+			pending, ok := r.models.pending[ref]
+			r.mu.Unlock()
+			if loads := len(modelConfigCalls(f.engine, nodepolicy.MethodReconcileResident)); loads != 1 || !ok {
+				t.Fatalf("contradiction loads=%d pending=%v, want the original load still pending", loads, ok)
+			}
+			if !pending.expires.Equal(window.expires) {
+				t.Fatalf("contradiction moved the observation deadline to %s, want %s", pending.expires, window.expires)
+			}
+			f.b.observeLoadedFrom(f.source, map[string][]string{"llamacpp": {"resident"}})
+			f.b.reconcileModelConfig(context.Background())
+			if entry := f.residentEntry(t); entry.State != nodepolicy.ModelStateSatisfied || len(modelConfigCalls(f.engine, nodepolicy.MethodReconcileResident)) != 1 {
+				t.Fatalf("confirming inventory after contradiction: %+v", entry)
+			}
+		})
 	}
-	f.b.observeLoadedFrom(f.source, map[string][]string{"llamacpp": {"other"}})
-	f.b.reconcileModelConfig(context.Background())
-	entry := f.residentEntry(t)
-	if entry.State != nodepolicy.ModelStateUnknown || entry.Reason != nodepolicy.ModelReasonObservationUnknown || entry.ObservedLoaded == nil || *entry.ObservedLoaded {
-		t.Fatalf("contradicting inventory during pending observation published %+v, want unknown observation with loaded=false", entry)
-	}
-	r := f.b.nodePolicyRuntime()
-	r.mu.Lock()
-	_, pending := r.models.pending[nodepolicy.Role{Engine: "llamacpp", Model: "resident"}]
-	r.mu.Unlock()
-	if loads := len(modelConfigCalls(f.engine, nodepolicy.MethodReconcileResident)); loads != 1 || !pending {
-		t.Fatalf("contradiction loads=%d pending=%v, want the original load still pending", loads, pending)
-	}
-	f.b.observeLoadedFrom(f.source, map[string][]string{"llamacpp": {"resident"}})
-	f.b.reconcileModelConfig(context.Background())
-	if entry := f.residentEntry(t); entry.State != nodepolicy.ModelStateSatisfied || len(modelConfigCalls(f.engine, nodepolicy.MethodReconcileResident)) != 1 {
-		t.Fatalf("confirming inventory after contradiction: %+v", entry)
-	}
+	test("other model", []string{"other"})
+	test("repeated empty", []string{})
+}
+
+func TestModelConfigPendingObservationIgnoresUnprovenInventory(t *testing.T) {
+	ref := nodepolicy.Role{Engine: "llamacpp", Model: "resident"}
+	t.Run("retired source", func(t *testing.T) {
+		f := newModelConfigFixture(t)
+		f.completedResidentLoad(t)
+		f.b.observeLoadedFrom(&engineManagerSource{}, map[string][]string{"llamacpp": {}})
+		f.b.reconcileModelConfig(context.Background())
+		if entry := f.residentEntry(t); entry.State != nodepolicy.ModelStateSatisfied {
+			t.Fatalf("retired-source inventory changed the correlated load: %+v", entry)
+		}
+		f.b.observeLoadedFrom(f.source, map[string][]string{"llamacpp": {}})
+		f.b.reconcileModelConfig(context.Background())
+		if entry := f.residentEntry(t); entry.State != nodepolicy.ModelStateUnknown || entry.Reason != nodepolicy.ModelReasonObservationUnknown {
+			t.Fatalf("current-source inventory after a retired one published %+v, want unknown observation", entry)
+		}
+	})
+	t.Run("unknown inventory", func(t *testing.T) {
+		f := newModelConfigFixture(t)
+		f.completedResidentLoad(t)
+		f.b.observeLoadedFrom(f.source, map[string][]string{})
+		f.b.reconcileModelConfig(context.Background())
+		entry := f.residentEntry(t)
+		r := f.b.nodePolicyRuntime()
+		r.mu.Lock()
+		_, pending := r.models.pending[ref]
+		r.mu.Unlock()
+		if loads := len(modelConfigCalls(f.engine, nodepolicy.MethodReconcileResident)); entry.State != nodepolicy.ModelStateUnknown || entry.ObservedLoaded != nil || !pending || loads != 1 {
+			t.Fatalf("unknown inventory: entry=%+v pending=%v loads=%d, want unknown without observed absence, still pending, one load", entry, pending, loads)
+		}
+	})
 }
 
 func TestModelConfigRetirementDropsRecordedLoadRequest(t *testing.T) {
@@ -2979,7 +3029,7 @@ func TestModelConfigNonterminalHoldConfirmsReplacementReadback(t *testing.T) {
 }
 
 func TestModelConfigUnchangedStatusDoesNotNotify(t *testing.T) {
-	for _, scenario := range []string{"satisfied", "blocked", "uncertain hold"} {
+	for _, scenario := range []string{"satisfied", "blocked", "uncertain hold", "failed attempt"} {
 		t.Run(scenario, func(t *testing.T) {
 			f := newModelConfigFixture(t)
 			r := f.b.nodePolicyRuntime()
@@ -2993,6 +3043,8 @@ func TestModelConfigUnchangedStatusDoesNotNotify(t *testing.T) {
 				r.mu.Lock()
 				r.intent["llamacpp"] = false
 				r.mu.Unlock()
+			case "failed attempt":
+				// Each pass publishes pending, then the manager's not-dispatched reply.
 			default:
 				want = nodepolicy.ModelStateUnknown
 				f.nonterminalHold(t)
@@ -3018,11 +3070,19 @@ func TestModelConfigUnchangedStatusDoesNotNotify(t *testing.T) {
 				return n
 			}
 			before := changed()
+			generation := f.b.modelConfiguration(f.b.captureModelConfig()).ObservationGeneration
+			loads := len(modelConfigCalls(f.engine, nodepolicy.MethodReconcileResident))
 			for range 3 {
 				tick()
 			}
 			if after := changed(); after != before {
 				t.Fatalf("unchanged status announced policy:changed %d times", after-before)
+			}
+			if got := f.b.modelConfiguration(f.b.captureModelConfig()).ObservationGeneration; got != generation+3 {
+				t.Fatalf("observationGeneration=%d after three passes from %d", got, generation)
+			}
+			if got := len(modelConfigCalls(f.engine, nodepolicy.MethodReconcileResident)) - loads; scenario == "failed attempt" && got != 3 {
+				t.Fatalf("failed attempt retried %d times in three passes, want 3", got)
 			}
 			r.mu.Lock()
 			r.localPauseRequested = true

@@ -1197,6 +1197,14 @@ func (b *Broker) observeLoadedFor(source *engineManagerSource, pp *proxyProcess,
 			delete(r.models.confirmed, ref)
 		}
 	}
+	for ref, pending := range r.models.pending {
+		if models, known := loadedByEngine[ref.Engine]; known && models != nil && !pending.published {
+			// A later known publication is newer than the load, whatever it lists.
+			pending.published = true
+			r.models.pending[ref] = pending
+			r.models.last = nil
+		}
+	}
 	now := r.now()
 	for engine, models := range loadedByEngine {
 		if !r.running[engine] {
