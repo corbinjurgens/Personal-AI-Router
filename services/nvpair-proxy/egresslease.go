@@ -137,7 +137,9 @@ func (p *Proxy) publicPermissionAccept(tier string, snapshot chatAccountSnapshot
 	l := p.egress
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	policy := p.admission.currentPolicy()
+	p.admission.mu.Lock()
+	defer p.admission.mu.Unlock()
+	policy := p.admission.policy
 	now := int64(l.now())
 	if p.runID == "" || snapshot.revision == "" || snapshot.revision != policy.Revision ||
 		!l.ready || l.transition != nil || l.revision != policy.Revision || now < 0 || now >= l.notAfter {
@@ -172,7 +174,18 @@ const (
 	publicFinalGuard    publicRefusalStage = "final-guard"
 )
 
-type publicAttemptRefusal struct{ Stage publicRefusalStage }
+type publicRefusalReason string
+
+const (
+	publicRefusalPermission publicRefusalReason = "permission-refused"
+	publicRefusalCancelled  publicRefusalReason = "cancelled-before-send"
+	publicRefusalLifecycle  publicRefusalReason = "request-lifecycle-refused"
+)
+
+type publicAttemptRefusal struct {
+	Stage  publicRefusalStage
+	Reason publicRefusalReason
+}
 
 func (e *publicAttemptRefusal) Error() string { return "public attempt refused: " + string(e.Stage) }
 func (e *publicAttemptRefusal) Unwrap() error { return errPublicPermission }
@@ -184,7 +197,9 @@ func (p *Proxy) observePublicAccount(snapshot chatAccountSnapshot, lifecycle *pu
 	l := p.egress
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	policy := p.admission.currentPolicy()
+	p.admission.mu.Lock()
+	defer p.admission.mu.Unlock()
+	policy := p.admission.policy
 	for _, account := range policy.Routing.Accounts {
 		if account.ID == snapshot.account.ID {
 			_, err := lifecycle.tryAccount(account)
@@ -201,30 +216,46 @@ func (p *Proxy) runPublicChatAttempt(ctx context.Context, tier string,
 	snapshot chatAccountSnapshot, body []byte, q *chatQualification,
 	transport *publicClient, resolve func(nodepolicy.CredentialRef) (string, bool),
 	budget chatByteBudget, lifecycle *publicAttemptLifecycle, emit func([]byte) error) (chatParseResult, error) {
-	if p.publicAttemptPermitted(tier, snapshot) != nil {
-		err := &publicAttemptRefusal{Stage: publicBeforeReserve}
+	if lifecycle == nil || lifecycle.request == nil {
+		return chatParseResult{}, &publicAttemptRefusal{Stage: publicBeforeReserve, Reason: publicRefusalLifecycle}
+	}
+	// Every candidate first observes the live validated account, including one
+	// G will refuse. The immutable D snapshot never supplies current allowance.
+	allowanceErr := p.observePublicAccount(snapshot, lifecycle)
+	if allowanceErr != nil || p.publicAttemptPermitted(tier, snapshot) != nil {
+		err := &publicAttemptRefusal{Stage: publicBeforeReserve, Reason: publicRefusalPermission}
 		if lifecycle != nil && lifecycle.request != nil {
-			// Trying a refused paid candidate still tightens the same request.
-			// This is an in-memory observation, never a grant or ledger write.
-			allowanceErr := p.observePublicAccount(snapshot, lifecycle)
 			lifecycle.finished(publicAttemptTerminal{Accounting: publicAccountingRetained, Err: errors.Join(err, allowanceErr)})
 		}
 		return chatParseResult{}, err
 	}
 	refused := false
 	guard := func(ctx context.Context, accept func() error) error {
-		if !nodepolicy.PublicDispatchAvailable() || ctx.Err() != nil || p.publicPermissionAccept(tier, snapshot, accept) != nil {
+		if ctx.Err() != nil {
+			return errPublicCancelledBeforeSend
+		}
+		if !nodepolicy.PublicDispatchAvailable() {
 			refused = true
 			return errPublicPermission
 		}
-		return nil
+		err := p.publicPermissionAccept(tier, snapshot, accept)
+		if err != nil {
+			refused = true
+		}
+		return err
 	}
 	result, err := runChatAccountAttempt(ctx, snapshot, body, q, p.accounts, transport, resolve, budget, guard, lifecycle, emit)
 	if errors.Is(err, errPublicFinalGuard) {
-		return result, &publicAttemptRefusal{Stage: publicFinalGuard}
+		reason := publicRefusalPermission
+		if errors.Is(err, errPublicCancelledBeforeSend) || lifecycle.request.requestCancelled() {
+			reason = publicRefusalCancelled
+		} else if errors.Is(err, errRoutingSpend) {
+			reason = publicRefusalLifecycle
+		}
+		return result, &publicAttemptRefusal{Stage: publicFinalGuard, Reason: reason}
 	}
 	if refused {
-		return result, &publicAttemptRefusal{Stage: publicAfterReserve}
+		return result, &publicAttemptRefusal{Stage: publicAfterReserve, Reason: publicRefusalPermission}
 	}
 	return result, err
 }

@@ -160,6 +160,7 @@ func (r *publicResponse) FirstBodyAt() time.Time {
 // A returned body owns its reservation until Close; consumers must defer Close,
 // including parser failures and panic unwinding.
 var errPublicFinalGuard = errors.New("public final pre-send guard refused")
+var errPublicCancelledBeforeSend = errors.New("public request cancelled before send")
 
 func (c *publicClient) post(ctx context.Context, prepared io.Reader, authorization string, stream bool, budget publicBudget, guard func(context.Context) error) (*publicResponse, error) {
 	return c.postObserved(ctx, prepared, authorization, stream, budget, guard, nil)
@@ -215,8 +216,11 @@ func (c *publicClient) postObserved(ctx context.Context, prepared io.Reader, aut
 	// The callback is the definitive permission/lease acceptance. All fallible
 	// construction and headroom acquisition precedes it; no work may block
 	// between its successful return and Do. Release its locks before IO.
-	if guard == nil || ctx.Err() != nil || guard(ctx) != nil {
-		return nil, errPublicFinalGuard
+	if ctx.Err() != nil {
+		return nil, errors.Join(errPublicFinalGuard, errPublicCancelledBeforeSend)
+	}
+	if guardErr := guard(ctx); guardErr != nil {
+		return nil, errors.Join(errPublicFinalGuard, guardErr)
 	}
 	resp, err := c.client.Do(req)
 	if err != nil {

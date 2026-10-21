@@ -221,6 +221,15 @@ type performanceJSONNode struct {
 type performancePreparationKey struct{}
 type performancePreparation struct{ bytes int64 }
 
+// Transfer only the admitted allowance; temporary preparation cancellation
+// must not become cancellation of the accepted transport or its reader.
+func rebasePerformancePreparation(live, prepared context.Context) context.Context {
+	if allowance, ok := prepared.Value(performancePreparationKey{}).(performancePreparation); ok {
+		return context.WithValue(live, performancePreparationKey{}, allowance)
+	}
+	return live
+}
+
 // One descriptor/index slot per lexical token (including keys) is a deliberate
 // upper capacity, not a body multiplier. A node is <=104 bytes on 64-bit Go;
 // 128 plus an 8-byte index covers either supported word size. Decoded strings
@@ -751,9 +760,16 @@ func performanceMilliseconds(d time.Duration) *int64 {
 func installResponseStream(resp *http.Response, request originStreamRequest, parent context.Context, idle time.Duration, a *performanceAttempt) (*streamFrameReader, error) {
 	managed, validMedia := request.manages(resp.Header.Get("Content-Type"))
 	if !managed || resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		if sink := responseSinkFrom(parent); sink != nil && resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices {
+			resp.Body = &sinkObservedBody{ReadCloser: resp.Body, sink: sink, response: resp, peer: request}
+		}
 		return nil, nil
 	}
-	config := streamFrameConfig{Protocol: request.protocol, Upstream: resp.Body, Parent: parent, IdleTimeout: idle, Choices: request.choices, PeerNormalized: request.peerNormalized}
+	sink := responseSinkFrom(parent)
+	config := streamFrameConfig{Protocol: request.protocol, Upstream: resp.Body, Parent: parent, IdleTimeout: idle, Choices: request.choices, PeerNormalized: request.peerNormalized, Sink: sink}
+	if request.peerNormalized {
+		config.PeerTrailer = func() []string { return resp.Trailer.Values(peerStreamFramingHeader) }
+	}
 	if a != nil {
 		config.Extract = func(payload []byte) performanceExtractMetadata {
 			return extractPerformanceObserved(payload, a.qualification)
@@ -802,6 +818,10 @@ func (a *performanceAttempt) finish(sc *statusCapture, returned bool) {
 	if a.reader != nil {
 		result := a.reader.Result()
 		complete := result.Outcome == streamOutcomeCompleted && returned && sc.wroteErr == nil && a.parent.Err() == nil
+		if sink := responseSinkFrom(a.parent); sink != nil {
+			delivery := sink.result()
+			complete = complete && delivery.DeliveryComplete && delivery.ProtocolComplete
+		}
 		m.ProtocolComplete = &complete
 		n := result.Numeric
 		m.PromptTokens, m.CachedPromptTokens, m.OutputTokens = n.PromptTokens, n.CachedPromptTokens, n.OutputTokens
@@ -814,7 +834,14 @@ func (a *performanceAttempt) finish(sc *statusCapture, returned bool) {
 			m.Outcome = performancewire.OutcomeCompleted
 		}
 	} else if returned && sc.upstreamBody != nil && sc.upstreamBody.complete && sc.wroteErr == nil && a.parent.Err() == nil && sc.status >= 200 && sc.status < 300 {
-		m.Outcome = performancewire.OutcomeCompleted // unobserved protocol stays nil
+		complete := true
+		if sink := responseSinkFrom(a.parent); sink != nil {
+			delivery := sink.result()
+			complete = delivery.DeliveryComplete && delivery.ProtocolComplete
+		}
+		if complete {
+			m.Outcome = performancewire.OutcomeCompleted // unobserved protocol stays nil
+		}
 	}
 	a.f.host.enqueuePerformance(performancewire.Sample{Key: a.key, Profile: performancewire.Profile{EngineFamily: a.qualification.EngineFamily}, Measurement: m})
 }

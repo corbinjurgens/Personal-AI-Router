@@ -576,6 +576,19 @@ func runChatAccountAttempt(ctx context.Context, snapshot chatAccountSnapshot, bo
 	if lifecycle == nil || lifecycle.request == nil {
 		return result, errChatAttempt
 	}
+	// The request's immutable sink is the actual owned output path. The emit
+	// argument remains the standalone synthetic library seam only.
+	lifecycle.request.mu.Lock()
+	sink := lifecycle.request.sink
+	deadline := lifecycle.request.deadline
+	lifecycle.request.mu.Unlock()
+	if !deadline.IsZero() {
+		ctx = context.WithValue(ctx, routingDeadlineContextKey{}, deadline)
+	}
+	if sink != nil {
+		emit = sink.writePublicFrame
+		ctx = withResponseSink(ctx, sink)
+	}
 	terminal := publicAttemptTerminal{Accounting: publicAccountingRetained}
 	defer func() {
 		terminal.ProtocolComplete, terminal.Exposed = result.Complete, result.Exposed
@@ -591,12 +604,20 @@ func runChatAccountAttempt(ctx context.Context, snapshot chatAccountSnapshot, bo
 		nodepolicy.CheckEndpoint(d.Endpoint) != nil || transport.endpoint != d.Endpoint || transport.bounds != *d.Transport {
 		return result, errChatAttempt
 	}
+	lifecycle.request.watchPreOutput(ctx)
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	if lifecycle.bindCancel(cancel) != nil {
 		return result, errChatAttempt
 	}
 	budget, stopWaiting := chatInferenceBudget(ctx, budget)
+	defer stopWaiting()
+	prepareCtx := ctx
+	stopPreparation := func() {}
+	if !deadline.IsZero() {
+		prepareCtx, stopPreparation = context.WithDeadline(ctx, deadline)
+	}
+	defer stopPreparation()
 	if q.MaxBodyBytes > d.Transport.MaxResponseBytes || q.MaxEventBytes > d.Transport.MaxEventBytes {
 		return result, errChatAttempt
 	}
@@ -606,7 +627,7 @@ func runChatAccountAttempt(ctx context.Context, snapshot chatAccountSnapshot, bo
 	}
 	target := chatTarget{Protocol: d.Protocol, Endpoint: d.Endpoint, Model: d.Model, Qualification: *d.Qualification,
 		ContextTokens: int64(d.ContextTokens), MaxOutputTokens: int64(d.MaxOutputTokens)}
-	prepared, err := q.prepare(ctx, target, http.MethodPost, routeChatCompletions, body, budget)
+	prepared, err := q.prepare(prepareCtx, target, http.MethodPost, routeChatCompletions, body, budget)
 	if err != nil {
 		return result, err
 	}
@@ -627,6 +648,7 @@ func runChatAccountAttempt(ctx context.Context, snapshot chatAccountSnapshot, bo
 	// All later growth belongs to this admitted attempt and must interrupt
 	// cleanly on refusal rather than waiting while a response is committed.
 	stopWaiting()
+	stopPreparation()
 	key, ok := resolve(ref)
 	if !ok || key == "" || strings.ContainsFunc(key, unicode.IsControl) {
 		return result, errChatCredential
@@ -651,15 +673,22 @@ func runChatAccountAttempt(ctx context.Context, snapshot chatAccountSnapshot, bo
 			}
 			return transportRelease, nil
 		}, func(ctx context.Context) error {
-			if q.fresh() != nil || ctx.Err() != nil {
+			if ctx.Err() != nil {
+				return errPublicCancelledBeforeSend
+			}
+			if q.fresh() != nil {
 				return errChatAttempt
 			}
-			return guard(ctx, func() error { return lifecycle.acceptedByGuard(ctx) })
+			guardErr := guard(ctx, func() error { return lifecycle.acceptedByGuard(ctx) })
+			if guardErr != nil && (ctx.Err() != nil || lifecycle.request.requestCancelled()) {
+				return errors.Join(errPublicCancelledBeforeSend, guardErr)
+			}
+			return guardErr
 		}, lifecycle.firstSuccessfulByte)
 	if errors.Is(attemptErr, errPublicFinalGuard) {
 		// Proven unsent: leave the hold unclassified and retained. There is no
 		// provider outcome, cooldown, qualification or money reconciliation.
-		return result, errPublicFinalGuard
+		return result, attemptErr
 	}
 	outcome, retryAfter := outcomeTransient, time.Duration(0)
 	if attemptErr != nil {
@@ -673,8 +702,46 @@ func runChatAccountAttempt(ctx context.Context, snapshot chatAccountSnapshot, bo
 				break
 			}
 			defer response.Body.Close()
+			if sink != nil {
+				contentType := "application/json"
+				if prepared.Stream {
+					contentType = "text/event-stream"
+				}
+				sink.Header().Set("Content-Type", contentType)
+			}
 			result, attemptErr = q.parseResponseWithAllowance(ctx, response.Body, prepared.Stream, prepared.Input, prepared.Output, response.HeaderAt, parserAllowance, emit)
 			terminal.Delivered = attemptErr == nil && result.Complete
+			if sink != nil {
+				// Publish parser and delivery facts before any independent D
+				// completion can fail. Raw transport observation alone commits.
+				cancelled := ctx.Err() != nil || lifecycle.request.requestCancelled()
+				if sink.result().WriteError != nil {
+					lifecycle.request.cancelWithReason("client connection lost")
+					cancelled = true
+				}
+				if attemptErr != nil && !cancelled && lifecycle.requestCommitted() {
+					reason := streamInterruptReasonMalformed
+					if errors.Is(attemptErr, errChatBudget) {
+						reason = streamInterruptReasonBudget
+					}
+					protocol := streamProtocolNDJSON
+					if prepared.Stream {
+						protocol = streamProtocolSSE
+					}
+					if deliveryErr := sink.interrupt(protocol, reason); deliveryErr != nil {
+						lifecycle.request.cancelWithReason("client connection lost")
+						cancelled = true
+					}
+				}
+				outcome := streamOutcomeInterrupted
+				if cancelled {
+					outcome = streamOutcomeCancelled
+				} else if result.Complete {
+					outcome = streamOutcomeCompleted
+				}
+				sink.streamResult(streamFrameResult{Outcome: outcome})
+				terminal.Delivered = sink.result().DeliveryComplete
+			}
 			if attemptErr == nil {
 				outcome = outcomeOK
 			}

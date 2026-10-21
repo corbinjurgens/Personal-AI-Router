@@ -876,8 +876,8 @@ func TestHandleHTTP_SelfAdmissionCancelStaysWithAttempt(t *testing.T) {
 		// abandon or exclude the replacement, even before that attempt commits.
 		cancel()
 		ctl.mu.Lock()
-		att := ctl.attempt
-		peerAbandoned := att != nil && att.claim.abandoned()
+		att := ctl.active
+		peerAbandoned := att != nil && att.aborted
 		peerExcluded := ctl.excluded["peer"]
 		ctl.mu.Unlock()
 		if att == nil || peerAbandoned || peerExcluded {

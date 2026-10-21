@@ -38,11 +38,16 @@ func chatInferenceBudget(ctx context.Context, budget chatByteBudget) (chatByteBu
 	if owner == nil || budget == nil {
 		return budget, func() {}
 	}
+	waitCtx := ctx
+	stopWaitContext := func() {}
+	if deadline, ok := ctx.Value(routingDeadlineContextKey{}).(time.Time); ok && !deadline.IsZero() {
+		waitCtx, stopWaitContext = context.WithDeadline(ctx, deadline)
+	}
 	wait := true
 	return func(n int64) (release func(), err error) {
 		var lease *bufferLease
 		if wait {
-			lease, err = owner.scope.acquire(ctx, n)
+			lease, err = owner.scope.acquire(waitCtx, n)
 		} else {
 			lease, err = owner.scope.tryAcquire(ctx, n)
 		}
@@ -67,7 +72,7 @@ func chatInferenceBudget(ctx context.Context, budget chatByteBudget) (chatByteBu
 		}
 		keep = true
 		return sync.OnceFunc(func() { bounded(); lease.close() }), nil
-	}, func() { wait = false }
+	}, func() { wait = false; stopWaitContext() }
 }
 
 type chatTarget struct {
@@ -1135,6 +1140,11 @@ func (q *chatQualification) parseResponseWithAllowance(ctx context.Context, read
 						}
 						state.done = true
 						result.Terminal = q.Now()
+						// Keep this event in its already-accounted buffer until
+						// EOF validates the entire response. A later read failure
+						// or trailing byte must never follow an exposed success.
+						line = line[:0]
+						return nil
 					} else {
 						if state.done {
 							return errChat
@@ -1190,6 +1200,9 @@ func (q *chatQualification) parseResponseWithAllowance(ctx context.Context, read
 			}
 			n, e := reader.Read(one[:])
 			if n > 0 {
+				if state.done {
+					return result, errChat
+				}
 				observe()
 				total++
 				if total > q.MaxBodyBytes || int64(len(event)) >= q.MaxEventBytes {
@@ -1218,8 +1231,13 @@ func (q *chatQualification) parseResponseWithAllowance(ctx context.Context, read
 			}
 		}
 		// EOF never dispatches an unterminated event or substitutes for [DONE].
-		if !state.done || len(event) != 0 || len(line) != 0 {
+		if !state.done || len(line) != 0 {
 			return result, errChat
+		}
+		if !aboveBound() {
+			if e := expose(event); e != nil {
+				return result, e
+			}
 		}
 	}
 	if ctx.Err() != nil {

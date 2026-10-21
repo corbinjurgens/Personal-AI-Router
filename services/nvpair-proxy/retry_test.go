@@ -135,8 +135,18 @@ func TestBackoffFor_NeverOutlastsTheDeadline(t *testing.T) {
 // signals (spec §5.3). These cover the claim directly, because the race window
 // in the handler is not reachable deterministically.
 
+func routingClaimAttempt(t *testing.T) *publicAttemptLifecycle {
+	t.Helper()
+	owner := newRoutingRequest(nil)
+	a, err := owner.newDispatchAttempt(context.Background(), func() {}, "candidate")
+	if err != nil || !a.acceptResponse() {
+		t.Fatalf("prepare accepted attempt: %v", err)
+	}
+	return a
+}
+
 func TestAttemptClaim_CommitWinsATie(t *testing.T) {
-	var claim attemptClaim
+	claim := routingClaimAttempt(t)
 
 	if !claim.commit() {
 		t.Fatal("commit on a pending claim should win")
@@ -150,7 +160,7 @@ func TestAttemptClaim_CommitWinsATie(t *testing.T) {
 }
 
 func TestAttemptClaim_AbandonBlocksALaterCommit(t *testing.T) {
-	var claim attemptClaim
+	claim := routingClaimAttempt(t)
 
 	if !claim.abandon() {
 		t.Fatal("abandon on a pending claim should win")
@@ -164,7 +174,7 @@ func TestAttemptClaim_AbandonBlocksALaterCommit(t *testing.T) {
 }
 
 func TestAttemptClaim_CommitIsIdempotent(t *testing.T) {
-	var claim attemptClaim
+	claim := routingClaimAttempt(t)
 
 	if !claim.commit() || !claim.commit() {
 		t.Fatal("a second commit from the same committed attempt should still report true")
@@ -172,7 +182,7 @@ func TestAttemptClaim_CommitIsIdempotent(t *testing.T) {
 }
 
 func TestAttemptClaim_SettledOnlyAfterAClaim(t *testing.T) {
-	var pending, committed, abandoned attemptClaim
+	pending, committed, abandoned := routingClaimAttempt(t), routingClaimAttempt(t), routingClaimAttempt(t)
 	committed.commit()
 	abandoned.abandon()
 
@@ -188,7 +198,7 @@ func TestAttemptClaim_SettledOnlyAfterAClaim(t *testing.T) {
 // exists for: with both sides racing, one and only one succeeds.
 func TestAttemptClaim_ExactlyOneWinnerUnderContention(t *testing.T) {
 	for range 500 {
-		var claim attemptClaim
+		claim := routingClaimAttempt(t)
 		var commits, abandons atomic.Int32
 
 		start := make(chan struct{})
