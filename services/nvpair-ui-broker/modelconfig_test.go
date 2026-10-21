@@ -1832,6 +1832,197 @@ func TestModelConfigUnknownInventoryDoesNotLoadNewResident(t *testing.T) {
 	}
 }
 
+func TestModelConfigRestartStartResponseRecoversResident(t *testing.T) {
+	f := newModelConfigFixture(t)
+	r := f.b.nodePolicyRuntime()
+	r.mu.Lock()
+	delete(r.running, "llamacpp") // Attach snapshot preceded the engine start.
+	r.mu.Unlock()
+	f.engine.setAnswer(func(method string, _ json.RawMessage) (any, string) {
+		if method == "engine:start" {
+			return map[string]any{"engine": "llamacpp", "running": true}, ""
+		}
+		return map[string]bool{"ok": true}, ""
+	})
+	f.b.relayToEngineNow(clientRequest(1, "engine:start", map[string]string{"engine": "llamacpp"}))
+	response := f.out.waitFrame(t, "engine:start response", isResponse(1))
+	if response.Error != nil {
+		t.Fatalf("engine:start response: %+v", response.Error)
+	}
+	status := f.b.modelConfiguration(f.b.captureModelConfig())
+	if len(status.Models) != 1 || status.Models[0].State != nodepolicy.ModelStatePending {
+		t.Fatalf("running start result left resident blocked: %+v", status)
+	}
+	done := f.startLoadedAttempt(t)
+	f.awaitGrant(t)
+	f.engine.releaseHeld()
+	awaitModelConfigDone(t, done)
+	status = f.b.modelConfiguration(f.b.captureModelConfig())
+	if len(status.Models) != 1 || status.Models[0].State != nodepolicy.ModelStateSatisfied {
+		t.Fatalf("resident did not settle: %+v", status)
+	}
+	if got := len(modelConfigCalls(f.engine, nodepolicy.MethodReconcileResident)); got != 1 {
+		t.Fatalf("resident loads = %d, want one", got)
+	}
+}
+
+func TestModelConfigRestartProxyEngineOffRefusalRetries(t *testing.T) {
+	f := newModelConfigFixture(t)
+	f.proxy.mu.Lock()
+	answer := f.proxy.answer
+	f.proxy.mu.Unlock()
+	refused := false
+	f.proxy.setAnswer(func(method string, params json.RawMessage) (any, string) {
+		if method == nodepolicy.MethodPrepareResident && !refused {
+			refused = true
+			return nodepolicy.PrepareResidentResult{EvidenceGeneration: 1, Refusals: []nodepolicy.ResidentRefusal{{Engine: "llamacpp", Model: "resident", Reason: nodepolicy.ModelReasonEngineOff}}}, ""
+		}
+		return answer(method, params)
+	})
+	f.b.reconcileModelConfig(context.Background())
+	status := f.b.localPolicy().ModelConfiguration
+	if len(status.Models) != 1 || status.Models[0].State != nodepolicy.ModelStatePending || status.Models[0].Reason != "" {
+		t.Fatalf("running engine with stale proxy view = %+v, want pending", status)
+	}
+	if got := len(modelConfigCalls(f.engine, nodepolicy.MethodReconcileResident)); got != 0 {
+		t.Fatalf("refused prepare dispatched %d loads", got)
+	}
+	r := f.b.nodePolicyRuntime()
+	r.mu.Lock()
+	r.now = time.Now
+	r.models.retryAt = time.Now().Add(60 * time.Millisecond)
+	r.mu.Unlock()
+	f.setResidentAttemptAnswer(t, nodepolicy.ResidentLoaded)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); f.b.runIdlePolicy(ctx) }()
+	defer func() { cancel(); awaitModelConfigDone(t, done) }()
+	f.awaitGrant(t)
+	f.engine.releaseHeld()
+	settled := time.After(2 * time.Second)
+	for {
+		r.mu.Lock()
+		busy := r.models.busy
+		r.mu.Unlock()
+		if !busy {
+			break
+		}
+		select {
+		case <-settled:
+			t.Fatal("retried resident reconciliation did not finish")
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+	f.b.observeLoadedFrom(f.source, map[string][]string{"llamacpp": {"resident"}})
+	f.b.reconcileModelConfig(context.Background())
+	status = f.b.localPolicy().ModelConfiguration
+	if len(status.Models) != 1 || status.Models[0].State != nodepolicy.ModelStateSatisfied {
+		t.Fatalf("resident did not recover after proxy caught up: %+v", status)
+	}
+	if got := len(modelConfigCalls(f.engine, nodepolicy.MethodReconcileResident)); got != 1 {
+		t.Fatalf("resident loads = %d, want one", got)
+	}
+}
+
+func TestModelConfigRetryWakesAtDeadlineBetweenIdleTicks(t *testing.T) {
+	f := newModelConfigFixture(t)
+	r := f.b.nodePolicyRuntime()
+	r.mu.Lock()
+	r.now = time.Now
+	r.mu.Unlock()
+	f.b.reconcileModelConfig(context.Background())
+	if got := len(modelConfigCalls(f.proxy, nodepolicy.MethodPrepareResident)); got != 1 {
+		t.Fatalf("initial prepares = %d, want one", got)
+	}
+	r.mu.Lock()
+	r.models.retryAt = time.Now().Add(60 * time.Millisecond)
+	r.mu.Unlock()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); f.b.runIdlePolicy(ctx) }()
+	defer func() { cancel(); awaitModelConfigDone(t, done) }()
+	deadline := time.After(500 * time.Millisecond)
+	for len(modelConfigCalls(f.proxy, nodepolicy.MethodPrepareResident)) < 2 {
+		select {
+		case <-deadline:
+			r.mu.Lock()
+			retryAt, now, busy := r.models.retryAt, r.now(), r.models.busy
+			r.mu.Unlock()
+			t.Fatalf("retry missed deadline: retryAt=%s now=%s busy=%v status=%+v calls=%v", retryAt, now, busy, f.b.localPolicy().ModelConfiguration, f.proxy.methods(""))
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+}
+
+func TestModelConfigRestartSnapshotDoesNotUndoNewerRunningStatus(t *testing.T) {
+	f := newModelConfigFixture(t)
+	r := f.b.nodePolicyRuntime()
+	r.mu.Lock()
+	delete(r.running, "llamacpp")
+	r.mu.Unlock()
+	f.engine.setAnswer(func(method string, _ json.RawMessage) (any, string) {
+		switch method {
+		case "engine:get-installed":
+			return map[string]any{"engines": []any{map[string]any{"engine": "llamacpp", "running": false}}}, holdSuccessReply
+		case "engine:start", "engine:status":
+			return map[string]any{"engine": "llamacpp", "running": true}, ""
+		case "engine:models":
+			return map[string]any{"models": []string{}, "loadedByEngine": map[string][]string{}}, ""
+		default:
+			return map[string]bool{"ok": true}, ""
+		}
+	})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		f.b.refreshEnginePolicySnapshotFrom(f.b.getEngineMgr(), f.source)
+	}()
+	f.engine.waitFor("initial installed snapshot", func(calls []policyCall) bool {
+		return len(modelConfigCalls(f.engine, "engine:get-installed")) > 0
+	})
+	for id, method := range []string{"engine:start", "engine:status"} {
+		requestID := id + 1
+		f.b.relayToEngineNow(clientRequest(requestID, method, map[string]string{"engine": "llamacpp"}))
+		response := f.out.waitFrame(t, method+" response", isResponse(requestID))
+		if response.Error != nil {
+			t.Fatalf("%s response: %+v", method, response.Error)
+		}
+	}
+	f.engine.releaseHeld()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("initial installed snapshot did not finish")
+	}
+	status := f.b.modelConfiguration(f.b.captureModelConfig())
+	if len(status.Models) != 1 || status.Models[0].State != nodepolicy.ModelStateUnknown || status.Models[0].Reason != nodepolicy.ModelReasonObservationUnknown {
+		t.Fatalf("stale installed snapshot overrode running status: %+v", status)
+	}
+}
+
+func TestModelConfigStoppedStatusKeepsEngineOff(t *testing.T) {
+	f := newModelConfigFixture(t)
+	f.engine.setAnswer(func(method string, _ json.RawMessage) (any, string) {
+		if method == "engine:status" {
+			return map[string]any{"engine": "llamacpp", "running": false}, ""
+		}
+		return map[string]bool{"ok": true}, ""
+	})
+	f.b.relayToEngineNow(clientRequest(1, "engine:status", map[string]string{"engine": "llamacpp"}))
+	response := f.out.waitFrame(t, "engine:status response", isResponse(1))
+	if response.Error != nil {
+		t.Fatalf("engine:status response: %+v", response.Error)
+	}
+	f.b.reconcileModelConfig(context.Background())
+	status := f.b.modelConfiguration(f.b.captureModelConfig())
+	if len(status.Models) != 1 || status.Models[0].State != nodepolicy.ModelStateBlocked || status.Models[0].Reason != nodepolicy.ModelReasonEngineOff {
+		t.Fatalf("stopped engine status = %+v, want engine-off", status)
+	}
+	if got := len(modelConfigCalls(f.engine, nodepolicy.MethodReconcileResident)); got != 0 {
+		t.Fatalf("stopped engine dispatched %d loads", got)
+	}
+}
+
 func TestModelConfigInternalClientMethodsDenied(t *testing.T) {
 	for _, method := range []string{nodepolicy.MethodReconcileResident, residentDispatchRequestMethod, residentDispatchReplyMethod} {
 		t.Run(method, func(t *testing.T) {
@@ -1851,6 +2042,14 @@ func (f *modelConfigFixture) startLoadedAttempt(t *testing.T) <-chan struct{} {
 }
 
 func (f *modelConfigFixture) startResidentAttempt(t *testing.T, outcome nodepolicy.ResidentOutcome) <-chan struct{} {
+	t.Helper()
+	f.setResidentAttemptAnswer(t, outcome)
+	done := make(chan struct{})
+	go func() { defer close(done); f.b.reconcileModelConfig(context.Background()) }()
+	return done
+}
+
+func (f *modelConfigFixture) setResidentAttemptAnswer(t *testing.T, outcome nodepolicy.ResidentOutcome) {
 	t.Helper()
 	f.engine.setAnswer(func(method string, raw json.RawMessage) (any, string) {
 		if method == settings.SwitchPrepareMethod {
@@ -1884,9 +2083,6 @@ func (f *modelConfigFixture) startResidentAttempt(t *testing.T, outcome nodepoli
 		}
 		return result, holdSuccessReply
 	})
-	done := make(chan struct{})
-	go func() { defer close(done); f.b.reconcileModelConfig(context.Background()) }()
-	return done
 }
 
 func awaitModelConfigDone(t *testing.T, done <-chan struct{}) {
