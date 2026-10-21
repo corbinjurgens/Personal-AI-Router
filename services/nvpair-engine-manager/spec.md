@@ -148,8 +148,9 @@ outside locks and rechecks run/config before returning detached values. A
 `*ServingIdentityRefusal` reports refusal; it never probes, loads, or edits
 configuration. SR owns requested context/output/slot comparisons. The helper
 `servingRetentionDisabled` is true only for exact retention `"-1"`; SR 5b owns
-retention enforcement and capacity comparison against its revision-bound
-resident set. Declaration count is not the resident set.
+retention enforcement and capacity comparison against the engine-specific
+`declaredResidentCount` bound to `policyRevision`. Declaration count is not the
+resident set.
 
 This identity alone does not establish loaded observations, qualification, strict
 readiness envelope enforcement, or plain direct-model output enforcement.
@@ -253,6 +254,13 @@ ec/HTTP route. The broker must reject client-originated requests before its
 generic engine relay. Shared decoding rejects duplicate, case-variant, unknown
 and null fields; invalid params return `-32602`. The reservation's incarnation
 must exactly equal this manager's incarnation, including when omitted on wire.
+`declaredResidentCount` is required: an integer in 1..256 describing this
+engine's desired resident set at the request's existing `policyRevision`.
+The bound reuses nodepolicy's resident-model limit. Missing, zero, negative,
+non-integer and over-bound counts are invalid params before effects. Broker and
+manager ship together; there is no compatibility default. Until SR 5c's broker
+producer supplies the field, automatic resident loads are refused. The field
+does not alter Prepare/Dispatch DTOs or keep-alive semantics.
 
 The first request establishes an absolute deadline of `timeoutMs` (1..60000),
 including lifecycle-lock waiting, dispatch relay, load and readback. Identical
@@ -273,10 +281,14 @@ the dispatch relay refuse these conditions with `outcome:"not-dispatched"`:
 - `not-installed`: normalized model absent from authoritative installed inventory.
   Older sweeps cannot replace newer installed inventory.
 - `unqualified`: incarnation/run/requested-model digest mismatch, absent owned
-  launch identity, withdrawn identity or ambiguous normalized identities.
-- `unsupported-load`: non-Ollama family, implicit/restart-after/content-mutating
-  load binding, unsupported endpoint or fixed parameters. Readback must be a
-  side-effect-free `GET /api/ps` action with a result extraction spec.
+  launch identity, withdrawn identity, ambiguous normalized identities, stale
+  serving envelope or mismatched finite context.
+- `unsupported-load`: implicit/restart-after/content-mutating load binding,
+  unsupported action shape, fixed parameters, enabled native idle retention,
+  or router capacity smaller than the revision-bound declared resident count.
+  Readback must be a
+  side-effect-free `GET` action with a result extraction spec and loaded-status
+  filter.
 
 These are internal refusal conditions: `ReconcileResidentResult` has no reason
 field. No raw engine bodies, prompts or digest dumps are returned as explanations.
@@ -287,7 +299,7 @@ Under E3 mutation admission and the engine lifecycle lock, immediately before
 the load, the manager synchronously sends an **internal notification**:
 
 ```json
-{"jsonrpc":"2.0","method":"engine:dispatch-resident-request","params":{"id":"correlation-id","params":{"reservationId":"reservation-id","proxyRunId":"proxy-run","managerIncarnation":"manager-incarnation","operationId":"operation-id","policyRevision":"1","engine":"ollama","model":"m:latest","identity":{"engineRunId":"engine-run","settingsFingerprint":"sha256-hex","modelDigest":"sha256-hex"}}}}
+{"jsonrpc":"2.0","method":"engine:dispatch-resident-request","params":{"id":"correlation-id","params":{"reservationId":"reservation-id","proxyRunId":"proxy-run","managerIncarnation":"manager-incarnation","operationId":"operation-id","policyRevision":"1","engine":"llamacpp","model":"m","identity":{"engineRunId":"engine-run","settingsFingerprint":"sha256-hex","modelDigest":"sha256-hex"}}}}
 ```
 
 `params.params` is exactly `nodepolicy.DispatchResidentParams`, built from the
@@ -334,20 +346,32 @@ not synthesize it or treat request fields alone as proof of a current grant.
 
 ### Load mapping and observation evidence
 
-Only an explicit Ollama-family manifest load binding to `POST /api/generate`
-with model parameter `model` is supported. The sole allowed fixed parameter is
-`stream:false`. No command/path/progress/resolver or restart side effect is
-accepted. The body contains only `{model,stream:false,keep_alive,options:{num_ctx}}`:
-the normalized installed model, integer `num_ctx = load.contextLength`, and
-numeric `keep_alive = load.keepAliveSeconds` in seconds (1..86400). No prompt
-is sent. LM Studio and llama.cpp are unsupported for automatic residency.
+An explicit manifest `OperationLoad` binding must name a `POST` action with
+`modelParam:"model"`, `BodySchema` exactly `{model:string}`, and no fixed
+parameters. Its payload is exactly `{model}` with the normalized installed
+model. The `loaded_models` action must be a safe `GET` with result extraction
+and a loaded-status filter. Neither action may use `ParamsIn`, restart,
+commands, remove paths, model resolution, progress protocols or content
+mutation. Compatible manifests share this contract; no family-specific body
+fields are invented. `load.keepAliveSeconds` remains validated in 1..86400 but
+is not sent; native launch settings own retention. No prompt is sent.
 There is no pull/install/copy/delete/start/restore, inference, arbitrary-action
 fallback, eviction or unload protection implementation here. Loads never take
 B2's content guard or withdraw identity.
 
+The manager calls NE's current-envelope validator before final grant and again
+immediately before the load. Requested context must equal the current approved
+finite per-slot context, retention must be exactly `-1` (disabled), and
+`RouterCapacity` must be at least `DeclaredResidentCount`. Settings/stop use the
+same registered-load cancellation guard as ordinary loads; residency does not
+introduce a separate cancellation registry.
+
 Every dispatched call, success or failure, pokes the loaded watcher. A fresh
 readback begins after the call, under the same deadline. `loaded` requires the
-requested normalized model and still-current identity. The observation contains
+requested normalized model, still-current identity and fresh model-specific
+context/slot readback matching the approved envelope. Successful settings
+re-apply may clear withdrawal but cannot prove that an already loaded child's
+allocation changed. The observation contains
 `{managerIncarnation,generation,engine,model,identity,loaded}`; generation is a
 monotonic counter scoped to this manager's resident readbacks. The settings
 fingerprint is the one authorized by the proxy. No last-good watcher baseline
