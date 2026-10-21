@@ -28,6 +28,9 @@ const residentObservationTimeout = 2 * idleCheckInterval
 type residentPendingObservation struct {
 	evidence modelConfigEvidence
 	expires  time.Time
+	// published records a known inventory publication for the engine after the
+	// load completed, even one equal to the inventory before the load.
+	published bool
 }
 
 type residentUnsettled struct {
@@ -298,14 +301,15 @@ func sameResidentAllocation(a, b modelConfigEvidence, ref nodepolicy.Role) bool 
 
 // Pending facts prevent redispatch even when their original source can no
 // longer prove satisfaction. Local vetoes still determine the published state.
-// Inventory published after the load that omits the model contradicts it.
+// Inventory that omits the model contradicts the load once it was published
+// after the load or differs from the inventory before it.
 func residentProofLocked(r *policyRuntime, e modelConfigEvidence, ref nodepolicy.Role, entry nodepolicy.ModelConfigurationEntry) nodepolicy.ModelConfigurationEntry {
 	if pending, ok := r.models.pending[ref]; ok && pending.evidence.Policy.Revision == e.Policy.Revision && r.now().Before(pending.expires) && entry.State == nodepolicy.ModelStatePending {
 		if e.LoadedCurrent[ref.Engine][ref.Model] && entry.ObservedLoaded != nil && *entry.ObservedLoaded && !sameResidentAllocation(pending.evidence, e, ref) {
 			return entry // Fresh replacement-source inventory still needs envelope readback.
 		}
 		entry.State, entry.Reason = nodepolicy.ModelStateUnknown, nodepolicy.ModelReasonObservationUnknown
-		contradicted := entry.ObservedLoaded != nil && !*entry.ObservedLoaded && !reflect.DeepEqual(pending.evidence.Loaded[ref.Engine], e.Loaded[ref.Engine])
+		contradicted := entry.ObservedLoaded != nil && !*entry.ObservedLoaded && (pending.published || !reflect.DeepEqual(pending.evidence.Loaded[ref.Engine], e.Loaded[ref.Engine]))
 		if sameResidentAllocation(pending.evidence, e, ref) && !contradicted {
 			loaded := true
 			entry.State, entry.Reason, entry.ObservedLoaded = nodepolicy.ModelStateSatisfied, "", &loaded
@@ -407,14 +411,15 @@ func (b *Broker) reconcileModelConfig(ctx context.Context) {
 		}
 		r.models.status.Models = append(r.models.status.Models, entry)
 	}
-	// Announce only a status that changed during this pass; the generation still
-	// counts every observation for readers.
-	changed := previous.PolicyRevision != e.Policy.Revision || !reflect.DeepEqual(previous.Models, r.models.status.Models)
 	r.mu.Unlock()
 	defer func() {
 		r.mu.Lock()
 		r.models.busy = false
 		r.models.active = nil
+		// Announce only a completed status that differs from the previous one;
+		// the generation still counts every observation for readers.
+		previous.ObservationGeneration = r.models.status.ObservationGeneration
+		changed := !reflect.DeepEqual(previous, r.models.status)
 		r.mu.Unlock()
 		if changed {
 			b.notifyPolicyChanged()
@@ -484,7 +489,6 @@ func (b *Broker) reconcileModelConfig(ctx context.Context) {
 			}
 			r.models.confirmed[ref] = e
 		}
-		changed = changed || !reflect.DeepEqual(r.models.status.Models[i], entry)
 		r.models.status.Models[i] = entry
 		r.mu.Unlock()
 		if !sameModelAuthority(e, b.captureModelConfig()) {
