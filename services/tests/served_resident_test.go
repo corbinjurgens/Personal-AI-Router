@@ -389,6 +389,10 @@ func newSRProcessFixture(t *testing.T) *srProcessFixture {
 	})
 	f.call(t, "llamacpp-proxy:node/add-manual", map[string]any{"id": "sr-self", "host": "127.0.0.1", "port": f.facadePort, "addresses": []string{"127.0.0.1"}, "models": []string{neModel, srNeighbor}}, nil)
 	f.call(t, "llamacpp-proxy:node/select", map[string]string{"id": "sr-self"}, nil)
+	neEventually(t, "healthy local backend advertised to facade", neCallBudget, func() bool {
+		status, _, err := f.http(http.MethodGet, f.facadePort, "/health", nil, nil)
+		return err == nil && status == http.StatusOK
+	})
 	t.Cleanup(func() {
 		if _, err := f.neServingFixture.state(); f.p != nil && err == nil {
 			f.control(t, "release")
@@ -444,21 +448,37 @@ func (f *srProcessFixture) edit(t *testing.T, change func(*nodepolicy.Policy)) s
 
 func (f *srProcessFixture) entry(t *testing.T, model string, state nodepolicy.ModelConfigurationState, reason nodepolicy.ModelConfigurationReason) {
 	t.Helper()
-	neEventually(t, "SR model configuration "+model+" "+string(state)+" "+string(reason), neCallBudget, func() bool {
+	deadline := time.Now().Add(neCallBudget)
+	var last nodepolicy.ModelConfigurationEntry
+	for {
 		view := f.policy(t)
 		if view.ModelConfiguration == nil {
-			return false
+			if time.Now().After(deadline) {
+				t.Fatalf("SR model configuration %s missing after %s", model, neCallBudget)
+			}
+			time.Sleep(500 * time.Millisecond)
+			continue
 		}
 		if err := view.ModelConfiguration.Validate(); err != nil {
 			t.Fatal(err)
 		}
 		for _, entry := range view.ModelConfiguration.Models {
 			if entry.Model == model {
-				return entry.State == state && entry.Reason == reason
+				last = entry
+				if entry.State == state && entry.Reason == reason {
+					return
+				}
 			}
 		}
-		return false
-	})
+		if time.Now().After(deadline) {
+			loaded := "unknown"
+			if last.ObservedLoaded != nil {
+				loaded = strconv.FormatBool(*last.ObservedLoaded)
+			}
+			t.Fatalf("SR model configuration %s want %s/%s, got %s/%s loaded=%s managerLoaded=%v after %s", model, state, reason, last.State, last.Reason, loaded, f.models(t).Loaded, neCallBudget)
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
 }
 
 func (f *srProcessFixture) resident(t *testing.T, models ...string) {
