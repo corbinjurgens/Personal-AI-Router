@@ -33,6 +33,36 @@ func (b *Broker) notifyPolicyChanged() {
 	r := b.nodePolicyRuntime()
 	r.publishMu.Lock()
 	defer r.publishMu.Unlock()
+	b.announcePolicyLocked()
+}
+
+// schedulePolicyAnnouncement keeps client IO out of the renewal job, which
+// Serve cancels and joins before tearing down the client transport. Requests
+// coalesce while a sender waits for publishMu: at most one sender and one
+// waiter exist, both still subject to the existing client transport lifetime.
+func (b *Broker) schedulePolicyAnnouncement() {
+	b.signalModelConfig()
+	r := b.nodePolicyRuntime()
+	r.mu.Lock()
+	if r.announcePending {
+		r.mu.Unlock()
+		return
+	}
+	r.announcePending = true
+	r.mu.Unlock()
+	go func() {
+		r.publishMu.Lock()
+		defer r.publishMu.Unlock()
+		r.mu.Lock()
+		r.announcePending = false
+		r.mu.Unlock()
+		b.announcePolicyLocked()
+	}()
+}
+
+// announcePolicyLocked reads the current state at send time. The caller holds
+// publishMu, preserving the order of synchronous and scheduled announcements.
+func (b *Broker) announcePolicyLocked() {
 	local := b.localPolicy()
 	b.notifyClients(notifyPolicyChanged, struct {
 		NodeID             string                        `json:"nodeId"`

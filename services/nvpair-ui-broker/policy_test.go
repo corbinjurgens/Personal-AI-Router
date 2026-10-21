@@ -201,6 +201,123 @@ func (a *proxyAcks) answer(method string, params json.RawMessage) (any, string) 
 
 var fakeProxyRuns atomic.Int64
 
+func TestEgressLeaseBrokerPublicationFailures(t *testing.T) {
+	test := func(name string, replacer durablefile.Replacer, landed bool) {
+		t.Run(name, func(t *testing.T) {
+			ab := newActivatedBroker(t)
+			enableBrokerLeaseReplies(t, ab)
+			ab.b.renewEgressLease(context.Background()) // anchor
+			ab.b.renewEgressLease(context.Background()) // grant
+			before := ab.b.localPolicy().Policy
+			setReplacer(ab.b, replacer)
+			_, err := ab.b.dispatchPolicy(context.Background(), methodPolicySet, policyParams{
+				Policy:                    mustJSON(map[string]any{"version": nodepolicy.SchemaVersion, "idle": map[string]any{"unloadAfterMinutes": 7}}),
+				ExpectedPersistedRevision: mustJSON(before.Revision),
+			})
+			setReplacer(ab.b, durablefile.Replacer{})
+			if !errors.Is(err, errPublish) {
+				t.Fatalf("publication error = %v, want original save failure", err)
+			}
+			current := ab.b.localPolicy()
+			if landed {
+				if current.Policy.Revision == before.Revision || current.Policy.Idle.UnloadAfterMinutes != 7 || current.ActiveRevision != current.Policy.Revision {
+					t.Fatalf("replaced document was not adopted and acknowledged: %+v", current)
+				}
+				var stored nodepolicy.Policy
+				data, readErr := os.ReadFile(ab.path)
+				if readErr != nil {
+					t.Fatal(readErr)
+				}
+				if err := json.Unmarshal(data, &stored); err != nil {
+					t.Fatal(err)
+				}
+				if !reflect.DeepEqual(stored, current.Policy) {
+					t.Fatal("adopted policy differs from complete replaced bytes")
+				}
+			} else if !reflect.DeepEqual(current.Policy, before) {
+				t.Fatal("failure before replacement changed desired policy")
+			}
+			start := len(ab.proxy.snapshot())
+			ab.b.renewEgressLease(context.Background())
+			calls := ab.proxy.snapshot()[start:]
+			if len(calls) != 1 || calls[0].method != nodepolicy.MethodRenewEgressLease {
+				t.Fatalf("exact acknowledged persisted state stopped renewing: %+v", calls)
+			}
+			var grant nodepolicy.RenewEgressLeaseParams
+			if err := json.Unmarshal(calls[0].params, &grant); err != nil {
+				t.Fatal(err)
+			}
+			if grant.Revision != current.Policy.Revision || grant.NotAfterNanos == "0" {
+				t.Fatalf("grant = %+v; want same-run anchor and current persisted revision", grant)
+			}
+			ab.setIdle(t, 8)
+			start = len(ab.proxy.snapshot())
+			ab.b.renewEgressLease(context.Background())
+			if calls := ab.proxy.snapshot()[start:]; len(calls) != 1 || calls[0].method != nodepolicy.MethodRenewEgressLease {
+				t.Fatalf("renewal after later durable save = %+v", calls)
+			}
+		})
+	}
+	test("before replacement keeps prior desired document", durablefile.Replacer{Replace: func(string, string) error { return errPublish }}, false)
+	test("ErrReplaced keeps matching activation eligible", durablefile.Replacer{SyncDir: func(string) error { return errPublish }}, true)
+}
+
+func TestEgressLeaseBrokerPersistedRevocationWaitsForExactActivation(t *testing.T) {
+	ab := newActivatedBroker(t)
+	enableBrokerLeaseReplies(t, ab)
+	ab.b.renewEgressLease(context.Background())
+	ab.b.renewEgressLease(context.Background())
+	setActivationWait(ab.b, 50*time.Millisecond)
+	ab.proxy.setAnswer(func(method string, params json.RawMessage) (any, string) {
+		if method == nodepolicy.MethodSetPolicy {
+			return nil, holdReply
+		}
+		return ab.acks.answer(method, params)
+	})
+	result := ab.setIdle(t, 9)
+	if result.Policy.Revision == "0" || result.ActiveRevision != "0" || result.Activation != activationError {
+		t.Fatalf("stalled new revision reported enforced: %+v", result)
+	}
+	start := len(ab.proxy.snapshot())
+	ab.b.renewEgressLease(context.Background())
+	if calls := ab.proxy.snapshot()[start:]; len(calls) != 0 {
+		t.Fatalf("renewal after persisted/active divergence = %+v", calls)
+	}
+	// Local control still returns the persisted document despite closed public
+	// authority; failure must not restart the otherwise usable proxy.
+	if got := ab.b.localPolicy(); got.Policy.Idle.UnloadAfterMinutes != 9 || ab.b.policyProxy() != ab.pp {
+		t.Fatal("activation failure lost local configuration or replaced proxy")
+	}
+	ab.proxy.releaseHeld()
+	enableBrokerLeaseReplies(t, ab)
+	ab.b.activatePolicyNow()
+	start = len(ab.proxy.snapshot())
+	ab.b.renewEgressLease(context.Background())
+	if calls := ab.proxy.snapshot()[start:]; len(calls) != 1 || calls[0].method != nodepolicy.MethodRenewEgressLease {
+		t.Fatalf("exact later activation did not restore renewal: %+v", calls)
+	}
+}
+
+func TestEgressLeaseBrokerRecoveryRequiresDurablePolicy(t *testing.T) {
+	ab := newActivatedBroker(t)
+	enableBrokerLeaseReplies(t, ab)
+	r := ab.b.nodePolicyRuntime()
+	r.mu.Lock()
+	r.recoveryRequired = true
+	r.mu.Unlock()
+	start := len(ab.proxy.snapshot())
+	ab.b.renewEgressLease(context.Background())
+	if calls := ab.proxy.snapshot()[start:]; len(calls) != 0 {
+		t.Fatalf("recovery policy renewed lease: %+v", calls)
+	}
+	ab.setIdle(t, 7)
+	start = len(ab.proxy.snapshot())
+	ab.b.renewEgressLease(context.Background())
+	if calls := ab.proxy.snapshot()[start:]; len(calls) != 1 || calls[0].method != nodepolicy.MethodRenewEgressLease {
+		t.Fatalf("durable policy recovery did not restore clock sampling: %+v", calls)
+	}
+}
+
 func decodePushedPolicy(data json.RawMessage, out any) error {
 	var envelope nodepolicy.SetPolicyParams
 	if err := json.Unmarshal(data, &envelope); err != nil {
