@@ -239,6 +239,7 @@ func openCodeHTTPFixture(t *testing.T, q *localQualification, warm bool) (*Proxy
 	t.Helper()
 	ne := newReadinessEnvelopeFixture(t, "llamacpp")
 	req := ne.request()
+	req.Request.OriginNodeID = "peer"
 	envelope := ne.id.Serving["m"]
 	envelope.ModelID = q.Model
 	ne.id.Serving = map[string]engines.ServingEnvelope{q.Model: envelope}
