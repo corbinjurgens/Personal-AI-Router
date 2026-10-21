@@ -329,16 +329,23 @@ func (e *Executor) residentPrecheck(p nodepolicy.ReconcileResidentParams) string
 	return ""
 }
 
-// Caller holds the engine lifecycle mutex. Cold configured envelopes bound a
-// load but establish neither observed allocation nor native resident support.
-func (e *Executor) residentCheck(p nodepolicy.ReconcileResidentParams) string {
+// Caller holds the engine lifecycle mutex. Validate the owned launch without
+// probing the engine; cold configuration alone cannot authorize a load.
+func (e *Executor) residentCheck(ctx context.Context, p nodepolicy.ReconcileResidentParams) string {
 	if reason := e.residentPrecheck(p); reason != "" {
 		return reason
 	}
 	m, _ := e.reg.Get(p.Engine)
 	st, _ := e.state(p.Engine)
-	if st.plat.Runtime.Serving != nil {
-		readback := e.launchStateLocked(p.Engine, st).ServingReadback
+	st.mu.Lock()
+	serving := st.plat.Runtime.Serving != nil
+	st.mu.Unlock()
+	if serving {
+		envelope, id, err := e.currentServingEnvelope(ctx, p.Engine, p.Model)
+		if err != nil || id.EngineRunID != p.Identity.EngineRunID || id.ModelDigests[p.Model] != p.Identity.ModelDigest {
+			return "unqualified"
+		}
+		readback := &engines.ServingReadback{Configured: []engines.ServingEnvelope{envelope}}
 		if !residentConfiguredContext(p, m.ModelNamingOrDefault(), readback) {
 			return "unqualified"
 		}
@@ -439,7 +446,7 @@ func (e *Executor) executeResident(ctx context.Context, p nodepolicy.ReconcileRe
 		return refused
 	}
 	defer st.opMu.Unlock()
-	if reason := e.residentCheck(p); reason != "" {
+	if reason := e.residentCheck(ctx, p); reason != "" {
 		logRefusal(reason, slog.LevelInfo)
 		return refused
 	}
@@ -476,7 +483,7 @@ func (e *Executor) executeResident(ctx context.Context, p nodepolicy.ReconcileRe
 	}
 	// Veto may have arrived during the relay. Never use a queued grant to
 	// bypass the local authority or dispatch under withdrawn identity.
-	if reason := e.residentCheck(p); reason != "" {
+	if reason := e.residentCheck(ctx, p); reason != "" {
 		logRefusal(reason, slog.LevelInfo)
 		return refused
 	}
@@ -485,25 +492,10 @@ func (e *Executor) executeResident(ctx context.Context, p nodepolicy.ReconcileRe
 	result := nodepolicy.ReconcileResidentResult{Outcome: nodepolicy.ResidentUnknown}
 	// Readback starts after the call, never from the watcher's last-good cache.
 	// The same absolute deadline bounds readback even after a lost response.
-	loadedAction, haveLoaded := st.manifest.Actions["loaded_models"]
-	if ctx.Err() == nil && haveLoaded && loadedAction.Result != nil && e.residentIdentity(p) {
-		raw, readErr := e.Action(ctx, p.Engine, "loaded_models", nil)
-		if readErr == nil && ctx.Err() == nil && e.residentIdentity(p) {
-			if names, known := extractStringsResult(raw, loadedAction.Result); known {
-				model := engines.NormalizeModelName(p.Model, st.manifest.ModelNamingOrDefault())
-				loaded := false
-				for _, name := range names {
-					if engines.NormalizeModelName(name, st.manifest.ModelNamingOrDefault()) == model {
-						loaded = true
-					}
-				}
-				result.Observation = &nodepolicy.ResidentLoadedObservation{ManagerIncarnation: e.switchIncarnation, Generation: e.residentGeneration.Add(1), Engine: p.Engine, Model: model, Identity: p.Identity, Loaded: loaded}
-				if loaded {
-					result.Outcome = nodepolicy.ResidentLoaded
-					return result
-				}
-			}
-		}
+	result.Observation = e.residentObservation(ctx, p, st)
+	if result.Observation != nil && result.Observation.Loaded {
+		result.Outcome = nodepolicy.ResidentLoaded
+		return result
 	}
 	switch {
 	case errors.Is(ctx.Err(), context.DeadlineExceeded):
@@ -521,4 +513,55 @@ func (e *Executor) executeResident(ctx context.Context, p nodepolicy.ReconcileRe
 		}
 	}
 	return result
+}
+
+// Read after the load under the original deadline. NE owns allocation probing,
+// mismatch withdrawal and run/config fencing; name presence alone is not proof.
+func (e *Executor) residentObservation(ctx context.Context, p nodepolicy.ReconcileResidentParams, st *engineState) *nodepolicy.ResidentLoadedObservation {
+	loadedAction, haveLoaded := st.manifest.Actions["loaded_models"]
+	if ctx.Err() != nil || !haveLoaded || loadedAction.Result == nil || !e.residentIdentity(p) {
+		return nil
+	}
+	st.mu.Lock()
+	serving := st.plat.Runtime.Serving != nil
+	st.mu.Unlock()
+	var run servingRunSnapshot
+	var sweep uint64
+	if serving {
+		var err error
+		run, err = snapshotLlamaObservation(st)
+		if err != nil {
+			return nil
+		}
+		sweep = e.sweeps.Add(1)
+	}
+	raw, readErr := e.Action(ctx, p.Engine, "loaded_models", nil)
+	names, known := extractStringsResult(raw, loadedAction.Result)
+	known = known && readErr == nil
+	if serving {
+		e.observeLlamaServing(ctx, st, run, sweep, names, known, raw)
+	}
+	if !known || ctx.Err() != nil || !e.residentIdentity(p) {
+		return nil
+	}
+	model := engines.NormalizeModelName(p.Model, st.manifest.ModelNamingOrDefault())
+	loaded := false
+	for _, name := range names {
+		if engines.NormalizeModelName(name, st.manifest.ModelNamingOrDefault()) == model {
+			loaded = true
+		}
+	}
+	if serving {
+		envelope, id, err := e.currentServingEnvelope(ctx, p.Engine, p.Model)
+		if err != nil || id.EngineRunID != p.Identity.EngineRunID || id.ModelDigests[p.Model] != p.Identity.ModelDigest {
+			return nil
+		}
+		if loaded {
+			observed, err := e.currentServingObservation(ctx, p.Engine, p.Model)
+			if err != nil || observed.PerSlotContextTokens != envelope.PerSlotContextTokens || observed.Slots != envelope.Slots {
+				return nil
+			}
+		}
+	}
+	return &nodepolicy.ResidentLoadedObservation{ManagerIncarnation: e.switchIncarnation, Generation: e.residentGeneration.Add(1), Engine: p.Engine, Model: model, Identity: p.Identity, Loaded: loaded}
 }

@@ -11,6 +11,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"os"
 	"reflect"
 	"runtime"
 	"strings"
@@ -22,6 +23,114 @@ import (
 	settings "nvpair-shared/enginesettings"
 	"nvpair-shared/nodepolicy"
 )
+
+// Synthetic owned launch and HTTP readback only; no native engine or model.
+func residentNativeFixture(t *testing.T) (llamaServingFixture, *loadedLlamaFake, nodepolicy.ReconcileResidentParams) {
+	t.Helper()
+	f, server := loadedReadbackFixture(t, "resident-model")
+	f.ex.nodeProjection.set(nodeProjection{})
+	if err := f.ex.desired.set("fake", true, intentLocal); err != nil {
+		t.Fatal(err)
+	}
+	id := f.ex.modelIdentity().Engines["fake"]
+	f.ex.storeInventory(map[string][]string{"fake": {"resident-model", "weak"}}, nil, f.ex.sweeps.Add(1))
+	p := nodepolicy.ReconcileResidentParams{OperationID: "resident:1", PolicyRevision: "1", Engine: "fake", Model: "resident-model",
+		Identity:  nodepolicy.StrictModelIdentity{EngineRunID: id.EngineRunID, ModelDigest: id.ModelDigests["resident-model"], SettingsFingerprint: nameDigest("synthetic-settings")},
+		TimeoutMs: 60000, Reservation: nodepolicy.ResidentReservationEvidence{ReservationID: "reservation", ProxyRunID: "proxy", ManagerIncarnation: f.ex.switchIncarnation},
+		Load: nodepolicy.ResidentLoadOptions{ContextLength: 8192, KeepAliveSeconds: 60}}
+	if err := p.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	return f, server, p
+}
+
+func TestResidentAttestedPreflight(t *testing.T) {
+	f, server, p := residentNativeFixture(t)
+	// 5b owns the adapter. A valid launch reaches its unsupported-load fence;
+	// an invalid attestation must be rejected earlier by NE's pure validator.
+	if got := f.ex.residentCheck(context.Background(), p); got != "unsupported-load" {
+		t.Fatalf("current native launch preflight = %q", got)
+	}
+	st := settingsState(t, f.ex)
+	st.mu.Lock()
+	st.plat.Runtime.servingBaseDigest = nameDigest("replaced-executable")
+	st.mu.Unlock()
+	if got := f.ex.residentCheck(context.Background(), p); got != "unqualified" {
+		t.Fatalf("stale owned launch preflight = %q, want unqualified", got)
+	}
+	grants := 0
+	f.ex.residentParent = func(context.Context, nodepolicy.DispatchResidentParams) error { grants++; return nil }
+	result, err := f.ex.reconcileResident(context.Background(), p)
+	if err != nil || result.Outcome != nodepolicy.ResidentNotDispatched || grants != 0 || server.models.Load() != 0 || server.gets.Load() != 0 || server.loads.Load() != 0 {
+		t.Fatalf("stale preflight effects: result=%+v err=%v grants=%d models=%d props=%d loads=%d", result, err, grants, server.models.Load(), server.gets.Load(), server.loads.Load())
+	}
+}
+
+func TestResidentObservedAllocation(t *testing.T) {
+	test := func(name, loaded, props string, wantKnown, wantLoaded bool, wantGets int32, withdrawn bool) {
+		t.Run(name, func(t *testing.T) {
+			f, server, p := residentNativeFixture(t)
+			server.mu.Lock()
+			server.loaded, server.props = loaded, props
+			server.mu.Unlock()
+			got := f.ex.residentObservation(context.Background(), p, settingsState(t, f.ex))
+			if (got != nil) != wantKnown || got != nil && (got.Loaded != wantLoaded || got.Identity != p.Identity || got.Generation == 0) {
+				t.Fatalf("resident observation = %+v, want known=%v loaded=%v", got, wantKnown, wantLoaded)
+			}
+			if server.models.Load() != 1 || server.gets.Load() != wantGets || server.loads.Load() != 0 {
+				t.Fatalf("models=%d props=%d forbidden loads=%d", server.models.Load(), server.gets.Load(), server.loads.Load())
+			}
+			if id := f.ex.modelIdentity().Engines["fake"]; (len(id.Serving) == 0) != withdrawn {
+				t.Fatalf("identity withdrawn=%v, want %v", len(id.Serving) == 0, withdrawn)
+			}
+		})
+	}
+	const loaded = `{"data":[{"id":"resident-model","status":{"value":"loaded"}}]}`
+	const props = `{"default_generation_settings":{"n_ctx":8192},"total_slots":2}`
+	test("matching model-specific allocation", loaded, props, true, true, 1, false)
+	test("native context mismatch", loaded, `{"default_generation_settings":{"n_ctx":4096},"total_slots":2}`, false, false, 1, true)
+	test("native slot mismatch", loaded, `{"default_generation_settings":{"n_ctx":8192},"total_slots":1}`, false, false, 1, true)
+	test("unknown allocation", loaded, `{}`, false, false, 1, true)
+	test("missing loaded inventory", `{}`, props, false, false, 0, true)
+	test("unknown loaded semantics", `{"data":[{"id":"resident-model","status":{"value":"surprising"}}]}`, props, false, false, 0, true)
+	test("explicit empty stays unloaded", `{"data":[]}`, props, true, false, 0, false)
+	test("cold launch is not loaded", `{"data":[{"id":"resident-model","status":{"value":"unloaded"}}]}`, props, true, false, 0, false)
+}
+
+func TestResidentObservedAllocationReplacement(t *testing.T) {
+	test := func(name string, replace func(*testing.T, llamaServingFixture, *engineState)) {
+		t.Run(name, func(t *testing.T) {
+			f, server, p := residentNativeFixture(t)
+			st := settingsState(t, f.ex)
+			server.mu.Lock()
+			server.onProps = func() { replace(t, f, st) }
+			server.mu.Unlock()
+			if got := f.ex.residentObservation(context.Background(), p, st); got != nil {
+				t.Fatalf("replaced evidence reported loaded: %+v", got)
+			}
+			if server.gets.Load() != 1 || server.loads.Load() != 0 {
+				t.Fatalf("props=%d forbidden loads=%d", server.gets.Load(), server.loads.Load())
+			}
+		})
+	}
+	test("config replaced during observation", func(_ *testing.T, _ llamaServingFixture, st *engineState) {
+		st.mu.Lock()
+		st.plat.Runtime.Serving = st.plat.Runtime.Serving.Clone()
+		st.mu.Unlock()
+	})
+	test("run replaced during observation", func(_ *testing.T, _ llamaServingFixture, st *engineState) {
+		st.mu.Lock()
+		st.runID = "replacement-run"
+		st.mu.Unlock()
+	})
+	test("source changed during observation", func(t *testing.T, f llamaServingFixture, _ *engineState) {
+		data, err := os.ReadFile(f.source)
+		if err != nil {
+			t.Fatal(err)
+		}
+		writeServingFixture(t, f.source, append(data, []byte("\n# replaced source\n")...))
+	})
+}
 
 type residentTransport struct {
 	mu                      sync.Mutex
@@ -227,7 +336,7 @@ func TestResidentContextBoundConfigured(t *testing.T) {
 }
 
 func TestResidentContextBoundColdPreflight(t *testing.T) {
-	test := func(name string, context int, wantBound bool) {
+	test := func(name string, contextLength int, wantBound bool) {
 		t.Run(name, func(t *testing.T) {
 			cold := newLlamaServingFixture(t)
 			applyLlamaServing(t, cold, approveLlamaServing(t, cold))
@@ -238,10 +347,10 @@ func TestResidentContextBoundColdPreflight(t *testing.T) {
 			st.binPath = fakeEngineBin
 			// Synthetic inventory identity; no owned NE launch is established.
 			f.ex.storeInventory(map[string][]string{"ollama": {"medium:latest"}}, map[string]observedDigests{"ollama": {runID: st.runID, models: map[string]string{"medium:latest": f.p.Identity.ModelDigest}}}, 2)
-			f.p.Model, f.p.Load.ContextLength = "medium:latest", context
+			f.p.Model, f.p.Load.ContextLength = "medium:latest", contextLength
 			st.opMu.Lock()
 			bounded := residentConfiguredContext(f.p, st.manifest.ModelNamingOrDefault(), f.ex.launchStateLocked(f.p.Engine, st).ServingReadback)
-			reason := f.ex.residentCheck(f.p)
+			reason := f.ex.residentCheck(context.Background(), f.p)
 			st.opMu.Unlock()
 			if bounded != wantBound {
 				t.Fatalf("cold configured context accepted=%v, want %v", bounded, wantBound)
@@ -329,7 +438,7 @@ func TestResidentRefusesWithoutSideEffects(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			f := newResidentFixture(t)
 			modify(f)
-			if got := f.ex.residentCheck(f.p); got != reason {
+			if got := f.ex.residentCheck(context.Background(), f.p); got != reason {
 				t.Fatalf("reason = %q, want %q", got, reason)
 			}
 			if result := f.run(t); result.Outcome != nodepolicy.ResidentNotDispatched {
@@ -887,7 +996,7 @@ func TestResidentSwitchBusy(t *testing.T) {
 	if err := f.ex.desired.save(state); err != nil {
 		t.Fatal(err)
 	}
-	if got := f.ex.residentCheck(f.p); got != "switch-busy" {
+	if got := f.ex.residentCheck(context.Background(), f.p); got != "switch-busy" {
 		t.Fatalf("reason = %s, want switch-busy", got)
 	}
 	if result := f.run(t); result.Outcome != nodepolicy.ResidentNotDispatched {

@@ -13,8 +13,84 @@ import (
 	"testing"
 	"time"
 
+	"nvpair-shared/engines"
 	"nvpair-shared/nodepolicy"
 )
+
+func TestResidentNativeAllocation(t *testing.T) {
+	test := func(name string, edit func(*readinessEnvelopeFixture), wantGrant bool) {
+		t.Run(name, func(t *testing.T) {
+			f := newReadinessEnvelopeFixture(t, "llamacpp")
+			f.policy.ResidentModels = nodepolicy.ResidentModels{{Engine: f.engine, Model: "m"}}
+			edit(&f)
+			f.install(t)
+			f.a.setIntent(map[string]bool{f.engine: true})
+			f.a.setResidency(map[string][]string{f.engine: {}})
+			in := nodepolicy.PrepareResidentParams{PolicyRevision: "1", ProxyRunID: "proxy", ManagerIncarnation: "manager", Engine: f.engine, Model: "m", Identity: f.request().Identity, OperationID: "resident:1", TimeoutMs: 1000}
+			result, err := f.a.prepareResident("proxy", in)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if wantGrant {
+				if result.ReservationID == "" || len(result.Refusals) != 0 {
+					t.Fatalf("exact native allocation refused: %+v", result)
+				}
+				dispatchResidentOK(t, f.a, in, result)
+			} else if result.ReservationID != "" || len(result.Refusals) != 1 || result.Refusals[0].Reason != nodepolicy.ModelReasonUnqualified || f.a.currentActive() != 0 || len(f.a.inflight) != 0 {
+				t.Fatalf("unqualified native allocation reserved capacity: %+v active=%d", result, f.a.currentActive())
+			}
+			if f.a.isLoaded(f.engine, "m") {
+				t.Fatal("cold declaration became loaded inventory")
+			}
+		})
+	}
+	test("exact allocation", func(*readinessEnvelopeFixture) {}, true)
+	test("profile cannot shrink native context", func(f *readinessEnvelopeFixture) { f.policy.Profiles[0].ContextTokens = 2048 }, false)
+	test("qualification must cover native context", func(f *readinessEnvelopeFixture) {
+		f.policy.Profiles[0].ContextTokens, f.q.ContextTokens = 2048, 2048
+	}, false)
+	test("qualification must cover native output", func(f *readinessEnvelopeFixture) {
+		f.policy.Profiles[0].MaxOutputTokens, f.q.MaxOutputTokens = 512, 512
+	}, false)
+	test("effective concurrency must cover native slots", func(f *readinessEnvelopeFixture) { f.policy.Admission.MaxConcurrentPerModel = 1 }, false)
+}
+
+func TestResidentNativeAllocationRevalidation(t *testing.T) {
+	test := func(name string, replace func(*readinessEnvelopeFixture)) {
+		t.Run(name, func(t *testing.T) {
+			f := newReadinessEnvelopeFixture(t, "llamacpp")
+			f.policy.ResidentModels = nodepolicy.ResidentModels{{Engine: f.engine, Model: "m"}}
+			f.install(t)
+			f.a.setIntent(map[string]bool{f.engine: true})
+			f.a.setResidency(map[string][]string{f.engine: {}})
+			in := nodepolicy.PrepareResidentParams{PolicyRevision: "1", ProxyRunID: "proxy", ManagerIncarnation: "manager", Engine: f.engine, Model: "m", Identity: f.request().Identity, OperationID: "resident:1", TimeoutMs: 1000}
+			prepared := prepareResidentOK(t, f.a, in)
+			replace(&f)
+			result, err := f.a.dispatchResident("proxy", residentDispatch(in, prepared))
+			if err != nil || result.Dispatched || f.a.currentActive() != 0 || len(f.a.inflight) != 0 {
+				t.Fatalf("stale native allocation granted: %+v err=%v active=%d", result, err, f.a.currentActive())
+			}
+		})
+	}
+	test("qualification narrows without generation refresh", func(f *readinessEnvelopeFixture) {
+		f.a.mu.Lock()
+		defer f.a.mu.Unlock()
+		f.q.MaxOutputTokens = 512
+		f.a.policy.Profiles[0].MaxOutputTokens = 512
+	})
+	test("envelope replacement", func(f *readinessEnvelopeFixture) {
+		id := f.id
+		envelope := id.Serving["m"].Clone()
+		envelope.NativeSourceDigest = strings.Repeat("e", 64)
+		id.Serving = map[string]engines.ServingEnvelope{"m": envelope}
+		f.a.setModelIdentity(map[string]nodepolicy.EngineIdentity{f.engine: id})
+	})
+	test("run replacement", func(f *readinessEnvelopeFixture) {
+		id := f.id
+		id.EngineRunID = "replacement-run"
+		f.a.setModelIdentity(map[string]nodepolicy.EngineIdentity{f.engine: id})
+	})
+}
 
 func residentHarness(t *testing.T, models ...string) (*admHarness, nodepolicy.PrepareResidentParams) {
 	t.Helper()
