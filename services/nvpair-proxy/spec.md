@@ -771,6 +771,12 @@ stack and answered as an internal error.
 | `workload:submitted` | between attempts | `queued` | empty |
 | `workload:started` | commit | `running` | the node that served |
 | `workload:completed` / `workload:errored` | terminal | per §5.4 | unchanged |
+| `workload:errored` synthesized by the broker | proxy process exit (crash or replacement) | `failed` | unchanged |
+
+On process exit, the proxy's own `cancelled` terminals come only from a graceful
+stop. Graceful drain can lose terminal frames, so any workload still open after
+exit, even if drained, is retired by the broker as `failed` with error
+`proxy exited before the request finished`.
 
 `submitted` covers the whole pre-commit life; `started` means the engine is
 producing content. That split is forced as well as honest: the broker's store
@@ -1327,7 +1333,8 @@ never reach the client. Workload fields are in §5.5.
 in-flight workload this process originated and answers `{found}`. Workload ids
 count per facade, so `engine` selects among facades and an id in flight on two
 engines without it is an error; a `runId` other than this process's finds
-nothing.
+nothing. The broker has already retired that departed run's open workloads as
+`failed`.
 
 - **Before commit, with `regenerate`**: the current attempt is abandoned
   through the same claim the discovery watcher uses (§5.3), its node is excluded

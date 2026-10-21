@@ -780,9 +780,11 @@ Two classes of proxy notification are **not** re-emitted under the `ollama-proxy
   that through unchanged.
 - **Peer workloads** — the `workloads:upsert` / `workloads:remove` the `nvpair-workload-manager` relays from other nodes after validating and de-duplicating their broadcasts.
 
-- **Retired history** — a `workloads:remove` for a completed or failed workload that fell outside the broker's history caps (the newest 10,000 terminal records, none older than seven days). The broker enforces the caps once a minute whether or not history persistence is on, so a subscriber that applies removals stays as bounded as the broker. Active workloads are never retired, and no removal is sent while a newer workload with the same `(originatedFrom, workloadId)` pair is still held. Retirement is local housekeeping and is not broadcast to peers.
+- **Retired history** — a `workloads:remove` for a completed or failed workload that fell outside the broker's history caps (the newest 10,000 terminal records, none older than seven days). The broker enforces the caps once a minute whether or not history persistence is on, so a subscriber that applies removals stays as bounded as the broker. History housekeeping never removes active workloads, and no removal is sent while a newer workload with the same `(originatedFrom, workloadId)` pair is still held. History removal is local housekeeping and is not broadcast to peers.
 
-- **Inferred workloads** — a `workloads:upsert` transitioning a workload to `failed` that **no origin ever sent**. The broker synthesizes one in two situations: when a node leaves discovery while workloads are pinned to it, and when a remote origin that is still present stops re-asserting a workload this node believes is running (the origin's re-sync heartbeat asserts each of its active workloads indefinitely, so prolonged silence about one means it is finished or the origin is gone). Both are recorded as *inferred*, so the origin's next authoritative event overrides them; a client should treat a `failed` as the broker's best current answer rather than proof the origin reported a failure, and its `error` text names the reason. Workloads this node originated or is itself executing are never inferred about.
+- **Inferred workloads** — a `workloads:upsert` transitioning a workload to `failed` that **no origin ever sent**. The broker synthesizes one in two situations: when a node leaves discovery while workloads are pinned to it, and when a remote origin that is still present stops re-asserting a workload this node believes is running (the origin's re-sync heartbeat asserts each of its active workloads indefinitely, so prolonged silence about one means it is finished or the origin is gone). Both are recorded as *inferred*, so the origin's next authoritative event overrides them; a client should treat a `failed` as the broker's best current answer rather than proof the origin reported a failure, and its `error` text names the reason. Local-origin workloads are never inferred about, but workloads of a departed local proxy run are retired authoritatively.
+
+- **Departed-run workloads** — when the proxy process this broker supervises exits or is replaced, the broker ends every still-open local-origin workload of that run as authoritative `failed` with error `proxy exited before the request finished`. Only terminals accepted into its store are fed to the scheduler, emitted as `workloads:upsert`, and forwarded as `workload:errored` to the workload-manager for peer convergence. These terminals are not inferred and cannot be overridden by a later active re-assertion. Graceful drain can lose terminal frames, so even drained work still open in the store after exit is retired as `failed`. Retirement is not evidence that an engine is idle and does not trigger residency changes.
 
 `workloads:upsert` carries `params.workloadInfo` (a full `Workload`); `workloads:remove` carries `params.workloadId` and the origin `params.originatedFrom`. See [`nvpair-workload-manager`](../nvpair-workload-manager/README.md) for the `Workload` shape.
 
@@ -861,6 +863,11 @@ carries it to the origin over the pinned peer channel, and `ok:true` only means 
 was handed on; the outcome arrives on the `workloads:*` stream. A peer's relayed
 `workloads:cancel` reaches the broker from the workload-manager and is acted on
 only by the origin. `-32602` without `originatedFrom` or `workloadId`.
+
+A job whose proxy run has exited has already been retired and is no longer
+cancellable. At its origin, a cancel targeting that departed run returns
+`ok:false` from the replacement run, or `-32000` (`proxy not available`) while
+no proxy runs.
 
 #### `discovery:get-node-info`
 

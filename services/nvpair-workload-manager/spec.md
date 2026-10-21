@@ -85,6 +85,7 @@ Tracks inference workloads cluster-wide as they are queued, executed, and retire
 `WorkloadState` (enum): `"queued" | "running" | "completed" | "failed" | "cancelled"`
 - Method → `state`: `workload:submitted` → `queued`, `workload:started` → `running`, `workload:completed` → `completed`, `workload:errored` → `failed` or `cancelled`.
 - `cancelled` is terminal and means the requester stopped waiting — a disconnected client, a dead client whose write deadline tripped, or an in-flight request cancelled by the producer's own shutdown. It rides `workload:errored` rather than having a method of its own, because state is not validated against the method that carried it and consumers read `state` from the payload. Keeping it distinct from `failed` is what lets a consumer's failed bucket mean "an outcome someone might act on" instead of also collecting every time a user pressed stop.
+- The Broker may synthesize `workload:errored` with state `failed` and error `proxy exited before the request finished` for a departed proxy run. The manager treats it like any local terminal: broadcast it and retain it for two heartbeat intervals for best-effort re-assertion.
 
 Validation: check every inbound envelope before processing. A `Workload` must
 carry `id`, `model`, `engine`, `state`, and `originatedFrom`; `runId`, `seq`,
@@ -168,7 +169,7 @@ Example `workloads:remove` (identical body inter-node and on `stdout`; `originat
   - `workload:submitted` — queued/submitted on this node
   - `workload:started` — began executing
   - `workload:completed` — finished successfully
-  - `workload:errored` — failed (may retry on another node)
+  - `workload:errored` — failed (may retry on another node) or cancelled; includes Broker-synthesized `failed` for a departed proxy run with error `proxy exited before the request finished`, retained and re-asserted like any local terminal for two heartbeat intervals.
 - **Outbound** (`stdout`): `workloads:upsert` after each validated remote `workload:*`; `workloads:remove` after each validated remote removal (see §7.0).
 - Params: lifecycle uses `params.workloadInfo`; `workloads:remove` uses `params.workloadId`.
 
