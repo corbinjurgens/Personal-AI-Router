@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"nvpair-shared/clustertrust"
+	"nvpair-shared/engines"
 	settings "nvpair-shared/enginesettings"
 	"nvpair-shared/jsonrpc"
 	"nvpair-shared/nodepolicy"
@@ -480,6 +481,11 @@ func managementSwitchWriterAt(t *testing.T, base string) *switchProcessFixture {
 	waitEngineProxyReady(t, "llamacpp-proxy", f.p.in, f.p.msgs, 20*time.Second)
 	f.rpcOK(t, "engine:start", map[string]string{"engine": "ollama"})
 	f.pid(t, "ollama")
+	// Initialize every settings baseline before a switch revision is captured.
+	// Otherwise the periodic refresh can add an unrelated engine's revision.
+	for _, engine := range engines.Names() {
+		f.rpcOK(t, "engine:get-settings", map[string]string{"engine": engine})
+	}
 	return f
 }
 
