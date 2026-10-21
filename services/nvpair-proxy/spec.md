@@ -771,6 +771,25 @@ stack and answered as an internal error.
 | `workload:submitted` | between attempts | `queued` | empty |
 | `workload:started` | commit | `running` | the node that served |
 | `workload:completed` / `workload:errored` | terminal | per §5.4 | unchanged |
+| `workload:errored` synthesized by the broker | proxy process exit (crash or replacement) | `failed` | unchanged |
+
+On process exit, the proxy's own `cancelled` terminals come only from a graceful
+stop. Unread tail frames can be lost when stdout closes, so even a request that
+actually drained can appear `failed`. A delivered `completed` or `cancelled`
+tail may still be accepted after process exit until the exact source handle is
+withdrawn; once accepted, that authoritative outcome is preserved. The broker
+retires open or inferred local-origin outcomes of a departed run as authoritative
+`failed` with error `proxy exited before the request finished`, excluding
+authoritative terminals, the live replacement run and foreign-origin workloads.
+Every synthesized terminal sets `seq` to the current stored sequence plus one
+and `completedAt` to the broker's retirement time.
+For an inferred outcome, retirement replaces its prior `error` and `completedAt`
+with that fixed error and the broker's retirement time, preserving other identity
+and placement facts. The best-effort emission join is capped at the smaller of
+`workerSignalGrace` and the remaining shared teardown budget; an unarmed teardown
+clock still allows `workerSignalGrace`. Fanout need not finish before that wait
+expires, and the cap does not bound an underlying client write. Retirement
+supplies no engine-idle evidence and does not trigger residency changes.
 
 `submitted` covers the whole pre-commit life; `started` means the engine is
 producing content. That split is forced as well as honest: the broker's store
@@ -779,9 +798,10 @@ dispatch time could not return to `queued` for its next attempt and the retry
 would be invisible. Keeping the loop inside one state, with `scheduledOn`
 carrying the detail, is the only shape that store can represent.
 
-Terminal emission remains exactly once, including disconnect/copy-unwind races;
-an interrupted stream cannot later resurrect as `completed`. Its committed
-placement and workload identity are retained, with the bounded reason exposed
+The proxy emits at most one terminal per request, including disconnect/copy-unwind
+races; this does not guarantee delivery of its terminal frame. An interrupted
+stream cannot later resurrect as `completed`. Its committed placement and
+workload identity are retained, with the bounded reason exposed
 through the existing failure display. The private continuation timeline and
 placement changes planned for SC-b are not shipped here.
 
@@ -790,6 +810,11 @@ workload-manager's inter-node dedup is a permanent set, so a retry returning to
 a placement it already used — `queued` on A, cleared, `queued` on A again, which
 this loop produces routinely — would otherwise be indistinguishable from a
 redelivery and dropped by every peer.
+
+The broker forwards all proxy lifecycle frames only after its store accepts
+them. For an authoritative queued workload of the same generation and placement,
+changing only model metadata (even with a new `seq`) is a store no-op and is not
+forwarded to peers; peer broker stores already reject the same update.
 
 A job admitted but not yet dispatched has no execution node. Consumers must
 treat an absent `scheduledOn` as "not placed" rather than assuming a node.
@@ -1327,7 +1352,9 @@ never reach the client. Workload fields are in §5.5.
 in-flight workload this process originated and answers `{found}`. Workload ids
 count per facade, so `engine` selects among facades and an id in flight on two
 engines without it is an error; a `runId` other than this process's finds
-nothing.
+nothing. For a departed run, the broker retires open or inferred local-origin
+outcomes as `failed`, preserving authoritative terminals already accepted before
+source withdrawal.
 
 - **Before commit, with `regenerate`**: the current attempt is abandoned
   through the same claim the discovery watcher uses (§5.3), its node is excluded

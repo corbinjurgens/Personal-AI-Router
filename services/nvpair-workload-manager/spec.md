@@ -85,6 +85,7 @@ Tracks inference workloads cluster-wide as they are queued, executed, and retire
 `WorkloadState` (enum): `"queued" | "running" | "completed" | "failed" | "cancelled"`
 - Method → `state`: `workload:submitted` → `queued`, `workload:started` → `running`, `workload:completed` → `completed`, `workload:errored` → `failed` or `cancelled`.
 - `cancelled` is terminal and means the requester stopped waiting — a disconnected client, a dead client whose write deadline tripped, or an in-flight request cancelled by the producer's own shutdown. It rides `workload:errored` rather than having a method of its own, because state is not validated against the method that carried it and consumers read `state` from the payload. Keeping it distinct from `failed` is what lets a consumer's failed bucket mean "an outcome someone might act on" instead of also collecting every time a user pressed stop.
+- The Broker may synthesize `workload:errored` with state `failed` and error `proxy exited before the request finished` to retire open or inferred local-origin outcomes of a departed proxy run. Once received, the manager treats it like any local terminal: broadcast it and retain it for two heartbeat intervals for best-effort re-assertion.
 
 Validation: check every inbound envelope before processing. A `Workload` must
 carry `id`, `model`, `engine`, `state`, and `originatedFrom`; `runId`, `seq`,
@@ -120,7 +121,7 @@ All traffic is JSON-RPC 2.0. The local interface uses `stdin`/`stdout` (or a nam
 | `performance:received` | — | — | Accepted higher-revision replacement, with admission identity |
 | `performance:status` | — | — | Receiver-owned freshness or admission retirement |
 
-- **Inbound `workload:*` (Broker → WM)**: local-origin transitions to broadcast cluster-wide; `params.workloadInfo` is a full `Workload`. No response.
+- **Inbound `workload:*` (Broker → WM)**: local-origin transitions to broadcast cluster-wide; `params.workloadInfo` is a full `Workload`. No response. All proxy lifecycle frames, as well as Broker-synthesized retirement terminals, must be accepted by the Broker's store before being forwarded here. A rejected model-only queued repoint at unchanged generation and placement is not broadcast; peer Brokers already reject the same-rank update in their stores.
 - **`workloads:upsert` (WM → Broker)**: emitted for remote-origin lifecycle updates — each validated inter-node `workload:*` is translated (not forwarded) into an upsert. Not used on inter-node HTTP or Broker `stdin`. Params: `workloadInfo` copied unchanged from the peer event. Semantics: upsert into the Broker catalog by `Workload.id` (create if absent, replace if present) — the latest metadata/state, not a replay of the method name.
 - **`workloads:remove` (WM → Broker)**: emitted on `stdout` after a validated inter-node removal (same `(nodeId, workloadId)`), deduplicated so retries emit at most once; not re-posted to peers. Local-origin removals arrive on `stdin` and are broadcast over HTTP unchanged. Semantics: remove the workload by `(nodeId, workloadId)` from the Broker's view if present, else no-op. Inter-node handler returns `200 OK` once accepted/relayed (or deduplicated).
 - **`workloads:cancel`**: params `{originatedFrom, workloadId, regenerate?, cancelId?}`. On `stdin` the Broker omits `cancelId`; the manager mints one before sending, so a retried delivery is recognized while a second cancel of the same job is not. The inter-node handler rejects a cancel missing `originatedFrom` or `workloadId` (`400`), deduplicates by `(originatedFrom, workloadId, cancelId)`, and returns `500` when the Broker write fails so the sender retries. The manager does not decide whether this node is the origin; the Broker does, and every other Broker drops the cancel.
@@ -168,7 +169,7 @@ Example `workloads:remove` (identical body inter-node and on `stdout`; `originat
   - `workload:submitted` — queued/submitted on this node
   - `workload:started` — began executing
   - `workload:completed` — finished successfully
-  - `workload:errored` — failed (may retry on another node)
+  - `workload:errored` — failed (may retry on another node) or cancelled; includes Broker-synthesized `failed` for a departed proxy run with error `proxy exited before the request finished`, retained like any received local terminal for two heartbeat intervals for best-effort re-assertion.
 - **Outbound** (`stdout`): `workloads:upsert` after each validated remote `workload:*`; `workloads:remove` after each validated remote removal (see §7.0).
 - Params: lifecycle uses `params.workloadInfo`; `workloads:remove` uses `params.workloadId`.
 

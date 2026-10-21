@@ -775,14 +775,38 @@ Two classes of proxy notification are **not** re-emitted under the `ollama-proxy
 
 - **Local workloads** — the `workload:*` lifecycle events the enabled proxy
   facades emit per inference request, stamped with this host's stable `hostUuid`
-  (`originatedFrom`) and translated to `workloads:upsert`. The proxy also fills
-  in `scheduledOn` with the destination node's `hostUuid`; the broker passes
-  that through unchanged.
+  (`originatedFrom`) and translated to `workloads:upsert` when accepted by the
+  broker's store. The proxy also fills in `scheduledOn` with the destination
+  node's `hostUuid`; the broker passes that through unchanged.
 - **Peer workloads** — the `workloads:upsert` / `workloads:remove` the `nvpair-workload-manager` relays from other nodes after validating and de-duplicating their broadcasts.
 
-- **Retired history** — a `workloads:remove` for a completed or failed workload that fell outside the broker's history caps (the newest 10,000 terminal records, none older than seven days). The broker enforces the caps once a minute whether or not history persistence is on, so a subscriber that applies removals stays as bounded as the broker. Active workloads are never retired, and no removal is sent while a newer workload with the same `(originatedFrom, workloadId)` pair is still held. Retirement is local housekeeping and is not broadcast to peers.
+- **Retired history** — a `workloads:remove` for a completed or failed workload that fell outside the broker's history caps (the newest 10,000 terminal records, none older than seven days). The broker enforces the caps once a minute whether or not history persistence is on, so a subscriber that applies removals stays as bounded as the broker. History housekeeping never removes active workloads, and no removal is sent while a newer workload with the same `(originatedFrom, workloadId)` pair is still held. History removal is local housekeeping and is not broadcast to peers.
 
-- **Inferred workloads** — a `workloads:upsert` transitioning a workload to `failed` that **no origin ever sent**. The broker synthesizes one in two situations: when a node leaves discovery while workloads are pinned to it, and when a remote origin that is still present stops re-asserting a workload this node believes is running (the origin's re-sync heartbeat asserts each of its active workloads indefinitely, so prolonged silence about one means it is finished or the origin is gone). Both are recorded as *inferred*, so the origin's next authoritative event overrides them; a client should treat a `failed` as the broker's best current answer rather than proof the origin reported a failure, and its `error` text names the reason. Workloads this node originated or is itself executing are never inferred about.
+- **Inferred workloads** — a `workloads:upsert` transitioning a workload to `failed` that **no origin ever sent**. The broker synthesizes one in two situations: when a node leaves discovery while workloads are pinned to it, and when a remote origin that is still present stops re-asserting a workload this node believes is running (the origin's re-sync heartbeat asserts each of its active workloads indefinitely, so prolonged silence about one means it is finished or the origin is gone). Both are recorded as *inferred*, so the origin's next authoritative event overrides them; a client should treat a `failed` as the broker's best current answer rather than proof the origin reported a failure, and its `error` text names the reason. The origin-silence sweep excludes local-origin workloads; node-loss inference can still cover them when they were scheduled on a departed peer. A departed local proxy run's open or inferred outcomes are retired authoritatively.
+
+- **Departed-run workloads** — when the proxy process this broker supervises exits
+  or is replaced, the broker schedules authoritative `failed` retirement with
+  error `proxy exited before the request finished` for that run's open or
+  inferred local-origin outcomes. Every synthesized terminal sets `seq` to the
+  current stored sequence plus one and `completedAt` to the broker's retirement
+  time. For an inferred outcome, retirement replaces
+  its prior `error` and `completedAt` with that fixed error and the broker's
+  retirement time, preserving other identity and placement facts. It excludes
+  authoritative terminals, the live replacement run and foreign-origin
+  workloads. Accepted outcomes feed the scheduler, emit `workloads:upsert`, and
+  are forwarded as `workload:errored` to the workload-manager for best-effort peer
+  convergence. A later active re-assertion cannot override these authoritative
+  terminals.
+
+  Graceful stop can lose unread tail frames when stdout closes, so even a
+  request that actually drained can appear `failed`. Delivered `completed` or
+  `cancelled` tails may still be accepted after process exit while the exact
+  source handle remains current; once accepted, those authoritative outcomes
+  survive retirement. The best-effort emission join is capped at the smaller of
+  `workerSignalGrace` and the remaining shared teardown budget; an unarmed
+  teardown clock still allows `workerSignalGrace`. The join can expire before
+  fanout finishes and does not bound an underlying client write. Retirement is
+  not evidence that an engine is idle and does not trigger residency changes.
 
 `workloads:upsert` carries `params.workloadInfo` (a full `Workload`); `workloads:remove` carries `params.workloadId` and the origin `params.originatedFrom`. See [`nvpair-workload-manager`](../nvpair-workload-manager/README.md) for the `Workload` shape.
 
@@ -794,6 +818,12 @@ A few semantics worth knowing:
 
 - **Baseline is explicit.** `workloads:subscribe` itself replays nothing; subscribe first, then call `workloads:get-initial` and merge the snapshot with any overlapping transitions by workload key.
 - **`upsert`, not a method replay.** A local `workload:completed` and a peer's running-state update both arrive as `workloads:upsert`; key on `(originatedFrom, engine, runId, id)` so concurrent engines and proxy restarts cannot collide.
+- **Accepted proxy transitions only.** All proxy lifecycle frames use the same
+  store acceptance gate as departed-run terminals. Store-rejected frames reach
+  neither the scheduler/client stream nor the workload-manager. For an
+  authoritative queued workload of the same generation and placement, changing
+  only model metadata (even with a new `seq`) is a store no-op and is not
+  forwarded to peers; peer broker stores already reject the same update.
 - **Best-effort delivery**, like the other streams: one write attempt per event, transient errors logged not retried.
 
 #### `errors:update`
@@ -861,6 +891,12 @@ carries it to the origin over the pinned peer channel, and `ok:true` only means 
 was handed on; the outcome arrives on the `workloads:*` stream. A peer's relayed
 `workloads:cancel` reaches the broker from the workload-manager and is acted on
 only by the origin. `-32602` without `originatedFrom` or `workloadId`.
+
+A cancel targeting a departed run cannot affect the replacement run. The broker
+retires that run's open or inferred local outcomes as described above and
+preserves already-authoritative terminals. At its origin, a cancel returns
+`ok:false` from the replacement run, or `-32000` (`proxy not available`) while
+no proxy runs.
 
 #### `discovery:get-node-info`
 
