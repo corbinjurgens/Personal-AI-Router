@@ -936,6 +936,58 @@ func TestStrictCapabilityDerivation(t *testing.T) {
 		m, ok := a.strict.models[admKey{engine: "ollama", model: "m:latest"}]
 		return m, ok
 	}
+	for _, tc := range []struct {
+		name         string
+		capabilities []nodepolicy.Capability
+		tools        bool
+		modes        []string
+		want         bool
+	}{
+		{name: "empty capabilities need no shapes", want: true},
+		{name: "tools missing", capabilities: []nodepolicy.Capability{nodepolicy.CapTools}},
+		{name: "tools covered", capabilities: []nodepolicy.Capability{nodepolicy.CapTools}, tools: true, want: true},
+		{name: "structured missing", capabilities: []nodepolicy.Capability{nodepolicy.CapStructured}},
+		{name: "structured object only", capabilities: []nodepolicy.Capability{nodepolicy.CapStructured}, modes: []string{"json_object"}},
+		{name: "structured schema only", capabilities: []nodepolicy.Capability{nodepolicy.CapStructured}, modes: []string{"json_schema"}},
+		{name: "structured covered", capabilities: []nodepolicy.Capability{nodepolicy.CapStructured}, modes: []string{"json_object", "json_schema"}, want: true},
+		{name: "all declared capabilities covered", capabilities: []nodepolicy.Capability{nodepolicy.CapTools, nodepolicy.CapStructured}, tools: true, modes: []string{"json_object", "json_schema"}, want: true},
+		{name: "tools do not cover structured", capabilities: []nodepolicy.Capability{nodepolicy.CapTools, nodepolicy.CapStructured}, tools: true},
+		{name: "structured does not cover tools", capabilities: []nodepolicy.Capability{nodepolicy.CapStructured, nodepolicy.CapTools}, modes: []string{"json_object", "json_schema"}},
+		{name: "vision refused", capabilities: []nodepolicy.Capability{nodepolicy.CapVision}, tools: true, modes: []string{"json_object", "json_schema"}},
+		{name: "embeddings refused", capabilities: []nodepolicy.Capability{nodepolicy.CapEmbeddings}, tools: true, modes: []string{"json_object", "json_schema"}},
+		{name: "unknown refused", capabilities: []nodepolicy.Capability{"future"}, tools: true, modes: []string{"json_object", "json_schema"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newStrictHarness(t)
+			p := h.a.currentPolicy()
+			p.Profiles[0].Capabilities = tc.capabilities
+			q := testQualification("coverage", "ollama", "m")
+			q.Shapes.Tools = &tc.tools
+			q.Shapes.StructuredOutput = append([]string{}, tc.modes...)
+			ref := nodepolicy.QualificationRef{ID: q.ID, Revision: q.Revision}
+			p.Profiles[0].Qualification = &ref
+			h.a.mu.Lock()
+			h.a.strict.registry[ref] = q
+			h.a.mu.Unlock()
+			h.a.setPolicy(p)
+			if _, ok := installed(h.a); ok != tc.want {
+				t.Fatalf("installed = %v, want %v", ok, tc.want)
+			}
+			readiness := h.a.StrictReadiness()
+			if tc.want {
+				if readiness.Capability == nil || len(readiness.Capability.Models) != 1 || readiness.Capability.Models[0].Identity != strictRequest().Identity {
+					t.Fatalf("readiness = %+v, want the matching model identity", readiness)
+				}
+			} else {
+				if readiness.Capability != nil {
+					t.Fatalf("uncovered profile advertised: %+v", readiness.Capability)
+				}
+				if _, err := h.a.qualifyStrict("ollama", "m", routeChatCompletions, []byte(strictBody("m")), strictRequest().Identity); !errors.Is(err, errStrictUnavailable) {
+					t.Fatalf("qualifyStrict = %v, want unavailable", err)
+				}
+			}
+		})
+	}
 	t.Run("matching inputs install the identity", func(t *testing.T) {
 		h := newStrictHarness(t)
 		m, ok := installed(h.a)
@@ -1060,6 +1112,56 @@ func TestStrictCapabilityDerivation(t *testing.T) {
 }
 
 func TestStrictQualifyThenAdmitIsFencedByReinstallation(t *testing.T) {
+	for _, change := range []string{"policy requires uncovered structured output", "evidence loses tools coverage"} {
+		t.Run(change, func(t *testing.T) {
+			h := newStrictHarness(t)
+			p := h.a.currentPolicy()
+			p.Profiles[0].Capabilities = []nodepolicy.Capability{nodepolicy.CapTools}
+			h.a.setPolicy(p)
+			validated, err := h.a.qualifyStrict("ollama", "m", routeChatCompletions, []byte(strictBody("m")), strictRequest().Identity)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if change == "policy requires uncovered structured output" {
+				p.Profiles[0].Capabilities = []nodepolicy.Capability{nodepolicy.CapTools, nodepolicy.CapStructured}
+			} else {
+				ref := *p.Profiles[0].Qualification
+				h.a.mu.Lock()
+				q := *h.a.strict.registry[ref]
+				shapes := *q.Shapes
+				tools := false
+				shapes.Tools = &tools
+				q.Shapes = &shapes
+				q.Revision = "uncovered"
+				ref = nodepolicy.QualificationRef{ID: q.ID, Revision: q.Revision}
+				h.a.strict.registry[ref] = &q
+				h.a.mu.Unlock()
+				p.Profiles[0].Qualification = &ref
+			}
+			h.a.setPolicy(p)
+			if readiness := h.a.StrictReadiness(); readiness.Capability != nil {
+				t.Fatalf("removed coverage still advertised: %+v", readiness.Capability)
+			}
+			if ticket, err := h.a.AdmitStrict(context.Background(), "ollama", "m", strictRequest(), validated.generation); ticket != nil || !errors.Is(err, errStrictUnavailable) {
+				t.Fatalf("ticket %v, error %v; want unavailable after coverage loss", ticket, err)
+			}
+			// Restore the original covered profile: the stale validation must
+			// remain fenced even though its identity and evidence match again.
+			original := h.a.currentPolicy()
+			original.Profiles[0].Capabilities = []nodepolicy.Capability{nodepolicy.CapTools}
+			original.Profiles[0].Qualification = &nodepolicy.QualificationRef{ID: "test-0", Revision: "1"}
+			h.a.setPolicy(original)
+			if readiness := h.a.StrictReadiness(); readiness.Capability == nil {
+				t.Fatal("restored coverage did not reinstall readiness")
+			}
+			if ticket, err := h.a.AdmitStrict(context.Background(), "ollama", "m", strictRequest(), validated.generation); ticket != nil || !errors.Is(err, errStrictUnavailable) {
+				t.Fatalf("ticket %v, error %v; want stale generation refused", ticket, err)
+			}
+			if h.a.currentActive() != 0 || len(h.a.tickets) != 0 || len(h.a.strict.markers) != 0 || len(h.notes(nodepolicy.NotifyAdmissionWake)) != 0 || len(h.notes(nodepolicy.NotifyAdmissionUnload)) != 0 {
+				t.Fatal("a fenced admission had side effects")
+			}
+		})
+	}
 	h := newStrictHarness(t)
 	validated, err := h.a.qualifyStrict("ollama", "m", routeChatCompletions, []byte(strictBody("m")), strictRequest().Identity)
 	if err != nil {
