@@ -79,7 +79,8 @@ type strictAdmissionState struct {
 // engine's identity is present, its launch and the model's content digest are
 // ones the qualification covers, the profile's defaults are the qualified ones,
 // its context and output bounds are within the qualified ones, and its
-// effective concurrency is finite. Two profiles normalizing to one model
+// effective concurrency is finite. Its routing capabilities must be covered
+// by the qualification's shapes. Two profiles normalizing to one model
 // install neither. Keys whose installed entry changed get a new generation;
 // setModelIdentity also fences envelope-only changes. It reports
 // whether the capability changed. Caller holds a.mu.
@@ -153,6 +154,20 @@ func (a *admissionController) qualifiedModelLocked(k admKey, pr nodepolicy.Profi
 		envelope, ok := a.servingEnvelopeLocked(id, k, digest)
 		if !ok || int64(q.ContextTokens) > envelope.PerSlotContextTokens || int64(q.MaxOutputTokens) > envelope.MaxOutputTokens ||
 			int64(m.MaxConcurrent) > envelope.Slots || pr.MemoryBytes < *envelope.Memory.VRAMBytes {
+			return nodeStrictModel{}, nil, false
+		}
+	}
+	for _, capability := range pr.Capabilities {
+		switch capability {
+		case nodepolicy.CapTools:
+			if !*q.Shapes.Tools {
+				return nodeStrictModel{}, nil, false
+			}
+		case nodepolicy.CapStructured:
+			if !slices.Contains(q.Shapes.StructuredOutput, "json_object") || !slices.Contains(q.Shapes.StructuredOutput, "json_schema") {
+				return nodeStrictModel{}, nil, false
+			}
+		default:
 			return nodeStrictModel{}, nil, false
 		}
 	}
