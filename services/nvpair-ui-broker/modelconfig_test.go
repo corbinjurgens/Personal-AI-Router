@@ -106,6 +106,571 @@ func decodeModelConfigCall[T any](t *testing.T, call policyCall) T {
 	return params
 }
 
+// TestModelConfigEventStateMachine explores ordered event pairs at each owned
+// reconciliation phase. Each row uses actual RPC workers and reconciliation;
+// the only clock advanced is policyRuntime.now. The small triples exercise
+// capacity/watcher and veto/resume schedules with an intervening restart.
+func TestModelConfigEventStateMachine(t *testing.T) {
+	events := []string{"load ok", "load error", "finish ok", "finish error", "publish matching", "publish mismatching", "capacity", "revision", "pause", "resume", "Off", "On", "drain", "undrain", "proxy restart", "worker restart", "timeout", "shutdown"}
+	states := []string{"prepare in flight", "grant in flight", "load in flight", "finish in flight", "pending observation", "terminal finish failure", "nonterminal uncertainty", "retry"}
+	for _, state := range states {
+		// Independent fixtures partition the first event, keeping long live-RPC
+		// phases from serializing the matrix behind a single fixture owner.
+		for partition, name := range []string{"first", "middle", "last"} {
+			t.Run(state+"/"+name, func(t *testing.T) {
+				t.Parallel()
+				f := newModelConfigFixture(t)
+				defer close(f.done)
+				base := f.b.captureModelConfig()
+				f.proxy.mu.Lock()
+				proxyAnswer := f.proxy.answer
+				f.proxy.mu.Unlock()
+				r := f.b.nodePolicyRuntime()
+				r.mu.Lock()
+				identities := r.engineIdentity
+				baseModels := r.models
+				r.mu.Unlock()
+				seed := &modelConfigMatrixSeed{manager: emptySwitchManagerSnapshot()}
+				for firstIndex, first := range events {
+					if firstIndex%3 != partition {
+						continue
+					}
+					for _, second := range events {
+						runModelConfigEventTrace(t, state, []string{first, second}, f, base, baseModels, identities, proxyAnswer, seed)
+					}
+				}
+				for _, trace := range [][]string{
+					{"capacity", "publish matching", "capacity"},
+					{"pause", "capacity", "resume"},
+					{"Off", "proxy restart", "On"},
+					{"drain", "capacity", "undrain"},
+					{"proxy restart", "publish matching", "timeout"},
+					{"finish error", "proxy restart", "publish matching"},
+				} {
+					if partition == 0 {
+						runModelConfigEventTrace(t, state, trace, f, base, baseModels, identities, proxyAnswer, seed)
+					}
+				}
+			})
+		}
+	}
+}
+
+func runModelConfigEventTrace(t *testing.T, state string, events []string, f *modelConfigFixture, base modelConfigEvidence, baseModels modelConfigRuntime, identities map[string]engineManagerIdentity, proxyAnswer func(string, json.RawMessage) (any, string), seed *modelConfigMatrixSeed) {
+	t.Helper()
+	// Restore the same quiescent fixture between traces. No held RPC/evaluator
+	// crosses this boundary; the deferred join below is part of every row.
+	publishTestProxy(f.b, base.Proxy)
+	f.source = base.Source
+	f.b.bindEngineMgr(f.b.getEngineMgr(), base.Source)
+	r := f.b.nodePolicyRuntime()
+	r.mu.Lock()
+	r.current, r.live, r.localPauseRequested = base.Policy, base.Live, false
+	r.incarnation, r.runID, r.activeRevision = base.Proxy, base.Run, base.Policy.Revision
+	r.activationErr, r.availabilityErr = "", ""
+	r.strictReadiness = base.Readiness
+	r.engineManagerSource, r.engineIdentity = base.Source, identities
+	r.intent, r.running, r.loaded = map[string]bool{"llamacpp": true}, map[string]bool{"llamacpp": true}, map[string][]string{"llamacpp": {}}
+	r.drains, r.admission.ActiveByEngine = nil, nil
+	r.models = baseModels
+	r.mu.Unlock()
+	f.engine.mu.Lock()
+	f.engine.calls = nil
+	f.engine.held = make(chan struct{})
+	f.engine.holdOnce = sync.Once{}
+	f.engine.mu.Unlock()
+	f.proxy.mu.Lock()
+	f.proxy.calls = nil
+	f.proxy.held = make(chan struct{})
+	f.proxy.holdOnce = sync.Once{}
+	f.proxy.mu.Unlock()
+	f.acks.mu.Lock()
+	f.acks.held = "0"
+	f.acks.mu.Unlock()
+	ref := nodepolicy.Role{Engine: "llamacpp", Model: "resident"}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	clock := time.Unix(5000, 0)
+	r.mu.Lock()
+	r.now = func() time.Time { return clock }
+	r.mu.Unlock()
+
+	// Seed phases are independent of future events. The held reply points to
+	// wireResult, whose final value is published by closing the reply barrier.
+	outcome := nodepolicy.ResidentLoaded
+	if state == "nonterminal uncertainty" {
+		outcome = nodepolicy.ResidentUnknown
+	}
+	if state == "retry" {
+		outcome = nodepolicy.ResidentFailed
+	}
+	finishError := state == "terminal finish failure" || state == "nonterminal uncertainty"
+	wireFinish := &nodepolicy.FinishResidentResult{ReservationID: "fixture-reservation", Outcome: outcome}
+	finishEncoded := make(chan struct{})
+	finishReply := &modelConfigMatrixReply{value: wireFinish, encoded: finishEncoded}
+	phaseEncoded := make(chan struct{})
+	// Shared answer flags are read by fake-worker goroutines.
+	var answerMu sync.Mutex
+	f.proxy.setAnswer(func(method string, raw json.RawMessage) (any, string) {
+		if (state == "prepare in flight" && method == nodepolicy.MethodPrepareResident) || (state == "grant in flight" && method == nodepolicy.MethodDispatchResident) {
+			result, _ := proxyAnswer(method, raw)
+			return &modelConfigMatrixReply{value: result, encoded: phaseEncoded}, holdSuccessReply
+		}
+		if method == nodepolicy.MethodFinishResident {
+			answerMu.Lock()
+			fail := finishError
+			answerMu.Unlock()
+			if fail {
+				return nil, "injected finish failure"
+			}
+			result, failure := proxyAnswer(method, raw)
+			if state == "finish in flight" {
+				return finishReply, holdSuccessReply
+			}
+			return result, failure
+		}
+		return proxyAnswer(method, raw)
+	})
+	var done <-chan struct{}
+	var wireResult *nodepolicy.ReconcileResidentResult
+	var loadEncoded <-chan struct{}
+	seeded := seed.models != nil
+	loadLive, finishLive := false, false
+	if seeded {
+		r.mu.Lock()
+		r.models = cloneModelConfigMatrixState(*seed.models)
+		r.mu.Unlock()
+		closed := make(chan struct{})
+		close(closed)
+		done = closed
+	} else {
+		done, wireResult, loadEncoded = startModelConfigMatrixAttempt(t, ctx, f, seed.manager, outcome, state == "nonterminal uncertainty")
+		if state == "prepare in flight" || state == "grant in flight" {
+			heldMethod := nodepolicy.MethodPrepareResident
+			if state == "grant in flight" {
+				heldMethod = nodepolicy.MethodDispatchResident
+			}
+			awaitModelConfigMatrixCall(t, f.proxy, heldMethod)
+		} else {
+			awaitModelConfigMatrixCall(t, f.engine, residentDispatchReplyMethod)
+			f.awaitGrant(t)
+			loadLive = true
+		}
+		if state != "prepare in flight" && state != "grant in flight" && state != "load in flight" {
+			f.engine.releaseHeld()
+			loadLive = false
+			if state == "finish in flight" && !finishError {
+				awaitModelConfigMatrixCall(t, f.proxy, nodepolicy.MethodFinishResident)
+				finishLive = true
+			} else {
+				awaitModelConfigDone(t, done)
+			}
+		}
+		if state != "prepare in flight" && state != "grant in flight" && state != "load in flight" && state != "finish in flight" {
+			r.mu.Lock()
+			copy := cloneModelConfigMatrixState(r.models)
+			seed.models = &copy
+			r.mu.Unlock()
+		}
+	}
+	defer func() {
+		cancel()
+		f.engine.releaseHeld()
+		f.proxy.releaseHeld()
+		awaitModelConfigDone(t, done)
+		if !seeded && state != "nonterminal uncertainty" && state != "prepare in flight" {
+			<-loadEncoded
+		}
+		if !seeded && state == "finish in flight" {
+			<-finishEncoded
+		}
+		if state == "prepare in flight" || state == "grant in flight" {
+			<-phaseEncoded
+		}
+	}()
+	// After the seed operation, any accidental second dispatch gets an immediate
+	// negative reply. This makes duplicate detection finite, never a timeout.
+	readback := residentLaunchReadback(base)
+	f.engine.setAnswer(func(method string, _ json.RawMessage) (any, string) {
+		switch method {
+		case settings.SwitchPrepareMethod:
+			return seed.manager, ""
+		case "engine:get-launch":
+			return readback, ""
+		case nodepolicy.MethodReconcileResident:
+			return nodepolicy.ReconcileResidentResult{Outcome: nodepolicy.ResidentNotDispatched}, ""
+		}
+		return map[string]bool{"ok": true}, ""
+	})
+	loads := func() int {
+		n := 0
+		f.engine.mu.Lock()
+		defer f.engine.mu.Unlock()
+		for _, call := range f.engine.calls {
+			if call.method == nodepolicy.MethodReconcileResident {
+				n++
+			}
+		}
+		return n
+	}
+	shutdown := false
+	// The ledger persists after a record disappears. A buggy clearing path
+	// cannot evade duplicate detection on the next event by deleting ownership.
+	issued := map[string]int{"0": 1}
+	if state == "retry" || state == "prepare in flight" || state == "grant in flight" {
+		issued["0"] = 0
+	}
+	for _, event := range events {
+		beforeLoads := loads()
+		if shutdown {
+			f.b.reconcileModelConfig(ctx)
+			if loads() != beforeLoads {
+				t.Fatalf("trace %v: event after shutdown issued a load", events)
+			}
+			continue
+		}
+		r.mu.Lock()
+		beforeActive, beforeBusy := r.models.active, r.models.busy
+		beforeGranted := beforeActive != nil && beforeActive.granted
+		beforeProof, beforePending := r.models.pending[ref]
+		beforeHold, beforeUnsettled := r.models.unsettled[ref]
+		revision := r.current.Revision
+		paused, intent, draining := r.localPauseRequested, r.intent["llamacpp"], r.drains["llamacpp"]
+		capacity := r.admission.ActiveByEngine["llamacpp"]
+		r.mu.Unlock()
+		allowedExit := (beforeActive != nil && beforeActive.evidence.Policy.Revision != revision) ||
+			(beforePending && beforeProof.evidence.Policy.Revision != revision) ||
+			(beforeUnsettled && beforeHold.op.evidence.Policy.Revision != revision)
+		trigger := !shutdown
+		switch event {
+		case "load ok", "load error":
+			trigger = loadLive && !shutdown
+			if loadLive {
+				if event == "load error" {
+					wireResult.Outcome, wireResult.Observation = nodepolicy.ResidentFailed, nil
+				}
+				f.engine.releaseHeld()
+				loadLive = false
+				if state == "finish in flight" && !finishError {
+					finishLive = true
+				} else {
+					awaitModelConfigDone(t, done)
+				}
+				allowedExit = allowedExit || event == "load error" || (beforeActive != nil && !beforeGranted)
+			}
+		case "finish ok", "finish error":
+			trigger = (finishLive || beforeUnsettled) && !shutdown
+			answerMu.Lock()
+			finishError = event == "finish error"
+			answerMu.Unlock()
+			if finishLive {
+				if event == "finish error" {
+					wireFinish.ReservationID = ""
+				}
+				f.proxy.releaseHeld()
+				finishLive = false
+				awaitModelConfigDone(t, done)
+			}
+		case "publish matching":
+			f.b.observeLoadedFrom(f.source, map[string][]string{"llamacpp": {"resident"}})
+			// Name presence cannot discharge a live native operation or uncertain
+			// completion; only the reconciler's confirming transfer below can.
+		case "publish mismatching":
+			f.b.observeLoadedFrom(f.source, map[string][]string{"llamacpp": {}})
+		case "capacity":
+			trigger = capacity != 1
+			r.mu.Lock()
+			r.admission.ActiveByEngine = map[string]int{"llamacpp": 1}
+			r.mu.Unlock()
+		case "revision":
+			r.mu.Lock()
+			if r.current.Revision == "0" {
+				r.current.Revision = "1"
+			} else {
+				r.current.Revision = "2"
+			}
+			revision := r.current.Revision
+			r.mu.Unlock()
+			if !f.b.replayPolicyToProxy(ctx, f.b.policyProxy()) && !shutdown {
+				t.Fatal("revision activation failed")
+			}
+			reportStrict(t, f.b, revision, f.b.captureModelConfig().Run, strictCapability(t, "llamacpp", "resident"))
+			allowedExit = true
+		case "pause", "resume":
+			trigger = paused != (event == "pause")
+			r.mu.Lock()
+			r.localPauseRequested = event == "pause"
+			r.mu.Unlock()
+		case "Off", "On":
+			trigger = intent != (event == "On")
+			r.mu.Lock()
+			r.intent["llamacpp"] = event == "On"
+			r.mu.Unlock()
+		case "drain", "undrain":
+			trigger = draining != (event == "drain")
+			r.mu.Lock()
+			r.drains = map[string]bool{"llamacpp": event == "drain"}
+			r.mu.Unlock()
+		case "proxy restart":
+			if !shutdown {
+				pp, proxy, acks := attachAckingProxy(t, f.b)
+				defer proxy.conn.Close()
+				proxy.setAnswer(func(method string, raw json.RawMessage) (any, string) {
+					if method == nodepolicy.MethodSetPolicy {
+						return acks.answer(method, raw)
+					}
+					return proxyAnswer(method, raw)
+				})
+				if !f.b.replayPolicyToProxy(ctx, pp) {
+					t.Fatal("replacement activation failed")
+				}
+				reportStrict(t, f.b, f.b.captureModelConfig().Policy.Revision, acks.runID, strictCapability(t, "llamacpp", "resident"))
+			}
+		case "worker restart":
+			// The original native worker is retained as the completion source;
+			// changing its source handle invalidates current inventory provenance.
+			f.source = f.b.activateEngineManagerSource()
+			f.b.bindEngineMgr(f.b.getEngineMgr(), f.source)
+			r.mu.Lock()
+			r.engineIdentity = identities
+			r.mu.Unlock()
+		case "timeout":
+			r.mu.Lock()
+			clock = clock.Add(residentObservationTimeout + time.Second)
+			r.mu.Unlock()
+			allowedExit = allowedExit || !beforeUnsettled || state != "nonterminal uncertainty"
+		case "shutdown":
+			// An unbuffered wake rendezvous proves the owner reached its select
+			// after creating the ticker. Busy admission coalesces this wake so
+			// starting the owner cannot introduce a new load before cancellation.
+			wake := make(chan struct{})
+			r.mu.Lock()
+			oldBusy, oldWake := r.models.busy, r.models.wake
+			r.models.busy, r.models.wake = true, wake
+			r.mu.Unlock()
+			idleDone := make(chan struct{})
+			go func() { defer close(idleDone); f.b.runIdlePolicy(ctx) }()
+			wake <- struct{}{}
+			cancel()
+			shutdown = true
+			awaitModelConfigDone(t, idleDone)
+			r.mu.Lock()
+			r.models.wake = oldWake
+			if r.models.active != nil {
+				r.models.busy = oldBusy
+			} else {
+				r.models.busy = false
+			}
+			r.mu.Unlock()
+			f.engine.releaseHeld()
+			f.proxy.releaseHeld()
+			loadLive, finishLive = false, false
+			awaitModelConfigDone(t, done)
+		}
+		if trigger {
+			f.b.reconcileModelConfig(ctx)
+		}
+		r.mu.Lock()
+		active, busy := r.models.active, r.models.busy
+		pending, hasPending := r.models.pending[ref]
+		hold, hasHold := r.models.unsettled[ref]
+		veto := r.localPauseRequested || !r.intent["llamacpp"] || r.drains["llamacpp"]
+		_, confirmed := r.models.confirmed[ref]
+		currentRevision := r.current.Revision
+		r.mu.Unlock()
+		if event == "publish matching" && confirmed && !hasPending && !hasHold {
+			allowedExit = true
+		}
+		if allowedExit {
+			issued[revision] = 0
+		}
+		if delta := loads() - beforeLoads; delta > 0 {
+			issued[currentRevision] += delta
+			if issued[currentRevision] > 1 {
+				t.Fatalf("trace %v: duplicate dispatch for revision %s", events, currentRevision)
+			}
+			// Every post-seed fake attempt immediately replies NotDispatched,
+			// which is itself the allowed load-failure exit for that new attempt.
+			issued[currentRevision] = 0
+		}
+		if (veto || shutdown) && loads() != beforeLoads {
+			t.Fatalf("%s issued load under veto/shutdown", event)
+		}
+		if !allowedExit && (beforePending || beforeUnsettled || beforeActive != nil) && loads() != beforeLoads {
+			t.Fatalf("%s issued another load before an allowed fact exit", event)
+		}
+		if !allowedExit && beforePending && !hasPending {
+			t.Fatalf("%s discarded pending observation without an allowed exit", event)
+		}
+		if event == "publish matching" && beforeUnsettled && beforeHold.terminal && beforeHold.finish.Outcome == nodepolicy.ResidentLoaded && beforeHold.op.evidence.Proxy != f.b.policyProxy() && !veto && !shutdown && hasHold {
+			t.Fatalf("trace %v: fresh replacement publication left terminal load stuck", events)
+		}
+		operationPending := false
+		select {
+		case <-done:
+		default:
+			operationPending = true
+		}
+		if beforeBusy && operationPending && (active != beforeActive || !busy) {
+			t.Fatalf("%s discarded live ownership", event)
+		}
+		if !shutdown && hasPending && !pending.expires.After(clock) {
+			t.Fatalf("%s left pending without live observation deadline", event)
+		}
+		if !shutdown && hasHold && hold.terminal && !hold.expires.After(clock) {
+			t.Fatalf("%s left terminal hold without live observation deadline", event)
+		}
+		if hasHold && !hold.terminal && (hold.op == nil || hold.finish.ReservationID == "") {
+			t.Fatalf("%s lost original completion/revision exit", event)
+		}
+		if busy && active == nil {
+			t.Fatalf("%s left busy without an operation", event)
+		}
+		if shutdown && (busy || active != nil) {
+			t.Fatalf("shutdown retained operation goroutine ownership")
+		}
+	}
+	// Joining every held evaluation is the scoped goroutine leak assertion. No
+	// per-key timer is created: expiration is driven by the injected idle clock.
+	cancel()
+	f.engine.releaseHeld()
+	f.proxy.releaseHeld()
+	awaitModelConfigDone(t, done)
+	r.mu.Lock()
+	busy, active := r.models.busy, r.models.active
+	r.mu.Unlock()
+	if busy || active != nil {
+		t.Fatal("trace cleanup retained evaluator")
+	}
+	r.mu.Lock()
+	remainingHold, held := r.models.unsettled[ref]
+	r.mu.Unlock()
+	if !held || remainingHold.terminal {
+		return
+	}
+	// Pending and terminal waits have a live injected-clock deadline, checked
+	// above and exercised by every timeout event. A genuinely uncertain native
+	// operation instead needs explicit declaration retirement; execute that exit
+	// rather than treating a dead operation pointer as a pending completion.
+	r.mu.Lock()
+	r.localPauseRequested = true
+	r.current.Revision = "9"
+	r.models.last = nil
+	r.mu.Unlock()
+	f.b.reconcileModelConfig(context.Background())
+	r.mu.Lock()
+	_, pendingAfterRetire := r.models.pending[ref]
+	_, heldAfterRetire := r.models.unsettled[ref]
+	r.mu.Unlock()
+	if pendingAfterRetire || heldAfterRetire {
+		t.Fatalf("trace %v: declaration exit unreachable", events)
+	}
+}
+
+type modelConfigMatrixSeed struct {
+	models  *modelConfigRuntime
+	manager switchManagerSnapshot
+}
+
+func awaitModelConfigMatrixCall(t *testing.T, worker *fakeWorker, method string) {
+	t.Helper()
+	deadline := time.NewTimer(3 * time.Second)
+	defer deadline.Stop()
+	for {
+		for _, call := range worker.snapshot() {
+			if call.method == method {
+				return
+			}
+		}
+		select {
+		case <-worker.signal:
+		case <-deadline.C:
+			t.Fatalf("missing matrix RPC %s", method)
+		}
+	}
+}
+
+func cloneModelConfigMatrixState(from modelConfigRuntime) modelConfigRuntime {
+	copy := from
+	copy.pending = make(map[nodepolicy.Role]residentPendingObservation)
+	for ref, pending := range from.pending {
+		copy.pending[ref] = pending
+	}
+	copy.unsettled = make(map[nodepolicy.Role]residentUnsettled)
+	for ref, hold := range from.unsettled {
+		op := *hold.op
+		if op.recovery != nil {
+			recovery := *op.recovery
+			op.recovery = &recovery
+		}
+		hold.op = &op
+		copy.unsettled[ref] = hold
+	}
+	copy.confirmed = make(map[nodepolicy.Role]modelConfigEvidence)
+	for ref, evidence := range from.confirmed {
+		copy.confirmed[ref] = evidence
+	}
+	copy.status.Models = append([]nodepolicy.ModelConfigurationEntry(nil), from.status.Models...)
+	return copy
+}
+
+func startModelConfigMatrixAttempt(t *testing.T, ctx context.Context, f *modelConfigFixture, manager switchManagerSnapshot, outcome nodepolicy.ResidentOutcome, nonterminal bool) (<-chan struct{}, *nodepolicy.ReconcileResidentResult, <-chan struct{}) {
+	t.Helper()
+	result := &nodepolicy.ReconcileResidentResult{Outcome: outcome}
+	encoded := make(chan struct{})
+	reply := &modelConfigMatrixReply{value: result, encoded: encoded}
+	f.engine.setAnswer(func(method string, raw json.RawMessage) (any, string) {
+		if method == settings.SwitchPrepareMethod {
+			return manager, ""
+		}
+		if method != nodepolicy.MethodReconcileResident {
+			return map[string]bool{"ok": true}, ""
+		}
+		var p nodepolicy.ReconcileResidentParams
+		if err := json.Unmarshal(raw, &p); err != nil {
+			return nil, err.Error()
+		}
+		request, err := json.Marshal(struct {
+			ID     string                            `json:"id"`
+			Params nodepolicy.DispatchResidentParams `json:"params"`
+		}{"fixture-dispatch", nodepolicy.DispatchResidentParams{
+			ReservationID: p.Reservation.ReservationID, ProxyRunID: p.Reservation.ProxyRunID,
+			ManagerIncarnation: p.Reservation.ManagerIncarnation, PolicyRevision: p.PolicyRevision,
+			OperationID: p.OperationID, Engine: p.Engine, Model: p.Model, Identity: p.Identity,
+		}})
+		if err != nil {
+			return nil, err.Error()
+		}
+		if outcome == nodepolicy.ResidentLoaded {
+			result.Observation = &nodepolicy.ResidentLoadedObservation{
+				ManagerIncarnation: p.Reservation.ManagerIncarnation, Generation: 1,
+				Engine: p.Engine, Model: p.Model, Identity: p.Identity, Loaded: true,
+			}
+		}
+		f.b.dispatchResidentFrom(f.source, request)
+		if nonterminal {
+			return nil, holdReply
+		}
+		return reply, holdSuccessReply
+	})
+	done := make(chan struct{})
+	go func() { defer close(done); f.b.reconcileModelConfig(ctx) }()
+	return done, result, encoded
+}
+
+// Encoding joins the fake held-response goroutine even when cancellation wins
+// the RPC response race. That barrier makes resetting fakeWorker.held safe.
+type modelConfigMatrixReply struct {
+	value   any
+	encoded chan struct{}
+	once    sync.Once
+}
+
+func (r *modelConfigMatrixReply) MarshalJSON() ([]byte, error) {
+	defer r.once.Do(func() { close(r.encoded) })
+	return json.Marshal(r.value)
+}
+
 func TestModelConfigLoadUsesRevisionProfile(t *testing.T) {
 	test := func(t *testing.T, contextTokens int) {
 		f := newModelConfigFixture(t)
@@ -220,6 +785,89 @@ func TestModelConfigBusyRetainsOriginalOwnership(t *testing.T) {
 	}
 	if status := f.b.modelConfiguration(f.b.captureModelConfig()); status.Models[0].State != nodepolicy.ModelStateSatisfied {
 		t.Fatalf("original operation did not finish satisfied: %+v", status)
+	}
+}
+
+func TestModelConfigDrainRetainsInflightOwnership(t *testing.T) {
+	f := newModelConfigFixture(t)
+	done := f.startLoadedAttempt(t)
+	f.awaitGrant(t)
+	r := f.b.nodePolicyRuntime()
+	r.mu.Lock()
+	original := r.models.active
+	r.drains = map[string]bool{"llamacpp": true}
+	r.mu.Unlock()
+	f.b.reconcileModelConfig(context.Background())
+	r.mu.Lock()
+	retained := original != nil && r.models.active == original && r.models.busy
+	r.drains["llamacpp"] = false
+	r.mu.Unlock()
+	f.engine.releaseHeld()
+	awaitModelConfigDone(t, done)
+	if !retained || len(modelConfigCalls(f.engine, nodepolicy.MethodReconcileResident)) != 1 {
+		t.Fatal("drain lost original in-flight ownership or dispatched overlapping work")
+	}
+	f.b.reconcileModelConfig(context.Background())
+	if status := f.b.modelConfiguration(f.b.captureModelConfig()); status.Models[0].State != nodepolicy.ModelStateSatisfied {
+		t.Fatalf("original operation did not complete: %+v", status)
+	}
+}
+
+func TestModelConfigTerminalFinishFailureHasBoundedExit(t *testing.T) {
+	for _, exit := range []string{"fresh confirmation", "observation timeout"} {
+		t.Run(exit, func(t *testing.T) {
+			f := newModelConfigFixture(t)
+			f.proxy.mu.Lock()
+			answer := f.proxy.answer
+			f.proxy.mu.Unlock()
+			f.proxy.setAnswer(func(method string, raw json.RawMessage) (any, string) {
+				if method == nodepolicy.MethodFinishResident {
+					return nil, "retired proxy"
+				}
+				return answer(method, raw)
+			})
+			done := f.startLoadedAttempt(t)
+			f.awaitGrant(t)
+			f.engine.releaseHeld()
+			awaitModelConfigDone(t, done)
+			before := f.b.captureModelConfig()
+			r := f.b.nodePolicyRuntime()
+			ref := nodepolicy.Role{Engine: "llamacpp", Model: "resident"}
+			r.mu.Lock()
+			hold, ok := r.models.unsettled[ref]
+			r.mu.Unlock()
+			if !ok || !hold.terminal || hold.expires.IsZero() {
+				t.Fatal("terminal finish failure has no bounded observation exit")
+			}
+			pp, _, acks := attachAckingProxy(t, f.b)
+			if !f.b.replayPolicyToProxy(context.Background(), pp) {
+				t.Fatal("activate replacement proxy")
+			}
+			reportStrict(t, f.b, "0", acks.runID, strictCapability(t, "llamacpp", "resident"))
+			readback := residentLaunchReadback(before)
+			f.engine.setAnswer(func(string, json.RawMessage) (any, string) { return readback, "" })
+			if exit == "fresh confirmation" {
+				f.b.observeLoadedFrom(f.source, map[string][]string{"llamacpp": {"resident"}})
+			} else {
+				r.mu.Lock()
+				now := hold.expires.Add(time.Second)
+				r.now = func() time.Time { return now }
+				r.mu.Unlock()
+			}
+			f.b.reconcileModelConfig(context.Background())
+			r.mu.Lock()
+			_, retained := r.models.unsettled[ref]
+			r.mu.Unlock()
+			if retained || len(modelConfigCalls(f.engine, nodepolicy.MethodReconcileResident)) != 1 {
+				t.Fatal("terminal observation remained stuck or duplicated load")
+			}
+			if exit == "fresh confirmation" {
+				status := f.b.modelConfiguration(f.b.captureModelConfig())
+				if status.Models[0].State != nodepolicy.ModelStateSatisfied || len(modelConfigCalls(f.engine, "engine:get-launch")) != 1 {
+					t.Fatalf("replacement bypassed fresh envelope confirmation: %+v", status)
+				}
+			}
+		})
 	}
 }
 
@@ -485,7 +1133,13 @@ func TestModelConfigTransientRecoveryRetries(t *testing.T) {
 			f.b.observeLoadedFrom(f.source, map[string][]string{"llamacpp": {"resident"}})
 			f.b.reconcileModelConfig(context.Background())
 			status := f.b.modelConfiguration(f.b.captureModelConfig())
-			if status.Models[0].State != nodepolicy.ModelStateSatisfied || len(modelConfigCalls(f.engine, nodepolicy.MethodReconcileResident)) != 1 {
+			wantLoads := 1
+			if scenario == "cancelled recovery" {
+				// Both tick advances cross the terminal observation deadline.
+				// Its bounded exit permits one new attempt after cancellation.
+				wantLoads = 2
+			}
+			if status.Models[0].State != nodepolicy.ModelStateSatisfied || len(modelConfigCalls(f.engine, nodepolicy.MethodReconcileResident)) != wantLoads {
 				t.Fatalf("transient failure suppressed settlement or duplicated load: %+v loads=%d", status, len(modelConfigCalls(f.engine, nodepolicy.MethodReconcileResident)))
 			}
 			if scenario != "revision replacement" && len(modelConfigCalls(f.proxy, nodepolicy.MethodObserveResident)) == 0 {

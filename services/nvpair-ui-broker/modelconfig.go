@@ -33,6 +33,9 @@ type residentUnsettled struct {
 	op       *modelConfigAttempt
 	finish   nodepolicy.FinishResidentParams
 	terminal bool
+	// A terminal reply ends native execution even if finish cannot be delivered.
+	// Retain its uncertainty as bounded observation, not a permanent proxy hold.
+	expires time.Time
 }
 
 // modelConfigEvidence is an immutable capture. RPCs never hold policy locks.
@@ -356,8 +359,9 @@ func (b *Broker) reconcileModelConfig(ctx context.Context) {
 	}
 	for ref, hold := range r.models.unsettled {
 		// Keep original ownership across worker replacement; it is not unload
-		// evidence. Revision replacement/removal retires the declaration.
-		if !b.residentDeclarationCurrent(hold.op.evidence, e, ref) {
+		// evidence. A terminal reply can instead leave bounded observation;
+		// the Serve-owned idle tick expires it even if the proxy is retired.
+		if !b.residentDeclarationCurrent(hold.op.evidence, e, ref) || (hold.terminal && !r.now().Before(hold.expires)) {
 			delete(r.models.unsettled, ref)
 		}
 	}
@@ -400,6 +404,17 @@ func (b *Broker) reconcileModelConfig(ctx context.Context) {
 			switch {
 			case unsettled:
 				entry.State, entry.Reason = nodepolicy.ModelStateUnknown, nodepolicy.ModelReasonOperationTimeout
+				// Native execution has ended. A replacement authority may confirm
+				// that allocation, but only with fresh inventory and envelope proof.
+				if hold.terminal && hold.finish.Outcome == nodepolicy.ResidentLoaded && !sameResidentAllocation(hold.op.evidence, e, ref) && e.LoadedCurrent[ref.Engine][ref.Model] && entry.ObservedLoaded != nil && *entry.ObservedLoaded {
+					entry = b.confirmResident(ctx, e, entry)
+					if entry.State == nodepolicy.ModelStateSatisfied {
+						r.mu.Lock()
+						delete(r.models.unsettled, ref)
+						r.mu.Unlock()
+						break
+					}
+				}
 				cleanup, cancel := context.WithTimeout(ctx, proxyCallTimeout)
 				var finished nodepolicy.FinishResidentResult
 				settled := residentRPC(cleanup, hold.op.evidence.Proxy, nodepolicy.MethodFinishResident, hold.finish, &finished) && finished.ReservationID == hold.finish.ReservationID
@@ -551,7 +566,7 @@ func (b *Broker) reconcileResident(parent context.Context, e modelConfigEvidence
 			if r.models.unsettled == nil {
 				r.models.unsettled = make(map[nodepolicy.Role]residentUnsettled)
 			}
-			r.models.unsettled[nodepolicy.Role{Engine: entry.Engine, Model: entry.Model}] = residentUnsettled{op: op, finish: finish, terminal: terminal}
+			r.models.unsettled[nodepolicy.Role{Engine: entry.Engine, Model: entry.Model}] = residentUnsettled{op: op, finish: finish, terminal: terminal, expires: r.now().Add(residentObservationTimeout)}
 		}
 		if r.models.active == op {
 			r.models.active = nil
