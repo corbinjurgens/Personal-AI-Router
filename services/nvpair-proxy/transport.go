@@ -4,22 +4,32 @@
 package main
 
 import (
+	"errors"
 	"io"
-	"os"
+	"sync"
 )
 
 type stdioTransport struct {
-	io.Reader
-	io.Writer
+	io.ReadCloser
+	io.WriteCloser
+	closeOnce sync.Once
+	closeErr  error
 }
 
-func newStdioTransport() io.ReadWriteCloser {
-	return &stdioTransport{
-		Reader: os.Stdin,
-		Writer: os.Stdout,
+func newStdioTransport() (io.ReadWriteCloser, error) {
+	input, output, err := prepareStdio()
+	if err != nil {
+		return nil, err
 	}
+	return &stdioTransport{ReadCloser: input, WriteCloser: output}, nil
 }
 
 func (s *stdioTransport) Close() error {
-	return nil
+	s.closeOnce.Do(func() {
+		// Interrupt an active notification before waking the protocol reader.
+		outErr := s.WriteCloser.Close()
+		inErr := s.ReadCloser.Close()
+		s.closeErr = errors.Join(outErr, inErr)
+	})
+	return s.closeErr
 }

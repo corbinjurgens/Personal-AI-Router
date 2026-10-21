@@ -23,6 +23,9 @@ import (
 // alone went from under a second to nineteen. The schedule itself is asserted
 // directly in TestBackoffFor, so shortening it here costs no coverage.
 func TestMain(m *testing.M) {
+	if len(os.Args) >= 3 && os.Args[1] == "notification-transport-helper" {
+		os.Exit(runNotificationTransportHelper(os.Args[2:]))
+	}
 	retryBackoff = []time.Duration{time.Millisecond}
 	os.Exit(m.Run())
 }

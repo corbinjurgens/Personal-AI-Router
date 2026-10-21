@@ -73,9 +73,10 @@ A process-wide FIFO holds at most 128 samples. Sequence numbers are assigned at
 enqueue in finalization order across facades. One sender writes notifications
 outside the queue lock; saturation drops telemetry with bounded counters rather
 than waiting on the codec. Normal shutdown cancellation stops the sender
-between writes or while waiting for the codec write gate. An active codec write
-has the same lifetime as existing proxy
-notifications; shutdown does not join or interrupt it.
+between writes or while waiting for the codec write gate. The parent session
+interrupts an active write when its caller is cancelled or its 60-second
+notification budget expires, then closes both transport directions. The sender
+is not joined during shutdown.
 
 ## Build
 
