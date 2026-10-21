@@ -462,6 +462,13 @@ func (f *srProcessFixture) entry(t *testing.T, model string, state nodepolicy.Mo
 		if err := view.ModelConfiguration.Validate(); err != nil {
 			t.Fatal(err)
 		}
+		if view.ModelConfiguration.PolicyRevision != view.Policy.Revision {
+			if time.Now().After(deadline) {
+				t.Fatalf("SR model configuration %s still belongs to revision %s, want %s", model, view.ModelConfiguration.PolicyRevision, view.Policy.Revision)
+			}
+			time.Sleep(500 * time.Millisecond)
+			continue
+		}
 		for _, entry := range view.ModelConfiguration.Models {
 			if entry.Model == model {
 				last = entry
@@ -617,6 +624,10 @@ func TestServedResidentProcessResidency(t *testing.T) {
 	t.Run("declaration removal retains allocation", func(t *testing.T) {
 		before := f.control(t, "")
 		f.resident(t)
+		neEventually(t, "resident declaration removed from current projection", neCallBudget, func() bool {
+			view := f.policy(t)
+			return view.ModelConfiguration != nil && view.ModelConfiguration.PolicyRevision == view.Policy.Revision && len(view.ModelConfiguration.Models) == 0
+		})
 		after := f.control(t, "")
 		if !after.Models[neModel].Loaded {
 			t.Fatal("removing desire unloaded model")
@@ -681,14 +692,12 @@ func TestServedResidentProcessResidency(t *testing.T) {
 		defer f.control(t, "release")
 		neEventually(t, "first request owns final slot", 3*time.Second, func() bool { return f.control(t, "").HeldChats == 1 })
 		before := f.control(t, "")
-		capability := neCapability(f.models(t))
-		if capability == nil {
-			t.Fatal("resident capability absent")
-		}
-		request := nodepolicy.StrictAdmissionRequest{Version: 1, QueueBudgetMs: 100, ColdStartBudgetMs: 0, PreOutputBudgetMs: 1000, Request: nodepolicy.RoutingRequestKey{OriginNodeID: f.snapshot(t).NodeID, ProxyRunID: "sr-last-slot", RequestID: "1"}, Identity: capability.Identity}
+		request := f.strictRequest(t, neModel, "4")
+		request.QueueBudgetMs = 100
+		request.PreOutputBudgetMs = 1000
 		status, _ := f.chat(t, neModel, neOutput, &request)
-		if status == http.StatusOK {
-			t.Fatal("contending request entered occupied last slot")
+		if status != http.StatusTooManyRequests {
+			t.Fatalf("contending request status=%d, want occupied refusal", status)
 		}
 		srAssertNoEffects(t, before, f.control(t, ""))
 		f.control(t, "release")
@@ -774,9 +783,16 @@ func TestServedResidentProcessRecovery(t *testing.T) {
 		t.Fatalf("recovered source effects=%+v", state)
 	}
 	stale := nodepolicy.StrictAdmissionRequest{Version: 1, QueueBudgetMs: 0, ColdStartBudgetMs: 0, PreOutputBudgetMs: 2000, Request: nodepolicy.RoutingRequestKey{OriginNodeID: f.snapshot(t).NodeID, ProxyRunID: "sr-stale-router", RequestID: "1"}, Identity: old.Identity}
-	status, _ := f.chat(t, neModel, neOutput, &stale)
-	if status == http.StatusOK {
-		t.Fatal("stale router identity accepted after source replacement")
+	status, data := f.chat(t, neModel, neOutput, &stale)
+	var refusal struct {
+		Code  string `json:"code"`
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(data, &refusal); err != nil {
+		t.Fatal(err)
+	}
+	if status != http.StatusServiceUnavailable || refusal.Code != "strict-admission" || refusal.Error != "strict admission: unavailable" {
+		t.Fatalf("stale router identity status=%d refusal=%+v", status, refusal)
 	}
 	srAssertNoEffects(t, state, f.control(t, ""))
 }
