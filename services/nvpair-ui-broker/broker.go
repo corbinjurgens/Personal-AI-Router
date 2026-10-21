@@ -1109,6 +1109,13 @@ func enginePeerRelayNotification(method string) bool {
 // Identity and running-state observations are fenced by its source; control-plane
 // requests and subscribed client notifications follow their respective relays.
 func (b *Broker) forwardEngineNotificationFrom(source *engineManagerSource, method string, params json.RawMessage) {
+	if method == residentDispatchRequestMethod {
+		b.dispatchResidentFrom(source, params)
+		return
+	}
+	if method == engineModelIdentityMethod {
+		defer b.signalModelConfig()
+	}
 	if enginePeerRelayNotification(method) && !b.engineManagerSourceCurrent(source) {
 		slog.Debug("dropped a peer relay notification from a retired engine manager", "method", method)
 		return

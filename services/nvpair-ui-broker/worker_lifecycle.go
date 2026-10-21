@@ -360,6 +360,12 @@ func (b *Broker) spawnProxy() (supervisedHandle, error) {
 		b.clearProxyHandles()
 		return nil, fmt.Errorf("engine switch invalidations could not be replayed before facade enable")
 	}
+	// A new proxy run has lost its in-memory resident holds. Refresh inventory
+	// after activation rather than reuse observations from the retired run.
+	b.workersMu.Lock()
+	modelWorker, modelSource := b.engineMgr, b.engineMgrSource
+	b.workersMu.Unlock()
+	go b.refreshEnginePolicySnapshotFrom(modelWorker, modelSource)
 
 	enabled := 0
 	var failed []engineProxyProfile
@@ -499,6 +505,12 @@ func (b *Broker) spawnEngineMgr() (supervisedHandle, error) {
 	}
 	args = append(args, b.clusterDirArgs()...)
 	source := b.activateEngineManagerSource()
+	r := b.nodePolicyRuntime()
+	r.mu.Lock()
+	r.loaded = map[string][]string{}
+	r.intent = map[string]bool{}
+	r.running = map[string]bool{}
+	r.mu.Unlock()
 	w, err := startRPCWorker("engine-manager", b.engineMgrPath, args, func(method string, params json.RawMessage) {
 		b.forwardEngineNotificationFrom(source, method, params)
 	}, func(exited *rpcWorker) {

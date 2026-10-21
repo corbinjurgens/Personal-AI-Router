@@ -58,11 +58,17 @@ function loadStrictFixtures(): JsonObject {
 
 describe('served/resident policy contract', () => {
     it('preserves custom buffers and zero wait through the generic policy bridge', () => {
-        const policy = { revision: '31', routing: { buffers: { capacityMiB: 384, waitSeconds: 0 } } }
+        const policy = {
+            revision: '31',
+            routing: { buffers: { capacityMiB: 384, waitSeconds: 0 } }
+        }
         const document = parsePolicyDocument({ policy, availability: 'available' })
         const draft = parsePolicyText(document.policy)
         expect(draft).toEqual(policy)
-        const params = policySetParams({ policy: document.policy, expectedPersistedRevision: document.revision })
+        const params = policySetParams({
+            policy: document.policy,
+            expectedPersistedRevision: document.revision
+        })
         expect(params).toEqual({ policy, expectedPersistedRevision: '31' })
         const result = parsePolicySetResult({ policy: params.policy })
         expect(parsePolicyText(result.policy)).toEqual(policy)
@@ -810,6 +816,155 @@ describe('policy revision and activation fields', () => {
                 recoveryRequired: 'yes'
             })
         ).toThrow(/recovery flag/)
+    })
+})
+
+describe('model configuration policy evidence', () => {
+    const loaded: JsonObject = {
+        engine: 'ollama',
+        model: 'model-a',
+        desiredResident: true,
+        observedLoaded: true,
+        state: 'satisfied'
+    }
+    const configuration: JsonObject = {
+        policyRevision: '9',
+        observationGeneration: 17,
+        models: [
+            loaded,
+            {
+                engine: 'llamacpp',
+                model: 'model-b',
+                desiredResident: false,
+                observedLoaded: true,
+                state: 'pending'
+            },
+            {
+                engine: 'ollama',
+                model: 'model-c',
+                desiredResident: true,
+                observedLoaded: false,
+                state: 'blocked',
+                reason: 'not-installed'
+            },
+            {
+                engine: 'ollama',
+                model: 'model-d',
+                desiredResident: true,
+                state: 'unknown',
+                reason: 'observation-unknown'
+            }
+        ]
+    }
+
+    it.each(['local', 'peer'])(
+        'preserves %s get, set and push evidence outside editable policy',
+        node => {
+            const policy = { revision: '9', servedModels: [], residentModels: [] }
+            const snapshot = {
+                policy,
+                modelConfiguration: configuration,
+                ...(node === 'local' ? { activation: 'active', activeRevision: '9' } : {})
+            }
+            const document = parsePolicyDocument({ ...snapshot, availability: 'available' })
+            const saved = parsePolicySetResult(snapshot)
+            const change = parsePolicyChange({ ...snapshot, nodeId: node })
+            expect(document.modelConfiguration).toEqual(configuration)
+            expect(saved.modelConfiguration).toEqual(configuration)
+            expect(change?.modelConfiguration).toEqual(configuration)
+            expect(JSON.parse(document.policy)).toEqual(policy)
+            expect(JSON.parse(saved.policy)).toEqual(policy)
+            expect(change?.policy).toBe(document.policy)
+            expect(document.modelConfiguration?.models[3]).not.toHaveProperty('observedLoaded')
+        }
+    )
+
+    it('keeps absent status absent on get, set and push', () => {
+        const snapshot = { policy: { revision: '9' } }
+        expect(parsePolicyDocument({ ...snapshot, availability: 'available' })).not.toHaveProperty(
+            'modelConfiguration'
+        )
+        expect(parsePolicySetResult(snapshot)).not.toHaveProperty('modelConfiguration')
+        expect(parsePolicyChange({ ...snapshot, nodeId: 'peer' })).not.toHaveProperty(
+            'modelConfiguration'
+        )
+    })
+
+    it('preserves explicit empty evidence and served permission without inferring success', () => {
+        const evidence = { policyRevision: '9', observationGeneration: 0, models: [] }
+        const policy = { revision: '9', servedModels: [] }
+        const snapshot = { policy, modelConfiguration: evidence }
+        expect(
+            parsePolicyDocument({ ...snapshot, availability: 'available' }).modelConfiguration
+        ).toEqual(evidence)
+        expect(parsePolicySetResult(snapshot).modelConfiguration).toEqual(evidence)
+        expect(parsePolicyChange({ ...snapshot, nodeId: 'peer' })?.modelConfiguration).toEqual(
+            evidence
+        )
+        expect(parsePolicyText(parsePolicySetResult(snapshot).policy)).toEqual(policy)
+    })
+
+    const malformed: [string, JsonValue][] = [
+        ['null status', null],
+        ['missing policy revision', { observationGeneration: 0, models: [] }],
+        ['numeric policy revision', { ...configuration, policyRevision: 9 }],
+        [
+            'overflowing policy revision',
+            { ...configuration, policyRevision: '9223372036854775808' }
+        ],
+        ['missing generation', { policyRevision: '9', models: [] }],
+        ['negative generation', { ...configuration, observationGeneration: -1 }],
+        ['fractional generation', { ...configuration, observationGeneration: 1.5 }],
+        ['non-list models', { ...configuration, models: {} }],
+        [
+            'too many models',
+            { ...configuration, models: Array.from({ length: 257 }, () => loaded) }
+        ],
+        ['duplicate model', { ...configuration, models: [loaded, loaded] }],
+        ['unknown status field', { ...configuration, extra: true }],
+        ['unknown model field', { ...configuration, models: [{ ...loaded, secret: 'private' }] }],
+        ['unknown state', { ...configuration, models: [{ ...loaded, state: 'ready' }] }],
+        [
+            'unknown reason',
+            { ...configuration, models: [{ ...loaded, reason: 'engine error text' }] }
+        ],
+        [
+            'missing desired flag',
+            { ...configuration, models: [{ engine: 'ollama', model: 'm', state: 'unknown' }] }
+        ],
+        [
+            'non-boolean loaded',
+            { ...configuration, models: [{ ...loaded, observedLoaded: 'yes' }] }
+        ],
+        ['null loaded', { ...configuration, models: [{ ...loaded, observedLoaded: null }] }],
+        [
+            'satisfied without loaded evidence',
+            {
+                ...configuration,
+                models: [
+                    { engine: 'ollama', model: 'm', desiredResident: true, state: 'satisfied' }
+                ]
+            }
+        ],
+        [
+            'satisfied with unloaded evidence',
+            { ...configuration, models: [{ ...loaded, observedLoaded: false }] }
+        ],
+        [
+            'satisfied without desire',
+            { ...configuration, models: [{ ...loaded, desiredResident: false }] }
+        ],
+        ['satisfied with refusal', { ...configuration, models: [{ ...loaded, reason: 'no-fit' }] }],
+        ['invalid reference', { ...configuration, models: [{ ...loaded, engine: '../engine' }] }],
+        ['reserved alias', { ...configuration, models: [{ ...loaded, model: 'weak' }] }],
+        ['untrimmed model', { ...configuration, models: [{ ...loaded, model: ' m ' }] }],
+        ['oversized model', { ...configuration, models: [{ ...loaded, model: 'm'.repeat(1025) }] }]
+    ]
+    it.each(malformed)('rejects %s on get/set and drops its push', (_name, evidence) => {
+        const snapshot = { policy: { revision: '9' }, modelConfiguration: evidence }
+        expect(() => parsePolicyDocument({ ...snapshot, availability: 'available' })).toThrow()
+        expect(() => parsePolicySetResult(snapshot)).toThrow()
+        expect(parsePolicyChange({ ...snapshot, nodeId: 'peer' })).toBeNull()
     })
 })
 

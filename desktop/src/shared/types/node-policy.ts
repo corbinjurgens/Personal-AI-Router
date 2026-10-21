@@ -119,6 +119,34 @@ export interface PolicyActivationStatus {
     error?: string
 }
 
+/** Current evidence for one concrete model; absent observedLoaded means unknown. */
+export interface ModelConfigurationEntry extends NodeModelReference {
+    desiredResident: boolean
+    observedLoaded?: boolean
+    state: 'satisfied' | 'pending' | 'blocked' | 'unknown'
+    reason?:
+        | ''
+        | 'engine-off'
+        | 'no-fit'
+        | 'paused-local'
+        | 'engine-off-local'
+        | 'not-served'
+        | 'not-installed'
+        | 'unqualified'
+        | 'unsupported-load'
+        | 'switch-busy'
+        | 'operation-timeout'
+        | 'observation-unknown'
+        | 'projection-unknown'
+}
+
+/** Derived service status, independent of the saved policy and activation. */
+export interface ModelConfiguration {
+    policyRevision: string
+    observationGeneration: number
+    models: ModelConfigurationEntry[]
+}
+
 /**
  * A node's saved policy. The policy travels as JSON text because the editor
  * shows and edits it as text and the service validates it. Revisions are
@@ -130,6 +158,8 @@ export interface NodePolicySnapshot {
     revision: string
     /** Whether the proxy enforces this revision; null when the node reports none. */
     activation: PolicyActivationStatus | null
+    /** Omitted when the service reports no model evidence. An empty models list is explicit. */
+    modelConfiguration?: ModelConfiguration
 }
 
 /** A node's saved policy and live availability. */

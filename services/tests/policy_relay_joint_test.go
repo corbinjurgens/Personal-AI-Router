@@ -229,6 +229,75 @@ func TestPolicyRelayJoint(t *testing.T) {
 	})
 }
 
+func TestPolicyRelayJointModelConfiguration(t *testing.T) {
+	f := newPolicyJointFixture(t)
+	peer := jointExpectedPeer(f.want)
+	peer.Profiles = append(peer.Profiles, fixtureResidentProfile())
+	peer.ServedModels = nodepolicy.ServedModels{{Engine: "llamacpp", Model: "sr-status-fixture"}}
+	peer.ResidentModels = nodepolicy.ResidentModels{{Engine: "llamacpp", Model: "sr-status-fixture"}}
+	result := f.rpc(t, "engine:remote-policy-set", map[string]any{
+		"policy": peer, "expectedPersistedRevision": f.want.Revision,
+	}).Result
+	var accepted struct {
+		Policy nodepolicy.PeerPolicy `json:"policy"`
+	}
+	if err := json.Unmarshal(result, &accepted); err != nil {
+		t.Fatalf("decode paired resident declaration: %v", err)
+	}
+	if accepted.Policy.Revision == "" || accepted.Policy.Revision == f.want.Revision {
+		t.Fatal("paired resident declaration did not advance the policy revision")
+	}
+	f.want.Revision = accepted.Policy.Revision
+	f.want.Profiles = peer.Profiles
+	f.want.ServedModels = peer.ServedModels
+	f.want.ResidentModels = peer.ResidentModels
+	assertJointPeer(t, result, f.want)
+	assertFixtureResidentConfiguration(t, result, f.want.Revision)
+	f.assertPolicy(t)
+
+	local := callRPC(t, f.target.in, f.target.msgs, "policy:get", map[string]any{}, 10*time.Second)
+	if local.Error != nil {
+		t.Fatalf("local resident readback: %+v", local.Error)
+	}
+	localConfiguration := decodeFixtureModelConfiguration(t, local.Result, f.want.Revision)
+	for _, readback := range []struct {
+		name string
+		raw  []byte
+	}{
+		{"paired HTTP", f.http(t, "/v1/node-policy/get", map[string]any{}, http.StatusOK)},
+		{"paired manager RPC", f.rpc(t, "engine:remote-policy-get", map[string]any{}).Result},
+	} {
+		t.Run(readback.name, func(t *testing.T) {
+			assertJointPeer(t, readback.raw, f.want)
+			assertFixtureResidentConfiguration(t, readback.raw, f.want.Revision)
+			configuration := decodeFixtureModelConfiguration(t, readback.raw, f.want.Revision)
+			if !reflect.DeepEqual(configuration, localConfiguration) {
+				t.Fatal("paired model configuration differs from target local readback")
+			}
+		})
+	}
+
+	peer = jointExpectedPeer(f.want)
+	peer.ServedModels = nodepolicy.ServedModels{}
+	peer.ResidentModels = nil
+	result = f.http(t, "/v1/node-policy/set", map[string]any{
+		"policy": peer, "expectedPersistedRevision": f.want.Revision,
+	}, http.StatusOK)
+	if err := json.Unmarshal(result, &accepted); err != nil {
+		t.Fatalf("decode paired empty served declaration: %v", err)
+	}
+	f.want.Revision = accepted.Policy.Revision
+	f.want.ServedModels = peer.ServedModels
+	f.want.ResidentModels = nil
+	assertJointPeer(t, result, f.want)
+	configuration := decodeFixtureModelConfiguration(t, result, f.want.Revision)
+	if len(configuration.Models) != 0 {
+		t.Fatal("paired explicit empty served set retained removed model configuration")
+	}
+	assertJointPeer(t, f.rpc(t, "engine:remote-policy-get", map[string]any{}).Result, f.want)
+	f.assertPolicy(t)
+}
+
 type policyJointFixture struct {
 	inertPort                                           int
 	base, cluster, engine, scanner, originCluster, path string
@@ -446,6 +515,7 @@ func jointExpectedPeer(p nodepolicy.Policy) nodepolicy.PeerPolicy {
 	return nodepolicy.PeerPolicy{
 		Version: 2, Revision: p.Revision, Availability: nodepolicy.Paused,
 		Pause: p.Pause, Admission: p.Admission, Idle: p.Idle, Profiles: p.Profiles, Roles: map[string]nodepolicy.Role{}, TierPolicy: p.TierPolicy,
+		ServedModels: p.ServedModels, ResidentModels: p.ResidentModels,
 		Tiers: map[string][]nodepolicy.TierEntry{"weak": {{Kind: "local", Engine: "ollama", Model: "joint-local", ContextTokens: 8192, Capabilities: []nodepolicy.Capability{"tools"}}}},
 	}
 }
@@ -453,8 +523,9 @@ func jointExpectedPeer(p nodepolicy.Policy) nodepolicy.PeerPolicy {
 func assertJointPeer(t *testing.T, raw []byte, want nodepolicy.Policy) {
 	t.Helper()
 	var envelope struct {
-		Policy       nodepolicy.PeerPolicy   `json:"policy"`
-		Availability nodepolicy.Availability `json:"availability,omitempty"`
+		Policy             nodepolicy.PeerPolicy          `json:"policy"`
+		Availability       nodepolicy.Availability        `json:"availability,omitempty"`
+		ModelConfiguration *nodepolicy.ModelConfiguration `json:"modelConfiguration"`
 	}
 	decoder := json.NewDecoder(bytes.NewReader(raw))
 	decoder.DisallowUnknownFields()
@@ -464,6 +535,7 @@ func assertJointPeer(t *testing.T, raw []byte, want nodepolicy.Policy) {
 	if !reflect.DeepEqual(envelope.Policy, jointExpectedPeer(want)) {
 		t.Fatal("peer policy differs from the independently spelled device/local-only projection")
 	}
+	decodeFixtureModelConfiguration(t, raw, want.Revision)
 }
 
 func jointAppDir(base string) string {

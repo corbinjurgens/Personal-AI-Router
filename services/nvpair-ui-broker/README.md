@@ -5,6 +5,40 @@ SPDX-License-Identifier: Apache-2.0
 
 # nvpair-ui-broker
 
+Resident reconciliation runs on the broker's Serve-owned idle/event loop. A
+policy save persists the declaration and activates it without waiting for a
+model load. Local and paired `policy:get`, `policy:set`, and `policy:changed`
+carry `modelConfiguration`: `policyRevision`, `observationGeneration`, and a
+deterministically ordered `models` list with `engine`, `model`,
+`desiredResident`, `state`, optional `observedLoaded`, and a bounded `reason`.
+Missing loaded evidence remains absent; an explicit empty loaded inventory is
+known empty. A saved preference or an installed model does not establish
+`satisfied`; that requires a source-bound successful load/readback with current
+qualification and effective serving-envelope evidence. Removing a preference
+does not unload the model. Older targets that drop requested served/resident
+preferences are refused as unsupported readback.
+
+Each operation binds a unique normalized resident profile and engine-specific
+`declaredResidentCount` to the same policy revision. Its load context is exactly
+the profile's `contextTokens`; `keepAliveSeconds` remains 60 and is not a native
+retention guarantee. Native retention/protection and capacity must already be
+approved and reported by the engine's serving envelope. The proxy owns batch
+admission and the final single-use grant. The broker relays that grant only for
+the live operation, original proxy run and paired manager source. Loads are
+serialized with an absolute budget bounded by 60 seconds and the policy's
+finite switch timeout. Unchanged failures are suppressed until relevant policy,
+identity, readiness, intent, inventory or admission evidence changes.
+
+Unknown completion retains the proxy's capacity hold. Recovery requires a
+terminal response from the original manager followed by a fresh `engine:models`
+read from that same source and identity, after the recovery ID was received.
+A missing response, watcher cache, null inventory or replacement manager cannot
+settle it. Holds remain in memory: a proxy restart loses their accounting;
+this is not durable recovery. Replacement invalidates prior status and waits for
+fresh activation and inventory. Automatic unload and idle sleep recheck current
+resident protection immediately before execution; explicit pause retains its
+unload authority.
+
 The [engine settings protocol](ENGINE_SETTINGS.md) documents local/paired
 launch and port editing, revision checks, serialized application and recovery.
 Its [engine switching contract](ENGINE_SETTINGS.md#engine-switching) covers
