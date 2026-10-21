@@ -10,6 +10,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	stderrors "errors"
 	"fmt"
@@ -20,6 +21,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -56,18 +58,92 @@ func activate(t *testing.T, p *Proxy, w *recordingWriter, pol nodepolicy.Policy)
 	rpcOK(t, p, w, nodepolicy.MethodSetPolicy, pol)
 }
 
-// freeRoutingPort returns a port that was free on the IPv4 wildcard a moment
-// ago. freeTCPPort probes only 127.0.0.1, and on macOS that succeeds beside a
-// wildcard listener an earlier test has not yet released, which the routing
-// listener rightly refuses as a collision.
+// freeRoutingPort is only a candidate, never a promise that the subsequent
+// production bind will succeed. Positive setup uses startRoutingPolicy below.
 func freeRoutingPort(t *testing.T) int {
 	t.Helper()
-	ln, err := net.Listen("tcp", "0.0.0.0:0")
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("reserve free port: %v", err)
 	}
 	defer ln.Close()
 	return ln.Addr().(*net.TCPAddr).Port
+}
+
+// startRoutingPolicy establishes a working listener for tests whose subject is
+// not a bind collision. A competing process can take a candidate between close
+// and activation (or hold the same port on another address), so retry setup on
+// a fresh port. Collision and same-port replay assertions use activate directly.
+func startRoutingPolicy(t *testing.T, p *Proxy, w *recordingWriter, pol nodepolicy.Policy) int {
+	t.Helper()
+	pol.Routing.Listener.Enabled = true
+	for range 20 {
+		pol.Routing.Listener.Port = freeRoutingPort(t)
+		activate(t, p, w, pol)
+		if got := boundPort(p); got == pol.Routing.Listener.Port {
+			return got
+		}
+		if got := boundPort(p); got != 0 {
+			t.Fatalf("listener bound %d, want configured port %d", got, pol.Routing.Listener.Port)
+		}
+	}
+	t.Fatal("could not establish routing listener after fresh-port setup retries")
+	return 0
+}
+
+func startRouting(t *testing.T, p *Proxy, w *recordingWriter, revision string, origins ...string) int {
+	t.Helper()
+	return startRoutingPolicy(t, p, w, listenerPolicy(t, revision, nodepolicy.Listener{AllowedOrigins: origins}))
+}
+
+// assertRoutingClosed checks the captured socket, which cannot be replaced by
+// an unrelated listener that acquires the released address. It also covers a
+// raw socket leaked before http.Server.Serve registers it.
+func assertRoutingClosed(t *testing.T, ln net.Listener) {
+	t.Helper()
+	tcp, ok := ln.(*net.TCPListener)
+	if !ok {
+		t.Fatalf("routing listener = %T, want *net.TCPListener", ln)
+	}
+	if err := tcp.SetDeadline(time.Now()); !stderrors.Is(err, net.ErrClosed) {
+		t.Errorf("routing socket deadline error = %v, want net.ErrClosed", err)
+	}
+}
+
+func routingSocket(p *Proxy) net.Listener {
+	p.routing.mu.Lock()
+	defer p.routing.mu.Unlock()
+	return p.routing.ln
+}
+
+// replayRouting retries the same policy only if an independent bind observes a
+// competing loopback socket after the handoff. A product failure on a free port
+// is fatal; this must not turn a broken replay into successful fresh-port setup.
+func replayRouting(t *testing.T, p *Proxy, w *recordingWriter, pol nodepolicy.Policy) {
+	t.Helper()
+	for range 20 {
+		activate(t, p, w, pol)
+		if boundPort(p) == pol.Routing.Listener.Port {
+			return
+		}
+		occupied := false
+		for _, host := range []string{"127.0.0.1", "::1"} {
+			ln, err := net.Listen("tcp", net.JoinHostPort(host, strconv.Itoa(pol.Routing.Listener.Port)))
+			if stderrors.Is(err, syscall.EADDRINUSE) {
+				occupied = true
+			}
+			if err == nil {
+				if err := ln.Close(); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
+		if !occupied {
+			t.Fatalf("replay did not bind released port %d", pol.Routing.Listener.Port)
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatal("released routing port stayed occupied throughout replay retries")
 }
 
 // boundPort returns the port the proxy's routing listener is bound to, or 0.
@@ -179,8 +255,8 @@ func TestRoutingListener_StopClosesListenerBeforeServeStarts(t *testing.T) {
 				entered <- struct{}{}
 				<-release
 			}
-			port := freeRoutingPort(t)
-			activate(t, p, w, listenerPolicy(t, "1", nodepolicy.Listener{Enabled: true, Port: port}))
+			port := startRouting(t, p, w, "1")
+			socket := routingSocket(p)
 			if got := boundPort(p); got != port {
 				t.Fatalf("bound port = %d, want %d", got, port)
 			}
@@ -192,16 +268,7 @@ func TestRoutingListener_StopClosesListenerBeforeServeStarts(t *testing.T) {
 
 			stop(t, p, w)
 
-			conn, err := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)), time.Second)
-			if err == nil {
-				if closeErr := conn.Close(); closeErr != nil {
-					t.Errorf("close unexpected connection: %v", closeErr)
-				}
-				t.Errorf("port %d still accepts connections after stop while Serve is gated", port)
-			}
-			if !refuses(port) {
-				t.Errorf("refuses(%d) = false after stop while Serve is gated", port)
-			}
+			assertRoutingClosed(t, socket)
 		})
 	}
 	test("final shutdown", func(t *testing.T, p *Proxy, _ *recordingWriter) {
@@ -217,8 +284,7 @@ func TestRoutingListener_StopClosesListenerBeforeServeStarts(t *testing.T) {
 		}
 	})
 	test("policy moves port", func(t *testing.T, p *Proxy, w *recordingWriter) {
-		port := freeRoutingPort(t)
-		activate(t, p, w, listenerPolicy(t, "2", nodepolicy.Listener{Enabled: true, Port: port}))
+		port := startRouting(t, p, w, "2")
 		if got := boundPort(p); got != port {
 			t.Errorf("bound port after move = %d, want %d", got, port)
 		}
@@ -227,7 +293,7 @@ func TestRoutingListener_StopClosesListenerBeforeServeStarts(t *testing.T) {
 
 func TestRoutingListener_ListsAliasesWithNoEngineRunning(t *testing.T) {
 	p, w := zeroFacadeProxy(t)
-	activate(t, p, w, listenerPolicy(t, "1", nodepolicy.Listener{Enabled: true, Port: freeRoutingPort(t)}))
+	startRouting(t, p, w, "1")
 	port := boundPort(p)
 	if port == 0 {
 		t.Fatal("listener is not bound after activating an enabled policy")
@@ -254,8 +320,7 @@ func TestRoutingListener_ListsAnEmptyPolicyAsAnEmptyArray(t *testing.T) {
 	p, w := zeroFacadeProxy(t)
 	pol := nodepolicy.Default()
 	pol.Revision = "1"
-	pol.Routing.Listener = nodepolicy.Listener{Enabled: true, Port: freeRoutingPort(t)}
-	activate(t, p, w, pol)
+	startRoutingPolicy(t, p, w, pol)
 
 	got := call(t, boundPort(p), http.MethodGet, "/v1/models", nil)
 	if ids := listedIDs(t, got); len(ids) != 0 {
@@ -265,9 +330,8 @@ func TestRoutingListener_ListsAnEmptyPolicyAsAnEmptyArray(t *testing.T) {
 
 func TestRoutingListener_ListFollowsTheActivatedPolicy(t *testing.T) {
 	p, w := zeroFacadeProxy(t)
-	listener := nodepolicy.Listener{Enabled: true, Port: freeRoutingPort(t)}
-	activate(t, p, w, listenerPolicy(t, "1", listener))
-	port := boundPort(p)
+	port := startRouting(t, p, w, "1")
+	listener := nodepolicy.Listener{Enabled: true, Port: port}
 
 	pol := nodepolicy.Default()
 	pol.Revision = "2"
@@ -297,31 +361,14 @@ func TestRoutingListener_IsOffUntilEnabled(t *testing.T) {
 }
 
 func TestRoutingListener_BindsLoopbackOnly(t *testing.T) {
-	addrs, err := net.InterfaceAddrs()
-	if err != nil {
-		t.Fatalf("InterfaceAddrs: %v", err)
-	}
-	var lan string
-	for _, a := range addrs {
-		if ipNet, ok := a.(*net.IPNet); ok && ipNet.IP.To4() != nil && !ipNet.IP.IsLoopback() {
-			lan = ipNet.IP.String()
-			break
-		}
-	}
-	if lan == "" {
-		t.Skip("no non-loopback IPv4 address on this host to probe")
-	}
 	p, w := zeroFacadeProxy(t)
-	activate(t, p, w, listenerPolicy(t, "1", nodepolicy.Listener{Enabled: true, Port: freeRoutingPort(t)}))
-	port := boundPort(p)
-
-	if refuses(port) {
-		t.Fatal("loopback does not accept connections")
+	port := startRouting(t, p, w, "1")
+	addr := routingSocket(p).Addr().(*net.TCPAddr)
+	if !addr.IP.Equal(net.IPv4(127, 0, 0, 1)) {
+		t.Errorf("routing socket bound %s, want 127.0.0.1", addr)
 	}
-	conn, err := net.DialTimeout("tcp", net.JoinHostPort(lan, strconv.Itoa(port)), time.Second)
-	if err == nil {
-		_ = conn.Close()
-		t.Fatalf("the listener accepted a connection on %s:%d", lan, port)
+	if got := call(t, port, http.MethodGet, "/v1/models", nil); got.status != http.StatusOK {
+		t.Errorf("loopback response = %d, want 200", got.status)
 	}
 }
 
@@ -370,8 +417,9 @@ func TestRoutingListener_RejectsInferenceWithoutSideEffects(t *testing.T) {
 
 	t.Run("every inference route", func(t *testing.T) {
 		p, w, local := newFixture(t)
-		activate(t, p, w, listenerPolicy(t, "1", nodepolicy.Listener{Enabled: true, Port: freeRoutingPort(t)}))
+		startRouting(t, p, w, "1")
 		port := boundPort(p)
+		setupFrames := len(frames(t, w))
 		for _, path := range []string{
 			"/v1/chat/completions", "/v1/completions", "/v1/embeddings", "/v1/messages",
 			"/api/generate", "/api/chat", "/api/embeddings", "/api/embed",
@@ -385,8 +433,7 @@ func TestRoutingListener_RejectsInferenceWithoutSideEffects(t *testing.T) {
 			t.Errorf("engine received %d request(s), want none", n)
 		}
 		settled(t, p)
-		for _, f := range frames(t, w) {
-			// The strict readiness report follows the policy acknowledgement.
+		for _, f := range frames(t, w)[setupFrames:] {
 			if f.ID == nil && f.Method != "errors:clear" && f.Method != nodepolicy.NotifyStrictReadiness {
 				t.Errorf("proxy emitted %q for an inference attempt, want only the listener's error clear", f.Method)
 			}
@@ -395,7 +442,7 @@ func TestRoutingListener_RejectsInferenceWithoutSideEffects(t *testing.T) {
 
 	t.Run("every model name form", func(t *testing.T) {
 		p, w, local := newFixture(t)
-		activate(t, p, w, listenerPolicy(t, "1", nodepolicy.Listener{Enabled: true, Port: freeRoutingPort(t)}))
+		startRouting(t, p, w, "1")
 		port := boundPort(p)
 		bodies := []string{
 			`{"model":"mid:7b"}`,
@@ -432,7 +479,7 @@ func TestRoutingListener_RejectsInferenceWithoutSideEffects(t *testing.T) {
 
 func TestRoutingListener_RejectsMethodsAndPaths(t *testing.T) {
 	p, w := zeroFacadeProxy(t)
-	activate(t, p, w, listenerPolicy(t, "1", nodepolicy.Listener{Enabled: true, Port: freeRoutingPort(t)}))
+	startRouting(t, p, w, "1")
 	port := boundPort(p)
 
 	test := func(name, method, target string, wantStatus int, wantCode string) {
@@ -491,28 +538,24 @@ func TestRoutingListener_RebindsAndDisablesOnlyItsOwnListener(t *testing.T) {
 	}
 	defer foreign.Close()
 
-	first, second := freeRoutingPort(t), freeRoutingPort(t)
-	for second == first {
-		second = freeRoutingPort(t)
-	}
-
-	activate(t, p, w, listenerPolicy(t, "1", nodepolicy.Listener{Enabled: true, Port: first}))
+	first := startRouting(t, p, w, "1")
+	firstSocket := routingSocket(p)
 	if boundPort(p) != first || call(t, first, http.MethodGet, "/v1/models", nil).status != http.StatusOK {
 		t.Fatalf("listener is not serving on %d", first)
 	}
 
-	activate(t, p, w, listenerPolicy(t, "2", nodepolicy.Listener{Enabled: true, Port: second}))
+	second := startRouting(t, p, w, "2")
+	secondSocket := routingSocket(p)
 	if boundPort(p) != second || call(t, second, http.MethodGet, "/v1/models", nil).status != http.StatusOK {
 		t.Fatalf("listener did not move to %d", second)
 	}
-	if !refuses(first) {
-		t.Errorf("old port %d still accepts connections after a rebind", first)
-	}
+	assertRoutingClosed(t, firstSocket)
 
 	activate(t, p, w, listenerPolicy(t, "3", nodepolicy.Listener{Port: second}))
-	if boundPort(p) != 0 || !refuses(second) {
-		t.Errorf("disabled listener still bound: port %d, refuses=%v", boundPort(p), refuses(second))
+	if boundPort(p) != 0 {
+		t.Errorf("disabled listener still bound: port %d", boundPort(p))
 	}
+	assertRoutingClosed(t, secondSocket)
 
 	if refuses(facadePort) {
 		t.Errorf("the facade on %d stopped accepting connections", facadePort)
@@ -527,23 +570,23 @@ func TestRoutingListener_RebindsAndDisablesOnlyItsOwnListener(t *testing.T) {
 
 func TestRoutingListener_DisablingClosesKeptAliveConnections(t *testing.T) {
 	p, w := zeroFacadeProxy(t)
-	port := freeRoutingPort(t)
-	activate(t, p, w, listenerPolicy(t, "1", nodepolicy.Listener{Enabled: true, Port: port}))
+	port := startRouting(t, p, w, "1")
 
-	client := &http.Client{Timeout: 5 * time.Second, Transport: &http.Transport{}}
-	defer client.CloseIdleConnections()
-	target := "http://127.0.0.1:" + strconv.Itoa(port) + "/v1/models"
-	resp, err := client.Get(target)
+	conn, err := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)), time.Second)
 	if err != nil {
-		t.Fatalf("GET: %v", err)
+		t.Fatal(err)
 	}
-	_, _ = io.Copy(io.Discard, resp.Body)
-	_ = resp.Body.Close()
+	defer conn.Close()
+	reader := bufio.NewReader(conn)
+	if got, err := routingExchange(conn, reader, "127.0.0.1", port, http.MethodGet, "/v1/models"); err != nil || got.status != http.StatusOK {
+		t.Fatalf("initial keep-alive response = %+v, %v", got, err)
+	}
 
 	activate(t, p, w, listenerPolicy(t, "2", nodepolicy.Listener{}))
-	if resp, err := client.Get(target); err == nil {
-		_ = resp.Body.Close()
-		t.Fatalf("the kept-alive connection still served after disabling: %d", resp.StatusCode)
+	if got, err := routingExchange(conn, reader, "127.0.0.1", port, http.MethodGet, "/v1/models"); err == nil {
+		t.Fatalf("the kept-alive connection still served after disabling: %d", got.status)
+	} else if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+		t.Fatalf("kept-alive connection remained open after disabling: %v", err)
 	}
 }
 
@@ -586,7 +629,7 @@ func TestRoutingListener_ReportsACollisionAndNeverPicksAnotherPort(t *testing.T)
 	// Freeing the port and replaying the same revision, as the broker does
 	// after a proxy restart, binds it and clears the error.
 	_ = held.Close()
-	activate(t, p, w, listenerPolicy(t, "1", nodepolicy.Listener{Enabled: true, Port: taken}))
+	replayRouting(t, p, w, listenerPolicy(t, "1", nodepolicy.Listener{Enabled: true, Port: taken}))
 	if boundPort(p) != taken {
 		t.Fatalf("replay did not bind the freed port %d", taken)
 	}
@@ -660,8 +703,9 @@ func assertFacadesUnchanged(t *testing.T, ports map[string]int, before map[strin
 
 func TestRoutingListener_MovingOntoATakenPortLeavesNoListener(t *testing.T) {
 	p, w, ports := facadeProxy(t)
-	working := freeRoutingPort(t)
-	activate(t, p, w, listenerPolicy(t, "1", nodepolicy.Listener{Enabled: true, Port: working}))
+	working := startRouting(t, p, w, "1")
+	workingSocket := routingSocket(p)
+	reportsBefore := len(notificationsOf(t, w, "errors:report"))
 	if boundPort(p) != working {
 		t.Fatalf("listener did not bind %d", working)
 	}
@@ -681,31 +725,80 @@ func TestRoutingListener_MovingOntoATakenPortLeavesNoListener(t *testing.T) {
 	if boundPort(p) != 0 {
 		t.Errorf("listener bound %d, want none after the configured port collided", boundPort(p))
 	}
-	if !refuses(working) {
-		t.Errorf("the previous port %d still serves although the policy no longer names it", working)
-	}
-	if n := len(notificationsOf(t, w, "errors:report")); n != 1 {
+	assertRoutingClosed(t, workingSocket)
+	if n := len(notificationsOf(t, w, "errors:report")) - reportsBefore; n != 1 {
 		t.Errorf("%d errors:report notifications, want 1", n)
 	}
 	assertFacadesUnchanged(t, ports, before)
 }
 
-// holdAddress listens on address (an ephemeral port) and answers every request
-// with marker, returning the port.
-func holdAddress(t *testing.T, address, marker string) int {
-	t.Helper()
-	ln, err := net.Listen("tcp", address)
-	if err != nil {
-		t.Skipf("cannot listen on %s here: %v", address, err)
+// routingExchange uses an existing connection and never redials a released
+// address. Both the foreign-holder and keep-alive tests need that distinction.
+func routingExchange(conn net.Conn, reader *bufio.Reader, host string, port int, method, path string) (answer, error) {
+	if err := conn.SetDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		return answer{}, err
 	}
-	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = w.Write([]byte(marker))
-	}))
-	_ = srv.Listener.Close()
-	srv.Listener = ln
-	srv.Start()
-	t.Cleanup(srv.Close)
-	return ln.Addr().(*net.TCPAddr).Port
+	if _, err := fmt.Fprintf(conn, "%s %s HTTP/1.1\r\nHost: %s\r\nContent-Length: 0\r\n\r\n", method, path, net.JoinHostPort(host, strconv.Itoa(port))); err != nil {
+		return answer{}, err
+	}
+	resp, err := http.ReadResponse(reader, nil)
+	if err != nil {
+		return answer{}, err
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return answer{}, err
+	}
+	return answer{status: resp.StatusCode, header: resp.Header, body: body}, nil
+}
+
+// holdAddress retains both the foreign listener and a verified connection to it.
+func holdAddress(t *testing.T, address, dial, marker string) (int, func() answer) {
+	t.Helper()
+	for range 20 {
+		ln, err := net.Listen("tcp", address)
+		if err != nil {
+			t.Skipf("cannot listen on %s here: %v", address, err)
+		}
+		srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			_, _ = w.Write([]byte(marker))
+		}))
+		_ = srv.Listener.Close()
+		srv.Listener = ln
+		srv.Start()
+		port := ln.Addr().(*net.TCPAddr).Port
+		conn, err := net.DialTimeout("tcp", net.JoinHostPort(dial, strconv.Itoa(port)), time.Second)
+		if err != nil {
+			srv.Close()
+			continue
+		}
+		reader := bufio.NewReader(conn)
+		ask := func() answer {
+			t.Helper()
+			if _, err := ln.(*net.TCPListener).SyscallConn(); err != nil {
+				t.Fatalf("foreign holder's listener was closed: %v", err)
+			}
+			got, err := routingExchange(conn, reader, dial, port, http.MethodPost, "/api/chat")
+			if err != nil {
+				t.Fatalf("ask the holder: %v", err)
+			}
+			return got
+		}
+		// Wildcard listeners may be shadowed by an unrelated specific-address
+		// listener. Establish identity before the action, then retain this exact
+		// connection so later address reuse cannot redirect the assertion.
+		if got, err := routingExchange(conn, reader, dial, port, http.MethodPost, "/api/chat"); err != nil || got.status != http.StatusOK || string(got.body) != marker {
+			_ = conn.Close()
+			srv.Close()
+			continue
+		}
+		t.Cleanup(srv.Close)
+		t.Cleanup(func() { _ = conn.Close() })
+		return port, ask
+	}
+	t.Fatal("could not connect to the foreign holder after fresh-port setup retries")
+	return 0, nil
 }
 
 // A port that another socket holds on a wildcard address or on the IPv6
@@ -715,16 +808,15 @@ func holdAddress(t *testing.T, address, marker string) int {
 func TestRoutingListener_ReportsAnotherHolderAsACollision(t *testing.T) {
 	for _, tc := range []struct {
 		name, address, dial string
-		reachableOnIPv4     bool
 	}{
-		{"IPv6 wildcard", "[::]:0", "127.0.0.1", true},
-		{"IPv4 wildcard", "0.0.0.0:0", "127.0.0.1", true},
-		{"IPv6 loopback", "[::1]:0", "[::1]", false},
+		{"IPv6 wildcard", "[::]:0", "127.0.0.1"},
+		{"IPv4 wildcard", "0.0.0.0:0", "127.0.0.1"},
+		{"IPv6 loopback", "[::1]:0", "::1"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			p, w := zeroFacadeProxy(t)
-			const marker = "the foreign holder"
-			taken := holdAddress(t, tc.address, marker)
+			marker := rand.Text()
+			taken, ask := holdAddress(t, tc.address, tc.dial, marker)
 
 			activate(t, p, w, listenerPolicy(t, "1", nodepolicy.Listener{Enabled: true, Port: taken}))
 
@@ -734,20 +826,15 @@ func TestRoutingListener_ReportsAnotherHolderAsACollision(t *testing.T) {
 			if port := boundPort(p); port != 0 {
 				t.Errorf("listener bound %d beside a holder on %s", port, tc.address)
 			}
-			if !tc.reachableOnIPv4 && !refuses(taken) {
-				t.Errorf("something accepts connections on 127.0.0.1:%d, but the foreign holder is bound to ::1 only", taken)
+			if ln := routingSocket(p); ln != nil {
+				t.Errorf("proxy owns a routing socket %v beside the foreign holder", ln.Addr())
 			}
 			if n := len(notificationsOf(t, w, "errors:report")); n != 1 {
 				t.Errorf("%d errors:report notifications, want 1", n)
 			}
-			resp, err := noKeepAlive.Post("http://"+tc.dial+":"+strconv.Itoa(taken)+"/api/chat", "application/json", strings.NewReader(`{}`))
-			if err != nil {
-				t.Fatalf("ask the holder: %v", err)
-			}
-			defer resp.Body.Close()
-			body, _ := io.ReadAll(resp.Body)
-			if string(body) != marker {
-				t.Errorf("the holder's route answered %d %q, want its own %q", resp.StatusCode, body, marker)
+			got := ask()
+			if got.status != http.StatusOK || string(got.body) != marker {
+				t.Errorf("the holder's route answered %d %q, want its own %q", got.status, got.body, marker)
 			}
 		})
 	}
@@ -782,8 +869,7 @@ func TestRoutingListener_RefusesAFacadeOnItsPort(t *testing.T) {
 		p := newBoundProxy(NewCodec(w))
 		p.serveCtx = t.Context()
 		t.Cleanup(func() { p.shutdown(context.Background()) })
-		port := freeRoutingPort(t)
-		activate(t, p, w, listenerPolicy(t, "1", nodepolicy.Listener{Enabled: true, Port: port}))
+		port := startRouting(t, p, w, "1")
 		if boundPort(p) != port {
 			t.Fatalf("listener did not bind %d", port)
 		}
@@ -798,8 +884,7 @@ func TestRoutingListener_RefusesAFacadeOnItsPort(t *testing.T) {
 	})
 	t.Run("set-port", func(t *testing.T) {
 		p, w, ports := facadeProxy(t)
-		port := freeRoutingPort(t)
-		activate(t, p, w, listenerPolicy(t, "1", nodepolicy.Listener{Enabled: true, Port: port}))
+		port := startRouting(t, p, w, "1")
 		if boundPort(p) != port {
 			t.Fatalf("listener did not bind %d", port)
 		}
@@ -822,8 +907,7 @@ func TestRoutingListener_IsNeverAnnouncedBeyondTheErrorPipeline(t *testing.T) {
 	p, w, _ := facadeProxy(t)
 	seen := len(w.lines())
 
-	port := freeRoutingPort(t)
-	activate(t, p, w, listenerPolicy(t, "1", nodepolicy.Listener{Enabled: true, Port: port}))
+	port := startRouting(t, p, w, "1")
 	if got := call(t, port, http.MethodGet, "/v1/models", nil); got.status != http.StatusOK {
 		t.Fatalf("listener answered %d, want 200", got.status)
 	}
@@ -861,9 +945,7 @@ func TestRoutingListener_IsNeverAnnouncedBeyondTheErrorPipeline(t *testing.T) {
 func TestRoutingListener_DeniesBrowserOriginsUnlessExactlyAllowed(t *testing.T) {
 	const allowed = "http://localhost:3000"
 	p, w := zeroFacadeProxy(t)
-	activate(t, p, w, listenerPolicy(t, "1", nodepolicy.Listener{
-		Enabled: true, Port: freeRoutingPort(t), AllowedOrigins: []string{allowed, "https://app.example.test"},
-	}))
+	startRouting(t, p, w, "1", allowed, "https://app.example.test")
 	port := boundPort(p)
 
 	t.Run("no origin is a plain local client", func(t *testing.T) {
@@ -934,9 +1016,7 @@ func TestRoutingListener_DeniesBrowserOriginsUnlessExactlyAllowed(t *testing.T) 
 func TestRoutingListener_AnswersPreflightOnlyForAllowedOrigins(t *testing.T) {
 	const allowed = "http://localhost:3000"
 	p, w := zeroFacadeProxy(t)
-	activate(t, p, w, listenerPolicy(t, "1", nodepolicy.Listener{
-		Enabled: true, Port: freeRoutingPort(t), AllowedOrigins: []string{allowed},
-	}))
+	startRouting(t, p, w, "1", allowed)
 	port := boundPort(p)
 
 	preflight := func(origin, method string, headers string) func(*http.Request) {
@@ -1001,10 +1081,7 @@ func TestRoutingListener_AnswersPreflightOnlyForAllowedOrigins(t *testing.T) {
 
 func TestRoutingListener_OriginAllowListFollowsActivationWithoutARebind(t *testing.T) {
 	p, w := zeroFacadeProxy(t)
-	port := freeRoutingPort(t)
-	activate(t, p, w, listenerPolicy(t, "1", nodepolicy.Listener{
-		Enabled: true, Port: port, AllowedOrigins: []string{"http://localhost:3000"},
-	}))
+	port := startRouting(t, p, w, "1", "http://localhost:3000")
 	activate(t, p, w, listenerPolicy(t, "2", nodepolicy.Listener{
 		Enabled: true, Port: port, AllowedOrigins: []string{"http://localhost:4000"},
 	}))
@@ -1020,9 +1097,7 @@ func TestRoutingListener_OriginAllowListFollowsActivationWithoutARebind(t *testi
 func TestRoutingListener_RejectsHostsThatAreNotItsLoopbackName(t *testing.T) {
 	const allowed = "http://localhost:3000"
 	p, w := zeroFacadeProxy(t)
-	activate(t, p, w, listenerPolicy(t, "1", nodepolicy.Listener{
-		Enabled: true, Port: freeRoutingPort(t), AllowedOrigins: []string{allowed},
-	}))
+	startRouting(t, p, w, "1", allowed)
 	port := boundPort(p)
 	other := strconv.Itoa(port + 1)
 	own := strconv.Itoa(port)
@@ -1065,24 +1140,21 @@ func TestRoutingListener_RejectsHostsThatAreNotItsLoopbackName(t *testing.T) {
 }
 
 func TestRoutingListener_ReturnsAfterARestartWhenThePolicyIsReplayed(t *testing.T) {
-	port := freeRoutingPort(t)
-	pol := listenerPolicy(t, "7", nodepolicy.Listener{Enabled: true, Port: port})
-
 	first, firstOut := zeroFacadeProxy(t)
-	activate(t, first, firstOut, pol)
+	port := startRouting(t, first, firstOut, "7")
+	pol := first.admission.currentPolicy()
+	socket := routingSocket(first)
 	if boundPort(first) != port {
 		t.Fatalf("first process did not bind %d", port)
 	}
 	first.shutdown(context.Background())
-	if !refuses(port) {
-		t.Fatalf("port %d still accepts connections after the process shut down", port)
-	}
+	assertRoutingClosed(t, socket)
 
 	restarted, out := zeroFacadeProxy(t)
-	if boundPort(restarted) != 0 || !refuses(port) {
+	if boundPort(restarted) != 0 || routingSocket(restarted) != nil {
 		t.Fatal("a fresh process listened before the broker replayed any policy")
 	}
-	activate(t, restarted, out, pol)
+	replayRouting(t, restarted, out, pol)
 	if got := call(t, port, http.MethodGet, "/v1/models", nil); got.status != http.StatusOK {
 		t.Errorf("after replay status = %d, want 200", got.status)
 	}
@@ -1095,13 +1167,13 @@ func TestRoutingListener_ReturnsAfterARestartWhenThePolicyIsReplayed(t *testing.
 
 func TestRoutingListener_StaleRevisionDoesNotChangeTheListener(t *testing.T) {
 	p, w := zeroFacadeProxy(t)
-	port := freeRoutingPort(t)
-	activate(t, p, w, listenerPolicy(t, "5", nodepolicy.Listener{Enabled: true, Port: port}))
+	port := startRouting(t, p, w, "5")
+	socket := routingSocket(p)
 
 	other := freeRoutingPort(t)
 	rpcErr(t, p, w, nodepolicy.MethodSetPolicy, listenerPolicy(t, "4", nodepolicy.Listener{Enabled: true, Port: other}))
-	if boundPort(p) != port || !refuses(other) {
-		t.Errorf("a refused older revision changed the listener: bound %d, %d refuses=%v", boundPort(p), other, refuses(other))
+	if boundPort(p) != port || routingSocket(p) != socket {
+		t.Errorf("a refused older revision changed the listener: bound %d, want %d", boundPort(p), port)
 	}
 	rpcErr(t, p, w, nodepolicy.MethodSetPolicy, listenerPolicy(t, "4", nodepolicy.Listener{}))
 	if boundPort(p) != port {
@@ -1111,14 +1183,11 @@ func TestRoutingListener_StaleRevisionDoesNotChangeTheListener(t *testing.T) {
 
 func TestRoutingListener_ShutdownClosesItForGood(t *testing.T) {
 	p, w := zeroFacadeProxy(t)
-	port := freeRoutingPort(t)
-	pol := listenerPolicy(t, "1", nodepolicy.Listener{Enabled: true, Port: port})
-	activate(t, p, w, pol)
+	startRouting(t, p, w, "1")
+	socket := routingSocket(p)
 
 	p.shutdown(context.Background())
-	if !refuses(port) {
-		t.Fatalf("port %d still accepts connections after shutdown", port)
-	}
+	assertRoutingClosed(t, socket)
 	p.routing.reconcile()
 	if boundPort(p) != 0 {
 		t.Error("a reconcile after shutdown rebound the listener")
@@ -1167,14 +1236,11 @@ func TestRoutingListener_StalledClientsNeitherDelayAnAnswerNorHoldTheControlLoop
 			"\r\nContent-Type: application/json\r\nContent-Length: 100\r\n\r\n"
 	}
 
-	for name, newListener := range map[string]nodepolicy.Listener{
-		"disabled": {},
-		"moved":    {Enabled: true, Port: freeRoutingPort(t)},
-	} {
+	for _, name := range []string{"disabled", "moved"} {
 		t.Run(name, func(t *testing.T) {
 			p, w := zeroFacadeProxy(t)
-			port := freeRoutingPort(t)
-			activate(t, p, w, listenerPolicy(t, "1", nodepolicy.Listener{Enabled: true, Port: port}))
+			port := startRouting(t, p, w, "1")
+			socket := routingSocket(p)
 
 			// Headers and part of the declared body, then silence.
 			stalledBody := dial(t, port)
@@ -1196,14 +1262,15 @@ func TestRoutingListener_StalledClientsNeitherDelayAnAnswerNorHoldTheControlLoop
 			send(t, stalledHeader, "POST /v1/chat/completions HTTP/1.1\r\nHost: 127.0.0.1:")
 
 			started := time.Now()
-			next := listenerPolicy(t, "2", newListener)
-			activate(t, p, w, next)
+			if name == "moved" {
+				startRouting(t, p, w, "2")
+			} else {
+				activate(t, p, w, listenerPolicy(t, "2", nodepolicy.Listener{}))
+			}
 			if elapsed := time.Since(started); elapsed > time.Second {
 				t.Errorf("activating the new listener setting took %v with stalled clients connected, want under 1s", elapsed)
 			}
-			if !refuses(port) {
-				t.Errorf("old port %d still accepts connections", port)
-			}
+			assertRoutingClosed(t, socket)
 		})
 	}
 }
