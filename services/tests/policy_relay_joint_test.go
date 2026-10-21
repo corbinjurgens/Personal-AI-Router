@@ -310,8 +310,8 @@ type policyJointFixture struct {
 
 func newPolicyJointFixture(t *testing.T) *policyJointFixture {
 	t.Helper()
-	f := &policyJointFixture{base: t.TempDir()}
-	originBase := t.TempDir()
+	f := &policyJointFixture{base: shortClusterTempDir(t)}
+	originBase := shortClusterTempDir(t)
 	f.originBase = originBase
 	f.cluster = filepath.Join(f.base, "cluster")
 	f.originCluster = filepath.Join(originBase, "cluster")
