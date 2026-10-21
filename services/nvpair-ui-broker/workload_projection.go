@@ -11,6 +11,8 @@ import (
 	"io"
 	"log/slog"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"nvpair-shared/nodepolicy"
 
@@ -99,10 +101,14 @@ func projectWorkloadFrame(method string, params json.RawMessage) (json.RawMessag
 var workloadFieldKinds = map[string]string{
 	"id": "identity", "model": "string", "engine": "identity",
 	"runId": "identity", "state": "string", "originatedFrom": "identity",
-	"scheduledOn": "identity", "createdAt": "integer", "seq": "integer",
+	"scheduledOn": "node-reference", "createdAt": "integer", "seq": "integer",
 	"startedAt": "nullable-integer", "completedAt": "nullable-integer",
 	"error": "nullable-string", "requesterId": "nullable-string", "requestedModel": "string",
 }
+
+// Manual destination IDs have no producer-side length bound. Limit their wire
+// projection to 256 UTF-8 bytes; origin remains the broker's stable host UUID.
+const workloadNodeReferenceMaxBytes = 256
 
 func validWorkloadValue(kind string, raw json.RawMessage) bool {
 	if bytes.Equal(raw, []byte("null")) {
@@ -116,7 +122,18 @@ func validWorkloadValue(kind string, raw json.RawMessage) bool {
 	if json.Unmarshal(raw, &s) != nil {
 		return false
 	}
-	// Empty origin/placement is legitimate before node stamping/scheduling.
+	if kind == "node-reference" {
+		if s == "" || len(s) > workloadNodeReferenceMaxBytes || !utf8.Valid(raw) {
+			return false
+		}
+		for _, r := range s {
+			if unicode.IsControl(r) {
+				return false
+			}
+		}
+		return true
+	}
+	// Empty origin is legitimate before node stamping; placement is optional.
 	return kind != "identity" || s == "" || nodepolicy.ValidateRoutingIdentity(s, s) == nil
 }
 
@@ -159,7 +176,8 @@ func projectedWorkloadInfo(info json.RawMessage) json.RawMessage {
 	if err != nil {
 		return nil
 	}
-	projected, _, _ := projectWorkloadFrame("workloads:upsert", params)
+	projected, category, count := projectWorkloadFrame("workloads:upsert", params)
+	slog.Debug("projected workload info", "category", category, "count", count)
 	if projected == nil {
 		return nil
 	}
@@ -234,7 +252,8 @@ func (b *Broker) activeLocalReplayFrames() []workloadReplayFrame {
 		if err != nil {
 			continue
 		}
-		projected, _, _ := projectWorkloadFrame(method, params)
+		projected, category, count := projectWorkloadFrame(method, params)
+		slog.Debug("projected workload replay", "category", category, "count", count)
 		if projected != nil {
 			frames = append(frames, workloadReplayFrame{method: method, params: projected})
 		}
@@ -332,7 +351,8 @@ var proxyWorkloadMethods = map[string]bool{
 // keeps emitting regardless of whether a manager is present, so the echo
 // still happens with no manager supervised (the broadcast simply doesn't).
 func (b *Broker) routeProxyWorkload(method string, params json.RawMessage) {
-	params, _, _ = projectWorkloadFrame(method, params)
+	params, category, count := projectWorkloadFrame(method, params)
+	slog.Debug("projected proxy workload", "category", category, "count", count)
 	if params == nil {
 		return
 	}
@@ -475,7 +495,8 @@ func (b *Broker) emitWorkloadEventStale(method string, params json.RawMessage, s
 var noSightingGuard time.Time
 
 func (b *Broker) emitWorkloadEventProvenance(method string, params json.RawMessage, inferred bool, unchangedSince time.Time) {
-	params, _, _ = projectWorkloadFrame(method, params)
+	params, category, count := projectWorkloadFrame(method, params)
+	slog.Debug("projected workload event", "category", category, "count", count)
 	if params == nil {
 		return
 	}
