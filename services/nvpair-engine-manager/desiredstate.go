@@ -281,16 +281,29 @@ func (e *Executor) restoreEnabled(ctx context.Context, engine string) error {
 		pid, image, found := pidOnPort(port)
 		if found && isManagedInstallPath(binPath, installDir) && isOurEngineImage(image, binPath) {
 			terminatePID(pid, stopGrace(rt))
-			if rt.Ready != nil {
-				if !e.waitUnavailable(rt.Ready, port, stopGrace(rt)+2*time.Second) {
-					return fmt.Errorf("reclaim owned %s orphan: listener on port %d did not stop", engine, port)
-				}
-			} else if pidAlive(pid) {
-				return fmt.Errorf("reclaim owned %s orphan: pid %d did not stop", engine, pid)
+			if err := e.confirmOrphanStopped(engine, pid, port, rt); err != nil {
+				return err
 			}
 			e.markStopped(st, engine)
 			return e.doStart(ctx, st, engine, startOpts{RequireOwned: true})
 		}
 	}
 	return e.doStart(ctx, st, engine, startOpts{})
+}
+
+// confirmOrphanStopped checks termination separately from sending signals so
+// failure handling can be exercised without an unkillable process fixture.
+func (e *Executor) confirmOrphanStopped(engine string, pid, port int, rt Runtime) error {
+	var err error
+	if rt.Ready != nil {
+		if !e.waitUnavailable(rt.Ready, port, stopGrace(rt)+2*time.Second) {
+			err = fmt.Errorf("reclaim owned %s orphan: listener on port %d did not stop", engine, port)
+		}
+	} else if pidAlive(pid) {
+		err = fmt.Errorf("reclaim owned %s orphan: pid %d did not stop", engine, pid)
+	}
+	if err != nil {
+		e.reportStartFailed(engine, err)
+	}
+	return err
 }

@@ -5,6 +5,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -251,14 +252,42 @@ func TestE2ERestoreReclaimsOwnedOrphanAfterHardKill(t *testing.T) {
 	}
 	newPID, err := strconv.Atoi(strings.TrimSpace(string(data)))
 	listenerPID, image, found := pidOnPort(port)
-	if err != nil || newPID <= 0 || newPID == oldPID || !found || listenerPID != newPID || !isOurEngineImage(image, bin) || !pidAlive(newPID) || (runtime.GOOS == "windows" && pidAlive(oldPID)) {
+	if err != nil || newPID <= 0 || newPID == oldPID || !found || listenerPID != newPID || !isOurEngineImage(image, bin) || !pidAlive(newPID) {
 		t.Fatalf("cold relaunch PID=%q parsed=%d err=%v; old=%d oldAlive=%v listener=(%d,%q,%v)", data, newPID, err, oldPID, pidAlive(oldPID), listenerPID, image, found)
 	}
+	waitE2EProcessDead(t, oldPID)
 	send(t, second.stdin, 3, "engine:stop", map[string]any{"engine": "fake"})
 	waitResult(t, second.frames, "3", 10*time.Second)
 	second.stop(t)
 	if pidAlive(newPID) || portServing(port) {
 		t.Fatalf("replacement survived stop: pid=%d alive=%v portServing=%v", newPID, pidAlive(newPID), portServing(port))
+	}
+}
+
+// A Unix orphan may remain as a zombie until its new parent reaps it. Require
+// absence or an explicit zombie state; a missing image alone is not evidence.
+func waitE2EProcessDead(t *testing.T, pid int) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	var state []byte
+	var inspectErr error
+	for {
+		if !pidAlive(pid) {
+			return
+		}
+		if runtime.GOOS != "windows" {
+			ctx, cancel := context.WithTimeout(context.Background(), time.Until(deadline))
+			state, inspectErr = exec.CommandContext(ctx, "ps", "-o", "stat=", "-p", strconv.Itoa(pid)).Output()
+			cancel()
+			fields := strings.Fields(string(state))
+			if inspectErr == nil && len(fields) == 1 && strings.HasPrefix(fields[0], "Z") {
+				return
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("old orphan PID %d is still alive: state=%q inspection error=%v", pid, state, inspectErr)
+		}
+		time.Sleep(50 * time.Millisecond)
 	}
 }
 
