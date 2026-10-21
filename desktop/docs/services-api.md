@@ -319,11 +319,14 @@
 | `engine:restart` | request (we call) | ⚠️ not called |
 | `engine:set-port` | request (we call) | ⚠️ not called |
 | `engine:start` | request (we call) | ✅ yes |
+| `engine:status` | request (we call) | ✅ yes |
+| `engine:stop` | request (we call) | ✅ yes |
 | `engine:subscribe` | request (we call) | ✅ yes |
 | `engine:switch` | request (we call) | ✅ yes |
 | `engine:switch-cancel` | request (we call) | ➖ ignored |
 | `engine:switch-request` | request (we call) | ➖ ignored |
 | `engine:switch-status` | request (we call) | ✅ yes |
+| `engine:uninstall` | request (we call) | ✅ yes |
 | `engine:unsubscribe` | request (we call) | ⚠️ not called |
 | `engine:wake` | request (we call) | ⚠️ not called |
 | `errors:get-initial` | request (we call) | ✅ yes |
