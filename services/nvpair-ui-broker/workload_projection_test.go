@@ -212,7 +212,8 @@ func TestWorkloadPrivacyProjectionLiveEffects(t *testing.T) {
 func TestWorkloadManualDestinationReachesConsumers(t *testing.T) {
 	for name, destination := range map[string]string{
 		"space": "manual node", "slash": "lab/gpu", "non-ASCII": "手動ノード",
-		"byte bound": strings.Repeat("a", 256), "UTF-8 byte bound": strings.Repeat("界", 85) + "a",
+		"accented Latin": "nœud café",
+		"byte bound":     strings.Repeat("a", 256), "UTF-8 byte bound": strings.Repeat("界", 85) + "a",
 	} {
 		t.Run(name, func(t *testing.T) {
 			raw, err := json.Marshal(destination)
@@ -248,9 +249,27 @@ func TestWorkloadManualDestinationRejectsBeforeEffects(t *testing.T) {
 	for name, value := range map[string]string{
 		"empty": `""`, "newline": `"node\nname"`, "NUL": `"node\u0000name"`,
 		"DEL": `"node\u007fname"`, "C1 control": `"node\u0085name"`,
-		"over byte bound":       `"` + strings.Repeat("a", 257) + `"`,
-		"UTF-8 over byte bound": `"` + strings.Repeat("界", 86) + `"`,
-		"invalid UTF-8":         string([]byte{'"', 'n', 0xff, '"'}),
+		"left-to-right embedding":    `"node\u202aname"`,
+		"right-to-left embedding":    `"node\u202bname"`,
+		"pop directional formatting": `"node\u202cname"`,
+		"left-to-right override":     `"node\u202dname"`,
+		"right-to-left override":     `"node\u202ename"`,
+		"left-to-right isolate":      `"node\u2066name"`,
+		"right-to-left isolate":      `"node\u2067name"`,
+		"first strong isolate":       `"node\u2068name"`,
+		"pop directional isolate":    `"node\u2069name"`,
+		"left-to-right mark":         `"node\u200ename"`,
+		"right-to-left mark":         `"node\u200fname"`,
+		"Arabic letter mark":         `"node\u061cname"`,
+		"zero-width space":           `"node\u200bname"`,
+		"zero-width non-joiner":      `"node\u200cname"`,
+		"zero-width joiner":          `"node\u200dname"`,
+		"word joiner":                `"node\u2060name"`,
+		"soft hyphen":                `"node\u00adname"`,
+		"byte order mark":            `"node\ufeffname"`,
+		"over byte bound":            `"` + strings.Repeat("a", 257) + `"`,
+		"UTF-8 over byte bound":      `"` + strings.Repeat("界", 86) + `"`,
+		"invalid UTF-8":              string([]byte{'"', 'n', 0xff, '"'}),
 	} {
 		t.Run(name, func(t *testing.T) {
 			input := privacyEnvelope(strings.Replace(privacyInfo, `"scheduledOn":"peer"`, `"scheduledOn":`+value, 1))

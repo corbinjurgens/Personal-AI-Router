@@ -127,7 +127,7 @@ func validWorkloadValue(kind string, raw json.RawMessage) bool {
 			return false
 		}
 		for _, r := range s {
-			if unicode.IsControl(r) {
+			if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
 				return false
 			}
 		}
