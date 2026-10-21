@@ -4,6 +4,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -12,6 +13,7 @@ import (
 	"net"
 	"runtime"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -299,6 +301,175 @@ func TestEgressLeaseBrokerAnnouncementsCoalesce(t *testing.T) {
 		t.Fatalf("coalesced announcements = %d, want exactly 1", len(frames))
 	}
 	requireBrokerLeaseAnnouncement(t, frames[0], "latest availability activation failed", "0")
+}
+
+func TestEgressLeaseBrokerAnnouncementsDuringBlockedSend(t *testing.T) {
+	publicationGoroutines := func(t *testing.T) int {
+		t.Helper()
+		stack := make([]byte, 1<<20)
+		n := runtime.Stack(stack, true)
+		if n == len(stack) {
+			t.Fatal("policy publication goroutine snapshot exceeded 1 MiB")
+		}
+		count := 0
+		for _, goroutine := range strings.Split(string(stack[:n]), "\n\n") {
+			if strings.Contains(goroutine, ".(*Broker).schedulePolicyAnnouncement.func1(") ||
+				strings.Contains(goroutine, ".(*Broker).notifyPolicyChanged(") {
+				count++
+			}
+		}
+		return count
+	}
+	blockedClient := func(t *testing.T, ab *activatedBroker) (*stallingClient, func()) {
+		t.Helper()
+		// These cases are not parallel. Drain pre-existing publishers so the
+		// method-specific stack count belongs to this fixture, not other work.
+		waitUntil(t, "pre-existing policy publication goroutines to exit", func() bool {
+			return publicationGoroutines(t) == 0
+		})
+		client := &stallingClient{
+			stall:   func([]byte) bool { return true },
+			entered: make(chan struct{}),
+			resume:  make(chan struct{}),
+		}
+		ab.b.codec = NewCodec(client)
+		var once sync.Once
+		release := func() { once.Do(func() { close(client.resume) }) }
+		t.Cleanup(func() {
+			release()
+			waitUntil(t, "all policy publication goroutines to exit", func() bool {
+				return publicationGoroutines(t) == 0
+			})
+		})
+		return client, release
+	}
+	framesAfterDrain := func(t *testing.T, client *stallingClient, release func()) []Message {
+		t.Helper()
+		release()
+		waitUntil(t, "all policy publication goroutines to exit", func() bool {
+			return publicationGoroutines(t) == 0
+		})
+		client.mu.Lock()
+		data := bytes.Clone(client.buf.Bytes())
+		client.mu.Unlock()
+		reader := NewCodec(bytes.NewBuffer(data))
+		var frames []Message
+		for {
+			frame, err := reader.Read()
+			if errors.Is(err, io.EOF) {
+				return frames
+			}
+			if err != nil {
+				t.Fatalf("decode policy announcement stream: %v", err)
+			}
+			frames = append(frames, *frame)
+		}
+	}
+
+	t.Run("concurrent requests preserve the latest mid-send state", func(t *testing.T) {
+		ab, _ := newBrokerLeaseFixture(t)
+		client, release := blockedClient(t, ab)
+		r := ab.b.nodePolicyRuntime()
+		const first = "first availability activation failed"
+		const latest = "second availability activation failed"
+		r.mu.Lock()
+		r.availabilityErr = first
+		r.mu.Unlock()
+		ab.b.schedulePolicyAnnouncement()
+		// Write receives an already encoded frame. Its entry barrier and closed
+		// gate prove the state changes while that actual send remains blocked.
+		receive(t, "first policy announcement write", client.entered)
+		if got := publicationGoroutines(t); got != 1 {
+			t.Fatalf("blocked policy publication goroutines = %d, want 1", got)
+		}
+		r.mu.Lock()
+		r.availabilityErr = latest
+		r.mu.Unlock()
+		start, done := make(chan struct{}), make(chan struct{})
+		var callers sync.WaitGroup
+		callers.Add(200)
+		for range 200 {
+			go func() {
+				defer callers.Done()
+				<-start
+				ab.b.schedulePolicyAnnouncement()
+			}()
+		}
+		go func() { callers.Wait(); close(done) }()
+		t.Cleanup(func() {
+			release()
+			waitBrokerLeaseDone(t, "concurrent announcement callers", done)
+		})
+		close(start)
+		waitBrokerLeaseDone(t, "200 concurrent announcement callers", done)
+		// All requests have returned while Write is still blocked. Stack capture
+		// includes runnable senders too; no sleep is needed to expose a queue.
+		if got := publicationGoroutines(t); got > 2 {
+			t.Fatalf("scheduled policy publication goroutines = %d, want at most 2", got)
+		}
+		frames := framesAfterDrain(t, client, release)
+		if len(frames) == 0 {
+			t.Fatal("blocked policy send published no frames")
+		}
+		requireBrokerLeaseAnnouncement(t, frames[0], first, "0")
+		// Check latest delivery before the frame bound so a late pending-clear
+		// regression fails on the missing second state, even with one frame.
+		requireBrokerLeaseAnnouncement(t, frames[len(frames)-1], latest, "0")
+		if len(frames) > 2 {
+			t.Fatalf("mid-send policy announcements = %d, want at most 2", len(frames))
+		}
+	})
+
+	t.Run("renewed binding failures keep publication bounded", func(t *testing.T) {
+		ab, _ := newBrokerLeaseFixture(t)
+		rejectBrokerLeaseBinding(ab)
+		client, release := blockedClient(t, ab)
+		r := ab.b.nodePolicyRuntime()
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		t.Cleanup(cancel)
+		ab.b.renewEgressLease(ctx)
+		receive(t, "rejected binding announcement write", client.entered)
+		if got := publicationGoroutines(t); got != 1 {
+			t.Fatalf("blocked renewal publication goroutines = %d, want 1", got)
+		}
+		for range 199 {
+			// Fresh real availability and policy ACKs restore eligibility after
+			// each failure. Replay would itself block on the client publication.
+			if !r.acquirePush(ctx) {
+				t.Fatalf("acquire fresh activation push slot: %v", ctx.Err())
+			}
+			ab.b.sendPolicyStateLocked(ctx, ab.pp, pushPolicy)
+			r.releasePush()
+			ab.wantActivation(t, "0", activationActive, "")
+			ab.b.renewEgressLease(ctx)
+		}
+		renewals := brokerLeaseRenewals(t, ab.proxy)
+		if len(renewals) != 200 {
+			t.Fatalf("independent binding failure renewals = %d, want 200", len(renewals))
+		}
+		for i, renewal := range renewals {
+			if renewal.RunID != ab.acks.runID || renewal.Revision != "0" ||
+				renewal.Sequence != strconv.Itoa(i+1) || renewal.NotAfterNanos != "0" {
+				t.Fatalf("binding failure renewal %d = %+v, want current run/revision and increasing fresh anchor", i+1, renewal)
+			}
+		}
+		if got := publicationGoroutines(t); got > 2 {
+			t.Fatalf("renewal binding failure publication goroutines = %d, want at most 2", got)
+		}
+		const latest = "latest repeated binding failure availability"
+		r.mu.Lock()
+		r.availabilityErr = latest
+		r.mu.Unlock()
+		frames := framesAfterDrain(t, client, release)
+		if len(frames) == 0 {
+			t.Fatal("binding failures published no policy frames")
+		}
+		requireBrokerLeaseAnnouncement(t, frames[0], "the proxy egress lease binding requires availability acknowledgement", "0")
+		requireBrokerLeaseAnnouncement(t, frames[len(frames)-1], latest, "0")
+		if len(frames) > 2 {
+			t.Fatalf("binding failure policy announcements = %d, want at most 2", len(frames))
+		}
+	})
 }
 
 func TestEgressLeaseBrokerStartupHasNoGrant(t *testing.T) {
