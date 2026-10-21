@@ -591,7 +591,15 @@ func (b *Broker) reconcileResident(parent context.Context, e modelConfigEvidence
 		return entry
 	}
 	if len(prepared.Refusals) > 0 {
-		entry.State, entry.Reason = nodepolicy.ModelStateBlocked, prepared.Refusals[0].Reason
+		reason := prepared.Refusals[0].Reason
+		current := b.captureModelConfig()
+		if reason == nodepolicy.ModelReasonEngineOff && e.Running[entry.Engine] && current.Running[entry.Engine] && sameModelAuthority(e, current) {
+			// The proxy can still be learning a run the current manager already
+			// reported. Its engine-off refusal is not settled engine evidence.
+			entry.State, entry.Reason = nodepolicy.ModelStatePending, ""
+		} else {
+			entry.State, entry.Reason = nodepolicy.ModelStateBlocked, reason
+		}
 		return entry
 	}
 	r.mu.Lock()

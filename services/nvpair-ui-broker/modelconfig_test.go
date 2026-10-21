@@ -1866,6 +1866,94 @@ func TestModelConfigRestartStartResponseRecoversResident(t *testing.T) {
 	}
 }
 
+func TestModelConfigRestartProxyEngineOffRefusalRetries(t *testing.T) {
+	f := newModelConfigFixture(t)
+	f.proxy.mu.Lock()
+	answer := f.proxy.answer
+	f.proxy.mu.Unlock()
+	refused := false
+	f.proxy.setAnswer(func(method string, params json.RawMessage) (any, string) {
+		if method == nodepolicy.MethodPrepareResident && !refused {
+			refused = true
+			return nodepolicy.PrepareResidentResult{EvidenceGeneration: 1, Refusals: []nodepolicy.ResidentRefusal{{Engine: "llamacpp", Model: "resident", Reason: nodepolicy.ModelReasonEngineOff}}}, ""
+		}
+		return answer(method, params)
+	})
+	f.b.reconcileModelConfig(context.Background())
+	status := f.b.localPolicy().ModelConfiguration
+	if len(status.Models) != 1 || status.Models[0].State != nodepolicy.ModelStatePending || status.Models[0].Reason != "" {
+		t.Fatalf("running engine with stale proxy view = %+v, want pending", status)
+	}
+	if got := len(modelConfigCalls(f.engine, nodepolicy.MethodReconcileResident)); got != 0 {
+		t.Fatalf("refused prepare dispatched %d loads", got)
+	}
+	r := f.b.nodePolicyRuntime()
+	r.mu.Lock()
+	r.now = time.Now
+	r.models.retryAt = time.Now().Add(60 * time.Millisecond)
+	r.mu.Unlock()
+	f.setResidentAttemptAnswer(t, nodepolicy.ResidentLoaded)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); f.b.runIdlePolicy(ctx) }()
+	defer func() { cancel(); awaitModelConfigDone(t, done) }()
+	f.awaitGrant(t)
+	f.engine.releaseHeld()
+	settled := time.After(2 * time.Second)
+	for {
+		r.mu.Lock()
+		busy := r.models.busy
+		r.mu.Unlock()
+		if !busy {
+			break
+		}
+		select {
+		case <-settled:
+			t.Fatal("retried resident reconciliation did not finish")
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+	f.b.observeLoadedFrom(f.source, map[string][]string{"llamacpp": {"resident"}})
+	f.b.reconcileModelConfig(context.Background())
+	status = f.b.localPolicy().ModelConfiguration
+	if len(status.Models) != 1 || status.Models[0].State != nodepolicy.ModelStateSatisfied {
+		t.Fatalf("resident did not recover after proxy caught up: %+v", status)
+	}
+	if got := len(modelConfigCalls(f.engine, nodepolicy.MethodReconcileResident)); got != 1 {
+		t.Fatalf("resident loads = %d, want one", got)
+	}
+}
+
+func TestModelConfigRetryWakesAtDeadlineBetweenIdleTicks(t *testing.T) {
+	f := newModelConfigFixture(t)
+	r := f.b.nodePolicyRuntime()
+	r.mu.Lock()
+	r.now = time.Now
+	r.mu.Unlock()
+	f.b.reconcileModelConfig(context.Background())
+	if got := len(modelConfigCalls(f.proxy, nodepolicy.MethodPrepareResident)); got != 1 {
+		t.Fatalf("initial prepares = %d, want one", got)
+	}
+	r.mu.Lock()
+	r.models.retryAt = time.Now().Add(60 * time.Millisecond)
+	r.mu.Unlock()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); f.b.runIdlePolicy(ctx) }()
+	defer func() { cancel(); awaitModelConfigDone(t, done) }()
+	deadline := time.After(500 * time.Millisecond)
+	for len(modelConfigCalls(f.proxy, nodepolicy.MethodPrepareResident)) < 2 {
+		select {
+		case <-deadline:
+			r.mu.Lock()
+			retryAt, now, busy := r.models.retryAt, r.now(), r.models.busy
+			r.mu.Unlock()
+			t.Fatalf("retry missed deadline: retryAt=%s now=%s busy=%v status=%+v calls=%v", retryAt, now, busy, f.b.localPolicy().ModelConfiguration, f.proxy.methods(""))
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+}
+
 func TestModelConfigRestartSnapshotDoesNotUndoNewerRunningStatus(t *testing.T) {
 	f := newModelConfigFixture(t)
 	r := f.b.nodePolicyRuntime()
@@ -1955,6 +2043,14 @@ func (f *modelConfigFixture) startLoadedAttempt(t *testing.T) <-chan struct{} {
 
 func (f *modelConfigFixture) startResidentAttempt(t *testing.T, outcome nodepolicy.ResidentOutcome) <-chan struct{} {
 	t.Helper()
+	f.setResidentAttemptAnswer(t, outcome)
+	done := make(chan struct{})
+	go func() { defer close(done); f.b.reconcileModelConfig(context.Background()) }()
+	return done
+}
+
+func (f *modelConfigFixture) setResidentAttemptAnswer(t *testing.T, outcome nodepolicy.ResidentOutcome) {
+	t.Helper()
 	f.engine.setAnswer(func(method string, raw json.RawMessage) (any, string) {
 		if method == settings.SwitchPrepareMethod {
 			return emptySwitchManagerSnapshot(), ""
@@ -1987,9 +2083,6 @@ func (f *modelConfigFixture) startResidentAttempt(t *testing.T, outcome nodepoli
 		}
 		return result, holdSuccessReply
 	})
-	done := make(chan struct{})
-	go func() { defer close(done); f.b.reconcileModelConfig(context.Background()) }()
-	return done
 }
 
 func awaitModelConfigDone(t *testing.T, done <-chan struct{}) {

@@ -36,13 +36,34 @@ func (b *Broker) runIdlePolicy(ctx context.Context) {
 	ticker := time.NewTicker(idleCheckInterval)
 	defer ticker.Stop()
 	for {
+		r.mu.Lock()
+		retryAt := r.models.retryAt
+		retryDelay := retryAt.Sub(r.now())
+		r.mu.Unlock()
+		var retry *time.Timer
+		var retryC <-chan time.Time
+		if !retryAt.IsZero() {
+			retry = time.NewTimer(max(0, retryDelay))
+			retryC = retry.C
+		}
 		select {
 		case <-ctx.Done():
+			if retry != nil {
+				retry.Stop()
+			}
 			return
 		case <-ticker.C:
+			if retry != nil {
+				retry.Stop()
+			}
 			b.idleTick(ctx)
 			b.reconcileModelConfig(ctx)
 		case <-wake:
+			if retry != nil {
+				retry.Stop()
+			}
+			b.reconcileModelConfig(ctx)
+		case <-retryC:
 			b.reconcileModelConfig(ctx)
 		}
 	}
