@@ -118,6 +118,7 @@ func TestUninstallRetries(t *testing.T) {
 	m.Platforms[key] = p
 
 	ex := newTestExecutor(t, m)
+	ex.detectTimeout = 2 * time.Second
 	// A command-mode engine's files live wherever its vendor script put them, so
 	// uninstall declines one PAIR has no record of installing. Claim it, to reach
 	// the retry behavior under test.

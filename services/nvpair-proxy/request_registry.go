@@ -18,18 +18,17 @@ import (
 const maxLiveRoutingRequests = 1024
 
 type routingRequest struct {
-	key      nodepolicy.RoutingRequestKey
-	control  *workloadCtl
-	workload *workloadKey
+	key   nodepolicy.RoutingRequestKey
+	owner *routingSpend
 }
 
-func (p *Proxy) registerRoutingRequest(control *workloadCtl) (*routingRequest, error) {
+func (p *Proxy) registerRoutingRequest(owner *routingSpend) (*routingRequest, error) {
 	p.identityMu.Lock()
 	defer p.identityMu.Unlock()
 	if err := p.routingIdentityLocked(); err != nil {
 		return nil, err
 	}
-	if control == nil || len(p.requests) >= maxLiveRoutingRequests {
+	if owner == nil || len(p.requests) >= maxLiveRoutingRequests {
 		return nil, fmt.Errorf("routing request registry is full or unavailable")
 	}
 	if p.requestSequence == math.MaxInt64 {
@@ -37,7 +36,9 @@ func (p *Proxy) registerRoutingRequest(control *workloadCtl) (*routingRequest, e
 	}
 	p.requestSequence++
 	key := nodepolicy.RoutingRequestKey{OriginNodeID: p.originNodeID, ProxyRunID: p.runID, RequestID: strconv.FormatInt(p.requestSequence, 10)}
-	request := &routingRequest{key: key, control: control}
+	owner.key = key // Immutable before publication in the registry.
+	request := &routingRequest{key: key, owner: owner}
+	owner.detachWorkload = func() { p.unregisterWorkload(request) }
 	if p.requests == nil {
 		p.requests = map[string]*routingRequest{}
 	}
@@ -49,7 +50,7 @@ func (p *Proxy) unregisterRoutingRequest(request *routingRequest) {
 	if request == nil {
 		return
 	}
-	request.control.finish()
+	request.owner.finish()
 	p.identityMu.Lock()
 	defer p.identityMu.Unlock()
 	if p.requests[request.key.RequestID] != request {
@@ -62,7 +63,12 @@ func (p *Proxy) unregisterRoutingRequest(request *routingRequest) {
 func (p *Proxy) registerWorkload(request *routingRequest, key workloadKey) error {
 	p.identityMu.Lock()
 	defer p.identityMu.Unlock()
-	if request == nil || p.requests[request.key.RequestID] != request || request.workload != nil {
+	if request == nil || p.requests[request.key.RequestID] != request {
+		return fmt.Errorf("workload requires a live unlinked routing request")
+	}
+	request.owner.mu.Lock()
+	defer request.owner.mu.Unlock()
+	if request.owner.done || request.owner.workload != nil {
 		return fmt.Errorf("workload requires a live unlinked routing request")
 	}
 	if _, exists := p.workloadRequests[key]; exists {
@@ -72,7 +78,7 @@ func (p *Proxy) registerWorkload(request *routingRequest, key workloadKey) error
 		p.workloadRequests = map[workloadKey]string{}
 	}
 	p.workloadRequests[key] = request.key.RequestID
-	request.workload = &key
+	request.owner.workload = &key
 	return nil
 }
 
@@ -85,27 +91,29 @@ func (p *Proxy) unregisterWorkload(request *routingRequest) {
 }
 
 func (p *Proxy) unregisterWorkloadLocked(request *routingRequest) {
-	if request.workload != nil {
-		delete(p.workloadRequests, *request.workload)
-		request.workload = nil
+	request.owner.mu.Lock()
+	defer request.owner.mu.Unlock()
+	if request.owner.workload != nil {
+		delete(p.workloadRequests, *request.owner.workload)
+		request.owner.workload = nil
 	}
 }
 
-func (p *Proxy) workloadControls(engine, id string) []*workloadCtl {
+func (p *Proxy) workloadControls(engine, id string) []*routingSpend {
 	p.identityMu.Lock()
 	defer p.identityMu.Unlock()
-	var matches []*workloadCtl
+	var matches []*routingSpend
 	for workload, requestID := range p.workloadRequests {
 		if workload.id == id && (engine == "" || workload.engine == engine) {
 			if request := p.requests[requestID]; request != nil {
-				matches = append(matches, request.control)
+				matches = append(matches, request.owner)
 			}
 		}
 	}
 	return matches
 }
 
-func (p *Proxy) workloadCancelControl(target nodepolicy.WorkloadCancelParams) *workloadCtl {
+func (p *Proxy) workloadCancelControl(target nodepolicy.WorkloadCancelParams) *routingSpend {
 	p.identityMu.Lock()
 	defer p.identityMu.Unlock()
 	if target.Validate() != nil || p.routingIdentityLocked() != nil || target.OriginatedFrom != p.originNodeID || target.RunID != p.runID {
@@ -113,19 +121,19 @@ func (p *Proxy) workloadCancelControl(target nodepolicy.WorkloadCancelParams) *w
 	}
 	requestID := p.workloadRequests[workloadKey{engine: target.Engine, id: target.WorkloadID}]
 	if request := p.requests[requestID]; request != nil {
-		return request.control
+		return request.owner
 	}
 	return nil
 }
 
-func (p *Proxy) routingRequestControl(key nodepolicy.RoutingRequestKey) *workloadCtl {
+func (p *Proxy) routingRequestControl(key nodepolicy.RoutingRequestKey) *routingSpend {
 	p.identityMu.Lock()
 	defer p.identityMu.Unlock()
 	if key.Validate() != nil || key.OriginNodeID != p.originNodeID || key.ProxyRunID != p.runID {
 		return nil
 	}
 	if request := p.requests[key.RequestID]; request != nil {
-		return request.control
+		return request.owner
 	}
 	return nil
 }

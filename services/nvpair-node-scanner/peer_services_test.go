@@ -12,6 +12,7 @@ import (
 	"reflect"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -291,6 +292,197 @@ func TestPeerServicesUnchangedSnapshotPreservesEnrichmentAndGeneration(t *testin
 type peerServicesTestTransport func(*http.Request) (*http.Response, error)
 
 func (f peerServicesTestTransport) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+func peerServicesEnrichmentClaim(t *testing.T, f *scannerReverseFixture) noderec.PeerServicesClaim {
+	t.Helper()
+	f.node.IP = "192.0.2.40"
+	if _, existed := f.d.dir.removeBrowse("peer"); !existed {
+		t.Fatal("fixture peer had no browse record to remove")
+	}
+	incarnation, ok := f.d.mesh.PeerServiceIncarnation("peer")
+	if !ok {
+		t.Fatal("fixture has no current incarnation")
+	}
+	return noderec.PeerServicesClaim{Incarnation: incarnation, Source: "cm-first", Sequence: 1, ObservedAt: time.Now().UnixMilli(),
+		Descriptor: noderec.PeerServicesDescriptor{HostUUID: "peer", Name: "peer-name", Addresses: []string{"192.0.2.40"}, Services: []noderec.PeerService{
+			{Service: noderec.ServiceNodeInfo, Port: f.node.Services[noderec.ServiceNodeInfo].Port},
+			{Service: noderec.ServiceEngineManager, Port: f.node.Services[noderec.ServiceEngineManager].Port},
+		}}}
+}
+
+func waitPeerServicesCondition(t *testing.T, description string, condition func() bool) {
+	t.Helper()
+	deadline := time.After(5 * time.Second)
+	tick := time.NewTicker(10 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		if condition() {
+			return
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("timed out waiting for %s", description)
+		case <-tick.C:
+		}
+	}
+}
+
+func TestPeerServicesRetriesFullEnrichmentAfterFirstNodeInfoFailure(t *testing.T) {
+	f := newScannerReverseFixture(t)
+	claim := peerServicesEnrichmentClaim(t, f)
+	var calls atomic.Int32
+	f.d.tlsHTTP = &http.Client{Transport: peerServicesTestTransport(func(*http.Request) (*http.Response, error) {
+		if calls.Add(1) == 1 {
+			return &http.Response{StatusCode: http.StatusServiceUnavailable, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(""))}, nil
+		}
+		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"hostUuid":"peer","cpu":{"name":"recovered CPU","cores":8}}`))}, nil
+	})}
+	if !f.d.acceptPeerServices(claim) {
+		t.Fatal("first claim rejected")
+	}
+	waitPeerServicesCondition(t, "successful first model fetch and failed node-info fetch", func() bool {
+		f.d.peerServicesMu.Lock()
+		busy := f.d.peerServicesEnriching["peer"]
+		f.d.peerServicesMu.Unlock()
+		return !busy && calls.Load() == 1 && f.modelCalls.Load() == 1
+	})
+	if node := peerServicesNode(t, f.d); node.CPU != nil || len(node.Models) != 1 || node.Models[0] != "model" {
+		t.Fatalf("first enrichment = CPU %+v, models %v", node.CPU, node.Models)
+	}
+	if _, ok := f.d.lastInfoAt["peer"]; ok {
+		t.Fatal("failed node-info fetch recorded success")
+	}
+	generation := f.d.dir.routeGeneration("peer")
+	claim.Sequence++
+	claim.ObservedAt = time.Now().UnixMilli()
+	if !f.d.acceptPeerServices(claim) {
+		t.Fatal("same-route retry claim rejected")
+	}
+	waitPeerServicesCondition(t, "recovered node-info fields", func() bool {
+		f.d.infoMu.Lock()
+		at := f.d.lastInfoAt["peer"]
+		f.d.infoMu.Unlock()
+		node := peerServicesNode(t, f.d)
+		return !at.IsZero() && node.CPU != nil && node.CPU.Name == "recovered CPU"
+	})
+	if got := f.d.dir.routeGeneration("peer"); got != generation {
+		t.Fatalf("retry changed route generation %d to %d", generation, got)
+	}
+}
+
+func TestPeerServicesClaimsKeepOneEnrichmentInFlight(t *testing.T) {
+	f := newScannerReverseFixture(t)
+	claim := peerServicesEnrichmentClaim(t, f)
+	started, release := make(chan struct{}), make(chan struct{})
+	var calls atomic.Int32
+	var once sync.Once
+	t.Cleanup(func() { once.Do(func() { close(release) }) })
+	f.d.tlsHTTP = &http.Client{Transport: peerServicesTestTransport(func(r *http.Request) (*http.Response, error) {
+		if calls.Add(1) == 1 {
+			close(started)
+		}
+		select {
+		case <-release:
+		case <-r.Context().Done():
+			return nil, r.Context().Err()
+		}
+		return &http.Response{StatusCode: http.StatusServiceUnavailable, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(""))}, nil
+	})}
+	if !f.d.acceptPeerServices(claim) {
+		t.Fatal("first claim rejected")
+	}
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("first node-info fetch did not start")
+	}
+	for range 2 {
+		time.Sleep(2 * time.Second)
+		claim.Sequence++
+		claim.ObservedAt = time.Now().UnixMilli()
+		if !f.d.acceptPeerServices(claim) {
+			t.Fatal("later claim rejected")
+		}
+		if got := calls.Load(); got != 1 {
+			t.Fatalf("%d node-info fetches overlapped", got)
+		}
+	}
+	once.Do(func() { close(release) })
+}
+
+func TestPeerServicesNewIncarnationRejectsOldEnrichmentResult(t *testing.T) {
+	f := newScannerReverseFixture(t)
+	old := peerServicesEnrichmentClaim(t, f)
+	started, release := make(chan struct{}), make(chan struct{})
+	var calls atomic.Int32
+	var once sync.Once
+	t.Cleanup(func() { once.Do(func() { close(release) }) })
+	f.d.tlsHTTP = &http.Client{Transport: peerServicesTestTransport(func(r *http.Request) (*http.Response, error) {
+		call := calls.Add(1)
+		if call == 1 {
+			close(started)
+			select {
+			case <-release:
+			case <-r.Context().Done():
+				return nil, r.Context().Err()
+			}
+		}
+		name := "new CPU"
+		if call == 1 {
+			name = "obsolete CPU"
+		}
+		body, err := json.Marshal(NodeInfoResponse{HostUUID: "peer", CPU: &CPUInfo{Name: name, Cores: 8}})
+		if err != nil {
+			return nil, err
+		}
+		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(string(body)))}, nil
+	})}
+	if !f.d.acceptPeerServices(old) {
+		t.Fatal("old claim rejected")
+	}
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("old fetch did not start")
+	}
+	writeScannerAdmissionPin(t, f.d.clusterDir, "peer", "cluster", 2)
+	f.d.reloadTrust()
+	current, ok := f.d.mesh.PeerServiceIncarnation("peer")
+	if !ok || current == old.Incarnation {
+		t.Fatal("admission incarnation did not change")
+	}
+	claim := old
+	claim.Incarnation = current
+	claim.ObservedAt = time.Now().UnixMilli()
+	if !f.d.acceptPeerServices(claim) {
+		t.Fatal("new incarnation claim rejected")
+	}
+	once.Do(func() { close(release) })
+	waitPeerServicesCondition(t, "obsolete enrichment completion", func() bool {
+		f.d.peerServicesMu.Lock()
+		busy := f.d.peerServicesEnriching["peer"]
+		f.d.peerServicesMu.Unlock()
+		return !busy
+	})
+	if node := peerServicesNode(t, f.d); node.CPU != nil {
+		t.Fatalf("obsolete CPU published into new incarnation: %+v", node.CPU)
+	}
+	f.d.infoMu.Lock()
+	_, cached := f.d.lastInfoAt["peer"]
+	f.d.infoMu.Unlock()
+	if cached {
+		t.Fatal("obsolete node-info result cached for new incarnation")
+	}
+	claim.Sequence++
+	claim.ObservedAt = time.Now().UnixMilli()
+	if !f.d.acceptPeerServices(claim) {
+		t.Fatal("new incarnation retry claim rejected")
+	}
+	waitPeerServicesCondition(t, "new incarnation enrichment", func() bool {
+		node := peerServicesNode(t, f.d)
+		return node.CPU != nil && node.CPU.Name == "new CPU"
+	})
+}
 
 func TestPeerServicesHeldEnrichmentCannotRestoreWithdrawnMetadataOrCaches(t *testing.T) {
 	d, claim := newPeerServicesScanner(t)

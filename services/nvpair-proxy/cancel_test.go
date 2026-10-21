@@ -4,6 +4,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -23,7 +24,7 @@ type cancelFixture struct {
 	a       *stallingEngine
 	b       *recordingEngine
 	done    chan *httptest.ResponseRecorder
-	control *workloadCtl
+	control *routingSpend
 }
 
 func startCancelFixture(t *testing.T, tc engineCase, a *stallingEngine) *cancelFixture {
@@ -241,7 +242,7 @@ func TestCancel_LookupRules(t *testing.T) {
 
 	// Two facades can hold the same id; every complete target selects one.
 	var cancelledA, cancelledB int
-	a, b := newWorkloadCtl(func(string) { cancelledA++ }), newWorkloadCtl(func(string) { cancelledB++ })
+	a, b := newRoutingRequest(func(string) { cancelledA++ }), newRoutingRequest(func(string) { cancelledB++ })
 	ra, err := p.registerRoutingRequest(a)
 	if err != nil {
 		t.Fatal(err)
@@ -293,25 +294,23 @@ func TestCancel_LookupRules(t *testing.T) {
 }
 
 func TestAbortLocalIf_IgnoresEndedAttempt(t *testing.T) {
-	test := func(name string, end func(*workloadCtl)) {
+	test := func(name string, end func(*routingSpend)) {
 		t.Run(name, func(t *testing.T) {
 			var requestCancelled, attemptCancelled bool
-			ctl := newWorkloadCtl(func(string) { requestCancelled = true })
-			att := &attemptCtl{
-				claim:  &attemptClaim{},
-				cancel: func() { attemptCancelled = true },
-				nodeID: "self",
+			ctl := newRoutingRequest(func(string) { requestCancelled = true })
+			att, err := ctl.newDispatchAttempt(context.Background(), func() { attemptCancelled = true }, "self")
+			if err != nil {
+				t.Fatal(err)
 			}
-			ctl.setAttempt(att)
 			end(ctl)
 
 			ctl.abortLocalIf(att)
-			if requestCancelled || attemptCancelled || att.claim.abandoned() || ctl.isExcluded("self") {
+			if requestCancelled || attemptCancelled || att.abandoned() || ctl.isExcluded("self") {
 				t.Fatalf("ended attempt callback acted: request cancelled=%t attempt cancelled=%t abandoned=%t excluded=%t",
-					requestCancelled, attemptCancelled, att.claim.abandoned(), ctl.isExcluded("self"))
+					requestCancelled, attemptCancelled, att.abandoned(), ctl.isExcluded("self"))
 			}
 		})
 	}
-	test("between attempts", func(ctl *workloadCtl) { ctl.setAttempt(nil) })
-	test("finished request", func(ctl *workloadCtl) { ctl.finish() })
+	test("between attempts", func(ctl *routingSpend) { ctl.active.finished(publicAttemptTerminal{}) })
+	test("finished request", func(ctl *routingSpend) { ctl.finish() })
 }

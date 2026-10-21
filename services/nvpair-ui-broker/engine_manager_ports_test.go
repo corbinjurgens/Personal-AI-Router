@@ -118,12 +118,7 @@ func TestEngineManagerPortsInvalidProgrammaticConfigurationDoesNotSpawn(t *testi
 func TestEngineManagerPortsSpawnAndScannerReplay(t *testing.T) {
 	isolateOllamaHostTestConfig(t)
 	engineBinary := buildEngineManagerPortTestBinary(t, "ports-spawn", "nvpair-engine-manager", "../nvpair-engine-manager", ".")
-	scannerDir := t.TempDir()
-	scannerSource := filepath.Join(scannerDir, "main.go")
-	if err := os.WriteFile(scannerSource, []byte(engineManagerPortScannerFixture), 0600); err != nil {
-		t.Fatalf("write scanner fixture: %v", err)
-	}
-	scannerBinary := buildEngineManagerPortTestBinary(t, "ports-spawn", "scanner", ".", scannerSource)
+	scannerBinary := buildServicePortFixture(t)
 	ports := make([]int, 2)
 	listeners := make([]net.Listener, 2)
 	for i := range ports {
@@ -315,16 +310,23 @@ func TestEngineManagerPortsSettingsReleaseUnusedDefaults(t *testing.T) {
 func buildEngineManagerPortTestBinary(t *testing.T, role, program, directory, target string) string {
 	t.Helper()
 	binary := filepath.Join(testbin.Dir(t, "nvpair-ui-broker", role, program), testbin.Exe(program))
-	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
-	defer cancel()
-	// TestMain and individual fixtures isolate HOME; keep any modules fetched
-	// into that temporary GOPATH removable by the owning test's cleanup.
-	command := exec.CommandContext(ctx, "go", "build", "-modcacherw", "-o", binary, target)
-	command.Dir = directory
-	if output, err := command.CombinedOutput(); err != nil {
-		t.Fatalf("build %s in %s: %v\n%s", target, directory, err, output)
+	if err := buildPortTestBinary(binary, directory, target); err != nil {
+		t.Fatal(err)
 	}
 	return binary
+}
+
+func buildPortTestBinary(binary, directory, target string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	command := exec.CommandContext(ctx, "go", "build", "-modcacherw", "-o", binary, target)
+	command.Dir = directory
+	// Preserve the real caches while fixtures keep their private app-data roots.
+	command.Env = append(os.Environ(), portTestGoEnv...)
+	if output, err := command.CombinedOutput(); err != nil {
+		return fmt.Errorf("build %s in %s: %w\n%s", target, directory, err, output)
+	}
+	return nil
 }
 
 const engineManagerPortScannerFixture = `// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.

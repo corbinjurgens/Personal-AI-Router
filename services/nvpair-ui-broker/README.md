@@ -19,9 +19,11 @@ does not unload the model. Older targets that drop requested served/resident
 preferences are refused as unsupported readback.
 
 A revision-only policy save preserves loaded-inventory freshness when the
-resident's effective load request and engine identity are unchanged. A changed
-load request requires reconciliation under the new revision; stale inventory
-cannot confirm it merely because the engine identity has not changed yet.
+resident's effective load request and engine identity are unchanged. If
+`contextTokens` changes while the engine's serving envelope does not, the
+resident is `blocked` with `unsupported-load` until that envelope matches the
+new context. Once it matches, the changed request needs reconciliation; stale
+inventory cannot confirm the old allocation under the new request.
 
 Each operation binds a unique normalized resident profile and engine-specific
 `declaredResidentCount` to the same policy revision. Its load context is exactly

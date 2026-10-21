@@ -114,7 +114,7 @@ func TestRoutingIdentityTerminalIngressPreservesRemoteEnvelope(t *testing.T) {
 	}
 	r.Header.Set(nodepolicy.StrictAdmissionHeader, string(encoded))
 	rec := httptest.NewRecorder()
-	p.soleFacade().serveIngress(rec, r, "remote-peer")
+	p.soleFacade().serveIngress(rec, r, "remote-origin")
 	if rec.Code != http.StatusOK || engine.hits() != 1 {
 		t.Fatalf("strict terminal ingress status=%d hits=%d", rec.Code, engine.hits())
 	}
@@ -137,13 +137,13 @@ func TestRoutingIdentityProcessCounterAndExhaustion(t *testing.T) {
 			t.Fatalf("fixture status = %d", rec.Code)
 		}
 	}
-	request, err := p.registerRoutingRequest(newWorkloadCtl(func(string) {}))
+	request, err := p.registerRoutingRequest(newRoutingRequest(func(string) {}))
 	if err != nil || request.key.OriginNodeID != "test-origin" || request.key.ProxyRunID != p.runID || request.key.RequestID != "3" {
 		t.Fatalf("process request = %+v: %v", request, err)
 	}
 	p.unregisterRoutingRequest(request)
 	p.requestSequence = math.MaxInt64 - 1
-	last, err := p.registerRoutingRequest(newWorkloadCtl(func(string) {}))
+	last, err := p.registerRoutingRequest(newRoutingRequest(func(string) {}))
 	if err != nil || last.key.RequestID != "9223372036854775807" {
 		t.Fatalf("last key = %+v: %v", last, err)
 	}

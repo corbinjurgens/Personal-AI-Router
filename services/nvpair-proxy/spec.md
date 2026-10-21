@@ -1063,10 +1063,16 @@ POST and safe GET contract. No prompt or request keep-alive override is sent.
 
 Finish/observe reconcile operation-bound evidence; failed load, stale generation,
 source replacement or unknown observation cannot invent loaded satisfaction.
+
+An interrupted load without a terminal manager reply retains its resident hold
+and reports `unknown`/`operation-timeout` until a policy edit invalidates the
+declaration or the proxy restarts. Elapsed observation time and manager
+replacement alone do not release this nonterminal hold.
 Fresh manager-owned observed context/slots are required for restart confirmation;
-there is no persistent load queue replay. This protocol does not clear durable
-strict-inference quarantine from HTTP completion or elapsed time. Local pause/Off
-remains a veto, and PG retains route-policy ownership. See
+an engine adopted from a previous manager run is never confirmed and remains
+`unknown`. There is no persistent load queue replay. This protocol does not
+clear durable strict-inference quarantine from HTTP completion or elapsed time.
+Local pause/Off remains a veto, and PG retains route-policy ownership. See
 [Local qualification](../../docs/local-qualification.mdx#daily-adapter-and-residency-contract)
 for the on-demand/resident distinction and pending real-host acceptance.
 

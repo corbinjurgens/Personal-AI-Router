@@ -477,7 +477,22 @@ func TestHandleHTTP_RealSocketFlushDeadline(t *testing.T) {
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
-	srv := &http.Server{Handler: http.HandlerFunc(p.soleFacade().handleHTTP)}
+	srv := &http.Server{
+		Handler: http.HandlerFunc(p.soleFacade().handleHTTP),
+		ConnContext: func(ctx context.Context, conn net.Conn) context.Context {
+			tcp, ok := conn.(*net.TCPConn)
+			if !ok {
+				t.Errorf("accepted connection is not TCP: %T", conn)
+				_ = conn.Close()
+				return ctx
+			}
+			if err := tcp.SetWriteBuffer(4 << 10); err != nil {
+				t.Errorf("bound proxy write buffer: %v", err)
+				_ = conn.Close()
+			}
+			return ctx
+		},
+	}
 	go func() { _ = srv.Serve(ln) }()
 	defer srv.Close()
 
@@ -486,6 +501,13 @@ func TestHandleHTTP_RealSocketFlushDeadline(t *testing.T) {
 		t.Fatalf("dial proxy: %v", err)
 	}
 	defer conn.Close()
+	tcp, ok := conn.(*net.TCPConn)
+	if !ok {
+		t.Fatalf("client connection is not TCP: %T", conn)
+	}
+	if err := tcp.SetReadBuffer(4 << 10); err != nil {
+		t.Fatalf("bound client read buffer: %v", err)
+	}
 
 	body := tc.inferenceBody()
 	reqText := fmt.Sprintf("POST %s HTTP/1.1\r\n", tc.inferencePath) +

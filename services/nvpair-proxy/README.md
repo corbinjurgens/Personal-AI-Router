@@ -126,6 +126,10 @@ The broker coordinates internal prepare/dispatch/finish/observe calls and publis
 model-configuration status; desktop clients do not call these admission methods.
 PG keeps route-policy ownership. Unknown load/allocation evidence and restart
 are not proof of satisfaction; fresh manager-owned observed allocation is required.
+An interrupted load without a terminal manager reply retains its resident hold
+and reports `unknown`/`operation-timeout` until the next policy edit or a proxy
+restart. Engines adopted from a previous manager run cannot provide confirmed
+resident allocation and stay `unknown`.
 See `docs/local-qualification.mdx` for adapter requirements and pending real-host
 acceptance, including retention, capacity, loaded limits and restart recovery.
 
