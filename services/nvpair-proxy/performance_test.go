@@ -46,6 +46,11 @@ func performanceIdentify(p *Proxy, host string) {
 
 func performanceProxy(t *testing.T, engine string) *Proxy {
 	t.Helper()
+	return performanceProxyWithCodec(t, engine, NewCodec(rwNop{}))
+}
+
+func performanceProxyWithCodec(t *testing.T, engine string, codec *Codec) *Proxy {
+	t.Helper()
 	profile, ok := profileFor(engine)
 	if engine == "strata" {
 		var err error
@@ -60,7 +65,7 @@ func performanceProxy(t *testing.T, engine string) *Proxy {
 	}
 	disc := NewDiscovery()
 	disc.AddManual(selfNode("destination", profile.FacadePort, "m"))
-	p := testProxy(profile, disc, profile.FacadePort)
+	p := newTestProxy(profile, codec, disc, profile.FacadePort)
 	performanceIdentify(p, "destination")
 	t.Cleanup(p.closeIdleTransports)
 	return p
@@ -918,6 +923,283 @@ func TestPerformanceNonstreamUnobserved(t *testing.T) {
 	if w.Body.String() != body || s.Outcome != performancewire.OutcomeCompleted || s.ProtocolComplete != nil || s.EngineDecodeTokensPerSecond != nil || s.OutputTokens != nil {
 		t.Fatalf("nonstream observed/rewritten: %+v", s)
 	}
+}
+
+type performanceSampleWriter struct {
+	recordingWriter
+	cancel context.CancelFunc
+}
+
+func (w *performanceSampleWriter) Write(b []byte) (int, error) {
+	var frame Message
+	if err := json.Unmarshal(b, &frame); err != nil {
+		return 0, err
+	}
+	n, err := w.recordingWriter.Write(b)
+	if frame.Method == "performance:sample" {
+		w.cancel()
+	}
+	return n, err
+}
+
+func performanceCapture(t *testing.T) (*Codec, func(*Proxy) performancewire.Sample) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	w := &performanceSampleWriter{cancel: cancel}
+	return NewCodec(w), func(p *Proxy) performancewire.Sample {
+		t.Helper()
+		queued := performanceOne(t, p)
+		// Keep the constructor's codec stable for admission callbacks. Only
+		// the queued sample's actual codec write stops this synchronous sender.
+		p.sendPerformance(ctx)
+		emitted := notificationsOf(t, &w.recordingWriter, "performance:sample")
+		if len(emitted) != 1 {
+			t.Fatalf("emitted samples=%d, want one", len(emitted))
+		}
+		var actual performancewire.Sample
+		if err := json.Unmarshal(emitted[0], &actual); err != nil {
+			t.Fatalf("decode emitted sample: %v", err)
+		}
+		if err := actual.Validate(); err != nil {
+			t.Fatalf("validate emitted sample: %v", err)
+		}
+		if !reflect.DeepEqual(actual, queued) {
+			t.Fatalf("emitted sample=%+v, want queued %+v", actual, queued)
+		}
+		return actual
+	}
+}
+
+func TestPerformanceReaderlessRequiresDelivery(t *testing.T) {
+	test := func(name string, flushErr error, want performancewire.Outcome) {
+		t.Run(name, func(t *testing.T) {
+			codec, emittedOne := performanceCapture(t)
+			p := performanceProxyWithCodec(t, "llamacpp", codec)
+			upstream := paServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				if _, err := io.WriteString(w, `{}`); err != nil {
+					t.Errorf("write upstream body: %v", err)
+				}
+			}))
+			w := &responseSinkWriter{header: make(http.Header), flushErr: flushErr}
+			sink := newResponseSink(w, nil)
+			ctx := withResponseSink(context.Background(), sink)
+			body := []byte(`{"model":"m","stream":false}`)
+			a := p.soleFacade().newPerformanceAttempt(ctx, "m", routeChatCompletions, body, 0)
+			if a == nil {
+				t.Fatal("valid identity did not create an attempt")
+			}
+			r, err := http.NewRequestWithContext(ctx, http.MethodPost, upstream.URL+routeChatCompletions, bytes.NewReader(body))
+			if err != nil {
+				t.Fatalf("create upstream request: %v", err)
+			}
+			resp, err := (performanceTransport{RoundTripper: p.plainHTTPTransport(), attempt: a}).RoundTrip(r)
+			if err != nil {
+				t.Fatalf("dispatch upstream request: %v", err)
+			}
+			t.Cleanup(func() {
+				if err := resp.Body.Close(); err != nil {
+					t.Errorf("close upstream body: %v", err)
+				}
+			})
+			request, err := parseOriginStreamRequest(routeChatCompletions, body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			reader, err := installResponseStream(resp, request, ctx, 0, a)
+			if err != nil {
+				t.Fatalf("install nonstream response: %v", err)
+			}
+			if reader != nil || a.reader != nil {
+				t.Fatal("nonstream response installed a frame reader")
+			}
+			sc := &statusCapture{ResponseWriter: sink, upstreamBody: &originResponseBody{ReadCloser: resp.Body, response: resp}}
+			sc.WriteHeader(resp.StatusCode)
+			if n, err := io.Copy(sc, sc.upstreamBody); err != nil || n != 2 {
+				t.Fatalf("copy upstream body: n=%d err=%v", n, err)
+			}
+			if err := sc.upstreamBody.Close(); err != nil {
+				t.Fatalf("finish upstream body: %v", err)
+			}
+			// Fail the sink's flush directly: sc.wroteErr and the parent stay
+			// clean, isolating DeliveryComplete from every other finish predicate.
+			if err := sink.FlushError(); !errors.Is(err, flushErr) {
+				t.Fatalf("flush=%v, want %v", err, flushErr)
+			}
+			returned := true
+			if !returned || !sc.upstreamBody.complete || sc.wroteErr != nil || ctx.Err() != nil || sc.status != http.StatusOK || a.start.IsZero() {
+				t.Fatalf("other completion predicates: returned=%v EOF=%v write=%v context=%v status=%d start=%v", returned, sc.upstreamBody.complete, sc.wroteErr, ctx.Err(), sc.status, a.start)
+			}
+			_, _, identity, valid := a.f.performanceCurrentIdentity(a.model, a.api)
+			if !valid || identity != a.identity {
+				t.Fatal("attempt identity changed before completion")
+			}
+			delivery := sink.result()
+			if !delivery.ProtocolComplete || delivery.Written != 2 || delivery.Genuine != 2 || delivery.Synthetic != 0 || w.body.String() != `{}` || !errors.Is(delivery.WriteError, flushErr) {
+				t.Fatalf("protocol/body evidence=%+v body=%q", delivery, w.body.String())
+			}
+			wantDelivered, wantFlushed := flushErr == nil, int64(0)
+			if wantDelivered {
+				wantFlushed = 2
+			}
+			if delivery.DeliveryComplete != wantDelivered || delivery.Flushed != wantFlushed {
+				t.Fatalf("delivery=%+v, want delivered=%v flushed=%d", delivery, wantDelivered, wantFlushed)
+			}
+			a.finish(sc, returned)
+			sample := emittedOne(p)
+			if sample.Outcome != want || sample.ProtocolComplete != nil {
+				t.Fatalf("reader-less emitted measurement=%+v, want %s with unknown protocol", sample.Measurement, want)
+			}
+		})
+	}
+	test("protocol complete but flush failed", io.ErrClosedPipe, performancewire.OutcomeFailed)
+	test("protocol complete and delivered", nil, performancewire.OutcomeCompleted)
+}
+
+func TestPerformanceReaderlessHTTPSuccess(t *testing.T) {
+	test := func(name string, strictIngress bool, status int, body string) {
+		t.Run(name, func(t *testing.T) {
+			codec, emittedOne := performanceCapture(t)
+			var p *Proxy
+			if strictIngress {
+				p = newTestProxy(ollamaOnlyProfile(t), codec, NewDiscovery(), 0)
+				t.Cleanup(p.closeIdleTransports)
+				configureStrict(t, p.admission, filepath.Join(t.TempDir(), "capacity.json"))
+				p.noteSelf("destination", "ollama", []string{"m"})
+			} else {
+				p = performanceProxyWithCodec(t, "llamacpp", codec)
+			}
+			var hits atomic.Int32
+			upstream := paServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				hits.Add(1)
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(status)
+				if body != "" {
+					if _, err := io.WriteString(w, body); err != nil {
+						t.Errorf("write upstream body: %v", err)
+					}
+				}
+			}))
+			setBackend(t, p.soleFacade(), upstream.URL, true)
+			observed := make(chan *responseSink, 1)
+			transport := p.plainHTTPTransport()
+			dial := transport.DialContext
+			transport.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
+				select {
+				case observed <- responseSinkFrom(ctx):
+				default:
+					t.Error("unexpected additional dispatch")
+				}
+				return dial(ctx, network, address)
+			}
+			w := httptest.NewRecorder()
+			const requestBody = `{"model":"m","messages":[{"role":"user","content":"x"}],"max_tokens":16,"stream":false}`
+			if strictIngress {
+				p.soleFacade().serveIngress(w, strictHTTPRequestWith(t, requestBody), "peer")
+			} else {
+				p.soleFacade().handleHTTP(w, httptest.NewRequest(http.MethodPost, routeChatCompletions, strings.NewReader(requestBody)))
+			}
+			if w.Code != status || w.Body.String() != body || hits.Load() != 1 {
+				t.Fatalf("response: status=%d body=%q dispatches=%d", w.Code, w.Body.String(), hits.Load())
+			}
+			var sink *responseSink
+			select {
+			case sink = <-observed:
+			default:
+				t.Fatal("no engine dispatch observed")
+			}
+			if sink == nil {
+				t.Fatal("HTTP dispatch has no response sink")
+			}
+			delivery := sink.result()
+			if delivery.Status != status || !delivery.ProtocolComplete || !delivery.DeliveryComplete || delivery.WriteError != nil || delivery.Written != int64(len(body)) || delivery.Flushed != int64(len(body)) || delivery.Genuine != int64(len(body)) || delivery.Synthetic != 0 {
+				t.Fatalf("HTTP delivery=%+v", delivery)
+			}
+			// Empty EOF can complete delivery with no positive-byte commitment.
+			sample := emittedOne(p)
+			if sample.Outcome != performancewire.OutcomeCompleted || sample.ProtocolComplete != nil || sample.HeaderMs == nil || sample.TotalMs == nil || (sample.FirstBodyMs != nil) != (body != "") || sample.OutputTokens != nil || sample.EngineDecodeTokensPerSecond != nil {
+				t.Fatalf("reader-less HTTP measurement=%+v", sample.Measurement)
+			}
+		})
+	}
+	test("origin empty 200", false, http.StatusOK, "")
+	test("origin 204", false, http.StatusNoContent, "")
+	test("strict ingress success body", true, http.StatusOK, `{"choices":[]}`)
+	test("strict ingress empty 200", true, http.StatusOK, "")
+	test("strict ingress 204", true, http.StatusNoContent, "")
+}
+
+func TestPerformanceStrictOriginWithoutSink(t *testing.T) {
+	test := func(name string, flushErr error, want performancewire.Outcome) {
+		t.Run(name, func(t *testing.T) {
+			codec, emittedOne := performanceCapture(t)
+			p := newTestProxy(ollamaOnlyProfile(t), codec, NewDiscovery(), 0)
+			t.Cleanup(p.closeIdleTransports)
+			configureStrict(t, p.admission, filepath.Join(t.TempDir(), "capacity.json"))
+			p.noteSelf("destination", "ollama", []string{"m"})
+			const body = `{"choices":[]}`
+			var hits atomic.Int32
+			upstream := paServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				hits.Add(1)
+				w.Header().Set("Content-Type", "application/json")
+				if _, err := io.WriteString(w, body); err != nil {
+					t.Errorf("write upstream body: %v", err)
+				}
+			}))
+			setBackend(t, p.soleFacade(), upstream.URL, true)
+			type observation struct {
+				sink  *responseSink
+				owner *routingSpend
+			}
+			observed := make(chan observation, 1)
+			transport := p.plainHTTPTransport()
+			dial := transport.DialContext
+			transport.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
+				keys := p.activeRoutingRequests()
+				var owner *routingSpend
+				if len(keys) == 1 {
+					owner = p.routingRequestControl(keys[0])
+				} else {
+					t.Errorf("strict-origin registered owners=%d, want one", len(keys))
+				}
+				select {
+				case observed <- observation{sink: responseSinkFrom(ctx), owner: owner}:
+				default:
+					t.Error("unexpected additional strict-origin dispatch")
+				}
+				return dial(ctx, network, address)
+			}
+			w := &responseSinkWriter{header: make(http.Header), flushErr: flushErr}
+			p.soleFacade().handleHTTP(w, strictHTTPRequestWith(t, `{"model":"m","messages":[{"role":"user","content":"x"}],"max_tokens":16,"stream":false}`))
+			var dispatch observation
+			select {
+			case dispatch = <-observed:
+			default:
+				t.Fatal("no strict-origin engine dispatch observed")
+			}
+			if dispatch.sink != nil || dispatch.owner == nil {
+				t.Fatalf("strict-origin dispatch: sink=%p owner=%p", dispatch.sink, dispatch.owner)
+			}
+			dispatch.owner.mu.Lock()
+			ownerSink := dispatch.owner.sink
+			dispatch.owner.mu.Unlock()
+			if ownerSink != nil {
+				t.Fatal("strict-origin request installed an ordinary dispatch sink")
+			}
+			if len(w.statuses) != 1 || w.statuses[0] != http.StatusOK || w.body.String() != body || hits.Load() != 1 {
+				t.Fatalf("strict-origin response: statuses=%v body=%q dispatches=%d", w.statuses, w.body.String(), hits.Load())
+			}
+			// handleHTTP enters serveStrictLocal before installing its ordinary
+			// sink. EOF and statusCapture's flush result still classify this path.
+			sample := emittedOne(p)
+			if sample.Outcome != want || sample.ProtocolComplete != nil || sample.HeaderMs == nil || sample.FirstBodyMs == nil || sample.TotalMs == nil {
+				t.Fatalf("sink-less strict-origin measurement=%+v, want %s", sample.Measurement, want)
+			}
+		})
+	}
+	test("successful delivery", nil, performancewire.OutcomeCompleted)
+	test("failed flush", io.ErrClosedPipe, performancewire.OutcomeFailed)
 }
 
 type performanceBlockedWriter struct {

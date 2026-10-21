@@ -569,9 +569,11 @@ type candidate struct {
 // scheduler priority and stable ID fallback. The failover loop walks the
 // resulting owner list until a node returns a usable response.
 //
-// A node that resolves to this proxy's own listen address is dropped
-// (self-forward guard): with the proxy on Ollama's default :11434, a
-// local-Ollama advertisement can otherwise point right back at us and loop.
+// Advertised paused remote peers are excluded from inference before host
+// deduplication. Self uses local admission, manual nodes without a pause hint
+// remain eligible, and empty-model enumeration for non-inference is unchanged.
+// A self advertisement uses the explicit local engine; a target still pointing
+// back at this proxy after that substitution is dropped to prevent recursion.
 //
 // Returns an empty slice when no forwarding target is available; the caller
 // treats that as the rejection path.
@@ -620,9 +622,8 @@ func (f *facade) resolveCandidates(model string) []candidate {
 	placed := make(map[string]bool, len(nodes))
 	add := func(n Node) {
 		placed[n.ID] = true
-		// targetURL picks a reachable address for a multi-homed node (cached,
-		// TCP-probed), falling back to the first candidate; nil only when the
-		// node advertises no usable address.
+		// targetURL uses targets.Prefer's cached address or the first candidate,
+		// without probing; nil only when the node has no usable address.
 		u := f.targetURL(n)
 		if u == nil {
 			return
@@ -669,6 +670,9 @@ func (f *facade) resolveCandidates(model string) []candidate {
 		if isSelfTarget(u, selfPort) || isAnyAliasSelfTarget(u, aliasBoundAddresses) {
 			slog.Debug("resolveCandidates: skipping self-target node",
 				"node_id", n.ID, "target", u.Host)
+			return
+		}
+		if model != "" && !self && n.PausedBy != "" {
 			return
 		}
 		if seenHost[u.Host] {
@@ -1304,6 +1308,7 @@ func subscribedToNode(p engineProfile, n noderec.DirectoryNode) (Node, bool) {
 		node.Roles = maps.Clone(n.Policy.Roles)
 		node.ServedModels = slices.Clone(n.Policy.ServedModels)
 		node.PolicyRevision = n.Policy.Revision
+		node.PausedBy = n.Policy.PausedBy
 		node.StrictAdmission = n.Policy.StrictAdmission
 	}
 	return node, true
