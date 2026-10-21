@@ -543,7 +543,7 @@ func (e *Executor) residentObservation(ctx context.Context, p nodepolicy.Reconci
 	names, known := extractStringsResult(raw, loadedAction.Result)
 	known = known && readErr == nil
 	if serving {
-		e.observeLlamaServing(ctx, st, run, sweep, names, known, raw)
+		e.observeLlamaServing(ctx, st, run, sweep, names, known, raw, readErr != nil)
 	}
 	if !known || ctx.Err() != nil || !e.residentIdentity(p) {
 		return nil

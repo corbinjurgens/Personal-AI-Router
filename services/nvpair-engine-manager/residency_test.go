@@ -313,6 +313,45 @@ func TestResidentObservedAllocation(t *testing.T) {
 	test("cold launch is not loaded", `{"data":[{"id":"resident-model","status":{"value":"unloaded"}}]}`, props, true, false, 0, false)
 }
 
+func TestResidentPostLoadTransportFailureRemainsUnknown(t *testing.T) {
+	test := func(name string, readErr error, readStatus int, propsErr error) {
+		t.Run(name, func(t *testing.T) {
+			f := newResidentFixture(t)
+			st := f.ex.engines[f.p.Engine]
+			if got := f.ex.residentObservation(context.Background(), f.p, st); got == nil || !got.Loaded {
+				t.Fatalf("initial observation=%+v", got)
+			}
+			f.transport.readErr, f.transport.readStatus, f.transport.propsErr = readErr, readStatus, propsErr
+			result := f.run(t)
+			if result.Outcome != nodepolicy.ResidentUnknown || result.Observation != nil {
+				t.Fatalf("post-load transport failure satisfied residency: %+v", result)
+			}
+			st.mu.Lock()
+			drift, observed := st.plat.Runtime.servingDrift, st.plat.Runtime.servingObserved
+			st.mu.Unlock()
+			if drift != "" || observed != nil {
+				t.Fatalf("transport failure retained proof or latched drift: observed=%+v drift=%q", observed, drift)
+			}
+			if f.transport.loads != 1 || f.transport.reads != 2 || f.dispatches != 1 {
+				t.Fatalf("post-load effects: loads=%d reads=%d grants=%d", f.transport.loads, f.transport.reads, f.dispatches)
+			}
+			f.transport.readErr, f.transport.readStatus, f.transport.propsErr = nil, 0, nil
+			f.p.OperationID = "resident-retry"
+			result = f.run(t)
+			if result.Outcome != nodepolicy.ResidentLoaded || result.Observation == nil || !result.Observation.Loaded || result.Observation.Identity != f.p.Identity {
+				t.Fatalf("fresh retry did not restore residency: %+v", result)
+			}
+			if f.transport.loads != 2 || f.transport.reads != 3 || f.transport.forbidden != 0 {
+				t.Fatalf("retry effects: loads=%d reads=%d forbidden=%d", f.transport.loads, f.transport.reads, f.transport.forbidden)
+			}
+		})
+	}
+	test("inventory connection failure", errors.New("inventory unavailable"), 0, nil)
+	test("inventory HTTP 201 is not observation success", nil, http.StatusCreated, nil)
+	test("inventory HTTP 204 is not observation success", nil, http.StatusNoContent, nil)
+	test("props connection failure", nil, 0, errors.New("props unavailable"))
+}
+
 func TestResidentObservedAllocationReplacement(t *testing.T) {
 	test := func(name string, replace func(*testing.T, llamaServingFixture, *engineState)) {
 		t.Run(name, func(t *testing.T) {
@@ -354,6 +393,9 @@ type residentTransport struct {
 	body                    map[string]json.RawMessage
 	loaded                  string
 	loadErr                 error
+	readErr                 error
+	readStatus              int
+	propsErr                error
 	onLoad                  func(*http.Request)
 }
 
@@ -407,11 +449,21 @@ func (r *residentTransport) RoundTrip(req *http.Request) (*http.Response, error)
 		return residentJSON(`{}`), nil
 	case "/fixture/loaded":
 		r.reads++
-		return residentJSON(r.loaded), nil
+		if r.readErr != nil {
+			return nil, r.readErr
+		}
+		response := residentJSON(r.loaded)
+		if r.readStatus != 0 {
+			response.StatusCode = r.readStatus
+		}
+		return response, nil
 	case "/props":
 		if req.URL.Query().Get("autoload") != "false" || req.URL.Query().Get("model") != "m" {
 			r.forbidden++
 			return nil, errors.New("unsafe props")
+		}
+		if r.propsErr != nil {
+			return nil, r.propsErr
 		}
 		return residentJSON(`{"default_generation_settings":{"n_ctx":8192},"total_slots":2}`), nil
 	default:
