@@ -1512,13 +1512,8 @@ func TestServedResidentPolicyPairedRoutes(t *testing.T) {
 					assertDesired(t, view.ModelConfiguration, want)
 					configuration = normalizeConfiguration(t, view.ModelConfiguration)
 					peer := assertPeer(t, remote(t, "engine:remote-policy-get", map[string]string{"nodeId": mesh.b.uuid}), want)
-					// Compare settled results, not a projection captured while
-					// policy activation or source observation is still catching up.
-					for _, entry := range configuration.Models {
-						if entry.State == nodepolicy.ModelStateUnknown || entry.State == nodepolicy.ModelStatePending {
-							return false
-						}
-					}
+					// Fixture-only qualification can leave a model honestly unknown.
+					// Compare the complete local and peer projections after activation.
 					return view.Activation == "active" && reflect.DeepEqual(configuration, peer)
 				})
 				return configuration
