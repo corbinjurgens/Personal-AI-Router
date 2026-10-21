@@ -397,18 +397,30 @@ func (b *Broker) reconcileModelConfig(ctx context.Context) {
 	}
 	r.models.last = &e
 	r.models.retryAt = r.now().Add(idleCheckInterval)
+	previous := r.models.status
 	r.models.status = nodepolicy.ModelConfiguration{PolicyRevision: e.Policy.Revision, ObservationGeneration: r.models.status.ObservationGeneration + 1, Models: []nodepolicy.ModelConfigurationEntry{}}
 	for _, ref := range b.residentRefs(e.Policy) {
 		entry, _, _, _ := b.modelConfigEntry(e, ref)
+		entry = residentProofLocked(r, e, ref, entry)
+		if _, held := r.models.unsettled[ref]; held && entry.State == nodepolicy.ModelStatePending {
+			entry.State, entry.Reason = nodepolicy.ModelStateUnknown, nodepolicy.ModelReasonOperationTimeout
+		}
 		r.models.status.Models = append(r.models.status.Models, entry)
 	}
+	// Announce only a status that changed during this pass; the generation still
+	// counts every observation for readers.
+	changed := previous.PolicyRevision != e.Policy.Revision || !reflect.DeepEqual(previous.Models, r.models.status.Models)
 	r.mu.Unlock()
 	defer func() {
 		r.mu.Lock()
 		r.models.busy = false
 		r.models.active = nil
 		r.mu.Unlock()
-		b.notifyPolicyChanged()
+		if changed {
+			b.notifyPolicyChanged()
+		} else {
+			b.signalModelConfig() // Recheck evidence that changed during this pass.
+		}
 	}()
 	for i, ref := range b.residentRefs(e.Policy) {
 		entry, pr, id, count := b.modelConfigEntry(e, ref)
@@ -472,6 +484,7 @@ func (b *Broker) reconcileModelConfig(ctx context.Context) {
 			}
 			r.models.confirmed[ref] = e
 		}
+		changed = changed || !reflect.DeepEqual(r.models.status.Models[i], entry)
 		r.models.status.Models[i] = entry
 		r.mu.Unlock()
 		if !sameModelAuthority(e, b.captureModelConfig()) {

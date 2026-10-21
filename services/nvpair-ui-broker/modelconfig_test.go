@@ -2977,3 +2977,60 @@ func TestModelConfigNonterminalHoldConfirmsReplacementReadback(t *testing.T) {
 	f.b.observeLoadedFrom(f.source, map[string][]string{"llamacpp": {}})
 	assertBarrier("later known-empty inventory", nodepolicy.ModelStateUnknown)
 }
+
+func TestModelConfigUnchangedStatusDoesNotNotify(t *testing.T) {
+	for _, scenario := range []string{"satisfied", "blocked", "uncertain hold"} {
+		t.Run(scenario, func(t *testing.T) {
+			f := newModelConfigFixture(t)
+			r := f.b.nodePolicyRuntime()
+			want := nodepolicy.ModelStateBlocked
+			switch scenario {
+			case "satisfied":
+				want = nodepolicy.ModelStateSatisfied
+				f.completedResidentLoad(t)
+				f.b.observeLoadedFrom(f.source, map[string][]string{"llamacpp": {"resident"}})
+			case "blocked":
+				r.mu.Lock()
+				r.intent["llamacpp"] = false
+				r.mu.Unlock()
+			default:
+				want = nodepolicy.ModelStateUnknown
+				f.nonterminalHold(t)
+			}
+			tick := func() {
+				r.mu.Lock()
+				now := r.now().Add(idleCheckInterval + time.Second)
+				r.now = func() time.Time { return now }
+				r.mu.Unlock()
+				f.b.reconcileModelConfig(context.Background())
+			}
+			tick()
+			if entry := f.residentEntry(t); entry.State != want {
+				t.Fatalf("steady state %+v, want %s", entry, want)
+			}
+			changed := func() int {
+				n := 0
+				for _, frame := range f.out.frames() {
+					if frame.Method == notifyPolicyChanged {
+						n++
+					}
+				}
+				return n
+			}
+			before := changed()
+			for range 3 {
+				tick()
+			}
+			if after := changed(); after != before {
+				t.Fatalf("unchanged status announced policy:changed %d times", after-before)
+			}
+			r.mu.Lock()
+			r.localPauseRequested = true
+			r.mu.Unlock()
+			tick()
+			if changed() == before {
+				t.Fatal("changed status was not announced")
+			}
+		})
+	}
+}

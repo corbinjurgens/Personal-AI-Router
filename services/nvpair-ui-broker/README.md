@@ -11,6 +11,8 @@ model load. Local and paired `policy:get`, `policy:set`, and `policy:changed`
 carry `modelConfiguration`: `policyRevision`, `observationGeneration`, and a
 deterministically ordered `models` list with `engine`, `model`,
 `desiredResident`, `state`, optional `observedLoaded`, and a bounded `reason`.
+Each reconciliation pass advances `observationGeneration`, but announces
+`policy:changed` only when the pass changes the published model status.
 Missing loaded evidence remains absent; an explicit empty loaded inventory is
 known empty. A saved preference or an installed model does not establish
 `satisfied`; that requires a source-bound successful load/readback with current
