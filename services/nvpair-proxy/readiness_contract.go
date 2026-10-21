@@ -18,6 +18,7 @@ import (
 	"sync"
 	"time"
 
+	"nvpair-shared/engines"
 	"nvpair-shared/nodepolicy"
 )
 
@@ -53,7 +54,8 @@ type strictAdmissionState struct {
 	// models is the installed capability and qualified what each model was
 	// qualified under. Both are derived together by refreshStrictCapabilityLocked
 	// from the policy, the engine identity and the qualification registry, and
-	// never set otherwise. A key's generation changes whenever its entry does.
+	// never set otherwise. A key's generation changes whenever its entry or
+	// current serving envelope does.
 	models     map[admKey]nodeStrictModel
 	qualified  map[admKey]installedQualification
 	generation map[admKey]uint64
@@ -78,8 +80,8 @@ type strictAdmissionState struct {
 // ones the qualification covers, the profile's defaults are the qualified ones,
 // its context and output bounds are within the qualified ones, and its
 // effective concurrency is finite. Two profiles normalizing to one model
-// install neither. Only keys whose installed entry changed get a new
-// generation, which fences tickets admitted under the old one. It reports
+// install neither. Keys whose installed entry changed get a new generation;
+// setModelIdentity also fences envelope-only changes. It reports
 // whether the capability changed. Caller holds a.mu.
 func (a *admissionController) refreshStrictCapabilityLocked() bool {
 	models := make(map[admKey]nodeStrictModel)
@@ -147,7 +149,36 @@ func (a *admissionController) qualifiedModelLocked(k admKey, pr nodepolicy.Profi
 	if m.Validate() != nil {
 		return nodeStrictModel{}, nil, false
 	}
+	if id.Serving != nil {
+		envelope, ok := a.servingEnvelopeLocked(id, k, digest)
+		if !ok || int64(q.ContextTokens) > envelope.PerSlotContextTokens || int64(q.MaxOutputTokens) > envelope.MaxOutputTokens ||
+			int64(m.MaxConcurrent) > envelope.Slots || pr.MemoryBytes < *envelope.Memory.VRAMBytes {
+			return nodeStrictModel{}, nil, false
+		}
+	}
 	return m, q, true
+}
+
+// servingEnvelopeLocked resolves the same normalized model as content identity.
+// A present serving map must supply a valid, unambiguous content-bound envelope.
+// Canonicalize only the model name so equivalent aliases can agree.
+func (a *admissionController) servingEnvelopeLocked(id nodepolicy.EngineIdentity, k admKey, digest string) (engines.ServingEnvelope, bool) {
+	var found engines.ServingEnvelope
+	present := false
+	for name, envelope := range id.Serving {
+		if a.normalize(k.engine, name) != k.model {
+			continue
+		}
+		if envelope.Validate(name, digest) != nil {
+			return engines.ServingEnvelope{}, false
+		}
+		envelope.ModelID = k.model
+		if present && !reflect.DeepEqual(found, envelope) {
+			return engines.ServingEnvelope{}, false
+		}
+		found, present = envelope, true
+	}
+	return found, present
 }
 
 // modelDigestLocked finds the content digest the identity lists for k's model
@@ -189,8 +220,22 @@ func sameJSONObject(x, y json.RawMessage) bool {
 func (a *admissionController) setModelIdentity(engines map[string]nodepolicy.EngineIdentity) bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	changed := false
+	for k := range a.strict.models {
+		old, next := a.strict.identity[k.engine], engines[k.engine]
+		oldDigest, _ := a.modelDigestLocked(old, k)
+		nextDigest, _ := a.modelDigestLocked(next, k)
+		oldEnvelope, oldOK := a.servingEnvelopeLocked(old, k, oldDigest)
+		nextEnvelope, nextOK := a.servingEnvelopeLocked(next, k, nextDigest)
+		// The outward entry omits the envelope. Fence validations and held
+		// tickets even when a replacement still satisfies every strict bound.
+		if (old.Serving == nil) != (next.Serving == nil) || oldOK && nextOK && !reflect.DeepEqual(oldEnvelope, nextEnvelope) {
+			a.strict.generation[k]++
+			changed = true
+		}
+	}
 	a.strict.identity = engines
-	changed := a.refreshStrictCapabilityLocked()
+	changed = a.refreshStrictCapabilityLocked() || changed
 	// Launch-only changes can leave strict model entries unchanged, but a
 	// resident final grant binds the complete engine identity.
 	a.signalLocked()

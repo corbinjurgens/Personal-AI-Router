@@ -119,10 +119,24 @@ all of the following hold:
   and `maxOutputTokens` do not exceed the qualified ones;
 - the model's effective concurrency is finite.
 
+When the current identity includes a `serving` map, the normalized model must
+also have a valid envelope bound to that content digest. Missing envelopes,
+conflicting normalized aliases and absent or null memory domains refuse strict
+capacity. The qualification's `contextTokens` and `maxOutputTokens` must fit
+the envelope's per-slot context and output ceilings, the effective policy or
+profile concurrency must not exceed its slots, and the profile's `memoryBytes`
+must be at least the explicitly declared `vramBytes`. Equality is accepted.
+Host RAM remains a separate declared domain; it is not added to VRAM for this
+comparison. A nil `serving` map retains the existing non-NE qualification and
+digest rules, including Ollama's inventory digests.
+
 The installed entry carries the identity `{engineRunId, settingsFingerprint,
 modelDigest}` that a strict request must name. When any input changes, the entry
 is withdrawn or replaced, and tickets admitted under the previous entry can no
-longer dispatch.
+longer dispatch. Envelope-only replacements also advance the existing admission
+generation, even if the outward strict entry is unchanged. Requests validated
+before replacement and tickets awaiting dispatch must be validated and admitted
+again; withdrawal followed by reconnect does not restore their old generation.
 
 ## Validating a strict request
 
@@ -229,8 +243,14 @@ seconds remain valid and zero or values below -1 reject. SR 5b owns retention
 enforcement and router-capacity comparison with its revision-bound resident
 set. Plain direct-model output enforcement remains deferred until after I 4b;
 router-cached undeclared models and native output defaults retain their current
-behavior on that path. Strict readiness envelope checks and loaded observations
-are separate follow-up gates. Further Strata-specific work is deferred.
+behavior on that path. Strict readiness checks the current launch-validated
+envelope against qualification and profile bounds; it does not require a loaded
+observation or load a cold model to establish eligibility. Cold validation proves
+the prepared configuration and bindings, not observed runtime allocation.
+Declared RAM/VRAM bounds are operator-approved conservative admission values,
+not measured usage or OS-enforced RSS/VRAM limits. Loaded observations and actual
+host qualification remain separate acceptance gates. Further Strata-specific
+work is deferred.
 
 Invalidation happens before the change it guards wherever PAIR makes the change:
 
