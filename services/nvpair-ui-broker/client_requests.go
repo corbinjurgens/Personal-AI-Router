@@ -556,6 +556,12 @@ func (b *Broker) relayToEngineNow(msg *Message) {
 		}
 		return
 	}
+	b.workersMu.Lock()
+	source := b.engineMgrSource
+	if b.engineMgr != em {
+		source = nil
+	}
+	b.workersMu.Unlock()
 	// Capture the client's id/method for the async response closure; the
 	// read loop allocates a fresh Message per request so these are stable.
 	id := msg.ID
@@ -614,6 +620,19 @@ func (b *Broker) relayToEngineNow(msg *Message) {
 			log.Printf("failed to relay engine error for %s: %v", method, e)
 		}
 	default:
+		// A manager can return an unchanged running status without emitting a
+		// state-change notification. Seed the policy from the authoritative
+		// response, fenced to the manager that answered this request.
+		switch method {
+		case "engine:status", "engine:start", "engine:stop", "engine:restart", "engine:install", "engine:uninstall":
+			var status struct {
+				Engine  string `json:"engine"`
+				Running *bool  `json:"running"`
+			}
+			if json.Unmarshal(result, &status) == nil && status.Engine != "" && status.Running != nil {
+				b.observeEngineRunningFrom(source, status.Engine, *status.Running)
+			}
+		}
 		if isOllamaPortAssignment {
 			var status struct {
 				Port int `json:"port"`

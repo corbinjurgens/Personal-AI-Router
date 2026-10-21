@@ -1832,6 +1832,63 @@ func TestModelConfigUnknownInventoryDoesNotLoadNewResident(t *testing.T) {
 	}
 }
 
+func TestModelConfigRestartStartResponseRecoversResident(t *testing.T) {
+	f := newModelConfigFixture(t)
+	r := f.b.nodePolicyRuntime()
+	r.mu.Lock()
+	delete(r.running, "llamacpp") // Attach snapshot preceded the engine start.
+	r.mu.Unlock()
+	f.engine.setAnswer(func(method string, _ json.RawMessage) (any, string) {
+		if method == "engine:start" {
+			return map[string]any{"engine": "llamacpp", "running": true}, ""
+		}
+		return map[string]bool{"ok": true}, ""
+	})
+	f.b.relayToEngineNow(clientRequest(1, "engine:start", map[string]string{"engine": "llamacpp"}))
+	response := f.out.waitFrame(t, "engine:start response", isResponse(1))
+	if response.Error != nil {
+		t.Fatalf("engine:start response: %+v", response.Error)
+	}
+	status := f.b.modelConfiguration(f.b.captureModelConfig())
+	if len(status.Models) != 1 || status.Models[0].State != nodepolicy.ModelStatePending {
+		t.Fatalf("running start result left resident blocked: %+v", status)
+	}
+	done := f.startLoadedAttempt(t)
+	f.awaitGrant(t)
+	f.engine.releaseHeld()
+	awaitModelConfigDone(t, done)
+	status = f.b.modelConfiguration(f.b.captureModelConfig())
+	if len(status.Models) != 1 || status.Models[0].State != nodepolicy.ModelStateSatisfied {
+		t.Fatalf("resident did not settle: %+v", status)
+	}
+	if got := len(modelConfigCalls(f.engine, nodepolicy.MethodReconcileResident)); got != 1 {
+		t.Fatalf("resident loads = %d, want one", got)
+	}
+}
+
+func TestModelConfigStoppedStatusKeepsEngineOff(t *testing.T) {
+	f := newModelConfigFixture(t)
+	f.engine.setAnswer(func(method string, _ json.RawMessage) (any, string) {
+		if method == "engine:status" {
+			return map[string]any{"engine": "llamacpp", "running": false}, ""
+		}
+		return map[string]bool{"ok": true}, ""
+	})
+	f.b.relayToEngineNow(clientRequest(1, "engine:status", map[string]string{"engine": "llamacpp"}))
+	response := f.out.waitFrame(t, "engine:status response", isResponse(1))
+	if response.Error != nil {
+		t.Fatalf("engine:status response: %+v", response.Error)
+	}
+	f.b.reconcileModelConfig(context.Background())
+	status := f.b.modelConfiguration(f.b.captureModelConfig())
+	if len(status.Models) != 1 || status.Models[0].State != nodepolicy.ModelStateBlocked || status.Models[0].Reason != nodepolicy.ModelReasonEngineOff {
+		t.Fatalf("stopped engine status = %+v, want engine-off", status)
+	}
+	if got := len(modelConfigCalls(f.engine, nodepolicy.MethodReconcileResident)); got != 0 {
+		t.Fatalf("stopped engine dispatched %d loads", got)
+	}
+}
+
 func TestModelConfigInternalClientMethodsDenied(t *testing.T) {
 	for _, method := range []string{nodepolicy.MethodReconcileResident, residentDispatchRequestMethod, residentDispatchReplyMethod} {
 		t.Run(method, func(t *testing.T) {
