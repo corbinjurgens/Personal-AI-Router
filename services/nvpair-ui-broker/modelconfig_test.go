@@ -2873,3 +2873,35 @@ func TestModelConfigContradictingPendingObservationIsUnknown(t *testing.T) {
 		t.Fatalf("confirming inventory after contradiction: %+v", entry)
 	}
 }
+
+func TestModelConfigRetirementDropsRecordedLoadRequest(t *testing.T) {
+	for _, scenario := range []string{"removal", "Off", "pause"} {
+		t.Run(scenario, func(t *testing.T) {
+			f := newModelConfigFixture(t)
+			f.completedResidentLoad(t)
+			r := f.b.nodePolicyRuntime()
+			ref := nodepolicy.Role{Engine: "llamacpp", Model: "resident"}
+			r.mu.Lock()
+			_, recorded := r.models.loadedRequests[ref]
+			switch scenario {
+			case "removal":
+				r.current.ResidentModels = nil
+			case "Off":
+				r.intent["llamacpp"] = false
+			default:
+				r.localPauseRequested = true
+			}
+			r.mu.Unlock()
+			if !recorded {
+				t.Fatal("completed load did not record its request")
+			}
+			f.b.reconcileModelConfig(context.Background())
+			r.mu.Lock()
+			_, recorded = r.models.loadedRequests[ref]
+			r.mu.Unlock()
+			if recorded {
+				t.Fatalf("%s retained the recorded load request", scenario)
+			}
+		})
+	}
+}

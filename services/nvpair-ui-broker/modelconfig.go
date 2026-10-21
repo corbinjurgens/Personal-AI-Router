@@ -9,6 +9,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"reflect"
+	"slices"
 	"sort"
 	"time"
 
@@ -360,6 +361,13 @@ func (b *Broker) reconcileModelConfig(ctx context.Context) {
 		return
 	}
 	r.models.busy = true
+	// A recorded request labels a resident allocation. Removal, Off and pause
+	// retire that allocation's declaration; a later one re-adopts inventory.
+	for ref := range r.models.loadedRequests {
+		if e.Live != nodepolicy.Available || e.Paused || !e.Intent[ref.Engine] || !slices.Contains(b.residentRefs(e.Policy), ref) {
+			delete(r.models.loadedRequests, ref)
+		}
+	}
 	for ref, proof := range r.models.confirmed {
 		if !b.residentDeclarationCurrent(proof, e, ref) {
 			delete(r.models.confirmed, ref)
