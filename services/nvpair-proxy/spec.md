@@ -1830,8 +1830,9 @@ Failed, lost, unreadable, wrong-origin/run/revision activation acknowledgements,
 failed availability pushes, process exit/replacement and withdrawal cannot restore
 eligibility. A renewal transport/RPC error skips that tick and is re-evaluated
 next tick without latching activation closed or discarding a valid anchor. A
-decoded reply with an invalid run/revision/sequence binding invalidates the anchor
-and records both activation and availability errors; fresh exact acknowledgements
+successful renewal RPC with an undecodable reply or a decoded reply with an
+invalid run/revision/sequence binding invalidates the anchor and records both
+activation and availability errors; fresh exact acknowledgements
 of both are required before a new anchor/grant. Negative elapsed time or arithmetic
 or sequence exhaustion denies further issuance.
 

@@ -158,7 +158,8 @@ function localGoModules(dir: string): [string, string][] {
 }
 
 const QUOTED_RE = /"([^"]+)"/g
-const IDENT_RE = /\b([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)?)\b/g
+// Consume whole selectors so their tails cannot resolve as package-local constants.
+const IDENT_RE = /\b([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)\b/g
 // NotifyContext takes ctx before method; keep the method in capture group 1
 // for both bare and receiver-qualified calls, just like Notify.
 const NOTIFY_LITERAL_RE =
@@ -169,7 +170,7 @@ const NOTIFY_PREFIX_CONCAT_RE =
 // literal Broadcast methods above, but do not treat an identifier argument to
 // Broadcast as an unresolved JSON-RPC method.
 const NOTIFY_IDENT_RE =
-    /(?:(?:notify|emit|publish)\(|notifyContext\([^,]*,)\s*([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)?)\s*,/gi
+    /(?:(?:notify|emit|publish)\(|notifyContext\([^,]*,)\s*([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)\s*,/gi
 
 /** A `| `nvpair-ui-broker` | 0.37.0 | … |` row — forbidden in hand-maintained docs. */
 const DOC_COMPONENT_ROW_RE = /^\|\s*`([a-z0-9-]+)`\s*\|\s*(\d+\.\d+\.\d+)\s*\|/gm
@@ -196,7 +197,10 @@ export function extractSurface(dir: string): BinarySurface {
         const rel = path.basename(file)
         const source = readFileSync(file, 'utf8')
         const constMap = new Map(packageConstants(path.dirname(file)))
-        for (const declaration of source.matchAll(/^\s*import\s*(?:\(([\s\S]*?)\)|([^\n]+))/gm)) {
+        // A comment's closing parenthesis does not end the import block.
+        for (const declaration of source.matchAll(
+            /^\s*import\s*(?:\(((?:\/\/[^\n]*|\/\*[\s\S]*?\*\/|[^)])*)\)|([^\n]+))/gm
+        )) {
             const imports = declaration[1] ?? declaration[2]
             for (const imported of imports.matchAll(/^\s*(?:([A-Za-z_]\w*|[._])\s+)?"([^"]+)"/gm)) {
                 const [, alias, importPath] = imported

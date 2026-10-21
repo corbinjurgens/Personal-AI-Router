@@ -118,8 +118,9 @@ policy/availability push, failed activation, lost/unreadable acknowledgement,
 wrong origin/run/revision, recovery, process exit/replacement or withdrawal
 cannot supply eligibility. Ordinary renewal transport errors and RPC refusals
 skip the tick and are re-evaluated on the next tick; they do not require a new
-policy edit. A decoded renewal reply with an invalid run/revision/sequence
-binding invalidates the anchor and records both policy and availability errors.
+policy edit. A successful renewal RPC whose reply cannot be decoded, or whose
+decoded run/revision/sequence binding is invalid, invalidates the anchor and
+records both policy and availability errors.
 Fresh exact acknowledgement of both is required before re-anchoring/granting.
 
 `persistPolicy` adopts the complete new document on `durablefile.ErrReplaced`
@@ -238,43 +239,41 @@ single availability constant can enable dispatch. Even then owner-local tier
 permissions, an enabled qualified deployment, an exact fresh lease and D/E
 admission remain mandatory. Successful qualification does not flip availability.
 
-The following separates historical evidence from the current source handover.
-Execution receipts are delivered separately with the identified candidate's
-handback; plan text and this table do not supply those receipts. This
-documentation author ran no test or compiler. Every joined gate claim requires
-an execution handback naming the exact head, commands, architecture, executed
-cases, counts, skips and exclusions. This source freeze is not runtime acceptance.
+Acceptance requires execution receipts naming the exact source revision,
+commands, OS/architecture, executed cases, results, skips and exclusions. Source
+review, test listing and compilation do not establish runtime acceptance, and
+evidence from one OS does not establish native behavior on another.
 
-| Evidence lane | Existing evidence and limit | Current Task 4 acceptance |
+| Evidence category | Required verification | Limit |
 | --- | --- | --- |
-| Mac module unit/race and static gates | Coordinator records G3 `c934c37` accepted/landed at JOIN30 `7afdf7a`. Exact native Mac commands, OS/arch, executed names and skips are not supplied by this source change; no new Mac runtime claim follows. | Current joined module/race/static evidence must be supplied by that owner; no `services/tests` execution on Mac. |
-| MSI native Windows modules/race | G3 repair candidate `c934c37`: Windows amd64 broker full plain/race each 1706 pass, zero fail, one runtime skip. JOIN30 follow-up handback, delivered as `3ce121c`: joined broker each 1714/0/1. `TestEngineSwitchStorePOSIXModes` skipped; `TestEngineManagerPortsSpawnAndScannerReplay` separately excluded. | Module acceptance requires an execution handback naming the exact joined head, Windows architecture, commands, counts, skips and exclusions. |
-| Cross-platform static checks | JOIN30 follow-up records Windows/Darwin/Linux amd64 vet with `CGO_ENABLED=0`, all exit zero. Darwin vet is not native Mac unit/race or durability evidence. | This documentation author ran no new static/compiler check. Root's joined gate results belong in the execution handback. |
-| PC3 process and full desktop | Root records process vet/list on `8224d3f` passed with all three required names listed and zero process cases executed. No current full desktop acceptance supplied. | Pending the isolated PC3 interval: named disabled/EOF/incarnation cases, neighboring policy/routing cases, full process suite and desktop gates. Listing/compilation alone is not execution. |
-| Mac generated contracts and typecheck | The imported-constant extractor repair and exact internal-only lease exceptions are source-ready. Generated `desktop/docs/services-api.md` remains reserved to the external join owner. | Required proof for the exact join: focused extractor execution/report, generator run twice with byte-identical output, contract check and typecheck. Source readiness does not establish generated freshness. |
-| Public activation and real provider evidence | No live provider evidence or activation is established by synthetic mechanism tests or prior module gates. | F/D/B/I prerequisites and final acceptance above remain pending; availability stays false. |
+| Native module tests and race checks | Run `go test ./...` and `go test -race ./...` in each affected service module on the target OS. | Skips and exclusions remain untested; module success does not establish process or native durability acceptance. |
+| Cross-platform static checks | Run `go vet ./...` in each affected module for the required OS/architecture targets. | Cross-target vet is static evidence, not native unit/race, process or durability execution. |
+| Process behavior | Execute the named lease process cases, neighboring policy/routing cases and the full `services/tests` suite in an isolated environment. | Deadline, ready/activation-transition and revoke-clear boundaries remain unit-owned checks; process tests do not establish those boundaries. A defensive `.invalid` endpoint/loopback trap does not intercept `publicClient.Do` and cannot establish that no public transport attempt occurred. |
+| Generated contracts and desktop | Execute focused extractor tests, generate API documentation twice with byte-identical output, then run contract and desktop checks. | Generation is a required acceptance gate; source readiness does not establish generated freshness. |
+| Public activation and real provider evidence | Supply the F/D/B/I prerequisites and final acceptance above. | Synthetic mechanism tests and module gates cannot establish live provider evidence or enable dispatch; availability stays false. |
 
-PC3 process acceptance must execute `TestPublicEgressLeaseProcessDisabled`,
+Process acceptance must execute `TestPublicEgressLeaseProcessDisabled`,
 `TestPublicEgressLeaseProcessEOF` and `TestPublicEgressLeaseProcessIncarnation`
 without skips, survivors or provider contact, then the authorized neighboring and
-full-suite gates after fixture isolation. Full desktop acceptance includes lint,
-typecheck, unit tests, dead-code and service-contract checks. Each record must
-name the exact joined head, command, OS/architecture, executed cases, skips and
-result. Native/live evidence cannot be inferred from another OS or from a plan.
+full-suite gates after fixture isolation. From `services/tests`, use
+`go test -run '^TestPublicEgressLeaseProcess(Disabled|EOF|Incarnation)$' -count=1 .`
+for the named cases and `go test ./...` for the full suite. Full desktop acceptance
+requires `npm run lint`, `npm run typecheck`, `npm run test:unit`,
+`npm run dead-code:check` and `npm run service-contracts:check` from `desktop/`.
 
 `desktop/docs/service-contract-exceptions.json` accepts precise `ignoredMethods`
-reasons, not a renderer implementation or a broad ignore. The source-ready
+reasons, not a renderer implementation or a broad ignore. The
 extractor resolves package-qualified imported constants through the containing
 Go module and local replacements, including the proxy's
 `nodepolicy.MethodRenewEgressLease`/`MethodRevokeEgressLease` cases. Exact
 `node/renew-egress-lease` and `node/revoke-egress-lease` exceptions now classify
 their trusted-parent ownership. This remains regex source extraction, not a full
 Go parser/type checker; external modules, computed constants and unsupported
-import forms remain outside its scope. In the historical contract source
-handover, six focused cases were authored and zero had executed. Execution
-handbacks must supply focused verification and generation/check evidence for
-the exact joined source. Generated API Markdown must be produced by the reserved
-generator owner, never typed by hand.
+import forms remain outside its scope. Acceptance requires focused extractor
+verification and two `npm run service-contracts:write` runs with byte-identical
+output, followed by `npm run service-contracts:check` and `npm run typecheck`,
+all from `desktop/` against the same source revision. Generated API Markdown
+must be produced by the generator, never typed by hand.
 
 Lease diagnostics contain only bounded operational categories, revision, run and
 attempt identities. Prompts, messages, response bodies, credentials, credential

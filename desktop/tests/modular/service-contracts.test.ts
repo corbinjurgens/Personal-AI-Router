@@ -210,6 +210,210 @@ var MethodRevokeEgressLease string
         expect([...extractSurface(dir).handles]).toEqual(['node/renew-egress-lease'])
     })
 
+    it.each([
+        { name: 'line comment', comment: '// A closing ) belongs to the comment.' },
+        { name: 'block comment', comment: '/* A closing ) belongs to the comment. */' },
+        { name: 'multiline block comment', comment: '/*\n)\n*/' }
+    ])('resolves imports after a closing parenthesis in a $name', async ({ comment }) => {
+        const dir = await fixture({
+            'component/go.mod': `module example.test/component
+replace example.test/shared => ../shared
+`,
+            'component/main.go': `package main
+import (
+    ${comment}
+    lease "example.test/shared/nodepolicy"
+)
+func handle(method string) {
+    switch method {
+    case lease.MethodRenewEgressLease:
+    }
+    notify(lease.Changed, nil)
+}
+`,
+            'shared/nodepolicy/wire.go': `package nodepolicy
+const MethodRenewEgressLease = "node/renew-egress-lease"
+const Changed = "node/lease-changed"
+`
+        })
+
+        const surface = extractSurface(dir)
+        expect([...surface.handles]).toEqual(['node/renew-egress-lease'])
+        expect([...surface.emits]).toEqual(['node/lease-changed'])
+        expect(surface.dynamic).toEqual([])
+    })
+
+    it('keeps three-part selectors unresolved without matching their constant-name tails', async () => {
+        const dir = await fixture({
+            'component/go.mod': `module example.test/component
+replace example.test/shared => ../shared
+`,
+            'component/main.go': `package main
+import lease "example.test/shared/nodepolicy"
+const MethodRenewEgressLease = "local:request-collision"
+const Changed = "local:changed-collision"
+func handle(method string) {
+    switch method {
+    case holder.lease.MethodRenewEgressLease, lease.MethodRenewEgressLease:
+    }
+    notify(holder.lease.Changed, nil)
+    codec.NotifyContext(ctx, holder.lease.Changed, nil)
+}
+`,
+            'shared/nodepolicy/wire.go': `package nodepolicy
+const MethodRenewEgressLease = "node/renew-egress-lease"
+const Changed = "node/lease-changed"
+`
+        })
+
+        const surface = extractSurface(dir)
+        expect([...surface.handles]).toEqual(['node/renew-egress-lease'])
+        expect([...surface.emits]).toEqual([])
+        expect(surface.dynamic).toEqual([
+            { label: 'holder.lease.Changed (var)', file: 'main.go', line: 9 },
+            { label: 'holder.lease.Changed (var)', file: 'main.go', line: 10 }
+        ])
+    })
+
+    it('leaves external and standard-library imports unresolved despite local name collisions', async () => {
+        const dir = await fixture({
+            'component/go.mod': 'module example.test/component\n',
+            'component/main.go': `package main
+import (
+    "net/http"
+    remote "example.net/contracts"
+)
+const Changed = "local:changed-collision"
+const MethodGet = "local:request-collision"
+func handle(method string) {
+    switch method {
+    case "literal:request", http.MethodGet, remote.MethodGet:
+    }
+    notify("literal:changed", nil)
+    notify(http.MethodGet, nil)
+    notify(remote.Changed, nil)
+}
+`
+        })
+
+        const surface = extractSurface(dir)
+        expect([...surface.handles]).toEqual(['literal:request'])
+        expect([...surface.emits]).toEqual(['literal:changed'])
+        expect(surface.dynamic).toEqual([
+            { label: 'http.MethodGet (var)', file: 'main.go', line: 13 },
+            { label: 'remote.Changed (var)', file: 'main.go', line: 14 }
+        ])
+    })
+
+    it('does not bind dot or underscore imports to local or package-qualified names', async () => {
+        const dir = await fixture({
+            'component/go.mod': `module example.test/component
+replace example.test/shared => ../shared
+`,
+            'component/main.go': `package main
+import (
+    . "example.test/shared/nodepolicy"
+    _ "example.test/shared/other"
+)
+func handle(method string) {
+    switch method {
+    case MethodRenewEgressLease, nodepolicy.MethodRenewEgressLease, other.MethodRevokeEgressLease:
+    }
+    notify(Changed, nil)
+    notify(nodepolicy.Changed, nil)
+    notify(other.Changed, nil)
+}
+`,
+            'shared/nodepolicy/wire.go': `package nodepolicy
+const MethodRenewEgressLease = "node/renew-egress-lease"
+const Changed = "node/lease-changed"
+`,
+            'shared/other/wire.go': `package other
+const MethodRevokeEgressLease = "other:revoke"
+const Changed = "other:changed"
+`
+        })
+
+        const surface = extractSurface(dir)
+        expect([...surface.handles]).toEqual([])
+        expect([...surface.emits]).toEqual([])
+        expect(surface.dynamic).toEqual([
+            { label: 'Changed (var)', file: 'main.go', line: 10 },
+            { label: 'nodepolicy.Changed (var)', file: 'main.go', line: 11 },
+            { label: 'other.Changed (var)', file: 'main.go', line: 12 }
+        ])
+    })
+
+    it('requires an exact module name or slash boundary before resolving local replacements', async () => {
+        const dir = await fixture({
+            'component/go.mod': `module example.test/component
+replace example.test/shared => ../shared
+`,
+            'component/main.go': `package main
+import (
+    root "example.test/shared"
+    lease "example.test/shared/nodepolicy"
+    lookalike "example.test/shared2/nodepolicy"
+)
+func handle(method string) {
+    switch method {
+    case root.Request, lease.MethodRenewEgressLease, lookalike.MethodRenewEgressLease:
+    }
+    notify(lookalike.Changed, nil)
+}
+`,
+            'shared/wire.go': `package shared
+const Request = "shared:root"
+`,
+            'shared/nodepolicy/wire.go': `package nodepolicy
+const MethodRenewEgressLease = "node/renew-egress-lease"
+`,
+            'shared/2/nodepolicy/wire.go': `package nodepolicy
+const MethodRenewEgressLease = "wrong-prefix:request"
+const Changed = "wrong-prefix:changed"
+`,
+            'shared2/nodepolicy/wire.go': `package nodepolicy
+const MethodRenewEgressLease = "unreplaced:request"
+const Changed = "unreplaced:changed"
+`
+        })
+
+        const surface = extractSurface(dir)
+        expect([...surface.handles].sort()).toEqual(['node/renew-egress-lease', 'shared:root'])
+        expect([...surface.emits]).toEqual([])
+        expect(surface.dynamic).toEqual([
+            { label: 'lookalike.Changed (var)', file: 'main.go', line: 11 }
+        ])
+    })
+
+    it('labels unresolved imported and unknown notification selectors with their full names', async () => {
+        const dir = await fixture({
+            'component/go.mod': `module example.test/component
+replace example.test/shared => ../shared
+`,
+            'component/main.go': `package main
+import lease "example.test/shared/nodepolicy"
+const Changed = "local:changed-collision"
+func handle() {
+    notify(lease.Changed, nil)
+    notify(missing.Changed, nil)
+    codec.NotifyContext(ctx, lease.Unknown, nil)
+}
+`,
+            'shared/nodepolicy/wire.go': `package nodepolicy
+const Changed = "node/lease-changed"
+`
+        })
+
+        const surface = extractSurface(dir)
+        expect([...surface.handles]).toEqual([])
+        expect([...surface.emits]).toEqual(['node/lease-changed'])
+        expect(surface.dynamic).toEqual([
+            { label: 'missing.Changed (var)', file: 'main.go', line: 6 },
+            { label: 'lease.Unknown (var)', file: 'main.go', line: 7 }
+        ])
+    })
+
     it('extracts both real proxy lease methods as ignored private requests', () => {
         const desktop = fileURLToPath(new URL('../../', import.meta.url))
         const services = path.resolve(desktop, '..', 'services')

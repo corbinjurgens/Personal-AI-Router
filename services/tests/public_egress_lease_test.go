@@ -74,6 +74,35 @@ func TestPublicEgressLeaseProcessDisabled(t *testing.T) {
 	egressProcessAssertConcrete(t, client, f.facadePort)
 	before := upstream.localCalls.Load()
 
+	t.Run("policy stays active across renewal intervals", func(t *testing.T) {
+		assertActive := func() {
+			t.Helper()
+			reply := call(t, "policy:get", map[string]any{})
+			egressProcessOK(t, reply)
+			snapshot := decodeServicePolicySnapshot(t, &reply)
+			if snapshot.Activation != "active" || snapshot.ActiveRevision != policy.Revision || snapshot.Policy.Revision != policy.Revision {
+				t.Fatalf("policy changed during renewal: state=%q active=%q persisted=%q, want active revision %q",
+					snapshot.Activation, snapshot.ActiveRevision, snapshot.Policy.Revision, policy.Revision)
+			}
+		}
+		// Observe the real broker/proxy across renewal ticks without waiting
+		// for an error state to recover. Each direct read must remain active.
+		window := time.NewTimer(2 * nodepolicy.EgressLeaseRenewalInterval)
+		defer window.Stop()
+		tick := time.NewTicker(nodepolicy.EgressLeaseRenewalInterval / 4)
+		defer tick.Stop()
+		assertActive()
+		for {
+			select {
+			case <-window.C:
+				assertActive()
+				return
+			case <-tick.C:
+				assertActive()
+			}
+		}
+	})
+
 	t.Run("model configuration and listing grant no public authority", func(t *testing.T) {
 		got := call(t, "policy:get", map[string]any{})
 		egressProcessOK(t, got)
@@ -153,7 +182,9 @@ func TestPublicEgressLeaseProcessDisabled(t *testing.T) {
 				t.Fatalf("write forged public notification: %v", err)
 			}
 		}
-		// The following response fences the notifications on the same pipe.
+		// The following response fences the notifications on the same pipe,
+		// proving pipe survival while public dispatch remains disabled. It does
+		// not prove that forged notifications cannot alter an enabled lease.
 		egressProcessActivePolicy(t, call, "17")
 		egressProcessAssertDisabled(t, client, f.facadePort)
 	})
@@ -310,8 +341,10 @@ func TestPublicEgressLeaseProcessEOF(t *testing.T) {
 	}
 	newPort := replacement.enable(t)
 	egressProcessAssertDisabled(t, client, newPort)
-	// Replay the exact old bytes through the NEW pipe, with an otherwise fresh
-	// sequence there. A cached old acknowledgement cannot satisfy this read.
+	// Replay the exact old bytes through the NEW pipe. Rejection can depend on
+	// the old run, sequence or deadline; this is a compound replay check. The
+	// incarnation case below isolates wrong-run rejection with an anchor-only
+	// renewal and a fresh sequence. A cached reply cannot satisfy this read.
 	egressProcessRefused(t, replacement.exchange(t, oldID, oldFrame), -32602, egressBindingError)
 	replacement.renew(t, newAck.RunID, "17", "2", "0")
 	egressProcessAssertDisabled(t, client, newPort)
@@ -348,7 +381,7 @@ func TestPublicEgressLeaseProcessIncarnation(t *testing.T) {
 	rejectRenew("wrong run cannot poison highwater", "wrong-run", "17", "100", "0", egressBindingError)
 	rejectRenew("wrong revision cannot poison highwater", ack.RunID, "18", "100", "0", egressBindingError)
 	rejectRenew("noncanonical sequence is rejected by the wire validator", ack.RunID, "17", "04", "0",
-		"sequence must be canonical decimal digits within the signed 64-bit range")
+		"invalid params: sequence must be canonical decimal digits within the signed 64-bit range")
 	anchor = p.renew(t, ack.RunID, "17", "4", "0")
 	p.revoke(t, ack.RunID, "6")
 	rejectRenew("pre-revoke grant cannot restore authority", ack.RunID, "17", "5", egressProcessDeadline(t, anchor), egressBindingError)
@@ -404,8 +437,9 @@ func egressProcessPolicy(t *testing.T, revision string, publicPort int) nodepoli
 		PerRequestCeiling: "1000", DailyCeiling: "10000", MonthlyCeiling: "100000"}}
 	p.Routing.Deployments = []nodepolicy.Deployment{{ID: "g-public", Account: "g-account", Model: "g-t4-public", Family: "g-family",
 		ContextTokens: 8192, MaxOutputTokens: 1024, Enabled: false,
-		// Keep the staged DNS name non-routable. The process contract here is
-		// refusal before dispatch; it does not qualify a public transport.
+		// The .invalid name is defensive only. This fake endpoint does not
+		// intercept publicClient.Do, so its counter cannot prove that no public
+		// transport was attempted or qualify a public transport.
 		Endpoint: fmt.Sprintf("https://public-egress.invalid:%d/v1/chat/completions", publicPort),
 		Protocol: nodepolicy.ProtocolOpenAIChatCompletions,
 		Prices:   &nodepolicy.Prices{Currency: "USD", Unit: "nanoUSDPerMillionTokens", InputPerMillion: "0", OutputPerMillion: "0"},
@@ -459,7 +493,7 @@ func newEgressProcessUpstream(t *testing.T) *egressProcessUpstream {
 	u := &egressProcessUpstream{}
 	local := newFixtureHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		if r.Method == http.MethodGet && r.URL.Path == "/v1/models" {
+		if r.Method == http.MethodGet && r.URL.Path == "/models" {
 			if _, err := io.WriteString(w, `{"object":"list","data":[{"id":"g-t4-concrete","object":"model"}]}`); err != nil {
 				t.Errorf("write concrete model list: %v", err)
 			}
