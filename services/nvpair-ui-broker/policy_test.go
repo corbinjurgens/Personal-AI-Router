@@ -344,6 +344,27 @@ func TestPolicyIdentityRejectsWrongOrigin(t *testing.T) {
 	}
 }
 
+func TestServedResidentPeerReadbackRefusesDroppedPreferences(t *testing.T) {
+	for _, tc := range []struct {
+		name, request, result string
+		refused               bool
+	}{
+		{"explicit empty served dropped", `{"servedModels":[]}`, `{"policy":{}}`, true},
+		{"resident dropped", `{"residentModels":[{"engine":"llamacpp","model":"m"}]}`, `{"policy":{}}`, true},
+		{"resident changed", `{"residentModels":[{"engine":"llamacpp","model":"m"}]}`, `{"policy":{"residentModels":[{"engine":"llamacpp","model":"other"}]}}`, true},
+		{"explicit empty served preserved", `{"servedModels":[]}`, `{"policy":{"servedModels":[]}}`, false},
+		{"empty resident equivalent to absent", `{"residentModels":[]}`, `{"policy":{}}`, false},
+		{"absent served preserved", `{}`, `{"policy":{}}`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := residentReadbackSupported(json.RawMessage(tc.request), json.RawMessage(tc.result))
+			if (err != nil) != tc.refused {
+				t.Fatalf("refused=%v want %v: %v", err != nil, tc.refused, err)
+			}
+		})
+	}
+}
+
 func TestPolicyIdentityEnvelopeIsPrivateToProxyChannel(t *testing.T) {
 	ab := newActivatedBroker(t)
 	result := ab.setIdle(t, 5)

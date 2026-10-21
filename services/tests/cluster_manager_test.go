@@ -56,6 +56,15 @@ func startCMBinaryEnv(t *testing.T, binary, configDir string, port int, extraEnv
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start cluster-manager: %v", err)
 	}
+	ready := false
+	defer func() {
+		if !ready {
+			_ = cmd.Process.Kill()
+			_ = cmd.Wait()
+		}
+	}()
+	waitTCP(t, "127.0.0.1:"+strconv.Itoa(port), 5*time.Second)
+	ready = true
 	return &cmProc{t: t, cmd: cmd, stdin: stdin, msgs: startMsgReader(stdout), nextID: 1}
 }
 
@@ -178,9 +187,6 @@ func TestClusterManagerPairing(t *testing.T) {
 		t.Fatalf("node B should start unclustered, got %q", bInfo.ClusterID)
 	}
 
-	// Give both inter-node listeners a moment to bind.
-	time.Sleep(time.Second)
-
 	// A founds a cluster, then invites B.
 	a.call("cluster:create", map[string]any{"clusterFriendlyName": "Test Lab"})
 
@@ -283,9 +289,6 @@ func TestInviteAutoFoundsClusterWhenUnclustered(t *testing.T) {
 		t.Fatalf("node A should start unclustered, got %q", aInfo.ClusterID)
 	}
 
-	// Let both inter-node listeners bind.
-	time.Sleep(time.Second)
-
 	type inviteResult struct {
 		InviteID string `json:"inviteId"`
 		State    string `json:"state"`
@@ -344,8 +347,6 @@ func TestRepeatedInviteSameSenderSupersedesPrior(t *testing.T) {
 	defer a.stop()
 	b := startCM(t, shortClusterTempDir(t), 14912)
 	defer b.stop()
-
-	time.Sleep(time.Second)
 
 	type inviteResult struct {
 		InviteID string `json:"inviteId"`
@@ -483,9 +484,6 @@ func TestClusterFanout(t *testing.T) {
 	bInfo := decodeResult[cmNodeID](t, b.call("cluster:get-node-id", nil))
 	cInfo := decodeResult[cmNodeID](t, c.call("cluster:get-node-id", nil))
 
-	// Let the inter-node listeners bind.
-	time.Sleep(time.Second)
-
 	a.call("cluster:create", map[string]any{"clusterFriendlyName": "Test Lab"})
 	pairNodes(t, a, b, 14842, "node-b") // A <-> B
 	pairNodes(t, a, c, 14843, "node-c") // A <-> C
@@ -533,8 +531,6 @@ func TestClusterLeave(t *testing.T) {
 	defer c.stop()
 
 	cInfo := decodeResult[cmNodeID](t, c.call("cluster:get-node-id", nil))
-
-	time.Sleep(time.Second)
 
 	a.call("cluster:create", map[string]any{"clusterFriendlyName": "Test Lab"})
 	pairNodes(t, a, b, 14852, "node-b")
@@ -586,9 +582,6 @@ func TestClusterCancelInvite(t *testing.T) {
 	defer b.stop()
 
 	bInfo := decodeResult[cmNodeID](t, b.call("cluster:get-node-id", nil))
-
-	// Let the inter-node listeners bind.
-	time.Sleep(time.Second)
 
 	a.call("cluster:create", map[string]any{"clusterFriendlyName": "Test Lab"})
 
@@ -673,7 +666,6 @@ func TestClusterCancelInviteRace(t *testing.T) {
 		fmt.Sprintf("NVPAIR_TEST_PAIR_COMMIT_DELAY_MS=%d", commitDelayMS),
 	})
 	defer a.stop()
-	time.Sleep(time.Second)
 	a.call("cluster:create", map[string]any{"clusterFriendlyName": "Race Lab"})
 
 	type inviteResult struct {
@@ -780,9 +772,6 @@ func TestClusterDeclineInvite(t *testing.T) {
 
 	bInfo := decodeResult[cmNodeID](t, b.call("cluster:get-node-id", nil))
 
-	// Let the inter-node listeners bind.
-	time.Sleep(time.Second)
-
 	type inviteResult struct {
 		InviteID string `json:"inviteId"`
 		State    string `json:"state"`
@@ -854,9 +843,6 @@ func TestClusterInviteExpiresBothSides(t *testing.T) {
 	})
 	defer b.stop()
 
-	// Let the inter-node listeners bind.
-	time.Sleep(time.Second)
-
 	type inviteResult struct {
 		InviteID string `json:"inviteId"`
 		State    string `json:"state"`
@@ -912,8 +898,6 @@ func TestClusterDeclinePreservesIntentionalSolo(t *testing.T) {
 	b := startCM(t, shortClusterTempDir(t), 14882)
 	defer b.stop()
 
-	time.Sleep(time.Second)
-
 	a.call("cluster:create", map[string]any{"clusterFriendlyName": "Intentional Lab"})
 	before := decodeResult[cmNodeID](t, a.call("cluster:get-node-id", nil))
 	if before.ClusterID == "" {
@@ -964,8 +948,6 @@ func TestClusterDeclineKeepsSiblingPendingInvite(t *testing.T) {
 	defer b.stop()
 	c := startCM(t, shortClusterTempDir(t), 14893)
 	defer c.stop()
-
-	time.Sleep(time.Second)
 
 	type inviteResult struct {
 		InviteID string `json:"inviteId"`
@@ -1033,9 +1015,6 @@ func TestClusterWrongPinFailsBothSides(t *testing.T) {
 	aInfo := decodeResult[cmNodeID](t, a.call("cluster:get-node-id", nil))
 	bInfo := decodeResult[cmNodeID](t, b.call("cluster:get-node-id", nil))
 
-	// Let the inter-node listeners bind.
-	time.Sleep(time.Second)
-
 	type inviteResult struct {
 		InviteID string `json:"inviteId"`
 		State    string `json:"state"`
@@ -1102,8 +1081,6 @@ func TestClusterWrongPinPreservesIntentionalSolo(t *testing.T) {
 	defer a.stop()
 	b := startCM(t, shortClusterTempDir(t), portB)
 	defer b.stop()
-
-	time.Sleep(time.Second)
 
 	a.call("cluster:create", map[string]any{"clusterFriendlyName": "Intentional Lab"})
 	before := decodeResult[cmNodeID](t, a.call("cluster:get-node-id", nil))
@@ -1230,9 +1207,6 @@ func TestClusterSelfRemoveWhenRemovedOffline(t *testing.T) {
 
 	bInfo := decodeResult[cmNodeID](t, b.call("cluster:get-node-id", nil))
 
-	// Let the inter-node listeners bind before pairing.
-	time.Sleep(time.Second)
-
 	a.call("cluster:create", map[string]any{"clusterFriendlyName": "Offline Lab"})
 	pairNodes(t, a, b, portB, "node-b")
 	waitMembers(t, a, 2)
@@ -1287,9 +1261,6 @@ func TestClusterNoSelfRemoveWhenPeerLeft(t *testing.T) {
 	// for the wrong reason.
 	b := startCM(t, baseB, portB)
 	defer b.stop()
-
-	// Let the inter-node listeners bind before pairing.
-	time.Sleep(time.Second)
 
 	a.call("cluster:create", map[string]any{"clusterFriendlyName": "Survivor Lab"})
 	pairNodes(t, a, b, portB, "node-b")
@@ -1355,9 +1326,6 @@ func TestClusterNoSelfRemoveWhenPeerAccepts(t *testing.T) {
 	defer a.stop()
 	b := startCM(t, baseB, portB)
 
-	// Let the inter-node listeners bind before pairing.
-	time.Sleep(time.Second)
-
 	a.call("cluster:create", map[string]any{"clusterFriendlyName": "Healthy Lab"})
 	pairNodes(t, a, b, portB, "node-b")
 	waitMembers(t, a, 2)
@@ -1396,9 +1364,6 @@ func TestClusterNoSelfRemoveWhenPeerUnreachable(t *testing.T) {
 	defer a.stop()
 	b := startCM(t, baseB, portB)
 
-	// Let the inter-node listeners bind before pairing.
-	time.Sleep(time.Second)
-
 	a.call("cluster:create", map[string]any{"clusterFriendlyName": "Outage Lab"})
 	pairNodes(t, a, b, portB, "node-b")
 	waitMembers(t, a, 2)
@@ -1436,9 +1401,6 @@ func TestClusterInviteAlreadyClusteredRejected(t *testing.T) {
 	defer a.stop()
 	b := startCM(t, shortClusterTempDir(t), 14882)
 	defer b.stop()
-
-	// Let the inter-node listeners bind.
-	time.Sleep(time.Second)
 
 	a.call("cluster:create", map[string]any{"clusterFriendlyName": "Test Lab"})
 	pairNodes(t, a, b, 14882, "node-b")
@@ -1499,9 +1461,6 @@ func TestClusterInviteTwoPendingThenClustered(t *testing.T) {
 
 	bInfo := decodeResult[cmNodeID](t, b.call("cluster:get-node-id", nil))
 	cInfo := decodeResult[cmNodeID](t, c.call("cluster:get-node-id", nil))
-
-	// Let the inter-node listeners bind.
-	time.Sleep(time.Second)
 
 	// A and C each found their own cluster.
 	type createResult struct {
@@ -1583,9 +1542,6 @@ func TestClusterInviteRejectedDissolvesAutoFoundedSolo(t *testing.T) {
 	defer a.stop()
 	b := startCM(t, shortClusterTempDir(t), 14902)
 	defer b.stop()
-
-	// Let the inter-node listeners bind.
-	time.Sleep(time.Second)
 
 	// B is already in its own cluster; A stays standalone.
 	b.call("cluster:create", map[string]any{"clusterFriendlyName": "Cluster B"})

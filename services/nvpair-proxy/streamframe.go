@@ -199,6 +199,7 @@ const (
 	streamInterruptReasonBudget        = "stream frame buffer exhausted"
 	streamInterruptReasonMalformed     = "malformed upstream stream"
 	streamInterruptReasonUpstreamError = "upstream reported an error"
+	streamInterruptReasonPeerLink      = "peer response interrupted"
 )
 
 var streamInterruptionReasons = []string{
@@ -209,6 +210,7 @@ var streamInterruptionReasons = []string{
 	streamInterruptReasonBudget,
 	streamInterruptReasonMalformed,
 	streamInterruptReasonUpstreamError,
+	streamInterruptReasonPeerLink,
 }
 
 // streamInterruptionFrames holds the protocol-correct error terminator for each
@@ -264,6 +266,10 @@ type streamFrameConfig struct {
 	// PeerNormalized is set only after validating pinned ingress metadata.
 	// Preserve that reader's bounded interruption reason and full terminator.
 	PeerNormalized bool
+	// PeerTrailer is read only after transport EOF. A header advertisement
+	// cannot establish that the destination's terminal bytes survived the hop.
+	PeerTrailer func() []string
+	Sink        *responseSink
 }
 
 type streamFrameReader struct {
@@ -305,6 +311,14 @@ type streamFrameReader struct {
 	extract         func([]byte) performanceExtractMetadata
 	numeric         performanceNumbers
 	peerNormalized  bool
+	peerTrailer     func() []string
+	sink            *responseSink
+	pendingTerminal bool
+	pendingBytes    int
+	pendingOutcome  streamOutcome
+	pendingReason   string
+	pendingExpected []byte
+	peerEnding      bool
 }
 
 func newStreamFrameReader(config streamFrameConfig) (*streamFrameReader, error) {
@@ -374,6 +388,8 @@ func newStreamFrameReader(config streamFrameConfig) (*streamFrameReader, error) 
 		stopped:        make(chan struct{}),
 		extract:        config.Extract,
 		peerNormalized: config.PeerNormalized,
+		peerTrailer:    config.PeerTrailer,
+		sink:           config.Sink,
 		bootstrap:      bootstrap,
 	}
 	if metadata {
@@ -428,6 +444,7 @@ func (r *streamFrameReader) Read(p []byte) (int, error) {
 		if r.deliverOff < r.readyEnd {
 			n := copy(p, r.buf[r.deliverOff:r.readyEnd])
 			r.deliverOff += n
+			r.sink.output(n, !r.peerEnding)
 			if r.deliverOff == r.readyEnd {
 				r.recycleLocked()
 			}
@@ -437,10 +454,12 @@ func (r *streamFrameReader) Read(p []byte) (int, error) {
 		if r.termOff < len(r.terminator) {
 			n := copy(p, r.terminator[r.termOff:])
 			r.termOff += n
+			r.sink.output(n, false)
 			r.mu.Unlock()
 			return n, nil
 		}
 		if r.finished {
+			r.sink.streamResult(streamFrameResult{Outcome: r.outcome, Reason: r.reason})
 			r.mu.Unlock()
 			<-r.stopped
 			return 0, io.EOF
@@ -593,6 +612,10 @@ func (r *streamFrameReader) handleReadErrorLocked(err error) {
 		r.handleCleanEOFLocked()
 		return
 	}
+	if r.peerTrailer != nil {
+		r.finishInterruptedLocked(streamInterruptReasonPeerLink)
+		return
+	}
 	r.finishInterruptedLocked(streamInterruptReasonReadFailed)
 }
 
@@ -602,6 +625,33 @@ func (r *streamFrameReader) handleReadErrorLocked(err error) {
 // only completes the stream when every requested choice finished and the body
 // ended cleanly.
 func (r *streamFrameReader) handleCleanEOFLocked() {
+	if r.pendingTerminal {
+		if !r.validatePendingPeerLocked() {
+			return
+		}
+		metadata := originStreamRequest{peerNormalized: true}
+		reason, err := metadata.withPeerTrailer(r.peerTrailer())
+		if err != nil {
+			var invalid *peerFramingMetadataError
+			if errors.As(err, &invalid) && invalid.invalid {
+				r.finishInterruptedLocked(streamInterruptReasonMalformed)
+			} else {
+				r.finishInterruptedLocked(streamInterruptReasonPeerLink)
+			}
+			return
+		}
+		if reason != r.pendingReason {
+			r.finishInterruptedLocked(streamInterruptReasonMalformed)
+			return
+		}
+		r.readyEnd += r.pendingBytes
+		r.peerEnding = r.pendingOutcome == streamOutcomeInterrupted
+		if r.peerEnding {
+			r.sink.planInterruption(reason)
+		}
+		r.finishLocked(r.pendingOutcome, reason, nil)
+		return
+	}
 	pending := r.buf[r.readyEnd:]
 	if len(pending) > 0 && r.protocol == streamProtocolNDJSON {
 		verdict := r.assessNDJSONFrameLocked(pending)
@@ -611,6 +661,15 @@ func (r *streamFrameReader) handleCleanEOFLocked() {
 		}
 		if verdict == frameMalformed {
 			r.finishInterruptedLocked(streamInterruptReasonPrematureEOF)
+			return
+		}
+		if r.peerTrailer != nil && (verdict == frameCompleted || verdict == frameUpstreamError) {
+			outcome, reason := streamOutcomeCompleted, ""
+			if verdict == frameUpstreamError {
+				outcome, reason = streamOutcomeUpstreamError, streamInterruptReasonUpstreamError
+			}
+			r.holdPeerTerminalLocked(len(pending), outcome, reason, nil)
+			r.handleCleanEOFLocked()
 			return
 		}
 		r.readyEnd += len(pending)
@@ -629,14 +688,27 @@ func (r *streamFrameReader) handleCleanEOFLocked() {
 		return
 	}
 	if len(r.buf) > r.readyEnd {
-		r.finishInterruptedLocked(streamInterruptReasonPrematureEOF)
+		reason := streamInterruptReasonPrematureEOF
+		if r.peerTrailer != nil {
+			reason = streamInterruptReasonPeerLink
+		}
+		r.finishInterruptedLocked(reason)
 		return
 	}
 	if r.allChoicesDone {
+		if r.peerTrailer != nil {
+			r.holdPeerTerminalLocked(0, streamOutcomeCompleted, "", nil)
+			r.handleCleanEOFLocked()
+			return
+		}
 		r.finishLocked(streamOutcomeCompleted, "", nil)
 		return
 	}
-	r.finishInterruptedLocked(streamInterruptReasonPrematureEOF)
+	reason := streamInterruptReasonPrematureEOF
+	if r.peerTrailer != nil {
+		reason = streamInterruptReasonPeerLink
+	}
+	r.finishInterruptedLocked(reason)
 }
 
 type frameVerdict int
@@ -651,6 +723,10 @@ const (
 
 func (r *streamFrameReader) parseLocked() {
 	for !r.finished {
+		if r.pendingTerminal {
+			r.validatePendingPeerLocked()
+			return
+		}
 		pending := r.buf[r.readyEnd:]
 		if len(pending) == 0 {
 			return
@@ -674,6 +750,14 @@ func (r *streamFrameReader) parseLocked() {
 					canonical = bytes.TrimSuffix(terminator.sse, []byte("data: [DONE]\n\n"))
 				}
 				if bytes.Equal(frame, canonical) {
+					if r.peerTrailer != nil {
+						expected := terminator.ndjson
+						if r.protocol == streamProtocolSSE {
+							expected = terminator.sse
+						}
+						r.holdPeerTerminalLocked(len(expected), streamOutcomeInterrupted, reason, expected)
+						return
+					}
 					// Replace the peer's exact canonical record with the same
 					// full terminator, without re-observing synthetic metadata.
 					r.finishInterruptedLocked(reason)
@@ -698,10 +782,18 @@ func (r *streamFrameReader) parseLocked() {
 			r.finishInterruptedLocked(streamInterruptReasonMalformed)
 			return
 		case frameUpstreamError:
+			if r.peerTrailer != nil {
+				r.holdPeerTerminalLocked(n, streamOutcomeUpstreamError, streamInterruptReasonUpstreamError, nil)
+				return
+			}
 			r.readyEnd += n
 			r.finishLocked(streamOutcomeUpstreamError, streamInterruptReasonUpstreamError, nil)
 			return
 		case frameCompleted:
+			if r.peerTrailer != nil {
+				r.holdPeerTerminalLocked(n, streamOutcomeCompleted, "", nil)
+				return
+			}
 			r.readyEnd += n
 			r.finishLocked(streamOutcomeCompleted, "", nil)
 			return
@@ -710,6 +802,29 @@ func (r *streamFrameReader) parseLocked() {
 			r.refreshIdleLocked()
 		}
 	}
+}
+
+func (r *streamFrameReader) holdPeerTerminalLocked(n int, outcome streamOutcome, reason string, expected []byte) {
+	r.pendingTerminal, r.pendingBytes = true, n
+	r.pendingOutcome, r.pendingReason, r.pendingExpected = outcome, reason, expected
+	r.validatePendingPeerLocked()
+}
+
+func (r *streamFrameReader) validatePendingPeerLocked() bool {
+	pending := r.buf[r.readyEnd:]
+	if len(pending) > r.pendingBytes {
+		r.finishInterruptedLocked(streamInterruptReasonMalformed)
+		return false
+	}
+	if r.pendingExpected != nil && !bytes.Equal(pending, r.pendingExpected[:len(pending)]) {
+		r.finishInterruptedLocked(streamInterruptReasonMalformed)
+		return false
+	}
+	if r.cleanEOF && len(pending) < r.pendingBytes {
+		r.finishInterruptedLocked(streamInterruptReasonPeerLink)
+		return false
+	}
+	return true
 }
 
 func (r *streamFrameReader) nextFrameLocked(pending []byte) (int, bool) {
@@ -996,6 +1111,7 @@ func (r *streamFrameReader) finishInterruptedLocked(reason string) {
 		frames = streamInterruptionFramesByReason[streamInterruptReasonReadFailed]
 		reason = streamInterruptReasonReadFailed
 	}
+	r.sink.planInterruption(reason)
 	terminator := frames.sse
 	if r.protocol == streamProtocolNDJSON {
 		terminator = frames.ndjson

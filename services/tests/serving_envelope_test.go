@@ -830,9 +830,10 @@ func TestNEServingEnvelope(t *testing.T) {
 		t.Fatal("cold identity/readback caused inference, loading, or model props")
 	}
 	f.stop(t)
-	jointWriteJSON(t, filepath.Join(f.app, "local-qualification.json"), map[string]any{"version": 1, "qualifications": []any{map[string]any{
+	jointWriteJSON(t, filepath.Join(f.app, "local-qualification.json"), map[string]any{"version": 2, "qualifications": []any{map[string]any{
 		"id": "ne-synthetic", "revision": "1", "engine": "llamacpp", "model": neModel, "modelDigests": []string{firstEnvelope.ContentDigest}, "launchDigests": []string{firstLaunch},
 		"tokenizer": "synthetic-ne-tokenizer", "chatTemplate": "synthetic-ne-template", "contextTokens": neContext, "maxOutputTokens": neOutput, "routes": []string{"/v1/chat/completions"},
+		"shapes":     map[string]any{"tools": false, "structuredOutput": []string{}, "reasoningReplay": false},
 		"accounting": map[string]any{"method": "utf8-bytes", "requestOverheadTokens": 8, "messageOverheadTokens": 4, "toolOverheadTokens": 0, "schemaOverheadTokens": 0},
 		"evidence":   "Synthetic NE process wiring data only; no model, hardware, or native engine qualification was performed.",
 	}}})

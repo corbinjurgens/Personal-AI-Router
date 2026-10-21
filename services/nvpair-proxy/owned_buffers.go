@@ -19,7 +19,7 @@ import (
 type ownedInferenceContextKey struct{}
 
 // This transparent adapter only exposes storage context to local error
-// serialization. statusCapture remains the existing response/commit authority.
+// serialization. The request owner decides commitment; its sink owns response IO.
 type inferenceErrorWriter struct {
 	http.ResponseWriter
 	ctx context.Context

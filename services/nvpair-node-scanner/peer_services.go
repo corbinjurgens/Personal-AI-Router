@@ -150,10 +150,26 @@ func (d *daemon) acceptPeerServices(claim noderec.PeerServicesClaim) bool {
 	// A claim is proof the peer reaches us again, whatever the lapse that put it
 	// in the errors view.
 	d.clearUnreachable(hostUUID)
-	if !wasAuthenticated || routeChanged {
+	d.infoMu.Lock()
+	_, hadNodeInfo := d.lastInfoAt[hostUUID]
+	d.infoMu.Unlock()
+	_, wantsNodeInfo := node.Services[noderec.ServiceNodeInfo]
+	if (!wasAuthenticated || routeChanged || wantsNodeInfo && !hadNodeInfo) && !d.peerServicesEnriching[hostUUID] {
+		if d.peerServicesEnriching == nil {
+			d.peerServicesEnriching = make(map[string]bool)
+		}
+		d.peerServicesEnriching[hostUUID] = true
 		enrichmentNode := node
 		enrichmentNode.Services = maps.Clone(node.Services)
-		go d.enrichPeerServices(claim, enrichmentNode, d.dir.routeGeneration(hostUUID))
+		generation := d.dir.routeGeneration(hostUUID)
+		go func() {
+			defer func() {
+				d.peerServicesMu.Lock()
+				delete(d.peerServicesEnriching, hostUUID)
+				d.peerServicesMu.Unlock()
+			}()
+			d.enrichPeerServices(claim, enrichmentNode, generation)
+		}()
 	}
 	return true
 }

@@ -1040,6 +1040,42 @@ only for the exact revision it pushed, and it bounds its whole wait for one
 (`nvpair-ui-broker` README). The lease that gates public egress on the active
 revision belongs to hybrid dispatch and is not part of this contract.
 
+#### Automatic residency control
+
+The broker alone calls `node/prepare-resident`, `node/dispatch-resident`,
+`node/finish-resident` and `node/observe-resident`. `handlePolicyMethod` decodes
+the shared nodepolicy DTOs and delegates to the process-wide admission controller.
+These are internal parent IPC, with no renderer or peer command surface.
+`engine:reconcile-resident` belongs to engine-manager. Immediately before load,
+its correlated `engine:dispatch-resident-request` notification asks the broker
+to obtain the final proxy grant; only a valid matching notification reply
+`engine:dispatch-resident-reply` can authorize the manager's load.
+
+Prepare checks the whole revision-bound desired resident set against the same
+resident/in-flight memory and model limits as inference, without eviction.
+Served permission, desired membership, healthy On intent, local availability,
+drain state and unique qualified identity are checked again at dispatch. NE
+resident context equals native per-slot context; qualification covers native
+context/output and effective concurrency equals native slots. Native retention
+must be `"-1"`, router capacity must cover this engine's desired resident count,
+and explicit load/loaded-read bindings must satisfy engine-manager's model-only
+POST and safe GET contract. No prompt or request keep-alive override is sent.
+
+Finish/observe reconcile operation-bound evidence; failed load, stale generation,
+source replacement or unknown observation cannot invent loaded satisfaction.
+
+An interrupted load without a terminal manager reply retains its resident hold
+and reports `unknown`/`operation-timeout` until a policy edit invalidates the
+declaration or the proxy restarts. Elapsed observation time and manager
+replacement alone do not release this nonterminal hold.
+Fresh manager-owned observed context/slots are required for restart confirmation;
+an engine adopted from a previous manager run is never confirmed and remains
+`unknown`. There is no persistent load queue replay. This protocol does not
+clear durable strict-inference quarantine from HTTP completion or elapsed time.
+Local pause/Off remains a veto, and PG retains route-policy ownership. See
+[Local qualification](../../docs/local-qualification.mdx#daily-adapter-and-residency-contract)
+for the on-demand/resident distinction and pending real-host acceptance.
+
 #### 12.1.2 Engine switch invalidation and fresh drain evidence
 
 These are internal broker requests. Invalidation requires every field, rejects

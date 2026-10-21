@@ -22,6 +22,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strconv"
 	"strings"
@@ -97,7 +98,8 @@ const engineCallTimeout = 5 * time.Minute
 // reads the state at send time, so a later change can never be overwritten by
 // an earlier one that happened to be sent second.
 type policyRuntime struct {
-	mu sync.Mutex
+	mu     sync.Mutex
+	models modelConfigRuntime
 	// path is the policy file. Empty keeps the policy in memory only, which is
 	// what a Broker built by a test gets unless it asks for a file.
 	path    string
@@ -404,8 +406,9 @@ func (r *policyRuntime) activationLocked(running *proxyProcess, revision string)
 
 // policyGetResult is the policy:get result.
 type policyGetResult struct {
-	Policy       nodepolicy.Policy       `json:"policy"`
-	Availability nodepolicy.Availability `json:"availability"`
+	ModelConfiguration nodepolicy.ModelConfiguration `json:"modelConfiguration"`
+	Policy             nodepolicy.Policy             `json:"policy"`
+	Availability       nodepolicy.Availability       `json:"availability"`
 	// RecoveryRequired is true while the node runs on the recovery policy
 	// because its file was unusable; an explicit policy:set clears it.
 	RecoveryRequired bool `json:"recoveryRequired"`
@@ -415,7 +418,8 @@ type policyGetResult struct {
 // policySetResult is the policy:set result: the persisted policy and whether
 // the proxy has activated it.
 type policySetResult struct {
-	Policy nodepolicy.Policy `json:"policy"`
+	ModelConfiguration nodepolicy.ModelConfiguration `json:"modelConfiguration"`
+	Policy             nodepolicy.Policy             `json:"policy"`
 	policyActivation
 }
 
@@ -484,11 +488,9 @@ func checkExpectedRevision(stored nodepolicy.Policy, expected string) error {
 }
 
 func (b *Broker) localPolicy() policyGetResult {
-	r := b.nodePolicyRuntime()
-	running := b.policyProxy()
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return policyGetResult{Policy: r.current, Availability: r.live, RecoveryRequired: r.recoveryRequired, policyActivation: r.activationLocked(running, r.current.Revision)}
+	e := b.captureModelConfig()
+	configuration := b.modelConfiguration(e)
+	return policyGetResult{ModelConfiguration: configuration, Policy: e.Policy, Availability: e.Live, RecoveryRequired: e.Recovery, policyActivation: e.Activation}
 }
 
 // activationOf is the activation of one revision right now. A result or
@@ -505,13 +507,14 @@ func (b *Broker) activationOf(revision string) policyActivation {
 // peerPolicyGetResult is the policy:get result a paired node receives: the
 // peer projection, without the routing section or API tier entries.
 type peerPolicyGetResult struct {
-	Policy       nodepolicy.PeerPolicy   `json:"policy"`
-	Availability nodepolicy.Availability `json:"availability"`
+	ModelConfiguration nodepolicy.ModelConfiguration `json:"modelConfiguration"`
+	Policy             nodepolicy.PeerPolicy         `json:"policy"`
+	Availability       nodepolicy.Availability       `json:"availability"`
 }
 
 func (b *Broker) peerPolicy() peerPolicyGetResult {
 	local := b.localPolicy()
-	return peerPolicyGetResult{Policy: local.Policy.PeerProjection(), Availability: local.Availability}
+	return peerPolicyGetResult{ModelConfiguration: local.ModelConfiguration, Policy: local.Policy.PeerProjection(), Availability: local.Availability}
 }
 
 // setLocalPolicy validates, persists and applies a new policy. Availability and
@@ -812,7 +815,7 @@ func (b *Broker) dispatchPolicy(ctx context.Context, method string, p policyPara
 			}
 			return nil, &invalidParamsError{err}
 		}
-		return policySetResult{Policy: policy, policyActivation: b.activationOf(policy.Revision)}, nil
+		return policySetResult{ModelConfiguration: b.modelConfigurationFor(policy), Policy: policy, policyActivation: b.activationOf(policy.Revision)}, nil
 	case methodSetAvailability:
 		availability, err := b.setAvailabilityParams(ctx, p, nodepolicy.PausedLocally, "")
 		if err != nil {
@@ -848,6 +851,9 @@ func (b *Broker) relayPolicyToPeer(msg *Message, p policyParams) {
 	}
 	remote := remotePolicyMethods[msg.Method]
 	err := worker.RelayRequest(remote, msg.Params, func(result json.RawMessage, rpcErr *RPCError, err error) {
+		if err == nil && rpcErr == nil && msg.Method == methodPolicySet {
+			err = residentReadbackSupported(p.Policy, result)
+		}
 		switch {
 		case err != nil:
 			_ = b.codec.RespondError(msg.ID, -32000, err.Error())
@@ -863,10 +869,39 @@ func (b *Broker) relayPolicyToPeer(msg *Message, p policyParams) {
 	}
 }
 
+func residentReadbackSupported(request, result json.RawMessage) error {
+	var want map[string]json.RawMessage
+	var got struct {
+		Policy map[string]json.RawMessage `json:"policy"`
+	}
+	if json.Unmarshal(request, &want) != nil || json.Unmarshal(result, &got) != nil {
+		return fmt.Errorf("unsupported policy readback")
+	}
+	for _, key := range []string{"servedModels", "residentModels"} {
+		raw, present := want[key]
+		if !present {
+			continue
+		}
+		var refs, received []nodepolicy.Role
+		if json.Unmarshal(raw, &refs) != nil {
+			return fmt.Errorf("unsupported policy readback")
+		}
+		actual, exists := got.Policy[key]
+		if key == "residentModels" && len(refs) == 0 && !exists {
+			continue
+		}
+		if !exists || json.Unmarshal(actual, &received) != nil || !reflect.DeepEqual(refs, received) {
+			return fmt.Errorf("target does not preserve %s; served/resident edits are unsupported", key)
+		}
+	}
+	return nil
+}
+
 func (b *Broker) announceRemotePolicyChange(method, nodeID string, result json.RawMessage) {
 	var r struct {
-		Policy       json.RawMessage `json:"policy"`
-		Availability string          `json:"availability"`
+		ModelConfiguration *nodepolicy.ModelConfiguration `json:"modelConfiguration,omitempty"`
+		Policy             json.RawMessage                `json:"policy"`
+		Availability       string                         `json:"availability"`
 	}
 	if json.Unmarshal(result, &r) != nil {
 		return
@@ -874,7 +909,11 @@ func (b *Broker) announceRemotePolicyChange(method, nodeID string, result json.R
 	switch method {
 	case methodPolicySet:
 		if len(r.Policy) > 0 {
-			b.notifyClients(notifyPolicyChanged, map[string]any{"nodeId": nodeID, "policy": r.Policy})
+			payload := map[string]any{"nodeId": nodeID, "policy": r.Policy}
+			if r.ModelConfiguration != nil {
+				payload["modelConfiguration"] = r.ModelConfiguration
+			}
+			b.notifyClients(notifyPolicyChanged, payload)
 		}
 	case methodSetAvailability:
 		if r.Availability != "" {
@@ -975,7 +1014,7 @@ func (b *Broker) servePolicyRelay(ctx context.Context, req policyRelayRequest) (
 		if err != nil {
 			return nil, err
 		}
-		return map[string]any{"policy": policy.PeerProjection()}, nil
+		return map[string]any{"policy": policy.PeerProjection(), "modelConfiguration": b.modelConfigurationFor(policy)}, nil
 	}
 	// The peer sees what its policy:get shows of this node, which has no
 	// activation fields. A resume of a node paused on the node itself is
@@ -1007,6 +1046,9 @@ func (b *Broker) cancelPolicyRelay(raw json.RawMessage) {
 // policy. It consumes the policy relay's own notifications and reports true for
 // them; everything else is only observed and continues to subscribed clients.
 func (b *Broker) handlePolicyEngineNotification(source *engineManagerSource, method string, params json.RawMessage) bool {
+	if (method == engineModelsChangedMethod || method == engineIntentChanged) && !b.engineManagerSourceCurrent(source) {
+		return false
+	}
 	switch method {
 	case policyRelayRequestMethod:
 		b.handlePolicyRelay(source, params)
@@ -1017,16 +1059,17 @@ func (b *Broker) handlePolicyEngineNotification(source *engineManagerSource, met
 	case engineModelsChangedMethod:
 		var p struct {
 			Models struct {
+				Models         []string            `json:"models"`
 				LoadedByEngine map[string][]string `json:"loadedByEngine"`
 			} `json:"models"`
 		}
-		if json.Unmarshal(params, &p) == nil {
-			b.observeLoaded(p.Models.LoadedByEngine)
+		if json.Unmarshal(params, &p) == nil && (p.Models.Models != nil || p.Models.LoadedByEngine != nil) {
+			b.observeLoadedFrom(source, p.Models.LoadedByEngine)
 		}
 	case engineIntentChanged:
 		var p engineintent.Snapshot
 		if json.Unmarshal(params, &p) == nil && p.Validate() == nil {
-			b.observeIntent(p.EnabledByEngine)
+			b.observeIntentFrom(source, p.EnabledByEngine)
 		}
 	}
 	return false
@@ -1046,9 +1089,6 @@ func (b *Broker) observeEngineRunningFrom(source *engineManagerSource, engine st
 		r.running[engine] = true
 		if !was {
 			r.runningSince[engine] = r.now()
-		}
-		if _, ok := r.loaded[engine]; !ok {
-			r.loaded[engine] = []string{}
 		}
 	} else {
 		delete(r.running, engine)
@@ -1072,14 +1112,70 @@ func (b *Broker) observeEngineRunningFrom(source *engineManagerSource, engine st
 }
 
 // observeLoaded folds engine-manager's loadedByEngine into the residency. Only
-// engines that answered are present, so an absent engine keeps what it had; a
-// stop arrives separately as engine:state-changed.
+// engines that answered are present. An absent engine has unknown inventory;
+// an explicit empty slice establishes that no models are loaded.
 func (b *Broker) observeLoaded(loadedByEngine map[string][]string) {
-	if len(loadedByEngine) == 0 {
-		return
-	}
+	b.observeLoadedFrom(nil, loadedByEngine)
+}
+
+func (b *Broker) observeLoadedFrom(source *engineManagerSource, loadedByEngine map[string][]string) {
+	b.observeLoadedFor(source, b.policyProxy(), loadedByEngine)
+}
+
+func (b *Broker) observeLoadedFor(source *engineManagerSource, pp *proxyProcess, loadedByEngine map[string][]string) {
 	r := b.nodePolicyRuntime()
 	r.mu.Lock()
+	if source != nil && source != r.engineManagerSource {
+		r.mu.Unlock()
+		return
+	}
+	if r.models.loadedSource != r.engineManagerSource || r.models.loadedProxy != pp {
+		r.models.loadedRequests = nil
+	}
+	r.models.loadedSource = r.engineManagerSource
+	r.models.loadedProxy = pp
+	if r.models.loadedRequests == nil {
+		r.models.loadedRequests = make(map[nodepolicy.Role]nodepolicy.ResidentLoadOptions)
+	}
+	for ref := range r.models.loadedRequests {
+		if models, known := loadedByEngine[ref.Engine]; known && models != nil {
+			found := false
+			for _, model := range models {
+				if b.modelRef(ref.Engine, model) == ref {
+					found = true
+					break
+				}
+			}
+			if !found {
+				delete(r.models.loadedRequests, ref)
+			}
+		}
+	}
+	for _, ref := range b.residentRefs(r.current) {
+		if _, known := r.models.loadedRequests[ref]; known {
+			continue
+		}
+		for _, model := range loadedByEngine[ref.Engine] {
+			if b.modelRef(ref.Engine, model) == ref {
+				if pr, qualified := b.residentProfile(r.current, ref); qualified {
+					r.models.loadedRequests[ref] = residentLoadRequest(pr)
+				}
+				break
+			}
+		}
+	}
+	r.models.loadedIdentity = r.modelIdentityLocked()
+	for ref := range r.models.confirmed {
+		found := false
+		for _, model := range loadedByEngine[ref.Engine] {
+			if b.modelRef(ref.Engine, model) == ref {
+				found = true
+			}
+		}
+		if !found {
+			delete(r.models.confirmed, ref)
+		}
+	}
 	now := r.now()
 	for engine, models := range loadedByEngine {
 		if !r.running[engine] {
@@ -1093,15 +1189,28 @@ func (b *Broker) observeLoaded(loadedByEngine map[string][]string) {
 				break
 			}
 		}
-		r.loaded[engine] = append([]string{}, models...)
+	}
+	r.loaded = make(map[string][]string, len(loadedByEngine))
+	for engine, models := range loadedByEngine {
+		if models != nil {
+			r.loaded[engine] = append([]string{}, models...)
+		}
 	}
 	r.mu.Unlock()
 	b.schedulePolicyPush(pushResidency)
 }
 
 func (b *Broker) observeIntent(enabledByEngine map[string]bool) {
+	b.observeIntentFrom(nil, enabledByEngine)
+}
+
+func (b *Broker) observeIntentFrom(source *engineManagerSource, enabledByEngine map[string]bool) {
 	r := b.nodePolicyRuntime()
 	r.mu.Lock()
+	if source != nil && source != r.engineManagerSource {
+		r.mu.Unlock()
+		return
+	}
 	r.intent = make(map[string]bool, len(enabledByEngine))
 	for k, v := range enabledByEngine {
 		r.intent[k] = v
@@ -1136,7 +1245,7 @@ func (b *Broker) refreshEnginePolicySnapshotFrom(w *rpcWorker, source *engineMan
 	if result, rpcErr, err := w.CallNoTimeout(ctx, engineIntentMethod, nil); err == nil && rpcErr == nil {
 		var p engineintent.Snapshot
 		if json.Unmarshal(result, &p) == nil && p.Validate() == nil {
-			b.observeIntent(p.EnabledByEngine)
+			b.observeIntentFrom(source, p.EnabledByEngine)
 		}
 	}
 	if result, rpcErr, err := w.CallNoTimeout(ctx, "engine:get-installed", nil); err == nil && rpcErr == nil {
@@ -1152,12 +1261,14 @@ func (b *Broker) refreshEnginePolicySnapshotFrom(w *rpcWorker, source *engineMan
 			}
 		}
 	}
-	if result, rpcErr, err := w.CallNoTimeout(ctx, "engine:models", nil); err == nil && rpcErr == nil {
+	inventoryProxy := b.policyProxy()
+	if result, rpcErr, err := w.CallNoTimeout(ctx, "engine:models", nil); err == nil && rpcErr == nil && b.policyProxy() == inventoryProxy {
 		var p struct {
+			Models         []string            `json:"models"`
 			LoadedByEngine map[string][]string `json:"loadedByEngine"`
 		}
-		if json.Unmarshal(result, &p) == nil {
-			b.observeLoaded(p.LoadedByEngine)
+		if json.Unmarshal(result, &p) == nil && (p.Models != nil || p.LoadedByEngine != nil) {
+			b.observeLoadedFor(source, inventoryProxy, p.LoadedByEngine)
 		}
 	}
 }
@@ -1199,6 +1310,7 @@ func (r *policyRuntime) releasePush() { <-r.pushSlot }
 
 // schedulePolicyPush sends one kind of state to the proxy in the background.
 func (b *Broker) schedulePolicyPush(kind string) {
+	b.signalModelConfig()
 	r := b.nodePolicyRuntime()
 	r.mu.Lock()
 	if r.pendingPush[kind] {
@@ -1535,12 +1647,14 @@ func (b *Broker) handleAdmissionNotification(method string, params json.RawMessa
 		return true
 	case nodepolicy.NotifyStrictReadiness:
 		b.observeStrictReadiness(params)
+		b.signalModelConfig()
 		return true
 	}
 	return false
 }
 
 func (b *Broker) observeAdmission(st nodepolicy.AdmissionState) {
+	defer b.signalModelConfig()
 	r := b.nodePolicyRuntime()
 	r.mu.Lock()
 	activeChanged := r.admission.Active != st.Active
@@ -1614,6 +1728,15 @@ func (b *Broker) unloadModels(engine string, models []string, reason string) {
 	for _, model := range models {
 		if model == "" {
 			continue
+		}
+		if reason != "pause" {
+			r := b.nodePolicyRuntime()
+			r.mu.Lock()
+			protected := b.protectedResidentLocked(engine, model)
+			r.mu.Unlock()
+			if protected {
+				continue
+			}
 		}
 		if _, err := b.callEngine(context.Background(), engineUnloadModelMethod, map[string]string{"engine": engine, "model": model}); err != nil {
 			slog.Warn("model unload failed", "engine", engine, "model", model, "reason", reason, "err", err)

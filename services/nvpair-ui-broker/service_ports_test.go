@@ -12,6 +12,7 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -63,12 +64,25 @@ func servicePortWorkers(b *Broker) []servicePortWorker {
 // exits on stdin EOF, which is all these spawn paths need from a child.
 func buildServicePortFixture(t *testing.T) string {
 	t.Helper()
-	source := filepath.Join(t.TempDir(), "main.go")
-	if err := os.WriteFile(source, []byte(engineManagerPortScannerFixture), 0600); err != nil {
-		t.Fatalf("write fixture: %v", err)
+	portScannerOnce.Do(func() {
+		if err := os.WriteFile(portScannerSource, []byte(engineManagerPortScannerFixture), 0600); err != nil {
+			portScannerErr = err
+			return
+		}
+		portScannerErr = buildPortTestBinary(portScannerBinary, ".", portScannerSource)
+	})
+	if portScannerErr != nil {
+		t.Fatalf("build scanner fixture: %v", portScannerErr)
 	}
-	return buildEngineManagerPortTestBinary(t, "ports-spawn", "scanner", ".", source)
+	return portScannerBinary
 }
+
+var (
+	portScannerOnce   sync.Once
+	portScannerBinary string
+	portScannerSource string
+	portScannerErr    error
+)
 
 func cachedRegistrations(b *Broker) map[noderec.ServiceKey]int {
 	got := map[noderec.ServiceKey]int{}

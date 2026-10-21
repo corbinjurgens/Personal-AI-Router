@@ -262,6 +262,151 @@ func TestServicePolicy(t *testing.T) {
 	})
 }
 
+func TestServicePolicyModelConfiguration(t *testing.T) {
+	f := newServiceFixture(t)
+	f.start()
+	command := f.readyClient()
+	setServiceAvailability(t, command, nodepolicy.Paused)
+	observer := f.readyClient()
+	want := servicePolicy(t, command)
+	want.Profiles = append(want.Profiles, fixtureResidentProfile())
+	want.ServedModels = nodepolicy.ServedModels{{Engine: "llamacpp", Model: "sr-status-fixture"}}
+	want.ResidentModels = nodepolicy.ResidentModels{{Engine: "llamacpp", Model: "sr-status-fixture"}}
+	result := command.mustPolicyCall(t, "241", want)
+	var accepted struct {
+		Policy nodepolicy.Policy `json:"policy"`
+	}
+	if result.Error != nil {
+		t.Fatalf("save paused resident declaration: %+v", result.Error)
+	}
+	if err := json.Unmarshal(result.Result, &accepted); err != nil {
+		t.Fatalf("decode paused resident declaration: %v", err)
+	}
+	want.Revision = accepted.Policy.Revision
+	if !reflect.DeepEqual(accepted.Policy, want) {
+		t.Fatal("policy:set changed the paused resident declaration")
+	}
+	assertFixtureResidentConfiguration(t, result.Result, want.Revision)
+	assertFixtureUnknownLoaded(t, result.Result, want.Revision)
+	readback := command.mustCall(t, "242", "policy:get", nil)
+	assertFixtureResidentConfiguration(t, readback.Result, want.Revision)
+	assertFixtureUnknownLoaded(t, readback.Result, want.Revision)
+	event := fixturePolicyConfigurationChange(t, observer, want.Revision)
+	assertFixtureResidentConfiguration(t, event, want.Revision)
+	assertFixtureUnknownLoaded(t, event, want.Revision)
+	assertStoredPolicy(t, f.policyPath(), want)
+
+	// Removing the preference does not turn unknown inventory into loaded evidence.
+	want.ServedModels = nodepolicy.ServedModels{}
+	want.ResidentModels = nil
+	result = command.mustPolicyCall(t, "243", want)
+	if result.Error != nil {
+		t.Fatalf("remove resident declaration: %+v", result.Error)
+	}
+	// Policy.UnmarshalJSON keeps omitted fields, so decode into a fresh value.
+	accepted.Policy = nodepolicy.Policy{}
+	if err := json.Unmarshal(result.Result, &accepted); err != nil {
+		t.Fatalf("decode removed resident declaration: %v", err)
+	}
+	want.Revision = accepted.Policy.Revision
+	if !reflect.DeepEqual(accepted.Policy, want) {
+		t.Fatal("policy:set lost the explicit empty served declaration")
+	}
+	configuration := decodeFixtureModelConfiguration(t, result.Result, want.Revision)
+	if len(configuration.Models) != 0 {
+		t.Fatalf("explicit empty served set retained %d configuration entries", len(configuration.Models))
+	}
+	readback = command.mustCall(t, "244", "policy:get", nil)
+	configuration = decodeFixtureModelConfiguration(t, readback.Result, want.Revision)
+	if len(configuration.Models) != 0 {
+		t.Fatal("policy:get retained removed model configuration")
+	}
+	event = fixturePolicyConfigurationChange(t, observer, want.Revision)
+	configuration = decodeFixtureModelConfiguration(t, event, want.Revision)
+	if len(configuration.Models) != 0 {
+		t.Fatal("policy:changed retained removed model configuration")
+	}
+	assertStoredPolicy(t, f.policyPath(), want)
+}
+
+// This profile is a declaration only; it supplies no live qualification or
+// loaded/effective-envelope evidence and must never produce satisfied status.
+func fixtureResidentProfile() nodepolicy.Profile {
+	return nodepolicy.Profile{
+		Name: "sr-status", Engine: "llamacpp", Model: "sr-status-fixture",
+		ContextTokens: 8192, MaxOutputTokens: 1024, MaxConcurrent: 1, MemoryBytes: 1,
+		Qualification: &nodepolicy.QualificationRef{ID: "fixture-only-sr-status", Revision: "1"},
+	}
+}
+
+func decodeFixtureModelConfiguration(t *testing.T, raw []byte, revision string) nodepolicy.ModelConfiguration {
+	t.Helper()
+	var envelope struct {
+		ModelConfiguration *nodepolicy.ModelConfiguration `json:"modelConfiguration"`
+	}
+	if err := json.Unmarshal(raw, &envelope); err != nil {
+		t.Fatalf("decode model configuration: %v", err)
+	}
+	if envelope.ModelConfiguration == nil {
+		t.Fatal("current broker omitted modelConfiguration")
+	}
+	configuration := *envelope.ModelConfiguration
+	if err := configuration.Validate(); err != nil {
+		t.Fatalf("invalid model configuration: %v", err)
+	}
+	if configuration.PolicyRevision != revision {
+		t.Fatalf("model configuration revision=%q, want %q", configuration.PolicyRevision, revision)
+	}
+	return configuration
+}
+
+func assertFixtureResidentConfiguration(t *testing.T, raw []byte, revision string) {
+	t.Helper()
+	configuration := decodeFixtureModelConfiguration(t, raw, revision)
+	if len(configuration.Models) != 1 {
+		t.Fatalf("model configuration has %d entries, want one desired reference", len(configuration.Models))
+	}
+	entry := configuration.Models[0]
+	if entry.Engine != "llamacpp" || entry.Model != "sr-status-fixture" || !entry.DesiredResident {
+		t.Fatalf("configuration lost desired resident reference: %+v", entry)
+	}
+	if entry.ObservedLoaded != nil && *entry.ObservedLoaded || entry.State == nodepolicy.ModelStateSatisfied {
+		t.Fatalf("absent engine supplied loaded evidence or satisfaction: %+v", entry)
+	}
+}
+
+func assertFixtureUnknownLoaded(t *testing.T, raw []byte, revision string) {
+	t.Helper()
+	configuration := decodeFixtureModelConfiguration(t, raw, revision)
+	for _, entry := range configuration.Models {
+		if entry.ObservedLoaded != nil {
+			t.Fatal("fixture without an engine-manager published known loaded inventory")
+		}
+	}
+}
+
+func fixturePolicyConfigurationChange(t *testing.T, c *serviceRPCClient, revision string) []byte {
+	t.Helper()
+	var decodeErr error
+	m, err := c.next(serviceCallTimeout, func(m *jsonrpc.Message) bool {
+		if !m.IsNotification() || m.Method != "policy:changed" {
+			return false
+		}
+		var event struct {
+			Policy nodepolicy.Policy `json:"policy"`
+		}
+		decodeErr = json.Unmarshal(m.Params, &event)
+		return decodeErr != nil || event.Policy.Revision == revision
+	})
+	if err != nil {
+		t.Fatalf("wait for policy configuration revision %q: %v", revision, err)
+	}
+	if decodeErr != nil {
+		t.Fatalf("decode policy configuration notification: %v", decodeErr)
+	}
+	return m.Params
+}
+
 func fetchServicePolicy(t *testing.T, c *serviceRPCClient) servicePolicySnapshot {
 	t.Helper()
 	return decodeServicePolicySnapshot(t, c.mustCall(t, "201", "policy:get", nil))

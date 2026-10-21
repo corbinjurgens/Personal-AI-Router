@@ -137,6 +137,7 @@ func (f *facade) handleClusterIngress(w http.ResponseWriter, r *http.Request) {
 // requestOptions are merged in, and only then is the request forwarded. Every
 // other route is forwarded as before.
 func (f *facade) serveIngress(w http.ResponseWriter, r *http.Request, peer string) {
+	start := time.Now()
 	if isInferenceRequest(f.profile, r.Method, r.URL.Path) && !f.host.routingIdentityReady() {
 		writeIngressError(w, http.StatusServiceUnavailable, "identity-unavailable", "routing identity is unavailable")
 		return
@@ -144,6 +145,10 @@ func (f *facade) serveIngress(w http.ResponseWriter, r *http.Request, peer strin
 	strict, strictErr := parseStrictAdmission(r.Header)
 	if strictErr != nil {
 		writeIngressError(w, http.StatusBadRequest, "strict-admission", strictErr.Error())
+		return
+	}
+	if strict != nil && strict.Request.OriginNodeID != peer {
+		writeIngressError(w, http.StatusForbidden, "strict-admission", "strict request origin does not match the authenticated peer")
 		return
 	}
 	if strict != nil && !isInferenceRequest(f.profile, r.Method, r.URL.Path) {
@@ -163,14 +168,24 @@ func (f *facade) serveIngress(w http.ResponseWriter, r *http.Request, peer strin
 		return
 	}
 
+	r = r.WithContext(context.WithValue(r.Context(), routingDeadlineContextKey{}, start.Add(jobDeadline)))
 	r, buffers := f.host.ownInferenceBuffers(r)
 	w = &inferenceErrorWriter{ResponseWriter: w, ctx: r.Context()}
 	defer buffers.close()
-	body, model, err := bufferBodyAndModel(w, r, f.host.requestBodyLimit())
+	ctx, cancel := context.WithCancel(r.Context())
+	defer cancel()
+	r = r.WithContext(ctx)
+	bodyCtx, stopBodyPreparation := routingPreparationContext(r.Context())
+	body, model, err := bufferInferenceBody(w, r.WithContext(bodyCtx), f.host.requestBodyLimit())
+	stopBodyPreparation()
 	if err != nil {
 		writeIngressError(w, bufferRequestStatus(err), "request-body", "request body could not be buffered")
 		return
 	}
+	sink := newResponseSink(w, cancel)
+	w = sink
+	r = r.WithContext(withResponseSink(ctx, sink))
+	ctx = r.Context()
 	if err := validateRequestIdentifiers(r, body); err != nil {
 		writeIngressError(w, bufferRequestStatus(err), "request-identifier", err.Error())
 		return
@@ -191,16 +206,24 @@ func (f *facade) serveIngress(w http.ResponseWriter, r *http.Request, peer strin
 		f.serveStrictLocal(w, r, body, model, *strict, true)
 		return
 	}
+	// Terminal ingress has one local transport and sink, not an origin key or
+	// registry entry. Reuse the same request arbitration without another driver.
+	owner := newRoutingRequest(func(string) { cancel() })
+	owner.deadline, _ = ctx.Value(routingDeadlineContextKey{}).(time.Time)
+	owner.sink = sink
+	defer owner.finish()
+	stopCancellation := context.AfterFunc(ctx, func() { owner.cancelWithReason("destination request cancelled") })
+	defer stopCancellation()
+	owner.watchPreOutput(ctx)
 	// The execution's own context, so cancelActive can stop it without the
 	// peer having gone anywhere.
-	ctx, cancel := context.WithCancel(r.Context())
-	defer cancel()
 	rawBody := body
 	preparedCtx := ctx
 	releaseBody, releasePreparation := func() {}, func() {}
 	defer func() { releasePreparation(); releaseBody() }()
 	admissionStarted := time.Now()
-	decision := f.host.admission.admit(ctx, admissionRequest{
+	prepareCtx, stopPreparation := routingPreparationContext(ctx)
+	decision := f.host.admission.admit(prepareCtx, admissionRequest{
 		engine:  f.profile.Name,
 		model:   model,
 		waitCap: parseAdmissionWait(r.Header),
@@ -230,7 +253,10 @@ func (f *facade) serveIngress(w http.ResponseWriter, r *http.Request, peer strin
 			return err
 		},
 	})
+	stopPreparation()
+	preparedCtx = rebasePerformancePreparation(ctx, preparedCtx)
 	if decision.err != nil {
+		decision.err = inferencePreparationRefusal(decision.err)
 		if ctx.Err() == nil {
 			if errors.Is(decision.err, errAmbiguousModel) {
 				writeIngressError(w, http.StatusBadRequest, "ambiguous-model", ambiguousModelMessage)
@@ -263,6 +289,18 @@ func (f *facade) serveIngress(w http.ResponseWriter, r *http.Request, peer strin
 		writeIngressError(w, http.StatusBadRequest, "invalid-stream", "invalid effective stream flag")
 		return
 	}
+	attemptCtx, cancelAttempt := context.WithCancel(ctx)
+	defer cancelAttempt()
+	attempt, err := owner.newDispatchAttempt(attemptCtx, cancelAttempt, "")
+	if err != nil {
+		writeIngressError(w, http.StatusServiceUnavailable, "request-deadline", "inference request deadline expired")
+		return
+	}
+	defer func() {
+		result := sink.result()
+		attempt.finished(publicAttemptTerminal{ProtocolComplete: result.ProtocolComplete, Delivered: result.DeliveryComplete})
+	}()
+	preparedCtx = rebasePerformancePreparation(attemptCtx, preparedCtx)
 	out := r.WithContext(preparedCtx)
 	out.Header = r.Header.Clone()
 	out.Header.Del(nodepolicy.AdmissionWaitHeader)
@@ -279,31 +317,68 @@ func (f *facade) serveIngress(w http.ResponseWriter, r *http.Request, peer strin
 		return
 	}
 	p.Transport = performanceTransport{RoundTripper: p.Transport, attempt: performance}
+	upstreamError := p.ErrorHandler
+	p.ErrorHandler = func(ew http.ResponseWriter, req *http.Request, err error) {
+		if owner.deadlineExpired() {
+			writeIngressError(ew, http.StatusServiceUnavailable, "request-deadline", "inference request deadline expired")
+			return
+		}
+		upstreamError(ew, req, err)
+	}
 	sc := &statusCapture{ResponseWriter: w, status: http.StatusOK, idle: idleClientWriteTimeout}
 	p.ModifyResponse = func(resp *http.Response) error {
+		if resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices {
+			if !attempt.acceptResponse() {
+				return context.Canceled
+			}
+			resp.Body = &routingResponseBody{ReadCloser: resp.Body, attempt: attempt}
+		}
 		reader, err := installResponseStream(resp, streamRequest, r.Context(), 0, performance)
 		if err != nil {
-			return err
+			if !errors.Is(err, errStreamFrameBudget) {
+				return err
+			}
+			if closeErr := resp.Body.Close(); closeErr != nil {
+				slog.Debug("stream bootstrap body close failed", "err", closeErr)
+			}
+			resp.Body = sink.interruptedBody(streamRequest.protocol, streamInterruptReasonBudget)
+			resp.ContentLength = -1
+			clearOriginStreamIntegrity(resp.Header)
+			clearOriginStreamIntegrity(resp.Trailer)
 		}
 		setPeerStreamFraming(resp, streamRequest)
 		sc.upstreamBody = &originResponseBody{ReadCloser: resp.Body, response: resp, managed: reader != nil}
-		resp.Body = sc.upstreamBody
+		resp.Body = destinationResponseFraming(resp, sc.upstreamBody, streamRequest, reader, sink)
 		return nil
 	}
 	returned := false
-	defer func() { performance.finish(sc, returned) }()
+	defer func() {
+		if !returned && sc.upstreamBody != nil {
+			_ = sc.upstreamBody.Close()
+		}
+		performance.finish(sc, returned)
+	}()
 	p.ServeHTTP(sc, out)
+	_ = sc.FlushError()
 	returned = true
 }
 
 func setPeerStreamFraming(resp *http.Response, s originStreamRequest) {
 	resp.Header.Del(peerStreamFramingHeader)
 	resp.Trailer.Del(peerStreamFramingHeader)
-	if resp.StatusCode != http.StatusSwitchingProtocols {
+	if s.protocol == streamProtocolUnknown && resp.StatusCode != http.StatusSwitchingProtocols {
 		resp.Body = &originResponseBody{ReadCloser: resp.Body, response: resp}
 	}
 	if s.protocol != streamProtocolUnknown {
 		resp.Header.Set(peerStreamFramingHeader, s.peerMetadata())
+		// HTTP/1.1 needs chunked framing to carry the disposition trailer,
+		// including for fixed-length nonstreaming engine responses.
+		resp.ContentLength = -1
+		resp.Header.Del("Content-Length")
+		if resp.Trailer == nil {
+			resp.Trailer = make(http.Header)
+		}
+		resp.Trailer[http.CanonicalHeaderKey(peerStreamFramingHeader)] = nil
 	}
 }
 
@@ -364,7 +439,10 @@ func (f *facade) serveStrictLocal(w http.ResponseWriter, r *http.Request, body [
 	}
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
-	validated, err := f.host.admission.qualifyStrict(f.profile.Name, model, r.URL.Path, body, req.Identity, ctx)
+	prepareCtx, stopPreparation := routingPreparationContext(ctx)
+	defer stopPreparation()
+	validated, err := f.host.admission.qualifyStrict(f.profile.Name, model, r.URL.Path, body, req.Identity, prepareCtx)
+	err = inferencePreparationRefusal(err)
 	if errors.Is(err, errAmbiguousModel) {
 		writeIngressError(w, http.StatusBadRequest, "ambiguous-model", ambiguousModelMessage)
 		return
@@ -393,13 +471,13 @@ func (f *facade) serveStrictLocal(w http.ResponseWriter, r *http.Request, body [
 		writeIngressError(w, http.StatusBadRequest, "ambiguous-model", ambiguousModelMessage)
 		return
 	}
-	preparedCtx, releasePreparation, err := preparePerformanceBuffers(ctx, body)
+	preparedCtx, releasePreparation, err := preparePerformanceBuffers(prepareCtx, body)
 	if err != nil {
 		writeIngressError(w, bufferRequestStatus(err), "inference-buffer", "inference request could not be prepared")
 		return
 	}
 	defer releasePreparation()
-	ticket, err := f.host.admission.AdmitStrict(ctx, f.profile.Name, model, req, validated.generation)
+	ticket, err := f.host.admission.AdmitStrict(prepareCtx, f.profile.Name, model, req, validated.generation)
 	if err != nil {
 		writeStrictAdmissionError(w, err)
 		return
@@ -411,6 +489,10 @@ func (f *facade) serveStrictLocal(w http.ResponseWriter, r *http.Request, body [
 	f.host.admission.mu.Lock()
 	t.base.cancel = cancel
 	f.host.admission.mu.Unlock()
+	// The request's remaining preparation bound also covers strict pre-output
+	// waits. Stop it at the first body, alongside the existing strict timer.
+	stopRequestDeadline := context.AfterFunc(prepareCtx, cancel)
+	defer stopRequestDeadline()
 	stop := t.watchPreOutput(cancel)
 	defer stop()
 	target, ok := f.localBackendTarget()
@@ -423,6 +505,7 @@ func (f *facade) serveStrictLocal(w http.ResponseWriter, r *http.Request, body [
 		return
 	}
 	evidence = strictUncertain
+	preparedCtx = rebasePerformancePreparation(ctx, preparedCtx)
 	out := r.WithContext(preparedCtx)
 	out.Header = r.Header.Clone()
 	stripInternalRoutingHeaders(out.Header)
@@ -441,6 +524,9 @@ func (f *facade) serveStrictLocal(w http.ResponseWriter, r *http.Request, body [
 		f.host.admission.mu.Lock()
 		exhausted := !f.host.admission.strict.now().Before(t.deadline)
 		f.host.admission.mu.Unlock()
+		if deadline, ok := prepareCtx.Deadline(); ok {
+			exhausted = exhausted || !time.Now().Before(deadline)
+		}
 		if exhausted {
 			writeStrictAdmissionError(ew, context.DeadlineExceeded)
 			return
@@ -457,6 +543,9 @@ func (f *facade) serveStrictLocal(w http.ResponseWriter, r *http.Request, body [
 		f.host.admission.mu.Lock()
 		remaining := t.deadline.Sub(f.host.admission.strict.now())
 		f.host.admission.mu.Unlock()
+		if deadline, ok := prepareCtx.Deadline(); ok {
+			remaining = min(remaining, time.Until(deadline))
+		}
 		if remaining <= 0 {
 			return context.DeadlineExceeded
 		}
@@ -465,18 +554,38 @@ func (f *facade) serveStrictLocal(w http.ResponseWriter, r *http.Request, body [
 			return err
 		}
 		resp.Body = b
+		stopRequestDeadline()
 		stop()
 		reader, err := installResponseStream(resp, streamRequest, r.Context(), 0, performance)
 		if err != nil {
-			return err
+			sink := responseSinkFrom(r.Context())
+			if !errors.Is(err, errStreamFrameBudget) || sink == nil {
+				return err
+			}
+			if closeErr := resp.Body.Close(); closeErr != nil {
+				slog.Debug("stream bootstrap body close failed", "err", closeErr)
+			}
+			resp.Body = sink.interruptedBody(streamRequest.protocol, streamInterruptReasonBudget)
+			resp.ContentLength = -1
+			clearOriginStreamIntegrity(resp.Header)
+			clearOriginStreamIntegrity(resp.Trailer)
 		}
 		sc.upstreamBody = &originResponseBody{ReadCloser: resp.Body, response: resp, managed: reader != nil}
 		resp.Body = sc.upstreamBody
+		if peer {
+			resp.Body = destinationResponseFraming(resp, sc.upstreamBody, streamRequest, reader, responseSinkFrom(r.Context()))
+		}
 		return nil
 	}
 	returned := false
-	defer func() { performance.finish(sc, returned) }()
+	defer func() {
+		if !returned && sc.upstreamBody != nil {
+			_ = sc.upstreamBody.Close()
+		}
+		performance.finish(sc, returned)
+	}()
 	p.ServeHTTP(sc, out)
+	_ = sc.FlushError()
 	returned = true
 }
 

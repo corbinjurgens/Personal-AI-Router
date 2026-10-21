@@ -1,6 +1,6 @@
 {
   "artifact": {
-    "version": 1,
+    "version": 2,
     "qualifications": [
       {
         "id": "synthetic-fixture",
@@ -9,12 +9,17 @@
         "model": "fixture-model:latest",
         "modelDigests": ["1111111111111111111111111111111111111111111111111111111111111111"],
         "launchDigests": ["2222222222222222222222222222222222222222222222222222222222222222"],
-        "requestOptions": {"options": {"num_ctx": 4096}, "keep_alive": "5m"},
+        "requestOptions": {"seed": 7, "frequency_penalty": 0},
         "tokenizer": "synthetic-byte-level-bpe",
         "chatTemplate": "synthetic-chatml",
         "contextTokens": 4096,
         "maxOutputTokens": 1024,
         "routes": ["/v1/chat/completions"],
+        "shapes": {
+          "tools": true,
+          "structuredOutput": ["json_object", "json_schema"],
+          "reasoningReplay": false
+        },
         "accounting": {
           "method": "utf8-bytes",
           "requestOverheadTokens": 8,

@@ -29,15 +29,17 @@ import (
 // the push that activates the revision, so the announcement carries the result;
 // an activation change of an unchanged revision is announced the same way.
 func (b *Broker) notifyPolicyChanged() {
+	b.signalModelConfig()
 	r := b.nodePolicyRuntime()
 	r.publishMu.Lock()
 	defer r.publishMu.Unlock()
 	local := b.localPolicy()
 	b.notifyClients(notifyPolicyChanged, struct {
-		NodeID string            `json:"nodeId"`
-		Policy nodepolicy.Policy `json:"policy"`
+		NodeID             string                        `json:"nodeId"`
+		Policy             nodepolicy.Policy             `json:"policy"`
+		ModelConfiguration nodepolicy.ModelConfiguration `json:"modelConfiguration"`
 		policyActivation
-	}{b.nodeID, local.Policy, local.policyActivation})
+	}{b.nodeID, local.Policy, local.ModelConfiguration, local.policyActivation})
 }
 
 // notifyAvailability tells clients the live availability and active count.
@@ -86,6 +88,7 @@ func (b *Broker) refreshStrictAdvertisement() {
 // under the projection lock too, so a projection that saw a running proxy can
 // never follow one that saw it gone.
 func (b *Broker) sendNodeProjection(onlyOnStrictChange bool) {
+	b.signalModelConfig()
 	r := b.nodePolicyRuntime()
 	r.projectionMu.Lock()
 	defer r.projectionMu.Unlock()

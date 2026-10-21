@@ -213,39 +213,36 @@ func (m *Manager) runResident(ctx context.Context, msg *Message) {
 	m.codec.Respond(msg.ID, result)
 }
 
-// residentLoadCall accepts only the explicit, prompt-free Ollama load protocol.
-// Fixed extras cannot silently override the profile or add inference input.
+// residentLoadCall accepts only an explicit, prompt-free manifest load shape.
+// Native allocation is validated separately; request options cannot resize it.
 func (e *Executor) residentLoadCall(p nodepolicy.ReconcileResidentParams) (Action, string, json.RawMessage, bool) {
 	m, ok := e.reg.Get(p.Engine)
-	if !ok || m.FamilyOrDefault() != "ollama" || p.Load.Validate() != nil {
+	if !ok || p.Load.Validate() != nil {
 		return Action{}, "", nil, false
 	}
-	b, ok := m.Operations[engines.OperationLoad]
-	if !ok || b.modelParam() != "model" {
+	b, ok := m.operationBinding(engines.OperationLoad)
+	_, declared := m.Operations[engines.OperationLoad]
+	if !ok || !declared || b.modelParam() != "model" || len(b.Params) != 0 {
 		return Action{}, "", nil, false
 	}
 	a, ok := m.Actions[b.Action]
-	if !ok || a.HTTP == nil || a.HTTP.Method != http.MethodPost || a.HTTP.Path != "/api/generate" || a.HTTP.ParamsIn != "" ||
-		a.RestartAfter || len(a.Cmd) != 0 || a.RemovePath != nil || a.ModelResolution != "" || a.ProgressProtocol != "" || m.mutatesModelContent(b.Action) {
+	if !ok || !residentSafeHTTP(m, b.Action, a, http.MethodPost) {
 		return Action{}, "", nil, false
 	}
-	for key, value := range b.Params {
-		if key != "stream" || !bytes.Equal(bytes.TrimSpace(value), []byte("false")) {
-			return Action{}, "", nil, false
-		}
+	var schema map[string]string
+	if json.Unmarshal(a.HTTP.BodySchema, &schema) != nil || len(schema) != 1 || schema["model"] != "string" {
+		return Action{}, "", nil, false
 	}
-	// Ollama accepts numeric keep_alive as seconds, and num_ctx as an integer.
 	body, err := json.Marshal(struct {
-		Model     string `json:"model"`
-		Stream    bool   `json:"stream"`
-		KeepAlive int    `json:"keep_alive"`
-		Options   struct {
-			Context int `json:"num_ctx"`
-		} `json:"options"`
-	}{Model: engines.NormalizeModelName(p.Model, m.ModelNamingOrDefault()), KeepAlive: p.Load.KeepAliveSeconds, Options: struct {
-		Context int `json:"num_ctx"`
-	}{p.Load.ContextLength}})
+		Model string `json:"model"`
+	}{Model: engines.NormalizeModelName(p.Model, m.ModelNamingOrDefault())})
 	return a, b.Action, body, err == nil
+}
+
+func residentSafeHTTP(m *Manifest, name string, a Action, method string) bool {
+	return a.HTTP != nil && a.HTTP.Method == method && a.HTTP.Path != "" && a.HTTP.ParamsIn == "" &&
+		!a.RestartAfter && len(a.Cmd) == 0 && a.RemovePath == nil && a.ModelResolution == "" &&
+		a.ProgressProtocol == "" && !m.mutatesModelContent(name)
 }
 
 func (e *Executor) residentIdentity(p nodepolicy.ReconcileResidentParams) bool {
@@ -340,6 +337,9 @@ func (e *Executor) residentCheck(ctx context.Context, p nodepolicy.ReconcileResi
 	st.mu.Lock()
 	serving := st.plat.Runtime.Serving != nil
 	st.mu.Unlock()
+	if !serving {
+		return "unqualified"
+	}
 	if serving {
 		envelope, id, err := e.currentServingEnvelope(ctx, p.Engine, p.Model)
 		if err != nil || id.EngineRunID != p.Identity.EngineRunID || id.ModelDigests[p.Model] != p.Identity.ModelDigest {
@@ -349,13 +349,15 @@ func (e *Executor) residentCheck(ctx context.Context, p nodepolicy.ReconcileResi
 		if !residentConfiguredContext(p, m.ModelNamingOrDefault(), readback) {
 			return "unqualified"
 		}
+		if !servingRetentionDisabled(envelope) || envelope.RouterCapacity < int64(p.DeclaredResidentCount) {
+			return "unsupported-load"
+		}
 	}
 	if _, _, _, ok := e.residentLoadCall(p); !ok {
 		return "unsupported-load"
 	}
 	read, ok := m.Actions["loaded_models"]
-	if !ok || read.Result == nil || read.HTTP == nil || read.HTTP.Method != http.MethodGet || read.HTTP.Path != "/api/ps" ||
-		read.RestartAfter || len(read.Cmd) != 0 || read.RemovePath != nil || read.ModelResolution != "" || read.ProgressProtocol != "" || m.mutatesModelContent("loaded_models") {
+	if !ok || read.Result == nil || read.Result.Match == nil || read.Result.Array == "" || read.Result.Field == "" || !residentSafeHTTP(m, "loaded_models", read, http.MethodGet) || len(read.HTTP.BodySchema) != 0 {
 		return "unsupported-load"
 	}
 	return ""
@@ -428,17 +430,18 @@ func (e *Executor) executeResident(ctx context.Context, p nodepolicy.ReconcileRe
 		return refused
 	}
 	defer end()
+	a, action, body, ok := e.residentLoadCall(p)
+	st, err := e.state(p.Engine)
+	if !ok || err != nil || e.checkServingLoad(st, action, body) != nil {
+		logRefusal("unsupported-load", slog.LevelInfo)
+		return refused
+	}
 	done, err := e.admitMutation(p.Engine)
 	if err != nil {
 		logRefusal("mutation-refused", slog.LevelInfo)
 		return refused
 	}
 	defer done()
-	st, err := e.state(p.Engine)
-	if err != nil {
-		logRefusal(string(nodepolicy.ModelReasonEngineOff), slog.LevelInfo)
-		return refused
-	}
 	// E3 tracks us while waiting for the lifecycle lock. No content guard:
 	// residency never changes installed content or withdraws B2 identity.
 	if !residentLock(ctx, &st.opMu) {
@@ -446,6 +449,12 @@ func (e *Executor) executeResident(ctx context.Context, p nodepolicy.ReconcileRe
 		return refused
 	}
 	defer st.opMu.Unlock()
+	ctx, release, err := e.guardServingLoadLocked(ctx, st, action, body)
+	if err != nil {
+		logRefusal("unsupported-load", slog.LevelInfo)
+		return refused
+	}
+	defer release()
 	if reason := e.residentCheck(ctx, p); reason != "" {
 		logRefusal(reason, slog.LevelInfo)
 		return refused
@@ -454,13 +463,8 @@ func (e *Executor) executeResident(ctx context.Context, p nodepolicy.ReconcileRe
 		logRefusal(contextReason(), slog.LevelInfo)
 		return refused
 	}
-	a, action, body, ok := e.residentLoadCall(p)
-	if !ok || e.residentParent == nil {
-		if !ok {
-			logRefusal(string(nodepolicy.ModelReasonUnsupportedLoad), slog.LevelInfo)
-		} else {
-			logRefusal("dispatch-unavailable", slog.LevelWarn)
-		}
+	if e.residentParent == nil {
+		logRefusal("dispatch-unavailable", slog.LevelWarn)
 		return refused
 	}
 	grant := nodepolicy.DispatchResidentParams{ReservationID: p.Reservation.ReservationID, ProxyRunID: p.Reservation.ProxyRunID,
@@ -539,7 +543,7 @@ func (e *Executor) residentObservation(ctx context.Context, p nodepolicy.Reconci
 	names, known := extractStringsResult(raw, loadedAction.Result)
 	known = known && readErr == nil
 	if serving {
-		e.observeLlamaServing(ctx, st, run, sweep, names, known, raw)
+		e.observeLlamaServing(ctx, st, run, sweep, names, known, raw, readErr != nil)
 	}
 	if !known || ctx.Err() != nil || !e.residentIdentity(p) {
 		return nil

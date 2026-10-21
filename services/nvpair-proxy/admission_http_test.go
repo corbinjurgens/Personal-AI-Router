@@ -46,7 +46,9 @@ func strictHTTPRequest(t *testing.T) *http.Request {
 func strictHTTPRequestWith(t *testing.T, body string) *http.Request {
 	t.Helper()
 	r := httptest.NewRequest(http.MethodPost, routeChatCompletions, strings.NewReader(body))
-	b, err := json.Marshal(strictRequest())
+	strict := strictRequest()
+	strict.Request.OriginNodeID = "peer"
+	b, err := json.Marshal(strict)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -876,8 +878,8 @@ func TestHandleHTTP_SelfAdmissionCancelStaysWithAttempt(t *testing.T) {
 		// abandon or exclude the replacement, even before that attempt commits.
 		cancel()
 		ctl.mu.Lock()
-		att := ctl.attempt
-		peerAbandoned := att != nil && att.claim.abandoned()
+		att := ctl.active
+		peerAbandoned := att != nil && att.aborted
 		peerExcluded := ctl.excluded["peer"]
 		ctl.mu.Unlock()
 		if att == nil || peerAbandoned || peerExcluded {

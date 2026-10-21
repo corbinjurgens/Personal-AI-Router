@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -70,92 +71,42 @@ func TestMain(m *testing.M) {
 		os.RemoveAll(tmpDir)
 	}
 
-	// One process fronts every engine, with a facade enabled per engine, so
-	// both the Ollama and LM Studio bridge tests run against this build.
-	log.Println("building nvpair-proxy...")
-	if err := goBuild(filepath.Join("..", "nvpair-proxy"), proxyBin); err != nil {
-		cleanup()
-		log.Fatalf("build nvpair-proxy: %v", err)
+	// Build distinct product outputs before redirecting the cache environment.
+	builds := []struct {
+		name   string
+		output string
+	}{
+		{"nvpair-proxy", proxyBin},
+		{"nvpair-errors", errorsBin},
+		{"nvpair-node-info", nodeInfoBin},
+		{"nvpair-node-scanner", scannerBin},
+		{"nvpair-ui-broker", brokerBin},
+		{"nvpair-service", serviceBin},
+		{"nvpair-node-settings", nodeSettingsBin},
+		{"nvpair-workload-manager", workloadMgrBin},
+		{"nvpair-engine-manager", engineMgrBin},
+		{"nvpair-manual-nodes", manualNodesBin},
+		{"nvpair-cluster-manager", clusterMgrBin},
+		{"nvpair-job-scheduler", schedulerBin},
 	}
-
-	log.Println("building nvpair-errors...")
-	if err := goBuild(filepath.Join("..", "nvpair-errors"), errorsBin); err != nil {
-		cleanup()
-		log.Fatalf("build nvpair-errors: %v", err)
+	limit := min(runtime.GOMAXPROCS(0), 4)
+	slots := make(chan struct{}, limit)
+	var workers sync.WaitGroup
+	buildErrors := make([]error, len(builds))
+	for i, build := range builds {
+		slots <- struct{}{}
+		workers.Go(func() {
+			defer func() { <-slots }()
+			log.Printf("building %s...", build.name)
+			buildErrors[i] = goBuild(filepath.Join("..", build.name), build.output)
+		})
 	}
-
-	log.Println("building nvpair-node-info...")
-	if err := goBuild(filepath.Join("..", "nvpair-node-info"), nodeInfoBin); err != nil {
-		cleanup()
-		log.Fatalf("build nvpair-node-info: %v", err)
-	}
-
-	// The broker spawns nvpair-node-scanner, so the cross-process broker test
-	// needs both binaries. The broker is pointed at scannerBin via
-	// --scanner-path so it doesn't depend on a sibling-file layout.
-	log.Println("building nvpair-node-scanner...")
-	if err := goBuild(filepath.Join("..", "nvpair-node-scanner"), scannerBin); err != nil {
-		cleanup()
-		log.Fatalf("build nvpair-node-scanner: %v", err)
-	}
-
-	log.Println("building nvpair-ui-broker...")
-	if err := goBuild(filepath.Join("..", "nvpair-ui-broker"), brokerBin); err != nil {
-		cleanup()
-		log.Fatalf("build nvpair-ui-broker: %v", err)
-	}
-
-	// The service owns and supervises the broker, so the service-lifetime
-	// tests need its binary in the same bundle as the broker and scanner.
-	log.Println("building nvpair-service...")
-	if err := goBuild(filepath.Join("..", "nvpair-service"), serviceBin); err != nil {
-		cleanup()
-		log.Fatalf("build nvpair-service: %v", err)
-	}
-
-	log.Println("building nvpair-node-settings...")
-	if err := goBuild(filepath.Join("..", "nvpair-node-settings"), nodeSettingsBin); err != nil {
-		cleanup()
-		log.Fatalf("build nvpair-node-settings: %v", err)
-	}
-
-	// The broker supervises nvpair-workload-manager, so the workload-interop
-	// test needs its binary too. The broker is pointed at workloadMgrBin
-	// via --workload-manager-path.
-	log.Println("building nvpair-workload-manager...")
-	if err := goBuild(filepath.Join("..", "nvpair-workload-manager"), workloadMgrBin); err != nil {
-		cleanup()
-		log.Fatalf("build nvpair-workload-manager: %v", err)
-	}
-
-	// The broker now also supervises engine-manager, manual-nodes, and
-	// cluster-manager, so the broker-supervision tests need their binaries
-	// (pointed at via --engine-manager-path / --manual-nodes-path /
-	// --cluster-manager-path).
-	log.Println("building nvpair-engine-manager...")
-	if err := goBuild(filepath.Join("..", "nvpair-engine-manager"), engineMgrBin); err != nil {
-		cleanup()
-		log.Fatalf("build nvpair-engine-manager: %v", err)
-	}
-
-	log.Println("building nvpair-manual-nodes...")
-	if err := goBuild(filepath.Join("..", "nvpair-manual-nodes"), manualNodesBin); err != nil {
-		cleanup()
-		log.Fatalf("build nvpair-manual-nodes: %v", err)
-	}
-
-	log.Println("building nvpair-cluster-manager...")
-	if err := goBuild(filepath.Join("..", "nvpair-cluster-manager"), clusterMgrBin); err != nil {
-		cleanup()
-		log.Fatalf("build nvpair-cluster-manager: %v", err)
-	}
-
-	// The broker supervises nvpair-job-scheduler (pointed at via --scheduler-path);
-	// the scheduler-interop test also drives its binary directly.
-	log.Println("building nvpair-job-scheduler...")
-	if err := goBuild(filepath.Join("..", "nvpair-job-scheduler"), schedulerBin); err != nil {
-		cleanup()
-		log.Fatalf("build nvpair-job-scheduler: %v", err)
+	workers.Wait()
+	for i, err := range buildErrors {
+		if err != nil {
+			cleanup()
+			log.Fatalf("build %s: %v", builds[i].name, err)
+		}
 	}
 
 	// Every child binary inherits this environment, so its persisted state

@@ -15,8 +15,10 @@ import (
 	"context"
 	"log/slog"
 	"sort"
+	"strings"
 	"time"
 
+	"nvpair-shared/engines"
 	"nvpair-shared/nodepolicy"
 )
 
@@ -26,6 +28,11 @@ const idleCheckInterval = 30 * time.Second
 
 // runIdlePolicy runs the idle policy until ctx ends.
 func (b *Broker) runIdlePolicy(ctx context.Context) {
+	b.signalModelConfig()
+	r := b.nodePolicyRuntime()
+	r.mu.Lock()
+	wake := r.models.wake
+	r.mu.Unlock()
 	ticker := time.NewTicker(idleCheckInterval)
 	defer ticker.Stop()
 	for {
@@ -34,6 +41,9 @@ func (b *Broker) runIdlePolicy(ctx context.Context) {
 			return
 		case <-ticker.C:
 			b.idleTick(ctx)
+			b.reconcileModelConfig(ctx)
+		case <-wake:
+			b.reconcileModelConfig(ctx)
 		}
 	}
 }
@@ -80,7 +90,7 @@ func (b *Broker) idleTick(ctx context.Context) {
 			r.idleUnloadedAt[engine] = base
 			unloads = append(unloads, idleUnload{engine: engine, models: append([]string{}, r.loaded[engine]...)})
 		}
-		if stopAfter > 0 && idleFor >= stopAfter && r.intent[engine] && !r.idleSleptAt[engine].Equal(base) {
+		if stopAfter > 0 && idleFor >= stopAfter && r.intent[engine] && !b.protectedResidentLocked(engine, "") && !r.idleSleptAt[engine].Equal(base) {
 			r.idleSleptAt[engine] = base
 			sleeps = append(sleeps, engine)
 		}
@@ -95,11 +105,34 @@ func (b *Broker) idleTick(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
+		r.mu.Lock()
+		protected := b.protectedResidentLocked(engine, "")
+		r.mu.Unlock()
+		if protected {
+			continue
+		}
 		slog.Info("stopping idle engine", "engine", engine)
 		if _, err := b.callEngine(ctx, engineSleepMethod, map[string]string{"engine": engine}); err != nil {
 			slog.Warn("could not stop idle engine", "engine", engine, "err", err)
 		}
 	}
+}
+
+// protectedResidentLocked checks the current desired resident set at the
+// destructive action boundary. An empty model checks whether the engine has
+// any resident preference. Caller holds the policy runtime mutex.
+func (b *Broker) protectedResidentLocked(engine, model string) bool {
+	r := &b.nodePolicy
+	naming, _ := b.engineModelNaming(engine)
+	normalize := func(name string) string {
+		return engines.NormalizeModelName(strings.TrimSpace(name), naming)
+	}
+	for _, ref := range r.current.ResidentModels {
+		if ref.Engine == engine && (model == "" || normalize(ref.Model) == normalize(model)) {
+			return true
+		}
+	}
+	return false
 }
 
 // idleBaselineLocked is when engine last did anything. Caller holds r.mu.

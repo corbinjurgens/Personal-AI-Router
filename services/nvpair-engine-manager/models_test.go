@@ -894,6 +894,38 @@ func TestModelsResultLoaded(t *testing.T) {
 	}
 }
 
+func TestWatcherPublishesFirstEmptyLoadedInventory(t *testing.T) {
+	reg := NewRegistry()
+	reg.engines["fake"] = loadedActionManifest()
+	updates := make(chan modelsChangedParams, 2)
+	ex := NewExecutor(reg, NewReporter(nil), func(method string, params any) {
+		if method == modelsChangedMethod {
+			update, ok := params.(modelsChangedParams)
+			if ok {
+				updates <- update
+			}
+		}
+	}, t.TempDir())
+	ex.loadedPollInterval = time.Hour
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(func() { cancel(); _ = ex.Stop("fake") })
+	if err := ex.Start(ctx, "fake"); err != nil {
+		t.Fatalf("start fake engine: %v", err)
+	}
+	setLoaded(t, ex, nil)
+	go ex.watchLoaded(ctx)
+	ex.pokeLoaded()
+	select {
+	case update := <-updates:
+		loaded, known := update.Models.LoadedByEngine["fake"]
+		if update.Engine != "fake" || !known || loaded == nil || len(loaded) != 0 {
+			t.Fatalf("initial loaded inventory = %+v", update)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("first empty loaded inventory was not published")
+	}
+}
+
 // TestModelsResultNoLoadedActionOmitsKey confirms an engine with no loaded_models
 // action contributes no LoadedByEngine key (the map stays nil), so the field is
 // omitted on the wire for engines that don't support loaded reporting.
@@ -916,10 +948,8 @@ func TestModelsResultNoLoadedActionOmitsKey(t *testing.T) {
 }
 
 // TestSweepLoadedSeedsThenEmitsOnChange covers the watcher's core diff without
-// goroutines or timers: the first sweep only seeds a baseline (the caller,
-// watchLoaded, suppresses its emit), a subsequent identical sweep reports no
-// change, and a sweep after an eviction reports the engine as changed and
-// carries the fresh full model result as the push payload.
+// goroutines or timers: the first sweep publishes its baseline, a subsequent
+// identical sweep reports no change, and an eviction carries a fresh result.
 func TestSweepLoadedSeedsThenEmitsOnChange(t *testing.T) {
 	ex := newTestExecutor(t, loadedActionManifest())
 	ctx := context.Background()

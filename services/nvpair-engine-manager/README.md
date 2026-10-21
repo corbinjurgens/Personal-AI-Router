@@ -84,19 +84,32 @@ delivery acknowledgement or runtime budget setting is introduced.
 `engine:reconcile-resident` is a parent-IPC-only broker operation. It consumes
 the strict `nodepolicy.ReconcileResidentParams` DTO, including the current
 manager incarnation, process-bound reservation, identity, policy revision,
+engine-specific `declaredResidentCount` (integer 1..256, from that revision),
 absolute operation budget (`timeoutMs`, at most 60 seconds), and finite
 `load.contextLength` / `load.keepAliveSeconds`. Clients and peers must not
 invoke it. The broker owns policy, qualification and capacity; the manager
 does not infer a grant from saved intent.
 
-Only an explicit Ollama-family semantic load binding to prompt-free
-`POST /api/generate` is supported. The manager sends the normalized installed
-model, `stream:false`, `options.num_ctx = contextLength` and numeric
-`keep_alive = keepAliveSeconds` (seconds). Other fixed load parameters,
-restart-after bindings, implicit bindings and other engine families are
-`unsupported-load`. No prompt, download, delete, copy, engine start, restore,
-generic action fallback or inference is performed. This path takes E3
-admission and the lifecycle lock, never B2's content guard.
+The manifest must explicitly bind the semantic load operation to a `POST`
+action with model parameter `model`, body schema exactly `{model:string}`,
+and no fixed parameters. Loaded inventory must use a safe `GET` action with
+a result extraction spec and loaded-status filter. Neither action may use
+parameter placement overrides, restart, commands, remove paths, model
+resolution, progress protocols or content mutation. The load sends exactly
+`{model}` using the normalized installed model. `keepAliveSeconds` retains its
+1..86400 validation but is not sent to the engine; approved native settings
+own retention. No prompt, download, delete, copy, engine start, restore or
+inference is performed. This path takes E3 admission and the lifecycle lock,
+and registers with the shared load guard so settings/stop cancellation applies.
+
+The current NE serving envelope is validated before the final grant and again
+immediately before loading. Requested context must match the approved finite
+per-slot allocation, native idle retention must be disabled (`-1`), and router
+capacity must cover `declaredResidentCount`. That count describes this engine's
+desired residents at `policyRevision`, not all serving declarations. Missing or
+invalid counts fail closed before effects; automatic resident loads remain
+refused until the SR 5c broker producer supplies the field. Prepare/Dispatch
+DTOs and keep-alive validation are unchanged.
 
 Before and after admission, unknown projection, local pause/Off, switch busy,
 engine Off, missing installed model, stale/withdrawn identity or unsupported
@@ -110,12 +123,14 @@ See [spec.md](spec.md#automatic-residency-internal-parent-ipc) for the exact hop
 The result is `not-dispatched`, `loaded`, `failed`, `timeout`, `cancelled` or
 `unknown`. This DTO has no reason field; local refusal conditions and typed
 proxy reasons are documented in the spec. `loaded` requires a new authoritative
-post-call inventory observation with the current manager/model identity;
+post-call inventory observation with the current manager/model identity and
+fresh model-specific context/slot readback matching its approved envelope;
 even a lost load response can converge through that readback. Missing inventory
-is unknown, while an explicit empty list is observed absence. Every dispatched
-call pokes the loaded watcher. Desired residents never become observed inventory
-or new desired-state-file fields. Duplicate operation IDs coalesce for their
-original lifetime; changed payloads conflict. Idle unload protection belongs to
+is unknown, while an explicit empty list is observed absence. Successful settings
+re-apply alone does not prove that an already loaded child's allocation changed.
+Every dispatched call pokes the loaded watcher. Desired residents never become
+observed inventory or new desired-state-file fields. Duplicate operation IDs
+coalesce for their original lifetime; changed payloads conflict. Idle unload protection belongs to
 the broker.
 
 Requests (caller → service):

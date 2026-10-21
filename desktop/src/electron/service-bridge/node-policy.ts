@@ -22,7 +22,9 @@ import type {
     DeploymentTransport,
     DeploymentPrices,
     QualificationRef,
-    RoutingDeployment
+    RoutingDeployment,
+    ModelConfiguration,
+    ModelConfigurationEntry
 } from '@/shared/types/node-policy'
 import { engineManagerName, isValidRoutingEngineId } from '@/shared/utils/engines'
 import getErrorString from '@/shared/utils/get-error-string'
@@ -405,16 +407,98 @@ function activationStatus(body: JsonObject): PolicyActivationStatus | null {
     }
 }
 
+function modelConfigurationEntry(value: JsonValue): ModelConfigurationEntry {
+    const body = objectValue(value)
+    const fields = ['engine', 'model', 'desiredResident', 'observedLoaded', 'state', 'reason']
+    if (!body || Object.keys(body).some(key => !fields.includes(key))) {
+        throw new Error('Invalid model configuration entry')
+    }
+    const { desiredResident, observedLoaded, state, reason } = body
+    // Match encoding/json before validation and duplicate-reference checks.
+    const engine = typeof body.engine === 'string' ? body.engine.toWellFormed() : null
+    const model = typeof body.model === 'string' ? body.model.toWellFormed() : null
+    if (
+        typeof engine !== 'string' ||
+        !isValidRoutingEngineId(engine) ||
+        typeof model !== 'string' ||
+        model === '' ||
+        /^\p{White_Space}|\p{White_Space}$/u.test(model) ||
+        new TextEncoder().encode(model).length > 1024 ||
+        /^(weak|medium|strong)(-api|-local)?$/.exec(model)?.[0] === model ||
+        typeof desiredResident !== 'boolean' ||
+        (observedLoaded !== undefined && typeof observedLoaded !== 'boolean') ||
+        (state !== 'satisfied' &&
+            state !== 'pending' &&
+            state !== 'blocked' &&
+            state !== 'unknown') ||
+        (reason !== undefined &&
+            reason !== '' &&
+            reason !== 'engine-off' &&
+            reason !== 'no-fit' &&
+            reason !== 'paused-local' &&
+            reason !== 'engine-off-local' &&
+            reason !== 'not-served' &&
+            reason !== 'not-installed' &&
+            reason !== 'unqualified' &&
+            reason !== 'unsupported-load' &&
+            reason !== 'switch-busy' &&
+            reason !== 'operation-timeout' &&
+            reason !== 'observation-unknown' &&
+            reason !== 'projection-unknown') ||
+        (state === 'satisfied' &&
+            (!desiredResident ||
+                observedLoaded !== true ||
+                (reason !== undefined && reason !== '')))
+    ) {
+        throw new Error('Invalid model configuration entry')
+    }
+    return {
+        engine,
+        model,
+        desiredResident,
+        state,
+        ...(observedLoaded !== undefined ? { observedLoaded } : {}),
+        ...(reason !== undefined ? { reason } : {})
+    }
+}
+
+function modelConfiguration(value: JsonValue | undefined): ModelConfiguration | undefined {
+    if (value === undefined) return undefined
+    const body = strictObject(value, ['policyRevision', 'observationGeneration', 'models'])
+    const policyRevision = revisionValue(body.policyRevision)
+    const { observationGeneration } = body
+    if (
+        policyRevision === null ||
+        BigInt(policyRevision) > 9223372036854775807n ||
+        typeof observationGeneration !== 'number' ||
+        !Number.isInteger(observationGeneration) ||
+        observationGeneration < 0 ||
+        observationGeneration > Number('18446744073709551615') ||
+        !Array.isArray(body.models) ||
+        body.models.length > 256
+    ) {
+        throw new Error('Invalid model configuration')
+    }
+    const models = body.models.map(modelConfigurationEntry)
+    const references = models.map(entry => JSON.stringify([entry.engine, entry.model]))
+    if (new Set(references).size !== references.length) {
+        throw new Error('Duplicate model configuration reference')
+    }
+    return { policyRevision, observationGeneration, models }
+}
+
 function policySnapshot(body: JsonObject | null): NodePolicySnapshot {
     const policy = objectValue(body?.policy)
     if (!body || !policy) throw new Error('The service returned no node policy')
     validateModelPreferences(policy)
     const revision = revisionValue(policy.revision)
     if (revision === null) throw new Error('The service returned a node policy without a revision')
+    const configuration = modelConfiguration(body.modelConfiguration)
     return {
         policy: JSON.stringify(policy, null, 2),
         revision,
-        activation: activationStatus(body)
+        activation: activationStatus(body),
+        ...(configuration !== undefined ? { modelConfiguration: configuration } : {})
     }
 }
 

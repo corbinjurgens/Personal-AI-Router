@@ -27,14 +27,14 @@ import (
 // Synthetic owned launch and HTTP readback only; no native engine or model.
 func residentNativeFixture(t *testing.T) (llamaServingFixture, *loadedLlamaFake, nodepolicy.ReconcileResidentParams) {
 	t.Helper()
-	f, server := loadedReadbackFixture(t, "resident-model")
+	f, server := residentOwnedFixture(t, "resident-model")
 	f.ex.nodeProjection.set(nodeProjection{})
 	if err := f.ex.desired.set("fake", true, intentLocal); err != nil {
 		t.Fatal(err)
 	}
 	id := f.ex.modelIdentity().Engines["fake"]
 	f.ex.storeInventory(map[string][]string{"fake": {"resident-model", "weak"}}, nil, f.ex.sweeps.Add(1))
-	p := nodepolicy.ReconcileResidentParams{OperationID: "resident:1", PolicyRevision: "1", Engine: "fake", Model: "resident-model",
+	p := nodepolicy.ReconcileResidentParams{OperationID: "resident:1", PolicyRevision: "1", DeclaredResidentCount: 1, Engine: "fake", Model: "resident-model",
 		Identity:  nodepolicy.StrictModelIdentity{EngineRunID: id.EngineRunID, ModelDigest: id.ModelDigests["resident-model"], SettingsFingerprint: nameDigest("synthetic-settings")},
 		TimeoutMs: 60000, Reservation: nodepolicy.ResidentReservationEvidence{ReservationID: "reservation", ProxyRunID: "proxy", ManagerIncarnation: f.ex.switchIncarnation},
 		Load: nodepolicy.ResidentLoadOptions{ContextLength: 8192, KeepAliveSeconds: 60}}
@@ -44,11 +44,44 @@ func residentNativeFixture(t *testing.T) (llamaServingFixture, *loadedLlamaFake,
 	return f, server, p
 }
 
+func residentOwnedFixture(t *testing.T, model string) (llamaServingFixture, *loadedLlamaFake) {
+	t.Helper()
+	return residentOwnedRetentionFixture(t, model, "-1")
+}
+
+func residentOwnedRetentionFixture(t *testing.T, model, retention string) (llamaServingFixture, *loadedLlamaFake) {
+	t.Helper()
+	f := newLlamaServingFixture(t)
+	data, err := os.ReadFile(f.source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := strings.Replace(string(data), "[medium]", "["+model+"]", 1)
+	text = strings.Replace(text, "sleep-idle-seconds = 180", "sleep-idle-seconds = "+retention, 1)
+	writeServingFixture(t, f.source, []byte(text))
+	f.request.Settings.Serving.Models[0].ModelID = model
+	applyLlamaServing(t, f, approveLlamaServing(t, f))
+	if err := f.ex.Start(context.Background(), "fake"); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := f.ex.Stop("fake"); err != nil {
+			t.Error(err)
+		}
+	})
+	server := attachLoadedLlamaFake(t, f, model)
+	reg := loadWithOverrides(t, t.TempDir())
+	m, ok := reg.Get("llamacpp")
+	if !ok {
+		t.Fatal("missing llama manifest")
+	}
+	f.ex.reg.engines["fake"].Operations = m.Operations
+	return f, server
+}
+
 func TestResidentAttestedPreflight(t *testing.T) {
 	f, server, p := residentNativeFixture(t)
-	// 5b owns the adapter. A valid launch reaches its unsupported-load fence;
-	// an invalid attestation must be rejected earlier by NE's pure validator.
-	if got := f.ex.residentCheck(context.Background(), p); got != "unsupported-load" {
+	if got := f.ex.residentCheck(context.Background(), p); got != "" {
 		t.Fatalf("current native launch preflight = %q", got)
 	}
 	st := settingsState(t, f.ex)
@@ -63,6 +96,189 @@ func TestResidentAttestedPreflight(t *testing.T) {
 	result, err := f.ex.reconcileResident(context.Background(), p)
 	if err != nil || result.Outcome != nodepolicy.ResidentNotDispatched || grants != 0 || server.models.Load() != 0 || server.gets.Load() != 0 || server.loads.Load() != 0 {
 		t.Fatalf("stale preflight effects: result=%+v err=%v grants=%d models=%d props=%d loads=%d", result, err, grants, server.models.Load(), server.gets.Load(), server.loads.Load())
+	}
+}
+
+func TestResidentDailyAdapterFinalGrantRevalidatesNativeLaunch(t *testing.T) {
+	f := newResidentFixture(t)
+	f.grant = func(req residentDispatchRequest) {
+		st := f.ex.engines[f.p.Engine]
+		st.mu.Lock()
+		// Ordinary run/content identity remains current. Only the cold validator
+		// detects the changed executable binding at this grant boundary.
+		st.plat.Runtime.servingBaseDigest = nameDigest("changed-after-grant")
+		st.mu.Unlock()
+		if !f.ex.residentIdentity(f.p) {
+			t.Fatal("test invalidated the ordinary identity fence")
+		}
+		f.reply(t, req.ID, nodepolicy.DispatchResidentResult{Dispatched: true})
+	}
+	result := f.run(t)
+	if result.Outcome != nodepolicy.ResidentNotDispatched || f.dispatches != 1 {
+		t.Fatalf("post-grant drift result=%+v grants=%d loads=%d reads=%d", result, f.dispatches, f.transport.loads, f.transport.reads)
+	}
+	f.noCalls(t)
+}
+
+func TestResidentDailyAdapterNativeRequirements(t *testing.T) {
+	test := func(name, retention string, count int, want string) {
+		t.Run(name, func(t *testing.T) {
+			f, server := residentOwnedRetentionFixture(t, "resident-model", retention)
+			f.ex.nodeProjection.set(nodeProjection{})
+			if err := f.ex.desired.set("fake", true, intentLocal); err != nil {
+				t.Fatal(err)
+			}
+			f.ex.storeInventory(map[string][]string{"fake": {"resident-model"}}, nil, f.ex.sweeps.Add(1))
+			id := f.ex.modelIdentity().Engines["fake"]
+			p := nodepolicy.ReconcileResidentParams{OperationID: "native:1", PolicyRevision: "1", DeclaredResidentCount: count, Engine: "fake", Model: "resident-model",
+				Identity:  nodepolicy.StrictModelIdentity{EngineRunID: id.EngineRunID, ModelDigest: id.ModelDigests["resident-model"], SettingsFingerprint: nameDigest("settings")},
+				TimeoutMs: 60000, Reservation: nodepolicy.ResidentReservationEvidence{ReservationID: "r", ProxyRunID: "p", ManagerIncarnation: f.ex.switchIncarnation}, Load: nodepolicy.ResidentLoadOptions{ContextLength: 8192, KeepAliveSeconds: 60}}
+			if got := f.ex.residentCheck(context.Background(), p); got != want {
+				t.Fatalf("preflight=%q, want %q", got, want)
+			}
+			if want != "" {
+				grants := 0
+				f.ex.residentParent = func(context.Context, nodepolicy.DispatchResidentParams) error { grants++; return nil }
+				result, err := f.ex.reconcileResident(context.Background(), p)
+				if err != nil || result.Outcome != nodepolicy.ResidentNotDispatched || grants != 0 {
+					t.Fatalf("result=%+v err=%v grants=%d", result, err, grants)
+				}
+			}
+			if server.loads.Load() != 0 || server.models.Load() != 0 || server.gets.Load() != 0 {
+				t.Fatal("preflight made HTTP effects")
+			}
+		})
+	}
+	test("one resident among two declarations fits", "-1", 1, "")
+	test("native idle expiry refuses", "180", 1, "unsupported-load")
+	test("resident selection exceeds router capacity", "-1", 2, "unsupported-load")
+}
+
+func TestResidentDailyAdapterSettingsStopCancelsLoad(t *testing.T) {
+	f := newResidentFixture(t)
+	entered, stopped := make(chan struct{}), make(chan struct{})
+	f.transport.onLoad = func(req *http.Request) {
+		close(entered)
+		<-req.Context().Done()
+		close(stopped)
+	}
+	f.transport.loadErr = context.Canceled
+	done := make(chan nodepolicy.ReconcileResidentResult, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		result, err := f.ex.reconcileResident(ctx, f.p)
+		if err != nil {
+			t.Errorf("reconcile: %v", err)
+		}
+		done <- result
+	}()
+	<-entered
+	release := stopServingLoads(f.ex.engines[f.p.Engine])
+	defer release()
+	select {
+	case <-stopped:
+	case <-time.After(3 * time.Second):
+		t.Fatal("settings stop did not cancel the registered resident load")
+	}
+	result := <-done
+	if result.Outcome != nodepolicy.ResidentCancelled || result.Observation != nil || f.transport.loads != 1 || f.transport.reads != 0 {
+		t.Fatalf("settings-stop result=%+v loads=%d reads=%d", result, f.transport.loads, f.transport.reads)
+	}
+	st := f.ex.engines[f.p.Engine]
+	st.mu.Lock()
+	active := len(st.loads.active)
+	st.mu.Unlock()
+	if active != 0 {
+		t.Fatalf("registered loads leaked: %d", active)
+	}
+}
+
+func TestResidentDailyAdapterUndeclaredLoadBeforeAdmission(t *testing.T) {
+	f := newResidentFixture(t)
+	st := f.ex.engines[f.p.Engine]
+	st.mu.Lock()
+	st.plat.Runtime.Serving = st.plat.Runtime.Serving.Clone()
+	st.plat.Runtime.Serving.Models = st.plat.Runtime.Serving.Models[1:]
+	st.mu.Unlock()
+	_, action, body, ok := f.ex.residentLoadCall(f.p)
+	if !ok || f.ex.checkServingLoad(st, action, body) == nil {
+		t.Fatal("undeclared load passed the pre-admission declaration check")
+	}
+	if result := f.run(t); result.Outcome != nodepolicy.ResidentNotDispatched || f.dispatches != 0 {
+		t.Fatalf("undeclared result=%+v grants=%d", result, f.dispatches)
+	}
+	f.noCalls(t)
+}
+
+func TestResidentDailyAdapterUnsafeShapes(t *testing.T) {
+	test := func(name string, modify func(*Manifest)) {
+		t.Run(name, func(t *testing.T) {
+			f := newResidentFixture(t)
+			modify(f.ex.reg.engines[f.p.Engine])
+			if result := f.run(t); result.Outcome != nodepolicy.ResidentNotDispatched || f.dispatches != 0 {
+				t.Fatalf("unsafe manifest result=%+v grants=%d", result, f.dispatches)
+			}
+			f.noCalls(t)
+		})
+	}
+	load := func(change func(*Action)) func(*Manifest) {
+		return func(m *Manifest) { a := m.Actions["resident_load"]; change(&a); m.Actions["resident_load"] = a }
+	}
+	read := func(change func(*Action)) func(*Manifest) {
+		return func(m *Manifest) { a := m.Actions["loaded_models"]; change(&a); m.Actions["loaded_models"] = a }
+	}
+	test("load GET", load(func(a *Action) { a.HTTP.Method = http.MethodGet }))
+	test("load query override", load(func(a *Action) { a.HTTP.ParamsIn = "query" }))
+	test("load missing schema", load(func(a *Action) { a.HTTP.BodySchema = nil }))
+	test("load extra inference input", load(func(a *Action) { a.HTTP.BodySchema = json.RawMessage(`{"model":"string","prompt":"string"}`) }))
+	test("load wrong schema type", load(func(a *Action) { a.HTTP.BodySchema = json.RawMessage(`{"model":"number"}`) }))
+	test("load command", load(func(a *Action) { a.Cmd = []string{"forbidden"} }))
+	test("load remove", load(func(a *Action) { a.RemovePath = &ActionRemovePath{} }))
+	test("load model resolution", load(func(a *Action) { a.ModelResolution = "lms-get" }))
+	test("load progress", load(func(a *Action) { a.ProgressProtocol = "ndjson" }))
+	test("different model parameter", func(m *Manifest) {
+		b := m.Operations[engines.OperationLoad]
+		b.ModelParam = "name"
+		m.Operations[engines.OperationLoad] = b
+	})
+	test("read POST", read(func(a *Action) { a.HTTP.Method = http.MethodPost }))
+	test("read query override", read(func(a *Action) { a.HTTP.ParamsIn = "query" }))
+	test("read command", read(func(a *Action) { a.Cmd = []string{"forbidden"} }))
+	test("read restart", read(func(a *Action) { a.RestartAfter = true }))
+	test("read missing result", read(func(a *Action) { a.Result = nil }))
+	test("read missing loaded filter", read(func(a *Action) { a.Result.Match = nil }))
+	test("read missing extraction field", read(func(a *Action) { a.Result.Field = "" }))
+}
+
+func TestResidentDailyAdapterReapplyRequiresFreshObservation(t *testing.T) {
+	f, server, p := residentNativeFixture(t)
+	st := settingsState(t, f.ex)
+	if got := f.ex.residentObservation(context.Background(), p, st); got == nil || !got.Loaded {
+		t.Fatalf("initial observation=%+v", got)
+	}
+	server.mu.Lock()
+	server.props = `{"default_generation_settings":{"n_ctx":4096},"total_slots":2}`
+	server.mu.Unlock()
+	if got := f.ex.residentObservation(context.Background(), p, st); got != nil {
+		t.Fatalf("mismatch observation=%+v", got)
+	}
+	st.mu.Lock()
+	fixturePort := st.port
+	st.mu.Unlock()
+	applyLlamaServing(t, f, approveLlamaServing(t, f))
+	// Keep the HTTP fixture attached after apply restores the configured port.
+	st.mu.Lock()
+	st.port = fixturePort
+	st.mu.Unlock()
+	id := f.ex.modelIdentity().Engines["fake"]
+	p.Identity.EngineRunID, p.Identity.ModelDigest = id.EngineRunID, id.ModelDigests[p.Model]
+	before := server.gets.Load()
+	if got := f.ex.residentObservation(context.Background(), p, st); got != nil {
+		t.Fatalf("unchanged reapply certified old child: %+v", got)
+	}
+	if server.gets.Load() != before+1 {
+		t.Fatal("reapply used cached allocation rather than fresh props")
 	}
 }
 
@@ -95,6 +311,45 @@ func TestResidentObservedAllocation(t *testing.T) {
 	test("unknown loaded semantics", `{"data":[{"id":"resident-model","status":{"value":"surprising"}}]}`, props, false, false, 0, true)
 	test("explicit empty stays unloaded", `{"data":[]}`, props, true, false, 0, false)
 	test("cold launch is not loaded", `{"data":[{"id":"resident-model","status":{"value":"unloaded"}}]}`, props, true, false, 0, false)
+}
+
+func TestResidentPostLoadTransportFailureRemainsUnknown(t *testing.T) {
+	test := func(name string, readErr error, readStatus int, propsErr error) {
+		t.Run(name, func(t *testing.T) {
+			f := newResidentFixture(t)
+			st := f.ex.engines[f.p.Engine]
+			if got := f.ex.residentObservation(context.Background(), f.p, st); got == nil || !got.Loaded {
+				t.Fatalf("initial observation=%+v", got)
+			}
+			f.transport.readErr, f.transport.readStatus, f.transport.propsErr = readErr, readStatus, propsErr
+			result := f.run(t)
+			if result.Outcome != nodepolicy.ResidentUnknown || result.Observation != nil {
+				t.Fatalf("post-load transport failure satisfied residency: %+v", result)
+			}
+			st.mu.Lock()
+			drift, observed := st.plat.Runtime.servingDrift, st.plat.Runtime.servingObserved
+			st.mu.Unlock()
+			if drift != "" || observed != nil {
+				t.Fatalf("transport failure retained proof or latched drift: observed=%+v drift=%q", observed, drift)
+			}
+			if f.transport.loads != 1 || f.transport.reads != 2 || f.dispatches != 1 {
+				t.Fatalf("post-load effects: loads=%d reads=%d grants=%d", f.transport.loads, f.transport.reads, f.dispatches)
+			}
+			f.transport.readErr, f.transport.readStatus, f.transport.propsErr = nil, 0, nil
+			f.p.OperationID = "resident-retry"
+			result = f.run(t)
+			if result.Outcome != nodepolicy.ResidentLoaded || result.Observation == nil || !result.Observation.Loaded || result.Observation.Identity != f.p.Identity {
+				t.Fatalf("fresh retry did not restore residency: %+v", result)
+			}
+			if f.transport.loads != 2 || f.transport.reads != 3 || f.transport.forbidden != 0 {
+				t.Fatalf("retry effects: loads=%d reads=%d forbidden=%d", f.transport.loads, f.transport.reads, f.transport.forbidden)
+			}
+		})
+	}
+	test("inventory connection failure", errors.New("inventory unavailable"), 0, nil)
+	test("inventory HTTP 201 is not observation success", nil, http.StatusCreated, nil)
+	test("inventory HTTP 204 is not observation success", nil, http.StatusNoContent, nil)
+	test("props connection failure", nil, 0, errors.New("props unavailable"))
 }
 
 func TestResidentObservedAllocationReplacement(t *testing.T) {
@@ -138,6 +393,9 @@ type residentTransport struct {
 	body                    map[string]json.RawMessage
 	loaded                  string
 	loadErr                 error
+	readErr                 error
+	readStatus              int
+	propsErr                error
 	onLoad                  func(*http.Request)
 }
 
@@ -171,7 +429,7 @@ func (r *residentTransport) RoundTrip(req *http.Request) (*http.Response, error)
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	switch req.URL.Path {
-	case "/api/generate":
+	case "/fixture/load":
 		r.loads++
 		if err := json.NewDecoder(req.Body).Decode(&r.body); err != nil {
 			return nil, err
@@ -189,9 +447,25 @@ func (r *residentTransport) RoundTrip(req *http.Request) (*http.Response, error)
 			return nil, r.loadErr
 		}
 		return residentJSON(`{}`), nil
-	case "/api/ps":
+	case "/fixture/loaded":
 		r.reads++
-		return residentJSON(r.loaded), nil
+		if r.readErr != nil {
+			return nil, r.readErr
+		}
+		response := residentJSON(r.loaded)
+		if r.readStatus != 0 {
+			response.StatusCode = r.readStatus
+		}
+		return response, nil
+	case "/props":
+		if req.URL.Query().Get("autoload") != "false" || req.URL.Query().Get("model") != "m" {
+			r.forbidden++
+			return nil, errors.New("unsafe props")
+		}
+		if r.propsErr != nil {
+			return nil, r.propsErr
+		}
+		return residentJSON(`{"default_generation_settings":{"n_ctx":8192},"total_slots":2}`), nil
 	default:
 		// Includes start, pull, delete, copy and arbitrary action endpoints.
 		r.forbidden++
@@ -221,37 +495,34 @@ type residentFixture struct {
 
 func newResidentFixture(t *testing.T) *residentFixture {
 	t.Helper()
-	mf := testEngineManifest("forbidden-resident-engine")
-	mf.Engine, mf.Family, mf.ModelNaming = "ollama", "ollama", engines.ModelNamingImpliedLatestTag
-	mf.Operations = map[string]OperationBinding{engines.OperationLoad: {Action: "resident_load", Params: map[string]json.RawMessage{"stream": json.RawMessage(`false`)}}}
+	native, _ := residentOwnedFixture(t, "m")
+	ex := native.ex
+	st := settingsState(t, ex)
+	mf := st.manifest
+	mf.ModelNaming = engines.ModelNamingExact
+	mf.Operations = map[string]OperationBinding{engines.OperationLoad: {Action: "resident_load", Params: map[string]json.RawMessage{}}}
 	mf.Actions = map[string]Action{
-		"resident_load": {HTTP: &ActionHTTP{Method: http.MethodPost, Path: "/api/generate"}},
+		"resident_load": {HTTP: &ActionHTTP{Method: http.MethodPost, Path: "/fixture/load", BodySchema: json.RawMessage(`{"model":"string"}`)}},
 		"list_models":   {HTTP: &ActionHTTP{Method: http.MethodGet, Path: "/api/tags"}, Result: &ActionResult{Array: "models", Field: "name", Digest: "digest"}},
-		"loaded_models": {HTTP: &ActionHTTP{Method: http.MethodGet, Path: "/api/ps"}, Result: &ActionResult{Array: "models", Field: "name"}},
+		"loaded_models": {HTTP: &ActionHTTP{Method: http.MethodGet, Path: "/fixture/loaded"}, Result: &ActionResult{Array: "data", Field: "id", Match: &ResultMatch{Field: "status.value", In: []string{"loaded"}}}},
 		"pull_model":    {HTTP: &ActionHTTP{Method: http.MethodPost, Path: "/forbidden/pull"}},
 		"delete_model":  {HTTP: &ActionHTTP{Method: http.MethodDelete, Path: "/forbidden/delete"}},
 		"arbitrary":     {HTTP: &ActionHTTP{Method: http.MethodPost, Path: "/forbidden/action"}},
 	}
-	ex := newTestExecutor(t, mf)
-	st, err := ex.state("ollama")
-	if err != nil {
-		t.Fatal(err)
-	}
-	st.running, st.installed, st.proc, st.runID, st.launchDigest = true, true, &managedProc{}, "resident-run", nameDigest("launch")
 	ex.nodeProjection.set(nodeProjection{})
-	if err := ex.desired.set("ollama", true, intentLocal); err != nil {
+	if err := ex.desired.set("fake", true, intentLocal); err != nil {
 		t.Fatal(err)
 	}
-	ex.storeInventory(map[string][]string{"ollama": {"m:latest"}}, map[string]observedDigests{"ollama": {runID: st.runID, models: map[string]string{"m:latest": nameDigest("model")}}}, 1)
-	ex.sweeps.Store(1)
+	ex.storeInventory(map[string][]string{"fake": {"m"}}, nil, ex.sweeps.Add(1))
 	ex.settingsHub.Publish([]settings.Snapshot{})
-	f := &residentFixture{ex: ex, transport: &residentTransport{loaded: `{"models":[{"name":"m:latest"}]}`}, responses: make(chan Message, 8)}
+	f := &residentFixture{ex: ex, transport: &residentTransport{loaded: `{"data":[{"id":"m","status":{"value":"loaded"}}]}`}, responses: make(chan Message, 8)}
 	ex.client = &http.Client{Transport: f.transport}
 	ex.modelMutationParent = func(context.Context, string) error { f.contentCalls++; return errors.New("forbidden content mutation") }
-	f.p = nodepolicy.ReconcileResidentParams{OperationID: "resident-op", PolicyRevision: "1", Engine: "ollama", Model: "m",
-		Identity:  nodepolicy.StrictModelIdentity{EngineRunID: st.runID, SettingsFingerprint: nameDigest("settings-and-launch"), ModelDigest: nameDigest("model")},
+	id := ex.modelIdentity().Engines["fake"]
+	f.p = nodepolicy.ReconcileResidentParams{OperationID: "resident-op", PolicyRevision: "1", DeclaredResidentCount: 1, Engine: "fake", Model: "m",
+		Identity:  nodepolicy.StrictModelIdentity{EngineRunID: st.runID, SettingsFingerprint: nameDigest("settings-and-launch"), ModelDigest: id.ModelDigests["m"]},
 		TimeoutMs: 60000, Reservation: nodepolicy.ResidentReservationEvidence{ReservationID: "reservation-1", ProxyRunID: "proxy-1", ManagerIncarnation: ex.switchIncarnation},
-		Load: nodepolicy.ResidentLoadOptions{ContextLength: 4096, KeepAliveSeconds: 120}}
+		Load: nodepolicy.ResidentLoadOptions{ContextLength: 8192, KeepAliveSeconds: 120}}
 	codec := NewCodec(&residentCodecIO{write: func(raw []byte) (int, error) {
 		var msg Message
 		if err := json.Unmarshal(raw, &msg); err != nil {
@@ -315,7 +586,7 @@ func TestResidentContextBoundConfigured(t *testing.T) {
 			}
 		})
 	}
-	bound := []engines.ServingEnvelope{{ModelID: "m:latest", PerSlotContextTokens: 4096}}
+	bound := []engines.ServingEnvelope{{ModelID: "m", PerSlotContextTokens: 4096}}
 	test("exact native bound", 4096, bound, true)
 	test("bound plus one", 4097, bound, false)
 	test("smaller profile cannot shrink native allocation", 2048, bound, false)
@@ -341,15 +612,21 @@ func TestResidentContextBoundColdPreflight(t *testing.T) {
 			cold := newLlamaServingFixture(t)
 			applyLlamaServing(t, cold, approveLlamaServing(t, cold))
 			f := newResidentFixture(t)
-			st := f.ex.engines["ollama"]
+			st := f.ex.engines["fake"]
 			st.manifest.Family = "llamacpp"
-			st.plat = settingsState(t, cold.ex).plat
-			st.binPath = fakeEngineBin
-			// Synthetic inventory identity; no owned NE launch is established.
-			f.ex.storeInventory(map[string][]string{"ollama": {"medium:latest"}}, map[string]observedDigests{"ollama": {runID: st.runID, models: map[string]string{"medium:latest": f.p.Identity.ModelDigest}}}, 2)
-			f.p.Model, f.p.Load.ContextLength = "medium:latest", contextLength
+			// Compare cold bounds independently; never transplant Runtime state.
+			coldState := settingsState(t, cold.ex)
+			coldState.opMu.Lock()
+			readback := cold.ex.launchStateLocked("fake", coldState).ServingReadback
+			coldState.opMu.Unlock()
+			st.mu.Lock()
+			st.plat.Runtime.servingLaunch = nil
+			st.mu.Unlock()
+			f.p.Load.ContextLength = contextLength
 			st.opMu.Lock()
-			bounded := residentConfiguredContext(f.p, st.manifest.ModelNamingOrDefault(), f.ex.launchStateLocked(f.p.Engine, st).ServingReadback)
+			coldParams := f.p
+			coldParams.Model = "medium"
+			bounded := residentConfiguredContext(coldParams, st.manifest.ModelNamingOrDefault(), readback)
 			reason := f.ex.residentCheck(context.Background(), f.p)
 			st.opMu.Unlock()
 			if bounded != wantBound {
@@ -388,7 +665,7 @@ func TestResidentLoadMappingAndObservation(t *testing.T) {
 			t.Fatal("publication lock held")
 		}
 		f.ex.publishMu.Unlock()
-		st := f.ex.engines["ollama"]
+		st := f.ex.engines["fake"]
 		select {
 		case st.contentMu <- struct{}{}:
 			<-st.contentMu
@@ -401,7 +678,7 @@ func TestResidentLoadMappingAndObservation(t *testing.T) {
 	if result.Outcome != nodepolicy.ResidentLoaded || result.Observation == nil {
 		t.Fatalf("result = %+v", result)
 	}
-	want := nodepolicy.ResidentLoadedObservation{ManagerIncarnation: f.ex.switchIncarnation, Generation: 1, Engine: "ollama", Model: "m:latest", Identity: f.p.Identity, Loaded: true}
+	want := nodepolicy.ResidentLoadedObservation{ManagerIncarnation: f.ex.switchIncarnation, Generation: 1, Engine: "fake", Model: "m", Identity: f.p.Identity, Loaded: true}
 	if !reflect.DeepEqual(*result.Observation, want) {
 		t.Fatalf("observation = %+v, want %+v", result.Observation, want)
 	}
@@ -420,7 +697,7 @@ func TestResidentLoadMappingAndObservation(t *testing.T) {
 	if err := json.Unmarshal(raw, &body); err != nil {
 		t.Fatal(err)
 	}
-	if body.Model != "m:latest" || body.KeepAlive != 120 || body.Options.Context != 4096 || body.Stream || len(f.transport.body) != 4 {
+	if body.Model != "m" || body.KeepAlive != 0 || body.Options.Context != 0 || body.Stream || len(f.transport.body) != 1 {
 		t.Fatalf("load body = %+v", body)
 	}
 	if f.transport.loads != 1 || f.transport.forbidden != 0 || f.contentCalls != 0 || f.dispatches != 1 {
@@ -452,49 +729,49 @@ func TestResidentRefusesWithoutSideEffects(t *testing.T) {
 	}
 	test("unknown projection after restart", "projection-unknown", func(f *residentFixture) { f.ex.nodeProjection = nodeProjectionStore{} })
 	test("paused locally edited policy", "paused-local", func(f *residentFixture) { f.ex.nodeProjection.set(nodeProjection{PausedLocally: true}) })
-	test("missing installed model", "not-installed", func(f *residentFixture) { f.ex.inventory["ollama"] = []string{} })
-	test("unknown installed inventory", "not-installed", func(f *residentFixture) { delete(f.ex.inventory, "ollama") })
-	test("non Ollama", "unsupported-load", func(f *residentFixture) { f.ex.reg.engines["ollama"].Family = "lmstudio" })
-	test("implicit binding", "unsupported-load", func(f *residentFixture) { delete(f.ex.reg.engines["ollama"].Operations, engines.OperationLoad) })
+	test("missing installed model", "not-installed", func(f *residentFixture) { f.ex.inventory["fake"] = []string{} })
+	test("unknown installed inventory", "not-installed", func(f *residentFixture) { delete(f.ex.inventory, "fake") })
+	test("implicit binding", "unsupported-load", func(f *residentFixture) { delete(f.ex.reg.engines["fake"].Operations, engines.OperationLoad) })
 	test("restart binding", "unsupported-load", func(f *residentFixture) {
-		mf := f.ex.reg.engines["ollama"]
+		mf := f.ex.reg.engines["fake"]
 		a := mf.Actions["resident_load"]
 		a.RestartAfter = true
 		mf.Actions["resident_load"] = a
 	})
 	test("prompt bearing fixed options", "unsupported-load", func(f *residentFixture) {
-		f.ex.reg.engines["ollama"].Operations[engines.OperationLoad].Params["prompt"] = json.RawMessage(`"forbidden"`)
+		f.ex.reg.engines["fake"].Operations[engines.OperationLoad].Params["prompt"] = json.RawMessage(`"forbidden"`)
 	})
 	test("unexpressible fixed context", "unsupported-load", func(f *residentFixture) {
-		f.ex.reg.engines["ollama"].Operations[engines.OperationLoad].Params["options"] = json.RawMessage(`{"num_ctx":8}`)
+		f.ex.reg.engines["fake"].Operations[engines.OperationLoad].Params["options"] = json.RawMessage(`{"num_ctx":8}`)
 	})
-	test("wrong load endpoint", "unsupported-load", func(f *residentFixture) {
-		f.ex.reg.engines["ollama"].Actions["resident_load"].HTTP.Path = "/forbidden/action"
+	test("missing load endpoint", "unsupported-load", func(f *residentFixture) {
+		f.ex.reg.engines["fake"].Actions["resident_load"].HTTP.Path = ""
 	})
 	test("new manager incarnation", "unqualified", func(f *residentFixture) { f.p.Reservation.ManagerIncarnation = "old-manager" })
 	test("omitted manager incarnation", "unqualified", func(f *residentFixture) { f.p.Reservation.ManagerIncarnation = "" })
 	test("stale run", "unqualified", func(f *residentFixture) { f.p.Identity.EngineRunID = "old-run" })
-	test("missing launch identity", "unqualified", func(f *residentFixture) { f.ex.engines["ollama"].launchDigest = "" })
-	test("same digest under another model", "unqualified", func(f *residentFixture) { f.p.Model = "n"; f.ex.inventory["ollama"] = []string{"m:latest", "n:latest"} })
+	test("missing launch identity", "unqualified", func(f *residentFixture) { f.ex.engines["fake"].launchDigest = "" })
+	test("same digest under another model", "unqualified", func(f *residentFixture) { f.p.Model = "n"; f.ex.inventory["fake"] = []string{"m", "n"} })
 	test("different model digest", "unqualified", func(f *residentFixture) { f.p.Identity.ModelDigest = nameDigest("other") })
 	test("withdrawn identity", "unqualified", func(f *residentFixture) {
-		v := f.ex.inventoryDigests["ollama"]
-		v.suppressed = true
-		f.ex.inventoryDigests["ollama"] = v
+		st := f.ex.engines["fake"]
+		st.mu.Lock()
+		st.plat.Runtime.servingDrift = "withdrawn"
+		st.mu.Unlock()
 	})
-	test("engine stopped", "engine-off", func(f *residentFixture) { f.ex.engines["ollama"].running = false })
+	test("engine stopped", "engine-off", func(f *residentFixture) { f.ex.engines["fake"].running = false })
 	test("peer Off", "engine-off", func(f *residentFixture) {
-		if err := f.ex.desired.set("ollama", false, intentPeer); err != nil {
+		if err := f.ex.desired.set("fake", false, intentPeer); err != nil {
 			t.Fatal(err)
 		}
 	})
 	test("local Off", "engine-off-local", func(f *residentFixture) {
-		if err := f.ex.desired.set("ollama", false, intentLocal); err != nil {
+		if err := f.ex.desired.set("fake", false, intentLocal); err != nil {
 			t.Fatal(err)
 		}
 	})
 	test("legacy Off", "engine-off-local", func(f *residentFixture) {
-		if err := f.ex.desired.save(desiredStateFile{Engines: map[string]bool{"ollama": false}}); err != nil {
+		if err := f.ex.desired.save(desiredStateFile{Engines: map[string]bool{"fake": false}}); err != nil {
 			t.Fatal(err)
 		}
 	})
@@ -506,7 +783,7 @@ func residentAwaitMutation(t *testing.T, ex *Executor) {
 	deadline := time.After(5 * time.Second)
 	for {
 		ex.switchAdmission.Lock()
-		count := ex.switchMutations["ollama"]
+		count := ex.switchMutations["fake"]
 		ex.switchAdmission.Unlock()
 		if count != 0 {
 			return
@@ -524,7 +801,7 @@ func TestResidentPostLockVeto(t *testing.T) {
 	test := func(name string, veto func(*residentFixture)) {
 		t.Run(name, func(t *testing.T) {
 			f := newResidentFixture(t)
-			st := f.ex.engines["ollama"]
+			st := f.ex.engines["fake"]
 			st.opMu.Lock()
 			done := make(chan nodepolicy.ReconcileResidentResult, 1)
 			go func() { done <- f.run(t) }()
@@ -540,7 +817,7 @@ func TestResidentPostLockVeto(t *testing.T) {
 	}
 	test("projection pause wins", func(f *residentFixture) { f.ex.nodeProjection.set(nodeProjection{PausedLocally: true}) })
 	test("Off provenance wins", func(f *residentFixture) {
-		if err := f.ex.desired.set("ollama", false, intentLocal); err != nil {
+		if err := f.ex.desired.set("fake", false, intentLocal); err != nil {
 			t.Fatal(err)
 		}
 	})
@@ -602,7 +879,7 @@ func TestResidentRefusalLogging(t *testing.T) {
 		})
 	}
 	test("pre-lock not installed", "not-installed", "INFO", func(_ *testing.T, f *residentFixture) {
-		f.ex.inventory["ollama"] = nil
+		f.ex.inventory["fake"] = nil
 	})
 	test("final grant reservation revoked", "reservation-revoked", "INFO", func(t *testing.T, f *residentFixture) {
 		f.grant = func(req residentDispatchRequest) {
@@ -729,11 +1006,11 @@ func TestResidentReadback(t *testing.T) {
 		})
 	}
 	yes, no := true, false
-	test("lost response but loaded", `{"models":[{"name":"m"}]}`, io.ErrUnexpectedEOF, nodepolicy.ResidentLoaded, &yes)
+	test("lost response but loaded", `{"data":[{"id":"m","status":{"value":"loaded"}}]}`, io.ErrUnexpectedEOF, nodepolicy.ResidentLoaded, &yes)
 	test("missing inventory", `{}`, nil, nodepolicy.ResidentUnknown, nil)
-	test("null inventory", `{"models":null}`, nil, nodepolicy.ResidentUnknown, nil)
-	test("explicit empty", `{"models":[]}`, nil, nodepolicy.ResidentFailed, &no)
-	test("failed load empty", `{"models":[]}`, io.ErrUnexpectedEOF, nodepolicy.ResidentFailed, &no)
+	test("null inventory", `{"data":null}`, nil, nodepolicy.ResidentUnknown, nil)
+	test("explicit empty", `{"data":[]}`, nil, nodepolicy.ResidentFailed, &no)
+	test("failed load empty", `{"data":[]}`, io.ErrUnexpectedEOF, nodepolicy.ResidentFailed, &no)
 	test("failed load missing", `{}`, io.ErrUnexpectedEOF, nodepolicy.ResidentUnknown, nil)
 }
 
@@ -780,12 +1057,10 @@ func TestResidentConcurrentDuplicate(t *testing.T) {
 func TestResidentIdentityWithdrawnDuringLoad(t *testing.T) {
 	f := newResidentFixture(t)
 	f.transport.onLoad = func(*http.Request) {
-		f.ex.inventoryMu.Lock()
-		v := f.ex.inventoryDigests["ollama"]
-		v.suppressed = true
-		v.epoch++
-		f.ex.inventoryDigests["ollama"] = v
-		f.ex.inventoryMu.Unlock()
+		st := f.ex.engines["fake"]
+		st.mu.Lock()
+		st.plat.Runtime.servingDrift = "withdrawn"
+		st.mu.Unlock()
 	}
 	result := f.run(t)
 	if result.Outcome != nodepolicy.ResidentUnknown || result.Observation != nil {
@@ -828,7 +1103,7 @@ func TestResidentLoadCancellation(t *testing.T) {
 
 func TestResidentLifecycleWaitCancelled(t *testing.T) {
 	f := newResidentFixture(t)
-	st := f.ex.engines["ollama"]
+	st := f.ex.engines["fake"]
 	st.opMu.Lock()
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan nodepolicy.ReconcileResidentResult, 1)
@@ -930,9 +1205,10 @@ func TestResidentMalformedGrantNeverAuthorizesLiveContext(t *testing.T) {
 
 func TestResidentOldSweepCannotReplaceNewInventory(t *testing.T) {
 	f := newResidentFixture(t)
-	f.ex.storeInventory(map[string][]string{"ollama": {}}, nil, 3)
-	f.ex.storeInventory(map[string][]string{"ollama": {"m:latest"}}, map[string]observedDigests{"ollama": {runID: f.p.Identity.EngineRunID, models: map[string]string{"m:latest": f.p.Identity.ModelDigest}}}, 2)
-	if got := f.ex.cachedInventory()["ollama"]; len(got) != 0 {
+	sweep := f.ex.sweeps.Add(2)
+	f.ex.storeInventory(map[string][]string{"fake": {}}, nil, sweep)
+	f.ex.storeInventory(map[string][]string{"fake": {"m"}}, map[string]observedDigests{"fake": {runID: f.p.Identity.EngineRunID, models: map[string]string{"m": f.p.Identity.ModelDigest}}}, sweep-1)
+	if got := f.ex.cachedInventory()["fake"]; len(got) != 0 {
 		t.Fatalf("old sweep restored installed inventory: %v", got)
 	}
 	if result := f.run(t); result.Outcome != nodepolicy.ResidentNotDispatched {
@@ -943,7 +1219,7 @@ func TestResidentOldSweepCannotReplaceNewInventory(t *testing.T) {
 
 func TestResidentNoContentFallback(t *testing.T) {
 	f := newResidentFixture(t)
-	f.ex.inventory["ollama"] = []string{}
+	f.ex.inventory["fake"] = []string{}
 	result := f.run(t)
 	f.noCalls(t)
 	if result.Outcome != nodepolicy.ResidentNotDispatched {
@@ -975,9 +1251,9 @@ func TestResidentStrictDecode(t *testing.T) {
 		return strings.Replace(s, `"timeoutMs":60000`, `"timeoutMs":1,"timeoutMs":60000`, 1)
 	})
 	test("null load", func(s string) string {
-		return strings.Replace(s, `{"contextLength":4096,"keepAliveSeconds":120}`, `null`, 1)
+		return strings.Replace(s, `{"contextLength":8192,"keepAliveSeconds":120}`, `null`, 1)
 	})
-	test("zero context", func(s string) string { return strings.Replace(s, `"contextLength":4096`, `"contextLength":0`, 1) })
+	test("zero context", func(s string) string { return strings.Replace(s, `"contextLength":8192`, `"contextLength":0`, 1) })
 	test("unbounded keep alive", func(s string) string {
 		return strings.Replace(s, `"keepAliveSeconds":120`, `"keepAliveSeconds":86401`, 1)
 	})
@@ -986,12 +1262,18 @@ func TestResidentStrictDecode(t *testing.T) {
 func TestResidentSwitchBusy(t *testing.T) {
 	f := newResidentFixture(t)
 	_, p := switchFixture(t)
-	p.SourceEngine, p.TargetEngine, p.ManagerIncarnation = "ollama", "other", f.ex.switchIncarnation
+	p.SourceEngine, p.TargetEngine, p.ManagerIncarnation = "fake", "other", f.ex.switchIncarnation
 	p.ConfigurationFence = "e3v1:" + nameDigest("configuration")
 	state, err := f.ex.desired.load()
 	if err != nil {
 		t.Fatal(err)
 	}
+	before := state
+	t.Cleanup(func() {
+		if err := f.ex.desired.save(before); err != nil {
+			t.Errorf("restore fixture switch checkpoint: %v", err)
+		}
+	})
 	state.PendingSwitch = &settings.SwitchCheckpoint{SwitchPrepareRequest: p, Phase: settings.SwitchCheckpointReserved}
 	if err := f.ex.desired.save(state); err != nil {
 		t.Fatal(err)
