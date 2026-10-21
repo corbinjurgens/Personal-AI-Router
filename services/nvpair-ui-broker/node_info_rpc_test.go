@@ -578,7 +578,10 @@ func main() {
 		t.Fatal(err)
 	}
 	t.Cleanup(replacement.Stop)
-	recoveryCtx, recoveryCancel := context.WithTimeout(context.Background(), time.Second)
+	// The budget covers the replacement's process startup, unlike the
+	// production relay budget, which applies to a running scanner. This test
+	// checks recovery, not latency.
+	recoveryCtx, recoveryCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer recoveryCancel()
 	result, rpcErr, err := replacement.getNodeInfo(recoveryCtx, json.RawMessage(`{"hostUuid":"peer"}`))
 	var sample nodeInfoRPCParams
