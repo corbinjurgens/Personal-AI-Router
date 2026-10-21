@@ -42,14 +42,15 @@ import (
 // through the broker relay, which the broker builds from this daemon's
 // discovery:node-* stream and fans out to consumers as discovery:nodes snapshots.
 type daemon struct {
-	codec             *Codec
-	mesh              *clustertrust.Mesh
-	peerServicesMu    sync.Mutex
-	peerServicesOrder map[string]peerServicesOrder
-	reg               *registry
-	dir               *directory
-	responder         *mdns.Responder
-	browser           *Discovery
+	codec                 *Codec
+	mesh                  *clustertrust.Mesh
+	peerServicesMu        sync.Mutex
+	peerServicesOrder     map[string]peerServicesOrder
+	peerServicesEnriching map[string]bool
+	reg                   *registry
+	dir                   *directory
+	responder             *mdns.Responder
+	browser               *Discovery
 	// instance is this node's mDNS instance name (the hostname). It names the
 	// registry-driven self directory entry (publishSelf), which is anchored to
 	// our own identity rather than to hearing our own multicast.
