@@ -215,7 +215,10 @@ func (e *Executor) dispatchAction(ctx context.Context, st *engineState, engine, 
 		return nil, fmt.Errorf("action %q: %w", action, err)
 	}
 	defer resp.Body.Close()
-	data, _ := io.ReadAll(io.LimitReader(resp.Body, 8*1024*1024))
+	data, err := io.ReadAll(io.LimitReader(resp.Body, 8*1024*1024))
+	if err != nil {
+		return nil, fmt.Errorf("action %q: read response body: %w", action, err)
+	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return nil, &ActionHTTPError{Action: action, StatusCode: resp.StatusCode, Body: strings.TrimSpace(string(data))}
 	}

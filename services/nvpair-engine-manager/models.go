@@ -160,10 +160,13 @@ func (e *Executor) modelsSweep(ctx context.Context, fullInventory bool) ModelsRe
 		wg.Add(1)
 		go func(i int, name string, listSpec, loadedSpec *ActionResult, shared bool) {
 			defer wg.Done()
+			loadedTransportFailed := false
 			servingState, stateErr := e.state(name)
 			if stateErr == nil {
 				if run, err := snapshotLlamaObservation(servingState); err == nil {
-					defer func() { e.observeLlamaServing(ctx, servingState, run, sweep, loaded[i], loadedOK[i], loadedRaw[i]) }()
+					defer func() {
+						e.observeLlamaServing(ctx, servingState, run, sweep, loaded[i], loadedOK[i], loadedRaw[i], loadedTransportFailed)
+					}()
 				}
 			}
 			st, err := e.Status(name)
@@ -199,6 +202,7 @@ func (e *Executor) modelsSweep(ctx context.Context, fullInventory bool) ModelsRe
 					raw, err = e.Action(ctx, name, "loaded_models", nil)
 				}
 				if err != nil {
+					loadedTransportFailed = true
 					slog.Debug("engine:models loaded_models failed", "engine", name, "err", err)
 				} else if models, ok := extractStringsResult(raw, loadedSpec); ok {
 					loadedRaw[i] = raw

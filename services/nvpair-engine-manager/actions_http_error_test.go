@@ -15,6 +15,30 @@ import (
 	"testing"
 )
 
+func TestActionBodyReadFailureIsTransportError(t *testing.T) {
+	m := testEngineManifest(fakeEngineBin)
+	m.Actions["read"] = Action{HTTP: &ActionHTTP{Method: http.MethodGet, Path: "/read"}}
+	ex := newTestExecutor(t, m)
+	st, err := ex.state(m.Engine)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st.mu.Lock()
+	st.running = true
+	st.mu.Unlock()
+	ex.client.Transport = memoryModelsTransport(func(*http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusOK, Body: readbackBrokenBody{strings.NewReader(`{"ok":true}`)}}, nil
+	})
+	result, err := ex.Action(context.Background(), m.Engine, "read", nil)
+	if !errors.Is(err, io.ErrUnexpectedEOF) || result != nil {
+		t.Fatalf("result=%s err=%v, want no result and wrapped body read error", result, err)
+	}
+	var status *ActionHTTPError
+	if errors.As(err, &status) {
+		t.Fatal("body read error was classified as HTTP status failure")
+	}
+}
+
 func TestActionHTTPErrorPreservesDiagnostic(t *testing.T) {
 	for _, tc := range []struct {
 		name, body string

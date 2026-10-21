@@ -6,7 +6,9 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -282,7 +284,6 @@ func TestLoadedServingAmbiguousLoadedMappingCannotWake(t *testing.T) {
 func TestLoadedServingInvalidAllocationWithdrawsIdentity(t *testing.T) {
 	tests := []struct {
 		name, props, loaded string
-		status              int
 	}{
 		{name: "context mismatch", props: `{"default_generation_settings":{"n_ctx":4096},"total_slots":2}`},
 		{name: "slot mismatch", props: `{"default_generation_settings":{"n_ctx":8192},"total_slots":1}`},
@@ -293,8 +294,8 @@ func TestLoadedServingInvalidAllocationWithdrawsIdentity(t *testing.T) {
 		{name: "missing residency", loaded: `{"data":[{"id":"medium"}]}`},
 		{name: "unknown residency", loaded: `{"data":[{"id":"medium","status":{"value":"future"}}]}`},
 		{name: "invalid loaded result", loaded: `{"data":null}`},
-		{name: "unloaded during props", status: http.StatusNotFound},
-		{name: "redirect cannot drop autoload", status: http.StatusFound},
+		{name: "undeclared loaded model", loaded: `{"data":[{"id":"unknown","status":{"value":"loaded"}}]}`},
+		{name: "malformed loaded JSON", loaded: `{`},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -307,9 +308,6 @@ func TestLoadedServingInvalidAllocationWithdrawsIdentity(t *testing.T) {
 			}
 			if tc.loaded != "" {
 				server.loaded = tc.loaded
-			}
-			if tc.status != 0 {
-				server.status = tc.status
 			}
 			server.mu.Unlock()
 			f.ex.sweepLoaded(context.Background(), nil, false)
@@ -327,6 +325,118 @@ func TestLoadedServingInvalidAllocationWithdrawsIdentity(t *testing.T) {
 			}
 			if server.loads.Load() != 0 {
 				t.Fatal("observation triggered load")
+			}
+			server.mu.Lock()
+			server.loaded = `{"data":[{"id":"medium","status":{"value":"loaded"}}]}`
+			server.props = `{"default_generation_settings":{"n_ctx":8192},"total_slots":2}`
+			server.mu.Unlock()
+			f.ex.sweepLoaded(context.Background(), nil, false)
+			readbackProof(t, f, 0)
+			st := settingsState(t, f.ex)
+			st.mu.Lock()
+			drift := st.plat.Runtime.servingDrift
+			st.mu.Unlock()
+			if drift == "" {
+				t.Fatal("successful sweep cleared semantic drift")
+			}
+			// The readback fake uses a separate listener; restore the owned
+			// process port before exercising lifecycle restart.
+			st.mu.Lock()
+			st.port = st.plat.Runtime.Port
+			st.mu.Unlock()
+			if err := f.ex.Stop("fake"); err != nil {
+				t.Fatal(err)
+			}
+			if err := f.ex.Start(context.Background(), "fake"); err != nil {
+				t.Fatal(err)
+			}
+			attachLoadedLlamaFake(t, f, "medium")
+			f.ex.sweepLoaded(context.Background(), nil, false)
+			readbackProof(t, f, 1)
+		})
+	}
+}
+
+// Return valid bytes together with a read failure: even parseable partial
+// responses must never become observation evidence.
+type readbackBrokenBody struct {
+	io.Reader
+}
+
+func (b readbackBrokenBody) Read(p []byte) (int, error) {
+	n, _ := b.Reader.Read(p)
+	return n, io.ErrUnexpectedEOF
+}
+
+func (readbackBrokenBody) Close() error { return nil }
+
+func TestLoadedServingTransportFailureRecoversNextSweep(t *testing.T) {
+	for _, endpoint := range []string{"/models", "/props"} {
+		t.Run(endpoint, func(t *testing.T) {
+			for _, failure := range []string{"connection", "500", "timeout", "sweep timeout", "truncated body", "404", "redirect"} {
+				t.Run(failure, func(t *testing.T) {
+					f, server := loadedReadbackFixture(t, "medium")
+					f.ex.sweepLoaded(context.Background(), nil, false)
+					readbackProof(t, f, 1)
+					original := f.ex.client.Transport
+					f.ex.client.Transport = memoryModelsTransport(func(r *http.Request) (*http.Response, error) {
+						if r.URL.Path != endpoint {
+							return original.RoundTrip(r)
+						}
+						switch failure {
+						case "connection":
+							return nil, errors.New("connection lost")
+						case "timeout", "sweep timeout":
+							<-r.Context().Done()
+							return nil, r.Context().Err()
+						case "truncated body":
+							body := `{"data":[{"id":"medium","status":{"value":"loaded"}}]}`
+							if endpoint == "/props" {
+								body = `{"default_generation_settings":{"n_ctx":8192},"total_slots":2}`
+							}
+							return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: readbackBrokenBody{strings.NewReader(body)}}, nil
+						default:
+							status := http.StatusInternalServerError
+							if failure == "404" {
+								status = http.StatusNotFound
+							} else if failure == "redirect" {
+								status = http.StatusFound
+							}
+							header := make(http.Header)
+							if failure == "redirect" && endpoint == "/props" {
+								header.Set("Location", "/models/load")
+							}
+							return &http.Response{StatusCode: status, Header: header, Body: io.NopCloser(strings.NewReader("unavailable"))}, nil
+						}
+					})
+					ctx := context.Background()
+					if failure == "timeout" {
+						var cancel context.CancelFunc
+						ctx, cancel = context.WithTimeout(ctx, 100*time.Millisecond)
+						defer cancel()
+					}
+					f.ex.sweepLoaded(ctx, nil, false)
+					readbackProof(t, f, 0)
+					if _, err := f.ex.currentServingObservation(context.Background(), "fake", "medium"); err == nil {
+						t.Fatal("transport failure retained current observation")
+					}
+					st := settingsState(t, f.ex)
+					st.mu.Lock()
+					drift := st.plat.Runtime.servingDrift
+					st.mu.Unlock()
+					if drift != "" {
+						t.Fatalf("transport failure latched drift: %s", drift)
+					}
+					if server.loads.Load() != 0 {
+						t.Fatal("failed observation triggered a load")
+					}
+					f.ex.client.Transport = original
+					f.ex.sweepLoaded(context.Background(), nil, false)
+					readbackProof(t, f, 1)
+					if _, err := f.ex.currentServingObservation(context.Background(), "fake", "medium"); err != nil {
+						t.Fatalf("successful sweep did not restore observation: %v", err)
+					}
+				})
 			}
 		})
 	}
