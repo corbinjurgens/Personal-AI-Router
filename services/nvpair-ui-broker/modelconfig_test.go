@@ -2493,3 +2493,112 @@ func TestModelConfigNotificationWithoutLoadedInventoryClearsKnowledge(t *testing
 		t.Fatal("explicit empty inventory did not permit resident attempt")
 	}
 }
+
+func modelConfigNotDispatched(readback *settings.LaunchState) func(string, json.RawMessage) (any, string) {
+	return func(method string, _ json.RawMessage) (any, string) {
+		switch method {
+		case settings.SwitchPrepareMethod:
+			return emptySwitchManagerSnapshot(), ""
+		case "engine:get-launch":
+			if readback != nil {
+				return *readback, ""
+			}
+		}
+		return nodepolicy.ReconcileResidentResult{Outcome: nodepolicy.ResidentNotDispatched}, ""
+	}
+}
+
+func TestModelConfigEnvelopeChangeThenInventoryReloads(t *testing.T) {
+	f := newModelConfigFixture(t)
+	done := f.startLoadedAttempt(t)
+	f.awaitGrant(t)
+	f.engine.releaseHeld()
+	awaitModelConfigDone(t, done)
+	f.b.observeLoadedFrom(f.source, map[string][]string{"llamacpp": {"resident"}})
+	f.b.reconcileModelConfig(context.Background())
+	old := residentLaunchReadback(f.b.captureModelConfig())
+	r := f.b.nodePolicyRuntime()
+	r.mu.Lock()
+	r.current.Revision = "1"
+	r.current.Profiles = append([]nodepolicy.Profile(nil), r.current.Profiles...)
+	r.current.Profiles[0].ContextTokens = 8193
+	id := r.engineIdentity["llamacpp"]
+	env := id.Serving["resident"]
+	env.PerSlotContextTokens, env.TotalContextTokens = 8193, 8193
+	id.Serving = map[string]engines.ServingEnvelope{"resident": env}
+	r.engineIdentity["llamacpp"] = id
+	r.mu.Unlock()
+	if !f.b.replayPolicyToProxy(context.Background(), f.pp) {
+		t.Fatal("activate changed resident policy")
+	}
+	reportStrict(t, f.b, "1", f.acks.runID, strictCapability(t, "llamacpp", "resident"))
+	f.b.observeLoadedFrom(f.source, map[string][]string{"llamacpp": {"resident"}})
+	f.engine.setAnswer(modelConfigNotDispatched(&old))
+	f.b.reconcileModelConfig(context.Background())
+	if loads := len(modelConfigCalls(f.engine, nodepolicy.MethodReconcileResident)); loads != 2 {
+		t.Fatalf("changed request after inventory produced %d loads, want 2; readbacks=%d", loads, len(modelConfigCalls(f.engine, "engine:get-launch")))
+	}
+}
+
+func TestModelConfigTerminalLoadedReplyPreventsTickReload(t *testing.T) {
+	f := newModelConfigFixture(t)
+	r := f.b.nodePolicyRuntime()
+	r.mu.Lock()
+	declared := r.current.ResidentModels
+	r.current.ResidentModels = nil
+	r.mu.Unlock()
+	f.b.observeLoadedFrom(f.source, map[string][]string{"llamacpp": {"resident"}})
+	r.mu.Lock()
+	r.current.ResidentModels = declared
+	r.mu.Unlock()
+	done := f.startLoadedAttempt(t)
+	f.awaitGrant(t)
+	f.engine.releaseHeld()
+	awaitModelConfigDone(t, done)
+	f.engine.setAnswer(modelConfigNotDispatched(nil))
+	for range 2 {
+		r.mu.Lock()
+		now := r.now().Add(idleCheckInterval + time.Second)
+		r.now = func() time.Time { return now }
+		r.mu.Unlock()
+		f.b.reconcileModelConfig(context.Background())
+	}
+	status := f.b.modelConfiguration(f.b.captureModelConfig())
+	if loads := len(modelConfigCalls(f.engine, nodepolicy.MethodReconcileResident)); loads != 1 || status.Models[0].State != nodepolicy.ModelStateSatisfied {
+		t.Fatalf("terminal loaded reply did not prevent tick reload: loads=%d status=%+v", loads, status)
+	}
+}
+
+func TestModelConfigObservedUnloadDropsRecordedRequest(t *testing.T) {
+	f := newModelConfigFixture(t)
+	done := f.startLoadedAttempt(t)
+	f.awaitGrant(t)
+	f.engine.releaseHeld()
+	awaitModelConfigDone(t, done)
+	f.b.observeLoadedFrom(f.source, map[string][]string{"llamacpp": {"resident"}})
+	f.b.reconcileModelConfig(context.Background())
+	f.b.observeLoadedFrom(f.source, map[string][]string{"llamacpp": {}})
+	r := f.b.nodePolicyRuntime()
+	r.mu.Lock()
+	r.current.Revision = "1"
+	r.current.Profiles = append([]nodepolicy.Profile(nil), r.current.Profiles...)
+	r.current.Profiles[0].ContextTokens = 8193
+	id := r.engineIdentity["llamacpp"]
+	env := id.Serving["resident"]
+	env.PerSlotContextTokens, env.TotalContextTokens = 8193, 8193
+	id.Serving = map[string]engines.ServingEnvelope{"resident": env}
+	r.engineIdentity["llamacpp"] = id
+	r.mu.Unlock()
+	if !f.b.replayPolicyToProxy(context.Background(), f.pp) {
+		t.Fatal("activate changed resident policy")
+	}
+	reportStrict(t, f.b, "1", f.acks.runID, strictCapability(t, "llamacpp", "resident"))
+	f.b.observeLoadedFrom(f.source, map[string][]string{"llamacpp": {"resident"}})
+	readback := residentLaunchReadback(f.b.captureModelConfig())
+	f.engine.setAnswer(modelConfigNotDispatched(&readback))
+	f.b.reconcileModelConfig(context.Background())
+	status := f.b.modelConfiguration(f.b.captureModelConfig())
+	if loads := len(modelConfigCalls(f.engine, nodepolicy.MethodReconcileResident)); loads != 1 || status.Models[0].State != nodepolicy.ModelStateSatisfied {
+		t.Fatalf("observed unload caused extra load: loads=%d status=%+v", loads, status)
+	}
+}

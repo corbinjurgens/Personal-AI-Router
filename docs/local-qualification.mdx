@@ -276,6 +276,56 @@ binding validation runs on full-inventory sweeps, scheduled every 60 seconds and
 also triggered by an action poke, rather than at dispatch. The watcher's ordinary
 loaded-model ticks do not each perform this validation.
 
+## Daily adapter and residency contract
+
+`servedModels` permits on-demand admission; `residentModels` is the desired
+always-loaded subset, not an inventory report or evidence of allocation. Saving
+either list does not qualify a model. Automatic residency requires the existing
+B qualification and current owned NE serving identity, a unique normalized
+profile, finite context, output and concurrency, and approved memory bounds.
+Profile context must equal native per-slot allocation; qualification must cover
+that allocation and its output ceiling, and effective concurrency must equal
+native slots. A model-only load cannot shrink native allocation.
+
+Daily adapters require an explicit, non-mutating load contract: `POST` with exactly
+`{model}`, and a side-effect-free loaded-model `GET` with extraction and a loaded
+filter. There is no prompt, implicit load, pull, install, restart, eviction or
+arbitrary-action fallback. An engine family name alone does not establish support.
+Native retention must be exactly `"-1"`, disabling idle expiry, and router
+capacity must fit the revision-bound resident set for that engine. The validated
+`keepAliveSeconds` request value is not sent to the engine; native launch settings
+own retention. Positive native expiry remains valid for other launch uses but
+does not satisfy automatic residency.
+
+The destination proxy owns admission and reserves against the whole desired set
+and existing resident/in-flight memory. The broker coordinates prepare, manager
+reconcile, final proxy dispatch grant, finish and authoritative observation.
+Paused-local and local engine Off remain target vetoes, including a veto arriving
+after work was accepted. Reconciliation does not start an Off engine.
+PG's existing route-policy owner continues to decide routes; residency does not
+select a route, broaden served permission or enable hybrid dispatch.
+
+Unknown loaded observations and failed or interrupted loads remain uncertainty,
+not satisfaction or free capacity. Source/run/revision changes fence stale replies;
+restart does not replay a persistent load queue. Fresh manager-owned loaded
+allocation evidence, rather than a cold declaration or model name alone, is
+required to confirm satisfaction after replacement. Resident bookkeeping is
+separate from durable strict-inference quarantine: an HTTP terminal frame or
+elapsed timeout does not prove inference termination.
+
+If a manager stops mid-load without a terminal reply, its nonterminal resident
+hold remains `unknown`/`operation-timeout` until the next policy edit or a proxy
+restart; time passing or manager replacement does not clear it. Engines adopted
+from an earlier manager run stay `unknown` because they lack confirmable
+manager-owned allocation evidence.
+
+Real-host acceptance remains pending: approved launch/binding evidence,
+tokenizer/template measurement, loaded context and slots, retention behavior,
+router capacity, local veto races and restart recovery must be demonstrated on
+the selected host and engine build. Configured bounds and synthetic tests do not
+establish Windows/GPU behavior or actual RAM/VRAM usage. Strata has no loaded
+allocation observation producer; its declaration alone cannot prove residency.
+
 ## Not covered here
 
 - Actual qualification evidence. It must come from the target machine: the model
