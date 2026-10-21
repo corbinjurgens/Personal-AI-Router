@@ -5,6 +5,7 @@ package tests
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -12,6 +13,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -265,17 +267,34 @@ func runSRRuntime(args []string) error {
 
 type srProcessFixture struct {
 	*neServingFixture
-	peerClient *http.Client
+	peerClient       *http.Client
+	switchTarget     bool
+	switchEnginePort int
+	switchFacadePort int
+	switchControl    *httptest.Server
+	switchMu         sync.Mutex
+	switchStarts     []int32
 }
 
 // NE owns fixed-image dispatch, service-port reservations, private manifests,
 // pre-start facade settings and process cleanup. SR adds two synthetic models.
 func newSRProcessFixture(t *testing.T) *srProcessFixture {
+	return newSRProcessFixtureWithSwitch(t, false)
+}
+
+func newSRSwitchProcessFixture(t *testing.T) *srProcessFixture {
+	return newSRProcessFixtureWithSwitch(t, true)
+}
+
+func newSRProcessFixtureWithSwitch(t *testing.T, switchTarget bool) *srProcessFixture {
 	t.Helper()
 	if runtime.GOOS != "windows" {
 		t.Skip("SR process evidence requires the Windows fixed-path lane")
 	}
 	f := &srProcessFixture{neServingFixture: newNEServingFixture(t)}
+	if switchTarget {
+		f.enableSwitchTarget(t)
+	}
 	peerDir := filepath.Join(t.TempDir(), "cluster")
 	targetDir := filepath.Join(f.root, "cluster")
 	if err := os.MkdirAll(peerDir, 0o700); err != nil {
@@ -422,6 +441,141 @@ func newSRProcessFixture(t *testing.T) *srProcessFixture {
 	})
 	t.Log("SR evidence is fixture-only: real broker/manager/proxy and synthetic NE/B data, with no native model qualification")
 	return f
+}
+
+// Only the switch case owns a second fake engine. Its facade settings and
+// executable are private before the first broker start; other SR cases keep
+// the NE fixture's single-facade startup and inert Ollama manifest.
+func (f *srProcessFixture) enableSwitchTarget(t *testing.T) {
+	t.Helper()
+	f.switchTarget = true
+	reservations := []net.Listener{listenFixtureLoopback(t), listenFixtureLoopback(t)}
+	f.switchEnginePort = reservations[0].Addr().(*net.TCPAddr).Port
+	f.switchFacadePort = reservations[1].Addr().(*net.TCPAddr).Port
+	servicePorts := []int{f.ports.nodeInfo, f.ports.errors, f.ports.workload, f.ports.clusterManager, f.ports.engineManagerHTTP, f.ports.engineControl}
+	for _, port := range []int{f.switchEnginePort, f.switchFacadePort} {
+		if !neSafePort(port) || port == f.enginePort || port == f.facadePort || port == f.scannerPort || port == f.inertPort {
+			t.Fatalf("switch fixture selected occupied or protected port %d", port)
+		}
+		for _, servicePort := range servicePorts {
+			if port == servicePort {
+				t.Fatalf("switch fixture selected service port %d", port)
+			}
+		}
+	}
+	for _, listener := range reservations {
+		if err := listener.Close(); err != nil {
+			t.Fatalf("release switch port reservation: %v", err)
+		}
+	}
+	f.switchControl = newFixtureHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/started" || r.URL.Query().Get("engine") != "ollama" {
+			http.Error(w, "unexpected fake engine callback", http.StatusBadRequest)
+			return
+		}
+		pid, err := strconv.ParseInt(r.URL.Query().Get("pid"), 10, 32)
+		if err != nil || pid <= 0 {
+			http.Error(w, "invalid fake engine PID", http.StatusBadRequest)
+			return
+		}
+		f.switchMu.Lock()
+		f.switchStarts = append(f.switchStarts, int32(pid))
+		f.switchMu.Unlock()
+	}))
+	t.Cleanup(f.switchControl.Close)
+	probe := map[string]any{"http": "http://127.0.0.1:{port}/api/tags", "status": http.StatusOK, "timeout_s": 10, "interval_s": 60, "json_match": nil}
+	runtimeConfig := map[string]any{
+		"mode": "process", "bin": f.image, "cli": filepath.Join(f.root, "absent-ollama-cli"), "port": f.switchEnginePort, "bind": "127.0.0.1", "ready": probe, "health": probe,
+		"env":  map[string]string{"NVPAIR_TEST_SWITCH_ENGINE": f.image, "NVPAIR_TEST_SWITCH_NAME": "ollama", "NVPAIR_TEST_SWITCH_PORT": "{port}", "NVPAIR_TEST_SWITCH_CONTROL": f.switchControl.URL},
+		"stop": map[string]any{"signal": "term", "grace_s": 1},
+	}
+	modelsDir := filepath.Join(f.root, "switch-models")
+	jointWriteJSON(t, filepath.Join(f.app, "engines", "ollama.json"), map[string]any{
+		"engine": "ollama", "runtime": runtimeConfig, "models_dir": modelsDir,
+		"platforms": map[string]any{runtime.GOOS + "/" + runtime.GOARCH: map[string]any{"detect": []string{f.image}, "runtime": runtimeConfig, "models_dir": modelsDir}},
+	})
+	journalPath := filepath.Join(f.root, "engine-settings-operations.json")
+	data, err := os.ReadFile(journalPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var journal map[string]any
+	if err := json.Unmarshal(data, &journal); err != nil {
+		t.Fatal(err)
+	}
+	journal["ollama"] = map[string]any{"explicit": true, "snapshot": settings.Snapshot{
+		Engine: "ollama", Revision: 1, AppliedRevision: 1, Phase: "idle", Format: "pair-arguments-v1", Settings: settings.Config{ServerPort: f.switchEnginePort, ProxyPort: f.switchFacadePort},
+	}}
+	jointWriteJSON(t, journalPath, journal)
+}
+
+func (f *srProcessFixture) start(t *testing.T) {
+	t.Helper()
+	if !f.switchTarget {
+		f.neServingFixture.start(t)
+		return
+	}
+	if f.p != nil {
+		t.Fatal("fixture broker already running")
+	}
+	// The default NE isolation checks expect Ollama to remain inert. Check the
+	// switch target separately, and still check every other private engine.
+	for _, engine := range engines.Names() {
+		data, err := os.ReadFile(filepath.Join(f.app, "engines", engine+".json"))
+		if err != nil || len(data) > neLimit {
+			t.Fatalf("%s cannot read private manifest: %v", engine, err)
+		}
+		var manifest struct {
+			Runtime   neFixtureRuntime             `json:"runtime"`
+			ModelsDir string                       `json:"models_dir"`
+			Platforms map[string]neFixturePlatform `json:"platforms"`
+		}
+		if err := json.Unmarshal(data, &manifest); err != nil {
+			t.Fatal(err)
+		}
+		if engine == "ollama" {
+			platform, ok := manifest.Platforms[runtime.GOOS+"/"+runtime.GOARCH]
+			if !ok || !reflect.DeepEqual(platform.Detect, []string{f.image}) || manifest.Runtime.Bin != f.image || manifest.Runtime.CLI != filepath.Join(f.root, "absent-ollama-cli") || manifest.Runtime.Port != f.switchEnginePort || platform.Runtime.Port != f.switchEnginePort || platform.Runtime.Ready.HTTP != "http://127.0.0.1:{port}/api/tags" || platform.ModelsDir != filepath.Join(f.root, "switch-models") {
+				t.Fatal("switch target escaped private image, port or model directory")
+			}
+			continue
+		}
+		f.assertRuntimeIsolation(t, engine, "raw shared", manifest.Runtime, manifest.ModelsDir)
+		f.assertPlatformIsolation(t, engine, "raw host", manifest.Platforms)
+	}
+	args := append([]string{"--scanner-path", f.scanner, "--engine-manager-path", engineMgrBin, "--proxy-path", proxyBin, "--proxy-engines=llamacpp,ollama", "--cluster-dir", filepath.Join(f.root, "cluster"), "--log-level", "info"}, f.ports.args()...)
+	f.p = startInteropProcess(t, f.root, brokerBin, f.ports.engineManagerHTTP, []string{"OLLAMA_HOST=", "NVPAIR_TEST_SUBSCRIPTION_SCANNER=" + f.scanner, "NVPAIR_TEST_SUBSCRIPTION_PORT=" + strconv.Itoa(f.scannerPort)}, args...)
+	f.p.ports = append(f.p.ports, f.ports.engineControl, f.scannerPort, f.facadePort, f.switchEnginePort, f.switchFacadePort)
+	for _, path := range []string{engineMgrBin, proxyBin, f.scanner} {
+		canonical, err := canonicalServicePath(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		f.p.paths = append(f.p.paths, canonical)
+	}
+	waitForMethod(t, f.p.msgs, "app:ready", neCallBudget)
+	for _, facade := range []struct {
+		name string
+		port int
+	}{{"llamacpp-proxy", f.facadePort}, {"ollama-proxy", f.switchFacadePort}} {
+		if port := waitEngineProxyReady(t, facade.name, f.p.in, f.p.msgs, neCallBudget); port != facade.port {
+			t.Fatalf("%s bound port %d, want reserved %d", facade.name, port, facade.port)
+		}
+	}
+	for _, engine := range engines.Names() {
+		var manifest struct {
+			Platforms map[string]neFixturePlatform `json:"platforms"`
+		}
+		f.call(t, "engine:describe", map[string]string{"engine": engine}, &manifest)
+		if engine == "ollama" {
+			platform, ok := manifest.Platforms[runtime.GOOS+"/"+runtime.GOARCH]
+			if !ok || !reflect.DeepEqual(platform.Detect, []string{f.image}) || platform.Runtime.Bin != f.image || platform.Runtime.CLI != filepath.Join(f.root, "absent-ollama-cli") || platform.Runtime.Port != f.switchEnginePort || platform.Runtime.Ready.HTTP != "http://127.0.0.1:{port}/api/tags" || platform.ModelsDir != filepath.Join(f.root, "switch-models") {
+				t.Fatal("effective switch target escaped private image, port, probe or model directory")
+			}
+			continue
+		}
+		f.assertPlatformIsolation(t, engine, "effective host", manifest.Platforms)
+	}
 }
 
 func (f *srProcessFixture) control(t *testing.T, action string) srRuntimeState {
@@ -820,23 +974,84 @@ func TestServedResidentProcessRecovery(t *testing.T) {
 }
 
 func TestServedResidentProcessSwitch(t *testing.T) {
-	f := newSRProcessFixture(t)
+	f := newSRSwitchProcessFixture(t)
 	f.resident(t, neModel)
 	f.entry(t, neModel, nodepolicy.ModelStateSatisfied, "")
+	// Capture every engine settings baseline before obtaining the CAS revision.
+	// A periodic broker refresh must not add an unrelated baseline mid-switch.
+	for _, engine := range engines.Names() {
+		f.call(t, "engine:get-settings", map[string]string{"engine": engine}, nil)
+	}
+	source := f.control(t, "hold")
+	sourceStarts := len(f.starts(t))
+	if source.Base.PID <= 0 || source.Models[neModel].Loads != 1 {
+		t.Fatalf("switch source was not resident before drain: %+v", source)
+	}
+	body := []byte(`{"model":"ne-fixture","messages":[{"role":"user","content":"fixture"}],"max_tokens":128,"stream":false}`)
+	completed := make(chan error, 1)
+	go func() {
+		client := &http.Client{Timeout: 80 * time.Second, Transport: &http.Transport{Proxy: nil}}
+		response, err := client.Post(fmt.Sprintf("http://127.0.0.1:%d/v1/chat/completions", f.facadePort), "application/json", bytes.NewReader(body))
+		if err == nil {
+			if response.StatusCode != http.StatusOK {
+				err = fmt.Errorf("held inference status=%d", response.StatusCode)
+			}
+			if closeErr := response.Body.Close(); err == nil {
+				err = closeErr
+			}
+		}
+		completed <- err
+	}()
+	neEventually(t, "source inference reached fake runtime", 10*time.Second, func() bool { return f.control(t, "").HeldChats == 1 })
 	var status settings.SwitchStatus
 	f.call(t, settings.SwitchStatusMethod, settings.SwitchStatusRequest{}, &status)
-	request := settings.SwitchRequest{RequestID: "sr-invalid-target", SourceEngine: "llamacpp", TargetEngine: "ollama", ExpectedRevision: status.ConfigurationRevision}
-	before := f.control(t, "")
+	request := settings.SwitchRequest{RequestID: "sr-resident-drain", SourceEngine: "llamacpp", TargetEngine: "ollama", ExpectedRevision: status.ConfigurationRevision}
 	f.call(t, settings.SwitchMethod, request, nil)
-	neEventually(t, "switch terminal validation", neCallBudget, func() bool {
+	neEventually(t, "switch entered drain", 40*time.Second, func() bool {
+		f.call(t, settings.SwitchStatusMethod, settings.SwitchStatusRequest{RequestID: request.RequestID}, &status)
+		if status.Receipt != nil && status.Receipt.Terminal {
+			t.Fatalf("switch became terminal before held inference released: %+v", status.Receipt)
+		}
+		return status.Receipt != nil && status.Receipt.Phase == settings.SwitchDraining
+	})
+	stopped, err := serviceProcessStopped(context.Background(), int32(source.Base.PID))
+	if err != nil || stopped || f.control(t, "").HeldChats != 1 {
+		t.Fatalf("switch stopped a busy resident source: stopped=%t err=%v", stopped, err)
+	}
+	f.control(t, "release")
+	select {
+	case err := <-completed:
+		if err != nil {
+			t.Fatalf("held inference did not finish: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("held inference did not finish after release")
+	}
+	neEventually(t, "switch completed after resident request", 45*time.Second, func() bool {
 		f.call(t, settings.SwitchStatusMethod, settings.SwitchStatusRequest{RequestID: request.RequestID}, &status)
 		return status.Receipt != nil && status.Receipt.Terminal
 	})
-	if status.Receipt.Phase != settings.SwitchFailedValidation {
-		t.Fatalf("isolated absent target switch phase=%s", status.Receipt.Phase)
+	receipt := status.Receipt
+	if receipt.Phase != settings.SwitchCompleted || receipt.Error != nil || receipt.RecoveryRequired || receipt.Source.Intent != settings.SwitchIntentOff || receipt.Target.Intent != settings.SwitchIntentOn || !receipt.Source.TerminationVerified {
+		t.Fatalf("resident switch receipt=%+v", receipt)
 	}
+	assertSwitchProcessStopped(t, int32(source.Base.PID))
+	assertInteropListenerClosed(t, f.enginePort)
+	f.switchMu.Lock()
+	starts := append([]int32(nil), f.switchStarts...)
+	f.switchMu.Unlock()
+	if len(starts) != 1 {
+		t.Fatalf("target starts=%v, want one", starts)
+	}
+	stopped, err = serviceProcessStopped(context.Background(), starts[0])
+	if err != nil || stopped {
+		t.Fatalf("switch target not running: stopped=%t err=%v", stopped, err)
+	}
+	f.entry(t, neModel, nodepolicy.ModelStateBlocked, nodepolicy.ModelReasonEngineOffLocal)
 	if !reflect.DeepEqual(f.policy(t).Policy.ResidentModels, nodepolicy.ResidentModels{{Engine: "llamacpp", Model: neModel}}) {
-		t.Fatal("failed switch changed resident declaration")
+		t.Fatal("switch changed resident declaration")
 	}
-	srAssertNoEffects(t, before, f.control(t, ""))
+	if len(f.starts(t)) != sourceStarts {
+		t.Fatal("saved source Off automatically restarted resident engine")
+	}
 }
