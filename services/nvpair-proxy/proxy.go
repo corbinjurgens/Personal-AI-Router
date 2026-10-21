@@ -1304,6 +1304,7 @@ func subscribedToNode(p engineProfile, n noderec.DirectoryNode) (Node, bool) {
 		node.Roles = maps.Clone(n.Policy.Roles)
 		node.ServedModels = slices.Clone(n.Policy.ServedModels)
 		node.PolicyRevision = n.Policy.Revision
+		node.PausedBy = n.Policy.PausedBy
 		node.StrictAdmission = n.Policy.StrictAdmission
 	}
 	return node, true

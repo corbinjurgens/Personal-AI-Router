@@ -71,6 +71,9 @@ type Node struct {
 	Roles          map[string]nodepolicy.AdvertisedRole `json:"-"`
 	ServedModels   nodepolicy.ServedModels              `json:"-"`
 	PolicyRevision string                               `json:"-"`
+	// PausedBy is an advisory policy hint fetched over authenticated LAN
+	// transport, with the scanner's existing plaintext loopback exception.
+	PausedBy nodepolicy.PauseOrigin `json:"-"`
 	// StrictAdmission is the strict admission capability from the same
 	// advertisement, nil when the node publishes none. It is shared with the
 	// decoded advertisement and never modified. Read it through strictModel.
@@ -186,8 +189,8 @@ func (d *Discovery) SetSubscribed(nodes []Node) (discovered, updated, removed []
 
 // nodeEqual reports whether two routable Nodes carry the same routing/display
 // identity — the fields a consumer dials or renders. A change in any of them
-// warrants a node/updated. Loaded, ClusterUUID, Roles, PolicyRevision and
-// StrictAdmission are internal routing metadata and deliberately not compared.
+// warrants a node/updated. Loaded, ClusterUUID, Roles, PolicyRevision, PausedBy
+// and StrictAdmission are internal routing metadata and deliberately not compared.
 func nodeEqual(a, b Node) bool {
 	return a.ID == b.ID && a.Host == b.Host && a.Port == b.Port && a.IP == b.IP &&
 		slices.Equal(a.Addresses, b.Addresses) && slices.Equal(a.TXT, b.TXT) &&
