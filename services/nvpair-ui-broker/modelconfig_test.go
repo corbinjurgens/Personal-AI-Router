@@ -200,6 +200,224 @@ func TestModelConfigInflightConfirmingInventoryCoalesces(t *testing.T) {
 	}
 }
 
+func TestModelConfigBusyRetainsOriginalOwnership(t *testing.T) {
+	f := newModelConfigFixture(t)
+	done := f.startLoadedAttempt(t)
+	f.awaitGrant(t)
+	r := f.b.nodePolicyRuntime()
+	r.mu.Lock()
+	original := r.models.active
+	r.mu.Unlock()
+	f.b.observeLoadedFrom(f.source, map[string][]string{"llamacpp": {"resident"}})
+	f.b.reconcileModelConfig(context.Background())
+	r.mu.Lock()
+	active, busy := r.models.active, r.models.busy
+	r.mu.Unlock()
+	f.engine.releaseHeld()
+	awaitModelConfigDone(t, done)
+	if original == nil || active != original || !busy || len(modelConfigCalls(f.engine, "engine:get-launch")) != 0 {
+		t.Fatalf("changed evidence lost original owner: original=%p active=%p busy=%v launch-reads=%d", original, active, busy, len(modelConfigCalls(f.engine, "engine:get-launch")))
+	}
+	if status := f.b.modelConfiguration(f.b.captureModelConfig()); status.Models[0].State != nodepolicy.ModelStateSatisfied {
+		t.Fatalf("original operation did not finish satisfied: %+v", status)
+	}
+}
+
+func TestModelConfigCompletedLoadWaitsForWatcher(t *testing.T) {
+	f := newModelConfigFixture(t)
+	done := f.startLoadedAttempt(t)
+	f.awaitGrant(t)
+	f.engine.releaseHeld()
+	awaitModelConfigDone(t, done)
+	f.engine.setAnswer(func(method string, _ json.RawMessage) (any, string) {
+		if method == settings.SwitchPrepareMethod {
+			return emptySwitchManagerSnapshot(), ""
+		}
+		return nodepolicy.ReconcileResidentResult{Outcome: nodepolicy.ResidentNotDispatched}, ""
+	})
+	r := f.b.nodePolicyRuntime()
+	for capacity := range 3 {
+		r.mu.Lock()
+		r.admission.ActiveByEngine = map[string]int{"llamacpp": capacity}
+		r.mu.Unlock()
+		f.b.reconcileModelConfig(context.Background())
+	}
+	if got := len(modelConfigCalls(f.engine, nodepolicy.MethodReconcileResident)); got != 1 {
+		t.Fatalf("capacity change before watcher issued %d loads, want one", got)
+	}
+	f.b.observeLoadedFrom(f.source, map[string][]string{"llamacpp": {}})
+	f.b.reconcileModelConfig(context.Background())
+	if got := len(modelConfigCalls(f.engine, nodepolicy.MethodReconcileResident)); got != 1 {
+		t.Fatalf("empty publication during pending observation issued %d loads", got)
+	}
+	f.b.observeLoadedFrom(f.source, map[string][]string{"llamacpp": {"resident"}})
+	f.b.reconcileModelConfig(context.Background())
+	if status := f.b.modelConfiguration(f.b.captureModelConfig()); status.Models[0].State != nodepolicy.ModelStateSatisfied || len(modelConfigCalls(f.engine, nodepolicy.MethodReconcileResident)) != 1 {
+		t.Fatalf("fresh observation did not confirm one load: %+v", status)
+	}
+}
+
+func TestModelConfigObservationTimeoutReevaluates(t *testing.T) {
+	f := newModelConfigFixture(t)
+	done := f.startLoadedAttempt(t)
+	f.awaitGrant(t)
+	f.engine.releaseHeld()
+	awaitModelConfigDone(t, done)
+	f.engine.setAnswer(func(method string, _ json.RawMessage) (any, string) {
+		if method == settings.SwitchPrepareMethod {
+			return emptySwitchManagerSnapshot(), ""
+		}
+		return nodepolicy.ReconcileResidentResult{Outcome: nodepolicy.ResidentNotDispatched}, ""
+	})
+	r := f.b.nodePolicyRuntime()
+	r.mu.Lock()
+	now := r.now().Add(2*idleCheckInterval + time.Second)
+	r.now = func() time.Time { return now }
+	r.mu.Unlock()
+	f.b.reconcileModelConfig(context.Background())
+	if got := len(modelConfigCalls(f.engine, nodepolicy.MethodReconcileResident)); got != 2 {
+		t.Fatalf("observation timeout issued %d loads, want original and re-evaluation", got)
+	}
+}
+
+func TestModelConfigTransientRecoveryRetries(t *testing.T) {
+	for _, scenario := range []string{"inventory failure", "observe failure", "finish transport failure", "revision replacement", "cancelled recovery"} {
+		t.Run(scenario, func(t *testing.T) {
+			f := newModelConfigFixture(t)
+			var mu sync.Mutex
+			healthy := false
+			f.proxy.mu.Lock()
+			answer := f.proxy.answer
+			f.proxy.mu.Unlock()
+			f.proxy.setAnswer(func(method string, raw json.RawMessage) (any, string) {
+				mu.Lock()
+				ok := healthy
+				mu.Unlock()
+				if method == nodepolicy.MethodFinishResident {
+					if !ok && scenario == "finish transport failure" {
+						return nil, "transient finish failure"
+					}
+					return nodepolicy.FinishResidentResult{ReservationID: "fixture-reservation", Outcome: nodepolicy.ResidentUnknown, RecoveryID: "fixture-recovery"}, ""
+				}
+				if method == nodepolicy.MethodObserveResident {
+					if !ok && scenario == "observe failure" {
+						return nil, "transient observe failure"
+					}
+					return nodepolicy.ObserveResidentResult{ReservationID: "fixture-reservation", Settled: true}, ""
+				}
+				return answer(method, raw)
+			})
+			done := f.startResidentAttempt(t, nodepolicy.ResidentUnknown)
+			f.awaitGrant(t)
+			f.engine.mu.Lock()
+			engineAnswer := f.engine.answer
+			f.engine.mu.Unlock()
+			readback := residentLaunchReadback(f.b.captureModelConfig())
+			f.engine.setAnswer(func(method string, raw json.RawMessage) (any, string) {
+				mu.Lock()
+				ok := healthy
+				mu.Unlock()
+				if method == "engine:models" {
+					if !ok && scenario != "observe failure" && scenario != "finish transport failure" {
+						return nil, "transient inventory failure"
+					}
+					return map[string]any{"loadedByEngine": map[string][]string{"llamacpp": {"resident"}}}, ""
+				}
+				if method == "engine:get-launch" {
+					return readback, ""
+				}
+				if method == nodepolicy.MethodReconcileResident {
+					_, mode := engineAnswer(method, raw)
+					return nodepolicy.ReconcileResidentResult{Outcome: nodepolicy.ResidentUnknown}, mode
+				}
+				return engineAnswer(method, raw)
+			})
+			f.engine.releaseHeld()
+			awaitModelConfigDone(t, done)
+			mu.Lock()
+			healthy = true
+			mu.Unlock()
+			r := f.b.nodePolicyRuntime()
+			if scenario == "revision replacement" {
+				r.mu.Lock()
+				r.current.Revision = "1"
+				r.mu.Unlock()
+				if !f.b.replayPolicyToProxy(context.Background(), f.pp) {
+					t.Fatal("activate replacement revision")
+				}
+				reportStrict(t, f.b, "1", f.acks.runID, strictCapability(t, "llamacpp", "resident"))
+				f.b.observeLoadedFrom(f.source, map[string][]string{"llamacpp": {"resident"}})
+				// Replacement must evaluate immediately, without a retry tick.
+				f.b.reconcileModelConfig(context.Background())
+			}
+			if scenario == "cancelled recovery" {
+				r.mu.Lock()
+				now := r.now().Add(idleCheckInterval + time.Second)
+				r.now = func() time.Time { return now }
+				r.mu.Unlock()
+				ctx, cancel := context.WithCancel(context.Background())
+				cancel()
+				f.b.reconcileModelConfig(ctx)
+			}
+			// No changed evidence is needed: advance the broker tick clock.
+			r.mu.Lock()
+			now := r.now().Add(idleCheckInterval + time.Second)
+			r.now = func() time.Time { return now }
+			r.mu.Unlock()
+			f.b.reconcileModelConfig(context.Background())
+			f.b.observeLoadedFrom(f.source, map[string][]string{"llamacpp": {"resident"}})
+			f.b.reconcileModelConfig(context.Background())
+			status := f.b.modelConfiguration(f.b.captureModelConfig())
+			if status.Models[0].State != nodepolicy.ModelStateSatisfied || len(modelConfigCalls(f.engine, nodepolicy.MethodReconcileResident)) != 1 {
+				t.Fatalf("transient failure suppressed settlement or duplicated load: %+v loads=%d", status, len(modelConfigCalls(f.engine, nodepolicy.MethodReconcileResident)))
+			}
+			if scenario != "revision replacement" && len(modelConfigCalls(f.proxy, nodepolicy.MethodObserveResident)) == 0 {
+				t.Fatal("original operation was not recovered before confirmation")
+			}
+			if scenario == "observe failure" {
+				calls := modelConfigCalls(f.proxy, nodepolicy.MethodObserveResident)
+				if len(calls) != 2 || !reflect.DeepEqual(decodeModelConfigCall[nodepolicy.ObserveResidentParams](t, calls[0]), decodeModelConfigCall[nodepolicy.ObserveResidentParams](t, calls[1])) || len(modelConfigCalls(f.engine, "engine:models")) != 1 {
+					t.Fatal("observe retry did not preserve the exact original recovery receipt")
+				}
+			}
+		})
+	}
+}
+
+func TestModelConfigRecoveryCannotUseReplacementManager(t *testing.T) {
+	f := newModelConfigFixture(t)
+	f.proxy.mu.Lock()
+	answer := f.proxy.answer
+	f.proxy.mu.Unlock()
+	f.proxy.setAnswer(func(method string, raw json.RawMessage) (any, string) {
+		if method == nodepolicy.MethodFinishResident {
+			return nodepolicy.FinishResidentResult{ReservationID: "fixture-reservation", Outcome: nodepolicy.ResidentUnknown, RecoveryID: "fixture-recovery"}, ""
+		}
+		return answer(method, raw)
+	})
+	done := f.startResidentAttempt(t, nodepolicy.ResidentUnknown)
+	f.awaitGrant(t)
+	f.engine.releaseHeld()
+	awaitModelConfigDone(t, done)
+	before := f.b.captureModelConfig()
+	manager := attachFakeEngine(t, f.b)
+	f.source = f.b.activateEngineManagerSource()
+	f.b.bindEngineMgr(f.b.getEngineMgr(), f.source)
+	r := f.b.nodePolicyRuntime()
+	r.mu.Lock()
+	id := before.Identity.Engines["llamacpp"]
+	r.engineIdentity = map[string]engineManagerIdentity{"llamacpp": {EngineRunID: id.EngineRunID, LaunchDigest: id.LaunchDigest, ModelDigests: id.ModelDigests, Serving: id.Serving}}
+	r.intent["llamacpp"], r.running["llamacpp"] = true, true
+	r.mu.Unlock()
+	manager.setAnswer(func(string, json.RawMessage) (any, string) { return residentLaunchReadback(before), "" })
+	f.b.observeLoadedFrom(f.source, map[string][]string{"llamacpp": {"resident"}})
+	f.b.reconcileModelConfig(context.Background())
+	status := f.b.modelConfiguration(f.b.captureModelConfig())
+	if status.Models[0].State != nodepolicy.ModelStateUnknown || len(modelConfigCalls(manager, "engine:get-launch")) != 0 || len(modelConfigCalls(manager, nodepolicy.MethodReconcileResident)) != 0 {
+		t.Fatalf("replacement manager settled or retried the original hold: %+v", status)
+	}
+}
+
 func residentLaunchReadback(e modelConfigEvidence) settings.LaunchState {
 	envelope := e.Identity.Engines["llamacpp"].Serving["resident"]
 	return settings.LaunchState{Engine: "llamacpp", Running: true, ServingReadback: &engines.ServingReadback{
@@ -419,6 +637,20 @@ func TestModelConfigFailedAttemptWaitsForChangedEvidence(t *testing.T) {
 	}
 }
 
+func TestModelConfigFailedAttemptRetriesOnTick(t *testing.T) {
+	f := newModelConfigFixture(t)
+	f.b.reconcileModelConfig(context.Background())
+	r := f.b.nodePolicyRuntime()
+	r.mu.Lock()
+	now := r.now().Add(idleCheckInterval + time.Second)
+	r.now = func() time.Time { return now }
+	r.mu.Unlock()
+	f.b.reconcileModelConfig(context.Background())
+	if got := len(modelConfigCalls(f.engine, nodepolicy.MethodReconcileResident)); got != 2 {
+		t.Fatalf("unchanged failed attempt did not retry on tick: loads=%d", got)
+	}
+}
+
 func TestModelConfigAdmissionRefusalsHaveNoLoad(t *testing.T) {
 	cases := []struct {
 		name   string
@@ -542,6 +774,10 @@ func TestModelConfigInternalClientMethodsDenied(t *testing.T) {
 }
 
 func (f *modelConfigFixture) startLoadedAttempt(t *testing.T) <-chan struct{} {
+	return f.startResidentAttempt(t, nodepolicy.ResidentLoaded)
+}
+
+func (f *modelConfigFixture) startResidentAttempt(t *testing.T, outcome nodepolicy.ResidentOutcome) <-chan struct{} {
 	t.Helper()
 	f.engine.setAnswer(func(method string, raw json.RawMessage) (any, string) {
 		if method == settings.SwitchPrepareMethod {
@@ -566,11 +802,14 @@ func (f *modelConfigFixture) startLoadedAttempt(t *testing.T) <-chan struct{} {
 			return nil, err.Error()
 		}
 		f.b.dispatchResidentFrom(f.source, request)
-		return nodepolicy.ReconcileResidentResult{Outcome: nodepolicy.ResidentLoaded,
-			Observation: &nodepolicy.ResidentLoadedObservation{
+		result := nodepolicy.ReconcileResidentResult{Outcome: outcome}
+		if outcome == nodepolicy.ResidentLoaded {
+			result.Observation = &nodepolicy.ResidentLoadedObservation{
 				ManagerIncarnation: p.Reservation.ManagerIncarnation, Generation: 1,
 				Engine: p.Engine, Model: p.Model, Identity: p.Identity, Loaded: true,
-			}}, holdSuccessReply
+			}
+		}
+		return result, holdSuccessReply
 	})
 	done := make(chan struct{})
 	go func() { defer close(done); f.b.reconcileModelConfig(context.Background()) }()
@@ -1125,7 +1364,9 @@ func TestModelConfigConcurrentEvidenceChangeIsReevaluated(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newModelConfigFixture(t)
 			f.b.observeLoadedFrom(f.source, map[string][]string{"llamacpp": {"neighbor"}})
-			done := f.startLoadedAttempt(t)
+			// Failed attempts must reevaluate changed evidence; successful loads
+			// instead wait for observation without another dispatch.
+			done := f.startResidentAttempt(t, nodepolicy.ResidentUnknown)
 			f.awaitGrant(t)
 			tc.change(f)
 			f.engine.releaseHeld()
