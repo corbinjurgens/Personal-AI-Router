@@ -33,6 +33,7 @@ import (
 	settings "nvpair-shared/enginesettings"
 	"nvpair-shared/jsonrpc"
 	"nvpair-shared/nodepolicy"
+	"nvpair-shared/noderec"
 )
 
 const srRuntimeArg = "--sr-process-runtime"
@@ -1110,6 +1111,202 @@ func srAssertNoEffects(t *testing.T, before, after srRuntimeState) {
 	if before.Base.PID != after.Base.PID || before.Base.Loads != after.Base.Loads || before.Base.Unloads != after.Base.Unloads || before.Base.Chats != after.Base.Chats || before.Content != after.Content || before.Base.Unexpected != after.Base.Unexpected {
 		t.Fatalf("refusal caused effects: before=%+v after=%+v", before, after)
 	}
+}
+
+// Task 602 proves configuration equivalence on the production paired routes.
+// The switch fixture has no SR qualifications: desired residency readback here
+// is not evidence of native loading or of the SR/NE/B qualification path above.
+func TestServedResidentPolicyPairedRoutes(t *testing.T) {
+	test := func(name string, reverse bool) {
+		t.Run(name, func(t *testing.T) {
+			p := newPinnedSwitchFixture(t, reverse)
+			mesh, f := p.mesh, p.f
+			path := filepath.Join(jointAppDir(f.base), nodepolicy.FileName)
+			if !reverse {
+				// The fixture blocks the outer upgrade and advertises the ec
+				// observer directly. Remove the private gateway owner as well:
+				// every successful read/write below must use direct pinned TLS.
+				mesh.a.cm.stop()
+			} else if mesh.directory(mesh.b).Services[noderec.ServiceEngineControl].Port != mesh.blockedPort || mesh.a.observers[noderec.ServiceCluster].established(mesh.b.uuid) == 0 {
+				t.Fatal("reverse case lacks blocked direct ec and an observed pinned outer session")
+			}
+
+			local := func(t *testing.T) srPolicyView {
+				t.Helper()
+				var view srPolicyView
+				task2Decode(t, f.rpcOK(t, "policy:get", nil), &view)
+				return view
+			}
+			remote := func(t *testing.T, method string, params any) jsonrpc.Message {
+				t.Helper()
+				route := "/v1/node-policy/get"
+				if method == "engine:remote-policy-set" {
+					route = "/v1/node-policy/set"
+				}
+				before := p.ec.count(mesh.a.uuid, http.MethodPost, route)
+				response := task2Response(t, p.origin, p.origin.send(t, method, params, true))
+				if actual := p.ec.count(mesh.a.uuid, http.MethodPost, route); actual != before+1 {
+					t.Fatalf("authenticated %s dispatches=%d, want exactly one", route, actual-before)
+				}
+				return response
+			}
+			assertDesired := func(t *testing.T, configuration *nodepolicy.ModelConfiguration, want nodepolicy.Policy) {
+				t.Helper()
+				if configuration == nil {
+					t.Fatal("model configuration readback absent")
+				}
+				if err := configuration.Validate(); err != nil {
+					t.Fatalf("model configuration readback: %v", err)
+				}
+				if configuration.PolicyRevision != want.Revision || len(configuration.Models) != len(want.ResidentModels) {
+					t.Fatalf("desired residency readback=%+v, want revision=%s residents=%v", configuration, want.Revision, want.ResidentModels)
+				}
+				for _, entry := range configuration.Models {
+					found := false
+					for _, ref := range want.ResidentModels {
+						if ref.Engine == entry.Engine && ref.Model == entry.Model {
+							found = true
+						}
+					}
+					if !found || !entry.DesiredResident {
+						t.Fatalf("unexpected desired residency entry: %+v", entry)
+					}
+				}
+			}
+			assertPeer := func(t *testing.T, response jsonrpc.Message, want nodepolicy.Policy) {
+				t.Helper()
+				if response.Error != nil {
+					t.Fatalf("paired policy response: %+v", response.Error)
+				}
+				var view struct {
+					Policy             nodepolicy.PeerPolicy          `json:"policy"`
+					ModelConfiguration *nodepolicy.ModelConfiguration `json:"modelConfiguration"`
+				}
+				task2Decode(t, response.Result, &view)
+				if !reflect.DeepEqual(view.Policy, want.PeerProjection()) {
+					t.Fatalf("paired policy=%+v, want=%+v", view.Policy, want.PeerProjection())
+				}
+				assertDesired(t, view.ModelConfiguration, want)
+			}
+			readback := func(t *testing.T, want nodepolicy.Policy) {
+				t.Helper()
+				view := local(t)
+				if !reflect.DeepEqual(view.Policy, want) {
+					t.Fatalf("local policy=%+v, want=%+v", view.Policy, want)
+				}
+				assertStoredPolicy(t, path, want)
+				assertDesired(t, view.ModelConfiguration, want)
+				assertPeer(t, remote(t, "engine:remote-policy-get", map[string]string{"nodeId": mesh.b.uuid}), want)
+			}
+			writeLocal := func(t *testing.T, want nodepolicy.Policy) nodepolicy.Policy {
+				t.Helper()
+				before := local(t).Policy
+				var accepted srPolicyView
+				task2Decode(t, f.rpcOK(t, "policy:set", map[string]any{"policy": want, "expectedPersistedRevision": before.Revision}), &accepted)
+				if accepted.Policy.Revision == "" || accepted.Policy.Revision == before.Revision {
+					t.Fatal("local save did not advance revision")
+				}
+				want.Revision = accepted.Policy.Revision
+				if !reflect.DeepEqual(accepted.Policy, want) {
+					t.Fatalf("local accepted policy=%+v, want=%+v", accepted.Policy, want)
+				}
+				assertDesired(t, accepted.ModelConfiguration, want)
+				readback(t, want)
+				return want
+			}
+
+			f.mu.Lock()
+			starts := make(map[string][]int32)
+			for engine, pids := range f.starts {
+				starts[engine] = append([]int32(nil), pids...)
+			}
+			f.mu.Unlock()
+			assertNoEffects := func(t *testing.T) {
+				t.Helper()
+				f.mu.Lock()
+				unchanged := reflect.DeepEqual(f.starts, starts)
+				f.mu.Unlock()
+				if !unchanged {
+					t.Fatal("configuration edit started or restarted a synthetic engine")
+				}
+				select {
+				case <-f.inflight:
+					t.Fatal("unqualified configuration edit dispatched synthetic generate/load")
+				default:
+				}
+			}
+			configure := func(name string, served nodepolicy.ServedModels, resident nodepolicy.ResidentModels) {
+				t.Run(name, func(t *testing.T) {
+					before := local(t).Policy
+					want := before
+					want.ServedModels, want.ResidentModels = served, resident
+					if err := want.Validate(); err != nil {
+						t.Fatalf("invalid configuration control: %v", err)
+					}
+					managementSet(t, mesh.b.cm, mesh.a.uuid, false)
+					stored := readPolicyBytes(t, path)
+					request := map[string]any{"nodeId": mesh.b.uuid, "policy": want.PeerProjection(), "expectedPersistedRevision": before.Revision}
+					denied := remote(t, "engine:remote-policy-set", request)
+					if denied.Error == nil || denied.Error.Code != -32012 || len(denied.Result) != 0 {
+						t.Fatalf("PG denial=%+v, want -32012 without a result", denied)
+					}
+					if !bytes.Equal(readPolicyBytes(t, path), stored) {
+						t.Fatal("PG-denied configuration changed persisted bytes")
+					}
+					readback(t, before) // Denied peers retain authenticated read access.
+					assertNoEffects(t)
+					localWant := writeLocal(t, want) // PG does not gate the local owner.
+					assertNoEffects(t)
+					restored := writeLocal(t, before)
+					managementSet(t, mesh.b.cm, mesh.a.uuid, true)
+					// Restore the same starting configuration, then perform a real
+					// remote change; sending the already-applied local state would
+					// only demonstrate preservation, not equivalent mutation.
+					request["expectedPersistedRevision"] = restored.Revision
+					accepted := remote(t, "engine:remote-policy-set", request)
+					if accepted.Error != nil {
+						t.Fatalf("PG-allowed configuration: %+v", accepted.Error)
+					}
+					var result struct {
+						Policy nodepolicy.PeerPolicy `json:"policy"`
+					}
+					task2Decode(t, accepted.Result, &result)
+					if result.Policy.Revision == "" || result.Policy.Revision == restored.Revision {
+						t.Fatal("paired save did not advance revision")
+					}
+					localWant.Revision = result.Policy.Revision
+					assertPeer(t, accepted, localWant)
+					readback(t, localWant)
+					assertNoEffects(t)
+				})
+			}
+			model := nodepolicy.Role{Engine: "ollama", Model: "switch-model:latest"}
+			neighbor := nodepolicy.Role{Engine: "ollama", Model: srNeighbor + ":latest"}
+			configure("explicit empty served permission", nodepolicy.ServedModels{}, nil)
+			configure("served subset with desired resident", nodepolicy.ServedModels{model, neighbor}, nodepolicy.ResidentModels{model})
+			configure("replace desired resident within served subset", nodepolicy.ServedModels{model, neighbor}, nodepolicy.ResidentModels{neighbor})
+			configure("restore unrestricted serving and clear residency", nil, nil)
+
+			if reverse {
+				// Positive inner mTLS observations plus this gateway-loss control
+				// distinguish reverse dispatch from mere successful policy calls.
+				before := local(t).Policy
+				count := p.ec.count(mesh.a.uuid, http.MethodPost, "/v1/node-policy/get")
+				mesh.a.cm.stop()
+				response := task2Response(t, p.origin, p.origin.send(t, "engine:remote-policy-get", map[string]string{"nodeId": mesh.b.uuid}, true))
+				if response.Error == nil || len(response.Result) != 0 || p.ec.count(mesh.a.uuid, http.MethodPost, "/v1/node-policy/get") != count {
+					t.Fatal("blocked-direct policy read did not depend on the private reverse gateway")
+				}
+				if !reflect.DeepEqual(local(t).Policy, before) {
+					t.Fatal("gateway loss changed local policy")
+				}
+				assertStoredPolicy(t, path, before)
+			}
+			assertNoEffects(t)
+		})
+	}
+	test("authenticated direct without reverse gateway", false)
+	test("authenticated reverse with blocked direct ec", true)
 }
 
 func TestServedResidentProcessPermission(t *testing.T) {
