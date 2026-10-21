@@ -420,11 +420,13 @@ func (b *Broker) reconcileModelConfig(ctx context.Context) {
 			switch {
 			case unsettled:
 				entry.State, entry.Reason = nodepolicy.ModelStateUnknown, nodepolicy.ModelReasonOperationTimeout
-				// Native execution has ended. A replacement authority may confirm
-				// that allocation, but only with fresh inventory and envelope proof.
-				if hold.terminal && hold.finish.Outcome == nodepolicy.ResidentLoaded && !sameResidentAllocation(hold.op.evidence, e, ref) && e.LoadedCurrent[ref.Engine][ref.Model] && entry.ObservedLoaded != nil && *entry.ObservedLoaded {
+				// A replacement authority may confirm the allocation, but only with
+				// fresh inventory and envelope proof. Only a terminal hold, whose
+				// native execution has ended, is discharged; a nonterminal one stays
+				// the barrier against another load.
+				if (!hold.terminal || hold.finish.Outcome == nodepolicy.ResidentLoaded) && !sameResidentAllocation(hold.op.evidence, e, ref) && e.LoadedCurrent[ref.Engine][ref.Model] && entry.ObservedLoaded != nil && *entry.ObservedLoaded {
 					entry = b.confirmResident(ctx, e, entry)
-					if entry.State == nodepolicy.ModelStateSatisfied {
+					if entry.State == nodepolicy.ModelStateSatisfied && hold.terminal {
 						r.mu.Lock()
 						delete(r.models.unsettled, ref)
 						r.mu.Unlock()

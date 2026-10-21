@@ -315,9 +315,11 @@ elapsed timeout does not prove inference termination.
 
 If a manager stops mid-load without a terminal reply, its nonterminal resident
 hold remains `unknown`/`operation-timeout` until the next policy edit or a proxy
-restart; time passing or manager replacement does not clear it. Engines adopted
-from an earlier manager run stay `unknown` because they lack confirmable
-manager-owned allocation evidence.
+restart; time passing or manager replacement does not clear it. After proxy or
+manager replacement, fresh inventory and the observed serving envelope from the
+current manager can report the resident `satisfied` while the hold remains.
+Engines adopted from an earlier manager run stay `unknown` because they lack
+confirmable manager-owned allocation evidence.
 
 Real-host acceptance remains pending: approved launch/binding evidence,
 tokenizer/template measurement, loaded context and slots, retention behavior,

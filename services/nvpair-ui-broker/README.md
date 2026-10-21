@@ -43,7 +43,10 @@ Unknown completion retains the proxy's capacity hold. Recovery requires a
 terminal response from the original manager followed by a fresh `engine:models`
 read from that same source and identity, after the recovery ID was received.
 A missing response, watcher cache, null inventory or replacement manager cannot
-settle it. Holds remain in memory: a proxy restart loses their accounting;
+settle it. After proxy or manager replacement, fresh inventory and the
+manager-owned observed serving envelope from the current source can report the
+resident `satisfied`; an uncertain hold then remains the barrier against another
+load. Holds remain in memory: a proxy restart loses their accounting;
 this is not durable recovery. Replacement invalidates prior status and waits for
 fresh activation and inventory. Automatic unload and idle sleep recheck current
 resident protection immediately before execution; explicit pause retains its

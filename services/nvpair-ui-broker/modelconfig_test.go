@@ -2905,3 +2905,75 @@ func TestModelConfigRetirementDropsRecordedLoadRequest(t *testing.T) {
 		})
 	}
 }
+
+// nonterminalHold leaves a granted load whose completion never decoded and
+// whose finish cannot reach the proxy: the original nonterminal barrier.
+func (f *modelConfigFixture) nonterminalHold(t *testing.T) residentUnsettled {
+	t.Helper()
+	f.proxy.mu.Lock()
+	answer := f.proxy.answer
+	f.proxy.mu.Unlock()
+	f.proxy.setAnswer(func(method string, raw json.RawMessage) (any, string) {
+		if method == nodepolicy.MethodFinishResident {
+			return nil, "finish unavailable"
+		}
+		return answer(method, raw)
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done, _, _ := startModelConfigMatrixAttempt(t, ctx, f, emptySwitchManagerSnapshot(), nodepolicy.ResidentUnknown, true)
+	f.awaitGrant(t)
+	cancel()
+	awaitModelConfigDone(t, done)
+	f.engine.releaseHeld()
+	f.engine.setAnswer(modelConfigNotDispatched(nil))
+	r := f.b.nodePolicyRuntime()
+	r.mu.Lock()
+	hold, held := r.models.unsettled[nodepolicy.Role{Engine: "llamacpp", Model: "resident"}]
+	r.mu.Unlock()
+	if !held || hold.terminal {
+		t.Fatal("missing original nonterminal granted uncertainty")
+	}
+	return hold
+}
+
+func TestModelConfigNonterminalHoldConfirmsReplacementReadback(t *testing.T) {
+	f := newModelConfigFixture(t)
+	original := f.nonterminalHold(t)
+	r := f.b.nodePolicyRuntime()
+	ref := nodepolicy.Role{Engine: "llamacpp", Model: "resident"}
+	// The original allocation may still be loading: no readback replaces it.
+	f.b.observeLoadedFrom(f.source, map[string][]string{"llamacpp": {"resident"}})
+	f.b.reconcileModelConfig(context.Background())
+	if entry := f.residentEntry(t); entry.State != nodepolicy.ModelStateUnknown || entry.Reason != nodepolicy.ModelReasonOperationTimeout || len(modelConfigCalls(f.engine, "engine:get-launch")) != 0 {
+		t.Fatalf("original-allocation inventory confirmed a nonterminal hold: %+v", entry)
+	}
+	r.mu.Lock()
+	identity := r.engineIdentity
+	r.mu.Unlock()
+	f.source = f.b.activateEngineManagerSource()
+	f.b.bindEngineMgr(f.b.getEngineMgr(), f.source)
+	r.mu.Lock()
+	r.engineIdentity = identity
+	r.mu.Unlock()
+	f.b.observeLoadedFrom(f.source, map[string][]string{"llamacpp": {"resident"}})
+	readback := residentLaunchReadback(f.b.captureModelConfig())
+	f.engine.setAnswer(modelConfigNotDispatched(&readback))
+	assertBarrier := func(stage string, want nodepolicy.ModelConfigurationState) {
+		t.Helper()
+		f.b.reconcileModelConfig(context.Background())
+		r.mu.Lock()
+		retained, held := r.models.unsettled[ref]
+		r.mu.Unlock()
+		entry := f.residentEntry(t)
+		if loads := len(modelConfigCalls(f.engine, nodepolicy.MethodReconcileResident)); entry.State != want || !held || retained.op != original.op || loads != 1 {
+			t.Fatalf("%s: entry=%+v held=%v loads=%d, want %s with the original barrier and one load", stage, entry, held, loads, want)
+		}
+	}
+	assertBarrier("replacement readback", nodepolicy.ModelStateSatisfied)
+	if len(modelConfigCalls(f.engine, "engine:get-launch")) == 0 {
+		t.Fatal("replacement confirmation did not read the observed envelope")
+	}
+	f.b.observeLoadedFrom(f.source, map[string][]string{"llamacpp": {}})
+	assertBarrier("later known-empty inventory", nodepolicy.ModelStateUnknown)
+}
