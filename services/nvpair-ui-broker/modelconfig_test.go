@@ -2798,3 +2798,52 @@ func TestModelConfigObservedUnloadDropsRecordedRequest(t *testing.T) {
 		t.Fatalf("observed unload caused extra load: loads=%d status=%+v", loads, status)
 	}
 }
+
+// completedResidentLoad finishes one correlated load and leaves its pending
+// observation open; later manager calls answer not-dispatched.
+func (f *modelConfigFixture) completedResidentLoad(t *testing.T) {
+	t.Helper()
+	done := f.startLoadedAttempt(t)
+	f.awaitGrant(t)
+	f.engine.releaseHeld()
+	awaitModelConfigDone(t, done)
+	f.engine.setAnswer(modelConfigNotDispatched(nil))
+}
+
+func (f *modelConfigFixture) residentEntry(t *testing.T) nodepolicy.ModelConfigurationEntry {
+	t.Helper()
+	status := f.b.modelConfiguration(f.b.captureModelConfig())
+	if len(status.Models) != 1 {
+		t.Fatalf("status models=%+v, want one resident", status.Models)
+	}
+	return status.Models[0]
+}
+
+func TestModelConfigAbsentEngineKeepsConfirmedProof(t *testing.T) {
+	f := newModelConfigFixture(t)
+	f.completedResidentLoad(t)
+	f.b.observeLoadedFrom(f.source, map[string][]string{"llamacpp": {"resident"}})
+	f.b.reconcileModelConfig(context.Background())
+	if entry := f.residentEntry(t); entry.State != nodepolicy.ModelStateSatisfied {
+		t.Fatalf("confirmed resident: %+v", entry)
+	}
+	// An engine absent from a publication has unknown, not empty, inventory.
+	f.b.observeLoadedFrom(f.source, map[string][]string{})
+	f.b.reconcileModelConfig(context.Background())
+	if entry := f.residentEntry(t); entry.State != nodepolicy.ModelStateUnknown || entry.ObservedLoaded != nil {
+		t.Fatalf("absent engine inventory: %+v", entry)
+	}
+	r := f.b.nodePolicyRuntime()
+	r.mu.Lock()
+	_, confirmed := r.models.confirmed[nodepolicy.Role{Engine: "llamacpp", Model: "resident"}]
+	r.mu.Unlock()
+	if !confirmed {
+		t.Fatal("unknown inventory deleted the confirmed proof")
+	}
+	f.b.observeLoadedFrom(f.source, map[string][]string{"llamacpp": {"resident"}})
+	f.b.reconcileModelConfig(context.Background())
+	entry := f.residentEntry(t)
+	if readbacks, loads := len(modelConfigCalls(f.engine, "engine:get-launch")), len(modelConfigCalls(f.engine, nodepolicy.MethodReconcileResident)); entry.State != nodepolicy.ModelStateSatisfied || readbacks != 0 || loads != 1 {
+		t.Fatalf("returning inventory: entry=%+v readbacks=%d loads=%d, want satisfied by retained proof", entry, readbacks, loads)
+	}
+}
