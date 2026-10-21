@@ -517,6 +517,25 @@ func (f *srProcessFixture) chat(t *testing.T, model string, output int, strict *
 	return status, data
 }
 
+func (f *srProcessFixture) strictRequest(t *testing.T, model, requestID string) nodepolicy.StrictAdmissionRequest {
+	t.Helper()
+	models := f.models(t)
+	if models.Policy == nil || models.Policy.StrictAdmission == nil {
+		t.Fatal("strict capability absent before permission change")
+	}
+	for _, capability := range models.Policy.StrictAdmission.Models {
+		if capability.Engine == "llamacpp" && capability.Model == model {
+			request := nodepolicy.StrictAdmissionRequest{Version: 1, QueueBudgetMs: 0, ColdStartBudgetMs: 0, PreOutputBudgetMs: 2000, Request: nodepolicy.RoutingRequestKey{OriginNodeID: f.snapshot(t).NodeID, ProxyRunID: "sr-fixture-origin", RequestID: requestID}, Identity: capability.Identity}
+			if err := request.Validate(); err != nil {
+				t.Fatal(err)
+			}
+			return request
+		}
+	}
+	t.Fatalf("strict capability for %s absent before permission change", model)
+	return nodepolicy.StrictAdmissionRequest{}
+}
+
 func srAssertNoEffects(t *testing.T, before, after srRuntimeState) {
 	t.Helper()
 	if before.Base.PID != after.Base.PID || before.Base.Loads != after.Base.Loads || before.Base.Unloads != after.Base.Unloads || before.Base.Chats != after.Base.Chats || before.Content != after.Content || before.Base.Unexpected != after.Base.Unexpected {
@@ -526,6 +545,7 @@ func srAssertNoEffects(t *testing.T, before, after srRuntimeState) {
 
 func TestServedResidentProcessPermission(t *testing.T) {
 	f := newSRProcessFixture(t)
+	neighborRequest := f.strictRequest(t, srNeighbor, "2")
 	f.load(t, neModel)
 	t.Run("absent served permission accepts self", func(t *testing.T) {
 		if f.policy(t).Policy.ServedModels != nil {
@@ -537,17 +557,17 @@ func TestServedResidentProcessPermission(t *testing.T) {
 		}
 	})
 	t.Run("explicit empty refuses before effects", func(t *testing.T) {
+		request := f.strictRequest(t, neModel, "1")
 		f.edit(t, func(p *nodepolicy.Policy) { p.ServedModels = nodepolicy.ServedModels{} })
 		before := f.control(t, "")
-		status, data := f.chat(t, neModel, neOutput, nil)
+		status, data := f.chat(t, neModel, neOutput, &request)
 		var refusal struct {
-			Reason string `json:"reason"`
-			Code   string `json:"code"`
+			Code string `json:"code"`
 		}
 		if err := json.Unmarshal(data, &refusal); err != nil {
 			t.Fatal(err)
 		}
-		if status != http.StatusServiceUnavailable || refusal.Reason != "not-served" || refusal.Code != "admission" {
+		if status != http.StatusServiceUnavailable || refusal.Code != "strict-admission" {
 			t.Fatalf("empty permission status=%d refusal=%+v", status, refusal)
 		}
 		srAssertNoEffects(t, before, f.control(t, ""))
@@ -575,7 +595,7 @@ func TestServedResidentProcessPermission(t *testing.T) {
 			t.Fatalf("subset allowed model status=%d", status)
 		}
 		before := f.control(t, "")
-		status, _ = f.chat(t, srNeighbor, 64, nil)
+		status, _ = f.chat(t, srNeighbor, 64, &neighborRequest)
 		if status != http.StatusServiceUnavailable {
 			t.Fatalf("subset excluded model status=%d", status)
 		}
