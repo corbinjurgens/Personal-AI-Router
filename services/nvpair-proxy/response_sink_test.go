@@ -287,6 +287,49 @@ func TestResponseSink(t *testing.T) {
 	})
 }
 
+func TestResponseSinkReaderlessEmptyDelivery(t *testing.T) {
+	test := func(name string, status int) {
+		t.Run(name, func(t *testing.T) {
+			w := &responseSinkWriter{header: make(http.Header)}
+			sink := newResponseSink(w, nil)
+			ctx := withResponseSink(context.Background(), sink)
+			resp := &http.Response{StatusCode: status, Header: http.Header{"Content-Type": {"application/json"}}, Body: io.NopCloser(strings.NewReader(""))}
+			request, err := parseOriginStreamRequest(routeChatCompletions, []byte(`{"model":"m","stream":false}`))
+			if err != nil {
+				t.Fatal(err)
+			}
+			reader, err := installResponseStream(resp, request, ctx, 0, nil)
+			if err != nil || reader != nil {
+				t.Fatalf("install empty nonstream response: reader=%p err=%v", reader, err)
+			}
+			sink.WriteHeader(status)
+			if result := sink.result(); result.ProtocolComplete || result.DeliveryComplete || result.Written != 0 {
+				t.Fatalf("headers alone completed delivery: %+v", result)
+			}
+			n, copyErr := io.Copy(sink, resp.Body)
+			closeErr := resp.Body.Close()
+			if copyErr != nil || closeErr != nil || n != 0 {
+				t.Fatalf("empty body: copied=%d read=%v close=%v", n, copyErr, closeErr)
+			}
+			if result := sink.result(); !result.ProtocolComplete || result.DeliveryComplete || result.WriteError != nil {
+				t.Fatalf("EOF without successful flush: %+v", result)
+			}
+			if err := sink.FlushError(); err != nil {
+				t.Fatalf("flush empty response: %v", err)
+			}
+			result := sink.result()
+			if result.Status != status || !result.ProtocolComplete || !result.DeliveryComplete || result.WriteError != nil || result.Written != 0 || result.Flushed != 0 || result.Genuine != 0 || result.Synthetic != 0 {
+				t.Fatalf("empty successful delivery=%+v", result)
+			}
+			if len(w.statuses) != 1 || w.statuses[0] != status || w.body.Len() != 0 {
+				t.Fatalf("empty response: statuses=%v body=%q", w.statuses, w.body.String())
+			}
+		})
+	}
+	test("empty 200", http.StatusOK)
+	test("204", http.StatusNoContent)
+}
+
 type responseSinkFailedEOF struct{}
 
 func (responseSinkFailedEOF) Read([]byte) (int, error) { return 0, io.ErrUnexpectedEOF }
