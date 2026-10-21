@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sync"
 	"syscall"
 
 	"nvpair-shared/appdir"
@@ -65,13 +66,19 @@ func main() {
 		transport = conn
 		log.Printf("using IPC transport: %s", *ipcPath)
 	} else {
-		transport = newStdioTransport()
+		conn, err := newStdioTransport()
+		if err != nil {
+			log.Fatalf("failed to prepare stdio transport: %v", err)
+		}
+		transport = conn
 		log.Print("using stdio transport")
 	}
 	defer transport.Close()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	failSession, joinSession := newTerminalSession(ctx, cancel, transport)
+	defer joinSession()
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
@@ -84,7 +91,7 @@ func main() {
 		}
 	}()
 
-	codec := NewCodec(transport)
+	codec := newOwnedCodec(ctx, transport, failSession, notificationWriteBudget)
 	proxy, err := initializeProxy(codec, *maxRequestBytes)
 	if err != nil {
 		log.Fatal(err)
@@ -115,4 +122,31 @@ func main() {
 		log.Fatalf("proxy error: %v", err)
 	}
 	log.Print("shutdown complete")
+}
+
+// The session owns the parent transport independently of Proxy's locks.
+// Closing both directions wakes readLoop; Run remains the shutdown owner.
+func newTerminalSession(ctx context.Context, cancel context.CancelFunc, transport io.ReadWriteCloser) (func(string, error), func()) {
+	var closeOnce, failOnce sync.Once
+	closeTransport := func() {
+		closeOnce.Do(func() {
+			if err := transport.Close(); err != nil {
+				slog.Warn("parent transport close failed", "err", err)
+			}
+		})
+	}
+	fail := func(method string, err error) {
+		failOnce.Do(func() {
+			slog.Error("terminal parent transport failure", "method", method, "err", err)
+			cancel()
+			closeTransport()
+		})
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		<-ctx.Done()
+		closeTransport()
+	}()
+	return fail, func() { cancel(); <-done }
 }

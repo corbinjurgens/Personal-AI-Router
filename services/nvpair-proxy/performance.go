@@ -127,8 +127,8 @@ func (p *Proxy) sendPerformance(ctx context.Context) {
 		q.head = (q.head + 1) % len(q.items)
 		q.size--
 		q.mu.Unlock()
-		// Cancellation covers waiting for the shared write gate. An active
-		// write still belongs to the codec's lifetime, never request handling.
+		// Cancellation covers the shared write gate. The transport owner
+		// interrupts an active write and retires the parent session.
 		if ctx.Err() != nil {
 			return
 		}
