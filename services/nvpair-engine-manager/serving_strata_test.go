@@ -403,7 +403,8 @@ func TestStrataRuntimeChangesWhileHashing(t *testing.T) {
 		t.Fatal(err)
 	}
 	key := hashEntry{path: path, size: info.Size(), mtime: info.ModTime().UnixNano()}
-	call := &hashCall{sum: artifact.SHA256}
+	waiting := make(chan struct{})
+	call := &hashCall{sum: artifact.SHA256, onWait: func() { close(waiting) }}
 	call.wg.Add(1)
 	fileHashes.mu.Lock()
 	delete(fileHashes.done, path)
@@ -421,9 +422,11 @@ func TestStrataRuntimeChangesWhileHashing(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- f.prepareRuntimeHashes(t, context.Background(), config) }()
 	select {
+	case <-waiting:
 	case err := <-done:
-		t.Fatalf("hash finished before release: %v", err)
-	case <-time.After(100 * time.Millisecond):
+		t.Fatalf("hash did not reach injected wait: %v", err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("runtime hash did not reach injected wait")
 	}
 	writeServingFixture(t, path, []byte("replacement during runtime hash"))
 	call.wg.Done()

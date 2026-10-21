@@ -532,6 +532,9 @@ func newServiceSlotFixture(t *testing.T, reverse bool) *serviceSlotFixture {
 	if reverse {
 		s.direct = func(context.Context, noderec.ServiceKey) (net.Conn, error) { return nil, errors.New("blocked") }
 	}
+	// These cases measure slot admission, not TLS setup. Use the normal direct
+	// budget so a healthy loopback handshake survives host load under -race.
+	s.adapter.opts.DirectTimeout = time.Second
 	s.client = s.adapter.Client("peer", noderec.ServiceCluster)
 	s.client.Timeout = 0
 	for range peerMaxConnsPerHost {

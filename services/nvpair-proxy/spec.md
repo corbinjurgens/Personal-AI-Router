@@ -65,9 +65,10 @@ performs codec IO outside the lock; producers never await codec writes or queue
 space. Saturating counters cover full/sequence-exhausted, missing identity or
 unsupported options, stale identity and invalid-sample drops. There is no
 durable queue, resend or retained request content. Normal shutdown cancellation
-stops the sender between writes or while waiting for the codec write gate,
-without joining an active codec write; physical
-write interruption is outside this producer's contract.
+stops the sender between writes or while waiting for the codec write gate.
+The parent session interrupts an active write when its caller is cancelled or
+its 60-second notification budget expires, then closes both transport
+directions. Shutdown does not join the telemetry sender.
 
 ### Strict destination admission (A1a)
 

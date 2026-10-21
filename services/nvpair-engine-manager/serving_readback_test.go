@@ -594,8 +594,29 @@ func TestLoadedServingFencesReplacementDuringHTTP(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			var proc *managedProc
+			t.Cleanup(func() {
+				if proc == nil {
+					return
+				}
+				select {
+				case <-proc.done:
+				default:
+					t.Error("fake engine was not reaped by fixture cleanup")
+				}
+			})
 			f, server := loadedReadbackFixture(t, "medium")
 			st := settingsState(t, f.ex)
+			if tc.name == "process" {
+				proc = st.proc
+				// This case changes the observed flag without stopping its fake
+				// process. Restore the fixture's real state before Stop cleanup.
+				t.Cleanup(func() {
+					st.mu.Lock()
+					st.running = true
+					st.mu.Unlock()
+				})
+			}
 			server.mu.Lock()
 			server.onProps = func() { st.mu.Lock(); defer st.mu.Unlock(); tc.replace(st) }
 			server.mu.Unlock()

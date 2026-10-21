@@ -713,8 +713,33 @@ func TestResidentLoadMappingAndObservation(t *testing.T) {
 func TestResidentRefusesWithoutSideEffects(t *testing.T) {
 	test := func(name, reason string, modify func(*residentFixture)) {
 		t.Run(name, func(t *testing.T) {
+			var proc *managedProc
+			t.Cleanup(func() {
+				if proc == nil {
+					return
+				}
+				select {
+				case <-proc.done:
+				default:
+					t.Error("fake engine was not reaped by fixture cleanup")
+				}
+			})
 			f := newResidentFixture(t)
+			if name == "engine stopped" {
+				st := f.ex.engines["fake"]
+				proc = st.proc
+			}
 			modify(f)
+			if name == "engine stopped" {
+				st := f.ex.engines["fake"]
+				// This case changes the observed flag without stopping its fake
+				// process. Restore the fixture's real state before Stop cleanup.
+				t.Cleanup(func() {
+					st.mu.Lock()
+					st.running = true
+					st.mu.Unlock()
+				})
+			}
 			if got := f.ex.residentCheck(context.Background(), f.p); got != reason {
 				t.Fatalf("reason = %q, want %q", got, reason)
 			}

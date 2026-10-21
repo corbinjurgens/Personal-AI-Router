@@ -140,9 +140,10 @@ type hashEntry struct {
 }
 
 type hashCall struct {
-	wg  sync.WaitGroup
-	sum string
-	err error
+	wg     sync.WaitGroup
+	sum    string
+	err    error
+	onWait func() // Optional synchronization for tests that inject an in-flight call.
 }
 
 // fileHashes is the process-wide cache shared by the ec listing (source side)
@@ -165,6 +166,9 @@ func (c *hashCache) sum(ctx context.Context, abs string, onBytes func(int64)) (s
 	}
 	if call, ok := c.inflight[key]; ok {
 		c.mu.Unlock()
+		if call.onWait != nil {
+			call.onWait()
+		}
 		call.wg.Wait()
 		return call.sum, call.err
 	}
