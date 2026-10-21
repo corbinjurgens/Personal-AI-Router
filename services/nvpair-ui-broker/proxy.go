@@ -204,6 +204,22 @@ func (b *Broker) forwardProxyNotificationFrom(source *proxyProcess, ollamaGenera
 		b.observeStrictReadinessFrom(source, params)
 		return
 	}
+	engine, bare := engines.SplitAddressedMethod(method)
+	if proxyWorkloadMethods[bare] {
+		if engine != "" {
+			_, known := engineProxyProfileFor(engine)
+			if !known {
+				_, known = b.dynamicEngineProfile(engine)
+			}
+			if !known {
+				return
+			}
+		}
+		// Keep the actual process source through the serialized apply/fence
+		// boundary. Done does not join a notification already past this guard.
+		b.routeProxyWorkloadFrom(source, bare, params)
+		return
+	}
 	b.forwardProxyProcessNotification(ollamaGeneration, lmstudioGeneration, method, params)
 }
 
@@ -469,6 +485,7 @@ func (b *Broker) stopProxySupervisorLocked() {
 		b.setProxySupervisor(nil)
 	}
 	b.clearProxyHandles()
+	b.captureDepartedRunWorkloads("proxy stopped")
 }
 
 // credentialRefs is the sorted set of provider credential references the
@@ -520,9 +537,12 @@ func (b *Broker) shutdownProxySupervision() {
 		b.beforeProxyShutdownLocked()
 	}
 	b.proxySupMu.Lock()
-	defer b.proxySupMu.Unlock()
 	b.proxySupPhase = proxySupClosed
 	b.stopProxySupervisorLocked()
+	b.proxySupMu.Unlock()
+	// Cap retirement's drain allowance so later shutdown work keeps its budget.
+	// Accepted terminals stay in history even if unread output blocks fanout.
+	b.waitProxyRetirements()
 }
 
 // reconcileProxySupervision asks for the proxy to be brought in line with the
@@ -548,6 +568,7 @@ func (b *Broker) resumeProxySupervision() {
 }
 
 func (b *Broker) resumeProxySupervisionLocked() {
+	b.resumeProxyRetirementsLocked()
 	if !b.proxySupDirty || b.proxySupWorking {
 		return
 	}

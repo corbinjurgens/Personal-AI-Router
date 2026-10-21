@@ -274,12 +274,17 @@ type Broker struct {
 
 	// proxySupMu serializes starting and stopping proxySup. It is held for as
 	// long as a start or stop takes, so nothing on a request path takes it; see
-	// reconcileProxySupervision. proxySupWorkMu guards the request flags only.
+	// reconcileProxySupervision. proxySupWorkMu guards both coalesced stages.
 	proxySupMu      sync.Mutex
 	proxySupPhase   proxySupPhase
 	proxySupWorkMu  sync.Mutex
 	proxySupDirty   bool
 	proxySupWorking bool
+	// Retirement is a separate coalesced stage of this owner: blocked workload
+	// output must not occupy the supervision worker or the monitor it joins.
+	// Pending entries contain identities only, never a queue of wire frames.
+	proxyRetirePending map[departedWorkload]string
+	proxyRetireDone    chan struct{}
 	// Set after the supervisor's terminal callback completes. An absent process
 	// otherwise belongs to its existing spawn/backoff and must not be replaced.
 	proxySupExhausted atomic.Bool
@@ -353,6 +358,12 @@ type Broker struct {
 	// failWorkloadsForNode); it is internally synchronized.
 	workloads   *workloadstore.Store
 	performance *performanceRuntime
+	// lastLocalRunID is guarded by workloadEmitMu. Only actual proxy input
+	// advances the fence; broker-synthesized retirement never does.
+	lastLocalRunID string
+	// Optional barrier before the serialized source check, set by tests before
+	// proxy notifications start.
+	beforeProxyWorkloadApply func()
 
 	// engineMu guards engineSubscribed. The engine:<event> stream is
 	// opt-in like proxy's: forwardEngineNotificationFrom (engine-manager reader

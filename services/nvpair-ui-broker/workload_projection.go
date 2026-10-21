@@ -351,27 +351,85 @@ var proxyWorkloadMethods = map[string]bool{
 // keeps emitting regardless of whether a manager is present, so the echo
 // still happens with no manager supervised (the broadcast simply doesn't).
 func (b *Broker) routeProxyWorkload(method string, params json.RawMessage) {
+	// Unscoped relay/test entry: real child workloads are intercepted with
+	// their source in forwardProxyNotificationFrom before facade dispatch.
+	// Keep projection/merge semantics here, but only a process can fence a run.
+	b.routeProxyWorkloadFrom(nil, method, params)
+}
+
+type proxyWorkloadEvent struct {
+	method string
+	params json.RawMessage
+}
+
+func (b *Broker) routeProxyWorkloadFrom(source *proxyProcess, method string, params json.RawMessage) {
 	params, category, count := projectWorkloadFrame(method, params)
 	slog.Debug("projected proxy workload", "category", category, "count", count)
 	if params == nil {
 		return
 	}
 	stamped := stampNodeID(params, b.nodeID)
-	// Update the authoritative store (and echo to clients / fan to the
-	// scheduler) BEFORE forwarding to the workload-manager, so the store is
-	// never staler than what the manager has broadcast. Rehydration snapshots
-	// the store on a manager restart; a forward-first ordering could let the
-	// manager broadcast a terminal, then a restart replay the store's not-yet-
-	// updated running over it. A lifecycle event becomes a workloads:upsert (the
-	// same translation the manager applies to peer-origin lifecycle events, spec
-	// 7.0); a removal stays a removal.
-	if method == "workloads:remove" {
-		b.emitWorkloadEvent("workloads:remove", stamped)
-	} else {
-		b.emitWorkloadEvent("workloads:upsert", stamped)
+	if b.beforeProxyWorkloadApply != nil {
+		b.beforeProxyWorkloadApply()
 	}
+	b.workloadEmitMu.Lock()
+	defer b.workloadEmitMu.Unlock()
+	// Validation and store apply are indivisible with handle withdrawal. The
+	// initial source check cannot protect a callback stalled behind this owner.
+	// Neither workersMu nor proxySupMu is held across the output below.
+	b.workersMu.Lock()
+	if source != nil {
+		if b.proxyProc != source {
+			b.workersMu.Unlock()
+			return
+		}
+		// Done does not withdraw this handle or join admitted callbacks. Keep
+		// a delivered terminal tail until actual withdrawal/capture; the exact
+		// source comparison above rejects it after a replacement is published.
+	}
+	var frames []proxyWorkloadEvent
+	var env struct {
+		Info json.RawMessage `json:"workloadInfo"`
+	}
+	if source != nil && json.Unmarshal(stamped, &env) == nil {
+		in, ok := workloadstore.ParseIncoming(env.Info)
+		if ok && in.Origin == b.nodeID && in.RunID != "" && in.RunID != b.lastLocalRunID {
+			// The current handle is the sole proxy process, and deliberate
+			// replacement joins its predecessor. Every other local run has
+			// departed. Legacy frames without a run leave this fence unchanged.
+			b.lastLocalRunID = in.RunID
+			pending := b.departedRunCandidates(in.RunID, "proxy run replaced")
+			frames = b.applyDepartedRunWorkloadsLocked(pending)
+		}
+	}
+	if b.applyProxyWorkloadLocked(method, stamped) {
+		frames = append(frames, proxyWorkloadEvent{method: method, params: stamped})
+	}
+	b.workersMu.Unlock()
+	for _, frame := range frames {
+		b.publishProxyWorkloadLocked(frame.method, frame.params)
+	}
+}
+
+// applyProxyWorkloadLocked and publishProxyWorkloadLocked are the same
+// authoritative apply/fan/forward path for proxy input and broker retirement.
+// Synthetic retirement never re-enters the process/run fence. Caller holds
+// workloadEmitMu; publication is only for accepted frames, after store apply.
+func (b *Broker) applyProxyWorkloadLocked(method string, params json.RawMessage) bool {
+	if method == "workloads:remove" {
+		return b.applyWorkloadEvent(method, params, false, noSightingGuard)
+	}
+	return b.applyWorkloadEvent("workloads:upsert", params, false, noSightingGuard)
+}
+
+func (b *Broker) publishProxyWorkloadLocked(method string, params json.RawMessage) {
+	event := "workloads:upsert"
+	if method == "workloads:remove" {
+		event = method
+	}
+	b.publishWorkloadEventLocked(event, params)
 	if wm := b.getWorkloadMgr(); wm != nil {
-		if err := wm.Forward(method, stamped); err != nil {
+		if err := wm.Forward(method, params); err != nil {
 			slog.Warn("failed to forward workload event to workload-manager", "method", method, "err", err)
 		}
 	} else {
@@ -506,7 +564,12 @@ func (b *Broker) emitWorkloadEventProvenance(method string, params json.RawMessa
 	if !b.applyWorkloadEvent(method, params, inferred, unchangedSince) {
 		return
 	}
+	b.publishWorkloadEventLocked(method, params)
+}
 
+// publishWorkloadEventLocked fans an already accepted store transition.
+// Caller holds workloadEmitMu so observed order matches the applied order.
+func (b *Broker) publishWorkloadEventLocked(method string, params json.RawMessage) {
 	// The scheduler is fanned every real transition (independent of the
 	// external client's opt-in) so it can keep its own catalog.
 	b.fanWorkloadToScheduler(method, params)
@@ -816,6 +879,13 @@ func (b *Broker) nodeDisplayNames() map[string]string {
 // that serializes the Workload wire format, so it is the only place that should
 // know the format's representation. Callers stay in time.Time.
 func markWorkloadFailed(info json.RawMessage, completedAt time.Time, errMsg string) json.RawMessage {
+	return markWorkloadTerminal(info, "failed", completedAt, errMsg, -1)
+}
+
+// markWorkloadTerminal preserves identity/placement and sets an authoritative
+// sequence when nonnegative. The inferred sweeps pass -1 to leave seq untouched,
+// including its absence in legacy records.
+func markWorkloadTerminal(info json.RawMessage, state string, completedAt time.Time, errMsg string, seq int64) json.RawMessage {
 	var wi map[string]json.RawMessage
 	if err := json.Unmarshal(info, &wi); err != nil {
 		return nil
@@ -825,9 +895,12 @@ func markWorkloadFailed(info json.RawMessage, completedAt time.Time, errMsg stri
 			wi[key] = raw
 		}
 	}
-	set("state", "failed")
+	set("state", state)
 	set("completedAt", completedAt.UnixMilli())
 	set("error", errMsg)
+	if seq >= 0 {
+		set("seq", seq)
+	}
 	newWI, err := json.Marshal(wi)
 	if err != nil {
 		return nil

@@ -70,6 +70,15 @@ Inbound lifecycle notifications, on either channel:
 | `workload:completed` | `completed` |
 | `workload:errored` | `failed` |
 
+The broker may synthesize `workload:errored` with state `failed` and error
+`proxy exited before the request finished` to retire open or inferred local-origin
+outcomes of a departed proxy run; once received, the manager broadcasts it like
+any local terminal and retains it for two heartbeat intervals for best-effort
+re-assertion.
+
+All proxy lifecycle frames, as well as broker-synthesized retirement terminals,
+reach this manager only after the broker's store accepts them.
+
 Each carries `params.workloadInfo`. Removal uses `workloads:remove` with
 `params.workloadId` and the origin `params.originatedFrom`.
 
