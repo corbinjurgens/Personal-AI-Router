@@ -114,7 +114,7 @@ func TestRoutingIdentityTerminalIngressPreservesRemoteEnvelope(t *testing.T) {
 	}
 	r.Header.Set(nodepolicy.StrictAdmissionHeader, string(encoded))
 	rec := httptest.NewRecorder()
-	p.soleFacade().serveIngress(rec, r, "remote-peer")
+	p.soleFacade().serveIngress(rec, r, "remote-origin")
 	if rec.Code != http.StatusOK || engine.hits() != 1 {
 		t.Fatalf("strict terminal ingress status=%d hits=%d", rec.Code, engine.hits())
 	}

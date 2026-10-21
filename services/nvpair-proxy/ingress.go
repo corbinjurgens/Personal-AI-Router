@@ -147,6 +147,10 @@ func (f *facade) serveIngress(w http.ResponseWriter, r *http.Request, peer strin
 		writeIngressError(w, http.StatusBadRequest, "strict-admission", strictErr.Error())
 		return
 	}
+	if strict != nil && strict.Request.OriginNodeID != peer {
+		writeIngressError(w, http.StatusForbidden, "strict-admission", "strict request origin does not match the authenticated peer")
+		return
+	}
 	if strict != nil && !isInferenceRequest(f.profile, r.Method, r.URL.Path) {
 		writeIngressError(w, http.StatusBadRequest, "strict-admission", "strict admission requires inference")
 		return
