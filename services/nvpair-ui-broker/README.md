@@ -289,7 +289,7 @@ Two classes of proxy notification are **not** re-emitted under any
 
 **`nvpair-workload-manager`** is the cluster workload relay, and it's the only worker the broker talks to **bidirectionally over a notification-only link** (no id-bearing request/response). It supervises it the same optional, non-fatal way as node-info / proxy: a missing default sibling (and no `--workload-manager-path`) just means no cluster workload relay. The broker plays the workload **broker** role between the proxy and the manager:
 
-- **Outbound (proxy -> broker -> manager -> peers).** When a facade emits a `workload:started` / `workload:completed` / `workload:errored`, the broker stamps the local stable `hostUuid` onto `params.workloadInfo.originatedFrom`, applies the transition to its authoritative workload store, and fans the accepted update to the scheduler before forwarding the original lifecycle frame to the manager. The manager broadcasts it to peer nodes. With no manager supervised the event still updates local scheduling and subscribed clients, but is not broadcast.
+- **Outbound (proxy -> broker -> manager -> peers).** When a facade emits a `workload:started` / `workload:completed` / `workload:errored`, the broker validates and projects the frame to the allowed `workloadInfo` fields, stripping unknown members from both the envelope and `workloadInfo`. It stamps the local stable `hostUuid` onto an empty `params.workloadInfo.originatedFrom`, applies the transition to its authoritative workload store, and fans the accepted update to the scheduler before forwarding the projected, stamped lifecycle frame to the manager. The manager broadcasts it to peer nodes. With no manager supervised the event still updates local scheduling and subscribed clients, but is not broadcast.
 - **Inbound (peers -> manager -> broker).** The manager translates peer-origin lifecycle events into `workloads:upsert` and peer-origin removals into `workloads:remove` on stdout. The broker applies each accepted transition to the same store, fans it to the scheduler, and relays it to clients subscribed via `workloads:subscribe`.
 - **Local echo.** Local-origin proxy workloads are also emitted to the same `workloads:*` client stream (lifecycle translated to `workloads:upsert`), so a subscribed client sees a coherent cluster-wide view — its own workloads alongside peers'.
 
@@ -506,15 +506,15 @@ proxy enforces it.
   its advertisement still describes the previously stored policy. The later
   adopted projection carries the saved pause provenance and new revision.
   A peer resume vetoed by a local pause changes neither the stored policy nor
-  its revision and emits no projection. Remote routers can use advertised
-  pauses to skip remote peers for inference; self/dormant-self admission,
-  manual nodes without hints, model lists and pass-through retain their own
-  behavior. Pause does not remove catalogue models or declared tier aliases.
-  This is advisory snapshot evidence: a previously selected dispatch cannot
-  be revoked by a later hint, and stale available hints still meet destination
-  admission. Healthy scanner refreshes have a nominal 15-second cadence plus
-  preceding work, batching and fetch time; failed refreshes retain the last
-  good hint indefinitely, so router re-entry requires a successful refresh.
+  its revision and emits no projection. Remote routers do not filter inference
+  candidates by advertised `pausedBy`: a paused peer remains selectable. The
+  paused node's admission refuses inference with HTTP 503 and
+  `X-PAIR-Admission: paused`; the origin treats that response as retryable and
+  fails over when another candidate remains. With no remaining candidate, it
+  relays the 503. Pause does not remove catalogue models or declared tier aliases.
+  The advertisement is snapshot evidence of saved policy. Healthy scanner
+  refreshes have a nominal 15-second cadence plus preceding work, batching and
+  fetch time; failed refreshes retain the last good hint indefinitely.
   LAN peer inventory uses pinned authentication; loopback inventory uses plaintext.
 - **Strict admission readiness.** The proxy reports its strict admission
   controller's readiness with the notification `admission/strict-readiness`,
@@ -1076,7 +1076,7 @@ Response:
 
 #### `workloads:get-initial`
 
-Returns `{ "workloads": [Workload, ...] }`, the broker's full-fidelity current and historic workload snapshot. Active records are kept in memory; completed/failed history is bounded by the caps described under `workloads:remove` and persisted across broker restarts. The scheduler uses an internal active-only replay of the same catalog when its subprocess restarts.
+Returns `{ "workloads": [Workload, ...] }`, the broker's projected current and historic workload snapshot. Each record passes through the same `workloadInfo` allowlist projection as lifecycle frames: unknown members, including those in persisted history, are stripped, and malformed records are omitted. Active records are kept in memory; completed/failed history is bounded by the caps described under `workloads:remove` and persisted across broker restarts. The scheduler uses an internal active-only replay of the same catalog when its subprocess restarts.
 
 #### `errors:get-initial`
 

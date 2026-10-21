@@ -1569,9 +1569,16 @@ bytes-per-token guess or unknown/unlimited output fallback.
 
 Responses, Anthropic Messages, legacy Completions, native engine protocols,
 embeddings, image/audio content and opaque reasoning are unsupported.
-`n` (even one), `store`, metadata/user tracking, previous-response/conversation
-state, logprobs, reasoning fields, context overrides and unknown extensions are
-rejected even if a profile lists them. Stateful SSE fields are unsupported.
+On the public-account (chat adapter) path, `n` (even one), `store`, metadata/user
+tracking, previous-response/conversation state, logprobs, reasoning fields,
+context overrides and unknown extensions are rejected even if a profile lists
+them. Stateful SSE fields are unsupported.
+
+On the strict local path, `store:false` is accepted as a no-op and stripped
+after profile defaults are merged, before accounting and forwarding to the
+engine. Both the raw request and the effective request with defaults are
+validated: `store:true` is refused with HTTP 400 `strict-qualification`, as is
+any `store` value other than the JSON boolean `false`.
 
 #### Public transport and resource ownership
 
