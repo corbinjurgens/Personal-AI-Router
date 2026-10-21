@@ -235,6 +235,23 @@ func phase04CopyAuthorityDirectory(t *testing.T, node, peer *task1Node) string {
 	return isolated
 }
 
+// The seeded CM pin names its peer by UUID and carries no display name. The
+// first production roster exchange, about five seconds after CM startup,
+// replaces both with the sender's own hostname-derived identity. That is
+// authorized display metadata, not copy authority; settle it before the byte
+// snapshot so later equality is attributable to the copy pin alone.
+func phase04AwaitPinIdentity(t *testing.T, node, peer *task1Node, hostname string) {
+	t.Helper()
+	path := filepath.Join(node.base, "cluster", "trusted", peer.uuid+".json")
+	task1Eventually(t, "CM pin identity refreshed by first roster exchange", 45*time.Second, func() bool {
+		var pin struct {
+			NodeID string `json:"nodeId"`
+			Name   string `json:"name"`
+		}
+		return json.Unmarshal(readLiveDurableFile(t, path), &pin) == nil && pin.NodeID == hostname && pin.Name == hostname
+	})
+}
+
 // Await a real production CM roster request and its completed reply while the
 // copy authority is invalid. No sender or roster is synthesized by the test.
 func phase04AwaitRosterExchange(t *testing.T, destination, source *task1Node) {
@@ -406,6 +423,13 @@ func TestReverseModelCopyPhase04(t *testing.T) {
 			original := readLiveDurableFile(t, pin)
 			if filepath.Dir(filepath.Dir(pin)) == filepath.Join(destination.base, "cluster") {
 				t.Fatal("negative copy authority shares the CM directory")
+			}
+			hostname, err := os.Hostname()
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, node := range []*task1Node{destination, source} {
+				phase04AwaitPinIdentity(t, node, f.peer(node), hostname)
 			}
 			// Snapshot only current identity/admission authority, not changing
 			// membership metadata such as last-seen timestamps.
