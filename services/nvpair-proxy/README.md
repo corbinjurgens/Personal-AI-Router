@@ -112,6 +112,23 @@ wake, unload, slot or inference, and the engine receives it with the profile's
 defaults merged in. See `docs/local-qualification.mdx`. Concrete requests retain
 their existing admission and retry behavior.
 
+Automatic residency uses the same admission owner and qualified finite bounds.
+`servedModels` permits on-demand work; `residentModels` declares the desired
+loaded subset, without proving that it is loaded. The proxy reserves the whole
+desired set against resident/in-flight memory and model limits, without eviction.
+For an NE envelope, profile context equals native per-slot context, qualification
+covers native context/output, and effective concurrency equals native slots.
+The manager requires explicit model-only POST load and safe loaded-model GET
+bindings, native retention `"-1"`, and router capacity for the revision-bound
+engine resident set. No request keep-alive field changes native retention.
+Local pause/Off vetoes still apply; reconciliation cannot start an Off engine.
+The broker coordinates internal prepare/dispatch/finish/observe calls and publishes
+model-configuration status; desktop clients do not call these admission methods.
+PG keeps route-policy ownership. Unknown load/allocation evidence and restart
+are not proof of satisfaction; fresh manager-owned observed allocation is required.
+See `docs/local-qualification.mdx` for adapter requirements and pending real-host
+acceptance, including retention, capacity, loaded limits and restart recovery.
+
 Before strict inference bytes, the proxy durably writes a slot to
 `proxy-strict-capacity.json` in the shared `appdir` directory. Cancellation,
 transport failure and HTTP EOF retain uncertain capacity across restart; HTTP

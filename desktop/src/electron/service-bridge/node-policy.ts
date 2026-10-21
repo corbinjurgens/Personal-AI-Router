@@ -413,13 +413,16 @@ function modelConfigurationEntry(value: JsonValue): ModelConfigurationEntry {
     if (!body || Object.keys(body).some(key => !fields.includes(key))) {
         throw new Error('Invalid model configuration entry')
     }
-    const { engine, model, desiredResident, observedLoaded, state, reason } = body
+    const { desiredResident, observedLoaded, state, reason } = body
+    // Match encoding/json before validation and duplicate-reference checks.
+    const engine = typeof body.engine === 'string' ? body.engine.toWellFormed() : null
+    const model = typeof body.model === 'string' ? body.model.toWellFormed() : null
     if (
         typeof engine !== 'string' ||
         !isValidRoutingEngineId(engine) ||
         typeof model !== 'string' ||
         model === '' ||
-        model.trim() !== model ||
+        /^\p{White_Space}|\p{White_Space}$/u.test(model) ||
         new TextEncoder().encode(model).length > 1024 ||
         /^(weak|medium|strong)(-api|-local)?$/.exec(model)?.[0] === model ||
         typeof desiredResident !== 'boolean' ||

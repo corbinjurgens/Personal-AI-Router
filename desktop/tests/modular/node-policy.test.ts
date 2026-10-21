@@ -890,6 +890,60 @@ describe('model configuration policy evidence', () => {
         )
     })
 
+    it('keeps remote status separate from the policy and CAS write through readback', () => {
+        const policy = {
+            revision: '9',
+            servedModels: [],
+            routing: { buffers: { capacityMiB: 384, waitSeconds: 0 } }
+        }
+        const document = parsePolicyDocument({
+            policy,
+            availability: 'paused',
+            modelConfiguration: configuration
+        })
+        const params = policySetParams({
+            nodeId: 'peer',
+            policy: document.policy,
+            expectedPersistedRevision: document.revision
+        })
+        expect(params).toEqual({
+            nodeId: 'peer',
+            policy,
+            expectedPersistedRevision: '9'
+        })
+        const savedPolicy = { ...policy, revision: '10' }
+        const evidence = { ...configuration, policyRevision: '10' }
+        const saved = parsePolicySetResult({ policy: savedPolicy, modelConfiguration: evidence })
+        const readback = parsePolicyDocument({
+            policy: savedPolicy,
+            availability: 'paused',
+            modelConfiguration: evidence
+        })
+        expect(saved.modelConfiguration).toEqual(evidence)
+        expect(readback.modelConfiguration).toEqual(evidence)
+        expect(parsePolicyText(readback.policy)).toEqual(savedPolicy)
+        expect(parsePolicyText(readback.policy)).not.toHaveProperty('residentModels')
+        expect(readback.activation).toBeNull()
+    })
+
+    it('normalizes model text like the Go decoder before checking duplicate evidence', () => {
+        const entry = { ...loaded, model: '\ud800' }
+        const snapshot = {
+            policy: { revision: '9' },
+            modelConfiguration: { ...configuration, models: [entry] }
+        }
+        expect(parsePolicySetResult(snapshot).modelConfiguration?.models[0].model).toBe('\ufffd')
+        expect(() =>
+            parsePolicySetResult({
+                ...snapshot,
+                modelConfiguration: {
+                    ...configuration,
+                    models: [entry, { ...entry, model: '\ufffd' }]
+                }
+            })
+        ).toThrow(/Duplicate model configuration reference/)
+    })
+
     it('preserves explicit empty evidence and served permission without inferring success', () => {
         const evidence = { policyRevision: '9', observationGeneration: 0, models: [] }
         const policy = { revision: '9', servedModels: [] }
@@ -904,6 +958,14 @@ describe('model configuration policy evidence', () => {
         expect(parsePolicyText(parsePolicySetResult(snapshot).policy)).toEqual(policy)
     })
 
+    it('accepts a leading byte-order mark in model names like Go TrimSpace', () => {
+        const evidence = { ...configuration, models: [{ ...loaded, model: '\ufeffmodel' }] }
+        expect(
+            parsePolicySetResult({ policy: { revision: '9' }, modelConfiguration: evidence })
+                .modelConfiguration
+        ).toEqual(evidence)
+    })
+
     const malformed: [string, JsonValue][] = [
         ['null status', null],
         ['missing policy revision', { observationGeneration: 0, models: [] }],
@@ -913,8 +975,11 @@ describe('model configuration policy evidence', () => {
             { ...configuration, policyRevision: '9223372036854775808' }
         ],
         ['missing generation', { policyRevision: '9', models: [] }],
+        ['non-numeric generation', { ...configuration, observationGeneration: '17' }],
         ['negative generation', { ...configuration, observationGeneration: -1 }],
         ['fractional generation', { ...configuration, observationGeneration: 1.5 }],
+        ['overflowing generation', { ...configuration, observationGeneration: 2 ** 65 }],
+        ['non-finite generation', { ...configuration, observationGeneration: Infinity }],
         ['non-list models', { ...configuration, models: {} }],
         [
             'too many models',
@@ -958,6 +1023,10 @@ describe('model configuration policy evidence', () => {
         ['invalid reference', { ...configuration, models: [{ ...loaded, engine: '../engine' }] }],
         ['reserved alias', { ...configuration, models: [{ ...loaded, model: 'weak' }] }],
         ['untrimmed model', { ...configuration, models: [{ ...loaded, model: ' m ' }] }],
+        [
+            'Unicode whitespace model',
+            { ...configuration, models: [{ ...loaded, model: '\u0085m' }] }
+        ],
         ['oversized model', { ...configuration, models: [{ ...loaded, model: 'm'.repeat(1025) }] }]
     ]
     it.each(malformed)('rejects %s on get/set and drops its push', (_name, evidence) => {
