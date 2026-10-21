@@ -143,7 +143,7 @@ func (b *Broker) renewEgressLease(parent context.Context) {
 		r.activationErr = "the proxy did not acknowledge the egress lease binding"
 		r.availabilityErr = "the proxy egress lease binding requires availability acknowledgement"
 		r.mu.Unlock()
-		b.notifyPolicyChanged()
+		b.schedulePolicyAnnouncement()
 		return
 	}
 	if anchor {

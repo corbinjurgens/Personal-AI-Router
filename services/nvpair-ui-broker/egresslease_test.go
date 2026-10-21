@@ -6,8 +6,13 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"io"
 	"math"
+	"net"
+	"runtime"
 	"strconv"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -73,6 +78,227 @@ func newBrokerLeaseFixture(t *testing.T) (*activatedBroker, *atomic.Int64) {
 	r.egress.now = func() time.Time { return base.Add(time.Duration(clock.Load())) }
 	r.mu.Unlock()
 	return ab, clock
+}
+
+func rejectBrokerLeaseBinding(ab *activatedBroker) {
+	ab.proxy.setAnswer(func(method string, raw json.RawMessage) (any, string) {
+		if method != nodepolicy.MethodRenewEgressLease {
+			return ab.acks.answer(method, raw)
+		}
+		var in nodepolicy.RenewEgressLeaseParams
+		if err := json.Unmarshal(raw, &in); err != nil {
+			return nil, err.Error()
+		}
+		return nodepolicy.RenewEgressLeaseResult{RunID: "wrong-run", Revision: in.Revision, Sequence: in.Sequence, NowNanos: "1"}, ""
+	})
+}
+
+// brokerLeaseUnreadClient signals entry into a real net.Pipe write. Until the
+// test reads the other end, the announcement cannot finish that write.
+type brokerLeaseUnreadClient struct {
+	net.Conn
+	writing chan struct{}
+	once    sync.Once
+}
+
+func (c *brokerLeaseUnreadClient) Write(p []byte) (int, error) {
+	c.once.Do(func() { close(c.writing) })
+	return c.Conn.Write(p)
+}
+
+func waitBrokerLeaseDone(t *testing.T, what string, done <-chan struct{}) {
+	t.Helper()
+	select {
+	case <-done:
+	case <-time.After(1500 * time.Millisecond):
+		t.Fatalf("%s did not finish within 1.5s", what)
+	}
+}
+
+func waitBrokerLeaseAnnouncement(t *testing.T, r *policyRuntime) {
+	t.Helper()
+	waitUntil(t, "scheduled announcement to acquire publication", func() bool {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		return !r.announcePending
+	})
+	done := make(chan struct{})
+	go func() {
+		r.publishMu.Lock()
+		r.publishMu.Unlock()
+		close(done)
+	}()
+	waitBrokerLeaseDone(t, "policy publication", done)
+}
+
+func requireBrokerLeasePushSlotFree(t *testing.T, r *policyRuntime) {
+	t.Helper()
+	select {
+	case r.pushSlot <- struct{}{}:
+		r.releasePush()
+	default:
+		t.Fatal("renewal retained the push slot while publication was blocked")
+	}
+}
+
+func requireBrokerLeaseAnnouncement(t *testing.T, frame Message, wantError, wantRevision string) {
+	t.Helper()
+	if frame.Method != notifyPolicyChanged {
+		t.Fatalf("announcement method = %q, want policy:changed", frame.Method)
+	}
+	var event struct {
+		NodeID             string                         `json:"nodeId"`
+		Policy             nodepolicy.Policy              `json:"policy"`
+		ModelConfiguration *nodepolicy.ModelConfiguration `json:"modelConfiguration"`
+		policyActivation
+	}
+	if err := json.Unmarshal(frame.Params, &event); err != nil {
+		t.Fatalf("decode announcement: %v", err)
+	}
+	if event.NodeID != "self-node" || event.Policy.Revision != wantRevision || event.Activation != activationError || event.ActivationError != wantError {
+		t.Fatalf("announcement = %+v, want self-node revision %s activation:error %q", event, wantRevision, wantError)
+	}
+	if event.ModelConfiguration == nil || event.ModelConfiguration.PolicyRevision != wantRevision {
+		t.Fatalf("announcement model configuration = %+v, want revision %s", event.ModelConfiguration, wantRevision)
+	}
+}
+
+func TestEgressLeaseBrokerBindingFailureStopWithUnreadClient(t *testing.T) {
+	ab, _ := newBrokerLeaseFixture(t)
+	rejectBrokerLeaseBinding(ab)
+	brokerSide, clientSide := net.Pipe()
+	client := &brokerLeaseUnreadClient{Conn: brokerSide, writing: make(chan struct{})}
+	ab.b.codec = NewCodec(client)
+	r := ab.b.nodePolicyRuntime()
+	stop := ab.b.startEgressRenewal(context.Background())
+	stopped := make(chan struct{})
+	var stopOnce sync.Once
+	stopAsync := func() { stopOnce.Do(func() { go func() { stop(); close(stopped) }() }) }
+	t.Cleanup(func() {
+		if err := clientSide.Close(); err != nil {
+			t.Errorf("close unread client: %v", err)
+		}
+		if err := brokerSide.Close(); err != nil {
+			t.Errorf("close broker client pipe: %v", err)
+		}
+		stopAsync()
+		waitBrokerLeaseDone(t, "renewal cleanup", stopped)
+		waitBrokerLeaseAnnouncement(t, r)
+	})
+	// A positive write-entry barrier proves client IO has started, with no
+	// reader present, before cancellation and the push-slot assertion.
+	receive(t, "unread policy announcement write", client.writing)
+	stopAsync()
+	waitBrokerLeaseDone(t, "renewal stop with unread client", stopped)
+	requireBrokerLeasePushSlotFree(t, r)
+	if err := clientSide.SetReadDeadline(time.Now().Add(1500 * time.Millisecond)); err != nil {
+		t.Fatalf("bound client read: %v", err)
+	}
+	reader := NewCodec(clientSide)
+	frame, err := reader.Read()
+	if err != nil {
+		t.Fatalf("read policy announcement after stop: %v", err)
+	}
+	requireBrokerLeaseAnnouncement(t, *frame, "the proxy egress lease binding requires availability acknowledgement", "0")
+	waitBrokerLeaseAnnouncement(t, r)
+	if err := brokerSide.Close(); err != nil {
+		t.Fatalf("close completed announcement pipe: %v", err)
+	}
+	if frame, err := reader.Read(); !errors.Is(err, io.EOF) {
+		t.Fatalf("after exactly one announcement got frame=%+v err=%v, want EOF", frame, err)
+	}
+}
+
+func TestEgressLeaseBrokerBindingFailureDoesNotWaitForPublication(t *testing.T) {
+	ab, _ := newBrokerLeaseFixture(t)
+	rejectBrokerLeaseBinding(ab)
+	r := ab.b.nodePolicyRuntime()
+	before := len(ab.out.frames())
+	r.publishMu.Lock()
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(r.publishMu.Unlock) }
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { ab.b.renewEgressLease(ctx); close(done) }()
+	t.Cleanup(func() {
+		cancel()
+		release()
+		waitBrokerLeaseDone(t, "renewal cleanup", done)
+		waitBrokerLeaseAnnouncement(t, r)
+	})
+	waitUntil(t, "rejected lease binding", func() bool {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		return r.availabilityErr != ""
+	})
+	cancel()
+	waitBrokerLeaseDone(t, "cancelled renewal with publication locked", done)
+	requireBrokerLeasePushSlotFree(t, r)
+	if got := len(ab.out.frames()); got != before {
+		t.Fatalf("publication passed the held lock: frames=%d, want %d", got, before)
+	}
+	release()
+	waitBrokerLeaseAnnouncement(t, r)
+	frames := ab.out.frames()[before:]
+	if len(frames) != 1 {
+		t.Fatalf("binding failure announcements = %d, want 1", len(frames))
+	}
+	requireBrokerLeaseAnnouncement(t, frames[0], "the proxy egress lease binding requires availability acknowledgement", "0")
+}
+
+func TestEgressLeaseBrokerAnnouncementsCoalesce(t *testing.T) {
+	ab, _ := newBrokerLeaseFixture(t)
+	r := ab.b.nodePolicyRuntime()
+	before := len(ab.out.frames())
+	// One scheduler P and a yield after every request let its new goroutine
+	// reach the held lock before the next request. This also exposes clearing
+	// pending before taking publishMu, which would enqueue twenty senders.
+	previous := runtime.GOMAXPROCS(1)
+	t.Cleanup(func() { runtime.GOMAXPROCS(previous) })
+	r.publishMu.Lock()
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(r.publishMu.Unlock) }
+	t.Cleanup(func() {
+		release()
+		for range 20 {
+			runtime.Gosched()
+		}
+		waitBrokerLeaseAnnouncement(t, r)
+	})
+	r.mu.Lock()
+	wake := r.models.wake
+	r.mu.Unlock()
+	select {
+	case <-wake:
+	default:
+	}
+	for range 20 {
+		ab.b.schedulePolicyAnnouncement()
+		select {
+		case <-wake:
+		default:
+			t.Fatal("announcement did not synchronously signal model configuration")
+		}
+		runtime.Gosched()
+	}
+	if got := len(ab.out.frames()); got != before {
+		t.Fatalf("announcement passed the held publication lock: frames=%d, want %d", got, before)
+	}
+	r.mu.Lock()
+	r.availabilityErr = "latest availability activation failed"
+	r.mu.Unlock()
+	release()
+	// Drain every waiter admitted by the requests before taking the completion
+	// lock and inspecting the bounded, existing fixture output.
+	for range 20 {
+		runtime.Gosched()
+	}
+	waitBrokerLeaseAnnouncement(t, r)
+	frames := ab.out.frames()[before:]
+	if len(frames) != 1 {
+		t.Fatalf("coalesced announcements = %d, want exactly 1", len(frames))
+	}
+	requireBrokerLeaseAnnouncement(t, frames[0], "latest availability activation failed", "0")
 }
 
 func TestEgressLeaseBrokerStartupHasNoGrant(t *testing.T) {

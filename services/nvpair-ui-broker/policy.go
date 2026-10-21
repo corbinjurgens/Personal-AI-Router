@@ -199,6 +199,8 @@ type policyRuntime struct {
 	// to clients (policy_notifications.go). It is taken before r.mu and held
 	// across the client write; r.mu is not.
 	publishMu sync.Mutex
+	// announcePending is guarded by mu until a scheduled sender takes publishMu.
+	announcePending bool
 	// projectionMu serializes this node's projections to engine-manager the
 	// same way (policy_notifications.go). It is separate from publishMu so an
 	// engine-manager slow to read never holds up client announcements.
