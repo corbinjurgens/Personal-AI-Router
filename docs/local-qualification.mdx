@@ -27,7 +27,7 @@ fails validation is ignored as a whole and logged; nothing is qualified from it.
 
 ```json
 {
-  "version": 1,
+  "version": 2,
   "qualifications": [{
     "id": "msi-example",
     "revision": "1",
@@ -41,6 +41,11 @@ fails validation is ignored as a whole and logged; nothing is qualified from it.
     "contextTokens": 8192,
     "maxOutputTokens": 2048,
     "routes": ["/v1/chat/completions"],
+    "shapes": {
+      "tools": true,
+      "structuredOutput": ["json_object", "json_schema"],
+      "reasoningReplay": false
+    },
     "accounting": {
       "method": "utf8-bytes",
       "requestOverheadTokens": 16,

@@ -313,7 +313,7 @@ func TestStrataContractRequiresLocalQualification(t *testing.T) {
 			profile := policy.Profiles[0]
 			engineIdentity := identity.Engines[profile.Engine]
 			strataContractWriteJSON(t, filepath.Join(proxy.AppDir, "local-qualification.json"), map[string]any{
-				"version": 1,
+				"version": 2,
 				"qualifications": []any{map[string]any{
 					"id": profile.Qualification.ID, "revision": profile.Qualification.Revision,
 					"engine": profile.Engine, "model": profile.Model,
@@ -321,6 +321,7 @@ func TestStrataContractRequiresLocalQualification(t *testing.T) {
 					"tokenizer": "synthetic-test-tokenizer", "chatTemplate": "synthetic-test-template",
 					"contextTokens": profile.ContextTokens, "maxOutputTokens": profile.MaxOutputTokens,
 					"routes": []string{"/v1/chat/completions"},
+					"shapes": map[string]any{"tools": false, "structuredOutput": []string{}, "reasoningReplay": false},
 					"accounting": map[string]any{"method": "utf8-bytes", "requestOverheadTokens": 8, "messageOverheadTokens": 4,
 						"toolOverheadTokens": 0, "schemaOverheadTokens": 0},
 					"evidence": "Synthetic test data for the Strata contract positive control; no model or hardware qualification was performed.",

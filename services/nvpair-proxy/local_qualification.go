@@ -40,7 +40,7 @@ import (
 const qualificationFileName = "local-qualification.json"
 
 // qualificationDocumentVersion is the artifact schema version.
-const qualificationDocumentVersion = 1
+const qualificationDocumentVersion = 2
 
 // accountingUTF8Bytes bounds input tokens by rendered UTF-8 bytes: a
 // byte-level BPE tokenizer emits at most one token per byte. Template tokens
@@ -79,8 +79,44 @@ type localQualification struct {
 	ContextTokens   int                     `json:"contextTokens"`
 	MaxOutputTokens int                     `json:"maxOutputTokens"`
 	Routes          []string                `json:"routes"`
+	Shapes          *qualificationShapes    `json:"shapes"`
 	Accounting      qualificationAccounting `json:"accounting"`
 	Evidence        string                  `json:"evidence"`
+}
+
+// qualificationShapes declares evidence explicitly; nil members distinguish
+// missing/null declarations from false and an empty list of qualified modes.
+type qualificationShapes struct {
+	Tools            *bool    `json:"tools"`
+	StructuredOutput []string `json:"structuredOutput"`
+	ReasoningReplay  *bool    `json:"reasoningReplay"`
+}
+
+func (s *qualificationShapes) validate() error {
+	if s == nil {
+		return errors.New("shapes must be a non-null object")
+	}
+	if s.Tools == nil {
+		return errors.New("shapes.tools must be a non-null boolean")
+	}
+	if s.StructuredOutput == nil {
+		return errors.New("shapes.structuredOutput must be a non-null array")
+	}
+	for i, mode := range s.StructuredOutput {
+		if mode != "json_object" && mode != "json_schema" {
+			return fmt.Errorf("unsupported shapes.structuredOutput mode %q", mode)
+		}
+		if slices.Contains(s.StructuredOutput[:i], mode) {
+			return fmt.Errorf("repeated shapes.structuredOutput mode %q", mode)
+		}
+	}
+	if s.ReasoningReplay == nil {
+		return errors.New("shapes.reasoningReplay must be a non-null boolean")
+	}
+	if *s.ReasoningReplay {
+		return errors.New("shapes.reasoningReplay must be false while reasoning replay is unsupported")
+	}
+	return nil
 }
 
 type qualificationAccounting struct {
@@ -144,6 +180,9 @@ func (q localQualification) validate() error {
 			return fmt.Errorf("unsupported route %q", r)
 		}
 	}
+	if err := q.Shapes.validate(); err != nil {
+		return err
+	}
 	a := q.Accounting
 	if a.Method != accountingUTF8Bytes {
 		return fmt.Errorf("unsupported accounting method %q", a.Method)
@@ -174,6 +213,9 @@ func parseQualificationDocument(data []byte) (qualificationRegistry, error) {
 	}
 	if _, err := dec.Token(); err != io.EOF {
 		return nil, errors.New("invalid qualification document: trailing data")
+	}
+	if !uniqueKeys(data) {
+		return nil, errors.New("invalid qualification document: malformed JSON or repeated keys")
 	}
 	if doc.Version == nil || *doc.Version != qualificationDocumentVersion {
 		return nil, fmt.Errorf("qualification document version must be %d", qualificationDocumentVersion)
@@ -318,24 +360,8 @@ func (q *localQualification) validateRequest(profile nodepolicy.Profile, route s
 	if !isJSONObject(body) {
 		return nil, strictBound{}, rejectBody("the request must be a JSON object")
 	}
-	var fieldError error
-	visitObject(body, func(key []byte, start, end int) {
-		if fieldError != nil {
-			return
-		}
-		if jsonStringEquals(key, "store") {
-			fieldError = checkQualificationStore(body[start:end])
-			return
-		}
-		for _, name := range chatRequestKeys {
-			if jsonStringEquals(key, name) {
-				return
-			}
-		}
-		fieldError = rejectStrictField(ctx, key)
-	})
-	if fieldError != nil {
-		return nil, strictBound{}, fieldError
+	if err := checkQualificationKeys(ctx, body); err != nil {
+		return nil, strictBound{}, err
 	}
 	effective, release, mergeErr := transformBody(ctx, body, "", false, profile.RequestOptions)
 	if mergeErr != nil {
@@ -359,6 +385,9 @@ func (q *localQualification) validateRequest(profile nodepolicy.Profile, route s
 	if !isJSONObject(effective) {
 		return nil, strictBound{}, rejectBody("the request with its defaults is not a JSON object")
 	}
+	if err := checkQualificationKeys(ctx, effective); err != nil {
+		return nil, strictBound{}, err
+	}
 	effective, err = stripQualificationStore(ctx, effective)
 	if err != nil {
 		return nil, strictBound{}, err
@@ -379,16 +408,16 @@ func (q *localQualification) validateRequest(profile nodepolicy.Profile, route s
 	bound.output = output
 	a := q.Accounting
 	bound.input = a.RequestOverheadTokens
-	n, err := accountMessages(strictField(effective, "messages", false), a)
+	n, err := accountMessages(strictField(effective, "messages", false), a, *q.Shapes.Tools)
 	if err != nil {
 		return nil, strictBound{}, err
 	}
 	bound.input += n
-	if n, err = accountTools(effective, a); err != nil {
+	if n, err = accountTools(effective, a, *q.Shapes.Tools); err != nil {
 		return nil, strictBound{}, err
 	}
 	bound.input += n
-	if n, err = accountResponseFormat(strictField(effective, "response_format", false), a); err != nil {
+	if n, err = accountResponseFormat(strictField(effective, "response_format", false), a, q.Shapes.StructuredOutput); err != nil {
 		return nil, strictBound{}, err
 	}
 	bound.input += n
@@ -396,6 +425,28 @@ func (q *localQualification) validateRequest(profile nodepolicy.Profile, route s
 		return nil, strictBound{}, rejectBody("the input bound %d and output bound %d exceed the qualified context %d", bound.input, bound.output, context)
 	}
 	return effective, bound, nil
+}
+
+// Check both incoming and effective keys. Store is the sole ingress no-op;
+// it is validated here and removed only after the normal defaults merge.
+func checkQualificationKeys(ctx context.Context, body []byte) error {
+	var fieldError error
+	visitObject(body, func(key []byte, start, end int) {
+		if fieldError != nil {
+			return
+		}
+		if jsonStringEquals(key, "store") {
+			fieldError = checkQualificationStore(body[start:end])
+			return
+		}
+		for _, name := range chatRequestKeys {
+			if jsonStringEquals(key, name) {
+				return
+			}
+		}
+		fieldError = rejectStrictField(ctx, key)
+	})
+	return fieldError
 }
 
 func checkQualificationStore(raw []byte) error {
@@ -641,12 +692,18 @@ func outputBound(f []byte) (int, error) {
 	return bound, nil
 }
 
-func accountMessages(raw json.RawMessage, a qualificationAccounting) (int, error) {
+func accountMessages(raw json.RawMessage, a qualificationAccounting, toolsQualified bool) (int, error) {
 	total := 0
 	count, err := strictArray(raw, func(i int, m []byte) error {
 		calls := strictField(m, "tool_calls", true)
 		if !strictObject(m, "role", "content", "name", "tool_calls", "tool_call_id") || !strictStrings(m, "role", "name", "tool_call_id") {
 			return rejectBody("messages[%d] has an unsupported shape", i)
+		}
+		if len(calls) > 0 && strictNull(calls) {
+			return rejectBody("messages[%d].tool_calls must be a non-null array", i)
+		}
+		if id := strictField(m, "tool_call_id", true); len(id) > 0 && strictNull(id) {
+			return rejectBody("messages[%d].tool_call_id must be a string", i)
 		}
 		callCount, callErr := strictArray(calls, nil)
 		if callErr != nil {
@@ -655,6 +712,12 @@ func accountMessages(raw json.RawMessage, a qualificationAccounting) (int, error
 		role := strictField(m, "role", true)
 		if !jsonStringEquals(role, "system") && !jsonStringEquals(role, "user") && !jsonStringEquals(role, "assistant") && !jsonStringEquals(role, "tool") {
 			return rejectBody("messages[%d].role is not supported", i)
+		}
+		if len(calls) > 0 && !jsonStringEquals(role, "assistant") {
+			return rejectBody("messages[%d].tool_calls belong to an assistant message", i)
+		}
+		if !toolsQualified && (len(calls) > 0 || jsonStringEquals(role, "tool")) {
+			return rejectBody("messages[%d] tool history is not qualified by shapes.tools", i)
 		}
 		roleBytes, _ := strictStringLen(role)
 		n := a.MessageOverheadTokens + roleBytes
@@ -674,9 +737,6 @@ func accountMessages(raw json.RawMessage, a qualificationAccounting) (int, error
 			}
 			idBytes, _ := strictStringLen(id)
 			n += idBytes
-		}
-		if callCount > 0 && !jsonStringEquals(role, "assistant") {
-			return rejectBody("messages[%d].tool_calls belong to an assistant message", i)
 		}
 		_, err = strictArray(calls, func(j int, call []byte) error {
 			fn := strictField(call, "function", true)
@@ -729,10 +789,15 @@ func contentText(raw json.RawMessage) (n int, isNull bool, err error) {
 	return n, false, err
 }
 
-func accountTools(f []byte, a qualificationAccounting) (int, error) {
+func accountTools(f []byte, a qualificationAccounting, toolsQualified bool) (int, error) {
 	total := 0
+	definitions := 0
 	if raw := strictField(f, "tools", false); len(raw) > 0 {
-		_, err := strictArray(raw, func(i int, tool []byte) error {
+		if strictNull(raw) {
+			return 0, rejectBody("tools must be a non-null array")
+		}
+		var err error
+		definitions, err = strictArray(raw, func(i int, tool []byte) error {
 			fn := strictField(tool, "function", true)
 			name, nameOK := strictStringLen(strictField(fn, "name", true))
 			if !strictObject(tool, "type", "function") || !strictStrings(tool, "type") || !strictObject(fn, "name", "description", "parameters", "strict") || !strictStrings(fn, "name", "description") || !strictBool(strictField(fn, "strict", true)) || !jsonStringEquals(strictField(tool, "type", true), "function") || !nameOK || name == 0 {
@@ -750,14 +815,19 @@ func accountTools(f []byte, a qualificationAccounting) (int, error) {
 			}
 			return 0, err
 		}
+		if definitions > 0 && !toolsQualified {
+			return 0, rejectBody("tools are not qualified by shapes.tools")
+		}
 	}
 	if raw := strictField(f, "tool_choice", false); len(raw) > 0 {
+		requiresTools := false
 		if raw[0] == '"' || strictNull(raw) {
 			if !jsonStringEquals(raw, "none") && !jsonStringEquals(raw, "auto") && !jsonStringEquals(raw, "required") {
 				return 0, rejectBody("tool_choice is not supported")
 			}
 			n, _ := strictStringLen(raw)
 			total += n
+			requiresTools = jsonStringEquals(raw, "required")
 		} else {
 			fn := strictField(raw, "function", true)
 			name, nameOK := strictStringLen(strictField(fn, "name", true))
@@ -765,12 +835,21 @@ func accountTools(f []byte, a qualificationAccounting) (int, error) {
 				return 0, rejectBody("tool_choice is not supported")
 			}
 			total += compactLen(raw)
+			requiresTools = true
+		}
+		if requiresTools {
+			if !toolsQualified {
+				return 0, rejectBody("tool_choice is not qualified by shapes.tools")
+			}
+			if definitions == 0 {
+				return 0, rejectBody("tool_choice requires nonempty tools")
+			}
 		}
 	}
 	return total, nil
 }
 
-func accountResponseFormat(raw json.RawMessage, a qualificationAccounting) (int, error) {
+func accountResponseFormat(raw json.RawMessage, a qualificationAccounting, modes []string) (int, error) {
 	if len(raw) == 0 {
 		return 0, nil
 	}
@@ -784,10 +863,16 @@ func accountResponseFormat(raw json.RawMessage, a qualificationAccounting) (int,
 	case jsonStringEquals(typ, "text") && noSchema:
 		return 0, nil
 	case jsonStringEquals(typ, "json_object") && noSchema:
+		if !slices.Contains(modes, "json_object") {
+			return 0, rejectBody("response_format json_object is not qualified by shapes.structuredOutput")
+		}
 		return a.SchemaOverheadTokens, nil
 	case jsonStringEquals(typ, "json_schema") && !noSchema:
 		name, _ := strictStringLen(strictField(schema, "name", true))
 		if name > 0 && isJSONObject(strictField(schema, "schema", true)) {
+			if !slices.Contains(modes, "json_schema") {
+				return 0, rejectBody("response_format json_schema is not qualified by shapes.structuredOutput")
+			}
 			description, _ := strictStringLen(strictField(schema, "description", true))
 			return a.SchemaOverheadTokens + name + description + compactLen(strictField(schema, "schema", true)), nil
 		}
