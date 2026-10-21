@@ -182,7 +182,9 @@ resident eligibility that require observed proof are withheld for that sweep;
 the next successful sweep restores observation without apply or restart.
 Only exactly HTTP 200 succeeds for HTTP `list_models` and `loaded_models`
 inventory actions (including a shared response) and `/props`; other 2xx statuses
-are transport failures too. Other actions retain their general 2xx success rule.
+are transport failures too. These observation reads never follow redirects:
+success must come from the requested URL, and every 3xx is transport unknown.
+Other actions retain their existing redirect policy and general 2xx success rule.
 Semantic disagreement from any model in a sweep latches even when another
 model's props read fails transport, independent of inventory ordering. A sweep
 with any transport failure publishes no observed proof.

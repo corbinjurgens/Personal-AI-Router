@@ -210,7 +210,16 @@ func (e *Executor) dispatchAction(ctx context.Context, st *engineState, engine, 
 	// An action a model operation binds with a longer response budget (Ollama
 	// answers a cold load only once the model is resident) gets that budget on
 	// every call, engine:action included.
-	resp, err := e.clientFor(st.manifest.actionResponseBudget(action)).Do(req)
+	client := e.clientFor(st.manifest.actionResponseBudget(action))
+	observation := action == "list_models" || action == "loaded_models"
+	if observation {
+		// Proof must come from the requested URL's 200, never a redirect
+		// destination. Copy the client to preserve other actions' policy.
+		observationClient := *client
+		observationClient.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+		client = &observationClient
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("action %q: %w", action, err)
 	}
@@ -222,7 +231,6 @@ func (e *Executor) dispatchAction(ctx context.Context, st *engineState, engine, 
 	// Inventory reads are observation evidence only on exactly 200. Apply
 	// this to list_models too: a sweep can share its response with loaded_models.
 	// Mutation actions retain their general 2xx success contract (e.g. 204).
-	observation := action == "list_models" || action == "loaded_models"
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 || (observation && resp.StatusCode != http.StatusOK) {
 		return nil, &ActionHTTPError{Action: action, StatusCode: resp.StatusCode, Body: strings.TrimSpace(string(data))}
 	}

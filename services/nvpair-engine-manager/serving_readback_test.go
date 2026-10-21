@@ -450,6 +450,61 @@ func TestLoadedServingTransportFailureRecoversNextSweep(t *testing.T) {
 	}
 }
 
+func TestLoadedServingRedirectIsTransportUnknown(t *testing.T) {
+	for _, endpoint := range []string{"/models", "/props"} {
+		t.Run(endpoint, func(t *testing.T) {
+			for _, status := range []int{http.StatusMovedPermanently, http.StatusFound, http.StatusTemporaryRedirect} {
+				t.Run(http.StatusText(status), func(t *testing.T) {
+					f, server := loadedReadbackFixture(t, "medium")
+					f.ex.sweepLoaded(context.Background(), nil, false)
+					readbackProof(t, f, 1)
+					original := f.ex.client.Transport
+					redirects := 0
+					f.ex.client.Transport = memoryModelsTransport(func(r *http.Request) (*http.Response, error) {
+						if r.URL.Path == "/redirected" {
+							redirects++
+							// A followed redirect would return valid proof, exposing
+							// clients that check only the final response's status.
+							forward := r.Clone(r.Context())
+							forward.URL.Path = endpoint
+							return original.RoundTrip(forward)
+						}
+						if r.URL.Path == endpoint {
+							return &http.Response{StatusCode: status, Header: http.Header{"Location": {"/redirected"}}, Body: http.NoBody}, nil
+						}
+						return original.RoundTrip(r)
+					})
+					f.ex.sweepLoaded(context.Background(), nil, false)
+					st := settingsState(t, f.ex)
+					st.mu.Lock()
+					drift := st.plat.Runtime.servingDrift
+					st.mu.Unlock()
+					if redirects != 0 || drift != "" {
+						t.Errorf("redirect requests=%d drift=%q, want no redirect or drift latch", redirects, drift)
+					}
+					readbackProof(t, f, 0)
+					if _, err := f.ex.currentServingObservation(context.Background(), "fake", "medium"); err == nil {
+						t.Fatal("redirect retained current observation")
+					}
+					state, err := f.ex.LaunchSettings("fake")
+					if err != nil || state.ServingReadback.Status != "unverified" {
+						t.Fatalf("readback=%+v err=%v, want unverified", state.ServingReadback, err)
+					}
+					f.ex.client.Transport = original
+					f.ex.sweepLoaded(context.Background(), nil, false)
+					readbackProof(t, f, 1)
+					if _, err := f.ex.currentServingObservation(context.Background(), "fake", "medium"); err != nil {
+						t.Fatalf("next good sweep did not restore observation: %v", err)
+					}
+					if server.loads.Load() != 0 {
+						t.Fatal("observation triggered a load")
+					}
+				})
+			}
+		})
+	}
+}
+
 func TestLoadedServingSemanticEvidenceSurvivesTransportFailure(t *testing.T) {
 	test := func(name, semanticModel, props string, semanticFirst bool) {
 		t.Run(name, func(t *testing.T) {

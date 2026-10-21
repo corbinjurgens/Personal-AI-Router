@@ -5,6 +5,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -69,6 +70,57 @@ func TestActionObservationRequiresHTTP200(t *testing.T) {
 						t.Fatalf("result=%s err=%v, want HTTP %d observation failure", result, err, status)
 					}
 				})
+			}
+		})
+	}
+}
+
+func TestActionRedirectPolicyPreservesMutationBehavior(t *testing.T) {
+	for _, status := range []int{http.StatusMovedPermanently, http.StatusFound, http.StatusTemporaryRedirect} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			m := testEngineManifest(fakeEngineBin)
+			for _, action := range []string{"list_models", "loaded_models", "load_model"} {
+				m.Actions[action] = Action{HTTP: &ActionHTTP{Method: http.MethodGet, Path: "/read"}}
+			}
+			ex := newTestExecutor(t, m)
+			st, err := ex.state(m.Engine)
+			if err != nil {
+				t.Fatal(err)
+			}
+			st.mu.Lock()
+			st.running = true
+			st.mu.Unlock()
+			redirects := 0
+			ex.client.Transport = memoryModelsTransport(func(r *http.Request) (*http.Response, error) {
+				if r.URL.Path == "/redirected" {
+					redirects++
+					return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"ok":true}`))}, nil
+				}
+				return &http.Response{StatusCode: status, Header: http.Header{"Location": {"/redirected"}}, Body: http.NoBody}, nil
+			})
+			// Exercise mutation after both observations on the same client, so
+			// changing the shared client's redirect policy also fails this test.
+			for _, action := range []string{"list_models", "loaded_models", "load_model"} {
+				result, err := ex.Action(context.Background(), m.Engine, action, nil)
+				if action == "load_model" {
+					if err != nil || redirects != 1 {
+						t.Fatalf("mutation result=%s err=%v redirects=%d", result, err, redirects)
+					}
+					var reply struct {
+						OK bool `json:"ok"`
+					}
+					if err := json.Unmarshal(result, &reply); err != nil {
+						t.Fatal(err)
+					}
+					if !reply.OK {
+						t.Fatal("mutation lost redirected response")
+					}
+					continue
+				}
+				var failure *ActionHTTPError
+				if !errors.As(err, &failure) || failure.StatusCode != status || result != nil || redirects != 0 {
+					t.Errorf("%s result=%s err=%v redirects=%d, want original HTTP %d", action, result, err, redirects, status)
+				}
 			}
 		})
 	}
