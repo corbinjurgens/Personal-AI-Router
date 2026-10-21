@@ -18,6 +18,11 @@ qualification and effective serving-envelope evidence. Removing a preference
 does not unload the model. Older targets that drop requested served/resident
 preferences are refused as unsupported readback.
 
+A revision-only policy save preserves loaded-inventory freshness when the
+resident's effective load request and engine identity are unchanged. A changed
+load request requires reconciliation under the new revision; stale inventory
+cannot confirm it merely because the engine identity has not changed yet.
+
 Each operation binds a unique normalized resident profile and engine-specific
 `declaredResidentCount` to the same policy revision. Its load context is exactly
 the profile's `contextTokens`; `keepAliveSeconds` remains 60 and is not a native

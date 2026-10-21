@@ -84,7 +84,7 @@ type modelConfigRuntime struct {
 	active         *modelConfigAttempt
 	loadedSource   *engineManagerSource
 	loadedProxy    *proxyProcess
-	loadedRevision string
+	loadedRequests map[nodepolicy.Role]nodepolicy.ResidentLoadOptions
 	loadedIdentity nodepolicy.SetModelIdentityParams
 	confirmed      map[nodepolicy.Role]modelConfigEvidence
 	unsettled      map[nodepolicy.Role]residentUnsettled
@@ -122,16 +122,16 @@ func (b *Broker) captureModelConfig() modelConfigEvidence {
 	if r.models.loadedSource != source || r.models.loadedProxy != pp {
 		e.Loaded = nil
 	}
-	if r.models.loadedRevision == e.Policy.Revision {
-		e.LoadedCurrent = make(map[string]map[string]bool)
-		for _, ref := range b.residentRefs(e.Policy) {
-			previous, current := r.models.loadedIdentity.Engines[ref.Engine], e.Identity.Engines[ref.Engine]
-			if previous.EngineRunID == current.EngineRunID && previous.SettingsFingerprint == current.SettingsFingerprint && previous.LaunchDigest == current.LaunchDigest && previous.ModelDigests[ref.Model] == current.ModelDigests[ref.Model] && reflect.DeepEqual(previous.Serving[ref.Model], current.Serving[ref.Model]) {
-				if e.LoadedCurrent[ref.Engine] == nil {
-					e.LoadedCurrent[ref.Engine] = make(map[string]bool)
-				}
-				e.LoadedCurrent[ref.Engine][ref.Model] = true
+	e.LoadedCurrent = make(map[string]map[string]bool)
+	for _, ref := range b.residentRefs(e.Policy) {
+		previous, current := r.models.loadedIdentity.Engines[ref.Engine], e.Identity.Engines[ref.Engine]
+		pr, qualified := b.residentProfile(e.Policy, ref)
+		loaded, known := r.models.loadedRequests[ref]
+		if qualified && known && loaded == residentLoadRequest(pr) && previous.EngineRunID == current.EngineRunID && previous.SettingsFingerprint == current.SettingsFingerprint && previous.LaunchDigest == current.LaunchDigest && previous.ModelDigests[ref.Model] == current.ModelDigests[ref.Model] && reflect.DeepEqual(previous.Serving[ref.Model], current.Serving[ref.Model]) {
+			if e.LoadedCurrent[ref.Engine] == nil {
+				e.LoadedCurrent[ref.Engine] = make(map[string]bool)
 			}
+			e.LoadedCurrent[ref.Engine][ref.Model] = true
 		}
 	}
 	// Marshal while locked, then decode to detach every map and policy slice.
@@ -212,6 +212,12 @@ func (b *Broker) residentProfile(p nodepolicy.Policy, ref nodepolicy.Role) (node
 		}
 	}
 	return result, found
+}
+
+// Use the exact dispatch payload for inventory freshness, so every effective
+// load option participates and unrelated policy edits do not invalidate it.
+func residentLoadRequest(pr nodepolicy.Profile) nodepolicy.ResidentLoadOptions {
+	return nodepolicy.ResidentLoadOptions{ContextLength: pr.ContextTokens, KeepAliveSeconds: 60}
 }
 
 func (b *Broker) modelConfigEntry(e modelConfigEvidence, ref nodepolicy.Role) (nodepolicy.ModelConfigurationEntry, nodepolicy.Profile, nodepolicy.StrictModelIdentity, int) {
@@ -369,7 +375,7 @@ func (b *Broker) reconcileModelConfig(ctx context.Context) {
 		if !b.residentDeclarationCurrent(pending.evidence, e, ref) || !r.now().Before(pending.expires) {
 			delete(r.models.pending, ref)
 			delete(r.models.confirmed, ref)
-		} else if sameResidentAllocation(pending.evidence, e, ref) && e.LoadedCurrent[ref.Engine][ref.Model] && containsString(e.Loaded[ref.Engine], ref.Model) {
+		} else if entry, _, _, _ := b.modelConfigEntry(e, ref); sameResidentAllocation(pending.evidence, e, ref) && e.LoadedCurrent[ref.Engine][ref.Model] && entry.ObservedLoaded != nil && *entry.ObservedLoaded {
 			// The correlated load already proved the envelope. A same-authority
 			// watcher publication completes its observation phase.
 			if r.models.confirmed == nil {
@@ -513,9 +519,9 @@ func residentRPC(ctx context.Context, pp *proxyProcess, method string, params an
 func (b *Broker) residentCurrent(op *modelConfigAttempt) bool {
 	r := b.nodePolicyRuntime()
 	r.mu.Lock()
-	active := r.models.active == op
+	active := r.models.active == op && r.now().Before(op.deadline)
 	r.mu.Unlock()
-	return active && op.ctx.Err() == nil && time.Now().Before(op.deadline) && b.residentSourceCurrent(op)
+	return active && op.ctx.Err() == nil && b.residentSourceCurrent(op)
 }
 
 func (b *Broker) residentSourceCurrent(op *modelConfigAttempt) bool {
@@ -593,7 +599,7 @@ func (b *Broker) reconcileResident(parent context.Context, e modelConfigEvidence
 	r.mu.Unlock()
 	result := nodepolicy.ReconcileResidentResult{Outcome: nodepolicy.ResidentNotDispatched}
 	if b.residentCurrent(op) {
-		params := nodepolicy.ReconcileResidentParams{OperationID: opID, PolicyRevision: e.Policy.Revision, DeclaredResidentCount: count, Engine: entry.Engine, Model: entry.Model, Identity: id, TimeoutMs: int(time.Until(deadline).Milliseconds()), Reservation: nodepolicy.ResidentReservationEvidence{ReservationID: prepared.ReservationID, ProxyRunID: e.Run, ManagerIncarnation: incarnation}, Load: nodepolicy.ResidentLoadOptions{ContextLength: pr.ContextTokens, KeepAliveSeconds: 60}}
+		params := nodepolicy.ReconcileResidentParams{OperationID: opID, PolicyRevision: e.Policy.Revision, DeclaredResidentCount: count, Engine: entry.Engine, Model: entry.Model, Identity: id, TimeoutMs: int(time.Until(deadline).Milliseconds()), Reservation: nodepolicy.ResidentReservationEvidence{ReservationID: prepared.ReservationID, ProxyRunID: e.Run, ManagerIncarnation: incarnation}, Load: residentLoadRequest(pr)}
 		if params.Validate() == nil {
 			raw, rpcErr, callErr := e.Worker.CallNoTimeout(ctx, nodepolicy.MethodReconcileResident, settingsJSON(params))
 			result.Outcome = nodepolicy.ResidentUnknown
@@ -614,6 +620,14 @@ func (b *Broker) reconcileResident(parent context.Context, e modelConfigEvidence
 	if result.Outcome == nodepolicy.ResidentLoaded && !granted {
 		result = nodepolicy.ReconcileResidentResult{Outcome: nodepolicy.ResidentUnknown}
 		terminal = false
+	}
+	if terminal && result.Outcome == nodepolicy.ResidentLoaded {
+		r.mu.Lock()
+		if r.models.loadedRequests == nil {
+			r.models.loadedRequests = make(map[nodepolicy.Role]nodepolicy.ResidentLoadOptions)
+		}
+		r.models.loadedRequests[nodepolicy.Role{Engine: entry.Engine, Model: entry.Model}] = residentLoadRequest(pr)
+		r.mu.Unlock()
 	}
 	finish = nodepolicy.FinishResidentParams{ReservationID: prepared.ReservationID, ProxyRunID: e.Run, OperationID: opID, Outcome: result.Outcome, Observation: result.Observation}
 	// Finish is cleanup on the original proxy even after revocation. A separate
