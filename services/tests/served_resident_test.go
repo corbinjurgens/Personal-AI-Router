@@ -4,6 +4,7 @@
 package tests
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/sha256"
@@ -11,15 +12,18 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"regexp"
 	"runtime"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -27,6 +31,7 @@ import (
 	"nvpair-shared/clustertrust"
 	"nvpair-shared/engines"
 	settings "nvpair-shared/enginesettings"
+	"nvpair-shared/jsonrpc"
 	"nvpair-shared/nodepolicy"
 )
 
@@ -37,6 +42,20 @@ const srNeighbor = "sr-neighbor"
 // This dispatch reuses the wrapper's fixed test image, rather than introducing
 // another executable path or a native engine. All qualification below is fixture-only.
 func init() {
+	// Broker worker arguments distinguish the relay from the synthetic native
+	// runtime, which uses this same fixed image with --host instead.
+	if os.Getenv("NVPAIR_SR_RELAY_IMAGE") != "" && len(os.Args) > 2 && os.Args[1] == "--log-level" {
+		image, err := os.Executable()
+		if err != nil || runtime.GOOS != "windows" || os.Getenv("NVPAIR_SR_RELAY_IMAGE") != image || !neFixedTestImage(image) {
+			os.Exit(2)
+		}
+		if err := runSRWorkerRelay(); err != nil {
+			// Frame contents, policy, native arguments and paths stay private.
+			fmt.Fprintln(os.Stderr, "SR worker relay failed")
+			os.Exit(2)
+		}
+		os.Exit(0)
+	}
 	if len(os.Args) < 6 || os.Args[5] != srRuntimeArg {
 		return
 	}
@@ -275,6 +294,7 @@ func runSRRuntime(args []string) error {
 
 type srProcessFixture struct {
 	*neServingFixture
+	relay            *srWorkerRelay
 	peerClient       *http.Client
 	switchTarget     bool
 	switchEnginePort int
@@ -519,6 +539,10 @@ func (f *srProcessFixture) enableSwitchTarget(t *testing.T) {
 
 func (f *srProcessFixture) start(t *testing.T) {
 	t.Helper()
+	if f.relay != nil {
+		f.startRelayed(t)
+		return
+	}
 	if !f.switchTarget {
 		f.neServingFixture.start(t)
 		return
@@ -584,6 +608,360 @@ func (f *srProcessFixture) start(t *testing.T) {
 		}
 		f.assertPlatformIsolation(t, engine, "effective host", manifest.Platforms)
 	}
+}
+
+// The relay has one bounded correlation table and never decodes/re-encodes a
+// forwarded frame. Only resident RPCs reach its private loopback controller.
+// Both roles run the real product binary, and the relay owns its Cmd and Wait.
+type srRelayEvent struct {
+	Role   string            `json:"role"`
+	PID    int               `json:"pid"`
+	Phase  string            `json:"phase"`
+	Method string            `json:"method,omitempty"`
+	Params json.RawMessage   `json:"params,omitempty"`
+	Result json.RawMessage   `json:"result,omitempty"`
+	Error  *jsonrpc.RPCError `json:"error,omitempty"`
+}
+
+type srRelayAction struct {
+	Action string                             `json:"action,omitempty"`
+	Probe  *nodepolicy.DispatchResidentParams `json:"probe,omitempty"`
+}
+
+func runSRWorkerRelay() error {
+	role, binary := "proxy", os.Getenv("NVPAIR_SR_RELAY_PROXY")
+	for _, arg := range os.Args[1:] {
+		if arg == "--http-port" {
+			role, binary = "manager", os.Getenv("NVPAIR_SR_RELAY_MANAGER")
+		}
+	}
+	if !neWithin(os.Getenv("NVPAIR_TEST_BIN_DIR"), binary) {
+		return errors.New("worker outside fixed executable root")
+	}
+	client := &http.Client{Timeout: neCallBudget + 5*time.Second, Transport: &http.Transport{Proxy: nil}}
+	defer client.CloseIdleConnections()
+	cmd := exec.Command(binary, os.Args[1:]...)
+	for _, assignment := range os.Environ() {
+		if !strings.HasPrefix(assignment, "NVPAIR_SR_RELAY_") {
+			cmd.Env = append(cmd.Env, assignment)
+		}
+	}
+	cmd.Stderr = os.Stderr
+	input, err := cmd.StdinPipe()
+	if err != nil {
+		return err
+	}
+	defer input.Close()
+	// Own the pipe explicitly so Wait cannot close stdout before its final
+	// response/notification has drained through the transparent pump.
+	output, writer, err := os.Pipe()
+	if err != nil {
+		return err
+	}
+	defer output.Close()
+	cmd.Stdout = writer
+	if err := cmd.Start(); err != nil {
+		_ = writer.Close()
+		return err
+	}
+	if err := writer.Close(); err != nil {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		return err
+	}
+	wait := make(chan error, 1)
+	go func() { wait <- cmd.Wait() }()
+	// Every exit path waits for the actual worker; killing the relay alone is
+	// never the test's loss boundary. EOF gets a bounded graceful shutdown.
+	reaped := false
+	defer func() {
+		if !reaped {
+			_ = cmd.Process.Kill()
+			<-wait
+		}
+	}()
+	report := func(event srRelayEvent) (srRelayAction, error) {
+		event.Role, event.PID = role, cmd.Process.Pid
+		data, err := json.Marshal(event)
+		if err != nil {
+			return srRelayAction{}, err
+		}
+		response, err := client.Post(os.Getenv("NVPAIR_SR_RELAY_CONTROL"), "application/json", bytes.NewReader(data))
+		if err != nil {
+			return srRelayAction{}, err
+		}
+		defer response.Body.Close()
+		if response.StatusCode != http.StatusOK {
+			return srRelayAction{}, errors.New("private controller refused event")
+		}
+		var action srRelayAction
+		err = neDecode(response.Body, &action)
+		return action, err
+	}
+	if _, err := report(srRelayEvent{Phase: "started"}); err != nil {
+		return err
+	}
+	type call struct {
+		method string
+		params json.RawMessage
+	}
+	var mu, inputMu sync.Mutex
+	pending := make(map[string]call)
+	probeID := fmt.Sprintf(`"sr-worker-loss-probe-%d"`, cmd.Process.Pid)
+	killBoundary := errors.New("requested actual worker loss")
+	forward := func(reader io.Reader, destination io.Writer, fromBroker bool) error {
+		scanner := bufio.NewScanner(reader)
+		scanner.Buffer(make([]byte, 4096), jsonrpc.WorkerFrameBytes)
+		// Retain the delimiter and all bytes, including extension fields and
+		// CRLF. The bound applies equally to inspected and unrelated frames.
+		scanner.Split(func(data []byte, eof bool) (int, []byte, error) {
+			if i := bytes.IndexByte(data, '\n'); i >= 0 {
+				return i + 1, data[:i+1], nil
+			}
+			if eof && len(data) > 0 {
+				return len(data), data, nil
+			}
+			return 0, nil, nil
+		})
+		for scanner.Scan() {
+			frame := scanner.Bytes()
+			var message jsonrpc.Message
+			var event srRelayEvent
+			if json.Unmarshal(frame, &message) == nil && message.ID != nil {
+				id := string(*message.ID)
+				mu.Lock()
+				if fromBroker && message.IsRequest() {
+					switch message.Method {
+					case nodepolicy.MethodPrepareResident, nodepolicy.MethodDispatchResident, nodepolicy.MethodFinishResident, nodepolicy.MethodObserveResident, nodepolicy.MethodReconcileResident:
+						if len(pending) >= 32 || id == probeID {
+							mu.Unlock()
+							return errors.New("resident relay correlation bound")
+						}
+						pending[id] = call{message.Method, bytes.Clone(message.Params)}
+						event = srRelayEvent{Phase: "request", Method: message.Method, Params: message.Params}
+					}
+				} else if !fromBroker && message.IsResponse() {
+					if request, ok := pending[id]; ok {
+						delete(pending, id)
+						event = srRelayEvent{Phase: "response", Method: request.method, Params: request.params, Result: message.Result, Error: message.Error}
+					}
+					if id == probeID {
+						event = srRelayEvent{Phase: "probe", Method: nodepolicy.MethodDispatchResident, Result: message.Result, Error: message.Error}
+					}
+				}
+				mu.Unlock()
+			}
+			if event.Phase != "" {
+				action, err := report(event)
+				if err != nil {
+					return err
+				}
+				if action.Action == "kill" {
+					return killBoundary
+				}
+				if action.Probe != nil {
+					probe, err := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": fmt.Sprintf("sr-worker-loss-probe-%d", cmd.Process.Pid), "method": nodepolicy.MethodDispatchResident, "params": action.Probe})
+					if err != nil {
+						return err
+					}
+					inputMu.Lock()
+					_, err = input.Write(append(probe, '\n'))
+					inputMu.Unlock()
+					if err != nil {
+						return err
+					}
+				}
+				if action.Action == "drop" || event.Phase == "probe" {
+					continue
+				}
+			}
+			if fromBroker {
+				inputMu.Lock()
+			}
+			_, err := destination.Write(frame)
+			if fromBroker {
+				inputMu.Unlock()
+			}
+			if err != nil {
+				return err
+			}
+		}
+		return scanner.Err()
+	}
+	pumps := make(chan error, 2)
+	outputDone := make(chan error, 1)
+	go func() { pumps <- forward(os.Stdin, input, true) }()
+	go func() {
+		err := forward(output, os.Stdout, false)
+		outputDone <- err
+		pumps <- err
+	}()
+	var pumpErr error
+	select {
+	case pumpErr = <-pumps:
+	case <-time.After(5 * time.Minute):
+		return errors.New("relay lifetime bound")
+	}
+	forced := errors.Is(pumpErr, killBoundary)
+	if forced {
+		if err := cmd.Process.Kill(); err != nil {
+			return err
+		}
+	}
+	_ = input.Close()
+	select {
+	case err := <-wait:
+		reaped = true
+		if !forced && (err != nil || pumpErr != nil) {
+			return errors.New("worker or relay pump failed")
+		}
+	case <-time.After(8 * time.Second):
+		return errors.New("worker did not stop on relay EOF")
+	}
+	select {
+	case err := <-outputDone:
+		if err != nil && !forced {
+			return errors.New("worker output relay failed")
+		}
+	case <-time.After(2 * time.Second):
+		return errors.New("worker output did not drain")
+	}
+	if _, err := report(srRelayEvent{Phase: "reaped"}); err != nil {
+		return err
+	}
+	return nil
+}
+
+type srWorkerRelay struct {
+	server      *httptest.Server
+	mu          sync.Mutex
+	events      []srRelayEvent
+	fired       bool
+	oldPID      int
+	oldGrant    *nodepolicy.DispatchResidentParams
+	probed      bool
+	release     chan struct{}
+	releaseOnce sync.Once
+}
+
+func newSRWorkerRelay(t *testing.T, mode string) *srWorkerRelay {
+	t.Helper()
+	r := &srWorkerRelay{release: make(chan struct{})}
+	r.server = newFixtureHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		var event srRelayEvent
+		if request.Method != http.MethodPost || neDecode(request.Body, &event) != nil || event.PID <= 0 || (event.Role != "proxy" && event.Role != "manager") {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		r.mu.Lock()
+		if len(r.events) >= 256 {
+			r.mu.Unlock()
+			w.WriteHeader(http.StatusInsufficientStorage)
+			return
+		}
+		r.events = append(r.events, event)
+		action := srRelayAction{}
+		if !r.fired && mode == "proxy-before-grant" && event.Role == "proxy" && event.Phase == "request" && event.Method == nodepolicy.MethodDispatchResident {
+			var grant nodepolicy.DispatchResidentParams
+			if json.Unmarshal(event.Params, &grant) == nil {
+				r.fired, r.oldPID, r.oldGrant = true, event.PID, &grant
+				action.Action = "kill"
+			}
+		}
+		if !r.fired && mode == "manager-completion" && event.Role == "manager" && event.Phase == "response" && event.Method == nodepolicy.MethodReconcileResident && event.Error == nil {
+			var result nodepolicy.ReconcileResidentResult
+			if json.Unmarshal(event.Result, &result) == nil && result.Outcome == nodepolicy.ResidentLoaded {
+				r.fired, r.oldPID = true, event.PID
+				action.Action = "drop"
+			}
+		}
+		if r.oldGrant != nil && !r.probed && event.Role == "proxy" && event.PID != r.oldPID && event.Phase == "response" && event.Method == nodepolicy.MethodPrepareResident && event.Error == nil {
+			var prepared nodepolicy.PrepareResidentResult
+			if json.Unmarshal(event.Result, &prepared) == nil && prepared.ReservationID != "" {
+				r.probed = true
+				action.Probe = r.oldGrant
+			}
+		}
+		gate := mode == "proxy-before-grant" && r.fired && event.Role == "proxy" && event.PID == r.oldPID && event.Phase == "reaped"
+		r.mu.Unlock()
+		if gate {
+			select {
+			case <-r.release:
+			case <-request.Context().Done():
+				return
+			case <-time.After(neCallBudget):
+				w.WriteHeader(http.StatusGatewayTimeout)
+				return
+			}
+		}
+		if err := json.NewEncoder(w).Encode(action); err != nil {
+			return
+		}
+	}))
+	t.Cleanup(r.server.Close)
+	t.Cleanup(r.resume)
+	return r
+}
+
+func (r *srWorkerRelay) resume() {
+	r.releaseOnce.Do(func() { close(r.release) })
+}
+
+func (r *srWorkerRelay) wait(t *testing.T, description string, match func(srRelayEvent) bool) srRelayEvent {
+	t.Helper()
+	var found srRelayEvent
+	neEventually(t, description, 2*neCallBudget, func() bool {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		for _, event := range r.events {
+			if match(event) {
+				found = event
+				return true
+			}
+		}
+		return false
+	})
+	return found
+}
+
+func (f *srProcessFixture) startRelayed(t *testing.T) {
+	t.Helper()
+	if f.p != nil || f.switchTarget {
+		t.Fatal("worker-loss relay requires a stopped single-facade fixture")
+	}
+	f.assertIsolationFiles(t)
+	args := append([]string{"--scanner-path", f.scanner, "--engine-manager-path", f.image, "--proxy-path", f.image, "--proxy-engines=llamacpp", "--cluster-dir", filepath.Join(f.root, "cluster"), "--log-level", "info"}, f.ports.args()...)
+	env := []string{"OLLAMA_HOST=", "NVPAIR_TEST_SUBSCRIPTION_SCANNER=" + f.scanner, "NVPAIR_TEST_SUBSCRIPTION_PORT=" + strconv.Itoa(f.scannerPort), "NVPAIR_SR_RELAY_IMAGE=" + f.image, "NVPAIR_SR_RELAY_MANAGER=" + engineMgrBin, "NVPAIR_SR_RELAY_PROXY=" + proxyBin, "NVPAIR_SR_RELAY_CONTROL=" + f.relay.server.URL}
+	f.p = startInteropProcess(t, f.root, brokerBin, f.ports.engineManagerHTTP, env, args...)
+	f.p.ports = append(f.p.ports, f.ports.engineControl, f.scannerPort, f.facadePort)
+	for _, path := range []string{engineMgrBin, proxyBin, f.scanner} {
+		canonical, err := canonicalServicePath(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		f.p.paths = append(f.p.paths, canonical)
+	}
+	waitForMethod(t, f.p.msgs, "app:ready", neCallBudget)
+	if port := waitEngineProxyReady(t, "llamacpp-proxy", f.p.in, f.p.msgs, neCallBudget); port != f.facadePort {
+		t.Fatal("relayed proxy did not use reserved facade")
+	}
+	f.assertIsolation(t)
+	t.Cleanup(f.relay.resume)
+}
+
+func newSRWorkerLossFixture(t *testing.T, mode string) *srProcessFixture {
+	t.Helper()
+	f := newSRProcessFixture(t)
+	f.stop(t)
+	f.relay = newSRWorkerRelay(t, mode)
+	// Close the controller only after the broker and both actual children have
+	// been reaped, including a fatal assertion at the gated loss boundary.
+	t.Cleanup(func() { f.relay.resume(); f.stop(t) })
+	f.start(t)
+	f.call(t, "engine:start", map[string]string{"engine": "llamacpp"}, nil)
+	f.retainRuntime(t)
+	neEventually(t, "relayed qualified source", neCallBudget, func() bool { return neCapability(f.models(t)) != nil })
+	return f
 }
 
 func (f *srProcessFixture) control(t *testing.T, action string) srRuntimeState {
@@ -1033,6 +1411,180 @@ func TestServedResidentProcessRecovery(t *testing.T) {
 			t.Fatalf("source-bound settlement caused extra effects=%+v", state)
 		}
 	})
+}
+
+func srRelayDecode(t *testing.T, data json.RawMessage, value any) {
+	t.Helper()
+	if err := json.Unmarshal(data, value); err != nil {
+		t.Fatalf("decode resident relay metadata: %v", err)
+	}
+}
+
+func TestServedResidentProcessProxyLossBeforeGrant(t *testing.T) {
+	f := newSRWorkerLossFixture(t, "proxy-before-grant")
+	before := f.control(t, "")
+	f.edit(t, func(p *nodepolicy.Policy) {
+		p.Admission.SwitchTimeoutSeconds = 10
+		p.ResidentModels = nodepolicy.ResidentModels{{Engine: "llamacpp", Model: neModel}}
+	})
+	lost := f.relay.wait(t, "actual proxy killed and reaped before grant", func(event srRelayEvent) bool {
+		return event.Role == "proxy" && event.Phase == "reaped"
+	})
+	assertSwitchProcessStopped(t, int32(lost.PID))
+	f.relay.mu.Lock()
+	old := f.relay.oldGrant
+	f.relay.mu.Unlock()
+	if old == nil {
+		t.Fatal("proxy loss did not intercept the final grant request")
+	}
+	prepared := f.relay.wait(t, "successful correlated prepare on lost proxy", func(event srRelayEvent) bool {
+		var params nodepolicy.PrepareResidentParams
+		return event.PID == lost.PID && event.Phase == "response" && event.Method == nodepolicy.MethodPrepareResident && json.Unmarshal(event.Params, &params) == nil && params.OperationID == old.OperationID
+	})
+	var reservation nodepolicy.PrepareResidentResult
+	srRelayDecode(t, prepared.Result, &reservation)
+	if prepared.Error != nil || reservation.ReservationID != old.ReservationID || len(reservation.Refusals) != 0 {
+		t.Fatal("loss was not between successful prepare and final grant")
+	}
+	// The old wrapper remains at the post-Wait gate until this assertion. A
+	// replacement cannot hide an unauthorized load from the retired operation.
+	srAssertNoEffects(t, before, f.control(t, ""))
+	f.relay.resume()
+	replacement := f.relay.wait(t, "replacement proxy prepared with a fresh run", func(event srRelayEvent) bool {
+		var params nodepolicy.PrepareResidentParams
+		var result nodepolicy.PrepareResidentResult
+		return event.Role == "proxy" && event.PID != lost.PID && event.Phase == "response" && event.Method == nodepolicy.MethodPrepareResident && event.Error == nil && json.Unmarshal(event.Params, &params) == nil && params.ProxyRunID != old.ProxyRunID && json.Unmarshal(event.Result, &result) == nil && result.ReservationID != ""
+	})
+	probe := f.relay.wait(t, "old reservation refused by replacement proxy", func(event srRelayEvent) bool {
+		return event.PID == replacement.PID && event.Phase == "probe"
+	})
+	var refusal nodepolicy.DispatchResidentResult
+	srRelayDecode(t, probe.Result, &refusal)
+	if probe.Error != nil || refusal.Dispatched || refusal.Reason != nodepolicy.DispatchReasonReservationUnknown {
+		t.Fatal("retired proxy reservation authorized a new call")
+	}
+	completed := f.relay.wait(t, "fresh source observation after replacement grant", func(event srRelayEvent) bool {
+		var params nodepolicy.ReconcileResidentParams
+		var result nodepolicy.ReconcileResidentResult
+		return event.Role == "manager" && event.Phase == "response" && event.Method == nodepolicy.MethodReconcileResident && event.Error == nil && json.Unmarshal(event.Params, &params) == nil && params.Reservation.ProxyRunID != old.ProxyRunID && json.Unmarshal(event.Result, &result) == nil && result.Outcome == nodepolicy.ResidentLoaded
+	})
+	var request nodepolicy.ReconcileResidentParams
+	var result nodepolicy.ReconcileResidentResult
+	srRelayDecode(t, completed.Params, &request)
+	srRelayDecode(t, completed.Result, &result)
+	if result.Observation == nil || !result.Observation.Loaded || result.Observation.Generation == 0 || result.Observation.ManagerIncarnation != request.Reservation.ManagerIncarnation || result.Observation.Identity != request.Identity {
+		t.Fatal("replacement satisfaction lacks a correlated current-source observation")
+	}
+	f.entry(t, neModel, nodepolicy.ModelStateSatisfied, "")
+	after := f.control(t, "")
+	if after.Base.PID != before.Base.PID || after.Models[neModel].Loads != before.Models[neModel].Loads+1 || after.Base.Chats != 0 || after.Base.Unloads != 0 || after.Content != 0 || after.Base.Unexpected != 0 {
+		t.Fatal("proxy replacement caused duplicate or unrelated native effects")
+	}
+	// This proves process-scoped revocation and recovery, not durable holds.
+}
+
+func TestServedResidentProcessLostManagerCompletion(t *testing.T) {
+	f := newSRWorkerLossFixture(t, "manager-completion")
+	f.edit(t, func(p *nodepolicy.Policy) {
+		p.Admission.SwitchTimeoutSeconds = 10
+		p.ResidentModels = nodepolicy.ResidentModels{{Engine: "llamacpp", Model: neModel}}
+	})
+	dropped := f.relay.wait(t, "correlated loaded manager completion suppressed", func(event srRelayEvent) bool {
+		var result nodepolicy.ReconcileResidentResult
+		return event.Role == "manager" && event.Phase == "response" && event.Method == nodepolicy.MethodReconcileResident && event.Error == nil && json.Unmarshal(event.Result, &result) == nil && result.Outcome == nodepolicy.ResidentLoaded
+	})
+	var operation nodepolicy.ReconcileResidentParams
+	var completion nodepolicy.ReconcileResidentResult
+	srRelayDecode(t, dropped.Params, &operation)
+	srRelayDecode(t, dropped.Result, &completion)
+	if completion.Observation == nil || !completion.Observation.Loaded || completion.Observation.Generation == 0 {
+		t.Fatal("suppressed response did not attest an actual completed native load")
+	}
+	grant := f.relay.wait(t, "proxy granted the suppressed manager operation", func(event srRelayEvent) bool {
+		var params nodepolicy.DispatchResidentParams
+		return event.Role == "proxy" && event.Phase == "response" && event.Method == nodepolicy.MethodDispatchResident && json.Unmarshal(event.Params, &params) == nil && params.OperationID == operation.OperationID && params.ReservationID == operation.Reservation.ReservationID
+	})
+	var granted nodepolicy.DispatchResidentResult
+	srRelayDecode(t, grant.Result, &granted)
+	if grant.Error != nil || !granted.Dispatched {
+		t.Fatal("native load was not preceded by its correlated proxy grant")
+	}
+	uncertain := f.relay.wait(t, "original proxy retains the uncertain dispatched hold", func(event srRelayEvent) bool {
+		var params nodepolicy.FinishResidentParams
+		var result nodepolicy.FinishResidentResult
+		return event.PID == grant.PID && event.Phase == "response" && event.Method == nodepolicy.MethodFinishResident && event.Error == nil && json.Unmarshal(event.Params, &params) == nil && params.OperationID == operation.OperationID && params.Outcome == nodepolicy.ResidentUnknown && params.Observation == nil && json.Unmarshal(event.Result, &result) == nil && result.RecoveryID != ""
+	})
+	var held nodepolicy.FinishResidentResult
+	srRelayDecode(t, uncertain.Result, &held)
+	if held.ReservationID != operation.Reservation.ReservationID || held.Outcome != nodepolicy.ResidentUnknown {
+		t.Fatal("uncertain hold was not bound to the dispatched reservation")
+	}
+	f.entry(t, neModel, nodepolicy.ModelStateUnknown, nodepolicy.ModelReasonOperationTimeout)
+	view := f.policy(t)
+	if view.ModelConfiguration == nil {
+		t.Fatal("uncertain model configuration missing")
+	}
+	generation := view.ModelConfiguration.ObservationGeneration
+	// Require another actual reconciliation, rather than a sleep or a cached
+	// status read. Loaded watcher inventory cannot become a completion barrier.
+	neEventually(t, "uncertainty survives another reconciliation in the same proxy run", 2*neCallBudget, func() bool {
+		current := f.policy(t)
+		if current.ModelConfiguration == nil {
+			return false
+		}
+		for _, entry := range current.ModelConfiguration.Models {
+			if entry.Model == neModel && entry.State == nodepolicy.ModelStateSatisfied {
+				t.Fatal("lost terminal completion falsely satisfied resident desire")
+			}
+		}
+		return current.ModelConfiguration.ObservationGeneration > generation
+	})
+	f.entry(t, neModel, nodepolicy.ModelStateUnknown, nodepolicy.ModelReasonOperationTimeout)
+	f.relay.mu.Lock()
+	retries := 0
+	for _, event := range f.relay.events {
+		var result nodepolicy.FinishResidentResult
+		if event.Role == "proxy" && event.Phase == "reaped" {
+			f.relay.mu.Unlock()
+			t.Fatal("uncertainty interval crossed a proxy replacement")
+		}
+		if event.PID == grant.PID && event.Phase == "response" && event.Method == nodepolicy.MethodFinishResident && event.Error == nil && json.Unmarshal(event.Result, &result) == nil && result == held {
+			retries++
+		}
+	}
+	f.relay.mu.Unlock()
+	if retries < 2 {
+		t.Fatal("uncertain hold did not return the same recovery receipt on retry")
+	}
+	before := f.control(t, "")
+	if before.Models[neModel].Loads != 1 || !before.Models[neModel].Loaded || before.Base.Chats != 0 || before.Base.Unloads != 0 || before.Content != 0 || before.Base.Unexpected != 0 {
+		t.Fatal("uncertain completion caused duplicate or unrelated native effects")
+	}
+	// Restart the broker and its owned workers as a set. This intentionally
+	// makes no durable-hold claim and never clears uncertainty in the old run.
+	f.stop(t)
+	f.start(t)
+	f.call(t, "engine:start", map[string]string{"engine": "llamacpp"}, nil)
+	f.retainRuntime(t)
+	f.entry(t, neModel, nodepolicy.ModelStateSatisfied, "")
+	recovered := f.relay.wait(t, "replacement manager supplies a fresh loaded observation", func(event srRelayEvent) bool {
+		var result nodepolicy.ReconcileResidentResult
+		return event.Role == "manager" && event.PID != dropped.PID && event.Phase == "response" && event.Method == nodepolicy.MethodReconcileResident && event.Error == nil && json.Unmarshal(event.Result, &result) == nil && result.Outcome == nodepolicy.ResidentLoaded
+	})
+	var replacement nodepolicy.ReconcileResidentParams
+	var observed nodepolicy.ReconcileResidentResult
+	srRelayDecode(t, recovered.Params, &replacement)
+	srRelayDecode(t, recovered.Result, &observed)
+	if replacement.Reservation.ProxyRunID == operation.Reservation.ProxyRunID || replacement.Reservation.ManagerIncarnation == operation.Reservation.ManagerIncarnation || replacement.Identity.EngineRunID == operation.Identity.EngineRunID || observed.Observation == nil || !observed.Observation.Loaded || observed.Observation.Generation == 0 || observed.Observation.Identity != replacement.Identity || observed.Observation.ManagerIncarnation != replacement.Reservation.ManagerIncarnation {
+		t.Fatal("replacement reused retired source evidence")
+	}
+	if current := f.policy(t); current.Policy.Revision != view.Policy.Revision || !reflect.DeepEqual(current.Policy.ResidentModels, view.Policy.ResidentModels) {
+		t.Fatal("replacement changed persisted resident desire")
+	}
+	after := f.control(t, "")
+	if after.Base.PID == before.Base.PID || after.Models[neModel].Loads != 1 || after.Base.Chats != 0 || after.Base.Unloads != 0 || after.Content != 0 || after.Base.Unexpected != 0 {
+		t.Fatal("replacement did not recover from its own native observation")
+	}
 }
 
 func TestServedResidentProcessSwitch(t *testing.T) {
