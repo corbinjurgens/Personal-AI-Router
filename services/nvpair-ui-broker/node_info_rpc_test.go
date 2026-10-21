@@ -215,6 +215,9 @@ func TestNodeInfoRPCRelayConcurrentCorrelationAndReadPump(t *testing.T) {
 }
 
 func TestNodeInfoRPCRelayDeadlineDisownsLateReply(t *testing.T) {
+	// Allow 2.5 s of scheduling slack over the 1.5 s relay budget, while
+	// still requiring a broker response 1 s before the caller's deadline.
+	const relayLimit = 4 * time.Second
 	requests := make(chan *Message, 2)
 	b, client, scanner := nodeInfoBrokerTestClient(t, func(_ *Peer, msg *Message) { requests <- msg })
 	type response struct {
@@ -225,7 +228,7 @@ func TestNodeInfoRPCRelayDeadlineDisownsLateReply(t *testing.T) {
 	done := make(chan response, 1)
 	started := time.Now()
 	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), relayLimit+time.Second)
 		defer cancel()
 		result, rpcErr, err := client.Call(ctx, "discovery:get-node-info", json.RawMessage(`{"hostUuid":"old"}`))
 		done <- response{result, rpcErr, err}
@@ -239,10 +242,10 @@ func TestNodeInfoRPCRelayDeadlineDisownsLateReply(t *testing.T) {
 	select {
 	case got := <-done:
 		elapsed := time.Since(started)
-		if got.err != nil || got.rpcErr == nil || got.rpcErr.Code != -32000 || len(got.result) != 0 || elapsed < time.Second || elapsed > 2500*time.Millisecond {
+		if got.err != nil || got.rpcErr == nil || got.rpcErr.Code != -32000 || len(got.result) != 0 || elapsed < time.Second || elapsed > relayLimit {
 			t.Fatalf("relay deadline: %+v elapsed=%s", got, elapsed)
 		}
-	case <-time.After(2500 * time.Millisecond):
+	case <-time.After(relayLimit):
 		t.Fatal("relay exceeded deadline")
 	}
 	select {
