@@ -562,9 +562,48 @@ Engine switching also has two internal process-scoped requests:
   remain retained and count against admission capacity until both the account
   outcome and qualification classification are durably recorded. Every failure
   refuses spending and never blocks policy activation or local routing. No
-  user-traffic path calls it. The private `runChatAccountAttempt` library runner
-  now reserves and completes ledger attempts, but has no production caller.
-  See `spec.md` sections 12.7–12.8.
+  user-traffic path calls it. G's `runPublicChatAttempt` is the sole intended
+  production wrapper around the private `runChatAccountAttempt` library runner;
+  the wrapper remains unwired from HTTP ingress. See `spec.md` sections 12.7–12.9.
+
+### Public egress lease (G; disabled)
+
+The trusted broker parent alone sends `node/renew-egress-lease`
+`{runId, revision, sequence, notAfterNanos}` and `node/revoke-egress-lease`
+`{runId, sequence}`. These process-scoped requests are not desktop or peer
+capabilities. A renewal answers `{runId, revision, sequence, nowNanos}`; a revoke
+answers `{runId, sequence}`. A successful wire acknowledgement grants no public
+permission by itself.
+
+The broker renews once per second only for its exact persisted desired revision
+and acknowledged active proxy run, with policy and availability pushes complete
+and no activation, recovery or withdrawal uncertainty. A zero deadline is an
+anchor-only clock sample; later grants use that run's proxy monotonic clock and
+expire no later than issuance plus five seconds, even after pipe delay. At
+`now >= notAfter` permission is refused without grace. Sequence high-water
+survives policy changes and revocation within a run; a replacement inherits no
+lease. Credential-reference replacement disables renewal and attempts a bounded
+revoke before stopping/joining the old proxy, even if the revoke fails.
+
+`remoteDispatchAvailable=false` in `shared/nodepolicy/routing.go` remains the
+single build availability owner; `PublicDispatchAvailable()` only reads it.
+There is no environment variable, flag or second enable bit. Disabled provider
+configuration can be staged; enabled deployments and remote/paid tier permissions
+are rejected. Production public traffic remains zero.
+
+I's advisory `publicAttemptPermitted(tier, snapshot)` can skip a candidate before
+body construction or qualification, but each attempt must enter
+`runPublicChatAttempt` with its request-bound lifecycle. D durably reserves and E
+prepares/accounts; G checks permission early, after reserve and immediately before
+`http.Client.Do`, where the same guard accepts I's still-live attempt. Refusal
+after reservation retains the hold. I owns tier/mode selection, qualification,
+request identity, cumulative allowance, deadline, cancellation and output
+commitment; it must not call the raw runner/transport or cache a successful guard.
+
+See `spec.md` §12.9 and [Public egress lease](../../docs/public-egress-lease.mdx)
+for the clock formula, refusal stages, activation prerequisites and acceptance
+limits. Real-provider activation, external generation and process acceptance
+remain separate gates.
 
 ### Strict Chat adapter library (E; inactive)
 
@@ -579,13 +618,16 @@ numeric dials and verified TLS; it rejects redirects and compressed responses,
 ignores environment proxies, and never forwards raw provider headers or trailers.
 
 `runChatAccountAttempt` ties one send to a pinned account snapshot, selected-reference
-resolver, mandatory pre-send guard and finite byte-budget hooks. It neither selects
-targets nor retries. Ledger outcome, money and qualification completion remain
-independent; incomplete or untrusted responses retain their money hold.
+resolver, mandatory guard, `publicAttemptLifecycle` and finite byte-budget hooks.
+It neither selects targets nor retries. G supplies the production guard through
+`runPublicChatAttempt`; E preserves the final pre-send refusal sentinel for G's
+typed result. Ledger outcome, money and qualification completion remain independent;
+incomplete or untrusted responses retain their money hold.
 
 This adds no route or RPC exposure, configured provider or real qualification.
-`remoteDispatchAvailable` remains false. F must supply real evidence and freshness,
-G the lease, and I the dispatch wiring and aggregate buffer owner. D's native
+`remoteDispatchAvailable` remains false. G's lease and wrapper are present; F must
+supply real evidence and freshness, B finite local qualification, and I complete
+public ingress/attempt/cancellation wiring and the aggregate buffer owner. D's native
 lock/crash-window acceptance and owner recovery controls remain activation gates.
 Synthetic profiles and successful test guards activate nothing. The normative
 matrix, limits and completion rules are in `spec.md` section 12.8.

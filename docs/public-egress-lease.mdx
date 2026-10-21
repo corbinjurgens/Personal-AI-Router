@@ -1,0 +1,282 @@
+{/*
+SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+*/}
+
+# Public egress lease
+
+Public dispatch is disabled. The single build owner is
+`remoteDispatchAvailable=false` in
+[`shared/nodepolicy/routing.go`](../services/shared/nodepolicy/routing.go).
+Policy validation uses it directly; the read-only `PublicDispatchAvailable()`
+accessor supplies G's early and final production gates. Disabled provider
+configuration may be staged, but enabled deployments and remote/paid tier
+permissions cannot be saved. There is no environment variable, CLI flag, mutable
+test switch, policy field or alternate enable bit. Production public traffic
+remains zero.
+
+G supplies a broker-issued, proxy-enforced lease and one guarded attempt wrapper.
+It does not expose a public HTTP route or renderer capability. The wrapper is
+still unwired from production ingress. A successful private lease acknowledgement,
+model listing, account status or synthetic test guard cannot authorize disclosure.
+The [proxy specification](../services/nvpair-proxy/spec.md#129-public-egress-lease-and-stable-consumer-g-disabled)
+is the normative component contract; this page traces its owners and acceptance
+limits.
+
+## Authority and owners
+
+| Responsibility | Owner |
+| --- | --- |
+| Persisted desired policy, CAS, active revision/run, renewal and withdrawal | Broker [`policy.go`](../services/nvpair-ui-broker/policy.go), [`egresslease.go`](../services/nvpair-ui-broker/egresslease.go), [`proxy.go`](../services/nvpair-ui-broker/proxy.go) and `Broker.Serve` |
+| Typed private lease messages and fixed timing constants | [`shared/nodepolicy/wire.go`](../services/shared/nodepolicy/wire.go) |
+| Process-local lease, activation transition and permission acceptance | Proxy [`egresslease.go`](../services/nvpair-proxy/egresslease.go) and [`policy.go`](../services/nvpair-proxy/policy.go) |
+| Immutable selected account snapshot, durable hold and money/account completion (D) | [`accounts.go`](../services/nvpair-proxy/accounts.go), `accountstore.go`, `accountlock_*.go` |
+| Qualified Chat preparation/parsing and the actual HTTP handoff (E) | [`chat_adapter.go`](../services/nvpair-proxy/chat_adapter.go), [`api_transport.go`](../services/nvpair-proxy/api_transport.go) and `runChatAccountAttempt` |
+| Local-origin tier/mode, request/attempt lifecycle, cumulative allowance, cancellation and commitment (I) | [`request_spend.go`](../services/nvpair-proxy/request_spend.go), [`routing.go`](../services/nvpair-proxy/routing.go), [`request_registry.go`](../services/nvpair-proxy/request_registry.go) and `response_sink.go` |
+
+Lease state is neither durable policy nor a second accounting owner. Public
+permission is accepted separately for every attempt. A stream accepted before
+revocation is in flight and may finish with its accounting retained; revocation
+prevents the next acceptance. The mutex boundary does not make a socket write
+physically atomic.
+
+## Receiver-clock protocol
+
+Only the trusted broker parent calls these process-scoped proxy methods. Public
+broker clients receive method-not-found; generic client/peer relays do not forward
+them. Neither method is an engine-manager route or a desktop bridge capability.
+
+| Method | Request | Result |
+| --- | --- | --- |
+| `node/renew-egress-lease` | `{runId, revision, sequence, notAfterNanos}` | `{runId, revision, sequence, nowNanos}` |
+| `node/revoke-egress-lease` | `{runId, sequence}` | `{runId, sequence}` |
+
+`runId` identifies the exact proxy process; `revision` must equal its active
+policy revision. Sequence is a canonical positive decimal string within signed
+64-bit range. Deadlines and clock samples are canonical nonnegative decimal
+strings in the receiver's monotonic clock domain, never JSON numbers or
+wall-clock timestamps. Strict decoding rejects unknown fields and malformed
+values; binding, sequence and deadline refusals return JSON-RPC `-32602` without
+changing authority.
+
+A renewal with `notAfterNanos: "0"` is anchor-only: it validates the ready active
+run/revision, advances the sequence high-water and samples `nowNanos` without
+changing an existing deadline. It does not grant or withdraw permission.
+
+For a valid anchor reply the broker records returned proxy elapsed time `p0` at
+broker monotonic receipt time `b0`. At a later eligible issuance/request-start
+time `b`, after acquiring the push slot and before codec I/O, it calculates:
+
+```text
+notAfter = p0 + (b - b0) + 5 seconds
+```
+
+The proxy sampled `p0` before the broker received it at `b0`. The processes share
+the host monotonic time rate, so this conservative elapsed calculation expires
+no later than issuance plus five seconds. Pipe delay, a synchronous handler and
+late acknowledgements consume validity instead of restarting it. A severely
+delayed anchor can shorten or deny a grant. Negative elapsed time or signed
+overflow denies issuance.
+
+The anchor belongs to the proxy run. Expiry or age alone does not re-anchor it;
+run replacement, explicit withdrawal or rejected reply binding invalidates it.
+A transient renewal transport/RPC error leaves an existing anchor intact.
+
+The receiver accepts a nonzero deadline only when both `now < notAfter` and
+`notAfter - now <= 5 seconds`. Permission refuses at exact equality
+`now >= notAfter`, with no grace. Renewal also requires the current run/revision,
+completed account activation, no activation transition and a sequence strictly
+above the run's high-water.
+
+Renewals and revokes share that high-water across policy changes and withdrawal.
+A higher-sequence revoke for the current run clears the deadline and lease
+revision without activating policy. Duplicate or reordered messages cannot
+restore revoked authority. Sequence exhaustion never wraps. A replacement starts
+with a new run and empty lease state; old-run bytes cannot grant it authority.
+
+## Broker renewal and withdrawal
+
+One context-bound renewal job belongs to the broker's `Serve` lifetime. It starts
+without a grant and re-evaluates eligibility once per second. Every attempt
+requires, under `policyRuntime.mu`:
+
+- Loaded policy (`ready`) and no `recoveryRequired`.
+- The current live proxy equal to both `incarnation` and `egress.process`, with
+  a nonempty acknowledged `runID` and an unclosed process lifetime.
+- `activeRevision == current.Revision`, no activation or availability error,
+  no pending policy/availability push and no withdrawal latch.
+
+The existing policy push slot serializes lease calls with policy/availability
+pushes. A one-second context covers slot acquisition and the RPC. The broker
+rechecks the same process/run/revision and eligibility after acquiring the slot,
+then validates the reply and current process again on return. It never holds the
+runtime mutex across codec I/O. Missed ticks do not accumulate retry jobs.
+Already constructed bytes keep their original run binding.
+
+Adopting a new desired revision stops renewal of the old one. An unacknowledged
+policy/availability push, failed activation, lost/unreadable acknowledgement,
+wrong origin/run/revision, recovery, process exit/replacement or withdrawal
+cannot supply eligibility. Ordinary renewal transport errors and RPC refusals
+skip the tick and are re-evaluated on the next tick; they do not require a new
+policy edit. A decoded renewal reply with an invalid run/revision/sequence
+binding invalidates the anchor and records both policy and availability errors.
+Fresh exact acknowledgement of both is required before re-anchoring/granting.
+
+`persistPolicy` adopts the complete new document on `durablefile.ErrReplaced`
+while preserving the save error: only directory-sync durability is uncertain.
+Its exactly acknowledged active revision remains eligible; G adds no separate
+durability tracker. A pre-replacement failure retains the old desired document.
+Invalid input and stale CAS cannot manufacture a persisted revocation.
+
+Credential-reference replacement and intentional shutdown first latch withdrawal,
+then attempt a higher-sequence revoke on the exact old process within one second.
+They stop/join that proxy even if slot acquisition, transport or acknowledgement
+fails. `Serve` cancels/joins the renewal job before proxy teardown. A crash makes
+the old process ineligible; replacement policy/availability replay establishes
+activation, followed by a new anchor, never an inherited lease. Proxy broker-stdin
+EOF cancels its request context; it supplies no engine-idle guarantee.
+
+Policy results and `policy:changed` retain persisted desired revision,
+`activeRevision`, `activation` (`pending`, `error`, `active`) and operational error
+text. A failed restrictive push never reports that new revision enforced; no new
+public attempt can be accepted after the last grant's issuance-plus-five-second
+bound. Policy activation status is not public permission. G3's scheduled
+binding-error publication is bounded to one sender plus one waiter. Its underlying
+parent client-write lifetime remains a separate unresolved transport limit;
+bounded publication count does not promise bounded fanout completion. Existing
+departed-run workload retirement, accepted-tail handling and capped shutdown join
+retain their own contract.
+
+## Stable consumer contract for I
+
+I may call `publicAttemptPermitted(tier, snapshot) error` to skip a public
+candidate before body construction or qualification. Success is provisional and
+cannot be cached as a grant. Each production attempt must use this existing
+wrapper signature:
+
+```go
+func (p *Proxy) runPublicChatAttempt(ctx context.Context, tier string,
+    snapshot chatAccountSnapshot, body []byte, q *chatQualification,
+    transport *publicClient, resolve func(nodepolicy.CredentialRef) (string, bool),
+    budget chatByteBudget, lifecycle *publicAttemptLifecycle,
+    emit func([]byte) error) (chatParseResult, error)
+```
+
+I supplies its trusted local-origin tier/mode decision, immutable D snapshot and
+E qualification, selected transport/reference resolver, one request context,
+finite process-budget/emit hooks and an attempt-bound lifecycle. A trial account
+does not qualify as permanently free. G requires `PaidAllowed` for `BillingPaid`;
+I retains classification, ordering and free-only eligibility.
+
+G's early wrapper observes the current validated account, even for a refused
+candidate, to tighten the request's allowance; the pinned snapshot cannot supply
+an obsolete ceiling. It checks build availability, exact active policy/lease,
+matching enabled deployment/account and tier API membership, remote/family and
+paid permissions. D/E then prepare qualified bounded content, resolve only the
+selected canonical credential reference, and durably reserve against the remaining
+request allowance. D rechecks the whole snapshot under its ledger mutex.
+
+The E runner's injected interface stays unchanged:
+
+```go
+type publicAttemptGuard func(context.Context, func() error) error
+```
+
+It first calls the guard with a nil continuation after reserve. At the final
+handoff E supplies `lifecycle.acceptedByGuard` as the continuation. G's
+`publicPermissionAccept` holds the lease mutex, then admission, then enters I's
+request transition mutex. This rechecks policy/lease and accepts only the current,
+uncancelled, unexpired attempt with a confirmed durable hold. The caller never
+enters G while holding the request mutex.
+
+E completes request construction, finite headroom admission, credential resolution
+and DNS validation/pinning before final acceptance. The callback is immediately
+before `http.Client.Do`, with no blocking work between successful acceptance and
+`Do`; permission locks are released before I/O. Policy activation and lease revoke
+serialize with acceptance, not with filesystem sync, credential lookup, HTTP I/O
+or streaming. Existing accepted work retains D/E accounting.
+
+| Typed wrapper refusal | Liability and send state |
+| --- | --- |
+| `publicBeforeReserve` / `"before-reserve"` | No new hold; invalid lifecycle or early permission refusal. |
+| `publicAfterReserve` / `"after-reserve"` | Advisory post-reserve permission refusal; hold retained, no send. |
+| `publicFinalGuard` / `"final-guard"` | Final refusal immediately before send; proven unsent, hold retained. |
+
+`publicAttemptRefusal` unwraps to `errPublicPermission`. Reasons distinguish
+`permission-refused`, `cancelled-before-send` and `request-lifecycle-refused`
+where applicable. E preserves `errPublicFinalGuard` for the wrapper instead of
+collapsing it into `errChatAttempt`; G maps it to the typed final refusal. This
+unsent branch performs no provider-outcome, money or qualification completion.
+Other D/E errors retain their categories: reservation/accounting failure can
+leave a durable or uncertain liability and is not proof of no hold. There is no
+G-owned refund or release operation.
+
+`routingSpend` remains I's one logical request owner across destinations and
+regeneration. It retains `RoutingRequestKey` (`OriginNodeID`, `ProxyRunID`,
+`RequestID`), total attempts, one pre-output deadline, cancellation and cumulative
+paid allowance. `associated` records a durable/uncertain D reservation even if
+cancellation won during the write. Settlement never subtracts granted bounds or
+refills the allowance. Unknown durability stops further spending.
+
+`firstSuccessfulByte` commits through the existing request owner at the first
+positive raw successful-response read, including bytes later rejected by framing
+or parsing; discarded provider error bytes do not commit. The owned `responseSink`
+supplies delivery facts and replaces the standalone synthetic `emit` seam. I owns
+the aggregate inference byte root, output commitment, cancellation/regeneration
+and terminal delivery; G's run binding is not a replacement request identity.
+I must not call the raw runner or `post`/`postObserved` in production, add a second
+reserve, retry inside the guard, cache guard success or treat a wire ACK as
+permission. Public ingress integration remains pending.
+
+## Activation and acceptance
+
+Activation requires F's real OpenCode free-model qualification with fresh
+tokenizer/billing/model/terminal evidence, D's native macOS/Windows durability and
+recovery gates, B's finite qualification, I's complete ingress/attempt/cancellation
+path and final acceptance evidence. Only a later reviewed source change to the
+single availability constant can enable dispatch. Even then owner-local tier
+permissions, an enabled qualified deployment, an exact fresh lease and D/E
+admission remain mandatory. Successful qualification does not flip availability.
+
+The following separates historical evidence from the current source handover.
+Execution receipts are delivered separately with the identified candidate's
+handback; plan text and this table do not supply those receipts. This
+documentation author ran no test or compiler. Every joined gate claim requires
+an execution handback naming the exact head, commands, architecture, executed
+cases, counts, skips and exclusions. This source freeze is not runtime acceptance.
+
+| Evidence lane | Existing evidence and limit | Current Task 4 acceptance |
+| --- | --- | --- |
+| Mac module unit/race and static gates | Coordinator records G3 `c934c37` accepted/landed at JOIN30 `7afdf7a`. Exact native Mac commands, OS/arch, executed names and skips are not supplied by this source change; no new Mac runtime claim follows. | Current joined module/race/static evidence must be supplied by that owner; no `services/tests` execution on Mac. |
+| MSI native Windows modules/race | G3 repair candidate `c934c37`: Windows amd64 broker full plain/race each 1706 pass, zero fail, one runtime skip. JOIN30 follow-up handback, delivered as `3ce121c`: joined broker each 1714/0/1. `TestEngineSwitchStorePOSIXModes` skipped; `TestEngineManagerPortsSpawnAndScannerReplay` separately excluded. | Module acceptance requires an execution handback naming the exact joined head, Windows architecture, commands, counts, skips and exclusions. |
+| Cross-platform static checks | JOIN30 follow-up records Windows/Darwin/Linux amd64 vet with `CGO_ENABLED=0`, all exit zero. Darwin vet is not native Mac unit/race or durability evidence. | This documentation author ran no new static/compiler check. Root's joined gate results belong in the execution handback. |
+| PC3 process and full desktop | Root records process vet/list on `8224d3f` passed with all three required names listed and zero process cases executed. No current full desktop acceptance supplied. | Pending the isolated PC3 interval: named disabled/EOF/incarnation cases, neighboring policy/routing cases, full process suite and desktop gates. Listing/compilation alone is not execution. |
+| Mac generated contracts and typecheck | The imported-constant extractor repair and exact internal-only lease exceptions are source-ready. Generated `desktop/docs/services-api.md` remains reserved to the external join owner. | Required proof for the exact join: focused extractor execution/report, generator run twice with byte-identical output, contract check and typecheck. Source readiness does not establish generated freshness. |
+| Public activation and real provider evidence | No live provider evidence or activation is established by synthetic mechanism tests or prior module gates. | F/D/B/I prerequisites and final acceptance above remain pending; availability stays false. |
+
+PC3 process acceptance must execute `TestPublicEgressLeaseProcessDisabled`,
+`TestPublicEgressLeaseProcessEOF` and `TestPublicEgressLeaseProcessIncarnation`
+without skips, survivors or provider contact, then the authorized neighboring and
+full-suite gates after fixture isolation. Full desktop acceptance includes lint,
+typecheck, unit tests, dead-code and service-contract checks. Each record must
+name the exact joined head, command, OS/architecture, executed cases, skips and
+result. Native/live evidence cannot be inferred from another OS or from a plan.
+
+`desktop/docs/service-contract-exceptions.json` accepts precise `ignoredMethods`
+reasons, not a renderer implementation or a broad ignore. The source-ready
+extractor resolves package-qualified imported constants through the containing
+Go module and local replacements, including the proxy's
+`nodepolicy.MethodRenewEgressLease`/`MethodRevokeEgressLease` cases. Exact
+`node/renew-egress-lease` and `node/revoke-egress-lease` exceptions now classify
+their trusted-parent ownership. This remains regex source extraction, not a full
+Go parser/type checker; external modules, computed constants and unsupported
+import forms remain outside its scope. In the historical contract source
+handover, six focused cases were authored and zero had executed. Execution
+handbacks must supply focused verification and generation/check evidence for
+the exact joined source. Generated API Markdown must be produced by the reserved
+generator owner, never typed by hand.
+
+Lease diagnostics contain only bounded operational categories, revision, run and
+attempt identities. Prompts, messages, response bodies, credentials, credential
+references and authorization headers must not enter them. No secret or real
+account-reference value is needed to exercise this protocol.

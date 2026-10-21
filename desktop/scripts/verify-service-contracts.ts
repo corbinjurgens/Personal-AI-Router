@@ -22,6 +22,7 @@
 
 import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 import {
     modularFirewallBinaryBaseNames,
     modularShippedBinaryBaseNames
@@ -132,8 +133,32 @@ function buildConstMap(files: string[]): Map<string, string> {
     return map
 }
 
+// Resolve only the current module and its local replacements. External modules,
+// computed constants and dot imports remain outside this source-only extractor.
+function localGoModules(dir: string): [string, string][] {
+    let root = path.resolve(dir)
+    while (!existsSync(path.join(root, 'go.mod'))) {
+        const parent = path.dirname(root)
+        if (parent === root) return []
+        root = parent
+    }
+    const source = readFileSync(path.join(root, 'go.mod'), 'utf8')
+    const modules = new Map<string, string>()
+    const own = /^module\s+(\S+)/m.exec(source)
+    if (own) modules.set(own[1], root)
+    for (const match of source.matchAll(
+        /^\s*(?:replace\s+)?([^\s()]+)(?:\s+v\S+)?\s*=>\s*(\S+)/gm
+    )) {
+        const replacement = match[2]
+        if (replacement.startsWith('.') || path.isAbsolute(replacement)) {
+            modules.set(match[1], path.resolve(root, replacement))
+        }
+    }
+    return [...modules].sort(([a], [b]) => b.length - a.length)
+}
+
 const QUOTED_RE = /"([^"]+)"/g
-const IDENT_RE = /\b([A-Za-z_]\w*)\b/g
+const IDENT_RE = /\b([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)?)\b/g
 // NotifyContext takes ctx before method; keep the method in capture group 1
 // for both bare and receiver-qualified calls, just like Notify.
 const NOTIFY_LITERAL_RE =
@@ -143,21 +168,59 @@ const NOTIFY_PREFIX_CONCAT_RE =
 // Broadcast(ctx, frame) is HTTP fan-out, not a JSON-RPC notification. Keep
 // literal Broadcast methods above, but do not treat an identifier argument to
 // Broadcast as an unresolved JSON-RPC method.
-const NOTIFY_IDENT_RE = /(?:(?:notify|emit|publish)\(|notifyContext\([^,]*,)\s*([A-Za-z_]\w*)\s*,/gi
+const NOTIFY_IDENT_RE =
+    /(?:(?:notify|emit|publish)\(|notifyContext\([^,]*,)\s*([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)?)\s*,/gi
 
 /** A `| `nvpair-ui-broker` | 0.37.0 | … |` row — forbidden in hand-maintained docs. */
 const DOC_COMPONENT_ROW_RE = /^\|\s*`([a-z0-9-]+)`\s*\|\s*(\d+\.\d+\.\d+)\s*\|/gm
 /** "…at product version 1.4.2" / "- Backend product: `1.4.2`" — forbidden. */
 const DOC_PRODUCT_VERSION_RE = /(?:backend product|product version)[^\d\n]{0,4}(\d+\.\d+\.\d+)/gi
 
-function extractSurface(dir: string): BinarySurface {
+export function extractSurface(dir: string): BinarySurface {
     const surface: BinarySurface = { dir, emits: new Set(), handles: new Set(), dynamic: [] }
     const files = listGoFiles(dir)
-    const constMap = buildConstMap(files)
+    const modules = localGoModules(dir)
+    const packages = new Map<string, Map<string, string>>()
+    const packageConstants = (packageDir: string): Map<string, string> => {
+        const cached = packages.get(packageDir)
+        if (cached) return cached
+        const packageFiles = readdirSync(packageDir)
+            .filter(name => name.endsWith('.go') && !name.endsWith('_test.go'))
+            .map(name => path.join(packageDir, name))
+        const constants = buildConstMap(packageFiles)
+        packages.set(packageDir, constants)
+        return constants
+    }
 
     for (const file of files) {
         const rel = path.basename(file)
-        const lines = readFileSync(file, 'utf8').split('\n')
+        const source = readFileSync(file, 'utf8')
+        const constMap = new Map(packageConstants(path.dirname(file)))
+        for (const declaration of source.matchAll(/^\s*import\s*(?:\(([\s\S]*?)\)|([^\n]+))/gm)) {
+            const imports = declaration[1] ?? declaration[2]
+            for (const imported of imports.matchAll(/^\s*(?:([A-Za-z_]\w*|[._])\s+)?"([^"]+)"/gm)) {
+                const [, alias, importPath] = imported
+                if (alias === '_' || alias === '.') continue
+                const module = modules.find(
+                    ([name]) => importPath === name || importPath.startsWith(`${name}/`)
+                )
+                if (!module) continue
+                const packageDir = path.join(module[1], importPath.slice(module[0].length))
+                if (!existsSync(packageDir)) continue
+                const packageFile = readdirSync(packageDir).find(
+                    name => name.endsWith('.go') && !name.endsWith('_test.go')
+                )
+                if (!packageFile) continue
+                const packageName = /^\s*package\s+([A-Za-z_]\w*)/m.exec(
+                    readFileSync(path.join(packageDir, packageFile), 'utf8')
+                )?.[1]
+                if (!packageName) continue
+                for (const [name, value] of packageConstants(packageDir)) {
+                    constMap.set(`${alias ?? packageName}.${name}`, value)
+                }
+            }
+        }
+        const lines = source.split('\n')
         lines.forEach((line, idx) => {
             const lineNo = idx + 1
             if (!line.includes('signal.Notify')) {
@@ -255,7 +318,7 @@ function buildFirewallDrift(): FirewallDrift {
     }
 }
 
-function buildReports(
+export function buildReports(
     repo: string,
     exceptions: ContractExceptions,
     versions: Record<string, string>
@@ -565,4 +628,4 @@ function main(): void {
     }
 }
 
-main()
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) main()
