@@ -171,6 +171,10 @@ func imagePathForPID(pid int) string {
 	return windows.UTF16ToString(buf[:size])
 }
 
+// procImage matches the Unix inspection helper. A known owned test child can
+// still be identified for cleanup after it releases its listening port.
+func procImage(pid int) string { return imagePathForPID(pid) }
+
 // signalPID asks the PID's process tree to stop (taskkill /T), adding /F when
 // force is set. The owned-process escalation and orphan reclaim share it.
 func signalPID(pid int, force bool) error {

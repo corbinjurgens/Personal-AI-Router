@@ -359,6 +359,77 @@ func TestDesiredOnSurvivesShutdownAndExplicitOffDoesNot(t *testing.T) {
 	}
 }
 
+func TestRestoreEnabledPreservesForeignListenerOnManagedPort(t *testing.T) {
+	baseDir := t.TempDir()
+	managedDir := filepath.Join(baseDir, "fake")
+	if err := os.MkdirAll(managedDir, 0o700); err != nil {
+		t.Fatalf("create managed install: %v", err)
+	}
+	managedBin := filepath.Join(managedDir, filepath.Base(fakeEngineBin))
+	foreignBin := filepath.Join(t.TempDir(), filepath.Base(fakeEngineBin))
+	copyFile(t, fakeEngineBin, managedBin)
+	copyFile(t, fakeEngineBin, foreignBin)
+	port, err := freePort()
+	if err != nil {
+		t.Fatalf("reserve foreign listener port: %v", err)
+	}
+	foreign := spawnFakeListener(t, foreignBin, port)
+	manifest := testEngineManifest(managedBin)
+	platform := manifest.Platforms[hostKey()]
+	platform.Runtime.Port = port
+	platform.Runtime.Health = nil
+	manifest.Platforms[hostKey()] = platform
+	ex := desiredTestExecutor(t, manifest, baseDir)
+	if err := ex.desired.set("fake", true, intentLocal); err != nil {
+		t.Fatalf("save ON intent: %v", err)
+	}
+	if err := ex.RestoreEnabled(context.Background()); err != nil {
+		t.Fatalf("restore with foreign listener: %v", err)
+	}
+	state, err := ex.state("fake")
+	if err != nil {
+		t.Fatalf("read restored state: %v", err)
+	}
+	state.mu.Lock()
+	running, adopted, proc := state.running, state.adopted, state.proc
+	state.mu.Unlock()
+	if !running || !adopted || proc != nil || !pidAlive(foreign.Process.Pid) {
+		t.Fatalf("foreign listener changed: running=%v adopted=%v owned=%v foreignAlive=%v", running, adopted, proc != nil, pidAlive(foreign.Process.Pid))
+	}
+}
+
+func TestRestoreEnabledReclaimsUnhealthyManagedOrphan(t *testing.T) {
+	baseDir := t.TempDir()
+	managedDir := filepath.Join(baseDir, "fake")
+	if err := os.MkdirAll(managedDir, 0o700); err != nil {
+		t.Fatalf("create managed install: %v", err)
+	}
+	managedBin := filepath.Join(managedDir, filepath.Base(fakeEngineBin))
+	copyFile(t, fakeEngineBin, managedBin)
+	port, err := freePort()
+	if err != nil {
+		t.Fatalf("reserve orphan port: %v", err)
+	}
+	orphan := spawnFakeListener(t, managedBin, port)
+	manifest := testEngineManifest(managedBin)
+	platform := manifest.Platforms[hostKey()]
+	platform.Runtime.Port = port
+	platform.Runtime.Ready.Status = http.StatusCreated // listener is alive but fails readiness
+	platform.Runtime.Ready.TimeoutS = 1
+	platform.Runtime.Health = nil
+	manifest.Platforms[hostKey()] = platform
+	ex := desiredTestExecutor(t, manifest, baseDir)
+	if err := ex.desired.set("fake", true, intentLocal); err != nil {
+		t.Fatalf("save ON intent: %v", err)
+	}
+	if err := ex.RestoreEnabled(context.Background()); err == nil || !strings.Contains(err.Error(), "did not become ready") {
+		t.Fatalf("restore with deliberately unmatched readiness = %v, want cold-start readiness failure", err)
+	}
+	if portServing(port) {
+		t.Fatalf("unhealthy managed orphan PID %d still holds port %d", orphan.Process.Pid, port)
+	}
+}
+
 func TestFailedRestoreRetainsDesiredOnForRetry(t *testing.T) {
 	baseDir := t.TempDir()
 	seed := desiredTestExecutor(t, testEngineManifest(fakeEngineBin), baseDir)

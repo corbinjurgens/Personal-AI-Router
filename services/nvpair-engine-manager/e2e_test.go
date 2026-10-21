@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -167,6 +168,98 @@ func TestE2EDesiredStateAcrossShutdownRPC(t *testing.T) {
 		t.Fatalf("explicit OFF state was not preserved: %s", r)
 	}
 	third.stop(t)
+}
+
+// A hard manager death leaves its owned child alive. Saved ON must reclaim
+// that exact managed image on the configured port before starting a new child.
+func TestE2ERestoreReclaimsOwnedOrphanAfterHardKill(t *testing.T) {
+	cfg, home := t.TempDir(), t.TempDir()
+	base := cfg
+	if runtime.GOOS == "darwin" {
+		base = filepath.Join(home, "Library", "Application Support")
+	}
+	root := filepath.Join(base, "Nvidia Corporation", "Personal AI Router")
+	bin := filepath.Join(root, "engine-bin", "fake", filepath.Base(fakeEngineBin))
+	if err := os.MkdirAll(filepath.Dir(bin), 0o700); err != nil {
+		t.Fatalf("create managed fake install: %v", err)
+	}
+	copyFile(t, fakeEngineBin, bin)
+	port, err := freePort()
+	if err != nil {
+		t.Fatalf("reserve fake engine port: %v", err)
+	}
+	pidFile := filepath.Join(t.TempDir(), "fake.pid")
+	manifest := testEngineManifest(bin)
+	platform := manifest.Platforms[hostKey()]
+	platform.Runtime.Port = port
+	platform.Runtime.Env["FAKE_PID_FILE"] = pidFile
+	manifest.Platforms[hostKey()] = platform
+	for _, dir := range []string{
+		filepath.Join(cfg, "Nvidia Corporation", "Personal AI Router", "engines"),
+		filepath.Join(home, "Library", "Application Support", "Nvidia Corporation", "Personal AI Router", "engines"),
+	} {
+		writeE2EManifest(t, dir, manifest)
+	}
+
+	first := startE2EManager(t, cfg, home)
+	send(t, first.stdin, 1, "engine:start", map[string]any{"engine": "fake"})
+	var started EngineStatus
+	if err := json.Unmarshal(waitResult(t, first.frames, "1", 20*time.Second), &started); err != nil || !started.Running || started.Port != port {
+		t.Fatalf("initial start = %+v, err=%v; want running on port %d", started, err, port)
+	}
+	data, err := os.ReadFile(pidFile)
+	if err != nil {
+		t.Fatalf("read owned child PID: %v", err)
+	}
+	oldPID, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	if err != nil || oldPID <= 0 {
+		t.Fatalf("owned child PID = %q, err=%v", data, err)
+	}
+	t.Cleanup(func() {
+		if pidAlive(oldPID) && isOurEngineImage(procImage(oldPID), bin) {
+			terminatePID(oldPID, 0)
+		}
+	})
+	first.stopped = true
+	if err := first.cmd.Process.Kill(); err != nil {
+		t.Fatalf("hard-kill first manager: %v", err)
+	}
+	_ = first.stdin.Close()
+	select {
+	case <-first.readerDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("first manager reader did not exit after hard kill")
+	}
+	if err := first.cmd.Wait(); err == nil {
+		t.Fatal("hard-killed manager exited successfully")
+	}
+	if !pidAlive(oldPID) || !portServing(port) {
+		t.Fatalf("owned child did not survive hard manager kill: pid=%d alive=%v portServing=%v", oldPID, pidAlive(oldPID), portServing(port))
+	}
+
+	second := startE2EManager(t, cfg, home)
+	notify(t, second.stdin, restoreEnabledMethod, nil)
+	waitNotify(t, second.frames, "engine:state-changed", 20*time.Second)
+	send(t, second.stdin, 2, "engine:status", map[string]any{"engine": "fake"})
+	var restored EngineStatus
+	if err := json.Unmarshal(waitResult(t, second.frames, "2", 5*time.Second), &restored); err != nil || !restored.Running {
+		t.Fatalf("restored status = %+v, err=%v; want owned running process", restored, err)
+	}
+	data, err = os.ReadFile(pidFile)
+	if err != nil {
+		t.Fatalf("read replacement child PID: %v", err)
+	}
+	newPID, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	listenerPID, image, found := pidOnPort(port)
+	if err != nil || newPID <= 0 || newPID == oldPID || !found || listenerPID != newPID || !isOurEngineImage(image, bin) || !pidAlive(newPID) || (runtime.GOOS == "windows" && pidAlive(oldPID)) {
+		t.Fatalf("cold relaunch PID=%q parsed=%d err=%v; old=%d oldAlive=%v listener=(%d,%q,%v)", data, newPID, err, oldPID, pidAlive(oldPID), listenerPID, image, found)
+	}
+	send(t, second.stdin, 3, "engine:stop", map[string]any{"engine": "fake"})
+	waitResult(t, second.frames, "3", 10*time.Second)
+	second.stop(t)
+	if pidAlive(newPID) || portServing(port) {
+		t.Fatalf("replacement survived stop: pid=%d alive=%v portServing=%v", newPID, pidAlive(newPID), portServing(port))
+	}
 }
 
 // TestE2EPrepareShutdownCancelsStartingEngine proves shutdown preparation
