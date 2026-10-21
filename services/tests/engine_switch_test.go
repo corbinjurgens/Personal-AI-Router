@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"nvpair-shared/clustertrust"
+	"nvpair-shared/engines"
 	settings "nvpair-shared/enginesettings"
 	"nvpair-shared/jsonrpc"
 	"nvpair-shared/noderec"
@@ -192,6 +193,11 @@ func newSwitchProcessFixtureAt(t *testing.T, base string, ports fixtureServicePo
 	jointWriteJSON(t, filepath.Join(f.base, "engine-settings-operations.json"), journal)
 	f.start(t)
 	f.rpcOK(t, "engine:start", map[string]string{"engine": "ollama"})
+	// Initialize every settings baseline before a switch revision is captured.
+	// Otherwise the periodic refresh can add an unrelated engine's revision.
+	for _, engine := range engines.Names() {
+		f.rpcOK(t, "engine:get-settings", map[string]string{"engine": engine})
+	}
 	return f
 }
 
