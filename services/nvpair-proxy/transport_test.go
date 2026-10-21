@@ -52,7 +52,9 @@ func runNotificationTransportHelper(args []string) int {
 	defer cancel()
 	fail, join := newTerminalSession(ctx, cancel, transport)
 	defer join()
-	codec := newOwnedCodec(ctx, notificationTransportProbe{transport}, fail, 150*time.Millisecond)
+	// The 4 MiB frame is marshalled before Write. Leave enough room for that
+	// work under -race so the deadline tests an active blocked pipe write.
+	codec := newOwnedCodec(ctx, notificationTransportProbe{transport}, fail, time.Second)
 	read := make(chan error, 1)
 	go func() { _, err := codec.Read(); read <- err }()
 	// A finite frame well beyond anonymous pipe and socket buffering. The
