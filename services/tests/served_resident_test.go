@@ -65,6 +65,7 @@ type srRuntimeState struct {
 	HeldChats            int                  `json:"heldChats"`
 	InventoryUnavailable bool                 `json:"inventoryUnavailable"`
 	DropNextLoadResponse bool                 `json:"dropNextLoadResponse"`
+	HideInventoryOnDrop  bool                 `json:"hideInventoryOnDrop"`
 }
 
 func runSRRuntime(args []string) error {
@@ -146,6 +147,9 @@ func runSRRuntime(args []string) error {
 				state.InventoryUnavailable = false
 			case "drop-next-load-response":
 				state.DropNextLoadResponse = true
+			case "drop-load-and-hide-inventory":
+				state.DropNextLoadResponse = true
+				state.HideInventoryOnDrop = true
 			}
 			response = state
 		case r.Method == http.MethodGet && r.URL.Path == "/props" && r.URL.RawQuery == "":
@@ -204,6 +208,10 @@ func runSRRuntime(args []string) error {
 			state.Base.Loaded = state.Models[neModel].Loaded
 			if effect.Loaded && state.DropNextLoadResponse {
 				state.DropNextLoadResponse = false
+				if state.HideInventoryOnDrop {
+					state.InventoryUnavailable = true
+					state.HideInventoryOnDrop = false
+				}
 				conn, _, err := http.NewResponseController(w).Hijack()
 				if err != nil {
 					state.Base.Unexpected++
@@ -937,40 +945,86 @@ func TestServedResidentProcessVeto(t *testing.T) {
 }
 
 func TestServedResidentProcessRecovery(t *testing.T) {
-	f := newSRProcessFixture(t)
-	f.resident(t, neModel)
-	f.entry(t, neModel, nodepolicy.ModelStateSatisfied, "")
-	before := f.models(t)
-	old := neCapability(before)
-	if old == nil {
-		t.Fatal("qualified pre-restart identity absent")
-	}
-	f.stop(t)
-	f.start(t)
-	f.call(t, "engine:start", map[string]string{"engine": "llamacpp"}, nil)
-	f.retainRuntime(t)
-	f.entry(t, neModel, nodepolicy.ModelStateSatisfied, "")
-	neEventually(t, "new source identity", neCallBudget, func() bool {
-		capability := neCapability(f.models(t))
-		return capability != nil && capability.Identity.EngineRunID != old.Identity.EngineRunID
+	t.Run("broker restart", func(t *testing.T) {
+		f := newSRProcessFixture(t)
+		f.resident(t, neModel)
+		f.entry(t, neModel, nodepolicy.ModelStateSatisfied, "")
+		before := f.models(t)
+		old := neCapability(before)
+		if old == nil {
+			t.Fatal("qualified pre-restart identity absent")
+		}
+		f.stop(t)
+		f.start(t)
+		f.call(t, "engine:start", map[string]string{"engine": "llamacpp"}, nil)
+		f.retainRuntime(t)
+		f.entry(t, neModel, nodepolicy.ModelStateSatisfied, "")
+		neEventually(t, "new source identity", neCallBudget, func() bool {
+			capability := neCapability(f.models(t))
+			return capability != nil && capability.Identity.EngineRunID != old.Identity.EngineRunID
+		})
+		state := f.control(t, "")
+		if state.Base.Loads != 1 || state.Base.Chats != 0 || state.Content != 0 || state.Base.Unexpected != 0 {
+			t.Fatalf("recovered source effects=%+v", state)
+		}
+		stale := nodepolicy.StrictAdmissionRequest{Version: 1, QueueBudgetMs: 0, ColdStartBudgetMs: 0, PreOutputBudgetMs: 2000, Request: nodepolicy.RoutingRequestKey{OriginNodeID: f.snapshot(t).NodeID, ProxyRunID: "sr-stale-router", RequestID: "1"}, Identity: old.Identity}
+		status, data := f.chat(t, neModel, neOutput, &stale)
+		var refusal struct {
+			Code  string `json:"code"`
+			Error string `json:"error"`
+		}
+		if err := json.Unmarshal(data, &refusal); err != nil {
+			t.Fatal(err)
+		}
+		if status != http.StatusServiceUnavailable || refusal.Code != "strict-admission" || refusal.Error != "strict admission: unavailable" {
+			t.Fatalf("stale router identity status=%d refusal=%+v", status, refusal)
+		}
+		srAssertNoEffects(t, state, f.control(t, ""))
 	})
-	state := f.control(t, "")
-	if state.Base.Loads != 1 || state.Base.Chats != 0 || state.Content != 0 || state.Base.Unexpected != 0 {
-		t.Fatalf("recovered source effects=%+v", state)
-	}
-	stale := nodepolicy.StrictAdmissionRequest{Version: 1, QueueBudgetMs: 0, ColdStartBudgetMs: 0, PreOutputBudgetMs: 2000, Request: nodepolicy.RoutingRequestKey{OriginNodeID: f.snapshot(t).NodeID, ProxyRunID: "sr-stale-router", RequestID: "1"}, Identity: old.Identity}
-	status, data := f.chat(t, neModel, neOutput, &stale)
-	var refusal struct {
-		Code  string `json:"code"`
-		Error string `json:"error"`
-	}
-	if err := json.Unmarshal(data, &refusal); err != nil {
-		t.Fatal(err)
-	}
-	if status != http.StatusServiceUnavailable || refusal.Code != "strict-admission" || refusal.Error != "strict admission: unavailable" {
-		t.Fatalf("stale router identity status=%d refusal=%+v", status, refusal)
-	}
-	srAssertNoEffects(t, state, f.control(t, ""))
+	t.Run("lost load response is completed by source readback", func(t *testing.T) {
+		f := newSRProcessFixture(t)
+		f.control(t, "drop-next-load-response")
+		f.resident(t, neModel)
+		f.entry(t, neModel, nodepolicy.ModelStateSatisfied, "")
+		state := f.control(t, "")
+		if state.DropNextLoadResponse || state.InventoryUnavailable || state.Models[neModel].Loads != 1 || !state.Models[neModel].Loaded || state.Base.Chats != 0 || state.Content != 0 || state.Base.Unexpected != 0 {
+			t.Fatalf("readback-completed load effects=%+v", state)
+		}
+	})
+	t.Run("lost load response without inventory remains unknown", func(t *testing.T) {
+		f := newSRProcessFixture(t)
+		f.control(t, "drop-load-and-hide-inventory")
+		f.resident(t, neModel)
+		neEventually(t, "one dispatched load with unreadable inventory", neCallBudget, func() bool {
+			state := f.control(t, "")
+			return state.Models[neModel].Loads == 1 && state.InventoryUnavailable && !state.DropNextLoadResponse
+		})
+		neEventually(t, "unknown completion without readback", neCallBudget, func() bool {
+			view := f.policy(t)
+			if view.ModelConfiguration == nil || view.ModelConfiguration.PolicyRevision != view.Policy.Revision {
+				return false
+			}
+			for _, entry := range view.ModelConfiguration.Models {
+				if entry.Model == neModel {
+					if entry.State == nodepolicy.ModelStateSatisfied || entry.ObservedLoaded != nil && *entry.ObservedLoaded {
+						t.Fatalf("unreadable inventory falsely satisfied resident: %+v", entry)
+					}
+					return entry.State == nodepolicy.ModelStateUnknown && entry.Reason == nodepolicy.ModelReasonOperationTimeout
+				}
+			}
+			return false
+		})
+		state := f.control(t, "")
+		if state.Models[neModel].Loads != 1 || state.Base.Chats != 0 || state.Content != 0 || state.Base.Unexpected != 0 {
+			t.Fatalf("uncertain load caused extra effects=%+v", state)
+		}
+		f.control(t, "inventory-available")
+		f.entry(t, neModel, nodepolicy.ModelStateSatisfied, "")
+		state = f.control(t, "")
+		if state.Models[neModel].Loads != 1 || state.Base.Chats != 0 || state.Content != 0 || state.Base.Unexpected != 0 {
+			t.Fatalf("source-bound settlement caused extra effects=%+v", state)
+		}
+	})
 }
 
 func TestServedResidentProcessSwitch(t *testing.T) {
