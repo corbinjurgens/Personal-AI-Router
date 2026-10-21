@@ -4,7 +4,9 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -168,8 +170,8 @@ func TestWorkloadPrivacyProjectionRejectsBeforeEffects(t *testing.T) {
 			if b.workloads.Len() != 0 || len(client.frames()) != 0 || len(scheduler.frames()) != 0 || len(manager.frames()) != 0 {
 				t.Fatal("malformed frame caused effects")
 			}
-			if bufferText(logs) != "" {
-				t.Fatal("malformed frame logged input")
+			if strings.Count(bufferText(logs), "category=malformed count=0") != 2 {
+				t.Fatal("malformed frame must report fixed diagnostics")
 			}
 		})
 	}
@@ -204,6 +206,171 @@ func TestWorkloadPrivacyProjectionLiveEffects(t *testing.T) {
 	assertPrivacyInfo(t, snapshot[0], privacyInfo)
 	if strings.Contains(bufferText(logs), "synthetic-secret") {
 		t.Fatal("secret logged")
+	}
+}
+
+func TestWorkloadManualDestinationReachesConsumers(t *testing.T) {
+	for name, destination := range map[string]string{
+		"space": "manual node", "slash": "lab/gpu", "non-ASCII": "手動ノード",
+		"accented Latin": "nœud café",
+		"byte bound":     strings.Repeat("a", 256), "UTF-8 byte bound": strings.Repeat("界", 85) + "a",
+	} {
+		t.Run(name, func(t *testing.T) {
+			raw, err := json.Marshal(destination)
+			if err != nil {
+				t.Fatal(err)
+			}
+			info := strings.Replace(privacyInfo, `"scheduledOn":"peer"`, `"scheduledOn":`+string(raw), 1)
+			b, client, scheduler, manager := privacyBroker(t)
+			b.routeProxyWorkload("workload:started", privacyEnvelope(info))
+			snapshot := b.workloads.Snapshot()
+			if len(snapshot) != 1 {
+				t.Fatal("manual destination workload missing from store")
+			}
+			assertPrivacyInfo(t, snapshot[0], info)
+			for _, output := range []*syncBuffer{client, scheduler, manager} {
+				frames := output.frames()
+				if len(frames) != 1 {
+					t.Fatal("manual destination workload missing from consumer")
+				}
+				assertPrivacyInfo(t, privacyObject(t, frames[0].Params)["workloadInfo"], info)
+			}
+			assertPrivacyInfo(t, projectedWorkloadInfo(snapshot[0]), info)
+			replay := b.activeLocalReplayFrames()
+			if len(replay) != 1 {
+				t.Fatal("manual destination workload missing from replay")
+			}
+			assertPrivacyInfo(t, privacyObject(t, replay[0].params)["workloadInfo"], info)
+		})
+	}
+}
+
+func TestWorkloadManualDestinationRejectsBeforeEffects(t *testing.T) {
+	for name, value := range map[string]string{
+		"empty": `""`, "newline": `"node\nname"`, "NUL": `"node\u0000name"`,
+		"DEL": `"node\u007fname"`, "C1 control": `"node\u0085name"`,
+		"left-to-right embedding":    `"node\u202aname"`,
+		"right-to-left embedding":    `"node\u202bname"`,
+		"pop directional formatting": `"node\u202cname"`,
+		"left-to-right override":     `"node\u202dname"`,
+		"right-to-left override":     `"node\u202ename"`,
+		"left-to-right isolate":      `"node\u2066name"`,
+		"right-to-left isolate":      `"node\u2067name"`,
+		"first strong isolate":       `"node\u2068name"`,
+		"pop directional isolate":    `"node\u2069name"`,
+		"left-to-right mark":         `"node\u200ename"`,
+		"right-to-left mark":         `"node\u200fname"`,
+		"Arabic letter mark":         `"node\u061cname"`,
+		"zero-width space":           `"node\u200bname"`,
+		"zero-width non-joiner":      `"node\u200cname"`,
+		"zero-width joiner":          `"node\u200dname"`,
+		"word joiner":                `"node\u2060name"`,
+		"soft hyphen":                `"node\u00adname"`,
+		"byte order mark":            `"node\ufeffname"`,
+		"over byte bound":            `"` + strings.Repeat("a", 257) + `"`,
+		"UTF-8 over byte bound":      `"` + strings.Repeat("界", 86) + `"`,
+		"invalid UTF-8":              string([]byte{'"', 'n', 0xff, '"'}),
+	} {
+		t.Run(name, func(t *testing.T) {
+			input := privacyEnvelope(strings.Replace(privacyInfo, `"scheduledOn":"peer"`, `"scheduledOn":`+value, 1))
+			projected, category, count := projectWorkloadFrame("workload:started", input)
+			if projected != nil || category != "malformed" || count != 0 {
+				t.Fatalf("projection = %s, %s/%d", projected, category, count)
+			}
+			b, client, scheduler, manager := privacyBroker(t)
+			b.routeProxyWorkload("workload:started", input)
+			if b.workloads.Len() != 0 || len(client.frames())+len(scheduler.frames())+len(manager.frames()) != 0 {
+				t.Fatal("invalid destination caused effects")
+			}
+		})
+	}
+}
+
+func TestWorkloadStrictIdentitiesRemainStrict(t *testing.T) {
+	for _, key := range []string{"id", "engine", "runId", "originatedFrom"} {
+		t.Run(key, func(t *testing.T) {
+			for _, value := range []string{"manual node", "lab/gpu", "手動", strings.Repeat("a", 129)} {
+				obj := privacyObject(t, json.RawMessage(privacyInfo))
+				raw, err := json.Marshal(value)
+				if err != nil {
+					t.Fatal(err)
+				}
+				obj[key] = raw
+				info, err := json.Marshal(obj)
+				if err != nil {
+					t.Fatal(err)
+				}
+				projected, category, _ := projectWorkloadFrame("workload:started", privacyEnvelope(string(info)))
+				if projected != nil || category != "malformed" {
+					t.Fatal("strict identity accepted a manual destination ID")
+				}
+			}
+		})
+	}
+}
+
+func TestWorkloadProjectionDiagnostics(t *testing.T) {
+	for _, site := range []string{"proxy", "event", "replay", "info"} {
+		t.Run(site, func(t *testing.T) {
+			for _, category := range []string{"accepted", "stripped", "malformed"} {
+				t.Run(category, func(t *testing.T) {
+					info := privacyInfo
+					wantCount := 0
+					if category == "stripped" {
+						info = strings.TrimSuffix(info, "}") + `,"private-key-sentinel":"private-value-sentinel"}`
+						wantCount = 1
+					} else if category == "malformed" {
+						info = strings.Replace(info, `"scheduledOn":"peer"`, `"scheduledOn":"private/value\n"`, 1)
+					}
+					b, _, _, _ := privacyBroker(t)
+					var logs bytes.Buffer
+					previous := slog.Default()
+					slog.SetDefault(slog.New(slog.NewJSONHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug})))
+					t.Cleanup(func() { slog.SetDefault(previous) })
+					wantMessage := "projected workload " + site
+					switch site {
+					case "proxy":
+						wantMessage = "projected proxy workload"
+						b.routeProxyWorkload("workload:started", privacyEnvelope(info))
+					case "event":
+						b.emitWorkloadEvent("workloads:upsert", privacyEnvelope(info))
+					case "replay":
+						in, ok := workloadstore.ParseIncoming(json.RawMessage(info))
+						if !ok || !b.workloads.Apply(in) {
+							t.Fatal("seed replay record")
+						}
+						b.activeLocalReplayFrames()
+					case "info":
+						projectedWorkloadInfo(json.RawMessage(info))
+					}
+					found := 0
+					decoder := json.NewDecoder(&logs)
+					for decoder.More() {
+						var record map[string]json.RawMessage
+						if err := decoder.Decode(&record); err != nil {
+							t.Fatal(err)
+						}
+						var message string
+						if err := json.Unmarshal(record["msg"], &message); err != nil {
+							t.Fatal(err)
+						}
+						if message != wantMessage {
+							continue // The proxy also runs the event projection.
+						}
+						found++
+						want := map[string]json.RawMessage{"level": json.RawMessage(`"DEBUG"`), "category": json.RawMessage(`"` + category + `"`), "count": json.RawMessage(jsonNumber(t, int64(wantCount)))}
+						delete(record, "time")
+						delete(record, "msg")
+						if !reflect.DeepEqual(record, want) {
+							t.Fatalf("diagnostic fields = %s, want category/count only", record)
+						}
+					}
+					if found != 1 {
+						t.Fatalf("diagnostic records = %d, want 1", found)
+					}
+				})
+			}
+		})
 	}
 }
 
