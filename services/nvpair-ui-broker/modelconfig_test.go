@@ -2798,3 +2798,239 @@ func TestModelConfigObservedUnloadDropsRecordedRequest(t *testing.T) {
 		t.Fatalf("observed unload caused extra load: loads=%d status=%+v", loads, status)
 	}
 }
+
+// completedResidentLoad finishes one correlated load and leaves its pending
+// observation open; later manager calls answer not-dispatched.
+func (f *modelConfigFixture) completedResidentLoad(t *testing.T) {
+	t.Helper()
+	done := f.startLoadedAttempt(t)
+	f.awaitGrant(t)
+	f.engine.releaseHeld()
+	awaitModelConfigDone(t, done)
+	f.engine.setAnswer(modelConfigNotDispatched(nil))
+}
+
+func (f *modelConfigFixture) residentEntry(t *testing.T) nodepolicy.ModelConfigurationEntry {
+	t.Helper()
+	status := f.b.modelConfiguration(f.b.captureModelConfig())
+	if len(status.Models) != 1 {
+		t.Fatalf("status models=%+v, want one resident", status.Models)
+	}
+	return status.Models[0]
+}
+
+func TestModelConfigAbsentEngineKeepsConfirmedProof(t *testing.T) {
+	f := newModelConfigFixture(t)
+	f.completedResidentLoad(t)
+	f.b.observeLoadedFrom(f.source, map[string][]string{"llamacpp": {"resident"}})
+	f.b.reconcileModelConfig(context.Background())
+	if entry := f.residentEntry(t); entry.State != nodepolicy.ModelStateSatisfied {
+		t.Fatalf("confirmed resident: %+v", entry)
+	}
+	// An engine absent from a publication has unknown, not empty, inventory.
+	f.b.observeLoadedFrom(f.source, map[string][]string{})
+	f.b.reconcileModelConfig(context.Background())
+	if entry := f.residentEntry(t); entry.State != nodepolicy.ModelStateUnknown || entry.ObservedLoaded != nil {
+		t.Fatalf("absent engine inventory: %+v", entry)
+	}
+	r := f.b.nodePolicyRuntime()
+	r.mu.Lock()
+	_, confirmed := r.models.confirmed[nodepolicy.Role{Engine: "llamacpp", Model: "resident"}]
+	r.mu.Unlock()
+	if !confirmed {
+		t.Fatal("unknown inventory deleted the confirmed proof")
+	}
+	f.b.observeLoadedFrom(f.source, map[string][]string{"llamacpp": {"resident"}})
+	f.b.reconcileModelConfig(context.Background())
+	entry := f.residentEntry(t)
+	if readbacks, loads := len(modelConfigCalls(f.engine, "engine:get-launch")), len(modelConfigCalls(f.engine, nodepolicy.MethodReconcileResident)); entry.State != nodepolicy.ModelStateSatisfied || readbacks != 0 || loads != 1 {
+		t.Fatalf("returning inventory: entry=%+v readbacks=%d loads=%d, want satisfied by retained proof", entry, readbacks, loads)
+	}
+}
+
+func TestModelConfigContradictingPendingObservationIsUnknown(t *testing.T) {
+	f := newModelConfigFixture(t)
+	f.completedResidentLoad(t)
+	if entry := f.residentEntry(t); entry.State != nodepolicy.ModelStateSatisfied {
+		t.Fatalf("correlated load before any later inventory: %+v", entry)
+	}
+	f.b.observeLoadedFrom(f.source, map[string][]string{"llamacpp": {"other"}})
+	f.b.reconcileModelConfig(context.Background())
+	entry := f.residentEntry(t)
+	if entry.State != nodepolicy.ModelStateUnknown || entry.Reason != nodepolicy.ModelReasonObservationUnknown || entry.ObservedLoaded == nil || *entry.ObservedLoaded {
+		t.Fatalf("contradicting inventory during pending observation published %+v, want unknown observation with loaded=false", entry)
+	}
+	r := f.b.nodePolicyRuntime()
+	r.mu.Lock()
+	_, pending := r.models.pending[nodepolicy.Role{Engine: "llamacpp", Model: "resident"}]
+	r.mu.Unlock()
+	if loads := len(modelConfigCalls(f.engine, nodepolicy.MethodReconcileResident)); loads != 1 || !pending {
+		t.Fatalf("contradiction loads=%d pending=%v, want the original load still pending", loads, pending)
+	}
+	f.b.observeLoadedFrom(f.source, map[string][]string{"llamacpp": {"resident"}})
+	f.b.reconcileModelConfig(context.Background())
+	if entry := f.residentEntry(t); entry.State != nodepolicy.ModelStateSatisfied || len(modelConfigCalls(f.engine, nodepolicy.MethodReconcileResident)) != 1 {
+		t.Fatalf("confirming inventory after contradiction: %+v", entry)
+	}
+}
+
+func TestModelConfigRetirementDropsRecordedLoadRequest(t *testing.T) {
+	for _, scenario := range []string{"removal", "Off", "pause"} {
+		t.Run(scenario, func(t *testing.T) {
+			f := newModelConfigFixture(t)
+			f.completedResidentLoad(t)
+			r := f.b.nodePolicyRuntime()
+			ref := nodepolicy.Role{Engine: "llamacpp", Model: "resident"}
+			r.mu.Lock()
+			_, recorded := r.models.loadedRequests[ref]
+			switch scenario {
+			case "removal":
+				r.current.ResidentModels = nil
+			case "Off":
+				r.intent["llamacpp"] = false
+			default:
+				r.localPauseRequested = true
+			}
+			r.mu.Unlock()
+			if !recorded {
+				t.Fatal("completed load did not record its request")
+			}
+			f.b.reconcileModelConfig(context.Background())
+			r.mu.Lock()
+			_, recorded = r.models.loadedRequests[ref]
+			r.mu.Unlock()
+			if recorded {
+				t.Fatalf("%s retained the recorded load request", scenario)
+			}
+		})
+	}
+}
+
+// nonterminalHold leaves a granted load whose completion never decoded and
+// whose finish cannot reach the proxy: the original nonterminal barrier.
+func (f *modelConfigFixture) nonterminalHold(t *testing.T) residentUnsettled {
+	t.Helper()
+	f.proxy.mu.Lock()
+	answer := f.proxy.answer
+	f.proxy.mu.Unlock()
+	f.proxy.setAnswer(func(method string, raw json.RawMessage) (any, string) {
+		if method == nodepolicy.MethodFinishResident {
+			return nil, "finish unavailable"
+		}
+		return answer(method, raw)
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done, _, _ := startModelConfigMatrixAttempt(t, ctx, f, emptySwitchManagerSnapshot(), nodepolicy.ResidentUnknown, true)
+	f.awaitGrant(t)
+	cancel()
+	awaitModelConfigDone(t, done)
+	f.engine.releaseHeld()
+	f.engine.setAnswer(modelConfigNotDispatched(nil))
+	r := f.b.nodePolicyRuntime()
+	r.mu.Lock()
+	hold, held := r.models.unsettled[nodepolicy.Role{Engine: "llamacpp", Model: "resident"}]
+	r.mu.Unlock()
+	if !held || hold.terminal {
+		t.Fatal("missing original nonterminal granted uncertainty")
+	}
+	return hold
+}
+
+func TestModelConfigNonterminalHoldConfirmsReplacementReadback(t *testing.T) {
+	f := newModelConfigFixture(t)
+	original := f.nonterminalHold(t)
+	r := f.b.nodePolicyRuntime()
+	ref := nodepolicy.Role{Engine: "llamacpp", Model: "resident"}
+	// The original allocation may still be loading: no readback replaces it.
+	f.b.observeLoadedFrom(f.source, map[string][]string{"llamacpp": {"resident"}})
+	f.b.reconcileModelConfig(context.Background())
+	if entry := f.residentEntry(t); entry.State != nodepolicy.ModelStateUnknown || entry.Reason != nodepolicy.ModelReasonOperationTimeout || len(modelConfigCalls(f.engine, "engine:get-launch")) != 0 {
+		t.Fatalf("original-allocation inventory confirmed a nonterminal hold: %+v", entry)
+	}
+	r.mu.Lock()
+	identity := r.engineIdentity
+	r.mu.Unlock()
+	f.source = f.b.activateEngineManagerSource()
+	f.b.bindEngineMgr(f.b.getEngineMgr(), f.source)
+	r.mu.Lock()
+	r.engineIdentity = identity
+	r.mu.Unlock()
+	f.b.observeLoadedFrom(f.source, map[string][]string{"llamacpp": {"resident"}})
+	readback := residentLaunchReadback(f.b.captureModelConfig())
+	f.engine.setAnswer(modelConfigNotDispatched(&readback))
+	assertBarrier := func(stage string, want nodepolicy.ModelConfigurationState) {
+		t.Helper()
+		f.b.reconcileModelConfig(context.Background())
+		r.mu.Lock()
+		retained, held := r.models.unsettled[ref]
+		r.mu.Unlock()
+		entry := f.residentEntry(t)
+		if loads := len(modelConfigCalls(f.engine, nodepolicy.MethodReconcileResident)); entry.State != want || !held || retained.op != original.op || loads != 1 {
+			t.Fatalf("%s: entry=%+v held=%v loads=%d, want %s with the original barrier and one load", stage, entry, held, loads, want)
+		}
+	}
+	assertBarrier("replacement readback", nodepolicy.ModelStateSatisfied)
+	if len(modelConfigCalls(f.engine, "engine:get-launch")) == 0 {
+		t.Fatal("replacement confirmation did not read the observed envelope")
+	}
+	f.b.observeLoadedFrom(f.source, map[string][]string{"llamacpp": {}})
+	assertBarrier("later known-empty inventory", nodepolicy.ModelStateUnknown)
+}
+
+func TestModelConfigUnchangedStatusDoesNotNotify(t *testing.T) {
+	for _, scenario := range []string{"satisfied", "blocked", "uncertain hold"} {
+		t.Run(scenario, func(t *testing.T) {
+			f := newModelConfigFixture(t)
+			r := f.b.nodePolicyRuntime()
+			want := nodepolicy.ModelStateBlocked
+			switch scenario {
+			case "satisfied":
+				want = nodepolicy.ModelStateSatisfied
+				f.completedResidentLoad(t)
+				f.b.observeLoadedFrom(f.source, map[string][]string{"llamacpp": {"resident"}})
+			case "blocked":
+				r.mu.Lock()
+				r.intent["llamacpp"] = false
+				r.mu.Unlock()
+			default:
+				want = nodepolicy.ModelStateUnknown
+				f.nonterminalHold(t)
+			}
+			tick := func() {
+				r.mu.Lock()
+				now := r.now().Add(idleCheckInterval + time.Second)
+				r.now = func() time.Time { return now }
+				r.mu.Unlock()
+				f.b.reconcileModelConfig(context.Background())
+			}
+			tick()
+			if entry := f.residentEntry(t); entry.State != want {
+				t.Fatalf("steady state %+v, want %s", entry, want)
+			}
+			changed := func() int {
+				n := 0
+				for _, frame := range f.out.frames() {
+					if frame.Method == notifyPolicyChanged {
+						n++
+					}
+				}
+				return n
+			}
+			before := changed()
+			for range 3 {
+				tick()
+			}
+			if after := changed(); after != before {
+				t.Fatalf("unchanged status announced policy:changed %d times", after-before)
+			}
+			r.mu.Lock()
+			r.localPauseRequested = true
+			r.mu.Unlock()
+			tick()
+			if changed() == before {
+				t.Fatal("changed status was not announced")
+			}
+		})
+	}
+}

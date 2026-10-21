@@ -9,6 +9,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"reflect"
+	"slices"
 	"sort"
 	"time"
 
@@ -297,13 +298,15 @@ func sameResidentAllocation(a, b modelConfigEvidence, ref nodepolicy.Role) bool 
 
 // Pending facts prevent redispatch even when their original source can no
 // longer prove satisfaction. Local vetoes still determine the published state.
+// Inventory published after the load that omits the model contradicts it.
 func residentProofLocked(r *policyRuntime, e modelConfigEvidence, ref nodepolicy.Role, entry nodepolicy.ModelConfigurationEntry) nodepolicy.ModelConfigurationEntry {
 	if pending, ok := r.models.pending[ref]; ok && pending.evidence.Policy.Revision == e.Policy.Revision && r.now().Before(pending.expires) && entry.State == nodepolicy.ModelStatePending {
 		if e.LoadedCurrent[ref.Engine][ref.Model] && entry.ObservedLoaded != nil && *entry.ObservedLoaded && !sameResidentAllocation(pending.evidence, e, ref) {
 			return entry // Fresh replacement-source inventory still needs envelope readback.
 		}
 		entry.State, entry.Reason = nodepolicy.ModelStateUnknown, nodepolicy.ModelReasonObservationUnknown
-		if sameResidentAllocation(pending.evidence, e, ref) {
+		contradicted := entry.ObservedLoaded != nil && !*entry.ObservedLoaded && !reflect.DeepEqual(pending.evidence.Loaded[ref.Engine], e.Loaded[ref.Engine])
+		if sameResidentAllocation(pending.evidence, e, ref) && !contradicted {
 			loaded := true
 			entry.State, entry.Reason, entry.ObservedLoaded = nodepolicy.ModelStateSatisfied, "", &loaded
 		}
@@ -358,6 +361,13 @@ func (b *Broker) reconcileModelConfig(ctx context.Context) {
 		return
 	}
 	r.models.busy = true
+	// A recorded request labels a resident allocation. Removal, Off and pause
+	// retire that allocation's declaration; a later one re-adopts inventory.
+	for ref := range r.models.loadedRequests {
+		if e.Live != nodepolicy.Available || e.Paused || !e.Intent[ref.Engine] || !slices.Contains(b.residentRefs(e.Policy), ref) {
+			delete(r.models.loadedRequests, ref)
+		}
+	}
 	for ref, proof := range r.models.confirmed {
 		if !b.residentDeclarationCurrent(proof, e, ref) {
 			delete(r.models.confirmed, ref)
@@ -387,18 +397,30 @@ func (b *Broker) reconcileModelConfig(ctx context.Context) {
 	}
 	r.models.last = &e
 	r.models.retryAt = r.now().Add(idleCheckInterval)
+	previous := r.models.status
 	r.models.status = nodepolicy.ModelConfiguration{PolicyRevision: e.Policy.Revision, ObservationGeneration: r.models.status.ObservationGeneration + 1, Models: []nodepolicy.ModelConfigurationEntry{}}
 	for _, ref := range b.residentRefs(e.Policy) {
 		entry, _, _, _ := b.modelConfigEntry(e, ref)
+		entry = residentProofLocked(r, e, ref, entry)
+		if _, held := r.models.unsettled[ref]; held && entry.State == nodepolicy.ModelStatePending {
+			entry.State, entry.Reason = nodepolicy.ModelStateUnknown, nodepolicy.ModelReasonOperationTimeout
+		}
 		r.models.status.Models = append(r.models.status.Models, entry)
 	}
+	// Announce only a status that changed during this pass; the generation still
+	// counts every observation for readers.
+	changed := previous.PolicyRevision != e.Policy.Revision || !reflect.DeepEqual(previous.Models, r.models.status.Models)
 	r.mu.Unlock()
 	defer func() {
 		r.mu.Lock()
 		r.models.busy = false
 		r.models.active = nil
 		r.mu.Unlock()
-		b.notifyPolicyChanged()
+		if changed {
+			b.notifyPolicyChanged()
+		} else {
+			b.signalModelConfig() // Recheck evidence that changed during this pass.
+		}
 	}()
 	for i, ref := range b.residentRefs(e.Policy) {
 		entry, pr, id, count := b.modelConfigEntry(e, ref)
@@ -410,11 +432,13 @@ func (b *Broker) reconcileModelConfig(ctx context.Context) {
 			switch {
 			case unsettled:
 				entry.State, entry.Reason = nodepolicy.ModelStateUnknown, nodepolicy.ModelReasonOperationTimeout
-				// Native execution has ended. A replacement authority may confirm
-				// that allocation, but only with fresh inventory and envelope proof.
-				if hold.terminal && hold.finish.Outcome == nodepolicy.ResidentLoaded && !sameResidentAllocation(hold.op.evidence, e, ref) && e.LoadedCurrent[ref.Engine][ref.Model] && entry.ObservedLoaded != nil && *entry.ObservedLoaded {
+				// A replacement authority may confirm the allocation, but only with
+				// fresh inventory and envelope proof. Only a terminal hold, whose
+				// native execution has ended, is discharged; a nonterminal one stays
+				// the barrier against another load.
+				if (!hold.terminal || hold.finish.Outcome == nodepolicy.ResidentLoaded) && !sameResidentAllocation(hold.op.evidence, e, ref) && e.LoadedCurrent[ref.Engine][ref.Model] && entry.ObservedLoaded != nil && *entry.ObservedLoaded {
 					entry = b.confirmResident(ctx, e, entry)
-					if entry.State == nodepolicy.ModelStateSatisfied {
+					if entry.State == nodepolicy.ModelStateSatisfied && hold.terminal {
 						r.mu.Lock()
 						delete(r.models.unsettled, ref)
 						r.mu.Unlock()
@@ -460,6 +484,7 @@ func (b *Broker) reconcileModelConfig(ctx context.Context) {
 			}
 			r.models.confirmed[ref] = e
 		}
+		changed = changed || !reflect.DeepEqual(r.models.status.Models[i], entry)
 		r.models.status.Models[i] = entry
 		r.mu.Unlock()
 		if !sameModelAuthority(e, b.captureModelConfig()) {

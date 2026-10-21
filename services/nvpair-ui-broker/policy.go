@@ -1183,8 +1183,12 @@ func (b *Broker) observeLoadedFor(source *engineManagerSource, pp *proxyProcess,
 	}
 	r.models.loadedIdentity = r.modelIdentityLocked()
 	for ref := range r.models.confirmed {
+		models, known := loadedByEngine[ref.Engine]
+		if !known || models == nil {
+			continue // Unknown inventory neither confirms nor contradicts the proof.
+		}
 		found := false
-		for _, model := range loadedByEngine[ref.Engine] {
+		for _, model := range models {
 			if b.modelRef(ref.Engine, model) == ref {
 				found = true
 			}

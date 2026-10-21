@@ -11,10 +11,15 @@ model load. Local and paired `policy:get`, `policy:set`, and `policy:changed`
 carry `modelConfiguration`: `policyRevision`, `observationGeneration`, and a
 deterministically ordered `models` list with `engine`, `model`,
 `desiredResident`, `state`, optional `observedLoaded`, and a bounded `reason`.
+Each reconciliation pass advances `observationGeneration`, but announces
+`policy:changed` only when the pass changes the published model status.
 Missing loaded evidence remains absent; an explicit empty loaded inventory is
 known empty. A saved preference or an installed model does not establish
 `satisfied`; that requires a source-bound successful load/readback with current
-qualification and effective serving-envelope evidence. Removing a preference
+qualification and effective serving-envelope evidence. After a successful
+load, inventory published later that omits the model reports `unknown` with
+`observation-unknown` until the model appears or the bounded observation window
+ends; it does not start another load meanwhile. Removing a preference
 does not unload the model. Older targets that drop requested served/resident
 preferences are refused as unsupported readback.
 
@@ -33,14 +38,22 @@ approved and reported by the engine's serving envelope. The proxy owns batch
 admission and the final single-use grant. The broker relays that grant only for
 the live operation, original proxy run and paired manager source. Loads are
 serialized with an absolute budget bounded by 60 seconds and the policy's
-finite switch timeout. Unchanged failures are suppressed until relevant policy,
-identity, readiness, intent, inventory or admission evidence changes.
+finite switch timeout. A failed load with unchanged evidence is retried at the
+30-second retry deadline, with no attempt limit: reconciliation wakes at that
+deadline as well as on the idle tick, and does not re-evaluate unchanged
+evidence before it. A change in relevant policy, identity, readiness, intent,
+inventory or admission evidence is evaluated on the next wake without waiting
+for the deadline. Each retry is a new operation subject to the same
+eligibility, inventory and hold checks.
 
 Unknown completion retains the proxy's capacity hold. Recovery requires a
 terminal response from the original manager followed by a fresh `engine:models`
 read from that same source and identity, after the recovery ID was received.
 A missing response, watcher cache, null inventory or replacement manager cannot
-settle it. Holds remain in memory: a proxy restart loses their accounting;
+settle it. After proxy or manager replacement, fresh inventory and the
+manager-owned observed serving envelope from the current source can report the
+resident `satisfied`; an uncertain hold then remains the barrier against another
+load. Holds remain in memory: a proxy restart loses their accounting;
 this is not durable recovery. Replacement invalidates prior status and waits for
 fresh activation and inventory. Automatic unload and idle sleep recheck current
 resident protection immediately before execution; explicit pause retains its

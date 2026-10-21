@@ -1096,7 +1096,9 @@ source replacement or unknown observation cannot invent loaded satisfaction.
 An interrupted load without a terminal manager reply retains its resident hold
 and reports `unknown`/`operation-timeout` until a policy edit invalidates the
 declaration or the proxy restarts. Elapsed observation time and manager
-replacement alone do not release this nonterminal hold.
+replacement alone do not release this nonterminal hold. After proxy or manager
+replacement, fresh inventory and the manager-owned observed serving envelope
+from the current source can report the resident `satisfied`; the hold remains.
 Fresh manager-owned observed context/slots are required for restart confirmation;
 an engine adopted from a previous manager run is never confirmed and remains
 `unknown`. There is no persistent load queue replay. This protocol does not
