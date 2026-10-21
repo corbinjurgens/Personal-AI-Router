@@ -14,7 +14,10 @@ deterministically ordered `models` list with `engine`, `model`,
 Missing loaded evidence remains absent; an explicit empty loaded inventory is
 known empty. A saved preference or an installed model does not establish
 `satisfied`; that requires a source-bound successful load/readback with current
-qualification and effective serving-envelope evidence. Removing a preference
+qualification and effective serving-envelope evidence. After a successful
+load, inventory published later that omits the model reports `unknown` with
+`observation-unknown` until the model appears or the bounded observation window
+ends; it does not start another load meanwhile. Removing a preference
 does not unload the model. Older targets that drop requested served/resident
 preferences are refused as unsupported readback.
 

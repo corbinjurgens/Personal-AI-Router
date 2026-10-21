@@ -2847,3 +2847,29 @@ func TestModelConfigAbsentEngineKeepsConfirmedProof(t *testing.T) {
 		t.Fatalf("returning inventory: entry=%+v readbacks=%d loads=%d, want satisfied by retained proof", entry, readbacks, loads)
 	}
 }
+
+func TestModelConfigContradictingPendingObservationIsUnknown(t *testing.T) {
+	f := newModelConfigFixture(t)
+	f.completedResidentLoad(t)
+	if entry := f.residentEntry(t); entry.State != nodepolicy.ModelStateSatisfied {
+		t.Fatalf("correlated load before any later inventory: %+v", entry)
+	}
+	f.b.observeLoadedFrom(f.source, map[string][]string{"llamacpp": {"other"}})
+	f.b.reconcileModelConfig(context.Background())
+	entry := f.residentEntry(t)
+	if entry.State != nodepolicy.ModelStateUnknown || entry.Reason != nodepolicy.ModelReasonObservationUnknown || entry.ObservedLoaded == nil || *entry.ObservedLoaded {
+		t.Fatalf("contradicting inventory during pending observation published %+v, want unknown observation with loaded=false", entry)
+	}
+	r := f.b.nodePolicyRuntime()
+	r.mu.Lock()
+	_, pending := r.models.pending[nodepolicy.Role{Engine: "llamacpp", Model: "resident"}]
+	r.mu.Unlock()
+	if loads := len(modelConfigCalls(f.engine, nodepolicy.MethodReconcileResident)); loads != 1 || !pending {
+		t.Fatalf("contradiction loads=%d pending=%v, want the original load still pending", loads, pending)
+	}
+	f.b.observeLoadedFrom(f.source, map[string][]string{"llamacpp": {"resident"}})
+	f.b.reconcileModelConfig(context.Background())
+	if entry := f.residentEntry(t); entry.State != nodepolicy.ModelStateSatisfied || len(modelConfigCalls(f.engine, nodepolicy.MethodReconcileResident)) != 1 {
+		t.Fatalf("confirming inventory after contradiction: %+v", entry)
+	}
+}

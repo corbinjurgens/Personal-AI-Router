@@ -297,13 +297,15 @@ func sameResidentAllocation(a, b modelConfigEvidence, ref nodepolicy.Role) bool 
 
 // Pending facts prevent redispatch even when their original source can no
 // longer prove satisfaction. Local vetoes still determine the published state.
+// Inventory published after the load that omits the model contradicts it.
 func residentProofLocked(r *policyRuntime, e modelConfigEvidence, ref nodepolicy.Role, entry nodepolicy.ModelConfigurationEntry) nodepolicy.ModelConfigurationEntry {
 	if pending, ok := r.models.pending[ref]; ok && pending.evidence.Policy.Revision == e.Policy.Revision && r.now().Before(pending.expires) && entry.State == nodepolicy.ModelStatePending {
 		if e.LoadedCurrent[ref.Engine][ref.Model] && entry.ObservedLoaded != nil && *entry.ObservedLoaded && !sameResidentAllocation(pending.evidence, e, ref) {
 			return entry // Fresh replacement-source inventory still needs envelope readback.
 		}
 		entry.State, entry.Reason = nodepolicy.ModelStateUnknown, nodepolicy.ModelReasonObservationUnknown
-		if sameResidentAllocation(pending.evidence, e, ref) {
+		contradicted := entry.ObservedLoaded != nil && !*entry.ObservedLoaded && !reflect.DeepEqual(pending.evidence.Loaded[ref.Engine], e.Loaded[ref.Engine])
+		if sameResidentAllocation(pending.evidence, e, ref) && !contradicted {
 			loaded := true
 			entry.State, entry.Reason, entry.ObservedLoaded = nodepolicy.ModelStateSatisfied, "", &loaded
 		}
