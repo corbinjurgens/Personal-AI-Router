@@ -10,6 +10,61 @@ import (
 	"time"
 )
 
+func TestActiveLocalOutsideRun(t *testing.T) {
+	s := New()
+	seed := func(id, origin, runID, state, destination string) {
+		t.Helper()
+		raw, err := json.Marshal(map[string]any{
+			"id": id, "originatedFrom": origin, "engine": "ollama",
+			"runId": runID, "seq": 7, "state": state, "scheduledOn": destination,
+			"createdAt": 1,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		in, ok := ParseIncoming(raw)
+		if !ok || !s.Apply(in) {
+			t.Fatalf("seed %s was rejected", id)
+		}
+	}
+	seed("queued", "host", "r1", "queued", "peer")
+	seed("running", "host", "r1", "running", "host")
+	seed("live", "host", "r2", "running", "peer")
+	seed("finished", "host", "r1", "completed", "host")
+	seed("remote-old", "peer", "r1", "running", "host")
+	seed("remote-live", "peer", "r2", "queued", "host")
+	seed("legacy", "host", "", "queued", "host")
+
+	for _, tc := range []struct {
+		name string
+		live string
+		want map[string]string
+	}{
+		{"all departed", "", map[string]string{"queued": "r1", "running": "r1", "live": "r2", "legacy": ""}},
+		{"replacement stays live", "r2", map[string]string{"queued": "r1", "running": "r1", "legacy": ""}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			records := s.ActiveLocalOutsideRun("host", tc.live)
+			if len(records) != len(tc.want) {
+				t.Fatalf("selected %d records, want %d", len(records), len(tc.want))
+			}
+			seen := make(map[string]bool)
+			for _, rec := range records {
+				runID, ok := tc.want[rec.ID]
+				if !ok || seen[rec.ID] || rec.RunID != runID || rec.Seq != 7 || rec.Terminal || rec.Origin != "host" {
+					t.Fatalf("unexpected selected record: %+v", rec)
+				}
+				seen[rec.ID] = true
+				rec.Info[0] = '['
+				stored, ok := s.Get("host", rec.ID)
+				if !ok || !json.Valid(stored.Info) {
+					t.Fatal("selected Info aliases the store")
+				}
+			}
+		})
+	}
+}
+
 // mkIn builds an Incoming with a realistic full-fidelity Info payload.
 func mkIn(id, origin, state, scheduledOn string, createdAt int64) Incoming {
 	m := map[string]any{
