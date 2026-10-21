@@ -146,6 +146,7 @@ func TestModelConfigEventStateMachine(t *testing.T) {
 					{"drain", "capacity", "undrain"},
 					{"proxy restart", "publish matching", "timeout"},
 					{"finish error", "proxy restart", "publish matching"},
+					{"publish matching", "revision", "capacity"},
 				} {
 					if partition == 0 {
 						runModelConfigEventTrace(t, state, trace, f, base, baseModels, identities, proxyAnswer, seed)
@@ -1498,6 +1499,42 @@ func TestModelConfigConfirmingInventoryCannotSettleUncertainHold(t *testing.T) {
 	}
 }
 
+func TestModelConfigUnchangedRevisionLoadRequestDoesNotReload(t *testing.T) {
+	f := newModelConfigFixture(t)
+	done := f.startLoadedAttempt(t)
+	f.awaitGrant(t)
+	f.engine.releaseHeld()
+	awaitModelConfigDone(t, done)
+	f.b.observeLoadedFrom(f.source, map[string][]string{"llamacpp": {"resident"}})
+	f.b.reconcileModelConfig(context.Background())
+	readback := residentLaunchReadback(f.b.captureModelConfig())
+	f.engine.setAnswer(func(method string, _ json.RawMessage) (any, string) {
+		switch method {
+		case "engine:get-launch":
+			return readback, ""
+		case settings.SwitchPrepareMethod:
+			return emptySwitchManagerSnapshot(), ""
+		default:
+			return nodepolicy.ReconcileResidentResult{Outcome: nodepolicy.ResidentNotDispatched}, ""
+		}
+	})
+	r := f.b.nodePolicyRuntime()
+	r.mu.Lock()
+	r.current.Revision = "1"
+	r.mu.Unlock()
+	if !f.b.replayPolicyToProxy(context.Background(), f.pp) {
+		t.Fatal("activate unchanged load revision")
+	}
+	reportStrict(t, f.b, "1", f.acks.runID, strictCapability(t, "llamacpp", "resident"))
+	for range 3 {
+		f.b.reconcileModelConfig(context.Background())
+	}
+	status := f.b.modelConfiguration(f.b.captureModelConfig())
+	if status.PolicyRevision != "1" || status.Models[0].State != nodepolicy.ModelStateSatisfied || len(modelConfigCalls(f.engine, nodepolicy.MethodReconcileResident)) != 1 || len(modelConfigCalls(f.engine, "engine:get-launch")) != 1 {
+		t.Fatalf("unchanged load revision reloaded or lost confirmation: status=%+v loads=%d readbacks=%d", status, len(modelConfigCalls(f.engine, nodepolicy.MethodReconcileResident)), len(modelConfigCalls(f.engine, "engine:get-launch")))
+	}
+}
+
 func TestModelConfigReplacedRevisionReconcilesOnce(t *testing.T) {
 	f := newModelConfigFixture(t)
 	done := f.startLoadedAttempt(t)
@@ -1508,7 +1545,28 @@ func TestModelConfigReplacedRevisionReconcilesOnce(t *testing.T) {
 	r := f.b.nodePolicyRuntime()
 	r.mu.Lock()
 	r.current.Revision = "1"
+	// Replace the slice rather than mutating the old captured policy evidence.
+	r.current.Profiles = append([]nodepolicy.Profile(nil), r.current.Profiles...)
 	r.current.Profiles[0].ContextTokens = 8193
+	r.mu.Unlock()
+	// A later inventory publication must not relabel the old allocation as
+	// loaded under the new revision's request.
+	f.b.observeLoadedFrom(f.source, map[string][]string{"llamacpp": {"resident"}})
+	stale := f.b.captureModelConfig()
+	if stale.LoadedCurrent["llamacpp"]["resident"] {
+		t.Fatal("changed load request accepted old inventory with unchanged identity")
+	}
+	oldReadback := residentLaunchReadback(stale)
+	f.engine.setAnswer(func(string, json.RawMessage) (any, string) { return oldReadback, "" })
+	if !f.b.replayPolicyToProxy(context.Background(), f.pp) {
+		t.Fatal("activate changed load before identity publication")
+	}
+	reportStrict(t, f.b, "1", f.acks.runID, strictCapability(t, "llamacpp", "resident"))
+	f.b.reconcileModelConfig(context.Background())
+	if got := f.b.modelConfiguration(f.b.captureModelConfig()); got.Models[0].State == nodepolicy.ModelStateSatisfied || len(modelConfigCalls(f.engine, "engine:get-launch")) != 0 {
+		t.Fatalf("old identity/readback confirmed changed request: %+v", got)
+	}
+	r.mu.Lock()
 	id := r.engineIdentity["llamacpp"]
 	envelope := id.Serving["resident"]
 	envelope.PerSlotContextTokens, envelope.TotalContextTokens = 8193, 8193
@@ -1523,23 +1581,27 @@ func TestModelConfigReplacedRevisionReconcilesOnce(t *testing.T) {
 	if status.Models[0].State == nodepolicy.ModelStateSatisfied {
 		t.Fatal("replacement revision inherited old completion")
 	}
-	readback := residentLaunchReadback(f.b.captureModelConfig())
-	f.engine.setAnswer(func(method string, _ json.RawMessage) (any, string) {
-		if method == settings.SwitchPrepareMethod {
-			return emptySwitchManagerSnapshot(), ""
+	f.engine.mu.Lock()
+	f.engine.held = make(chan struct{})
+	f.engine.holdOnce = sync.Once{}
+	f.engine.mu.Unlock()
+	done = f.startLoadedAttempt(t)
+	f.engine.waitFor("replacement resident grant", func(calls []policyCall) bool {
+		grants := 0
+		for _, call := range calls {
+			if call.method == residentDispatchReplyMethod {
+				grants++
+			}
 		}
-		if method == "engine:get-launch" {
-			return readback, ""
-		}
-		return nodepolicy.ReconcileResidentResult{Outcome: nodepolicy.ResidentNotDispatched}, ""
+		return grants == 2
 	})
-	f.b.reconcileModelConfig(context.Background())
-	f.b.reconcileModelConfig(context.Background())
+	f.engine.releaseHeld()
+	awaitModelConfigDone(t, done)
 	f.b.observeLoadedFrom(f.source, map[string][]string{"llamacpp": {"resident"}})
 	f.b.reconcileModelConfig(context.Background())
 	status = f.b.modelConfiguration(f.b.captureModelConfig())
 	if status.Models[0].State != nodepolicy.ModelStateSatisfied || len(modelConfigCalls(f.engine, nodepolicy.MethodReconcileResident)) != 2 {
-		t.Fatalf("replacement revision did not reconcile exactly once: %+v", status)
+		t.Fatalf("replacement revision did not reconcile exactly once: status=%+v loads=%d grants=%d", status, len(modelConfigCalls(f.engine, nodepolicy.MethodReconcileResident)), len(modelConfigCalls(f.engine, residentDispatchReplyMethod)))
 	}
 	call := modelConfigCalls(f.engine, nodepolicy.MethodReconcileResident)[1]
 	p := decodeModelConfigCall[nodepolicy.ReconcileResidentParams](t, call)
