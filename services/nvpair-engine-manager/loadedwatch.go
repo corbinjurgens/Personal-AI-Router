@@ -48,8 +48,9 @@ var residencyNeutralActions = map[string]bool{
 // nothing, so this internal poll is the only signal; keeping it here means a
 // push-driven consumer never has to poll. It runs until ctx is cancelled and is
 // pokeable (see Executor.pokeLoaded) for sub-tick latency after an explicit
-// action. The first sweep seeds loaded names and publishes any memory baseline;
-// later memory changes use the same notification even if names are unchanged.
+// action. The first successful sweep publishes its loaded-name and memory
+// baseline; later memory changes use the same notification even if names are
+// unchanged.
 func (e *Executor) watchLoaded(ctx context.Context) {
 	interval := e.loadedPollInterval
 	if interval <= 0 {
@@ -62,7 +63,6 @@ func (e *Executor) watchLoaded(ctx context.Context) {
 	var previousMemory *performancewire.MemoryEvidence
 	var lastInventory time.Time
 	var identity *modelIdentityParams
-	seeded := false
 	for {
 		poked := false
 		select {
@@ -85,10 +85,9 @@ func (e *Executor) watchLoaded(ctx context.Context) {
 		// Identity is reported from the first sweep on: its consumer starts
 		// with none, so it must never wait for a change.
 		identity = e.publishModelIdentity(identity)
-		if !seeded {
-			seeded = true
-			changed = nil // loaded names retain their existing first-sweep behavior
-		}
+		// The first successful loaded_models read is an observation too. A
+		// broker snapshot may have preceded engine start, so publish even an
+		// empty resident set when its engine key first appears.
 		changed = mergeMemoryChanges(changed, memoryChanged)
 		for _, name := range changed {
 			e.notify(modelsChangedMethod, modelsChangedParams{Engine: name, Models: res})

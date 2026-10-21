@@ -1774,6 +1774,64 @@ func TestModelConfigStatusUnknownEmptyAndRemoval(t *testing.T) {
 	}
 }
 
+func TestModelConfigSnapshotEmptyInventoryLoadsNewResident(t *testing.T) {
+	f := newModelConfigFixture(t)
+	r := f.b.nodePolicyRuntime()
+	r.mu.Lock()
+	r.current.ResidentModels = nil
+	r.loaded = nil
+	r.models.loadedSource = nil
+	r.models.loadedProxy = nil
+	r.mu.Unlock()
+	f.engine.setAnswer(func(method string, _ json.RawMessage) (any, string) {
+		switch method {
+		case "engine:get-installed":
+			return map[string]any{"engines": []any{map[string]any{"engine": "llamacpp", "running": true}}}, ""
+		case "engine:models":
+			return map[string]any{"models": []string{"resident"}, "loadedByEngine": map[string][]string{"llamacpp": {}}}, ""
+		default:
+			return map[string]bool{"ok": true}, ""
+		}
+	})
+	f.b.refreshEnginePolicySnapshotFrom(f.b.getEngineMgr(), f.source)
+	r.mu.Lock()
+	r.current.ResidentModels = nodepolicy.ResidentModels{{Engine: "llamacpp", Model: "resident"}}
+	r.mu.Unlock()
+	status := f.b.modelConfiguration(f.b.captureModelConfig())
+	if len(status.Models) != 1 || status.Models[0].ObservedLoaded == nil || *status.Models[0].ObservedLoaded || status.Models[0].State != nodepolicy.ModelStatePending {
+		t.Fatalf("empty manager snapshot did not authorize resident load: %+v", status)
+	}
+	done := f.startLoadedAttempt(t)
+	f.awaitGrant(t)
+	f.engine.releaseHeld()
+	awaitModelConfigDone(t, done)
+	if got := len(modelConfigCalls(f.engine, nodepolicy.MethodReconcileResident)); got != 1 {
+		t.Fatalf("manager resident calls = %d, want one", got)
+	}
+	status = f.b.modelConfiguration(f.b.captureModelConfig())
+	if len(status.Models) != 1 || status.Models[0].State != nodepolicy.ModelStateSatisfied || status.Models[0].ObservedLoaded == nil || !*status.Models[0].ObservedLoaded {
+		t.Fatalf("correlated load did not satisfy resident: %+v", status)
+	}
+}
+
+func TestModelConfigUnknownInventoryDoesNotLoadNewResident(t *testing.T) {
+	f := newModelConfigFixture(t)
+	r := f.b.nodePolicyRuntime()
+	r.mu.Lock()
+	r.loaded = nil
+	r.models.loadedSource = nil
+	r.models.loadedProxy = nil
+	r.mu.Unlock()
+	f.b.reconcileModelConfig(context.Background())
+	status := f.b.modelConfiguration(f.b.captureModelConfig())
+	if len(status.Models) != 1 || status.Models[0].ObservedLoaded != nil || status.Models[0].State != nodepolicy.ModelStateUnknown {
+		t.Fatalf("missing snapshot status = %+v", status)
+	}
+	if got := len(modelConfigCalls(f.engine, nodepolicy.MethodReconcileResident)); got != 0 {
+		t.Fatalf("unknown inventory dispatched %d loads", got)
+	}
+}
+
 func TestModelConfigInternalClientMethodsDenied(t *testing.T) {
 	for _, method := range []string{nodepolicy.MethodReconcileResident, residentDispatchRequestMethod, residentDispatchReplyMethod} {
 		t.Run(method, func(t *testing.T) {
