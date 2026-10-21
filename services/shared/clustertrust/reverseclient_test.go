@@ -23,6 +23,8 @@ import (
 	"nvpair-shared/noderec"
 )
 
+type serviceClientConnContextKey struct{}
+
 type serviceClientFixture struct {
 	adapter      *PeerServiceClient
 	mesh         *Mesh
@@ -76,6 +78,9 @@ func newServiceClientFixture(t *testing.T, handler http.Handler) *serviceClientF
 		handler.ServeHTTP(w, r)
 	}))
 	f.server.TLS = peer.ServerTLSConfig()
+	f.server.Config.ConnContext = func(ctx context.Context, conn net.Conn) context.Context {
+		return context.WithValue(ctx, serviceClientConnContextKey{}, conn)
+	}
 	f.server.Config.ConnState = func(_ net.Conn, state http.ConnState) {
 		if state == http.StateNew {
 			f.connections.Add(1)
@@ -1603,8 +1608,19 @@ func TestPeerServiceClientIneligibleMutationsRemainFresh(t *testing.T) {
 	test := func(name, method, header string, makeBody func() io.Reader) {
 		t.Run(name, func(t *testing.T) {
 			var dispatches atomic.Int32
+			var mu sync.Mutex
+			connections := make(map[net.Conn]struct{})
 			f := newServiceClientFixture(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				dispatches.Add(1)
+				conn, ok := r.Context().Value(serviceClientConnContextKey{}).(net.Conn)
+				if !ok {
+					t.Error("request has no server connection identity")
+					http.Error(w, "missing connection identity", http.StatusInternalServerError)
+					return
+				}
+				mu.Lock()
+				connections[conn] = struct{}{}
+				mu.Unlock()
 				if _, err := io.Copy(io.Discard, r.Body); err != nil {
 					t.Error(err)
 				}
@@ -1630,8 +1646,11 @@ func TestPeerServiceClientIneligibleMutationsRemainFresh(t *testing.T) {
 					t.Fatalf("fresh response: status=%d read=%v close=%v", response.StatusCode, readErr, closeErr)
 				}
 			}
-			if dispatches.Load() != 2 || f.connections.Load() != 2 {
-				t.Fatalf("dispatches=%d connections=%d, want 2 fresh dispatches", dispatches.Load(), f.connections.Load())
+			mu.Lock()
+			dispatchedConnections := len(connections)
+			mu.Unlock()
+			if dispatches.Load() != 2 || dispatchedConnections != 2 {
+				t.Fatalf("dispatches=%d dispatched connections=%d, want 2 dispatches over distinct connections", dispatches.Load(), dispatchedConnections)
 			}
 		})
 	}
@@ -2569,13 +2588,21 @@ func TestPeerServiceClientDropUnauthorized(t *testing.T) {
 			key := peerServiceKey{"peer", noderec.ServiceCluster}
 			f.adapter.mu.Lock()
 			h := f.adapter.entries[key]
+			var original *peerServiceReuse
+			if len(h.idle) == 1 {
+				original = h.idle[0]
+			}
 			f.adapter.mu.Unlock()
+			if original == nil {
+				t.Fatal("setup did not retain the original idle connection")
+			}
 
 			change(f)
 			f.adapter.DropUnauthorized()
 
 			f.adapter.mu.Lock()
 			retired, idle, global := h.retired, len(h.idle), f.adapter.idle
+			keptOriginal := idle == 1 && h.idle[0] == original
 			f.adapter.mu.Unlock()
 			if retired != wantRetired || (idle == 0) != wantRetired || (global == 0) != wantRetired {
 				t.Fatalf("DropUnauthorized state: retired=%v idle=%d global=%d, want retired=%v", retired, idle, global, wantRetired)
@@ -2586,8 +2613,8 @@ func TestPeerServiceClientDropUnauthorized(t *testing.T) {
 				case <-time.After(time.Second):
 					t.Fatal("DropUnauthorized did not close the idle socket")
 				}
-			} else if f.connections.Load() != 1 {
-				t.Fatalf("connections = %d, want the original connection kept", f.connections.Load())
+			} else if !keptOriginal {
+				t.Fatal("DropUnauthorized replaced the original idle connection")
 			}
 		})
 	}
