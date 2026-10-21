@@ -112,9 +112,20 @@ func (a *admissionController) residentContextLocked(k admKey) (int, bool) {
 	if !ok || count != 1 || pr.Qualification == nil {
 		return 0, false
 	}
-	_, q, ok := a.qualifiedModelLocked(k, pr)
+	m, q, ok := a.qualifiedModelLocked(k, pr)
 	if !ok || nodepolicy.ValidateResidentContext(pr.ContextTokens, q.ContextTokens) != nil {
 		return 0, false
+	}
+	id := a.strict.identity[k.engine]
+	if id.Serving != nil {
+		envelope, ok := a.servingEnvelopeLocked(id, k, m.Identity.ModelDigest)
+		// A model-only load cannot shrink native allocation. Qualification
+		// must cover the actual allocation, not just smaller request bounds.
+		if !ok || int64(pr.ContextTokens) != envelope.PerSlotContextTokens ||
+			int64(q.ContextTokens) < envelope.PerSlotContextTokens || int64(q.MaxOutputTokens) < envelope.MaxOutputTokens ||
+			int64(m.MaxConcurrent) != envelope.Slots {
+			return 0, false
+		}
 	}
 	return pr.ContextTokens, true
 }
