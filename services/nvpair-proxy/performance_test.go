@@ -1082,6 +1082,133 @@ func TestPerformanceUnobservedCopyOutcome(t *testing.T) {
 	}
 }
 
+func TestPerformanceCommittedPeekOutcome(t *testing.T) {
+	setForTest(t, &firstBodyTimeout, 50*time.Millisecond)
+	for _, cancelAfterCommit := range []bool{false, true} {
+		name, wantOutcome := "delivered interruption", performancewire.OutcomeFailed
+		if cancelAfterCommit {
+			name, wantOutcome = "requester cancellation", performancewire.OutcomeCancelled
+		}
+		t.Run(name, func(t *testing.T) {
+			p := performanceProxy(t, "llamacpp")
+			p.buffers = bufferTestBudget(t, 256<<10, 0)
+			writer := &recordingWriter{}
+			p.codec = NewCodec(writer)
+			entered, send := make(chan struct{}), make(chan struct{})
+			var sendOnce sync.Once
+			releaseEngine := func() { sendOnce.Do(func() { close(send) }) }
+			var hits atomic.Int32
+			engine := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if _, err := io.Copy(io.Discard, r.Body); err != nil {
+					return
+				}
+				hits.Add(1)
+				w.Header().Set("Content-Type", "text/event-stream")
+				w.WriteHeader(http.StatusAccepted)
+				w.(http.Flusher).Flush()
+				close(entered)
+				<-send
+				_, _ = io.WriteString(w, "data: "+performanceLlamaFinal+"\n\ndata: [DONE]\n\n")
+			}))
+			defer engine.Close()
+			defer releaseEngine()
+			setBackend(t, p.soleFacade(), engine.URL, true)
+			fallback := newRecordingEngine(t, http.StatusOK)
+			p.soleFacade().discovery.AddManual(nodeForModel(t, "fallback", fallback.URL, "m"))
+			p.SetPriority([]string{"destination", "fallback"})
+			rec, done := httptest.NewRecorder(), make(chan struct{})
+			go func() {
+				defer close(done)
+				p.soleFacade().handleHTTP(rec, httptest.NewRequest(http.MethodPost, routeChatCompletions, strings.NewReader(`{"model":"m","stream":true}`)))
+			}()
+			waitChan(t, entered, "accepted self-engine response headers")
+			keys := p.activeRoutingRequests()
+			if len(keys) != 1 {
+				t.Fatalf("registered requests=%d, want one", len(keys))
+			}
+			owner := p.routingRequestControl(keys[0])
+			committed, resume, callbackDone := make(chan struct{}), make(chan struct{}), make(chan struct{})
+			var resumeOnce sync.Once
+			releaseCallback := func() { resumeOnce.Do(func() { close(resume) }) }
+			defer releaseCallback()
+			owner.mu.Lock()
+			stop := owner.stopPreOutput
+			var blocked atomic.Bool
+			owner.stopPreOutput = func() bool {
+				if blocked.CompareAndSwap(false, true) {
+					defer close(callbackDone)
+					close(committed)
+					<-resume
+				}
+				return stop()
+			}
+			owner.mu.Unlock()
+			releaseEngine()
+			waitChan(t, committed, "raw commitment before peek publication")
+			if cancelAfterCommit && !owner.cancel(false) {
+				t.Fatal("requester cancellation did not win")
+			}
+			waitChan(t, done, "handler return before callback release")
+			owner.mu.Lock()
+			pending, terminal, rawCommitted := owner.firstBodyDone, owner.done, owner.committed
+			owner.mu.Unlock()
+			if !terminal || !rawCommitted || hits.Load() != 1 || fallback.hits() != 0 {
+				t.Fatalf("request winner: terminal=%v committed=%v dispatches=%d fallback=%d", terminal, rawCommitted, hits.Load(), fallback.hits())
+			}
+			if pending == nil || p.routingRequestControl(keys[0]) != owner {
+				t.Fatal("pending borrower lost its terminal request owner")
+			}
+			bufferAssertTotals(t, p.buffers, 96<<10, 1, 0)
+			p.identityMu.Lock()
+			associations := len(p.workloadRequests)
+			p.identityMu.Unlock()
+			if associations != 0 {
+				t.Fatalf("terminal workload associations=%d, want zero", associations)
+			}
+			result := owner.sink.result()
+			if cancelAfterCommit {
+				if rec.Body.Len() != 0 || result.Reason != "" || result.Synthetic != 0 || result.DeliveryComplete {
+					t.Fatalf("cancelled response: body=%q sink=%+v", rec.Body.String(), result)
+				}
+			} else if rec.Code != http.StatusAccepted || rec.Body.String() != string(wantSSEInterruption(streamInterruptReasonIdle)) || result.Reason != streamInterruptReasonIdle || result.ProtocolComplete || !result.DeliveryComplete || result.Genuine != 0 || result.Synthetic != int64(rec.Body.Len()) {
+				t.Fatalf("committed interruption: status=%d body=%q sink=%+v", rec.Code, rec.Body.String(), result)
+			}
+			sample := performanceOne(t, p)
+			if sample.ProtocolComplete != nil || sample.HeaderMs == nil || sample.FirstBodyMs == nil || sample.OutputTokens != nil || sample.EngineDecodeTokensPerSecond != nil {
+				t.Fatalf("queued measurement=%+v, want observed first byte and unobserved protocol/numerics", sample.Measurement)
+			}
+			releaseCallback()
+			waitChan(t, callbackDone, "pure stop callback completion")
+			waitChan(t, pending, "charged peek borrower release")
+			waitForCond(t, time.Second, "registry cleanup after borrower release", func() bool { return len(p.activeRoutingRequests()) == 0 })
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			senderDone := make(chan struct{})
+			go func() { defer close(senderDone); p.sendPerformance(ctx) }()
+			waitForCond(t, time.Second, "actual performance sample notification", func() bool {
+				return len(notificationsOf(t, writer, "performance:sample")) == 1
+			})
+			cancel()
+			waitChan(t, senderDone, "performance sender completion")
+			emitted := notificationsOf(t, writer, "performance:sample")
+			if len(emitted) != 1 {
+				t.Fatalf("emitted samples=%d, want one", len(emitted))
+			}
+			var actual performancewire.Sample
+			if err := json.Unmarshal(emitted[0], &actual); err != nil {
+				t.Fatal(err)
+			}
+			if err := actual.Validate(); err != nil {
+				t.Fatal(err)
+			}
+			if actual.Outcome != wantOutcome || actual.ProtocolComplete != nil || !reflect.DeepEqual(actual, sample) {
+				t.Fatalf("emitted measurement=%+v, want queued %s with unobserved protocol", actual.Measurement, wantOutcome)
+			}
+			ownedAssertHandlerDrained(t, p, owner)
+		})
+	}
+}
+
 func TestPerformanceSenderStopsOutsideWrite(t *testing.T) {
 	p := performanceProxy(t, "llamacpp")
 	ctx, cancel := context.WithCancel(context.Background())

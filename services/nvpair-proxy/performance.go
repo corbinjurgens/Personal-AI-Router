@@ -834,7 +834,12 @@ func (a *performanceAttempt) finish(sc *statusCapture, returned bool) {
 			m.Outcome = performancewire.OutcomeCompleted
 		}
 	} else if returned && sc.upstreamBody != nil && sc.upstreamBody.complete && sc.wroteErr == nil && a.parent.Err() == nil && sc.status >= 200 && sc.status < 300 {
-		if sink := responseSinkFrom(a.parent); sink == nil || sink.result().DeliveryComplete {
+		complete := true
+		if sink := responseSinkFrom(a.parent); sink != nil {
+			delivery := sink.result()
+			complete = delivery.DeliveryComplete && delivery.ProtocolComplete
+		}
+		if complete {
 			m.Outcome = performancewire.OutcomeCompleted // unobserved protocol stays nil
 		}
 	}
