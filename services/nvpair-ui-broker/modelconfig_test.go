@@ -1866,6 +1866,52 @@ func TestModelConfigRestartStartResponseRecoversResident(t *testing.T) {
 	}
 }
 
+func TestModelConfigRestartSnapshotDoesNotUndoNewerRunningStatus(t *testing.T) {
+	f := newModelConfigFixture(t)
+	r := f.b.nodePolicyRuntime()
+	r.mu.Lock()
+	delete(r.running, "llamacpp")
+	r.mu.Unlock()
+	f.engine.setAnswer(func(method string, _ json.RawMessage) (any, string) {
+		switch method {
+		case "engine:get-installed":
+			return map[string]any{"engines": []any{map[string]any{"engine": "llamacpp", "running": false}}}, holdSuccessReply
+		case "engine:start", "engine:status":
+			return map[string]any{"engine": "llamacpp", "running": true}, ""
+		case "engine:models":
+			return map[string]any{"models": []string{}, "loadedByEngine": map[string][]string{}}, ""
+		default:
+			return map[string]bool{"ok": true}, ""
+		}
+	})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		f.b.refreshEnginePolicySnapshotFrom(f.b.getEngineMgr(), f.source)
+	}()
+	f.engine.waitFor("initial installed snapshot", func(calls []policyCall) bool {
+		return len(modelConfigCalls(f.engine, "engine:get-installed")) > 0
+	})
+	for id, method := range []string{"engine:start", "engine:status"} {
+		requestID := id + 1
+		f.b.relayToEngineNow(clientRequest(requestID, method, map[string]string{"engine": "llamacpp"}))
+		response := f.out.waitFrame(t, method+" response", isResponse(requestID))
+		if response.Error != nil {
+			t.Fatalf("%s response: %+v", method, response.Error)
+		}
+	}
+	f.engine.releaseHeld()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("initial installed snapshot did not finish")
+	}
+	status := f.b.modelConfiguration(f.b.captureModelConfig())
+	if len(status.Models) != 1 || status.Models[0].State != nodepolicy.ModelStateUnknown || status.Models[0].Reason != nodepolicy.ModelReasonObservationUnknown {
+		t.Fatalf("stale installed snapshot overrode running status: %+v", status)
+	}
+}
+
 func TestModelConfigStoppedStatusKeepsEngineOff(t *testing.T) {
 	f := newModelConfigFixture(t)
 	f.engine.setAnswer(func(method string, _ json.RawMessage) (any, string) {

@@ -158,9 +158,13 @@ type policyRuntime struct {
 	// What engine-manager reports: which engines run, what each has loaded,
 	// and each engine's saved intent.
 	running map[string]bool
-	loaded  map[string][]string
-	intent  map[string]bool
-	drains  map[string]bool
+	// An installed-state snapshot cannot overwrite a newer observation made
+	// while its RPC was in flight.
+	runningGeneration uint64
+	runningObserved   map[string]uint64
+	loaded            map[string][]string
+	intent            map[string]bool
+	drains            map[string]bool
 
 	// Strict admission identity (model_identity.go): engine-manager's run,
 	// launch and model content identity per engine, and this broker's
@@ -223,6 +227,7 @@ func (r *policyRuntime) initLocked() {
 	r.live = r.current.Availability
 	r.admissionCh = make(chan struct{})
 	r.running = map[string]bool{}
+	r.runningObserved = map[string]uint64{}
 	r.loaded = map[string][]string{}
 	r.intent = map[string]bool{}
 	r.drains = map[string]bool{}
@@ -1074,12 +1079,22 @@ func (b *Broker) handlePolicyEngineNotification(source *engineManagerSource, met
 // observeEngineRunningFrom records a running/stopped transition only from the
 // current source. A stopped engine has no loaded models or run identity.
 func (b *Broker) observeEngineRunningFrom(source *engineManagerSource, engine string, running bool) bool {
+	return b.observeEngineRunningFromSnapshot(source, engine, running, nil)
+}
+
+func (b *Broker) observeEngineRunningFromSnapshot(source *engineManagerSource, engine string, running bool, snapshotGeneration *uint64) bool {
 	r := b.nodePolicyRuntime()
 	r.mu.Lock()
 	if source == nil || r.engineManagerSource != source {
 		r.mu.Unlock()
 		return false
 	}
+	if snapshotGeneration != nil && r.runningObserved[engine] > *snapshotGeneration {
+		r.mu.Unlock()
+		return false
+	}
+	r.runningGeneration++
+	r.runningObserved[engine] = r.runningGeneration
 	was := r.running[engine]
 	if running {
 		r.running[engine] = true
@@ -1176,6 +1191,8 @@ func (b *Broker) observeLoadedFor(source *engineManagerSource, pp *proxyProcess,
 	for engine, models := range loadedByEngine {
 		if !r.running[engine] {
 			r.running[engine] = true
+			r.runningGeneration++
+			r.runningObserved[engine] = r.runningGeneration
 			r.runningSince[engine] = now
 		}
 		prev := r.loaded[engine]
@@ -1244,6 +1261,10 @@ func (b *Broker) refreshEnginePolicySnapshotFrom(w *rpcWorker, source *engineMan
 			b.observeIntentFrom(source, p.EnabledByEngine)
 		}
 	}
+	r := b.nodePolicyRuntime()
+	r.mu.Lock()
+	runningGeneration := r.runningGeneration
+	r.mu.Unlock()
 	if result, rpcErr, err := w.CallNoTimeout(ctx, "engine:get-installed", nil); err == nil && rpcErr == nil {
 		var p struct {
 			Engines []struct {
@@ -1253,7 +1274,7 @@ func (b *Broker) refreshEnginePolicySnapshotFrom(w *rpcWorker, source *engineMan
 		}
 		if json.Unmarshal(result, &p) == nil {
 			for _, e := range p.Engines {
-				b.observeEngineRunningFrom(source, e.Engine, e.Running)
+				b.observeEngineRunningFromSnapshot(source, e.Engine, e.Running, &runningGeneration)
 			}
 		}
 	}
