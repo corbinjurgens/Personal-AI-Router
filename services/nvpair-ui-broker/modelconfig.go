@@ -268,12 +268,36 @@ func (b *Broker) modelConfigEntry(e modelConfigEvidence, ref nodepolicy.Role) (n
 	return entry, pr, identity, count
 }
 
-// residentProofLocked preserves completed envelope proof across delayed or
-// confirming inventory and admission changes, never authority replacement.
+// A completed load is a fact about a declaration, independent of eligibility.
+// Worker replacement does not establish that the native allocation unloaded.
+func (b *Broker) residentDeclarationCurrent(previous, current modelConfigEvidence, ref nodepolicy.Role) bool {
+	if previous.Policy.Revision != current.Policy.Revision {
+		return false
+	}
+	for _, desired := range b.residentRefs(current.Policy) {
+		if desired == ref {
+			return true
+		}
+	}
+	return false
+}
+
+func sameResidentAllocation(a, b modelConfigEvidence, ref nodepolicy.Role) bool {
+	return a.Policy.Revision == b.Policy.Revision && a.Proxy == b.Proxy && a.Worker == b.Worker && a.Source == b.Source && a.Run == b.Run && reflect.DeepEqual(a.Identity.Engines[ref.Engine], b.Identity.Engines[ref.Engine])
+}
+
+// Pending facts prevent redispatch even when their original source can no
+// longer prove satisfaction. Local vetoes still determine the published state.
 func residentProofLocked(r *policyRuntime, e modelConfigEvidence, ref nodepolicy.Role, entry nodepolicy.ModelConfigurationEntry) nodepolicy.ModelConfigurationEntry {
-	if pending, ok := r.models.pending[ref]; ok && sameModelAuthority(pending.evidence, e) && r.now().Before(pending.expires) && entry.State == nodepolicy.ModelStatePending {
-		loaded := true
-		entry.State, entry.ObservedLoaded = nodepolicy.ModelStateSatisfied, &loaded
+	if pending, ok := r.models.pending[ref]; ok && pending.evidence.Policy.Revision == e.Policy.Revision && r.now().Before(pending.expires) && entry.State == nodepolicy.ModelStatePending {
+		if e.LoadedCurrent[ref.Engine][ref.Model] && entry.ObservedLoaded != nil && *entry.ObservedLoaded && !sameResidentAllocation(pending.evidence, e, ref) {
+			return entry // Fresh replacement-source inventory still needs envelope readback.
+		}
+		entry.State, entry.Reason = nodepolicy.ModelStateUnknown, nodepolicy.ModelReasonObservationUnknown
+		if sameResidentAllocation(pending.evidence, e, ref) {
+			loaded := true
+			entry.State, entry.Reason, entry.ObservedLoaded = nodepolicy.ModelStateSatisfied, "", &loaded
+		}
 		return entry
 	}
 	if proof, ok := r.models.confirmed[ref]; ok && sameModelAuthority(proof, e) && entry.State == nodepolicy.ModelStatePending && entry.ObservedLoaded != nil && *entry.ObservedLoaded {
@@ -326,22 +350,22 @@ func (b *Broker) reconcileModelConfig(ctx context.Context) {
 	}
 	r.models.busy = true
 	for ref, proof := range r.models.confirmed {
-		if !sameModelAuthority(proof, e) {
+		if !b.residentDeclarationCurrent(proof, e, ref) {
 			delete(r.models.confirmed, ref)
 		}
 	}
 	for ref, hold := range r.models.unsettled {
-		// A replacement manager cannot discharge an original proxy's hold.
-		// Revision replacement revokes the old declaration at the proxy.
-		if hold.op.evidence.Proxy != e.Proxy || hold.op.evidence.Policy.Revision != e.Policy.Revision {
+		// Keep original ownership across worker replacement; it is not unload
+		// evidence. Revision replacement/removal retires the declaration.
+		if !b.residentDeclarationCurrent(hold.op.evidence, e, ref) {
 			delete(r.models.unsettled, ref)
 		}
 	}
 	for ref, pending := range r.models.pending {
-		if !sameModelAuthority(pending.evidence, e) || !r.now().Before(pending.expires) {
+		if !b.residentDeclarationCurrent(pending.evidence, e, ref) || !r.now().Before(pending.expires) {
 			delete(r.models.pending, ref)
 			delete(r.models.confirmed, ref)
-		} else if e.LoadedCurrent[ref.Engine][ref.Model] && containsString(e.Loaded[ref.Engine], ref.Model) {
+		} else if sameResidentAllocation(pending.evidence, e, ref) && e.LoadedCurrent[ref.Engine][ref.Model] && containsString(e.Loaded[ref.Engine], ref.Model) {
 			// The correlated load already proved the envelope. A same-authority
 			// watcher publication completes its observation phase.
 			if r.models.confirmed == nil {
@@ -390,7 +414,7 @@ func (b *Broker) reconcileModelConfig(ctx context.Context) {
 						if r.models.pending == nil {
 							r.models.pending = make(map[nodepolicy.Role]residentPendingObservation)
 						}
-						r.models.pending[ref] = residentPendingObservation{evidence: e, expires: r.now().Add(residentObservationTimeout)}
+						r.models.pending[ref] = residentPendingObservation{evidence: hold.op.evidence, expires: r.now().Add(residentObservationTimeout)}
 					}
 					r.models.last = nil // Evaluate the settled inventory on the next wake.
 					r.mu.Unlock()
@@ -398,6 +422,11 @@ func (b *Broker) reconcileModelConfig(ctx context.Context) {
 				}
 			case e.LoadedCurrent[ref.Engine][ref.Model] && entry.ObservedLoaded != nil && *entry.ObservedLoaded:
 				entry = b.confirmResident(ctx, e, entry)
+				if entry.State == nodepolicy.ModelStateSatisfied {
+					r.mu.Lock()
+					delete(r.models.pending, ref)
+					r.mu.Unlock()
+				}
 			default:
 				entry = b.reconcileResident(ctx, e, entry, pr, id, count)
 			}
@@ -592,9 +621,13 @@ func (b *Broker) reconcileResident(parent context.Context, e modelConfigEvidence
 		return entry
 	}
 	holdUnsettled = false
-	if b.residentCurrent(op) && result.Outcome == nodepolicy.ResidentLoaded && finished.Outcome == nodepolicy.ResidentLoaded {
-		loaded := true
-		entry.State, entry.Reason, entry.ObservedLoaded = nodepolicy.ModelStateSatisfied, "", &loaded
+	if result.Outcome == nodepolicy.ResidentLoaded && finished.Outcome == nodepolicy.ResidentLoaded {
+		// Completion survives changes in desire, including a veto arriving
+		// after dispatch. Eligibility controls status, not retention of fact.
+		if b.residentCurrent(op) {
+			loaded := true
+			entry.State, entry.Reason, entry.ObservedLoaded = nodepolicy.ModelStateSatisfied, "", &loaded
+		}
 		r.mu.Lock()
 		if r.models.pending == nil {
 			r.models.pending = make(map[nodepolicy.Role]residentPendingObservation)

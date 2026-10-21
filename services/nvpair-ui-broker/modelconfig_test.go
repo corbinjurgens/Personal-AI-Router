@@ -257,6 +257,123 @@ func TestModelConfigCompletedLoadWaitsForWatcher(t *testing.T) {
 	}
 }
 
+func TestModelConfigTemporaryVetoPreservesCompletedLoad(t *testing.T) {
+	for _, scenario := range []string{"pause", "Off", "drain", "pause in flight"} {
+		t.Run(scenario, func(t *testing.T) {
+			f := newModelConfigFixture(t)
+			r := f.b.nodePolicyRuntime()
+			setVeto := func(enabled bool) {
+				r.mu.Lock()
+				defer r.mu.Unlock()
+				switch scenario {
+				case "Off":
+					r.intent["llamacpp"] = !enabled
+				case "drain":
+					r.drains = map[string]bool{"llamacpp": enabled}
+				default:
+					r.localPauseRequested = enabled
+				}
+			}
+			done := f.startLoadedAttempt(t)
+			f.awaitGrant(t)
+			if scenario == "pause in flight" {
+				setVeto(true)
+				f.b.reconcileModelConfig(context.Background())
+			}
+			f.engine.releaseHeld()
+			awaitModelConfigDone(t, done)
+			f.engine.setAnswer(func(method string, _ json.RawMessage) (any, string) {
+				if method == settings.SwitchPrepareMethod {
+					return emptySwitchManagerSnapshot(), ""
+				}
+				return nodepolicy.ReconcileResidentResult{Outcome: nodepolicy.ResidentNotDispatched}, ""
+			})
+			setVeto(true)
+			f.b.reconcileModelConfig(context.Background())
+			if status := f.b.modelConfiguration(f.b.captureModelConfig()); status.Models[0].State != nodepolicy.ModelStateBlocked {
+				t.Fatalf("local veto lost precedence: %+v", status)
+			}
+			setVeto(false)
+			f.b.reconcileModelConfig(context.Background())
+			if got := len(modelConfigCalls(f.engine, nodepolicy.MethodReconcileResident)); got != 1 {
+				t.Fatalf("resume before watcher issued %d loads, want exactly one", got)
+			}
+			if status := f.b.modelConfiguration(f.b.captureModelConfig()); status.Models[0].State != nodepolicy.ModelStateSatisfied {
+				t.Fatalf("resume lost completed load proof: %+v", status)
+			}
+		})
+	}
+}
+
+func TestModelConfigPendingObservationAllowedExits(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		outcome       nodepolicy.ResidentOutcome
+		wantLoads     int
+		wantConfirmed bool
+	}{
+		{"confirming observation", nodepolicy.ResidentLoaded, 1, true},
+		{"load failure", nodepolicy.ResidentFailed, 2, false},
+		{"revision replacement", nodepolicy.ResidentLoaded, 2, false},
+		{"resident removal", nodepolicy.ResidentLoaded, 1, false},
+		{"observation timeout", nodepolicy.ResidentLoaded, 2, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newModelConfigFixture(t)
+			done := f.startResidentAttempt(t, tc.outcome)
+			f.awaitGrant(t)
+			f.engine.releaseHeld()
+			awaitModelConfigDone(t, done)
+			r := f.b.nodePolicyRuntime()
+			ref := nodepolicy.Role{Engine: "llamacpp", Model: "resident"}
+			r.mu.Lock()
+			_, pending := r.models.pending[ref]
+			r.mu.Unlock()
+			if pending != (tc.outcome == nodepolicy.ResidentLoaded) {
+				t.Fatalf("completion pending=%v outcome=%s", pending, tc.outcome)
+			}
+			f.engine.setAnswer(func(method string, _ json.RawMessage) (any, string) {
+				if method == settings.SwitchPrepareMethod {
+					return emptySwitchManagerSnapshot(), ""
+				}
+				return nodepolicy.ReconcileResidentResult{Outcome: nodepolicy.ResidentNotDispatched}, ""
+			})
+			if tc.name == "confirming observation" {
+				f.b.observeLoadedFrom(f.source, map[string][]string{"llamacpp": {"resident"}})
+			} else {
+				r.mu.Lock()
+				switch tc.name {
+				case "revision replacement":
+					r.current.Revision = "1"
+				case "resident removal":
+					r.current.ResidentModels = nil
+				default:
+					now := r.now().Add(residentObservationTimeout + time.Second)
+					r.now = func() time.Time { return now }
+				}
+				r.mu.Unlock()
+			}
+			if tc.name == "revision replacement" {
+				if !f.b.replayPolicyToProxy(context.Background(), f.pp) {
+					t.Fatal("activate replacement revision")
+				}
+				reportStrict(t, f.b, "1", f.acks.runID, strictCapability(t, "llamacpp", "resident"))
+			}
+			f.b.reconcileModelConfig(context.Background())
+			r.mu.Lock()
+			_, pending = r.models.pending[ref]
+			_, confirmed := r.models.confirmed[ref]
+			r.mu.Unlock()
+			if pending || confirmed != tc.wantConfirmed {
+				t.Fatalf("exit pending=%v confirmed=%v, want false/%v", pending, confirmed, tc.wantConfirmed)
+			}
+			if got := len(modelConfigCalls(f.engine, nodepolicy.MethodReconcileResident)); got != tc.wantLoads {
+				t.Fatalf("exit loads=%d, want %d", got, tc.wantLoads)
+			}
+		})
+	}
+}
+
 func TestModelConfigObservationTimeoutReevaluates(t *testing.T) {
 	f := newModelConfigFixture(t)
 	done := f.startLoadedAttempt(t)
