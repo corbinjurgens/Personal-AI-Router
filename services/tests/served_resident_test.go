@@ -57,10 +57,12 @@ type srEffects struct {
 }
 
 type srRuntimeState struct {
-	Base      neRuntimeState       `json:"base"`
-	Models    map[string]srEffects `json:"models"`
-	Content   int                  `json:"content"`
-	HeldChats int                  `json:"heldChats"`
+	Base                 neRuntimeState       `json:"base"`
+	Models               map[string]srEffects `json:"models"`
+	Content              int                  `json:"content"`
+	HeldChats            int                  `json:"heldChats"`
+	InventoryUnavailable bool                 `json:"inventoryUnavailable"`
+	DropNextLoadResponse bool                 `json:"dropNextLoadResponse"`
 }
 
 func runSRRuntime(args []string) error {
@@ -136,6 +138,12 @@ func runSRRuntime(args []string) error {
 					close(gate)
 					held = false
 				}
+			case "inventory-unavailable":
+				state.InventoryUnavailable = true
+			case "inventory-available":
+				state.InventoryUnavailable = false
+			case "drop-next-load-response":
+				state.DropNextLoadResponse = true
 			}
 			response = state
 		case r.Method == http.MethodGet && r.URL.Path == "/props" && r.URL.RawQuery == "":
@@ -154,6 +162,10 @@ func runSRRuntime(args []string) error {
 			state.Base.ModelProps++
 			response = map[string]any{"default_generation_settings": map[string]int{"n_ctx": context}, "total_slots": 1}
 		case r.Method == http.MethodGet && r.URL.Path == "/models":
+			if state.InventoryUnavailable {
+				w.WriteHeader(http.StatusServiceUnavailable)
+				return
+			}
 			var models []any
 			for _, model := range []string{neModel, srNeighbor} {
 				status := "unloaded"
@@ -188,6 +200,16 @@ func runSRRuntime(args []string) error {
 			}
 			state.Models[request.Model] = effect
 			state.Base.Loaded = state.Models[neModel].Loaded
+			if effect.Loaded && state.DropNextLoadResponse {
+				state.DropNextLoadResponse = false
+				conn, _, err := http.NewResponseController(w).Hijack()
+				if err != nil {
+					state.Base.Unexpected++
+					return
+				}
+				_ = conn.Close()
+				return
+			}
 			response = map[string]any{"ok": true, "model": request.Model}
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/chat/completions":
 			var request struct {
