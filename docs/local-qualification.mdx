@@ -266,8 +266,10 @@ Invalidation happens before the change it guards wherever PAIR makes the change:
 
 Withdrawal rejects cached strict envelopes and tickets that have not passed
 their final dispatch check; it does not cancel already dispatched inference.
-The remaining polling window is for models changed outside PAIR: replacement is
-noticed at the next watcher tick (5 seconds by default) rather than at dispatch.
+The remaining polling window is for models changed outside PAIR: artifact/source
+binding validation runs on full-inventory sweeps, scheduled every 60 seconds and
+also triggered by an action poke, rather than at dispatch. The watcher's ordinary
+loaded-model ticks do not each perform this validation.
 
 ## Not covered here
 
