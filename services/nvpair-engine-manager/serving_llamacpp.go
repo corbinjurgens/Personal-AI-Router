@@ -768,6 +768,21 @@ func (e *Executor) guardServingLoad(ctx context.Context, st *engineState, action
 	if !load || action != binding.Action {
 		return ctx, noop, nil
 	}
+	ctx, cleanup := registerServingLoad(ctx, st)
+	// Register before the lifecycle wait so settings cancellation sees waiters.
+	if !residentLock(ctx, &st.opMu) {
+		cleanup()
+		return ctx, noop, ctx.Err()
+	}
+	release := sync.OnceFunc(func() { st.opMu.Unlock(); cleanup() })
+	if err := e.checkServingLoad(st, binding.Action, params); err != nil {
+		release()
+		return ctx, noop, err
+	}
+	return ctx, release, nil
+}
+
+func registerServingLoad(ctx context.Context, st *engineState) (context.Context, func()) {
 	ctx, cancel := context.WithCancel(ctx)
 	entry := &servingLoad{cancel: cancel}
 	st.mu.Lock()
@@ -779,32 +794,24 @@ func (e *Executor) guardServingLoad(ctx context.Context, st *engineState, action
 		cancel()
 	}
 	st.mu.Unlock()
-	cleanup := func() {
+	cleanup := sync.OnceFunc(func() {
 		cancel()
 		st.mu.Lock()
 		delete(st.loads.active, entry)
 		st.mu.Unlock()
-	}
-	// Keep the applied declaration and the target process on one operation
-	// generation even when NE is currently absent. A caller can cancel while
-	// queued behind a lifecycle operation, without waiting for that operation.
-	if !residentLock(ctx, &st.opMu) {
+	})
+	return ctx, cleanup
+}
+
+// Caller already holds opMu, under switch admission. Share the same stop fence,
+// registry and declaration check without recursively taking the lifecycle lock.
+func (e *Executor) guardServingLoadLocked(ctx context.Context, st *engineState, action string, params json.RawMessage) (context.Context, func(), error) {
+	ctx, cleanup := registerServingLoad(ctx, st)
+	if err := e.checkServingLoad(st, action, params); err != nil {
 		cleanup()
-		return ctx, noop, ctx.Err()
+		return ctx, func() {}, err
 	}
-	release := sync.OnceFunc(func() { st.opMu.Unlock(); cleanup() })
-	// Once locked, dispatch owns context/error precedence, including for a
-	// cancelled caller. Only a cancelled lock wait returns a guard context error.
-	st.mu.Lock()
-	config := st.plat.Runtime.Serving.Clone()
-	st.mu.Unlock()
-	if config != nil {
-		if err := rejectUndeclaredServingLoad(config, binding.modelParam(), params); err != nil {
-			release()
-			return ctx, noop, err
-		}
-	}
-	return ctx, release, nil
+	return ctx, cleanup, nil
 }
 
 // Reject undeclared loads before mutation admission. guardServingLoad repeats

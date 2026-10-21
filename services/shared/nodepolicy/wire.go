@@ -470,18 +470,25 @@ func (e ResidentReservationEvidence) Validate() error {
 	return nil
 }
 
+// ReconcileResidentParams binds the engine-specific declared resident count to
+// PolicyRevision. The count shares the resident policy list's upper bound,
+// MaxModelConfigurationEntries, and is required before any load effects.
 type ReconcileResidentParams struct {
-	OperationID    string                      `json:"operationId"`
-	PolicyRevision string                      `json:"policyRevision"`
-	Engine         string                      `json:"engine"`
-	Model          string                      `json:"model"`
-	Identity       StrictModelIdentity         `json:"identity"`
-	TimeoutMs      int                         `json:"timeoutMs"`
-	Reservation    ResidentReservationEvidence `json:"reservation"`
-	Load           ResidentLoadOptions         `json:"load"`
+	OperationID           string                      `json:"operationId"`
+	PolicyRevision        string                      `json:"policyRevision"`
+	DeclaredResidentCount int                         `json:"declaredResidentCount"`
+	Engine                string                      `json:"engine"`
+	Model                 string                      `json:"model"`
+	Identity              StrictModelIdentity         `json:"identity"`
+	TimeoutMs             int                         `json:"timeoutMs"`
+	Reservation           ResidentReservationEvidence `json:"reservation"`
+	Load                  ResidentLoadOptions         `json:"load"`
 }
 
 func (p ReconcileResidentParams) Validate() error {
+	if p.DeclaredResidentCount < 1 || p.DeclaredResidentCount > MaxModelConfigurationEntries {
+		return fmt.Errorf("declaredResidentCount must be in 1..%d", MaxModelConfigurationEntries)
+	}
 	if err := p.Load.Validate(); err != nil {
 		return err
 	}
@@ -784,7 +791,7 @@ func (p *ResidentReservationEvidence) UnmarshalJSON(data []byte) error {
 func (p *ReconcileResidentParams) UnmarshalJSON(data []byte) error {
 	type plain ReconcileResidentParams
 	var next plain
-	if err := decodeResident(data, &next, []string{"operationId", "policyRevision", "engine", "model", "identity", "timeoutMs", "reservation", "load"}); err != nil {
+	if err := decodeResident(data, &next, []string{"operationId", "policyRevision", "declaredResidentCount", "engine", "model", "identity", "timeoutMs", "reservation", "load"}); err != nil {
 		return err
 	}
 	if err := ReconcileResidentParams(next).Validate(); err != nil {

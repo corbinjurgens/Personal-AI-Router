@@ -4,6 +4,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"net/http"
@@ -154,7 +155,7 @@ func TestResidentPreservesDesiredStateAndFailedWrites(t *testing.T) {
 	state := desiredStateFile{
 		PendingSwitch:      &settings.SwitchCheckpoint{SwitchPrepareRequest: p, Phase: settings.SwitchCheckpointSourceOff},
 		PendingSwitchPorts: &switchCheckpointPorts{Source: 17001, Target: 17002},
-		Engines:            map[string]bool{"ollama": true, "source": false, "target": true, "legacy": false},
+		Engines:            map[string]bool{f.p.Engine: true, "source": false, "target": true, "legacy": false},
 		OffBy:              map[string]intentOrigin{"source": intentLocal, "legacy": intentPeer},
 	}
 	if err := f.ex.desired.save(state); err != nil {
@@ -168,24 +169,78 @@ func TestResidentPreservesDesiredStateAndFailedWrites(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Inject failure at the existing atomic writer, not a residency-only seam.
+	writes := 0
+	useEngineFileReplacer(t, durablefile.Replacer{CreateTemp: func(string, string, os.FileMode) (durablefile.File, error) {
+		writes++
+		return nil, errors.New("injected desired write failure")
+	}})
 	if result := f.run(t); result.Outcome != nodepolicy.ResidentLoaded {
 		t.Fatalf("result = %+v", result)
 	}
-	assertDurableFile(t, f.ex.desired.path, before)
-	// Inject failure at the existing atomic writer, not a residency-only seam.
-	useEngineFileReplacer(t, durablefile.Replacer{CreateTemp: func(string, string, os.FileMode) (durablefile.File, error) {
-		return nil, errors.New("injected desired write failure")
-	}})
+	if writes != 0 {
+		t.Fatalf("residency attempted %d desired-state writes", writes)
+	}
+	assertDesiredFileBytes(t, f.ex.desired.path, before)
 	if err := f.ex.desired.set("unrelated", false, intentLocal); err == nil {
 		t.Fatal("failed write reported success")
 	}
-	assertDurableFile(t, f.ex.desired.path, before)
-	after, err := f.ex.desired.load()
+	if writes != 1 {
+		t.Fatalf("injected writer calls = %d, want one failed intent write", writes)
+	}
+	assertDesiredFileBytes(t, f.ex.desired.path, before)
+	// Reopen the store to prove checkpoint, port, intent and provenance survive
+	// the disk round trip rather than relying on the original store instance.
+	after, err := newDesiredStateStore(filepath.Dir(f.ex.desired.path)).load()
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !reflect.DeepEqual(initial, after) {
 		t.Fatalf("desired state changed: before=%+v after=%+v", initial, after)
+	}
+}
+
+func TestResidentFailedDesiredReadDoesNotRepairState(t *testing.T) {
+	f := newResidentFixture(t)
+	before, err := os.ReadFile(f.ex.desired.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.WriteFile(f.ex.desired.path, before, 0o600); err != nil {
+			t.Errorf("restore desired state for fixture cleanup: %v", err)
+		}
+	})
+	const malformed = `{"engines":`
+	if err := os.WriteFile(f.ex.desired.path, []byte(malformed), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	writes := 0
+	useEngineFileReplacer(t, durablefile.Replacer{CreateTemp: func(string, string, os.FileMode) (durablefile.File, error) {
+		writes++
+		return nil, errors.New("residency must not repair desired state")
+	}})
+	if result := f.run(t); result.Outcome != nodepolicy.ResidentNotDispatched {
+		t.Fatalf("failed desired read result = %+v", result)
+	}
+	f.noCalls(t)
+	if f.dispatches != 0 || writes != 0 {
+		t.Fatalf("failed desired read dispatched=%d writes=%d", f.dispatches, writes)
+	}
+	assertDesiredFileBytes(t, f.ex.desired.path, []byte(malformed))
+	if _, err := newDesiredStateStore(filepath.Dir(f.ex.desired.path)).load(); err == nil {
+		t.Fatal("malformed desired state became readable")
+	}
+}
+
+func assertDesiredFileBytes(t *testing.T, path string, want []byte) {
+	t.Helper()
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("desired-state bytes = %q, want %q", got, want)
 	}
 }
 

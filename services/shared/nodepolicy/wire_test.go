@@ -291,8 +291,14 @@ func TestResidentReservationEvidenceWire(t *testing.T) {
 }
 
 func TestReconcileResidentWire(t *testing.T) {
-	valid := ReconcileResidentParams{OperationID: "op-1", PolicyRevision: "1", Engine: "ollama", Model: "m:latest", Identity: residentIdentity(), TimeoutMs: 60_000, Reservation: ResidentReservationEvidence{ReservationID: "r-1", ProxyRunID: "p-1"}, Load: ResidentLoadOptions{ContextLength: 4096, KeepAliveSeconds: 300}}
-	testResidentWire(t, valid, "operationId policyRevision engine model identity timeoutMs reservation load",
+	valid := ReconcileResidentParams{OperationID: "op-1", PolicyRevision: "1", DeclaredResidentCount: 1, Engine: "ollama", Model: "m:latest", Identity: residentIdentity(), TimeoutMs: 60_000, Reservation: ResidentReservationEvidence{ReservationID: "r-1", ProxyRunID: "p-1"}, Load: ResidentLoadOptions{ContextLength: 4096, KeepAliveSeconds: 300}}
+	testResidentWire(t, valid, "operationId policyRevision declaredResidentCount engine model identity timeoutMs reservation load",
+		residentWireRejection{"zero declared resident count", "declaredResidentCount", 0},
+		residentWireRejection{"negative declared resident count", "declaredResidentCount", -1},
+		residentWireRejection{"declared resident count over bound", "declaredResidentCount", MaxModelConfigurationEntries + 1},
+		residentWireRejection{"fractional declared resident count", "declaredResidentCount", 1.5},
+		residentWireRejection{"string declared resident count", "declaredResidentCount", "1"},
+		residentWireRejection{"overflow declared resident count", "declaredResidentCount", json.Number("18446744073709551616")},
 		residentWireRejection{"invalid load", "load", ResidentLoadOptions{}},
 		residentWireRejection{"invalid reservation", "reservation", ResidentReservationEvidence{}},
 		residentWireRejection{"stale syntax revision", "policyRevision", "01"},
@@ -301,6 +307,10 @@ func TestReconcileResidentWire(t *testing.T) {
 		residentWireRejection{"invalid identity", "identity", StrictModelIdentity{}},
 		residentWireRejection{"invalid reference", "model", ""},
 		residentWireRejection{"invalid operation", "operationId", ""})
+	t.Run("upper declared resident count bound", func(t *testing.T) {
+		valid.DeclaredResidentCount = MaxModelConfigurationEntries
+		testResidentWire(t, valid, "operationId policyRevision declaredResidentCount engine model identity timeoutMs reservation load")
+	})
 }
 
 func TestResidentLoadOptionsWire(t *testing.T) {
@@ -622,9 +632,9 @@ func TestServedResidentOrderedOperationIDs(t *testing.T) {
 }
 
 func TestServedResidentReconcileKeepsOpaqueManagerIDs(t *testing.T) {
-	valid := ReconcileResidentParams{OperationID: "legacy-opaque-op", PolicyRevision: "1", Engine: "ollama", Model: "m:latest", Identity: residentIdentity(), TimeoutMs: 1000,
+	valid := ReconcileResidentParams{OperationID: "legacy-opaque-op", PolicyRevision: "1", DeclaredResidentCount: 1, Engine: "ollama", Model: "m:latest", Identity: residentIdentity(), TimeoutMs: 1000,
 		Reservation: ResidentReservationEvidence{ReservationID: "reservation", ProxyRunID: "proxy", ManagerIncarnation: "manager"}, Load: ResidentLoadOptions{ContextLength: 4096, KeepAliveSeconds: 300}}
-	testResidentWire(t, valid, "operationId policyRevision engine model identity timeoutMs reservation load")
+	testResidentWire(t, valid, "operationId policyRevision declaredResidentCount engine model identity timeoutMs reservation load")
 	prepare := PrepareResidentParams{PolicyRevision: valid.PolicyRevision, ProxyRunID: valid.Reservation.ProxyRunID, ManagerIncarnation: valid.Reservation.ManagerIncarnation,
 		Engine: valid.Engine, Model: valid.Model, Identity: valid.Identity, OperationID: valid.OperationID, TimeoutMs: valid.TimeoutMs}
 	if err := prepare.Validate(); err == nil {
