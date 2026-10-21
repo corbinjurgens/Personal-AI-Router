@@ -15,12 +15,10 @@ import (
 	"net/http/httputil"
 	"strconv"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"time"
 
 	"nvpair-shared/cors"
-	"nvpair-shared/nodepolicy"
 )
 
 type statusCapture struct {
@@ -507,6 +505,10 @@ func (f *facade) handleHTTPWithStreamIdle(w http.ResponseWriter, r *http.Request
 	// completion event still bumps the failed counter regardless of
 	// whether a matching Started was seen.
 	reqID := strconv.FormatUint(f.nextRequestID.Add(1), 10)
+	if !isInf {
+		f.serveProxyPassthrough(w, r, start, reqID)
+		return
+	}
 
 	// The request's own context. The client leaving still cancels it, and so
 	// can workload/cancel and cancelActive, each naming why in cancelReason so
@@ -525,31 +527,40 @@ func (f *facade) handleHTTPWithStreamIdle(w http.ResponseWriter, r *http.Request
 		}
 		return def
 	}
-	ctl := newWorkloadCtl(cancelRequest)
+	ctl := newRoutingRequest(cancelRequest)
+	// One immutable pre-dispatch deadline also bounds initial owned storage.
+	// The live request context remains independent so accepted streams drain.
+	ctl.deadline = start.Add(jobDeadline)
+	r = r.WithContext(context.WithValue(r.Context(), routingDeadlineContextKey{}, ctl.deadline))
+	defer ctl.finish()
+	stopCancellation := context.AfterFunc(reqCtx, func() {
+		ctl.cancelWithReason(cancelReasonOr("client disconnected before completion"))
+	})
+	defer stopCancellation()
 	var requestOwner *routingRequest
 	if isInf {
 		var buffers *ownedInferenceBuffers
 		r, buffers = p.ownInferenceBuffers(r)
 		w = &inferenceErrorWriter{ResponseWriter: w, ctx: r.Context()}
-		defer buffers.close()
+		// Keep cancellation discoverable until every final buffer borrower has
+		// joined, including registration refusal, body errors and panic unwind.
+		defer func() {
+			buffers.close()
+			p.unregisterRoutingRequest(requestOwner)
+		}()
 		var err error
 		requestOwner, err = p.registerRoutingRequest(ctl)
 		if err != nil {
 			writeIngressError(w, http.StatusServiceUnavailable, "identity-unavailable", "routing request identity or capacity is unavailable")
 			return
 		}
-		defer p.unregisterRoutingRequest(requestOwner)
 	}
-	// curTicket is the admission held for a self dispatch. Released after each
-	// attempt and, by this defer, on every other way out, including the
-	// ErrAbortHandler unwind of a mid-stream copy error.
-	var curTicket *admissionTicket
-	defer func() { curTicket.release() }()
-
 	// Parse the request's model before choosing a node. Model eligibility only
 	// applies to inference routes; control endpoints retain their existing
 	// routing behavior even when their JSON happens to contain a model field.
-	bodyBytes, model, err := bufferBodyAndModel(w, r, p.requestBodyLimit())
+	bodyCtx, stopBodyPreparation := context.WithDeadline(r.Context(), ctl.deadline)
+	bodyBytes, model, err := bufferInferenceBody(w, r.WithContext(bodyCtx), p.requestBodyLimit())
+	stopBodyPreparation()
 	if err != nil {
 		status := bufferRequestStatus(err)
 		reason := "request body read failed"
@@ -654,43 +665,96 @@ func (f *facade) handleHTTPWithStreamIdle(w http.ResponseWriter, r *http.Request
 			return
 		}
 	}
-	routingModel := ""
 	if isInf {
-		routingModel = model
+		ctl.sink = newResponseSink(w, func() { ctl.cancelWithReason("client connection lost") })
+		w = ctl.sink
+		r = r.WithContext(withResponseSink(r.Context(), ctl.sink))
 	}
-	// A tier request resolves to concrete (node, engine, model) candidates
-	// from the policy instead of to owners of the literal model name.
-	tier := ""
-	var needs requestNeeds
-	crossEngine := false
-	if isInf && nodepolicy.IsTier(model) {
-		tier = model
-		needs, err = parseRequestNeedsOwned(r.Context(), bodyBytes, r.URL.Path)
+	ctl.dispatch(f, w, r, start, reqID, bodyBytes, model, streamIdle, cancelReasonOr, requestOwner)
+}
+
+// Storage cancellation alone cannot interrupt a socket-backed Body.Read (or
+// its deferred Close). Bound that same body phase at the HTTP connection and
+// join the interrupt before clearing its temporary read deadline. No body
+// reader is detached, and the live request/response context is not replaced.
+func bufferInferenceBody(w http.ResponseWriter, r *http.Request, limit int64) ([]byte, string, error) {
+	controller := http.NewResponseController(w)
+	deadline, bounded := r.Context().Deadline()
+	if err := controller.SetReadDeadline(deadline); err != nil && !stderrors.Is(err, http.ErrNotSupported) {
+		return nil, "", &bufferBusyError{cause: err}
+	}
+	interrupted := make(chan struct{})
+	stop := context.AfterFunc(r.Context(), func() {
+		defer close(interrupted)
+		_ = controller.SetReadDeadline(time.Now())
+	})
+	body, model, err := bufferBodyAndModel(w, r, limit)
+	if !stop() {
+		<-interrupted
+	}
+	clearErr := controller.SetReadDeadline(time.Time{})
+	// Impossible own footprints retain their typed413 precedence.
+	if bufferRequestStatus(err) == http.StatusRequestEntityTooLarge {
+		return body, model, err
+	}
+	cause := r.Context().Err()
+	if cause == nil && bounded && !time.Now().Before(deadline) {
+		cause = context.DeadlineExceeded
+	}
+	if cause != nil {
+		return nil, "", &bufferBusyError{cause: cause}
+	}
+	if err == nil && clearErr != nil && !stderrors.Is(clearErr, http.ErrNotSupported) {
+		return nil, "", &bufferBusyError{cause: clearErr}
+	}
+	return body, model, err
+}
+
+func retryableProxyStatus(code int) bool {
+	switch code {
+	case http.StatusRequestTimeout, http.StatusTooManyRequests,
+		http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+		return true
+	}
+	return code >= http.StatusInternalServerError
+}
+
+// Control requests retain their single pass over concrete candidates. They do
+// not register inference identities, acquire inference buffers or enter its
+// request owner, admission, workload, performance or retry-deadline machinery.
+func (f *facade) serveProxyPassthrough(w http.ResponseWriter, r *http.Request, start time.Time, reqID string) {
+	p := f.host
+	body, model, err := bufferBodyAndModel(w, r, p.requestBodyLimit())
+	if err != nil {
+		reason := "request body read failed"
+		if bufferRequestStatus(err) == http.StatusRequestEntityTooLarge {
+			reason = "request body too large"
+		}
+		writeIngressError(w, bufferRequestStatus(err), "request-body", "request body could not be buffered")
+		_ = f.notify("proxy/request", RequestEvent{ID: reqID, Method: r.Method, Path: r.URL.Path,
+			Status: bufferRequestStatus(err), Duration: time.Since(start).Milliseconds(), Error: reason})
+		return
+	}
+	if err := validateRequestIdentifiers(r, body); err != nil {
+		writeIngressError(w, bufferRequestStatus(err), "request-identifier", err.Error())
+		return
+	}
+	strict, err := parseStrictAdmission(r.Header)
+	if err != nil || strict != nil {
+		message := "strict admission requires inference"
 		if err != nil {
-			writeIngressError(w, bufferRequestStatus(err), "inference-buffer", "inference request could not be prepared")
-			return
+			message = err.Error()
 		}
-		crossEngine = openAICompatibleInference[r.URL.Path]
+		writeIngressError(w, http.StatusBadRequest, "strict-admission", message)
+		return
 	}
-	resolve := func() []candidate {
-		var cands []candidate
-		if tier != "" {
-			cands = f.resolveTierCandidates(tier, needs, crossEngine)
-		} else {
-			cands = f.resolveCandidates(routingModel)
-		}
-		if !ctl.hasExclusions() {
-			return cands
-		}
-		kept := make([]candidate, 0, len(cands))
-		for _, c := range cands {
-			if !ctl.isExcluded(c.id) {
-				kept = append(kept, c)
-			}
-		}
-		return kept
+	if alias, reason, rejected := requestAliasRejection(r, body, model, false); rejected {
+		writeAliasRejection(w, alias, reason)
+		_ = f.notify("proxy/request", RequestEvent{ID: reqID, Method: r.Method, Path: r.URL.Path,
+			Status: http.StatusBadRequest, Duration: time.Since(start).Milliseconds(), Error: reason})
+		return
 	}
-	candidates := resolve()
+	candidates := f.resolveCandidates("")
 	if cors.IsPreflight(r) {
 		targets := make([]cors.Target, 0, len(candidates))
 		for _, cand := range candidates {
@@ -698,1167 +762,177 @@ func (f *facade) handleHTTPWithStreamIdle(w http.ResponseWriter, r *http.Request
 		}
 		sc := &statusCapture{ResponseWriter: w, status: http.StatusOK}
 		cors.ServePreflight(sc, r, targets)
-		f.notify("proxy/request", RequestEvent{ID: reqID, Method: r.Method, Path: r.URL.Path, Target: "cluster", Status: sc.status, Duration: time.Since(start).Milliseconds()})
+		_ = f.notify("proxy/request", RequestEvent{ID: reqID, Method: r.Method, Path: r.URL.Path,
+			Target: "cluster", Status: sc.status, Duration: time.Since(start).Milliseconds()})
 		return
 	}
-	// held is this request's claim on a node's capacity while it is in flight.
-	// resMu guards it because failover re-points it from the ReverseProxy's
-	// callbacks while the disconnect watcher may be releasing it.
-	var (
-		resMu sync.Mutex
-		held  reservation
-	)
-	sendBody := bodyBytes
-	preparedCtx := r.Context()
-	var preparedCandidate candidate
-	var preparedDefaults []byte
-	var preparedGeneration uint64
-	preparedValid := false
-	releaseSendBody, releasePreparation := func() {}, func() {}
-	dropPrepared := func() {
-		releasePreparation()
-		releaseSendBody()
-		releaseSendBody, releasePreparation = func() {}, func() {}
-		preparedValid = false
-	}
-	defer dropPrepared()
-	var beforeRebuild func()
-	prepareCandidate := func(ctx context.Context, c candidate, profile nodepolicy.Profile, hasProfile bool, generation uint64) error {
-		var defaults []byte
-		if hasProfile {
-			defaults = profile.RequestOptions
+	if route, ok := f.profile.routeFor(r.Method, r.URL.Path); ok && route.Role.isModelList() {
+		if len(candidates) != 0 {
+			_ = f.notify("proxy/request-started", RequestStartedEvent{ID: reqID, Method: r.Method, Path: r.URL.Path, Target: "cluster"})
 		}
-		if preparedValid && preparedCandidate == c && generation == preparedGeneration && bytes.Equal(defaults, preparedDefaults) {
-			allowance := preparedCtx.Value(performancePreparationKey{})
-			preparedCtx = ctx
-			if allowance != nil {
-				preparedCtx = context.WithValue(ctx, performancePreparationKey{}, allowance)
-			}
-			return nil
-		}
-		if beforeRebuild != nil {
-			beforeRebuild()
-		}
-		dropPrepared()
-		var err error
-		sendBody, releaseSendBody, err = transformBody(ctx, bodyBytes, c.model, c.model != "", defaults)
-		if err != nil {
-			releaseSendBody = func() {}
-			return err
-		}
-		concrete := model
-		if c.model != "" {
-			concrete = c.model
-		}
-		if hasProfile && !bodyModelMatches(sendBody, concrete) {
-			return errAmbiguousModel
-		}
-		preparedCtx = ctx
-		if c.self && isInf {
-			preparedCtx, releasePreparation, err = preparePerformanceBuffers(ctx, sendBody)
-			if err != nil {
-				releasePreparation = func() {}
-				return err
-			}
-		}
-		preparedCandidate, preparedDefaults, preparedGeneration, preparedValid = c, defaults, generation, true
-		return nil
-	}
-	if isInf && model != "" {
-		candidates, held, err = f.reserveRoundPrepared(r.Context(), candidates, tier != "", model, prepareCandidate, resolve)
-		if err != nil {
-			if r.Context().Err() == nil {
-				writeInferencePreparationError(w, err)
-			}
-			return
-		}
-	}
-	roundReservations := held.held
-	roundGeneration := preparedGeneration
-	// Released exactly once, whichever way the request ends: normal unwind,
-	// client disconnect, or an early return below. Without this a node stays
-	// counted as loaded until the next scheduler snapshot, so a steady trickle
-	// of short requests makes it look busier than it is and drives dispatch
-	// away from it.
-	//
-	// Both accessors release resMu by defer. The release itself runs from a
-	// defer, so a resMu stranded by a panic in the move would deadlock this
-	// request against its own cleanup.
-	moveHeld := func(nodeID string) {
-		resMu.Lock()
-		defer resMu.Unlock()
-		held = p.moveReservation(held, nodeID)
-	}
-	defer func() {
-		resMu.Lock()
-		defer resMu.Unlock()
-		p.releaseReservation(held)
-		held = reservation{}
-	}()
-	if matchedRoute, ok := f.profile.routeFor(r.Method, r.URL.Path); ok && matchedRoute.Role.isModelList() {
-		if len(candidates) > 0 {
-			_ = f.notify("proxy/request-started", RequestStartedEvent{
-				ID: reqID, Method: r.Method, Path: r.URL.Path, Target: "cluster",
-			})
-		}
-		status, err := f.serveModelList(w, r, matchedRoute, candidates)
+		status, err := f.serveModelList(w, r, route, candidates)
 		errText := ""
 		if err != nil {
 			errText = err.Error()
 		}
-		_ = f.notify("proxy/request", RequestEvent{
-			ID: reqID, Method: r.Method, Path: r.URL.Path, Target: "cluster",
-			Status: status, Duration: time.Since(start).Milliseconds(), Error: errText,
-		})
-		return
-	}
-	if len(candidates) == 0 && tier != "" {
-		// Nothing anywhere can answer this tier for this request, which waiting
-		// will not change.
-		slog.Warn("proxy request rejected",
-			"id", reqID, "method", r.Method, "path", r.URL.Path,
-			"remote", r.RemoteAddr, "reason", "no eligible model for tier", "tier", tier)
-		writeProxyError(w, http.StatusNotFound, []string{"no eligible model for tier ", tier}, needs.names(), true)
-		_ = f.notify("proxy/request", RequestEvent{
-			ID:       reqID,
-			Method:   r.Method,
-			Path:     r.URL.Path,
-			Status:   http.StatusNotFound,
-			Duration: time.Since(start).Milliseconds(),
-			Error:    "no eligible model for tier",
-		})
+		_ = f.notify("proxy/request", RequestEvent{ID: reqID, Method: r.Method, Path: r.URL.Path,
+			Target: "cluster", Status: status, Duration: time.Since(start).Milliseconds(), Error: errText})
 		return
 	}
 	if len(candidates) == 0 {
-		rejectionBody := `{"error":"no active node selected or available"}`
-		rejectionError := "no active node"
-		if isInf && model != "" {
-			rejectionBody = `{"error":"no available node advertises the requested model"}`
-			rejectionError = "no node advertises requested model"
-		}
-		slog.Warn("proxy request rejected",
-			"id", reqID, "method", r.Method, "path", r.URL.Path,
-			"remote", r.RemoteAddr, "reason", rejectionError)
-		http.Error(w, rejectionBody, http.StatusBadGateway)
-		_ = f.notify("proxy/request", RequestEvent{
-			ID:       reqID,
-			Method:   r.Method,
-			Path:     r.URL.Path,
-			Status:   http.StatusBadGateway,
-			Duration: time.Since(start).Milliseconds(),
-			Error:    rejectionError,
-		})
+		http.Error(w, `{"error":"no active node selected or available"}`, http.StatusBadGateway)
+		_ = f.notify("proxy/request", RequestEvent{ID: reqID, Method: r.Method, Path: r.URL.Path,
+			Status: http.StatusBadGateway, Duration: time.Since(start).Milliseconds(), Error: "no active node"})
 		return
 	}
-	// shouldRetry reports whether an upstream status warrants failing over to
-	// the next candidate: busy/unavailable/gateway statuses, plus a 404 on an
-	// inference call (an advertised owner's inventory may have become stale).
-	// Genuine client errors (400/401/422…) are not retried — they'd fail
-	// identically on every node.
-	shouldRetry := func(code int) bool {
-		switch code {
-		case http.StatusRequestTimeout,
-			http.StatusTooManyRequests,
-			http.StatusBadGateway,
-			http.StatusServiceUnavailable,
-			http.StatusGatewayTimeout:
-			return true
-		case http.StatusNotFound:
-			return isInf
-		}
-		return code >= 500
-	}
-
-	var (
-		servedNodeID string
-		servedTarget string
-		ttfbMs       int64
-		proxyErr     string
-		finalStatus  int
-		started      bool
-		wl           *Workload
-	)
-
-	// wlSeq numbers this workload's events. Every mutation of wl below happens
-	// either before the watcher goroutine exists or under wlMu, so a plain
-	// counter is enough; see Workload.Seq for why the sequence is needed.
-	var wlSeq int64
-	nextWlSeq := func() int64 { wlSeq++; return wlSeq }
-
-	// Emit workload:submitted the moment the request is admitted, before any
-	// dispatch. A burst of concurrent inference requests must surface as job
-	// cards immediately — the upstream engine serializes work on a single GPU
-	// slot, so a card that waited for the upstream response would leave every
-	// queued job invisible until the node dequeued it, one at a time (a prior
-	// regression). "queued" is what makes that visible without claiming the
-	// engine is generating, which only becomes true at the commit point below.
-	//
-	// scheduledOn is left empty here: nothing has been dispatched yet, and the
-	// scheduler counts pending work by scheduledOn, so naming a node we have
-	// not tried would inflate its load. Each dispatch and each gap between
-	// attempts re-points it.
-	if isInf && model != "" {
-		createdMs := start.UnixMilli()
-		// A tier request's model is the concrete model it is headed for: the
-		// leading candidate's until a dispatch says otherwise.
-		wlModel := model
-		if tier != "" && candidates[0].model != "" {
-			wlModel = candidates[0].model
-		}
-		wl = &Workload{
-			ID:             reqID,
-			Model:          wlModel,
-			RequestedModel: tier,
-			Engine:         f.profile.Name,
-			RunID:          p.runID,
-			State:          "queued",
-			CreatedAt:      createdMs,
-			Seq:            nextWlSeq(),
-		}
-		key := workloadKey{engine: f.profile.Name, id: reqID}
-		if err := p.registerWorkload(requestOwner, key); err != nil {
-			writeIngressError(w, http.StatusServiceUnavailable, "request-unavailable", "routing request workload is unavailable")
-			return
-		}
-		p.emitWorkload(workloadSubmittedMethod, *wl)
-	}
-
-	// The terminal workload transition (completed/errored) can be reached from
-	// two places: the normal path after the stream copy unwinds below, and the
-	// disconnect watcher that fires while the copy is still blocked. terminalOnce
-	// guarantees exactly one is emitted; wlMu guards the shared wl fields the
-	// watcher (a separate goroutine) and ModifyResponse's failover re-point both
-	// touch; terminated suppresses a late started re-point once we've finalized.
-	var (
-		terminalOnce sync.Once
-		wlMu         sync.Mutex
-		terminated   bool
-	)
-	emitTerminal := func(state, errMsg string) {
-		if wl == nil {
-			return
-		}
-		terminalOnce.Do(func() {
-			p.unregisterWorkload(requestOwner)
-			now := time.Now().UnixMilli()
-			wlMu.Lock()
-			terminated = true
-			wl.CompletedAt = &now
-			wl.State = state
-			if errMsg != "" {
-				wl.Error = &errMsg
-			}
-			wl.Seq = nextWlSeq()
-			snapshot := *wl
-			wlMu.Unlock()
-			// Only "completed" gets its own method; every other terminal state,
-			// including "cancelled", rides workload:errored. The workload
-			// manager does not validate method against state and consumers read
-			// the state out of the payload, so a new terminal state needs no new
-			// method on the wire.
-			method := workloadCompletedMethod
-			if state != "completed" {
-				method = workloadErroredMethod
-			}
-			p.emitWorkload(method, snapshot)
-		})
-	}
-
-	// Watch for the client going away while the request is in flight. The
-	// terminal event is otherwise emitted only after the stream copy returns;
-	// a client that disconnects mid-stream can leave the copy blocked, so we
-	// emit the terminal here the moment r.Context() is cancelled instead of
-	// waiting for the unwind. Cancelling r.Context() (client close, or our own
-	// shutdown) also propagates to the ReverseProxy's upstream request, so the
-	// engine stops generating. terminalOnce keeps this from double-emitting
-	// with the normal path. The half-open case (no FIN, r.Context() never
-	// fires) is caught instead by statusCapture's write deadline below.
-	if wl != nil {
-		reqCtx := r.Context()
-		finished := make(chan struct{})
-		defer close(finished)
-		go func() {
-			select {
-			case <-reqCtx.Done():
-				emitTerminal("cancelled", cancelReasonOr("client disconnected before completion"))
-			case <-finished:
-			}
-		}()
-	}
-
-	// committedSC is the statusCapture of the candidate we committed to
-	// streaming; its wroteErr tells us after the fact whether the client write
-	// failed (dead/half-open client) so we can mark the workload failed. It is
-	// assigned at the commit point as well as after the loop, because the
-	// post-loop assignment does not always run — see finalize below.
-	var committedSC *statusCapture
-	var committedStream *streamFrameReader
-
-	// finalize reports this request's outcome, and it is deferred because a
-	// mid-copy error is never returned to us: ReverseProxy converts one into
-	// panic(http.ErrAbortHandler) whenever it detects a real server, and that
-	// panic unwinds straight past the end of this function. Reported inline,
-	// both the terminal workload event and the proxy/request completion were
-	// lost whenever an upstream died mid-stream while the client was healthy,
-	// leaving the job "running" for the life of the broker. That is worse than
-	// a stuck card: the scheduler counts queued and running by scheduledOn, so
-	// the ghost permanently inflated that node's pending count and biased
-	// routing away from a node whose only fault was a crashed engine.
-	//
-	// Client-side failures never had this problem. net/http cancels the
-	// request context synchronously before a write error propagates
-	// (checkConnErrorWriter), so the watcher above has always emitted by the
-	// time the panic arrives. The upstream-died case is the one that had no
-	// reporter at all.
-	//
-	// Registered after the reservation release above, so on unwind this runs
-	// first and the node is still counted as loaded while we report.
+	var final *statusCapture
+	var nodeID, target, proxyErr string
+	var ttfb int64
 	defer func() {
 		aborted := recover()
-		// A managed copy ends with normal HTTP EOF even on protocol failure;
-		// its separate result, rather than the committed status, is decisive.
-		if committedStream != nil {
-			result := committedStream.Result()
-			if result.Outcome == streamOutcomeInterrupted || result.Outcome == streamOutcomeUpstreamError {
-				proxyErr = fmt.Sprintf("stream interrupted after output began on %s: %s", servedNodeID, result.Reason)
-			}
+		status := 0
+		if final != nil {
+			status = final.status
 		}
 		if aborted != nil && proxyErr == "" {
-			proxyErr = fmt.Sprintf("stream interrupted after output began on %s: upstream response copy aborted", servedNodeID)
+			proxyErr = "upstream response copy aborted"
 		}
-		reportErr := proxyErr
-		if committedSC != nil && finalStatus == 0 {
-			// The panic skipped the post-loop assignment, but the committed
-			// capture still carries the status the upstream sent.
-			finalStatus = committedSC.status
-		}
-
-		slog.Debug("proxy request complete",
-			"id", reqID,
-			"node_id", servedNodeID,
-			"method", r.Method,
-			"path", r.URL.Path,
-			"target", servedTarget,
-			"status", finalStatus,
-			"duration_ms", time.Since(start).Milliseconds(),
-			"ttfb_ms", ttfbMs,
-			"err", reportErr,
-		)
-
-		_ = f.notify("proxy/request", RequestEvent{
-			ID:       reqID,
-			NodeID:   servedNodeID,
-			Method:   r.Method,
-			Path:     r.URL.Path,
-			Target:   servedTarget,
-			Status:   finalStatus,
-			Duration: time.Since(start).Milliseconds(),
-			TTFB:     ttfbMs,
-			Error:    reportErr,
-		})
-
-		// Terminal workload transition pairs with the workload:started emitted
-		// at forward time above. Cancellation, an upstream/transport error, a
-		// failed client write (dead/half-open client), or any non-2xx status is
-		// a failure; a clean 2xx is a completion. The Workload carries the same
-		// id so the broker (and peers) can collapse the start/finish pair.
-		// Routed through emitTerminal so the disconnect watcher and this path
-		// emit exactly once.
-		if wl != nil {
-			switch {
-			case r.Context().Err() != nil:
-				// The request was cancelled before it finished — either the
-				// client disconnected or, on shutdown, we cancelled it to stop
-				// the in-flight inference. A mid-stream cancel never reaches
-				// ErrorHandler (the 200 headers are already sent), so without
-				// this branch it would be misreported as completed. (The
-				// watcher above usually beats us to it; emitTerminal makes that
-				// a no-op.) Cancelled rather than failed: nothing went wrong
-				// here, the requester stopped waiting.
-				emitTerminal("cancelled", cancelReasonOr("request cancelled before completion"))
-			case committedSC != nil && committedSC.wroteErr != nil:
-				// The response committed but a write to (or flush toward) the
-				// client failed — typically the idle deadline tripping on a
-				// dead/half-open client. The same event as the branch above,
-				// differing only in how we noticed: a client that vanished
-				// without a FIN never cancels the context, so the write
-				// deadline is what surfaces it. Classified identically.
-				emitTerminal("cancelled", "client connection lost: "+committedSC.wroteErr.Error())
-			case proxyErr != "" || finalStatus < http.StatusOK || finalStatus >= http.StatusMultipleChoices:
-				msg := proxyErr
-				if msg == "" {
-					msg = fmt.Sprintf("upstream returned HTTP %d", finalStatus)
-				}
-				emitTerminal("failed", msg)
-			default:
-				emitTerminal("completed", "")
-			}
-		}
-
+		_ = f.notify("proxy/request", RequestEvent{ID: reqID, NodeID: nodeID, Method: r.Method, Path: r.URL.Path,
+			Target: target, Status: status, Duration: time.Since(start).Milliseconds(), TTFB: ttfb, Error: proxyErr})
 		if aborted != nil {
-			// Preserve ReverseProxy's contract with http.Server, which recovers
-			// ErrAbortHandler silently and closes the connection. Swallowing it
-			// here would leave the client waiting on a response that will never
-			// be finished or closed.
 			panic(aborted)
 		}
 	}()
-
-	// repointWorkload records where the job is currently placed: a node id while
-	// an attempt is in flight, empty between attempts. The scheduler counts
-	// pending work by scheduledOn, so clearing it is what stops a node we have
-	// given up on from still looking busy. The state stays "queued" throughout,
-	// because "running" means the engine is generating and the broker's store
-	// would reject a return to "queued" as a backwards transition.
-	repointWorkload := func(nodeID, concrete string) {
-		if wl == nil {
-			return
-		}
-		wlMu.Lock()
-		if terminated || (wl.ScheduledOn == nodeID && (concrete == "" || wl.Model == concrete)) {
-			wlMu.Unlock()
-			return
-		}
-		wl.ScheduledOn = nodeID
-		if concrete != "" {
-			wl.Model = concrete
-		}
-		wl.Seq = nextWlSeq()
-		snapshot := *wl
-		wlMu.Unlock()
-		p.emitWorkload(workloadSubmittedMethod, snapshot)
-	}
-
-	// releaseHeld drops the capacity claim. Called before every backoff: the
-	// reservation map is process-wide and shared with the other engine's
-	// facade, so holding a claim on a node we have stopped using would push
-	// that engine's traffic away from a node that is in fact free. It is the
-	// same reasoning as clearing scheduledOn, applied to the proxy's own
-	// estimate rather than the scheduler's.
-	releaseHeld := func() {
-		resMu.Lock()
-		defer resMu.Unlock()
-		p.releaseReservation(held)
-		held = reservation{}
-	}
-	// takeHeld re-reserves for a fresh round, replacing any claim still held.
-	// reserveCandidate both orders the round and takes the claim, so a retry
-	// that re-resolves has to go back through it.
-	takeHeld := func(cands []candidate) ([]candidate, error) {
-		releaseHeld()
-		out, proposal, err := f.reserveRoundPrepared(r.Context(), cands, tier != "", model, prepareCandidate, resolve)
-		resMu.Lock()
-		held = proposal
-		resMu.Unlock()
-		roundReservations = proposal.held
-		roundGeneration = preparedGeneration
-		return out, err
-	}
-	beforeRebuild = func() { repointWorkload("", ""); releaseHeld() }
-
-	// Retry loop. Each iteration dispatches to one candidate; when a round's
-	// candidates are exhausted it backs off and re-resolves, so a node that
-	// recovered or a model that finished pulling becomes eligible mid-retry.
-	//
-	// Bounded by maxDispatchAttempts for dispatch failures and by jobDeadline
-	// for the whole pre-commit life. Both bounds are checked before every
-	// dispatch — the deadline never truncates an attempt already in flight,
-	// because killing one seconds from its first token and then failing the job
-	// for being out of time would spend the entire wait and discard the result.
-	//
-	// Retrying is only possible before the first byte reaches the client; past
-	// the commit point we are bound to that node, and a stream truncated from
-	// there fails explicitly for supported streams. proxy/request-started fires
-	// at the commit so it names the node that actually served. The self-forward guard lives in
-	// resolveCandidates.
-	// The budget is for inference only. Everything not in the engine's route
-	// table is forwarded verbatim, and some of those are state-changing: a
-	// POST /api/pull starts a model download. shouldRetry treats any 5xx as
-	// retryable regardless of route, so without this split a failed pull would
-	// be replayed up to five times — including against the node that just took
-	// the work, since re-resolution can pick it again.
-	//
-	// Non-inference therefore gets one pass over the resolved candidates: no
-	// re-resolution, no backoff, no deadline.
-	maxDispatches := maxDispatchAttempts
-	retryRounds := true
-	if !isInf {
-		maxDispatches = len(candidates)
-		retryRounds = false
-	}
-
-	deadline := start.Add(jobDeadline)
-	dispatches := 0
-	committed := false
-	respondedWithError := false
-	regenExhausted := false
-	// selfRejection is why this node refused its own candidate when that
-	// refusal excluded it, and is the answer if nothing else remains.
-	var selfRejection nodepolicy.RejectReason
-	round := candidates
-	next := 0
-	firstAttempt := true
-
-	for !committed {
-		if !firstAttempt {
-			beforeRebuild()
-			dropPrepared()
-		}
-		firstAttempt = false
-		if dispatches >= maxDispatches {
-			break
-		}
-		if retryRounds && !time.Now().Before(deadline) {
-			break
-		}
-		// Abandon-now: the requester has gone, so there is nobody left to
-		// receive an answer and the remaining attempts are better spent on work
-		// someone is waiting for. The watcher has already emitted the terminal
-		// as cancelled; the guard on the exhaustion response below keeps this
-		// from also inventing a reason for a client that stopped listening.
+	for i, cand := range candidates {
 		if r.Context().Err() != nil {
-			break
+			return
 		}
-		if isInf && model != "" {
-			p.admission.mu.Lock()
-			stale := roundGeneration != p.admission.policyGeneration
-			p.admission.mu.Unlock()
-			if stale {
-				beforeRebuild()
-				var err error
-				round, err = takeHeld(resolve())
-				if err != nil {
-					respondedWithError = true
-					finalStatus = bufferRequestStatus(err)
-					proxyErr = "inference request preparation failed"
-					if r.Context().Err() == nil {
-						writeInferencePreparationError(w, err)
-					}
-					break
-				}
-				next = 0
-			}
+		out := r.Clone(r.Context())
+		if body != nil {
+			setReplayBody(out, body)
 		}
-		if next >= len(round) {
-			if !retryRounds {
-				// Single pass: the candidate list is the whole budget.
-				break
-			}
-			// Round exhausted, or no owner was available. Either way the job is
-			// on no node right now, so drop both the placement and the capacity
-			// claim before waiting.
-			repointWorkload("", "")
-			releaseHeld()
-			// This node refused its own candidate for a reason no backoff will
-			// change, and nothing else can take the request: answer now.
-			if selfRejection != "" && len(resolve()) == 0 {
-				respondedWithError = true
-				finalStatus = http.StatusServiceUnavailable
-				proxyErr = "admission rejected: " + string(selfRejection)
-				writeAdmissionRejection(w, selfRejection)
-				break
-			}
-			if !waitBeforeRetry(r.Context(), backoffFor(dispatches, time.Until(deadline))) {
-				break
-			}
-			round = resolve()
-			if isInf && model != "" {
-				var err error
-				round, err = takeHeld(round)
-				if err != nil {
-					respondedWithError = true
-					finalStatus = bufferRequestStatus(err)
-					proxyErr = "inference request preparation failed"
-					if r.Context().Err() == nil {
-						writeInferencePreparationError(w, err)
-					}
-					break
-				}
-			}
-			next = 0
-			if len(round) == 0 && ctl.hasExclusions() {
-				// A cancel, or this node's own pause, excluded the only node
-				// left. Waiting for an owner would only run out the deadline on
-				// a node this request may not use.
-				if selfRejection != "" {
-					respondedWithError = true
-					finalStatus = http.StatusServiceUnavailable
-					proxyErr = "admission rejected: " + string(selfRejection)
-					writeAdmissionRejection(w, selfRejection)
-					break
-				}
-				regenExhausted = true
-				break
-			}
-			if len(round) == 0 {
-				// Every owner went away mid-flight. Not a rejection: keep
-				// waiting for one to come back. This consumes no attempt, which
-				// is why jobDeadline is the only bound on it.
-				continue
-			}
-		}
-		cand := round[next]
-		next++
-		// A node a cancel excluded stays out of this request, including later
-		// entries of a round resolved before the exclusion.
-		if ctl.isExcluded(cand.id) {
-			continue
-		}
-		dispatches++
-		// lastPermitted means no further dispatch can happen, so this attempt's
-		// failure is the client's answer. It is not "last candidate in the
-		// round" any more: another round may follow.
-		lastPermitted := dispatches >= maxDispatches ||
-			(retryRounds && !time.Now().Before(deadline))
-		last := lastPermitted
-		// What this attempt asks for: a tier candidate names its concrete model
-		// and may be another engine of this process.
-		candModel := model
-		if cand.model != "" {
-			candModel = cand.model
-		}
-		candEngine := cand.engineOr(f.profile.Name)
-		candFacade := cand.fac
-		if candFacade == nil {
-			candFacade = f
-		}
-
-		// Each attempt runs on its own context, a child of the request's, so we
-		// can abandon this dispatch without touching the request itself. The
-		// distinction is load-bearing: the disconnect watcher and the terminal
-		// classification both read r.Context(), the parent, so cancelling a
-		// child cannot be mistaken for the client going away.
-		attemptCtx, cancelAttempt := context.WithCancel(r.Context())
-		// claim decides, once, whether this attempt commits or is abandoned;
-		// see attemptClaim for why a pair of channels could not.
-		claim := &attemptClaim{}
-		att := &attemptCtl{claim: claim, cancel: cancelAttempt, nodeID: cand.id}
-		ctl.setAttempt(att)
-
-		// The body this attempt sends: the request's own, with a tier's concrete
-		// model in place of the tier name and every other byte untouched.
-		prepare := func(ctx context.Context, profile nodepolicy.Profile, hasProfile bool, generation uint64) error {
-			return prepareCandidate(ctx, cand, profile, hasProfile, generation)
-		}
-		preparationFailed := func(err error) {
-			cancelAttempt()
-			ctl.setAttempt(nil)
-			respondedWithError = true
-			finalStatus = bufferRequestStatus(err)
-			proxyErr = "inference request preparation failed"
-			writeInferencePreparationError(w, err)
-		}
-		if !cand.self || !isInf {
-			p.admission.mu.Lock()
-			generation := p.admission.policyGeneration
-			p.admission.mu.Unlock()
-			if err := prepare(attemptCtx, nodepolicy.Profile{}, false, generation); err != nil {
-				preparationFailed(err)
-				break
-			}
-		}
-		// How long the destination may queue this attempt: not at all while
-		// this round still has somewhere else to go, so a busy node hands the
-		// request straight back; the policy's queue timeout for the last one.
-		admissionWait := 0
-		if next >= len(round) {
-			admissionWait = p.admission.currentPolicy().Admission.QueueTimeoutSeconds
-		}
-
-		// This node's own engine is admitted here, before dispatch, the way a
-		// peer's ingress admits what we send it. A rejection is a failed
-		// candidate like a peer's 503, and writes nothing to the client unless
-		// it is the answer.
-		target := cand.url
-		admissionStarted := time.Now()
-		var performanceWait time.Duration
-		if cand.self && isInf {
-			decision := p.admission.admit(attemptCtx, admissionRequest{
-				resolvedInventory: true,
-				engine:            candEngine,
-				model:             candModel,
-				waitCap:           time.Duration(admissionWait) * time.Second,
-				cancel:            func() { ctl.abortLocalIf(att) },
-				prepare:           prepare,
-			})
-			rejectSelf := func(errText string, answer func()) bool {
-				cancelAttempt()
-				ctl.setAttempt(nil)
-				proxyErr = errText
-				if !last {
-					slog.Debug("proxy self candidate not admitted, failing over",
-						"id", reqID, "node_id", cand.id, "engine", candEngine, "err", errText)
-					return false
-				}
-				respondedWithError = true
-				servedNodeID = cand.id
-				servedTarget = target.Host
-				finalStatus = http.StatusServiceUnavailable
-				answer()
-				return true
-			}
-			if decision.err != nil {
-				if attemptCtx.Err() == nil {
-					preparationFailed(decision.err)
-					break
-				}
-				cancelAttempt()
-				ctl.setAttempt(nil)
-				if att.redispatched() {
-					dispatches--
-				}
-				// Otherwise the request itself ended while it waited; the loop's
-				// own check ends it.
-				continue
-			}
-			if decision.reject != "" {
-				if rejectSelf("admission rejected: "+string(decision.reject), func() {
-					writeAdmissionRejection(w, decision.reject)
-				}) {
-					break
-				}
-				// A node that is pausing or paused will refuse every later
-				// round too, so it leaves this request rather than spending
-				// its retry budget on the same refusal.
-				if p.admission.currentAvailability() != nodepolicy.Available {
-					ctl.exclude(cand.id)
-					selfRejection = decision.reject
-				}
-				continue
-			}
-			curTicket = decision.ticket
-			performanceWait = time.Since(admissionStarted)
-			attemptCtx = preparedCtx
-			if cand.dormant {
-				// Admission waited for the wake; the engine's address is the one
-				// it came up on.
-				u, ok := candFacade.localBackendTarget()
-				if !ok {
-					curTicket.release()
-					if rejectSelf("local engine is not running", func() {
-						writeIngressError(w, http.StatusServiceUnavailable, "no-local-backend",
-							"no local inference backend is available on this node")
-					}) {
-						break
-					}
-					continue
-				}
-				target = u
-			}
-		}
-		if isInf && model != "" {
-			resMu.Lock()
-			hasClaim := held.held
-			resMu.Unlock()
-			if !hasClaim {
-				var proposal reservation
-				stable := preparedGeneration == roundGeneration
-				if stable {
-					proposal, stable = p.claimPreparedTarget(attemptCtx, cand.id, preparedGeneration, roundReservations)
-				}
-				if !stable {
-					curTicket.release()
-					cancelAttempt()
-					ctl.setAttempt(nil)
-					next--
-					dispatches--
-					continue // Rebuild in this same driver without spending a dispatch.
-				}
-				resMu.Lock()
-				held = proposal
-				resMu.Unlock()
-			}
-		}
-		repointWorkload(cand.id, candModel)
-
-		// Framing follows this attempt's effective body, including local profile
-		// defaults. Ingress validation above still rejects ambiguous client flags
-		// before admission or any body rewrite.
-		var streamRequest originStreamRequest
-		if isInf {
-			var streamErr error
-			streamRequest, streamErr = parseOriginStreamRequest(r.URL.Path, sendBody)
-			if streamErr != nil {
-				curTicket.release()
-				cancelAttempt()
-				ctl.setAttempt(nil)
-				respondedWithError = true
-				finalStatus = http.StatusBadRequest
-				proxyErr = "invalid effective stream flag"
-				writeIngressError(w, http.StatusBadRequest, "invalid-stream", "invalid effective stream flag")
-				break
-			}
-		}
-
-		// Watch the target while the attempt is pre-commit. A node that has
-		// dropped out of discovery is not coming back to answer a request
-		// already sent to it, and without this the attempt sat out the whole
-		// first-content budget before failing over — while the broker had
-		// already stamped the record failed from its own node-loss sweep, so
-		// the UI said failed while the client still waited.
-		//
-		// Polling rather than subscribing keeps this out of Discovery's
-		// contract, and the interval only bounds detection latency. Watching
-		// stops at the commit point, because cancelling after that would kill a
-		// stream that is working.
-		//
-		// A dormant self candidate is not in discovery until its engine has
-		// been advertised again, so it is not watched.
-		//
-		// Read the interval once, on this goroutine: the watcher must not
-		// depend on a value that could change under it mid-attempt.
-		watchEvery := targetWatchInterval
-		if !cand.dormant {
-			go func() {
-				t := time.NewTicker(watchEvery)
-				defer t.Stop()
-				for {
-					select {
-					case <-attemptCtx.Done():
-						return
-					case <-t.C:
-						// The commit path may have claimed the outcome since the
-						// last tick, in which case this attempt is no longer ours
-						// to cancel.
-						if claim.settled() {
-							return
-						}
-						if candFacade.discovery.Has(cand.id) {
-							continue
-						}
-						if claim.abandon() {
-							cancelAttempt()
-						}
-						return
-					}
-				}
-			}()
-		}
-
-		// ReverseProxy derives the outbound request from the one it is given,
-		// so the attempt context has to travel on a copy. The replayed body
-		// and the per-attempt admission header go on the copy for the same
-		// reason, with headers cloned so one attempt's never leak into the
-		// next.
-		attemptReq := r.WithContext(attemptCtx)
-		attemptReq.Header = r.Header.Clone()
-		if isInf && streamRequest.protocol != streamProtocolUnknown {
-			// Explicit identity also prevents Go's transport from negotiating gzip.
-			attemptReq.Header.Set("Accept-Encoding", "identity")
-		}
-		if bodyBytes != nil {
-			setReplayBody(attemptReq, sendBody)
-		}
-		if isInf {
-			if cand.self {
-				attemptReq.Header.Del(nodepolicy.AdmissionWaitHeader)
-			} else {
-				attemptReq.Header.Set(nodepolicy.AdmissionWaitHeader, strconv.Itoa(admissionWait))
-			}
-		}
-		retry := false
+		last, retry := i == len(candidates)-1, false
 		sc := &statusCapture{ResponseWriter: w, status: http.StatusOK, idle: idleClientWriteTimeout}
-		var performance *performanceAttempt
-		if cand.self && isInf {
-			var err error
-			performance, err = candFacade.newPerformanceAttemptOwned(preparedCtx, candModel, r.URL.Path, sendBody, performanceWait)
-			if err != nil {
-				curTicket.release()
-				preparationFailed(err)
-				break
-			}
-		}
-
 		proxy := &httputil.ReverseProxy{
 			Director: func(req *http.Request) {
 				if cand.self {
 					stripInternalRoutingHeaders(req.Header)
 					req.Header.Del(peerStreamFramingHeader)
 				}
-				req.URL.Scheme = target.Scheme
-				req.URL.Host = target.Host
-				req.Host = target.Host
+				req.URL.Scheme, req.URL.Host, req.Host = cand.url.Scheme, cand.url.Host, cand.url.Host
 			},
-			// A remote cluster peer is dialed over mTLS (per-peer pinned config);
-			// self/manual candidates use the plain transport. See candidateTransport.
-			Transport: performanceTransport{RoundTripper: proxyResponseTransport{p.candidateTransport(cand)}, attempt: performance},
-			// ModifyResponse fires when the upstream's status line + headers
-			// have arrived but before the body streams. That's both the retry
-			// decision point and, on commit, the time-to-first-byte boundary.
+			Transport: passthroughTransport{RoundTripper: proxyResponseTransport{p.candidateTransport(cand)}, candidate: cand, facade: f},
 			ModifyResponse: func(resp *http.Response) error {
-				metadata := resp.Header.Values(peerStreamFramingHeader)
 				resp.Header.Del(peerStreamFramingHeader)
 				resp.Trailer.Del(peerStreamFramingHeader)
-				if !last && shouldRetry(resp.StatusCode) {
-					// Abort before streaming: ReverseProxy closes resp.Body and
-					// calls ErrorHandler with our sentinel, then we try next.
+				if !last && retryableProxyStatus(resp.StatusCode) {
 					retry = true
 					return retrySignal{}
 				}
-				if isInf && cand.peerUUID != "" && streamRequest.protocol != streamProtocolUnknown && resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices {
-					var err error
-					streamRequest, err = streamRequest.withPeerMetadata(metadata)
-					if err != nil {
-						return err // existing attempt failure path; never commit body bytes
-					}
-				}
-				// Hold the commit until the engine actually produces content.
-				// Only for inference: a control endpoint's headers mean what
-				// they say, and the model-list fan-out has its own client.
-				// Waiting here costs a non-streaming response nothing, since
-				// its headers and body arrive together. Framing is selected
-				// separately, after the winning claim.
-				var peeked io.ReadCloser
-				if isInf {
-					body, err := awaitFirstBody(resp.Body, firstBodyTimeout)
-					if err != nil {
-						// This response must not commit, whether or not another
-						// attempt is permitted. awaitFirstBody's reader is still
-						// blocked on resp.Body, so committing would put two
-						// readers on one stream — the peek could swallow a byte
-						// the client never sees — and against a silent upstream
-						// the copy would then block with nothing left to
-						// interrupt it, hanging the request past every bound we
-						// set.
-						//
-						// Returning an error is what releases that reader:
-						// ReverseProxy closes resp.Body and calls ErrorHandler.
-						proxyErr = err.Error()
-						if !last {
-							retry = true
-							slog.Warn("proxy upstream produced no content, failing over",
-								"id", reqID, "node_id", cand.id, "target", target.Host,
-								"path", r.URL.Path, "err", err)
-							return retrySignal{}
-						}
-						slog.Warn("proxy upstream produced no content, retries exhausted",
-							"id", reqID, "node_id", cand.id, "target", target.Host,
-							"method", r.Method, "path", r.URL.Path,
-							"duration_ms", time.Since(start).Milliseconds(), "err", err)
-						return err
-					}
-					peeked = body
-				}
-				// Claim the attempt before any commit side effect. Losing the
-				// claim means the watcher has already cancelled this attempt,
-				// so committing would stream through a context that is about to
-				// die and truncate the response we just started.
-				if !claim.commit() {
-					if att.redispatch.Load() {
-						// A cancel moved this request on before it committed.
-						retry = true
-						return retrySignal{}
-					}
-					proxyErr = errTargetGone.Error()
-					if !last {
-						retry = true
-						slog.Warn("proxy target left discovery as the response committed, failing over",
-							"id", reqID, "node_id", cand.id, "target", target.Host,
-							"path", r.URL.Path)
-						return retrySignal{}
-					}
-					return errTargetGone
-				}
-				// The peeked byte goes back only once the commit is ours, so a
-				// lost claim leaves the body untouched for ReverseProxy to close.
-				if peeked != nil {
-					resp.Body = peeked
-				}
-				if isInf {
-					reader, err := installResponseStream(resp, streamRequest, r.Context(), streamIdle, performance)
-					if err != nil {
-						return err
-					}
-					committedStream = reader
-				}
-				if resp.StatusCode != http.StatusSwitchingProtocols {
-					sc.upstreamBody = &originResponseBody{ReadCloser: resp.Body, response: resp, managed: committedStream != nil}
-					resp.Body = sc.upstreamBody
-				}
-				// Name what actually answered (FORK_DESIGN.md §3.8). Set on the
-				// committed response only, so a failed-over attempt's headers
-				// can never reach the client.
-				if isInf {
-					resp.Header.Set(nodepolicy.ModelHeader, candModel)
-					resp.Header.Set(nodepolicy.EngineHeader, candEngine)
-					resp.Header.Set(nodepolicy.NodeHeader, cand.id)
-					if tier != "" {
-						resp.Header.Set(nodepolicy.TierHeader, tier)
-					} else {
-						resp.Header.Del(nodepolicy.TierHeader)
-					}
-				}
-				// Committing to this candidate — body stream is about to begin.
-				ttfbMs = time.Since(start).Milliseconds()
-				servedNodeID = cand.id
-				servedTarget = target.Host
-				proxyErr = "" // clear any error recorded from a failed-over candidate
-				// Arm the liveness report only now. statusCapture also carries
-				// the proxy's OWN error bodies — ReverseProxy's ErrorHandler
-				// writes a failed dial's message through it — and those bytes
-				// prove nothing about the node. Reaching here means the upstream
-				// returned a status line, so everything written from this point
-				// came from the node. Same goroutine as the body copy, so no
-				// synchronization is needed.
+				nodeID, target, proxyErr = cand.id, cand.url.Host, ""
+				ttfb = time.Since(start).Milliseconds()
+				final = sc
 				sc.upstreamAlive = func() { p.reportActivity(cand.id) }
-				// Preserve the upstream response, including absent CORS permissions.
-				if !started {
-					started = true
-					_ = f.notify("proxy/request-started", RequestStartedEvent{
-						ID:     reqID,
-						NodeID: cand.id,
-						Method: r.Method,
-						Path:   r.URL.Path,
-						Target: target.Host,
-					})
-					// The claim already follows each dispatch, so this is a
-					// no-op unless something reordered underneath us; it stays
-					// as the belt-and-braces guarantee that the node that
-					// actually served is the one counted as loaded.
-					moveHeld(cand.id)
-					// Record the commit here, not just after the loop: a copy
-					// error aborts this handler by panic, and finalize needs to
-					// know the response had committed (and on which capture) to
-					// classify it.
-					committedSC = sc
-					// queued -> running: the engine is producing content, so
-					// this is the first moment "running" is true. It also fixes
-					// the placement on the node that actually served, which may
-					// differ from the last node the queued updates named.
-					// Guarded by wlMu against the disconnect watcher, and
-					// skipped once terminated so a late transition cannot
-					// resurrect a workload we have already finalized.
-					if wl != nil {
-						wlMu.Lock()
-						if !terminated {
-							startedMs := time.Now().UnixMilli()
-							wl.State = "running"
-							wl.StartedAt = &startedMs
-							wl.ScheduledOn = cand.id
-							wl.Model = candModel
-							wl.Seq = nextWlSeq()
-							snapshot := *wl
-							wlMu.Unlock()
-							p.emitWorkload(workloadStartedMethod, snapshot)
-						} else {
-							wlMu.Unlock()
-						}
-					}
-				}
+				_ = f.notify("proxy/request-started", RequestStartedEvent{ID: reqID, NodeID: cand.id, Method: r.Method, Path: r.URL.Path, Target: target})
 				return nil
 			},
 			ErrorHandler: func(ew http.ResponseWriter, _ *http.Request, err error) {
 				if _, ok := err.(retrySignal); ok {
-					return // retryable status — the loop advances to the next candidate
-				}
-				// A deliberate abort says nothing about the node or its
-				// address, and is never the client's answer.
-				if att.redispatch.Load() && claim.abandoned() {
-					retry = true
 					return
 				}
-				// Transport/dial error (not a status-based retry): forget this
-				// node's confirmed address so the next request re-confirms and
-				// can fail over to another of its published addresses
-				// (multi-homed peer). The in-request failover below moves on to
-				// the next node.
-				candFacade.targets.Forget(cand.id)
+				owner := cand.fac
+				if owner == nil {
+					owner = f
+				}
+				owner.targets.Forget(cand.id)
 				if !last {
-					// Transport/dial error with candidates left: fail over.
 					retry = true
-					proxyErr = err.Error()
-					slog.Warn("proxy upstream error, failing over",
-						"id", reqID, "node_id", cand.id, "target", target.Host,
-						"path", r.URL.Path, "err", err)
 					return
 				}
-				// No further dispatch is permitted: terminal, surface it.
-				respondedWithError = true
-				servedNodeID = cand.id
-				servedTarget = target.Host
-				proxyErr = err.Error()
-				slog.Warn("proxy upstream error, retries exhausted",
-					"id", reqID, "node_id", cand.id, "target", target.Host,
-					"method", r.Method, "path", r.URL.Path,
-					"duration_ms", time.Since(start).Milliseconds(), "err", err)
-				// A node that answered but never produced content timed out
-				// rather than failed to be reached, and 504 says so.
-				status := http.StatusBadGateway
-				if stderrors.Is(err, errFirstBodyTimeout) {
-					status = http.StatusGatewayTimeout
-				}
-				writeProxyError(ew, status, []string{"upstream error: ", proxyErr}, nil, false)
+				nodeID, target, proxyErr, final = cand.id, cand.url.Host, err.Error(), sc
+				writeProxyError(ew, http.StatusBadGateway, []string{"upstream error: ", proxyErr}, nil, false)
 			},
 		}
-
-		func() {
-			returned := false
-			defer func() { performance.finish(sc, returned) }()
-			proxy.ServeHTTP(sc, attemptReq)
-			returned = true
-		}()
-		cancelAttempt()
-		// The admitted execution ends with the attempt: a retried attempt no
-		// longer occupies this node, and a committed one has finished copying.
-		curTicket.release()
-		ctl.setAttempt(nil)
-		switch {
-		case att.redispatched():
-			// Moved on by a cancel, not failed: it costs no dispatch.
-			retry = true
-			dispatches--
-			proxyErr = "attempt aborted to re-dispatch the request"
-		case claim.abandoned():
-			// Name the real reason rather than the bare "context canceled" the
-			// transport reports, which reads identically to a client hangup.
-			proxyErr = errTargetGone.Error()
-		}
+		proxy.ServeHTTP(sc, out)
 		if !retry {
-			finalStatus = sc.status
-			committedSC = sc
-			committed = true
+			return
 		}
 	}
+}
 
-	// Nothing committed and no attempt wrote the client's answer, so the loop
-	// ended between attempts: either the budget ran out or, more usually, every
-	// owner went away and none came back before the deadline. The dispatch
-	// paths answer for themselves — a final transport failure writes its own
-	// 502 and a non-retryable status is passed through — so this is the only
-	// outcome left without a response.
-	//
-	// An abandoned request is excluded: writing to a client that has gone
-	// achieves nothing, and attributing its end to a missing node would be a
-	// fabricated reason for something that was the requester's own choice.
-	if !committed && !respondedWithError && r.Context().Err() == nil {
-		// Name what the loop was actually doing when it ran out, which is what
-		// the caller needs to know. The three cases are distinguishable: the
-		// budget is gone; or the deadline passed while an owner was still there
-		// to try, because slow attempts can reach 10 minutes before they reach
-		// five dispatches; or the deadline passed with the candidate set empty,
-		// which is the wait for an owner to come back.
-		reason := "no node advertising the requested model became available before the retry deadline"
-		switch {
-		case regenExhausted:
-			reason = "no other eligible node remained after the previous one was excluded"
-		case dispatches >= maxDispatches:
-			reason = "every dispatch attempt failed"
-		case len(round) > 0:
-			reason = "the retry deadline passed while dispatch attempts were still failing"
-		}
-		proxyErr = reason
-		finalStatus = http.StatusServiceUnavailable
-		slog.Warn("proxy request exhausted its retry budget",
-			"id", reqID, "method", r.Method, "path", r.URL.Path,
-			"dispatches", dispatches, "duration_ms", time.Since(start).Milliseconds(),
-			"reason", reason)
-		// Advisory only: the caller knows its own patience better than we do.
-		w.Header().Set("Retry-After", "1")
-		writeProxyError(w, http.StatusServiceUnavailable, []string{reason}, nil, false)
+// Header arrival ends control transport discovery monitoring. Unlike inference,
+// this is a transport wait only: no response-body commitment or retry owner.
+type passthroughTransport struct {
+	http.RoundTripper
+	candidate candidate
+	facade    *facade
+}
+
+func (t passthroughTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	if t.candidate.dormant {
+		return t.RoundTripper.RoundTrip(r)
 	}
+	ctx, cancel := context.WithCancel(r.Context())
+	type result struct {
+		response *http.Response
+		err      error
+	}
+	ready := make(chan result, 1)
+	go func() { resp, err := t.RoundTripper.RoundTrip(r.WithContext(ctx)); ready <- result{resp, err} }()
+	owner := t.candidate.fac
+	if owner == nil {
+		owner = t.facade
+	}
+	ticker := time.NewTicker(targetWatchInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case result := <-ready:
+			if result.err != nil {
+				cancel()
+				return result.response, result.err
+			}
+			if upgrade, ok := result.response.Body.(io.ReadWriteCloser); ok && result.response.StatusCode == http.StatusSwitchingProtocols {
+				result.response.Body = &passthroughUpgradeBody{ReadWriteCloser: upgrade, cancel: cancel}
+				return result.response, nil
+			}
+			result.response.Body = &passthroughResponseBody{ReadCloser: result.response.Body, cancel: cancel}
+			return result.response, nil
+		case <-ctx.Done():
+			result := <-ready
+			if result.response != nil {
+				_ = result.response.Body.Close()
+			}
+			cancel()
+			return nil, ctx.Err()
+		case <-ticker.C:
+			if !owner.discovery.Has(t.candidate.id) {
+				cancel()
+				result := <-ready
+				if result.response != nil {
+					_ = result.response.Body.Close()
+				}
+				return nil, errTargetGone
+			}
+		}
+	}
+}
 
-	// Reporting happens in the deferred finalize above, so it survives the
-	// ErrAbortHandler panic that a mid-copy error raises.
+type passthroughResponseBody struct {
+	io.ReadCloser
+	cancel context.CancelFunc
+}
+
+func (b *passthroughResponseBody) Close() error { defer b.cancel(); return b.ReadCloser.Close() }
+
+type passthroughUpgradeBody struct {
+	io.ReadWriteCloser
+	cancel context.CancelFunc
+}
+
+func (b *passthroughUpgradeBody) Close() error {
+	defer b.cancel()
+	return b.ReadWriteCloser.Close()
 }
 
 func writeInferencePreparationError(w http.ResponseWriter, err error) {

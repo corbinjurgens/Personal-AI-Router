@@ -21,7 +21,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"nvpair-shared/applog"
@@ -490,58 +489,6 @@ func (p *Proxy) Run(ctx context.Context) error {
 	p.shutdown(shutCtx)
 
 	return err
-}
-
-// Attempt outcomes for attemptClaim.
-const (
-	attemptPending int32 = iota
-	attemptCommitted
-	attemptAbandoned
-)
-
-// attemptClaim resolves the race between committing an attempt and abandoning
-// it because its target left discovery.
-//
-// Both can become true at once: the watcher's discovery check can pass while
-// the commit path is already running, and between the first body byte arriving
-// and the commit finishing that path does a synchronous notification write and
-// takes two mutexes. A pair of channels cannot express which happened first —
-// closing one says an event occurred, not that it won — so the outcome is one
-// value that each side claims by compare-and-swap.
-//
-// Exactly one of commit and abandon succeeds, and callers must honor the
-// result: a false from commit means this attempt is being cancelled and must
-// not be served, and a false from abandon means the response is already
-// committed and must not be torn down.
-type attemptClaim struct {
-	state atomic.Int32
-}
-
-// commit claims the attempt for the response. Idempotent, so an already
-// committed attempt still reports true.
-func (a *attemptClaim) commit() bool {
-	return a.state.CompareAndSwap(attemptPending, attemptCommitted) ||
-		a.state.Load() == attemptCommitted
-}
-
-// abandon claims the attempt for cancellation, reporting false when the
-// response has already committed.
-//
-// A committed first byte wins on purpose. The byte is direct evidence that this
-// node is serving this request, whereas an absence from discovery can be a
-// transient announcement gap; cancelling then would truncate a working stream.
-func (a *attemptClaim) abandon() bool {
-	return a.state.CompareAndSwap(attemptPending, attemptAbandoned)
-}
-
-// settled reports whether either side has claimed the outcome.
-func (a *attemptClaim) settled() bool {
-	return a.state.Load() != attemptPending
-}
-
-// abandoned reports whether cancellation won.
-func (a *attemptClaim) abandoned() bool {
-	return a.state.Load() == attemptAbandoned
 }
 
 // Timeouts for upstream connections. Logged at startup so they're always

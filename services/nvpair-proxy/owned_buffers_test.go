@@ -761,7 +761,7 @@ func TestOwnedInferenceBuffersIdentifierLimit(t *testing.T) {
 	})
 }
 
-func ownedAssertHandlerDrained(t *testing.T, p *Proxy, control *workloadCtl) {
+func ownedAssertHandlerDrained(t *testing.T, p *Proxy, control *routingSpend) {
 	t.Helper()
 	bufferAssertTotals(t, p.buffers, 0, 0, 0)
 	p.identityMu.Lock()
@@ -781,7 +781,7 @@ func ownedAssertHandlerDrained(t *testing.T, p *Proxy, control *workloadCtl) {
 	}
 	if control != nil {
 		control.mu.Lock()
-		done, attempt := control.done, control.attempt
+		done, attempt := control.done, control.active
 		control.mu.Unlock()
 		if !done || attempt != nil {
 			t.Fatalf("controller retained an attempt: done=%v attempt=%p", done, attempt)
@@ -1039,9 +1039,9 @@ func TestOwnedInferenceBuffersHandlerPreparationCancellation(t *testing.T) {
 				return fx.p.buffers.waiters.Len() == 1
 			})
 			fx.p.identityMu.Lock()
-			var control *workloadCtl
+			var control *routingSpend
 			for _, request := range fx.p.requests {
-				control = request.control
+				control = request.owner
 			}
 			fx.p.identityMu.Unlock()
 			if control == nil {

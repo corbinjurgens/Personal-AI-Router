@@ -4,15 +4,19 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"io"
 	"math"
 	"net/http"
 	"net/netip"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"nvpair-shared/durablefile"
 	"nvpair-shared/nodepolicy"
@@ -536,4 +540,507 @@ func TestPublicAttemptLifecycle(t *testing.T) {
 			t.Fatal("parser storage leaked")
 		}
 	})
+}
+
+// These cases execute E/D's existing one-attempt seam with the request's real
+// sink. Synthetic transport never dials a provider; all storage uses I4a's root.
+func TestPublicAttemptLifecycleOwnedSink(t *testing.T) {
+	attach := func(t *testing.T, f *chatAccountFixture, w http.ResponseWriter) (*routingSpend, *publicAttemptLifecycle, *responseSink) {
+		t.Helper()
+		ctx, root, buffers := chatTestInferenceContext(t, 64<<20, 0)
+		parser, err := buffers.scope.tryAcquire(ctx, 96<<10)
+		if err != nil {
+			t.Fatal(err)
+		}
+		buffers.retainParser(parser)
+		request := newRoutingRequest(nil)
+		sink := newResponseSink(w, func() { request.cancelWithReason("client connection lost") })
+		request.sink = sink
+		f.ctx = withResponseSink(ctx, sink)
+		f.body = strings.TrimSuffix(chatSimple, "}") + `,"stream":true}`
+		f.response = chatCompleteStream()
+		attempt := spendAttempt(t, request)
+		t.Cleanup(func() {
+			if f.budget.used.Load() != 0 || root.used != 96<<10 || request.active != nil {
+				t.Errorf("live attempt resources: explicit=%d root=%d active=%v", f.budget.used.Load(), root.used, request.active != nil)
+			}
+			request.finish()
+			buffers.close()
+			if root.used != 0 || root.live != 0 || root.waiters.Len() != 0 {
+				t.Errorf("owned sink leaked: used=%d live=%d queue=%d", root.used, root.live, root.waiters.Len())
+			}
+		})
+		return request, attempt, sink
+	}
+	writer := func() *responseSinkWriter { return &responseSinkWriter{header: make(http.Header)} }
+
+	t.Run("raw commitment preserves live public parser after request deadline", func(t *testing.T) {
+		f := newChatAccountFixture(t)
+		w := writer()
+		request, attempt, sink := attach(t, f, w)
+		request.deadline = time.Now().Add(200 * time.Millisecond)
+		reader, pipe := io.Pipe()
+		defer reader.Close()
+		defer pipe.Close()
+		release := make(chan struct{})
+		var once sync.Once
+		unblock := func() { once.Do(func() { close(release) }) }
+		defer unblock()
+		transport := f.transport.client.Transport
+		f.transport.client.Transport = publicTestRoundTrip(func(req *http.Request) (*http.Response, error) {
+			response, err := transport.RoundTrip(req)
+			if err != nil {
+				return response, err
+			}
+			if err := response.Body.Close(); err != nil {
+				return nil, err
+			}
+			response.Body = reader
+			return response, nil
+		})
+		written := make(chan error, 1)
+		go func() {
+			end := strings.Index(f.response, "\n\n") + 2
+			_, err := io.WriteString(pipe, f.response[:end])
+			if err == nil {
+				<-release
+				_, err = io.WriteString(pipe, f.response[end:])
+			}
+			closeErr := pipe.Close()
+			written <- errors.Join(err, closeErr)
+		}()
+		type completion struct {
+			result chatParseResult
+			err    error
+		}
+		done := make(chan completion, 1)
+		go func() {
+			result, err := lifecycleRun(t, f, attempt, chatTestGuard(f.guard))
+			done <- completion{result, err}
+		}()
+		waitForCond(t, time.Second, "public raw commitment", func() bool { request.mu.Lock(); defer request.mu.Unlock(); return request.committed })
+		<-time.After(time.Until(request.deadline) + 50*time.Millisecond)
+		select {
+		case result := <-done:
+			unblock()
+			t.Fatalf("public stream ended at preparation bound: %+v", result)
+		default:
+		}
+		unblock()
+		result := <-done
+		if writeErr := <-written; writeErr != nil {
+			t.Fatal(writeErr)
+		}
+		if result.err != nil || !result.result.Complete || request.cancelled || !attempt.terminal.Delivered || attempt.terminal.Accounting != publicAccountingRecorded || !sink.result().DeliveryComplete || w.body.String() != f.response {
+			t.Fatalf("public accepted stream lost live context: err=%v complete=%v cancelled=%v terminal=%+v sink=%+v body=%q", result.err, result.result.Complete, request.cancelled, attempt.terminal, sink.result(), w.body.String())
+		}
+	})
+
+	t.Run("same owned sink replaces external emitter exactly once", func(t *testing.T) {
+		f := newChatAccountFixture(t)
+		w := writer()
+		request, attempt, sink := attach(t, f, w)
+		emissions := 0
+		f.emit = func([]byte) error { emissions++; return errors.New("external emitter must be unused") }
+		result, err := lifecycleRun(t, f, attempt, chatTestGuard(f.guard))
+		delivery := sink.result()
+		if err != nil || !result.Complete || !request.committed || !attempt.committed || emissions != 0 {
+			t.Fatalf("owned attempt: result=%+v err=%v committed=%v/%v external=%d", result, err, request.committed, attempt.committed, emissions)
+		}
+		if w.body.String() != f.response || bytes.Count(w.body.Bytes(), []byte("[DONE]")) != 1 || len(w.statuses) != 1 || w.statuses[0] != http.StatusOK || w.Header().Get("Content-Type") != "text/event-stream" {
+			t.Fatalf("owned output: statuses=%v body=%q type=%q", w.statuses, w.body.String(), w.Header().Get("Content-Type"))
+		}
+		if !delivery.ProtocolComplete || !delivery.DeliveryComplete || delivery.Genuine == 0 || delivery.Synthetic != int64(len("data: [DONE]\n\n")) || !attempt.terminal.Delivered || attempt.terminal.Accounting != publicAccountingRecorded {
+			t.Fatalf("owned facts: sink=%+v terminal=%+v", delivery, attempt.terminal)
+		}
+		if _, err := request.newAttempt(); !errors.Is(err, errRoutingSpend) {
+			t.Fatalf("completed request admitted fallback: %v", err)
+		}
+	})
+
+	t.Run("owned sink permits no external emitter", func(t *testing.T) {
+		f := newChatAccountFixture(t)
+		w := writer()
+		_, attempt, sink := attach(t, f, w)
+		f.emit = nil
+		if result, err := lifecycleRun(t, f, attempt, chatTestGuard(f.guard)); err != nil || !result.Complete || !sink.result().DeliveryComplete || w.body.String() != f.response {
+			t.Fatalf("nil external emitter blocked owned sink: result=%+v err=%v sink=%+v body=%q", result, err, sink.result(), w.body.String())
+		}
+	})
+
+	t.Run("nonstream success requires accepted clean EOF and delivery", func(t *testing.T) {
+		f := newChatAccountFixture(t)
+		w := writer()
+		request, attempt, sink := attach(t, f, w)
+		f.body = chatSimple
+		f.response = chatResponse("synthetic-v1", `{"role":"assistant","content":"ok"}`, `"stop"`, chatUsageOK, false)
+		f.emit = nil
+		result, err := lifecycleRun(t, f, attempt, chatTestGuard(f.guard))
+		if err != nil || !result.Complete || !attempt.accepted || !request.committed || !sink.result().ProtocolComplete || !sink.result().DeliveryComplete || !attempt.terminal.Delivered || w.body.String() != f.response || w.Header().Get("Content-Type") != "application/json" {
+			t.Fatalf("nonstream completion: result=%+v err=%v accepted=%v sink=%+v terminal=%+v body=%q", result, err, attempt.accepted, sink.result(), attempt.terminal, w.body.String())
+		}
+	})
+
+	t.Run("nonstream read failure withholds body and emits one JSON error", func(t *testing.T) {
+		f := newChatAccountFixture(t)
+		w := writer()
+		request, attempt, sink := attach(t, f, w)
+		f.body = chatSimple
+		f.response = chatResponse("synthetic-v1", `{"role":"assistant","content":"ok"}`, `"stop"`, chatUsageOK, false)
+		roundTrip := f.transport.client.Transport
+		f.transport.client.Transport = publicTestRoundTrip(func(req *http.Request) (*http.Response, error) {
+			response, err := roundTrip.RoundTrip(req)
+			if err != nil {
+				return response, err
+			}
+			response.Body = &publicSinkReadHook{ReadCloser: response.Body, eofError: io.ErrUnexpectedEOF}
+			return response, nil
+		})
+		f.emit = nil
+		result, err := lifecycleRun(t, f, attempt, chatTestGuard(f.guard))
+		want := "{\"error\":\"stream interrupted: malformed upstream stream\"}\n"
+		if err == nil || result.Complete || !request.committed || !attempt.committed || w.body.String() != want || !sink.result().DeliveryComplete || sink.result().ProtocolComplete || !attempt.terminal.Delivered || w.Header().Get("Content-Type") != "application/json" {
+			t.Fatalf("nonstream EOF failure: result=%+v err=%v sink=%+v terminal=%+v body=%q", result, err, sink.result(), attempt.terminal, w.body.String())
+		}
+	})
+
+	t.Run("trailing data replaces withheld DONE with one clean error", func(t *testing.T) {
+		f := newChatAccountFixture(t)
+		w := writer()
+		request, attempt, sink := attach(t, f, w)
+		prefix := strings.TrimSuffix(f.response, "data: [DONE]\n\n")
+		f.response += "data: {}\n\n"
+		sink.WriteHeader(http.StatusAccepted)
+		external := 0
+		f.emit = func([]byte) error { external++; return nil }
+		result, err := lifecycleRun(t, f, attempt, chatTestGuard(f.guard))
+		want := prefix + string(wantSSEInterruption(streamInterruptReasonMalformed))
+		if err == nil || result.Complete || !attempt.committed || !request.committed || external != 0 || w.body.String() != want || bytes.Count(w.body.Bytes(), []byte("[DONE]")) != 1 {
+			t.Fatalf("trailing public response: result=%+v err=%v committed=%v/%v external=%d body=%q", result, err, attempt.committed, request.committed, external, w.body.String())
+		}
+		if got := sink.result(); got.ProtocolComplete || !got.DeliveryComplete || got.Reason != streamInterruptReasonMalformed || !got.ContinuationUnavailable || !attempt.terminal.Delivered || attempt.terminal.ProtocolComplete {
+			t.Fatalf("interruption facts: sink=%+v terminal=%+v", got, attempt.terminal)
+		}
+		if len(w.statuses) != 1 || w.statuses[0] != http.StatusAccepted {
+			t.Fatalf("committed status rewritten: %v", w.statuses)
+		}
+		if err := sink.interrupt(streamProtocolSSE, streamInterruptReasonBudget); err != nil {
+			t.Fatal(err)
+		}
+		if w.body.String() != want {
+			t.Fatal("second synthetic ending emitted")
+		}
+		if _, err := request.newAttempt(); !errors.Is(err, errRoutingSpend) {
+			t.Fatalf("committed malformed response admitted fallback: %v", err)
+		}
+	})
+
+	t.Run("postcommit parser allocation refusal uses the sink once", func(t *testing.T) {
+		f := newChatAccountFixture(t)
+		w := writer()
+		request, attempt, sink := attach(t, f, w)
+		roundTrip := f.transport.client.Transport
+		f.transport.client.Transport = publicTestRoundTrip(func(req *http.Request) (*http.Response, error) {
+			response, err := roundTrip.RoundTrip(req)
+			if err != nil {
+				return response, err
+			}
+			response.Body = &publicSinkReadHook{ReadCloser: response.Body, hook: func() { f.budget.ceiling = f.budget.used.Load() }}
+			return response, nil
+		})
+		f.emit = nil
+		result, err := lifecycleRun(t, f, attempt, chatTestGuard(f.guard))
+		if !errors.Is(err, errChatBudget) || result.Complete || !attempt.committed || !request.committed || f.calls.Load() != 1 || !bytes.Equal(w.body.Bytes(), wantSSEInterruption(streamInterruptReasonBudget)) {
+			t.Fatalf("allocation refusal: result=%+v err=%v committed=%v/%v Do=%d body=%q", result, err, attempt.committed, request.committed, f.calls.Load(), w.body.String())
+		}
+		if got := sink.result(); !got.DeliveryComplete || got.ProtocolComplete || got.Genuine != 0 || got.Reason != streamInterruptReasonBudget || !attempt.terminal.Delivered {
+			t.Fatalf("budget ending facts: sink=%+v terminal=%+v", got, attempt.terminal)
+		}
+		if _, err := request.newAttempt(); !errors.Is(err, errRoutingSpend) {
+			t.Fatalf("allocation refusal admitted fallback: %v", err)
+		}
+	})
+
+	t.Run("delivered success survives independent accounting write failure", func(t *testing.T) {
+		f := newChatAccountFixture(t)
+		w := &publicSinkFlushHook{responseSinkWriter: writer()}
+		request, attempt, sink := attach(t, f, w)
+		accountingWrites := 0
+		w.hook = func() {
+			f.ledger.write = func(string, []byte, os.FileMode) error {
+				accountingWrites++
+				return errors.New("injected accounting failure")
+			}
+		}
+		f.emit = func([]byte) error { t.Error("owned output called external emitter"); return nil }
+		result, err := lifecycleRun(t, f, attempt, chatTestGuard(f.guard))
+		if !errors.Is(err, errChatAccounting) || !result.Complete || !request.committed || !attempt.terminal.Delivered || !attempt.terminal.ProtocolComplete || attempt.terminal.Accounting != publicAccountingFailed || accountingWrites != 3 {
+			t.Fatalf("accounting rewrote delivery: result=%+v err=%v terminal=%+v accounting writes=%d", result, err, attempt.terminal, accountingWrites)
+		}
+		if got := sink.result(); !got.ProtocolComplete || !got.DeliveryComplete || got.WriteError != nil || w.body.String() != f.response || bytes.Count(w.body.Bytes(), []byte("[DONE]")) != 1 {
+			t.Fatalf("delivered success lost: sink=%+v body=%q", got, w.body.String())
+		}
+		if _, err := request.newAttempt(); !errors.Is(err, errRoutingSpend) {
+			t.Fatalf("accounting failure admitted resend: %v", err)
+		}
+	})
+
+	for _, scenario := range []string{"partial write", "flush failure", "request cancellation"} {
+		t.Run(scenario+" cancels without synthetic follow-up", func(t *testing.T) {
+			f := newChatAccountFixture(t)
+			w := &publicSinkFlushHook{responseSinkWriter: writer()}
+			request, attempt, sink := attach(t, f, w)
+			first := chatEvent(chatChunk(`{"role":"assistant"}`, `null`))
+			want := first
+			switch scenario {
+			case "partial write":
+				w.short = true
+				want = first[:len(first)-1]
+			case "flush failure":
+				w.flushErr = io.ErrClosedPipe
+			case "request cancellation":
+				w.hook = func() { request.cancelRequest() }
+			}
+			f.emit = nil
+			result, err := lifecycleRun(t, f, attempt, chatTestGuard(f.guard))
+			if err == nil || result.Complete || !request.cancelled || !attempt.committed || w.body.String() != want || attempt.terminal.Delivered || sink.result().DeliveryComplete {
+				t.Fatalf("client cancellation: result=%+v err=%v cancelled=%v terminal=%+v sink=%+v body=%q", result, err, request.cancelled, attempt.terminal, sink.result(), w.body.String())
+			}
+			if bytes.Contains(w.body.Bytes(), []byte("[DONE]")) || bytes.Contains(w.body.Bytes(), []byte("stream_interrupted")) || len(w.statuses) != 1 {
+				t.Fatalf("synthetic follow-up after cancellation: status=%v body=%q", w.statuses, w.body.String())
+			}
+			if _, err := request.newAttempt(); !errors.Is(err, errRoutingSpend) {
+				t.Fatalf("cancelled request admitted fallback: %v", err)
+			}
+		})
+	}
+
+	for _, scenario := range []string{"cancel at final acceptance", "G refusal at final acceptance"} {
+		t.Run(scenario+" retains unsent liability without sink output", func(t *testing.T) {
+			p, f, _, snapshot := egressFixture(t)
+			egressGrant(t, p, 1, 6*time.Second)
+			w := writer()
+			request, attempt, sink := attach(t, f, w)
+			guard := func(ctx context.Context, accept func() error) error {
+				if accept != nil {
+					if scenario == "cancel at final acceptance" {
+						request.cancelRequest()
+					} else {
+						egressRevoke(t, p, 2)
+					}
+				}
+				return p.publicPermissionAccept("weak", snapshot, accept)
+			}
+			f.emit = nil
+			result, err := runChatAccountAttempt(f.ctx, snapshot, []byte(f.body), f.profile, f.ledger, f.transport, f.resolve, f.budget.acquire, guard, attempt, f.emit)
+			if !errors.Is(err, errPublicFinalGuard) || result.Complete || attempt.accepted || attempt.committed || request.committed || f.calls.Load() != 0 || w.body.Len() != 0 || len(w.statuses) != 0 {
+				t.Fatalf("unsent attempt affected sink: result=%+v err=%v accepted=%v committed=%v/%v Do=%d statuses=%v body=%q", result, err, attempt.accepted, attempt.committed, request.committed, f.calls.Load(), w.statuses, w.body.String())
+			}
+			if scenario == "cancel at final acceptance" {
+				if !errors.Is(err, errPublicCancelledBeforeSend) || errors.Is(err, errPublicPermission) {
+					t.Fatalf("cancellation lost its distinct final refusal: %v", err)
+				}
+			} else if !errors.Is(err, errPublicPermission) || errors.Is(err, errPublicCancelledBeforeSend) {
+				t.Fatalf("G refusal collapsed into cancellation: %v", err)
+			}
+			if attempt.reservation.Durability != accountReserveDurable || attempt.reservation.Hold.Attempt == "" || request.granted == 0 || attempt.terminal.Accounting != publicAccountingRetained || attempt.terminal.Delivered || sink.result().DeliveryComplete || sink.result().Reason != "" {
+				t.Fatalf("unsent liability/sink: reservation=%+v terminal=%+v sink=%+v granted=%d", attempt.reservation, attempt.terminal, sink.result(), request.granted)
+			}
+			egressUnsentHold(t, f)
+		})
+	}
+}
+
+type publicSinkReadHook struct {
+	io.ReadCloser
+	hook     func()
+	eofError error
+}
+
+func (b *publicSinkReadHook) Read(p []byte) (int, error) {
+	n, err := b.ReadCloser.Read(p)
+	if n > 0 && b.hook != nil {
+		hook := b.hook
+		b.hook = nil
+		hook()
+	}
+	if err == io.EOF && b.eofError != nil {
+		err = b.eofError
+	}
+	return n, err
+}
+
+type publicSinkFlushHook struct {
+	*responseSinkWriter
+	hook func()
+}
+
+func (w *publicSinkFlushHook) FlushError() error {
+	if err := w.responseSinkWriter.FlushError(); err != nil {
+		return err
+	}
+	if w.hook != nil {
+		w.hook()
+	}
+	return nil
+}
+
+func TestPublicAttemptPreparationDeadline(t *testing.T) {
+	for _, stage := range []string{"initial preparation", "parser allowance", "transport headroom"} {
+		t.Run(stage, func(t *testing.T) {
+			f := newChatAccountFixture(t)
+			ctx, root, buffers := chatTestInferenceContext(t, 64<<20, time.Hour)
+			ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+			defer cancel()
+			defer buffers.close()
+			f.ctx = ctx
+			if stage == "parser allowance" {
+				f.body = strings.TrimSuffix(chatSimple, "}") + `,"stream":true}`
+			}
+			request := newRoutingRequest(nil)
+			request.deadline = time.Now().Add(250 * time.Millisecond)
+			defer request.finish()
+			attempt := spendAttempt(t, request)
+			var lookups, guards int
+			f.resolve = func(nodepolicy.CredentialRef) (string, bool) { lookups++; return "synthetic", true }
+			guard := func(context.Context, func() error) error { guards++; return nil }
+			held := make(chan *bufferLease, 1)
+			if stage == "initial preparation" {
+				held <- bufferMustAcquire(t, root, 64<<20)
+			}
+			fixed := 0
+			budget := func(n int64) (func(), error) {
+				if n == chatFixedStorage+256 {
+					fixed++
+					if fixed == 2 && stage != "initial preparation" {
+						root.mu.Lock()
+						remaining := root.capacity - root.used
+						root.mu.Unlock()
+						held <- bufferMustAcquire(t, root, remaining)
+					}
+				}
+				return f.budget.acquire(n)
+			}
+			snapshot, err := f.ledger.prepareChatAccount("chat-a")
+			if err != nil {
+				t.Fatal(err)
+			}
+			done := make(chan error, 1)
+			go func() {
+				_, err := runChatAccountAttempt(f.ctx, snapshot, []byte(f.body), f.profile, f.ledger, f.transport, f.resolve, budget, guard, attempt, f.emit)
+				done <- err
+			}()
+			var hold *bufferLease
+			select {
+			case hold = <-held:
+			case <-ctx.Done():
+				t.Fatal("public fixture never reached the requested pressure stage")
+			}
+			defer hold.close()
+			waitForCond(t, time.Second, "public preparation FIFO wait", func() bool { root.mu.Lock(); defer root.mu.Unlock(); return root.waiters.Len() == 1 })
+			root.mu.Lock()
+			waitDeadline := root.waiters.Front().Value.(*bufferWaiter).deadline
+			root.mu.Unlock()
+			if !waitDeadline.Equal(request.deadline) {
+				t.Errorf("public wait deadline=%v, want same immutable %v", waitDeadline, request.deadline)
+			}
+			select {
+			case err = <-done:
+			case <-time.After(time.Second):
+				cancel()
+				err = <-done
+				t.Error("public preparation exceeded request deadline")
+			}
+			if !errors.Is(err, errChatBudget) || bufferRequestStatus(err) != http.StatusServiceUnavailable || lookups != 0 || guards != 0 || f.calls.Load() != 0 || len(f.ledger.state.Holds) != 0 || request.active != nil || attempt.accepted || attempt.committed || f.budget.used.Load() != 0 {
+				t.Fatalf("pre-send deadline effects: err=%v lookups=%d guards=%d Do=%d holds=%d active=%v accepted=%v committed=%v explicit=%d", err, lookups, guards, f.calls.Load(), len(f.ledger.state.Holds), request.active != nil, attempt.accepted, attempt.committed, f.budget.used.Load())
+			}
+			if _, err := request.newAttempt(); !errors.Is(err, errRoutingSpend) {
+				t.Fatalf("expired public owner admitted another attempt: %v", err)
+			}
+			hold.close()
+			buffers.close()
+			bufferAssertTotals(t, root, 0, 0, 0)
+		})
+	}
+}
+
+func TestPublicAttemptDeadlineSpansAttempts(t *testing.T) {
+	f := newChatAccountFixture(t)
+	ctx, root, buffers := chatTestInferenceContext(t, 64<<20, time.Hour)
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	defer buffers.close()
+	f.ctx = ctx
+	request := newRoutingRequest(nil)
+	request.deadline = time.Now().Add(400 * time.Millisecond)
+	defer request.finish()
+	resolve := f.resolve
+	f.resolve = func(nodepolicy.CredentialRef) (string, bool) { return "", false }
+	if _, err := lifecycleRun(t, f, spendAttempt(t, request), chatTestGuard(f.guard)); !errors.Is(err, errChatCredential) {
+		t.Fatalf("first unsent attempt: %v", err)
+	}
+	if request.cancelled || request.active != nil || len(f.ledger.state.Holds) != 0 {
+		t.Fatal("unsent refusal changed request authority or reserved money")
+	}
+	f.resolve = resolve
+	entered := make(chan struct{})
+	f.transport.client.Transport = publicTestRoundTrip(func(req *http.Request) (*http.Response, error) {
+		f.calls.Add(1)
+		close(entered)
+		<-req.Context().Done()
+		return nil, req.Context().Err()
+	})
+	attempt := spendAttempt(t, request)
+	done := make(chan error, 1)
+	go func() { _, err := lifecycleRun(t, f, attempt, chatTestGuard(f.guard)); done <- err }()
+	waitChan(t, entered, "second public attempt headers wait")
+	var err error
+	select {
+	case err = <-done:
+	case <-time.After(time.Second):
+		cancel()
+		err = <-done
+		t.Error("first attempt cleanup disarmed the shared request deadline")
+	}
+	if err == nil || !request.cancelled || attempt.committed || !attempt.accepted || f.calls.Load() != 1 || request.active != nil {
+		t.Fatalf("public silent transport deadline: err=%v cancelled=%v committed=%v accepted=%v Do=%d active=%v", err, request.cancelled, attempt.committed, attempt.accepted, f.calls.Load(), request.active != nil)
+	}
+	if _, err := request.newAttempt(); !errors.Is(err, errRoutingSpend) {
+		t.Fatalf("deadline admitted a later public attempt: %v", err)
+	}
+	buffers.close()
+	bufferAssertTotals(t, root, 0, 0, 0)
+}
+
+func TestPublicAttemptDeadlineAtFinalAcceptance(t *testing.T) {
+	p, f, _, snapshot := egressFixture(t)
+	egressGrant(t, p, 1, 6*time.Second)
+	owner := newRoutingRequest(nil)
+	owner.deadline = time.Now().Add(150 * time.Millisecond)
+	defer owner.finish()
+	attempt := spendAttempt(t, owner)
+	guard := func(ctx context.Context, accept func() error) error {
+		if accept == nil {
+			if err := p.publicPermissionAccept("weak", snapshot, nil); err != nil {
+				return err
+			}
+			owner.mu.Lock()
+			stop := owner.stopPreOutput
+			owner.mu.Unlock()
+			if stop == nil || !stop() {
+				t.Fatal("deadline callback could not be delayed")
+			}
+			<-time.After(time.Until(owner.deadline) + 25*time.Millisecond)
+			return nil
+		}
+		return p.publicPermissionAccept("weak", snapshot, accept)
+	}
+	result, err := runChatAccountAttempt(f.ctx, snapshot, []byte(f.body), f.profile, f.ledger, f.transport, f.resolve, f.budget.acquire, guard, attempt, f.emit)
+	if !errors.Is(err, errPublicFinalGuard) || !errors.Is(err, errPublicCancelledBeforeSend) || errors.Is(err, errPublicPermission) || f.calls.Load() != 0 || attempt.accepted || attempt.committed || result.Exposed || result.Complete || !owner.cancelled || owner.reason != routingDeadlineReason {
+		t.Fatalf("late final acceptance crossed send boundary: err=%v Do=%d accepted=%v committed=%v result=%+v cancelled=%v reason=%q", err, f.calls.Load(), attempt.accepted, attempt.committed, result, owner.cancelled, owner.reason)
+	}
+	if attempt.reservation.Durability != accountReserveDurable || attempt.terminal.Accounting != publicAccountingRetained || attempt.terminal.Delivered || owner.active != nil || f.budget.used.Load() != 0 {
+		t.Fatalf("deadline erased liability/retained attempt: reservation=%+v terminal=%+v active=%v bytes=%d", attempt.reservation, attempt.terminal, owner.active != nil, f.budget.used.Load())
+	}
+	egressUnsentHold(t, f)
 }
