@@ -23,23 +23,24 @@ const residentDispatchReplyMethod = "engine:dispatch-resident-reply"
 // modelConfigEvidence is an immutable capture. RPCs never hold policy locks.
 // Source handles are compared separately from the serialized evidence.
 type modelConfigEvidence struct {
-	Policy     nodepolicy.Policy
-	Live       nodepolicy.Availability
-	Paused     bool
-	Recovery   bool
-	Activation policyActivation
-	Readiness  nodepolicy.StrictAdmissionReadiness
-	Identity   nodepolicy.SetModelIdentityParams
-	Intent     map[string]bool
-	Running    map[string]bool
-	Loaded     map[string][]string
-	Drains     map[string]bool
-	Active     map[string]int
-	Proxy      *proxyProcess        `json:"-"`
-	Worker     *rpcWorker           `json:"-"`
-	Source     *engineManagerSource `json:"-"`
-	Run        string
-	Key        [32]byte `json:"-"`
+	Policy        nodepolicy.Policy
+	Live          nodepolicy.Availability
+	Paused        bool
+	Recovery      bool
+	Activation    policyActivation
+	Readiness     nodepolicy.StrictAdmissionReadiness
+	Identity      nodepolicy.SetModelIdentityParams
+	Intent        map[string]bool
+	Running       map[string]bool
+	Loaded        map[string][]string
+	LoadedCurrent map[string]map[string]bool
+	Drains        map[string]bool
+	Active        map[string]int
+	Proxy         *proxyProcess        `json:"-"`
+	Worker        *rpcWorker           `json:"-"`
+	Source        *engineManagerSource `json:"-"`
+	Run           string
+	Key           [32]byte `json:"-"`
 }
 
 type modelConfigAttempt struct {
@@ -53,16 +54,20 @@ type modelConfigAttempt struct {
 }
 
 type modelConfigRuntime struct {
-	wake          chan struct{}
-	busy          bool
-	last          *modelConfigEvidence
-	status        nodepolicy.ModelConfiguration
-	sequence      uint64
-	sequenceProxy *proxyProcess
-	sequenceRun   string
-	active        *modelConfigAttempt
-	loadedSource  *engineManagerSource
-	loadedProxy   *proxyProcess
+	wake           chan struct{}
+	busy           bool
+	last           *modelConfigEvidence
+	status         nodepolicy.ModelConfiguration
+	sequence       uint64
+	sequenceProxy  *proxyProcess
+	sequenceRun    string
+	active         *modelConfigAttempt
+	loadedSource   *engineManagerSource
+	loadedProxy    *proxyProcess
+	loadedRevision string
+	loadedIdentity nodepolicy.SetModelIdentityParams
+	confirmed      map[nodepolicy.Role]modelConfigEvidence
+	unsettled      map[nodepolicy.Role]*proxyProcess
 }
 
 func (b *Broker) signalModelConfig() {
@@ -95,6 +100,18 @@ func (b *Broker) captureModelConfig() modelConfigEvidence {
 	}
 	if r.models.loadedSource != source || r.models.loadedProxy != pp {
 		e.Loaded = nil
+	}
+	if r.models.loadedRevision == e.Policy.Revision {
+		e.LoadedCurrent = make(map[string]map[string]bool)
+		for _, ref := range b.residentRefs(e.Policy) {
+			previous, current := r.models.loadedIdentity.Engines[ref.Engine], e.Identity.Engines[ref.Engine]
+			if previous.EngineRunID == current.EngineRunID && previous.SettingsFingerprint == current.SettingsFingerprint && previous.LaunchDigest == current.LaunchDigest && previous.ModelDigests[ref.Model] == current.ModelDigests[ref.Model] && reflect.DeepEqual(previous.Serving[ref.Model], current.Serving[ref.Model]) {
+				if e.LoadedCurrent[ref.Engine] == nil {
+					e.LoadedCurrent[ref.Engine] = make(map[string]bool)
+				}
+				e.LoadedCurrent[ref.Engine][ref.Model] = true
+			}
+		}
 	}
 	// Marshal while locked, then decode to detach every map and policy slice.
 	data, err := json.Marshal(e)
@@ -129,6 +146,7 @@ func sameModelAuthority(a, b modelConfigEvidence) bool {
 	a.Key, b.Key = [32]byte{}, [32]byte{}
 	a.Active, b.Active = nil, nil
 	a.Loaded, b.Loaded = nil, nil
+	a.LoadedCurrent, b.LoadedCurrent = nil, nil
 	a.Proxy, b.Proxy = nil, nil
 	a.Worker, b.Worker = nil, nil
 	a.Source, b.Source = nil, nil
@@ -232,8 +250,16 @@ func (b *Broker) modelConfigEntry(e modelConfigEvidence, ref nodepolicy.Role) (n
 	return entry, pr, identity, count
 }
 
-// modelConfigurationLocked publishes only evidence belonging to this revision.
-// Completion is invalidated immediately on any evidence/source change.
+// confirmedResidentLocked preserves completed envelope proof across confirming
+// inventory and admission changes, but never across authority replacement.
+func confirmedResidentLocked(r *policyRuntime, e modelConfigEvidence, ref nodepolicy.Role, entry nodepolicy.ModelConfigurationEntry) nodepolicy.ModelConfigurationEntry {
+	if proof, ok := r.models.confirmed[ref]; ok && sameModelAuthority(proof, e) && entry.State == nodepolicy.ModelStatePending && entry.ObservedLoaded != nil && *entry.ObservedLoaded {
+		entry.State = nodepolicy.ModelStateSatisfied
+	}
+	return entry
+}
+
+// modelConfiguration publishes only evidence belonging to this revision.
 func (b *Broker) modelConfiguration(e modelConfigEvidence) nodepolicy.ModelConfiguration {
 	r := b.nodePolicyRuntime()
 	r.mu.Lock()
@@ -246,6 +272,7 @@ func (b *Broker) modelConfiguration(e modelConfigEvidence) nodepolicy.ModelConfi
 	out := nodepolicy.ModelConfiguration{PolicyRevision: e.Policy.Revision, ObservationGeneration: r.models.status.ObservationGeneration, Models: []nodepolicy.ModelConfigurationEntry{}}
 	for _, ref := range b.residentRefs(e.Policy) {
 		entry, _, _, _ := b.modelConfigEntry(e, ref)
+		entry = confirmedResidentLocked(r, e, ref, entry)
 		out.Models = append(out.Models, entry)
 	}
 	return out
@@ -275,6 +302,16 @@ func (b *Broker) reconcileModelConfig(ctx context.Context) {
 		return
 	}
 	r.models.busy = true
+	for ref, proof := range r.models.confirmed {
+		if !sameModelAuthority(proof, e) {
+			delete(r.models.confirmed, ref)
+		}
+	}
+	for ref, proxy := range r.models.unsettled {
+		if proxy != e.Proxy {
+			delete(r.models.unsettled, ref)
+		}
+	}
 	r.models.last = &e
 	r.models.status = nodepolicy.ModelConfiguration{PolicyRevision: e.Policy.Revision, ObservationGeneration: r.models.status.ObservationGeneration + 1, Models: []nodepolicy.ModelConfigurationEntry{}}
 	for _, ref := range b.residentRefs(e.Policy) {
@@ -291,16 +328,72 @@ func (b *Broker) reconcileModelConfig(ctx context.Context) {
 	}()
 	for i, ref := range b.residentRefs(e.Policy) {
 		entry, pr, id, count := b.modelConfigEntry(e, ref)
+		r.mu.Lock()
+		entry = confirmedResidentLocked(r, e, ref, entry)
+		unsettled := r.models.unsettled[ref] == e.Proxy && e.Proxy != nil
+		r.mu.Unlock()
 		if entry.State == nodepolicy.ModelStatePending && ctx.Err() == nil {
-			entry = b.reconcileResident(ctx, e, entry, pr, id, count)
+			switch {
+			case unsettled:
+				entry.State, entry.Reason = nodepolicy.ModelStateUnknown, nodepolicy.ModelReasonOperationTimeout
+			case e.LoadedCurrent[ref.Engine][ref.Model] && entry.ObservedLoaded != nil && *entry.ObservedLoaded:
+				entry = b.confirmResident(ctx, e, entry)
+			default:
+				entry = b.reconcileResident(ctx, e, entry, pr, id, count)
+			}
 		}
 		r.mu.Lock()
+		if entry.State == nodepolicy.ModelStateSatisfied {
+			if r.models.confirmed == nil {
+				r.models.confirmed = make(map[nodepolicy.Role]modelConfigEvidence)
+			}
+			r.models.confirmed[ref] = e
+		}
 		r.models.status.Models[i] = entry
 		r.mu.Unlock()
 		if !sameModelAuthority(e, b.captureModelConfig()) {
 			return
 		}
 	}
+}
+
+// A fresh loaded inventory can confirm an existing native allocation after a
+// worker restart. Read the manager-owned observed envelope; cold declarations
+// and name presence alone never authorize satisfaction or another load.
+func (b *Broker) confirmResident(parent context.Context, e modelConfigEvidence, entry nodepolicy.ModelConfigurationEntry) nodepolicy.ModelConfigurationEntry {
+	entry.State, entry.Reason = nodepolicy.ModelStateUnknown, nodepolicy.ModelReasonObservationUnknown
+	ctx, cancel := context.WithTimeout(parent, proxyCallTimeout)
+	defer cancel()
+	var launch settings.LaunchState
+	if switchManagerCallOn(ctx, e.Worker, "engine:get-launch", map[string]string{"engine": entry.Engine}, &launch) != nil || !sameModelEvidence(e, b.captureModelConfig()) || !launch.Running || launch.Adopted || launch.Engine != entry.Engine || launch.ServingReadback == nil || launch.ServingReadback.Status != "observed" {
+		return entry
+	}
+	envelope := e.Identity.Engines[entry.Engine].Serving[entry.Model]
+	matched := 0
+	for _, current := range launch.ServingReadback.LaunchValidated {
+		if current.ModelID == entry.Model {
+			if !reflect.DeepEqual(current, envelope) {
+				return entry
+			}
+			matched++
+		}
+	}
+	if matched != 1 {
+		return entry
+	}
+	matched = 0
+	for _, observed := range launch.ServingReadback.Observed {
+		if observed.ModelID == entry.Model {
+			if observed.PerSlotContextTokens != envelope.PerSlotContextTokens || observed.Slots != envelope.Slots {
+				return entry
+			}
+			matched++
+		}
+	}
+	if matched == 1 {
+		entry.State, entry.Reason = nodepolicy.ModelStateSatisfied, ""
+	}
+	return entry
 }
 
 func residentRPC(ctx context.Context, pp *proxyProcess, method string, params any, result any) bool {
@@ -357,8 +450,17 @@ func (b *Broker) reconcileResident(parent context.Context, e modelConfigEvidence
 	op := &modelConfigAttempt{ctx: ctx, evidence: e, deadline: deadline, prepare: nodepolicy.PrepareResidentParams{PolicyRevision: e.Policy.Revision, ProxyRunID: e.Run, ManagerIncarnation: incarnation, Engine: entry.Engine, Model: entry.Model, Identity: id, OperationID: opID, TimeoutMs: int(time.Until(deadline).Milliseconds())}}
 	r.models.active = op
 	r.mu.Unlock()
+	holdUnsettled := true
 	defer func() {
 		r.mu.Lock()
+		// An uncertain dispatched hold belongs to the original proxy. Ordinary
+		// inventory cannot settle it, retry it, or manufacture completion.
+		if op.granted && holdUnsettled {
+			if r.models.unsettled == nil {
+				r.models.unsettled = make(map[nodepolicy.Role]*proxyProcess)
+			}
+			r.models.unsettled[nodepolicy.Role{Engine: entry.Engine, Model: entry.Model}] = e.Proxy
+		}
 		if r.models.active == op {
 			r.models.active = nil
 		}
@@ -423,10 +525,11 @@ func (b *Broker) reconcileResident(parent context.Context, e modelConfigEvidence
 		// Only a received terminal manager response is a completion barrier.
 		// Watcher caches and elapsed time can never discharge this hold.
 		if terminal && b.residentSourceCurrent(op) {
-			b.recoverResident(cleanup, op, finished)
+			holdUnsettled = !b.recoverResident(cleanup, op, finished)
 		}
 		return entry
 	}
+	holdUnsettled = false
 	if b.residentCurrent(op) && result.Outcome == nodepolicy.ResidentLoaded && finished.Outcome == nodepolicy.ResidentLoaded {
 		loaded := true
 		entry.State, entry.Reason, entry.ObservedLoaded = nodepolicy.ModelStateSatisfied, "", &loaded
@@ -436,20 +539,20 @@ func (b *Broker) reconcileResident(parent context.Context, e modelConfigEvidence
 	return entry
 }
 
-func (b *Broker) recoverResident(ctx context.Context, op *modelConfigAttempt, finish nodepolicy.FinishResidentResult) {
+func (b *Broker) recoverResident(ctx context.Context, op *modelConfigAttempt, finish nodepolicy.FinishResidentResult) bool {
 	raw, rpcErr, err := op.evidence.Worker.CallNoTimeout(ctx, "engine:models", nil)
 	if err != nil || rpcErr != nil || !b.residentSourceCurrent(op) {
-		return
+		return false
 	}
 	var inventory struct {
 		Loaded map[string][]string `json:"loadedByEngine"`
 	}
 	if json.Unmarshal(raw, &inventory) != nil {
-		return
+		return false
 	}
 	models, known := inventory.Loaded[op.prepare.Engine]
 	if !known || models == nil {
-		return
+		return false
 	}
 	loaded := false
 	for _, model := range models {
@@ -459,7 +562,7 @@ func (b *Broker) recoverResident(ctx context.Context, op *modelConfigAttempt, fi
 	}
 	p := nodepolicy.ObserveResidentParams{ReservationID: finish.ReservationID, ProxyRunID: op.prepare.ProxyRunID, OperationID: op.prepare.OperationID, RecoveryID: finish.RecoveryID, Sequence: 1, OperationComplete: true, Observation: nodepolicy.ResidentCapacityObservation{ManagerIncarnation: op.prepare.ManagerIncarnation, Engine: op.prepare.Engine, Model: op.prepare.Model, Identity: op.prepare.Identity, Loaded: loaded}}
 	var result nodepolicy.ObserveResidentResult
-	residentRPC(ctx, op.evidence.Proxy, nodepolicy.MethodObserveResident, p, &result)
+	return residentRPC(ctx, op.evidence.Proxy, nodepolicy.MethodObserveResident, p, &result) && result.ReservationID == finish.ReservationID && result.Settled
 }
 
 // The request is strictly decoded before leaving the manager reader pump.

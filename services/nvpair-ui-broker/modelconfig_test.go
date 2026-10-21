@@ -107,25 +107,273 @@ func decodeModelConfigCall[T any](t *testing.T, call policyCall) T {
 }
 
 func TestModelConfigLoadUsesRevisionProfile(t *testing.T) {
+	test := func(t *testing.T, contextTokens int) {
+		f := newModelConfigFixture(t)
+		// A valid nonallocation multiple detects rounding, clamping and defaults.
+		r := f.b.nodePolicyRuntime()
+		r.mu.Lock()
+		r.current.Profiles[0].ContextTokens = contextTokens
+		id := r.engineIdentity["llamacpp"]
+		envelope := id.Serving["resident"]
+		envelope.PerSlotContextTokens, envelope.TotalContextTokens = int64(contextTokens), int64(contextTokens)
+		id.Serving["resident"] = envelope
+		r.engineIdentity["llamacpp"] = id
+		r.mu.Unlock()
+		f.b.reconcileModelConfig(context.Background())
+		calls := modelConfigCalls(f.engine, nodepolicy.MethodReconcileResident)
+		if len(calls) != 1 {
+			t.Fatalf("manager reconcile calls=%d, want one", len(calls))
+		}
+		p := decodeModelConfigCall[nodepolicy.ReconcileResidentParams](t, calls[0])
+		if p.Load.ContextLength != contextTokens || p.Load.KeepAliveSeconds != 60 || p.DeclaredResidentCount != 1 || p.PolicyRevision != "0" || p.Reservation.ManagerIncarnation != "fixture-manager" || p.Identity.EngineRunID != "engine-run-1" {
+			t.Fatalf("reconcile lost exact revision/profile/count contract: %+v", p)
+		}
+		prepared := modelConfigCalls(f.proxy, nodepolicy.MethodPrepareResident)
+		finished := modelConfigCalls(f.proxy, nodepolicy.MethodFinishResident)
+		if len(prepared) != 1 || len(finished) != 1 {
+			t.Fatalf("prepare=%d finish=%d, want one each", len(prepared), len(finished))
+		}
+		prepare := decodeModelConfigCall[nodepolicy.PrepareResidentParams](t, prepared[0])
+		finish := decodeModelConfigCall[nodepolicy.FinishResidentParams](t, finished[0])
+		if prepare.PolicyRevision != p.PolicyRevision || prepare.Identity != p.Identity || prepare.OperationID != p.OperationID || finish.OperationID != p.OperationID || finish.ReservationID != p.Reservation.ReservationID {
+			t.Fatal("prepare, reconcile and finish do not share the captured operation")
+		}
+	}
+	t.Run("small nonaligned context", func(t *testing.T) { test(t, 4097) })
+	t.Run("review nonaligned context", func(t *testing.T) { test(t, 8193) })
+	t.Run("large nonaligned context", func(t *testing.T) { test(t, 32769) })
+}
+
+func TestModelConfigConfirmingInventoryDoesNotReload(t *testing.T) {
 	f := newModelConfigFixture(t)
+	done := f.startLoadedAttempt(t)
+	f.awaitGrant(t)
+	f.engine.releaseHeld()
+	awaitModelConfigDone(t, done)
+	f.engine.setAnswer(func(method string, _ json.RawMessage) (any, string) {
+		if method == settings.SwitchPrepareMethod {
+			return emptySwitchManagerSnapshot(), ""
+		}
+		return nodepolicy.ReconcileResidentResult{Outcome: nodepolicy.ResidentNotDispatched}, ""
+	})
+	f.b.observeLoadedFrom(f.source, map[string][]string{"llamacpp": {"resident"}})
+	for range 3 {
+		f.b.reconcileModelConfig(context.Background())
+	}
+	if got := len(modelConfigCalls(f.engine, nodepolicy.MethodReconcileResident)); got != 1 {
+		t.Fatalf("confirming inventory issued %d loads, want one completed load", got)
+	}
+	status := f.b.modelConfiguration(f.b.captureModelConfig())
+	if status.Models[0].State != nodepolicy.ModelStateSatisfied {
+		t.Fatalf("confirming inventory lost satisfaction: %+v", status)
+	}
+	f.b.observeLoadedFrom(f.source, map[string][]string{"llamacpp": {}})
 	f.b.reconcileModelConfig(context.Background())
-	calls := modelConfigCalls(f.engine, nodepolicy.MethodReconcileResident)
-	if len(calls) != 1 {
-		t.Fatalf("manager reconcile calls=%d, want one", len(calls))
+	f.b.reconcileModelConfig(context.Background())
+	if got := len(modelConfigCalls(f.engine, nodepolicy.MethodReconcileResident)); got != 2 {
+		t.Fatalf("actual unload issued %d loads, want original and one retry", got)
 	}
-	p := decodeModelConfigCall[nodepolicy.ReconcileResidentParams](t, calls[0])
-	if p.Load.ContextLength != 8192 || p.Load.KeepAliveSeconds != 60 || p.DeclaredResidentCount != 1 || p.PolicyRevision != "0" || p.Reservation.ManagerIncarnation != "fixture-manager" || p.Identity.EngineRunID != "engine-run-1" {
-		t.Fatalf("reconcile lost exact revision/profile/count contract: %+v", p)
+}
+
+func TestModelConfigInflightConfirmingInventoryCoalesces(t *testing.T) {
+	f := newModelConfigFixture(t)
+	done := f.startLoadedAttempt(t)
+	f.awaitGrant(t)
+	f.b.observeLoadedFrom(f.source, map[string][]string{"llamacpp": {"resident"}})
+	var wg sync.WaitGroup
+	for range 12 {
+		wg.Add(1)
+		go func() { defer wg.Done(); f.b.reconcileModelConfig(context.Background()) }()
 	}
-	prepared := modelConfigCalls(f.proxy, nodepolicy.MethodPrepareResident)
-	finished := modelConfigCalls(f.proxy, nodepolicy.MethodFinishResident)
-	if len(prepared) != 1 || len(finished) != 1 {
-		t.Fatalf("prepare=%d finish=%d, want one each", len(prepared), len(finished))
+	wg.Wait()
+	f.engine.releaseHeld()
+	awaitModelConfigDone(t, done)
+	f.engine.setAnswer(func(method string, _ json.RawMessage) (any, string) {
+		if method == settings.SwitchPrepareMethod {
+			return emptySwitchManagerSnapshot(), ""
+		}
+		return nodepolicy.ReconcileResidentResult{Outcome: nodepolicy.ResidentNotDispatched}, ""
+	})
+	f.b.reconcileModelConfig(context.Background())
+	if got := len(modelConfigCalls(f.engine, nodepolicy.MethodReconcileResident)); got != 1 {
+		t.Fatalf("inflight confirmation issued %d loads, want one", got)
 	}
-	prepare := decodeModelConfigCall[nodepolicy.PrepareResidentParams](t, prepared[0])
-	finish := decodeModelConfigCall[nodepolicy.FinishResidentParams](t, finished[0])
-	if prepare.PolicyRevision != p.PolicyRevision || prepare.Identity != p.Identity || prepare.OperationID != p.OperationID || finish.OperationID != p.OperationID || finish.ReservationID != p.Reservation.ReservationID {
-		t.Fatal("prepare, reconcile and finish do not share the captured operation")
+}
+
+func residentLaunchReadback(e modelConfigEvidence) settings.LaunchState {
+	envelope := e.Identity.Engines["llamacpp"].Serving["resident"]
+	return settings.LaunchState{Engine: "llamacpp", Running: true, ServingReadback: &engines.ServingReadback{
+		Status: "observed", LaunchValidated: []engines.ServingEnvelope{envelope},
+		Observed: []engines.ServingObservation{{ModelID: "resident", PerSlotContextTokens: envelope.PerSlotContextTokens, Slots: envelope.Slots}},
+	}}
+}
+
+func TestModelConfigWorkerRestartConfirmsWithoutReload(t *testing.T) {
+	for _, worker := range []string{"manager", "proxy"} {
+		t.Run(worker, func(t *testing.T) {
+			f := newModelConfigFixture(t)
+			done := f.startLoadedAttempt(t)
+			f.awaitGrant(t)
+			f.engine.releaseHeld()
+			awaitModelConfigDone(t, done)
+			before := f.b.captureModelConfig()
+			manager := f.engine
+			if worker == "manager" {
+				manager = attachFakeEngine(t, f.b)
+				f.source = f.b.activateEngineManagerSource()
+				f.b.bindEngineMgr(f.b.getEngineMgr(), f.source)
+				r := f.b.nodePolicyRuntime()
+				r.mu.Lock()
+				id := before.Identity.Engines["llamacpp"]
+				r.engineIdentity = map[string]engineManagerIdentity{"llamacpp": {EngineRunID: id.EngineRunID, LaunchDigest: id.LaunchDigest, ModelDigests: id.ModelDigests, Serving: id.Serving}}
+				r.intent["llamacpp"], r.running["llamacpp"] = true, true
+				r.mu.Unlock()
+			} else {
+				pp, _, acks := attachAckingProxy(t, f.b)
+				if !f.b.replayPolicyToProxy(context.Background(), pp) {
+					t.Fatal("activate replacement proxy")
+				}
+				reportStrict(t, f.b, "0", acks.runID, strictCapability(t, "llamacpp", "resident"))
+			}
+			readback := residentLaunchReadback(before)
+			manager.setAnswer(func(method string, _ json.RawMessage) (any, string) {
+				if method == "engine:get-launch" {
+					return readback, ""
+				}
+				if method == settings.SwitchPrepareMethod {
+					return emptySwitchManagerSnapshot(), ""
+				}
+				return nodepolicy.ReconcileResidentResult{Outcome: nodepolicy.ResidentNotDispatched}, ""
+			})
+			f.b.reconcileModelConfig(context.Background())
+			status := f.b.modelConfiguration(f.b.captureModelConfig())
+			if status.Models[0].State == nodepolicy.ModelStateSatisfied {
+				t.Fatal("replacement inherited completion before fresh inventory")
+			}
+			f.b.observeLoadedFrom(f.source, map[string][]string{"llamacpp": {"resident"}})
+			for range 3 {
+				f.b.reconcileModelConfig(context.Background())
+			}
+			status = f.b.modelConfiguration(f.b.captureModelConfig())
+			if status.Models[0].State != nodepolicy.ModelStateSatisfied || len(modelConfigCalls(manager, "engine:get-launch")) != 1 {
+				t.Fatalf("fresh observed envelope was not confirmed once: %+v", status)
+			}
+			wantLoads := 1
+			if worker == "manager" {
+				wantLoads = 0
+			}
+			if got := len(modelConfigCalls(manager, nodepolicy.MethodReconcileResident)); got != wantLoads {
+				t.Fatalf("replacement issued duplicate resident load: got %d want %d", got, wantLoads)
+			}
+		})
+	}
+}
+
+func TestModelConfigLoadedConfirmationRequiresObservedEnvelope(t *testing.T) {
+	for _, invalid := range []string{"cold only", "wrong context", "wrong slots", "wrong envelope", "local Off", "local pause"} {
+		t.Run(invalid, func(t *testing.T) {
+			f := newModelConfigFixture(t)
+			readback := residentLaunchReadback(f.b.captureModelConfig())
+			r := f.b.nodePolicyRuntime()
+			r.mu.Lock()
+			switch invalid {
+			case "cold only":
+				readback.ServingReadback.Observed = nil
+			case "wrong context":
+				readback.ServingReadback.Observed[0].PerSlotContextTokens++
+			case "wrong slots":
+				readback.ServingReadback.Observed[0].Slots++
+			case "wrong envelope":
+				readback.ServingReadback.LaunchValidated[0].RouterCapacity++
+			case "local Off":
+				r.intent["llamacpp"] = false
+			case "local pause":
+				r.localPauseRequested = true
+			}
+			r.mu.Unlock()
+			f.engine.setAnswer(func(string, json.RawMessage) (any, string) { return readback, "" })
+			f.b.observeLoadedFrom(f.source, map[string][]string{"llamacpp": {"resident"}})
+			f.b.reconcileModelConfig(context.Background())
+			status := f.b.modelConfiguration(f.b.captureModelConfig())
+			if status.Models[0].State == nodepolicy.ModelStateSatisfied || len(modelConfigCalls(f.engine, nodepolicy.MethodReconcileResident)) != 0 {
+				t.Fatalf("invalid observation authorized satisfaction or load: %+v", status)
+			}
+		})
+	}
+}
+
+func TestModelConfigConfirmingInventoryCannotSettleUncertainHold(t *testing.T) {
+	f := newModelConfigFixture(t)
+	f.proxy.mu.Lock()
+	answer := f.proxy.answer
+	f.proxy.mu.Unlock()
+	f.proxy.setAnswer(func(method string, raw json.RawMessage) (any, string) {
+		if method == nodepolicy.MethodFinishResident {
+			return nodepolicy.FinishResidentResult{ReservationID: "fixture-reservation", Outcome: nodepolicy.ResidentUnknown, RecoveryID: "fixture-recovery"}, ""
+		}
+		return answer(method, raw)
+	})
+	done := f.startLoadedAttempt(t)
+	f.awaitGrant(t)
+	f.engine.releaseHeld()
+	awaitModelConfigDone(t, done)
+	readback := residentLaunchReadback(f.b.captureModelConfig())
+	f.engine.setAnswer(func(string, json.RawMessage) (any, string) { return readback, "" })
+	f.b.observeLoadedFrom(f.source, map[string][]string{"llamacpp": {"resident"}})
+	f.b.reconcileModelConfig(context.Background())
+	status := f.b.modelConfiguration(f.b.captureModelConfig())
+	if status.Models[0].State != nodepolicy.ModelStateUnknown || len(modelConfigCalls(f.engine, nodepolicy.MethodReconcileResident)) != 1 || len(modelConfigCalls(f.engine, "engine:get-launch")) != 0 {
+		t.Fatalf("ordinary inventory retried or settled uncertain hold: %+v", status)
+	}
+}
+
+func TestModelConfigReplacedRevisionReconcilesOnce(t *testing.T) {
+	f := newModelConfigFixture(t)
+	done := f.startLoadedAttempt(t)
+	f.awaitGrant(t)
+	f.engine.releaseHeld()
+	awaitModelConfigDone(t, done)
+	f.b.observeLoadedFrom(f.source, map[string][]string{"llamacpp": {"resident"}})
+	r := f.b.nodePolicyRuntime()
+	r.mu.Lock()
+	r.current.Revision = "1"
+	r.current.Profiles[0].ContextTokens = 8193
+	id := r.engineIdentity["llamacpp"]
+	envelope := id.Serving["resident"]
+	envelope.PerSlotContextTokens, envelope.TotalContextTokens = 8193, 8193
+	id.Serving["resident"] = envelope
+	r.engineIdentity["llamacpp"] = id
+	r.mu.Unlock()
+	if !f.b.replayPolicyToProxy(context.Background(), f.pp) {
+		t.Fatal("activate replacement revision")
+	}
+	reportStrict(t, f.b, "1", f.acks.runID, strictCapability(t, "llamacpp", "resident"))
+	status := f.b.modelConfiguration(f.b.captureModelConfig())
+	if status.Models[0].State == nodepolicy.ModelStateSatisfied {
+		t.Fatal("replacement revision inherited old completion")
+	}
+	readback := residentLaunchReadback(f.b.captureModelConfig())
+	f.engine.setAnswer(func(method string, _ json.RawMessage) (any, string) {
+		if method == settings.SwitchPrepareMethod {
+			return emptySwitchManagerSnapshot(), ""
+		}
+		if method == "engine:get-launch" {
+			return readback, ""
+		}
+		return nodepolicy.ReconcileResidentResult{Outcome: nodepolicy.ResidentNotDispatched}, ""
+	})
+	f.b.reconcileModelConfig(context.Background())
+	f.b.reconcileModelConfig(context.Background())
+	f.b.observeLoadedFrom(f.source, map[string][]string{"llamacpp": {"resident"}})
+	f.b.reconcileModelConfig(context.Background())
+	status = f.b.modelConfiguration(f.b.captureModelConfig())
+	if status.Models[0].State != nodepolicy.ModelStateSatisfied || len(modelConfigCalls(f.engine, nodepolicy.MethodReconcileResident)) != 2 {
+		t.Fatalf("replacement revision did not reconcile exactly once: %+v", status)
+	}
+	call := modelConfigCalls(f.engine, nodepolicy.MethodReconcileResident)[1]
+	p := decodeModelConfigCall[nodepolicy.ReconcileResidentParams](t, call)
+	if p.PolicyRevision != "1" || p.Load.ContextLength != 8193 {
+		t.Fatalf("replacement load lost new revision/envelope: %+v", p)
 	}
 }
 
@@ -876,7 +1124,7 @@ func TestModelConfigConcurrentEvidenceChangeIsReevaluated(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newModelConfigFixture(t)
-			f.b.observeLoadedFrom(f.source, map[string][]string{"llamacpp": {"resident"}})
+			f.b.observeLoadedFrom(f.source, map[string][]string{"llamacpp": {"neighbor"}})
 			done := f.startLoadedAttempt(t)
 			f.awaitGrant(t)
 			tc.change(f)

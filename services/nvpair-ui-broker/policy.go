@@ -1127,6 +1127,19 @@ func (b *Broker) observeLoadedFor(source *engineManagerSource, pp *proxyProcess,
 	}
 	r.models.loadedSource = r.engineManagerSource
 	r.models.loadedProxy = pp
+	r.models.loadedRevision = r.current.Revision
+	r.models.loadedIdentity = r.modelIdentityLocked()
+	for ref := range r.models.confirmed {
+		found := false
+		for _, model := range loadedByEngine[ref.Engine] {
+			if b.modelRef(ref.Engine, model) == ref {
+				found = true
+			}
+		}
+		if !found {
+			delete(r.models.confirmed, ref)
+		}
+	}
 	now := r.now()
 	for engine, models := range loadedByEngine {
 		if !r.running[engine] {
