@@ -38,8 +38,13 @@ approved and reported by the engine's serving envelope. The proxy owns batch
 admission and the final single-use grant. The broker relays that grant only for
 the live operation, original proxy run and paired manager source. Loads are
 serialized with an absolute budget bounded by 60 seconds and the policy's
-finite switch timeout. Unchanged failures are suppressed until relevant policy,
-identity, readiness, intent, inventory or admission evidence changes.
+finite switch timeout. A failed load with unchanged evidence is retried at the
+30-second retry deadline, with no attempt limit: reconciliation wakes at that
+deadline as well as on the idle tick, and does not re-evaluate unchanged
+evidence before it. A change in relevant policy, identity, readiness, intent,
+inventory or admission evidence is evaluated on the next wake without waiting
+for the deadline. Each retry is a new operation subject to the same
+eligibility, inventory and hold checks.
 
 Unknown completion retains the proxy's capacity hold. Recovery requires a
 terminal response from the original manager followed by a fresh `engine:models`
