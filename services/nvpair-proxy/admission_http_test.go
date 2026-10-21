@@ -46,7 +46,9 @@ func strictHTTPRequest(t *testing.T) *http.Request {
 func strictHTTPRequestWith(t *testing.T, body string) *http.Request {
 	t.Helper()
 	r := httptest.NewRequest(http.MethodPost, routeChatCompletions, strings.NewReader(body))
-	b, err := json.Marshal(strictRequest())
+	strict := strictRequest()
+	strict.Request.OriginNodeID = "peer"
+	b, err := json.Marshal(strict)
 	if err != nil {
 		t.Fatal(err)
 	}
