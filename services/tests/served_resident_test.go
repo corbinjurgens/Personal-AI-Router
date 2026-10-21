@@ -1751,7 +1751,12 @@ func TestServedResidentProcessCrossEngineLastSlot(t *testing.T) {
 	if afterTarget.Base.PID != target.Base.PID || afterTarget.Models[srOllamaModel] != (srEffects{Loaded: true, Loads: 1, Chats: 1}) || afterTarget.Base.Loads != 1 || afterTarget.Base.Unloads != 0 || afterTarget.Base.Chats != 1 || afterTarget.Content != 0 || afterTarget.Base.Unexpected != 0 || afterTarget.Base.LeakedHeaders != 0 || targetStarts() != starts || len(f.starts(t)) != sourceStarts {
 		t.Fatalf("admissible target effects=%+v", afterTarget)
 	}
-	srAssertNoEffects(t, released, f.control(t, ""))
+	finalSource := f.control(t, "")
+	// Target admission may repeat the already-completed source unload while
+	// reconciling its allocation. It must not reload or infer on that source.
+	if finalSource.Base.PID != released.Base.PID || finalSource.Models[neModel].Loaded || finalSource.Base.Loads != released.Base.Loads || finalSource.Base.Chats != released.Base.Chats || finalSource.Content != released.Content || finalSource.Base.Unexpected != released.Base.Unexpected || finalSource.Base.Unloads < released.Base.Unloads || finalSource.Base.Unloads > released.Base.Unloads+1 {
+		t.Fatalf("released source changed outside bounded admission unload: before=%+v after=%+v", released, finalSource)
+	}
 	neEventually(t, "only the cross-engine demand owns the released slot", neCallBudget, func() bool {
 		models := f.models(t)
 		return len(models.Loaded["llamacpp"]) == 0 && reflect.DeepEqual(models.Loaded["ollama"], []string{srOllamaModel})
