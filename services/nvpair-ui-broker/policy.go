@@ -1125,9 +1125,41 @@ func (b *Broker) observeLoadedFor(source *engineManagerSource, pp *proxyProcess,
 		r.mu.Unlock()
 		return
 	}
+	if r.models.loadedSource != r.engineManagerSource || r.models.loadedProxy != pp {
+		r.models.loadedRequests = nil
+	}
 	r.models.loadedSource = r.engineManagerSource
 	r.models.loadedProxy = pp
-	r.models.loadedRevision = r.current.Revision
+	if r.models.loadedRequests == nil {
+		r.models.loadedRequests = make(map[nodepolicy.Role]nodepolicy.ResidentLoadOptions)
+	}
+	for ref := range r.models.loadedRequests {
+		if models, known := loadedByEngine[ref.Engine]; known && models != nil {
+			found := false
+			for _, model := range models {
+				if b.modelRef(ref.Engine, model) == ref {
+					found = true
+					break
+				}
+			}
+			if !found {
+				delete(r.models.loadedRequests, ref)
+			}
+		}
+	}
+	for _, ref := range b.residentRefs(r.current) {
+		if _, known := r.models.loadedRequests[ref]; known {
+			continue
+		}
+		for _, model := range loadedByEngine[ref.Engine] {
+			if b.modelRef(ref.Engine, model) == ref {
+				if pr, qualified := b.residentProfile(r.current, ref); qualified {
+					r.models.loadedRequests[ref] = residentLoadRequest(pr)
+				}
+				break
+			}
+		}
+	}
 	r.models.loadedIdentity = r.modelIdentityLocked()
 	for ref := range r.models.confirmed {
 		found := false
