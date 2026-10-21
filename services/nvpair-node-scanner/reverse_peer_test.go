@@ -169,7 +169,7 @@ func newScannerReverseFixture(t *testing.T) *scannerReverseFixture {
 		Services: make(map[noderec.ServiceKey]noderec.ServiceStatus)}
 	info := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		f.infoCalls.Add(1)
-		if r.Method != http.MethodGet || r.URL.Path != "/v1/node-info" || r.Host != net.JoinHostPort("localhost", strconv.Itoa(f.node.Services[noderec.ServiceNodeInfo].Port)) {
+		if r.Method != http.MethodGet || r.URL.Path != "/v1/node-info" || r.Host != net.JoinHostPort(f.node.IP, strconv.Itoa(f.node.Services[noderec.ServiceNodeInfo].Port)) {
 			t.Errorf("unexpected node-info request: %s %s host=%s", r.Method, r.URL.Path, r.Host)
 		}
 		if f.beforeReply != nil {
@@ -211,7 +211,7 @@ func newScannerReverseFixture(t *testing.T) *scannerReverseFixture {
 			http.Error(w, "forbidden", http.StatusForbidden)
 			return
 		}
-		if r.Method != http.MethodGet || r.URL.Path != "/v1/models" || r.Host != net.JoinHostPort("localhost", strconv.Itoa(f.node.Services[noderec.ServiceEngineManager].Port)) {
+		if r.Method != http.MethodGet || r.URL.Path != "/v1/models" || r.Host != net.JoinHostPort(f.node.IP, strconv.Itoa(f.node.Services[noderec.ServiceEngineManager].Port)) {
 			t.Errorf("unexpected model request: %s %s host=%s", r.Method, r.URL.Path, r.Host)
 		}
 		if f.beforeReply != nil {
