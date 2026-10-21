@@ -470,10 +470,12 @@ function modelConfiguration(value: JsonValue | undefined): ModelConfiguration | 
     if (
         policyRevision === null ||
         BigInt(policyRevision) > 9223372036854775807n ||
+        // Go carries a uint64, but the broker starts it at zero in memory and adds one
+        // per changed observation, so it never reaches 2^53. JSON.parse has already
+        // rounded anything larger, so only safe integers are exact; reject the rest.
         typeof observationGeneration !== 'number' ||
-        !Number.isInteger(observationGeneration) ||
+        !Number.isSafeInteger(observationGeneration) ||
         observationGeneration < 0 ||
-        observationGeneration > Number('18446744073709551615') ||
         !Array.isArray(body.models) ||
         body.models.length > 256
     ) {

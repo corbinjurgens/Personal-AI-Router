@@ -958,6 +958,14 @@ describe('model configuration policy evidence', () => {
         expect(parsePolicyText(parsePolicySetResult(snapshot).policy)).toEqual(policy)
     })
 
+    it('accepts the largest exact generation', () => {
+        const evidence = { ...configuration, observationGeneration: Number.MAX_SAFE_INTEGER }
+        expect(
+            parsePolicySetResult({ policy: { revision: '9' }, modelConfiguration: evidence })
+                .modelConfiguration?.observationGeneration
+        ).toBe(Number.MAX_SAFE_INTEGER)
+    })
+
     it('accepts a leading byte-order mark in model names like Go TrimSpace', () => {
         const evidence = { ...configuration, models: [{ ...loaded, model: '\ufeffmodel' }] }
         expect(
@@ -979,6 +987,19 @@ describe('model configuration policy evidence', () => {
         ['negative generation', { ...configuration, observationGeneration: -1 }],
         ['fractional generation', { ...configuration, observationGeneration: 1.5 }],
         ['overflowing generation', { ...configuration, observationGeneration: 2 ** 65 }],
+        ['inexact generation 2^53', { ...configuration, observationGeneration: 2 ** 53 }],
+        [
+            'inexact generation 2^53+1',
+            JSON.parse(
+                '{"policyRevision":"9","observationGeneration":9007199254740993,"models":[]}'
+            )
+        ],
+        [
+            'inexact generation 2^64',
+            JSON.parse(
+                '{"policyRevision":"9","observationGeneration":18446744073709551616,"models":[]}'
+            )
+        ],
         ['non-finite generation', { ...configuration, observationGeneration: Infinity }],
         ['non-list models', { ...configuration, models: {} }],
         [
