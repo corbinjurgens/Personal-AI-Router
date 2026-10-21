@@ -57,6 +57,8 @@ type Key struct {
 // only what the merge rule and the node-loss sweep need.
 type Record struct {
 	Origin      string
+	RunID       string
+	Seq         int64
 	ID          string
 	State       string
 	CreatedAt   int64
@@ -100,6 +102,7 @@ type Incoming struct {
 	Origin      string
 	Engine      string
 	RunID       string
+	Seq         int64
 	ID          string
 	State       string
 	CreatedAt   int64
@@ -150,6 +153,7 @@ func ParseIncoming(info json.RawMessage) (Incoming, bool) {
 		ID             string `json:"id"`
 		Engine         string `json:"engine"`
 		RunID          string `json:"runId"`
+		Seq            int64  `json:"seq"`
 		State          string `json:"state"`
 		OriginatedFrom string `json:"originatedFrom"`
 		ScheduledOn    string `json:"scheduledOn"`
@@ -167,6 +171,7 @@ func ParseIncoming(info json.RawMessage) (Incoming, bool) {
 		Origin:      hdr.OriginatedFrom,
 		Engine:      hdr.Engine,
 		RunID:       hdr.RunID,
+		Seq:         hdr.Seq,
 		ID:          hdr.ID,
 		State:       hdr.State,
 		CreatedAt:   hdr.CreatedAt,
@@ -408,6 +413,22 @@ func (s *Store) ActiveForNode(node string) []Record {
 	return out
 }
 
+// ActiveLocalOutsideRun returns independent copies of open records originated
+// here, excluding the live run. An empty liveRunID selects every open run.
+func (s *Store) ActiveLocalOutsideRun(origin, liveRunID string) []Record {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []Record
+	for key, r := range s.records {
+		if r.Terminal || r.Origin != origin || (liveRunID != "" && key.RunID == liveRunID) {
+			continue
+		}
+		r.Info = append(json.RawMessage(nil), r.Info...)
+		out = append(out, r)
+	}
+	return out
+}
+
 // StaleForeign returns copies of the non-terminal records whose origin is not
 // selfNode and which that origin has not asserted for at least staleAfter.
 //
@@ -540,6 +561,8 @@ func keyOf(in Incoming) Key {
 func recordFrom(in Incoming, now time.Time) Record {
 	return Record{
 		Origin:      in.Origin,
+		RunID:       in.RunID,
+		Seq:         in.Seq,
 		ID:          in.ID,
 		State:       in.State,
 		CreatedAt:   in.CreatedAt,
