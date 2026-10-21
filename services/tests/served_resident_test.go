@@ -64,9 +64,14 @@ func init() {
 			os.Exit(0)
 		}
 	}
-	if selected := os.Getenv(srOllamaRuntimeEnv); selected != "" {
+	if selected := os.Getenv(srOllamaRuntimeEnv); selected != "" && len(os.Args) > 1 && os.Args[1] == "serve" {
 		image, err := os.Executable()
-		if err != nil || runtime.GOOS != "windows" || selected != image || !neFixedTestImage(image) || len(os.Args) != 2 || os.Args[1] != "serve" {
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "SR Ollama fixture executable lookup failed:", err)
+			os.Exit(2)
+		}
+		if runtime.GOOS != "windows" || selected != image || !neFixedTestImage(image) || len(os.Args) != 2 {
+			fmt.Fprintln(os.Stderr, "SR Ollama fixture requires Windows, the selected fixed test image and only the serve argument")
 			os.Exit(2)
 		}
 		if err := runSROllamaRuntime(); err != nil {
@@ -104,6 +109,7 @@ type srRuntimeState struct {
 	InventoryUnavailable bool                 `json:"inventoryUnavailable"`
 	DropNextLoadResponse bool                 `json:"dropNextLoadResponse"`
 	HideInventoryOnDrop  bool                 `json:"hideInventoryOnDrop"`
+	UnexpectedRoutes     []string             `json:"unexpectedRoutes"`
 }
 
 // This owned process supplies synthetic B identity and observable cold inference,
@@ -200,6 +206,7 @@ func runSROllamaRuntime() error {
 		default:
 			state.Content++
 			state.Base.Unexpected++
+			state.UnexpectedRoutes = append(state.UnexpectedRoutes, r.Method+" "+r.URL.Path)
 			w.WriteHeader(http.StatusNotFound)
 			return
 		}
@@ -405,6 +412,7 @@ func runSRRuntime(args []string) error {
 		default:
 			state.Content++
 			state.Base.Unexpected++
+			state.UnexpectedRoutes = append(state.UnexpectedRoutes, r.Method+" "+r.URL.Path)
 			w.WriteHeader(http.StatusNotFound)
 			return
 		}
@@ -449,7 +457,7 @@ func newSRProcessFixtureWithRetention(t *testing.T, switchTarget bool, retention
 	peerDir := filepath.Join(t.TempDir(), "cluster")
 	targetDir := filepath.Join(f.root, "cluster")
 	if err := os.MkdirAll(peerDir, 0o700); err != nil {
-		t.Fatal(err)
+		t.Fatalf("create SR peer cluster directory: %v", err)
 	}
 	targetCert := mintClusterIdentity(t, targetDir, "sr-target")
 	peerCert := mintClusterIdentity(t, peerDir, "sr-peer")
@@ -474,11 +482,11 @@ func newSRProcessFixtureWithRetention(t *testing.T, switchTarget bool, retention
 	manifestPath := filepath.Join(f.app, "engines", "llamacpp.json")
 	data, err := os.ReadFile(manifestPath)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("read SR llama.cpp manifest: %v", err)
 	}
 	var manifest map[string]any
 	if err := json.Unmarshal(data, &manifest); err != nil {
-		t.Fatal(err)
+		t.Fatalf("decode SR llama.cpp manifest: %v", err)
 	}
 	// Decode the known fixture structure explicitly; never carry the NE launch
 	// selector into SR's child because its dispatch deliberately rejects it.
@@ -489,7 +497,7 @@ func newSRProcessFixtureWithRetention(t *testing.T, switchTarget bool, retention
 		} `json:"platforms"`
 	}
 	if err := json.Unmarshal(data, &override); err != nil {
-		t.Fatal(err)
+		t.Fatalf("decode SR runtime override: %v", err)
 	}
 	override.Runtime["env"] = map[string]string{srRuntimeEnv: f.image}
 	manifest["runtime"] = override.Runtime
@@ -498,7 +506,7 @@ func newSRProcessFixtureWithRetention(t *testing.T, switchTarget bool, retention
 	content := []byte("SR synthetic fixture-only model bytes; no native engine qualification")
 	modelPath := filepath.Join(f.root, "model.gguf")
 	if err := os.WriteFile(modelPath, content, 0o600); err != nil {
-		t.Fatal(err)
+		t.Fatalf("write synthetic SR model: %v", err)
 	}
 	source := "[*]\nfit = off\nload-on-startup = false\n"
 	for _, model := range []string{neModel, srNeighbor} {
@@ -509,7 +517,7 @@ func newSRProcessFixtureWithRetention(t *testing.T, switchTarget bool, retention
 		source += fmt.Sprintf("\n[%s]\nmodel = %s\nctx-size = %d\nparallel = 1\nkv-unified = false\nsleep-idle-seconds = %s\n", model, filepath.ToSlash(modelPath), context, retention)
 	}
 	if err := os.WriteFile(f.source, []byte(source), 0o600); err != nil {
-		t.Fatal(err)
+		t.Fatalf("write SR two-model preset: %v", err)
 	}
 	policy := nodepolicy.Default()
 	policy.Revision = "1"
@@ -526,7 +534,7 @@ func newSRProcessFixtureWithRetention(t *testing.T, switchTarget bool, retention
 		policy.Profiles = append(policy.Profiles, nodepolicy.Profile{Name: model, Engine: "llamacpp", Model: model, ContextTokens: context, MaxOutputTokens: output, MemoryBytes: neMemory, MaxConcurrent: 1, Qualification: &nodepolicy.QualificationRef{ID: "sr-" + model, Revision: "1"}})
 	}
 	if err := policy.Validate(); err != nil {
-		t.Fatal(err)
+		t.Fatalf("validate initial SR policy: %v", err)
 	}
 	jointWriteJSON(t, filepath.Join(f.app, nodepolicy.FileName), policy)
 	f.start(t)
@@ -650,11 +658,11 @@ func (f *srProcessFixture) enableSwitchTarget(t *testing.T) {
 	journalPath := filepath.Join(f.root, "engine-settings-operations.json")
 	data, err := os.ReadFile(journalPath)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("read SR switch settings journal: %v", err)
 	}
 	var journal map[string]any
 	if err := json.Unmarshal(data, &journal); err != nil {
-		t.Fatal(err)
+		t.Fatalf("decode SR switch settings journal: %v", err)
 	}
 	journal["ollama"] = map[string]any{"explicit": true, "snapshot": settings.Snapshot{
 		Engine: "ollama", Revision: 1, AppliedRevision: 1, Phase: "idle", Format: "pair-arguments-v1", Settings: settings.Config{ServerPort: f.switchEnginePort, ProxyPort: f.switchFacadePort},
@@ -693,7 +701,7 @@ func (f *srProcessFixture) start(t *testing.T) {
 			Platforms map[string]neFixturePlatform `json:"platforms"`
 		}
 		if err := json.Unmarshal(data, &manifest); err != nil {
-			t.Fatal(err)
+			t.Fatalf("decode %s private SR manifest: %v", engine, err)
 		}
 		if engine == "ollama" {
 			platform, ok := manifest.Platforms[runtime.GOOS+"/"+runtime.GOARCH]
@@ -711,7 +719,7 @@ func (f *srProcessFixture) start(t *testing.T) {
 	for _, path := range []string{engineMgrBin, proxyBin, f.scanner} {
 		canonical, err := canonicalServicePath(path)
 		if err != nil {
-			t.Fatal(err)
+			t.Fatalf("canonicalize SR switch service image %s: %v", path, err)
 		}
 		f.p.paths = append(f.p.paths, canonical)
 	}
@@ -1195,7 +1203,7 @@ func (f *srProcessFixture) startRelayed(t *testing.T) {
 	for _, path := range []string{engineMgrBin, proxyBin, f.scanner} {
 		canonical, err := canonicalServicePath(path)
 		if err != nil {
-			t.Fatal(err)
+			t.Fatalf("canonicalize SR relay service image %s: %v", path, err)
 		}
 		f.p.paths = append(f.p.paths, canonical)
 	}
@@ -1230,7 +1238,7 @@ func (f *srProcessFixture) control(t *testing.T, action string) srRuntimeState {
 	}
 	var state srRuntimeState
 	if err := neDecode(bytes.NewReader(data), &state); err != nil {
-		t.Fatal(err)
+		t.Fatalf("decode SR runtime control for action %q: %v", action, err)
 	}
 	if state.Base.Nonce != f.nonce || state.Base.PID <= 0 {
 		t.Fatal("SR runtime authentication failed")
@@ -1280,7 +1288,7 @@ func (f *srProcessFixture) entry(t *testing.T, model string, state nodepolicy.Mo
 			continue
 		}
 		if err := view.ModelConfiguration.Validate(); err != nil {
-			t.Fatal(err)
+			t.Fatalf("validate SR model configuration for %s: %v", model, err)
 		}
 		if view.ModelConfiguration.PolicyRevision != view.Policy.Revision {
 			if time.Now().After(deadline) {
@@ -1335,7 +1343,7 @@ func (f *srProcessFixture) chat(t *testing.T, model string, output int, strict *
 	t.Helper()
 	body, err := json.Marshal(map[string]any{"model": model, "messages": []any{map[string]string{"role": "user", "content": "fixture"}}, "max_tokens": output, "stream": false})
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("encode SR chat for %s: %v", model, err)
 	}
 	status, data, err := f.http(http.MethodPost, f.facadePort, "/v1/chat/completions", body, strict)
 	if err != nil {
@@ -1354,7 +1362,7 @@ func (f *srProcessFixture) strictRequest(t *testing.T, model, requestID string) 
 		if capability.Engine == "llamacpp" && capability.Model == model {
 			request := nodepolicy.StrictAdmissionRequest{Version: 1, QueueBudgetMs: 0, ColdStartBudgetMs: 0, PreOutputBudgetMs: 2000, Request: nodepolicy.RoutingRequestKey{OriginNodeID: f.snapshot(t).NodeID, ProxyRunID: "sr-fixture-origin", RequestID: requestID}, Identity: capability.Identity}
 			if err := request.Validate(); err != nil {
-				t.Fatal(err)
+				t.Fatalf("validate SR strict request for %s: %v", model, err)
 			}
 			return request
 		}
@@ -1365,8 +1373,8 @@ func (f *srProcessFixture) strictRequest(t *testing.T, model, requestID string) 
 
 func srAssertNoEffects(t *testing.T, before, after srRuntimeState) {
 	t.Helper()
-	if before.Base.PID != after.Base.PID || before.Base.Loads != after.Base.Loads || before.Base.Unloads != after.Base.Unloads || before.Base.Chats != after.Base.Chats || before.Content != after.Content || before.Base.Unexpected != after.Base.Unexpected {
-		t.Fatalf("refusal caused effects: before=%+v after=%+v", before, after)
+	if before.Base.PID != after.Base.PID || before.Base.Loads != after.Base.Loads || before.Base.Unloads != after.Base.Unloads || before.Base.Chats != after.Base.Chats || before.Content != after.Content || before.Base.Unexpected != after.Base.Unexpected || before.Base.LeakedHeaders != after.Base.LeakedHeaders || !reflect.DeepEqual(before.Models, after.Models) || !reflect.DeepEqual(before.UnexpectedRoutes, after.UnexpectedRoutes) {
+		t.Fatalf("unexpected runtime effects: before=%+v after=%+v", before, after)
 	}
 }
 
@@ -1374,6 +1382,22 @@ func srAssertNoEffects(t *testing.T, before, after srRuntimeState) {
 // Profiles carry fixture-only qualification references without registry evidence:
 // desired residency readback is not native loading or SR/NE/B qualification proof.
 func TestServedResidentPolicyPairedRoutes(t *testing.T) {
+	// Revisions and observation generations belong to each save/process. Keep
+	// all model entries intact, including state, reason and loaded evidence.
+	normalizeConfiguration := func(t *testing.T, configuration *nodepolicy.ModelConfiguration) nodepolicy.ModelConfiguration {
+		t.Helper()
+		if configuration == nil {
+			t.Fatal("model configuration absent for route comparison")
+		}
+		if err := configuration.Validate(); err != nil {
+			t.Fatalf("invalid model configuration for route comparison: %v", err)
+		}
+		normalized := *configuration
+		normalized.PolicyRevision = "0"
+		normalized.ObservationGeneration = 0
+		return normalized
+	}
+	directConfigurations := make(map[string]nodepolicy.ModelConfiguration)
 	test := func(name string, reverse bool) {
 		t.Run(name, func(t *testing.T) {
 			p := newPinnedSwitchFixture(t, reverse)
@@ -1384,8 +1408,8 @@ func TestServedResidentPolicyPairedRoutes(t *testing.T) {
 				// observer directly. Remove the private gateway owner as well:
 				// every successful read/write below must use direct pinned TLS.
 				mesh.a.cm.stop()
-			} else if mesh.directory(mesh.b).Services[noderec.ServiceEngineControl].Port != mesh.blockedPort || mesh.a.observers[noderec.ServiceCluster].established(mesh.b.uuid) == 0 {
-				t.Fatal("reverse case lacks blocked direct ec and an observed pinned outer session")
+			} else if mesh.a.observers[noderec.ServiceCluster].established(mesh.b.uuid) == 0 {
+				t.Fatal("reverse case lacks an observed pinned outer session")
 			}
 
 			local := func(t *testing.T) srPolicyView {
@@ -1430,7 +1454,7 @@ func TestServedResidentPolicyPairedRoutes(t *testing.T) {
 					}
 				}
 			}
-			assertPeer := func(t *testing.T, response jsonrpc.Message, want nodepolicy.Policy) {
+			assertPeer := func(t *testing.T, response jsonrpc.Message, want nodepolicy.Policy) nodepolicy.ModelConfiguration {
 				t.Helper()
 				if response.Error != nil {
 					t.Fatalf("paired policy response: %+v", response.Error)
@@ -1444,6 +1468,7 @@ func TestServedResidentPolicyPairedRoutes(t *testing.T) {
 					t.Fatalf("paired policy=%+v, want=%+v", view.Policy, want.PeerProjection())
 				}
 				assertDesired(t, view.ModelConfiguration, want)
+				return normalizeConfiguration(t, view.ModelConfiguration)
 			}
 			saved := false
 			readStored := func(t *testing.T) ([]byte, bool) {
@@ -1469,7 +1494,7 @@ func TestServedResidentPolicyPairedRoutes(t *testing.T) {
 				}
 				return parsed
 			}
-			readback := func(t *testing.T, want nodepolicy.Policy) {
+			readback := func(t *testing.T, want nodepolicy.Policy) nodepolicy.ModelConfiguration {
 				t.Helper()
 				view := local(t)
 				if !reflect.DeepEqual(view.Policy, want) {
@@ -1481,7 +1506,22 @@ func TestServedResidentPolicyPairedRoutes(t *testing.T) {
 					t.Fatal("unsaved policy must retain revision zero")
 				}
 				assertDesired(t, view.ModelConfiguration, want)
-				assertPeer(t, remote(t, "engine:remote-policy-get", map[string]string{"nodeId": mesh.b.uuid}), want)
+				var configuration nodepolicy.ModelConfiguration
+				neEventually(t, "local and paired model configuration agree", neCallBudget, func() bool {
+					view = local(t)
+					assertDesired(t, view.ModelConfiguration, want)
+					configuration = normalizeConfiguration(t, view.ModelConfiguration)
+					peer := assertPeer(t, remote(t, "engine:remote-policy-get", map[string]string{"nodeId": mesh.b.uuid}), want)
+					// Compare settled results, not a projection captured while
+					// policy activation or source observation is still catching up.
+					for _, entry := range configuration.Models {
+						if entry.State == nodepolicy.ModelStateUnknown || entry.State == nodepolicy.ModelStatePending {
+							return false
+						}
+					}
+					return view.Activation == "active" && reflect.DeepEqual(configuration, peer)
+				})
+				return configuration
 			}
 			writeLocal := func(t *testing.T, want nodepolicy.Policy) nodepolicy.Policy {
 				t.Helper()
@@ -1508,7 +1548,10 @@ func TestServedResidentPolicyPairedRoutes(t *testing.T) {
 				starts[engine] = append([]int32(nil), pids...)
 			}
 			f.mu.Unlock()
-			assertNoEffects := func(t *testing.T) {
+			// This shared fake observes starts and /api/generate only; its generic
+			// fallback does not report other routes. These checks make no claim
+			// about arbitrary unload/content requests or unexpected fake routes.
+			assertNoStartsOrGenerate := func(t *testing.T) {
 				t.Helper()
 				f.mu.Lock()
 				unchanged := reflect.DeepEqual(f.starts, starts)
@@ -1518,7 +1561,7 @@ func TestServedResidentPolicyPairedRoutes(t *testing.T) {
 				}
 				select {
 				case <-f.inflight:
-					t.Fatal("unqualified configuration edit dispatched synthetic generate/load")
+					t.Fatal("unqualified configuration edit dispatched synthetic /api/generate")
 				default:
 				}
 			}
@@ -1553,9 +1596,10 @@ func TestServedResidentPolicyPairedRoutes(t *testing.T) {
 						t.Fatal("PG-denied configuration changed policy file presence or bytes")
 					}
 					readback(t, before) // Denied peers retain authenticated read access.
-					assertNoEffects(t)
+					assertNoStartsOrGenerate(t)
 					localWant := writeLocal(t, want) // PG does not gate the local owner.
-					assertNoEffects(t)
+					localConfiguration := readback(t, localWant)
+					assertNoStartsOrGenerate(t)
 					restored := writeLocal(t, before)
 					managementSet(t, mesh.b.cm, mesh.a.uuid, true)
 					// Restore the same starting configuration, then perform a real
@@ -1575,8 +1619,20 @@ func TestServedResidentPolicyPairedRoutes(t *testing.T) {
 					}
 					localWant.Revision = result.Policy.Revision
 					assertPeer(t, accepted, localWant)
-					readback(t, localWant)
-					assertNoEffects(t)
+					pairedConfiguration := readback(t, localWant)
+					if !reflect.DeepEqual(pairedConfiguration, localConfiguration) {
+						t.Fatalf("local/paired save model configuration differs: local=%+v paired=%+v", localConfiguration, pairedConfiguration)
+					}
+					if reverse {
+						// Compare routes when both are selected by -run; a reverse-only
+						// run still compares the local and remote save/readback paths.
+						if direct, ok := directConfigurations[name]; ok && !reflect.DeepEqual(localConfiguration, direct) {
+							t.Fatalf("direct/reverse model configuration differs: direct=%+v reverse=%+v", direct, localConfiguration)
+						}
+					} else {
+						directConfigurations[name] = localConfiguration
+					}
+					assertNoStartsOrGenerate(t)
 				})
 			}
 			configure("explicit empty served permission", nodepolicy.ServedModels{}, nil)
@@ -1599,7 +1655,7 @@ func TestServedResidentPolicyPairedRoutes(t *testing.T) {
 				}
 				assertStoredPolicy(t, path, before)
 			}
-			assertNoEffects(t)
+			assertNoStartsOrGenerate(t)
 		})
 	}
 	test("authenticated direct without reverse gateway", false)
@@ -1624,13 +1680,16 @@ func TestServedResidentProcessPermission(t *testing.T) {
 		f.edit(t, func(p *nodepolicy.Policy) { p.ServedModels = nodepolicy.ServedModels{} })
 		before := f.control(t, "")
 		status, data := f.chat(t, neModel, neOutput, &request)
+		if status != http.StatusServiceUnavailable {
+			t.Fatalf("empty served permission HTTP status=%d, want %d", status, http.StatusServiceUnavailable)
+		}
 		var refusal struct {
 			Code string `json:"code"`
 		}
 		if err := json.Unmarshal(data, &refusal); err != nil {
-			t.Fatal(err)
+			t.Fatalf("decode empty served permission refusal: %v", err)
 		}
-		if status != http.StatusServiceUnavailable || refusal.Code != "strict-admission" {
+		if refusal.Code != "strict-admission" {
 			t.Fatalf("empty permission status=%d refusal=%+v", status, refusal)
 		}
 		srAssertNoEffects(t, before, f.control(t, ""))
@@ -1638,13 +1697,16 @@ func TestServedResidentProcessPermission(t *testing.T) {
 	t.Run("paired destination enforces current served permission", func(t *testing.T) {
 		before := f.control(t, "")
 		status, _, data := managementHTTPResponse(t, f.peerClient, f.facadePort, http.MethodPost, "/v1/chat/completions", map[string]any{"model": neModel, "messages": []any{map[string]string{"role": "user", "content": "fixture"}}, "max_tokens": neOutput, "stream": false})
+		if status != http.StatusServiceUnavailable {
+			t.Fatalf("paired destination permission HTTP status=%d, want %d", status, http.StatusServiceUnavailable)
+		}
 		var refusal struct {
 			Reason string `json:"reason"`
 		}
 		if err := json.Unmarshal(data, &refusal); err != nil {
-			t.Fatal(err)
+			t.Fatalf("decode paired destination permission refusal: %v", err)
 		}
-		if status != http.StatusServiceUnavailable || refusal.Reason != "not-served" {
+		if refusal.Reason != "not-served" {
 			t.Fatalf("paired destination status=%d reason=%s", status, refusal.Reason)
 		}
 		srAssertNoEffects(t, before, f.control(t, ""))
@@ -1701,13 +1763,16 @@ func TestServedResidentProcessResidency(t *testing.T) {
 			request := nodepolicy.StrictAdmissionRequest{Version: 1, QueueBudgetMs: 0, ColdStartBudgetMs: 0, PreOutputBudgetMs: 2000, Request: nodepolicy.RoutingRequestKey{OriginNodeID: f.snapshot(t).NodeID, ProxyRunID: "sr-bound-origin", RequestID: strconv.Itoa(i + 1)}, Identity: model.Identity}
 			before := f.control(t, "")
 			status, data := f.chat(t, model.Model, limit+1, &request)
+			if status != http.StatusBadRequest {
+				t.Fatalf("oversized output for %s HTTP status=%d, want %d", model.Model, status, http.StatusBadRequest)
+			}
 			var refusal struct {
 				Code string `json:"code"`
 			}
 			if err := json.Unmarshal(data, &refusal); err != nil {
-				t.Fatal(err)
+				t.Fatalf("decode oversized output refusal for %s: %v", model.Model, err)
 			}
-			if status != http.StatusBadRequest || refusal.Code != "strict-qualification" {
+			if refusal.Code != "strict-qualification" {
 				t.Fatalf("oversized output %s status=%d code=%s", model.Model, status, refusal.Code)
 			}
 			srAssertNoEffects(t, before, f.control(t, ""))
@@ -1796,19 +1861,19 @@ func TestServedResidentProcessCrossEngineLastSlot(t *testing.T) {
 	path := filepath.Join(f.app, "local-qualification.json")
 	data, err := os.ReadFile(path)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("read SR cross-engine qualification registry: %v", err)
 	}
 	var registry struct {
 		Version        int               `json:"version"`
 		Qualifications []json.RawMessage `json:"qualifications"`
 	}
 	if err := neDecode(bytes.NewReader(data), &registry); err != nil {
-		t.Fatal(err)
+		t.Fatalf("decode SR cross-engine qualification registry: %v", err)
 	}
 	digest := sha256.Sum256([]byte(srOllamaModel))
 	qualification, err := json.Marshal(map[string]any{"id": "sr-ollama", "revision": "1", "engine": "ollama", "model": srOllamaModel, "modelDigests": []string{hex.EncodeToString(digest[:])}, "launchDigests": []string{launch}, "tokenizer": "synthetic-sr-tokenizer", "chatTemplate": "synthetic-sr-template", "contextTokens": neContext, "maxOutputTokens": neOutput, "routes": []string{"/v1/chat/completions"}, "shapes": map[string]any{"tools": false, "structuredOutput": []string{}, "reasoningReplay": false}, "accounting": map[string]any{"method": "utf8-bytes", "requestOverheadTokens": 8, "messageOverheadTokens": 4, "toolOverheadTokens": 0, "schemaOverheadTokens": 0}, "evidence": "Fixture-only cross-engine admission proof. No native Ollama, model, hardware or performance qualification."})
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("encode SR synthetic Ollama qualification: %v", err)
 	}
 	registry.Qualifications = append(registry.Qualifications, qualification)
 	jointWriteJSON(t, path, registry)
@@ -1849,7 +1914,7 @@ func TestServedResidentProcessCrossEngineLastSlot(t *testing.T) {
 			t.Fatalf("private Ollama control status=%d err=%v", status, err)
 		}
 		if err := neDecode(bytes.NewReader(data), &state); err != nil {
-			t.Fatal(err)
+			t.Fatalf("decode SR private Ollama runtime control: %v", err)
 		}
 		if state.Base.Nonce != f.nonce || state.Base.PID <= 0 {
 			t.Fatal("private Ollama runtime authentication failed")
@@ -1863,28 +1928,41 @@ func TestServedResidentProcessCrossEngineLastSlot(t *testing.T) {
 	}
 	source, target := f.control(t, ""), targetState()
 	sourceStarts, starts := len(f.starts(t)), targetStarts()
-	if source.Models[neModel] != (srEffects{Loaded: true, Loads: 1}) || target.Models[srOllamaModel] != (srEffects{}) || source.Base.Chats != 0 || target.Base.Chats != 0 || source.Content != 0 || target.Content != 0 || source.Base.Unexpected != 0 || target.Base.Unexpected != 0 || starts == 0 {
+	if source.Models[neModel] != (srEffects{Loaded: true, Loads: 1}) || source.Models[srNeighbor] != (srEffects{}) || target.Models[srOllamaModel] != (srEffects{}) || source.Base.Chats != 0 || target.Base.Chats != 0 || source.Content != 0 || target.Content != 0 || source.Base.Unexpected != 0 || target.Base.Unexpected != 0 || starts == 0 {
 		t.Fatalf("last-slot fixture must start with only an idle hard resident: source=%+v target=%+v starts=%d", source, target, starts)
 	}
 	request := nodepolicy.StrictAdmissionRequest{Version: 1, QueueBudgetMs: 100, ColdStartBudgetMs: 1000, PreOutputBudgetMs: 2000, Request: nodepolicy.RoutingRequestKey{OriginNodeID: f.snapshot(t).NodeID, ProxyRunID: "sr-cross-engine-origin", RequestID: "1"}, Identity: capability.Identity}
 	if err := request.Validate(); err != nil {
-		t.Fatal(err)
+		t.Fatalf("validate cross-engine occupied request: %v", err)
 	}
 	body := []byte(`{"model":"sr-ollama:latest","messages":[{"role":"user","content":"fixture"}],"max_tokens":128,"stream":false}`)
+	unloadPattern := regexp.MustCompile(`(?m)^[^\r\n]*\[nvpair-ui-broker\] INFO model unloaded engine=(\S+) model=(\S+) reason=(\S+)\r?\n`)
+	refusalLogOffset := len(f.p.output.String())
+	started := time.Now()
 	status, data, err := f.http(http.MethodPost, f.switchFacadePort, "/v1/chat/completions", body, &request)
+	elapsed := time.Since(started)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("cross-engine occupied request transport: %v", err)
+	}
+	if status != http.StatusTooManyRequests {
+		t.Fatalf("cross-engine occupied request HTTP status=%d, want %d", status, http.StatusTooManyRequests)
+	}
+	queueBudget := time.Duration(request.QueueBudgetMs) * time.Millisecond
+	// Allow Windows process scheduling and loopback RPC overhead, while still
+	// distinguishing this queue expiry from the larger pre-output deadline.
+	if elapsed < queueBudget || elapsed > queueBudget+time.Second {
+		t.Fatalf("cross-engine occupied refusal elapsed=%s, want queue budget %s through %s", elapsed, queueBudget, queueBudget+time.Second)
 	}
 	var refusal struct {
 		Code  string `json:"code"`
 		Error string `json:"error"`
 	}
 	if err := json.Unmarshal(data, &refusal); err != nil {
-		t.Fatal(err)
+		t.Fatalf("decode cross-engine occupied refusal: %v", err)
 	}
 	// AdmitStrict's fitWait path expires the queue as occupied, before cold
 	// dispatch; neither an unqualified nor a cold-budget refusal proves this.
-	if status != http.StatusTooManyRequests || refusal.Code != "strict-admission" || refusal.Error != "strict admission: occupied" {
+	if refusal.Code != "strict-admission" || refusal.Error != "strict admission: occupied" {
 		t.Fatalf("cross-engine last slot status=%d refusal=%+v", status, refusal)
 	}
 	afterSource, afterTarget := f.control(t, ""), targetState()
@@ -1893,9 +1971,13 @@ func TestServedResidentProcessCrossEngineLastSlot(t *testing.T) {
 	if !reflect.DeepEqual(source.Models, afterSource.Models) || !reflect.DeepEqual(target.Models, afterTarget.Models) || len(f.starts(t)) != sourceStarts || targetStarts() != starts || afterTarget.Base.LeakedHeaders != 0 {
 		t.Fatalf("contention changed loaded models, starts or internal headers: source=%+v target=%+v", afterSource, afterTarget)
 	}
+	if unloads := unloadPattern.FindAllStringSubmatch(f.p.output.String()[refusalLogOffset:], -1); len(unloads) != 0 {
+		t.Fatalf("occupied refusal dispatched broker unloads: %v", unloads)
+	}
 	f.entry(t, neModel, nodepolicy.ModelStateSatisfied, "")
 	// Removing desire alone retains allocation. Explicitly unload it, and wait
-	// for the same inventory owner that strict admission uses to release space.
+	// for manager readback. The broker asynchronously pushes that inventory to
+	// the admission owner via node/set-residency; readback is not its barrier.
 	f.resident(t)
 	f.call(t, "engine:unload-model", map[string]string{"engine": "llamacpp", "model": neModel}, nil)
 	neEventually(t, "global model slot released by source readback", neCallBudget, func() bool {
@@ -1903,13 +1985,48 @@ func TestServedResidentProcessCrossEngineLastSlot(t *testing.T) {
 		return len(models.Loaded["llamacpp"]) == 0 && len(models.Loaded["ollama"]) == 0 && !f.control(t, "").Models[neModel].Loaded
 	})
 	released := f.control(t, "")
-	if released.Models[neModel] != (srEffects{Loads: 1, Unloads: 1}) {
+	if released.Models[neModel] != (srEffects{Loads: 1, Unloads: 1}) || released.Models[srNeighbor] != source.Models[srNeighbor] {
 		t.Fatalf("explicit source release effects=%+v", released)
 	}
-	request.Request.RequestID = "2"
-	status, data, err = f.http(http.MethodPost, f.switchFacadePort, "/v1/chat/completions", body, &request)
+	admissible := request
+	admissible.Request.RequestID = "2"
+	admissible.ColdStartBudgetMs = 5000
+	admissible.PreOutputBudgetMs = 8000
+	if err := admissible.Validate(); err != nil {
+		t.Fatalf("validate cross-engine released-slot request: %v", err)
+	}
+	// The shared HTTP helper stops at five seconds. Give this success control
+	// enough transport time to observe its full eight-second pre-output budget.
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	httpRequest, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://"+net.JoinHostPort("127.0.0.1", strconv.Itoa(f.switchFacadePort))+"/v1/chat/completions", bytes.NewReader(body))
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("create cross-engine released-slot HTTP request: %v", err)
+	}
+	strictHeader, err := json.Marshal(admissible)
+	if err != nil {
+		t.Fatalf("encode cross-engine released-slot strict header: %v", err)
+	}
+	httpRequest.Header.Set("Content-Type", "application/json")
+	httpRequest.Header.Set("X-NE-Fixture-Nonce", f.nonce)
+	httpRequest.Header.Set(nodepolicy.StrictAdmissionHeader, string(strictHeader))
+	client := *f.client
+	client.Timeout = 10 * time.Second
+	successLogOffset := len(f.p.output.String())
+	response, err := client.Do(httpRequest)
+	if err != nil {
+		t.Fatalf("cross-engine released-slot request transport: %v", err)
+	}
+	status = response.StatusCode
+	data, readErr := io.ReadAll(io.LimitReader(response.Body, neLimit+1))
+	if err := errors.Join(readErr, response.Body.Close()); err != nil {
+		t.Fatalf("read cross-engine released-slot response: %v", err)
+	}
+	if status != http.StatusOK {
+		t.Fatalf("cross-engine released-slot request HTTP status=%d, want %d", status, http.StatusOK)
+	}
+	if len(data) > neLimit {
+		t.Fatal("cross-engine released-slot response exceeded fixture bound")
 	}
 	var completion struct {
 		Model   string `json:"model"`
@@ -1920,24 +2037,40 @@ func TestServedResidentProcessCrossEngineLastSlot(t *testing.T) {
 		} `json:"choices"`
 	}
 	if err := json.Unmarshal(data, &completion); err != nil {
-		t.Fatal(err)
+		t.Fatalf("decode cross-engine released-slot completion: %v", err)
 	}
-	if status != http.StatusOK || completion.Model != srOllamaModel || len(completion.Choices) != 1 || completion.Choices[0].Message.Content != "fixture-only" {
+	if completion.Model != srOllamaModel || len(completion.Choices) != 1 || completion.Choices[0].Message.Content != "fixture-only" {
 		t.Fatalf("released cross-engine slot status=%d completion=%+v", status, completion)
 	}
 	afterTarget = targetState()
 	if afterTarget.Base.PID != target.Base.PID || afterTarget.Models[srOllamaModel] != (srEffects{Loaded: true, Loads: 1, Chats: 1}) || afterTarget.Base.Loads != 1 || afterTarget.Base.Unloads != 0 || afterTarget.Base.Chats != 1 || afterTarget.Content != 0 || afterTarget.Base.Unexpected != 0 || afterTarget.Base.LeakedHeaders != 0 || targetStarts() != starts || len(f.starts(t)) != sourceStarts {
 		t.Fatalf("admissible target effects=%+v", afterTarget)
 	}
-	finalSource := f.control(t, "")
-	// Target admission may repeat the already-completed source unload while
-	// reconciling its allocation. It must not reload or infer on that source.
-	if finalSource.Base.PID != released.Base.PID || finalSource.Models[neModel].Loaded || finalSource.Base.Loads != released.Base.Loads || finalSource.Base.Chats != released.Base.Chats || finalSource.Content != released.Content || finalSource.Base.Unexpected != released.Base.Unexpected || finalSource.Base.Unloads < released.Base.Unloads || finalSource.Base.Unloads > released.Base.Unloads+1 {
-		t.Fatalf("released source changed outside bounded admission unload: before=%+v after=%+v", released, finalSource)
-	}
 	neEventually(t, "only the cross-engine demand owns the released slot", neCallBudget, func() bool {
 		models := f.models(t)
 		return len(models.Loaded["llamacpp"]) == 0 && reflect.DeepEqual(models.Loaded["ollama"], []string{srOllamaModel})
+	})
+	finalSource := f.control(t, "")
+	// A stale broker node/set-residency push can make target admission repeat
+	// the completed source unload once. Attribute that exact model's effect to
+	// admission, and reject idle/pause unloads or any neighbor mutation.
+	extra := finalSource.Models[neModel].Unloads - released.Models[neModel].Unloads
+	wantSource := released.Models[neModel]
+	wantSource.Unloads += extra
+	if extra < 0 || extra > 1 || finalSource.Models[neModel] != wantSource || finalSource.Models[srNeighbor] != source.Models[srNeighbor] || finalSource.Base.PID != released.Base.PID || finalSource.Base.Loads != released.Base.Loads || finalSource.Base.Chats != released.Base.Chats || finalSource.Base.LeakedHeaders != released.Base.LeakedHeaders || finalSource.Content != released.Content || finalSource.Base.Unexpected != released.Base.Unexpected || !reflect.DeepEqual(finalSource.UnexpectedRoutes, released.UnexpectedRoutes) || finalSource.Base.Unloads != released.Base.Unloads+extra {
+		t.Fatalf("released source changed outside bounded admission unload: before=%+v after=%+v", released, finalSource)
+	}
+	neEventually(t, "broker attributes source unload to target admission", neCallBudget, func() bool {
+		unloads := unloadPattern.FindAllStringSubmatch(f.p.output.String()[successLogOffset:], -1)
+		for _, unload := range unloads {
+			if unload[1] != "llamacpp" || unload[2] != neModel || unload[3] != "admission" {
+				t.Fatalf("released-slot request caused an unrelated broker unload: %v", unload)
+			}
+		}
+		if len(unloads) > extra {
+			t.Fatalf("broker admission unload count=%d exceeds model effect=%d", len(unloads), extra)
+		}
+		return len(unloads) == extra
 	})
 }
 
@@ -1973,13 +2106,16 @@ func TestServedResidentProcessVeto(t *testing.T) {
 		peer.ResidentModels = nil
 		peer.ServedModels = nodepolicy.ServedModels{}
 		status, _, data := managementHTTPResponse(t, f.peerClient, f.ports.engineControl, http.MethodPost, "/v1/node-policy/set", map[string]any{"policy": peer, "expectedPersistedRevision": beforePolicy.Revision})
+		if status != http.StatusConflict {
+			t.Fatalf("PG denial HTTP status=%d, want %d", status, http.StatusConflict)
+		}
 		var refusal struct {
 			Code string `json:"code"`
 		}
 		if err := json.Unmarshal(data, &refusal); err != nil {
-			t.Fatal(err)
+			t.Fatalf("decode PG policy refusal: %v", err)
 		}
-		if status != http.StatusConflict || refusal.Code != "remote_management_denied" {
+		if refusal.Code != "remote_management_denied" {
 			t.Fatalf("PG denial status=%d code=%s", status, refusal.Code)
 		}
 		if !reflect.DeepEqual(f.policy(t).Policy, beforePolicy) {
@@ -2022,14 +2158,17 @@ func TestServedResidentProcessRecovery(t *testing.T) {
 		}
 		stale := nodepolicy.StrictAdmissionRequest{Version: 1, QueueBudgetMs: 0, ColdStartBudgetMs: 0, PreOutputBudgetMs: 2000, Request: nodepolicy.RoutingRequestKey{OriginNodeID: f.snapshot(t).NodeID, ProxyRunID: "sr-stale-router", RequestID: "1"}, Identity: old.Identity}
 		status, data := f.chat(t, neModel, neOutput, &stale)
+		if status != http.StatusServiceUnavailable {
+			t.Fatalf("stale router identity HTTP status=%d, want %d", status, http.StatusServiceUnavailable)
+		}
 		var refusal struct {
 			Code  string `json:"code"`
 			Error string `json:"error"`
 		}
 		if err := json.Unmarshal(data, &refusal); err != nil {
-			t.Fatal(err)
+			t.Fatalf("decode stale router identity refusal: %v", err)
 		}
-		if status != http.StatusServiceUnavailable || refusal.Code != "strict-admission" || refusal.Error != "strict admission: unavailable" {
+		if refusal.Code != "strict-admission" || refusal.Error != "strict admission: unavailable" {
 			t.Fatalf("stale router identity status=%d refusal=%+v", status, refusal)
 		}
 		srAssertNoEffects(t, state, f.control(t, ""))
