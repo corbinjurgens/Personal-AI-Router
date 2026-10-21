@@ -303,6 +303,8 @@ func TestServicePolicyModelConfiguration(t *testing.T) {
 	if result.Error != nil {
 		t.Fatalf("remove resident declaration: %+v", result.Error)
 	}
+	// Policy.UnmarshalJSON keeps omitted fields, so decode into a fresh value.
+	accepted.Policy = nodepolicy.Policy{}
 	if err := json.Unmarshal(result.Result, &accepted); err != nil {
 		t.Fatalf("decode removed resident declaration: %v", err)
 	}
