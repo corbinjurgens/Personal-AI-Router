@@ -4,7 +4,6 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	stderrors "errors"
 	"fmt"
@@ -224,8 +223,24 @@ var errTargetGone = stderrors.New("target node left discovery mid-request")
 // upstream body, while keeping Close bound to the original so the connection
 // is still released.
 type bodyWithPeek struct {
-	io.Reader
-	io.Closer
+	io.ReadCloser
+	first []byte
+	err   error
+}
+
+func (b *bodyWithPeek) Read(p []byte) (int, error) {
+	if len(b.first) != 0 {
+		n := copy(p, b.first)
+		b.first = b.first[n:]
+		if len(b.first) == 0 {
+			return n, b.err
+		}
+		return n, nil
+	}
+	if b.err != nil {
+		return 0, b.err
+	}
+	return b.ReadCloser.Read(p)
 }
 
 // awaitFirstBody blocks until the upstream produces the first byte of its
@@ -254,24 +269,61 @@ func awaitFirstBody(body io.ReadCloser, budget time.Duration) (io.ReadCloser, er
 		b   []byte
 		err error
 	}
-	// Buffered so the reader goroutine can always finish. On the timeout path
-	// ReverseProxy closes resp.Body, which unblocks the pending Read.
-	ch := make(chan peeked, 1)
+	raw, _ := body.(*routingResponseBody)
+	var borrower *bufferLease
+	if raw != nil && raw.attempt.request.sink != nil && raw.attempt.request.sink.bootstrap != nil {
+		var err error
+		borrower, err = raw.attempt.request.sink.bootstrap.borrow()
+		if err != nil {
+			return nil, errStreamFrameBudget
+		}
+	}
+	ch := make(chan peeked)
+	discard := make(chan struct{})
+	done := make(chan struct{})
+	if raw != nil {
+		raw.attempt.request.mu.Lock()
+		raw.attempt.request.firstBodyDone = done
+		raw.attempt.request.mu.Unlock()
+	}
 	go func() {
+		defer func() {
+			if borrower != nil {
+				borrower.close()
+			}
+			close(done)
+		}()
 		var one [1]byte
 		n, err := body.Read(one[:])
-		ch <- peeked{b: one[:n], err: err}
+		// Transfer the byte to the live handler or discard it before releasing
+		// its charge. No buffered channel can retain an abandoned peek.
+		select {
+		case ch <- peeked{b: one[:n], err: err}:
+		case <-discard:
+		}
 	}()
 
 	timer := time.NewTimer(budget)
 	defer timer.Stop()
 	select {
 	case p := <-ch:
+		<-done // No second reader can overlap this peek's body Read.
 		if len(p.b) == 0 && p.err != nil && !stderrors.Is(p.err, io.EOF) {
 			return nil, p.err
 		}
-		return bodyWithPeek{Reader: io.MultiReader(bytes.NewReader(p.b), body), Closer: body}, nil
+		return &bodyWithPeek{ReadCloser: body, first: p.b, err: p.err}, nil
 	case <-timer.C:
+		close(discard)
+		committed := raw != nil && raw.attempt.expireFirstBody()
+		_ = body.Close()
+		if !committed {
+			// The timeout won at the request owner. Close and join the
+			// real raw read before another attempt can borrow its resources.
+			<-done
+		}
+		// Commitment proves the underlying Read already returned. Only its
+		// timer-stop callback can remain; its byte charge and registry entry
+		// stay live until done, without another reader or upstream body.
 		return nil, errFirstBodyTimeout
 	}
 }
@@ -545,6 +597,26 @@ func (f *facade) handleHTTPWithStreamIdle(w http.ResponseWriter, r *http.Request
 		// Keep cancellation discoverable until every final buffer borrower has
 		// joined, including registration refusal, body errors and panic unwind.
 		defer func() {
+			ctl.mu.Lock()
+			pending := ctl.firstBodyDone
+			ctl.mu.Unlock()
+			if pending != nil {
+				select {
+				case <-pending:
+				default:
+					// The committed peek has finished raw IO but its pure stop
+					// callback still owns charged scratch. End this same owner
+					// and detach its workload while retaining registry discovery.
+					ctl.finish()
+					p.unregisterWorkload(requestOwner)
+					buffers.close()
+					go func() {
+						<-pending
+						p.unregisterRoutingRequest(requestOwner)
+					}()
+					return
+				}
+			}
 			buffers.close()
 			p.unregisterRoutingRequest(requestOwner)
 		}()

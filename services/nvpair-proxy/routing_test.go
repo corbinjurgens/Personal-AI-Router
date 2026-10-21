@@ -5,6 +5,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -13,6 +14,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -164,14 +166,14 @@ func TestUnifiedDispatch(t *testing.T) {
 
 	t.Run("nil and stale lifecycle hooks deny", func(t *testing.T) {
 		var absent *publicAttemptLifecycle
-		if absent.commit() || absent.acceptedByGuard(context.Background()) == nil || absent.bindCancel(func() {}) == nil || absent.associated(accountReservation{}) == nil {
+		if absent.commit() || absent.admitInterruption(streamInterruptReasonIdle) || absent.acceptedByGuard(context.Background()) == nil || absent.bindCancel(func() {}) == nil || absent.associated(accountReservation{}) == nil {
 			t.Fatal("nil attempt granted authority")
 		}
 		owner := newRoutingRequest(nil)
 		old := spendAttempt(t, owner)
 		old.finished(publicAttemptTerminal{})
 		current := spendAttempt(t, owner)
-		if old.commit() || old.acceptedByGuard(context.Background()) == nil || old.associated(accountReservation{Durability: accountReserveDurable}) == nil || owner.active != current {
+		if old.commit() || old.admitInterruption(streamInterruptReasonIdle) || old.acceptedByGuard(context.Background()) == nil || old.associated(accountReservation{Durability: accountReserveDurable}) == nil || owner.active != current {
 			t.Fatal("stale attempt granted authority or replaced active attempt")
 		}
 	})
@@ -1245,72 +1247,435 @@ func (c *routingParserRefusalConn) Read(p []byte) (int, error) {
 }
 
 func TestUnifiedDispatchPostcommitModifyResponseRefusal(t *testing.T) {
-	var upstream, refusals atomic.Int32
-	observed := make(chan *routingSpend, 1)
-	engine := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if _, err := io.Copy(io.Discard, r.Body); err != nil {
-			return
-		}
-		upstream.Add(1)
-		w.Header().Set("Content-Type", "text/event-stream")
-		w.WriteHeader(http.StatusAccepted)
-		_, _ = io.WriteString(w, continuitySSEEvent+"data: [DONE]\n\n")
-	}))
-	defer engine.Close()
-	fallback := newRecordingEngine(t, http.StatusOK)
-	discovery := NewDiscovery()
-	discovery.AddManual(nodeForModel(t, "a", engine.URL, "m"))
-	discovery.AddManual(nodeForModel(t, "b", fallback.URL, "m"))
-	p := newTestProxy(ollamaOnlyProfile(t), NewCodec(&recordingWriter{}), discovery, 0)
-	p.SetPriority([]string{"a", "b"})
-	p.buffers = bufferTestBudget(t, 256<<10, 0)
-	transport := p.plainHTTPTransport()
-	dial := transport.DialContext
-	transport.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
-		conn, err := dial(ctx, network, address)
-		if err != nil {
-			return nil, err
-		}
-		buffers := inferenceBuffers(ctx)
-		if buffers == nil {
-			return conn, nil
-		}
-		return &routingParserRefusalConn{Conn: conn, refuse: func() {
-			// The sink retains its real parser borrower. Make only the owner's
-			// handle unborrowable, forcing ModifyResponse's explicit error path.
-			buffers.mu.Lock()
-			parser := buffers.parser
-			buffers.mu.Unlock()
-			if parser == nil {
-				t.Error("missing retained parser handle")
+	test := func(name string, cancelBeforeSink bool) {
+		t.Run(name, func(t *testing.T) {
+			var upstream, refusals atomic.Int32
+			observed := make(chan *routingSpend, 1)
+			engine := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if _, err := io.Copy(io.Discard, r.Body); err != nil {
+					return
+				}
+				upstream.Add(1)
+				w.Header().Set("Content-Type", "text/event-stream")
+				w.WriteHeader(http.StatusAccepted)
+				_, _ = io.WriteString(w, continuitySSEEvent+"data: [DONE]\n\n")
+			}))
+			defer engine.Close()
+			fallback := newRecordingEngine(t, http.StatusOK)
+			discovery := NewDiscovery()
+			discovery.AddManual(nodeForModel(t, "a", engine.URL, "m"))
+			discovery.AddManual(nodeForModel(t, "b", fallback.URL, "m"))
+			p := newTestProxy(ollamaOnlyProfile(t), NewCodec(&recordingWriter{}), discovery, 0)
+			p.SetPriority([]string{"a", "b"})
+			p.buffers = bufferTestBudget(t, 256<<10, 0)
+			transport := p.plainHTTPTransport()
+			dial := transport.DialContext
+			transport.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
+				conn, err := dial(ctx, network, address)
+				if err != nil {
+					return nil, err
+				}
+				buffers := inferenceBuffers(ctx)
+				if buffers == nil {
+					return conn, nil
+				}
+				return &routingParserRefusalConn{Conn: conn, refuse: func() {
+					// The sink retains its real parser borrower. Make only the owner's
+					// handle unborrowable, forcing ModifyResponse's explicit error path.
+					buffers.mu.Lock()
+					parser := buffers.parser
+					buffers.mu.Unlock()
+					if parser == nil {
+						t.Error("missing retained parser handle")
+						return
+					}
+					parser.close()
+					if probe := buffers.borrowParserAllowance(); probe != nil {
+						probe.close()
+						t.Error("parser fixture did not reach the unborrowable-handle branch")
+					}
+					keys := p.activeRoutingRequests()
+					if len(keys) != 1 {
+						t.Errorf("parser refusal has %d request owners", len(keys))
+					} else {
+						owner := p.routingRequestControl(keys[0])
+						if cancelBeforeSink {
+							owner.sink.mu.Lock()
+						}
+						observed <- owner
+					}
+					refusals.Add(1)
+				}}, nil
+			}
+			rec, done := httptest.NewRecorder(), make(chan struct{})
+			go func() {
+				defer close(done)
+				p.soleFacade().handleHTTP(rec, httptest.NewRequest(http.MethodPost, routeChatCompletions, strings.NewReader(`{"model":"m","stream":true}`)))
+			}()
+			if cancelBeforeSink {
+				owner := <-observed
+				locked := true
+				defer func() {
+					if locked {
+						owner.sink.mu.Unlock()
+					}
+				}()
+				stacks := make([]byte, 1<<20)
+				waitForCond(t, time.Second, "budget error waiting for sink admission", func() bool {
+					n := runtime.Stack(stacks, true)
+					return bytes.Contains(stacks[:n], []byte("(*responseSink).planInterruption"))
+				})
+				if owner.sink.endingPlanned || !owner.cancel(false) {
+					t.Fatal("budget fixture did not establish cancellation before new sink planning")
+				}
+				owner.mu.Lock()
+				committed, cancelled, reason := owner.committed, owner.cancelled, owner.reason
+				owner.mu.Unlock()
+				if !committed || !cancelled || reason != "cancelled by request" {
+					t.Fatalf("budget cancellation winner: committed=%v cancelled=%v reason=%q", committed, cancelled, reason)
+				}
+				owner.sink.mu.Unlock()
+				locked = false
+				waitChan(t, done, "cancelled budget error cleanup")
+				result := owner.sink.result()
+				if result.Reason != "" || result.Synthetic != 0 || rec.Body.Len() != 0 || refusals.Load() != 1 || upstream.Load() != 1 || fallback.hits() != 0 {
+					t.Fatalf("cancelled budget error planned output: sink=%+v body=%q refusals=%d upstream=%d fallback=%d", result, rec.Body.String(), refusals.Load(), upstream.Load(), fallback.hits())
+				}
+				ownedAssertHandlerDrained(t, p, owner)
 				return
 			}
-			parser.close()
-			if probe := buffers.borrowParserAllowance(); probe != nil {
-				probe.close()
-				t.Error("parser fixture did not reach the unborrowable-handle branch")
+			waitChan(t, done, "postcommit ModifyResponse refusal cleanup")
+			select {
+			case owner := <-observed:
+				if owner == nil || !owner.committed {
+					t.Fatal("ModifyResponse refusal did not follow genuine raw commitment")
+				}
+			default:
+				t.Fatal("no real request owner observed at the parser refusal branch")
 			}
+			if refusals.Load() != 1 || upstream.Load() != 1 || fallback.hits() != 0 || rec.Code != http.StatusAccepted || rec.Body.String() != string(wantSSEInterruption(streamInterruptReasonBudget)) {
+				t.Fatalf("postcommit ModifyResponse refusal: handles=%d upstream=%d fallback=%d status=%d body=%q", refusals.Load(), upstream.Load(), fallback.hits(), rec.Code, rec.Body.String())
+			}
+			ownedAssertHandlerDrained(t, p, nil)
+		})
+	}
+	test("committed allocation error", false)
+	test("cancellation before budget sink admission", true)
+}
+
+func TestUnifiedDispatchCommittedPeekTimer(t *testing.T) {
+	setForTest(t, &firstBodyTimeout, 50*time.Millisecond)
+	setForTest(t, &retryBackoff, []time.Duration(nil))
+	test := func(name string, acceptedAttempt int32, cancelAfterCommit, sinkAdmissionBarrier bool) {
+		t.Run(name, func(t *testing.T) {
+			entered, send := make(chan struct{}), make(chan struct{})
+			var sends atomic.Int32
+			engine := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if _, err := io.Copy(io.Discard, r.Body); err != nil {
+					return
+				}
+				if sends.Add(1) < acceptedAttempt {
+					w.WriteHeader(http.StatusServiceUnavailable)
+					return
+				}
+				w.Header().Set("Content-Type", "text/event-stream")
+				w.WriteHeader(http.StatusAccepted)
+				w.(http.Flusher).Flush()
+				close(entered)
+				<-send
+				_, _ = io.WriteString(w, continuitySSEEvent+"data: [DONE]\n\n")
+			}))
+			defer engine.Close()
+			var sendOnce sync.Once
+			unblockEngine := func() { sendOnce.Do(func() { close(send) }) }
+			defer unblockEngine()
+			fallback := newRecordingEngine(t, http.StatusOK)
+			discovery := NewDiscovery()
+			discovery.AddManual(nodeForModel(t, "a", engine.URL, "m"))
+			if acceptedAttempt == 1 {
+				discovery.AddManual(nodeForModel(t, "b", fallback.URL, "m"))
+			}
+			writer := &recordingWriter{}
+			p := newTestProxy(ollamaOnlyProfile(t), NewCodec(writer), discovery, 0)
+			p.SetPriority([]string{"a", "b"})
+			p.buffers = bufferTestBudget(t, 256<<10, 0)
+			rec, done := httptest.NewRecorder(), make(chan struct{})
+			go func() {
+				defer close(done)
+				p.soleFacade().handleHTTP(rec, httptest.NewRequest(http.MethodPost, routeChatCompletions, strings.NewReader(`{"model":"m","stream":true}`)))
+			}()
+			waitChan(t, entered, "accepted response headers")
 			keys := p.activeRoutingRequests()
 			if len(keys) != 1 {
-				t.Errorf("parser refusal has %d request owners", len(keys))
-			} else {
-				observed <- p.routingRequestControl(keys[0])
+				t.Fatalf("registered requests=%d", len(keys))
 			}
-			refusals.Add(1)
-		}}, nil
+			owner := p.routingRequestControl(keys[0])
+			committed, resume, callbackDone := make(chan struct{}), make(chan struct{}), make(chan struct{})
+			var resumeOnce sync.Once
+			unblockCallback := func() { resumeOnce.Do(func() { close(resume) }) }
+			defer unblockCallback()
+			owner.mu.Lock()
+			stop := owner.stopPreOutput
+			var blocked atomic.Bool
+			owner.stopPreOutput = func() bool {
+				if blocked.CompareAndSwap(false, true) {
+					defer close(callbackDone)
+					close(committed)
+					<-resume
+				}
+				return stop()
+			}
+			owner.mu.Unlock()
+			sinkLocked := false
+			unlockSink := func() {
+				if sinkLocked {
+					owner.sink.mu.Unlock()
+					sinkLocked = false
+				}
+			}
+			defer unlockSink()
+			if sinkAdmissionBarrier {
+				owner.sink.mu.Lock()
+				sinkLocked = true
+			}
+			unblockEngine()
+			waitChan(t, committed, "recorded raw commitment before peek publication")
+			if sinkAdmissionBarrier {
+				stacks := make([]byte, 1<<20)
+				waitForCond(t, time.Second, "handler waiting to admit its sink plan", func() bool {
+					n := runtime.Stack(stacks, true)
+					return bytes.Contains(stacks[:n], []byte("(*responseSink).planInterruptionForAttempt"))
+				})
+				if owner.sink.endingPlanned {
+					t.Fatal("sink barrier did not precede new planning")
+				}
+			}
+			if cancelAfterCommit && !owner.cancel(false) {
+				t.Fatal("request cancellation did not win")
+			}
+			if sinkAdmissionBarrier {
+				owner.mu.Lock()
+				cancelled, reason := owner.cancelled, owner.reason
+				owner.mu.Unlock()
+				if !cancelled || reason != "cancelled by request" {
+					t.Fatalf("cancellation lost before sink admission: cancelled=%v reason=%q", cancelled, reason)
+				}
+				unlockSink()
+			}
+			waitChan(t, done, "handler return before callback release")
+			owner.mu.Lock()
+			pending, terminal, rawCommitted := owner.firstBodyDone, owner.done, owner.committed
+			owner.mu.Unlock()
+			if !terminal || !rawCommitted || sends.Load() != acceptedAttempt || fallback.hits() != 0 {
+				t.Fatalf("timer changed request winner: terminal=%v committed=%v sends=%d fallback=%d", terminal, rawCommitted, sends.Load(), fallback.hits())
+			}
+			if pending == nil || p.routingRequestControl(keys[0]) != owner || owner.cancel(false) {
+				t.Fatal("pending byte borrower lost terminal owner discovery")
+			}
+			if _, err := owner.newAttempt(); !errors.Is(err, errRoutingSpend) {
+				t.Fatalf("terminal committed request allowed dispatch: %v", err)
+			}
+			bufferAssertTotals(t, p.buffers, 96<<10, 1, 0)
+			p.identityMu.Lock()
+			associations := len(p.workloadRequests)
+			p.identityMu.Unlock()
+			if associations != 0 {
+				t.Fatalf("terminal workload associations=%d", associations)
+			}
+			result := owner.sink.result()
+			if cancelAfterCommit {
+				if rec.Body.Len() != 0 || result.Reason != "" || result.DeliveryComplete {
+					t.Fatalf("cancelled response delivered a terminal body: body=%q sink=%+v", rec.Body.String(), result)
+				}
+			} else if rec.Code != http.StatusAccepted || rec.Body.String() != string(wantSSEInterruption(streamInterruptReasonIdle)) || result.Reason != streamInterruptReasonIdle || result.ProtocolComplete || !result.DeliveryComplete || !result.ContinuationUnavailable || result.Genuine != 0 {
+				t.Fatalf("committed timer bypassed sink: status=%d body=%q sink=%+v", rec.Code, rec.Body.String(), result)
+			}
+			completed := notificationsOf(t, writer, engines.AddressMethod(p.soleFacade().profile.Name, "proxy/request"))
+			if len(completed) != 1 {
+				t.Fatalf("completion notifications=%d", len(completed))
+			}
+			var event RequestEvent
+			if err := json.Unmarshal(completed[0], &event); err != nil {
+				t.Fatal(err)
+			}
+			wantReason := streamInterruptReasonIdle
+			if cancelAfterCommit {
+				wantReason = "cancelled by request"
+			}
+			if event.Error != wantReason || (!cancelAfterCommit && (event.Status != http.StatusAccepted || event.NodeID != "a")) {
+				t.Fatalf("false terminal reason/status: %+v", event)
+			}
+			unblockCallback()
+			waitChan(t, callbackDone, "pure stop callback completion")
+			waitChan(t, pending, "peek discard and charged borrower release")
+			waitForCond(t, time.Second, "registry cleanup after peek release", func() bool { return len(p.activeRoutingRequests()) == 0 })
+			ownedAssertHandlerDrained(t, p, owner)
+		})
 	}
-	rec := httptest.NewRecorder()
-	p.soleFacade().handleHTTP(rec, httptest.NewRequest(http.MethodPost, routeChatCompletions, strings.NewReader(`{"model":"m","stream":true}`)))
-	select {
-	case owner := <-observed:
-		if owner == nil || !owner.committed {
-			t.Fatal("ModifyResponse refusal did not follow genuine raw commitment")
+	test("multiple candidates", 1, false, false)
+	test("last permitted candidate", maxDispatchAttempts, false, false)
+	test("cancellation after recorded commitment", 1, true, false)
+	test("cancellation while sink admission is blocked", 1, true, true)
+}
+
+type routingTrackedPeekBody struct {
+	entered, release, closed chan struct{}
+	err                      error
+	reading, overlap         atomic.Bool
+	reads, closes            atomic.Int32
+	closeOnce                sync.Once
+}
+
+func (b *routingTrackedPeekBody) Read(p []byte) (int, error) {
+	if b.reads.Add(1) != 1 {
+		return 0, io.EOF
+	}
+	if b.reading.Swap(true) {
+		b.overlap.Store(true)
+	}
+	defer b.reading.Store(false)
+	close(b.entered)
+	<-b.release
+	p[0] = '!'
+	return 1, b.err
+}
+
+func (b *routingTrackedPeekBody) Close() error {
+	if b.reading.Load() {
+		b.overlap.Store(true)
+	}
+	b.closes.Add(1)
+	b.closeOnce.Do(func() { close(b.closed) })
+	return nil
+}
+
+func TestUnifiedDispatchPeekReadErrorAndTimeout(t *testing.T) {
+	t.Run("committed timeout closes finished raw IO without another reader", func(t *testing.T) {
+		owner := newRoutingRequest(nil)
+		a, err := owner.newDispatchAttempt(context.Background(), func() {}, "local")
+		if err != nil || !a.acceptResponse() {
+			t.Fatalf("attempt setup: %v", err)
 		}
-	default:
-		t.Fatal("no real request owner observed at the parser refusal branch")
-	}
-	if refusals.Load() != 1 || upstream.Load() != 1 || fallback.hits() != 0 || rec.Code != http.StatusAccepted || rec.Body.String() != string(wantSSEInterruption(streamInterruptReasonBudget)) {
-		t.Fatalf("postcommit ModifyResponse refusal: handles=%d upstream=%d fallback=%d status=%d body=%q", refusals.Load(), upstream.Load(), fallback.hits(), rec.Code, rec.Body.String())
-	}
-	ownedAssertHandlerDrained(t, p, nil)
+		committed, resume := make(chan struct{}), make(chan struct{})
+		var once sync.Once
+		unblock := func() { once.Do(func() { close(resume) }) }
+		defer unblock()
+		owner.stopPreOutput = func() bool { close(committed); <-resume; return true }
+		upstream := &routingTrackedPeekBody{entered: make(chan struct{}), release: make(chan struct{}), closed: make(chan struct{})}
+		close(upstream.release)
+		body := &routingResponseBody{ReadCloser: upstream, attempt: a}
+		result := make(chan error, 1)
+		go func() { _, err := awaitFirstBody(body, 50*time.Millisecond); result <- err }()
+		waitChan(t, committed, "raw IO finished before blocked callback")
+		if err := <-result; !errors.Is(err, errFirstBodyTimeout) {
+			t.Fatalf("committed peek timer=%v", err)
+		}
+		if upstream.reads.Load() != 1 || upstream.closes.Load() != 1 || upstream.overlap.Load() {
+			t.Fatalf("committed timeout raw IO: reads=%d closes=%d overlap=%v", upstream.reads.Load(), upstream.closes.Load(), upstream.overlap.Load())
+		}
+		owner.mu.Lock()
+		pending := owner.firstBodyDone
+		owner.mu.Unlock()
+		select {
+		case <-pending:
+			t.Fatal("peek discarded its scratch before callback completion")
+		default:
+		}
+		unblock()
+		waitChan(t, pending, "finished callback and peek worker")
+	})
+	t.Run("raw error survives first byte publication without second read", func(t *testing.T) {
+		owner := newRoutingRequest(nil)
+		rec := httptest.NewRecorder()
+		sink := newResponseSink(rec, nil)
+		owner.sink = sink
+		a, err := owner.newDispatchAttempt(context.Background(), func() {}, "local")
+		if err != nil || !a.acceptResponse() {
+			t.Fatalf("attempt setup: %v", err)
+		}
+		committed, resume := make(chan struct{}), make(chan struct{})
+		var once sync.Once
+		unblock := func() { once.Do(func() { close(resume) }) }
+		defer unblock()
+		owner.stopPreOutput = func() bool { close(committed); <-resume; return true }
+		upstream := &routingTrackedPeekBody{entered: make(chan struct{}), release: make(chan struct{}), closed: make(chan struct{}), err: io.ErrUnexpectedEOF}
+		close(upstream.release)
+		body := &routingResponseBody{ReadCloser: upstream, attempt: a}
+		type peekResult struct {
+			body io.ReadCloser
+			err  error
+		}
+		result := make(chan peekResult, 1)
+		go func() { b, err := awaitFirstBody(body, time.Second); result <- peekResult{b, err} }()
+		waitChan(t, committed, "raw error commitment before peek publication")
+		if !a.requestCommitted() {
+			t.Fatal("positive raw read with error did not commit")
+		}
+		unblock()
+		peek := <-result
+		if peek.err != nil {
+			t.Fatalf("committed raw error rejected before delivery: %v", peek.err)
+		}
+		budget := newFrameBudget(64 << 20)
+		reader, err := newStreamFrameReader(streamFrameConfig{Upstream: peek.body, Protocol: streamProtocolSSE, Budget: budget, Sink: sink})
+		if err != nil {
+			t.Fatal(err)
+		}
+		sink.WriteHeader(http.StatusAccepted)
+		if _, err := io.Copy(sink, reader); err != nil {
+			t.Fatal(err)
+		}
+		if err := sink.FlushError(); err != nil {
+			t.Fatal(err)
+		}
+		if err := reader.Close(); err != nil {
+			t.Fatal(err)
+		}
+		resultSink := sink.result()
+		if rec.Code != http.StatusAccepted || rec.Body.String() != string(wantSSEInterruption(streamInterruptReasonReadFailed)) || resultSink.Reason != streamInterruptReasonReadFailed || resultSink.ProtocolComplete || !resultSink.DeliveryComplete || budget.inUse() != 0 {
+			t.Fatalf("raw error did not end through sink: status=%d body=%q sink=%+v bytes=%d", rec.Code, rec.Body.String(), resultSink, budget.inUse())
+		}
+		if upstream.reads.Load() != 1 || upstream.closes.Load() != 1 || upstream.overlap.Load() {
+			t.Fatalf("raw IO lifetime: reads=%d closes=%d overlap=%v", upstream.reads.Load(), upstream.closes.Load(), upstream.overlap.Load())
+		}
+	})
+	t.Run("timeout wins before late raw byte and joins the reader", func(t *testing.T) {
+		owner := newRoutingRequest(nil)
+		var cancellations atomic.Int32
+		a, err := owner.newDispatchAttempt(context.Background(), func() { cancellations.Add(1) }, "local")
+		if err != nil || !a.acceptResponse() {
+			t.Fatalf("attempt setup: %v", err)
+		}
+		upstream := &routingTrackedPeekBody{entered: make(chan struct{}), release: make(chan struct{}), closed: make(chan struct{})}
+		var once sync.Once
+		unblock := func() { once.Do(func() { close(upstream.release) }) }
+		defer unblock()
+		body := &routingResponseBody{ReadCloser: upstream, attempt: a}
+		result := make(chan error, 1)
+		go func() { _, err := awaitFirstBody(body, 20*time.Millisecond); result <- err }()
+		waitChan(t, upstream.entered, "pending raw first read")
+		waitChan(t, upstream.closed, "timeout cancels and closes pending body")
+		select {
+		case err := <-result:
+			t.Fatalf("timeout returned before raw reader joined: %v", err)
+		default:
+		}
+		owner.mu.Lock()
+		ending, reason := a.state, a.reason
+		owner.mu.Unlock()
+		if ending != routingEnding || reason != errFirstBodyTimeout.Error() {
+			t.Fatalf("timeout did not record its owner transition: state=%s reason=%q", ending, reason)
+		}
+		if cancellations.Load() != 0 {
+			t.Fatal("failed upstream read was misclassified as requester cancellation")
+		}
+		unblock()
+		if err := <-result; !errors.Is(err, errFirstBodyTimeout) || owner.committed || a.committed {
+			t.Fatalf("late raw byte defeated timeout: err=%v committed=%v/%v", err, owner.committed, a.committed)
+		}
+		a.finished(publicAttemptTerminal{})
+		if _, err := owner.newAttempt(); err != nil {
+			t.Fatalf("genuine precommit timeout prohibited retry: %v", err)
+		}
+	})
 }

@@ -178,11 +178,31 @@ func (s *responseSink) planInterruption(reason string) bool {
 	if s == nil {
 		return true
 	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.planInterruptionLocked(reason, nil)
+}
+
+// Admission locks sink metadata before the request owner. The request hook
+// acquires only its own mutex and performs no callback or sink access.
+func (s *responseSink) planInterruptionForAttempt(reason string, attempt *publicAttemptLifecycle) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if attempt == nil {
+		return false
+	}
+	return s.planInterruptionLocked(reason, attempt)
+}
+
+// planInterruptionLocked requires s.mu; a supplied attempt admits the ending
+// under the existing request mutex before any new sink plan is recorded.
+func (s *responseSink) planInterruptionLocked(reason string, attempt *publicAttemptLifecycle) bool {
 	if _, ok := streamInterruptionFramesByReason[reason]; !ok {
 		reason = streamInterruptReasonReadFailed
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	if attempt != nil && !attempt.admitInterruption(reason) {
+		return false
+	}
 	if !s.endingPlanned {
 		s.endingPlanned = true
 		s.reason = reason
@@ -207,6 +227,14 @@ func interruptionBytes(protocol streamProtocol, reason string) []byte {
 // immutable templates even if the parser's bootstrap allowance was refused.
 func (s *responseSink) interruptedBody(protocol streamProtocol, reason string) io.ReadCloser {
 	s.planInterruption(reason)
+	s.body = responseInterruptionBody{sink: s, data: interruptionBytes(protocol, reason)}
+	return &s.body
+}
+
+func (s *responseSink) interruptedBodyForAttempt(protocol streamProtocol, reason string, attempt *publicAttemptLifecycle) io.ReadCloser {
+	if !s.planInterruptionForAttempt(reason, attempt) {
+		return nil
+	}
 	s.body = responseInterruptionBody{sink: s, data: interruptionBytes(protocol, reason)}
 	return &s.body
 }

@@ -97,7 +97,7 @@ func (a *publicAttemptLifecycle) commit() bool {
 	}
 	r := a.request
 	r.mu.Lock()
-	if r.active != a || r.cancelled || r.done || a.aborted || a.terminal != nil || !a.accepted || (a.ctx != nil && a.ctx.Err() != nil) {
+	if r.active != a || r.cancelled || r.done || a.aborted || a.terminal != nil || a.state == routingEnding || !a.accepted || (a.ctx != nil && a.ctx.Err() != nil) {
 		r.mu.Unlock()
 		return false
 	}
@@ -117,6 +117,47 @@ func (a *publicAttemptLifecycle) commit() bool {
 	if stop != nil {
 		stop()
 	}
+	return true
+}
+
+// expireFirstBody arbitrates this timer against raw commitment at the same
+// owner. An ended precommit attempt cannot accept a late byte after Close.
+func (a *publicAttemptLifecycle) expireFirstBody() bool {
+	r := a.request
+	r.mu.Lock()
+	committed := r.committed
+	var cancel context.CancelFunc
+	if r.active == a && !r.done && !r.cancelled && !a.aborted && a.terminal == nil {
+		if !committed && !r.deadline.IsZero() && !time.Now().Before(r.deadline) {
+			cancel, _, _ = r.cancelLocked(routingDeadlineReason)
+		} else if !committed {
+			a.state, a.reason = routingEnding, errFirstBodyTimeout.Error()
+			r.transitionLocked(a.state, a.reason)
+			// Body Close interrupts this failed upstream read. Cancelling its
+			// context would misclassify the failure as requester cancellation.
+		}
+	}
+	r.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	return committed
+}
+
+// Called with sink metadata locked, never with the request mutex held. This
+// transition admits planning before cancellation or denies it after cancellation.
+func (a *publicAttemptLifecycle) admitInterruption(reason string) bool {
+	if a == nil || a.request == nil {
+		return false
+	}
+	r := a.request
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.active != a || r.done || r.cancelled || !r.committed || a.aborted || a.terminal != nil || (a.ctx != nil && a.ctx.Err() != nil) {
+		return false
+	}
+	a.state, a.reason = routingEnding, reason
+	r.transitionLocked(a.state, a.reason)
 	return true
 }
 
@@ -265,6 +306,11 @@ func (r *routingSpend) finish() {
 	}
 	r.transitionLocked(routingTerminal, "request finished")
 	stop := r.stopPreOutput
+	if r.committed {
+		// The committing reader already owns the stop call. Its scheduling
+		// cannot block terminal sink delivery or request cleanup.
+		stop = nil
+	}
 	r.mu.Unlock()
 	if stop != nil {
 		stop()
@@ -1314,30 +1360,41 @@ func (ctl *routingSpend) dispatch(f *facade, w http.ResponseWriter, r *http.Requ
 				bodyWait = min(bodyWait, max(time.Until(deadline), time.Nanosecond))
 				body, err := awaitFirstBody(resp.Body, bodyWait)
 				if err != nil {
-					// This response must not commit, whether or not another
-					// attempt is permitted. awaitFirstBody's reader is still
-					// blocked on resp.Body, so committing would put two
-					// readers on one stream — the peek could swallow a byte
-					// the client never sees — and against a silent upstream
-					// the copy would then block with nothing left to
-					// interrupt it, hanging the request past every bound we
-					// set.
-					//
-					// Returning an error is what releases that reader:
-					// ReverseProxy closes resp.Body and calls ErrorHandler.
-					proxyErr = err.Error()
-					if !last {
-						retry = true
-						slog.Warn("proxy upstream produced no content, failing over",
+					if ctl.sink != nil && att.requestCommitted() {
+						if !att.canDeliverResponse() {
+							return context.Canceled
+						}
+						// Raw commitment precedes peek publication. A timer or
+						// read error after that point ends this accepted status
+						// through the sink, never ErrorHandler or another send.
+						if !stderrors.Is(err, errFirstBodyTimeout) {
+							_ = resp.Body.Close()
+						}
+						reason := streamInterruptReasonReadFailed
+						if stderrors.Is(err, errFirstBodyTimeout) {
+							reason = streamInterruptReasonIdle
+						}
+						body = ctl.sink.interruptedBodyForAttempt(streamRequest.protocol, reason, att)
+						if body == nil {
+							return context.Canceled
+						}
+						resp.ContentLength = -1
+						clearOriginStreamIntegrity(resp.Header)
+					} else {
+						proxyErr = err.Error()
+						if !last {
+							retry = true
+							slog.Warn("proxy upstream produced no content, failing over",
+								"id", reqID, "node_id", cand.id, "target", target.Host,
+								"path", r.URL.Path, "err", err)
+							return retrySignal{}
+						}
+						slog.Warn("proxy upstream produced no content, retries exhausted",
 							"id", reqID, "node_id", cand.id, "target", target.Host,
-							"path", r.URL.Path, "err", err)
-						return retrySignal{}
+							"method", r.Method, "path", r.URL.Path,
+							"duration_ms", time.Since(start).Milliseconds(), "err", err)
+						return err
 					}
-					slog.Warn("proxy upstream produced no content, retries exhausted",
-						"id", reqID, "node_id", cand.id, "target", target.Host,
-						"method", r.Method, "path", r.URL.Path,
-						"duration_ms", time.Since(start).Milliseconds(), "err", err)
-					return err
 				}
 				peeked = body
 				// Claim the attempt before any commit side effect. Losing the
@@ -1345,6 +1402,9 @@ func (ctl *routingSpend) dispatch(f *facade, w http.ResponseWriter, r *http.Requ
 				// so committing would stream through a context that is about to
 				// die and truncate the response we just started.
 				if !att.canDeliverResponse() {
+					if att.requestCommitted() {
+						return context.Canceled
+					}
 					if att.redispatched() {
 						// A cancel moved this request on before it committed.
 						retry = true
@@ -1365,7 +1425,12 @@ func (ctl *routingSpend) dispatch(f *facade, w http.ResponseWriter, r *http.Requ
 				if peeked != nil {
 					resp.Body = peeked
 				}
-				reader, err := installResponseStream(resp, streamRequest, r.Context(), streamIdle, performance)
+				var reader *streamFrameReader
+				if err == nil {
+					reader, err = installResponseStream(resp, streamRequest, r.Context(), streamIdle, performance)
+				} else {
+					err = nil
+				}
 				if err != nil {
 					// Raw bytes already committed this request. Buffer refusal
 					// must end through its sink without a new status or retry.
@@ -1373,7 +1438,11 @@ func (ctl *routingSpend) dispatch(f *facade, w http.ResponseWriter, r *http.Requ
 						return err
 					}
 					_ = resp.Body.Close()
-					resp.Body = ctl.sink.interruptedBody(streamRequest.protocol, streamInterruptReasonBudget)
+					ending := ctl.sink.interruptedBodyForAttempt(streamRequest.protocol, streamInterruptReasonBudget, att)
+					if ending == nil {
+						return context.Canceled
+					}
+					resp.Body = ending
 					resp.ContentLength = -1
 					clearOriginStreamIntegrity(resp.Header)
 				}
@@ -1464,6 +1533,10 @@ func (ctl *routingSpend) dispatch(f *facade, w http.ResponseWriter, r *http.Requ
 					servedNodeID, servedTarget = cand.id, target.Host
 					proxyErr = routingDeadlineReason
 					writeProxyError(ew, http.StatusServiceUnavailable, []string{proxyErr}, nil, false)
+					return
+				}
+				if ctl.requestCancelled() || r.Context().Err() != nil {
+					proxyErr = cancelReasonOr("request cancelled before completion")
 					return
 				}
 				// A deliberate abort says nothing about the node or its
