@@ -124,6 +124,22 @@ func TestLapsedClaimReportIsClearedWhenThePeerIsUnpaired(t *testing.T) {
 	d.reconcilePeerServices()
 	requireErrorsFrames(t, sent(), "errors:report")
 
+	// acceptPeerServices starts enrichment that rereads the peer pin. Join that
+	// test-owned reader before removing the pin; cluster-manager uses a bounded
+	// sharing retry for a real concurrent removal on Windows.
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		d.peerServicesMu.Lock()
+		active := d.peerServicesEnriching["peer"]
+		d.peerServicesMu.Unlock()
+		if !active {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("peer enrichment did not finish")
+		}
+		time.Sleep(time.Millisecond)
+	}
 	if err := os.Remove(filepath.Join(d.clusterDir, "trusted", "peer.json")); err != nil {
 		t.Fatal(err)
 	}
