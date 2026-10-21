@@ -161,6 +161,246 @@ func TestQualificationFixtureCases(t *testing.T) {
 	}
 }
 
+// Exercise the same shapes supplied by the caller and by profile defaults.
+// Every expected bound uses decoded UTF-8 lengths or independently compact
+// synthetic JSON literals, never the production accounting helpers.
+func TestQualificationShapeMatrix(t *testing.T) {
+	testQualificationShapeCases(t, false)
+}
+
+func testQualificationShapeCases(t *testing.T, defaults bool) {
+	t.Helper()
+	const user = `"messages":[{"role":"user","content":"hi"}]`
+	const tool = `{"type":"function","function":{"name":"f"}}`
+	const call = `{"id":"c","type":"function","function":{"name":"f","arguments":"{}"}}`
+	const named = `{"type":"function","function":{"name":"f"}}`
+	const schema = `{"type":"object"}`
+	const format = `{"type":"json_schema","json_schema":{"name":"s","schema":` + schema + `}}`
+	definitions := user + `,"tools":[` + tool + `]`
+	history := `"messages":[{"role":"assistant","content":null,"tool_calls":[` + call + `]}]`
+	for _, tc := range []struct {
+		name, fields, gate string
+		input              int
+	}{
+		{"plain text", user, "", 8 + 4 + 4 + 2},
+		{"empty tools", user + `,"tools":[]`, "", 18},
+		{"none without tools", user + `,"tool_choice":"none"`, "", 18 + 4},
+		{"auto without tools", user + `,"tool_choice":"auto"`, "", 18 + 4},
+		{"none with empty tools", user + `,"tools":[],"tool_choice":"none"`, "", 18 + 4},
+		{"auto with empty tools", user + `,"tools":[],"tool_choice":"auto"`, "", 18 + 4},
+		{"definitions with optional parameters omitted", definitions, "tools", 18 + 16 + len(tool)},
+		{"definitions with object parameters", user + `,"tools":[{"type":"function","function":{"name":"f","parameters":{}}}]`, "tools", 18 + 16 + len(`{"type":"function","function":{"name":"f","parameters":{}}}`)},
+		{"required choice", definitions + `,"tool_choice":"required"`, "tools", 18 + 16 + len(tool) + 8},
+		{"named choice", definitions + `,"tool_choice":` + named, "tools", 18 + 16 + len(tool) + len(named)},
+		{"assistant calls without definitions", history, "tools", 8 + 4 + 9 + len(call)},
+		{"assistant calls with empty definitions", history + `,"tools":[]`, "tools", 8 + 4 + 9 + len(call)},
+		{"empty assistant calls", `"messages":[{"role":"assistant","content":"ok","tool_calls":[]}]`, "tools", 8 + 4 + 9 + 2},
+		{"tool result without definitions", `"messages":[{"role":"tool","tool_call_id":"c","content":"{}"}]`, "tools", 8 + 4 + 4 + 1 + 2},
+		{"native history with empty definitions", `"messages":[{"role":"assistant","content":null,"tool_calls":[` + call + `]},{"role":"tool","tool_call_id":"c","content":"{}"}],"tools":[]`, "tools", 8 + 4 + 9 + len(call) + 4 + 4 + 1 + 2},
+		{"text format", user + `,"response_format":{"type":"text"}`, "", 18},
+		{"object format", user + `,"response_format":{"type":"json_object"}`, "json_object", 18 + 16},
+		{"schema format", user + `,"response_format":` + format, "json_schema", 18 + 16 + 1 + len(schema)},
+		{"UTF8 and escaped text", `"messages":[{"role":"user","content":"日\u672c\n"}]`, "", 8 + 4 + 4 + len("日本\n")},
+		{"streaming usage", user + `,"stream":true,"stream_options":{"include_usage":true}`, "", 18},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			run := func(t *testing.T, qualified bool, modes []string) {
+				t.Helper()
+				q, profile, _ := qualificationFixture(t)
+				tools := qualified && tc.gate == "tools"
+				q.Shapes.Tools = &tools
+				q.Shapes.StructuredOutput = modes
+				fields := `"max_completion_tokens":16,` + tc.fields
+				want := `{"model":"m",` + fields + `}`
+				body := []byte(want)
+				profile.RequestOptions = nil
+				if defaults {
+					body = []byte(`{"model":"m"}`)
+					profile.RequestOptions = json.RawMessage(`{` + fields + `}`)
+				}
+				q.RequestOptions = profile.RequestOptions
+				effective, bound, err := q.validateRequest(profile, routeChatCompletions, body)
+				if tc.gate != "" && !qualified {
+					var invalid *strictQualificationError
+					if !errors.As(err, &invalid) || !strings.Contains(invalid.reason, "not qualified") {
+						t.Fatalf("error = %v, want shape qualification denial", err)
+					}
+					return
+				}
+				if err != nil || bound != (strictBound{input: tc.input, output: 16}) {
+					t.Fatalf("bound = %+v, error = %v; want %d input and 16 output", bound, err, tc.input)
+				}
+				var gotFields, wantFields map[string]json.RawMessage
+				if err := json.Unmarshal(effective, &gotFields); err != nil {
+					t.Fatal(err)
+				}
+				if err := json.Unmarshal([]byte(want), &wantFields); err != nil {
+					t.Fatal(err)
+				}
+				if !reflect.DeepEqual(gotFields, wantFields) || (!defaults && !bytes.Equal(effective, body)) {
+					t.Fatalf("effective body = %s, want unchanged fields from %s", effective, want)
+				}
+			}
+			modes := []string{}
+			if tc.gate == "json_object" || tc.gate == "json_schema" {
+				modes = []string{tc.gate}
+			}
+			t.Run("qualified", func(t *testing.T) { run(t, true, modes) })
+			if tc.gate != "" {
+				t.Run("undeclared", func(t *testing.T) { run(t, false, []string{}) })
+			}
+			if tc.gate == "json_object" {
+				t.Run("schema evidence does not cover object", func(t *testing.T) { run(t, false, []string{"json_schema"}) })
+			}
+			if tc.gate == "json_schema" {
+				t.Run("object evidence does not cover schema", func(t *testing.T) { run(t, false, []string{"json_object"}) })
+			}
+		})
+	}
+
+	// Malformed shapes are refused even with tools and both JSON modes covered.
+	reject := func(name, fields, reason string) {
+		t.Run(name, func(t *testing.T) {
+			q, profile, _ := qualificationFixture(t)
+			fields = `"max_completion_tokens":16,` + fields
+			body := []byte(`{"model":"m",` + fields + `}`)
+			profile.RequestOptions = nil
+			if defaults {
+				body = []byte(`{"model":"m"}`)
+				profile.RequestOptions = json.RawMessage(`{` + fields + `}`)
+			}
+			q.RequestOptions = profile.RequestOptions
+			_, _, err := q.validateRequest(profile, routeChatCompletions, body)
+			var invalid *strictQualificationError
+			if !errors.As(err, &invalid) || !strings.Contains(invalid.reason, reason) {
+				t.Fatalf("error = %v, want qualification denial containing %q", err, reason)
+			}
+		})
+	}
+	reject("null tools", user+`,"tools":null`, "tools must be a non-null array")
+	reject("object tools", user+`,"tools":{}`, "tools must be an array")
+	reject("null definition", user+`,"tools":[null]`, "named function")
+	reject("unnamed definition", user+`,"tools":[{"type":"function","function":{}}]`, "named function")
+	reject("null parameters", user+`,"tools":[{"type":"function","function":{"name":"f","parameters":null}}]`, "parameters must be an object")
+	reject("array parameters", user+`,"tools":[{"type":"function","function":{"name":"f","parameters":[]}}]`, "parameters must be an object")
+	reject("null choice", user+`,"tool_choice":null`, "tool_choice is not supported")
+	reject("unknown choice", user+`,"tool_choice":"any"`, "tool_choice is not supported")
+	reject("array choice", user+`,"tool_choice":[]`, "tool_choice is not supported")
+	reject("unnamed choice", definitions+`,"tool_choice":{"type":"function","function":{}}`, "tool_choice is not supported")
+	reject("required without definitions", user+`,"tool_choice":"required"`, "tool_choice requires nonempty tools")
+	reject("required with empty definitions", user+`,"tools":[],"tool_choice":"required"`, "tool_choice requires nonempty tools")
+	reject("named without definitions", user+`,"tool_choice":`+named, "tool_choice requires nonempty tools")
+	reject("named with empty definitions", user+`,"tools":[],"tool_choice":`+named, "tool_choice requires nonempty tools")
+	reject("null calls", `"messages":[{"role":"assistant","content":"ok","tool_calls":null}]`, "tool_calls must be a non-null array")
+	reject("object calls", `"messages":[{"role":"assistant","content":"ok","tool_calls":{}}]`, "unsupported shape")
+	reject("null tool id", `"messages":[{"role":"tool","content":"ok","tool_call_id":null}]`, "tool_call_id must be a string")
+	reject("wrong type tool id", `"messages":[{"role":"tool","content":"ok","tool_call_id":3}]`, "unsupported shape")
+	reject("calls on user", `"messages":[{"role":"user","content":"ok","tool_calls":[`+call+`]}]`, "belong to an assistant")
+	reject("empty calls on user", `"messages":[{"role":"user","content":"ok","tool_calls":[]}]`, "belong to an assistant")
+	reject("tool id on assistant", `"messages":[{"role":"assistant","content":"ok","tool_call_id":"c"}]`, "belongs to a tool")
+	reject("unnamed call", `"messages":[{"role":"assistant","content":null,"tool_calls":[{"type":"function","function":{}}]}]`, "named function")
+	reject("assistant null without calls", `"messages":[{"role":"assistant","content":null}]`, "content is required")
+	reject("assistant null with empty calls", `"messages":[{"role":"assistant","content":null,"tool_calls":[]}]`, "content is required")
+	reject("user null with calls", `"messages":[{"role":"user","content":null,"tool_calls":[`+call+`]}]`, "belong to an assistant")
+	reject("null format", user+`,"response_format":null`, "response_format")
+	reject("array format", user+`,"response_format":[]`, "unsupported shape")
+	reject("unknown format", user+`,"response_format":{"type":"xml"}`, "response_format is not supported")
+	reject("null schema", user+`,"response_format":{"type":"json_schema","json_schema":null}`, "response_format is not supported")
+	reject("array schema", user+`,"response_format":{"type":"json_schema","json_schema":{"name":"s","schema":[]}}`, "response_format is not supported")
+	reject("wrong type format name", user+`,"response_format":{"type":3}`, "unsupported shape")
+	for _, choice := range []string{`"required"`, named} {
+		t.Run("requiring choice without tools evidence "+choice, func(t *testing.T) {
+			q, profile, _ := qualificationFixture(t)
+			tools := false
+			q.Shapes.Tools = &tools
+			profile.RequestOptions = nil
+			fields := `"max_completion_tokens":16,` + user + `,"tool_choice":` + choice
+			body := []byte(`{"model":"m",` + fields + `}`)
+			if defaults {
+				body = []byte(`{"model":"m"}`)
+				profile.RequestOptions = json.RawMessage(`{` + fields + `}`)
+			}
+			q.RequestOptions = profile.RequestOptions
+			_, _, err := q.validateRequest(profile, routeChatCompletions, body)
+			var invalid *strictQualificationError
+			if !errors.As(err, &invalid) || invalid.reason != "tool_choice is not qualified by shapes.tools" {
+				t.Fatalf("error = %v, want tool_choice evidence denial", err)
+			}
+		})
+	}
+	for _, key := range []string{"reasoning_effort", "parallel_tool_calls", "unrelated_unknown", "options", "keep_alive"} {
+		for _, value := range []string{"null", "false", `"high"`, "{}"} {
+			reject(key+" "+value, user+`,"`+key+`":`+value, `field "`+key+`" is not supported`)
+		}
+	}
+	// Replay stays refused for every role/value while the owner decision is pending.
+	for _, role := range []string{"assistant", "user", "tool"} {
+		for _, value := range []string{`""`, `"日本"`, "null", "3"} {
+			reject("replay refused "+role+" "+value, `"messages":[{"role":"`+role+`","content":"ok","reasoning_content":`+value+`}]`, "unsupported shape")
+		}
+	}
+}
+
+func TestQualificationShapeDefaultsAndBounds(t *testing.T) {
+	t.Run("default shapes", func(t *testing.T) { testQualificationShapeCases(t, true) })
+	// Compact tool JSON, schema JSON, and choice JSON are charged byte for byte;
+	// content and schema names/descriptions use their decoded UTF-8 byte lengths.
+	const tool = `{"type":"function","function":{"name":"f","parameters":{"type":"object"}}}`
+	const call = `{"id":"c","type":"function","function":{"name":"f","arguments":"{\"日\":1}"}}`
+	const choice = `{"type":"function","function":{"name":"f"}}`
+	const schema = `{"type":"object","properties":{"日":{"type":"string"}}}`
+	const defaults = `{"tools":[ ` + tool + ` ],"tool_choice":` + choice + `,"response_format":{"type":"json_schema","json_schema":{"name":"答","description":"説","schema":` + schema + `}},"max_completion_tokens":16}`
+	const body = `{"model":"m","messages":[{"role":"user","content":"日\n"},{"role":"assistant","content":null,"tool_calls":[ ` + call + ` ]},{"role":"tool","tool_call_id":"c","content":"{}"}]}`
+	// Request + three roles/messages + text/id + call + definition/choice/schema.
+	const input = 8 + (4 + 4 + len("日\n")) + (4 + 9 + len(call)) + (4 + 4 + 1 + 2) + 16 + len(tool) + len(choice) + 16 + len("答") + len("説") + len(schema)
+	for _, tc := range []struct {
+		name           string
+		context, limit int
+		extra          string
+		wantError      string
+		extraByte      bool
+	}{
+		{"exact context", input + 16, 16, "", "", false},
+		{"one byte over context", input + 16, 16, "", "exceed the qualified context", true},
+		{"output ceiling", 4096, 15, "", "exceeds the qualified ceiling", false},
+		{"equal maximum aliases", input + 16, 16, `,"max_tokens":16`, "", false},
+		{"unequal maximum aliases", 4096, 32, `,"max_tokens":17`, "disagree", false},
+		{"raw store false", input + 16, 16, `,"store":false`, "", false},
+		{"raw store true", input + 16, 16, `,"store":true`, "PAIR does not store requests", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			q, profile, _ := qualificationFixture(t)
+			profile.RequestOptions = json.RawMessage(defaults)
+			q.RequestOptions = profile.RequestOptions
+			q.ContextTokens, profile.ContextTokens = tc.context, tc.context
+			q.MaxOutputTokens, profile.MaxOutputTokens = tc.limit, tc.limit
+			request := strings.TrimSuffix(body, "}") + tc.extra + "}"
+			if tc.extraByte {
+				request = strings.Replace(request, `日\n`, `日\nx`, 1)
+			}
+			effective, bound, err := q.validateRequest(profile, routeChatCompletions, []byte(request))
+			if tc.wantError != "" {
+				var invalid *strictQualificationError
+				if !errors.As(err, &invalid) || !strings.Contains(invalid.reason, tc.wantError) {
+					t.Fatalf("error = %v, want %q", err, tc.wantError)
+				}
+				return
+			}
+			if err != nil || bound != (strictBound{input: input, output: 16}) {
+				t.Fatalf("bound = %+v, error = %v; want %d input and 16 output", bound, err, input)
+			}
+			var got map[string]json.RawMessage
+			if err := json.Unmarshal(effective, &got); err != nil {
+				t.Fatal(err)
+			}
+			if _, exists := got["store"]; exists {
+				t.Fatal("store forwarded")
+			}
+		})
+	}
+	t.Run("store request and default controls", TestQualificationStoreNoOp)
+}
+
 func TestQualificationBorrowedViewsPreserveScalarAndStructDecoding(t *testing.T) {
 	q, profile, _ := qualificationFixture(t)
 	profile.RequestOptions = nil
@@ -168,7 +408,7 @@ func TestQualificationBorrowedViewsPreserveScalarAndStructDecoding(t *testing.T)
 		name, message, extras, reject string
 	}{
 		{name: "nested field case folding", message: `{"RoLe":"user","CoNtEnT":"hi"}`},
-		{name: "optional null zero values", message: `{"role":"user","content":"hi","name":null,"tool_call_id":null,"tool_calls":null}`, extras: `,"stream":null,"stream_options":null,"stop":[null,"x"],"seed":null,"temperature":null`},
+		{name: "optional scalar null zero values", message: `{"role":"user","content":"hi","name":null}`, extras: `,"stream":null,"stream_options":null,"stop":[null,"x"],"seed":null,"temperature":null`},
 		{name: "int64 minimum", extras: `,"seed":-9223372036854775808`},
 		{name: "int64 maximum", extras: `,"seed":9223372036854775807`},
 		{name: "int64 overflow", extras: `,"seed":9223372036854775808`, reject: "seed must be an integer"},
@@ -350,7 +590,7 @@ func TestQualificationAppliesProfileDefaults(t *testing.T) {
 	if err := json.Unmarshal(effective, &got); err != nil {
 		t.Fatal(err)
 	}
-	if compactLen(got["options"]) != len(`{"num_ctx":4096}`) || !strings.Contains(string(got["options"]), "4096") || string(got["keep_alive"]) != `"5m"` {
+	if string(got["seed"]) != "7" || string(got["frequency_penalty"]) != "0" {
 		t.Fatalf("effective body = %s, want the profile's defaults merged in", effective)
 	}
 	t.Run("defaults may supply the output bound", func(t *testing.T) {
@@ -373,8 +613,8 @@ func TestQualificationAppliesProfileDefaults(t *testing.T) {
 func TestQualificationStoreNoOp(t *testing.T) {
 	q, profile, _ := qualificationFixture(t)
 	const omitted = `{"model":"fixture-model","messages":[{"role":"user","content":"hi"}],"max_tokens":16,"stream":true,"stream_options":{"include_usage":true},"temperature":0.25,"stop":["done"]}`
-	const defaults = `{"options":{"num_ctx":4096},"keep_alive":"5m"}`
-	const merged = `{"model":"fixture-model","messages":[{"role":"user","content":"hi"}],"max_tokens":16,"stream":true,"stream_options":{"include_usage":true},"temperature":0.25,"stop":["done"],"options":{"num_ctx":4096},"keep_alive":"5m"}`
+	const defaults = `{"seed":7,"frequency_penalty":0}`
+	const merged = `{"model":"fixture-model","messages":[{"role":"user","content":"hi"}],"max_tokens":16,"stream":true,"stream_options":{"include_usage":true},"temperature":0.25,"stop":["done"],"seed":7,"frequency_penalty":0}`
 	decode := func(t *testing.T, raw []byte) map[string]json.RawMessage {
 		t.Helper()
 		var fields map[string]json.RawMessage
@@ -420,9 +660,9 @@ func TestQualificationStoreNoOp(t *testing.T) {
 	accept("escaped store key stripped", strings.Replace(withFalse, `"store"`, `"\u0073tore"`, 1), "", "", omitted, false)
 	accept("absent preserves exact bytes", " \n"+omitted+"\t ", "", "", " \n"+omitted+"\t ", true)
 	accept("absent preserves merged bytes", omitted, defaults, defaults, merged, true)
-	accept("default false stripped", omitted, `{"store":false,"options":{"num_ctx":4096},"keep_alive":"5m"}`, defaults, merged, false)
-	accept("raw false overrides default true before stripping", withFalse, `{"store":true,"options":{"num_ctx":4096},"keep_alive":"5m"}`, defaults, merged, false)
-	accept("raw false overrides default null before stripping", withFalse, `{"store":null,"options":{"num_ctx":4096},"keep_alive":"5m"}`, defaults, merged, false)
+	accept("default false stripped", omitted, `{"store":false,"seed":7,"frequency_penalty":0}`, defaults, merged, false)
+	accept("raw false overrides default true before stripping", withFalse, `{"store":true,"seed":7,"frequency_penalty":0}`, defaults, merged, false)
+	accept("raw false overrides default null before stripping", withFalse, `{"store":null,"seed":7,"frequency_penalty":0}`, defaults, merged, false)
 	reject := func(name, raw, requestDefaults, want string) {
 		t.Run(name, func(t *testing.T) {
 			p := profile
@@ -905,7 +1145,7 @@ func TestStrictHTTPForwardsTheEffectiveBody(t *testing.T) {
 		t.Run(path, func(t *testing.T) {
 			p, e := strictHTTPFixture(t)
 			pol := p.admission.currentPolicy()
-			pol.Profiles[0].RequestOptions = json.RawMessage(`{"keep_alive":"5m"}`)
+			pol.Profiles[0].RequestOptions = json.RawMessage(`{"temperature":0.5}`)
 			q := p.admission.strict.registry[*pol.Profiles[0].Qualification]
 			q.RequestOptions = pol.Profiles[0].RequestOptions
 			p.admission.setPolicy(pol)
@@ -914,8 +1154,15 @@ func TestStrictHTTPForwardsTheEffectiveBody(t *testing.T) {
 			if w.Code != http.StatusOK || e.hits() != 1 {
 				t.Fatalf("status %d hits %d body %s", w.Code, e.hits(), w.Body)
 			}
-			if got := e.lastBody(); !strings.Contains(got, `"keep_alive":"5m"`) || !strings.Contains(got, `"max_tokens":16`) {
-				t.Fatalf("engine received %s, want the request with the profile's defaults", got)
+			var got struct {
+				Temperature float64 `json:"temperature"`
+				MaxTokens   int     `json:"max_tokens"`
+			}
+			if err := json.Unmarshal([]byte(e.lastBody()), &got); err != nil {
+				t.Fatal(err)
+			}
+			if got.Temperature != 0.5 || got.MaxTokens != 16 {
+				t.Fatalf("engine received %+v, want the request with the profile's defaults", got)
 			}
 		})
 	}
