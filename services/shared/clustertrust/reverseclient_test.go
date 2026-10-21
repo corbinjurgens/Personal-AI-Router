@@ -39,8 +39,41 @@ type serviceClientFixture struct {
 	reverseCalls map[noderec.ServiceKey]int
 	direct       func(context.Context, noderec.ServiceKey) (net.Conn, error)
 	reverse      func(context.Context, noderec.ServiceKey) (net.Conn, error)
-	connections  atomic.Int32
+	dispatchMu   sync.Mutex
+	dispatches   []net.Conn
 	closed       chan struct{}
+}
+
+// assertDispatchConnections labels server connections by their first dispatch.
+// Equal labels require reuse; different labels require distinct connections.
+// Accepted sockets that never carry a request do not enter this sequence.
+func (f *serviceClientFixture) assertDispatchConnections(t *testing.T, want ...int) {
+	t.Helper()
+	f.dispatchMu.Lock()
+	defer f.dispatchMu.Unlock()
+	if len(f.dispatches) != len(want) {
+		t.Fatalf("dispatch connections: got %d dispatches, want %d (identities %v)", len(f.dispatches), len(want), want)
+	}
+	for i, conn := range f.dispatches {
+		for j := 0; j < i; j++ {
+			if (conn == f.dispatches[j]) != (want[i] == want[j]) {
+				t.Fatalf("dispatch connections %d and %d: same=%v, want identities %v", j, i, conn == f.dispatches[j], want)
+			}
+		}
+	}
+}
+
+func (f *serviceClientFixture) recordDispatch(t *testing.T, r *http.Request) bool {
+	t.Helper()
+	conn, ok := r.Context().Value(serviceClientConnContextKey{}).(net.Conn)
+	if !ok {
+		t.Error("request has no server connection identity")
+		return false
+	}
+	f.dispatchMu.Lock()
+	f.dispatches = append(f.dispatches, conn)
+	f.dispatchMu.Unlock()
+	return true
 }
 
 func newServiceClientFixture(t *testing.T, handler http.Handler) *serviceClientFixture {
@@ -75,6 +108,10 @@ func newServiceClientFixture(t *testing.T, handler http.Handler) *serviceClientF
 		if !known {
 			t.Errorf("Host = %q, not an original route URL host", r.Host)
 		}
+		if !f.recordDispatch(t, r) {
+			http.Error(w, "missing connection identity", http.StatusInternalServerError)
+			return
+		}
 		handler.ServeHTTP(w, r)
 	}))
 	f.server.TLS = peer.ServerTLSConfig()
@@ -82,9 +119,6 @@ func newServiceClientFixture(t *testing.T, handler http.Handler) *serviceClientF
 		return context.WithValue(ctx, serviceClientConnContextKey{}, conn)
 	}
 	f.server.Config.ConnState = func(_ net.Conn, state http.ConnState) {
-		if state == http.StateNew {
-			f.connections.Add(1)
-		}
 		if state == http.StateClosed {
 			select {
 			case f.closed <- struct{}{}:
@@ -1132,9 +1166,8 @@ func TestPeerServiceClientMutationsNeverReplay(t *testing.T) {
 			if got := mutations.Load(); got != 1 {
 				t.Fatalf("mutation dispatched %d times, want exactly one", got)
 			}
-			if got := f.connections.Load(); got != 2 {
-				t.Fatalf("connections after warm GET and mutation = %d, want 2 fresh connections", got)
-			}
+			f.assertDispatchConnections(t, 0, 1)
+
 			f.mu.Lock()
 			replayed := len(f.reverseCalls) != 0
 			f.mu.Unlock()
@@ -1186,8 +1219,9 @@ func TestPeerServiceClientReverseMutationNeverReplays(t *testing.T) {
 	if _, err := client.Do(req); err == nil {
 		t.Fatal("reverse mutation reset succeeded")
 	}
-	if mutations.Load() != 1 || f.connections.Load() != 2 {
-		t.Fatalf("reverse mutation dispatches=%d connections=%d, want one dispatch and two fresh connections", mutations.Load(), f.connections.Load())
+	f.assertDispatchConnections(t, 0, 1)
+	if mutations.Load() != 1 {
+		t.Fatalf("reverse mutation dispatches=%d, want one dispatch", mutations.Load())
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -1586,8 +1620,9 @@ func TestPeerServiceClientReusesEligiblePosts(t *testing.T) {
 					t.Fatalf("request %d: reused=%v TLS=%v", i, reused, response.TLS)
 				}
 			}
-			if dispatches.Load() != 2 || f.connections.Load() != 1 {
-				t.Fatalf("dispatches=%d connections=%d, want 2 dispatches over one connection", dispatches.Load(), f.connections.Load())
+			f.assertDispatchConnections(t, 0, 0)
+			if dispatches.Load() != 2 {
+				t.Fatalf("dispatches=%d, want 2 dispatches over one connection", dispatches.Load())
 			}
 			f.mu.Lock()
 			defer f.mu.Unlock()
@@ -1608,19 +1643,8 @@ func TestPeerServiceClientIneligibleMutationsRemainFresh(t *testing.T) {
 	test := func(name, method, header string, makeBody func() io.Reader) {
 		t.Run(name, func(t *testing.T) {
 			var dispatches atomic.Int32
-			var mu sync.Mutex
-			connections := make(map[net.Conn]struct{})
 			f := newServiceClientFixture(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				dispatches.Add(1)
-				conn, ok := r.Context().Value(serviceClientConnContextKey{}).(net.Conn)
-				if !ok {
-					t.Error("request has no server connection identity")
-					http.Error(w, "missing connection identity", http.StatusInternalServerError)
-					return
-				}
-				mu.Lock()
-				connections[conn] = struct{}{}
-				mu.Unlock()
 				if _, err := io.Copy(io.Discard, r.Body); err != nil {
 					t.Error(err)
 				}
@@ -1646,11 +1670,9 @@ func TestPeerServiceClientIneligibleMutationsRemainFresh(t *testing.T) {
 					t.Fatalf("fresh response: status=%d read=%v close=%v", response.StatusCode, readErr, closeErr)
 				}
 			}
-			mu.Lock()
-			dispatchedConnections := len(connections)
-			mu.Unlock()
-			if dispatches.Load() != 2 || dispatchedConnections != 2 {
-				t.Fatalf("dispatches=%d dispatched connections=%d, want 2 dispatches over distinct connections", dispatches.Load(), dispatchedConnections)
+			f.assertDispatchConnections(t, 0, 1)
+			if dispatches.Load() != 2 {
+				t.Fatalf("dispatches=%d, want 2", dispatches.Load())
 			}
 		})
 	}
@@ -1711,8 +1733,9 @@ func TestPeerServiceClientStaleReuseNeverReplays(t *testing.T) {
 		response.Body.Close()
 		t.Fatal("stale connection succeeded")
 	}
-	if !reused.Load() || recreated.Load() != 0 || dispatches.Load() != 1 || f.connections.Load() != 1 {
-		t.Fatalf("stale request: reused=%v factories=%d dispatches=%d connections=%d", reused.Load(), recreated.Load(), dispatches.Load(), f.connections.Load())
+	f.assertDispatchConnections(t, 0)
+	if !reused.Load() || recreated.Load() != 0 || dispatches.Load() != 1 {
+		t.Fatalf("stale request: reused=%v factories=%d dispatches=%d", reused.Load(), recreated.Load(), dispatches.Load())
 	}
 	f.mu.Lock()
 	direct, reverse := f.directCalls[noderec.ServiceCluster], f.reverseCalls[noderec.ServiceCluster]
@@ -1770,12 +1793,14 @@ func TestPeerServiceClientReusableLostReplyNeverReplays(t *testing.T) {
 				response.Body.Close()
 				t.Fatal("lost reply returned success")
 			}
-			if accepted.Load() != 2 || f.connections.Load() != 1 || recreated.Load() != 0 {
-				t.Fatalf("lost reply: accepted=%d connections=%d factories=%d, want no replay", accepted.Load(), f.connections.Load(), recreated.Load())
+			f.assertDispatchConnections(t, 0, 0)
+			if accepted.Load() != 2 || recreated.Load() != 0 {
+				t.Fatalf("lost reply: accepted=%d factories=%d, want no replay", accepted.Load(), recreated.Load())
 			}
 			serviceClientPost(t, client, f.url)
-			if accepted.Load() != 3 || f.connections.Load() != 2 {
-				t.Fatalf("next caller: accepted=%d connections=%d, want replacement setup", accepted.Load(), f.connections.Load())
+			f.assertDispatchConnections(t, 0, 0, 1)
+			if accepted.Load() != 3 {
+				t.Fatalf("next caller: accepted=%d, want replacement setup", accepted.Load())
 			}
 		})
 	}
@@ -1812,8 +1837,9 @@ func TestPeerServiceClientReusableAuthorityRotation(t *testing.T) {
 			f.adapter.mu.Lock()
 			retired, idle := old.retired, len(old.idle)
 			f.adapter.mu.Unlock()
-			if !retired || idle != 0 || dispatches.Load() != 2 || f.connections.Load() != 2 {
-				t.Fatalf("rotation: retired=%v old idle=%d dispatches=%d connections=%d, want new connection", retired, idle, dispatches.Load(), f.connections.Load())
+			f.assertDispatchConnections(t, 0, 1)
+			if !retired || idle != 0 || dispatches.Load() != 2 {
+				t.Fatalf("rotation: retired=%v old idle=%d dispatches=%d, want new connection", retired, idle, dispatches.Load())
 			}
 		})
 	}
@@ -1897,8 +1923,9 @@ func TestPeerServiceClientReusableRevocationRetiresIdle(t *testing.T) {
 			h := f.adapter.entries[peerServiceKey{"peer", noderec.ServiceCluster}]
 			retired, idle := h.retired, len(h.idle)
 			f.adapter.mu.Unlock()
-			if !retired || idle != 0 || dispatches.Load() != 1 || f.connections.Load() != 1 {
-				t.Fatalf("revocation: retired=%v idle=%d dispatches=%d connections=%d", retired, idle, dispatches.Load(), f.connections.Load())
+			f.assertDispatchConnections(t, 0)
+			if !retired || idle != 0 || dispatches.Load() != 1 {
+				t.Fatalf("revocation: retired=%v idle=%d dispatches=%d", retired, idle, dispatches.Load())
 			}
 		})
 	}
@@ -1954,8 +1981,9 @@ func TestPeerServiceClientReusableAuthorityAtDispatch(t *testing.T) {
 				response.Body.Close()
 			}
 			var unavailable *ReverseUnavailableError
-			if !errors.As(err, &unavailable) || !reused.Load() || dispatches.Load() != 1 || f.connections.Load() != 1 {
-				t.Fatalf("dispatch authority: err=%v reused=%v dispatches=%d connections=%d", err, reused.Load(), dispatches.Load(), f.connections.Load())
+			f.assertDispatchConnections(t, 0)
+			if !errors.As(err, &unavailable) || !reused.Load() || dispatches.Load() != 1 {
+				t.Fatalf("dispatch authority: err=%v reused=%v dispatches=%d", err, reused.Load(), dispatches.Load())
 			}
 		})
 	}
@@ -2001,8 +2029,9 @@ func TestPeerServiceClientReusableRedirectClosesRecreatedBody(t *testing.T) {
 			if readErr != nil || closeErr != nil || response.StatusCode != status || string(body) != "redirect response" {
 				t.Fatalf("redirect response: status=%d body=%q read=%v close=%v", response.StatusCode, body, readErr, closeErr)
 			}
-			if factories.Load() != 1 || recreated.closed.Load() != 1 || original.closed.Load() < 1 || mutations.Load() != 1 || f.connections.Load() != 1 {
-				t.Fatalf("redirect: factories=%d recreated closes=%d original closes=%d mutations=%d connections=%d", factories.Load(), recreated.closed.Load(), original.closed.Load(), mutations.Load(), f.connections.Load())
+			f.assertDispatchConnections(t, 0, 0)
+			if factories.Load() != 1 || recreated.closed.Load() != 1 || original.closed.Load() < 1 || mutations.Load() != 1 {
+				t.Fatalf("redirect: factories=%d recreated closes=%d original closes=%d mutations=%d", factories.Load(), recreated.closed.Load(), original.closed.Load(), mutations.Load())
 			}
 		})
 	}
@@ -2120,8 +2149,9 @@ func TestPeerServiceClientReusableReverseReconnect(t *testing.T) {
 	}
 	serviceClientPost(t, client, f.url)
 	serviceClientPost(t, client, f.url)
-	if dispatches.Load() != 3 || f.connections.Load() != 2 {
-		t.Fatalf("reconnected session: dispatches=%d connections=%d, want next caller's pooled replacement", dispatches.Load(), f.connections.Load())
+	f.assertDispatchConnections(t, 0, 1, 1)
+	if dispatches.Load() != 3 {
+		t.Fatalf("reconnected session: dispatches=%d, want next caller's pooled replacement", dispatches.Load())
 	}
 }
 
@@ -2156,15 +2186,13 @@ func TestPeerServiceClientReusableIdleReaping(t *testing.T) {
 		t.Fatalf("idle reaper retained local=%d global=%d entries", idle, global)
 	}
 	serviceClientPost(t, client, f.url)
-	if f.connections.Load() != 2 {
-		t.Fatalf("connections after idle expiry=%d, want replacement", f.connections.Load())
-	}
+	f.assertDispatchConnections(t, 0, 1)
 }
 
 func TestPeerServiceClientReusableProtocolChange(t *testing.T) {
 	test := func(name string, reverse bool) {
 		t.Run(name, func(t *testing.T) {
-			var dispatches, plainConnections atomic.Int32
+			var dispatches atomic.Int32
 			handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				dispatches.Add(1)
 				if _, err := io.Copy(io.Discard, r.Body); err != nil {
@@ -2175,12 +2203,14 @@ func TestPeerServiceClientReusableProtocolChange(t *testing.T) {
 			f := newServiceClientFixture(t, handler)
 			f.adapter.opts.ReuseConnections = true
 			f.routes[noderec.ServiceNodeInfo] = f.routes[noderec.ServiceCluster]
-			plain := httptest.NewUnstartedServer(handler)
-			plain.Config.ConnState = func(_ net.Conn, state http.ConnState) {
-				if state == http.StateNew {
-					plainConnections.Add(1)
+			plain := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if !f.recordDispatch(t, r) {
+					http.Error(w, "missing connection identity", http.StatusInternalServerError)
+					return
 				}
-			}
+				handler.ServeHTTP(w, r)
+			}))
+			plain.Config.ConnContext = f.server.Config.ConnContext
 			plain.Start()
 			defer plain.Close()
 			var usePlain atomic.Bool
@@ -2228,8 +2258,9 @@ func TestPeerServiceClientReusableProtocolChange(t *testing.T) {
 			f.adapter.mu.Lock()
 			retired, idle := old.retired, len(old.idle)
 			f.adapter.mu.Unlock()
-			if !retired || idle != 0 || dispatches.Load() != 3 || plainConnections.Load() != 1 || f.connections.Load() != 1 {
-				t.Fatalf("protocol change: retired=%v old idle=%d dispatches=%d plain conns=%d TLS conns=%d", retired, idle, dispatches.Load(), plainConnections.Load(), f.connections.Load())
+			f.assertDispatchConnections(t, 0, 1, 1)
+			if !retired || idle != 0 || dispatches.Load() != 3 {
+				t.Fatalf("protocol change: retired=%v old idle=%d dispatches=%d", retired, idle, dispatches.Load())
 			}
 		})
 	}
@@ -2342,8 +2373,9 @@ func TestPeerServiceClientReusableCanceledIdleProbeRecovers(t *testing.T) {
 	f.mu.Lock()
 	direct, reverse := f.directCalls[noderec.ServiceCluster], f.reverseCalls[noderec.ServiceCluster]
 	f.mu.Unlock()
-	if !healthy || direct != 3 || reverse != 0 || f.connections.Load() != 3 {
-		t.Fatalf("direct recovery: healthy=%v direct=%d reverse=%d connections=%d, want one replacement direct connection and reusable healthy state", healthy, direct, reverse, f.connections.Load())
+	f.assertDispatchConnections(t, 0, 1, 1, 2, 2)
+	if !healthy || direct != 3 || reverse != 0 {
+		t.Fatalf("direct recovery: healthy=%v direct=%d reverse=%d, want one replacement direct connection and reusable healthy state", healthy, direct, reverse)
 	}
 }
 
@@ -2535,8 +2567,9 @@ func TestPeerServiceClientCloseIdlePreservesExposedResponse(t *testing.T) {
 	old := f.adapter.entries[key]
 	idleBefore := len(old.idle)
 	f.adapter.mu.Unlock()
-	if idleBefore != 1 || f.connections.Load() != 2 {
-		t.Fatalf("cleanup setup: idle=%d connections=%d, want one idle beside one exposed response", idleBefore, f.connections.Load())
+	f.assertDispatchConnections(t, 0, 1)
+	if idleBefore != 1 {
+		t.Fatalf("cleanup setup: idle=%d, want one idle beside one exposed response", idleBefore)
 	}
 
 	f.adapter.CloseIdle()
@@ -2569,8 +2602,9 @@ func TestPeerServiceClientCloseIdlePreservesExposedResponse(t *testing.T) {
 	f.adapter.mu.Lock()
 	replacement := f.adapter.entries[key]
 	f.adapter.mu.Unlock()
-	if replacement == old || dispatches.Load() != 3 || f.connections.Load() != 3 {
-		t.Fatalf("replacement: new health=%v dispatches=%d connections=%d", replacement != old, dispatches.Load(), f.connections.Load())
+	f.assertDispatchConnections(t, 0, 1, 2)
+	if replacement == old || dispatches.Load() != 3 {
+		t.Fatalf("replacement: new health=%v dispatches=%d", replacement != old, dispatches.Load())
 	}
 }
 
@@ -2679,7 +2713,8 @@ func TestPeerServiceClientReusableProbePreservesReverseResponse(t *testing.T) {
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if f.directCalls[noderec.ServiceCluster] != 2 || f.reverseCalls[noderec.ServiceCluster] != 1 || f.connections.Load() != 2 {
-		t.Fatalf("direct recovery: direct=%v reverse=%v connections=%d", f.directCalls, f.reverseCalls, f.connections.Load())
+	f.assertDispatchConnections(t, 0, 0, 1, 1)
+	if f.directCalls[noderec.ServiceCluster] != 2 || f.reverseCalls[noderec.ServiceCluster] != 1 {
+		t.Fatalf("direct recovery: direct=%v reverse=%v", f.directCalls, f.reverseCalls)
 	}
 }
