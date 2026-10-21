@@ -2221,11 +2221,14 @@ func srRelayDecode(t *testing.T, data json.RawMessage, value any) {
 	}
 }
 
-// The two relay tests below cover representative worker-loss stages with real
-// processes. Other stages have component-level evidence, not process coverage:
+// The two relay tests below kill real workers. The component tests listed here
+// model loss by attaching a replacement while the old connection stays open;
+// they do not add process-level kill coverage:
 //   - Before preparation completes: nvpair-ui-broker
-//     TestModelConfigAuthorityChangesDuringPreparePreventLoad prevents a stale
-//     prepare from loading and finishes its reservation on the original proxy.
+//     TestModelConfigManagerReplacementInvalidatesPreparedWork prevents a stale
+//     prepare from loading and finishes its reservation on the original proxy;
+//     TestModelConfigAuthorityChangesDuringPreparePreventLoad also covers
+//     proxy replacement, pause, Off, and policy revision changes.
 //   - During the final grant: nvpair-ui-broker
 //     TestModelConfigManagerReplacementDuringGrant keeps an old grant away from
 //     a replacement manager; TestModelConfigAuthorityChangesDuringGrantLoadAndFinish
@@ -2239,10 +2242,16 @@ func srRelayDecode(t *testing.T, data json.RawMessage, value any) {
 //     manager result before fresh observation; nvpair-proxy
 //     TestResidentCapacityDispatchedUnknownRetained holds dispatched capacity,
 //     while TestResidentCapacityFinishObservations releases it on bound proof.
+//   - At manager readback: nvpair-engine-manager
+//     TestResidentPostLoadTransportFailureRemainsUnknown keeps failed readback
+//     uncertain; TestResidentObservedAllocationReplacement rejects observations
+//     whose allocation evidence changes during the read.
 //   - Across replacement: nvpair-proxy
-//     TestResidentCapacityStaleFinishCannotReleaseReplacement rejects old finish
-//     bindings; nvpair-ui-broker TestModelConfigWorkerRestartConfirmsWithoutReload
-//     confirms a fresh observation without another native load.
+//     TestResidentCapacityProxyReplacementRejectsOldCompletion rejects an old
+//     proxy's completion against a new hold. nvpair-ui-broker
+//     TestModelConfigWorkerRestartConfirmsWithoutReload requires fresh inventory
+//     after replacement; its proxy case permits one reconcile, and no reload
+//     holds because the fake manager answers not-dispatched.
 func TestServedResidentProcessProxyLossBeforeGrant(t *testing.T) {
 	f := newSRWorkerLossFixture(t, "proxy-before-grant")
 	before := f.control(t, "")
