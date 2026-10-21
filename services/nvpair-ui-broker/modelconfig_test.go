@@ -813,6 +813,188 @@ func TestModelConfigDrainRetainsInflightOwnership(t *testing.T) {
 	}
 }
 
+func TestModelConfigNonterminalReplacementTimeoutPreservesBarrier(t *testing.T) {
+	for _, replacement := range []string{"manager", "proxy"} {
+		t.Run(replacement, func(t *testing.T) {
+			f := newModelConfigFixture(t)
+			f.proxy.mu.Lock()
+			answer := f.proxy.answer
+			f.proxy.mu.Unlock()
+			f.proxy.setAnswer(func(method string, raw json.RawMessage) (any, string) {
+				if method == nodepolicy.MethodFinishResident {
+					return nil, "finish unavailable"
+				}
+				return answer(method, raw)
+			})
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			done, _, _ := startModelConfigMatrixAttempt(t, ctx, f, emptySwitchManagerSnapshot(), nodepolicy.ResidentUnknown, true)
+			f.awaitGrant(t)
+			cancel()
+			awaitModelConfigDone(t, done)
+			f.engine.releaseHeld()
+			r := f.b.nodePolicyRuntime()
+			ref := nodepolicy.Role{Engine: "llamacpp", Model: "resident"}
+			r.mu.Lock()
+			original, present := r.models.unsettled[ref]
+			identity := r.engineIdentity
+			r.mu.Unlock()
+			if !present || original.terminal || original.op == nil {
+				t.Fatal("missing original nonterminal granted uncertainty")
+			}
+			assertRetained := func(stage string) {
+				t.Helper()
+				r.mu.Lock()
+				retained, held := r.models.unsettled[ref]
+				r.mu.Unlock()
+				if !held || retained.op != original.op || !reflect.DeepEqual(retained, original) {
+					t.Fatalf("%s changed original nonterminal record: held=%v original=%p retained=%p", stage, held, original.op, retained.op)
+				}
+				if loads := len(modelConfigCalls(f.engine, nodepolicy.MethodReconcileResident)); loads != 1 {
+					t.Fatalf("%s issued %d loads, want exactly one original load", stage, loads)
+				}
+			}
+			assertRetained("before replacement")
+			if replacement == "manager" {
+				f.source = f.b.activateEngineManagerSource()
+				f.b.bindEngineMgr(f.b.getEngineMgr(), f.source)
+				r.mu.Lock()
+				r.engineIdentity = identity
+				r.mu.Unlock()
+			} else {
+				pp, _, acks := attachAckingProxy(t, f.b)
+				if !f.b.replayPolicyToProxy(context.Background(), pp) {
+					t.Fatal("activate replacement proxy")
+				}
+				reportStrict(t, f.b, "0", acks.runID, strictCapability(t, "llamacpp", "resident"))
+			}
+			assertRetained("after replacement")
+			f.engine.setAnswer(func(method string, _ json.RawMessage) (any, string) {
+				if method == settings.SwitchPrepareMethod {
+					return emptySwitchManagerSnapshot(), ""
+				}
+				return nodepolicy.ReconcileResidentResult{Outcome: nodepolicy.ResidentNotDispatched}, ""
+			})
+			r.mu.Lock()
+			now := original.expires.Add(time.Hour)
+			r.now = func() time.Time { return now }
+			r.mu.Unlock()
+			f.b.reconcileModelConfig(context.Background())
+			assertRetained("past observation deadline")
+			f.b.observeLoadedFrom(f.source, nil)
+			f.b.reconcileModelConfig(context.Background())
+			assertRetained("unknown publication")
+			f.b.observeLoadedFrom(f.source, map[string][]string{"llamacpp": {}})
+			f.b.reconcileModelConfig(context.Background())
+			assertRetained("known-empty publication")
+			r.mu.Lock()
+			r.localPauseRequested = true
+			r.mu.Unlock()
+			f.b.reconcileModelConfig(context.Background())
+			assertRetained("paused declaration")
+			// Declaration removal is an allowed exit even while paused.
+			r.mu.Lock()
+			r.current.ResidentModels = nil
+			r.mu.Unlock()
+			f.b.reconcileModelConfig(context.Background())
+			r.mu.Lock()
+			_, held := r.models.unsettled[ref]
+			r.mu.Unlock()
+			if held || len(modelConfigCalls(f.engine, nodepolicy.MethodReconcileResident)) != 1 {
+				t.Fatal("paused declaration removal retained uncertainty or dispatched another load")
+			}
+		})
+	}
+}
+
+func TestModelConfigTerminalLoadedObservationBound(t *testing.T) {
+	test := func(t *testing.T, paused bool) {
+		t.Helper()
+		f := newModelConfigFixture(t)
+		r := f.b.nodePolicyRuntime()
+		r.mu.Lock()
+		initial := r.now()
+		now := initial
+		r.now = func() time.Time { return now }
+		r.mu.Unlock()
+		f.proxy.mu.Lock()
+		answer := f.proxy.answer
+		f.proxy.mu.Unlock()
+		f.proxy.setAnswer(func(method string, raw json.RawMessage) (any, string) {
+			if method == nodepolicy.MethodFinishResident {
+				return nil, "finish unavailable"
+			}
+			return answer(method, raw)
+		})
+		done := f.startLoadedAttempt(t)
+		f.awaitGrant(t)
+		f.engine.releaseHeld()
+		awaitModelConfigDone(t, done)
+		ref := nodepolicy.Role{Engine: "llamacpp", Model: "resident"}
+		r.mu.Lock()
+		hold, held := r.models.unsettled[ref]
+		r.mu.Unlock()
+		if !held || !hold.terminal || hold.finish.Outcome != nodepolicy.ResidentLoaded {
+			t.Fatal("missing terminal loaded / failed-finish record")
+		}
+		if residentObservationTimeout != time.Minute || hold.expires.Sub(initial) != residentObservationTimeout {
+			t.Fatalf("terminal observation duration=%v, domain constant=%v, want 60s", hold.expires.Sub(initial), residentObservationTimeout)
+		}
+		f.engine.setAnswer(func(method string, _ json.RawMessage) (any, string) {
+			if method == settings.SwitchPrepareMethod {
+				return emptySwitchManagerSnapshot(), ""
+			}
+			return nodepolicy.ReconcileResidentResult{Outcome: nodepolicy.ResidentNotDispatched}, ""
+		})
+		f.b.observeLoadedFrom(f.source, map[string][]string{"llamacpp": {}})
+		r.mu.Lock()
+		now = initial.Add(residentObservationTimeout - time.Nanosecond)
+		r.localPauseRequested = paused
+		r.mu.Unlock()
+		f.b.reconcileModelConfig(context.Background())
+		r.mu.Lock()
+		before, retained := r.models.unsettled[ref]
+		r.mu.Unlock()
+		if !retained || before.op != hold.op || len(modelConfigCalls(f.engine, nodepolicy.MethodReconcileResident)) != 1 {
+			t.Fatal("terminal record expired before the fixed observation bound")
+		}
+		r.mu.Lock()
+		// The just-before evaluation installs the unchanged-evidence retry tick.
+		// Advance independently of hold.expires to its next eligible evaluation.
+		now = initial.Add(residentObservationTimeout + idleCheckInterval)
+		r.mu.Unlock()
+		f.b.reconcileModelConfig(context.Background())
+		r.mu.Lock()
+		_, retained = r.models.unsettled[ref]
+		r.mu.Unlock()
+		if retained {
+			t.Fatal("terminal record survived the next eligible evaluation after the fixed bound")
+		}
+		wantLoads := 2
+		if paused {
+			wantLoads = 1
+		}
+		if got := len(modelConfigCalls(f.engine, nodepolicy.MethodReconcileResident)); got != wantLoads {
+			t.Fatalf("post-bound loads=%d, want %d", got, wantLoads)
+		}
+		if paused {
+			f.b.reconcileModelConfig(context.Background())
+			if len(modelConfigCalls(f.engine, nodepolicy.MethodReconcileResident)) != 1 {
+				t.Fatal("paused evaluation dispatched after terminal retirement")
+			}
+			r.mu.Lock()
+			r.localPauseRequested = false
+			r.mu.Unlock()
+			f.b.reconcileModelConfig(context.Background())
+			if len(modelConfigCalls(f.engine, nodepolicy.MethodReconcileResident)) != 2 {
+				t.Fatal("resume lost known-empty retry after terminal retirement")
+			}
+		}
+	}
+	t.Run("eligible known-empty retries", func(t *testing.T) { test(t, false) })
+	t.Run("paused retries only after resume", func(t *testing.T) { test(t, true) })
+}
+
 func TestModelConfigTerminalFinishFailureHasBoundedExit(t *testing.T) {
 	for _, exit := range []string{"fresh confirmation", "observation timeout"} {
 		t.Run(exit, func(t *testing.T) {
