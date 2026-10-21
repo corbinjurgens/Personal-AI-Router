@@ -1,6 +1,6 @@
 {
   "artifact": {
-    "version": 1,
+    "version": 2,
     "qualifications": [
       {
         "id": "synthetic-fixture",
@@ -15,6 +15,11 @@
         "contextTokens": 4096,
         "maxOutputTokens": 1024,
         "routes": ["/v1/chat/completions"],
+        "shapes": {
+          "tools": true,
+          "structuredOutput": ["json_object", "json_schema"],
+          "reasoningReplay": false
+        },
         "accounting": {
           "method": "utf8-bytes",
           "requestOverheadTokens": 8,

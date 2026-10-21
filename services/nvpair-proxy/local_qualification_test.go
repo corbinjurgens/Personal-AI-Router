@@ -26,11 +26,13 @@ var testLaunchDigest = strings.Repeat("c", 64)
 // testQualification qualifies engine and model under the identity
 // strictRequest names.
 func testQualification(id, engine, model string) *localQualification {
+	tools, replay := true, false
 	return &localQualification{
 		ID: id, Revision: "1", Engine: engine, Model: model,
 		ModelDigests: []string{strictRequest().Identity.ModelDigest}, LaunchDigests: []string{testLaunchDigest},
 		Tokenizer: "test-tokenizer", ChatTemplate: "test-template", ContextTokens: 4096, MaxOutputTokens: 1024,
 		Routes:     []string{routeChatCompletions},
+		Shapes:     &qualificationShapes{Tools: &tools, StructuredOutput: []string{}, ReasoningReplay: &replay},
 		Accounting: qualificationAccounting{Method: accountingUTF8Bytes, RequestOverheadTokens: 8, MessageOverheadTokens: 4},
 		Evidence:   "test fixture",
 	}
@@ -510,12 +512,16 @@ func TestQualificationDocumentRejects(t *testing.T) {
 			"modelDigests": []string{strings.Repeat("1", 64)}, "launchDigests": []string{strings.Repeat("2", 64)},
 			"tokenizer": "t", "chatTemplate": "c", "contextTokens": 4096, "maxOutputTokens": 1024,
 			"routes":     []string{routeChatCompletions},
+			"shapes":     map[string]any{"tools": true, "structuredOutput": []string{}, "reasoningReplay": false},
 			"accounting": map[string]any{"method": accountingUTF8Bytes, "requestOverheadTokens": 1, "messageOverheadTokens": 1, "toolOverheadTokens": 1, "schemaOverheadTokens": 1},
 			"evidence":   "measured",
 		}
 	}
 	doc := func(entries ...map[string]any) []byte {
-		data, _ := json.Marshal(map[string]any{"version": 1, "qualifications": entries})
+		data, err := json.Marshal(map[string]any{"version": qualificationDocumentVersion, "qualifications": entries})
+		if err != nil {
+			t.Fatal(err)
+		}
 		return data
 	}
 	if reg, err := parseQualificationDocument(doc(valid())); err != nil || len(reg) != 1 {
@@ -526,7 +532,7 @@ func TestQualificationDocumentRejects(t *testing.T) {
 		data func() []byte
 		want string
 	}{
-		{"another version", func() []byte { return []byte(`{"version":2,"qualifications":[]}`) }, "version"},
+		{"another version", func() []byte { return []byte(`{"version":3,"qualifications":[]}`) }, "version"},
 		{"no version", func() []byte { return []byte(`{"qualifications":[]}`) }, "version"},
 		{"unknown field", func() []byte { e := valid(); e["guess"] = true; return doc(e) }, "unknown field"},
 		{"estimated accounting", func() []byte {
@@ -566,13 +572,111 @@ func TestQualificationDocumentRejects(t *testing.T) {
 	}
 }
 
+func TestQualificationShapesDocument(t *testing.T) {
+	if qualificationDocumentVersion != 2 {
+		t.Fatalf("artifact version = %d, want coordinated revision 2", qualificationDocumentVersion)
+	}
+	document := func(t *testing.T, version int, shapes string) []byte {
+		t.Helper()
+		data, err := json.Marshal(testQualification("q", "ollama", "m"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var entry map[string]json.RawMessage
+		if err := json.Unmarshal(data, &entry); err != nil {
+			t.Fatal(err)
+		}
+		delete(entry, "shapes")
+		if shapes != "" {
+			entry["shapes"] = json.RawMessage(shapes)
+		}
+		data, err = json.Marshal(map[string]any{"version": version, "qualifications": []map[string]json.RawMessage{entry}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return data
+	}
+	accept := func(name, shapes string, tools bool, modes []string) {
+		t.Run(name, func(t *testing.T) {
+			reg, err := parseQualificationDocument(document(t, 2, shapes))
+			if err != nil {
+				t.Fatal(err)
+			}
+			q, ok := reg.lookup(nodepolicy.QualificationRef{ID: "q", Revision: "1"})
+			if !ok || q.Shapes == nil || q.Shapes.Tools == nil || q.Shapes.ReasoningReplay == nil {
+				t.Fatal("parsed qualification lacks explicit shape evidence")
+			}
+			if *q.Shapes.Tools != tools || *q.Shapes.ReasoningReplay || !reflect.DeepEqual(q.Shapes.StructuredOutput, modes) {
+				t.Fatalf("shapes = %+v, want tools %v, modes %v and replay false", q.Shapes, tools, modes)
+			}
+			// NE produces these opaque canonical digests; parsing must preserve
+			// them without adding another provenance acceptance field.
+			want := testQualification("q", "ollama", "m")
+			if !reflect.DeepEqual(q.ModelDigests, want.ModelDigests) || !reflect.DeepEqual(q.LaunchDigests, want.LaunchDigests) ||
+				q.Tokenizer != want.Tokenizer || q.ChatTemplate != want.ChatTemplate || q.ContextTokens != want.ContextTokens || q.MaxOutputTokens != want.MaxOutputTokens {
+				t.Fatalf("identity or bounds changed: %+v", q)
+			}
+		})
+	}
+	accept("text only", `{"tools":false,"structuredOutput":[],"reasoningReplay":false}`, false, []string{})
+	accept("tools only", `{"tools":true,"structuredOutput":[],"reasoningReplay":false}`, true, []string{})
+	accept("json object grants only that mode", `{"tools":false,"structuredOutput":["json_object"],"reasoningReplay":false}`, false, []string{"json_object"})
+	accept("json schema grants only that mode", `{"tools":false,"structuredOutput":["json_schema"],"reasoningReplay":false}`, false, []string{"json_schema"})
+	accept("both modes and NE identity", `{"tools":true,"structuredOutput":["json_schema","json_object"],"reasoningReplay":false}`, true, []string{"json_schema", "json_object"})
+
+	reject := func(name string, version int, shapes, want string) {
+		t.Run(name, func(t *testing.T) {
+			reg, err := parseQualificationDocument(document(t, version, shapes))
+			if err == nil || !strings.Contains(err.Error(), want) || len(reg) != 0 {
+				t.Fatalf("registry = %v, error = %v; want empty registry and %q", reg, err, want)
+			}
+		})
+	}
+	reject("old evidence", 1, "", "version must be 2")
+	reject("future version", 3, `{"tools":false,"structuredOutput":[],"reasoningReplay":false}`, "version must be 2")
+	reject("missing shapes", 2, "", "shapes must be a non-null object")
+	reject("null shapes", 2, `null`, "shapes must be a non-null object")
+	reject("array shapes", 2, `[]`, "cannot unmarshal")
+	reject("boolean shapes", 2, `false`, "cannot unmarshal")
+	reject("string shapes", 2, `"tools"`, "cannot unmarshal")
+	reject("required members checked in order", 2, `{}`, "shapes.tools must be")
+	reject("missing tools", 2, `{"structuredOutput":[],"reasoningReplay":false}`, "shapes.tools must be")
+	reject("null tools", 2, `{"tools":null,"structuredOutput":[],"reasoningReplay":false}`, "shapes.tools must be")
+	reject("string tools", 2, `{"tools":"false","structuredOutput":[],"reasoningReplay":false}`, "cannot unmarshal")
+	reject("number tools", 2, `{"tools":0,"structuredOutput":[],"reasoningReplay":false}`, "cannot unmarshal")
+	reject("missing modes and replay", 2, `{"tools":false}`, "shapes.structuredOutput must be")
+	reject("null modes", 2, `{"tools":false,"structuredOutput":null,"reasoningReplay":false}`, "shapes.structuredOutput must be")
+	reject("string modes", 2, `{"tools":false,"structuredOutput":"json_object","reasoningReplay":false}`, "cannot unmarshal")
+	reject("object modes", 2, `{"tools":false,"structuredOutput":{},"reasoningReplay":false}`, "cannot unmarshal")
+	reject("unknown mode", 2, `{"tools":false,"structuredOutput":["text"],"reasoningReplay":false}`, "unsupported shapes.structuredOutput mode")
+	reject("null mode", 2, `{"tools":false,"structuredOutput":[null],"reasoningReplay":false}`, "unsupported shapes.structuredOutput mode")
+	reject("number mode", 2, `{"tools":false,"structuredOutput":[1],"reasoningReplay":false}`, "cannot unmarshal")
+	reject("duplicate mode", 2, `{"tools":false,"structuredOutput":["json_object","json_object"],"reasoningReplay":false}`, "repeated shapes.structuredOutput mode")
+	reject("missing replay", 2, `{"tools":false,"structuredOutput":[]}`, "shapes.reasoningReplay must be")
+	reject("null replay", 2, `{"tools":false,"structuredOutput":[],"reasoningReplay":null}`, "shapes.reasoningReplay must be")
+	reject("string replay", 2, `{"tools":false,"structuredOutput":[],"reasoningReplay":"false"}`, "cannot unmarshal")
+	reject("replay acceptance remains forbidden", 2, `{"tools":false,"structuredOutput":[],"reasoningReplay":true}`, "shapes.reasoningReplay must be false")
+	reject("unknown shape", 2, `{"tools":false,"structuredOutput":[],"reasoningReplay":false,"vision":false}`, "unknown field")
+	reject("effort not evidence", 2, `{"tools":false,"structuredOutput":[],"reasoningReplay":false,"reasoning_effort":false}`, "unknown field")
+	reject("parallel not evidence", 2, `{"tools":false,"structuredOutput":[],"reasoningReplay":false,"parallel_tool_calls":false}`, "unknown field")
+	reject("duplicate shape member", 2, `{"tools":false,"tools":true,"structuredOutput":[],"reasoningReplay":false}`, "repeated keys")
+	reject("escaped duplicate member", 2, `{"tools":false,"to\u006fls":true,"structuredOutput":[],"reasoningReplay":false}`, "repeated keys")
+	t.Run("duplicate shapes object", func(t *testing.T) {
+		data := document(t, 2, `{"tools":false,"structuredOutput":[],"reasoningReplay":false}`)
+		data = bytes.Replace(data, []byte(`"shapes":`), []byte(`"shapes":{},"shapes":`), 1)
+		if _, err := parseQualificationDocument(data); err == nil || !strings.Contains(err.Error(), "repeated keys") {
+			t.Fatalf("error = %v, want duplicate object rejection", err)
+		}
+	})
+}
+
 func TestLoadQualificationRegistry(t *testing.T) {
 	dir := t.TempDir()
 	if reg, err := loadQualificationRegistry(filepath.Join(dir, "missing.json"), os.ReadFile); err != nil || len(reg) != 0 {
 		t.Fatalf("missing file: %d entries, %v; want an empty registry", len(reg), err)
 	}
 	bad := filepath.Join(dir, "bad.json")
-	if err := os.WriteFile(bad, []byte(`{"version":1,"qualifications":[{"id":"q"}]}`), 0o600); err != nil {
+	if err := os.WriteFile(bad, []byte(`{"version":2,"qualifications":[{"id":"q"}]}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if reg, err := loadQualificationRegistry(bad, os.ReadFile); err == nil || len(reg) != 0 {

@@ -40,7 +40,7 @@ import (
 const qualificationFileName = "local-qualification.json"
 
 // qualificationDocumentVersion is the artifact schema version.
-const qualificationDocumentVersion = 1
+const qualificationDocumentVersion = 2
 
 // accountingUTF8Bytes bounds input tokens by rendered UTF-8 bytes: a
 // byte-level BPE tokenizer emits at most one token per byte. Template tokens
@@ -79,8 +79,44 @@ type localQualification struct {
 	ContextTokens   int                     `json:"contextTokens"`
 	MaxOutputTokens int                     `json:"maxOutputTokens"`
 	Routes          []string                `json:"routes"`
+	Shapes          *qualificationShapes    `json:"shapes"`
 	Accounting      qualificationAccounting `json:"accounting"`
 	Evidence        string                  `json:"evidence"`
+}
+
+// qualificationShapes declares evidence explicitly; nil members distinguish
+// missing/null declarations from false and an empty list of qualified modes.
+type qualificationShapes struct {
+	Tools            *bool    `json:"tools"`
+	StructuredOutput []string `json:"structuredOutput"`
+	ReasoningReplay  *bool    `json:"reasoningReplay"`
+}
+
+func (s *qualificationShapes) validate() error {
+	if s == nil {
+		return errors.New("shapes must be a non-null object")
+	}
+	if s.Tools == nil {
+		return errors.New("shapes.tools must be a non-null boolean")
+	}
+	if s.StructuredOutput == nil {
+		return errors.New("shapes.structuredOutput must be a non-null array")
+	}
+	for i, mode := range s.StructuredOutput {
+		if mode != "json_object" && mode != "json_schema" {
+			return fmt.Errorf("unsupported shapes.structuredOutput mode %q", mode)
+		}
+		if slices.Contains(s.StructuredOutput[:i], mode) {
+			return fmt.Errorf("repeated shapes.structuredOutput mode %q", mode)
+		}
+	}
+	if s.ReasoningReplay == nil {
+		return errors.New("shapes.reasoningReplay must be a non-null boolean")
+	}
+	if *s.ReasoningReplay {
+		return errors.New("shapes.reasoningReplay must be false while reasoning replay is unsupported")
+	}
+	return nil
 }
 
 type qualificationAccounting struct {
@@ -144,6 +180,9 @@ func (q localQualification) validate() error {
 			return fmt.Errorf("unsupported route %q", r)
 		}
 	}
+	if err := q.Shapes.validate(); err != nil {
+		return err
+	}
 	a := q.Accounting
 	if a.Method != accountingUTF8Bytes {
 		return fmt.Errorf("unsupported accounting method %q", a.Method)
@@ -174,6 +213,9 @@ func parseQualificationDocument(data []byte) (qualificationRegistry, error) {
 	}
 	if _, err := dec.Token(); err != io.EOF {
 		return nil, errors.New("invalid qualification document: trailing data")
+	}
+	if !uniqueKeys(data) {
+		return nil, errors.New("invalid qualification document: malformed JSON or repeated keys")
 	}
 	if doc.Version == nil || *doc.Version != qualificationDocumentVersion {
 		return nil, fmt.Errorf("qualification document version must be %d", qualificationDocumentVersion)
