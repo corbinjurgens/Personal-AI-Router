@@ -666,12 +666,36 @@ func TestOwnedInferenceBuffersAliasBorrowedScan(t *testing.T) {
 		})
 	}
 	t.Run("large ignored members allocate no retained alias representation", func(t *testing.T) {
-		body := []byte(`{"ignored":"` + strings.Repeat("x", 1<<20) + `","name":"` + strings.Repeat(" ", 1<<20) + `weak-api"}`)
-		var alias string
-		allocations := testing.AllocsPerRun(2, func() { alias = jsonModelAlias(body) })
-		if alias != "weak-api" || allocations != 0 {
-			t.Fatalf("borrowed alias=%q allocations=%g, want weak-api and zero", alias, allocations)
+		test := func(name, encoded, want string) {
+			t.Run(name, func(t *testing.T) {
+				body := []byte(`{"ignored":"` + strings.Repeat("x", 1<<20) + `","Na\u004de":"` + strings.Repeat(" ", 1<<20) + encoded + `\u2003"}`)
+				alias := jsonModelAlias(body)
+				assertCanonical := func() {
+					t.Helper()
+					// Canonical literal identity excludes both a heap copy and a
+					// view retaining any request storage through the result.
+					if alias != want || unsafe.StringData(alias) != unsafe.StringData(want) {
+						t.Fatalf("borrowed alias=%q storage=%p, want canonical %q storage=%p", alias, unsafe.StringData(alias), want, unsafe.StringData(want))
+					}
+				}
+				assertCanonical()
+				clear(body)
+				body = nil
+				assertCanonical()
+			})
 		}
+		test("plain weak api", "weak-api", "weak-api")
+		test("escaped weak api", `weak\u002dapi`, "weak-api")
+		test("plain weak local", "weak-local", "weak-local")
+		test("escaped weak local", `weak\u002dlocal`, "weak-local")
+		test("plain medium api", "medium-api", "medium-api")
+		test("escaped medium api", `medium\u002dapi`, "medium-api")
+		test("plain medium local", "medium-local", "medium-local")
+		test("escaped medium local", `medium\u002dlocal`, "medium-local")
+		test("plain strong api", "strong-api", "strong-api")
+		test("escaped strong api", `strong\u002dapi`, "strong-api")
+		test("plain strong local", "strong-local", "strong-local")
+		test("escaped strong local", `strong\u002dlocal`, "strong-local")
 	})
 }
 
