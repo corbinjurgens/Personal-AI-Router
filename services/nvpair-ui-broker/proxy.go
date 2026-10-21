@@ -540,8 +540,8 @@ func (b *Broker) shutdownProxySupervision() {
 	b.proxySupPhase = proxySupClosed
 	b.stopProxySupervisorLocked()
 	b.proxySupMu.Unlock()
-	// Give retirement the remaining shared teardown budget. Accepted terminals
-	// stay in history even if unread output prevents their fanout from finishing.
+	// Cap retirement's drain allowance so later shutdown work keeps its budget.
+	// Accepted terminals stay in history even if unread output blocks fanout.
 	b.waitProxyRetirements()
 }
 

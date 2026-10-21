@@ -98,14 +98,14 @@ func (b *Broker) waitProxyRetirements() {
 	if done == nil {
 		return
 	}
-	remaining, active := teardownRemaining()
-	if !active {
-		// Direct shutdown callers still use the existing teardown allowance;
-		// only shutdownInferenceStack arms its shared clock.
-		remaining = teardownBudget
+	// Leave shared shutdown time for later cleanup. An unarmed clock still
+	// grants a bounded opportunity for already-accepted output to drain.
+	allowance := workerSignalGrace
+	if remaining, active := teardownRemaining(); active && remaining < allowance {
+		allowance = remaining
 	}
-	if !waitClosed(done, remaining) {
-		slog.Warn("proxy workload retirement exhausted the shared teardown budget")
+	if !waitClosed(done, allowance) {
+		slog.Warn("proxy workload retirement exhausted its shutdown allowance")
 	}
 }
 

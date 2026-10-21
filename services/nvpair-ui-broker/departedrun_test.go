@@ -663,7 +663,7 @@ func TestDepartedRun(t *testing.T) {
 		departedRunFrames(t, manager, "workload:errored", map[string]string{"one": "failed"})
 	})
 
-	shutdownBudget := func(name, destination string, remaining time.Duration) {
+	shutdownBudget := func(name, destination string, armed bool, remaining time.Duration) {
 		t.Run(name, func(t *testing.T) {
 			logs := captureLogs(t)
 			b, _, _, _ := privacyBroker(t)
@@ -694,16 +694,24 @@ func TestDepartedRun(t *testing.T) {
 				waitDepartedRun(t, returned, "bounded shutdown cleanup")
 				joinDepartedRun(t, b)
 			})
-			setTeardownStart(time.Now().Add(-teardownBudget + remaining))
+			clockStart := time.Time{}
+			if armed {
+				clockStart = time.Now().Add(-teardownBudget + remaining)
+			}
+			setTeardownStart(clockStart)
+			bound := time.Second
+			if !armed || remaining > workerSignalGrace {
+				bound = workerSignalGrace + time.Second
+			}
 			started := time.Now()
 			go func() { defer close(returned); b.shutdownProxySupervision() }()
 			waitDepartedRun(t, pipe.entered, "retirement write to never-draining reader")
 			select {
 			case <-returned:
-			case <-time.After(time.Second):
-				t.Fatal("shutdown retirement ignored the remaining shared teardown budget")
+			case <-time.After(bound):
+				t.Fatal("shutdown retirement ignored its capped allowance or remaining shared budget")
 			}
-			if time.Since(started) > time.Second {
+			if time.Since(started) > bound {
 				t.Fatal("shutdown retirement did not remain bounded")
 			}
 			select {
@@ -711,8 +719,11 @@ func TestDepartedRun(t *testing.T) {
 				t.Fatal("reader unexpectedly drained before cleanup")
 			default:
 			}
-			if !strings.Contains(bufferText(logs), "proxy workload retirement exhausted the shared teardown budget") {
-				t.Fatal("shutdown budget exhaustion was not reported")
+			if !strings.Contains(bufferText(logs), "proxy workload retirement exhausted its shutdown allowance") {
+				t.Fatal("shutdown retirement allowance exhaustion was not reported")
+			}
+			if _, active := teardownRemaining(); active != armed {
+				t.Fatal("retirement wait changed whether the shared teardown clock was armed")
 			}
 			rec := departedRunRecord(t, b, "host", "one", "failed")
 			if rec.Inferred || rec.Seq != 8 {
@@ -731,10 +742,107 @@ func TestDepartedRun(t *testing.T) {
 			}
 		})
 	}
-	shutdownBudget("shutdown unread client uses nearly-spent shared budget", "client", 100*time.Millisecond)
-	shutdownBudget("shutdown unread manager uses nearly-spent shared budget", "manager", 100*time.Millisecond)
-	shutdownBudget("shutdown unread client honors exhausted shared budget", "client", -time.Millisecond)
-	shutdownBudget("shutdown unread manager honors exhausted shared budget", "manager", -time.Millisecond)
+	shutdownBudget("shutdown unread client uses nearly-spent shared budget", "client", true, 100*time.Millisecond)
+	shutdownBudget("shutdown unread manager uses nearly-spent shared budget", "manager", true, 100*time.Millisecond)
+	shutdownBudget("shutdown unread client honors exhausted shared budget", "client", true, -time.Millisecond)
+	shutdownBudget("shutdown unread manager honors exhausted shared budget", "manager", true, -time.Millisecond)
+	shutdownBudget("shutdown unread client caps ample shared budget", "client", true, teardownBudget)
+	shutdownBudget("shutdown unread manager caps ample shared budget", "manager", true, teardownBudget)
+	shutdownBudget("shutdown unread client caps unarmed clock allowance", "client", false, 0)
+	shutdownBudget("shutdown unread manager caps unarmed clock allowance", "manager", false, 0)
+
+	shutdownUnarmedDrain := func(name, destination string) {
+		t.Run(name, func(t *testing.T) {
+			logs := captureLogs(t)
+			b, client, scheduler, manager := privacyBroker(t)
+			reader, conn := net.Pipe()
+			pipe := &departedRunObservedPipe{Conn: conn, entered: make(chan struct{}), finished: make(chan struct{})}
+			if destination == "client" {
+				b.codec = NewCodec(pipe)
+			} else {
+				b.setWorkloadMgr(&workloadManagerProcess{stdin: pipe})
+			}
+			seedDepartedRun(t, b, departedRunInput(t, "one", "host", "r1", "running", "peer"))
+			teardownClock.mu.Lock()
+			previous := teardownClock.start
+			teardownClock.mu.Unlock()
+			t.Cleanup(func() { setTeardownStart(previous) })
+			returned, drained := make(chan struct{}), make(chan struct{})
+			readerStarted := false
+			t.Cleanup(func() {
+				if err := reader.Close(); err != nil {
+					t.Error(err)
+				}
+				if err := conn.Close(); err != nil {
+					t.Error(err)
+				}
+				waitDepartedRun(t, returned, "unarmed shutdown cleanup")
+				joinDepartedRun(t, b)
+				if readerStarted {
+					waitDepartedRun(t, drained, "unarmed reader cleanup")
+				}
+			})
+			setTeardownStart(time.Time{})
+			go func() { defer close(returned); b.shutdownProxySupervision() }()
+			waitDepartedRun(t, pipe.entered, "unarmed retirement write before drain")
+			select {
+			case <-returned:
+				t.Fatal("unarmed retirement returned before blocked output was released")
+			case <-time.After(100 * time.Millisecond):
+			}
+			var frame struct {
+				Method string          `json:"method"`
+				Params json.RawMessage `json:"params"`
+			}
+			var readErr error
+			readerStarted = true
+			go func() {
+				defer close(drained)
+				readErr = json.NewDecoder(reader).Decode(&frame)
+			}()
+			waitDepartedRun(t, returned, "unarmed retirement after drain")
+			waitDepartedRun(t, drained, "unarmed terminal frame")
+			if readErr != nil {
+				t.Fatal(readErr)
+			}
+			select {
+			case <-pipe.finished:
+			default:
+				t.Fatal("unarmed retirement returned before its output write finished")
+			}
+			b.proxySupWorkMu.Lock()
+			done := b.proxyRetireDone
+			b.proxySupWorkMu.Unlock()
+			if done != nil {
+				select {
+				case <-done:
+				default:
+					t.Fatal("unarmed retirement returned before the drained emitter finished")
+				}
+			}
+			method := "workloads:upsert"
+			other := manager
+			if destination == "manager" {
+				method, other = "workload:errored", client
+			}
+			info := privacyObject(t, frame.Params)["workloadInfo"]
+			in, ok := workloadstore.ParseIncoming(info)
+			if !ok || frame.Method != method || in.ID != "one" || in.RunID != "r1" || in.State != "failed" || in.Seq != 8 || string(privacyObject(t, info)["error"]) != `"proxy exited before the request finished"` {
+				t.Fatalf("unarmed drain lost the accepted terminal: %+v", frame)
+			}
+			if len(scheduler.frames()) != 1 || len(other.frames()) != 1 {
+				t.Fatal("unarmed retirement did not finish its other fanout")
+			}
+			if _, active := teardownRemaining(); active {
+				t.Fatal("unarmed retirement wait armed the shared teardown clock")
+			}
+			if strings.Contains(bufferText(logs), "proxy workload retirement exhausted its shutdown allowance") {
+				t.Fatal("drained retirement incorrectly reported allowance exhaustion")
+			}
+		})
+	}
+	shutdownUnarmedDrain("shutdown unarmed client waits for drain", "client")
+	shutdownUnarmedDrain("shutdown unarmed manager waits for drain", "manager")
 
 	t.Run("blocked output leaves supervision and worker locks available", func(t *testing.T) {
 		for _, destination := range []string{"client", "manager"} {
