@@ -1233,8 +1233,8 @@ func srAssertNoEffects(t *testing.T, before, after srRuntimeState) {
 }
 
 // Task 602 proves configuration equivalence on the production paired routes.
-// The switch fixture has no SR qualifications: desired residency readback here
-// is not evidence of native loading or of the SR/NE/B qualification path above.
+// Profiles carry fixture-only qualification references without registry evidence:
+// desired residency readback is not native loading or SR/NE/B qualification proof.
 func TestServedResidentPolicyPairedRoutes(t *testing.T) {
 	test := func(name string, reverse bool) {
 		t.Run(name, func(t *testing.T) {
@@ -1307,18 +1307,47 @@ func TestServedResidentPolicyPairedRoutes(t *testing.T) {
 				}
 				assertDesired(t, view.ModelConfiguration, want)
 			}
+			saved := false
+			readStored := func(t *testing.T) ([]byte, bool) {
+				t.Helper()
+				data, err := os.ReadFile(path)
+				if errors.Is(err, os.ErrNotExist) && !saved {
+					return nil, false
+				}
+				if err != nil {
+					t.Fatalf("read stored policy: %v", err)
+				}
+				return data, true
+			}
+			canonicalPolicy := func(t *testing.T, policy nodepolicy.Policy) nodepolicy.Policy {
+				t.Helper()
+				data, err := json.Marshal(policy)
+				if err != nil {
+					t.Fatalf("encode configuration control: %v", err)
+				}
+				parsed, err := nodepolicy.Parse(data)
+				if err != nil {
+					t.Fatalf("invalid configuration control: %v", err)
+				}
+				return parsed
+			}
 			readback := func(t *testing.T, want nodepolicy.Policy) {
 				t.Helper()
 				view := local(t)
 				if !reflect.DeepEqual(view.Policy, want) {
 					t.Fatalf("local policy=%+v, want=%+v", view.Policy, want)
 				}
-				assertStoredPolicy(t, path, want)
+				if _, exists := readStored(t); exists {
+					assertStoredPolicy(t, path, want)
+				} else if want.Revision != "0" {
+					t.Fatal("unsaved policy must retain revision zero")
+				}
 				assertDesired(t, view.ModelConfiguration, want)
 				assertPeer(t, remote(t, "engine:remote-policy-get", map[string]string{"nodeId": mesh.b.uuid}), want)
 			}
 			writeLocal := func(t *testing.T, want nodepolicy.Policy) nodepolicy.Policy {
 				t.Helper()
+				want = canonicalPolicy(t, want)
 				before := local(t).Policy
 				var accepted srPolicyView
 				task2Decode(t, f.rpcOK(t, "policy:set", map[string]any{"policy": want, "expectedPersistedRevision": before.Revision}), &accepted)
@@ -1329,9 +1358,10 @@ func TestServedResidentPolicyPairedRoutes(t *testing.T) {
 				if !reflect.DeepEqual(accepted.Policy, want) {
 					t.Fatalf("local accepted policy=%+v, want=%+v", accepted.Policy, want)
 				}
-				assertDesired(t, accepted.ModelConfiguration, want)
-				readback(t, want)
-				return want
+				saved = true
+				assertDesired(t, accepted.ModelConfiguration, accepted.Policy)
+				readback(t, accepted.Policy)
+				return accepted.Policy
 			}
 
 			f.mu.Lock()
@@ -1354,23 +1384,35 @@ func TestServedResidentPolicyPairedRoutes(t *testing.T) {
 				default:
 				}
 			}
+			model := nodepolicy.Role{Engine: "ollama", Model: "switch-model:latest"}
+			neighbor := nodepolicy.Role{Engine: "ollama", Model: srNeighbor + ":latest"}
+			var profiles []nodepolicy.Profile
+			for _, ref := range []nodepolicy.Role{model, neighbor} {
+				profiles = append(profiles, nodepolicy.Profile{
+					Name: ref.Model, Engine: ref.Engine, Model: ref.Model,
+					ContextTokens: neContext, MaxOutputTokens: neOutput,
+					MemoryBytes: neMemory, MaxConcurrent: 1,
+					Qualification: &nodepolicy.QualificationRef{ID: "sr-paired-" + ref.Model, Revision: "1"},
+				})
+			}
 			configure := func(name string, served nodepolicy.ServedModels, resident nodepolicy.ResidentModels) {
 				t.Run(name, func(t *testing.T) {
 					before := local(t).Policy
 					want := before
+					// The first accepted edit seeds finite profiles for subsequent
+					// resident preferences; references alone cannot authorize loads.
+					want.Profiles = profiles
 					want.ServedModels, want.ResidentModels = served, resident
-					if err := want.Validate(); err != nil {
-						t.Fatalf("invalid configuration control: %v", err)
-					}
+					want = canonicalPolicy(t, want)
 					managementSet(t, mesh.b.cm, mesh.a.uuid, false)
-					stored := readPolicyBytes(t, path)
+					stored, existed := readStored(t)
 					request := map[string]any{"nodeId": mesh.b.uuid, "policy": want.PeerProjection(), "expectedPersistedRevision": before.Revision}
 					denied := remote(t, "engine:remote-policy-set", request)
 					if denied.Error == nil || denied.Error.Code != -32012 || len(denied.Result) != 0 {
 						t.Fatalf("PG denial=%+v, want -32012 without a result", denied)
 					}
-					if !bytes.Equal(readPolicyBytes(t, path), stored) {
-						t.Fatal("PG-denied configuration changed persisted bytes")
+					if after, exists := readStored(t); exists != existed || !bytes.Equal(after, stored) {
+						t.Fatal("PG-denied configuration changed policy file presence or bytes")
 					}
 					readback(t, before) // Denied peers retain authenticated read access.
 					assertNoEffects(t)
@@ -1399,8 +1441,6 @@ func TestServedResidentPolicyPairedRoutes(t *testing.T) {
 					assertNoEffects(t)
 				})
 			}
-			model := nodepolicy.Role{Engine: "ollama", Model: "switch-model:latest"}
-			neighbor := nodepolicy.Role{Engine: "ollama", Model: srNeighbor + ":latest"}
 			configure("explicit empty served permission", nodepolicy.ServedModels{}, nil)
 			configure("served subset with desired resident", nodepolicy.ServedModels{model, neighbor}, nodepolicy.ResidentModels{model})
 			configure("replace desired resident within served subset", nodepolicy.ServedModels{model, neighbor}, nodepolicy.ResidentModels{neighbor})
