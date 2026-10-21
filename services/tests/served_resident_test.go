@@ -1076,6 +1076,9 @@ func TestServedResidentProcessSwitch(t *testing.T) {
 		}
 		return status.Receipt != nil && status.Receipt.Phase == settings.SwitchDraining
 	})
+	beforeDrain := f.control(t, "")
+	f.entry(t, neModel, nodepolicy.ModelStateBlocked, nodepolicy.ModelReasonSwitchBusy)
+	srAssertNoEffects(t, beforeDrain, f.control(t, ""))
 	stopped, err := serviceProcessStopped(context.Background(), int32(source.Base.PID))
 	if err != nil || stopped || f.control(t, "").HeldChats != 1 {
 		t.Fatalf("switch stopped a busy resident source: stopped=%t err=%v", stopped, err)
