@@ -2221,6 +2221,28 @@ func srRelayDecode(t *testing.T, data json.RawMessage, value any) {
 	}
 }
 
+// The two relay tests below cover representative worker-loss stages with real
+// processes. Other stages have component-level evidence, not process coverage:
+//   - Before preparation completes: nvpair-ui-broker
+//     TestModelConfigAuthorityChangesDuringPreparePreventLoad prevents a stale
+//     prepare from loading and finishes its reservation on the original proxy.
+//   - During the final grant: nvpair-ui-broker
+//     TestModelConfigManagerReplacementDuringGrant keeps an old grant away from
+//     a replacement manager; TestModelConfigAuthorityChangesDuringGrantLoadAndFinish
+//     also checks replacement, pause, and Off at this stage.
+//   - During native load and finish: nvpair-ui-broker
+//     TestModelConfigManagerReplacementDuringLoadOrFinish and
+//     TestModelConfigAuthorityChangesDuringGrantLoadAndFinish reject stale
+//     completion after manager replacement or an authority change.
+//   - After an uncertain completion: nvpair-ui-broker
+//     TestModelConfigRecoveryRequiresTerminalManagerBarrier requires a terminal
+//     manager result before fresh observation; nvpair-proxy
+//     TestResidentCapacityDispatchedUnknownRetained holds dispatched capacity,
+//     while TestResidentCapacityFinishObservations releases it on bound proof.
+//   - Across replacement: nvpair-proxy
+//     TestResidentCapacityStaleFinishCannotReleaseReplacement rejects old finish
+//     bindings; nvpair-ui-broker TestModelConfigWorkerRestartConfirmsWithoutReload
+//     confirms a fresh observation without another native load.
 func TestServedResidentProcessProxyLossBeforeGrant(t *testing.T) {
 	f := newSRWorkerLossFixture(t, "proxy-before-grant")
 	before := f.control(t, "")
