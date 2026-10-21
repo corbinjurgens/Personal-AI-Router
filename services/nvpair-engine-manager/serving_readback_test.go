@@ -373,7 +373,7 @@ func (readbackBrokenBody) Close() error { return nil }
 func TestLoadedServingTransportFailureRecoversNextSweep(t *testing.T) {
 	for _, endpoint := range []string{"/models", "/props"} {
 		t.Run(endpoint, func(t *testing.T) {
-			for _, failure := range []string{"connection", "500", "timeout", "sweep timeout", "truncated body", "404", "redirect"} {
+			for _, failure := range []string{"connection", "500", "timeout", "sweep timeout", "truncated body", "404", "redirect", "201 valid body", "204 empty body"} {
 				t.Run(failure, func(t *testing.T) {
 					f, server := loadedReadbackFixture(t, "medium")
 					f.ex.sweepLoaded(context.Background(), nil, false)
@@ -395,6 +395,14 @@ func TestLoadedServingTransportFailureRecoversNextSweep(t *testing.T) {
 								body = `{"default_generation_settings":{"n_ctx":8192},"total_slots":2}`
 							}
 							return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: readbackBrokenBody{strings.NewReader(body)}}, nil
+						case "201 valid body":
+							body := `{"data":[{"id":"medium","status":{"value":"loaded"}}]}`
+							if endpoint == "/props" {
+								body = `{"default_generation_settings":{"n_ctx":8192},"total_slots":2}`
+							}
+							return &http.Response{StatusCode: http.StatusCreated, Body: io.NopCloser(strings.NewReader(body))}, nil
+						case "204 empty body":
+							return &http.Response{StatusCode: http.StatusNoContent, Body: http.NoBody}, nil
 						default:
 							status := http.StatusInternalServerError
 							if failure == "404" {
@@ -440,6 +448,83 @@ func TestLoadedServingTransportFailureRecoversNextSweep(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestLoadedServingSemanticEvidenceSurvivesTransportFailure(t *testing.T) {
+	test := func(name, semanticModel, props string, semanticFirst bool) {
+		t.Run(name, func(t *testing.T) {
+			f, server := loadedReadbackFixture(t, "medium")
+			f.ex.sweepLoaded(context.Background(), nil, false)
+			readbackProof(t, f, 1)
+			models := []string{"medium", semanticModel}
+			if semanticFirst {
+				models[0], models[1] = models[1], models[0]
+			}
+			rows := make([]map[string]any, 0, len(models))
+			for _, model := range models {
+				rows = append(rows, map[string]any{"id": model, "status": map[string]string{"value": "loaded"}})
+			}
+			raw, err := json.Marshal(map[string]any{"data": rows})
+			if err != nil {
+				t.Fatal(err)
+			}
+			server.mu.Lock()
+			server.loaded = string(raw)
+			server.mu.Unlock()
+			original := f.ex.client.Transport
+			f.ex.client.Transport = memoryModelsTransport(func(r *http.Request) (*http.Response, error) {
+				if r.URL.Path == "/props" {
+					if r.URL.Query().Get("model") == "medium" {
+						return nil, errors.New("connection lost")
+					}
+					if r.URL.Query().Get("autoload") != "false" {
+						t.Error("props request did not disable autoload")
+					}
+					return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(props))}, nil
+				}
+				return original.RoundTrip(r)
+			})
+			f.ex.sweepLoaded(context.Background(), nil, false)
+			readbackProof(t, f, 0)
+			st := settingsState(t, f.ex)
+			st.mu.Lock()
+			drift := st.plat.Runtime.servingDrift
+			st.mu.Unlock()
+			if drift == "" {
+				t.Fatal("transport failure masked semantic disagreement")
+			}
+			f.ex.client.Transport = original
+			server.mu.Lock()
+			server.loaded = `{"data":[{"id":"medium","status":{"value":"loaded"}}]}`
+			server.mu.Unlock()
+			f.ex.sweepLoaded(context.Background(), nil, false)
+			readbackProof(t, f, 0)
+			if _, err := f.ex.currentServingObservation(context.Background(), "fake", "medium"); err == nil {
+				t.Fatal("good sweep cleared semantic latch")
+			}
+			if server.loads.Load() != 0 {
+				t.Fatal("observation triggered a load")
+			}
+			st.mu.Lock()
+			st.port = st.plat.Runtime.Port
+			st.mu.Unlock()
+			if err := f.ex.Stop("fake"); err != nil {
+				t.Fatal(err)
+			}
+			if err := f.ex.Start(context.Background(), "fake"); err != nil {
+				t.Fatal(err)
+			}
+			attachLoadedLlamaFake(t, f, "medium")
+			f.ex.sweepLoaded(context.Background(), nil, false)
+			readbackProof(t, f, 1)
+		})
+	}
+	test("undeclared last", "unknown", "", false)
+	test("undeclared first", "unknown", "", true)
+	test("allocation mismatch last", "weak", `{"default_generation_settings":{"n_ctx":1},"total_slots":1}`, false)
+	test("allocation mismatch first", "weak", `{"default_generation_settings":{"n_ctx":1},"total_slots":1}`, true)
+	test("invalid props last", "weak", `{`, false)
+	test("invalid props first", "weak", `{`, true)
 }
 
 func TestLoadedServingFencesReplacementDuringHTTP(t *testing.T) {

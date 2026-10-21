@@ -219,7 +219,11 @@ func (e *Executor) dispatchAction(ctx context.Context, st *engineState, engine, 
 	if err != nil {
 		return nil, fmt.Errorf("action %q: read response body: %w", action, err)
 	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+	// Inventory reads are observation evidence only on exactly 200. Apply
+	// this to list_models too: a sweep can share its response with loaded_models.
+	// Mutation actions retain their general 2xx success contract (e.g. 204).
+	observation := action == "list_models" || action == "loaded_models"
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 || (observation && resp.StatusCode != http.StatusOK) {
 		return nil, &ActionHTTPError{Action: action, StatusCode: resp.StatusCode, Body: strings.TrimSpace(string(data))}
 	}
 	if len(data) == 0 {

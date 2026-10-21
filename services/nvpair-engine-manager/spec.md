@@ -180,6 +180,12 @@ read failures make loaded observation unknown for that sweep. They clear all
 previous observed proof without writing serving drift. Identity, readiness and
 resident eligibility that require observed proof are withheld for that sweep;
 the next successful sweep restores observation without apply or restart.
+Only exactly HTTP 200 succeeds for HTTP `list_models` and `loaded_models`
+inventory actions (including a shared response) and `/props`; other 2xx statuses
+are transport failures too. Other actions retain their general 2xx success rule.
+Semantic disagreement from any model in a sweep latches even when another
+model's props read fails transport, independent of inventory ordering. A sweep
+with any transport failure publishes no observed proof.
 
 Settings readback uses the existing `observed` array and status only for matching
 fresh loaded values; configured and launch-validated cold bounds remain distinct.

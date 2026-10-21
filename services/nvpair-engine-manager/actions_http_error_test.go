@@ -39,6 +39,41 @@ func TestActionBodyReadFailureIsTransportError(t *testing.T) {
 	}
 }
 
+func TestActionObservationRequiresHTTP200(t *testing.T) {
+	for _, action := range []string{"list_models", "loaded_models", "load_model"} {
+		t.Run(action, func(t *testing.T) {
+			for _, status := range []int{http.StatusOK, http.StatusCreated, http.StatusNoContent} {
+				t.Run(http.StatusText(status), func(t *testing.T) {
+					m := testEngineManifest(fakeEngineBin)
+					m.Actions[action] = Action{HTTP: &ActionHTTP{Method: http.MethodGet, Path: "/read"}}
+					ex := newTestExecutor(t, m)
+					st, err := ex.state(m.Engine)
+					if err != nil {
+						t.Fatal(err)
+					}
+					st.mu.Lock()
+					st.running = true
+					st.mu.Unlock()
+					ex.client.Transport = memoryModelsTransport(func(*http.Request) (*http.Response, error) {
+						return &http.Response{StatusCode: status, Body: http.NoBody}, nil
+					})
+					result, err := ex.Action(context.Background(), m.Engine, action, nil)
+					if action == "load_model" || status == http.StatusOK {
+						if err != nil || string(result) != "null" {
+							t.Fatalf("result=%s err=%v, want successful empty action", result, err)
+						}
+						return
+					}
+					var failure *ActionHTTPError
+					if !errors.As(err, &failure) || failure.StatusCode != status || result != nil {
+						t.Fatalf("result=%s err=%v, want HTTP %d observation failure", result, err, status)
+					}
+				})
+			}
+		})
+	}
+}
+
 func TestActionHTTPErrorPreservesDiagnostic(t *testing.T) {
 	for _, tc := range []struct {
 		name, body string

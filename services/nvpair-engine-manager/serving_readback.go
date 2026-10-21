@@ -140,7 +140,10 @@ func (e *Executor) observeLlamaServing(ctx context.Context, st *engineState, s s
 			value, err := e.llamaServingProps(ctx, port, model)
 			var semantic *ServingIdentityRefusal
 			if err != nil && !errors.As(err, &semantic) {
-				return
+				// Keep checking the sweep: unavailable props cannot hide an
+				// undeclared ID or semantic disagreement in another model.
+				transportFailed = true
+				continue
 			}
 			if err != nil || value.PerSlotContextTokens != envelope.PerSlotContextTokens || value.Slots != envelope.Slots {
 				reason = "Loaded allocation does not match the validated serving envelope."
@@ -148,6 +151,9 @@ func (e *Executor) observeLlamaServing(ctx context.Context, st *engineState, s s
 			}
 			values = append(values, value)
 		}
+	}
+	if reason == "" && transportFailed {
+		return
 	}
 	if reason == "" && len(values) > 0 && validateServingSnapshot(ctx, st, s) != nil {
 		if ctx.Err() != nil {
