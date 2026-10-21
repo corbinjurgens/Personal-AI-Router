@@ -287,14 +287,14 @@ type srProcessFixture struct {
 // NE owns fixed-image dispatch, service-port reservations, private manifests,
 // pre-start facade settings and process cleanup. SR adds two synthetic models.
 func newSRProcessFixture(t *testing.T) *srProcessFixture {
-	return newSRProcessFixtureWithSwitch(t, false)
+	return newSRProcessFixtureWithRetention(t, false, "-1")
 }
 
 func newSRSwitchProcessFixture(t *testing.T) *srProcessFixture {
-	return newSRProcessFixtureWithSwitch(t, true)
+	return newSRProcessFixtureWithRetention(t, true, "-1")
 }
 
-func newSRProcessFixtureWithSwitch(t *testing.T, switchTarget bool) *srProcessFixture {
+func newSRProcessFixtureWithRetention(t *testing.T, switchTarget bool, retention string) *srProcessFixture {
 	t.Helper()
 	if runtime.GOOS != "windows" {
 		t.Skip("SR process evidence requires the Windows fixed-path lane")
@@ -363,7 +363,7 @@ func newSRProcessFixtureWithSwitch(t *testing.T, switchTarget bool) *srProcessFi
 		if model == srNeighbor {
 			context = 1024
 		}
-		source += fmt.Sprintf("\n[%s]\nmodel = %s\nctx-size = %d\nparallel = 1\nkv-unified = false\nsleep-idle-seconds = -1\n", model, filepath.ToSlash(modelPath), context)
+		source += fmt.Sprintf("\n[%s]\nmodel = %s\nctx-size = %d\nparallel = 1\nkv-unified = false\nsleep-idle-seconds = %s\n", model, filepath.ToSlash(modelPath), context, retention)
 	}
 	if err := os.WriteFile(f.source, []byte(source), 0o600); err != nil {
 		t.Fatal(err)
@@ -894,6 +894,14 @@ func TestServedResidentProcessResidency(t *testing.T) {
 			t.Fatal("first request did not finish after release")
 		}
 	})
+}
+
+func TestServedResidentProcessRetention(t *testing.T) {
+	f := newSRProcessFixtureWithRetention(t, false, "60")
+	before := f.control(t, "")
+	f.resident(t, neModel)
+	f.entry(t, neModel, nodepolicy.ModelStateBlocked, nodepolicy.ModelReasonUnsupportedLoad)
+	srAssertNoEffects(t, before, f.control(t, ""))
 }
 
 func TestServedResidentProcessVeto(t *testing.T) {
