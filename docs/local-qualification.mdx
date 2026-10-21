@@ -313,6 +313,12 @@ required to confirm satisfaction after replacement. Resident bookkeeping is
 separate from durable strict-inference quarantine: an HTTP terminal frame or
 elapsed timeout does not prove inference termination.
 
+If a manager stops mid-load without a terminal reply, its nonterminal resident
+hold remains `unknown`/`operation-timeout` until the next policy edit or a proxy
+restart; time passing or manager replacement does not clear it. Engines adopted
+from an earlier manager run stay `unknown` because they lack confirmable
+manager-owned allocation evidence.
+
 Real-host acceptance remains pending: approved launch/binding evidence,
 tokenizer/template measurement, loaded context and slots, retention behavior,
 router capacity, local veto races and restart recovery must be demonstrated on
