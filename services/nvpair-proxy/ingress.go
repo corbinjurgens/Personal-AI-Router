@@ -367,6 +367,10 @@ func setPeerStreamFraming(resp *http.Response, s originStreamRequest) {
 	}
 	if s.protocol != streamProtocolUnknown {
 		resp.Header.Set(peerStreamFramingHeader, s.peerMetadata())
+		// HTTP/1.1 needs chunked framing to carry the disposition trailer,
+		// including for fixed-length nonstreaming engine responses.
+		resp.ContentLength = -1
+		resp.Header.Del("Content-Length")
 		if resp.Trailer == nil {
 			resp.Trailer = make(http.Header)
 		}
