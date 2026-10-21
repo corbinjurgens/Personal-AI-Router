@@ -6,7 +6,10 @@ package tests
 import (
 	"context"
 	"errors"
+	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -311,4 +314,118 @@ func TestServiceInspectionErrorDuringKillRevalidation(t *testing.T) {
 			t.Fatalf("failed signal: error=%v signals=%d", err, p.signals)
 		}
 	})
+}
+
+// A state read that fails after the process was seen present is ambiguous: the
+// process can exit between the presence probe and the read, and macOS reports
+// that as a ps failure rather than absence. Only independent, successful
+// absence may resolve it.
+func TestServiceProcessStoppedResolvesExitingStatusFailure(t *testing.T) {
+	statusErr := errors.New("exit status 1")
+	existenceCalls, statusCalls := 0, 0
+	exists := func(ctx context.Context, pid int32) (bool, error) {
+		if pid != 123 || ctx.Err() != nil {
+			t.Fatalf("unexpected existence probe: pid=%d context=%v", pid, ctx.Err())
+		}
+		existenceCalls++
+		return existenceCalls == 1, nil
+	}
+	status := func(ctx context.Context, pid int32) ([]string, error) {
+		statusCalls++
+		if pid != 123 || ctx.Err() != nil {
+			t.Fatalf("unexpected status probe: pid=%d context=%v", pid, ctx.Err())
+		}
+		return nil, statusErr
+	}
+	stopped, err := serviceProcessStoppedWithProbes(context.Background(), 123, exists, status)
+	if err != nil || !stopped {
+		t.Fatalf("exiting process status failure: stopped=%t error=%v, want proven stop after independent absence", stopped, err)
+	}
+	if statusCalls != 1 || existenceCalls < 2 {
+		t.Fatalf("probes: status=%d existence=%d, want one status read and at least one independent presence recheck", statusCalls, existenceCalls)
+	}
+}
+
+// A copied fixture executable that has exited but is not yet reaped stays
+// enumerable while its executable path is unavailable: proc_pidpath reports 0
+// for a zombie. Proven zombie state is stopped evidence, so the scan omits that
+// identity without failing, while the same rule still reports a live identity.
+func TestServiceScanOmitsZombieWithUnavailableExecutable(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows has no zombie process state")
+	}
+	data, err := os.ReadFile("/bin/cat")
+	if err != nil {
+		t.Fatalf("read copying source: %v", err)
+	}
+	copied := filepath.Join(t.TempDir(), "copied-scanner")
+	if err := os.WriteFile(copied, data, 0o755); err != nil {
+		t.Fatalf("write copied fixture executable: %v", err)
+	}
+	path, err := canonicalServicePath(copied)
+	if err != nil {
+		t.Fatalf("canonical copied fixture path: %v", err)
+	}
+	// The child is expected to exit on its own and stays unreaped, so the
+	// identity remains enumerable with an unavailable executable path.
+	zombie := exec.Command(path)
+	if err := zombie.Start(); err != nil {
+		t.Fatalf("start exiting fixture child: %v", err)
+	}
+	zombiePID := int32(zombie.Process.Pid)
+	defer func() { _ = zombie.Wait() }()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		p, err := process.NewProcessWithContext(context.Background(), zombiePID)
+		if err == nil {
+			states, statusErr := p.StatusWithContext(context.Background())
+			if statusErr == nil && serviceProcessHasZombieStatus(states) {
+				break
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("exiting fixture child pid %d did not reach zombie state", zombiePID)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	// On macOS the regression depends on the zombie's executable being
+	// unavailable; fail rather than pass without exercising that path.
+	p, err := process.NewProcessWithContext(context.Background(), zombiePID)
+	if err != nil {
+		t.Fatalf("open exited fixture child pid %d: %v", zombiePID, err)
+	}
+	if exe, exeErr := p.ExeWithContext(context.Background()); exeErr != nil {
+		t.Logf("exiting fixture child pid %d executable unavailable: %q %v", zombiePID, exe, exeErr)
+	} else if runtime.GOOS == "darwin" {
+		t.Fatalf("zombie pid %d executable resolved to %q, want proc_pidpath failure for an unreaped child", zombiePID, exe)
+	} else {
+		t.Logf("this platform still reports the executable of zombie pid %d as %q", zombiePID, exe)
+	}
+	in := &serviceProcessInventory{
+		paths: []string{path},
+		known: map[int32]serviceProcessIdentity{zombiePID: {PID: zombiePID, Path: path}},
+	}
+	owned, err := in.scanContext(context.Background())
+	if err != nil {
+		t.Fatalf("scan with an owned zombie: %v", err)
+	}
+	if len(owned) != 0 {
+		t.Fatalf("scan owned=%+v, want proven zombie pid %d omitted", owned, zombiePID)
+	}
+	// The same evidence rule must not hide a live identity: the running test
+	// process is still reported for its own executable path.
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatalf("running test executable: %v", err)
+	}
+	selfPath, err := canonicalServicePath(self)
+	if err != nil {
+		t.Fatalf("canonical running test executable: %v", err)
+	}
+	live := &serviceProcessInventory{paths: []string{selfPath}, known: make(map[int32]serviceProcessIdentity)}
+	if owned, err := live.scanContext(context.Background()); err != nil {
+		t.Fatalf("scan for the running test identity: %v", err)
+	} else if len(owned) != 1 || owned[0].PID != int32(os.Getpid()) {
+		t.Fatalf("live scan owned=%+v, want only the running test process pid %d", owned, os.Getpid())
+	}
 }

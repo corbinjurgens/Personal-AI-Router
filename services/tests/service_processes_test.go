@@ -58,10 +58,6 @@ func serviceExecutablePath(path string) (string, error) {
 	return filepath.Clean(path), nil
 }
 
-func serviceInspectionError(ctx context.Context, pid int32, stage string, inspectionErr error) error {
-	return serviceInspectionErrorWithProbe(ctx, pid, stage, inspectionErr, process.PidExistsWithContext)
-}
-
 func serviceInspectionErrorWithProbe(ctx context.Context, pid int32, stage string, inspectionErr error, probe func(context.Context, int32) (bool, error)) error {
 	// An exiting process can remain enumerable briefly after inspection fails.
 	// Only an independent, successful absence check resolves that ambiguity.
@@ -106,6 +102,17 @@ func serviceProcessHasZombieStatus(status []string) bool {
 	return false
 }
 
+// serviceStoppedPresence adapts stopped-state evidence to the presence shape
+// serviceInspectionErrorWithProbe resolves. A proven stop counts as absent: a
+// disappeared process or an enumerable zombie can no longer run fixture code,
+// so neither an inspection failure nor the recorded identity survives it.
+func serviceStoppedPresence(stopped func(context.Context, int32) (bool, error)) func(context.Context, int32) (bool, error) {
+	return func(ctx context.Context, pid int32) (bool, error) {
+		isStopped, err := stopped(ctx, pid)
+		return !isStopped, err
+	}
+}
+
 // A recorded identity can be omitted only after independent absence or a zombie
 // status is established. Windows has no zombie state and no supported Status.
 func serviceProcessStopped(ctx context.Context, pid int32) (bool, error) {
@@ -141,7 +148,13 @@ func serviceProcessStoppedWithProbes(ctx context.Context, pid int32, exists func
 	}
 	states, err := status(ctx, pid)
 	if err != nil {
-		return false, fmt.Errorf("status: %w", errors.Join(err, ctx.Err()))
+		// ps reads the state by PID, so it fails when the process exits between
+		// the presence probe and this read. Resolve that ambiguity only against
+		// independently proven absence; presence cannot erase the failure.
+		if unresolved := serviceInspectionErrorWithProbe(ctx, pid, "status", err, exists); unresolved != nil {
+			return false, unresolved
+		}
+		return true, nil
 	}
 	if err := ctx.Err(); err != nil {
 		return false, err
@@ -182,14 +195,14 @@ func (in *serviceProcessInventory) scanContext(ctx context.Context) ([]servicePr
 		path, err := p.ExeWithContext(ctx)
 		if err != nil {
 			if known && !errors.Is(err, process.ErrorProcessNotRunning) {
-				failures = append(failures, serviceInspectionError(ctx, pid, "executable", err))
+				failures = append(failures, serviceInspectionErrorWithProbe(ctx, pid, "executable", err, serviceStoppedPresence(serviceProcessStopped)))
 			}
 			continue
 		}
 		path, err = serviceExecutablePath(path)
 		if err != nil {
 			if known {
-				failures = append(failures, serviceInspectionError(ctx, pid, "executable path", err))
+				failures = append(failures, serviceInspectionErrorWithProbe(ctx, pid, "executable path", err, serviceStoppedPresence(serviceProcessStopped)))
 			}
 			continue
 		}
@@ -198,7 +211,7 @@ func (in *serviceProcessInventory) scanContext(ctx context.Context) ([]servicePr
 		}
 		created, err := p.CreateTimeWithContext(ctx)
 		if err != nil {
-			failures = append(failures, serviceInspectionError(ctx, pid, "creation time", err))
+			failures = append(failures, serviceInspectionErrorWithProbe(ctx, pid, "creation time", err, serviceStoppedPresence(serviceProcessStopped)))
 			continue
 		}
 		identity := serviceProcessIdentity{PID: pid, Path: path, Created: created}
@@ -208,7 +221,7 @@ func (in *serviceProcessInventory) scanContext(ctx context.Context) ([]servicePr
 		if runtime.GOOS != "windows" {
 			status, err := p.StatusWithContext(ctx)
 			if err != nil {
-				failures = append(failures, serviceInspectionError(ctx, pid, "status", err))
+				failures = append(failures, serviceInspectionErrorWithProbe(ctx, pid, "status", err, serviceStoppedPresence(serviceProcessStopped)))
 				continue
 			}
 			zombie = serviceProcessHasZombieStatus(status)
@@ -289,10 +302,7 @@ func (in *serviceProcessInventory) killContextWithProbes(ctx context.Context, wa
 		return err
 	}
 	inspectionFailed := func(stage string, inspectionErr error) error {
-		return serviceInspectionErrorWithProbe(ctx, want.PID, "revalidate "+stage, inspectionErr, func(ctx context.Context, pid int32) (bool, error) {
-			isStopped, err := stopped(ctx, pid)
-			return !isStopped, err
-		})
+		return serviceInspectionErrorWithProbe(ctx, want.PID, "revalidate "+stage, inspectionErr, serviceStoppedPresence(stopped))
 	}
 	p, err := open(ctx, want.PID)
 	if err != nil {

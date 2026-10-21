@@ -278,10 +278,17 @@ func TestServiceRestartReconnect(t *testing.T) {
 		}
 	}
 	deadline := time.Now().Add(serviceCallTimeout)
-	for len(f.scan()) != 0 {
-		if time.Now().After(deadline) {
-			t.Fatal("old owned policy writers did not stop before private persisted mutation")
+	for {
+		owned, err := f.inventory.scan()
+		if err == nil && len(owned) == 0 {
+			break
 		}
+		if time.Now().After(deadline) {
+			t.Fatalf("old owned policy writers did not stop before private persisted mutation: owned=%+v error=%v", owned, err)
+		}
+		// An inspection failure is ambiguous evidence, not a verdict: an exiting
+		// process stays enumerable while it stops and cannot be re-inspected.
+		// Only a scan proving no owned process survives may continue the test.
 		time.Sleep(25 * time.Millisecond)
 	}
 	changed := initial

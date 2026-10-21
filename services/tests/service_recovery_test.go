@@ -117,7 +117,7 @@ func TestServiceRecoveryPreservesPartialScanIdentity(t *testing.T) {
 
 func TestServiceRecoveryRetainsProbeErrors(t *testing.T) {
 	probeErr := errors.New("inspection unavailable")
-	test := func(name string, present bool, existenceErr error, states []string, statusErr error, wantStatusCalls int) {
+	test := func(name string, present bool, existenceErr error, states []string, statusErr error, wantStatusCalls int, wantIndependentExistence bool) {
 		t.Run(name, func(t *testing.T) {
 			in, identity := serviceRecoveryInventory(t)
 			existenceCalls, statusCalls := 0, 0
@@ -136,14 +136,22 @@ func TestServiceRecoveryRetainsProbeErrors(t *testing.T) {
 			if !errors.Is(err, probeErr) || !reflect.DeepEqual(owned, []serviceProcessIdentity{identity}) {
 				t.Fatalf("ambiguous recovery: identities=%+v error=%v, want exact recorded identity %+v and retained probe error", owned, err, identity)
 			}
-			if existenceCalls != 1 || statusCalls != wantStatusCalls {
+			if wantIndependentExistence {
+				// A failed status read is ambiguous until existence is rechecked.
+				if existenceCalls < 2 {
+					t.Fatalf("probe calls: existence=%d status=%d, want an independent existence recheck after the status failure", existenceCalls, statusCalls)
+				}
+			} else if existenceCalls != 1 {
 				t.Fatalf("probe calls: existence=%d status=%d, want existence=1 status=%d", existenceCalls, statusCalls, wantStatusCalls)
+			}
+			if statusCalls != wantStatusCalls {
+				t.Fatalf("status calls=%d, want %d", statusCalls, wantStatusCalls)
 			}
 		})
 	}
-	test("existence failure preserves apparent presence", true, probeErr, nil, nil, 0)
-	test("existence failure preserves apparent absence", false, probeErr, nil, nil, 0)
-	test("status failure preserves apparent zombie", true, nil, []string{process.Zombie}, probeErr, 1)
+	test("existence failure preserves apparent presence", true, probeErr, nil, nil, 0, false)
+	test("existence failure preserves apparent absence", false, probeErr, nil, nil, 0, false)
+	test("status failure preserves apparent zombie", true, nil, []string{process.Zombie}, probeErr, 1, true)
 }
 
 func TestServiceRecoveryPreservesAmbiguousStoppedIdentity(t *testing.T) {
