@@ -46,11 +46,13 @@ func newReadinessEnvelopeFixture(t *testing.T, engine string) readinessEnvelopeF
 	t.Helper()
 	digest, launch := strings.Repeat("b", 64), strings.Repeat("c", 64)
 	ref := nodepolicy.QualificationRef{ID: "ne-readiness", Revision: "1"}
+	tools, replay := true, false
 	q := &localQualification{
 		ID: ref.ID, Revision: ref.Revision, Engine: engine, Model: "m",
 		ModelDigests: []string{digest}, LaunchDigests: []string{launch},
 		Tokenizer: "synthetic-byte-tokenizer", ChatTemplate: "synthetic-template",
 		ContextTokens: 4096, MaxOutputTokens: 1024, Routes: []string{routeChatCompletions},
+		Shapes:     &qualificationShapes{Tools: &tools, StructuredOutput: []string{}, ReasoningReplay: &replay},
 		Accounting: qualificationAccounting{Method: accountingUTF8Bytes, RequestOverheadTokens: 8, MessageOverheadTokens: 4},
 		Evidence:   "synthetic readiness fixture; qualifies no real model",
 	}
