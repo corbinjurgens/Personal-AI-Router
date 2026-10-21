@@ -144,6 +144,13 @@ func runSROllamaRuntime() error {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/__sr/control" && r.Header.Get("X-NE-Fixture-Nonce") == config.Nonce:
 			result = state
+		case r.Method == http.MethodGet && r.URL.Path == "/":
+			// The broker probes Ollama's root independently of manifest readiness.
+			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+			if _, err := io.WriteString(w, "Ollama is running"); err != nil {
+				state.Base.Unexpected++
+			}
+			return
 		case r.Method == http.MethodGet && r.URL.Path == "/api/tags":
 			result = map[string]any{"models": []any{map[string]string{"name": srOllamaModel, "digest": hex.EncodeToString(digest[:])}}}
 		case r.Method == http.MethodGet && r.URL.Path == "/api/ps":
@@ -1647,8 +1654,8 @@ func TestServedResidentProcessCrossEngineLastSlot(t *testing.T) {
 	f.call(t, "ollama-proxy:node/add-manual", map[string]any{"id": "sr-ollama-self", "host": "127.0.0.1", "port": f.switchFacadePort, "addresses": []string{"127.0.0.1"}, "models": []string{srOllamaModel}}, nil)
 	f.call(t, "ollama-proxy:node/select", map[string]string{"id": "sr-ollama-self"}, nil)
 	neEventually(t, "healthy Ollama facade", neCallBudget, func() bool {
-		status, _, err := f.http(http.MethodGet, f.switchFacadePort, "/health", nil, nil)
-		return err == nil && status == http.StatusOK
+		status, data, err := f.http(http.MethodGet, f.switchFacadePort, "/", nil, nil)
+		return err == nil && status == http.StatusOK && string(data) == "Ollama is running"
 	})
 	f.resident(t, neModel)
 	f.entry(t, neModel, nodepolicy.ModelStateSatisfied, "")
