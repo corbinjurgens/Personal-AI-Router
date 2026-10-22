@@ -327,6 +327,8 @@ load-on-startup = false
 threads = 8
 threads-batch = 8
 flash-attn = on
+kv-offload = false
+op-offload = false
 
 [medium]
 model = medium.gguf
@@ -371,7 +373,7 @@ func TestLlamaServingAcceptsOwnerRouterPreset(t *testing.T) {
 	if weak.TotalContextTokens != 131072 || weak.Slots != 1 || weak.Retention != "600" {
 		t.Fatalf("weak envelope differs from its preset: %+v", weak)
 	}
-	for _, want := range []string{"batch-size=2048", "ubatch-size=512", "cache-type-k=q8_0", "cache-type-v=q8_0", "flash-attn=on", "gpu-layers=8"} {
+	for _, want := range []string{"batch-size=2048", "ubatch-size=512", "cache-type-k=q8_0", "cache-type-v=q8_0", "flash-attn=on", "gpu-layers=8", "kv-offload=false", "op-offload=false"} {
 		if !slices.Contains(weak.Placement, want) {
 			t.Fatalf("weak placement lacks %s: %v", want, weak.Placement)
 		}
@@ -423,8 +425,8 @@ func TestLlamaServingOwnerRouterPresetReachesChild(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := map[string]map[string]string{
-		"medium": {"ctx-size": "32768", "parallel": "1", "sleep-idle-seconds": "600", "threads": "8", "threads-batch": "8", "flash-attn": "on", "batch-size": "2048", "cache-type-k": "q8_0"},
-		"weak":   {"ctx-size": "131072", "parallel": "1", "sleep-idle-seconds": "600", "threads": "8", "gpu-layers": "8", "ubatch-size": "512", "cache-type-v": "q8_0"},
+		"medium": {"ctx-size": "32768", "parallel": "1", "sleep-idle-seconds": "600", "threads": "8", "threads-batch": "8", "flash-attn": "on", "batch-size": "2048", "cache-type-k": "q8_0", "kv-offload": "false", "op-offload": "false"},
+		"weak":   {"ctx-size": "131072", "parallel": "1", "sleep-idle-seconds": "600", "threads": "8", "gpu-layers": "8", "ubatch-size": "512", "cache-type-v": "q8_0", "kv-offload": "false", "op-offload": "false"},
 	}
 	for model, options := range want {
 		for key, value := range options {
@@ -642,6 +644,8 @@ func TestLlamaServingOptionTableRejectsConflictsWithoutEffects(t *testing.T) {
 		"gpu-layers": {"1", "2"}, "split-mode": {"layer", "none"},
 		"tensor-split": {"1,1", "2,1"}, "main-gpu": {"0", "1"}, "device": {"none", "CPU"},
 		"sleep-idle-seconds": {"60", "120"}, "cache-ram": {"512", "1024"}, "fit": {"off", "false"},
+		"batch-size": {"512", "1024"}, "ubatch-size": {"128", "256"},
+		"cache-type-k": {"f16", "q8_0"}, "cache-type-v": {"f16", "q8_0"}, "flash-attn": {"on", "off"},
 	}
 	for _, option := range llamaServingOptions {
 		t.Run(option.key, func(t *testing.T) {
@@ -745,7 +749,6 @@ func TestLlamaServingOptionTableRejectsConflictsWithoutEffects(t *testing.T) {
 // delete its own coverage. Values are native spellings from pinned arg.cpp.
 func TestLlamaServingRejectsPinnedAllocationControls(t *testing.T) {
 	tests := []struct{ name, text string }{
-		{"logical batch", "-b 512"}, {"physical batch", "-ub 128"},
 		{"main sampling CLI", "--backend-sampling"}, {"main sampling short", "-bs"},
 		{"main sampling environment", "LLAMA_ARG_BACKEND_SAMPLING=1"},
 		{"main sampling empty environment", "LLAMA_ARG_BACKEND_SAMPLING="},
@@ -757,12 +760,9 @@ func TestLlamaServingRejectsPinnedAllocationControls(t *testing.T) {
 		{"scaled control vector artifact", "--control-vector-scaled synthetic.gguf:1"},
 		{"control vector placement", "--control-vector-layer-range 1 2"},
 		{"default speculative allocation", "--spec-default"},
-		{"underscore batch", "--batch_size 4096"}, {"underscore cache type", "--cache_type_k q8_0"},
-		{"mixed cache type", "--cache_type-k q8_0"},
 		{"canonical underscore duplicate", "--ctx-size 32768 --ctx_size 32768"},
 		{"negative KV alias duplicate", "--no-kv-unified --no_kv_unified"},
-		{"key cache type", "-ctk q8_0"}, {"value cache type", "-ctv q8_0"},
-		{"full SWA", "--swa-full"}, {"flash attention", "-fa on"},
+		{"full SWA", "--swa-full"},
 		{"context shift", "--no-context-shift"}, {"rope scaling", "--rope-scaling yarn"},
 		{"rope scale", "--rope-scale 2"}, {"rope base", "--rope-freq-base 10000"},
 		{"rope frequency", "--rope-freq-scale 0.5"}, {"yarn context", "--yarn-orig-ctx 4096"},
@@ -771,7 +771,6 @@ func TestLlamaServingRejectsPinnedAllocationControls(t *testing.T) {
 		{"metadata context override", "--override-kv llama.context_length=int:32768"},
 		{"tensor placement", "-ot blk.*=CPU"}, {"CPU MoE", "-cmoe"},
 		{"partial CPU MoE", "-ncmoe 2"}, {"CPU FFN", "-ncffn 2"},
-		{"KV placement", "-nkvo"}, {"operation placement", "--no-op-offload"},
 		{"weight repacking", "-nr"}, {"host buffer", "--no-host"},
 		{"loading placement", "-lm mmap"}, {"lazy placement", "-lzm off"},
 		{"NUMA placement", "--numa isolate"}, {"RPC placement", "--rpc 127.0.0.1:1"},
