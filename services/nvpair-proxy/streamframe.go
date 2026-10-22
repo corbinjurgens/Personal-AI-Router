@@ -62,8 +62,9 @@ type frameBudget struct {
 	used   int64
 	scope  *bufferScope
 	leases [32]struct {
-		bytes int64
-		lease *bufferLease
+		bytes   int64
+		lease   *bufferLease
+		pending bool
 	}
 }
 
@@ -80,6 +81,9 @@ func ownedFrameBudget(ctx context.Context) *frameBudget {
 	owner := inferenceBuffers(ctx)
 	if owner == nil {
 		return nil
+	}
+	if preparation, ok := ctx.Value(performancePreparationKey{}).(performancePreparation); ok && preparation.frames != nil {
+		return preparation.frames
 	}
 	bootstrap := owner.borrowParserAllowance()
 	if bootstrap == nil {
@@ -101,11 +105,21 @@ func ownedFrameBudget(ctx context.Context) *frameBudget {
 // reserve records n bytes against the budget. It reports false when the
 // reservation would exceed the limit, and then records nothing.
 func (b *frameBudget) reserve(n int64) bool {
+	return b.reserveStorage(n, true)
+}
+
+func (b *frameBudget) reserveStorage(n int64, claim bool) bool {
 	if n <= 0 {
 		return true
 	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	for i := range b.leases {
+		if claim && b.leases[i].pending && b.leases[i].bytes == n {
+			b.leases[i].pending = false
+			return true
+		}
+	}
 	if n > b.limit-b.used {
 		return false
 	}
@@ -124,6 +138,7 @@ func (b *frameBudget) reserve(n int64) bool {
 		return false
 	}
 	b.leases[slot].bytes, b.leases[slot].lease = n, lease
+	b.leases[slot].pending = !claim
 	b.used += n
 	return true
 }
@@ -135,7 +150,7 @@ func (b *frameBudget) release(n int64) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	for i, record := range b.leases {
-		if record.lease != nil && record.bytes == n {
+		if record.lease != nil && !record.pending && record.bytes == n {
 			b.leases[i].lease = nil
 			b.leases[i].bytes = 0
 			b.used -= n
@@ -144,6 +159,27 @@ func (b *frameBudget) release(n int64) {
 		}
 	}
 	panic("stream frame release without matching storage")
+}
+
+// Preparation transfers individual grants to the response reader. Unclaimed
+// grants are released by the dispatch owner; claimed grants by the reader.
+// They use the same frame category and lease table as later frame growth.
+func (b *frameBudget) prepare(n int64) bool {
+	return b.reserveStorage(n, false)
+}
+
+func (b *frameBudget) releasePreparation() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for i, record := range b.leases {
+		if record.pending {
+			b.used -= record.bytes
+			record.lease.close()
+			b.leases[i].lease = nil
+			b.leases[i].bytes = 0
+			b.leases[i].pending = false
+		}
+	}
 }
 
 // inUse is the live reservation, which tests use to prove a closed reader gave
@@ -290,6 +326,8 @@ type streamFrameReader struct {
 	choiceBytes   int64
 	scratchBytes  int64
 	metadataBytes int64
+	parserBytes   int64
+	payload       []byte
 	bootstrap     *bufferLease
 
 	mu              sync.Mutex
@@ -403,7 +441,22 @@ func newStreamFrameReader(config streamFrameConfig) (*streamFrameReader, error) 
 			reader.finishedChoices = make([]bool, choices)
 		}
 	}
-	if reader.scratchBytes == 0 {
+	// Admit reusable working storage before reading upstream. Reusing these
+	// allocations needs no new grant after a live capacity decrease; larger
+	// frames still require their full replacement capacity while copying.
+	parserBytes := int64(streamFrameSyntaxBytes)
+	if config.Extract != nil || (config.Parent != nil && config.Parent.Value(performancePreparationKey{}) != nil) {
+		parserBytes = streamFrameNumericBytes
+	}
+	ready := reader.scratchBytes != 0 && budget.reserve(parserBytes)
+	if ready {
+		reader.parserBytes = parserBytes
+		ready = reader.growLocked(streamFrameReadChunk)
+	}
+	if ready && config.Protocol == streamProtocolSSE {
+		ready = reader.growPayloadLocked(streamFrameReadChunk)
+	}
+	if !ready {
 		reader.finishInterruptedLocked(streamInterruptReasonBudget)
 	}
 	if reader.finished {
@@ -882,14 +935,13 @@ func (r *streamFrameReader) assessSSEFrameLocked(frame []byte) frameVerdict {
 		return frameContinue
 	}
 	if dataLines > 1 {
-		// Joining multiline SSE data is the only payload copy. Reserve its
-		// full allocation while the raw event is still live.
+		// The joined payload has its own reusable allocation: raw bytes and
+		// parser scratch remain charged while it is constructed and validated.
 		size := dataBytes + dataLines - 1
-		if !r.budget.reserve(int64(size)) {
+		if !r.growPayloadLocked(size) {
 			return frameBudgetExhausted
 		}
-		defer r.budget.release(int64(size))
-		payload = make([]byte, 0, size)
+		payload = r.payload[:0]
 		dataLines = 0
 		forEachSSELine(frame, func(line []byte) {
 			field, value := splitSSEField(line)
@@ -905,14 +957,6 @@ func (r *streamFrameReader) assessSSEFrameLocked(frame []byte) frameVerdict {
 	if bytes.Equal(bytes.TrimSpace(payload), []byte("[DONE]")) {
 		return frameCompleted
 	}
-	scratch := int64(streamFrameSyntaxBytes)
-	if r.extract != nil {
-		scratch = streamFrameNumericBytes
-	}
-	if !r.budget.reserve(scratch) {
-		return frameBudgetExhausted
-	}
-	defer r.budget.release(scratch)
 	if !validStreamObject(payload) {
 		return frameMalformed
 	}
@@ -1045,14 +1089,6 @@ func (r *streamFrameReader) assessNDJSONFrameLocked(frame []byte) frameVerdict {
 	if len(bytes.TrimSpace(line)) == 0 {
 		return frameMalformed
 	}
-	scratch := int64(streamFrameSyntaxBytes)
-	if r.extract != nil {
-		scratch = streamFrameNumericBytes
-	}
-	if !r.budget.reserve(scratch) {
-		return frameBudgetExhausted
-	}
-	defer r.budget.release(scratch)
 	if !validStreamObject(line) {
 		return frameMalformed
 	}
@@ -1142,7 +1178,11 @@ func (r *streamFrameReader) finishLocked(outcome streamOutcome, reason string, t
 func (r *streamFrameReader) releaseReadStorageLocked() {
 	r.budget.release(r.choiceBytes)
 	r.budget.release(r.scratchBytes)
+	r.budget.release(r.parserBytes)
+	r.budget.release(int64(cap(r.payload)))
 	r.choiceBytes, r.scratchBytes = 0, 0
+	r.parserBytes = 0
+	r.payload = nil
 	r.finishedChoices = nil
 	r.scratch = nil
 }
@@ -1189,8 +1229,22 @@ func (r *streamFrameReader) growLocked(need int) bool {
 	return true
 }
 
+func (r *streamFrameReader) growPayloadLocked(need int) bool {
+	if need <= cap(r.payload) {
+		return true
+	}
+	if !r.budget.reserve(int64(need)) {
+		return false
+	}
+	next := make([]byte, 0, need)
+	r.budget.release(int64(cap(r.payload)))
+	r.payload = next
+	return true
+}
+
 // recycleLocked compacts the incomplete tail after the complete frames have
-// been delivered, and returns the buffer when nothing is held.
+// been delivered. Empty live streams retain their admitted capacity for the
+// next frame; no response prefix is retained in the logical buffer.
 func (r *streamFrameReader) recycleLocked() {
 	if r.deliverOff < r.readyEnd {
 		return
@@ -1204,7 +1258,12 @@ func (r *streamFrameReader) recycleLocked() {
 		r.readyEnd, r.deliverOff = 0, 0
 		return
 	}
-	r.releaseBufferLocked()
+	if r.finished {
+		r.releaseBufferLocked()
+	} else {
+		r.buf = r.buf[:0]
+		r.readyEnd, r.deliverOff = 0, 0
+	}
 }
 
 func (r *streamFrameReader) releaseBufferLocked() {

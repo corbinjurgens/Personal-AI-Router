@@ -623,8 +623,18 @@ each operation; it bounds a stuck client, not time spent waiting for generation.
 Frames are held in volatile memory only: at most 1 MiB per raw frame and
 64 MiB of live frame-buffer allocations process-wide across facades, reserved
 before allocation/growth. Exhaustion terminates explicitly rather than waiting
-for memory. No whole-response prefix is retained. The future I aggregate owner
-must absorb this backing accounting; it is not yet present. Real slow-model
+for memory. The category is subordinate to the inference aggregate budget.
+Before dispatch, the request reserves separate response working grants for
+metadata, choice tracking, read scratch, numeric validation, initial raw frame
+storage and multiline SSE assembly. These grants do not share the request
+parser or performance fingerprint charge. The response reader claims them even
+if aggregate capacity decreases before the first output. Live readers retain
+their working allocations between frames, so an admitted stream can drain
+through its original terminal frame while usage exceeds a reduced aggregate
+cap. New admissions and larger replacement allocations still require capacity;
+growth charges both arrays during copying. Unclaimed preparation grants and
+reader-owned grants are released by their respective owners. No whole-response
+prefix is retained. Real slow-model
 acceptance of the idle default remains pending.
 
 On premature EOF, read failure, idle expiry, malformed framing or a memory bound,

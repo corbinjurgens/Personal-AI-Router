@@ -396,7 +396,10 @@ func TestPerformancePreparationAllowanceTransfer(t *testing.T) {
 	if err != nil || n != wantStorage {
 		t.Fatalf("preparation capacity=%d err=%v, want %d", n, err, wantStorage)
 	}
-	root, err := newBufferBudget(96<<10+wantStorage, 0)
+	const parserBytes int64 = 96 << 10
+	const responseBytes int64 = streamFrameMetadataBytes + 1 + 3*streamFrameReadChunk + streamFrameNumericBytes
+	const totalBytes int64 = parserBytes + streamFrameNumericBytes + wantStorage + responseBytes
+	root, err := newBufferBudget(totalBytes, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -404,7 +407,14 @@ func TestPerformancePreparationAllowanceTransfer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ctx := context.WithValue(context.Background(), ownedInferenceContextKey{}, &ownedInferenceBuffers{scope: scope})
+	owner := &ownedInferenceBuffers{scope: scope}
+	parser, err := scope.acquire(context.Background(), parserBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner.retainParser(parser)
+	defer owner.close()
+	ctx := context.WithValue(context.Background(), ownedInferenceContextKey{}, owner)
 	ctx, release, err := preparePerformanceBuffers(ctx, body)
 	if err != nil {
 		t.Fatal(err)
@@ -414,10 +424,11 @@ func TestPerformancePreparationAllowanceTransfer(t *testing.T) {
 	if err != nil || a == nil {
 		t.Fatalf("transferred full-root allowance was recharged: attempt=%v err=%v", a != nil, err)
 	}
-	if root.used != 96<<10+wantStorage {
+	if root.used != totalBytes {
 		t.Fatalf("live charge=%d", root.used)
 	}
 	release()
+	owner.close()
 	if root.used != 0 || root.live != 0 {
 		t.Fatalf("released preparation retained bytes=%d leases=%d", root.used, root.live)
 	}
@@ -1373,7 +1384,7 @@ func TestPerformanceCommittedPeekOutcome(t *testing.T) {
 		}
 		t.Run(name, func(t *testing.T) {
 			p := performanceProxy(t, "llamacpp")
-			p.buffers = bufferTestBudget(t, 256<<10, 0)
+			p.buffers = bufferTestBudget(t, (256<<10)+bufferFixtureResponseBytes, 0)
 			writer := &recordingWriter{}
 			p.codec = NewCodec(writer)
 			entered, send := make(chan struct{}), make(chan struct{})

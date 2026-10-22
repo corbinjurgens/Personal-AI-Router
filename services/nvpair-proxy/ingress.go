@@ -333,7 +333,7 @@ func (f *facade) serveIngress(w http.ResponseWriter, r *http.Request, peer strin
 			}
 			resp.Body = &routingResponseBody{ReadCloser: resp.Body, attempt: attempt}
 		}
-		reader, err := installResponseStream(resp, streamRequest, r.Context(), 0, performance)
+		reader, err := installResponseStream(resp, streamRequest, rebasePerformancePreparation(r.Context(), preparedCtx), 0, performance)
 		if err != nil {
 			if !errors.Is(err, errStreamFrameBudget) {
 				return err
@@ -556,7 +556,7 @@ func (f *facade) serveStrictLocal(w http.ResponseWriter, r *http.Request, body [
 		resp.Body = b
 		stopRequestDeadline()
 		stop()
-		reader, err := installResponseStream(resp, streamRequest, r.Context(), 0, performance)
+		reader, err := installResponseStream(resp, streamRequest, rebasePerformancePreparation(r.Context(), preparedCtx), 0, performance)
 		if err != nil {
 			sink := responseSinkFrom(r.Context())
 			if !errors.Is(err, errStreamFrameBudget) || sink == nil {

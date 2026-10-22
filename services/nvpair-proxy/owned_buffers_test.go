@@ -969,12 +969,29 @@ func TestOwnedInferenceBuffersStrictIdentifierStorage(t *testing.T) {
 	}
 }
 
+// Each fixture requests one choice. Keep response grants distinct from the
+// fingerprint scanner/storage and the request's retained parser allowance.
+const bufferFixtureResponseBytes int64 = streamFrameMetadataBytes + 1 + 3*streamFrameReadChunk + streamFrameNumericBytes
+
+func bufferFixtureRemotePreparationBytes(t *testing.T, body string) int64 {
+	t.Helper()
+	storage, err := performancePreparationBytes([]byte(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return streamFrameNumericBytes + storage + bufferFixtureResponseBytes
+}
+
 func TestOwnedInferenceBuffersHandlerPreparationCancellation(t *testing.T) {
 	run := func(name string, later, disconnect bool) {
 		t.Run(name, func(t *testing.T) {
 			pol := ollamaTierPolicy(map[string][]nodepolicy.TierEntry{"weak": {{Kind: nodepolicy.EntryLocal, Engine: "ollama", Model: "small:1b"}}})
 			fx := newTierFixture(t, ollamaCase(t), pol, map[string][]string{"a": {"small:1b"}, "b": {"small:1b"}}, nil)
-			fx.p.buffers = bufferTestBudget(t, 256<<10, time.Hour)
+			capacity := int64(256 << 10)
+			if later {
+				capacity += bufferFixtureRemotePreparationBytes(t, `{"model":"small:1b"}`)
+			}
+			fx.p.buffers = bufferTestBudget(t, capacity, time.Hour)
 			type heldResult struct {
 				lease *bufferLease
 				err   error
@@ -986,6 +1003,11 @@ func TestOwnedInferenceBuffersHandlerPreparationCancellation(t *testing.T) {
 				first := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 					once.Do(func() {
 						lease, err := fx.p.buffers.acquire(r.Context(), 128<<10)
+						// Remove startup-only headroom after the first dispatch. Its
+						// prepaid grants drain; the retry's transform must still wait.
+						if err == nil {
+							err = fx.p.buffers.reconfigure(256<<10, time.Hour)
+						}
 						held <- heldResult{lease, err}
 					})
 					w.WriteHeader(http.StatusServiceUnavailable)

@@ -277,7 +277,10 @@ func TestUnifiedDispatchPostcommitAllocationRefusal(t *testing.T) {
 		<-resume
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.WriteHeader(http.StatusAccepted)
-		if _, err := io.WriteString(w, continuitySSEEvent+"data: [DONE]\n\n"); err != nil {
+		// The initial raw array is prepaid. Make the first frame require a
+		// replacement grant after commitment, before any frame can be delivered.
+		event := strings.Replace(continuitySSEEvent, "intact", strings.Repeat("x", streamFrameReadChunk), 1)
+		if _, err := io.WriteString(w, event+"data: [DONE]\n\n"); err != nil {
 			t.Error(err)
 		}
 	}))
@@ -289,7 +292,7 @@ func TestUnifiedDispatchPostcommitAllocationRefusal(t *testing.T) {
 	writer := &recordingWriter{}
 	p := newTestProxy(ollamaOnlyProfile(t), NewCodec(writer), discovery, 0)
 	p.SetPriority([]string{"a", "b"})
-	p.buffers = bufferTestBudget(t, 256<<10, 0)
+	p.buffers = bufferTestBudget(t, (256<<10)+bufferFixtureRemotePreparationBytes(t, `{"model":"m","stream":true}`), 0)
 	recorder, done := httptest.NewRecorder(), make(chan struct{})
 	go func() {
 		defer close(done)
@@ -526,7 +529,11 @@ func TestUnifiedDispatchCandidatePreparationDeadline(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			pol := ollamaTierPolicy(map[string][]nodepolicy.TierEntry{"weak": {{Kind: nodepolicy.EntryLocal, Engine: "ollama", Model: "small:1b"}}})
 			fx := newTierFixture(t, ollamaCase(t), pol, map[string][]string{"a": {"small:1b"}, "b": {"small:1b"}}, nil)
-			fx.p.buffers = bufferTestBudget(t, 256<<10, time.Hour)
+			capacity := int64(256 << 10)
+			if later {
+				capacity += bufferFixtureRemotePreparationBytes(t, `{"model":"small:1b"}`)
+			}
+			fx.p.buffers = bufferTestBudget(t, capacity, time.Hour)
 			held := make(chan *bufferLease, 1)
 			var firstCalls atomic.Int32
 			if later {
@@ -539,6 +546,13 @@ func TestUnifiedDispatchCandidatePreparationDeadline(t *testing.T) {
 					}
 					lease, err := fx.p.buffers.acquire(r.Context(), 128<<10)
 					if err != nil {
+						t.Error(err)
+						return
+					}
+					// Restore the original pressure before the next candidate's
+					// transform, without denying the first candidate preparation.
+					if err := fx.p.buffers.reconfigure(256<<10, time.Hour); err != nil {
+						lease.close()
 						t.Error(err)
 						return
 					}
@@ -1267,7 +1281,7 @@ func TestUnifiedDispatchPostcommitModifyResponseRefusal(t *testing.T) {
 			discovery.AddManual(nodeForModel(t, "b", fallback.URL, "m"))
 			p := newTestProxy(ollamaOnlyProfile(t), NewCodec(&recordingWriter{}), discovery, 0)
 			p.SetPriority([]string{"a", "b"})
-			p.buffers = bufferTestBudget(t, 256<<10, 0)
+			p.buffers = bufferTestBudget(t, (256<<10)+bufferFixtureRemotePreparationBytes(t, `{"model":"m","stream":true}`), 0)
 			transport := p.plainHTTPTransport()
 			dial := transport.DialContext
 			transport.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
@@ -1313,7 +1327,14 @@ func TestUnifiedDispatchPostcommitModifyResponseRefusal(t *testing.T) {
 				p.soleFacade().handleHTTP(rec, httptest.NewRequest(http.MethodPost, routeChatCompletions, strings.NewReader(`{"model":"m","stream":true}`)))
 			}()
 			if cancelBeforeSink {
-				owner := <-observed
+				var owner *routingSpend
+				select {
+				case owner = <-observed:
+				case <-done:
+					t.Fatal("handler returned before the parser refusal barrier")
+				case <-time.After(3 * time.Second):
+					t.Fatal("timed out waiting for the parser refusal barrier")
+				}
 				locked := true
 				defer func() {
 					if locked {
@@ -1398,7 +1419,7 @@ func TestUnifiedDispatchCommittedPeekTimer(t *testing.T) {
 			writer := &recordingWriter{}
 			p := newTestProxy(ollamaOnlyProfile(t), NewCodec(writer), discovery, 0)
 			p.SetPriority([]string{"a", "b"})
-			p.buffers = bufferTestBudget(t, 256<<10, 0)
+			p.buffers = bufferTestBudget(t, 256<<10+bufferFixtureRemotePreparationBytes(t, `{"model":"m","stream":true}`), 0)
 			rec, done := httptest.NewRecorder(), make(chan struct{})
 			go func() {
 				defer close(done)

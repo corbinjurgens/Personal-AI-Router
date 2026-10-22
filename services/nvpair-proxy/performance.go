@@ -219,7 +219,10 @@ type performanceJSONNode struct {
 }
 
 type performancePreparationKey struct{}
-type performancePreparation struct{ bytes int64 }
+type performancePreparation struct {
+	bytes  int64
+	frames *frameBudget
+}
 
 // Transfer only the admitted allowance; temporary preparation cancellation
 // must not become cancellation of the accepted transport or its reader.
@@ -269,8 +272,25 @@ func preparePerformanceBuffers(ctx context.Context, body []byte) (context.Contex
 		fixed.close()
 		return ctx, nil, err
 	}
-	release := sync.OnceFunc(func() { storage.close(); fixed.close() })
-	return context.WithValue(ctx, performancePreparationKey{}, performancePreparation{n}), release, nil
+	// Response working storage is distinct from the request parser and the
+	// fingerprint allowance: both can remain live while the response arrives.
+	frames := ownedFrameBudget(ctx)
+	if frames == nil {
+		storage.close()
+		fixed.close()
+		return ctx, nil, errStreamFrameBudget
+	}
+	request, _ := parseOriginStreamRequest("/v1/chat/completions", body)
+	for _, size := range []int64{streamFrameMetadataBytes, int64(request.choices), streamFrameReadChunk, streamFrameNumericBytes, streamFrameReadChunk, streamFrameReadChunk} {
+		if !frames.prepare(size) {
+			frames.releasePreparation()
+			storage.close()
+			fixed.close()
+			return ctx, nil, &bufferBusyError{}
+		}
+	}
+	release := sync.OnceFunc(func() { frames.releasePreparation(); storage.close(); fixed.close() })
+	return context.WithValue(ctx, performancePreparationKey{}, performancePreparation{bytes: n, frames: frames}), release, nil
 }
 
 func performanceJSONMeasure(body []byte) (tokens, decoded int) {

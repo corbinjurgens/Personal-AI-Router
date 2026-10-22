@@ -532,12 +532,10 @@ func (ctl *routingSpend) dispatch(f *facade, w http.ResponseWriter, r *http.Requ
 			return errAmbiguousModel
 		}
 		preparedCtx = ctx
-		if c.self {
-			preparedCtx, releasePreparation, err = preparePerformanceBuffers(ctx, sendBody)
-			if err != nil {
-				releasePreparation = func() {}
-				return err
-			}
+		preparedCtx, releasePreparation, err = preparePerformanceBuffers(ctx, sendBody)
+		if err != nil {
+			releasePreparation = func() {}
+			return err
 		}
 		preparedCandidate, preparedDefaults, preparedGeneration, preparedValid = c, defaults, generation, true
 		return nil
@@ -1427,7 +1425,7 @@ func (ctl *routingSpend) dispatch(f *facade, w http.ResponseWriter, r *http.Requ
 				}
 				var reader *streamFrameReader
 				if err == nil {
-					reader, err = installResponseStream(resp, streamRequest, r.Context(), streamIdle, performance)
+					reader, err = installResponseStream(resp, streamRequest, rebasePerformancePreparation(r.Context(), preparedCtx), streamIdle, performance)
 				} else {
 					err = nil
 				}
