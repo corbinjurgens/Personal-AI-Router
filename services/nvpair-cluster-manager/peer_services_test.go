@@ -13,11 +13,56 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"testing"
 	"time"
 
 	"nvpair-shared/noderec"
 )
+
+func TestDescriptorAddresses(t *testing.T) {
+	test := func(name string, scanner, overlay, want []string) {
+		t.Run(name, func(t *testing.T) {
+			originalScanner, originalOverlay := slices.Clone(scanner), slices.Clone(overlay)
+			got := descriptorAddresses(scanner, overlay)
+			if !slices.Equal(got, want) {
+				t.Fatalf("descriptor addresses = %v, want %v", got, want)
+			}
+			if again := descriptorAddresses(scanner, overlay); !slices.Equal(again, got) {
+				t.Fatalf("repeated assembly = %v, want stable order %v", again, got)
+			}
+			if !slices.Equal(scanner, originalScanner) || !slices.Equal(overlay, originalOverlay) {
+				t.Fatalf("assembly mutated inputs: scanner=%v overlay=%v", scanner, overlay)
+			}
+			descriptor := noderec.PeerServicesDescriptor{
+				HostUUID: "descriptor-test", Name: "descriptor", Addresses: got,
+				Services: []noderec.PeerService{},
+			}
+			err := noderec.ValidatePeerServicesDescriptor(descriptor, descriptor.HostUUID)
+			if len(want) == 0 {
+				if err == nil {
+					t.Fatal("overlay fabricated a valid descriptor without scanner addresses")
+				}
+			} else if err != nil {
+				t.Fatalf("assembled descriptor rejected: %v", err)
+			}
+			if len(got) > 0 {
+				got[0] = "changed output"
+				if !slices.Equal(scanner, originalScanner) || !slices.Equal(overlay, originalOverlay) {
+					t.Fatal("assembled output aliases an input")
+				}
+			}
+		})
+	}
+	test("LAN plus overlay", []string{"192.168.42.8"}, []string{"100.91.248.18"}, []string{"192.168.42.8", "100.91.248.18"})
+	test("duplicate overlap", []string{"192.168.42.8", "100.91.248.18", "192.168.42.8"}, []string{"100.91.248.18", "100.91.248.18"}, []string{"192.168.42.8", "100.91.248.18"})
+	test("full cap reserves overlay", []string{"192.168.42.8", "192.168.42.9", "192.168.42.10", "192.168.42.11"}, []string{"100.91.248.18"}, []string{"192.168.42.8", "192.168.42.9", "192.168.42.10", "100.91.248.18"})
+	test("full cap keeps only first missing overlay", []string{"192.168.42.8", "192.168.42.9", "192.168.42.10", "192.168.42.11"}, []string{"100.91.248.19", "100.91.248.18"}, []string{"192.168.42.8", "192.168.42.9", "192.168.42.10", "100.91.248.18"})
+	test("multiple overlays limited room", []string{"192.168.42.8", "192.168.42.9"}, []string{"100.91.248.20", "100.91.248.18", "100.91.248.19"}, []string{"192.168.42.8", "192.168.42.9", "100.91.248.18", "100.91.248.19"})
+	test("no overlay", []string{"192.168.42.8", "192.168.42.9", "192.168.42.8"}, nil, []string{"192.168.42.8", "192.168.42.9"})
+	test("empty scanner", nil, []string{"100.91.248.18"}, nil)
+	test("empty inputs", nil, nil, nil)
+}
 
 func setDescriptorSelf(t *testing.T, m *Manager) {
 	t.Helper()
@@ -76,6 +121,14 @@ func TestPeerServicesRequiresSelfIdentityAndInitializedRegistry(t *testing.T) {
 	m.setSelfServicesIdentity([]noderec.DirectoryNode{{HostUUID: m.identity.NodeUUID, Name: "self", IP: "127.0.0.1"}})
 	if _, err := m.selfServicesDescriptor(); err == nil {
 		t.Fatal("loopback self descriptor accepted")
+	}
+	m.setSelfServicesIdentity([]noderec.DirectoryNode{{HostUUID: m.identity.NodeUUID, Name: "self"}})
+	if _, err := m.selfServicesDescriptor(); err == nil {
+		t.Fatal("missing scanner addresses accepted")
+	}
+	m.setSelfServicesIdentity([]noderec.DirectoryNode{{HostUUID: m.identity.NodeUUID, Name: "self", IPs: []string{"192.168.42.8", "192.168.42.9", "192.168.42.10", "127.0.0.1"}}})
+	if _, err := m.selfServicesDescriptor(); err == nil {
+		t.Fatal("invalid scanner address hidden by overlay reservation")
 	}
 }
 
