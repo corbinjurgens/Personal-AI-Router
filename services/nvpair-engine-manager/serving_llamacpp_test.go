@@ -313,6 +313,226 @@ func TestLlamaServingChildArgvHasNoImplicitEnvelopeOverrides(t *testing.T) {
 	}
 }
 
+// writeOwnerRouterPreset replaces the fixture source with a preset shaped
+// like the owner's approved MSI router preset: a top-level version key,
+// global threads and Flash Attention, and per-model context, slots, batch
+// sizes, K/V cache types, GPU offload and idle sleep.
+func writeOwnerRouterPreset(t *testing.T, f llamaServingFixture) {
+	t.Helper()
+	writeServingFixture(t, f.source, []byte(`version = 1
+
+[*]
+fit = off
+load-on-startup = false
+threads = 8
+threads-batch = 8
+flash-attn = on
+kv-offload = false
+op-offload = false
+
+[medium]
+model = medium.gguf
+ctx-size = 32768
+parallel = 1
+batch-size = 2048
+ubatch-size = 512
+cache-type-k = q8_0
+cache-type-v = q8_0
+gpu-layers = 0
+sleep-idle-seconds = 600
+
+[weak]
+model = weak.gguf
+ctx-size = 131072
+parallel = 1
+batch-size = 2048
+ubatch-size = 512
+cache-type-k = q8_0
+cache-type-v = q8_0
+gpu-layers = 8
+sleep-idle-seconds = 600
+`))
+}
+
+// Problem 1 (MSI install, 2026-10-23): the typed serving preview rejected the
+// owner's native preset because its knobs were outside the adapter subset.
+func TestLlamaServingAcceptsOwnerRouterPreset(t *testing.T) {
+	f := newLlamaServingFixture(t)
+	writeOwnerRouterPreset(t, f)
+	preview := previewSettings(t, f.ex, f.request)
+	if len(preview.Errors) != 0 || preview.Conflict != nil {
+		t.Fatalf("owner router preset rejected by typed preview: %v", preview.Errors)
+	}
+	if preview.Serving == nil || len(preview.Serving.Configured) != 2 {
+		t.Fatal("preview did not derive one envelope per declared model")
+	}
+	medium, weak := preview.Serving.Configured[0], preview.Serving.Configured[1]
+	if medium.TotalContextTokens != 32768 || medium.Slots != 1 || medium.Retention != "600" {
+		t.Fatalf("medium envelope differs from its preset: %+v", medium)
+	}
+	if weak.TotalContextTokens != 131072 || weak.Slots != 1 || weak.Retention != "600" {
+		t.Fatalf("weak envelope differs from its preset: %+v", weak)
+	}
+	for _, want := range []string{"batch-size=2048", "ubatch-size=512", "cache-type-k=q8_0", "cache-type-v=q8_0", "flash-attn=on", "gpu-layers=8", "kv-offload=false", "op-offload=false"} {
+		if !slices.Contains(weak.Placement, want) {
+			t.Fatalf("weak placement lacks %s: %v", want, weak.Placement)
+		}
+	}
+	assertNoSettingsOverride(t, f.ex)
+	assertNoLlamaSpawn(t, f)
+}
+
+// Problem 2 (MSI install, 2026-10-23): both models ran at context 8192 because
+// a router CLI --ctx-size overrode every per-model preset value. On the
+// canonical typed path the child argv must carry no bundled router default and
+// the snapshot must carry the per-model values.
+func TestLlamaServingOwnerRouterPresetReachesChild(t *testing.T) {
+	f := newLlamaServingFixture(t)
+	writeOwnerRouterPreset(t, f)
+	preview := approveLlamaServing(t, f)
+	applyLlamaServing(t, f, preview)
+	if err := f.ex.Start(context.Background(), "fake"); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(f.startLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var args []string
+	if err := json.Unmarshal(bytes.TrimSpace(data), &args); err != nil {
+		t.Fatal(err)
+	}
+	for _, forbidden := range []string{"--ctx-size", "--parallel", "--sleep-idle-seconds", "--cache-ram"} {
+		if slices.Contains(args, forbidden) {
+			t.Fatalf("router argv carries bundled default %s, which overrides every per-model preset value", forbidden)
+		}
+	}
+	index := slices.Index(args, "--models-preset")
+	if index < 0 || index+1 >= len(args) || args[index+1] == f.source {
+		t.Fatal("router argv did not select an immutable snapshot")
+	}
+	content, err := os.ReadFile(args[index+1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, line := range strings.Split(string(content), "\n") {
+		if strings.HasPrefix(line, "version") {
+			t.Fatal("snapshot materialized the reserved version key")
+		}
+	}
+	sections, err := parseLlamaServingPreset(content)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]map[string]string{
+		"medium": {"ctx-size": "32768", "parallel": "1", "sleep-idle-seconds": "600", "threads": "8", "threads-batch": "8", "flash-attn": "on", "batch-size": "2048", "cache-type-k": "q8_0", "kv-offload": "false", "op-offload": "false"},
+		"weak":   {"ctx-size": "131072", "parallel": "1", "sleep-idle-seconds": "600", "threads": "8", "gpu-layers": "8", "ubatch-size": "512", "cache-type-v": "q8_0", "kv-offload": "false", "op-offload": "false"},
+	}
+	for model, options := range want {
+		for key, value := range options {
+			if sections[model][key] != value {
+				t.Fatalf("snapshot %s lost %s = %s (got %q)", model, key, value, sections[model][key])
+			}
+		}
+	}
+}
+
+// The pinned preset parser reverses negative aliases using is_truthy, which
+// recognizes enabled as well as on/true/1. Positive values stay native-owned.
+func TestLlamaServingOffloadPresetPolarity(t *testing.T) {
+	test := func(name, key, value, want string) {
+		t.Run(name, func(t *testing.T) {
+			f := newLlamaServingFixture(t)
+			writeOwnerRouterPreset(t, f)
+			data, err := os.ReadFile(f.source)
+			if err != nil {
+				t.Fatal(err)
+			}
+			text := strings.Replace(string(data), key+" = false", "no-"+key+" = "+value, 1)
+			writeServingFixture(t, f.source, []byte(text))
+			preview := approveLlamaServing(t, f)
+			for _, envelope := range preview.Serving.Configured {
+				if !slices.Contains(envelope.Placement, key+"="+want) {
+					t.Fatalf("negative preset alias changed native polarity: placement=%v, want %s=%s", envelope.Placement, key, want)
+				}
+			}
+			assertLlamaOffloadChild(t, f, preview, key, want, "")
+		})
+	}
+	test("KV true disables", "kv-offload", "true", "false")
+	test("KV false enables", "kv-offload", "false", "true")
+	test("KV enabled disables", "kv-offload", "enabled", "false")
+	test("KV other native value enables", "kv-offload", "native-value", "true")
+	test("operation true disables", "op-offload", "true", "false")
+	test("operation false enables", "op-offload", "false", "true")
+	test("operation enabled disables", "op-offload", "enabled", "false")
+	test("operation disabled enables", "op-offload", "disabled", "true")
+}
+
+func TestLlamaServingOffloadCLIPolarity(t *testing.T) {
+	test := func(name, flag, key, want string) {
+		t.Run(name, func(t *testing.T) {
+			f := newLlamaServingFixture(t)
+			writeOwnerRouterPreset(t, f)
+			f.request.Settings.LaunchText += " " + flag
+			preview := approveLlamaServing(t, f)
+			for _, envelope := range preview.Serving.Configured {
+				if !slices.Contains(envelope.Placement, key+"="+want) {
+					t.Fatalf("CLI alias changed native polarity: placement=%v, want %s=%s", envelope.Placement, key, want)
+				}
+			}
+			assertLlamaOffloadChild(t, f, preview, key, want, flag)
+		})
+	}
+	test("short KV disable", "-nkvo", "kv-offload", "false")
+	test("long KV disable", "--no-kv-offload", "kv-offload", "false")
+	test("long operation disable", "--no-op-offload", "op-offload", "false")
+	test("short KV enable", "-kvo", "kv-offload", "true")
+	test("long operation enable", "--op-offload", "op-offload", "true")
+}
+
+func assertLlamaOffloadChild(t *testing.T, f llamaServingFixture, preview settings.Preview, key, want, flag string) {
+	t.Helper()
+	applyLlamaServing(t, f, preview)
+	if err := f.ex.Start(context.Background(), "fake"); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(f.startLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var args []string
+	if err := json.Unmarshal(bytes.TrimSpace(data), &args); err != nil {
+		t.Fatal(err)
+	}
+	if flag != "" && !slices.Contains(args, flag) {
+		t.Fatalf("child lost explicit CLI token %q: %v", flag, args)
+	}
+	index := slices.Index(args, "--models-preset")
+	if index < 0 || index+1 >= len(args) || args[index+1] == f.source {
+		t.Fatal("child did not select an immutable snapshot")
+	}
+	data, err = os.ReadFile(args[index+1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Inspect literal generated INI fields independently of the adapter parser.
+	values := map[string]string{}
+	section := ""
+	for _, line := range strings.Split(string(data), "\n") {
+		if strings.HasPrefix(line, "[") {
+			section = strings.TrimSuffix(strings.TrimPrefix(line, "["), "]")
+		} else if name, value, ok := strings.Cut(line, " = "); ok && name == key {
+			values[section] = value
+		}
+	}
+	for _, model := range []string{"medium", "weak"} {
+		if values[model] != want {
+			t.Fatalf("snapshot %s %s=%q, want %q", model, key, values[model], want)
+		}
+	}
+}
+
 func TestLlamaServingExplicitNativePrecedence(t *testing.T) {
 	test := func(name, text string, wantMedium, wantWeak int64) {
 		t.Run(name, func(t *testing.T) {
@@ -520,6 +740,8 @@ func TestLlamaServingOptionTableRejectsConflictsWithoutEffects(t *testing.T) {
 		"gpu-layers": {"1", "2"}, "split-mode": {"layer", "none"},
 		"tensor-split": {"1,1", "2,1"}, "main-gpu": {"0", "1"}, "device": {"none", "CPU"},
 		"sleep-idle-seconds": {"60", "120"}, "cache-ram": {"512", "1024"}, "fit": {"off", "false"},
+		"batch-size": {"512", "1024"}, "ubatch-size": {"128", "256"},
+		"cache-type-k": {"f16", "q8_0"}, "cache-type-v": {"f16", "q8_0"}, "flash-attn": {"on", "off"},
 	}
 	for _, option := range llamaServingOptions {
 		t.Run(option.key, func(t *testing.T) {
@@ -623,7 +845,6 @@ func TestLlamaServingOptionTableRejectsConflictsWithoutEffects(t *testing.T) {
 // delete its own coverage. Values are native spellings from pinned arg.cpp.
 func TestLlamaServingRejectsPinnedAllocationControls(t *testing.T) {
 	tests := []struct{ name, text string }{
-		{"logical batch", "-b 512"}, {"physical batch", "-ub 128"},
 		{"main sampling CLI", "--backend-sampling"}, {"main sampling short", "-bs"},
 		{"main sampling environment", "LLAMA_ARG_BACKEND_SAMPLING=1"},
 		{"main sampling empty environment", "LLAMA_ARG_BACKEND_SAMPLING="},
@@ -635,12 +856,9 @@ func TestLlamaServingRejectsPinnedAllocationControls(t *testing.T) {
 		{"scaled control vector artifact", "--control-vector-scaled synthetic.gguf:1"},
 		{"control vector placement", "--control-vector-layer-range 1 2"},
 		{"default speculative allocation", "--spec-default"},
-		{"underscore batch", "--batch_size 4096"}, {"underscore cache type", "--cache_type_k q8_0"},
-		{"mixed cache type", "--cache_type-k q8_0"},
 		{"canonical underscore duplicate", "--ctx-size 32768 --ctx_size 32768"},
 		{"negative KV alias duplicate", "--no-kv-unified --no_kv_unified"},
-		{"key cache type", "-ctk q8_0"}, {"value cache type", "-ctv q8_0"},
-		{"full SWA", "--swa-full"}, {"flash attention", "-fa on"},
+		{"full SWA", "--swa-full"},
 		{"context shift", "--no-context-shift"}, {"rope scaling", "--rope-scaling yarn"},
 		{"rope scale", "--rope-scale 2"}, {"rope base", "--rope-freq-base 10000"},
 		{"rope frequency", "--rope-freq-scale 0.5"}, {"yarn context", "--yarn-orig-ctx 4096"},
@@ -649,7 +867,6 @@ func TestLlamaServingRejectsPinnedAllocationControls(t *testing.T) {
 		{"metadata context override", "--override-kv llama.context_length=int:32768"},
 		{"tensor placement", "-ot blk.*=CPU"}, {"CPU MoE", "-cmoe"},
 		{"partial CPU MoE", "-ncmoe 2"}, {"CPU FFN", "-ncffn 2"},
-		{"KV placement", "-nkvo"}, {"operation placement", "--no-op-offload"},
 		{"weight repacking", "-nr"}, {"host buffer", "--no-host"},
 		{"loading placement", "-lm mmap"}, {"lazy placement", "-lzm off"},
 		{"NUMA placement", "--numa isolate"}, {"RPC placement", "--rpc 127.0.0.1:1"},

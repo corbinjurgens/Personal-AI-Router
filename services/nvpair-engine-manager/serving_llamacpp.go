@@ -58,12 +58,13 @@ type llamaServingSnapshot struct {
 }
 
 type llamaServingOption struct {
-	key         string
-	flags       []string
-	env         string
-	negEnv      string
-	bool        bool
-	unsupported bool
+	key           string
+	flags         []string
+	negativeFlags []string
+	env           string
+	negEnv        string
+	bool          bool
+	unsupported   bool
 }
 
 // Envelope boundary derived from llama.cpp 7fe450e1 common/arg.cpp. Every
@@ -71,13 +72,15 @@ type llamaServingOption struct {
 // the parser's LLAMA_ARG_NO_ compatibility names for paired boolean switches.
 // Other native options pass through unchanged. Unsupported controls also fail
 // in presets; local model/draft paths and disabled startup loading are exceptions.
+// Batch sizes, K/V cache types, Flash Attention and KV/operation offload are
+// accepted and surfaced as placement; memory bounds stay operator declarations.
 var llamaServingOptions = []llamaServingOption{
 	{key: "models-preset", flags: []string{"--models-preset"}, env: "LLAMA_ARG_MODELS_PRESET"},
 	{key: "models-max", flags: []string{"--models-max"}, env: "LLAMA_ARG_MODELS_MAX"},
 	{key: "ctx-size", flags: []string{"--ctx-size", "-c"}, env: "LLAMA_ARG_CTX_SIZE"},
 	{key: "parallel", flags: []string{"--parallel", "-np"}, env: "LLAMA_ARG_N_PARALLEL"},
 	{key: "kv-unified-per-slot", flags: []string{"--kv-unified-per-slot"}, env: "LLAMA_ARG_KV_UNIFIED_PER_SLOT"},
-	{key: "kv-unified", flags: []string{"--kv-unified", "-kvu", "--no-kv-unified", "-no-kvu"}, env: "LLAMA_ARG_KV_UNIFIED", negEnv: "LLAMA_ARG_NO_KV_UNIFIED", bool: true},
+	{key: "kv-unified", flags: []string{"--kv-unified", "-kvu", "--no-kv-unified", "-no-kvu"}, negativeFlags: []string{"--no-kv-unified", "-no-kvu"}, env: "LLAMA_ARG_KV_UNIFIED", negEnv: "LLAMA_ARG_NO_KV_UNIFIED", bool: true},
 	{key: "n-predict", flags: []string{"--predict", "--n-predict", "-n"}, env: "LLAMA_ARG_N_PREDICT"},
 	{key: "gpu-layers", flags: []string{"--gpu-layers", "--n-gpu-layers", "-ngl"}, env: "LLAMA_ARG_N_GPU_LAYERS"},
 	{key: "split-mode", flags: []string{"--split-mode", "-sm"}, env: "LLAMA_ARG_SPLIT_MODE"},
@@ -88,15 +91,15 @@ var llamaServingOptions = []llamaServingOption{
 	{key: "sleep-idle-seconds", flags: []string{"--sleep-idle-seconds"}, env: "LLAMA_ARG_SLEEP_IDLE_SECONDS"},
 	{key: "cache-ram", flags: []string{"--cache-ram", "-cram"}, env: "LLAMA_ARG_CACHE_RAM"},
 	{key: "fit", flags: []string{"--fit", "-fit"}, env: "LLAMA_ARG_FIT"},
-	{key: "cache-prompt", flags: []string{"--cache-prompt", "--no-cache-prompt"}, env: "LLAMA_ARG_CACHE_PROMPT", negEnv: "LLAMA_ARG_NO_CACHE_PROMPT", bool: true},
-	{key: "cache-idle-slots", flags: []string{"--cache-idle-slots", "--no-cache-idle-slots"}, env: "LLAMA_ARG_CACHE_IDLE_SLOTS", negEnv: "LLAMA_ARG_NO_CACHE_IDLE_SLOTS", bool: true},
-	{key: "batch-size", flags: []string{"-b", "--batch-size"}, env: "LLAMA_ARG_BATCH", unsupported: true},
-	{key: "ubatch-size", flags: []string{"-ub", "--ubatch-size"}, env: "LLAMA_ARG_UBATCH", unsupported: true},
+	{key: "cache-prompt", flags: []string{"--cache-prompt", "--no-cache-prompt"}, negativeFlags: []string{"--no-cache-prompt"}, env: "LLAMA_ARG_CACHE_PROMPT", negEnv: "LLAMA_ARG_NO_CACHE_PROMPT", bool: true},
+	{key: "cache-idle-slots", flags: []string{"--cache-idle-slots", "--no-cache-idle-slots"}, negativeFlags: []string{"--no-cache-idle-slots"}, env: "LLAMA_ARG_CACHE_IDLE_SLOTS", negEnv: "LLAMA_ARG_NO_CACHE_IDLE_SLOTS", bool: true},
+	{key: "batch-size", flags: []string{"-b", "--batch-size"}, env: "LLAMA_ARG_BATCH"},
+	{key: "ubatch-size", flags: []string{"-ub", "--ubatch-size"}, env: "LLAMA_ARG_UBATCH"},
 	{key: "cont-batching", flags: []string{"-cb", "--cont-batching", "-nocb", "--no-cont-batching"}, env: "LLAMA_ARG_CONT_BATCHING", negEnv: "LLAMA_ARG_NO_CONT_BATCHING", bool: true, unsupported: true},
-	{key: "cache-type-k", flags: []string{"-ctk", "--cache-type-k"}, env: "LLAMA_ARG_CACHE_TYPE_K", unsupported: true},
-	{key: "cache-type-v", flags: []string{"-ctv", "--cache-type-v"}, env: "LLAMA_ARG_CACHE_TYPE_V", unsupported: true},
+	{key: "cache-type-k", flags: []string{"-ctk", "--cache-type-k"}, env: "LLAMA_ARG_CACHE_TYPE_K"},
+	{key: "cache-type-v", flags: []string{"-ctv", "--cache-type-v"}, env: "LLAMA_ARG_CACHE_TYPE_V"},
 	{key: "swa-full", flags: []string{"--swa-full"}, env: "LLAMA_ARG_SWA_FULL", bool: true, unsupported: true},
-	{key: "flash-attn", flags: []string{"-fa", "--flash-attn"}, env: "LLAMA_ARG_FLASH_ATTN", unsupported: true},
+	{key: "flash-attn", flags: []string{"-fa", "--flash-attn"}, env: "LLAMA_ARG_FLASH_ATTN"},
 	{key: "context-shift", flags: []string{"--context-shift", "--no-context-shift"}, env: "LLAMA_ARG_CONTEXT_SHIFT", negEnv: "LLAMA_ARG_NO_CONTEXT_SHIFT", bool: true, unsupported: true},
 	{key: "rope-scaling", flags: []string{"--rope-scaling"}, env: "LLAMA_ARG_ROPE_SCALING_TYPE", unsupported: true},
 	{key: "rope-scale", flags: []string{"--rope-scale"}, env: "LLAMA_ARG_ROPE_SCALE", unsupported: true},
@@ -112,8 +115,8 @@ var llamaServingOptions = []llamaServingOption{
 	{key: "cpu-moe", flags: []string{"-cmoe", "--cpu-moe"}, env: "LLAMA_ARG_CPU_MOE", bool: true, unsupported: true},
 	{key: "n-cpu-moe", flags: []string{"-ncmoe", "--n-cpu-moe"}, env: "LLAMA_ARG_N_CPU_MOE", unsupported: true},
 	{key: "n-cpu-ffn", flags: []string{"-ncffn", "--n-cpu-ffn"}, env: "LLAMA_ARG_N_CPU_FFN", unsupported: true},
-	{key: "kv-offload", flags: []string{"-kvo", "--kv-offload", "-nkvo", "--no-kv-offload"}, env: "LLAMA_ARG_KV_OFFLOAD", negEnv: "LLAMA_ARG_NO_KV_OFFLOAD", bool: true, unsupported: true},
-	{key: "op-offload", flags: []string{"--op-offload", "--no-op-offload"}, bool: true, unsupported: true},
+	{key: "kv-offload", flags: []string{"-kvo", "--kv-offload", "-nkvo", "--no-kv-offload"}, negativeFlags: []string{"-nkvo", "--no-kv-offload"}, env: "LLAMA_ARG_KV_OFFLOAD", negEnv: "LLAMA_ARG_NO_KV_OFFLOAD", bool: true},
+	{key: "op-offload", flags: []string{"--op-offload", "--no-op-offload"}, negativeFlags: []string{"--no-op-offload"}, bool: true},
 	{key: "repack", flags: []string{"--repack", "-nr", "--no-repack"}, env: "LLAMA_ARG_REPACK", negEnv: "LLAMA_ARG_NO_REPACK", bool: true, unsupported: true},
 	{key: "no-host", flags: []string{"--no-host"}, env: "LLAMA_ARG_NO_HOST", bool: true, unsupported: true},
 	{key: "load-mode", flags: []string{"-lm", "--load-mode"}, env: "LLAMA_ARG_LOAD_MODE", unsupported: true},
@@ -222,7 +225,7 @@ func validateLlamaValue(key, value string) error {
 		return nil
 	}
 	switch key {
-	case "ctx-size", "parallel", "kv-unified-per-slot", "n-predict", "models-max", "sleep-idle-seconds", "cache-ram":
+	case "ctx-size", "parallel", "kv-unified-per-slot", "n-predict", "models-max", "sleep-idle-seconds", "cache-ram", "batch-size", "ubatch-size":
 		_, err := llamaPositive(value)
 		return err
 	case "kv-unified", "cache-prompt", "cache-idle-slots":
@@ -252,7 +255,7 @@ func llamaOptionKey(name string) string {
 		}
 	}
 	switch name {
-	case "temp", "top-k", "top-p", "min-p", "seed":
+	case "temp", "top-k", "top-p", "min-p", "seed", "threads", "threads-batch":
 		return name
 	}
 	return ""
@@ -368,7 +371,7 @@ func llamaLaunchOptions(command launchCommand, policy *EditableLaunch) (map[stri
 						return nil, nil, servingError("Native boolean switches do not take values.")
 					}
 					value = "true"
-					if strings.Contains(flag, "no-") {
+					if slices.Contains(option.negativeFlags, flag) {
 						value = "false"
 					}
 				} else if !attached {
@@ -456,6 +459,11 @@ func parseLlamaServingPreset(data []byte) (map[string]map[string]string, error) 
 			continue
 		}
 		name, value, ok := strings.Cut(line, "=")
+		// The pinned native parser skips the reserved version key in every
+		// section and drops an otherwise-empty default section.
+		if ok && strings.TrimSpace(name) == "version" {
+			continue
+		}
 		if !ok || section == "" {
 			return nil, servingError("Preset requires explicit sections and key=value options.")
 		}
@@ -464,9 +472,13 @@ func parseLlamaServingPreset(data []byte) (map[string]map[string]string, error) 
 		if key == "" || key == "models-preset" || key == "models-max" {
 			return nil, servingError("Unknown preset option, include or inheritance is unsupported.")
 		}
+		negative := false
 		for _, option := range llamaServingOptions {
 			if key == option.key && option.unsupported && key != "model" && key != "model-draft" && key != "load-on-startup" {
 				return nil, servingError("Unsupported envelope-affecting preset option.")
+			}
+			if key == option.key {
+				negative = slices.Contains(option.negativeFlags, "--"+name)
 			}
 		}
 		if _, duplicate := sections[section][key]; duplicate {
@@ -478,9 +490,14 @@ func parseLlamaServingPreset(data []byte) (map[string]map[string]string, error) 
 			if err != nil {
 				return nil, err
 			}
-			if strings.HasPrefix(name, "no-") {
+			if negative {
 				value = strconv.FormatBool(value != "true")
 			}
+		}
+		if negative && (key == "kv-offload" || key == "op-offload") {
+			// Pinned preset.cpp reverses args_neg using is_truthy; every other
+			// value becomes true. Positive offload values remain native-owned.
+			value = strconv.FormatBool(value != "on" && value != "enabled" && value != "true" && value != "1")
 		}
 		if key == "load-on-startup" {
 			boolean, err := llamaBool(value)
@@ -675,7 +692,7 @@ func compileLlamaServing(command launchCommand, rt Runtime, requireApproved bool
 			model.Artifacts[ai].Binding = current
 		}
 		placement := []string{"kv-unified=" + unified}
-		for _, key := range []string{"kv-unified-per-slot", "gpu-layers", "split-mode", "tensor-split", "main-gpu", "device", "fit", "cache-ram"} {
+		for _, key := range []string{"kv-unified-per-slot", "gpu-layers", "split-mode", "tensor-split", "main-gpu", "device", "fit", "cache-ram", "batch-size", "ubatch-size", "cache-type-k", "cache-type-v", "flash-attn", "kv-offload", "op-offload"} {
 			if v, ok := options[key]; ok {
 				placement = append(placement, key+"="+v)
 			}

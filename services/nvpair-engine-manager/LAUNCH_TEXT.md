@@ -89,7 +89,11 @@ through unchanged in the actual launch, including `--log-disable` and inherited
 
 The supported subset includes context/parallelism, KV mode/per-slot cap,
 prediction default, GPU layers/device/split settings, idle sleep, prompt cache,
-local model/draft paths and disabled startup loading. Placement stays opaque;
+logical/physical batch sizes, K/V cache types, Flash Attention, KV/operation
+offload, local model/draft paths and disabled startup loading. A reserved
+top-level `version` preset key is skipped, as the pinned native parser does.
+`threads` and `threads-batch` pass through presets unchanged, like the sampling
+keys. Placement stays opaque;
 memory declarations are operator bounds, not inferred allocations. The adapter's
 explicit envelope-option set is `llamaServingOptions` in `serving_llamacpp.go`:
 
@@ -97,11 +101,18 @@ explicit envelope-option set is `llamaServingOptions` in `serving_llamacpp.go`:
   cap, prediction limit, router preset and capacity.
 - GPU layers, split mode, tensor split, main GPU and device (opaque placement).
 - Idle sleep, cache RAM, prompt caching, idle-slot caching and fitting off.
-- Unsupported allocation controls: logical/physical and continuous batch controls, K/V cache types,
-  full SWA cache, Flash Attention, context shift, RoPE/YaRN scaling and metadata
-  overrides. The adapter does not yet interpret their allocation semantics.
-- Unsupported placement controls: tensor overrides, CPU MoE/FFN, KV/operation
-  offload, main-model sampling offload, weight repacking, host buffers, load/lazy modes, NUMA and RPC devices;
+- Logical/physical batch sizes (`--batch-size`/`-b`, `--ubatch-size`/`-ub`),
+  K/V cache types (`--cache-type-k`/`-ctk`, `--cache-type-v`/`-ctv`), Flash
+  Attention (`--flash-attn`/`-fa`), KV offload (`--kv-offload`/`-kvo`,
+  `--no-kv-offload`/`-nkvo`) and operation offload (`--op-offload`,
+  `--no-op-offload`), retained in placement entries. Batch sizes must be
+  explicit positive integers; the other preset values reach the native parser
+  unvalidated.
+- Unsupported allocation controls: continuous batching, full SWA cache,
+  context shift, RoPE/YaRN scaling and metadata overrides. The adapter does not
+  interpret their allocation semantics.
+- Unsupported placement controls: tensor overrides, CPU MoE/FFN,
+  main-model sampling offload, weight repacking, host buffers, load/lazy modes, NUMA and RPC devices;
   draft K/V types, tensor/MoE/device/GPU/sampling placement and draft batch size;
   projector auto-selection/offload/device and image token/batch allocation.
 - Unsupported startup controls: both router autoload switches, warmup switches,
