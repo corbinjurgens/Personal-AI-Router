@@ -6,7 +6,6 @@ package main
 import (
 	"context"
 	stderrors "errors"
-	"fmt"
 	"io"
 	"log/slog"
 	"mime"
@@ -428,6 +427,13 @@ func (s originStreamRequest) withPeerMetadata(values []string) (originStreamRequ
 	return s, nil
 }
 
+type invalidStreamFlagError struct{}
+
+func (*invalidStreamFlagError) Error() string {
+	return "stream must be a single boolean or null member"
+}
+func (*invalidStreamFlagError) HTTPStatus() int { return http.StatusBadRequest }
+
 func parseOriginStreamRequest(path string, body []byte) (originStreamRequest, error) {
 	s := originStreamRequest{choices: 1}
 	switch path {
@@ -445,11 +451,12 @@ func parseOriginStreamRequest(path string, body []byte) (originStreamRequest, er
 	}
 	seen := false
 	var invalid error
+	var impossibleChoices bool
 	visitObject(body, func(key []byte, start, end int) {
 		value := body[start:end]
 		if jsonKeyEqual(key, "stream", false) {
 			if seen || (string(value) != "true" && string(value) != "false" && string(value) != "null") {
-				invalid = fmt.Errorf("stream must be a single boolean or null member")
+				invalid = &invalidStreamFlagError{}
 				return
 			}
 			seen = true
@@ -458,12 +465,24 @@ func parseOriginStreamRequest(path string, body []byte) (originStreamRequest, er
 				s.disabled = !s.declared
 			}
 		}
-		if jsonKeyEqual(key, "n", false) {
+		if s.protocol == streamProtocolSSE && jsonKeyEqual(key, "n", false) {
 			if n, ok := positiveJSONInt(value); ok {
 				s.choices = n
+				impossibleChoices = impossibleChoices || int64(n) > streamFrameMaxChoices
+			} else if len(value) > 0 && value[0] >= '1' && value[0] <= '9' {
+				// An overflowing positive integer is still a requested choice
+				// count, not an absent/unsupported n that defaults to one.
+				integer := true
+				for _, c := range value {
+					integer = integer && c >= '0' && c <= '9'
+				}
+				impossibleChoices = impossibleChoices || integer
 			}
 		}
 	})
+	if impossibleChoices {
+		return s, &bufferLimitError{}
+	}
 	return s, invalid
 }
 
@@ -728,11 +747,16 @@ func (f *facade) handleHTTPWithStreamIdle(w http.ResponseWriter, r *http.Request
 	if isInf {
 		_, err = parseOriginStreamRequest(r.URL.Path, bodyBytes)
 		if err != nil {
-			writeIngressError(w, http.StatusBadRequest, "invalid-stream", "stream must be a single boolean or null member")
+			writeOriginStreamRequestError(w, err)
+			reason := "inference request could not be prepared"
+			var invalid *invalidStreamFlagError
+			if stderrors.As(err, &invalid) {
+				reason = "invalid stream flag"
+			}
 			_ = f.notify("proxy/request", RequestEvent{
 				ID: reqID, Method: r.Method, Path: r.URL.Path,
-				Status: http.StatusBadRequest, Duration: time.Since(start).Milliseconds(),
-				Error: "invalid stream flag",
+				Status: bufferRequestStatus(err), Duration: time.Since(start).Milliseconds(),
+				Error: reason,
 			})
 			return
 		}
@@ -1012,7 +1036,21 @@ func writeInferencePreparationError(w http.ResponseWriter, err error) {
 		writeIngressError(w, http.StatusBadRequest, "ambiguous-model", ambiguousModelMessage)
 		return
 	}
+	var invalid *invalidStreamFlagError
+	if stderrors.As(err, &invalid) {
+		writeIngressError(w, http.StatusBadRequest, "invalid-stream", "invalid effective stream flag")
+		return
+	}
 	writeIngressError(w, bufferRequestStatus(err), "inference-buffer", "inference request could not be prepared")
+}
+
+func writeOriginStreamRequestError(w http.ResponseWriter, err error) {
+	var invalid *invalidStreamFlagError
+	if stderrors.As(err, &invalid) {
+		writeIngressError(w, http.StatusBadRequest, "invalid-stream", invalid.Error())
+		return
+	}
+	writeInferencePreparationError(w, err)
 }
 
 // writeProxyError retains its exact response capacity through the final Write.

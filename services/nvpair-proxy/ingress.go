@@ -199,7 +199,7 @@ func (f *facade) serveIngress(w http.ResponseWriter, r *http.Request, peer strin
 		return
 	}
 	if _, err := parseOriginStreamRequest(r.URL.Path, body); err != nil {
-		writeIngressError(w, http.StatusBadRequest, "invalid-stream", "stream must be a single boolean or null member")
+		writeOriginStreamRequestError(w, err)
 		return
 	}
 	if strict != nil {
@@ -219,6 +219,7 @@ func (f *facade) serveIngress(w http.ResponseWriter, r *http.Request, peer strin
 	// peer having gone anywhere.
 	rawBody := body
 	preparedCtx := ctx
+	var streamRequest originStreamRequest
 	releaseBody, releasePreparation := func() {}, func() {}
 	defer func() { releasePreparation(); releaseBody() }()
 	admissionStarted := time.Now()
@@ -246,7 +247,11 @@ func (f *facade) serveIngress(w http.ResponseWriter, r *http.Request, peer strin
 			if hasProfile && !bodyModelMatches(body, model) {
 				return errAmbiguousModel
 			}
-			preparedCtx, releasePreparation, err = preparePerformanceBuffers(ctx, body)
+			streamRequest, err = parseOriginStreamRequest(r.URL.Path, body)
+			if err != nil {
+				return err
+			}
+			preparedCtx, releasePreparation, err = preparePerformanceBuffers(ctx, body, streamRequest, f.performancePreparationMode(r.URL.Path))
 			if err != nil {
 				releasePreparation = func() {}
 			}
@@ -258,11 +263,7 @@ func (f *facade) serveIngress(w http.ResponseWriter, r *http.Request, peer strin
 	if decision.err != nil {
 		decision.err = inferencePreparationRefusal(decision.err)
 		if ctx.Err() == nil {
-			if errors.Is(decision.err, errAmbiguousModel) {
-				writeIngressError(w, http.StatusBadRequest, "ambiguous-model", ambiguousModelMessage)
-			} else {
-				writeIngressError(w, bufferRequestStatus(decision.err), "inference-buffer", "inference request could not be prepared")
-			}
+			writeInferencePreparationError(w, decision.err)
 		}
 		// The peer gave up while the request waited; nobody is left to answer.
 		return
@@ -282,11 +283,6 @@ func (f *facade) serveIngress(w http.ResponseWriter, r *http.Request, peer strin
 	if !ok {
 		writeIngressError(w, http.StatusServiceUnavailable, "no-local-backend",
 			"no local inference backend is available on this node")
-		return
-	}
-	streamRequest, err := parseOriginStreamRequest(r.URL.Path, body)
-	if err != nil {
-		writeIngressError(w, http.StatusBadRequest, "invalid-stream", "invalid effective stream flag")
 		return
 	}
 	attemptCtx, cancelAttempt := context.WithCancel(ctx)
@@ -333,7 +329,7 @@ func (f *facade) serveIngress(w http.ResponseWriter, r *http.Request, peer strin
 			}
 			resp.Body = &routingResponseBody{ReadCloser: resp.Body, attempt: attempt}
 		}
-		reader, err := installResponseStream(resp, streamRequest, r.Context(), 0, performance)
+		reader, err := installResponseStream(resp, streamRequest, rebasePerformancePreparation(r.Context(), preparedCtx), 0, performance)
 		if err != nil {
 			if !errors.Is(err, errStreamFrameBudget) {
 				return err
@@ -434,7 +430,7 @@ func (f *facade) newLocalReverseProxy(target *url.URL) *httputil.ReverseProxy {
 func (f *facade) serveStrictLocal(w http.ResponseWriter, r *http.Request, body []byte, model string, req nodepolicy.StrictAdmissionRequest, peer bool) {
 	admissionStarted := time.Now()
 	if _, err := parseOriginStreamRequest(r.URL.Path, body); err != nil {
-		writeIngressError(w, http.StatusBadRequest, "invalid-stream", "stream must be a single boolean or null member")
+		writeOriginStreamRequestError(w, err)
 		return
 	}
 	ctx, cancel := context.WithCancel(r.Context())
@@ -464,14 +460,14 @@ func (f *facade) serveStrictLocal(w http.ResponseWriter, r *http.Request, body [
 	body = validated.body
 	streamRequest, err := parseOriginStreamRequest(r.URL.Path, body)
 	if err != nil {
-		writeIngressError(w, http.StatusBadRequest, "invalid-stream", "invalid effective stream flag")
+		writeInferencePreparationError(w, err)
 		return
 	}
 	if !bodyModelMatches(body, model) {
 		writeIngressError(w, http.StatusBadRequest, "ambiguous-model", ambiguousModelMessage)
 		return
 	}
-	preparedCtx, releasePreparation, err := preparePerformanceBuffers(prepareCtx, body)
+	preparedCtx, releasePreparation, err := preparePerformanceBuffers(prepareCtx, body, streamRequest, f.performancePreparationMode(r.URL.Path))
 	if err != nil {
 		writeIngressError(w, bufferRequestStatus(err), "inference-buffer", "inference request could not be prepared")
 		return
@@ -556,7 +552,7 @@ func (f *facade) serveStrictLocal(w http.ResponseWriter, r *http.Request, body [
 		resp.Body = b
 		stopRequestDeadline()
 		stop()
-		reader, err := installResponseStream(resp, streamRequest, r.Context(), 0, performance)
+		reader, err := installResponseStream(resp, streamRequest, rebasePerformancePreparation(r.Context(), preparedCtx), 0, performance)
 		if err != nil {
 			sink := responseSinkFrom(r.Context())
 			if !errors.Is(err, errStreamFrameBudget) || sink == nil {

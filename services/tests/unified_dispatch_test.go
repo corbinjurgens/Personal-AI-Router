@@ -60,9 +60,7 @@ func TestUnifiedDispatchProcess(t *testing.T) {
 		u := i7BuffersUpstream(t)
 		egressProcessAddConcrete(t, f.call, "llamacpp-proxy:", u.port)
 		held := f.hold(t, u, i7BuffersBody(50<<20), 4)
-		// Preserve terminal-frame headroom here. The below-usage case is the
-		// known open product bug "Live inference-buffer decrease below current
-		// usage interrupts in-flight streams", owned by the I lane.
+		// Preserve terminal-frame headroom here.
 		f.set(t, 224, 0)
 		for _, h := range held {
 			select {
@@ -88,6 +86,47 @@ func TestUnifiedDispatchProcess(t *testing.T) {
 			h.slot.release()
 			i7BuffersCompletedStream(t, h.request)
 		}
+	})
+
+	t.Run("live cap decrease below usage drains existing streams before admitting new storage", func(t *testing.T) {
+		f, _, _ := i7BuffersBroker(t, 256, 0)
+		u := i7BuffersUpstream(t)
+		egressProcessAddConcrete(t, f.call, "llamacpp-proxy:", u.port)
+		body := i7BuffersBody(50 << 20)
+		preOutputSlot := u.slot(t, "pre-output-owner")
+		u.mu.Lock()
+		preOutputSlot.preOutput = true
+		u.mu.Unlock()
+		preOutputRequest := i7BuffersStart(t, f.client, f.port, "/v1/chat/completions", "pre-output-owner", body)
+		egressProcessBarrier(t, preOutputSlot.entered, "accepted storage owner held before first output")
+		held := []i7BuffersHold{{preOutputSlot, preOutputRequest}}
+		held = append(held, f.hold(t, u, body, 3)...)
+		// The entered barriers fence admission of roughly 200 MiB of request
+		// storage. set waits for the broker's new policy to become active.
+		f.set(t, 192, 0)
+		probe := u.slot(t, "above-cap")
+		i7BuffersBusy(t, i7BuffersStart(t, f.client, f.port, "/v1/chat/completions", "above-cap", body), probe)
+
+		// The first owner must initialize its stream frame reader and emit its
+		// normal terminal frames while usage still exceeds the new cap.
+		// One drained owner leaves roughly 150 MiB: a
+		// fresh 50 MiB request still cannot fit in 192 MiB.
+		held[0].slot.release()
+		i7BuffersCompletedStream(t, held[0].request)
+		probe = u.slot(t, "insufficient-drain")
+		i7BuffersBusy(t, i7BuffersStart(t, f.client, f.port, "/v1/chat/completions", "insufficient-drain", body), probe)
+
+		held[1].slot.release()
+		i7BuffersCompletedStream(t, held[1].request)
+		recovered := u.slot(t, "enough-drained")
+		request := i7BuffersStart(t, f.client, f.port, "/v1/chat/completions", "enough-drained", body)
+		egressProcessBarrier(t, recovered.entered, "new storage after enough old owners drain")
+		for _, h := range held[2:] {
+			h.slot.release()
+			i7BuffersCompletedStream(t, h.request)
+		}
+		recovered.release()
+		i7BuffersCompletedStream(t, request)
 	})
 
 	t.Run("client cancelled under storage pressure cannot dispatch after release", func(t *testing.T) {

@@ -219,7 +219,36 @@ type performanceJSONNode struct {
 }
 
 type performancePreparationKey struct{}
-type performancePreparation struct{ bytes int64 }
+type performancePreparationMode int
+
+const (
+	performancePrepareLocalNumeric performancePreparationMode = iota + 1
+	performancePrepareLocalSyntax
+	performancePreparePeer
+)
+
+// Qualification is static: missing live identity may suppress a sample, but
+// must not change the parser storage admitted for this engine-facing API.
+func (f *facade) performancePreparationMode(api string) performancePreparationMode {
+	switch f.performanceFamily() {
+	case "ollama":
+		switch api {
+		case "/api/chat", "/api/generate", "/v1/chat/completions", "/v1/completions":
+			return performancePrepareLocalNumeric
+		}
+	case "llamacpp", "strata":
+		if api == "/v1/chat/completions" {
+			return performancePrepareLocalNumeric
+		}
+	}
+	return performancePrepareLocalSyntax
+}
+
+type performancePreparation struct {
+	bytes  int64
+	frames *frameBudget
+	mode   performancePreparationMode
+}
 
 // Transfer only the admitted allowance; temporary preparation cancellation
 // must not become cancellation of the accepted transport or its reader.
@@ -250,27 +279,73 @@ func performancePreparationBytes(body []byte) (int64, error) {
 	return 136*int64(tokens) + int64(strings) + 24*int64(members) + 4*8192, nil
 }
 
-func preparePerformanceBuffers(ctx context.Context, body []byte) (context.Context, func(), error) {
+func preparePerformanceBuffers(ctx context.Context, body []byte, request originStreamRequest, mode performancePreparationMode) (context.Context, func(), error) {
+	if int64(request.choices) > streamFrameMaxChoices {
+		return ctx, nil, &bufferLimitError{}
+	}
 	owner := inferenceBuffers(ctx)
 	if owner == nil {
 		return ctx, func() {}, nil
 	}
-	fixed, err := owner.scope.acquire(ctx, streamFrameNumericBytes)
-	if err != nil {
-		return ctx, nil, err
+	var fixed, storage *bufferLease
+	var frames *frameBudget
+	var n int64
+	release := sync.OnceFunc(func() {
+		if frames != nil {
+			frames.releasePreparation()
+		}
+		if storage != nil {
+			storage.close()
+		}
+		if fixed != nil {
+			fixed.close()
+		}
+	})
+	if mode != performancePreparePeer {
+		var err error
+		fixed, err = owner.scope.acquire(ctx, streamFrameNumericBytes)
+		if err != nil {
+			return ctx, nil, err
+		}
+		n, err = performancePreparationBytes(body)
+		if err == nil {
+			storage, err = owner.scope.acquire(ctx, n)
+		}
+		if err != nil {
+			release()
+			return ctx, nil, err
+		}
 	}
-	n, err := performancePreparationBytes(body)
-	if err != nil {
-		fixed.close()
-		return ctx, nil, err
+	// OpenAI's omitted/null stream flag defaults to nonstreaming. An unusual
+	// SSE response is still detected later, but must acquire fresh frame grants.
+	if request.disabled || !request.declared || (request.protocol != streamProtocolSSE && request.protocol != streamProtocolNDJSON) {
+		return context.WithValue(ctx, performancePreparationKey{}, performancePreparation{bytes: n, mode: mode}), release, nil
 	}
-	storage, err := owner.scope.acquire(ctx, n)
-	if err != nil {
-		fixed.close()
-		return ctx, nil, err
+	// Response working storage is distinct from the request parser and the
+	// fingerprint allowance: both can remain live while the response arrives.
+	frames = ownedFrameBudget(ctx)
+	if frames == nil {
+		release()
+		return ctx, nil, errStreamFrameBudget
 	}
-	release := sync.OnceFunc(func() { storage.close(); fixed.close() })
-	return context.WithValue(ctx, performancePreparationKey{}, performancePreparation{n}), release, nil
+	parserBytes := int64(streamFrameSyntaxBytes)
+	if mode == performancePrepareLocalNumeric {
+		parserBytes = streamFrameNumericBytes
+	}
+	choices := max(request.choices, 1)
+	for _, size := range []int64{streamFrameMetadataBytes, int64(choices), streamFrameReadChunk, parserBytes, streamFrameReadChunk} {
+		if err := frames.prepare(ctx, size); err != nil {
+			release()
+			return ctx, nil, err
+		}
+	}
+	if request.protocol == streamProtocolSSE {
+		if err := frames.prepare(ctx, streamFrameReadChunk); err != nil {
+			release()
+			return ctx, nil, err
+		}
+	}
+	return context.WithValue(ctx, performancePreparationKey{}, performancePreparation{bytes: n, frames: frames, mode: mode}), release, nil
 }
 
 func performanceJSONMeasure(body []byte) (tokens, decoded int) {
@@ -694,8 +769,11 @@ func (f *facade) newPerformanceAttemptOwned(parent context.Context, model, api s
 				return nil, &bufferLimitError{}
 			}
 		} else {
-			var err error
-			parent, release, err = preparePerformanceBuffers(parent, body)
+			request, err := parseOriginStreamRequest(api, body)
+			if err != nil {
+				return nil, err
+			}
+			parent, release, err = preparePerformanceBuffers(parent, body, request, f.performancePreparationMode(api))
 			if err != nil {
 				return nil, err
 			}
@@ -770,7 +848,7 @@ func installResponseStream(resp *http.Response, request originStreamRequest, par
 	if request.peerNormalized {
 		config.PeerTrailer = func() []string { return resp.Trailer.Values(peerStreamFramingHeader) }
 	}
-	if a != nil {
+	if a != nil && a.f.performancePreparationMode(a.api) == performancePrepareLocalNumeric {
 		config.Extract = func(payload []byte) performanceExtractMetadata {
 			return extractPerformanceObserved(payload, a.qualification)
 		}

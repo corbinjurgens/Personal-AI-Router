@@ -53,8 +53,11 @@ func TestOwnedInferenceBuffersPlacement(t *testing.T) {
 	})
 	t.Run("queued transformation has no claim or published placement", func(t *testing.T) {
 		fx := fixture(t)
-		fx.p.buffers = bufferTestBudget(t, 256<<10, time.Hour)
-		hold := bufferMustAcquire(t, fx.p.buffers, 128<<10)
+		preparationBytes := bufferFixtureRemotePreparationBytes(t, `{"model":"small:1b"}`)
+		fx.p.buffers = bufferTestBudget(t, (256<<10)+preparationBytes, time.Hour)
+		// Offset the added preparation room until release, preserving the
+		// original 128 KiB blocker against the transform's 96 KiB allowance.
+		hold := bufferMustAcquire(t, fx.p.buffers, (128<<10)+preparationBytes)
 		defer hold.close()
 		rec := httptest.NewRecorder()
 		done := make(chan struct{})
@@ -90,7 +93,11 @@ func TestOwnedInferenceBuffersPlacement(t *testing.T) {
 	t.Run("retry clears prior placement and claim before storage wait", func(t *testing.T) {
 		pol := ollamaTierPolicy(map[string][]nodepolicy.TierEntry{"weak": {{Kind: nodepolicy.EntryLocal, Engine: "ollama", Model: "small:1b"}}})
 		fx := newTierFixture(t, ollamaCase(t), pol, map[string][]string{"a": {"small:1b"}, "b": {"small:1b"}}, nil)
-		fx.p.buffers = bufferTestBudget(t, 256<<10, time.Hour)
+		preparationBytes := bufferFixtureRemotePreparationBytes(t, `{"model":"small:1b"}`)
+		capacity := (256 << 10) + preparationBytes
+		// The first attempt needs preparation room in addition to the blocker
+		// that will offset that same room while the retry waits.
+		fx.p.buffers = bufferTestBudget(t, capacity+preparationBytes, time.Hour)
 		type heldResult struct {
 			lease *bufferLease
 			err   error
@@ -99,7 +106,15 @@ func TestOwnedInferenceBuffersPlacement(t *testing.T) {
 		var firstCalls atomic.Int32
 		first := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if firstCalls.Add(1) == 1 {
-				lease, err := fx.p.buffers.acquire(r.Context(), 128<<10)
+				lease, err := fx.p.buffers.acquire(r.Context(), (128<<10)+preparationBytes)
+				// Remove startup headroom before retry preparation. Once the
+				// first attempt drains, effective pressure is again 256/128 KiB.
+				if err == nil {
+					err = fx.p.buffers.reconfigure(capacity, time.Hour)
+					if err != nil {
+						lease.close()
+					}
+				}
 				held <- heldResult{lease, err}
 			}
 			w.WriteHeader(http.StatusServiceUnavailable)
