@@ -236,9 +236,19 @@ func (e *Executor) reconcilePresence(ctx context.Context, engine string, st *eng
 		return presenceResult{Occupied: true}
 	}
 
+	// A successful probe is not permission to publish an adoption after its
+	// caller was cancelled. Order automatic adoption against pause just like
+	// owned readiness; the external listener is never stopped on refusal.
+	e.nodeProjection.mu.Lock()
 	st.mu.Lock()
+	if ctx.Err() != nil || (automaticCrashRelaunch(ctx) && e.nodeProjection.projection != nil && e.nodeProjection.projection.PausedLocally) {
+		st.mu.Unlock()
+		e.nodeProjection.mu.Unlock()
+		return presenceResult{Occupied: true}
+	}
 	if st.stopping && !allowWhileStopping {
 		st.mu.Unlock()
+		e.nodeProjection.mu.Unlock()
 		return presenceResult{Identified: true, Occupied: true}
 	}
 	// Detect resets installed=false on every path-miss. Do not treat that
@@ -264,6 +274,7 @@ func (e *Executor) reconcilePresence(ctx context.Context, engine string, st *eng
 		st.binPath = ""
 	}
 	st.mu.Unlock()
+	e.nodeProjection.mu.Unlock()
 	if changed {
 		e.emitState(engine)
 	}

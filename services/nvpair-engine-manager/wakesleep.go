@@ -71,6 +71,7 @@ func (e *Executor) Sleep(engine string) error {
 	if err != nil {
 		return err
 	}
+	cancelCrashRelaunch(st)
 	st.opMu.Lock()
 	defer st.opMu.Unlock()
 	return e.doStop(st, engine)

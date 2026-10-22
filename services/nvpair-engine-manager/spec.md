@@ -5,6 +5,19 @@ SPDX-License-Identifier: Apache-2.0
 
 # Microservice: Engine Manager (`nvpair-engine-manager`)
 
+## Unexpected owned-process exit
+
+An owned process exiting without an intentional stop reports the existing
+unexpected-exit error, then retries saved-On intent through `restoreEnabled`
+after 5 seconds, 30 seconds and 2 minutes (delays between failed attempts).
+Successful readiness resets the consecutive-failure episode. After three failed
+attempts no further automatic start is scheduled and the unexpected-exit error
+remains. Unknown/Off intent never launches. Explicit stop, pause/sleep and
+shutdown cancel both pending backoff and its registered start. A pending switch
+defers automatic restore to switch reconciliation; the failed-reclaim latch and
+precise cold-reclaim predicate remain authoritative. There is no retry RPC or
+configuration setting, and recovery does not resume interrupted inference.
+
 ## Finite llama serving launch
 
 An optional versioned `runtime.serving` declaration activates the finite llama

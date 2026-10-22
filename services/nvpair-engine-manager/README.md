@@ -14,6 +14,12 @@ is a JSON manifest, not code.
 The bundled manifests under `manifests/` are the working reference for manifest
 authoring.
 
+An unexpected owned-process exit with saved On intent retries through restore
+after 5 seconds, 30 seconds and 2 minutes. Readiness resets that failure episode;
+three unsuccessful attempts leave the existing unexpected-exit error standing.
+Explicit stop, pause/sleep and shutdown cancel recovery; pending switches retain
+their recovery owner and failed orphan reclaim still fences adoption.
+
 ### llama.cpp backend checkpoint
 
 The `llamacpp` manifest runs `llama-server` in router mode on loopback port

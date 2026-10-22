@@ -191,7 +191,12 @@ func (e *Executor) doStart(ctx context.Context, st *engineState, engine string, 
 		st.mu.Lock()
 		st.gen++
 		gen := st.gen
+		recovery := st.relaunch
+		st.relaunch = nil
 		st.mu.Unlock()
+		if recovery != nil {
+			recovery.cancel()
+		}
 		e.reporter.clear(startFailedID(engine))
 		e.reporter.clear(exitedID(engine))
 		e.reporter.clear(unhealthyID(engine))
@@ -229,7 +234,24 @@ func (e *Executor) doStart(ctx context.Context, st *engineState, engine string, 
 		return err
 	}
 
+	// Linearize automatic readiness with the pause projection. A pause that
+	// wins this gate must not be followed by a running publication, even if
+	// the last readiness response was already successful. No I/O under gates.
+	e.nodeProjection.mu.Lock()
 	st.mu.Lock()
+	readyErr := ctx.Err()
+	if readyErr == nil && automaticCrashRelaunch(ctx) && e.nodeProjection.projection != nil && e.nodeProjection.projection.PausedLocally {
+		readyErr = &localVetoError{reason: nodePausedVeto}
+	}
+	if readyErr != nil {
+		// bringUp succeeded: this start owns the launched process/control
+		// command. Let the existing stop owner reap it before returning.
+		// This internal flag is never emitted as a running notification.
+		st.running = true
+		st.mu.Unlock()
+		e.nodeProjection.mu.Unlock()
+		return errors.Join(readyErr, e.doStop(st, engine))
+	}
 	st.running = true
 	st.runID = newEngineRunID()
 	st.healthy = true
@@ -238,7 +260,13 @@ func (e *Executor) doStart(ctx context.Context, st *engineState, engine string, 
 	st.reclaimPID = 0
 	st.gen++
 	gen := st.gen
+	recovery := st.relaunch
+	st.relaunch = nil
 	st.mu.Unlock()
+	e.nodeProjection.mu.Unlock()
+	if recovery != nil {
+		recovery.cancel()
+	}
 	e.reporter.clear(startFailedID(engine))
 	e.reporter.clear(exitedID(engine))
 	e.reporter.clear(unhealthyID(engine))
@@ -550,6 +578,7 @@ func (e *Executor) watch(st *engineState, engine string, proc *managedProc) {
 				Severity: "error", Action: "none", EngineType: engine,
 			})
 			e.emitState(engine)
+			e.scheduleCrashRelaunch(st, engine)
 		}
 	}()
 }
@@ -592,6 +621,7 @@ func (e *Executor) stopFrom(engine string, origin intentOrigin, operationID stri
 	if origin == intentLocal {
 		e.remoteWork.cancelEngine(engine, &localVetoError{reason: engineOffVeto(engine)})
 	}
+	cancelCrashRelaunch(st)
 	finishLoads := stopServingLoads(st)
 	defer finishLoads()
 	st.opMu.Lock()
@@ -1051,6 +1081,9 @@ func (e *Executor) StopAll() {
 		wg.Add(1)
 		go func(st *engineState, n string) {
 			defer wg.Done()
+			if recoveryDone := cancelCrashRelaunch(st); recoveryDone != nil {
+				defer func() { <-recoveryDone }()
+			}
 			finishLoads := stopServingLoads(st)
 			defer finishLoads()
 			st.mu.Lock()
