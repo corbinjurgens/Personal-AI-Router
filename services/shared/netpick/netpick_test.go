@@ -5,9 +5,59 @@ package netpick
 
 import (
 	"net"
+	"slices"
 	"strings"
 	"testing"
 )
+
+func TestSharedOverlayAddresses(t *testing.T) {
+	tests := []struct {
+		name   string
+		ifaces []localIface
+		want   []string
+	}{
+		{name: "Windows Tailscale", ifaces: []localIface{{name: "Tailscale", addrs: []localAddr{{ip: "100.101.2.3", prefixLen: 32}}}}, want: []string{"100.101.2.3"}},
+		{name: "macOS utun", ifaces: []localIface{{name: "utun4", pointToPoint: true, addrs: []localAddr{{ip: "100.90.2.3", prefixLen: 32}}}}, want: []string{"100.90.2.3"}},
+		{name: "Linux tailscale", ifaces: []localIface{{name: "tailscale0", addrs: []localAddr{{ip: "100.80.2.3", prefixLen: -1}}}}, want: []string{"100.80.2.3"}},
+		{name: "CIDR boundaries inclusive", ifaces: []localIface{{name: "tailscale0", addrs: []localAddr{{ip: "100.127.255.255"}, {ip: "100.64.0.0"}}}}, want: []string{"100.127.255.255", "100.64.0.0"}},
+		{name: "sorted deduplicated across adapters", ifaces: []localIface{
+			{name: "utun2", addrs: []localAddr{{ip: "100.90.0.2"}, {ip: "100.90.0.10"}, {ip: "100.90.0.2"}}},
+			{name: "Tailscale", addrs: []localAddr{{ip: "100.90.0.10"}, {ip: "100.65.0.1"}}},
+		}, want: []string{"100.65.0.1", "100.90.0.10", "100.90.0.2"}},
+		{name: "physical CGNAT excluded", ifaces: []localIface{{name: "Ethernet", addrs: []localAddr{{ip: "100.65.0.1"}}}, {name: "en0", addrs: []localAddr{{ip: "100.66.0.1"}}}}},
+		{name: "outside range excluded", ifaces: []localIface{{name: "tailscale0", addrs: []localAddr{{ip: "100.63.255.255"}, {ip: "100.128.0.0"}, {ip: "99.100.0.1"}, {ip: "101.100.0.1"}, {ip: "192.168.1.2"}, {ip: "127.0.0.1"}}}}},
+		{name: "invalid and IPv6 excluded", ifaces: []localIface{{name: "utun1", addrs: []localAddr{{ip: ""}, {ip: "garbage"}, {ip: "100.064.0.1"}, {ip: "100.64.0.1/32"}, {ip: "fd7a:115c:a1e0::1"}, {ip: "::ffff:100.64.0.1"}}}}},
+		{name: "empty adapters", ifaces: []localIface{{name: "tailscale0"}}},
+		{name: "empty input"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := sharedOverlayAddresses(tc.ifaces); !slices.Equal(got, tc.want) {
+				t.Fatalf("sharedOverlayAddresses = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestSharedOverlayAddressesLeavesRankingUnchanged(t *testing.T) {
+	ifaces := []localIface{
+		{name: "Ethernet", addrs: []localAddr{{ip: "192.168.1.2", prefixLen: 24}}},
+		{name: "Tailscale", addrs: []localAddr{{ip: "100.90.0.2", prefixLen: 32}, {ip: "100.90.0.1", prefixLen: 32}}},
+	}
+	want := []string{"192.168.1.2"}
+	if got := rankLocal(ifaces, Evidence{}, ""); !slices.Equal(got, want) {
+		t.Fatalf("initial rankLocal = %v, want %v", got, want)
+	}
+	if got := sharedOverlayAddresses(ifaces); !slices.Equal(got, []string{"100.90.0.1", "100.90.0.2"}) {
+		t.Fatalf("overlay hints = %v, want both unproven overlay addresses", got)
+	}
+	if got := rankLocal(ifaces, Evidence{}, ""); !slices.Equal(got, want) {
+		t.Fatalf("rankLocal after overlay lookup = %v, want %v", got, want)
+	}
+	if got := ifaces[1].addrs[0].ip; got != "100.90.0.2" {
+		t.Fatalf("overlay lookup reordered input: first address = %q", got)
+	}
+}
 
 func TestRankRemote_DemotesOnlyUnusableClasses(t *testing.T) {
 	// Docker's default bridge, CGNAT and link-local rank below any real private
