@@ -313,6 +313,128 @@ func TestLlamaServingChildArgvHasNoImplicitEnvelopeOverrides(t *testing.T) {
 	}
 }
 
+// writeOwnerRouterPreset replaces the fixture source with a preset shaped
+// like the owner's approved MSI router preset: a top-level version key,
+// global threads and Flash Attention, and per-model context, slots, batch
+// sizes, K/V cache types, GPU offload and idle sleep.
+func writeOwnerRouterPreset(t *testing.T, f llamaServingFixture) {
+	t.Helper()
+	writeServingFixture(t, f.source, []byte(`version = 1
+
+[*]
+fit = off
+load-on-startup = false
+threads = 8
+threads-batch = 8
+flash-attn = on
+
+[medium]
+model = medium.gguf
+ctx-size = 32768
+parallel = 1
+batch-size = 2048
+ubatch-size = 512
+cache-type-k = q8_0
+cache-type-v = q8_0
+gpu-layers = 0
+sleep-idle-seconds = 600
+
+[weak]
+model = weak.gguf
+ctx-size = 131072
+parallel = 1
+batch-size = 2048
+ubatch-size = 512
+cache-type-k = q8_0
+cache-type-v = q8_0
+gpu-layers = 8
+sleep-idle-seconds = 600
+`))
+}
+
+// Problem 1 (MSI install, 2026-10-23): the typed serving preview rejected the
+// owner's native preset because its knobs were outside the adapter subset.
+func TestLlamaServingAcceptsOwnerRouterPreset(t *testing.T) {
+	f := newLlamaServingFixture(t)
+	writeOwnerRouterPreset(t, f)
+	preview := previewSettings(t, f.ex, f.request)
+	if len(preview.Errors) != 0 || preview.Conflict != nil {
+		t.Fatalf("owner router preset rejected by typed preview: %v", preview.Errors)
+	}
+	if preview.Serving == nil || len(preview.Serving.Configured) != 2 {
+		t.Fatal("preview did not derive one envelope per declared model")
+	}
+	medium, weak := preview.Serving.Configured[0], preview.Serving.Configured[1]
+	if medium.TotalContextTokens != 32768 || medium.Slots != 1 || medium.Retention != "600" {
+		t.Fatalf("medium envelope differs from its preset: %+v", medium)
+	}
+	if weak.TotalContextTokens != 131072 || weak.Slots != 1 || weak.Retention != "600" {
+		t.Fatalf("weak envelope differs from its preset: %+v", weak)
+	}
+	for _, want := range []string{"batch-size=2048", "ubatch-size=512", "cache-type-k=q8_0", "cache-type-v=q8_0", "flash-attn=on", "gpu-layers=8"} {
+		if !slices.Contains(weak.Placement, want) {
+			t.Fatalf("weak placement lacks %s: %v", want, weak.Placement)
+		}
+	}
+	assertNoSettingsOverride(t, f.ex)
+	assertNoLlamaSpawn(t, f)
+}
+
+// Problem 2 (MSI install, 2026-10-23): both models ran at context 8192 because
+// a router CLI --ctx-size overrode every per-model preset value. On the
+// canonical typed path the child argv must carry no bundled router default and
+// the snapshot must carry the per-model values.
+func TestLlamaServingOwnerRouterPresetReachesChild(t *testing.T) {
+	f := newLlamaServingFixture(t)
+	writeOwnerRouterPreset(t, f)
+	preview := approveLlamaServing(t, f)
+	applyLlamaServing(t, f, preview)
+	if err := f.ex.Start(context.Background(), "fake"); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(f.startLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var args []string
+	if err := json.Unmarshal(bytes.TrimSpace(data), &args); err != nil {
+		t.Fatal(err)
+	}
+	for _, forbidden := range []string{"--ctx-size", "--parallel", "--sleep-idle-seconds", "--cache-ram"} {
+		if slices.Contains(args, forbidden) {
+			t.Fatalf("router argv carries bundled default %s, which overrides every per-model preset value", forbidden)
+		}
+	}
+	index := slices.Index(args, "--models-preset")
+	if index < 0 || index+1 >= len(args) || args[index+1] == f.source {
+		t.Fatal("router argv did not select an immutable snapshot")
+	}
+	content, err := os.ReadFile(args[index+1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, line := range strings.Split(string(content), "\n") {
+		if strings.HasPrefix(line, "version") {
+			t.Fatal("snapshot materialized the reserved version key")
+		}
+	}
+	sections, err := parseLlamaServingPreset(content)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]map[string]string{
+		"medium": {"ctx-size": "32768", "parallel": "1", "sleep-idle-seconds": "600", "threads": "8", "threads-batch": "8", "flash-attn": "on", "batch-size": "2048", "cache-type-k": "q8_0"},
+		"weak":   {"ctx-size": "131072", "parallel": "1", "sleep-idle-seconds": "600", "threads": "8", "gpu-layers": "8", "ubatch-size": "512", "cache-type-v": "q8_0"},
+	}
+	for model, options := range want {
+		for key, value := range options {
+			if sections[model][key] != value {
+				t.Fatalf("snapshot %s lost %s = %s (got %q)", model, key, value, sections[model][key])
+			}
+		}
+	}
+}
+
 func TestLlamaServingExplicitNativePrecedence(t *testing.T) {
 	test := func(name, text string, wantMedium, wantWeak int64) {
 		t.Run(name, func(t *testing.T) {
