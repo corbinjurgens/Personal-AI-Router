@@ -10,6 +10,7 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -19,6 +20,7 @@ import (
 	"runtime"
 	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -29,36 +31,524 @@ import (
 	"nvpair-shared/reach"
 )
 
+// ownedPeerListener keeps its address reserved across each physical dial. A
+// closed listener cannot silently authorize a later owner of the same port.
+type ownedPeerListener struct {
+	net.Listener
+	mu     sync.RWMutex
+	closed bool
+}
+
+func (l *ownedPeerListener) Close() error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.closed {
+		return nil
+	}
+	l.closed = true
+	return l.Listener.Close()
+}
+
+type peerDialGuard struct {
+	mu                          sync.Mutex
+	targets                     map[string]string
+	owned                       map[string]*ownedPeerListener
+	logical                     map[string]int
+	probes                      map[string]int
+	setup                       map[string]func(context.Context) error
+	physical, rejected, reverse atomic.Int32
+}
+
+func newPeerDialGuard(t *testing.T) *peerDialGuard {
+	t.Helper()
+	g := &peerDialGuard{targets: make(map[string]string), owned: make(map[string]*ownedPeerListener), logical: make(map[string]int), probes: make(map[string]int), setup: make(map[string]func(context.Context) error)}
+	t.Cleanup(func() {
+		g.mu.Lock()
+		defer g.mu.Unlock()
+		if g.rejected.Load() != 0 {
+			t.Errorf("guard rejected physical dial: %d", g.rejected.Load())
+		}
+		t.Logf("owned-dial counts logical=%v chooser=%v physical=%d reverse=%d rejected=%d", g.logical, g.probes, g.physical.Load(), g.reverse.Load(), g.rejected.Load())
+	})
+	return g
+}
+
+func (g *peerDialGuard) allow(t *testing.T, logical string, listener *ownedPeerListener) {
+	t.Helper()
+	physical := listener.Addr().String()
+	host, port, err := net.SplitHostPort(physical)
+	if err != nil || !net.ParseIP(host).IsLoopback() || port == "0" {
+		t.Fatalf("non-owned listener address %q", physical)
+	}
+	g.mu.Lock()
+	g.owned[physical] = listener
+	g.targets[physical] = physical
+	g.targets[logical] = physical
+	g.mu.Unlock()
+}
+
+func (g *peerDialGuard) physicalDial(ctx context.Context, network, address string) (net.Conn, error) {
+	host, _, err := net.SplitHostPort(address)
+	g.mu.Lock()
+	owner := g.owned[address]
+	g.mu.Unlock()
+	if err != nil || network != "tcp" || !net.ParseIP(host).IsLoopback() || owner == nil {
+		g.rejected.Add(1)
+		return nil, errors.New("unowned physical destination")
+	}
+	owner.mu.RLock()
+	defer owner.mu.RUnlock()
+	if owner.closed {
+		return nil, errors.New("owned listener closed")
+	}
+	g.physical.Add(1)
+	return (&net.Dialer{}).DialContext(ctx, network, address)
+}
+
+func (g *peerDialGuard) dial(ctx context.Context, network, logical string) (net.Conn, error) {
+	g.mu.Lock()
+	g.logical[logical]++
+	physical, ok := g.targets[logical]
+	setup := g.setup[logical]
+	g.mu.Unlock()
+	if setup != nil {
+		if err := setup(ctx); err != nil {
+			return nil, err
+		}
+	}
+	if !ok {
+		return nil, errors.New("synthetic unavailable candidate")
+	}
+	return g.physicalDial(ctx, network, physical)
+}
+
+func (g *peerDialGuard) probe(network, logical string, timeout time.Duration) (net.Conn, error) {
+	g.mu.Lock()
+	g.probes[logical]++
+	physical, ok := g.targets[logical]
+	g.mu.Unlock()
+	if !ok {
+		return nil, errors.New("synthetic unavailable chooser candidate")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	return g.physicalDial(ctx, network, physical)
+}
+
+func (g *peerDialGuard) attempted(logical string) int {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.logical[logical]
+}
+
+type peerWalkFixture struct {
+	a, b       *Manager
+	guard      *peerDialGuard
+	listener   *ownedPeerListener
+	descriptor noderec.PeerServicesDescriptor
+	output     bytes.Buffer
+	handlers   atomic.Int32
+	lan, tail  string
+}
+
+func newPeerWalkFixture(t *testing.T) *peerWalkFixture {
+	t.Helper()
+	f := &peerWalkFixture{a: newReverseTestManager(t), b: newReverseTestManager(t), guard: newPeerDialGuard(t)}
+	f.descriptor = noderec.PeerServicesDescriptor{HostUUID: f.b.identity.NodeUUID, Name: "walk-peer", Addresses: []string{"192.0.2.55", "100.90.0.8"}, Services: []noderec.PeerService{{Service: noderec.ServiceNodeInfo, Port: 23456}}}
+	if err := noderec.ValidatePeerServicesDescriptor(f.descriptor, f.b.identity.NodeUUID); err != nil {
+		t.Fatal(err)
+	}
+	f.listener = startWalkServer(t, f.b, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		f.handlers.Add(1)
+		if err := json.NewEncoder(w).Encode(f.descriptor); err != nil {
+			t.Error(err)
+		}
+	}))
+	f.b.port = f.listener.Addr().(*net.TCPAddr).Port
+	pairReverseManagers(t, f.a, f.b)
+	f.lan = net.JoinHostPort("192.0.2.55", fmt.Sprint(f.b.port))
+	f.tail = net.JoinHostPort("100.90.0.8", fmt.Sprint(f.b.port))
+	f.a.setMemberAddr(f.b.identity.NodeUUID, "192.0.2.55", f.b.port)
+	persistPeerServicesMembers(t, f.a, f.b)
+	f.guard.allow(t, f.lan, f.listener)
+	f.install(t, f.a, f.guard, nil)
+	f.install(t, f.b, newPeerDialGuard(t), nil)
+	f.a.codec = NewCodec(struct {
+		io.Reader
+		io.Writer
+	}{bytes.NewReader(nil), &f.output})
+	f.a.serviceRefresh.source = "first-process"
+	return f
+}
+
+func startWalkServer(t *testing.T, peer *Manager, handler http.Handler) *ownedPeerListener {
+	t.Helper()
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if _, ok := peer.verifyClientPin(r); !ok {
+			http.Error(w, "unpaired fixture", http.StatusForbidden)
+			return
+		}
+		handler.ServeHTTP(w, r)
+	}))
+	owned := &ownedPeerListener{Listener: server.Listener}
+	server.Listener = owned
+	server.TLS = peer.buildServerTLSConfig()
+	server.StartTLS()
+	t.Cleanup(server.Close)
+	return owned
+}
+
+func (f *peerWalkFixture) install(t *testing.T, m *Manager, guard *peerDialGuard, reverse func(context.Context, string, string, noderec.ServiceKey) (net.Conn, error)) {
+	t.Helper()
+	opts := m.peerServiceOptions()
+	opts.DirectTimeout = 2 * time.Second
+	opts.DialReverse = reverse
+	replaceClusterPeerServices(t, m, opts, guard)
+}
+
+func (f *peerWalkFixture) addTail(t *testing.T) {
+	t.Helper()
+	f.a.browser = newBrowser()
+	f.a.browser.seed(f.b.identity.NodeUUID, "100.90.0.8", f.b.port)
+	f.guard.allow(t, f.tail, f.listener)
+}
+
+func assertWalkUnchanged(t *testing.T, f *peerWalkFixture) {
+	t.Helper()
+	member, ok := f.a.memberByNodeID(f.b.identity.NodeUUID)
+	disk := storedHintMember(t, f.a, f.b.identity.NodeUUID)
+	pin, pinned := f.a.trust.Get(f.b.identity.NodeUUID)
+	if !ok || !pinned || member.State != stateMember || member.AdmissionEpoch != 1 || len(member.AdvertisedAddresses) != 0 || len(disk.AdvertisedAddresses) != 0 || pin.AdmissionEpoch != 1 || pin.CertFingerprint != f.b.identity.CertFingerprint {
+		t.Fatalf("failed walk changed authority/hints: memory=%+v disk=%+v pin=%+v", member, disk, pin)
+	}
+	assertNoPeerServicesClaim(t, f.output.Bytes())
+}
+
+func TestPeerServicesLearnPersistReopenTailnet(t *testing.T) {
+	f := newPeerWalkFixture(t)
+	f.a.mesh.Refresh()
+	incarnation, ok := f.a.mesh.PeerServiceIncarnation(f.b.identity.NodeUUID)
+	if !ok {
+		t.Fatal("original admission missing")
+	}
+	identity, fingerprint := f.a.identity.NodeUUID, f.a.identity.CertFingerprint
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := f.a.refreshPeerServices(ctx, f.b.identity.NodeUUID); err != nil {
+		t.Fatal(err)
+	}
+	if learned := storedHintMember(t, f.a, f.b.identity.NodeUUID); !slices.Equal(learned.AdvertisedAddresses, f.descriptor.Addresses) {
+		t.Fatalf("authenticated learning not durable: %+v", learned)
+	}
+	if f.guard.attempted(f.lan) == 0 || f.handlers.Load() != 1 {
+		t.Fatal("initial authenticated LAN read did not occur")
+	}
+	f.a.peerServices.CloseIdle()
+	f.a.removalPeerServices.CloseIdle()
+	f.a.clients.CloseIdle()
+	if err := f.a.reverse.manager.Close(); err != nil {
+		t.Fatal(err)
+	}
+	base := filepath.Dir(f.a.clusterDir)
+	reopened, err := NewManager(NewCodec(struct {
+		io.Reader
+		io.Writer
+	}{bytes.NewReader(nil), io.Discard}), base, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := reopened.reverse.manager.Close(); err != nil {
+			t.Error(err)
+		}
+	})
+	if reopened.identity.NodeUUID != identity || reopened.identity.CertFingerprint != fingerprint || filepath.Dir(reopened.clusterDir) != base || len(reopened.peerRoutes) != 0 {
+		t.Fatal("reopen changed original identity/profile or retained route state")
+	}
+	if cid, epoch := reopened.currentAdmission(); cid != "cluster-1" || epoch != 1 {
+		t.Fatalf("reopen admission %s/%d", cid, epoch)
+	}
+	pin, pinned := reopened.trust.Get(f.b.identity.NodeUUID)
+	member, exists := reopened.memberByNodeID(f.b.identity.NodeUUID)
+	if !pinned || pin.CertFingerprint != f.b.identity.CertFingerprint || pin.AdmissionEpoch != 1 || !exists || !slices.Equal(member.AdvertisedAddresses, f.descriptor.Addresses) {
+		t.Fatal("reopen lost learned hints or original pin/member")
+	}
+	reopened.browser = newBrowser()
+	if hosts, _, ok := reopened.browser.Resolve(f.b.identity.NodeUUID); ok || len(hosts) != 0 {
+		t.Fatal("reopen browser is not empty")
+	}
+	guard := newPeerDialGuard(t)
+	guard.allow(t, f.tail, f.listener) // LAN is deliberately unmapped and never reaches the OS.
+	f.install(t, reopened, guard, nil)
+	f.output.Reset()
+	reopened.codec = NewCodec(struct {
+		io.Reader
+		io.Writer
+	}{bytes.NewReader(nil), &f.output})
+	reopened.serviceRefresh.source = "reopened-process"
+	start := time.Now().UnixMilli()
+	if err := reopened.refreshPeerServices(ctx, f.b.identity.NodeUUID); err != nil {
+		t.Fatal(err)
+	}
+	message, err := NewCodec(struct {
+		io.Reader
+		io.Writer
+	}{bytes.NewReader(f.output.Bytes()), io.Discard}).Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var claim noderec.PeerServicesClaim
+	if err := json.Unmarshal(message.Params, &claim); err != nil {
+		t.Fatal(err)
+	}
+	if message.Method != peerServicesEvent || claim.Descriptor.HostUUID != f.b.identity.NodeUUID || !slices.Equal(claim.Descriptor.Addresses, f.descriptor.Addresses) || !slices.Equal(claim.Descriptor.Services, f.descriptor.Services) || claim.Incarnation != incarnation || claim.Source != "reopened-process" || claim.Sequence != 1 || claim.ObservedAt < start || claim.ObservedAt > time.Now().UnixMilli() {
+		t.Fatalf("reopen claim metadata=%+v", claim)
+	}
+	if guard.attempted(f.tail) == 0 || guard.physical.Load() == 0 || guard.reverse.Load() != 0 || f.handlers.Load() != 2 {
+		t.Fatalf("tailnet bootstrap missing: tail=%d physical=%d reverse=%d handlers=%d", guard.attempted(f.tail), guard.physical.Load(), guard.reverse.Load(), f.handlers.Load())
+	}
+}
+
+func TestPeerServicesWholeAttemptFairness(t *testing.T) {
+	test := func(name string, stage string) {
+		t.Run(name, func(t *testing.T) {
+			f := newPeerWalkFixture(t)
+			f.addTail(t)
+			entered, exited := make(chan struct{}), make(chan struct{})
+			bad := startWalkServer(t, f.b, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				close(entered)
+				defer close(exited)
+				if stage == "body" || stage == "EOF" {
+					w.Header().Set("Content-Length", "100")
+					w.WriteHeader(http.StatusOK)
+					if _, err := w.Write([]byte("{")); err != nil {
+						t.Error(err)
+						return
+					}
+					w.(http.Flusher).Flush()
+					if stage == "EOF" {
+						return
+					}
+				}
+				if stage == "invalid" {
+					if _, err := w.Write([]byte(`{"unexpected":true}`)); err != nil {
+						t.Error(err)
+					}
+					return
+				}
+				<-r.Context().Done()
+			}))
+			f.guard.allow(t, f.lan, bad)
+			if stage == "setup" {
+				f.guard.setup[f.lan] = func(ctx context.Context) error { close(entered); defer close(exited); <-ctx.Done(); return ctx.Err() }
+			}
+			var remaining time.Duration
+			later := make(chan struct{})
+			f.guard.setup[f.tail] = func(ctx context.Context) error {
+				deadline, ok := ctx.Deadline()
+				if ok {
+					remaining = time.Until(deadline)
+				}
+				close(later)
+				return ctx.Err()
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 1200*time.Millisecond)
+			defer cancel()
+			err := f.a.refreshPeerServices(ctx, f.b.identity.NodeUUID)
+			select {
+			case <-entered:
+			default:
+				t.Fatal("first candidate was not attempted")
+			}
+			select {
+			case <-exited:
+			case <-time.After(2 * time.Second):
+				t.Fatal("stalled first attempt was not cancelled/joined")
+			}
+			if stage == "invalid" {
+				if err == nil {
+					t.Fatal("complete invalid descriptor accepted")
+				}
+				if f.guard.attempted(f.tail) != 0 {
+					t.Fatal("complete invalid descriptor advanced")
+				}
+				assertWalkUnchanged(t, f)
+				return
+			}
+			if err != nil {
+				t.Fatalf("later authenticated candidate starved: %v", err)
+			}
+			select {
+			case <-later:
+			default:
+				t.Fatal("later candidate did not receive an attempt")
+			}
+			if remaining <= 0 || ctx.Err() != nil || f.handlers.Load() != 1 {
+				t.Fatalf("later request lacked parent time: remaining=%s parent=%v handlers=%d", remaining, ctx.Err(), f.handlers.Load())
+			}
+		})
+	}
+	test("blocking setup", "setup")
+	test("stalled headers", "headers")
+	test("incomplete body waits for cancellation", "body")
+	test("incomplete body EOF", "EOF")
+	test("complete invalid descriptor is terminal", "invalid")
+}
+
+func TestPeerServicesStaleReverseDoesNotStarveHint(t *testing.T) {
+	f := newPeerWalkFixture(t)
+	f.addTail(t)
+	f.guard.setup[f.lan] = func(context.Context) error { return errors.New("synthetic direct unavailable") }
+	entered, exited := make(chan struct{}), make(chan struct{})
+	f.install(t, f.a, f.guard, func(ctx context.Context, _ string, _ string, _ noderec.ServiceKey) (net.Conn, error) {
+		close(entered)
+		defer close(exited)
+		<-ctx.Done()
+		return nil, ctx.Err()
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 1200*time.Millisecond)
+	defer cancel()
+	if err := f.a.refreshPeerServices(ctx, f.b.identity.NodeUUID); err != nil {
+		t.Fatalf("stale reverse starved authenticated hint: %v", err)
+	}
+	select {
+	case <-entered:
+	default:
+		t.Fatal("stale reverse was not attempted")
+	}
+	select {
+	case <-exited:
+	default:
+		t.Fatal("stale reverse did not observe cancellation")
+	}
+	if f.guard.reverse.Load() != 1 || f.guard.attempted(f.tail) == 0 || ctx.Err() != nil || f.handlers.Load() != 1 {
+		t.Fatalf("reverse=%d later=%d parent=%v handlers=%d", f.guard.reverse.Load(), f.guard.attempted(f.tail), ctx.Err(), f.handlers.Load())
+	}
+}
+
+func TestPeerServicesCancelledWalkPreservesMembership(t *testing.T) {
+	t.Run("parent cancelled during held chooser", func(t *testing.T) {
+		f := newPeerWalkFixture(t)
+		f.addTail(t)
+		entered, release, returned := make(chan struct{}, 2), make(chan struct{}), make(chan struct{}, 2)
+		var once sync.Once
+		unblock := func() { once.Do(func() { close(release) }) }
+		f.a.peerAddrs = reach.NewChooser(reach.WithDial(func(string, string, time.Duration) (net.Conn, error) {
+			entered <- struct{}{}
+			defer func() { returned <- struct{}{} }()
+			<-release
+			return nil, errors.New("synthetic held chooser refusal")
+		}))
+		ctx, cancel := context.WithCancel(context.Background())
+		done, joined := make(chan error, 1), make(chan struct{})
+		go func() { defer close(joined); done <- f.a.refreshPeerServices(ctx, f.b.identity.NodeUUID) }()
+		defer func() {
+			cancel()
+			unblock()
+			select {
+			case <-joined:
+			case <-time.After(2 * time.Second):
+				t.Error("held-chooser refresh did not join")
+			}
+			for range 2 {
+				select {
+				case <-returned:
+				case <-time.After(2 * time.Second):
+					t.Error("held chooser probe did not join")
+				}
+			}
+		}()
+		for range 2 {
+			select {
+			case <-entered:
+			case <-time.After(2 * time.Second):
+				t.Fatal("chooser did not enter both synthetic probes")
+			}
+		}
+		cancel()
+		select {
+		case err := <-done:
+			if !errors.Is(err, context.Canceled) {
+				t.Errorf("held chooser cancellation=%v", err)
+			}
+		case <-time.After(200 * time.Millisecond):
+			t.Error("parent cancellation did not interrupt CM chooser wait")
+		}
+		f.guard.mu.Lock()
+		logical := len(f.guard.logical)
+		f.guard.mu.Unlock()
+		if logical != 0 || f.guard.reverse.Load() != 0 || f.handlers.Load() != 0 {
+			t.Fatal("cancelled confirmation dispatched descriptor work")
+		}
+		assertWalkUnchanged(t, f)
+	})
+	t.Run("parent cancelled during setup", func(t *testing.T) {
+		f := newPeerWalkFixture(t)
+		f.addTail(t)
+		ctx, cancel := context.WithCancel(context.Background())
+		entered := make(chan struct{})
+		f.guard.setup[f.lan] = func(ctx context.Context) error { close(entered); <-ctx.Done(); return ctx.Err() }
+		done := make(chan error, 1)
+		joined := make(chan struct{})
+		go func() { defer close(joined); done <- f.a.refreshPeerServices(ctx, f.b.identity.NodeUUID) }()
+		defer func() {
+			cancel()
+			select {
+			case <-joined:
+			case <-time.After(3 * time.Second):
+				t.Error("cancelled worker did not join")
+			}
+		}()
+		select {
+		case <-entered:
+		case <-time.After(3 * time.Second):
+			t.Fatal("walk did not enter setup")
+		}
+		cancel()
+		select {
+		case err := <-done:
+			if !errors.Is(err, context.Canceled) {
+				t.Fatalf("cancel error=%v", err)
+			}
+		case <-time.After(3 * time.Second):
+			t.Fatal("cancelled walk did not stop")
+		}
+		if f.guard.attempted(f.tail) != 0 || f.handlers.Load() != 0 {
+			t.Fatal("cancelled walk advanced")
+		}
+		assertWalkUnchanged(t, f)
+	})
+	t.Run("no endpoint succeeds", func(t *testing.T) {
+		f := newPeerWalkFixture(t)
+		f.addTail(t)
+		f.guard.targets = make(map[string]string)
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		if err := f.a.refreshPeerServices(ctx, f.b.identity.NodeUUID); err == nil {
+			t.Fatal("unavailable walk succeeded")
+		}
+		if f.guard.attempted(f.lan) == 0 || f.guard.attempted(f.tail) == 0 || f.guard.physical.Load() != 0 || f.handlers.Load() != 0 {
+			t.Fatal("synthetic unavailable candidates were not fully walked")
+		}
+		assertWalkUnchanged(t, f)
+	})
+}
+
 // containHintDials fences both transport owners separately. These fixtures
 // never need chooser probes or reverse IPC; HTTP uses only literal loopback.
-func containHintDials(t *testing.T, m *Manager, wantHTTP bool) {
+func containHintDials(t *testing.T, m *Manager, wantHTTP bool) *peerDialGuard {
 	t.Helper()
-	var direct, blocked, reverse, chooser atomic.Int32
+	g := newPeerDialGuard(t)
 	opts := m.peerServiceOptions()
-	opts.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
-		host, _, err := net.SplitHostPort(address)
-		if err != nil || !net.ParseIP(host).IsLoopback() {
-			blocked.Add(1)
-			return nil, errors.New("fixture refused non-loopback dial")
-		}
-		direct.Add(1)
-		return (&net.Dialer{}).DialContext(ctx, network, address)
-	}
-	opts.DialReverse = func(context.Context, string, string, noderec.ServiceKey) (net.Conn, error) {
-		reverse.Add(1)
-		return nil, errors.New("fixture refused reverse dial")
-	}
-	replaceClusterPeerServices(t, m, opts)
-	m.peerAddrs = reach.NewChooser(reach.WithDial(func(string, string, time.Duration) (net.Conn, error) {
-		chooser.Add(1)
-		return nil, errors.New("fixture refused chooser dial")
-	}))
+	replaceClusterPeerServices(t, m, opts, g)
 	t.Cleanup(func() {
-		if blocked.Load() != 0 || reverse.Load() != 0 || chooser.Load() != 0 || (direct.Load() > 0) != wantHTTP {
-			t.Errorf("dial containment: direct=%d blocked=%d reverse=%d chooser=%d wantHTTP=%v", direct.Load(), blocked.Load(), reverse.Load(), chooser.Load(), wantHTTP)
+		g.mu.Lock()
+		defer g.mu.Unlock()
+		if g.reverse.Load() != 0 || (len(g.logical) > 0) != wantHTTP {
+			t.Errorf("hint dial containment logical=%v reverse=%d wantHTTP=%v", g.logical, g.reverse.Load(), wantHTTP)
 		}
-		t.Logf("dial counts: direct=%d blocked=%d reverse=%d chooser=%d", direct.Load(), blocked.Load(), reverse.Load(), chooser.Load())
 	})
+	return g
 }
 
 type peerHintFixture struct {
@@ -321,17 +811,20 @@ func TestPeerServicesHintCommitBindsAdmission(t *testing.T) {
 
 func TestPeerServicesHintPersistenceFailure(t *testing.T) {
 	a, b := newReverseTestManager(t), newReverseTestManager(t)
-	containHintDials(t, a, true)
+	guard := containHintDials(t, a, true)
 	containHintDials(t, b, false)
 	t.Cleanup(a.peerServices.CloseIdle)
 	t.Cleanup(a.removalPeerServices.CloseIdle)
 	setDescriptorSelf(t, b)
 	setReverseServices(t, b, 1)
 	server := httptest.NewUnstartedServer(http.HandlerFunc(b.handlePeerServices))
+	owned := &ownedPeerListener{Listener: server.Listener}
+	server.Listener = owned
 	server.TLS = b.buildServerTLSConfig()
 	server.StartTLS()
 	defer server.Close()
 	b.port = server.Listener.Addr().(*net.TCPAddr).Port
+	guard.allow(t, server.Listener.Addr().String(), owned)
 	pairReverseManagers(t, a, b)
 	persistPeerServicesMembers(t, a, b)
 	var output bytes.Buffer
@@ -573,7 +1066,7 @@ func TestPeerServicesFetchBindsOriginalAdmission(t *testing.T) {
 	test := func(name string, retire bool) {
 		t.Run(name, func(t *testing.T) {
 			a, b := newReverseTestManager(t), newReverseTestManager(t)
-			containHintDials(t, a, true)
+			guard := containHintDials(t, a, true)
 			containHintDials(t, b, false)
 			setDescriptorSelf(t, b)
 			setReverseServices(t, b, 1, noderec.RegisterParams{Service: noderec.ServiceNodeInfo, Port: 24441})
@@ -591,10 +1084,13 @@ func TestPeerServicesFetchBindsOriginalAdmission(t *testing.T) {
 				b.handlePeerServices(w, r)
 			}))
 			server.TLS = b.buildServerTLSConfig()
+			owned := &ownedPeerListener{Listener: server.Listener}
+			server.Listener = owned
 			server.StartTLS()
 			defer server.Close()
 			defer releaseHeld()
 			b.port = server.Listener.Addr().(*net.TCPAddr).Port
+			guard.allow(t, server.Listener.Addr().String(), owned)
 			pairReverseManagers(t, a, b)
 			persistPeerServicesMembers(t, a, b)
 			a.mesh.Refresh()
@@ -717,7 +1213,7 @@ func TestPeerServicesBlockedDirectUsesRealReverse(t *testing.T) {
 	setReverseServices(t, b.m, 2, noderec.RegisterParams{Service: noderec.ServiceCluster, Port: inner.Listener.Addr().(*net.TCPAddr).Port}, noderec.RegisterParams{Service: noderec.ServiceNodeInfo, Port: 26441})
 	startPrivateReverse(t, a.m)
 	connectReverseManagers(t, a.m, b.m)
-	reverse := countClusterReverseDials(t, a.m)
+	reverse := countClusterReverseDials(t, a)
 	var published bytes.Buffer
 	a.m.codec = NewCodec(struct {
 		io.Reader
@@ -752,7 +1248,7 @@ func TestPeerServicesUnavailableRoutePreservesMembership(t *testing.T) {
 	pairClusterFixtures(t, a, b)
 	persistPeerServicesMembers(t, a.m, b.m)
 	startPrivateReverse(t, a.m)
-	countClusterReverseDials(t, a.m)
+	countClusterReverseDials(t, a)
 	before, ok := a.m.mesh.PeerServiceIncarnation(b.m.identity.NodeUUID)
 	if !ok {
 		t.Fatal("missing initial authority")

@@ -75,11 +75,11 @@ func accepts(dial DialFunc, address string, timeout time.Duration) bool {
 // For one-shot, user-initiated work. A caller that dials the same node repeatedly
 // should use a Chooser so a confirmed address is not re-probed every time.
 func First(candidates []string, timeout time.Duration) (address string, ok bool) {
-	return first(netDial, candidates, timeout, time.Time{})
+	return first(context.Background(), netDial, candidates, timeout)
 }
 
 // first probes the candidates together and returns the best-ranked one that
-// accepts. A non-zero deadline caps the whole probe.
+// accepts. The context bounds the wait and caps each finite probe's timeout.
 //
 // Together rather than one after another because the expensive failure is an
 // address that neither answers nor refuses: a dropped SYN costs the full timeout,
@@ -96,11 +96,14 @@ func First(candidates []string, timeout time.Duration) (address string, ok bool)
 // best-ranked address that accepted. Taking the fastest responder instead would
 // let two equally reachable addresses trade places on timing noise, and every
 // swap costs a reconnect to learn nothing.
-func first(dial DialFunc, candidates []string, timeout time.Duration, deadline time.Time) (string, bool) {
+func first(ctx context.Context, dial DialFunc, candidates []string, timeout time.Duration) (string, bool) {
+	if ctx.Err() != nil {
+		return "", false
+	}
 	if timeout <= 0 {
 		timeout = DefaultTimeout
 	}
-	if !deadline.IsZero() {
+	if deadline, ok := ctx.Deadline(); ok {
 		remaining := time.Until(deadline)
 		if remaining <= 0 {
 			slog.Debug("reach: confirmation budget spent before it began; nothing was probed",
@@ -115,6 +118,9 @@ func first(dial DialFunc, candidates []string, timeout time.Duration, deadline t
 	// blocking on a send nobody will receive.
 	verdicts := make([]chan bool, len(candidates))
 	for i, address := range candidates {
+		if ctx.Err() != nil {
+			return "", false
+		}
 		if address == "" {
 			continue
 		}
@@ -128,8 +134,13 @@ func first(dial DialFunc, candidates []string, timeout time.Duration, deadline t
 		if verdict == nil {
 			continue
 		}
-		if <-verdict {
-			return candidates[i], true
+		select {
+		case <-ctx.Done():
+			return "", false
+		case accepted := <-verdict:
+			if accepted {
+				return candidates[i], true
+			}
 		}
 	}
 	return "", false
@@ -278,7 +289,10 @@ func (c *Chooser) Prefer(key string, candidates []string) string {
 }
 
 // ChooseWithin returns the address to use for key, confirming it by connecting when
-// there is nothing remembered, bounded by ctx's deadline.
+// there is nothing remembered, bounded by ctx's deadline and cancellation.
+// Cancellation returns the published fallback without caching the abandoned
+// confirmation. Timeout-only DialFunc probes already running may finish later;
+// they still close their connections and deliver into buffered verdict channels.
 //
 // For background and one-shot work, where being right on the first attempt is worth
 // more than the latency — a periodic reconcile, or an operation a person just asked
@@ -292,11 +306,10 @@ func (c *Chooser) ChooseWithin(ctx context.Context, key string, candidates []str
 	if len(candidates) == 0 {
 		return ""
 	}
-	if len(candidates) == 1 {
+	if len(candidates) == 1 || ctx.Err() != nil {
 		return candidates[0]
 	}
 	fingerprint := strings.Join(candidates, "|")
-	deadline, _ := ctx.Deadline()
 
 	c.mu.Lock()
 	if address, ok := c.reuse(key, candidates, fingerprint, time.Now()); ok {
@@ -306,8 +319,8 @@ func (c *Chooser) ChooseWithin(ctx context.Context, key string, candidates []str
 	generation := c.generation[key]
 	c.mu.Unlock()
 
-	address, ok := first(c.dial, candidates, c.timeout, deadline)
-	return c.remember(key, candidates, fingerprint, address, ok, generation)
+	address, ok := first(ctx, c.dial, candidates, c.timeout)
+	return c.remember(ctx, key, candidates, fingerprint, address, ok, generation)
 }
 
 // confirm probes in the background for Prefer and records the result for the calls
@@ -318,8 +331,8 @@ func (c *Chooser) ChooseWithin(ctx context.Context, key string, candidates []str
 // replacement; releasing it here regardless would clear that replacement's
 // registration and let a third probe start alongside it.
 func (c *Chooser) confirm(key string, candidates []string, fingerprint string, generation uint64) {
-	address, ok := first(c.dial, candidates, c.timeout, time.Time{})
-	c.remember(key, candidates, fingerprint, address, ok, generation)
+	address, ok := first(context.Background(), c.dial, candidates, c.timeout)
+	c.remember(context.Background(), key, candidates, fingerprint, address, ok, generation)
 	c.mu.Lock()
 	if c.generation[key] == generation {
 		delete(c.probing, key)
@@ -348,7 +361,7 @@ func (c *Chooser) reuse(key string, candidates []string, fingerprint string, now
 // remember records a probe's outcome and returns the address to use. The outcome
 // is still returned when it is not recorded: it is what this probe actually
 // found, and the caller that started it has a connection to make either way.
-func (c *Chooser) remember(key string, candidates []string, fingerprint, address string, ok bool, generation uint64) string {
+func (c *Chooser) remember(ctx context.Context, key string, candidates []string, fingerprint, address string, ok bool, generation uint64) string {
 	if !ok {
 		// The top candidate beats refusing: a blip must not become a hard failure,
 		// and the caller's own error path reports what really happened. It is
@@ -362,6 +375,10 @@ func (c *Chooser) remember(key string, candidates []string, fingerprint, address
 	}
 
 	c.mu.Lock()
+	if ctx.Err() != nil {
+		c.mu.Unlock()
+		return candidates[0]
+	}
 	if c.generation[key] == generation {
 		c.cache[key] = choice{fingerprint: fingerprint, address: address, settled: ok, at: time.Now()}
 	} else {

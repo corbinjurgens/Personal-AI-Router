@@ -4,11 +4,13 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"slices"
 	"sort"
@@ -213,12 +215,17 @@ func (m *Manager) refreshPeerServices(ctx context.Context, uuid string) error {
 		return errors.New("member unavailable")
 	}
 	addresses := m.resolvePeerAddrs(*member)
-	if len(addresses) > 8 {
-		addresses = addresses[:8]
-	}
 	ctx, cancel := context.WithTimeout(ctx, 8*time.Second)
 	defer cancel()
-	for _, address := range addresses {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	addresses = confirmedFirst(addresses, m.peerAddrs.ChooseWithin(ctx, uuid, addresses))
+	deadline, _ := ctx.Deadline()
+	for index, address := range addresses {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if !m.selectPeerServiceAddress(uuid, address) {
 			continue
 		}
@@ -226,25 +233,54 @@ func (m *Manager) refreshPeerServices(ctx context.Context, uuid string) error {
 		if err != nil {
 			return err
 		}
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://"+address+peerServicesPath, nil)
+		// Divide the remaining parent time among ALL remaining endpoints. This
+		// context owns setup, reverse fallback, headers, complete body and EOF.
+		budget := time.Until(deadline) / time.Duration(len(addresses)-index)
+		attempt, attemptCancel := context.WithTimeout(ctx, budget)
+		req, err := http.NewRequestWithContext(attempt, http.MethodGet, "https://"+address+peerServicesPath, nil)
 		if err != nil {
+			attemptCancel()
 			return err
 		}
 		response, err := client.Do(req)
+		var descriptor noderec.PeerServicesDescriptor
+		retry := true
+		if err == nil {
+			if response.StatusCode != http.StatusOK {
+				err = errors.New("peer services HTTP refusal")
+			} else {
+				// Read the real stream through EOF under the same attempt budget.
+				// Keeping transport errors separate from validation means a complete
+				// invalid document stays terminal rather than masquerading as failover.
+				var payload []byte
+				payload, err = io.ReadAll(io.LimitReader(response.Body, noderec.PeerServicesMaxBytes+1))
+				if err == nil {
+					descriptor, err = noderec.DecodePeerServices(bytes.NewReader(payload), uuid)
+					retry = errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF)
+				}
+			}
+		}
+		if response != nil {
+			if closeErr := response.Body.Close(); err == nil && closeErr != nil {
+				err = closeErr
+				retry = true
+			}
+		}
+		attemptErr := attempt.Err()
+		attemptCancel()
+		if parentErr := ctx.Err(); parentErr != nil {
+			return parentErr
+		}
+		if attemptErr != nil {
+			err = attemptErr
+			retry = true
+		}
 		if err != nil {
+			if !retry {
+				return err
+			}
+			m.peerAddrs.Forget(uuid)
 			continue
-		}
-		if response.StatusCode != http.StatusOK {
-			response.Body.Close()
-			continue
-		}
-		descriptor, err := noderec.DecodePeerServices(response.Body, uuid)
-		closeErr := response.Body.Close()
-		if err != nil {
-			return err
-		}
-		if closeErr != nil {
-			return closeErr
 		}
 		if err := m.commitPeerServiceHints(descriptor, incarnation, peer); err != nil {
 			return err

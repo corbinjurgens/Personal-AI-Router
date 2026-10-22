@@ -40,6 +40,7 @@ func TestReconcile_ReusesPeerConnections(t *testing.T) {
 
 type peerConnectionFixture struct {
 	m           *Manager
+	guard       *peerDialGuard
 	peerUUID    string
 	address     string
 	newConns    atomic.Int32
@@ -53,11 +54,11 @@ func newPeerConnectionFixture(t *testing.T, handler http.Handler) *peerConnectio
 	t.Cleanup(m.peerServices.CloseIdle)
 	t.Cleanup(m.removalPeerServices.CloseIdle)
 	t.Cleanup(m.clients.CloseIdle)
-	return addPeerConnectionFixture(t, m, handler)
+	return addPeerConnectionFixture(t, m, handler, newPeerDialGuard(t))
 }
 
 // addPeerConnectionFixture pins one more loopback peer on an existing manager.
-func addPeerConnectionFixture(t *testing.T, m *Manager, handler http.Handler) *peerConnectionFixture {
+func addPeerConnectionFixture(t *testing.T, m *Manager, handler http.Handler, guard *peerDialGuard) *peerConnectionFixture {
 	t.Helper()
 	peerUUID, err := newUUIDv4()
 	if err != nil {
@@ -78,8 +79,10 @@ func addPeerConnectionFixture(t *testing.T, m *Manager, handler http.Handler) *p
 		t.Fatal(err)
 	}
 
-	f := &peerConnectionFixture{m: m, peerUUID: peerUUID, closed: make(chan struct{}, 1)}
+	f := &peerConnectionFixture{m: m, guard: guard, peerUUID: peerUUID, closed: make(chan struct{}, 1)}
 	ts := httptest.NewUnstartedServer(handler)
+	owned := &ownedPeerListener{Listener: ts.Listener}
+	ts.Listener = owned
 	ts.Config.ConnState = func(_ net.Conn, state http.ConnState) {
 		if state == http.StateNew {
 			f.newConns.Add(1)
@@ -99,6 +102,8 @@ func addPeerConnectionFixture(t *testing.T, m *Manager, handler http.Handler) *p
 	addr := ts.Listener.Addr().String()
 	m.upsertMember(&ClusterNode{NodeUUID: peerUUID, ID: "peer", IPAddress: "127.0.0.1", Port: ts.Listener.Addr().(*net.TCPAddr).Port, ClusterID: "cluster-1", AdmissionEpoch: 1, State: stateMember})
 	f.address = addr
+	guard.allow(t, addr, owned)
+	replaceClusterPeerServices(t, m, m.peerServiceOptions(), guard)
 	return f
 }
 
@@ -202,7 +207,7 @@ func TestPooledPeerConnectionClosesWhenPeerLeavesMembership(t *testing.T) {
 
 func TestMemberRemovalKeepsOtherPeerPooledConnection(t *testing.T) {
 	removed := newPeerConnectionFixture(t, rosterOKHandler(t))
-	kept := addPeerConnectionFixture(t, removed.m, rosterOKHandler(t))
+	kept := addPeerConnectionFixture(t, removed.m, rosterOKHandler(t), removed.guard)
 	poolPeerConnection(t, removed)
 	poolPeerConnection(t, kept)
 
