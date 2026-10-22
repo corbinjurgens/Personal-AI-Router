@@ -84,6 +84,14 @@ func StartDetached(binaryPath string, brokerArgs []string) error {
 		args = append(args, "--")
 		args = append(args, brokerArgs...)
 	}
+	return StartDetachedArgs(binaryPath, args)
+}
+
+// StartDetachedArgs starts binaryPath detached with the complete service
+// arguments, without adding a broker separator. Like StartDetached, it returns
+// after process creation, uses null stdio and the executable's directory, and
+// inherits the caller's whole environment, including provider credentials.
+func StartDetachedArgs(binaryPath string, args []string) error {
 	cmd := exec.Command(binaryPath, args...)
 	cmd.Dir = filepath.Dir(binaryPath)
 	// Nil stdio is the null device: a detached service must not hold the

@@ -62,10 +62,14 @@ type autostartEntry struct {
 // runAutostart implements `nvpair-service autostart enable|disable|status`.
 // Everything after "enable" is recorded verbatim as the service's own command
 // line, so `autostart enable -- --log-level debug` starts the service at login
-// with those broker arguments.
+// with those broker arguments. The internal Windows "run" command starts that
+// service without a daemon console.
 func runAutostart(args []string, out io.Writer) error {
 	if len(args) == 0 {
 		return errors.New("usage: nvpair-service autostart enable|disable|status [--systemd] [service flags] [-- broker args]")
+	}
+	if args[0] == "run" {
+		return runAutostartService(args[1:])
 	}
 	args, useSystemd := extractSystemdFlag(args)
 	if useSystemd && runtime.GOOS != "linux" {
@@ -274,10 +278,11 @@ func launchAgentArgs(data []byte) ([]string, error) {
 	return args, nil
 }
 
-// windowsCommandLine joins e into a command line that CommandLineToArgvW (and
-// so Go's os.Args on Windows) splits back into the same arguments.
+// windowsCommandLine renders the Windows Run value through the autostart
+// starter. Quoting preserves e's original service and broker arguments when
+// Windows splits the command line.
 func windowsCommandLine(e autostartEntry) string {
-	parts := []string{`"` + e.Program + `"`}
+	parts := []string{`"` + e.Program + `"`, "autostart", "run"}
 	for _, a := range e.Args {
 		parts = append(parts, windowsQuoteArg(a))
 	}

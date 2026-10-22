@@ -6,9 +6,33 @@
 package main
 
 import (
+	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"syscall"
+
+	"nvpair-shared/servicectl"
 )
+
+// runAutostartService reexecutes the ordinary serve command without a console window.
+// It returns after process creation; service and broker readiness come later.
+func runAutostartService(args []string) error {
+	if err := validateRunArgs(args); err != nil {
+		return err
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("locate own executable: %w", err)
+	}
+	if resolved, err := filepath.EvalSymlinks(exe); err == nil {
+		exe = resolved
+	}
+	if err := servicectl.StartDetachedArgs(exe, args); err != nil {
+		return fmt.Errorf("start autostart service: %w", err)
+	}
+	return nil
+}
 
 // configureBroker hides the broker's console and gives it its own process
 // group, so a console Ctrl+C sent to the service is not delivered to the broker

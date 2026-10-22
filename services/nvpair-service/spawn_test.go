@@ -22,21 +22,86 @@ import (
 // exec-based spawner can be exercised end to end.
 const fakeBrokerEnv = "NVPAIR_SERVICE_TEST_BROKER"
 
+const (
+	serviceCommandEnv    = "NVPAIR_SERVICE_TEST_COMMAND"
+	serviceProcessDirEnv = "NVPAIR_SERVICE_TEST_PROCESS_DIR"
+	processBrokerArg     = "--nvpair-service-test-broker"
+)
+
+type serviceProcessRecord struct {
+	PID     int      `json:"pid"`
+	Cwd     string   `json:"cwd"`
+	Args    []string `json:"args"`
+	Image   string   `json:"image,omitempty"`
+	Created uint64   `json:"created,omitempty"`
+}
+
 func TestMain(m *testing.M) {
 	secretenvtest.RunChild()
-	if os.Getenv(fakeBrokerEnv) == "1" {
+	command := os.Getenv(serviceCommandEnv) == "1"
+	broker := len(os.Args) > 1 && os.Args[1] == processBrokerArg
+	if os.Getenv(fakeBrokerEnv) == "1" && (!command || broker) {
+		if err := recordServiceTestProcess("broker"); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(2)
+		}
 		runProcessBroker()
 		return
 	}
+	if command {
+		// The reexecuted daemon keeps the command role. The broker selects its
+		// existing fake role with an explicit first argument on the same image.
+		args := os.Args[1:]
+		if len(args) == 0 || (args[0] != "autostart" && args[0] != "status" && args[0] != "call" && args[0] != "stop") {
+			opts, err := parseRunArgs(args, io.Discard)
+			if err == nil && !opts.showVersion {
+				if err := recordServiceTestProcess("daemon"); err != nil {
+					fmt.Fprintln(os.Stderr, err)
+					os.Exit(2)
+				}
+			}
+		}
+		os.Exit(run(args, os.Stdout, os.Stderr))
+	}
 	os.Exit(m.Run())
+}
+
+// Records exist before listening or app:ready, so failed startup can still be
+// cleaned up by verified process identity. Only process tests supply this private directory.
+func recordServiceTestProcess(role string) error {
+	dir := os.Getenv(serviceProcessDirEnv)
+	if dir == "" {
+		return nil
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		return err
+	}
+	image, created, err := serviceTestProcessIdentity()
+	if err != nil {
+		return err
+	}
+	data, err := json.Marshal(serviceProcessRecord{PID: os.Getpid(), Cwd: cwd, Args: os.Args[1:], Image: image, Created: created})
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(dir, fmt.Sprintf("%s-%d.json", role, os.Getpid())), data, 0o600)
 }
 
 // runProcessBroker announces its working directory and arguments in app:ready,
 // writes a stderr line at start and on "log", and exits on shutdown or stdin
 // EOF.
 func runProcessBroker() {
-	cwd, _ := os.Getwd()
-	params, _ := json.Marshal(map[string]any{"version": "proc", "cwd": cwd, "args": os.Args[1:]})
+	cwd, err := os.Getwd()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(2)
+	}
+	params, err := json.Marshal(map[string]any{"version": "proc", "cwd": cwd, "args": os.Args[1:], "pid": os.Getpid()})
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(2)
+	}
 	fmt.Printf(`{"jsonrpc":"2.0","method":"app:ready","params":%s}`+"\n", params)
 	fmt.Fprintln(os.Stderr, "[nvpair-ui-broker] INFO started")
 	sc := bufio.NewScanner(os.Stdin)
@@ -44,11 +109,14 @@ func runProcessBroker() {
 		var m struct {
 			ID     json.RawMessage `json:"id"`
 			Method string          `json:"method"`
+			Params json.RawMessage `json:"params"`
 		}
 		if json.Unmarshal(sc.Bytes(), &m) != nil {
 			continue
 		}
 		switch m.Method {
+		case "echo":
+			fmt.Printf(`{"jsonrpc":"2.0","id":%s,"result":%s}`+"\n", m.ID, orNull(m.Params))
 		case "log":
 			fmt.Fprintln(os.Stderr, "[nvpair-ui-broker] INFO asked to log")
 			fmt.Printf(`{"jsonrpc":"2.0","id":%s,"result":null}`+"\n", m.ID)

@@ -14,6 +14,10 @@ import (
 	"syscall"
 )
 
+func runAutostartService([]string) error {
+	return errors.New("autostart run is only supported on Windows")
+}
+
 // configureBroker puts the broker in its own process group, so a Ctrl+C
 // delivered to a service running in a terminal reaches only the service, which
 // then stops the broker in order instead of the broker dying mid-flight.

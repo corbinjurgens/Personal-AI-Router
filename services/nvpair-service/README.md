@@ -72,6 +72,11 @@ the binary's directory — and keeps dialing for up to ten seconds. The service
 inherits the client's whole environment, including provider credentials in the
 reserved `NVPAIR_PROVIDER_SECRET_` namespace.
 
+Windows ignores `CREATE_NO_WINDOW` when combined with `DETACHED_PROCESS`;
+`DETACHED_PROCESS` prevents the service from creating or inheriting a console.
+The shared `servicectl` launcher owns these flags for both client starts and
+the Windows autostart starter.
+
 ### Flags
 
 | Flag | Default | Description |
@@ -108,6 +113,36 @@ arguments after `enable`, and takes effect at the next login:
 | Windows | `HKCU\Software\Microsoft\Windows\CurrentVersion\Run\NVPAIRService` |
 | macOS | `~/Library/LaunchAgents/com.nvidia.pair.service.plist` (`RunAtLoad`, no `KeepAlive`, so `service/stop` sticks until the next login) |
 | Linux | `$XDG_CONFIG_HOME/autostart/nvpair-service.desktop` (`~/.config` when unset) |
+
+On Windows, the Run value invokes this executable's internal `autostart run`
+command with the recorded service flags and broker arguments. The starter
+validates those arguments and starts the ordinary service command from its own
+executable directory through the same shared detached launcher as clients,
+with stdio on the null device and
+`DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW`. The daemon has
+no console and outlives the starter. A console window may still flash briefly
+while Windows starts the console-subsystem starter, before its Go code runs.
+
+The starter returns once the child process is created; successful return does
+not establish service or broker readiness. Clients still wait for the broker's
+`app:ready`. Ordinary foreground execution and the `status`, `call` and `stop`
+CLI commands retain their console output, exit codes and waiting behavior.
+The internal starter is refused on other platforms.
+
+Existing Windows Run entries are not rewritten automatically. After upgrading,
+rerun `autostart enable` with the same service flags and broker arguments to
+refresh an existing entry to use the starter.
+`autostart status` prints the recorded command; a refreshed Windows entry
+includes `autostart run` immediately after the executable path. Before the
+next login after downgrading to a binary without the internal starter, rerun
+`autostart enable` with that older binary and the same flags and broker
+arguments to replace the entry it cannot run.
+
+The detached child's startup errors are not printed in the starter's terminal.
+For diagnosis, run `nvpair-service` directly in a terminal with the same service
+flags and broker arguments, then inspect `service.log` and `broker.log` in the
+configured log directory. A missing service or log directory can mean startup
+failed before logging was initialized.
 
 The Linux entry follows the XDG autostart specification, so it runs when a
 desktop session starts. A headless machine has no desktop session to process
