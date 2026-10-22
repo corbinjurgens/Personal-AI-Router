@@ -124,17 +124,11 @@ func (sc *statusCapture) FlushError() error {
 
 // Retry bounds for a single inference request.
 //
-// The two are not redundant, because they bound different things. An attempt is
-// consumed by a dispatch, never by a resolution: finding no eligible owner
-// sends nothing, so maxDispatchAttempts governs dispatch failures while
-// jobDeadline governs the wait for an owner to exist at all — a wait that costs
-// no attempts and would otherwise be unbounded.
-//
-// Read only against dispatch failures the deadline looks unreachable, and the
-// arithmetic says so: five attempts at a 120s first-content cap plus 15s of
-// cumulative backoff span 615s, so every reschedule check before the last sees
-// a clock under 600s. It is not dead — it is the only bound on the no-owner
-// wait. Do not remove it as unreachable.
+// Dispatch failures consume attempts, except a busy refusal from the round's
+// sole candidate: there is nobody else to try, so it queues again with backoff.
+// Finding no eligible owner also costs no attempt. jobDeadline bounds both
+// waits and the sole candidate's first-content wait; maxDispatchAttempts still
+// bounds other dispatch failures. Neither bound is redundant.
 const maxDispatchAttempts = 5
 
 // jobDeadline is a var (not a const) only so a test can shorten it; production
@@ -341,13 +335,11 @@ func awaitFirstBody(body io.ReadCloser, budget time.Duration) (io.ReadCloser, er
 // deadline against a real socket; production never reassigns it.
 var idleClientWriteTimeout = 30 * time.Second
 
-// firstBodyTimeout bounds how long awaitFirstBody waits for an engine to emit
-// its first content byte. It matches proxyResponseTimeout, the budget the
-// transport applies to headers, because from the caller's point of view the two
-// bound the same thing: how long we wait for a node to start the work. Keeping
-// it generous is deliberate — it also covers a cold model load, which is real
-// work rather than a stall, and which cannot be told apart from a queue wait
-// from outside the engine.
+// firstBodyTimeout bounds the wait for an engine's first content byte when a
+// round has alternatives. It matches the transport's header timeout and allows
+// a cold model load before failing over. A sole candidate instead gets the
+// remaining job deadline, so a long prefill is not repeatedly dispatched to
+// the same owner. Header, committed-stream and client-write limits are unchanged.
 //
 // It is a var (not a const) only so a test can shorten it; production never
 // reassigns it.

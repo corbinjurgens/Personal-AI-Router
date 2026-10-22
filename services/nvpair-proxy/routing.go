@@ -1175,6 +1175,12 @@ func (ctl *routingSpend) dispatch(f *facade, w http.ResponseWriter, r *http.Requ
 				continue
 			}
 			if decision.reject != "" {
+				if decision.reject == nodepolicy.RejectBusy && len(round) == 1 {
+					// With no alternative, queue slices must not spend the
+					// failover budget. The job deadline still ends the wait.
+					dispatches--
+					last = false
+				}
 				if rejectSelf("admission rejected: "+string(decision.reject), func() {
 					writeAdmissionRejection(w, decision.reject)
 				}) {
@@ -1300,6 +1306,7 @@ func (ctl *routingSpend) dispatch(f *facade, w http.ResponseWriter, r *http.Requ
 			attemptReq.Header.Set(nodepolicy.AdmissionWaitHeader, strconv.Itoa(admissionWait))
 		}
 		retry := false
+		retryBusy := false
 		sc := &statusCapture{ResponseWriter: w, status: http.StatusOK, idle: idleClientWriteTimeout}
 		var performance *performanceAttempt
 		if cand.self {
@@ -1331,7 +1338,9 @@ func (ctl *routingSpend) dispatch(f *facade, w http.ResponseWriter, r *http.Requ
 			ModifyResponse: func(resp *http.Response) error {
 				metadata := resp.Header.Values(peerStreamFramingHeader)
 				resp.Header.Del(peerStreamFramingHeader)
-				if !last && shouldRetry(resp.StatusCode) {
+				retryBusy = len(round) == 1 && resp.StatusCode == http.StatusServiceUnavailable &&
+					resp.Header.Get(nodepolicy.AdmissionHeader) == string(nodepolicy.RejectBusy)
+				if (!last || retryBusy) && shouldRetry(resp.StatusCode) {
 					// Abort before streaming: ReverseProxy closes resp.Body and
 					// calls ErrorHandler with our sentinel, then we try next.
 					retry = true
@@ -1357,8 +1366,10 @@ func (ctl *routingSpend) dispatch(f *facade, w http.ResponseWriter, r *http.Requ
 				// its headers and body arrive together. Framing is selected
 				// separately, after the winning claim.
 				var peeked io.ReadCloser
-				bodyWait := firstBodyTimeout
-				bodyWait = min(bodyWait, max(time.Until(deadline), time.Nanosecond))
+				bodyWait := max(time.Until(deadline), time.Nanosecond)
+				if len(round) != 1 {
+					bodyWait = min(firstBodyTimeout, bodyWait)
+				}
 				body, err := awaitFirstBody(resp.Body, bodyWait)
 				if err != nil {
 					if ctl.sink != nil && att.requestCommitted() {
@@ -1611,6 +1622,11 @@ func (ctl *routingSpend) dispatch(f *facade, w http.ResponseWriter, r *http.Requ
 			// Name the real reason rather than the bare "context canceled" the
 			// transport reports, which reads identically to a client hangup.
 			proxyErr = errTargetGone.Error()
+		}
+		if retryBusy && !att.redispatched() {
+			// Capture admission's reason before retrySignal discards the
+			// response; only a sole candidate's busy refusal is free.
+			dispatches--
 		}
 		if !retry {
 			finalStatus = sc.status

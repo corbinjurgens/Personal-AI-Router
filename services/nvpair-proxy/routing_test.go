@@ -25,6 +25,43 @@ import (
 	"nvpair-shared/nodepolicy"
 )
 
+func TestHandleHTTP_SoleOwnerWaitsForFirstContent(t *testing.T) {
+	setForTest(t, &firstBodyTimeout, 100*time.Millisecond)
+	setForTest(t, &retryBackoff, []time.Duration{time.Millisecond})
+	tc := anyCase(t)
+	var hits atomic.Int32
+	engine := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.(http.Flusher).Flush()
+		timer := time.NewTimer(300 * time.Millisecond)
+		defer timer.Stop()
+		select {
+		case <-r.Context().Done():
+			return
+		case <-timer.C:
+		}
+		if _, err := io.WriteString(w, `{"done":true}`); err != nil {
+			t.Errorf("write delayed engine response: %v", err)
+		}
+	}))
+	defer engine.Close()
+	disc := NewDiscovery()
+	disc.AddManual(nodeForModel(t, "sole-owner", engine.URL, tc.advertisedModel))
+	p := testProxy(tc.profile, disc, tc.profile.FacadePort)
+	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+	defer cancel()
+	rec := httptest.NewRecorder()
+	p.soleFacade().handleHTTP(rec, tc.inferenceRequest().WithContext(ctx))
+	if rec.Code != http.StatusOK || hits.Load() != 1 {
+		t.Fatalf("sole slow owner: status %d, engine hits %d; want 200 and exactly one inference dispatch", rec.Code, hits.Load())
+	}
+	if got := decodeJSONBody(t, rec.Body.String())["done"]; got != true {
+		t.Fatalf("response done = %v, want true", got)
+	}
+}
+
 func TestUnifiedDispatch(t *testing.T) {
 	t.Run("local peer and public share one attempt slot and allowance", func(t *testing.T) {
 		owner := newRoutingRequest(nil)
@@ -1389,6 +1426,11 @@ func TestUnifiedDispatchCommittedPeekTimer(t *testing.T) {
 	setForTest(t, &retryBackoff, []time.Duration(nil))
 	test := func(name string, acceptedAttempt int32, cancelAfterCommit, sinkAdmissionBarrier bool) {
 		t.Run(name, func(t *testing.T) {
+			if acceptedAttempt == maxDispatchAttempts {
+				// A sole candidate now waits through the remaining job
+				// deadline, including this blocked publication of its peek.
+				setForTest(t, &jobDeadline, 200*time.Millisecond)
+			}
 			entered, send := make(chan struct{}), make(chan struct{})
 			var sends atomic.Int32
 			engine := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

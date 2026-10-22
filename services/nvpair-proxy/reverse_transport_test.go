@@ -362,17 +362,18 @@ func TestProxyReverseTransportDoesNotReplayDispatchedHTTP(t *testing.T) {
 }
 
 func TestProxyReverseOwnerRetriesBeforeFirstBody(t *testing.T) {
-	setForTest(t, &firstBodyTimeout, 50*time.Millisecond)
 	setForTest(t, &retryBackoff, []time.Duration{time.Millisecond})
 	var calls atomic.Int32
 	f := newProxyReverseFixture(t, "ollama", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if calls.Add(1) == 1 {
+			// Fail before producing content, rather than timing out a sole
+			// owner's healthy prefill. The owner must still retry read errors.
+			w.Header().Set("Content-Length", "1")
 			w.WriteHeader(http.StatusOK)
 			if err := http.NewResponseController(w).Flush(); err != nil {
 				t.Error(err)
 				return
 			}
-			<-r.Context().Done()
 			return
 		}
 		if _, err := io.WriteString(w, "recovered"); err != nil {

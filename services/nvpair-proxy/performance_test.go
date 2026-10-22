@@ -1351,12 +1351,24 @@ func TestPerformanceUnobservedCopyOutcome(t *testing.T) {
 			}))
 			defer u.Close()
 			setBackend(t, p.soleFacade(), u.URL, true)
+			if scenario == "headers then stall" {
+				// Exercise the failover cap with an alternative. A sole
+				// owner's prefill instead waits for the job deadline.
+				alternateURL, alternateHits := newCountingServer(t, http.StatusServiceUnavailable, "")
+				p.soleFacade().discovery.AddManual(nodeForModel(t, "alternate", alternateURL, "m"))
+				p.SetPriority([]string{"destination", "alternate"})
+				t.Cleanup(func() {
+					if got := alternateHits(); got != 2 {
+						t.Errorf("alternate dispatches=%d, want 2", got)
+					}
+				})
+			}
 			w := httptest.NewRecorder()
 			p.soleFacade().handleHTTP(w, httptest.NewRequest(http.MethodPost, routeChatCompletions, strings.NewReader(`{"model":"m","stream":false}`)))
 			samples := performanceSamples(p)
 			wantAttempts, wantOutcome := 1, performancewire.OutcomeFailed
 			if scenario == "headers then stall" {
-				wantAttempts = maxDispatchAttempts
+				wantAttempts = 3 // self, alternate, self, alternate, self
 				if w.Code != http.StatusGatewayTimeout {
 					t.Fatalf("status=%d, want 504", w.Code)
 				}

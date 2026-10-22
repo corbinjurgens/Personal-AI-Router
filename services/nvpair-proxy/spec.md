@@ -446,7 +446,7 @@ not inventory scope. Its inference routes remain `/v1/*`.
 | --- | --- | --- |
 | `maxDispatchAttempts` | 5 | how many dispatches may fail |
 | `jobDeadline` | 10 minutes from request creation | how long new attempts may keep being started, including while waiting for an owner to exist |
-| `firstBodyTimeout` | `proxyResponseTimeout` (120s) | one attempt's wait for first content, measured from the arrival of headers |
+| `firstBodyTimeout` | `proxyResponseTimeout` (120s) | first-content wait in a round with alternatives, clipped to the remaining job deadline; a sole candidate gets the remaining deadline |
 | `defaultStreamFrameIdle` | 60 seconds | after commit, wait for the next complete valid event on an SC-managed stream; independent of dispatch bounds |
 | `idleClientWriteTimeout` | 30 seconds | a single blocked client write or flush; independent of upstream read idle |
 
@@ -461,34 +461,33 @@ candidates, back off between rounds, or apply the inference deadline.
 
 **An attempt is consumed by a dispatch, never by a resolution.** Finding no
 eligible owner sends nothing, so a job whose only owner briefly drops out does
-not burn its budget while the node comes back.
+not burn its budget while the node comes back. A `busy` admission refusal from
+the round's sole candidate also costs no attempt: it queues again with the
+existing backoff until capacity is available or the job deadline expires.
+Other refusals and failures retain their dispatch accounting.
 
 **Elapsed time per attempt is the sum of three budgets, not one.** They run in
 sequence: the dial (`proxyDialTimeout`, 10s), then headers
 (`proxyResponseTimeout`, 120s, enforced by the transport), then first content
-(`firstBodyTimeout`, 120s, which starts only once headers arrive). One attempt
-can therefore occupy around 240s — the two 120s caps back to back, since a slow
-dial is a LAN rarity — and nothing caps their sum.
+(`firstBodyTimeout`, 120s, which starts only once headers arrive). First content
+is also bounded by the remaining job deadline. If the round has a single
+candidate, only the remaining job deadline bounds this first-content wait,
+allowing long cache-miss prefill without resending it to the same owner.
 
-The dispatch-count and job-deadline bounds are checked before every dispatch and
-**never truncate an attempt already in flight**. Killing one seconds from its
-first token and then failing the job for being out of time would spend the
-entire wait and discard the result. `jobDeadline` is therefore a "no new attempts
-after" line rather than a ceiling on elapsed time, and the worst case is the
-deadline plus one whole
-attempt: a last dispatch starting just under 600s and running its full 240s
-puts time to first content near fourteen minutes.
+The dispatch-count and job-deadline bounds are checked before every dispatch.
+The deadline also bounds preparation, admission and waiting for the first
+content; it does not cut off a response that has already committed. Committed
+streams and client writes have their own idle limits.
 
 Which bound ends a job depends on how its attempts fail, and all three cases
 are real:
 
-- **Fast failures** — a refused connection, a prompt `503` — cost about a
+- **Fast failures** — a refused connection, a prompt non-busy `503` — cost about a
   second, so all five attempts fit well inside the deadline and the dispatch
   budget is what ends the job. This is the common case.
 - **Slow failures** — an engine that accepts and then withholds everything —
-  cost close to a whole attempt each, so the deadline arrives first. At 240s
-  per attempt the fourth dispatch would start past 600s, so the job ends after
-  three attempts with budget unspent.
+  can reach the deadline with budget unspent. With one candidate, waiting for
+  its first content uses the remaining deadline without a timeout redispatch.
 - **No owner at all** costs no attempt, so the deadline is the only thing that
   can end the wait.
 
@@ -1302,7 +1301,9 @@ JSON body naming the reason.
 `X-PAIR-Admission-Wait`: `0` while the round has other candidates, so a busy
 node hands the request straight back, and `admission.queueTimeoutSeconds` for
 the round's last candidate. The self candidate is admitted with the same value
-and the header is not passed to an engine.
+and the header is not passed to an engine. With a single candidate, a `busy`
+refusal requeues with backoff without spending a dispatch attempt, bounded by
+the job deadline.
 
 **A paused node and its own requests.** Pausing affects only work executed
 here. A self candidate refused while the node is not `available` is excluded
