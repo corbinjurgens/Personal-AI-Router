@@ -59,6 +59,7 @@ function entry(): PerformanceEntry {
         failed: 1,
         cancelled: 1,
         incomplete: 3,
+        outputTokens: null,
         newestAgeMs: 1234,
         oldestAgeMs: 4567,
         newestObservedAtMs: 1000,

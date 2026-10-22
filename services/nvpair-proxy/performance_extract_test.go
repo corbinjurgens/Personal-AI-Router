@@ -5,12 +5,15 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"nvpair-shared/performancewire"
 )
@@ -350,6 +353,93 @@ func TestPerformanceExtractDailyFixtures(t *testing.T) {
 	test("Strata native work differs from visible output", "strata-native-count-diff.json", strata,
 		performanceExtractMetadata{OutputTokens: performanceExtractTestInt(20), EngineDecodeNs: performanceExtractTestInt(400000000),
 			EngineDecodeTokensPerSecond: performanceExtractTestFloat(55)})
+}
+
+func TestPerformanceExtractLlamaStreamOutputCount(t *testing.T) {
+	test := func(name string, stream []byte, wantInterval *int64, wantRate *float64) {
+		t.Run(name, func(t *testing.T) {
+			p := performanceProxy(t, "llamacpp")
+			attempt, err := p.soleFacade().newPerformanceAttemptOwned(context.Background(), "m", routeChatCompletions,
+				[]byte(`{"model":"m","stream":true}`), 0)
+			if err != nil {
+				t.Fatalf("create qualified attempt: %v", err)
+			}
+			if attempt == nil {
+				t.Fatal("qualified llama.cpp attempt was not created")
+			}
+			attempt.start = time.Now()
+			reader, err := newStreamFrameReader(streamFrameConfig{
+				Budget:   newFrameBudget(64 << 20),
+				Protocol: streamProtocolSSE,
+				Upstream: io.NopCloser(bytes.NewReader(stream)),
+				Extract: func(payload []byte) performanceExtractMetadata {
+					return extractPerformanceObserved(payload, attempt.qualification)
+				},
+			})
+			if err != nil {
+				t.Fatalf("create SC reader: %v", err)
+			}
+			t.Cleanup(func() {
+				if err := reader.Close(); err != nil {
+					t.Errorf("close SC reader: %v", err)
+				}
+			})
+			forwarded, err := io.ReadAll(reader)
+			if err != nil {
+				t.Fatalf("read SSE stream: %v", err)
+			}
+			if !bytes.Equal(forwarded, stream) {
+				t.Fatal("SC reader changed complete upstream stream")
+			}
+			if result := reader.Result(); result.Outcome != streamOutcomeCompleted {
+				t.Fatalf("SC outcome = %v, want completed", result.Outcome)
+			}
+			attempt.reader = reader
+			attempt.finish(&statusCapture{}, true)
+			sample := performanceOne(t, p)
+			if sample.Outcome != performancewire.OutcomeCompleted || sample.ProtocolComplete == nil || !*sample.ProtocolComplete {
+				t.Fatal("successful SC completion did not qualify the sample")
+			}
+			knownOutputTokens, legacyDecodeNs := sample.OutputTokens, sample.DecodeNs
+			if knownOutputTokens == nil || *knownOutputTokens != 11 {
+				t.Fatalf("output tokens = %v, want known count 11", knownOutputTokens)
+			}
+			if legacyDecodeNs != nil {
+				t.Fatal("llama.cpp native interval populated legacy DecodeNs")
+			}
+			if !reflect.DeepEqual(sample.EngineDecodeNs, wantInterval) || !reflect.DeepEqual(sample.EngineDecodeTokensPerSecond, wantRate) {
+				t.Fatal("native interval/rate did not remain independent of output count")
+			}
+			if wantRate != nil && *wantRate == performancewire.TokensPerSecond(*knownOutputTokens, *wantInterval) {
+				t.Fatal("fixture must distinguish native decode steps from visible output tokens")
+			}
+		})
+	}
+	// The final empty-choices event carries matching usage and predicted_n.
+	// llama.cpp reports ten decode steps for eleven visible output tokens.
+	test("native timings with usage", performanceExtractTestFixture(t, "llamacpp-chat-stream-usage.txt"),
+		performanceExtractTestInt(250500000), performanceExtractTestFloat(39.92015968063872))
+	test("usage without timings retains count and unknown rates", []byte(
+		"data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"fixture\"},\"finish_reason\":null}]}\n\n"+
+			"data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n"+
+			"data: {\"choices\":[],\"usage\":{\"prompt_tokens\":15,\"completion_tokens\":11,\"total_tokens\":26}}\n\n"+
+			"data: [DONE]\n\n"), nil, nil)
+}
+
+func TestPerformanceExtractExistingEngineSchemas(t *testing.T) {
+	payload := []byte(`{"eval_count":11,"eval_duration":250500000,"usage":{"completion_tokens":11},"timings":{"predicted_n":11,"predicted_ms":250.5,"predicted_per_second":39.92015968063872}}`)
+	test := func(name string, q performanceExtractQualification, want performanceExtractMetadata) {
+		t.Run(name, func(t *testing.T) {
+			performanceExtractTestEqual(t, extractPerformancePayload(payload, q), want)
+		})
+	}
+	test("Ollama native keeps legacy interval", performanceExtractQualification{"ollama", "/api/chat", true, ""},
+		performanceExtractMetadata{OutputTokens: performanceExtractTestInt(11), DecodeNs: performanceExtractTestInt(250500000)})
+	test("Ollama compatibility ignores native timing extensions", performanceExtractQualification{"ollama", "/v1/chat/completions", true, ""},
+		performanceExtractMetadata{OutputTokens: performanceExtractTestInt(11)})
+	test("Ollama native rejects foreign schema", performanceExtractQualification{"ollama", "/api/chat", true, performanceExtractLlamaSchema}, performanceExtractMetadata{})
+	test("LM Studio compatibility remains unqualified", performanceExtractQualification{"lmstudio", "/v1/chat/completions", true, ""}, performanceExtractMetadata{})
+	test("LM Studio cannot opt into llama schema", performanceExtractQualification{"lmstudio", "/v1/chat/completions", true, performanceExtractLlamaSchema}, performanceExtractMetadata{})
 }
 
 func TestPerformanceExtractFractionalMilliseconds(t *testing.T) {

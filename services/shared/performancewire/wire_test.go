@@ -183,6 +183,72 @@ func TestEncodeDecodeSummaryRoundTrip(t *testing.T) {
 	}
 }
 
+func TestOutputTokensSummaryValidation(t *testing.T) {
+	test := func(name string, completed, incomplete, failed int, tokens *int64, wantError bool) {
+		t.Run(name, func(t *testing.T) {
+			s := validSummary()
+			e := &s.Entries[0]
+			e.Completed, e.Incomplete, e.Failed = completed, incomplete, failed
+			e.Samples = completed + failed
+			e.FirstBodyMs, e.Decode = nil, nil
+			e.OutputTokens = tokens
+			err := s.Validate()
+			if wantError {
+				if err == nil || !strings.Contains(err.Error(), "outputTokens") {
+					t.Fatalf("Validate() = %v, want outputTokens rejection", err)
+				}
+			} else if err != nil {
+				t.Fatalf("Validate() = %v", err)
+			}
+		})
+	}
+	test("unknown all failed", 0, 0, 1, nil, false)
+	test("measured zero", 1, 0, 0, ptr[int64](0), false)
+	test("maximum qualified total", 3, 1, 1, ptr(2*MaxTokens), false)
+	test("negative total", 1, 0, 0, ptr[int64](-1), true)
+	test("over qualified bound", 3, 1, 1, ptr(2*MaxTokens+1), true)
+	test("failed zero has no eligible sample", 0, 0, 1, ptr[int64](0), true)
+	test("incomplete zero has no eligible sample", 1, 1, 0, ptr[int64](0), true)
+}
+
+func TestOutputTokensSummaryRoundTripOwnsPointers(t *testing.T) {
+	test := func(name string, tokens *int64) {
+		t.Run(name, func(t *testing.T) {
+			want := validSummary()
+			want.Entries[0].OutputTokens = tokens
+			data, err := EncodeSummary(want)
+			if err != nil {
+				t.Fatalf("encode summary: %v", err)
+			}
+			var fields struct {
+				Entries []map[string]json.RawMessage `json:"entries"`
+			}
+			if err := json.Unmarshal(data, &fields); err != nil {
+				t.Fatalf("decode entry fields: %v", err)
+			}
+			if _, present := fields.Entries[0]["outputTokens"]; present != (tokens != nil) {
+				t.Fatalf("outputTokens presence = %t, want %t", present, tokens != nil)
+			}
+			got, err := DecodeSummary(data)
+			if err != nil {
+				t.Fatalf("decode summary: %v", err)
+			}
+			if !reflect.DeepEqual(got, want) {
+				t.Fatalf("round trip = %+v, want %+v", got, want)
+			}
+			if tokens != nil {
+				*got.Entries[0].OutputTokens = -1
+				if *want.Entries[0].OutputTokens < 0 {
+					t.Fatal("decoded count aliases source summary")
+				}
+			}
+		})
+	}
+	test("unknown omitted", nil)
+	test("measured zero present", ptr[int64](0))
+	test("maximum count", ptr(MaxTokens))
+}
+
 func TestDecodeSummaryRejects(t *testing.T) {
 	valid, err := json.Marshal(validSummary())
 	if err != nil {

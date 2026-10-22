@@ -59,6 +59,12 @@ and Strata Chat adapters preserve engine-reported decode rates and intervals
 separately from visible output tokens; Ollama retains its native count/duration
 semantics. Nonstream bodies pass through without numeric observation. No first
 token time is inferred from headers, body bytes or final timings.
+The aggregate `Entry.outputTokens` is the total of known engine-reported output
+counts from successful, SC-complete local executions in that entry. It is
+qualified independently of decode rates: usage-only completion can contribute
+a count while rates remain unknown. The field is absent when no qualifying
+count is known; an explicit zero is a measured zero. Native decode intervals
+and rates remain separate from this visible-output total.
 Unobserved responses count as completed only after the accepted response body
 reaches upstream EOF and delivery succeeds; protocol completion stays unknown.
 
