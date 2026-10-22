@@ -563,21 +563,32 @@ type candidate struct {
 	declared bool
 }
 
-// resolveCandidates returns the ordered list of nodes to try for the current
+// resolveCandidates resolves inference targets, including requests without a model.
+func (f *facade) resolveCandidates(model string) []candidate {
+	return f.resolveRouteCandidates(model, true)
+}
+
+// resolvePassthroughCandidates keeps paused peers visible to inventory and control.
+func (f *facade) resolvePassthroughCandidates() []candidate {
+	return f.resolveRouteCandidates("", false)
+}
+
+// resolveRouteCandidates returns the ordered list of nodes to try for the current
 // request. A model-bearing request first filters a request-local node copy to
 // advertised owners. A user-selected eligible node then leads, followed by
 // scheduler priority and stable ID fallback. The failover loop walks the
 // resulting owner list until a node returns a usable response.
 //
 // Advertised paused remote peers are excluded from inference before host
-// deduplication. Self uses local admission, manual nodes without a pause hint
-// remain eligible, and empty-model enumeration for non-inference is unchanged.
+// deduplication, including when the model is omitted. Self uses local admission,
+// and manual nodes without a pause hint remain eligible. Non-inference target
+// enumeration does not filter pause hints.
 // A self advertisement uses the explicit local engine; a target still pointing
 // back at this proxy after that substitution is dropped to prevent recursion.
 //
 // Returns an empty slice when no forwarding target is available; the caller
 // treats that as the rejection path.
-func (f *facade) resolveCandidates(model string) []candidate {
+func (f *facade) resolveRouteCandidates(model string, inference bool) []candidate {
 	p := f.host
 	id := f.SelectedID()
 
@@ -672,7 +683,7 @@ func (f *facade) resolveCandidates(model string) []candidate {
 				"node_id", n.ID, "target", u.Host)
 			return
 		}
-		if model != "" && !self && n.PausedBy != "" {
+		if inference && !self && n.PausedBy != "" {
 			return
 		}
 		if seenHost[u.Host] {

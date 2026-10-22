@@ -649,6 +649,10 @@ func (ctl *routingSpend) dispatch(f *facade, w http.ResponseWriter, r *http.Requ
 	// scheduler counts pending work by scheduledOn, so naming a node we have
 	// not tried would inflate its load. Each dispatch and each gap between
 	// attempts re-points it.
+	//
+	// Model-less inference still has a routing request key. Lifecycle payloads
+	// require a nonempty concrete model in both the broker projection and the
+	// workload-manager validator, so only model-bearing requests emit workloads.
 	if model != "" {
 		createdMs := start.UnixMilli()
 		// A tier request's model is the concrete model it is headed for: the
