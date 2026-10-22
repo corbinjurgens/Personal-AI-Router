@@ -20,6 +20,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"nvpair-shared/durablefile"
 	"nvpair-shared/engines"
 	"nvpair-shared/errors"
 	"nvpair-shared/noderec"
@@ -52,7 +53,8 @@ type facade struct {
 	profile engineProfile
 
 	// portMu serializes durable rebinds without blocking routing during storage I/O.
-	portMu sync.Mutex
+	portMu    sync.Mutex
+	portFiles durablefile.Replacer
 
 	// httpMu guards port, the servers, the split listener, and the listeners
 	// across a live set-port rebind. The HTTP handlers never read port (they
@@ -322,7 +324,7 @@ func (p *Proxy) enableFacade(params enableFacadeParams) (enableFacadeResult, err
 	// first lands on is persisted: clients configured against it keep working
 	// after a restart, whatever the broker would plan next time.
 	if profile.dynamic() && (!hasPersisted || persisted != port) {
-		if err := savePersistedPort(profile, port); err != nil {
+		if err := savePersistedPort(profile, port, f.portFiles); err != nil {
 			slog.Warn("could not persist descriptor engine facade port", "engine", profile.Name, "port", port, "err", err)
 		}
 	}
@@ -858,32 +860,37 @@ func (f *facade) setPort(newPort int) error {
 	f.portMu.Lock()
 	defer f.portMu.Unlock()
 	swapped, err := f.swapListener(newPort)
-	if err != nil || !swapped {
+	if !swapped {
 		return err
 	}
 
 	if err := f.notify("ready", ReadyParams{Version: Version, Port: newPort}); err != nil {
 		slog.Warn("failed to emit ready after rebind", "err", err)
 	}
-	return nil
+	return err
 }
 
 // swapListener binds newPort and moves both personalities onto it, reporting
 // false when the facade was already there. The new listener is bound before the
-// old split closes and persisted before the swap, so either failure leaves the
-// current listener serving. The caller holds portMu throughout the operation.
+// old split closes and persisted before the swap. A failure before replacement
+// leaves the current listener serving; ErrReplaced adopts the new listener to
+// match disk while reporting uncertain durability. The caller holds portMu.
 func (f *facade) swapListener(newPort int) (bool, error) {
 	port, _ := f.selfAddresses()
 	if newPort == port {
-		return false, savePersistedPort(f.profile, newPort)
+		return false, savePersistedPort(f.profile, newPort, f.portFiles)
 	}
 	newLn, err := f.host.routing.listenWildcard(newPort)
 	if err != nil {
 		return false, fmt.Errorf("failed to bind port %d: %w", newPort, err)
 	}
-	if err := savePersistedPort(f.profile, newPort); err != nil {
-		_ = newLn.Close()
-		return false, fmt.Errorf("persist proxy port: %w", err)
+	saveErr := savePersistedPort(f.profile, newPort, f.portFiles)
+	if saveErr != nil {
+		saveErr = fmt.Errorf("persist proxy port: %w", saveErr)
+		if !stderrors.Is(saveErr, durablefile.ErrReplaced) {
+			_ = newLn.Close()
+			return false, saveErr
+		}
 	}
 	f.httpMu.Lock()
 	defer f.httpMu.Unlock()
@@ -900,5 +907,5 @@ func (f *facade) swapListener(newPort int) (bool, error) {
 	if oldSplit != nil {
 		_ = oldSplit.Close()
 	}
-	return true, nil
+	return true, saveErr
 }

@@ -1037,6 +1037,10 @@ when that facade is enabled, taking precedence over the requested port, so the
 facade returns where the user left it. `ignorePersistedPort` bypasses that for a
 broker-coordinated start.
 
+Port persistence uses `durablefile`: failure before replacement leaves the old
+listener and file intact; `ErrReplaced` keeps the new listener and saved port,
+emits `ready`, and reports the durability error rather than reverting memory.
+
 `port` 0 means "the engine's standalone default". Any other out-of-range value
 is rejected rather than honoured as ephemeral: the facade announces the
 requested port in `ready`, so binding an ephemeral one would leave the broker

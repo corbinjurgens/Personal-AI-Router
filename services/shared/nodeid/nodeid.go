@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"nvpair-shared/appdir"
+	"nvpair-shared/durablefile"
 )
 
 type idFile struct {
@@ -79,11 +80,7 @@ func persist(path, uuid string) error {
 	if err != nil {
 		return err
 	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o600); err != nil {
-		return err
-	}
-	return os.Rename(tmp, path)
+	return durablefile.WriteFile(path, data, 0o600)
 }
 
 func defaultBaseDir() string {

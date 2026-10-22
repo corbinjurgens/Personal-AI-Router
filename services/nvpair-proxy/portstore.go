@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 
 	"nvpair-shared/appdir"
+	"nvpair-shared/durablefile"
 )
 
 type persistedPort struct {
@@ -56,9 +57,9 @@ func loadPersistedPort(p engineProfile) (int, bool) {
 	return pp.Port, true
 }
 
-// savePersistedPort atomically writes the chosen port (tmp + rename) so a
-// crash mid-write can't leave a truncated file behind.
-func savePersistedPort(p engineProfile, port int) error {
+// savePersistedPort durably replaces the chosen port. ErrReplaced means the
+// new port is on disk even though its durability could not be confirmed.
+func savePersistedPort(p engineProfile, port int, files durablefile.Replacer) error {
 	path, err := proxyPortPath(p)
 	if err != nil {
 		return err
@@ -70,13 +71,5 @@ func savePersistedPort(p engineProfile, port int) error {
 	if err != nil {
 		return err
 	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
-		return err
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		_ = os.Remove(tmp)
-		return err
-	}
-	return nil
+	return files.WriteFile(path, data, 0o644)
 }

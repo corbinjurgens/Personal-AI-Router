@@ -58,7 +58,7 @@ Bidirectional newline-delimited JSON-RPC 2.0. Stdio by default; `--ipc <path>` s
 ## Persistence
 
 - File: `settings.json` in the per-user data dir — `%LocalAppData%\Nvidia Corporation\Personal AI Router` (Windows), `~/.config/Nvidia Corporation/Personal AI Router` (Linux) — same directory as `manual-nodes.json`.
-- Writes go to `settings.json.tmp` first, then `os.Rename` over the destination. A crash mid-save leaves either the previous file intact or the new one fully written, never a half-file.
+- Writes use the shared `durablefile` helper: write a unique temporary sibling, sync it, replace the destination, then confirm replacement durability. A failure before replacement preserves the old file and in-memory settings. On `ErrReplaced`, the complete new bytes are already on disk: setters adopt the new settings while returning the persistence error, with no success notification. Getters report the applied value. A crash cannot leave a half-file; durability failures can still lose the replacement after power loss.
 - File mode is pinned to `0o600` (parent directory `0o700`) regardless of umask. The previous cluster-secret rationale is gone, but per-user settings still shouldn't be world-readable on shared hosts.
 - A malformed file on load is renamed aside as `settings.json.corrupt-<unix-ts>` and the subprocess starts with product defaults — refusing to start used to wedge every UI settings call behind a parse error.
 - Unknown JSON keys on load are silently ignored, and missing fields take Go zero-values. Adding or removing a setting is a non-breaking on-disk change: older settings.json files with the removed `auto_join_invites` / `cluster_secret` keys load cleanly under the new schema and those keys are dropped on the next save.
