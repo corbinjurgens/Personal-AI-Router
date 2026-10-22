@@ -831,7 +831,11 @@ func (e *Executor) switchStepLocked(ctx context.Context, p settings.SwitchStepRe
 		st.mu.Unlock()
 		var cleanupErr error
 		if !reclaimFailed && (!recoverCommitted || launchSucceeded || owned) && (!reconcile || recoverCommitted) {
-			cleanupErr = e.doStop(st, engine)
+			if !reconcile && !owned && !launchSucceeded {
+				cleanupErr = e.cleanupSwitchRecovery(startCtx, st, engine)
+			} else {
+				cleanupErr = e.doStop(st, engine)
+			}
 		}
 		err = errors.Join(err, cleanupErr)
 		if recoverCommitted && switchCode(err) != codeLocalVeto {

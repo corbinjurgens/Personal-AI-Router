@@ -11,8 +11,10 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -603,6 +605,162 @@ func TestSwitchTargetStartColdLaunchesMatchingOrphanAfterPrepare(t *testing.T) {
 	st.mu.Unlock()
 	if proc == nil || adopted || !running || pidAlive(orphan.Process.Pid) {
 		t.Fatalf("fresh target must cold-launch: owned=%v adopted=%v running=%v orphanAlive=%v", proc != nil, adopted, running, pidAlive(orphan.Process.Pid))
+	}
+}
+
+func freshRestoreSwitchFixture(t *testing.T) (*Executor, settings.SwitchPrepareRequest, *engineState, string, int) {
+	t.Helper()
+	m, managedDir, port := restoreOrphanManifest(t)
+	ex, p := switchFixture(t)
+	m.Engine = "target"
+	ex.reg.engines["target"] = m
+	st, err := ex.state("target")
+	if err != nil {
+		t.Fatal(err)
+	}
+	st.mu.Lock()
+	st.installDir = managedDir
+	st.mu.Unlock()
+	p.Origin = settings.SwitchOriginRemote
+	p = prepareSwitch(t, ex, p)
+	switchStep(t, ex, p, settings.SwitchStepSourceStop)
+	return ex, p, st, m.Platforms[hostKey()].Runtime.Bin, port
+}
+
+func TestSwitchFreshTargetCancellationDuringOperationWaitPreservesAdoptedOrphan(t *testing.T) {
+	ex, p, st, bin, port := freshRestoreSwitchFixture(t)
+	orphan := spawnFakeListener(t, bin, port)
+	status, err := ex.Status("target")
+	if err != nil || !status.Running || !status.Healthy {
+		t.Fatalf("passive target adoption: %+v err=%v", status, err)
+	}
+	st.mu.Lock()
+	adopted, owned := st.adopted, st.proc != nil
+	st.mu.Unlock()
+	if !adopted || owned {
+		t.Fatalf("fixture must be passively adopted: adopted=%v owned=%v", adopted, owned)
+	}
+
+	st.opMu.Lock()
+	release := sync.OnceFunc(st.opMu.Unlock)
+	defer release()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	completed := make(chan settings.SwitchStepResult, 1)
+	go func() {
+		completed <- ex.SwitchStep(ctx, settings.SwitchStepRequest{SwitchPrepareRequest: p, Step: settings.SwitchStepTargetStart})
+	}()
+	// Positive registration proves the fresh step has entered its start path;
+	// opMu still excludes every reclaim, launch and failed-start cleanup. The
+	// fake runtime needs no preparation, so no elapsed delay proves ordering.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		ex.remoteWork.mu.Lock()
+		registered := false
+		for _, op := range ex.remoteWork.ops {
+			registered = registered || op.engine == "target"
+		}
+		ex.remoteWork.mu.Unlock()
+		if registered {
+			break
+		}
+		select {
+		case result := <-completed:
+			t.Fatalf("fresh start returned before operation-lock barrier: %+v", result)
+		default:
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("fresh target start did not register before operation-lock wait")
+		}
+		runtime.Gosched()
+	}
+	// Registration and the initial admission check share this gate. Crossing
+	// it ensures cancellation cannot instead take the early admission exit.
+	ex.switchAdmission.Lock()
+	ex.switchAdmission.Unlock()
+	// With admission released and no other lifecycle locks held, this stack
+	// witness establishes the actual opMu wait before caller cancellation.
+	if err := servingWaitForPhase(ctx, "(*Executor).switchStepLocked("); err != nil {
+		t.Fatalf("fresh target operation-lock barrier: %v", err)
+	}
+	cancel()
+	release()
+	var result settings.SwitchStepResult
+	select {
+	case result = <-completed:
+	case <-time.After(10 * time.Second):
+		t.Fatal("cancelled fresh target start did not return")
+	}
+	if result.Error == nil || !strings.Contains(result.Error.Message, "canceled") {
+		t.Fatalf("cancelled fresh start: error=%+v checkpoint=%+v", result.Error, result.Checkpoint)
+	}
+	if result.Checkpoint == nil || result.Checkpoint.TargetCommitted || result.Checkpoint.Phase != settings.SwitchCheckpointStartPending || result.Observed.Target.TerminationVerified {
+		t.Errorf("cancelled unowned start must retain pending cleanup: checkpoint=%+v target=%+v", result.Checkpoint, result.Observed.Target)
+	}
+	st.mu.Lock()
+	owned, generation, fenced := st.proc != nil, st.gen, st.reclaimFailed
+	st.mu.Unlock()
+	// The fixture uses a kill stop signal: a live original PID and endpoint
+	// prove failed-start cleanup did not terminate the adopted process.
+	if owned || generation != 0 || fenced || !pidAlive(orphan.Process.Pid) || !portServing(port) {
+		t.Errorf("cancelled unowned start signalled or replaced orphan: owned=%v generation=%d fenced=%v alive=%v serving=%v", owned, generation, fenced, pidAlive(orphan.Process.Pid), portServing(port))
+	}
+	saved, err := ex.desired.load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if saved.PendingSwitch == nil || saved.PendingSwitch.Phase != settings.SwitchCheckpointStartPending || saved.PendingSwitch.TargetCommitted || saved.Engines["source"] || saved.Engines["target"] {
+		t.Errorf("cancelled fresh start lost pending Off checkpoint: %+v", saved)
+	}
+
+	// A later explicit reconcile owns precise cleanup, with no automatic
+	// target retry or source rollback after the cancelled forward operation.
+	cleaned := ex.SwitchReconcile(context.Background(), settings.SwitchReconcileRequest{SwitchPrepareRequest: p})
+	if cleaned.Error == nil || cleaned.Checkpoint == nil || cleaned.Checkpoint.TargetCommitted || cleaned.Checkpoint.Phase != settings.SwitchCheckpointSourceOff || !cleaned.Observed.Target.TerminationVerified {
+		t.Fatalf("later pending cleanup: error=%+v checkpoint=%+v target=%+v", cleaned.Error, cleaned.Checkpoint, cleaned.Observed.Target)
+	}
+	st.mu.Lock()
+	owned, generation = st.proc != nil, st.gen
+	st.mu.Unlock()
+	if owned || generation != 0 || !orphanPIDExited(orphan.Process.Pid) || portServing(port) {
+		t.Fatalf("later reconcile did not verify orphan exit without launch: owned=%v generation=%d alive=%v serving=%v", owned, generation, pidAlive(orphan.Process.Pid), portServing(port))
+	}
+	if source, err := ex.Status("source"); err != nil || source.Running {
+		t.Fatalf("cancelled fresh switch restored source: %+v err=%v", source, err)
+	}
+}
+
+func TestSwitchFreshTargetVetoBeforeReadinessCommitStopsOwnedLaunch(t *testing.T) {
+	ex, p, st, _, port := freshRestoreSwitchFixture(t)
+	var veto sync.Once
+	launchedPID := 0
+	ex.emit = func(method string, _ any) {
+		if method != "engine:state-changed" {
+			return
+		}
+		st.mu.Lock()
+		pid := 0
+		if st.proc != nil {
+			pid = st.proc.cmd.Process.Pid
+		}
+		st.mu.Unlock()
+		if pid != 0 {
+			veto.Do(func() {
+				launchedPID = pid
+				admitRecoveryVeto(t, ex, p, "local pause")
+			})
+		}
+	}
+	result := ex.SwitchStep(context.Background(), settings.SwitchStepRequest{SwitchPrepareRequest: p, Step: settings.SwitchStepTargetStart})
+	if launchedPID == 0 {
+		t.Fatal("fresh switch did not reach owned launch before veto")
+	}
+	assertRecoveryVeto(t, ex, result)
+	st.mu.Lock()
+	owned, running := st.proc != nil, st.running
+	st.mu.Unlock()
+	if owned || running || !result.Observed.Target.TerminationVerified || !orphanPIDExited(launchedPID) || portServing(port) {
+		t.Fatalf("fresh post-launch veto retained owned target: owned=%v running=%v pid=%d alive=%v serving=%v target=%+v", owned, running, launchedPID, pidAlive(launchedPID), portServing(port), result.Observed.Target)
 	}
 }
 
