@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"nvpair-shared/netpick"
 	"nvpair-shared/noderec"
 )
 
@@ -42,6 +43,38 @@ func (m *Manager) setSelfServicesIdentity(nodes []noderec.DirectoryNode) {
 	m.serviceRefresh.mu.Unlock()
 }
 
+func descriptorAddresses(scanner, overlay []string) []string {
+	var addresses []string
+	seen := make(map[string]bool)
+	for _, address := range scanner {
+		if !seen[address] && len(addresses) < noderec.MaxAdvertisedIPs {
+			addresses = append(addresses, address)
+			seen[address] = true
+		}
+	}
+	if len(addresses) == 0 {
+		return nil
+	}
+	orderedOverlay := append([]string(nil), overlay...)
+	sort.Strings(orderedOverlay)
+	for _, address := range orderedOverlay {
+		if seen[address] {
+			continue
+		}
+		// A full scanner list reserves one final position for an overlay hint.
+		if len(addresses) == noderec.MaxAdvertisedIPs {
+			addresses[len(addresses)-1] = address
+			break
+		}
+		addresses = append(addresses, address)
+		seen[address] = true
+		if len(addresses) == noderec.MaxAdvertisedIPs {
+			break
+		}
+	}
+	return addresses
+}
+
 func (m *Manager) selfServicesDescriptor() (noderec.PeerServicesDescriptor, error) {
 	m.serviceRefresh.mu.Lock()
 	self := m.serviceRefresh.self
@@ -57,6 +90,11 @@ func (m *Manager) selfServicesDescriptor() (noderec.PeerServicesDescriptor, erro
 		return d, errors.New("local registrations not initialized")
 	}
 	sort.Slice(d.Services, func(i, j int) bool { return d.Services[i].Service < d.Services[j].Service })
+	// Overlay hints cannot replace missing or invalid scanner identity data.
+	if err := noderec.ValidatePeerServicesDescriptor(d, m.identity.NodeUUID); err != nil {
+		return d, err
+	}
+	d.Addresses = descriptorAddresses(d.Addresses, netpick.SharedOverlayAddresses())
 	return d, noderec.ValidatePeerServicesDescriptor(d, m.identity.NodeUUID)
 }
 
