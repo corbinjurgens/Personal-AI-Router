@@ -84,9 +84,14 @@ type Manager struct {
 	// wait is never erased by a now-stale unanimous-403 verdict.
 	clusterGen atomic.Uint64
 
-	memMu   sync.Mutex
-	members map[string]*ClusterNode // keyed by nodeUuid
-	invites map[string]*Invite      // keyed by inviteId
+	// membersStoreMu serializes every member snapshot through replacement and
+	// speculative hint rollback. Order: existing roster/invite/session owner,
+	// then membersStoreMu, then briefly memMu. Storage never acquires outer
+	// identity, trust, reverse, routing or callback owners; I/O releases memMu.
+	membersStoreMu sync.Mutex
+	memMu          sync.Mutex
+	members        map[string]*ClusterNode // keyed by nodeUuid
+	invites        map[string]*Invite      // keyed by inviteId
 
 	tsMu       sync.Mutex
 	tombstones map[string]Tombstone // keyed by removed nodeUuid; newest wins (fan-out removal)

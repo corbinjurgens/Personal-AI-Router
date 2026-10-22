@@ -10,10 +10,12 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"slices"
 	"sort"
 	"sync"
 	"time"
 
+	"nvpair-shared/clustertrust"
 	"nvpair-shared/netpick"
 	"nvpair-shared/noderec"
 )
@@ -244,11 +246,8 @@ func (m *Manager) refreshPeerServices(ctx context.Context, uuid string) error {
 		if closeErr != nil {
 			return closeErr
 		}
-		m.mesh.Refresh()
-		current, valid := m.mesh.PeerServiceIncarnation(uuid)
-		currentPeer, memberValid := m.reversePeer(uuid)
-		if !valid || current != incarnation || !memberValid || currentPeer != peer {
-			return errors.New("admission changed during descriptor read")
+		if err := m.commitPeerServiceHints(descriptor, incarnation, peer); err != nil {
+			return err
 		}
 		m.serviceRefresh.mu.Lock()
 		m.serviceRefresh.sequence++
@@ -258,4 +257,50 @@ func (m *Manager) refreshPeerServices(ctx context.Context, uuid string) error {
 		return err
 	}
 	return errors.New("peer services unavailable")
+}
+
+// commitPeerServiceHints consumes a fully validated descriptor. Authentication
+// finishes under composition ownership before storage; storage then rechecks
+// only member fields and owns the complete speculative update/save/rollback.
+func (m *Manager) commitPeerServiceHints(descriptor noderec.PeerServicesDescriptor, incarnation string, peer clustertrust.ReversePeer) error {
+	m.rosterMu.Lock()
+	defer m.rosterMu.Unlock()
+	m.mesh.Refresh()
+	current, valid := m.mesh.PeerServiceIncarnation(descriptor.HostUUID)
+	currentPeer, memberValid := m.reversePeer(descriptor.HostUUID)
+	if !valid || current != incarnation || !memberValid || currentPeer != peer {
+		return errors.New("admission changed during descriptor read")
+	}
+	authenticated, ok := m.memberByNodeID(descriptor.HostUUID)
+	if !ok {
+		return errors.New("member unavailable during descriptor commit")
+	}
+
+	m.membersStoreMu.Lock()
+	defer m.membersStoreMu.Unlock()
+	m.memMu.Lock()
+	member := m.members[descriptor.HostUUID]
+	if member == nil || member.NodeUUID != authenticated.NodeUUID || member.State != stateMember ||
+		member.State != authenticated.State || member.ClusterID != authenticated.ClusterID || member.AdmissionEpoch != authenticated.AdmissionEpoch {
+		m.memMu.Unlock()
+		return errors.New("member changed during descriptor commit")
+	}
+	if slices.Equal(member.AdvertisedAddresses, descriptor.Addresses) {
+		m.memMu.Unlock()
+		return nil
+	}
+	previous := slices.Clone(member.AdvertisedAddresses)
+	member.AdvertisedAddresses = slices.Clone(descriptor.Addresses)
+	m.memMu.Unlock()
+	if err := m.persistMembersStoreLocked(); err != nil {
+		m.memMu.Lock()
+		// Restore only this transaction's hints, preserving ordinary address/name
+		// updates that do not acquire storage until their persistence call.
+		if current := m.members[descriptor.HostUUID]; current == member {
+			current.AdvertisedAddresses = previous
+		}
+		m.memMu.Unlock()
+		return err
+	}
+	return nil
 }

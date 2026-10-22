@@ -30,6 +30,14 @@ func (m *Manager) persistMembers() {
 }
 
 func (m *Manager) persistMembersErr() error {
+	m.membersStoreMu.Lock()
+	defer m.membersStoreMu.Unlock()
+	return m.persistMembersStoreLocked()
+}
+
+// persistMembersStoreLocked requires membersStoreMu held and memMu NOT held.
+// Keep the storage boundary through replacement; acquire no outer owner here.
+func (m *Manager) persistMembersStoreLocked() error {
 	m.memMu.Lock()
 	durable := make([]ClusterNode, 0, len(m.members))
 	for _, n := range m.members {
