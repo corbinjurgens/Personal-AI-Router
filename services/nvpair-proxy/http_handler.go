@@ -826,7 +826,7 @@ func (f *facade) serveProxyPassthrough(w http.ResponseWriter, r *http.Request, s
 			Status: http.StatusBadRequest, Duration: time.Since(start).Milliseconds(), Error: reason})
 		return
 	}
-	candidates := f.resolveCandidates("")
+	candidates := f.resolvePassthroughCandidates()
 	if cors.IsPreflight(r) {
 		targets := make([]cors.Target, 0, len(candidates))
 		for _, cand := range candidates {

@@ -428,6 +428,12 @@ For a model-bearing inference request:
 An ineligible manual selection cannot override the capability gate, and failover
 never broadens to an excluded node.
 
+Every inference request excludes advertised paused remote nodes before host
+deduplication, including requests without a `model` member. A model-less request
+has no model-owner filter. Self continues through local admission, and manual
+nodes without pause hints remain eligible. Model lists and control requests
+enumerate candidates without the inference pause filter.
+
 The llama.cpp facade exposes `GET /models` and `GET /v1/models` as aliases for
 the fleet's llama.cpp inventory. Both query every candidate's `GET /models`
 concurrently and merge duplicate model ids into an OpenAI list envelope
@@ -838,6 +844,11 @@ the client named a model. `engine` stays the facade the request entered on even
 when a tier candidate is served by another engine, because `engine` is part of
 the workload's store and dedup identity and changing it mid-life would fork the
 record; the engine that answered is in the `X-PAIR-Engine` response header.
+
+Inference without a `model` member still has a routing request identity but emits
+no workload lifecycle events. The broker's workload projection and the
+workload-manager's lifecycle validation require a nonempty concrete `model`.
+The routing key identifies the request but does not supply the concrete model.
 
 ### 5.6 Coverage gap: non-streaming requests
 

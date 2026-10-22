@@ -293,6 +293,50 @@ func paEngine(t *testing.T, endpoint *paEndpoint, profile engineProfile, id stri
 	}))
 }
 
+const paModelLessBody = `{"messages":[{"role":"user","content":"fixture request"}],"stream":false}`
+
+func paModelLessEngine(t *testing.T, endpoint *paEndpoint, id string) *httptest.Server {
+	t.Helper()
+	return paServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		endpoint.inference.Add(1)
+		body, readErr := io.ReadAll(r.Body)
+		closeErr := r.Body.Close()
+		if readErr != nil || closeErr != nil {
+			t.Errorf("model-less engine request read/close = %v/%v", readErr, closeErr)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if r.Method != http.MethodPost || r.URL.Path != routeChatCompletions || string(body) != paModelLessBody {
+			t.Errorf("model-less engine method/path/body preserved = %s/%s/%t", r.Method, r.URL.Path, string(body) == paModelLessBody)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		var request map[string]json.RawMessage
+		if err := json.Unmarshal(body, &request); err != nil {
+			t.Errorf("decode model-less engine request: %v", err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if _, exists := request["model"]; exists {
+			t.Error("model-less engine request acquired a model member")
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(map[string]any{"id": id, "object": "chat.completion", "choices": []map[string]any{{"index": 0, "message": map[string]string{"role": "assistant", "content": "ok"}, "finish_reason": "stop"}}}); err != nil {
+			t.Errorf("write model-less engine completion: %v", err)
+		}
+	}))
+}
+
+func paModelLessServed(t *testing.T, response paResponse, profile engineProfile, id string) {
+	t.Helper()
+	paServed(t, response, id)
+	if response.header.Get(nodepolicy.NodeHeader) != id || response.header.Get(nodepolicy.EngineHeader) != profile.Name || response.header.Get(nodepolicy.ModelHeader) != "" || response.header.Get(nodepolicy.TierHeader) != "" {
+		t.Fatalf("model-less routing node/engine/model/tier = %q/%q/%q/%q, want %q/%q/empty/empty", response.header.Get(nodepolicy.NodeHeader), response.header.Get(nodepolicy.EngineHeader), response.header.Get(nodepolicy.ModelHeader), response.header.Get(nodepolicy.TierHeader), id, profile.Name)
+	}
+}
+
 func (fx *paFixture) peers(t *testing.T, ids ...string) []*paEndpoint {
 	t.Helper()
 	var peers []*paEndpoint
@@ -497,6 +541,181 @@ func TestPAPausedPinnedPeerEligibility(t *testing.T) {
 			test("selected local pause", nodepolicy.PausedLocally, true)
 			test("priority peer pause", nodepolicy.PausedByPeer, false)
 			test("selected future provenance", nodepolicy.PauseOrigin("future-origin"), true)
+		})
+	}
+}
+
+func TestPAModelLessPausedPeerEligibility(t *testing.T) {
+	for _, profile := range append(buildProfiles(), strataProfile(t)) {
+		t.Run(profile.Name, func(t *testing.T) {
+			test := func(name string, hint nodepolicy.PauseOrigin, selected bool) {
+				t.Run(name, func(t *testing.T) {
+					fx := paNewFixture(t, profile)
+					peers := fx.peers(t, "a-paused", "z-available")
+					a, b := peers[0], peers[1]
+					for _, peer := range peers {
+						engine := paModelLessEngine(t, peer, peer.node.HostUUID)
+						setBackend(t, peer.p.soleFacade(), engine.URL, true)
+						policy := peer.p.admission.currentPolicy()
+						policy.ServedModels = nil
+						peer.p.admission.setPolicy(policy)
+					}
+					// Keep destination admission available: a leaked origin dispatch
+					// succeeds visibly instead of being hidden by a destination veto.
+					// Unrestricted serving above also accepts the omitted model.
+					a.node.Policy.PausedBy = hint
+					fx.replace(t, a.node, b.node)
+					fx.p.SetPriority([]string{"a-paused", "z-available"})
+					if selected {
+						fx.f.SetSelected("a-paused")
+					}
+					response := fx.finish(t, fx.request(http.MethodPost, routeChatCompletions, paModelLessBody), http.StatusOK)
+					if a.ingress.Load() != 0 || a.inference.Load() != 0 {
+						t.Errorf("paused peer ingress/engine = %d/%d, want 0/0", a.ingress.Load(), a.inference.Load())
+					}
+					if b.ingress.Load() != 1 || b.inference.Load() != 1 {
+						t.Errorf("available peer ingress/engine = %d/%d, want 1/1", b.ingress.Load(), b.inference.Load())
+					}
+					paModelLessServed(t, response, profile, "z-available")
+				})
+			}
+			test("selected local pause", nodepolicy.PausedLocally, true)
+			test("priority peer pause", nodepolicy.PausedByPeer, false)
+			test("selected future provenance", nodepolicy.PauseOrigin("future-origin"), true)
+		})
+	}
+}
+
+func TestPAModelLessRouteExceptions(t *testing.T) {
+	for _, profile := range append(buildProfiles(), strataProfile(t)) {
+		t.Run(profile.Name, func(t *testing.T) {
+			t.Run("available peer without inventory", func(t *testing.T) {
+				fx := paNewFixture(t, profile)
+				peer := fx.peers(t, "available-peer")[0]
+				engine := paModelLessEngine(t, peer, "available-peer")
+				setBackend(t, peer.p.soleFacade(), engine.URL, true)
+				policy := peer.p.admission.currentPolicy()
+				policy.ServedModels = nil
+				peer.p.admission.setPolicy(policy)
+				peer.node.ModelsByEngine = nil
+				fx.replace(t, peer.node)
+				response := fx.finish(t, fx.request(http.MethodPost, routeChatCompletions, paModelLessBody), http.StatusOK)
+				paModelLessServed(t, response, profile, "available-peer")
+				if peer.ingress.Load() != 1 || peer.inference.Load() != 1 {
+					t.Fatalf("available peer ingress/engine = %d/%d, want 1/1", peer.ingress.Load(), peer.inference.Load())
+				}
+			})
+			t.Run("manual without hint or inventory", func(t *testing.T) {
+				fx := paNewFixture(t, profile)
+				e := &paEndpoint{}
+				engine := paModelLessEngine(t, e, "manual")
+				fx.f.discovery.AddManual(nodeFor(t, "manual", engine.URL))
+				response := fx.finish(t, fx.request(http.MethodPost, routeChatCompletions, paModelLessBody), http.StatusOK)
+				paModelLessServed(t, response, profile, "manual")
+				if e.inference.Load() != 1 {
+					t.Fatalf("manual engine requests = %d, want 1", e.inference.Load())
+				}
+			})
+			t.Run("self ignores advertised pause hint", func(t *testing.T) {
+				fx := paNewFixture(t, profile)
+				e := &paEndpoint{}
+				engine := paModelLessEngine(t, e, "test-origin")
+				setBackend(t, fx.f, engine.URL, true)
+				n := selfNode("test-origin", fx.f.port)
+				n.PausedBy = nodepolicy.PausedLocally
+				fx.f.discovery.SetSubscribed([]Node{n})
+				response := fx.finish(t, fx.request(http.MethodPost, routeChatCompletions, paModelLessBody), http.StatusOK)
+				paModelLessServed(t, response, profile, "test-origin")
+				if e.inference.Load() != 1 {
+					t.Fatalf("self engine requests = %d, want 1", e.inference.Load())
+				}
+			})
+			t.Run("paused peer inventory and model-less passthrough", func(t *testing.T) {
+				fx := paNewFixture(t, profile)
+				peer := fx.peers(t, "paused-peer")[0]
+				peer.node.Policy.PausedBy = nodepolicy.PausedLocally
+				fx.replace(t, peer.node)
+				response := fx.finish(t, fx.request(http.MethodGet, "/v1/models", ""), http.StatusOK)
+				var inventory struct {
+					Object string `json:"object"`
+					Data   []struct {
+						ID string `json:"id"`
+					} `json:"data"`
+				}
+				if err := json.Unmarshal(response.body, &inventory); err != nil {
+					t.Fatalf("decode paused peer inventory: %v", err)
+				}
+				var ids []string
+				for _, item := range inventory.Data {
+					ids = append(ids, item.ID)
+				}
+				if inventory.Object != "list" || !slices.Contains(ids, paModel) {
+					t.Fatalf("paused peer inventory object/ids = %q/%v, want list including %s", inventory.Object, ids, paModel)
+				}
+				response = fx.finish(t, fx.request(http.MethodPost, "/pa-control", paModelLessBody), http.StatusOK)
+				var control struct {
+					ID string `json:"id"`
+				}
+				if err := json.Unmarshal(response.body, &control); err != nil {
+					t.Fatalf("decode paused peer control: %v", err)
+				}
+				if control.ID != "paused-peer" || peer.inference.Load() != 0 || peer.list.Load() != 1 || peer.control.Load() != 1 || peer.ingress.Load() != 2 {
+					t.Fatalf("paused peer control/inference/list/passthrough/ingress = %s/%d/%d/%d/%d, want paused-peer/0/1/1/2", control.ID, peer.inference.Load(), peer.list.Load(), peer.control.Load(), peer.ingress.Load())
+				}
+			})
+		})
+	}
+}
+
+func TestPAModelLessPausedDuplicateDoesNotClaimHost(t *testing.T) {
+	for _, profile := range append(buildProfiles(), strataProfile(t)) {
+		t.Run(profile.Name, func(t *testing.T) {
+			fx := paNewFixture(t, profile)
+			peers := fx.peers(t, "a-paused", "z-available")
+			peer := peers[1]
+			engine := paModelLessEngine(t, peer, "z-available")
+			setBackend(t, peer.p.soleFacade(), engine.URL, true)
+			serving := peer.p.admission.currentPolicy()
+			serving.ServedModels = nil
+			peer.p.admission.setPolicy(serving)
+			// Distinct pinned principals share one advertised target. The paused
+			// record must not claim that host before the available peer is tried.
+			paused := peers[0].node
+			paused.Services = peer.node.Services
+			paused.Policy.PausedBy = nodepolicy.PausedLocally
+			fx.replace(t, paused, peer.node)
+			fx.f.SetSelected("a-paused")
+			response := fx.finish(t, fx.request(http.MethodPost, routeChatCompletions, paModelLessBody), http.StatusOK)
+			paModelLessServed(t, response, profile, "z-available")
+			if peer.ingress.Load() != 1 || peer.inference.Load() != 1 {
+				t.Fatalf("deduplicated peer ingress/engine = %d/%d, want 1/1", peer.ingress.Load(), peer.inference.Load())
+			}
+		})
+	}
+}
+
+func TestPAModelLessAllPausedResponse(t *testing.T) {
+	for _, profile := range append(buildProfiles(), strataProfile(t)) {
+		t.Run(profile.Name, func(t *testing.T) {
+			fx := paNewFixture(t, profile)
+			peer := fx.peers(t, "paused-peer")[0]
+			engine := paModelLessEngine(t, peer, "paused-peer")
+			setBackend(t, peer.p.soleFacade(), engine.URL, true)
+			policy := peer.p.admission.currentPolicy()
+			policy.ServedModels = nil
+			peer.p.admission.setPolicy(policy)
+			peer.node.Policy.PausedBy = nodepolicy.PausedByPeer
+			fx.replace(t, peer.node)
+			response := fx.finish(t, fx.request(http.MethodPost, routeChatCompletions, paModelLessBody), http.StatusBadGateway)
+			var rejection struct {
+				Error string `json:"error"`
+			}
+			if err := json.Unmarshal(response.body, &rejection); err != nil {
+				t.Fatalf("decode model-less empty-candidate rejection: %v", err)
+			}
+			if rejection.Error != "no active node selected or available" || peer.ingress.Load() != 0 || peer.inference.Load() != 0 {
+				t.Fatalf("model-less rejection/paused ingress/engine = %q/%d/%d, want no active node selected or available/0/0", rejection.Error, peer.ingress.Load(), peer.inference.Load())
+			}
 		})
 	}
 }
