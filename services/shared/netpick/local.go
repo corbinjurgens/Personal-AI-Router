@@ -341,6 +341,36 @@ func enumerate() []localIface {
 	return out
 }
 
+// SharedOverlayAddresses returns canonical IPv4 overlay dial hints for
+// authenticated paired descriptors. It does not prove Tailscale is running or
+// routable, and an address confers no trust.
+func SharedOverlayAddresses() []string {
+	return sharedOverlayAddresses(enumerate())
+}
+
+func sharedOverlayAddresses(ifaces []localIface) []string {
+	var out []string
+	seen := make(map[string]bool)
+	for _, ifi := range ifaces {
+		if !virtualIface(ifi.name) {
+			continue
+		}
+		for _, a := range ifi.addrs {
+			ip := net.ParseIP(a.ip).To4()
+			if ip == nil || strings.Contains(a.ip, ":") || ip[0] != 100 || ip[1]&0xc0 != 64 {
+				continue
+			}
+			address := ip.String()
+			if !seen[address] {
+				seen[address] = true
+				out = append(out, address)
+			}
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
 // routeSourceIP returns the source address the kernel would use to reach an
 // off-link destination — this host's default-route address. It is the kernel's
 // own answer to "which of my interfaces faces the wider network", which is
