@@ -316,7 +316,9 @@ func preparePerformanceBuffers(ctx context.Context, body []byte, request originS
 			return ctx, nil, err
 		}
 	}
-	if request.disabled || (request.protocol != streamProtocolSSE && request.protocol != streamProtocolNDJSON) || (!request.declared && request.protocol != streamProtocolSSE) {
+	// OpenAI's omitted/null stream flag defaults to nonstreaming. An unusual
+	// SSE response is still detected later, but must acquire fresh frame grants.
+	if request.disabled || !request.declared || (request.protocol != streamProtocolSSE && request.protocol != streamProtocolNDJSON) {
 		return context.WithValue(ctx, performancePreparationKey{}, performancePreparation{bytes: n, mode: mode}), release, nil
 	}
 	// Response working storage is distinct from the request parser and the

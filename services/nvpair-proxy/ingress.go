@@ -199,7 +199,7 @@ func (f *facade) serveIngress(w http.ResponseWriter, r *http.Request, peer strin
 		return
 	}
 	if _, err := parseOriginStreamRequest(r.URL.Path, body); err != nil {
-		writeIngressError(w, bufferRequestStatus(err), "invalid-stream", "invalid stream request")
+		writeOriginStreamRequestError(w, err)
 		return
 	}
 	if strict != nil {
@@ -263,11 +263,7 @@ func (f *facade) serveIngress(w http.ResponseWriter, r *http.Request, peer strin
 	if decision.err != nil {
 		decision.err = inferencePreparationRefusal(decision.err)
 		if ctx.Err() == nil {
-			if errors.Is(decision.err, errAmbiguousModel) {
-				writeIngressError(w, http.StatusBadRequest, "ambiguous-model", ambiguousModelMessage)
-			} else {
-				writeIngressError(w, bufferRequestStatus(decision.err), "inference-buffer", "inference request could not be prepared")
-			}
+			writeInferencePreparationError(w, decision.err)
 		}
 		// The peer gave up while the request waited; nobody is left to answer.
 		return
@@ -434,7 +430,7 @@ func (f *facade) newLocalReverseProxy(target *url.URL) *httputil.ReverseProxy {
 func (f *facade) serveStrictLocal(w http.ResponseWriter, r *http.Request, body []byte, model string, req nodepolicy.StrictAdmissionRequest, peer bool) {
 	admissionStarted := time.Now()
 	if _, err := parseOriginStreamRequest(r.URL.Path, body); err != nil {
-		writeIngressError(w, bufferRequestStatus(err), "invalid-stream", "invalid stream request")
+		writeOriginStreamRequestError(w, err)
 		return
 	}
 	ctx, cancel := context.WithCancel(r.Context())
@@ -464,7 +460,7 @@ func (f *facade) serveStrictLocal(w http.ResponseWriter, r *http.Request, body [
 	body = validated.body
 	streamRequest, err := parseOriginStreamRequest(r.URL.Path, body)
 	if err != nil {
-		writeIngressError(w, bufferRequestStatus(err), "invalid-stream", "invalid effective stream request")
+		writeInferencePreparationError(w, err)
 		return
 	}
 	if !bodyModelMatches(body, model) {

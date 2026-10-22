@@ -6,7 +6,6 @@ package main
 import (
 	"context"
 	stderrors "errors"
-	"fmt"
 	"io"
 	"log/slog"
 	"mime"
@@ -428,6 +427,13 @@ func (s originStreamRequest) withPeerMetadata(values []string) (originStreamRequ
 	return s, nil
 }
 
+type invalidStreamFlagError struct{}
+
+func (*invalidStreamFlagError) Error() string {
+	return "stream must be a single boolean or null member"
+}
+func (*invalidStreamFlagError) HTTPStatus() int { return http.StatusBadRequest }
+
 func parseOriginStreamRequest(path string, body []byte) (originStreamRequest, error) {
 	s := originStreamRequest{choices: 1}
 	switch path {
@@ -450,7 +456,7 @@ func parseOriginStreamRequest(path string, body []byte) (originStreamRequest, er
 		value := body[start:end]
 		if jsonKeyEqual(key, "stream", false) {
 			if seen || (string(value) != "true" && string(value) != "false" && string(value) != "null") {
-				invalid = fmt.Errorf("stream must be a single boolean or null member")
+				invalid = &invalidStreamFlagError{}
 				return
 			}
 			seen = true
@@ -459,7 +465,7 @@ func parseOriginStreamRequest(path string, body []byte) (originStreamRequest, er
 				s.disabled = !s.declared
 			}
 		}
-		if jsonKeyEqual(key, "n", false) {
+		if s.protocol == streamProtocolSSE && jsonKeyEqual(key, "n", false) {
 			if n, ok := positiveJSONInt(value); ok {
 				s.choices = n
 				impossibleChoices = impossibleChoices || int64(n) > streamFrameMaxChoices
@@ -741,11 +747,16 @@ func (f *facade) handleHTTPWithStreamIdle(w http.ResponseWriter, r *http.Request
 	if isInf {
 		_, err = parseOriginStreamRequest(r.URL.Path, bodyBytes)
 		if err != nil {
-			writeIngressError(w, bufferRequestStatus(err), "invalid-stream", "invalid stream request")
+			writeOriginStreamRequestError(w, err)
+			reason := "inference request could not be prepared"
+			var invalid *invalidStreamFlagError
+			if stderrors.As(err, &invalid) {
+				reason = "invalid stream flag"
+			}
 			_ = f.notify("proxy/request", RequestEvent{
 				ID: reqID, Method: r.Method, Path: r.URL.Path,
 				Status: bufferRequestStatus(err), Duration: time.Since(start).Milliseconds(),
-				Error: "invalid stream flag",
+				Error: reason,
 			})
 			return
 		}
@@ -1025,7 +1036,21 @@ func writeInferencePreparationError(w http.ResponseWriter, err error) {
 		writeIngressError(w, http.StatusBadRequest, "ambiguous-model", ambiguousModelMessage)
 		return
 	}
+	var invalid *invalidStreamFlagError
+	if stderrors.As(err, &invalid) {
+		writeIngressError(w, http.StatusBadRequest, "invalid-stream", "invalid effective stream flag")
+		return
+	}
 	writeIngressError(w, bufferRequestStatus(err), "inference-buffer", "inference request could not be prepared")
+}
+
+func writeOriginStreamRequestError(w http.ResponseWriter, err error) {
+	var invalid *invalidStreamFlagError
+	if stderrors.As(err, &invalid) {
+		writeIngressError(w, http.StatusBadRequest, "invalid-stream", invalid.Error())
+		return
+	}
+	writeInferencePreparationError(w, err)
 }
 
 // writeProxyError retains its exact response capacity through the final Write.

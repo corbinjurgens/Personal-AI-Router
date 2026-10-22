@@ -329,12 +329,13 @@ Frames use volatile memory only, with a 1 MiB raw-frame limit and 64 MiB of live
 frame-buffer reservations shared across facades. No response content is logged
 or persisted, and no whole-response prefix is retained.
 
-Managed streams prepay reader storage using the configured inference-buffer
-wait; local non-streams retain telemetry preparation and peer non-streams add
-none. Admitted readers drain within existing storage after a cap decrease;
-growth and pre-output retries require current capacity. The spec lists the
-aggregate/category ceilings, including the unchanged 564 self numeric-stream
-live-reader bound.
+Effectively enabled streams prepay reader storage; each aggregate acquisition
+may use the configured inference-buffer wait, while a full stream category
+refuses immediately. Local non-streams retain telemetry preparation and peer
+non-streams add none. Admitted readers drain within existing storage after a
+cap decrease; growth and pre-output retries require current capacity. See the
+spec's preparation ceiling table and drain conditions, including protocol
+defaults and responses that acquire fresh reader grants.
 
 An interrupted/malformed stream, idle expiry, overflow, exhausted frame budget,
 empty declared stream or wrong streaming media type ends with a protocol error.

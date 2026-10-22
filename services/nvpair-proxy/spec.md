@@ -624,18 +624,25 @@ Frames are held in volatile memory only: at most 1 MiB per raw frame and
 64 MiB of live frame-buffer allocations process-wide across facades, reserved
 before allocation/growth. Exhaustion terminates explicitly rather than waiting
 for memory. The category is subordinate to the inference aggregate budget.
-Before dispatch, a known, enabled managed stream reserves separate response
+Before dispatch, an effectively enabled managed stream reserves separate response
 working grants for metadata, choice tracking, read scratch, its parser,
 initial raw frame storage and, for SSE, multiline assembly. Local numeric
 streams reserve a 96 KiB parser; local syntax-only and peer streams reserve
-16 KiB. Local requests also retain their existing fixed and fingerprint
+16 KiB. OpenAI `/v1` routes default to non-streaming when `stream` is omitted
+or null; native Ollama NDJSON routes default to streaming. An unexpected
+auto-SSE response to an omitted-flag OpenAI request acquires fresh reader
+grants as at base and is not protected against a prior capacity decrease.
+Local requests also retain their existing fixed and fingerprint
 preparation, including non-streaming requests. Peers reserve no fingerprint
 storage, and peer non-streaming requests reserve no preparation grants.
 These grants do not share the request parser or performance fingerprint charge.
-Pre-dispatch preparation uses the configured I8 FIFO wait (`waitSeconds`, zero
-for immediate refusal); exhausted capacity returns 503, while a request or
+Each pre-dispatch aggregate acquisition may wait up to the configured I8
+`waitSeconds` (zero for immediate refusal). Each acquisition joins the FIFO
+tail with a fresh deadline and holds earlier grants while queued; a full
+stream category refuses at once. Exhausted capacity returns 503, while a request or
 choice count that cannot fit the applicable limit returns 413, including an
-impossible choice count on a non-streaming request. Reader growth does not wait.
+impossible OpenAI choice count on a non-streaming request. Native NDJSON routes
+ignore `n`. Reader growth does not wait.
 The response reader claims the admitted grants without another charge even
 if aggregate capacity decreases before the first output. Live readers retain
 their working allocations between frames, so an admitted stream can drain
@@ -649,11 +656,14 @@ storage still needs capacity and may interrupt the stream after a decrease.
 A pre-output retry is a new dispatch admission: it releases the failed attempt's
 preparation and must satisfy current policy and capacity, including a changed
 policy generation. Same-attempt drain does not authorize that retry.
+A peer request sent with `stream:false` has no prepaid frame grants even if
+the destination profile enables streaming, so a decrease before reader
+construction can interrupt that response as at base.
 
 The following byte-accounting ceilings are measured with one-choice SSE,
 minimal `model`/`stream` bodies, their retained body/model bytes, a 96 KiB
 request parser and fully constructed live readers. They exclude rewrites and
-other concurrent allocations. The separate 1,024-request routing registry and
+other concurrent allocations. The separate `maxLiveRoutingRequests` registry and
 other admission limits can bind first; these are not throughput guarantees.
 
 | Preparation class | 192 MiB | 256 MiB | 1024 MiB |
@@ -661,9 +671,12 @@ other admission limits can bind first; these are not throughput guarantees.
 | Self numeric stream | 564 | 564 | 564 |
 | Self syntax stream | 754 | 1005 | 1820 |
 | Self non-stream | 874 | 1166 | 4665 |
+| Self omitted-flag OpenAI non-stream | 875 | 1167 | 4671 |
 | Peer stream | 1489 | 1820 | 1820 |
 | Peer non-stream | 2047 | 2729 | 10919 |
 
+The omitted-flag row uses `{"model":"m"}`; the explicit non-stream row
+includes `"stream":false`, so its retained request and fingerprint are larger.
 Each ceiling is the smaller of the aggregate capacity divided by the request
 charge and the existing 64 MiB stream category divided by the frame charge
 (the latter is absent for non-streams). The 564 self numeric bound equals the
