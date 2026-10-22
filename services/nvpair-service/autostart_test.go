@@ -60,9 +60,25 @@ func TestWindowsCommandLine(t *testing.T) {
 		Program: `C:\Program Files\PAIR\nvpair-service.exe`,
 		Args:    []string{"--", "--log-level", "debug", "", "a b", `say "hi"`, `trail\`, `dir\ x\`},
 	})
-	want := `"C:\Program Files\PAIR\nvpair-service.exe" -- --log-level debug "" "a b" "say \"hi\"" trail\ "dir\ x\\"`
+	want := `"C:\Program Files\PAIR\nvpair-service.exe" autostart run -- --log-level debug "" "a b" "say \"hi\"" trail\ "dir\ x\\"`
 	if got != want {
 		t.Fatalf("command line\n got %s\nwant %s", got, want)
+	}
+}
+
+func TestWindowsAutostartCommandLineKeepsServiceFlagsBeforeBrokerArgs(t *testing.T) {
+	got := windowsCommandLine(autostartEntry{
+		Program: `C:\Program Files\PAIR\nvpair-service.exe`,
+		Args: []string{
+			"--endpoint", `\\.\pipe\pair autostart`,
+			"--broker-path", `C:\PAIR tools\broker.exe`,
+			"--log-dir", `C:\PAIR logs\`, "--log-level", "debug",
+			"--", "--systemd", "", `say "hi"`, `dir\ x\`,
+		},
+	})
+	want := `"C:\Program Files\PAIR\nvpair-service.exe" autostart run --endpoint "\\.\pipe\pair autostart" --broker-path "C:\PAIR tools\broker.exe" --log-dir "C:\PAIR logs\\" --log-level debug -- --systemd "" "say \"hi\"" "dir\ x\\"`
+	if got != want {
+		t.Fatalf("Run command\n got %s\nwant %s", got, want)
 	}
 }
 

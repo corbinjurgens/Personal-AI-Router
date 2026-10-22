@@ -109,6 +109,24 @@ arguments after `enable`, and takes effect at the next login:
 | macOS | `~/Library/LaunchAgents/com.nvidia.pair.service.plist` (`RunAtLoad`, no `KeepAlive`, so `service/stop` sticks until the next login) |
 | Linux | `$XDG_CONFIG_HOME/autostart/nvpair-service.desktop` (`~/.config` when unset) |
 
+On Windows, the Run value invokes this executable's internal `autostart run`
+command with the recorded service flags and broker arguments. The starter
+validates those arguments and starts the ordinary service command from its own
+executable directory, with stdio on the null device and
+`CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP`. The daemon has no console window and
+outlives the starter. A console window may still flash briefly while Windows
+starts the console-subsystem starter, before its Go code runs.
+
+The starter returns once the child process is created; successful return does
+not establish service or broker readiness. Clients still wait for the broker's
+`app:ready`. Ordinary foreground execution and the `status`, `call` and `stop`
+CLI commands retain their console output, exit codes and waiting behavior.
+The internal starter is refused on other platforms.
+
+Existing Windows Run entries are not rewritten automatically. After upgrading,
+rerun `autostart enable` with the same service flags and broker arguments to
+refresh an existing entry to use the starter.
+
 The Linux entry follows the XDG autostart specification, so it runs when a
 desktop session starts. A headless machine has no desktop session to process
 it; use `--systemd` there (Linux only, an error elsewhere):

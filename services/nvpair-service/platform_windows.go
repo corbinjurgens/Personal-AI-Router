@@ -6,9 +6,43 @@
 package main
 
 import (
+	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"syscall"
 )
+
+// runAutostartService reexecutes the ordinary serve command without a console window.
+// It returns after process creation; service and broker readiness come later.
+func runAutostartService(args []string) error {
+	if err := validateRunArgs(args); err != nil {
+		return err
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("locate own executable: %w", err)
+	}
+	if resolved, err := filepath.EvalSymlinks(exe); err == nil {
+		exe = resolved
+	}
+	cmd := exec.Command(exe, args...)
+	cmd.Dir = filepath.Dir(exe)
+	// Nil stdio connects to the null device instead of retaining the starter's
+	// terminal or redirected pipes.
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = nil, nil, nil
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		HideWindow: true,
+		// CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP
+		CreationFlags: 0x08000000 | 0x00000200,
+	}
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("start autostart service: %w", err)
+	}
+	// Reap resources if the service exits while its starter is still alive.
+	go func() { _ = cmd.Wait() }()
+	return nil
+}
 
 // configureBroker hides the broker's console and gives it its own process
 // group, so a console Ctrl+C sent to the service is not delivered to the broker
