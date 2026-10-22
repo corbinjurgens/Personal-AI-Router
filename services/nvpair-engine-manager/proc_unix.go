@@ -179,6 +179,13 @@ func signalPID(pid int, force bool) error {
 	return syscall.Kill(pid, sig)
 }
 
+func signalPIDContext(ctx context.Context, pid int, force bool) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return signalPID(pid, force)
+}
+
 // pidAlive reports whether the PID still exists (signal 0 probes existence
 // without delivering a signal; EPERM means it exists but isn't ours).
 func pidAlive(pid int) bool {

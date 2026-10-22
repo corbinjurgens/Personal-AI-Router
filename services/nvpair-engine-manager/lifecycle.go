@@ -64,6 +64,7 @@ func (e *Executor) waitDetect(engine string, want bool, timeout time.Duration) b
 // runtime.bind (which itself defaults to loopback).
 type startOpts struct {
 	RequireOwned bool
+	ReclaimOwned bool
 	Port         int
 	Bind         string
 	// Origin is who asked for the start. A paired node's start (intentPeer)
@@ -125,20 +126,11 @@ func (e *Executor) StartWith(ctx context.Context, engine string, opts startOpts)
 
 // doStart performs the start. Callers must hold st.opMu.
 func (e *Executor) doStart(ctx context.Context, st *engineState, engine string, opts startOpts) error {
-	ctx, cancel := context.WithCancel(ctx)
-	st.mu.Lock()
-	st.startCancel = cancel
-	st.mu.Unlock()
-	defer func() {
-		cancel()
-		st.mu.Lock()
-		st.startCancel = nil
-		st.mu.Unlock()
-	}()
-	if e.shuttingDown.Load() {
-		return context.Canceled
+	ctx, finish := e.startContext(ctx, st)
+	defer finish()
+	if err := ctx.Err(); err != nil {
+		return err
 	}
-
 	st.mu.Lock()
 	running := st.running
 	adopted := st.adopted
@@ -153,6 +145,7 @@ func (e *Executor) doStart(ctx context.Context, st *engineState, engine string, 
 	rt := st.plat.Runtime
 	port := st.port
 	st.mu.Unlock()
+	reclaimPort := port
 	if opts.Port > 0 {
 		port = opts.Port
 	}
@@ -166,7 +159,30 @@ func (e *Executor) doStart(ctx context.Context, st *engineState, engine string, 
 	if err := e.reservedPortError(port); err != nil {
 		return err
 	}
+	if opts.ReclaimOwned && reclaimPort > 0 {
+		reclaimed, err := e.reclaimOrphan(ctx, st, engine, port)
+		if err != nil {
+			return err
+		}
+		if reclaimed {
+			opts.RequireOwned = true
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		// Successful reclaim already verified termination and cleared its fence.
+		// Cancellation here prevents launch without invalidating that evidence.
+		return err
+	}
+	st.mu.Lock()
+	fenced, reclaimPID := st.reclaimFailed, st.reclaimPID
+	st.mu.Unlock()
 	presence := e.reconcilePresence(ctx, engine, st, pathInstalled, port, true)
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if fenced && (presence.Occupied || !orphanPIDExited(reclaimPID)) {
+		return fmt.Errorf("cannot start engine %q: an owned orphan reclaim failed; stop it before retrying", engine)
+	}
 	if presence.Identified {
 		if opts.RequireOwned {
 			return fmt.Errorf("cannot apply launch settings: another process already owns the server port")
@@ -218,6 +234,8 @@ func (e *Executor) doStart(ctx context.Context, st *engineState, engine string, 
 	st.runID = newEngineRunID()
 	st.healthy = true
 	st.adopted = false
+	st.reclaimFailed = false
+	st.reclaimPID = 0
 	st.gen++
 	gen := st.gen
 	st.mu.Unlock()
@@ -241,6 +259,24 @@ func (e *Executor) doStart(ctx context.Context, st *engineState, engine string, 
 		go e.runHealth(hctx, st, engine, port, gen)
 	}
 	return nil
+}
+
+// Register before reclaim as well as launch so StopAll can cancel either stage.
+// Callers hold opMu for the entire lifetime of this registration.
+func (e *Executor) startContext(ctx context.Context, st *engineState) (context.Context, func()) {
+	ctx, cancel := context.WithCancel(ctx)
+	st.mu.Lock()
+	st.startCancel = cancel
+	st.mu.Unlock()
+	if e.shuttingDown.Load() {
+		cancel()
+	}
+	return ctx, func() {
+		cancel()
+		st.mu.Lock()
+		st.startCancel = nil
+		st.mu.Unlock()
+	}
 }
 
 func (e *Executor) bringUp(ctx context.Context, st *engineState, engine string, rt Runtime, port int, vars map[string]string) error {
@@ -329,6 +365,9 @@ func (e *Executor) bringUpProcessWithSnapshot(ctx context.Context, st *engineSta
 
 	diagnostics := newStartupOutput(launchDiagnosticArgs(rt), launch.Env)
 	defer diagnostics.close()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	proc, err := startManagedProc(launch.Bin, launch.Args, launch.Env, func(stream, line string) {
 		// Native NE output can name model paths read from the preset, which
 		// argument/environment redaction cannot know. Report safe stages instead.
@@ -606,9 +645,34 @@ func (e *Executor) verifyStopped(engine string) (settings.SwitchEngineState, err
 
 // doStop performs the stop. Callers must hold st.opMu.
 func (e *Executor) doStop(st *engineState, engine string) error {
+	return e.doStopContext(context.Background(), st, engine)
+}
+
+// Switch recovery carries its cancellation through fallback orphan cleanup.
+func (e *Executor) doStopContext(ctx context.Context, st *engineState, engine string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	st.mu.Lock()
 	rt := st.plat.Runtime
+	fenced, port, reclaimPID := st.reclaimFailed, st.port, st.reclaimPID
 	st.mu.Unlock()
+	if fenced {
+		if !e.shuttingDown.Load() {
+			reclaimed, err := e.reclaimOrphan(ctx, st, engine, port)
+			if err != nil {
+				return err
+			}
+			if reclaimed {
+				return nil
+			}
+		}
+		if !orphanPIDExited(reclaimPID) || rt.Ready == nil || !e.waitUnavailableContext(ctx, rt.Ready, port, time.Second) {
+			return fmt.Errorf("cannot stop engine %q: orphan termination could not be verified", engine)
+		}
+		e.markStopped(st, engine)
+		return nil
+	}
 	mode := rt.modeOrDefault()
 	st.mu.Lock()
 	if !st.running {
@@ -616,13 +680,13 @@ func (e *Executor) doStop(st *engineState, engine string) error {
 		return nil
 	}
 	proc := st.proc
-	port := st.port
+	port = st.port
 	adopted := st.adopted
 	binPath := st.binPath
 	if mode != "command" && proc == nil {
 		st.mu.Unlock()
 		if adopted {
-			if rt.Ready != nil && e.waitUnavailable(rt.Ready, port, time.Second) {
+			if rt.Ready != nil && e.waitUnavailableContext(ctx, rt.Ready, port, time.Second) {
 				e.markStopped(st, engine)
 				return nil
 			}
@@ -636,22 +700,33 @@ func (e *Executor) doStop(st *engineState, engine string) error {
 			// whose image we can't confirm is ours.
 			pid, image, ok := pidOnPort(port)
 			if ok && isManagedInstallPath(binPath, st.installDir) && isOurEngineImage(image, binPath) {
+				if err := ctx.Err(); err != nil {
+					return err
+				}
 				st.mu.Lock()
 				st.stopping = true
+				st.reclaimPID = pid
 				if st.healthStop != nil {
 					st.healthStop()
 					st.healthStop = nil
 				}
 				st.mu.Unlock()
 				grace := stopGrace(rt)
-				terminatePID(pid, grace)
+				if err := terminatePIDContext(ctx, pid, grace); err != nil && ctx.Err() != nil {
+					e.failOrphanReclaim(st, engine, err)
+					return err
+				}
 				if !pidAlive(pid) {
 					e.markStopped(st, engine)
 					return nil
 				}
-				if rt.Ready == nil || e.waitUnavailable(rt.Ready, port, grace+2*time.Second) {
+				if rt.Ready == nil || e.waitUnavailableContext(ctx, rt.Ready, port, grace+2*time.Second) {
 					e.markStopped(st, engine)
 					return nil
+				}
+				if err := ctx.Err(); err != nil {
+					e.failOrphanReclaim(st, engine, err)
+					return err
 				}
 			}
 			e.emitState(engine)
@@ -767,6 +842,8 @@ func (e *Executor) markStopped(st *engineState, engine string) {
 	st.stopping = true
 	st.adopted = false
 	st.proc = nil
+	st.reclaimFailed = false
+	st.reclaimPID = 0
 	st.mu.Unlock()
 	// A deliberately-stopped engine has no live unhealthy/crash condition.
 	e.reporter.clear(unhealthyID(engine))
@@ -779,7 +856,11 @@ func (e *Executor) markStopped(st *engineState, engine string) {
 // live listener returning 503 is unhealthy, not stopped. A successful control
 // command is likewise not proof that its daemon actually exited.
 func (e *Executor) waitUnavailable(p *Probe, port int, timeout time.Duration) bool {
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	return e.waitUnavailableContext(context.Background(), p, port, timeout)
+}
+
+func (e *Executor) waitUnavailableContext(ctx context.Context, p *Probe, port int, timeout time.Duration) bool {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	misses := 0
 	for {

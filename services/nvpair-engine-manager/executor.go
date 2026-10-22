@@ -70,8 +70,13 @@ type engineState struct {
 	running   bool
 	healthy   bool
 	stopping  bool
-	adopted   bool  // started externally; we can't stop it
-	gen       int64 // bumped each start; gates stale health loops
+	adopted   bool // started externally; we can't stop it
+	// reclaimFailed fences adoption until verified stop or owned cold start.
+	reclaimFailed bool
+	// reclaimPID is evidence to check, never authority to signal a process.
+	// A reused/live PID conservatively keeps the fence closed.
+	reclaimPID int
+	gen        int64 // bumped each start; gates stale health loops
 	// runID names the engine process incarnation this manager observes:
 	// minted whenever the engine is marked running by a start or an adoption,
 	// cleared whenever it is marked stopped. launchDigest identifies the

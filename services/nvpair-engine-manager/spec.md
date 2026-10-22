@@ -917,7 +917,20 @@ untouched. Runtime state and termination evidence remain separate from intent.
 
 Steps compare the whole operation envelope, serialize on the existing engine
 operation lock, and retain successful or failed checkpoints for idempotent
-retries. Interrupted work is reconciled toward cleanup, never forward startup.
+retries. Uncommitted interrupted work is reconciled toward cleanup, never forward
+startup. Target cleanup, committed target On recovery and later fresh switch
+target starts share the positive-port, managed-install and executable-image
+reclaim predicate before readiness or adoption. Committed target On recovery
+reclaims a matching orphan and launches cold; foreign listeners are preserved
+and produce the existing port-ownership error. Reclaim verifies PID exit and
+listener refusal, honours caller/shutdown cancellation, and uses immediate
+`taskkill /T /F` for Windows console orphans while retaining Unix graceful stop.
+A failed or cancelled reclaim reports `StartFailed` and fences passive and
+explicit-start adoption until verified stop or successful owned cold start;
+failed or no-op stops do not clear that fence. Listener refusal alone is
+insufficient: the recorded failed-reclaim PID must be verified exited. A live
+or reused PID, or an inspection error, retains the fence; retained identity never
+authorizes signalling without the current precise reclaim predicate.
 The broker must persist its terminal receipt before release. A pending stop or
 start cannot be released until cleanup is reconciled. Released checkpoints retain
 the last identity until a subsequent prepare replaces them; the broker's journal
