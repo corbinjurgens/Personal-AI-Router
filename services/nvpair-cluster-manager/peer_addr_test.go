@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -21,6 +22,28 @@ import (
 // unreachableAddr is in TEST-NET-1 (RFC 5737), which is reserved for
 // documentation and routed nowhere, so a connection to it never completes.
 const unreachableAddr = "192.0.2.1:14321"
+
+func TestResolvePeerAddrsIncludesAuthenticatedHints(t *testing.T) {
+	f := newPeerHintFixture(t)
+	if err := f.commit(); err != nil {
+		t.Fatal(err)
+	}
+	f.m.browser = newBrowser()
+	f.m.browser.seed(f.peer.UUID, "192.0.2.56", 25422)
+	member, _ := f.m.memberByNodeID(f.peer.UUID)
+	want := []string{"192.0.2.55:25421", "192.0.2.56:25422", "100.90.0.8:25421"}
+	if got := f.m.resolvePeerAddrs(*member); !slices.Equal(got, want) {
+		t.Fatalf("resolved addresses = %v, want %v", got, want)
+	}
+	f.m.browser = newBrowser()
+	want = []string{"192.0.2.55:25421", "100.90.0.8:25421"}
+	if got := f.m.resolvePeerAddrs(*member); !slices.Equal(got, want) {
+		t.Fatalf("empty-browser addresses = %v, want %v", got, want)
+	}
+	if member.IPAddress != "192.0.2.55" || member.State != stateMember {
+		t.Fatalf("hints changed member authority/canonical IP: %+v", member)
+	}
+}
 
 // TestReconcileWithFailsOverToAnAnsweringAddress is the reported defect at the
 // cluster layer: a peer's leading address was a direct-connect link this host

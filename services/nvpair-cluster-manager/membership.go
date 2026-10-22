@@ -5,6 +5,7 @@ package main
 
 import (
 	"log"
+	"slices"
 	"sort"
 	"time"
 )
@@ -51,16 +52,19 @@ const reasonIncorrectPIN = "incorrect-pin"
 // ClusterNode is a cluster member or pending invitee (§6). The logical id is the
 // membership key for display; nodeUuid is the cryptographic principal.
 type ClusterNode struct {
-	ID             string          `json:"id"`
-	NodeUUID       string          `json:"nodeUuid"`
-	Name           string          `json:"name"`
-	IPAddress      string          `json:"ipAddress"`
-	Port           int             `json:"port"`
-	ClusterID      string          `json:"clusterId"`
-	AdmissionEpoch uint64          `json:"admissionEpoch,omitempty"`
-	State          MembershipState `json:"state"`
-	JoinedAt       *int64          `json:"joinedAt"`
-	LastSeen       *int64          `json:"lastSeen"`
+	ID        string `json:"id"`
+	NodeUUID  string `json:"nodeUuid"`
+	Name      string `json:"name"`
+	IPAddress string `json:"ipAddress"`
+	// AdvertisedAddresses are authenticated, bounded routing hints, not identity
+	// or liveness. An old member record without hints remains valid.
+	AdvertisedAddresses []string        `json:"advertisedAddresses,omitempty"`
+	Port                int             `json:"port"`
+	ClusterID           string          `json:"clusterId"`
+	AdmissionEpoch      uint64          `json:"admissionEpoch,omitempty"`
+	State               MembershipState `json:"state"`
+	JoinedAt            *int64          `json:"joinedAt"`
+	LastSeen            *int64          `json:"lastSeen"`
 }
 
 // Invite is the Broker-facing view of a pairing session (§6). Certificates are
@@ -88,6 +92,7 @@ func cloneClusterNode(node *ClusterNode) *ClusterNode {
 		return nil
 	}
 	cp := *node
+	cp.AdvertisedAddresses = slices.Clone(node.AdvertisedAddresses)
 	if node.JoinedAt != nil {
 		v := *node.JoinedAt
 		cp.JoinedAt = &v

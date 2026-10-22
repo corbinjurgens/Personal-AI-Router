@@ -13,6 +13,8 @@ import (
 	"slices"
 	"sync"
 	"time"
+
+	"nvpair-shared/noderec"
 )
 
 // reconcileEvery is the heartbeat cadence for catch-up roster reconciles — the
@@ -577,6 +579,12 @@ func (m *Manager) resolvePeerAddrs(n ClusterNode) []string {
 				add(joinHostPort(h, port, m.port))
 			}
 		}
+	}
+	for i, host := range n.AdvertisedAddresses {
+		if i >= noderec.MaxAdvertisedIPs {
+			break
+		}
+		add(joinHostPort(host, n.Port, m.port))
 	}
 	return addrs
 }

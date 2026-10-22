@@ -9,16 +9,399 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
+	"errors"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"runtime"
 	"slices"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"nvpair-shared/clustertrust"
+	"nvpair-shared/durablefile"
 	"nvpair-shared/noderec"
+	"nvpair-shared/reach"
 )
+
+// containHintDials fences both transport owners separately. These fixtures
+// never need chooser probes or reverse IPC; HTTP uses only literal loopback.
+func containHintDials(t *testing.T, m *Manager, wantHTTP bool) {
+	t.Helper()
+	var direct, blocked, reverse, chooser atomic.Int32
+	opts := m.peerServiceOptions()
+	opts.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
+		host, _, err := net.SplitHostPort(address)
+		if err != nil || !net.ParseIP(host).IsLoopback() {
+			blocked.Add(1)
+			return nil, errors.New("fixture refused non-loopback dial")
+		}
+		direct.Add(1)
+		return (&net.Dialer{}).DialContext(ctx, network, address)
+	}
+	opts.DialReverse = func(context.Context, string, string, noderec.ServiceKey) (net.Conn, error) {
+		reverse.Add(1)
+		return nil, errors.New("fixture refused reverse dial")
+	}
+	replaceClusterPeerServices(t, m, opts)
+	m.peerAddrs = reach.NewChooser(reach.WithDial(func(string, string, time.Duration) (net.Conn, error) {
+		chooser.Add(1)
+		return nil, errors.New("fixture refused chooser dial")
+	}))
+	t.Cleanup(func() {
+		if blocked.Load() != 0 || reverse.Load() != 0 || chooser.Load() != 0 || (direct.Load() > 0) != wantHTTP {
+			t.Errorf("dial containment: direct=%d blocked=%d reverse=%d chooser=%d wantHTTP=%v", direct.Load(), blocked.Load(), reverse.Load(), chooser.Load(), wantHTTP)
+		}
+		t.Logf("dial counts: direct=%d blocked=%d reverse=%d chooser=%d", direct.Load(), blocked.Load(), reverse.Load(), chooser.Load())
+	})
+}
+
+type peerHintFixture struct {
+	m, remote   *Manager
+	descriptor  noderec.PeerServicesDescriptor
+	incarnation string
+	peer        clustertrust.ReversePeer
+	output      bytes.Buffer
+}
+
+func newPeerHintFixture(t *testing.T) *peerHintFixture {
+	t.Helper()
+	f := &peerHintFixture{m: newReverseTestManager(t), remote: newReverseTestManager(t)}
+	containHintDials(t, f.m, false)
+	containHintDials(t, f.remote, false)
+	f.remote.port = 25421 // Data only: these managers never start listeners.
+	pairReverseManagers(t, f.m, f.remote)
+	f.m.setMemberAddr(f.remote.identity.NodeUUID, "192.0.2.55", f.remote.port)
+	persistPeerServicesMembers(t, f.m, f.remote)
+	f.m.mesh.Refresh()
+	var ok bool
+	f.incarnation, ok = f.m.mesh.PeerServiceIncarnation(f.remote.identity.NodeUUID)
+	if !ok {
+		t.Fatal("private hint fixture lacks durable admission")
+	}
+	f.peer, ok = f.m.reversePeer(f.remote.identity.NodeUUID)
+	if !ok {
+		t.Fatal("private hint fixture lacks current peer")
+	}
+	f.descriptor = noderec.PeerServicesDescriptor{
+		HostUUID: f.remote.identity.NodeUUID, Name: "hint-peer",
+		Addresses: []string{"192.0.2.55", "100.90.0.8"}, Services: []noderec.PeerService{},
+	}
+	if err := noderec.ValidatePeerServicesDescriptor(f.descriptor, f.peer.UUID); err != nil {
+		t.Fatal(err)
+	}
+	f.m.codec = NewCodec(struct {
+		io.Reader
+		io.Writer
+	}{bytes.NewReader(nil), &f.output})
+	t.Cleanup(f.m.peerServices.CloseIdle)
+	t.Cleanup(f.m.removalPeerServices.CloseIdle)
+	return f
+}
+
+func (f *peerHintFixture) commit() error {
+	return f.m.commitPeerServiceHints(f.descriptor, f.incarnation, f.peer)
+}
+
+func storedHintMember(t *testing.T, m *Manager, uuid string) ClusterNode {
+	t.Helper()
+	data, err := os.ReadFile(m.membersPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var members []ClusterNode
+	if err := json.Unmarshal(data, &members); err != nil {
+		t.Fatal(err)
+	}
+	for _, member := range members {
+		if member.NodeUUID == uuid {
+			return member
+		}
+	}
+	t.Fatalf("stored member %s missing", uuid)
+	return ClusterNode{}
+}
+
+func assertPeerHints(t *testing.T, f *peerHintFixture, want []string) {
+	t.Helper()
+	member, ok := f.m.memberByNodeID(f.peer.UUID)
+	if !ok || !slices.Equal(member.AdvertisedAddresses, want) {
+		t.Fatalf("memory hints = %+v, want %v", member, want)
+	}
+	stored := storedHintMember(t, f.m, f.peer.UUID)
+	if !slices.Equal(stored.AdvertisedAddresses, want) {
+		t.Fatalf("disk hints = %v, want %v", stored.AdvertisedAddresses, want)
+	}
+}
+
+func assertNoPeerServicesClaim(t *testing.T, output []byte) {
+	t.Helper()
+	decoder := json.NewDecoder(bytes.NewReader(output))
+	for {
+		var message Message
+		if err := decoder.Decode(&message); err == io.EOF {
+			return
+		} else if err != nil {
+			t.Fatal(err)
+		}
+		if message.Method == peerServicesEvent {
+			t.Fatal("failed hint commit published a peer-services claim")
+		}
+	}
+}
+
+func reopenPeerHints(t *testing.T, f *peerHintFixture, want []string) {
+	t.Helper()
+	reopened, err := NewManager(NewCodec(struct {
+		io.Reader
+		io.Writer
+	}{bytes.NewReader(nil), io.Discard}), filepath.Dir(f.m.clusterDir), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := reopened.reverse.manager.Close(); err != nil {
+			t.Error(err)
+		}
+	})
+	t.Cleanup(reopened.peerServices.CloseIdle)
+	t.Cleanup(reopened.removalPeerServices.CloseIdle)
+	member, ok := reopened.memberByNodeID(f.peer.UUID)
+	if !ok || !slices.Equal(member.AdvertisedAddresses, want) {
+		t.Fatalf("original-base reopen hints = %+v, want %v", member, want)
+	}
+	if cid, epoch := reopened.currentAdmission(); cid != "cluster-1" || epoch != 1 {
+		t.Fatalf("reopen admission = %s/%d", cid, epoch)
+	}
+	if pin, ok := reopened.trust.Get(f.peer.UUID); !ok || pin.AdmissionEpoch != 1 || pin.CertFingerprint != f.remote.identity.CertFingerprint {
+		t.Fatalf("reopen changed original peer pin: %+v", pin)
+	}
+}
+
+func TestMemberAdvertisedAddressesDeepCopy(t *testing.T) {
+	f := newPeerHintFixture(t)
+	member, _ := f.m.memberByNodeID(f.peer.UUID)
+	member.AdvertisedAddresses = []string{"100.90.0.8"}
+	f.m.upsertMember(member)
+	member.AdvertisedAddresses[0] = "input mutation"
+	lookup, _ := f.m.memberByNodeID(f.peer.UUID)
+	lookup.AdvertisedAddresses[0] = "lookup mutation"
+	for _, snapshot := range f.m.snapshotNodes() {
+		if snapshot.NodeUUID == f.peer.UUID {
+			snapshot.AdvertisedAddresses[0] = "snapshot mutation"
+		}
+	}
+	if err := f.m.persistMembersErr(); err != nil {
+		t.Fatal(err)
+	}
+	assertPeerHints(t, f, []string{"100.90.0.8"})
+}
+
+func TestMemberAdvertisedAddressesCompatibility(t *testing.T) {
+	f := newPeerHintFixture(t)
+	assertPeerHints(t, f, nil)
+	reopenPeerHints(t, f, nil)
+	for _, addresses := range [][]string{nil, {}} {
+		member, _ := f.m.memberByNodeID(f.peer.UUID)
+		member.AdvertisedAddresses = addresses
+		data, err := json.Marshal(member)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal(data, &fields); err != nil {
+			t.Fatal(err)
+		}
+		if _, exists := fields["advertisedAddresses"]; exists {
+			t.Fatal("nil or empty hints were not omitted")
+		}
+	}
+}
+
+func TestPeerServicesHintCommitBindsAdmission(t *testing.T) {
+	test := func(name string, mutate func(*testing.T, *peerHintFixture), wantSuccess bool) {
+		t.Run(name, func(t *testing.T) {
+			f := newPeerHintFixture(t)
+			f.m.rosterMu.Lock()
+			locked := true
+			done := make(chan error, 1)
+			finished := make(chan struct{})
+			go func() { defer close(finished); done <- f.commit() }()
+			defer func() {
+				if locked {
+					f.m.rosterMu.Unlock()
+				}
+				select {
+				case <-finished:
+				case <-time.After(8 * time.Second):
+					t.Error("hint worker did not join after boundary release")
+				}
+			}()
+			deadline := time.Now().Add(5 * time.Second)
+			for {
+				stack := make([]byte, 256*1024)
+				n := runtime.Stack(stack, true)
+				blocked := false
+				for _, worker := range strings.Split(string(stack[:n]), "\n\n") {
+					if strings.Contains(worker, "commitPeerServiceHints") && strings.Contains(worker, "sync.runtime_SemacquireMutex") {
+						blocked = true
+					}
+				}
+				if blocked {
+					break
+				}
+				if time.Now().After(deadline) {
+					f.m.rosterMu.Unlock()
+					locked = false
+					t.Fatal("hint commit did not wait at composition boundary")
+				}
+				runtime.Gosched()
+			}
+			mutate(t, f)
+			before := storedHintMember(t, f.m, f.peer.UUID)
+			f.m.rosterMu.Unlock()
+			locked = false
+			select {
+			case err := <-done:
+				if (err == nil) != wantSuccess {
+					t.Fatalf("commit error = %v, want success %v", err, wantSuccess)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("hint commit failed to finish")
+			}
+			if wantSuccess {
+				assertPeerHints(t, f, f.descriptor.Addresses)
+			} else {
+				after := storedHintMember(t, f.m, f.peer.UUID)
+				if !slices.Equal(after.AdvertisedAddresses, before.AdvertisedAddresses) || after.AdmissionEpoch != before.AdmissionEpoch {
+					t.Fatalf("stale response changed replacement disk state: before=%+v after=%+v", before, after)
+				}
+				member, _ := f.m.memberByNodeID(f.peer.UUID)
+				if !slices.Equal(member.AdvertisedAddresses, before.AdvertisedAddresses) {
+					t.Fatal("stale response changed replacement memory hints")
+				}
+			}
+			assertNoPeerServicesClaim(t, f.output.Bytes())
+		})
+	}
+	test("current admission", func(*testing.T, *peerHintFixture) {}, true)
+	test("same certificate newer peer admission", func(t *testing.T, f *peerHintFixture) {
+		readmitClusterPeer(t, f.m, f.remote)
+		member, _ := f.m.memberByNodeID(f.peer.UUID)
+		member.AdvertisedAddresses = []string{"100.90.0.9"}
+		f.m.upsertMember(member)
+		if err := f.m.persistMembersErr(); err != nil {
+			t.Fatal(err)
+		}
+	}, false)
+	test("local teardown and rejoin", func(t *testing.T, f *peerHintFixture) {
+		if err := f.m.teardownClusterLocalLocked(); err != nil {
+			t.Fatal(err)
+		}
+		activateTestCluster(t, f.m, "cluster-1")
+		f.m.addSelfMember()
+		pinTrusted(t, f.m, f.peer.UUID, string(f.remote.identity.CertPEM), f.remote.identity.CertFingerprint)
+		f.m.upsertMember(&ClusterNode{NodeUUID: f.peer.UUID, ID: "replacement", ClusterID: "cluster-1", AdmissionEpoch: 1, State: stateMember, AdvertisedAddresses: []string{"100.90.0.9"}})
+		if err := f.m.persistMembersErr(); err != nil {
+			t.Fatal(err)
+		}
+	}, false)
+	test("revoked pin", func(t *testing.T, f *peerHintFixture) { f.m.trust.Forget(f.peer.UUID) }, false)
+	test("pending member", func(t *testing.T, f *peerHintFixture) {
+		member, _ := f.m.memberByNodeID(f.peer.UUID)
+		member.State = statePendingOutbound
+		f.m.upsertMember(member)
+	}, false)
+}
+
+func TestPeerServicesHintPersistenceFailure(t *testing.T) {
+	a, b := newReverseTestManager(t), newReverseTestManager(t)
+	containHintDials(t, a, true)
+	containHintDials(t, b, false)
+	t.Cleanup(a.peerServices.CloseIdle)
+	t.Cleanup(a.removalPeerServices.CloseIdle)
+	setDescriptorSelf(t, b)
+	setReverseServices(t, b, 1)
+	server := httptest.NewUnstartedServer(http.HandlerFunc(b.handlePeerServices))
+	server.TLS = b.buildServerTLSConfig()
+	server.StartTLS()
+	defer server.Close()
+	b.port = server.Listener.Addr().(*net.TCPAddr).Port
+	pairReverseManagers(t, a, b)
+	persistPeerServicesMembers(t, a, b)
+	var output bytes.Buffer
+	a.codec = NewCodec(struct {
+		io.Reader
+		io.Writer
+	}{bytes.NewReader(nil), &output})
+	failure := errors.New("injected member persistence failure")
+	injectClusterReplacer(t, durablefile.Replacer{CreateTemp: func(dir, base string, mode os.FileMode) (durablefile.File, error) {
+		if dir == a.clusterDir && base == membersFile {
+			return nil, failure
+		}
+		return createHintTemp(dir, base, mode)
+	}})
+	if err := a.refreshPeerServices(context.Background(), b.identity.NodeUUID); !errors.Is(err, failure) {
+		t.Fatalf("fetch persistence error = %v, want injected failure", err)
+	}
+	member, _ := a.memberByNodeID(b.identity.NodeUUID)
+	if len(member.AdvertisedAddresses) != 0 || len(storedHintMember(t, a, b.identity.NodeUUID).AdvertisedAddresses) != 0 {
+		t.Fatal("failed fetch retained speculative hints")
+	}
+	assertNoPeerServicesClaim(t, output.Bytes())
+}
+
+func TestPeerServicesHintsClearedWithMembership(t *testing.T) {
+	test := func(name string, clear func(*testing.T, *peerHintFixture)) {
+		t.Run(name, func(t *testing.T) {
+			f := newPeerHintFixture(t)
+			if err := f.commit(); err != nil {
+				t.Fatal(err)
+			}
+			clear(t, f)
+			activateTestCluster(t, f.m, "cluster-1")
+			f.m.addSelfMember()
+			if err := f.m.trust.Pin(&TrustedPin{NodeUUID: f.peer.UUID, NodeID: f.remote.identity.NodeID, ClusterID: "cluster-1", AdmissionEpoch: 2, CertPem: string(f.remote.identity.CertPEM), CertFingerprint: f.remote.identity.CertFingerprint}); err != nil {
+				t.Fatal(err)
+			}
+			f.m.upsertMember(&ClusterNode{NodeUUID: f.peer.UUID, ID: "new-admission", ClusterID: "cluster-1", AdmissionEpoch: 2, State: stateMember})
+			if err := f.m.persistMembersErr(); err != nil {
+				t.Fatal(err)
+			}
+			assertPeerHints(t, f, nil)
+			reopened, err := NewManager(NewCodec(struct {
+				io.Reader
+				io.Writer
+			}{bytes.NewReader(nil), io.Discard}), filepath.Dir(f.m.clusterDir), 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() {
+				if err := reopened.reverse.manager.Close(); err != nil {
+					t.Error(err)
+				}
+			})
+			t.Cleanup(reopened.peerServices.CloseIdle)
+			t.Cleanup(reopened.removalPeerServices.CloseIdle)
+			node, ok := reopened.memberByNodeID(f.peer.UUID)
+			if !ok || len(node.AdvertisedAddresses) != 0 {
+				t.Fatalf("reopen leaked deleted hints: %+v", node)
+			}
+		})
+	}
+	test("remove member", func(t *testing.T, f *peerHintFixture) { f.m.removeMemberByUUID(f.peer.UUID) })
+	test("reset membership", func(t *testing.T, f *peerHintFixture) { f.m.resetMembership() })
+	test("local teardown", func(t *testing.T, f *peerHintFixture) {
+		if err := f.m.teardownClusterLocal(); err != nil {
+			t.Fatal(err)
+		}
+	})
+}
 
 func TestDescriptorAddresses(t *testing.T) {
 	test := func(name string, scanner, overlay, want []string) {
@@ -190,6 +573,8 @@ func TestPeerServicesFetchBindsOriginalAdmission(t *testing.T) {
 	test := func(name string, retire bool) {
 		t.Run(name, func(t *testing.T) {
 			a, b := newReverseTestManager(t), newReverseTestManager(t)
+			containHintDials(t, a, true)
+			containHintDials(t, b, false)
 			setDescriptorSelf(t, b)
 			setReverseServices(t, b, 1, noderec.RegisterParams{Service: noderec.ServiceNodeInfo, Port: 24441})
 			held := make(chan struct{})
