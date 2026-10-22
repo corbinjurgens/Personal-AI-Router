@@ -1732,6 +1732,52 @@ func TestModelConfigDefiniteLoadFailureReason(t *testing.T) {
 	test("recovered finish", true)
 }
 
+// The manager's ordinary definite failure carries its readable post-load
+// inventory, which omits the model; the proxy settles it without recovery.
+func TestModelConfigObservedLoadFailureReason(t *testing.T) {
+	f := newModelConfigFixture(t)
+	f.setResidentAttemptAnswer(t, nodepolicy.ResidentFailed)
+	f.engine.mu.Lock()
+	answer := f.engine.answer
+	f.engine.mu.Unlock()
+	f.engine.setAnswer(func(method string, raw json.RawMessage) (any, string) {
+		// The fixture answer still grants the dispatch; only its result changes.
+		value, reply := answer(method, raw)
+		if method != nodepolicy.MethodReconcileResident {
+			return value, reply
+		}
+		var p nodepolicy.ReconcileResidentParams
+		if err := json.Unmarshal(raw, &p); err != nil {
+			return nil, err.Error()
+		}
+		return nodepolicy.ReconcileResidentResult{Outcome: nodepolicy.ResidentFailed, Observation: &nodepolicy.ResidentLoadedObservation{
+			ManagerIncarnation: p.Reservation.ManagerIncarnation, Generation: 1,
+			Engine: p.Engine, Model: p.Model, Identity: p.Identity, Loaded: false,
+		}}, reply
+	})
+	done := make(chan struct{})
+	go func() { defer close(done); f.b.reconcileModelConfig(context.Background()) }()
+	f.awaitGrant(t)
+	f.engine.releaseHeld()
+	awaitModelConfigDone(t, done)
+	finishes := modelConfigCalls(f.proxy, nodepolicy.MethodFinishResident)
+	if len(finishes) != 1 {
+		t.Fatalf("finish calls=%d, want one", len(finishes))
+	}
+	finish := decodeModelConfigCall[nodepolicy.FinishResidentParams](t, finishes[0])
+	if finish.Outcome != nodepolicy.ResidentFailed || finish.Observation == nil || finish.Observation.Loaded {
+		t.Fatalf("observed manager failure was not finished intact: %+v", finish)
+	}
+	r := f.b.nodePolicyRuntime()
+	r.mu.Lock()
+	holds, pending := len(r.models.unsettled), len(r.models.pending)
+	r.mu.Unlock()
+	if holds != 0 || pending != 0 || len(modelConfigCalls(f.proxy, nodepolicy.MethodObserveResident)) != 0 || len(modelConfigCalls(f.engine, nodepolicy.MethodReconcileResident)) != 1 {
+		t.Fatalf("settled observed failure left work behind: holds=%d pending=%d", holds, pending)
+	}
+	assertModelConfigLoadFailed(t, f)
+}
+
 func TestModelConfigDefiniteLoadFailureRetainedReason(t *testing.T) {
 	for _, failure := range []string{"finish transport failure", "recovery inventory failure", "recovery observe failure"} {
 		t.Run(failure, func(t *testing.T) {
@@ -1902,6 +1948,63 @@ func TestModelConfigRetainedFailureReadbackTracksInventory(t *testing.T) {
 	}
 }
 
+// A retained failure explains an otherwise eligible resident. A current local
+// veto still decides the published state without discharging that failure.
+func TestModelConfigRetainedFailureKeepsCurrentVeto(t *testing.T) {
+	test := func(name string, setVeto func(r *policyRuntime, enabled bool), reason nodepolicy.ModelConfigurationReason) {
+		t.Run(name, func(t *testing.T) {
+			f := newModelConfigFixture(t)
+			f.proxy.mu.Lock()
+			answer := f.proxy.answer
+			f.proxy.mu.Unlock()
+			f.proxy.setAnswer(func(method string, raw json.RawMessage) (any, string) {
+				if method == nodepolicy.MethodFinishResident {
+					return nil, "private fixture finish failure"
+				}
+				return answer(method, raw)
+			})
+			done := f.startResidentAttempt(t, nodepolicy.ResidentFailed)
+			f.awaitGrant(t)
+			f.engine.releaseHeld()
+			awaitModelConfigDone(t, done)
+			r := f.b.nodePolicyRuntime()
+			ref := nodepolicy.Role{Engine: "llamacpp", Model: "resident"}
+			r.mu.Lock()
+			hold, held := r.models.unsettled[ref]
+			setVeto(r, true)
+			r.mu.Unlock()
+			if !held || !hold.terminal || hold.finish.Outcome != nodepolicy.ResidentFailed {
+				t.Fatal("fixture did not retain the definite manager failure")
+			}
+			assertVeto := func(phase string) {
+				t.Helper()
+				e := f.b.captureModelConfig()
+				for _, status := range []nodepolicy.ModelConfiguration{
+					f.b.modelConfiguration(e), f.b.localPolicy().ModelConfiguration,
+					f.b.peerPolicy().ModelConfiguration, f.b.modelConfigurationFor(e.Policy),
+				} {
+					if len(status.Models) != 1 || status.Models[0].State != nodepolicy.ModelStateBlocked || status.Models[0].Reason != reason {
+						t.Errorf("%s with retained failure=%+v, want blocked/%s", phase, status.Models, reason)
+					}
+				}
+			}
+			assertVeto("readback")
+			f.b.reconcileModelConfig(context.Background())
+			assertVeto("reconcile")
+			r.mu.Lock()
+			after, retained := r.models.unsettled[ref]
+			setVeto(r, false)
+			r.mu.Unlock()
+			if !retained || after.op != hold.op || len(modelConfigCalls(f.engine, nodepolicy.MethodReconcileResident)) != 1 {
+				t.Fatal("veto discharged the retained failure or dispatched another load")
+			}
+			assertModelConfigLoadFailed(t, f)
+		})
+	}
+	test("local pause", func(r *policyRuntime, enabled bool) { r.localPauseRequested = enabled }, nodepolicy.ModelReasonPausedLocal)
+	test("local Off", func(r *policyRuntime, enabled bool) { r.intent["llamacpp"] = !enabled }, nodepolicy.ModelReasonEngineOffLocal)
+}
+
 func TestModelConfigNonfailureOutcomeReasons(t *testing.T) {
 	test := func(name string, outcome nodepolicy.ResidentOutcome, transportFailure bool, state nodepolicy.ModelConfigurationState, reason nodepolicy.ModelConfigurationReason) {
 		t.Run(name, func(t *testing.T) {
@@ -1925,6 +2028,8 @@ func TestModelConfigNonfailureOutcomeReasons(t *testing.T) {
 	}
 	test("loaded", nodepolicy.ResidentLoaded, false, "satisfied", "")
 	test("terminal unknown", nodepolicy.ResidentUnknown, false, "unknown", "operation-timeout")
+	test("terminal timeout", nodepolicy.ResidentTimeout, false, "unknown", "operation-timeout")
+	test("terminal cancelled", nodepolicy.ResidentCancelled, false, "unknown", "operation-timeout")
 	test("transport failure", nodepolicy.ResidentUnknown, true, "unknown", "operation-timeout")
 	test("not dispatched", nodepolicy.ResidentNotDispatched, false, "blocked", "unsupported-load")
 }
