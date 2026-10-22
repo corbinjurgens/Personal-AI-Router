@@ -264,46 +264,93 @@ func (e *Executor) restoreEnabled(ctx context.Context, engine string) error {
 	if err != nil || !known || !enabled {
 		return err
 	}
-	// A hard manager death can leave an owned process listening on its configured
-	// port. Normal Start adopts an identified listener, but restore must
-	// relaunch an orphaned PAIR install cold. Check the same exact port,
-	// managed install and image predicate as Stop before probing readiness:
-	// an owned orphan may be listening but unhealthy. External listeners are
-	// never reclaimed.
-	st.mu.Lock()
-	port, owned := st.port, st.proc != nil
-	st.mu.Unlock()
-	if !owned && port > 0 {
-		_, _ = e.Detect(engine)
-		st.mu.Lock()
-		binPath, installDir, rt := st.binPath, st.installDir, st.plat.Runtime
-		st.mu.Unlock()
-		pid, image, found := pidOnPort(port)
-		if found && isManagedInstallPath(binPath, installDir) && isOurEngineImage(image, binPath) {
-			terminatePID(pid, stopGrace(rt))
-			if err := e.confirmOrphanStopped(engine, pid, port, rt); err != nil {
-				return err
-			}
-			e.markStopped(st, engine)
-			return e.doStart(ctx, st, engine, startOpts{RequireOwned: true})
-		}
+	return e.doStart(ctx, st, engine, startOpts{ReclaimOwned: true})
+}
+
+// reclaimOrphan is shared by restore and switch recovery/start. It runs before
+// readiness/adoption, since an interrupted managed child may be unhealthy.
+// Callers hold opMu and register startCancel before entering this owner.
+func (e *Executor) reclaimOrphan(ctx context.Context, st *engineState, engine string, port int) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
 	}
-	return e.doStart(ctx, st, engine, startOpts{})
+	st.mu.Lock()
+	binPath, installDir, rt, owned := st.binPath, st.installDir, st.plat.Runtime, st.proc != nil
+	st.mu.Unlock()
+	if owned || port <= 0 || rt.modeOrDefault() != "process" || !isManagedInstallPath(binPath, installDir) {
+		return false, nil
+	}
+	pid, image, found := pidOnPort(port)
+	if !found || !isOurEngineImage(image, binPath) {
+		return false, nil
+	}
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	st.mu.Lock()
+	previousPID := st.reclaimPID
+	st.mu.Unlock()
+	if previousPID != 0 && previousPID != pid && !orphanPIDExited(previousPID) {
+		return true, fmt.Errorf("reclaim owned %s orphan: previous pid %d termination is unverified", engine, previousPID)
+	}
+	st.mu.Lock()
+	st.reclaimPID = pid
+	st.mu.Unlock()
+	if err := terminatePIDContext(ctx, pid, stopGrace(rt)); err != nil {
+		err = fmt.Errorf("reclaim owned %s orphan: %w", engine, err)
+		e.failOrphanReclaim(st, engine, err)
+		return true, err
+	}
+	if err := e.confirmOrphanStoppedContext(ctx, engine, pid, port, rt); err != nil {
+		return true, err
+	}
+	e.markStopped(st, engine)
+	return true, nil
+}
+
+func (e *Executor) failOrphanReclaim(st *engineState, engine string, err error) {
+	st.mu.Lock()
+	st.reclaimFailed = true
+	st.running, st.healthy, st.adopted = false, false, false
+	st.runID = ""
+	if st.healthStop != nil {
+		st.healthStop()
+		st.healthStop = nil
+	}
+	st.mu.Unlock()
+	e.reportStartFailed(engine, err)
+	e.emitState(engine)
 }
 
 // confirmOrphanStopped checks termination separately from sending signals so
 // failure handling can be exercised without an unkillable process fixture.
 func (e *Executor) confirmOrphanStopped(engine string, pid, port int, rt Runtime) error {
+	return e.confirmOrphanStoppedContext(context.Background(), engine, pid, port, rt)
+}
+
+func (e *Executor) confirmOrphanStoppedContext(ctx context.Context, engine string, pid, port int, rt Runtime) error {
 	var err error
 	if rt.Ready != nil {
-		if !e.waitUnavailable(rt.Ready, port, stopGrace(rt)+2*time.Second) {
+		// The signal owner has already consumed any graceful interval.
+		if !e.waitUnavailableContext(ctx, rt.Ready, port, 2*time.Second) {
 			err = fmt.Errorf("reclaim owned %s orphan: listener on port %d did not stop", engine, port)
 		}
-	} else if pidAlive(pid) {
+	}
+	if err == nil && !orphanPIDExited(pid) {
 		err = fmt.Errorf("reclaim owned %s orphan: pid %d did not stop", engine, pid)
 	}
+	if ctx.Err() != nil {
+		err = fmt.Errorf("reclaim owned %s orphan: %w", engine, ctx.Err())
+	}
 	if err != nil {
-		e.reportStartFailed(engine, err)
+		if st, stateErr := e.state(engine); stateErr == nil {
+			st.mu.Lock()
+			if st.reclaimPID == 0 {
+				st.reclaimPID = pid
+			}
+			st.mu.Unlock()
+			e.failOrphanReclaim(st, engine, err)
+		}
 	}
 	return err
 }

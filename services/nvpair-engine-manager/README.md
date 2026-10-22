@@ -697,7 +697,20 @@ dynamic target port is allocated and checkpointed before launching its process.
 Target On and `target-committed` are saved together only after readiness. A failed
 start saves target Off, preserves a stronger local Off, and never restores the
 source. Termination evidence requires listener refusal as well as stopped owned
-state. Reconciliation cleans up interrupted work and never resumes target startup.
+state. Reconciliation cleans up uncommitted interrupted work and never resumes
+that target startup. Cleanup checks the durable positive port, managed install
+containment and executable image before reclaiming a child, even if unhealthy.
+A committed target still saved On recovers through the same reclaim owner and
+an owned cold launch; a later fresh switch target start uses that owner too.
+Foreign listeners are never killed and retain the existing port-ownership error.
+Reclaim observes caller and shutdown cancellation before signalling and while
+waiting for termination. Windows windowless orphans use `taskkill /T /F` without
+consuming the Unix graceful interval. Failed or cancelled reclaim reports a start
+failure and fences adoption, including explicit Start, until a verified stop or
+successful owned cold start. Passive status remains not running and unhealthy.
+Listener refusal alone cannot clear that fence: the recorded failed-reclaim PID
+must be verified exited. Live/reused PIDs and inspection errors retain the fence;
+the retained PID never authorizes signalling without the current reclaim predicate.
 The matching checkpoint remains reserved until the broker releases it after its
 terminal receipt is durable; a released checkpoint retains the last operation's
 retry identity until replaced by a new reservation.

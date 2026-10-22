@@ -5,6 +5,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"io"
 	"os"
 	"os/exec"
@@ -127,24 +128,41 @@ func (mp *managedProc) stop(grace time.Duration) {
 // process that's already gone counts as success. The platform primitives
 // (signalPID, pidAlive) live in proc_windows.go / proc_unix.go.
 func terminatePID(pid int, grace time.Duration) {
+	_ = terminatePIDContext(context.Background(), pid, grace)
+}
+
+func terminatePIDContext(ctx context.Context, pid int, grace time.Duration) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if pid <= 0 {
-		return
+		return nil
+	}
+	if runtime.GOOS == "windows" {
+		// The platform stop is already forceful; there is no graceful phase.
+		grace = 0
 	}
 	if grace <= 0 {
-		_ = signalPID(pid, true)
-		return
+		return signalPIDContext(ctx, pid, true)
 	}
-	_ = signalPID(pid, false)
+	if err := signalPIDContext(ctx, pid, false); err != nil && pidAlive(pid) {
+		return err
+	}
 	deadline := time.Now().Add(grace)
 	for time.Now().Before(deadline) {
 		if !pidAlive(pid) {
-			return
+			return ctx.Err()
 		}
-		time.Sleep(100 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(100 * time.Millisecond):
+		}
 	}
 	if pidAlive(pid) {
-		_ = signalPID(pid, true)
+		return signalPIDContext(ctx, pid, true)
 	}
+	return ctx.Err()
 }
 
 // normalizeEngineImage handles annotations supplied by process inspection,

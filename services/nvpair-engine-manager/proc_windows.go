@@ -175,22 +175,29 @@ func imagePathForPID(pid int) string {
 // still be identified for cleanup after it releases its listening port.
 func procImage(pid int) string { return imagePathForPID(pid) }
 
-// signalPID asks the PID's process tree to stop (taskkill /T), adding /F when
-// force is set. The owned-process escalation and orphan reclaim share it.
+// signalPID stops the PID's process tree with taskkill /T /F, matching
+// gracefulSignal. Keep the force argument for the shared platform interface.
 func signalPID(pid int, force bool) error {
+	return signalPIDContext(context.Background(), pid, force)
+}
+
+// Orphans use the same forceful tree stop as gracefulSignal: a windowless
+// console engine cannot receive the WM_CLOSE sent by a non-/F taskkill.
+func signalPIDContext(ctx context.Context, pid int, force bool) error {
 	if pid <= 0 {
 		return nil
 	}
-	args := []string{"/T", "/PID", strconv.Itoa(pid)}
-	if force {
-		args = append([]string{"/F"}, args...)
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), taskkillTimeout)
+	args := []string{"/F", "/T", "/PID", strconv.Itoa(pid)}
+	ctx, cancel := context.WithTimeout(ctx, taskkillTimeout)
 	defer cancel()
 	kc := exec.CommandContext(ctx, "taskkill", args...)
 	kc.Env = childEnv(nil)
 	configureSysProcAttr(kc) // hide taskkill's own console window
-	return kc.Run()
+	err := kc.Run()
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	return err
 }
 
 // pidAlive reports whether the PID is still running (WaitForSingleObject with

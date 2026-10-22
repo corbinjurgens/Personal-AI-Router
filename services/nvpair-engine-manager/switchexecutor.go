@@ -611,12 +611,7 @@ func (e *Executor) switchStepLocked(ctx context.Context, p settings.SwitchStepRe
 				return fail(settings.SwitchErrorInterrupted, stopErr)
 			}
 			st.opMu.Lock()
-			installed, _ := e.Detect(pair.name)
-			st.mu.Lock()
-			port := st.port
-			st.mu.Unlock()
-			e.reconcilePresence(ctx, pair.name, st, installed, port, true)
-			stopErr = e.doStop(st, pair.name)
+			stopErr = e.cleanupSwitchRecovery(ctx, st, pair.name)
 			terminated := e.switchTerminated(st)
 			*pair.observation = e.switchObserved(st, settings.SwitchIntentOff, terminated)
 			st.opMu.Unlock()
@@ -645,12 +640,16 @@ func (e *Executor) switchStepLocked(ctx context.Context, p settings.SwitchStepRe
 			}
 		}
 	}
+	recoverCommitted := reconcile && cp.TargetCommitted && switchIntent(state, cp.TargetEngine) == settings.SwitchIntentOn
 	if reconcile && cp.Phase != settings.SwitchCheckpointStopPending && cp.Phase != settings.SwitchCheckpointStartPending {
 		for _, pair := range []struct {
 			name        string
 			observation *settings.SwitchEngineState
 		}{{cp.SourceEngine, &result.Observed.Source}, {cp.TargetEngine, &result.Observed.Target}} {
 			if st, err := e.state(pair.name); err == nil {
+				if pair.name == cp.TargetEngine && recoverCommitted {
+					continue
+				}
 				st.opMu.Lock()
 				installed, _ := e.Detect(pair.name)
 				st.mu.Lock()
@@ -661,8 +660,10 @@ func (e *Executor) switchStepLocked(ctx context.Context, p settings.SwitchStepRe
 				st.opMu.Unlock()
 			}
 		}
-		result.Error = cp.Error
-		return result
+		if !recoverCommitted {
+			result.Error = cp.Error
+			return result
+		}
 	}
 	if !reconcile && cp.Error != nil {
 		result.Error = cp.Error
@@ -678,7 +679,7 @@ func (e *Executor) switchStepLocked(ctx context.Context, p settings.SwitchStepRe
 		return fail(settings.SwitchErrorInterrupted, errors.New("switch step deadline expired or caller cancelled"))
 	}
 	stopSource := p.Step == settings.SwitchStepSourceStop || (reconcile && cp.Phase == settings.SwitchCheckpointStopPending)
-	startTarget := p.Step == settings.SwitchStepTargetStart || (reconcile && cp.Phase == settings.SwitchCheckpointStartPending)
+	startTarget := recoverCommitted || p.Step == settings.SwitchStepTargetStart || (reconcile && cp.Phase == settings.SwitchCheckpointStartPending)
 	if !stopSource && !startTarget {
 		return fail(settings.SwitchErrorInvalidRequest, &codedError{code: -32602, message: "unknown switch step"})
 	}
@@ -693,11 +694,30 @@ func (e *Executor) switchStepLocked(ctx context.Context, p settings.SwitchStepRe
 	if err != nil {
 		return fail(kind, err)
 	}
-	if startTarget && !reconcile {
-		prepareCtx, cancel := context.WithDeadline(ctx, cp.Deadline)
-		err := prepareStrataState(prepareCtx, st)
-		cancel()
-		if err != nil {
+	startCtx := ctx
+	if startTarget && (!reconcile || recoverCommitted) {
+		if !reconcile {
+			var cancel context.CancelFunc
+			startCtx, cancel = context.WithDeadline(ctx, cp.Deadline)
+			defer cancel()
+		}
+		if cp.Origin == settings.SwitchOriginRemote {
+			// Register and read the reservation under the same gate as source
+			// Off, which also cancels work registered for the target engine.
+			e.switchAdmission.Lock()
+			remoteCtx, done, beginErr := e.beginRemote(startCtx, engine)
+			err = beginErr
+			if err == nil {
+				startCtx = remoteCtx
+				defer done()
+				err = e.switchStartAllowed(startCtx, cp, recoverCommitted)
+			}
+			e.switchAdmission.Unlock()
+		}
+		if err == nil {
+			err = vetoCause(startCtx, prepareStrataState(startCtx, st))
+		}
+		if err != nil && !recoverCommitted {
 			return fail(kind, err)
 		}
 	}
@@ -710,12 +730,16 @@ func (e *Executor) switchStepLocked(ctx context.Context, p settings.SwitchStepRe
 			return fail(settings.SwitchErrorStorage, err)
 		}
 		e.emitIntent()
-		installed, _ := e.Detect(engine)
-		st.mu.Lock()
-		port := st.port
-		st.mu.Unlock()
-		e.reconcilePresence(ctx, engine, st, installed, port, true)
-		err = e.doStop(st, engine)
+		if reconcile {
+			err = e.cleanupSwitchRecovery(ctx, st, engine)
+		} else {
+			installed, _ := e.Detect(engine)
+			st.mu.Lock()
+			port := st.port
+			st.mu.Unlock()
+			e.reconcilePresence(ctx, engine, st, installed, port, true)
+			err = e.doStop(st, engine)
+		}
 		terminated := e.switchTerminated(st)
 		cp.Source = e.switchObserved(st, settings.SwitchIntentOff, terminated)
 		if !terminated && err == nil {
@@ -738,60 +762,50 @@ func (e *Executor) switchStepLocked(ctx context.Context, p settings.SwitchStepRe
 			st.port = port
 			st.mu.Unlock()
 		}
-		cp.Phase = settings.SwitchCheckpointStartPending
+		if !recoverCommitted {
+			cp.Phase = settings.SwitchCheckpointStartPending
+		}
 		intentEngine := ""
 		if vetoedCommittedTarget {
 			intentEngine = engine
 		}
-		if err := e.saveSwitch(cp, intentEngine, false); err != nil {
-			return fail(settings.SwitchErrorStorage, err)
+		if !recoverCommitted {
+			if err := e.saveSwitch(cp, intentEngine, false); err != nil {
+				return fail(settings.SwitchErrorStorage, err)
+			}
 		}
-		if reconcile {
+		launchSucceeded := false
+		if reconcile && !recoverCommitted {
 			if port == 0 {
 				return fail(settings.SwitchErrorInterrupted, errors.New("interrupted target has no durable listener endpoint; reservation retained"))
 			}
-			installed, _ := e.Detect(engine)
-			st.mu.Lock()
-			port := st.port
-			st.mu.Unlock()
-			e.reconcilePresence(ctx, engine, st, installed, port, true)
-			err = e.doStop(st, engine)
+			err = e.cleanupSwitchRecovery(ctx, st, engine)
 			if err == nil {
 				err = errors.New("target startup interrupted; source is not restored")
 			}
 		} else {
-			startCtx, cancel := context.WithDeadline(ctx, cp.Deadline)
-			defer cancel()
-			done := func() {}
-			if cp.Origin == settings.SwitchOriginRemote {
-				startCtx, done, err = e.beginRemote(startCtx, engine)
-			}
+			e.switchAdmission.Lock()
 			if err == nil {
-				defer done()
+				err = e.switchStartAllowed(startCtx, cp, recoverCommitted)
+			}
+			e.switchAdmission.Unlock()
+			if err == nil {
 				installed, detectErr := e.Detect(engine)
 				if detectErr != nil {
 					err = detectErr
 				} else if !installed {
 					err = errors.New("target engine is no longer prepared")
 				} else {
-					err = e.doStart(startCtx, st, engine, startOpts{RequireOwned: true, Bind: "127.0.0.1"})
+					err = e.doStart(startCtx, st, engine, startOpts{RequireOwned: true, ReclaimOwned: true, Bind: "127.0.0.1"})
+					launchSucceeded = err == nil
 				}
 				err = vetoCause(startCtx, err)
 			}
 		}
 		// Serialize final veto/readiness commit against a local Off admission.
 		e.switchAdmission.Lock()
-		if err == nil && cp.Origin == settings.SwitchOriginRemote {
-			err = e.remoteVeto(engine)
-			if err == nil {
-				e.desired.mu.Lock()
-				current, loadErr := e.desired.load()
-				e.desired.mu.Unlock()
-				err = loadErr
-				if pending := current.PendingSwitch; err == nil && pending != nil && pending.Error != nil && pending.Error.Code == codeLocalVeto {
-					err = &localVetoError{reason: pending.Error.Message}
-				}
-			}
+		if err == nil {
+			err = e.switchStartAllowed(startCtx, cp, recoverCommitted)
 		}
 		if err == nil && e.shuttingDown.Load() {
 			err = context.Canceled
@@ -811,8 +825,26 @@ func (e *Executor) switchStepLocked(ctx context.Context, p settings.SwitchStepRe
 		}
 		e.switchAdmission.Unlock()
 		// A failed or vetoed launch never restores the source.
-		cleanupErr := e.doStop(st, engine)
+		st.mu.Lock()
+		reclaimFailed := st.reclaimFailed
+		owned := st.proc != nil
+		st.mu.Unlock()
+		var cleanupErr error
+		if !reclaimFailed && (!recoverCommitted || launchSucceeded || owned) && (!reconcile || recoverCommitted) {
+			if !reconcile && !owned && !launchSucceeded {
+				cleanupErr = e.cleanupSwitchRecovery(startCtx, st, engine)
+			} else {
+				cleanupErr = e.doStop(st, engine)
+			}
+		}
 		err = errors.Join(err, cleanupErr)
+		if recoverCommitted && switchCode(err) != codeLocalVeto {
+			return fail(kind, err)
+		}
+		if recoverCommitted {
+			cp.TargetCommitted = false
+			cp.Phase = settings.SwitchCheckpointStartPending
+		}
 		cp.Target = e.switchObserved(st, settings.SwitchIntentOff, e.switchTerminated(st))
 	}
 	if err != nil {
@@ -828,7 +860,33 @@ func (e *Executor) switchStepLocked(ctx context.Context, p settings.SwitchStepRe
 			cp.Phase = settings.SwitchCheckpointSourceOff
 		}
 	}
-	if saveErr := e.saveSwitch(cp, intentEngine, false); saveErr != nil {
+	if recoverCommitted {
+		e.switchAdmission.Lock()
+		// The terminal target observation was made after recovery/cleanup. Acknowledge
+		// a concurrent target Off under its admission gate so saveSwitch keeps
+		// this fresh observation instead of merging the admission's older On.
+		// Source Off still needs its own termination reconciliation.
+		e.desired.mu.Lock()
+		current, loadErr := e.desired.load()
+		e.desired.mu.Unlock()
+		if loadErr != nil {
+			e.switchAdmission.Unlock()
+			return fail(settings.SwitchErrorStorage, loadErr)
+		}
+		pending := current.PendingSwitch
+		if pending == nil || pending.SwitchPrepareRequest != cp.SwitchPrepareRequest {
+			e.switchAdmission.Unlock()
+			return fail(settings.SwitchErrorInterrupted, errors.New("switch checkpoint changed before recovery terminal"))
+		}
+		if pending.TargetLocalOff && cp.Target.Intent == settings.SwitchIntentOff {
+			cp.TargetLocalOff = true
+		}
+	}
+	saveErr := e.saveSwitch(cp, intentEngine, false)
+	if recoverCommitted {
+		e.switchAdmission.Unlock()
+	}
+	if saveErr != nil {
 		return fail(settings.SwitchErrorStorage, saveErr)
 	}
 	if startTarget {
@@ -839,11 +897,65 @@ func (e *Executor) switchStepLocked(ctx context.Context, p settings.SwitchStepRe
 	return result
 }
 
+// Caller holds switchAdmission, shared with local Off admission. Check both
+// before launch and before accepting readiness, using the current durable intent.
+func (e *Executor) switchStartAllowed(ctx context.Context, cp *settings.SwitchCheckpoint, recoverCommitted bool) error {
+	if err := vetoCause(ctx, ctx.Err()); err != nil {
+		return err
+	}
+	if cp.Origin == settings.SwitchOriginRemote {
+		if err := e.remoteVeto(cp.TargetEngine); err != nil {
+			return err
+		}
+	}
+	e.desired.mu.Lock()
+	current, err := e.desired.load()
+	e.desired.mu.Unlock()
+	if err != nil {
+		return err
+	}
+	pending := current.PendingSwitch
+	if pending == nil || pending.SwitchPrepareRequest != cp.SwitchPrepareRequest || pending.Phase != cp.Phase || pending.TargetCommitted != cp.TargetCommitted {
+		return errors.New("switch checkpoint changed before target readiness")
+	}
+	if pending.Error != nil && pending.Error.Code == codeLocalVeto {
+		return &localVetoError{reason: pending.Error.Message}
+	}
+	if recoverCommitted && switchIntent(current, cp.TargetEngine) != settings.SwitchIntentOn {
+		return errors.New("committed target no longer has durable On intent")
+	}
+	return nil
+}
+
+// Caller holds opMu. All interrupted switch cleanup uses the same precise
+// reclaim owner before readiness can adopt (or overlook) a managed orphan.
+func (e *Executor) cleanupSwitchRecovery(ctx context.Context, st *engineState, engine string) error {
+	cleanupCtx, finish := e.startContext(ctx, st)
+	defer finish()
+	if err := cleanupCtx.Err(); err != nil {
+		return err
+	}
+	installed, _ := e.Detect(engine)
+	st.mu.Lock()
+	port := st.port
+	st.mu.Unlock()
+	reclaimed, err := e.reclaimOrphan(cleanupCtx, st, engine, port)
+	if err != nil || reclaimed {
+		return err
+	}
+	if err := cleanupCtx.Err(); err != nil {
+		return err
+	}
+	e.reconcilePresence(cleanupCtx, engine, st, installed, port, true)
+	return e.doStopContext(cleanupCtx, st, engine)
+}
+
 func (e *Executor) switchTerminated(st *engineState) bool {
 	st.mu.Lock()
 	proc, running, port := st.proc, st.running, st.port
+	fenced, reclaimPID := st.reclaimFailed, st.reclaimPID
 	st.mu.Unlock()
-	if proc != nil || running {
+	if proc != nil || running || (fenced && !orphanPIDExited(reclaimPID)) {
 		return false
 	}
 	if port == 0 {

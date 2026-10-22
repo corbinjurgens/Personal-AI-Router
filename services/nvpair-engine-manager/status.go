@@ -149,7 +149,16 @@ func (e *Executor) reconcilePresence(ctx context.Context, engine string, st *eng
 	adopted := st.adopted
 	proc := st.proc
 	ready := st.plat.Runtime.Ready
+	fenced := st.reclaimFailed
 	st.mu.Unlock()
+	if fenced {
+		// A surviving failed reclaim must never become a healthy adoption,
+		// including through explicit Start's allowWhileStopping path.
+		if ready != nil && e.waitUnavailableContext(ctx, ready, port, presenceRefusalWindow) {
+			return presenceResult{}
+		}
+		return presenceResult{Occupied: true}
+	}
 
 	// A command-mode engine needs its control CLI. A compatible HTTP endpoint
 	// alone (for example another OpenAI server on LM Studio's port) is not an
