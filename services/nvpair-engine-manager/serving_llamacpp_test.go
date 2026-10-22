@@ -437,6 +437,102 @@ func TestLlamaServingOwnerRouterPresetReachesChild(t *testing.T) {
 	}
 }
 
+// The pinned preset parser reverses negative aliases using is_truthy, which
+// recognizes enabled as well as on/true/1. Positive values stay native-owned.
+func TestLlamaServingOffloadPresetPolarity(t *testing.T) {
+	test := func(name, key, value, want string) {
+		t.Run(name, func(t *testing.T) {
+			f := newLlamaServingFixture(t)
+			writeOwnerRouterPreset(t, f)
+			data, err := os.ReadFile(f.source)
+			if err != nil {
+				t.Fatal(err)
+			}
+			text := strings.Replace(string(data), key+" = false", "no-"+key+" = "+value, 1)
+			writeServingFixture(t, f.source, []byte(text))
+			preview := approveLlamaServing(t, f)
+			for _, envelope := range preview.Serving.Configured {
+				if !slices.Contains(envelope.Placement, key+"="+want) {
+					t.Fatalf("negative preset alias changed native polarity: placement=%v, want %s=%s", envelope.Placement, key, want)
+				}
+			}
+			assertLlamaOffloadChild(t, f, preview, key, want, "")
+		})
+	}
+	test("KV true disables", "kv-offload", "true", "false")
+	test("KV false enables", "kv-offload", "false", "true")
+	test("KV enabled disables", "kv-offload", "enabled", "false")
+	test("KV other native value enables", "kv-offload", "native-value", "true")
+	test("operation true disables", "op-offload", "true", "false")
+	test("operation false enables", "op-offload", "false", "true")
+	test("operation enabled disables", "op-offload", "enabled", "false")
+	test("operation disabled enables", "op-offload", "disabled", "true")
+}
+
+func TestLlamaServingOffloadCLIPolarity(t *testing.T) {
+	test := func(name, flag, key, want string) {
+		t.Run(name, func(t *testing.T) {
+			f := newLlamaServingFixture(t)
+			writeOwnerRouterPreset(t, f)
+			f.request.Settings.LaunchText += " " + flag
+			preview := approveLlamaServing(t, f)
+			for _, envelope := range preview.Serving.Configured {
+				if !slices.Contains(envelope.Placement, key+"="+want) {
+					t.Fatalf("CLI alias changed native polarity: placement=%v, want %s=%s", envelope.Placement, key, want)
+				}
+			}
+			assertLlamaOffloadChild(t, f, preview, key, want, flag)
+		})
+	}
+	test("short KV disable", "-nkvo", "kv-offload", "false")
+	test("long KV disable", "--no-kv-offload", "kv-offload", "false")
+	test("long operation disable", "--no-op-offload", "op-offload", "false")
+	test("short KV enable", "-kvo", "kv-offload", "true")
+	test("long operation enable", "--op-offload", "op-offload", "true")
+}
+
+func assertLlamaOffloadChild(t *testing.T, f llamaServingFixture, preview settings.Preview, key, want, flag string) {
+	t.Helper()
+	applyLlamaServing(t, f, preview)
+	if err := f.ex.Start(context.Background(), "fake"); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(f.startLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var args []string
+	if err := json.Unmarshal(bytes.TrimSpace(data), &args); err != nil {
+		t.Fatal(err)
+	}
+	if flag != "" && !slices.Contains(args, flag) {
+		t.Fatalf("child lost explicit CLI token %q: %v", flag, args)
+	}
+	index := slices.Index(args, "--models-preset")
+	if index < 0 || index+1 >= len(args) || args[index+1] == f.source {
+		t.Fatal("child did not select an immutable snapshot")
+	}
+	data, err = os.ReadFile(args[index+1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Inspect literal generated INI fields independently of the adapter parser.
+	values := map[string]string{}
+	section := ""
+	for _, line := range strings.Split(string(data), "\n") {
+		if strings.HasPrefix(line, "[") {
+			section = strings.TrimSuffix(strings.TrimPrefix(line, "["), "]")
+		} else if name, value, ok := strings.Cut(line, " = "); ok && name == key {
+			values[section] = value
+		}
+	}
+	for _, model := range []string{"medium", "weak"} {
+		if values[model] != want {
+			t.Fatalf("snapshot %s %s=%q, want %q", model, key, values[model], want)
+		}
+	}
+}
+
 func TestLlamaServingExplicitNativePrecedence(t *testing.T) {
 	test := func(name, text string, wantMedium, wantWeak int64) {
 		t.Run(name, func(t *testing.T) {
