@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"nvpair-shared/applog"
+	"nvpair-shared/durablefile"
 )
 
 // Version is stamped at build time via -ldflags "-X main.Version=...".
@@ -116,6 +117,7 @@ type Manager struct {
 	mu       sync.RWMutex
 	path     string
 	settings Settings
+	files    durablefile.Replacer
 }
 
 func NewManager(codec *Codec, path string) (*Manager, error) {
@@ -230,25 +232,10 @@ func (m *Manager) save() error {
 	return m.saveSettings(snapshot)
 }
 
-// saveSettings persists the supplied Settings value via the standard
-// write-to-tmp + os.Rename atomic-replace pattern. A crash mid-save
-// leaves either the previous file intact or the new one fully
-// written — never a torn half-file. The temp file lives next to the
-// destination so the rename stays on the same filesystem (cross-FS
-// rename is not atomic).
-//
-// Setters use this variant to apply the copy-then-save-then-commit
-// pattern: serialize a candidate value, persist it, and only then
-// flip the in-memory state. That way a save failure never leaves
-// m.settings advertising a value the disk doesn't agree with.
-//
-// File and directory permissions are pinned at 0o700 / 0o600
-// regardless of umask. Even though cluster_secret was removed (the
-// previous hard requirement for tight permissions), the rest of the
-// file is still per-user state and shouldn't be world-readable.
-// os.Chmod after rename matters because
-// os.WriteFile honors umask and Windows ignores the mode bits — we
-// re-set them explicitly to keep both platforms aligned.
+// saveSettings durably replaces the supplied settings. ErrReplaced means the
+// complete new file is on disk, but durability or final permissions failed.
+// Keep the explicit 0o600 chmod after replacement, matching the existing
+// settings permission policy even when the process umask is restrictive.
 func (m *Manager) saveSettings(s Settings) error {
 	data, err := json.MarshalIndent(s, "", "  ")
 	if err != nil {
@@ -260,21 +247,26 @@ func (m *Manager) saveSettings(s Settings) error {
 		return fmt.Errorf("create config dir %s: %w", dir, err)
 	}
 
-	tmp := m.path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o600); err != nil {
-		return fmt.Errorf("write %s: %w", tmp, err)
+	err = m.files.WriteFile(m.path, data, 0o600)
+	if err != nil && !errors.Is(err, durablefile.ErrReplaced) {
+		return err
 	}
-	if err := os.Rename(tmp, m.path); err != nil {
-		// Best-effort cleanup so we don't leave a stray .tmp behind
-		// when the rename fails (e.g. EACCES on Windows because some
-		// AV scanner is holding a read lock on the destination).
-		_ = os.Remove(tmp)
-		return fmt.Errorf("rename %s -> %s: %w", tmp, m.path, err)
+	if chmodErr := os.Chmod(m.path, 0o600); chmodErr != nil {
+		return errors.Join(err, fmt.Errorf("chmod %s: %w: %w", m.path, durablefile.ErrReplaced, chmodErr))
 	}
-	if err := os.Chmod(m.path, 0o600); err != nil {
-		return fmt.Errorf("chmod %s: %w", m.path, err)
+	return err
+}
+
+// commitSettings keeps memory consistent with the applied file, including a
+// replacement whose durability is uncertain. readLoop serializes setters.
+func (m *Manager) commitSettings(s Settings) error {
+	err := m.saveSettings(s)
+	if err == nil || errors.Is(err, durablefile.ErrReplaced) {
+		m.mu.Lock()
+		m.settings = s
+		m.mu.Unlock()
 	}
-	return nil
+	return err
 }
 
 func (m *Manager) readLoop(ctx context.Context) error {
@@ -343,24 +335,17 @@ func (m *Manager) handleMessage(msg *Message) {
 			m.codec.RespondError(msg.ID, -32602, `invalid params: expected {"value": <bool>}`)
 			return
 		}
-		// Copy-then-save-then-commit: persist the candidate first
-		// and only flip in-memory state on success, so a save
-		// failure never leaves m.settings advertising a value the
-		// disk doesn't agree with. handleMessage runs serially
-		// (one frame at a time off readLoop), so no other setter
-		// can race the snapshot/commit window here.
+		// Persist the candidate before adopting it. ErrReplaced also adopts
+		// the applied bytes while returning the persistence error.
 		m.mu.RLock()
 		newSettings := m.settings
 		m.mu.RUnlock()
 		newSettings.ForcePorts = *p.Value
-		if err := m.saveSettings(newSettings); err != nil {
+		if err := m.commitSettings(newSettings); err != nil {
 			slog.Error("failed to persist force-ports", "err", err)
 			m.codec.RespondError(msg.ID, -32603, "failed to persist setting: "+err.Error())
 			return
 		}
-		m.mu.Lock()
-		m.settings = newSettings
-		m.mu.Unlock()
 		m.codec.Respond(msg.ID, map[string]bool{"ok": true})
 
 	case "settings/get-cluster-id":
@@ -379,14 +364,11 @@ func (m *Manager) handleMessage(msg *Message) {
 		newSettings := m.settings
 		m.mu.RUnlock()
 		newSettings.ClusterID = *p.Value
-		if err := m.saveSettings(newSettings); err != nil {
+		if err := m.commitSettings(newSettings); err != nil {
 			slog.Error("failed to persist cluster-id", "err", err)
 			m.codec.RespondError(msg.ID, -32603, "failed to persist setting: "+err.Error())
 			return
 		}
-		m.mu.Lock()
-		m.settings = newSettings
-		m.mu.Unlock()
 		m.codec.Respond(msg.ID, map[string]bool{"ok": true})
 		// Fire the push AFTER acknowledging the request, so the
 		// peer's "set completed" callback always observes a
@@ -414,14 +396,11 @@ func (m *Manager) handleMessage(msg *Message) {
 		newSettings := m.settings
 		m.mu.RUnlock()
 		newSettings.ClusterFriendlyName = *p.Value
-		if err := m.saveSettings(newSettings); err != nil {
+		if err := m.commitSettings(newSettings); err != nil {
 			slog.Error("failed to persist cluster-friendly-name", "err", err)
 			m.codec.RespondError(msg.ID, -32603, "failed to persist setting: "+err.Error())
 			return
 		}
-		m.mu.Lock()
-		m.settings = newSettings
-		m.mu.Unlock()
 		m.codec.Respond(msg.ID, map[string]bool{"ok": true})
 		// Intentional: no push. The friendly name is presentation
 		// metadata; consumers that need live updates can either
@@ -444,14 +423,11 @@ func (m *Manager) handleMessage(msg *Message) {
 		newSettings := m.settings
 		m.mu.RUnlock()
 		newSettings.ClusterAutoSync = *p.Value
-		if err := m.saveSettings(newSettings); err != nil {
+		if err := m.commitSettings(newSettings); err != nil {
 			slog.Error("failed to persist cluster-auto-sync", "err", err)
 			m.codec.RespondError(msg.ID, -32603, "failed to persist setting: "+err.Error())
 			return
 		}
-		m.mu.Lock()
-		m.settings = newSettings
-		m.mu.Unlock()
 		m.codec.Respond(msg.ID, map[string]bool{"ok": true})
 		if err := m.emitClusterAutoSync(); err != nil {
 			slog.Warn("failed to emit cluster-auto-sync notification after set", "err", err)

@@ -5,8 +5,10 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -214,6 +216,85 @@ func callExpectError(t *testing.T, m *Manager, rw *captureRW, id int, method str
 		t.Fatalf("error code = %d, want %d (message=%q)", resp.Error.Code, wantCode, resp.Error.Message)
 	}
 	return resp.Error
+}
+
+func TestSettingsPersistenceBoundary(t *testing.T) {
+	test := func(name, method string, value any, want Settings) {
+		t.Run(name, func(t *testing.T) {
+			boundary := func(name string, replaced bool) {
+				t.Run(name, func(t *testing.T) {
+					m, rw, path := newTestManager(t)
+					if err := m.save(); err != nil {
+						t.Fatalf("seed old settings: %v", err)
+					}
+					oldBytes, err := os.ReadFile(path)
+					if err != nil {
+						t.Fatalf("read old settings: %v", err)
+					}
+					injected := errors.New("injected settings persistence failure")
+					var boundaryCalls int
+					if replaced {
+						m.files.SyncDir = func(string) error { boundaryCalls++; return injected }
+					} else {
+						m.files.Replace = func(string, string) error { boundaryCalls++; return injected }
+					}
+					rpcErr := callExpectError(t, m, rw, 1, "settings/set-"+method, map[string]any{"value": value}, -32603)
+					if !strings.Contains(rpcErr.Message, injected.Error()) || boundaryCalls != 1 {
+						t.Fatalf("RPC error=%+v, boundary calls=%d; want injected persistence failure", rpcErr, boundaryCalls)
+					}
+					wantState := want
+					if !replaced {
+						wantState = defaultSettings()
+					}
+					m.mu.RLock()
+					gotState := m.settings
+					m.mu.RUnlock()
+					if gotState != wantState {
+						t.Errorf("live settings=%+v, want %+v", gotState, wantState)
+					}
+					data, err := os.ReadFile(path)
+					if err != nil {
+						t.Fatalf("read resulting settings: %v", err)
+					}
+					var disk Settings
+					if err := json.Unmarshal(data, &disk); err != nil || disk != wantState {
+						t.Errorf("disk settings=%+v, decode error=%v; want %+v", disk, err, wantState)
+					}
+					if !replaced && !bytes.Equal(data, oldBytes) {
+						t.Error("failure before replacement changed old file bytes")
+					}
+					readback := callAndDecode[struct{ Value json.RawMessage }](t, m, rw, 2, "settings/get-"+method, nil)
+					wantValue := value
+					if !replaced {
+						if method == "force-ports" {
+							wantValue = true
+						} else if method == "cluster-auto-sync" {
+							wantValue = false
+						} else {
+							wantValue = ""
+						}
+					}
+					wantJSON, err := json.Marshal(wantValue)
+					if err != nil || !bytes.Equal(readback.Value, wantJSON) {
+						t.Errorf("getter value=%s, want %s; marshal error=%v", readback.Value, wantJSON, err)
+					}
+					if len(rw.notifications) != 0 {
+						t.Errorf("failed setter emitted %d success notifications", len(rw.notifications))
+					}
+					entries, err := os.ReadDir(filepath.Dir(path))
+					if err != nil || len(entries) != 1 || entries[0].Name() != filepath.Base(path) {
+						t.Errorf("settings directory=%v, error=%v; want only target file", entries, err)
+					}
+				})
+			}
+			boundary("failure before replacement keeps old settings", false)
+			boundary("directory sync failure adopts new settings", true)
+		})
+	}
+	test("force ports", "force-ports", false, Settings{ForcePorts: false})
+	test("cluster id", "cluster-id", "new-cluster", Settings{ForcePorts: true, ClusterID: "new-cluster"})
+	test("friendly name", "cluster-friendly-name", "new-name", Settings{ForcePorts: true, ClusterFriendlyName: "new-name"})
+	test("auto sync", "cluster-auto-sync", true, Settings{ForcePorts: true, ClusterAutoSync: true})
 }
 
 func TestClusterAutoSyncRoundTrip(t *testing.T) {
@@ -476,34 +557,24 @@ func TestForcePortsRoundTrip(t *testing.T) {
 }
 
 // TestSaveFailureRejectsValueAndDoesNotPersist locks down the
-// copy-then-save-then-commit contract of the setters: when save()
-// fails, the attempted value must NOT be observable in-memory (a
+// copy-then-save-then-commit contract before replacement: the
+// attempted value must NOT be observable in-memory (a
 // follow-up getter still sees the old value) and must NOT have
 // landed on disk (a later, successful set proves the rejected key
 // is still at its default in the persisted file).
 //
-// We simulate the save failure at the right layer by pre-occupying
-// `<path>.tmp` with a directory, which makes the inner os.WriteFile
-// fail with EISDIR regardless of platform or umask. Removing the
-// blocker restores normal save() semantics for the rest of the
-// test.
+// Inject replacement failure, then restore the platform implementation so a
+// later successful setter proves the rejected value was never committed.
 func TestSaveFailureRejectsValueAndDoesNotPersist(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "settings.json")
-
-	// Block the temp-file slot save() writes through. Both 0o755 and
-	// 0o700 work here; the dir's mode doesn't matter, only its
-	// existence-as-a-directory at exactly the path WriteFile is
-	// about to use.
-	if err := os.MkdirAll(path+".tmp", 0o700); err != nil {
-		t.Fatalf("seed blocker dir: %v", err)
-	}
 
 	rw := newCaptureRW()
 	m, err := NewManager(NewCodec(rw), path)
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
 	}
+	m.files.Replace = func(string, string) error { return errors.New("injected replacement failure") }
 
 	// Set must be rejected: handleMessage returns -32603 when
 	// save() errors out, BEFORE the in-memory state is touched.
@@ -518,13 +589,11 @@ func TestSaveFailureRejectsValueAndDoesNotPersist(t *testing.T) {
 		t.Errorf("rejected cluster-id leaked into in-memory state: got %q, want \"\"", got["value"])
 	}
 
-	// Remove the blocker so the next save() can succeed. We use a
+	// Restore replacement so the next save() can succeed. We use a
 	// different setter (force-ports) so the persisted file proves
 	// "cluster_id was never written" rather than "the file happens
 	// to record cluster_id: \"\" (the default)".
-	if err := os.RemoveAll(path + ".tmp"); err != nil {
-		t.Fatalf("clear blocker: %v", err)
-	}
+	m.files.Replace = nil
 	_ = callAndDecode[map[string]bool](t, m, rw, 3, "settings/set-force-ports",
 		map[string]bool{"value": true})
 

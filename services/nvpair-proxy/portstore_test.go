@@ -6,12 +6,17 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"os"
 	"strings"
 	"testing"
 	"time"
+
+	"nvpair-shared/durablefile"
+	"nvpair-shared/engines"
 )
 
 // redirectConfigDir points os.UserConfigDir() at a temp dir for the test, so
@@ -54,7 +59,7 @@ func TestPersistedPortRoundTrip(t *testing.T) {
 		if _, ok := loadPersistedPort(tc.profile); ok {
 			t.Fatal("expected no persisted port before any save")
 		}
-		if err := savePersistedPort(tc.profile, 11500); err != nil {
+		if err := savePersistedPort(tc.profile, 11500, durablefile.Replacer{}); err != nil {
 			t.Fatalf("savePersistedPort: %v", err)
 		}
 		if p, ok := loadPersistedPort(tc.profile); !ok || p != 11500 {
@@ -76,6 +81,78 @@ func TestPersistedPortRoundTrip(t *testing.T) {
 	})
 }
 
+func TestSetPortPersistenceBoundary(t *testing.T) {
+	test := func(name string, replaced bool) {
+		t.Run(name, func(t *testing.T) {
+			redirectConfigDir(t)
+			tc := anyCase(t)
+			portA := freeTCPPort(t)
+			writer := &recordingWriter{}
+			p := newTestProxy(tc.profile, NewCodec(writer), NewDiscovery(), portA)
+			f := p.soleFacade()
+			ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", portA))
+			if err != nil {
+				t.Fatalf("listen on old port: %v", err)
+			}
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			f.serveHTTP(ctx, ln)
+			defer p.shutdown(context.Background())
+			if err := savePersistedPort(tc.profile, portA, durablefile.Replacer{}); err != nil {
+				t.Fatalf("seed old port: %v", err)
+			}
+			injected := errors.New("injected port persistence failure")
+			var boundaryCalls int
+			if replaced {
+				f.portFiles.SyncDir = func(string) error { boundaryCalls++; return injected }
+			} else {
+				f.portFiles.Replace = func(string, string) error { boundaryCalls++; return injected }
+			}
+			portB := freeTCPPort(t)
+			err = f.setPort(portB)
+			if !errors.Is(err, injected) || errors.Is(err, durablefile.ErrReplaced) != replaced || boundaryCalls != 1 {
+				t.Fatalf("setPort error=%v, boundary calls=%d; want injected failure with replaced=%v", err, boundaryCalls, replaced)
+			}
+			wantPort, closedPort, wantReady := portA, portB, 0
+			if replaced {
+				wantPort, closedPort, wantReady = portB, portA, 1
+			}
+			if got, _ := f.selfAddresses(); got != wantPort {
+				t.Errorf("live port=%d, want %d", got, wantPort)
+			}
+			if got, ok := loadPersistedPort(tc.profile); !ok || got != wantPort {
+				t.Errorf("persisted port=%d, present=%v; want %d", got, ok, wantPort)
+			}
+			conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", wantPort), time.Second)
+			if err != nil {
+				t.Fatalf("chosen listener unavailable: %v", err)
+			}
+			if err := conn.Close(); err != nil {
+				t.Errorf("close chosen listener connection: %v", err)
+			}
+			other, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", closedPort))
+			if err != nil {
+				t.Fatalf("discarded listener still bound: %v", err)
+			}
+			if err := other.Close(); err != nil {
+				t.Errorf("close discarded-port probe: %v", err)
+			}
+			ready := notificationsOf(t, writer, engines.AddressMethod(tc.profile.Name, "ready"))
+			if len(ready) != wantReady {
+				t.Fatalf("ready notifications=%d, want %d", len(ready), wantReady)
+			}
+			if replaced {
+				var event ReadyParams
+				if err := json.Unmarshal(ready[0], &event); err != nil || event.Port != portB {
+					t.Fatalf("ready event=%+v, decode error=%v; want new port %d", event, err, portB)
+				}
+			}
+		})
+	}
+	test("failure before replacement keeps old listener", false)
+	test("directory sync failure keeps new listener", true)
+}
+
 // The two engines must not share a persisted-port file, or moving one proxy
 // would silently move the other on its next start.
 func TestPersistedPortIsPerEngine(t *testing.T) {
@@ -84,13 +161,13 @@ func TestPersistedPortIsPerEngine(t *testing.T) {
 	ollama := ollamaCase(t).profile
 	lmstudio := lmstudioCase(t).profile
 
-	if err := savePersistedPort(ollama, 11500); err != nil {
+	if err := savePersistedPort(ollama, 11500, durablefile.Replacer{}); err != nil {
 		t.Fatal(err)
 	}
 	if _, ok := loadPersistedPort(lmstudio); ok {
 		t.Fatal("LM Studio read a port only Ollama saved")
 	}
-	if err := savePersistedPort(lmstudio, 1300); err != nil {
+	if err := savePersistedPort(lmstudio, 1300, durablefile.Replacer{}); err != nil {
 		t.Fatal(err)
 	}
 	if p, ok := loadPersistedPort(ollama); !ok || p != 11500 {

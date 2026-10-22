@@ -11,6 +11,8 @@ import (
 	"os"
 	"sort"
 	"time"
+
+	"nvpair-shared/durablefile"
 )
 
 // Retention and persistence defaults. The history caps bound the in-memory
@@ -267,11 +269,7 @@ func writeSnapshotFile(path string, infos []json.RawMessage) error {
 	if err != nil {
 		return err
 	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o600); err != nil {
-		return err
-	}
-	return os.Rename(tmp, path)
+	return durablefile.WriteFile(path, data, 0o600)
 }
 
 func readSnapshotFile(path string) ([]json.RawMessage, error) {

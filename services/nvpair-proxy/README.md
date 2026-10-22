@@ -378,6 +378,12 @@ engine has its own file, so moving one proxy never moves another.
 broker-coordinated start. Delete the file (or
 `set-port` back to the default) to revert.
 
+Port saves use the shared durable-file replacement helper. A bind failure or
+save failure before replacement keeps the old listener and saved port. If the
+new file has already replaced the old one but durability cannot be confirmed
+(`ErrReplaced`), the proxy keeps the new listener and port, emits `ready`, and
+still reports the save error. Memory and disk therefore agree in either case.
+
 LM Studio additionally refuses to restore port 1235 even if it is stored: that
 is where engine-manager runs a managed LM Studio, so a proxy restoring it would
 sit on the engine's own port. The stored value predates the current default.
