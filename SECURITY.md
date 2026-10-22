@@ -108,6 +108,37 @@ node-information HTTP, Electron IPC, third-party engine APIs, or traffic outside
 PAIR. Certificate storage and operating-system account protection are part of
 the boundary.
 
+### Authenticated Address Hints Are Locators
+
+Already-admitted peers can exchange bounded service descriptors over their
+pinned mutual-TLS channel. Private descriptors may include IPv4 hints in
+`100.64.0.0/10` from virtual/overlay interfaces alongside validated scanner
+addresses. This heuristic neither identifies a tailnet authority nor proves
+Tailscale configuration, ACL permission or native reachability. The change
+adds no mDNS publication; existing publication of peer-proven overlay addresses
+remains, so it does not guarantee those addresses stay out of mDNS.
+
+Optional persisted member hints survive restart only as locators. They grant
+no membership, trust, liveness, fresh service claim, model eligibility or
+control permission. Learning requires a complete strictly decoded descriptor
+and revalidation of the original local/peer admissions and certificates before
+durable commit. Scanner independently validates private claim freshness and
+admission; broker does not expose that authority envelope to ordinary clients.
+TCP chooser success is not authentication. Cancellation abandons its wait
+without caching that result; finite timeout-only probes may still finish and
+close their connections after the caller returns.
+
+Removal persists an exact-admission proof, selects a current endpoint and
+attempts at most one authenticated notification before final de-pin. It does
+not redirect or replay a missing/partial reply. Admission, pin and route checks
+remain at preparation, pre-dispatch, adapter setup/first write and final local
+commit; they do not make network send atomic against all later composition
+changes. Unavailability, timeout, bad pinned authentication or lost reply can
+still end in best-effort local removal if the original admissions remain
+current. Durable proof supports convergence; local success is not proof of
+remote acknowledgement. A replacement admission must not be removed by stale
+work. Synthetic fallback tests are not evidence of live off-LAN operation.
+
 ### Local APIs and Proxies Can Expose Sensitive Operations
 
 The broker's stdio, Unix-socket, or named-pipe transport relies on the parent

@@ -601,6 +601,16 @@ direct/reverse client. The serving peer derives identity and ranked addresses
 from its scanner self row, and ports from current broker registrations. A roster
 entry or a reverse connection alone cannot create operational service presence.
 
+The private descriptor also appends missing sorted IPv4 overlay hints in
+`100.64.0.0/10` from locally enumerated virtual/overlay interfaces. Scanner
+identity must already be valid; the canonical scanner address stays first.
+The public four-address cap remains: at capacity the last scanner entry yields
+to the first missing overlay, never the first entry. This does not add mDNS
+publication, but existing `netpick.peerProven` publication is unchanged; an
+overlay address may already qualify for publication there. Interface heuristics
+are not proof of a configured or reachable native tailnet. Tailscale setup,
+routing, ACLs and host firewall policy remain operational responsibilities.
+
 Cluster-manager captures the exact local and remote admission/certificate
 incarnation before the read and revalidates it after the complete bounded
 response. Broker consumes its private event only from the current child and
@@ -608,6 +618,26 @@ relays a typed private notification to scanner, which checks the original
 incarnation again at apply. These envelopes never reach ordinary clients and
 cannot modify local reverse-forwarding targets. Protocol selection and inner
 protected-service mutual TLS retain their existing owners.
+
+After complete authenticated decoding, CM stores optional
+`advertisedAddresses` locator hints on confirmed members. One membership-store
+boundary serializes every snapshot through replacement; a hint transaction
+holds composition then storage ownership, uses the memory lock only briefly,
+and rolls back only hints on a pre-replacement failure. Landed writes keep the
+existing adoption policy. Removal/teardown clears member hints. The broker's
+membership relay preserves the optional field; desktop/TUI membership parsers
+project their existing fields. The HTTP descriptor remains a separate strict
+`noderec` contract, not an extension to those UI membership types.
+
+After restart, the resolver combines the recorded member endpoint, Browser
+endpoints with their own port, and bounded persisted hints with the member
+port, preserving order and deduplicating endpoints without prefix truncation.
+TCP chooser confirmation precedes authentication. A descriptor refresh keeps
+an eight-second parent budget and divides remaining time across complete
+remaining attempts, including TLS/setup, headers, body and EOF. Cancellation
+interrupts the chooser wait without caching an abandoned result or negative
+cooldown. Timeout-only probes already running may finish later and close their
+connections; OS connects are not promised immediate cancellation.
 
 Scanner atomically reconciles authenticated and mDNS claims. A current
 authenticated snapshot takes precedence; service omission withdraws the old
@@ -624,6 +654,23 @@ Descriptor metadata does not establish liveness, trust or membership, and cannot
 select protocol, filesystem state or a tunnel's local target. Remote loopback,
 unspecified, multicast and non-IP candidates are rejected, so the reverse
 gateway's loopback/ephemeral endpoint never becomes a public address.
+
+Saved hints supply locators only. Fresh private claims still pass through
+`cluster:peer-services`, the current broker child and `discovery:peer-services`
+before scanner directory consumers perform inventory, inference eligibility
+and control checks. Hints alone cannot create fresh inventory or an eligible
+model. Synthetic pinned-TLS/reopen tests establish the fallback path, not native
+Tailscale or away-from-home acceptance.
+
+Peer removal prepares its durable exact-admission proof before selecting one
+current endpoint. Selection and notification share the existing ten-second
+budget; at most one authenticated POST uses the fresh removal adapter before
+final de-pin. It does not redirect or replay a lost/partial reply. Original
+admission/pin/endpoint rechecks and adapter first-write guards remain, without
+promising atomic network send against every subsequent composition change.
+Unavailable, timed-out or failed-authentication notification still permits the
+existing best-effort local removal after a final admission check; durable proof
+supports convergence and local success does not imply remote acknowledgement.
 
 ### Node Identity
 
