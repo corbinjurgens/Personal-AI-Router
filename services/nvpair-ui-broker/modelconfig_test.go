@@ -1633,6 +1633,357 @@ func TestModelConfigResidentSetNormalizedPerEngine(t *testing.T) {
 	}
 }
 
+func assertModelConfigLoadFailed(t *testing.T, f *modelConfigFixture) {
+	t.Helper()
+	e := f.b.captureModelConfig()
+	for _, read := range []struct {
+		name   string
+		status nodepolicy.ModelConfiguration
+	}{
+		{"current status", f.b.modelConfiguration(e)},
+		{"local policy readback", f.b.localPolicy().ModelConfiguration},
+		{"peer policy readback", f.b.peerPolicy().ModelConfiguration},
+		{"revision readback", f.b.modelConfigurationFor(e.Policy)},
+	} {
+		if len(read.status.Models) != 1 {
+			t.Errorf("%s models=%+v, want one failed resident", read.name, read.status.Models)
+			continue
+		}
+		entry := read.status.Models[0]
+		if entry.Engine != "llamacpp" || entry.Model != "resident" || !entry.DesiredResident || entry.State != "unknown" || entry.Reason != "load-failed" {
+			t.Errorf("%s entry=%+v, want desired resident unknown/load-failed", read.name, entry)
+		}
+		if entry.ObservedLoaded == nil || *entry.ObservedLoaded {
+			t.Errorf("%s lost the fixture's known empty inventory: %+v", read.name, entry)
+		}
+	}
+}
+
+func TestModelConfigDefiniteLoadFailureReason(t *testing.T) {
+	test := func(name string, recovery bool) {
+		t.Run(name, func(t *testing.T) {
+			f := newModelConfigFixture(t)
+			r := f.b.nodePolicyRuntime()
+			r.mu.Lock()
+			initial := r.now()
+			r.now = func() time.Time { return initial }
+			r.mu.Unlock()
+			if recovery {
+				f.proxy.mu.Lock()
+				answer := f.proxy.answer
+				f.proxy.mu.Unlock()
+				f.proxy.setAnswer(func(method string, raw json.RawMessage) (any, string) {
+					switch method {
+					case nodepolicy.MethodFinishResident:
+						return nodepolicy.FinishResidentResult{ReservationID: "fixture-reservation", Outcome: nodepolicy.ResidentFailed, RecoveryID: "fixture-recovery"}, ""
+					case nodepolicy.MethodObserveResident:
+						return nodepolicy.ObserveResidentResult{ReservationID: "fixture-reservation", Settled: true}, ""
+					}
+					return answer(method, raw)
+				})
+			}
+			done := f.startResidentAttempt(t, nodepolicy.ResidentFailed)
+			f.awaitGrant(t)
+			if recovery {
+				f.engine.mu.Lock()
+				answer := f.engine.answer
+				f.engine.mu.Unlock()
+				f.engine.setAnswer(func(method string, raw json.RawMessage) (any, string) {
+					if method == "engine:models" {
+						return map[string]any{"loadedByEngine": map[string][]string{"llamacpp": {}}}, ""
+					}
+					return answer(method, raw)
+				})
+			}
+			f.engine.releaseHeld()
+			awaitModelConfigDone(t, done)
+			finishes := modelConfigCalls(f.proxy, nodepolicy.MethodFinishResident)
+			if len(finishes) != 1 {
+				t.Fatalf("finish calls=%d, want one", len(finishes))
+			}
+			finish := decodeModelConfigCall[nodepolicy.FinishResidentParams](t, finishes[0])
+			if finish.Outcome != "failed" || finish.Observation != nil {
+				t.Fatalf("definite manager failure was not finished intact: %+v", finish)
+			}
+			observations := modelConfigCalls(f.proxy, nodepolicy.MethodObserveResident)
+			wantObservations := 0
+			if recovery {
+				wantObservations = 1
+			}
+			if len(observations) != wantObservations || len(modelConfigCalls(f.engine, "engine:models")) != wantObservations {
+				t.Fatalf("recovery observations=%d inventory reads=%d, want %d each", len(observations), len(modelConfigCalls(f.engine, "engine:models")), wantObservations)
+			}
+			if recovery {
+				observation := decodeModelConfigCall[nodepolicy.ObserveResidentParams](t, observations[0])
+				if !observation.OperationComplete || observation.Observation.Loaded || observation.RecoveryID != "fixture-recovery" || observation.OperationID != finish.OperationID {
+					t.Fatalf("failed load recovery lost its terminal/empty observation: %+v", observation)
+				}
+			}
+			r.mu.Lock()
+			holds, pending, retryAt := len(r.models.unsettled), len(r.models.pending), r.models.retryAt
+			r.mu.Unlock()
+			if holds != 0 || pending != 0 || !retryAt.Equal(initial.Add(30*time.Second)) || len(modelConfigCalls(f.engine, nodepolicy.MethodReconcileResident)) != 1 {
+				t.Fatalf("failed load changed cleanup or retry: holds=%d pending=%d retryAt=%s", holds, pending, retryAt)
+			}
+			assertModelConfigLoadFailed(t, f)
+		})
+	}
+	test("normal finish", false)
+	test("recovered finish", true)
+}
+
+func TestModelConfigDefiniteLoadFailureRetainedReason(t *testing.T) {
+	for _, failure := range []string{"finish transport failure", "recovery inventory failure", "recovery observe failure"} {
+		t.Run(failure, func(t *testing.T) {
+			f := newModelConfigFixture(t)
+			r := f.b.nodePolicyRuntime()
+			r.mu.Lock()
+			initial := r.now()
+			now := initial
+			r.now = func() time.Time { return now }
+			r.mu.Unlock()
+			f.proxy.mu.Lock()
+			answer := f.proxy.answer
+			f.proxy.mu.Unlock()
+			f.proxy.setAnswer(func(method string, raw json.RawMessage) (any, string) {
+				switch method {
+				case nodepolicy.MethodFinishResident:
+					if failure == "finish transport failure" {
+						return nil, "private fixture finish failure"
+					}
+					return nodepolicy.FinishResidentResult{ReservationID: "fixture-reservation", Outcome: nodepolicy.ResidentFailed, RecoveryID: "fixture-recovery"}, ""
+				case nodepolicy.MethodObserveResident:
+					return nil, "private fixture observation failure"
+				}
+				return answer(method, raw)
+			})
+			done := f.startResidentAttempt(t, nodepolicy.ResidentFailed)
+			f.awaitGrant(t)
+			f.engine.mu.Lock()
+			engineAnswer := f.engine.answer
+			f.engine.mu.Unlock()
+			f.engine.setAnswer(func(method string, raw json.RawMessage) (any, string) {
+				if method == "engine:models" {
+					if failure == "recovery inventory failure" {
+						return nil, "private fixture inventory failure"
+					}
+					return map[string]any{"loadedByEngine": map[string][]string{"llamacpp": {}}}, ""
+				}
+				return engineAnswer(method, raw)
+			})
+			f.engine.releaseHeld()
+			awaitModelConfigDone(t, done)
+			ref := nodepolicy.Role{Engine: "llamacpp", Model: "resident"}
+			r.mu.Lock()
+			hold, held := r.models.unsettled[ref]
+			retryAt := r.models.retryAt
+			r.mu.Unlock()
+			if !held || !hold.terminal || hold.op == nil || !hold.op.granted || hold.finish.Outcome != "failed" || !hold.expires.Equal(initial.Add(time.Minute)) {
+				t.Fatalf("failed load lost its terminal hold: %+v held=%v", hold, held)
+			}
+			if (hold.op.recovery != nil) != (failure == "recovery observe failure") {
+				t.Fatalf("unexpected retained recovery receipt: %+v", hold.op.recovery)
+			}
+			assertModelConfigLoadFailed(t, f)
+			r.mu.Lock()
+			now = initial.Add(30*time.Second - time.Nanosecond)
+			r.mu.Unlock()
+			f.b.reconcileModelConfig(context.Background())
+			r.mu.Lock()
+			unchangedRetry := r.models.retryAt
+			r.mu.Unlock()
+			if !retryAt.Equal(initial.Add(30*time.Second)) || !unchangedRetry.Equal(retryAt) || len(modelConfigCalls(f.proxy, nodepolicy.MethodFinishResident)) != 1 {
+				t.Fatal("failure readback moved the retry deadline or retried early")
+			}
+			f.proxy.mu.Lock()
+			retryAnswer := f.proxy.answer
+			f.proxy.mu.Unlock()
+			f.proxy.setAnswer(func(method string, raw json.RawMessage) (any, string) {
+				value, errText := retryAnswer(method, raw)
+				if method == nodepolicy.MethodFinishResident {
+					if errText != "" {
+						return nil, holdReply
+					}
+					return value, holdSuccessReply
+				}
+				return value, errText
+			})
+			r.mu.Lock()
+			now = initial.Add(30 * time.Second)
+			r.mu.Unlock()
+			retried := make(chan struct{})
+			go func() { defer close(retried); f.b.reconcileModelConfig(context.Background()) }()
+			defer func() { f.proxy.releaseHeld(); awaitModelConfigDone(t, retried) }()
+			f.proxy.waitFor("retained failed-load finish retry", func(calls []policyCall) bool {
+				finishes := 0
+				for _, call := range calls {
+					if call.method == nodepolicy.MethodFinishResident {
+						finishes++
+					}
+				}
+				return finishes == 2
+			})
+			assertModelConfigLoadFailed(t, f)
+			f.proxy.releaseHeld()
+			awaitModelConfigDone(t, retried)
+			r.mu.Lock()
+			after, retained := r.models.unsettled[ref]
+			retryAt = r.models.retryAt
+			r.mu.Unlock()
+			if !retained || after.op != hold.op || !after.expires.Equal(hold.expires) || !reflect.DeepEqual(after.finish, hold.finish) || !retryAt.Equal(initial.Add(time.Minute)) || len(modelConfigCalls(f.engine, nodepolicy.MethodReconcileResident)) != 1 {
+				t.Fatal("failed-load retry changed hold ownership, expiry, deadline or load count")
+			}
+			assertModelConfigLoadFailed(t, f)
+		})
+	}
+}
+
+func TestModelConfigRetainedFailureReadbackTracksInventory(t *testing.T) {
+	for _, inventory := range []string{"changed inventory", "unknown inventory"} {
+		t.Run(inventory, func(t *testing.T) {
+			f := newModelConfigFixture(t)
+			f.proxy.mu.Lock()
+			answer := f.proxy.answer
+			f.proxy.mu.Unlock()
+			f.proxy.setAnswer(func(method string, raw json.RawMessage) (any, string) {
+				if method == nodepolicy.MethodFinishResident {
+					return nil, "private fixture finish failure"
+				}
+				return answer(method, raw)
+			})
+			done := f.startResidentAttempt(t, nodepolicy.ResidentFailed)
+			f.awaitGrant(t)
+			f.engine.releaseHeld()
+			awaitModelConfigDone(t, done)
+			r := f.b.nodePolicyRuntime()
+			ref := nodepolicy.Role{Engine: "llamacpp", Model: "resident"}
+			r.mu.Lock()
+			hold, held := r.models.unsettled[ref]
+			if inventory == "unknown inventory" {
+				delete(r.loaded, "llamacpp")
+			} else {
+				r.loaded["llamacpp"] = []string{"other-model"}
+			}
+			r.mu.Unlock()
+			if !held || !hold.terminal || hold.finish.Outcome != "failed" {
+				t.Fatal("fixture did not retain the definite manager failure")
+			}
+			assertReadback := func() {
+				t.Helper()
+				e := f.b.captureModelConfig()
+				for _, status := range []nodepolicy.ModelConfiguration{
+					f.b.modelConfiguration(e), f.b.localPolicy().ModelConfiguration,
+					f.b.peerPolicy().ModelConfiguration, f.b.modelConfigurationFor(e.Policy),
+				} {
+					if len(status.Models) != 1 || status.Models[0].State != "unknown" || status.Models[0].Reason != "load-failed" {
+						t.Errorf("retained failed-load readback=%+v, want unknown/load-failed", status)
+						continue
+					}
+					observed := status.Models[0].ObservedLoaded
+					if inventory == "unknown inventory" {
+						if observed != nil {
+							t.Errorf("failure invented loaded evidence for unknown inventory: %v", *observed)
+						}
+					} else if observed == nil || *observed {
+						t.Error("failure lost current inventory's known absent model")
+					}
+				}
+			}
+			assertReadback()
+			f.b.reconcileModelConfig(context.Background())
+			assertReadback()
+			r.mu.Lock()
+			after, retained := r.models.unsettled[ref]
+			r.mu.Unlock()
+			if !retained || after.op != hold.op || !after.expires.Equal(hold.expires) || len(modelConfigCalls(f.engine, nodepolicy.MethodReconcileResident)) != 1 {
+				t.Fatal("inventory readback changed the retained hold or dispatched another load")
+			}
+		})
+	}
+}
+
+func TestModelConfigNonfailureOutcomeReasons(t *testing.T) {
+	test := func(name string, outcome nodepolicy.ResidentOutcome, transportFailure bool, state nodepolicy.ModelConfigurationState, reason nodepolicy.ModelConfigurationReason) {
+		t.Run(name, func(t *testing.T) {
+			f := newModelConfigFixture(t)
+			if outcome == nodepolicy.ResidentNotDispatched {
+				f.b.reconcileModelConfig(context.Background())
+			} else {
+				done, _, _ := startModelConfigMatrixAttempt(t, context.Background(), f, emptySwitchManagerSnapshot(), outcome, transportFailure)
+				f.awaitGrant(t)
+				f.engine.releaseHeld()
+				awaitModelConfigDone(t, done)
+			}
+			status := f.b.localPolicy().ModelConfiguration
+			if len(status.Models) != 1 || status.Models[0].State != state || status.Models[0].Reason != reason {
+				t.Fatalf("%s status=%+v, want %s/%s", name, status, state, reason)
+			}
+			if got := len(modelConfigCalls(f.engine, nodepolicy.MethodReconcileResident)); got != 1 {
+				t.Fatalf("manager reconcile calls=%d, want one", got)
+			}
+		})
+	}
+	test("loaded", nodepolicy.ResidentLoaded, false, "satisfied", "")
+	test("terminal unknown", nodepolicy.ResidentUnknown, false, "unknown", "operation-timeout")
+	test("transport failure", nodepolicy.ResidentUnknown, true, "unknown", "operation-timeout")
+	test("not dispatched", nodepolicy.ResidentNotDispatched, false, "blocked", "unsupported-load")
+}
+
+func TestModelConfigTransientEngineOffKeepsPendingAndRetryDeadline(t *testing.T) {
+	f := newModelConfigFixture(t)
+	r := f.b.nodePolicyRuntime()
+	r.mu.Lock()
+	initial := r.now()
+	now := initial
+	r.now = func() time.Time { return now }
+	r.mu.Unlock()
+	f.proxy.mu.Lock()
+	answer := f.proxy.answer
+	f.proxy.mu.Unlock()
+	f.proxy.setAnswer(func(method string, raw json.RawMessage) (any, string) {
+		if method == nodepolicy.MethodPrepareResident {
+			return nodepolicy.PrepareResidentResult{EvidenceGeneration: 1, Refusals: []nodepolicy.ResidentRefusal{{Engine: "llamacpp", Model: "resident", Reason: nodepolicy.ModelReasonEngineOff}}}, ""
+		}
+		return answer(method, raw)
+	})
+	f.b.reconcileModelConfig(context.Background())
+	e := f.b.captureModelConfig()
+	if e.Source != f.source || !e.Running["llamacpp"] {
+		t.Fatal("transient refusal fixture lost its current running source")
+	}
+	assertPending := func() {
+		t.Helper()
+		status := f.b.localPolicy().ModelConfiguration
+		if len(status.Models) != 1 || status.Models[0].State != "pending" || status.Models[0].Reason != "" {
+			t.Fatalf("current running source with stale engine-off refusal=%+v, want pending without reason", status)
+		}
+	}
+	assertPending()
+	r.mu.Lock()
+	retryAt := r.models.retryAt
+	now = initial.Add(30*time.Second - time.Nanosecond)
+	r.mu.Unlock()
+	f.b.reconcileModelConfig(context.Background())
+	assertPending()
+	r.mu.Lock()
+	unchangedRetry := r.models.retryAt
+	r.mu.Unlock()
+	if !retryAt.Equal(initial.Add(30*time.Second)) || !unchangedRetry.Equal(retryAt) || len(modelConfigCalls(f.proxy, nodepolicy.MethodPrepareResident)) != 1 {
+		t.Fatal("transient pending status moved its retry deadline or retried early")
+	}
+	r.mu.Lock()
+	now = retryAt
+	r.mu.Unlock()
+	f.b.reconcileModelConfig(context.Background())
+	assertPending()
+	r.mu.Lock()
+	nextRetry, holds := r.models.retryAt, len(r.models.unsettled)
+	r.mu.Unlock()
+	if !nextRetry.Equal(initial.Add(time.Minute)) || len(modelConfigCalls(f.proxy, nodepolicy.MethodPrepareResident)) != 2 || len(modelConfigCalls(f.engine, nodepolicy.MethodReconcileResident)) != 0 || len(modelConfigCalls(f.proxy, nodepolicy.MethodFinishResident)) != 0 || holds != 0 {
+		t.Fatal("transient engine-off refusal changed retry cadence or dispatched a load")
+	}
+}
+
 func TestModelConfigFailedAttemptWaitsForChangedEvidence(t *testing.T) {
 	f := newModelConfigFixture(t)
 	for range 5 {

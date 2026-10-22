@@ -305,6 +305,15 @@ after work was accepted. Reconciliation does not start an Off engine.
 PG's existing route-policy owner continues to decide routes; residency does not
 select a route, broaden served permission or enable hybrid dispatch.
 
+A definite terminal manager load failure reports `unknown` with the bounded
+reason `load-failed`, including finish/recovery and retained-hold readbacks.
+Loaded observation is independent: a failure without inventory evidence does
+not prove the model absent or capacity free. Unknown completion or transport
+uncertainty continues to report `operation-timeout`; raw engine errors are not
+public reasons. A transient proxy `engine-off` refusal stays `pending` without
+a reason when the current manager source reports the engine running. Status
+classification does not alter existing retry deadlines, hold cleanup or expiry.
+
 Unknown loaded observations and failed or interrupted loads remain uncertainty,
 not satisfaction or free capacity. Source/run/revision changes fence stale replies;
 restart does not replay a persistent load queue. Fresh manager-owned loaded

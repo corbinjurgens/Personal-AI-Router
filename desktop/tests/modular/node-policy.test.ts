@@ -879,6 +879,43 @@ describe('model configuration policy evidence', () => {
         }
     )
 
+    it.each(['local', 'peer'])(
+        'preserves load-failed on %s get, set and push without inventing loaded evidence',
+        node => {
+            const evidence: JsonObject = {
+                policyRevision: '9',
+                observationGeneration: 18,
+                models: [
+                    {
+                        engine: 'ollama',
+                        model: 'failed-unloaded',
+                        desiredResident: true,
+                        observedLoaded: false,
+                        state: 'unknown',
+                        reason: 'load-failed'
+                    },
+                    {
+                        engine: 'llamacpp',
+                        model: 'failed-unknown',
+                        desiredResident: true,
+                        state: 'unknown',
+                        reason: 'load-failed'
+                    }
+                ]
+            }
+            const snapshot = { policy: { revision: '9' }, modelConfiguration: evidence }
+            const document = parsePolicyDocument({ ...snapshot, availability: 'available' })
+            const saved = parsePolicySetResult(snapshot)
+            const change = parsePolicyChange({ ...snapshot, nodeId: node })
+            expect(document.modelConfiguration).toEqual(evidence)
+            expect(saved.modelConfiguration).toEqual(evidence)
+            expect(change?.modelConfiguration).toEqual(evidence)
+            expect(document.modelConfiguration?.models[1]).not.toHaveProperty('observedLoaded')
+            expect(saved.modelConfiguration?.models[1]).not.toHaveProperty('observedLoaded')
+            expect(change?.modelConfiguration?.models[1]).not.toHaveProperty('observedLoaded')
+        }
+    )
+
     it('keeps absent status absent on get, set and push', () => {
         const snapshot = { policy: { revision: '9' } }
         expect(parsePolicyDocument({ ...snapshot, availability: 'available' })).not.toHaveProperty(

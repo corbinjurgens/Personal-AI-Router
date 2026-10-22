@@ -450,6 +450,34 @@ func TestModelConfigurationWire(t *testing.T) {
 	}
 }
 
+func TestModelConfigurationLoadFailedReasonWire(t *testing.T) {
+	t.Run("reason validation", func(t *testing.T) {
+		if err := ModelConfigurationReason("load-failed").Validate(); err != nil {
+			t.Fatalf("load-failed reason rejected: %v", err)
+		}
+	})
+	test := func(name string, observed *bool) {
+		t.Run(name, func(t *testing.T) {
+			entry := ModelConfigurationEntry{
+				Engine: "ollama", Model: "m", DesiredResident: true,
+				ObservedLoaded: observed, State: "unknown", Reason: "load-failed",
+			}
+			t.Run("entry", func(t *testing.T) {
+				testResidentWire(t, entry, "engine model desiredResident state")
+			})
+			t.Run("status", func(t *testing.T) {
+				testResidentWire(t, ModelConfiguration{
+					PolicyRevision: "1", ObservationGeneration: 2,
+					Models: []ModelConfigurationEntry{entry},
+				}, "policyRevision observationGeneration models")
+			})
+		})
+	}
+	unloaded := false
+	test("known unloaded", &unloaded)
+	test("unknown capacity", nil)
+}
+
 func TestResidentWireBoundsAccepted(t *testing.T) {
 	longID := strings.Repeat("i", 128)
 	for _, timeout := range []int{1, MaxResidentTimeoutMs} {
@@ -480,7 +508,7 @@ func TestResidentWireBoundsAccepted(t *testing.T) {
 }
 
 func TestResidentWireEnums(t *testing.T) {
-	for _, reason := range []ModelConfigurationReason{ModelReasonEngineOff, ModelReasonNoFit, ModelReasonPausedLocal, ModelReasonEngineOffLocal, ModelReasonNotServed, ModelReasonNotInstalled, ModelReasonUnqualified, ModelReasonUnsupportedLoad, ModelReasonSwitchBusy, ModelReasonOperationTimeout, ModelReasonObservationUnknown, ModelReasonProjectionUnknown} {
+	for _, reason := range []ModelConfigurationReason{ModelReasonEngineOff, ModelReasonNoFit, ModelReasonPausedLocal, ModelReasonEngineOffLocal, ModelReasonNotServed, ModelReasonNotInstalled, ModelReasonUnqualified, ModelReasonUnsupportedLoad, ModelReasonSwitchBusy, ModelReasonLoadFailed, ModelReasonOperationTimeout, ModelReasonObservationUnknown, ModelReasonProjectionUnknown} {
 		t.Run(string(reason), func(t *testing.T) {
 			testResidentWire(t, ResidentRefusal{Engine: "ollama", Model: "m", Reason: reason}, "engine model reason")
 		})

@@ -42,6 +42,20 @@ type residentUnsettled struct {
 	expires time.Time
 }
 
+func residentAttemptReason(terminal bool, outcome nodepolicy.ResidentOutcome) nodepolicy.ModelConfigurationReason {
+	if terminal && outcome == nodepolicy.ResidentFailed {
+		return nodepolicy.ModelReasonLoadFailed
+	}
+	return nodepolicy.ModelReasonOperationTimeout
+}
+
+func residentFailureReadback(entry nodepolicy.ModelConfigurationEntry, hold residentUnsettled) nodepolicy.ModelConfigurationEntry {
+	if reason := residentAttemptReason(hold.terminal, hold.finish.Outcome); reason == nodepolicy.ModelReasonLoadFailed && (entry.State == nodepolicy.ModelStatePending || entry.Reason == nodepolicy.ModelReasonObservationUnknown) {
+		entry.State, entry.Reason = nodepolicy.ModelStateUnknown, reason
+	}
+	return entry
+}
+
 // modelConfigEvidence is an immutable capture. RPCs never hold policy locks.
 // Source handles are compared separately from the serialized evidence.
 type modelConfigEvidence struct {
@@ -336,6 +350,11 @@ func (b *Broker) modelConfiguration(e modelConfigEvidence) nodepolicy.ModelConfi
 	for _, ref := range b.residentRefs(e.Policy) {
 		entry, _, _, _ := b.modelConfigEntry(e, ref)
 		entry = residentProofLocked(r, e, ref, entry)
+		if hold, held := r.models.unsettled[ref]; held && b.residentDeclarationCurrent(hold.op.evidence, e, ref) && r.now().Before(hold.expires) {
+			// A retained terminal failure remains known when inventory changes;
+			// missing capacity evidence and current vetoes retain their meaning.
+			entry = residentFailureReadback(entry, hold)
+		}
 		out.Models = append(out.Models, entry)
 	}
 	return out
@@ -406,8 +425,11 @@ func (b *Broker) reconcileModelConfig(ctx context.Context) {
 	for _, ref := range b.residentRefs(e.Policy) {
 		entry, _, _, _ := b.modelConfigEntry(e, ref)
 		entry = residentProofLocked(r, e, ref, entry)
-		if _, held := r.models.unsettled[ref]; held && entry.State == nodepolicy.ModelStatePending {
-			entry.State, entry.Reason = nodepolicy.ModelStateUnknown, nodepolicy.ModelReasonOperationTimeout
+		if hold, held := r.models.unsettled[ref]; held {
+			entry = residentFailureReadback(entry, hold)
+			if entry.State == nodepolicy.ModelStatePending {
+				entry.State, entry.Reason = nodepolicy.ModelStateUnknown, residentAttemptReason(hold.terminal, hold.finish.Outcome)
+			}
 		}
 		r.models.status.Models = append(r.models.status.Models, entry)
 	}
@@ -436,7 +458,7 @@ func (b *Broker) reconcileModelConfig(ctx context.Context) {
 		if entry.State == nodepolicy.ModelStatePending && ctx.Err() == nil {
 			switch {
 			case unsettled:
-				entry.State, entry.Reason = nodepolicy.ModelStateUnknown, nodepolicy.ModelReasonOperationTimeout
+				entry.State, entry.Reason = nodepolicy.ModelStateUnknown, residentAttemptReason(hold.terminal, hold.finish.Outcome)
 				// A replacement authority may confirm the allocation, but only with
 				// fresh inventory and envelope proof. Only a terminal hold, whose
 				// native execution has ended, is discharged; a nonterminal one stays
@@ -480,6 +502,9 @@ func (b *Broker) reconcileModelConfig(ctx context.Context) {
 			default:
 				entry = b.reconcileResident(ctx, e, entry, pr, id, count)
 			}
+		}
+		if unsettled {
+			entry = residentFailureReadback(entry, hold)
 		}
 		r.mu.Lock()
 		_, awaitingObservation := r.models.pending[ref]
@@ -658,6 +683,7 @@ func (b *Broker) reconcileResident(parent context.Context, e modelConfigEvidence
 		result = nodepolicy.ReconcileResidentResult{Outcome: nodepolicy.ResidentUnknown}
 		terminal = false
 	}
+	entry.Reason = residentAttemptReason(terminal, result.Outcome)
 	if terminal && result.Outcome == nodepolicy.ResidentLoaded {
 		r.mu.Lock()
 		if r.models.loadedRequests == nil {

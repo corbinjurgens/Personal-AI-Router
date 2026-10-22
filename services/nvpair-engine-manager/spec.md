@@ -331,7 +331,7 @@ A refusal is `result:{"dispatched":false,"reason":"reservation-revoked"}`.
 Reasons are `reservation-revoked`, `reservation-unknown`, or any shared
 `ModelConfigurationReason`: `engine-off`, `no-fit`, `paused-local`,
 `engine-off-local`, `not-served`, `not-installed`, `unqualified`,
-`unsupported-load`, `switch-busy`, `operation-timeout`, `observation-unknown`,
+`unsupported-load`, `switch-busy`, `load-failed`, `operation-timeout`, `observation-unknown`,
 `projection-unknown`. A relay error instead has
 `error:{"code":-32000,"message":"bounded explanation"}`, with no result.
 Exactly one of result/error is required. Null, duplicate/case-variant/unknown
@@ -400,6 +400,14 @@ failure can return `failed` without an observation. Deadline/cancellation after
 dispatch returns `timeout`/`cancelled`; identity withdrawal yields `unknown`.
 Pending switch checkpoints/ports, Off provenance and intents stay untouched.
 No resident fields are added to `engine-state.json`; broker owns unload protection.
+
+The broker maps a definite terminal `failed` result to derived model status
+`unknown` with reason `load-failed`, including finish/recovery and retained-hold
+readbacks. It preserves the observation independently: failure without an
+observation does not prove absence or release capacity. Missing/unknown results
+and transport uncertainty retain `operation-timeout`; no raw engine error is
+published as a model-configuration reason. This mapping does not change grants,
+holds, recovery evidence, retry deadlines or terminal-hold expiry.
 
 ## 1. Purpose
 A declarative, config-driven control plane for **local inference engines**
