@@ -11,6 +11,13 @@ published releases on GitHub.
 Builds from this repository are unsigned and configure no update feed, so
 automatic updates are unavailable in them.
 
+## 0.1.16 — Personal fork preview with durable state and engine recovery
+
+- Saved-On engines can recover from an unexpected owned-process exit with bounded retries that respect pause, Off and shutdown.
+- The typed llama.cpp serving adapter accepts the reviewed native preset options with correct negative-flag semantics.
+- Node identity, settings, facade ports and workload snapshots use durable file replacement and preserve truthful failure reporting.
+- This prepares the personal-fork GUI preview; release notes document the tested platforms and remaining validation limits.
+
 ## 0.1.15 — Safer engine removal and data resets (#153)
 
 - Removing an engine never follows a symlink or Windows junction into another folder.
