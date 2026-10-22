@@ -8,10 +8,11 @@ package servicectl
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
-	"strings"
+	"slices"
 	"testing"
 	"time"
 
@@ -53,7 +54,10 @@ func runFakeService() {
 		if err != nil {
 			return
 		}
-		_, _ = c.Write([]byte(strings.Join(os.Args[1:], " ") + "\n"))
+		if err := json.NewEncoder(c).Encode(os.Args[1:]); err != nil {
+			_ = c.Close()
+			continue
+		}
 		sc := bufio.NewScanner(c)
 		for sc.Scan() {
 			if sc.Text() == "quit" {
@@ -120,12 +124,12 @@ func TestConnectOrStartStartsDetachedServiceAndPassesBrokerArgs(t *testing.T) {
 	}
 	defer conn.Close()
 
-	line, err := bufio.NewReader(conn).ReadString('\n')
-	if err != nil {
+	var args []string
+	if err := json.NewDecoder(conn).Decode(&args); err != nil {
 		t.Fatalf("read greeting: %v", err)
 	}
-	if got := strings.TrimSpace(line); got != "-- --log-level debug" {
-		t.Fatalf("service argv = %q, want broker args after --", got)
+	if want := []string{"--", "--log-level", "debug"}; !slices.Equal(args, want) {
+		t.Fatalf("service argv = %q, want %q", args, want)
 	}
 
 	// A second ConnectOrStart finds the running service rather than starting
@@ -149,6 +153,39 @@ func TestConnectOrStartReportsUnstartableBinary(t *testing.T) {
 	}
 }
 
+func TestStartDetachedArgsPreservesServiceArguments(t *testing.T) {
+	t.Setenv(EndpointEnv, filepath.Join(shortTempDir(t), "s.sock"))
+	t.Setenv(fakeServiceEnv, "1")
+	args := []string{"--log-level", "debug", "--", "", "space value", `say "hi"`, `dir\ x\`}
+	if err := StartDetachedArgs(os.Args[0], args); err != nil {
+		t.Fatalf("StartDetachedArgs: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	for {
+		conn, err := Dial(ctx)
+		if err == nil {
+			defer conn.Close()
+			var got []string
+			if err := json.NewDecoder(conn).Decode(&got); err != nil {
+				t.Fatalf("read greeting: %v", err)
+			}
+			if !slices.Equal(got, args) {
+				t.Errorf("service argv = %q, want %q", got, args)
+			}
+			if _, err := conn.Write([]byte("quit\n")); err != nil {
+				t.Fatal(err)
+			}
+			return
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatalf("detached service did not answer: %v", err)
+		case <-time.After(dialRetryInterval):
+		}
+	}
+}
+
 // A client-to-service launch is a trusted carrier: the service owns the broker,
 // which hands configured credential references to the proxy, so the detached
 // service keeps the whole provider-secret namespace.
@@ -158,6 +195,23 @@ func TestStartDetachedKeepsProviderSecrets(t *testing.T) {
 		t.Fatalf("StartDetached: %v", err)
 	}
 	secretenvtest.AssertRetained(t, secretenvtest.Wait(t, report))
+}
+
+func TestStartDetachedArgsKeepsProviderSecrets(t *testing.T) {
+	report := secretenvtest.Prepare(t)
+	if err := StartDetachedArgs(os.Args[0], []string{"--log-level", "debug"}); err != nil {
+		t.Fatalf("StartDetachedArgs: %v", err)
+	}
+	secretenvtest.AssertRetained(t, secretenvtest.Wait(t, report))
+}
+
+func TestStartDetachedArgsFailureDoesNotExposeProviderSecrets(t *testing.T) {
+	secretenvtest.Prepare(t)
+	err := StartDetachedArgs(filepath.Join(shortTempDir(t), "missing-service"), []string{"--log-level", "debug"})
+	if err == nil {
+		t.Fatal("expected an error for a missing binary")
+	}
+	secretenvtest.AssertNoValue(t, "start error", err.Error())
 }
 
 func TestStartDetachedFailureDoesNotExposeProviderSecrets(t *testing.T) {

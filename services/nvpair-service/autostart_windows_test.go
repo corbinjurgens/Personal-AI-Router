@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"golang.org/x/sys/windows"
+	"nvpair-shared/secretenv/secretenvtest"
 	"nvpair-shared/servicectl"
 )
 
@@ -70,8 +71,8 @@ func TestWindowsAutostartRunHasNoConsoleAfterStarterExits(t *testing.T) {
 		t.Fatalf("starter PID=%d, ready broker PID=%d, service status=%+v", starter.pid, ready.PID, status)
 	}
 	probe := f.inspectConsole(status.PID)
-	// CREATE_NO_WINDOW can retain an attachable headless console on Windows.
-	// A real console window, including a hidden one, must still be rejected.
+	// A real console window, including a hidden one, must be rejected. Keep
+	// accepting an attachable headless console for the no-window assertion.
 	if probe.Window != 0 || probe.Visible || (!probe.Attached && probe.AttachError != uint32(windows.ERROR_INVALID_HANDLE)) {
 		t.Fatalf("daemon has a console window or inspection failed: %+v", probe)
 	}
@@ -104,6 +105,29 @@ func TestWindowsAutostartRunPreservesArgumentsAndWorkingDirectory(t *testing.T) 
 			t.Fatalf("forwarded --log-dir did not receive %s: %v", name, err)
 		}
 	}
+}
+
+// Exercise the shared launcher through the existing fixed service-test image,
+// whose TestMain handles the sentinel before the service or broker can start.
+func TestWindowsStartDetachedArgsKeepsProviderSecrets(t *testing.T) {
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	report := secretenvtest.Prepare(t)
+	if err := servicectl.StartDetachedArgs(exe, []string{"--log-level", "debug"}); err != nil {
+		t.Fatalf("StartDetachedArgs: %v", err)
+	}
+	secretenvtest.AssertRetained(t, secretenvtest.Wait(t, report))
+}
+
+func TestWindowsStartDetachedArgsFailureDoesNotExposeProviderSecrets(t *testing.T) {
+	secretenvtest.Prepare(t)
+	err := servicectl.StartDetachedArgs(filepath.Join(t.TempDir(), "missing-service.exe"), []string{"--log-level", "debug"})
+	if err == nil {
+		t.Fatal("expected an error for a missing binary")
+	}
+	secretenvtest.AssertNoValue(t, "start error", err.Error())
 }
 
 func TestWindowsAutostartRunKeepsConsoleCLIUsable(t *testing.T) {
@@ -318,9 +342,15 @@ func (f *windowsAutostartFixture) cli(args ...string) windowsCLIResult {
 	cmd := exec.CommandContext(ctx, f.exe, args...)
 	cmd.Env, cmd.Dir, cmd.WaitDelay = f.env, f.dir, 2*time.Second
 	if len(args) > 1 && args[0] == "autostart" && args[1] == "run" {
-		// A hidden console is deliberate: removing CREATE_NO_WINDOW from the
-		// daemon must fail even if the starter's console was never visible.
-		cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: windows.CREATE_NEW_CONSOLE | windows.CREATE_NEW_PROCESS_GROUP}
+		// Use the exact Run-value command line, so the native Windows parser
+		// rather than exec.Command's quoting forwards the recorded arguments.
+		entry := autostartEntry{Program: f.exe, Args: slices.Clone(args[2:])}
+		// A hidden starter console makes bypassing the shared detached flags
+		// fail even when that console was never visible.
+		cmd.SysProcAttr = &syscall.SysProcAttr{
+			CmdLine: windowsCommandLine(entry), HideWindow: true,
+			CreationFlags: windows.CREATE_NEW_CONSOLE | windows.CREATE_NEW_PROCESS_GROUP,
+		}
 	}
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
@@ -481,14 +511,26 @@ func serviceTestHandleIdentity(handle windows.Handle) (string, uint64, error) {
 	return windows.UTF16ToString(image[:size]), uint64(created.HighDateTime)<<32 | uint64(created.LowDateTime), nil
 }
 
+type serviceProcessIdentityMismatchError struct {
+	pid int
+}
+
+func (err *serviceProcessIdentityMismatchError) Error() string {
+	return fmt.Sprintf("fixture PID %d process identity changed", err.pid)
+}
+
 func openRecordedServiceProcess(record serviceProcessRecord, expectedImage string) (windows.Handle, error) {
 	handle, err := windows.OpenProcess(windows.SYNCHRONIZE|windows.PROCESS_TERMINATE|windows.PROCESS_QUERY_LIMITED_INFORMATION, false, uint32(record.PID))
 	if err != nil {
 		return 0, err
 	}
 	image, created, err := serviceTestHandleIdentity(handle)
-	if err == nil && (record.Created == 0 || created != record.Created || !strings.EqualFold(image, record.Image) || !strings.EqualFold(image, expectedImage)) {
-		err = fmt.Errorf("fixture PID %d process identity changed", record.PID)
+	if err != nil {
+		// Query failures stay distinct from an OpenProcess refusal. Cleanup
+		// must not silently dismiss an unexpected identity-query failure.
+		err = fmt.Errorf("query fixture PID %d identity: %w", record.PID, err)
+	} else if record.Created == 0 || created != record.Created || !strings.EqualFold(image, record.Image) || !strings.EqualFold(image, expectedImage) {
+		err = &serviceProcessIdentityMismatchError{pid: record.PID}
 	}
 	if err != nil {
 		if closeErr := windows.CloseHandle(handle); closeErr != nil {
@@ -497,6 +539,65 @@ func openRecordedServiceProcess(record serviceProcessRecord, expectedImage strin
 		return 0, err
 	}
 	return handle, nil
+}
+
+// Only a direct opening refusal or a verified identity mismatch establishes
+// that the recorded process cannot be cleaned up by this fallback. Wrapped
+// query failures and joined CloseHandle errors still have to fail the test.
+func recordedServiceProcessGone(err error) bool {
+	if err == windows.ERROR_INVALID_PARAMETER || err == windows.ERROR_ACCESS_DENIED {
+		return true
+	}
+	_, mismatch := err.(*serviceProcessIdentityMismatchError)
+	return mismatch
+}
+
+func openRecordedServiceProcessForCleanup(record serviceProcessRecord, expectedImage string) (windows.Handle, error) {
+	handle, err := openRecordedServiceProcess(record, expectedImage)
+	if recordedServiceProcessGone(err) {
+		return 0, nil
+	}
+	return handle, err
+}
+
+func TestWindowsAutostartCleanupSkipsChangedIdentity(t *testing.T) {
+	image, created, err := serviceTestProcessIdentity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Use this process with a synthetic stale creation time. Only open and
+	// validate it; the cleanup opener never terminates a process.
+	record := serviceProcessRecord{PID: os.Getpid(), Image: image, Created: created + 1}
+	handle, err := openRecordedServiceProcessForCleanup(record, image)
+	if handle != 0 {
+		defer func() {
+			if err := windows.CloseHandle(handle); err != nil {
+				t.Error(err)
+			}
+		}()
+	}
+	if err != nil || handle != 0 {
+		t.Fatalf("stale recorded process: handle=%v err=%v, want no handle and no cleanup error", handle, err)
+	}
+}
+
+func TestWindowsAutostartCleanupClassifiesGoneRecordedProcess(t *testing.T) {
+	test := func(name string, err error, wantGone bool) {
+		t.Run(name, func(t *testing.T) {
+			if got := recordedServiceProcessGone(err); got != wantGone {
+				t.Fatalf("recordedServiceProcessGone(%v) = %v, want %v", err, got, wantGone)
+			}
+		})
+	}
+	mismatch := &serviceProcessIdentityMismatchError{pid: os.Getpid()}
+	test("recorded identity changed", mismatch, true)
+	test("opening recorded PID denied", windows.ERROR_ACCESS_DENIED, true)
+	test("recorded PID no longer exists", windows.ERROR_INVALID_PARAMETER, true)
+	test("matching process opened", nil, false)
+	test("unexpected opening failure", windows.ERROR_INVALID_HANDLE, false)
+	test("identity query denied", fmt.Errorf("query fixture identity: %w", windows.ERROR_ACCESS_DENIED), false)
+	test("identity query failed", fmt.Errorf("query fixture identity: %w", windows.ERROR_INVALID_PARAMETER), false)
+	test("identity mismatch with close failure", errors.Join(mismatch, windows.ERROR_INVALID_HANDLE), false)
 }
 
 func TestWindowsAutostartCleanupValidatesRecordedIdentity(t *testing.T) {
@@ -519,8 +620,11 @@ func TestWindowsAutostartCleanupValidatesRecordedIdentity(t *testing.T) {
 				if err != nil || handle == 0 {
 					t.Fatalf("matching identity: handle=%v err=%v", handle, err)
 				}
-			} else if err == nil || handle != 0 {
-				t.Fatalf("mismatched identity admitted: handle=%v err=%v", handle, err)
+			} else {
+				var mismatch *serviceProcessIdentityMismatchError
+				if handle != 0 || !errors.As(err, &mismatch) {
+					t.Fatalf("mismatched identity: handle=%v err=%v, want typed identity rejection", handle, err)
+				}
 			}
 		})
 	}
@@ -599,13 +703,13 @@ func (f *windowsAutostartFixture) cleanup() {
 			}
 			handle, ok := f.handles[record.PID]
 			if !ok {
-				handle, err = openRecordedServiceProcess(record, f.exe)
-				if errors.Is(err, windows.ERROR_INVALID_PARAMETER) {
-					continue // This recorded process already exited.
-				}
+				handle, err = openRecordedServiceProcessForCleanup(record, f.exe)
 				if err != nil {
 					f.t.Errorf("open cleanup PID %d: %v", record.PID, err)
 					continue
+				}
+				if handle == 0 {
+					continue // The recorded process is gone; never target its replacement.
 				}
 				f.handles[record.PID] = handle
 			}
