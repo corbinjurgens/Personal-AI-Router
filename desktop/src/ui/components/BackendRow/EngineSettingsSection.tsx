@@ -396,7 +396,7 @@ export function EngineSettingsSection({
                 }}
                 title="Restart engine?"
                 confirmLabel="Restart"
-                message="Applying these arguments will restart your engine, continue?"
+                message="Applying these settings will restart your engine. PAIR waits up to 60 seconds for active requests to finish, then restarts even if requests remain. This can interrupt those requests. Continue?"
                 onConfirm={() => {
                     if (confirmation) void apply(confirmation)
                 }}

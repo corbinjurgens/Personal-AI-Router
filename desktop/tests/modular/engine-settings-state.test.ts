@@ -168,6 +168,146 @@ describe('serving preservation in the settings editor', () => {
     })
 })
 
+describe('engine settings restart confirmation', () => {
+    const preview = vi.fn<IEngineApi['previewSettings']>()
+    const apply = vi.fn<IEngineApi['applySettings']>()
+    let container: HTMLDivElement
+    let root: ReturnType<typeof createRoot>
+
+    function confirmationDialog(): HTMLDialogElement {
+        const dialog = document.querySelector('dialog[open]')
+        if (!(dialog instanceof HTMLDialogElement)) throw new Error('Confirmation dialog missing')
+        return dialog
+    }
+
+    function buttonNamed(parent: ParentNode, label: string): HTMLButtonElement {
+        const button = Array.from(parent.querySelectorAll('button')).find(
+            candidate => candidate.textContent === label
+        )
+        if (!button) throw new Error(`${label} button missing`)
+        return button
+    }
+
+    beforeEach(async () => {
+        const get = vi.fn<IEngineApi['getSettings']>().mockResolvedValue(baseline)
+        preview.mockImplementation(async request => ({
+            settings: request.settings,
+            revision: 1,
+            errors: {},
+            restart: true,
+            rebind: false
+        }))
+        apply.mockResolvedValue({ revision: 2, phase: 'applying' })
+        Object.defineProperty(window, 'pairApi', {
+            configurable: true,
+            value: {
+                engines: {
+                    getSettings: get,
+                    previewSettings: preview,
+                    applySettings: apply,
+                    onSettingsChanged: () => () => {},
+                    onSettingsDisconnected: () => () => {}
+                }
+            }
+        })
+        vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
+        vi.stubGlobal('CSS', { supports: () => false })
+        Object.defineProperty(HTMLDialogElement.prototype, 'showModal', {
+            configurable: true,
+            value: function (this: HTMLDialogElement) {
+                this.open = true
+            }
+        })
+        Object.defineProperty(HTMLDialogElement.prototype, 'close', {
+            configurable: true,
+            value: function (this: HTMLDialogElement) {
+                this.open = false
+            }
+        })
+        useConnectionStore.setState({ connected: true, selfId: 'remote' })
+        store.setState({ entries: {} })
+        usePendingActionsStore.setState({ pending: new Map() })
+        container = document.createElement('div')
+        document.body.appendChild(container)
+        root = createRoot(container)
+        await act(async () =>
+            root.render(
+                createElement(EngineSettingsSection, {
+                    nodeId: 'remote',
+                    engineType: 'ollama',
+                    disabled: false
+                })
+            )
+        )
+        const input = container.querySelector('input[aria-label="Proxy port"]')
+        const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set
+        if (!input || !setter) throw new Error('Proxy port input missing')
+        await act(async () => {
+            setter.call(input, '12500')
+            input.dispatchEvent(new Event('input', { bubbles: true }))
+        })
+        const button = container.querySelector('button[aria-label="Apply"]')
+        if (!(button instanceof HTMLButtonElement)) throw new Error('Apply button missing')
+        await act(async () => button.click())
+    })
+
+    afterEach(async () => {
+        await act(async () => root.unmount())
+        container.remove()
+        usePendingActionsStore.setState({ pending: new Map() })
+        vi.unstubAllGlobals()
+        vi.restoreAllMocks()
+    })
+
+    it('discloses the bounded request wait and applies only after restart confirmation', async () => {
+        const dialog = confirmationDialog()
+        expect(dialog.textContent).toContain('Restart engine?')
+        expect(dialog.textContent).toContain(
+            'PAIR waits up to 60 seconds for active requests to finish, then restarts even if requests remain. This can interrupt those requests.'
+        )
+        expect(preview).toHaveBeenCalledWith(
+            expect.objectContaining({ settings: { ...baseline.settings, proxyPort: 12500 } })
+        )
+        expect(apply).not.toHaveBeenCalled()
+        expect(usePendingActionsStore.getState().isSettingsPending('remote', 'ollama')).toBe(false)
+
+        await act(async () => buttonNamed(dialog, 'Restart').click())
+
+        expect(apply).toHaveBeenCalledTimes(1)
+        expect(apply).toHaveBeenCalledWith(
+            expect.objectContaining({
+                ...target,
+                expectedRevision: 1,
+                requestId: expect.any(String),
+                settings: { ...baseline.settings, proxyPort: 12500 }
+            })
+        )
+        expect(dialog.open).toBe(false)
+        expect(usePendingActionsStore.getState().isSettingsPending('remote', 'ollama')).toBe(true)
+    })
+
+    it('cancels a restart without applying and leaves the draft editable', async () => {
+        const dialog = confirmationDialog()
+        expect(apply).not.toHaveBeenCalled()
+
+        await act(async () => buttonNamed(dialog, 'Cancel').click())
+
+        expect(dialog.open).toBe(false)
+        expect(apply).not.toHaveBeenCalled()
+        expect(usePendingActionsStore.getState().isSettingsPending('remote', 'ollama')).toBe(false)
+        const input = container.querySelector('input[aria-label="Proxy port"]')
+        if (!(input instanceof HTMLInputElement)) throw new Error('Proxy port input missing')
+        expect(input.value).toBe('12500')
+        expect(input.disabled).toBe(false)
+        const button = container.querySelector('button[aria-label="Apply"]')
+        if (!(button instanceof HTMLButtonElement)) throw new Error('Apply button missing')
+        expect(button.disabled).toBe(false)
+        await act(async () => button.click())
+        expect(confirmationDialog().textContent).toContain('Restart engine?')
+        expect(apply).not.toHaveBeenCalled()
+    })
+})
+
 describe('engine settings snapshot ordering and pending operations', () => {
     beforeEach(() => {
         store.setState({ entries: {} })
