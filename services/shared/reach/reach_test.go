@@ -137,7 +137,7 @@ func TestFirstPrefersRankOverArrivalOrder(t *testing.T) {
 		_ = remote.Close()
 		return local, nil
 	}
-	got, ok := first(dial, []string{"10.0.0.1:1", "10.0.0.2:1"}, time.Second, time.Time{})
+	got, ok := first(context.Background(), dial, []string{"10.0.0.1:1", "10.0.0.2:1"}, time.Second)
 	if !ok || got != "10.0.0.1:1" {
 		t.Fatalf("first = %q,%v, want the top-ranked address despite answering later", got, ok)
 	}
@@ -162,7 +162,7 @@ func TestFirstPaysOneTimeoutForTheWholeList(t *testing.T) {
 	candidates := []string{"10.0.0.1:1", "10.0.0.2:1", "10.0.0.3:1", "10.0.0.4:1"}
 
 	start := time.Now()
-	got, ok := first(dial, candidates, timeout, time.Time{})
+	got, ok := first(context.Background(), dial, candidates, timeout)
 	elapsed := time.Since(start)
 
 	if !ok || got != "10.0.0.4:1" {
@@ -539,7 +539,7 @@ func TestChooseKeepsAConfirmedAddressIndefinitely(t *testing.T) {
 // and a caller's expiring timeout is not.
 func TestFirstReportsWhenNothingIsReachable(t *testing.T) {
 	f := newFakeNet()
-	if _, ok := first(f.dial, []string{"10.0.0.1:1", "10.0.0.2:1"}, time.Millisecond, time.Time{}); ok {
+	if _, ok := first(context.Background(), f.dial, []string{"10.0.0.1:1", "10.0.0.2:1"}, time.Millisecond); ok {
 		t.Fatal("first reported success with nothing accepting")
 	}
 	if n := f.dials.Load(); n != 2 {
@@ -547,7 +547,7 @@ func TestFirstReportsWhenNothingIsReachable(t *testing.T) {
 	}
 
 	f = newFakeNet("10.0.0.2:1")
-	got, ok := first(f.dial, []string{"", "10.0.0.1:1", "10.0.0.2:1"}, time.Millisecond, time.Time{})
+	got, ok := first(context.Background(), f.dial, []string{"", "10.0.0.1:1", "10.0.0.2:1"}, time.Millisecond)
 	if !ok || got != "10.0.0.2:1" {
 		t.Fatalf("first = %q,%v, want 10.0.0.2:1,true (blank entries skipped)", got, ok)
 	}
@@ -593,6 +593,158 @@ func TestChooseWithinStopsWhenTheCallersBudgetIsSpent(t *testing.T) {
 	if n := dials.Load(); n != 3 {
 		t.Errorf("attempted %d addresses, want all three inside the one budget", n)
 	}
+}
+
+// heldConfirmation keeps the first confirmation's fake dials in flight until
+// explicitly released. Later confirmations see a different, valid fake network.
+type heldConfirmation struct {
+	entered, returned, closed chan struct{}
+	release                   chan struct{}
+	once                      sync.Once
+	issued                    atomic.Int32
+	accept                    bool
+	next                      *fakeNet
+}
+
+type closingProbeConn struct {
+	net.Conn
+	closed chan<- struct{}
+}
+
+func (c closingProbeConn) Close() error {
+	err := c.Conn.Close()
+	c.closed <- struct{}{}
+	return err
+}
+
+func newHeldConfirmation(t *testing.T, accept bool) *heldConfirmation {
+	t.Helper()
+	h := &heldConfirmation{entered: make(chan struct{}, 2), returned: make(chan struct{}, 2), closed: make(chan struct{}, 2), release: make(chan struct{}), accept: accept, next: newFakeNet("second")}
+	t.Cleanup(func() {
+		h.unblock()
+		for range 2 {
+			select {
+			case <-h.returned:
+			case <-time.After(2 * time.Second):
+				t.Error("held fake dial did not return during cleanup")
+			}
+			if accept {
+				select {
+				case <-h.closed:
+				case <-time.After(2 * time.Second):
+					t.Error("late successful probe connection was not closed")
+				}
+			}
+		}
+	})
+	return h
+}
+
+func (h *heldConfirmation) unblock() { h.once.Do(func() { close(h.release) }) }
+
+func (h *heldConfirmation) dial(network, address string, timeout time.Duration) (net.Conn, error) {
+	if h.issued.Add(1) > 2 {
+		return h.next.dial(network, address, timeout)
+	}
+	h.entered <- struct{}{}
+	defer func() { h.returned <- struct{}{} }()
+	<-h.release
+	if !h.accept {
+		return nil, errors.New("held fake refusal")
+	}
+	local, remote := net.Pipe()
+	_ = remote.Close()
+	return closingProbeConn{Conn: local, closed: h.closed}, nil
+}
+
+func runCancelledConfirmation(t *testing.T, c *Chooser, h *heldConfirmation) string {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	result, joined := make(chan string, 1), make(chan struct{})
+	go func() {
+		defer close(joined)
+		result <- c.ChooseWithin(ctx, "peer", []string{"first", "second"})
+	}()
+	t.Cleanup(func() {
+		h.unblock()
+		select {
+		case <-joined:
+		case <-time.After(2 * time.Second):
+			t.Error("cancelled chooser did not join")
+		}
+	})
+	for range 2 {
+		select {
+		case <-h.entered:
+		case <-time.After(2 * time.Second):
+			t.Fatal("uncached confirmation did not enter both fake dials")
+		}
+	}
+	cancel()
+	select {
+	case got := <-result:
+		return got
+	case <-time.After(200 * time.Millisecond):
+		t.Error("parent cancellation did not interrupt held confirmation")
+		h.unblock() // Cleanup the old-wait behavioral RED as well as GREEN.
+		select {
+		case got := <-result:
+			return got
+		case <-time.After(2 * time.Second):
+			t.Fatal("released confirmation did not finish")
+			return ""
+		}
+	}
+}
+
+func TestChooseWithinCancellationInterruptsConfirmation(t *testing.T) {
+	t.Run("in-flight confirmation", func(t *testing.T) {
+		h := newHeldConfirmation(t, true)
+		c := NewChooser(WithDial(h.dial))
+		if got := runCancelledConfirmation(t, c, h); got != "first" {
+			t.Fatalf("cancelled chooser=%q, want published fallback first", got)
+		}
+	})
+	t.Run("already cancelled starts no probes", func(t *testing.T) {
+		f := newFakeNet("second")
+		c := NewChooser(WithDial(f.dial))
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		if got := c.ChooseWithin(ctx, "peer", []string{"first", "second"}); got != "first" {
+			t.Errorf("cancelled chooser=%q, want published fallback first", got)
+		}
+		if got := f.dials.Load(); got != 0 {
+			t.Errorf("already-cancelled confirmation started %d probes", got)
+		}
+	})
+}
+
+func TestChooseWithinCancellationDoesNotCacheConfirmation(t *testing.T) {
+	test := func(name string, accept bool) {
+		t.Run(name, func(t *testing.T) {
+			h := newHeldConfirmation(t, accept)
+			c := NewChooser(WithDial(h.dial))
+			runCancelledConfirmation(t, c, h)
+			c.mu.Lock()
+			_, cached := c.cache["peer"]
+			c.mu.Unlock()
+			if cached {
+				t.Error("abandoned confirmation populated the chooser cache")
+			}
+			// Keep old verdicts held while a new confirmation succeeds. Their
+			// eventual delivery must neither suppress this walk nor overwrite it.
+			if got := choose(c, "peer", []string{"first", "second"}); got != "second" || h.next.dials.Load() != 2 {
+				t.Errorf("fresh confirmation=%q probes=%d, want second/2", got, h.next.dials.Load())
+			}
+			h.unblock()
+			if got := choose(c, "peer", []string{"first", "second"}); got != "second" {
+				t.Errorf("late confirmation poisoned cache: %q", got)
+			}
+		})
+	}
+	test("late success cannot settle", true)
+	test("late refusal cannot install cooldown", false)
 }
 
 func TestChooseIsConcurrencySafe(t *testing.T) {

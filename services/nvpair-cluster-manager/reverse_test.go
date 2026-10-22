@@ -456,6 +456,24 @@ func connectReverseManagers(t *testing.T, a, b *Manager) {
 	if !ok {
 		t.Fatal("reachable peer missing")
 	}
+	// The selected fixtures hold a public listener at a.port. Preserve stored
+	// logical membership, but restrict raw session setup to its numeric endpoint.
+	if node.Port != a.port || a.port <= 0 || (node.IPAddress != "localhost" && !net.ParseIP(node.IPAddress).IsLoopback()) {
+		t.Fatal("reverse setup lacks fixture-owned loopback endpoint")
+	}
+	node = cloneClusterNode(node)
+	node.IPAddress = "127.0.0.1"
+	node.AdvertisedAddresses = nil
+	want := net.JoinHostPort("127.0.0.1", strconv.Itoa(a.port))
+	addresses := b.resolvePeerAddrs(*node)
+	if len(addresses) == 0 {
+		t.Fatal("raw reverse candidate walk is empty")
+	}
+	for _, address := range addresses {
+		if address != want {
+			t.Fatalf("raw reverse alternative %q is not owned endpoint %q", address, want)
+		}
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	if err := b.dialReverseSession(ctx, *node); err != nil {

@@ -127,7 +127,7 @@ func TestReverseRemovalLostReplyDoesNotReplay(t *testing.T) {
 	pairClusterFixtures(t, remover, victim)
 	startPrivateReverse(t, remover.m)
 	connectReverseManagers(t, remover.m, victim.m)
-	reverse := countClusterReverseDials(t, remover.m)
+	reverse := countClusterReverseDials(t, remover)
 	// A roster leaves a reusable stream idle. Removal must open its own fresh
 	// stream and must not retry when teardown revokes that stream's reply.
 	if outcome, _ := remover.m.reconcileWith([]string{victim.address}, victim.m.identity.NodeUUID); outcome != reconcileAccepted {
@@ -176,7 +176,7 @@ func TestNodesRemoveCommitsAfterReverseReplyIsRevoked(t *testing.T) {
 	pairClusterFixtures(t, remover, victim)
 	startPrivateReverse(t, remover.m)
 	connectReverseManagers(t, remover.m, victim.m)
-	reverse := countClusterReverseDials(t, remover.m)
+	reverse := countClusterReverseDials(t, remover)
 	committed := make(chan struct{})
 	victim.afterRemove = func() { close(committed) }
 	var output bytes.Buffer

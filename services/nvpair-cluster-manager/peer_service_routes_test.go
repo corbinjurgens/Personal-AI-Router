@@ -19,10 +19,13 @@ import (
 
 	"nvpair-shared/clustertrust"
 	"nvpair-shared/noderec"
+	"nvpair-shared/reach"
 )
 
 type clusterPeerFixture struct {
 	m           *Manager
+	guard       *peerDialGuard
+	listener    *ownedPeerListener
 	address     string
 	rosters     atomic.Int32
 	removes     atomic.Int32
@@ -33,7 +36,7 @@ type clusterPeerFixture struct {
 
 func newClusterPeerFixture(t *testing.T, blocked bool) *clusterPeerFixture {
 	t.Helper()
-	f := &clusterPeerFixture{m: newReverseTestManager(t)}
+	f := &clusterPeerFixture{m: newReverseTestManager(t), guard: newPeerDialGuard(t)}
 	t.Cleanup(f.m.peerServices.CloseIdle)
 	t.Cleanup(f.m.removalPeerServices.CloseIdle)
 	mux := http.NewServeMux()
@@ -58,6 +61,8 @@ func newClusterPeerFixture(t *testing.T, blocked bool) *clusterPeerFixture {
 		t.Fatal(err)
 	}
 	f.m.port = listener.Addr().(*net.TCPAddr).Port
+	f.listener = &ownedPeerListener{Listener: listener}
+	listener = f.listener
 	f.address = net.JoinHostPort("localhost", strconv.Itoa(f.m.port))
 	f.m.addSelfMember()
 	if blocked {
@@ -80,6 +85,7 @@ func newClusterPeerFixture(t *testing.T, blocked bool) *clusterPeerFixture {
 	// The gateway's service registration is loopback-only and differs from the
 	// peer's original URL. The inner handshake still uses the peer's exact pin.
 	inner := httptest.NewUnstartedServer(mux)
+	inner.Listener = &ownedPeerListener{Listener: inner.Listener}
 	inner.Listener = reverseForwardListener{Listener: inner.Listener, manager: f.m}
 	inner.Config.ConnContext = f.m.reverseConnContext
 	inner.TLS = f.m.buildServerTLSConfig()
@@ -88,36 +94,50 @@ func newClusterPeerFixture(t *testing.T, blocked bool) *clusterPeerFixture {
 	setReverseServices(t, f.m, 1, noderec.RegisterParams{
 		Service: noderec.ServiceCluster, Port: inner.Listener.Addr().(*net.TCPAddr).Port,
 	})
+	replaceClusterPeerServices(t, f.m, f.m.peerServiceOptions(), f.guard)
 	return f
 }
 
 func pairClusterFixtures(t *testing.T, a, b *clusterPeerFixture) {
 	t.Helper()
 	pairReverseManagers(t, a.m, b.m)
+	a.guard.allow(t, b.address, b.listener)
+	b.guard.allow(t, a.address, a.listener)
 	if !a.m.setMemberAddr(b.m.identity.NodeUUID, "localhost", b.m.port) ||
 		!b.m.setMemberAddr(a.m.identity.NodeUUID, "localhost", a.m.port) {
 		t.Fatal("set public cluster addresses")
 	}
 }
 
-func countClusterReverseDials(t *testing.T, m *Manager) *atomic.Int32 {
+func countClusterReverseDials(t *testing.T, f *clusterPeerFixture) *atomic.Int32 {
 	t.Helper()
-	count := new(atomic.Int32)
+	m := f.m
 	opts := m.peerServiceOptions()
 	opts.DirectTimeout = 80 * time.Millisecond
 	opts.DialReverse = func(ctx context.Context, base, uuid string, service noderec.ServiceKey) (net.Conn, error) {
 		if service != noderec.ServiceCluster {
 			t.Errorf("reverse service = %q, want cluster", service)
 		}
-		count.Add(1)
 		return clustertrust.DialReverse(ctx, base, uuid, service)
 	}
-	replaceClusterPeerServices(t, m, opts)
-	return count
+	replaceClusterPeerServices(t, m, opts, f.guard)
+	return &f.guard.reverse
 }
 
-func replaceClusterPeerServices(t *testing.T, m *Manager, opts clustertrust.PeerServiceClientOptions) {
+func replaceClusterPeerServices(t *testing.T, m *Manager, opts clustertrust.PeerServiceClientOptions, guard *peerDialGuard) {
 	t.Helper()
+	if opts.DialContext == nil {
+		opts.DialContext = guard.dial
+	}
+	reverse := opts.DialReverse
+	opts.DialReverse = func(ctx context.Context, base, uuid string, service noderec.ServiceKey) (net.Conn, error) {
+		guard.reverse.Add(1)
+		if reverse == nil {
+			return nil, errors.New("fixture reverse unavailable")
+		}
+		return reverse(ctx, base, uuid, service)
+	}
+	m.peerAddrs = reach.NewChooser(reach.WithDial(guard.probe))
 	m.peerServices.CloseIdle()
 	m.removalPeerServices.CloseIdle()
 	opts.ReuseConnections = true
@@ -131,7 +151,7 @@ func replaceClusterPeerServices(t *testing.T, m *Manager, opts clustertrust.Peer
 func TestClusterRosterDirectWorksWithoutReverseSession(t *testing.T) {
 	a, b := newClusterPeerFixture(t, false), newClusterPeerFixture(t, false)
 	pairClusterFixtures(t, a, b)
-	reverse := countClusterReverseDials(t, a.m)
+	reverse := countClusterReverseDials(t, a)
 	outcome, proven := a.m.reconcileWith([]string{b.address}, b.m.identity.NodeUUID)
 	if outcome != reconcileAccepted || proven || b.rosters.Load() != 1 || reverse.Load() != 0 {
 		t.Fatalf("outcome=%v proof=%v rosters=%d reverse=%d, want accepted/false/1/0", outcome, proven, b.rosters.Load(), reverse.Load())
@@ -142,9 +162,10 @@ func TestClusterRosterFailsOverBetweenCurrentEndpoints(t *testing.T) {
 	a, b, blocked := newClusterPeerFixture(t, false), newClusterPeerFixture(t, false), newClusterPeerFixture(t, true)
 	pairClusterFixtures(t, a, b)
 	a.m.setMemberAddr(b.m.identity.NodeUUID, "localhost", blocked.m.port)
+	a.guard.allow(t, blocked.address, blocked.listener)
 	a.m.browser = newBrowser()
 	a.m.browser.seed(b.m.identity.NodeUUID, "localhost", b.m.port)
-	reverse := countClusterReverseDials(t, a.m)
+	reverse := countClusterReverseDials(t, a)
 	outcome, proven := a.m.reconcileWith([]string{blocked.address, b.address}, b.m.identity.NodeUUID)
 	if outcome != reconcileAccepted || proven || b.rosters.Load() != 1 || reverse.Load() != 1 {
 		t.Fatalf("endpoint failover outcome=%v proof=%v roster=%d reverse=%d, want accepted/false/1/1", outcome, proven, b.rosters.Load(), reverse.Load())
@@ -172,7 +193,7 @@ func TestClusterRosterDoesNotReplayExposedResponse(t *testing.T) {
 			t.Error(err)
 		}
 	}
-	reverse := countClusterReverseDials(t, a.m)
+	reverse := countClusterReverseDials(t, a)
 	// A second candidate must not receive a retry after the 200 headers and
 	// partial body have been exposed, even though the first body is unusable.
 	other := net.JoinHostPort("127.0.0.1", strconv.Itoa(b.m.port))
@@ -189,7 +210,7 @@ func TestClusterRosterBlockedTLSUsesRealReverseSession(t *testing.T) {
 	pairClusterFixtures(t, a, b)
 	startPrivateReverse(t, a.m)
 	connectReverseManagers(t, a.m, b.m)
-	reverse := countClusterReverseDials(t, a.m)
+	reverse := countClusterReverseDials(t, a)
 	for range 2 {
 		outcome, proven := a.m.reconcileWith([]string{b.address}, b.m.identity.NodeUUID)
 		if outcome != reconcileAccepted || proven {
@@ -215,7 +236,7 @@ func TestClusterRosterUnavailableRouteDoesNotRemoveMembership(t *testing.T) {
 	a, b := newClusterPeerFixture(t, false), newClusterPeerFixture(t, true)
 	pairClusterFixtures(t, a, b)
 	startPrivateReverse(t, a.m)
-	reverse := countClusterReverseDials(t, a.m)
+	reverse := countClusterReverseDials(t, a)
 	a.m.reconcilePeersAndMaybeSelfRemove()
 	if cid, epoch := a.m.currentAdmission(); cid != "cluster-1" || epoch != 1 {
 		t.Fatalf("route failure changed admission: (%q,%d), want cluster-1/1", cid, epoch)
@@ -302,7 +323,8 @@ func TestClusterRosterPairwiseThreePeerFanout(t *testing.T) {
 		}
 	}
 	connectReverseManagers(t, c.m, b.m)
-	reverse := countClusterReverseDials(t, c.m)
+	c.guard.allow(t, b.address, b.listener)
+	reverse := countClusterReverseDials(t, c)
 	aBefore := a.rosters.Load()
 	bBefore := b.rosters.Load()
 	if outcome, _ := c.m.reconcileWith([]string{b.address}, b.m.identity.NodeUUID); outcome != reconcileAccepted {
@@ -352,7 +374,7 @@ func TestClusterPeerAdaptersRejectRevokedAuthority(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			a, b := newClusterPeerFixture(t, false), newClusterPeerFixture(t, false)
 			pairClusterFixtures(t, a, b)
-			reverse := countClusterReverseDials(t, a.m)
+			reverse := countClusterReverseDials(t, a)
 			if outcome, _ := a.m.reconcileWith([]string{b.address}, b.m.identity.NodeUUID); outcome != reconcileAccepted {
 				t.Fatalf("prime roster outcome = %v, want accepted", outcome)
 			}
@@ -406,7 +428,7 @@ func TestClusterPeerRouteRevokedDuringDial(t *testing.T) {
 			entered, release := make(chan struct{}), make(chan struct{})
 			opts := a.m.peerServiceOptions()
 			opts.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
-				conn, err := (&net.Dialer{}).DialContext(ctx, network, addr)
+				conn, err := a.guard.dial(ctx, network, addr)
 				if err != nil {
 					return nil, err
 				}
@@ -424,7 +446,7 @@ func TestClusterPeerRouteRevokedDuringDial(t *testing.T) {
 				reverse.Add(1)
 				return nil, errors.New("unexpected reverse after authority change")
 			}
-			replaceClusterPeerServices(t, a.m, opts)
+			replaceClusterPeerServices(t, a.m, opts, a.guard)
 			client, err := a.m.peerClient(b.m.identity.NodeUUID)
 			if err != nil {
 				t.Fatal(err)
@@ -481,7 +503,7 @@ func TestClusterPeerRouteChangesBeforeFirstApplicationWrite(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			a, b := newClusterPeerFixture(t, false), newClusterPeerFixture(t, false)
 			pairClusterFixtures(t, a, b)
-			reverse := countClusterReverseDials(t, a.m)
+			reverse := countClusterReverseDials(t, a)
 			client, err := a.m.peerClient(b.m.identity.NodeUUID)
 			if err != nil {
 				t.Fatal(err)

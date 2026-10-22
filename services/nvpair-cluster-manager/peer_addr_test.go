@@ -6,6 +6,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -22,6 +23,63 @@ import (
 // unreachableAddr is in TEST-NET-1 (RFC 5737), which is reserved for
 // documentation and routed nowhere, so a connection to it never completes.
 const unreachableAddr = "192.0.2.1:14321"
+
+func TestPeerServicesCandidateUnionKeepsLastHint(t *testing.T) {
+	f := newPeerWalkFixture(t)
+	f.descriptor.Addresses = []string{"192.0.2.60", "192.0.2.61", "192.0.2.62", "100.90.0.8"}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := f.a.refreshPeerServices(ctx, f.b.identity.NodeUUID); err != nil {
+		t.Fatal(err)
+	}
+	if stored := storedHintMember(t, f.a, f.b.identity.NodeUUID); !slices.Equal(stored.AdvertisedAddresses, f.descriptor.Addresses) {
+		t.Fatal("cap fixture did not learn through authenticated persistence")
+	}
+	f.a.browser = newBrowser()
+	browserPort := f.b.port + 1
+	if browserPort > 65535 {
+		browserPort = f.b.port - 1
+	}
+	browserHosts := []string{"192.0.2.20", "192.0.2.21", "192.0.2.22", "192.0.2.23"}
+	f.a.browser.setRelay([]noderec.DirectoryNode{{HostUUID: f.b.identity.NodeUUID, Name: "walk-peer", IP: browserHosts[0], IPs: browserHosts, Services: map[noderec.ServiceKey]noderec.ServiceStatus{noderec.ServiceCluster: {Port: browserPort}}}})
+	member, ok := f.a.memberByNodeID(f.b.identity.NodeUUID)
+	if !ok {
+		t.Fatal("learned member missing")
+	}
+	want := []string{f.lan}
+	for _, host := range browserHosts {
+		want = append(want, net.JoinHostPort(host, fmt.Sprint(browserPort)))
+	}
+	for _, host := range f.descriptor.Addresses {
+		want = append(want, net.JoinHostPort(host, fmt.Sprint(f.b.port)))
+	}
+	if got := f.a.resolvePeerAddrs(*member); !slices.Equal(got, want) {
+		t.Fatalf("candidate source order=%v want=%v", got, want)
+	}
+	if len(want) <= 8 || want[len(want)-1] != f.tail {
+		t.Fatal("useful hint is not beyond old prefix")
+	}
+	// Only the final learned endpoint has a physical mapping. All earlier
+	// logical candidates fail synthetically, including independent chooser probes.
+	guard := newPeerDialGuard(t)
+	guard.allow(t, f.tail, f.listener)
+	f.install(t, f.a, guard, nil)
+	f.output.Reset()
+	if err := f.a.refreshPeerServices(ctx, f.b.identity.NodeUUID); err != nil {
+		t.Fatalf("last persisted candidate omitted: %v", err)
+	}
+	if guard.attempted(f.tail) == 0 || guard.physical.Load() == 0 || guard.reverse.Load() != 0 || f.handlers.Load() != 2 {
+		t.Fatal("final hint did not make a pinned authenticated read")
+	}
+	// Same host+port from discovery wins over its persisted duplicate, without
+	// changing the order of the other persisted candidates.
+	f.a.browser.seed(f.b.identity.NodeUUID, "192.0.2.60", f.b.port)
+	member, _ = f.a.memberByNodeID(f.b.identity.NodeUUID)
+	dedup := []string{f.lan, net.JoinHostPort("192.0.2.60", fmt.Sprint(f.b.port)), net.JoinHostPort("192.0.2.61", fmt.Sprint(f.b.port)), net.JoinHostPort("192.0.2.62", fmt.Sprint(f.b.port)), f.tail}
+	if got := f.a.resolvePeerAddrs(*member); !slices.Equal(got, dedup) {
+		t.Fatalf("dedup precedence=%v want=%v", got, dedup)
+	}
+}
 
 func TestResolvePeerAddrsIncludesAuthenticatedHints(t *testing.T) {
 	f := newPeerHintFixture(t)
