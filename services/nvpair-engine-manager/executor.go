@@ -89,6 +89,9 @@ type engineState struct {
 	healthStop   context.CancelFunc
 	// startCancel lets StopAll unblock doStart before waiting on opMu.
 	startCancel context.CancelFunc
+	// relaunch owns a bounded recovery episode after an unexpected owned exit.
+	// Explicit stop/sleep and shutdown cancel it before waiting for opMu.
+	relaunch *engineRelaunch
 	// loads registers queued/held load cancellation and stop fences under mu,
 	// independently of startup cancellation. Stop/StopAll cancel before opMu.
 	loads servingLoadControl

@@ -83,6 +83,9 @@ func (m *Manager) applyNodeProjection(msg *Message) {
 		return
 	}
 	m.exec.nodeProjection.set(p)
+	if p.PausedLocally {
+		m.exec.cancelPausedCrashRelaunches()
+	}
 	m.exec.cancelVetoedRemoteWork()
 }
 
