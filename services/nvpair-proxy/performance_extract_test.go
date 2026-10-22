@@ -417,7 +417,10 @@ func TestPerformanceExtractLlamaStreamOutputCount(t *testing.T) {
 	}
 	// The final empty-choices event carries matching usage and predicted_n.
 	// llama.cpp reports ten decode steps for eleven visible output tokens.
-	test("native timings with usage", performanceExtractTestFixture(t, "llamacpp-chat-stream-usage.txt"),
+	// The extractor fixture ends with one newline after [DONE]; the wire stream
+	// needs a blank line to dispatch that terminal SSE event.
+	nativeStream := append(performanceExtractTestFixture(t, "llamacpp-chat-stream-usage.txt"), '\n')
+	test("native timings with usage", nativeStream,
 		performanceExtractTestInt(250500000), performanceExtractTestFloat(39.92015968063872))
 	test("usage without timings retains count and unknown rates", []byte(
 		"data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"fixture\"},\"finish_reason\":null}]}\n\n"+
