@@ -30,10 +30,13 @@ reject auto/zero/negative/overflow, except `sleep-idle-seconds = -1`, which
 disables idle retention in the pinned build. Positive retention remains valid;
 zero and values below -1 are refused. Retention stays string-valued (`"-1"`).
 The single `llamaServingOptions` table derives native spellings/environment names
-from pinned llama.cpp `7fe450e1` `common/arg.cpp`. Unsupported batch/ubatch, KV
-type/SWA/attention/scaling, tensor/MoE/offload/loading placement, draft/projector
-allocation, router autoload and built-in model preset controls are rejected on
-CLI, in environment and in source presets. Main-model sampling offload,
+from pinned llama.cpp `7fe450e1` `common/arg.cpp`. Logical/physical batch sizes,
+K/V cache types, Flash Attention and KV/operation offload are supported and
+retained in placement entries. Unsupported SWA, context-shift and scaling
+controls, tensor/MoE/loading placement, draft/projector allocation, router
+autoload and built-in model preset controls are rejected on CLI, in environment
+and in source presets. A reserved `version` preset key is skipped; `threads` and
+`threads-batch` pass through presets unchanged. Main-model sampling offload,
 continuous batching, control-vector artifacts/layer placement and the default
 speculative preset are unsupported too. Long CLI options normalize underscores
 to hyphens before envelope lookup, exactly as the pinned native parser does;
