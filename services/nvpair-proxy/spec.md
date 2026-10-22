@@ -1092,6 +1092,12 @@ POST and safe GET contract. No prompt or request keep-alive override is sent.
 
 Finish/observe reconcile operation-bound evidence; failed load, stale generation,
 source replacement or unknown observation cannot invent loaded satisfaction.
+A definite terminal manager `failed` result is reported by the broker as
+`unknown`/`load-failed`, including recovery and retained-hold readbacks. It is a
+bounded reason, not a raw engine error or proof of unloaded/free capacity;
+observation, hold cleanup, terminal expiry and retry deadlines retain their
+existing meaning. A stale proxy `engine-off` refusal remains `pending` without
+a reason while the current manager source reports the engine running.
 
 An interrupted load without a terminal manager reply retains its resident hold
 and reports `unknown`/`operation-timeout` until a policy edit invalidates the

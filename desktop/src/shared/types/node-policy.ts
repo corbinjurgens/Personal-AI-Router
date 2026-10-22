@@ -135,6 +135,7 @@ export interface ModelConfigurationEntry extends NodeModelReference {
         | 'unqualified'
         | 'unsupported-load'
         | 'switch-busy'
+        | 'load-failed'
         | 'operation-timeout'
         | 'observation-unknown'
         | 'projection-unknown'

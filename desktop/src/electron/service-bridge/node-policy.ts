@@ -442,6 +442,7 @@ function modelConfigurationEntry(value: JsonValue): ModelConfigurationEntry {
             reason !== 'unqualified' &&
             reason !== 'unsupported-load' &&
             reason !== 'switch-busy' &&
+            reason !== 'load-failed' &&
             reason !== 'operation-timeout' &&
             reason !== 'observation-unknown' &&
             reason !== 'projection-unknown') ||

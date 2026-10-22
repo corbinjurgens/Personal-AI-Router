@@ -46,6 +46,16 @@ inventory or admission evidence is evaluated on the next wake without waiting
 for the deadline. Each retry is a new operation subject to the same
 eligibility, inventory and hold checks.
 
+A definite terminal manager `failed` result reports `unknown` with `load-failed`,
+including finish/recovery failures and readbacks while its terminal hold is
+retained. This reason does not prove that the model is unloaded or capacity is
+free; `observedLoaded` still reflects available inventory. Uncertain completion
+or transport failure remains `unknown` with `operation-timeout`. A stale proxy
+`engine-off` refusal remains `pending` without a reason when the current manager
+source still reports the engine running; it uses the same retry deadline.
+These status reasons do not change hold cleanup, expiry or retry scheduling,
+and never include raw engine errors.
+
 Unknown completion retains the proxy's capacity hold. Recovery requires a
 terminal response from the original manager followed by a fresh `engine:models`
 read from that same source and identity, after the recovery ID was received.
@@ -58,6 +68,10 @@ this is not durable recovery. Replacement invalidates prior status and waits for
 fresh activation and inventory. Automatic unload and idle sleep recheck current
 resident protection immediately before execution; explicit pause retains its
 unload authority.
+
+The TUI's current `policy:get` consumers read availability and pause provenance;
+they do not decode or render `modelConfiguration` reasons. Desktop policy
+get/set/push consumers preserve the bounded reason through their strict bridge.
 
 The [engine settings protocol](ENGINE_SETTINGS.md) documents local/paired
 launch and port editing, revision checks, serialized application and recovery.

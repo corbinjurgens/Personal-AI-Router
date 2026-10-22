@@ -125,6 +125,11 @@ engine resident set. No request keep-alive field changes native retention.
 Local pause/Off vetoes still apply; reconciliation cannot start an Off engine.
 The broker coordinates internal prepare/dispatch/finish/observe calls and publishes
 model-configuration status; desktop clients do not call these admission methods.
+A definite terminal manager load failure is published as `unknown`/`load-failed`,
+including retained finish/recovery readbacks. The reason does not establish
+unloaded inventory or free capacity, and leaves hold cleanup, expiry and retry
+deadlines unchanged. A transient proxy `engine-off` refusal stays `pending`
+without a reason while the current manager source reports the engine running.
 PG keeps route-policy ownership. Unknown load/allocation evidence and restart
 are not proof of satisfaction; fresh manager-owned observed allocation is required.
 An interrupted load without a terminal manager reply retains its resident hold

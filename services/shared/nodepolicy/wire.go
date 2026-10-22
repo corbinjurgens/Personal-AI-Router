@@ -389,6 +389,7 @@ const (
 	ModelReasonUnqualified        ModelConfigurationReason = "unqualified"
 	ModelReasonUnsupportedLoad    ModelConfigurationReason = "unsupported-load"
 	ModelReasonSwitchBusy         ModelConfigurationReason = "switch-busy"
+	ModelReasonLoadFailed         ModelConfigurationReason = "load-failed"
 	ModelReasonOperationTimeout   ModelConfigurationReason = "operation-timeout"
 	ModelReasonObservationUnknown ModelConfigurationReason = "observation-unknown"
 	ModelReasonProjectionUnknown  ModelConfigurationReason = "projection-unknown"
@@ -398,7 +399,7 @@ func (r ModelConfigurationReason) Validate() error {
 	switch r {
 	case ModelReasonEngineOff, ModelReasonNoFit, ModelReasonPausedLocal, ModelReasonEngineOffLocal,
 		ModelReasonNotServed, ModelReasonNotInstalled, ModelReasonUnqualified, ModelReasonUnsupportedLoad,
-		ModelReasonSwitchBusy, ModelReasonOperationTimeout, ModelReasonObservationUnknown, ModelReasonProjectionUnknown:
+		ModelReasonSwitchBusy, ModelReasonLoadFailed, ModelReasonOperationTimeout, ModelReasonObservationUnknown, ModelReasonProjectionUnknown:
 		return nil
 	}
 	return errors.New("unknown model configuration reason")
