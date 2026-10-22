@@ -54,6 +54,8 @@ func TestLegacyTombstoneCannotEvictAdmissionAwareMember(t *testing.T) {
 func TestRemovalRevalidatesTargetAdmissionBeforeDepin(t *testing.T) {
 	m := newTestManagerPort(t, 15131)
 	target := newTestManagerPort(t, 15132)
+	containHintDials(t, m, false)
+	containHintDials(t, target, false)
 	pinTrusted(t, m, target.identity.NodeUUID, string(target.identity.CertPEM), target.identity.CertFingerprint)
 	m.upsertMember(&ClusterNode{
 		NodeUUID: target.identity.NodeUUID, ID: "target", ClusterID: "cluster-1",

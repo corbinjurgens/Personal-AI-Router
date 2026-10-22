@@ -120,7 +120,7 @@ func TestNotifyPeerRemovalUsesFreshConnections(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	}))
 	for range 2 {
-		f.m.notifyPeerRemoval(f.address, f.peerUUID, RemovalProof{})
+		f.m.notifyPeerRemoval(context.Background(), f.address, f.peerUUID, RemovalProof{})
 		select {
 		case <-f.closed:
 		case <-time.After(time.Second):
