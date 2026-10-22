@@ -93,6 +93,7 @@ Because membership **is** trust, this service is also the **trust fabric** for t
   nodeUuid: string           // stable cryptographic identity; the trusted-node-store key and cert subject (§7.4). Independent of hostname.
   name: string               // human-readable display name (falls back to id)
   ipAddress: string          // reachable address for the inter-node interface
+  advertisedAddresses?: string[] // authenticated descriptor locator hints; omitted when empty
   port: number               // inter-node port (default 14321)
   clusterId: string          // the cluster this membership belongs to
   state: MembershipState
@@ -655,7 +656,7 @@ Point-to-point pairing alone leaves trust un-propagated: if A pairs B and then A
 - **Roster.** A node's roster is `{clusterId, members[], removalProofs[], tombstones[]}`: a self entry plus one entry per pinned peer (carrying that peer's stored endorsements, admission epoch, and last-known reachable address), durable removal-proof envelopes, and a bare-tombstone compatibility mirror.
 - **Reconcile (the merge rule).** On receiving a roster (over the mTLS `POST /v1/cluster/roster` endpoint, so the sender is already a trusted member), a node **transitively pins** every entry whose exact cert admission is endorsed by a node/admission it *already* trusts, iterating to a fixpoint so a freshly-pinned node can in turn vouch for the nodes it endorsed. The endorsement graph it walks **is** the human-authorized pairing graph. The merge is bounded: an entry endorsed only by a node it does not trust is rejected, an endorser or introduced admission mismatch is rejected, and an entry whose cert does not match its claimed fingerprint is rejected. A newer authenticated admission may replace an older same-cert admission; stale gossip can never downgrade it.
 - **Removal fan-out (durable proofs).** A removal first persists a `RemovalProof`: an admission-bound tombstone `(removed nodeUuid, clusterId, removed admission epoch, remover nodeUuid, remover admission epoch, removedAt, signature)`, the original remover certificate/fingerprint, and signed endorsements of that remover from relays. Persistence is authoritative and precedes de-pinning: if it fails, removal fails with membership intact; restart replays a persisted proof against a stale pin/member if the process stopped between those steps. A recipient verifies the original tombstone signature and either the exact directly-pinned remover admission or an endorsement from an exact admission it still trusts. This lets an older member relay proof from a remover the offline victim never pinned. Proof retention has **no TTL**: it remains durable and gossiped until a strictly newer authenticated admission of the removed node has been durably pinned, at which point that older proof is superseded and deleted. `removedAt` is audit metadata only, never ordering authority.
-- **Convergence triggers.** Reconciles are pushed to all members on **pair success** (the inviter fans the new member out; the joiner reconciles with the inviter to learn the rest of the cluster from its reply) and on **removal**, with a periodic **heartbeat** (~30 s) as the catch-up backstop for members that were offline during a change. Peer addresses come from the address recorded at pairing (the observed source IP plus the listening port the joiner advertises in its PairingInfo), falling back to the discovery resolver (§7.5) for a member whose address was never observed.
+- **Convergence triggers.** Reconciles are pushed to all members on **pair success** (the inviter fans the new member out; the joiner reconciles with the inviter to learn the rest of the cluster from its reply) and on **removal**, with a periodic **heartbeat** (~30 s) as the catch-up backstop for members that were offline during a change. The derived peer-address union starts with the recorded member endpoint, adds Browser endpoints using their advertised port, then appends bounded persisted descriptor hints using the member port, deduplicating complete endpoints. These are locators, not admission authority.
 - **Self-removal on unanimous rejection plus proof (offline-removed backstop).** A node removed while offline misses the direct notify and every peer has already de-pinned it, so normal roster reconciles receive `403`. A unanimous `403` is **necessary but not sufficient**: a peer that merely left also drops all pins and returns the same status. A rejecting peer therefore includes any durable proof targeting the caller in the `403` body. The caller self-removes only when every current peer rejects, no peer is unreachable, and at least one response carries a fully verified proof for this node's **exact current cluster admission** (direct remover or relay-endorsed unknown remover). A bare `403`, bare/legacy tombstone, wrong cluster/epoch, unknown signer, stale endorser admission, or tampered proof never authorizes self-teardown; instead, after the same cluster/generation recheck, a bare authenticated rejector is de-pinned and removed as a peer that departed or lost its cluster trust. This lets a surviving node converge to a solo roster after its only offline peer voluntarily leaves. The network verdict is revalidated against cluster identity and the in-process composition generation under `rosterMu`; a concurrent different- or same-cluster rejoin invalidates it. Teardown, invite/session reset, initial invite publication, pairing commit, and final EAP-Success release all share that composition boundary, so an in-flight exchange cannot republish state or produce a one-sided Registered pairing after teardown.
 - **Threat model.** Trust is now **transitive**: a compromised member can endorse certs that every other member will then pin, so the blast radius of one bad node is the whole cluster rather than just its direct pairings. This is a deliberate trade-off (re-pairing every pair by hand does not scale) layered on the same "pair only on a network you control" debt as the PIN. Hardening options include a cluster CA with revocation, endorsement quorums, and audit logging.
 
@@ -692,10 +693,10 @@ Point-to-point pairing alone leaves trust un-propagated: if A pairs B and then A
 
 ## 12. Failure Modes and Mitigations
 - **Peer unreachable during the Initial Exchange** (down, partitioned, suspended): the pairing can't start. → Bounded timeout/retries; the outbound invite ends `failed` and `cluster:invite-status` reports it. No PIN is issued and no membership is created.
-- **Peer unreachable during the Completion Exchange or a removal**: the two sides may disagree about membership. → A wrong PIN or unfinished completion simply leaves both unpaired (fail closed). For removal, the local change applies regardless; re-delivery on reconnect reconciles idempotently (and a future membership heartbeat, §4, would close the gap). Removal is authoritative locally even if the peer never hears it.
+- **Peer unreachable during the Completion Exchange or a removal**: the two sides may disagree about membership. → A wrong PIN or unfinished completion simply leaves both unpaired (fail closed). Removal uses one best-effort notification; unavailability, timeout, failed pinned authentication or a lost reply does not prevent local de-pin/removal if the original admissions remain current. Durable proof reconciliation provides convergence, not notification replay. A changed admission is preserved; a pin-deletion failure leaves the pin/member in place.
 - **Wrong / mistyped PIN (surfaces as a Completion `MACs`/`MACp` mismatch or an unrecognized `NoobId`)**: a typo or a tampered transcript. → EAP-NOOB completion fails; the invite ends `failed` with no pin and no membership. The user can retry by re-inviting (a fresh PIN). A few failed attempts should expire the session (§4) to bound online guessing.
 - **Active MITM on the pairing channel** (the accepted §4 weakness): because the PIN is only ~20 bits and `NoobId`/MACs are in-band, a determined on-path attacker can recover the PIN and substitute its cert. → **Not fully mitigated today** — documented debt; partial mitigations are session expiry and limited PIN attempts. Real fix is the high-entropy pairing code (§4).
-- **Duplicate / retried pairing or removal message**: could create a second pending invite or double-apply a change. → Deduplicate by `inviteId` (pairing) and `nodeUuid` (removals); re-delivery is a no-op that returns the same `2xx`.
+- **Duplicate / retried pairing or removal message**: could create a second pending invite or double-apply a change. → Pairing uses its `inviteId`; removal authority is the signed proof for an exact cluster admission, not UUID alone. The removal client does not redirect or replay a POST after a missing/partial reply. Stale proofs cannot remove a replacement admission.
 - **Unwanted / spoofed removal on the LAN**: a stranger could send a removal. → `members/remove` requires a pinned client cert over mTLS (`403` otherwise), so only an already-paired peer can trigger it; pairing itself requires the user to enter the PIN.
 - **Presented cert doesn't match the pin (impersonation / stale pin)**: a peer presents a cert that doesn't match what's pinned for its claimed UUID. → Reject the handshake (`403`), log the presented subject/fingerprint vs. the pinned one. A *different* cert for an already-pinned UUID is never silently re-pinned — it requires an explicit re-pin / re-invite flow (§4, key rotation).
 - **Cert expiry**: a peer's (or this node's) leaf expires, breaking handshakes. → Monitor and warn ahead of expiry (§13); rotation re-pins via a re-invite or explicit re-pin path (§4). Clock skew between nodes can cause spurious not-yet-valid / expired errors — leaves are issued with a small backdated `notBefore` to absorb modest skew.
@@ -716,6 +717,20 @@ with a complete service/port snapshot from current broker registrations.
 An uninitialized registry or missing self row returns unavailable. An initialized
 empty service list is a valid withdrawal. The plain pairing mux has no such route.
 
+`descriptorAddresses` preserves the ordered unique scanner candidates with the
+canonical address first, then appends missing sorted overlay hints from
+`netpick.SharedOverlayAddresses`. That helper enumerates local interfaces and
+selects canonical IPv4 addresses in `100.64.0.0/10` on interfaces classified as
+virtual/overlay. The public `noderec.MaxAdvertisedIPs` cap remains four. If the
+scanner already fills it, the last scanner entry yields to the first missing
+overlay hint; the first entry never yields. Further overlay hints fit only when
+space remains. Scanner identity/addresses must validate before augmentation and
+the combined descriptor must validate afterward. This adds neither arbitrary
+addresses nor a new mDNS publication path. Existing `netpick.peerProven`
+publication behavior remains, so an overlay address is not guaranteed absent
+from mDNS. Interface classification proves neither native tailnet configuration
+nor connectivity; host routing, ACLs and firewall policy remain operational.
+
 The descriptor is bounded to 8192 bytes, the shared advertised-address bound,
 and known service keys with unique ports in range. It cannot set transport,
 trust, membership, liveness or a loopback forwarding target. Candidate addresses
@@ -725,7 +740,7 @@ identity are required before publishing anything. The serving endpoint requires
 current mutual admission and the exact pinned requester certificate.
 
 Refreshes retry every two seconds, with at most four network reads and one
-fetch/publish per peer in flight; each read has an eight-second overall budget.
+fetch/publish per peer in flight; each refresh has an eight-second overall budget.
 The original shared Mesh incarnation (both certificates and admission epochs)
 is captured before the read and checked again after the complete response.
 The manager emits private `cluster:peer-services` metadata with that original
@@ -733,6 +748,68 @@ token, a process source identity, receiver-owned sequence and observation time.
 The broker binds delivery to its current manager child and relays only through
 the scanner's private `discovery:peer-services` notification. Neither envelope
 is an ordinary client contract or local reverse-registration input.
+
+#### Durable locator transaction and read walk
+
+`ClusterNode.advertisedAddresses` is an optional, omitted-when-empty slice copied
+by `cloneClusterNode` for member inputs, lookups, snapshots and persistence.
+`members.json` stores confirmed members only; old records without the field
+still load. Removing/resetting membership or completing teardown clears its
+hints, and fresh admission after removal does not resurrect them.
+
+Every normal member writer enters `persistMembersErr` through
+`membersStoreMu` before taking its snapshot and retains that boundary through
+encoding and replacement. `persistMembersStoreLocked` is the single snapshot
+and replacement implementation. Ordinary member mutations release `memMu`
+before persistence; the store does not serialize all live display/address
+updates. The hint transaction is different: `commitPeerServiceHints` first
+owns `rosterMu` and verifies the original Mesh incarnation and `reversePeer`
+identity, including both admissions and certificates. Only then does it take
+`membersStoreMu`, briefly recheck exact member UUID/state/cluster/epoch under
+`memMu`, and copy/update the slice. No Mesh, trust, reverse, routing or outer
+composition callback runs inside the store boundary, and filesystem I/O holds
+no `memMu`.
+
+The hint transaction calls the locked writer without recursively acquiring it.
+Pre-replacement failure restores only the old hint slice before releasing
+storage, retains unrelated live updates and emits no claim. The existing
+`atomicWrite` policy adopts landed `durablefile.ErrReplaced` writes as success;
+it does not roll back bytes already replaced. Successful unchanged hints can
+skip a write because older outstanding snapshots cannot later overwrite them.
+Composition/storage locks release before claim notification; hint-only updates
+do not emit `nodes:changed`.
+
+`resolvePeerAddrs` derives an ordered endpoint union: recorded `ipAddress` with
+member port, Browser candidates with Browser port, then at most
+`MaxAdvertisedIPs` persisted hosts with member port. Duplicate endpoints are
+removed without changing precedence. The internal union is not truncated to
+the public descriptor cap or an eight-entry prefix. `ChooseWithin` uses cached
+confirmation or concurrent bounded TCP probes, selecting by published rank;
+`confirmedFirst` moves that result ahead of the remaining descriptor attempts.
+TCP acceptance alone supplies no certificate, admission or service authority.
+
+Each descriptor attempt receives an equal share of the remaining parent time
+among remaining endpoints. Its child context covers direct/reverse setup, TLS,
+headers, complete body and EOF. Transport or child-deadline failure closes and
+cancels the attempt, forgets the stale chooser result and advances while the
+parent remains live. Complete invalid descriptors fail without learning or
+publication. Parent cancellation ends the walk, including an in-flight chooser
+confirmation wait. An abandoned confirmation installs neither a settled result
+nor a negative cooldown; the chooser retains its published-address fallback.
+Its timeout-only `DialFunc` cannot cancel an already-running OS connect:
+finite probes may finish after the caller returns, close late connections and
+deliver unused verdicts into buffered channels. `First` and `Prefer` retain
+their background-context behavior.
+
+#### Payload and consumer boundaries
+
+CM produces the optional field in durable members and membership snapshots;
+broker relays membership results and notifications verbatim. Desktop's
+`parseClusterNode` and TUI's `clusterNode` decode/project their existing fields
+without requiring the hints. This compatibility follows from those parsers,
+not from a service-contract-checker guarantee about unknown JSON fields.
+The private HTTP descriptor instead uses `noderec.DecodePeerServices`, which
+rejects unknown fields and requires a bounded complete document and EOF.
 
 Scanner validates the same current incarnation at apply, replaces the complete
 authenticated claim atomically, computes trust locally and emits the existing
@@ -745,6 +822,42 @@ metadata or changes durable membership. Restart reconstructs metadata through
 fresh reads, without treating a remote broker generation as durable ordering.
 Direct-first routing, reverse service allowlists, inner protected-service mTLS
 and node-info's plain protocol policy remain owned by their existing adapters.
+
+Persisted hints bootstrap a fresh read after reopening the original profile
+with an empty Browser; they are not themselves fresh scanner claims. Scanner's
+directory remains the source for inventory, inference and control consumers,
+with their existing enrichment, model eligibility and access checks. Hints do
+not authorize membership, liveness, a model or a control operation. Synthetic
+pinned-TLS, restart and cancellation regressions establish these code paths,
+not live Tailscale/off-LAN reachability or an exact one-refresh recovery time.
+
+#### One best-effort removal notification
+
+`handleNodesRemove` prepares the durable exact-admission proof and tombstone
+under `rosterMu`, retaining the original local/peer admissions and certificate
+identity. After unlocking, it selects from the complete candidate union using
+`ChooseWithin`. One `pairingHTTPTimeout` context (ten seconds) spans selection
+and notification, with the chooser's existing connect bound. No confirming TCP
+endpoint still leaves the chooser's top-address fallback eligible for normal
+direct/reverse adapter setup; selection performs no descriptor GET.
+
+Before dispatch, a brief composition recheck binds the original local identity,
+peer admission and pin and verifies the selected endpoint is still a current
+candidate. Network I/O runs unlocked. Adapter route-generation/authority checks
+cover setup and first application writes; the receiver verifies the exact
+removal proof. These checks do not promise an atomic network send against every
+later composition change.
+
+`notifyPeerRemoval` uses the fresh removal adapter for at most one authenticated
+POST before final de-pin. It neither walks endpoints by POST nor redirects,
+reuses the connection or replays after a missing/partial reply. A failed
+notification forgets the cached choice. No candidates, exhausted
+context, bad pinned authentication or lost reply leave the existing best-effort
+local-removal policy: the final original-admission check still precedes pin
+deletion, and membership/hints are removed only after successful de-pin. A
+stale admission is preserved and a pin-deletion failure keeps membership. The
+durable proof remains available for convergence; a local success does not
+claim remote acknowledgement.
 
 ## 13. Observability
 - **Logging**: pairing lifecycle (initial-exchange started / completed, PIN issued [**never the PIN value**], PIN entered, paired / declined / expired / failed) with `inviteId` and peer; EAP-NOOB protocol errors (`MACs`/`MACp` mismatch, unrecognized `NoobId`); membership changes (join, local removal, peer-initiated removal) with `nodeId`/`nodeUuid`; cert pins added and dropped (with UUID + fingerprint); mTLS rejections (`403`) with the presented subject/fingerprint vs. the pinned one; cert expiry warnings (own and peer leaves); first-run identity generation; inter-node delivery failures including final drop; malformed/protocol-error rejections (`400`); resolver changes applied from a `discovery:nodes` snapshot, and whether a dialed address was resolved or Broker-supplied; startup and clean shutdown on `stdin` EOF / `stdout` `EPIPE`. Never log private key material, full cert PEMs at info level, or the PIN.
@@ -760,7 +873,7 @@ On node A, the user opens the cluster view and invites node B (discovered on the
 
 B's Cluster Manager emits `cluster:invite-received`; B's UI prompts "enter the PIN shown on Lab desk A". B's Broker submits `cluster:respond-to-invite` (`accept: true, pin: "402199", allowRemoteManagement: false`), which feeds the PIN only to B's EAP Peer. With both peers advertising `completion:"inviter-v1"`, A observes B ready through polling, then POSTs Discovery → NoobID → MACs/MACp to B. A commits its member/pin state before sending EAP-Success; B commits its provisional membership/pin and activates admission before reporting paired. A then asks B for authenticated exact-invite confirmation over HTTPS. All pairing connections originate at A, so its listener may reject new inbound connections. If either capability is absent, the legacy joiner-driven transport in §7.2 applies.
 
-From here every trusted inter-node call between A and B is mutually authenticated over mTLS — each presents its leaf and is verified against the other's pin. Both Brokers see each other in `nodes:get-initial` (and via the proposed `nodes:changed` push). Later, the user on A removes B: the Broker sends `nodes:remove` (`nodeUuid` of B); A drops B locally, **deletes B's pin** (so any further handshake from B fails `403`), and notifies B via `POST /v1/cluster/members/remove` over mTLS, so B drops A too. If B was offline, the removal and de-pin still apply on A immediately and reconcile when B returns.
+From here trusted inter-node calls between A and B use their pinned mTLS channels. Both Brokers see membership in `nodes:get-initial` and `nodes:changed`. Later, A's Broker sends `nodes:remove` for B. A durably prepares the exact-admission proof, selects a current endpoint and attempts one `POST /v1/cluster/members/remove` while B's pin still exists. After the final original-admission recheck, A deletes the pin and removes B locally. An offline B does not prevent this best-effort local outcome; durable proofs support later convergence without replaying the POST.
 
 > Reminder (§4): the six-digit PIN is a temporary, MITM-vulnerable bootstrap accepted to ship the flow; it must be replaced by a high-entropy pairing code before the cluster trust is relied on in production.
 

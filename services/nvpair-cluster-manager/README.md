@@ -242,6 +242,7 @@ No `id`; never carry an error; handle them off your read loop.
   "nodeUuid":  "7a1c...",           // stable cryptographic id; the trust principal
   "name":      "Lab desk B",        // display name
   "ipAddress": "192.168.1.22",
+  "advertisedAddresses": ["192.168.1.22", "100.64.0.10"], // optional authenticated locator hints
   "port":      14321,
   "clusterId": "cluster-xyz",
   "state":     "member",            // "member" | "pending-outbound" | "pending-inbound"
@@ -249,6 +250,13 @@ No `id`; never carry an error; handle them off your read loop.
   "lastSeen":  1716998500000        // epoch ms; null if never contacted
 }
 ```
+
+`advertisedAddresses` is optional and omitted when empty. Confirmed members
+retain these descriptor-derived hints in `members.json`; old records without
+the field still load. The manager clones the slice on member inputs, reads and
+snapshots. Removing membership or completing teardown removes its hints; a
+fresh admission does not inherit the removed member's hints. Hints neither
+replace `ipAddress` nor grant membership, trust, liveness or service presence.
 
 `Invite` (the pairing session, from invite-node/-status/-received/respond):
 
@@ -296,8 +304,11 @@ automatically cancels the older ID; handle its `cluster:invite-canceled`
 notification before presenting the replacement.
 
 **Remove a node.** `nodes:remove {nodeId}` → `{removed:true}`. The manager
-drops the peer locally, deletes its pin, and best-effort notifies the peer;
-removal is authoritative locally even if the peer is offline.
+durably prepares an exact-admission removal proof, selects a current endpoint,
+and attempts one authenticated notification while the pin still exists. It then
+rechecks the original admissions, deletes the pin and drops the member. An
+unavailable notification does not prevent this best-effort local removal;
+durable proofs support later convergence, without replaying the notification.
 
 ## Remote-management permission
 
@@ -395,6 +406,7 @@ Generated on first run and reused forever after, under
   node.key                 # this node's private key (PEM) — never leaves the host
   node.crt                 # this node's self-signed leaf (PEM)
   trusted/                 # the trusted-node store: ONE <peerUuid>.json per pinned peer
+  members.json             # confirmed members, including optional advertisedAddresses
   pairing-receipts.json     # bounded public transcript/terminal confirmation receipts
 ```
 
@@ -472,6 +484,31 @@ scanner's self identity/addresses and current broker service registrations;
 neither roster entries nor reverse sessions establish service presence.
 The pinned direct/reverse client retains its normal transport policy.
 
+The descriptor keeps the scanner's canonical address first and appends missing,
+sorted IPv4 overlay hints from `netpick.SharedOverlayAddresses`. Its public
+address cap remains four: a full scanner list gives its last position to the
+first missing overlay hint, never replacing the canonical address. Overlay
+hints cannot rescue a missing or invalid scanner self row. They are interface
+heuristics, not evidence that Tailscale is configured or reachable. This adds no
+mDNS publication; existing publication of peer-proven overlay addresses remains.
+
+After full decoding, the original local/peer admissions and certificate pins
+are rechecked before committing the hints. All member writers share one
+snapshot-through-replacement storage boundary. Hint updates hold it through
+save or selective rollback, preserving unrelated address/name changes; landed
+replacements retain the existing adoption policy. The resolver assembles the
+recorded member endpoint, Browser endpoints with their own port, then bounded,
+deduplicated persisted hints with the member port. This internal union is not
+truncated to the public descriptor cap. Restart can therefore recover locators
+without a browse record, but must read a fresh authenticated descriptor again.
+
+TCP chooser confirmation is not authentication. Descriptor reads share an
+eight-second overall budget and divide remaining time across remaining whole
+attempts, including setup, headers and complete body/EOF. Cancellation stops
+the chooser wait without caching an abandoned result; already-running finite
+timeout-only probes may finish later and close their connections. It does not
+promise immediate cancellation of an OS connect.
+
 The original admission incarnation accompanies the validated result through
 private `cluster:peer-services` and broker-to-scanner `discovery:peer-services`
 notifications. They are consumed internally and never forwarded to clients or
@@ -486,6 +523,15 @@ Refresh retries cover startup, restored admission, reverse availability and
 worker replacement. Requests have bounded concurrency, duration and response
 size; complete validation precedes atomic scanner application. Details and
 bounds are in the specification's authenticated operational-directory section.
+
+Membership results and `nodes:changed` snapshots retain the optional hint field
+through the broker's verbatim relay. Desktop and TUI membership parsers project
+their existing fields and do not need these hints. The private descriptor uses
+the separate strict `noderec` decoder; the service-contract checker is not a
+test of unknown-field handling. Scanner directory consumers for inventory,
+inference and control retain their existing freshness, eligibility and access
+checks. A saved locator alone creates none of those capabilities. Synthetic
+restart/TLS tests do not establish native tailnet or away-from-home operation.
 
 ## Security note
 
