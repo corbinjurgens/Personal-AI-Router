@@ -4,10 +4,12 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
-	"net"
-	"strconv"
+	"slices"
+
+	"nvpair-shared/clustertrust"
 )
 
 type removeParams struct {
@@ -36,6 +38,7 @@ func (m *Manager) handleNodesRemove(msg *Message) {
 	var cid0 string
 	var selfEpoch0 uint64
 	var prepareErr error
+	var preparedPeer clustertrust.ReversePeer
 
 	// Bind proof creation to the exact live cluster composition. Without this
 	// boundary, a leave/rejoin between lookup and persistence could introduce an
@@ -70,9 +73,10 @@ func (m *Manager) handleNodesRemove(msg *Message) {
 	cid0, selfEpoch0 = m.currentAdmission()
 	liveCID, _ := m.clusterIdentity()
 	pin, pinned := m.trust.Get(node.NodeUUID)
+	preparedPeer, authenticated := m.reversePeer(node.NodeUUID)
 	if cid0 == "" || liveCID != cid0 || selfEpoch0 == 0 ||
 		node.ClusterID != cid0 || node.AdmissionEpoch == 0 ||
-		!pinned || pin.ClusterID != cid0 || pin.AdmissionEpoch != node.AdmissionEpoch {
+		!pinned || pin.ClusterID != cid0 || pin.AdmissionEpoch != node.AdmissionEpoch || !authenticated {
 		prepareErr = fmt.Errorf("member admission is not authenticated in the active cluster")
 	} else if proof, prepareErr = m.newRemovalProof(node.NodeUUID, node.AdmissionEpoch); prepareErr == nil {
 		if _, prepareErr = m.putRemovalProof(proof); prepareErr == nil {
@@ -91,9 +95,25 @@ func (m *Manager) handleNodesRemove(msg *Message) {
 		<-m.testRemovalContinue
 	}
 
-	// Notify first, while the peer's pin is still present to authenticate mTLS.
-	if node.IPAddress != "" {
-		m.notifyPeerRemoval(net.JoinHostPort(node.IPAddress, strconv.Itoa(node.Port)), node.NodeUUID, proof)
+	// Confirm one endpoint before the single mutation. Selection is not peer
+	// authentication, and shares the notification's overall time bound.
+	ctx, cancel := context.WithTimeout(context.Background(), pairingHTTPTimeout)
+	defer cancel()
+	address := m.peerAddrs.ChooseWithin(ctx, node.NodeUUID, m.resolvePeerAddrs(*node))
+	m.rosterMu.Lock()
+	current, ok := m.memberByNodeID(node.NodeUUID)
+	stale := !m.removalAdmissionCurrent(node, cid0, selfEpoch0, preparedPeer) ||
+		(address != "" && (!ok || !slices.Contains(m.resolvePeerAddrs(*current), address)))
+	m.rosterMu.Unlock()
+	if stale {
+		m.codec.RespondErrorData(msg.ID, codeInternalError,
+			"member admission or endpoint changed while removal was in progress; current admission was preserved", nil)
+		return
+	}
+	// The fresh adapter revalidates authority/route generation during setup and
+	// before application writes; the receiver also validates the exact proof.
+	if address != "" {
+		m.notifyPeerRemoval(ctx, address, node.NodeUUID, proof)
 	}
 	// De-pin and drop membership under the cluster-composition boundary so the
 	// removal is atomic against a concurrent self-remove teardown — the two can't
@@ -102,17 +122,10 @@ func (m *Manager) handleNodesRemove(msg *Message) {
 	// Remove is idempotent, so a teardown that cleared the pin first just makes
 	// this a no-op.
 	var rmErr error
-	stale := false
+	stale = false
 	m.rosterMu.Lock()
 	{
-		cid, selfEpoch := m.currentAdmission()
-		liveCID, _ := m.clusterIdentity()
-		current, ok := m.memberByNodeID(node.NodeUUID)
-		pin, pinned := m.trust.Get(node.NodeUUID)
-		if cid != cid0 || selfEpoch != selfEpoch0 || liveCID != cid0 ||
-			!ok || !pinned ||
-			current.ClusterID != cid0 || pin.ClusterID != cid0 ||
-			current.AdmissionEpoch != node.AdmissionEpoch || pin.AdmissionEpoch != node.AdmissionEpoch {
+		if !m.removalAdmissionCurrent(node, cid0, selfEpoch0, preparedPeer) {
 			stale = true
 		} else if rmErr = m.trust.Remove(node.NodeUUID); rmErr == nil {
 			m.removeMemberByUUID(node.NodeUUID)
@@ -132,4 +145,15 @@ func (m *Manager) handleNodesRemove(msg *Message) {
 	m.codec.Respond(msg.ID, map[string]any{"nodeId": node.ID, "removed": true})
 	// Fan the tombstone out to the remaining members.
 	go m.reconcileAllMembers()
+}
+
+// removalAdmissionCurrent requires rosterMu held. It binds both local and peer
+// admissions and exact certificates to the proof preparation, without I/O.
+func (m *Manager) removalAdmissionCurrent(node *ClusterNode, cid0 string, selfEpoch0 uint64, prepared clustertrust.ReversePeer) bool {
+	cid, epoch := m.currentAdmission()
+	liveCID, _ := m.clusterIdentity()
+	current, ok := m.memberByNodeID(node.NodeUUID)
+	peer, valid := m.reversePeer(node.NodeUUID)
+	return cid == cid0 && epoch == selfEpoch0 && liveCID == cid0 && ok &&
+		current.ClusterID == cid0 && current.AdmissionEpoch == node.AdmissionEpoch && valid && peer == prepared
 }

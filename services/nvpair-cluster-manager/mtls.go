@@ -159,7 +159,13 @@ func (m *Manager) handleMembersRemove(w http.ResponseWriter, r *http.Request) {
 
 // notifyPeerRemoval best-effort tells a peer it has been removed, over mTLS,
 // while the peer's pin still exists (call before deleting it locally).
-func (m *Manager) notifyPeerRemoval(addr, peerUUID string, proof RemovalProof) {
+func (m *Manager) notifyPeerRemoval(ctx context.Context, addr, peerUUID string, proof RemovalProof) {
+	succeeded := false
+	defer func() {
+		if !succeeded {
+			m.peerAddrs.Forget(peerUUID)
+		}
+	}()
 	if !m.selectPeerServiceAddress(peerUUID, addr) {
 		log.Printf("notify removal: no current endpoint for peer %s", peerUUID)
 		return
@@ -169,14 +175,28 @@ func (m *Manager) notifyPeerRemoval(addr, peerUUID string, proof RemovalProof) {
 		log.Printf("notify removal: %v", err)
 		return
 	}
-	body, _ := json.Marshal(membersRemoveRequest{NodeUUID: m.identity.NodeUUID, Proof: proof})
-	resp, err := client.Post("https://"+addr+membersRemovePath, "application/json", bytes.NewReader(body))
+	body, err := json.Marshal(membersRemoveRequest{NodeUUID: m.identity.NodeUUID, Proof: proof})
+	if err != nil {
+		log.Printf("notify removal: encode request: %v", err)
+		return
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://"+addr+membersRemovePath, bytes.NewReader(body))
+	if err != nil {
+		log.Printf("notify removal: create request: %v", err)
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := client.Do(req)
 	if err != nil {
 		log.Printf("notify removal to %s (%s): %v", addr, peerUUID, err)
 		return
 	}
-	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxBodyBytes))
-	_ = resp.Body.Close()
+	_, readErr := io.Copy(io.Discard, io.LimitReader(resp.Body, maxBodyBytes))
+	closeErr := resp.Body.Close()
+	succeeded = resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices && readErr == nil && closeErr == nil
+	if !succeeded {
+		log.Printf("notify removal to %s (%s): status=%d read=%v close=%v", addr, peerUUID, resp.StatusCode, readErr, closeErr)
+	}
 }
 
 // serveSplit serves both transport modes on one listener via the shared
