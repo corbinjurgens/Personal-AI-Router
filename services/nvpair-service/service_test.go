@@ -72,6 +72,7 @@ func TestNotificationsAreBroadcastToEveryClient(t *testing.T) {
 	h.broker()
 	c1 := h.dial()
 	c2 := h.dial()
+	c2.notification("app:ready")
 
 	c1.call("1", "emit", `{"n":1}`)
 	for _, c := range []*testClient{c1, c2} {
@@ -122,6 +123,7 @@ func TestSubscribeIsForwardedAndBaselineReplayed(t *testing.T) {
 	b := h.broker()
 	c1 := h.dial()
 	c2 := h.dial()
+	c2.notification("app:ready")
 
 	c1.call("1", "discovery:subscribe", "")
 	c1.notification("discovery:nodes-changed")

@@ -31,8 +31,9 @@ func departedWorkloadIdentity(rec workloadstore.Record) departedWorkload {
 // supervisor can be replaced. Source validation and apply share workersMu, so
 // an admitted old callback either applied before this snapshot or is rejected.
 // It never waits for workloadEmitMu or output: Stop may be joining this monitor.
-// The spawnProxy bring-up failure stops are intentionally not hooked: no facade
-// was enabled, and the hybrid listener currently refuses inference at that head.
+// The spawnProxy bring-up failure stops are intentionally not hooked: policy
+// replay fails before any facade is enabled, and a failed facade bring-up stops
+// the process only when no facade was enabled and routingListenerEnabled is false.
 func (b *Broker) captureDepartedRunWorkloads(cause string) {
 	if b.workloads == nil {
 		return
