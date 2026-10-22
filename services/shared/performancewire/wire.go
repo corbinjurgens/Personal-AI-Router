@@ -333,6 +333,9 @@ type Entry struct {
 	// ClockUncertain marks a key holding a sample stamped later than the
 	// measuring host's current clock, whose age is therefore unreliable.
 	ClockUncertain bool `json:"clockUncertain,omitempty"`
+	// OutputTokens sums known counts from successful, protocol-complete samples,
+	// independently of decode timing. Nil means no count qualified; zero is measured.
+	OutputTokens *int64 `json:"outputTokens,omitempty"`
 
 	AdmissionWaitMs *Distribution `json:"admissionWaitMs,omitempty"`
 	HeaderMs        *Distribution `json:"headerMs,omitempty"`
@@ -434,6 +437,12 @@ func (e Entry) validate(host string, w Window) error {
 	}
 	if e.Incomplete < 0 || e.Incomplete > e.Completed {
 		return fmt.Errorf("incomplete %d is outside 0..%d", e.Incomplete, e.Completed)
+	}
+	if e.OutputTokens != nil {
+		eligible := e.Completed - e.Incomplete
+		if eligible < 1 || eligible > e.Samples || *e.OutputTokens < 0 || *e.OutputTokens > int64(eligible)*MaxTokens {
+			return errors.New("outputTokens requires eligible completed samples and a total within their token bound")
+		}
 	}
 	if e.NewestAgeMs < 0 || e.NewestAgeMs > e.OldestAgeMs || e.OldestAgeMs > w.MaxAgeMs {
 		return errors.New("sample ages are out of order or outside the window")

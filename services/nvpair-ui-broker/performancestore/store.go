@@ -322,6 +322,7 @@ func keyLess(a, b performancewire.ProfileKey) bool {
 // known to be missing. Rates additionally require a known protocol end and a
 // positive matching phase duration. Legacy phase rates use known token counts;
 // engine-reported decode rates are weighted by their reported intervals.
+// Output counts require a known protocol end but do not require any timing.
 // Unknown values are skipped, never counted as zero.
 func aggregate(key performancewire.ProfileKey, st *keyState, wallMs, ageMs int64) (performancewire.Entry, bool) {
 	e := performancewire.Entry{Key: key, Profile: st.profile}
@@ -368,6 +369,12 @@ func aggregate(key performancewire.ProfileKey, st *keyState, wallMs, ageMs int64
 		total = appendKnown(total, r.TotalMs)
 		load = appendKnown(load, r.LoadNs)
 		if r.ProtocolComplete != nil {
+			if r.OutputTokens != nil {
+				if e.OutputTokens == nil {
+					e.OutputTokens = new(int64)
+				}
+				*e.OutputTokens += *r.OutputTokens
+			}
 			prefill.add(r.PromptTokens, r.PrefillNs)
 			decode.add(r.OutputTokens, r.DecodeNs)
 			engineDecode.add(r.EngineDecodeTokensPerSecond, r.EngineDecodeNs)

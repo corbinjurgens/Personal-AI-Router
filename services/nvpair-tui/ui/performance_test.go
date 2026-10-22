@@ -61,6 +61,69 @@ func assertPerformanceText(t *testing.T, text string, wants ...string) {
 	}
 }
 
+func TestPerformanceProjectionPreservesOutputTokens(t *testing.T) {
+	test := func(name, field string, want *int64) {
+		t.Run(name, func(t *testing.T) {
+			raw := strings.Replace(performanceFixtureJSON, `"decode":`, field+`"decode":`, 1)
+			p, err := decodePerformanceProjection([]byte(raw))
+			if err != nil {
+				t.Fatalf("decode output tokens: %v", err)
+			}
+			// Include a peer to prove both projection paths preserve the shared field.
+			peer := *p.Local
+			summary := *peer.Summary
+			peer.MeasuringHost, peer.Summary = "peer-host", &summary
+			summary.MeasuringHost, summary.AdmissionIncarnation, summary.Revision = "peer-host", "7", 1
+			summary.Entries = append([]performancewire.Entry(nil), summary.Entries...)
+			summary.Entries[0].Key.Host = "peer-host"
+			p.Peers = append(p.Peers, peer)
+			decoded, err := decodePerformanceProjection(performanceJSON(t, p))
+			if err != nil {
+				t.Fatalf("decode round trip: %v", err)
+			}
+			for _, node := range []performanceNode{*decoded.Local, decoded.Peers[0]} {
+				got := node.Summary.Entries[0].OutputTokens
+				if want == nil {
+					if got != nil {
+						t.Fatalf("%s: unknown output tokens became %d", node.MeasuringHost, *got)
+					}
+				} else if got == nil || *got != *want {
+					t.Fatalf("%s: output tokens = %v, want %d", node.MeasuringHost, got, *want)
+				}
+			}
+		})
+	}
+	zero, known, maximum := int64(0), int64(42), int64(200_000_000)
+	test("absent is unknown", "", nil)
+	test("null is unknown", `"outputTokens":null,`, nil)
+	test("measured zero", `"outputTokens":0,`, &zero)
+	test("independent total", `"outputTokens":42,`, &known)
+	test("qualified maximum", `"outputTokens":200000000,`, &maximum)
+}
+
+func TestPerformanceProjectionRejectsInvalidOutputTokens(t *testing.T) {
+	test := func(name, value, incomplete string) {
+		t.Run(name, func(t *testing.T) {
+			raw := strings.Replace(performanceFixtureJSON, `"decode":`, `"outputTokens":`+value+`,"decode":`, 1)
+			raw = strings.Replace(raw, `"incomplete":1`, `"incomplete":`+incomplete, 1)
+			if p, err := decodePerformanceProjection([]byte(raw)); err == nil || p != nil {
+				t.Fatal("invalid output tokens were accepted")
+			}
+		})
+	}
+	test("negative", `-1`, `1`)
+	test("fractional", `0.5`, `1`)
+	test("string", `"1"`, `1`)
+	test("boolean", `false`, `1`)
+	test("object", `{}`, `1`)
+	test("array", `[]`, `1`)
+	test("incomplete coverage exceeds bound", `200000001`, `1`)
+	test("zero without eligible completion", `0`, `3`)
+	test("positive without eligible completion", `1`, `3`)
+	test("integer overflow", `9223372036854775808`, `1`)
+	test("numeric overflow", `1e309`, `1`)
+}
+
 func TestPerformanceNullableMetricsAndCoverage(t *testing.T) {
 	d := localDetail()
 	d.performance = performanceFixture(t)

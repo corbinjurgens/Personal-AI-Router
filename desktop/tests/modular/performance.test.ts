@@ -141,6 +141,7 @@ describe('bounded broker performance projection', () => {
             failed: 0,
             cancelled: 0,
             incomplete: 0,
+            outputTokens: null,
             newestAgeMs: 20,
             oldestAgeMs: 30,
             newestObservedAtMs: 1000,
@@ -162,6 +163,61 @@ describe('bounded broker performance projection', () => {
         })
         expect(JSON.stringify([...result.values()])).not.toContain('/private/path')
         expect(JSON.stringify([...result.values()])).not.toContain('PublishedRevision')
+    })
+
+    const acceptedOutputTotals: [string, JsonObject, number | null][] = [
+        ['absent', {}, null],
+        ['explicit null', { outputTokens: null }, null],
+        ['measured zero', { outputTokens: 0 }, 0],
+        ['known total without a decode rate', { outputTokens: 42 }, 42],
+        [
+            'qualified maximum',
+            { samples: 3, completed: 3, incomplete: 1, outputTokens: 200_000_000 },
+            200_000_000
+        ],
+        [
+            'retention maximum',
+            { samples: 64, completed: 64, outputTokens: 6_400_000_000 },
+            6_400_000_000
+        ]
+    ]
+    it.each(acceptedOutputTotals)(
+        'preserves %s output tokens independently of decode rates',
+        (_name, extra, expected) => {
+            const measured = parsePerformanceProjection(
+                projection([peer({ summary: summary({ entries: [entry(extra)] }) })])
+            ).get('peer')?.summary?.entries[0]
+            expect(measured?.outputTokens).toBe(expected)
+            expect(measured?.decode).toBeNull()
+            expect(measured?.engineDecode).toBeNull()
+        }
+    )
+
+    const invalidOutputTotals: [string, JsonObject][] = [
+        ['negative', { outputTokens: -1 }],
+        ['fractional', { outputTokens: 0.5 }],
+        ['string', { outputTokens: '1' }],
+        ['boolean', { outputTokens: false }],
+        ['object', { outputTokens: {} }],
+        ['array', { outputTokens: [] }],
+        ['nonfinite', { outputTokens: Infinity }],
+        ['unsafe integer', { outputTokens: Number.MAX_SAFE_INTEGER + 1 }],
+        ['over bound', { outputTokens: 100_000_001 }],
+        [
+            'incomplete coverage',
+            { samples: 3, completed: 3, incomplete: 1, outputTokens: 200_000_001 }
+        ],
+        ['no qualified completion', { incomplete: 1, outputTokens: 1 }],
+        ['zero without qualified completions', { incomplete: 1, outputTokens: 0 }],
+        ['zero with only failed samples', { completed: 0, failed: 1, outputTokens: 0 }],
+        ['over retention maximum', { samples: 64, completed: 64, outputTokens: 6_400_000_001 }]
+    ]
+    it.each(invalidOutputTotals)('rejects %s output tokens', (_name, extra) => {
+        expect(
+            parsePerformanceProjection(
+                projection([peer({ summary: summary({ entries: [entry(extra)] }) })])
+            ).size
+        ).toBe(0)
     })
 
     it('accepts broker-aged oldest samples beyond wire retention', () => {
@@ -441,6 +497,27 @@ describe('node snapshot performance attachment', () => {
         change(undefined)
         discover()
         vi.mocked(emitBridgePush).mockClear()
+    })
+
+    it('replaces output totals in node snapshots and pushes without retaining unknown counts', () => {
+        for (const outputTokens of [42, 0, null]) {
+            change(
+                projection([peer({ summary: summary({ entries: [entry({ outputTokens })] }) })])
+            )
+            expect(
+                state.getNodesInitial().nodes.peer?.performance?.summary?.entries[0]?.outputTokens
+            ).toBe(outputTokens)
+            expect(emitBridgePush).toHaveBeenLastCalledWith(
+                'nodes:upsert',
+                expect.objectContaining({
+                    performance: expect.objectContaining({
+                        summary: expect.objectContaining({
+                            entries: [expect.objectContaining({ outputTokens })]
+                        })
+                    })
+                })
+            )
+        }
     })
 
     it('emits a performance-only node update without creating workloads or engine events', () => {

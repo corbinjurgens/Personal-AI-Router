@@ -52,6 +52,16 @@ headers, first genuine body byte (before any peek), and finalization. Unreached
 milestones and `FirstTokenMs` remain nil. Daily adapters preserve native rate
 and duration in `EngineDecodeTokensPerSecond` and `EngineDecodeNs`, leaving
 legacy `DecodeNs` nil. Ollama keeps its original count/duration mapping.
+Aggregate `Entry.outputTokens` (`Entry.OutputTokens *int64`, JSON
+`outputTokens,omitempty`) sums independently known output counts only from
+successful, SC-complete local executions retained in the entry. Count
+qualification is independent of rate qualification: usage-only completion
+contributes its count even when all decode rates are unknown. Native engine
+decode intervals and rates do not redefine this visible-output total or imply
+a count. If no qualifying count is known, the field is absent, not zero;
+explicit zero counts remain measured zero. Failed, interrupted, cancelled and
+protocol-unobserved executions do not contribute. Existing token and retained
+sample bounds apply.
 Qualified completion requires successful delivery and SC completion. Errors,
 interruption or cancellation cannot qualify a terminal rate; unobserved
 protocol completion remains unknown. These results do not release strict

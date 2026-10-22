@@ -4,6 +4,7 @@
 package performancestore
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -71,6 +72,190 @@ func onlyEntry(t *testing.T, s *Store) performancewire.Entry {
 		t.Fatalf("local summary has %d entries, want 1", len(sum.Entries))
 	}
 	return sum.Entries[0]
+}
+
+// outputTokenEntry checks the wire contract without requiring the new Entry field.
+type outputTokenEntry struct {
+	OutputTokens *int64                        `json:"outputTokens"`
+	Decode       *performancewire.Rate         `json:"decode"`
+	EngineDecode *performancewire.ReportedRate `json:"engineDecode"`
+}
+
+func encodedEntryJSON(t *testing.T, s *Store) outputTokenEntry {
+	t.Helper()
+	data, err := json.Marshal(onlyEntry(t, s))
+	if err != nil {
+		t.Fatalf("encode entry: %v", err)
+	}
+	var entry outputTokenEntry
+	if err := json.Unmarshal(data, &entry); err != nil {
+		t.Fatalf("decode entry: %v", err)
+	}
+	return entry
+}
+
+func TestOutputTokensCountLlamaSampleWithoutLegacyDecodeTiming(t *testing.T) {
+	s, _ := newTestStore(t, "")
+	r := &recorder{t: t, s: s}
+	m := completed()
+	m.OutputTokens = ptr[int64](20)
+	m.EngineDecodeNs = ptr[int64](400_000_000)
+	// llama.cpp reports nineteen decode steps for twenty visible output tokens.
+	m.EngineDecodeTokensPerSecond = ptr(47.5)
+	r.record(testKey("llama"), m)
+
+	e := encodedEntryJSON(t, s)
+	wantRate := performancewire.ReportedRate{Samples: 1, DurationNs: 400_000_000, TokensPerSecond: 47.5}
+	if e.EngineDecode == nil || *e.EngineDecode != wantRate {
+		t.Fatalf("engineDecode = %+v, want %+v", e.EngineDecode, wantRate)
+	}
+	if e.Decode != nil {
+		t.Fatalf("decode = %+v, want unknown without legacy timing", e.Decode)
+	}
+	if e.OutputTokens == nil || *e.OutputTokens != 20 {
+		t.Fatalf("outputTokens = %v, want known total 20 without legacy timing", e.OutputTokens)
+	}
+}
+
+func TestOutputTokensSumSamplesWithoutAnyDecodeTiming(t *testing.T) {
+	s, _ := newTestStore(t, "")
+	r := &recorder{t: t, s: s}
+	for _, tokens := range []int64{20, 30} {
+		m := completed()
+		m.OutputTokens = ptr(tokens)
+		r.record(testKey("m"), m)
+	}
+	r.record(testKey("m"), completed())
+
+	e := encodedEntryJSON(t, s)
+	if e.Decode != nil || e.EngineDecode != nil {
+		t.Fatalf("rates = decode %+v engineDecode %+v, want both unknown without timings", e.Decode, e.EngineDecode)
+	}
+	if e.OutputTokens == nil || *e.OutputTokens != 50 {
+		t.Fatalf("outputTokens = %v, want known total 50 without timings", e.OutputTokens)
+	}
+}
+
+func TestOutputTokensDoNotAliasCallerOrLocalSummary(t *testing.T) {
+	s, _ := newTestStore(t, "")
+	r := &recorder{t: t, s: s}
+	m := completed()
+	m.OutputTokens = ptr[int64](20)
+	r.record(testKey("m"), m)
+	*m.OutputTokens = 900
+	first := onlyEntry(t, s)
+	if first.OutputTokens == nil || *first.OutputTokens != 20 {
+		t.Fatalf("count after caller mutation = %v, want 20", first.OutputTokens)
+	}
+	*first.OutputTokens = 800
+	if got := onlyEntry(t, s).OutputTokens; got == nil || *got != 20 {
+		t.Fatalf("count after summary mutation = %v, want 20", got)
+	}
+}
+
+func TestOutputTokensRecomputeAfterRingEviction(t *testing.T) {
+	s, _ := newTestStore(t, "")
+	r := &recorder{t: t, s: s}
+	m := completed()
+	m.OutputTokens = ptr[int64](20)
+	r.record(testKey("m"), m)
+	for range performancewire.MaxSamplesPerKey {
+		r.record(testKey("m"), completed())
+	}
+	if got := onlyEntry(t, s).OutputTokens; got != nil {
+		t.Fatalf("count after last known sample eviction = %d, want unknown", *got)
+	}
+	m.OutputTokens = ptr(performancewire.MaxTokens)
+	for range performancewire.MaxSamplesPerKey {
+		r.record(testKey("m"), m)
+	}
+	if got := onlyEntry(t, s).OutputTokens; got == nil || *got != int64(performancewire.MaxSamplesPerKey)*performancewire.MaxTokens {
+		t.Fatalf("bounded window count = %v, want full maximum window", got)
+	}
+}
+
+func TestOutputTokensDoNotSurviveProfileEviction(t *testing.T) {
+	s, c := newTestStore(t, "")
+	r := &recorder{t: t, s: s}
+	m := completed()
+	m.OutputTokens = ptr[int64](20)
+	r.record(testKey("old"), m)
+	for i := range performancewire.MaxEntries {
+		c.advance(time.Millisecond)
+		r.record(testKey(fmt.Sprintf("m-%d", i)), completed())
+	}
+	c.advance(time.Millisecond)
+	r.record(testKey("old"), completed())
+	for _, e := range s.Local().Entries {
+		if e.Key == testKey("old") {
+			if e.OutputTokens != nil || e.Samples != 1 {
+				t.Fatalf("recreated profile = %+v, want one unknown-count sample", e)
+			}
+			return
+		}
+	}
+	t.Fatal("recreated profile is missing")
+}
+
+func TestOutputTokensDistinguishMeasuredZeroFromAbsent(t *testing.T) {
+	test := func(name string, tokens *int64) {
+		t.Run(name, func(t *testing.T) {
+			s, _ := newTestStore(t, "")
+			r := &recorder{t: t, s: s}
+			m := completed()
+			m.OutputTokens = tokens
+			r.record(testKey("m"), m)
+			r.record(testKey("m"), completed())
+
+			e := encodedEntryJSON(t, s)
+			if e.Decode != nil || e.EngineDecode != nil {
+				t.Fatalf("rates = decode %+v engineDecode %+v, want both unknown", e.Decode, e.EngineDecode)
+			}
+			if tokens == nil {
+				if e.OutputTokens != nil {
+					t.Fatalf("outputTokens = %d, want unknown", *e.OutputTokens)
+				}
+				return
+			}
+			if e.OutputTokens == nil || *e.OutputTokens != 0 {
+				t.Fatalf("outputTokens = %v, want measured zero", e.OutputTokens)
+			}
+		})
+	}
+	test("measured zero remains known alongside an absent count", ptr[int64](0))
+	test("absent counts remain unknown", nil)
+}
+
+func TestOutputTokensExcludeUnqualifiedSamples(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*performancewire.Measurement)
+	}{
+		{"failed", func(m *performancewire.Measurement) { m.Outcome = performancewire.OutcomeFailed }},
+		{"cancelled", func(m *performancewire.Measurement) { m.Outcome = performancewire.OutcomeCancelled }},
+		{"incomplete", func(m *performancewire.Measurement) { m.ProtocolComplete = ptr(false) }},
+		{"unknown protocol end", func(m *performancewire.Measurement) { m.ProtocolComplete = nil }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s, _ := newTestStore(t, "")
+			r := &recorder{t: t, s: s}
+			m := completed()
+			m.OutputTokens = ptr[int64](1000)
+			tt.mutate(&m)
+			r.record(testKey("m"), m)
+			if e := encodedEntryJSON(t, s); e.OutputTokens != nil {
+				t.Fatalf("unqualified outputTokens = %d, want unknown", *e.OutputTokens)
+			}
+
+			good := completed()
+			good.OutputTokens = ptr[int64](7)
+			r.record(testKey("m"), good)
+			if e := encodedEntryJSON(t, s); e.OutputTokens == nil || *e.OutputTokens != 7 {
+				t.Fatalf("outputTokens = %v, want only the qualified count 7", e.OutputTokens)
+			}
+		})
+	}
 }
 
 func TestMissingMetricsLeaveAggregatesUnknown(t *testing.T) {

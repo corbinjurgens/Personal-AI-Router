@@ -367,6 +367,104 @@ func TestReportedRateMeasurementsRoundTripWithoutChangingFileSchema(t *testing.T
 	}
 }
 
+func TestOutputTokensRecomputeAfterReload(t *testing.T) {
+	test := func(name string, counts []*int64, want *int64) {
+		t.Run(name, func(t *testing.T) {
+			path := snapshotPath(t)
+			s, _ := newTestStore(t, path)
+			r := &recorder{t: t, s: s}
+			for _, count := range counts {
+				m := completed()
+				m.OutputTokens = count
+				r.record(testKey("m"), m)
+			}
+			for _, outcome := range []performancewire.Outcome{performancewire.OutcomeFailed, performancewire.OutcomeCancelled} {
+				m := completed()
+				m.Outcome, m.OutputTokens = outcome, ptr[int64](900)
+				r.record(testKey("m"), m)
+			}
+			for _, protocol := range []*bool{nil, ptr(false)} {
+				m := completed()
+				m.ProtocolComplete, m.OutputTokens = protocol, ptr[int64](800)
+				r.record(testKey("m"), m)
+			}
+			mustSave(t, s)
+			saved := readFileSnapshot(t, path)
+			if saved.SchemaVersion != 1 || len(saved.Keys) != 1 {
+				t.Fatalf("snapshot = %+v, want existing v1 sample layout", saved)
+			}
+			if len(saved.Keys[0].Samples) != len(counts)+4 {
+				t.Fatalf("persisted samples = %d, want %d", len(saved.Keys[0].Samples), len(counts)+4)
+			}
+			for i, count := range counts {
+				if got := saved.Keys[0].Samples[i].OutputTokens; !reflect.DeepEqual(got, count) {
+					t.Fatalf("persisted count %d = %v, want %v", i, got, count)
+				}
+			}
+			restarted, _ := newTestStore(t, path)
+			if err := restarted.Load(); err != nil {
+				t.Fatalf("reload output counts: %v", err)
+			}
+			assertCount := func(summary performancewire.Summary) {
+				t.Helper()
+				if len(summary.Entries) != 1 || !reflect.DeepEqual(summary.Entries[0].OutputTokens, want) {
+					t.Fatalf("recomputed entries = %+v, want count %v", summary.Entries, want)
+				}
+			}
+			assertCount(restarted.Local())
+			published := mustPublished(t, restarted)
+			assertCount(published)
+			if published.Entries[0].OutputTokens != nil {
+				*published.Entries[0].OutputTokens = -1
+				assertCount(mustPublished(t, restarted))
+				assertCount(restarted.Local())
+			}
+		})
+	}
+	test("sum known counts and skip missing and unqualified", []*int64{ptr[int64](20), nil, ptr[int64](30)}, ptr[int64](50))
+	test("zero remains measured", []*int64{ptr[int64](0), nil}, ptr[int64](0))
+	test("unknown remains absent", []*int64{nil}, nil)
+}
+
+func TestOutputTokensExpireFromPublishedAndReloadedHistory(t *testing.T) {
+	path := snapshotPath(t)
+	s, c := newTestStore(t, path)
+	r := &recorder{t: t, s: s}
+	m := completed()
+	m.OutputTokens = ptr[int64](20)
+	r.record(testKey("m"), m)
+	c.advance(time.Hour)
+	r.record(testKey("m"), completed())
+	mustSave(t, s)
+	c.advance(time.Duration(performancewire.RetentionMs)*time.Millisecond - time.Hour + time.Millisecond)
+	assertUnknown := func(summary performancewire.Summary) {
+		t.Helper()
+		if len(summary.Entries) != 1 || summary.Entries[0].Samples != 1 || summary.Entries[0].OutputTokens != nil {
+			t.Fatalf("expired-count summary = %+v, want one unknown-count sample", summary)
+		}
+	}
+	assertUnknown(s.Local())
+	assertUnknown(mustPublished(t, s))
+	restarted, restartedClock := newTestStore(t, path)
+	restartedClock.t = c.t
+	if err := restarted.Load(); err != nil {
+		t.Fatalf("reload aged history: %v", err)
+	}
+	assertUnknown(restarted.Local())
+	assertUnknown(mustPublished(t, restarted))
+}
+
+func TestOutputTokensSnapshotCopiesOwnPointers(t *testing.T) {
+	m := completed()
+	m.OutputTokens = ptr[int64](20)
+	snap := snapshot{Keys: []snapshotKey{{Key: testKey("m"), Samples: []record{{Measurement: m}}}}}
+	keys := snap.keyStates()
+	*keys[testKey("m")].samples[0].OutputTokens = 900
+	if *m.OutputTokens != 20 {
+		t.Fatalf("snapshot count = %d, want 20 after copy mutation", *m.OutputTokens)
+	}
+}
+
 func TestSnapshotCopiesOwnReportedRatePointers(t *testing.T) {
 	m := completed()
 	m.EngineDecodeNs = ptr[int64](400_000_000)

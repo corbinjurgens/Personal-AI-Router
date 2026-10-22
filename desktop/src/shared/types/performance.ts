@@ -26,6 +26,7 @@ export interface PerformanceEntry {
     samples: number
     completed: number
     incomplete: number
+    outputTokens: number | null
     failed: number
     cancelled: number
     newestAgeMs: number

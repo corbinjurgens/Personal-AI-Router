@@ -101,6 +101,7 @@ function entry(value: JsonValue, host: string, maxSamples: number): PerformanceE
         'samples',
         'completed',
         'incomplete',
+        'outputTokens',
         'failed',
         'cancelled',
         'newestAgeMs',
@@ -126,6 +127,7 @@ function entry(value: JsonValue, host: string, maxSamples: number): PerformanceE
     const failed = count(obj.failed, samples)
     const cancelled = count(obj.cancelled, samples)
     if (completed + failed + cancelled !== samples) throw new Error('outcomes')
+    if (obj.outputTokens != null && completed - incomplete < 1) throw new Error('output tokens')
     const newestAgeMs = count(obj.newestAgeMs)
     return {
         key: {
@@ -148,6 +150,10 @@ function entry(value: JsonValue, host: string, maxSamples: number): PerformanceE
         failed,
         cancelled,
         incomplete,
+        outputTokens:
+            obj.outputTokens == null
+                ? null
+                : count(obj.outputTokens, (completed - incomplete) * 100_000_000),
         newestAgeMs,
         // Broker-aged display summaries can have an oldest sample beyond retention.
         oldestAgeMs: count(obj.oldestAgeMs, Number.MAX_SAFE_INTEGER, newestAgeMs),

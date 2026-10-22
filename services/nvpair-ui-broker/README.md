@@ -1406,9 +1406,16 @@ deduplicates the producer/sequence pair. It never writes disk or worker stdin.
 Samples may retain a nullable native engine decode interval and reported rate,
 separate from exact visible output counts and their matching legacy decode
 interval. Version 2 summaries expose `engineDecode` as a duration-weighted mean
-of qualified reported rates, without inventing a native token total. The file
-layout remains version 1: old optional-field-free history stays readable, while
-new fields survive save/reload. Older binaries must not reopen upgraded history.
+of qualified reported rates, without inventing a native token total. Each
+summary entry's optional `outputTokens` independently sums known output counts
+from successful, protocol-complete samples retained for that profile. It does not
+require a decode interval or rate. Missing counts are skipped; an absent total
+means no count qualified, while zero preserves a measured zero. The total is
+bounded by `(completed - incomplete) * MaxTokens` and requires at least one
+eligible completed sample, even for zero. Eviction and reload recompute it from
+retained samples. The file layout remains version 1: old optional-field-free
+history stays readable, while new fields survive save/reload. Older binaries
+must not reopen upgraded history.
 No proxy extractor emits these samples yet. This projection has no scheduler or
 ranking input; desktop and TUI render the broker's aggregates. Public
 contract drift for these methods must be addressed by that integration; the
