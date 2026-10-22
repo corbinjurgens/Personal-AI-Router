@@ -495,6 +495,7 @@ func (ctl *routingSpend) dispatch(f *facade, w http.ResponseWriter, r *http.Requ
 	var preparedCandidate candidate
 	var preparedDefaults []byte
 	var preparedGeneration uint64
+	var streamRequest originStreamRequest
 	preparedValid := false
 	releaseSendBody, releasePreparation := func() {}, func() {}
 	dropPrepared := func() {
@@ -517,6 +518,9 @@ func (ctl *routingSpend) dispatch(f *facade, w http.ResponseWriter, r *http.Requ
 		if beforeRebuild != nil {
 			beforeRebuild()
 		}
+		// Retained grants let only the same accepted stream drain. They do not
+		// grant retry permission or budget: a new candidate or generation must
+		// drop/reprepare and pass admission for its new dispatch.
 		dropPrepared()
 		var err error
 		sendBody, releaseSendBody, err = transformBody(ctx, bodyBytes, c.model, c.model != "", defaults)
@@ -532,7 +536,19 @@ func (ctl *routingSpend) dispatch(f *facade, w http.ResponseWriter, r *http.Requ
 			return errAmbiguousModel
 		}
 		preparedCtx = ctx
-		preparedCtx, releasePreparation, err = preparePerformanceBuffers(ctx, sendBody)
+		streamRequest, err = parseOriginStreamRequest(r.URL.Path, sendBody)
+		if err != nil {
+			return err
+		}
+		mode := performancePreparePeer
+		if c.self {
+			local := c.fac
+			if local == nil {
+				local = f
+			}
+			mode = local.performancePreparationMode(r.URL.Path)
+		}
+		preparedCtx, releasePreparation, err = preparePerformanceBuffers(ctx, sendBody, streamRequest, mode)
 		if err != nil {
 			releasePreparation = func() {}
 			return err
@@ -1214,23 +1230,6 @@ func (ctl *routingSpend) dispatch(f *facade, w http.ResponseWriter, r *http.Requ
 			}
 		}
 		repointWorkload(cand.id, candModel)
-
-		// Framing follows this attempt's effective body, including local profile
-		// defaults. Ingress validation above still rejects ambiguous client flags
-		// before admission or any body rewrite.
-		var streamRequest originStreamRequest
-		var streamErr error
-		streamRequest, streamErr = parseOriginStreamRequest(r.URL.Path, sendBody)
-		if streamErr != nil {
-			att.ticket.release()
-			cancelAttempt()
-			att.finished(publicAttemptTerminal{})
-			respondedWithError = true
-			finalStatus = http.StatusBadRequest
-			proxyErr = "invalid effective stream flag"
-			writeIngressError(w, http.StatusBadRequest, "invalid-stream", "invalid effective stream flag")
-			break
-		}
 
 		// Watch the target while the attempt is pre-commit. A node that has
 		// dropped out of discovery is not coming back to answer a request

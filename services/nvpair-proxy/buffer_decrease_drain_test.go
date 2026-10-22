@@ -57,11 +57,28 @@ func TestBufferDecreaseAdmittedStreamDrains(t *testing.T) {
 			t.Run(fixture.name+"/"+boundary, func(t *testing.T) {
 				root := bufferTestBudget(t, 192<<20, 0)
 				ctx, owner := decreaseDrainOwner(t, root)
-				prepared, release, err := preparePerformanceBuffers(ctx, []byte(`{"model":"m","stream":true}`))
+				prepared, release, err := preparePerformanceBuffers(ctx, []byte(`{"model":"m","stream":true}`), originStreamRequest{protocol: fixture.protocol, declared: true, choices: 1}, performancePrepareLocalNumeric)
 				if err != nil {
 					t.Fatal(err)
 				}
 				defer release()
+				preparationBytes, err := performancePreparationBytes([]byte(`{"model":"m","stream":true}`))
+				if err != nil {
+					t.Fatal(err)
+				}
+				responseCharges := []int64{streamFrameMetadataBytes, 1, streamFrameReadChunk, streamFrameNumericBytes, streamFrameReadChunk}
+				if fixture.protocol == streamProtocolSSE {
+					responseCharges = append(responseCharges, streamFrameReadChunk)
+				}
+				var responseBytes int64
+				for _, charge := range responseCharges {
+					responseBytes += charge
+				}
+				// Request parser, fingerprint scratch and preparation storage remain
+				// owned alongside the response grants during handover.
+				wantLiveBytes := (96 << 10) + streamFrameNumericBytes + preparationBytes + responseBytes
+				wantLiveLeases := 3 + len(responseCharges)
+				bufferAssertTotals(t, root, wantLiveBytes, wantLiveLeases, 0)
 				body := &decreaseDrainBody{}
 				for _, frame := range fixture.frames {
 					body.frames = append(body.frames, []byte(frame))
@@ -96,6 +113,25 @@ func TestBufferDecreaseAdmittedStreamDrains(t *testing.T) {
 					t.Fatal(err)
 				}
 				defer reader.Close()
+				bufferAssertTotals(t, root, wantLiveBytes, wantLiveLeases, 0)
+				wantPendingBytes, wantPendingLeases := int64(0), 0
+				ownedBytes := reader.metadataBytes + reader.choiceBytes + reader.scratchBytes + reader.parserBytes + reader.reserved + int64(cap(reader.payload))
+				if want := responseBytes - wantPendingBytes; ownedBytes != want {
+					t.Fatalf("reader-owned charge = %d, want %d", ownedBytes, want)
+				}
+				var pendingBytes int64
+				pendingLeases := 0
+				reader.budget.mu.Lock()
+				for _, record := range reader.budget.leases {
+					if record.pending {
+						pendingBytes += record.bytes
+						pendingLeases++
+					}
+				}
+				reader.budget.mu.Unlock()
+				if pendingBytes != wantPendingBytes || pendingLeases != wantPendingLeases {
+					t.Fatalf("pending response grants = (%d bytes, %d leases), want (%d, %d)", pendingBytes, pendingLeases, wantPendingBytes, wantPendingLeases)
+				}
 				var got []byte
 				if boundary == "after first frame" {
 					first := make([]byte, 4096)
@@ -150,7 +186,7 @@ func TestBufferDecreaseAdmittedStreamDrains(t *testing.T) {
 func TestBufferDecreaseStreamGrowthRefused(t *testing.T) {
 	root := bufferTestBudget(t, 192<<20, 0)
 	ctx, owner := decreaseDrainOwner(t, root)
-	prepared, release, err := preparePerformanceBuffers(ctx, []byte(`{"stream":true}`))
+	prepared, release, err := preparePerformanceBuffers(ctx, []byte(`{"stream":true}`), originStreamRequest{protocol: streamProtocolSSE, declared: true, choices: 1}, performancePrepareLocalNumeric)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -203,7 +239,7 @@ func TestBufferDecreasePreparationSharesStreamCategory(t *testing.T) {
 	}
 	defer frames.release(streamFrameBudgetBytes)
 	other, _ := decreaseDrainOwner(t, root)
-	_, release, err := preparePerformanceBuffers(other, []byte(`{"stream":true}`))
+	_, release, err := preparePerformanceBuffers(other, []byte(`{"stream":true}`), originStreamRequest{protocol: streamProtocolSSE, declared: true, choices: 1}, performancePrepareLocalNumeric)
 	if err == nil {
 		release()
 		t.Fatal("response preparation bypassed saturated shared stream category")
@@ -215,7 +251,7 @@ func TestBufferDecreaseCancelledReaderReleasesCharges(t *testing.T) {
 	ctx, owner := decreaseDrainOwner(t, root)
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	prepared, release, err := preparePerformanceBuffers(ctx, []byte(`{"stream":true}`))
+	prepared, release, err := preparePerformanceBuffers(ctx, []byte(`{"stream":true}`), originStreamRequest{protocol: streamProtocolSSE, declared: true, choices: 1}, performancePrepareLocalNumeric)
 	if err != nil {
 		t.Fatal(err)
 	}

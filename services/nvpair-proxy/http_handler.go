@@ -445,6 +445,7 @@ func parseOriginStreamRequest(path string, body []byte) (originStreamRequest, er
 	}
 	seen := false
 	var invalid error
+	var impossibleChoices bool
 	visitObject(body, func(key []byte, start, end int) {
 		value := body[start:end]
 		if jsonKeyEqual(key, "stream", false) {
@@ -461,9 +462,21 @@ func parseOriginStreamRequest(path string, body []byte) (originStreamRequest, er
 		if jsonKeyEqual(key, "n", false) {
 			if n, ok := positiveJSONInt(value); ok {
 				s.choices = n
+				impossibleChoices = impossibleChoices || int64(n) > streamFrameMaxChoices
+			} else if len(value) > 0 && value[0] >= '1' && value[0] <= '9' {
+				// An overflowing positive integer is still a requested choice
+				// count, not an absent/unsupported n that defaults to one.
+				integer := true
+				for _, c := range value {
+					integer = integer && c >= '0' && c <= '9'
+				}
+				impossibleChoices = impossibleChoices || integer
 			}
 		}
 	})
+	if impossibleChoices {
+		return s, &bufferLimitError{}
+	}
 	return s, invalid
 }
 
@@ -728,10 +741,10 @@ func (f *facade) handleHTTPWithStreamIdle(w http.ResponseWriter, r *http.Request
 	if isInf {
 		_, err = parseOriginStreamRequest(r.URL.Path, bodyBytes)
 		if err != nil {
-			writeIngressError(w, http.StatusBadRequest, "invalid-stream", "stream must be a single boolean or null member")
+			writeIngressError(w, bufferRequestStatus(err), "invalid-stream", "invalid stream request")
 			_ = f.notify("proxy/request", RequestEvent{
 				ID: reqID, Method: r.Method, Path: r.URL.Path,
-				Status: http.StatusBadRequest, Duration: time.Since(start).Milliseconds(),
+				Status: bufferRequestStatus(err), Duration: time.Since(start).Milliseconds(),
 				Error: "invalid stream flag",
 			})
 			return

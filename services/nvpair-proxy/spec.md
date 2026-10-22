@@ -624,18 +624,53 @@ Frames are held in volatile memory only: at most 1 MiB per raw frame and
 64 MiB of live frame-buffer allocations process-wide across facades, reserved
 before allocation/growth. Exhaustion terminates explicitly rather than waiting
 for memory. The category is subordinate to the inference aggregate budget.
-Before dispatch, the request reserves separate response working grants for
-metadata, choice tracking, read scratch, numeric validation, initial raw frame
-storage and multiline SSE assembly. These grants do not share the request
-parser or performance fingerprint charge. The response reader claims them even
+Before dispatch, a known, enabled managed stream reserves separate response
+working grants for metadata, choice tracking, read scratch, its parser,
+initial raw frame storage and, for SSE, multiline assembly. Local numeric
+streams reserve a 96 KiB parser; local syntax-only and peer streams reserve
+16 KiB. Local requests also retain their existing fixed and fingerprint
+preparation, including non-streaming requests. Peers reserve no fingerprint
+storage, and peer non-streaming requests reserve no preparation grants.
+These grants do not share the request parser or performance fingerprint charge.
+Pre-dispatch preparation uses the configured I8 FIFO wait (`waitSeconds`, zero
+for immediate refusal); exhausted capacity returns 503, while a request or
+choice count that cannot fit the applicable limit returns 413, including an
+impossible choice count on a non-streaming request. Reader growth does not wait.
+The response reader claims the admitted grants without another charge even
 if aggregate capacity decreases before the first output. Live readers retain
 their working allocations between frames, so an admitted stream can drain
 through its original terminal frame while usage exceeds a reduced aggregate
 cap. New admissions and larger replacement allocations still require capacity;
 growth charges both arrays during copying. Unclaimed preparation grants and
-reader-owned grants are released by their respective owners. No whole-response
-prefix is retained. Real slow-model
-acceptance of the idle default remains pending.
+reader-owned grants are released by their respective owners. Drain requires
+subsequent raw frames, joined SSE payloads and choice tracking to fit the
+reader's existing grants or retained high-water storage. Larger replacement
+storage still needs capacity and may interrupt the stream after a decrease.
+A pre-output retry is a new dispatch admission: it releases the failed attempt's
+preparation and must satisfy current policy and capacity, including a changed
+policy generation. Same-attempt drain does not authorize that retry.
+
+The following byte-accounting ceilings are measured with one-choice SSE,
+minimal `model`/`stream` bodies, their retained body/model bytes, a 96 KiB
+request parser and fully constructed live readers. They exclude rewrites and
+other concurrent allocations. The separate 1,024-request routing registry and
+other admission limits can bind first; these are not throughput guarantees.
+
+| Preparation class | 192 MiB | 256 MiB | 1024 MiB |
+| --- | ---: | ---: | ---: |
+| Self numeric stream | 564 | 564 | 564 |
+| Self syntax stream | 754 | 1005 | 1820 |
+| Self non-stream | 874 | 1166 | 4665 |
+| Peer stream | 1489 | 1820 | 1820 |
+| Peer non-stream | 2047 | 2729 | 10919 |
+
+Each ceiling is the smaller of the aggregate capacity divided by the request
+charge and the existing 64 MiB stream category divided by the frame charge
+(the latter is absent for non-streams). The 564 self numeric bound equals the
+base live-reader ceiling: admission now pays that existing charge before
+dispatch. Metadata-only preparation counts do not include reader storage.
+The stream category does not scale with I8 capacity. No whole-response prefix
+is retained. Real slow-model acceptance of the idle default remains pending.
 
 On premature EOF, read failure, idle expiry, malformed framing or a memory bound,
 the old body closes and the torn tail is discarded. OpenAI receives

@@ -975,11 +975,16 @@ const bufferFixtureResponseBytes int64 = streamFrameMetadataBytes + 1 + 3*stream
 
 func bufferFixtureRemotePreparationBytes(t *testing.T, body string) int64 {
 	t.Helper()
-	storage, err := performancePreparationBytes([]byte(body))
+	request, err := parseOriginStreamRequest("/api/generate", []byte(body))
 	if err != nil {
 		t.Fatal(err)
 	}
-	return streamFrameNumericBytes + storage + bufferFixtureResponseBytes
+	if request.disabled || request.protocol == streamProtocolUnknown {
+		return 0
+	}
+	// The origin observes peer framing with syntax storage only; it does not
+	// fingerprint remote execution. Native NDJSON has no SSE payload grant.
+	return streamFrameMetadataBytes + int64(request.choices) + 2*streamFrameReadChunk + streamFrameSyntaxBytes
 }
 
 func TestOwnedInferenceBuffersHandlerPreparationCancellation(t *testing.T) {

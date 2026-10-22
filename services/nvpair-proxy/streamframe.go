@@ -48,6 +48,9 @@ const (
 	streamFrameMetadataBytes = 8 << 10
 	streamFrameSyntaxBytes   = 16 << 10
 	streamFrameNumericBytes  = 96 << 10
+	// Even the smallest reader (syntax-only NDJSON) needs this storage in
+	// addition to its choice bitmap. Larger counts cannot fit any reader.
+	streamFrameMaxChoices = streamFrameBudgetBytes - streamFrameMetadataBytes - streamFrameSyntaxBytes - 2*streamFrameReadChunk
 
 	// defaultStreamFrameIdle bounds the wait for the next complete upstream
 	// event after the first body byte committed the attempt.
@@ -105,17 +108,13 @@ func ownedFrameBudget(ctx context.Context) *frameBudget {
 // reserve records n bytes against the budget. It reports false when the
 // reservation would exceed the limit, and then records nothing.
 func (b *frameBudget) reserve(n int64) bool {
-	return b.reserveStorage(n, true)
-}
-
-func (b *frameBudget) reserveStorage(n int64, claim bool) bool {
 	if n <= 0 {
 		return true
 	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	for i := range b.leases {
-		if claim && b.leases[i].pending && b.leases[i].bytes == n {
+		if b.leases[i].pending && b.leases[i].bytes == n {
 			b.leases[i].pending = false
 			return true
 		}
@@ -138,7 +137,7 @@ func (b *frameBudget) reserveStorage(n int64, claim bool) bool {
 		return false
 	}
 	b.leases[slot].bytes, b.leases[slot].lease = n, lease
-	b.leases[slot].pending = !claim
+	b.leases[slot].pending = false
 	b.used += n
 	return true
 }
@@ -164,8 +163,28 @@ func (b *frameBudget) release(n int64) {
 // Preparation transfers individual grants to the response reader. Unclaimed
 // grants are released by the dispatch owner; claimed grants by the reader.
 // They use the same frame category and lease table as later frame growth.
-func (b *frameBudget) prepare(n int64) bool {
-	return b.reserveStorage(n, false)
+func (b *frameBudget) prepare(ctx context.Context, n int64) error {
+	if n <= 0 {
+		return nil
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if n > b.limit-b.used {
+		return &bufferLimitError{}
+	}
+	for i := range b.leases {
+		if b.leases[i].lease != nil {
+			continue
+		}
+		lease, err := b.scope.acquire(ctx, n)
+		if err != nil {
+			return err
+		}
+		b.leases[i].bytes, b.leases[i].lease, b.leases[i].pending = n, lease, true
+		b.used += n
+		return nil
+	}
+	return &bufferBusyError{}
 }
 
 func (b *frameBudget) releasePreparation() {
@@ -398,6 +417,13 @@ func newStreamFrameReader(config streamFrameConfig) (*streamFrameReader, error) 
 	if parent == nil {
 		parent = context.Background()
 	}
+	numeric := config.Extract != nil
+	if preparation, ok := parent.Value(performancePreparationKey{}).(performancePreparation); ok {
+		numeric = preparation.mode == performancePrepareLocalNumeric
+		if !numeric {
+			config.Extract = nil
+		}
+	}
 
 	metadata := budget.reserve(streamFrameMetadataBytes)
 	var bootstrap *bufferLease
@@ -445,7 +471,7 @@ func newStreamFrameReader(config streamFrameConfig) (*streamFrameReader, error) 
 	// allocations needs no new grant after a live capacity decrease; larger
 	// frames still require their full replacement capacity while copying.
 	parserBytes := int64(streamFrameSyntaxBytes)
-	if config.Extract != nil || (config.Parent != nil && config.Parent.Value(performancePreparationKey{}) != nil) {
+	if numeric {
 		parserBytes = streamFrameNumericBytes
 	}
 	ready := reader.scratchBytes != 0 && budget.reserve(parserBytes)

@@ -415,7 +415,11 @@ func TestPerformancePreparationAllowanceTransfer(t *testing.T) {
 	owner.retainParser(parser)
 	defer owner.close()
 	ctx := context.WithValue(context.Background(), ownedInferenceContextKey{}, owner)
-	ctx, release, err := preparePerformanceBuffers(ctx, body)
+	request, err := parseOriginStreamRequest(routeChatCompletions, body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, release, err := preparePerformanceBuffers(ctx, body, request, performancePrepareLocalNumeric)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -832,7 +836,7 @@ func TestPerformancePreparationImpossibleBeforeAllocation(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx := context.WithValue(context.Background(), ownedInferenceContextKey{}, &ownedInferenceBuffers{scope: scope})
-	_, release, err := preparePerformanceBuffers(ctx, []byte(`{"model":"m","stream":true,"temperature":1}`))
+	_, release, err := preparePerformanceBuffers(ctx, []byte(`{"model":"m","stream":true,"temperature":1}`), originStreamRequest{protocol: streamProtocolSSE, declared: true, choices: 1}, performancePrepareLocalNumeric)
 	if release != nil {
 		release()
 	}
