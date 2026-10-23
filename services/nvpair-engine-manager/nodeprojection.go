@@ -12,10 +12,8 @@ package main
 // lives in memory, is replaced whole on every push and is unknown until the
 // first one, which the broker sends whenever engine-manager reports ready.
 //
-// It also holds the local veto: a node paused on the node itself, or an
-// engine saved Off on the node itself, refuses a paired node's start,
-// install-with-start and model load until it is resumed or started locally.
-// Stop, unload, delete, pull and settings edits are never vetoed.
+// Pause fences every peer mutation. Durable engine locks additionally fence
+// local and peer activation; ordinary saved Off is only lifecycle intent.
 
 import (
 	"context"
@@ -99,19 +97,28 @@ func (m *Manager) applyNodeProjection(msg *Message) {
 		return
 	}
 	m.exec.nodeProjection.set(p)
-	if p.PausedLocally {
-		m.exec.cancelPausedCrashRelaunches()
-	}
+	// Preserve the typed pause cause before generic lifecycle/load cancellation
+	// can let an accepted peer operation return.
 	m.exec.cancelVetoedRemoteWork()
+	if p.ManagementBlocked {
+		m.exec.cancelPausedCrashRelaunches()
+		m.exec.cancelBlockedActivations()
+	}
 }
 
-// localVetoError refuses a paired node's start or load that this node's own
-// pause or Off forbids. It reaches the caller as JSON-RPC codeLocalVeto.
-type localVetoError struct{ reason string }
+// localVetoError retains the typed refusal as a cancellation cause.
+type localVetoError struct {
+	code   int
+	reason string
+}
 
 func (e *localVetoError) Error() string { return e.reason }
 
-const nodePausedVeto = "this node was paused on the node itself; resume it there"
+const nodePausedVeto = "This node is paused. Resume it on this node before managing it remotely."
+
+func engineLockedVeto(_ string) string {
+	return "This engine is locked on this node. Unlock it on this node before starting or loading a model."
+}
 
 func engineOffVeto(engine string) string {
 	return fmt.Sprintf("%s was turned off on the node itself; start it there", engine)
@@ -123,23 +130,49 @@ func engineOffVeto(engine string) string {
 var errNoProjection = errors.New("this node's policy is not known yet; try again shortly")
 
 // remoteVeto is why a paired node may not start engine or load a model into it
-// now, or nil when it may. A node paused locally and an engine saved Off
-// locally (an Off with no provenance included) refuse with localVetoError; a
-// node without a projection yet refuses with errNoProjection.
+// now, or nil when it may. Either-origin pause and durable lock refuse with a
+// typed veto; an unknown projection refuses with errNoProjection.
 func (e *Executor) remoteVeto(engine string) error {
-	paused, known := e.nodeProjection.pausedLocally()
+	blocked, known := e.nodeProjection.managementBlocked()
 	if !known {
 		return errNoProjection
 	}
-	if paused {
-		return &localVetoError{reason: nodePausedVeto}
+	if blocked {
+		return &localVetoError{code: codeLocalVeto, reason: nodePausedVeto}
 	}
-	off, err := e.desired.offLocally(engine)
+	locked, err := e.desired.locked(engine)
 	if err != nil {
 		return err
 	}
-	if off {
-		return &localVetoError{reason: engineOffVeto(engine)}
+	if locked {
+		return &localVetoError{code: codeEngineLocked, reason: engineLockedVeto(engine)}
+	}
+	return nil
+}
+
+type activationAdoptionKey struct{}
+
+// activationAdoptionContext marks ctx as owned by an explicit activation, so a
+// pause that wins the projection gate refuses its adoption of a running
+// external engine.
+func activationAdoptionContext(ctx context.Context) context.Context {
+	return context.WithValue(ctx, activationAdoptionKey{}, struct{}{})
+}
+
+func activationAdoption(ctx context.Context) bool {
+	return ctx.Value(activationAdoptionKey{}) != nil
+}
+
+func (e *Executor) activationVeto(engine string) error {
+	if blocked, known := e.nodeProjection.managementBlocked(); known && blocked {
+		return &localVetoError{code: codeLocalVeto, reason: nodePausedVeto}
+	}
+	locked, err := e.desired.locked(engine)
+	if err != nil {
+		return err
+	}
+	if locked {
+		return &localVetoError{code: codeEngineLocked, reason: engineLockedVeto(engine)}
 	}
 	return nil
 }
@@ -210,6 +243,23 @@ func (w *remoteWork) cancelEngine(engine string, veto *localVetoError) {
 			op.cancel(veto)
 			delete(w.ops, id)
 		}
+	}
+}
+
+func (e *Executor) cancelBlockedActivations() {
+	veto := &localVetoError{code: codeLocalVeto, reason: nodePausedVeto}
+	for _, engine := range e.reg.Names() {
+		st, err := e.state(engine)
+		if err != nil {
+			continue
+		}
+		st.mu.Lock()
+		if st.startCancel != nil {
+			st.startCancel(veto)
+		}
+		st.mu.Unlock()
+		finish := stopServingLoadsWithCause(st, veto)
+		finish()
 	}
 }
 

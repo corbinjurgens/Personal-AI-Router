@@ -117,6 +117,7 @@ func TestSettingsPairedMutationPushObserversAndRevocation(t *testing.T) {
 	grantRemoteManagement(t, a, "1", map[string]bool{"b": true, "c": true})
 	mesh := clustertrust.Open(a)
 	exec := settingsExecutor(t, false)
+	exec.nodeProjection.set(nodeProjection{ManagementBlocked: false})
 	snapshot := settings.Snapshot{NodeID: "a-host", Engine: "ollama", Revision: 1, Epoch: "epoch-a", Sequence: 1, Phase: "idle", Settings: settings.Config{ServerPort: 12000, ProxyPort: 12001, LaunchText: "managed serve"}}
 	exec.settingsHub.Publish([]settings.Snapshot{snapshot})
 	var mu sync.Mutex
@@ -235,6 +236,7 @@ func TestSettingsRemoteOnlyCORSIsLocalOnly(t *testing.T) {
 	grantRemoteManagement(t, a, "1", map[string]bool{"b": true})
 	mesh := clustertrust.Open(a)
 	exec := settingsExecutor(t, false)
+	exec.nodeProjection.set(nodeProjection{ManagementBlocked: false})
 	exec.settingsParent = func(context.Context, string, settings.Request, string) (json.RawMessage, error) {
 		return json.RawMessage(`{}`), nil
 	}
@@ -365,6 +367,7 @@ func TestSettingsRelayErrorCodesReachThePairedOrigin(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			exec := settingsExecutor(t, false)
+			exec.nodeProjection.set(nodeProjection{ManagementBlocked: false})
 			relay := &settingsRelay{}
 			relay.send = func(_ context.Context, method string, params any) error {
 				request, ok := params.(settings.Relay)

@@ -340,11 +340,10 @@ Checks before effects, after E3 admission and the lifecycle lock, and after
 the dispatch relay refuse these conditions with `outcome:"not-dispatched"`:
 
 - `projection-unknown`: no broker projection since startup.
-- `paused-local`, `engine-off-local`: R4 veto, including locally edited policy,
-  explicit local Off and legacy Off without provenance. `beginRemote` registers
-  accepted work for cancellation by a later local veto.
+- `paused`, `engine-locked`: either-origin pause or durable engine lock.
+  `beginRemote` registers accepted work for cancellation by a later veto.
 - `switch-busy`: an unreleased E3 checkpoint reserves this engine.
-- `engine-off`: no saved On intent or running engine (including peer Off).
+- `engine-off`: no saved On intent or running engine, regardless of Off origin.
 - `not-installed`: normalized model absent from authoritative installed inventory.
   Older sweeps cannot replace newer installed inventory.
 - `unqualified`: incarnation/run/requested-model digest mismatch, absent owned
@@ -381,8 +380,8 @@ it dispatched under its admission mutex. The broker must return its result as an
 
 A refusal is `result:{"dispatched":false,"reason":"reservation-revoked"}`.
 Reasons are `reservation-revoked`, `reservation-unknown`, or any shared
-`ModelConfigurationReason`: `engine-off`, `no-fit`, `paused-local`,
-`engine-off-local`, `not-served`, `not-installed`, `unqualified`,
+`ModelConfigurationReason`: `engine-off`, `no-fit`, `paused`, `engine-locked`,
+`paused-local`, `engine-off-local` (older inbound reasons), `not-served`, `not-installed`, `unqualified`,
 `unsupported-load`, `switch-busy`, `load-failed`, `operation-timeout`, `observation-unknown`,
 `projection-unknown`. A relay error instead has
 `error:{"code":-32000,"message":"bounded explanation"}`, with no result.
@@ -621,8 +620,10 @@ extensibility story for an open-source product.
 
 `locked` is the engine's durable lock on its own node. Present `true` or `false`
 is authoritative; absent means lock state is unavailable, as from an older
-target, and is never evidence of unlocked. It is not populated until lock
-enforcement lands.
+target, and is never evidence of unlocked. Every registered engine's status,
+get-installed shell and state push reads the desired-state store before taking
+the runtime state mutex. A store read error leaves `locked` unavailable and
+fails activation closed.
 
 `LogLine` object (entry in `engine:logs`):
 ```json
@@ -663,7 +664,7 @@ Requests (caller → service):
 | `engine:start` | `{ engine }` | `EngineStatus` (after readiness) |
 | `engine:stop` | `{ engine }` | `EngineStatus` |
 | `engine:restart` | `{ engine }` | `EngineStatus` |
-| `engine:set-lock` | `{ engine, locked }` | `null` acknowledgement. Local only: decoded strictly, with exact, unique member names, so `engine` must be registered, `locked` must be a JSON boolean and any other member, `node`, `nodeId`, `caller` and `origin` included, is `-32602`. No `ec` route or peer relay reaches it. Until lock enforcement lands, a well-formed request answers `-32000` `Engine locking is not available yet.` and changes no saved intent, lock or runtime state |
+| `engine:set-lock` | `{ engine, locked }` | `null` acknowledgement after persistence and verified stop for Lock, or removal of only the lock for Unlock. Local only: decoded strictly, with exact, unique member names, so `engine` must be registered, `locked` must be a JSON boolean and any other member, `node`, `nodeId`, `caller` and `origin` included, is `-32602`. No `ec` route or peer relay reaches it. See Lock storage and execution below |
 | `engine:action` | `{ engine, action, params }` | the engine's raw response |
 | `engine:logs` | `{ engine }` | `{ lines: [LogLine] }` |
 | `engine:errors` | — | `{ errors: [ServiceError] }` |
@@ -702,7 +703,7 @@ are display data and do not change proxy admission or lifecycle behavior.
 
 Notifications (service → caller): `engine:intent-changed{enabledByEngine, offByEngine}` (after an explicit start/stop changes saved intent), `policy:request{id, method, caller, params}` / `policy:cancel{id}` (a paired node's node-policy call for the broker, which answers with the `policy:reply{id, result, error?, errorCode?}` notification), `ready{version}`, `engine:state-changed{EngineStatus}`, `engine:models-changed{engine, models}` (pushed when an engine's loaded-in-memory model set changes; `models` is the full `engine:models` shape incl. `loadedByEngine`), `engine:install-progress{engine, stage, percent?, error?}` (`error` on the terminal `failed` frame), `engine:pull-progress{engine, op, stage, percent?, message}` (live progress for a local model pull driven via `engine:action{action:"pull_model"}` — the local counterpart of `engine:remote-progress`), `engine:remote-progress{opId, node, engine, op, stage, percent?, message}` (live progress relayed from a remote install/pull; a model copy reports `op:"copy"` with `file?, bytesDone?, bytesTotal?`, §7.3), and `errors:report` / `errors:clear` (consumed by `nvpair-errors` via the Broker). `install` / `start` / `stop` / `restart` / `action` / `remote-*` each run in their own goroutine so the read loop never blocks; their responses arrive when the op completes.
 
-Notifications (caller → service): `engine:node-projection{policy, pausedLocally, managementBlocked}` carries this node's policy advertisement (`nvpair-shared/nodepolicy.Advertisement`: `revision`, `roles` per tier with the bounds of the matching profile, `pausedBy?`), whether the node is paused by its own clients, a pause without recorded provenance included (§7.2 Local veto), and `managementBlocked`: whether a pause of either origin, accepted but not yet saved, draining or saved, fences peer management writes. engine-manager exposes `managementBlocked` with whether it is known yet; it is stored but not enforced until the common remote pause gate lands. An older broker omits it, which reads as false; it is never derived from `pausedBy` or `pausedLocally`. The broker sends it after every persisted policy or availability change and again on every `engine:ready`, reading its current policy each time under one lock, so a later projection never carries older state. engine-manager keeps the last one in memory, replaced whole, never persisted; an undecodable one leaves the previous in place. `engine:models` and `GET /v1/models` return it as `policy`, omitted until the first push. `engine:models-changed` does not carry it.
+Notifications (caller → service): `engine:node-projection{policy, pausedLocally, managementBlocked}` carries this node's policy advertisement (`nvpair-shared/nodepolicy.Advertisement`: `revision`, `roles` per tier with the bounds of the matching profile, `pausedBy?`), local-pause provenance, and `managementBlocked`: whether a pause of either origin, accepted but not yet saved, draining or saved, fences peer management writes. The common mutation gate requires a known projection and enforces this bit after the current grant check. Local activation also refuses known blocked state; trusted local startup may proceed before the first projection. An older broker omits the bit, which reads as false; it is never derived from `pausedBy` or `pausedLocally`. The broker sends it after every persisted policy or availability change and again on every `engine:ready`, reading its current policy each time under one lock, so a later projection never carries older state. engine-manager keeps the last one in memory, replaced whole, never persisted; an undecodable one leaves the previous in place. `engine:models` and `GET /v1/models` return it as `policy`, omitted until the first push. `engine:models-changed` does not carry it.
 
 `engine:model-identity{engines}` is also a service → caller notification: a whole snapshot keyed by engine, each entry `{engineRunId, launchDigest, modelDigests}` with `modelDigests` keyed by model name. The loaded-model watcher emits it after its first sweep and whenever the snapshot changes; an absent engine has no current identity. Only running owned processes with a known launch digest are included, excluding adopted services and command-mode daemons. Model digests must come from an inventory of the same run and contain lowercase SHA-256 hex. Publication is ordered with `engine:state-changed`, so a running engine's identity cannot arrive after its stop. The broker adds its settings fingerprint before publishing the strict admission identity to the proxy.
 
@@ -790,33 +791,70 @@ policy validation, even if it tries to enable remote or paid execution.
 Successful replies have no error code. Body/shape validation still returns 400,
 unpaired callers 403, non-POST calls 405 and a missing coordinator 503.
 
-**Local veto.** A node's own pause or Off always wins over paired nodes. The
-`ec` start (`POST /engines/start`), install with `start`
-(`POST /engines/install`) and model load (`POST /models/load`) are refused with
-HTTP 409 `{"error", "code": "local_veto"}` while the last
-`engine:node-projection` says `pausedLocally`, or while the engine is saved Off
-by this node; before the first projection they are refused with HTTP 503 (fail
-closed). Saved intent lives in `engine-state.json` as
-`{engines: {<engine>: bool}, offBy?: {<engine>: "local" | "peer"}}`: a local `engine:stop` or uninstall records `local`, an `ec` stop
-records `peer` unless the engine is already saved Off, and any start (local or
-remote, or `engine:restart`) saves On and clears the entry. An Off without an
-`offBy` entry predates provenance and counts as local; an engine with no saved
-intent is not vetoed. Only a local start or resume lifts a veto. The start is
-checked again under the engine's lifecycle lock, and accepted remote starts and
-loads still running when a local veto arrives (a projection with
-`pausedLocally`, or a local `engine:stop` of that engine) are canceled and
-answer the typed 409; a veto during an install with `start` cancels only the
-start, reported as an error frame with `"code": "local_veto"`. Stop, unload,
-delete, pull, model copy and settings edits are not refused by this lifecycle
-veto (remote mutations still require a management grant), and settings
-applies cannot resume an engine saved Off, nor, while the node is paused, a
-stopped one (the broker withholds `resume` from `engine:configure-launch`). The
-broker refuses a paired node's settings apply that would resume one while the
-node is paused locally; its `engine:settings-reply` carries `errorCode: -32011`
-and the settings route answers the same typed 409. At the origin, the typed 409
-and the coded error frame become JSON-RPC `-32011` on `engine:remote-start`,
-`engine:remote-install`, `engine:remote-load-model` and
-`engine:remote-apply-settings`.
+**Off, lock and pause.** Saved Off is ordinary intent, never a prohibition on a
+new granted peer start/load/switch. This includes local, peer and legacy Off and
+missing intent. Explicit model load never starts a stopped engine, and its real
+runtime failure must not become a lock/pause refusal. Saved-On restoration,
+wake and residency retain their existing intent requirements. A local stop or
+uninstall records `offBy:local`; an ec stop records `peer` unless already Off,
+preserving its earlier provenance. On clears the origin. Legacy Off without
+`offBy` projects local provenance. A local Stop admitted during existing peer
+work still cancels that operation with `-32011/local_veto` and retains all
+operation-specific durable switch cleanup; it does not veto a later operation.
+
+After a successful fresh grant check, `controlServer.authorize` uses the common
+route registry classification: every incoming mutation returns HTTP 503 until
+projection is known, then HTTP 409 with `code:local_veto` while
+`managementBlocked` is true. The exact message is `This node is paused. Resume it on this node before managing it remotely.` Grant denial retains `-32012`
+precedence, and pause precedes lock for a granted peer. Install, start, stop,
+load, unload, delete, pull, settings apply, switch apply, policy set and
+availability set are fenced. This includes the pause initiator's Resume and
+repeated Pause; only the owning node may Resume. Reads return before this check,
+including GET/HEAD, read-only POST preview/status/get, event streams and model
+files. No second production route registry is introduced.
+
+Either-origin pause projection cancels accepted starts, loads, crash relaunch
+and pending activation. Local start/load/switch also refuse known pause; local
+reads, configuration, lock/unlock, stop and unload remain available. Settings
+apply/recovery can change metadata but cannot restart while paused or locked.
+Accepted content installation/download may finish, without starting an engine.
+When available, a locked engine still admits granted stop/unload/delete/pull,
+install-without-start and settings edits; restart-after cannot activate it.
+Lock refusal is `-32013/engine_locked` with the exact message `This engine is locked on this node. Unlock it on this node before starting or loading a model.`
+The HTTP body, stream terminal error, JSON-RPC relay and switch receipt retain
+the numeric code and bounded target message. Switch kind `engine_locked` is
+valid only with `-32013`; pause and operation-scoped Stop retain `-32011`.
+
+**Lock storage and execution.** `engine-state.json` extends the existing document
+with optional `locked: {engine:true}`; it has no schema version bump or separate
+store. Missing maps mean unlocked. Reject null maps, null/non-boolean entries
+and locked+On contradictions rather than repairing unreadable state. Preserve
+unknown engine keys and checkpoints. An older binary rewriting this private
+file may discard locks; downgrade to an old writer is unsupported.
+
+Each complete command holds the engine's `lockMu` before mutation admission
+through acknowledgement. Ordinary lifecycle commands do not take it. Unreleased
+switch involvement refuses lock/unlock before any write with `-32000` and the
+existing `engine "<engine>" is reserved by an engine switch (busy)` message.
+Lock atomically replaces lock=true, saved Off and local Off provenance, emits
+intent/state, then cancels starts, serving loads and crash relaunch before
+waiting on `opMu`. Never hold `desired.mu` while waiting on `opMu`. The existing
+process owner stops/unloads and verifies termination before success. Pre-replace
+failure leaves disk/runtime unchanged. Post-replace stop failure retains durable
+locked+Off, publishes actual runtime facts and returns operational `-32000`;
+idempotent Lock retries unresolved stop. Use the existing atomic writer warning
+semantics; a directory-sync warning is not proof of power-loss durability.
+Unlock removes only the lock and emits state, leaving Off and provenance without
+starting. Lock-only changes emit state too.
+
+Common start/load guards read the durable store under `desired.mu`; loads check
+before admission and after lifecycle waiting, and starts check before accepting
+readiness. No late success, intent setter or switch commit may save On over a
+lock. These guards cover explicit activation, restart, restore, wake, crash
+relaunch, settings recovery, switch recovery and action restart-after. Neither
+sleep nor idle unload/stop changes lock. Source ownership validation remains
+unchanged when switching away from a locked engine; target lock and either-origin
+pause are checked before source stop for local and remote switches.
 
 The `engine:remote-*` methods are the client half: engine-manager resolves the target `node` in an `ec` peer directory (fed by its own `discovery:subscribe{services:[ec]}` to the broker relay), dials the peer's `ec` surface with the same pinned identity, relays each streamed progress frame up as `engine:remote-progress` (keyed by a minted `opId`), and settles the request on the terminal frame. Remote install/pull run for the operation's full duration (no broker-imposed timeout); remote stop and model unload/delete are fast request/response, remote Ollama model load uses the readiness-sized response budget, and remote start waits for the engine's bounded readiness result. They error if this node isn't clustered or the target isn't a pinned peer.
 
@@ -904,7 +942,7 @@ The operator opens the UI; the Broker calls `engine:get-installed`, which return
 
 The operator starts it: `engine:start {engine:"ollama"}` resolves the manifest runtime (`OLLAMA_HOST` = `{host}:{port}`, `{host}` from `runtime.bind` defaulting to `0.0.0.0`; per-call `port`/`bind` override either), spawns the process, and waits for the readiness probe before reporting `running:true, healthy:true` in the response and an `engine:state-changed` notification. A periodic health probe keeps the state current; an unexpected exit emits `engine:state-changed` + `errors:report`. If something is already serving the port, `start` **adopts** it instead of spawning a duplicate.
 
-The operator stops it: `engine:stop {engine:"ollama"}` signals a process the service owns. For an **adopted** engine (no owned process), it resolves the PID bound to the port and terminates it only when that process is running the binary we manage — reclaiming an orphan a prior run left on our own managed port; a genuinely foreign listener (a different image on a different port) is declined with an error naming its PID and image. A user-initiated `stop` records the OFF intent regardless (even when the RPC returns an error), so the health loop and restore-on-restart don't flip the engine back on — clients must not treat a stop error as proof the OFF choice was discarded. The cluster `ec` stop endpoint shares this semantics and may return HTTP 500 while OFF is persisted; its OFF records peer provenance, so a later remote start may undo it, while a local OFF vetoes remote starts (§7.2 Local veto).
+The operator stops it: `engine:stop {engine:"ollama"}` signals a process the service owns. For an **adopted** engine (no owned process), it resolves the PID bound to the port and terminates it only when that process is running the binary we manage — reclaiming an orphan a prior run left on our own managed port; a genuinely foreign listener (a different image on a different port) is declined with an error naming its PID and image. A user-initiated `stop` records the OFF intent regardless (even when the RPC returns an error), so the health loop and restore-on-restart don't flip the engine back on — clients must not treat a stop error as proof the OFF choice was discarded. The cluster `ec` stop endpoint shares this semantics and may return HTTP 500 while OFF is persisted. Local and peer Off retain their provenance; either permits a later granted peer activation when unlocked and available.
 
 The operator pulls a model: `engine:action {engine:"ollama", action:"pull_model", params:{name:"llama3.2"}}` issues the manifest-declared `POST 127.0.0.1:{port}/api/pull`. Because the action is `pull_model`, the request is routed through the streaming pull path (not the buffered `engine:action` reader): each `/api/pull` status line is emitted as an `engine:pull-progress` notification — so a local pull shows live download progress just like a remote pull's `engine:remote-progress` — and the request settles with the pull's terminal result line. Frames are coalesced (only a change in `stage` or `percent` is emitted) so a chatty engine that streams many byte-progress lines per layer doesn't flood subscribers. Streaming Ollama and llama.cpp pulls use a 30-minute inactivity watchdog that is refreshed only when a layer/file completed-byte count advances, allowing active downloads to exceed 30 minutes without letting duplicate progress or heartbeat frames keep a stalled pull alive. The engine's terminal `{"status":"success"}` surfaces as a `stage:"success"` frame; a **failed** pull emits a terminal `stage:"error", percent:-1, message:<why>` frame in addition to the JSON-RPC error, so a UI whose synchronous call already timed out on a long download still converges off "pulling". A CLI-driven pull (LM Studio's `lms get`) has no line-level progress, so it emits one `stage:"pulling"` marker and retains the fixed 30-minute action timeout before returning the command's result. On `shutdown` (or stdin EOF) the service stops every running engine first, so none are orphaned.
 
@@ -1008,7 +1046,8 @@ the last identity until a subsequent prepare replaces them; the broker's journal
 owns older receipt retention. Unreadable checkpoint metadata fails mutation and
 restore admission closed.
 
-Remote prepare/start recheck local Off/pause (`-32011`). Explicit local Off
+Local and remote prepare/start recheck lock (`-32013`) and either-origin pause
+(`-32011`); target refusal precedes source stop. Explicit local Off
 cancels remote target work and durably records local provenance before waiting
 on the operation lock for cleanup; that vetoing stop returns its actual result.
 This admission does not acquire the switch lock or engine operation lock and
@@ -1036,10 +1075,11 @@ on an adopted running source is observation-only after a failed drain without
 a new veto. Release requires termination evidence for those flags, rather than
 all saved Off provenance. Cleanup failure retains the checkpoint.
 The existing projection
-path cancels remote work on local pause. Local switching is allowed under these
-remote-only vetoes.
-Before a remote reservation is released, local Off of either engine or a local
-pause also cancels an already-committed target. Reconcile durably changes it to
+path cancels activation on either-origin pause. Local switching also requires
+an unlocked target and an available node.
+Before a remote reservation is released, new local Off of either engine also
+cancels an already-committed target. Either-origin pause fences committed targets
+of local and remote reservations. Reconcile durably changes the target to
 target Off with pending cleanup, then stops it without restoring source. In the
 absence of an explicit veto, restart reconciliation preserves committed On.
 The broker-local reconcile envelope may include `localVeto: {engine, pause}`

@@ -205,7 +205,7 @@ func (s *controlServer) streamOp(w http.ResponseWriter, r *http.Request, opID, e
 				frame = streamFrame{Type: "error", OpID: opID, Engine: engine, Op: op, Message: res.err.Error()}
 				var veto *localVetoError
 				if errors.As(res.err, &veto) {
-					frame.Code = wireCodes[codeLocalVeto]
+					frame.Code = wireCodes[veto.code]
 				}
 			}
 			_ = enc.Encode(frame)

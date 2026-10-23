@@ -31,7 +31,7 @@ func switchFixture(t *testing.T) (*Executor, settings.SwitchPrepareRequest) {
 	}
 	ex := NewExecutor(reg, NewReporter(nil), nil, t.TempDir())
 	t.Cleanup(ex.StopAll)
-	ex.nodeProjection.set(nodeProjection{})
+	ex.nodeProjection.set(nodeProjection{ManagementBlocked: false})
 	p := settings.SwitchPrepareRequest{OperationID: "switch-test", Caller: "local", Origin: settings.SwitchOriginLocal, SourceEngine: "source", TargetEngine: "target", PayloadHash: "sha256:0123456789012345678901234567890123456789012345678901234567890123", ManagerIncarnation: ex.switchIncarnation, Deadline: time.Now().Add(time.Minute).UTC()}
 	return ex, p
 }
@@ -92,15 +92,15 @@ func TestSwitchPrepareValidations(t *testing.T) {
 			}
 			st.plat.Runtime.Ready = nil
 		}, settings.SwitchErrorValidation},
-		{"remote local Off", func(ex *Executor, p *settings.SwitchPrepareRequest) {
+		{"remote locked target", func(ex *Executor, p *settings.SwitchPrepareRequest) {
 			p.Origin = settings.SwitchOriginRemote
-			if err := ex.desired.set("target", false, intentLocal); err != nil {
+			if _, err := ex.desired.setLocked("target", true); err != nil {
 				t.Fatal(err)
 			}
-		}, settings.SwitchErrorRemoteVeto},
+		}, settings.SwitchErrorEngineLocked},
 		{"remote local pause", func(ex *Executor, p *settings.SwitchPrepareRequest) {
 			p.Origin = settings.SwitchOriginRemote
-			ex.nodeProjection.set(nodeProjection{PausedLocally: true})
+			ex.nodeProjection.set(nodeProjection{PausedLocally: true, ManagementBlocked: true})
 		}, settings.SwitchErrorRemoteVeto},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -264,9 +264,8 @@ func TestSwitchForeignSourceNeverStartsTarget(t *testing.T) {
 	}
 }
 
-func TestSwitchLocalAllowedDespiteLocalVeto(t *testing.T) {
+func TestSwitchLocalAllowedDespiteSavedOff(t *testing.T) {
 	ex, p := switchFixture(t)
-	ex.nodeProjection.set(nodeProjection{PausedLocally: true})
 	if err := ex.desired.set("target", false, intentLocal); err != nil {
 		t.Fatal(err)
 	}
@@ -314,10 +313,7 @@ func TestSwitchLocalOffCancelsRemoteTargetStart(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("local veto did not cancel start")
 	}
-	off, err := ex.desired.offLocally("target")
-	if err != nil || !off {
-		t.Fatalf("local Off = %v, %v", off, err)
-	}
+	requireOffOrigin(t, ex.desired, "target", "local")
 }
 
 func TestSwitchCheckpointJSONPreservesLegacyIntent(t *testing.T) {
@@ -325,10 +321,7 @@ func TestSwitchCheckpointJSONPreservesLegacyIntent(t *testing.T) {
 	if err := os.WriteFile(ex.desired.path, []byte(`{"engines":{"target":false,"other":true}}`), 0600); err != nil {
 		t.Fatal(err)
 	}
-	off, err := ex.desired.offLocally("target")
-	if err != nil || !off {
-		t.Fatalf("legacy local Off = %v, %v", off, err)
-	}
+	requireOffOrigin(t, ex.desired, "target", "local")
 	var state desiredStateFile
 	data, err := os.ReadFile(ex.desired.path)
 	if err != nil {
@@ -557,10 +550,7 @@ func TestSwitchLocalOffDuringLocalReservationStaysBusy(t *testing.T) {
 			if err := ex.Stop(engine); !errors.As(err, &busy) {
 				t.Fatalf("local switch stop = %v, want busy", err)
 			}
-			off, err := ex.desired.offLocally(engine)
-			if err != nil || off {
-				t.Fatalf("busy stop persisted local Off = %v, %v", off, err)
-			}
+			requireOffOrigin(t, ex.desired, engine, "")
 		})
 	}
 }

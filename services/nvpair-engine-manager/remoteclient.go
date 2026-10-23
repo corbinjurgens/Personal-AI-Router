@@ -103,6 +103,10 @@ func codeOfWire(name string) (int, bool) {
 
 // rpcCode is the JSON-RPC error code err reaches a client with.
 func rpcCode(err error) int {
+	var veto *localVetoError
+	if errors.As(err, &veto) && veto.code != 0 {
+		return veto.code
+	}
 	var coded *codedError
 	if errors.As(err, &coded) && coded.code != 0 {
 		return coded.code

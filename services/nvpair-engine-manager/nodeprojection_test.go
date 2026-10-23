@@ -83,7 +83,7 @@ func TestNodeProjectionServedWithTheModelInventory(t *testing.T) {
 		},
 	}
 	t.Run("served after a push", func(t *testing.T) {
-		pushProjection(t, m, string(mustMarshal(t, map[string]any{"policy": first})))
+		pushProjection(t, m, string(mustMarshal(t, map[string]any{"policy": first, "managementBlocked": false})))
 		fromHTTP, fromRPC, _, _ := servedPolicy(t, m, &out)
 		if !reflect.DeepEqual(fromHTTP, &first) || !reflect.DeepEqual(fromRPC, &first) {
 			t.Fatalf("served policy = /v1/models %+v, engine:models %+v; want %+v", fromHTTP, fromRPC, first)
@@ -99,7 +99,7 @@ func TestNodeProjectionServedWithTheModelInventory(t *testing.T) {
 
 	t.Run("a later push replaces it whole", func(t *testing.T) {
 		paused := nodepolicy.Advertisement{Revision: "13", Roles: map[string]nodepolicy.AdvertisedRole{}, PausedBy: nodepolicy.PausedLocally}
-		pushProjection(t, m, string(mustMarshal(t, map[string]any{"policy": paused})))
+		pushProjection(t, m, string(mustMarshal(t, map[string]any{"policy": paused, "pausedLocally": true, "managementBlocked": true})))
 		if fromHTTP, fromRPC, _, _ := servedPolicy(t, m, &out); !reflect.DeepEqual(fromHTTP, &paused) || !reflect.DeepEqual(fromRPC, &paused) {
 			t.Fatalf("served policy = /v1/models %+v, engine:models %+v; want %+v", fromHTTP, fromRPC, paused)
 		}

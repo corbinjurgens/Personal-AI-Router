@@ -63,6 +63,10 @@ type engineState struct {
 	// st.mu is released around probes, and the background health loop
 	// never takes opMu.
 	opMu sync.Mutex
+	// lockMu orders complete lock/unlock commands before mutation admission.
+	// desired.mu is released before waiting for opMu; status reads desired
+	// before st.mu. Ordinary lifecycle commands never take lockMu.
+	lockMu sync.Mutex
 	// contentMu serializes content mutations (delete / pull / copy into the
 	// engine's model store) for this engine, separate from opMu: a model change
 	// must not be blocked by, nor block, an install/start/stop/restart, and
@@ -92,7 +96,7 @@ type engineState struct {
 	proc         *managedProc
 	healthStop   context.CancelFunc
 	// startCancel lets StopAll unblock doStart before waiting on opMu.
-	startCancel context.CancelFunc
+	startCancel context.CancelCauseFunc
 	// relaunch owns a bounded recovery episode after an unexpected owned exit.
 	// Explicit stop/sleep and shutdown cancel it before waiting for opMu.
 	relaunch *engineRelaunch

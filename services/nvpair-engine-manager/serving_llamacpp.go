@@ -762,23 +762,34 @@ func llamaServingReadback(prepared *llamaServingLaunch) *engines.ServingReadback
 // between cancelling existing loads and acquiring the lifecycle operation lock.
 type servingLoadControl struct {
 	stops  int
+	cause  error
 	active map[*servingLoad]struct{}
 }
 
 type servingLoad struct {
-	cancel context.CancelFunc
+	cancel context.CancelCauseFunc
 }
 
 func stopServingLoads(st *engineState) func() {
+	return stopServingLoadsWithCause(st, nil)
+}
+
+func stopServingLoadsWithCause(st *engineState, cause error) func() {
 	st.mu.Lock()
 	st.loads.stops++
+	if cause != nil {
+		st.loads.cause = cause
+	}
 	for load := range st.loads.active {
-		load.cancel()
+		load.cancel(st.loads.cause)
 	}
 	st.mu.Unlock()
 	return func() {
 		st.mu.Lock()
 		st.loads.stops--
+		if st.loads.stops == 0 {
+			st.loads.cause = nil
+		}
 		st.mu.Unlock()
 	}
 }
@@ -789,13 +800,20 @@ func (e *Executor) guardServingLoad(ctx context.Context, st *engineState, action
 	if !load || action != binding.Action {
 		return ctx, noop, nil
 	}
+	if err := e.activationVeto(st.manifest.Engine); err != nil {
+		return ctx, noop, err
+	}
 	ctx, cleanup := registerServingLoad(ctx, st)
 	// Register before the lifecycle wait so settings cancellation sees waiters.
 	if !residentLock(ctx, &st.opMu) {
 		cleanup()
-		return ctx, noop, ctx.Err()
+		return ctx, noop, vetoCause(ctx, ctx.Err())
 	}
 	release := sync.OnceFunc(func() { st.opMu.Unlock(); cleanup() })
+	if err := e.activationVeto(st.manifest.Engine); err != nil {
+		release()
+		return ctx, noop, err
+	}
 	if err := e.checkServingLoad(st, binding.Action, params); err != nil {
 		release()
 		return ctx, noop, err
@@ -804,7 +822,7 @@ func (e *Executor) guardServingLoad(ctx context.Context, st *engineState, action
 }
 
 func registerServingLoad(ctx context.Context, st *engineState) (context.Context, func()) {
-	ctx, cancel := context.WithCancel(ctx)
+	ctx, cancel := context.WithCancelCause(ctx)
 	entry := &servingLoad{cancel: cancel}
 	st.mu.Lock()
 	if st.loads.active == nil {
@@ -812,11 +830,11 @@ func registerServingLoad(ctx context.Context, st *engineState) (context.Context,
 	}
 	st.loads.active[entry] = struct{}{}
 	if st.loads.stops != 0 {
-		cancel()
+		cancel(st.loads.cause)
 	}
 	st.mu.Unlock()
 	cleanup := sync.OnceFunc(func() {
-		cancel()
+		cancel(nil)
 		st.mu.Lock()
 		delete(st.loads.active, entry)
 		st.mu.Unlock()
@@ -828,6 +846,10 @@ func registerServingLoad(ctx context.Context, st *engineState) (context.Context,
 // registry and declaration check without recursively taking the lifecycle lock.
 func (e *Executor) guardServingLoadLocked(ctx context.Context, st *engineState, action string, params json.RawMessage) (context.Context, func(), error) {
 	ctx, cleanup := registerServingLoad(ctx, st)
+	if err := e.activationVeto(st.manifest.Engine); err != nil {
+		cleanup()
+		return ctx, func() {}, err
+	}
 	if err := e.checkServingLoad(st, action, params); err != nil {
 		cleanup()
 		return ctx, func() {}, err

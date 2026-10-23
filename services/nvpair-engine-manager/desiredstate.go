@@ -12,6 +12,7 @@ import (
 	settings "nvpair-shared/enginesettings"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 )
@@ -28,7 +29,36 @@ type desiredStateFile struct {
 	Engines            map[string]bool            `json:"engines"`
 	// OffBy records who saved each engine Off: intentLocal or intentPeer. An
 	// engine saved Off with no entry predates provenance and counts as local.
-	OffBy map[string]intentOrigin `json:"offBy,omitempty"`
+	OffBy  map[string]intentOrigin `json:"offBy,omitempty"`
+	Locked map[string]bool         `json:"locked,omitempty"`
+}
+
+func (state *desiredStateFile) UnmarshalJSON(data []byte) error {
+	type document desiredStateFile
+	var decoded document
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return err
+	}
+	for name, raw := range fields {
+		if !strings.EqualFold(name, "locked") {
+			continue
+		}
+		var values map[string]*bool
+		if err := json.Unmarshal(raw, &values); err != nil || values == nil {
+			return errors.New("locked must be an object of boolean values")
+		}
+		for engine, value := range values {
+			if value == nil {
+				return fmt.Errorf("locked.%s must be boolean", engine)
+			}
+		}
+	}
+	*state = desiredStateFile(decoded)
+	return nil
 }
 
 // Allocated ports are execution evidence, excluded from configuration tokens.
@@ -104,17 +134,35 @@ func (s *desiredStateStore) snapshot(names []string) (engineintent.Snapshot, err
 	return out, nil
 }
 
-// offLocally reports whether engine is saved Off by this node itself: an Off
-// saved by a local client, or one saved before provenance was recorded.
-func (s *desiredStateStore) offLocally(engine string) (bool, error) {
+func (s *desiredStateStore) locked(engine string) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	state, err := s.load()
 	if err != nil {
 		return false, err
 	}
-	enabled, known := state.Engines[engine]
-	return known && !enabled && state.OffBy[engine] != intentPeer, nil
+	return state.Locked[engine], nil
+}
+
+func (s *desiredStateStore) setLocked(engine string, locked bool) (intentChanged bool, err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.path == "" {
+		return false, errors.New("no user data directory is available")
+	}
+	state, err := s.load()
+	if err != nil {
+		return false, err
+	}
+	wasEnabled, known := state.Engines[engine]
+	if locked {
+		intentChanged = !known || wasEnabled || state.OffBy[engine] != intentLocal
+		state.Locked[engine] = true
+		state.setIntent(engine, false, intentLocal)
+	} else {
+		delete(state.Locked, engine)
+	}
+	return intentChanged, s.save(state)
 }
 
 // set saves engine's intent. Saving On clears the Off provenance; saving Off
@@ -130,11 +178,19 @@ func (s *desiredStateStore) set(engine string, enabled bool, origin intentOrigin
 	if err != nil {
 		return err
 	}
+	if enabled && state.Locked[engine] {
+		return &localVetoError{code: codeEngineLocked, reason: engineLockedVeto(engine)}
+	}
 	state.setIntent(engine, enabled, origin)
 	return s.save(state)
 }
 
 func (state *desiredStateFile) setIntent(engine string, enabled bool, origin intentOrigin) {
+	// All persistence callers report the refusal before saving. Keep this
+	// primitive fail-closed too, including checkpoint assembly.
+	if enabled && state.Locked[engine] {
+		return
+	}
 	was, known := state.Engines[engine]
 	state.Engines[engine] = enabled
 	switch {
@@ -148,7 +204,7 @@ func (state *desiredStateFile) setIntent(engine string, enabled bool, origin int
 }
 
 func (s *desiredStateStore) load() (desiredStateFile, error) {
-	state := desiredStateFile{Engines: make(map[string]bool), OffBy: make(map[string]intentOrigin)}
+	state := desiredStateFile{Engines: make(map[string]bool), OffBy: make(map[string]intentOrigin), Locked: make(map[string]bool)}
 	if s.path == "" {
 		return state, nil
 	}
@@ -167,6 +223,14 @@ func (s *desiredStateStore) load() (desiredStateFile, error) {
 	}
 	if state.OffBy == nil {
 		state.OffBy = make(map[string]intentOrigin)
+	}
+	if state.Locked == nil {
+		state.Locked = make(map[string]bool)
+	}
+	for engine, locked := range state.Locked {
+		if locked && state.Engines[engine] {
+			return desiredStateFile{}, fmt.Errorf("invalid desired engine state: %s is both locked and On", engine)
+		}
 	}
 	if cp := state.PendingSwitch; cp != nil {
 		if ports := state.PendingSwitchPorts; ports != nil && (ports.Source < 0 || ports.Source > 65535 || ports.Target < 0 || ports.Target > 65535) {

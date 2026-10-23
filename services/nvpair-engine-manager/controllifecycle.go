@@ -79,7 +79,7 @@ func writeRemoteError(w http.ResponseWriter, err error) {
 	var veto *localVetoError
 	switch {
 	case errors.As(err, &veto):
-		writeCodedError(w, codeLocalVeto, veto.Error())
+		writeCodedError(w, veto.code, veto.Error())
 	case errors.Is(err, errNoProjection):
 		http.Error(w, err.Error(), http.StatusServiceUnavailable)
 	default:

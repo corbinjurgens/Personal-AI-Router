@@ -68,7 +68,7 @@ func TestStopAllCancelsInFlightOrphanConfirmation(t *testing.T) {
 		cancel := st.startCancel
 		st.mu.Unlock()
 		if cancel != nil {
-			cancel()
+			cancel(nil)
 		}
 		t.Fatal("orphan confirmation did not reach the listener")
 	}

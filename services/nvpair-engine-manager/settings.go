@@ -524,6 +524,14 @@ func (e *Executor) ConfigureLaunch(ctx context.Context, p settings.Configure, re
 	e.reporter.clear(exitedID(p.Engine))
 	old := e.launchStateLocked(p.Engine, st)
 	changed := old.ServerPort != preview.Settings.ServerPort || old.LaunchText != preview.Settings.LaunchText || !old.Serving.Equal(preview.Settings.Serving)
+	activationBlocked := false
+	if err := e.activationVeto(p.Engine); err != nil {
+		var veto *localVetoError
+		if !errors.As(err, &veto) {
+			return settings.LaunchState{}, err
+		}
+		activationBlocked = true
+	}
 	var pending *llamaServingSnapshot
 	if preparedServingRuntime(st, preview.Settings.Serving) {
 		st.mu.Lock()
@@ -593,7 +601,7 @@ func (e *Executor) ConfigureLaunch(ctx context.Context, p settings.Configure, re
 	if enabled, known, err := e.desired.get(p.Engine); err == nil && known && !enabled && !old.Running {
 		resume = false
 	}
-	if (changed && old.Running) || resume {
+	if !activationBlocked && ((changed && old.Running) || resume) {
 		if err := e.doStart(ctx, st, p.Engine, startOpts{RequireOwned: true}); err != nil {
 			e.emitState(p.Engine)
 			return e.launchStateLocked(p.Engine, st), err

@@ -28,7 +28,7 @@ import (
 func residentNativeFixture(t *testing.T) (llamaServingFixture, *loadedLlamaFake, nodepolicy.ReconcileResidentParams) {
 	t.Helper()
 	f, server := residentOwnedFixture(t, "resident-model")
-	f.ex.nodeProjection.set(nodeProjection{})
+	f.ex.nodeProjection.set(nodeProjection{ManagementBlocked: false})
 	if err := f.ex.desired.set("fake", true, intentLocal); err != nil {
 		t.Fatal(err)
 	}
@@ -124,7 +124,7 @@ func TestResidentDailyAdapterNativeRequirements(t *testing.T) {
 	test := func(name, retention string, count int, want string) {
 		t.Run(name, func(t *testing.T) {
 			f, server := residentOwnedRetentionFixture(t, "resident-model", retention)
-			f.ex.nodeProjection.set(nodeProjection{})
+			f.ex.nodeProjection.set(nodeProjection{ManagementBlocked: false})
 			if err := f.ex.desired.set("fake", true, intentLocal); err != nil {
 				t.Fatal(err)
 			}
@@ -509,7 +509,7 @@ func newResidentFixture(t *testing.T) *residentFixture {
 		"delete_model":  {HTTP: &ActionHTTP{Method: http.MethodDelete, Path: "/forbidden/delete"}},
 		"arbitrary":     {HTTP: &ActionHTTP{Method: http.MethodPost, Path: "/forbidden/action"}},
 	}
-	ex.nodeProjection.set(nodeProjection{})
+	ex.nodeProjection.set(nodeProjection{ManagementBlocked: false})
 	if err := ex.desired.set("fake", true, intentLocal); err != nil {
 		t.Fatal(err)
 	}
@@ -753,7 +753,15 @@ func TestResidentRefusesWithoutSideEffects(t *testing.T) {
 		})
 	}
 	test("unknown projection after restart", "projection-unknown", func(f *residentFixture) { f.ex.nodeProjection = nodeProjectionStore{} })
-	test("paused locally edited policy", "paused-local", func(f *residentFixture) { f.ex.nodeProjection.set(nodeProjection{PausedLocally: true}) })
+	test("paused locally edited policy", "paused", func(f *residentFixture) {
+		f.ex.nodeProjection.set(nodeProjection{PausedLocally: true, ManagementBlocked: true})
+	})
+	test("paused by peer", "paused", func(f *residentFixture) { f.ex.nodeProjection.set(nodeProjection{ManagementBlocked: true}) })
+	test("engine locked", "engine-locked", func(f *residentFixture) {
+		if _, err := f.ex.desired.setLocked("fake", true); err != nil {
+			t.Fatal(err)
+		}
+	})
 	test("missing installed model", "not-installed", func(f *residentFixture) { f.ex.inventory["fake"] = []string{} })
 	test("unknown installed inventory", "not-installed", func(f *residentFixture) { delete(f.ex.inventory, "fake") })
 	test("implicit binding", "unsupported-load", func(f *residentFixture) { delete(f.ex.reg.engines["fake"].Operations, engines.OperationLoad) })
@@ -790,12 +798,12 @@ func TestResidentRefusesWithoutSideEffects(t *testing.T) {
 			t.Fatal(err)
 		}
 	})
-	test("local Off", "engine-off-local", func(f *residentFixture) {
+	test("local Off", "engine-off", func(f *residentFixture) {
 		if err := f.ex.desired.set("fake", false, intentLocal); err != nil {
 			t.Fatal(err)
 		}
 	})
-	test("legacy Off", "engine-off-local", func(f *residentFixture) {
+	test("legacy Off", "engine-off", func(f *residentFixture) {
 		if err := f.ex.desired.save(desiredStateFile{Engines: map[string]bool{"fake": false}}); err != nil {
 			t.Fatal(err)
 		}
@@ -840,8 +848,10 @@ func TestResidentPostLockVeto(t *testing.T) {
 			f.noCalls(t)
 		})
 	}
-	test("projection pause wins", func(f *residentFixture) { f.ex.nodeProjection.set(nodeProjection{PausedLocally: true}) })
-	test("Off provenance wins", func(f *residentFixture) {
+	test("projection pause wins", func(f *residentFixture) {
+		f.ex.nodeProjection.set(nodeProjection{PausedLocally: true, ManagementBlocked: true})
+	})
+	test("saved Off wins", func(f *residentFixture) {
 		if err := f.ex.desired.set("fake", false, intentLocal); err != nil {
 			t.Fatal(err)
 		}
@@ -1152,7 +1162,7 @@ func TestResidentLifecycleWaitCancelled(t *testing.T) {
 func TestResidentVetoDuringFinalGrant(t *testing.T) {
 	f := newResidentFixture(t)
 	f.grant = func(req residentDispatchRequest) {
-		f.m.applyNodeProjection(&Message{Params: json.RawMessage(`{"policy":{"revision":"1","roles":{}},"pausedLocally":true}`)})
+		f.m.applyNodeProjection(&Message{Params: json.RawMessage(`{"policy":{"revision":"1","roles":{}},"pausedLocally":true,"managementBlocked":true}`)})
 		f.reply(t, req.ID, nodepolicy.DispatchResidentResult{Dispatched: true})
 	}
 	if result := f.run(t); result.Outcome != nodepolicy.ResidentNotDispatched {

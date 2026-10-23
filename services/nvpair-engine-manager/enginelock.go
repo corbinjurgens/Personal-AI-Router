@@ -6,11 +6,11 @@ package main
 // enginelock.go is the local-only engine:set-lock surface. A lock is a
 // per-engine activation prohibition only a client on the engine's own node may
 // set or clear: no ec route reaches it and the request names no node, caller
-// or origin. The request contract is fixed here; until lock enforcement lands
-// the method refuses every well-formed request without changing state.
+// or origin.
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -18,9 +18,6 @@ import (
 )
 
 const setLockMethod = "engine:set-lock"
-
-// engineLockUnavailableMessage is the stub's refusal of a well-formed request.
-const engineLockUnavailableMessage = "Engine locking is not available yet."
 
 // setLockParams is the engine:set-lock request.
 type setLockParams struct {
@@ -88,12 +85,101 @@ func checkSetLockMembers(raw json.RawMessage) error {
 	return nil
 }
 
-// runSetLock answers engine:set-lock. A malformed request is invalid params;
-// a well-formed one is refused as unavailable and changes nothing.
+func (e *Executor) setEngineLocked(engine string, locked bool) error {
+	st, err := e.state(engine)
+	if err != nil {
+		return err
+	}
+	st.lockMu.Lock()
+	defer st.lockMu.Unlock()
+	return e.setEngineLockedCommand(st, engine, locked)
+}
+
+// Caller holds lockMu through its acknowledgement. Ordinary mutation admission
+// remains live until physical stop and state publication have finished.
+func (e *Executor) setEngineLockedCommand(st *engineState, engine string, locked bool) error {
+	done, err := e.admitMutation(engine)
+	if err != nil {
+		return err
+	}
+	defer done()
+	intentChanged, err := e.desired.setLocked(engine, locked)
+	if err != nil {
+		return fmt.Errorf("persist %s lock state: %w", engine, err)
+	}
+	if intentChanged {
+		e.emitIntent()
+	}
+	e.emitState(engine)
+	if !locked {
+		return nil
+	}
+	veto := &localVetoError{code: codeEngineLocked, reason: engineLockedVeto(engine)}
+	e.remoteWork.cancelEngine(engine, veto)
+	st.mu.Lock()
+	if st.startCancel != nil {
+		st.startCancel(veto)
+	}
+	st.mu.Unlock()
+	relaunchDone := cancelCrashRelaunch(st)
+	finishLoads := stopServingLoadsWithCause(st, veto)
+	defer finishLoads()
+	if relaunchDone != nil {
+		<-relaunchDone
+	}
+	st.opMu.Lock()
+	defer st.opMu.Unlock()
+	installed, _ := e.Detect(engine)
+	st.mu.Lock()
+	port := st.port
+	st.mu.Unlock()
+	// Reclaim by managed image and private port before readiness adoption: an
+	// orphan may be unhealthy or absent from this manager's runtime state.
+	if reclaimed, err := e.reclaimOrphan(context.Background(), st, engine, port); err != nil {
+		st.mu.Lock()
+		pid := st.reclaimPID
+		st.mu.Unlock()
+		running := !e.waitUnavailable(st.plat.Runtime.Ready, port, presenceRefusalWindow) || !orphanPIDExited(pid)
+		st.mu.Lock()
+		st.reclaimFailed = true
+		st.running, st.healthy, st.adopted = running, false, running
+		st.mu.Unlock()
+		e.emitState(engine)
+		return fmt.Errorf("lock %s: %w", engine, err)
+	} else if !reclaimed {
+		e.reconcilePresence(context.Background(), engine, st, installed, port, true)
+	}
+	if err := e.doStop(st, engine); err != nil {
+		return fmt.Errorf("lock %s: %w", engine, err)
+	}
+	if !e.switchTerminated(st) {
+		e.emitState(engine)
+		return fmt.Errorf("lock %s: termination could not be verified", engine)
+	}
+	return nil
+}
+
+// runSetLock answers the local-only engine:set-lock method.
 func (m *Manager) runSetLock(msg *Message) {
-	if _, _, err := m.exec.parseSetLock(msg.Params); err != nil {
+	go m.setLockCommand(msg)
+}
+
+func (m *Manager) setLockCommand(msg *Message) {
+	engine, locked, err := m.exec.parseSetLock(msg.Params)
+	if err != nil {
 		m.codec.RespondError(msg.ID, -32602, err.Error())
 		return
 	}
-	m.codec.RespondError(msg.ID, -32000, engineLockUnavailableMessage)
+	st, err := m.exec.state(engine)
+	if err != nil {
+		m.codec.RespondError(msg.ID, rpcCode(err), err.Error())
+		return
+	}
+	st.lockMu.Lock()
+	defer st.lockMu.Unlock()
+	if err := m.exec.setEngineLockedCommand(st, engine, locked); err != nil {
+		m.codec.RespondError(msg.ID, rpcCode(err), err.Error())
+		return
+	}
+	m.codec.Respond(msg.ID, nil)
 }

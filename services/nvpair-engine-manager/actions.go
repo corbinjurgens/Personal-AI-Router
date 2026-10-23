@@ -92,6 +92,7 @@ func (e *Executor) Action(ctx context.Context, engine, action string, params jso
 		// mutation. A multiply-bound action never acquires contentMu under opMu.
 		defer releaseServingLoad()
 		res, err := e.dispatchAction(loadCtx, st, engine, action, act, params)
+		err = vetoCause(loadCtx, err)
 		// Authorization and dispatch share opMu. The existing restart owner
 		// takes it itself, so release the load guard before that step.
 		releaseServingLoad()

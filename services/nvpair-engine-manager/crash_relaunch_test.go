@@ -126,7 +126,7 @@ func TestCrashRelaunchPauseAtReadinessStopsUncommittedChild(t *testing.T) {
 	if err != nil {
 		t.Fatalf("engine state: %v", err)
 	}
-	params, err := json.Marshal(nodeProjection{PausedLocally: true})
+	params, err := json.Marshal(nodeProjection{PausedLocally: true, ManagementBlocked: true})
 	if err != nil {
 		t.Fatalf("encode pause: %v", err)
 	}
@@ -206,7 +206,7 @@ func TestCrashRelaunchPauseDuringIdentityProbeNeverAdopts(t *testing.T) {
 	// This listener is test-owned, not manager-owned and outside its managed
 	// install root. Cancellation must neither adopt nor signal it.
 	listener := spawnFakeListener(t, fakeEngineBin, port)
-	params, err := json.Marshal(nodeProjection{PausedLocally: true})
+	params, err := json.Marshal(nodeProjection{PausedLocally: true, ManagementBlocked: true})
 	if err != nil {
 		t.Fatalf("encode pause: %v", err)
 	}
@@ -314,14 +314,18 @@ func TestCrashRelaunchExplicitLocalStartWhilePausedRemainsAuthorized(t *testing.
 	st.mu.Lock()
 	st.relaunch = recovery
 	st.mu.Unlock()
-	params, err := json.Marshal(nodeProjection{PausedLocally: true})
+	params, err := json.Marshal(nodeProjection{PausedLocally: true, ManagementBlocked: true})
 	if err != nil {
 		t.Fatalf("encode pause projection: %v", err)
 	}
 	manager := &Manager{exec: ex}
 	manager.applyNodeProjection(&Message{Params: params})
+	if err := ex.Start(context.Background(), "fake"); rpcCode(err) != codeLocalVeto {
+		t.Fatalf("explicit local start while paused = %v, want -32011", err)
+	}
+	ex.nodeProjection.set(nodeProjection{ManagementBlocked: false})
 	if err := ex.Start(context.Background(), "fake"); err != nil {
-		t.Fatalf("explicit local start while paused: %v", err)
+		t.Fatalf("explicit local start after resume: %v", err)
 	}
 	st.mu.Lock()
 	defer st.mu.Unlock()
@@ -369,7 +373,7 @@ func TestCrashRelaunchPauseDuringOperationWaitCancels(t *testing.T) {
 			t.Fatal("recovery did not enter mutation admission")
 		}
 	}
-	params, err := json.Marshal(nodeProjection{PausedLocally: true})
+	params, err := json.Marshal(nodeProjection{PausedLocally: true, ManagementBlocked: true})
 	if err != nil {
 		t.Fatalf("encode pause projection: %v", err)
 	}
@@ -477,7 +481,7 @@ func TestCrashRelaunchCancelledByIntentionalStop(t *testing.T) {
 						t.Fatalf("explicit stop: %v", err)
 					}
 				case "pause sleep":
-					ex.nodeProjection.set(nodeProjection{PausedLocally: true})
+					ex.nodeProjection.set(nodeProjection{PausedLocally: true, ManagementBlocked: true})
 					if err := ex.Sleep("fake"); err != nil {
 						t.Fatalf("pause sleep: %v", err)
 					}
