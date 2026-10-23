@@ -356,11 +356,14 @@ func TestPauseReplaySkipsRestoreForEveryOrigin(t *testing.T) {
 }
 
 // An engine this host cannot run is reported stopped and refuses Sleep. Pause
-// must not fail on it when the final readback shows nothing running.
+// must not fail on it when the descriptor confirms no host-platform block and
+// the final readback shows nothing running.
 func TestPauseIgnoresSleepRefusalFromAnEngineReportedStopped(t *testing.T) {
 	b, _, _, engine := pausingBroker(t, nodepolicy.PauseConfig{OnActive: nodepolicy.FinishActive})
 	engine.setAnswer(func(method string, raw json.RawMessage) (any, string) {
 		switch method {
+		case "engine:descriptors":
+			return json.RawMessage(`{"engines":[{"version":1,"engine":"custom","available":false}]}`), ""
 		case "engine:get-installed":
 			return map[string]any{"engines": []any{
 				map[string]any{"engine": "ollama", "running": false},
@@ -384,5 +387,105 @@ func TestPauseIgnoresSleepRefusalFromAnEngineReportedStopped(t *testing.T) {
 	state, err := b.setAvailability(context.Background(), nodepolicy.Paused, nodepolicy.PausedLocally)
 	if err != nil || state != nodepolicy.Paused {
 		t.Fatalf("pause = %s, %v; want paused despite the unsupported engine's sleep refusal", state, err)
+	}
+}
+
+func requireUnverifiedPauseFence(t *testing.T, b *Broker, proxy *fakeWorker, out *syncBuffer) {
+	t.Helper()
+	r := b.nodePolicyRuntime()
+	r.mu.Lock()
+	live, blocked, proxyErr := r.live, r.managementBlockedLocked(), r.availabilityErr
+	r.mu.Unlock()
+	if live != nodepolicy.Draining || !blocked || proxyErr != "" || b.localPolicy().Policy.Availability != nodepolicy.Paused {
+		t.Fatalf("unverified shutdown lost its fence: live=%s blocked=%v proxyErr=%q policy=%+v", live, blocked, proxyErr, b.localPolicy().Policy)
+	}
+	pushes := availabilityPushes(proxy.snapshot())
+	if len(pushes) == 0 || pushes[len(pushes)-1].State != nodepolicy.Draining {
+		t.Fatalf("unverified shutdown did not advertise draining: %+v", pushes)
+	}
+	for _, push := range pushes {
+		if push.State == nodepolicy.Paused {
+			t.Fatalf("unverified shutdown published paused to proxy: %+v", push)
+		}
+	}
+	var announcements int
+	for _, frame := range out.frames() {
+		if frame.Method != notifyAvailabilityChanged {
+			continue
+		}
+		var announcement struct {
+			Availability nodepolicy.Availability `json:"availability"`
+		}
+		if err := json.Unmarshal(frame.Params, &announcement); err != nil {
+			t.Fatalf("decode availability announcement: %v", err)
+		}
+		if announcement.Availability != nodepolicy.Draining {
+			t.Fatalf("unverified shutdown announced %s", announcement.Availability)
+		}
+		announcements++
+	}
+	if announcements == 0 {
+		t.Fatal("unverified shutdown did not announce draining to clients")
+	}
+}
+
+func TestPauseFailedSleepRequiresUnsupportedEngineProof(t *testing.T) {
+	const stopped = `{"engines":[{"engine":"ollama","running":false}]}`
+	const unsupported = `{"engines":[{"version":1,"engine":"ollama","available":false}]}`
+	for _, tc := range []struct {
+		name            string
+		inventory       string
+		inventoryError  string
+		descriptors     string
+		descriptorError string
+		wantDetail      string
+	}{
+		{name: "failed reclaim with surviving PID", inventory: stopped, descriptors: `{"engines":[{"version":1,"engine":"ollama","available":true}]}`, wantDetail: "ollama: stop unverified"},
+		{name: "descriptor unavailable", inventory: stopped, descriptorError: "descriptors unavailable", wantDetail: "ollama: stop unverified"},
+		{name: "descriptor missing engines", inventory: stopped, descriptors: `{}`, wantDetail: "ollama: stop unverified"},
+		{name: "descriptor missing availability", inventory: stopped, descriptors: `{"engines":[{"version":1,"engine":"ollama"}]}`, wantDetail: "ollama: stop unverified"},
+		{name: "descriptor null availability", inventory: stopped, descriptors: `{"engines":[{"version":1,"engine":"ollama","available":null}]}`, wantDetail: "ollama: stop unverified"},
+		{name: "descriptor unknown version", inventory: stopped, descriptors: `{"engines":[{"version":2,"engine":"ollama","available":false}]}`, wantDetail: "ollama: stop unverified"},
+		{name: "descriptor omits engine", inventory: stopped, descriptors: `{"engines":[]}`, wantDetail: "ollama: stop unverified"},
+		{name: "descriptor duplicate engine", inventory: stopped, descriptors: `{"engines":[{"version":1,"engine":"ollama","available":true},{"version":1,"engine":"ollama","available":false}]}`, wantDetail: "ollama: stop unverified"},
+		{name: "descriptor truncated entry", inventory: stopped, descriptors: `{"engines":[{}]}`, wantDetail: "ollama: stop unverified"},
+		{name: "final inventory unavailable", inventoryError: "inventory unavailable", descriptors: unsupported, wantDetail: "engine shutdown readback unavailable"},
+		{name: "final inventory missing engines", inventory: `{}`, descriptors: unsupported, wantDetail: "engine shutdown readback unavailable"},
+		{name: "final inventory truncated entry", inventory: `{"engines":[{}]}`, descriptors: unsupported, wantDetail: "engine shutdown readback unavailable"},
+		{name: "final inventory missing running", inventory: `{"engines":[{"engine":"ollama"}]}`, descriptors: unsupported, wantDetail: "engine shutdown readback unavailable"},
+		{name: "final inventory null running", inventory: `{"engines":[{"engine":"ollama","running":null}]}`, descriptors: unsupported, wantDetail: "engine shutdown readback unavailable"},
+		{name: "final inventory omits failed engine", inventory: `{"engines":[]}`, descriptors: unsupported, wantDetail: "ollama: stop unverified"},
+		{name: "final inventory duplicate engine", inventory: `{"engines":[{"engine":"ollama","running":true},{"engine":"ollama","running":false}]}`, descriptors: unsupported, wantDetail: "engine shutdown readback unavailable"},
+		{name: "unsupported descriptor cannot override running", inventory: `{"engines":[{"engine":"ollama","running":true}]}`, descriptors: unsupported, wantDetail: "ollama: still running"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b, out, proxy, engine := pausingBroker(t, nodepolicy.PauseConfig{OnActive: nodepolicy.FinishActive})
+			reads := 0
+			engine.setAnswer(func(method string, _ json.RawMessage) (any, string) {
+				switch method {
+				case "engine:get-installed":
+					reads++
+					if reads == 1 {
+						return json.RawMessage(stopped), ""
+					}
+					return json.RawMessage(tc.inventory), tc.inventoryError
+				case "engine:descriptors":
+					return json.RawMessage(tc.descriptors), tc.descriptorError
+				case "engine:models":
+					return map[string]any{"loadedByEngine": map[string][]string{}}, ""
+				case engineSleepMethod:
+					return nil, `cannot stop engine "ollama": orphan termination could not be verified`
+				}
+				return map[string]bool{"ok": true}, ""
+			})
+			state, err := b.setAvailability(context.Background(), nodepolicy.Paused, nodepolicy.PausedLocally)
+			if err == nil || state != nodepolicy.Draining || policyErrorCode(err) != -32000 || !strings.HasPrefix(err.Error(), "Pause could not stop every engine: ") || !strings.Contains(err.Error(), tc.wantDetail) {
+				t.Fatalf("unverified pause = %s, %v; want draining/-32000 with %q", state, err, tc.wantDetail)
+			}
+			if reads != 2 || len(engine.methods(engineSleepMethod)) != 1 {
+				t.Fatalf("shutdown proof skipped lifecycle/readback: inventories=%d calls=%v", reads, engine.methods(""))
+			}
+			requireUnverifiedPauseFence(t, b, proxy, out)
+		})
 	}
 }

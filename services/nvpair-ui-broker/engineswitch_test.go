@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -748,6 +749,99 @@ func TestSwitchPauseRecoveryReleasesBeforePinnedShutdown(t *testing.T) {
 	}
 	test("local pause", nodepolicy.PausedLocally)
 	test("peer pause", nodepolicy.PausedByPeer)
+}
+
+func TestSwitchPauseRecoveryRequiresPhysicalStopProof(t *testing.T) {
+	const stopped = `{"engines":[{"engine":"llamacpp","running":false},{"engine":"lmstudio","running":false}]}`
+	for _, tc := range []struct {
+		name           string
+		inventory      string
+		inventoryError string
+		wantDetail     string
+	}{
+		{name: "failed reclaim with surviving PID", inventory: stopped, wantDetail: "llamacpp: stop unverified"},
+		{name: "final inventory unavailable", inventoryError: "inventory unavailable", wantDetail: "engine shutdown readback unavailable"},
+		{name: "final inventory truncated entry", inventory: `{"engines":[{}]}`, wantDetail: "engine shutdown readback unavailable"},
+		{name: "final inventory missing running", inventory: `{"engines":[{"engine":"llamacpp"},{"engine":"lmstudio","running":false}]}`, wantDetail: "engine shutdown readback unavailable"},
+		{name: "final inventory omits failed engine", inventory: `{"engines":[{"engine":"lmstudio","running":false}]}`, wantDetail: "llamacpp: stop unverified"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newSwitchHarness(t)
+			p := h.request(t, "unverified-pause-recovery")
+			p.NodeID = h.b.nodeID
+			r := switchStoreReceipt(p.RequestID)
+			r.NodeID, r.Caller = h.b.nodeID, "peer"
+			r.Request, r.ExpectedRevision, r.AcceptedRevision = p, p.ExpectedRevision, p.ExpectedRevision
+			r.PayloadHash = settings.SwitchPayloadHash(r.Caller, r.NodeID, p)
+			r.Source = switchTestState(true, true, settings.SwitchIntentOn)
+			r.Target = switchTestState(false, false, settings.SwitchIntentOff)
+			switchStoreAccept(t, h.b.engineSwitch.store, r)
+			if err := h.b.engineSwitch.store.SaveLocalObligation(p.RequestID, settings.SwitchLocalObligation{Pause: true}); err != nil {
+				t.Fatalf("save pause obligation: %v", err)
+			}
+			h.mu.Lock()
+			h.cp = &settings.SwitchCheckpoint{SwitchPrepareRequest: settings.SwitchPrepareRequest{
+				OperationID: p.RequestID, Caller: r.Caller, Origin: settings.SwitchOriginRemote,
+				SourceEngine: p.SourceEngine, TargetEngine: p.TargetEngine, PayloadHash: r.PayloadHash,
+				ConfigurationFence: settings.SwitchConfigurationToken(h.config), Deadline: r.Deadline,
+			}, Phase: settings.SwitchCheckpointReserved, Source: r.Source, Target: r.Target}
+			h.mu.Unlock()
+			runtime := h.b.nodePolicyRuntime()
+			runtime.mu.Lock()
+			runtime.current.Availability, runtime.current.PausedBy = nodepolicy.Paused, nodepolicy.PausedByPeer
+			runtime.live = nodepolicy.Paused
+			runtime.mu.Unlock()
+			worker := hideSwitchRecoveryManager(t, h.b)
+			base := h.engine.answer
+			reads := 0
+			h.engine.setAnswer(func(method string, raw json.RawMessage) (any, string) {
+				switch method {
+				case "engine:get-installed":
+					reads++
+					if reads == 1 {
+						// Failed reclaim is fenced but not proof of process exit.
+						return json.RawMessage(stopped), ""
+					}
+					return json.RawMessage(tc.inventory), tc.inventoryError
+				case "engine:descriptors":
+					return json.RawMessage(`{"engines":[{"version":1,"engine":"llamacpp","available":true},{"version":1,"engine":"lmstudio","available":true}]}`), ""
+				case engineSleepMethod:
+					var p struct {
+						Engine string `json:"engine"`
+					}
+					if err := json.Unmarshal(raw, &p); err != nil {
+						return nil, err.Error()
+					}
+					if p.Engine == "llamacpp" {
+						return nil, `cannot stop engine "llamacpp": orphan termination could not be verified`
+					}
+				}
+				return base(method, raw)
+			})
+			if h.b.recoverEngineSwitchOn(worker) {
+				t.Fatal("replacement accepted unverified termination as physical pause")
+			}
+			err := h.b.engineSwitch.recoveryErr
+			if err == nil || policyErrorCode(err) != -32000 || !strings.HasPrefix(err.Error(), "Pause could not stop every engine: ") || !strings.Contains(err.Error(), tc.wantDetail) {
+				t.Fatalf("replacement recovery error = %v; want -32000 with %q", err, tc.wantDetail)
+			}
+			disk := switchStoreDisk(t, h.b.engineSwitch.store)
+			o, ok := disk.LocalObligations[p.RequestID]
+			if !ok || !o.Pause || o.PauseApplied || o.Discharged || !disk.Receipts[p.RequestID].RecoveryRequired || h.b.engineSwitch.resolved[p.RequestID] {
+				t.Fatalf("unverified shutdown discharged durable work: obligation=%+v receipt=%+v resolved=%v", o, disk.Receipts[p.RequestID], h.b.engineSwitch.resolved[p.RequestID])
+			}
+			if h.b.getEngineMgr() != nil || len(h.engine.methods("engine:switch-recovery-ready")) != 0 {
+				t.Fatal("unverified shutdown acknowledged readiness or exposed the replacement")
+			}
+			h.mu.Lock()
+			phase, targetSlept := h.cp.Phase, h.sleeping[p.TargetEngine]
+			h.mu.Unlock()
+			if reads != 2 || phase != settings.SwitchCheckpointReleased || !targetSlept {
+				t.Fatalf("recovery did not reach physical proof or continue other stops: reads=%d phase=%s targetSlept=%v", reads, phase, targetSlept)
+			}
+			requireUnverifiedPauseFence(t, h.b, h.proxy, h.output)
+		})
+	}
 }
 
 func TestSwitchRelayCancellationRetiresOnlyWaiter(t *testing.T) {

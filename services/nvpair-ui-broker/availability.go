@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"nvpair-shared/durablefile"
+	"nvpair-shared/engines"
 	"nvpair-shared/nodepolicy"
 )
 
@@ -324,9 +325,8 @@ func (b *Broker) pauseEnginesOn(ctx context.Context, worker *rpcWorker) error {
 		}
 	}
 	var failures []string
-	// A failed sleep is only a failure when the final readback does not show the
-	// engine stopped: an engine this host cannot run is reported stopped, and
-	// refuses Sleep.
+	// running:false can also mean failed orphan reclamation with a surviving
+	// process. Only a host-unsupported engine may refuse Sleep benignly.
 	stopFailed := make(map[string]bool)
 	if inventoryErr != nil {
 		failures = append(failures, "engine inventory unavailable")
@@ -361,6 +361,10 @@ func (b *Broker) pauseEnginesOn(ctx context.Context, worker *rpcWorker) error {
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
+	var unsupported map[string]bool
+	if len(stopFailed) > 0 {
+		unsupported = pauseUnsupportedEngines(ctx, worker)
+	}
 	stopped, verifyErr := pauseEngineInventory(ctx, worker)
 	b.workersMu.Lock()
 	current := worker != nil && b.engineMgr == worker
@@ -382,6 +386,8 @@ func (b *Broker) pauseEnginesOn(ctx context.Context, worker *rpcWorker) error {
 			known[engine] = true
 			if running {
 				failures = append(failures, engine+": still running")
+			} else if stopFailed[engine] && !unsupported[engine] {
+				failures = append(failures, engine+": stop unverified")
 			}
 		}
 		for engine := range known {
@@ -524,9 +530,48 @@ func pauseEngineInventory(ctx context.Context, worker *rpcWorker) (map[string]bo
 		if engine.Engine == "" || engine.Running == nil {
 			return nil, errors.New("engine running state is incomplete")
 		}
+		if _, duplicate := engines[engine.Engine]; duplicate {
+			return nil, errors.New("engine inventory contains duplicate engines")
+		}
 		engines[engine.Engine] = *engine.Running
 	}
 	return engines, nil
+}
+
+// pauseUnsupportedEngines reads the same worker's immutable registry, rather
+// than the broker's startup catalog (which omits unavailable engines). The
+// descriptor's available flag means a host-platform block exists, not health
+// or installation state. Without that block Executor.state cannot create a
+// process, so a stopped inventory entry can safely satisfy a failed Sleep.
+// Missing, malformed or unknown-version evidence never forgives a failure.
+func pauseUnsupportedEngines(ctx context.Context, worker *rpcWorker) map[string]bool {
+	ctx, cancel := context.WithTimeout(ctx, engineDescriptorsTimeout)
+	defer cancel()
+	raw, err := callEngineOn(ctx, worker, "engine:descriptors", nil)
+	if err != nil {
+		return nil
+	}
+	var descriptors struct {
+		Engines *[]struct {
+			Version   int    `json:"version"`
+			Engine    string `json:"engine"`
+			Available *bool  `json:"available"`
+		} `json:"engines"`
+	}
+	if err := json.Unmarshal(raw, &descriptors); err != nil || descriptors.Engines == nil {
+		return nil
+	}
+	unsupported := make(map[string]bool)
+	for _, descriptor := range *descriptors.Engines {
+		if descriptor.Version != engines.DescriptorVersion || !engines.ValidID(descriptor.Engine) || descriptor.Available == nil {
+			return nil
+		}
+		if _, duplicate := unsupported[descriptor.Engine]; duplicate {
+			return nil
+		}
+		unsupported[descriptor.Engine] = !*descriptor.Available
+	}
+	return unsupported
 }
 
 func pauseModelInventory(ctx context.Context, worker *rpcWorker) (map[string][]string, error) {

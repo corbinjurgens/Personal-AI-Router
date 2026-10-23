@@ -676,6 +676,13 @@ proxy enforces it.
   other engines, and returns `-32000` with `Pause could not stop every engine: `
   plus bounded operational detail. Failed unload is satisfied by verified
   process termination. A local Pause retries incomplete work.
+  A failed Sleep is not satisfied by `running:false` alone: failed orphan
+  reclamation can report that state while termination is unverified. It is
+  forgiven only when the same worker's `engine:descriptors` explicitly reports
+  `available:false` (no host-platform block) and final inventory reports the
+  engine stopped. Missing or malformed evidence keeps shutdown unverified.
+  Replacement recovery uses this same proof before settling pause obligations
+  or acknowledging readiness.
   `pause.unloadModels` and `pause.stopEngines` are obsolete input kept in schema
   version 2: a file, a local `policy:set` or an older peer's relayed set may
   carry either bool, and parsing normalizes both to `true`, so every stored

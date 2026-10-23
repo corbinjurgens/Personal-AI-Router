@@ -243,6 +243,8 @@ func (b *Broker) recoverEngineSwitchPauseOnTransitionLocked(w *rpcWorker, resume
 		runtime.live = nodepolicy.Draining
 		runtime.mu.Unlock()
 		b.engineConfigMu.Unlock()
+		// Use the ordinary pause proof: running:false cannot forgive a failed
+		// Sleep on a host-supported engine, including failed orphan reclaim.
 		err := b.pauseEnginesOn(ctx, w)
 		b.engineConfigMu.Lock()
 		if err != nil {
