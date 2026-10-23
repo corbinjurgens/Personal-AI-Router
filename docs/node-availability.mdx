@@ -181,8 +181,9 @@ change is refused with `-32000` while the engine is reserved by an engine switch
 
 When more than one applies, the permission check comes first, then the pause,
 then the lock. A local Stop that cancels an accepted peer operation also reports
-`-32011`, with the message `<engine> was turned off on the node itself; start it
-there`; it does not refuse later operations.
+`-32011`, with this message:
+`<engine> was turned off on the node itself; start it there`. It does not refuse
+later operations.
 
 ## Saved Off no longer blocks a granted peer
 
@@ -219,10 +220,14 @@ A router uses the hint in two ways:
   candidates for an inference request, including a request with no `model`. The
   router's own node is never removed this way, and goes through its own
   admission. Model lists and control requests do not use this filter, so the
-  paused node still appears in inventory. If every candidate is paused, a request
-  naming a model receives `502` with `no available node advertises the requested
-  model`, and a request for the `strong` tier alias receives `404` with `no
-  eligible model for tier strong`.
+  paused node still appears in inventory. If pause hints exclude every remote
+  candidate and no self candidate remains, a request naming a model receives
+  `502` with this message:
+  `no available node advertises the requested model`
+  and a request for the `strong` tier alias receives `404` with this message:
+  `no eligible model for tier strong`
+  A paused self candidate stays eligible and is refused by its own admission
+  with `503` instead.
 - **Display.** The desktop shows the paused message for a paired node that is
   paused or draining, and the terminal interface shows the origin.
 
