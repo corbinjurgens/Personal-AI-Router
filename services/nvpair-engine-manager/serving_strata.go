@@ -238,6 +238,10 @@ type strataServingConfig struct {
 	GPU          *int64            `json:"gpu,omitempty"`
 	FitMaxTokens *bool             `json:"fit_max_tokens,omitempty"`
 
+	// APIKey is bound but never forwarded in the snapshot: the server gets it
+	// as STRATA_API_KEY, and PAIR's own requests to this engine carry it.
+	APIKey *string `json:"api_key,omitempty"`
+
 	BuildMetadata *string `json:"build_metadata,omitempty"`
 	GPUsAsked     *bool   `json:"gpus_asked,omitempty"`
 	Port          *int64  `json:"port,omitempty"`
@@ -259,6 +263,10 @@ var strataEnvironment = map[string]func(string) bool{
 }
 
 var strataKVFormats = []string{"fp16", "int8", "q4_0", "q4", "k8v4"}
+
+// strataAPIKeyPattern is printable ASCII without spaces or commas, which the
+// server would read as a list of keys.
+var strataAPIKeyPattern = regexp.MustCompile(`^[\x21-\x2b\x2d-\x7e]{16,512}$`)
 
 var strataDecimalPattern = regexp.MustCompile(`^[0-9]{1,6}(\.[0-9]{1,6})?$`)
 
@@ -293,6 +301,11 @@ func validateStrataExtras(config strataServingConfig) error {
 	}
 	if config.OpenBrowser != nil && *config.OpenBrowser {
 		return strataUnreviewed("open_browser")
+	}
+	// One key in the server's single-key form. Its lists and blank keys are
+	// refused, and the reason never repeats the value.
+	if config.APIKey != nil && !strataAPIKeyPattern.MatchString(*config.APIKey) {
+		return strataUnreviewed("api_key")
 	}
 	if config.Log != nil {
 		path := *config.Log
@@ -735,7 +748,10 @@ func deriveStrataServing(command launchCommand, rt Runtime) (*llamaServingLaunch
 		placement = append(placement, "env:"+name+"="+config.Env[name])
 	}
 	forwarded := config
-	forwarded.BuildMetadata, forwarded.GPUsAsked, forwarded.Port, forwarded.Host, forwarded.OpenBrowser = nil, nil, nil, nil, nil
+	forwarded.BuildMetadata, forwarded.GPUsAsked, forwarded.Port, forwarded.Host, forwarded.OpenBrowser, forwarded.APIKey = nil, nil, nil, nil, nil, nil
+	if config.APIKey != nil {
+		result.Credential = *config.APIKey
+	}
 	result.Snapshot, err = json.Marshal(forwarded)
 	if err != nil || len(result.Snapshot) > servingSmallFileLimit {
 		return nil, servingError("Cannot prepare bounded Strata config snapshot.")

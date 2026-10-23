@@ -594,10 +594,11 @@ func TestStrataCurrentForkSnapshotAndPlacement(t *testing.T) {
 	}
 }
 
-// api_key and memory_policy each keep the otherwise accepted profile rejected.
+// memory_policy keeps the otherwise accepted profile rejected; api_key, bound with
+// the local credential path, no longer does.
 func TestStrataCurrentForkFailClosedFields(t *testing.T) {
 	c := loadForkContract(t)
-	for _, key := range []string{"api_key", "memory_policy"} {
+	for _, key := range []string{"memory_policy"} {
 		t.Run(key, func(t *testing.T) {
 			f := newForkProfileFixture(t, c)
 			raw := forkPeeled(t, c, f.root)

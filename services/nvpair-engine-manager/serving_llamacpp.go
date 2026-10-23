@@ -49,6 +49,10 @@ type llamaServingLaunch struct {
 	Snapshot  []byte
 	Source    string
 	Digest    string
+	// Credential is the native API key of a Strata launch. It reaches the
+	// server only through the child environment, never the snapshot, and is
+	// never serialized.
+	Credential string `json:"-"`
 }
 
 type llamaServingSnapshot struct {

@@ -16,6 +16,7 @@ import (
 
 	"nvpair-shared/applog"
 	"nvpair-shared/clustertrust"
+	"nvpair-shared/engines"
 	"nvpair-shared/nodepolicy"
 	"nvpair-shared/noderec"
 	"nvpair-shared/reach"
@@ -311,6 +312,15 @@ func (m *Manager) handleMessage(ctx context.Context, msg *Message) {
 			st, err := m.exec.StatusAtPort(p.Engine, p.Port)
 			m.respondOrErr(msg, st, err)
 		}()
+
+	// Only the broker calls this; it refuses the method from its clients.
+	case engines.LocalCredentialMethod:
+		var p engineParam
+		if !m.parse(msg, &p) {
+			return
+		}
+		credential, err := m.exec.LocalCredential(p.Engine)
+		m.respondOrErr(msg, credential, err)
 
 	case "engine:logs":
 		var p engineParam

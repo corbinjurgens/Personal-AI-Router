@@ -1614,7 +1614,7 @@ func (p *Proxy) handleMessage(msg *Message) {
 			return
 		}
 		slog.Info("local backend updated",
-			"engine", f.profile.Name, "host", b.Host, "port", b.Port, "healthy", b.Healthy)
+			"engine", f.profile.Name, "host", b.Host, "port", b.Port, "healthy", b.Healthy, "keyed", b.Credential != "")
 		if err := p.codec.Respond(msg.ID, map[string]bool{"ok": true}); err != nil {
 			log.Printf("failed to respond to node/set-local-backend: %v", err)
 		}

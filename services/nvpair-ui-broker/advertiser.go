@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"time"
 
+	"nvpair-shared/engines"
 	"nvpair-shared/httpcon"
 	"nvpair-shared/noderec"
 )
@@ -113,7 +114,7 @@ func (b *Broker) reconcileAdvertise(client *http.Client) {
 	// ports differ. Equal ports mean we can't tell the engine from the proxy
 	// (or there is no separate engine), and setting the local backend to the
 	// proxy's own port would make the ingress forward to itself.
-	up := probe && proxyPort != 0 && enginePort != proxyPort && checkEngineHealth(ollamaProxyProfile, client, enginePort)
+	up := probe && proxyPort != 0 && enginePort != proxyPort && checkEngineHealth(ollamaProxyProfile, client, enginePort, "")
 	if up {
 		b.registerService(noderec.RegisterParams{Service: noderec.ServiceOllama, Port: proxyPort})
 		b.setProxyLocalBackend(b.getProxy(), "ollama", enginePort, true)
@@ -190,7 +191,7 @@ func (b *Broker) reconcileAdvertiseLMStudio(client *http.Client) {
 	// cache while the proxy and engine restart together (as on the first invite),
 	// which later makes the compatibility proxy on the facade port look like the
 	// backend and wrongly disables managed mode.
-	up := probe && proxyPort != 0 && enginePort != proxyPort && checkEngineHealth(lmstudioProxyProfile, client, enginePort)
+	up := probe && proxyPort != 0 && enginePort != proxyPort && checkEngineHealth(lmstudioProxyProfile, client, enginePort, "")
 	if up {
 		b.registerService(noderec.RegisterParams{Service: noderec.ServiceLMStudio, Port: proxyPort})
 		b.setProxyLocalBackend(b.getLMStudioProxy(), "lmstudio", enginePort, true)
@@ -227,27 +228,36 @@ func (b *Broker) reconcileAdvertiseEngine(profile engineProxyProfile, client *ht
 
 	enginePort := int(b.engineProxy(profile).backendPort.Load())
 	proxyPort := b.engineProxyListenPort(profile)
+	credential := ""
+	if enginePort > 0 {
+		credential = b.localEngineCredential(profile.Name, enginePort)
+	}
 	up := enginePort > 0 &&
 		proxyPort > 0 &&
 		enginePort != proxyPort &&
-		checkEngineHealth(profile, client, enginePort)
+		checkEngineHealth(profile, client, enginePort, credential)
 	if up {
 		b.registerService(noderec.RegisterParams{Service: profile.DiscoveryService, Port: proxyPort})
-		b.setProxyLocalBackend(b.engineProxyHandle(profile), profile.Name, enginePort, true)
+		b.setProxyLocalBackendKeyed(b.engineProxyHandle(profile), profile.Name, enginePort, true, credential)
 		return
 	}
 	b.unregisterService(profile.DiscoveryService)
-	b.setProxyLocalBackend(b.engineProxyHandle(profile), profile.Name, enginePort, false)
+	b.setProxyLocalBackendKeyed(b.engineProxyHandle(profile), profile.Name, enginePort, false, "")
 }
 
 // proxyLocalBackend is the node/set-local-backend payload: the loopback engine
 // the proxy's cluster mTLS ingress forwards to, and the proxy's own self
 // candidate on the local routing path.
+//
+// Credential is the engine's native API key, when it has one. It is sent only
+// over the broker's private stdio channel to its own proxy, never logged, and
+// the proxy uses it only for that loopback engine.
 type proxyLocalBackend struct {
-	Engine  string `json:"engine"`
-	Host    string `json:"host"`
-	Port    int    `json:"port"`
-	Healthy bool   `json:"healthy"`
+	Engine     string `json:"engine"`
+	Host       string `json:"host"`
+	Port       int    `json:"port"`
+	Healthy    bool   `json:"healthy"`
+	Credential string `json:"credential,omitempty"`
 }
 
 // setProxyLocalBackend hands the proxy its local (loopback) engine endpoint, or
@@ -258,12 +268,49 @@ func (b *Broker) setProxyLocalBackend(p *proxyProcess, engine string, port int, 
 	if p == nil {
 		return
 	}
+	credential := ""
+	if healthy && port > 0 {
+		credential = b.localEngineCredential(engine, port)
+	}
+	b.setProxyLocalBackendKeyed(p, engine, port, healthy, credential)
+}
+
+// setProxyLocalBackendKeyed is setProxyLocalBackend with the credential the
+// caller already read for this port.
+func (b *Broker) setProxyLocalBackendKeyed(p *proxyProcess, engine string, port int, healthy bool, credential string) {
+	if p == nil {
+		return
+	}
 	b.callProxyManual(p, engine, "node/set-local-backend", proxyLocalBackend{
-		Engine:  engine,
-		Host:    "127.0.0.1",
-		Port:    port,
-		Healthy: healthy,
+		Engine:     engine,
+		Host:       "127.0.0.1",
+		Port:       port,
+		Healthy:    healthy,
+		Credential: credential,
 	}, "local-backend")
+}
+
+// localEngineCredential asks engine-manager for the native API key of the
+// engine's owned launch, and keeps it only when that launch serves the port
+// about to be configured. Any failure gives no key; the engine then rejects
+// PAIR's requests and is not advertised, with no unauthenticated fallback.
+func (b *Broker) localEngineCredential(engine string, port int) string {
+	em := b.getEngineMgr()
+	if em == nil {
+		return ""
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	params, _ := json.Marshal(map[string]string{"engine": engine})
+	result, rpcErr, err := em.Call(ctx, engines.LocalCredentialMethod, params)
+	if err != nil || rpcErr != nil {
+		return ""
+	}
+	var answer engines.LocalCredential
+	if json.Unmarshal(result, &answer) != nil || answer.Port != port {
+		return ""
+	}
+	return answer.Credential
 }
 
 // localEnginePort asks engine-manager for the port the named engine is actually
@@ -322,8 +369,21 @@ func (b *Broker) lmstudioProxyListenPort() int {
 // port, by probing the path its own liveness convention uses. The port is
 // resolved per poll (see localEnginePort) rather than hardcoded, so the proxy
 // is never mistaken for the engine it fronts.
-func checkEngineHealth(profile engineProxyProfile, client *http.Client, port int) bool {
-	resp, err := client.Get(fmt.Sprintf("http://localhost:%d%s", port, profile.HealthProbePath))
+//
+// With a native API key the probe carries it, and a redirect is answered as is
+// rather than followed with the key.
+func checkEngineHealth(profile engineProxyProfile, client *http.Client, port int, credential string) bool {
+	req, err := http.NewRequest(http.MethodGet, fmt.Sprintf("http://localhost:%d%s", port, profile.HealthProbePath), nil)
+	if err != nil {
+		return false
+	}
+	if credential != "" {
+		req.Header.Set("Authorization", "Bearer "+credential)
+		keyed := *client
+		keyed.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+		client = &keyed
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return false
 	}

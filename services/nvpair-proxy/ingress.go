@@ -28,11 +28,16 @@ const engineIdentityProbeHeader = "X-NVPAIR-Engine-Identity-Probe"
 // over the LAN mTLS ingress can only ever be dumped on this node's own local
 // engine, never re-routed to a peer, so the ingress path is strictly terminal
 // and cannot recurse or amplify.
+//
+// Credential is the engine's native API key, when it has one. It arrives only
+// over the broker's private channel, is never logged or advertised, and is sent
+// only to this loopback engine.
 type localBackend struct {
-	Engine  string `json:"engine"`
-	Host    string `json:"host"`
-	Port    int    `json:"port"`
-	Healthy bool   `json:"healthy"`
+	Engine     string `json:"engine"`
+	Host       string `json:"host"`
+	Port       int    `json:"port"`
+	Healthy    bool   `json:"healthy"`
+	Credential string `json:"credential,omitempty"`
 }
 
 // currentLocalBackend snapshots the configured local engine.

@@ -109,11 +109,11 @@
     {"key": "host", "class": "incompatibility", "decision": "agree", "outcome": "accepted", "strata": "serve/server.py:5819", "why": "The command line host wins; the config host must still be 127.0.0.1. Not forwarded."},
     {"key": "fit_max_tokens", "class": "incompatibility", "decision": "bind", "outcome": "accepted", "strata": "serve/server.py:5905", "why": "Output-fitting flag; forwarded as a boolean. It is not a hard output guarantee."},
     {"key": "open_browser", "class": "incompatibility", "decision": "ignore", "outcome": "accepted", "strata": "serve/server.py:6034", "why": "Only the --open command line flag opens a browser and PAIR never passes it. Only false is accepted; not forwarded."},
-    {"key": "api_key", "class": "fail-closed-until-task3", "decision": "keep rejecting", "outcome": "rejected", "strata": "serve/server.py:4587", "why": "Authentication must stay rejected until the complete host-local credential path exists."},
+    {"key": "api_key", "class": "fail-closed-until-task3", "decision": "bind", "outcome": "accepted", "strata": "serve/server.py:5776", "why": "One key in the server single-key form. Given to the server only as STRATA_API_KEY, never in the snapshot; PAIR requests to this engine carry it."},
     {"key": "memory_policy", "class": "approval-binding", "decision": "keep rejecting", "outcome": "rejected", "strata": "tools/prepare_unsloth_q2.py:566", "why": "Startup recomputes launch controls from live telemetry; binding the effective result is an open design choice."}
   ],
   "stages": [
-    {"id": "unsupported-top-level-fields", "fields": true, "class": "approval-binding", "expect": "Unsupported or malformed prepared Strata config.", "strata": "tools/prepare_unsloth_q2.py:518", "reason": "memory_policy and api_key stay rejected; every other generated field is now bound, agreed or ignored."},
+    {"id": "unsupported-top-level-fields", "fields": true, "class": "approval-binding", "expect": "Unsupported or malformed prepared Strata config.", "strata": "tools/prepare_unsloth_q2.py:518", "reason": "memory_policy stays rejected; every other generated field is now bound, agreed or ignored."},
     {"id": "automatic-expert-cache", "set_args": {"--expert-cache": "64"}, "class": "approval-binding", "expect": "explicit positive native int32", "strata": "tools/prepare_unsloth_q2.py:170", "reason": "Generated cache is auto; a fixed value needs an approval contract, not a silent substitution."}
   ],
   "variants": [

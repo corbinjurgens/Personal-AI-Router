@@ -107,6 +107,13 @@ func main() {
 			os.Exit(2)
 		}
 	}
+	// Records the native key a prepared Strata launch hands its server, which
+	// arrives only in the environment.
+	if path := os.Getenv("FAKE_API_KEY_LOG"); path != "" {
+		if os.WriteFile(path, []byte(os.Getenv("STRATA_API_KEY")), 0600) != nil {
+			os.Exit(2)
+		}
+	}
 	if path := os.Getenv("FAKE_START_LOG"); path != "" {
 		file, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
 		if err != nil {
