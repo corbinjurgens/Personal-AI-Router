@@ -5,6 +5,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/hex"
@@ -152,6 +153,17 @@ func (m *Manager) handleInviteNode(msg *Message) {
 // The caller has published the exact pending invite before any network I/O.
 func (m *Manager) completeInitialInvite(inviteID string, endpoints []string, cid string, sessGen0 uint64, allowRemoteManagement bool) map[string]any {
 	sess, pin, err := m.pairAtFirstWorkingEndpoint(inviteID, endpoints, cid, sessGen0, allowRemoteManagement)
+	if m.isJoinRequestInvite(inviteID) {
+		// A deadline can interrupt HTTP before the periodic request sweep. Settle
+		// expiry/cancel first so exchange cleanup preserves that terminal state.
+		m.inviteMu.Lock()
+		m.rosterMu.Lock()
+		m.joinMu.Lock()
+		m.reconcileJoinRequestsLocked()
+		m.joinMu.Unlock()
+		m.rosterMu.Unlock()
+		m.inviteMu.Unlock()
+	}
 	if err != nil {
 		var rej *pairingRejectedError
 		rejected := errors.As(err, &rej)
@@ -256,9 +268,16 @@ var errPairingAbandoned = errors.New("pairing abandoned: invite is no longer pen
 // (even on error) so the caller can gate the invite's terminal/PIN bookkeeping on
 // its liveness.
 func (m *Manager) runInitialExchange(inviteID, target, cid0 string, sessGen0 uint64, allowRemoteManagement bool) (*pairingSession, string, error) {
+	ctx, cancel, requestID, err := m.joinRequestInitialContext(inviteID)
+	if err != nil {
+		return nil, "", err
+	}
+	if cancel != nil {
+		defer cancel()
+	}
 	myAddr := net.JoinHostPort(outboundIP(target), strconv.Itoa(m.port))
 	localInfo := m.localPairingInfo(myAddr)
-	localInfo.JoinRequestID = m.joinRequestForInvite(inviteID)
+	localInfo.JoinRequestID = requestID
 	info, err := localInfo.toMap()
 	if err != nil {
 		return nil, "", fmt.Errorf("build pairing info: %w", err)
@@ -269,7 +288,8 @@ func (m *Manager) runInitialExchange(inviteID, target, cid0 string, sessGen0 uin
 	// discarded by commitPairing's epoch recheck.
 	sess := &pairingSession{
 		inviteID: inviteID, role: roleInviter, createdAt: time.Now().UnixMilli(),
-		server: server, addr: myAddr, clusterID: cid0, joinerAddr: target,
+		initialCancel: cancel,
+		server:        server, addr: myAddr, clusterID: cid0, joinerAddr: target,
 		localAdmissionEpoch:   localInfo.AdmissionEpoch,
 		allowRemoteManagement: &allowRemoteManagement,
 	}
@@ -284,12 +304,26 @@ func (m *Manager) runInitialExchange(inviteID, target, cid0 string, sessGen0 uin
 	if localInfo.JoinRequestID != "" {
 		client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	}
+	post := func(blob []byte) ([]byte, error) {
+		if err := ctx.Err(); err != nil {
+			return nil, errPairingAbandoned
+		}
+		if requestID != "" && !m.joinRequestInitialLive(requestID, inviteID, sess) {
+			cancel()
+			return nil, errPairingAbandoned
+		}
+		response, err := postPairingBlobContext(ctx, client, target, inviteID, "initial", blob)
+		if requestID != "" && ctx.Err() != nil {
+			return nil, errPairingAbandoned
+		}
+		return response, err
+	}
 	blob, err := server.Start()
 	if err != nil {
 		return sess, "", fmt.Errorf("server start: %w", err)
 	}
 	for {
-		respBlob, err := postPairingBlob(client, target, inviteID, "initial", blob)
+		respBlob, err := post(blob)
 		if err != nil {
 			return sess, "", err
 		}
@@ -304,13 +338,16 @@ func (m *Manager) runInitialExchange(inviteID, target, cid0 string, sessGen0 uin
 		if out.Done {
 			if len(blob) > 0 {
 				// Deliver the final EAP-Failure so the joiner also reaches Waiting.
-				_, _ = postPairingBlob(client, target, inviteID, "initial", blob)
+				_, _ = post(blob)
 			}
 			break
 		}
 		if len(blob) == 0 {
 			break
 		}
+	}
+	if requestID != "" && (ctx.Err() != nil || !m.joinRequestInitialLive(requestID, inviteID, sess)) {
+		return sess, "", errPairingAbandoned
 	}
 
 	if server.State() != eapnoob.StateWaiting {
@@ -341,6 +378,10 @@ func (m *Manager) runInitialExchange(inviteID, target, cid0 string, sessGen0 uin
 // blob (nil if the peer had nothing to send). Shared by the inviter (Initial)
 // and joiner (Completion) HTTP-client loops.
 func postPairingBlob(client *http.Client, target, inviteID, phase string, blob []byte) ([]byte, error) {
+	return postPairingBlobContext(context.Background(), client, target, inviteID, phase, blob)
+}
+
+func postPairingBlobContext(ctx context.Context, client *http.Client, target, inviteID, phase string, blob []byte) ([]byte, error) {
 	env := pairingEnvelope{InviteID: inviteID, Phase: phase}
 	if len(blob) > 0 {
 		env.Msg = base64.StdEncoding.EncodeToString(blob)
@@ -349,7 +390,12 @@ func postPairingBlob(client *http.Client, target, inviteID, phase string, blob [
 	if err != nil {
 		return nil, err
 	}
-	resp, err := client.Post("http://"+target+pairingPath, "application/json", bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://"+target+pairingPath, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -504,7 +550,7 @@ func pairingWorthAnotherAddress(err error) bool {
 	if errors.As(err, &rejected) {
 		return false
 	}
-	return !errors.Is(err, errPairingClusterGone)
+	return !errors.Is(err, errPairingClusterGone) && !errors.Is(err, errPairingAbandoned)
 }
 
 // newInviteID returns a fresh correlation id of the form "inv-<hex>".

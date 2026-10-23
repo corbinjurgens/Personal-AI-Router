@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"eapnoob"
+	"nvpair-shared/discovery"
 	"nvpair-shared/durablefile"
 )
 
@@ -608,6 +609,279 @@ func TestJoinRequestAddressResolutionUsesExplicitPort(t *testing.T) {
 	}
 	if len(endpoints) != 1 || endpoints[0] != net.JoinHostPort("::1", strconv.Itoa(p)) {
 		t.Fatalf("endpoints = %v", endpoints)
+	}
+}
+
+func TestJoinRequestHostnameSelectorCorrelatesCanonicalPeerUUID(t *testing.T) {
+	m := joinTestManager(t)
+	peer := joinTestManager(t)
+	requestStarted := make(chan struct{})
+	releaseRequest := make(chan struct{})
+	release := sync.OnceFunc(func() { close(releaseRequest) })
+	cancelReceived := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		var wire joinRequestWire
+		if err := json.NewDecoder(req.Body).Decode(&wire); err != nil {
+			t.Error(err)
+			return
+		}
+		if wire.Operation == "request" {
+			close(requestStarted)
+			<-releaseRequest
+		} else if wire.Operation == "cancel" {
+			defer close(cancelReceived)
+		}
+		now := m.joinTime()
+		if err := json.NewEncoder(w).Encode(joinRequestReply{Version: 1, RequestID: wire.RequestID, State: "awaiting-approval", CreatedAt: now.UnixMilli(), ExpiresAt: now.Add(time.Minute).UnixMilli()}); err != nil {
+			t.Error(err)
+		}
+	}))
+	defer server.Close()
+	defer release()
+	host, portText, err := net.SplitHostPort(server.Listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	port, err := strconv.Atoi(portText)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hostname := "discovered-member"
+	m.browser = newBrowser()
+	m.browser.relay[peer.identity.NodeUUID] = discovery.Node{ID: hostname, Addresses: []string{host}, Port: port, TXT: []string{"uuid=" + peer.identity.NodeUUID}}
+	response := joinTestRPC(t, m, "cluster:ask-to-join", map[string]any{"nodeId": hostname, "replaceSoloCluster": false})
+	if response.Error != nil {
+		t.Fatalf("ask by hostname: %+v", response.Error)
+	}
+	var result JoinRequest
+	if err := json.Unmarshal(response.Result, &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.PeerNodeUUID != peer.identity.NodeUUID || result.PeerAddress != host || result.PeerPort != port {
+		t.Fatalf("hostname resolution = %+v", result)
+	}
+	select {
+	case <-requestStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("request did not reach the owned discovery endpoint")
+	}
+	id := "hostname-child"
+	m.joinMu.Lock()
+	r := m.joinRequests[result.RequestID]
+	r.InviteID, r.State, r.ready = &id, "pairing", true
+	m.joinMu.Unlock()
+	if _, _, err := peer.foundCluster("hostname member"); err != nil {
+		t.Fatal(err)
+	}
+	incoming := joinTestRecord(t, peer, "incoming")
+	delete(peer.joinRequests, incoming.RequestID)
+	incoming.RequestID = result.RequestID
+	incoming.InviteID, incoming.State, incoming.ready = &id, "pairing", true
+	incoming.PeerNodeUUID = m.identity.NodeUUID
+	peer.joinRequests[result.RequestID] = incoming
+	cid, _ := peer.clusterIdentity()
+	peer.putInvite(&Invite{InviteID: id, FromNodeUUID: peer.identity.NodeUUID, ClusterID: cid, State: inviteStatePending, CreatedAt: time.Now().UnixMilli()})
+	pairingServer := httptest.NewServer(http.HandlerFunc(m.handlePairing))
+	defer pairingServer.Close()
+	if _, _, err := peer.runInitialExchange(id, strings.TrimPrefix(pairingServer.URL, "http://"), cid, peer.sessGen.Load(), false); err != nil {
+		t.Fatal("hostname-selected member failed the exact Initial Exchange correlation")
+	}
+	sess, live := m.getSession(id)
+	if !live || sess.peerPairing == nil || sess.peerPairing.NodeUUID != result.PeerNodeUUID || sess.peerPairing.JoinRequestID != result.RequestID {
+		t.Fatal("Initial Exchange did not retain the canonical member UUID and exact request ID")
+	}
+	info := peer.localPairingInfo(server.Listener.Addr().String())
+	info.JoinRequestID = result.RequestID
+	if !m.matchJoinRequestPeer(id, info) {
+		t.Fatal("hostname selection rejected the exact transcript peer UUID")
+	}
+	info.NodeUUID = "different-authenticated-peer"
+	if m.matchJoinRequestPeer(id, info) {
+		t.Fatal("hostname selection accepted a mismatched transcript peer UUID")
+	}
+	m.joinMu.Lock()
+	m.finishJoinRequestLocked(r, "canceled", "")
+	m.joinMu.Unlock()
+	// Release the in-flight prelude; its late reply must retain cancellation.
+	release()
+	select {
+	case <-cancelReceived:
+	case <-time.After(5 * time.Second):
+		t.Fatal("request worker did not stop after its canceled late reply")
+	}
+	if got := m.joinSnapshot().Requests[0]; got.State != "canceled" {
+		t.Fatalf("late reply changed terminal state: %+v", got)
+	}
+}
+
+func TestJoinRequestUnresolvedSelectorDoesNotBecomePeerUUID(t *testing.T) {
+	m := joinTestManager(t)
+	selector := "unresolved-hostname"
+	endpoints, uuid, err := m.joinRequestEndpoints("127.0.0.1", nil, &selector)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(endpoints) != 1 || uuid != "" {
+		t.Fatalf("unresolved selector = %v, UUID %q", endpoints, uuid)
+	}
+}
+
+func TestJoinRequestInitialLoopStopsOnCancellation(t *testing.T) {
+	test := func(name string, cancel func(*testing.T, *Manager, string, string)) {
+		t.Run(name, func(t *testing.T) {
+			m, r, target, blocked, attempts := joinRequestLoopFixture(t)
+			cid, _ := m.clusterIdentity()
+			id := *r.InviteID
+			done := make(chan map[string]any, 1)
+			go func() { done <- m.completeInitialInvite(id, []string{target}, cid, m.sessGen.Load(), false) }()
+			select {
+			case <-blocked:
+			case <-time.After(5 * time.Second):
+				t.Fatal("Initial Exchange did not repeat discovery")
+			}
+			cancel(t, m, r.RequestID, id)
+			select {
+			case result := <-done:
+				if result["state"] != inviteStateCanceled {
+					t.Fatalf("exchange outcome = %v", result["state"])
+				}
+			case <-time.After(time.Second):
+				t.Fatal("cancellation did not interrupt the active HTTP wait")
+			}
+			joinRequestAssertStoppedLoop(t, m, r.RequestID, id, target, cid, "canceled", attempts)
+		})
+	}
+	test("remote request cancel", func(t *testing.T, m *Manager, requestID, _ string) {
+		if _, status, reason := m.applyJoinRequestWire("127.0.0.1", joinRequestWire{Version: 1, Operation: "cancel", RequestID: requestID}); status != http.StatusOK {
+			t.Fatalf("cancel = %d %q", status, reason)
+		}
+	})
+	test("local exact invite cancel", func(t *testing.T, m *Manager, _, inviteID string) {
+		response := joinTestRPC(t, m, "cluster:cancel-invite", map[string]any{"inviteId": inviteID})
+		if response.Error != nil {
+			t.Fatalf("cancel invite: %+v", response.Error)
+		}
+	})
+}
+
+func TestJoinRequestInitialLoopStopsAtOriginalDeadline(t *testing.T) {
+	m, r, target, blocked, attempts := joinRequestLoopFixture(t)
+	// The child is fresh, but only the remaining original request lifetime is
+	// available. No request loop or expiry sweep runs in this fixture.
+	r.CreatedAt = m.joinTime().Add(-m.effectiveInviteTTL()).UnixMilli()
+	r.ExpiresAt = m.joinTime().Add(time.Second).UnixMilli()
+	cid, _ := m.clusterIdentity()
+	id := *r.InviteID
+	done := make(chan map[string]any, 1)
+	go func() { done <- m.completeInitialInvite(id, []string{target}, cid, m.sessGen.Load(), false) }()
+	select {
+	case <-blocked:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Initial Exchange did not repeat discovery")
+	}
+	select {
+	case result := <-done:
+		if result["state"] != inviteStateExpired {
+			t.Fatalf("exchange outcome = %v", result["state"])
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("original request deadline did not interrupt the active HTTP wait")
+	}
+	joinRequestAssertStoppedLoop(t, m, r.RequestID, id, target, cid, "expired", attempts)
+}
+
+func TestJoinRequestInitialLoopStopsWhenExactSessionIsRemoved(t *testing.T) {
+	m, r, target, blocked, attempts := joinRequestLoopFixture(t)
+	cid, _ := m.clusterIdentity()
+	id := *r.InviteID
+	done := make(chan error, 1)
+	go func() {
+		// The alternate is the same owned listener: an invalidated exact
+		// session must not start a replacement at any endpoint.
+		_, _, err := m.pairAtFirstWorkingEndpoint(id, []string{target, target}, cid, m.sessGen.Load(), false)
+		done <- err
+	}()
+	select {
+	case <-blocked:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Initial Exchange did not repeat discovery")
+	}
+	m.deleteSession(id)
+	select {
+	case err := <-done:
+		if !errors.Is(err, errPairingAbandoned) {
+			t.Fatalf("session removal outcome = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("session removal did not interrupt the active HTTP wait")
+	}
+	if attempts.Load() != 3 {
+		t.Fatalf("Initial HTTP attempts after session removal = %d", attempts.Load())
+	}
+	if _, live := m.getSession(id); live {
+		t.Fatal("session removal started a replacement session")
+	}
+}
+
+func joinRequestLoopFixture(t *testing.T) (*Manager, *joinRequestRecord, string, <-chan struct{}, *atomic.Int32) {
+	t.Helper()
+	m := joinTestManager(t)
+	m.port = 1
+	if _, _, err := m.foundCluster("bounded Initial Exchange"); err != nil {
+		t.Fatal(err)
+	}
+	r := joinTestRecord(t, m, "incoming")
+	id := "repeating-initial-child"
+	r.InviteID, r.State, r.ready = &id, "pairing", true
+	cid, _ := m.clusterIdentity()
+	m.putInvite(&Invite{InviteID: id, FromNodeUUID: m.identity.NodeUUID, ClusterID: cid, State: inviteStatePending, CreatedAt: time.Now().UnixMilli()})
+	blocked := make(chan struct{})
+	attempts := &atomic.Int32{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		var env pairingEnvelope
+		if err := json.NewDecoder(req.Body).Decode(&env); err != nil {
+			t.Error(err)
+			return
+		}
+		if env.InviteID != id {
+			t.Error("HTTP attempt lost the exact child invite ID")
+			return
+		}
+		if env.Phase == "cancel" {
+			respondPairing(w, nil)
+			return
+		}
+		if env.Phase != "initial" {
+			t.Errorf("unexpected phase %q", env.Phase)
+			return
+		}
+		if attempts.Add(1) == 3 {
+			close(blocked)
+			<-req.Context().Done()
+			return
+		}
+		respondPairing(w, []byte(`{"Type":1,"PeerState":0}`))
+	}))
+	t.Cleanup(server.Close)
+	return m, r, strings.TrimPrefix(server.URL, "http://"), blocked, attempts
+}
+
+func joinRequestAssertStoppedLoop(t *testing.T, m *Manager, requestID, inviteID, target, cid, want string, attempts *atomic.Int32) {
+	t.Helper()
+	if got := m.joinSnapshot().Requests[0]; got.RequestID != requestID || got.State != want {
+		t.Fatalf("request outcome = %+v", got)
+	}
+	inv, ok := m.getInvite(inviteID)
+	if !ok || string(inv.State) != want || inv.Pin != nil {
+		t.Fatalf("child outcome = %+v, exists %t", inv, ok)
+	}
+	if _, live := m.getSession(inviteID); live {
+		t.Fatal("terminal Initial Exchange retained its session")
+	}
+	// A late worker/retry must keep the recorded outcome and send no more HTTP.
+	result := m.completeInitialInvite(inviteID, []string{target}, cid, m.sessGen.Load(), false)
+	if result["state"] != inv.State || attempts.Load() != 3 {
+		t.Fatalf("late result = %v, Initial HTTP attempts = %d", result["state"], attempts.Load())
 	}
 }
 

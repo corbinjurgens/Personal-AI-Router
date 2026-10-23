@@ -253,6 +253,11 @@ func (m *Manager) finishJoinRequestLocked(r *joinRequestRecord, state, reason st
 	}
 	r.State, r.Reason = state, reason
 	r.terminalAt = m.joinTime().UnixMilli()
+	if r.InviteID != nil {
+		if sess, live := m.getSession(*r.InviteID); live && sess.initialCancel != nil {
+			sess.initialCancel()
+		}
+	}
 }
 
 // reconcileJoinRequestsLocked requires inviteMu, rosterMu and joinMu, in that
@@ -323,6 +328,9 @@ func (m *Manager) stopJoinRequestChildLocked(r *joinRequestRecord) bool {
 			m.finishInviteReason(id, InviteState(r.stopState), r.stopReason)
 		}
 		return true
+	}
+	if sess.initialCancel != nil {
+		sess.initialCancel()
 	}
 	if !sess.mu.TryLock() {
 		return false
@@ -419,7 +427,7 @@ func (m *Manager) handleAskToJoin(msg *Message) {
 		m.codec.RespondError(msg.ID, codeInvalidParams, "invalid params: replaceSoloCluster and valid address/port are required")
 		return
 	}
-	endpoints, err := m.inviteEndpoints(p.Address, p.Port, p.NodeID)
+	endpoints, peerUUID, err := m.joinRequestEndpoints(p.Address, p.Port, p.NodeID)
 	if err != nil {
 		m.codec.RespondError(msg.ID, codeInvalidParams, err.Error())
 		return
@@ -460,9 +468,7 @@ func (m *Manager) handleAskToJoin(msg *Message) {
 	host, portText, _ := net.SplitHostPort(endpoints[0])
 	port, _ := strconv.Atoi(portText)
 	r := &joinRequestRecord{JoinRequest: JoinRequest{RequestID: id, Direction: "outgoing", PeerAddress: host, PeerPort: port, State: "awaiting-approval", CreatedAt: now.UnixMilli(), ExpiresAt: now.Add(m.effectiveInviteTTL()).UnixMilli()}, replaceSolo: *p.ReplaceSoloCluster, generation: m.clusterGen.Load(), sessionGeneration: m.sessGen.Load()}
-	if p.NodeID != nil {
-		r.PeerNodeUUID = *p.NodeID
-	}
+	r.PeerNodeUUID = peerUUID
 	m.joinRequests[id] = r
 	result := cloneJoinRequest(r)
 	m.joinMu.Unlock()
@@ -475,6 +481,13 @@ func (m *Manager) handleAskToJoin(msg *Message) {
 
 // inviteEndpoints shares ordinary Invite's discovery/explicit-port authority.
 func (m *Manager) inviteEndpoints(address string, port *int, nodeID *string) ([]string, error) {
+	endpoints, _, err := m.joinRequestEndpoints(address, port, nodeID)
+	return endpoints, err
+}
+
+// Keep endpoint selection and the expected peer UUID tied to one browser record;
+// a hostname selector is never itself a cryptographic peer identity.
+func (m *Manager) joinRequestEndpoints(address string, port *int, nodeID *string) ([]string, string, error) {
 	p := m.port
 	if port != nil {
 		p = *port
@@ -492,8 +505,10 @@ func (m *Manager) inviteEndpoints(address string, port *int, nodeID *string) ([]
 		}
 	}
 	add(address, p)
+	peerUUID := ""
 	if nodeID != nil && m.browser != nil {
-		if hosts, discoveredPort, ok := m.browser.Resolve(*nodeID); ok {
+		if hosts, discoveredPort, uuid, ok := m.browser.resolvePeer(*nodeID); ok {
+			peerUUID = uuid
 			if port == nil && discoveredPort > 0 {
 				p = discoveredPort
 			}
@@ -503,9 +518,9 @@ func (m *Manager) inviteEndpoints(address string, port *int, nodeID *string) ([]
 		}
 	}
 	if len(endpoints) == 0 {
-		return nil, fmt.Errorf("address is required (or a discoverable nodeId)")
+		return nil, "", fmt.Errorf("address is required (or a discoverable nodeId)")
 	}
-	return endpoints, nil
+	return endpoints, peerUUID, nil
 }
 
 func (m *Manager) selfJoinEndpoint(endpoints []string) bool {
@@ -662,6 +677,36 @@ func (m *Manager) isJoinRequestInvite(inviteID string) bool {
 		}
 	}
 	return false
+}
+
+// The Initial Exchange shares the request's original deadline, even when an
+// endpoint retry starts a new EAP session. Ordinary Invite keeps its own TTL.
+func (m *Manager) joinRequestInitialContext(inviteID string) (context.Context, context.CancelFunc, string, error) {
+	m.joinMu.Lock()
+	defer m.joinMu.Unlock()
+	for id, r := range m.joinRequests {
+		if r.InviteID == nil || *r.InviteID != inviteID {
+			continue
+		}
+		remaining := time.UnixMilli(r.ExpiresAt).Sub(m.joinTime())
+		if joinRequestTerminal(r.State) || r.stopState != "" || remaining <= 0 {
+			return nil, nil, id, errPairingAbandoned
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), remaining)
+		return ctx, cancel, id, nil
+	}
+	return context.Background(), nil, "", nil
+}
+
+func (m *Manager) joinRequestInitialLive(requestID, inviteID string, sess *pairingSession) bool {
+	m.joinMu.Lock()
+	r, ok := m.joinRequests[requestID]
+	live := ok && r.InviteID != nil && *r.InviteID == inviteID && !joinRequestTerminal(r.State) &&
+		r.stopState == "" && r.ExpiresAt > m.joinTime().UnixMilli()
+	m.joinMu.Unlock()
+	current, sessionLive := m.getSession(inviteID)
+	inv, inviteLive := m.getInvite(inviteID)
+	return live && sessionLive && current == sess && inviteLive && inv.State == inviteStatePending
 }
 
 // Called with sess.mu held but no composition locks. Membership is still

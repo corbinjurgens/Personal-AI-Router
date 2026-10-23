@@ -4,6 +4,7 @@
 package main
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/x509"
 	"encoding/json"
@@ -195,9 +196,12 @@ type pairingSession struct {
 	inviteID  string
 	role      pairingRole
 	createdAt int64
-	server    *eapnoob.Server // set for roleInviter
-	peer      *eapnoob.Peer   // set for roleJoiner
-	addr      string          // inviter listening host:port (joiner drives Completion here)
+	// initialCancel is immutable after publication. Only correlated Initial
+	// Exchanges have a cancel function; session removal stops their HTTP waits.
+	initialCancel context.CancelFunc
+	server        *eapnoob.Server // set for roleInviter
+	peer          *eapnoob.Peer   // set for roleJoiner
+	addr          string          // inviter listening host:port (joiner drives Completion here)
 	// joinerAddr is the target host:port the inviter POSTed the Initial Exchange
 	// to (set for roleInviter). It lets the inviter best-effort notify the joiner
 	// on cancel so the joiner's pending prompt clears.
@@ -257,6 +261,9 @@ func (s *pairingSession) legacyNotifyAddress() string {
 func (m *Manager) putSession(s *pairingSession) {
 	m.sessMu.Lock()
 	defer m.sessMu.Unlock()
+	if old := m.sessions[s.inviteID]; old != nil && old != s && old.initialCancel != nil {
+		old.initialCancel()
+	}
 	m.sessions[s.inviteID] = s
 }
 
@@ -270,6 +277,9 @@ func (m *Manager) getSession(inviteID string) (*pairingSession, bool) {
 func (m *Manager) deleteSession(inviteID string) {
 	m.sessMu.Lock()
 	defer m.sessMu.Unlock()
+	if s := m.sessions[inviteID]; s != nil && s.initialCancel != nil {
+		s.initialCancel()
+	}
 	delete(m.sessions, inviteID)
 }
 
@@ -324,6 +334,11 @@ func (m *Manager) registerJoinerSession(session *pairingSession) (registered, at
 func (m *Manager) resetSessions() {
 	m.sessMu.Lock()
 	defer m.sessMu.Unlock()
+	for _, s := range m.sessions {
+		if s.initialCancel != nil {
+			s.initialCancel()
+		}
+	}
 	m.sessions = make(map[string]*pairingSession)
 	m.sessGen.Add(1)
 }
