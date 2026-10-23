@@ -304,8 +304,10 @@ automatically cancels the older ID; handle its `cluster:invite-canceled`
 notification before presenting the replacement.
 
 **Remove a node.** `nodes:remove {nodeId}` → `{removed:true}`. The manager
-durably prepares an exact-admission removal proof, selects a current endpoint,
-and attempts one authenticated notification while the pin still exists. It then
+prepares an exact-admission removal proof, selects a current endpoint, persists
+the proof only once that selection and the original admissions are still
+current, and attempts one authenticated notification while the pin still
+exists. A stale selection leaves no durable removal state. It then
 rechecks the original admissions, deletes the pin and drops the member. An
 unavailable notification does not prevent this best-effort local removal;
 durable proofs support later convergence, without replaying the notification.

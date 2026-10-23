@@ -78,12 +78,11 @@ func (m *Manager) handleNodesRemove(msg *Message) {
 		node.ClusterID != cid0 || node.AdmissionEpoch == 0 ||
 		!pinned || pin.ClusterID != cid0 || pin.AdmissionEpoch != node.AdmissionEpoch || !authenticated {
 		prepareErr = fmt.Errorf("member admission is not authenticated in the active cluster")
-	} else if proof, prepareErr = m.newRemovalProof(node.NodeUUID, node.AdmissionEpoch); prepareErr == nil {
-		if _, prepareErr = m.putRemovalProof(proof); prepareErr == nil {
-			// Keep the legacy tombstone mirror for old peers. It is never local
-			// admission authority.
-			m.putTombstone(proof.Tombstone)
-		}
+	} else {
+		// The proof stays in memory until selection has finished: a durable proof
+		// would be replayed on restart even when this call reports the admission
+		// preserved.
+		proof, prepareErr = m.newRemovalProof(node.NodeUUID, node.AdmissionEpoch)
 	}
 	m.rosterMu.Unlock()
 	if prepareErr != nil {
@@ -104,10 +103,24 @@ func (m *Manager) handleNodesRemove(msg *Message) {
 	current, ok := m.memberByNodeID(node.NodeUUID)
 	stale := !m.removalAdmissionCurrent(node, cid0, selfEpoch0, preparedPeer) ||
 		(address != "" && (!ok || !slices.Contains(m.resolvePeerAddrs(*current), address)))
+	var persistErr error
+	if !stale {
+		// Persist before notification so a crash after the peer applies the
+		// proof still finishes the removal on restart.
+		if _, persistErr = m.putRemovalProof(proof); persistErr == nil {
+			// Keep the legacy tombstone mirror for old peers. It is never local
+			// admission authority.
+			m.putTombstone(proof.Tombstone)
+		}
+	}
 	m.rosterMu.Unlock()
 	if stale {
 		m.codec.RespondErrorData(msg.ID, codeInternalError,
 			"member admission or endpoint changed while removal was in progress; current admission was preserved", nil)
+		return
+	}
+	if persistErr != nil {
+		m.codec.RespondErrorData(msg.ID, codeInternalError, "prepare removal: "+persistErr.Error(), nil)
 		return
 	}
 	// The fresh adapter revalidates authority/route generation during setup and

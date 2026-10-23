@@ -128,8 +128,10 @@ TCP chooser success is not authentication. Cancellation abandons its wait
 without caching that result; finite timeout-only probes may still finish and
 close their connections after the caller returns.
 
-Removal persists an exact-admission proof, selects a current endpoint and
-attempts at most one authenticated notification before final de-pin. It does
+Removal prepares an exact-admission proof, selects a current endpoint,
+persists the proof only after a current-selection recheck, and attempts at most
+one authenticated notification before final de-pin. A stale selection leaves
+no durable proof that restart replay could apply. It does
 not redirect or replay a missing/partial reply. Admission, pin and route checks
 remain at preparation, pre-dispatch, adapter setup/first write and final local
 commit; they do not make network send atomic against all later composition

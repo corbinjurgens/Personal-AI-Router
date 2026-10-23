@@ -662,8 +662,9 @@ and control checks. Hints alone cannot create fresh inventory or an eligible
 model. Synthetic pinned-TLS/reopen tests establish the fallback path, not native
 Tailscale or away-from-home acceptance.
 
-Peer removal prepares its durable exact-admission proof before selecting one
-current endpoint. Selection and notification share the existing ten-second
+Peer removal prepares its exact-admission proof in memory, selects one
+current endpoint, and persists the proof only after rechecking that the
+selection and admissions are still current. Selection and notification share the existing ten-second
 budget; at most one authenticated POST uses the fresh removal adapter before
 final de-pin. It does not redirect or replay a lost/partial reply. Original
 admission/pin/endpoint rechecks and adapter first-write guards remain, without

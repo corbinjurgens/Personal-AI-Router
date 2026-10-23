@@ -9,6 +9,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -16,6 +17,7 @@ import (
 	"net/http/httptrace"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strconv"
 	"sync"
@@ -382,6 +384,174 @@ func TestNodesRemoveSelectionRejectsReadmission(t *testing.T) {
 		node.IPAddress = "192.0.2.99"
 		f.a.upsertMember(node)
 	})
+}
+
+// withdrawSelectedEndpoint makes the chooser's first dial replace the target's
+// stored endpoint, leaving its identity and admission unchanged, so the removal
+// recheck sees a stale selection. The returned wait reports the withdrawal.
+func withdrawSelectedEndpoint(t *testing.T, f *removalHintFixture) func() {
+	t.Helper()
+	uuid := f.b.identity.NodeUUID
+	var once sync.Once
+	changed := make(chan error, 1)
+	f.a.peerAddrs = reach.NewChooser(reach.WithDial(func(network, address string, timeout time.Duration) (net.Conn, error) {
+		once.Do(func() {
+			f.a.rosterMu.Lock()
+			member, ok := f.a.memberByNodeID(uuid)
+			if !ok {
+				f.a.rosterMu.Unlock()
+				changed <- errors.New("target disappeared before endpoint withdrawal")
+				return
+			}
+			member.IPAddress = "192.0.2.99"
+			member.AdvertisedAddresses = nil
+			f.a.upsertMember(member)
+			err := f.a.persistMembersErr()
+			f.a.rosterMu.Unlock()
+			changed <- err
+		})
+		return f.guard.probe(network, address, timeout)
+	}))
+	return func() {
+		t.Helper()
+		select {
+		case err := <-changed:
+			if err != nil {
+				t.Fatal(err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("removal did not reach endpoint selection")
+		}
+	}
+}
+
+func TestNodesRemoveWithdrawnEndpointPreservesAdmissionAfterRestart(t *testing.T) {
+	f := newRemovalHintFixture(t)
+	uuid := f.b.identity.NodeUUID
+	pin, pinned := f.a.trust.Get(uuid)
+	if !pinned {
+		t.Fatal("fixture lacks the target pin")
+	}
+	cid, epoch := f.a.currentAdmission()
+	withdrawn := withdrawSelectedEndpoint(t, f)
+	response := f.remove(t)
+	withdrawn()
+	if response.Error == nil || response.Error.Code != codeInternalError || f.posts.Load() != 0 || f.reads.Load() != 1 || f.guard.reverse.Load() != 0 {
+		t.Fatalf("withdrawn endpoint error=%v posts=%d reads=%d reverse=%d", response.Error, f.posts.Load(), f.reads.Load(), f.guard.reverse.Load())
+	}
+	assertPreserved := func(m *Manager) {
+		t.Helper()
+		var output bytes.Buffer
+		m.codec = NewCodec(struct {
+			io.Reader
+			io.Writer
+		}{bytes.NewReader(nil), &output})
+		id := json.RawMessage(`2`)
+		m.handleGetInitial(&Message{ID: &id})
+		var reply Message
+		if err := json.NewDecoder(&output).Decode(&reply); err != nil {
+			t.Fatal(err)
+		}
+		if reply.Error != nil || reply.ID == nil || string(*reply.ID) != "2" {
+			t.Fatalf("membership response=%+v", reply)
+		}
+		var result struct {
+			Nodes []ClusterNode `json:"nodes"`
+		}
+		if err := json.Unmarshal(reply.Result, &result); err != nil {
+			t.Fatal(err)
+		}
+		index := slices.IndexFunc(result.Nodes, func(n ClusterNode) bool { return n.NodeUUID == uuid })
+		if index < 0 {
+			t.Error("preservation error lost the target from public membership")
+		} else if member := result.Nodes[index]; member.ClusterID != cid || member.AdmissionEpoch != pin.AdmissionEpoch || member.IPAddress != "192.0.2.99" || len(member.AdvertisedAddresses) != 0 {
+			t.Errorf("preserved public member=%+v", member)
+		}
+		current, ok := m.trust.Get(uuid)
+		if !ok || current.CertFingerprint != pin.CertFingerprint || current.AdmissionEpoch != pin.AdmissionEpoch {
+			t.Errorf("preservation error changed the target pin: %+v", current)
+		}
+		if currentCID, currentEpoch := m.currentAdmission(); currentCID != cid || currentEpoch != epoch {
+			t.Errorf("preservation error changed local admission: %s/%d", currentCID, currentEpoch)
+		}
+		roster := m.buildLocalRoster()
+		if len(roster.RemovalProofs) != 0 || len(roster.Tombstones) != 0 {
+			t.Errorf("aborted selection published removal authority: proofs=%d tombstones=%d", len(roster.RemovalProofs), len(roster.Tombstones))
+		}
+	}
+	assertPreserved(f.a)
+	f.a.peerServices.CloseIdle()
+	f.a.removalPeerServices.CloseIdle()
+	reopened := testManagerAt(t, filepath.Dir(f.a.clusterDir), 0)
+	containHintDials(t, reopened, false)
+	t.Cleanup(reopened.peerServices.CloseIdle)
+	t.Cleanup(reopened.removalPeerServices.CloseIdle)
+	t.Cleanup(func() {
+		if err := reopened.reverse.manager.Close(); err != nil {
+			t.Error(err)
+		}
+	})
+	if reopened.identity.NodeUUID != f.a.identity.NodeUUID || reopened.identity.CertFingerprint != f.a.identity.CertFingerprint {
+		t.Fatal("original-base reopen changed local identity")
+	}
+	assertPreserved(reopened)
+	if remoteCID, remoteEpoch := f.b.currentAdmission(); remoteCID != cid || remoteEpoch != pin.AdmissionEpoch {
+		t.Fatalf("zero-dispatch abort changed remote admission: %s/%d", remoteCID, remoteEpoch)
+	}
+}
+
+func TestNodesRemoveWithdrawnEndpointKeepsPriorProof(t *testing.T) {
+	f := newRemovalHintFixture(t)
+	prior := newPinFixture(t, "prior")
+	pinTrusted(t, f.a, prior.uuid, prior.cert, prior.fp)
+	proof, err := f.a.newRemovalProof(prior.uuid, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored, err := f.a.putRemovalProof(proof); err != nil || !stored {
+		t.Fatalf("persist prior proof stored=%v err=%v", stored, err)
+	}
+	if !f.a.putTombstone(proof.Tombstone) {
+		t.Fatal("persist prior tombstone mirror")
+	}
+	readDurable := func() ([]byte, []byte) {
+		t.Helper()
+		proofs, err := os.ReadFile(f.a.removalProofsPath())
+		if err != nil {
+			t.Fatal(err)
+		}
+		tombstones, err := os.ReadFile(f.a.tombstonesPath())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return proofs, tombstones
+	}
+	proofsBefore, tombstonesBefore := readDurable()
+	before := f.a.buildLocalRoster()
+	if len(before.RemovalProofs) != 1 || before.RemovalProofs[0].Tombstone.NodeUUID != prior.uuid || len(before.Tombstones) != 1 {
+		t.Fatalf("prior evidence proofs=%+v tombstones=%+v", before.RemovalProofs, before.Tombstones)
+	}
+
+	withdrawn := withdrawSelectedEndpoint(t, f)
+	response := f.remove(t)
+	withdrawn()
+	if response.Error == nil || response.Error.Code != codeInternalError || f.posts.Load() != 0 {
+		t.Fatalf("withdrawn endpoint error=%v posts=%d", response.Error, f.posts.Load())
+	}
+	proofsAfter, tombstonesAfter := readDurable()
+	if !bytes.Equal(proofsAfter, proofsBefore) || !bytes.Equal(tombstonesAfter, tombstonesBefore) {
+		t.Error("aborted selection rewrote durable removal evidence")
+	}
+	after := f.a.buildLocalRoster()
+	if !reflect.DeepEqual(after.RemovalProofs, before.RemovalProofs) || !reflect.DeepEqual(after.Tombstones, before.Tombstones) {
+		t.Errorf("aborted selection changed removal evidence: proofs=%+v tombstones=%+v", after.RemovalProofs, after.Tombstones)
+	}
+	if _, ok := f.a.trust.Get(f.b.identity.NodeUUID); !ok {
+		t.Error("preservation error removed the target pin")
+	}
+	if _, ok := f.a.memberByNodeID(f.b.identity.NodeUUID); !ok {
+		t.Error("preservation error removed the target member")
+	}
 }
 
 func TestNodesRemoveHintLostReplyDoesNotReplay(t *testing.T) {
