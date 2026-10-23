@@ -94,6 +94,12 @@ export interface EngineStatusData {
      * reported version data or engines that are not installed.
      */
     installedVersion?: string
+    /**
+     * The engine's durable lock on its owning node. Present true or false is
+     * authoritative; undefined means lock state is unavailable, as from an
+     * older target, and is never read as unlocked.
+     */
+    locked?: boolean
 }
 
 export type ModelItemStatus = (typeof ModelItemStatuses)[number]

@@ -62,10 +62,14 @@ func TestPolicyRelayJoint(t *testing.T) {
 			if edit {
 				peer.Admission.MaxConcurrentPerModel = 3
 				peer.Idle.UnloadAfterMinutes = 7
+				// An older peer's false pause switch is accepted and saved as
+				// the canonical true; the drain timeout stays editable.
 				peer.Pause.UnloadModels = false
+				peer.Pause.DrainTimeoutSeconds = 45
 				want.Admission = peer.Admission
 				want.Idle = peer.Idle
 				want.Pause = peer.Pause
+				want.Pause.UnloadModels = true
 			}
 			params := map[string]any{"policy": peer, "expectedPersistedRevision": f.want.Revision}
 			started := time.Now().UnixNano()

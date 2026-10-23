@@ -258,7 +258,8 @@ Failures terminate as `failed-validation`, `failed-drain`, `failed-source-stop`,
 `failed-target-start`, `failed-publication` or `failed-interrupted`; pre-acceptance
 refusals may have a durable `rejected` receipt. Errors carry a stable kind and
 numeric code: invalid/reused ID `-32602`, configuration conflict `-32010`, local
-remote veto `-32011`, remote-management denial `-32012`, and other operational/storage/full/busy errors `-32000`.
+remote veto `-32011`, remote-management denial `-32012`, a target engine locked on
+its node `-32013` (kind `engine_locked`), and other operational/storage/full/busy errors `-32000`.
 Manager result envelopes are inspected even when JSON-RPC itself succeeds.
 
 Startup loads the switch journal, marks nonterminal operations

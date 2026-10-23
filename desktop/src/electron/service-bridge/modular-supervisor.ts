@@ -15,7 +15,12 @@ import {
 } from './json-rpc-client'
 import { createStructuredLogger } from '@/shared/utils/log'
 import getErrorString from '@/shared/utils/get-error-string'
-import { LOCAL_VETO_CODE, localVetoMessage } from '@/shared/constants/service-errors'
+import {
+    ENGINE_LOCKED_CODE,
+    LOCAL_VETO_CODE,
+    engineLockedMessage,
+    localVetoMessage
+} from '@/shared/constants/service-errors'
 import { currentPlatform } from '@/shared/utils/platform'
 import { parseServiceBuildId } from '@/shared/utils/service-build'
 import {
@@ -271,13 +276,26 @@ function isRestartAfterFailure(detail: string | undefined): boolean {
     return /failed to restart/i.test(detail ?? '')
 }
 
+/** The longest target-supplied refusal detail a remote error report carries. */
+const MAX_REFUSAL_DETAIL_LENGTH = 1024
+
 /**
- * Whether a paired node refused a remote start, install with start or model
- * load with its local veto: it is paused, or the engine is Off, on the node
- * itself. Retrying from here cannot succeed until it is lifted there.
+ * The explanation for a paired node's typed refusal of `action`, or undefined
+ * for any other failure. A lock refusal names the lock. A local veto stays
+ * neutral: -32011 alone cannot tell a pause from an older target's saved Off or
+ * from a local stop that cancelled the operation. The target's own message
+ * follows, bounded. Retrying from here cannot succeed until the target lifts it.
  */
-function isLocalVeto(err: unknown): boolean {
-    return err instanceof JsonRpcResponseError && err.code === LOCAL_VETO_CODE
+function remoteRefusalMessage(err: unknown, action: string): string | undefined {
+    if (!(err instanceof JsonRpcResponseError)) return undefined
+    const explanation =
+        err.code === ENGINE_LOCKED_CODE
+            ? engineLockedMessage(action)
+            : err.code === LOCAL_VETO_CODE
+              ? localVetoMessage(action)
+              : undefined
+    if (explanation === undefined) return undefined
+    return `${explanation} Target: ${err.message.slice(0, MAX_REFUSAL_DETAIL_LENGTH)}`
 }
 
 /**
@@ -559,6 +577,7 @@ class ModularSupervisor {
 
         this.brokerSessionGeneration++
         getModularBridgeState().applyEngineIntent(null)
+        getModularBridgeState().invalidateEngineLocks()
         this.shuttingDown = false
         this.performance.reset()
         this.brokerReady = false
@@ -648,6 +667,7 @@ class ModularSupervisor {
         this.shuttingDown = true
         this.brokerSessionGeneration++
         getModularBridgeState().applyEngineIntent(null)
+        getModularBridgeState().invalidateEngineLocks()
         await this.performance.stop()
         stopNodeInfoPoller()
         if (this.remoteStatusDebounceTimer) {
@@ -902,6 +922,7 @@ class ModularSupervisor {
     private resetBrokerSession(): void {
         this.brokerSessionGeneration++
         getModularBridgeState().applyEngineIntent(null)
+        getModularBridgeState().invalidateEngineLocks()
         this.performance.reset()
         this.brokerReady = false
         this.brokerHydrationDone = false
@@ -952,6 +973,7 @@ class ModularSupervisor {
             if (child.name === 'broker') {
                 this.brokerSessionGeneration++
                 getModularBridgeState().applyEngineIntent(null)
+                getModularBridgeState().invalidateEngineLocks()
                 this.performance.reset()
                 this.brokerReady = false
                 this.brokerHydrationDone = false
@@ -1942,6 +1964,7 @@ class ModularSupervisor {
         }
         if (notification.method === 'engine:ready') {
             getModularBridgeState().applyEngineIntent(null)
+            getModularBridgeState().invalidateEngineLocks()
             void this.hydrateEngineIntent()
             void this.hydrateEngineManager()
             return
@@ -2175,8 +2198,8 @@ class ModularSupervisor {
             // does not read stale.
             await this.refreshRemoteEngineStatus(nodeId)
         } catch (err) {
-            const message = getErrorString(err) ?? ''
-            const pullError = resolvePullCatchError(message)
+            const refusal = remoteRefusalMessage(err, `download ${model} on ${nodeId}`)
+            const pullError = refusal ?? resolvePullCatchError(getErrorString(err) ?? '')
             if (pullError) {
                 this.reportError(
                     pullError,
@@ -2187,7 +2210,7 @@ class ModularSupervisor {
                         nodeId,
                         operation: 'pull',
                         modelName: model,
-                        action: 'retry'
+                        ...(refusal === undefined ? { action: 'retry' } : {})
                     }
                 )
             }
@@ -2260,13 +2283,14 @@ class ModularSupervisor {
         } catch (err) {
             // Use engine-manager's canonical error identity so a rejection here
             // upserts the backend's own report (and offers retry) rather than
-            // duplicating it under a UI-synthesized id. A local veto offers no
-            // retry: only that node can lift it.
-            const vetoed = start && isLocalVeto(err)
+            // duplicating it under a UI-synthesized id. A target refusal offers
+            // no retry: only that node can lift it.
+            const refusal = remoteRefusalMessage(
+                err,
+                `${start ? 'install and start' : 'install'} ${engine} on ${nodeId}`
+            )
             this.reportError(
-                vetoed
-                    ? localVetoMessage(`install and start ${engine} on ${nodeId}`)
-                    : `Failed to install ${engine} on ${nodeId}: ${getErrorString(err)}`,
+                refusal ?? `Failed to install ${engine} on ${nodeId}: ${getErrorString(err)}`,
                 'error',
                 `engine-remote-install:${nodeId}:${engine}`,
                 {
@@ -2274,7 +2298,7 @@ class ModularSupervisor {
                     nodeId,
                     engineType: engine,
                     operation: 'install',
-                    ...(vetoed ? {} : { action: 'retry' })
+                    ...(refusal === undefined ? { action: 'retry' } : {})
                 }
             )
         } finally {
@@ -2307,10 +2331,9 @@ class ModularSupervisor {
             state.applyRemoteEngineStatusResult(nodeId, engineType, result)
         } catch (err) {
             state.clearPendingRemoteEngineOp(nodeId, engineType)
+            const action = `${running ? 'stop' : 'start'} ${engine} on ${nodeId}`
             this.reportError(
-                !running && isLocalVeto(err)
-                    ? localVetoMessage(`start ${engine} on ${nodeId}`)
-                    : `Failed to ${running ? 'stop' : 'start'} ${engine} on ${nodeId}: ${getErrorString(err)}`,
+                remoteRefusalMessage(err, action) ?? `Failed to ${action}: ${getErrorString(err)}`,
                 'error',
                 `engine-remote-toggle:${nodeId}:${engine}`
             )
@@ -2356,9 +2379,8 @@ class ModularSupervisor {
             this.reportError(
                 restartFailed
                     ? `Deleted ${model} on ${nodeId}, but ${engine} failed to restart: ${detail}`
-                    : command === 'loadModel' && isLocalVeto(err)
-                      ? localVetoMessage(`load ${model} on ${nodeId}`)
-                      : `Failed to ${verb} ${model} on ${nodeId}: ${detail}`,
+                    : (remoteRefusalMessage(err, `${verb} ${model} on ${nodeId}`) ??
+                          `Failed to ${verb} ${model} on ${nodeId}: ${detail}`),
                 'error',
                 `engine-remote-model:${nodeId}:${engineType}:${model}:${verb}`,
                 { nodeId, engineType, operation: verb, modelName: model }

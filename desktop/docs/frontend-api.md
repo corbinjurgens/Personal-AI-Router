@@ -85,7 +85,19 @@ They do not imply a WebSocket connection. Browser clients are not supported.
   engine-status store subscribes before fetching and clears intent on teardown.
   Intent and origin are independent of runtime lifecycle status.
 - `getInitialState()` returns engine statuses, models, active progress, and available
-  updates.
+  updates. `EngineStatusData.locked` is the engine's durable lock on its owning
+  node: `true` or `false` is authoritative, and an absent field means the lock
+  state is unavailable, as from an older target. Absent is never unlocked; it
+  stays absent through facts, single operation results, pending overlays,
+  refresh and invalidation. A disconnect or a broker or engine-manager restart
+  makes every reported lock unknown again until a new report arrives. Current
+  engine-managers do not report it yet.
+- The `engine:command` shape `{ command: 'setLock', engineType, nodeId, locked }`
+  maps to the local `engine:set-lock`. The bridge sends it only when `nodeId` is
+  this device's own node, and refuses any other target before sending with
+  `Engine locks can only be changed on the device running the engine.` The
+  renderer has no lock helper or control yet, and the current engine-manager
+  answers every request with `Engine locking is not available yet.`
 - `toggle`, `install`, `uninstall`, and `update` manage engine lifecycle.
 - `pullModel`, `loadModel`, `unloadModel`, `deleteModel`, and
   `setModelExpiry` manage models.
@@ -125,9 +137,10 @@ Other clients' receipts are observed activity. Local pause/Off remains available
 The controls show node/request identity, sequence, phase, typed error and
 `recoveryRequired`, with saved intent, timestamped observations and termination
 evidence separately. Accepted, source-off and target-ready are not completed.
-Remote permission denial (`-32012`), local veto (`-32011`) and configuration
-conflict (`-32010`) remain distinct; denial refreshes permission and retains the
-draft. Permission changes belong on the target device.
+Remote permission denial (`-32012`), local veto (`-32011`), engine lock
+(`-32013`, receipt kind `engine_locked`) and configuration conflict (`-32010`)
+remain distinct; denial refreshes permission and retains the draft. Permission
+changes belong on the target device.
 
 After an uncertain submit, read the original ID; no automatic resend occurs.
 Unknown/unreachable outcomes remain unknown. Refresh only reads: it cannot
@@ -271,8 +284,14 @@ answered with a JSON-RPC error also carries its `code`. The preload's service
 transport resolves to the envelope, because an Error crossing the context
 bridge keeps only its message; the renderer's transport
 (`src/ui/api/service-transport.ts`) rejects a failure with a `ServiceCallError`
-whose `code` callers classify by, for example `-32010` for a policy conflict
-and `-32011` for the local veto.
+whose `code` callers classify by, for example `-32010` for a policy conflict,
+`-32011` for the local veto and `-32013` for an engine locked on its node.
+`-32011` alone does not establish a pause: an older target's saved Off and a
+local stop that cancelled the operation use it too, so `localVetoMessage` stays
+neutral. Electron main reports a remote start, stop, install, pull, load, unload
+or delete refused with `-32011` or `-32013` as `localVetoMessage` or
+`engineLockedMessage` followed by the target's own message, bounded, without a
+retry action.
 
 ## Subscription lifecycle
 

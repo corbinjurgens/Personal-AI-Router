@@ -388,9 +388,65 @@ function routeRemoteEngineCommand(payload: WsInvokeRequest<'engine:command'>): v
     }
 }
 
+/** Why a lock change addressed to another device is refused before sending. */
+const ENGINE_LOCK_REMOTE_REFUSAL =
+    'Engine locks can only be changed on the device running the engine.'
+
+/**
+ * Send `engine:set-lock` to this device's engine-manager. A lock is local-only:
+ * a command for any node other than the known self node is refused here and
+ * never reaches a remote route. Outcome state arrives through engine pushes.
+ */
+function setLocalEngineLock(
+    payload: WsInvokeRequest<'engine:command'>,
+    selfId: string | null
+): void {
+    const supervisor = getModularSupervisor()
+    const engine = engineManagerName(payload.engineType)
+    const context = { nodeId: payload.nodeId, engineType: payload.engineType }
+    if (selfId === null || payload.nodeId !== selfId) {
+        supervisor.reportError(
+            ENGINE_LOCK_REMOTE_REFUSAL,
+            'warning',
+            `engine-cmd:setLock:${payload.nodeId}:${engine}`,
+            context
+        )
+        return
+    }
+    const locked = payload.locked
+    if (typeof locked !== 'boolean') {
+        supervisor.reportError(
+            `Failed to change the lock of ${engine}: no lock state was requested.`,
+            'error',
+            `engine-cmd:setLock:${payload.nodeId}:${engine}`,
+            context
+        )
+        return
+    }
+    supervisor.sendProcess(
+        'broker',
+        'engine:set-lock',
+        { engine, locked },
+        error =>
+            supervisor.reportError(
+                `Failed to ${locked ? 'lock' : 'unlock'} ${engine}: ${error}`,
+                'error',
+                `engine-cmd:setLock:${payload.nodeId}:${engine}`,
+                context
+            ),
+        true
+    )
+}
+
 async function handleEngineCommand(payload?: WsInvokeRequest<'engine:command'>): Promise<null> {
     if (!payload) return null
     const supervisor = getModularSupervisor()
+    const selfId = getModularBridgeState().getSelfId()
+
+    if (payload.command === 'setLock') {
+        setLocalEngineLock(payload, selfId)
+        return null
+    }
 
     // "Load" loads a model into the engine's memory/VRAM — never proxy routing.
     // Proxy node selection is owned by the backend nvpair-job-scheduler (it drives
@@ -401,7 +457,6 @@ async function handleEngineCommand(payload?: WsInvokeRequest<'engine:command'>):
     // Remote peers: `nvpair-engine-manager` exposes `engine:remote-*` client methods
     // (cluster mTLS `ec` surface) for install/start/stop/pull and model ops.
     // Local-only ops are refused in {@link routeRemoteEngineCommand}.
-    const selfId = getModularBridgeState().getSelfId()
     if (selfId && payload.nodeId && payload.nodeId !== selfId) {
         if (supervisor.hasProcess('broker')) {
             routeRemoteEngineCommand(payload)

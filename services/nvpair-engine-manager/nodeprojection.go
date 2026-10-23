@@ -6,7 +6,8 @@ package main
 // nodeprojection.go keeps the node projection the broker publishes with
 // engine:node-projection: this node's policy advertisement (declared roles,
 // policy revision, pause origin), which /v1/models and engine:models carry to
-// paired peers, and whether the node is paused locally. The broker owns the
+// paired peers, whether the node is paused locally and whether a pause of
+// either origin fences peer management writes. The broker owns the
 // policy; engine-manager only relays what it was last sent. The projection
 // lives in memory, is replaced whole on every push and is unknown until the
 // first one, which the broker sends whenever engine-manager reports ready.
@@ -35,6 +36,10 @@ type nodeProjection struct {
 	// PausedLocally is true while the node is paused by its own clients, a
 	// pause with no recorded provenance included.
 	PausedLocally bool `json:"pausedLocally"`
+	// ManagementBlocked is true while the node is pausing or paused by either
+	// origin, a pause accepted but not yet saved included. An older broker
+	// omits it; that reads as false and is never derived from the other fields.
+	ManagementBlocked bool `json:"managementBlocked"`
 }
 
 // nodeProjectionStore holds the last projection the broker pushed.
@@ -71,6 +76,17 @@ func (s *nodeProjectionStore) pausedLocally() (paused, known bool) {
 		return false, false
 	}
 	return s.projection.PausedLocally, true
+}
+
+// managementBlocked reports whether the last projection fences peer management
+// writes; known is false before the first push.
+func (s *nodeProjectionStore) managementBlocked() (blocked, known bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.projection == nil {
+		return false, false
+	}
+	return s.projection.ManagementBlocked, true
 }
 
 // applyNodeProjection stores a pushed projection and cancels the paired nodes'
