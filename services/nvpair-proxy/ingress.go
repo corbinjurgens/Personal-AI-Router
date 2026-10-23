@@ -91,6 +91,30 @@ func (f *facade) localBackendTarget() (*url.URL, bool) {
 	return &url.URL{Scheme: "http", Host: net.JoinHostPort(host, strconv.Itoa(b.Port))}, true
 }
 
+// localCredentialFor is the local engine's native API key when target is that
+// engine's current loopback address, and "" otherwise, so a key is never sent
+// to a port it was not issued for.
+func (f *facade) localCredentialFor(target *url.URL) string {
+	b := f.currentLocalBackend()
+	current, ok := f.localBackendTarget()
+	if !ok || target == nil || b.Credential == "" || current.Host != target.Host {
+		return ""
+	}
+	return b.Credential
+}
+
+// withLocalCredential makes a request to the local engine carry its native key
+// in place of any credential the caller sent. Only PAIR-classified inference
+// and the model list use it; every other forwarded path reaches the engine
+// with what the caller sent, so the engine's own authentication still applies.
+func withLocalCredential(h http.Header, credential string) {
+	if credential == "" {
+		return
+	}
+	h.Del("X-Api-Key")
+	h.Set("Authorization", "Bearer "+credential)
+}
+
 // handlePlain is the plaintext personality: it accepts requests only from
 // loopback and hands them to the full local router (handleHTTP). A non-loopback
 // caller — any LAN peer — is refused; peers must use the mTLS ingress. This is
@@ -169,6 +193,12 @@ func (f *facade) serveIngress(w http.ResponseWriter, r *http.Request, peer strin
 		}
 		slog.Debug("cluster ingress forwarding to local backend",
 			"peer", peer, "method", r.Method, "path", r.URL.Path, "target", target.Host)
+		// A peer's model-list read is the only non-inference route that
+		// carries the local key; any other path is forwarded as the peer sent it.
+		if route, ok := f.profile.routeFor(r.Method, r.URL.Path); ok && route.Role.isModelList() {
+			r = r.Clone(r.Context())
+			withLocalCredential(r.Header, f.localCredentialFor(target))
+		}
 		f.reverseProxyToLocal(w, r, target)
 		return
 	}
@@ -305,6 +335,7 @@ func (f *facade) serveIngress(w http.ResponseWriter, r *http.Request, peer strin
 	out := r.WithContext(preparedCtx)
 	out.Header = r.Header.Clone()
 	out.Header.Del(nodepolicy.AdmissionWaitHeader)
+	withLocalCredential(out.Header, f.localCredentialFor(target))
 	setReplayBody(out, body)
 	if streamRequest.protocol != streamProtocolUnknown {
 		out.Header.Set("Accept-Encoding", "identity")
@@ -510,6 +541,7 @@ func (f *facade) serveStrictLocal(w http.ResponseWriter, r *http.Request, body [
 	out := r.WithContext(preparedCtx)
 	out.Header = r.Header.Clone()
 	stripInternalRoutingHeaders(out.Header)
+	withLocalCredential(out.Header, f.localCredentialFor(target))
 	setReplayBody(out, body)
 	if streamRequest.protocol != streamProtocolUnknown {
 		out.Header.Set("Accept-Encoding", "identity")
