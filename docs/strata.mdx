@@ -106,7 +106,8 @@ These are not available for Strata, and no PAIR setting enables them:
 An optional version 1 `runtime.serving` record binds one exact model to reviewed
 native context, parallelism, placement, output and declared memory bounds. The
 adapter supports the narrow native subset inspected at `corbinjurgens/Strata`
-`f6726098`; that source does not identify an installed MSI executable. See the
+`f6726098`, extended to the current fork profile described below; that source
+does not identify an installed MSI executable. See the
 [adapter contract](../services/nvpair-engine-manager/spec.md#finite-prepared-strata-launch)
 for accepted config keys, flags and artifact roles. Unknown modes, automatic
 fitting, ambiguous clamping, duplicate options and undeclared explicit file
@@ -121,7 +122,8 @@ including split GGUF names, are excluded from runtime hashing. Other declared
 runtime files are fully hashed before the lifecycle lock, with cancellation;
 under the lock only bounded bindings and cached file metadata are rechecked.
 Pack/draft enumeration is
-fixed, and `native_experts.txt` indirection is unsupported. All paths must be
+fixed; a main pack may name its experts through `native_experts.txt` instead of an
+`experts.bin`, and a draft pack may not. All paths must be
 absolute and existing; directory and selected file spellings must be clean and
 use the platform's native separators. The hashed config binds the `lib_dirs` list,
 but directory contents are never crawled or hashed. Undeclared libraries reached
@@ -138,37 +140,41 @@ unverified. This record does not implement automatic residency.
 
 ## Current Strata fork compatibility
 
-The adapter above was written against `f6726098`. The owner's current fork
+The adapter was written against `f6726098`. The owner's current fork
 (`corbinjurgens/Strata`, `main` at `0e70753c6b0668ecf929d8ee52982a2922b4e727`)
-generates a different launch profile, and most of it is rejected today. The
-`TestStrataCurrentFork` tests in `services/nvpair-engine-manager` pin that
-behavior against the sanitized `testdata/strata/current-fork-contract.json`
-(fake key, placeholder paths). They call the existing parser and compiler only:
-no server, engine or installed port is contacted, and nothing here shows that the
-current fork runs under PAIR. The rejections stay until the adapter changes;
-deleting generated fields to make validation pass is not a fix.
+generates a different launch profile, and the adapter now accepts most of it. The
+`TestStrataCurrentFork` tests in `services/nvpair-engine-manager` pin what is
+accepted and rejected against the sanitized
+`testdata/strata/current-fork-contract.json` (fake key, placeholder paths). They
+call the parser and compiler only: no server, engine or installed port is
+contacted, and nothing here shows that the current fork runs under PAIR.
+
+Two things keep the generated profile rejected as a whole: `memory_policy` and
+`api_key`. A profile prepared as a separate, fixed candidate, without those two
+fields and with a fixed expert cache and prefill, is accepted. Deleting fields to
+make validation pass is the operator's explicit act of preparing that candidate,
+not something PAIR does.
 
 What the generated profile for the low-VRAM 128K case contains, and what the
-prepared subset does with it:
+prepared launch does with it:
 
-| Generated item | Today | Needed |
-| --- | --- | --- |
-| Top-level `build_metadata`, `log`, `env`, `gpu`, `gpus_asked`, `port`, `host`, `fit_max_tokens`, `open_browser` | Rejected as unsupported config fields | A reviewed decision per field: bind it, require it to agree with the PAIR launch, or ignore it |
-| `env` with `STRATA_*` names | Field rejected; the names are also rejected in the server environment | A reviewed environment transformation bound into the approval |
-| `memory_policy` | Rejected | The server recomputes launch controls at startup from live telemetry, so approval must bind the effective result, not the saved sample |
-| `api_key` | Rejected | Stays rejected until the host-local credential path exists |
-| `--expert-cache auto`, `--prefill auto` | Rejected | Same approval binding as `memory_policy` |
-| `--kv`, `--kv-resident`, `--resident-budget-gib`, `--suffix-draft`, `--lookup-chain` | Rejected as unsupported native arguments | Admit the reviewed ones with their meaning |
-| `--no-prefill-borrow` | Rejected: the grammar only knows `--serve` as a flag without a value | A value-less flag in the grammar |
-| `--serve` absent from `args` | Rejected: the config must contain it | The server adds it itself, so the effective command must account for it |
-| `native_experts.txt` in the pack | Rejected; `experts.bin` is also required | Bind the table and every shard it names |
-| `{"parallel":1,"Parallel":2}` | Accepted; the later value wins | Reject a key that differs only by case |
+| Generated item | Now |
+| --- | --- |
+| `log`, `env`, `gpu`, `fit_max_tokens` | Bound: validated and forwarded to the server in the immutable snapshot. `log` is an absolute clean path in an existing directory, a regular file that is not the same file as any declared input; `env` is a closed list of the four memory controls (`STRATA_RESIDENT_HEADROOM_GIB`, `STRATA_FILE_CACHE_MIB`, `STRATA_FILE_CACHE_COMPACT`, `STRATA_OWNED_PRICE`) with their value syntax, shown in the approved placement; `gpu` is a small non-negative index; `fit_max_tokens` is not an output guarantee |
+| `build_metadata`, `gpus_asked`, `port`, `open_browser` | Validated and not forwarded: the server does not read them, or PAIR's command line decides. `open_browser` must be false |
+| `host` | Must be `127.0.0.1`; the command line host wins; not forwarded |
+| `--kv`, `--kv-resident`, `--resident-budget-gib` | Accepted with their value syntax (`fp16`, `int8`, `q4_0`, `q4`, `k8v4` for `--kv`; a positive plain decimal in GiB for the budget) |
+| `--suffix-draft`, `--lookup-chain` | Accepted only as an explicit `0` |
+| `--no-prefill-borrow` | Accepted as a value-less flag |
+| `--serve` | May be omitted from `args`: the server prepends it |
+| `native_experts.txt` in the main pack | Bound with the shards it names when the pack has no `experts.bin`; both together are rejected as an ambiguous expert source |
+| keys that differ only by case | Rejected, at the top level and inside `env` |
+| `memory_policy` | Still rejected: the server recomputes launch controls at startup from live telemetry, so approval would have to bind the effective result, and how to do that is an open design choice |
+| `--expert-cache auto`, `--prefill auto` | Still rejected, with `memory_policy` |
+| `api_key` | Still rejected until the host-local credential path exists |
 
-Already inside the prepared subset: `--vram-reserve-mib`, a fixed `--prefill`,
-`--spec 2`, a 131072-token context, serial `parallel` with no `--batch`, and the
-generated model name as the declared model identity. Inventory rows with
-`status.value` of `loaded` count as resident; a missing, unknown or `loading`
-status does not.
+Inventory rows with `status.value` of `loaded` count as resident; a missing,
+unknown or `loading` status does not.
 
 Not exercised: load and unload responses, authentication failures,
 cancellation, redirects and any request through the proxy. The recorded owners

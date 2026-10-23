@@ -6,7 +6,6 @@ package main
 import (
 	"bytes"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"maps"
 	"os"
@@ -19,32 +18,38 @@ import (
 	"nvpair-shared/engines"
 )
 
-// These tests characterize what the prepared Strata parser and compiler accept
-// today against the shape the owner's current Strata fork generates
-// (testdata/strata/current-fork-contract.json). They call the existing
-// helpers only: no server, engine or installed port is contacted. A rejection
-// here is a recorded fact, not a defect; the "class" of each rejected item
-// says what the follow-up task must do with it:
+// These tests pin what the prepared Strata parser and compiler accept and reject
+// for the shape the owner's current Strata fork generates
+// (testdata/strata/current-fork-contract.json). They call the existing helpers
+// only: no server, engine or installed port is contacted. The "class" of an item
+// says why it was a blocker, and its decision and outcome in the fixture say what
+// the adapter now does with it:
 //
-//	incompatibility          the fork generates it and the prepared subset has no place for it
-//	approval-binding         accepting it needs the effective value bound into the approval
+//	incompatibility          the fork generates it; bound, agreed or ignored now
+//	approval-binding         needs the effective value bound into approval; still rejected
 //	fail-closed-until-task3  must stay rejected until local authentication exists
-//	supported                accepted today
+//	supported                accepted
 //
 // A fixture mistake is a rejection caused by the specimen instead of the fork;
-// TestStrataCurrentForkProfilePeel proves there is none left by removing every
-// recorded blocker in order and requiring acceptance at the end.
+// TestStrataCurrentForkProfilePeel proves there is none left by removing the
+// still-rejected blockers in order and requiring acceptance at the end.
 
 const forkPlaceholder = "/REPLACE_WITH_ABSOLUTE_PATH"
 
 // forkBooleanFlags are the native flags that take no value.
 var forkBooleanFlags = map[string]bool{"--serve": true, "--no-prefill-borrow": true}
 
+// forkField is one top-level field the fork generates. Decision is what the
+// prepared adapter does with it (bind: forwarded to the server, ignore: validated
+// and not forwarded, agree: must match the PAIR launch, keep rejecting) and
+// Outcome is whether the field is accepted or rejected today.
 type forkField struct {
-	Key    string `json:"key"`
-	Class  string `json:"class"`
-	Strata string `json:"strata"`
-	Why    string `json:"why"`
+	Key      string `json:"key"`
+	Class    string `json:"class"`
+	Decision string `json:"decision"`
+	Outcome  string `json:"outcome"`
+	Strata   string `json:"strata"`
+	Why      string `json:"why"`
 }
 
 type forkStage struct {
@@ -212,7 +217,9 @@ func (c forkContract) applyStage(t *testing.T, raw map[string]any, stage forkSta
 	next := forkClone(t, raw)
 	if stage.Fields {
 		for _, field := range c.ExtraFields {
-			delete(next, field.Key)
+			if field.Outcome == "rejected" {
+				delete(next, field.Key)
+			}
 		}
 	}
 	args := forkArgs(t, next)
@@ -260,9 +267,9 @@ func forkGeneratedRaw(t *testing.T, c forkContract, root string) map[string]any 
 	return raw
 }
 
-// deriveRaw writes the config bytes, rebinds the config artifact and runs the
+// deriveLaunch writes the config bytes, rebinds the config artifact and runs the
 // compiler's derivation. Nothing is started or persisted.
-func (f *strataServingFixture) deriveRaw(t *testing.T, raw map[string]any) error {
+func (f *strataServingFixture) deriveLaunch(t *testing.T, raw map[string]any) (*llamaServingLaunch, error) {
 	t.Helper()
 	data, err := json.Marshal(raw)
 	if err != nil {
@@ -277,8 +284,24 @@ func (f *strataServingFixture) deriveRaw(t *testing.T, raw map[string]any) error
 	}
 	rt := st.plat.Runtime
 	rt.Serving = f.request.Settings.Serving
-	_, err = deriveStrataServing(command, rt)
+	return deriveStrataServing(command, rt)
+}
+
+func (f *strataServingFixture) deriveRaw(t *testing.T, raw map[string]any) error {
+	t.Helper()
+	_, err := f.deriveLaunch(t, raw)
 	return err
+}
+
+// forkPeeled is the generated profile with only the still-rejected blockers
+// remediated: the shape every other decision must accept.
+func forkPeeled(t *testing.T, c forkContract, root string) map[string]any {
+	t.Helper()
+	raw := forkGeneratedRaw(t, c, root)
+	for _, stage := range c.Stages {
+		raw = c.applyStage(t, raw, stage)
+	}
+	return raw
 }
 
 func requireForkOutcome(t *testing.T, err error, expect string) {
@@ -331,7 +354,11 @@ func TestStrataCurrentForkIsolatedIncompatibilities(t *testing.T) {
 	for _, stage := range c.Stages {
 		if stage.Fields {
 			for _, field := range c.ExtraFields {
-				probes = append(probes, probe{"field " + field.Key, field.Class, stage.Expect, func(t *testing.T, base, generated map[string]any) {
+				expect := stage.Expect
+				if field.Outcome == "accepted" {
+					expect = ""
+				}
+				probes = append(probes, probe{"field " + field.Key, field.Class + "/" + field.Decision, expect, func(t *testing.T, base, generated map[string]any) {
 					base[field.Key] = generated[field.Key]
 				}})
 			}
@@ -359,6 +386,9 @@ func TestStrataCurrentForkIsolatedIncompatibilities(t *testing.T) {
 			args := forkArgs(t, base)
 			for flag, value := range variant.SetArgs {
 				args = forkSetArg(args, flag, value)
+			}
+			for _, flag := range variant.RemoveArgs {
+				args = forkRemoveArg(args, flag)
 			}
 			base["args"] = append(slices.Clone(variant.AddArgs), args...)
 		}})
@@ -388,30 +418,90 @@ func TestStrataCurrentForkFixtureMistakeControl(t *testing.T) {
 	requireForkOutcome(t, f.deriveRaw(t, raw), "Unselected Strata model artifact")
 }
 
-// Packs written by the fork's packer normally name expert shards through
-// native_experts.txt instead of carrying an experts.bin.
-func TestStrataCurrentForkPackShape(t *testing.T) {
-	t.Run("indirection table beside experts.bin", func(t *testing.T) {
+// useForkExpertTable turns the fixture's pack into the fork packer's shape: no
+// experts.bin, a native_experts.txt that is declared like any pack file.
+func useForkExpertTable(t *testing.T, f *strataServingFixture, table string) {
+	t.Helper()
+	if err := os.Remove(filepath.Join(f.root, "pack", "experts.bin")); err != nil {
+		t.Fatal(err)
+	}
+	model := &f.request.Settings.Serving.Models[0]
+	model.Artifacts = slices.DeleteFunc(model.Artifacts, func(a engines.ServingArtifact) bool { return a.Role == "model:pack-experts" })
+	path := filepath.Join(f.root, "pack", "native_experts.txt")
+	writeServingFixture(t, path, []byte(table))
+	model.Artifacts = append(model.Artifacts, strataArtifact(t, path, "model:pack-native-experts"))
+}
+
+const (
+	forkTableV3   = "# strata native experts v3: layer gu_type d_type offset blob_bytes gate_off up_off down_off [shard]\n"
+	forkTableV4   = "# strata native experts v4: layer gu_type d_type offset blob_bytes gate_off up_off down_off [shard | gate,up,down]\n"
+	forkShardOne  = "model-00001-of-00002.gguf"
+	forkShardTwo  = "model-00002-of-00002.gguf"
+	forkLayerZero = "0 12 14 0 4096 100 200 300"
+	forkLayerOne  = "1 12 14 4096 4096 400 500 600"
+)
+
+// The fork's packer writes native_experts.txt, a table naming the shards that
+// hold each layer's experts, and normally no experts.bin. The table and every
+// shard it names are bound; an unreadable or ambiguous table is rejected.
+func TestStrataCurrentForkNativeExpertsTable(t *testing.T) {
+	for _, tc := range []struct {
+		name, table, expect string
+	}{
+		{"v3 without a shard column", forkTableV3 + forkLayerZero + "\n" + forkLayerOne + "\n", ""},
+		{"v3 with one shard column", forkTableV3 + forkLayerZero + " " + forkShardTwo + "\n", ""},
+		{"v4 per-role shards", forkTableV4 + forkLayerZero + " " + forkShardOne + "," + forkShardTwo + "," + forkShardOne + "\r\n", ""},
+		{"comments and blank lines", forkTableV3 + "\n# note\n" + forkLayerZero + "\n", ""},
+		{"v4 empty components mean the first shard", forkTableV4 + forkLayerZero + " ," + forkShardTwo + ",\n", ""},
+		{"v4 list that names no shard", forkTableV4 + forkLayerZero + " ,,\n", "native_experts table"},
+		{"empty component in a v3 column", forkTableV3 + forkLayerZero + " ," + forkShardTwo + ",\n", "native_experts table"},
+		{"later header that agrees", forkTableV4 + forkLayerZero + "\n" + forkTableV4, ""},
+		{"later header above the supported versions", forkTableV3 + forkLayerZero + "\n# strata native experts v5: layer\n", "native_experts table"},
+		{"later header that disagrees", forkTableV3 + forkLayerZero + "\n" + forkTableV4, "native_experts table"},
+		{"later tag without a version", forkTableV3 + forkLayerZero + "\n# strata native experts vx\n", "native_experts table"},
+		{"unsupported version", "# strata native experts v5: layer\n" + forkLayerZero + "\n", "native_experts table"},
+		{"missing header", forkLayerZero + "\n", "native_experts table"},
+		{"no layers", forkTableV3, "native_experts table"},
+		{"layer does not start at zero", forkTableV3 + forkLayerOne + "\n", "native_experts table"},
+		{"duplicate layer", forkTableV3 + forkLayerZero + "\n" + forkLayerZero + "\n", "native_experts table"},
+		{"short line", forkTableV3 + "0 12 14 0 4096 100 200\n", "native_experts table"},
+		{"non-numeric field", forkTableV3 + "0 12 14 0 4096 100 200 x\n", "native_experts table"},
+		{"negative field", forkTableV3 + "0 12 14 0 4096 100 200 -3\n", "native_experts table"},
+		{"overflowing field", forkTableV3 + "0 12 14 0 4096 100 200 99999999999999999999\n", "native_experts table"},
+		{"v3 with a role list", forkTableV3 + forkLayerZero + " " + forkShardOne + "," + forkShardTwo + "," + forkShardOne + "\n", "native_experts table"},
+		{"two shard names", forkTableV4 + forkLayerZero + " " + forkShardOne + "," + forkShardTwo + "\n", "native_experts table"},
+		{"parent traversal", forkTableV3 + forkLayerZero + " ../" + forkShardTwo + "\n", "native_experts table"},
+		{"absolute name", forkTableV3 + forkLayerZero + " /" + forkShardTwo + "\n", "native_experts table"},
+		{"backslash name", forkTableV3 + forkLayerZero + ` sub\` + forkShardTwo + "\n", "native_experts table"},
+		{"stream name", forkTableV3 + forkLayerZero + " " + forkShardTwo + ":stream\n", "native_experts table"},
+		{"not a gguf name", forkTableV3 + forkLayerZero + " experts.bin\n", "native_experts table"},
+		{"undeclared shard", forkTableV3 + forkLayerZero + " other-00001-of-00001.gguf\n", "no declared artifact"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newStrataServingFixture(t)
+			writeServingFixture(t, filepath.Join(f.root, "other-00001-of-00001.gguf"), []byte("undeclared shard"))
+			useForkExpertTable(t, &f, tc.table)
+			requireForkOutcome(t, f.deriveRaw(t, forkBaselineRaw(t, f)), tc.expect)
+		})
+	}
+	t.Run("table beside experts.bin is ambiguous", func(t *testing.T) {
 		f := newStrataServingFixture(t)
-		writeServingFixture(t, filepath.Join(f.root, "pack", "native_experts.txt"), []byte("synthetic table"))
+		writeServingFixture(t, filepath.Join(f.root, "pack", "native_experts.txt"), []byte(forkTableV3+forkLayerZero+"\n"))
+		requireForkOutcome(t, f.deriveRaw(t, forkBaselineRaw(t, f)), "expert source is ambiguous")
+	})
+	t.Run("a table in the draft pack is still unsupported", func(t *testing.T) {
+		f := newStrataServingFixture(t)
+		writeServingFixture(t, filepath.Join(f.root, "draft", "native_experts.txt"), []byte(forkTableV3+forkLayerZero+"\n"))
 		requireForkOutcome(t, f.deriveRaw(t, forkBaselineRaw(t, f)), "native_experts indirection is unsupported")
 	})
-	t.Run("indirection table without experts.bin", func(t *testing.T) {
+	t.Run("changed table needs a fresh binding", func(t *testing.T) {
 		f := newStrataServingFixture(t)
-		writeServingFixture(t, filepath.Join(f.root, "pack", "native_experts.txt"), []byte("synthetic table"))
-		if err := os.Remove(filepath.Join(f.root, "pack", "experts.bin")); err != nil {
+		useForkExpertTable(t, &f, forkTableV3+forkLayerZero+"\n")
+		if err := f.deriveRaw(t, forkBaselineRaw(t, f)); err != nil {
 			t.Fatal(err)
 		}
-		// Drop its declaration too, so the rejection is the compiler's pack
-		// requirement and not an undeclared-file mistake of the specimen.
-		model := &f.request.Settings.Serving.Models[0]
-		model.Artifacts = slices.DeleteFunc(model.Artifacts, func(a engines.ServingArtifact) bool { return a.Role == "model:pack-experts" })
-		// Today the fixed pack list asks for experts.bin before it looks at the
-		// table, so the fork's indirection-only pack fails on the missing file.
-		err := f.deriveRaw(t, forkBaselineRaw(t, f))
-		if !errors.Is(err, os.ErrNotExist) {
-			t.Fatalf("error = %v, want the missing experts.bin", err)
-		}
+		writeServingFixture(t, filepath.Join(f.root, "pack", "native_experts.txt"), []byte(forkTableV3+forkLayerZero+"\n"+forkLayerOne+"\n"))
+		requireForkOutcome(t, f.deriveRaw(t, forkBaselineRaw(t, f)), "binding changed")
 	})
 }
 
@@ -422,20 +512,179 @@ func TestStrataCurrentForkConfigGrammar(t *testing.T) {
 		}
 	})
 	t.Run("wrong types are rejected", func(t *testing.T) {
-		for _, data := range []string{`{"parallel":"2"}`, `{"args":"--serve"}`, `{"lib_dirs":"lib"}`} {
+		for _, data := range []string{`{"parallel":"2"}`, `{"args":"--serve"}`, `{"lib_dirs":"lib"}`, `{"gpu":"0"}`, `{"gpu":0.5}`, `{"env":{"STRATA_FILE_CACHE_MIB":5}}`, `{"fit_max_tokens":"yes"}`, `{"log":null}`} {
 			if _, err := parseStrataServingConfig([]byte(data)); err == nil {
 				t.Fatalf("%s accepted", data)
 			}
 		}
 	})
-	// Known gap for Task 2: the duplicate-key scan is case sensitive while the
-	// typed decoder folds case, so a case alias silently replaces the first value.
-	t.Run("case alias of a key is accepted today", func(t *testing.T) {
-		config, err := parseStrataServingConfig([]byte(`{"parallel":1,"Parallel":2}`))
-		if err != nil || config.Parallel != 2 {
-			t.Fatalf("recorded behaviour changed: parallel = %d, error = %v", config.Parallel, err)
+	t.Run("keys that differ only by case are ambiguous", func(t *testing.T) {
+		for _, data := range []string{`{"parallel":1,"Parallel":2}`, `{"PARALLEL":2,"parallel":1}`, `{"env":{"STRATA_FILE_CACHE_MIB":"1","strata_file_cache_mib":"2"}}`, `{"env":{"STRATA_OWNED_PRICE":"exact","STRATA_OWNED_PRICE":"exact"}}`} {
+			if _, err := parseStrataServingConfig([]byte(data)); err == nil || !strings.Contains(err.Error(), "Duplicate") {
+				t.Fatalf("%s: error = %v, want a duplicate rejection", data, err)
+			}
 		}
 	})
+}
+
+// The config env block is bound through a closed list of the memory controls
+// the fork's planner generates, each with its value syntax.
+func TestStrataCurrentForkEnvironmentAllowList(t *testing.T) {
+	c := loadForkContract(t)
+	for _, tc := range []struct {
+		name   string
+		env    map[string]any
+		expect string
+	}{
+		{"generated block", c.GeneratedConfig["env"].(map[string]any), ""},
+		{"empty block", map[string]any{}, ""},
+		{"zero recent cache", map[string]any{"STRATA_FILE_CACHE_MIB": "0"}, ""},
+		{"fractional headroom", map[string]any{"STRATA_RESIDENT_HEADROOM_GIB": "1.5"}, ""},
+		{"unreviewed name", map[string]any{"STRATA_API_KEY": "x"}, "is not a reviewed value"},
+		{"lower case name", map[string]any{"strata_file_cache_mib": "1"}, "is not a reviewed value"},
+		{"python name", map[string]any{"PYTHONPATH": "x"}, "is not a reviewed value"},
+		{"negative cache", map[string]any{"STRATA_FILE_CACHE_MIB": "-1"}, "is not a reviewed value"},
+		{"cache above the planner limit", map[string]any{"STRATA_FILE_CACHE_MIB": "17592186044416"}, "is not a reviewed value"},
+		{"signed cache", map[string]any{"STRATA_FILE_CACHE_MIB": "+5"}, "is not a reviewed value"},
+		{"compact flag value", map[string]any{"STRATA_FILE_CACHE_COMPACT": "2"}, "is not a reviewed value"},
+		{"price mode", map[string]any{"STRATA_OWNED_PRICE": "cheap"}, "is not a reviewed value"},
+		{"empty headroom", map[string]any{"STRATA_RESIDENT_HEADROOM_GIB": ""}, "is not a reviewed value"},
+		{"non-numeric headroom", map[string]any{"STRATA_RESIDENT_HEADROOM_GIB": "abc"}, "is not a reviewed value"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newStrataServingFixture(t)
+			base := forkBaselineRaw(t, f)
+			base["env"] = tc.env
+			requireForkOutcome(t, f.deriveRaw(t, base), tc.expect)
+		})
+	}
+}
+
+// The values the server does not read, or reads from the command line, are
+// validated and then not forwarded; the others reach the snapshot, and every
+// reviewed control appears in the approved placement, in a fixed order.
+func TestStrataCurrentForkSnapshotAndPlacement(t *testing.T) {
+	c := loadForkContract(t)
+	f := newForkProfileFixture(t, c)
+	launch, err := f.deriveLaunch(t, forkPeeled(t, c, f.root))
+	if err != nil {
+		t.Fatalf("profile rejected: %v", err)
+	}
+	var snapshot map[string]json.RawMessage
+	if err := json.Unmarshal(launch.Snapshot, &snapshot); err != nil {
+		t.Fatal(err)
+	}
+	for _, kept := range []string{"log", "env", "gpu", "fit_max_tokens", "exe", "args", "tokenizer", "model_name", "lib_dirs"} {
+		if _, ok := snapshot[kept]; !ok {
+			t.Errorf("snapshot lost %s", kept)
+		}
+	}
+	for _, dropped := range []string{"port", "host", "build_metadata", "gpus_asked", "open_browser", "api_key", "memory_policy"} {
+		if _, ok := snapshot[dropped]; ok {
+			t.Errorf("snapshot forwards %s", dropped)
+		}
+	}
+	want := []string{
+		"--expert-cache=64", "--kv=q4_0", "--spec=2", "--suffix-draft=0", "--lookup-chain=0",
+		"--resident-budget-gib=3", "--prefill=64", "--no-prefill-borrow", "--kv-resident=20480",
+		"env:STRATA_FILE_CACHE_COMPACT=1", "env:STRATA_FILE_CACHE_MIB=2136", "env:STRATA_OWNED_PRICE=exact", "env:STRATA_RESIDENT_HEADROOM_GIB=4",
+	}
+	if len(launch.Envelopes) != 1 || !slices.Equal(launch.Envelopes[0].Placement, want) {
+		t.Fatalf("placement = %v, want %v", launch.Envelopes, want)
+	}
+}
+
+// api_key and memory_policy each keep the otherwise accepted profile rejected.
+func TestStrataCurrentForkFailClosedFields(t *testing.T) {
+	c := loadForkContract(t)
+	for _, key := range []string{"api_key", "memory_policy"} {
+		t.Run(key, func(t *testing.T) {
+			f := newForkProfileFixture(t, c)
+			raw := forkPeeled(t, c, f.root)
+			if err := f.deriveRaw(t, raw); err != nil {
+				t.Fatalf("control rejected: %v", err)
+			}
+			raw[key] = forkResolve(c.GeneratedConfig[key], f.root)
+			requireForkOutcome(t, f.deriveRaw(t, raw), "Unsupported or malformed prepared Strata config.")
+		})
+	}
+}
+
+// The server opens the log for append, so it must not be another name for a
+// declared input: judged by file identity, not by spelling.
+func TestStrataCurrentForkLogIdentity(t *testing.T) {
+	logOver := func(t *testing.T, f *strataServingFixture, path string) error {
+		t.Helper()
+		base := forkBaselineRaw(t, *f)
+		base["log"] = path
+		return f.deriveRaw(t, base)
+	}
+	t.Run("hard link to a declared file", func(t *testing.T) {
+		f := newStrataServingFixture(t)
+		alias := filepath.Join(f.root, "alias.log")
+		if err := os.Link(filepath.Join(f.root, "server.py"), alias); err != nil {
+			t.Fatal(err)
+		}
+		requireForkOutcome(t, logOver(t, &f, alias), "Strata log")
+	})
+	t.Run("directory", func(t *testing.T) {
+		f := newStrataServingFixture(t)
+		dir := filepath.Join(f.root, "logdir")
+		if err := os.Mkdir(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		requireForkOutcome(t, logOver(t, &f, dir), "Strata log")
+	})
+	t.Run("symbolic link", func(t *testing.T) {
+		f := newStrataServingFixture(t)
+		alias := filepath.Join(f.root, "link.log")
+		if err := os.Symlink(filepath.Join(f.root, "server.py"), alias); err != nil {
+			t.Logf("symbolic links are not permitted here, so this case is not exercised: %v", err)
+			return
+		}
+		requireForkOutcome(t, logOver(t, &f, alias), "Strata log")
+	})
+	t.Run("existing regular log", func(t *testing.T) {
+		f := newStrataServingFixture(t)
+		old := filepath.Join(f.root, "old.log")
+		writeServingFixture(t, old, []byte("earlier output"))
+		requireForkOutcome(t, logOver(t, &f, old), "")
+	})
+}
+
+// Validation of the fields that are accepted without being forwarded, and of the
+// log location that is.
+func TestStrataCurrentForkFieldValidation(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		key    string
+		value  func(root string) any
+		expect string
+	}{
+		{"port zero", "port", func(string) any { return 0 }, "is not a reviewed value"},
+		{"port too large", "port", func(string) any { return 70000 }, "is not a reviewed value"},
+		{"port text", "port", func(string) any { return "8080" }, "Unsupported or malformed"},
+		{"host not loopback", "host", func(string) any { return "0.0.0.0" }, "is not a reviewed value"},
+		{"browser opening", "open_browser", func(string) any { return true }, "is not a reviewed value"},
+		{"empty receipt path", "build_metadata", func(string) any { return "" }, "is not a reviewed value"},
+		{"negative gpu", "gpu", func(string) any { return -1 }, "is not a reviewed value"},
+		{"large gpu", "gpu", func(string) any { return 1000 }, "is not a reviewed value"},
+		{"relative log", "log", func(string) any { return "strata.log" }, "Strata log"},
+		{"empty log", "log", func(string) any { return "" }, "Strata log"},
+		{"unclean log", "log", func(root string) any {
+			return root + string(filepath.Separator) + "." + string(filepath.Separator) + "strata.log"
+		}, "Strata log"},
+		{"log in a missing directory", "log", func(root string) any { return filepath.Join(root, "absent", "strata.log") }, "Strata log"},
+		{"log over a declared file", "log", func(root string) any { return filepath.Join(root, "server.py") }, "Strata log"},
+		{"log in an existing directory", "log", func(root string) any { return filepath.Join(root, "strata.log") }, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newStrataServingFixture(t)
+			base := forkBaselineRaw(t, f)
+			base[tc.key] = tc.value(f.root)
+			requireForkOutcome(t, f.deriveRaw(t, base), tc.expect)
+		})
+	}
 }
 
 // The generated config's env block names these variables, and the server turns

@@ -14,7 +14,9 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -212,18 +214,98 @@ func (e *Executor) prepareStrataRequest(ctx context.Context, st *engineState, re
 	return prepareStrataRuntimeHashes(ctx, command, rt)
 }
 
-// Prepared subset of corbinjurgens/Strata f6726098 serve/server.py and
-// src/program/generate.cpp. Automatic fitting, mutable profiles, hooks, vision,
-// native_experts indirection and implicit allocation controls are unsupported.
+// Prepared subset of corbinjurgens/Strata serve/server.py and
+// src/program/generate.cpp, from f6726098 to the current main 0e70753c.
+// Automatic fitting, the automatic memory policy, authentication, mutable
+// profiles, hooks and vision are unsupported.
+//
+// The fork's generated profile also carries fields beyond the original subset.
+// Log, Env, GPU and FitMaxTokens are read by the server and reach it through the
+// snapshot. BuildMetadata, GPUsAsked, Port, Host and OpenBrowser are validated
+// and then dropped from the snapshot: the server reads none of them or lets the
+// command line decide, and PAIR owns that command line.
 type strataServingConfig struct {
-	Exe         string   `json:"exe"`
-	Args        []string `json:"args"`
-	CWD         string   `json:"cwd"`
-	Tokenizer   string   `json:"tokenizer"`
-	ModelName   string   `json:"model_name"`
-	Parallel    int64    `json:"parallel"`
-	LibDirs     []string `json:"lib_dirs"`
-	IdleUnloadS int64    `json:"idle_unload_s"`
+	Exe          string            `json:"exe"`
+	Args         []string          `json:"args"`
+	CWD          string            `json:"cwd"`
+	Tokenizer    string            `json:"tokenizer"`
+	ModelName    string            `json:"model_name"`
+	Parallel     int64             `json:"parallel"`
+	LibDirs      []string          `json:"lib_dirs"`
+	IdleUnloadS  int64             `json:"idle_unload_s"`
+	Log          *string           `json:"log,omitempty"`
+	Env          map[string]string `json:"env,omitempty"`
+	GPU          *int64            `json:"gpu,omitempty"`
+	FitMaxTokens *bool             `json:"fit_max_tokens,omitempty"`
+
+	BuildMetadata *string `json:"build_metadata,omitempty"`
+	GPUsAsked     *bool   `json:"gpus_asked,omitempty"`
+	Port          *int64  `json:"port,omitempty"`
+	Host          *string `json:"host,omitempty"`
+	OpenBrowser   *bool   `json:"open_browser,omitempty"`
+}
+
+// Only the memory controls the fork's planner generates are accepted in the
+// config env block, each with the syntax it writes. Anything else could change
+// native behavior outside the reviewed profile.
+var strataEnvironment = map[string]func(string) bool{
+	"STRATA_RESIDENT_HEADROOM_GIB": func(v string) bool { return strataDecimal(v, true) },
+	"STRATA_FILE_CACHE_MIB": func(v string) bool {
+		n, err := strconv.ParseUint(v, 10, 64)
+		return err == nil && strconv.FormatUint(n, 10) == v && n <= math.MaxUint64>>20
+	},
+	"STRATA_FILE_CACHE_COMPACT": func(v string) bool { return v == "0" || v == "1" },
+	"STRATA_OWNED_PRICE":        func(v string) bool { return v == "exact" },
+}
+
+var strataKVFormats = []string{"fp16", "int8", "q4_0", "q4", "k8v4"}
+
+var strataDecimalPattern = regexp.MustCompile(`^[0-9]{1,6}(\.[0-9]{1,6})?$`)
+
+// strataDecimal accepts a plain decimal number up to 4096; zero only when allowed.
+func strataDecimal(value string, allowZero bool) bool {
+	if !strataDecimalPattern.MatchString(value) {
+		return false
+	}
+	n, err := strconv.ParseFloat(value, 64)
+	return err == nil && n <= 4096 && (n > 0 || allowZero)
+}
+
+func strataUnreviewed(field string) error {
+	return servingError("Strata config field " + field + " is not a reviewed value.")
+}
+
+// validateStrataExtras checks the fields beyond the original subset. The log
+// is the only one that names a file: it must be an absolute clean path whose
+// directory exists and must not be a declared input.
+func validateStrataExtras(config strataServingConfig) error {
+	if config.GPU != nil && (*config.GPU < 0 || *config.GPU > 255) {
+		return strataUnreviewed("gpu")
+	}
+	if config.Port != nil && (*config.Port < 1 || *config.Port > 65535) {
+		return strataUnreviewed("port")
+	}
+	if config.Host != nil && *config.Host != "127.0.0.1" {
+		return strataUnreviewed("host")
+	}
+	if config.BuildMetadata != nil && *config.BuildMetadata == "" {
+		return strataUnreviewed("build_metadata")
+	}
+	if config.OpenBrowser != nil && *config.OpenBrowser {
+		return strataUnreviewed("open_browser")
+	}
+	if config.Log != nil {
+		path := *config.Log
+		if !filepath.IsAbs(path) || filepath.Clean(path) != path || strataDirectory(filepath.Dir(path)) != nil {
+			return servingError("Strata log must be an absolute clean file path in an existing directory.")
+		}
+	}
+	for name, value := range config.Env {
+		if valid, reviewed := strataEnvironment[name]; !reviewed || !valid(value) {
+			return strataUnreviewed("env")
+		}
+	}
+	return nil
 }
 
 func strataServingRuntime(st *engineState, config *engines.ServingConfig) bool {
@@ -316,17 +398,22 @@ func parseStrataServingConfig(data []byte) (strataServingConfig, error) {
 	if err != nil || token != json.Delim('{') {
 		return config, servingError("Prepared Strata config must be a JSON object.")
 	}
+	// The typed decode below folds case, so a key that differs only by case
+	// would silently replace the first value: names are compared case-insensitively.
 	seen := map[string]bool{}
 	for decoder.More() {
 		token, err := decoder.Token()
 		key, ok := token.(string)
-		if err != nil || !ok || seen[key] {
+		if err != nil || !ok || seen[strings.ToLower(key)] {
 			return config, servingError("Duplicate or malformed Strata config key.")
 		}
-		seen[key] = true
+		seen[strings.ToLower(key)] = true
 		var value json.RawMessage
 		if decoder.Decode(&value) != nil || bytes.Equal(value, []byte("null")) {
 			return config, servingError("Null or malformed Strata config values are unsupported.")
+		}
+		if strings.EqualFold(key, "env") && !strataDistinctNames(value) {
+			return config, servingError("Duplicate or malformed Strata config key.")
 		}
 	}
 	decoder = json.NewDecoder(bytes.NewReader(data))
@@ -335,6 +422,29 @@ func parseStrataServingConfig(data []byte) (strataServingConfig, error) {
 		return config, servingError("Unsupported or malformed prepared Strata config.")
 	}
 	return config, nil
+}
+
+// strataDistinctNames reports whether a JSON object has no two keys equal
+// ignoring case. A value that is not an object is left to the typed decode.
+func strataDistinctNames(raw json.RawMessage) bool {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	if token, err := decoder.Token(); err != nil || token != json.Delim('{') {
+		return true
+	}
+	seen := map[string]bool{}
+	for decoder.More() {
+		token, err := decoder.Token()
+		key, ok := token.(string)
+		if err != nil || !ok || seen[strings.ToUpper(key)] {
+			return false
+		}
+		seen[strings.ToUpper(key)] = true
+		var skipped json.RawMessage
+		if decoder.Decode(&skipped) != nil {
+			return false
+		}
+	}
+	return true
 }
 
 func compileStrataServing(command launchCommand, rt Runtime, approved bool) (*llamaServingLaunch, error) {
@@ -395,6 +505,9 @@ func deriveStrataServing(command launchCommand, rt Runtime) (*llamaServingLaunch
 	if config.Parallel < 1 || config.Parallel > 8 || config.IdleUnloadS < 0 {
 		return nil, servingError("Strata requires explicit parallel in 1..8 and nonnegative idle retention.")
 	}
+	if err := validateStrataExtras(config); err != nil {
+		return nil, err
+	}
 	result := &llamaServingLaunch{Config: rt.Serving.Clone(), Source: source}
 	model := &result.Config.Models[0]
 	if config.ModelName != model.ModelID {
@@ -424,6 +537,7 @@ func deriveStrataServing(command launchCommand, rt Runtime) (*llamaServingLaunch
 	}
 	options := map[string]string{}
 	placement := []string{}
+	expertTable := ""
 	for i := 0; i < len(config.Args); i++ {
 		key := config.Args[i]
 		canonical := key
@@ -433,8 +547,13 @@ func deriveStrataServing(command launchCommand, rt Runtime) (*llamaServingLaunch
 		if _, exists := options[canonical]; exists {
 			return nil, servingError("Duplicate or conflicting native Strata arguments.")
 		}
-		if key == "--serve" {
+		// The server prepends --serve itself, so a config may omit it; the other
+		// value-less flag is part of the reviewed placement.
+		if key == "--serve" || key == "--no-prefill-borrow" {
 			options[key] = "true"
+			if key != "--serve" {
+				placement = append(placement, key)
+			}
 			continue
 		}
 		if i+1 == len(config.Args) {
@@ -470,6 +589,22 @@ func deriveStrataServing(command launchCommand, rt Runtime) (*llamaServingLaunch
 				files = []string{"dense.txt", "dense.bin", "experts.bin"}
 				role = "draft"
 			}
+			// The fork's packer normally writes native_experts.txt and no
+			// experts.bin. The table and the shards it names are bound below;
+			// both sources together would make the expert source ambiguous.
+			table := filepath.Join(value, "native_experts.txt")
+			if _, err := os.Lstat(table); err == nil {
+				if key == "--mtp" {
+					return nil, servingError("Pack native_experts indirection is unsupported.")
+				}
+				if _, err := os.Lstat(filepath.Join(value, "experts.bin")); !os.IsNotExist(err) {
+					return nil, servingError("Pack has both experts.bin and native_experts.txt; the expert source is ambiguous.")
+				}
+				files = []string{"index.txt", "dense.bin"}
+				expertTable = table
+			} else if !os.IsNotExist(err) {
+				return nil, servingError("Cannot inspect prepared pack file.")
+			}
 			for _, name := range files {
 				if err := add(filepath.Join(value, name), role); err != nil {
 					return nil, err
@@ -485,16 +620,38 @@ func deriveStrataServing(command launchCommand, rt Runtime) (*llamaServingLaunch
 					return nil, servingError("Cannot inspect prepared pack file.")
 				}
 			}
-			if _, err := os.Lstat(filepath.Join(value, "native_experts.txt")); !os.IsNotExist(err) {
-				return nil, servingError("Pack native_experts indirection is unsupported.")
+			if key == "--pack" && expertTable != "" {
+				if err := add(expertTable, role); err != nil {
+					return nil, err
+				}
 			}
-		case "--prefill", "--vram-reserve-mib", "--expert-cache", "--spec":
+		case "--prefill", "--vram-reserve-mib", "--expert-cache", "--spec", "--kv-resident":
 			if _, err := llamaPositive(value); err != nil {
 				return nil, err
 			}
 			placement = append(placement, key+"="+value)
+		case "--kv":
+			if !slices.Contains(strataKVFormats, value) {
+				return nil, servingError("Unsupported Strata KV format; use " + strings.Join(strataKVFormats, ", ") + ".")
+			}
+			placement = append(placement, key+"="+value)
+		case "--resident-budget-gib":
+			if !strataDecimal(value, false) {
+				return nil, servingError("Strata resident budget must be a positive decimal number of GiB.")
+			}
+			placement = append(placement, key+"="+value)
+		case "--suffix-draft", "--lookup-chain":
+			if value != "0" {
+				return nil, servingError("Strata speculative alternatives are supported only when explicitly disabled with 0.")
+			}
+			placement = append(placement, key+"="+value)
 		default:
 			return nil, servingError("Unsupported native Strata argument; implicit paths, fitting and allocation modes are forbidden.")
+		}
+	}
+	if expertTable != "" {
+		if err := strataExpertTable(expertTable, options["--native"], add); err != nil {
+			return nil, err
 		}
 	}
 	contextTokens, ctxErr := llamaPositive(options["--max-context"])
@@ -506,8 +663,8 @@ func deriveStrataServing(command launchCommand, rt Runtime) (*llamaServingLaunch
 		}
 	}
 	// Pinned generate.cpp f6726098 rejects max_context > 2147483647LL - 8.
-	if ctxErr != nil || contextTokens > (math.MaxInt32-8)/slots || contextTokens <= model.MaxOutputTokens || options["--serve"] != "true" || options["--native"] == "" || options["--pack"] == "" {
-		return nil, servingError("Strata requires explicit finite context, native model, pack and serve mode; output must fit the per-slot context.")
+	if ctxErr != nil || contextTokens > (math.MaxInt32-8)/slots || contextTokens <= model.MaxOutputTokens || options["--native"] == "" || options["--pack"] == "" {
+		return nil, servingError("Strata requires explicit finite context, native model and pack; output must fit the per-slot context.")
 	}
 	if options["--expert-cache"] == "" || options["--prefill"] == "" {
 		return nil, servingError("Strata requires explicit fixed expert cache and prefill placement.")
@@ -552,7 +709,34 @@ func deriveStrataServing(command launchCommand, rt Runtime) (*llamaServingLaunch
 			return nil, servingError("Explicit Strata dependency has no declared artifact.")
 		}
 	}
-	result.Snapshot, err = json.Marshal(config)
+	// The server opens the log for append. It must be a new or existing regular
+	// file, never a link, and never the same file as any declared input, by
+	// identity, so a hard link cannot make an input writable.
+	if config.Log != nil {
+		logInfo, err := os.Lstat(*config.Log)
+		switch {
+		case os.IsNotExist(err):
+		case err != nil || !logInfo.Mode().IsRegular():
+			return nil, servingError("Strata log must be a regular file, not a link or device.")
+		default:
+			for _, artifact := range model.Artifacts {
+				if info, err := os.Stat(artifact.Binding.SourcePath); err != nil || os.SameFile(logInfo, info) {
+					return nil, servingError("Strata log must not be a declared input file.")
+				}
+			}
+		}
+	}
+	names := make([]string, 0, len(config.Env))
+	for name := range config.Env {
+		names = append(names, name)
+	}
+	slices.Sort(names)
+	for _, name := range names {
+		placement = append(placement, "env:"+name+"="+config.Env[name])
+	}
+	forwarded := config
+	forwarded.BuildMetadata, forwarded.GPUsAsked, forwarded.Port, forwarded.Host, forwarded.OpenBrowser = nil, nil, nil, nil, nil
+	result.Snapshot, err = json.Marshal(forwarded)
 	if err != nil || len(result.Snapshot) > servingSmallFileLimit {
 		return nil, servingError("Cannot prepare bounded Strata config snapshot.")
 	}
@@ -572,6 +756,105 @@ func deriveStrataServing(command launchCommand, rt Runtime) (*llamaServingLaunch
 	model.ExpectedNativeSourceDigest = result.Digest
 	result.Envelopes = []engines.ServingEnvelope{{ModelID: model.ModelID, PerSlotContextTokens: contextTokens, TotalContextTokens: contextTokens * slots, Slots: slots, MaxOutputTokens: model.MaxOutputTokens, Memory: model.Memory, Placement: placement, Retention: strconv.FormatInt(config.IdleUnloadS, 10), RouterCapacity: 1, NativeSourceDigest: result.Digest}}
 	return result, nil
+}
+
+// strataExpertTable binds the fork packer's native_experts.txt: a header naming
+// version v3 or v4, then one line per layer in order from zero with eight
+// unsigned numbers and an optional shard column (one name, or for v4 a gate,up,
+// down list). Each named shard sits beside the first --native shard and must be
+// a declared model file. Anything else in the table is rejected.
+func strataExpertTable(table, native string, add func(path, role string) error) error {
+	reject := func(reason string) error {
+		return servingError("The native_experts table " + reason + ".")
+	}
+	if native == "" {
+		return reject("needs --native to place its shards")
+	}
+	data, _, err := servingSource(table)
+	if err != nil {
+		return reject("is missing, unstable or oversized")
+	}
+	// The engine reads a version from every comment that starts with the tag and
+	// refuses one it does not know, so every such comment is checked here, and
+	// they must all agree with the header.
+	const tag = "# strata native experts v"
+	lines := strings.Split(string(data), "\n")
+	version := ""
+	for i, line := range lines {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, tag) {
+			if i == 0 {
+				return reject("has no version header")
+			}
+			continue
+		}
+		this := ""
+		for _, supported := range []string{"v3", "v4"} {
+			if strings.HasPrefix(line, "# strata native experts "+supported+":") {
+				this = supported
+			}
+		}
+		if this == "" || (version != "" && this != version) {
+			return reject("has an unsupported or inconsistent version header")
+		}
+		version = this
+	}
+	shards := map[string]bool{}
+	layers := 0
+	for _, line := range lines[1:] {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 8 || len(fields) > 9 {
+			return reject("has a layer line that is not eight numbers and an optional shard column")
+		}
+		for i, field := range fields[:8] {
+			n, err := strconv.ParseUint(field, 10, 63)
+			if err != nil || (i == 0 && n != uint64(layers)) {
+				return reject("has a bad number or layers that do not run from zero in order")
+			}
+		}
+		layers++
+		if len(fields) == 9 {
+			names := strings.Split(fields[8], ",")
+			if len(names) != 1 && (version == "v3" || len(names) != 3) {
+				return reject("has a shard column that is not one name or a v4 gate,up,down list")
+			}
+			// In a v4 list an empty component means the first --native shard,
+			// which the packer writes for roles stored there.
+			named := 0
+			for _, name := range names {
+				if name == "" && len(names) == 3 {
+					continue
+				}
+				lower := strings.ToLower(name)
+				if name == "" || name != filepath.Base(name) || strings.ContainsAny(name, `/\:`) || name == "." || name == ".." || !strings.HasSuffix(lower, ".gguf") {
+					return reject("names a shard that is not a plain .gguf file name")
+				}
+				shards[name] = true
+				named++
+			}
+			if named == 0 {
+				return reject("has a v4 shard list that names no shard")
+			}
+		}
+	}
+	if layers == 0 {
+		return reject("has no layers")
+	}
+	names := make([]string, 0, len(shards))
+	for name := range shards {
+		names = append(names, name)
+	}
+	slices.Sort(names)
+	for _, name := range names {
+		if err := add(filepath.Join(filepath.Dir(native), name), "model"); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func recheckPreparedServing(st *engineState, launch launchCommand, rt Runtime, prepared *llamaServingLaunch) error {

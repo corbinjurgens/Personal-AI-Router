@@ -177,7 +177,7 @@ artifact: runtime Python/server/config/native executable/profile/tokenizer and
 attested libraries are fully hashed with the existing cache; selected model
 shards, pack and draft files use operator-supplied full SHA256 plus bounded local
 binding checks. No full model hashing or model copying occurs during preparation.
-Pack/draft enumeration is fixed; `native_experts.txt` indirection is unsupported.
+Pack/draft enumeration is fixed; a main pack may use `native_experts.txt` instead of `experts.bin` (the table and its shards are bound; both together are ambiguous), and a draft pack may not.
 The hashed config binds `lib_dirs`, whose entries must be absolute existing
 directories. Directories and Python imports are not crawled. Undeclared files
 found via library directories or inherited PATH/LD_LIBRARY_PATH, and Python
