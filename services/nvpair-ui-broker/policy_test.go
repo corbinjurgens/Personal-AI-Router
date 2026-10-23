@@ -418,9 +418,46 @@ func attachFakeProxy(t *testing.T, b *Broker) (*proxyProcess, *fakeWorker) {
 func attachFakeEngine(t *testing.T, b *Broker) *fakeWorker {
 	t.Helper()
 	peer, f := newFakeWorkerPipe(t)
-	f.setAnswer(func(method string, _ json.RawMessage) (any, string) {
+	slept := make(map[string]bool)
+	f.setAnswer(func(method string, raw json.RawMessage) (any, string) {
 		if method == "engine:switch-prepare" {
 			return emptySwitchManagerSnapshot(), ""
+		}
+		switch method {
+		case "engine:get-installed":
+			r := b.nodePolicyRuntime()
+			r.mu.Lock()
+			engines := make(map[string]bool)
+			for engine, running := range r.running {
+				engines[engine] = running && !slept[engine]
+			}
+			r.mu.Unlock()
+			for engine := range slept {
+				engines[engine] = false
+			}
+			statuses := make([]map[string]any, 0, len(engines))
+			for engine, running := range engines {
+				statuses = append(statuses, map[string]any{"engine": engine, "running": running})
+			}
+			return map[string]any{"engines": statuses}, ""
+		case "engine:models":
+			return map[string]any{"loadedByEngine": b.loadedSnapshot()}, ""
+		case engineSleepMethod:
+			var p struct {
+				Engine string `json:"engine"`
+			}
+			if err := json.Unmarshal(raw, &p); err != nil {
+				return nil, err.Error()
+			}
+			slept[p.Engine] = true
+		case engineWakeMethod:
+			var p struct {
+				Engine string `json:"engine"`
+			}
+			if err := json.Unmarshal(raw, &p); err != nil {
+				return nil, err.Error()
+			}
+			delete(slept, p.Engine)
 		}
 		return map[string]bool{"ok": true}, ""
 	})
@@ -590,6 +627,7 @@ func newActivatedBroker(t *testing.T) *activatedBroker {
 	path := filepath.Join(t.TempDir(), nodepolicy.FileName)
 	b.loadNodePolicy(path)
 	setClock(b, 5000)
+	attachFakeEngine(t, b)
 	pp, proxy, acks := attachAckingProxy(t, b)
 	b.replayPolicyToProxy(context.Background(), pp)
 	ab := &activatedBroker{b: b, out: out, pp: pp, proxy: proxy, acks: acks, path: path}
@@ -1037,7 +1075,7 @@ func TestPauseFinishWaitsForDrainThenUnloadsAndStops(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("pause did not finish after the drain")
 	}
-	calls := engine.snapshot()
+	calls := pauseLifecycleCalls(engine.snapshot())
 	if len(calls) != 2 || calls[0].method != engineUnloadModelMethod || calls[1].method != engineSleepMethod {
 		t.Fatalf("engine calls = %v, want unload then sleep", engine.methods(""))
 	}
@@ -1065,7 +1103,7 @@ func TestPauseCancelPushesCancelActiveImmediately(t *testing.T) {
 	if len(p) < 2 || p[0].State != nodepolicy.Draining || !p[0].CancelActive {
 		t.Fatalf("availability pushes = %+v, want draining with cancelActive first", p)
 	}
-	calls := engine.snapshot()
+	calls := pauseLifecycleCalls(engine.snapshot())
 	if len(calls) != 2 || calls[0].method != engineUnloadModelMethod || calls[1].method != engineSleepMethod {
 		t.Fatalf("legacy false pause options skipped unload or stop: %v", engine.methods(""))
 	}
@@ -2712,7 +2750,7 @@ func TestAvailabilityRelayedLandedReplacementAdoptsPolicy(t *testing.T) {
 				setClock(rb.b, 5)
 				rb.b.replayPolicyToProxy(context.Background(), rb.b.policyProxy())
 				if to == nodepolicy.Available {
-					// A paired node may resume only a pause a paired node made.
+					// A peer-origin pause fences every peer, including its initiator.
 					if _, err := rb.b.setAvailability(context.Background(), nodepolicy.Paused, nodepolicy.PausedByPeer); err != nil {
 						t.Fatalf("prepare paused node: %v", err)
 					}
@@ -2722,7 +2760,25 @@ func TestAvailabilityRelayedLandedReplacementAdoptsPolicy(t *testing.T) {
 				want.Availability, want.Revision = to, revision
 				want.PausedBy = pausedByFor(to, nodepolicy.PausedByPeer)
 				setReplacer(rb.b, boundary.rep)
-				_, errText := rb.relay(t, "set-availability", map[string]any{"state": to})
+				var errText string
+				if to == nodepolicy.Available {
+					before, beforeBytes := rb.b.localPolicy(), rb.fileBytes(t)
+					reply := rb.relayReply(t, "set-availability", map[string]any{"state": to})
+					if reply.ErrorCode != codeLocalVeto || reply.Error != "This node is paused. Resume it on this node before managing it remotely." {
+						t.Fatalf("peer resume = %+v, want pause refusal before publication", reply)
+					}
+					if !reflect.DeepEqual(rb.b.localPolicy(), before) || !bytes.Equal(rb.fileBytes(t), beforeBytes) || len(rb.proxy.snapshot()) != callStart || len(rb.out.frames()) != frameStart {
+						t.Fatal("refused peer resume changed the policy, file, proxy or notifications")
+					}
+					// Only local Resume reaches the writer, so exercise the landed
+					// replacement warning through that authorized path.
+					_, err := rb.b.setAvailability(context.Background(), to, nodepolicy.PausedLocally)
+					if err != nil {
+						errText = err.Error()
+					}
+				} else {
+					_, errText = rb.relay(t, "set-availability", map[string]any{"state": to})
+				}
 				setReplacer(rb.b, durablefile.Replacer{})
 				wantMessage := "the policy document with revision " + revision + " was saved and is being applied but may not survive a power loss: "
 				if !strings.HasPrefix(errText, wantMessage) || !strings.Contains(errText, errPublish.Error()) {
@@ -2768,7 +2824,7 @@ func TestAvailabilityLandedReplacementCompletesEngineActions(t *testing.T) {
 				t.Fatalf("landed transition = %q, %v, want completed %q and durability warning", got, err, to)
 			}
 			requireLandedAvailability(t, rb, want, callStart, frameStart)
-			wantMethods := []string{engineUnloadModelMethod, engineSleepMethod}
+			wantMethods := []string{"engine:get-installed", "engine:models", engineUnloadModelMethod, engineSleepMethod, "engine:get-installed"}
 			if to == nodepolicy.Available {
 				wantMethods = []string{restoreEnabledEnginesMethod, engineWakeMethod}
 				rb.engine.waitFor("restore and wake after landed resume", func(calls []policyCall) bool { return len(calls) >= engineStart+2 })
@@ -2777,7 +2833,7 @@ func TestAvailabilityLandedReplacementCompletesEngineActions(t *testing.T) {
 			var gotMethods []string
 			for _, call := range calls {
 				gotMethods = append(gotMethods, call.method)
-				if call.method == restoreEnabledEnginesMethod {
+				if call.method == restoreEnabledEnginesMethod || call.method == "engine:get-installed" || call.method == "engine:models" {
 					continue
 				}
 				var params struct {
@@ -3303,8 +3359,17 @@ func TestPolicyRecoveryPublicationFaultBoundaries(t *testing.T) {
 			}
 			if boundary.landed {
 				requireLandedPolicy(t, rb, want)
-				if _, errText := rb.relaySet(t, rb.peerSnapshot(t)); errText != "" {
-					t.Fatalf("peer set after landed recovery = %q, want recovery cleared", errText)
+				// Recovery is cleared, but the recovered paused document still
+				// fences peer writes until a local Resume.
+				doc := rb.peerSnapshot(t)
+				before, beforeBytes := rb.b.localPolicy(), rb.fileBytes(t)
+				callStart, frameStart := len(rb.proxy.snapshot()), len(rb.out.frames())
+				reply := rb.relayReply(t, "set", map[string]any{"policy": doc, "expectedPersistedRevision": doc["revision"]})
+				if reply.ErrorCode != codeLocalVeto || reply.Error != "This node is paused. Resume it on this node before managing it remotely." {
+					t.Fatalf("peer set after landed recovery = %+v, want pause refusal", reply)
+				}
+				if !reflect.DeepEqual(rb.b.localPolicy(), before) || !bytes.Equal(rb.fileBytes(t), beforeBytes) || len(rb.proxy.snapshot()) != callStart || len(rb.out.frames()) != frameStart {
+					t.Fatal("refused peer set changed the recovered policy, file, proxy or notifications")
 				}
 				return
 			}

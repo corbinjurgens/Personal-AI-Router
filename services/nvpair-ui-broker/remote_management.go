@@ -59,16 +59,30 @@ func (*remoteManagementDeniedError) Error() string { return remoteManagementDeni
 // (empty) is always allowed. For a paired node it reads the permission fresh
 // and emits one secret-free line for that acceptance decision.
 func (b *Broker) authorizeRemoteManagement(caller, family, operation string) error {
+	r := b.nodePolicyRuntime()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return b.authorizeRemoteManagementLocked(r, caller, family, operation)
+}
+
+// authorizeRemoteManagementLocked is shared by the r.mu-held policy and
+// availability entry points and the settings/switch wrapper. Permission wins
+// over pause, preserving revocation's code. Never acquire engineConfigMu here:
+// settings and switch admission already own it before taking r.mu.
+func (b *Broker) authorizeRemoteManagementLocked(r *policyRuntime, caller, family, operation string) error {
 	if caller == "" {
 		return nil
 	}
 	mesh := clustertrust.Open(b.clusterDir)
 	permission := mesh.RemoteManagement(caller)
 	b.logRemoteManagementDecision(caller, mesh.NodeUUID(), family, operation, permission)
-	if permission.Allowed {
-		return nil
+	if !permission.Allowed {
+		return &remoteManagementDeniedError{}
 	}
-	return &remoteManagementDeniedError{}
+	if r.managementBlockedLocked() {
+		return &localVetoError{}
+	}
+	return nil
 }
 
 // logRemoteManagementDecision records one permission decision. It carries no

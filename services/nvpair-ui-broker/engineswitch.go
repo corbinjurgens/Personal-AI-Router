@@ -77,6 +77,10 @@ func switchErrorDetail(err error, kind string) *settings.SwitchError {
 		// path; it is not a local veto (-32011) or a configuration conflict.
 		return &settings.SwitchError{Code: codeRemoteManagementDenied, Kind: settings.SwitchErrorValidation, Message: denied.Error()}
 	}
+	var paused *localVetoError
+	if errors.As(err, &paused) {
+		return &settings.SwitchError{Code: settings.SwitchRemoteVetoCode, Kind: settings.SwitchErrorRemoteVeto, Message: paused.Error()}
+	}
 	var storeErr *engineSwitchStoreError
 	if errors.As(err, &storeErr) {
 		kind = storeErr.Kind
@@ -222,6 +226,8 @@ func (b *Broker) recordSwitchLocalObligationLocked(id, engine string) error {
 	return nil
 }
 
+var errSwitchPauseUnapplied = switchError(settings.SwitchErrorBusy, "Pause must be persisted and physically applied before its obligation can be discharged.")
+
 // Caller owns settingsApplyMu and engineConfigMu. Drop only the admission lock
 // while stopping: a new Off can join this operation, but a later local On cannot
 // interleave. An older direct peer start settles before this ordinary stop wins.
@@ -295,13 +301,7 @@ func (b *Broker) dischargeSwitchLocalObligationLocked(ctx context.Context, id st
 			return switchError(settings.SwitchErrorInterrupted, "Manager changed during local Off discharge.")
 		}
 		if o.Pause && !o.PauseApplied {
-			runtime := b.nodePolicyRuntime()
-			runtime.mu.Lock()
-			applied := pausedLocally(runtime.current) && !runtime.recoveryRequired && !runtime.localPauseRequested
-			runtime.mu.Unlock()
-			if !applied {
-				return switchError(settings.SwitchErrorBusy, "Local pause must be persisted and applied before switch release.")
-			}
+			return errSwitchPauseUnapplied
 		}
 		if c.store.journal.LocalObligations[id] != o {
 			continue
@@ -315,14 +315,14 @@ func (b *Broker) dischargeSwitchLocalObligationLocked(ctx context.Context, id st
 	}
 }
 
-// Caller holds the availability transition lock after a successful local Pause.
+// Caller holds the availability transition lock after a successful Pause.
 // Record completion per operation before Resume can replace the current policy.
 func (b *Broker) completeSwitchPauseObligations() error {
 	b.engineConfigMu.Lock()
 	defer b.engineConfigMu.Unlock()
 	runtime := b.nodePolicyRuntime()
 	runtime.mu.Lock()
-	applied := pausedLocally(runtime.current) && runtime.live == nodepolicy.Paused && !runtime.recoveryRequired
+	applied := runtime.current.Availability == nodepolicy.Paused && runtime.live == nodepolicy.Paused && !runtime.recoveryRequired
 	runtime.mu.Unlock()
 	if !applied {
 		return nil
@@ -339,6 +339,152 @@ func (b *Broker) completeSwitchPauseObligations() error {
 				return err
 			}
 		}
+	}
+	return nil
+}
+
+// A reconciled manager reservation may be released before physical pause only
+// while the authoritative pause fence remains in place. The broker keeps the
+// durable obligation and recovery receipt until shutdown is verified.
+func (b *Broker) switchPauseReleaseFenced(err error) bool {
+	if !errors.Is(err, errSwitchPauseUnapplied) {
+		return false
+	}
+	runtime := b.nodePolicyRuntime()
+	runtime.mu.Lock()
+	defer runtime.mu.Unlock()
+	return runtime.managementBlockedLocked()
+}
+
+// Caller owns transitionMu, after drain. Recovery can finish a previously
+// failed release or use a hidden replacement without exposing it prematurely.
+// A true result includes physical shutdown, so the caller need not repeat it.
+func (b *Broker) prepareSwitchPause() (bool, error) {
+	b.engineConfigMu.Lock()
+	if err := b.loadEngineSwitchLocked(); err != nil {
+		b.engineConfigMu.Unlock()
+		return false, err
+	}
+	// Include the existing reservation/recovery owner: local-origin switches
+	// need cleanup too, even though they have no remote pause obligation.
+	pending := b.pendingSwitchLocked("") != nil
+	for _, o := range b.switchCoordinator().store.journal.LocalObligations {
+		pending = pending || (o.Pause && !o.Discharged)
+	}
+	b.engineConfigMu.Unlock()
+	b.workersMu.Lock()
+	w, recovering := b.engineMgr, b.engineMgrRecovering
+	b.workersMu.Unlock()
+	if !pending && !recovering {
+		return false, nil
+	}
+	if !b.recoverEngineSwitchOnTransitionLocked(w) {
+		b.engineConfigMu.Lock()
+		err := b.switchCoordinator().recoveryErr
+		if err == nil {
+			err = b.switchCoordinator().err
+		}
+		b.engineConfigMu.Unlock()
+		if err == nil {
+			err = fmt.Errorf("engine manager changed during recovery")
+		}
+		return false, fmt.Errorf("Pause could not stop every engine: switch recovery: %.448s", err)
+	}
+	if !b.exposeRecoveredSwitchManager(w) {
+		return false, fmt.Errorf("Pause could not stop every engine: engine manager changed after recovery")
+	}
+	return true, nil
+}
+
+// Recovery acknowledged readiness for w before this helper is called. The
+// explicit availability owner may expose that still-current worker; saved-On
+// restoration deferred by failed bring-up is retained for the next Resume.
+func (b *Broker) exposeRecoveredSwitchManager(w *rpcWorker) bool {
+	b.workersMu.Lock()
+	current := w != nil && b.engineMgr == w
+	if current {
+		select {
+		case <-w.Done():
+			current = false
+		default:
+		}
+	}
+	recovering := b.engineMgrRecovering
+	if current {
+		b.engineMgrRecovering = false
+	}
+	b.workersMu.Unlock()
+	if current && recovering {
+		runtime := b.nodePolicyRuntime()
+		runtime.mu.Lock()
+		runtime.restoreSkipped = true
+		runtime.mu.Unlock()
+		b.forwardErrorsClear(engineSwitchRecoveryBlockedID)
+	}
+	return current
+}
+
+// Caller owns transitionMu. Persist the physical proof before resolving the
+// recovery receipt, so a later Resume cannot erase an unapplied obligation.
+func (b *Broker) settleSwitchPauseObligations() error {
+	if err := b.completeSwitchPauseObligations(); err != nil {
+		return err
+	}
+	b.engineConfigMu.Lock()
+	if err := b.loadEngineSwitchLocked(); err != nil {
+		b.engineConfigMu.Unlock()
+		return err
+	}
+	c := b.switchCoordinator()
+	pending := false
+	for _, o := range c.store.journal.LocalObligations {
+		pending = pending || (o.Pause && !o.Discharged)
+	}
+	b.engineConfigMu.Unlock()
+	if !pending {
+		return nil
+	}
+	b.workersMu.Lock()
+	w := b.engineMgr
+	b.workersMu.Unlock()
+	if !b.recoverEngineSwitchOnTransitionLocked(w) {
+		return switchError(settings.SwitchErrorInterrupted, "Pause stopped the engines but switch cleanup still requires recovery.")
+	}
+	return nil
+}
+
+// Local Resume may explicitly supersede an incomplete pause after conservative
+// switch cleanup. Discharged records retirement; PauseApplied remains truthful.
+// Caller owns transitionMu and rechecks gen before making availability public.
+func (b *Broker) supersedeSwitchPauseObligations(gen uint64) error {
+	b.engineConfigMu.Lock()
+	if err := b.loadEngineSwitchLocked(); err != nil {
+		b.engineConfigMu.Unlock()
+		return err
+	}
+	pending := b.pendingSwitchLocked("") != nil
+	for _, o := range b.switchCoordinator().store.journal.LocalObligations {
+		pending = pending || (o.Pause && !o.Discharged)
+	}
+	b.engineConfigMu.Unlock()
+	b.workersMu.Lock()
+	w, recovering := b.engineMgr, b.engineMgrRecovering
+	b.workersMu.Unlock()
+	if !pending && !recovering {
+		return nil
+	}
+	if !b.recoverEngineSwitchPauseOnTransitionLocked(w, gen) {
+		runtime := b.nodePolicyRuntime()
+		runtime.mu.Lock()
+		superseded := runtime.transitionGen != gen
+		runtime.mu.Unlock()
+		if superseded {
+			return errAvailabilitySuperseded
+		}
+		return switchError(settings.SwitchErrorInterrupted, "Resume could not settle the interrupted engine switch.")
+	}
+	if !b.exposeRecoveredSwitchManager(w) {
+		return switchError(settings.SwitchErrorInterrupted, "Engine manager changed after Resume recovery.")
 	}
 	return nil
 }
@@ -532,11 +678,20 @@ func (b *Broker) acceptEngineSwitch(ctx context.Context, p settings.SwitchReques
 	if err != nil {
 		return settings.SwitchResult{}, err
 	}
+	// Snapshot readback can wait on the manager. Pause registration and every
+	// new acceptance/rejection receipt share this final critical section.
+	runtime := b.nodePolicyRuntime()
+	runtime.mu.Lock()
+	if err := b.authorizeRemoteManagementLocked(runtime, caller, "switch", p.RequestID); err != nil {
+		runtime.mu.Unlock()
+		return settings.SwitchResult{}, err
+	}
 	now := time.Now().UTC()
 	r := settings.SwitchReceipt{Version: settings.SwitchVersion, NodeID: b.nodeID, RequestID: p.RequestID, Caller: identity, PayloadHash: hash, Request: p, ExpectedRevision: p.ExpectedRevision, AcceptedRevision: token, Sequence: 1, Phase: settings.SwitchAccepted, AcceptedAt: now, UpdatedAt: now, Deadline: now.Add(settings.SwitchOperationBudget), Source: settings.SwitchEngineState{Intent: settings.SwitchIntentUnknown}, Target: settings.SwitchEngineState{Intent: settings.SwitchIntentUnknown}}
 	refuse := func(err error) (settings.SwitchResult, error) {
 		r.Phase, r.Terminal, r.FinishedAt, r.Error = settings.SwitchRejected, true, &now, switchErrorDetail(err, settings.SwitchErrorValidation)
 		stored, saveErr := b.engineSwitch.store.Reject(r)
+		runtime.mu.Unlock()
 		if stored.Sequence > 0 {
 			b.switchChangedLocked(stored)
 		}
@@ -555,17 +710,13 @@ func (b *Broker) acceptEngineSwitch(ctx context.Context, p settings.SwitchReques
 	if err := b.switchTargetRoutable(p.TargetEngine); err != nil {
 		return refuse(err)
 	}
-	if caller != "" {
-		if _, local := b.settingsPause(); local {
-			return refuse(switchError(settings.SwitchErrorRemoteVeto, "A local pause vetoes remote switching."))
-		}
-	}
 	for _, record := range b.engineSettings {
 		if record.Snapshot.Phase == "applying" {
 			return refuse(switchError(settings.SwitchErrorBusy, "Pending settings require recovery."))
 		}
 	}
 	stored, err := b.engineSwitch.store.Accept(r)
+	runtime.mu.Unlock()
 	if stored.Sequence > 0 {
 		b.switchChangedLocked(stored)
 	}
@@ -598,7 +749,7 @@ func (b *Broker) acceptEngineSwitch(ctx context.Context, p settings.SwitchReques
 	// Recheck after installing cancellation: a pause accepted between the first
 	// veto check and registration cannot be missed.
 	if caller != "" {
-		if _, local := b.settingsPause(); local {
+		if paused, _ := b.settingsPause(); paused {
 			cancel()
 		}
 	}
@@ -886,8 +1037,12 @@ func (b *Broker) finishEngineSwitch(p settings.SwitchPrepareRequest, phase strin
 		}
 		b.engineConfigMu.Lock()
 		cleanupObserved := result.Observed
+		pausePending := false
 		if dischargeErr := b.dischargeSwitchLocalObligationLocked(ctx, p.OperationID, &cleanupObserved); dischargeErr != nil {
-			err = errors.Join(err, dischargeErr)
+			pausePending = b.switchPauseReleaseFenced(dischargeErr)
+			if !pausePending {
+				err = errors.Join(err, dischargeErr)
+			}
 		} else if cleanupObserved.Source.Intent != "" && cleanupObserved.Target.Intent != "" {
 			observed = &cleanupObserved
 		}
@@ -900,7 +1055,7 @@ func (b *Broker) finishEngineSwitch(p settings.SwitchPrepareRequest, phase strin
 		if b.finishInterruptedEngineSwitch(p, observed) {
 			return
 		}
-		if advanceErr := b.advanceEngineSwitch(p.OperationID, phase, observed, failure, err != nil, veto); advanceErr != nil {
+		if advanceErr := b.advanceEngineSwitch(p.OperationID, phase, observed, failure, err != nil || pausePending, veto); advanceErr != nil {
 			if switchErrorDetail(advanceErr, settings.SwitchErrorStorage).Kind == settings.SwitchErrorRemoteVeto {
 				failure = advanceErr
 				continue

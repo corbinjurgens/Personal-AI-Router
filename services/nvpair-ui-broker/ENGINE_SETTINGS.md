@@ -61,10 +61,14 @@ engines require their official stop path.
 A normalized no-op changes no runtime. Proxy-only edits do not restart the
 engine. A stopped engine remains stopped. Running launch/server changes stop
 and start once without rewriting explicit enabled intent. While the node is
-paused, an Apply or a recovered operation never resumes a stopped engine, even
-one a failed Apply left with a pending resume; the settings are still applied.
-A paired node's Apply that would resume one while the node is paused on the
-node itself is refused with the local veto (`-32011`) before acceptance. Advertisements and
+paused, a local Apply or a recovered operation never resumes a stopped engine,
+even one a failed Apply left with a pending resume; local settings are still
+applied. Every paired Apply is refused while a pause of either origin is
+pending, stored or live, including a no-op or a request for an existing receipt.
+The refusal is `-32011` with
+`This node is paused. Resume it on this node before managing it remotely.`
+No settings revision or receipt is written. Only local Resume lifts the fence;
+Get, preview, events and switch status remain readable. Advertisements and
 proxy upstream eligibility are disabled during application and restored only
 after readiness. Polling advertisers share the node lock.
 
@@ -107,7 +111,12 @@ limited to 64 KiB and cannot forward another hop. The authenticated caller ID is
 carried through correlated `engine:settings-request` / `engine:settings-reply`
 notifications to the local broker. Get, preview and events are reads; Apply
 requires the target's remote-management grant at the `ec` gate and again under
-the broker's journal locks immediately before acceptance. A failed reply
+the broker's journal locks immediately before acceptance, followed by the
+common pause decision. Worker validation and lock waits cannot bypass that
+decision. Apply prepares initialization, drift reconciliation and legacy
+argument conversion on a private record, then rechecks authorization before
+saving any of them or accepting a receipt. A refused delayed Apply leaves the
+journal unchanged. A failed reply
 carries `errorCode`; `-32011` and `-32012` become HTTP 409 with code
 `local_veto` and `remote_management_denied`, respectively, and retain those RPC
 codes at the origin. Permission denial means change permission locally on the
@@ -118,7 +127,7 @@ durably accepted, the target completes under its own eleven-minute deadline even
 if the initiating peer disconnects. Revocation blocks new acceptance, including
 queued broker writes, but accepted Apply/switch work retains target-owned
 completion and reconciliation. Progress and receipts remain readable; revocation
-does not roll back effects or replace local pause/Off cancellation. The same
+does not roll back effects or replace pause/local-Off cancellation. The same
 fresh acceptance checks apply to switch receipt acceptance, and grants never
 override private/CORS, served/resident or target-admission restrictions.
 
@@ -177,9 +186,9 @@ Each phase is saved before its effect and manager observations are saved after
 the effect. Source Off is committed before stopping; target On is committed by
 the manager only after readiness. A failed target start never restores source.
 One switch runs per node under the shared settings operation lock. Settings and
-legacy lifecycle/port mutations respect switch reservations. Local pause cancels
+legacy lifecycle/port mutations respect switch reservations. A pause of either origin cancels
 remote execution before waiting on transition locks; a switch never resumes the
-node. The pending local pause projection reaches the manager before cancellation
+node. The pending `managementBlocked` projection reaches the manager before cancellation
 or transition-lock waiting. Local Off of either involved engine bypasses the
 broker operation lock during a remote switch, including recovery reservations,
 and reaches the manager's existing stop admission. That owner durably saves
@@ -213,20 +222,26 @@ repeating cleanup for any new veto within the cleanup budget. Its final
 metadata-only release and clearing recovery ownership share the local admission
 lock; long physical cleanup runs outside that lock. Failure retains recovery.
 
-The broker durably owns every admitted local Off/pause. Internal journal
+The broker durably owns every admitted local Off and either-origin pause. Internal journal
 `localObligations[operationId]` records `sourceOff`, `targetOff`, `pause`, optional
 `pauseApplied`, and `discharged`; public receipts are unchanged. Admission persists before latching
 or returning to the local handler, and a failed write visibly refuses the request.
 After reconcile, while still holding `settingsApplyMu`, cleanup sends ordinary
 unscoped `engine:stop` with internal `verifyStop: true` to the current worker for
 each obligated engine. Its `SwitchEngineState` reply must prove saved Off and
-termination. A successful local Pause durably records `pauseApplied` for its
+termination. A successful Pause of either origin durably records `pauseApplied` for its
 pending obligations before a later Resume can run. Cleanup relies on that proof
 independently of current availability, preserving the owner's later Resume while
-still reconciling the operation's target veto. Older journals without this proof
-retain the requirement that the node currently be locally paused, with no pending
-pause or policy recovery. An unapplied Pause remains unresolved. Discharge is saved
-durably before terminal release or recovery resolution; failure keeps recovery.
+still reconciling the operation's target veto. An unapplied Pause remains
+unresolved. After conservative reconciliation, the manager reservation may be
+released behind the authoritative pause fence, retaining the durable recovery
+receipt and undischarged obligation. Intent-neutral sleep then runs without
+reservation contention; fresh readback from that same manager must verify
+shutdown before `pauseApplied` and discharge are saved. Startup and replacement
+perform this shutdown before acknowledging manager readiness. A later local
+Resume may supersede an unapplied pause after conservative switch cleanup:
+discharge records that explicit override without setting `pauseApplied`.
+Discharge precedes recovery resolution; failure keeps recovery ownership.
 Broker restart and manager replacement replay undischarged obligations even
 when inspection returns no checkpoint, before restore/readiness. An older direct
 peer start loses to a subsequently admitted Off at this settlement boundary.
@@ -266,7 +281,7 @@ Startup loads the switch journal, marks nonterminal operations
 `failed-interrupted`, and conservatively reconciles manager reservations before
 settings replay and enabled-intent restoration. It never resumes switch steps
 or starts target as recovery. Conflicting pending settings/switch journals fail
-closed. A committed target On is preserved unless a local Off/pause veto applies
+closed. A committed target On is preserved unless a local-Off or either-origin pause veto applies
 to the unreleased remote reservation; that veto cleans up target to Off too.
 An uncommitted partial target launch is cleaned up. Unknown cleanup remains
 visibly recovery-required. Terminal receipts remain historical facts; current
@@ -294,7 +309,7 @@ cleanup on the same still-current worker with bounded backoff; the replacement
 stays hidden throughout. Success clears only the retryable error and permits the
 remaining bring-up continuation. This gate also applies on the initial spawn;
 the manager's discovery subscription and node/settings state projections bypass
-it so recovery receives the peer directory and authoritative local-pause state.
+it so recovery receives the peer directory and authoritative pause state.
 Log-level changes also reach the current worker during this interval. The
 manager starts with its mutating authenticated peer-control surface fenced;
 read-only queries and state deliveries remain available. Only the broker's

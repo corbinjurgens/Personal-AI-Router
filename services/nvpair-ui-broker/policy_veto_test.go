@@ -80,28 +80,40 @@ func TestPeerResumeOfALocalPauseIsVetoed(t *testing.T) {
 	requirePausedLocally(t, rb.engine, false, "the local resume left the projection paused locally")
 }
 
-func TestPeerMayResumeAPeerPause(t *testing.T) {
+func TestPeerCannotResumePeerPause(t *testing.T) {
 	rb := newRoutedBroker(t)
 	if _, errText := rb.relay(t, "set-availability", map[string]any{"state": nodepolicy.Paused}); errText != "" {
 		t.Fatalf("relayed pause: %s", errText)
 	}
 	requirePause(t, rb.b, nodepolicy.Paused, nodepolicy.PausedByPeer)
 	requirePausedLocally(t, rb.engine, false, "a peer pause was projected as local")
-	if _, errText := rb.relay(t, "set-availability", map[string]any{"state": nodepolicy.Available}); errText != "" {
-		t.Fatalf("relayed resume of a peer pause: %s", errText)
+	for _, state := range []nodepolicy.Availability{nodepolicy.Available, nodepolicy.Paused} {
+		before := rb.baseline(t)
+		reply := rb.relayReply(t, "set-availability", map[string]any{"state": state})
+		if reply.ErrorCode != codeLocalVeto || reply.Error != "This node is paused. Resume it on this node before managing it remotely." {
+			t.Fatalf("peer %s after its pause = code %d %q, want the pause refusal", state, reply.ErrorCode, reply.Error)
+		}
+		before.requireUnchanged(t)
+		requirePause(t, rb.b, nodepolicy.Paused, nodepolicy.PausedByPeer)
+	}
+	if resp := rb.localAvailability(t, 1, nodepolicy.Available); resp.Error != nil {
+		t.Fatalf("local resume of a peer pause: %+v", resp.Error)
 	}
 	requirePause(t, rb.b, nodepolicy.Available, "")
 }
 
 func TestPauseProvenanceIsNeverDowngraded(t *testing.T) {
-	t.Run("peer pause over a local pause stays local", func(t *testing.T) {
+	t.Run("peer pause over a local pause is refused without changes", func(t *testing.T) {
 		rb := newRoutedBroker(t)
 		if resp := rb.localAvailability(t, 1, nodepolicy.Paused); resp.Error != nil {
 			t.Fatalf("local pause: %+v", resp.Error)
 		}
-		if _, errText := rb.relay(t, "set-availability", map[string]any{"state": nodepolicy.Paused}); errText != "" {
-			t.Fatalf("relayed pause: %s", errText)
+		before := rb.baseline(t)
+		reply := rb.relayReply(t, "set-availability", map[string]any{"state": nodepolicy.Paused})
+		if reply.ErrorCode != codeLocalVeto || reply.Error != "This node is paused. Resume it on this node before managing it remotely." {
+			t.Fatalf("repeated peer pause = code %d %q, want the pause refusal", reply.ErrorCode, reply.Error)
 		}
+		before.requireUnchanged(t)
 		requirePause(t, rb.b, nodepolicy.Paused, nodepolicy.PausedLocally)
 		if reply := rb.relayReply(t, "set-availability", map[string]any{"state": nodepolicy.Available}); reply.ErrorCode != codeLocalVeto {
 			t.Fatalf("relayed resume after a peer pause over a local one = code %d %q, want local veto", reply.ErrorCode, reply.Error)
@@ -183,15 +195,15 @@ func TestConfigurationEditsStayAllowedWhileLocallyPaused(t *testing.T) {
 	if resp := rb.localAvailability(t, 1, nodepolicy.Paused); resp.Error != nil {
 		t.Fatalf("local pause: %+v", resp.Error)
 	}
-	t.Run("peer policy:set keeps the local pause", func(t *testing.T) {
+	t.Run("peer policy:set is refused without changes", func(t *testing.T) {
 		doc := rb.peerSnapshot(t)
 		doc["idle"].(map[string]any)["unloadAfterMinutes"] = 9
-		if _, errText := rb.relaySet(t, doc); errText != "" {
-			t.Fatalf("relayed policy:set while locally paused: %s", errText)
+		before := rb.baseline(t)
+		reply := rb.relayReply(t, "set", map[string]any{"policy": doc, "expectedPersistedRevision": doc["revision"]})
+		if reply.ErrorCode != codeLocalVeto || reply.Error != "This node is paused. Resume it on this node before managing it remotely." {
+			t.Fatalf("relayed policy:set = code %d %q, want the pause refusal", reply.ErrorCode, reply.Error)
 		}
-		if got := rb.b.localPolicy().Policy.Idle.UnloadAfterMinutes; got != 9 {
-			t.Fatalf("relayed edit not applied: unloadAfterMinutes %d", got)
-		}
+		before.requireUnchanged(t)
 		requirePause(t, rb.b, nodepolicy.Paused, nodepolicy.PausedLocally)
 	})
 	t.Run("local policy:set ignores the pausedBy it sends", func(t *testing.T) {

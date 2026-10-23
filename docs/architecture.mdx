@@ -839,12 +839,45 @@ Engine-manager's `ec` route registry gates all mutations with the shared
 permission predicate; broker policy, availability, settings and switch owners
 recheck immediately before acceptance. Denial is HTTP 409
 `remote_management_denied`, preserved as RPC `-32012`; unpinned callers remain
-403, local veto is `-32011` and revision conflict is `-32010`. Reads, status and
-permitted inference remain available. Grants cannot bypass local pause/Off,
+403, target veto is `-32011`, engine lock is `-32013` and revision conflict is
+`-32010`. Reads, status and permitted inference remain available. Grants cannot bypass pause, engine locks,
 private policy, CORS, served-model or resident protections. Revocation blocks
 new acceptance, including queued broker writes, while already accepted work
 can finish or reconcile and remains visible in progress and receipt reads.
 It does not stop or unpair the device.
+
+The broker owns one pause fence: an accepted pause of either origin, stored
+`paused`, or live `draining`/`paused`. It projects `managementBlocked` to the
+engine-manager under the existing projection ordering lock, including before
+persistence and during startup or worker replacement. `pausedLocally` retains
+origin evidence; peer origin never grants authority to resume. A peer may pause
+an available node, then every incoming peer management mutation is refused,
+including that peer's Resume, repeated Pause, settings no-op and receipt retry.
+The broker checks the grant first, then returns `-32011` with
+`This node is paused. Resume it on this node before managing it remotely.`
+Refusal saves no revision or receipt and supersedes no transition. Reads and
+local configuration remain available. Only local Resume clears the fence at
+the authoritative availability transition; local activation requires Resume.
+
+Pause drains or cancels admitted work, reads fresh engine/model inventory,
+unloads every known loaded model and intent-neutrally sleeps every reported
+engine. The schema-v2 `stopEngines` and `unloadModels` inputs are obsolete and
+normalize to true; reading an old file does not rewrite it. Engine-stop failure
+retains stored pause and live draining, reports actual availability, and returns
+`-32000` with `Pause could not stop every engine: ` plus bounded detail. A local
+Pause can retry; peer retries remain fenced. A paused node skips saved-On
+restoration on startup and manager replacement. Local Resume wakes only
+unlocked saved-On engines through the manager's existing guards. The broker's
+model-configuration reasons are `paused` for either-origin pause and `engine-off`
+for ordinary saved Off; saved Off is not inferred to be an engine lock.
+
+Conservative switch cleanup may release a reconciled manager reservation while
+retaining a durable pause obligation and recovery receipt behind the pause
+fence. This allows intent-neutral shutdown to finish. Inventory, unload, sleep
+and shutdown verification use one manager; a replacement cannot complete an
+older manager's proof. Recovery verifies a stored pause before opening the
+replacement's management surface. A repeated completed Pause rechecks physical
+shutdown without allocating another policy revision.
 
 An old target without the permission read is unsupported; downgrading to a
 pre-PG target executable restores its unrestricted pinned-peer management.

@@ -20,17 +20,35 @@ import (
 // accepted arguments and proxy port. Component launch_args/launch_env need no
 // migration because they have always stored only literal user overrides.
 func (b *Broker) migrateSettingsArgumentsLocked(ctx context.Context, engine string, record *engineSettingsRecord) error {
-	if record == nil || record.Snapshot.Format != "pair-launch-v1" {
+	if record == nil {
 		return nil
+	}
+	previous := record.Snapshot.Clone()
+	changed, err := b.prepareSettingsArgumentsLocked(ctx, engine, record)
+	if err != nil || !changed {
+		return err
+	}
+	if err := b.saveEngineSettingsLocked(); err != nil {
+		record.Snapshot = previous
+		return err
+	}
+	return nil
+}
+
+// Preparation updates only the supplied record. Apply uses a private copy so
+// migration cannot save anything before its final pause admission check.
+func (b *Broker) prepareSettingsArgumentsLocked(ctx context.Context, engine string, record *engineSettingsRecord) (bool, error) {
+	if record == nil || record.Snapshot.Format != "pair-launch-v1" {
+		return false, nil
 	}
 	var preview settings.Preview
 	if err := b.settingsWorkerCall(ctx, "engine:preview-launch", settings.Request{
 		Engine: engine, Settings: record.Snapshot.Settings.Clone(), Format: "pair-launch-v1",
 	}, &preview); err != nil {
-		return err
+		return false, err
 	}
 	if len(preview.Errors) != 0 || preview.Conflict != nil {
-		return fmt.Errorf("saved full-command settings could not be converted; existing settings were preserved")
+		return false, fmt.Errorf("saved full-command settings could not be converted; existing settings were preserved")
 	}
 	previous := record.Snapshot.Clone()
 	record.Snapshot.Settings = preview.Settings.Clone()
@@ -39,11 +57,7 @@ func (b *Broker) migrateSettingsArgumentsLocked(ctx context.Context, engine stri
 	if previous.AppliedRevision == previous.Revision {
 		record.Snapshot.AppliedRevision = record.Snapshot.Revision
 	}
-	if err := b.saveEngineSettingsLocked(); err != nil {
-		record.Snapshot = previous
-		return err
-	}
-	return nil
+	return true, nil
 }
 
 func (b *Broker) explicitEngineSettings(engine string) (settings.Config, bool) {

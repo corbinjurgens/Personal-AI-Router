@@ -173,36 +173,23 @@ func TestEnabledEngineRestorationSurvivesInvalidSettingsJournal(t *testing.T) {
 	}
 	worker, codec := newTestRPCWorkerPipe(t)
 	b.setEngineMgr(worker)
-	restored := make(chan string, 1)
-	go func() {
-		msg, err := codec.Read()
-		if err != nil {
-			t.Error(err)
-			return
+	restored := recordEnabledEngineRestoration(t, codec)
+	done := make(chan struct{})
+	go func() { b.restoreEnabledEngines(worker); close(done) }()
+	for _, want := range []string{engineNodeProjectionMethod, settings.SwitchPrepareMethod, restoreEnabledEnginesMethod} {
+		select {
+		case method := <-restored:
+			if method != want {
+				t.Fatalf("restoration method=%q, want %q", method, want)
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("invalid journal suppressed %s", want)
 		}
-		if msg.Method != settings.SwitchPrepareMethod {
-			t.Errorf("recovery method=%q", msg.Method)
-			return
-		}
-		if err := codec.Respond(msg.ID, emptySwitchManagerSnapshot()); err != nil {
-			t.Error(err)
-			return
-		}
-		msg, err = codec.Read()
-		if err != nil {
-			t.Error(err)
-			return
-		}
-		restored <- msg.Method
-	}()
-	b.restoreEnabledEngines(worker)
+	}
 	select {
-	case method := <-restored:
-		if method != restoreEnabledEnginesMethod {
-			t.Fatalf("method=%q", method)
-		}
+	case <-done:
 	case <-time.After(time.Second):
-		t.Fatal("invalid journal suppressed enabled-engine restoration")
+		t.Fatal("enabled-engine restoration did not return")
 	}
 	if b.engineSettingsError == nil {
 		t.Fatal("invalid journal was not reported")

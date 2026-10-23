@@ -4,9 +4,12 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"reflect"
+	"sync"
 	"testing"
 	"time"
 
@@ -60,8 +63,8 @@ func (h *settingsHarness) snapshot() settings.Snapshot {
 }
 
 // A paused node stays paused: an apply saves the settings and never starts the
-// stopped engine whose resume it carries, whoever paused the node and whoever
-// applies. A paired node's apply under a peer pause is not vetoed.
+// stopped engine whose resume it carries, whoever paused the node. Local
+// configuration remains available while peer configuration is fenced.
 func TestSettingsApplyWhilePausedNeverResumesAStoppedEngine(t *testing.T) {
 	cases := []struct {
 		name   string
@@ -70,7 +73,6 @@ func TestSettingsApplyWhilePausedNeverResumesAStoppedEngine(t *testing.T) {
 	}{
 		{"local apply on a node paused locally", nodepolicy.PausedLocally, ""},
 		{"local apply on a node paused by a peer", nodepolicy.PausedByPeer, ""},
-		{"paired apply on a node paused by a peer", nodepolicy.PausedByPeer, settingsPeer},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -95,9 +97,8 @@ func TestSettingsApplyWhilePausedNeverResumesAStoppedEngine(t *testing.T) {
 	}
 }
 
-// A paired node's apply that would resume a stopped engine while this node is
-// paused on the node itself is refused with the local veto, before anything is
-// accepted, and the relay reply carries -32011.
+// A paired node's apply while paused is refused before anything is accepted,
+// and the relay reply carries -32011.
 func TestSettingsPairedApplyIsVetoedWhilePausedLocally(t *testing.T) {
 	h := newSettingsHarness(t)
 	clustertrusttest.Join(t, h.b.clusterDir, "cluster-1", "self-node", settingsPeer)
@@ -155,21 +156,288 @@ func TestSettingsPairedApplyIsVetoedWhilePausedLocally(t *testing.T) {
 	}
 }
 
-// The local veto refuses a start, not a configuration edit: a paired node may
-// still change the settings of a running engine on a node paused locally.
-func TestSettingsPairedApplyWithoutAResumeIsAllowedWhilePausedLocally(t *testing.T) {
+func TestSettingsPairedApplyWithoutAResumeIsRefusedWhilePaused(t *testing.T) {
 	h := newSettingsHarness(t)
 	clustertrusttest.Join(t, h.b.clusterDir, "cluster-1", "self-node", settingsPeer)
 	grantRemoteManagement(t, h.b.clusterDir, "cluster-1", "self-node", settingsPeer, true)
 	h.pause(nodepolicy.PausedLocally)
 	p := h.changedRequest(t, "--edit-only")
-	receipt, err := h.b.applyEngineSettings(context.Background(), p, settingsPeer)
-	if err != nil || receipt.Phase != "succeeded" {
-		t.Fatalf("paired edit of a running engine while paused locally = %+v, %v; want it applied", receipt, err)
+	before, journal := h.snapshot(), rmSettingsJournal(t, h)
+	_, err := h.b.applyEngineSettings(context.Background(), p, settingsPeer)
+	if policyErrorCode(err) != codeLocalVeto || err.Error() != "This node is paused. Resume it on this node before managing it remotely." {
+		t.Fatalf("paired configuration while paused = %v, want the pause refusal", err)
 	}
-	if s := h.snapshot(); s.Settings != p.Settings {
-		t.Fatalf("settings after a paired edit = %+v, want %+v", s.Settings, p.Settings)
+	rmSettingsUnchanged(t, h, before, p.RequestID, journal)
+}
+
+func TestPausedSettingsRefuseNoOpAndDuplicateReceipts(t *testing.T) {
+	test := func(name string, origin nodepolicy.PauseOrigin, duplicate bool) {
+		t.Run(name, func(t *testing.T) {
+			h, _ := rmSettings(t)
+			p := h.request(t)
+			if duplicate {
+				receipt, err := h.b.applyEngineSettings(context.Background(), p, "peer")
+				if err != nil || receipt.Phase != "succeeded" {
+					t.Fatalf("seed duplicate receipt: %+v, %v", receipt, err)
+				}
+			}
+			h.pause(origin)
+			before, journal := h.snapshot(), rmSettingsJournal(t, h)
+			h.b.engineConfigMu.Lock()
+			receipts := make(map[string]settingsReceipt, len(h.b.engineSettings["ollama"].Receipts))
+			for id, receipt := range h.b.engineSettings["ollama"].Receipts {
+				receipts[id] = receipt
+			}
+			h.b.engineConfigMu.Unlock()
+			_, err := h.b.applyEngineSettings(context.Background(), p, "peer")
+			if policyErrorCode(err) != codeLocalVeto || err.Error() != "This node is paused. Resume it on this node before managing it remotely." {
+				t.Fatalf("paused receipt request = %v, want the pause refusal", err)
+			}
+			if got := h.snapshot(); !reflect.DeepEqual(got, before) {
+				t.Fatalf("receipt refusal changed snapshot: got %+v, want %+v", got, before)
+			}
+			if !bytes.Equal(rmSettingsJournal(t, h), journal) {
+				t.Fatal("receipt refusal changed the persisted journal")
+			}
+			h.b.engineConfigMu.Lock()
+			gotReceipts := h.b.engineSettings["ollama"].Receipts
+			unchanged := reflect.DeepEqual(gotReceipts, receipts)
+			h.b.engineConfigMu.Unlock()
+			if !unchanged || h.applies.Load() != 0 || h.proxyRebinds.Load() != 0 {
+				t.Fatal("receipt refusal changed receipts or runtime")
+			}
+		})
 	}
+	test("no-op under local pause", nodepolicy.PausedLocally, false)
+	test("no-op under peer pause", nodepolicy.PausedByPeer, false)
+	test("duplicate under local pause", nodepolicy.PausedLocally, true)
+	test("duplicate under peer pause", nodepolicy.PausedByPeer, true)
+}
+
+func TestPendingPauseRefusesSettingsQueuedBeforeAcceptance(t *testing.T) {
+	test := func(name string, lock func(*Broker) *sync.Mutex) {
+		t.Run(name, func(t *testing.T) {
+			h, p := rmSettings(t)
+			before, journal := h.snapshot(), rmSettingsJournal(t, h)
+			unlock := rmHoldLock(t, lock(h.b))
+			done := rmBlockedCall(t, "applyEngineSettings", func() error {
+				_, err := h.b.applyEngineSettings(context.Background(), p, "peer")
+				return err
+			})
+			r := h.b.nodePolicyRuntime()
+			r.mu.Lock()
+			r.pendingPauseRequested = true
+			r.mu.Unlock()
+			unlock()
+			err := rmResult(t, done)
+			if policyErrorCode(err) != codeLocalVeto || err.Error() != "This node is paused. Resume it on this node before managing it remotely." {
+				t.Fatalf("queued settings = %v, want the pending pause refusal", err)
+			}
+			rmSettingsUnchanged(t, h, before, p.RequestID, journal)
+		})
+	}
+	test("queued for apply lock", func(b *Broker) *sync.Mutex { return &b.settingsApplyMu })
+	test("queued for journal lock", func(b *Broker) *sync.Mutex { return &b.engineConfigMu })
+}
+
+func TestPendingPauseRefusesSettingsAfterDelayedPreview(t *testing.T) {
+	h, p := rmSettings(t)
+	before, journal := h.snapshot(), rmSettingsJournal(t, h)
+	engine := attachFakeEngine(t, h.b)
+	engine.setAnswer(func(method string, params json.RawMessage) (any, string) {
+		switch method {
+		case "engine:get-launch":
+			return settings.LaunchState{
+				Engine: "ollama", ServerPort: before.Settings.ServerPort,
+				EffectivePort: before.EffectiveServerPort, LaunchText: before.Settings.LaunchText,
+				Running: before.Running, Editable: true, Format: "pair-arguments-v1",
+			}, ""
+		case "engine:preview-launch":
+			var request settings.Request
+			if err := json.Unmarshal(params, &request); err != nil {
+				t.Errorf("decode delayed preview: %v", err)
+				return nil, "invalid preview request"
+			}
+			return settings.Preview{Settings: request.Settings, Restart: true}, holdSuccessReply
+		case "engine:configured-ports", "engine:get-installed":
+			return map[string]any{"engines": []any{}}, ""
+		case "engine:models":
+			return map[string]any{"loadedByEngine": map[string][]string{}}, ""
+		default:
+			return map[string]bool{"ok": true}, ""
+		}
+	})
+	done := make(chan error, 1)
+	go func() {
+		_, err := h.b.applyEngineSettings(context.Background(), p, "peer")
+		done <- err
+	}()
+	engine.waitFor("settings preview after initial authorization", func(calls []policyCall) bool {
+		for _, call := range calls {
+			if call.method == "engine:preview-launch" {
+				return true
+			}
+		}
+		return false
+	})
+	paused := make(chan error, 1)
+	go func() {
+		_, err := h.b.setAvailabilityAs(context.Background(), nodepolicy.Paused, nodepolicy.PausedByPeer, "peer")
+		paused <- err
+	}()
+	engine.waitFor("accepted peer pause projection before preview returns", func([]policyCall) bool {
+		engine.mu.Lock()
+		projections := append([]policyCall(nil), engine.projections...)
+		engine.mu.Unlock()
+		for _, call := range projections {
+			var projection nodeProjection
+			if err := json.Unmarshal(call.params, &projection); err != nil {
+				t.Fatalf("decode pending pause projection: %v", err)
+			}
+			if projection.ManagementBlocked && !projection.PausedLocally {
+				return true
+			}
+		}
+		return false
+	})
+	engine.releaseHeld()
+	err := rmResult(t, done)
+	if policyErrorCode(err) != codeLocalVeto || err.Error() != "This node is paused. Resume it on this node before managing it remotely." {
+		t.Fatalf("settings after delayed preview = %v, want the pause refusal", err)
+	}
+	if err := rmResult(t, paused); err != nil {
+		t.Fatalf("accepted peer pause: %v", err)
+	}
+	rmSettingsUnchanged(t, h, before, p.RequestID, journal)
+}
+
+func TestPendingPauseDiscardsSettingsPreparation(t *testing.T) {
+	test := func(name string, prepare func(*settingsHarness, *settings.Request), drift bool) {
+		t.Run(name, func(t *testing.T) {
+			h, p := rmSettings(t)
+			launch := h.snapshot()
+			h.b.engineConfigMu.Lock()
+			prepare(h, &p)
+			if err := h.b.saveEngineSettingsLocked(); err != nil {
+				h.b.engineConfigMu.Unlock()
+				t.Fatalf("save preparation fixture: %v", err)
+			}
+			before := h.b.engineSettings["ollama"].clone()
+			h.b.engineConfigMu.Unlock()
+			journal := rmSettingsJournal(t, h)
+			engine := attachFakeEngine(t, h.b)
+			engine.setAnswer(func(method string, params json.RawMessage) (any, string) {
+				switch method {
+				case "engine:get-launch":
+					text := launch.Settings.LaunchText
+					if drift {
+						text += " --component-drift"
+					}
+					return settings.LaunchState{
+						Engine: "ollama", ServerPort: launch.Settings.ServerPort,
+						EffectivePort: launch.EffectiveServerPort, LaunchText: text,
+						Running: launch.Running, Editable: true, Format: "pair-arguments-v1",
+					}, holdSuccessReply
+				case "engine:preview-launch":
+					var request settings.Request
+					if err := json.Unmarshal(params, &request); err != nil {
+						t.Errorf("decode preparation preview: %v", err)
+						return nil, "invalid preview request"
+					}
+					if request.Format == "pair-launch-v1" {
+						request.Settings.LaunchText = launch.Settings.LaunchText
+					}
+					return settings.Preview{Settings: request.Settings}, ""
+				case "engine:configured-ports":
+					return map[string]any{"engines": []any{}}, ""
+				default:
+					t.Errorf("unexpected preparation call: %s", method)
+					return nil, "unexpected call"
+				}
+			})
+			done := make(chan error, 1)
+			go func() {
+				_, err := h.b.applyEngineSettings(context.Background(), p, "peer")
+				done <- err
+			}()
+			engine.waitFor("settings readback before preparation", func(calls []policyCall) bool {
+				for _, call := range calls {
+					if call.method == "engine:get-launch" {
+						return true
+					}
+				}
+				return false
+			})
+			r := h.b.nodePolicyRuntime()
+			r.mu.Lock()
+			r.pendingPauseRequested = true
+			r.mu.Unlock()
+			engine.releaseHeld()
+			if err := rmResult(t, done); policyErrorCode(err) != codeLocalVeto {
+				t.Fatalf("prepared peer settings = %v, want pause refusal", err)
+			}
+			if !bytes.Equal(rmSettingsJournal(t, h), journal) {
+				t.Fatal("refused preparation changed the persisted journal")
+			}
+			h.b.engineConfigMu.Lock()
+			after := h.b.engineSettings["ollama"].clone()
+			h.b.engineConfigMu.Unlock()
+			if !reflect.DeepEqual(after, before) {
+				t.Fatalf("refused preparation changed record: got %+v, want %+v", after, before)
+			}
+			if h.applies.Load() != 0 || h.proxyRebinds.Load() != 0 {
+				t.Fatal("refused preparation changed runtime")
+			}
+		})
+	}
+	test("initialization", func(h *settingsHarness, p *settings.Request) {
+		delete(h.b.engineSettings, "ollama")
+		p.ExpectedRevision = 1
+	}, false)
+	test("component drift", func(h *settingsHarness, p *settings.Request) {
+		p.ExpectedRevision++
+	}, true)
+	test("legacy argument migration", func(h *settingsHarness, p *settings.Request) {
+		record := h.b.engineSettings["ollama"]
+		record.Snapshot.Format = "pair-launch-v1"
+		record.Snapshot.Settings.LaunchText = "managed serve " + record.Snapshot.Settings.LaunchText
+		p.ExpectedRevision++
+	}, false)
+}
+
+func TestPausedBrokerReadsAndLocalConfigurationRemainAvailable(t *testing.T) {
+	t.Run("peer policy read and local policy edit", func(t *testing.T) {
+		rb := newBrokerOnFile(t, pausedLocallyDocument)
+		grantRemoteManagement(t, rb.b.clusterDir, "cluster-1", "self-node", "pinned-peer", false)
+		if doc := rb.peerSnapshot(t); doc["pausedBy"] != "local" {
+			t.Fatalf("paused peer policy read = %+v", doc)
+		}
+		rb.localSet(t, func(doc map[string]any) {
+			doc["idle"].(map[string]any)["unloadAfterMinutes"] = 11
+		})
+		if got := rb.b.localPolicy().Policy; got.Idle.UnloadAfterMinutes != 11 || got.Availability != nodepolicy.Paused {
+			t.Fatalf("local paused policy edit = %+v", got)
+		}
+	})
+	t.Run("peer settings reads and local settings edit", func(t *testing.T) {
+		h, _ := rmSettings(t)
+		p := h.changedRequest(t, "--local-paused-edit")
+		h.pause(nodepolicy.PausedByPeer)
+		grantRemoteManagement(t, h.b.clusterDir, "cluster", "target", "peer", false)
+		if _, err := h.b.getEngineSettings(context.Background(), p, "peer"); err != nil {
+			t.Fatalf("paused peer settings read: %v", err)
+		}
+		if _, err := h.b.previewEngineSettings(context.Background(), p, "peer"); err != nil {
+			t.Fatalf("paused peer settings preview: %v", err)
+		}
+		receipt, err := h.b.applyEngineSettings(context.Background(), p, "")
+		if err != nil || receipt.Phase != "succeeded" {
+			t.Fatalf("local paused settings edit = %+v, %v", receipt, err)
+		}
+		if got := h.snapshot(); !got.Settings.Equal(p.Settings) || got.Running {
+			t.Fatalf("local paused settings snapshot = %+v, want edited settings without activation", got)
+		}
+	})
 }
 
 // Recovery replays an interrupted apply without resuming its engine while the

@@ -18,6 +18,7 @@ import (
 	"time"
 
 	settings "nvpair-shared/enginesettings"
+	"nvpair-shared/jsonrpc"
 )
 
 func emptySwitchManagerSnapshot() switchManagerSnapshot {
@@ -99,7 +100,8 @@ func publishTestProxy(b *Broker, pp *proxyProcess) {
 }
 
 // newTestRPCWorkerPipe returns a worker whose peer is served over an in-memory
-// pipe, plus the codec for the far end so a test can act as the worker.
+// pipe, plus the codec for the far end so a test can act as the worker. Match
+// production's write interruption so call deadlines also cover an unread pipe.
 func newTestRPCWorkerPipe(t *testing.T) (*rpcWorker, *Codec) {
 	t.Helper()
 	client, server := net.Pipe()
@@ -107,9 +109,46 @@ func newTestRPCWorkerPipe(t *testing.T) (*rpcWorker, *Codec) {
 		_ = client.Close()
 		_ = server.Close()
 	})
-	worker := &rpcWorker{peer: NewPeer(NewCodec(client))}
+	worker := &rpcWorker{stdin: client}
+	worker.peer = jsonrpc.NewPeerWithWriteInterrupt(NewCodec(client), worker.interruptWrite)
 	go worker.peer.Serve(nil, nil)
 	return worker, NewCodec(server)
+}
+
+// recordEnabledEngineRestoration serves switch inspection and records every
+// frame, including the projection that must precede recovery and restoration.
+// Unexpected requests receive an error rather than stranding a synchronous call.
+func recordEnabledEngineRestoration(t *testing.T, codec *Codec) <-chan string {
+	t.Helper()
+	methods := make(chan string, 1)
+	go func() {
+		for {
+			msg, err := codec.Read()
+			if err != nil {
+				return
+			}
+			select {
+			case methods <- msg.Method:
+			case <-t.Context().Done():
+				return
+			}
+			if msg.IsRequest() {
+				if msg.Method == settings.SwitchPrepareMethod {
+					err = codec.Respond(msg.ID, emptySwitchManagerSnapshot())
+				} else {
+					err = codec.RespondError(msg.ID, -32601, "unexpected restoration request")
+				}
+				if err != nil {
+					t.Error(err)
+					return
+				}
+			}
+			if msg.Method == restoreEnabledEnginesMethod {
+				return
+			}
+		}
+	}()
+	return methods
 }
 
 // brokerWithEngineStatus is brokerWithEngineInventory for a single engine.
