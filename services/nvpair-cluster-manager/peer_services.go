@@ -295,15 +295,20 @@ func (m *Manager) refreshPeerServices(ctx context.Context, uuid string) error {
 	return errors.New("peer services unavailable")
 }
 
-// commitPeerServiceHints consumes a fully validated descriptor. Authentication
-// finishes under composition ownership before storage; storage then rechecks
-// only member fields and owns the complete speculative update/save/rollback.
+// commitPeerServiceHints consumes a fully validated descriptor. Identity and
+// reverse-peer authentication finish under composition ownership before
+// storage. The incarnation check reads members.json, so it runs under storage
+// ownership and cannot overlap a replacement; storage then rechecks only member
+// fields and owns the complete speculative update/save/rollback.
 func (m *Manager) commitPeerServiceHints(descriptor noderec.PeerServicesDescriptor, incarnation string, peer clustertrust.ReversePeer) error {
 	m.rosterMu.Lock()
 	defer m.rosterMu.Unlock()
 	m.mesh.Refresh()
-	current, valid := m.mesh.PeerServiceIncarnation(descriptor.HostUUID)
 	currentPeer, memberValid := m.reversePeer(descriptor.HostUUID)
+
+	m.membersStoreMu.Lock()
+	defer m.membersStoreMu.Unlock()
+	current, valid := m.mesh.PeerServiceIncarnation(descriptor.HostUUID)
 	if !valid || current != incarnation || !memberValid || currentPeer != peer {
 		return errors.New("admission changed during descriptor read")
 	}
@@ -312,8 +317,6 @@ func (m *Manager) commitPeerServiceHints(descriptor noderec.PeerServicesDescript
 		return errors.New("member unavailable during descriptor commit")
 	}
 
-	m.membersStoreMu.Lock()
-	defer m.membersStoreMu.Unlock()
 	m.memMu.Lock()
 	member := m.members[descriptor.HostUUID]
 	if member == nil || member.NodeUUID != authenticated.NodeUUID || member.State != stateMember ||
