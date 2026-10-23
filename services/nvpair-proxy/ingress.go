@@ -109,9 +109,20 @@ func (f *facade) localCredentialFor(target *url.URL) string {
 	return b.Credential
 }
 
+// localInferenceCredential is localCredentialFor for a forwarded inference
+// request: only chat completions carry the key, however the route or a
+// cross-engine tier chose the local engine. Completions, embeddings and every
+// other inference path reach it with what the caller sent.
+func (f *facade) localInferenceCredential(r *http.Request, target *url.URL) string {
+	if r.Method != http.MethodPost || r.URL.Path != routeChatCompletions {
+		return ""
+	}
+	return f.localCredentialFor(target)
+}
+
 // withLocalCredential makes a request to the local engine carry its native key
-// in place of any credential the caller sent. Only PAIR-classified inference
-// and the model list use it; every other forwarded path reaches the engine
+// in place of any credential the caller sent. Only chat completions and the
+// model list use it; every other forwarded path reaches the engine
 // with what the caller sent, so the engine's own authentication still applies.
 func withLocalCredential(h http.Header, credential string) {
 	if credential == "" {
@@ -341,7 +352,7 @@ func (f *facade) serveIngress(w http.ResponseWriter, r *http.Request, peer strin
 	out := r.WithContext(preparedCtx)
 	out.Header = r.Header.Clone()
 	out.Header.Del(nodepolicy.AdmissionWaitHeader)
-	withLocalCredential(out.Header, f.localCredentialFor(target))
+	withLocalCredential(out.Header, f.localInferenceCredential(r, target))
 	setReplayBody(out, body)
 	if streamRequest.protocol != streamProtocolUnknown {
 		out.Header.Set("Accept-Encoding", "identity")
@@ -547,7 +558,7 @@ func (f *facade) serveStrictLocal(w http.ResponseWriter, r *http.Request, body [
 	out := r.WithContext(preparedCtx)
 	out.Header = r.Header.Clone()
 	stripInternalRoutingHeaders(out.Header)
-	withLocalCredential(out.Header, f.localCredentialFor(target))
+	withLocalCredential(out.Header, f.localInferenceCredential(r, target))
 	setReplayBody(out, body)
 	if streamRequest.protocol != streamProtocolUnknown {
 		out.Header.Set("Accept-Encoding", "identity")

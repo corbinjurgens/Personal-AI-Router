@@ -1324,7 +1324,7 @@ func (ctl *routingSpend) dispatch(f *facade, w http.ResponseWriter, r *http.Requ
 				if cand.self {
 					stripInternalRoutingHeaders(req.Header)
 					req.Header.Del(peerStreamFramingHeader)
-					withLocalCredential(req.Header, candFacade.localCredentialFor(target))
+					withLocalCredential(req.Header, candFacade.localInferenceCredential(r, target))
 				}
 				req.URL.Scheme = target.Scheme
 				req.URL.Host = target.Host

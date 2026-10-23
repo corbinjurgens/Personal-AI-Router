@@ -67,7 +67,7 @@ func TestLocalCredentialIsPairedWithTheBackendPort(t *testing.T) {
 // Local self dispatch: inference and the model list carry the key in place of
 // the caller's; another forwarded path carries what the caller sent.
 func TestLocalCredentialOnSelfRequests(t *testing.T) {
-	tc := anyCase(t)
+	tc := lmstudioCase(t)
 	engine := newRecordingEngine(t, http.StatusOK)
 	port := tc.profile.FacadePort
 	disc := NewDiscovery()
@@ -92,7 +92,7 @@ func TestLocalCredentialOnSelfRequests(t *testing.T) {
 // Peer ingress: admitted inference and the model list carry the key; any
 // other path is forwarded with only what the peer sent.
 func TestLocalCredentialOnPeerIngress(t *testing.T) {
-	tc := anyCase(t)
+	tc := lmstudioCase(t)
 	engine := newRecordingEngine(t, http.StatusOK)
 	p := testProxy(tc.profile, NewDiscovery(), tc.profile.FacadePort)
 	f := p.soleFacade()
@@ -154,5 +154,40 @@ func TestUnkeyedBackendKeepsCallerCredentials(t *testing.T) {
 	f.serveIngress(httptest.NewRecorder(), withCallerCredentials(ingressRequest(tc, tc.inferenceBody(), "0")), "peer")
 	if got := engine.lastHeader().Get("Authorization"); got != "Bearer caller-key" {
 		t.Fatalf("Authorization = %q, want the caller's", got)
+	}
+}
+
+// Only chat completions and the model list carry the key. A cross-engine tier
+// request on /v1/completions can still reach the keyed local
+// engine, and there the caller's own credentials pass through unchanged.
+func TestLocalCredentialStaysOffOtherInferencePaths(t *testing.T) {
+	w := &recordingWriter{}
+	p, oll, lm := twoEngineProxy(t, w)
+	engine := newRecordingEngine(t, http.StatusOK)
+	lm.discovery.AddManual(selfNode("self", lm.profile.FacadePort, "qwen3-8b"))
+	setKeyedBackend(t, lm, engine.URL, proxyTestKey)
+	oll.discovery.AddManual(selfNode("self", oll.profile.FacadePort, "llama3:latest"))
+	setBackend(t, oll, newRecordingEngine(t, http.StatusOK).URL, true)
+	pol := nodepolicy.Default()
+	pol.Tiers = map[string][]nodepolicy.TierEntry{"weak": {{Kind: nodepolicy.EntryLocal, Engine: "lmstudio", Model: "qwen3-8b"}}}
+	p.admission.setPolicy(pol)
+
+	send := func(path string) http.Header {
+		t.Helper()
+		before := engine.hits()
+		r := httptest.NewRequest(http.MethodPost, path, strings.NewReader(`{"model":"weak","messages":[]}`))
+		rec := httptest.NewRecorder()
+		oll.handleHTTP(rec, withCallerCredentials(r))
+		if rec.Code != http.StatusOK || engine.hits() != before+1 {
+			t.Fatalf("%s: status %d, hits %d -> %d", path, rec.Code, before, engine.hits())
+		}
+		return engine.lastHeader()
+	}
+	requireLocalKey(t, send("/v1/chat/completions"))
+	for _, path := range []string{"/v1/completions"} {
+		h := send(path)
+		if h.Get("Authorization") != "Bearer caller-key" || h.Get("X-Api-Key") != "caller-key" {
+			t.Fatalf("%s carried Authorization %q, X-Api-Key %q; want only the caller's", path, h.Get("Authorization"), h.Get("X-Api-Key"))
+		}
 	}
 }
