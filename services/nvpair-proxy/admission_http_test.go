@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -704,6 +705,145 @@ func TestHandleHTTP_BusySelfHandsOnImmediately(t *testing.T) {
 	}
 	if waited := time.Since(started); waited > time.Second {
 		t.Fatalf("a busy self candidate held the request for %v", waited)
+	}
+}
+
+func TestHandleHTTP_SoleBusySelfWaitsWithoutSpendingDispatches(t *testing.T) {
+	test := func(name string, profileLimit bool) {
+		t.Run(name, func(t *testing.T) {
+			setForTest(t, &retryBackoff, []time.Duration{time.Millisecond})
+			tc := anyCase(t)
+			local := newRecordingEngine(t, http.StatusOK)
+			disc := NewDiscovery()
+			disc.AddManual(selfNode("self", tc.profile.FacadePort, tc.advertisedModel))
+			p := testProxy(tc.profile, disc, tc.profile.FacadePort)
+			setBackend(t, p.soleFacade(), local.URL, true)
+			policy := nodepolicy.Default()
+			policy.Admission.QueueTimeoutSeconds = 1
+			if profileLimit {
+				policy.Profiles = []nodepolicy.Profile{{Name: "limited", Engine: tc.profile.Name, Model: tc.requestedModel, MaxConcurrent: 1}}
+			} else {
+				policy.Admission.MaxConcurrentPerModel = 1
+			}
+			p.admission.setPolicy(policy)
+			held := mustAdmit(t, p.admission.admit(t.Context(), admissionRequest{engine: tc.profile.Name, model: tc.requestedModel, waitCap: -1}))
+			defer held.release()
+			// Hold the real admission slot beyond all five one-second slices.
+			// A successful response must wait for capacity, not exhaust retries.
+			release := time.AfterFunc(7*time.Second, held.release)
+			defer release.Stop()
+			ctx, cancel := context.WithTimeout(t.Context(), 12*time.Second)
+			defer cancel()
+			rec := httptest.NewRecorder()
+			p.soleFacade().handleHTTP(rec, tc.inferenceRequest().WithContext(ctx))
+			if rec.Code != http.StatusOK || local.hits() != 1 {
+				t.Fatalf("sole busy self: status %d, local hits %d; want 200 and one dispatch after capacity is released", rec.Code, local.hits())
+			}
+		})
+	}
+	test("admission model limit", false)
+	test("profile model limit", true)
+}
+
+func TestHandleHTTP_SoleBusyPeerWaitsWithoutSpendingDispatches(t *testing.T) {
+	setForTest(t, &retryBackoff, []time.Duration{time.Millisecond})
+	tc := anyCase(t)
+	var hits atomic.Int32
+	peer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if hits.Add(1) <= 6 {
+			writeAdmissionRejection(w, nodepolicy.RejectBusy)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		if _, err := io.WriteString(w, `{"done":true}`); err != nil {
+			t.Errorf("write peer response: %v", err)
+		}
+	}))
+	defer peer.Close()
+	disc := NewDiscovery()
+	disc.AddManual(nodeForModel(t, "peer", peer.URL, tc.advertisedModel))
+	p := testProxy(tc.profile, disc, tc.profile.FacadePort)
+	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+	defer cancel()
+	rec := httptest.NewRecorder()
+	p.soleFacade().handleHTTP(rec, tc.inferenceRequest().WithContext(ctx))
+	if rec.Code != http.StatusOK || hits.Load() != 7 {
+		t.Fatalf("sole busy peer: status %d, hits %d; want 200 after six busy refusals and one success", rec.Code, hits.Load())
+	}
+}
+
+func TestHandleHTTP_SolePeerOtherRefusalsSpendDispatches(t *testing.T) {
+	test := func(name string, status int, reason nodepolicy.RejectReason) {
+		t.Run(name, func(t *testing.T) {
+			tc := anyCase(t)
+			var hits atomic.Int32
+			peer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				hits.Add(1)
+				w.Header().Set(nodepolicy.AdmissionHeader, string(reason))
+				w.WriteHeader(status)
+			}))
+			defer peer.Close()
+			disc := NewDiscovery()
+			disc.AddManual(nodeForModel(t, "peer", peer.URL, tc.advertisedModel))
+			p := testProxy(tc.profile, disc, tc.profile.FacadePort)
+			ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+			defer cancel()
+			rec := httptest.NewRecorder()
+			p.soleFacade().handleHTTP(rec, tc.inferenceRequest().WithContext(ctx))
+			if rec.Code != status || hits.Load() != 5 {
+				t.Fatalf("refusal status %d, hits %d; want %d and five dispatches", rec.Code, hits.Load(), status)
+			}
+		})
+	}
+	test("paused", http.StatusServiceUnavailable, nodepolicy.RejectPaused)
+	test("off", http.StatusServiceUnavailable, nodepolicy.RejectOff)
+	test("no fit", http.StatusServiceUnavailable, nodepolicy.RejectNoFit)
+	test("wake timeout", http.StatusServiceUnavailable, nodepolicy.RejectWake)
+	test("busy header without admission status", http.StatusBadGateway, nodepolicy.RejectBusy)
+}
+
+func TestHandleHTTP_MultipleBusyPeersSpendDispatches(t *testing.T) {
+	tc := anyCase(t)
+	var hits atomic.Int32
+	busy := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		writeAdmissionRejection(w, nodepolicy.RejectBusy)
+	})
+	first, second := httptest.NewServer(busy), httptest.NewServer(busy)
+	defer first.Close()
+	defer second.Close()
+	disc := NewDiscovery()
+	disc.AddManual(nodeForModel(t, "first", first.URL, tc.advertisedModel))
+	disc.AddManual(nodeForModel(t, "second", second.URL, tc.advertisedModel))
+	p := testProxy(tc.profile, disc, tc.profile.FacadePort)
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+	defer cancel()
+	rec := httptest.NewRecorder()
+	p.soleFacade().handleHTTP(rec, tc.inferenceRequest().WithContext(ctx))
+	if rec.Code != http.StatusServiceUnavailable || hits.Load() != 5 || ctx.Err() != nil {
+		t.Fatalf("busy alternatives: status %d, hits %d, outer context %v; want admission 503 after five dispatches", rec.Code, hits.Load(), ctx.Err())
+	}
+	assertAdmissionRejection(t, rec, nodepolicy.RejectBusy)
+}
+
+func TestHandleHTTP_SoleBusyPeerStopsAtJobDeadline(t *testing.T) {
+	setForTest(t, &jobDeadline, 100*time.Millisecond)
+	tc := anyCase(t)
+	var hits atomic.Int32
+	peer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		writeAdmissionRejection(w, nodepolicy.RejectBusy)
+	}))
+	defer peer.Close()
+	disc := NewDiscovery()
+	disc.AddManual(nodeForModel(t, "peer", peer.URL, tc.advertisedModel))
+	p := testProxy(tc.profile, disc, tc.profile.FacadePort)
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+	defer cancel()
+	rec := httptest.NewRecorder()
+	p.soleFacade().handleHTTP(rec, tc.inferenceRequest().WithContext(ctx))
+	if rec.Code != http.StatusServiceUnavailable || hits.Load() <= 5 || ctx.Err() != nil {
+		t.Fatalf("deadline wait: status %d, hits %d, outer context %v; want job-bounded 503 after more than five refusals", rec.Code, hits.Load(), ctx.Err())
 	}
 }
 
