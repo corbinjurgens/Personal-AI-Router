@@ -6,6 +6,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"maps"
 	"os"
@@ -82,6 +83,7 @@ type forkContract struct {
 			Repository string `json:"repository"`
 			Commit     string `json:"commit"`
 			Generator  string `json:"generator"`
+			Inputs     string `json:"inputs"`
 		} `json:"strata"`
 		Pair struct {
 			Base string `json:"base"`
@@ -400,11 +402,16 @@ func TestStrataCurrentForkPackShape(t *testing.T) {
 		if err := os.Remove(filepath.Join(f.root, "pack", "experts.bin")); err != nil {
 			t.Fatal(err)
 		}
+		// Drop its declaration too, so the rejection is the compiler's pack
+		// requirement and not an undeclared-file mistake of the specimen.
+		model := &f.request.Settings.Serving.Models[0]
+		model.Artifacts = slices.DeleteFunc(model.Artifacts, func(a engines.ServingArtifact) bool { return a.Role == "model:pack-experts" })
+		// Today the fixed pack list asks for experts.bin before it looks at the
+		// table, so the fork's indirection-only pack fails on the missing file.
 		err := f.deriveRaw(t, forkBaselineRaw(t, f))
-		if err == nil {
-			t.Fatal("pack without experts.bin accepted")
+		if !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("error = %v, want the missing experts.bin", err)
 		}
-		t.Logf("real pack shape rejected: %v", err)
 	})
 }
 

@@ -5,7 +5,8 @@
     "strata": {
       "repository": "https://github.com/corbinjurgens/Strata",
       "commit": "0e70753c6b0668ecf929d8ee52982a2922b4e727",
-      "generator": "tools/prepare_unsloth_q2.py config_for, profile unsloth-portable-128k, GPU below 8 GiB, context 131072"
+      "generator": "tools/prepare_unsloth_q2.py config_for, profile unsloth-portable-128k, GPU below 8 GiB, context 131072",
+      "inputs": "Synthetic telemetry: ram_gib 16, vram_gib 6, available_gib 12.5, no commit telemetry, no overrides. memory_plan then gives kv_ram_gib 0.9140625 (7488 bytes per KV cell at 131072 tokens), expert_pool_gib 5.0859375, pinned 3, recent_mib 2136."
     },
     "pair": {
       "base": "e8e9fe963dc45810f043fb3ca134106279624139"
@@ -38,7 +39,7 @@
     "lib_dirs": ["/REPLACE_WITH_ABSOLUTE_PATH/lib"],
     "env": {
       "STRATA_RESIDENT_HEADROOM_GIB": "4",
-      "STRATA_FILE_CACHE_MIB": "1024",
+      "STRATA_FILE_CACHE_MIB": "2136",
       "STRATA_FILE_CACHE_COMPACT": "1",
       "STRATA_OWNED_PRICE": "exact"
     },
@@ -59,12 +60,43 @@
       ],
       "generated_env": {
         "STRATA_RESIDENT_HEADROOM_GIB": "4",
-        "STRATA_FILE_CACHE_MIB": "1024",
+        "STRATA_FILE_CACHE_MIB": "2136",
         "STRATA_FILE_CACHE_COMPACT": "1",
         "STRATA_OWNED_PRICE": "exact"
       },
       "overrides": {},
-      "sample": {"ram_gib": 16, "vram_gib": 6, "fixture": true}
+      "sample": {
+        "args": [
+          "--expert-cache", "auto", "--max-context", "131072", "--kv", "q4_0", "--spec", "2",
+          "--suffix-draft", "0", "--lookup-chain", "0", "--resident-budget-gib", "3",
+          "--prefill", "64", "--no-prefill-borrow", "--kv-resident", "20480"
+        ],
+        "env": {
+          "STRATA_RESIDENT_HEADROOM_GIB": "4",
+          "STRATA_FILE_CACHE_MIB": "2136",
+          "STRATA_FILE_CACHE_COMPACT": "1",
+          "STRATA_OWNED_PRICE": "exact"
+        },
+        "ram_gib": 16,
+        "vram_gib": 6,
+        "available_gib": 12.5,
+        "commit_available_gib": null,
+        "windows_commit": true,
+        "automatic_host_cache": true,
+        "available_fallback_gib": null,
+        "kv_ram_gib": 0.9140625,
+        "cpu_server_gib": 2.0,
+        "later_startup_gib": 0.5,
+        "headroom_gib": 4.0,
+        "vram_reserve_requested_mib": 0,
+        "vram_reserve_mib": 0,
+        "gpu_commit_gib": 6,
+        "expert_pool_gib": 5.0859375,
+        "pinned_gib": 3,
+        "recent_mib": 2136,
+        "low_memory": false,
+        "over_budget": false
+      }
     }
   },
   "extra_fields": [
