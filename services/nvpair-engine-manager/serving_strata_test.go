@@ -17,6 +17,7 @@ import (
 	"runtime"
 	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -224,16 +225,20 @@ func TestStrataRuntimeHashOutsideOperationLock(t *testing.T) {
 			delete(fileHashes.done, path)
 			fileHashes.inflight[key] = call
 			fileHashes.mu.Unlock()
-			defer func() {
-				call.wg.Done()
+			releaseHash := sync.OnceFunc(call.wg.Done)
+			ctx, cancel := context.WithCancel(context.Background())
+			done := make(chan error, 1)
+			exited := make(chan struct{})
+			t.Cleanup(func() {
+				cancel()
+				releaseHash()
+				<-exited
 				fileHashes.mu.Lock()
 				delete(fileHashes.inflight, key)
 				fileHashes.mu.Unlock()
-			}()
-			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
-			done := make(chan error, 1)
+			})
 			go func() {
+				defer close(exited)
 				var err error
 				switch operation {
 				case "preview":
@@ -410,17 +415,22 @@ func TestStrataRuntimeChangesWhileHashing(t *testing.T) {
 	delete(fileHashes.done, path)
 	fileHashes.inflight[key] = call
 	fileHashes.mu.Unlock()
-	released := false
-	defer func() {
-		if !released {
-			call.wg.Done()
-		}
+	releaseHash := sync.OnceFunc(call.wg.Done)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	exited := make(chan struct{})
+	t.Cleanup(func() {
+		cancel()
+		releaseHash()
+		<-exited
 		fileHashes.mu.Lock()
 		delete(fileHashes.inflight, key)
 		fileHashes.mu.Unlock()
+	})
+	go func() {
+		defer close(exited)
+		done <- f.prepareRuntimeHashes(t, ctx, config)
 	}()
-	done := make(chan error, 1)
-	go func() { done <- f.prepareRuntimeHashes(t, context.Background(), config) }()
 	select {
 	case <-waiting:
 	case err := <-done:
@@ -429,8 +439,7 @@ func TestStrataRuntimeChangesWhileHashing(t *testing.T) {
 		t.Fatal("runtime hash did not reach injected wait")
 	}
 	writeServingFixture(t, path, []byte("replacement during runtime hash"))
-	call.wg.Done()
-	released = true
+	releaseHash()
 	select {
 	case err := <-done:
 		if err == nil || !strings.Contains(err.Error(), "changed during preparation") {
@@ -465,8 +474,148 @@ func TestStrataSettingsCanReplaceInvalidPriorDeclaration(t *testing.T) {
 	}
 }
 
+// isolateStrataFixtureEnv removes ambient native/Python overrides only for this
+// fixture's test. Setenv enforces nonparallel use and owns exact restoration;
+// the later Unsetenv is required because even an empty value is rejected.
+func isolateStrataFixtureEnv(t *testing.T) {
+	t.Helper()
+	for _, assignment := range os.Environ() {
+		key, value, ok := strings.Cut(assignment, "=")
+		name := strings.ToUpper(key)
+		if !ok || (!strings.HasPrefix(name, "STRATA_") && !strings.HasPrefix(name, "PYTHON")) {
+			continue
+		}
+		// Registered before Setenv, this runs after its restoration cleanup.
+		t.Cleanup(func() {
+			if got, present := os.LookupEnv(key); !present || got != value {
+				t.Errorf("fixture environment restoration failed for %s", key)
+			}
+		})
+		t.Setenv(key, value)
+		if err := os.Unsetenv(key); err != nil {
+			t.Fatalf("unset fixture environment key %s: %v", key, err)
+		}
+	}
+}
+
+func TestStrataFixtureClearsAmbientEnvironment(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		key   string
+		value string
+	}{
+		{"Python present", "PYTHONPAIR_FIXTURE_SENTINEL", "synthetic"},
+		{"Python empty", "PYTHONPAIR_FIXTURE_SENTINEL", ""},
+		{"mixed case Python", "pYtHoNpAiR_Fixture_Sentinel", "synthetic"},
+		{"Strata present", "STRATA_PAIR_FIXTURE_SENTINEL", "synthetic"},
+		{"Strata empty", "STRATA_PAIR_FIXTURE_SENTINEL", ""},
+		{"mixed case Strata", "sTrAtA_Pair_Fixture_Sentinel", "synthetic"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			isolateStrataFixtureEnv(t)
+			root := t.TempDir()
+			command := launchCommand{Bin: fakeEngineBin, Args: []string{
+				filepath.Join(root, "server.py"), "--engine", "strata", "--config", filepath.Join(root, "config.json"),
+				"--host", "127.0.0.1", "--port", "12345", "--lazy",
+			}}
+			if _, err := strataLaunchSource(command); err != nil {
+				t.Fatal("clean synthetic launch rejected")
+			}
+			t.Setenv(tc.key, tc.value)
+			if _, present := os.LookupEnv(tc.key); !present {
+				t.Fatal("ambient sentinel was not installed")
+			}
+			if _, err := strataLaunchSource(command); err == nil || !strings.Contains(err.Error(), "Strata/Python environment overrides are unsupported in prepared mode.") {
+				t.Fatal("production validator did not reject ambient presence")
+			}
+			t.Setenv("PAIR_FIXTURE_UNRELATED", "retained")
+			f := newStrataServingFixture(t)
+			preview := previewSettings(t, f.ex, f.request)
+			if len(preview.Errors) != 0 || preview.Conflict != nil || preview.Serving == nil || len(preview.Serving.Configured) != 1 {
+				t.Fatal("positive fixture rejected after ambient isolation")
+			}
+			if _, present := os.LookupEnv(tc.key); present {
+				t.Fatal("fixture retained ambient sentinel")
+			}
+			if got, present := os.LookupEnv("PAIR_FIXTURE_UNRELATED"); !present || got != "retained" {
+				t.Fatal("fixture changed unrelated environment")
+			}
+			assertNoLlamaSpawn(t, f.llamaServingFixture)
+			assertNoSettingsOverride(t, f.ex)
+		})
+	}
+}
+
+func TestStrataFixtureRestoresAmbientEnvironment(t *testing.T) {
+	snapshot := func() map[string]string {
+		out := map[string]string{}
+		for _, assignment := range os.Environ() {
+			key, value, ok := strings.Cut(assignment, "=")
+			name := strings.ToUpper(key)
+			if ok && (strings.HasPrefix(name, "STRATA_") || strings.HasPrefix(name, "PYTHON")) {
+				out[key] = value
+			}
+		}
+		return out
+	}
+	for _, tc := range []struct {
+		name    string
+		present bool
+		value   string
+	}{
+		{"absent", false, ""},
+		{"present empty", true, ""},
+		{"present exact bytes", true, "synthetic=space tab\tline\nutf8\u00e9"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			const key = "PYTHONPAIR_FIXTURE_RESTORE"
+			t.Setenv(key, tc.value)
+			if !tc.present {
+				if err := os.Unsetenv(key); err != nil {
+					t.Fatal("cannot prepare absent sentinel")
+				}
+			}
+			before := snapshot()
+			t.Run("fixture", func(t *testing.T) {
+				f := newStrataServingFixture(t)
+				if _, present := os.LookupEnv(key); present {
+					t.Fatal("fixture retained restoration sentinel")
+				}
+				assertNoLlamaSpawn(t, f.llamaServingFixture)
+				return // The failure-cleanup control replaces only this return.
+			})
+			if !reflect.DeepEqual(snapshot(), before) {
+				t.Error("fixture did not restore exact prior environment presence and bytes")
+			} else {
+				t.Log("fixture environment restoration verified")
+			}
+		})
+	}
+}
+
+func TestStrataFixturePreservesCommandEnvironmentRejection(t *testing.T) {
+	for _, key := range []string{"STRATA_PAIR_FIXTURE_SENTINEL", "PYTHONPAIR_FIXTURE_SENTINEL"} {
+		t.Run(key, func(t *testing.T) {
+			f := newStrataServingFixture(t)
+			command, err := launchForState(settingsState(t, f.ex), f.request.Settings.ServerPort)
+			if err != nil {
+				t.Fatal("cannot resolve synthetic command")
+			}
+			if _, err := strataLaunchSource(command); err != nil {
+				t.Fatal("clean fixture command rejected")
+			}
+			command.Env[key] = ""
+			if _, err := strataLaunchSource(command); err == nil || !strings.Contains(err.Error(), "Strata/Python environment overrides are unsupported in prepared mode.") {
+				t.Fatal("production validator accepted a command environment key")
+			}
+			assertNoLlamaSpawn(t, f.llamaServingFixture)
+		})
+	}
+}
+
 func newStrataServingFixture(t *testing.T) strataServingFixture {
 	t.Helper()
+	isolateStrataFixtureEnv(t)
 	ex := settingsExecutor(t, false)
 	st := settingsState(t, ex)
 	st.manifest.Family = "strata"
