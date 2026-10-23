@@ -74,13 +74,39 @@ template and pins what the facade does with the `openai-chat` surface:
   not refuse it, does not check the model against a node's inventory and does
   not track it as a workload. Whatever the engine answers, including its own
   404 for an unsupported path, reaches the client. That includes `/v1/load` and
-  `/v1/unload`, so a client of the facade can load and unload the model.
+  `/v1/unload`: without an API key a client of the facade can load and unload
+  the model; with one, those paths carry only what the client sent, so the
+  engine refuses them unless the client has the key itself (see below).
 - Enabling the facade without a descriptor, without a port, or for a descriptor
   with no chat and model-list protocol is refused.
 
 The inventory a node advertises is the configured model list, loaded or not.
 Load the model first; whether Strata loads an unloaded model on the first chat
 request under `--lazy` was not checked.
+
+## The Strata API key
+
+A prepared config may set `api_key` (one key, 16 to 512 printable ASCII
+characters, no spaces or commas). The key stays on the serving host:
+
+- engine-manager gives it to the Strata server only as `STRATA_API_KEY` in the
+  server's environment; it is not in the launch snapshot, readback or logs;
+- engine-manager's own requests (model list, load, unload) carry it, never
+  follow a redirect with it, and redact it from error bodies;
+- the broker reads it from engine-manager over a private method that clients
+  cannot call, uses it for the advertisement health probe, and hands it to its
+  own proxy over the private stdio channel;
+- the proxy sends it only to this node's own engine, and only for chat
+  completions and model-list reads, from local clients and admitted peers. It
+  replaces any `Authorization` or `X-Api-Key` the caller sent. Every other path
+  is forwarded with only what the caller sent.
+
+The key never enters engine descriptors, discovery, peer payloads or the
+desktop application, so peers route to the node through PAIR without knowing
+it. A missing or wrong key is the engine's own 401; there is no
+unauthenticated fallback. Changing the key changes the approval digest, so it
+takes a fresh approval and restart. Loading and unloading remain available
+through PAIR's engine controls.
 
 ## Unsupported actions
 
@@ -95,9 +121,6 @@ These are not available for Strata, and no PAIR setting enables them:
 - Legacy completions, embeddings, Anthropic Messages (`/v1/messages`) and
   Responses (`/v1/responses`) as PAIR-classified inference. Strata serves some
   of these upstream, but PAIR does not claim them for Strata.
-- Strata API keys. PAIR's engine actions cannot send an authorization header,
-  so leave Strata's `--api-key` and `STRATA_API_KEY` unset and keep the server
-  on loopback.
 - The optional Strata features: request monitoring, before-load hooks and MCP
   hooks. Leave them disabled in the configuration.
 
@@ -149,9 +172,9 @@ accepted and rejected against the sanitized
 call the parser and compiler only: no server, engine or installed port is
 contacted, and nothing here shows that the current fork runs under PAIR.
 
-Two things keep the generated profile rejected as a whole: `memory_policy` and
-`api_key`. A profile prepared as a separate, fixed candidate, without those two
-fields and with a fixed expert cache and prefill, is accepted. Deleting fields to
+One thing keeps the generated profile rejected as a whole: `memory_policy`. A
+profile prepared as a separate, fixed candidate, without that field and with a
+fixed expert cache and prefill, is accepted. Deleting fields to
 make validation pass is the operator's explicit act of preparing that candidate,
 not something PAIR does.
 
@@ -171,7 +194,7 @@ prepared launch does with it:
 | keys that differ only by case | Rejected, at the top level and inside `env` |
 | `memory_policy` | Still rejected: the server recomputes launch controls at startup from live telemetry, so approval would have to bind the effective result, and how to do that is an open design choice |
 | `--expert-cache auto`, `--prefill auto` | Still rejected, with `memory_policy` |
-| `api_key` | Still rejected until the host-local credential path exists |
+| `api_key` | Bound; see [The Strata API key](#the-strata-api-key) |
 
 Inventory rows with `status.value` of `loaded` count as resident; a missing,
 unknown or `loading` status does not.

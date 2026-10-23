@@ -248,8 +248,13 @@ allow-list of `STRATA_RESIDENT_HEADROOM_GIB`, `STRATA_FILE_CACHE_MIB`,
 `STRATA_FILE_CACHE_COMPACT` and `STRATA_OWNED_PRICE`, each with its value syntax,
 listed in the approved placement as `env:NAME=value`. Duplicate keys (compared
 ignoring case, also inside `env`), nulls and unknown fields fail closed;
-`api_key` and `memory_policy` are unknown fields, so authentication and the
-automatic memory policy stay rejected. Context is an explicit positive
+`memory_policy` is an unknown field, so the automatic memory policy stays
+rejected. `api_key` is one key of 16 to 512 printable ASCII characters without
+spaces or commas; it is never in the snapshot, the server receives it only as
+`STRATA_API_KEY` in its child environment, engine-manager's own requests to the
+engine carry it (without following redirects, and redacted from error bodies),
+and `internal:local-engine-credential` gives it, with the launch's port, only
+to the broker for its health probe and its own proxy. Context is an explicit positive
 `--max-context` per slot; `parallel` must be in 1..8. Explicit `--batch` or
 `--slots` must agree with parallel and be at least two; otherwise the server
 supplies parallelism. Total context is context times slots, checked against int32
