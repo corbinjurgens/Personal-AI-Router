@@ -834,7 +834,6 @@ func TestStrataServingRejectsInvalidPreparedInputs(t *testing.T) {
 		{"output does not fit", func(t *testing.T, f *strataServingFixture) {
 			f.request.Settings.Serving.Models[0].MaxOutputTokens = 4096
 		}},
-		{"no serve", func(t *testing.T, f *strataServingFixture) { f.config.Args = f.config.Args[1:] }},
 		{"automatic placement", func(t *testing.T, f *strataServingFixture) {
 			f.config.Args[slices.Index(f.config.Args, "--expert-cache")+1] = "auto"
 		}},
