@@ -8,9 +8,11 @@ package main
 // EngineStatus; start may run for the engine's bounded readiness allowance.
 // They map onto the same lifecycle the local engine:start / engine:stop use
 // (including adopted-orphan reclaim and foreign-listener decline, exactly as
-// local engine:stop). A remote start is refused while the node is paused
-// locally or the engine is saved Off locally (remoteVeto), and a remote stop
-// saves Off with peer provenance, which a later remote start may undo.
+// local engine:stop). A remote start is refused by remoteVeto: with an unknown
+// node projection, with -32011 while the node is paused by either origin, and
+// with -32013 while the engine is locked. A saved Off, of any origin, does not
+// refuse it. A remote stop saves Off with peer provenance, which a later remote
+// start may undo.
 
 import (
 	"encoding/json"

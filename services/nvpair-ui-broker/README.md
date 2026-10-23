@@ -591,9 +591,11 @@ proxy enforces it.
   its advertisement still describes the previously stored policy. The later
   adopted projection carries the saved pause provenance and new revision.
   A peer write vetoed by a pause changes neither the stored policy nor
-  its revision and emits no projection. Remote routers do not filter inference
-  candidates by advertised `pausedBy`: a paused peer remains selectable. The
-  paused node's admission refuses inference with HTTP 503 and
+  its revision and emits no projection. A remote router drops a remote node with
+  a non-empty advertised `pausedBy` from its inference candidates, a request
+  without a `model` included; its own node is excepted and model lists and
+  control requests are not filtered. A stale hint still meets the destination's
+  veto: the paused node's admission refuses inference with HTTP 503 and
   `X-PAIR-Admission: paused`; the origin treats that response as retryable and
   fails over when another candidate remains. With no remaining candidate, it
   relays the 503. Pause does not remove catalogue models or declared tier aliases.
