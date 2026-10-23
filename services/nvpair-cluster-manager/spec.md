@@ -833,8 +833,8 @@ not live Tailscale/off-LAN reachability or an exact one-refresh recovery time.
 
 #### One best-effort removal notification
 
-`handleNodesRemove` prepares the durable exact-admission proof and tombstone
-under `rosterMu`, retaining the original local/peer admissions and certificate
+`handleNodesRemove` prepares the exact-admission proof in memory under
+`rosterMu`, retaining the original local/peer admissions and certificate
 identity. After unlocking, it selects from the complete candidate union using
 `ChooseWithin`. One `pairingHTTPTimeout` context (ten seconds) spans selection
 and notification, with the chooser's existing connect bound. No confirming TCP
@@ -843,7 +843,10 @@ direct/reverse adapter setup; selection performs no descriptor GET.
 
 Before dispatch, a brief composition recheck binds the original local identity,
 peer admission and pin and verifies the selected endpoint is still a current
-candidate. Network I/O runs unlocked. Adapter route-generation/authority checks
+candidate. Only a passing recheck persists the proof and tombstone mirror, still
+under `rosterMu` and before notification; a stale selection returns the
+preservation error with no durable removal state, so restart replay cannot
+remove the preserved admission. Network I/O runs unlocked. Adapter route-generation/authority checks
 cover setup and first application writes; the receiver verifies the exact
 removal proof. These checks do not promise an atomic network send against every
 later composition change.
