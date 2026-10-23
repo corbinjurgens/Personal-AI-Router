@@ -96,6 +96,9 @@ func (m *Manager) notifyJoinerCanceled(joinerAddr, inviteID string) {
 		return
 	}
 	client := &http.Client{Timeout: pairingHTTPTimeout}
+	if m.isJoinRequestInvite(inviteID) {
+		client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	}
 	if _, err := postPairingBlob(client, joinerAddr, inviteID, "cancel", nil); err != nil {
 		log.Printf("invite %s: notify joiner cancel: %v", inviteID, err)
 	}

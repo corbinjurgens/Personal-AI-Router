@@ -287,7 +287,13 @@ func (m *Manager) resumeOutboundPairings() {
 			continue
 		}
 		client := &http.Client{Timeout: pairingHTTPTimeout}
-		_, _ = postPairingBlob(client, receipt.Addr, receipt.InviteID, "outbound-completion", receipt.SuccessBlob)
+		if pi.JoinRequestID != "" {
+			client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+		}
+		_, replayErr := postPairingBlob(client, receipt.Addr, receipt.InviteID, "outbound-completion", receipt.SuccessBlob)
+		if errors.Is(replayErr, errJoinRequestRedirect) {
+			log.Printf("pairing %s: receipt replay refused an HTTP redirect", receipt.InviteID)
+		}
 		client.CloseIdleConnections()
 		m.confirmOutboundPairing(sess)
 	}

@@ -139,6 +139,7 @@ reserved for inference clients.
 | `cluster:invite-received`                            | Parse inbound invite                                                                                                            | `cluster:invite-received`                                 |
 | `cluster:invite-canceled` / `cluster:invite-expired` | Prune the canceled or timed-out inbound invite from the authoritative set                                                       | `cluster:pending-invites-changed`                         |
 | `cluster:identity-changed`                           | Persist local identity                                                                                                          | `connection:cluster-identity`                             |
+| `cluster:join-requests-changed` | Strictly parse the complete manager-owned eligibility/request snapshot | `cluster:join-requests-changed` |
 | `nodes:changed`                                      | Replace membership snapshot                                                                                                     | `nodes:changed`                                           |
 | `workloads:upsert` / `workloads:remove`              | Update workload catalog                                                                                                         | workload pushes                                           |
 
@@ -332,6 +333,55 @@ UUID that also keys discovery, workloads, errors, and `selfId` — never the
 hostname (`ClusterNode.id`, which is display only). `nodes:remove` is sent the
 UUID (self-removal routes to `cluster:leave`); a manual node's `node/remove` is
 resolved back to the hostname the entry was keyed by.
+
+### Ask-to-join admission contract
+
+The service owns the request prelude as well as pairing. The unchanged broker
+`cluster:*` relay exposes `cluster:get-join-requests`, `cluster:ask-to-join`,
+`cluster:respond-to-join-request` and `cluster:cancel-join-request`.
+The getter and `cluster:join-requests-changed` push carry the same full
+`{supported:true, canAskToJoin, requiresSoloReplacement, blockedReason, requests}`
+snapshot, fetched independently of `ClusterInitialSnapshot` on attach/reconnect.
+The strict bridge parser, invoke registration and supervisor notification
+demux/allowlist project this contract; Electron does not reconstruct request
+eligibility or replace the manager's deadlines.
+
+The selected member remains inviter/EAP Server, approves locally with its
+own `allowRemoteManagement` choice and displays the pending child PIN via local
+`cluster:invite-status`. The requester remains joiner/EAP Peer and supplies the
+PIN and its independent grant choice through `cluster:respond-to-invite`.
+Request IDs, exact child invite IDs and ordinary invites stay distinct.
+Approval, discovery identity and unauthenticated HTTP status grant no trust.
+Optional transcript-authenticated `PairingInfo.joinRequestId` binds the handoff;
+only the exact confirmed durable pairing outcome permits `paired`.
+
+The plain side of the existing cluster listener accepts strict version-1
+`POST /v1/cluster/join-requests` operations `request`, `status`, `ready`, `cancel`.
+This adds no listener/firewall permission. The manager enforces observed-source
+binding, private IPv4/ULA/Tailscale CGNAT policy (fixture loopback allowed),
+strict 4 KiB bodies, one outgoing/eight incoming requests, one incoming per IP,
+bounded create/follow-up rates, source/terminal tables and eight nonblocking
+HTTP handler slots. Callback uses only observed IP and validated port, never a
+supplied callback URL or redirects. Request snapshots/status contain no PIN,
+grant, roster, certificate or key; names/UUIDs remain unverified display claims.
+
+Go checks authoritative durable composition before mutation. Explicitly
+consented empty-solo replacement waits for member approval and a fresh safe
+check, then durable teardown before `ready`. Retained/offline peer relationships
+and unreadable or incomplete durable state refuse without clearing anything.
+After replacement failure leaves the requester unclustered, retaining models,
+engine/settings and node identity; retired admissions are never restored.
+No TypeScript membership mutation or network approval is permitted.
+
+Request lifetime is five minutes from local creation (`effectiveInviteTTL()`);
+the child keeps its own TTL and canonical receipt/rollback semantics. Client
+detach preserves work, manager restart invalidates memory-only requests.
+Re-read membership after lost status. Old local `-32601` means unsupported;
+initial peer HTTP 404 maps to `unsupported-peer`, later status 404 means lost
+attempt. No fallback Invite or pre-approval solo teardown. Generic broker errors
+preserve code/message but omit error data; read stable eligibility reasons from
+the getter. Full RPC/HTTP shapes, exact bounds and cancel races are specified in
+[cluster-manager spec §7.0.1](../../services/nvpair-cluster-manager/spec.md#701-ask-to-join-admission-requests).
 
 ### Secure inference (backend-owned)
 

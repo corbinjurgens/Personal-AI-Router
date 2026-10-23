@@ -3,7 +3,13 @@
 
 import type { WsInvokeChannel, WsInvokeRequest, WsInvokeResponse } from '@/shared/types/ws-channels'
 import type { ClusterInitialSnapshot } from '@/shared/types/bootstrap'
-import type { ClusterNode, ClusterNodeIdentity, Invite } from '@/shared/types/cluster'
+import type {
+    ClusterNode,
+    ClusterNodeIdentity,
+    Invite,
+    JoinRequest,
+    JoinRequestsSnapshot
+} from '@/shared/types/cluster'
 import type { EngineType } from '@/shared/types/engines'
 import type { ServiceError } from '@/shared/types/errors'
 import { parseEngineSwitchResult, parseEngineSwitchStatus } from './engine-switch'
@@ -37,10 +43,13 @@ import {
 import { parseWorkloadsInitial } from './workload-projection'
 
 import type { JsonObject, JsonValue } from './json-rpc-client'
+import { JsonRpcResponseError } from './json-rpc-client'
 import {
     emptyInvite,
     parseClusterNodes,
     parseInvite,
+    parseJoinRequest,
+    parseJoinRequestsSnapshot,
     parseNodeIdentity,
     parseRemoteManagementCapability,
     parseRemoteManagementSnapshot
@@ -566,6 +575,74 @@ function handleErrorsClear(id: string): null {
     return null
 }
 
+async function handleClusterGetJoinRequests(): Promise<JoinRequestsSnapshot> {
+    try {
+        return parseJoinRequestsSnapshot(await callCluster('cluster:get-join-requests', {}))
+    } catch (error) {
+        if (error instanceof JsonRpcResponseError && error.code === -32601) {
+            return {
+                supported: false,
+                canAskToJoin: false,
+                requiresSoloReplacement: false,
+                blockedReason: 'unsupported',
+                requests: []
+            }
+        }
+        throw error
+    }
+}
+
+async function handleClusterAskToJoin(
+    payload?: WsInvokeRequest<'cluster:ask-to-join'>
+): Promise<JoinRequest> {
+    if (
+        !payload ||
+        typeof payload.address !== 'string' ||
+        payload.address === '' ||
+        typeof payload.replaceSoloCluster !== 'boolean' ||
+        (payload.port !== undefined &&
+            (!Number.isInteger(payload.port) || payload.port < 1 || payload.port > 65535)) ||
+        (payload.nodeId !== undefined && typeof payload.nodeId !== 'string')
+    ) {
+        throw new Error('Asking to join requires an address and explicit solo replacement choice')
+    }
+    const params: JsonObject = {
+        address: payload.address,
+        replaceSoloCluster: payload.replaceSoloCluster
+    }
+    if (payload.port !== undefined) params.port = payload.port
+    if (payload.nodeId !== undefined) params.nodeId = payload.nodeId
+    return parseJoinRequest(await callCluster('cluster:ask-to-join', params))
+}
+
+async function handleClusterRespondToJoinRequest(
+    payload?: WsInvokeRequest<'cluster:respond-to-join-request'>
+): Promise<JoinRequest> {
+    if (
+        !payload ||
+        typeof payload.requestId !== 'string' ||
+        payload.requestId === '' ||
+        typeof payload.accept !== 'boolean' ||
+        (payload.accept && typeof payload.allowRemoteManagement !== 'boolean')
+    ) {
+        throw new Error('Approving a join request requires an explicit remote management choice')
+    }
+    const params: JsonObject = { requestId: payload.requestId, accept: payload.accept }
+    if (payload.accept) params.allowRemoteManagement = payload.allowRemoteManagement
+    return parseJoinRequest(await callCluster('cluster:respond-to-join-request', params))
+}
+
+async function handleClusterCancelJoinRequest(
+    payload?: WsInvokeRequest<'cluster:cancel-join-request'>
+): Promise<JoinRequest> {
+    if (!payload || typeof payload.requestId !== 'string' || payload.requestId === '') {
+        throw new Error('Canceling a join request requires its request ID')
+    }
+    return parseJoinRequest(
+        await callCluster('cluster:cancel-join-request', { requestId: payload.requestId })
+    )
+}
+
 async function handleClusterInviteNode(
     payload?: WsInvokeRequest<'cluster:invite-node'>
 ): Promise<Invite> {
@@ -756,6 +833,10 @@ const EMPTY_SERVICE_BRIDGE_HANDLERS: BridgeHandlerMap = {
     'discovery:get-nodes': () => getModularBridgeState().getAvailableNodes(),
 
     'cluster:get-initial': () => handleClusterGetInitial(),
+    'cluster:get-join-requests': () => handleClusterGetJoinRequests(),
+    'cluster:ask-to-join': payload => handleClusterAskToJoin(payload),
+    'cluster:respond-to-join-request': payload => handleClusterRespondToJoinRequest(payload),
+    'cluster:cancel-join-request': payload => handleClusterCancelJoinRequest(payload),
     'cluster:get-remote-management': async () =>
         parseRemoteManagementSnapshot(await callCluster('cluster:get-remote-management', {})),
     'cluster:set-remote-management': async payload => {

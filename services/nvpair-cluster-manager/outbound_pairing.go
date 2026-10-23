@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"crypto/x509"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -45,6 +46,10 @@ func (m *Manager) commitJoinerPairing(sess *pairingSession, inv *Invite) (commit
 		if m.teardownPending.Load() || cid != "" || admissionCID != "" || epoch != 0 ||
 			!live || current != sess || !exists || pending.State != inviteStatePending ||
 			pending.ClusterID != inv.ClusterID || pi == nil || sess.localAdmissionEpoch == 0 {
+			commitErr = errPairingCommitStale
+			return
+		}
+		if !m.matchJoinRequestPeer(sess.inviteID, pi) {
 			commitErr = errPairingCommitStale
 			return
 		}
@@ -253,6 +258,9 @@ func exchangePairingEnvelope(client *http.Client, scheme, addr string, env pairi
 		return out, err
 	}
 	defer resp.Body.Close()
+	if client.CheckRedirect != nil && resp.StatusCode >= 300 && resp.StatusCode < 400 {
+		return out, errJoinRequestRedirect
+	}
 	if resp.StatusCode != http.StatusOK {
 		return out, fmt.Errorf("pairing %s status %d", env.Phase, resp.StatusCode)
 	}
@@ -267,6 +275,9 @@ func exchangePairingEnvelope(client *http.Client, scheme, addr string, env pairi
 func (m *Manager) driveOutboundCompletion(sess *pairingSession) {
 	log.Printf("pairing %s: polling joiner readiness", sess.inviteID)
 	client := &http.Client{Timeout: pairingHTTPTimeout}
+	if m.joinRequestForInvite(sess.inviteID) != "" {
+		client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	}
 	defer client.CloseIdleConnections()
 	deadline := time.UnixMilli(sess.createdAt).Add(m.effectiveInviteTTL())
 	ready := false
@@ -276,6 +287,11 @@ func (m *Manager) driveOutboundCompletion(sess *pairingSession) {
 		}
 		out, err := exchangePairingEnvelope(client, "http", sess.joinerAddr,
 			pairingEnvelope{InviteID: sess.inviteID, Phase: "outbound-ready"})
+		if errors.Is(err, errJoinRequestRedirect) {
+			m.handlePairingTerminalSignal(&pairingEnvelope{InviteID: sess.inviteID}, inviteStateFailed, "redirect-refused", "cluster:invite-failed", "")
+			m.wakeJoinRequests()
+			return
+		}
 		if err == nil && out.InviteID == sess.inviteID && out.State != inviteStatePending {
 			method := ""
 			state := out.State
@@ -328,6 +344,10 @@ func (m *Manager) driveOutboundCompletion(sess *pairingSession) {
 	for {
 		response, postErr := postPairingBlob(client, sess.joinerAddr, sess.inviteID, "outbound-completion", blob)
 		if postErr != nil {
+			if errors.Is(postErr, errJoinRequestRedirect) {
+				m.handlePairingTerminalSignal(&pairingEnvelope{InviteID: sess.inviteID}, inviteStateFailed, "redirect-refused", "cluster:invite-failed", "")
+				m.wakeJoinRequests()
+			}
 			log.Printf("pairing %s: completion transport: %v", sess.inviteID, postErr)
 			// Once committed, an HTTP error or silence proves no outcome. Retain
 			// that durable admission and try only authenticated confirmation.
@@ -417,6 +437,9 @@ func (m *Manager) confirmOutboundPairing(sess *pairingSession) {
 	transport := &http.Transport{TLSClientConfig: tlsConfig}
 	defer transport.CloseIdleConnections()
 	client := &http.Client{Transport: transport, Timeout: pairingHTTPTimeout}
+	if pi.JoinRequestID != "" {
+		client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	}
 	for attempt := 0; attempt < inviterNotifyAttempts && time.Now().Before(deadline); {
 		out, err := exchangePairingEnvelope(client, "https", sess.joinerAddr, pairingEnvelope{
 			InviteID: sess.inviteID, Phase: "confirm", ClusterID: clusterID,

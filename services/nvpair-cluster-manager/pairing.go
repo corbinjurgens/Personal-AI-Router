@@ -52,6 +52,7 @@ type PairingInfo struct {
 	Addr                string `json:"addr,omitempty"`
 	Cert                string `json:"cert"`
 	Completion          string `json:"completion,omitempty"`
+	JoinRequestID       string `json:"joinRequestId,omitempty"`
 }
 
 // localPairingInfo builds this node's PairingInfo. addr is the inviter's
@@ -98,17 +99,27 @@ func (pi *PairingInfo) toMap() (map[string]any, error) {
 // nodeUuid (§7.2: a PairingInfo whose cert CN/URI != nodeUuid is rejected).
 func parsePairingInfo(raw []byte) (*PairingInfo, *x509.Certificate, error) {
 	var pi PairingInfo
-	if _, err := decodeRemoteManagementParams(raw, map[string]bool{
+	fields, err := decodeRemoteManagementParams(raw, map[string]bool{
 		"v": true, "nodeUuid": true, "nodeId": true, "name": true, "clusterId": true,
-		"admissionEpoch": true, "clusterFriendlyName": true, "addr": true, "cert": true, "completion": true,
-	}); err != nil {
+		"admissionEpoch": true, "clusterFriendlyName": true, "addr": true, "cert": true, "completion": true, "joinRequestId": true,
+	})
+	if err != nil {
 		return nil, nil, fmt.Errorf("invalid PairingInfo fields: %w", err)
+	}
+	if rawID, present := fields["joinRequestId"]; present {
+		var id string
+		if json.Unmarshal(rawID, &id) != nil || !validJoinRequestID(id) {
+			return nil, nil, fmt.Errorf("invalid PairingInfo join request")
+		}
 	}
 	if err := json.Unmarshal(raw, &pi); err != nil {
 		return nil, nil, fmt.Errorf("decode PairingInfo: %w", err)
 	}
 	if pi.NodeUUID == "" {
 		return nil, nil, fmt.Errorf("PairingInfo missing nodeUuid")
+	}
+	if pi.JoinRequestID != "" && pi.Completion != inviterCompletionV1 {
+		return nil, nil, fmt.Errorf("invalid PairingInfo join request")
 	}
 	if pi.Completion != "" && (pi.Completion != inviterCompletionV1 || pi.V < 2) {
 		return nil, nil, fmt.Errorf("unsupported PairingInfo completion capability")
@@ -281,6 +292,9 @@ func (m *Manager) registerJoinerSession(session *pairingSession) (registered, at
 		return false, false
 	}
 	if cid, _ := m.clusterIdentity(); cid != "" {
+		return false, false
+	}
+	if !m.joinRequestAllowsInvite(session.inviteID) {
 		return false, false
 	}
 	m.sessMu.Lock()

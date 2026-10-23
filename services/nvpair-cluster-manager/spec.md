@@ -75,7 +75,7 @@ Because membership **is** trust, this service is also the **trust fabric** for t
 - Persist the trusted-node store (UUID → pinned cert + metadata); pin a peer's cert on pairing success, drop it on removal, and reload it on startup.
 
 **Non-functional**
-- All inter-node traffic is **mTLS over HTTPS**: the server requires a client certificate and verifies the presented cert against the trusted-node store; an absent or unpinned cert is rejected (`403 Forbidden`). The one exception is the **pairing channel** (`POST /v1/cluster/pairing`), which by definition runs before a pin exists and is instead authenticated by the EAP-NOOB PIN (§7.2/§7.4).
+- Trusted inter-node traffic uses **mTLS over HTTPS**: the server verifies the presented cert against the trusted-node store. Pre-trust exceptions are the PIN-authenticated pairing channel (`POST /v1/cluster/pairing`, §7.2/§7.4) and the unauthenticated, source-limited admission-request prelude (§7.0.1). The latter creates no trust.
 - The pairing PIN is six digits **for now** — accepted, documented security debt (§4). The design must keep the OOB value swappable for a high-entropy pairing code without changing the local Broker contract.
 - Private key material is stored with owner-only permissions (`0600` file / `0700` dir), matching the per-user config-dir convention `nvpair-node-settings` uses.
 - Membership and trust changes must be idempotent and reconcilable — re-delivery converges to the same state (and same pin) on both nodes.
@@ -117,7 +117,7 @@ Because membership **is** trust, this service is also the **trust fabric** for t
   toNodeId: string | null    // invitee logical node id, if known to the inviter
   clusterId: string          // the cluster the invitee would join
   clusterFriendlyName: string
-  pin: string | null         // six-digit PIN — present in the cluster:invite-node RESULT (inviter displays it); never sent to the invitee and never logged
+  pin: string | null         // inviter-local invite-node result or still-pending outbound invite-status only; never sent to the invitee or logged
   state: InviteState
   reason?: string           // stable failure or pending-outcome reason
   error?: string            // original diagnostic on failed invite-node result
@@ -311,7 +311,177 @@ Example `cluster:respond-to-invite` request (joiner submits the PIN) and result:
 }
 ```
 
+### 7.0.1 Ask-to-join admission requests
+
+This manager-owned prelude lets a standalone device request admission from one
+selected existing member. It does not merge clusters, auto-found the target or
+establish trust. The member stays the EAP-NOOB Server/inviter and displays the
+PIN; the requester stays the EAP Peer/joiner and enters it through ordinary
+`cluster:respond-to-invite` with its own `allowRemoteManagement` choice.
+Approval chooses authority over the admitting device only. Existing Invite
+fields/states and ordinary already-clustered joiner rejection remain unchanged.
+
+`JoinRequest` is a separate local record:
+
+```typescript
+type JoinRequest = {
+  requestId: string
+  direction: "incoming" | "outgoing"
+  peerNodeUuid: string
+  peerName: string
+  peerAddress: string
+  peerPort: number
+  state: "awaiting-approval" | "awaiting-requester" | "pairing" | "paired"
+       | "declined" | "canceled" | "expired" | "failed" | "rejected"
+  inviteId: string | null
+  reason: string
+  createdAt: number
+  expiresAt: number
+}
+```
+
+Times are epoch milliseconds. Each manager measures its deadline from its own
+creation time using `effectiveInviteTTL()` (five minutes in production);
+peer timestamps never extend it. The requester generates a fresh ID with at
+least 128 random bits. It correlates operations, not membership authority.
+Pre-authentication names and UUIDs are unverified claims; names are bounded and
+sanitized for display. Discovery identities do not authenticate a requester.
+
+| Local method | Params | Result |
+| --- | --- | --- |
+| `cluster:get-join-requests` | `{}` | `{supported:true, canAskToJoin:boolean, requiresSoloReplacement:boolean, blockedReason:string, requests:JoinRequest[]}` |
+| `cluster:ask-to-join` | `{address:string, port?:number, nodeId?:string, replaceSoloCluster:boolean}` | `JoinRequest`; registers one outgoing attempt and returns promptly while the manager owns progress |
+| `cluster:respond-to-join-request` | `{requestId:string, accept:true, allowRemoteManagement:boolean}` or `{requestId:string, accept:false}` | Updated incoming `JoinRequest` |
+| `cluster:cancel-join-request` | `{requestId:string}` | Updated outgoing `JoinRequest` |
+| `cluster:join-requests-changed` | Manager notification | The same complete snapshot as the getter on request or composition change |
+
+The snapshot is separate from `ClusterInitialSnapshot`. Reconcile authoritative
+composition on reads and before mutations. `blockedReason` is empty when
+eligible, otherwise `already-clustered`, `pairing-busy` or `state-unavailable`.
+Address resolution and port validation use the existing invite path. Reject
+self-targeting, including manual addresses, with `self-target` at the service
+boundary. `replaceSoloCluster` is mandatory even when false. Approval requires
+a real `allowRemoteManagement` boolean; decline needs no grant choice. Only
+clients on the existing per-user local service endpoint may approve; this
+relies on OS access, not physical presence. No peer HTTP approval exists.
+Snapshots and request records contain no PIN, certificate, key or grant. Once
+`inviteId` exists, the member retrieves its pending inviter PIN through local
+`cluster:invite-status`, never through network request status.
+
+#### Unauthenticated HTTP prelude
+
+The existing split listener's plain side accepts
+`POST /v1/cluster/join-requests`; no new listener or firewall permission is added.
+Strict version-1 bodies are `{version:1, operation, requestId}`, with operation
+`request`, `status`, `ready` or `cancel`. Only `request` additionally requires
+`requester:{nodeUuid:string,name:string}` and `port:number`. Accept no callback
+host/URL. Bind follow-ups to the exact ID and observed source IP, ignoring
+forwarded-address headers. Callback dials only that IP at the validated pairing
+port and never follows redirects.
+
+Successful replies are HTTP 200 with
+`{version:1, requestId:string, state:string, reason:string, createdAt:number, expiresAt:number, inviteId:string|null}`.
+They expose no PIN, grants, roster, certificate or eligibility snapshot. These
+unauthenticated replies are advisory and cannot prove durable membership.
+Error bodies are `{version:1, reason:string}`:
+
+| Status | Meaning |
+| --- | --- |
+| 400 | Malformed body/ID/port or unsupported version (`unsupported-version`) |
+| 404 | Unknown status/ready ID or an ID presented from the wrong source |
+| 409 | Unclustered approver (`target-not-clustered`) or conflicting ID reuse |
+| 429 | Capacity/rate refusal, with `Retry-After` |
+
+Before allocation or prompting, allow only private unicast IPv4
+(`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`), IPv6 ULA (`fc00::/7`),
+Tailscale CGNAT (`100.64.0.0/10`) and loopback for isolated fixtures. Reject
+public, multicast, unspecified and link-local sources. Canonicalize
+IPv4-mapped IPv6 before source matching and rate accounting. This policy does
+not change existing pairing endpoints or authenticate the source.
+
+Bounds are manager constants, not settings:
+
+| Resource | Bound |
+| --- | --- |
+| Body | 4 KiB; reject unknown/duplicate fields and trailing JSON |
+| Outgoing / live incoming | One outgoing; eight incoming globally; one incoming per source IP |
+| Create rate | Per IP one per 30 seconds, burst one; global one per second, burst four |
+| Follow-up rate | Status/ready/cancel share five operations per second per source, burst ten |
+| Source accounting | 128 entries, five-minute idle expiry; refuse new sources when full |
+| Terminal records | Five-minute retention, cap 64; refuse new work rather than evict unexpired cancellation fences |
+| Concurrent HTTP handlers | Eight, nonblocking semaphore; excess returns 429 before body reads or allocation |
+
+Body reads and operations have bounded timeouts. Excess traffic does not queue
+background workers. Devices sharing a NAT queue one request at a time. Exact
+duplicate creates return existing state without refreshing expiry or prompting
+again. A valid cancel before create records a source-bound canceled tombstone
+and returns 200; reordered create cannot resurrect it. Tombstones obey
+allocation bounds and conflicting source reuse is refused. Incoming requests
+are passive review data: never automatically open a modal or take focus.
+
+#### Consent, handoff and durable outcome
+
+Pending approval changes no membership, admission, pin or grant. Capture the
+member's cluster, admission and composition generation. Approval moves to
+`awaiting-requester` without starting EAP. The requester polls every two seconds
+with one call in flight and the existing bounded HTTP timeout. On approval it
+rechecks eligibility and solo consent under the existing composition boundary;
+network waits stay outside composition locks.
+
+A named intentional empty solo remains intact before approval. Replacement
+requires confirmation: “Joining replaces this device's empty cluster. Other
+devices will not be moved.” Prove empty composition from readable authoritative
+stores, including offline relationships: no non-self durable members, pins or
+retained peer management relationships, competing pairing, incomplete
+publication/receipt/rollback or teardown. Uncertain state refuses without
+clearing anything. Use existing durable teardown and identity publication,
+preserving models, engine/settings, node UUID and keypair. Do not broaden normal
+intentional-solo cleanup. Reinstall the outgoing request under its new generation
+after teardown, then send `ready`; failed teardown never sends ready.
+Cancellation/failure after replacement leaves the requester unclustered and
+never resurrects the retired admission.
+
+`ready` rechecks approval and the member's captured generation/admission and
+starts exactly one canonical invitation with its saved local grant choice.
+Leave/rejoin invalidates approval. Optional `PairingInfo.joinRequestId` is
+strict-decoded and authenticated in the existing transcript, emitted only for
+this flow; ordinary invites omit it. The requester must match a live request
+and its exact child invite, and compare the authenticated peer UUID to the
+expected UUID when discovery supplied one. An unrelated invite cannot satisfy
+the request. Asking never automatically accepts a later invite or enters a PIN.
+The member-to-requester handoff still needs requester inbound reachability;
+failure is a connection failure, with no outbound-only transport fallback.
+
+Only the exact invitation's confirmed durable result can set local `paired`.
+Preserve wrong-PIN failure, awaiting-confirmation, rollback-pending, compensation,
+exact-admission mTLS pins and receipt recovery. Uncertain durable outcome blocks
+another request. The child invite retains its own existing TTL after handoff.
+Expiry/cancel fences late approval/ready and cancels/declines only the exact
+pending child through canonical helpers. Durable completion winning a cancel
+race reports that terminal outcome; never unpair completed membership. Members
+decline before handoff and use `cluster:cancel-invite` for the exact child after
+handoff; that cancellation also reconciles the request.
+
+Client detach never cancels manager-owned work. Requests are memory-only;
+restart invalidates them while existing durable receipt recovery remains.
+After lost status show: “Request status is no longer available. Check the cluster
+on both devices before trying again.” Read actual membership before a new attempt.
+Unknown local IDs use `-32001`, invalid state `-32002`, invalid params `-32602`,
+eligibility refusal `-32004` with a stable reason. Existing connection failure
+reasons apply. The generic broker relay preserves error code/message but drops
+error data; obtain eligibility reasons from the authoritative snapshot.
+
+Ask-to-join requires support at both endpoints. Old local method-not-found means
+unsupported; network failure never implies eligibility. Initial create HTTP 404
+maps to `unsupported-peer`; later status 404 means lost attempt. Never fall back
+to inviting a clustered peer or dissolve a solo before support and approval.
+Normal compatible invites retain their existing wire contract.
+
 ### 7.1 Local Interface (UI Broker ↔ Cluster Manager)
+
+The admission-request methods and full-snapshot notification in §7.0.1 use
+this same local channel and generic broker relay.
+
 - Transport: `stdin` / `stdout` (or a named pipe); JSON-RPC 2.0 **request/response** plus CM → Broker notifications.
 - **Inbound** (`stdin`): the requests in §7.0 (`cluster:get-node-id`, `cluster:set-identity`, `cluster:create`, `nodes:get-initial`, `cluster:invite-node`, `cluster:invite-status`, `cluster:respond-to-invite`, `cluster:cancel-invite`, `nodes:remove`, `log/set-level`).
 - **Outbound** (`stdout`): JSON-RPC results for each request; `cluster:invite-received` on each inbound invite; `cluster:invite-canceled` when the inviter cancels a pending inbound invite; `cluster:invite-declined` / `cluster:invite-failed` / `cluster:invite-expired` on the inviter when an outbound invite is declined / fails (e.g. wrong PIN) / times out, and `cluster:invite-expired` on the receiver when an unanswered inbound invite times out; `cluster:identity-changed` when a pairing changes the local `clusterId`; `nodes:changed` on each membership change (proposed).
@@ -320,6 +490,7 @@ Example `cluster:respond-to-invite` request (joiner submits the PIN) and result:
 ### 7.2 Inter-node Interface (Cluster Manager ↔ Cluster Manager)
 - Port `14321` (TCP), fixed on every node — all peers, whether resolved from discovery or Broker-supplied, are reached here. (`14318` node-info, `14319` errors, `14320` workload-manager are already taken.)
 - Traffic on this port is scoped by endpoint and pairing phase:
+  - **Admission requests** (`POST /v1/cluster/join-requests`) — unauthenticated plain HTTP with observed-source binding and the strict limits in §7.0.1; no membership, PIN or grant authority.
   - **Pairing channel** (`POST /v1/cluster/pairing`) — EAP exchanges and readiness polling use **plain HTTP**; authentication comes from EAP-NOOB plus the user-entered PIN. The negotiated `confirm` phase uses **HTTPS with the exact completed transcript certificates**, independently of ordinary membership pins, and authorizes only that invite's outcome. (Confidential transport for the EAP exchange alone would not rescue the low-entropy PIN against an active MITM — see §4 debt.)
   - **Trusted endpoints** (e.g. `POST /v1/cluster/members/remove`) — **HTTPS over mTLS**: the server presents this node's leaf cert (§7.4) and is configured `RequireAnyClientCert`. The request handler's `verifyClientPin` reads the **claimed UUID from the presented client cert's subject `CN` (and URI SAN, §7.4)**, looks up that UUID in the trusted-node store, and requires a **byte-for-byte DER match** against the pinned cert (TLS min 1.2). An unpinned or mismatched cert receives `403 Forbidden`; the TLS handshake requires a client certificate. Pairing-only confirmation uses its exact transcript gate instead of this membership-pin gate.
 
@@ -330,6 +501,10 @@ Example `cluster:respond-to-invite` request (joiner submits the PIN) and result:
 - `msg` is the opaque `Outcome.Send` blob from the `eap-noob` library, relayed verbatim; the receiver feeds it to its `Server`/`Peer` and returns that side's next `Outcome.Send` in the HTTP response. The legacy Completion *kickoff* uses an **empty string**. Readiness and confirmation controls omit the EAP blob.
 - **No out-of-band material is ever transmitted on this channel.** There is no `noob`/`peerId`/`hoob` field: the only OOB secret is the six-digit PIN, and it is human-carried. Each side already holds everything else — the `PeerId` is assigned during the Initial Exchange (the joiner records it from the negotiation message), and `Hoob` is recomputed locally from the transcript, so neither needs to be relayed. The joiner builds its EAP-NOOB OOB input entirely from local state + the typed PIN (§7.4).
 - **`PairingInfo` — the object each side puts in EAP-NOOB `ServerInfo` (inviter) / `PeerInfo` (joiner)** (identical schema both directions). It is folded into the `Hoob` fingerprint and the Completion `MACs`/`MACp` (`eap-noob/mac.go::noobArray`), so the cert and identity are cryptographically bound to the pairing (§7.4). Exact, fixed schema:
+
+  The optional `joinRequestId:string` is emitted only for ask-to-join (§7.0.1),
+  accepted by the strict decoder and authenticated with the other transcript
+  fields. Ordinary invites omit it and keep the shape shown below.
 ```json
 {
   "v": 2,

@@ -66,13 +66,11 @@ func (m *Manager) handleInviteNode(msg *Message) {
 		m.codec.RespondError(msg.ID, codeInternalError, "remote management unavailable for pairing")
 		return
 	}
-	port := m.port
 	if p.Port != nil {
 		if *p.Port < 1 || *p.Port > 65535 {
 			m.codec.RespondErrorData(msg.ID, codeInvalidParams, "port out of range", map[string]string{"field": "port"})
 			return
 		}
-		port = *p.Port
 	}
 	// A Broker-supplied address is tried first; the peer's own remaining
 	// addresses follow it as failover candidates, because the address any
@@ -84,32 +82,8 @@ func (m *Manager) handleInviteNode(msg *Message) {
 	// peer advertises for its cluster service, which is the only authority on
 	// where that peer listens; a caller-supplied port still overrides everything,
 	// and this node's own port is the last resort.
-	endpoints := make([]string, 0, 4)
-	seen := make(map[string]bool, 4)
-	addEndpoint := func(host string, p int) {
-		if host == "" || p < 1 || p > 65535 {
-			return
-		}
-		ep := net.JoinHostPort(host, strconv.Itoa(p))
-		if seen[ep] {
-			return
-		}
-		seen[ep] = true
-		endpoints = append(endpoints, ep)
-	}
-	addEndpoint(p.Address, port)
-	if p.NodeID != nil && m.browser != nil {
-		if resolved, mport, ok := m.browser.Resolve(*p.NodeID); ok {
-			discovered := port
-			if p.Port == nil && mport > 0 {
-				discovered = mport
-			}
-			for _, host := range resolved {
-				addEndpoint(host, discovered)
-			}
-		}
-	}
-	if len(endpoints) == 0 {
+	endpoints, endpointErr := m.inviteEndpoints(p.Address, p.Port, p.NodeID)
+	if endpointErr != nil {
 		m.codec.RespondErrorData(msg.ID, codeInvalidParams, "address is required (or a discoverable nodeId)",
 			map[string]string{"field": "address"})
 		return
@@ -171,12 +145,21 @@ func (m *Manager) handleInviteNode(msg *Message) {
 		return
 	}
 
-	sess, pin, err := m.pairAtFirstWorkingEndpoint(inviteID, endpoints, cid, sessGen0, *p.AllowRemoteManagement)
+	m.codec.Respond(msg.ID, m.completeInitialInvite(inviteID, endpoints, cid, sessGen0, *p.AllowRemoteManagement))
+}
+
+// completeInitialInvite is shared by normal invites and approved join requests.
+// The caller has published the exact pending invite before any network I/O.
+func (m *Manager) completeInitialInvite(inviteID string, endpoints []string, cid string, sessGen0 uint64, allowRemoteManagement bool) map[string]any {
+	sess, pin, err := m.pairAtFirstWorkingEndpoint(inviteID, endpoints, cid, sessGen0, allowRemoteManagement)
 	if err != nil {
 		var rej *pairingRejectedError
 		rejected := errors.As(err, &rej)
 		state := inviteStateFailed
 		reason := inviteFailureReason(err)
+		if errors.Is(err, errJoinRequestRedirect) {
+			reason = "redirect-refused"
+		}
 		if rejected {
 			state = inviteStateRejected
 			reason = rej.reason
@@ -205,19 +188,18 @@ func (m *Manager) handleInviteNode(msg *Message) {
 		case !applied:
 			log.Printf("invite %s: initial exchange ended (%v) after the pairing was abandoned; leaving the recorded state %q alone",
 				inviteID, err, recorded)
-			m.codec.Respond(msg.ID, map[string]any{"inviteId": inviteID, "state": abandonedState(recorded)})
+			return map[string]any{"inviteId": inviteID, "state": abandonedState(recorded)}
 		case rejected:
 			log.Printf("invite %s: rejected by peer (reason %q)", inviteID, rej.reason)
 			resp := map[string]any{"inviteId": inviteID, "state": inviteStateRejected}
 			if rej.reason != "" {
 				resp["reason"] = rej.reason
 			}
-			m.codec.Respond(msg.ID, resp)
+			return resp
 		default:
 			log.Printf("invite %s: initial exchange failed: %v", inviteID, err)
-			m.codec.Respond(msg.ID, map[string]any{"inviteId": inviteID, "state": inviteStateFailed, "reason": reason, "error": err.Error()})
+			return map[string]any{"inviteId": inviteID, "state": inviteStateFailed, "reason": reason, "error": err.Error()}
 		}
-		return
 	}
 
 	m.inviteMu.Lock()
@@ -232,13 +214,13 @@ func (m *Manager) handleInviteNode(msg *Message) {
 		// this node has left, or over a record the user has already terminated.
 		log.Printf("invite %s: abandoned during the initial exchange (recorded state %q); not publishing the PIN",
 			inviteID, recorded)
-		m.codec.Respond(msg.ID, map[string]any{"inviteId": inviteID, "state": abandonedState(recorded)})
-		return
+		return map[string]any{"inviteId": inviteID, "state": abandonedState(recorded)}
 	}
-	m.codec.Respond(msg.ID, map[string]any{"inviteId": inviteID, "state": inviteStatePending, "pin": pin})
 	if sess.completionMode == inviterCompletionV1 {
 		go m.driveOutboundCompletion(sess)
 	}
+	m.wakeJoinRequests()
+	return map[string]any{"inviteId": inviteID, "state": inviteStatePending, "pin": pin}
 }
 
 func (m *Manager) publishInitialInvite(inv *Invite, clusterID string) (uint64, bool) {
@@ -276,6 +258,7 @@ var errPairingAbandoned = errors.New("pairing abandoned: invite is no longer pen
 func (m *Manager) runInitialExchange(inviteID, target, cid0 string, sessGen0 uint64, allowRemoteManagement bool) (*pairingSession, string, error) {
 	myAddr := net.JoinHostPort(outboundIP(target), strconv.Itoa(m.port))
 	localInfo := m.localPairingInfo(myAddr)
+	localInfo.JoinRequestID = m.joinRequestForInvite(inviteID)
 	info, err := localInfo.toMap()
 	if err != nil {
 		return nil, "", fmt.Errorf("build pairing info: %w", err)
@@ -298,6 +281,9 @@ func (m *Manager) runInitialExchange(inviteID, target, cid0 string, sessGen0 uin
 	}
 
 	client := &http.Client{Timeout: pairingHTTPTimeout}
+	if localInfo.JoinRequestID != "" {
+		client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	}
 	blob, err := server.Start()
 	if err != nil {
 		return sess, "", fmt.Errorf("server start: %w", err)
@@ -335,6 +321,9 @@ func (m *Manager) runInitialExchange(inviteID, target, cid0 string, sessGen0 uin
 		return sess, "", err
 	}
 	sess.peerPairing, sess.peerCert = pi, cert
+	if !m.matchJoinRequestPeer(inviteID, pi) {
+		return sess, "", &pairingRejectedError{reason: "peer-mismatch"}
+	}
 	if pi.Completion == inviterCompletionV1 {
 		sess.completionMode = inviterCompletionV1
 	}
@@ -365,6 +354,9 @@ func postPairingBlob(client *http.Client, target, inviteID, phase string, blob [
 		return nil, err
 	}
 	defer resp.Body.Close()
+	if client.CheckRedirect != nil && resp.StatusCode >= 300 && resp.StatusCode < 400 {
+		return nil, errJoinRequestRedirect
+	}
 	rb, _ := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes))
 	if resp.StatusCode == http.StatusConflict {
 		// A 409 may be an explicit pairing refusal (rejected envelope with a
@@ -377,6 +369,9 @@ func postPairingBlob(client *http.Client, target, inviteID, phase string, blob [
 		}
 	}
 	if resp.StatusCode != http.StatusOK {
+		if client.CheckRedirect != nil {
+			return nil, fmt.Errorf("pairing %s: status %d", phase, resp.StatusCode)
+		}
 		return nil, fmt.Errorf("pairing %s: status %d: %s", phase, resp.StatusCode, string(rb))
 	}
 	var out pairingEnvelope

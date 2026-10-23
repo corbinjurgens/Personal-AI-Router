@@ -14,6 +14,9 @@ import type {
     ClusterNodeIdentity,
     Invite,
     InviteState,
+    JoinRequest,
+    JoinRequestsSnapshot,
+    JoinRequestState,
     MembershipState,
     RemoteManagementCapability,
     RemoteManagementSnapshot,
@@ -148,6 +151,125 @@ function exactFields(obj: JsonObject, fields: string[]): boolean {
         Object.keys(obj).length === fields.length &&
         fields.every(field => Object.hasOwn(obj, field))
     )
+}
+
+function joinRequestState(value: JsonValue | undefined): value is JoinRequestState {
+    switch (value) {
+        case 'awaiting-approval':
+        case 'awaiting-requester':
+        case 'pairing':
+        case 'paired':
+        case 'declined':
+        case 'canceled':
+        case 'expired':
+        case 'failed':
+        case 'rejected':
+            return true
+        default:
+            return false
+    }
+}
+
+function joinTimestamp(value: JsonValue | undefined): value is number {
+    return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
+}
+
+/** Reject malformed records rather than inventing an identity or successful state. */
+export function parseJoinRequest(value: JsonValue | undefined): JoinRequest {
+    const obj = objectValue(value)
+    if (
+        !obj ||
+        !exactFields(obj, [
+            'requestId',
+            'direction',
+            'peerNodeUuid',
+            'peerName',
+            'peerAddress',
+            'peerPort',
+            'state',
+            'inviteId',
+            'reason',
+            'createdAt',
+            'expiresAt'
+        ]) ||
+        typeof obj.requestId !== 'string' ||
+        obj.requestId === '' ||
+        (obj.direction !== 'incoming' && obj.direction !== 'outgoing') ||
+        typeof obj.peerNodeUuid !== 'string' ||
+        typeof obj.peerName !== 'string' ||
+        typeof obj.peerAddress !== 'string' ||
+        typeof obj.peerPort !== 'number' ||
+        !Number.isInteger(obj.peerPort) ||
+        obj.peerPort < 1 ||
+        obj.peerPort > 65535 ||
+        !joinRequestState(obj.state) ||
+        (obj.inviteId !== null && (typeof obj.inviteId !== 'string' || obj.inviteId === '')) ||
+        typeof obj.reason !== 'string' ||
+        !joinTimestamp(obj.createdAt) ||
+        !joinTimestamp(obj.expiresAt) ||
+        obj.expiresAt < obj.createdAt
+    ) {
+        throw new Error('Invalid join request response')
+    }
+    return {
+        requestId: obj.requestId,
+        direction: obj.direction,
+        peerNodeUuid: obj.peerNodeUuid,
+        peerName: obj.peerName,
+        peerAddress: obj.peerAddress,
+        peerPort: obj.peerPort,
+        state: obj.state,
+        inviteId: obj.inviteId,
+        reason: obj.reason,
+        createdAt: obj.createdAt,
+        expiresAt: obj.expiresAt
+    }
+}
+
+/** Malformed snapshots invalidate cached eligibility on reads and pushes alike. */
+export function parseJoinRequestsSnapshot(value: JsonValue | undefined): JoinRequestsSnapshot {
+    const unavailable: JoinRequestsSnapshot = {
+        supported: true,
+        canAskToJoin: false,
+        requiresSoloReplacement: false,
+        blockedReason: 'state-unavailable',
+        requests: []
+    }
+    const obj = objectValue(value)
+    if (
+        !obj ||
+        !exactFields(obj, [
+            'supported',
+            'canAskToJoin',
+            'requiresSoloReplacement',
+            'blockedReason',
+            'requests'
+        ]) ||
+        obj.supported !== true ||
+        typeof obj.canAskToJoin !== 'boolean' ||
+        typeof obj.requiresSoloReplacement !== 'boolean' ||
+        (obj.blockedReason !== '' &&
+            obj.blockedReason !== 'already-clustered' &&
+            obj.blockedReason !== 'pairing-busy' &&
+            obj.blockedReason !== 'state-unavailable') ||
+        obj.canAskToJoin !== (obj.blockedReason === '') ||
+        !Array.isArray(obj.requests)
+    )
+        return unavailable
+    try {
+        const requests = obj.requests.map(parseJoinRequest)
+        if (new Set(requests.map(request => request.requestId)).size !== requests.length)
+            return unavailable
+        return {
+            supported: true,
+            canAskToJoin: obj.canAskToJoin,
+            requiresSoloReplacement: obj.requiresSoloReplacement,
+            blockedReason: obj.blockedReason,
+            requests
+        }
+    } catch {
+        return unavailable
+    }
 }
 
 function boundedPayload(value: JsonValue | undefined, maxBytes: number): boolean {

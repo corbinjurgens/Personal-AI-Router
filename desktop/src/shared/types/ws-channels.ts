@@ -63,12 +63,16 @@ import type {
 import type { Workload } from '@/shared/types/workloads'
 import type {
     AvailableNode,
+    AskToJoinRequest,
     ClusterIdentityPayload,
     ClusterNode,
     Invite,
+    JoinRequest,
+    JoinRequestsSnapshot,
     RemoteManagementCapability,
     RemoteManagementSetRequest,
-    RemoteManagementSnapshot
+    RemoteManagementSnapshot,
+    RespondToJoinRequest
 } from '@/shared/types/cluster'
 
 // -----------------------------------------------------------------------------
@@ -104,6 +108,10 @@ export interface WsInvokeChannelMap {
 
     // Cluster — PIN-pairing handshake (nvpair-cluster-manager)
     'cluster:get-initial': { request: void; response: ClusterInitialSnapshot }
+    'cluster:get-join-requests': { request: void; response: JoinRequestsSnapshot }
+    'cluster:ask-to-join': { request: AskToJoinRequest; response: JoinRequest }
+    'cluster:respond-to-join-request': { request: RespondToJoinRequest; response: JoinRequest }
+    'cluster:cancel-join-request': { request: { requestId: string }; response: JoinRequest }
     'cluster:invite-node': {
         request: { ipAddress: string; allowRemoteManagement: boolean }
         response: Invite
@@ -173,6 +181,7 @@ export type WsInvokeResponse<C extends WsInvokeChannel> = WsInvokeChannelMap[C][
 // -----------------------------------------------------------------------------
 
 export interface WsPushChannelMap {
+    'cluster:join-requests-changed': JoinRequestsSnapshot
     'cluster:remote-management-changed': RemoteManagementSnapshot
     // Nodes / cluster state
     'nodes:upsert': NodeItem

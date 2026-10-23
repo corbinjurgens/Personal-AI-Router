@@ -1261,7 +1261,7 @@ Relayed to `nvpair-manual-nodes`. `node/add` (`{ address, name?, tls_port?, mtls
 
 #### `cluster:<method>` / `nodes:<method>` (generic relay)
 
-Requests whose method starts with `cluster:` or `nodes:` are **forwarded to `nvpair-cluster-manager`** verbatim (no prefix stripping — these are the manager's own native namespaces), and the manager's result or JSON-RPC error is relayed straight back to the caller unchanged. The private `cluster:set-local-services` method is excluded: client requests receive method-not-found and client notifications are discarded. Current public methods include `cluster:get-node-id`, `cluster:set-identity`, `cluster:create`, `cluster:invite-node`, `cluster:respond-to-invite`, `cluster:cancel-invite`, `cluster:invite-status`, `nodes:get-initial`, and `nodes:remove` (see the [`nvpair-cluster-manager` README](../nvpair-cluster-manager/README.md) for their params/results and app-defined error codes).
+Requests whose method starts with `cluster:` or `nodes:` are **forwarded to `nvpair-cluster-manager`** verbatim (no prefix stripping — these are the manager's own native namespaces). Results and error code/message return unchanged; error `data` is omitted. The private `cluster:set-local-services` method is excluded: client requests receive method-not-found and client notifications are discarded. Public methods include `cluster:get-node-id`, `cluster:set-identity`, `cluster:create`, `cluster:invite-node`, `cluster:respond-to-invite`, `cluster:cancel-invite`, `cluster:invite-status`, the join-request methods below, `nodes:get-initial`, and `nodes:remove` (see the [`nvpair-cluster-manager` README](../nvpair-cluster-manager/README.md) for their params/results and app-defined error codes).
 
 The broker sends `cluster:set-local-services` only down the child's stdio link,
 with `{"generation":UINT64,"services":[noderec.RegisterParams,...]}`. This is an
@@ -1275,7 +1275,29 @@ registration/shutdown. Cluster-manager owns the listener protocol classification
 the broker supplies no user-selected TLS policy and does not infer it from
 discovery transport labels. This metadata has no desktop consumer.
 
-The cluster-manager also pushes notifications (`cluster:invite-received`, `cluster:invite-canceled`, `cluster:identity-changed`, `nodes:changed`, ...); the broker forwards them to the caller verbatim. Unlike `ollama-proxy:<event>` / `workloads:*` these are **not opt-in** — there is no `cluster:subscribe`; the events always flow.
+The cluster-manager also pushes notifications (`cluster:invite-received`, `cluster:invite-canceled`, `cluster:identity-changed`, `cluster:join-requests-changed`, `nodes:changed`, ...); the broker forwards them to the caller verbatim. Unlike `ollama-proxy:<event>` / `workloads:*` these are **not opt-in** — there is no `cluster:subscribe`; the events always flow.
+
+Ask-to-join uses the same generic production relay, without broker-owned
+admission logic. `cluster:get-join-requests {}` returns the complete
+`{supported:true, canAskToJoin, requiresSoloReplacement, blockedReason, requests}`
+snapshot; `cluster:join-requests-changed` carries that same snapshot.
+`cluster:ask-to-join {address, port?, nodeId?, replaceSoloCluster:boolean}`,
+`cluster:respond-to-join-request {requestId, accept:true, allowRemoteManagement:boolean}`
+(or `{requestId, accept:false}`) and
+`cluster:cancel-join-request {requestId}` return the exact manager `JoinRequest`.
+The request ID and nullable child invite ID are distinct. No subscription is
+required; attached clients can recover pending requests with the getter.
+
+The broker preserves manager error code/message, including `-32001` unknown ID,
+`-32002` invalid state, `-32602` invalid params, `-32004` eligibility refusal
+and old-service `-32601`. The existing generic relay drops error `data`;
+clients read eligibility reasons from the authoritative snapshot. The broker
+never polls peer HTTP, approves a request, replaces a solo cluster or owns
+pairing cryptography.
+Member PIN retrieval stays local via the exact pending `cluster:invite-status`;
+request snapshots/events contain none. The manager owns limits, source binding,
+consent, restart invalidation and durable outcome. See its
+[admission-request contract](../nvpair-cluster-manager/spec.md#701-ask-to-join-admission-requests).
 
 If no cluster-manager is being supervised (or it has exited), the broker replies with error `-32000` `"nvpair-cluster-manager not available"`. Because pairing calls drive multi-round-trip inter-node network exchanges, the relay's per-call timeout is 30 s (vs. the proxy's 5 s).
 
