@@ -34,6 +34,9 @@ navigation:
       - page: Engine Settings
         path: ../docs/engine-settings.mdx
         slug: engine-settings
+      - page: Node Availability
+        path: ../docs/node-availability.mdx
+        slug: node-availability
       - page: Prepared Strata Runtime
         path: ../docs/strata.mdx
         slug: strata

@@ -247,25 +247,28 @@ Each entry assumes the ones before it.
 4. **[Engine settings](docs/engine-settings.mdx)** — change an engine's ports and
    its launch command, on this machine or a paired one, and give a browser access
    to your models.
-5. **[Prepared Strata runtime](docs/strata.mdx)** — point PAIR at a Strata
+5. **[Node availability](docs/node-availability.mdx)** — what Pause, Resume and
+   an engine lock do, what a paired device can and cannot change while they are
+   in force, and how peers learn a node is paused.
+6. **[Prepared Strata runtime](docs/strata.mdx)** — point PAIR at a Strata
    installation you prepared by hand, and what is and is not supported for it.
    Optional; skip it unless you run Strata.
-6. **[Terminal interface](docs/terminal-interface.mdx)** — the same tasks from a
+7. **[Terminal interface](docs/terminal-interface.mdx)** — the same tasks from a
    terminal, for a machine with no desktop environment. Skip it if every machine
    you run has a desktop.
-7. **[Troubleshooting](docs/troubleshooting.mdx)** — worth skimming once before
+8. **[Troubleshooting](docs/troubleshooting.mdx)** — worth skimming once before
    you need it, so you know where the diagnostics live. Alongside it,
    **[Known issues](docs/known-issues.mdx)** lists the significant limitations we
    are already aware of, and
    **[Collecting and sanitizing logs](docs/log-collection.mdx)** covers preparing
    a log you can share.
-8. **[Architecture](docs/architecture.mdx)** — the process model, how a request is
+9. **[Architecture](docs/architecture.mdx)** — the process model, how a request is
    routed, and where the trust boundaries are. Read this before changing
    anything, or if you want to know why PAIR behaves the way it does.
-9. **[Building and running](docs/building.mdx)** — prerequisites, building from
+10. **[Building and running](docs/building.mdx)** — prerequisites, building from
    source, running the services without the desktop application, and writing
    your own client against the JSON-RPC API.
-10. **[Developer guide](docs/developing.mdx)** — read this before contributing:
+11. **[Developer guide](docs/developing.mdx)** — read this before contributing:
    where the code lives, how a change travels through the layers, and the
    conventions the project enforces.
 
