@@ -85,6 +85,7 @@ func TestE2ELlamaCPPPullRemoteDisconnectStopsDownload(t *testing.T) {
 		writeE2EManifest(t, dir, manifest)
 	}
 	manager := startE2EManager(t, cfg, home, "--control-port", strconv.Itoa(controlPort), "--cluster-dir", serverDir, "--loaded-poll-interval", "0")
+	notify(t, manager.stdin, nodeProjectionMethod, nodeProjection{ManagementBlocked: false})
 	// The fake router is already listening. Start adopts it using its readiness
 	// probe; the child never spawns a real engine or another fake listener.
 	send(t, manager.stdin, 1, "engine:start", map[string]string{"engine": "fake"})

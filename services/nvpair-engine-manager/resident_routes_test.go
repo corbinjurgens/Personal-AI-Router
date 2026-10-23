@@ -81,6 +81,7 @@ func TestResidentRoutesPermissionAndCaller(t *testing.T) {
 				}
 				return json.RawMessage(`{"ok":true}`), nil
 			}}
+			exec.nodeProjection.set(nodeProjection{ManagementBlocked: false})
 			f := newRemoteReverseFixture(t, func(mesh *clustertrust.Mesh) http.Handler {
 				return (&controlServer{exec: exec, mesh: mesh}).mux()
 			})
