@@ -8,8 +8,12 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"runtime"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"nvpair-shared/nodepolicy"
@@ -171,4 +175,100 @@ func TestPeerPauseProjectionCancelsActivation(t *testing.T) {
 			t.Fatalf("local stop while paused: %v", err)
 		}
 	})
+}
+
+// TestPauseDuringAdoptionProbeRefusesLocalStart holds an explicit local Start
+// at its external-engine identity probe, lets the pause projection win the
+// gate before any cancellation is delivered, and releases the probe. The start
+// must refuse with the pause code, publish no running state and save no On.
+func TestPauseDuringAdoptionProbeRefusesLocalStart(t *testing.T) {
+	for _, origin := range []string{"local", "peer"} {
+		t.Run(origin+" pause", func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(http.StatusOK)
+			}))
+			t.Cleanup(server.Close)
+			u, err := url.Parse(server.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			port, err := strconv.Atoi(u.Port())
+			if err != nil {
+				t.Fatal(err)
+			}
+			manifest := testEngineManifest(fakeEngineBin)
+			key := runtime.GOOS + "/" + runtime.GOARCH
+			platform := manifest.Platforms[key]
+			platform.Runtime.Port = port
+			platform.Runtime.Ready = &Probe{HTTP: server.URL + "/", Status: http.StatusOK}
+			platform.Runtime.Health = nil
+			manifest.Platforms[key] = platform
+			ex := newTestExecutor(t, manifest)
+			ex.nodeProjection.set(nodeProjection{ManagementBlocked: false})
+			var runningEvents atomic.Int32
+			ex.emit = func(method string, value any) {
+				if status, ok := value.(EngineStatus); ok && method == "engine:state-changed" && status.Running {
+					runningEvents.Add(1)
+				}
+			}
+
+			pauseOrigin := nodepolicy.PausedByPeer
+			if origin == "local" {
+				pauseOrigin = nodepolicy.PausedLocally
+			}
+			probed := make(chan struct{})
+			release := make(chan struct{})
+			var releaseOnce sync.Once
+			releaseProbe := func() { releaseOnce.Do(func() { close(release) }) }
+			t.Cleanup(releaseProbe)
+			ex.client.Transport = &crashReadyTransport{base: ex.client.Transport, ready: func() {
+				// Store the pause without delivering cancellation: the interval
+				// before applyNodeProjection reaches the start's cancel func.
+				ex.nodeProjection.set(nodeProjection{
+					PausedLocally:     origin == "local",
+					ManagementBlocked: true,
+					Policy:            nodepolicy.Advertisement{PausedBy: pauseOrigin},
+				})
+				close(probed)
+				<-release
+			}}
+			started := make(chan error, 1)
+			go func() { started <- ex.Start(context.Background(), "fake") }()
+			awaitLockCondition(t, "identity probe", func() bool {
+				select {
+				case <-probed:
+					return true
+				default:
+					return false
+				}
+			})
+			releaseProbe()
+			if err := awaitLockCommand(t, started); rpcCode(err) != -32011 {
+				t.Fatalf("start after pause won the probe = %v, want -32011", err)
+			}
+			st, err := ex.state("fake")
+			if err != nil {
+				t.Fatal(err)
+			}
+			st.mu.Lock()
+			running, adopted, healthy, proc := st.running, st.adopted, st.healthy, st.proc
+			st.mu.Unlock()
+			if running || adopted || healthy || proc != nil {
+				t.Fatalf("refused adoption published state: running=%v adopted=%v healthy=%v proc=%p", running, adopted, healthy, proc)
+			}
+			if count := runningEvents.Load(); count != 0 {
+				t.Fatalf("refused adoption published %d running events", count)
+			}
+			if enabled, known, err := ex.desired.get("fake"); err != nil || (known && enabled) {
+				t.Fatalf("pause accepted late On: %v, %v, %v", enabled, known, err)
+			}
+			response, err := http.Get(server.URL)
+			if err != nil {
+				t.Fatalf("external listener was disturbed: %v", err)
+			}
+			if err := response.Body.Close(); err != nil {
+				t.Fatalf("close external listener response: %v", err)
+			}
+		})
+	}
 }

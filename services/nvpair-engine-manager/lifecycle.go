@@ -185,8 +185,12 @@ func (e *Executor) doStart(ctx context.Context, st *engineState, engine string, 
 	st.mu.Lock()
 	fenced, reclaimPID := st.reclaimFailed, st.reclaimPID
 	st.mu.Unlock()
-	presence := e.reconcilePresence(ctx, engine, st, pathInstalled, port, true)
+	presence := e.reconcilePresence(activationAdoptionContext(ctx), engine, st, pathInstalled, port, true)
 	if err := ctx.Err(); err != nil {
+		return err
+	}
+	// A pause that landed while the identity probe ran refused its adoption.
+	if err := e.activationVeto(engine); err != nil {
 		return err
 	}
 	if fenced && (presence.Occupied || !orphanPIDExited(reclaimPID)) {

@@ -247,11 +247,13 @@ func (e *Executor) reconcilePresence(ctx context.Context, engine string, st *eng
 	}
 
 	// A successful probe is not permission to publish an adoption after its
-	// caller was cancelled. Order automatic adoption against pause just like
-	// owned readiness; the external listener is never stopped on refusal.
+	// caller was cancelled. Order activation-owned adoption (automatic recovery
+	// and explicit start) against pause just like owned readiness; the external
+	// listener is never stopped on refusal. Passive status checks and cleanup
+	// reconciliation keep adopting so reporting and stop stay truthful.
 	e.nodeProjection.mu.Lock()
 	st.mu.Lock()
-	if ctx.Err() != nil || (automaticCrashRelaunch(ctx) && e.nodeProjection.projection != nil && e.nodeProjection.projection.ManagementBlocked) {
+	if ctx.Err() != nil || ((automaticCrashRelaunch(ctx) || activationAdoption(ctx)) && e.nodeProjection.projection != nil && e.nodeProjection.projection.ManagementBlocked) {
 		st.mu.Unlock()
 		e.nodeProjection.mu.Unlock()
 		return presenceResult{Occupied: true}

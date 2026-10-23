@@ -150,6 +150,19 @@ func (e *Executor) remoteVeto(engine string) error {
 	return nil
 }
 
+type activationAdoptionKey struct{}
+
+// activationAdoptionContext marks ctx as owned by an explicit activation, so a
+// pause that wins the projection gate refuses its adoption of a running
+// external engine.
+func activationAdoptionContext(ctx context.Context) context.Context {
+	return context.WithValue(ctx, activationAdoptionKey{}, struct{}{})
+}
+
+func activationAdoption(ctx context.Context) bool {
+	return ctx.Value(activationAdoptionKey{}) != nil
+}
+
 func (e *Executor) activationVeto(engine string) error {
 	if blocked, known := e.nodeProjection.managementBlocked(); known && blocked {
 		return &localVetoError{code: codeLocalVeto, reason: nodePausedVeto}
