@@ -229,21 +229,38 @@ content qualification or live-host acceptance.
 
 For family `strata`, `runtime.serving` activates a narrow adapter for the native
 config and server argument semantics inspected at `corbinjurgens/Strata`
-`f6726098`. It requires one exact model, an owned Python process, absolute Python,
+`f6726098`, extended to the profile its current `main` (`0e70753c`) generates
+(see the extension below). It requires one exact model, an owned Python process, absolute Python,
 server and config paths, `--engine strata`, loopback host, explicit port and
 `--lazy`. Python switches, abbreviated/unknown/duplicate server options and
 inherited or explicit `STRATA_*`/`PYTHON*` overrides are rejected.
 
-The flat JSON config accepts only `exe`, `args`, `cwd`, `tokenizer`, `model_name`,
-`parallel`, `lib_dirs` and `idle_unload_s`. Duplicate keys, nulls and unknown
-fields fail closed. Context is an explicit positive `--max-context` per slot;
-`parallel` must be in 1..8. Explicit `--batch` or `--slots` must agree with
-parallel and be at least two; otherwise the server supplies parallelism.
-Total context is context times slots, checked against int32 overflow. Output
-must fit strictly below per-slot context. `--serve`, `--native`, `--pack`, fixed
-positive `--prefill`/`--expert-cache` and `--spec` in 2..8 are required. Optional
-`--vram-reserve-mib` is positive opaque placement. Automatic fitting, clamping,
-other native options, hooks and alternate Python/native modes are unsupported.
+The flat JSON config accepts `exe`, `args`, `cwd`, `tokenizer`, `model_name`,
+`parallel`, `lib_dirs` and `idle_unload_s`, and the fields the fork generates:
+`log`, `env`, `gpu` and `fit_max_tokens` are validated and forwarded in the
+snapshot; `build_metadata`, `gpus_asked`, `port`, `host` and `open_browser` are
+validated and not forwarded, because the server reads none of them or takes the
+command line, which PAIR owns. `host` must be `127.0.0.1`, `port` in 1..65535,
+`open_browser` false, `gpu` a small non-negative index. `log` is an absolute
+clean path in an existing directory and never a declared input. `env` is a closed
+allow-list of `STRATA_RESIDENT_HEADROOM_GIB`, `STRATA_FILE_CACHE_MIB`,
+`STRATA_FILE_CACHE_COMPACT` and `STRATA_OWNED_PRICE`, each with its value syntax,
+listed in the approved placement as `env:NAME=value`. Duplicate keys (compared
+ignoring case, also inside `env`), nulls and unknown fields fail closed;
+`api_key` and `memory_policy` are unknown fields, so authentication and the
+automatic memory policy stay rejected. Context is an explicit positive
+`--max-context` per slot; `parallel` must be in 1..8. Explicit `--batch` or
+`--slots` must agree with parallel and be at least two; otherwise the server
+supplies parallelism. Total context is context times slots, checked against int32
+overflow. Output must fit strictly below per-slot context. `--native`, `--pack`,
+fixed positive `--prefill`/`--expert-cache` and `--spec` in 2..8 are required.
+`--serve` may appear once or be omitted, because the server prepends it. Optional
+placement is `--vram-reserve-mib` and `--kv-resident` (positive), `--kv` (one of
+`fp16`, `int8`, `q4_0`, `q4`, `k8v4`), `--resident-budget-gib` (a positive plain
+decimal up to 4096), the value-less `--no-prefill-borrow`, and `--suffix-draft`
+or `--lookup-chain` only as an explicit `0`. Automatic fitting (`auto` cache or
+prefill), clamping, other native options, hooks and alternate Python/native modes
+are unsupported.
 
 Every selected GGUF shard, pack/draft file, profile, tokenizer file, Python
 executable, server script, config and native executable must have a matching
@@ -261,8 +278,14 @@ identity, rejecting files changed during preparation without rehashing.
 
 Pack enumeration is fixed: `index.txt`, `dense.bin`, `experts.bin`; draft uses
 `dense.txt`, `dense.bin`, `experts.bin`. Existing `embd.bin`, `extra.bin`,
-`manifest.json` and `draft_vocab.bin` are also bound. `native_experts.txt`
-indirection is unsupported and rejected. Tokenizer enumeration requires
+`manifest.json` and `draft_vocab.bin` are also bound. A main pack that has
+`native_experts.txt` and no `experts.bin` (the fork packer's usual output) binds
+the table as a pack file instead: a `v3` or `v4` header, then layer lines from
+zero with eight unsigned numbers and an optional shard column (one name, or for
+`v4` a gate,up,down list). Each named shard must be a plain `.gguf` name resolved
+beside the first `--native` shard and a declared model artifact. Both the table
+and `experts.bin` together are rejected as an ambiguous expert source, and a
+table in the draft pack is unsupported. Tokenizer enumeration requires
 `vocab.json`, `merges.txt`, `token_type.json` and `chat_template.jinja`.
 `cwd`, tokenizer and each `lib_dirs` entry must be absolute existing directories.
 The hashed config binds the library directory list; directories are never
