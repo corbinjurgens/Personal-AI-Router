@@ -35,6 +35,7 @@ func TestRemotePolicyRelaysRolesUnchanged(t *testing.T) {
 	var mu sync.Mutex
 	var relayed []policyBody
 	exec := &Executor{progress: newProgressHub()}
+	exec.nodeProjection.set(nodeProjection{ManagementBlocked: false})
 	exec.policyParent = func(_ context.Context, method string, params json.RawMessage, _ string) (json.RawMessage, error) {
 		var p policyBody
 		if err := json.Unmarshal(params, &p); err != nil {

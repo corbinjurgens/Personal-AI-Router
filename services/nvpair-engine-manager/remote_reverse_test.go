@@ -287,6 +287,7 @@ func TestRemoteReverseReadsAndEveryControlRoute(t *testing.T) {
 
 func TestRemoteReverseSafeStopAndSettingsPolicyOwners(t *testing.T) {
 	exec := settingsExecutor(t, false)
+	exec.nodeProjection.set(nodeProjection{ManagementBlocked: false})
 	var mu sync.Mutex
 	settingsCalls, policyCalls := map[string]int{}, map[string]int{}
 	exec.settingsParent = func(_ context.Context, method string, p settings.Request, caller string) (json.RawMessage, error) {
