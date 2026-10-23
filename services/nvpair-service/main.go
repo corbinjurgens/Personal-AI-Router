@@ -11,6 +11,7 @@
 //
 //	nvpair-service [flags] [-- broker args]
 //	nvpair-service status
+//	nvpair-service diagnose [--json]
 //	nvpair-service stop
 //	nvpair-service autostart enable [flags] [-- broker args]
 //	nvpair-service autostart disable|status
@@ -53,6 +54,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 			return 0
 		case "status":
 			return runStatus(stdout, stderr)
+		case "diagnose":
+			return runDiagnose(args[1:], stdout, stderr)
 		case "stop":
 			return runStop(stdout, stderr)
 		case "call":
@@ -106,6 +109,7 @@ func newRunFlags(stderr io.Writer) (*flag.FlagSet, *runOptions, func() slog.Leve
 	fs.Usage = func() {
 		fmt.Fprintln(stderr, "usage: nvpair-service [flags] [-- broker args]")
 		fmt.Fprintln(stderr, "       nvpair-service status | stop")
+		fmt.Fprintln(stderr, "       "+diagnoseUsage)
 		fmt.Fprintln(stderr, "       nvpair-service autostart enable [--systemd] [flags] [-- broker args] | disable | status")
 		fs.PrintDefaults()
 	}

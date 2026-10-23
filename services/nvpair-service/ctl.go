@@ -112,10 +112,8 @@ func callRunningServiceWith(ctx context.Context, method string, params json.RawM
 		return nil, err
 	}
 	defer conn.Close()
-	go func() {
-		<-ctx.Done()
-		_ = conn.Close()
-	}()
+	stop := context.AfterFunc(ctx, func() { _ = conn.Close() })
+	defer stop()
 
 	req, _ := json.Marshal(&jsonrpc.Message{JSONRPC: "2.0", ID: rawID(1), Method: method, Params: params})
 	if _, err := conn.Write(append(req, '\n')); err != nil {
@@ -135,6 +133,9 @@ func callRunningServiceWith(ctx context.Context, method string, params json.RawM
 	}
 	if ctx.Err() != nil {
 		return nil, fmt.Errorf("%s: %w", method, ctx.Err())
+	}
+	if err := sc.Err(); errors.Is(err, bufio.ErrTooLong) {
+		return nil, fmt.Errorf("%s: a frame from the service exceeds %d bytes: %w", method, jsonrpc.WorkerFrameBytes, err)
 	}
 	return nil, fmt.Errorf("%s: connection closed before the service answered", method)
 }

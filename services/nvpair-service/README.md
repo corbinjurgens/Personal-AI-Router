@@ -45,6 +45,7 @@ nvpair-service                              # serve; broker found beside this bi
 nvpair-service --log-level debug            # also passed to the broker
 nvpair-service -- --proxy-engines ollama    # everything after -- goes to the broker
 nvpair-service status                       # print service/status of the running service
+nvpair-service diagnose [--json]            # bounded local report; see Diagnosis
 nvpair-service call <method> [json-params]  # send any request through the service and print the result
 nvpair-service stop                         # service/stop: stop the broker cleanly, then exit
 nvpair-service --version
@@ -63,6 +64,126 @@ A set without the field is refused with `-32602`. A set whose revision is no
 longer the persisted one is refused with a `policy conflict:` error that names
 the current revision and changes nothing; call `policy:get` again, review the
 policy and resubmit.
+
+### Diagnosis
+
+```sh
+nvpair-service diagnose          # readable report
+nvpair-service diagnose --json   # the same report as JSON
+```
+
+`diagnose` answers common local support questions without printing the policy
+document. It dials the running service and never starts one. Within one
+five-second deadline it reads, in this order and nothing else:
+
+1. `service/status`;
+2. the local `policy:get` with empty params (no `nodeId`, so nothing is relayed
+   to a peer);
+3. `<engine>-proxy:get-status` for each built-in engine facade, in the order of
+   the shared engine table;
+4. `policy:get` and `service/status` again, as end-of-capture checks.
+
+Each of these answers from state the service and broker already hold. The
+command sends no inference, wakes no engine, probes no peer, subscribes to
+nothing and changes no configuration. It reports only validated, allowlisted
+fields: never the policy's routing or provider configuration, credential
+references, error text, model identifiers, paths, hostnames or addresses.
+`call policy:get` prints the complete policy, including its private routing
+configuration.
+
+| Section | Fields when `known` |
+|---|---|
+| `service` | `pid`, `brokerPid` (`0` while no broker runs), `brokerRestarts`, `version` and `buildId` when they are plain identifiers |
+| `policy` | `persistedRevision`, `activeRevision` (absent when the proxy has activated none), `activation` (`active`, `pending` or `error`), `availability` (`available`, `draining` or `paused`), `recoveryRequired` |
+| `builtinFacades` | Per engine: `ready`, and `port` when ready. The port is the one the facade actually bound, which can differ from the engine's stock port |
+| `residentConfiguration` | `stateCounts` and `reasonCounts` over the accepted `modelConfiguration` entries |
+
+Every section has a `status`: `known`, `not-running`, `unavailable` (the read
+failed or the deadline ended first), `invalid` (the answer was malformed,
+oversized or outside the accepted values) or `changed-during-capture`. A
+field is present only while its section is `known`; missing values are never
+shown as `false` or `0`. Unknown fields in an answer are discarded.
+`modelConfiguration` is accepted only through its own strict decoder, so an
+unknown field inside it makes the section `invalid`.
+
+The JSON report is a command result with `"schema": 1`, not a broker wire. It
+always carries `"snapshotAtomic": false`, `"inferenceProbed": false` and
+`"peerConnectivityProbed": false`, and the text report ends with
+`Inference and peer connectivity were not tested.`
+
+| Exit | Meaning |
+|---|---|
+| `0` | Complete capture: every section `known` and the end-of-capture checks matched. Paused, pending, error and recovery states are complete captures |
+| `1` | Incomplete capture: a section is not `known`, an end-of-capture check could not be read, or a checked value changed. The service vanishing after the first read is also `1` |
+| `2` | Invalid arguments; nothing is dialed |
+| `3` | No service answered the first dial; nothing else is read |
+
+The capture is not a transaction and is never retried. The end-of-capture
+checks compare the service and broker process ids, `brokerRestarts` and
+`buildId`; the policy's revisions, `activation`, `availability` and
+`recoveryRequired`; and `modelConfiguration`'s `policyRevision` and
+`observationGeneration`. A change marks the sections that depend on it
+`changed-during-capture`: a service or broker change marks every section. A
+match shows only that those fields did not change, so `snapshotAtomic` stays
+`false`.
+
+Limits of what it reports:
+
+- Only the built-in facades are listed; facades of engines defined only by a
+  descriptor are not.
+- A facade bound on a port is not evidence that an engine or model behind it
+  can answer inference. No URL is printed for that reason.
+- A `satisfied` resident entry describes an observed load, not a successful
+  inference request.
+- It does not diagnose peer reachability, firewalls, VPNs or provider
+  credentials, and it keeps no history.
+
+A node with a pending policy activation, running on the recovery policy, with
+Ollama's facade relocated to another port (synthetic values):
+
+```text
+PAIR service diagnosis (cached local state)
+Service: known
+  pid 4242, broker pid 4243, broker restarts 0
+  version 0.2.0, build git:0123456789abcdef0123456789abcdef01234567
+Policy: known
+  persisted revision 1792285135482000000, active revision 1792285135481000000, activation pending
+  availability available, recovery required yes
+Built-in facades:
+  Ollama: known, bound on port 11500
+  LM Studio: known, not bound
+  llama.cpp: known, not bound
+Resident configuration: known
+  states: blocked 1
+  reasons: no-fit 1
+Capture: complete. Not an atomic snapshot: the start and end checks show only that the compared fields did not change.
+A bound facade port does not show that an engine or model can answer.
+Inference and peer connectivity were not tested.
+```
+
+The same capture with `--json`:
+
+```json
+{
+  "schema": 1,
+  "complete": true,
+  "snapshotAtomic": false,
+  "inferenceProbed": false,
+  "peerConnectivityProbed": false,
+  "service": {"status": "known", "pid": 4242, "brokerPid": 4243, "brokerRestarts": 0, "version": "0.2.0", "buildId": "git:0123456789abcdef0123456789abcdef01234567"},
+  "policy": {"status": "known", "persistedRevision": "1792285135482000000", "activeRevision": "1792285135481000000", "activation": "pending", "availability": "available", "recoveryRequired": true},
+  "builtinFacades": [
+    {"engine": "ollama", "status": "known", "ready": true, "port": 11500},
+    {"engine": "lmstudio", "status": "known", "ready": false},
+    {"engine": "llamacpp", "status": "known", "ready": false}
+  ],
+  "residentConfiguration": {"status": "known", "stateCounts": {"blocked": 1}, "reasonCounts": {"no-fit": 1}}
+}
+```
+
+The command prints this JSON indented one field per line. When the broker
+restarts during the capture, every section reads `changed-during-capture`,
+`complete` is `false` and the exit status is `1`; run the command again.
 
 Clients normally start it themselves: `servicectl.ConnectOrStart` dials the
 endpoint and, when nothing answers, starts the service detached — its own
@@ -305,7 +426,9 @@ brokers (multiplexing, id remapping, broadcast, `app:ready` replay, subscription
 baselines, unsubscribe and shutdown handling, broker restart, clean and forced
 stop, single instance, stale sockets, slow clients, and log rotation), plus one
 test that runs the real exec-based spawner against the test binary acting as a
-broker.
+broker. The `diagnose` tests drive the command through an injected caller and
+through a scripted listener on a private endpoint in the test process; they
+start no service, broker or other process.
 
 ### Real-service lifecycle and policy integration
 
