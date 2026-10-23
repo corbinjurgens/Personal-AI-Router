@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"nvpair-shared/engines"
+	settings "nvpair-shared/enginesettings"
 )
 
 // TestClusterManagerConfigDirTracksBrokerClusterDir pins the invariant that keeps
@@ -36,10 +37,7 @@ func TestClusterManagerConfigDirTracksBrokerClusterDir(t *testing.T) {
 }
 
 func TestEngineAvailabilityWaitsForBothProxyOutcomes(t *testing.T) {
-	engineClient, engineServer := net.Pipe()
-	defer engineClient.Close()
-	defer engineServer.Close()
-	engine := &rpcWorker{peer: NewPeer(NewCodec(engineClient))}
+	engine, codec := newTestRPCWorkerPipe(t)
 
 	b := &Broker{
 		clusterDir:        filepath.Join(t.TempDir(), "cluster"),
@@ -47,27 +45,7 @@ func TestEngineAvailabilityWaitsForBothProxyOutcomes(t *testing.T) {
 		lmstudioPortReady: make(chan struct{}),
 	}
 	b.setEngineMgr(engine)
-	go engine.peer.Serve(nil, nil)
-
-	restore := make(chan string, 1)
-	go func() {
-		codec := NewCodec(engineServer)
-		for {
-			msg, err := codec.Read()
-			if err != nil {
-				return
-			}
-			if msg.Method == "engine:switch-prepare" {
-				if err := codec.Respond(msg.ID, emptySwitchManagerSnapshot()); err != nil {
-					t.Error(err)
-					return
-				}
-				continue
-			}
-			restore <- msg.Method
-			return
-		}
-	}()
+	restore := recordEnabledEngineRestoration(t, codec)
 	advertised := make(chan string, 3)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -98,13 +76,15 @@ func TestEngineAvailabilityWaitsForBothProxyOutcomes(t *testing.T) {
 	}
 	close(b.lmstudioPortReady)
 
-	select {
-	case got := <-restore:
-		if got != restoreEnabledEnginesMethod {
-			t.Fatalf("restore method = %q, want %q", got, restoreEnabledEnginesMethod)
+	for _, want := range []string{engineNodeProjectionMethod, settings.SwitchPrepareMethod, restoreEnabledEnginesMethod} {
+		select {
+		case got := <-restore:
+			if got != want {
+				t.Fatalf("restoration method = %q, want %q", got, want)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("%s did not run after both proxy outcomes", want)
 		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("enabled-engine restore did not run after both proxy outcomes")
 	}
 	seen := map[string]bool{}
 	for len(seen) < 3 {
@@ -115,8 +95,13 @@ func TestEngineAvailabilityWaitsForBothProxyOutcomes(t *testing.T) {
 			t.Fatalf("advertising did not start for every engine: %v", seen)
 		}
 	}
-	if !<-done {
-		t.Fatal("availability orchestration reported cancellation")
+	select {
+	case completed := <-done:
+		if !completed {
+			t.Fatal("availability orchestration reported cancellation")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("availability orchestration did not return")
 	}
 }
 

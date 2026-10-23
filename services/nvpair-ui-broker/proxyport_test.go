@@ -11,40 +11,19 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	settings "nvpair-shared/enginesettings"
 )
 
 func TestEnabledEngineRestoreWaitsForBothPortGates(t *testing.T) {
-	client, server := net.Pipe()
-	defer client.Close()
-	defer server.Close()
-	worker := &rpcWorker{peer: NewPeer(NewCodec(client))}
+	worker, codec := newTestRPCWorkerPipe(t)
 	broker := &Broker{
 		clusterDir:        filepath.Join(t.TempDir(), "cluster"),
 		ollamaPortReady:   make(chan struct{}),
 		lmstudioPortReady: make(chan struct{}),
 	}
 	broker.setEngineMgr(worker)
-	go worker.peer.Serve(nil, nil)
-
-	method := make(chan string, 1)
-	go func() {
-		codec := NewCodec(server)
-		for {
-			msg, err := codec.Read()
-			if err != nil {
-				return
-			}
-			if msg.Method == "engine:switch-prepare" {
-				if err := codec.Respond(msg.ID, emptySwitchManagerSnapshot()); err != nil {
-					t.Error(err)
-					return
-				}
-				continue
-			}
-			method <- msg.Method
-			return
-		}
-	}()
+	method := recordEnabledEngineRestoration(t, codec)
 	done := make(chan bool, 1)
 	go func() { done <- broker.restoreEnabledEnginesAfterPortGate(context.Background()) }()
 
@@ -60,16 +39,23 @@ func TestEnabledEngineRestoreWaitsForBothPortGates(t *testing.T) {
 	case <-time.After(100 * time.Millisecond):
 	}
 	close(broker.lmstudioPortReady)
+	for _, want := range []string{engineNodeProjectionMethod, settings.SwitchPrepareMethod, restoreEnabledEnginesMethod} {
+		select {
+		case got := <-method:
+			if got != want {
+				t.Fatalf("restoration method = %q, want %q", got, want)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("%s was not sent after both port gates opened", want)
+		}
+	}
 	select {
-	case got := <-method:
-		if got != restoreEnabledEnginesMethod {
-			t.Fatalf("method = %q, want %q", got, restoreEnabledEnginesMethod)
+	case completed := <-done:
+		if !completed {
+			t.Fatal("restore wait reported cancellation")
 		}
 	case <-time.After(2 * time.Second):
-		t.Fatal("restore was not sent after both port gates opened")
-	}
-	if !<-done {
-		t.Fatal("restore wait reported cancellation")
+		t.Fatal("enabled-engine restoration did not return")
 	}
 }
 

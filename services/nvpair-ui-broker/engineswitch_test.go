@@ -1469,6 +1469,63 @@ func TestSwitchStatusWaitTimeoutReturnsUnchangedReceipt(t *testing.T) {
 	}
 }
 
+func TestSwitchRecoveryCallDeadlineInterruptsUnservicedWorker(t *testing.T) {
+	worker, _ := newTestRPCWorkerPipe(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		var result switchManagerSnapshot
+		done <- switchManagerCallOn(ctx, worker, settings.SwitchPrepareMethod, settings.SwitchPrepareRequest{}, &result)
+	}()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("unserviced recovery call = %v, want deadline exceeded", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("recovery call deadline did not interrupt the unread worker pipe")
+	}
+}
+
+func TestSwitchPauseWithoutObligationsDoesNotCallWorker(t *testing.T) {
+	for _, operation := range []string{"prepare", "settle", "supersede"} {
+		t.Run(operation, func(t *testing.T) {
+			b := &Broker{clusterDir: filepath.Join(t.TempDir(), "cluster")}
+			worker, _ := newTestRPCWorkerPipe(t)
+			b.setEngineMgr(worker)
+			done := make(chan error, 1)
+			go func() {
+				runtime := b.nodePolicyRuntime()
+				runtime.transitionMu.Lock()
+				defer runtime.transitionMu.Unlock()
+				var err error
+				switch operation {
+				case "prepare":
+					var prepared bool
+					prepared, err = b.prepareSwitchPause()
+					if prepared && err == nil {
+						err = errors.New("pause reported prepared without an obligation")
+					}
+				case "settle":
+					err = b.settleSwitchPauseObligations()
+				case "supersede":
+					err = b.supersedeSwitchPauseObligations(1)
+				}
+				done <- err
+			}()
+			select {
+			case err := <-done:
+				if err != nil {
+					t.Fatal(err)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("pause without obligations waited on the unserviced worker")
+			}
+		})
+	}
+}
+
 func TestSwitchManagerRPCErrorsKeepCodeAndKind(t *testing.T) {
 	for _, tc := range []struct {
 		kind string
