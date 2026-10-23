@@ -14,6 +14,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
@@ -1741,4 +1742,273 @@ func TestUnifiedDispatchPeekReadErrorAndTimeout(t *testing.T) {
 			t.Fatalf("genuine precommit timeout prohibited retry: %v", err)
 		}
 	})
+}
+
+// serveHybridDispatch runs one inference request on the common driver under a
+// hybrid policy, prepared as handleHTTP prepares a concrete one. No production
+// caller sends a hybrid policy yet.
+func serveHybridDispatch(t *testing.T, f *facade, body string, policy dispatchPolicy) (*httptest.ResponseRecorder, *routingSpend) {
+	t.Helper()
+	p := f.host
+	var request struct {
+		Model string `json:"model"`
+	}
+	if err := json.Unmarshal([]byte(body), &request); err != nil {
+		t.Fatal(err)
+	}
+	recorder := httptest.NewRecorder()
+	r := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+	ctl := newRoutingRequest(nil)
+	r, buffers := p.ownInferenceBuffers(r)
+	owner, err := p.registerRoutingRequest(ctl)
+	if err != nil {
+		buffers.close()
+		t.Fatalf("register routing request: %v", err)
+	}
+	defer func() {
+		buffers.close()
+		p.unregisterRoutingRequest(owner)
+	}()
+	ctl.sink = newResponseSink(recorder, func() { ctl.cancelWithReason("client connection lost") })
+	r = r.WithContext(withResponseSink(r.Context(), ctl.sink))
+	ctl.dispatch(f, ctl.sink, r, time.Now(), "hybrid-request", []byte(body), request.Model, 0,
+		func(reason string) string { return reason }, owner, policy)
+	return recorder, ctl
+}
+
+func hybridTestPolicy(attempts int, budget time.Duration) dispatchPolicy {
+	return dispatchPolicy{maxAttempts: attempts, deadline: time.Now().Add(budget), queueWait: budget, coldWait: budget, hybrid: true}
+}
+
+const hybridTestBody = `{"model":"weak","messages":[{"role":"user","content":"hi"}]}`
+
+// hybridPeerFixture serves the weak tier from qualified declared peers. Each
+// listed peer answers with its status.
+func hybridPeerFixture(t *testing.T, peers map[string]int) *tierFixture {
+	t.Helper()
+	pol := ollamaTierPolicy(map[string][]nodepolicy.TierEntry{"weak": {{Kind: nodepolicy.EntryLocal, Engine: "ollama", Model: "q:1b"}}})
+	pol.TierPolicy.AllowStronger = false
+	nodes := map[string][]string{}
+	for id := range peers {
+		nodes[id] = []string{"q:1b"}
+	}
+	fx := newTierFixture(t, ollamaCase(t), pol, nodes, nil)
+	f := fx.p.soleFacade()
+	for id, status := range peers {
+		if status != http.StatusOK {
+			e := newRecordingEngine(t, status)
+			n := nodeFor(t, id, e.URL)
+			n.Models = []string{"q:1b"}
+			f.discovery.AddManual(n)
+			fx.eng[id] = e
+		}
+		fx.advertise(t, id, map[string]nodepolicy.AdvertisedRole{"weak": qualifiedRole("q:1b")}, strictCapabilityFor("ollama", "q:1b"))
+	}
+	return fx
+}
+
+func decodeStrictHeader(t *testing.T, h http.Header) nodepolicy.StrictAdmissionRequest {
+	t.Helper()
+	req, err := parseStrictAdmission(h)
+	if err != nil || req == nil {
+		t.Fatalf("strict admission header = %v (err %v), want one", h.Values(nodepolicy.StrictAdmissionHeader), err)
+	}
+	if err := req.Validate(); err != nil {
+		t.Fatalf("strict admission header is invalid: %v", err)
+	}
+	return *req
+}
+
+func TestUnifiedDispatchHybridPeerCarriesStrictRequest(t *testing.T) {
+	fx := hybridPeerFixture(t, map[string]int{"peer": http.StatusOK})
+	recorder, ctl := serveHybridDispatch(t, fx.p.soleFacade(), hybridTestBody, hybridTestPolicy(1, 5*time.Second))
+	if recorder.Code != http.StatusOK || fx.eng["peer"].hits() != 1 {
+		t.Fatalf("hybrid status = %d, peer hits = %d; want 200 from the peer", recorder.Code, fx.eng["peer"].hits())
+	}
+	req := decodeStrictHeader(t, fx.eng["peer"].lastHeader())
+	if req.Request != ctl.key || ctl.key.OriginNodeID != fx.p.originNodeID || ctl.key.ProxyRunID != fx.p.runID {
+		t.Fatalf("strict request key = %+v, want this request's registry key %+v", req.Request, ctl.key)
+	}
+	if req.Identity != strictRequest().Identity || req.PreOutputBudgetMs > 5000 || req.QueueBudgetMs > req.PreOutputBudgetMs {
+		t.Fatalf("strict request = %+v, want the advertised identity within the 5 s budget", req)
+	}
+	hybridBody := fx.eng["peer"].lastBody()
+
+	// The same candidate under the concrete policy: same destination and body
+	// model, and no strict envelope.
+	legacy := fx.do(t, "/v1/chat/completions", hybridTestBody)
+	if legacy.Code != http.StatusOK || fx.eng["peer"].hits() != 2 {
+		t.Fatalf("concrete status = %d, peer hits = %d; want the same peer", legacy.Code, fx.eng["peer"].hits())
+	}
+	if h := fx.eng["peer"].lastHeader().Values(nodepolicy.StrictAdmissionHeader); len(h) != 0 {
+		t.Fatalf("concrete attempt carried a strict envelope: %v", h)
+	}
+	var hybridModel, concreteModel struct {
+		Model string `json:"model"`
+	}
+	if err := json.Unmarshal([]byte(hybridBody), &hybridModel); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal([]byte(fx.eng["peer"].lastBody()), &concreteModel); err != nil {
+		t.Fatal(err)
+	}
+	if hybridModel.Model != "q:1b" || concreteModel.Model != hybridModel.Model {
+		t.Fatalf("forwarded models = %q (hybrid) and %q (concrete), want q:1b for both", hybridModel.Model, concreteModel.Model)
+	}
+}
+
+func TestUnifiedDispatchHybridSpendsOneAttemptBudget(t *testing.T) {
+	test := func(name string, attempts, wantStatus, wantFailedHits, wantServedHits int) {
+		t.Helper()
+		t.Run(name, func(t *testing.T) {
+			fx := hybridPeerFixture(t, map[string]int{"a-busy": http.StatusServiceUnavailable, "b-ready": http.StatusOK})
+			recorder, ctl := serveHybridDispatch(t, fx.p.soleFacade(), hybridTestBody, hybridTestPolicy(attempts, 5*time.Second))
+			busy, ready := fx.eng["a-busy"], fx.eng["b-ready"]
+			if recorder.Code != wantStatus || busy.hits() != wantFailedHits || ready.hits() != wantServedHits || ctl.ordinal != uint64(attempts) {
+				t.Fatalf("status = %d, hits busy/ready = %d/%d, attempts = %d; want %d, %d/%d, %d",
+					recorder.Code, busy.hits(), ready.hits(), ctl.ordinal, wantStatus, wantFailedHits, wantServedHits, attempts)
+			}
+			if ready.hits() == 0 {
+				return
+			}
+			// The second attempt sees what the first spent of the shared
+			// pre-output deadline and allowances, never a fresh budget.
+			first, second := decodeStrictHeader(t, busy.lastHeader()), decodeStrictHeader(t, ready.lastHeader())
+			if second.PreOutputBudgetMs > first.PreOutputBudgetMs || second.QueueBudgetMs > first.QueueBudgetMs || second.ColdStartBudgetMs > first.ColdStartBudgetMs {
+				t.Fatalf("later attempt budgets %+v exceed the earlier %+v", second, first)
+			}
+		})
+	}
+	test("one attempt answers with the first failure", 1, http.StatusServiceUnavailable, 1, 0)
+	test("two attempts fall back to the next candidate", 2, http.StatusOK, 1, 1)
+}
+
+func TestUnifiedDispatchHybridPreOutputDeadline(t *testing.T) {
+	pol := ollamaTierPolicy(map[string][]nodepolicy.TierEntry{"weak": {{Kind: nodepolicy.EntryLocal, Engine: "ollama", Model: "q:1b"}}})
+	pol.TierPolicy.AllowStronger = false
+	fx := newTierFixture(t, ollamaCase(t), pol, map[string][]string{"slow": {"q:1b"}}, nil)
+	stalled := newStallingEngine(t)
+	defer stalled.doRelease()
+	n := nodeFor(t, "slow", stalled.URL)
+	n.Models = []string{"q:1b"}
+	fx.p.soleFacade().discovery.AddManual(n)
+	fx.advertise(t, "slow", map[string]nodepolicy.AdvertisedRole{"weak": qualifiedRole("q:1b")}, strictCapabilityFor("ollama", "q:1b"))
+
+	started := time.Now()
+	recorder, ctl := serveHybridDispatch(t, fx.p.soleFacade(), hybridTestBody, hybridTestPolicy(3, 300*time.Millisecond))
+	if recorder.Code != http.StatusServiceUnavailable || !strings.Contains(recorder.Body.String(), routingDeadlineReason) {
+		t.Fatalf("status = %d body = %q, want the pre-output deadline", recorder.Code, recorder.Body.String())
+	}
+	if elapsed := time.Since(started); elapsed > 3*time.Second {
+		t.Fatalf("hybrid request took %v, want the 300 ms budget rather than the concrete job deadline", elapsed)
+	}
+	if ctl.ordinal != 1 {
+		t.Fatalf("attempts = %d, want the stalled one only", ctl.ordinal)
+	}
+}
+
+func TestUnifiedDispatchHybridPublicRefusalSpendsNothing(t *testing.T) {
+	p, accounts, _, _ := egressFixture(t)
+	egressGrant(t, p, 1, 5*time.Second)
+	profile, ok := profileFor("ollama")
+	if !ok {
+		t.Fatal("missing ollama profile")
+	}
+	f := newFacade(p, profile, NewDiscovery(), 0)
+	if p.facades == nil {
+		p.facades = map[string]*facade{}
+	}
+	p.facades["ollama"] = f
+	var credentialReads atomic.Int32
+	publicChatInputs = func(chatAccountSnapshot) (*chatQualification, *publicClient, func(nodepolicy.CredentialRef) (string, bool), chatByteBudget, bool) {
+		return accounts.profile, accounts.transport, func(ref nodepolicy.CredentialRef) (string, bool) {
+			credentialReads.Add(1)
+			return accounts.resolve(ref)
+		}, accounts.budget.acquire, true
+	}
+	t.Cleanup(func() { publicChatInputs = nil })
+
+	policy := hybridTestPolicy(3, 2*time.Second)
+	policy.publicAllowed = true
+	recorder, ctl := serveHybridDispatch(t, f, hybridTestBody, policy)
+	if recorder.Code != http.StatusNotFound {
+		t.Fatalf("API-only hybrid status = %d body = %q, want no eligible model", recorder.Code, recorder.Body.String())
+	}
+	store, err := readAccountStore(accounts.ledger.storePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if credentialReads.Load() != 0 || len(store.Holds) != 0 || accounts.calls.Load() != 0 || ctl.ordinal != 0 {
+		t.Fatalf("refused public selection did work: credential reads = %d, holds = %d, public Do = %d, attempts = %d; want all zero",
+			credentialReads.Load(), len(store.Holds), accounts.calls.Load(), ctl.ordinal)
+	}
+}
+
+// hybridSelfProxy is a router whose own Ollama engine serves the weak tier as
+// a qualified declared role, with its strict storage in a private directory.
+func hybridSelfProxy(t *testing.T, resident bool) (*Proxy, *facade, *recordingEngine) {
+	t.Helper()
+	p, oll, _ := twoEngineProxy(t, &recordingWriter{})
+	e := newRecordingEngine(t, http.StatusOK)
+	oll.discovery.AddManual(selfNode("self", oll.profile.FacadePort, "llama3:latest"))
+	setBackend(t, oll, e.URL, true)
+	p.admission.strict.path = filepath.Join(t.TempDir(), "strict-capacity.json")
+	p.admission.strict.storageErr = nil
+	installQualified(t, p.admission, admKey{engine: "ollama", model: "llama3:latest"})
+	pol := p.admission.currentPolicy()
+	pol.Roles = map[string]nodepolicy.Role{"weak": {Engine: "ollama", Model: "llama3:latest"}}
+	pol.Admission.MaxConcurrentPerModel = 1
+	p.admission.setPolicy(pol)
+	if resident {
+		p.admission.setResidency(map[string][]string{"ollama": {"llama3:latest"}})
+	}
+	return p, oll, e
+}
+
+const hybridSelfBody = `{"model":"weak","messages":[{"role":"user","content":"hi"}],"max_tokens":16}`
+
+func TestUnifiedDispatchHybridSelfAdmitsStrictly(t *testing.T) {
+	p, oll, e := hybridSelfProxy(t, true)
+	recorder, ctl := serveHybridDispatch(t, oll, hybridSelfBody, hybridTestPolicy(1, 5*time.Second))
+	if recorder.Code != http.StatusOK || e.hits() != 1 || ctl.ordinal != 1 {
+		t.Fatalf("status = %d, engine hits = %d, attempts = %d; want one strict local attempt", recorder.Code, e.hits(), ctl.ordinal)
+	}
+	if h := e.lastHeader().Values(nodepolicy.StrictAdmissionHeader); len(h) != 0 {
+		t.Fatalf("local engine received the internal strict envelope: %v", h)
+	}
+	// Dispatched strict work is uncertain until reconciliation, so its slot
+	// stays quarantined rather than released by the attempt's end.
+	p.admission.mu.Lock()
+	markers := len(p.admission.strict.markers)
+	p.admission.mu.Unlock()
+	if markers != 1 {
+		t.Fatalf("strict capacity markers = %d, want the dispatched attempt quarantined", markers)
+	}
+}
+
+func TestUnifiedDispatchHybridSelfRefusalFallsBackToPeer(t *testing.T) {
+	p, oll, local := hybridSelfProxy(t, false) // Not resident and no cold-start allowance.
+	peer := newRecordingEngine(t, http.StatusOK)
+	n := nodeFor(t, "peer", peer.URL)
+	n.Models = []string{"llama3:latest"}
+	n.Roles = map[string]nodepolicy.AdvertisedRole{"weak": qualifiedRole("llama3:latest")}
+	n.PolicyRevision = "1"
+	n.StrictAdmission = strictCapabilityFor("ollama", "llama3:latest")
+	oll.discovery.AddManual(n)
+	p.SetPriority([]string{"self", "peer"}) // The tier order leads with this node.
+
+	policy := hybridTestPolicy(2, 5*time.Second)
+	policy.coldWait = 0
+	recorder, ctl := serveHybridDispatch(t, oll, hybridSelfBody, policy)
+	if recorder.Code != http.StatusOK || local.hits() != 0 || peer.hits() != 1 || ctl.ordinal != 2 {
+		t.Fatalf("status = %d, local/peer hits = %d/%d, attempts = %d; want the refused self attempt then the peer",
+			recorder.Code, local.hits(), peer.hits(), ctl.ordinal)
+	}
+	decodeStrictHeader(t, peer.lastHeader())
+	p.admission.mu.Lock()
+	markers := len(p.admission.strict.markers)
+	p.admission.mu.Unlock()
+	if markers != 0 {
+		t.Fatalf("strict capacity markers = %d, want none for an undispatched refusal", markers)
+	}
 }
