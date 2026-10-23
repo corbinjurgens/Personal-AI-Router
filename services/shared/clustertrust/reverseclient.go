@@ -9,6 +9,7 @@ import (
 	"crypto/sha256"
 	"crypto/tls"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -335,6 +336,7 @@ func (t *peerServiceTransport) RoundTrip(req *http.Request) (*http.Response, err
 	p.mu.Unlock()
 	var conn net.Conn
 	var usedDirect atomic.Bool
+	var replayed bool
 	var tlsState atomic.Pointer[tls.ConnectionState]
 	if plain {
 		var connectedDirect bool
@@ -392,6 +394,7 @@ func (t *peerServiceTransport) RoundTrip(req *http.Request) (*http.Response, err
 		// before any response was exposed. Mutations and TLS calls never replay.
 		if plain && req.Method == http.MethodGet && (req.Body == nil || req.Body == http.NoBody) && req.Context().Err() == nil {
 			directErr := err
+			replayed = true
 			tr.CloseIdleConnections()
 			conn.Close()
 			var connectedDirect bool
@@ -402,7 +405,7 @@ func (t *peerServiceTransport) RoundTrip(req *http.Request) (*http.Response, err
 				response, err = tr.RoundTrip(req)
 			}
 			if err != nil {
-				err = errors.Join(directErr, err)
+				err = fmt.Errorf("direct: %w; reverse: %w", directErr, routeCause(err))
 			}
 		}
 	}
@@ -415,7 +418,7 @@ func (t *peerServiceTransport) RoundTrip(req *http.Request) (*http.Response, err
 		if req.Context().Err() != nil {
 			return nil, req.Context().Err()
 		}
-		return nil, &ReverseUnavailableError{PeerUUID: key.uuid, Cause: err}
+		return nil, unavailableOver(key.uuid, routeOf(usedDirect.Load(), replayed), err)
 	}
 	// Preserve TLS response metadata on Go versions whose Transport only
 	// recognizes a concrete *tls.Conn from DialTLSContext.
@@ -568,7 +571,7 @@ func (p *PeerServiceClient) reusableRoundTrip(req *http.Request, key peerService
 		if req.Context().Err() != nil {
 			return nil, req.Context().Err()
 		}
-		return nil, &ReverseUnavailableError{PeerUUID: key.uuid, Cause: err}
+		return nil, unavailableOver(key.uuid, routeOf(c.direct, false), err)
 	}
 	if c.direct {
 		p.outcome(h, true)
@@ -702,9 +705,43 @@ func (p *PeerServiceClient) connect(req *http.Request, setupContext context.Cont
 		cancel()
 	}
 	if err != nil {
-		return nil, false, &ReverseUnavailableError{PeerUUID: key.uuid, Cause: errors.Join(directErr, err)}
+		if directErr == nil {
+			return nil, false, unavailableOver(key.uuid, RouteReverse, err)
+		}
+		return nil, false, &ReverseUnavailableError{PeerUUID: key.uuid, Route: RouteDirectThenReverse,
+			Cause: fmt.Errorf("direct: %w; reverse: %w", directErr, routeCause(err))}
 	}
 	return conn, false, nil
+}
+
+// routeOf names the transport a connection used; fellBack means a direct
+// attempt failed first and the reverse session was tried after it.
+func routeOf(direct, fellBack bool) ReverseRoute {
+	switch {
+	case fellBack:
+		return RouteDirectThenReverse
+	case direct:
+		return RouteDirect
+	}
+	return RouteReverse
+}
+
+// unavailableOver wraps err once. A failure that already names its route, such
+// as one returned by connect, passes through unchanged.
+func unavailableOver(peerUUID string, route ReverseRoute, err error) error {
+	if unavailable, ok := err.(*ReverseUnavailableError); ok {
+		return unavailable
+	}
+	return &ReverseUnavailableError{PeerUUID: peerUUID, Route: route, Cause: err}
+}
+
+// routeCause strips a lower layer's ReverseUnavailableError wrapper, so the
+// failure is wrapped once at the layer that knows the whole route.
+func routeCause(err error) error {
+	if unavailable, ok := err.(*ReverseUnavailableError); ok {
+		return unavailable.Cause
+	}
+	return err
 }
 
 // TLS setup writes are complete before this wrapper is installed. Its first

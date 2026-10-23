@@ -450,6 +450,15 @@ removal, in-memory revocation, membership/admission changes, local identity
 changes, leave, and shutdown close obsolete sessions and their active streams.
 Interrupted application traffic is never replayed by this transport.
 
+Session lifecycle is logged by node ID, direction (`outbound` when this node
+initiated the upgrade), address and port only, never keys, PINs, certificate
+bytes or payloads: setup failure per attempt and address with its stage
+(`dial`, `TLS handshake`, `upgrade request`, `upgrade response`, `upgrade`,
+`handoff`, `setup`), session established, session closed with its reason and
+uptime, and duplicate-session resolution. A repeated identical failure for one
+peer is logged once and then as a `repeatsSinceLastLog` count every 30 seconds.
+The session library's own diagnostics are logged at debug level.
+
 The broker supplies `cluster:set-local-services` exclusively over its child
 stdio transport: `{generation: uint64, services: RegisterParams[]}` is a full
 snapshot. Initial generation zero, including an empty baseline, is valid.
@@ -478,7 +487,13 @@ ACL and message-mode byte adapter for half-close. No HTTP handler exposes this
 operation, including any loopback or tunnel service. The bounded private JSON
 header contains `peerUuid`, `service`, a random `callId`, and an optional local
 `deadlineUnixNano` applied by the manager; a one-byte zero
-reply admits the stream and a nonzero reply refuses it. A retained private
+reply admits the stream and a nonzero reply refuses it, naming the reason:
+`1` no current reverse session to the peer, `2` capacity (private calls,
+sessions or streams), `3` the peer is not admitted to this cluster, `4` the
+peer's service refused the stream, `5` opening the stream failed for another
+reason. The reply is a local contract between processes of one release;
+`DialReverse` reports the reason inside `ReverseUnavailableError` and there is
+no reading for any other value. A retained private
 `{callId, watch: true}` lifecycle connection must attach and receive its own
 zero acknowledgement before an application stream is opened or acknowledged.
 Closing that connection cancels the request through an already admitted path,
@@ -488,7 +503,9 @@ Failed attachment is bounded by the setup deadline and cleans both halves;
 lifecycle waiters are joined at shutdown. Active calls and both connection
 halves remain within the process caps.
 Context deadlines, cancellation, and closing the local client revoke only that
-request. Unavailability is reported as `ReverseUnavailableError`. Shutdown
+request. Unavailability is reported as `ReverseUnavailableError`, whose `Route`
+says whether the failed attempt was `direct`, `reverse` or `direct, then
+reverse`, and whose cause keeps the underlying errors. Shutdown
 closes and joins the private listener, its requests, and owned reverse sessions;
 a second instance never removes an endpoint another instance owns.
 

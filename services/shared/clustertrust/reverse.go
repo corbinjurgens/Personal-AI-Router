@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"strings"
@@ -78,19 +79,47 @@ type ReverseOptions struct {
 	MaxStreams        int           // default 128
 	MaxSessions       int           // default 64
 	SetupTimeout      time.Duration // default 5 seconds
+	// Log receives session lifecycle events (default slog.Default()). Events
+	// carry the peer UUID and direction only, never keys or payloads.
+	Log *slog.Logger
 }
+
+// ReverseRoute names the transport a failed attempt used.
+type ReverseRoute string
+
+const (
+	RouteDirect            ReverseRoute = "direct"
+	RouteReverse           ReverseRoute = "reverse"
+	RouteDirectThenReverse ReverseRoute = "direct, then reverse"
+)
 
 // ReverseUnavailableError reports failure before handing application bytes to a
 // stream. Transport code never retries a stream or an application request.
+// Route says which transport failed; it is empty when the attempt stopped
+// before choosing one, for example because the peer is no longer admitted.
 type ReverseUnavailableError struct {
 	PeerUUID string
+	Route    ReverseRoute
 	Cause    error
 }
 
 func (e *ReverseUnavailableError) Error() string {
-	return fmt.Sprintf("reverse peer %s unavailable: %v", e.PeerUUID, e.Cause)
+	if e.Route == "" {
+		return fmt.Sprintf("peer %s unavailable: %v", e.PeerUUID, e.Cause)
+	}
+	return fmt.Sprintf("peer %s unavailable (%s): %v", e.PeerUUID, e.Route, e.Cause)
 }
 func (e *ReverseUnavailableError) Unwrap() error { return e.Cause }
+
+// The reverse manager's reasons for refusing to open or register a session.
+// ReverseRefusalFor reports them to private dial callers.
+var (
+	ErrReverseNoSession     = errors.New("no current reverse session")
+	ErrReverseCapacity      = errors.New("reverse capacity exhausted")
+	ErrReverseAdmission     = errors.New("peer admission failed")
+	ErrReverseRemoteRefused = errors.New("reverse service unavailable")
+	ErrReverseDuplicate     = errors.New("duplicate session")
+)
 
 type reverseSession struct {
 	peer          ReversePeer
@@ -102,10 +131,55 @@ type reverseSession struct {
 	ready         chan struct{}
 	control       *yamux.Stream
 	cancellations chan uint32
+	started       time.Time
 	mu            sync.Mutex
+	closeReason   string
 	forwards      map[uint32]context.CancelFunc
 	pendingCancel map[uint32]bool
 	lastAccepted  uint32
+}
+
+// end records why the session is closing. The first reason wins, so a cause
+// set before Close is not replaced by the accept loop's resulting error.
+func (s *reverseSession) end(reason string) {
+	s.mu.Lock()
+	if s.closeReason == "" {
+		s.closeReason = reason
+	}
+	s.mu.Unlock()
+}
+
+func (s *reverseSession) reason() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.closeReason
+}
+
+func (m *ReverseManager) logger() *slog.Logger {
+	if m.opts.Log != nil {
+		return m.opts.Log
+	}
+	return slog.Default()
+}
+
+// direction is the session's role from this node: outbound when this node
+// initiated the upgrade.
+func (m *ReverseManager) direction(initiator string) string {
+	if initiator == m.opts.LocalUUID {
+		return "outbound"
+	}
+	return "inbound"
+}
+
+// yamuxLog carries the session library's own diagnostics at debug level.
+type yamuxLog struct {
+	log  *slog.Logger
+	peer string
+}
+
+func (w yamuxLog) Write(p []byte) (int, error) {
+	w.log.Debug("reverse session transport", "peer", w.peer, "detail", strings.TrimSpace(string(p)))
+	return len(p), nil
 }
 
 // ReverseManager owns authenticated outer connections and their streams. The
@@ -160,19 +234,21 @@ func (m *ReverseManager) Register(peer ReversePeer, conn net.Conn, initiator, id
 	if m.closed || !m.opts.Validate(peer) {
 		m.mu.Unlock()
 		conn.Close()
-		return &ReverseUnavailableError{peer.UUID, errors.New("obsolete peer incarnation")}
+		return &ReverseUnavailableError{peer.UUID, RouteReverse, ErrReverseAdmission}
 	}
 	old := m.sessions[peer.UUID]
 	if old == nil && len(m.sessions) >= m.opts.MaxSessions {
 		m.mu.Unlock()
 		conn.Close()
-		return &ReverseUnavailableError{peer.UUID, errors.New("reverse session capacity")}
+		return &ReverseUnavailableError{peer.UUID, RouteReverse, fmt.Errorf("%w: reverse session limit", ErrReverseCapacity)}
 	}
 	if old != nil && old.peer == peer && !old.session.IsClosed() &&
 		(old.initiator < initiator || (old.initiator == initiator && old.id <= id)) {
 		m.mu.Unlock()
 		conn.Close()
-		return &ReverseUnavailableError{peer.UUID, errors.New("duplicate session")}
+		m.logger().Info("reverse session duplicate resolved", "peer", peer.UUID, "kept", "existing",
+			"existingDirection", m.direction(old.initiator), "rejectedDirection", m.direction(initiator))
+		return &ReverseUnavailableError{peer.UUID, RouteReverse, ErrReverseDuplicate}
 	}
 	if err := conn.SetDeadline(time.Time{}); err != nil {
 		m.mu.Unlock()
@@ -183,7 +259,7 @@ func (m *ReverseManager) Register(peer ReversePeer, conn net.Conn, initiator, id
 	cfg.AcceptBacklog = m.opts.PerSessionStreams + 1
 	cfg.StreamOpenTimeout = m.opts.SetupTimeout
 	cfg.ConnectionWriteTimeout = m.opts.SetupTimeout
-	cfg.LogOutput = io.Discard
+	cfg.LogOutput = yamuxLog{m.logger(), peer.UUID}
 	conn = newReverseMuxConn(conn, m.opts.SetupTimeout)
 	var session *yamux.Session
 	var err error
@@ -198,15 +274,21 @@ func (m *ReverseManager) Register(peer ReversePeer, conn net.Conn, initiator, id
 		return err
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	s := &reverseSession{peer: peer, initiator: initiator, id: id, session: session, ctx: ctx, cancel: cancel,
+	s := &reverseSession{peer: peer, initiator: initiator, id: id, session: session, ctx: ctx, cancel: cancel, started: time.Now(),
 		ready: make(chan struct{}), cancellations: make(chan uint32, m.opts.PerSessionStreams),
 		forwards: make(map[uint32]context.CancelFunc), pendingCancel: make(map[uint32]bool)}
+	if old != nil {
+		// Recorded before the map changes so no later failure takes the reason.
+		old.end("replaced by duplicate session")
+	}
 	m.sessions[peer.UUID] = s
 	m.wg.Add(1)
 	m.mu.Unlock()
 	if old != nil {
 		old.cancel()
 		old.session.Close()
+		m.logger().Info("reverse session duplicate resolved", "peer", peer.UUID, "kept", "new",
+			"keptDirection", m.direction(initiator), "replacedDirection", m.direction(old.initiator))
 	}
 	go m.accept(s)
 	return nil
@@ -483,6 +565,7 @@ func (m *ReverseManager) Revalidate() {
 	var obsolete []*reverseSession
 	for uuid, s := range m.sessions {
 		if !m.opts.Validate(s.peer) {
+			s.end("peer no longer admitted")
 			delete(m.sessions, uuid)
 			obsolete = append(obsolete, s)
 		}
@@ -497,6 +580,9 @@ func (m *ReverseManager) Revalidate() {
 func (m *ReverseManager) Revoke(uuid string) {
 	m.mu.Lock()
 	s := m.sessions[uuid]
+	if s != nil {
+		s.end("revoked")
+	}
 	delete(m.sessions, uuid)
 	m.mu.Unlock()
 	if s != nil {
@@ -510,6 +596,9 @@ func (m *ReverseManager) Close() error {
 	m.closed = true
 	all := m.sessions
 	m.sessions = make(map[string]*reverseSession)
+	for _, s := range all {
+		s.end("reverse manager closed")
+	}
 	m.mu.Unlock()
 	for _, s := range all {
 		s.cancel()
@@ -519,16 +608,19 @@ func (m *ReverseManager) Close() error {
 	return nil
 }
 
-func (m *ReverseManager) reserve(s *reverseSession) bool {
+func (m *ReverseManager) reserve(s *reverseSession) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if !m.current(s) || s.active >= m.opts.PerSessionStreams || m.active >= m.opts.MaxStreams {
-		return false
+	if !m.current(s) {
+		return ErrReverseNoSession
+	}
+	if s.active >= m.opts.PerSessionStreams || m.active >= m.opts.MaxStreams {
+		return fmt.Errorf("%w: stream limit", ErrReverseCapacity)
 	}
 	s.active++
 	m.active++
 	m.wg.Add(1)
-	return true
+	return nil
 }
 func (m *ReverseManager) release(s *reverseSession) {
 	m.mu.Lock()
@@ -541,6 +633,7 @@ func (m *ReverseManager) release(s *reverseSession) {
 func (m *ReverseManager) accept(s *reverseSession) {
 	defer m.wg.Done()
 	defer func() {
+		s.end("session ended")
 		s.cancel()
 		s.session.Close()
 		m.mu.Lock()
@@ -548,8 +641,11 @@ func (m *ReverseManager) accept(s *reverseSession) {
 			delete(m.sessions, s.peer.UUID)
 		}
 		m.mu.Unlock()
+		m.logger().Info("reverse session closed", "peer", s.peer.UUID, "direction", m.direction(s.initiator),
+			"reason", s.reason(), "uptime", time.Since(s.started).Round(time.Second).String())
 	}()
 	if err := m.setupControl(s); err != nil {
+		s.end("control stream setup failed: " + err.Error())
 		return
 	}
 	m.wg.Add(2)
@@ -559,11 +655,17 @@ func (m *ReverseManager) accept(s *reverseSession) {
 	for {
 		stream, err := s.session.AcceptStream()
 		if err != nil {
+			s.end("session ended: " + err.Error())
 			return
 		}
 		// Yamux Close is a half-close. Closing an over-budget session bounds
 		// even peers that keep sending after a rejected stream's FIN.
-		if s.session.NumStreams() > m.opts.PerSessionStreams+1 || !m.reserve(s) {
+		if s.session.NumStreams() > m.opts.PerSessionStreams+1 {
+			s.end("peer exceeded the per-session stream limit")
+			return
+		}
+		if err := m.reserve(s); err != nil {
+			s.end("stream rejected: " + err.Error())
 			return
 		}
 		ctx, cancel := context.WithCancel(s.ctx)
@@ -647,10 +749,12 @@ func (m *ReverseManager) readControl(s *reverseSession) {
 	var frame [4]byte
 	for {
 		if _, err := io.ReadFull(s.control, frame[:1]); err != nil {
+			s.end("control stream read failed: " + err.Error())
 			return
 		}
 		s.control.SetReadDeadline(time.Now().Add(m.opts.SetupTimeout))
 		if _, err := io.ReadFull(s.control, frame[1:]); err != nil {
+			s.end("control stream read failed: " + err.Error())
 			return
 		}
 		s.control.SetReadDeadline(time.Time{})
@@ -659,6 +763,7 @@ func (m *ReverseManager) readControl(s *reverseSession) {
 		// the control channel. Pending early cancellations have a finite cap.
 		odd := s.initiator != m.opts.LocalUUID
 		if id <= 1 || (id%2 == 1) != odd {
+			s.end("peer sent an invalid stream cancellation")
 			return
 		}
 		s.mu.Lock()
@@ -666,6 +771,7 @@ func (m *ReverseManager) readControl(s *reverseSession) {
 		if cancel == nil && id > s.lastAccepted {
 			if len(s.pendingCancel) >= m.opts.PerSessionStreams {
 				s.mu.Unlock()
+				s.end("peer exceeded the pending cancellation limit")
 				return
 			}
 			s.pendingCancel[id] = true
@@ -689,6 +795,7 @@ func (m *ReverseManager) writeControl(s *reverseSession) {
 			binary.BigEndian.PutUint32(frame[:], id)
 			s.control.SetWriteDeadline(time.Now().Add(m.opts.SetupTimeout))
 			if _, err := s.control.Write(frame[:]); err != nil {
+				s.end("control stream write failed: " + err.Error())
 				return
 			}
 		}
@@ -704,6 +811,7 @@ func (m *ReverseManager) cancelStream(s *reverseSession, id uint32) {
 	select {
 	case s.cancellations <- id:
 	default:
+		s.end("stream cancellation backlog full")
 		s.cancel()
 		s.session.Close()
 	}
@@ -879,7 +987,7 @@ func ForwardReverse(ctx context.Context, a, b net.Conn, first io.Reader) error {
 // stream's lifetime, not just setup. The peer independently verifies the inner
 // protocol before dialing its local listener.
 func (m *ReverseManager) Open(ctx context.Context, peer ReversePeer, service noderec.ServiceKey) (net.Conn, error) {
-	unavailable := func(err error) (net.Conn, error) { return nil, &ReverseUnavailableError{peer.UUID, err} }
+	unavailable := func(err error) (net.Conn, error) { return nil, &ReverseUnavailableError{peer.UUID, RouteReverse, err} }
 	if !reverseServiceAllowed(service) {
 		return unavailable(errors.New("unknown reverse service"))
 	}
@@ -893,17 +1001,20 @@ func (m *ReverseManager) Open(ctx context.Context, peer ReversePeer, service nod
 	current := s != nil && s.peer == peer && m.current(s)
 	m.mu.Unlock()
 	if !current {
-		return unavailable(errors.New("no current reverse session"))
+		return unavailable(ErrReverseNoSession)
 	}
 	select {
 	case <-s.ready:
 	case <-s.ctx.Done():
-		return unavailable(errors.New("reverse session closed"))
+		return unavailable(fmt.Errorf("%w: session closed", ErrReverseNoSession))
 	case <-setupCtx.Done():
 		return unavailable(setupCtx.Err())
 	}
-	if s.session.NumStreams() >= m.opts.PerSessionStreams+1 || !m.reserve(s) {
-		return unavailable(errors.New("no current reverse session or stream capacity"))
+	if s.session.NumStreams() >= m.opts.PerSessionStreams+1 {
+		return unavailable(fmt.Errorf("%w: stream limit", ErrReverseCapacity))
+	}
+	if err := m.reserve(s); err != nil {
+		return unavailable(err)
 	}
 	type result struct {
 		stream *yamux.Stream
@@ -921,7 +1032,7 @@ func (m *ReverseManager) Open(ctx context.Context, peer ReversePeer, service nod
 				var ack [1]byte
 				_, err = io.ReadFull(stream, ack[:])
 				if err == nil && ack[0] != 0 {
-					err = errors.New("reverse service unavailable")
+					err = ErrReverseRemoteRefused
 				}
 			}
 			stop()

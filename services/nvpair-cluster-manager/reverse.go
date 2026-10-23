@@ -15,10 +15,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"sync"
 	"time"
 
@@ -48,7 +50,87 @@ type reverseState struct {
 	privateSlots chan struct{}
 	forwardMu    sync.Mutex
 	forwarded    map[reverseForwardKey]*reverseForwardMarker
+	failures     reverseFailureLog
+	refused      map[string]struct{}
 	wg           sync.WaitGroup
+}
+
+// A peer that stays unreachable retries about once a second, so a repeated
+// identical failure is logged once and then as a count each interval.
+const (
+	reverseFailureLogInterval = 30 * time.Second
+	reverseFailureLogMaxKeys  = 256
+)
+
+type reverseFailureRun struct {
+	text    string
+	logged  time.Time
+	repeats int
+}
+
+// reverseFailureLog decides which failures to log. The zero value is ready.
+type reverseFailureLog struct {
+	mu       sync.Mutex
+	interval time.Duration    // zero means reverseFailureLogInterval
+	now      func() time.Time // nil means time.Now
+	runs     map[string]*reverseFailureRun
+}
+
+// note reports whether the failure for key should be logged now, and how many
+// identical failures were held back since the last logged one.
+func (l *reverseFailureLog) note(key, text string) (emit bool, repeats int) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	now := time.Now()
+	if l.now != nil {
+		now = l.now()
+	}
+	interval := l.interval
+	if interval == 0 {
+		interval = reverseFailureLogInterval
+	}
+	run := l.runs[key]
+	if run == nil || run.text != text {
+		if l.runs == nil || (run == nil && len(l.runs) >= reverseFailureLogMaxKeys) {
+			l.runs = make(map[string]*reverseFailureRun)
+		}
+		l.runs[key] = &reverseFailureRun{text: text, logged: now}
+		return true, 0
+	}
+	if now.Sub(run.logged) < interval {
+		run.repeats++
+		return false, 0
+	}
+	repeats, run.repeats, run.logged = run.repeats, 0, now
+	return true, repeats
+}
+
+func (l *reverseFailureLog) clear(key string) {
+	l.mu.Lock()
+	delete(l.runs, key)
+	l.mu.Unlock()
+}
+
+// logReverseFailure logs a failed reverse session setup with the peer's node
+// ID and, when known, the remote address. key groups repeats: the peer's node
+// ID, or the caller's host when the caller is not an authenticated peer.
+func (m *Manager) logReverseFailure(direction, key, peer, remote string, err error) {
+	emit, repeats := m.reverse.failures.note(direction+" "+key, err.Error())
+	if !emit {
+		return
+	}
+	attrs := []any{"peer", peer, "direction", direction, "err", err.Error()}
+	if remote != "" {
+		attrs = append(attrs, "remote", remote)
+	}
+	if repeats > 0 {
+		attrs = append(attrs, "repeatsSinceLastLog", repeats)
+	}
+	slog.Warn("reverse session failed", attrs...)
+}
+
+func (m *Manager) clearReverseFailure(direction, key string) {
+	m.reverse.failures.clear(direction + " " + key)
 }
 
 type reverseForwardKey struct {
@@ -381,6 +463,12 @@ func (m *Manager) handleReverseUpgrade(w http.ResponseWriter, r *http.Request) {
 	}
 	peer, admitted := m.reversePeerCertificate(uuid, authenticatedDER)
 	if !trusted || !admitted {
+		if trusted {
+			m.logReverseFailure("inbound", uuid, uuid, r.RemoteAddr, errors.New("peer is not admitted to the current cluster"))
+		} else {
+			host, _, _ := net.SplitHostPort(r.RemoteAddr)
+			m.logReverseFailure("inbound", host, "", r.RemoteAddr, errors.New("client certificate is not a pinned member"))
+		}
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
@@ -401,7 +489,16 @@ func (m *Manager) handleReverseUpgrade(w http.ResponseWriter, r *http.Request) {
 		conn.Close()
 		return
 	}
-	m.reverse.manager.Register(peer, &reverseBufferedConn{conn, buffered.Reader}, uuid, r.Header.Get(clustertrust.ReverseSessionHeader))
+	err = m.reverse.manager.Register(peer, &reverseBufferedConn{conn, buffered.Reader}, uuid, r.Header.Get(clustertrust.ReverseSessionHeader))
+	switch {
+	case err == nil:
+		m.clearReverseFailure("inbound", uuid)
+		slog.Info("reverse session established", "peer", uuid, "direction", "inbound", "remote", r.RemoteAddr)
+	case errors.Is(err, clustertrust.ErrReverseDuplicate):
+		m.clearReverseFailure("inbound", uuid)
+	default:
+		m.logReverseFailure("inbound", uuid, uuid, r.RemoteAddr, err)
+	}
 }
 
 func (m *Manager) dialReverseSession(ctx context.Context, node ClusterNode) error {
@@ -417,19 +514,23 @@ func (m *Manager) dialReverseSession(ctx context.Context, node ClusterNode) erro
 	if _, err := rand.Read(id[:]); err != nil {
 		return err
 	}
+	var failures []string
 	for _, addr := range m.resolvePeerAddrs(node) {
 		setup, cancel := context.WithTimeout(ctx, reverseSetupTimeout)
 		conn, err := (&net.Dialer{}).DialContext(setup, "tcp", addr)
 		if err != nil {
 			cancel()
+			failures = append(failures, reverseAttemptFailure(addr, "dial", err))
 			continue
 		}
 		stop := context.AfterFunc(setup, func() { conn.Close() })
 		deadline, _ := setup.Deadline()
 		conn.SetDeadline(deadline)
 		tlsConn := tls.Client(conn, clustertrust.ClientTLSConfig(m.identity.Cert, der))
+		stage := "TLS handshake"
 		err = tlsConn.HandshakeContext(setup)
 		if err == nil {
+			stage = "upgrade request"
 			_, err = fmt.Fprintf(tlsConn, "GET %s HTTP/1.1\r\nHost: %s\r\nConnection: Upgrade\r\nUpgrade: %s\r\n%s: %s\r\n\r\n", clustertrust.ReverseUpgradePath, addr, clustertrust.ReverseUpgradeProtocol, clustertrust.ReverseSessionHeader, hex.EncodeToString(id[:]))
 		}
 		reader := bufio.NewReader(io.LimitReader(tlsConn, 8192))
@@ -437,24 +538,79 @@ func (m *Manager) dialReverseSession(ctx context.Context, node ClusterNode) erro
 		// switches back to the connection without limiting application traffic.
 		var response *http.Response
 		if err == nil {
+			stage = "upgrade response"
 			response, err = http.ReadResponse(reader, &http.Request{Method: http.MethodGet})
+			if err != nil {
+				err = responseReadFailure(err)
+			}
 		}
 		if err == nil && (response.StatusCode != http.StatusSwitchingProtocols || !clustertrust.IsReverseUpgrade(response.Header)) {
-			err = errors.New("reverse upgrade rejected")
+			stage = "upgrade"
+			err = fmt.Errorf("rejected with HTTP status %d", response.StatusCode)
 		}
 		stopped := stop()
 		expired := setup.Err()
 		cancel()
 		if err == nil && stopped && expired == nil {
 			remaining := make([]byte, reader.Buffered())
+			stage = "handoff"
 			_, err = io.ReadFull(reader, remaining)
 			if err == nil {
-				return m.reverse.manager.Register(peer, &reverseBufferedConn{tlsConn, io.MultiReader(bytes.NewReader(remaining), tlsConn)}, m.identity.NodeUUID, hex.EncodeToString(id[:]))
+				err = m.reverse.manager.Register(peer, &reverseBufferedConn{tlsConn, io.MultiReader(bytes.NewReader(remaining), tlsConn)}, m.identity.NodeUUID, hex.EncodeToString(id[:]))
+				if err == nil {
+					slog.Info("reverse session established", "peer", peer.UUID, "direction", "outbound", "addr", addr)
+				}
+				return err
 			}
 		}
 		tlsConn.Close()
+		if err == nil {
+			stage, err = "setup", errors.New("setup budget expired")
+		}
+		failures = append(failures, reverseAttemptFailure(addr, stage, err))
 	}
-	return errors.New("no direct reverse upgrade endpoint")
+	if len(failures) == 0 {
+		return errors.New("peer has no known address")
+	}
+	return errors.New(strings.Join(failures, "; "))
+}
+
+// responseReadFailure keeps a transport error but replaces a parser error with
+// a fixed description: the parser quotes the peer's response bytes, and an
+// unauthenticated listener must not choose what reaches the log.
+func responseReadFailure(err error) error {
+	var netErr net.Error
+	switch {
+	case errors.Is(err, io.EOF), errors.Is(err, io.ErrUnexpectedEOF):
+		return errors.New("connection closed before a complete response")
+	case errors.As(err, &netErr):
+		return err
+	}
+	return errors.New("malformed HTTP response")
+}
+
+// reverseAttemptFailure describes one failed address attempt by address, stage
+// and cause. A network error is reduced to its cause: the connection's own
+// local and remote endpoints would make every retry's text differ.
+func reverseAttemptFailure(addr, stage string, err error) string {
+	reason := err.Error()
+	var netErr *net.OpError
+	if errors.As(err, &netErr) && netErr.Err != nil {
+		reason = netErr.Err.Error()
+	}
+	return fmt.Sprintf("%s %s: %s", addr, stage, reason)
+}
+
+// attemptReverseSession dials one session and logs a failure through the
+// repeat limiter. A duplicate means a session to the peer already exists.
+func (m *Manager) attemptReverseSession(ctx context.Context, node ClusterNode) {
+	err := m.dialReverseSession(ctx, node)
+	switch {
+	case err == nil || errors.Is(err, clustertrust.ErrReverseDuplicate):
+		m.clearReverseFailure("outbound", node.NodeUUID)
+	case ctx.Err() == nil:
+		m.logReverseFailure("outbound", node.NodeUUID, node.NodeUUID, "", err)
+	}
 }
 
 func (m *Manager) reverseConnectLoop(ctx context.Context) {
@@ -492,7 +648,7 @@ func (m *Manager) reverseConnectLoop(ctx context.Context) {
 				defer m.reverse.wg.Done()
 				defer func() { <-slots }()
 				defer func() { workersMu.Lock(); delete(workers, node.NodeUUID); workersMu.Unlock() }()
-				m.dialReverseSession(ctx, node)
+				m.attemptReverseSession(ctx, node)
 			}(node)
 		}
 		select {
@@ -582,8 +738,18 @@ func (m *Manager) serveReversePrivate(ctx context.Context, conn net.Conn) {
 		return
 	}
 	if len(m.reverse.calls) >= reverseMaxPrivateCalls {
+		// The call never registers, so its lifecycle connection learns the
+		// refusal from this record instead of waiting out the setup budget. IDs
+		// are random, so a record whose watch never arrives is harmless; the
+		// table is bounded.
+		if m.reverse.refused == nil || len(m.reverse.refused) >= reverseMaxPrivateConnections {
+			m.reverse.refused = make(map[string]struct{})
+		}
+		m.reverse.refused[request.CallID] = struct{}{}
+		close(m.reverse.callChanged)
+		m.reverse.callChanged = make(chan struct{})
 		m.reverse.mu.Unlock()
-		conn.Write([]byte{1})
+		conn.Write([]byte{byte(clustertrust.ReverseRefusedCapacity)})
 		return
 	}
 	call := &reversePrivateCall{ctx: ctx, cancel: cancel, watchReady: make(chan struct{})}
@@ -602,12 +768,12 @@ func (m *Manager) serveReversePrivate(ctx context.Context, conn net.Conn) {
 	setupCancel()
 	peer, ok := m.reversePeer(request.PeerUUID)
 	if !ok {
-		conn.Write([]byte{1})
+		conn.Write([]byte{byte(clustertrust.ReverseRefusedAdmission)})
 		return
 	}
 	stream, err := m.reverse.manager.Open(ctx, peer, request.Service)
 	if err != nil {
-		conn.Write([]byte{1})
+		conn.Write([]byte{byte(clustertrust.ReverseRefusalFor(err))})
 		return
 	}
 	defer stream.Close()
@@ -643,7 +809,13 @@ func (m *Manager) serveReverseWatch(ctx context.Context, conn net.Conn, reader i
 			}
 			call.watched = true
 		}
+		_, refused := m.reverse.refused[id]
+		delete(m.reverse.refused, id)
 		m.reverse.mu.Unlock()
+		if call == nil && refused {
+			conn.Write([]byte{byte(clustertrust.ReverseRefusedCapacity)})
+			return
+		}
 		if call != nil {
 			break
 		}
