@@ -11,6 +11,7 @@ import (
 
 	settings "nvpair-shared/enginesettings"
 	serviceerrors "nvpair-shared/errors"
+	"nvpair-shared/nodepolicy"
 )
 
 const engineSwitchRecoveryBlockedID = "engine-switch:recovery-blocked"
@@ -44,6 +45,21 @@ func (b *Broker) recoverEngineSwitch() bool {
 }
 
 func (b *Broker) recoverEngineSwitchOn(w *rpcWorker) bool {
+	runtime := b.nodePolicyRuntime()
+	runtime.transitionMu.Lock()
+	defer runtime.transitionMu.Unlock()
+	return b.recoverEngineSwitchOnTransitionLocked(w)
+}
+
+// Caller owns transitionMu, including the live Pause completion path. Recovery
+// takes this lock before settingsApplyMu, matching ordinary availability work.
+func (b *Broker) recoverEngineSwitchOnTransitionLocked(w *rpcWorker) bool {
+	return b.recoverEngineSwitchPauseOnTransitionLocked(w, 0)
+}
+
+// A nonzero resumeGen is the current local Resume's explicit supersession of
+// unapplied pause obligations; ordinary startup/replacement recovery supplies 0.
+func (b *Broker) recoverEngineSwitchPauseOnTransitionLocked(w *rpcWorker, resumeGen uint64) bool {
 	b.settingsApplyMu.Lock()
 	defer b.settingsApplyMu.Unlock()
 	b.engineConfigMu.Lock()
@@ -54,6 +70,8 @@ func (b *Broker) recoverEngineSwitchOn(w *rpcWorker) bool {
 	if !current {
 		return false
 	}
+	// A replacement must know the pause fence before reconcile or readiness.
+	b.publishNodeProjection()
 	c := b.switchCoordinator()
 	fail := func(err error) bool {
 		if switchRecoveryPermanent(err) {
@@ -170,7 +188,7 @@ func (b *Broker) recoverEngineSwitchOn(w *rpcWorker) bool {
 			if err := releaseDrains(); err != nil {
 				return fail(err)
 			}
-			if err := b.dischargeSwitchLocalObligationLocked(ctx, cp.OperationID, nil); err != nil {
+			if err := b.dischargeSwitchLocalObligationLocked(ctx, cp.OperationID, nil); err != nil && !b.switchPauseReleaseFenced(err) {
 				return fail(err)
 			}
 			b.workersMu.Lock()
@@ -193,12 +211,56 @@ func (b *Broker) recoverEngineSwitchOn(w *rpcWorker) bool {
 			if err != nil {
 				return fail(err)
 			}
-			c.resolved[cp.OperationID] = true
+			if o, ok := c.store.journal.LocalObligations[cp.OperationID]; !ok || o.Discharged {
+				c.resolved[cp.OperationID] = true
+			}
 			c.recoveryCheckpoint = nil
 			break
 		}
 	} else {
 		if err := releaseDrains(); err != nil {
+			return fail(err)
+		}
+	}
+	// Sleep is intent-neutral but cannot enter an unreleased manager
+	// reservation. Release the reconciled checkpoint first, retaining the
+	// broker's durable pause obligation and management fence until readback.
+	runtime := b.nodePolicyRuntime()
+	runtime.mu.Lock()
+	storedPause := runtime.current.Availability == nodepolicy.Paused
+	draining := runtime.live == nodepolicy.Draining
+	blocked := runtime.managementBlockedLocked()
+	runtime.mu.Unlock()
+	b.workersMu.Lock()
+	recovering := b.engineMgrRecovering
+	b.workersMu.Unlock()
+	pendingPause := false
+	for _, o := range c.store.journal.LocalObligations {
+		pendingPause = pendingPause || (o.Pause && !o.PauseApplied && !o.Discharged)
+	}
+	if resumeGen == 0 && storedPause && (recovering || pendingPause || draining) {
+		runtime.mu.Lock()
+		runtime.live = nodepolicy.Draining
+		runtime.mu.Unlock()
+		b.engineConfigMu.Unlock()
+		err := b.pauseEnginesOn(ctx, w)
+		b.engineConfigMu.Lock()
+		if err != nil {
+			b.engineConfigMu.Unlock()
+			b.announceActivationChange(b.pushPolicyNow(context.Background(), pushAvailability))
+			b.notifyAvailability()
+			b.engineConfigMu.Lock()
+			return fail(err)
+		}
+		runtime.mu.Lock()
+		runtime.live = nodepolicy.Paused
+		runtime.mu.Unlock()
+		b.engineConfigMu.Unlock()
+		err = b.completeSwitchPauseObligations()
+		b.announceActivationChange(b.pushPolicyNow(context.Background(), pushAvailability))
+		b.notifyAvailability()
+		b.engineConfigMu.Lock()
+		if err != nil {
 			return fail(err)
 		}
 	}
@@ -208,10 +270,33 @@ func (b *Broker) recoverEngineSwitchOn(w *rpcWorker) bool {
 		pending := false
 		for id, o := range c.store.journal.LocalObligations {
 			if !o.Discharged {
-				pending = true
 				if err := b.dischargeSwitchLocalObligationLocked(ctx, id, nil); err != nil {
+					if resumeGen != 0 && b.switchPauseReleaseFenced(err) {
+						runtime.mu.Lock()
+						if runtime.transitionGen != resumeGen {
+							runtime.mu.Unlock()
+							return fail(errAvailabilitySuperseded)
+						}
+						// Explicit Off was verified above; only the superseded
+						// global pause remains. Do not fabricate physical proof.
+						o = c.store.journal.LocalObligations[id]
+						o.Discharged = true
+						saveErr := c.store.SaveLocalObligation(id, o)
+						runtime.mu.Unlock()
+						if saveErr != nil {
+							b.latchSwitchStorageLocked(saveErr)
+							return fail(saveErr)
+						}
+						continue
+					}
+					if blocked && b.switchPauseReleaseFenced(err) {
+						// A pending live Pause has not saved its policy yet. It
+						// owns shutdown once this still-fenced worker is exposed.
+						continue
+					}
 					return fail(err)
 				}
+				pending = true
 			}
 		}
 		if !pending {
@@ -221,6 +306,9 @@ func (b *Broker) recoverEngineSwitchOn(w *rpcWorker) bool {
 	c.recoveryCheckpoint = nil
 	for id, receipt := range c.store.journal.Receipts {
 		if !receipt.RecoveryRequired || c.resolved[id] {
+			continue
+		}
+		if o, ok := c.store.journal.LocalObligations[id]; ok && !o.Discharged {
 			continue
 		}
 		c.resolved[id] = true
