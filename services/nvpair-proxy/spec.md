@@ -706,8 +706,9 @@ construction can interrupt that response as at base.
 The following byte-accounting ceilings are measured with one-choice SSE,
 minimal `model`/`stream` bodies, their retained body/model bytes, a 96 KiB
 request parser and fully constructed live readers. They exclude rewrites and
-other concurrent allocations. The separate `maxLiveRoutingRequests` registry and
-other admission limits can bind first; these are not throughput guarantees.
+live registry metadata, routing snapshots and other concurrent allocations.
+Registry metadata competes for the same root capacity; admission limits can
+also bind first. These isolated preparation ceilings are not throughput guarantees.
 
 | Preparation class | 192 MiB | 256 MiB | 1024 MiB |
 | --- | ---: | ---: | ---: |
@@ -1217,8 +1218,9 @@ response buffers. It charges allocation capacity before allocation, including
 both arrays during growth, and retains a charge until the last borrower
 releases it. It is not a process RSS bound, an engine/GPU memory limit, or a
 promise about allocator/transport overhead. The stream category remains
-subordinate to this root (§5.2); control/cancellation metadata has its own
-bounds and remains reachable under byte pressure.
+subordinate to this root (§5.2). Live registry metadata and routing snapshot
+copy/encoding storage also use this root (§12.5.1); cancellation of an existing
+owner requires no additional capacity and remains reachable under byte pressure.
 
 Waiting aggregate acquisitions join one FIFO queue with at most 1,024 waiter
 records. Only the head can receive capacity: a large head blocks smaller
@@ -1350,7 +1352,8 @@ field/type and malformed-prefix behavior remains unchanged within this bound.
 This identifier limit is independent of `--max-request-bytes` and the inference
 root's `413` storage-impossibility / `503` contention distinction. Bounded
 normalization (including `:latest`), workload IPC and retained control identifiers
-are outside the inference byte root. Performance queue entries own scalar and
+are outside the inference byte root, except live canonical registry keys and
+`routing/active` copy/encoding storage (§12.5.1). Performance queue entries own scalar and
 identifier copies; finished-model timestamps own small keys and are created only
 for resolved inventory or known resident identities, not arbitrary terminal
 ingress names. Residency updates reconcile those timestamps at the existing
@@ -1600,11 +1603,52 @@ identity mutex; sorting and encoding run outside it. One snapshot copy through
 response encoding is allowed per proxy instance; an overlapping snapshot is
 refused with bounded control error `-32000` before copying. The broker similarly
 allows one forward across both methods, using the existing five-second proxy
-call bound and releasing its gate on every error. Neither operation consumes
-inference byte capacity or adds history; registry or byte-root saturation does
-not hide existing cancellation targets. New inference still receives `503`
-before effects when the registry is full. Snapshots are observations, not
-reservations: an owner may end before a subsequent cancellation arrives.
+call bound and releasing its gate on every error. No routing history is added.
+
+Every live registry entry reserves 512 bytes of metadata representation
+headroom (linkage, key headers, lease and closure), plus the actual origin,
+run and decimal-ID byte lengths, from the existing process byte root before
+allocating owned key data or publishing/advancing the counter. The nonwaiting
+grant never queues behind inference. Refusal gives new inference `503` before
+body or other effects, with no counter advance. There is no independent live
+entry cap; the allocator's separate 1,024 FIFO waiter bound is unchanged.
+Cancellation does not acquire a new grant and does not release an entry's
+charge. Final registry cleanup releases that row/key charge exactly once.
+Map backing has separate root-funded ownership in the same registry owner:
+both the canonical request map and workload secondary index retain a grant of
+256 fixed bytes plus 256 bytes per explicit reserved slot. Partial deletion
+releases row data but retains the backing grant; removal does not rebuild or
+acquire capacity. An empty map is discarded and its backing grant released,
+including an empty workload index whose canonical owners are still live.
+
+Insertions reuse paid spare slots. The backing owner also counts cumulative
+insertions since allocation, so deleted-slot/tombstone churn cannot increase
+retained storage without bound. When that allowance is exhausted, insertion
+nonblockingly reserves an entire fresh backing allocation while the old one
+remains charged, copies only live rows, swaps maps, then releases the discarded
+backing grant. Fresh backing has at least eight slots and room for twice the
+new live count, rounded to a power of two. A failed overlap grant preserves
+the old map/funding and publishes no new row or identity. No terminal rows or
+per-departed-row leases are retained, and churn can compact backing on insertion.
+
+Before any snapshot key copy, the proxy counts the complete reply footprint
+under the identity mutex. It reserves 512 bytes of fixed metadata headroom,
+128 bytes per copied key for headers/rounding, the actual cloned key bytes,
+and four times each result JSON and complete framed-message upper bound for
+encoding copies, scratch and allocation rounding. The envelope includes a
+conservative sixfold escaped caller-ID bound and its newline. This covers the
+result RawMessage and separately marshalled outer message while both coexist.
+An ID beyond the conservative echo bound receives a bounded `-32000` error
+with null ID, before gate admission, so the refusal itself cannot overflow IPC.
+The complete framed reply must also fit the existing 1 MiB codec capability;
+oversized replies and exhausted root capacity return bounded control error
+`-32000` before copying, including for an empty snapshot. No uncharged fallback
+or partial list is returned. The asynchronous worker holds its snapshot lease
+through sorting, IPC encoding and successful or failed response I/O, then
+releases it before the instance gate. Snapshot strings are independently
+owned clones, so concurrent entry removal cannot release their storage early.
+Snapshots are observations, not reservations: an owner may end before a
+subsequent cancellation arrives.
 
 ### 12.6 Routing listener
 

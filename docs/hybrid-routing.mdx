@@ -140,10 +140,21 @@ behavior; ordinary cancellation uses `cancelled by request`.
 The broker forwards only to its current local proxy, under the existing
 five-second call bound. A second concurrent forward across the two methods is
 refused with a bounded control error. The proxy independently allows one active
-snapshot copy/encoding at a time, refusing overlap before copying. Control
-requests use no inference byte grants and remain available when the live
-registry or byte root is full. These APIs do not activate the hybrid listener
-or public dispatch, and no desktop control consumes them yet.
+snapshot copy/encoding at a time, refusing overlap before copying. Live registry
+entries hold metadata/key grants from the same byte root until final cleanup,
+including requests with no body or facade. Registration refuses without advancing
+its counter when capacity is unavailable; no independent live-entry cap applies.
+Registry and workload-index map backing stays charged across partial drains,
+is reused by insertions, and is released when discarded. Empty workload-index
+backing is released while canonical requests can remain live. Removal never
+rebuilds or needs a grant; insertion rebuilds fund old/new overlap to bound churn.
+Snapshots reserve copied keys and both result/envelope encodings, including
+caller ID and newline, before copying and hold the grant through response I/O.
+Exhausted capacity or a response beyond the existing 1 MiB IPC capability returns
+a bounded control error, with no partial or uncharged snapshot. Cancellation
+of an existing owner requires no new grant and remains available at full root;
+cancellation alone does not release its registry charge. These APIs do not
+activate the hybrid listener or public dispatch, and no desktop control consumes them yet.
 
 ## Response commitment and interruption
 

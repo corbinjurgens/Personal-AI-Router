@@ -43,7 +43,7 @@ func TestOwnedInferenceBuffersPlacement(t *testing.T) {
 	}
 	t.Run("impossible transformation has no claim or published placement", func(t *testing.T) {
 		fx := fixture(t)
-		fx.p.buffers = bufferTestBudget(t, 128<<10, time.Hour)
+		fx.p.buffers = bufferTestBudget(t, (128<<10)+registryNextTestBytes(fx.p), time.Hour)
 		rec := fx.do(t, "/api/generate", `{"model":"weak"}`)
 		if rec.Code != http.StatusRequestEntityTooLarge {
 			t.Fatalf("impossible status=%d body=%s", rec.Code, rec.Body.String())
@@ -54,7 +54,7 @@ func TestOwnedInferenceBuffersPlacement(t *testing.T) {
 	t.Run("queued transformation has no claim or published placement", func(t *testing.T) {
 		fx := fixture(t)
 		preparationBytes := bufferFixtureRemotePreparationBytes(t, `{"model":"small:1b"}`)
-		fx.p.buffers = bufferTestBudget(t, (256<<10)+preparationBytes, time.Hour)
+		fx.p.buffers = bufferTestBudget(t, (256<<10)+preparationBytes+registryNextTestBytes(fx.p), time.Hour)
 		// Offset the added preparation room until release, preserving the
 		// original 128 KiB blocker against the transform's 96 KiB allowance.
 		hold := bufferMustAcquire(t, fx.p.buffers, (128<<10)+preparationBytes)
@@ -94,7 +94,7 @@ func TestOwnedInferenceBuffersPlacement(t *testing.T) {
 		pol := ollamaTierPolicy(map[string][]nodepolicy.TierEntry{"weak": {{Kind: nodepolicy.EntryLocal, Engine: "ollama", Model: "small:1b"}}})
 		fx := newTierFixture(t, ollamaCase(t), pol, map[string][]string{"a": {"small:1b"}, "b": {"small:1b"}}, nil)
 		preparationBytes := bufferFixtureRemotePreparationBytes(t, `{"model":"small:1b"}`)
-		capacity := (256 << 10) + preparationBytes
+		capacity := (256 << 10) + preparationBytes + registryNextTestBytes(fx.p)
 		// The first attempt needs preparation room in addition to the blocker
 		// that will offset that same room while the retry waits.
 		fx.p.buffers = bufferTestBudget(t, capacity+preparationBytes, time.Hour)

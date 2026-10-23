@@ -99,6 +99,14 @@ func (p *Proxy) handleRoutingControl(msg *Message) {
 		_ = p.codec.Respond(msg.ID, nodepolicy.RoutingCancelResult{Status: status})
 		return
 	}
+	// Even a refusal must fit the parent codec. An ID too large to echo
+	// safely gets a null-ID control error rather than an oversized
+	// envelope; reserve room for the fixed error object as well as escaping.
+	if msg.ID != nil && int64(len(*msg.ID)) > (routingSnapshotFrameBytes-256)/6 {
+		id := json.RawMessage(`null`)
+		_ = p.codec.RespondError(&id, -32000, "routing snapshot response ID exceeds IPC capacity")
+		return
+	}
 	var in nodepolicy.RoutingActiveParams
 	if err := json.Unmarshal(msg.Params, &in); err != nil {
 		_ = p.codec.RespondError(msg.ID, -32602, "invalid routing active params")
@@ -110,6 +118,13 @@ func (p *Proxy) handleRoutingControl(msg *Message) {
 	}
 	go func() {
 		defer p.routingSnapshot.Store(false)
-		_ = p.codec.Respond(msg.ID, nodepolicy.RoutingActiveResult{Requests: p.activeRoutingRequests()})
+		keys, lease, err := p.snapshotRoutingRequests(msg.ID)
+		if err != nil {
+			_ = p.codec.RespondError(msg.ID, -32000, "routing snapshot capacity unavailable; retry")
+			return
+		}
+		defer lease.close()
+		sortRoutingRequests(keys)
+		_ = p.codec.Respond(msg.ID, nodepolicy.RoutingActiveResult{Requests: keys})
 	}()
 }

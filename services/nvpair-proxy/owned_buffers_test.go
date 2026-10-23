@@ -992,7 +992,7 @@ func TestOwnedInferenceBuffersHandlerPreparationCancellation(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			pol := ollamaTierPolicy(map[string][]nodepolicy.TierEntry{"weak": {{Kind: nodepolicy.EntryLocal, Engine: "ollama", Model: "small:1b"}}})
 			fx := newTierFixture(t, ollamaCase(t), pol, map[string][]string{"a": {"small:1b"}, "b": {"small:1b"}}, nil)
-			capacity := int64(256 << 10)
+			capacity := int64(256<<10) + registryNextTestBytes(fx.p)
 			if later {
 				capacity += bufferFixtureRemotePreparationBytes(t, `{"model":"small:1b"}`)
 			}
@@ -1011,7 +1011,7 @@ func TestOwnedInferenceBuffersHandlerPreparationCancellation(t *testing.T) {
 						// Remove startup-only headroom after the first dispatch. Its
 						// prepaid grants drain; the retry's transform must still wait.
 						if err == nil {
-							err = fx.p.buffers.reconfigure(256<<10, time.Hour)
+							err = fx.p.buffers.reconfigure((256<<10)+registryTestBytes(fx.p), time.Hour)
 						}
 						held <- heldResult{lease, err}
 					})

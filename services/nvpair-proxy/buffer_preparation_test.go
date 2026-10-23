@@ -617,8 +617,8 @@ func preparationConstruct(root *bufferBudget, class preparationClass) (*preparat
 }
 
 func TestBufferPreparationMeasuredLiveCeilings(t *testing.T) {
-	// The request registry's 1024-live-request gate is a separate constraint.
-	// These are independent byte-account ceilings, not admitted HTTP concurrency
+	// These isolated preparations omit the registry's per-live-owner root charge
+	// and routing snapshots. They are not admitted HTTP concurrency
 	// or RSS measurements. Each row gets a fresh process root and shared 64 MiB
 	// stream category. No listener, engine, transport or response output is used.
 	for _, class := range preparationClasses() {
@@ -690,7 +690,7 @@ func TestBufferPreparationMeasuredLiveCeilings(t *testing.T) {
 					t.Fatalf("physical initial frame arrays=%d, exceed 10 MiB", frameCapacity)
 				}
 				// Exactly one bounded row per class/capacity; no request-count log.
-				t.Logf("%s %dMiB: live=%d root/request=%d category/request=%d frame-arrays=%d registry-limit=%d", class.name, mib, len(held), perRoot, perFrames, frameCapacity, maxLiveRoutingRequests)
+				t.Logf("%s %dMiB: live=%d root/request=%d category/request=%d frame-arrays=%d", class.name, mib, len(held), perRoot, perFrames, frameCapacity)
 			})
 		}
 	}

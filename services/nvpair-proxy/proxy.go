@@ -336,6 +336,8 @@ type Proxy struct {
 	requestSequence  int64
 	requests         map[string]*routingRequest
 	workloadRequests map[workloadKey]string
+	requestStorage   routingMapStorage // identityMu owns retained registry backing.
+	workloadStorage  routingMapStorage // identityMu owns retained workload-index backing.
 	performance      performanceQueue
 
 	// admission is the node-wide admission controller every facade shares

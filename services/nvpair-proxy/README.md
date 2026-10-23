@@ -40,8 +40,9 @@ An identifier above the limit returns HTTP 400 before routing resolution,
 admission, preparation or workload placement. Escapes count as their decoded
 UTF-8 bytes. The independent request-body limit remains 64 MiB by default;
 body or required inference-storage overflow returns 413, and buffer contention
-returns 503. Bounded normalized identifiers and workload/control serialization
-are outside the inference byte root; queued identifiers and finished-model
+returns 503. Bounded normalized identifiers and ordinary workload/cancellation
+serialization are outside the inference byte root; live canonical registry
+entries and `routing/active` copies/encoding are charged to it. Queued identifiers and finished-model
 timestamps own small copies rather than retaining request storage.
 
 ## Local execution measurements
@@ -462,6 +463,24 @@ borrower, including overlapping old/new arrays during growth. Activation
 requires `capacityBytes >= 2 * effectiveIndividualLimitBytes + 1` (the
 individual body limit defaults to 64 MiB); otherwise `node/set-policy` keeps
 the previous active settings.
+
+Each canonical live registry entry also holds a nonwaiting root grant for its
+metadata and owned key bytes until final cleanup, even with no body or facade.
+Failed admission returns 503 before body/effects and leaves the request counter
+unchanged. There is no separate live-entry count limit. Cancellation of an
+existing owner needs no additional grant; cancellation alone does not release
+its metadata. Both registry and workload-index map backing have their own
+grants from this same root, retained across partial drains and reused by later
+insertions. Empty backing is discarded and released, including an empty
+workload index with live canonical requests. Deletion never rebuilds or waits
+for a grant. Insertions periodically rebuild under an overlapping old/new
+backing grant to bound churn; they retain no terminal rows or per-removed-row
+leases. `routing/active` first reserves its key clones and overlapping
+result/envelope encoding storage, including the caller's ID and newline, from
+the same root. Capacity exhaustion or a reply exceeding the existing 1 MiB IPC
+frame capability returns a bounded control error before copying. The single
+snapshot lease remains held until response I/O succeeds or fails, including
+when an original entry is removed concurrently.
 
 Aggregate acquisitions wait in FIFO order, bounded to 1,024 waiter records,
 with head-of-line blocking: a small request cannot bypass a larger head.

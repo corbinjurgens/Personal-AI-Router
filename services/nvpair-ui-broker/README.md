@@ -1018,8 +1018,18 @@ One forward across both methods is allowed per broker instance; overlap,
 unavailable proxy, malformed result or a five-second call timeout returns a
 bounded control error (`-32000`). There is no queue, registry or routing history
 in the broker. The proxy independently bounds snapshot copy/encoding to one
-operation, and the control path remains available under inference byte pressure
-or live-registry saturation. These methods currently have no desktop consumer.
+operation. Live registry entries and snapshot copies plus overlapping JSON
+result/envelope encoding are charged to its existing byte root, including the
+caller ID and newline until response I/O finishes. Snapshot capacity exhaustion
+or a reply exceeding the existing 1 MiB IPC capability returns a bounded control
+error before copying. A private proxy control ID too large for its conservative
+escaped-ID echo bound receives a null-ID control error to keep refusal bounded.
+Cancellation of an existing key requires no new byte grant
+and remains available when the root is full; its entry is released only on final
+cleanup. Partially drained proxy registry/index map backing stays funded until
+discarded and is reused by insertions; empty workload-index backing is released
+independently of live canonical owners. There is no separate live-entry count cap. These methods currently have
+no desktop consumer.
 
 #### `discovery:get-node-info`
 

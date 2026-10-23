@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"math"
 	"net"
 	"net/http"
@@ -249,7 +250,7 @@ func TestRoutingCancelActiveOrderAndZeroFacade(t *testing.T) {
 	if got := routingCancelResultOf(t, rpc(t, p, w, nodepolicy.MethodRoutingCancel, nodepolicy.RoutingCancelParams{Request: active.Requests[2]})); got != "cancelled" {
 		t.Fatalf("status=%s", got)
 	}
-	bufferAssertTotals(t, p.buffers, 0, 0, 0)
+	bufferAssertTotals(t, p.buffers, registryTestBytes(p), 4, 0)
 	for _, request := range p.requests {
 		p.unregisterRoutingRequest(request)
 	}
@@ -262,35 +263,145 @@ func TestRoutingCancelActiveOrderAndZeroFacade(t *testing.T) {
 func TestRoutingCancelAvailableUnderSaturation(t *testing.T) {
 	w := &recordingWriter{}
 	p := newBoundProxy(NewCodec(w))
-	var first *routingRequest
-	for range 1024 {
-		request, err := p.registerRoutingRequest(newRoutingRequest(nil))
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer p.unregisterRoutingRequest(request)
-		if first == nil {
-			first = request
-		}
+	first, err := p.registerRoutingRequest(newRoutingRequest(nil))
+	if err != nil {
+		t.Fatal(err)
 	}
+	defer p.unregisterRoutingRequest(first)
+	metadata := registryTestBytes(p)
+	lease := bufferMustAcquire(t, p.buffers, p.buffers.capacity-metadata)
+	defer lease.close()
 	body := &identityBody{}
 	f := newFacade(p, anyProfile(t), NewDiscovery(), 0)
 	rec := httptest.NewRecorder()
 	f.handleHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/chat", body))
-	if rec.Code != http.StatusServiceUnavailable || body.reads != 0 || len(w.lines()) != 0 || p.requestSequence != 1024 {
+	if rec.Code != http.StatusServiceUnavailable || body.reads != 0 || len(w.lines()) != 0 || p.requestSequence != 1 {
 		t.Fatalf("overflow status=%d body reads=%d frames=%d sequence=%d", rec.Code, body.reads, len(w.lines()), p.requestSequence)
 	}
-	lease := bufferMustAcquire(t, p.buffers, p.buffers.capacity)
-	defer lease.close()
 	out := routingActiveRPC(t, p, w, nodepolicy.RoutingActiveParams{})
-	var active nodepolicy.RoutingActiveResult
-	if out.Error != nil || json.Unmarshal(out.Result, &active) != nil || len(active.Requests) != 1024 {
-		t.Fatalf("saturated snapshot=%s error=%+v", out.Result, out.Error)
+	if out.Error == nil || out.Error.Code != -32000 || out.Error.Message != "routing snapshot capacity unavailable; retry" {
+		t.Fatalf("saturated snapshot should refuse before copying: %+v", out)
 	}
 	if got := routingCancelResultOf(t, rpc(t, p, w, nodepolicy.MethodRoutingCancel, nodepolicy.RoutingCancelParams{Request: first.key})); got != "cancelled" {
 		t.Fatalf("saturated cancel=%s", got)
 	}
-	bufferAssertTotals(t, p.buffers, p.buffers.capacity, 1, 0)
+	bufferAssertTotals(t, p.buffers, p.buffers.capacity, 3, 0)
+	if !first.owner.cancelled {
+		t.Fatal("full root hid cancellation")
+	}
+	id := json.RawMessage(`1`)
+	keys, snapshotLease, snapshotErr := p.snapshotRoutingRequests(&id)
+	if snapshotErr == nil || keys != nil || snapshotLease != nil {
+		t.Fatal("failed snapshot retained an uncharged copy")
+	}
+	bufferAssertTotals(t, p.buffers, p.buffers.capacity, 3, 0)
+	lease.close()
+	if out := routingActiveRPC(t, p, w, nodepolicy.RoutingActiveParams{}); out.Error != nil {
+		t.Fatalf("snapshot gate not reusable after exhaustion: %+v", out.Error)
+	}
+	bufferAssertTotals(t, p.buffers, metadata, 2, 0)
+}
+
+type routingChargedWrite struct {
+	msg   Message
+	bytes int
+}
+
+type routingChargedWriter struct {
+	entered chan routingChargedWrite
+	release chan struct{}
+	fail    bool
+}
+
+func (*routingChargedWriter) Read([]byte) (int, error) { return 0, io.EOF }
+func (w *routingChargedWriter) Write(data []byte) (int, error) {
+	var msg Message
+	if err := json.Unmarshal(data, &msg); err != nil {
+		return 0, err
+	}
+	w.entered <- routingChargedWrite{msg: msg, bytes: len(data)}
+	<-w.release
+	if w.fail {
+		return 0, errors.New("charged snapshot response failed")
+	}
+	return len(data), nil
+}
+
+func TestRoutingCancelSnapshotChargeHeldThroughResponse(t *testing.T) {
+	test := func(name string, fail bool) {
+		t.Run(name, func(t *testing.T) {
+			writer := &routingChargedWriter{entered: make(chan routingChargedWrite, 1), release: make(chan struct{}), fail: fail}
+			p := newBoundProxy(NewCodec(writer))
+			request, err := p.registerRoutingRequest(newRoutingRequest(nil))
+			if err != nil {
+				t.Fatal(err)
+			}
+			metadata := registryTestBytes(p)
+			var once sync.Once
+			unblock := func() { once.Do(func() { close(writer.release) }) }
+			t.Cleanup(func() { unblock(); waitRoutingSnapshotIdle(t, p); p.unregisterRoutingRequest(request) })
+			// The actual outer message contains HTML-escaped caller-ID bytes,
+			// independently of the inner result RawMessage representation.
+			id := json.RawMessage(`"` + strings.Repeat("<", 4096) + `"`)
+			p.handleMessage(&Message{ID: &id, Method: nodepolicy.MethodRoutingActive, Params: json.RawMessage(`{}`)})
+			var written routingChargedWrite
+			select {
+			case written = <-writer.entered:
+			case <-time.After(3 * time.Second):
+				t.Fatal("snapshot response did not reach writer")
+			}
+			if written.msg.Error != nil {
+				t.Fatalf("snapshot refused: %+v", written.msg.Error)
+			}
+			var result nodepolicy.RoutingActiveResult
+			if err := json.Unmarshal(written.msg.Result, &result); err != nil {
+				t.Fatal(err)
+			}
+			if len(result.Requests) != 1 || result.Requests[0] != request.key {
+				t.Fatalf("snapshot=%+v", result)
+			}
+			p.buffers.mu.Lock()
+			snapshotBytes := p.buffers.used - metadata
+			p.buffers.mu.Unlock()
+			minimum := int64(128 + len(request.key.OriginNodeID) + len(request.key.ProxyRunID) + len(request.key.RequestID) + len(written.msg.Result) + written.bytes)
+			if snapshotBytes < minimum || !p.routingSnapshot.Load() {
+				t.Fatalf("snapshot charge=%d minimum overlapping storage=%d gate=%v", snapshotBytes, minimum, p.routingSnapshot.Load())
+			}
+			bufferAssertTotals(t, p.buffers, metadata+snapshotBytes, 3, 0)
+			// Entry cleanup races with the held response, but its independently
+			// owned key copy and both encodings remain charged until I/O ends.
+			p.unregisterRoutingRequest(request)
+			bufferAssertTotals(t, p.buffers, snapshotBytes, 1, 0)
+			unblock()
+			waitRoutingSnapshotIdle(t, p)
+			bufferAssertTotals(t, p.buffers, 0, 0, 0)
+		})
+	}
+	test("successful write", false)
+	test("failed write", true)
+}
+
+func TestRoutingCancelOversizedSnapshotIDBoundedRefusal(t *testing.T) {
+	w := &recordingWriter{}
+	p := newBoundProxy(NewCodec(w))
+	id := json.RawMessage(`"` + strings.Repeat("<", (1<<20)/6) + `"`)
+	p.handleMessage(&Message{ID: &id, Method: nodepolicy.MethodRoutingActive, Params: json.RawMessage(`{}`)})
+	lines := w.lines()
+	if len(lines) != 1 || len(lines[0]) >= 1<<20 {
+		t.Fatalf("bounded error frame count=%d", len(lines))
+	}
+	var envelope map[string]json.RawMessage
+	if err := json.Unmarshal(lines[0], &envelope); err != nil {
+		t.Fatal(err)
+	}
+	var controlError RPCError
+	if err := json.Unmarshal(envelope["error"], &controlError); err != nil {
+		t.Fatal(err)
+	}
+	if string(envelope["id"]) != "null" || controlError.Code != -32000 || p.routingSnapshot.Load() {
+		t.Fatalf("oversized ID refusal id=%s error=%+v", envelope["id"], controlError)
+	}
+	bufferAssertTotals(t, p.buffers, 0, 0, 0)
 }
 
 func TestRoutingCancelPeerMethodUnavailable(t *testing.T) {
