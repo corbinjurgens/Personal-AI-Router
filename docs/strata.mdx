@@ -136,6 +136,44 @@ Readback distinguishes configured and owned-launch-validated bounds; loaded
 observations, strict content qualification and real Windows/GPU acceptance remain
 unverified. This record does not implement automatic residency.
 
+## Current Strata fork compatibility
+
+The adapter above was written against `f6726098`. The owner's current fork
+(`corbinjurgens/Strata`, `main` at `0e70753c6b0668ecf929d8ee52982a2922b4e727`)
+generates a different launch profile, and most of it is rejected today. The
+`TestStrataCurrentFork` tests in `services/nvpair-engine-manager` pin that
+behavior against the sanitized `testdata/strata/current-fork-contract.json`
+(fake key, placeholder paths). They call the existing parser and compiler only:
+no server, engine or installed port is contacted, and nothing here shows that the
+current fork runs under PAIR. The rejections stay until the adapter changes;
+deleting generated fields to make validation pass is not a fix.
+
+What the generated profile for the low-VRAM 128K case contains, and what the
+prepared subset does with it:
+
+| Generated item | Today | Needed |
+| --- | --- | --- |
+| Top-level `build_metadata`, `log`, `env`, `gpu`, `gpus_asked`, `port`, `host`, `fit_max_tokens`, `open_browser` | Rejected as unsupported config fields | A reviewed decision per field: bind it, require it to agree with the PAIR launch, or ignore it |
+| `env` with `STRATA_*` names | Field rejected; the names are also rejected in the server environment | A reviewed environment transformation bound into the approval |
+| `memory_policy` | Rejected | The server recomputes launch controls at startup from live telemetry, so approval must bind the effective result, not the saved sample |
+| `api_key` | Rejected | Stays rejected until the host-local credential path exists |
+| `--expert-cache auto`, `--prefill auto` | Rejected | Same approval binding as `memory_policy` |
+| `--kv`, `--kv-resident`, `--resident-budget-gib`, `--suffix-draft`, `--lookup-chain` | Rejected as unsupported native arguments | Admit the reviewed ones with their meaning |
+| `--no-prefill-borrow` | Rejected: the grammar only knows `--serve` as a flag without a value | A value-less flag in the grammar |
+| `--serve` absent from `args` | Rejected: the config must contain it | The server adds it itself, so the effective command must account for it |
+| `native_experts.txt` in the pack | Rejected; `experts.bin` is also required | Bind the table and every shard it names |
+| `{"parallel":1,"Parallel":2}` | Accepted; the later value wins | Reject a key that differs only by case |
+
+Already inside the prepared subset: `--vram-reserve-mib`, a fixed `--prefill`,
+`--spec 2`, a 131072-token context, serial `parallel` with no `--batch`, and the
+generated model name as the declared model identity. Inventory rows with
+`status.value` of `loaded` count as resident; a missing, unknown or `loading`
+status does not.
+
+Not exercised: load and unload responses, authentication failures,
+cancellation, redirects and any request through the proxy. The recorded owners
+of the credential path are listed in the fixture and checked to still exist.
+
 ## Procedure
 
 1. Prepare Strata outside PAIR, using its own setup, until its generated launch
