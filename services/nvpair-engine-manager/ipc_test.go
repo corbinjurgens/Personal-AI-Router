@@ -20,9 +20,7 @@ func TestIPCTransport(t *testing.T) {
 	defer ln.Close()
 
 	cmd := exec.Command(managerBin, "--ipc", path)
-	// Isolate the child's app directory from any real installation.
-	cfg := t.TempDir()
-	cmd.Env = overrideEnv(map[string]string{"APPDATA": cfg, "LOCALAPPDATA": cfg, "XDG_CONFIG_HOME": cfg, "HOME": t.TempDir()})
+	cmd.Env = isolatedManagerEnv(t.TempDir(), t.TempDir())
 	cmd.Stderr = os.Stderr
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)

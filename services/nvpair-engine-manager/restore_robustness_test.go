@@ -471,8 +471,18 @@ func TestCommittedStrataRecoveryPreparesColdRuntimeBeforeOperationLock(t *testin
 	// finish, proving this cold-manager path hashes before entering that lock.
 	st.opMu.Lock()
 	ctx, cancel := context.WithCancel(context.Background())
+	releaseOperation := sync.OnceFunc(func() {
+		cancel()
+		st.opMu.Unlock()
+	})
 	done := make(chan settings.SwitchReconcileResult, 1)
+	exited := make(chan struct{})
+	t.Cleanup(func() {
+		releaseOperation()
+		<-exited
+	})
 	go func() {
+		defer close(exited)
 		done <- f.ex.SwitchReconcile(ctx, settings.SwitchReconcileRequest{SwitchPrepareRequest: p})
 	}()
 	deadline := time.Now().Add(3 * time.Second)
@@ -487,8 +497,7 @@ func TestCommittedStrataRecoveryPreparesColdRuntimeBeforeOperationLock(t *testin
 	strataRuntimeHashes.Lock()
 	prepared, cached := strataRuntimeHashes.files[path]
 	strataRuntimeHashes.Unlock()
-	cancel()
-	st.opMu.Unlock()
+	releaseOperation()
 	select {
 	case result := <-done:
 		if result.Error == nil || !strings.Contains(result.Error.Message, "canceled") {
