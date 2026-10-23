@@ -991,6 +991,36 @@ preserves already-authoritative terminals. At its origin, a cancel returns
 `ok:false` from the replacement run, or `-32000` (`proxy not available`) while
 no proxy runs.
 
+#### `routing:cancel` and `routing:active`
+
+These client-facing methods control this origin's live requests without an
+engine or facade dependency. They use the process-wide proxy registry, including
+API-only requests with no concrete workload; they are never forwarded to a
+peer or routed through workload-manager.
+
+`routing:cancel` takes
+`{request: {originNodeId, proxyRunId, requestId}, regenerate: bool}` and returns
+`{status}`. All fields are required; `requestId` is a canonical positive
+signed-64-bit decimal string. Malformed, unknown, duplicate, missing or null
+fields and another origin return `-32602`. A stale run or ended request returns
+`not_found`. Eligible pre-commit regeneration returns `regenerating`, including
+before any node has been tried, without inventing an exclusion or consuming an
+attempt. Committed regeneration returns `conflict_committed` with no side
+effect. Otherwise cancellation returns `cancelled`, including a repeat while
+the owner remains live. This differs from `workloads:cancel`, which retains
+post-commit cancellation even when regenerate is requested.
+
+`routing:active {}` returns `{requests: RoutingRequestKey[]}`, with `[]` when
+empty. Complete keys sort numerically by their decimal ID strings (`9` before
+`10`). Both methods validate source and result contracts and call only the
+current local proxy's private `routing/cancel` or `routing/active` method.
+One forward across both methods is allowed per broker instance; overlap,
+unavailable proxy, malformed result or a five-second call timeout returns a
+bounded control error (`-32000`). There is no queue, registry or routing history
+in the broker. The proxy independently bounds snapshot copy/encoding to one
+operation, and the control path remains available under inference byte pressure
+or live-registry saturation. These methods currently have no desktop consumer.
+
 #### `discovery:get-node-info`
 
 ```json

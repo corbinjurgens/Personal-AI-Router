@@ -109,6 +109,42 @@ regenerate, or after commitment, the workload ends `cancelled` with
 `cancelled by request`. Workload cancellation after commitment never starts
 another attempt or splices another model's output into the response.
 
+## Cancel a canonical request
+
+Local broker clients can use `routing:active {}` to obtain
+`{requests: [{originNodeId, proxyRunId, requestId}, ...]}`. The list includes
+requests with no concrete workload or facade, sorts decimal request IDs
+numerically (`9` before `10`), and is `[]` when empty. It is a live snapshot,
+not history; a request may end before the next call. IDs are canonical positive
+signed-64-bit decimal strings and retain their exact value through JSON.
+
+`routing:cancel` requires the complete key in
+`{request: {originNodeId, proxyRunId, requestId}, regenerate: bool}`. It is
+origin-local only: another origin is invalid params, never a peer relay. Missing,
+null, duplicate, unknown or malformed fields also return invalid params.
+The proxy returns `not_found` for an absent or ended request or a different
+run. Ordinary cancellation returns `cancelled`; a repeat on a still-live
+cancelled owner returns the same status and preserves its first reason.
+
+Before commitment, eligible regeneration returns `regenerating` and uses the
+same owner and remaining bounds. The current concrete node, or the last tried
+node between attempts, is excluded. With no prior node it consumes no attempt
+and invents no exclusion. Concrete dispatch retains its existing retry bounds;
+hybrid requests must retain their policy bounds and cumulative spend, and
+uncertain holds never become permission to try again. After commitment,
+`regenerate:true` returns `conflict_committed` without cancelling or changing
+the stream. This differs from the workload API above, whose post-commit
+regenerate still cancels. Neither API introduces continuation or second-request
+behavior; ordinary cancellation uses `cancelled by request`.
+
+The broker forwards only to its current local proxy, under the existing
+five-second call bound. A second concurrent forward across the two methods is
+refused with a bounded control error. The proxy independently allows one active
+snapshot copy/encoding at a time, refusing overlap before copying. Control
+requests use no inference byte grants and remain available when the live
+registry or byte root is full. These APIs do not activate the hybrid listener
+or public dispatch, and no desktop control consumes them yet.
+
 ## Response commitment and interruption
 
 One request owner arbitrates attempts, deadlines, cancellation and commitment.

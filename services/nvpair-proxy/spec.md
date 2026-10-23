@@ -1163,6 +1163,8 @@ state in force. The broker re-sends policy state whenever the proxy starts; unti
 | `node/renew-egress-lease` | `{runId, revision, sequence, notAfterNanos}` | trusted parent only; answers `{runId, revision, sequence, nowNanos}`; zero deadline samples the receiver clock without changing authority; a nonzero deadline is a run/revision-bound grant (§12.9) |
 | `node/revoke-egress-lease` | `{runId, sequence}` | trusted parent only; answers `{runId, sequence}`; a higher sequence clears the current lease without activating policy (§12.9) |
 | `workload/cancel` | `{originatedFrom, runId, engine, workloadId, regenerate?}` | §12.5; answers `{found}` |
+| `routing/cancel` | `{request: {originNodeId, proxyRunId, requestId}, regenerate}` | §12.5.1; answers `{status}`; private parent IPC |
+| `routing/active` | `{}` | §12.5.1; answers `{requests: RoutingRequestKey[]}`; private parent IPC |
 
 Unknown fields and engine IDs that are not `engines.ValidRoutingID` are errors. A
 valid descriptor engine ID with no facade here is accepted state.
@@ -1556,6 +1558,53 @@ source withdrawal.
 - **Without `regenerate`, or after commit**: the request is cancelled and its
   workload ends `cancelled` with the error `cancelled by request`. A committed
   stream is never re-dispatched, so two models' output is never spliced.
+
+#### 12.5.1 Private request control
+
+The process-scoped parent IPC methods `routing/cancel` and `routing/active`
+use the existing live request registry, including requests without a concrete
+workload or enabled facade. They have no peer HTTP adapter and no per-engine
+addressed form. The broker exposes them to local clients as `routing:cancel`
+and `routing:active`; it never relays these methods to another origin.
+
+`routing/cancel` requires
+`{request: {originNodeId, proxyRunId, requestId}, regenerate: bool}`
+and returns `{status}`. Every field is required, including
+the boolean. Identity strings use the shared strict key contract; `requestId`
+is a canonical positive signed-64-bit decimal string, never a JSON number.
+Unknown, duplicate, missing, null or malformed fields return invalid params
+(`-32602`). A complete key cannot select another origin or proxy incarnation.
+
+| Status | Meaning |
+| --- | --- |
+| `not_found` | No live owner for this complete key, including an ended request |
+| `conflict_committed` | Regenerate requested after commitment; no state, callback or exclusion changes |
+| `regenerating` | An eligible pre-commit regeneration uses the existing attempt transition and remaining bounds |
+| `cancelled` | Ordinary cancellation, including a repeat while the cancelled owner remains live |
+
+Regeneration abandons an eligible active concrete destination and excludes its
+node. Between attempts it excludes the last node only when one exists. Before
+any destination has been tried it still returns `regenerating`, consumes no
+attempt and fabricates no exclusion. An uncertain hold is retained and cannot
+authorize regeneration. Both request and workload cancellation enter one
+mutex-protected owner transition and run cancellation callbacks after unlock.
+The workload surface retains its legacy post-commit cancellation behavior;
+the request surface instead refuses committed regeneration without side effects.
+Cancellation retains the first accepted cancellation state/reason and uses
+`cancelled by request`; it adds no second-request policy.
+
+`routing/active {}` returns `{requests: [...]}` with the complete live keys.
+The empty array is `[]`, never null. IDs sort by decimal length then lexically
+(`9` before `10`, through `9223372036854775807`). Keys are copied under the
+identity mutex; sorting and encoding run outside it. One snapshot copy through
+response encoding is allowed per proxy instance; an overlapping snapshot is
+refused with bounded control error `-32000` before copying. The broker similarly
+allows one forward across both methods, using the existing five-second proxy
+call bound and releasing its gate on every error. Neither operation consumes
+inference byte capacity or adds history; registry or byte-root saturation does
+not hide existing cancellation targets. New inference still receives `503`
+before effects when the registry is full. Snapshots are observations, not
+reservations: an owner may end before a subsequent cancellation arrives.
 
 ### 12.6 Routing listener
 

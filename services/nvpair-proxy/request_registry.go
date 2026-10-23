@@ -140,11 +140,19 @@ func (p *Proxy) routingRequestControl(key nodepolicy.RoutingRequestKey) *routing
 
 func (p *Proxy) activeRoutingRequests() []nodepolicy.RoutingRequestKey {
 	p.identityMu.Lock()
-	defer p.identityMu.Unlock()
 	keys := make([]nodepolicy.RoutingRequestKey, 0, len(p.requests))
 	for _, request := range p.requests {
 		keys = append(keys, request.key)
 	}
-	slices.SortFunc(keys, func(a, b nodepolicy.RoutingRequestKey) int { return strings.Compare(a.RequestID, b.RequestID) })
+	p.identityMu.Unlock()
+	slices.SortFunc(keys, func(a, b nodepolicy.RoutingRequestKey) int {
+		if len(a.RequestID) < len(b.RequestID) {
+			return -1
+		}
+		if len(a.RequestID) > len(b.RequestID) {
+			return 1
+		}
+		return strings.Compare(a.RequestID, b.RequestID)
+	})
 	return keys
 }
