@@ -969,3 +969,151 @@ func TestTerminalControlsReopenedNodeRejectsOldVisit(t *testing.T) {
 		})
 	}
 }
+
+func TestTerminalControlsEngineLock(t *testing.T) {
+	locked, unlocked := true, false
+	lockedEngines := func() []engineStatus {
+		return []engineStatus{{Engine: "ollama", Installed: true, Locked: &locked}, {Engine: "lmstudio", Installed: true, Locked: &unlocked}, {Engine: "llamacpp", Installed: true}}
+	}
+
+	t.Run("lock shown on self and peer", func(t *testing.T) {
+		for _, self := range []bool{true, false} {
+			d := newNodeDetail(nil, nodeRow{self: self})
+			d.engines = lockedEngines()
+			d.refreshEngines()
+			rows := d.engineTable.Rows()
+			if rows[0][0] != "ollama (locked on this node)" {
+				t.Fatalf("self=%v locked label = %q", self, rows[0][0])
+			}
+		}
+	})
+	t.Run("absent lock remains unknown", func(t *testing.T) {
+		d := newNodeDetail(nil, nodeRow{self: true})
+		d.engines = lockedEngines()
+		d.refreshEngines()
+		rows := d.engineTable.Rows()
+		for _, i := range []int{1, 2} {
+			if strings.Contains(rows[i][0], "lock") {
+				t.Fatalf("row %d label = %q, want no lock claim", i, rows[i][0])
+			}
+		}
+	})
+	t.Run("saved Off is not lock", func(t *testing.T) {
+		d := localDetail()
+		d.engines = []engineStatus{{Engine: "ollama"}, {Engine: "lmstudio", Locked: &locked}}
+		d.intent = engineintent.Snapshot{
+			EnabledByEngine: map[string]bool{"ollama": false, "lmstudio": false},
+			OffByEngine:     map[string]engineintent.Origin{"ollama": engineintent.Local, "lmstudio": engineintent.Local},
+		}
+		d.refreshEngines()
+		rows := d.engineTable.Rows()
+		if rows[0][0] != "ollama (saved Off, local)" || rows[1][0] != "lmstudio (locked on this node) (saved Off, local)" {
+			t.Fatalf("labels = %q, %q", rows[0][0], rows[1][0])
+		}
+		if d.engineLocked("ollama") {
+			t.Fatal("saved Off was read as a lock")
+		}
+		// A saved Off engine is still startable; the target decides.
+		if cmd := d.lifecycle(&d.engines[0], "start"); cmd == nil {
+			t.Fatalf("saved Off start was refused: %s", d.status.render())
+		}
+	})
+	t.Run("locked activation is disabled", func(t *testing.T) {
+		d := localDetail()
+		d.engines = lockedEngines()
+		d.refreshEngines()
+		for _, op := range []string{"start", "restart"} {
+			if cmd := d.lifecycle(&d.engines[0], op); cmd != nil {
+				t.Fatalf("locked %s sent a command", op)
+			}
+			if d.status.kind != toastError || !strings.Contains(d.status.text, engineLockedMessage) {
+				t.Fatalf("%s status = %+v", op, d.status)
+			}
+			d.status.info("")
+		}
+		if !d.refuseModelOp("ollama", modelActions["load"]) || !strings.Contains(d.status.text, engineLockedMessage) {
+			t.Fatalf("locked load was not refused: %+v", d.status)
+		}
+		if d.refuseModelOp("lmstudio", modelActions["load"]) {
+			t.Fatal("unlocked engine load was refused")
+		}
+		if d.refuseModelOp("llamacpp", modelActions["load"]) {
+			t.Fatal("unreported lock refused a load; the target decides")
+		}
+	})
+	t.Run("locked stop and unload remain available", func(t *testing.T) {
+		d := localDetail()
+		d.engines = lockedEngines()
+		if cmd := d.lifecycle(&d.engines[0], "stop"); cmd == nil {
+			t.Fatalf("locked stop was refused: %s", d.status.render())
+		}
+		for _, op := range []string{"unload", "delete", "pull"} {
+			if d.refuseModelOp("ollama", modelActions[op]) {
+				t.Fatalf("locked %s was refused: %s", op, d.status.render())
+			}
+		}
+	})
+	t.Run("distinct locked paused conflict and denied refusals", func(t *testing.T) {
+		seen := map[string]int{}
+		for _, code := range []int{-32013, -32011, -32010, -32012, -32000} {
+			text := commandFailure(&rpc.RPCError{Code: code, Message: "target text"})
+			if !strings.Contains(text, "target text") {
+				t.Fatalf("code %d dropped the target text: %q", code, text)
+			}
+			if prior, dup := seen[text]; dup {
+				t.Fatalf("codes %d and %d share %q", prior, code, text)
+			}
+			seen[text] = code
+		}
+		if got := commandFailure(&rpc.RPCError{Code: -32000, Message: "projection unavailable"}); strings.Contains(got, "veto") || strings.Contains(got, "locked") {
+			t.Fatalf("unknown projection read as a refusal: %q", got)
+		}
+	})
+	t.Run("paused reads remain available", func(t *testing.T) {
+		client, broker := nodeInfoRPCFixture(t)
+		d := newNodeDetail(client, nodeRow{key: "peer", name: "Peer", membership: membershipMember, presence: presenceOnline})
+		d.remotePermission, d.remotePermissionFresh = remotePermission{Version: 1, Allowed: true, State: "allowed"}, true
+		const pausedText = "This node is paused. Resume it on this node before managing it remotely."
+		_, result := terminalControlsReply(t, broker, d.modelCmd("ollama", modelActions["load"], "model"), &rpc.Message{Error: &rpc.RPCError{Code: -32011, Message: pausedText}})
+		if cmd, _ := d.update(result); cmd != nil {
+			t.Fatal("pause refusal scheduled a retry")
+		}
+		if !strings.Contains(d.status.render(), pausedText) {
+			t.Fatalf("status = %s", d.status.render())
+		}
+		if d.policyCmd() == nil {
+			t.Fatal("a refused mutation stopped status reads")
+		}
+	})
+}
+
+// A locked engine that is also saved Off must still read as locked when the
+// narrow engine column clips its label at 80 columns.
+func TestLockedEngineRowSurvivesNarrowColumn(t *testing.T) {
+	locked := true
+	d := localDetail()
+	d.SetSize(80, 30)
+	d.engines = []engineStatus{{Engine: "ollama", Installed: true, Locked: &locked}, {Engine: "lmstudio", Installed: true}}
+	d.intent = engineintent.Snapshot{
+		EnabledByEngine: map[string]bool{"ollama": false, "lmstudio": false},
+		OffByEngine:     map[string]engineintent.Origin{"ollama": engineintent.Local, "lmstudio": engineintent.Local},
+	}
+	d.refreshEngines()
+	d.engineTable.SetHeight(8)
+	rendered := d.engineTable.View()
+	var lockedRow, plainRow string
+	for _, line := range strings.Split(rendered, "\n") {
+		switch {
+		case strings.Contains(line, "ollama"):
+			lockedRow = line
+		case strings.Contains(line, "lmstudio"):
+			plainRow = line
+		}
+	}
+	if !strings.Contains(lockedRow, "(locked") {
+		t.Fatalf("locked row lost its lock at 80 columns: %q", lockedRow)
+	}
+	if strings.Contains(plainRow, "locked") || !strings.Contains(plainRow, "(saved Off") {
+		t.Fatalf("saved Off row = %q, want provenance without a lock", plainRow)
+	}
+}

@@ -132,7 +132,8 @@ provides.
 
 The top line shows `NVPAIR` and the service state on the right:
 `starting service...`, `service ready v<version>`, or `service disconnected`.
-Beside `NVPAIR` is this node's availability: `Available`, `Pausing…`, or `Paused`.
+Beside `NVPAIR` is this node's availability: `Available`, `Pausing…`, `Paused`, or
+`Pause incomplete — P retries`.
 The second line is the numbered tab bar; when anything has gone wrong, the count
 appears on the **Errors** tab's own label. The footer shows the keys available
 where you are, starting with the ones that always work. When a newer release of
@@ -154,7 +155,7 @@ header stays on `starting service...`, the service tree did not come up, and the
 | `?` | Toggle full help |
 | `ctrl+x` | Dismiss the update notice, while one is showing |
 | `q`, `ctrl+c` | Quit; the service keeps running |
-| `P` | Pause or resume this node. A pause waits for running jobs to finish, so the header shows `Pausing…` meanwhile; a failure is shown in the header |
+| `P` | Pause or resume this node. A pause waits for running jobs to finish, so the header shows `Pausing…` meanwhile; a failure is shown in the header. If a failed pause leaves the node draining, the header says `Pause incomplete — P retries; resume from this device's desktop.` and `P` retries the pause |
 | `Q` | Stop the service and quit, after a `y` confirmation |
 
 Within a table, `j` / `k` (or `↓` / `↑`) move the selection, `f` / `b` page, and
@@ -301,6 +302,18 @@ class, not a particular peer, and stays separate from installed, running and
 healthy state. A stopped engine alone does not establish saved Off, and reading
 origin does not grant permission to start an engine.
 
+Plain Off, an engine lock and a node pause are different. Saved Off is ordinary
+intent and does not stop a granted peer from starting the engine. When the
+engine's node reports it locked, the row adds ` (locked on this node)`, for this
+machine and for paired targets. A target that reports no lock is shown without
+one and is never read as unlocked, and saved Off is never read as a lock. A
+locked engine refuses start, restart and model load before anything is sent,
+with `This engine is locked on this node. Unlock it on this node before starting
+or loading a model.` Stop, unload and reads stay available. The terminal has no
+lock key; locks are changed on the engine's own device. A paused target refuses
+remote changes until it is resumed on that node, while status, permission and
+receipt reads keep working.
+
 A port is a request rather than a promise. If a running engine already holds
 the port you asked for, PAIR binds elsewhere and tells you which port it ended
 up on — so a change you did not get is never reported as one you did.
@@ -310,8 +323,10 @@ up on — so a change you did not get is never reported as one you did.
 In node detail, press `w` (**switch engine**). Choose **From** and **To** with
 `tab` to change fields and up/down (or `j`/`k`) to select installed engines.
 Press `enter` to **Switch**. The engines must differ. `r` reads status and
-permission again; `esc` closes the panel. Local pause and Stop/Off remain
-available through their existing controls, including during a remote switch.
+permission again; `esc` closes the panel. A locked target engine is refused before
+submission; a locked source adds no extra prohibition. Local pause and Stop/Off
+remain available through their existing controls, including during a remote
+switch.
 
 The target broker owns source draining, saved Off intent and verified termination,
 target startup, and readiness publication. The TUI exposes the existing
@@ -328,8 +343,8 @@ The saved-Off origin labels described above retain their meaning.
 
 Remote switching needs a current remote-management grant on the target device.
 Permission denial (`-32012`) requires a local permission change there; a local
-pause/Off veto (`-32011`) and configuration conflict (`-32010`) are different
-refusals. Keep the selections, read back current state and resolve the reported
+target veto (`-32011`, for example a pause), engine lock (`-32013`) and configuration conflict
+(`-32010`) are different refusals. Keep the selections, read back current state and resolve the reported
 cause before a deliberate new submission. Unavailable permission or revision
 keeps switching read-only. Revocation blocks new acceptance; accepted work may
 finish or reconcile.

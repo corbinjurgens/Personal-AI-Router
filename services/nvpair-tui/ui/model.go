@@ -233,6 +233,7 @@ func (m Model) Update(msg tea.Msg) (model tea.Model, cmd tea.Cmd) {
 			}
 			m.avail.pending = m.avail.toggleTarget()
 			m.avail.err = ""
+			m.avail.epoch++
 			return m, setAvailabilityCmd(m.client, m.avail.pending)
 		case key.Matches(msg, m.keys.Help):
 			m.showFullHelp = !m.showFullHelp
@@ -260,6 +261,11 @@ func (m Model) Update(msg tea.Msg) (model tea.Model, cmd tea.Cmd) {
 
 	case selfIdentityMsg, policyGetMsg, setAvailabilityMsg:
 		m.avail.update(msg)
+		// A failed call may have left the broker draining; read the state back so
+		// the header says so instead of the last value this shell saw.
+		if failed, ok := msg.(setAvailabilityMsg); ok && failed.err != nil && m.client != nil {
+			return m, policyReadbackCmd(m.client, m.avail.epoch)
+		}
 		return m, nil
 
 	case NotificationMsg:
@@ -492,6 +498,9 @@ func (m Model) banner() string {
 	if m.confirmingStop {
 		return m.stopBanner()
 	}
+	if m.avail.incomplete() {
+		return statusErrStyle.Render(" " + pauseIncompleteRecovery)
+	}
 	if m.updateLatest == "" || m.updateDismissed {
 		return ""
 	}
@@ -554,7 +563,13 @@ func (m Model) headerView() string {
 	// The pause switch sits between the title and the service status. A failure
 	// replaces the indicator until the next attempt.
 	if m.avail.err != "" {
-		left += "  " + statusErrStyle.Render("pause failed: "+m.avail.err)
+		if m.avail.incomplete() {
+			// The engine-specific detail comes first so a clipped header keeps it;
+			// the banner row carries the recovery sentence.
+			left += "  " + statusErrStyle.Render(pauseIncompleteLabel+": "+m.avail.detail())
+		} else {
+			left += "  " + statusErrStyle.Render("pause failed: "+m.avail.err)
+		}
 	} else if label := m.avail.label(); label != "" {
 		style := statusOKStyle
 		if m.avail.value != availAvailable || m.avail.pending != "" {
