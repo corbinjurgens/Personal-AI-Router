@@ -25,7 +25,6 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -48,12 +47,13 @@ const workloadMgrService = "_nvpair-workload-manager._tcp"
 // node-scanner daemon browses it and relays the directory to subscribers.
 const nodeRecordService = "_nvpair-node._tcp"
 
-// The broker does not expose a workload worker port override. This test-only
-// stdio adapter starts the real worker on an isolated port and supplies its peer
-// directory through discovery:nodes. All other broker input and all worker
-// output pass through unchanged; it never synthesizes a service response or a
-// workload. Dispatch before TestMain so broker worker arguments are not parsed
-// as testing flags and the adapter does not build another binary bundle.
+// This test-only stdio adapter supplies the real worker's peer directory through
+// discovery:nodes. It preserves the broker's --port argument, so the worker's
+// listener agrees with the broker's discovery registration. All other input and
+// all worker output pass through unchanged; it never synthesizes a service
+// response or a workload. Dispatch before TestMain so broker worker arguments
+// are not parsed as testing flags and the adapter does not build another binary
+// bundle.
 func init() {
 	if bridge := os.Getenv("NVPAIR_TEST_WORKLOAD_BRIDGE"); bridge != "" && bridge == os.Args[0] {
 		if err := runWorkloadInteropBridge(); err != nil {
@@ -65,8 +65,7 @@ func init() {
 }
 
 func runWorkloadInteropBridge() error {
-	args := append(os.Args[1:], "--port", os.Getenv("NVPAIR_TEST_WORKLOAD_PORT"))
-	cmd := exec.Command(os.Getenv("NVPAIR_TEST_WORKLOAD_BINARY"), args...)
+	cmd := exec.Command(os.Getenv("NVPAIR_TEST_WORKLOAD_BINARY"), os.Args[1:]...)
 	cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
@@ -280,10 +279,6 @@ type wlParams struct {
 	WorkloadInfo wlInfo `json:"workloadInfo"`
 }
 
-// startBrokerProc starts the broker with the given extra args and returns
-// its stdin, a reader over its stdout JSON-RPC frames, and a cleanup that
-// closes stdin and waits for a graceful exit (the broker tears down its
-// children with a 2 s grace each, so the wait window is generous).
 // startBrokerProc starts the broker as a NON-MEMBER: it pins an empty cluster dir
 // so the broker cannot pick up a real cluster identity from this machine's user
 // config. The inter-node data plane is cluster mTLS only, so workers started this
@@ -300,35 +295,18 @@ func startBrokerProc(t *testing.T, args ...string) (io.WriteCloser, <-chan jsonr
 // cluster that directory describes (see newInterNodeCluster).
 func startBrokerProcInCluster(t *testing.T, clusterDir string, args ...string) (io.WriteCloser, <-chan jsonrpc.Message, func()) {
 	t.Helper()
-	args = append([]string{"--cluster-dir", clusterDir}, args...)
-	cmd := exec.Command(brokerBin, args...)
-	cmd.Stderr = os.Stderr
+	return startBrokerProcWithPorts(t, clusterDir, reserveFixtureServicePorts(t), args...)
+}
 
-	stdinPipe, err := cmd.StdinPipe()
-	if err != nil {
-		t.Fatalf("broker stdin pipe: %v", err)
-	}
-	stdoutPipe, err := cmd.StdoutPipe()
-	if err != nil {
-		t.Fatalf("broker stdout pipe: %v", err)
-	}
-	if err := cmd.Start(); err != nil {
-		t.Fatalf("start broker: %v", err)
-	}
-	t.Logf("broker started: pid=%d", cmd.Process.Pid)
-
-	ch := startMsgReader(stdoutPipe)
-	return stdinPipe, ch, func() {
-		stdinPipe.Close()
-		done := make(chan error, 1)
-		go func() { done <- cmd.Wait() }()
-		select {
-		case <-done:
-		case <-time.After(10 * time.Second):
-			cmd.Process.Kill()
-			<-done
+func startBrokerProcWithPorts(t *testing.T, clusterDir string, ports fixtureServicePorts, args ...string) (io.WriteCloser, <-chan jsonrpc.Message, func()) {
+	t.Helper()
+	stdin, msgs, stderr, cleanup := startBrokerWithPorts(t, t.TempDir(), clusterDir, nil, ports, args...)
+	go func() {
+		for line := range stderr {
+			fmt.Fprintln(os.Stderr, line)
 		}
-	}
+	}()
+	return stdin, msgs, cleanup
 }
 
 // writeRawFrame writes a raw JSON-RPC frame (newline-terminated) to the
@@ -345,8 +323,18 @@ func writeRawFrame(t *testing.T, w io.Writer, frame string) {
 // must surface on the broker's workloads:* client stream as a
 // workloads:upsert, but only after the client has subscribed.
 func TestWorkloadManagerInboundRelay(t *testing.T) {
+	t.Run("fixture isolation controls", testWorkloadFixtureIsolation)
+	t.Run("peer event is relayed", testWorkloadManagerInboundRelay)
+}
+
+func testWorkloadManagerInboundRelay(t *testing.T) {
+	ports := reserveFixtureServicePorts(t)
+	endpoint, err := ports.workloadEventsURL()
+	if err != nil {
+		t.Fatal(err)
+	}
 	fx := newInterNodeCluster(t)
-	stdin, msgs, cleanup := startBrokerProcInCluster(t, fx.nodeDir,
+	stdin, msgs, cleanup := startBrokerProcWithPorts(t, fx.nodeDir, ports,
 		"--scanner-path", scannerBin,
 		"--workload-manager-path", workloadMgrBin,
 	)
@@ -365,9 +353,9 @@ func TestWorkloadManagerInboundRelay(t *testing.T) {
 	t.Log("subscribed to workloads stream")
 
 	// POST a peer workload to the manager's inter-node endpoint over cluster mTLS.
-	// The manager binds :14320 in a goroutine, so retry until it accepts.
+	// The manager binds its planned port in a goroutine, so retry until it accepts.
 	const peerEvent = `{"jsonrpc":"2.0","method":"workload:started","params":{"workloadInfo":{"id":"peer-wl-1","model":"llama-3-70b","engine":"trt-llm","state":"running","originatedFrom":"peer-node-A","createdAt":1716998400000,"startedAt":1716998400000,"completedAt":null,"error":null,"requesterId":null}}}`
-	postPeerEvent(t, fx.clientAsPeer(t), "https://127.0.0.1:14320/v1/workloads/events", peerEvent, 15*time.Second)
+	postPeerEvent(t, fx.clientAsPeer(t), endpoint, peerEvent, 15*time.Second)
 	t.Log("peer workload accepted by manager")
 
 	// The manager translates the peer lifecycle event into workloads:upsert
@@ -388,8 +376,13 @@ func TestWorkloadManagerInboundRelay(t *testing.T) {
 // dropped by the broker's store and never re-emitted — and workloads:get-initial
 // reports the authoritative terminal state.
 func TestWorkloadOutOfOrderSuppressed(t *testing.T) {
+	ports := reserveFixtureServicePorts(t)
+	endpoint, err := ports.workloadEventsURL()
+	if err != nil {
+		t.Fatal(err)
+	}
 	fx := newInterNodeCluster(t)
-	stdin, msgs, cleanup := startBrokerProcInCluster(t, fx.nodeDir,
+	stdin, msgs, cleanup := startBrokerProcWithPorts(t, fx.nodeDir, ports,
 		"--scanner-path", scannerBin,
 		"--workload-manager-path", workloadMgrBin,
 	)
@@ -404,7 +397,6 @@ func TestWorkloadOutOfOrderSuppressed(t *testing.T) {
 		t.Fatalf("subscribe ack = %s (err %v), want subscribed:true", ack.Result, err)
 	}
 
-	const endpoint = "https://127.0.0.1:14320/v1/workloads/events"
 	peer := fx.clientAsPeer(t)
 	// Same (originatedFrom, id, createdAt) — one workload, two lifecycle events,
 	// delivered terminal-first (the inversion the network can produce).
@@ -484,8 +476,13 @@ func TestWorkloadFailedOnNodeLoss(t *testing.T) {
 	const peerNode = "nodeloss-peer"
 	const peerUUID = "nodeloss-peer-uuid"
 
+	ports := reserveFixtureServicePorts(t)
+	endpoint, err := ports.workloadEventsURL()
+	if err != nil {
+		t.Fatal(err)
+	}
 	fx := newInterNodeCluster(t)
-	stdin, msgs, cleanup := startBrokerProcInCluster(t, fx.nodeDir,
+	stdin, msgs, cleanup := startBrokerProcWithPorts(t, fx.nodeDir, ports,
 		"--scanner-path", scannerBin,
 		"--workload-manager-path", workloadMgrBin,
 	)
@@ -523,7 +520,7 @@ func TestWorkloadFailedOnNodeLoss(t *testing.T) {
 	// tracked workloads:upsert. Stamped with the peer's HostUUID (not its
 	// name), as a real proxy does.
 	peerEvent := fmt.Sprintf(`{"jsonrpc":"2.0","method":"workload:started","params":{"workloadInfo":{"id":"wl-nodeloss-1","model":"llama-3-8b","engine":"ollama","state":"running","originatedFrom":%q,"scheduledOn":%q,"createdAt":1716998400000,"startedAt":1716998400000,"completedAt":null,"error":null,"requesterId":null}}}`, peerUUID, peerUUID)
-	postPeerEvent(t, fx.clientAsPeer(t), "https://127.0.0.1:14320/v1/workloads/events", peerEvent, 15*time.Second)
+	postPeerEvent(t, fx.clientAsPeer(t), endpoint, peerEvent, 15*time.Second)
 
 	running := waitForWorkloadEvent(t, msgs, "workloads:upsert", "wl-nodeloss-1", 10*time.Second)
 	if running.WorkloadInfo.State != "running" {
@@ -557,7 +554,7 @@ func TestWorkloadFailedOnNodeLoss(t *testing.T) {
 // broadcasts it to a discovered peer.
 func TestWorkloadManagerOutboundBroadcast(t *testing.T) {
 	// Fake Ollama upstream the proxy forwards to (200 on any request).
-	ollama := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	ollama := newFixtureHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		io.Copy(io.Discard, r.Body)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
@@ -589,7 +586,8 @@ func TestWorkloadManagerOutboundBroadcast(t *testing.T) {
 	if err := os.WriteFile(bridge, data, 0o700); err != nil {
 		t.Fatalf("copy workload bridge to %q (a previous process may still be running): %v", bridge, err)
 	}
-	workerPort := temporaryClusterPort(t)
+	ports := reserveFixtureServicePorts(t)
+	workerPort := ports.workload
 	proxyPort := temporaryClusterPort(t)
 	// Persist an explicit startup choice in the broker's temporary journal;
 	// changing a proxy port later requires an engine-manager we do not need.
@@ -607,18 +605,19 @@ func TestWorkloadManagerOutboundBroadcast(t *testing.T) {
 		HostUUID: "stub-wm-peer-uuid", ClusterUUID: fx.peerUUID, IP: "127.0.0.1",
 		Services: map[noderec.ServiceKey]noderec.ServiceStatus{noderec.ServiceWorkload: {Port: peerPort}},
 	}}}
+	args, err := ports.brokerArgs(fx.nodeDir,
+		"--proxy-path", proxyBin, "--proxy-engines", "ollama",
+		"--workload-manager-path", bridge,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
 	p := startInteropProcess(t, base, brokerBin, workerPort, []string{
 		"OLLAMA_HOST=",
 		"NVPAIR_TEST_WORKLOAD_BRIDGE=" + bridge,
 		"NVPAIR_TEST_WORKLOAD_BINARY=" + workloadMgrBin,
-		"NVPAIR_TEST_WORKLOAD_PORT=" + strconv.Itoa(workerPort),
 		"NVPAIR_TEST_WORKLOAD_NODES=" + string(mustMarshal(t, directory)),
-	},
-		"--cluster-dir", fx.nodeDir,
-		"--scanner-path", scannerBin,
-		"--proxy-path", proxyBin, "--proxy-engines", "ollama",
-		"--workload-manager-path", bridge,
-	)
+	}, args...)
 	p.paths = append(p.paths, scannerBin, proxyBin, bridge, workloadMgrBin)
 	for i, path := range p.paths {
 		canonical, err := canonicalServicePath(path)
@@ -736,7 +735,7 @@ func postPeerEvent(t *testing.T, client *http.Client, endpoint, body string, tim
 	tick := time.NewTicker(300 * time.Millisecond)
 	defer tick.Stop()
 	for {
-		resp, err := client.Post(endpoint, "application/json", strings.NewReader(body))
+		resp, err := postFixturePeerEvent(client, endpoint, body)
 		if err == nil {
 			io.Copy(io.Discard, resp.Body)
 			resp.Body.Close()
@@ -751,6 +750,134 @@ func postPeerEvent(t *testing.T, client *http.Client, endpoint, body string, tim
 			t.Fatalf("timed out POSTing peer event to %s (last err: %v)", endpoint, err)
 		}
 	}
+}
+
+// Check the target before handing the request to any transport, including one
+// with a dialer that could reach an installed service. Synthetic default-port
+// controls exercise this path without opening a listener or making a connection.
+func postFixturePeerEvent(client *http.Client, endpoint, body string) (*http.Response, error) {
+	request, err := http.NewRequest(http.MethodPost, endpoint, strings.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	port, err := strconv.Atoi(request.URL.Port())
+	if err != nil {
+		return nil, fmt.Errorf("fixture workload endpoint requires an explicit port: %w", err)
+	}
+	if err := validateFixturePort(port); err != nil {
+		return nil, err
+	}
+	request.Header.Set("Content-Type", "application/json")
+	return client.Do(request)
+}
+
+type workloadFixtureTransport func(*http.Request) (*http.Response, error)
+
+func (transport workloadFixtureTransport) RoundTrip(request *http.Request) (*http.Response, error) {
+	return transport(request)
+}
+
+// This construction/control regression is nested under the inbound parent so
+// the focused six-parent selector includes it. It allocates no real listeners
+// and gives its client only an in-memory transport.
+func testWorkloadFixtureIsolation(t *testing.T) {
+	safe := fixtureServicePorts{
+		nodeInfo: 24001, errors: 24002, workload: 24003,
+		clusterManager: 24004, engineManagerHTTP: 24005, engineControl: 24006,
+	}
+	t.Run("launch registration and inbound target agree", func(t *testing.T) {
+		args, err := safe.brokerArgs("synthetic-cluster", "--workload-manager-path", "synthetic-worker")
+		if err != nil {
+			t.Fatal(err)
+		}
+		flags := make(map[string]string)
+		for i := 0; i < len(args); i += 2 {
+			if i+1 >= len(args) {
+				t.Fatalf("unpaired fixture launch flag: %v", args)
+			}
+			if _, exists := flags[args[i]]; exists {
+				t.Fatalf("duplicate fixture launch flag %s", args[i])
+			}
+			flags[args[i]] = args[i+1]
+		}
+		for flag, want := range map[string]string{
+			"--node-info-port": "24001", "--errors-port": "24002", "--workload-manager-port": "24003",
+			"--cluster-manager-port": "24004", "--engine-manager-http-port": "24005", "--engine-manager-control-port": "24006",
+			"--scanner-path": scannerBin, "--cluster-dir": "synthetic-cluster", "--workload-manager-path": "synthetic-worker",
+		} {
+			if flags[flag] != want {
+				t.Fatalf("launch %s = %q, want %q", flag, flags[flag], want)
+			}
+		}
+		// The broker's spawnWorkloadManager passes this flag's port to the
+		// worker and registers that same port as ServiceWorkload. This is the
+		// expected registration contract; no broker or scanner runs here.
+		registered := noderec.RegisterParams{Service: noderec.ServiceWorkload, Port: safe.workload}
+		if flags["--workload-manager-port"] != strconv.Itoa(registered.Port) {
+			t.Fatalf("launch flags %v disagree with registration %+v", flags, registered)
+		}
+		endpoint, err := safe.workloadEventsURL()
+		if err != nil {
+			t.Fatal(err)
+		}
+		calls := 0
+		client := &http.Client{Transport: workloadFixtureTransport(func(request *http.Request) (*http.Response, error) {
+			calls++
+			if request.URL.Scheme != "https" || request.URL.Hostname() != "127.0.0.1" || request.URL.Port() != strconv.Itoa(registered.Port) || request.URL.Path != "/v1/workloads/events" {
+				t.Fatalf("inbound URL %s disagrees with registration %+v", request.URL, registered)
+			}
+			if request.Method != http.MethodPost || request.Header.Get("Content-Type") != "application/json" {
+				t.Fatalf("workload request method=%s headers=%v", request.Method, request.Header)
+			}
+			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader("")), Header: make(http.Header), Request: request}, nil
+		})}
+		response, err := postFixturePeerEvent(client, endpoint, `{}`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := response.Body.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if calls != 1 {
+			t.Fatalf("transport calls = %d, want 1", calls)
+		}
+	})
+	for port, owner := range installedServicePorts {
+		t.Run("rejects installed "+owner, func(t *testing.T) {
+			unsafe := safe
+			unsafe.workload = port
+			if args, err := unsafe.brokerArgs("synthetic-cluster"); err == nil || args != nil {
+				t.Fatalf("installed port %d produced launch args %v, err=%v", port, args, err)
+			}
+			if endpoint, err := unsafe.workloadEventsURL(); err == nil || endpoint != "" {
+				t.Fatalf("installed port %d produced inbound URL %q, err=%v", port, endpoint, err)
+			}
+			calls := 0
+			client := &http.Client{Transport: workloadFixtureTransport(func(*http.Request) (*http.Response, error) {
+				calls++
+				return nil, fmt.Errorf("installed-port control reached transport")
+			})}
+			// In particular 14320 is only a URL string, never a live negative control.
+			endpoint := fmt.Sprintf("https://127.0.0.1:%d/v1/workloads/events", port)
+			if response, err := postFixturePeerEvent(client, endpoint, `{}`); err == nil || response != nil || calls != 0 {
+				t.Fatalf("installed port %d: response=%v err=%v transport calls=%d, want nil, error, 0", port, response, err, calls)
+			}
+		})
+	}
+	t.Run("extra arguments cannot replace the plan", func(t *testing.T) {
+		portArgs := safe.args()
+		for i := 0; i < len(portArgs); i += 2 {
+			name := strings.TrimLeft(portArgs[i], "-")
+			for _, override := range [][]string{
+				{"--" + name, "14320"}, {"--" + name + "=14320"},
+				{"-" + name, "14320"}, {"-" + name + "=14320"},
+			} {
+				if args, err := safe.brokerArgs("synthetic-cluster", override...); err == nil || args != nil {
+					t.Fatalf("override %v produced launch args %v, err=%v", override, args, err)
+				}
+			}
+		}
+	})
 }
 
 // waitProxyReady polls ollama-proxy:get-status until the Ollama proxy reports ready
