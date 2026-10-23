@@ -478,6 +478,29 @@ func TestModelConfigurationLoadFailedReasonWire(t *testing.T) {
 	test("unknown capacity", nil)
 }
 
+// TestModelConfigurationPauseAndLockReasons carries each pause and lock reason,
+// the new codes and the older producers' codes, inside the enclosing status.
+func TestModelConfigurationPauseAndLockReasons(t *testing.T) {
+	test := func(name string, reason ModelConfigurationReason) {
+		t.Run(name, func(t *testing.T) {
+			entry := ModelConfigurationEntry{Engine: "ollama", Model: "m", DesiredResident: true, State: ModelStateBlocked, Reason: reason}
+			testResidentWire(t, ModelConfiguration{
+				PolicyRevision: "1", ObservationGeneration: 2,
+				Models: []ModelConfigurationEntry{entry},
+			}, "policyRevision observationGeneration models")
+		})
+	}
+	test("paused by either origin", ModelReasonPaused)
+	test("engine locked", ModelReasonEngineLocked)
+	test("older local pause", ModelReasonPausedLocal)
+	test("older local Off", ModelReasonEngineOffLocal)
+	t.Run("spellings", func(t *testing.T) {
+		if ModelReasonPaused != "paused" || ModelReasonEngineLocked != "engine-locked" {
+			t.Fatalf("reason spellings = %q, %q", ModelReasonPaused, ModelReasonEngineLocked)
+		}
+	})
+}
+
 func TestResidentWireBoundsAccepted(t *testing.T) {
 	longID := strings.Repeat("i", 128)
 	for _, timeout := range []int{1, MaxResidentTimeoutMs} {
@@ -508,7 +531,7 @@ func TestResidentWireBoundsAccepted(t *testing.T) {
 }
 
 func TestResidentWireEnums(t *testing.T) {
-	for _, reason := range []ModelConfigurationReason{ModelReasonEngineOff, ModelReasonNoFit, ModelReasonPausedLocal, ModelReasonEngineOffLocal, ModelReasonNotServed, ModelReasonNotInstalled, ModelReasonUnqualified, ModelReasonUnsupportedLoad, ModelReasonSwitchBusy, ModelReasonLoadFailed, ModelReasonOperationTimeout, ModelReasonObservationUnknown, ModelReasonProjectionUnknown} {
+	for _, reason := range []ModelConfigurationReason{ModelReasonEngineOff, ModelReasonNoFit, ModelReasonPaused, ModelReasonEngineLocked, ModelReasonPausedLocal, ModelReasonEngineOffLocal, ModelReasonNotServed, ModelReasonNotInstalled, ModelReasonUnqualified, ModelReasonUnsupportedLoad, ModelReasonSwitchBusy, ModelReasonLoadFailed, ModelReasonOperationTimeout, ModelReasonObservationUnknown, ModelReasonProjectionUnknown} {
 		t.Run(string(reason), func(t *testing.T) {
 			testResidentWire(t, ResidentRefusal{Engine: "ollama", Model: "m", Reason: reason}, "engine model reason")
 		})
@@ -529,7 +552,8 @@ func TestResidentWireEnums(t *testing.T) {
 			testResidentWire(t, r, "outcome")
 		})
 	}
-	if ModelReasonEngineOff != ModelConfigurationReason(RejectOff) || ModelReasonNoFit != ModelConfigurationReason(RejectNoFit) {
+	if ModelReasonEngineOff != ModelConfigurationReason(RejectOff) || ModelReasonNoFit != ModelConfigurationReason(RejectNoFit) ||
+		ModelReasonPaused != ModelConfigurationReason(RejectPaused) {
 		t.Fatal("admission reason spellings diverged")
 	}
 }

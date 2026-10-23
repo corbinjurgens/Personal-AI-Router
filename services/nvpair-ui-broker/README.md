@@ -563,11 +563,16 @@ proxy enforces it.
   reached.
 - **Node projection.** After every persisted policy change, pause and resume,
   and on every `engine:ready` (and when a new engine-manager is attached), the
-  broker sends engine-manager `engine:node-projection {policy, pausedLocally}`:
+  broker sends engine-manager `engine:node-projection {policy, pausedLocally, managementBlocked}`:
   the stored policy's advertisement (`revision`, declared `roles` with the
-  bounds of the matching profiles, `pausedBy`), and whether the node is paused
-  locally (Local veto). engine-manager serves `policy` to paired peers in its
-  pinned `GET /v1/models` document and enforces `pausedLocally`. Each send reads
+  bounds of the matching profiles, `pausedBy`), whether the node is paused
+  locally (Local veto), and `managementBlocked`, true while a pause of either
+  origin is saved, the node is draining or paused, or a local pause is accepted
+  but not yet saved. The advertisement carries no availability, so
+  `managementBlocked` is sent explicitly rather than derived from `pausedBy`.
+  engine-manager serves `policy` to paired peers in its
+  pinned `GET /v1/models` document and enforces `pausedLocally`; it stores
+  `managementBlocked` for the remote pause gate, which is not enforced yet. Each send reads
   the policy current at send time under one lock, so an older projection never
   follows a newer one.
   A local pause also sends a pending `pausedLocally` veto before persistence;
@@ -651,9 +656,15 @@ proxy enforces it.
 - **Pausing** (`node:set-availability {state:"paused"}`): persist `paused`, push
   `draining` (with `cancelActive` when `pause.onActive` is `cancel`), wait for the
   proxy's active count to reach zero for up to `pause.drainTimeoutSeconds`, then
-  push again with `cancelActive` and allow 10 s for that work to unwind. Then, as
-  the policy says, unload every loaded model and `engine:sleep` every running
-  engine, push `paused`, and notify clients. The request returns once paused.
+  push again with `cancelActive` and allow 10 s for that work to unwind. Then
+  unload every loaded model and `engine:sleep` every running engine, push
+  `paused`, and notify clients. The request returns once paused.
+  `pause.unloadModels` and `pause.stopEngines` are obsolete input kept in schema
+  version 2: a file, a local `policy:set` or an older peer's relayed set may
+  carry either bool, and parsing normalizes both to `true`, so every stored
+  policy and readback shows `true`. Reading a file does not rewrite it; the next
+  ordinary save writes the canonical values. `pause.onActive` and
+  `pause.drainTimeoutSeconds` stay configurable with their existing validation.
 - **Resuming** persists and pushes `available`, then `engine:wake`s the engines
   the pause stopped. Their saved intent was never changed, so only engines saved
   On come back.
@@ -680,8 +691,9 @@ proxy enforces it.
   locally is refused with `-32011` before it is accepted, and its
   `engine:settings-reply` carries `errorCode` like `policy:reply`.
 - **Startup.** A persisted `paused` reaches the proxy before it can admit
-  anything. With `pause.stopEngines` set, `engine:restore-enabled` is skipped
-  (also when engine-manager restarts while paused) and sent on resume instead.
+  anything. Because every stored policy has `pause.stopEngines` normalized to
+  `true`, a paused node skips `engine:restore-enabled` (also when engine-manager
+  restarts while paused) and sends it on resume instead.
 - **Idle policy.** Every 30 s the broker looks at each running engine with no
   active requests. Its idle time runs from the latest of its last admitted
   request (`admission/state.lastActivityMs`), the moment it was seen to start,

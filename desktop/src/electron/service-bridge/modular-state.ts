@@ -91,6 +91,17 @@ interface RemoteEngineFacts {
     running: boolean
     healthy: boolean
     port: number
+    /** The peer's durable engine lock; absent when the peer reported none. */
+    locked?: boolean
+}
+
+/**
+ * The engine lock an `EngineStatus` reported, as an optional field. Anything but
+ * a boolean, an older engine-manager's omission included, leaves it absent:
+ * missing lock state is unknown, never unlocked.
+ */
+function reportedLock(value: JsonValue | undefined): { locked?: boolean } {
+    return typeof value === 'boolean' ? { locked: value } : {}
 }
 
 const appStartTime = new Date().toISOString()
@@ -221,7 +232,7 @@ class ModularBridgeState {
      */
     private engineManagerFacts = new Map<
         EngineType,
-        { installed: boolean; running: boolean; port: number }
+        { installed: boolean; running: boolean; port: number; locked?: boolean }
     >()
     /**
      * The local engine-manager's validated descriptors (`engine:descriptors`),
@@ -848,7 +859,8 @@ class ModularBridgeState {
         this.engineManagerFacts.set(engineType, {
             installed: booleanValue(obj.installed),
             running: booleanValue(obj.running),
-            port: numberValue(obj.port)
+            port: numberValue(obj.port),
+            ...reportedLock(obj.locked)
         })
         // A fresh authoritative state is the resolution of whatever op was in
         // flight (start/stop done, install `done`+installed, uninstall removed).
@@ -1305,7 +1317,8 @@ class ModularBridgeState {
                 // it for the engine port.
                 enginePort: facts.installed && facts.port > 0 ? facts.port : null,
                 // The peer's promoted proxy port, when its engine is advertised.
-                proxyPort: presence?.up && presence.port > 0 ? presence.port : null
+                proxyPort: presence?.up && presence.port > 0 ? presence.port : null,
+                ...reportedLock(facts.locked)
             }
         } else if (
             node &&
@@ -1361,7 +1374,8 @@ class ModularBridgeState {
                 installed: booleanValue(engineObj.installed),
                 running: booleanValue(engineObj.running),
                 healthy: booleanValue(engineObj.healthy),
-                port: numberValue(engineObj.port)
+                port: numberValue(engineObj.port),
+                ...reportedLock(engineObj.locked)
             })
             seen.add(engineType)
         }
@@ -1389,7 +1403,8 @@ class ModularBridgeState {
             installed: booleanValue(obj.installed),
             running: booleanValue(obj.running),
             healthy: booleanValue(obj.healthy),
-            port: numberValue(obj.port)
+            port: numberValue(obj.port),
+            ...reportedLock(obj.locked)
         })
         this.emitRemoteEngineStatus(nodeId, engineType)
     }
@@ -1675,7 +1690,8 @@ class ModularBridgeState {
                 nodeId,
                 processStatus: pending,
                 enginePort: facts && facts.running && facts.port > 0 ? facts.port : null,
-                proxyPort: isProxyEngine(engineType) ? this.getProxyPort(engineType) : null
+                proxyPort: isProxyEngine(engineType) ? this.getProxyPort(engineType) : null,
+                ...reportedLock(facts?.locked)
             }
         }
 
@@ -1698,7 +1714,8 @@ class ModularBridgeState {
                 // Each proxy-fronted engine has its own broker proxy
                 // (mapped in proxy-engines.ts); report that engine's bound
                 // proxy port. Loopback-only engines get null.
-                proxyPort: isProxyEngine(engineType) ? this.getProxyPort(engineType) : null
+                proxyPort: isProxyEngine(engineType) ? this.getProxyPort(engineType) : null,
+                ...reportedLock(facts.locked)
             }
         }
 

@@ -225,10 +225,10 @@ func TestMergePeerSetAcceptsUnchangedProjection(t *testing.T) {
 	test("no edit", nil, func(*Policy) {})
 	test("device edit keeps the protected sections", func(doc map[string]any) {
 		doc["idle"].(map[string]any)["unloadAfterMinutes"] = 7
-		doc["pause"].(map[string]any)["unloadModels"] = false
+		doc["pause"].(map[string]any)["drainTimeoutSeconds"] = 9
 	}, func(p *Policy) {
 		p.Idle.UnloadAfterMinutes = 7
-		p.Pause.UnloadModels = false
+		p.Pause.DrainTimeoutSeconds = 9
 	})
 	test("peer availability is ignored", func(doc map[string]any) {
 		doc["availability"] = "paused"

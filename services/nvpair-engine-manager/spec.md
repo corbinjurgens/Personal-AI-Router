@@ -606,8 +606,14 @@ extensibility story for an open-source product.
   running: boolean
   healthy: boolean
   port: number
+  locked?: boolean
 }
 ```
+
+`locked` is the engine's durable lock on its own node. Present `true` or `false`
+is authoritative; absent means lock state is unavailable, as from an older
+target, and is never evidence of unlocked. It is not populated until lock
+enforcement lands.
 
 `LogLine` object (entry in `engine:logs`):
 ```json
@@ -648,6 +654,7 @@ Requests (caller → service):
 | `engine:start` | `{ engine }` | `EngineStatus` (after readiness) |
 | `engine:stop` | `{ engine }` | `EngineStatus` |
 | `engine:restart` | `{ engine }` | `EngineStatus` |
+| `engine:set-lock` | `{ engine, locked }` | `null` acknowledgement. Local only: decoded strictly, so `engine` must be registered, `locked` must be a JSON boolean and any other member, `node`, `nodeId`, `caller` and `origin` included, is `-32602`. No `ec` route or peer relay reaches it. Until lock enforcement lands, a well-formed request answers `-32000` `Engine locking is not available yet.` and changes no saved intent, lock or runtime state |
 | `engine:action` | `{ engine, action, params }` | the engine's raw response |
 | `engine:logs` | `{ engine }` | `{ lines: [LogLine] }` |
 | `engine:errors` | — | `{ errors: [ServiceError] }` |
@@ -686,7 +693,7 @@ are display data and do not change proxy admission or lifecycle behavior.
 
 Notifications (service → caller): `engine:intent-changed{enabledByEngine, offByEngine}` (after an explicit start/stop changes saved intent), `policy:request{id, method, caller, params}` / `policy:cancel{id}` (a paired node's node-policy call for the broker, which answers with the `policy:reply{id, result, error?, errorCode?}` notification), `ready{version}`, `engine:state-changed{EngineStatus}`, `engine:models-changed{engine, models}` (pushed when an engine's loaded-in-memory model set changes; `models` is the full `engine:models` shape incl. `loadedByEngine`), `engine:install-progress{engine, stage, percent?, error?}` (`error` on the terminal `failed` frame), `engine:pull-progress{engine, op, stage, percent?, message}` (live progress for a local model pull driven via `engine:action{action:"pull_model"}` — the local counterpart of `engine:remote-progress`), `engine:remote-progress{opId, node, engine, op, stage, percent?, message}` (live progress relayed from a remote install/pull; a model copy reports `op:"copy"` with `file?, bytesDone?, bytesTotal?`, §7.3), and `errors:report` / `errors:clear` (consumed by `nvpair-errors` via the Broker). `install` / `start` / `stop` / `restart` / `action` / `remote-*` each run in their own goroutine so the read loop never blocks; their responses arrive when the op completes.
 
-Notifications (caller → service): `engine:node-projection{policy, pausedLocally}` carries this node's policy advertisement (`nvpair-shared/nodepolicy.Advertisement`: `revision`, `roles` per tier with the bounds of the matching profile, `pausedBy?`) and whether the node is paused by its own clients, a pause without recorded provenance included (§7.2 Local veto). The broker sends it after every persisted policy or availability change and again on every `engine:ready`, reading its current policy each time under one lock, so a later projection never carries older state. engine-manager keeps the last one in memory, replaced whole, never persisted; an undecodable one leaves the previous in place. `engine:models` and `GET /v1/models` return it as `policy`, omitted until the first push. `engine:models-changed` does not carry it.
+Notifications (caller → service): `engine:node-projection{policy, pausedLocally, managementBlocked}` carries this node's policy advertisement (`nvpair-shared/nodepolicy.Advertisement`: `revision`, `roles` per tier with the bounds of the matching profile, `pausedBy?`), whether the node is paused by its own clients, a pause without recorded provenance included (§7.2 Local veto), and `managementBlocked`: whether a pause of either origin, accepted but not yet saved, draining or saved, fences peer management writes. engine-manager exposes `managementBlocked` with whether it is known yet; it is stored but not enforced until the common remote pause gate lands. An older broker omits it, which reads as false; it is never derived from `pausedBy` or `pausedLocally`. The broker sends it after every persisted policy or availability change and again on every `engine:ready`, reading its current policy each time under one lock, so a later projection never carries older state. engine-manager keeps the last one in memory, replaced whole, never persisted; an undecodable one leaves the previous in place. `engine:models` and `GET /v1/models` return it as `policy`, omitted until the first push. `engine:models-changed` does not carry it.
 
 `engine:model-identity{engines}` is also a service → caller notification: a whole snapshot keyed by engine, each entry `{engineRunId, launchDigest, modelDigests}` with `modelDigests` keyed by model name. The loaded-model watcher emits it after its first sweep and whenever the snapshot changes; an absent engine has no current identity. Only running owned processes with a known launch digest are included, excluding adopted services and command-mode daemons. Model digests must come from an inventory of the same run and contain lowercase SHA-256 hex. Publication is ordered with `engine:state-changed`, so a running engine's identity cannot arrive after its stop. The broker adds its settings fingerprint before publishing the strict admission identity to the proxy.
 
@@ -731,7 +738,11 @@ from the current authenticated worker notification.
 
 HTTP 409 `{"error": "bounded explanation", "code":"remote_management_denied"}`
 maps to RPC `-32012`, independently of `-32010/policy_conflict`,
-`-32011/local_veto` and unpinned 403. Missing, invalid, unsupported, changing or
+`-32011/local_veto`, `-32013/engine_locked` and unpinned 403. Each typed code
+keeps its number through the 409 body, stream error frames and broker relays,
+with the target's message and no JSON-RPC error `data`. `-32013` is the refusal
+of a start, load or switch into an engine locked on its own node; a switch
+receipt carries it as kind `engine_locked`, which is valid only with `-32013`. Missing, invalid, unsupported, changing or
 incomplete authority denies without a cached allow. A grant does not override
 local veto, private/CORS policy, served/resident protection or target admission.
 Permitted inference is unchanged. Direct operations accept at the fresh `ec`
@@ -759,10 +770,10 @@ The broker's `policy:reply {id, result, error?, errorCode?}` carries a JSON-RPC
 `errorCode` on every failure. Invalid parameters, including missing or malformed
 `expectedPersistedRevision`, invalid policy and invalid availability, use
 `-32602`; revision conflicts use `-32010`; a resume the local veto refuses uses
-`-32011`; remote-management denial uses `-32012`; save failures and other operational errors use `-32000`. Inbound
+`-32011`; remote-management denial uses `-32012`; an engine lock uses `-32013`; save failures and other operational errors use `-32000`. Inbound
 policy routes return HTTP 400 for `-32602`, HTTP 409 with the JSON body
-`{"error": <diagnostic>, "code": "policy_conflict" | "local_veto" | "remote_management_denied"}`
-for `-32010`, `-32011` and `-32012`, and a plain-text HTTP 409 for other broker or relay errors. At the
+`{"error": <diagnostic>, "code": "policy_conflict" | "local_veto" | "remote_management_denied" | "engine_locked"}`
+for `-32010`, `-32011`, `-32012` and `-32013`, and a plain-text HTTP 409 for other broker or relay errors. At the
 origin, HTTP 400 becomes JSON-RPC `-32602`, a typed 409 becomes its code, and
 other HTTP failures become `-32000`; diagnostics are preserved without inferring
 a code from their text. A stale policy draft conflicts before

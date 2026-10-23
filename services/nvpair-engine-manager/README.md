@@ -153,6 +153,7 @@ Requests (caller → service):
 | `engine:stop` | `{ engine }` | `EngineStatus` |
 | `engine:restart` | `{ engine }` | `EngineStatus` |
 | `engine:set-port` | `{ engine, port }` | `EngineStatus` (after rebind) |
+| `engine:set-lock` | `{ engine, locked }` | `null` acknowledgement. Local only: see [Engine lock](#engine-lock). Until lock enforcement lands, every well-formed request answers `-32000` `Engine locking is not available yet.` and changes nothing |
 | `engine:action` | `{ engine, action, params }` | the engine's raw response. `action:"pull_model"` is streamed: it emits live `engine:pull-progress` notifications and returns the pull's terminal result (see below). An action whose manifest declares `restart_after` (LM Studio's `delete_model`) restarts a running engine before replying, so the response also means the engine is back and healthy |
 | `engine:logs` | `{ engine }` | `{ lines: [LogLine] }` |
 | `engine:errors` | — | `{ errors: [ServiceError] }` |
@@ -176,7 +177,24 @@ Requests (caller → service):
 | `shutdown` | — | `null` |
 | `log/set-level` | `{ level }` | `{ level }` |
 
-`EngineStatus` = `{ engine, display_name, installed, running, healthy, port }`.
+`EngineStatus` = `{ engine, display_name, installed, running, healthy, port, locked? }`.
+`locked` is the engine's durable lock on its own node: present `true` or `false`
+is authoritative, and an absent field means lock state is unavailable, as from a
+target that predates it. A client never reads an absent `locked` as unlocked.
+This service does not populate it until lock enforcement lands.
+
+### Engine lock
+
+`engine:set-lock {engine, locked}` is the local-only setter for an engine's
+lock. `engine` must name a registered engine and `locked` must be a JSON
+boolean; any other member, `node`, `nodeId`, `caller` and `origin` included, is
+`-32602`, so a request cannot address another node or claim an origin. No `ec`
+route, broker peer relay or `engine:remote-*` method reaches it, so a paired
+node, even one with remote-management permission, can neither set nor clear a
+lock. The current implementation is a contract stub: a well-formed request
+answers `-32000` with `Engine locking is not available yet.` and changes no
+saved intent, lock or runtime state. A locked engine's start, load or switch
+refusal is `-32013`, wire name `engine_locked` (below).
 
 `engine:wake`, `engine:sleep` and `engine:intent` exist for the broker's node
 policy (pause, idle stop, start on demand). `engine:start` and `engine:stop`
@@ -227,15 +245,20 @@ node's node-policy call relayed to the broker, answered by the broker's
 pipeline — `errors:report` / `errors:clear` (consumed by `nvpair-errors`
 via the broker; see below).
 
-Notifications (caller → service): `engine:node-projection{policy, pausedLocally}`
+Notifications (caller → service): `engine:node-projection{policy, pausedLocally, managementBlocked}`
 is this node's policy advertisement (declared roles with their profile bounds,
-policy revision, pause origin) and whether the node is paused locally. The
+policy revision, pause origin), whether the node is paused locally, and
+whether a pause of either origin, pending, draining or saved, fences peer
+management writes. An older broker omits `managementBlocked`, which then reads
+as false; it is never derived from `pausedBy` or `pausedLocally`. The
 broker sends it after every persisted policy or availability change and on
 every `engine:ready`. engine-manager keeps the last one in memory only and
 serves `policy` on `engine:models` and `GET /v1/models`, so paired peers learn
 this node's roles from the pinned inventory fetch they already make. It is
 never put in mDNS TXT or in the peer-services descriptor. `pausedLocally`
-drives the local veto (Remote engine management).
+drives the local veto (Remote engine management). `managementBlocked` is stored
+with the projection; nothing enforces it until the common remote pause gate
+lands.
 
 Streaming HTTP pulls have a 30-minute **inactivity** watchdog. Each increase in
 an Ollama layer's or llama.cpp file's completed byte count refreshes that
@@ -437,7 +460,10 @@ lifecycle/content lock waits are part of that accepted operation.
 Permission refusal is HTTP 409 with `code:"remote_management_denied"`, preserved
 as JSON-RPC `-32012` by ordinary and streaming clients, before progress headers
 or side effects. It is distinct from an unpinned 403, local veto
-`-32011/local_veto` and conflict `-32010`. Reads, status, model exports and
+`-32011/local_veto`, engine lock `-32013/engine_locked` and conflict `-32010`.
+Every one of these typed codes reaches the origin's JSON-RPC client with its own
+number, through the 409 body, a stream error frame and the broker relays alike,
+with the target's message and no JSON-RPC error `data`. Reads, status, model exports and
 permitted inference stay available without management permission. Pull-copy
 reads the source and writes the local requester; it grants no remote destination
 write authority. No inbound destination-copy route exists.
@@ -485,10 +511,11 @@ pin, acts, and answers with `policy:reply {id, result, error?, errorCode?}`.
 Every error carries a JSON-RPC `errorCode`: `-32602` for invalid parameters,
 including missing `expectedPersistedRevision`, invalid policy or availability;
 `-32010` for a revision conflict; `-32011` for a resume the local veto refuses;
-`-32012` for remote-management denial;
+`-32012` for remote-management denial; `-32013` for an engine locked on this
+node;
 `-32000` for a save failure or other operational failure. The route maps
-`-32602` to HTTP 400, `-32010`, `-32011` and `-32012` to HTTP 409 with the body
-`{"error": <diagnostic>, "code": "policy_conflict" | "local_veto" | "remote_management_denied"}`, and other
+`-32602` to HTTP 400, `-32010`, `-32011`, `-32012` and `-32013` to HTTP 409 with the body
+`{"error": <diagnostic>, "code": "policy_conflict" | "local_veto" | "remote_management_denied" | "engine_locked"}`, and other
 failures to a plain-text HTTP 409. The origin's remote-policy methods map HTTP
 400 to JSON-RPC `-32602`, a typed 409 to its code, and other HTTP failures to
 `-32000`, preserving the diagnostic. No classification depends

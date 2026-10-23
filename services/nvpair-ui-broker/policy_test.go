@@ -1176,23 +1176,37 @@ func TestStartupPausedWithStopEnginesSkipsRestoreUntilResume(t *testing.T) {
 	})
 }
 
-func TestStartupPausedWithoutStopEnginesStillRestores(t *testing.T) {
+// TestStartupPausedWithLegacyFalseOptionsSkipsRestore loads a legacy paused
+// document that turned stopEngines and unloadModels off. Loading normalizes
+// both to true without rewriting the file, so startup skips restoration like
+// any other paused node.
+func TestStartupPausedWithLegacyFalseOptionsSkipsRestore(t *testing.T) {
 	path := filepath.Join(t.TempDir(), nodepolicy.FileName)
-	paused := nodepolicy.Default()
-	paused.Availability = nodepolicy.Paused
-	writePolicyFile(t, path, paused)
+	legacy := `{"version":2,"revision":"3","availability":"paused","pausedBy":"local",` +
+		`"pause":{"onActive":"finish","drainTimeoutSeconds":30,"unloadModels":false,"stopEngines":false}}`
+	if err := os.WriteFile(path, []byte(legacy), 0o600); err != nil {
+		t.Fatalf("write legacy policy: %v", err)
+	}
 	b, _ := newPolicyBroker(t)
 	b.loadNodePolicy(path)
+	if pause := b.localPolicy().Policy.Pause; !pause.StopEngines || !pause.UnloadModels {
+		t.Fatalf("loaded pause = %+v, want both legacy switches normalized to true", pause)
+	}
 	engine := attachFakeEngine(t, b)
 	b.restoreEnabledEngines(b.getEngineMgr())
-	engine.waitFor("engine:restore-enabled", func(calls []policyCall) bool {
-		for _, call := range calls {
-			if call.method == restoreEnabledEnginesMethod {
-				return true
-			}
+	time.Sleep(50 * time.Millisecond)
+	for _, c := range engine.snapshot() {
+		if c.method == restoreEnabledEnginesMethod {
+			t.Fatal("a paused node with legacy false pause options restored its engines at startup")
 		}
-		return false
-	})
+	}
+	saved, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read policy after load: %v", err)
+	}
+	if string(saved) != legacy {
+		t.Fatalf("loading rewrote the legacy policy file:\n%s", saved)
+	}
 }
 
 func TestWakeRefusedWhenPausedOrSavedOff(t *testing.T) {

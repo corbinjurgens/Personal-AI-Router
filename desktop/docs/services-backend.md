@@ -185,8 +185,19 @@ The typed engine API also exposes `switchEngine` and `switchStatus`, mapped to
 intent and recovery; the bridge validates the complete receipt and republishes
 `engine:switch-changed` as `engines:switch-changed` with node, request and sequence.
 Status accepts `afterSequence` for a bounded wait. Numeric refusal codes survive
-the IPC envelope, including configuration conflict (-32010) and local veto
-(-32011). These methods have no desktop controls yet.
+the IPC envelope, including configuration conflict (-32010), local veto
+(-32011) and engine lock (-32013). The receipt parser accepts kind
+`engine_locked` only with `-32013`. These methods have no desktop controls yet.
+
+Engine status carries an optional `locked` from engine-manager's `EngineStatus`
+through local and remote facts; an absent value stays absent. The local-only
+`engine:set-lock` is reached from `engine:command {command:'setLock'}` only for
+this device's own node. The node projection the broker sends engine-manager
+carries `managementBlocked`; the desktop does not read it. Model configuration
+reasons include `paused` and `engine-locked`, and the older `paused-local` and
+`engine-off-local` remain readable. An older desktop rejects a snapshot carrying
+a new reason rather than showing generic text, so deploy the broker and its
+clients together for complete policy presentation.
 
 Ports and the engine arguments are one authoritative, revisioned record owned by
 the node running the engine. The broker exposes `engine:{get,preview,apply}-settings`

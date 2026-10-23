@@ -38,6 +38,10 @@ type EngineStatus struct {
 	Running     bool   `json:"running"`
 	Healthy     bool   `json:"healthy"`
 	Port        int    `json:"port,omitempty"`
+	// Locked is the engine's durable lock on this node. Present true or false
+	// is authoritative; nil, omitted on the wire, means lock state is not
+	// available, as from an older target, and is never read as unlocked.
+	Locked *bool `json:"locked,omitempty"`
 }
 
 // engineState is the per-engine runtime state.

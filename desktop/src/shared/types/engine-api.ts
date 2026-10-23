@@ -77,6 +77,7 @@ export type EngineCommandType =
     | 'deleteModel'
     | 'copyModelToThisPc'
     | 'setModelExpiry'
+    | 'setLock'
 
 /** Payload for engine commands sent from the UI. */
 export interface EngineCommandPayload {
@@ -85,6 +86,11 @@ export interface EngineCommandPayload {
     nodeId: string
     model?: string
     expiry?: string
+    /**
+     * `setLock` only: the requested lock. Only the device running the engine
+     * can change it, so `nodeId` must be this device's own node.
+     */
+    locked?: boolean
 }
 
 /** Canonical engine state snapshot sent on connect/reconnect. */

@@ -79,11 +79,13 @@ const (
 	SwitchInvalidParamsCode          = -32602
 	SwitchConfigurationConflictCode  = -32010
 	SwitchRemoteVetoCode             = -32011
+	SwitchEngineLockedCode           = -32013
 	SwitchOperationErrorCode         = -32000
 	SwitchErrorInvalidRequest        = "invalid_request"
 	SwitchErrorReusedID              = "reused_id"
 	SwitchErrorConfigurationConflict = "configuration_conflict"
 	SwitchErrorRemoteVeto            = "remote_veto"
+	SwitchErrorEngineLocked          = "engine_locked"
 	SwitchErrorUnknownReceipt        = "unknown_receipt"
 	SwitchErrorBusy                  = "busy"
 	SwitchErrorFull                  = "full"
@@ -344,6 +346,8 @@ func (e SwitchError) Validate() error {
 		code = SwitchConfigurationConflictCode
 	case SwitchErrorRemoteVeto:
 		code = SwitchRemoteVetoCode
+	case SwitchErrorEngineLocked:
+		code = SwitchEngineLockedCode
 	case SwitchErrorUnknownReceipt, SwitchErrorBusy, SwitchErrorFull, SwitchErrorStorage,
 		SwitchErrorUnprepared, SwitchErrorUnroutable, SwitchErrorTargetRunning, SwitchErrorValidation,
 		SwitchErrorDrain, SwitchErrorSourceStop, SwitchErrorTargetStart, SwitchErrorPublication, SwitchErrorInterrupted:

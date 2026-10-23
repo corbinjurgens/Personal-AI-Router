@@ -916,6 +916,34 @@ describe('model configuration policy evidence', () => {
         }
     )
 
+    it.each(['paused', 'engine-locked', 'paused-local', 'engine-off-local'])(
+        'reads the %s reason on get, set and push',
+        reason => {
+            const evidence: JsonObject = {
+                policyRevision: '9',
+                observationGeneration: 19,
+                models: [
+                    {
+                        engine: 'ollama',
+                        model: 'held',
+                        desiredResident: true,
+                        observedLoaded: false,
+                        state: 'blocked',
+                        reason
+                    }
+                ]
+            }
+            const snapshot = { policy: { revision: '9' }, modelConfiguration: evidence }
+            expect(
+                parsePolicyDocument({ ...snapshot, availability: 'paused' }).modelConfiguration
+            ).toEqual(evidence)
+            expect(parsePolicySetResult(snapshot).modelConfiguration).toEqual(evidence)
+            expect(parsePolicyChange({ ...snapshot, nodeId: 'peer' })?.modelConfiguration).toEqual(
+                evidence
+            )
+        }
+    )
+
     it('keeps absent status absent on get, set and push', () => {
         const snapshot = { policy: { revision: '9' } }
         expect(parsePolicyDocument({ ...snapshot, availability: 'available' })).not.toHaveProperty(
