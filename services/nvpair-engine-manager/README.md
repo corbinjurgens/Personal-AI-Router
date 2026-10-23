@@ -624,7 +624,10 @@ reserved for JSON-RPC frames in stdio mode.
 ## Logging & errors
 
 Each managed engine's stdout/stderr is captured into a bounded ring
-(queryable via `engine:logs`). Operational failures (install/start/health)
+(queryable via `engine:logs`); serving output redacts path-bearing tokens, quoted
+paths and the configured models directory before capture or diagnostics, and
+oversized output is drained without retention.
+Operational failures (install/start/health)
 are recorded and surfaced as `errors:report` / `errors:clear`
 notifications using the `nvpair-shared/errors` wire shape. The broker
 (`nvpair-ui-broker`) forwards them to the `nvpair-errors` registry.

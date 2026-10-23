@@ -397,9 +397,10 @@ func (e *Executor) bringUpProcessWithSnapshot(ctx context.Context, st *engineSta
 		return err
 	}
 	proc, err := startManagedProc(launch.Bin, launch.Args, launch.Env, func(stream, line string) {
-		// Native NE output can name model paths read from the preset, which
-		// argument/environment redaction cannot know. Report safe stages instead.
 		if serving {
+			line = redactServingLine(line, st.modelsDir)
+			st.logs.append(stream, line)
+			_, _ = diagnostics.Write([]byte(line + "\n"))
 			return
 		}
 		_, _ = diagnostics.Write([]byte(line + "\n"))

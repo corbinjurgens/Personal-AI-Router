@@ -84,12 +84,13 @@ outside the samples remain outside this cheap local binding's assurance.
 Superseded pending generations and unconsumed cold generations at orderly
 executor shutdown are released independently of running-process leases.
 
-NE process stdout/stderr is suppressed in exported startup diagnostics and the
-log ring because native output can expose preset model paths. Failures report
-the NE validation/launch stage, native early-exit code or readiness-wait duration
-without copying native output or paths. Unconfigured launches retain their
-existing native-output and diagnostic behavior. A local sanitized native
-diagnostic remains deferred to the live validation gate.
+Serving process output enters the bounded engine log ring and startup diagnostics
+only after the configured models directory, quoted spans holding a path and
+path-bearing tokens are replaced with `[redacted]`. Failures report the NE
+validation/launch stage, native early-exit code or readiness-wait duration with
+that redacted output. Unconfigured launches retain their existing output
+behavior. After a scanner error, remaining process output is drained and
+discarded so oversized lines cannot block process exit.
 
 Readback distinguishes configured, owned-launch-validated and loaded-observed
 values. The existing loaded-model sweep supplies llama observations as described
