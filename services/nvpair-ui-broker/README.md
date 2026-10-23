@@ -682,7 +682,12 @@ proxy enforces it.
   `available:false` (no host-platform block) and final inventory reports the
   engine stopped. Missing or malformed evidence keeps shutdown unverified.
   Replacement recovery uses this same proof before settling pause obligations
-  or acknowledging readiness.
+  or acknowledging readiness. Known residual: if a custom engine's manifest
+  loses this host's platform block while its process runs and engine-manager
+  then crashes, the replacement reports `available:false` and `running:false`
+  without probing, so that predecessor's process is not proven stopped. Closing
+  it needs termination evidence from engine-manager that no wire field carries
+  today.
   `pause.unloadModels` and `pause.stopEngines` are obsolete input kept in schema
   version 2: a file, a local `policy:set` or an older peer's relayed set may
   carry either bool, and parsing normalizes both to `true`, so every stored
