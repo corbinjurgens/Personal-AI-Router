@@ -7,7 +7,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -101,7 +104,6 @@ func TestPauseProjectionCarriesProvenanceAndRevision(t *testing.T) {
 	emission("local pause", nodepolicy.Paused, nodepolicy.PausedLocally)
 	emission("local resume", nodepolicy.Available, nodepolicy.PausedLocally)
 	emission("peer pause", nodepolicy.Paused, nodepolicy.PausedByPeer)
-	emission("peer resume", nodepolicy.Available, nodepolicy.PausedByPeer)
 
 	t.Run("peer resume veto emits no projection", func(t *testing.T) {
 		ab, engine := fixture(t)
@@ -122,4 +124,176 @@ func TestPauseProjectionCarriesProvenanceAndRevision(t *testing.T) {
 			t.Fatalf("veto emitted a projection: before %+v, after %+v", before, got)
 		}
 	})
+}
+
+func pauseLifecycleCalls(calls []policyCall) []policyCall {
+	var lifecycle []policyCall
+	for _, call := range calls {
+		if call.method == engineUnloadModelMethod || call.method == engineSleepMethod {
+			lifecycle = append(lifecycle, call)
+		}
+	}
+	return lifecycle
+}
+
+func TestPauseAlwaysStopsAndUnloadsDespiteLegacyOptions(t *testing.T) {
+	test := func(name string, origin nodepolicy.PauseOrigin) {
+		t.Run(name, func(t *testing.T) {
+			b, _, _, engine := pausingBroker(t, nodepolicy.PauseConfig{OnActive: nodepolicy.FinishActive, StopEngines: false, UnloadModels: false})
+			// Neither this engine nor its model has reached broker notifications.
+			running := true
+			engine.setAnswer(func(method string, raw json.RawMessage) (any, string) {
+				switch method {
+				case "engine:get-installed":
+					return map[string]any{"engines": []any{
+						map[string]any{"engine": "ollama", "running": running},
+						map[string]any{"engine": "llamacpp", "running": running},
+					}}, ""
+				case "engine:models":
+					return map[string]any{"loadedByEngine": map[string][]string{"llamacpp": {"fresh-model"}}}, ""
+				case engineSleepMethod:
+					var p struct {
+						Engine string `json:"engine"`
+					}
+					if err := json.Unmarshal(raw, &p); err != nil {
+						return nil, err.Error()
+					}
+					if p.Engine == "ollama" {
+						running = false
+					}
+				}
+				return map[string]bool{"ok": true}, ""
+			})
+			if state, err := b.setAvailability(context.Background(), nodepolicy.Paused, origin); err != nil || state != nodepolicy.Paused {
+				t.Fatalf("pause = %s, %v", state, err)
+			}
+			unloaded, slept := make(map[string][]string), make(map[string]bool)
+			for _, call := range pauseLifecycleCalls(engine.snapshot()) {
+				var p struct {
+					Engine string `json:"engine"`
+					Model  string `json:"model"`
+				}
+				if err := json.Unmarshal(call.params, &p); err != nil {
+					t.Fatalf("decode lifecycle call: %v", err)
+				}
+				if call.method == engineSleepMethod {
+					slept[p.Engine] = true
+				} else {
+					unloaded[p.Engine] = append(unloaded[p.Engine], p.Model)
+				}
+			}
+			if !reflect.DeepEqual(unloaded, map[string][]string{"ollama": {"m1"}, "llamacpp": {"fresh-model"}}) || !reflect.DeepEqual(slept, map[string]bool{"ollama": true, "llamacpp": true}) {
+				t.Fatalf("unloaded=%v slept=%v, want cached and fresh models/engines", unloaded, slept)
+			}
+			requirePolicyIntent(t, b, map[string]bool{"ollama": true})
+			for _, call := range engine.snapshot() {
+				if call.method == "engine:stop" {
+					t.Fatal("pause rewrote engine intent with an ordinary stop")
+				}
+			}
+		})
+	}
+	test("local pause", nodepolicy.PausedLocally)
+	test("peer pause", nodepolicy.PausedByPeer)
+}
+
+func TestPauseStopFailureRetainsFenceAndCanRetryLocally(t *testing.T) {
+	b, _, proxy, engine := pausingBroker(t, nodepolicy.PauseConfig{OnActive: nodepolicy.FinishActive})
+	fail, running := true, map[string]bool{"ollama": true, "llamacpp": true}
+	engine.setAnswer(func(method string, raw json.RawMessage) (any, string) {
+		switch method {
+		case "engine:get-installed":
+			return map[string]any{"engines": []any{
+				map[string]any{"engine": "ollama", "running": running["ollama"]},
+				map[string]any{"engine": "llamacpp", "running": running["llamacpp"]},
+			}}, ""
+		case "engine:models":
+			return map[string]any{"loadedByEngine": map[string][]string{}}, ""
+		case engineUnloadModelMethod:
+			return nil, "unload failed"
+		case engineSleepMethod:
+			var p struct {
+				Engine string `json:"engine"`
+			}
+			if err := json.Unmarshal(raw, &p); err != nil {
+				return nil, err.Error()
+			}
+			if p.Engine == "llamacpp" && fail {
+				return nil, "external process cannot be stopped"
+			}
+			running[p.Engine] = false
+		}
+		return map[string]bool{"ok": true}, ""
+	})
+	state, err := b.setAvailability(context.Background(), nodepolicy.Paused, nodepolicy.PausedByPeer)
+	if state != nodepolicy.Draining || policyErrorCode(err) != -32000 || !strings.HasPrefix(err.Error(), "Pause could not stop every engine: ") || len(err.Error()) > 560 {
+		t.Fatalf("incomplete pause = %s, %v", state, err)
+	}
+	r := b.nodePolicyRuntime()
+	r.mu.Lock()
+	blocked, proxyErr := r.managementBlockedLocked(), r.availabilityErr
+	r.mu.Unlock()
+	if !blocked || proxyErr != "" || b.localPolicy().Policy.Availability != nodepolicy.Paused || running["ollama"] {
+		t.Fatalf("failed pause lost fence or stopped trying: blocked=%v proxyErr=%q running=%v", blocked, proxyErr, running)
+	}
+	pushes := availabilityPushes(proxy.snapshot())
+	if last := pushes[len(pushes)-1]; last.State != nodepolicy.Draining {
+		t.Fatalf("failure advertised %+v", last)
+	}
+	for _, next := range []nodepolicy.Availability{nodepolicy.Available, nodepolicy.Paused} {
+		_, err := b.setAvailability(context.Background(), next, nodepolicy.PausedByPeer)
+		if policyErrorCode(err) != codeLocalVeto {
+			t.Fatalf("peer retry/resume = %v", err)
+		}
+	}
+	fail = false
+	if state, err := b.setAvailability(context.Background(), nodepolicy.Paused, nodepolicy.PausedLocally); err != nil || state != nodepolicy.Paused {
+		t.Fatalf("local retry = %s, %v", state, err)
+	}
+	if running["ollama"] || running["llamacpp"] {
+		t.Fatalf("retry left engines running: %v", running)
+	}
+}
+
+func TestPauseReplaySkipsRestoreForEveryOrigin(t *testing.T) {
+	test := func(name string, origin nodepolicy.PauseOrigin, recovery bool) {
+		t.Run(name, func(t *testing.T) {
+			b, _ := newPolicyBroker(t)
+			path := filepath.Join(t.TempDir(), nodepolicy.FileName)
+			if recovery {
+				if err := os.WriteFile(path, []byte("invalid policy"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				policy := nodepolicy.Default()
+				policy.Availability, policy.PausedBy = nodepolicy.Paused, origin
+				writePolicyFile(t, path, policy)
+			}
+			b.loadNodePolicy(path)
+			check := func(engine *fakeWorker) {
+				t.Helper()
+				b.publishNodeProjection()
+				b.restoreEnabledEngines(b.getEngineMgr())
+				paProjectionBarrier(t, b)
+				if got := engine.methods(restoreEnabledEnginesMethod); len(got) != 0 {
+					t.Fatalf("paused replay restored engines: %v", got)
+				}
+				engine.mu.Lock()
+				raw := append(json.RawMessage(nil), engine.projections[len(engine.projections)-1].params...)
+				engine.mu.Unlock()
+				var projection nodeProjection
+				if err := json.Unmarshal(raw, &projection); err != nil {
+					t.Fatal(err)
+				}
+				if !projection.ManagementBlocked || projection.PausedLocally != (origin != nodepolicy.PausedByPeer) {
+					t.Fatalf("paused replay projection = %+v", projection)
+				}
+			}
+			check(attachFakeEngine(t, b))
+			check(attachFakeEngine(t, b))
+		})
+	}
+	test("stored local pause", nodepolicy.PausedLocally, false)
+	test("stored peer pause", nodepolicy.PausedByPeer, false)
+	test("startup recovery", "", true)
 }

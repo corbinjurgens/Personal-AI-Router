@@ -2001,8 +2001,16 @@ func TestModelConfigRetainedFailureKeepsCurrentVeto(t *testing.T) {
 			assertModelConfigLoadFailed(t, f)
 		})
 	}
-	test("local pause", func(r *policyRuntime, enabled bool) { r.localPauseRequested = enabled }, nodepolicy.ModelReasonPausedLocal)
-	test("local Off", func(r *policyRuntime, enabled bool) { r.intent["llamacpp"] = !enabled }, nodepolicy.ModelReasonEngineOffLocal)
+	test("local pause", func(r *policyRuntime, enabled bool) { r.localPauseRequested = enabled }, nodepolicy.ModelReasonPaused)
+	test("pending peer pause", func(r *policyRuntime, enabled bool) { r.pendingPauseRequested = enabled }, nodepolicy.ModelReasonPaused)
+	test("saved peer pause before live transition", func(r *policyRuntime, enabled bool) {
+		r.current.PausedBy = nodepolicy.PausedByPeer
+		r.current.Availability = nodepolicy.Available
+		if enabled {
+			r.current.Availability = nodepolicy.Paused
+		}
+	}, nodepolicy.ModelReasonPaused)
+	test("ordinary saved Off", func(r *policyRuntime, enabled bool) { r.intent["llamacpp"] = !enabled }, nodepolicy.ModelReasonEngineOff)
 }
 
 func TestModelConfigNonfailureOutcomeReasons(t *testing.T) {

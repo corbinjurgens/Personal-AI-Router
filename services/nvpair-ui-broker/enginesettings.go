@@ -20,7 +20,6 @@ import (
 	"nvpair-shared/clustertrust"
 	"nvpair-shared/engines"
 	settings "nvpair-shared/enginesettings"
-	"nvpair-shared/nodepolicy"
 	"nvpair-shared/noderec"
 )
 
@@ -478,7 +477,7 @@ func (b *Broker) settingsPause() (paused, local bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	local = pausedLocally(r.current) || r.localPauseRequested
-	return local || r.current.Availability == nodepolicy.Paused, local
+	return r.managementBlockedLocked(), local
 }
 
 // authorizeSettingsCallerLocked rejects a peer this node no longer pins. A
@@ -566,6 +565,9 @@ func (b *Broker) applyEngineSettings(ctx context.Context, p settings.Request, ca
 	hash := hex.EncodeToString(fingerprint[:])
 	if record := b.engineSettings[p.Engine]; record != nil {
 		if receipt, exists := record.Receipts[p.RequestID]; exists {
+			if err := b.authorizeRemoteManagement(caller, "settings", p.RequestID); err != nil {
+				return settingsReceipt{}, err
+			}
 			if receipt.Hash != hash {
 				return settingsReceipt{}, fmt.Errorf("request identifier was already used for different settings")
 			}
@@ -582,7 +584,16 @@ func (b *Broker) applyEngineSettings(ctx context.Context, p settings.Request, ca
 	if err != nil {
 		return settingsReceipt{}, err
 	}
+	// Preview can wait on a worker. Order the final decision and journal write
+	// with pause acceptance, without holding r.mu across worker or client IO.
+	r := b.nodePolicyRuntime()
+	r.mu.Lock()
+	if err := b.authorizeRemoteManagementLocked(r, caller, "settings", p.RequestID); err != nil {
+		r.mu.Unlock()
+		return settingsReceipt{}, err
+	}
 	if len(preview.Errors) > 0 || preview.Conflict != nil {
+		r.mu.Unlock()
 		return settingsReceipt{}, fmt.Errorf("resolve settings errors and port conflicts before applying")
 	}
 	record := b.engineSettings[p.Engine]
@@ -599,19 +610,12 @@ func (b *Broker) applyEngineSettings(ctx context.Context, p settings.Request, ca
 		record.Receipts[p.RequestID] = settingsReceipt{Hash: hash, Revision: record.Snapshot.Revision, Phase: "succeeded"}
 		if err := b.saveEngineSettingsLocked(); err != nil {
 			*record = previous
+			r.mu.Unlock()
 			return settingsReceipt{}, err
 		}
+		r.mu.Unlock()
 		b.publishSettingsLocked()
 		return record.Receipts[p.RequestID], nil
-	}
-	// The local veto: a paired node's apply that would finish a pending resume
-	// of a stopped engine is refused while this node is paused on the node
-	// itself, before anything is accepted. Only a restart of a running engine
-	// sets preview.Restart, so a stopped one starts only from record.Resume.
-	if caller != "" && record.Resume && !record.Snapshot.Running {
-		if _, local := b.settingsPause(); local {
-			return settingsReceipt{}, &localVetoError{}
-		}
 	}
 	record.Previous = record.Snapshot.Settings.Clone()
 	record.Resume = record.Resume || preview.Restart
@@ -624,8 +628,10 @@ func (b *Broker) applyEngineSettings(ctx context.Context, p settings.Request, ca
 	record.Receipts[p.RequestID] = settingsReceipt{Hash: hash, Revision: record.Snapshot.Revision, Phase: "applying"}
 	if err := b.saveEngineSettingsLocked(); err != nil {
 		*record = previous
+		r.mu.Unlock()
 		return settingsReceipt{}, fmt.Errorf("settings could not be saved; no runtime changes were made")
 	}
+	r.mu.Unlock()
 	b.publishSettingsLocked()
 	// Once accepted, completion is target-owned. Losing the requesting UI or
 	// peer cannot abandon half a port swap. The operation has its own deadline.

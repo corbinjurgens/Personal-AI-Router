@@ -14,10 +14,12 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"sort"
+	"strings"
 	"time"
 
 	"nvpair-shared/durablefile"
@@ -36,11 +38,8 @@ var pauseCancelSettle = 10 * time.Second
 // transition itself does not depend on ctx: a caller that stops waiting (a
 // disconnected client or peer) does not abandon a half-finished pause.
 //
-// origin is who asked: this node's own clients or a paired node. A node paused
-// locally, or with a local pause accepted and not yet finished, refuses a paired
-// node's resume with localVetoError, before the request can supersede anything.
-// A paired node's pause over a local one stays local, so it never downgrades
-// the veto.
+// origin records who asked. Either origin's accepted pause refuses all later
+// peer writes, including Resume and repeated Pause, before superseding work.
 func (b *Broker) setAvailability(ctx context.Context, state nodepolicy.Availability, origin nodepolicy.PauseOrigin) (nodepolicy.Availability, error) {
 	return b.setAvailabilityAs(ctx, state, origin, "")
 }
@@ -52,18 +51,18 @@ func (b *Broker) setAvailability(ctx context.Context, state nodepolicy.Availabil
 func (b *Broker) setAvailabilityAs(ctx context.Context, state nodepolicy.Availability, origin nodepolicy.PauseOrigin, caller string) (nodepolicy.Availability, error) {
 	r := b.nodePolicyRuntime()
 	r.mu.Lock()
-	if err := b.authorizeRemoteManagement(caller, "availability", ""); err != nil {
+	if err := b.authorizeRemoteManagementLocked(r, caller, "availability", ""); err != nil {
 		r.mu.Unlock()
 		return "", err
 	}
-	if origin == nodepolicy.PausedByPeer && (pausedLocally(r.current) || r.localPauseRequested) {
-		if state == nodepolicy.Available {
-			r.mu.Unlock()
-			return "", &localVetoError{}
-		}
-		origin = nodepolicy.PausedLocally
+	if origin == nodepolicy.PausedByPeer && r.managementBlockedLocked() {
+		r.mu.Unlock()
+		return "", &localVetoError{}
 	}
-	r.localPauseRequested = state == nodepolicy.Paused && origin == nodepolicy.PausedLocally
+	if state == nodepolicy.Paused {
+		r.pendingPauseRequested = true
+		r.localPauseRequested = origin == nodepolicy.PausedLocally || r.localPauseRequested || pausedLocally(r.current)
+	}
 	r.transitionGen++
 	gen := r.transitionGen
 	if r.transitionCancel != nil {
@@ -73,14 +72,20 @@ func (b *Broker) setAvailabilityAs(ctx context.Context, state nodepolicy.Availab
 	r.transitionCancel = cancel
 	r.mu.Unlock()
 
-	if state == nodepolicy.Paused && origin == nodepolicy.PausedLocally {
+	if state == nodepolicy.Paused {
+		// Publish before waiting for engineConfigMu or transitionMu. Admission
+		// takes engineConfigMu -> r.mu, never the reverse; pending state closes
+		// the interval while already accepted work finishes its journal.
+		b.publishNodeProjection()
 		if err := b.vetoRemoteEngineSwitch("", false); err != nil {
 			cancel()
 			r.mu.Lock()
 			if r.transitionGen == gen {
 				r.localPauseRequested = false
+				r.pendingPauseRequested = false
 			}
 			r.mu.Unlock()
+			b.publishNodeProjection()
 			return "", err
 		}
 		// An install admitted before this pause must not start its engine
@@ -88,9 +93,6 @@ func (b *Broker) setAvailabilityAs(ctx context.Context, state nodepolicy.Availab
 		b.engineConfigMu.Lock()
 		b.supersedeInstallStartsLocked("")
 		b.engineConfigMu.Unlock()
-		// Deliver the authoritative pending pause to the manager's veto owner
-		// before cancelling waits or waiting for the availability transition.
-		b.publishNodeProjection()
 		b.cancelRemoteSwitch()
 	}
 
@@ -106,9 +108,15 @@ func (b *Broker) setAvailabilityAs(ctx context.Context, state nodepolicy.Availab
 		// either way the stored policy now says whether a local pause holds.
 		r.mu.Lock()
 		if r.transitionGen == gen {
-			r.localPauseRequested = false
+			// A failed Resume must retain the fence until a later local
+			// transition actually makes availability authoritative.
+			if state == nodepolicy.Paused {
+				r.localPauseRequested = false
+				r.pendingPauseRequested = false
+			}
 		}
 		r.mu.Unlock()
+		b.publishNodeProjection()
 		done <- outcome{availability, err}
 	}()
 	select {
@@ -131,14 +139,14 @@ func (b *Broker) runAvailabilityTransition(ctx context.Context, gen uint64, stat
 	}
 	if state == nodepolicy.Paused {
 		availability, err := b.pauseNode(ctx, origin)
-		if err == nil && origin == nodepolicy.PausedLocally {
+		if err == nil {
 			// transitionMu keeps a later Resume behind the durable completion
 			// proof, even when switch reconciliation is still waiting.
 			err = b.completeSwitchPauseObligations()
 		}
 		return availability, err
 	}
-	return b.resumeNode(origin)
+	return b.resumeNode(ctx, gen, origin)
 }
 
 // persistAvailabilityLocked returns the current policy with state as its
@@ -179,17 +187,12 @@ func (b *Broker) pushAvailabilityAndActivate(persisted bool) {
 	b.announceActivationChange(changed)
 }
 
-// pauseNode drains, then unloads and stops engines as the policy says. A node
-// already paused is paused again only when origin changes whether the pause is
-// local, which records the new provenance.
+// pauseNode drains, then unconditionally unloads models and stops engines.
+// Local retries re-read inventory even after a stored or previously completed
+// pause: a replacement manager may have discovered another running engine.
 func (b *Broker) pauseNode(ctx context.Context, origin nodepolicy.PauseOrigin) (nodepolicy.Availability, error) {
 	r := b.nodePolicyRuntime()
 	r.mu.Lock()
-	if r.live == nodepolicy.Paused && r.current.Availability == nodepolicy.Paused && r.availabilityErr == "" &&
-		pausedLocally(r.current) == (origin == nodepolicy.PausedLocally) {
-		r.mu.Unlock()
-		return nodepolicy.Paused, nil
-	}
 	policy, persisted, err := r.persistAvailabilityLocked(nodepolicy.Paused, origin)
 	if err != nil && !persisted {
 		r.mu.Unlock()
@@ -233,35 +236,101 @@ func (b *Broker) pauseNode(ctx context.Context, origin nodepolicy.PauseOrigin) (
 		return "", errAvailabilitySuperseded
 	}
 
-	for engine, models := range b.loadedSnapshot() {
-		if ctx.Err() != nil {
-			return "", errAvailabilitySuperseded
-		}
-		b.unloadModels(engine, models, "pause")
-	}
+	// Merge fresh readback with known models/engines: notifications may lag an
+	// activation that was accepted before the pause projection arrived.
+	worker := b.getEngineMgr()
+	engines, inventoryErr := b.pauseEngineInventory(ctx)
+	known := make(map[string]bool)
 	for _, engine := range b.runningSnapshot() {
+		known[engine] = true
+	}
+	for engine := range engines {
+		known[engine] = true
+	}
+	loaded := b.loadedSnapshot()
+	models, modelErr := b.pauseModelInventory(ctx)
+	for engine, fresh := range models {
+		loaded[engine] = append(loaded[engine], fresh...)
+	}
+	for engine, models := range loaded {
+		known[engine] = true
 		if ctx.Err() != nil {
 			return "", errAvailabilitySuperseded
 		}
+		seen := make(map[string]bool)
+		var unique []string
+		for _, model := range models {
+			if !seen[model] {
+				seen[model] = true
+				unique = append(unique, model)
+			}
+		}
+		b.unloadModels(engine, unique, "pause")
+	}
+	var failures []string
+	if inventoryErr != nil {
+		failures = append(failures, "engine inventory unavailable")
+	}
+	// Inventory failure cannot hide known engines; stop the others as well.
+	ordered := make([]string, 0, len(known))
+	for engine := range known {
+		ordered = append(ordered, engine)
+	}
+	sort.Strings(ordered)
+	for _, engine := range ordered {
+		if ctx.Err() != nil {
+			return "", errAvailabilitySuperseded
+		}
+		// A lost response can still have stopped the engine. A local Resume
+		// must retry saved-On wake through the manager's normal guards.
+		r.mu.Lock()
+		r.pauseSlept[engine] = true
+		r.mu.Unlock()
 		if _, err := b.callEngine(ctx, engineSleepMethod, map[string]string{"engine": engine}); err != nil {
 			if ctx.Err() != nil {
 				// Superseded mid-stop: engine-manager may still finish the
 				// stop, so let the resume that superseded us wake it.
 				// Transitions are serialized, so it reads this afterwards.
-				r.mu.Lock()
-				r.pauseSlept[engine] = true
-				r.mu.Unlock()
 				return "", errAvailabilitySuperseded
 			}
 			slog.Warn("could not stop engine for pause", "engine", engine, "err", err)
+			failures = append(failures, engine+": stop failed")
 			continue
 		}
-		r.mu.Lock()
-		r.pauseSlept[engine] = true
-		r.mu.Unlock()
 	}
 	if ctx.Err() != nil {
 		return "", errAvailabilitySuperseded
+	}
+	stopped, verifyErr := b.pauseEngineInventory(ctx)
+	if verifyErr != nil || worker == nil || b.getEngineMgr() != worker {
+		failures = append(failures, "engine shutdown readback unavailable")
+	} else {
+		for engine, running := range stopped {
+			known[engine] = true
+			if running {
+				failures = append(failures, engine+": still running")
+			}
+		}
+		for engine := range known {
+			if _, reported := stopped[engine]; !reported {
+				failures = append(failures, engine+": stop unverified")
+			}
+		}
+	}
+	// Unload failures are satisfied by verified engine shutdown. Without a
+	// model readback and shutdown proof we cannot claim physical pause.
+	if modelErr != nil && (verifyErr != nil || len(failures) > 0) {
+		failures = append(failures, "loaded model inventory unavailable")
+	}
+	if len(failures) > 0 {
+		sort.Strings(failures)
+		detail := strings.Join(failures, "; ")
+		if len(detail) > 512 {
+			detail = detail[:512]
+		}
+		b.announceActivationChange(b.pushPolicyNow(context.Background(), pushAvailability))
+		b.notifyAvailability()
+		return nodepolicy.Draining, fmt.Errorf("Pause could not stop every engine: %s", detail)
 	}
 
 	r.mu.Lock()
@@ -282,14 +351,24 @@ func (b *Broker) pauseNode(ctx context.Context, origin nodepolicy.PauseOrigin) (
 // launch that skipped restoration, engine:restore-enabled) starts exactly the
 // ones saved On. A paired node's resume is checked against a local pause again
 // here, where it would take effect.
-func (b *Broker) resumeNode(origin nodepolicy.PauseOrigin) (nodepolicy.Availability, error) {
+func (b *Broker) resumeNode(ctx context.Context, gen uint64, origin nodepolicy.PauseOrigin) (nodepolicy.Availability, error) {
 	r := b.nodePolicyRuntime()
 	r.mu.Lock()
-	if origin == nodepolicy.PausedByPeer && pausedLocally(r.current) {
+	// A later Pause may have registered after the transition's initial check.
+	// Only the still-current Resume may release its fence or publish available.
+	if r.transitionGen != gen || ctx.Err() != nil {
+		r.mu.Unlock()
+		return "", errAvailabilitySuperseded
+	}
+	if origin == nodepolicy.PausedByPeer && r.managementBlockedLocked() {
 		r.mu.Unlock()
 		return "", &localVetoError{}
 	}
 	if r.live == nodepolicy.Available && r.current.Availability == nodepolicy.Available && r.availabilityErr == "" {
+		// A Resume can supersede a pause before it saves anything. This is
+		// still the authoritative transition that releases its pending fence.
+		r.pendingPauseRequested = false
+		r.localPauseRequested = false
 		r.mu.Unlock()
 		return nodepolicy.Available, nil
 	}
@@ -304,6 +383,8 @@ func (b *Broker) resumeNode(origin nodepolicy.PauseOrigin) (nodepolicy.Availabil
 		r.activationErr = ""
 	}
 	r.live = nodepolicy.Available
+	r.pendingPauseRequested = false
+	r.localPauseRequested = false
 	r.cancelActive = false
 	slept := make([]string, 0, len(r.pauseSlept))
 	for engine := range r.pauseSlept {
@@ -347,11 +428,51 @@ func (b *Broker) skipRestoreWhilePaused() bool {
 	r := b.nodePolicyRuntime()
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	skip := r.current.Availability == nodepolicy.Paused
+	skip := r.managementBlockedLocked()
 	if skip {
 		r.restoreSkipped = true
 	}
 	return skip
+}
+
+// pauseEngineInventory requires explicit running readback for every reported
+// engine. Missing data is unknown, never evidence of a stopped engine.
+func (b *Broker) pauseEngineInventory(ctx context.Context) (map[string]bool, error) {
+	raw, err := b.callEngine(ctx, "engine:get-installed", nil)
+	if err != nil {
+		return nil, err
+	}
+	var inventory struct {
+		Engines *[]struct {
+			Engine  string `json:"engine"`
+			Running *bool  `json:"running"`
+		} `json:"engines"`
+	}
+	if err := json.Unmarshal(raw, &inventory); err != nil || inventory.Engines == nil {
+		return nil, errors.New("engine inventory is incomplete")
+	}
+	engines := make(map[string]bool)
+	for _, engine := range *inventory.Engines {
+		if engine.Engine == "" || engine.Running == nil {
+			return nil, errors.New("engine running state is incomplete")
+		}
+		engines[engine.Engine] = *engine.Running
+	}
+	return engines, nil
+}
+
+func (b *Broker) pauseModelInventory(ctx context.Context) (map[string][]string, error) {
+	raw, err := b.callEngine(ctx, "engine:models", nil)
+	if err != nil {
+		return nil, err
+	}
+	var inventory struct {
+		LoadedByEngine map[string][]string `json:"loadedByEngine"`
+	}
+	if err := json.Unmarshal(raw, &inventory); err != nil || inventory.LoadedByEngine == nil {
+		return nil, errors.New("loaded model inventory is incomplete")
+	}
+	return inventory.LoadedByEngine, nil
 }
 
 func (b *Broker) loadedSnapshot() map[string][]string {

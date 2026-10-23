@@ -77,6 +77,10 @@ func switchErrorDetail(err error, kind string) *settings.SwitchError {
 		// path; it is not a local veto (-32011) or a configuration conflict.
 		return &settings.SwitchError{Code: codeRemoteManagementDenied, Kind: settings.SwitchErrorValidation, Message: denied.Error()}
 	}
+	var paused *localVetoError
+	if errors.As(err, &paused) {
+		return &settings.SwitchError{Code: settings.SwitchRemoteVetoCode, Kind: settings.SwitchErrorRemoteVeto, Message: paused.Error()}
+	}
 	var storeErr *engineSwitchStoreError
 	if errors.As(err, &storeErr) {
 		kind = storeErr.Kind
@@ -297,7 +301,8 @@ func (b *Broker) dischargeSwitchLocalObligationLocked(ctx context.Context, id st
 		if o.Pause && !o.PauseApplied {
 			runtime := b.nodePolicyRuntime()
 			runtime.mu.Lock()
-			applied := pausedLocally(runtime.current) && !runtime.recoveryRequired && !runtime.localPauseRequested
+			applied := runtime.current.Availability == nodepolicy.Paused && runtime.live == nodepolicy.Paused &&
+				!runtime.pendingPauseRequested && !runtime.localPauseRequested && !runtime.recoveryRequired
 			runtime.mu.Unlock()
 			if !applied {
 				return switchError(settings.SwitchErrorBusy, "Local pause must be persisted and applied before switch release.")
@@ -322,7 +327,7 @@ func (b *Broker) completeSwitchPauseObligations() error {
 	defer b.engineConfigMu.Unlock()
 	runtime := b.nodePolicyRuntime()
 	runtime.mu.Lock()
-	applied := pausedLocally(runtime.current) && runtime.live == nodepolicy.Paused && !runtime.recoveryRequired
+	applied := runtime.current.Availability == nodepolicy.Paused && runtime.live == nodepolicy.Paused && !runtime.recoveryRequired
 	runtime.mu.Unlock()
 	if !applied {
 		return nil
@@ -532,11 +537,20 @@ func (b *Broker) acceptEngineSwitch(ctx context.Context, p settings.SwitchReques
 	if err != nil {
 		return settings.SwitchResult{}, err
 	}
+	// Snapshot readback can wait on the manager. Pause registration and every
+	// new acceptance/rejection receipt share this final critical section.
+	runtime := b.nodePolicyRuntime()
+	runtime.mu.Lock()
+	if err := b.authorizeRemoteManagementLocked(runtime, caller, "switch", p.RequestID); err != nil {
+		runtime.mu.Unlock()
+		return settings.SwitchResult{}, err
+	}
 	now := time.Now().UTC()
 	r := settings.SwitchReceipt{Version: settings.SwitchVersion, NodeID: b.nodeID, RequestID: p.RequestID, Caller: identity, PayloadHash: hash, Request: p, ExpectedRevision: p.ExpectedRevision, AcceptedRevision: token, Sequence: 1, Phase: settings.SwitchAccepted, AcceptedAt: now, UpdatedAt: now, Deadline: now.Add(settings.SwitchOperationBudget), Source: settings.SwitchEngineState{Intent: settings.SwitchIntentUnknown}, Target: settings.SwitchEngineState{Intent: settings.SwitchIntentUnknown}}
 	refuse := func(err error) (settings.SwitchResult, error) {
 		r.Phase, r.Terminal, r.FinishedAt, r.Error = settings.SwitchRejected, true, &now, switchErrorDetail(err, settings.SwitchErrorValidation)
 		stored, saveErr := b.engineSwitch.store.Reject(r)
+		runtime.mu.Unlock()
 		if stored.Sequence > 0 {
 			b.switchChangedLocked(stored)
 		}
@@ -555,17 +569,13 @@ func (b *Broker) acceptEngineSwitch(ctx context.Context, p settings.SwitchReques
 	if err := b.switchTargetRoutable(p.TargetEngine); err != nil {
 		return refuse(err)
 	}
-	if caller != "" {
-		if _, local := b.settingsPause(); local {
-			return refuse(switchError(settings.SwitchErrorRemoteVeto, "A local pause vetoes remote switching."))
-		}
-	}
 	for _, record := range b.engineSettings {
 		if record.Snapshot.Phase == "applying" {
 			return refuse(switchError(settings.SwitchErrorBusy, "Pending settings require recovery."))
 		}
 	}
 	stored, err := b.engineSwitch.store.Accept(r)
+	runtime.mu.Unlock()
 	if stored.Sequence > 0 {
 		b.switchChangedLocked(stored)
 	}
@@ -598,7 +608,7 @@ func (b *Broker) acceptEngineSwitch(ctx context.Context, p settings.SwitchReques
 	// Recheck after installing cancellation: a pause accepted between the first
 	// veto check and registration cannot be missed.
 	if caller != "" {
-		if _, local := b.settingsPause(); local {
+		if paused, _ := b.settingsPause(); paused {
 			cancel()
 		}
 	}

@@ -14,6 +14,7 @@ import (
 	"nvpair-ui-broker/relay"
 
 	"nvpair-shared/applog"
+	"nvpair-shared/durablefile"
 	settings "nvpair-shared/enginesettings"
 	"nvpair-shared/nodepolicy"
 	"nvpair-shared/noderec"
@@ -277,4 +278,163 @@ func TestNodeProjectionWithoutEngineManagerIsDropped(t *testing.T) {
 	engine := attachFakeEngine(t, ab.b)
 	ab.b.forwardEngineNotificationFrom(ab.b.activateEngineManagerSource(), "engine:ready", json.RawMessage(`{}`))
 	requireLastProjectionIsStored(t, ab.b, waitProjections(t, engine, 1))
+}
+
+func TestNodeProjectionUsesFullPauseBoundary(t *testing.T) {
+	test := func(name string, set func(*policyRuntime), local bool) {
+		t.Run(name, func(t *testing.T) {
+			b, _ := newPolicyBroker(t)
+			engine := attachFakeEngine(t, b)
+			r := b.nodePolicyRuntime()
+			r.mu.Lock()
+			set(r)
+			r.mu.Unlock()
+			b.publishNodeProjection()
+			paProjectionBarrier(t, b)
+			engine.mu.Lock()
+			raw := append(json.RawMessage(nil), engine.projections[len(engine.projections)-1].params...)
+			engine.mu.Unlock()
+			var projection nodeProjection
+			if err := json.Unmarshal(raw, &projection); err != nil {
+				t.Fatalf("decode pause projection: %v", err)
+			}
+			if !projection.ManagementBlocked || projection.PausedLocally != local {
+				t.Fatalf("projection = %+v, want blocked with local provenance %t", projection, local)
+			}
+		})
+	}
+	test("pending peer pause", func(r *policyRuntime) { r.pendingPauseRequested = true }, false)
+	test("saved peer pause before live transition", func(r *policyRuntime) {
+		r.current.Availability, r.current.PausedBy = nodepolicy.Paused, nodepolicy.PausedByPeer
+	}, false)
+	test("draining without saved provenance", func(r *policyRuntime) { r.live = nodepolicy.Draining }, false)
+	test("live paused before persistence", func(r *policyRuntime) { r.live = nodepolicy.Paused }, false)
+	test("startup policy recovery", func(r *policyRuntime) {
+		r.current, r.recoveryRequired = recoveryPolicy(), true
+	}, true)
+}
+
+func TestWaitingProjectionReplaysPendingPeerPauseToReplacement(t *testing.T) {
+	b, _ := newPolicyBroker(t)
+	old := attachFakeEngine(t, b)
+	r := b.nodePolicyRuntime()
+	r.projectionMu.Lock()
+	done := make(chan struct{})
+	go func() { b.publishNodeProjection(); close(done) }()
+	r.mu.Lock()
+	r.pendingPauseRequested = true
+	r.mu.Unlock()
+	replacement := attachFakeEngine(t, b)
+	r.projectionMu.Unlock()
+	receive(t, "waiting projection to finish", done)
+	paProjectionBarrier(t, b)
+	old.mu.Lock()
+	oldCount := len(old.projections)
+	old.mu.Unlock()
+	if oldCount != 0 {
+		t.Fatalf("waiting projection reached old manager %d times", oldCount)
+	}
+	replacement.mu.Lock()
+	calls := append([]policyCall(nil), replacement.projections...)
+	replacement.mu.Unlock()
+	if len(calls) == 0 {
+		t.Fatal("replacement did not receive the waiting projection")
+	}
+	for _, call := range calls {
+		var projection nodeProjection
+		if err := json.Unmarshal(call.params, &projection); err != nil {
+			t.Fatalf("decode replacement projection: %v", err)
+		}
+		if !projection.ManagementBlocked || projection.PausedLocally {
+			t.Fatalf("replacement projection = %+v, want pending peer fence", projection)
+		}
+	}
+}
+
+func TestFailedLocalResumeKeepsBlockedProjection(t *testing.T) {
+	ab := newActivatedBroker(t)
+	engine := attachFakeEngine(t, ab.b)
+	r := ab.b.nodePolicyRuntime()
+	r.mu.Lock()
+	r.current.Availability, r.current.PausedBy, r.live = nodepolicy.Paused, nodepolicy.PausedByPeer, nodepolicy.Draining
+	r.mu.Unlock()
+	setReplacer(ab.b, durablefile.Replacer{Replace: func(string, string) error { return errPublish }})
+	_, err := ab.b.setAvailability(context.Background(), nodepolicy.Available, nodepolicy.PausedLocally)
+	if !errors.Is(err, errPublish) {
+		t.Fatalf("Resume = %v, want save failure", err)
+	}
+	paProjectionBarrier(t, ab.b)
+	engine.mu.Lock()
+	calls := append([]policyCall(nil), engine.projections...)
+	engine.mu.Unlock()
+	if len(calls) == 0 {
+		t.Fatal("failed Resume did not replay its authoritative fence")
+	}
+	for _, call := range calls {
+		var projection nodeProjection
+		if err := json.Unmarshal(call.params, &projection); err != nil {
+			t.Fatalf("decode failed Resume projection: %v", err)
+		}
+		if !projection.ManagementBlocked || projection.PausedLocally {
+			t.Fatalf("failed Resume projection = %+v, want peer fence retained", projection)
+		}
+	}
+}
+
+func TestSupersededLocalResumeNeverProjectsAnUnblockedNode(t *testing.T) {
+	ab := newActivatedBroker(t)
+	engine := attachFakeEngine(t, ab.b)
+	r := ab.b.nodePolicyRuntime()
+	r.mu.Lock()
+	r.current.Availability, r.current.PausedBy, r.live = nodepolicy.Paused, nodepolicy.PausedByPeer, nodepolicy.Paused
+	r.mu.Unlock()
+	r.transitionMu.Lock()
+	var once sync.Once
+	release := func() { once.Do(r.transitionMu.Unlock) }
+	t.Cleanup(release)
+	resumeDone := make(chan error, 1)
+	go func() {
+		_, err := ab.b.setAvailability(context.Background(), nodepolicy.Available, nodepolicy.PausedLocally)
+		resumeDone <- err
+	}()
+	waitUntil(t, "local Resume acceptance", func() bool {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		return r.transitionGen == 1
+	})
+	// Replaying a manager while Resume waits must still carry the old fence.
+	ab.b.publishNodeProjection()
+	pauseDone := make(chan error, 1)
+	go func() {
+		_, err := ab.b.setAvailability(context.Background(), nodepolicy.Paused, nodepolicy.PausedLocally)
+		pauseDone <- err
+	}()
+	waitUntil(t, "replacement local Pause acceptance", func() bool {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		return r.transitionGen == 2 && r.pendingPauseRequested
+	})
+	release()
+	if err := receive(t, "superseded local Resume", resumeDone); !errors.Is(err, errAvailabilitySuperseded) {
+		t.Fatalf("local Resume = %v, want superseded", err)
+	}
+	if err := receive(t, "replacement local Pause", pauseDone); err != nil {
+		t.Fatalf("replacement local Pause: %v", err)
+	}
+	paProjectionBarrier(t, ab.b)
+	engine.mu.Lock()
+	calls := append([]policyCall(nil), engine.projections...)
+	engine.mu.Unlock()
+	if len(calls) == 0 {
+		t.Fatal("no authoritative pause projection was published")
+	}
+	for _, call := range calls {
+		var projection nodeProjection
+		if err := json.Unmarshal(call.params, &projection); err != nil {
+			t.Fatalf("decode superseded Resume projection: %v", err)
+		}
+		if !projection.ManagementBlocked {
+			t.Fatalf("superseded Resume projected an unblocked node: %+v", projection)
+		}
+	}
 }

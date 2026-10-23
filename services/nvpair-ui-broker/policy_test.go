@@ -418,9 +418,46 @@ func attachFakeProxy(t *testing.T, b *Broker) (*proxyProcess, *fakeWorker) {
 func attachFakeEngine(t *testing.T, b *Broker) *fakeWorker {
 	t.Helper()
 	peer, f := newFakeWorkerPipe(t)
-	f.setAnswer(func(method string, _ json.RawMessage) (any, string) {
+	slept := make(map[string]bool)
+	f.setAnswer(func(method string, raw json.RawMessage) (any, string) {
 		if method == "engine:switch-prepare" {
 			return emptySwitchManagerSnapshot(), ""
+		}
+		switch method {
+		case "engine:get-installed":
+			r := b.nodePolicyRuntime()
+			r.mu.Lock()
+			engines := make(map[string]bool)
+			for engine, running := range r.running {
+				engines[engine] = running && !slept[engine]
+			}
+			r.mu.Unlock()
+			for engine := range slept {
+				engines[engine] = false
+			}
+			statuses := make([]map[string]any, 0, len(engines))
+			for engine, running := range engines {
+				statuses = append(statuses, map[string]any{"engine": engine, "running": running})
+			}
+			return map[string]any{"engines": statuses}, ""
+		case "engine:models":
+			return map[string]any{"loadedByEngine": b.loadedSnapshot()}, ""
+		case engineSleepMethod:
+			var p struct {
+				Engine string `json:"engine"`
+			}
+			if err := json.Unmarshal(raw, &p); err != nil {
+				return nil, err.Error()
+			}
+			slept[p.Engine] = true
+		case engineWakeMethod:
+			var p struct {
+				Engine string `json:"engine"`
+			}
+			if err := json.Unmarshal(raw, &p); err != nil {
+				return nil, err.Error()
+			}
+			delete(slept, p.Engine)
 		}
 		return map[string]bool{"ok": true}, ""
 	})
@@ -1037,7 +1074,7 @@ func TestPauseFinishWaitsForDrainThenUnloadsAndStops(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("pause did not finish after the drain")
 	}
-	calls := engine.snapshot()
+	calls := pauseLifecycleCalls(engine.snapshot())
 	if len(calls) != 2 || calls[0].method != engineUnloadModelMethod || calls[1].method != engineSleepMethod {
 		t.Fatalf("engine calls = %v, want unload then sleep", engine.methods(""))
 	}
@@ -1065,7 +1102,7 @@ func TestPauseCancelPushesCancelActiveImmediately(t *testing.T) {
 	if len(p) < 2 || p[0].State != nodepolicy.Draining || !p[0].CancelActive {
 		t.Fatalf("availability pushes = %+v, want draining with cancelActive first", p)
 	}
-	calls := engine.snapshot()
+	calls := pauseLifecycleCalls(engine.snapshot())
 	if len(calls) != 2 || calls[0].method != engineUnloadModelMethod || calls[1].method != engineSleepMethod {
 		t.Fatalf("legacy false pause options skipped unload or stop: %v", engine.methods(""))
 	}

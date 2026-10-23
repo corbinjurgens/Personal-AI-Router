@@ -933,3 +933,126 @@ func TestRemoteManagementUnavailablePermissionFailsClosed(t *testing.T) {
 		t.Fatalf("local caller = %v", err)
 	}
 }
+
+func requireBrokerPauseRefusal(t *testing.T, err error) {
+	t.Helper()
+	var paused *localVetoError
+	if !errors.As(err, &paused) || policyErrorCode(err) != -32011 || err.Error() != "This node is paused. Resume it on this node before managing it remotely." {
+		t.Fatalf("pause refusal = %v (code %d), want exact -32011 refusal", err, policyErrorCode(err))
+	}
+}
+
+func TestPausedBrokerRejectsEveryPeerRelayMutation(t *testing.T) {
+	test := func(name string, origin nodepolicy.PauseOrigin) {
+		t.Run(name, func(t *testing.T) {
+			t.Run("policy set", func(t *testing.T) {
+				rb := newRoutedBroker(t)
+				r := rb.b.nodePolicyRuntime()
+				r.mu.Lock()
+				r.current.Availability, r.current.PausedBy, r.live = nodepolicy.Paused, origin, nodepolicy.Paused
+				r.mu.Unlock()
+				waitPushesSettled(t, rb.b)
+				before := rb.baseline(t)
+				_, err := rb.b.servePolicyRelay(context.Background(), rmPolicyRequest(t, rb))
+				requireBrokerPauseRefusal(t, err)
+				before.requireUnchanged(t)
+				grantRemoteManagement(t, rb.b.clusterDir, "cluster-1", "self-node", "pinned-peer", false)
+				_, err = rb.b.servePolicyRelay(context.Background(), rmPolicyRequest(t, rb))
+				rmDeny(t, err)
+			})
+			availability := func(name string, state nodepolicy.Availability) {
+				t.Run(name, func(t *testing.T) {
+					rb := newRoutedBroker(t)
+					r := rb.b.nodePolicyRuntime()
+					r.mu.Lock()
+					r.current.Availability, r.current.PausedBy, r.live = nodepolicy.Paused, origin, nodepolicy.Paused
+					gen := r.transitionGen
+					r.mu.Unlock()
+					waitPushesSettled(t, rb.b)
+					before := rb.baseline(t)
+					_, err := rb.b.servePolicyRelay(context.Background(), policyRelayRequest{Method: "set-availability", Caller: "pinned-peer", Params: rmJSON(t, policyParams{State: string(state)})})
+					requireBrokerPauseRefusal(t, err)
+					before.requireUnchanged(t)
+					r.mu.Lock()
+					defer r.mu.Unlock()
+					if r.transitionGen != gen {
+						t.Fatal("refused availability superseded the transition")
+					}
+				})
+			}
+			availability("repeat pause", nodepolicy.Paused)
+			availability("resume", nodepolicy.Available)
+			t.Run("settings apply", func(t *testing.T) {
+				h, p := rmSettings(t)
+				h.pause(origin)
+				before, journal := h.snapshot(), rmSettingsJournal(t, h)
+				_, err := h.b.dispatchEngineSettings(context.Background(), "apply", p, "peer")
+				requireBrokerPauseRefusal(t, err)
+				rmSettingsUnchanged(t, h, before, p.RequestID, journal)
+			})
+			t.Run("switch apply", func(t *testing.T) {
+				h, p := rmSwitch(t, "paused-peer-switch")
+				r := h.b.nodePolicyRuntime()
+				r.mu.Lock()
+				r.current.Availability, r.current.PausedBy, r.live = nodepolicy.Paused, origin, nodepolicy.Paused
+				r.mu.Unlock()
+				calls := len(h.engine.snapshot())
+				_, err := h.b.dispatchEngineSwitch(context.Background(), settings.SwitchMethod, rmJSON(t, p), "peer")
+				requireBrokerPauseRefusal(t, err)
+				rmSwitchUnchanged(t, h, p.RequestID, calls)
+			})
+		})
+	}
+	test("local pause", nodepolicy.PausedLocally)
+	test("peer pause", nodepolicy.PausedByPeer)
+}
+
+func TestPendingPeerPauseBlocksQueuedMutation(t *testing.T) {
+	h, p := rmSettings(t)
+	// The queued request will be refused before reaching the engine, so a
+	// separate pipe can model an otherwise idle manager during the pause.
+	engine := attachFakeEngine(t, h.b)
+	before, journal := h.snapshot(), rmSettingsJournal(t, h)
+	unlockApply := rmHoldLock(t, &h.b.settingsApplyMu)
+	queued := rmBlockedCall(t, "applyEngineSettings", func() error {
+		_, err := h.b.applyEngineSettings(context.Background(), p, "peer")
+		return err
+	})
+	r := h.b.nodePolicyRuntime()
+	unlockTransition := rmHoldLock(t, &r.transitionMu)
+	pause := rmBlockedCall(t, "runAvailabilityTransition", func() error {
+		_, err := h.b.setAvailabilityAs(context.Background(), nodepolicy.Paused, nodepolicy.PausedByPeer, "peer")
+		return err
+	})
+	paProjectionBarrier(t, h.b)
+	engine.mu.Lock()
+	raw := append(json.RawMessage(nil), engine.projections[len(engine.projections)-1].params...)
+	engine.mu.Unlock()
+	var projection nodeProjection
+	if err := json.Unmarshal(raw, &projection); err != nil {
+		t.Fatal(err)
+	}
+	if !projection.ManagementBlocked || projection.PausedLocally {
+		t.Fatalf("pending peer projection = %+v", projection)
+	}
+	r.mu.Lock()
+	gen, revision := r.transitionGen, r.current.Revision
+	r.mu.Unlock()
+	unlockApply()
+	requireBrokerPauseRefusal(t, rmResult(t, queued))
+	rmSettingsUnchanged(t, h, before, p.RequestID, journal)
+	for _, state := range []nodepolicy.Availability{nodepolicy.Available, nodepolicy.Paused} {
+		_, err := h.b.setAvailabilityAs(context.Background(), state, nodepolicy.PausedByPeer, "peer")
+		requireBrokerPauseRefusal(t, err)
+	}
+	r.mu.Lock()
+	unchanged := r.transitionGen == gen && r.current.Revision == revision && r.pendingPauseRequested
+	r.mu.Unlock()
+	if !unchanged {
+		t.Fatal("refused peer writes disturbed the pending pause")
+	}
+	unlockTransition()
+	if err := rmResult(t, pause); err != nil {
+		t.Fatalf("accepted peer pause: %v", err)
+	}
+}

@@ -56,6 +56,11 @@ source still reports the engine running; it uses the same retry deadline.
 These status reasons do not change hold cleanup, expiry or retry scheduling,
 and never include raw engine errors.
 
+A pause of either origin reports model-configuration reason `paused`, including
+the accepted interval before persistence. An ordinary saved Off reports
+`engine-off`; it does not imply an engine lock. Lock enforcement and the
+`engine-locked` refusal belong to engine-manager.
+
 Unknown completion retains the proxy's capacity hold. Recovery requires a
 terminal response from the original manager followed by a fresh `engine:models`
 read from that same source and identity, after the recovery ID was received.
@@ -85,7 +90,7 @@ lock. Forward steps are pinned to the preparing manager incarnation; replacement
 interrupts the operation and gates the new manager until reconciliation finishes.
 The gate applies to forward operations, including on the initial spawn. The
 manager's discovery subscription and node/settings projections still reach the
-current worker during recovery, including authoritative local-pause state and
+current worker during recovery, including authoritative pause state and
 log-level changes. Mutating direct peer control also remains fenced inside the
 manager until the broker acknowledges successful recovery for its incarnation.
 Off/pause admission and terminal completion share a gate, so an admitted veto
@@ -107,7 +112,7 @@ every obligated engine through a verified ordinary stop on the current manager.
 Pause must be persisted and applied too; its operation-specific completion proof
 is saved before a later local Resume can run. Cleanup preserves that Resume and
 uses the saved proof without re-pausing. Older journals without the proof retain
-the current local-pause check. Discharge is durably recorded; failure
+the current persisted and applied pause check for either origin. Discharge is durably recorded; failure
 retains recovery ownership. Restart replays undischarged obligations even with no
 manager checkpoint, before restoration/readiness. An older direct peer start loses
 to the subsequently admitted local Off; later local On waits for this discharge.
@@ -115,7 +120,7 @@ Explicit local start, restart and install with `start: true` share the operation
 lock and recovery reservation check, including installs without a port override
 and the desktop install, installAll and update commands that send them.
 Install preparation runs without either global lock; only its separate start
-uses lifecycle admission. A local Off of that engine, or a local pause, admitted during preparation supersedes
+uses lifecycle admission. A local Off of that engine, or a pause of either origin, admitted during preparation supersedes
 that older start even after switch discharge. The install remains completed,
 but its start returns busy. A later On retains normal lifecycle ordering.
 The journal lock is released during lifecycle worker waits.
@@ -399,8 +404,8 @@ public parameters cannot impersonate a local caller. Local callers and internal
 cleanup of already accepted work retain their existing paths. Reads and
 permitted inference remain available without a grant.
 
-Permission denial is `-32012/remote_management_denied`, independently of local
-veto `-32011` and revision conflict `-32010`. Local pause/Off and private-policy,
+Permission denial is `-32012/remote_management_denied`, independently of pause
+veto `-32011` and revision conflict `-32010`. Pause, engine locks and private-policy,
 CORS, served/resident and admission checks remain authoritative even for allowed
 peers. Revocation prevents new acceptance; it does not stop or unpair the node
 or undo accepted work, whose target-owned completion/recovery and receipt reads
@@ -566,19 +571,20 @@ proxy enforces it.
   broker sends engine-manager `engine:node-projection {policy, pausedLocally, managementBlocked}`:
   the stored policy's advertisement (`revision`, declared `roles` with the
   bounds of the matching profiles, `pausedBy`), whether the node is paused
-  locally (Local veto), and `managementBlocked`, true while a pause of either
-  origin is saved, the node is draining or paused, or a local pause is accepted
+  locally (provenance), and `managementBlocked`, true while a pause of either
+  origin is saved, the node is draining or paused, or a pause of either origin is accepted
   but not yet saved. The advertisement carries no availability, so
   `managementBlocked` is sent explicitly rather than derived from `pausedBy`.
   engine-manager serves `policy` to paired peers in its
-  pinned `GET /v1/models` document and enforces `pausedLocally`; it stores
-  `managementBlocked` for the remote pause gate, which is not enforced yet. Each send reads
+  pinned `GET /v1/models` document. `managementBlocked` is the authoritative
+  pause fence for incoming peer mutations; `pausedLocally` retains provenance
+  and existing operation-scoped obligations. Each send reads
   the policy current at send time under one lock, so an older projection never
   follows a newer one.
-  A local pause also sends a pending `pausedLocally` veto before persistence;
+  Every pause sends a pending `managementBlocked` fence before persistence;
   its advertisement still describes the previously stored policy. The later
   adopted projection carries the saved pause provenance and new revision.
-  A peer resume vetoed by a local pause changes neither the stored policy nor
+  A peer write vetoed by a pause changes neither the stored policy nor
   its revision and emits no projection. Remote routers do not filter inference
   candidates by advertised `pausedBy`: a paused peer remains selectable. The
   paused node's admission refuses inference with HTTP 503 and
@@ -657,8 +663,13 @@ proxy enforces it.
   `draining` (with `cancelActive` when `pause.onActive` is `cancel`), wait for the
   proxy's active count to reach zero for up to `pause.drainTimeoutSeconds`, then
   push again with `cancelActive` and allow 10 s for that work to unwind. Then
-  unload every loaded model and `engine:sleep` every running engine, push
-  `paused`, and notify clients. The request returns once paused.
+  read fresh engine and loaded-model inventories, unload every known loaded
+  model and intent-neutrally `engine:sleep` every reported engine. Only verified
+  shutdown permits live `paused`. An incomplete stop leaves stored `paused`,
+  live `draining` and the management fence in place, continues attempting the
+  other engines, and returns `-32000` with `Pause could not stop every engine: `
+  plus bounded operational detail. Failed unload is satisfied by verified
+  process termination. A local Pause retries incomplete work.
   `pause.unloadModels` and `pause.stopEngines` are obsolete input kept in schema
   version 2: a file, a local `policy:set` or an older peer's relayed set may
   carry either bool, and parsing normalizes both to `true`, so every stored
@@ -667,29 +678,30 @@ proxy enforces it.
   `pause.drainTimeoutSeconds` stay configurable with their existing validation.
 - **Resuming** persists and pushes `available`, then `engine:wake`s the engines
   the pause stopped. Their saved intent was never changed, so only engines saved
-  On come back.
+  On and unlocked come back through engine-manager's activation guards.
 - **Ordering.** Transitions run one at a time. A newer `node:set-availability`
   cancels the one in progress, which returns the error `superseded by a later
   node:set-availability request`; the latest request always wins, and a resume
-  never waits out a pause's drain. A paired node's resume refused by the local
-  veto is not accepted, so it supersedes nothing.
-- **Local veto.** A pause records who made it in `policy.pausedBy`: `local` for
+  never waits out a pause's drain. A paired node's write refused by the pause
+  fence is not accepted, so it supersedes nothing.
+- **Pause fence.** A pause records who made it in `policy.pausedBy`: `local` for
   a local client's `node:set-availability`, `peer` for one relayed from a
   paired node; a resume clears it, and `policy:set` (local or relayed) never
-  changes it. A node paused locally, including a pause saved before `pausedBy`
-  existed and the recovery policy's pause, refuses a paired node's resume with
-  error `-32011` (`this node was paused on the node itself; resume it there`),
-  also while a local pause is accepted but not yet saved. A paired node's pause
-  over a local one stays `local`; a local pause over a peer one becomes
-  `local`. Only a local resume lifts it. A paired node may resume a peer pause.
-  Configuration edits through `policy:set` stay allowed while vetoed.
-  engine-manager applies the same veto to paired nodes' engine starts and model
-  loads from the projected `pausedLocally`. While the node is paused, whoever
-  paused it, `engine:apply-settings` (and journal recovery) applies the
-  settings but never resumes a stopped engine; the local user resumes the node
-  first. A paired node's apply that would resume one while the node is paused
-  locally is refused with `-32011` before it is accepted, and its
-  `engine:settings-reply` carries `errorCode` like `policy:reply`.
+  changes it. The common blocked predicate covers an accepted pause of either
+  origin, stored `paused`, and live `draining` or `paused`, including recovery.
+  After the fresh permission check, it refuses every peer management mutation
+  with `-32011` and `This node is paused. Resume it on this node before managing it remotely.`
+  A peer may pause an available node, but cannot resume or repeat that pause,
+  including the peer that initiated it. Refusal changes no revision, settings,
+  receipt or transition. A local pause over a peer pause becomes `local`.
+  Only a local resume lifts the fence at the authoritative availability
+  transition; a failed or superseded resume cannot publish an unblocked state.
+  Reads, outgoing management, local configuration, grants and manual-node
+  operations remain available. Local starts, loads and switches require Resume.
+  Local settings Apply and journal recovery may finish configuration while
+  paused, but never activate a stopped engine. Settings and switch acceptance
+  recheck after waiting for locks and worker validation, before writing any
+  new receipt; no-op and duplicate peer requests are fenced too.
 - **Startup.** A persisted `paused` reaches the proxy before it can admit
   anything. A paused node skips `engine:restore-enabled` (also when
   engine-manager restarts while paused) and sends it on resume instead. Legacy
@@ -912,7 +924,7 @@ node's policy or availability; the remote form carries no `active`.
 |---|---|---|
 | `policy:get` | `{ nodeId? }` | `{ policy, availability, recoveryRequired, activeRevision, activation, activationError? }` — `policy` is the persisted `nodepolicy.Policy` (`policy.revision` is the broker-assigned revision of the stored document); `availability` is live and may be `draining`; `recoveryRequired` is true while the node runs on the paused recovery policy because its file was unusable, until an explicit `policy:set` succeeds; `activeRevision` is the revision the running proxy acknowledged (empty when none, and after the newest availability push was refused, failed or not answered in time; a push still in flight leaves it as it was) and `activation` is `active`, `pending` or `error` (Activation above). Relayed from a paired node, `policy` is the peer projection (`nodepolicy.PeerPolicy`: no `routing`, no API tier entries) and the activation fields are absent |
 | `policy:set` | `{ nodeId?, policy, expectedPersistedRevision }` | `{ policy, activeRevision, activation, activationError? }` after the precondition, validation, persisting and the bounded wait for the proxy to acknowledge that exact revision; `activation` describes `policy.revision` and is `pending` or `error` when it was saved but not activated; `policy.revision` against `activeRevision` shows both revisions. The wait is bounded, so a busy push slot yields `pending`. Fields the caller omits take their defaults. `policy.availability`, `policy.pausedBy` and `policy.revision` are ignored (the persisted availability and its provenance are kept: only `node:set-availability` changes them; the broker assigns the next revision). `expectedPersistedRevision` is required: the canonical decimal `policy.revision` of the `policy:get` the draft is based on. A missing, null, empty or non-canonical value is error `-32602` before anything else, and there is no unconditional write. It is compared with the persisted `policy.revision` under the same lock as the save, so two writers holding the same revision cannot both succeed; a mismatch is error `-32010` whose message starts with `policy conflict:` and names the current persisted revision, with nothing validated, persisted, pushed or announced. The caller reloads and reviews the policy rather than resubmitting the old draft. A failure before replacement is error `-32000` (`the policy could not be saved: ...`), with the file and running state unchanged. A landed replacement whose durability failed is also error `-32000`, saying the document with revision N was saved and is being applied but may not survive a power loss. That complete document is adopted, recovery is cleared, proxy supervision is reconciled, and the proxy push and `policy:changed` proceed as after success (Durability above). An invalid policy is error `-32602` and nothing changes, as is an enabled `routing.listener.port` that a configured facade uses (Supervision & recovery). Enabling or disabling the listener on a node with no facade starts or stops the proxy in the background, so that revision is `pending` until the new process acknowledges the replay. Relayed from a paired node, `expectedPersistedRevision` is required in the same way (the `revision` of the projection it read) and a mismatch is returned with `errorCode: -32010` and `policy conflict:` text in `policy:reply`, while invalid parameters carry `errorCode: -32602`; only device fields may change: `tiers` and `tierPolicy` must equal the projection and `routing` must be absent, or the set is rejected; the result is the peer projection |
-| `node:set-availability` | `{ nodeId?, state: "available" \| "paused" }` | `{ availability, revision, activeRevision, activation, activationError? }` once the state is reached; pausing waits for the drain. `revision` is the persisted revision the activation fields describe (the one this change took, unless it was made during policy recovery); `activation` is `error`, with `activeRevision` empty, when the proxy refused or did not answer the availability push, even though the state was reached on this node (Activation). A request replaced by a newer one fails with `superseded by a later node:set-availability request`. Relayed from a paired node the result is `{ availability }` alone: like the relayed `policy:get`, it shows that peer no activation fields. A paired node's resume of a node paused locally is error `-32011` and changes nothing (Local veto) |
+| `node:set-availability` | `{ nodeId?, state: "available" \| "paused" }` | `{ availability, revision, activeRevision, activation, activationError? }` once the state is reached; pausing waits for the drain and verified engine shutdown. Incomplete shutdown returns `-32000` and retains live `draining` and the pause fence. `revision` is the persisted revision the activation fields describe (the one this change took, unless it was made during policy recovery); `activation` is `error`, with `activeRevision` empty, when the proxy refused or did not answer the availability push, even though the state was reached on this node (Activation). A request replaced by a newer one fails with `superseded by a later node:set-availability request`. Relayed from a paired node the result is `{ availability }` alone: like the relayed `policy:get`, it shows that peer no activation fields. Every peer availability write while either-origin pause is pending or active returns `-32011` and changes nothing (Pause fence); only local Resume lifts the fence |
 
 An omitted `nodeId`, or this node's own, acts locally; any other is relayed to
 that node (see [Node policy](#node-policy)).

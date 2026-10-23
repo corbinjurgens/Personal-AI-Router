@@ -32,6 +32,7 @@ type switchHarness struct {
 	config             settings.SwitchConfigurationSnapshot
 	active             atomic.Int32
 	runningTarget      bool
+	sleeping           map[string]bool
 	failStep           string
 	publicationFailure bool
 }
@@ -45,7 +46,7 @@ func newSwitchHarness(t *testing.T) *switchHarness {
 	if err := c.store.Load(); err != nil {
 		t.Fatal(err)
 	}
-	h := &switchHarness{b: b, output: output, config: settings.SwitchConfigurationSnapshot{ManagerIncarnation: "manager-run", RegistryRuntimeFingerprint: "runtime", Engines: []settings.SwitchConfigurationEngine{{Engine: "llamacpp", Intent: settings.SwitchIntentOn}, {Engine: "lmstudio", Intent: settings.SwitchIntentOff}}}}
+	h := &switchHarness{b: b, output: output, sleeping: make(map[string]bool), config: settings.SwitchConfigurationSnapshot{ManagerIncarnation: "manager-run", RegistryRuntimeFingerprint: "runtime", Engines: []settings.SwitchConfigurationEngine{{Engine: "llamacpp", Intent: settings.SwitchIntentOn}, {Engine: "lmstudio", Intent: settings.SwitchIntentOff}}}}
 	h.engine = attachFakeEngine(t, b)
 	h.engine.setAnswer(func(method string, raw json.RawMessage) (any, string) {
 		h.mu.Lock()
@@ -57,6 +58,40 @@ func newSwitchHarness(t *testing.T) *switchHarness {
 			result.Observed = settings.SwitchObserved{Source: copy.Source, Target: copy.Target}
 		}
 		switch method {
+		case "engine:get-installed":
+			engines := make([]map[string]any, 0, len(h.config.Engines))
+			for _, config := range h.config.Engines {
+				running := config.Intent == settings.SwitchIntentOn || (config.Engine == "lmstudio" && h.runningTarget)
+				if h.cp != nil {
+					state := h.cp.Source
+					if config.Engine == h.cp.TargetEngine {
+						state = h.cp.Target
+					}
+					if state.Running != nil {
+						running = *state.Running
+					}
+				}
+				engines = append(engines, map[string]any{"engine": config.Engine, "running": running && !h.sleeping[config.Engine]})
+			}
+			return map[string]any{"engines": engines}, ""
+		case "engine:models":
+			return map[string]any{"models": []string{}, "loadedByEngine": map[string][]string{}}, ""
+		case engineSleepMethod:
+			var p struct {
+				Engine string `json:"engine"`
+			}
+			if err := json.Unmarshal(raw, &p); err != nil {
+				return nil, err.Error()
+			}
+			h.sleeping[p.Engine] = true
+			if h.cp != nil {
+				if p.Engine == h.cp.SourceEngine {
+					h.cp.Source = switchTestState(false, false, h.cp.Source.Intent)
+				} else if p.Engine == h.cp.TargetEngine {
+					h.cp.Target = switchTestState(false, false, h.cp.Target.Intent)
+				}
+			}
+			return map[string]any{"engine": p.Engine, "running": false}, ""
 		case "engine:stop":
 			var p struct {
 				Engine     string `json:"engine"`
@@ -1329,5 +1364,97 @@ func TestSwitchManagerRPCErrorsKeepCodeAndKind(t *testing.T) {
 				t.Fatalf("manager error cannot be persisted: %v", err)
 			}
 		})
+	}
+}
+
+func TestSwitchBrokerPauseErrorKeepsRemoteVetoCodeAndKind(t *testing.T) {
+	detail := switchErrorDetail(&localVetoError{}, settings.SwitchErrorValidation)
+	if detail.Code != settings.SwitchRemoteVetoCode || detail.Kind != settings.SwitchErrorRemoteVeto ||
+		detail.Message != "This node is paused. Resume it on this node before managing it remotely." {
+		t.Fatalf("broker pause error = %+v", detail)
+	}
+	if err := detail.Validate(); err != nil {
+		t.Fatalf("broker pause error cannot cross the switch relay: %v", err)
+	}
+}
+
+func TestSwitchDelayedSnapshotCannotWriteReceiptAfterPauseAcceptance(t *testing.T) {
+	h := newSwitchHarness(t)
+	clustertrusttest.Join(t, h.b.clusterDir, "cluster", "target", "peer")
+	grantRemoteManagement(t, h.b.clusterDir, "cluster", "target", "peer", true)
+	p := h.request(t, "snapshot-before-pause")
+	base := h.engine.answer
+	reached := make(chan struct{})
+	h.engine.setAnswer(func(method string, raw json.RawMessage) (any, string) {
+		result, errText := base(method, raw)
+		if method == settings.SwitchPrepareMethod && errText == "" {
+			close(reached)
+			return result, holdSuccessReply
+		}
+		return result, errText
+	})
+	var writes atomic.Int32
+	write := h.b.engineSwitch.store.write
+	h.b.engineSwitch.store.write = func(path string, data []byte, mode os.FileMode) error {
+		writes.Add(1)
+		return write(path, data, mode)
+	}
+	generation := h.b.engineSwitch.store.Generation()
+	done := make(chan error, 1)
+	go func() { _, err := h.b.acceptEngineSwitch(context.Background(), p, "peer"); done <- err }()
+	receive(t, "switch snapshot readback to wait", reached)
+	r := h.b.nodePolicyRuntime()
+	r.mu.Lock()
+	r.pendingPauseRequested = true
+	r.mu.Unlock()
+	h.b.publishNodeProjection()
+	h.engine.releaseHeld()
+	err := receive(t, "delayed switch refusal", done)
+	var paused *localVetoError
+	if !errors.As(err, &paused) || policyErrorCode(err) != codeLocalVeto {
+		t.Fatalf("delayed switch = %v, want broker pause refusal", err)
+	}
+	if _, exists := h.b.engineSwitch.store.Lookup(p.RequestID); exists || writes.Load() != 0 || h.b.engineSwitch.store.Generation() != generation {
+		t.Fatalf("refused switch wrote a receipt: exists=%t writes=%d generation=%d", exists, writes.Load(), h.b.engineSwitch.store.Generation())
+	}
+	if steps := switchSteps(t, h.engine); len(steps) != 0 {
+		t.Fatalf("refused switch dispatched lifecycle steps: %v", steps)
+	}
+}
+
+func TestPausedSwitchDuplicateReceiptIsRefusedWithoutJournalChange(t *testing.T) {
+	h := newSwitchHarness(t)
+	clustertrusttest.Join(t, h.b.clusterDir, "cluster", "target", "peer")
+	grantRemoteManagement(t, h.b.clusterDir, "cluster", "target", "peer", true)
+	p := h.request(t, "duplicate-while-paused")
+	p.NodeID = h.b.nodeID
+	r := switchStoreReceipt(p.RequestID)
+	r.NodeID, r.Caller, r.Request = h.b.nodeID, "peer", p
+	r.ExpectedRevision, r.AcceptedRevision = p.ExpectedRevision, p.ExpectedRevision
+	r.PayloadHash = settings.SwitchPayloadHash("peer", h.b.nodeID, p)
+	before := switchStoreAccept(t, h.b.engineSwitch.store, r)
+	data, err := os.ReadFile(h.b.engineSwitch.store.path)
+	if err != nil {
+		t.Fatalf("read accepted switch receipt: %v", err)
+	}
+	runtime := h.b.nodePolicyRuntime()
+	runtime.mu.Lock()
+	runtime.current.Availability, runtime.current.PausedBy = nodepolicy.Paused, nodepolicy.PausedByPeer
+	runtime.mu.Unlock()
+	_, err = h.b.acceptEngineSwitch(context.Background(), p, "peer")
+	var paused *localVetoError
+	if !errors.As(err, &paused) {
+		t.Fatalf("paused duplicate = %v, want broker pause refusal", err)
+	}
+	after, exists := h.b.engineSwitch.store.Lookup(p.RequestID)
+	if !exists || !reflect.DeepEqual(after, before) {
+		t.Fatalf("paused duplicate changed receipt: %+v -> %+v", before, after)
+	}
+	afterData, err := os.ReadFile(h.b.engineSwitch.store.path)
+	if err != nil {
+		t.Fatalf("read refused switch receipt: %v", err)
+	}
+	if string(afterData) != string(data) {
+		t.Fatal("paused duplicate rewrote the switch journal")
 	}
 }

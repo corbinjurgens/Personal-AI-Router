@@ -143,10 +143,9 @@ func (b *Broker) sendNodeProjection(onlyOnStrictChange bool) {
 	}
 	r.strictPublished = advertisement.StrictAdmission
 	projection := nodeProjection{
-		Policy:        advertisement,
-		PausedLocally: pausedLocally(r.current) || r.localPauseRequested,
-		ManagementBlocked: r.current.Availability == nodepolicy.Paused || r.live == nodepolicy.Draining ||
-			r.live == nodepolicy.Paused || r.localPauseRequested,
+		Policy:            advertisement,
+		PausedLocally:     pausedLocally(r.current) || r.localPauseRequested,
+		ManagementBlocked: r.managementBlockedLocked(),
 	}
 	r.mu.Unlock()
 	if err := worker.Notify(engineNodeProjectionMethod, projection); err != nil {

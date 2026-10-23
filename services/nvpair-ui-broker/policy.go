@@ -151,6 +151,9 @@ type policyRuntime struct {
 	// transition ends, so a paired node's resume is refused even before that
 	// pause has been saved (setAvailability).
 	localPauseRequested bool
+	// pendingPauseRequested fences management from acceptance of either origin's
+	// pause until it is stored, or a local Resume takes effect. Guarded by mu.
+	pendingPauseRequested bool
 
 	// Admission state from the proxy, and a channel closed on every update so
 	// waiters can block on a change without polling.
@@ -249,6 +252,14 @@ func (r *policyRuntime) initLocked() {
 	if r.now == nil {
 		r.now = time.Now
 	}
+}
+
+// managementBlockedLocked is the authoritative pause boundary. Provenance is
+// independent: a peer pause has the same boundary as a local pause. Caller
+// holds r.mu; localPauseRequested also retains existing scoped obligations.
+func (r *policyRuntime) managementBlockedLocked() bool {
+	return r.pendingPauseRequested || r.localPauseRequested || r.current.Availability == nodepolicy.Paused ||
+		r.live == nodepolicy.Draining || r.live == nodepolicy.Paused
 }
 
 // loadNodePolicy reads the policy file at startup. A missing file means the
@@ -593,7 +604,7 @@ func (b *Broker) setPeerPolicyAs(raw, expected json.RawMessage, caller string) (
 	r := b.nodePolicyRuntime()
 	return b.persistPolicy(func(stored nodepolicy.Policy) (nodepolicy.Policy, error) {
 		// build runs under r.mu. Recovery is the owner's to complete.
-		if err := b.authorizeRemoteManagement(caller, "policy", ""); err != nil {
+		if err := b.authorizeRemoteManagementLocked(r, caller, "policy", ""); err != nil {
 			return nodepolicy.Policy{}, err
 		}
 		if err := checkExpectedRevision(stored, want); err != nil {
@@ -772,12 +783,12 @@ func policyErrorCode(err error) int {
 	return -32000
 }
 
-// localVetoError refuses a paired node's resume of a node paused on the node
-// itself. Only a resume made on this node lifts such a pause.
+// localVetoError refuses peer management while this node is pausing or paused.
+// Only a resume made on this node lifts the boundary, for either pause origin.
 type localVetoError struct{}
 
 func (*localVetoError) Error() string {
-	return "this node was paused on the node itself; resume it there"
+	return "This node is paused. Resume it on this node before managing it remotely."
 }
 
 // pausedLocally reports whether policy is paused by this node itself. A pause

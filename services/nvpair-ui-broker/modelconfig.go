@@ -130,7 +130,7 @@ func (b *Broker) captureModelConfig() modelConfigEvidence {
 	r := b.nodePolicyRuntime()
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	e := modelConfigEvidence{Policy: r.current, Live: r.live, Paused: r.localPauseRequested, Recovery: r.recoveryRequired,
+	e := modelConfigEvidence{Policy: r.current, Live: r.live, Paused: r.managementBlockedLocked(), Recovery: r.recoveryRequired,
 		Activation: r.activationLocked(pp, r.current.Revision), Readiness: r.strictReadinessLocked(pp, b.engineModelNaming),
 		Identity: r.modelIdentityLocked(), Intent: r.intent, Running: r.running, Loaded: r.loaded, Drains: r.drains,
 		Active: r.admission.ActiveByEngine, Proxy: pp, Worker: w, Source: source, Run: r.runID}
@@ -262,9 +262,9 @@ func (b *Broker) modelConfigEntry(e modelConfigEvidence, ref nodepolicy.Role) (n
 	}
 	switch {
 	case e.Live != nodepolicy.Available || e.Paused:
-		block(nodepolicy.ModelReasonPausedLocal)
+		block(nodepolicy.ModelReasonPaused)
 	case !e.Intent[ref.Engine]:
-		block(nodepolicy.ModelReasonEngineOffLocal)
+		block(nodepolicy.ModelReasonEngineOff)
 	case e.Drains[ref.Engine]:
 		block(nodepolicy.ModelReasonSwitchBusy)
 	case e.Activation.Activation != activationActive || e.Source == nil || e.Worker == nil:
