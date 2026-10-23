@@ -119,12 +119,14 @@ func TestHandleHTTP_NoContentOnFinalAttemptTerminates(t *testing.T) {
 	setForTest(t, &firstBodyTimeout, testFirstBodyTimeout)
 
 	forEachEngine(t, func(t *testing.T, tc engineCase) {
-		// The only owner, so every attempt in the budget goes to it and the
-		// last one has nowhere to fail over to.
+		// Alternatives retain the per-attempt first-content cap, even when
+		// the final dispatch has no remaining attempt to fail over to.
 		stalled := newStalledEngine(t)
+		other := newStalledEngine(t)
 
 		disc := NewDiscovery()
 		disc.AddManual(nodeForModel(t, "silent", stalled.url, tc.advertisedModel))
+		disc.AddManual(nodeForModel(t, "other-silent", other.url, tc.advertisedModel))
 		p := testProxy(tc.profile, disc, tc.profile.FacadePort)
 
 		rec := httptest.NewRecorder()
@@ -143,8 +145,8 @@ func TestHandleHTTP_NoContentOnFinalAttemptTerminates(t *testing.T) {
 			t.Fatal("handleHTTP never returned: a silent upstream committed and hung the request")
 		}
 
-		if got := stalled.hits(); got != maxDispatchAttempts {
-			t.Errorf("upstream saw %d dispatches, want the full budget of %d spent on the only owner", got, maxDispatchAttempts)
+		if got := stalled.hits() + other.hits(); got != maxDispatchAttempts {
+			t.Errorf("upstreams saw %d dispatches, want the full budget of %d", got, maxDispatchAttempts)
 		}
 		if rec.Code != http.StatusGatewayTimeout {
 			t.Fatalf("status = %d, want 504 for an upstream that answered but produced no content", rec.Code)
