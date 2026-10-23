@@ -9,6 +9,7 @@ import (
 	"reflect"
 	"testing"
 
+	"nvpair-shared/nodepolicy"
 	"nvpair-shared/noderec"
 )
 
@@ -41,6 +42,16 @@ func TestStrataContractRemoteUnsupported(t *testing.T) {
 	b.strataContractStartRuntime(t)
 	a.strataContractStartManager(t)
 	a.strataContractStartRuntime(t)
+	// Supply the available-node projection normally published by the broker,
+	// so target authorization reaches the engine's capability check.
+	b.Manager.strataContractNotify(t, "engine:node-projection", map[string]any{
+		"policy":            nodepolicy.Default().Advertisement(),
+		"pausedLocally":     false,
+		"managementBlocked": false,
+	})
+	// The manager applies projections in its stdio read loop. A following
+	// manifest read is a processing barrier with no runtime mutation or probe.
+	b.Manager.strataContractOK(t, "engine:describe", map[string]string{"engine": "strata"}, nil)
 	a.Manager.strataContractNotify(t, "discovery:nodes", noderec.GetNodesResult{
 		Nodes: []noderec.DirectoryNode{{
 			HostUUID: nodeB, Name: nodeB, IP: "127.0.0.1", ClusterUUID: uuidB, Trusted: true,

@@ -130,6 +130,7 @@ func TestServicePolicy(t *testing.T) {
 
 	t.Run("a real proxy activates the persisted revision after set, pause and resume", func(t *testing.T) {
 		f := newProxyServiceFixture(t)
+		f.withInertEngineManager()
 		f.start()
 		c := f.readyClient()
 		assertActive := func(step string) servicePolicySnapshot {
@@ -187,6 +188,7 @@ func TestServicePolicy(t *testing.T) {
 
 	t.Run("pause notifies observer and persists before restart and resume", func(t *testing.T) {
 		f := newServiceFixture(t)
+		f.withInertEngineManager()
 		f.start()
 		command := f.readyClient()
 		observer := f.readyClient()
@@ -264,9 +266,18 @@ func TestServicePolicy(t *testing.T) {
 
 func TestServicePolicyModelConfiguration(t *testing.T) {
 	f := newServiceFixture(t)
+	// No manager is intentional: configuration must retain unknown loaded
+	// inventory. Start paused without requesting physical shutdown proof.
+	initial := nodepolicy.Default()
+	initial.Availability = nodepolicy.Paused
+	initial.PausedBy = nodepolicy.PausedLocally
+	if err := initial.Validate(); err != nil {
+		t.Fatalf("invalid paused startup policy: %v", err)
+	}
+	jointWriteJSON(t, f.policyPath(), initial)
 	f.start()
 	command := f.readyClient()
-	setServiceAvailability(t, command, nodepolicy.Paused)
+	assertPolicySnapshot(t, fetchServicePolicy(t, command), initial, nodepolicy.Paused)
 	observer := f.readyClient()
 	want := servicePolicy(t, command)
 	want.Profiles = append(want.Profiles, fixtureResidentProfile())
