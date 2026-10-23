@@ -57,11 +57,11 @@ const routingModelsPath = "/v1/models"
 // routingAllowedHeaders are the request headers a preflight may ask for.
 var routingAllowedHeaders = []string{"content-type", "authorization"}
 
-// routingDrainGrace bounds how long a rebind or disable waits for connections to
-// finish. Every response here is a small body written by an instant handler, so
-// anything still open after this is a client that has stalled, and the control
-// loop must not wait on it.
-const routingDrainGrace = 250 * time.Millisecond
+// Rebinding closes acceptance only. Disabling or process teardown cancels
+// requests and bounds server shutdown, including a client stuck sending a body.
+const routingShutdownGrace = 3 * time.Second
+
+type routingPortContextKey struct{}
 
 // routingPreflightMaxAge is how long, in seconds, a browser may cache an
 // allowed preflight.
@@ -79,6 +79,7 @@ type routingListener struct {
 	srv    *http.Server
 	ln     net.Listener
 	port   int
+	cancel context.CancelFunc
 	// beforeServe is an optional per-instance hook, captured before launch.
 	beforeServe func()
 	// cleared records that this process has told the pipeline the listener is
@@ -88,9 +89,9 @@ type routingListener struct {
 }
 
 // reconcile makes the listener match the active policy: bound to the configured
-// port when enabled, absent otherwise. A changed port closes and drains the old
-// listener before the new one binds. A bind failure leaves no listener and a
-// visible error, never another port. It is idempotent, so a replayed policy
+// port when enabled, absent otherwise. A changed port binds first, serves with
+// the same HTTP server, then closes the old listening socket. A bind failure
+// keeps the working listener and reports a visible error. A replayed policy
 // retries a collision without disturbing a healthy listener.
 func (l *routingListener) reconcile() {
 	l.mu.Lock()
@@ -108,36 +109,49 @@ func (l *routingListener) reconcile() {
 		l.clearBlockedLocked()
 		return
 	}
-	l.stopLocked()
-
 	address := net.JoinHostPort("127.0.0.1", strconv.Itoa(want.Port))
 	ln, err := listenLoopbackExclusive(want.Port)
 	if err != nil {
 		l.reportBlockedLocked(address, err)
 		return
 	}
-	ctx := l.host.serveCtx
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	srv := &http.Server{
-		Handler:           &routingHandler{host: l.host, port: want.Port},
-		BaseContext:       func(net.Listener) context.Context { return ctx },
-		ReadHeaderTimeout: proxyReadHeaderTimeout,
-		WriteTimeout:      proxyReadHeaderTimeout,
-		IdleTimeout:       proxyServerIdleTimeout,
-		MaxHeaderBytes:    64 << 10,
+	srv := l.srv
+	if srv == nil {
+		ctx := l.host.serveCtx
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		ctx, l.cancel = context.WithCancel(ctx)
+		srv = &http.Server{
+			Handler:     &routingHandler{host: l.host},
+			BaseContext: func(net.Listener) context.Context { return ctx },
+			ConnContext: func(ctx context.Context, conn net.Conn) context.Context {
+				if addr, ok := conn.LocalAddr().(*net.TCPAddr); ok {
+					return context.WithValue(ctx, routingPortContextKey{}, addr.Port)
+				}
+				return ctx
+			},
+			ReadHeaderTimeout: proxyReadHeaderTimeout,
+			IdleTimeout:       proxyServerIdleTimeout,
+			MaxHeaderBytes:    64 << 10,
+		}
 	}
 	beforeServe := l.beforeServe
 	go func() {
 		if beforeServe != nil {
 			beforeServe()
 		}
-		if err := srv.Serve(ln); err != nil && !stderrors.Is(err, http.ErrServerClosed) {
+		if err := srv.Serve(ln); err != nil && !stderrors.Is(err, http.ErrServerClosed) && !stderrors.Is(err, net.ErrClosed) {
 			slog.Error("routing listener exited", "address", address, "err", err)
 		}
 	}()
+	old := l.ln
 	l.srv, l.ln, l.port = srv, ln, want.Port
+	if old != nil {
+		if err := old.Close(); err != nil && !stderrors.Is(err, net.ErrClosed) {
+			slog.Warn("routing listener close failed", "err", err)
+		}
+	}
 	l.clearBlockedLocked()
 	slog.Info("routing listener listening", "address", address)
 }
@@ -206,9 +220,7 @@ func (l *routingListener) close(ctx context.Context) {
 }
 
 func (l *routingListener) stopLocked() {
-	ctx, cancel := context.WithTimeout(context.Background(), routingDrainGrace)
-	defer cancel()
-	l.stopLockedWith(ctx)
+	l.stopLockedWith(context.Background())
 }
 
 // stopLockedWith drains the HTTP server, then forces it closed if the drain
@@ -218,14 +230,18 @@ func (l *routingListener) stopLockedWith(ctx context.Context) {
 	if l.srv == nil {
 		return
 	}
-	if err := l.srv.Shutdown(ctx); err != nil {
-		_ = l.srv.Close()
-	}
+	ctx, cancel := context.WithTimeout(ctx, routingShutdownGrace)
+	defer cancel()
+	l.cancel()
 	if err := l.ln.Close(); err != nil && !stderrors.Is(err, net.ErrClosed) {
 		slog.Warn("routing listener close failed", "port", l.port, "err", err)
 	}
+	if err := l.srv.Shutdown(ctx); err != nil {
+		_ = l.srv.Close()
+	}
 	slog.Info("routing listener stopped", "port", l.port)
 	l.srv, l.ln, l.port = nil, nil, 0
+	l.cancel = nil
 }
 
 func (l *routingListener) reportBlockedLocked(address string, bindErr error) {
@@ -259,7 +275,6 @@ func (l *routingListener) clearBlockedLocked() {
 // rebind.
 type routingHandler struct {
 	host *Proxy
-	port int
 }
 
 func (h *routingHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -273,7 +288,8 @@ func (h *routingHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Connection", "close")
 	}
 
-	if !h.hostAllowed(r.Host) {
+	port, ok := r.Context().Value(routingPortContextKey{}).(int)
+	if !ok || !h.hostAllowed(r.Host, port) {
 		writeRoutingError(w, http.StatusForbidden, routingCodeHostNotAllowed, "", "request host is not a loopback name of this listener")
 		return
 	}
@@ -307,9 +323,9 @@ func (h *routingHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 // hostAllowed accepts only a loopback name this listener is bound under, on its
 // own port, so a page that rebinds a hostname to 127.0.0.1 is refused.
-func (h *routingHandler) hostAllowed(host string) bool {
+func (h *routingHandler) hostAllowed(host string, localPort int) bool {
 	name, port, err := net.SplitHostPort(host)
-	if err != nil || port != strconv.Itoa(h.port) {
+	if err != nil || port != strconv.Itoa(localPort) {
 		return false
 	}
 	name = strings.ToLower(name)
