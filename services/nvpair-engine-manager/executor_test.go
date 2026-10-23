@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -20,6 +21,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -1219,14 +1221,35 @@ func managedFixtureExecutor(t *testing.T, m *Manifest, dir string) *Executor {
 	return ex
 }
 
+// errorSharingViolation is the Windows error for opening a file that another
+// handle still holds without sharing; it is not portable as a syscall name.
+const errorSharingViolation = syscall.Errno(32)
+
+// copyShareRetry bounds how long copyFile waits for a previous holder of a
+// fixed destination to release it.
+const copyShareRetry = 5 * time.Second
+
+// copyFile writes a fixed-path executable copy. The destinations are fixed
+// because firewall rules name them, so a path cannot be unique per test. On
+// Windows a previous test's process can still hold the image for a moment
+// after it was reaped, so only a sharing violation is retried, for a bounded
+// time; every other error fails at once.
 func copyFile(t *testing.T, src, dst string) {
 	t.Helper()
 	data, err := os.ReadFile(src)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(dst, data, 0o755); err != nil {
-		t.Fatalf("copy executable to %q: %v (a process from a previous run may still be using this path)", dst, err)
+	deadline := time.Now().Add(copyShareRetry)
+	for {
+		err = os.WriteFile(dst, data, 0o755)
+		if err == nil {
+			return
+		}
+		if runtime.GOOS != "windows" || !errors.Is(err, errorSharingViolation) || time.Now().After(deadline) {
+			t.Fatalf("copy executable to %q: %v (a process from a previous run may still be using this path)", dst, err)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 
