@@ -442,9 +442,9 @@ func concreteDispatchPolicy(start time.Time) dispatchPolicy {
 	return dispatchPolicy{maxAttempts: maxDispatchAttempts, deadline: start.Add(jobDeadline)}
 }
 
-// hybridDispatchPolicy reads one request's Limits. publicAllowed only asks for
-// public selection: every public candidate still passes publicAttemptPermitted,
-// the one guard that refuses while public dispatch is unavailable in this build.
+// hybridDispatchPolicy reads one request's Limits. Public selection also
+// requires build availability; each candidate still passes the request-bound
+// publicAttemptPermitted guard before dispatch.
 func hybridDispatchPolicy(start time.Time, limits nodepolicy.Limits, rules nodepolicy.TierRouting) dispatchPolicy {
 	seconds := func(n int) time.Duration { return time.Duration(n) * time.Second }
 	return dispatchPolicy{
@@ -453,8 +453,20 @@ func hybridDispatchPolicy(start time.Time, limits nodepolicy.Limits, rules nodep
 		queueWait:     seconds(limits.QueueSeconds),
 		coldWait:      seconds(limits.ColdStartSeconds),
 		hybrid:        true,
-		publicAllowed: rules.RemoteAllowed,
+		publicAllowed: rules.RemoteAllowed && nodepolicy.PublicDispatchAvailable(),
 	}
+}
+
+// peerSlotContext uses the remaining hybrid queue allowance for the origin's
+// peer-service slot, leaving at least half the pre-output time for the
+// destination's strict admission and first response. Concrete and local
+// attempts retain their context.
+func peerSlotContext(ctx context.Context, policy dispatchPolicy, cand candidate, queueLeft, preOutputLeft time.Duration) (context.Context, time.Duration) {
+	if !policy.hybrid || cand.self || cand.peerUUID == "" {
+		return ctx, 0
+	}
+	wait := min(queueLeft, max(preOutputLeft/2, 0))
+	return clustertrust.WithPeerSlotWait(ctx, wait), wait
 }
 
 // publicChatSource supplies what a permitted public attempt needs: the
@@ -1568,18 +1580,10 @@ func (ctl *routingSpend) dispatch(f *facade, w http.ResponseWriter, r *http.Requ
 		// next.
 		// The request travels on its own context so the slot bound below never
 		// reassigns attemptCtx, which the target watcher already reads.
-		requestCtx := attemptCtx
-		var peerSlotWait time.Duration
-		if policy.hybrid && !cand.self && cand.peerUUID != "" {
-			// A hybrid peer attempt waits for a slot for at most half its
-			// remaining queue allowance; the destination's budgets are reduced
-			// by that bound, because the slot is acquired inside the transport
-			// after the strict header is written. ErrPeerSlotOccupied ends the
-			// attempt as a costing one. Concrete attempts keep blocking
-			// acquisition.
-			peerSlotWait = queueLeft / 2
-			requestCtx = clustertrust.WithPeerSlotWait(requestCtx, peerSlotWait)
-		}
+		// The destination's budgets are reduced by the origin's slot bound
+		// because acquisition happens inside the transport after the strict
+		// header is written. ErrPeerSlotOccupied costs one hybrid attempt.
+		requestCtx, peerSlotWait := peerSlotContext(attemptCtx, policy, cand, queueLeft, time.Until(deadline))
 		attemptReq := r.WithContext(requestCtx)
 		attemptReq.Header = r.Header.Clone()
 		if streamRequest.protocol != streamProtocolUnknown {

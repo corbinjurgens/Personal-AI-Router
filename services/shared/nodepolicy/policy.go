@@ -290,8 +290,7 @@ type PauseConfig struct {
 	DrainTimeoutSeconds int      `json:"drainTimeoutSeconds"`
 	// UnloadModels and StopEngines are obsolete input kept for wire and file
 	// compatibility. Decoding accepts any bool and normalizes both to true, so
-	// every parsed or decoded policy shows true. A policy constructed in code
-	// can still hold false; the broker's pause execution still reads them.
+	// every parsed or decoded policy shows true. Pause execution ignores them.
 	UnloadModels bool `json:"unloadModels"`
 	StopEngines  bool `json:"stopEngines"`
 }

@@ -2079,15 +2079,35 @@ func TestServedResidentProcessRetention(t *testing.T) {
 
 func TestServedResidentProcessVeto(t *testing.T) {
 	f := newSRProcessFixture(t)
+	var pausedPID int
 	t.Run("local pause blocks resident loading", func(t *testing.T) {
-		f.call(t, "node:set-availability", map[string]string{"state": "paused"}, nil)
 		before := f.control(t, "")
+		starts := len(f.starts(t))
+		f.call(t, "node:set-availability", map[string]string{"state": "paused"}, nil)
+		pausedPID = before.Base.PID
+		assertSwitchProcessStopped(t, int32(pausedPID))
 		f.resident(t, neModel)
 		f.entry(t, neModel, nodepolicy.ModelStateBlocked, nodepolicy.ModelReasonPausedLocal)
-		srAssertNoEffects(t, before, f.control(t, ""))
+		if got := len(f.starts(t)); got != starts {
+			t.Fatalf("paused resident desire started a runtime: starts=%d, want %d", got, starts)
+		}
+		if _, err := f.state(); !neConnectionRefused(err) {
+			t.Fatalf("paused runtime still answers its private control: %v", err)
+		}
 	})
 	t.Run("resume reconciles without inference", func(t *testing.T) {
 		f.call(t, "node:set-availability", map[string]string{"state": "available"}, nil)
+		neEventually(t, "resumed authenticated runtime", neCallBudget, func() bool {
+			state, err := f.state()
+			return err == nil && state.PID != pausedPID
+		})
+		if f.fake != nil {
+			if err := f.fake.Release(); err != nil {
+				t.Fatalf("release paused runtime handle: %v", err)
+			}
+			f.fake = nil
+		}
+		f.retainRuntime(t)
 		f.entry(t, neModel, nodepolicy.ModelStateSatisfied, "")
 		state := f.control(t, "")
 		if state.Base.Loads != 1 || state.Base.Chats != 0 || state.Content != 0 {

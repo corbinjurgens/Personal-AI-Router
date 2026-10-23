@@ -1944,6 +1944,14 @@ func TestUnifiedDispatchHybridPublicRefusalSpendsNothing(t *testing.T) {
 	}
 }
 
+func TestUnifiedDispatchHybridPublicUnavailableBeforePreparation(t *testing.T) {
+	policy := hybridDispatchPolicy(time.Now(), nodepolicy.Limits{MaxAttempts: 1, PreOutputBudgetSeconds: 2},
+		nodepolicy.TierRouting{RemoteAllowed: true})
+	if policy.publicAllowed {
+		t.Fatal("unavailable public dispatch was selected before account preparation")
+	}
+}
+
 // hybridSelfProxy is a router whose own Ollama engine serves the weak tier as
 // a qualified declared role, with its strict storage in a private directory.
 func hybridSelfProxy(t *testing.T, resident bool) (*Proxy, *facade, *recordingEngine) {

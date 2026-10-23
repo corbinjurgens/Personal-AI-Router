@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"slices"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -22,6 +23,7 @@ import (
 	"nvpair-shared/clustertrust"
 	settings "nvpair-shared/enginesettings"
 	"nvpair-shared/jsonrpc"
+	"nvpair-shared/netpick"
 	"nvpair-shared/nodepolicy"
 	"nvpair-shared/noderec"
 )
@@ -438,7 +440,29 @@ func (f *pairedBootstrapFixture) bootstrap(t *testing.T) {
 		{Service: noderec.ServiceEngineControl, Port: f.b.ports[noderec.ServiceEngineControl]},
 		{Service: noderec.ServiceNodeInfo, Port: f.b.ports[noderec.ServiceNodeInfo]},
 	}
-	if descriptor.HostUUID != f.b.uuid || descriptor.Name != f.self.Name || !reflect.DeepEqual(descriptor.Addresses, f.self.CandidateIPs()) || !reflect.DeepEqual(descriptor.Services, wantServices) {
+	scannerAddresses := f.self.CandidateIPs()
+	var wantAddresses []string
+	for _, address := range scannerAddresses {
+		if !slices.Contains(wantAddresses, address) && len(wantAddresses) < noderec.MaxAdvertisedIPs {
+			wantAddresses = append(wantAddresses, address)
+		}
+	}
+	if len(wantAddresses) > 0 {
+		for _, address := range netpick.SharedOverlayAddresses() {
+			if slices.Contains(wantAddresses, address) {
+				continue
+			}
+			if len(wantAddresses) == noderec.MaxAdvertisedIPs {
+				wantAddresses[len(wantAddresses)-1] = address
+				break
+			}
+			wantAddresses = append(wantAddresses, address)
+			if len(wantAddresses) == noderec.MaxAdvertisedIPs {
+				break
+			}
+		}
+	}
+	if descriptor.HostUUID != f.b.uuid || descriptor.Name != f.self.Name || !reflect.DeepEqual(descriptor.Addresses, wantAddresses) || !reflect.DeepEqual(descriptor.Services, wantServices) {
 		t.Fatalf("complete authenticated advertised identity/ports differ: %+v", descriptor)
 	}
 }

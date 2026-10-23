@@ -1054,7 +1054,10 @@ func TestPauseFinishWaitsForDrainThenUnloadsAndStops(t *testing.T) {
 }
 
 func TestPauseCancelPushesCancelActiveImmediately(t *testing.T) {
-	b, _, proxy, engine := pausingBroker(t, nodepolicy.PauseConfig{OnActive: nodepolicy.CancelActive, DrainTimeoutSeconds: 30})
+	b, _, proxy, engine := pausingBroker(t, nodepolicy.PauseConfig{
+		OnActive: nodepolicy.CancelActive, DrainTimeoutSeconds: 30,
+		UnloadModels: false, StopEngines: false,
+	})
 	if a, err := b.setAvailability(context.Background(), nodepolicy.Paused, nodepolicy.PausedLocally); err != nil || a != nodepolicy.Paused {
 		t.Fatalf("pause = %q, %v", a, err)
 	}
@@ -1062,8 +1065,9 @@ func TestPauseCancelPushesCancelActiveImmediately(t *testing.T) {
 	if len(p) < 2 || p[0].State != nodepolicy.Draining || !p[0].CancelActive {
 		t.Fatalf("availability pushes = %+v, want draining with cancelActive first", p)
 	}
-	if got := engine.methods("engine:"); len(got) != 0 {
-		t.Fatalf("pause without unload/stop touched engines: %v", got)
+	calls := engine.snapshot()
+	if len(calls) != 2 || calls[0].method != engineUnloadModelMethod || calls[1].method != engineSleepMethod {
+		t.Fatalf("legacy false pause options skipped unload or stop: %v", engine.methods(""))
 	}
 }
 

@@ -751,7 +751,7 @@ func (b *Broker) restoreEnabledEngines(w *rpcWorker) {
 	}
 	b.recoverEngineSettings()
 	if b.skipRestoreWhilePaused() {
-		slog.Info("node is paused with stopEngines; engines are restored when it resumes")
+		slog.Info("node is paused; engines are restored when it resumes")
 		return
 	}
 	if err := w.Notify(restoreEnabledEnginesMethod, nil); err != nil {
@@ -1729,8 +1729,8 @@ func (b *Broker) Serve(ctx context.Context) error {
 	go b.refreshEngineSettings(ctx)
 
 	// The node policy is loaded before engine-manager and the proxy start: the
-	// proxy is handed it before it can admit anything, and a node paused with
-	// stopEngines must not have its engines restored.
+	// proxy is handed it before it can admit anything, and a paused node must
+	// not have its engines restored.
 	if path, err := defaultNodePolicyPath(); err != nil {
 		slog.Warn("could not resolve the node policy path; using the default policy in memory", "err", err)
 	} else {

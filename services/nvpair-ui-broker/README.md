@@ -691,9 +691,9 @@ proxy enforces it.
   locally is refused with `-32011` before it is accepted, and its
   `engine:settings-reply` carries `errorCode` like `policy:reply`.
 - **Startup.** A persisted `paused` reaches the proxy before it can admit
-  anything. Because every stored policy has `pause.stopEngines` normalized to
-  `true`, a paused node skips `engine:restore-enabled` (also when engine-manager
-  restarts while paused) and sends it on resume instead.
+  anything. A paused node skips `engine:restore-enabled` (also when
+  engine-manager restarts while paused) and sends it on resume instead. Legacy
+  `stopEngines` and `unloadModels` values remain readable but never weaken pause.
 - **Idle policy.** Every 30 s the broker looks at each running engine with no
   active requests. Its idle time runs from the latest of its last admitted
   request (`admission/state.lastActivityMs`), the moment it was seen to start,

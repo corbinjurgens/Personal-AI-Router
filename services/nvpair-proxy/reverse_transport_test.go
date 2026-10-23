@@ -1134,3 +1134,39 @@ func TestProxyReverseHybridPeerSlotWaitIsBounded(t *testing.T) {
 		t.Fatal("concrete attempt never acquired a released slot")
 	}
 }
+
+func TestProxyReverseHybridPeerSlotPreservesDestinationBudget(t *testing.T) {
+	base := context.Background()
+	peer := candidate{peerUUID: "peer"}
+	for _, tc := range []struct {
+		name             string
+		queue, preOutput time.Duration
+		want             time.Duration
+	}{
+		{"queue fits before destination", 2 * time.Second, 6 * time.Second, 2 * time.Second},
+		{"equal queue and deadline", 5 * time.Second, 5 * time.Second, 2500 * time.Millisecond},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, wait := peerSlotContext(base, dispatchPolicy{hybrid: true}, peer, tc.queue, tc.preOutput)
+			if ctx == base || wait != tc.want || wait >= tc.preOutput {
+				t.Fatalf("hybrid peer slot context = (%v, %v), want bound %v below deadline %v", ctx, wait, tc.want, tc.preOutput)
+			}
+		})
+	}
+	for _, tc := range []struct {
+		name   string
+		policy dispatchPolicy
+		cand   candidate
+	}{
+		{name: "concrete peer", cand: peer},
+		{name: "hybrid self", policy: dispatchPolicy{hybrid: true}, cand: candidate{self: true, peerUUID: "peer"}},
+		{name: "hybrid direct", policy: dispatchPolicy{hybrid: true}, cand: candidate{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, wait := peerSlotContext(base, tc.policy, tc.cand, 5*time.Second, 5*time.Second)
+			if ctx != base || wait != 0 {
+				t.Fatalf("slot context = (%v, %v), want unbounded original context", ctx, wait)
+			}
+		})
+	}
+}
