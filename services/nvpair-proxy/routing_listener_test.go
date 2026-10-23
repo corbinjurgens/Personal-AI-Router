@@ -21,6 +21,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -77,13 +78,14 @@ func freeRoutingPort(t *testing.T) int {
 func startRoutingPolicy(t *testing.T, p *Proxy, w *recordingWriter, pol nodepolicy.Policy) int {
 	t.Helper()
 	pol.Routing.Listener.Enabled = true
+	previous := boundPort(p)
 	for range 20 {
 		pol.Routing.Listener.Port = freeRoutingPort(t)
 		activate(t, p, w, pol)
 		if got := boundPort(p); got == pol.Routing.Listener.Port {
 			return got
 		}
-		if got := boundPort(p); got != 0 {
+		if got := boundPort(p); got != 0 && got != previous {
 			t.Fatalf("listener bound %d, want configured port %d", got, pol.Routing.Listener.Port)
 		}
 	}
@@ -701,7 +703,7 @@ func assertFacadesUnchanged(t *testing.T, ports map[string]int, before map[strin
 	}
 }
 
-func TestRoutingListener_MovingOntoATakenPortLeavesNoListener(t *testing.T) {
+func TestRoutingListener_MovingOntoATakenPortKeepsTheWorkingListener(t *testing.T) {
 	p, w, ports := facadeProxy(t)
 	working := startRouting(t, p, w, "1")
 	workingSocket := routingSocket(p)
@@ -722,14 +724,69 @@ func TestRoutingListener_MovingOntoATakenPortLeavesNoListener(t *testing.T) {
 	if got := p.admission.currentPolicy().Revision; got != "2" {
 		t.Errorf("active revision = %q, want 2 despite the collision", got)
 	}
-	if boundPort(p) != 0 {
-		t.Errorf("listener bound %d, want none after the configured port collided", boundPort(p))
+	if boundPort(p) != working || routingSocket(p) != workingSocket {
+		t.Fatalf("failed rebind replaced working listener: port %d, want %d", boundPort(p), working)
 	}
-	assertRoutingClosed(t, workingSocket)
+	if got := call(t, working, http.MethodGet, routingModelsPath, nil); got.status != http.StatusOK {
+		t.Fatalf("working listener after refused rebind: status %d", got.status)
+	}
 	if n := len(notificationsOf(t, w, "errors:report")) - reportsBefore; n != 1 {
 		t.Errorf("%d errors:report notifications, want 1", n)
 	}
 	assertFacadesUnchanged(t, ports, before)
+}
+
+func routingHTTPServer(p *Proxy) *http.Server {
+	p.routing.mu.Lock()
+	defer p.routing.mu.Unlock()
+	return p.routing.srv
+}
+
+func TestRoutingListener_HasNoStreamWriteDeadline(t *testing.T) {
+	p, w := zeroFacadeProxy(t)
+	startRouting(t, p, w, "1")
+	srv := routingHTTPServer(p)
+	if srv.WriteTimeout != 0 {
+		t.Fatalf("stream write timeout = %v, want no server-wide deadline", srv.WriteTimeout)
+	}
+	if srv.ReadHeaderTimeout != proxyReadHeaderTimeout || srv.IdleTimeout != proxyServerIdleTimeout {
+		t.Fatalf("header/idle bounds changed: %v/%v", srv.ReadHeaderTimeout, srv.IdleTimeout)
+	}
+}
+
+func TestRoutingListener_RebindUsesOneServerAndConnectionPorts(t *testing.T) {
+	p, w := zeroFacadeProxy(t)
+	first := startRouting(t, p, w, "1")
+	srv := routingHTTPServer(p)
+	conn, err := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(first)), time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	reader := bufio.NewReader(conn)
+	if got, err := routingExchange(conn, reader, "localhost", first, http.MethodGet, routingModelsPath); err != nil || got.status != http.StatusOK {
+		t.Fatalf("initial connection: status %d, error %v", got.status, err)
+	}
+	for revision := 2; revision <= 5; revision++ {
+		old := routingSocket(p)
+		port := startRouting(t, p, w, strconv.Itoa(revision))
+		if routingHTTPServer(p) != srv {
+			t.Fatal("rebind replaced the HTTP server")
+		}
+		assertRoutingClosed(t, old)
+		if got := call(t, port, http.MethodGet, routingModelsPath, nil); got.status != http.StatusOK {
+			t.Fatalf("new listener: status %d", got.status)
+		}
+		if got, err := routingExchange(conn, reader, "localhost", first, http.MethodGet, routingModelsPath); err != nil || got.status != http.StatusOK {
+			t.Fatalf("old connection lost accepted port: status %d, error %v", got.status, err)
+		}
+		if got, err := routingExchange(conn, reader, "localhost", port, http.MethodGet, routingModelsPath); err != nil || got.status != http.StatusForbidden || got.code(t) != routingCodeHostNotAllowed {
+			t.Fatalf("old connection accepted new Host port: status %d, error %v", got.status, err)
+		}
+		if got := call(t, port, http.MethodGet, routingModelsPath, withHost(net.JoinHostPort("localhost", strconv.Itoa(first)))); got.status != http.StatusForbidden || got.code(t) != routingCodeHostNotAllowed {
+			t.Fatalf("new connection accepted old Host port: status %d", got.status)
+		}
+	}
 }
 
 // routingExchange uses an existing connection and never redials a released
@@ -1195,7 +1252,7 @@ func TestRoutingListener_ShutdownClosesItForGood(t *testing.T) {
 }
 
 func TestRoutingListener_HostMatchesCaseInsensitivelyButNotByPrefix(t *testing.T) {
-	h := &routingHandler{port: 8123}
+	h := &routingHandler{}
 	for host, want := range map[string]bool{
 		"127.0.0.1:8123":  true,
 		"localhost:8123":  true,
@@ -1206,7 +1263,7 @@ func TestRoutingListener_HostMatchesCaseInsensitivelyButNotByPrefix(t *testing.T
 		"":                false,
 		"[::1]:8123":      false,
 	} {
-		if got := h.hostAllowed(host); got != want {
+		if got := h.hostAllowed(host, 8123); got != want {
 			t.Errorf("hostAllowed(%q) = %v, want %v", host, got, want)
 		}
 	}
@@ -1267,10 +1324,155 @@ func TestRoutingListener_StalledClientsNeitherDelayAnAnswerNorHoldTheControlLoop
 			} else {
 				activate(t, p, w, listenerPolicy(t, "2", nodepolicy.Listener{}))
 			}
-			if elapsed := time.Since(started); elapsed > time.Second {
-				t.Errorf("activating the new listener setting took %v with stalled clients connected, want under 1s", elapsed)
+			limit := time.Second
+			if name == "disabled" {
+				limit = routingShutdownGrace + 500*time.Millisecond
+			}
+			if elapsed := time.Since(started); elapsed > limit {
+				t.Errorf("activating the new listener setting took %v with stalled clients connected, want under %v", elapsed, limit)
 			}
 			assertRoutingClosed(t, socket)
 		})
+	}
+}
+
+// Replace the handler before the existing Serve gate opens. This exercises the
+// production server lifecycle without enabling the Q4-gated inference route.
+func routingLifetimeFixture(t *testing.T, p *Proxy, w *recordingWriter, handler http.Handler) int {
+	t.Helper()
+	gate := make(chan struct{})
+	defer close(gate)
+	p.routing.beforeServe = func() { <-gate }
+	port := startRouting(t, p, w, "1")
+	srv := routingHTTPServer(p)
+	original := srv.Handler
+	srv.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/fixture/") {
+			handler.ServeHTTP(w, r)
+			return
+		}
+		original.ServeHTTP(w, r)
+	})
+	return port
+}
+
+func TestRoutingListener_StreamSurvivesRebindAndFormerWriteTimeout(t *testing.T) {
+	p, w := zeroFacadeProxy(t)
+	release := make(chan struct{})
+	finish := sync.OnceFunc(func() { close(release) })
+	defer finish()
+	done := make(chan error, 1)
+	first := routingLifetimeFixture(t, p, w, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if _, err := io.WriteString(w, "first\n"); err != nil {
+			done <- err
+			return
+		}
+		if err := http.NewResponseController(w).Flush(); err != nil {
+			done <- err
+			return
+		}
+		select {
+		case <-release:
+		case <-r.Context().Done():
+			done <- r.Context().Err()
+			return
+		}
+		if _, err := io.WriteString(w, "last\n"); err != nil {
+			done <- err
+			return
+		}
+		done <- http.NewResponseController(w).Flush()
+	}))
+	client := &http.Client{Timeout: proxyReadHeaderTimeout + 5*time.Second, Transport: &http.Transport{DisableKeepAlives: true}}
+	resp, err := client.Get("http://127.0.0.1:" + strconv.Itoa(first) + "/fixture/stream")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	reader := bufio.NewReader(resp.Body)
+	if line, err := reader.ReadString('\n'); err != nil || line != "first\n" {
+		t.Fatalf("initial stream frame %q, error %v", line, err)
+	}
+	srv := routingHTTPServer(p)
+	old := routingSocket(p)
+	port := startRouting(t, p, w, "2")
+	if routingHTTPServer(p) != srv {
+		t.Fatal("streaming rebind replaced the server")
+	}
+	assertRoutingClosed(t, old)
+	if got := call(t, port, http.MethodGet, routingModelsPath, nil); got.status != http.StatusOK {
+		t.Fatalf("new listener status %d", got.status)
+	}
+	timer := time.NewTimer(proxyReadHeaderTimeout + 100*time.Millisecond)
+	defer timer.Stop()
+	select {
+	case err := <-done:
+		t.Fatalf("stream ended during rebind: %v", err)
+	case <-timer.C:
+	}
+	finish()
+	if tail, err := io.ReadAll(reader); err != nil || string(tail) != "last\n" {
+		t.Fatalf("terminal stream frame %q, error %v", tail, err)
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("terminal flush: %v", err)
+	}
+}
+
+func TestRoutingListener_DisableAndReenableCreatesFreshServer(t *testing.T) {
+	p, w := zeroFacadeProxy(t)
+	startRouting(t, p, w, "1")
+	srv := routingHTTPServer(p)
+	activate(t, p, w, listenerPolicy(t, "2", nodepolicy.Listener{}))
+	if routingHTTPServer(p) != nil || routingSocket(p) != nil || boundPort(p) != 0 {
+		t.Fatal("disabled listener retains acceptance or server state")
+	}
+	port := startRouting(t, p, w, "3")
+	if routingHTTPServer(p) == srv {
+		t.Fatal("re-enable reused a shut down HTTP server")
+	}
+	if got := call(t, port, http.MethodGet, routingModelsPath, nil); got.status != http.StatusOK {
+		t.Fatalf("re-enabled listener status %d", got.status)
+	}
+}
+
+func TestRoutingListener_ShutdownClosesBlockedBodyWithinGrace(t *testing.T) {
+	p, w := zeroFacadeProxy(t)
+	entered := make(chan struct{})
+	done := make(chan error, 1)
+	port := routingLifetimeFixture(t, p, w, http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		close(entered)
+		_, err := io.ReadAll(r.Body)
+		done <- err
+	}))
+	conn, err := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)), time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if _, err := fmt.Fprintf(conn, "POST /fixture/read HTTP/1.1\r\nHost: localhost:%d\r\nContent-Length: 100\r\n\r\nx", port); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("body reader did not start")
+	}
+	socket := routingSocket(p)
+	ctx, cancel := context.WithTimeout(context.Background(), routingShutdownGrace)
+	defer cancel()
+	started := time.Now()
+	p.shutdown(ctx)
+	if elapsed := time.Since(started); elapsed > routingShutdownGrace+500*time.Millisecond {
+		t.Fatalf("blocked body shutdown took %v", elapsed)
+	}
+	assertRoutingClosed(t, socket)
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("incomplete request body unexpectedly completed")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("forced socket close did not release the body reader")
 	}
 }
