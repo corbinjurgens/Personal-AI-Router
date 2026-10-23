@@ -542,6 +542,10 @@ func (s *rmHandlerSpy) count(family string) int {
 // grant decision all come from controlServer.authorize; only the side effect is
 // replaced.
 func rmRegistryMux(s *controlServer, spy *rmHandlerSpy) *http.ServeMux {
+	if s.exec == nil {
+		s.exec = &Executor{}
+		s.exec.nodeProjection.set(nodeProjection{ManagementBlocked: false})
+	}
 	mux := http.NewServeMux()
 	for _, route := range s.routes() {
 		route.handle = spy.handle(route.family)
@@ -804,7 +808,9 @@ func TestRemoteManagementRecoveryPermissionPrecedesFence(t *testing.T) {
 func TestRemoteManagementRouteMatrixGrantsMutation(t *testing.T) {
 	f := rmNewFixture(t, "uuid-self", "uuid-a", "uuid-b")
 	f.writePermissions("1", map[string]bool{"uuid-a": true, "uuid-b": false})
-	s := &controlServer{mesh: f.mesh}
+	ex := &Executor{}
+	ex.nodeProjection.set(nodeProjection{ManagementBlocked: false})
+	s := &controlServer{mesh: f.mesh, exec: ex}
 	spy := newRMHandlerSpy()
 	ts := rmTLSServer(t, f.mesh, rmRegistryMux(s, spy))
 	allowed := f.client("uuid-a")

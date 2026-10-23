@@ -41,10 +41,7 @@ func TestSwitchReservedSourceVetoStopsBeforeDelayedScopedStop(t *testing.T) {
 	if err != nil || status.Running {
 		t.Fatalf("source after release and delayed delivery = %+v, %v", status, err)
 	}
-	off, err := ex.desired.offLocally("source")
-	if err != nil || !off {
-		t.Fatalf("source local Off = %v, %v", off, err)
-	}
+	requireOffOrigin(t, ex.desired, "source", "local")
 }
 
 func TestSwitchRejectedPrepareOlderPeerStartLosesToBrokerOff(t *testing.T) {
@@ -247,7 +244,7 @@ func TestSwitchRecoveryReplacementWithoutCheckpointDischargesBeforeRestore(t *te
 	// Rejection allocated no checkpoint; the broker's journal is the only owner.
 	replacement := NewExecutor(ex.reg, NewReporter(nil), nil, filepath.Dir(ex.desired.path))
 	t.Cleanup(replacement.StopAll)
-	replacement.nodeProjection.set(nodeProjection{})
+	replacement.nodeProjection.set(nodeProjection{ManagementBlocked: false})
 	snapshot := replacement.SwitchPrepare(context.Background(), settings.SwitchPrepareRequest{})
 	if snapshot.Error != nil || snapshot.Checkpoint != nil {
 		t.Fatalf("replacement inspection: %+v", snapshot)
@@ -338,7 +335,7 @@ func TestSwitchRemoteVetoAfterTargetCommitCleansTarget(t *testing.T) {
 					t.Fatal(err)
 				}
 			case "local pause":
-				ex.nodeProjection.set(nodeProjection{PausedLocally: true})
+				ex.nodeProjection.set(nodeProjection{PausedLocally: true, ManagementBlocked: true})
 			}
 			result := ex.SwitchReconcile(context.Background(), settings.SwitchReconcileRequest{SwitchPrepareRequest: p})
 			if result.Error == nil || result.Error.Kind != settings.SwitchErrorRemoteVeto || result.Checkpoint == nil || result.Checkpoint.TargetCommitted || !result.Observed.Target.TerminationVerified || result.Observed.Target.Intent != settings.SwitchIntentOff {
@@ -470,10 +467,7 @@ func TestSwitchReconcileDeliversLatchedVetoBeforeLocalStop(t *testing.T) {
 				t.Fatalf("delivered veto cleanup = %+v", result)
 			}
 			if scenario.veto.Engine != "" {
-				off, err := ex.desired.offLocally(scenario.veto.Engine)
-				if err != nil || !off {
-					t.Fatalf("veto engine local Off = %v, %v", off, err)
-				}
+				requireOffOrigin(t, ex.desired, scenario.veto.Engine, "local")
 			}
 			switchStep(t, ex, p, settings.SwitchStepRelease)
 			if scenario.veto.Engine != "" {

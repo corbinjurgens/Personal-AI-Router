@@ -307,7 +307,7 @@ func (m *Manager) runModelOperation(ctx context.Context, msg *Message) {
 		res, err = m.exec.ModelDelete(ctx, p.Engine, p.Model)
 	}
 	if err != nil {
-		m.codec.RespondError(msg.ID, -32000, err.Error())
+		m.codec.RespondError(msg.ID, rpcCode(err), err.Error())
 		return
 	}
 	m.exec.pokeLoaded()

@@ -266,25 +266,26 @@ func TestDesiredStateStoresExplicitOffAndLeavesLegacyUnknown(t *testing.T) {
 }
 
 func TestDesiredStateRecordsOffProvenance(t *testing.T) {
-	requireOffLocally := func(t *testing.T, store *desiredStateStore, want bool) {
+	requireOrigin := func(t *testing.T, store *desiredStateStore, want engineintent.Origin) {
 		t.Helper()
-		if got, err := store.offLocally("fake"); err != nil || got != want {
-			t.Fatalf("offLocally = (%v, %v), want %v", got, err, want)
+		got, err := store.snapshot([]string{"fake"})
+		if err != nil || got.OffByEngine["fake"] != want {
+			t.Fatalf("snapshot = %+v, %v; want Off origin %q", got, err, want)
 		}
 	}
 	t.Run("unknown intent is not a local Off", func(t *testing.T) {
-		requireOffLocally(t, newDesiredStateStore(t.TempDir()), false)
+		requireOrigin(t, newDesiredStateStore(t.TempDir()), "")
 	})
-	t.Run("local Off vetoes until a start clears it", func(t *testing.T) {
+	t.Run("On clears local Off provenance", func(t *testing.T) {
 		store := newDesiredStateStore(t.TempDir())
 		if err := store.set("fake", false, intentLocal); err != nil {
 			t.Fatal(err)
 		}
-		requireOffLocally(t, store, true)
+		requireOrigin(t, store, engineintent.Local)
 		if err := store.set("fake", true, intentPeer); err != nil {
 			t.Fatal(err)
 		}
-		requireOffLocally(t, store, false)
+		requireOrigin(t, store, "")
 		if state, err := store.load(); err != nil || len(state.OffBy) != 0 {
 			t.Fatalf("saving On left Off provenance %v (%v)", state.OffBy, err)
 		}
@@ -294,7 +295,7 @@ func TestDesiredStateRecordsOffProvenance(t *testing.T) {
 		if err := store.set("fake", false, intentPeer); err != nil {
 			t.Fatal(err)
 		}
-		requireOffLocally(t, store, false)
+		requireOrigin(t, store, engineintent.Peer)
 	})
 	t.Run("peer Off never downgrades a local Off", func(t *testing.T) {
 		store := newDesiredStateStore(t.TempDir())
@@ -304,7 +305,7 @@ func TestDesiredStateRecordsOffProvenance(t *testing.T) {
 		if err := store.set("fake", false, intentPeer); err != nil {
 			t.Fatal(err)
 		}
-		requireOffLocally(t, store, true)
+		requireOrigin(t, store, engineintent.Local)
 	})
 	t.Run("local Off replaces a peer Off", func(t *testing.T) {
 		store := newDesiredStateStore(t.TempDir())
@@ -314,7 +315,7 @@ func TestDesiredStateRecordsOffProvenance(t *testing.T) {
 		if err := store.set("fake", false, intentLocal); err != nil {
 			t.Fatal(err)
 		}
-		requireOffLocally(t, store, true)
+		requireOrigin(t, store, engineintent.Local)
 	})
 	t.Run("legacy Off without provenance counts as local", func(t *testing.T) {
 		dir := t.TempDir()
@@ -322,11 +323,11 @@ func TestDesiredStateRecordsOffProvenance(t *testing.T) {
 			t.Fatal(err)
 		}
 		store := newDesiredStateStore(dir)
-		requireOffLocally(t, store, true)
+		requireOrigin(t, store, engineintent.Local)
 		if err := store.set("fake", false, intentPeer); err != nil {
 			t.Fatal(err)
 		}
-		requireOffLocally(t, store, true)
+		requireOrigin(t, store, engineintent.Local)
 	})
 }
 

@@ -64,6 +64,7 @@ func policyPeerServer(t *testing.T, peerDir string) (*httptest.Server, func() []
 	var mu sync.Mutex
 	var calls []policyCall
 	exec := &Executor{progress: newProgressHub()}
+	exec.nodeProjection.set(nodeProjection{ManagementBlocked: false})
 	exec.policyParent = func(_ context.Context, method string, params json.RawMessage, caller string) (json.RawMessage, error) {
 		var p policyBody
 		if err := json.Unmarshal(params, &p); err != nil {
@@ -370,6 +371,7 @@ func policyReplyPeerServer(t *testing.T, peerDir string, code int, message strin
 		return nil
 	}
 	exec := &Executor{progress: newProgressHub(), policyParent: peer.policyRelay.call}
+	exec.nodeProjection.set(nodeProjection{ManagementBlocked: false})
 	mesh := clustertrust.Open(peerDir)
 	server := httptest.NewUnstartedServer((&controlServer{exec: exec, mesh: mesh}).mux())
 	server.TLS = mesh.ServerTLSConfig()

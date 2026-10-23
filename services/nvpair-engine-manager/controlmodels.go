@@ -78,7 +78,7 @@ func (s *controlServer) handleModelAction(w http.ResponseWriter, r *http.Request
 		return
 	}
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeRemoteError(w, err)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")

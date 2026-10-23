@@ -1178,7 +1178,7 @@ func TestModelsResultCarriesAndWithdrawsTheStrictCapability(t *testing.T) {
 			Identity: nodepolicy.StrictModelIdentity{EngineRunID: "engine-run-1", SettingsFingerprint: strings.Repeat("a", 64), ModelDigest: strings.Repeat("b", 64)},
 		}}},
 	}
-	pushProjection(t, m, string(mustMarshal(t, map[string]any{"policy": ready, "pausedLocally": false})))
+	pushProjection(t, m, string(mustMarshal(t, map[string]any{"policy": ready, "pausedLocally": false, "managementBlocked": false})))
 	fromHTTP, fromRPC, _, _ := servedPolicy(t, m, &out)
 	for name, got := range map[string]*nodepolicy.Advertisement{"/v1/models": fromHTTP, "engine:models": fromRPC} {
 		if got == nil || got.StrictAdmission.State() != nodepolicy.StrictCapabilityValid || !reflect.DeepEqual(got.StrictAdmission.Models, ready.StrictAdmission.Models) {
@@ -1188,7 +1188,7 @@ func TestModelsResultCarriesAndWithdrawsTheStrictCapability(t *testing.T) {
 
 	withdrawn := ready
 	withdrawn.StrictAdmission = nil
-	pushProjection(t, m, string(mustMarshal(t, map[string]any{"policy": withdrawn, "pausedLocally": false})))
+	pushProjection(t, m, string(mustMarshal(t, map[string]any{"policy": withdrawn, "pausedLocally": false, "managementBlocked": false})))
 	fromHTTP, fromRPC, _, _ = servedPolicy(t, m, &out)
 	for name, got := range map[string]*nodepolicy.Advertisement{"/v1/models": fromHTTP, "engine:models": fromRPC} {
 		if got == nil || got.Revision != "21" || got.StrictAdmission != nil {

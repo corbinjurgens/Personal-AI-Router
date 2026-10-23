@@ -57,7 +57,7 @@ func (e *Executor) runCrashRelaunch(ctx context.Context, st *engineState, engine
 		if ctx.Err() != nil || e.shuttingDown.Load() {
 			return
 		}
-		if paused, _ := e.nodeProjection.pausedLocally(); paused {
+		if blocked, _ := e.nodeProjection.managementBlocked(); blocked {
 			return
 		}
 		enabled, known, err := e.desired.get(engine)

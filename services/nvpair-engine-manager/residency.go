@@ -278,11 +278,13 @@ func (e *Executor) residentPrecheck(p nodepolicy.ReconcileResidentParams) string
 		if errors.Is(err, errNoProjection) {
 			return "projection-unknown"
 		}
-		paused, _ := e.nodeProjection.pausedLocally()
-		if paused {
-			return "paused-local"
+		if rpcCode(err) == codeLocalVeto {
+			return string(nodepolicy.ModelReasonPaused)
 		}
-		return "engine-off-local"
+		if rpcCode(err) == codeEngineLocked {
+			return string(nodepolicy.ModelReasonEngineLocked)
+		}
+		return "observation-unknown"
 	}
 	e.desired.mu.Lock()
 	state, err := e.desired.load()

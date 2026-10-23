@@ -63,7 +63,7 @@ func (e *Executor) StatusAtPort(engine string, probePort int) (EngineStatus, err
 		// (matching get-installed) rather than erroring, so status is
 		// consistent for the same engine across methods.
 		if m, ok := e.reg.Get(engine); ok {
-			return EngineStatus{Engine: engine, DisplayName: m.DisplayName}, nil
+			return EngineStatus{Engine: engine, DisplayName: m.DisplayName, Locked: e.lockedStatus(engine)}, nil
 		}
 		return EngineStatus{}, err
 	}
@@ -92,7 +92,7 @@ func (e *Executor) GetInstalled() []EngineStatus {
 			if m, ok := e.reg.Get(name); ok {
 				dn = m.DisplayName
 			}
-			out = append(out, EngineStatus{Engine: name, DisplayName: dn})
+			out = append(out, EngineStatus{Engine: name, DisplayName: dn, Locked: e.lockedStatus(name)})
 			continue
 		}
 		st.opMu.Lock()
@@ -122,6 +122,7 @@ func (e *Executor) Errors() []serviceError {
 }
 
 func (e *Executor) snapshot(engine string, st *engineState) EngineStatus {
+	locked := e.lockedStatus(engine)
 	st.mu.Lock()
 	defer st.mu.Unlock()
 	return EngineStatus{
@@ -131,7 +132,16 @@ func (e *Executor) snapshot(engine string, st *engineState) EngineStatus {
 		Running:     st.running,
 		Healthy:     st.healthy,
 		Port:        st.port,
+		Locked:      locked,
 	}
+}
+
+func (e *Executor) lockedStatus(engine string) *bool {
+	locked, err := e.desired.locked(engine)
+	if err != nil {
+		return nil
+	}
+	return &locked
 }
 
 // reconcilePresence reconciles filesystem detection with a fixed-port engine
@@ -241,7 +251,7 @@ func (e *Executor) reconcilePresence(ctx context.Context, engine string, st *eng
 	// owned readiness; the external listener is never stopped on refusal.
 	e.nodeProjection.mu.Lock()
 	st.mu.Lock()
-	if ctx.Err() != nil || (automaticCrashRelaunch(ctx) && e.nodeProjection.projection != nil && e.nodeProjection.projection.PausedLocally) {
+	if ctx.Err() != nil || (automaticCrashRelaunch(ctx) && e.nodeProjection.projection != nil && e.nodeProjection.projection.ManagementBlocked) {
 		st.mu.Unlock()
 		e.nodeProjection.mu.Unlock()
 		return presenceResult{Occupied: true}

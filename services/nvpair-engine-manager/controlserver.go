@@ -176,6 +176,19 @@ func (s *controlServer) authorize(route controlRoute, h pinnedPeerHandler) pinne
 			writeCodedError(w, codeRemoteManagementDenied, remoteManagementDeniedMessage)
 			return
 		}
+		if s.exec == nil {
+			http.Error(w, errNoProjection.Error(), http.StatusServiceUnavailable)
+			return
+		}
+		blocked, known := s.exec.nodeProjection.managementBlocked()
+		if !known {
+			http.Error(w, errNoProjection.Error(), http.StatusServiceUnavailable)
+			return
+		}
+		if blocked {
+			writeCodedError(w, codeLocalVeto, nodePausedVeto)
+			return
+		}
 		if !s.allowControlDuringRecovery(w, r, route.class) {
 			return
 		}

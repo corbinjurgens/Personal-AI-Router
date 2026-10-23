@@ -96,8 +96,8 @@ func (e *Executor) Start(ctx context.Context, engine string) error {
 
 // StartWith is Start with per-call overrides. The overrides are not
 // persisted — a service restart reverts to the manifest. A paired node's start
-// rechecks the local veto after taking the lifecycle lock, so a local Off that
-// finished while it waited wins.
+// rechecks target pause and lock after taking the lifecycle lock. Saved Off
+// alone does not prohibit a fresh explicit start.
 func (e *Executor) StartWith(ctx context.Context, engine string, opts startOpts) error {
 	done, err := e.admitMutation(engine)
 	if err != nil {
@@ -121,13 +121,22 @@ func (e *Executor) StartWith(ctx context.Context, engine string, opts startOpts)
 	if err := e.doStart(ctx, st, engine, opts); err != nil {
 		return err
 	}
-	return e.setDesiredEnabled(engine, true, opts.Origin)
+	if err := e.setDesiredEnabled(engine, true, opts.Origin); err != nil {
+		return errors.Join(err, e.doStop(st, engine))
+	}
+	return nil
 }
 
 // doStart performs the start. Callers must hold st.opMu.
-func (e *Executor) doStart(ctx context.Context, st *engineState, engine string, opts startOpts) error {
+func (e *Executor) doStart(ctx context.Context, st *engineState, engine string, opts startOpts) (err error) {
 	ctx, finish := e.startContext(ctx, st)
-	defer finish()
+	defer func() {
+		err = vetoCause(ctx, err)
+		finish()
+	}()
+	if err := e.activationVeto(engine); err != nil {
+		return err
+	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -233,6 +242,12 @@ func (e *Executor) doStart(ctx context.Context, st *engineState, engine string, 
 	if err := e.bringUp(ctx, st, engine, rt, port, vars); err != nil {
 		return err
 	}
+	if err := e.activationVeto(engine); err != nil {
+		st.mu.Lock()
+		st.running = true
+		st.mu.Unlock()
+		return errors.Join(err, e.doStop(st, engine))
+	}
 
 	// Linearize automatic readiness with the pause projection. A pause that
 	// wins this gate must not be followed by a running publication, even if
@@ -240,8 +255,8 @@ func (e *Executor) doStart(ctx context.Context, st *engineState, engine string, 
 	e.nodeProjection.mu.Lock()
 	st.mu.Lock()
 	readyErr := ctx.Err()
-	if readyErr == nil && automaticCrashRelaunch(ctx) && e.nodeProjection.projection != nil && e.nodeProjection.projection.PausedLocally {
-		readyErr = &localVetoError{reason: nodePausedVeto}
+	if readyErr == nil && e.nodeProjection.projection != nil && e.nodeProjection.projection.ManagementBlocked {
+		readyErr = &localVetoError{code: codeLocalVeto, reason: nodePausedVeto}
 	}
 	if readyErr != nil {
 		// bringUp succeeded: this start owns the launched process/control
@@ -292,15 +307,15 @@ func (e *Executor) doStart(ctx context.Context, st *engineState, engine string, 
 // Register before reclaim as well as launch so StopAll can cancel either stage.
 // Callers hold opMu for the entire lifetime of this registration.
 func (e *Executor) startContext(ctx context.Context, st *engineState) (context.Context, func()) {
-	ctx, cancel := context.WithCancel(ctx)
+	ctx, cancel := context.WithCancelCause(ctx)
 	st.mu.Lock()
 	st.startCancel = cancel
 	st.mu.Unlock()
 	if e.shuttingDown.Load() {
-		cancel()
+		cancel(nil)
 	}
 	return ctx, func() {
-		cancel()
+		cancel(nil)
 		st.mu.Lock()
 		st.startCancel = nil
 		st.mu.Unlock()
@@ -620,7 +635,7 @@ func (e *Executor) stopFrom(engine string, origin intentOrigin, operationID stri
 	}
 	defer done()
 	if origin == intentLocal {
-		e.remoteWork.cancelEngine(engine, &localVetoError{reason: engineOffVeto(engine)})
+		e.remoteWork.cancelEngine(engine, &localVetoError{code: codeLocalVeto, reason: engineOffVeto(engine)})
 	}
 	cancelCrashRelaunch(st)
 	finishLoads := stopServingLoads(st)
@@ -1091,7 +1106,7 @@ func (e *Executor) StopAll() {
 			cancel := st.startCancel
 			st.mu.Unlock()
 			if cancel != nil {
-				cancel()
+				cancel(nil)
 			}
 			st.opMu.Lock()
 			defer st.opMu.Unlock()

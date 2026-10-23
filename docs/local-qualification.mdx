@@ -300,8 +300,15 @@ does not satisfy automatic residency.
 The destination proxy owns admission and reserves against the whole desired set
 and existing resident/in-flight memory. The broker coordinates prepare, manager
 reconcile, final proxy dispatch grant, finish and authoritative observation.
-Paused-local and local engine Off remain target vetoes, including a veto arriving
-after work was accepted. Reconciliation does not start an Off engine.
+Either-origin pause and durable engine lock fence automatic residency with
+`paused` and `engine-locked` reasons. Ordinary saved Off of any origin reports
+`engine-off`; reconciliation still requires saved On and a running engine and
+does not start one. A granted peer may explicitly start or switch to an unlocked
+engine despite saved Off, and may load a running one. Explicit load never starts
+an Off engine. Local Stop can still cancel work already accepted for that engine.
+Lock/unlock is local-only; unlocking leaves Off. Pause fences all peer management
+writes, including Resume, while reads stay available. Local activation also
+requires local Resume. These fences apply after acceptance as well as admission.
 PG's existing route-policy owner continues to decide routes; residency does not
 select a route, broaden served permission or enable hybrid dispatch.
 

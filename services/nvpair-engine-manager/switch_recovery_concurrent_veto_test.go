@@ -32,7 +32,7 @@ func committedRecoveryVetoFixture(t *testing.T) (*Executor, settings.SwitchPrepa
 	}
 	restarted := NewExecutor(ex.reg, NewReporter(nil), nil, ex.baseDir)
 	t.Cleanup(restarted.StopAll)
-	restarted.nodeProjection.set(nodeProjection{})
+	restarted.nodeProjection.set(nodeProjection{ManagementBlocked: false})
 	st, err := restarted.state("target")
 	if err != nil {
 		t.Fatal(err)
@@ -48,7 +48,7 @@ func committedRecoveryVetoFixture(t *testing.T) (*Executor, settings.SwitchPrepa
 func admitRecoveryVeto(t *testing.T, ex *Executor, p settings.SwitchPrepareRequest, scenario string) {
 	t.Helper()
 	if scenario == "local pause" {
-		(&Manager{exec: ex}).applyNodeProjection(&Message{Params: json.RawMessage(`{"pausedLocally":true}`)})
+		(&Manager{exec: ex}).applyNodeProjection(&Message{Params: json.RawMessage(`{"pausedLocally":true,"managementBlocked":true}`)})
 		return
 	}
 	engine := "target"
