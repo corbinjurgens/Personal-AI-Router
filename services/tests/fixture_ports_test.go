@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -131,6 +132,62 @@ func (p fixtureServicePorts) args() []string {
 		"--engine-manager-http-port", strconv.Itoa(p.engineManagerHTTP),
 		"--engine-manager-control-port", strconv.Itoa(p.engineControl),
 	}
+}
+
+// validate rejects unsafe synthetic plans as well as allocator mistakes before
+// a fixture can launch a process or construct an inbound request.
+func (p fixtureServicePorts) validate() error {
+	seen := make(map[int]bool)
+	for _, port := range []int{p.nodeInfo, p.errors, p.workload, p.clusterManager, p.engineManagerHTTP, p.engineControl} {
+		if err := validateFixturePort(port); err != nil {
+			return err
+		}
+		if seen[port] {
+			return fmt.Errorf("fixture service plan repeats port %d", port)
+		}
+		seen[port] = true
+	}
+	return nil
+}
+
+func validateFixturePort(port int) error {
+	if port < 1 || port > 65535 {
+		return fmt.Errorf("fixture port %d must be between 1 and 65535", port)
+	}
+	if owner, installed := installedServicePorts[port]; installed {
+		return fmt.Errorf("fixture port %d belongs to installed PAIR (%s)", port, owner)
+	}
+	return nil
+}
+
+// brokerArgs keeps the worker listeners and discovery registrations on the
+// same explicit plan. Extra arguments cannot override one of its port flags.
+func (p fixtureServicePorts) brokerArgs(clusterDir string, extraArgs ...string) ([]string, error) {
+	if err := p.validate(); err != nil {
+		return nil, err
+	}
+	portArgs := p.args()
+	for _, arg := range extraArgs {
+		flag, _, _ := strings.Cut(arg, "=")
+		if !strings.HasPrefix(flag, "-") {
+			continue
+		}
+		name := strings.TrimLeft(flag, "-")
+		for i := 0; i < len(portArgs); i += 2 {
+			if name == strings.TrimLeft(portArgs[i], "-") {
+				return nil, fmt.Errorf("fixture service flag %s must come from its port plan", flag)
+			}
+		}
+	}
+	args := append([]string{"--scanner-path", scannerBin, "--cluster-dir", clusterDir}, portArgs...)
+	return append(args, extraArgs...), nil
+}
+
+func (p fixtureServicePorts) workloadEventsURL() (string, error) {
+	if err := p.validate(); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("https://127.0.0.1:%d/v1/workloads/events", p.workload), nil
 }
 
 type fixtureAllocationListener struct {

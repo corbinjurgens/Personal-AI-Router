@@ -76,8 +76,10 @@ func startBrokerWithDirsAndEnv(t *testing.T, configDir, clusterDir string, extra
 // reserves the plan itself and passes it here.
 func startBrokerWithPorts(t *testing.T, configDir, clusterDir string, extraEnv []string, ports fixtureServicePorts, extraArgs ...string) (stdin io.WriteCloser, msgs <-chan jsonrpc.Message, stderrLines <-chan string, cleanup func()) {
 	t.Helper()
-	args := append([]string{"--scanner-path", scannerBin, "--cluster-dir", clusterDir}, ports.args()...)
-	args = append(args, extraArgs...)
+	args, err := ports.brokerArgs(clusterDir, extraArgs...)
+	if err != nil {
+		t.Fatalf("broker fixture plan: %v", err)
+	}
 	cmd := exec.Command(brokerBin, args...)
 	// Every supervised worker must use disposable per-test config. In
 	// particular, managed-port startup can persist an Ollama backend port; a
