@@ -84,6 +84,9 @@ func scanLines(r io.Reader, stream string, onLine func(stream, line string)) {
 			onLine(stream, sc.Text())
 		}
 	}
+	if sc.Err() != nil {
+		_, _ = io.Copy(io.Discard, r)
+	}
 }
 
 // stop asks the owned process tree to exit, waits for grace, then force-kills

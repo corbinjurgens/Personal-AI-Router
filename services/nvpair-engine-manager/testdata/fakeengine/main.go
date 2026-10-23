@@ -88,6 +88,9 @@ func bstr(m map[string]any, k string) string {
 }
 
 func main() {
+	if text := os.Getenv("FAKE_OUTPUT"); text != "" {
+		fmt.Println(text)
+	}
 	if path := os.Getenv("PAIR_TEST_ENV_FILE"); path != "" {
 		values := map[string]string{}
 		for _, key := range []string{"OLLAMA_ORIGINS", "PAIR_TEST_LITERAL", "PAIR_TEST_EMPTY", "OLLAMA_HOST"} {
@@ -116,6 +119,10 @@ func main() {
 	// exit (no server), standing in for a daemon's control CLI.
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
+		case "oversized-output":
+			fmt.Println(strings.Repeat("x", 300*1024))
+			fmt.Println("finished")
+			return
 		case "captureargs": // record exact argv for launch-text round-trip tests
 			if len(os.Args) < 3 {
 				os.Exit(2)

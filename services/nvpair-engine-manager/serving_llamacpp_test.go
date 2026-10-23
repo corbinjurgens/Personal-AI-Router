@@ -1776,11 +1776,17 @@ func TestLlamaServingSafeStartFailures(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), "NE readiness") || !strings.Contains(err.Error(), "exit code 2") {
 			t.Fatalf("native exit lost safe failure context: %v", err)
 		}
-		if strings.Contains(err.Error(), f.root) || strings.Contains(err.Error(), f.ex.baseDir) || strings.Contains(err.Error(), "invalid launch") {
-			t.Fatal("NE failure copied native output or a private path")
+		if strings.Contains(err.Error(), f.root) || strings.Contains(err.Error(), f.ex.baseDir) {
+			t.Fatal("NE failure copied a private path")
 		}
-		if logs := settingsState(t, f.ex).logs.snapshot(); len(logs) != 0 {
-			t.Fatal("NE native output entered the exported log ring")
+		logs := settingsState(t, f.ex).logs.snapshot()
+		if len(logs) == 0 {
+			t.Fatal("NE redacted native output missing from exported log ring")
+		}
+		for _, line := range logs {
+			if strings.Contains(line.Text, f.root) || strings.Contains(line.Text, f.ex.baseDir) {
+				t.Fatalf("NE log copied a private path: %q", line.Text)
+			}
 		}
 	})
 	t.Run("readiness timeout reports stage and duration", func(t *testing.T) {

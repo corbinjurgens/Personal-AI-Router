@@ -200,7 +200,7 @@ func TestLiveLMStudioCleanRoom(t *testing.T) {
 
 	// Empty config dir so only the bundled lmstudio manifest is loaded.
 	cfg := t.TempDir()
-	frames, stdin, stop := startManager(t, map[string]string{"APPDATA": cfg, "XDG_CONFIG_HOME": cfg})
+	frames, stdin, stop := startManager(t, map[string]string{"APPDATA": cfg, "LOCALAPPDATA": cfg, "XDG_CONFIG_HOME": cfg})
 	defer stop()
 
 	send(t, stdin, 1, "engine:get-installed", nil)
@@ -301,7 +301,7 @@ func startManagerWithManifest(t *testing.T, m Manifest) (chan frame, io.WriteClo
 	if err := os.WriteFile(filepath.Join(engdir, m.Engine+".json"), data, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	return startManager(t, map[string]string{"APPDATA": cfg, "XDG_CONFIG_HOME": cfg})
+	return startManager(t, map[string]string{"APPDATA": cfg, "LOCALAPPDATA": cfg, "XDG_CONFIG_HOME": cfg})
 }
 
 func sha256File(t *testing.T, path string) string {
