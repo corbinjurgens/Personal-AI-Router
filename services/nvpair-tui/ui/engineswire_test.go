@@ -1099,6 +1099,7 @@ func TestLockedEngineRowSurvivesNarrowColumn(t *testing.T) {
 		OffByEngine:     map[string]engineintent.Origin{"ollama": engineintent.Local, "lmstudio": engineintent.Local},
 	}
 	d.refreshEngines()
+	d.engineTable.SetHeight(8)
 	rendered := d.engineTable.View()
 	var lockedRow, plainRow string
 	for _, line := range strings.Split(rendered, "\n") {
