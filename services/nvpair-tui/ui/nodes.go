@@ -19,6 +19,7 @@ import (
 	"github.com/charmbracelet/bubbles/table"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/x/ansi"
 )
 
 // manualRefreshInterval re-lists manual nodes so the probe-driven reachability
@@ -35,6 +36,8 @@ const (
 	nodesInputPin
 	nodesInputFilter
 	nodesInputInviteChoice
+	nodesInputJoinConfirm
+	nodesInputJoinApproval
 )
 
 // nodesView is the Nodes tab: every machine PAIR knows about — discovered on
@@ -71,7 +74,24 @@ type nodesView struct {
 	// startup, carried on the cluster:identity-changed push, and taken from the
 	// Service tab's save when it is renamed there, since the settings worker
 	// sends no push of its own.
-	clusterName string
+	clusterName     string
+	joinSnapshot    joinRequestsSnapshot
+	joinFresh       bool
+	joinEpoch       int
+	joinPushes      int
+	joinReading     bool
+	joinWriting     bool
+	joinTrackedID   string
+	joinReviewID    string
+	joinApprovalID  string
+	joinAllow       bool
+	joinAddress     string
+	joinNodeID      string
+	joinReplaceSolo bool
+	joinByAddress   bool
+	joinPIN         string
+	joinPINID       string
+	joinPINReading  bool
 	// inbound is the pairing request on screen, awaiting our answer, and queued
 	// the ones that arrived while it was up, oldest first. Each is a live
 	// session another machine is waiting on, so a newer one waits its turn
@@ -348,6 +368,7 @@ func (v *nodesView) feedCommands() []tea.Cmd {
 		v.clusterNameCmd(),
 		v.membersCmd(),
 		v.manualCmd(),
+		v.joinRequestsCmd(),
 	}
 }
 
@@ -407,6 +428,265 @@ func (v *nodesView) manualTickCmd() tea.Cmd {
 	return tea.Tick(manualRefreshInterval, func(time.Time) tea.Msg { return manualTickMsg{} })
 }
 
+type joinRequestsMsg struct {
+	epoch, pushes int
+	snapshot      joinRequestsSnapshot
+	err           error
+}
+
+type joinActionMsg struct {
+	epoch     int
+	requestID string
+	request   joinRequest
+	err       error
+}
+
+type joinPINMsg struct {
+	epoch               int
+	requestID, inviteID string
+	result              inviteNodeResult
+	err                 error
+}
+
+func (v *nodesView) joinRequestsCmd() tea.Cmd {
+	if v.joinReading {
+		return nil
+	}
+	v.joinReading = true
+	epoch, pushes := v.joinEpoch, v.joinPushes
+	return call(v.client, "cluster:get-join-requests", map[string]any{}, func(msg *rpc.Message, err error) tea.Msg {
+		out := joinRequestsMsg{epoch: epoch, pushes: pushes, err: err}
+		var rpcErr *rpc.RPCError
+		if errors.As(err, &rpcErr) && rpcErr.Code == -32601 {
+			out.err = nil // Old local services still support ordinary Invite.
+		} else if err == nil {
+			out.err = decodeParams(msg.Result, &out.snapshot)
+		}
+		return out
+	})
+}
+
+func (v *nodesView) joinRequestByID(id string) *joinRequest {
+	for i := range v.joinSnapshot.Requests {
+		if v.joinSnapshot.Requests[i].RequestID == id {
+			return &v.joinSnapshot.Requests[i]
+		}
+	}
+	return nil
+}
+
+func (v *nodesView) invalidateJoinRequests() {
+	// Outgoing admission requests reuse the ordinary inbound-invite UI for the
+	// requester's child pairing. Once the admission feed is unavailable there
+	// is no authoritative request -> invite association left to prove that
+	// prompt is still actionable, so retire only those known child invites
+	// before discarding the snapshot. Ordinary inbound invites stay intact.
+	for _, r := range v.joinSnapshot.Requests {
+		if r.Direction == "outgoing" && r.InviteID != nil {
+			v.dropInbound(*r.InviteID)
+		}
+	}
+	v.joinEpoch++
+	v.joinFresh, v.joinReading, v.joinWriting, v.joinPINReading = false, false, false, false
+	v.joinSnapshot = joinRequestsSnapshot{}
+	v.joinReviewID, v.joinApprovalID = "", ""
+	v.joinPIN, v.joinPINID = "", ""
+	if v.mode == nodesInputJoinApproval || v.mode == nodesInputJoinConfirm {
+		v.cancelInput()
+	}
+}
+
+func (v *nodesView) joinRefreshCmd() tea.Cmd {
+	if !v.joinFresh {
+		return nil
+	}
+	for _, r := range v.joinSnapshot.Requests {
+		if r.live() {
+			return v.joinRequestsCmd()
+		}
+	}
+	return nil
+}
+
+func (v *nodesView) adoptJoinRequests(snapshot joinRequestsSnapshot) tea.Cmd {
+	previous := v.joinSnapshot
+	previousReview := v.joinReviewID
+	old := v.joinRequestByID(v.joinTrackedID)
+	oldState := ""
+	if old != nil {
+		oldState = old.State
+	}
+	v.joinSnapshot, v.joinFresh = snapshot, true
+	var cmds []tea.Cmd
+	for _, r := range previous.Requests {
+		if v.joinRequestByID(r.RequestID) == nil && r.InviteID != nil && r.Direction == "outgoing" {
+			v.dropInbound(*r.InviteID)
+		}
+	}
+	if r := v.joinRequestByID(previousReview); previousReview != "" && (r == nil || !r.live()) {
+		if r == nil {
+			v.status.error("incoming join request %s status lost; check membership before retrying", previousReview)
+		} else {
+			v.status.info("join request %s: %s (%s)", r.RequestID, r.State, r.Reason)
+		}
+	}
+	if v.joinTrackedID != "" {
+		r := v.joinRequestByID(v.joinTrackedID)
+		if r == nil {
+			v.status.error("join request %s status lost; check membership on both devices before retrying", v.joinTrackedID)
+			v.joinTrackedID = ""
+			cmds = append(cmds, v.membersCmd(), v.identityCmd())
+		} else if !r.live() && r.State != oldState {
+			v.status.info("join request %s: %s (%s); check membership before retrying", r.RequestID, r.State, r.Reason)
+			cmds = append(cmds, v.membersCmd(), v.identityCmd(), v.remoteManagementCmd())
+		}
+	}
+	// Reattaching discovers requests sent or received while no terminal was open.
+	for _, r := range snapshot.Requests {
+		tracked := v.joinRequestByID(v.joinTrackedID)
+		if r.Direction == "outgoing" && r.live() && (tracked == nil || !tracked.live()) {
+			v.joinTrackedID = r.RequestID
+		}
+	}
+	if r := v.joinRequestByID(v.joinReviewID); r == nil || !r.live() || r.Direction != "incoming" {
+		v.joinReviewID = ""
+		for _, candidate := range snapshot.Requests {
+			if candidate.Direction == "incoming" && candidate.live() {
+				v.joinReviewID = candidate.RequestID
+				break
+			}
+		}
+	}
+	if v.mode == nodesInputJoinApproval {
+		if r := v.joinRequestByID(v.joinApprovalID); r == nil || r.Direction != "incoming" || r.State != "awaiting-approval" {
+			v.joinApprovalID = ""
+			v.cancelInput()
+		}
+	}
+	// The requester enters the member's PIN through the ordinary exact invite.
+	for _, r := range snapshot.Requests {
+		if !r.live() && r.InviteID != nil {
+			v.dropInbound(*r.InviteID)
+		}
+		if r.Direction == "outgoing" && r.live() && r.State == "pairing" && r.InviteID != nil && *r.InviteID != "" {
+			v.receiveInvite(clusterInvite{InviteID: *r.InviteID, FromNodeName: r.PeerName, State: inviteStatePending})
+		}
+	}
+	pinID := ""
+	if r := v.joinRequestByID(v.joinReviewID); r != nil && r.State == "pairing" && r.InviteID != nil {
+		pinID = *r.InviteID
+	}
+	if pinID != v.joinPINID {
+		v.joinPIN, v.joinPINID, v.joinPINReading = "", pinID, false
+	}
+	if pinID != "" && !v.joinPINReading {
+		v.joinPINReading = true
+		epoch, requestID := v.joinEpoch, v.joinReviewID
+		cmds = append(cmds, call(v.client, "cluster:invite-status", map[string]string{"inviteId": pinID}, func(msg *rpc.Message, err error) tea.Msg {
+			out := joinPINMsg{epoch: epoch, requestID: requestID, inviteID: pinID, err: err}
+			if err == nil {
+				out.err = decodeParams(msg.Result, &out.result)
+			}
+			return out
+		}))
+	}
+	return tea.Batch(cmds...)
+}
+
+func (v *nodesView) beginJoin(address, nodeID string) tea.Cmd {
+	if !v.joinFresh || !v.joinSnapshot.Supported {
+		v.status.error("Ask to join unavailable; update the local service and refresh")
+		return nil
+	}
+	if !v.joinSnapshot.CanAskToJoin {
+		v.status.error("cannot Ask to join (%s); retained peer relationships must be removed first", v.joinSnapshot.BlockedReason)
+		return nil
+	}
+	if v.joinWriting {
+		return nil
+	}
+	if r := v.joinRequestByID(v.joinTrackedID); r != nil && r.live() {
+		v.status.error("join request %s is already open; c to cancel", r.RequestID)
+		return nil
+	}
+	v.joinAddress, v.joinNodeID = address, nodeID
+	v.joinReplaceSolo = v.joinSnapshot.RequiresSoloReplacement
+	v.beginInput(nodesInputJoinConfirm, "")
+	return nil
+}
+
+func (v *nodesView) sendJoin() tea.Cmd {
+	if !v.joinFresh || !v.joinSnapshot.Supported || !v.joinSnapshot.CanAskToJoin || v.joinReplaceSolo != v.joinSnapshot.RequiresSoloReplacement {
+		v.status.error("join eligibility changed; review Ask to join again")
+		return nil
+	}
+	address := v.joinAddress
+	params := map[string]any{"address": address, "replaceSoloCluster": v.joinReplaceSolo}
+	if address == "" {
+		v.status.error("address required")
+		return nil
+	}
+	if host, portText, err := net.SplitHostPort(address); err == nil {
+		port, ok := parsePort(portText)
+		if !ok {
+			v.status.error("invalid cluster-manager port")
+			return nil
+		}
+		params["address"], params["port"] = host, port
+	}
+	if v.joinNodeID != "" {
+		params["nodeId"] = v.joinNodeID
+	}
+	return v.joinAction("cluster:ask-to-join", "", params)
+}
+
+func (v *nodesView) joinAction(method, requestID string, params any) tea.Cmd {
+	if v.joinWriting {
+		return nil
+	}
+	v.joinWriting = true
+	// A read issued before this mutation cannot describe its outcome.
+	v.joinPushes++
+	v.joinReading = false
+	epoch := v.joinEpoch
+	return call(v.client, method, params, func(msg *rpc.Message, err error) tea.Msg {
+		out := joinActionMsg{epoch: epoch, requestID: requestID, err: err}
+		if err == nil {
+			out.err = decodeParams(msg.Result, &out.request)
+		}
+		return out
+	})
+}
+
+func (v *nodesView) joinPrompt() string {
+	if !v.joinFresh {
+		return ""
+	}
+	var lines []string
+	if r := v.joinRequestByID(v.joinTrackedID); r != nil && r.live() {
+		lines = append(lines, fmt.Sprintf("Ask to join %s: %s\nRequest\n%s\nc to cancel; member approves and reads you the PIN", r.PeerName, r.State, r.RequestID))
+		if r.Reason != "" {
+			lines = append(lines, "Service status: "+r.Reason)
+		}
+	}
+	if r := v.joinRequestByID(v.joinReviewID); r != nil {
+		lines = append(lines, fmt.Sprintf("Unverified join request from %s (%s)\nRequest\n%s\n%s", r.PeerName, r.PeerAddress, r.RequestID, r.State))
+		if v.joinWriting {
+			lines = append(lines, "Submitting join request response...")
+		} else if v.detail != nil {
+			lines = append(lines, "esc to the node list to review this request")
+		} else if r.State == "awaiting-approval" && v.inbound == nil && v.mode != nodesInputJoinApproval {
+			lines = append(lines, "a to review approval; d to decline")
+		} else if v.joinPIN != "" {
+			lines = append(lines, "Read this member PIN to the requester: "+v.joinPIN)
+		}
+		if r.Reason != "" {
+			lines = append(lines, "Service status: "+r.Reason)
+		}
+	}
+	return ansi.Wrap(joinLines(lines...), max(1, v.width), "")
+}
+
 // SetSize records the budget and fixes the table's width. Its height is set in
 // View, from the chrome actually being rendered — see fitTable.
 func (v *nodesView) SetSize(w, h int) {
@@ -459,6 +739,7 @@ func (v *nodesView) updateList(msg tea.Msg) tea.Cmd {
 	case remoteManagementSetMsg:
 		return v.handleRemoteManagementSet(msg)
 	case DisconnectedMsg:
+		v.invalidateJoinRequests()
 		if v.status.sticky && v.status.kind == toastInfo {
 			v.status.info("service disconnected; operation interrupted; outcome unknown")
 		} else {
@@ -548,16 +829,68 @@ func (v *nodesView) updateList(msg tea.Msg) tea.Cmd {
 		return nil
 
 	case manualTickMsg:
+		if !v.joinFresh {
+			return tea.Batch(v.manualCmd(), v.manualTickCmd(), v.joinRequestsCmd())
+		}
 		return tea.Batch(v.manualCmd(), v.manualTickCmd())
+	case joinRequestsMsg:
+		if msg.epoch != v.joinEpoch || msg.pushes != v.joinPushes {
+			return nil
+		}
+		v.joinReading = false
+		if msg.err != nil {
+			v.invalidateJoinRequests()
+			v.noteFeed("Ask to join", msg.err)
+			return nil
+		}
+		v.noteFeed("Ask to join", nil)
+		return v.adoptJoinRequests(msg.snapshot)
+	case joinActionMsg:
+		if msg.epoch != v.joinEpoch {
+			return nil
+		}
+		v.joinWriting = false
+		v.joinFresh = false
+		if msg.err != nil {
+			v.status.error("Ask to join failed: %s; refresh status before retrying", msg.err)
+		} else if msg.request.RequestID != "" && (msg.requestID == "" || msg.requestID == msg.request.RequestID) {
+			if msg.request.Direction == "outgoing" {
+				v.joinTrackedID = msg.request.RequestID
+			}
+			v.status.info("join request %s: %s (%s)", msg.request.RequestID, msg.request.State, msg.request.Reason)
+		} else {
+			v.status.error("join request reply did not match; refresh status before retrying")
+		}
+		return v.joinRequestsCmd()
+	case joinPINMsg:
+		if !v.joinFresh || msg.epoch != v.joinEpoch || msg.inviteID != v.joinPINID {
+			return nil
+		}
+		v.joinPINReading = false
+		r := v.joinRequestByID(msg.requestID)
+		if r == nil || !r.live() || r.Direction != "incoming" || r.InviteID == nil || *r.InviteID != msg.inviteID {
+			return nil
+		}
+		if msg.err != nil {
+			v.joinPIN = ""
+			v.status.error("cannot retrieve member PIN; check request status on both devices")
+			return nil
+		}
+		if msg.result.InviteID == msg.inviteID && msg.result.State == inviteStatePending && msg.result.Pin != nil {
+			v.joinPIN = *msg.result.Pin
+		} else {
+			v.joinPIN = ""
+		}
+		return nil
 
 	case TickMsg:
 		// Relative ages and presence both derive from the clock, so a node
 		// going quiet has to re-grade without waiting for a broker push.
 		v.rebuild()
 		if v.awaitingPairing && v.pairingPollID == "" {
-			return v.pairingStatusCmd()
+			return tea.Batch(v.pairingStatusCmd(), v.joinRefreshCmd())
 		}
-		return nil
+		return v.joinRefreshCmd()
 
 	case nodeActionMsg:
 		if msg.err != nil {
@@ -700,6 +1033,17 @@ func (v *nodesView) refuseSecondInvite() bool {
 
 func (v *nodesView) handleNotification(msg *rpc.Message) tea.Cmd {
 	switch msg.Method {
+	case "cluster:join-requests-changed":
+		var snapshot joinRequestsSnapshot
+		if err := decodeParams(msg.Params, &snapshot); err != nil {
+			v.invalidateJoinRequests()
+			v.noteFeed("Ask to join", err)
+			v.status.error("cannot read join request status")
+			return nil
+		}
+		v.joinPushes++
+		v.joinReading = false
+		return v.adoptJoinRequests(snapshot)
 	case "cluster:remote-management-changed":
 		var snapshot remoteManagementSnapshot
 		if decodeOrLog(msg.Method, msg.Params, &snapshot) {
@@ -708,9 +1052,10 @@ func (v *nodesView) handleNotification(msg *rpc.Message) tea.Cmd {
 		}
 		return v.remoteManagementCmd()
 	case "app:ready":
-		return v.remoteManagementCmd()
+		return tea.Batch(v.remoteManagementCmd(), v.joinRequestsCmd())
 	case "service/broker-restarted":
 		v.invalidateRemoteManagement()
+		v.invalidateJoinRequests()
 		return nil
 	case "discovery:nodes-changed":
 		var nodes []availableNode
@@ -894,6 +1239,27 @@ func (v *nodesView) handleKey(msg tea.KeyMsg) tea.Cmd {
 		return v.handleGrantKey(msg)
 	}
 	if v.mode != nodesInputNone {
+		if v.mode == nodesInputJoinConfirm || v.mode == nodesInputJoinApproval {
+			switch msg.String() {
+			case "esc":
+				v.joinApprovalID = ""
+				v.cancelInput()
+			case "tab":
+				if v.mode == nodesInputJoinApproval {
+					v.joinAllow = !v.joinAllow
+				}
+			case "enter":
+				return v.submitInput()
+			}
+			return nil
+		}
+		if v.mode == nodesInputInviteAddress && (msg.String() == "up" || msg.String() == "down") {
+			v.joinByAddress = !v.joinByAddress
+			return nil
+		}
+		if v.mode == nodesInputInviteAddress && v.joinByAddress && (msg.String() == "tab" || msg.String() == "shift+tab") {
+			return nil
+		}
 		if v.pairingChoiceActive() && (msg.String() == "tab" || msg.String() == "shift+tab" ||
 			(v.mode == nodesInputInviteChoice && (msg.String() == "up" || msg.String() == "down" || msg.String() == " "))) {
 			v.togglePairingChoice()
@@ -950,6 +1316,9 @@ func (v *nodesView) handleKey(msg tea.KeyMsg) tea.Cmd {
 		if v.refuseSecondInvite() {
 			return nil
 		}
+		if row := v.selectedRow(); row != nil && row.membership == membershipForeign && !row.self {
+			return v.beginJoin(row.address, row.key)
+		}
 		v.beginInput(nodesInputInviteChoice, "")
 		if row := v.selectedRow(); row != nil {
 			v.inviteChoiceKey = row.key
@@ -961,6 +1330,7 @@ func (v *nodesView) handleKey(msg tea.KeyMsg) tea.Cmd {
 			return nil
 		}
 		v.beginInput(nodesInputInviteAddress, "host (or host:port; default 14321)")
+		v.joinByAddress = false
 		return textinput.Blink
 	case key.Matches(msg, nodeAddKey):
 		v.beginInput(nodesInputManualAddress, "host")
@@ -968,6 +1338,13 @@ func (v *nodesView) handleKey(msg tea.KeyMsg) tea.Cmd {
 	case key.Matches(msg, nodeRemoveKey):
 		return v.removeSelected()
 	case key.Matches(msg, nodePairKey):
+		if v.inbound == nil && v.joinFresh {
+			if r := v.joinRequestByID(v.joinReviewID); r != nil && r.Direction == "incoming" && r.State == "awaiting-approval" && !v.joinWriting {
+				v.joinApprovalID, v.joinAllow = r.RequestID, false
+				v.beginInput(nodesInputJoinApproval, "")
+				return nil
+			}
+		}
 		if v.inbound == nil {
 			v.status.info("no pairing request to accept")
 			return nil
@@ -983,7 +1360,14 @@ func (v *nodesView) handleKey(msg tea.KeyMsg) tea.Cmd {
 		// standard half-page-down. Unconditionally intercepting it meant paging
 		// a long node list answered with a message about pairing.
 		return v.respondToInvite(false, "")
+	case key.Matches(msg, nodeDeclineKey) && v.inbound == nil && v.joinFresh:
+		if r := v.joinRequestByID(v.joinReviewID); r != nil && r.State == "awaiting-approval" && r.Direction == "incoming" {
+			return v.joinAction("cluster:respond-to-join-request", r.RequestID, map[string]any{"requestId": r.RequestID, "accept": false})
+		}
 	case key.Matches(msg, nodeCancelKey):
+		if r := v.joinRequestByID(v.joinTrackedID); v.joinFresh && r != nil && r.live() {
+			return v.joinAction("cluster:cancel-join-request", r.RequestID, map[string]string{"requestId": r.RequestID})
+		}
 		return v.cancelInvite()
 	case key.Matches(msg, nodeFilterKey):
 		v.beginInput(nodesInputFilter, "filter by name or address")
@@ -1072,6 +1456,15 @@ func (v *nodesView) submitInput() tea.Cmd {
 	v.cancelInput()
 
 	switch mode {
+	case nodesInputJoinConfirm:
+		return v.sendJoin()
+	case nodesInputJoinApproval:
+		r := v.joinRequestByID(v.joinApprovalID)
+		if !v.joinFresh || !v.joinSnapshot.Supported || r == nil || !r.live() || r.State != "awaiting-approval" || r.Direction != "incoming" {
+			v.status.error("join request changed; review it again")
+			return nil
+		}
+		return v.joinAction("cluster:respond-to-join-request", r.RequestID, map[string]any{"requestId": r.RequestID, "accept": true, "allowRemoteManagement": v.joinAllow})
 	case nodesInputInviteChoice:
 		if row := v.selectedRow(); row == nil || row.key != v.inviteChoiceKey {
 			v.outboundAllow = false
@@ -1102,6 +1495,9 @@ func (v *nodesView) submitInput() tea.Cmd {
 		if val == "" {
 			v.status.error("address required")
 			return nil
+		}
+		if v.joinByAddress {
+			return v.beginJoin(val, "")
 		}
 		return v.inviteAddress(val)
 
@@ -1762,7 +2158,7 @@ func (v *nodesView) View() string {
 		// list where it is otherwise shown. Sized here, from the line actually
 		// rendered, because it comes and goes with events the detail screen
 		// never sees.
-		line := v.pairingLine()
+		line := joinLines(v.pairingLine(), v.joinPrompt())
 		h := v.height
 		if line != "" {
 			h -= countLines(line)
@@ -1772,6 +2168,23 @@ func (v *nodesView) View() string {
 	}
 	if v.grantsOpen {
 		return v.grantsView()
+	}
+	if v.mode == nodesInputJoinConfirm {
+		text := "Ask to join " + v.joinAddress + "\nThe member must approve and read you a PIN.\n"
+		if v.joinReplaceSolo {
+			text += "This replaces your solo cluster after approval. Retained peer relationships cannot move.\n"
+		}
+		return ansi.Wrap(text+"enter to send Ask to join; esc to cancel", max(1, v.width), "")
+	}
+	if v.mode == nodesInputJoinApproval {
+		mark := "(*) Block this peer from changing this device"
+		if v.joinAllow {
+			mark = "(*) Allow this peer to manage this device"
+		}
+		return ansi.Wrap(joinLines(v.joinPrompt(), "Approve request\n"+v.joinApprovalID,
+			"Remote management of this admitting device (tab to choose)", mark,
+			"Status and inference remain available. Engine locks and pause still apply.",
+			"enter to approve; esc to cancel"), max(1, v.width), "")
 	}
 
 	// Everything that is not the table, gathered before the table is sized so
@@ -1793,13 +2206,23 @@ func (v *nodesView) View() string {
 		// than an empty one: it looks complete.
 		feedNote = statusErrStyle.Render("Some node data is " + warning)
 	}
-	inboundNote := v.inboundPrompt()
+	inboundNote := joinLines(v.inboundPrompt(), v.joinPrompt())
 	editor := ""
 	if v.mode != nodesInputNone {
 		editor = v.inputLabel() + v.input.View()
 		if v.mode == nodesInputInviteChoice {
 			editor = "Pair with " + v.inviteChoiceName() + " - enter to send, esc to cancel"
 		}
+		if v.mode == nodesInputInviteAddress {
+			direction := "Invite"
+			if v.joinByAddress {
+				direction = "Ask to join"
+			}
+			editor = joinLines("Direction: "+direction+" (up/down to choose Invite or Ask to join)", editor)
+		}
+	}
+	if v.mode == nodesInputInviteAddress && v.joinByAddress {
+		return ansi.Wrap(joinLines(editor, "enter to review Ask to join; esc to cancel", v.status.render()), max(1, v.width), "")
 	}
 	editor = joinLines(editor, v.pairingChoiceView())
 	if v.pairingChoiceActive() {
@@ -1887,6 +2310,9 @@ func (v *nodesView) Help() []key.Binding {
 		return []key.Binding{grantMoveKey, grantToggleKey, detailBackKey}
 	}
 	if v.mode != nodesInputNone {
+		if v.mode == nodesInputJoinConfirm || v.mode == nodesInputJoinApproval {
+			return inputHelp("confirm request")
+		}
 		if v.pairingChoiceActive() {
 			label := "send invite"
 			if v.mode == nodesInputPin {
@@ -1910,16 +2336,27 @@ func (v *nodesView) Help() []key.Binding {
 		return []key.Binding{nodeConfirmKey}
 	}
 	bindings := []key.Binding{nodeDetailKey, nodeInviteKey, nodeInviteAddrKey, nodeAddKey, nodeRemoveKey, nodeFilterKey, localGrantsKey}
+	if row := v.selectedRow(); row != nil && row.membership == membershipForeign && !row.self {
+		bindings[1] = key.NewBinding(key.WithKeys("p"), key.WithHelp("p", "Ask to join"))
+	}
 	if v.filter != "" {
 		bindings = append(bindings, nodeClearKey)
 	}
 	if v.inbound != nil && v.answering == "" {
 		bindings = append(bindings, nodePairKey, nodeDeclineKey)
 	}
+	if v.inbound == nil {
+		if r := v.joinRequestByID(v.joinReviewID); r != nil && r.State == "awaiting-approval" {
+			bindings = append(bindings, nodePairKey, nodeDeclineKey)
+		}
+	}
 	// Only while there is something to cancel: a key offered with nothing
 	// pending invites a press that can only answer "nothing is waiting".
 	if v.outboundInviteID != "" {
 		bindings = append(bindings, nodeCancelKey)
+	}
+	if r := v.joinRequestByID(v.joinTrackedID); r != nil && r.live() {
+		bindings = append(bindings, key.NewBinding(key.WithKeys("c"), key.WithHelp("c", "cancel join request")))
 	}
 	if v.identity.ClusterID != "" {
 		bindings = append(bindings, nodeLeaveKey)

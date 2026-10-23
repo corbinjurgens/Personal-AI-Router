@@ -18,14 +18,9 @@ is in
 [What the Terminal Interface Cannot Do](#what-the-terminal-interface-cannot-do),
 and it is worth reading before you depend on it.
 
-> **Never run the terminal interface's service and the desktop application on
-> the same machine at the same time.** This is not a preference. The desktop
-> application still starts its own broker and full worker tree, so two sets of
-> services would fight over the same proxy ports, try to manage the same engines,
-> and write the same settings files. Expect port conflicts, engines that refuse
-> to start, and confusing state on both sides. Quitting the terminal interface
-> leaves its service running, so stop the service (`Q`, or
-> `nvpair-tui --stop-service`) before starting the desktop application.
+The terminal interface and desktop application attach to the same per-user
+`nvpair-service`. The service owns the broker and worker tree. Quitting either
+client detaches it; stopping the service interrupts both clients.
 
 Within its scope it is self-contained. It attaches to `nvpair-service`, the
 background process that runs the broker and worker tree, and starts it if it is
@@ -46,9 +41,6 @@ build, which has no wrapper at all. Refer to
 [Building PAIR](building.mdx#run-without-the-desktop-application).
 
 ## Start It
-
-Before you start it, confirm the desktop application is not running on this
-machine, including minimized to the tray or menu bar. Quit it first.
 
 ```bash
 nvpair-tui
@@ -211,21 +203,52 @@ Everything below is on the **Nodes** tab (1).
 **To pair with a machine you can already see:**
 
 1. Select it with `j` / `k`.
-2. Press `p`. The status line shows the PIN.
+2. Press `p`, choose whether this peer may manage this device (`tab`, Block by
+   default), then press `enter`. The status line shows the PIN.
 3. Read that PIN to whoever is at the other machine.
 
 This is the easier path, because there is no address to type. Prefer it whenever
 PAIR has already discovered the machine you want.
 
 The PIN stays on screen until the pairing is answered, then tells you the outcome
-— joined, declined, or expired. A machine that is already a member, or that
-belongs to another cluster, cannot be invited: PAIR says so instead of sending an
-invite that would be refused.
+— joined, declined, or expired. An existing member cannot be invited again.
+For a device in another cluster, `p` offers **Ask to join** instead.
 
 **To pair with a machine by address**, press `n`, type the other machine's
 host — or `host:port` if it is not on the default pairing port — and press
-`enter`. Use this when discovery has not found the machine, for example on a
-network that filters multicast.
+`enter`. Use `up` / `down` in the address field to choose **Invite** or **Ask to
+join** explicitly; Invite is initially selected. Use this when discovery has
+not found the machine, for example on a network that filters multicast.
+
+### Ask to Join an Existing Cluster
+
+On a standalone device, select a row marked `Other cluster` and press `p`, or
+press `n` and choose Ask to join with `up` / `down`. Review the target and press
+`enter` to send; `esc` cancels the draft. A solo cluster requires explicit
+confirmation that it will be replaced after approval. Devices retaining peer
+relationships cannot move or merge clusters through this flow.
+
+On the admitting member, an unverified incoming request appears without moving
+focus or opening a dialog. With no ordinary pairing prompt displayed, `a`
+reviews that exact request and `d` declines it. Approval defaults to blocking
+the requester from managing the admitting device; `tab` changes this choice,
+`enter` approves, and `esc` cancels the review. Names and addresses in this
+prompt are unverified claims.
+
+After approval, the member reads its locally displayed PIN to the requester.
+The requester presses `a`, enters that PIN, chooses permission over its own
+device (`tab`, Block by default), and presses `enter`. Each side independently
+chooses permission over the device it is using. Approval alone does not mean
+membership has completed. The service confirms the exact pairing invite.
+
+`c` cancels an outgoing join request. Requests expire automatically; cancellation
+may wait for authoritative cleanup. Reattaching retrieves requests received
+while no terminal was open. A manager restart can lose request status: check
+membership on both devices before retrying. Declined, expired, unsupported,
+offline and callback failures are reported from the service; an unsupported
+peer is never retried as an ordinary Invite. Old local services retain Invite
+while Ask to join is unavailable. This flow adds no listener or firewall rule
+and cannot repair a blocked pairing callback.
 
 **To accept a pairing request from another machine:**
 
@@ -245,12 +268,12 @@ the rest are declined and their senders are told.
 
 | Key | Action |
 | --- | --- |
-| `p` | Pair with the selected machine |
-| `n` | Pair with a machine by address |
-| `a` | Accept an inbound pairing request |
-| `d` | Decline an inbound pairing request |
+| `p` | Invite a standalone machine or Ask to join a foreign cluster |
+| `n` | Choose Invite or Ask to join by address (`up` / `down`) |
+| `a` | Enter a pairing PIN or review the displayed admission request |
+| `d` | Decline the displayed pairing or admission request |
 | `f` | Find a machine by address, without pairing with it |
-| `c` | Cancel the pairing request you sent |
+| `c` | Cancel the outgoing join request or invite |
 | `r` | Remove the selected machine from the cluster (asks you to confirm) |
 | `l` | Leave the cluster (asks you to confirm) |
 | `/` | Filter the list by name or address; `esc` clears it |

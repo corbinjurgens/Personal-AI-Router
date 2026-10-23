@@ -21,6 +21,25 @@ This file is the component reference. For task-oriented usage instructions, see
 
 ## What it does
 
+On Nodes, `p` invites a standalone target or offers **Ask to join** for a row
+in another cluster. `n` accepts an address and uses `up` / `down` to choose
+Invite or Ask to join (initially Invite). Ask to join requires a supported local
+service and peer, authoritative standalone eligibility, and explicit consent
+before replacing a solo cluster; retained peer relationships cannot move.
+
+Admission requests hydrate through `cluster:get-join-requests` on attach and
+reconnect and reconcile `cluster:join-requests-changed` snapshots. Incoming
+requests remain passive until `a` reviews the displayed request or `d` declines
+it. Approval chooses remote management of the admitting device (Block by
+default); the member retrieves the exact child invite's PIN locally and reads
+it to the requester. The requester enters that PIN through ordinary pairing
+with its own independent management choice. Request IDs never substitute for
+invite IDs. `c` cancels an outgoing request. Expiry, refusal and lost status
+come from cluster-manager; lost status requires checking membership before
+retrying. Unsupported services retain normal Invite without reversing it into
+an invite to a clustered device. No new worker, transport or firewall rule is
+started by this flow. See the terminal guide for the complete ceremony.
+
 `nvpair-tui` is a JSON-RPC 2.0 client of `nvpair-ui-broker`, reached through
 `nvpair-service` (newline-delimited JSON over the service's Unix socket or named
 pipe, which the service multiplexes onto the broker's stdio). It consumes the
