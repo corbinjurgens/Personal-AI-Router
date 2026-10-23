@@ -5,6 +5,7 @@ package ui
 
 import (
 	"encoding/json"
+	"strings"
 	"time"
 
 	"nvpair-tui/rpc"
@@ -27,6 +28,13 @@ const setAvailabilityTimeout = 30 * time.Minute
 // pauseIncompleteLabel is what a node that stays draining after its pause call
 // ended shows. Resuming it is a desktop or local RPC action: P only retries.
 const pauseIncompleteLabel = "Pause incomplete — P retries"
+
+// pauseIncompleteRecovery is the banner for a node left half-paused by a failed
+// call. The terminal has no resume key for that state.
+const pauseIncompleteRecovery = "Pause incomplete — P retries; resume from this device's desktop."
+
+// pauseStopFailurePrefix leads the broker's incomplete-shutdown error.
+const pauseStopFailurePrefix = "Pause could not stop every engine: "
 
 // availabilityState is the shell's view of this node's pause switch.
 type availabilityState struct {
@@ -100,6 +108,17 @@ func setAvailabilityCmd(client *rpc.Client, target string) tea.Cmd {
 			decodeOrLog("node:set-availability", msg.Result, &r)
 			return setAvailabilityMsg{target: target, availability: r.Availability}
 		})
+}
+
+// incomplete reports a pause call that failed while the node stayed draining.
+func (a availabilityState) incomplete() bool {
+	return a.err != "" && a.value == availDraining
+}
+
+// detail is the failure without the broker's fixed lead-in, so the part that
+// differs between failures is what a narrow header shows.
+func (a availabilityState) detail() string {
+	return strings.TrimPrefix(a.err, pauseStopFailurePrefix)
 }
 
 // toggleTarget is the state P asks for: resume when paused, pause otherwise.

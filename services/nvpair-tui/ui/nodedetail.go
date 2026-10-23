@@ -2037,6 +2037,11 @@ func (d *nodeDetail) refreshEngines() {
 			port = strconv.Itoa(e.Port)
 		}
 		row := table.Row{e.label(), yesNo(e.Installed), yesNo(e.Running), yesNo(e.Healthy), port}
+		// The lock goes first: the engine column is narrow, and a clipped cell
+		// must still tell a locked engine from one that is only saved Off.
+		if e.locked() {
+			row[0] += " (locked on this node)"
+		}
 		// Saved Off reports intent without deriving it from runtime state.
 		if enabled, present := d.intent.EnabledByEngine[e.Engine]; !d.remote() && present && !enabled {
 			switch d.intent.OffByEngine[e.Engine] {
@@ -2047,9 +2052,6 @@ func (d *nodeDetail) refreshEngines() {
 			default:
 				row[0] += " (saved Off)"
 			}
-		}
-		if e.locked() {
-			row[0] += " (locked on this node)"
 		}
 		if d.proxy != nil {
 			row = append(row, d.proxyPortCell(e.Engine))

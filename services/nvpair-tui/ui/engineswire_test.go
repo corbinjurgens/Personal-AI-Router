@@ -1007,7 +1007,7 @@ func TestTerminalControlsEngineLock(t *testing.T) {
 		}
 		d.refreshEngines()
 		rows := d.engineTable.Rows()
-		if rows[0][0] != "ollama (saved Off, local)" || rows[1][0] != "lmstudio (saved Off, local) (locked on this node)" {
+		if rows[0][0] != "ollama (saved Off, local)" || rows[1][0] != "lmstudio (locked on this node) (saved Off, local)" {
 			t.Fatalf("labels = %q, %q", rows[0][0], rows[1][0])
 		}
 		if d.engineLocked("ollama") {
@@ -1085,4 +1085,34 @@ func TestTerminalControlsEngineLock(t *testing.T) {
 			t.Fatal("a refused mutation stopped status reads")
 		}
 	})
+}
+
+// A locked engine that is also saved Off must still read as locked when the
+// narrow engine column clips its label at 80 columns.
+func TestLockedEngineRowSurvivesNarrowColumn(t *testing.T) {
+	locked := true
+	d := localDetail()
+	d.SetSize(80, 30)
+	d.engines = []engineStatus{{Engine: "ollama", Installed: true, Locked: &locked}, {Engine: "lmstudio", Installed: true}}
+	d.intent = engineintent.Snapshot{
+		EnabledByEngine: map[string]bool{"ollama": false, "lmstudio": false},
+		OffByEngine:     map[string]engineintent.Origin{"ollama": engineintent.Local, "lmstudio": engineintent.Local},
+	}
+	d.refreshEngines()
+	rendered := d.engineTable.View()
+	var lockedRow, plainRow string
+	for _, line := range strings.Split(rendered, "\n") {
+		switch {
+		case strings.Contains(line, "ollama"):
+			lockedRow = line
+		case strings.Contains(line, "lmstudio"):
+			plainRow = line
+		}
+	}
+	if !strings.Contains(lockedRow, "(locked") {
+		t.Fatalf("locked row lost its lock at 80 columns: %q", lockedRow)
+	}
+	if strings.Contains(plainRow, "locked") || !strings.Contains(plainRow, "(saved Off") {
+		t.Fatalf("saved Off row = %q, want provenance without a lock", plainRow)
+	}
 }

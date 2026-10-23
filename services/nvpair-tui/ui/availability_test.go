@@ -9,6 +9,8 @@ import (
 	"testing"
 
 	"nvpair-tui/rpc"
+
+	"github.com/charmbracelet/lipgloss"
 )
 
 func availNote(node, state string) NotificationMsg {
@@ -99,15 +101,28 @@ func TestFailedPauseLeavesAnAccurateIncompleteState(t *testing.T) {
 	}
 }
 
-func TestIncompletePauseHeaderKeepsDetailAndDesktopResume(t *testing.T) {
-	m := newTestModel()
-	m.width = 200
-	m.avail = availabilityState{value: availDraining, err: "Pause could not stop every engine: ollama still running"}
-	got := m.headerView()
-	for _, want := range []string{"Pause incomplete — P retries; resume from this device's desktop.", "ollama still running"} {
-		if !strings.Contains(got, want) {
-			t.Fatalf("header %q lacks %q", got, want)
+func TestIncompletePauseKeepsDetailAndDesktopResumeVisible(t *testing.T) {
+	for _, width := range []int{80, 200} {
+		m := newTestModel()
+		m.width = width
+		m.ready, m.brokerVersion = true, "1.2.3"
+		m.avail = availabilityState{value: availDraining, err: "Pause could not stop every engine: ollama still running"}
+		// The frame is clipped to the terminal, as View does it.
+		header := lipgloss.NewStyle().MaxWidth(width).Render(m.headerView())
+		for _, want := range []string{"Pause incomplete — P retries", "ollama still running"} {
+			if !strings.Contains(header, want) {
+				t.Fatalf("width %d: header %q lacks %q", width, header, want)
+			}
 		}
+		banner := lipgloss.NewStyle().MaxWidth(width).Render(m.banner())
+		if !strings.Contains(banner, "Pause incomplete — P retries; resume from this device's desktop.") {
+			t.Fatalf("width %d: banner %q lacks the recovery sentence", width, banner)
+		}
+	}
+	m := newTestModel()
+	m.avail = availabilityState{value: availAvailable, err: "boom"}
+	if m.banner() != "" {
+		t.Fatal("an ordinary pause failure showed the incomplete-pause banner")
 	}
 	m.avail = availabilityState{value: availAvailable, err: "boom"}
 	if got := m.headerView(); !strings.Contains(got, "pause failed: boom") {

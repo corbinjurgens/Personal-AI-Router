@@ -498,6 +498,9 @@ func (m Model) banner() string {
 	if m.confirmingStop {
 		return m.stopBanner()
 	}
+	if m.avail.incomplete() {
+		return statusErrStyle.Render(" " + pauseIncompleteRecovery)
+	}
 	if m.updateLatest == "" || m.updateDismissed {
 		return ""
 	}
@@ -560,8 +563,10 @@ func (m Model) headerView() string {
 	// The pause switch sits between the title and the service status. A failure
 	// replaces the indicator until the next attempt.
 	if m.avail.err != "" {
-		if m.avail.value == availDraining {
-			left += "  " + statusErrStyle.Render(pauseIncompleteLabel+"; resume from this device's desktop. "+m.avail.err)
+		if m.avail.incomplete() {
+			// The engine-specific detail comes first so a clipped header keeps it;
+			// the banner row carries the recovery sentence.
+			left += "  " + statusErrStyle.Render(pauseIncompleteLabel+": "+m.avail.detail())
 		} else {
 			left += "  " + statusErrStyle.Render("pause failed: "+m.avail.err)
 		}
