@@ -152,6 +152,26 @@ func newServiceFixture(t *testing.T) *serviceFixture {
 	return f
 }
 
+// withInertEngineManager opts into physical pause verification without installed
+// engines or peer discovery. Keep the private configuration and inert listener
+// for the fixture's lifetime, including service restarts.
+func (f *serviceFixture) withInertEngineManager() {
+	f.t.Helper()
+	self, err := os.Executable()
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	jointCopyExecutable(f.t, self, f.scannerPath)
+	enginePath := f.copyBinary(engineMgrBin)
+	f.inventory.paths = append(f.inventory.paths, enginePath)
+	f.env = append(f.env, "NVPAIR_TEST_SUBSCRIPTION_SCANNER="+f.scannerPath,
+		"NVPAIR_TEST_SUBSCRIPTION_PORT="+strconv.Itoa(temporaryClusterPort(f.t)),
+		"OLLAMA_HOST=", "USERPROFILE="+f.configDir)
+	inert := newFixtureHTTPServer(f.t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusServiceUnavailable) }))
+	f.t.Cleanup(inert.Close)
+	jointIsolateEngines(f.t, f.configDir, inert.Listener.Addr().(*net.TCPAddr).Port)
+}
+
 // remoteServiceFixture is a serviceFixture whose bundle also runs
 // engine-manager and cluster-manager, with an empty-directory scanner, inert
 // engines, a pinned target identity and two pinned peers: one denied and one
