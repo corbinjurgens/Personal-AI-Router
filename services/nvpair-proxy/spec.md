@@ -523,7 +523,14 @@ node.
 
 ### 5.2 The commit point
 
-**Commit is the first byte of response body, not the response headers.**
+**Commit is the first raw byte of an accepted successful response body, not
+the response headers or the first complete frame.** One request owner
+(`routingSpend`) arbitrates acceptance, commitment, cancellation and attempts
+across destinations. Its one `responseSink` owns client delivery, counting
+genuine and synthetic output and recording protocol completion separately from
+successful delivery. Neither the storage account nor the frame reader is a
+second lifecycle owner. Synthetic heartbeats, local errors and SC-a endings do
+not commit a destination.
 
 Headers are not a valid commit signal: they may show only that the engine
 accepted the request. Treating them as commitment would disable the header
@@ -549,21 +556,27 @@ gate does not parse it. It is spliced back onto the front of the body before
 the origin's frame reader is installed, so supported stream parsing does not
 move the existing commit/retry boundary.
 
-`EOF` with no bytes counts as a commit. This is defensive rather than expected
+`EOF` with no bytes is accepted as an empty answer without retry. This is
+defensive rather than expected
 — an inference route answering `200` with an empty body is an engine
 misbehaving — but treating it as a stall would spend the whole budget waiting
 for content that is never coming and then fail a request the engine considered
-answered. An empty declared stream then fails protocol validation without
-retrying; an empty non-streaming response retains its raw transport behavior.
+answered. No raw byte exists to set the owner's byte-commit flag. An empty
+declared stream then fails protocol validation without retrying; an empty
+non-streaming response retains its raw transport behavior.
 
-A first-content timeout **never** commits, including on the final permitted
-attempt, where it is terminal with `504`. Committing there would leave the peek
-reader blocked on the same body, racing two readers on one stream, and against
-a silent upstream the copy would block with nothing left to interrupt it.
+A first-content timeout before any accepted raw byte **never** commits,
+including on the final permitted attempt, where it is terminal with `504`.
+The owner arbitrates timeout and the raw read under the same mutex. If the raw
+byte already won but peek publication or reader construction subsequently
+fails, the accepted response ends through its sink; it cannot dispatch again
+or replace the status with a new error response.
 
 The gate is scoped to inference, and costs a non-streaming response nothing
-when its headers and body arrive together. It remains engine-independent;
-protocol selection happens after its winning commit claim.
+when its headers and body arrive together. It remains engine-independent.
+Request framing settings and peer metadata are validated before the raw gate;
+response frame parsing and reader allocation happen after the byte claim. A
+byte commits even if later parsing rejects it or allocation fails.
 
 #### Managed streaming after commit (SC-a)
 
@@ -616,6 +629,21 @@ The origin strips this internal header from every client response and trailer,
 including non-peer engine responses; direct engines cannot supply authoritative
 framing metadata. Unsupported routes and non-inference forwarding are otherwise
 unaffected.
+
+The pinned destination also normalizes supported response framing and publishes
+an EOF disposition on the same internal `X-PAIR-Stream-Framing` trailer channel:
+`v1;completed` or `v1;interrupted;<reason>`, with a reason from the closed set
+below. This trailer is separate from the pre-body `v1;<mode>;<choices>` header.
+The origin requires one valid disposition for a normalized peer response and
+strips it before client delivery, including for supported non-streaming
+responses. Missing, duplicate, malformed or unknown-version dispositions do
+not establish completion; missing disposition is a peer interruption, while
+malformed or inconsistent stream metadata can be `malformed upstream stream`.
+A destination's synthetic error and `[DONE]`
+cannot turn an interruption into a completed workload at the origin. Engines
+cannot supply trusted disposition: ingress removes their values and publishes
+its own after body close at EOF. The trailer supplies no engine-termination or
+strict-admission release evidence.
 
 Origin and destination dispatch explicitly set `Accept-Encoding: identity` on
 the supported inference routes, even when the client requests compression.
@@ -705,7 +733,18 @@ the old body closes and the torn tail is discarded. OpenAI receives
 `data: {"error":{"message":"stream interrupted: <reason>","type":"server_error","code":"stream_interrupted"}}`
 as an SSE event, then a `[DONE]` event; Ollama receives
 `{"error":"stream interrupted: <reason>"}` as a newline-terminated object.
-Reasons are bounded operational categories, never copied engine error text.
+Reasons are a closed set of operational categories, never copied engine error
+text:
+
+- `upstream closed before the stream completed`
+- `upstream read failed`
+- `upstream stopped sending events`
+- `upstream frame exceeded the frame limit`
+- `stream frame buffer exhausted`
+- `malformed upstream stream`
+- `upstream reported an error`
+- `peer response interrupted`
+
 An already forwarded upstream error is retained without another error frame.
 Failure never fabricates a successful finish reason or `done:true`.
 
@@ -716,9 +755,14 @@ net/http. It preserves endpoint content type, concrete routing headers and
 engine-owned CORS. HTTP status is already committed and is never rewritten to
 502 for a later protocol failure.
 
-**After commit there is no retry or continuation in SC-a.** SC-b's qualified
-same-model continuation remains pending. Destination ingress remains local-only
-and gains no workload/attempt owner or onward route; parsing a terminal marker
+**After commit there is no retry or continuation in SC-a.** A peer or engine
+loss mid-stream ends a managed OpenAI stream with an error frame plus `[DONE]`,
+not a pause, until SC-b; managed Ollama streams use the error object above.
+Delivery remains best effort if the client has disconnected or writes fail.
+The sink records continuation as unavailable. SC-b's qualified same-model
+continuation remains pending and must use this request owner and sink rather
+than introduce another dispatch or delivery owner. Destination ingress remains
+local-only and gains no workload/attempt owner or onward route; parsing a terminal marker
 does not establish engine termination or release an uncertain strict hold.
 
 ### 5.3 Per-attempt cancellation
@@ -734,19 +778,21 @@ classification both read the *parent*, so cancelling a child cannot be mistaken
 for the requester leaving. Confusing the two would either report a job that went
 on to succeed as `cancelled`, or let a real disconnect keep burning attempts.
 
-**Commit and cancellation are mutually exclusive, decided by one atomic
-claim.** Both can become true at once — the watcher's discovery check can pass
-while the commit path is already running, and the work between the arrival of
-the first byte and the end of the commit includes a synchronous notification
-write and two mutex acquisitions. A pair of signals cannot express which
-happened first, so the attempt has a single state that each side claims by
-compare-and-swap; the loser becomes a no-op.
+**The request mutex decides commitment versus pre-output abandonment.** The
+raw read, discovery watcher, deadline and regenerate operation all transition
+the same active attempt under the request owner's mutex. An abandoned,
+cancelled, replaced or ended attempt cannot accept a late byte. If raw
+commitment wins first, discovery disappearance cannot abandon it into another
+dispatch; a later transport interruption ends through the same sink. If the
+watcher wins before commitment, the attempt is abandoned and ordinary
+pre-output retry bounds apply. There is no separate compare-and-swap owner.
 
-**A committed first byte wins that claim.** A delivered byte is direct evidence
-that this node is serving this request, whereas an absence from discovery can be
-a transient announcement gap. If the watcher claims first the attempt is
-abandoned without committing, so the request retries rather than being served a
-stream the proxy then truncates itself.
+Whole-request cancellation remains possible after commitment. A disconnect,
+failed client write or qualified `workload/cancel` ends the request and its
+active child; it never starts a post-commit attempt. Cancellation is recorded
+under the request mutex before callbacks and I/O run outside it. SC-a ending
+planning is arbitrated against the same owner; synthetic output cannot revive
+an ended request. The complete workload cancellation key is in §12.5.
 
 ### 5.4 Status handling and outcome classification
 
@@ -1116,7 +1162,7 @@ state in force. The broker re-sends policy state whenever the proxy starts; unti
 | `node/admission-snapshot` | `{}` | answers `{runId, active, activeByEngine, queued, lastActivityMs}` from current admission state (§12.1.2) |
 | `node/renew-egress-lease` | `{runId, revision, sequence, notAfterNanos}` | trusted parent only; answers `{runId, revision, sequence, nowNanos}`; zero deadline samples the receiver clock without changing authority; a nonzero deadline is a run/revision-bound grant (§12.9) |
 | `node/revoke-egress-lease` | `{runId, sequence}` | trusted parent only; answers `{runId, sequence}`; a higher sequence clears the current lease without activating policy (§12.9) |
-| `workload/cancel` | `{workloadId, engine?, runId?, regenerate?}` | §12.5; answers `{found}` |
+| `workload/cancel` | `{originatedFrom, runId, engine, workloadId, regenerate?}` | §12.5; answers `{found}` |
 
 Unknown fields and engine IDs that are not `engines.ValidRoutingID` are errors. A
 valid descriptor engine ID with no facade here is accepted state.
@@ -1150,6 +1196,50 @@ only for the exact revision it pushed, and it bounds its whole wait for one
 (`nvpair-ui-broker` README). Public egress additionally requires the separate
 run/revision-bound lease (§12.9). A lease acknowledgement never substitutes for
 policy or availability acknowledgement and cannot enable public dispatch.
+
+#### Inference buffer policy
+
+`routing.buffers.capacityMiB` is an integer from 192 through 1024 (default
+256). `routing.buffers.waitSeconds` is an integer from 0 through 600 (default
+5); zero disables waiting. The broker persists both in node policy and
+activates them live through the existing `node/set-policy` acknowledgement
+path. Buffer activation additionally requires
+`capacityBytes >= 2 * effectiveIndividualLimitBytes + 1`, covering overlapping
+old/new body storage and the overflow probe. The individual body limit is
+64 MiB by default. A policy failing this requirement is refused without
+changing the active policy or buffer settings.
+
+One process-wide byte root covers owned inference storage across facades and
+paired ingress: retained bodies, copies/rewrites, parsing/preparation and
+response buffers. It charges allocation capacity before allocation, including
+both arrays during growth, and retains a charge until the last borrower
+releases it. It is not a process RSS bound, an engine/GPU memory limit, or a
+promise about allocator/transport overhead. The stream category remains
+subordinate to this root (§5.2); control/cancellation metadata has its own
+bounds and remains reachable under byte pressure.
+
+Waiting aggregate acquisitions join one FIFO queue with at most 1,024 waiter
+records. Only the head can receive capacity: a large head blocks smaller
+requests behind it. Queue saturation, aggregate contention with waiting
+disabled, and wait expiry return 503. Each acquisition snapshots its own wait
+allowance, shortened by any earlier context deadline; request cancellation
+removes the waiter and releases its pending reservation. Pre-output waits
+share the request's overall pre-output deadline, rather than extending it.
+A body larger than the individual limit returns 413 without queueing for
+capacity (when its size is unknown, as soon as overflow is detected). An
+individual/category allocation or a request's own retained-plus-replacement
+footprint that cannot fit its applicable limit also returns 413. Response
+growth and some bounded category acquisitions refuse immediately (§5.2).
+
+A live capacity decrease never revokes storage already held. Usage can remain
+above the new cap while owners drain; new grants cannot increase that excess.
+Queued proposals made impossible by the decrease are removed with 413;
+remaining waiters retain their original deadlines. Admitted streams drain
+within retained grants, but larger replacement allocations and pre-output
+retries require current capacity; see §5.2 for the reader-specific conditions.
+The desktop's Node policy JSON editor can change these settings; the TUI has
+no buffer controls. See [Hybrid routing](../../docs/hybrid-routing.mdx) for the
+desktop edit example.
 
 #### Automatic residency control
 
@@ -1444,11 +1534,15 @@ never reach the client. Workload fields are in §5.5.
 
 ### 12.5 Cancel and regenerate
 
-`workload/cancel {workloadId, engine?, runId?, regenerate?}` acts on an
-in-flight workload this process originated and answers `{found}`. Workload ids
-count per facade, so `engine` selects among facades and an id in flight on two
-engines without it is an error; a `runId` other than this process's finds
-nothing. For a departed run, the broker retires open or inferred local-origin
+`workload/cancel {originatedFrom, runId, engine, workloadId, regenerate?}` acts
+on an in-flight workload this process originated and answers `{found}`.
+Every hop requires the complete key: the originating node, exact proxy run,
+valid engine ID and workload ID. Missing or malformed fields are invalid
+params (`-32602`); a valid key for another origin/run or an ended workload
+finds nothing. Workload counters can repeat across engines and proxy restarts,
+so neither engine nor run may be inferred from a numeric ID. Records missing
+`runId` remain displayable but are not cancellable; clients must not fill in
+the current run. For a departed run, the broker retires open or inferred local-origin
 outcomes as `failed`, preserving authoritative terminals already accepted before
 source withdrawal.
 

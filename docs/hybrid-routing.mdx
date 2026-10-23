@@ -1,0 +1,143 @@
+{/*
+SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+*/}
+
+# Hybrid routing
+
+The proxy owns inference requests across destination attempts, including their
+buffer storage, cancellation and response delivery. These controls already
+apply to the concrete inference path. The hybrid policy machinery is present,
+but the loopback routing listener still refuses inference with `501`
+`routing_listener_not_inference_ready`. Listing an alias does not make it
+inference-ready. Public dispatch remains disabled; see
+[Public egress lease](./public-egress-lease.mdx) for its separate activation
+requirements.
+
+The [proxy specification](../services/nvpair-proxy/spec.md) is the normative
+runtime contract. The [broker's Node policy documentation](../services/nvpair-ui-broker/README.md#node-policy)
+describes persistence, revision conflicts and activation status.
+
+## Inference buffer settings
+
+| Policy field | Range | Default | Meaning |
+| --- | --- | --- | --- |
+| `routing.buffers.capacityMiB` | 192..1024 MiB | 256 MiB | Aggregate owned inference allocation capacity in one proxy process |
+| `routing.buffers.waitSeconds` | 0..600 seconds | 5 seconds | Maximum wait per waiting acquisition; zero disables waiting |
+
+The budget covers retained bodies, copies and rewrites, parsing/preparation and
+response storage across engine facades and paired ingress. Capacity is charged
+before allocation and retained until the last borrower releases the storage.
+Growth charges both the old and replacement arrays while copying. This is an
+owned-storage bound, not process RSS, engine memory or GPU memory. The stream
+frame category retains its own subordinate limit; increasing aggregate capacity
+does not increase that category.
+
+An individual request body over its effective limit (64 MiB by default)
+receives 413 without waiting once overflow is known. A request's own
+retained-plus-replacement footprint that cannot fit its applicable limit also
+receives 413. Aggregate busy capacity, a full wait queue or an expired wait
+receives 503. Waiting acquisitions share a FIFO queue of at most 1,024 waiter
+records. A large head blocks smaller requests behind it. Each acquisition
+snapshots its wait allowance, bounded by an earlier context deadline;
+cancellation removes it from the queue and releases its pending reservation.
+Pre-output preparation waits consume the overall pre-output deadline. Earlier
+grants remain held while a later acquisition waits. Some response/category
+acquisitions refuse immediately, as detailed in specification §5.2.
+
+The broker persists these settings in node policy and activates them live
+through `node/set-policy`. Activation requires
+`capacityBytes >= 2 * effectiveIndividualLimitBytes + 1`, covering old/new body
+overlap and the overflow probe. A setting that fails this requirement leaves
+the previous active policy and buffer settings in force. Saved policy and
+active policy are distinct; check the activation result.
+
+A capacity decrease does not revoke existing storage. Owners can drain while
+usage exceeds the new cap, but new grants cannot increase that excess. Queued
+proposals made impossible by the decrease receive 413; other waiters retain
+their original deadlines. Admitted streams can finish within retained grants
+or existing high-water storage. Larger replacement allocations can still fail,
+and a pre-output retry must satisfy current policy and capacity. An unexpected
+stream that needs fresh reader grants after the decrease has no prepaid drain
+guarantee. Specification §5.2 gives the detailed stream conditions.
+
+## Change the settings in the desktop
+
+Open **Routing & resources**, select the node, and edit its loaded policy in
+the **Node policy JSON** editor. Merge this fragment into the existing
+`routing` object, keeping the rest of the policy:
+
+```json
+{
+  "buffers": {
+    "capacityMiB": 256,
+    "waitSeconds": 5
+  }
+}
+```
+
+The fragment is not a complete policy document. Set `waitSeconds` to `0` for
+immediate refusal on aggregate contention. Save through the editor and check
+the **Saved policy** activation status; a saved revision may still be pending
+or report an activation error. If the policy changed since it was loaded,
+review the latest saved policy and reload before editing again. The broker
+owns revision assignment and file writes, and replays the persisted settings
+after proxy restart. The TUI exposes no buffer controls.
+
+## Cancel and regenerate a workload
+
+The broker's `workloads:cancel` takes
+`{originatedFrom, runId, engine, workloadId, regenerate?}` and returns `{ok}`.
+Use the complete identity from the workload record at every hop. At the
+origin, the broker forwards the same complete key to the proxy's
+`workload/cancel`, whose result is `{found}`. Missing or malformed target
+fields are invalid params. A valid target for another proxy run or an ended
+request finds nothing at the origin. Engine-local counters can repeat across
+engines and proxy restarts. Records without `runId` remain displayable but are
+not cancellable; never substitute the current run.
+
+Only the origin can end its request. For a remote origin, the broker relays
+through the workload-manager over the pinned peer channel. In that case
+`ok:true` acknowledges handoff; observe the workload stream for the outcome.
+For a local origin, `ok` is the proxy's `found` result.
+
+Before commitment, regenerate can abandon the current concrete destination,
+exclude its node for the remaining request and continue under the existing
+request bounds. Between attempts it excludes the last tried node when one
+exists; it does not invent an exclusion when none has been tried. Without
+regenerate, or after commitment, the workload ends `cancelled` with
+`cancelled by request`. Workload cancellation after commitment never starts
+another attempt or splices another model's output into the response.
+
+## Response commitment and interruption
+
+One request owner arbitrates attempts, deadlines, cancellation and commitment.
+One sink owns client delivery and distinguishes genuine response output from
+synthetic control/error bytes. The first raw byte of an accepted successful
+response commits before frame parsing or reader allocation, even if the byte
+belongs to an incomplete or malformed frame. Headers and synthetic output do
+not commit. Later parser or allocation failure cannot authorize fallback.
+Protocol completion and successful delivery are separate requirements for a
+managed stream to finish as completed.
+
+Paired ingress reports effective request framing through the internal
+`X-PAIR-Stream-Framing` header `v1;<mode>;<choices>`. The origin validates it
+before body commitment. The pinned destination's EOF trailer on that same
+channel is `v1;completed` or `v1;interrupted;<reason>`; the origin validates
+and strips it. Missing or invalid disposition cannot establish completion,
+and a destination's synthetic `[DONE]` cannot hide an interruption. Engines
+cannot provide trusted framing/disposition metadata.
+
+SC-a preserves complete frames and discards torn tails. On managed OpenAI
+streams, peer or engine loss mid-stream ends with an error frame plus `[DONE]`,
+not a pause, until SC-b. Managed Ollama streams receive an error object.
+Reasons come from the closed operational set in specification §5.2; response
+content is not copied into the reason. HTTP status remains committed and the
+workload fails. Delivery is best effort when the client is gone or writes
+fail; client cancellation and failed delivery remain cancelled outcomes.
+
+Qualified same-model continuation, its private attempt history and UI belong
+to pending SC-b. That work must use the existing request owner and sink;
+destination ingress remains local-only and has no onward dispatch owner.
+Neither protocol completion nor a peer trailer proves engine termination or
+releases uncertain strict-admission capacity.
