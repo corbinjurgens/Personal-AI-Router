@@ -83,7 +83,7 @@ func TestFailedPauseLeavesAnAccurateIncompleteState(t *testing.T) {
 	a := availabilityState{value: availAvailable, pending: availPaused}
 	a.update(setAvailabilityMsg{target: availPaused, err: &rpc.RPCError{Code: -32000, Message: "Pause could not stop every engine: ollama still running"}})
 	// The broker stays draining; its readback replaces the stale value.
-	a.update(policyGetMsg{availability: availDraining})
+	a.update(policyGetMsg{availability: availDraining, guarded: true, epoch: a.epoch})
 	if a.value != availDraining || a.pending != "" || !strings.Contains(a.err, "ollama still running") {
 		t.Fatalf("state after failed pause = %+v", a)
 	}
@@ -112,5 +112,31 @@ func TestIncompletePauseHeaderKeepsDetailAndDesktopResume(t *testing.T) {
 	m.avail = availabilityState{value: availAvailable, err: "boom"}
 	if got := m.headerView(); !strings.Contains(got, "pause failed: boom") {
 		t.Fatalf("ordinary failure header = %q", got)
+	}
+}
+
+func TestStalePauseReadbackIsDropped(t *testing.T) {
+	a := availabilityState{value: availAvailable, pending: availPaused}
+	a.update(setAvailabilityMsg{target: availPaused, err: errors.New("boom")})
+	issued := a.epoch // the readback is issued here and is slow
+	// A retry completes before the read result arrives.
+	a.pending = availPaused
+	a.epoch++
+	a.update(setAvailabilityMsg{target: availPaused, availability: availPaused})
+	a.update(policyGetMsg{availability: availDraining, guarded: true, epoch: issued})
+	if a.value != availPaused || a.label() != "Paused" {
+		t.Fatalf("stale draining readback applied: %+v", a)
+	}
+	if got := a.toggleTarget(); got != availAvailable {
+		t.Fatalf("P asks for %q, want resume", got)
+	}
+	// A notification between issue and result also retires the read.
+	b := availabilityState{value: availAvailable}
+	b.update(setAvailabilityMsg{target: availPaused, err: errors.New("boom")})
+	issued = b.epoch
+	b.update(availNote("x", availAvailable))
+	b.update(policyGetMsg{availability: availDraining, guarded: true, epoch: issued})
+	if b.value != availAvailable {
+		t.Fatalf("readback overtaken by a notification applied: %+v", b)
 	}
 }

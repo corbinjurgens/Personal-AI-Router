@@ -37,6 +37,10 @@ type availabilityState struct {
 	pending string
 	// err is the last failure, shown in the header until the next attempt.
 	err string
+	// epoch counts the availability changes and attempts seen so far. A readback
+	// issued at one epoch is dropped if another change has arrived since, so a
+	// slow read cannot restore a state that has already moved on.
+	epoch int
 	// selfID and selfUUID identify this node, to filter availability-changed
 	// notifications. Both empty means unknown: availability-only pushes are accepted.
 	selfID, selfUUID string
@@ -46,6 +50,9 @@ type policyGetMsg struct {
 	availability string
 	pausedBy     string
 	err          error
+	// guarded readbacks carry the epoch they were issued at.
+	guarded bool
+	epoch   int
 }
 
 type setAvailabilityMsg struct {
@@ -65,6 +72,20 @@ func policyGetCmd(client *rpc.Client) tea.Cmd {
 		decodeOrLog("policy:get", msg.Result, &r)
 		return policyGetMsg{availability: r.Availability, pausedBy: r.Policy.PausedBy}
 	})
+}
+
+// policyReadbackCmd reads the policy back for the availability epoch it was
+// issued at.
+func policyReadbackCmd(client *rpc.Client, epoch int) tea.Cmd {
+	read := policyGetCmd(client)
+	return func() tea.Msg {
+		msg, ok := read().(policyGetMsg)
+		if !ok {
+			return nil
+		}
+		msg.guarded, msg.epoch = true, epoch
+		return msg
+	}
 }
 
 func setAvailabilityCmd(client *rpc.Client, target string) tea.Cmd {
@@ -126,6 +147,7 @@ func (a *availabilityState) notify(params json.RawMessage) {
 	}
 	a.value = p.Availability
 	a.pausedBy = ""
+	a.epoch++
 }
 
 // update applies the availability-related messages.
@@ -134,6 +156,9 @@ func (a *availabilityState) update(msg tea.Msg) {
 	case selfIdentityMsg:
 		a.selfID, a.selfUUID = msg.id.NodeID, msg.id.NodeUUID
 	case policyGetMsg:
+		if msg.guarded && msg.epoch != a.epoch {
+			return
+		}
 		if msg.err == nil && msg.availability != "" {
 			a.value = msg.availability
 			a.pausedBy = msg.pausedBy
@@ -142,6 +167,7 @@ func (a *availabilityState) update(msg tea.Msg) {
 		}
 	case setAvailabilityMsg:
 		a.pending = ""
+		a.epoch++
 		switch {
 		case msg.err != nil:
 			a.err = commandFailure(msg.err)

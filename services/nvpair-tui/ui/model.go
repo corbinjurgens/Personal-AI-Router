@@ -233,6 +233,7 @@ func (m Model) Update(msg tea.Msg) (model tea.Model, cmd tea.Cmd) {
 			}
 			m.avail.pending = m.avail.toggleTarget()
 			m.avail.err = ""
+			m.avail.epoch++
 			return m, setAvailabilityCmd(m.client, m.avail.pending)
 		case key.Matches(msg, m.keys.Help):
 			m.showFullHelp = !m.showFullHelp
@@ -263,7 +264,7 @@ func (m Model) Update(msg tea.Msg) (model tea.Model, cmd tea.Cmd) {
 		// A failed call may have left the broker draining; read the state back so
 		// the header says so instead of the last value this shell saw.
 		if failed, ok := msg.(setAvailabilityMsg); ok && failed.err != nil && m.client != nil {
-			return m, policyGetCmd(m.client)
+			return m, policyReadbackCmd(m.client, m.avail.epoch)
 		}
 		return m, nil
 

@@ -343,7 +343,7 @@ The saved-Off origin labels described above retain their meaning.
 
 Remote switching needs a current remote-management grant on the target device.
 Permission denial (`-32012`) requires a local permission change there; a local
-pause veto (`-32011`), engine lock (`-32013`) and configuration conflict
+target veto (`-32011`, for example a pause), engine lock (`-32013`) and configuration conflict
 (`-32010`) are different refusals. Keep the selections, read back current state and resolve the reported
 cause before a deliberate new submission. Unavailable permission or revision
 keeps switching read-only. Revocation blocks new acceptance; accepted work may
