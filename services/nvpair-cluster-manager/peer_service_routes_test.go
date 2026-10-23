@@ -257,6 +257,7 @@ func TestClusterRosterDisconnectDoesNotLearnGatewaySource(t *testing.T) {
 	pairClusterFixtures(t, a, b)
 	startPrivateReverse(t, a.m)
 	connectReverseManagers(t, a.m, b.m)
+	countClusterReverseDials(t, a)
 	finished := make(chan struct{})
 	b.rosterReply = func(w http.ResponseWriter, r *http.Request) {
 		body, err := io.ReadAll(r.Body)
@@ -303,6 +304,7 @@ func TestClusterRosterPairwiseThreePeerFanout(t *testing.T) {
 	startPrivateReverse(t, a.m)
 	startPrivateReverse(t, c.m)
 	connectReverseManagers(t, a.m, b.m)
+	countClusterReverseDials(t, a)
 	for _, target := range []*clusterPeerFixture{b, c} {
 		if outcome, _ := a.m.reconcileWith([]string{target.address}, target.m.identity.NodeUUID); outcome != reconcileAccepted {
 			t.Fatalf("A fanout to %s = %v, want accepted", target.m.identity.NodeUUID, outcome)
