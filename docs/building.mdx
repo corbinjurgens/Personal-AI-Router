@@ -217,6 +217,33 @@ For the methods, notifications, and worker ownership, refer to the
 [broker reference](../services/nvpair-ui-broker/README.md). That document, not
 this one, is the source of truth for API usage.
 
+### Inspect a Running Service
+
+When `nvpair-service` is running, `nvpair-service diagnose` prints a short
+local report: the service and broker process identities, the local policy's
+activation, the bind state of each built-in engine facade, and resident model
+configuration counts. Add `--json` for the same report as JSON.
+
+Linux and macOS:
+
+```bash
+cd services
+./build/bin/nvpair-service diagnose
+```
+
+Windows Command Prompt:
+
+```bat
+cd services
+build\bin\nvpair-service.exe diagnose
+```
+
+The command never starts the service and reads only state the service already
+holds. It does not send inference, wake an engine, or contact another machine,
+so it does not show that inference or peer connectivity works. Fields, exit
+codes, and limits are in the
+[service reference](../services/nvpair-service/README.md#diagnosis).
+
 ### Write Your Own Client
 
 The broker's JSON-RPC API is the same contract the desktop application and the
