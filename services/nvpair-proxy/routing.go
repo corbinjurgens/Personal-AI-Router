@@ -1566,6 +1566,9 @@ func (ctl *routingSpend) dispatch(f *facade, w http.ResponseWriter, r *http.Requ
 		// and the per-attempt admission header go on the copy for the same
 		// reason, with headers cloned so one attempt's never leak into the
 		// next.
+		// The request travels on its own context so the slot bound below never
+		// reassigns attemptCtx, which the target watcher already reads.
+		requestCtx := attemptCtx
 		var peerSlotWait time.Duration
 		if policy.hybrid && !cand.self && cand.peerUUID != "" {
 			// A hybrid peer attempt waits for a slot for at most half its
@@ -1575,9 +1578,9 @@ func (ctl *routingSpend) dispatch(f *facade, w http.ResponseWriter, r *http.Requ
 			// attempt as a costing one. Concrete attempts keep blocking
 			// acquisition.
 			peerSlotWait = queueLeft / 2
-			attemptCtx = clustertrust.WithPeerSlotWait(attemptCtx, peerSlotWait)
+			requestCtx = clustertrust.WithPeerSlotWait(requestCtx, peerSlotWait)
 		}
-		attemptReq := r.WithContext(attemptCtx)
+		attemptReq := r.WithContext(requestCtx)
 		attemptReq.Header = r.Header.Clone()
 		if streamRequest.protocol != streamProtocolUnknown {
 			// Explicit identity also prevents Go's transport from negotiating gzip.
