@@ -445,6 +445,8 @@ dropped.
 
 - node crypto identity;
 - interactive six-digit PIN pairing;
+- bounded, service-owned ask-to-join admission requests and their separate
+  eligibility/snapshot API;
 - trusted certificate pins;
 - membership snapshots;
 - cluster leave and member removal;
@@ -509,6 +511,44 @@ as a backstop. Other `failed` causes (peer unreachable, malformed) carry an empt
 
 The PIN is a convenience pairing code and should not be described as a strong
 authenticator.
+
+### Ask-to-join service surface
+
+The service contract supports requesting admission from one selected existing
+member. This section describes the API and its ownership boundaries.
+Ordinary Invite keeps its existing clustered-target rejection. There is no
+cluster merge, automatic join, broadcast approval or outbound-only requester
+transport. The existing broker/service generic relays remain unchanged.
+
+`cluster:get-join-requests` and `cluster:join-requests-changed` provide the same
+full manager-owned eligibility/request snapshot, separate from
+`ClusterInitialSnapshot`. `cluster:ask-to-join` requires explicit
+`replaceSoloCluster`; `cluster:respond-to-join-request` requires an admitting-
+device `allowRemoteManagement` boolean on approval; `cluster:cancel-join-request`
+cancels an outgoing request. Shared types, strict parsing, invoke registration
+and notification demux carry these contracts without a new ignored-method
+exemption. Claimed identities are unverified; snapshots contain no PIN/security
+material. Fetch the dedicated getter on attach/reconnect, including requests
+received with no GUI attached.
+
+The member approves locally and displays the existing PIN through local
+`cluster:invite-status`; the requester enters it through ordinary acceptance
+with its own grant choice. The exact child invite and authenticated
+`PairingInfo.joinRequestId` correlate the transaction. Approval/status alone is
+not Joined: canonical confirmed durable pairing/receipt state owns success.
+Wrong-PIN, pending confirmation, rollback, compensation and grant independence
+remain with the existing transaction.
+
+Go alone owns source/rate/capacity bounds, five-minute request expiry,
+composition eligibility and consented durable empty-solo replacement after
+approval. Retained peer relationships (offline included) and uncertain stores
+refuse safely. Client detach preserves pending work; manager restart invalidates
+requests, so clients read actual membership before retrying. An old local
+method-not-found disables this feature; initial peer 404 means `unsupported-peer`,
+later status 404 means lost status. No fallback Invite or pre-approval teardown.
+Broker code/message survive relay; eligibility reasons come from the snapshot
+because error data is dropped. Full limits and shapes:
+[cluster-manager spec §7.0.1](../../services/nvpair-cluster-manager/spec.md#701-ask-to-join-admission-requests).
 
 ## Security
 

@@ -99,6 +99,17 @@ func (m *Manager) expirePendingInvites(now time.Time) {
 	m.expirePreInviteSessions(now)
 	cutoff := now.Add(-m.effectiveInviteTTL()).UnixMilli()
 	var outboundIDs, inboundIDs []string
+	// Retain the exact local commit while a correlated request still awaits
+	// authenticated confirmation. Evicting this cache must not turn uncertainty
+	// into an expired request or release its request fence.
+	m.joinMu.Lock()
+	uncertainJoinInvites := make(map[string]bool)
+	for _, request := range m.joinRequests {
+		if request.Direction == "incoming" && !joinRequestTerminal(request.State) && request.InviteID != nil {
+			uncertainJoinInvites[*request.InviteID] = true
+		}
+	}
+	m.joinMu.Unlock()
 
 	m.memMu.Lock()
 	self := m.identity.NodeUUID
@@ -107,6 +118,9 @@ func (m *Manager) expirePendingInvites(now time.Time) {
 			continue
 		}
 		if inv.State != inviteStatePending {
+			if inv.State == inviteStatePaired && uncertainJoinInvites[id] {
+				continue
+			}
 			terminalAt := inv.CreatedAt
 			if inv.RespondedAt != nil {
 				terminalAt = *inv.RespondedAt

@@ -114,6 +114,34 @@ Ollama, LM Studio, and llama.cpp proxies expose local client-compatible HTTP
 endpoints. Chat behaves as a local third-party client. Prompts, messages,
 chunks, and response bodies must never be logged.
 
+## Ask-to-join ownership
+
+Cluster-manager owns admission requests before ordinary PIN pairing. The
+selected member stays EAP Server/inviter, approves locally and displays the
+existing PIN; the requester stays EAP Peer/joiner and enters it with an
+independent local remote-management choice. Approval/status never proves
+membership; only the exact child invite's confirmed durable outcome does.
+Optional transcript-authenticated `PairingInfo.joinRequestId` correlates the
+flow; ordinary invites retain their wire shape and clustered-joiner rejection.
+
+Use the existing service/broker relay and the dedicated
+`cluster:get-join-requests` / `cluster:join-requests-changed` full snapshot,
+separate from `ClusterInitialSnapshot`. Go owns eligibility, local deadlines,
+source/rate/capacity bounds and explicitly consented durable empty-solo
+replacement after approval. Retained/offline peer relationships and uncertain
+durable state refuse without destructive cleanup. The prelude runs on the
+existing plain split listener, with no new listener or firewall permission.
+See `services/nvpair-cluster-manager/spec.md` §7.0.1 for exact contracts/bounds.
+
+Incoming requests are passive review data. Do not automatically open modals,
+move focus, approve or enter a PIN. Keep pairing HTTP and membership/teardown
+logic out of TypeScript.
+Snapshots carry no PIN/security material; pre-authentication names/UUIDs are
+unverified claims. Client detach preserves work, manager restart invalidates
+memory-only requests and requires a membership read before retrying. Unsupported
+local/peer versions refuse clearly without fallback Invite or early solo
+teardown. This does not add cluster merging or outbound-only requester pairing.
+
 ## Runtime defaults
 
 Backend-coupled constants belong in

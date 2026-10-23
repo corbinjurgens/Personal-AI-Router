@@ -200,6 +200,7 @@ Important push domains include:
 - `connection:cluster-identity`;
 - `cluster:invite-received`;
 - `cluster:pending-invites-changed`;
+- `cluster:join-requests-changed`;
 - `state:request-refresh`.
 
 ## Discovery, pairing, and trust
@@ -229,6 +230,33 @@ which invalidates the PIN backend-side and notifies the joiner; a `rejected`
 invite surfaces its reason (e.g. `already-clustered`). Pairing uses a low-entropy
 convenience PIN; UI copy must not present it as a strong authenticator. See the
 repository [`SECURITY.md`](../../SECURITY.md).
+
+Ask-to-join adds a manager-owned admission prelude, exposed through
+`pairApi.cluster` and the unchanged generic broker/service relays. Its dedicated
+`cluster:get-join-requests` getter and `cluster:join-requests-changed` full
+snapshot are separate from `ClusterInitialSnapshot`; eligibility, deadlines and
+outcomes come from Go, including after reconnect. Request IDs remain distinct
+from the exact child invite ID. The existing ordinary Invite affordance still
+rejects clustered targets; Ask to join is a separate service operation.
+
+The addressed member approves locally and displays the ordinary PIN; the
+requester enters it through existing invite acceptance. Each device chooses its
+own remote-management grant. Request snapshots contain no PIN/security material,
+and claimed names/UUIDs are unverified before pairing. Incoming requests are
+passive review data with no automatic focus/modal change. No TypeScript code
+may dial pairing HTTP, authenticate a peer, determine safe solo composition or
+tear down membership. Empty-solo replacement requires explicit consent and a
+fresh manager check after approval; retained peers, including offline peers,
+and uncertain durable state block it.
+
+Requests expire after the manager's local five-minute lifetime and survive
+client detach, but are invalidated by manager restart. Lost status requires
+checking membership on both devices before retrying. Only confirmed durable
+pairing means Joined. Old local method-not-found disables Ask to join; initial
+peer 404 means `unsupported-peer`, later status 404 means a lost attempt. There
+is no fallback Invite, cluster merge or new outbound-only requester transport.
+The existing listener's source-limited unauthenticated prelude and its abuse
+bounds are defined in [cluster-manager spec §7.0.1](../../services/nvpair-cluster-manager/spec.md#701-ask-to-join-admission-requests).
 
 ## Engines and routing
 

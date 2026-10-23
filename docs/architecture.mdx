@@ -179,10 +179,84 @@ Not every surface is gated, and the exceptions are deliberate:
 | Workload replication, error synchronization | Mutual TLS |
 | Cluster membership | Mutual TLS, after pairing |
 | Pairing itself | Plaintext, authenticated by the PIN |
+| Ask-to-join prelude | Unauthenticated plaintext, source-bound and rate/capacity limited |
 | Host and GPU telemetry | Plaintext HTTP directly; paired reverse reads carry plaintext HTTP inside the authenticated pinned session |
 
 Pairing is plaintext because no trust exists yet at that point. The six-digit PIN
 is what authenticates the exchange that establishes the pinned certificates.
+
+### Requesting Admission Before Pairing
+
+A standalone requester can ask one selected existing member to admit it.
+Cluster-manager owns this bounded prelude. The member approves through its
+existing per-user local service endpoint, stays EAP Server/inviter and displays
+the ordinary PIN. The requester stays EAP Peer/joiner, enters that PIN through
+ordinary invite acceptance and chooses its own remote-management permission.
+Approval controls authority over the admitting device only; it grants no
+membership or authority over the requester.
+
+The local `cluster:get-join-requests` getter and
+`cluster:join-requests-changed` push carry the same full eligibility/request
+snapshot. `cluster:ask-to-join`, `cluster:respond-to-join-request` and
+`cluster:cancel-join-request` use the existing generic broker/service relays.
+The snapshot is independent of desktop `ClusterInitialSnapshot` and is fetched
+on attach/reconnect, so a running service can retain a reviewable request with
+no GUI attached. Incoming requests are passive review data, without automatic
+modal/focus changes. Names/UUIDs are unverified claims before pairing; request
+snapshots never carry PINs, certificates, keys or grants.
+
+`POST /v1/cluster/join-requests` uses the existing cluster listener's plain
+side, with strict version-1 `request`, `status`, `ready`, `cancel` operations.
+Follow-ups require the observed source IP and exact random request ID. Ignore
+forwarded-address headers and callback only to the observed IP and validated
+pairing port, without redirects or caller-supplied callback URLs. Allowed
+sources are private unicast IPv4, IPv6 ULA and Tailscale CGNAT; isolated fixtures
+may use loopback. Public, link-local, unspecified and multicast sources are
+refused. Canonicalize IPv4-mapped IPv6 before source accounting. These controls
+bound unsolicited traffic; they do not authenticate it or add a listener or
+firewall permission.
+
+The service limits bodies to 4 KiB, outgoing work to one request, live incoming
+work to eight globally/one per source IP and concurrent HTTP handlers to eight.
+Create rate is one per IP per 30 seconds (burst one), globally one per second
+(burst four); follow-ups share five per second per IP (burst ten). Source
+accounting is capped at 128 with five-minute idle expiry; terminal records last
+five minutes, capped at 64 without evicting live cancellation fences. Duplicate
+creates do not refresh deadlines or prompt again; source-bound cancel-before-
+create tombstones prevent resurrection. Body/operation timeouts are bounded and
+excess handlers are refused before body reads/allocation. Exact shapes, source
+ranges and HTTP errors are in the [cluster-manager specification](../services/nvpair-cluster-manager/spec.md#701-ask-to-join-admission-requests).
+
+Approval starts no EAP. After observing approval, the requester rechecks
+authoritative eligibility and explicit empty-solo replacement consent. Retained
+peer relationships, including offline peers, unreadable stores, competing
+pairing and incomplete publication/receipt/rollback/teardown block replacement.
+An intentional empty solo stays intact before approval. After consent and a
+fresh safe check, existing durable teardown retires that admission before
+`ready`, preserving node UUID/keypair, models and engine/settings. Failure
+afterward leaves it unclustered; never resurrect a retired admission.
+
+`ready` rechecks member approval and admission/composition generation, then
+starts exactly one ordinary member-to-requester invite. Optional
+transcript-authenticated `PairingInfo.joinRequestId` binds the live request and
+exact child; compare authenticated member UUID to discovery's expected UUID
+when supplied. Unrelated invites cannot satisfy it. Only that child's confirmed
+durable pairing result means `paired`; HTTP status is advisory. Existing
+wrong-PIN, confirmation, compensation, exact pins, grants and receipt recovery
+remain authoritative. Cancel/expiry fences late handoff; durable completion
+winning a late cancel is preserved, never unpaired. Requester inbound blocking
+can still fail the member's callback; this adds no outbound-only transport.
+
+Requests live for `effectiveInviteTTL()` from local creation (production five
+minutes), without refresh; a child invite keeps its own TTL. Client detach
+preserves work, manager restart loses memory-only requests. Lost status requires
+checking actual membership on both devices before retrying. Old local
+method-not-found means unsupported; initial peer HTTP 404 means
+`unsupported-peer`, later status 404 means lost attempt. There is no fallback
+Invite or early solo teardown. Ordinary compatible invites keep their contract;
+cluster merging and automatic joining remain outside this flow.
+
+### Node Telemetry
 
 Node telemetry is a considered trade-off, not an oversight. Its direct endpoint
 is the lowest-sensitivity inter-node surface and remains plaintext so unpaired
@@ -196,8 +270,10 @@ PAIR on a network where that is unacceptable.
 
 ### Two Personalities on One Port
 
-The proxies and `nvpair-cluster-manager` serve two different things on a single
-port, chosen by the connection's first byte. A TLS handshake record starts with
+The proxies serve local inference and trusted ingress on a single port, chosen
+by the connection's first byte. Cluster-manager uses the same split-listener
+mechanism with its own plain pairing/admission-request routes described above.
+A TLS handshake record starts with
 `0x16`, and no HTTP method does:
 
 | First Byte | Personality | Who Uses It |
@@ -210,7 +286,7 @@ machine itself while the same port serves authenticated TLS to the network. Loca
 clients need no certificates, and routed inference between nodes is never
 plaintext.
 
-The loopback restriction is enforced, not merely conventional. The listener binds
+For the proxies, the loopback restriction is enforced. The listener binds
 all interfaces so the TLS personality can accept peers, but a plaintext request
 from any non-loopback address is refused with `403`. Without that check the port
 would be an open relay for anything on the network.

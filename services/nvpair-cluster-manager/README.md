@@ -269,7 +269,7 @@ replace `ipAddress` nor grant membership, trust, liveness or service presence.
   "toNodeId":  "NODE-B",            // null if unknown to the inviter
   "clusterId": "cluster-xyz",
   "clusterFriendlyName": "Lab 3 desks",
-  "pin":       "402199",            // present only in the inviter's invite-node RESULT; null everywhere else, never logged
+  "pin":       "402199",            // inviter-local invite-node or pending outbound invite-status only; never logged
   "state":     "pending",           // "pending" | "paired" | "declined" | "canceled" | "expired" | "failed" | "rejected"
   "createdAt": 1716998400000,
   "respondedAt": null
@@ -311,6 +311,105 @@ exists. A stale selection leaves no durable removal state. It then
 rechecks the original admissions, deletes the pin and drops the member. An
 unavailable notification does not prevent this best-effort local removal;
 durable proofs support later convergence, without replaying the notification.
+
+## Ask to join an existing cluster
+
+A standalone requester addresses one existing member. That member's local user
+approves, then displays the ordinary pairing PIN; the requester enters it using
+`cluster:respond-to-invite` and chooses its own `allowRemoteManagement` value.
+The member remains EAP Server/inviter and the requester EAP Peer/joiner.
+Approval is consent to start this ceremony, not membership or remote-management
+authority over the requester. Normal invites and their already-clustered
+joiner rejection retain their existing contract.
+
+| Local method | Params | Result |
+| --- | --- | --- |
+| `cluster:get-join-requests` | `{}` | `{supported:true, canAskToJoin, requiresSoloReplacement, blockedReason, requests:JoinRequest[]}` |
+| `cluster:ask-to-join` | `{address, port?, nodeId?, replaceSoloCluster:boolean}` | `JoinRequest`; returns promptly, manager owns progress |
+| `cluster:respond-to-join-request` | `{requestId, accept:true, allowRemoteManagement:boolean}` or `{requestId, accept:false}` | Updated incoming `JoinRequest` |
+| `cluster:cancel-join-request` | `{requestId}` | Updated outgoing `JoinRequest` |
+| `cluster:join-requests-changed` | Notification | Same full snapshot as the getter |
+
+`JoinRequest` contains `requestId`, `direction` (`incoming`/`outgoing`),
+`peerNodeUuid`, `peerName`, `peerAddress`, `peerPort`, `state`, nullable
+`inviteId`, `reason`, `createdAt` and `expiresAt` (epoch ms). States are
+`awaiting-approval`, `awaiting-requester`, `pairing`, `paired`, `declined`,
+`canceled`, `expired`, `failed` and `rejected`. IDs have at least 128 random bits;
+they correlate operations and never authorize membership. Names/UUIDs before
+pairing are unverified claims; names are bounded and sanitized. Request records
+and snapshots contain no PIN, certificate, key or grant. Member clients read
+the pending inviter PIN locally through `cluster:invite-status` once the exact
+child `inviteId` exists. Only the existing per-user local endpoint can approve.
+
+The getter reconciles authoritative composition; `blockedReason` is empty when
+eligible, otherwise `already-clustered`, `pairing-busy` or `state-unavailable`.
+Refuse self-targets (`self-target`), retained peer relationships (offline peers
+included), competing pairing, unreadable stores and incomplete publication,
+receipt/rollback or teardown. Discovery absence cannot prove an empty cluster.
+An intentional empty solo requires explicit consent: “Joining replaces this
+device's empty cluster. Other devices will not be moved.” It stays intact until
+approval, a fresh safe-solo check and durable teardown. Preserve models,
+engine/settings and node UUID/keypair; failure after replacement leaves the
+device unclustered, without resurrecting its retired admission.
+
+The existing plain split-listener route is `POST /v1/cluster/join-requests`.
+Bodies are strict `{version:1, operation, requestId}`, with operations `request`,
+`status`, `ready`, `cancel`; `request` additionally requires
+`requester:{nodeUuid,name}` and `port`. HTTP 200 returns
+`{version:1, requestId, state, reason, createdAt, expiresAt, inviteId:string|null}`.
+No PIN, grant, roster, certificate or eligibility snapshot is returned. Bind
+follow-ups to the observed source IP and ID, ignore forwarded-address headers,
+and callback only to that IP and validated pairing port, without redirects.
+
+Allowed sources are private unicast IPv4 (`10.0.0.0/8`, `172.16.0.0/12`,
+`192.168.0.0/16`), IPv6 ULA (`fc00::/7`), Tailscale CGNAT
+(`100.64.0.0/10`) and fixture loopback; reject public, multicast, unspecified
+and link-local sources. Canonicalize
+IPv4-mapped IPv6 before source accounting. Bounds: 4 KiB strict bodies; one
+outgoing request; eight live incoming globally and one per IP; creates per IP
+one/30 seconds (burst one), globally one/second (burst four); follow-ups per IP
+five/second (burst ten). The source table holds 128 entries with five-minute
+idle expiry. Terminal records last five minutes, capped at 64; do not evict live
+cancellation fences to accept new work. Eight nonblocking HTTP handler slots
+and bounded body/operation timeouts refuse excess traffic before allocation.
+These constants add no settings, listeners or firewall permissions.
+
+HTTP errors use `{version:1, reason}`: 400 malformed/version errors
+(`unsupported-version`), 404 unknown status/ready or wrong source, 409 conflicting
+reuse or `target-not-clustered`, 429 capacity/rate refusal with `Retry-After`.
+Duplicate creates do not refresh expiry or prompt again. Source-bound
+cancel-before-create tombstones prevent reordered resurrection within the same
+bounds. Requests create passive review data, never automatic focus/modal changes.
+
+Request creation captures the member cluster/admission/generation. Approval sets
+`awaiting-requester`; it starts no EAP. The requester polls every two seconds,
+one call in flight. After eligibility/consent recheck and any durable solo
+replacement, it sends `ready`. This starts exactly one canonical member-to-
+requester invite with the saved member grant choice; leave/rejoin invalidates
+approval. Optional authenticated `PairingInfo.joinRequestId` binds the exact
+live request and child invite. Check authenticated peer UUID when discovery
+supplied one. Unrelated invites do not satisfy requests; Ask never auto-accepts
+or enters a PIN. A requester blocking inbound handoff reports connection failure.
+
+Only the exact child's confirmed durable receipt outcome yields local `paired`;
+HTTP status is advisory. Keep existing wrong-PIN, confirmation, rollback and
+compensation behavior. Uncertain durable outcomes block another attempt. Request
+lifetime is `effectiveInviteTTL()` from local creation (production five minutes);
+the child keeps its own invite TTL. Cancel/expiry fences late approval/ready and
+cancels only the exact pending child. Durable completion wins a late cancel;
+never unpair to honor it. Members decline before handoff and cancel the exact
+child with `cluster:cancel-invite` afterward.
+
+Client detach preserves service-owned work. Manager restart loses memory-only
+requests; receipt recovery still runs. Show “Request status is no longer
+available. Check the cluster on both devices before trying again.” Read actual
+membership before retrying. Local errors: `-32001` unknown ID, `-32002` invalid
+state, `-32602` invalid params, `-32004` eligibility refusal with stable reason.
+The broker preserves code/message but drops error data, so read eligibility
+reasons from the snapshot. Old local method-not-found means unsupported;
+initial peer HTTP 404 means `unsupported-peer`, later status 404 means lost
+attempt. Network failure does not imply eligibility. No fallback Invite or
+pre-approval solo teardown. Full transaction and abuse contract: spec §7.0.1.
 
 ## Remote-management permission
 
@@ -383,8 +482,8 @@ signal. Use the standard JSON-RPC `error` object `{code, message, data?}`.
 |---|---|
 | `-32700` / `-32600` / `-32601` / `-32602` | parse error / invalid request / method not found / invalid params |
 | `-32603` | internal error; a permission replacement may have landed with uncertain durability — read back before retrying |
-| `-32001` | unknown `inviteId` (`invite-status`, `respond-to-invite`) |
-| `-32002` | invalid invite state — e.g. `respond-to-invite` on an outbound or already-terminal invite (`data:{inviteId,state}`) |
+| `-32001` | unknown invite or local join-request ID |
+| `-32002` | invalid invite or join-request state |
 | `-32010` | remote-management revision conflict — fetch the local snapshot and retry with a current revision |
 | `-32004` | precondition not met — `create` while clustered (`{reason:"already-clustered"}`). `invite-node` while unclustered no longer errors: it auto-founds a cluster of one instead. |
 
@@ -421,7 +520,8 @@ trust fabric other inter-node services (`nvpair-workload-manager`,
 
 ## Inter-node networking
 
-- One HTTP listener on TCP **`14321`** serves both the plain-HTTP **pairing
+- One HTTP listener on TCP **`14321`** serves the source-limited plain-HTTP
+  admission prelude (`POST /v1/cluster/join-requests`), the **pairing
   channel** (`POST /v1/cluster/pairing`, used only during a pairing, before
   any pin exists, authenticated by the PIN) and the **mTLS trusted
   endpoints** (`POST /v1/cluster/members/remove` and `POST /v1/cluster/roster`,

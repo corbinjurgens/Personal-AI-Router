@@ -4,6 +4,7 @@
 package main
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/x509"
 	"encoding/json"
@@ -52,6 +53,7 @@ type PairingInfo struct {
 	Addr                string `json:"addr,omitempty"`
 	Cert                string `json:"cert"`
 	Completion          string `json:"completion,omitempty"`
+	JoinRequestID       string `json:"joinRequestId,omitempty"`
 }
 
 // localPairingInfo builds this node's PairingInfo. addr is the inviter's
@@ -98,17 +100,27 @@ func (pi *PairingInfo) toMap() (map[string]any, error) {
 // nodeUuid (§7.2: a PairingInfo whose cert CN/URI != nodeUuid is rejected).
 func parsePairingInfo(raw []byte) (*PairingInfo, *x509.Certificate, error) {
 	var pi PairingInfo
-	if _, err := decodeRemoteManagementParams(raw, map[string]bool{
+	fields, err := decodeRemoteManagementParams(raw, map[string]bool{
 		"v": true, "nodeUuid": true, "nodeId": true, "name": true, "clusterId": true,
-		"admissionEpoch": true, "clusterFriendlyName": true, "addr": true, "cert": true, "completion": true,
-	}); err != nil {
+		"admissionEpoch": true, "clusterFriendlyName": true, "addr": true, "cert": true, "completion": true, "joinRequestId": true,
+	})
+	if err != nil {
 		return nil, nil, fmt.Errorf("invalid PairingInfo fields: %w", err)
+	}
+	if rawID, present := fields["joinRequestId"]; present {
+		var id string
+		if json.Unmarshal(rawID, &id) != nil || !validJoinRequestID(id) {
+			return nil, nil, fmt.Errorf("invalid PairingInfo join request")
+		}
 	}
 	if err := json.Unmarshal(raw, &pi); err != nil {
 		return nil, nil, fmt.Errorf("decode PairingInfo: %w", err)
 	}
 	if pi.NodeUUID == "" {
 		return nil, nil, fmt.Errorf("PairingInfo missing nodeUuid")
+	}
+	if pi.JoinRequestID != "" && pi.Completion != inviterCompletionV1 {
+		return nil, nil, fmt.Errorf("invalid PairingInfo join request")
 	}
 	if pi.Completion != "" && (pi.Completion != inviterCompletionV1 || pi.V < 2) {
 		return nil, nil, fmt.Errorf("unsupported PairingInfo completion capability")
@@ -184,9 +196,12 @@ type pairingSession struct {
 	inviteID  string
 	role      pairingRole
 	createdAt int64
-	server    *eapnoob.Server // set for roleInviter
-	peer      *eapnoob.Peer   // set for roleJoiner
-	addr      string          // inviter listening host:port (joiner drives Completion here)
+	// initialCancel is immutable after publication. Only correlated Initial
+	// Exchanges have a cancel function; session removal stops their HTTP waits.
+	initialCancel context.CancelFunc
+	server        *eapnoob.Server // set for roleInviter
+	peer          *eapnoob.Peer   // set for roleJoiner
+	addr          string          // inviter listening host:port (joiner drives Completion here)
 	// joinerAddr is the target host:port the inviter POSTed the Initial Exchange
 	// to (set for roleInviter). It lets the inviter best-effort notify the joiner
 	// on cancel so the joiner's pending prompt clears.
@@ -246,6 +261,9 @@ func (s *pairingSession) legacyNotifyAddress() string {
 func (m *Manager) putSession(s *pairingSession) {
 	m.sessMu.Lock()
 	defer m.sessMu.Unlock()
+	if old := m.sessions[s.inviteID]; old != nil && old != s && old.initialCancel != nil {
+		old.initialCancel()
+	}
 	m.sessions[s.inviteID] = s
 }
 
@@ -259,6 +277,9 @@ func (m *Manager) getSession(inviteID string) (*pairingSession, bool) {
 func (m *Manager) deleteSession(inviteID string) {
 	m.sessMu.Lock()
 	defer m.sessMu.Unlock()
+	if s := m.sessions[inviteID]; s != nil && s.initialCancel != nil {
+		s.initialCancel()
+	}
 	delete(m.sessions, inviteID)
 }
 
@@ -281,6 +302,9 @@ func (m *Manager) registerJoinerSession(session *pairingSession) (registered, at
 		return false, false
 	}
 	if cid, _ := m.clusterIdentity(); cid != "" {
+		return false, false
+	}
+	if !m.joinRequestAllowsInvite(session.inviteID) {
 		return false, false
 	}
 	m.sessMu.Lock()
@@ -310,6 +334,11 @@ func (m *Manager) registerJoinerSession(session *pairingSession) (registered, at
 func (m *Manager) resetSessions() {
 	m.sessMu.Lock()
 	defer m.sessMu.Unlock()
+	for _, s := range m.sessions {
+		if s.initialCancel != nil {
+			s.initialCancel()
+		}
+	}
 	m.sessions = make(map[string]*pairingSession)
 	m.sessGen.Add(1)
 }

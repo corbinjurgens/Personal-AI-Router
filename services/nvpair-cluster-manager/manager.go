@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"nvpair-shared/appdir"
 	"nvpair-shared/applog"
@@ -95,6 +96,16 @@ type Manager struct {
 	memMu          sync.Mutex
 	members        map[string]*ClusterNode // keyed by nodeUuid
 	invites        map[string]*Invite      // keyed by inviteId
+
+	// Lock order: inviteMu -> rosterMu -> joinMu. No network wait holds them.
+	joinMu       sync.Mutex
+	joinRequests map[string]*joinRequestRecord
+	joinSources  map[string]*joinRequestSource
+	joinGlobal   joinRequestBucket
+	joinHandlers chan struct{}
+	joinWake     chan struct{}
+	joinNow      func() time.Time
+	joinContext  context.Context
 
 	tsMu       sync.Mutex
 	tombstones map[string]Tombstone // keyed by removed nodeUuid; newest wins (fan-out removal)
@@ -188,6 +199,7 @@ func (m *Manager) setClusterIdentity(id, friendly string) {
 	if changed {
 		m.clusterGen.Add(1)
 		m.revalidateReverse()
+		m.wakeJoinRequests()
 	}
 }
 
@@ -204,6 +216,7 @@ func (m *Manager) withClusterComposition(fn func()) {
 	m.rosterMu.Lock()
 	defer m.rosterMu.Unlock()
 	defer m.revalidateReverse()
+	defer m.wakeJoinRequests()
 	fn()
 }
 
@@ -259,6 +272,11 @@ func NewManager(codec *Codec, configDir string, port int) (*Manager, error) {
 		removalProofs: make(map[string]RemovalProof),
 		sessions:      make(map[string]*pairingSession),
 		peerAddrs:     reach.NewChooser(),
+		joinRequests:  make(map[string]*joinRequestRecord),
+		joinSources:   make(map[string]*joinRequestSource),
+		joinHandlers:  make(chan struct{}, 8),
+		joinWake:      make(chan struct{}, 1),
+		joinNow:       time.Now,
 	}
 	mgr.peerRoutes = make(map[string]clusterPeerRoute)
 	peerOptions := mgr.peerServiceOptions()
@@ -363,6 +381,7 @@ func defaultBaseDir() string {
 func (m *Manager) Run(ctx context.Context) error {
 	ctx, cancel := context.WithCancel(ctx)
 	m.cancel = cancel
+	m.joinContext = ctx
 	defer cancel()
 	defer m.peerServices.CloseIdle()
 	defer m.removalPeerServices.CloseIdle()
@@ -402,6 +421,7 @@ func (m *Manager) Run(ctx context.Context) error {
 
 	go m.reconcileLoop(ctx)
 	go m.inviteExpiryLoop(ctx)
+	go m.joinRequestsLoop(ctx)
 	go m.resumeOutboundPairings()
 
 	err := m.readLoop(ctx)
@@ -455,6 +475,7 @@ func (m *Manager) readLoop(ctx context.Context) error {
 }
 
 func (m *Manager) handleMessage(msg *Message) {
+	defer m.wakeJoinRequests()
 	if msg.Method == applog.SetLevelMethod {
 		resolved, err := applog.HandleSetLevelParams(msg.Params)
 		if msg.IsRequest() {
@@ -493,6 +514,14 @@ func (m *Manager) handleMessage(msg *Message) {
 		}
 	case "cluster:get-node-id":
 		m.handleGetNodeID(msg)
+	case "cluster:get-join-requests":
+		m.handleGetJoinRequests(msg)
+	case "cluster:ask-to-join":
+		m.handleAskToJoin(msg)
+	case "cluster:respond-to-join-request":
+		m.handleRespondToJoinRequest(msg)
+	case "cluster:cancel-join-request":
+		m.handleCancelJoinRequest(msg)
 	case "cluster:get-remote-management":
 		m.handleGetRemoteManagement(msg)
 	case "cluster:set-remote-management":

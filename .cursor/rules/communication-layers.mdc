@@ -46,6 +46,30 @@ SPDX-License-Identifier: Apache-2.0
   backend services; PAIR relays control-plane requests through the broker.
 - Public inference clients connect to local Ollama- or OpenAI-compatible proxy
   endpoints.
+- Ask-to-join admission requests travel through `pairApi`, the existing local
+  service endpoint and the generic broker `cluster:*` relay. Cluster-manager
+  owns eligibility, source/rate/capacity limits, expiry, explicit safe-solo
+  replacement and the existing durable pairing transaction. No TypeScript
+  pairing HTTP, membership decision or teardown is permitted.
+- `cluster:get-join-requests` and `cluster:join-requests-changed` carry the same
+  full snapshot independently of `ClusterInitialSnapshot`; hydrate on reconnect.
+  Request IDs and exact child invite IDs are distinct. Claimed names/UUIDs are
+  unverified and snapshots contain no PIN/security material. Incoming requests
+  remain passive review data with no automatic modal or focus change.
+- Only a local member client may approve, choosing authority over that device.
+  The member stays EAP Server/inviter and retrieves/displays the PIN locally via
+  the exact pending `cluster:invite-status`; the requester stays EAP Peer/joiner
+  and enters it with its own grant choice through `cluster:respond-to-invite`.
+  Approval or HTTP status is not durable membership. No fallback Invite for an
+  unsupported peer, cluster merge or automatic acceptance is allowed.
+- The unauthenticated source-bound `POST /v1/cluster/join-requests` prelude
+  belongs on the existing plain cluster listener. Its private IPv4/ULA/Tailscale
+  CGNAT source policy, fixture loopback allowance and bounded abuse controls
+  are specified in `services/nvpair-cluster-manager/spec.md` §7.0.1; no new
+  transport/listener/firewall permission or peer approval/grant API is added.
+  Client detach preserves work; manager restart loses requests. Re-read actual
+  membership after lost status before retrying. Old local method-not-found is
+  unsupported; a failed connection never establishes eligibility.
 - Cluster-manager alone writes target-local, admission-bound remote-management
   grants. Local invite initiation and acceptance require `allowRemoteManagement`;
   each side chooses authority over its own device. The local grant list/setter

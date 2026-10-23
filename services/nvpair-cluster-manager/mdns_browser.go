@@ -72,6 +72,13 @@ func (b *Browser) setRelay(nodes []noderec.DirectoryNode) {
 // list is what a caller dials down until one address answers — the publisher's
 // ranking is evidence from its vantage point, not a promise about this host's.
 func (b *Browser) Resolve(idOrUUID string) (hosts []string, port int, ok bool) {
+	hosts, port, _, ok = b.resolvePeer(idOrUUID)
+	return
+}
+
+// resolvePeer also retains the selected discovery record's canonical UUID.
+// It is an expected pairing identity, not authenticated discovery data.
+func (b *Browser) resolvePeer(idOrUUID string) (hosts []string, port int, uuid string, ok bool) {
 	b.mu.RLock()
 	nodes := make([]discovery.Node, 0, len(b.relay))
 	for _, n := range b.relay {
@@ -87,7 +94,7 @@ func (b *Browser) Resolve(idOrUUID string) (hosts []string, port int, ok bool) {
 		}
 		if discovery.UUIDFromTXT(n.TXT) == idOrUUID {
 			if h := pickHosts(n); len(h) > 0 {
-				return h, n.Port, true
+				return h, n.Port, discovery.UUIDFromTXT(n.TXT), true
 			}
 		}
 		if n.ID == idOrUUID && !haveNode {
@@ -96,10 +103,10 @@ func (b *Browser) Resolve(idOrUUID string) (hosts []string, port int, ok bool) {
 	}
 	if haveNode {
 		if h := pickHosts(byNode); len(h) > 0 {
-			return h, byNode.Port, true
+			return h, byNode.Port, discovery.UUIDFromTXT(byNode.TXT), true
 		}
 	}
-	return nil, 0, false
+	return nil, 0, "", false
 }
 
 // pickHosts returns the node's dialable addresses in ranked order, falling back

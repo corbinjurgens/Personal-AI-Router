@@ -5,9 +5,12 @@ import { type IEngineApi, createEngineApi } from '@/ui/api/engine-api'
 import type { ServiceTransport } from '@/shared/types/service-bridge'
 import type {
     AvailableNode,
+    AskToJoinRequest,
     ClusterIdentityPayload,
     ClusterNode,
     Invite,
+    JoinRequest,
+    JoinRequestsSnapshot,
     RemoteManagementCapability,
     RemoteManagementSetRequest,
     RemoteManagementSnapshot
@@ -63,6 +66,14 @@ export interface INodesApi {
 export interface IClusterApi {
     /** Fetch cluster bootstrap state: identity, settings, and membership. */
     getInitial(): Promise<ClusterInitialSnapshot>
+    getJoinRequests(): Promise<JoinRequestsSnapshot>
+    askToJoin(request: AskToJoinRequest): Promise<JoinRequest>
+    respondToJoinRequest(
+        requestId: string,
+        ...response: [accept: true, allowRemoteManagement: boolean] | [accept: false]
+    ): Promise<JoinRequest>
+    cancelJoinRequest(requestId: string): Promise<JoinRequest>
+    onJoinRequestsChanged(callback: (snapshot: JoinRequestsSnapshot) => void): () => void
     /** Start PIN pairing with a remote node; the returned invite carries the PIN to display. */
     inviteNode(ipAddress: string, allowRemoteManagement: boolean): Promise<Invite>
     /** Poll the state of an outbound pairing session. */
@@ -191,6 +202,19 @@ export function createPairApi(transport: ServiceTransport): IPairApi {
         },
         cluster: {
             getInitial: () => transport.invoke('cluster:get-initial'),
+            getJoinRequests: () => transport.invoke('cluster:get-join-requests'),
+            askToJoin: request => transport.invoke('cluster:ask-to-join', request),
+            respondToJoinRequest: (requestId, ...response) =>
+                transport.invoke(
+                    'cluster:respond-to-join-request',
+                    response[0]
+                        ? { requestId, accept: true, allowRemoteManagement: response[1] }
+                        : { requestId, accept: false }
+                ),
+            cancelJoinRequest: requestId =>
+                transport.invoke('cluster:cancel-join-request', { requestId }),
+            onJoinRequestsChanged: cb =>
+                transport.subscribePush('cluster:join-requests-changed', cb),
             inviteNode: (ipAddress, allowRemoteManagement) =>
                 transport.invoke('cluster:invite-node', { ipAddress, allowRemoteManagement }),
             inviteStatus: inviteId => transport.invoke('cluster:invite-status', { inviteId }),

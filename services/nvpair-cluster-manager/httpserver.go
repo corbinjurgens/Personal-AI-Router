@@ -68,6 +68,7 @@ func decodePairingEnvelope(data []byte, env *pairingEnvelope) error {
 func (m *Manager) runHTTP(ctx context.Context) error {
 	pairingMux := http.NewServeMux()
 	pairingMux.HandleFunc(pairingPath, m.handlePairing)
+	pairingMux.HandleFunc(joinRequestPath, m.handleJoinRequestHTTP)
 
 	trustedMux := http.NewServeMux()
 	trustedMux.HandleFunc(pairingPath, m.handlePairing)
@@ -91,6 +92,7 @@ func (m *Manager) runHTTP(ctx context.Context) error {
 }
 
 func (m *Manager) handlePairing(w http.ResponseWriter, r *http.Request) {
+	defer m.wakeJoinRequests()
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -189,6 +191,10 @@ func (m *Manager) handlePairingInitial(w http.ResponseWriter, env *pairingEnvelo
 			respondPairingRejected(w, reasonAlreadyClustered)
 			return
 		}
+		if !m.joinRequestAllowsInvite(env.InviteID) {
+			respondPairingRejected(w, "pairing-busy")
+			return
+		}
 		// Advertise our reachable address (the local IP that routes toward the
 		// inviter, plus our listening port) in PeerInfo so the inviter can later
 		// reconcile rosters back to us. This is folded into the EAP-NOOB MAC.
@@ -198,7 +204,9 @@ func (m *Manager) handlePairingInitial(w http.ResponseWriter, env *pairingEnvelo
 			http.Error(w, "reserve admission", http.StatusInternalServerError)
 			return
 		}
-		info, err := m.localPairingInfo(myAddr, admissionEpoch).toMap()
+		localInfo := m.localPairingInfo(myAddr, admissionEpoch)
+		localInfo.JoinRequestID = m.joinRequestForInvite(env.InviteID)
+		info, err := localInfo.toMap()
 		if err != nil {
 			http.Error(w, "build pairing info", http.StatusInternalServerError)
 			return
@@ -450,6 +458,7 @@ func (m *Manager) ackPairing(env *pairingEnvelope, callerUUID string) {
 		m.finishInvite(env.InviteID, inviteStatePaired)
 	}
 	sess.awaitingAck = false
+	m.confirmJoinRequest(env.InviteID)
 	m.deleteSession(env.InviteID)
 	sess.mu.Unlock()
 	m.setInviteCreatedCluster(false)
@@ -556,6 +565,9 @@ func (m *Manager) prepareJoinerInitialComplete(inviteID string, sess *pairingSes
 	pi, cert, err := parsePairingInfo(sess.peer.ServerInfo())
 	if err != nil {
 		log.Printf("pairing %s: cannot read inviter PairingInfo: %v", inviteID, err)
+		return nil
+	}
+	if !m.matchJoinRequestPeer(inviteID, pi) {
 		return nil
 	}
 	sess.peerPairing = pi
@@ -767,6 +779,10 @@ func (m *Manager) commitPairing(sess *pairingSession, pi *PairingInfo, cert *x50
 	m.withClusterComposition(func() {
 		if m.teardownPending.Load() {
 			err = fmt.Errorf("cluster teardown is pending")
+			return
+		}
+		if !m.matchJoinRequestPeer(sess.inviteID, pi) {
+			err = errPairingCommitStale
 			return
 		}
 		if cid, _ := m.clusterIdentity(); cid == "" || cid != sess.clusterID {

@@ -51,6 +51,7 @@ import { createOverviewWindow } from '@/electron/window'
 import {
     parseClusterNodes,
     parseInvite,
+    parseJoinRequestsSnapshot,
     parseNodeIdentity,
     parseRemoteManagementSnapshot
 } from './cluster-json'
@@ -1521,6 +1522,7 @@ class ModularSupervisor {
             notification.method === 'cluster:invite-failed' ||
             notification.method === 'cluster:identity-changed' ||
             notification.method === 'cluster:remote-management-changed' ||
+            notification.method === 'cluster:join-requests-changed' ||
             notification.method === 'nodes:changed'
         ) {
             this.handleClusterManagerNotification(notification)
@@ -1674,6 +1676,7 @@ class ModularSupervisor {
 
     /**
      * Cluster-manager → broker → here. Notifications:
+     * - `cluster:join-requests-changed`: full service-owned request and eligibility snapshot.
      * - `cluster:remote-management-changed`: authoritative local grants or an
      *   unavailable projection that invalidates earlier authority.
      * - `cluster:invite-received`: an inbound pairing arrived; prompt for the PIN.
@@ -1689,6 +1692,13 @@ class ModularSupervisor {
      *   tell the renderer.
      */
     private handleClusterManagerNotification(notification: JsonRpcNotification): void {
+        if (notification.method === 'cluster:join-requests-changed') {
+            emitBridgePush(
+                'cluster:join-requests-changed',
+                parseJoinRequestsSnapshot(notification.params)
+            )
+            return
+        }
         if (notification.method === 'cluster:remote-management-changed') {
             emitBridgePush(
                 'cluster:remote-management-changed',

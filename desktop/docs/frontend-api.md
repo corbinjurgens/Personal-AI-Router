@@ -55,14 +55,53 @@ They do not imply a WebSocket connection. Browser clients are not supported.
 ### `pairApi.cluster`
 
 - `getInitial()` returns identity, settings, membership, and all live inbound invites.
-- `inviteNode(ipAddress)` starts PIN pairing.
+- `inviteNode(ipAddress, allowRemoteManagement)` starts PIN pairing with the
+  inviting device's local grant choice.
 - `inviteStatus(inviteId)` polls an outbound pairing session.
-- `respondToInvite(inviteId, accept, pin?)` accepts or declines an invite.
+- `respondToInvite(inviteId, true, pin, allowRemoteManagement)` accepts with the
+  joining device's independent grant choice; `respondToInvite(inviteId, false)`
+  declines.
 - `cancelInvite(inviteId)` cancels an in-flight outbound invite, invalidating its
   PIN backend-side and notifying the joiner.
 - `abandonIfSolo()` removes a cluster created only for an unsuccessful invite.
 - `onInviteReceived(callback)` reports a freshly-arrived inbound pairing request.
 - `onPendingInvitesChanged(callback)` reports the full authoritative set of live inbound invites (re-emitted on every add or prune).
+
+The admission-request API is separate from `getInitial()` and its
+`ClusterInitialSnapshot`: `getJoinRequests()`, `askToJoin(params)`,
+`respondToJoinRequest(requestId, accept, allowRemoteManagement?)`,
+`cancelJoinRequest(requestId)` and
+`onJoinRequestsChanged(callback)`. The getter and push carry
+`{supported, canAskToJoin, requiresSoloReplacement, blockedReason, requests}`.
+The new service returns `supported:true`; old local method-not-found is
+unsupported, not eligible. `blockedReason` is empty or `already-clustered`,
+`pairing-busy`, `state-unavailable`. Network failure cannot establish eligibility.
+
+Each `JoinRequest` carries `requestId`, `direction` (`incoming`/`outgoing`),
+`peerNodeUuid`, `peerName`, `peerAddress`, `peerPort`, `state`, nullable
+`inviteId`, `reason`, `createdAt`, `expiresAt` (epoch ms). States are
+`awaiting-approval`, `awaiting-requester`, `pairing`, `paired`, `declined`,
+`canceled`, `expired`, `failed`, `rejected`. Strict bridge parsing validates
+every field and enum. Names/UUIDs before pairing are unverified display claims.
+Keep request IDs distinct from invite IDs and preserve service-owned deadlines.
+
+`replaceSoloCluster` is mandatory. An empty solo requires confirmation:
+“Joining replaces this device's empty cluster. Other devices will not be moved.”
+Only Go determines eligibility and durably replaces it after approval. The
+member approves with its own grant choice and displays the existing PIN using
+local `inviteStatus` for the exact child; the requester enters that PIN through
+ordinary `respondToInvite` with an independent grant choice. No PIN, certificate,
+key or grant belongs in a request snapshot/event. Approval/HTTP status never
+means Joined; only the exact child's confirmed durable result does.
+
+Subscribe and hydrate with the dedicated getter on attach/reconnect. Detach does
+not cancel. Manager restart loses requests; show “Request status is no longer
+available. Check the cluster on both devices before trying again.” Re-read
+membership before retrying. Initial peer HTTP 404 is `unsupported-peer`; later
+status 404 is lost status. Preserve ordinary Invite with an old local service;
+do not fall back from Ask to join to Invite. Incoming requests are passive
+review data, with no automatic modal/focus change. The full limits and trust
+contract lives in [cluster-manager spec §7.0.1](../../services/nvpair-cluster-manager/spec.md#701-ask-to-join-admission-requests).
 
 ### `pairApi.discovery`
 
@@ -211,9 +250,13 @@ Commands return no state. Renderer stores update from
 | `nodes:remove-member`       | `{ nodeId }`                 | `{ nodeId, removed }`     |
 | `discovery:get-nodes`       | `void`                       | `AvailableNode[]`         |
 | `cluster:get-initial`       | `void`                       | `ClusterInitialSnapshot`  |
-| `cluster:invite-node`       | `{ ipAddress }`              | `Invite`                  |
+| `cluster:get-join-requests` | `void` | Join-request eligibility and full snapshot |
+| `cluster:ask-to-join` | `{ address, port?, nodeId?, replaceSoloCluster:boolean }` | `JoinRequest` |
+| `cluster:respond-to-join-request` | `{ requestId, accept:true, allowRemoteManagement:boolean }` or `{ requestId, accept:false }` | `JoinRequest` |
+| `cluster:cancel-join-request` | `{ requestId }` | `JoinRequest` |
+| `cluster:invite-node`       | `{ ipAddress, allowRemoteManagement }` | `Invite`                  |
 | `cluster:invite-status`     | `{ inviteId }`               | `Invite`                  |
-| `cluster:respond-to-invite` | `{ inviteId, accept, pin? }` | `Invite`                  |
+| `cluster:respond-to-invite` | `{ inviteId, accept:true, pin, allowRemoteManagement }` or `{ inviteId, accept:false }` | `Invite` |
 | `cluster:cancel-invite`     | `{ inviteId }`               | `Invite`                  |
 | `cluster:abandon-if-solo`   | `void`                       | `null`                    |
 | `engines:get-initial`       | `void`                       | `EngineInitialState`      |
@@ -247,6 +290,7 @@ Commands return no state. Renderer stores update from
 | `errors:update`                   | `ServiceError[]`                 |
 | `cluster:invite-received`         | `Invite`                         |
 | `cluster:pending-invites-changed` | `Invite[]`                       |
+| `cluster:join-requests-changed` | Join-request eligibility and full snapshot |
 | `discovery:nodes-changed`         | `AvailableNode[]`                |
 | `connection:cluster-identity`     | `ClusterIdentityPayload`         |
 | `state:request-refresh`           | `void`                           |

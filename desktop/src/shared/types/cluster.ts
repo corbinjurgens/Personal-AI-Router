@@ -149,6 +149,52 @@ export interface ClusterInfo {
     clusterFriendlyName: string
 }
 
+export type JoinRequestState =
+    | 'awaiting-approval'
+    | 'awaiting-requester'
+    | 'pairing'
+    | 'paired'
+    | 'declined'
+    | 'canceled'
+    | 'expired'
+    | 'failed'
+    | 'rejected'
+
+/** Service-owned admission prelude. Peer identity is an unverified claim until pairing. */
+export interface JoinRequest {
+    requestId: string
+    direction: 'incoming' | 'outgoing'
+    peerNodeUuid: string
+    peerName: string
+    peerAddress: string
+    peerPort: number
+    state: JoinRequestState
+    inviteId: string | null
+    reason: string
+    createdAt: number
+    expiresAt: number
+}
+
+/** Independent of cluster bootstrap; only the service determines eligibility. */
+export interface JoinRequestsSnapshot {
+    supported: boolean
+    canAskToJoin: boolean
+    requiresSoloReplacement: boolean
+    blockedReason: string
+    requests: JoinRequest[]
+}
+
+export interface AskToJoinRequest {
+    address: string
+    port?: number
+    nodeId?: string
+    replaceSoloCluster: boolean
+}
+
+export type RespondToJoinRequest =
+    | { requestId: string; accept: true; allowRemoteManagement: boolean }
+    | { requestId: string; accept: false }
+
 /** Pushed when the local cluster identity changes (localhost UI). */
 export interface ClusterIdentityPayload {
     clusterId: string | null
