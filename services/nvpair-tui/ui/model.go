@@ -260,6 +260,11 @@ func (m Model) Update(msg tea.Msg) (model tea.Model, cmd tea.Cmd) {
 
 	case selfIdentityMsg, policyGetMsg, setAvailabilityMsg:
 		m.avail.update(msg)
+		// A failed call may have left the broker draining; read the state back so
+		// the header says so instead of the last value this shell saw.
+		if failed, ok := msg.(setAvailabilityMsg); ok && failed.err != nil && m.client != nil {
+			return m, policyGetCmd(m.client)
+		}
 		return m, nil
 
 	case NotificationMsg:
@@ -554,7 +559,11 @@ func (m Model) headerView() string {
 	// The pause switch sits between the title and the service status. A failure
 	// replaces the indicator until the next attempt.
 	if m.avail.err != "" {
-		left += "  " + statusErrStyle.Render("pause failed: "+m.avail.err)
+		if m.avail.value == availDraining {
+			left += "  " + statusErrStyle.Render(pauseIncompleteLabel+"; resume from this device's desktop. "+m.avail.err)
+		} else {
+			left += "  " + statusErrStyle.Render("pause failed: "+m.avail.err)
+		}
 	} else if label := m.avail.label(); label != "" {
 		style := statusOKStyle
 		if m.avail.value != availAvailable || m.avail.pending != "" {

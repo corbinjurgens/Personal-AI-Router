@@ -278,6 +278,11 @@ func (d *nodeDetail) switchReason() string {
 	case s.source == "" || s.target == "" || s.source == s.target:
 		return "select different installed From and To engines"
 	}
+	// A locked target is refused before anything is sent. A locked source is
+	// not: leaving a prohibited engine for an unlocked one stays possible.
+	if d.engineLocked(s.target) {
+		return engineLockedMessage
+	}
 	ids := d.switchEngines()
 	if !slices.Contains(ids, s.source) || !slices.Contains(ids, s.target) || d.enginesStale {
 		return "selected engines unavailable"
@@ -314,7 +319,7 @@ func (d *nodeDetail) applySwitch(msg detailSwitchMsg) tea.Cmd {
 		}
 		var refusal *rpc.RPCError
 		if msg.submit && errors.As(msg.err, &refusal) &&
-			(refusal.Code == -32010 || refusal.Code == -32011 || refusal.Code == -32012 || refusal.Code == -32602) {
+			(refusal.Code == -32010 || refusal.Code == -32011 || refusal.Code == -32012 || refusal.Code == -32013 || refusal.Code == -32602) {
 			s.transition(switchTransition{event: switchSubmitRefused, err: msg.err})
 			s.fresh = false
 			if refusal.Code == -32012 {

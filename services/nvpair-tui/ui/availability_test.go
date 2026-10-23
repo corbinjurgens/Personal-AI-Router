@@ -5,6 +5,7 @@ package ui
 
 import (
 	"errors"
+	"strings"
 	"testing"
 
 	"nvpair-tui/rpc"
@@ -25,7 +26,8 @@ func TestAvailabilityLabels(t *testing.T) {
 		{availabilityState{}, ""},
 		{availabilityState{value: availAvailable}, "Available"},
 		{availabilityState{value: availPaused}, "Paused"},
-		{availabilityState{value: availDraining}, "Pausing…"},
+		{availabilityState{value: availDraining}, "Pause incomplete — P retries"},
+		{availabilityState{value: availDraining, pending: availPaused}, "Pausing…"},
 		{availabilityState{value: availAvailable, pending: availPaused}, "Pausing…"},
 		{availabilityState{value: availPaused, pending: availAvailable}, "Resuming…"},
 	}
@@ -74,5 +76,41 @@ func TestAvailabilityToggleAndResult(t *testing.T) {
 	}
 	if got := a.toggleTarget(); got != availAvailable {
 		t.Errorf("toggle from paused = %q", got)
+	}
+}
+
+func TestFailedPauseLeavesAnAccurateIncompleteState(t *testing.T) {
+	a := availabilityState{value: availAvailable, pending: availPaused}
+	a.update(setAvailabilityMsg{target: availPaused, err: &rpc.RPCError{Code: -32000, Message: "Pause could not stop every engine: ollama still running"}})
+	// The broker stays draining; its readback replaces the stale value.
+	a.update(policyGetMsg{availability: availDraining})
+	if a.value != availDraining || a.pending != "" || !strings.Contains(a.err, "ollama still running") {
+		t.Fatalf("state after failed pause = %+v", a)
+	}
+	if got := a.label(); got != "Pause incomplete — P retries" {
+		t.Fatalf("label = %q", got)
+	}
+	if got := a.toggleTarget(); got != availPaused {
+		t.Fatalf("P asks for %q, want a pause retry", got)
+	}
+	a.pending = a.toggleTarget()
+	if got := a.label(); got != "Pausing…" {
+		t.Fatalf("retry label = %q", got)
+	}
+}
+
+func TestIncompletePauseHeaderKeepsDetailAndDesktopResume(t *testing.T) {
+	m := newTestModel()
+	m.width = 200
+	m.avail = availabilityState{value: availDraining, err: "Pause could not stop every engine: ollama still running"}
+	got := m.headerView()
+	for _, want := range []string{"Pause incomplete — P retries; resume from this device's desktop.", "ollama still running"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("header %q lacks %q", got, want)
+		}
+	}
+	m.avail = availabilityState{value: availAvailable, err: "boom"}
+	if got := m.headerView(); !strings.Contains(got, "pause failed: boom") {
+		t.Fatalf("ordinary failure header = %q", got)
 	}
 }

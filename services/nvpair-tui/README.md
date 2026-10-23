@@ -95,8 +95,9 @@ On Nodes, `g` opens this device's local permission list; up/down selects a peer,
 space/enter toggles permission, `r` reloads and `esc` returns. Saves use the
 reported revision and authoritative readback, including after errors; they are
 not automatically retried. `cluster_auto_sync` remains an inert stored
-preference and grants no authority. Local pause/Off still wins; revocation
-prevents new acceptance while already accepted work can finish or reconcile.
+preference and grants no authority. An engine lock and a node pause on the target
+still apply; revocation prevents new acceptance while already accepted work can
+finish or reconcile.
 
 `enter` on a node opens a full-screen drill-down with two panes, switched with
 `h`/`l`:
@@ -141,13 +142,29 @@ Off. These labels appear only on this machine's rows; there is no remote intent
 projection. Origin identifies a class relative to the engine-owning device,
 not a particular peer, and does not change lifecycle or permission decisions.
 
+Plain Off, an engine lock and a node pause are different facts. Saved Off is
+ordinary intent and does not stop a granted peer from starting the engine. A
+lock is reported by the engine-owning node as `locked` on its status; when it is
+true the row adds ` (locked on this node)`, on this machine and on a paired
+target. A target that reports no `locked` field, as an older one does, is shown
+without a lock claim and is never read as unlocked; saved Off is never read as a
+lock. A locked engine refuses start, restart, model load and being a switch
+target before anything is sent, with `This engine is locked on this node. Unlock
+it on this node before starting or loading a model.` Stop, unload, delete,
+download, settings and reads stay available, and a locked switch source adds no
+prohibition on switching to an unlocked engine. The target stays authoritative
+against a stale readback. The terminal has no lock or unlock key and exposes no
+remote setter; locks are changed on the engine's own device.
+
 Lifecycle, model, settings and availability refusals retain the target's message
 and RPC code. `-32012` means remote management is blocked and must be changed
 locally on the target. Its permission readback in remote detail is read-only;
 unknown, unavailable or unsupported is not a grant. Reads and permitted
 inference remain available. Downgraded pre-PG targets cannot enforce PG.
-`-32011` means a local veto; `-32010` means a revision conflict
-requiring reload and retry. Refusals do not retry or resume work automatically.
+`-32011` means a local veto, including a paused target, which must be resumed on
+that node first; `-32013` means the engine is locked on its node; `-32010`
+means a revision conflict requiring reload and retry. An unavailable projection
+on the target is an ordinary retryable operational error, not a veto. Refusals do not retry or resume work automatically.
 Existing long-operation timeouts still report continuing work rather than
 success, while quick-operation timeouts remain failures.
 
@@ -160,7 +177,8 @@ from `engine:models` and stay live through `engine:models-changed`.
 Node detail offers `w` / **switch engine**. Use `tab` for **From**/**To**,
 up/down to select installed engines, `enter` to **Switch**, `r` for status and
 permission readback, and `esc` to close the panel. Blocked submission shows its
-reason. Existing local pause/Off controls remain reachable. The TUI invokes the
+reason, including a locked target engine. Existing local pause/Off controls remain
+reachable. The TUI invokes the
 existing E3 `engine:switch` and
 `engine:switch-status` methods through the broker, with a peer `nodeId` only for
 a peer; it never orchestrates separate stop/start calls.
@@ -204,8 +222,12 @@ Client timeout disowns the result locally rather than sending wire cancellation.
 - `ctrl+x` — dismiss the update notice, while one is showing
 - `q` / `ctrl+c` — quit; the service, the broker, and inference keep running
 - `P` — pause or resume this node (`node:set-availability`, run in the
-  background). The header shows `Available`, `Pausing…`, or `Paused`, read from
-  `policy:get` at startup and kept current by `node:availability-changed`. It is
+  background). The header shows `Available`, `Pausing…`, `Paused`, or
+  `Pause incomplete — P retries`, read from `policy:get` at startup and kept
+  current by `node:availability-changed`. A pause that fails after the node began
+  draining shows `Pause incomplete — P retries; resume from this device's desktop.`
+  with the error; `P` retries the pause, and resuming that state is a desktop or
+  local RPC action, not a terminal key. It is
   the shifted key because lower-case `p` is "pair" / "proxy port" in the views
 - `Q` — stop the service and quit, after a `y` confirmation shown in the notice
   row. The service stops the broker cleanly (the broker tears its workers down

@@ -24,6 +24,10 @@ const (
 // ordinary control-call deadline would report a working pause as failed.
 const setAvailabilityTimeout = 30 * time.Minute
 
+// pauseIncompleteLabel is what a node that stays draining after its pause call
+// ended shows. Resuming it is a desktop or local RPC action: P only retries.
+const pauseIncompleteLabel = "Pause incomplete — P retries"
+
 // availabilityState is the shell's view of this node's pause switch.
 type availabilityState struct {
 	// value is the last availability the broker reported; empty until known.
@@ -88,8 +92,11 @@ func (a availabilityState) toggleTarget() string {
 // label is the header text, or empty while the state is unknown.
 func (a availabilityState) label() string {
 	switch {
-	case a.pending == availPaused, a.value == availDraining:
+	case a.pending == availPaused:
 		return "Pausing…"
+	case a.value == availDraining:
+		// Nothing is in flight here, so the node is stuck half-paused.
+		return pauseIncompleteLabel
 	case a.pending == availAvailable:
 		return "Resuming…"
 	case a.value == availPaused:

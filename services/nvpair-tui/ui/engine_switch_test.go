@@ -390,7 +390,7 @@ func TestSwitchTypedRefusalsSurviveReadback(t *testing.T) {
 	for _, tc := range []struct {
 		code int
 		text string
-	}{{-32010, "revision conflict"}, {-32011, "local veto"}, {-32012, "remote management denied"}} {
+	}{{-32010, "revision conflict"}, {-32011, "local veto"}, {-32012, "remote management denied"}, {-32013, "engine locked"}} {
 		t.Run(tc.text, func(t *testing.T) {
 			d, _ := switchDetail(t, false)
 			d.engineSwitch.requestID = "refused"
@@ -1114,4 +1114,29 @@ func TestSwitchRetainedIdentityBaselineMatrix(t *testing.T) {
 			})
 		}
 	}
+}
+
+// A locked target is refused before anything is sent; a locked source is not
+// an extra prohibition on switching to an unlocked engine.
+func TestSwitchLockedTargetIsRefusedBeforeSending(t *testing.T) {
+	locked, unlocked := true, false
+	test := func(name string, source, target *bool, wantReason string) {
+		t.Run(name, func(t *testing.T) {
+			d, _ := switchDetail(t, false)
+			d.engines[0].Locked, d.engines[1].Locked = source, target
+			if got := d.switchReason(); got != wantReason {
+				t.Fatalf("switchReason = %q, want %q", got, wantReason)
+			}
+			cmd := d.submitSwitch()
+			if (cmd == nil) != (wantReason != "") {
+				t.Fatalf("submit command present = %v with reason %q", cmd != nil, wantReason)
+			}
+			if wantReason != "" && (d.engineSwitch.state == switchSubmitting || d.engineSwitch.requestID != "") {
+				t.Fatalf("refused switch started a request: %+v", d.engineSwitch)
+			}
+		})
+	}
+	test("locked target", nil, &locked, engineLockedMessage)
+	test("locked source", &locked, &unlocked, "")
+	test("unreported lock is not a refusal", nil, nil, "")
 }

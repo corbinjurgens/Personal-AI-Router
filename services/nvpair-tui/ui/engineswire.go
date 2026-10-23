@@ -28,6 +28,14 @@ type engineStatus struct {
 	Locked *bool `json:"locked,omitempty"`
 }
 
+// engineLockedMessage is shown when an activation is refused because the
+// engine is locked on its owning node.
+const engineLockedMessage = "This engine is locked on this node. Unlock it on this node before starting or loading a model."
+
+// locked reports an authoritative lock. A target that did not report one is
+// unknown, not unlocked, so only a present true counts.
+func (e engineStatus) locked() bool { return e.Locked != nil && *e.Locked }
+
 func (e engineStatus) label() string {
 	if e.DisplayName != "" {
 		return e.DisplayName

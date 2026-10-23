@@ -388,7 +388,7 @@ func TestPermissionControlsFitShortTerminal(t *testing.T) {
 			if renderedRows(text) > 9 {
 				t.Fatalf("choice uses %d rows: %s", renderedRows(text), text)
 			}
-			if !strings.Contains(text, "Local pause and engine Off always win.") || !strings.Contains(text, "ready") {
+			if !strings.Contains(text, "Engine locks and node pause still apply.") || !strings.Contains(text, "ready") {
 				t.Fatalf("consent text or status hidden: %s", text)
 			}
 		})

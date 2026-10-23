@@ -78,7 +78,7 @@ func (v *nodesView) pairingChoiceView() string {
 	return ansi.Wrap(joinLines("Remote management of this device (tab to choose)",
 		allowMark+" Allow this peer to manage this device (my own devices)",
 		blockMark+" Block this peer from changing this device",
-		"This choice applies to the device you are using. Reading status and using models this device serves remain available. Local pause and engine Off always win."), max(1, v.width), "")
+		"This choice applies to the device you are using. Reading status and using models this device serves remain available. Engine locks and node pause still apply."), max(1, v.width), "")
 }
 
 func (v *nodesView) inviteChoiceName() string {
