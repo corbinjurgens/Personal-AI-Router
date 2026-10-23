@@ -107,6 +107,16 @@ func callRunningService(ctx context.Context, method string) (json.RawMessage, er
 }
 
 func callRunningServiceWith(ctx context.Context, method string, params json.RawMessage) (json.RawMessage, error) {
+	return callServiceReply(ctx, method, params, false)
+}
+
+var errInvalidServiceReply = errors.New("invalid service reply")
+
+func callDiagnoseService(ctx context.Context, method string, params json.RawMessage) (json.RawMessage, error) {
+	return callServiceReply(ctx, method, params, true)
+}
+
+func callServiceReply(ctx context.Context, method string, params json.RawMessage, strict bool) (json.RawMessage, error) {
 	conn, err := servicectl.Dial(ctx)
 	if err != nil {
 		return nil, err
@@ -122,6 +132,27 @@ func callRunningServiceWith(ctx context.Context, method string, params json.RawM
 	sc := bufio.NewScanner(conn)
 	sc.Buffer(make([]byte, 0, 64*1024), jsonrpc.WorkerFrameBytes)
 	for sc.Scan() {
+		if strict {
+			var frame struct {
+				ID json.RawMessage `json:"id"`
+			}
+			if json.Unmarshal(sc.Bytes(), &frame) == nil && string(frame.ID) == "1" {
+				var reply struct {
+					JSONRPC string          `json:"jsonrpc"`
+					Method  json.RawMessage `json:"method"`
+					Result  json.RawMessage `json:"result"`
+					Error   *struct {
+						Code    *int    `json:"code"`
+						Message *string `json:"message"`
+					} `json:"error"`
+				}
+				if json.Unmarshal(sc.Bytes(), &reply) != nil || reply.JSONRPC != "2.0" || len(reply.Method) != 0 ||
+					(len(reply.Result) == 0) == (reply.Error == nil) ||
+					(reply.Error != nil && (reply.Error.Code == nil || reply.Error.Message == nil)) {
+					return nil, errInvalidServiceReply
+				}
+			}
+		}
 		var msg jsonrpc.Message
 		if json.Unmarshal(sc.Bytes(), &msg) != nil || !msg.IsResponse() || string(*msg.ID) != "1" {
 			continue

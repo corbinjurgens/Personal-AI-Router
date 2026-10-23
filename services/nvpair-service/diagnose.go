@@ -119,7 +119,7 @@ type diagnoseResidentConfig struct {
 }
 
 // diagnoseCaller sends one request to the running service and returns its
-// result. Production uses callRunningServiceWith, which dials without starting
+// result. Production uses callDiagnoseService, which dials without starting
 // anything and closes its connection when the answer or the deadline arrives.
 type diagnoseCaller func(ctx context.Context, method string, params json.RawMessage) (json.RawMessage, error)
 
@@ -131,7 +131,7 @@ func runDiagnose(args []string, stdout, stderr io.Writer) int {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), diagnoseTimeout)
 	defer cancel()
-	return diagnose(ctx, callRunningServiceWith, asJSON, stdout)
+	return diagnose(ctx, callDiagnoseService, asJSON, stdout)
 }
 
 // parseDiagnoseArgs accepts nothing or a single --json.
@@ -197,11 +197,11 @@ func captureDiagnosis(ctx context.Context, call diagnoseCaller) (diagnoseReport,
 		}
 		return report, diagnoseExitNotRunning
 	}
-	firstPolicy, policyStatus, firstResident, residentStatus := readLocalPolicy(ctx, call)
+	firstPolicy, policyStatus, firstResident, residentStatus := readLocalPolicy(ctx, call, false)
 	for i, e := range builtins {
 		report.BuiltinFacades[i] = readFacade(ctx, call, e)
 	}
-	lastPolicy, lastPolicyStatus, lastResident, lastResidentStatus := readLocalPolicy(ctx, call)
+	lastPolicy, lastPolicyStatus, lastResident, lastResidentStatus := readLocalPolicy(ctx, call, true)
 	lastService, lastServiceStatus := readServiceStatus(ctx, call)
 
 	fencesHeld := true
@@ -211,17 +211,24 @@ func captureDiagnosis(ctx context.Context, call diagnoseCaller) (diagnoseReport,
 		}
 		if lastStatus != diagnoseKnown {
 			fencesHeld = false
-			return status
+			return lastStatus
 		}
 		if !same {
 			return diagnoseChanged
 		}
 		return status
 	}
-	serviceStatus = settle(serviceStatus, lastServiceStatus, firstService == lastService)
+	if lastServiceStatus == diagnoseKnown {
+		serviceStatus = settle(serviceStatus, lastServiceStatus, firstService == lastService)
+	} else {
+		fencesHeld = false
+	}
 	policyStatus = settle(policyStatus, lastPolicyStatus, firstPolicy == lastPolicy)
 	residentStatus = settle(residentStatus, lastResidentStatus,
 		firstResident.revision == lastResident.revision && firstResident.generation == lastResident.generation)
+	if policyStatus == diagnoseChanged {
+		residentStatus = changedIfKnown(residentStatus)
+	}
 	if serviceStatus == diagnoseChanged {
 		// Every other section came from a broker the service may have replaced.
 		policyStatus = changedIfKnown(policyStatus)
@@ -254,7 +261,7 @@ func changedIfKnown(status diagnoseStatus) diagnoseStatus {
 }
 
 // readResult performs one capture read and classifies a failure without
-// keeping its text: an oversized frame is invalid, anything else unavailable.
+// keeping its text: an oversized or malformed reply is invalid, anything else unavailable.
 // Only a refused dial while time remains is not-running.
 func readResult(ctx context.Context, call diagnoseCaller, method string, params json.RawMessage) (json.RawMessage, diagnoseStatus) {
 	if ctx.Err() != nil {
@@ -266,7 +273,7 @@ func readResult(ctx context.Context, call diagnoseCaller, method string, params 
 		return result, diagnoseKnown
 	case errors.Is(err, servicectl.ErrNotRunning) && ctx.Err() == nil:
 		return nil, diagnoseNotRunning
-	case errors.Is(err, bufio.ErrTooLong):
+	case errors.Is(err, bufio.ErrTooLong), errors.Is(err, errInvalidServiceReply):
 		return nil, diagnoseInvalid
 	}
 	return nil, diagnoseUnavailable
@@ -323,7 +330,7 @@ func plainVersion(v string) bool {
 
 // readLocalPolicy reads policy:get and projects it at once. The raw document,
 // which can hold private routing configuration, does not outlive this call.
-func readLocalPolicy(ctx context.Context, call diagnoseCaller) (policyFacts, diagnoseStatus, residentFacts, diagnoseStatus) {
+func readLocalPolicy(ctx context.Context, call diagnoseCaller, final bool) (policyFacts, diagnoseStatus, residentFacts, diagnoseStatus) {
 	result, status := readResult(ctx, call, "policy:get", policyGetParams)
 	if status != diagnoseKnown {
 		return policyFacts{}, status, residentFacts{}, status
@@ -335,6 +342,17 @@ func readLocalPolicy(ctx context.Context, call diagnoseCaller) (policyFacts, dia
 	resident, residentStatus := residentFacts{}, diagnoseInvalid
 	if r, err := decodeResidentFacts(result); err == nil {
 		resident, residentStatus = r, diagnoseKnown
+	}
+	if final {
+		var sections map[string]json.RawMessage
+		if json.Unmarshal(result, &sections) == nil && sections != nil {
+			if _, ok := sections["policy"]; !ok {
+				policyStatus = diagnoseUnavailable
+			}
+			if _, ok := sections["modelConfiguration"]; !ok {
+				residentStatus = diagnoseUnavailable
+			}
+		}
 	}
 	return policy, policyStatus, resident, residentStatus
 }

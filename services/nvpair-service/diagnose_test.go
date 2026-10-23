@@ -542,6 +542,7 @@ func TestDiagnoseMarksChangesDuringCapture(t *testing.T) {
 		f.answers["policy:get"] = changing(pending, policyGetResult(t, healthyPolicy()))
 	}, func(r *diagnoseReport) {
 		r.Policy = diagnosePolicy{Status: diagnoseChanged}
+		r.ResidentConfiguration = diagnoseResidentConfig{Status: diagnoseChanged}
 	})
 	test("resident observation advanced", func(f *fakeDiagnoseService) {
 		f.answers["policy:get"] = changing(policyGetResult(t, healthyPolicy()), policyAfter(func(p *policyFixture) { p.generation++ }))
@@ -556,6 +557,31 @@ func TestDiagnoseMarksChangesDuringCapture(t *testing.T) {
 			return nil, errors.New(sentinelError)
 		}
 	}, func(*diagnoseReport) {})
+}
+
+func TestDiagnoseFinalPolicyReadFailureDropsValues(t *testing.T) {
+	test := func(name string, later json.RawMessage, err error, policyStatus, residentStatus diagnoseStatus) {
+		t.Helper()
+		t.Run(name, func(t *testing.T) {
+			f := newHealthyDiagnoseService(t)
+			f.answers["policy:get"] = func(_ context.Context, occurrence int) (json.RawMessage, error) {
+				if occurrence == 0 {
+					return policyGetResult(t, healthyPolicy()), nil
+				}
+				return later, err
+			}
+			want := healthyReport()
+			want.Complete = false
+			want.Policy = diagnosePolicy{Status: policyStatus}
+			want.ResidentConfiguration = diagnoseResidentConfig{Status: residentStatus}
+			assertReport(t, runDiagnoseCapture(t, context.Background(), f.call), want, diagnoseExitIncomplete)
+			assertCalls(t, f.calls, wantDiagnoseSequence())
+		})
+	}
+	test("malformed final answer", json.RawMessage(`[]`), nil, diagnoseInvalid, diagnoseInvalid)
+	test("unavailable final answer", nil, errors.New(sentinelError), diagnoseUnavailable, diagnoseUnavailable)
+	test("service absent on final read", nil, servicectl.ErrNotRunning, diagnoseUnavailable, diagnoseUnavailable)
+	test("sections absent on final read", json.RawMessage(`{}`), nil, diagnoseUnavailable, diagnoseUnavailable)
 }
 
 func TestDiagnoseStopsAtTheSharedDeadline(t *testing.T) {
@@ -574,6 +600,8 @@ func TestDiagnoseStopsAtTheSharedDeadline(t *testing.T) {
 	}
 	want := healthyReport()
 	want.Complete = false
+	want.Policy = diagnosePolicy{Status: diagnoseUnavailable}
+	want.ResidentConfiguration = diagnoseResidentConfig{Status: diagnoseUnavailable}
 	for i := 1; i < len(want.BuiltinFacades); i++ {
 		want.BuiltinFacades[i] = diagnoseFacade{Engine: want.BuiltinFacades[i].Engine, Status: diagnoseUnavailable}
 	}
@@ -854,11 +882,39 @@ func TestDiagnoseEndpointFailures(t *testing.T) {
 		r.Policy = diagnosePolicy{Status: diagnoseUnavailable}
 		r.ResidentConfiguration = diagnoseResidentConfig{Status: diagnoseUnavailable}
 	})
+	test("malformed reply to this request", "policy:get",
+		diagnoseReply{frames: []string{`{"jsonrpc":"2.0","id":%s,"error":"malformed"}`}}, func(r *diagnoseReport) {
+			r.Policy = diagnosePolicy{Status: diagnoseInvalid}
+			r.ResidentConfiguration = diagnoseResidentConfig{Status: diagnoseInvalid}
+		})
 	test("error answer for a facade", facadeMethod(t, engines.NameLlamaCPP),
 		diagnoseReply{frames: []string{`{"jsonrpc":"2.0","id":%s,"error":{"code":-32000,"message":"` + sentinelError + `"}}`}},
 		func(r *diagnoseReport) {
 			r.BuiltinFacades[2] = diagnoseFacade{Engine: engines.NameLlamaCPP, Status: diagnoseUnavailable}
 		})
+}
+
+func TestControlCommandsKeepSkippingMalformedReplies(t *testing.T) {
+	test := func(name string, args []string, want string) {
+		t.Helper()
+		t.Run(name, func(t *testing.T) {
+			fixture := newDiagnoseFixture(t, func(string) diagnoseReply {
+				return diagnoseReply{frames: []string{
+					`{"jsonrpc":"2.0","id":%s,"error":"malformed"}`,
+					`{"jsonrpc":"2.0","id":%s,"result":{"ok":true}}`,
+				}}
+			})
+			var stdout, stderr bytes.Buffer
+			code := run(args, &stdout, &stderr)
+			if code != 0 || stdout.String() != want || stderr.Len() != 0 {
+				t.Fatalf("exit = %d, stdout = %q, stderr = %q; want 0, %q, empty stderr", code, stdout.String(), stderr.String(), want)
+			}
+			waitClosedByClient(t, fixture, 1)
+		})
+	}
+	test("status", []string{"status"}, "{\n  \"ok\": true\n}\n")
+	test("stop", []string{"stop"}, "nvpair-service: stopped\n")
+	test("call", []string{"call", "policy:get"}, "{\n  \"ok\": true\n}\n")
 }
 
 func TestDiagnoseContextEndClosesTheSlowConnection(t *testing.T) {
