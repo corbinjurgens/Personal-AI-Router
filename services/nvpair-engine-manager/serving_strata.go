@@ -628,7 +628,7 @@ func deriveStrataServing(command launchCommand, rt Runtime) (*llamaServingLaunch
 					return nil, servingError("Cannot inspect prepared pack file.")
 				}
 			}
-			if expertTable != "" {
+			if key == "--pack" && expertTable != "" {
 				if err := add(expertTable, role); err != nil {
 					return nil, err
 				}
