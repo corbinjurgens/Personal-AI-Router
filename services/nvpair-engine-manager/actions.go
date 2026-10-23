@@ -244,9 +244,10 @@ func (e *Executor) dispatchAction(ctx context.Context, st *engineState, engine, 
 		observationClient.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 		client = &observationClient
 	}
-	if credential != "" {
-		// The key authorizes only this loopback request: a redirect is
-		// answered as is, never followed with the header.
+	if observation && credential != "" {
+		// The native key belongs only to model-list reads. Load and unload
+		// remain PAIR controls and deliberately run without it. A keyed read
+		// answers redirects as is, never following them with the header.
 		req.Header.Set("Authorization", "Bearer "+credential)
 		keyedClient := *client
 		keyedClient.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
@@ -266,7 +267,7 @@ func (e *Executor) dispatchAction(ctx context.Context, st *engineState, engine, 
 	// Mutation actions retain their general 2xx success contract (e.g. 204).
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 || (observation && resp.StatusCode != http.StatusOK) {
 		body := strings.TrimSpace(string(data))
-		if credential != "" {
+		if observation && credential != "" {
 			body = strings.ReplaceAll(body, credential, "[redacted]")
 		}
 		return nil, &ActionHTTPError{Action: action, StatusCode: resp.StatusCode, Body: body}

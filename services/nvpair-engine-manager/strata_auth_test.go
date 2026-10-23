@@ -169,20 +169,32 @@ func TestStrataAuthUnkeyedLaunchOffersNoCredential(t *testing.T) {
 	}
 }
 
-// PAIR's own requests to the keyed engine carry the key, never follow a
-// redirect with it and never repeat it in an error.
-func TestStrataAuthEngineRequestsCarryTheKey(t *testing.T) {
+// PAIR's model-list reads carry the key, never follow a redirect with it and
+// never repeat it in an error. Load and unload remain unkeyed PAIR controls.
+func TestStrataAuthModelListCarriesKeyAndControlsDoNot(t *testing.T) {
 	f, _ := startKeyedStrata(t)
 	var landed atomic.Int32
+	var modelReads atomic.Int32
+	var controlCalls atomic.Int32
+	var keyedControls atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		authorized := r.Header.Get("Authorization") == "Bearer "+strataAuthKey
 		switch r.URL.Path {
 		case "/v1/models":
+			modelReads.Add(1)
 			if !authorized {
 				w.WriteHeader(http.StatusUnauthorized)
 				return
 			}
 			_, _ = w.Write([]byte(`{"object":"list","data":[]}`))
+		case "/v1/load", "/v1/unload":
+			controlCalls.Add(1)
+			if r.Header.Get("Authorization") != "" {
+				keyedControls.Add(1)
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			_, _ = w.Write([]byte(`{"ok":true}`))
 		case "/redirect":
 			http.Redirect(w, r, "/landing", http.StatusFound)
 		case "/landing":
@@ -203,17 +215,30 @@ func TestStrataAuthEngineRequestsCarryTheKey(t *testing.T) {
 		st.port = enginePort
 		st.mu.Unlock()
 	})
-	call := func(path string) (json.RawMessage, error) {
-		return f.ex.dispatchAction(context.Background(), st, "fake", "probe", Action{HTTP: &ActionHTTP{Method: http.MethodGet, Path: path}}, nil)
+	call := func(action, method, path string) (json.RawMessage, error) {
+		return f.ex.dispatchAction(context.Background(), st, "fake", action, Action{HTTP: &ActionHTTP{Method: method, Path: path}}, nil)
 	}
-	if _, err := call("/v1/models"); err != nil {
-		t.Fatalf("keyed request rejected: %v", err)
+	for _, action := range []string{"list_models", "loaded_models"} {
+		if _, err := call(action, http.MethodGet, "/v1/models"); err != nil {
+			t.Fatalf("%s rejected: %v", action, err)
+		}
+	}
+	for _, control := range []struct {
+		action string
+		path   string
+	}{{"load_model", "/v1/load"}, {"unload_model", "/v1/unload"}} {
+		if _, err := call(control.action, http.MethodPost, control.path); err != nil {
+			t.Fatalf("%s rejected: %v", control.action, err)
+		}
+	}
+	if modelReads.Load() != 2 || controlCalls.Load() != 2 || keyedControls.Load() != 0 {
+		t.Fatalf("model reads=%d control calls=%d keyed controls=%d", modelReads.Load(), controlCalls.Load(), keyedControls.Load())
 	}
 	var httpErr *ActionHTTPError
-	if _, err := call("/redirect"); !errors.As(err, &httpErr) || httpErr.StatusCode != http.StatusFound || landed.Load() != 0 {
+	if _, err := call("list_models", http.MethodGet, "/redirect"); !errors.As(err, &httpErr) || httpErr.StatusCode != http.StatusFound || landed.Load() != 0 {
 		t.Fatalf("redirect: error %v, landing hits %d", err, landed.Load())
 	}
-	_, err := call("/echo")
+	_, err := call("list_models", http.MethodGet, "/echo")
 	if !errors.As(err, &httpErr) || httpErr.StatusCode != http.StatusUnauthorized || strings.Contains(httpErr.Body, strataAuthKey) || !strings.Contains(httpErr.Body, "[redacted]") {
 		t.Fatalf("echoed key not redacted: %v", err)
 	}

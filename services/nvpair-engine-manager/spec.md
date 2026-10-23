@@ -255,9 +255,10 @@ with a bounded read, holding one key of 16 to 512 printable ASCII characters
 without spaces or commas (one trailing line end allowed). The file is bound into
 the approval digest by identity only (path, size, modification time, file ID),
 never by content; it is never in the snapshot, the server receives the key only as
-`STRATA_API_KEY` in its child environment, engine-manager's own requests to the
-engine carry it (without following redirects, and redacted from error bodies),
-and `internal:local-engine-credential` gives it, with the launch's port, only
+`STRATA_API_KEY` in its child environment, and engine-manager sends it only on
+model-list reads (without following redirects, and redacted from error bodies).
+Load and unload remain unkeyed PAIR controls. `internal:local-engine-credential`
+gives it, with the launch's port, only
 to the broker for its health probe and its own proxy. Context is an explicit positive
 `--max-context` per slot; `parallel` must be in 1..8. Explicit `--batch` or
 `--slots` must agree with parallel and be at least two; otherwise the server
