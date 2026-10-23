@@ -871,6 +871,14 @@ unlocked saved-On engines through the manager's existing guards. The broker's
 model-configuration reasons are `paused` for either-origin pause and `engine-off`
 for ordinary saved Off; saved Off is not inferred to be an engine lock.
 
+Conservative switch cleanup may release a reconciled manager reservation while
+retaining a durable pause obligation and recovery receipt behind the pause
+fence. This allows intent-neutral shutdown to finish. Inventory, unload, sleep
+and shutdown verification use one manager; a replacement cannot complete an
+older manager's proof. Recovery verifies a stored pause before opening the
+replacement's management surface. A repeated completed Pause rechecks physical
+shutdown without allocating another policy revision.
+
 An old target without the permission read is unsupported; downgrading to a
 pre-PG target executable restores its unrestricted pinned-peer management.
 Authorization logs record caller/target UUID, operation family, decision,

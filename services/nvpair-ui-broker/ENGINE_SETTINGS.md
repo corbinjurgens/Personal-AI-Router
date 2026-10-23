@@ -113,7 +113,10 @@ notifications to the local broker. Get, preview and events are reads; Apply
 requires the target's remote-management grant at the `ec` gate and again under
 the broker's journal locks immediately before acceptance, followed by the
 common pause decision. Worker validation and lock waits cannot bypass that
-decision. A failed reply
+decision. Apply prepares initialization, drift reconciliation and legacy
+argument conversion on a private record, then rechecks authorization before
+saving any of them or accepting a receipt. A refused delayed Apply leaves the
+journal unchanged. A failed reply
 carries `errorCode`; `-32011` and `-32012` become HTTP 409 with code
 `local_veto` and `remote_management_denied`, respectively, and retain those RPC
 codes at the origin. Permission denial means change permission locally on the
@@ -229,10 +232,16 @@ each obligated engine. Its `SwitchEngineState` reply must prove saved Off and
 termination. A successful Pause of either origin durably records `pauseApplied` for its
 pending obligations before a later Resume can run. Cleanup relies on that proof
 independently of current availability, preserving the owner's later Resume while
-still reconciling the operation's target veto. Older journals without this proof
-retain the requirement that the node currently have a persisted, live pause of either origin, with no pending
-pause or policy recovery. An unapplied Pause remains unresolved. Discharge is saved
-durably before terminal release or recovery resolution; failure keeps recovery.
+still reconciling the operation's target veto. An unapplied Pause remains
+unresolved. After conservative reconciliation, the manager reservation may be
+released behind the authoritative pause fence, retaining the durable recovery
+receipt and undischarged obligation. Intent-neutral sleep then runs without
+reservation contention; fresh readback from that same manager must verify
+shutdown before `pauseApplied` and discharge are saved. Startup and replacement
+perform this shutdown before acknowledging manager readiness. A later local
+Resume may supersede an unapplied pause after conservative switch cleanup:
+discharge records that explicit override without setting `pauseApplied`.
+Discharge precedes recovery resolution; failure keeps recovery ownership.
 Broker restart and manager replacement replay undischarged obligations even
 when inspection returns no checkpoint, before restore/readiness. An older direct
 peer start loses to a subsequently admitted Off at this settlement boundary.

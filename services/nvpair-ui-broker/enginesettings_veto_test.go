@@ -311,6 +311,100 @@ func TestPendingPauseRefusesSettingsAfterDelayedPreview(t *testing.T) {
 	rmSettingsUnchanged(t, h, before, p.RequestID, journal)
 }
 
+func TestPendingPauseDiscardsSettingsPreparation(t *testing.T) {
+	test := func(name string, prepare func(*settingsHarness, *settings.Request), drift bool) {
+		t.Run(name, func(t *testing.T) {
+			h, p := rmSettings(t)
+			launch := h.snapshot()
+			h.b.engineConfigMu.Lock()
+			prepare(h, &p)
+			if err := h.b.saveEngineSettingsLocked(); err != nil {
+				h.b.engineConfigMu.Unlock()
+				t.Fatalf("save preparation fixture: %v", err)
+			}
+			before := h.b.engineSettings["ollama"].clone()
+			h.b.engineConfigMu.Unlock()
+			journal := rmSettingsJournal(t, h)
+			engine := attachFakeEngine(t, h.b)
+			engine.setAnswer(func(method string, params json.RawMessage) (any, string) {
+				switch method {
+				case "engine:get-launch":
+					text := launch.Settings.LaunchText
+					if drift {
+						text += " --component-drift"
+					}
+					return settings.LaunchState{
+						Engine: "ollama", ServerPort: launch.Settings.ServerPort,
+						EffectivePort: launch.EffectiveServerPort, LaunchText: text,
+						Running: launch.Running, Editable: true, Format: "pair-arguments-v1",
+					}, holdSuccessReply
+				case "engine:preview-launch":
+					var request settings.Request
+					if err := json.Unmarshal(params, &request); err != nil {
+						t.Errorf("decode preparation preview: %v", err)
+						return nil, "invalid preview request"
+					}
+					if request.Format == "pair-launch-v1" {
+						request.Settings.LaunchText = launch.Settings.LaunchText
+					}
+					return settings.Preview{Settings: request.Settings}, ""
+				case "engine:configured-ports":
+					return map[string]any{"engines": []any{}}, ""
+				default:
+					t.Errorf("unexpected preparation call: %s", method)
+					return nil, "unexpected call"
+				}
+			})
+			done := make(chan error, 1)
+			go func() {
+				_, err := h.b.applyEngineSettings(context.Background(), p, "peer")
+				done <- err
+			}()
+			engine.waitFor("settings readback before preparation", func(calls []policyCall) bool {
+				for _, call := range calls {
+					if call.method == "engine:get-launch" {
+						return true
+					}
+				}
+				return false
+			})
+			r := h.b.nodePolicyRuntime()
+			r.mu.Lock()
+			r.pendingPauseRequested = true
+			r.mu.Unlock()
+			engine.releaseHeld()
+			if err := rmResult(t, done); policyErrorCode(err) != codeLocalVeto {
+				t.Fatalf("prepared peer settings = %v, want pause refusal", err)
+			}
+			if !bytes.Equal(rmSettingsJournal(t, h), journal) {
+				t.Fatal("refused preparation changed the persisted journal")
+			}
+			h.b.engineConfigMu.Lock()
+			after := h.b.engineSettings["ollama"].clone()
+			h.b.engineConfigMu.Unlock()
+			if !reflect.DeepEqual(after, before) {
+				t.Fatalf("refused preparation changed record: got %+v, want %+v", after, before)
+			}
+			if h.applies.Load() != 0 || h.proxyRebinds.Load() != 0 {
+				t.Fatal("refused preparation changed runtime")
+			}
+		})
+	}
+	test("initialization", func(h *settingsHarness, p *settings.Request) {
+		delete(h.b.engineSettings, "ollama")
+		p.ExpectedRevision = 1
+	}, false)
+	test("component drift", func(h *settingsHarness, p *settings.Request) {
+		p.ExpectedRevision++
+	}, true)
+	test("legacy argument migration", func(h *settingsHarness, p *settings.Request) {
+		record := h.b.engineSettings["ollama"]
+		record.Snapshot.Format = "pair-launch-v1"
+		record.Snapshot.Settings.LaunchText = "managed serve " + record.Snapshot.Settings.LaunchText
+		p.ExpectedRevision++
+	}, false)
+}
+
 func TestPausedBrokerReadsAndLocalConfigurationRemainAvailable(t *testing.T) {
 	t.Run("peer policy read and local policy edit", func(t *testing.T) {
 		rb := newBrokerOnFile(t, pausedLocallyDocument)

@@ -83,6 +83,9 @@ func newSwitchHarness(t *testing.T) *switchHarness {
 			if err := json.Unmarshal(raw, &p); err != nil {
 				return nil, err.Error()
 			}
+			if h.cp != nil && h.cp.Phase != settings.SwitchCheckpointReleased && (p.Engine == h.cp.SourceEngine || p.Engine == h.cp.TargetEngine) {
+				return nil, "engine is reserved by an engine switch (busy)"
+			}
 			h.sleeping[p.Engine] = true
 			if h.cp != nil {
 				if p.Engine == h.cp.SourceEngine {
@@ -673,6 +676,80 @@ func TestSwitchRecoveryConflictingSettingsJournalFailsClosed(t *testing.T) {
 	}
 }
 
+func TestSwitchPauseRecoveryReleasesBeforePinnedShutdown(t *testing.T) {
+	test := func(name string, origin nodepolicy.PauseOrigin) {
+		t.Run(name, func(t *testing.T) {
+			h := newSwitchHarness(t)
+			p := h.request(t, "paused-recovery")
+			p.NodeID = h.b.nodeID
+			r := switchStoreReceipt(p.RequestID)
+			r.NodeID, r.Caller = h.b.nodeID, "peer"
+			r.Request, r.ExpectedRevision, r.AcceptedRevision = p, p.ExpectedRevision, p.ExpectedRevision
+			r.PayloadHash = settings.SwitchPayloadHash(r.Caller, r.NodeID, p)
+			r.Source = switchTestState(true, true, settings.SwitchIntentOn)
+			r.Target = switchTestState(false, false, settings.SwitchIntentOff)
+			switchStoreAccept(t, h.b.engineSwitch.store, r)
+			if err := h.b.engineSwitch.store.SaveLocalObligation(p.RequestID, settings.SwitchLocalObligation{Pause: true}); err != nil {
+				t.Fatalf("save pause obligation: %v", err)
+			}
+			h.mu.Lock()
+			h.cp = &settings.SwitchCheckpoint{SwitchPrepareRequest: settings.SwitchPrepareRequest{
+				OperationID: p.RequestID, Caller: r.Caller, Origin: settings.SwitchOriginRemote,
+				SourceEngine: p.SourceEngine, TargetEngine: p.TargetEngine, PayloadHash: r.PayloadHash,
+				ConfigurationFence: settings.SwitchConfigurationToken(h.config), Deadline: r.Deadline,
+			}, Phase: settings.SwitchCheckpointReserved, Source: r.Source, Target: r.Target}
+			h.mu.Unlock()
+			runtime := h.b.nodePolicyRuntime()
+			runtime.mu.Lock()
+			runtime.current.Availability, runtime.current.PausedBy = nodepolicy.Paused, origin
+			runtime.live = nodepolicy.Paused
+			runtime.mu.Unlock()
+			worker := h.b.getEngineMgr()
+			h.b.workersMu.Lock()
+			h.b.engineMgrRecovering = true
+			h.b.workersMu.Unlock()
+			if h.b.getEngineMgr() != nil {
+				t.Fatal("replacement was exposed before conservative recovery")
+			}
+			if !h.b.recoverEngineSwitchOn(worker) {
+				t.Fatal("paused replacement could not release its reservation and verify shutdown")
+			}
+			o := switchStoreDisk(t, h.b.engineSwitch.store).LocalObligations[p.RequestID]
+			if !o.PauseApplied || !o.Discharged || !h.b.engineSwitch.resolved[p.RequestID] {
+				t.Fatalf("physical pause obligation not settled: %+v", o)
+			}
+			h.mu.Lock()
+			cp := *h.cp
+			sourceSlept, targetSlept := h.sleeping[p.SourceEngine], h.sleeping[p.TargetEngine]
+			h.mu.Unlock()
+			if cp.Phase != settings.SwitchCheckpointReleased || !sourceSlept || !targetSlept || cp.Source.Intent != settings.SwitchIntentOn {
+				t.Fatalf("release or intent-neutral shutdown incomplete: checkpoint=%+v sourceSlept=%v targetSlept=%v", cp, sourceSlept, targetSlept)
+			}
+			var released, slept bool
+			for _, call := range h.engine.snapshot() {
+				if call.method == settings.SwitchStepMethod {
+					var step settings.SwitchStepRequest
+					if err := json.Unmarshal(call.params, &step); err != nil {
+						t.Fatalf("decode switch step: %v", err)
+					}
+					released = released || step.Step == settings.SwitchStepRelease
+				}
+				if call.method == engineSleepMethod {
+					if !released {
+						t.Fatal("physical shutdown entered before switch reservation release")
+					}
+					slept = true
+				}
+				if call.method == "engine:switch-recovery-ready" && !slept {
+					t.Fatal("replacement admitted peer writes before physical pause")
+				}
+			}
+		})
+	}
+	test("local pause", nodepolicy.PausedLocally)
+	test("peer pause", nodepolicy.PausedByPeer)
+}
+
 func TestSwitchRelayCancellationRetiresOnlyWaiter(t *testing.T) {
 	h := newSwitchHarness(t)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -691,6 +768,74 @@ func TestSwitchRelayCancellationRetiresOnlyWaiter(t *testing.T) {
 	if ctx.Err() == nil || operation.Err() != nil {
 		t.Fatal("relay cancel affected accepted operation")
 	}
+}
+
+func TestFailedStartupPauseAllowsLocalRecovery(t *testing.T) {
+	test := func(name string, state nodepolicy.Availability) {
+		t.Run(name, func(t *testing.T) {
+			h := newSwitchHarness(t)
+			runtime := h.b.nodePolicyRuntime()
+			runtime.mu.Lock()
+			runtime.current.Availability, runtime.current.PausedBy = nodepolicy.Paused, nodepolicy.PausedByPeer
+			runtime.live = nodepolicy.Paused
+			runtime.mu.Unlock()
+			h.b.observeAdmission(nodepolicy.AdmissionState{ActiveByEngine: map[string]int{}})
+			worker := h.b.getEngineMgr()
+			h.b.workersMu.Lock()
+			h.b.engineMgrRecovering = true
+			h.b.workersMu.Unlock()
+			var fail atomic.Bool
+			fail.Store(true)
+			base := h.engine.answer
+			h.engine.setAnswer(func(method string, raw json.RawMessage) (any, string) {
+				if method == engineSleepMethod && fail.Load() {
+					return nil, "fixture engine could not be stopped"
+				}
+				return base(method, raw)
+			})
+			if h.b.recoverEngineSwitchOn(worker) {
+				t.Fatal("failed startup shutdown was reported as recovered")
+			}
+			runtime.mu.Lock()
+			live, blocked := runtime.live, runtime.managementBlockedLocked()
+			runtime.mu.Unlock()
+			if h.b.getEngineMgr() != nil || live != nodepolicy.Draining || !blocked {
+				t.Fatalf("failed startup lost its fence: live=%s blocked=%v", live, blocked)
+			}
+			beforeSleep := len(h.engine.methods(engineSleepMethod))
+			fail.Store(false)
+			if got, err := h.b.setAvailability(context.Background(), state, nodepolicy.PausedLocally); err != nil || got != state {
+				t.Fatalf("local recovery = %s, %v; want %s", got, err, state)
+			}
+			if h.b.getEngineMgr() != worker {
+				t.Fatal("local recovery left the acknowledged current manager hidden")
+			}
+			afterSleep := len(h.engine.methods(engineSleepMethod))
+			if state == nodepolicy.Paused {
+				if afterSleep <= beforeSleep {
+					t.Fatal("local Retry Pause did not retry physical shutdown")
+				}
+				if len(h.engine.methods(restoreEnabledEnginesMethod)) != 0 {
+					t.Fatal("Retry Pause restored engines before Resume")
+				}
+				if got, err := h.b.setAvailability(context.Background(), nodepolicy.Available, nodepolicy.PausedLocally); err != nil || got != nodepolicy.Available {
+					t.Fatalf("resume after retry = %s, %v", got, err)
+				}
+			} else if afterSleep != beforeSleep {
+				t.Fatal("local Resume executed the superseded physical pause")
+			}
+			h.engine.waitFor("deferred saved-On restoration after local Resume", func(calls []policyCall) bool {
+				for _, call := range calls {
+					if call.method == restoreEnabledEnginesMethod {
+						return true
+					}
+				}
+				return false
+			})
+		})
+	}
+	test("local Retry Pause", nodepolicy.Paused)
+	test("local Resume", nodepolicy.Available)
 }
 
 func TestSwitchLocalPauseVetoDoesNotWaitForTransitionLocks(t *testing.T) {

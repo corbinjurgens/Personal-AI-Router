@@ -106,14 +106,20 @@ Off/pause during retained recovery latches against its checkpoint identity;
 recovery rechecks after reconciliation and drain release, repeats cleanup for a
 new veto, and orders checkpoint release with that admission gate.
 Admission first persists an internal operation-keyed local obligation in the
-switch journal; failure visibly refuses the local request. Before terminal release
-or recovery resolution, the broker holds the operation lock while discharging
+switch journal; failure visibly refuses the local request. Before recovery
+resolution, the broker holds the operation lock while discharging
 every obligated engine through a verified ordinary stop on the current manager.
-Pause must be persisted and applied too; its operation-specific completion proof
+A completed Pause is persisted and applied; its operation-specific completion proof
 is saved before a later local Resume can run. Cleanup preserves that Resume and
-uses the saved proof without re-pausing. Older journals without the proof retain
-the current persisted and applied pause check for either origin. Discharge is durably recorded; failure
-retains recovery ownership. Restart replays undischarged obligations even with no
+uses the saved proof without re-pausing. A reconciled manager reservation may
+be released while pause is still pending, with a durable recovery receipt and
+undischarged obligation retained behind the pause fence. This permits
+intent-neutral sleep without a reservation cycle. Shutdown readback uses one
+manager throughout; startup and replacement verify it before readiness. Local
+Resume may explicitly retire an unapplied pause after conservative switch
+cleanup, without recording false physical-completion proof.
+Discharge is durably recorded; failure retains recovery ownership.
+Restart replays undischarged obligations even with no
 manager checkpoint, before restoration/readiness. An older direct peer start loses
 to the subsequently admitted local Off; later local On waits for this discharge.
 Explicit local start, restart and install with `start: true` share the operation

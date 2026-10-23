@@ -255,6 +255,63 @@ func TestPauseStopFailureRetainsFenceAndCanRetryLocally(t *testing.T) {
 	}
 }
 
+func TestRepeatedCompletedPauseKeepsRevisionAndRechecksShutdown(t *testing.T) {
+	b, _, _, engine := pausingBroker(t, nodepolicy.PauseConfig{OnActive: nodepolicy.FinishActive})
+	if state, err := b.setAvailability(context.Background(), nodepolicy.Paused, nodepolicy.PausedLocally); err != nil || state != nodepolicy.Paused {
+		t.Fatalf("initial pause = %s, %v", state, err)
+	}
+	revision := b.localPolicy().Policy.Revision
+	before := len(engine.methods(engineSleepMethod))
+	if state, err := b.setAvailability(context.Background(), nodepolicy.Paused, nodepolicy.PausedLocally); err != nil || state != nodepolicy.Paused {
+		t.Fatalf("repeated pause = %s, %v", state, err)
+	}
+	if got := b.localPolicy().Policy.Revision; got != revision {
+		t.Fatalf("repeated completed pause revision = %s, want %s", got, revision)
+	}
+	if got := len(engine.methods(engineSleepMethod)); got <= before {
+		t.Fatalf("repeated pause did not recheck physical shutdown: sleep calls %d -> %d", before, got)
+	}
+}
+
+func TestPauseReadbackCannotCrossManagerReplacement(t *testing.T) {
+	b, _, _, engine := pausingBroker(t, nodepolicy.PauseConfig{OnActive: nodepolicy.FinishActive})
+	t.Cleanup(engine.releaseHeld)
+	base := engine.answer
+	first := true
+	engine.setAnswer(func(method string, raw json.RawMessage) (any, string) {
+		result, errText := base(method, raw)
+		if method == "engine:get-installed" && first {
+			first = false
+			return result, holdSuccessReply
+		}
+		return result, errText
+	})
+	done := make(chan error, 1)
+	go func() {
+		_, err := b.setAvailability(context.Background(), nodepolicy.Paused, nodepolicy.PausedLocally)
+		done <- err
+	}()
+	engine.waitFor("first pause inventory", func(calls []policyCall) bool {
+		for _, call := range calls {
+			if call.method == "engine:get-installed" {
+				return true
+			}
+		}
+		return false
+	})
+	replacement := attachFakeEngine(t, b)
+	engine.releaseHeld()
+	if err := receive(t, "pause against replaced manager", done); err == nil || !strings.Contains(err.Error(), "engine shutdown readback unavailable") {
+		t.Fatalf("replaced-manager pause = %v, want unverified shutdown", err)
+	}
+	if got := b.localPolicy().Availability; got != nodepolicy.Draining {
+		t.Fatalf("replaced-manager availability = %s, want draining", got)
+	}
+	if got := replacement.snapshot(); len(got) != 0 {
+		t.Fatalf("pause mixed replacement calls into the old inventory: %+v", got)
+	}
+}
+
 func TestPauseReplaySkipsRestoreForEveryOrigin(t *testing.T) {
 	test := func(name string, origin nodepolicy.PauseOrigin, recovery bool) {
 		t.Run(name, func(t *testing.T) {

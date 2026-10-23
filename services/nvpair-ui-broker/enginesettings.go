@@ -35,6 +35,21 @@ type engineSettingsRecord struct {
 	Explicit bool                       `json:"explicit"`
 	Receipts map[string]settingsReceipt `json:"receipts"`
 }
+
+func (r *engineSettingsRecord) clone() *engineSettingsRecord {
+	if r == nil {
+		return nil
+	}
+	copy := *r
+	copy.Snapshot = r.Snapshot.Clone()
+	copy.Previous = r.Previous.Clone()
+	copy.Receipts = make(map[string]settingsReceipt, len(r.Receipts))
+	for id, receipt := range r.Receipts {
+		copy.Receipts[id] = receipt
+	}
+	return &copy
+}
+
 type activeSettingsOperation struct {
 	Engine string
 	Port   int
@@ -179,24 +194,54 @@ func isEngineDiscoveryService(service noderec.ServiceKey) bool {
 }
 
 func (b *Broker) settingsSnapshotLocked(ctx context.Context, engine string) (settings.Snapshot, error) {
+	record, save, err := b.prepareSettingsSnapshotLocked(ctx, engine)
+	if err != nil {
+		return settings.Snapshot{}, err
+	}
+	previous := b.engineSettings[engine].clone()
+	if current := b.engineSettings[engine]; current != nil {
+		// Readers can run while an accepted apply waits on the worker. Keep
+		// that operation's record pointer attached to the journal.
+		*current = *record
+		record = current
+	} else {
+		b.engineSettings[engine] = record
+	}
+	if save {
+		if err := b.saveEngineSettingsLocked(); err != nil {
+			if previous == nil {
+				delete(b.engineSettings, engine)
+			} else {
+				*record = *previous
+			}
+			return settings.Snapshot{}, err
+		}
+	}
+	return record.Snapshot.Clone(), nil
+}
+
+// Build initialization, migration and drift readback on a private record.
+// Apply must finish worker IO before it can atomically authorize and save.
+func (b *Broker) prepareSettingsSnapshotLocked(ctx context.Context, engine string) (*engineSettingsRecord, bool, error) {
 	if _, ok := engineProxyProfileFor(engine); !ok {
-		return settings.Snapshot{}, fmt.Errorf("this engine does not support settings")
+		return nil, false, fmt.Errorf("this engine does not support settings")
 	}
 	if err := b.loadEngineSettingsLocked(); err != nil {
-		return settings.Snapshot{}, err
+		return nil, false, err
 	}
 	var launch settings.LaunchState
 	if err := b.settingsWorkerCall(ctx, "engine:get-launch", map[string]string{"engine": engine}, &launch); err != nil {
-		return settings.Snapshot{}, err
+		return nil, false, err
 	}
 	proxyPort := 0
 	ready := false
 	if proxy := b.settingsProxy(engine); proxy != nil {
 		ready, proxyPort = proxy.Status(engine)
 	}
-	record := b.engineSettings[engine]
-	if err := b.migrateSettingsArgumentsLocked(ctx, engine, record); err != nil {
-		return settings.Snapshot{}, err
+	record := b.engineSettings[engine].clone()
+	save, err := b.prepareSettingsArgumentsLocked(ctx, engine, record)
+	if err != nil {
+		return nil, false, err
 	}
 	configuredProxy := proxyPort
 	if !ready && record != nil {
@@ -205,18 +250,12 @@ func (b *Broker) settingsSnapshotLocked(ctx context.Context, engine string) (set
 	current := settings.ConfigFromLaunch(launch, configuredProxy)
 	if record == nil {
 		record = &engineSettingsRecord{Snapshot: settings.Snapshot{NodeID: b.nodeID, Engine: engine, Revision: 1, AppliedRevision: 1, Epoch: b.engineSettingsEpoch, Phase: "idle", Settings: current}, Receipts: make(map[string]settingsReceipt)}
-		b.engineSettings[engine] = record
-		if err := b.saveEngineSettingsLocked(); err != nil {
-			delete(b.engineSettings, engine)
-			return settings.Snapshot{}, err
-		}
+		save = true
 	} else if record.Snapshot.Phase != "applying" && record.Snapshot.Phase != "failed" && !record.Snapshot.Settings.Equal(current) {
 		record.Snapshot.Settings = current
 		record.Snapshot.Revision++
 		record.Snapshot.AppliedRevision = record.Snapshot.Revision
-		if err := b.saveEngineSettingsLocked(); err != nil {
-			return settings.Snapshot{}, err
-		}
+		save = true
 	}
 	snapshot := record.Snapshot.Clone()
 	snapshot.Serving = launch.ServingReadback.Clone()
@@ -238,7 +277,7 @@ func (b *Broker) settingsSnapshotLocked(ctx context.Context, engine string) (set
 		snapshot.Sequence++
 		record.Snapshot = snapshot.Clone()
 	}
-	return snapshot, nil
+	return record, save, nil
 }
 
 func (b *Broker) publishSettingsLocked() {
@@ -346,6 +385,10 @@ func (b *Broker) previewSettingsLocked(ctx context.Context, p settings.Request) 
 	if err != nil {
 		return settings.Preview{}, err
 	}
+	return b.previewSettingsSnapshotLocked(ctx, p, current)
+}
+
+func (b *Broker) previewSettingsSnapshotLocked(ctx context.Context, p settings.Request, current settings.Snapshot) (settings.Preview, error) {
 	if current.Revision != p.ExpectedRevision {
 		return settings.Preview{}, fmt.Errorf("settings changed on this device; reload before applying")
 	}
@@ -580,7 +623,11 @@ func (b *Broker) applyEngineSettings(ctx context.Context, p settings.Request, ca
 	// Recheck CORS after acquiring the target's apply lock. An HTTP ingress
 	// check alone can become stale while another accepted apply is running.
 	p.PreserveCORS = caller != ""
-	preview, err := b.previewSettingsLocked(ctx, p)
+	record, _, err := b.prepareSettingsSnapshotLocked(ctx, p.Engine)
+	if err != nil {
+		return settingsReceipt{}, err
+	}
+	preview, err := b.previewSettingsSnapshotLocked(ctx, p, record.Snapshot)
 	if err != nil {
 		return settingsReceipt{}, err
 	}
@@ -596,20 +643,21 @@ func (b *Broker) applyEngineSettings(ctx context.Context, p settings.Request, ca
 		r.mu.Unlock()
 		return settingsReceipt{}, fmt.Errorf("resolve settings errors and port conflicts before applying")
 	}
-	record := b.engineSettings[p.Engine]
-	previous := *record
-	previous.Snapshot = record.Snapshot.Clone()
-	previous.Previous = record.Previous.Clone()
-	previous.Receipts = make(map[string]settingsReceipt, len(record.Receipts))
-	for k, v := range record.Receipts {
-		previous.Receipts[k] = v
+	previous := b.engineSettings[p.Engine]
+	b.engineSettings[p.Engine] = record
+	rollback := func() {
+		if previous == nil {
+			delete(b.engineSettings, p.Engine)
+		} else {
+			b.engineSettings[p.Engine] = previous
+		}
 	}
 	if preview.Settings.Equal(record.Snapshot.Settings) && record.Snapshot.Phase != "failed" {
 		record.Snapshot.RequestID = p.RequestID
 		record.Snapshot.Phase = "succeeded"
 		record.Receipts[p.RequestID] = settingsReceipt{Hash: hash, Revision: record.Snapshot.Revision, Phase: "succeeded"}
 		if err := b.saveEngineSettingsLocked(); err != nil {
-			*record = previous
+			rollback()
 			r.mu.Unlock()
 			return settingsReceipt{}, err
 		}
@@ -627,7 +675,7 @@ func (b *Broker) applyEngineSettings(ctx context.Context, p settings.Request, ca
 	record.Snapshot.Error = ""
 	record.Receipts[p.RequestID] = settingsReceipt{Hash: hash, Revision: record.Snapshot.Revision, Phase: "applying"}
 	if err := b.saveEngineSettingsLocked(); err != nil {
-		*record = previous
+		rollback()
 		r.mu.Unlock()
 		return settingsReceipt{}, fmt.Errorf("settings could not be saved; no runtime changes were made")
 	}

@@ -6,6 +6,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -858,11 +859,21 @@ func TestSwitchLatchedPauseReconcileCleansCommittedTarget(t *testing.T) {
 	runtime := h.b.nodePolicyRuntime()
 	runtime.mu.Lock()
 	runtime.current.Availability, runtime.current.PausedBy = nodepolicy.Paused, nodepolicy.PausedLocally
+	runtime.live = nodepolicy.Draining
 	runtime.mu.Unlock()
 	release()
 	r := h.receipt(t, p.RequestID)
-	if r.Phase != settings.SwitchFailedPublication || r.RecoveryRequired || r.Target.Intent != settings.SwitchIntentOff || !r.Target.TerminationVerified {
+	// Stored pause is a fence, not proof of physical shutdown. Reconciliation
+	// cleans the committed target but retains the global pause obligation.
+	if r.Phase != settings.SwitchFailedPublication || !r.RecoveryRequired || r.Target.Intent != settings.SwitchIntentOff || !r.Target.TerminationVerified {
 		t.Fatalf("latched pause terminal = %+v", r)
+	}
+	if state, err := h.b.setAvailability(context.Background(), nodepolicy.Paused, nodepolicy.PausedLocally); err != nil || state != nodepolicy.Paused {
+		t.Fatalf("physical pause after target cleanup = %s, %v", state, err)
+	}
+	o := switchStoreDisk(t, h.b.engineSwitch.store).LocalObligations[p.RequestID]
+	if !o.PauseApplied || !o.Discharged {
+		t.Fatalf("verified physical pause did not settle its obligation: %+v", o)
 	}
 }
 
@@ -898,6 +909,59 @@ func TestSwitchPauseResumeBeforeCleanupSettles(t *testing.T) {
 	requireSwitchPauseResumeSettled(t, h, p.RequestID)
 }
 
+func TestSwitchLocalResumeSupersedesUnappliedPause(t *testing.T) {
+	h := newSwitchHarness(t)
+	clustertrusttest.Join(t, h.b.clusterDir, "cluster", "target", "peer")
+	grantRemoteManagement(t, h.b.clusterDir, "cluster", "target", "peer", true)
+	p := h.request(t, "resume-unapplied-pause")
+	reached, release := holdSwitchCompletion(t, h)
+	if _, err := h.b.acceptEngineSwitch(context.Background(), p, "peer"); err != nil {
+		t.Fatal(err)
+	}
+	requireGateOpens(t, reached, "post-publication barrier")
+	runtime := h.b.nodePolicyRuntime()
+	runtime.mu.Lock()
+	runtime.current.Availability, runtime.current.PausedBy = nodepolicy.Paused, nodepolicy.PausedByPeer
+	runtime.live = nodepolicy.Draining
+	runtime.mu.Unlock()
+	if err := h.b.vetoRemoteEngineSwitch("", false); err != nil {
+		t.Fatal(err)
+	}
+	release()
+	r := h.receipt(t, p.RequestID)
+	o := switchStoreDisk(t, h.b.engineSwitch.store).LocalObligations[p.RequestID]
+	if !r.RecoveryRequired || !o.Pause || o.PauseApplied || o.Discharged {
+		t.Fatalf("unapplied fenced pause lost its durable obligation: receipt=%+v obligation=%+v", r, o)
+	}
+	h.mu.Lock()
+	phase := h.cp.Phase
+	h.mu.Unlock()
+	if phase != settings.SwitchCheckpointReleased {
+		t.Fatalf("reconciled manager reservation still prevents physical pause: %s", phase)
+	}
+	// Resume is explicitly allowed after incomplete physical pause. It retires
+	// the canceled obligation after cleanup without inventing a shutdown proof.
+	if state, err := h.b.setAvailability(context.Background(), nodepolicy.Available, nodepolicy.PausedLocally); err != nil || state != nodepolicy.Available {
+		t.Fatalf("local resume = %s, %v", state, err)
+	}
+	o = switchStoreDisk(t, h.b.engineSwitch.store).LocalObligations[p.RequestID]
+	if o.PauseApplied || !o.Discharged {
+		t.Fatalf("Resume fabricated physical completion or retained a canceled obligation: %+v", o)
+	}
+	h.b.engineConfigMu.Lock()
+	err := h.b.pendingSwitchLocked("")
+	resolved := h.b.switchCoordinator().resolved[p.RequestID]
+	h.b.engineConfigMu.Unlock()
+	if err != nil || !resolved {
+		t.Fatalf("explicit local Resume retained the old reservation: resolved=%v err=%v", resolved, err)
+	}
+	for _, call := range h.engine.snapshot() {
+		if call.method == engineSleepMethod {
+			t.Fatal("superseding Resume unnecessarily executed the canceled physical pause")
+		}
+	}
+}
+
 func TestSwitchPauseResumeBeforeCleanupJournalReloadSettles(t *testing.T) {
 	h, p := pauseResumeBeforeSwitchCleanup(t)
 	h.b.engineConfigMu.Lock()
@@ -912,10 +976,72 @@ func TestSwitchPauseResumeBeforeCleanupJournalReloadSettles(t *testing.T) {
 	requireSwitchPauseResumeSettled(t, h, p.RequestID)
 }
 
+func TestSwitchPauseRetriesFailedReservationRelease(t *testing.T) {
+	h := newSwitchHarness(t)
+	clustertrusttest.Join(t, h.b.clusterDir, "cluster", "target", "peer")
+	grantRemoteManagement(t, h.b.clusterDir, "cluster", "target", "peer", true)
+	h.b.observeAdmission(nodepolicy.AdmissionState{ActiveByEngine: map[string]int{}})
+	p := h.request(t, "pause-release-retry")
+	reached, release := holdSwitchCompletion(t, h)
+	base := h.engine.answer
+	var failRelease atomic.Bool
+	failRelease.Store(true)
+	h.engine.setAnswer(func(method string, raw json.RawMessage) (any, string) {
+		if method == settings.SwitchStepMethod {
+			var step settings.SwitchStepRequest
+			if err := json.Unmarshal(raw, &step); err != nil {
+				return nil, err.Error()
+			}
+			if step.Step == settings.SwitchStepRelease && failRelease.Load() {
+				return nil, "transient release failure"
+			}
+		}
+		return base(method, raw)
+	})
+	if _, err := h.b.acceptEngineSwitch(context.Background(), p, "peer"); err != nil {
+		t.Fatal(err)
+	}
+	requireGateOpens(t, reached, "post-publication barrier")
+	runtime := h.b.nodePolicyRuntime()
+	runtime.mu.Lock()
+	runtime.current.Availability, runtime.current.PausedBy = nodepolicy.Paused, nodepolicy.PausedLocally
+	runtime.live = nodepolicy.Draining
+	runtime.mu.Unlock()
+	if err := h.b.vetoRemoteEngineSwitch("", false); err != nil {
+		t.Fatal(err)
+	}
+	release()
+	r := h.receipt(t, p.RequestID)
+	if !r.RecoveryRequired {
+		t.Fatalf("failed release lost recovery receipt: %+v", r)
+	}
+	h.mu.Lock()
+	phase := h.cp.Phase
+	h.mu.Unlock()
+	if phase == settings.SwitchCheckpointReleased {
+		t.Fatal("fixture release failure did not retain the manager reservation")
+	}
+	failRelease.Store(false)
+	if state, err := h.b.setAvailability(context.Background(), nodepolicy.Paused, nodepolicy.PausedLocally); err != nil || state != nodepolicy.Paused {
+		t.Fatalf("local Retry Pause after failed release = %s, %v", state, err)
+	}
+	o := switchStoreDisk(t, h.b.engineSwitch.store).LocalObligations[p.RequestID]
+	h.b.engineConfigMu.Lock()
+	pendingErr := h.b.pendingSwitchLocked("")
+	h.b.engineConfigMu.Unlock()
+	h.mu.Lock()
+	phase = h.cp.Phase
+	h.mu.Unlock()
+	if phase != settings.SwitchCheckpointReleased || !o.PauseApplied || !o.Discharged || pendingErr != nil {
+		t.Fatalf("Retry Pause did not settle release and physical shutdown: phase=%s obligation=%+v pending=%v", phase, o, pendingErr)
+	}
+}
+
 func TestSwitchPauseResumeBeforeCleanupBrokerRecoverySettles(t *testing.T) {
 	h, p := pauseResumeBeforeSwitchCleanup(t)
-	// Snapshot both durable owners while the old broker is still waiting for
-	// reconciliation. A fresh broker has no transition or veto completion state.
+	// Snapshot both durable owners after verified Pause and local Resume. A
+	// fresh broker must recover the proof without transition or veto latches.
+	original := h.receipt(t, p.RequestID)
 	journal, err := os.ReadFile(h.b.engineSwitch.store.path)
 	if err != nil {
 		t.Fatal(err)
@@ -946,14 +1072,76 @@ func TestSwitchPauseResumeBeforeCleanupBrokerRecoverySettles(t *testing.T) {
 	// Restart interruption receipts are immutable historical recovery records;
 	// successful recovery resolves their fence rather than rewriting them.
 	r := restarted.receipt(t, p.RequestID)
-	if !r.Terminal || r.Phase != settings.SwitchFailedInterrupted || !restarted.b.engineSwitch.resolved[p.RequestID] {
+	if !r.Terminal || r.Phase != original.Phase || !restarted.b.engineSwitch.resolved[p.RequestID] {
 		t.Fatalf("restart receipt was not resolved: %+v", r)
 	}
 	requireSwitchPauseResumeReleased(t, restarted, p.RequestID)
 }
 
-// Reuse the review probe's real availability paths and nonblocking delayed
-// reconciliation reply, allowing Resume to finish while cleanup is waiting.
+func TestLocalSwitchPauseRetriesFailedReservationRelease(t *testing.T) {
+	h := newSwitchHarness(t)
+	h.b.observeAdmission(nodepolicy.AdmissionState{ActiveByEngine: map[string]int{}})
+	p := h.request(t, "local-pause-release-retry")
+	reached, release := holdSwitchCompletion(t, h)
+	base := h.engine.answer
+	var failRelease atomic.Bool
+	failRelease.Store(true)
+	h.engine.setAnswer(func(method string, raw json.RawMessage) (any, string) {
+		if method == settings.SwitchStepMethod {
+			var step settings.SwitchStepRequest
+			if err := json.Unmarshal(raw, &step); err != nil {
+				return nil, err.Error()
+			}
+			if step.Step == settings.SwitchStepRelease && failRelease.Load() {
+				return nil, "transient local switch release failure"
+			}
+		}
+		return base(method, raw)
+	})
+	if _, err := h.b.acceptEngineSwitch(context.Background(), p, ""); err != nil {
+		t.Fatal(err)
+	}
+	requireGateOpens(t, reached, "local switch publication barrier")
+	release()
+	r := h.receipt(t, p.RequestID)
+	if r.Phase != settings.SwitchCompleted || r.RecoveryRequired {
+		t.Fatalf("local switch did not complete before release failure: %+v", r)
+	}
+	if _, exists := switchStoreDisk(t, h.b.engineSwitch.store).LocalObligations[p.RequestID]; exists {
+		t.Fatal("local switch unexpectedly required a remote pause obligation")
+	}
+	h.mu.Lock()
+	phase := h.cp.Phase
+	h.mu.Unlock()
+	if phase == settings.SwitchCheckpointReleased {
+		t.Fatal("failed release did not retain the local manager reservation")
+	}
+	// The local switch's completed receipt carries no remote pause obligation.
+	// Retry must consult the existing recovery owner before intent-neutral sleep.
+	runtime := h.b.nodePolicyRuntime()
+	runtime.mu.Lock()
+	runtime.current.Availability, runtime.current.PausedBy = nodepolicy.Paused, nodepolicy.PausedLocally
+	runtime.live = nodepolicy.Draining
+	runtime.mu.Unlock()
+	failRelease.Store(false)
+	if state, err := h.b.setAvailability(context.Background(), nodepolicy.Paused, nodepolicy.PausedLocally); err != nil || state != nodepolicy.Paused {
+		t.Fatalf("local Retry Pause after local switch release failure = %s, %v", state, err)
+	}
+	h.mu.Lock()
+	cp := *h.cp
+	sourceSlept, targetSlept := h.sleeping[p.SourceEngine], h.sleeping[p.TargetEngine]
+	h.mu.Unlock()
+	h.b.engineConfigMu.Lock()
+	pendingErr := h.b.pendingSwitchLocked("")
+	h.b.engineConfigMu.Unlock()
+	if cp.Phase != settings.SwitchCheckpointReleased || !sourceSlept || !targetSlept || cp.Target.Intent != settings.SwitchIntentOn || pendingErr != nil {
+		t.Fatalf("local Retry Pause failed release or rewrote saved On: checkpoint=%+v sourceSlept=%v targetSlept=%v pending=%v", cp, sourceSlept, targetSlept, pendingErr)
+	}
+}
+
+// Pause must wait for conservative reconciliation to release the manager
+// reservation before its intent-neutral sleep can enter. Resume follows the
+// durable physical proof, including when the historical receipt needs recovery.
 func pauseResumeBeforeSwitchCleanup(t *testing.T) (*switchHarness, settings.SwitchRequest) {
 	t.Helper()
 	h := newSwitchHarness(t)
@@ -991,10 +1179,19 @@ func pauseResumeBeforeSwitchCleanup(t *testing.T) (*switchHarness, settings.Swit
 		t.Fatal(err)
 	}
 	requireGateOpens(t, starting, "target start")
-	if state, err := h.b.setAvailability(context.Background(), nodepolicy.Paused, nodepolicy.PausedLocally); err != nil || state != nodepolicy.Paused {
-		t.Fatalf("pause = %s, %v", state, err)
-	}
+	pauseDone := make(chan error, 1)
+	go func() {
+		state, err := h.b.setAvailability(context.Background(), nodepolicy.Paused, nodepolicy.PausedLocally)
+		if err == nil && state != nodepolicy.Paused {
+			err = fmt.Errorf("pause state = %s, want paused", state)
+		}
+		pauseDone <- err
+	}()
 	requireGateOpens(t, reconciling, "switch reconciliation")
+	h.engine.releaseHeld()
+	if err := receive(t, "physical pause after switch release", pauseDone); err != nil {
+		t.Fatalf("pause: %v", err)
+	}
 	if state, err := h.b.setAvailability(context.Background(), nodepolicy.Available, nodepolicy.PausedLocally); err != nil || state != nodepolicy.Available {
 		t.Fatalf("resume = %s, %v", state, err)
 	}
@@ -1004,7 +1201,10 @@ func pauseResumeBeforeSwitchCleanup(t *testing.T) (*switchHarness, settings.Swit
 func requireSwitchPauseResumeSettled(t *testing.T, h *switchHarness, id string) {
 	t.Helper()
 	r := h.receipt(t, id)
-	if !r.Terminal || r.RecoveryRequired || r.Error == nil || r.Error.Kind != settings.SwitchErrorRemoteVeto || r.Target.Intent != settings.SwitchIntentOff || !r.Target.TerminationVerified {
+	h.b.engineConfigMu.Lock()
+	resolved := h.b.switchCoordinator().resolved[id]
+	h.b.engineConfigMu.Unlock()
+	if !r.Terminal || (r.RecoveryRequired && !resolved) || r.Error == nil || r.Error.Kind != settings.SwitchErrorRemoteVeto || r.Target.Intent != settings.SwitchIntentOff || !r.Target.TerminationVerified {
 		t.Fatalf("Pause/Resume cleanup did not settle: %+v", r)
 	}
 	requireSwitchPauseResumeReleased(t, h, id)

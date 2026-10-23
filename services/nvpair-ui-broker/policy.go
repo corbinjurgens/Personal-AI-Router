@@ -1749,7 +1749,11 @@ func (b *Broker) waitAdmission(ctx context.Context, timeout time.Duration, pred 
 
 // callEngine makes one engine-manager call on the policy's behalf.
 func (b *Broker) callEngine(ctx context.Context, method string, params any) (json.RawMessage, error) {
-	w := b.getEngineMgr()
+	return callEngineOn(ctx, b.getEngineMgr(), method, params)
+}
+
+// Recovery uses its pinned manager before ordinary callers may see it.
+func callEngineOn(ctx context.Context, w *rpcWorker, method string, params any) (json.RawMessage, error) {
 	if w == nil {
 		return nil, fmt.Errorf("engine manager unavailable")
 	}
