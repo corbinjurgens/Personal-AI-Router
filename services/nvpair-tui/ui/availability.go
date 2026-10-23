@@ -115,10 +115,14 @@ func (a availabilityState) incomplete() bool {
 	return a.err != "" && a.value == availDraining
 }
 
-// detail is the failure without the broker's fixed lead-in, so the part that
-// differs between failures is what a narrow header shows.
+// detail is the failure after the broker's fixed lead-in, wherever the transport
+// put it ("rpc error -32000: " precedes it), so the part that differs between
+// failures is what a narrow header shows.
 func (a availabilityState) detail() string {
-	return strings.TrimPrefix(a.err, pauseStopFailurePrefix)
+	if _, rest, found := strings.Cut(a.err, pauseStopFailurePrefix); found {
+		return rest
+	}
+	return a.err
 }
 
 // toggleTarget is the state P asks for: resume when paused, pause otherwise.

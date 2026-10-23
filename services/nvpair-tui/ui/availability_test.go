@@ -106,7 +106,11 @@ func TestIncompletePauseKeepsDetailAndDesktopResumeVisible(t *testing.T) {
 		m := newTestModel()
 		m.width = width
 		m.ready, m.brokerVersion = true, "1.2.3"
-		m.avail = availabilityState{value: availDraining, err: "Pause could not stop every engine: ollama still running"}
+		// The failure arrives the way a real one does: through the RPC error's
+		// text, then the draining readback.
+		m.avail = availabilityState{value: availAvailable, pending: availPaused}
+		m.avail.update(setAvailabilityMsg{target: availPaused, err: &rpc.RPCError{Code: -32000, Message: "Pause could not stop every engine: ollama still running"}})
+		m.avail.update(policyGetMsg{availability: availDraining, guarded: true, epoch: m.avail.epoch})
 		// The frame is clipped to the terminal, as View does it.
 		header := lipgloss.NewStyle().MaxWidth(width).Render(m.headerView())
 		for _, want := range []string{"Pause incomplete — P retries", "ollama still running"} {
