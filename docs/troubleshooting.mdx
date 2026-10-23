@@ -1,7 +1,7 @@
-{/*
+{/_
 SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 SPDX-License-Identifier: Apache-2.0
-*/}
+_/}
 
 # Troubleshooting NVIDIA Personal AI Router
 
@@ -67,6 +67,29 @@ If a fresh invitation also fails:
   discovery problem first and work through the section above.
 - Allow PAIR through the firewall on both systems. Pairing uses TCP `14321`.
   Refer to [Ports](getting-started.mdx#7-connecting-your-agents-and-port-information).
+
+## Ask to Join Waits or Fails
+
+Open PAIR on the specific member selected by the requester and review
+**Settings > Cluster > Join requests**. Other members cannot approve that
+request. The service retains requests while its UI is closed, until expiry;
+an offline selected member cannot receive or approve them. Incoming requests
+do not automatically open a modal. The displayed name and address are unverified
+claims. Approve only a request you recognize.
+
+After approval, read the PIN on the member and enter it on the requester.
+The member must reach the requester's pairing port (normally TCP `14321`).
+Ask to join does not bypass firewalls: allow PAIR on both devices and check
+their pairing ports and local-network reachability. If the approver changed
+clusters, select a current member and start a new request. Update PAIR on both
+devices if Ask to join is unsupported; ordinary Invite remains a separate action.
+
+Declined, expired and canceled requests do not establish membership. If status
+or a pairing receipt is unavailable, check the cluster on both devices before
+trying again; disappearance from a list or elapsed time is not proof of joining.
+Do not attempt to move a device that has retained cluster peers with Ask to join.
+Leave that cluster explicitly first. Empty-solo replacement requires confirmation;
+if pairing fails after replacement, the device remains unclustered.
 
 ## No Engine or Model Is Available
 
@@ -135,7 +158,7 @@ To fix it:
    toggle the Ollama engine off and back on.
 
 That relaunches PAIR's proxy on `11434`. Send another request and the job should
-appear. This is about the Ollama *desktop application* specifically. PAIR can
+appear. This is about the Ollama _desktop application_ specifically. PAIR can
 manage or adopt an Ollama it starts itself.
 
 ## Jobs Do Not Show Expected Routing
@@ -165,10 +188,10 @@ Everything you need is on **Settings > Service**:
 
 To find them yourself:
 
-| Platform | Location |
-| --- | --- |
-| Windows | `%LOCALAPPDATA%\Nvidia Corporation\Personal AI Router\logs\` |
-| Linux | `~/.config/Nvidia Corporation/Personal AI Router/logs/` |
+| Platform | Location                                                     |
+| -------- | ------------------------------------------------------------ |
+| Windows  | `%LOCALAPPDATA%\Nvidia Corporation\Personal AI Router\logs\` |
+| Linux    | `~/.config/Nvidia Corporation/Personal AI Router/logs/`      |
 
 The current log is `nvpair.jsonl` and the previous one is `nvpair.1.jsonl`. Each
 line is a JSON object, so `grep` and `jq` work well on them. PAIR never writes

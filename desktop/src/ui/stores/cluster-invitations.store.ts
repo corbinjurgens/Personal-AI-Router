@@ -3,12 +3,19 @@
 
 import { create } from 'zustand'
 import type { ClusterInitialSnapshot } from '@/shared/types/bootstrap'
-import type { ClusterNode, Invite, RemoteManagementSnapshot } from '@/shared/types/cluster'
+import type {
+    AskToJoinRequest,
+    ClusterNode,
+    Invite,
+    JoinRequest,
+    JoinRequestsSnapshot,
+    RemoteManagementSnapshot
+} from '@/shared/types/cluster'
 import { INVALID_PARAMS_CODE, POLICY_CONFLICT_CODE } from '@/shared/constants/service-errors'
 import { getPairTransport } from '@/ui/api/bootstrap'
 import { serviceErrorCode } from '@/ui/api/service-transport'
 import getErrorString from '@/shared/utils/get-error-string'
-import { isInviteStatusUnknown } from '@/ui/utils/cluster-invite-error'
+import { formatJoinRequestError, isInviteStatusUnknown } from '@/ui/utils/cluster-invite-error'
 import { MODULAR_INVITE_STATUS_POLL_INTERVAL_MS } from '@/shared/constants/modular-runtime'
 
 interface RemoteManagementChange {
@@ -18,6 +25,17 @@ interface RemoteManagementChange {
 }
 
 interface ClusterInvitationsStore {
+    joinSnapshot: JoinRequestsSnapshot | null
+    joinError: string | null
+    joinBusy: Record<string, boolean>
+    refreshJoinRequests: () => Promise<void>
+    askToJoin: (request: AskToJoinRequest) => Promise<JoinRequest | null>
+    respondToJoinRequest: (
+        requestId: string,
+        ...response: [true, boolean] | [false]
+    ) => Promise<void>
+    cancelJoinRequest: (requestId: string) => Promise<void>
+    recoverJoinInvite: (requestId: string, open?: boolean) => Promise<void>
     /**
      * Every live inbound invite awaiting the local user's PIN entry. Electron
      * main is authoritative: this list is hydrated from `cluster:get-initial` and
@@ -56,20 +74,180 @@ interface ClusterInvitationsStore {
 }
 
 let unsubs: Array<() => void> = []
+let joinRevision = 0
+let joinConnection = 0
+let joinRead: Promise<void> | null = null
+let joinTimer: ReturnType<typeof setInterval> | null = null
+// Exact children of observed terminal requests cannot become new PIN prompts.
+const retiredJoinInvites = new Set<string>()
+
+function terminalJoin(request: JoinRequest): boolean {
+    return !['awaiting-approval', 'awaiting-requester', 'pairing'].includes(request.state)
+}
+
+function preferJoin(previous: JoinRequest | undefined, request: JoinRequest): JoinRequest {
+    if (!previous) return request
+    if (terminalJoin(previous)) return previous
+    const rank = (value: JoinRequest) =>
+        terminalJoin(value)
+            ? 3
+            : value.state === 'pairing'
+              ? 2
+              : value.state === 'awaiting-requester'
+                ? 1
+                : 0
+    return rank(previous) > rank(request) ? previous : request
+}
+
+function receiveJoinSnapshot(snapshot: JoinRequestsSnapshot): void {
+    joinRevision++
+    useClusterInvitationsStore.setState(state => {
+        const missing =
+            state.joinSnapshot?.requests.filter(
+                previous =>
+                    !terminalJoin(previous) &&
+                    !snapshot.requests.some(request => request.requestId === previous.requestId)
+            ) ?? []
+        const requests = [
+            ...snapshot.requests.map(request => {
+                const previous = state.joinSnapshot?.requests.find(
+                    value => value.requestId === request.requestId
+                )
+                return preferJoin(previous, request)
+            }),
+            ...missing
+        ]
+        for (const request of requests)
+            if (request.direction === 'outgoing' && terminalJoin(request) && request.inviteId)
+                retiredJoinInvites.add(request.inviteId)
+        return {
+            pendingInvites: state.pendingInvites.filter(
+                invite => !retiredJoinInvites.has(invite.inviteId)
+            ),
+            activeInviteId:
+                state.activeInviteId &&
+                retiredJoinInvites.has(state.activeInviteId) &&
+                !retainSubmittedSelection(state.activeInviteId, state.inviteResults)
+                    ? null
+                    : state.activeInviteId,
+            joinSnapshot: {
+                ...snapshot,
+                requests
+            },
+            joinError: missing.length
+                ? 'The request status is no longer available. Joining could not be confirmed. Check the cluster on both devices.'
+                : state.joinError
+        }
+    })
+    const store = useClusterInvitationsStore.getState()
+    for (const request of store.joinSnapshot?.requests ?? [])
+        if (
+            request.direction === 'outgoing' &&
+            request.state === 'pairing' &&
+            request.inviteId &&
+            (!store.pendingInvites.some(invite => invite.inviteId === request.inviteId) ||
+                request.reason === 'awaiting-confirmation' ||
+                request.reason === 'rollback-pending') &&
+            !store.inviteResults[request.inviteId]
+        )
+            void store.recoverJoinInvite(request.requestId)
+}
+
+function receiveJoinResult(request: JoinRequest): void {
+    const snapshot = useClusterInvitationsStore.getState().joinSnapshot
+    if (!snapshot) return
+    const previous = snapshot.requests.find(value => value.requestId === request.requestId)
+    if (previous && terminalJoin(previous) && !terminalJoin(request)) return
+    receiveJoinSnapshot({
+        ...snapshot,
+        requests: [
+            ...snapshot.requests.filter(value => value.requestId !== request.requestId),
+            request
+        ]
+    })
+}
+
+async function joinCommand(
+    key: string,
+    command: () => Promise<JoinRequest>
+): Promise<JoinRequest | null> {
+    const store = useClusterInvitationsStore.getState()
+    if (!connected || store.joinBusy[key]) return null
+    const currentGeneration = generation
+    const connection = joinConnection
+    useClusterInvitationsStore.setState(state => ({
+        joinBusy: { ...state.joinBusy, [key]: true },
+        joinError: null
+    }))
+    try {
+        const result = await command()
+        if (generation !== currentGeneration || connection !== joinConnection || !connected)
+            return null
+        receiveJoinResult(result)
+        return result
+    } catch (error) {
+        if (generation === currentGeneration && connection === joinConnection)
+            useClusterInvitationsStore.setState({
+                joinError: formatJoinRequestError(getErrorString(error))
+            })
+        return null
+    } finally {
+        if (generation === currentGeneration && connection === joinConnection) {
+            useClusterInvitationsStore.setState(state => ({
+                joinBusy: { ...state.joinBusy, [key]: false }
+            }))
+            void useClusterInvitationsStore.getState().refreshJoinRequests()
+        }
+    }
+}
 
 /** Drop `activeInviteId` if the invite it points at is no longer pending. */
 function stillActive(activeInviteId: string | null, invites: Invite[]): string | null {
     if (!activeInviteId) return null
+    if (retiredJoinInvites.has(activeInviteId)) return null
     return invites.some(invite => invite.inviteId === activeInviteId) ? activeInviteId : null
 }
 
-function pendingWithResults(invites: Invite[], results: Record<string, Invite>): Invite[] {
-    const pending = invites.filter(
-        invite => !results[invite.inviteId] || results[invite.inviteId].state === 'pending'
+function retainSubmittedSelection(
+    inviteId: string | null,
+    results: Record<string, Invite>
+): boolean {
+    if (!inviteId) return false
+    const result = results[inviteId]
+    return Boolean(result && (!retiredJoinInvites.has(inviteId) || result.state !== 'pending'))
+}
+
+function correlatedJoinInvites(
+    state: Pick<ClusterInvitationsStore, 'pendingInvites' | 'joinSnapshot'>
+): Invite[] {
+    return state.pendingInvites.filter(invite =>
+        state.joinSnapshot?.requests.some(
+            request =>
+                request.direction === 'outgoing' &&
+                request.state === 'pairing' &&
+                request.inviteId === invite.inviteId
+        )
+    )
+}
+
+function pendingWithResults(
+    invites: Invite[],
+    results: Record<string, Invite>,
+    recovered: Invite[] = []
+): Invite[] {
+    const combined = [
+        ...invites,
+        ...recovered.filter(invite => !invites.some(value => value.inviteId === invite.inviteId))
+    ]
+    const pending = combined.filter(
+        invite =>
+            !retiredJoinInvites.has(invite.inviteId) &&
+            (!results[invite.inviteId] || results[invite.inviteId].state === 'pending')
     )
     for (const result of Object.values(results)) {
         if (
             result.state === 'pending' &&
+            !retiredJoinInvites.has(result.inviteId) &&
             !pending.some(invite => invite.inviteId === result.inviteId)
         )
             pending.push(result)
@@ -204,6 +382,110 @@ function applyResult(result: Invite): void {
 }
 
 export const useClusterInvitationsStore = create<ClusterInvitationsStore>((set, get) => ({
+    joinSnapshot: null,
+    joinError: null,
+    joinBusy: {},
+    refreshJoinRequests: () => {
+        if (!connected) return Promise.resolve()
+        if (joinRead) return joinRead
+        const revision = joinRevision
+        const currentGeneration = generation
+        const request = Promise.resolve()
+            .then(() => window.pairApi.cluster.getJoinRequests())
+            .then(snapshot => {
+                if (connected && generation === currentGeneration && revision === joinRevision)
+                    receiveJoinSnapshot(snapshot)
+            })
+            .catch(() => {
+                if (connected && generation === currentGeneration && revision === joinRevision)
+                    set({
+                        joinError:
+                            'Join request status is unavailable. Joining could not be confirmed. Reconnect and check both devices before trying again.'
+                    })
+            })
+            .finally(() => {
+                if (joinRead === request) joinRead = null
+            })
+        joinRead = request
+        return request
+    },
+    askToJoin: request => joinCommand('outgoing', () => window.pairApi.cluster.askToJoin(request)),
+    respondToJoinRequest: async (requestId, ...response) => {
+        const request = get().joinSnapshot?.requests.find(value => value.requestId === requestId)
+        if (request?.state !== 'awaiting-approval' || request.direction !== 'incoming') return
+        await joinCommand(requestId, () =>
+            window.pairApi.cluster.respondToJoinRequest(requestId, ...response)
+        )
+    },
+    cancelJoinRequest: async requestId => {
+        await joinCommand(requestId, () => window.pairApi.cluster.cancelJoinRequest(requestId))
+    },
+    recoverJoinInvite: async (requestId, open = false) => {
+        const request = get().joinSnapshot?.requests.find(value => value.requestId === requestId)
+        if (
+            !connected ||
+            request?.direction !== 'outgoing' ||
+            request.state !== 'pairing' ||
+            !request.inviteId ||
+            retiredJoinInvites.has(request.inviteId) ||
+            get().joinBusy[requestId]
+        )
+            return
+        const inviteId = request.inviteId
+        const currentGeneration = generation
+        const connection = joinConnection
+        set(state => ({ joinBusy: { ...state.joinBusy, [requestId]: true } }))
+        try {
+            const invite = await window.pairApi.cluster.inviteStatus(inviteId)
+            const current = get().joinSnapshot?.requests.find(
+                value => value.requestId === requestId
+            )
+            if (
+                generation !== currentGeneration ||
+                connection !== joinConnection ||
+                !connected ||
+                current?.direction !== 'outgoing' ||
+                current.state !== 'pairing' ||
+                current.inviteId !== inviteId ||
+                invite.inviteId !== inviteId ||
+                invite.pin !== null
+            )
+                return
+            set(state => {
+                const submitted =
+                    invite.state !== 'pending' ||
+                    invite.reason === 'awaiting-confirmation' ||
+                    invite.reason === 'rollback-pending'
+                const previous = state.inviteResults[inviteId]
+                const inviteResults = submitted
+                    ? {
+                          ...state.inviteResults,
+                          [inviteId]: previous && previous.state !== 'pending' ? previous : invite
+                      }
+                    : state.inviteResults
+                return {
+                    inviteResults,
+                    pendingInvites: pendingWithResults(
+                        [
+                            ...state.pendingInvites.filter(value => value.inviteId !== inviteId),
+                            invite
+                        ],
+                        inviteResults
+                    ),
+                    activeInviteId: open ? inviteId : state.activeInviteId
+                }
+            })
+            if (get().inviteResults[inviteId]?.state === 'pending') ensurePolling(inviteId)
+        } catch (error) {
+            if (generation === currentGeneration && connection === joinConnection)
+                set({
+                    joinError: `Pairing status unavailable: ${getErrorString(error)}. Joining could not be confirmed. Check both devices.`
+                })
+        } finally {
+            if (generation === currentGeneration && connection === joinConnection)
+                set(state => ({ joinBusy: { ...state.joinBusy, [requestId]: false } }))
+        }
+    },
     pendingInvites: [],
     activeInviteId: null,
     members: [],
@@ -230,20 +512,32 @@ export const useClusterInvitationsStore = create<ClusterInvitationsStore>((set, 
             permissionNeedsBaseline = !firstBaseline
         }
         receiveMembers(snapshot.members, firstBaseline)
-        set(state => ({
-            pendingInvites: pendingWithResults(snapshot.pendingInvites, state.inviteResults),
-            members: snapshot.members,
-            remoteManagementContext: permissionGeneration,
-            activeInviteId:
-                state.activeInviteId && state.inviteResults[state.activeInviteId]
+        set(state => {
+            const pendingInvites = pendingWithResults(
+                snapshot.pendingInvites,
+                state.inviteResults,
+                correlatedJoinInvites(state)
+            )
+            return {
+                pendingInvites,
+                members: snapshot.members,
+                remoteManagementContext: permissionGeneration,
+                activeInviteId: retainSubmittedSelection(state.activeInviteId, state.inviteResults)
                     ? state.activeInviteId
-                    : stillActive(state.activeInviteId, snapshot.pendingInvites)
-        }))
+                    : stillActive(state.activeInviteId, pendingInvites)
+            }
+        })
         if (identityChanged && !membersChanged && connected) void get().refreshRemoteManagement()
     },
 
     initialize: async initial => {
         generation++
+        retiredJoinInvites.clear()
+        joinConnection++
+        joinRevision++
+        joinRead = null
+        if (joinTimer) clearInterval(joinTimer)
+        set({ joinSnapshot: null, joinError: null, joinBusy: {} })
         invalidatePermissions(true)
         permissionNeedsBaseline = false
         localIdentity = ''
@@ -258,6 +552,17 @@ export const useClusterInvitationsStore = create<ClusterInvitationsStore>((set, 
         const subscriptionGeneration = generation
         connected = transport?.connected ?? true
         unsubs.push(
+            window.pairApi.cluster.onJoinRequestsChanged(snapshot => {
+                if (connected && subscriptionGeneration === generation)
+                    receiveJoinSnapshot(snapshot)
+            })
+        )
+        void get().refreshJoinRequests()
+        joinTimer = setInterval(
+            () => void get().refreshJoinRequests(),
+            MODULAR_INVITE_STATUS_POLL_INTERVAL_MS
+        )
+        unsubs.push(
             window.pairApi.cluster.onRemoteManagementChanged(snapshot => {
                 if (!connected || subscriptionGeneration !== generation) return
                 if (permissionPushRequiresReadback) {
@@ -269,16 +574,26 @@ export const useClusterInvitationsStore = create<ClusterInvitationsStore>((set, 
             // list via `cluster:pending-invites-changed`, so this only picks which
             // invite the modal shows.
             window.pairApi.cluster.onInviteReceived(invite => {
-                if (invite.state === 'pending') set({ activeInviteId: invite.inviteId })
+                if (invite.state === 'pending' && !retiredJoinInvites.has(invite.inviteId))
+                    set({ activeInviteId: invite.inviteId })
             }),
             window.pairApi.cluster.onPendingInvitesChanged(invites => {
-                set(state => ({
-                    pendingInvites: pendingWithResults(invites, state.inviteResults),
-                    activeInviteId:
-                        state.activeInviteId && state.inviteResults[state.activeInviteId]
+                set(state => {
+                    const pendingInvites = pendingWithResults(
+                        invites,
+                        state.inviteResults,
+                        correlatedJoinInvites(state)
+                    )
+                    return {
+                        pendingInvites,
+                        activeInviteId: retainSubmittedSelection(
+                            state.activeInviteId,
+                            state.inviteResults
+                        )
                             ? state.activeInviteId
-                            : stillActive(state.activeInviteId, invites)
-                }))
+                            : stillActive(state.activeInviteId, pendingInvites)
+                    }
+                })
                 // Pruning says this invite left the pending set, but not why.
                 // Fetch its exact outcome even when the approval modal is closed.
                 for (const result of Object.values(get().inviteResults)) {
@@ -297,10 +612,20 @@ export const useClusterInvitationsStore = create<ClusterInvitationsStore>((set, 
             unsubs.push(
                 transport.onDisconnect(() => {
                     connected = false
+                    joinConnection++
+                    joinRevision++
+                    joinRead = null
+                    set({
+                        joinSnapshot: null,
+                        joinBusy: {},
+                        joinError: 'Connection lost. Reconnect to read the request outcome.'
+                    })
                     invalidatePermissions(true)
                 }),
                 transport.onConnect(() => {
                     connected = true
+                    set({ joinError: null })
+                    void get().refreshJoinRequests()
                     invalidatePermissions(true)
                     void get().refresh()
                 })
@@ -419,6 +744,13 @@ export const useClusterInvitationsStore = create<ClusterInvitationsStore>((set, 
 
     cleanup: () => {
         generation++
+        retiredJoinInvites.clear()
+        joinConnection++
+        joinRevision++
+        joinRead = null
+        if (joinTimer) clearInterval(joinTimer)
+        joinTimer = null
+        set({ joinSnapshot: null, joinError: null, joinBusy: {} })
         invalidatePermissions(true)
         permissionNeedsBaseline = false
         localIdentity = ''
@@ -437,6 +769,11 @@ export const useClusterInvitationsStore = create<ClusterInvitationsStore>((set, 
     },
 
     setActiveInvite: inviteId => {
+        if (
+            retiredJoinInvites.has(inviteId) &&
+            !retainSubmittedSelection(inviteId, get().inviteResults)
+        )
+            return
         set({ activeInviteId: inviteId })
     },
 

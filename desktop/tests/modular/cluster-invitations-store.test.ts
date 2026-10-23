@@ -2,7 +2,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import type { ClusterNode, Invite, RemoteManagementSnapshot } from '@/shared/types/cluster'
+import type {
+    ClusterNode,
+    Invite,
+    JoinRequest,
+    JoinRequestsSnapshot,
+    RemoteManagementSnapshot
+} from '@/shared/types/cluster'
 import type { ClusterInitialSnapshot } from '@/shared/types/bootstrap'
 import type { ServiceTransport } from '@/shared/types/service-bridge'
 import type { IClusterApi } from '@/ui/api/pair-api'
@@ -32,7 +38,246 @@ const status = vi.fn<IClusterApi['inviteStatus']>()
 const getPermissions = vi.fn<IClusterApi['getRemoteManagement']>()
 const setPermission = vi.fn<IClusterApi['setRemoteManagement']>()
 const getInitial = vi.fn<IClusterApi['getInitial']>()
+const getJoinRequests = vi.fn<IClusterApi['getJoinRequests']>()
+const askToJoin = vi.fn<IClusterApi['askToJoin']>()
+const respondToJoinRequest = vi.fn<IClusterApi['respondToJoinRequest']>()
+let joinPush: ((snapshot: JoinRequestsSnapshot) => void) | undefined
+const joinBaseline: JoinRequestsSnapshot = {
+    supported: true,
+    canAskToJoin: true,
+    requiresSoloReplacement: false,
+    blockedReason: '',
+    requests: []
+}
+const joinRequest: JoinRequest = {
+    requestId: 'jr-one',
+    direction: 'incoming',
+    peerNodeUuid: 'peer',
+    peerName: 'Peer',
+    peerAddress: '192.0.2.1',
+    peerPort: 14321,
+    state: 'awaiting-approval',
+    inviteId: null,
+    reason: '',
+    createdAt: 1,
+    expiresAt: 1000
+}
+
+describe('service-owned join requests', () => {
+    const store = () => useClusterInvitationsStore.getState()
+    const child: Invite = { ...invite, inviteId: 'child', pin: null }
+    const outgoing: JoinRequest = {
+        ...joinRequest,
+        direction: 'outgoing',
+        state: 'pairing',
+        inviteId: 'child'
+    }
+
+    async function recoverOutgoingChild(): Promise<ClusterInitialSnapshot> {
+        const attached = initial()
+        attached.pendingInvites = []
+        useClusterInvitationsStore.setState({ activeInviteId: null, pendingInvites: [] })
+        status.mockResolvedValue(child)
+        getJoinRequests.mockResolvedValue({ ...joinBaseline, requests: [outgoing] })
+        await store().initialize(attached)
+        await store().refreshJoinRequests()
+        await store().recoverJoinInvite(outgoing.requestId, true)
+        expect(store().pendingInvites).toEqual([child])
+        expect(store().activeInviteId).toBe('child')
+        expect(store().inviteResults.child).toBeUndefined()
+        return attached
+    }
+
+    it('filters a delayed nonempty bootstrap after a terminal join and stale pairing snapshot', async () => {
+        const attached = await recoverOutgoingChild()
+        joinPush?.({ ...joinBaseline, requests: [{ ...outgoing, state: 'canceled' }] })
+        joinPush?.({ ...joinBaseline, requests: [outgoing] })
+        store().hydrate({ ...attached, pendingInvites: [child, invite] })
+        expect(store().joinSnapshot?.requests[0].state).toBe('canceled')
+        expect(store().pendingInvites).toEqual([invite])
+        expect(store().activeInviteId).toBeNull()
+    })
+
+    it('filters a delayed pending-invites push even after the terminal request leaves the snapshot', async () => {
+        await recoverOutgoingChild()
+        joinPush?.({ ...joinBaseline, requests: [{ ...outgoing, state: 'expired' }] })
+        joinPush?.(joinBaseline)
+        push?.([child, invite])
+        expect(store().pendingInvites).toEqual([invite])
+        expect(store().activeInviteId).toBeNull()
+    })
+
+    it('ignores delayed invite-received selection for a terminal child and still selects ordinary invites', async () => {
+        await recoverOutgoingChild()
+        joinPush?.({ ...joinBaseline, requests: [{ ...outgoing, state: 'declined' }] })
+        received?.(child)
+        store().setActiveInvite('child')
+        expect(store().pendingInvites).toEqual([])
+        expect(store().activeInviteId).toBeNull()
+        push?.([invite])
+        received?.(invite)
+        expect(store().pendingInvites).toEqual([invite])
+        expect(store().activeInviteId).toBe(invite.inviteId)
+    })
+
+    const terminalStates: JoinRequest['state'][] = [
+        'canceled',
+        'declined',
+        'expired',
+        'failed',
+        'rejected',
+        'paired'
+    ]
+    it.each(terminalStates)('never restores an unsubmitted child after %s', async state => {
+        const attached = await recoverOutgoingChild()
+        joinPush?.({ ...joinBaseline, requests: [{ ...outgoing, state }] })
+        store().hydrate({ ...attached, pendingInvites: [child] })
+        push?.([child])
+        received?.(child)
+        expect(store().pendingInvites).toEqual([])
+        expect(store().activeInviteId).toBeNull()
+    })
+
+    it('retains a submitted exact terminal outcome without restoring its pending card', async () => {
+        await recoverOutgoingChild()
+        respond.mockResolvedValue({ ...child, state: 'paired' })
+        await store().respondToInvite('child', true, '123456', false)
+        joinPush?.({ ...joinBaseline, requests: [{ ...outgoing, state: 'paired' }] })
+        push?.([child])
+        expect(store().pendingInvites).toEqual([])
+        expect(store().activeInviteId).toBe('child')
+        expect(store().inviteResults.child.state).toBe('paired')
+    })
+
+    it('recovers the exact requester child on cold attach with no pending-invite bootstrap', async () => {
+        const attached = initial()
+        attached.pendingInvites = []
+        useClusterInvitationsStore.setState({ activeInviteId: null, pendingInvites: [] })
+        status.mockResolvedValue({ ...invite, inviteId: 'child', pin: null })
+        getJoinRequests.mockResolvedValue({
+            ...joinBaseline,
+            requests: [
+                { ...joinRequest, direction: 'outgoing', state: 'pairing', inviteId: 'child' }
+            ]
+        })
+        await store().initialize(attached)
+        await store().refreshJoinRequests()
+        expect(status).toHaveBeenCalledWith('child')
+        expect(store().pendingInvites).toEqual([{ ...invite, inviteId: 'child', pin: null }])
+        expect(store().inviteResults.child).toBeUndefined()
+        expect(store().activeInviteId).toBeNull()
+        // A late empty bootstrap must not erase the correlated recovered prompt.
+        store().hydrate(attached)
+        expect(store().pendingInvites[0]?.inviteId).toBe('child')
+        await store().recoverJoinInvite(joinRequest.requestId, true)
+        expect(store().activeInviteId).toBe('child')
+        store().hydrate(attached)
+        push?.([])
+        expect(store().activeInviteId).toBe('child')
+        respond.mockResolvedValue({ ...invite, inviteId: 'child', state: 'paired' })
+        await store().respondToInvite('child', true, '123456', false)
+        expect(respond).toHaveBeenCalledWith('child', true, '123456', false)
+    })
+
+    it('ignores a recovered child if a newer request snapshot canceled the handoff', async () => {
+        await store().initialize(initial())
+        await store().refreshJoinRequests()
+        const child = deferred<Invite>()
+        status.mockReturnValue(child.promise)
+        joinPush?.({
+            ...joinBaseline,
+            requests: [
+                { ...joinRequest, direction: 'outgoing', state: 'pairing', inviteId: 'child' }
+            ]
+        })
+        joinPush?.({
+            ...joinBaseline,
+            requests: [
+                { ...joinRequest, direction: 'outgoing', state: 'canceled', inviteId: 'child' }
+            ]
+        })
+        child.resolve({ ...invite, inviteId: 'child' })
+        await Promise.resolve()
+        expect(store().pendingInvites.some(value => value.inviteId === 'child')).toBe(false)
+        expect(store().joinSnapshot?.requests[0].state).toBe('canceled')
+    })
+
+    it('subscribes before baseline and keeps a newer terminal push', async () => {
+        const baseline = deferred<JoinRequestsSnapshot>()
+        getJoinRequests.mockImplementation(() => {
+            expect(joinPush).toBeTypeOf('function')
+            return baseline.promise
+        })
+        await store().initialize(initial())
+        joinPush?.({ ...joinBaseline, requests: [{ ...joinRequest, state: 'declined' }] })
+        baseline.resolve({ ...joinBaseline, requests: [joinRequest] })
+        await store().refreshJoinRequests()
+        expect(store().joinSnapshot?.requests[0].state).toBe('declined')
+        expect(store().activeInviteId).toBe('one')
+    })
+
+    it('coalesces outgoing submissions while the command is in flight', async () => {
+        await store().initialize(initial())
+        await store().refreshJoinRequests()
+        const result = deferred<JoinRequest>()
+        askToJoin.mockReturnValue(result.promise)
+        const request = { address: '192.0.2.1', replaceSoloCluster: false }
+        const first = store().askToJoin(request)
+        const second = store().askToJoin(request)
+        expect(askToJoin).toHaveBeenCalledTimes(1)
+        result.resolve({ ...joinRequest, direction: 'outgoing' })
+        await Promise.all([first, second])
+    })
+
+    it('reconciles another client approval without issuing a second invitation', async () => {
+        await store().initialize(initial())
+        await store().refreshJoinRequests()
+        joinPush?.({ ...joinBaseline, requests: [joinRequest] })
+        const reply = deferred<JoinRequest>()
+        respondToJoinRequest.mockReturnValue(reply.promise)
+        const approving = store().respondToJoinRequest(joinRequest.requestId, true, false)
+        joinPush?.({
+            ...joinBaseline,
+            requests: [{ ...joinRequest, state: 'pairing', inviteId: 'child' }]
+        })
+        reply.resolve({ ...joinRequest, state: 'awaiting-requester', inviteId: 'child' })
+        getJoinRequests.mockResolvedValue({
+            ...joinBaseline,
+            requests: [{ ...joinRequest, state: 'pairing', inviteId: 'child' }]
+        })
+        await approving
+        await store().respondToJoinRequest(joinRequest.requestId, true, false)
+        expect(respondToJoinRequest).toHaveBeenCalledTimes(1)
+        expect(store().joinSnapshot?.requests[0]).toMatchObject({
+            state: 'pairing',
+            inviteId: 'child'
+        })
+    })
+
+    it('reads the service again after reconnect', async () => {
+        await store().initialize(initial())
+        await store().refreshJoinRequests()
+        for (const callback of disconnectCallbacks) callback()
+        getJoinRequests.mockResolvedValue({
+            ...joinBaseline,
+            requests: [{ ...joinRequest, state: 'expired' }]
+        })
+        for (const callback of connectCallbacks) callback()
+        await store().refreshJoinRequests()
+        expect(store().joinSnapshot?.requests[0].state).toBe('expired')
+    })
+
+    it('does not infer joining when a live request disappears', async () => {
+        await store().initialize(initial())
+        await store().refreshJoinRequests()
+        joinPush?.({ ...joinBaseline, requests: [joinRequest] })
+        joinPush?.(joinBaseline)
+        expect(store().joinSnapshot?.requests[0].state).toBe('awaiting-approval')
+        expect(store().joinError).toContain('could not be confirmed')
+    })
+})
 let push: ((invites: Invite[]) => void) | undefined
+let received: ((invite: Invite) => void) | undefined
 let permissionPush: ((snapshot: RemoteManagementSnapshot) => void) | undefined
 let memberPush: ((members: ClusterNode[]) => void) | undefined
 const connectCallbacks = new Set<() => void>()
@@ -106,6 +351,9 @@ function deferred<T>() {
 }
 
 beforeEach(() => {
+    getJoinRequests.mockReset().mockResolvedValue(joinBaseline)
+    askToJoin.mockReset()
+    respondToJoinRequest.mockReset()
     vi.useFakeTimers()
     respond.mockReset()
     status.mockReset()
@@ -117,6 +365,15 @@ beforeEach(() => {
     vi.stubGlobal('window', {
         pairApi: {
             cluster: {
+                getJoinRequests,
+                askToJoin,
+                respondToJoinRequest,
+                onJoinRequestsChanged: (callback: (snapshot: JoinRequestsSnapshot) => void) => {
+                    joinPush = callback
+                    return () => {
+                        joinPush = undefined
+                    }
+                },
                 respondToInvite: respond,
                 inviteStatus: status,
                 getInitial,
@@ -130,7 +387,12 @@ beforeEach(() => {
                         permissionPush = undefined
                     }
                 },
-                onInviteReceived: () => () => {},
+                onInviteReceived: (callback: (invite: Invite) => void) => {
+                    received = callback
+                    return () => {
+                        received = undefined
+                    }
+                },
                 onPendingInvitesChanged: (callback: (invites: Invite[]) => void) => {
                     push = callback
                     return () => {}
@@ -181,6 +443,7 @@ describe('accepted invitation outcome tracking', () => {
             members: [],
             pendingInvites: [invite]
         })
+        const baselineTimerCount = vi.getTimerCount()
         respond.mockResolvedValue(invite)
         await store.respondToInvite('one', true, '123456', false)
         store.clearActiveInvite()
@@ -201,7 +464,7 @@ describe('accepted invitation outcome tracking', () => {
         expect(useClusterInvitationsStore.getState().activeInviteId).toBeNull()
         await vi.advanceTimersByTimeAsync(30_000)
         expect(status).toHaveBeenCalledTimes(2)
-        expect(vi.getTimerCount()).toBe(0)
+        expect(vi.getTimerCount()).toBe(baselineTimerCount)
     })
 
     it('permits one outstanding status request per invite and discards it after cleanup', async () => {

@@ -59,6 +59,16 @@ describe('failed invitation recovery', () => {
             configurable: true,
             value: {
                 cluster: {
+                    getJoinRequests: vi.fn<IClusterApi['getJoinRequests']>().mockResolvedValue({
+                        supported: false,
+                        canAskToJoin: false,
+                        requiresSoloReplacement: false,
+                        blockedReason: 'unsupported',
+                        requests: []
+                    }),
+                    onJoinRequestsChanged: vi
+                        .fn<IClusterApi['onJoinRequestsChanged']>()
+                        .mockReturnValue(() => {}),
                     inviteNode,
                     getRemoteManagement,
                     onRemoteManagementChanged: (
