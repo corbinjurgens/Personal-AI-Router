@@ -549,8 +549,9 @@ func acceptReverseDialWatch(listener net.Listener, callID string) (net.Conn, err
 	return conn, nil
 }
 
-func TestReverseDialRefusalIsTyped(t *testing.T) {
-	base, listener := reverseDialFixture(t)
+// refuseReverseDial answers one private dial request with a refusal byte, after
+// the lifecycle connection attaches as DialReverse requires.
+func refuseReverseDial(listener net.Listener, code byte) <-chan error {
 	done := make(chan error, 1)
 	go func() {
 		conn, err := listener.Accept()
@@ -575,19 +576,42 @@ func TestReverseDialRefusalIsTyped(t *testing.T) {
 			return
 		}
 		defer watch.Close()
-		_, err = conn.Write([]byte{1})
+		_, err = conn.Write([]byte{code})
 		done <- err
 	}()
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	_, err := DialReverse(ctx, base, "peer", "ni")
-	var unavailable *ReverseUnavailableError
-	if !errors.As(err, &unavailable) || unavailable.PeerUUID != "peer" {
-		t.Fatalf("refusal not typed: %v", err)
+	return done
+}
+
+func TestReverseDialRefusalNamesItsReason(t *testing.T) {
+	test := func(name string, code ReverseRefusal, wantCause error, wantText string) {
+		t.Helper()
+		t.Run(name, func(t *testing.T) {
+			base, listener := reverseDialFixture(t)
+			done := refuseReverseDial(listener, byte(code))
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			_, err := DialReverse(ctx, base, "peer", "ni")
+			var unavailable *ReverseUnavailableError
+			if !errors.As(err, &unavailable) || unavailable.PeerUUID != "peer" || unavailable.Route != RouteReverse {
+				t.Fatalf("refusal = %v, want a reverse-route ReverseUnavailableError for peer", err)
+			}
+			if wantCause != nil && !errors.Is(err, wantCause) {
+				t.Fatalf("refusal = %v, want cause %v", err, wantCause)
+			}
+			if !strings.Contains(err.Error(), "private service dial refused: "+wantText) {
+				t.Fatalf("refusal = %q, want reason %q", err, wantText)
+			}
+			if err = <-done; err != nil {
+				t.Fatal(err)
+			}
+		})
 	}
-	if err = <-done; err != nil {
-		t.Fatal(err)
-	}
+	test("no reverse session", ReverseRefusedNoSession, ErrReverseNoSession, "no current reverse session")
+	test("capacity exhausted", ReverseRefusedCapacity, ErrReverseCapacity, "reverse capacity exhausted")
+	test("admission failed", ReverseRefusedAdmission, ErrReverseAdmission, "peer admission failed")
+	test("remote refused", ReverseRefusedRemote, ErrReverseRemoteRefused, "reverse service unavailable")
+	test("open failed", ReverseRefusedFailed, nil, "reverse stream open failed")
+	test("unrecognized code", ReverseRefusal(9), nil, "unrecognized refusal code 9")
 }
 
 func TestReverseDialPreservesReplyBufferedBytes(t *testing.T) {

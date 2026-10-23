@@ -9,6 +9,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -29,6 +30,52 @@ type ReverseDialRequest struct {
 	CallID           string             `json:"callId"`
 	Watch            bool               `json:"watch,omitempty"`
 	DeadlineUnixNano int64              `json:"deadlineUnixNano,omitempty"`
+}
+
+// ReverseRefusal is the one-byte reply to a private dial request: zero admits
+// the stream, any other value refuses it and names why. The cluster-manager
+// that writes it and every DialReverse caller that reads it are the same
+// release, so there is no compatibility reading of other values.
+type ReverseRefusal byte
+
+const (
+	ReverseAdmitted         ReverseRefusal = 0
+	ReverseRefusedNoSession ReverseRefusal = 1 // no current reverse session to the peer
+	ReverseRefusedCapacity  ReverseRefusal = 2 // call, session or stream limit reached
+	ReverseRefusedAdmission ReverseRefusal = 3 // the peer is not admitted to this cluster
+	ReverseRefusedRemote    ReverseRefusal = 4 // the peer's service refused the stream
+	ReverseRefusedFailed    ReverseRefusal = 5 // opening the stream failed for another reason
+)
+
+// ReverseRefusalFor maps the reverse manager's failure to the refusal byte.
+func ReverseRefusalFor(err error) ReverseRefusal {
+	switch {
+	case errors.Is(err, ErrReverseNoSession):
+		return ReverseRefusedNoSession
+	case errors.Is(err, ErrReverseCapacity):
+		return ReverseRefusedCapacity
+	case errors.Is(err, ErrReverseAdmission):
+		return ReverseRefusedAdmission
+	case errors.Is(err, ErrReverseRemoteRefused):
+		return ReverseRefusedRemote
+	}
+	return ReverseRefusedFailed
+}
+
+func (r ReverseRefusal) cause() error {
+	switch r {
+	case ReverseRefusedNoSession:
+		return ErrReverseNoSession
+	case ReverseRefusedCapacity:
+		return ErrReverseCapacity
+	case ReverseRefusedAdmission:
+		return ErrReverseAdmission
+	case ReverseRefusedRemote:
+		return ErrReverseRemoteRefused
+	case ReverseRefusedFailed:
+		return errors.New("reverse stream open failed")
+	}
+	return fmt.Errorf("unrecognized refusal code %d", byte(r))
 }
 
 // ReverseDialPath is derived from the same base config directory as the broker.
@@ -56,7 +103,7 @@ func reverseDialContextError(ctx context.Context) error {
 // DialReverse returns a service byte stream whose lifetime follows ctx. The
 // current cluster-manager alone decides whether this peer/service is admitted.
 func DialReverse(ctx context.Context, base, peerUUID string, service noderec.ServiceKey) (net.Conn, error) {
-	fail := func(err error) (net.Conn, error) { return nil, &ReverseUnavailableError{peerUUID, err} }
+	fail := func(err error) (net.Conn, error) { return nil, &ReverseUnavailableError{peerUUID, RouteReverse, err} }
 	if peerUUID == "" || !reverseServiceAllowed(service) {
 		return fail(fmt.Errorf("invalid private dial target"))
 	}
@@ -113,10 +160,15 @@ func DialReverse(ctx context.Context, base, peerUUID string, service noderec.Ser
 	readReply := func(c net.Conn) error {
 		var reply [1]byte
 		if _, err := io.ReadFull(c, reply[:]); err != nil {
+			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+				// The listener drops a connection without a reply when its
+				// connection slots are full, and when it shuts down.
+				return fmt.Errorf("private service closed the connection without a reply: %w", err)
+			}
 			return err
 		}
-		if reply[0] != 0 {
-			return fmt.Errorf("private service dial refused")
+		if refusal := ReverseRefusal(reply[0]); refusal != ReverseAdmitted {
+			return fmt.Errorf("private service dial refused: %w", refusal.cause())
 		}
 		return nil
 	}
