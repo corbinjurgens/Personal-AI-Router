@@ -20,9 +20,33 @@ function ConvertTo-OverheadProcess {
 
 function Get-OverheadProcessSnapshot {
     # Deliberately select metadata only: never query CommandLine or profiles.
-    @(Get-CimInstance -ClassName Win32_Process -Property ProcessId, ParentProcessId,
+    @(Get-CimInstance -ClassName Win32_Process -OperationTimeoutSec 1 -ErrorAction Stop -Property ProcessId, ParentProcessId,
         ExecutablePath, CreationDate, KernelModeTime, UserModeTime, WorkingSetSize,
         PrivatePageCount, HandleCount | ForEach-Object { ConvertTo-OverheadProcess $_ })
+}
+
+function Resolve-OverheadOutputPath {
+    param([string]$Path, [string]$Repository, [string]$Vault,
+        [scriptblock]$DriveType = { param($Root) ([IO.DriveInfo]::new($Root)).DriveType })
+    # Reject UNC/device paths before any filesystem operation can touch them.
+    if ($Path -notmatch '^[A-Za-z]:[\\/]') { throw 'Output must be on a local fixed drive.' }
+    $full = [IO.Path]::GetFullPath($Path)
+    if ((& $DriveType ([IO.Path]::GetPathRoot($full))) -ne [IO.DriveType]::Fixed) { throw 'Output drive is not fixed.' }
+    foreach ($excluded in @($Repository, $Vault)) {
+        if ([string]::IsNullOrWhiteSpace($excluded)) { throw 'Repository and vault roots are required.' }
+        $root = [IO.Path]::GetFullPath($excluded).TrimEnd('\', '/')
+        if ($full.Equals($root, [StringComparison]::OrdinalIgnoreCase) -or
+            $full.StartsWith($root + '\', [StringComparison]::OrdinalIgnoreCase)) { throw 'Output is inside the repository or vault.' }
+    }
+    # A junction could otherwise redirect an apparently safe local path into an
+    # excluded root or a share. Fail closed rather than resolving it by access.
+    $ancestor = [IO.Path]::GetDirectoryName($full)
+    while ($ancestor) {
+        if ([IO.Directory]::Exists($ancestor) -and
+            (([IO.File]::GetAttributes($ancestor) -band [IO.FileAttributes]::ReparsePoint) -ne 0)) { throw 'Output ancestors must not be reparse points.' }
+        $ancestor = [IO.Path]::GetDirectoryName($ancestor)
+    }
+    $full
 }
 
 function Compare-OverheadIdentity {
@@ -90,7 +114,7 @@ function Invoke-AppOverheadSample {
         [scriptblock]$Wait = { param($Seconds) Start-Sleep -Seconds $Seconds },
         [scriptblock]$ObserverCpu = { [diagnostics.process]::GetCurrentProcess().TotalProcessorTime.TotalSeconds }
     )
-    if ($OutputPath -notmatch '^(?:[A-Za-z]:[\\/]|\\\\[^\\/]+[\\/][^\\/]+[\\/])') { throw 'OutputPath must be absolute and outside the checkout and vault.' }
+    $OutputPath = Resolve-OverheadOutputPath $OutputPath ([IO.Path]::GetFullPath("$PSScriptRoot/../..")) $env:WASABI_VAULT
     if ($LogicalCpus -le 0 -or $Authority.Count -eq 0) { throw 'Explicit authority and logical CPU count required.' }
     $ids = @()
     foreach ($entry in $Authority) {
@@ -125,6 +149,8 @@ function Invoke-AppOverheadSample {
             $elapsed = $now - $start
             $reason = 'ScheduleInvalid'
             if ($elapsed -lt $lastTime -or $elapsed -gt 62) { throw 'Schedule overrun or nonmonotonic clock.' }
+            $reason = 'SlotMissed'
+            if ($elapsed -gt 2 * $index + 1) { throw 'Sample missed its scheduled slot.' }
             $reason = 'CompetitionRead'
             $competitionNames = @(& $Competition)
             $reason = 'CaptureRead'
@@ -155,6 +181,8 @@ function Invoke-AppOverheadSample {
             if ($failures.Count) { throw 'Identity changed; trial invalid.' }
             $reason = 'CompetitionDetected'
             if ($competitionNames.Count) { throw 'Competition detected; trial invalid.' }
+            $reason = 'SlotMissed'
+            if ($captureElapsed -gt 2 * $index + 1) { throw 'Capture missed its scheduled slot.' }
             $reason = 'ScheduleInvalid'
             if ($captureElapsed -lt $elapsed -or $captureElapsed -gt 62) { throw 'Capture overrun or nonmonotonic clock.' }
             $lastTime = $captureElapsed
@@ -170,6 +198,10 @@ function Invoke-AppOverheadSample {
         $writer.WriteLine((@{ Kind = 'Complete'; Samples = $completed; Valid = $true } | ConvertTo-Json -Compress))
         $writer.Flush()
     } catch {
+        if ($reason -eq 'CaptureRead') {
+            if ($_.Exception -is [TimeoutException]) { $reason = 'CaptureTimeout' }
+            else { $reason = 'CaptureFailedOrTimedOut' }
+        }
         # Do not serialize exception messages: injected controllers may contain
         # sensitive context. The failed sample already holds identity fields.
         $writer.WriteLine((@{ Kind = 'Abort'; CompletedSamples = $completed; Valid = $false; Reason = $reason; FailedIndex = $index } | ConvertTo-Json -Compress))

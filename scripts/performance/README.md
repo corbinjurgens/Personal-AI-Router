@@ -15,7 +15,8 @@ PowerShell 7 (`pwsh`) is optional and can run the same test file.
 
 Dot-sourcing `app-overhead.ps1` defines functions and starts no measurement.
 `Invoke-AppOverheadSample` requires a separately approved controller, explicit
-process authority, an absolute new output file outside the checkout/vault,
+process authority, an absolute new output file outside the checkout/vault on a
+local fixed drive (no UNC/mapped drive or reparse-point ancestors),
 source revision, state annotation (`UNKNOWN` when unverified), logical CPU
 count, and lease acquisition/release and competition callbacks. Callbacks must
 be bounded, metadata-only, and throw on unavailable controls. Acquisition must
@@ -38,8 +39,12 @@ including failed identity fields, wall/monotonic time, cumulative CPU, working
 set, private bytes, handles and observer CPU cost. Only allowlisted metadata is
 serialized; controllers must not put secrets into provenance or annotations.
 The synchronous schedule has 31 samples at nominal 0..60 seconds, no timer or
-background job, and aborts beyond 62 seconds. Capture/control callbacks must
-themselves be bounded; the sampler cannot interrupt a blocked CIM call. Aborted
+background job. Each capture must finish within one second of its nominal slot;
+missed slots abort rather than producing catch-up samples. The default CIM query
+uses `-OperationTimeoutSec 1 -ErrorAction Stop`. Capture/control callbacks must
+themselves be bounded; there is no detached cancellation worker. CIM errors abort
+with `CaptureFailedOrTimedOut`; typed timeout exceptions use `CaptureTimeout`.
+Aborted
 trials are invalid. Abort records name an allowlisted reason/stage and failed
 index without exception text. Metrics records use the interval between capture
 completion timestamps, independently of the nominal schedule. Capturing process

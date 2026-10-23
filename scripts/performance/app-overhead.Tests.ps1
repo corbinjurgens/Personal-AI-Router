@@ -23,7 +23,9 @@ function Invoke-SyntheticTrial {
     $capture = {
         $state.Captures++
         if ($Mode -eq 'CaptureFailure' -and $state.Captures -eq 3) { throw 'DO-NOT-RECORD' }
+        if ($Mode -eq 'CaptureTimeout' -and $state.Captures -eq 3) { throw [TimeoutException]::new('DO-NOT-RECORD') }
         if ($Mode -eq 'BaselineLatency' -and $state.Captures -eq 1) { $state.Tick += 1 }
+        if ($Mode -eq 'SlowBaseline' -and $state.Captures -eq 1) { $state.Tick += 60 }
         if ($Mode -eq 'FinalOverrun' -and $state.Captures -eq 31) { $state.Tick += 5 }
         $p = New-SyntheticProcess -Cpu (2 + $state.Tick)
         if ($Mode -eq 'Reuse' -and $state.Captures -eq 3) { $p.CreatedUtc = '2026-10-24T00:00:00.0000000Z' }
@@ -53,6 +55,16 @@ function Invoke-SyntheticTrial {
 $temporary = Join-Path ([IO.Path]::GetTempPath()) ('pair-overhead-synthetic-' + [guid]::NewGuid())
 [void][IO.Directory]::CreateDirectory($temporary)
 try {
+    $repository = [IO.Path]::GetFullPath("$PSScriptRoot/../..")
+    foreach ($path in @('\\server\share\sample.jsonl', (Join-Path $repository 'sample.jsonl'),
+            (Join-Path $env:WASABI_VAULT 'sample.jsonl'), 'Z:\sample.jsonl')) {
+        $rejected = $false
+        try {
+            if ($path.StartsWith('Z:')) { [void](Resolve-OverheadOutputPath $path $repository $env:WASABI_VAULT { param($Root) [IO.DriveType]::Network }) }
+            else { [void](Resolve-OverheadOutputPath $path $repository $env:WASABI_VAULT) }
+        } catch { $rejected = $true }
+        Assert-True $rejected "Unsafe output path accepted: $path"
+    }
     $base = New-SyntheticProcess
     $same = New-SyntheticProcess -Cpu 4
     Assert-True (@(Compare-OverheadIdentity @($base) @($same)).Count -eq 0) 'Stable identity rejected'
@@ -81,19 +93,21 @@ try {
     $latency = @(Invoke-SyntheticTrial (Join-Path $temporary 'latency.jsonl') 'BaselineLatency')
     $firstMetric = @($latency | Where-Object Kind -EQ 'Metrics')[0]
     Assert-True ($firstMetric.ElapsedSeconds -eq 1 -and $firstMetric.Metrics[0].OneCorePercent -eq 100) 'Baseline capture latency biased CPU denominator'
-    foreach ($mode in @('Reuse', 'CaptureFailure', 'Competition')) {
+    foreach ($mode in @('Reuse', 'CaptureFailure', 'CaptureTimeout', 'Competition')) {
         $records = @(Invoke-SyntheticTrial (Join-Path $temporary "$mode.jsonl") $mode)
         Assert-True ($records[0].Kind -eq 'Sample' -and $records[0].Index -eq 0) "Baseline not retained for $mode"
         Assert-True ($records[-1].Kind -eq 'Abort' -and -not $records[-1].Valid -and $records[-1].CompletedSamples -eq 2) "Abort retention for $mode"
-        $reasons = @{ Reuse = 'IdentityChanged'; CaptureFailure = 'CaptureRead'; Competition = 'CompetitionDetected' }
+        $reasons = @{ Reuse = 'IdentityChanged'; CaptureFailure = 'CaptureFailedOrTimedOut'; CaptureTimeout = 'CaptureTimeout'; Competition = 'CompetitionDetected' }
         Assert-True ($records[-1].Reason -eq $reasons[$mode] -and $records[-1].FailedIndex -eq 2) "Abort reason/index for $mode"
         if ($mode -eq 'Reuse') {
             Assert-True ($records[-2].IdentityFailures[0].Field -eq 'CreatedUtc') 'Failed identity fields not retained'
         }
     }
     $overrun = @(Invoke-SyntheticTrial (Join-Path $temporary 'overrun.jsonl') 'FinalOverrun')
-    Assert-True ($overrun[-1].Kind -eq 'Abort' -and $overrun[-1].Reason -eq 'ScheduleInvalid' -and $overrun[-1].CompletedSamples -eq 30 -and $overrun[-1].FailedIndex -eq 30) 'Final capture overrun accepted'
+    Assert-True ($overrun[-1].Kind -eq 'Abort' -and $overrun[-1].Reason -eq 'SlotMissed' -and $overrun[-1].CompletedSamples -eq 30 -and $overrun[-1].FailedIndex -eq 30) 'Final capture overrun accepted'
     Assert-True ($overrun[-2].Kind -eq 'Sample' -and $overrun[-2].CaptureMonotonicSeconds -eq 65) 'Overrun capture not retained'
+    $slow = @(Invoke-SyntheticTrial (Join-Path $temporary 'slow-baseline.jsonl') 'SlowBaseline')
+    Assert-True ($slow.Count -eq 2 -and $slow[-1].Kind -eq 'Abort' -and $slow[-1].Reason -eq 'SlotMissed' -and $slow[-1].CompletedSamples -eq 0) 'Slow baseline produced catch-up samples'
     $source = [IO.File]::ReadAllText("$PSScriptRoot/app-overhead.ps1")
     Assert-True ($source -notmatch '(?im)^\s*(Start-Process|Stop-Process|Invoke-WebRequest|Invoke-RestMethod|Register-ObjectEvent|Start-Job)\b') 'Unexpected operation or persistent timer'
     Write-Output "PASS: $script:passed assertions; synthetic fixtures only; no live measurement."
