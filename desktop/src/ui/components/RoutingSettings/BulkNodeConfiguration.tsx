@@ -34,6 +34,7 @@ import {
     chosenRole,
     FAILED_STATES,
     inventoryChoices,
+    NODE_PAUSED_MESSAGE,
     roleDifferences,
     roleItems,
     roleKey,
@@ -113,7 +114,7 @@ function stateDetail(
         case 'rejected':
             return `The node refused these roles; change the draft.${message}`
         case 'vetoed':
-            return `Local veto: paused or turned off on that node. Change it there first.${message}`
+            return `${NODE_PAUSED_MESSAGE}${entry?.baseline?.pausedBy ? ` PausedBy: ${entry.baseline.pausedBy}.` : ''}`
         case 'unreachable':
             return `Not sent; the draft is kept.${message}`
         case 'unknown':

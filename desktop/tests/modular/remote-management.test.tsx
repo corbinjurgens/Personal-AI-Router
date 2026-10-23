@@ -58,6 +58,8 @@ import { useNodeConfigurationStore } from '@/ui/stores/node-configuration.store'
 import { useNodesStore } from '@/ui/stores/nodes.store'
 import { useEngineSettingsStore } from '@/ui/stores/engine-settings.store'
 import { usePendingActionsStore } from '@/ui/stores/pending-actions.store'
+import { useEngineStatusStore } from '@/ui/stores/engine-status.store'
+import { emptyEngineStatus } from '@/shared/utils/engines'
 
 vi.mock('@/ui/components/RoutingSettings/BulkNodeConfiguration', () => ({ default: () => null }))
 
@@ -839,6 +841,7 @@ describe('permission controls', () => {
         useNodesStore.setState({ nodes: new Map([['peer-1', peerNode]]) })
         useNodeConfigurationStore.setState({ editors: new Map(), management: new Map() })
         useEngineSettingsStore.setState({ entries: {} })
+        useEngineStatusStore.setState({ statusByNode: new Map() })
         container = document.createElement('div')
         document.body.append(container)
         root = createRoot(container)
@@ -873,6 +876,9 @@ describe('permission controls', () => {
                 )
             expect(document.querySelector<HTMLInputElement>('input[value="block"]')?.checked).toBe(
                 true
+            )
+            expect(document.body.textContent).toContain(
+                'This choice applies to the device you are using. Reading status and using models this device serves remain available. Engine locks and node pause still apply.'
             )
             if (allowed) await allow()
             if (path === 'manual')
@@ -1122,6 +1128,105 @@ describe('permission controls', () => {
         ).toBe('2345')
         expect(applySettings).toHaveBeenCalledTimes(1)
         expect(usePendingActionsStore.getState().isSettingsPending('peer-1', 'ollama')).toBe(false)
+    })
+
+    it.each([
+        {
+            name: 'engine lock',
+            code: -32013,
+            detail: 'engine locked on target',
+            label: 'Engine locked'
+        },
+        {
+            name: 'fresh pause',
+            code: -32011,
+            detail: 'refused',
+            label: 'Node paused',
+            state: 'paused'
+        },
+        {
+            name: 'fresh draining',
+            code: -32011,
+            detail: 'refused',
+            label: 'Node paused',
+            state: 'draining'
+        },
+        {
+            name: 'bounded pause message',
+            code: -32011,
+            detail: 'This node is paused. Resume it on this node before managing it remotely.',
+            label: 'Node paused'
+        },
+        {
+            name: 'older saved Off',
+            code: -32011,
+            detail: 'engine was turned off locally',
+            label: 'Target refused'
+        },
+        {
+            name: 'scoped stop',
+            code: -32011,
+            detail: 'local stop cancelled this operation',
+            label: 'Target refused'
+        },
+        {
+            name: 'configuration conflict',
+            code: -32010,
+            detail: 'revision changed',
+            label: 'Configuration conflict'
+        }
+    ] satisfies {
+        name: string
+        code: number
+        detail: string
+        label: string
+        state?: NodePolicyDocument['availability']
+    }[])(
+        'keeps the settings draft and target detail for $name',
+        async ({ code, detail, label, state }) => {
+            applySettings.mockRejectedValueOnce(new ServiceCallError(detail, code))
+            await renderSettings()
+            if (state) getPolicy.mockResolvedValue({ ...policy, availability: state })
+            await changeText(
+                document.querySelector<HTMLInputElement>('input[aria-label="Server port"]'),
+                '2345'
+            )
+            await act(async () => button('Apply').click())
+            expect(document.body.textContent).toContain(`${label}: ${detail}`)
+            expect(
+                document.querySelector<HTMLInputElement>('input[aria-label="Server port"]')?.value
+            ).toBe('2345')
+            expect(applySettings).toHaveBeenCalledTimes(1)
+            expect(document.body.textContent).not.toContain('Off always wins')
+        }
+    )
+
+    it('allows metadata-only settings apply to a locked engine', async () => {
+        useEngineStatusStore.setState({
+            statusByNode: new Map([
+                [
+                    'peer-1',
+                    new Map([
+                        ['ollama', { ...emptyEngineStatus('peer-1', 'ollama'), locked: true }]
+                    ])
+                ]
+            ])
+        })
+        await renderSettings()
+        await changeText(
+            document.querySelector<HTMLInputElement>('input[aria-label="Server port"]'),
+            '2345'
+        )
+        expect(button('Apply').disabled).toBe(false)
+        await act(async () => button('Apply').click())
+        expect(applySettings).toHaveBeenCalledTimes(1)
+        expect(applySettings).toHaveBeenCalledWith(
+            expect.objectContaining({
+                nodeId: 'peer-1',
+                engine: 'ollama',
+                settings: expect.objectContaining({ serverPort: 2345 })
+            })
+        )
     })
 
     it('keeps settings read-only when the peer is unreachable rather than calling it unsupported', async () => {

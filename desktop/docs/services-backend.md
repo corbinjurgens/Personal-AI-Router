@@ -187,7 +187,7 @@ intent and recovery; the bridge validates the complete receipt and republishes
 Status accepts `afterSequence` for a bounded wait. Numeric refusal codes survive
 the IPC envelope, including configuration conflict (-32010), local veto
 (-32011) and engine lock (-32013). The receipt parser accepts kind
-`engine_locked` only with `-32013`. These methods have no desktop controls yet.
+`engine_locked` only with `-32013`.
 
 Engine status carries an optional `locked` from engine-manager's `EngineStatus`
 through local and remote facts; an absent value stays absent. The local-only

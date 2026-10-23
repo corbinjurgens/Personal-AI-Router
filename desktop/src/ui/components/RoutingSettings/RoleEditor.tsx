@@ -14,7 +14,8 @@ import { useConnectionStore } from '@/ui/stores/connection.store'
 import {
     chosenRole,
     inventoryChoices,
-    pausedLocally,
+    nodePaused,
+    NODE_PAUSED_MESSAGE,
     roleDifferences,
     roleItems,
     roleKey,
@@ -58,6 +59,10 @@ export default function RoleEditor({ targetId, nodeId, onSaved }: RoleEditorProp
     const [noSuggestion, setNoSuggestion] = useState(false)
 
     const baseline = entry?.baseline
+    const paused =
+        nodeId !== undefined &&
+        baseline !== undefined &&
+        nodePaused(baseline.policy, baseline.availability)
 
     const suggest = useCallback(async () => {
         if (!baseline || readOnly) return
@@ -111,9 +116,9 @@ export default function RoleEditor({ targetId, nodeId, onSaved }: RoleEditorProp
                         {`Saved at revision ${baseline.revision}`}
                     </Badge>
                 )}
-                {nodeId && pausedLocally(baseline.policy) && (
+                {paused && (
                     <Badge color="gray" kind="solid">
-                        Paused locally
+                        Paused{baseline.pausedBy ? `; PausedBy: ${baseline.pausedBy}` : ''}
                     </Badge>
                 )}
             </Flex>
@@ -121,6 +126,11 @@ export default function RoleEditor({ targetId, nodeId, onSaved }: RoleEditorProp
                 Declaring any tier makes this node authoritative: routers send it only its declared
                 tiers, and its unset tiers are not served.
             </Text>
+            {paused && (
+                <Text kind="body/regular/sm" role="status">
+                    {NODE_PAUSED_MESSAGE}
+                </Text>
+            )}
             {nodeId !== undefined && readOnly && (
                 <Text kind="body/regular/sm" role="status">
                     {management?.message || 'Reading remote management permission for this device.'}
@@ -184,10 +194,7 @@ export default function RoleEditor({ targetId, nodeId, onSaved }: RoleEditorProp
                 </InlineErrorBanner>
             )}
             {phase === 'vetoed' && (
-                <InlineErrorBanner
-                    severity="warning"
-                    message={`Local veto: the node refused the change because it was paused or turned off on the node itself. Change it there first. ${entry.message ?? ''}`}
-                />
+                <InlineErrorBanner severity="warning" message={NODE_PAUSED_MESSAGE} />
             )}
             {phase === 'rejected' && entry.message && (
                 <InlineErrorBanner severity="error" message={entry.message} />
@@ -226,7 +233,7 @@ export default function RoleEditor({ targetId, nodeId, onSaved }: RoleEditorProp
                     kind="primary"
                     color="brand"
                     size="small"
-                    disabled={sending || readOnly || !edited || phase === 'conflict'}
+                    disabled={sending || readOnly || paused || !edited || phase === 'conflict'}
                     aria-busy={sending}
                     onClick={() => void save()}
                 >

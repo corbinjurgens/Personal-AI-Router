@@ -16,6 +16,7 @@ import {
     TextInput
 } from '@nvidia/foundations-react-core'
 import type { BuiltinEngineType } from '@/shared/types/engines'
+import type { NodePolicyDocument } from '@/shared/types/node-policy'
 import type {
     EngineSettingsConfig,
     EngineSettingsRequest,
@@ -31,11 +32,12 @@ import { usePendingActionsStore } from '@/ui/stores/pending-actions.store'
 import { ConfirmModal } from '@/ui/components/ConfirmModal'
 import getErrorString from '@/shared/utils/get-error-string'
 import { engineManagerName } from '@/shared/utils/engines'
-import { useEngineSwitchStore } from '@/ui/stores/engine-switch.store'
+import { engineRefusalLabel, useEngineSwitchStore } from '@/ui/stores/engine-switch.store'
 import {
+    ENGINE_LOCKED_CODE,
     LOCAL_VETO_CODE,
-    REMOTE_MANAGEMENT_DENIED_CODE,
-    localVetoMessage
+    POLICY_CONFLICT_CODE,
+    REMOTE_MANAGEMENT_DENIED_CODE
 } from '@/shared/constants/service-errors'
 import { serviceErrorCode } from '@/ui/api/service-transport'
 import {
@@ -221,6 +223,7 @@ export function EngineSettingsSection({
     }
     async function apply(request: EngineSettingsRequest): Promise<void> {
         if (useEngineSwitchStore.getState().reserved(nodeId, engine)) return
+        const ticket = generation.current
         const requestId = request.requestId ?? crypto.randomUUID()
         submitted.current = requestId
         const pending = usePendingActionsStore.getState()
@@ -231,19 +234,32 @@ export function EngineSettingsSection({
             await useEngineSettingsStore.getState().apply({ ...request, requestId })
         } catch (cause) {
             pending.endSettings(nodeId, engineType, requestId)
-            // A paired node refuses an apply that would start its stopped
-            // engine while it is paused on the node itself.
+            if (ticket !== generation.current) return
             const code = serviceErrorCode(cause)
             if (code === REMOTE_MANAGEMENT_DENIED_CODE)
                 void useNodeConfigurationStore
                     .getState()
                     .readManagement(nodeId, isLocalNode ? undefined : nodeId)
+            const message = getErrorString(cause)
+            let refusalPolicy: NodePolicyDocument | undefined
+            if (code === LOCAL_VETO_CODE) {
+                try {
+                    refusalPolicy = await window.pairApi.nodePolicy.get(
+                        isLocalNode ? undefined : nodeId
+                    )
+                } catch {
+                    // Preserve the target's refusal when policy readback is unavailable.
+                }
+            }
+            if (ticket !== generation.current) return
             reportError(
                 code === REMOTE_MANAGEMENT_DENIED_CODE
                     ? 'This device refused remote management permission. Your settings draft is kept. Change the permission on that device before trying again.'
-                    : code === LOCAL_VETO_CODE
-                      ? localVetoMessage(`apply these settings, which would start ${engine}`)
-                      : getErrorString(cause)
+                    : code === LOCAL_VETO_CODE ||
+                        code === ENGINE_LOCKED_CODE ||
+                        code === POLICY_CONFLICT_CODE
+                      ? `${engineRefusalLabel(code, message, refusalPolicy)}: ${message}`
+                      : message
             )
         }
     }

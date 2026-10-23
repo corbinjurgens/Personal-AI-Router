@@ -63,6 +63,11 @@ export interface IEngineApi {
 
     /** Start or stop an engine process on a node. */
     toggle(engineType: EngineType, nodeId: string): void
+    /**
+     * Lock or unlock an engine on this device. The lock is local-only: the bridge
+     * refuses any other node, and the outcome arrives on the engine status push.
+     */
+    setLock(engineType: EngineType, nodeId: string, locked: boolean): void
     /** Install an engine on a node. */
     install(engineType: EngineType, nodeId: string): void
     /** Uninstall an engine from a node without removing downloaded models. */
@@ -118,6 +123,8 @@ export function createEngineApi(transport: ServiceTransport): IEngineApi {
 
         toggle: (engineType, nodeId) =>
             fireCommand(transport, { command: 'toggle', engineType, nodeId }),
+        setLock: (engineType, nodeId, locked) =>
+            fireCommand(transport, { command: 'setLock', engineType, nodeId, locked }),
         install: (engineType, nodeId) =>
             fireCommand(transport, { command: 'install', engineType, nodeId }),
         uninstall: (engineType, nodeId) =>

@@ -17,6 +17,7 @@ import { useConnectionStore } from '@/ui/stores/connection.store'
 import { useDiscoveredNodesStore } from '@/ui/stores/discovered-nodes.store'
 import {
     BULK_CONCURRENCY,
+    NODE_PAUSED_MESSAGE,
     targetState,
     useNodeConfigurationStore,
     type RoleEditorEntry
@@ -83,6 +84,73 @@ const store = () => useNodeConfigurationStore.getState()
 const targets = (...ids: string[]) => ids.map(id => ({ targetId: id, nodeId: id }))
 
 describe('bulk fan-out', () => {
+    it.each([
+        {
+            name: 'peer-origin paused',
+            document: policyDocument('6', { availability: 'paused', pausedBy: 'peer' })
+        },
+        {
+            name: 'draining',
+            document: {
+                ...policyDocument('6'),
+                availability: 'draining'
+            } satisfies NodePolicyDocument
+        }
+    ])('reads but never resends a vetoed draft while $name', async ({ document }) => {
+        get.mockResolvedValueOnce(policyDocument('5'))
+        set.mockRejectedValueOnce(new ServiceCallError('pause accepted', -32011))
+        await store().apply('a', 'a', ROLES)
+        expect(set).toHaveBeenCalledTimes(1)
+
+        get.mockResolvedValue(document)
+        await store().apply('a', 'a', ROLES)
+        await store().apply('a', 'a', ROLES)
+
+        expect(set).toHaveBeenCalledTimes(1)
+        expect(entry('a')).toMatchObject({
+            phase: 'vetoed',
+            draft: ROLES,
+            message: NODE_PAUSED_MESSAGE,
+            baseline: { revision: '6' }
+        })
+    })
+
+    it('adopts canonical pause booleans from server readback without resending normalization', async () => {
+        const legacyPause = {
+            stopEngines: false,
+            unloadModels: false,
+            onActive: 'drain',
+            drainTimeoutSeconds: 12
+        }
+        const canonicalPause = { ...legacyPause, stopEngines: true, unloadModels: true }
+        get.mockResolvedValueOnce(policyDocument('5', { pause: legacyPause }))
+        const canonical = snapshot('6', { roles: { weak: WEAK }, pause: canonicalPause })
+        set.mockResolvedValue(canonical)
+        await store().apply('a', 'a', ROLES)
+
+        expect(JSON.parse(set.mock.calls[0][0].policy).pause).toEqual(legacyPause)
+        expect(JSON.parse(entry('a').baseline?.policy ?? '{}').pause).toEqual(canonicalPause)
+        get.mockResolvedValue(policyDocument('6', { roles: { weak: WEAK }, pause: canonicalPause }))
+        await store().apply('a', 'a', ROLES)
+        expect(set).toHaveBeenCalledTimes(1)
+        expect(entry('a').phase).toBe('applied')
+    })
+
+    it('keeps a peer-paused draft after available readback until explicitly sent', async () => {
+        get.mockResolvedValue(policyDocument('5', { availability: 'paused', pausedBy: 'peer' }))
+        await store().apply('a', 'a', ROLES)
+        expect(set).not.toHaveBeenCalled()
+        store().adopt('a', policyDocument('6'))
+        expect(set).not.toHaveBeenCalled()
+        expect(entry('a').draft).toEqual(ROLES)
+
+        get.mockResolvedValue(policyDocument('6'))
+        set.mockImplementation(async request => persisted(request))
+        await store().apply('a', 'a', ROLES)
+        expect(set).toHaveBeenCalledTimes(1)
+        expect(set.mock.calls[0][0].expectedPersistedRevision).toBe('6')
+    })
+
     it('never has more than four per-node operations in flight', async () => {
         const ids = Array.from({ length: 10 }, (_, index) => `node-${index}`)
         const active = new Set<string>()

@@ -115,7 +115,9 @@ describe('receiver pending pairing', () => {
         await submitPIN()
         expect(respond).toHaveBeenCalledWith('one', true, '123456', allowed)
         expect(document.body.textContent).toContain('Remote management of this device')
-        expect(document.body.textContent).toContain('Local pause and engine Off always win')
+        expect(document.body.textContent).toContain(
+            'This choice applies to the device you are using. Reading status and using models this device serves remain available. Engine locks and node pause still apply.'
+        )
     })
 
     it('resets the permission and PIN for a different invitation', async () => {
