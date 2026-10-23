@@ -1,7 +1,7 @@
-{/*
+{/_
 SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 SPDX-License-Identifier: Apache-2.0
-*/}
+_/}
 
 # Getting Started with NVIDIA Personal AI Router
 
@@ -64,6 +64,7 @@ Choose from:
   Then launch **NVIDIA PAIR** from the desktop application menu. If
   you have kept more than one PAIR package in that directory, install the one
   you want by its full filename instead.
+
 - **macOS disk image:** Open the `.dmg` and drag **NVIDIA PAIR** to
   **Applications**, then launch it from there.
 
@@ -137,6 +138,22 @@ Start PAIR on each system and confirm they are on the same local network.
 5. On either system, open **Settings > Cluster** and confirm that the peer
    appears under **Connected nodes**, or check the node list on **Overview**.
 6. Repeat the process from any cluster member to add more systems.
+
+To join an existing cluster from a standalone system, choose **Ask to join**
+beside a discovered clustered device in **Add node** or **Settings > Cluster**.
+Manual address entry offers separate **Invite** and **Ask to join** actions.
+Open PAIR on the selected member, then **Settings > Cluster > Join requests**.
+Review the unverified claimed name/address and choose **Approve** or **Decline**.
+Remote management of the approving device defaults to blocked. Approval shows
+the pairing PIN on that member; enter it in the existing invitation prompt on
+the requesting system. Approval alone does not complete joining.
+
+Both devices need an updated PAIR service and must be reachable on the local
+network. Requests wait for review on the selected member only. Closing the UI
+does not cancel a request; use **Cancel request** or **Decline** explicitly.
+A device with cluster peers must leave its current cluster separately. An empty
+solo cluster requires explicit replacement confirmation and is replaced only
+after approval. Pairing failure after replacement leaves that device unclustered.
 
 ![The Add node control in PAIR's toolbar with a discovered system listed.](assets/onboarding/getting-started/03-add-node.png)
 
@@ -231,11 +248,11 @@ There are two request styles because there are two different chat APIs in common
 the engine rather than rewriting it.
 The engine therefore has to understand the style you send.
 
-| Endpoint | OpenAI `/v1/chat/completions` | Ollama `/api/chat` |
-| --- | --- | --- |
-| Ollama | Works | Works |
-| LM Studio | Works | Not available |
-| llama.cpp | Works | Not available |
+| Endpoint  | OpenAI `/v1/chat/completions` | Ollama `/api/chat` |
+| --------- | ----------------------------- | ------------------ |
+| Ollama    | Works                         | Works              |
+| LM Studio | Works                         | Not available      |
+| llama.cpp | Works                         | Not available      |
 
 **If you are unsure, send the OpenAI-style request.** It works with every
 supported engine, and most tools and SDKs use it. Use the Ollama style
@@ -304,11 +321,11 @@ proxy takes the port the engine would normally use, so existing clients keep
 working without reconfiguration, and PAIR moves the engine itself to the next
 free port.
 
-| What an application connects to | Default port |
-| --- | --- |
-| Ollama-compatible proxy | `11434` |
-| LM Studio / OpenAI-compatible proxy | `1234` |
-| llama.cpp / OpenAI-compatible proxy | `8080` |
+| What an application connects to     | Default port |
+| ----------------------------------- | ------------ |
+| Ollama-compatible proxy             | `11434`      |
+| LM Studio / OpenAI-compatible proxy | `1234`       |
+| llama.cpp / OpenAI-compatible proxy | `8080`       |
 
 When PAIR takes one of those ports, the engine behind it moves:
 
@@ -328,15 +345,15 @@ them yourself, but they must be reachable between systems in a cluster. The
 Windows installer adds the corresponding firewall rules. On Linux, allow them
 manually if you run a restrictive firewall.
 
-| Port | Purpose |
-| --- | --- |
+| Port       | Purpose                                              |
+| ---------- | ---------------------------------------------------- |
 | `5353/udp` | Discovery of other nodes on the local network (mDNS) |
-| `14318` | Node hardware and model inventory |
-| `14319` | Service-error synchronization |
-| `14320` | Workload propagation |
-| `14321` | Pairing and cluster membership |
-| `14322` | Model list served to cluster peers |
-| `14323` | Cluster-scoped remote engine control |
+| `14318`    | Node hardware and model inventory                    |
+| `14319`    | Service-error synchronization                        |
+| `14320`    | Workload propagation                                 |
+| `14321`    | Pairing and cluster membership                       |
+| `14322`    | Model list served to cluster peers                   |
+| `14323`    | Cluster-scoped remote engine control                 |
 
 ### Changing a Port
 
@@ -378,10 +395,10 @@ with its own command-line interface (CLI). Two things make that less obvious:
 
 **Ollama** is installed inside PAIR's own data directory:
 
-| Platform | Path |
-| --- | --- |
-| Windows | `%LOCALAPPDATA%\Nvidia Corporation\Personal AI Router\engine-bin\ollama\ollama.exe` |
-| Linux | `~/.config/Nvidia Corporation/Personal AI Router/engine-bin/ollama/bin/ollama` |
+| Platform | Path                                                                                |
+| -------- | ----------------------------------------------------------------------------------- |
+| Windows  | `%LOCALAPPDATA%\Nvidia Corporation\Personal AI Router\engine-bin\ollama\ollama.exe` |
+| Linux    | `~/.config/Nvidia Corporation/Personal AI Router/engine-bin/ollama/bin/ollama`      |
 
 On Linux it needs its bundled libraries on the library path:
 
@@ -424,10 +441,10 @@ model you prepared in step 4.
 
 What that base URL serves depends on the engine behind it:
 
-| Endpoint | Default base URL | Paths it serves |
-| --- | --- | --- |
-| Ollama | `http://127.0.0.1:11434` | Ollama's own API — `/api/chat`, `/api/generate`, `/api/embed`, `/api/tags` — and the OpenAI-compatible `/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`, `/v1/models`, plus the Anthropic Messages API `/v1/messages` |
-| LM Studio | `http://127.0.0.1:1234` | The OpenAI-compatible paths (`/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`, `/v1/models`) and the Anthropic Messages API `/v1/messages` |
+| Endpoint  | Default base URL         | Paths it serves                                                                                                                                                                                                                  |
+| --------- | ------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Ollama    | `http://127.0.0.1:11434` | Ollama's own API — `/api/chat`, `/api/generate`, `/api/embed`, `/api/tags` — and the OpenAI-compatible `/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`, `/v1/models`, plus the Anthropic Messages API `/v1/messages` |
+| LM Studio | `http://127.0.0.1:1234`  | The OpenAI-compatible paths (`/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`, `/v1/models`) and the Anthropic Messages API `/v1/messages`                                                                            |
 
 The distinction matters when you fill in an application's settings. A client
 written against the OpenAI API usually wants the `/v1` included, as in
@@ -454,7 +471,7 @@ point an application on a fourth machine at `http://some-node:11434` and have it
 work.
 
 **Run PAIR where you work.** The intended pattern is to install PAIR on the
-machine you use, pair it into the cluster, and point your applications at *its*
+machine you use, pair it into the cluster, and point your applications at _its_
 local endpoint. That machine does not need a GPU or an engine of its own. It only
 needs to be a cluster member, and its proxy routes your requests to whichever
 node can serve them.
@@ -543,14 +560,14 @@ want to observe.
 
 ### Read a Failure
 
-| Symptom | Usual meaning |
-| --- | --- |
-| Connection refused | Nothing is listening on that port. Check the port and service status. |
-| `502` with `no active node` | The proxy is running, but no routable engine node is available. |
-| `502` with `no available node advertises the requested model` | Current inventory has no routable owner for that model. Wait for inventory to update, or prepare the model on a node running that engine. |
-| `404` on an inference call | Every advertised owner tried by the proxy rejected the model, so its inventory is stale. |
-| A reply, but **Jobs** is empty | Something else owns the proxy port. Refer to [Requests work but PAIR shows no jobs](troubleshooting.mdx#requests-work-but-pair-shows-no-jobs). |
-| `400` or `422` | The request is malformed. PAIR does not retry it because it would fail on every node. |
+| Symptom                                                       | Usual meaning                                                                                                                                  |
+| ------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| Connection refused                                            | Nothing is listening on that port. Check the port and service status.                                                                          |
+| `502` with `no active node`                                   | The proxy is running, but no routable engine node is available.                                                                                |
+| `502` with `no available node advertises the requested model` | Current inventory has no routable owner for that model. Wait for inventory to update, or prepare the model on a node running that engine.      |
+| `404` on an inference call                                    | Every advertised owner tried by the proxy rejected the model, so its inventory is stale.                                                       |
+| A reply, but **Jobs** is empty                                | Something else owns the proxy port. Refer to [Requests work but PAIR shows no jobs](troubleshooting.mdx#requests-work-but-pair-shows-no-jobs). |
+| `400` or `422`                                                | The request is malformed. PAIR does not retry it because it would fail on every node.                                                          |
 
 When a status is not specific enough, the services' own reporting is behind
 **Open log file** on **Settings → Service**.

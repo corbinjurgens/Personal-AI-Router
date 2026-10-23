@@ -9,7 +9,7 @@ import { useClusterInvitationsStore } from '@/ui/stores/cluster-invitations.stor
 import { useConnectionStore } from '@/ui/stores/connection.store'
 
 /**
- * Discovered LAN peers that can be invited: everything the broker has discovered
+ * Discovered LAN peers available for Invite or Ask to join: everything the broker has discovered
  * minus current cluster members minus self.
  *
  * This is the single source for both the Add Node modal and the cluster settings

@@ -12,12 +12,15 @@ import { useInvitablePeers } from '@/ui/hooks/useInvitablePeers'
 import ActiveNode from './ActiveNode'
 import AvailableNode from './AvailableNode'
 import PendingInviteCard from './PendingInviteCard'
+import JoinRequestCard from './JoinRequestCard'
 import { InlineErrorBanner } from '@/ui/components/InlineErrorBanner'
 
 export default function ClusterSettings() {
     const { connected, selfId, clusterId } = useConnectionStore()
     const members = useClusterInvitationsStore(state => state.members)
     const pendingInvites = useClusterInvitationsStore(state => state.pendingInvites)
+    const joinSnapshot = useClusterInvitationsStore(state => state.joinSnapshot)
+    const joinError = useClusterInvitationsStore(state => state.joinError)
     const selfNode = useNodesStore(state => (selfId ? (state.nodes.get(selfId) ?? null) : null))
     const [error, setError] = useState<string | null>(null)
 
@@ -65,6 +68,7 @@ export default function ClusterSettings() {
     return (
         <Stack gap="6" className="relative py-8 px-3">
             {error && <InlineErrorBanner severity="error" message={error} />}
+            {joinError && <InlineErrorBanner severity="error" message={joinError} />}
 
             <Flex wrap="wrap" align="start" justify="start" gap="4">
                 <div className="settings-card pair-paper p-4">
@@ -106,6 +110,26 @@ export default function ClusterSettings() {
                     </div>
                 )}
             </Flex>
+
+            <Stack gap="2">
+                <Text kind="body/semibold/md" className="px-1">
+                    Join requests
+                </Text>
+                {!joinSnapshot && (
+                    <Text kind="body/regular/sm">
+                        Join request status is unavailable. Reconnect to read it.
+                    </Text>
+                )}
+                {joinSnapshot && !joinSnapshot.supported && (
+                    <Text kind="body/regular/sm">Update PAIR to ask to join a cluster.</Text>
+                )}
+                {joinSnapshot?.supported && joinSnapshot.requests.length === 0 && (
+                    <Text kind="body/regular/sm">No join requests.</Text>
+                )}
+                {joinSnapshot?.requests.map(request => (
+                    <JoinRequestCard key={request.requestId} request={request} />
+                ))}
+            </Stack>
 
             {pendingInvites.length > 0 && (
                 <Stack gap="2">
