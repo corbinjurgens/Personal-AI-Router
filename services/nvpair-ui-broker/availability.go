@@ -324,6 +324,10 @@ func (b *Broker) pauseEnginesOn(ctx context.Context, worker *rpcWorker) error {
 		}
 	}
 	var failures []string
+	// A failed sleep is only a failure when the final readback does not show the
+	// engine stopped: an engine this host cannot run is reported stopped, and
+	// refuses Sleep.
+	stopFailed := make(map[string]bool)
 	if inventoryErr != nil {
 		failures = append(failures, "engine inventory unavailable")
 	}
@@ -350,7 +354,7 @@ func (b *Broker) pauseEnginesOn(ctx context.Context, worker *rpcWorker) error {
 				return ctx.Err()
 			}
 			slog.Warn("could not stop engine for pause", "engine", engine, "err", err)
-			failures = append(failures, engine+": stop failed")
+			stopFailed[engine] = true
 			continue
 		}
 	}
@@ -370,6 +374,9 @@ func (b *Broker) pauseEnginesOn(ctx context.Context, worker *rpcWorker) error {
 	}
 	if verifyErr != nil || !current {
 		failures = append(failures, "engine shutdown readback unavailable")
+		for engine := range stopFailed {
+			failures = append(failures, engine+": stop failed")
+		}
 	} else {
 		for engine, running := range stopped {
 			known[engine] = true

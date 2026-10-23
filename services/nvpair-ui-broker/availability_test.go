@@ -354,3 +354,35 @@ func TestPauseReplaySkipsRestoreForEveryOrigin(t *testing.T) {
 	test("stored peer pause", nodepolicy.PausedByPeer, false)
 	test("startup recovery", "", true)
 }
+
+// An engine this host cannot run is reported stopped and refuses Sleep. Pause
+// must not fail on it when the final readback shows nothing running.
+func TestPauseIgnoresSleepRefusalFromAnEngineReportedStopped(t *testing.T) {
+	b, _, _, engine := pausingBroker(t, nodepolicy.PauseConfig{OnActive: nodepolicy.FinishActive})
+	engine.setAnswer(func(method string, raw json.RawMessage) (any, string) {
+		switch method {
+		case "engine:get-installed":
+			return map[string]any{"engines": []any{
+				map[string]any{"engine": "ollama", "running": false},
+				map[string]any{"engine": "custom", "running": false},
+			}}, ""
+		case "engine:models":
+			return map[string]any{"loadedByEngine": map[string][]string{}}, ""
+		case engineSleepMethod:
+			var p struct {
+				Engine string `json:"engine"`
+			}
+			if err := json.Unmarshal(raw, &p); err != nil {
+				return nil, err.Error()
+			}
+			if p.Engine == "custom" {
+				return nil, "engine has no platform support on this host"
+			}
+		}
+		return map[string]bool{"ok": true}, ""
+	})
+	state, err := b.setAvailability(context.Background(), nodepolicy.Paused, nodepolicy.PausedLocally)
+	if err != nil || state != nodepolicy.Paused {
+		t.Fatalf("pause = %s, %v; want paused despite the unsupported engine's sleep refusal", state, err)
+	}
+}
