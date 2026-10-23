@@ -6,7 +6,7 @@ import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ServiceError } from '@/shared/types/errors'
-import type { EngineStatePatch } from '@/shared/types/engine-api'
+import type { EngineCommandPayload, EngineStatePatch } from '@/shared/types/engine-api'
 import type { EngineStatusData } from '@/shared/types/engines'
 import type { PreloadServiceTransport } from '@/shared/types/service-bridge'
 import { createEngineApi } from '@/ui/api/engine-api'
@@ -72,8 +72,16 @@ function toggleSwitch(): HTMLInputElement {
     return found
 }
 
-function commands(): unknown[] {
-    return invoke.mock.calls.filter(([channel]) => channel === 'engine:command').map(c => c[1])
+type InvokePayload = (typeof invoke.mock.calls)[number][1]
+
+function isCommand(payload: InvokePayload): payload is EngineCommandPayload {
+    return typeof payload === 'object' && payload !== null && 'command' in payload
+}
+
+function commands(): EngineCommandPayload[] {
+    return invoke.mock.calls.flatMap(([channel, payload]) =>
+        channel === 'engine:command' && isCommand(payload) ? [payload] : []
+    )
 }
 
 beforeEach(() => {

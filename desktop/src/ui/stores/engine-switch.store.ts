@@ -421,6 +421,9 @@ export const useEngineSwitchStore = create<SwitchStore>((_set, get) => ({
                         unavailable: undefined
                     })
                     refreshPermission(nodeId, code)
+                    // The refusal is definite: release the controls now, so a
+                    // stalled classification read cannot keep them pending.
+                    pending.endSwitch(nodeId, requestId)
                     if (code === LOCAL_VETO_CODE) {
                         try {
                             const policy = await window.pairApi.nodePolicy.get(

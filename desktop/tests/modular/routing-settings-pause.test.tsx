@@ -5,10 +5,12 @@
 import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { LOCAL_VETO_CODE } from '@/shared/constants/service-errors'
 import type { NodeAvailabilityChange, NodePolicyDocument } from '@/shared/types/node-policy'
 import type { NodeItem } from '@/shared/types/nodes'
 import type { ServiceTransport } from '@/shared/types/service-bridge'
 import { createPairApi, type INodePolicyApi } from '@/ui/api/pair-api'
+import { ServiceCallError } from '@/ui/api/service-transport'
 import RoutingSettings from '@/ui/components/RoutingSettings/RoutingSettings'
 import { useConnectionStore } from '@/ui/stores/connection.store'
 import { useNodeConfigurationStore } from '@/ui/stores/node-configuration.store'
@@ -298,6 +300,18 @@ describe('routing settings pause recovery', () => {
         expect(button('Retry pause').disabled).toBe(false)
         expect(button('Resume').disabled).toBe(false)
         expect(container.textContent).toContain('draining')
+    })
+
+    it('shows the target refusal detail when a policy save is vetoed', async () => {
+        await mount('available')
+        const detail = 'This node is paused. Resume it on this node before managing it remotely.'
+        window.pairApi.nodePolicy.set = vi
+            .fn<INodePolicyApi['set']>()
+            .mockRejectedValue(new ServiceCallError(detail, LOCAL_VETO_CODE))
+        await act(async () => button('Save').click())
+
+        expect(container.textContent).toContain('the target refused the operation')
+        expect(container.textContent).toContain(detail)
     })
 
     it.each([

@@ -339,7 +339,7 @@ export default function RoutingSettings() {
                 setSaveError(
                     code === REMOTE_MANAGEMENT_DENIED_CODE
                         ? 'This device refused remote management permission. Your policy draft is kept. Change the permission on that device before trying again.'
-                        : localVetoMessage('save this policy')
+                        : `${localVetoMessage('save this policy')} ${getErrorString(err)}`
                 )
                 if (code === REMOTE_MANAGEMENT_DENIED_CODE && targetId !== null)
                     void useNodeConfigurationStore

@@ -159,6 +159,60 @@ describe('node-scoped engine switch store', () => {
         )
     })
 
+    describe('a refusal whose classification read is outstanding', () => {
+        const paused: NodePolicyDocument = {
+            policy: JSON.stringify({ availability: 'paused', pausedBy: 'peer' }),
+            revision: '5',
+            activation: null,
+            recoveryRequired: false,
+            availability: 'paused'
+        }
+        async function refuse() {
+            await idle()
+            const policy = deferred<NodePolicyDocument>()
+            readPolicy.mockReturnValue(policy.promise)
+            invoke.mockResolvedValueOnce({
+                success: true,
+                data: { configurationRevision: revision }
+            })
+            invoke.mockResolvedValueOnce({ success: false, error: 'refused', code: -32011 })
+            const submitting = store.getState().submit('node-a', 'ollama', 'llamacpp')
+            await flush()
+            return { policy, submitting }
+        }
+
+        it('releases the controls before the read settles, then applies a guarded late result', async () => {
+            const { policy, submitting } = await refuse()
+            expect(readPolicy).toHaveBeenCalledTimes(1)
+            expect(usePendingActionsStore.getState().switches.has('node-a')).toBe(false)
+            expect(store.getState().entries['node-a'].refused).toBe(
+                'Target refused: refused before acceptance: refused (-32011).'
+            )
+            policy.resolve(paused)
+            await submitting
+            expect(store.getState().entries['node-a'].refused).toBe(
+                'Node paused: refused before acceptance: refused (-32011).'
+            )
+        })
+
+        it('drops a late result once the request is no longer the retained one', async () => {
+            const { policy, submitting } = await refuse()
+            store.setState({
+                entries: {
+                    'node-a': {
+                        ...store.getState().entries['node-a'],
+                        request: undefined,
+                        refused: undefined
+                    }
+                }
+            })
+            policy.resolve(paused)
+            await submitting
+            expect(store.getState().entries['node-a'].refused).toBeUndefined()
+            expect(store.getState().entries['node-a'].refusalPolicy).toBeUndefined()
+        })
+    })
+
     it.each([
         { name: 'lock', code: -32013, message: 'engine is locked', label: 'Engine locked' },
         {
