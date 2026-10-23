@@ -6,6 +6,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	stderrors "errors"
 	"fmt"
 	"io"
@@ -16,6 +17,7 @@ import (
 	"sync"
 	"time"
 
+	"nvpair-shared/clustertrust"
 	"nvpair-shared/nodepolicy"
 )
 
@@ -425,23 +427,111 @@ func (r *routingSpend) abortLocalIf(expected *publicAttemptLifecycle) {
 }
 
 // dispatch is the existing concrete inference retry loop, owned by this request.
-func (ctl *routingSpend) dispatch(f *facade, w http.ResponseWriter, r *http.Request, start time.Time, reqID string, bodyBytes []byte, model string, streamIdle time.Duration, cancelReasonOr func(string) string, requestOwner *routingRequest) {
+// dispatchPolicy bounds one request on the common driver. A concrete route
+// keeps the fixed failover budget and job deadline; a hybrid alias spends its
+// tier's Limits once across local, peer and public candidates.
+type dispatchPolicy struct {
+	maxAttempts         int
+	deadline            time.Time
+	queueWait, coldWait time.Duration
+	hybrid              bool
+	publicAllowed       bool
+}
+
+func concreteDispatchPolicy(start time.Time) dispatchPolicy {
+	return dispatchPolicy{maxAttempts: maxDispatchAttempts, deadline: start.Add(jobDeadline)}
+}
+
+// hybridDispatchPolicy reads one request's Limits. publicAllowed only asks for
+// public selection: every public candidate still passes publicAttemptPermitted,
+// the one guard that refuses while public dispatch is unavailable in this build.
+func hybridDispatchPolicy(start time.Time, limits nodepolicy.Limits, rules nodepolicy.TierRouting) dispatchPolicy {
+	seconds := func(n int) time.Duration { return time.Duration(n) * time.Second }
+	return dispatchPolicy{
+		maxAttempts:   limits.MaxAttempts,
+		deadline:      start.Add(seconds(limits.PreOutputBudgetSeconds)),
+		queueWait:     seconds(limits.QueueSeconds),
+		coldWait:      seconds(limits.ColdStartSeconds),
+		hybrid:        true,
+		publicAllowed: rules.RemoteAllowed,
+	}
+}
+
+// publicChatSource supplies what a permitted public attempt needs: the
+// deployment's qualification, transport, credential resolver and parser
+// budget. No production source exists until deployment qualification lands,
+// so a permitted candidate without one is skipped like a refused one.
+type publicChatSource func(chatAccountSnapshot) (q *chatQualification, transport *publicClient,
+	resolve func(nodepolicy.CredentialRef) (string, bool), budget chatByteBudget, ok bool)
+
+var publicChatInputs publicChatSource
+
+// hybridCandidateKey names one hybrid local candidate and the strict entry its
+// node advertised for it.
+func hybridCandidateKey(c candidate) string { return c.id + "\x00" + c.engine + "\x00" + c.model }
+
+// writeStrictSelfRefusal answers a refused hybrid self candidate the way
+// serveStrictLocal answers a refused strict request, and returns the status.
+func writeStrictSelfRefusal(w http.ResponseWriter, err error) int {
+	err = inferencePreparationRefusal(err)
+	var invalid *strictQualificationError
+	var capacity interface{ HTTPStatus() int }
+	switch {
+	case stderrors.Is(err, errAmbiguousModel):
+		writeIngressError(w, http.StatusBadRequest, "ambiguous-model", ambiguousModelMessage)
+		return http.StatusBadRequest
+	case stderrors.As(err, &invalid):
+		writeIngressError(w, http.StatusBadRequest, "strict-qualification", err.Error())
+		return http.StatusBadRequest
+	case stderrors.As(err, &capacity):
+		writeIngressError(w, capacity.HTTPStatus(), "inference-buffer", "inference request could not be prepared")
+		return capacity.HTTPStatus()
+	}
+	status := http.StatusServiceUnavailable
+	switch {
+	case stderrors.Is(err, errStrictOccupied):
+		status = http.StatusTooManyRequests
+	case stderrors.Is(err, context.DeadlineExceeded):
+		status = http.StatusGatewayTimeout
+	}
+	writeStrictAdmissionError(w, err)
+	return status
+}
+
+func (ctl *routingSpend) dispatch(f *facade, w http.ResponseWriter, r *http.Request, start time.Time, reqID string, bodyBytes []byte, model string, streamIdle time.Duration, cancelReasonOr func(string) string, requestOwner *routingRequest, policy dispatchPolicy) {
 	p := f.host
 	var err error
 	ctl.mu.Lock()
 	ctl.body = bodyBytes
+	// The policy's pre-output deadline is the request's one deadline.
+	ctl.deadline = policy.deadline
 	ctl.mu.Unlock()
-	deadline := ctl.deadline
+	deadline := policy.deadline
 	preparationCtx, stopPreparation := context.WithDeadline(r.Context(), deadline)
 	defer stopPreparation()
 	ctl.watchPreOutput(r.Context())
 	// The attempt owns its typed local admission. Panic cleanup follows the
 	// transport's body-close defer, before releasing request buffer borrowers.
 	var currentAttempt *publicAttemptLifecycle
+	// A hybrid self attempt holds a strict ticket instead. Its evidence turns
+	// uncertain once inference bytes may be sent, and Finish then keeps the
+	// capacity quarantined until reconciliation, as serveStrictLocal does.
+	var strictHeld strictAdmissionTicket
+	strictEvidence := strictNotDispatched
+	stopStrictWatch := func() {}
+	finishStrict := func() {
+		stopStrictWatch()
+		stopStrictWatch = func() {}
+		if strictHeld != nil {
+			strictHeld.Finish(strictEvidence)
+			strictHeld, strictEvidence = nil, strictNotDispatched
+		}
+	}
 	defer func() {
 		if currentAttempt != nil {
 			currentAttempt.ticket.release()
 		}
+		finishStrict()
 	}()
 
 	routingModel := model
@@ -459,9 +549,21 @@ func (ctl *routingSpend) dispatch(f *facade, w http.ResponseWriter, r *http.Requ
 		}
 		crossEngine = openAICompatibleInference[r.URL.Path]
 	}
+	// strictFor holds the strict entry each hybrid local candidate advertised
+	// when it was last resolved. The destination revalidates it.
+	strictFor := map[string]nodepolicy.StrictAdmissionModel{}
 	resolve := func() []candidate {
 		var cands []candidate
-		if tier != "" {
+		if policy.hybrid {
+			// The tier order filtered to qualified declared roles; never a
+			// second selector. A hybrid request without a tier has none.
+			if tier != "" {
+				for _, h := range f.hybridLocalCandidates(tier, needs, crossEngine) {
+					strictFor[hybridCandidateKey(h.candidate)] = h.strict
+					cands = append(cands, h.candidate)
+				}
+			}
+		} else if tier != "" {
 			cands = f.resolveTierCandidates(tier, needs, crossEngine)
 		} else {
 			cands = f.resolveCandidates(routingModel)
@@ -556,6 +658,39 @@ func (ctl *routingSpend) dispatch(f *facade, w http.ResponseWriter, r *http.Requ
 		preparedCandidate, preparedDefaults, preparedGeneration, preparedValid = c, defaults, generation, true
 		return nil
 	}
+	// prepareStrictCandidate qualifies a hybrid self candidate's body as
+	// serveStrictLocal does and prepares exactly the validated body it sends.
+	// A strict body serves one attempt and is never reused.
+	prepareStrictCandidate := func(ctx context.Context, c candidate, local *facade, engine, concrete string, identity nodepolicy.StrictModelIdentity, generation uint64) (uint64, error) {
+		if beforeRebuild != nil {
+			beforeRebuild()
+		}
+		dropPrepared()
+		raw, releaseRaw, err := transformBody(ctx, bodyBytes, c.model, c.model != "", nil)
+		if err != nil {
+			return 0, err
+		}
+		validated, err := p.admission.qualifyStrict(engine, concrete, r.URL.Path, raw, identity, ctx)
+		if err != nil {
+			releaseRaw()
+			return 0, err
+		}
+		sendBody, releaseSendBody = validated.body, releaseRaw
+		if !bodyModelMatches(sendBody, concrete) {
+			return 0, errAmbiguousModel
+		}
+		streamRequest, err = parseOriginStreamRequest(r.URL.Path, sendBody)
+		if err != nil {
+			return 0, err
+		}
+		preparedCtx, releasePreparation, err = preparePerformanceBuffers(ctx, sendBody, streamRequest, local.performancePreparationMode(r.URL.Path))
+		if err != nil {
+			releasePreparation = func() {}
+			return 0, err
+		}
+		preparedCandidate, preparedDefaults, preparedGeneration, preparedValid = c, nil, generation, false
+		return validated.generation, nil
+	}
 	if model != "" {
 		candidates, held, err = f.reserveRoundPrepared(preparationCtx, candidates, tier != "", model, prepareCandidate, resolve)
 		if err != nil {
@@ -588,7 +723,10 @@ func (ctl *routingSpend) dispatch(f *facade, w http.ResponseWriter, r *http.Requ
 		p.releaseReservation(held)
 		held = reservation{}
 	}()
-	if len(candidates) == 0 && tier != "" {
+	// Public candidates follow every local one, so their tier is not empty
+	// while public selection remains. They are offered inside the loop.
+	publicPending := policy.hybrid && policy.publicAllowed && tier != "" && p.accounts != nil
+	if len(candidates) == 0 && tier != "" && !publicPending {
 		// Nothing anywhere can answer this tier for this request, which waiting
 		// will not change.
 		slog.Warn("proxy request rejected",
@@ -605,7 +743,7 @@ func (ctl *routingSpend) dispatch(f *facade, w http.ResponseWriter, r *http.Requ
 		})
 		return
 	}
-	if len(candidates) == 0 {
+	if len(candidates) == 0 && !publicPending {
 		rejectionBody := `{"error":"no active node selected or available"}`
 		rejectionError := "no active node"
 		if model != "" {
@@ -672,7 +810,7 @@ func (ctl *routingSpend) dispatch(f *facade, w http.ResponseWriter, r *http.Requ
 		// A tier request's model is the concrete model it is headed for: the
 		// leading candidate's until a dispatch says otherwise.
 		wlModel := model
-		if tier != "" && candidates[0].model != "" {
+		if tier != "" && len(candidates) > 0 && candidates[0].model != "" {
 			wlModel = candidates[0].model
 		}
 		wl = &Workload{
@@ -941,9 +1079,80 @@ func (ctl *routingSpend) dispatch(f *facade, w http.ResponseWriter, r *http.Requ
 	// there fails explicitly for supported streams. proxy/request-started fires
 	// at the commit so it names the node that actually served. The self-forward guard lives in
 	// resolveCandidates.
-	maxDispatches := maxDispatchAttempts
-
+	maxDispatches := policy.maxAttempts
 	dispatches := 0
+	// A hybrid request's queue and cold-start allowances are totals across its
+	// attempts. Each wait spends both, conservatively; none outlasts the one
+	// pre-output deadline.
+	queueLeft, coldLeft := policy.queueWait, policy.coldWait
+	spendWaits := func(d time.Duration) {
+		queueLeft, coldLeft = max(queueLeft-d, 0), max(coldLeft-d, 0)
+	}
+	// reserved is time the attempt may still spend before the destination
+	// receives the request (a peer slot wait). The destination's budgets are
+	// reduced by it, so waits on both sides never exceed one allowance.
+	strictRequestFor := func(m nodepolicy.StrictAdmissionModel, reserved time.Duration) (nodepolicy.StrictAdmissionRequest, bool) {
+		pre := (time.Until(deadline) - reserved).Milliseconds()
+		if pre < 1 {
+			return nodepolicy.StrictAdmissionRequest{}, false
+		}
+		budget := func(d time.Duration) int { return int(min(max(d-reserved, 0).Milliseconds(), pre)) }
+		return nodepolicy.StrictAdmissionRequest{Version: nodepolicy.StrictAdmissionVersion,
+			QueueBudgetMs: budget(queueLeft), ColdStartBudgetMs: budget(coldLeft), PreOutputBudgetMs: int(pre),
+			Request: ctl.key, Identity: m.Identity}, true
+	}
+	// dispatchPublic offers the tier's API entries once, in configured order,
+	// after the first round of local and peer candidates. A candidate that
+	// publicAttemptPermitted refuses is skipped before any preparation and
+	// spends no attempt; in this build that is every candidate. A permitted one
+	// enters G's wrapper exactly once as a new attempt of this request.
+	triedAccounts := map[string]bool{}
+	dispatchPublic := func() bool {
+		for _, entry := range p.admission.currentPolicy().Tiers[tier] {
+			if entry.Kind != nodepolicy.EntryAPI {
+				continue
+			}
+			if dispatches >= maxDispatches || !time.Now().Before(deadline) || r.Context().Err() != nil {
+				return false
+			}
+			snapshot, err := p.accounts.prepareChatAccount(entry.Deployment)
+			if err != nil || triedAccounts[snapshot.account.ID] || p.publicAttemptPermitted(tier, snapshot) != nil || publicChatInputs == nil {
+				continue
+			}
+			q, transport, resolveCredential, budget, ok := publicChatInputs(snapshot)
+			if !ok {
+				continue
+			}
+			lifecycle, err := ctl.newAttempt()
+			if err != nil {
+				return false
+			}
+			triedAccounts[snapshot.account.ID] = true
+			dispatches++
+			attemptCtx, cancelAttempt := context.WithCancel(r.Context())
+			_, err = p.runPublicChatAttempt(attemptCtx, tier, snapshot, bodyBytes, q, transport, resolveCredential, budget, lifecycle,
+				func(b []byte) error { _, err := w.Write(b); return err })
+			cancelAttempt()
+			lifecycle.finished(publicAttemptTerminal{Accounting: publicAccountingRetained, Err: err})
+			ctl.mu.Lock()
+			committed := ctl.committed
+			ctl.mu.Unlock()
+			if err == nil || committed {
+				// Output reached the client: this attempt is the answer even if
+				// it then failed, and nothing else may write a response.
+				servedNodeID, finalStatus = entry.Deployment, http.StatusOK
+				if err != nil {
+					proxyErr = "public attempt failed after output began: " + err.Error()
+				}
+				return true
+			}
+			// Refusal at any stage ends this attempt only. Each account is
+			// offered once per request, so a cooldown is never retried here.
+			proxyErr = "public attempt failed: " + err.Error()
+		}
+		return false
+	}
+
 	responseFinished := false
 	respondedWithError := false
 	regenExhausted := false
@@ -1001,6 +1210,23 @@ func (ctl *routingSpend) dispatch(f *facade, w http.ResponseWriter, r *http.Requ
 			// claim before waiting.
 			repointWorkload("", "")
 			releaseHeld()
+			if publicPending {
+				publicPending = false
+				if dispatchPublic() {
+					responseFinished = true
+					break
+				}
+				if policy.hybrid && len(round) == 0 && len(resolve()) == 0 {
+					// No local candidate remains and every public one is spent:
+					// the tier has no eligible model, as the first check says.
+					respondedWithError = true
+					finalStatus = http.StatusNotFound
+					proxyErr = "no eligible model for tier"
+					writeProxyError(w, http.StatusNotFound, []string{"no eligible model for tier ", tier}, needs.names(), true)
+					break
+				}
+				continue
+			}
 			// This node refused its own candidate for a reason no backoff will
 			// change, and nothing else can take the request: answer now.
 			if selfRejection != "" && len(resolve()) == 0 {
@@ -1131,7 +1357,55 @@ func (ctl *routingSpend) dispatch(f *facade, w http.ResponseWriter, r *http.Requ
 		target := cand.url
 		admissionStarted := time.Now()
 		var performanceWait time.Duration
-		if cand.self {
+		if cand.self && policy.hybrid {
+			// The router admits its own hybrid candidate strictly, as
+			// serveStrictLocal admits a peer's: the body is qualified first,
+			// then AdmitStrict spends the remaining queue and cold allowances.
+			var refusal error
+			if m, ok := strictFor[hybridCandidateKey(cand)]; !ok {
+				refusal = errStrictUnavailable
+			} else if req, ok := strictRequestFor(m, 0); !ok {
+				refusal = context.DeadlineExceeded
+			} else {
+				p.admission.mu.Lock()
+				generation := p.admission.policyGeneration
+				p.admission.mu.Unlock()
+				prepareCtx, stop := context.WithDeadline(attemptCtx, deadline)
+				strictGeneration, err := prepareStrictCandidate(prepareCtx, cand, candFacade, candEngine, candModel, m.Identity, generation)
+				stop()
+				if err == nil {
+					strictHeld, err = p.admission.AdmitStrict(attemptCtx, candEngine, candModel, req, strictGeneration)
+				}
+				spendWaits(time.Since(admissionStarted))
+				refusal = err
+			}
+			if refusal == nil {
+				t := strictHeld.(*strictTicket)
+				p.admission.mu.Lock()
+				t.base.cancel = func() { ctl.abortLocalIf(att) }
+				p.admission.mu.Unlock()
+				stopStrictWatch = t.watchPreOutput(cancelAttempt)
+				performanceWait = time.Since(admissionStarted)
+				u, ok := candFacade.localBackendTarget()
+				if !ok {
+					refusal = errStrictUnavailable
+				}
+				target = u
+			}
+			if refusal != nil {
+				finishStrict()
+				cancelAttempt()
+				att.finished(publicAttemptTerminal{})
+				proxyErr = "strict admission refused: " + refusal.Error()
+				if !last {
+					continue
+				}
+				respondedWithError = true
+				servedNodeID, servedTarget = cand.id, cand.url.Host
+				finalStatus = writeStrictSelfRefusal(w, refusal)
+				break
+			}
+		} else if cand.self {
 			decision := func() admissionDecision {
 				ctx, stop := context.WithDeadline(attemptCtx, deadline)
 				defer stop()
@@ -1228,6 +1502,7 @@ func (ctl *routingSpend) dispatch(f *facade, w http.ResponseWriter, r *http.Requ
 				}
 				if !stable {
 					att.ticket.release()
+					finishStrict()
 					cancelAttempt()
 					att.finished(publicAttemptTerminal{})
 					next--
@@ -1291,6 +1566,17 @@ func (ctl *routingSpend) dispatch(f *facade, w http.ResponseWriter, r *http.Requ
 		// and the per-attempt admission header go on the copy for the same
 		// reason, with headers cloned so one attempt's never leak into the
 		// next.
+		var peerSlotWait time.Duration
+		if policy.hybrid && !cand.self && cand.peerUUID != "" {
+			// A hybrid peer attempt waits for a slot for at most half its
+			// remaining queue allowance; the destination's budgets are reduced
+			// by that bound, because the slot is acquired inside the transport
+			// after the strict header is written. ErrPeerSlotOccupied ends the
+			// attempt as a costing one. Concrete attempts keep blocking
+			// acquisition.
+			peerSlotWait = queueLeft / 2
+			attemptCtx = clustertrust.WithPeerSlotWait(attemptCtx, peerSlotWait)
+		}
 		attemptReq := r.WithContext(attemptCtx)
 		attemptReq.Header = r.Header.Clone()
 		if streamRequest.protocol != streamProtocolUnknown {
@@ -1305,6 +1591,31 @@ func (ctl *routingSpend) dispatch(f *facade, w http.ResponseWriter, r *http.Requ
 		} else {
 			attemptReq.Header.Set(nodepolicy.AdmissionWaitHeader, strconv.Itoa(admissionWait))
 		}
+		if policy.hybrid && !cand.self {
+			// The first production producer of the strict header. The
+			// destination revalidates identity, origin and body itself.
+			header := ""
+			if m, ok := strictFor[hybridCandidateKey(cand)]; ok {
+				if req, ok := strictRequestFor(m, peerSlotWait); ok {
+					if raw, err := json.Marshal(req); err == nil {
+						header = string(raw)
+					}
+				}
+			}
+			if header == "" {
+				cancelAttempt()
+				att.finished(publicAttemptTerminal{})
+				proxyErr = "strict admission request unavailable"
+				if !last {
+					continue
+				}
+				respondedWithError = true
+				servedNodeID, servedTarget = cand.id, target.Host
+				finalStatus = writeStrictSelfRefusal(w, errStrictUnavailable)
+				break
+			}
+			attemptReq.Header.Set(nodepolicy.StrictAdmissionHeader, header)
+		}
 		retry := false
 		retryBusy := false
 		sc := &statusCapture{ResponseWriter: w, status: http.StatusOK, idle: idleClientWriteTimeout}
@@ -1314,9 +1625,28 @@ func (ctl *routingSpend) dispatch(f *facade, w http.ResponseWriter, r *http.Requ
 			performance, err = candFacade.newPerformanceAttemptOwned(preparedCtx, candModel, r.URL.Path, sendBody, performanceWait)
 			if err != nil {
 				att.ticket.release()
+				finishStrict()
 				preparationFailed(err)
 				break
 			}
+		}
+		if strictHeld != nil {
+			// The engine is marked dirty before any inference byte is sent;
+			// from here a release is uncertain until reconciliation.
+			if err := strictHeld.BeforeStrictDispatch(); err != nil {
+				finishStrict()
+				cancelAttempt()
+				att.finished(publicAttemptTerminal{})
+				proxyErr = "strict admission refused: " + err.Error()
+				if !last {
+					continue
+				}
+				respondedWithError = true
+				servedNodeID, servedTarget = cand.id, target.Host
+				finalStatus = writeStrictSelfRefusal(w, err)
+				break
+			}
+			strictEvidence = strictUncertain
 		}
 
 		proxy := &httputil.ReverseProxy{
@@ -1432,6 +1762,8 @@ func (ctl *routingSpend) dispatch(f *facade, w http.ResponseWriter, r *http.Requ
 					}
 					return errTargetGone
 				}
+				// A hybrid self attempt's strict timer ends at the same commit.
+				stopStrictWatch()
 				// The peeked byte goes back only once the commit is ours, so a
 				// lost claim leaves the body untouched for ReverseProxy to close.
 				if peeked != nil {
@@ -1562,7 +1894,11 @@ func (ctl *routingSpend) dispatch(f *facade, w http.ResponseWriter, r *http.Requ
 				// can fail over to another of its published addresses
 				// (multi-homed peer). The in-request failover below moves on to
 				// the next node.
-				candFacade.targets.Forget(cand.id)
+				// A hybrid attempt that found every peer slot occupied says
+				// nothing about the address, which stays confirmed.
+				if !stderrors.Is(err, clustertrust.ErrPeerSlotOccupied) {
+					candFacade.targets.Forget(cand.id)
+				}
 				if !last {
 					// Transport/dial error with candidates left: fail over.
 					retry = true
@@ -1608,9 +1944,15 @@ func (ctl *routingSpend) dispatch(f *facade, w http.ResponseWriter, r *http.Requ
 			returned = true
 		}()
 		cancelAttempt()
+		if policy.hybrid && !cand.self {
+			// A peer attempt's slot wait and destination queue are spent by
+			// the time it ends; charge them to the request's allowances.
+			spendWaits(time.Since(admissionStarted))
+		}
 		// The admitted execution ends with the attempt: a retried attempt no
 		// longer occupies this node, and a committed one has finished copying.
 		att.ticket.release()
+		finishStrict()
 		att.finished(publicAttemptTerminal{})
 		switch {
 		case att.redispatched():
