@@ -160,7 +160,7 @@ prepared launch does with it:
 
 | Generated item | Now |
 | --- | --- |
-| `log`, `env`, `gpu`, `fit_max_tokens` | Bound: validated and forwarded to the server in the immutable snapshot. `log` is an absolute clean path in an existing directory that is not a declared input; `env` is a closed list of the four memory controls (`STRATA_RESIDENT_HEADROOM_GIB`, `STRATA_FILE_CACHE_MIB`, `STRATA_FILE_CACHE_COMPACT`, `STRATA_OWNED_PRICE`) with their value syntax, shown in the approved placement; `gpu` is a small non-negative index; `fit_max_tokens` is not an output guarantee |
+| `log`, `env`, `gpu`, `fit_max_tokens` | Bound: validated and forwarded to the server in the immutable snapshot. `log` is an absolute clean path in an existing directory, a regular file that is not the same file as any declared input; `env` is a closed list of the four memory controls (`STRATA_RESIDENT_HEADROOM_GIB`, `STRATA_FILE_CACHE_MIB`, `STRATA_FILE_CACHE_COMPACT`, `STRATA_OWNED_PRICE`) with their value syntax, shown in the approved placement; `gpu` is a small non-negative index; `fit_max_tokens` is not an output guarantee |
 | `build_metadata`, `gpus_asked`, `port`, `open_browser` | Validated and not forwarded: the server does not read them, or PAIR's command line decides. `open_browser` must be false |
 | `host` | Must be `127.0.0.1`; the command line host wins; not forwarded |
 | `--kv`, `--kv-resident`, `--resident-budget-gib` | Accepted with their value syntax (`fp16`, `int8`, `q4_0`, `q4`, `k8v4` for `--kv`; a positive plain decimal in GiB for the budget) |

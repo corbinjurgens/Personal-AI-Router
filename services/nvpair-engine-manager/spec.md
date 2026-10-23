@@ -242,7 +242,8 @@ snapshot; `build_metadata`, `gpus_asked`, `port`, `host` and `open_browser` are
 validated and not forwarded, because the server reads none of them or takes the
 command line, which PAIR owns. `host` must be `127.0.0.1`, `port` in 1..65535,
 `open_browser` false, `gpu` a small non-negative index. `log` is an absolute
-clean path in an existing directory and never a declared input. `env` is a closed
+clean path in an existing directory, a new or regular existing file (not a link
+or device), and never the same file as a declared input, judged by identity. `env` is a closed
 allow-list of `STRATA_RESIDENT_HEADROOM_GIB`, `STRATA_FILE_CACHE_MIB`,
 `STRATA_FILE_CACHE_COMPACT` and `STRATA_OWNED_PRICE`, each with its value syntax,
 listed in the approved placement as `env:NAME=value`. Duplicate keys (compared
@@ -282,7 +283,9 @@ Pack enumeration is fixed: `index.txt`, `dense.bin`, `experts.bin`; draft uses
 `native_experts.txt` and no `experts.bin` (the fork packer's usual output) binds
 the table as a pack file instead: a `v3` or `v4` header, then layer lines from
 zero with eight unsigned numbers and an optional shard column (one name, or for
-`v4` a gate,up,down list). Each named shard must be a plain `.gguf` name resolved
+`v4` a gate,up,down list in which an empty component means the first `--native`
+shard). Every version comment in the table must be `v3` or `v4` and agree with the
+header. Each named shard must be a plain `.gguf` name resolved
 beside the first `--native` shard and a declared model artifact. Both the table
 and `experts.bin` together are rejected as an ambiguous expert source, and a
 table in the draft pack is unsupported. Tokenizer enumeration requires
