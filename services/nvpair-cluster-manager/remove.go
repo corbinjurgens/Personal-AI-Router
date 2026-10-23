@@ -123,6 +123,10 @@ func (m *Manager) handleNodesRemove(msg *Message) {
 		m.codec.RespondErrorData(msg.ID, codeInternalError, "prepare removal: "+persistErr.Error(), nil)
 		return
 	}
+	if m.testRemovalSelected != nil {
+		close(m.testRemovalSelected)
+		<-m.testRemovalResume
+	}
 	// The fresh adapter revalidates authority/route generation during setup and
 	// before application writes; the receiver also validates the exact proof.
 	if address != "" {

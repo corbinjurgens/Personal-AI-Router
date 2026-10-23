@@ -566,6 +566,24 @@ func newPeerHintFixture(t *testing.T) *peerHintFixture {
 	containHintDials(t, f.remote, false)
 	f.remote.port = 25421 // Data only: these managers never start listeners.
 	pairReverseManagers(t, f.m, f.remote)
+	// Both private managers have the same real hostname. Give their member
+	// records distinct display IDs before persisting or capturing authority.
+	for _, manager := range []*Manager{f.m, f.remote} {
+		for _, display := range []struct {
+			uuid string
+			id   string
+		}{
+			{f.m.identity.NodeUUID, "hint-origin"},
+			{f.remote.identity.NodeUUID, "hint-peer"},
+		} {
+			member, ok := manager.memberByNodeID(display.uuid)
+			if !ok {
+				t.Fatalf("private hint fixture lacks member %s", display.id)
+			}
+			member.ID = display.id
+			manager.upsertMember(member)
+		}
+	}
 	f.m.setMemberAddr(f.remote.identity.NodeUUID, "192.0.2.55", f.remote.port)
 	persistPeerServicesMembers(t, f.m, f.remote)
 	f.m.mesh.Refresh()
@@ -671,6 +689,24 @@ func reopenPeerHints(t *testing.T, f *peerHintFixture, want []string) {
 	if pin, ok := reopened.trust.Get(f.peer.UUID); !ok || pin.AdmissionEpoch != 1 || pin.CertFingerprint != f.remote.identity.CertFingerprint {
 		t.Fatalf("reopen changed original peer pin: %+v", pin)
 	}
+}
+
+func TestPeerHintFixtureUsesDistinctDisplayIDs(t *testing.T) {
+	f := newPeerHintFixture(t)
+	test := func(name string, manager *Manager) {
+		t.Run(name, func(t *testing.T) {
+			origin := storedHintMember(t, manager, f.m.identity.NodeUUID)
+			if origin.ID != "hint-origin" {
+				t.Fatalf("persisted origin %s display ID = %q, want hint-origin", origin.NodeUUID, origin.ID)
+			}
+			peer := storedHintMember(t, manager, f.remote.identity.NodeUUID)
+			if peer.ID != "hint-peer" {
+				t.Fatalf("persisted peer %s display ID = %q, want hint-peer", peer.NodeUUID, peer.ID)
+			}
+		})
+	}
+	test("origin manager", f.m)
+	test("remote manager", f.remote)
 }
 
 func TestMemberAdvertisedAddressesDeepCopy(t *testing.T) {

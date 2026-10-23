@@ -158,6 +158,8 @@ type Manager struct {
 	// Test-only removal boundary hooks; nil in production.
 	testRemovalPrepared chan struct{}
 	testRemovalContinue chan struct{}
+	testRemovalSelected chan struct{}
+	testRemovalResume   chan struct{}
 }
 
 // clusterIdentity returns the current cluster id and friendly name. An empty

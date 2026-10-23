@@ -293,7 +293,13 @@ func startManager(t *testing.T, env map[string]string) (chan frame, io.WriteClos
 func startManagerWithManifest(t *testing.T, m Manifest) (chan frame, io.WriteCloser, func()) {
 	t.Helper()
 	cfg := t.TempDir()
-	engdir := filepath.Join(cfg, configSubdir, "engines")
+	// The spawned manager resolves its app directory from this environment,
+	// as appdir.Dir does: under the base config directory for its OS.
+	base := cfg
+	if runtime.GOOS == "darwin" {
+		base = filepath.Join(cfg, "Library", "Application Support")
+	}
+	engdir := filepath.Join(base, "Nvidia Corporation", "Personal AI Router", "engines")
 	if err := os.MkdirAll(engdir, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -301,7 +307,7 @@ func startManagerWithManifest(t *testing.T, m Manifest) (chan frame, io.WriteClo
 	if err := os.WriteFile(filepath.Join(engdir, m.Engine+".json"), data, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	return startManager(t, map[string]string{"APPDATA": cfg, "LOCALAPPDATA": cfg, "XDG_CONFIG_HOME": cfg})
+	return startManager(t, map[string]string{"APPDATA": cfg, "LOCALAPPDATA": cfg, "XDG_CONFIG_HOME": cfg, "HOME": cfg})
 }
 
 func sha256File(t *testing.T, path string) string {

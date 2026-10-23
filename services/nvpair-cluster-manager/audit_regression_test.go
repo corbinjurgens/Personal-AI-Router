@@ -4,8 +4,12 @@
 package main
 
 import (
+	"bytes"
+	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 )
@@ -90,6 +94,88 @@ func TestRemovalRevalidatesTargetAdmissionBeforeDepin(t *testing.T) {
 	pin, ok := m.trust.Get(target.identity.NodeUUID)
 	if !ok || pin.AdmissionEpoch != 2 {
 		t.Fatalf("newer target admission was removed: %+v", pin)
+	}
+}
+
+// TestRemovalFinalGuardPreservesReadmissionAfterSelection readmits the target
+// after the post-selection recheck has persisted the proof, so only the final
+// pre-de-pin guard can preserve the newer admission.
+func TestRemovalFinalGuardPreservesReadmissionAfterSelection(t *testing.T) {
+	m := newTestManagerPort(t, 15140)
+	target := newTestManagerPort(t, 15141)
+	containHintDials(t, m, false)
+	containHintDials(t, target, false)
+	var output bytes.Buffer
+	m.codec = NewCodec(struct {
+		io.Reader
+		io.Writer
+	}{bytes.NewReader(nil), &output})
+	pinTrusted(t, m, target.identity.NodeUUID, string(target.identity.CertPEM), target.identity.CertFingerprint)
+	m.upsertMember(&ClusterNode{
+		NodeUUID: target.identity.NodeUUID, ID: "target", ClusterID: "cluster-1",
+		AdmissionEpoch: 1, State: stateMember,
+	})
+	targetUUID := target.identity.NodeUUID
+	id := json.RawMessage(`1`)
+	params := mustJSON(t, removeParams{NodeUUID: &targetUUID})
+
+	m.testRemovalSelected = make(chan struct{})
+	m.testRemovalResume = make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		m.handleNodesRemove(&Message{ID: &id, Params: params})
+		close(done)
+	}()
+	// Release a paused removal on every exit so a failed assertion cannot leave
+	// the handler blocked.
+	resume := sync.OnceFunc(func() { close(m.testRemovalResume) })
+	t.Cleanup(func() {
+		resume()
+		<-done
+	})
+	select {
+	case <-m.testRemovalSelected:
+	case <-done:
+		t.Fatalf("removal ended before selection: %s", output.String())
+	}
+	m.rosterMu.Lock()
+	if err := m.trust.Pin(&TrustedPin{
+		NodeUUID: target.identity.NodeUUID, NodeID: "target", ClusterID: "cluster-1",
+		AdmissionEpoch: 2, CertPem: string(target.identity.CertPEM),
+		CertFingerprint: target.identity.CertFingerprint,
+	}); err != nil {
+		m.rosterMu.Unlock()
+		t.Fatal(err)
+	}
+	m.upsertMember(&ClusterNode{
+		NodeUUID: target.identity.NodeUUID, ID: "target", ClusterID: "cluster-1",
+		AdmissionEpoch: 2, State: stateMember,
+	})
+	m.rosterMu.Unlock()
+	resume()
+	<-done
+
+	var response Message
+	for decoder := json.NewDecoder(&output); decoder.More(); {
+		var message Message
+		if err := decoder.Decode(&message); err != nil {
+			t.Fatalf("decode removal output: %v", err)
+		}
+		if message.ID != nil && string(*message.ID) == "1" {
+			response = message
+		}
+	}
+	const preserved = "member admission changed while removal was in progress; current admission was preserved"
+	if response.Error == nil || response.Error.Message != preserved {
+		t.Fatalf("removal response = %+v, want error %q", response, preserved)
+	}
+	pin, ok := m.trust.Get(target.identity.NodeUUID)
+	if !ok || pin.AdmissionEpoch != 2 {
+		t.Fatalf("newer target pin was removed: %+v", pin)
+	}
+	member, ok := m.memberByNodeID(target.identity.NodeUUID)
+	if !ok || member.AdmissionEpoch != 2 {
+		t.Fatalf("newer target membership was removed: %+v", member)
 	}
 }
 
