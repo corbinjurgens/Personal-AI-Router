@@ -439,6 +439,24 @@ proxy enforces it.
   first save of any kind whose replacement lands, including a pause or resume,
   rewrites it as version 2, even when the save returns a durability warning.
   A document without a `version` key parses as version 2, not version 1.
+- **Inference buffers.** The same file persists
+  `routing.buffers.capacityMiB` (192..1024 MiB, default 256) and
+  `routing.buffers.waitSeconds` (0..600 seconds, default 5; zero disables
+  waiting). `policy:set` uses the existing revision/CAS path, then activates
+  the settings live through `node/set-policy`; restart replay restores them.
+  Saving alone does not establish activation. The proxy requires
+  `capacityBytes >= 2 * effectiveIndividualLimitBytes + 1`, with a default
+  individual body limit of 64 MiB, or refuses activation and keeps its previous
+  settings. The byte root bounds owned inference storage, not process RSS or
+  engine memory. Aggregate waits use a FIFO queue of at most 1,024 records
+  with head-of-line blocking and observe cancellation and the earlier request
+  deadline. Individual oversize is 413; aggregate busy, full queue or wait
+  expiry is 503. A capacity decrease drains existing storage without revoking
+  it; new/growing allocations must fit current capacity and queued proposals
+  made impossible by the decrease become 413. Desktop Routing & resources
+  exposes the Node policy JSON editor; the TUI has no buffer controls. See
+  [Hybrid routing](../../docs/hybrid-routing.mdx) for the edit example and the
+  proxy specification §12.1 for acquisition and drain details.
 - **Revision.** The broker is the only revision assigner. Every persisted
   document, whether from `policy:set`, a relayed peer set or a persisted
   availability change, is stamped with the next revision before it is written:
@@ -951,23 +969,69 @@ that node (see [Node policy](#node-policy)).
 
 #### `workloads:cancel`
 
-Params `{ originatedFrom, workloadId, regenerate?, engine?, runId? }`, result
-`{ ok }`. Workload ids are per-engine counters, so `engine` (and `runId`, from the
-workload record) pick the job when two share an id; the proxy refuses an
-ambiguous id. Only the node a job originated on can cancel it. When
+Params `{ originatedFrom, runId, engine, workloadId, regenerate? }`, result
+`{ ok }`. Every hop requires the complete originating node, proxy run, engine
+and workload ID from the record, because counters can repeat across engines
+and restarts. Records missing `runId` remain displayable but are not
+cancellable; clients must not substitute the current run. Only the node a job
+originated on can cancel it. When
 `originatedFrom` is this node the broker calls its proxy's
-`workload/cancel {workloadId, regenerate, engine?, runId?}` and `ok` is the
+`workload/cancel {originatedFrom, runId, engine, workloadId, regenerate?}` and `ok` is the
 proxy's `found`. Otherwise the cancel goes to `nvpair-workload-manager`, which
 carries it to the origin over the pinned peer channel, and `ok:true` only means it
 was handed on; the outcome arrives on the `workloads:*` stream. A peer's relayed
 `workloads:cancel` reaches the broker from the workload-manager and is acted on
-only by the origin. `-32602` without `originatedFrom` or `workloadId`.
+only by the origin. Missing or malformed target fields return `-32602`.
+Before commitment, regenerate can abandon the current destination and continue
+within the request's existing bounds; after commitment it cancels, without
+redispatch or splicing output. Managed peer or engine loss mid-stream ends
+with a protocol error (OpenAI error plus `[DONE]`), not a pause, until SC-b.
 
 A cancel targeting a departed run cannot affect the replacement run. The broker
 retires that run's open or inferred local outcomes as described above and
 preserves already-authoritative terminals. At its origin, a cancel returns
 `ok:false` from the replacement run, or `-32000` (`proxy not available`) while
 no proxy runs.
+
+#### `routing:cancel` and `routing:active`
+
+These client-facing methods control this origin's live requests without an
+engine or facade dependency. They use the process-wide proxy registry, including
+API-only requests with no concrete workload; they are never forwarded to a
+peer or routed through workload-manager.
+
+`routing:cancel` takes
+`{request: {originNodeId, proxyRunId, requestId}, regenerate: bool}` and returns
+`{status}`. All fields are required; `requestId` is a canonical positive
+signed-64-bit decimal string. Malformed, unknown, duplicate, missing or null
+fields and another origin return `-32602`. A stale run or ended request returns
+`not_found`. Eligible pre-commit regeneration returns `regenerating`, including
+before any node has been tried, without inventing an exclusion or consuming an
+attempt. Committed regeneration returns `conflict_committed` with no side
+effect. Otherwise cancellation returns `cancelled`, including a repeat while
+the owner remains live. This differs from `workloads:cancel`, which retains
+post-commit cancellation even when regenerate is requested.
+
+`routing:active {}` returns `{requests: RoutingRequestKey[]}`, with `[]` when
+empty. Complete keys sort numerically by their decimal ID strings (`9` before
+`10`). Both methods validate source and result contracts and call only the
+current local proxy's private `routing/cancel` or `routing/active` method.
+One forward across both methods is allowed per broker instance; overlap,
+unavailable proxy, malformed result or a five-second call timeout returns a
+bounded control error (`-32000`). There is no queue, registry or routing history
+in the broker. The proxy independently bounds snapshot copy/encoding to one
+operation. Live registry entries and snapshot copies plus overlapping JSON
+result/envelope encoding are charged to its existing byte root, including the
+caller ID and newline until response I/O finishes. Snapshot capacity exhaustion
+or a reply exceeding the existing 1 MiB IPC capability returns a bounded control
+error before copying. A private proxy control ID too large for its conservative
+escaped-ID echo bound receives a null-ID control error to keep refusal bounded.
+Cancellation of an existing key requires no new byte grant
+and remains available when the root is full; its entry is released only on final
+cleanup. Partially drained proxy registry/index map backing stays funded until
+discarded and is reused by insertions; empty workload-index backing is released
+independently of live canonical owners. There is no separate live-entry count cap. These methods currently have
+no desktop consumer.
 
 #### `discovery:get-node-info`
 

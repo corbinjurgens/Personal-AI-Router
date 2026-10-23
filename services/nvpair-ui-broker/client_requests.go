@@ -281,6 +281,9 @@ func (b *Broker) handleMessage(msg *Message) {
 			log.Printf("failed to respond to workloads:get-initial: %v", err)
 		}
 
+	case "routing:cancel", "routing:active":
+		b.handleRoutingControl(msg)
+
 	case "node/add", "node/remove", "nodes/list":
 		b.relayToManualNodes(msg)
 

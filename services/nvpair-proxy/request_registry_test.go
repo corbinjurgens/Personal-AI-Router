@@ -10,50 +10,423 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+	"unsafe"
 
 	"nvpair-shared/nodepolicy"
 )
 
+// Test-only registry observation; production snapshots must obtain a root
+// lease through snapshotRoutingRequests before copying or encoding any keys.
+func (p *Proxy) activeRoutingRequests() []nodepolicy.RoutingRequestKey {
+	p.identityMu.Lock()
+	keys := make([]nodepolicy.RoutingRequestKey, 0, len(p.requests))
+	for _, request := range p.requests {
+		keys = append(keys, request.key)
+	}
+	p.identityMu.Unlock()
+	sortRoutingRequests(keys)
+	return keys
+}
+
+func registryTestBytes(p *Proxy) int64 {
+	p.identityMu.Lock()
+	defer p.identityMu.Unlock()
+	var total int64
+	for _, request := range p.requests {
+		key := request.key
+		total += 512 + int64(len(key.OriginNodeID)+len(key.ProxyRunID)+len(key.RequestID))
+	}
+	for _, slots := range []int{p.requestStorage.slots, p.workloadStorage.slots} {
+		if slots != 0 {
+			total += 256 + 256*int64(slots)
+		}
+	}
+	return total
+}
+
+// Preserve a model-bearing HTTP fixture's original inference-byte headroom
+// while funding its canonical row and initially absent map backing owners.
+func registryNextTestBytes(p *Proxy) int64 {
+	p.identityMu.Lock()
+	defer p.identityMu.Unlock()
+	n := int64(512 + len(p.originNodeID) + len(p.runID) + len(strconv.FormatInt(p.requestSequence+1, 10)))
+	if p.requestStorage.lease == nil {
+		n += 256 + 8*256
+	}
+	if p.workloadStorage.lease == nil {
+		n += 256 + 8*256
+	}
+	return n
+}
+
+func TestRequestRegistryZeroFacadeMetadataLifetime(t *testing.T) {
+	p := newBoundProxy(NewCodec(&recordingWriter{}))
+	bufferAssertTotals(t, p.buffers, 0, 0, 0)
+	request, err := p.registerRoutingRequest(newRoutingRequest(nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p.unregisterRoutingRequest(request)
+	want := int64(512 + len("test-origin") + len(p.runID) + len("1") + 256 + 8*256)
+	if len(p.enabledFacades()) != 0 {
+		t.Fatal("metadata fixture enabled a facade")
+	}
+	bufferAssertTotals(t, p.buffers, want, 2, 0)
+	if request.owner.cancelRouting(false) != "cancelled" {
+		t.Fatal("cancel failed")
+	}
+	bufferAssertTotals(t, p.buffers, want, 2, 0)
+	request.owner.finish()
+	bufferAssertTotals(t, p.buffers, want, 2, 0)
+	p.unregisterRoutingRequest(request)
+	p.unregisterRoutingRequest(request)
+	bufferAssertTotals(t, p.buffers, 0, 0, 0)
+}
+
+func TestRequestRegistryRetainedBackingPartialDrainAndReuse(t *testing.T) {
+	p := newBoundProxy(NewCodec(&recordingWriter{}))
+	var rows []*routingRequest
+	for range 40 {
+		row, err := p.registerRoutingRequest(newRoutingRequest(nil))
+		if err != nil {
+			t.Fatal(err)
+		}
+		rows = append(rows, row)
+		defer p.unregisterRoutingRequest(row)
+	}
+	backing, slots, inserts := p.requestStorage.lease, p.requestStorage.slots, p.requestStorage.inserts
+	if backing == nil || slots < len(rows) {
+		t.Fatal("registry backing was not funded")
+	}
+	for _, row := range rows[1:] {
+		p.unregisterRoutingRequest(row)
+	}
+	if len(p.requests) != 1 || p.requestStorage.lease != backing || p.requestStorage.slots != slots || p.requestStorage.inserts != inserts {
+		t.Fatal("partial drain rebuilt backing or retained terminal rows")
+	}
+	want := int64(512+len(rows[0].key.OriginNodeID)+len(rows[0].key.ProxyRunID)+len(rows[0].key.RequestID)) + 256 + 256*int64(slots)
+	bufferAssertTotals(t, p.buffers, want, 2, 0)
+	// Leave room for exactly one new row, not another backing allocation.
+	rowBytes := int64(512 + len(p.originNodeID) + len(p.runID) + len("41"))
+	hold := bufferMustAcquire(t, p.buffers, p.buffers.capacity-want-rowBytes)
+	defer hold.close()
+	reused, err := p.registerRoutingRequest(newRoutingRequest(nil))
+	if err != nil {
+		t.Fatalf("funded backing was not reusable: %v", err)
+	}
+	defer p.unregisterRoutingRequest(reused)
+	if p.requestStorage.lease != backing || p.requestStorage.slots != slots {
+		t.Fatal("row reuse replaced still-funded backing")
+	}
+	bufferAssertTotals(t, p.buffers, p.buffers.capacity, 4, 0)
+	p.unregisterRoutingRequest(reused)
+	hold.close()
+	// Churn must eventually compact on insertion with overlapping funding,
+	// while never accumulating one retained lease per departed row.
+	for range 256 {
+		row, err := p.registerRoutingRequest(newRoutingRequest(nil))
+		if err != nil {
+			t.Fatal(err)
+		}
+		p.unregisterRoutingRequest(row)
+		if len(p.requests) != 1 || p.requestStorage.slots > slots {
+			t.Fatal("churn retained rows or grew backing without a live need")
+		}
+		bufferAssertTotals(t, p.buffers, registryTestBytes(p), 2, 0)
+	}
+	if p.requestStorage.lease == backing {
+		t.Fatal("insertion history did not retire churned backing")
+	}
+	p.buffers.mu.Lock()
+	retired := backing.closed
+	p.buffers.mu.Unlock()
+	if !retired {
+		t.Fatal("replaced backing retained its old root lease")
+	}
+	p.unregisterRoutingRequest(rows[0])
+	if p.requests != nil || p.requestStorage.lease != nil || p.requestStorage.slots != 0 {
+		t.Fatal("empty registry retained backing ownership")
+	}
+	bufferAssertTotals(t, p.buffers, 0, 0, 0)
+}
+
+func TestRequestRegistryRebuildRequiresOverlapGrant(t *testing.T) {
+	p := newBoundProxy(NewCodec(&recordingWriter{}))
+	var rows []*routingRequest
+	for range 8 {
+		row, err := p.registerRoutingRequest(newRoutingRequest(nil))
+		if err != nil {
+			t.Fatal(err)
+		}
+		rows = append(rows, row)
+		defer p.unregisterRoutingRequest(row)
+	}
+	for _, row := range rows[1:] {
+		p.unregisterRoutingRequest(row)
+	}
+	backing := p.requestStorage.lease
+	metadata := registryTestBytes(p)
+	rowBytes := int64(512 + len(p.originNodeID) + len(p.runID) + len("9"))
+	hold := bufferMustAcquire(t, p.buffers, p.buffers.capacity-metadata-rowBytes)
+	defer hold.close()
+	owner := newRoutingRequest(nil)
+	if row, err := p.registerRoutingRequest(owner); err == nil || row != nil {
+		t.Fatal("rebuild released old backing before obtaining overlap capacity")
+	}
+	if p.requestSequence != 8 || len(p.requests) != 1 || p.requestStorage.lease != backing || owner.key.RequestID != "" {
+		t.Fatal("failed rebuild changed registry or identity")
+	}
+	bufferAssertTotals(t, p.buffers, p.buffers.capacity-rowBytes, 3, 0)
+	if rows[0].owner.cancelRouting(false) != "cancelled" {
+		t.Fatal("failed rebuild hid cancellation")
+	}
+	hold.close()
+	row, err := p.registerRoutingRequest(owner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p.unregisterRoutingRequest(row)
+	if row.key.RequestID != "9" || p.requestStorage.lease == backing {
+		t.Fatal("released capacity did not admit a charged rebuild")
+	}
+	bufferAssertTotals(t, p.buffers, registryTestBytes(p), 3, 0)
+}
+
+func TestRequestRegistryWorkloadBackingPartialDrainAndEmptyRelease(t *testing.T) {
+	p := newBoundProxy(NewCodec(&recordingWriter{}))
+	var rows []*routingRequest
+	for i := range 40 {
+		row, err := p.registerRoutingRequest(newRoutingRequest(nil))
+		if err != nil {
+			t.Fatal(err)
+		}
+		rows = append(rows, row)
+		defer p.unregisterRoutingRequest(row)
+		if err := p.registerWorkload(row, workloadKey{engine: "ollama", id: strconv.Itoa(i + 1)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	backing, slots, inserts := p.workloadStorage.lease, p.workloadStorage.slots, p.workloadStorage.inserts
+	if backing == nil {
+		t.Fatal("workload-index backing was not funded")
+	}
+	for _, row := range rows[1:] {
+		p.unregisterWorkload(row)
+	}
+	if len(p.workloadRequests) != 1 || p.workloadStorage.lease != backing || p.workloadStorage.slots != slots || p.workloadStorage.inserts != inserts {
+		t.Fatal("workload partial drain discarded funding or retained terminal associations")
+	}
+	metadata := registryTestBytes(p)
+	bufferAssertTotals(t, p.buffers, metadata, 42, 0)
+	hold := bufferMustAcquire(t, p.buffers, p.buffers.capacity-metadata)
+	defer hold.close()
+	if err := p.registerWorkload(rows[1], workloadKey{engine: "ollama", id: "reused"}); err != nil {
+		t.Fatalf("funded index backing could not be reused at full root: %v", err)
+	}
+	if p.workloadStorage.lease != backing {
+		t.Fatal("index reuse allocated replacement backing")
+	}
+	p.unregisterWorkload(rows[1])
+	bufferAssertTotals(t, p.buffers, p.buffers.capacity, 43, 0)
+	hold.close()
+	for i := range 256 {
+		if err := p.registerWorkload(rows[1], workloadKey{engine: "ollama", id: strconv.Itoa(i + 100)}); err != nil {
+			t.Fatal(err)
+		}
+		p.unregisterWorkload(rows[1])
+		if len(p.workloadRequests) != 1 || p.workloadStorage.slots > slots {
+			t.Fatal("workload churn retained associations or unbounded backing")
+		}
+		bufferAssertTotals(t, p.buffers, registryTestBytes(p), 42, 0)
+	}
+	indexBytes := int64(256 + 256*p.workloadStorage.slots)
+	emptyHold := bufferMustAcquire(t, p.buffers, p.buffers.capacity-registryTestBytes(p))
+	defer emptyHold.close()
+	p.unregisterWorkload(rows[0])
+	if p.workloadRequests != nil || p.workloadStorage.lease != nil || p.workloadStorage.slots != 0 {
+		t.Fatal("empty workload index retained its backing")
+	}
+	bufferAssertTotals(t, p.buffers, p.buffers.capacity-indexBytes, 42, 0)
+	emptyHold.close()
+	bufferAssertTotals(t, p.buffers, registryTestBytes(p), 41, 0)
+	// Canonical requests remain live independently of the now-empty index.
+	if len(p.requests) != len(rows) || p.routingRequestControl(rows[0].key) != rows[0].owner {
+		t.Fatal("index cleanup retired canonical owners")
+	}
+	for _, row := range rows {
+		p.unregisterRoutingRequest(row)
+	}
+	bufferAssertTotals(t, p.buffers, 0, 0, 0)
+}
+
+func TestRequestRegistryBackingAdmissionRollback(t *testing.T) {
+	p := newBoundProxy(NewCodec(&recordingWriter{}))
+	rowBytes := int64(512 + len(p.originNodeID) + len(p.runID) + 1)
+	if err := p.buffers.reconfigure(rowBytes, 0); err != nil {
+		t.Fatal(err)
+	}
+	owner := newRoutingRequest(nil)
+	if row, err := p.registerRoutingRequest(owner); err == nil || row != nil {
+		t.Fatal("unfunded backing admitted a registry entry")
+	}
+	if p.requests != nil || p.requestStorage.lease != nil || p.requestSequence != 0 || owner.key.RequestID != "" {
+		t.Fatal("failed backing grant published partial state")
+	}
+	bufferAssertTotals(t, p.buffers, 0, 0, 0)
+}
+
+func TestRequestRegistryWorkloadBackingAdmissionRollback(t *testing.T) {
+	p := newBoundProxy(NewCodec(&recordingWriter{}))
+	row, err := p.registerRoutingRequest(newRoutingRequest(nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p.unregisterRoutingRequest(row)
+	hold := bufferMustAcquire(t, p.buffers, p.buffers.capacity-registryTestBytes(p))
+	defer hold.close()
+	key := workloadKey{engine: "ollama", id: "7"}
+	if err := p.registerWorkload(row, key); err == nil {
+		t.Fatal("unfunded workload-index backing was allocated")
+	}
+	if p.workloadRequests != nil || p.workloadStorage.lease != nil || row.owner.workload != nil {
+		t.Fatal("index grant failure published a workload association")
+	}
+	bufferAssertTotals(t, p.buffers, p.buffers.capacity, 3, 0)
+	if row.owner.cancelRouting(false) != "cancelled" {
+		t.Fatal("index refusal hid cancellation")
+	}
+	hold.close()
+	p.unregisterRoutingRequest(row)
+	bufferAssertTotals(t, p.buffers, 0, 0, 0)
+}
+
+func TestRequestRegistrySnapshotOwnsKeysAfterRemoval(t *testing.T) {
+	p := newBoundProxy(NewCodec(&recordingWriter{}))
+	request, err := p.registerRoutingRequest(newRoutingRequest(nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p.unregisterRoutingRequest(request)
+	metadata := registryTestBytes(p)
+	id := json.RawMessage(`1`)
+	keys, lease, err := p.snapshotRoutingRequests(&id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lease.close()
+	if len(keys) != 1 || keys[0] != request.key {
+		t.Fatalf("snapshot=%+v", keys)
+	}
+	// The chosen ownership model is an independently charged clone, not a
+	// shallow string whose registry lease could end during response encoding.
+	if unsafe.StringData(keys[0].OriginNodeID) == unsafe.StringData(request.key.OriginNodeID) ||
+		unsafe.StringData(keys[0].ProxyRunID) == unsafe.StringData(request.key.ProxyRunID) ||
+		unsafe.StringData(keys[0].RequestID) == unsafe.StringData(request.key.RequestID) {
+		t.Fatal("snapshot key still borrows registry string backing")
+	}
+	p.buffers.mu.Lock()
+	snapshotBytes := p.buffers.used - metadata
+	p.buffers.mu.Unlock()
+	if snapshotBytes < int64(128+len(keys[0].OriginNodeID)+len(keys[0].ProxyRunID)+len(keys[0].RequestID)) {
+		t.Fatal("snapshot copy storage was not charged")
+	}
+	p.unregisterRoutingRequest(request)
+	bufferAssertTotals(t, p.buffers, snapshotBytes, 1, 0)
+	if keys[0] != request.owner.key {
+		t.Fatal("entry removal changed snapshot identity")
+	}
+	lease.close()
+	bufferAssertTotals(t, p.buffers, 0, 0, 0)
+}
+
+func TestRequestRegistryRootFundedEntriesAndTransportLimit(t *testing.T) {
+	p := newBoundProxy(NewCodec(&recordingWriter{}))
+	p.originNodeID = strings.Repeat("o", 128)
+	p.runID = strings.Repeat("r", 128)
+	for range 4096 {
+		request, err := p.registerRoutingRequest(newRoutingRequest(nil))
+		if err != nil {
+			t.Fatalf("funded registry was independently capped: %v", err)
+		}
+		defer p.unregisterRoutingRequest(request)
+	}
+	bufferAssertTotals(t, p.buffers, registryTestBytes(p), 4097, 0)
+	id := json.RawMessage(`1`)
+	keys, lease, err := p.snapshotRoutingRequests(&id)
+	if err == nil || keys != nil || lease != nil {
+		t.Fatal("oversized IPC reply admitted a snapshot copy")
+	}
+	bufferAssertTotals(t, p.buffers, registryTestBytes(p), 4097, 0)
+	for _, request := range p.requests {
+		p.unregisterRoutingRequest(request)
+	}
+	bufferAssertTotals(t, p.buffers, 0, 0, 0)
+}
+
+func TestRequestRegistrySnapshotCallerIDCapacity(t *testing.T) {
+	p := newBoundProxy(NewCodec(&recordingWriter{}))
+	request, err := p.registerRoutingRequest(newRoutingRequest(nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p.unregisterRoutingRequest(request)
+	metadata := registryTestBytes(p)
+	// This input fits the inbound codec, but HTML escaping alone makes its
+	// outgoing envelope exceed the same codec's maximum frame size.
+	id := json.RawMessage(`"` + strings.Repeat("<", (1<<20)/6) + `"`)
+	keys, lease, err := p.snapshotRoutingRequests(&id)
+	if err == nil || keys != nil || lease != nil {
+		t.Fatal("oversized caller ID admitted a snapshot copy")
+	}
+	bufferAssertTotals(t, p.buffers, metadata, 2, 0)
+}
+
 func TestRequestRegistrySaturationRefusesBeforeEffects(t *testing.T) {
 	w := &recordingWriter{}
 	p := newBoundProxy(NewCodec(w))
-	requests := make([]*routingRequest, 0, 1024)
 	cancelled := 0
-	for range 1024 {
-		request, err := p.registerRoutingRequest(newRoutingRequest(func(string) { cancelled++ }))
-		if err != nil {
-			t.Fatalf("registry filled before 1024 entries: %v", err)
-		}
-		requests = append(requests, request)
-		defer p.unregisterRoutingRequest(request)
-	}
-	if err := p.registerWorkload(requests[0], workloadKey{engine: "ollama", id: "7"}); err != nil {
+	request, err := p.registerRoutingRequest(newRoutingRequest(func(string) { cancelled++ }))
+	if err != nil {
 		t.Fatal(err)
 	}
+	defer p.unregisterRoutingRequest(request)
+	if err := p.registerWorkload(request, workloadKey{engine: "ollama", id: "7"}); err != nil {
+		t.Fatal(err)
+	}
+	metadata := registryTestBytes(p)
+	bufferAssertTotals(t, p.buffers, metadata, 3, 0)
+	lease := bufferMustAcquire(t, p.buffers, p.buffers.capacity-metadata)
+	defer lease.close()
 	f := newFacade(p, anyProfile(t), NewDiscovery(), 0)
 	body := &identityBody{}
 	rec := httptest.NewRecorder()
 	f.handleHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/chat", body))
-	if rec.Code != http.StatusServiceUnavailable || body.reads != 0 || len(w.lines()) != 0 || len(p.activeRoutingRequests()) != 1024 || p.requestSequence != 1024 {
+	if rec.Code != http.StatusServiceUnavailable || body.reads != 0 || len(w.lines()) != 0 || len(p.activeRoutingRequests()) != 1 || p.requestSequence != 1 {
 		t.Fatalf("saturated request status=%d reads=%d notifications=%d entries=%d sequence=%d", rec.Code, body.reads, len(w.lines()), len(p.activeRoutingRequests()), p.requestSequence)
 	}
-	control := p.routingRequestControl(requests[0].key)
+	control := p.routingRequestControl(request.key)
 	if control == nil || !control.cancel(false) || cancelled != 1 {
 		t.Fatal("registry pressure hid a live cancellation target")
 	}
-	p.unregisterRoutingRequest(requests[0])
+	bufferAssertTotals(t, p.buffers, p.buffers.capacity, 4, 0)
+	p.unregisterRoutingRequest(request)
 	if len(p.workloadControls("ollama", "7")) != 0 {
 		t.Fatal("terminal request retained a workload index")
 	}
+	// Free byte capacity after cleanup; metadata refusal must not consume an
+	// identity, so the next admitted request remains counter 2.
+	lease.close()
 	rec = httptest.NewRecorder()
 	f.handleHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/chat", strings.NewReader(`{"model":"a","model":"b"}`)))
-	if rec.Code != http.StatusBadRequest || len(p.activeRoutingRequests()) != 1023 || p.requestSequence != 1025 {
+	if rec.Code != http.StatusBadRequest || len(p.activeRoutingRequests()) != 0 || p.requestSequence != 2 {
 		t.Fatalf("released slot was not reused and cleaned: status=%d entries=%d sequence=%d", rec.Code, len(p.activeRoutingRequests()), p.requestSequence)
 	}
+	bufferAssertTotals(t, p.buffers, 0, 0, 0)
 }
 
 func TestRequestRegistryTracksActualRequestAndFinalCleanup(t *testing.T) {

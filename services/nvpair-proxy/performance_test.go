@@ -1467,7 +1467,7 @@ func TestPerformanceCommittedPeekOutcome(t *testing.T) {
 			if pending == nil || p.routingRequestControl(keys[0]) != owner {
 				t.Fatal("pending borrower lost its terminal request owner")
 			}
-			bufferAssertTotals(t, p.buffers, 96<<10, 1, 0)
+			bufferAssertTotals(t, p.buffers, (96<<10)+registryTestBytes(p), 3, 0)
 			p.identityMu.Lock()
 			associations := len(p.workloadRequests)
 			p.identityMu.Unlock()

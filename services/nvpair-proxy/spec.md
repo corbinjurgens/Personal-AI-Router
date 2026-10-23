@@ -523,7 +523,14 @@ node.
 
 ### 5.2 The commit point
 
-**Commit is the first byte of response body, not the response headers.**
+**Commit is the first raw byte of an accepted successful response body, not
+the response headers or the first complete frame.** One request owner
+(`routingSpend`) arbitrates acceptance, commitment, cancellation and attempts
+across destinations. Its one `responseSink` owns client delivery, counting
+genuine and synthetic output and recording protocol completion separately from
+successful delivery. Neither the storage account nor the frame reader is a
+second lifecycle owner. Synthetic heartbeats, local errors and SC-a endings do
+not commit a destination.
 
 Headers are not a valid commit signal: they may show only that the engine
 accepted the request. Treating them as commitment would disable the header
@@ -549,21 +556,27 @@ gate does not parse it. It is spliced back onto the front of the body before
 the origin's frame reader is installed, so supported stream parsing does not
 move the existing commit/retry boundary.
 
-`EOF` with no bytes counts as a commit. This is defensive rather than expected
+`EOF` with no bytes is accepted as an empty answer without retry. This is
+defensive rather than expected
 — an inference route answering `200` with an empty body is an engine
 misbehaving — but treating it as a stall would spend the whole budget waiting
 for content that is never coming and then fail a request the engine considered
-answered. An empty declared stream then fails protocol validation without
-retrying; an empty non-streaming response retains its raw transport behavior.
+answered. No raw byte exists to set the owner's byte-commit flag. An empty
+declared stream then fails protocol validation without retrying; an empty
+non-streaming response retains its raw transport behavior.
 
-A first-content timeout **never** commits, including on the final permitted
-attempt, where it is terminal with `504`. Committing there would leave the peek
-reader blocked on the same body, racing two readers on one stream, and against
-a silent upstream the copy would block with nothing left to interrupt it.
+A first-content timeout before any accepted raw byte **never** commits,
+including on the final permitted attempt, where it is terminal with `504`.
+The owner arbitrates timeout and the raw read under the same mutex. If the raw
+byte already won but peek publication or reader construction subsequently
+fails, the accepted response ends through its sink; it cannot dispatch again
+or replace the status with a new error response.
 
 The gate is scoped to inference, and costs a non-streaming response nothing
-when its headers and body arrive together. It remains engine-independent;
-protocol selection happens after its winning commit claim.
+when its headers and body arrive together. It remains engine-independent.
+Request framing settings and peer metadata are validated before the raw gate;
+response frame parsing and reader allocation happen after the byte claim. A
+byte commits even if later parsing rejects it or allocation fails.
 
 #### Managed streaming after commit (SC-a)
 
@@ -616,6 +629,21 @@ The origin strips this internal header from every client response and trailer,
 including non-peer engine responses; direct engines cannot supply authoritative
 framing metadata. Unsupported routes and non-inference forwarding are otherwise
 unaffected.
+
+The pinned destination also normalizes supported response framing and publishes
+an EOF disposition on the same internal `X-PAIR-Stream-Framing` trailer channel:
+`v1;completed` or `v1;interrupted;<reason>`, with a reason from the closed set
+below. This trailer is separate from the pre-body `v1;<mode>;<choices>` header.
+The origin requires one valid disposition for a normalized peer response and
+strips it before client delivery, including for supported non-streaming
+responses. Missing, duplicate, malformed or unknown-version dispositions do
+not establish completion; missing disposition is a peer interruption, while
+malformed or inconsistent stream metadata can be `malformed upstream stream`.
+A destination's synthetic error and `[DONE]`
+cannot turn an interruption into a completed workload at the origin. Engines
+cannot supply trusted disposition: ingress removes their values and publishes
+its own after body close at EOF. The trailer supplies no engine-termination or
+strict-admission release evidence.
 
 Origin and destination dispatch explicitly set `Accept-Encoding: identity` on
 the supported inference routes, even when the client requests compression.
@@ -678,8 +706,9 @@ construction can interrupt that response as at base.
 The following byte-accounting ceilings are measured with one-choice SSE,
 minimal `model`/`stream` bodies, their retained body/model bytes, a 96 KiB
 request parser and fully constructed live readers. They exclude rewrites and
-other concurrent allocations. The separate `maxLiveRoutingRequests` registry and
-other admission limits can bind first; these are not throughput guarantees.
+live registry metadata, routing snapshots and other concurrent allocations.
+Registry metadata competes for the same root capacity; admission limits can
+also bind first. These isolated preparation ceilings are not throughput guarantees.
 
 | Preparation class | 192 MiB | 256 MiB | 1024 MiB |
 | --- | ---: | ---: | ---: |
@@ -705,7 +734,18 @@ the old body closes and the torn tail is discarded. OpenAI receives
 `data: {"error":{"message":"stream interrupted: <reason>","type":"server_error","code":"stream_interrupted"}}`
 as an SSE event, then a `[DONE]` event; Ollama receives
 `{"error":"stream interrupted: <reason>"}` as a newline-terminated object.
-Reasons are bounded operational categories, never copied engine error text.
+Reasons are a closed set of operational categories, never copied engine error
+text:
+
+- `upstream closed before the stream completed`
+- `upstream read failed`
+- `upstream stopped sending events`
+- `upstream frame exceeded the frame limit`
+- `stream frame buffer exhausted`
+- `malformed upstream stream`
+- `upstream reported an error`
+- `peer response interrupted`
+
 An already forwarded upstream error is retained without another error frame.
 Failure never fabricates a successful finish reason or `done:true`.
 
@@ -716,9 +756,14 @@ net/http. It preserves endpoint content type, concrete routing headers and
 engine-owned CORS. HTTP status is already committed and is never rewritten to
 502 for a later protocol failure.
 
-**After commit there is no retry or continuation in SC-a.** SC-b's qualified
-same-model continuation remains pending. Destination ingress remains local-only
-and gains no workload/attempt owner or onward route; parsing a terminal marker
+**After commit there is no retry or continuation in SC-a.** A peer or engine
+loss mid-stream ends a managed OpenAI stream with an error frame plus `[DONE]`,
+not a pause, until SC-b; managed Ollama streams use the error object above.
+Delivery remains best effort if the client has disconnected or writes fail.
+The sink records continuation as unavailable. SC-b's qualified same-model
+continuation remains pending and must use this request owner and sink rather
+than introduce another dispatch or delivery owner. Destination ingress remains
+local-only and gains no workload/attempt owner or onward route; parsing a terminal marker
 does not establish engine termination or release an uncertain strict hold.
 
 ### 5.3 Per-attempt cancellation
@@ -734,19 +779,21 @@ classification both read the *parent*, so cancelling a child cannot be mistaken
 for the requester leaving. Confusing the two would either report a job that went
 on to succeed as `cancelled`, or let a real disconnect keep burning attempts.
 
-**Commit and cancellation are mutually exclusive, decided by one atomic
-claim.** Both can become true at once — the watcher's discovery check can pass
-while the commit path is already running, and the work between the arrival of
-the first byte and the end of the commit includes a synchronous notification
-write and two mutex acquisitions. A pair of signals cannot express which
-happened first, so the attempt has a single state that each side claims by
-compare-and-swap; the loser becomes a no-op.
+**The request mutex decides commitment versus pre-output abandonment.** The
+raw read, discovery watcher, deadline and regenerate operation all transition
+the same active attempt under the request owner's mutex. An abandoned,
+cancelled, replaced or ended attempt cannot accept a late byte. If raw
+commitment wins first, discovery disappearance cannot abandon it into another
+dispatch; a later transport interruption ends through the same sink. If the
+watcher wins before commitment, the attempt is abandoned and ordinary
+pre-output retry bounds apply. There is no separate compare-and-swap owner.
 
-**A committed first byte wins that claim.** A delivered byte is direct evidence
-that this node is serving this request, whereas an absence from discovery can be
-a transient announcement gap. If the watcher claims first the attempt is
-abandoned without committing, so the request retries rather than being served a
-stream the proxy then truncates itself.
+Whole-request cancellation remains possible after commitment. A disconnect,
+failed client write or qualified `workload/cancel` ends the request and its
+active child; it never starts a post-commit attempt. Cancellation is recorded
+under the request mutex before callbacks and I/O run outside it. SC-a ending
+planning is arbitrated against the same owner; synthetic output cannot revive
+an ended request. The complete workload cancellation key is in §12.5.
 
 ### 5.4 Status handling and outcome classification
 
@@ -1116,7 +1163,9 @@ state in force. The broker re-sends policy state whenever the proxy starts; unti
 | `node/admission-snapshot` | `{}` | answers `{runId, active, activeByEngine, queued, lastActivityMs}` from current admission state (§12.1.2) |
 | `node/renew-egress-lease` | `{runId, revision, sequence, notAfterNanos}` | trusted parent only; answers `{runId, revision, sequence, nowNanos}`; zero deadline samples the receiver clock without changing authority; a nonzero deadline is a run/revision-bound grant (§12.9) |
 | `node/revoke-egress-lease` | `{runId, sequence}` | trusted parent only; answers `{runId, sequence}`; a higher sequence clears the current lease without activating policy (§12.9) |
-| `workload/cancel` | `{workloadId, engine?, runId?, regenerate?}` | §12.5; answers `{found}` |
+| `workload/cancel` | `{originatedFrom, runId, engine, workloadId, regenerate?}` | §12.5; answers `{found}` |
+| `routing/cancel` | `{request: {originNodeId, proxyRunId, requestId}, regenerate}` | §12.5.1; answers `{status}`; private parent IPC |
+| `routing/active` | `{}` | §12.5.1; answers `{requests: RoutingRequestKey[]}`; private parent IPC |
 
 Unknown fields and engine IDs that are not `engines.ValidRoutingID` are errors. A
 valid descriptor engine ID with no facade here is accepted state.
@@ -1150,6 +1199,51 @@ only for the exact revision it pushed, and it bounds its whole wait for one
 (`nvpair-ui-broker` README). Public egress additionally requires the separate
 run/revision-bound lease (§12.9). A lease acknowledgement never substitutes for
 policy or availability acknowledgement and cannot enable public dispatch.
+
+#### Inference buffer policy
+
+`routing.buffers.capacityMiB` is an integer from 192 through 1024 (default
+256). `routing.buffers.waitSeconds` is an integer from 0 through 600 (default
+5); zero disables waiting. The broker persists both in node policy and
+activates them live through the existing `node/set-policy` acknowledgement
+path. Buffer activation additionally requires
+`capacityBytes >= 2 * effectiveIndividualLimitBytes + 1`, covering overlapping
+old/new body storage and the overflow probe. The individual body limit is
+64 MiB by default. A policy failing this requirement is refused without
+changing the active policy or buffer settings.
+
+One process-wide byte root covers owned inference storage across facades and
+paired ingress: retained bodies, copies/rewrites, parsing/preparation and
+response buffers. It charges allocation capacity before allocation, including
+both arrays during growth, and retains a charge until the last borrower
+releases it. It is not a process RSS bound, an engine/GPU memory limit, or a
+promise about allocator/transport overhead. The stream category remains
+subordinate to this root (§5.2). Live registry metadata and routing snapshot
+copy/encoding storage also use this root (§12.5.1); cancellation of an existing
+owner requires no additional capacity and remains reachable under byte pressure.
+
+Waiting aggregate acquisitions join one FIFO queue with at most 1,024 waiter
+records. Only the head can receive capacity: a large head blocks smaller
+requests behind it. Queue saturation, aggregate contention with waiting
+disabled, and wait expiry return 503. Each acquisition snapshots its own wait
+allowance, shortened by any earlier context deadline; request cancellation
+removes the waiter and releases its pending reservation. Pre-output waits
+share the request's overall pre-output deadline, rather than extending it.
+A body larger than the individual limit returns 413 without queueing for
+capacity (when its size is unknown, as soon as overflow is detected). An
+individual/category allocation or a request's own retained-plus-replacement
+footprint that cannot fit its applicable limit also returns 413. Response
+growth and some bounded category acquisitions refuse immediately (§5.2).
+
+A live capacity decrease never revokes storage already held. Usage can remain
+above the new cap while owners drain; new grants cannot increase that excess.
+Queued proposals made impossible by the decrease are removed with 413;
+remaining waiters retain their original deadlines. Admitted streams drain
+within retained grants, but larger replacement allocations and pre-output
+retries require current capacity; see §5.2 for the reader-specific conditions.
+The desktop's Node policy JSON editor can change these settings; the TUI has
+no buffer controls. See [Hybrid routing](../../docs/hybrid-routing.mdx) for the
+desktop edit example.
 
 #### Automatic residency control
 
@@ -1258,7 +1352,8 @@ field/type and malformed-prefix behavior remains unchanged within this bound.
 This identifier limit is independent of `--max-request-bytes` and the inference
 root's `413` storage-impossibility / `503` contention distinction. Bounded
 normalization (including `:latest`), workload IPC and retained control identifiers
-are outside the inference byte root. Performance queue entries own scalar and
+are outside the inference byte root, except live canonical registry keys and
+`routing/active` copy/encoding storage (§12.5.1). Performance queue entries own scalar and
 identifier copies; finished-model timestamps own small keys and are created only
 for resolved inventory or known resident identities, not arbitrary terminal
 ingress names. Residency updates reconcile those timestamps at the existing
@@ -1444,11 +1539,15 @@ never reach the client. Workload fields are in §5.5.
 
 ### 12.5 Cancel and regenerate
 
-`workload/cancel {workloadId, engine?, runId?, regenerate?}` acts on an
-in-flight workload this process originated and answers `{found}`. Workload ids
-count per facade, so `engine` selects among facades and an id in flight on two
-engines without it is an error; a `runId` other than this process's finds
-nothing. For a departed run, the broker retires open or inferred local-origin
+`workload/cancel {originatedFrom, runId, engine, workloadId, regenerate?}` acts
+on an in-flight workload this process originated and answers `{found}`.
+Every hop requires the complete key: the originating node, exact proxy run,
+valid engine ID and workload ID. Missing or malformed fields are invalid
+params (`-32602`); a valid key for another origin/run or an ended workload
+finds nothing. Workload counters can repeat across engines and proxy restarts,
+so neither engine nor run may be inferred from a numeric ID. Records missing
+`runId` remain displayable but are not cancellable; clients must not fill in
+the current run. For a departed run, the broker retires open or inferred local-origin
 outcomes as `failed`, preserving authoritative terminals already accepted before
 source withdrawal.
 
@@ -1462,6 +1561,94 @@ source withdrawal.
 - **Without `regenerate`, or after commit**: the request is cancelled and its
   workload ends `cancelled` with the error `cancelled by request`. A committed
   stream is never re-dispatched, so two models' output is never spliced.
+
+#### 12.5.1 Private request control
+
+The process-scoped parent IPC methods `routing/cancel` and `routing/active`
+use the existing live request registry, including requests without a concrete
+workload or enabled facade. They have no peer HTTP adapter and no per-engine
+addressed form. The broker exposes them to local clients as `routing:cancel`
+and `routing:active`; it never relays these methods to another origin.
+
+`routing/cancel` requires
+`{request: {originNodeId, proxyRunId, requestId}, regenerate: bool}`
+and returns `{status}`. Every field is required, including
+the boolean. Identity strings use the shared strict key contract; `requestId`
+is a canonical positive signed-64-bit decimal string, never a JSON number.
+Unknown, duplicate, missing, null or malformed fields return invalid params
+(`-32602`). A complete key cannot select another origin or proxy incarnation.
+
+| Status | Meaning |
+| --- | --- |
+| `not_found` | No live owner for this complete key, including an ended request |
+| `conflict_committed` | Regenerate requested after commitment; no state, callback or exclusion changes |
+| `regenerating` | An eligible pre-commit regeneration uses the existing attempt transition and remaining bounds |
+| `cancelled` | Ordinary cancellation, including a repeat while the cancelled owner remains live |
+
+Regeneration abandons an eligible active concrete destination and excludes its
+node. Between attempts it excludes the last node only when one exists. Before
+any destination has been tried it still returns `regenerating`, consumes no
+attempt and fabricates no exclusion. An uncertain hold is retained and cannot
+authorize regeneration. Both request and workload cancellation enter one
+mutex-protected owner transition and run cancellation callbacks after unlock.
+The workload surface retains its legacy post-commit cancellation behavior;
+the request surface instead refuses committed regeneration without side effects.
+Cancellation retains the first accepted cancellation state/reason and uses
+`cancelled by request`; it adds no second-request policy.
+
+`routing/active {}` returns `{requests: [...]}` with the complete live keys.
+The empty array is `[]`, never null. IDs sort by decimal length then lexically
+(`9` before `10`, through `9223372036854775807`). Keys are copied under the
+identity mutex; sorting and encoding run outside it. One snapshot copy through
+response encoding is allowed per proxy instance; an overlapping snapshot is
+refused with bounded control error `-32000` before copying. The broker similarly
+allows one forward across both methods, using the existing five-second proxy
+call bound and releasing its gate on every error. No routing history is added.
+
+Every live registry entry reserves 512 bytes of metadata representation
+headroom (linkage, key headers, lease and closure), plus the actual origin,
+run and decimal-ID byte lengths, from the existing process byte root before
+allocating owned key data or publishing/advancing the counter. The nonwaiting
+grant never queues behind inference. Refusal gives new inference `503` before
+body or other effects, with no counter advance. There is no independent live
+entry cap; the allocator's separate 1,024 FIFO waiter bound is unchanged.
+Cancellation does not acquire a new grant and does not release an entry's
+charge. Final registry cleanup releases that row/key charge exactly once.
+Map backing has separate root-funded ownership in the same registry owner:
+both the canonical request map and workload secondary index retain a grant of
+256 fixed bytes plus 256 bytes per explicit reserved slot. Partial deletion
+releases row data but retains the backing grant; removal does not rebuild or
+acquire capacity. An empty map is discarded and its backing grant released,
+including an empty workload index whose canonical owners are still live.
+
+Insertions reuse paid spare slots. The backing owner also counts cumulative
+insertions since allocation, so deleted-slot/tombstone churn cannot increase
+retained storage without bound. When that allowance is exhausted, insertion
+nonblockingly reserves an entire fresh backing allocation while the old one
+remains charged, copies only live rows, swaps maps, then releases the discarded
+backing grant. Fresh backing has at least eight slots and room for twice the
+new live count, rounded to a power of two. A failed overlap grant preserves
+the old map/funding and publishes no new row or identity. No terminal rows or
+per-departed-row leases are retained, and churn can compact backing on insertion.
+
+Before any snapshot key copy, the proxy counts the complete reply footprint
+under the identity mutex. It reserves 512 bytes of fixed metadata headroom,
+128 bytes per copied key for headers/rounding, the actual cloned key bytes,
+and four times each result JSON and complete framed-message upper bound for
+encoding copies, scratch and allocation rounding. The envelope includes a
+conservative sixfold escaped caller-ID bound and its newline. This covers the
+result RawMessage and separately marshalled outer message while both coexist.
+An ID beyond the conservative echo bound receives a bounded `-32000` error
+with null ID, before gate admission, so the refusal itself cannot overflow IPC.
+The complete framed reply must also fit the existing 1 MiB codec capability;
+oversized replies and exhausted root capacity return bounded control error
+`-32000` before copying, including for an empty snapshot. No uncharged fallback
+or partial list is returned. The asynchronous worker holds its snapshot lease
+through sorting, IPC encoding and successful or failed response I/O, then
+releases it before the instance gate. Snapshot strings are independently
+owned clones, so concurrent entry removal cannot release their storage early.
+Snapshots are observations, not reservations: an owner may end before a
+subsequent cancellation arrives.
 
 ### 12.6 Routing listener
 

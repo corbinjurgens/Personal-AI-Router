@@ -502,7 +502,8 @@ func TestUnifiedDispatchBodyPreparationDeadline(t *testing.T) {
 			}
 			r := httptest.NewRequest(http.MethodPost, routeChatCompletions, strings.NewReader(body))
 			if stage == "initial allocation" {
-				hold = bufferMustAcquire(t, p.buffers, 256<<10)
+				// Admit metadata, then preserve the intended body-allocation wait.
+				hold = bufferMustAcquire(t, p.buffers, (256<<10)-registryNextTestBytes(p))
 			} else {
 				r.Body = &routingPressureBody{Reader: strings.NewReader(body), eofWithData: stage == "parser allowance", pressure: func() {
 					p.buffers.mu.Lock()
@@ -567,7 +568,7 @@ func TestUnifiedDispatchCandidatePreparationDeadline(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			pol := ollamaTierPolicy(map[string][]nodepolicy.TierEntry{"weak": {{Kind: nodepolicy.EntryLocal, Engine: "ollama", Model: "small:1b"}}})
 			fx := newTierFixture(t, ollamaCase(t), pol, map[string][]string{"a": {"small:1b"}, "b": {"small:1b"}}, nil)
-			capacity := int64(256 << 10)
+			capacity := int64(256<<10) + registryNextTestBytes(fx.p)
 			if later {
 				capacity += bufferFixtureRemotePreparationBytes(t, `{"model":"small:1b"}`)
 			}
@@ -589,7 +590,7 @@ func TestUnifiedDispatchCandidatePreparationDeadline(t *testing.T) {
 					}
 					// Restore the original pressure before the next candidate's
 					// transform, without denying the first candidate preparation.
-					if err := fx.p.buffers.reconfigure(256<<10, time.Hour); err != nil {
+					if err := fx.p.buffers.reconfigure((256<<10)+registryTestBytes(fx.p), time.Hour); err != nil {
 						lease.close()
 						t.Error(err)
 						return
@@ -663,7 +664,11 @@ func TestUnifiedDispatchDestinationPreparationDeadline(t *testing.T) {
 	for _, path := range []string{"self strict", "ingress strict", "ingress concrete", "self strict qualification", "ingress strict qualification"} {
 		t.Run(path, func(t *testing.T) {
 			p, engine := strictHTTPFixture(t)
-			p.buffers = bufferTestBudget(t, 256<<10, time.Hour)
+			capacity := int64(256 << 10)
+			if strings.HasPrefix(path, "self") {
+				capacity += registryNextTestBytes(p)
+			}
+			p.buffers = bufferTestBudget(t, capacity, time.Hour)
 			r := strictHTTPRequest(t)
 			pressure := int64(128 << 10)
 			if strings.Contains(path, "qualification") {
@@ -1539,7 +1544,7 @@ func TestUnifiedDispatchCommittedPeekTimer(t *testing.T) {
 			if _, err := owner.newAttempt(); !errors.Is(err, errRoutingSpend) {
 				t.Fatalf("terminal committed request allowed dispatch: %v", err)
 			}
-			bufferAssertTotals(t, p.buffers, 96<<10, 1, 0)
+			bufferAssertTotals(t, p.buffers, (96<<10)+registryTestBytes(p), 3, 0)
 			p.identityMu.Lock()
 			associations := len(p.workloadRequests)
 			p.identityMu.Unlock()

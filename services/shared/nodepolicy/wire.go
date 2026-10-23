@@ -1327,6 +1327,9 @@ type WakeRequest struct {
 // answered with WorkloadCancelResult or a JSON-RPC error.
 const MethodWorkloadCancel = "workload/cancel"
 
+const MethodRoutingCancel = "routing/cancel"
+const MethodRoutingActive = "routing/active"
+
 // WorkloadCancelParams names one in-flight workload this node's proxy
 // originated. Every hop requires the complete target; an old process's workload
 // counter must never resolve to a request in a newer process.

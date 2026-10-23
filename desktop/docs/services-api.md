@@ -322,6 +322,8 @@
 | `node/set-priority` | request (we call) | ✅ yes |
 | `node/set-residency` | request (we call) | ⚠️ not called |
 | `nodes/list` | request (we call) | ✅ yes |
+| `routing/active` | request (we call) | ➖ ignored |
+| `routing/cancel` | request (we call) | ➖ ignored |
 
 **Dynamic / unresolved notify sites (verify by hand — `npm run service-contracts` prints the line numbers):**
 - `n.method (var)  (admission.go)`
@@ -438,6 +440,8 @@
 | `policy:request` | request (we call) | ➖ ignored |
 | `policy:set` | request (we call) | ✅ yes |
 | `ready` | request (we call) | ✅ yes |
+| `routing:active` | request (we call) | ➖ ignored |
+| `routing:cancel` | request (we call) | ➖ ignored |
 | `workloads:cancel` | request (we call) | ✅ yes |
 | `workloads:get-initial` | request (we call) | ✅ yes |
 | `workloads:subscribe` | request (we call) | ✅ yes |

@@ -22,6 +22,74 @@ type strictFixtureCase struct {
 	State  StrictCapabilityState `json:"state"`
 }
 
+func TestRoutingControlConstantsAndStatuses(t *testing.T) {
+	if MethodRoutingCancel != "routing/cancel" || MethodRoutingActive != "routing/active" {
+		t.Fatal("routing method wire names changed")
+	}
+	for _, status := range []string{"not_found", "conflict_committed", "regenerating", "cancelled"} {
+		var out RoutingCancelResult
+		if err := json.Unmarshal([]byte(`{"status":"`+status+`"}`), &out); err != nil {
+			t.Fatal(err)
+		}
+		if string(out.Status) != status {
+			t.Fatalf("status=%s want=%s", out.Status, status)
+		}
+	}
+}
+
+func TestRoutingControlStrictDTOs(t *testing.T) {
+	key := `{"originNodeId":"origin","proxyRunId":"run","requestId":"9223372036854775807"}`
+	valid := `{"request":` + key + `,"regenerate":false}`
+	var in RoutingCancelParams
+	if err := json.Unmarshal([]byte(valid), &in); err != nil {
+		t.Fatal(err)
+	}
+	if in.Request.RequestID != "9223372036854775807" || in.Regenerate {
+		t.Fatalf("request=%+v", in)
+	}
+	test := func(name, raw string, target any) {
+		t.Helper()
+		t.Run(name, func(t *testing.T) {
+			if err := json.Unmarshal([]byte(raw), target); err == nil {
+				t.Fatalf("accepted %s", raw)
+			}
+		})
+	}
+	test("cancel null", `null`, &RoutingCancelParams{})
+	test("cancel missing key", `{"regenerate":false}`, &RoutingCancelParams{})
+	test("cancel missing regenerate", `{"request":`+key+`}`, &RoutingCancelParams{})
+	test("cancel null regenerate", `{"request":`+key+`,"regenerate":null}`, &RoutingCancelParams{})
+	test("cancel unknown field", `{"request":`+key+`,"regenerate":false,"extra":1}`, &RoutingCancelParams{})
+	test("cancel duplicate request", `{"request":`+key+`,"request":`+key+`,"regenerate":false}`, &RoutingCancelParams{})
+	test("cancel duplicate nested id", `{"request":{"originNodeId":"origin","proxyRunId":"run","requestId":"1","requestId":"2"},"regenerate":true}`, &RoutingCancelParams{})
+	test("cancel nested unknown", `{"request":{"originNodeId":"origin","proxyRunId":"run","requestId":"1","extra":1},"regenerate":true}`, &RoutingCancelParams{})
+	for _, id := range []string{`"0"`, `"01"`, `"-1"`, `"1.0"`, `"9223372036854775808"`, `1`, `null`} {
+		test("noncanonical id "+id, `{"request":{"originNodeId":"origin","proxyRunId":"run","requestId":`+id+`},"regenerate":true}`, &RoutingCancelParams{})
+	}
+	test("active null", `null`, &RoutingActiveParams{})
+	test("active unknown", `{"request":`+key+`}`, &RoutingActiveParams{})
+	test("result unknown status", `{"status":"ok"}`, &RoutingCancelResult{})
+	test("result missing status", `{}`, &RoutingCancelResult{})
+	test("result null status", `{"status":null}`, &RoutingCancelResult{})
+	test("result duplicate status", `{"status":"cancelled","status":"not_found"}`, &RoutingCancelResult{})
+	test("snapshot null requests", `{"requests":null}`, &RoutingActiveResult{})
+	test("snapshot missing requests", `{}`, &RoutingActiveResult{})
+	test("snapshot duplicate requests", `{"requests":[],"requests":[]}`, &RoutingActiveResult{})
+	test("snapshot bad key", `{"requests":[{"originNodeId":"origin","proxyRunId":"run","requestId":"01"}]}`, &RoutingActiveResult{})
+	test("snapshot duplicate nested id", `{"requests":[{"originNodeId":"origin","proxyRunId":"run","requestId":"1","requestId":"2"}]}`, &RoutingActiveResult{})
+	var params RoutingActiveParams
+	if err := json.Unmarshal([]byte(`{}`), &params); err != nil {
+		t.Fatal(err)
+	}
+	var active RoutingActiveResult
+	if err := json.Unmarshal([]byte(`{"requests":[`+key+`]}`), &active); err != nil {
+		t.Fatal(err)
+	}
+	if len(active.Requests) != 1 || active.Requests[0] != in.Request {
+		t.Fatalf("snapshot=%+v", active)
+	}
+}
+
 type strictFixtures struct {
 	Identity map[string]any      `json:"identity"`
 	Request  map[string]any      `json:"request"`

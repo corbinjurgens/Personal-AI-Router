@@ -21,6 +21,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"nvpair-shared/applog"
@@ -266,6 +267,8 @@ func bufferBodyAndModel(w http.ResponseWriter, r *http.Request, limit int64) ([]
 }
 
 type Proxy struct {
+	// routingSnapshot bounds snapshot copying and response encoding to one operation.
+	routingSnapshot atomic.Bool
 	// facadeMu guards facades, which is empty until the broker enables one. The
 	// process starts with no engine presence at all, so every reader has to
 	// tolerate a miss rather than assume a facade exists.
@@ -333,6 +336,8 @@ type Proxy struct {
 	requestSequence  int64
 	requests         map[string]*routingRequest
 	workloadRequests map[workloadKey]string
+	requestStorage   routingMapStorage // identityMu owns retained registry backing.
+	workloadStorage  routingMapStorage // identityMu owns retained workload-index backing.
 	performance      performanceQueue
 
 	// admission is the node-wide admission controller every facade shares
@@ -1419,6 +1424,13 @@ func (p *Proxy) handleMessage(msg *Message) {
 	if engine == "" && method == nodepolicy.MethodWorkloadCancel {
 		p.handleWorkloadCancel(msg)
 		return
+	}
+	if engine == "" {
+		switch method {
+		case nodepolicy.MethodRoutingCancel, nodepolicy.MethodRoutingActive:
+			p.handleRoutingControl(msg)
+			return
+		}
 	}
 
 	switch method {

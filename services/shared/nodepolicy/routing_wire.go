@@ -65,6 +65,99 @@ func (k *RoutingRequestKey) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
+// RoutingCancelStatus is the canonical outcome of request cancellation.
+type RoutingCancelStatus string
+
+const (
+	RoutingCancelNotFound          RoutingCancelStatus = "not_found"
+	RoutingCancelConflictCommitted RoutingCancelStatus = "conflict_committed"
+	RoutingCancelRegenerating      RoutingCancelStatus = "regenerating"
+	RoutingCancelCancelled         RoutingCancelStatus = "cancelled"
+)
+
+type RoutingCancelParams struct {
+	Request    RoutingRequestKey `json:"request"`
+	Regenerate bool              `json:"regenerate"`
+}
+
+func (p *RoutingCancelParams) UnmarshalJSON(data []byte) error {
+	type wire RoutingCancelParams
+	var next wire
+	if err := decodeRoutingControl(data, &next, "request", "regenerate"); err != nil {
+		return err
+	}
+	if err := next.Request.Validate(); err != nil {
+		return err
+	}
+	*p = RoutingCancelParams(next)
+	return nil
+}
+
+type RoutingCancelResult struct {
+	Status RoutingCancelStatus `json:"status"`
+}
+
+func (r *RoutingCancelResult) UnmarshalJSON(data []byte) error {
+	type wire RoutingCancelResult
+	var next wire
+	if err := decodeRoutingControl(data, &next, "status"); err != nil {
+		return err
+	}
+	switch next.Status {
+	case RoutingCancelNotFound, RoutingCancelConflictCommitted, RoutingCancelRegenerating, RoutingCancelCancelled:
+	default:
+		return errors.New("invalid routing cancellation status")
+	}
+	*r = RoutingCancelResult(next)
+	return nil
+}
+
+type RoutingActiveParams struct{}
+
+func (p *RoutingActiveParams) UnmarshalJSON(data []byte) error {
+	type wire RoutingActiveParams
+	var next wire
+	return decodeRoutingControl(data, &next)
+}
+
+type RoutingActiveResult struct {
+	Requests []RoutingRequestKey `json:"requests"`
+}
+
+func (r *RoutingActiveResult) UnmarshalJSON(data []byte) error {
+	type wire RoutingActiveResult
+	var next wire
+	if err := decodeRoutingControl(data, &next, "requests"); err != nil {
+		return err
+	}
+	if next.Requests == nil {
+		return errors.New("requests must be an array")
+	}
+	*r = RoutingActiveResult(next)
+	return nil
+}
+
+// Decode the original bytes so nested keys keep their duplicate-field checks
+// and request IDs never pass through a floating-point representation.
+func decodeRoutingControl(data []byte, dst any, required ...string) error {
+	fields, err := peerFields(data)
+	if err != nil {
+		return err
+	}
+	for key := range fields {
+		if !slices.Contains(required, key) {
+			return fmt.Errorf("unknown field %q", key)
+		}
+	}
+	for _, key := range required {
+		v, ok := fields[key]
+		if !ok || bytes.Equal(bytes.TrimSpace(v), []byte("null")) {
+			return fmt.Errorf("%s is required and must not be null", key)
+		}
+	}
+	return json.Unmarshal(data, dst)
+}
+
 // StrictModelIdentity fences engine restart, effective launch/settings changes,
 // and same-name model replacement. Digests are lowercase SHA-256 hex of public
 // configuration/content identity, never credentials. Qualification is separate.
