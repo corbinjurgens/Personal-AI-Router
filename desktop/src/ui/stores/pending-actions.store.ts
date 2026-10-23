@@ -30,7 +30,7 @@
 import { create } from 'zustand'
 import { engineCapabilities } from '@/ui/constants/engine-capabilities'
 import type { EngineCommandPayload, EngineCommandType } from '@/shared/types/engine-api'
-import type { EngineProcessStatus, EngineType } from '@/shared/types/engines'
+import type { EngineProcessStatus, EngineStatusData, EngineType } from '@/shared/types/engines'
 import type { ServiceStatus } from '@/shared/types/ipc-channels'
 import { engineTypeFromManagerName, isEngineType } from '@/shared/utils/engines'
 import { useEngineStatusStore } from '@/ui/stores/engine-status.store'
@@ -61,6 +61,7 @@ const SWEEP_INTERVAL_MS = 1_000
 /** Commands that flip an engine's lifecycle -- only one at a time per engine. */
 const LIFECYCLE_COMMANDS: ReadonlySet<EngineCommandType> = new Set<EngineCommandType>([
     'toggle',
+    'setLock',
     'install',
     'uninstall',
     'update'
@@ -103,6 +104,12 @@ interface PendingAction {
      * this, i.e. the backend acknowledged the transition.
      */
     baselineStatus?: EngineProcessStatus
+    /**
+     * `setLock` only: the lock readback captured when the command fired. A lock
+     * changes no process status on an engine that is already stopped, so this
+     * entry clears on the first status whose lock readback differs from this one.
+     */
+    baselineLocked?: boolean
     expiresAt: number
 }
 
@@ -125,6 +132,18 @@ function timeoutFor(command: EngineCommandType, engineType: EngineType): number 
         return RESTART_DELETE_TIMEOUT_MS
     }
     return PENDING_TIMEOUT_MS
+}
+
+/**
+ * Whether a pushed status is the backend acknowledging a lifecycle entry. A lock
+ * is acknowledged by its own readback, so a lock-only push clears it even though
+ * the process status did not move, and a stop that did move it does not clear it
+ * before the lock is reported.
+ */
+function statusSupersedes(entry: PendingAction, status: EngineStatusData): boolean {
+    return entry.action === 'setLock'
+        ? status.locked !== entry.baselineLocked
+        : status.processStatus !== entry.baselineStatus
 }
 
 function lifecycleKey(nodeId: string, engineType: EngineType): string {
@@ -211,15 +230,14 @@ export const usePendingActionsStore = create<PendingActionsState>((set, get) => 
         const expiresAt = Date.now() + timeoutFor(command, engineType)
 
         if (LIFECYCLE_COMMANDS.has(command)) {
-            const baselineStatus = useEngineStatusStore
-                .getState()
-                .getStatus(nodeId, engineType).processStatus
+            const baseline = useEngineStatusStore.getState().getStatus(nodeId, engineType)
             const next = new Map(get().pending)
             next.set(lifecycleKey(nodeId, engineType), {
                 nodeId,
                 engineType,
                 action: command,
-                baselineStatus,
+                baselineStatus: baseline.processStatus,
+                ...(command === 'setLock' ? { baselineLocked: baseline.locked } : {}),
                 expiresAt
             })
             set({ pending: next })
@@ -294,7 +312,7 @@ export const usePendingActionsStore = create<PendingActionsState>((set, get) => 
                     if (patch.status) {
                         const key = lifecycleKey(patch.nodeId, patch.engineType)
                         const entry = get().pending.get(key)
-                        if (entry && patch.status.processStatus !== entry.baselineStatus) {
+                        if (entry && statusSupersedes(entry, patch.status)) {
                             clearKeys([key])
                         }
                     }

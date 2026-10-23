@@ -7,7 +7,13 @@ import type { SwitchEngineState } from '@/shared/types/engine-switch'
 import { useConnectionStore } from '@/ui/stores/connection.store'
 import { useNodesStore } from '@/ui/stores/nodes.store'
 import { usePendingActionsStore } from '@/ui/stores/pending-actions.store'
-import { useEngineSwitchStore, watchEngineSwitch } from '@/ui/stores/engine-switch.store'
+import {
+    engineRefusalLabel,
+    useEngineSwitchStore,
+    watchEngineSwitch
+} from '@/ui/stores/engine-switch.store'
+import { useEngineStatusStore } from '@/ui/stores/engine-status.store'
+import { engineTypeFromManagerName } from '@/shared/utils/engines'
 import {
     useNodeConfigurationStore,
     watchNodeManagement
@@ -53,6 +59,13 @@ export function EngineSwitchControls({
     const entry = useEngineSwitchStore(state => state.entries[nodeId])
     const pending = usePendingActionsStore(state => state.switches.has(nodeId))
     const management = useNodeConfigurationStore(state => state.management.get(nodeId))
+    const statuses = useEngineStatusStore(state => state.statusByNode.get(nodeId))
+    const targetChoices = engines.filter(engine => {
+        const type = engineTypeFromManagerName(engine.value)
+        return !type || statuses?.get(type)?.locked !== true
+    })
+    const targetType = engineTypeFromManagerName(target)
+    const targetLocked = !!targetType && statuses?.get(targetType)?.locked === true
     useEffect(() => watchEngineSwitch(nodeId), [nodeId])
     useEffect(() => watchNodeManagement(nodeId, local ? undefined : nodeId), [nodeId, local])
     const receipt = entry?.receipt
@@ -74,21 +87,18 @@ export function EngineSwitchControls({
                           'Switch readback unavailable. Refresh before switching.')
                         : !source || !target
                           ? 'Select installed source and target engines.'
-                          : source === target
-                            ? 'From and To must be different engines.'
-                            : !engines.some(engine => engine.value === source) ||
-                                !engines.some(engine => engine.value === target)
-                              ? 'A selected engine is no longer reported installed.'
-                              : undefined
+                          : targetLocked
+                            ? 'Engine locked. Unlock it on the device running it before switching.'
+                            : source === target
+                              ? 'From and To must be different engines.'
+                              : !engines.some(engine => engine.value === source) ||
+                                  !engines.some(engine => engine.value === target)
+                                ? 'A selected engine is no longer reported installed.'
+                                : undefined
     const error = receipt?.error
-    const errorLabel =
-        error?.code === -32012
-            ? 'Remote management permission denied'
-            : error?.code === -32011
-              ? 'Local Off veto'
-              : error?.code === -32010
-                ? 'Configuration conflict'
-                : 'Switch failed'
+    const errorLabel = error
+        ? engineRefusalLabel(error.code, error.message, entry?.refusalPolicy, error.kind)
+        : undefined
     return (
         <Stack gap="3" className="pair-paper min-w-0 max-w-full p-4">
             <Text kind="body/semibold/md">{COPY.heading}</Text>
@@ -107,7 +117,7 @@ export function EngineSwitchControls({
                     <Select
                         size="small"
                         attributes={{ SelectTrigger: { 'aria-label': COPY.target } }}
-                        items={engines}
+                        items={targetChoices}
                         value={target}
                         onValueChange={setTarget}
                         placeholder="Select engine"

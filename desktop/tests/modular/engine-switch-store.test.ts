@@ -4,12 +4,16 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { SwitchChanged, SwitchReceipt, SwitchRequest } from '@/shared/types/engine-switch'
 import type { PreloadServiceTransport } from '@/shared/types/service-bridge'
+import type { NodePolicyDocument } from '@/shared/types/node-policy'
+import type { INodePolicyApi } from '@/ui/api/pair-api'
 import { createEngineApi } from '@/ui/api/engine-api'
 import { serviceTransport } from '@/ui/api/service-transport'
 import { useEngineSwitchStore, watchEngineSwitch } from '@/ui/stores/engine-switch.store'
 import { useConnectionStore } from '@/ui/stores/connection.store'
 import { usePendingActionsStore } from '@/ui/stores/pending-actions.store'
 import { useNodeConfigurationStore } from '@/ui/stores/node-configuration.store'
+import { useEngineStatusStore } from '@/ui/stores/engine-status.store'
+import { emptyEngineStatus } from '@/shared/utils/engines'
 import { parseEngineSwitchStatus } from '@/electron/service-bridge/engine-switch'
 
 const revision = `e3v1:${'a'.repeat(64)}`
@@ -65,6 +69,7 @@ function deferred<T>() {
     return { promise, resolve, reject }
 }
 const invoke = vi.fn<PreloadServiceTransport['invoke']>()
+const readPolicy = vi.fn<INodePolicyApi['get']>()
 const stopListener = vi.fn<() => void>()
 let change: (value: SwitchChanged) => void
 let releaseDefault: () => void
@@ -112,10 +117,12 @@ beforeEach(() => {
         change = callback
         return stopListener
     })
-    vi.stubGlobal('window', { pairApi: { engines: api } })
+    readPolicy.mockReset().mockRejectedValue(new Error('Policy unavailable'))
+    vi.stubGlobal('window', { pairApi: { engines: api, nodePolicy: { get: readPolicy } } })
     useConnectionStore.setState({ connected: true, selfId: 'node-a' })
     store.setState({ entries: {} })
     usePendingActionsStore.setState({ switches: new Map() })
+    useEngineStatusStore.setState({ statusByNode: new Map() })
 })
 afterEach(async () => {
     stops.splice(0).forEach(stop => stop())
@@ -128,6 +135,148 @@ afterEach(async () => {
 })
 
 describe('node-scoped engine switch store', () => {
+    it('reads fresh policy for a retained veto receipt without resubmitting the switch', async () => {
+        readPolicy.mockResolvedValue({
+            policy: JSON.stringify({ availability: 'paused', pausedBy: 'peer' }),
+            revision: '5',
+            activation: null,
+            recoveryRequired: false,
+            availability: 'draining'
+        })
+        await active(
+            receipt({
+                terminal: true,
+                phase: 'failed-validation',
+                error: { code: -32011, kind: 'remote_veto', message: 'refused' }
+            })
+        )
+        expect(readPolicy).toHaveBeenCalledExactlyOnceWith(undefined)
+        expect(store.getState().entries['node-a'].refusalPolicy?.availability).toBe('draining')
+        expect(store.getState().entries['node-a'].receipt?.source).toEqual(receipt().source)
+        expect(store.getState().entries['node-a'].receipt?.target).toEqual(receipt().target)
+        expect(invoke.mock.calls.filter(([channel]) => channel === 'engines:switch')).toHaveLength(
+            0
+        )
+    })
+
+    it.each([
+        { name: 'lock', code: -32013, message: 'engine is locked', label: 'Engine locked' },
+        {
+            name: 'authoritative pause',
+            code: -32011,
+            message: 'refused',
+            availability: 'paused',
+            label: 'Node paused'
+        },
+        {
+            name: 'authoritative draining',
+            code: -32011,
+            message: 'refused',
+            availability: 'draining',
+            label: 'Node paused'
+        },
+        {
+            name: 'bounded pause message without readback',
+            code: -32011,
+            message: 'This node is paused. Resume it on this node before managing it remotely.',
+            label: 'Node paused'
+        },
+        {
+            name: 'older target saved Off',
+            code: -32011,
+            message: 'engine was turned off locally',
+            availability: 'available',
+            label: 'Target refused'
+        },
+        {
+            name: 'scoped local stop',
+            code: -32011,
+            message: 'local stop cancelled this switch',
+            availability: 'available',
+            label: 'Target refused'
+        },
+        { name: 'unavailable policy', code: -32011, message: 'refused', label: 'Target refused' },
+        {
+            name: 'permission',
+            code: -32012,
+            message: 'permission denied',
+            label: 'Remote management permission denied'
+        },
+        {
+            name: 'conflict',
+            code: -32010,
+            message: 'revision changed',
+            label: 'Configuration conflict'
+        }
+    ] satisfies {
+        name: string
+        code: number
+        message: string
+        availability?: NodePolicyDocument['availability']
+        label: string
+    }[])(
+        'classifies $name from fresh target evidence without resending',
+        async ({ code, message, availability, label }) => {
+            await idle()
+            vi.spyOn(useNodeConfigurationStore.getState(), 'readManagement').mockResolvedValue()
+            if (availability)
+                readPolicy.mockResolvedValue({
+                    policy: JSON.stringify({ availability, pausedBy: 'peer' }),
+                    revision: '5',
+                    activation: null,
+                    recoveryRequired: false,
+                    availability
+                })
+            invoke.mockResolvedValueOnce({
+                success: true,
+                data: { configurationRevision: revision }
+            })
+            invoke.mockResolvedValueOnce({ success: false, error: message, code })
+            await store.getState().submit('node-a', 'ollama', 'llamacpp')
+            expect(store.getState().entries['node-a'].refused).toBe(
+                `${label}: refused before acceptance: ${message} (${code}).`
+            )
+            expect(store.getState().entries['node-a'].unknown).toBe(false)
+            expect(readPolicy).toHaveBeenCalledTimes(code === -32011 ? 1 : 0)
+            invoke.mockResolvedValueOnce({
+                success: true,
+                data: { configurationRevision: revision }
+            })
+            await store.getState().refresh('node-a')
+            await vi.advanceTimersByTimeAsync(1000)
+            expect(
+                invoke.mock.calls.filter(([channel]) => channel === 'engines:switch')
+            ).toHaveLength(1)
+        }
+    )
+
+    it('does not submit a known locked target and allows leaving a locked source', async () => {
+        await idle()
+        useEngineStatusStore.setState({
+            statusByNode: new Map([
+                [
+                    'node-a',
+                    new Map([
+                        ['llama-cpp', { ...emptyEngineStatus('node-a', 'llama-cpp'), locked: true }]
+                    ])
+                ]
+            ])
+        })
+        await store.getState().submit('node-a', 'ollama', 'llamacpp')
+        expect(invoke.mock.calls.filter(([channel]) => channel === 'engines:switch')).toHaveLength(
+            0
+        )
+        invoke.mockResolvedValueOnce({ success: true, data: { configurationRevision: revision } })
+        invoke.mockResolvedValueOnce({ success: false, error: 'revision changed', code: -32010 })
+        await store.getState().submit('node-a', 'llamacpp', 'ollama')
+        expect(invoke.mock.calls.filter(([channel]) => channel === 'engines:switch')).toEqual([
+            [
+                'engines:switch',
+                expect.objectContaining({ sourceEngine: 'llamacpp', targetEngine: 'ollama' })
+            ]
+        ])
+    })
+
     it.each([
         { outcome: 'observed', sequence: 1 },
         { outcome: 'error', sequence: 1 },
@@ -946,7 +1095,8 @@ describe('node-scoped engine switch store', () => {
     )
     it.each([
         [-32012, 'Remote management permission denied'],
-        [-32011, 'Local Off veto'],
+        [-32013, 'Engine locked'],
+        [-32011, 'Target refused'],
         [-32010, 'Configuration conflict'],
         [-32602, 'Invalid switch request']
     ])(

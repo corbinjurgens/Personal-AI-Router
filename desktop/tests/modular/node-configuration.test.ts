@@ -27,6 +27,7 @@ import { useDiscoveredNodesStore } from '@/ui/stores/discovered-nodes.store'
 import { useEngineModelsStore } from '@/ui/stores/engine-models.store'
 import {
     inventoryChoices,
+    NODE_PAUSED_MESSAGE,
     policyRefusal,
     policyRoles,
     roleDifferences,
@@ -117,6 +118,175 @@ function entry(targetId = PEER) {
 }
 
 describe('role substitution', () => {
+    it.each<{ name: string; policy: Record<string, JsonValue> }>([
+        { name: 'local pause', policy: { availability: 'paused', pausedBy: 'local' } },
+        { name: 'peer pause', policy: { availability: 'paused', pausedBy: 'peer' } },
+        { name: 'draining', policy: { availability: 'draining', pausedBy: 'peer' } }
+    ])('keeps a remote role draft without sending during $name', async ({ policy }) => {
+        const store = useNodeConfigurationStore.getState()
+        store.adopt(PEER, snapshot('5', policy))
+        store.setRole(PEER, 'weak', { engine: 'ollama', model: 'qwen3:4b' })
+
+        await store.save(PEER, PEER)
+        await store.save(PEER, PEER)
+
+        expect(set).not.toHaveBeenCalled()
+        expect(entry()).toMatchObject({
+            phase: 'vetoed',
+            message: NODE_PAUSED_MESSAGE,
+            draft: { weak: { engine: 'ollama', model: 'qwen3:4b' } }
+        })
+    })
+
+    it('uses live draining readback even while the saved document is available', async () => {
+        const store = useNodeConfigurationStore.getState()
+        store.adopt(PEER, { ...policyDocument('5'), availability: 'draining' })
+        store.setRole(PEER, 'weak', { engine: 'ollama', model: 'qwen3:4b' })
+        await store.save(PEER, PEER)
+        expect(set).not.toHaveBeenCalled()
+        expect(entry().phase).toBe('vetoed')
+    })
+
+    it('does not treat locked-engine model evidence as a node-wide pause', async () => {
+        const store = useNodeConfigurationStore.getState()
+        const locked: NodePolicySnapshot = {
+            ...snapshot('5'),
+            modelConfiguration: {
+                policyRevision: '5',
+                observationGeneration: 1,
+                models: [
+                    {
+                        engine: 'ollama',
+                        model: 'qwen3:4b',
+                        desiredResident: true,
+                        state: 'blocked',
+                        reason: 'engine-locked'
+                    }
+                ]
+            }
+        }
+        store.adopt(PEER, locked)
+        store.setRole(PEER, 'weak', { engine: 'ollama', model: 'qwen3:4b' })
+        set.mockResolvedValue(snapshot('6'))
+        await store.save(PEER, PEER)
+        expect(set).toHaveBeenCalledTimes(1)
+        expect(entry().phase).toBe('applied')
+    })
+
+    it('permits local role configuration while paused', async () => {
+        const store = useNodeConfigurationStore.getState()
+        store.adopt(SELF, snapshot('5', { availability: 'paused', pausedBy: 'peer' }))
+        store.setRole(SELF, 'weak', { engine: 'ollama', model: 'qwen3:4b' })
+        set.mockResolvedValue(
+            snapshot('6', {
+                availability: 'paused',
+                roles: { weak: { engine: 'ollama', model: 'qwen3:4b' } }
+            })
+        )
+        await store.save(SELF, undefined)
+        expect(set).toHaveBeenCalledTimes(1)
+        expect(entry(SELF).phase).toBe('applied')
+    })
+
+    it('keeps canonical pause options returned by the server after a roles-only save', async () => {
+        const store = useNodeConfigurationStore.getState()
+        const legacyPause = {
+            stopEngines: false,
+            unloadModels: false,
+            onActive: 'drain',
+            drainTimeoutSeconds: 12
+        }
+        const canonicalPause = { ...legacyPause, stopEngines: true, unloadModels: true }
+        store.adopt(PEER, snapshot('5', { pause: legacyPause }))
+        store.setRole(PEER, 'weak', { engine: 'ollama', model: 'qwen3:4b' })
+        set.mockResolvedValue(
+            snapshot('6', {
+                pause: canonicalPause,
+                roles: { weak: { engine: 'ollama', model: 'qwen3:4b' } }
+            })
+        )
+        await store.save(PEER, PEER)
+        expect(JSON.parse(set.mock.calls[0][0].policy).pause).toEqual(legacyPause)
+        expect(JSON.parse(entry().baseline?.policy ?? '{}').pause).toEqual(canonicalPause)
+        expect(entry().draft).toEqual(entry().baseline?.roles)
+    })
+
+    it('keeps a refused draft after resume until preview and an explicit revision-checked save', async () => {
+        const store = useNodeConfigurationStore.getState()
+        store.adopt(PEER, snapshot('5'))
+        store.setRole(PEER, 'weak', { engine: 'ollama', model: 'qwen3:4b' })
+        set.mockRejectedValueOnce(new ServiceCallError('pause accepted', LOCAL_VETO_CODE))
+        await store.save(PEER, PEER)
+        store.adopt(PEER, snapshot('6'))
+        expect(set).toHaveBeenCalledTimes(1)
+        expect(entry().draft.weak?.model).toBe('qwen3:4b')
+
+        get.mockResolvedValue(policyDocument('6'))
+        await store.save(PEER, PEER)
+        expect(set).toHaveBeenCalledTimes(1)
+        expect(entry().phase).toBe('draft')
+        set.mockResolvedValue(
+            snapshot('7', { roles: { weak: { engine: 'ollama', model: 'qwen3:4b' } } })
+        )
+        await store.save(PEER, PEER)
+        expect(set).toHaveBeenCalledTimes(2)
+        expect(set.mock.calls[1][0].expectedPersistedRevision).toBe('6')
+    })
+
+    it.each(['setRole', 'setDraft'])(
+        'keeps the veto fence when %s edits a refused draft',
+        async edit => {
+            const store = useNodeConfigurationStore.getState()
+            store.adopt(PEER, snapshot('5'))
+            store.setRole(PEER, 'weak', { engine: 'ollama', model: 'qwen3:4b' })
+            set.mockRejectedValueOnce(new ServiceCallError('pause accepted', LOCAL_VETO_CODE))
+            await store.save(PEER, PEER)
+
+            const changed = { engine: 'ollama', model: 'changed-model' }
+            if (edit === 'setRole') store.setRole(PEER, 'weak', changed)
+            else store.setDraft(PEER, { weak: changed })
+            expect(entry().phase).toBe('vetoed')
+
+            get.mockResolvedValue(policyDocument('6', { availability: 'paused', pausedBy: 'peer' }))
+            await store.save(PEER, PEER)
+
+            expect(get).toHaveBeenCalledTimes(1)
+            expect(set).toHaveBeenCalledTimes(1)
+            expect(entry()).toMatchObject({
+                phase: 'vetoed',
+                message: NODE_PAUSED_MESSAGE,
+                draft: { weak: changed },
+                baseline: { revision: '6' }
+            })
+        }
+    )
+
+    it('retains live draining after an identical policy push omits availability', async () => {
+        const store = useNodeConfigurationStore.getState()
+        store.adopt(PEER, { ...policyDocument('5'), availability: 'draining' })
+        store.setRole(PEER, 'weak', { engine: 'ollama', model: 'qwen3:4b' })
+        store.adopt(PEER, snapshot('5'))
+
+        expect(entry().baseline?.availability).toBe('draining')
+        await store.save(PEER, PEER)
+        expect(set).not.toHaveBeenCalled()
+        expect(entry().phase).toBe('vetoed')
+    })
+
+    it('allows a newer saved available revision to clear old draining readback', async () => {
+        const store = useNodeConfigurationStore.getState()
+        store.adopt(PEER, { ...policyDocument('5'), availability: 'draining' })
+        store.setRole(PEER, 'weak', { engine: 'ollama', model: 'qwen3:4b' })
+        store.adopt(PEER, snapshot('6'))
+        expect(entry().baseline?.availability).toBeUndefined()
+        expect(set).not.toHaveBeenCalled()
+
+        set.mockResolvedValue(snapshot('7'))
+        await store.save(PEER, PEER)
+        expect(set).toHaveBeenCalledTimes(1)
+        expect(set.mock.calls[0][0].expectedPersistedRevision).toBe('6')
+    })
+
     it('replaces only roles and keeps every other field of the target document', () => {
         const text = withRoles(
             policyText('5', { roles: { weak: { engine: 'ollama', model: 'a' } } }),
@@ -489,9 +659,9 @@ describe('declared roles on the node card', () => {
             expect(container.textContent).toBe('')
         })
 
-        it('shows a local pause only for a paired node and explains the semantics', async () => {
+        it('shows a peer-origin pause with local-resume guidance only for a paired node', async () => {
             vi.stubGlobal('CSS', { supports: () => true })
-            const paused = { availability: 'paused', pausedBy: 'local' }
+            const paused = { availability: 'paused', pausedBy: 'peer' }
             useNodeConfigurationStore.getState().adopt(PEER, snapshot('5', paused))
             useNodeConfigurationStore.getState().adopt(SELF, snapshot('5', paused))
             const onSaved = vi.fn()
@@ -499,7 +669,8 @@ describe('declared roles on the node card', () => {
             await act(async () =>
                 root.render(createElement(RoleEditor, { targetId: PEER, nodeId: PEER, onSaved }))
             )
-            expect(container.textContent).toContain('Paused locally')
+            expect(container.textContent).toContain('PausedBy: peer')
+            expect(container.textContent).toContain(NODE_PAUSED_MESSAGE)
             expect(container.textContent).toContain('unset tiers are not served')
 
             await act(async () =>
@@ -507,7 +678,7 @@ describe('declared roles on the node card', () => {
                     createElement(RoleEditor, { targetId: SELF, nodeId: undefined, onSaved })
                 )
             )
-            expect(container.textContent).not.toContain('Paused locally')
+            expect(container.textContent).not.toContain(NODE_PAUSED_MESSAGE)
         })
     })
 })

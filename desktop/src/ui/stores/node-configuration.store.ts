@@ -18,11 +18,12 @@
 import { create } from 'zustand'
 import type { EngineDescriptor, EngineModels, EngineType } from '@/shared/types/engines'
 import type { JsonValue } from '@/shared/types/json'
-import type { NodePolicySnapshot } from '@/shared/types/node-policy'
+import type { NodeAvailability, NodePolicySnapshot } from '@/shared/types/node-policy'
 import type {
     NodePolicyAdvertisement,
     NodeRole,
     NodeRoles,
+    PauseOrigin,
     RoleTier
 } from '@/shared/types/node-roles'
 import {
@@ -61,13 +62,19 @@ export function policyRoles(policy: string): NodeRoles {
     return parseNodeRoles(policyObject(policy).roles)
 }
 
-/** Whether the document says the node was paused on the node itself. */
-export function pausedLocally(policy: string): boolean {
+/** Pause fences peer writes regardless of who requested it. */
+export function nodePaused(policy: string, availability?: NodeAvailability): boolean {
     const body = policyObject(policy)
-    if (body.availability !== 'paused') return false
-    // A pause with no recorded origin predates the field and counts as local.
-    return pauseOriginValue(body.pausedBy) !== 'peer'
+    return (
+        availability === 'paused' ||
+        availability === 'draining' ||
+        body.availability === 'paused' ||
+        body.availability === 'draining'
+    )
 }
+
+export const NODE_PAUSED_MESSAGE =
+    'This node is paused. Resume it on that node before making changes.'
 
 /**
  * The target's own document with `roles` replaced by `roles` and every other
@@ -241,6 +248,12 @@ interface RoleBaseline {
     policy: string
     revision: string
     roles: NodeRoles
+    availability?: NodeAvailability
+    pausedBy?: PauseOrigin
+}
+
+type PolicyBaselineInput = Pick<NodePolicySnapshot, 'policy' | 'revision'> & {
+    availability?: NodeAvailability
 }
 
 export interface RoleEditorEntry {
@@ -264,11 +277,13 @@ export interface RoleEditorEntry {
     requestId?: string
 }
 
-function baselineOf(snapshot: Pick<NodePolicySnapshot, 'policy' | 'revision'>): RoleBaseline {
+function baselineOf(snapshot: PolicyBaselineInput): RoleBaseline {
     return {
         policy: snapshot.policy,
         revision: snapshot.revision,
-        roles: policyRoles(snapshot.policy)
+        roles: policyRoles(snapshot.policy),
+        availability: snapshot.availability,
+        pausedBy: pauseOriginValue(policyObject(snapshot.policy).pausedBy)
     }
 }
 
@@ -362,7 +377,7 @@ interface NodeConfigurationState {
      * replaces the baseline when the draft is untouched or its roles did not
      * change; otherwise the draft is stale and shown against it.
      */
-    adopt(targetId: string, snapshot: Pick<NodePolicySnapshot, 'policy' | 'revision'>): void
+    adopt(targetId: string, snapshot: PolicyBaselineInput): void
     setRole(targetId: string, tier: RoleTier, role: NodeRole | undefined): void
     /** Replace the draft, for an offered suggestion the user accepted. */
     setDraft(targetId: string, roles: NodeRoles): void
@@ -609,8 +624,18 @@ export const useNodeConfigurationStore = create<NodeConfigurationState>((set, ge
             if (entry.phase === 'sending') return
             if (isOlder(next.revision, entry.baseline.revision)) return
             if (
+                next.availability === undefined &&
                 next.revision === entry.baseline.revision &&
                 next.policy === entry.baseline.policy
+            ) {
+                // Policy pushes omit live availability. The same saved
+                // document cannot invalidate a draining policy:get readback.
+                next.availability = entry.baseline.availability
+            }
+            if (
+                next.revision === entry.baseline.revision &&
+                next.policy === entry.baseline.policy &&
+                next.availability === entry.baseline.availability
             ) {
                 return
             }
@@ -645,14 +670,22 @@ export const useNodeConfigurationStore = create<NodeConfigurationState>((set, ge
                 const draft: NodeRoles = { ...entry.draft }
                 if (role) draft[tier] = role
                 else delete draft[tier]
-                return { ...entry, draft, phase: entry.phase === 'conflict' ? 'conflict' : 'draft' }
+                return {
+                    ...entry,
+                    draft,
+                    phase:
+                        entry.phase === 'conflict' || entry.phase === 'vetoed'
+                            ? entry.phase
+                            : 'draft'
+                }
             }),
 
         setDraft: (targetId, roles) =>
             update(targetId, entry => ({
                 ...entry,
                 draft: { ...roles },
-                phase: entry.phase === 'conflict' ? 'conflict' : 'draft'
+                phase:
+                    entry.phase === 'conflict' || entry.phase === 'vetoed' ? entry.phase : 'draft'
             })),
 
         keepDraftOnLatest: targetId =>
@@ -672,6 +705,39 @@ export const useNodeConfigurationStore = create<NodeConfigurationState>((set, ge
             const entry = get().editors.get(targetId)
             const base = entry?.baseline
             if (!entry || !base || entry.phase === 'sending' || entry.phase === 'conflict') {
+                return null
+            }
+            if (nodeId !== undefined && nodePaused(base.policy, base.availability)) {
+                update(targetId, current => ({
+                    ...current,
+                    phase: 'vetoed',
+                    message: NODE_PAUSED_MESSAGE
+                }))
+                return null
+            }
+            if (entry.phase === 'vetoed') {
+                // A refusal keeps its draft. Read again for the preview; a
+                // later explicit save uses that revision, never this attempt.
+                try {
+                    const latest = await window.pairApi.nodePolicy.get(nodeId)
+                    get().adopt(targetId, latest)
+                    update(targetId, current => ({
+                        ...current,
+                        phase:
+                            current.phase === 'conflict'
+                                ? 'conflict'
+                                : nodeId !== undefined &&
+                                    nodePaused(latest.policy, latest.availability)
+                                  ? 'vetoed'
+                                  : 'draft',
+                        message:
+                            nodeId !== undefined && nodePaused(latest.policy, latest.availability)
+                                ? NODE_PAUSED_MESSAGE
+                                : undefined
+                    }))
+                } catch (err) {
+                    update(targetId, current => ({ ...current, message: getErrorString(err) }))
+                }
                 return null
             }
             update(targetId, current => ({ ...current, phase: 'sending', message: undefined }))
@@ -697,7 +763,9 @@ export const useNodeConfigurationStore = create<NodeConfigurationState>((set, ge
                     code === REMOTE_MANAGEMENT_DENIED_CODE ||
                     (code === undefined && /-32012\b/.test(message))
                         ? `Remote management permission was refused by this device. ${message}`
-                        : message
+                        : refusal === 'vetoed'
+                          ? NODE_PAUSED_MESSAGE
+                          : message
                 // Vetoed, rejected and unreachable are definite: the target
                 // refused it, or it never got there. The draft is kept.
                 if (refusal === 'vetoed' || refusal === 'rejected' || refusal === 'unreachable') {
@@ -799,9 +867,13 @@ export const useNodeConfigurationStore = create<NodeConfigurationState>((set, ge
                 update(targetId, current => ({ ...current, phase: 'draft' }))
                 return
             }
-            if (prior?.phase === 'vetoed' && pausedLocally(next.policy)) {
-                // Still paused on the node itself: the veto stands, so nothing is sent.
-                update(targetId, current => ({ ...current, phase: 'vetoed' }))
+            if (nodeId !== undefined && nodePaused(next.policy, next.availability)) {
+                // Both pause origins and an incomplete drain fence every peer.
+                update(targetId, current => ({
+                    ...current,
+                    phase: 'vetoed',
+                    message: NODE_PAUSED_MESSAGE
+                }))
                 return
             }
             await get().save(targetId, nodeId)

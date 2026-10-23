@@ -96,8 +96,13 @@ They do not imply a WebSocket connection. Browser clients are not supported.
   maps to the local `engine:set-lock`. The bridge sends it only when `nodeId` is
   this device's own node, and refuses any other target before sending with
   `Engine locks can only be changed on the device running the engine.` The
-  renderer has no lock helper or control yet, and the current engine-manager
-  answers every request with `Engine locking is not available yet.`
+  renderer sends it with `engines.setLock(engineType, nodeId, locked)`, covered
+  by the centralized pending state until the engine's status reports a
+  different `locked` (or an error for that engine arrives), even when the
+  process status did not change. The engine row shows the lock beside the
+  On/Off switch: a button on this device, a read-only state on a peer, and
+  `Lock status unavailable` when the field is absent. A known locked engine
+  cannot be started from its row.
 - `toggle`, `install`, `uninstall`, and `update` manage engine lifecycle.
 - `pullModel`, `loadModel`, `unloadModel`, `deleteModel`, and
   `setModelExpiry` manage models.

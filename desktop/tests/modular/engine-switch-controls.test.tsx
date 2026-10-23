@@ -8,6 +8,7 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { PreloadServiceTransport } from '@/shared/types/service-bridge'
 import type { SwitchReceipt, SwitchRequest } from '@/shared/types/engine-switch'
+import type { NodePolicyDocument } from '@/shared/types/node-policy'
 import { createEngineApi } from '@/ui/api/engine-api'
 import { serviceTransport } from '@/ui/api/service-transport'
 import type { IClusterApi } from '@/ui/api/pair-api'
@@ -300,12 +301,63 @@ describe('engine switch controls in node settings', () => {
         )
     })
     it.each([
-        [-32012, 'Remote management permission denied'],
-        [-32011, 'Local Off veto'],
-        [-32010, 'Configuration conflict']
-    ])(
-        'renders distinct authoritative refusal %s and independent recovery state',
-        async (code, label) => {
+        {
+            name: 'permission denial',
+            code: -32012,
+            label: 'Remote management permission denied',
+            message: 'refused'
+        },
+        { name: 'locked engine', code: -32013, label: 'Engine locked', message: 'engine locked' },
+        {
+            name: 'fresh pause',
+            code: -32011,
+            label: 'Node paused',
+            message: 'refused',
+            availability: 'paused'
+        },
+        {
+            name: 'fresh draining',
+            code: -32011,
+            label: 'Node paused',
+            message: 'refused',
+            availability: 'draining'
+        },
+        {
+            name: 'bounded pause message',
+            code: -32011,
+            label: 'Node paused',
+            message: 'This node is paused. Resume it on this node before managing it remotely.'
+        },
+        {
+            name: 'older saved Off',
+            code: -32011,
+            label: 'Target refused',
+            message: 'engine was turned off locally',
+            availability: 'available'
+        },
+        {
+            name: 'operation scoped stop',
+            code: -32011,
+            label: 'Target refused',
+            message: 'local stop cancelled this switch',
+            availability: 'available'
+        },
+        { name: 'unavailable policy', code: -32011, label: 'Target refused', message: 'refused' },
+        {
+            name: 'configuration conflict',
+            code: -32010,
+            label: 'Configuration conflict',
+            message: 'revision changed'
+        }
+    ] satisfies {
+        name: string
+        code: number
+        label: string
+        message: string
+        availability?: NodePolicyDocument['availability']
+    }[])(
+        'renders $name with source/target readback and independent recovery state',
+        async ({ code, label, message, availability }) => {
             await mount()
             await act(async () =>
                 useEngineSwitchStore.setState({
@@ -314,28 +366,86 @@ describe('engine switch controls in node settings', () => {
                             revision,
                             request,
                             own: false,
+                            refusalPolicy: availability
+                                ? {
+                                      policy: JSON.stringify({ availability, pausedBy: 'peer' }),
+                                      revision: '2',
+                                      activation: null,
+                                      recoveryRequired: false,
+                                      availability
+                                  }
+                                : undefined,
                             receipt: receipt({
                                 terminal: true,
                                 phase: 'failed-validation',
                                 recoveryRequired: true,
                                 error: {
-                                    code: Number(code),
-                                    kind: 'validation',
-                                    message: 'refused'
+                                    code,
+                                    kind: code === -32013 ? 'engine_locked' : 'validation',
+                                    message
                                 }
                             })
                         }
                     }
                 })
             )
-            expect(container.textContent).toContain(String(label))
+            expect(container.textContent).toContain(`${label}: ${message}`)
             expect(container.textContent).toContain('Recovery required')
             expect(container.textContent).toContain('Observed activity: observed')
             expect(container.textContent).toContain('Phase: failed-validation; sequence 3')
+            expect(container.textContent).toContain('Source ollama:')
+            expect(container.textContent).toContain('Target llamacpp:')
             expect(container.textContent).not.toContain('completed')
             expect(submit().disabled).toBe(true)
         }
     )
+    it('excludes locked activation targets while leaving them selectable as sources', async () => {
+        useEngineStatusStore.setState({
+            statusByNode: new Map([
+                [
+                    'node-a',
+                    new Map([
+                        ['llama-cpp', { ...emptyEngineStatus('node-a', 'llama-cpp'), locked: true }]
+                    ])
+                ]
+            ])
+        })
+        await mount()
+        const lists = container.querySelectorAll('[role="listbox"]')
+        expect(lists[0]?.querySelector('button[value="llamacpp"]')).not.toBeNull()
+        expect(lists[1]?.querySelector('button[value="llamacpp"]')).toBeNull()
+        await select(0, 'llamacpp')
+        await select(1, 'ollama')
+        expect(submit().disabled).toBe(false)
+    })
+    it('blocks an already selected target when authoritative lock readback arrives', async () => {
+        await mount()
+        await select(0, 'ollama')
+        await select(1, 'llamacpp')
+        await act(async () =>
+            useEngineStatusStore.setState({
+                statusByNode: new Map([
+                    [
+                        'node-a',
+                        new Map([
+                            [
+                                'llama-cpp',
+                                { ...emptyEngineStatus('node-a', 'llama-cpp'), locked: true }
+                            ]
+                        ])
+                    ]
+                ])
+            })
+        )
+        expect(submit().disabled).toBe(true)
+        expect(container.textContent).toContain(
+            'Engine locked. Unlock it on the device running it before switching.'
+        )
+        await act(async () => submit().click())
+        expect(invoke.mock.calls.filter(([channel]) => channel === 'engines:switch')).toHaveLength(
+            0
+        )
+    })
     it('drain shows reported identity and evidence without percentage or optimistic completion', async () => {
         await mount()
         await act(async () =>

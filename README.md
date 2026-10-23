@@ -49,6 +49,16 @@ before assuming a node can serve a model. A node only becomes a candidate for a
 request once it is actually running a compatible engine, and PAIR prefers the
 nodes it already knows hold the model.
 
+**Off, lock and pause are different.** Turning an engine Off with its switch is
+an ordinary choice: a paired device that you have given management permission
+can still start that engine on request. A lock, shown as a padlock next to the
+switch, keeps the engine Off and refuses every start, model load and engine
+switch to it until you unlock it. You can change a lock only on the device that
+runs the engine, and unlocking does not start the engine. Pausing a node stops
+its engines, unloads its models and refuses management requests from other
+devices, while status and model files stay readable. Only the paused device can
+resume itself, so resume it there.
+
 ## Quick start
 
 Download a released build and use the desktop application. That is the path we

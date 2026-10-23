@@ -3,12 +3,46 @@
 
 import { create } from 'zustand'
 import type { SwitchReceipt, SwitchRequest, SwitchStatus } from '@/shared/types/engine-switch'
+import type { NodePolicyDocument } from '@/shared/types/node-policy'
+import {
+    ENGINE_LOCKED_CODE,
+    INVALID_PARAMS_CODE,
+    LOCAL_VETO_CODE,
+    POLICY_CONFLICT_CODE,
+    REMOTE_MANAGEMENT_DENIED_CODE
+} from '@/shared/constants/service-errors'
+import { engineTypeFromManagerName } from '@/shared/utils/engines'
 import getErrorString from '@/shared/utils/get-error-string'
 import { serviceErrorCode } from '@/ui/api/service-transport'
 import { useConnectionStore } from '@/ui/stores/connection.store'
 import { useNodesStore } from '@/ui/stores/nodes.store'
 import { useNodeConfigurationStore } from '@/ui/stores/node-configuration.store'
 import { usePendingActionsStore } from '@/ui/stores/pending-actions.store'
+import { useEngineStatusStore } from '@/ui/stores/engine-status.store'
+
+/** Refusal codes alone cannot distinguish pause from older Off or scoped stop vetoes. */
+export function engineRefusalLabel(
+    code: number | undefined,
+    message: string,
+    policy?: NodePolicyDocument,
+    kind?: string
+): string {
+    if (code === ENGINE_LOCKED_CODE || kind === 'engine_locked') return 'Engine locked'
+    if (code === REMOTE_MANAGEMENT_DENIED_CODE) return 'Remote management permission denied'
+    if (code === POLICY_CONFLICT_CODE) return 'Configuration conflict'
+    if (code === INVALID_PARAMS_CODE) return 'Invalid switch request'
+    if (code !== LOCAL_VETO_CODE) return 'Switch failed'
+    const blocked = policy?.availability === 'paused' || policy?.availability === 'draining'
+    return blocked ||
+        message === 'This node is paused. Resume it on this node before managing it remotely.'
+        ? 'Node paused'
+        : 'Target refused'
+}
+
+function targetLocked(nodeId: string, engine: string): boolean {
+    const type = engineTypeFromManagerName(engine)
+    return !!type && useEngineStatusStore.getState().getStatus(nodeId, type).locked === true
+}
 
 interface SwitchEntry {
     revision?: string
@@ -19,6 +53,7 @@ interface SwitchEntry {
     own?: boolean
     unknown?: boolean
     refused?: string
+    refusalPolicy?: NodePolicyDocument
     unavailable?: string
 }
 interface SwitchStore {
@@ -90,7 +125,29 @@ function merge(nodeId: string, requestId: string, receipt: SwitchReceipt): boole
         entry?.receipt?.sequence === receipt.sequence
     )
         return false
-    put(nodeId, { receipt, unknown: false, refused: undefined })
+    put(nodeId, { receipt, unknown: false, refused: undefined, refusalPolicy: undefined })
+    if (receipt.error?.code === LOCAL_VETO_CODE) {
+        const watch = watches.get(nodeId)
+        if (watch) {
+            const generation = watch.generation
+            void Promise.resolve()
+                .then(() =>
+                    window.pairApi.nodePolicy.get(
+                        useConnectionStore.getState().selfId === nodeId ? undefined : nodeId
+                    )
+                )
+                .then(policy => {
+                    if (
+                        current(nodeId, watch, generation) &&
+                        useEngineSwitchStore.getState().entries[nodeId]?.receipt === receipt
+                    )
+                        put(nodeId, { refusalPolicy: policy })
+                })
+                .catch(() => {
+                    // Failed policy readback leaves the refusal neutral.
+                })
+        }
+    }
     usePendingActionsStore.getState().endSwitch(nodeId, requestId)
     if (receipt.error?.code === -32012)
         void useNodeConfigurationStore
@@ -176,6 +233,7 @@ function retire(nodeId: string): void {
     }
     put(nodeId, {
         revision: undefined,
+        refusalPolicy: undefined,
         unavailable: 'Device disconnected. Refresh after reconnecting.'
     })
 }
@@ -288,6 +346,7 @@ export const useEngineSwitchStore = create<SwitchStore>((_set, get) => ({
             !source ||
             !target ||
             source === target ||
+            targetLocked(nodeId, target) ||
             !connected(nodeId) ||
             unresolved(get().entries[nodeId])
         )
@@ -310,6 +369,7 @@ export const useEngineSwitchStore = create<SwitchStore>((_set, get) => ({
             if (!(await get().refresh(nodeId)) || !current(nodeId, watch, generation)) return
             const entry = get().entries[nodeId]
             if (!entry?.revision || unresolved(entry)) return
+            if (targetLocked(nodeId, target)) return
             if (
                 !local &&
                 useNodeConfigurationStore.getState().management.get(nodeId)?.state !== 'allowed'
@@ -329,6 +389,7 @@ export const useEngineSwitchStore = create<SwitchStore>((_set, get) => ({
                 own: true,
                 unknown: true,
                 refused: undefined,
+                refusalPolicy: undefined,
                 unavailable: undefined
             })
             try {
@@ -344,21 +405,40 @@ export const useEngineSwitchStore = create<SwitchStore>((_set, get) => ({
                 // These codes establish refusal, unlike generic RPC/storage or
                 // transport errors which may follow durable acceptance. Keep
                 // the draft and diagnostic without inventing a broker receipt.
-                if (code === -32012 || code === -32011 || code === -32010 || code === -32602) {
-                    const label =
-                        code === -32012
-                            ? 'Remote management permission denied'
-                            : code === -32011
-                              ? 'Local Off veto'
-                              : code === -32010
-                                ? 'Configuration conflict'
-                                : 'Invalid switch request'
+                if (
+                    code === REMOTE_MANAGEMENT_DENIED_CODE ||
+                    code === LOCAL_VETO_CODE ||
+                    code === ENGINE_LOCKED_CODE ||
+                    code === POLICY_CONFLICT_CODE ||
+                    code === INVALID_PARAMS_CODE
+                ) {
+                    // Establish refusal before the optional policy read: it must
+                    // never become an uncertain request or be retried by a waiter.
+                    const message = getErrorString(error)
                     put(nodeId, {
                         unknown: false,
-                        refused: `${label}: refused before acceptance: ${getErrorString(error)} (${code}).`,
+                        refused: `${engineRefusalLabel(code, message)}: refused before acceptance: ${message} (${code}).`,
                         unavailable: undefined
                     })
                     refreshPermission(nodeId, code)
+                    if (code === LOCAL_VETO_CODE) {
+                        try {
+                            const policy = await window.pairApi.nodePolicy.get(
+                                local ? undefined : nodeId
+                            )
+                            if (
+                                current(nodeId, watch, generation) &&
+                                get().entries[nodeId]?.request?.requestId === requestId &&
+                                !get().entries[nodeId]?.receipt
+                            )
+                                put(nodeId, {
+                                    refusalPolicy: policy,
+                                    refused: `${engineRefusalLabel(code, message, policy)}: refused before acceptance: ${message} (${code}).`
+                                })
+                        } catch {
+                            // Keep the target's bounded refusal if readback fails.
+                        }
+                    }
                     return
                 }
                 if (!current(nodeId, watch, generation)) return

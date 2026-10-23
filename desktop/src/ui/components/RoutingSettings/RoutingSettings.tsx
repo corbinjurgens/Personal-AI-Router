@@ -16,7 +16,8 @@ import { useShallow } from 'zustand/react/shallow'
 import type {
     NodeAvailability,
     NodePolicySnapshot,
-    PolicyActivation
+    PolicyActivation,
+    RequestedAvailability
 } from '@/shared/types/node-policy'
 import getErrorString from '@/shared/utils/get-error-string'
 import { InlineErrorBanner } from '@/ui/components/InlineErrorBanner'
@@ -97,6 +98,8 @@ export default function RoutingSettings() {
     } | null>(null)
     const [reviewing, setReviewing] = useState(false)
     const latestLoad = useRef(0)
+    const availabilityGeneration = useRef(0)
+    const latestAvailability = useRef<NodeAvailability | null>(null)
     // The policy as last loaded or saved, to tell whether the editor has unsaved edits.
     const textRef = useRef('')
     const savedTextRef = useRef('')
@@ -108,7 +111,9 @@ export default function RoutingSettings() {
     const management = useNodeConfigurationStore(state =>
         targetId === null ? undefined : state.management.get(targetId)
     )
-    const permissionReadOnly = !connected || (nodeId !== null && management?.state !== 'allowed')
+    const peerPaused = nodeId !== null && (availability === 'paused' || availability === 'draining')
+    const permissionReadOnly =
+        !connected || (nodeId !== null && management?.state !== 'allowed') || peerPaused
     const previousTarget = useRef<string | null>(null)
 
     useEffect(() => {
@@ -119,8 +124,19 @@ export default function RoutingSettings() {
     // The role editor substitutes into the newest document the node reported,
     // whatever the policy text editor holds.
     const adoptRoles = useCallback(
-        (saved: NodePolicySnapshot) => {
-            if (targetId !== null) useNodeConfigurationStore.getState().adopt(targetId, saved)
+        (
+            saved: NodePolicySnapshot & { availability?: NodeAvailability },
+            availabilityRead?: number
+        ) => {
+            if (targetId === null) return
+            useNodeConfigurationStore.getState().adopt(targetId, {
+                ...saved,
+                availability:
+                    availabilityRead !== undefined &&
+                    availabilityRead !== availabilityGeneration.current
+                        ? (latestAvailability.current ?? undefined)
+                        : (saved.availability ?? latestAvailability.current ?? undefined)
+            })
         },
         [targetId]
     )
@@ -135,9 +151,10 @@ export default function RoutingSettings() {
             setConflict(null)
             setReviewing(false)
             try {
+                const availabilityRead = availabilityGeneration.current
                 const document = await window.pairApi.nodePolicy.get(nodeId ?? undefined)
                 if (ticket !== latestLoad.current) return
-                adoptRoles(document)
+                adoptRoles(document, availabilityRead)
                 if (preserveDraft && textRef.current !== savedTextRef.current) {
                     if (document.revision !== baseRevisionRef.current)
                         setConflict({
@@ -151,7 +168,10 @@ export default function RoutingSettings() {
                 }
                 setStatus({ revision: document.revision, activation: document.activation })
                 setRecoveryRequired(document.recoveryRequired)
-                setAvailability(document.availability)
+                if (availabilityRead === availabilityGeneration.current) {
+                    latestAvailability.current = document.availability
+                    setAvailability(document.availability)
+                }
             } catch (err) {
                 if (ticket !== latestLoad.current) return
                 setLoadError(getErrorString(err))
@@ -168,6 +188,7 @@ export default function RoutingSettings() {
         if (!connected) setLoading(false)
         if (previousTarget.current !== targetId) {
             previousTarget.current = targetId
+            latestAvailability.current = null
             setAvailability(null)
             savedTextRef.current = ''
             baseRevisionRef.current = ''
@@ -195,9 +216,12 @@ export default function RoutingSettings() {
     }, [])
 
     const adopt = useCallback(
-        (saved: NodePolicySnapshot) => {
+        (
+            saved: NodePolicySnapshot & { availability?: NodeAvailability },
+            availabilityRead?: number
+        ) => {
             noteStatus(saved)
-            adoptRoles(saved)
+            adoptRoles(saved, availabilityRead)
             if (textRef.current !== savedTextRef.current) return
             if (isOlder(saved.revision, baseRevisionRef.current)) return
             baseRevisionRef.current = saved.revision
@@ -211,7 +235,19 @@ export default function RoutingSettings() {
     useEffect(() => {
         if (targetId === null) return
         const offAvailability = window.pairApi.nodePolicy.onAvailabilityChanged(change => {
-            if (change.nodeId === targetId) setAvailability(change.availability)
+            if (change.nodeId === targetId) {
+                availabilityGeneration.current++
+                latestAvailability.current = change.availability
+                setAvailability(change.availability)
+                const store = useNodeConfigurationStore.getState()
+                const baseline = store.editors.get(targetId)?.baseline
+                if (baseline)
+                    store.adopt(targetId, {
+                        policy: baseline.policy,
+                        revision: baseline.revision,
+                        availability: change.availability
+                    })
+            }
         })
         const offPolicy = window.pairApi.nodePolicy.onPolicyChanged(change => {
             if (change.nodeId === targetId) adopt(change)
@@ -222,41 +258,58 @@ export default function RoutingSettings() {
         }
     }, [targetId, adopt])
 
-    const toggleAvailability = useCallback(async () => {
-        if (permissionReadOnly || (availability !== 'available' && availability !== 'paused'))
-            return
-        const ticket = latestLoad.current
-        setSwitching(true)
-        setLoadError(null)
-        try {
-            const result = await window.pairApi.nodePolicy.setAvailability(
-                availability === 'available' ? 'paused' : 'available',
-                nodeId ?? undefined
-            )
-            if (ticket !== latestLoad.current) return
-            setAvailability(result.availability)
-            // The change took a new revision. This PC announces it; a paired
-            // node does not, and the result carries none, so read it back.
-            const document = await window.pairApi.nodePolicy.get(nodeId ?? undefined)
-            if (ticket === latestLoad.current) adopt(document)
-        } catch (err) {
-            if (ticket !== latestLoad.current) return
-            const code = serviceErrorCode(err)
-            setLoadError(
-                code === REMOTE_MANAGEMENT_DENIED_CODE
-                    ? 'This device refused remote management permission. Change the permission on that device before trying again.'
-                    : code === LOCAL_VETO_CODE
-                      ? localVetoMessage('change availability')
-                      : getErrorString(err)
-            )
-            if (code === REMOTE_MANAGEMENT_DENIED_CODE && targetId !== null)
-                void useNodeConfigurationStore
-                    .getState()
-                    .readManagement(targetId, nodeId ?? undefined)
-        } finally {
-            if (ticket === latestLoad.current) setSwitching(false)
-        }
-    }, [availability, nodeId, adopt, permissionReadOnly, targetId])
+    const changeAvailability = useCallback(
+        async (requested: RequestedAvailability) => {
+            if (permissionReadOnly || availability === null || switching || loading) return
+            const ticket = latestLoad.current
+            setSwitching(true)
+            setLoadError(null)
+            let operationError: string | null = null
+            try {
+                await window.pairApi.nodePolicy.setAvailability(requested, nodeId ?? undefined)
+            } catch (err) {
+                const code = serviceErrorCode(err)
+                operationError =
+                    code === REMOTE_MANAGEMENT_DENIED_CODE
+                        ? `This device refused remote management permission. Change the permission on that device before trying again. ${getErrorString(err)}`
+                        : code === LOCAL_VETO_CODE
+                          ? `${localVetoMessage('change availability')} ${getErrorString(err)}`
+                          : getErrorString(err)
+                if (
+                    ticket === latestLoad.current &&
+                    code === REMOTE_MANAGEMENT_DENIED_CODE &&
+                    targetId !== null
+                )
+                    void useNodeConfigurationStore
+                        .getState()
+                        .readManagement(targetId, nodeId ?? undefined)
+            } finally {
+                // Even an unsuccessful physical pause can have installed the fence.
+                // Read the node after either outcome; the command reply is not a
+                // promise that its availability still applies.
+                const availabilityRead = availabilityGeneration.current
+                try {
+                    const document = await window.pairApi.nodePolicy.get(nodeId ?? undefined)
+                    if (ticket === latestLoad.current) {
+                        adopt(document, availabilityRead)
+                        setRecoveryRequired(document.recoveryRequired)
+                        if (availabilityRead === availabilityGeneration.current) {
+                            latestAvailability.current = document.availability
+                            setAvailability(document.availability)
+                        }
+                    }
+                } catch (err) {
+                    const readError = `Could not refresh node policy: ${getErrorString(err)}`
+                    operationError = operationError ? `${operationError} ${readError}` : readError
+                }
+                if (ticket === latestLoad.current) {
+                    setLoadError(operationError)
+                    setSwitching(false)
+                }
+            }
+        },
+        [availability, nodeId, adopt, permissionReadOnly, targetId, switching, loading]
+    )
 
     const save = useCallback(async () => {
         if (permissionReadOnly) return
@@ -329,13 +382,14 @@ export default function RoutingSettings() {
         [peers]
     )
 
-    const canSwitch =
-        !permissionReadOnly &&
-        (availability === 'available' || availability === 'paused') &&
-        !switching
+    const canSwitch = !permissionReadOnly && availability !== null && !switching && !loading
     // Save needs the revision the draft is based on, which a loaded policy supplies.
     const canSave =
-        !permissionReadOnly && availability !== null && conflict === null && text.trim() !== ''
+        !permissionReadOnly &&
+        !switching &&
+        availability !== null &&
+        conflict === null &&
+        text.trim() !== ''
     const activation = status?.activation ?? null
 
     return (
@@ -376,11 +430,38 @@ export default function RoutingSettings() {
                             size="small"
                             disabled={!canSwitch}
                             aria-busy={switching}
-                            onClick={() => void toggleAvailability()}
+                            onClick={() =>
+                                void changeAvailability(
+                                    availability === 'available' ||
+                                        (availability === 'draining' && nodeId === null)
+                                        ? 'paused'
+                                        : 'available'
+                                )
+                            }
                         >
-                            {availability === 'paused' ? 'Resume' : 'Pause'}
+                            {availability === 'draining' && nodeId === null
+                                ? 'Retry pause'
+                                : availability === 'paused' || availability === 'draining'
+                                  ? 'Resume'
+                                  : 'Pause'}
                         </Button>
+                        {availability === 'draining' && nodeId === null && (
+                            <Button
+                                kind="secondary"
+                                size="small"
+                                disabled={!canSwitch}
+                                aria-busy={switching}
+                                onClick={() => void changeAvailability('available')}
+                            >
+                                Resume
+                            </Button>
+                        )}
                     </Flex>
+                    {peerPaused && (
+                        <Text kind="body/regular/sm" role="status">
+                            This node is paused. Resume it on that node before making changes.
+                        </Text>
+                    )}
 
                     {targetId !== null && availability !== null && (
                         <RoleEditor
@@ -392,6 +473,10 @@ export default function RoutingSettings() {
 
                     <Stack gap="2">
                         <Text kind="body/semibold/sm">Policy</Text>
+                        <Text kind="body/regular/sm">
+                            Pausing always unloads models and stops engines. The stopEngines and
+                            unloadModels fields are ignored.
+                        </Text>
                         {recoveryRequired && (
                             <InlineErrorBanner
                                 severity="warning"
@@ -466,7 +551,7 @@ export default function RoutingSettings() {
                             <Button
                                 kind="secondary"
                                 size="small"
-                                disabled={loading || saving}
+                                disabled={loading || saving || switching}
                                 onClick={() => void load()}
                             >
                                 Reload
