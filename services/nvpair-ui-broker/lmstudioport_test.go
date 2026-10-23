@@ -114,12 +114,20 @@ func TestManagedLMStudioReadyOpensGateAndPushesBackend(t *testing.T) {
 	engineMethod := make(chan string, 1)
 	go func() {
 		codec := NewCodec(engineServer)
-		msg, err := codec.Read()
-		if err != nil {
-			return
+		for {
+			msg, err := codec.Read()
+			if err != nil {
+				return
+			}
+			// Pushing a healthy backend first asks for the engine's native key;
+			// LM Studio's launch has none.
+			if msg.Method == engines.LocalCredentialMethod {
+				_ = codec.Respond(msg.ID, engines.LocalCredential{})
+				continue
+			}
+			engineMethod <- msg.Method
+			_ = codec.Respond(msg.ID, ollamaPortStatus{Running: true, Port: managedLMStudioBackendStart})
 		}
-		engineMethod <- msg.Method
-		_ = codec.Respond(msg.ID, ollamaPortStatus{Running: true, Port: managedLMStudioBackendStart})
 	}()
 
 	backend := make(chan proxyLocalBackend, 1)
