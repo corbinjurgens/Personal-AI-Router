@@ -39,7 +39,7 @@ func TestE2EOverStdio(t *testing.T) {
 	}
 
 	cmd := exec.Command(managerBin)
-	cmd.Env = overrideEnv(map[string]string{"APPDATA": cfg, "LOCALAPPDATA": cfg, "XDG_CONFIG_HOME": cfg, "HOME": home})
+	cmd.Env = isolatedManagerEnv(cfg, home)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		t.Fatal(err)
@@ -432,7 +432,7 @@ func startE2EManager(t *testing.T, cfg, home string, args ...string) *e2eManager
 func startE2EManagerObserved(t *testing.T, cfg, home string, enqueues chan<- e2eFrameEnqueue, args ...string) *e2eManager {
 	t.Helper()
 	cmd := exec.Command(managerBin, args...)
-	cmd.Env = overrideEnv(map[string]string{"APPDATA": cfg, "LOCALAPPDATA": cfg, "XDG_CONFIG_HOME": cfg, "HOME": home})
+	cmd.Env = isolatedManagerEnv(cfg, home)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		t.Fatal(err)
@@ -589,6 +589,16 @@ func writeE2EManifest(t *testing.T, dir string, manifest *Manifest) {
 	if err := os.WriteFile(filepath.Join(dir, "fake.json"), data, 0o644); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// isolatedManagerEnv is the environment for every manager process a test
+// starts. Profile and app-data roots point at test directories so the
+// bundled manifests cannot find, adopt or stop a real installed engine.
+func isolatedManagerEnv(cfg, home string) []string {
+	return overrideEnv(map[string]string{
+		"APPDATA": cfg, "LOCALAPPDATA": cfg, "XDG_CONFIG_HOME": cfg,
+		"HOME": home, "USERPROFILE": home,
+	})
 }
 
 // overrideEnv returns the current environment with the given keys
