@@ -271,14 +271,6 @@ func strataDecimal(value string, allowZero bool) bool {
 	return err == nil && n <= 4096 && (n > 0 || allowZero)
 }
 
-func strataSamePath(a, b string) bool {
-	a, b = filepath.Clean(a), filepath.Clean(b)
-	if runtime.GOOS == "windows" {
-		return strings.EqualFold(a, b)
-	}
-	return a == b
-}
-
 func strataUnreviewed(field string) error {
 	return servingError("Strata config field " + field + " is not a reviewed value.")
 }
@@ -717,10 +709,20 @@ func deriveStrataServing(command launchCommand, rt Runtime) (*llamaServingLaunch
 			return nil, servingError("Explicit Strata dependency has no declared artifact.")
 		}
 	}
+	// The server opens the log for append. It must be a new or existing regular
+	// file, never a link, and never the same file as any declared input, by
+	// identity, so a hard link cannot make an input writable.
 	if config.Log != nil {
-		for _, artifact := range model.Artifacts {
-			if strataSamePath(artifact.Binding.SourcePath, *config.Log) {
-				return nil, servingError("Strata log must not be a declared input file.")
+		logInfo, err := os.Lstat(*config.Log)
+		switch {
+		case os.IsNotExist(err):
+		case err != nil || !logInfo.Mode().IsRegular():
+			return nil, servingError("Strata log must be a regular file, not a link or device.")
+		default:
+			for _, artifact := range model.Artifacts {
+				if info, err := os.Stat(artifact.Binding.SourcePath); err != nil || os.SameFile(logInfo, info) {
+					return nil, servingError("Strata log must not be a declared input file.")
+				}
 			}
 		}
 	}
@@ -772,15 +774,30 @@ func strataExpertTable(table, native string, add func(path, role string) error) 
 	if err != nil {
 		return reject("is missing, unstable or oversized")
 	}
+	// The engine reads a version from every comment that starts with the tag and
+	// refuses one it does not know, so every such comment is checked here, and
+	// they must all agree with the header.
+	const tag = "# strata native experts v"
 	lines := strings.Split(string(data), "\n")
 	version := ""
-	for _, supported := range []string{"v3", "v4"} {
-		if strings.HasPrefix(strings.TrimRight(lines[0], "\r"), "# strata native experts "+supported+":") {
-			version = supported
+	for i, line := range lines {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, tag) {
+			if i == 0 {
+				return reject("has no version header")
+			}
+			continue
 		}
-	}
-	if version == "" {
-		return reject("has no supported version header")
+		this := ""
+		for _, supported := range []string{"v3", "v4"} {
+			if strings.HasPrefix(line, "# strata native experts "+supported+":") {
+				this = supported
+			}
+		}
+		if this == "" || (version != "" && this != version) {
+			return reject("has an unsupported or inconsistent version header")
+		}
+		version = this
 	}
 	shards := map[string]bool{}
 	layers := 0
@@ -805,12 +822,22 @@ func strataExpertTable(table, native string, add func(path, role string) error) 
 			if len(names) != 1 && (version == "v3" || len(names) != 3) {
 				return reject("has a shard column that is not one name or a v4 gate,up,down list")
 			}
+			// In a v4 list an empty component means the first --native shard,
+			// which the packer writes for roles stored there.
+			named := 0
 			for _, name := range names {
+				if name == "" && len(names) == 3 {
+					continue
+				}
 				lower := strings.ToLower(name)
 				if name == "" || name != filepath.Base(name) || strings.ContainsAny(name, `/\:`) || name == "." || name == ".." || !strings.HasSuffix(lower, ".gguf") {
 					return reject("names a shard that is not a plain .gguf file name")
 				}
 				shards[name] = true
+				named++
+			}
+			if named == 0 {
+				return reject("has a v4 shard list that names no shard")
 			}
 		}
 	}

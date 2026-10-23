@@ -452,6 +452,13 @@ func TestStrataCurrentForkNativeExpertsTable(t *testing.T) {
 		{"v3 with one shard column", forkTableV3 + forkLayerZero + " " + forkShardTwo + "\n", ""},
 		{"v4 per-role shards", forkTableV4 + forkLayerZero + " " + forkShardOne + "," + forkShardTwo + "," + forkShardOne + "\r\n", ""},
 		{"comments and blank lines", forkTableV3 + "\n# note\n" + forkLayerZero + "\n", ""},
+		{"v4 empty components mean the first shard", forkTableV4 + forkLayerZero + " ," + forkShardTwo + ",\n", ""},
+		{"v4 list that names no shard", forkTableV4 + forkLayerZero + " ,,\n", "native_experts table"},
+		{"empty component in a v3 column", forkTableV3 + forkLayerZero + " ," + forkShardTwo + ",\n", "native_experts table"},
+		{"later header that agrees", forkTableV4 + forkLayerZero + "\n" + forkTableV4, ""},
+		{"later header above the supported versions", forkTableV3 + forkLayerZero + "\n# strata native experts v5: layer\n", "native_experts table"},
+		{"later header that disagrees", forkTableV3 + forkLayerZero + "\n" + forkTableV4, "native_experts table"},
+		{"later tag without a version", forkTableV3 + forkLayerZero + "\n# strata native experts vx\n", "native_experts table"},
 		{"unsupported version", "# strata native experts v5: layer\n" + forkLayerZero + "\n", "native_experts table"},
 		{"missing header", forkLayerZero + "\n", "native_experts table"},
 		{"no layers", forkTableV3, "native_experts table"},
@@ -601,6 +608,48 @@ func TestStrataCurrentForkFailClosedFields(t *testing.T) {
 			requireForkOutcome(t, f.deriveRaw(t, raw), "Unsupported or malformed prepared Strata config.")
 		})
 	}
+}
+
+// The server opens the log for append, so it must not be another name for a
+// declared input: judged by file identity, not by spelling.
+func TestStrataCurrentForkLogIdentity(t *testing.T) {
+	logOver := func(t *testing.T, f *strataServingFixture, path string) error {
+		t.Helper()
+		base := forkBaselineRaw(t, *f)
+		base["log"] = path
+		return f.deriveRaw(t, base)
+	}
+	t.Run("hard link to a declared file", func(t *testing.T) {
+		f := newStrataServingFixture(t)
+		alias := filepath.Join(f.root, "alias.log")
+		if err := os.Link(filepath.Join(f.root, "server.py"), alias); err != nil {
+			t.Fatal(err)
+		}
+		requireForkOutcome(t, logOver(t, &f, alias), "Strata log")
+	})
+	t.Run("directory", func(t *testing.T) {
+		f := newStrataServingFixture(t)
+		dir := filepath.Join(f.root, "logdir")
+		if err := os.Mkdir(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		requireForkOutcome(t, logOver(t, &f, dir), "Strata log")
+	})
+	t.Run("symbolic link", func(t *testing.T) {
+		f := newStrataServingFixture(t)
+		alias := filepath.Join(f.root, "link.log")
+		if err := os.Symlink(filepath.Join(f.root, "server.py"), alias); err != nil {
+			t.Logf("symbolic links are not permitted here, so this case is not exercised: %v", err)
+			return
+		}
+		requireForkOutcome(t, logOver(t, &f, alias), "Strata log")
+	})
+	t.Run("existing regular log", func(t *testing.T) {
+		f := newStrataServingFixture(t)
+		old := filepath.Join(f.root, "old.log")
+		writeServingFixture(t, old, []byte("earlier output"))
+		requireForkOutcome(t, logOver(t, &f, old), "")
+	})
 }
 
 // Validation of the fields that are accepted without being forwarded, and of the
