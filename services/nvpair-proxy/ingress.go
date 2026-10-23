@@ -80,7 +80,12 @@ func (f *facade) storeLocalBackend(b localBackend) {
 // forwarding). The host defaults to 127.0.0.1, and setLocalBackend refuses to
 // store anything that is not loopback, so this is always a loopback target.
 func (f *facade) localBackendTarget() (*url.URL, bool) {
-	b := f.currentLocalBackend()
+	return f.currentLocalBackend().target()
+}
+
+// target is the loopback URL of this backend snapshot, or false when it is
+// unset or unhealthy.
+func (b localBackend) target() (*url.URL, bool) {
 	if b.Port <= 0 || !b.Healthy {
 		return nil, false
 	}
@@ -93,10 +98,11 @@ func (f *facade) localBackendTarget() (*url.URL, bool) {
 
 // localCredentialFor is the local engine's native API key when target is that
 // engine's current loopback address, and "" otherwise, so a key is never sent
-// to a port it was not issued for.
+// to a port it was not issued for. Health, address and key come from one
+// snapshot, so a concurrent backend update cannot pair an old key with a port.
 func (f *facade) localCredentialFor(target *url.URL) string {
 	b := f.currentLocalBackend()
-	current, ok := f.localBackendTarget()
+	current, ok := b.target()
 	if !ok || target == nil || b.Credential == "" || current.Host != target.Host {
 		return ""
 	}

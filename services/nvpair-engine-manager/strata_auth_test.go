@@ -17,6 +17,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"nvpair-shared/engines"
 )
@@ -27,9 +28,24 @@ const strataAuthKey = "FAKE-AUTH-KEY-0123456789abcdef"
 // a native API key, recording the key the server process receives.
 func startKeyedStrata(t *testing.T) (strataServingFixture, string) {
 	t.Helper()
+	f, keyLog := prepareKeyedStrata(t, "")
+	if err := f.ex.Start(context.Background(), "fake"); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = f.ex.Stop("fake") })
+	return f, keyLog
+}
+
+// prepareKeyedStrata approves and applies the keyed launch without starting
+// it. A non-empty echo makes the fake server print the key it was given.
+func prepareKeyedStrata(t *testing.T, echo string) (strataServingFixture, string) {
+	t.Helper()
 	f := newStrataServingFixture(t)
 	keyLog := filepath.Join(f.root, "key.log")
 	settingsState(t, f.ex).plat.Runtime.Env["FAKE_API_KEY_LOG"] = keyLog
+	if echo != "" {
+		settingsState(t, f.ex).plat.Runtime.Env["FAKE_ECHO_API_KEY"] = echo
+	}
 	key := strataAuthKey
 	f.config.APIKey = &key
 	f.saveConfig(t)
@@ -38,11 +54,52 @@ func startKeyedStrata(t *testing.T) (strataServingFixture, string) {
 		t.Fatalf("preview carries the key (marshal error %v)", err)
 	}
 	applyLlamaServing(t, f.llamaServingFixture, p)
+	return f, keyLog
+}
+
+// A server that prints its key leaves only [redacted] in PAIR's engine logs.
+func TestStrataAuthKeyNeverReachesEngineLogs(t *testing.T) {
+	f, _ := prepareKeyedStrata(t, "print")
 	if err := f.ex.Start(context.Background(), "fake"); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = f.ex.Stop("fake") })
-	return f, keyLog
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		logs, err := f.ex.Logs("fake")
+		if err != nil {
+			t.Fatal(err)
+		}
+		encoded, _ := json.Marshal(logs)
+		if bytes.Contains(encoded, []byte(strataAuthKey)) {
+			t.Fatal("engine logs carry the key")
+		}
+		if bytes.Count(encoded, []byte("server key [redacted]")) >= 2 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the printed key lines never reached the logs: %s", encoded)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// A server that prints its key and exits fails the start without the key in
+// the error or the logs.
+func TestStrataAuthKeyNeverReachesStartupFailure(t *testing.T) {
+	f, _ := prepareKeyedStrata(t, "fail")
+	err := f.ex.Start(context.Background(), "fake")
+	t.Cleanup(func() { _ = f.ex.Stop("fake") })
+	if err == nil {
+		t.Fatal("a server that exits at once started")
+	}
+	if strings.Contains(err.Error(), strataAuthKey) {
+		t.Fatal("start error carries the key")
+	}
+	logs, _ := f.ex.Logs("fake")
+	if encoded, _ := json.Marshal(logs); bytes.Contains(encoded, []byte(strataAuthKey)) {
+		t.Fatal("engine logs carry the key after a failed start")
+	}
 }
 
 func TestStrataAuthKeyReachesOnlyTheServerEnvironment(t *testing.T) {
