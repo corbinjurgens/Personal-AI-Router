@@ -34,7 +34,7 @@ import (
 // unrelated worker is the empty-directory subscription scanner fixture. No
 // policy response is synthesized by a fixture.
 func TestPolicyRelayJoint(t *testing.T) {
-	f := newPolicyJointFixture(t)
+	f := newPolicyJointFixture(t, jointAvailable)
 	if !t.Run("peer get excludes routing and every API entry", func(t *testing.T) {
 		f.assertPolicy(t)
 		body := f.http(t, "/v1/node-policy/get", map[string]any{}, http.StatusOK)
@@ -202,12 +202,25 @@ func TestPolicyRelayJoint(t *testing.T) {
 		}
 		f.assertUnchanged(t, before)
 	})
-	// The seeded pause predates pausedBy, so it counts as local: a paired
-	// node cannot resume it, and the node's own resume still can. This runs
-	// last because it leaves the target available.
+	// Pause locally after the ordinary policy writes: a paired node cannot
+	// resume it, and the node's own resume still can.
 	t.Run("local pause vetoes a relayed resume until the node resumes itself", func(t *testing.T) {
+		local := callRPC(t, f.target.in, f.target.msgs, "node:set-availability", map[string]any{"state": "paused"}, 15*time.Second)
+		if local.Error != nil {
+			t.Fatalf("local pause before relayed resume: %+v", local.Error)
+		}
+		var paused nodepolicy.Policy
+		if err := json.Unmarshal(readPolicyBytes(t, f.path), &paused); err != nil {
+			t.Fatalf("decode locally paused policy: %v", err)
+		}
+		want := f.want
+		want.Availability, want.PausedBy, want.Revision = nodepolicy.Paused, nodepolicy.PausedLocally, paused.Revision
+		if paused.Revision == f.want.Revision || !reflect.DeepEqual(paused, want) {
+			t.Fatal("local pause changed protected policy or failed to advance its revision")
+		}
+		f.want = want
 		before := assertStoredPolicy(t, f.path, f.want)
-		const veto = "this node was paused on the node itself; resume it there"
+		const veto = "This node is paused. Resume it on this node before managing it remotely."
 		body := f.http(t, "/v1/node-availability/set", map[string]any{"state": "available"}, http.StatusConflict)
 		var refusal struct {
 			Error string `json:"error"`
@@ -222,7 +235,7 @@ func TestPolicyRelayJoint(t *testing.T) {
 			t.Fatalf("origin resume of a local pause = %+v, want code -32011", response.Error)
 		}
 		f.assertUnchanged(t, before)
-		local := callRPC(t, f.target.in, f.target.msgs, "node:set-availability", map[string]any{"state": "available"}, 15*time.Second)
+		local = callRPC(t, f.target.in, f.target.msgs, "node:set-availability", map[string]any{"state": "available"}, 15*time.Second)
 		if local.Error != nil {
 			t.Fatalf("local resume after a vetoed relayed resume: %+v", local.Error)
 		}
@@ -234,7 +247,7 @@ func TestPolicyRelayJoint(t *testing.T) {
 }
 
 func TestPolicyRelayJointModelConfiguration(t *testing.T) {
-	f := newPolicyJointFixture(t)
+	f := newPolicyJointFixture(t, jointAvailable)
 	peer := jointExpectedPeer(f.want)
 	peer.Profiles = append(peer.Profiles, fixtureResidentProfile())
 	peer.ServedModels = nodepolicy.ServedModels{{Engine: "llamacpp", Model: "sr-status-fixture"}}
@@ -304,6 +317,7 @@ func TestPolicyRelayJointModelConfiguration(t *testing.T) {
 
 type policyJointFixture struct {
 	inertPort                                           int
+	inert                                               *httptest.Server
 	base, cluster, engine, scanner, originCluster, path string
 	originBase, originEngine                            string
 	ports                                               []int
@@ -312,7 +326,16 @@ type policyJointFixture struct {
 	want                                                nodepolicy.Policy
 }
 
-func newPolicyJointFixture(t *testing.T) *policyJointFixture {
+type policyJointFixtureOption func(*nodepolicy.Policy)
+
+// jointAvailable opts mutation fixtures into an available node. Status and
+// local-pause consumers retain the seeded pause when no option is supplied.
+func jointAvailable(policy *nodepolicy.Policy) {
+	policy.Availability = nodepolicy.Available
+	policy.PausedBy = ""
+}
+
+func newPolicyJointFixture(t *testing.T, options ...policyJointFixtureOption) *policyJointFixture {
 	t.Helper()
 	f := &policyJointFixture{base: shortClusterTempDir(t)}
 	originBase := shortClusterTempDir(t)
@@ -356,6 +379,7 @@ func newPolicyJointFixture(t *testing.T) *policyJointFixture {
 	inert.Listener = jointListener(t)
 	inert.Start()
 	t.Cleanup(inert.Close)
+	f.inert = inert
 	inertPort := inert.Listener.Addr().(*net.TCPAddr).Port
 	f.inertPort = inertPort
 	for _, base := range []string{f.base, originBase} {
@@ -385,6 +409,9 @@ func newPolicyJointFixture(t *testing.T) *policyJointFixture {
 	}`))
 	if err != nil {
 		t.Fatalf("invalid joint policy fixture: %v", err)
+	}
+	for _, option := range options {
+		option(&f.want)
 	}
 	jointWriteJSON(t, f.path, f.want)
 
@@ -517,7 +544,7 @@ func (f *policyJointFixture) cloudDraft(t *testing.T, params map[string]any, clo
 
 func jointExpectedPeer(p nodepolicy.Policy) nodepolicy.PeerPolicy {
 	return nodepolicy.PeerPolicy{
-		Version: 2, Revision: p.Revision, Availability: nodepolicy.Paused,
+		Version: 2, Revision: p.Revision, Availability: p.Availability,
 		Pause: p.Pause, Admission: p.Admission, Idle: p.Idle, Profiles: p.Profiles, Roles: map[string]nodepolicy.Role{}, TierPolicy: p.TierPolicy,
 		ServedModels: p.ServedModels, ResidentModels: p.ResidentModels,
 		Tiers: map[string][]nodepolicy.TierEntry{"weak": {{Kind: "local", Engine: "ollama", Model: "joint-local", ContextTokens: 8192, Capabilities: []nodepolicy.Capability{"tools"}}}},

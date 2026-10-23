@@ -123,9 +123,9 @@ type managementFixture struct {
 	denied *http.Client
 }
 
-func newManagementFixture(t *testing.T) *managementFixture {
+func newManagementFixture(t *testing.T, options ...policyJointFixtureOption) *managementFixture {
 	t.Helper()
-	f := &managementFixture{joint: newPolicyJointFixture(t), cmPort: temporaryClusterPort(t)}
+	f := &managementFixture{joint: newPolicyJointFixture(t, options...), cmPort: temporaryClusterPort(t)}
 	base := t.TempDir()
 	cert := mintClusterIdentity(t, base, "management-denied")
 	writeActiveAdmission(t, base)
@@ -231,7 +231,7 @@ func (f *managementFixture) permission(t *testing.T, client *http.Client, allowe
 }
 
 func TestRemoteManagementDirectMutationBoundary(t *testing.T) {
-	f := newManagementFixture(t)
+	f := newManagementFixture(t, jointAvailable)
 	f.permission(t, f.joint.client, true)
 	f.permission(t, f.denied, false)
 	beforePolicy := readPolicyBytes(t, f.joint.path)
@@ -711,7 +711,9 @@ func TestRemoteManagementReverseMutationBoundary(t *testing.T) {
 }
 
 func TestRemoteManagementReverseRevocationBoundary(t *testing.T) {
-	f := newTask2Fixture(t)
+	// Revocation uses the explicit peer directory and never reads discovery.
+	// Keep its authenticated reverse route without an unrelated advertiser.
+	f := newTask2Fixture(t, task2WithoutScanner)
 	a := f.engines[f.a.uuid]
 	// Inventory reconciles the fixture-owned HTTP engine's presence before an
 	// action can use it; no real executable or installed engine is adopted.
@@ -967,13 +969,14 @@ func TestRemoteManagementGrantPreservesLocalPause(t *testing.T) {
 	}
 	defer response.Body.Close()
 	var refusal struct {
-		Code string `json:"code"`
+		Code  string `json:"code"`
+		Error string `json:"error"`
 	}
 	if err := json.NewDecoder(io.LimitReader(response.Body, 4096)).Decode(&refusal); err != nil {
 		t.Fatal(err)
 	}
-	if response.StatusCode != http.StatusConflict || refusal.Code != "local_veto" {
-		t.Fatalf("granted peer under local pause: HTTP %d code=%s, want 409/local_veto", response.StatusCode, refusal.Code)
+	if response.StatusCode != http.StatusConflict || refusal.Code != "local_veto" || refusal.Error != "This node is paused. Resume it on this node before managing it remotely." {
+		t.Fatalf("granted peer under local pause: HTTP %d code=%s error=%q, want exact 409/local_veto", response.StatusCode, refusal.Code, refusal.Error)
 	}
 	f.joint.assertPolicy(t)
 }
