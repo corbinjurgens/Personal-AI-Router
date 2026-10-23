@@ -17,6 +17,7 @@ import (
 	"net/http/httptrace"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strconv"
 	"sync"
@@ -385,14 +386,12 @@ func TestNodesRemoveSelectionRejectsReadmission(t *testing.T) {
 	})
 }
 
-func TestNodesRemoveWithdrawnEndpointPreservesAdmissionAfterRestart(t *testing.T) {
-	f := newRemovalHintFixture(t)
+// withdrawSelectedEndpoint makes the chooser's first dial replace the target's
+// stored endpoint, leaving its identity and admission unchanged, so the removal
+// recheck sees a stale selection. The returned wait reports the withdrawal.
+func withdrawSelectedEndpoint(t *testing.T, f *removalHintFixture) func() {
+	t.Helper()
 	uuid := f.b.identity.NodeUUID
-	pin, pinned := f.a.trust.Get(uuid)
-	if !pinned {
-		t.Fatal("fixture lacks the target pin")
-	}
-	cid, epoch := f.a.currentAdmission()
 	var once sync.Once
 	changed := make(chan error, 1)
 	f.a.peerAddrs = reach.NewChooser(reach.WithDial(func(network, address string, timeout time.Duration) (net.Conn, error) {
@@ -413,15 +412,30 @@ func TestNodesRemoveWithdrawnEndpointPreservesAdmissionAfterRestart(t *testing.T
 		})
 		return f.guard.probe(network, address, timeout)
 	}))
-	response := f.remove(t)
-	select {
-	case err := <-changed:
-		if err != nil {
-			t.Fatal(err)
+	return func() {
+		t.Helper()
+		select {
+		case err := <-changed:
+			if err != nil {
+				t.Fatal(err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("removal did not reach endpoint selection")
 		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("removal did not reach endpoint selection")
 	}
+}
+
+func TestNodesRemoveWithdrawnEndpointPreservesAdmissionAfterRestart(t *testing.T) {
+	f := newRemovalHintFixture(t)
+	uuid := f.b.identity.NodeUUID
+	pin, pinned := f.a.trust.Get(uuid)
+	if !pinned {
+		t.Fatal("fixture lacks the target pin")
+	}
+	cid, epoch := f.a.currentAdmission()
+	withdrawn := withdrawSelectedEndpoint(t, f)
+	response := f.remove(t)
+	withdrawn()
 	if response.Error == nil || response.Error.Code != codeInternalError || f.posts.Load() != 0 || f.reads.Load() != 1 || f.guard.reverse.Load() != 0 {
 		t.Fatalf("withdrawn endpoint error=%v posts=%d reads=%d reverse=%d", response.Error, f.posts.Load(), f.reads.Load(), f.guard.reverse.Load())
 	}
@@ -483,6 +497,60 @@ func TestNodesRemoveWithdrawnEndpointPreservesAdmissionAfterRestart(t *testing.T
 	assertPreserved(reopened)
 	if remoteCID, remoteEpoch := f.b.currentAdmission(); remoteCID != cid || remoteEpoch != pin.AdmissionEpoch {
 		t.Fatalf("zero-dispatch abort changed remote admission: %s/%d", remoteCID, remoteEpoch)
+	}
+}
+
+func TestNodesRemoveWithdrawnEndpointKeepsPriorProof(t *testing.T) {
+	f := newRemovalHintFixture(t)
+	prior := newPinFixture(t, "prior")
+	pinTrusted(t, f.a, prior.uuid, prior.cert, prior.fp)
+	proof, err := f.a.newRemovalProof(prior.uuid, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored, err := f.a.putRemovalProof(proof); err != nil || !stored {
+		t.Fatalf("persist prior proof stored=%v err=%v", stored, err)
+	}
+	if !f.a.putTombstone(proof.Tombstone) {
+		t.Fatal("persist prior tombstone mirror")
+	}
+	readDurable := func() ([]byte, []byte) {
+		t.Helper()
+		proofs, err := os.ReadFile(f.a.removalProofsPath())
+		if err != nil {
+			t.Fatal(err)
+		}
+		tombstones, err := os.ReadFile(f.a.tombstonesPath())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return proofs, tombstones
+	}
+	proofsBefore, tombstonesBefore := readDurable()
+	before := f.a.buildLocalRoster()
+	if len(before.RemovalProofs) != 1 || before.RemovalProofs[0].Tombstone.NodeUUID != prior.uuid || len(before.Tombstones) != 1 {
+		t.Fatalf("prior evidence proofs=%+v tombstones=%+v", before.RemovalProofs, before.Tombstones)
+	}
+
+	withdrawn := withdrawSelectedEndpoint(t, f)
+	response := f.remove(t)
+	withdrawn()
+	if response.Error == nil || response.Error.Code != codeInternalError || f.posts.Load() != 0 {
+		t.Fatalf("withdrawn endpoint error=%v posts=%d", response.Error, f.posts.Load())
+	}
+	proofsAfter, tombstonesAfter := readDurable()
+	if !bytes.Equal(proofsAfter, proofsBefore) || !bytes.Equal(tombstonesAfter, tombstonesBefore) {
+		t.Error("aborted selection rewrote durable removal evidence")
+	}
+	after := f.a.buildLocalRoster()
+	if !reflect.DeepEqual(after.RemovalProofs, before.RemovalProofs) || !reflect.DeepEqual(after.Tombstones, before.Tombstones) {
+		t.Errorf("aborted selection changed removal evidence: proofs=%+v tombstones=%+v", after.RemovalProofs, after.Tombstones)
+	}
+	if _, ok := f.a.trust.Get(f.b.identity.NodeUUID); !ok {
+		t.Error("preservation error removed the target pin")
+	}
+	if _, ok := f.a.memberByNodeID(f.b.identity.NodeUUID); !ok {
+		t.Error("preservation error removed the target member")
 	}
 }
 
