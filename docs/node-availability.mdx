@@ -1,0 +1,257 @@
+{/*
+SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+*/}
+
+# Node availability: pause, resume and engine locks
+
+A node can take itself out of service, and an engine on a node can be kept from
+starting, without unpairing anything. This page describes what **Pause**,
+**Resume** and the per-engine **lock** do, who may use them, and what a paired
+device sees and gets refused while they are in force. It describes current
+behavior as the Go services implement it; where this page and a component
+README differ, the source wins. [Architecture](architecture.mdx) places these
+rules among the other trust boundaries.
+
+## Three different things
+
+| | What it is | Who can set it | What it stops |
+| --- | --- | --- | --- |
+| Saved Off | An engine's ordinary On/Off switch. It records intent. | The local device, or a paired device that has been granted management | Nothing on its own. A granted peer can still start or load into the engine. |
+| Engine lock | A durable per-engine flag, shown as a padlock beside the switch | Only a client on the device that runs the engine | Every start, model load and engine switch into that engine, from anyone |
+| Pause | A node-wide state | A client on the node, or a paired device that has been granted management | Work on this node, and every management change from other devices |
+
+A lock is stronger than Off, and Pause is stronger than a lock for a paired
+device: when both apply, the pause refusal is the one it receives.
+
+## Pause and Resume
+
+### What Pause does
+
+Pause affects only work that this machine would execute. A request that enters a
+paused node is still routed to other machines in the cluster. Pausing a node:
+
+1. Stops admitting new inference work on the node. The proxy is told first, so
+   admission stops before anything else changes. A request refused for this
+   reason receives HTTP 503 with `X-PAIR-Admission: paused` and `Retry-After: 30`;
+   a router that sent it treats that as a retryable failure and tries its next
+   candidate.
+2. Moves the node to `draining` while it waits for admitted work. Under the
+   default policy the node lets running work finish, for up to 120 seconds
+   (`pause.onActive` is `finish` and `pause.drainTimeoutSeconds` is `120`).
+   With `pause.onActive` set to `cancel`, running work is cancelled
+   immediately. When the drain timeout passes with work still running, the node
+   cancels it and waits up to 10 more seconds for it to unwind. While draining,
+   new work is refused with `X-PAIR-Admission: draining` and `Retry-After: 5`.
+3. Reads the current engine and model inventory, unloads every loaded model and
+   stops every engine it reports. The stop does not change an engine's saved
+   intent, so an engine that was saved On is still saved On.
+4. Reports `paused` once the engines are verified stopped.
+
+The older `pause.stopEngines` and `pause.unloadModels` settings are obsolete.
+They still parse, but both read as `true`, so a stored policy can no longer ask
+for a pause that leaves engines running.
+
+If an engine does not stop, the node stays `draining` and the request fails
+with `-32000` and `Pause could not stop every engine:` followed by bounded
+detail. A pause made on the node itself can be retried; a retry from a paired
+device is refused (see below).
+
+A newer availability request supersedes one still in progress, which then
+returns `superseded by a later node:set-availability request`. The latest
+request wins, so a Resume never waits out a pause's drain.
+
+### What keeps working
+
+- Inference that enters the paused node and is served by other nodes.
+- Every read: status, settings and policy reads, model files, event streams and
+  the node's inventory. Paired devices can still see the node and its models;
+  Pause does not remove catalogue models or declared tier aliases.
+- Local configuration: settings, grants, lock and unlock, stop and unload, and
+  manual nodes.
+- Management that this node sends to other nodes.
+
+A local start, model load or engine switch is refused until the node is
+resumed. Settings Apply and switch recovery may finish writing configuration
+while paused, but they do not start a stopped engine.
+
+### Local and peer origin
+
+Every pause records who made it, as `pausedBy` in the node policy: `local` for a
+pause from a client on the node, `peer` for one relayed from a paired device.
+Resume clears it.
+
+- A paired device with management permission may Pause an available node.
+- A peer pause blocks the node in the same way as a local one. The device that
+  paused it cannot Resume it, and cannot repeat the Pause. Only a client on the
+  paused node can Resume.
+- A local Pause over a peer pause makes the origin `local`.
+- Policy edits, whether local or relayed, never change `pausedBy`.
+
+In the desktop application, the Pause and Resume button is in the node's routing
+settings. If the target is a paired node that is paused or draining, the
+panel shows `This node is paused. Resume it on that node before making changes.`
+The terminal interface shows `Paused (local)` or `Paused (peer)`.
+
+### Resume and restart
+
+Resume saves the node as available, tells the proxy, and then starts the engines
+that the pause stopped. Because their saved intent never changed, only engines
+that are saved On and not locked come back. If the node restarted while paused,
+saved-On restoration was skipped, and Resume performs it.
+
+A paused state is saved, so it survives a restart. The proxy learns it before it
+can admit anything, and a paused node also skips engine restoration when its
+engine manager restarts.
+
+## Remote management while paused
+
+A pinned peer can manage a node only after the node's operator grants it
+management permission. The permission check always happens first, and a missing
+or revoked grant is refused with `-32012` (`remote_management_denied`).
+
+When the grant is fine and the node is paused (accepted, saved, `draining` or
+`paused`, whichever the origin), every incoming management **change** is refused
+with `-32011` and the message:
+
+```text
+This node is paused. Resume it on this node before managing it remotely.
+```
+
+This includes start, stop, load, unload, delete, pull, settings apply, switch
+apply, policy set and availability set. It includes the pause initiator's Resume
+and repeated Pause, and a settings change or receipt retry that would change
+nothing. A refused request saves no revision or receipt and supersedes no
+transition already in progress. Over HTTP the refusal is a 409 with
+`code: local_veto`.
+
+Reads are not refused: GET and HEAD requests, read-only policy and settings
+previews and gets, switch status, event streams and model files stay open. A
+peer can therefore still see why a node will not accept its changes.
+
+Pause also acts on work that was accepted just before it. When the node learns it
+is blocked, it cancels accepted starts and model loads from paired devices, and
+any pending activation or crash relaunch. If the node has not yet been told
+whether it is paused (shortly after an engine manager starts), incoming
+management requests receive HTTP 503 until it is; retry shortly.
+
+## The per-engine local lock
+
+A lock keeps one engine from starting on its node. It exists so an operator can
+reserve an engine for another use and know no paired device can start it.
+
+- It can only be set or cleared by a client on the device that runs the engine.
+  The request names no node or caller, and no peer route reaches it. The desktop
+  shows a padlock beside the engine's switch; on a paired node's row it only
+  reports the state. The terminal interface has no lock key.
+- Locking saves the lock, saves the engine as Off with local origin, cancels
+  starts, model loads and crash relaunches in progress, then stops the engine and
+  verifies it has stopped. If the stop cannot be verified, the lock stays, the
+  engine stays Off, and the request fails with `-32000`; repeating the lock
+  retries the stop.
+- Unlocking removes only the lock. The engine stays Off and does not start.
+- Sleep and idle unload or stop never change a lock.
+- The lock is stored in the engine manager's `engine-state.json` under `locked`.
+  An older program that rewrites that file may discard locks, and downgrading to
+  one is unsupported.
+
+A start, model load or switch into a locked engine is refused with `-32013`
+(`engine_locked`) and the message:
+
+```text
+This engine is locked on this node. Unlock it on this node before starting or loading a model.
+```
+
+This applies to a local client as well as a paired one, and it covers explicit
+starts, restarts, restoration, wake, crash relaunch, settings recovery, switch
+recovery and a restart after an action. While the node is not paused, a locked
+engine still accepts stop, unload, delete and pull from a granted peer, an
+install that does not start it, and settings edits; a restart after those edits
+cannot activate it. A lock
+change is refused with `-32000` while the engine is reserved by an engine switch.
+
+### Which code means what
+
+| Code | Meaning | HTTP body `code` |
+| --- | --- | --- |
+| `-32010` | Revision conflict | `policy_conflict` |
+| `-32011` | Local veto: the node is paused, or the node's own Stop cancelled a peer operation | `local_veto` |
+| `-32012` | The target has not granted this device management | `remote_management_denied` |
+| `-32013` | The engine is locked on its node | `engine_locked` |
+
+When more than one applies, the permission check comes first, then the pause,
+then the lock. A local Stop that cancels an accepted peer operation also reports
+`-32011`, with this message:
+`<engine> was turned off on the node itself; start it there`. It does not refuse
+later operations.
+
+## Saved Off no longer blocks a granted peer
+
+A granted peer may start an engine, load a model into a running engine, or
+switch to an engine that is saved Off, whatever the Off origin: local, peer,
+legacy, or no recorded intent. Saved Off is ordinary intent, not a prohibition.
+Only a lock or a pause refuses.
+
+Four limits remain:
+
+- An explicit model load never starts a stopped engine. A load into an engine
+  that is not running fails with its real error, not a lock or pause refusal.
+- Restoration after a restart, wake, and automatic model residency still require
+  the engine to be saved On. Residency reports `engine-off` for a saved-Off
+  engine and does not start it.
+- A local stop or uninstall records Off with `local` origin. A peer stop records
+  `peer` unless the engine was already Off, in which case the earlier origin is
+  kept. Starting clears the origin.
+- A local Stop that happens while a peer's start or load is in progress cancels
+  that operation with `-32011`. It does not refuse the next one.
+
+## How peers learn a node is paused
+
+Each node publishes a policy advertisement in its inventory document, which paired
+peers fetch over authenticated transport. The advertisement carries `pausedBy`
+(`local` or `peer`) while the node is paused. It does not carry the availability
+state, and it is a **hint**: the scanner refreshes it on a nominal 15-second
+cadence, and if a refresh fails, the last good hint is kept until a refresh
+succeeds.
+
+A router uses the hint in two ways:
+
+- **Inference.** Any non-empty `pausedBy` removes that remote node from the
+  candidates for an inference request, including a request with no `model`. The
+  router's own node is never removed this way, and goes through its own
+  admission. Model lists and control requests do not use this filter, so the
+  paused node still appears in inventory. If pause hints exclude every remote
+  candidate and no self candidate remains, a request naming a model receives
+  `502` with this message:
+  `no available node advertises the requested model`
+  and a request for the `strong` tier alias receives `404` with this message:
+  `no eligible model for tier strong`
+  A paused self candidate stays eligible and is refused by its own admission
+  with `503` instead.
+- **Display.** The desktop shows the paused message for a paired node that is
+  paused or draining, and the terminal interface shows the origin.
+
+The hint is never what authorizes anything. A stale hint is checked by the
+destination:
+
+- A router that still believes a node is available sends the request. The node
+  refuses it at admission with HTTP 503, `X-PAIR-Admission: paused` and
+  `Retry-After: 30`, and the router fails over to its next candidate. The
+  request is relayed as that 503 only when there is no candidate left.
+- A management change never consults the hint. The target decides from its own
+  state, so a peer that has not yet seen the pause still receives `-32011`.
+- A hint that says paused after the node has resumed only keeps the node out of
+  inference routing until a refresh replaces it.
+
+## Related
+
+- [Architecture](architecture.mdx) for the remote-management grant and the
+  trust boundaries.
+- [Managing engines](engine-lifecycle.mdx) for install, start and stop.
+- [Local qualification](local-qualification.mdx) for how pause and lock fence
+  automatic model residency, with the `paused` and `engine-locked` reasons.
+- Component contracts: the broker's availability and pause-fence sections in
+  [`nvpair-ui-broker`](../services/nvpair-ui-broker/README.md), the
+  remote-management and lock sections of the engine manager's
+  [spec](../services/nvpair-engine-manager/spec.md), and the paused-node
+  routing rule in the [proxy spec](../services/nvpair-proxy/spec.md).
