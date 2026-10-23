@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"net"
 	"net/http"
 	"net/url"
@@ -389,6 +390,16 @@ func (e *Executor) bringUpProcessWithSnapshot(ctx context.Context, st *engineSta
 		}
 		digest = servingLaunchDigest(originalLaunch, prepared.Digest)
 		launch = preparedSnapshotCommand(st, launch, snapshot)
+		if prepared.Credential != "" {
+			// Added after every source check, which rejects any STRATA_* name
+			// a manifest or the inherited environment supplies.
+			env := maps.Clone(launch.Env)
+			if env == nil {
+				env = map[string]string{}
+			}
+			env["STRATA_API_KEY"] = prepared.Credential
+			launch.Env = env
+		}
 	}
 
 	diagnostics := newStartupOutput(launchDiagnosticArgs(rt), launch.Env)
@@ -398,6 +409,9 @@ func (e *Executor) bringUpProcessWithSnapshot(ctx context.Context, st *engineSta
 	}
 	proc, err := startManagedProc(launch.Bin, launch.Args, launch.Env, func(stream, line string) {
 		if serving {
+			if prepared.Credential != "" {
+				line = strings.ReplaceAll(line, prepared.Credential, "[redacted]")
+			}
 			line = redactServingLine(line, st.modelsDir)
 			st.logs.append(stream, line)
 			_, _ = diagnostics.Write([]byte(line + "\n"))

@@ -36,6 +36,7 @@
 - ⚠️ nvpair-engine-manager → engine:switch-recovery-ready
 - ⚠️ nvpair-engine-manager → engine:switch-step
 - ⚠️ nvpair-engine-manager → engine:wake
+- ⚠️ nvpair-engine-manager → internal:local-engine-credential
 - ⚠️ nvpair-engine-manager → internal:set-reserved-port
 - ⚠️ nvpair-job-scheduler → scheduler:get-interval
 - ⚠️ nvpair-job-scheduler → scheduler:get-status
@@ -178,6 +179,7 @@
 | `engine:unload-model` | request (we call) | ✅ yes |
 | `engine:wake` | request (we call) | ⚠️ not called |
 | `error` | request (we call) | ✅ yes |
+| `internal:local-engine-credential` | request (we call) | ⚠️ not called |
 | `internal:set-reserved-port` | request (we call) | ⚠️ not called |
 
 **Dynamic / unresolved notify sites (verify by hand — `npm run service-contracts` prints the line numbers):**

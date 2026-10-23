@@ -18,7 +18,31 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"nvpair-shared/engines"
 )
+
+// ownedCredentialLocked is the native API key of the engine's owned, running
+// prepared launch, paired with the port that launch serves on. An adopted or
+// stopped engine has none. The caller holds st.mu.
+func (st *engineState) ownedCredentialLocked() engines.LocalCredential {
+	launch := st.plat.Runtime.servingLaunch
+	if st.proc == nil || !st.running || launch == nil || launch.Credential == "" {
+		return engines.LocalCredential{}
+	}
+	return engines.LocalCredential{Credential: launch.Credential, Port: st.port}
+}
+
+// LocalCredential answers engines.LocalCredentialMethod for the broker.
+func (e *Executor) LocalCredential(engine string) (engines.LocalCredential, error) {
+	st, err := e.state(engine)
+	if err != nil {
+		return engines.LocalCredential{}, err
+	}
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	return st.ownedCredentialLocked(), nil
+}
 
 // ActionHTTPError preserves the status of a failed HTTP action. Body is the
 // bounded, whitespace-trimmed response excerpt used by the action diagnostic.
@@ -155,6 +179,7 @@ func (e *Executor) dispatchAction(ctx context.Context, st *engineState, engine, 
 	st.mu.Lock()
 	running := st.running
 	port := st.port
+	credential := st.ownedCredentialLocked().Credential
 	st.mu.Unlock()
 
 	// CLI actions (act.Cmd) drive the engine's control binary, which
@@ -219,6 +244,14 @@ func (e *Executor) dispatchAction(ctx context.Context, st *engineState, engine, 
 		observationClient.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 		client = &observationClient
 	}
+	if credential != "" {
+		// The key authorizes only this loopback request: a redirect is
+		// answered as is, never followed with the header.
+		req.Header.Set("Authorization", "Bearer "+credential)
+		keyedClient := *client
+		keyedClient.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+		client = &keyedClient
+	}
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("action %q: %w", action, err)
@@ -232,7 +265,11 @@ func (e *Executor) dispatchAction(ctx context.Context, st *engineState, engine, 
 	// this to list_models too: a sweep can share its response with loaded_models.
 	// Mutation actions retain their general 2xx success contract (e.g. 204).
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 || (observation && resp.StatusCode != http.StatusOK) {
-		return nil, &ActionHTTPError{Action: action, StatusCode: resp.StatusCode, Body: strings.TrimSpace(string(data))}
+		body := strings.TrimSpace(string(data))
+		if credential != "" {
+			body = strings.ReplaceAll(body, credential, "[redacted]")
+		}
+		return nil, &ActionHTTPError{Action: action, StatusCode: resp.StatusCode, Body: body}
 	}
 	if len(data) == 0 {
 		return json.RawMessage("null"), nil

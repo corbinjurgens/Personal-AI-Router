@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"nvpair-shared/applog"
+	"nvpair-shared/engines"
 	settings "nvpair-shared/enginesettings"
 	"nvpair-shared/nodepolicy"
 )
@@ -56,6 +57,9 @@ var internalClientMethods = map[string]struct{}{
 	"engine:preview-launch":               {},
 	"engine:configured-ports":             {},
 	"engine:configure-launch":             {},
+	// The native API key of a local engine. It is outside every relayed
+	// namespace already; listing it keeps a future relay rule from reaching it.
+	engines.LocalCredentialMethod: {},
 }
 
 // forwardLogLevel pushes an already-validated log level down to every

@@ -34,7 +34,7 @@ func TestHealthChecksReuseConnections(t *testing.T) {
 					}))
 					const rounds = 32
 					for i := 0; i < rounds; i++ {
-						if got, want := checkEngineHealth(profile, client, 1), i%2 == 0; got != want {
+						if got, want := checkEngineHealth(profile, client, 1, ""), i%2 == 0; got != want {
 							t.Fatalf("poll %d: healthy = %v, want %v", i, got, want)
 						}
 					}

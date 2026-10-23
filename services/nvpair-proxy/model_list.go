@@ -83,6 +83,13 @@ func (f *facade) serveModelList(w http.ResponseWriter, r *http.Request, matchedR
 		if upstream.Header.Get("Accept") == "" {
 			upstream.Header.Set("Accept", "application/json")
 		}
+		if cand.self {
+			fac := cand.fac
+			if fac == nil {
+				fac = f
+			}
+			withLocalCredential(upstream.Header, fac.localCredentialFor(cand.url))
+		}
 
 		// A cluster-peer candidate is queried over mTLS to its promoted proxy;
 		// self/manual candidates use the shared plain client.

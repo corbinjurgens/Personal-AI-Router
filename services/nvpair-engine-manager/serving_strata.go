@@ -238,6 +238,13 @@ type strataServingConfig struct {
 	GPU          *int64            `json:"gpu,omitempty"`
 	FitMaxTokens *bool             `json:"fit_max_tokens,omitempty"`
 
+	// APIKeyFile names the file holding the native API key. An inline
+	// api_key is rejected: the config's bytes are hashed into advertised
+	// fields, so a key there could be guessed offline from them. The key file
+	// is bound by identity only and is never forwarded; the server gets the key
+	// as STRATA_API_KEY, and PAIR's own requests to this engine carry it.
+	APIKeyFile *string `json:"api_key_file,omitempty"`
+
 	BuildMetadata *string `json:"build_metadata,omitempty"`
 	GPUsAsked     *bool   `json:"gpus_asked,omitempty"`
 	Port          *int64  `json:"port,omitempty"`
@@ -259,6 +266,10 @@ var strataEnvironment = map[string]func(string) bool{
 }
 
 var strataKVFormats = []string{"fp16", "int8", "q4_0", "q4", "k8v4"}
+
+// strataAPIKeyPattern is printable ASCII without spaces or commas, which the
+// server would read as a list of keys.
+var strataAPIKeyPattern = regexp.MustCompile(`^[\x21-\x2b\x2d-\x7e]{16,512}$`)
 
 var strataDecimalPattern = regexp.MustCompile(`^[0-9]{1,6}(\.[0-9]{1,6})?$`)
 
@@ -735,7 +746,15 @@ func deriveStrataServing(command launchCommand, rt Runtime) (*llamaServingLaunch
 		placement = append(placement, "env:"+name+"="+config.Env[name])
 	}
 	forwarded := config
-	forwarded.BuildMetadata, forwarded.GPUsAsked, forwarded.Port, forwarded.Host, forwarded.OpenBrowser = nil, nil, nil, nil, nil
+	var keyIdentity *strataKeyIdentity
+	if config.APIKeyFile != nil {
+		key, identity, err := readStrataKeyFile(*config.APIKeyFile, model.Artifacts)
+		if err != nil {
+			return nil, err
+		}
+		result.Credential, keyIdentity = key, identity
+	}
+	forwarded.BuildMetadata, forwarded.GPUsAsked, forwarded.Port, forwarded.Host, forwarded.OpenBrowser, forwarded.APIKeyFile = nil, nil, nil, nil, nil, nil
 	result.Snapshot, err = json.Marshal(forwarded)
 	if err != nil || len(result.Snapshot) > servingSmallFileLimit {
 		return nil, servingError("Cannot prepare bounded Strata config snapshot.")
@@ -747,7 +766,10 @@ func deriveStrataServing(command launchCommand, rt Runtime) (*llamaServingLaunch
 		Bytes   []byte
 		Config  *engines.ServingConfig
 		Command launchCommand
-	}{1, binding, data, result.Config, command})
+		// The key file by identity, never content: changing the key changes
+		// the approval without any advertised field deriving from the key.
+		Key *strataKeyIdentity `json:",omitempty"`
+	}{1, binding, data, result.Config, command, keyIdentity})
 	if err != nil {
 		return nil, servingError("Cannot bind prepared Strata inputs.")
 	}

@@ -594,7 +594,8 @@ func TestStrataCurrentForkSnapshotAndPlacement(t *testing.T) {
 	}
 }
 
-// api_key and memory_policy each keep the otherwise accepted profile rejected.
+// memory_policy and an inline api_key each keep the otherwise accepted profile
+// rejected; the key belongs in the file api_key_file names.
 func TestStrataCurrentForkFailClosedFields(t *testing.T) {
 	c := loadForkContract(t)
 	for _, key := range []string{"api_key", "memory_policy"} {

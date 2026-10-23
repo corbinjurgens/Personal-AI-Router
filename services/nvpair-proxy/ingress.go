@@ -28,11 +28,16 @@ const engineIdentityProbeHeader = "X-NVPAIR-Engine-Identity-Probe"
 // over the LAN mTLS ingress can only ever be dumped on this node's own local
 // engine, never re-routed to a peer, so the ingress path is strictly terminal
 // and cannot recurse or amplify.
+//
+// Credential is the engine's native API key, when it has one. It arrives only
+// over the broker's private channel, is never logged or advertised, and is sent
+// only to this loopback engine.
 type localBackend struct {
-	Engine  string `json:"engine"`
-	Host    string `json:"host"`
-	Port    int    `json:"port"`
-	Healthy bool   `json:"healthy"`
+	Engine     string `json:"engine"`
+	Host       string `json:"host"`
+	Port       int    `json:"port"`
+	Healthy    bool   `json:"healthy"`
+	Credential string `json:"credential,omitempty"`
 }
 
 // currentLocalBackend snapshots the configured local engine.
@@ -75,7 +80,12 @@ func (f *facade) storeLocalBackend(b localBackend) {
 // forwarding). The host defaults to 127.0.0.1, and setLocalBackend refuses to
 // store anything that is not loopback, so this is always a loopback target.
 func (f *facade) localBackendTarget() (*url.URL, bool) {
-	b := f.currentLocalBackend()
+	return f.currentLocalBackend().target()
+}
+
+// target is the loopback URL of this backend snapshot, or false when it is
+// unset or unhealthy.
+func (b localBackend) target() (*url.URL, bool) {
 	if b.Port <= 0 || !b.Healthy {
 		return nil, false
 	}
@@ -84,6 +94,42 @@ func (f *facade) localBackendTarget() (*url.URL, bool) {
 		host = "127.0.0.1"
 	}
 	return &url.URL{Scheme: "http", Host: net.JoinHostPort(host, strconv.Itoa(b.Port))}, true
+}
+
+// localCredentialFor is the local engine's native API key when target is that
+// engine's current loopback address, and "" otherwise, so a key is never sent
+// to a port it was not issued for. Health, address and key come from one
+// snapshot, so a concurrent backend update cannot pair an old key with a port.
+func (f *facade) localCredentialFor(target *url.URL) string {
+	b := f.currentLocalBackend()
+	current, ok := b.target()
+	if !ok || target == nil || b.Credential == "" || current.Host != target.Host {
+		return ""
+	}
+	return b.Credential
+}
+
+// localInferenceCredential is localCredentialFor for a forwarded inference
+// request: only chat completions carry the key, however the route or a
+// cross-engine tier chose the local engine. Completions, embeddings and every
+// other inference path reach it with what the caller sent.
+func (f *facade) localInferenceCredential(r *http.Request, target *url.URL) string {
+	if r.Method != http.MethodPost || r.URL.Path != routeChatCompletions {
+		return ""
+	}
+	return f.localCredentialFor(target)
+}
+
+// withLocalCredential makes a request to the local engine carry its native key
+// in place of any credential the caller sent. Only chat completions and the
+// model list use it; every other forwarded path reaches the engine
+// with what the caller sent, so the engine's own authentication still applies.
+func withLocalCredential(h http.Header, credential string) {
+	if credential == "" {
+		return
+	}
+	h.Del("X-Api-Key")
+	h.Set("Authorization", "Bearer "+credential)
 }
 
 // handlePlain is the plaintext personality: it accepts requests only from
@@ -164,6 +210,12 @@ func (f *facade) serveIngress(w http.ResponseWriter, r *http.Request, peer strin
 		}
 		slog.Debug("cluster ingress forwarding to local backend",
 			"peer", peer, "method", r.Method, "path", r.URL.Path, "target", target.Host)
+		// A peer's model-list read is the only non-inference route that
+		// carries the local key; any other path is forwarded as the peer sent it.
+		if route, ok := f.profile.routeFor(r.Method, r.URL.Path); ok && route.Role.isModelList() {
+			r = r.Clone(r.Context())
+			withLocalCredential(r.Header, f.localCredentialFor(target))
+		}
 		f.reverseProxyToLocal(w, r, target)
 		return
 	}
@@ -300,6 +352,7 @@ func (f *facade) serveIngress(w http.ResponseWriter, r *http.Request, peer strin
 	out := r.WithContext(preparedCtx)
 	out.Header = r.Header.Clone()
 	out.Header.Del(nodepolicy.AdmissionWaitHeader)
+	withLocalCredential(out.Header, f.localInferenceCredential(r, target))
 	setReplayBody(out, body)
 	if streamRequest.protocol != streamProtocolUnknown {
 		out.Header.Set("Accept-Encoding", "identity")
@@ -505,6 +558,7 @@ func (f *facade) serveStrictLocal(w http.ResponseWriter, r *http.Request, body [
 	out := r.WithContext(preparedCtx)
 	out.Header = r.Header.Clone()
 	stripInternalRoutingHeaders(out.Header)
+	withLocalCredential(out.Header, f.localInferenceCredential(r, target))
 	setReplayBody(out, body)
 	if streamRequest.protocol != streamProtocolUnknown {
 		out.Header.Set("Accept-Encoding", "identity")

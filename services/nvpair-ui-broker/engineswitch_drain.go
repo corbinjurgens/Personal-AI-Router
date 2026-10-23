@@ -157,7 +157,11 @@ func (b *Broker) switchProxySetLocal(ctx context.Context, pp *proxyProcess, engi
 	if pp == nil {
 		return fmt.Errorf("proxy unavailable")
 	}
-	raw, rpcErr, err := pp.Call(ctx, engines.AddressMethod(engine, "node/set-local-backend"), settingsJSON(proxyLocalBackend{Engine: engine, Host: "127.0.0.1", Port: port, Healthy: healthy}))
+	credential := ""
+	if healthy && port > 0 {
+		credential = b.localEngineCredential(engine, port)
+	}
+	raw, rpcErr, err := pp.Call(ctx, engines.AddressMethod(engine, "node/set-local-backend"), settingsJSON(proxyLocalBackend{Engine: engine, Host: "127.0.0.1", Port: port, Healthy: healthy, Credential: credential}))
 	if err != nil {
 		return err
 	}

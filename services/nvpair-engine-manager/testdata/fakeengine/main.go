@@ -107,6 +107,22 @@ func main() {
 			os.Exit(2)
 		}
 	}
+	// Records the native key a prepared Strata launch hands its server, which
+	// arrives only in the environment.
+	if path := os.Getenv("FAKE_API_KEY_LOG"); path != "" {
+		if os.WriteFile(path, []byte(os.Getenv("STRATA_API_KEY")), 0600) != nil {
+			os.Exit(2)
+		}
+	}
+	// Prints the key on both streams, as a careless server might, to prove
+	// PAIR's logs and startup diagnostics never carry it; "fail" then exits.
+	if mode := os.Getenv("FAKE_ECHO_API_KEY"); mode != "" {
+		fmt.Println("server key", os.Getenv("STRATA_API_KEY"))
+		fmt.Fprintln(os.Stderr, "server key", os.Getenv("STRATA_API_KEY"))
+		if mode == "fail" {
+			os.Exit(2)
+		}
+	}
 	if path := os.Getenv("FAKE_START_LOG"); path != "" {
 		file, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
 		if err != nil {
