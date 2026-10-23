@@ -6,6 +6,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"net"
@@ -46,8 +48,8 @@ func prepareKeyedStrata(t *testing.T, echo string) (strataServingFixture, string
 	if echo != "" {
 		settingsState(t, f.ex).plat.Runtime.Env["FAKE_ECHO_API_KEY"] = echo
 	}
-	key := strataAuthKey
-	f.config.APIKey = &key
+	keyFile := writeStrataKeyFile(t, f, strataAuthKey+"\n")
+	f.config.APIKeyFile = &keyFile
 	f.saveConfig(t)
 	p := approveLlamaServing(t, f.llamaServingFixture)
 	if data, err := json.Marshal(p); err != nil || bytes.Contains(data, []byte(strataAuthKey)) {
@@ -220,32 +222,178 @@ func TestStrataAuthEngineRequestsCarryTheKey(t *testing.T) {
 	}
 }
 
-func TestStrataAuthKeyShape(t *testing.T) {
+// writeStrataKeyFile writes the key file beside the fixture's config.
+func writeStrataKeyFile(t *testing.T, f strataServingFixture, content string) string {
+	t.Helper()
+	path := filepath.Join(f.root, "strata.key")
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// keyedRaw is the accepted baseline config naming the key file.
+func keyedRaw(t *testing.T, f strataServingFixture, keyFile string) map[string]any {
+	t.Helper()
+	raw := forkBaselineRaw(t, f)
+	raw["api_key_file"] = keyFile
+	return raw
+}
+
+func TestStrataAuthInlineKeyIsRejected(t *testing.T) {
+	f := newStrataServingFixture(t)
+	raw := forkBaselineRaw(t, f)
+	raw["api_key"] = strataAuthKey
+	err := f.deriveRaw(t, raw)
+	requireForkOutcome(t, err, "Unsupported or malformed prepared Strata config.")
+	if strings.Contains(err.Error(), strataAuthKey) {
+		t.Fatal("rejection repeats the key")
+	}
+}
+
+func TestStrataAuthKeyFileRejections(t *testing.T) {
 	for _, tc := range []struct {
-		name, key, expect string
+		name   string
+		setup  func(t *testing.T, f strataServingFixture) string
+		expect string
 	}{
-		{"generated form", "Ab-_cd12EF34gh56IJ78kl90", ""},
-		{"too short", "short-key", "is not a reviewed value"},
-		{"empty", "", "is not a reviewed value"},
-		{"list of keys", "FAKE-AUTH-KEY-one,FAKE-AUTH-KEY-two", "is not a reviewed value"},
-		{"space", "FAKE AUTH KEY 0123456789", "is not a reviewed value"},
-		{"control character", "FAKE-AUTH-KEY-0123456789\t", "is not a reviewed value"},
-		{"non-ASCII", "FAKE-AUTH-KEY-0123456789é", "is not a reviewed value"},
+		{"missing file", func(t *testing.T, f strataServingFixture) string { return filepath.Join(f.root, "absent.key") }, "api_key_file is missing"},
+		{"empty file", func(t *testing.T, f strataServingFixture) string { return writeStrataKeyFile(t, f, "") }, "api_key_file is missing"},
+		{"directory", func(t *testing.T, f strataServingFixture) string { return filepath.Join(f.root, "lib") }, "api_key_file is missing"},
+		{"oversized file", func(t *testing.T, f strataServingFixture) string {
+			return writeStrataKeyFile(t, f, strings.Repeat("k", strataKeyFileLimit+1))
+		}, "api_key_file is missing"},
+		{"relative path", func(t *testing.T, f strataServingFixture) string { return "strata.key" }, "absolute clean path"},
+		{"declared artifact", func(t *testing.T, f strataServingFixture) string { return filepath.Join(f.root, "server.py") }, "declared artifact"},
+		{"too short", func(t *testing.T, f strataServingFixture) string { return writeStrataKeyFile(t, f, "short-key") }, "one reviewed key"},
+		{"list of keys", func(t *testing.T, f strataServingFixture) string {
+			return writeStrataKeyFile(t, f, "FAKE-AUTH-KEY-one-0001,FAKE-AUTH-KEY-two-0002")
+		}, "one reviewed key"},
+		{"space", func(t *testing.T, f strataServingFixture) string {
+			return writeStrataKeyFile(t, f, "FAKE AUTH KEY 0123456789")
+		}, "one reviewed key"},
+		{"two lines", func(t *testing.T, f strataServingFixture) string {
+			return writeStrataKeyFile(t, f, strataAuthKey+"\n"+strataAuthKey+"\n")
+		}, "one reviewed key"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newStrataServingFixture(t)
-			base := forkBaselineRaw(t, f)
-			base["api_key"] = tc.key
-			err := f.deriveRaw(t, base)
+			err := f.deriveRaw(t, keyedRaw(t, f, tc.setup(t, f)))
 			requireForkOutcome(t, err, tc.expect)
-			if err != nil && tc.key != "" && strings.Contains(err.Error(), tc.key) {
-				t.Fatal("rejection repeats the key")
+			for _, secret := range []string{strataAuthKey, "FAKE-AUTH-KEY-one", "FAKE AUTH KEY", "short-key"} {
+				if strings.Contains(err.Error(), secret) {
+					t.Fatal("rejection repeats the file content")
+				}
 			}
 		})
 	}
-	t.Run("wrong type", func(t *testing.T) {
-		if _, err := parseStrataServingConfig([]byte(`{"api_key":["FAKE-AUTH-KEY-0123456789"]}`)); err == nil {
-			t.Fatal("key list accepted")
+	t.Run("accepted with or without a line end", func(t *testing.T) {
+		for _, content := range []string{strataAuthKey, strataAuthKey + "\n", strataAuthKey + "\r\n"} {
+			f := newStrataServingFixture(t)
+			launch, err := f.deriveLaunch(t, keyedRaw(t, f, writeStrataKeyFile(t, f, content)))
+			if err != nil || launch.Credential != strataAuthKey {
+				t.Fatalf("content %q: credential ok %v, error %v", content, launch != nil && launch.Credential == strataAuthKey, err)
+			}
+			if bytes.Contains(launch.Snapshot, []byte("api_key")) {
+				t.Fatal("snapshot names the key file")
+			}
 		}
 	})
+}
+
+// Nothing advertised derives from the key's content: rewriting the file in
+// place with another key of the same length and modification time leaves
+// every advertised field identical. That is the documented residual: such a
+// rewrite is also not detected.
+func TestStrataAuthAdvertisedFieldsIgnoreKeyContent(t *testing.T) {
+	f := newStrataServingFixture(t)
+	keyFile := writeStrataKeyFile(t, f, "aaaaaaaaaaaaaaaa")
+	info, err := os.Stat(keyFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Write the config once: rewriting it would change its own binding.
+	if _, err := f.deriveLaunch(t, keyedRaw(t, f, keyFile)); err != nil {
+		t.Fatal(err)
+	}
+	advertised := func(t *testing.T) []byte {
+		t.Helper()
+		st := settingsState(t, f.ex)
+		command, err := launchForState(st, f.request.Settings.ServerPort)
+		if err != nil {
+			t.Fatal(err)
+		}
+		rt := st.plat.Runtime
+		rt.Serving = f.request.Settings.Serving
+		launch, err := deriveStrataServing(command, rt)
+		if err != nil {
+			t.Fatal(err)
+		}
+		data, err := json.Marshal(struct {
+			Config    *engines.ServingConfig
+			Envelopes []engines.ServingEnvelope
+			Digest    string
+			Snapshot  []byte
+		}{launch.Config, launch.Envelopes, launch.Digest, launch.Snapshot})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return data
+	}
+	weak := advertised(t)
+	if err := os.WriteFile(keyFile, []byte("bbbbbbbbbbbbbbbb"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(keyFile, info.ModTime(), info.ModTime()); err != nil {
+		t.Fatal(err)
+	}
+	if other := advertised(t); !bytes.Equal(weak, other) {
+		t.Fatal("an advertised field depends on the key content")
+	}
+	for _, guess := range []string{"aaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbb"} {
+		for _, form := range []string{guess, guess + "\n"} {
+			sum := sha256.Sum256([]byte(form))
+			if bytes.Contains(weak, []byte(form)) || bytes.Contains(weak, []byte(hex.EncodeToString(sum[:]))) {
+				t.Fatal("an advertised field carries the key or its hash")
+			}
+		}
+	}
+}
+
+// Replacing the key file in the ordinary way changes the approval binding:
+// the approved digest no longer compiles, so the key change takes a fresh
+// approval and a restart, while the old key keeps serving until then.
+func TestStrataAuthKeyChangeRequiresApprovalAndRestart(t *testing.T) {
+	f, _ := startKeyedStrata(t)
+	st := settingsState(t, f.ex)
+	command, err := launchForState(st, f.request.Settings.ServerPort)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st.mu.Lock()
+	approved := st.plat.Runtime.Serving.Clone()
+	running := st.plat.Runtime.servingLaunch
+	st.mu.Unlock()
+	rt := st.plat.Runtime
+	rt.Serving = approved
+	if _, err := compileStrataServing(command, rt, true); err != nil {
+		t.Fatalf("unchanged key no longer compiles: %v", err)
+	}
+	keyFile := filepath.Join(f.root, "strata.key")
+	time.Sleep(20 * time.Millisecond)
+	if err := os.Remove(keyFile); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(keyFile, []byte("FAKE-AUTH-KEY-replacement-0001\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := compileStrataServing(command, rt, true); err == nil || !strings.Contains(err.Error(), "fresh preview") {
+		t.Fatalf("a changed key compiled against the old approval: %v", err)
+	}
+	if err := recheckPreparedServing(st, command, rt, running); err == nil {
+		t.Fatal("a changed key passed the pre-spawn recheck")
+	}
+	if credential, _ := f.ex.LocalCredential("fake"); credential.Credential != strataAuthKey {
+		t.Fatal("the running launch lost the key it was started with")
+	}
 }

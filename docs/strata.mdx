@@ -86,8 +86,26 @@ request under `--lazy` was not checked.
 
 ## The Strata API key
 
-A prepared config may set `api_key` (one key, 16 to 512 printable ASCII
-characters, no spaces or commas). The key stays on the serving host:
+A prepared config may set `api_key_file`: the absolute path of a regular file
+holding one key (16 to 512 printable ASCII characters, no spaces or commas,
+optionally followed by one line end). An inline `api_key` is rejected, because
+the config's bytes are hashed into fields PAIR shows to clients, and a weak key
+could be guessed offline from those hashes. The key file is never hashed, never
+a declared artifact and never forwarded to the server; PAIR binds it by
+identity (path, size, modification time and file ID), so replacing it requires
+a fresh approval and restart.
+
+Moving the key the fork's preparation wrote into the config is a one-time step:
+copy the `api_key` value into a new file next to the config (for example
+`strata.key`), restrict that file to your user, replace `"api_key": "..."` with
+`"api_key_file": "<absolute path to strata.key>"`, and approve the changed
+config. Two residuals are accepted: the file's size reveals the key's length,
+and a rewrite that keeps the same file, size and modification time is not
+detected. A missing, empty, unreadable or oversized key file, or one that does
+not hold one key, fails the preview with a message that never repeats its
+content.
+
+The key stays on the serving host:
 
 - engine-manager gives it to the Strata server only as `STRATA_API_KEY` in the
   server's environment; it is not in the launch snapshot, readback or logs;
@@ -172,9 +190,10 @@ accepted and rejected against the sanitized
 call the parser and compiler only: no server, engine or installed port is
 contacted, and nothing here shows that the current fork runs under PAIR.
 
-One thing keeps the generated profile rejected as a whole: `memory_policy`. A
-profile prepared as a separate, fixed candidate, without that field and with a
-fixed expert cache and prefill, is accepted. Deleting fields to
+Two things keep the generated profile rejected as a whole: `memory_policy` and
+the inline `api_key`. A profile prepared as a separate, fixed candidate, without
+`memory_policy`, with the key moved to `api_key_file` and with a fixed expert
+cache and prefill, is accepted. Deleting fields to
 make validation pass is the operator's explicit act of preparing that candidate,
 not something PAIR does.
 
@@ -194,7 +213,7 @@ prepared launch does with it:
 | keys that differ only by case | Rejected, at the top level and inside `env` |
 | `memory_policy` | Still rejected: the server recomputes launch controls at startup from live telemetry, so approval would have to bind the effective result, and how to do that is an open design choice |
 | `--expert-cache auto`, `--prefill auto` | Still rejected, with `memory_policy` |
-| `api_key` | Bound; see [The Strata API key](#the-strata-api-key) |
+| `api_key` | Rejected inline; move it to the file `api_key_file` names, see [The Strata API key](#the-strata-api-key) |
 
 Inventory rows with `status.value` of `loaded` count as resident; a missing,
 unknown or `loading` status does not.

@@ -249,8 +249,12 @@ allow-list of `STRATA_RESIDENT_HEADROOM_GIB`, `STRATA_FILE_CACHE_MIB`,
 listed in the approved placement as `env:NAME=value`. Duplicate keys (compared
 ignoring case, also inside `env`), nulls and unknown fields fail closed;
 `memory_policy` is an unknown field, so the automatic memory policy stays
-rejected. `api_key` is one key of 16 to 512 printable ASCII characters without
-spaces or commas; it is never in the snapshot, the server receives it only as
+rejected, and so is an inline `api_key`: config bytes are hashed into advertised
+fields. `api_key_file` is the absolute path of a regular, undeclared file read
+with a bounded read, holding one key of 16 to 512 printable ASCII characters
+without spaces or commas (one trailing line end allowed). The file is bound into
+the approval digest by identity only (path, size, modification time, file ID),
+never by content; it is never in the snapshot, the server receives the key only as
 `STRATA_API_KEY` in its child environment, engine-manager's own requests to the
 engine carry it (without following redirects, and redacted from error bodies),
 and `internal:local-engine-credential` gives it, with the launch's port, only
