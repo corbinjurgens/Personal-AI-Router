@@ -1485,3 +1485,29 @@ func TestHybridLocalCandidatesSelfUsesItsOwnCapability(t *testing.T) {
 		t.Fatalf("hybrid candidates after the identity was withdrawn = %+v, want none", got)
 	}
 }
+
+// Hybrid selection is the legacy tier order filtered to eligible candidates,
+// never a reordering of its own.
+func TestHybridLocalCandidatesKeepTierOrder(t *testing.T) {
+	pol := ollamaTierPolicy(map[string][]nodepolicy.TierEntry{"weak": {{Kind: nodepolicy.EntryLocal, Engine: "ollama", Model: "q:1b"}}})
+	pol.TierPolicy.AllowStronger = false
+	fx := newTierFixture(t, ollamaCase(t), pol, map[string][]string{"a": {"q:1b"}, "b": {"q:1b"}, "c": {"q:1b"}}, nil)
+	fx.advertise(t, "a", map[string]nodepolicy.AdvertisedRole{"weak": qualifiedRole("q:1b")}, strictCapabilityFor("ollama", "q:1b"))
+	fx.advertise(t, "b", map[string]nodepolicy.AdvertisedRole{"weak": ollamaRole("q:1b")}, strictCapabilityFor("ollama", "q:1b"))
+	fx.advertise(t, "c", map[string]nodepolicy.AdvertisedRole{"weak": qualifiedRole("q:1b")}, strictCapabilityFor("ollama", "q:1b"))
+	f := fx.p.soleFacade()
+
+	var want []string
+	for _, c := range f.resolveTierCandidates("weak", requestNeeds{}, true) {
+		if c.id != "b" {
+			want = append(want, c.id)
+		}
+	}
+	var got []string
+	for _, c := range f.hybridLocalCandidates("weak", requestNeeds{}, true) {
+		got = append(got, c.id)
+	}
+	if len(want) != 2 || !slices.Equal(got, want) {
+		t.Fatalf("hybrid order = %v, want the tier order without the unqualified node: %v", got, want)
+	}
+}

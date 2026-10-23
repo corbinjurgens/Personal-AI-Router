@@ -1297,8 +1297,12 @@ func TestSwitchManagerRPCErrorsKeepCodeAndKind(t *testing.T) {
 		{settings.SwitchErrorInvalidRequest, settings.SwitchInvalidParamsCode},
 		{settings.SwitchErrorConfigurationConflict, settings.SwitchConfigurationConflictCode},
 		{settings.SwitchErrorRemoteVeto, settings.SwitchRemoteVetoCode},
+		{settings.SwitchErrorEngineLocked, settings.SwitchEngineLockedCode},
 	} {
 		t.Run(tc.kind, func(t *testing.T) {
+			if built := switchErrorDetail(switchError(tc.kind, "Built refusal."), settings.SwitchErrorStorage); built.Code != tc.code || built.Validate() != nil {
+				t.Fatalf("switchError(%q) = %+v, want code %d", tc.kind, built, tc.code)
+			}
 			worker, server := newTestRPCWorkerPipe(t)
 			b := &Broker{}
 			b.setEngineMgr(worker)

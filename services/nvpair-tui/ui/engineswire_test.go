@@ -367,6 +367,7 @@ func TestTerminalControlsTypedRefusals(t *testing.T) {
 	}{
 		{"veto", -32011, "local veto (-32011): paused on target"},
 		{"conflict", -32010, "revision conflict (-32010): paused on target - reload and retry"},
+		{"locked", -32013, "engine locked (-32013): paused on target"},
 	} {
 		for _, family := range []string{"lifecycle", "model", "settings read", "settings preview", "settings apply", "availability"} {
 			t.Run(refusal.name+"/"+family, func(t *testing.T) {
@@ -406,6 +407,40 @@ func TestTerminalControlsTypedRefusals(t *testing.T) {
 			})
 		}
 	}
+}
+
+// TestEngineStatusLockReadback keeps a reported lock exact and an unreported one
+// unknown, through decoding and the local state push that replaces a row.
+func TestEngineStatusLockReadback(t *testing.T) {
+	decode := func(t *testing.T, raw string) engineStatus {
+		t.Helper()
+		var e engineStatus
+		if err := json.Unmarshal([]byte(raw), &e); err != nil {
+			t.Fatalf("decode %s: %v", raw, err)
+		}
+		return e
+	}
+	test := func(name, raw string, want *bool) {
+		t.Run(name, func(t *testing.T) {
+			got := decode(t, raw).Locked
+			if (got == nil) != (want == nil) || (got != nil && *got != *want) {
+				t.Fatalf("locked = %v, want %v", got, want)
+			}
+		})
+	}
+	locked, unlocked := true, false
+	test("locked", `{"engine":"ollama","installed":true,"locked":true}`, &locked)
+	test("unlocked", `{"engine":"ollama","installed":true,"locked":false}`, &unlocked)
+	test("absent stays unknown", `{"engine":"ollama","installed":true}`, nil)
+
+	t.Run("push without lock clears a stale lock", func(t *testing.T) {
+		d := localDetail()
+		d.engines = []engineStatus{{Engine: "ollama", Installed: true, Locked: &locked}}
+		d.handleNotification(&rpc.Message{Method: "engine:state-changed", Params: json.RawMessage(`{"engine":"ollama","installed":true}`)})
+		if len(d.engines) != 1 || d.engines[0].Locked != nil {
+			t.Fatalf("engines after push = %+v, want lock unknown", d.engines)
+		}
+	})
 }
 
 func TestTerminalControlsTargetPolicy(t *testing.T) {

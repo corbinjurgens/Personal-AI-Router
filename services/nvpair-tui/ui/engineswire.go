@@ -23,6 +23,9 @@ type engineStatus struct {
 	Running     bool   `json:"running"`
 	Healthy     bool   `json:"healthy"`
 	Port        int    `json:"port"`
+	// Locked is the target's durable engine lock. Nil means the target did not
+	// report one, as an older target does, and is never read as unlocked.
+	Locked *bool `json:"locked,omitempty"`
 }
 
 func (e engineStatus) label() string {

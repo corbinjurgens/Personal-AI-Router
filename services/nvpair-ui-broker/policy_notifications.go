@@ -92,6 +92,10 @@ type nodeProjection struct {
 	// PausedLocally is pausedLocally of the policy. It counts a pause with no
 	// provenance as local, which the advertised pausedBy alone cannot say.
 	PausedLocally bool `json:"pausedLocally"`
+	// ManagementBlocked is true while the node is pausing or paused by either
+	// origin, including a local pause accepted but not yet saved. The
+	// advertisement carries no availability, so it cannot stand in for this.
+	ManagementBlocked bool `json:"managementBlocked"`
 }
 
 // publishNodeProjection sends engine-manager this node's policy advertisement,
@@ -138,7 +142,12 @@ func (b *Broker) sendNodeProjection(onlyOnStrictChange bool) {
 		return
 	}
 	r.strictPublished = advertisement.StrictAdmission
-	projection := nodeProjection{Policy: advertisement, PausedLocally: pausedLocally(r.current) || r.localPauseRequested}
+	projection := nodeProjection{
+		Policy:        advertisement,
+		PausedLocally: pausedLocally(r.current) || r.localPauseRequested,
+		ManagementBlocked: r.current.Availability == nodepolicy.Paused || r.live == nodepolicy.Draining ||
+			r.live == nodepolicy.Paused || r.localPauseRequested,
+	}
 	r.mu.Unlock()
 	if err := worker.Notify(engineNodeProjectionMethod, projection); err != nil {
 		slog.Warn("could not publish the node projection to engine-manager", "err", err)

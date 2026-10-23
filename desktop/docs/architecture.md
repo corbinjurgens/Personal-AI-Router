@@ -135,7 +135,10 @@ attaches late, and converts backend responses into stable UI contracts.
 - **Pause.** The tray's *Pause inference on this PC* / *Resume inference on this
   PC* item calls the broker's `node:set-availability`. Its label follows
   `policy:get` (read at hydrate time) and `node:availability-changed` pushes for
-  this node, and reads *Pausing…* (disabled) while the node drains.
+  this node, and reads *Pausing…* (disabled) while the node drains. Every stored
+  policy reads `pause.unloadModels` and `pause.stopEngines` back as `true`: they
+  are obsolete input that the broker normalizes, so pausing unloads models and
+  stops engines.
 - **Manual nodes.** The service-side `nvpair-manual-nodes` persists its own list.
   Electron's old `<userData>/configs/manual-nodes.json` is sent once as
   `node/add` per entry after the broker is ready, then deleted

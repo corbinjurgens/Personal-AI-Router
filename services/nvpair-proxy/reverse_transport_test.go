@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -1038,4 +1039,134 @@ func TestProxyReverseRejectsRemovedOrAmbiguousEndpoint(t *testing.T) {
 		node.ID = "other-host"
 		f.p.soleFacade().discovery.SetSubscribed([]Node{f.node, node})
 	})
+}
+
+// A hybrid peer attempt waits for a peer service slot no longer than the
+// request's queue allowance, and an occupied peer costs it one attempt. A
+// concrete attempt keeps blocking acquisition.
+func TestProxyReverseHybridPeerSlotWaitIsBounded(t *testing.T) {
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	stopHolding := func() { releaseOnce.Do(func() { close(release) }) }
+	var held atomic.Int32
+	fx := newProxyReverseFixture(t, "ollama", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/tags" {
+			held.Add(1)
+			select {
+			case <-release:
+			case <-r.Context().Done():
+			}
+		}
+		if _, err := io.WriteString(w, "ok"); err != nil {
+			t.Error(err)
+		}
+	}))
+	defer stopHolding()
+	fx.node.Roles = map[string]nodepolicy.AdvertisedRole{"weak": qualifiedRole("fixture-model")}
+	fx.node.PolicyRevision = "1"
+	// Ollama names the untagged model by its normalized tag.
+	fx.node.StrictAdmission = strictCapabilityFor("ollama", "fixture-model:latest")
+	fx.p.soleFacade().discovery.SetSubscribed([]Node{fx.node})
+	policy := nodepolicy.Default()
+	policy.Tiers = map[string][]nodepolicy.TierEntry{"weak": {{Kind: nodepolicy.EntryLocal, Engine: "ollama", Model: "fixture-model"}}}
+	if err := policy.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	fx.p.admission.setPolicy(policy)
+
+	candidate := fx.candidate(t)
+	transport := fx.p.candidateTransport(candidate)
+	var occupying sync.WaitGroup
+	for range 8 {
+		occupying.Add(1)
+		go func() {
+			defer occupying.Done()
+			response, err := transport.RoundTrip(proxyReverseRequest(t, http.MethodGet, candidate.url.String()+"/api/tags", nil))
+			if err != nil {
+				return
+			}
+			_, _ = io.Copy(io.Discard, response.Body)
+			_ = response.Body.Close()
+		}()
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for held.Load() < 8 {
+		if time.Now().After(deadline) {
+			t.Fatalf("held peer requests = %d, want every slot occupied", held.Load())
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	hybrid := hybridTestPolicy(1, 3*time.Second)
+	hybrid.queueWait = 50 * time.Millisecond
+	started := time.Now()
+	recorder, ctl := serveHybridDispatch(t, fx.p.soleFacade(), `{"model":"weak","messages":[{"role":"user","content":"hi"}]}`, hybrid)
+	if recorder.Code != http.StatusBadGateway || !strings.Contains(recorder.Body.String(), clustertrust.ErrPeerSlotOccupied.Error()) {
+		t.Fatalf("hybrid status = %d body = %q, want the occupied peer as the answer", recorder.Code, recorder.Body.String())
+	}
+	if ctl.ordinal != 1 {
+		t.Fatalf("attempts = %d, want the occupied peer to cost exactly one", ctl.ordinal)
+	}
+	if elapsed := time.Since(started); elapsed > 2*time.Second {
+		t.Fatalf("hybrid attempt waited %v for a slot, want about its 50 ms queue allowance", elapsed)
+	}
+
+	done := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		concrete := httptest.NewRecorder()
+		fx.p.soleFacade().handleHTTP(concrete, httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+			strings.NewReader(`{"model":"fixture-model","messages":[]}`)))
+		done <- concrete
+	}()
+	select {
+	case concrete := <-done:
+		t.Fatalf("concrete attempt did not wait for a slot: status %d body %q", concrete.Code, concrete.Body.String())
+	case <-time.After(300 * time.Millisecond):
+	}
+	stopHolding()
+	occupying.Wait()
+	select {
+	case concrete := <-done:
+		if concrete.Code != http.StatusOK || concrete.Body.String() != "ok" {
+			t.Fatalf("concrete status = %d body = %q, want the peer's answer once a slot freed", concrete.Code, concrete.Body.String())
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("concrete attempt never acquired a released slot")
+	}
+}
+
+func TestProxyReverseHybridPeerSlotPreservesDestinationBudget(t *testing.T) {
+	base := context.Background()
+	peer := candidate{peerUUID: "peer"}
+	for _, tc := range []struct {
+		name             string
+		queue, preOutput time.Duration
+		want             time.Duration
+	}{
+		{"queue fits before destination", 2 * time.Second, 6 * time.Second, 2 * time.Second},
+		{"equal queue and deadline", 5 * time.Second, 5 * time.Second, 2500 * time.Millisecond},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, wait := peerSlotContext(base, dispatchPolicy{hybrid: true}, peer, tc.queue, tc.preOutput)
+			if ctx == base || wait != tc.want || wait >= tc.preOutput {
+				t.Fatalf("hybrid peer slot context = (%v, %v), want bound %v below deadline %v", ctx, wait, tc.want, tc.preOutput)
+			}
+		})
+	}
+	for _, tc := range []struct {
+		name   string
+		policy dispatchPolicy
+		cand   candidate
+	}{
+		{name: "concrete peer", cand: peer},
+		{name: "hybrid self", policy: dispatchPolicy{hybrid: true}, cand: candidate{self: true, peerUUID: "peer"}},
+		{name: "hybrid direct", policy: dispatchPolicy{hybrid: true}, cand: candidate{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, wait := peerSlotContext(base, tc.policy, tc.cand, 5*time.Second, 5*time.Second)
+			if ctx != base || wait != 0 {
+				t.Fatalf("slot context = (%v, %v), want unbounded original context", ctx, wait)
+			}
+		})
+	}
 }

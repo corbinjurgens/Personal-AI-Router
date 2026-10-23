@@ -354,3 +354,50 @@ func TestPolicyAnnouncementToASlowClientDoesNotHoldBackSaves(t *testing.T) {
 	requireRevisionsNeverDescend(t, events)
 	requireLastAnnouncementIsStored(t, b, events)
 }
+
+// TestNodeProjectionCarriesManagementBlocked publishes the explicit peer
+// management fence for every pause origin and phase, beside the unchanged local
+// provenance bit.
+func TestNodeProjectionCarriesManagementBlocked(t *testing.T) {
+	test := func(name string, set func(r *policyRuntime), wantBlocked, wantPausedLocally bool) {
+		t.Run(name, func(t *testing.T) {
+			b, _ := newPolicyBroker(t)
+			r := b.nodePolicyRuntime()
+			r.mu.Lock()
+			r.current = nodepolicy.Default()
+			r.live = nodepolicy.Available
+			set(r)
+			r.mu.Unlock()
+			engine := attachFakeEngine(t, b)
+			b.publishNodeProjection()
+			waitProjections(t, engine, 1)
+			engine.mu.Lock()
+			raw := append(json.RawMessage(nil), engine.projections[len(engine.projections)-1].params...)
+			engine.mu.Unlock()
+			var projection nodeProjection
+			if err := json.Unmarshal(raw, &projection); err != nil {
+				t.Fatalf("decode projection %s: %v", raw, err)
+			}
+			if projection.ManagementBlocked != wantBlocked || projection.PausedLocally != wantPausedLocally {
+				t.Fatalf("projection managementBlocked=%v pausedLocally=%v, want %v and %v",
+					projection.ManagementBlocked, projection.PausedLocally, wantBlocked, wantPausedLocally)
+			}
+			var fields map[string]json.RawMessage
+			if err := json.Unmarshal(raw, &fields); err != nil {
+				t.Fatalf("decode projection fields: %v", err)
+			}
+			if _, ok := fields["managementBlocked"]; !ok {
+				t.Fatalf("projection %s omits managementBlocked", raw)
+			}
+		})
+	}
+	test("available", func(*policyRuntime) {}, false, false)
+	test("pending local pause", func(r *policyRuntime) { r.localPauseRequested = true }, true, true)
+	test("draining", func(r *policyRuntime) { r.live = nodepolicy.Draining }, true, false)
+	test("saved local pause", func(r *policyRuntime) {
+		r.current.Availability, r.current.PausedBy, r.live = nodepolicy.Paused, nodepolicy.PausedLocally, nodepolicy.Paused
+	}, true, true)
+	test("saved peer pause", func(r *policyRuntime) {
+		r.current.Availability, r.current.PausedBy, r.live = nodepolicy.Paused, nodepolicy.PausedByPeer, nodepolicy.Paused
+	}, true, false)
+}

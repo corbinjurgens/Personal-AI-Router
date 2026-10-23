@@ -41,6 +41,7 @@ export type SwitchErrorKind =
     | 'reused_id'
     | 'configuration_conflict'
     | 'remote_veto'
+    | 'engine_locked'
     | 'unknown_receipt'
     | 'busy'
     | 'full'

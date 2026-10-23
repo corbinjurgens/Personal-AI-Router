@@ -60,6 +60,7 @@ func (e *Executor) watchLoaded(ctx context.Context) {
 	defer t.Stop()
 
 	var prev map[string][]string
+	runs := make(map[string]string)
 	var previousMemory *performancewire.MemoryEvidence
 	var lastInventory time.Time
 	var identity *modelIdentityParams
@@ -77,6 +78,15 @@ func (e *Executor) watchLoaded(ctx context.Context) {
 		fullInventory := poked || time.Since(lastInventory) >= inventoryReconcileInterval
 		if fullInventory {
 			lastInventory = time.Now()
+		}
+		// A stop clears consumers' inventory. Even an identical loaded set is
+		// a new baseline after restart; retain last-good only within one run.
+		for _, name := range e.reg.Names() {
+			run := e.engineRunID(name)
+			if runs[name] != run {
+				delete(prev, name)
+				runs[name] = run
+			}
 		}
 		changed, next, res := e.sweepLoaded(ctx, prev, fullInventory)
 		prev = next

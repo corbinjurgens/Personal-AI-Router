@@ -129,7 +129,8 @@ type Policy struct {
 }
 
 // UnmarshalJSON retains omitted defaults and validates the new fields' raw
-// member names before encoding/json can discard duplicate occurrences.
+// member names before encoding/json can discard duplicate occurrences. It
+// normalizes the obsolete pause switches to true.
 func (p *Policy) UnmarshalJSON(data []byte) error {
 	if err := CheckModelListKeys(data); err != nil {
 		return err
@@ -141,6 +142,7 @@ func (p *Policy) UnmarshalJSON(data []byte) error {
 	}
 	next.ServedModels = slices.Clone(next.ServedModels)
 	next.ResidentModels = slices.Clone(next.ResidentModels)
+	next.Pause.canonicalize()
 	*p = Policy(next)
 	return nil
 }
@@ -281,15 +283,21 @@ func CheckModelListKeys(data []byte) error {
 	return nil
 }
 
-// PauseConfig controls what pausing does.
+// PauseConfig controls how pausing treats active work. Pausing unloads every
+// model and stops every engine.
 type PauseConfig struct {
 	OnActive            OnActive `json:"onActive"`
 	DrainTimeoutSeconds int      `json:"drainTimeoutSeconds"`
-	// UnloadModels unloads every loaded model once the node is drained.
+	// UnloadModels and StopEngines are obsolete input kept for wire and file
+	// compatibility. Decoding accepts any bool and normalizes both to true, so
+	// every parsed or decoded policy shows true. Pause execution ignores them.
 	UnloadModels bool `json:"unloadModels"`
-	// StopEngines also stops the managed engines, without changing their saved
-	// On/Off intent, and keeps them stopped across restarts while paused.
-	StopEngines bool `json:"stopEngines"`
+	StopEngines  bool `json:"stopEngines"`
+}
+
+// canonicalize sets the obsolete pause switches to their one behavior.
+func (c *PauseConfig) canonicalize() {
+	c.UnloadModels, c.StopEngines = true, true
 }
 
 // Admission is how this node decides whether to accept a request. Zero values
@@ -432,7 +440,7 @@ func Default() Policy {
 			OnActive:            FinishActive,
 			DrainTimeoutSeconds: 120,
 			UnloadModels:        true,
-			StopEngines:         false,
+			StopEngines:         true,
 		},
 		Admission: Admission{
 			MaxResidentModels:     1,
@@ -747,9 +755,11 @@ func migrateV1(data []byte) (Policy, error) {
 }
 
 // normalize makes equal policies compare equal after a JSON round trip: absent
-// lists become empty, empty capability lists become nil and request options are
-// rewritten the way encoding/json writes them, HTML escaping included.
+// lists become empty, empty capability lists become nil, request options are
+// rewritten the way encoding/json writes them, HTML escaping included, and the
+// obsolete pause switches are true, a migrated version 1 document's included.
 func (p *Policy) normalize() {
+	p.Pause.canonicalize()
 	if p.Profiles == nil {
 		p.Profiles = []Profile{}
 	}

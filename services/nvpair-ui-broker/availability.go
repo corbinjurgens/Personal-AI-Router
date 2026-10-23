@@ -205,8 +205,7 @@ func (b *Broker) pauseNode(ctx context.Context, origin nodepolicy.PauseOrigin) (
 	pause := policy.Pause
 	r.mu.Unlock()
 	b.publishNodeProjection()
-	slog.Info("pausing node", "onActive", pause.OnActive, "drainTimeoutSeconds", pause.DrainTimeoutSeconds,
-		"unloadModels", pause.UnloadModels, "stopEngines", pause.StopEngines)
+	slog.Info("pausing node", "onActive", pause.OnActive, "drainTimeoutSeconds", pause.DrainTimeoutSeconds)
 
 	// Pushes use their own context: a superseded pause still leaves the proxy
 	// with the state the next transition then replaces. Availability goes
@@ -234,36 +233,32 @@ func (b *Broker) pauseNode(ctx context.Context, origin nodepolicy.PauseOrigin) (
 		return "", errAvailabilitySuperseded
 	}
 
-	if pause.UnloadModels {
-		for engine, models := range b.loadedSnapshot() {
-			if ctx.Err() != nil {
-				return "", errAvailabilitySuperseded
-			}
-			b.unloadModels(engine, models, "pause")
+	for engine, models := range b.loadedSnapshot() {
+		if ctx.Err() != nil {
+			return "", errAvailabilitySuperseded
 		}
+		b.unloadModels(engine, models, "pause")
 	}
-	if pause.StopEngines {
-		for _, engine := range b.runningSnapshot() {
+	for _, engine := range b.runningSnapshot() {
+		if ctx.Err() != nil {
+			return "", errAvailabilitySuperseded
+		}
+		if _, err := b.callEngine(ctx, engineSleepMethod, map[string]string{"engine": engine}); err != nil {
 			if ctx.Err() != nil {
+				// Superseded mid-stop: engine-manager may still finish the
+				// stop, so let the resume that superseded us wake it.
+				// Transitions are serialized, so it reads this afterwards.
+				r.mu.Lock()
+				r.pauseSlept[engine] = true
+				r.mu.Unlock()
 				return "", errAvailabilitySuperseded
 			}
-			if _, err := b.callEngine(ctx, engineSleepMethod, map[string]string{"engine": engine}); err != nil {
-				if ctx.Err() != nil {
-					// Superseded mid-stop: engine-manager may still finish the
-					// stop, so let the resume that superseded us wake it.
-					// Transitions are serialized, so it reads this afterwards.
-					r.mu.Lock()
-					r.pauseSlept[engine] = true
-					r.mu.Unlock()
-					return "", errAvailabilitySuperseded
-				}
-				slog.Warn("could not stop engine for pause", "engine", engine, "err", err)
-				continue
-			}
-			r.mu.Lock()
-			r.pauseSlept[engine] = true
-			r.mu.Unlock()
+			slog.Warn("could not stop engine for pause", "engine", engine, "err", err)
+			continue
 		}
+		r.mu.Lock()
+		r.pauseSlept[engine] = true
+		r.mu.Unlock()
 	}
 	if ctx.Err() != nil {
 		return "", errAvailabilitySuperseded
@@ -347,13 +342,12 @@ func (b *Broker) wakeAfterResume(slept []string, restore bool) {
 }
 
 // skipRestoreWhilePaused reports whether engine restoration must be skipped
-// because the node is paused with pause.stopEngines, and records that resuming
-// has to restore them instead.
+// because the node is paused, and records that resuming restores them instead.
 func (b *Broker) skipRestoreWhilePaused() bool {
 	r := b.nodePolicyRuntime()
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	skip := r.current.Availability == nodepolicy.Paused && r.current.Pause.StopEngines
+	skip := r.current.Availability == nodepolicy.Paused
 	if skip {
 		r.restoreSkipped = true
 	}

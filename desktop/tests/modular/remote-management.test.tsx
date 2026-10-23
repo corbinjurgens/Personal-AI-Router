@@ -71,6 +71,7 @@ const mocks = vi.hoisted(() => ({
         getSelfId: vi.fn<BridgeState['getSelfId']>(() => 'self'),
         setLocalDiscoveryModelRefresher: vi.fn<BridgeState['setLocalDiscoveryModelRefresher']>(),
         applyEngineIntent: vi.fn<BridgeState['applyEngineIntent']>(),
+        invalidateEngineLocks: vi.fn<BridgeState['invalidateEngineLocks']>(),
         beginEngineIntentRead: vi.fn<BridgeState['beginEngineIntentRead']>(() => 0),
         getEngineIntent: vi.fn<BridgeState['getEngineIntent']>(() => null),
         prunePendingInvite: vi.fn<BridgeState['prunePendingInvite']>()
@@ -1115,7 +1116,7 @@ describe('permission controls', () => {
         )
         await act(async () => button('Apply').click())
         expect(document.body.textContent).toContain('refused remote management permission')
-        expect(document.body.textContent).not.toContain('paused, or the engine is Off')
+        expect(document.body.textContent).not.toContain('the target refused the operation')
         expect(
             document.querySelector<HTMLInputElement>('input[aria-label="Server port"]')?.value
         ).toBe('2345')
@@ -1224,7 +1225,7 @@ describe('permission controls', () => {
 
     it.each([
         { code: -32012, message: 'refused remote management permission' },
-        { code: -32011, message: 'paused, or the engine is Off' }
+        { code: -32011, message: 'the target refused the operation' }
     ])('preserves a raw policy draft after definite refusal $code', async ({ code, message }) => {
         setPolicy.mockRejectedValueOnce(new ServiceCallError('refused', code))
         await act(async () => root.render(<RoutingSettings />))
@@ -1252,7 +1253,7 @@ describe('permission controls', () => {
 
     it.each([
         { code: -32012, message: 'refused remote management permission' },
-        { code: -32011, message: 'paused, or the engine is Off' }
+        { code: -32011, message: 'the target refused the operation' }
     ])(
         'shows availability refusal $code without changing saved availability',
         async ({ code, message }) => {

@@ -307,6 +307,80 @@ func TestParseFillsOmittedFieldsFromDefault(t *testing.T) {
 	}
 }
 
+// TestPauseOptionsNormalizeForOldDocumentsAndPeerSets accepts the obsolete
+// stopEngines/unloadModels bools from files and older peers and reads both back
+// as true, keeping onActive and the drain timeout as written.
+func TestPauseOptionsNormalizeForOldDocumentsAndPeerSets(t *testing.T) {
+	const legacyPause = `{"onActive":"cancel","drainTimeoutSeconds":7,"unloadModels":false,"stopEngines":false}`
+	want := PauseConfig{OnActive: CancelActive, DrainTimeoutSeconds: 7, UnloadModels: true, StopEngines: true}
+	requireCanonical := func(t *testing.T, got Policy, want PauseConfig) {
+		t.Helper()
+		if got.Pause != want {
+			t.Fatalf("pause = %+v, want %+v", got.Pause, want)
+		}
+		data, err := json.Marshal(got)
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		var doc struct {
+			Pause map[string]json.RawMessage `json:"pause"`
+		}
+		if err := json.Unmarshal(data, &doc); err != nil {
+			t.Fatalf("decode marshaled policy: %v", err)
+		}
+		for _, key := range []string{"unloadModels", "stopEngines"} {
+			if string(doc.Pause[key]) != "true" {
+				t.Fatalf("serialized pause.%s = %s, want true", key, doc.Pause[key])
+			}
+		}
+	}
+	parse := func(name, doc string, want PauseConfig) {
+		t.Run(name, func(t *testing.T) {
+			got, err := Parse([]byte(doc))
+			if err != nil {
+				t.Fatalf("Parse: %v", err)
+			}
+			requireCanonical(t, got, want)
+		})
+	}
+	parse("version 2 file", `{"version":2,"pause":`+legacyPause+`}`, want)
+	parse("version 1 file", `{"version":1,"pause":`+legacyPause+`}`, want)
+	parse("omitted pause", `{"version":2}`, Default().Pause)
+
+	t.Run("direct Policy.UnmarshalJSON", func(t *testing.T) {
+		var got Policy
+		if err := json.Unmarshal([]byte(`{"version":2,"pause":`+legacyPause+`}`), &got); err != nil {
+			t.Fatalf("Unmarshal: %v", err)
+		}
+		requireCanonical(t, got, want)
+	})
+	t.Run("older peer policy:set", func(t *testing.T) {
+		stored := Default()
+		merged, err := MergePeerSet(stored, peerDocument(t, stored, func(doc map[string]any) {
+			doc["pause"] = map[string]any{"onActive": "cancel", "drainTimeoutSeconds": 7, "unloadModels": false, "stopEngines": false}
+		}))
+		if err != nil {
+			t.Fatalf("MergePeerSet: %v", err)
+		}
+		requireCanonical(t, merged, want)
+	})
+	t.Run("default", func(t *testing.T) {
+		if got := Default().Pause; !got.UnloadModels || !got.StopEngines {
+			t.Fatalf("default pause = %+v, want both switches true", got)
+		}
+	})
+	reject := func(name, pause string) {
+		t.Run(name, func(t *testing.T) {
+			if _, err := Parse([]byte(`{"version":2,"pause":` + pause + `}`)); err == nil {
+				t.Fatalf("Parse accepted pause %s", pause)
+			}
+		})
+	}
+	reject("rejects a non-bool switch", `{"onActive":"finish","drainTimeoutSeconds":7,"unloadModels":"no","stopEngines":true}`)
+	reject("rejects an unknown onActive", `{"onActive":"later","drainTimeoutSeconds":7,"unloadModels":true,"stopEngines":true}`)
+	reject("rejects a negative drain timeout", `{"onActive":"finish","drainTimeoutSeconds":-1,"unloadModels":true,"stopEngines":true}`)
+}
+
 // A descriptor engine ID is a policy identity like a built-in name: profiles,
 // tiers and roles may name it whether or not this node runs it.
 func TestValidateAcceptsDescriptorEngineIDs(t *testing.T) {
@@ -405,7 +479,7 @@ func TestParseMigratesV1KeepingLocalSettings(t *testing.T) {
 		Version:      2,
 		Revision:     "0",
 		Availability: Paused,
-		Pause:        PauseConfig{OnActive: CancelActive, DrainTimeoutSeconds: 7, UnloadModels: false, StopEngines: true},
+		Pause:        PauseConfig{OnActive: CancelActive, DrainTimeoutSeconds: 7, UnloadModels: true, StopEngines: true},
 		Admission: Admission{
 			MaxResidentModels: 2, MaxConcurrentPerModel: 3, QueueTimeoutSeconds: 11,
 			MemoryBudgetBytes: 8589934592, SwitchModels: false, SwitchTimeoutSeconds: 13,

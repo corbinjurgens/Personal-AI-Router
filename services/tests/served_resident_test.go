@@ -2078,16 +2078,40 @@ func TestServedResidentProcessRetention(t *testing.T) {
 }
 
 func TestServedResidentProcessVeto(t *testing.T) {
-	f := newSRProcessFixture(t)
-	t.Run("local pause blocks resident loading", func(t *testing.T) {
-		f.call(t, "node:set-availability", map[string]string{"state": "paused"}, nil)
+	pausedResident := func(t *testing.T) (*srProcessFixture, int) {
+		t.Helper()
+		f := newSRProcessFixture(t)
 		before := f.control(t, "")
+		starts := len(f.starts(t))
+		f.call(t, "node:set-availability", map[string]string{"state": "paused"}, nil)
+		assertSwitchProcessStopped(t, int32(before.Base.PID))
 		f.resident(t, neModel)
 		f.entry(t, neModel, nodepolicy.ModelStateBlocked, nodepolicy.ModelReasonPausedLocal)
-		srAssertNoEffects(t, before, f.control(t, ""))
+		if got := len(f.starts(t)); got != starts {
+			t.Fatalf("paused resident desire started a runtime: starts=%d, want %d", got, starts)
+		}
+		if _, err := f.state(); !neConnectionRefused(err) {
+			t.Fatalf("paused runtime still answers its private control: %v", err)
+		}
+		return f, before.Base.PID
+	}
+	t.Run("local pause blocks resident loading", func(t *testing.T) {
+		pausedResident(t)
 	})
 	t.Run("resume reconciles without inference", func(t *testing.T) {
+		f, pausedPID := pausedResident(t)
 		f.call(t, "node:set-availability", map[string]string{"state": "available"}, nil)
+		neEventually(t, "resumed authenticated runtime", neCallBudget, func() bool {
+			state, err := f.state()
+			return err == nil && state.PID != pausedPID
+		})
+		if f.fake != nil {
+			if err := f.fake.Release(); err != nil {
+				t.Fatalf("release paused runtime handle: %v", err)
+			}
+			f.fake = nil
+		}
+		f.retainRuntime(t)
 		f.entry(t, neModel, nodepolicy.ModelStateSatisfied, "")
 		state := f.control(t, "")
 		if state.Base.Loads != 1 || state.Base.Chats != 0 || state.Content != 0 {
@@ -2095,6 +2119,9 @@ func TestServedResidentProcessVeto(t *testing.T) {
 		}
 	})
 	t.Run("paired management denial cannot change desired or loaded models", func(t *testing.T) {
+		f := newSRProcessFixture(t)
+		f.resident(t, neModel)
+		f.entry(t, neModel, nodepolicy.ModelStateSatisfied, "")
 		beforePolicy := f.policy(t).Policy
 		before := f.control(t, "")
 		peer := beforePolicy.PeerProjection()
@@ -2119,6 +2146,9 @@ func TestServedResidentProcessVeto(t *testing.T) {
 		srAssertNoEffects(t, before, f.control(t, ""))
 	})
 	t.Run("local Off blocks desire without restarting engine", func(t *testing.T) {
+		f := newSRProcessFixture(t)
+		f.resident(t, neModel)
+		f.entry(t, neModel, nodepolicy.ModelStateSatisfied, "")
 		f.call(t, "engine:stop", map[string]string{"engine": "llamacpp"}, nil)
 		starts := len(f.starts(t))
 		f.entry(t, neModel, nodepolicy.ModelStateBlocked, nodepolicy.ModelReasonEngineOffLocal)

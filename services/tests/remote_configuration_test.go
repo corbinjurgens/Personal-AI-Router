@@ -347,6 +347,7 @@ func TestXARemoteConfigurationSwitch(t *testing.T) {
 	f, origin := p.f, p.origin
 	var vetoReq, successReq settings.SwitchRequest
 	var vetoStatus, terminal settings.SwitchStatus
+	var resumedSourcePID int32
 	assertNoTargetStart := func(t *testing.T) {
 		t.Helper()
 		f.mu.Lock()
@@ -407,6 +408,7 @@ func TestXARemoteConfigurationSwitch(t *testing.T) {
 
 	if !t.Run("local resume then a fresh request completes", func(t *testing.T) {
 		f.rpcOK(t, "node:set-availability", map[string]string{"state": "available"})
+		resumedSourcePID = f.resumedSource(t)
 		successReq = p.request(t, "xa-switch-ok")
 		var accepted settings.SwitchResult
 		task2Decode(t, origin.call(t, settings.RemoteSwitchMethod, successReq).Result, &accepted)
@@ -420,7 +422,7 @@ func TestXARemoteConfigurationSwitch(t *testing.T) {
 		if terminal.Receipt.Phase != settings.SwitchCompleted || terminal.Receipt.Error != nil || terminal.Receipt.Caller != p.mesh.a.uuid || terminal.Receipt.NodeID != p.mesh.b.uuid || terminal.Receipt.RequestID != successReq.RequestID || !reflect.DeepEqual(terminal.Receipt.Request, successReq) {
 			t.Fatalf("remote terminal receipt = %+v, want correlated completion without error", terminal.Receipt)
 		}
-		assertSwitchProcessStopped(t, f.pid(t, "ollama"))
+		assertSwitchProcessStopped(t, resumedSourcePID)
 		f.pid(t, "llamacpp")
 	}) {
 		return
@@ -457,8 +459,8 @@ func TestXARemoteConfigurationSwitch(t *testing.T) {
 		f.mu.Lock()
 		sourceStarts := len(f.starts["ollama"])
 		f.mu.Unlock()
-		if sourceStarts != 1 {
-			t.Fatalf("ollama starts=%d, want exactly one", sourceStarts)
+		if sourceStarts != 2 {
+			t.Fatalf("ollama starts=%d, want initial start and resume wake", sourceStarts)
 		}
 		journal, err := settings.DecodeSwitchJournal(readLiveDurableFile(t, filepath.Join(p.mesh.b.base, "engine-switch-operations.json")))
 		if err != nil {

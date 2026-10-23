@@ -914,16 +914,30 @@ func TestWatcherPublishesFirstEmptyLoadedInventory(t *testing.T) {
 	}
 	setLoaded(t, ex, nil)
 	go ex.watchLoaded(ctx)
-	ex.pokeLoaded()
-	select {
-	case update := <-updates:
-		loaded, known := update.Models.LoadedByEngine["fake"]
-		if update.Engine != "fake" || !known || loaded == nil || len(loaded) != 0 {
-			t.Fatalf("initial loaded inventory = %+v", update)
+	assertEmpty := func() {
+		t.Helper()
+		ex.pokeLoaded()
+		select {
+		case update := <-updates:
+			loaded, known := update.Models.LoadedByEngine["fake"]
+			if update.Engine != "fake" || !known || loaded == nil || len(loaded) != 0 {
+				t.Fatalf("loaded inventory = %+v", update)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("empty loaded inventory was not published for the current run")
 		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("first empty loaded inventory was not published")
 	}
+	assertEmpty()
+	// A stop/start can finish between sweeps. Model it by replacing the run
+	// without giving the watcher an intervening stopped observation.
+	st, err := ex.state("fake")
+	if err != nil {
+		t.Fatalf("fake engine state: %v", err)
+	}
+	st.mu.Lock()
+	st.runID = newEngineRunID()
+	st.mu.Unlock()
+	assertEmpty()
 }
 
 // TestModelsResultNoLoadedActionOmitsKey confirms an engine with no loaded_models

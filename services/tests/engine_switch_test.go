@@ -307,6 +307,28 @@ func (f *switchProcessFixture) pid(t *testing.T, engine string) int32 {
 	return f.starts[engine][0]
 }
 
+// Pause stops the source engine. Resume starts it asynchronously, so a switch
+// snapshot is meaningful only after that second start releases its mutation.
+func (f *switchProcessFixture) resumedSource(t *testing.T) int32 {
+	t.Helper()
+	var pid int32
+	task1Eventually(t, "resumed source and released switch snapshot", 30*time.Second, func() bool {
+		f.mu.Lock()
+		starts := append([]int32(nil), f.starts["ollama"]...)
+		f.mu.Unlock()
+		if len(starts) != 2 {
+			return false
+		}
+		response := f.rpc(t, settings.SwitchStatusMethod, settings.SwitchStatusRequest{})
+		if response.Error != nil {
+			return false
+		}
+		pid = starts[1]
+		return true
+	})
+	return pid
+}
+
 func assertSwitchProcessStopped(t *testing.T, pid int32) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -772,12 +794,13 @@ func TestE4SwitchClientDenialRevocationVetoConflict(t *testing.T) {
 	}
 	assertRefused(f.request(t, "e4-local-veto"), settings.SwitchRemoteVetoCode, settings.SwitchErrorRemoteVeto)
 	f.rpcOK(t, "node:set-availability", map[string]string{"state": "available"})
+	f.resumedSource(t)
 	stale := f.request(t, "e4-conflict")
 	stale.ExpectedRevision = "e3v1:" + strings.Repeat("0", 64)
 	assertRefused(stale, settings.SwitchConfigurationConflictCode, settings.SwitchErrorConfigurationConflict)
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if len(f.starts["ollama"]) != 1 || len(f.starts["llamacpp"]) != 0 {
+	if len(f.starts["ollama"]) != 2 || len(f.starts["llamacpp"]) != 0 {
 		t.Fatalf("refusals changed engine execution: %v", f.starts)
 	}
 }

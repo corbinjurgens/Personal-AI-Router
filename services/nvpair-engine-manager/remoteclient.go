@@ -43,6 +43,9 @@ const (
 	// target's local remote-management permission refused. It is distinct from
 	// an unpinned 403 and from codeLocalVeto.
 	codeRemoteManagementDenied = -32012
+	// codeEngineLocked is a start, load or switch into an engine locked on the
+	// target node. It is distinct from codeLocalVeto.
+	codeEngineLocked = -32013
 )
 
 // wireCodes names the typed codes in an ec 409 body and a stream error frame.
@@ -50,6 +53,7 @@ var wireCodes = map[int]string{
 	codePolicyConflict:         "policy_conflict",
 	codeLocalVeto:              "local_veto",
 	codeRemoteManagementDenied: remoteManagementWireCode,
+	codeEngineLocked:           "engine_locked",
 }
 
 // codedError reaches the JSON-RPC client with its own code: the broker's

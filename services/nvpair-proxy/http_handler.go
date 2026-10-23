@@ -758,7 +758,7 @@ func (f *facade) handleHTTPWithStreamIdle(w http.ResponseWriter, r *http.Request
 		w = ctl.sink
 		r = r.WithContext(withResponseSink(r.Context(), ctl.sink))
 	}
-	ctl.dispatch(f, w, r, start, reqID, bodyBytes, model, streamIdle, cancelReasonOr, requestOwner)
+	ctl.dispatch(f, w, r, start, reqID, bodyBytes, model, streamIdle, cancelReasonOr, requestOwner, concreteDispatchPolicy(start))
 }
 
 // Storage cancellation alone cannot interrupt a socket-backed Body.Read (or

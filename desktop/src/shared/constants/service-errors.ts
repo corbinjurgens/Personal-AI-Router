@@ -7,15 +7,29 @@
 export const INVALID_PARAMS_CODE = -32602
 /** A policy save based on a revision other than the persisted one. */
 export const POLICY_CONFLICT_CODE = -32010
-/** A start, load, resume or settings apply the target node's own pause or Off forbids. */
+/**
+ * A target node's own refusal: its pause, an older target's saved Off, or a
+ * local stop that cancelled the operation. The code alone does not establish
+ * which, so it is never presented as a pause without authoritative node state.
+ */
 export const LOCAL_VETO_CODE = -32011
 /** The target device has not granted this peer remote management permission. */
 export const REMOTE_MANAGEMENT_DENIED_CODE = -32012
+/** A start, load or switch into an engine locked on its own node. */
+export const ENGINE_LOCKED_CODE = -32013
 
 /**
  * The explanation for a paired node's action refused with LOCAL_VETO_CODE.
  * `action` names what was refused, for example `start ollama on node-a`.
  */
 export function localVetoMessage(action: string): string {
-    return `Could not ${action}: that node is paused, or the engine is Off there. Resume or start it on that node itself, then try again.`
+    return `Could not ${action}: the target refused the operation. Check its node and engine state, then try again.`
+}
+
+/**
+ * The explanation for a paired node's action refused with ENGINE_LOCKED_CODE.
+ * `action` names what was refused, for example `start ollama on node-a`.
+ */
+export function engineLockedMessage(action: string): string {
+    return `Could not ${action}: the engine is locked on that node. Unlock it on that node, then try again.`
 }

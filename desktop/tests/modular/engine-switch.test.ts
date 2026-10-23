@@ -153,6 +153,7 @@ describe('engine switch receipt parser', () => {
         [-32602, 'reused_id'],
         [-32010, 'configuration_conflict'],
         [-32011, 'remote_veto'],
+        [-32013, 'engine_locked'],
         [-32012, 'validation'],
         [-32000, 'validation'],
         [-32000, 'busy']
@@ -176,6 +177,10 @@ describe('engine switch status and notification parsers', () => {
     })
     it.each([
         [-32012, 'remote_veto'],
+        [-32013, 'remote_veto'],
+        [-32011, 'engine_locked'],
+        [-32000, 'engine_locked'],
+        [-32013, 'validation'],
         [-32012, 'busy'],
         [-32010, 'validation'],
         [-32000, 'configuration_conflict'],
@@ -228,7 +233,7 @@ describe('engine switch status and notification parsers', () => {
 })
 
 describe('typed engine switch transport', () => {
-    it.each([-32012, -32010, -32011, -32000, -32602])(
+    it.each([-32013, -32012, -32010, -32011, -32000, -32602])(
         'preserves numeric refusal %s without classifying message text',
         async code => {
             const preload: PreloadServiceTransport = {

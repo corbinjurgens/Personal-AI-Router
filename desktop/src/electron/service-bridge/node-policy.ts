@@ -435,6 +435,8 @@ function modelConfigurationEntry(value: JsonValue): ModelConfigurationEntry {
             reason !== '' &&
             reason !== 'engine-off' &&
             reason !== 'no-fit' &&
+            reason !== 'paused' &&
+            reason !== 'engine-locked' &&
             reason !== 'paused-local' &&
             reason !== 'engine-off-local' &&
             reason !== 'not-served' &&

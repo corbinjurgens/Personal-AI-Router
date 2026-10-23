@@ -474,6 +474,10 @@ func TestSwitchErrorValidation(t *testing.T) {
 		{"unknown kind", SwitchOperationErrorCode, "other", "error", false},
 		{"wrong code", SwitchOperationErrorCode, SwitchErrorRemoteVeto, "error", false},
 		{"remote veto", SwitchRemoteVetoCode, SwitchErrorRemoteVeto, "error", true},
+		{"engine locked", SwitchEngineLockedCode, SwitchErrorEngineLocked, "error", true},
+		{"engine locked with veto code", SwitchRemoteVetoCode, SwitchErrorEngineLocked, "error", false},
+		{"remote veto with locked code", SwitchEngineLockedCode, SwitchErrorRemoteVeto, "error", false},
+		{"engine locked with operation code", SwitchOperationErrorCode, SwitchErrorEngineLocked, "error", false},
 		{"reused ID", SwitchInvalidParamsCode, SwitchErrorReusedID, "error", true},
 	}
 	for _, tc := range cases {
