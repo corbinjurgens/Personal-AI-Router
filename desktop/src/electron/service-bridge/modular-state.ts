@@ -455,6 +455,29 @@ class ModularBridgeState {
         emitBridgePush('engines:intent-changed', snapshot)
     }
 
+    /**
+     * Forget every reported engine lock, local and remote, and republish the
+     * statuses that carried one. A lock is authoritative only from the session
+     * that reported it: after a disconnect or engine-manager restart it is
+     * unknown until a new report arrives, never the old value.
+     */
+    invalidateEngineLocks(): void {
+        for (const [engineType, facts] of Array.from(this.engineManagerFacts)) {
+            if (facts.locked === undefined) continue
+            delete facts.locked
+            this.emitLocalEngineStatus(engineType)
+        }
+        for (const [key, facts] of Array.from(this.remoteEngineFacts)) {
+            if (facts.locked === undefined) continue
+            delete facts.locked
+            const separator = key.lastIndexOf(':')
+            const engineType = key.slice(separator + 1)
+            if (isEngineType(engineType)) {
+                this.emitRemoteEngineStatus(key.slice(0, separator), engineType)
+            }
+        }
+    }
+
     /** Bound proxy port for an engine reported by the broker, or null if unknown. */
     getProxyPort(engine: ProxyEngine): number | null {
         const port = this.proxyPorts[engine]

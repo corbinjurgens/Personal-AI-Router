@@ -81,6 +81,12 @@ func TestEngineLockRequestContract(t *testing.T) {
 	test("rejects unknown field", `{"engine":"fake","locked":true,"extra":1}`, -32602)
 	test("rejects array params", `[{"engine":"fake","locked":true}]`, -32602)
 	test("rejects trailing data", `{"engine":"fake","locked":true}{}`, -32602)
+	test("rejects duplicate locked", `{"engine":"fake","locked":true,"locked":false}`, -32602)
+	test("rejects duplicate engine", `{"engine":"other","engine":"fake","locked":true}`, -32602)
+	test("rejects case variant of locked", `{"engine":"fake","Locked":true}`, -32602)
+	test("rejects case variant beside locked", `{"engine":"fake","locked":true,"LOCKED":false}`, -32602)
+	test("rejects case variant of engine", `{"Engine":"fake","locked":true}`, -32602)
+	test("rejects missing params", ``, -32602)
 
 	t.Run("no ec route", func(t *testing.T) {
 		mux := (&controlServer{exec: m.exec, mesh: m.mesh}).mux()

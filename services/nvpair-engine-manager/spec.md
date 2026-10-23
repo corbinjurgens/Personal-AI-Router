@@ -654,7 +654,7 @@ Requests (caller → service):
 | `engine:start` | `{ engine }` | `EngineStatus` (after readiness) |
 | `engine:stop` | `{ engine }` | `EngineStatus` |
 | `engine:restart` | `{ engine }` | `EngineStatus` |
-| `engine:set-lock` | `{ engine, locked }` | `null` acknowledgement. Local only: decoded strictly, so `engine` must be registered, `locked` must be a JSON boolean and any other member, `node`, `nodeId`, `caller` and `origin` included, is `-32602`. No `ec` route or peer relay reaches it. Until lock enforcement lands, a well-formed request answers `-32000` `Engine locking is not available yet.` and changes no saved intent, lock or runtime state |
+| `engine:set-lock` | `{ engine, locked }` | `null` acknowledgement. Local only: decoded strictly, with exact, unique member names, so `engine` must be registered, `locked` must be a JSON boolean and any other member, `node`, `nodeId`, `caller` and `origin` included, is `-32602`. No `ec` route or peer relay reaches it. Until lock enforcement lands, a well-formed request answers `-32000` `Engine locking is not available yet.` and changes no saved intent, lock or runtime state |
 | `engine:action` | `{ engine, action, params }` | the engine's raw response |
 | `engine:logs` | `{ engine }` | `{ lines: [LogLine] }` |
 | `engine:errors` | — | `{ errors: [ServiceError] }` |

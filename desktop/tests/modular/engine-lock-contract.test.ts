@@ -198,6 +198,17 @@ describe('engine lock status round trips', () => {
         expectLock(status(PEER, 'llama-cpp'), want)
     })
 
+    it('makes local and remote locks unknown on invalidation and keeps other facts', () => {
+        state.setSelfId(SELF)
+        state.applyEngineManagerStatus(engineStatus('llamacpp', false))
+        state.applyRemoteEngineFacts(PEER, { engines: [engineStatus('llamacpp', true)] })
+        state.invalidateEngineLocks()
+        expectLock(status(SELF, 'llama-cpp'), undefined)
+        expectLock(status(PEER, 'llama-cpp'), undefined)
+        expect(status(SELF, 'llama-cpp')).toMatchObject({ processStatus: 'stopped' })
+        expect(status(PEER, 'llama-cpp')).toMatchObject({ processStatus: 'stopped' })
+    })
+
     it('forgets a remote lock when a refresh no longer reports the engine', () => {
         state.setSelfId(SELF)
         state.applyRemoteEngineFacts(PEER, { engines: [engineStatus('llamacpp', true)] })

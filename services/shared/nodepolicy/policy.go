@@ -283,14 +283,15 @@ func CheckModelListKeys(data []byte) error {
 	return nil
 }
 
-// PauseConfig controls how pausing treats active work. Pausing always unloads
-// every model and stops every engine.
+// PauseConfig controls how pausing treats active work. Pausing unloads every
+// model and stops every engine.
 type PauseConfig struct {
 	OnActive            OnActive `json:"onActive"`
 	DrainTimeoutSeconds int      `json:"drainTimeoutSeconds"`
 	// UnloadModels and StopEngines are obsolete input kept for wire and file
 	// compatibility. Decoding accepts any bool and normalizes both to true, so
-	// a parsed policy always shows true; pause execution does not consult them.
+	// every parsed or decoded policy shows true. A policy constructed in code
+	// can still hold false; the broker's pause execution still reads them.
 	UnloadModels bool `json:"unloadModels"`
 	StopEngines  bool `json:"stopEngines"`
 }

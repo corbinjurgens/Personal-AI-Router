@@ -187,8 +187,9 @@ This service does not populate it until lock enforcement lands.
 
 `engine:set-lock {engine, locked}` is the local-only setter for an engine's
 lock. `engine` must name a registered engine and `locked` must be a JSON
-boolean; any other member, `node`, `nodeId`, `caller` and `origin` included, is
-`-32602`, so a request cannot address another node or claim an origin. No `ec`
+boolean; any other member, `node`, `nodeId`, `caller` and `origin` included, a
+repeated member or a case variant such as `Locked` is `-32602`, so a request
+cannot address another node, claim an origin or carry an ambiguous value. No `ec`
 route, broker peer relay or `engine:remote-*` method reaches it, so a paired
 node, even one with remote-management permission, can neither set nor clear a
 lock. The current implementation is a contract stub: a well-formed request

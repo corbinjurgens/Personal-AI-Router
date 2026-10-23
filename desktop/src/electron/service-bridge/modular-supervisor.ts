@@ -577,6 +577,7 @@ class ModularSupervisor {
 
         this.brokerSessionGeneration++
         getModularBridgeState().applyEngineIntent(null)
+        getModularBridgeState().invalidateEngineLocks()
         this.shuttingDown = false
         this.performance.reset()
         this.brokerReady = false
@@ -666,6 +667,7 @@ class ModularSupervisor {
         this.shuttingDown = true
         this.brokerSessionGeneration++
         getModularBridgeState().applyEngineIntent(null)
+        getModularBridgeState().invalidateEngineLocks()
         await this.performance.stop()
         stopNodeInfoPoller()
         if (this.remoteStatusDebounceTimer) {
@@ -920,6 +922,7 @@ class ModularSupervisor {
     private resetBrokerSession(): void {
         this.brokerSessionGeneration++
         getModularBridgeState().applyEngineIntent(null)
+        getModularBridgeState().invalidateEngineLocks()
         this.performance.reset()
         this.brokerReady = false
         this.brokerHydrationDone = false
@@ -970,6 +973,7 @@ class ModularSupervisor {
             if (child.name === 'broker') {
                 this.brokerSessionGeneration++
                 getModularBridgeState().applyEngineIntent(null)
+                getModularBridgeState().invalidateEngineLocks()
                 this.performance.reset()
                 this.brokerReady = false
                 this.brokerHydrationDone = false
@@ -1960,6 +1964,7 @@ class ModularSupervisor {
         }
         if (notification.method === 'engine:ready') {
             getModularBridgeState().applyEngineIntent(null)
+            getModularBridgeState().invalidateEngineLocks()
             void this.hydrateEngineIntent()
             void this.hydrateEngineManager()
             return

@@ -243,6 +243,37 @@ describe('local intent bridge', () => {
             expect(state.getEngineIntent()).toBeNull()
         }
     )
+    it.each(['disconnected', 'broker-restarted', 'exit', 'engine:ready'])(
+        'forgets a reported engine lock on %s',
+        async event => {
+            notify('app:ready')
+            await flush()
+            state.setSelfId('lock-invalidation-self')
+            state.applyEngineManagerStatus({
+                engine: 'llamacpp',
+                installed: true,
+                running: false,
+                port: 0,
+                locked: false
+            })
+            const lockOf = () =>
+                state
+                    .getEngineInitialState()
+                    .statuses.find(
+                        row =>
+                            row.nodeId === 'lock-invalidation-self' &&
+                            row.engineType === 'llama-cpp'
+                    )
+            expect(lockOf()).toHaveProperty('locked', false)
+            if (event === 'exit') client.emit('exit', { source: 'broker', code: 1 })
+            else if (event === 'engine:ready') notify('engine:ready')
+            else if (event === 'disconnected') client.emit('disconnected')
+            else client.emit('broker-restarted')
+            await flush()
+            expect(lockOf()).toMatchObject({ processStatus: 'stopped' })
+            expect(lockOf()).not.toHaveProperty('locked')
+        }
+    )
     it('keeps a new broker snapshot when the old session read arrives last', async () => {
         const pending = deferred<JsonValue>()
         read = () => pending.promise

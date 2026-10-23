@@ -89,7 +89,9 @@ They do not imply a WebSocket connection. Browser clients are not supported.
   node: `true` or `false` is authoritative, and an absent field means the lock
   state is unavailable, as from an older target. Absent is never unlocked; it
   stays absent through facts, single operation results, pending overlays,
-  refresh and invalidation. Current engine-managers do not report it yet.
+  refresh and invalidation. A disconnect or a broker or engine-manager restart
+  makes every reported lock unknown again until a new report arrives. Current
+  engine-managers do not report it yet.
 - The `engine:command` shape `{ command: 'setLock', engineType, nodeId, locked }`
   maps to the local `engine:set-lock`. The bridge sends it only when `nodeId` is
   this device's own node, and refuses any other target before sending with

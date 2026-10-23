@@ -31,7 +31,12 @@ type setLockParams struct {
 // parseSetLock decodes an engine:set-lock request strictly: one object with a
 // registered engine and a boolean locked, and no other member. A node, caller
 // or origin field is unknown, so it cannot turn the request into a remote one.
+// Member names must be exact and unique, because encoding/json would otherwise
+// accept a case variant or let a repeated member silently override the first.
 func (e *Executor) parseSetLock(raw json.RawMessage) (engine string, locked bool, err error) {
+	if err := checkSetLockMembers(raw); err != nil {
+		return "", false, err
+	}
 	var p setLockParams
 	decoder := json.NewDecoder(bytes.NewReader(raw))
 	decoder.DisallowUnknownFields()
@@ -51,6 +56,36 @@ func (e *Executor) parseSetLock(raw json.RawMessage) (engine string, locked bool
 		return "", false, errors.New("locked must be true or false")
 	}
 	return p.Engine, *p.Locked, nil
+}
+
+// checkSetLockMembers requires raw to be one JSON object whose members are
+// exactly named engine or locked, each at most once.
+func checkSetLockMembers(raw json.RawMessage) error {
+	invalid := errors.New("invalid params: expected an object with engine and locked")
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	if token, err := decoder.Token(); err != nil || token != json.Delim('{') {
+		return invalid
+	}
+	seen := map[string]bool{}
+	for decoder.More() {
+		token, err := decoder.Token()
+		name, ok := token.(string)
+		if err != nil || !ok {
+			return invalid
+		}
+		if name != "engine" && name != "locked" {
+			return fmt.Errorf("invalid params: unknown field %q", name)
+		}
+		if seen[name] {
+			return fmt.Errorf("invalid params: duplicate field %q", name)
+		}
+		seen[name] = true
+		var value json.RawMessage
+		if err := decoder.Decode(&value); err != nil {
+			return invalid
+		}
+	}
+	return nil
 }
 
 // runSetLock answers engine:set-lock. A malformed request is invalid params;
