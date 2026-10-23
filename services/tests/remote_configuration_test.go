@@ -36,6 +36,9 @@ func xaPlatform(t *testing.T) {
 func TestXARemoteConfigurationService(t *testing.T) {
 	xaPlatform(t)
 	rf := newRemoteServiceFixture(t)
+	// Lock verifies transport shutdown, so absent engines need a closed
+	// fixture port rather than the service fixture's live HTTP 503 sink.
+	jointIsolateEngines(t, rf.configDir, temporaryClusterPort(t))
 	rf.start()
 	c := rf.readyClient()
 	var snap servicePolicySnapshot
@@ -155,16 +158,17 @@ func TestXARemoteConfigurationService(t *testing.T) {
 			nextID++
 			return decodeOBIntent(t, m.Result).OffByEngine["ollama"] == engineintent.Local
 		})
+		c.mustCall(t, "911", "engine:set-lock", mustMarshal(t, map[string]any{"engine": "ollama", "locked": true}))
 		status, _, body := managementHTTPResponse(t, rf.allowed, rf.ports.engineControl, http.MethodPost, "/v1/engines/start", map[string]any{"engine": "ollama"})
 		var refusal struct {
 			Code  string `json:"code"`
 			Error string `json:"error"`
 		}
 		if err := json.Unmarshal(body, &refusal); err != nil {
-			t.Fatalf("decode service local-Off refusal: %v", err)
+			t.Fatalf("decode service engine-lock refusal: %v", err)
 		}
-		if status != http.StatusConflict || refusal.Code != "local_veto" || refusal.Error != "ollama was turned off on the node itself; start it there" {
-			t.Fatalf("service local-Off refusal = HTTP %d/%s/%q, want exact local veto", status, refusal.Code, refusal.Error)
+		if status != http.StatusConflict || refusal.Code != "engine_locked" || refusal.Error != "This engine is locked on this node. Unlock it on this node before starting or loading a model." {
+			t.Fatalf("service engine-lock refusal = HTTP %d/%s/%q, want exact engine lock", status, refusal.Code, refusal.Error)
 		}
 	}) {
 		return
@@ -248,7 +252,7 @@ func TestXARemoteConfigurationStatus(t *testing.T) {
 
 func TestXARemoteConfigurationConflict(t *testing.T) {
 	xaPlatform(t)
-	f := newPolicyJointFixture(t)
+	f := newPolicyJointFixture(t, jointAvailable)
 	before := assertStoredPolicy(t, f.path, f.want)
 	params := map[string]any{"policy": jointExpectedPeer(f.want), "expectedPersistedRevision": "0"}
 	conflict := "policy conflict: the persisted revision is " + f.want.Revision + ", not the expected 0; reload the policy and review it before saving"
@@ -305,7 +309,7 @@ func TestXARemoteConfigurationVeto(t *testing.T) {
 	if !t.Run("relayed resume is vetoed", func(t *testing.T) {
 		before := assertStoredPolicy(t, f.path, f.want)
 		m := f.originCall(t, "engine:remote-availability-set", map[string]any{"state": "available"})
-		const message = "remote node policy: HTTP 409: this node was paused on the node itself; resume it there"
+		const message = "remote node policy: HTTP 409: This node is paused. Resume it on this node before managing it remotely."
 		if m.Error == nil || m.Error.Code != -32011 || m.Error.Message != message || len(m.Result) != 0 {
 			t.Fatalf("relayed resume veto mismatch: error_present=%t result_bytes=%d", m.Error != nil, len(m.Result))
 		}
@@ -317,13 +321,13 @@ func TestXARemoteConfigurationVeto(t *testing.T) {
 	if !t.Run("remote start is vetoed while paused", func(t *testing.T) {
 		task1Eventually(t, "remote start refused by local pause", 15*time.Second, func() bool {
 			m := callRPC(t, f.origin.in, f.origin.msgs, "engine:remote-start", map[string]any{"node": "policy-joint-target", "engine": "ollama"}, 30*time.Second)
-			return m.Error != nil && m.Error.Code == -32011
+			return m.Error != nil && m.Error.Code == -32011 && m.Error.Message == "remote /v1/engines/start: HTTP 409: This node is paused. Resume it on this node before managing it remotely." && len(m.Result) == 0
 		})
 	}) {
 		return
 	}
 
-	t.Run("local resume then local Off vetoes remote start", func(t *testing.T) {
+	t.Run("local resume then explicit engine lock vetoes remote start", func(t *testing.T) {
 		local := callRPC(t, f.target.in, f.target.msgs, "node:set-availability", map[string]any{"state": "available"}, 15*time.Second)
 		if local.Error != nil {
 			t.Fatalf("local resume failed: code=%d", local.Error.Code)
@@ -332,9 +336,11 @@ func TestXARemoteConfigurationVeto(t *testing.T) {
 		c.call(t, "engine:stop", map[string]string{"engine": "ollama"})
 		want := obIntent(false, map[string]engineintent.Origin{"ollama": engineintent.Local})
 		c.assertIntent(t, want)
-		task1Eventually(t, "remote start refused by local Off", 15*time.Second, func() bool {
+		f.inert.Close()
+		c.call(t, "engine:set-lock", map[string]any{"engine": "ollama", "locked": true})
+		task1Eventually(t, "remote start refused by explicit engine lock", 15*time.Second, func() bool {
 			m := callRPC(t, f.origin.in, f.origin.msgs, "engine:remote-start", map[string]any{"node": "policy-joint-target", "engine": "ollama"}, 30*time.Second)
-			return m.Error != nil && m.Error.Code == -32011
+			return m.Error != nil && m.Error.Code == -32013 && m.Error.Message == "remote /v1/engines/start: HTTP 409: This engine is locked on this node. Unlock it on this node before starting or loading a model." && len(m.Result) == 0
 		})
 		assertOBIntent(t, decodeOBIntent(t, c.call(t, "engine:intent", nil)), want)
 		assertOBStoredIntent(t, filepath.Join(jointAppDir(f.base), "engine-bin", "engine-state.json"), false, engineintent.Local)
@@ -346,7 +352,8 @@ func TestXARemoteConfigurationSwitch(t *testing.T) {
 	p := newPinnedSwitchFixture(t, false)
 	f, origin := p.f, p.origin
 	var vetoReq, successReq settings.SwitchRequest
-	var vetoStatus, terminal settings.SwitchStatus
+	var terminal settings.SwitchStatus
+	var staleReceipt settings.SwitchReceipt
 	var resumedSourcePID int32
 	assertNoTargetStart := func(t *testing.T) {
 		t.Helper()
@@ -355,6 +362,17 @@ func TestXARemoteConfigurationSwitch(t *testing.T) {
 		f.mu.Unlock()
 		if targetStarts != 0 {
 			t.Fatalf("llamacpp starts=%d, want none", targetStarts)
+		}
+	}
+	assertNoVetoReceipt := func(t *testing.T) {
+		t.Helper()
+		m := task2Response(t, origin, origin.send(t, settings.RemoteSwitchStatusMethod, settings.SwitchStatusRequest{NodeID: p.mesh.b.uuid, RequestID: vetoReq.RequestID}, true))
+		if m.Error == nil || m.Error.Code != settings.SwitchOperationErrorCode || m.Error.Message != "remote engine switch: HTTP 409: Unknown switch receipt for this caller." || len(m.Result) != 0 {
+			t.Fatalf("paused switch receipt lookup = %+v, want exact unknown receipt", m.Error)
+		}
+		status := p.remoteStatus(t, "")
+		if status.Receipt != nil || status.ActiveRequestID != "" || status.ConfigurationRevision != vetoReq.ExpectedRevision {
+			t.Fatalf("paused switch changed coordinator state: %+v", status)
 		}
 	}
 
@@ -370,6 +388,7 @@ func TestXARemoteConfigurationSwitch(t *testing.T) {
 		if st.Receipt == nil || st.Receipt.RequestID != req.RequestID || st.Receipt.Phase != settings.SwitchRejected || !st.Receipt.Terminal || st.Receipt.Error == nil || st.Receipt.Error.Kind != settings.SwitchErrorConfigurationConflict || st.Receipt.Error.Code != settings.SwitchConfigurationConflictCode || st.Receipt.Caller != p.mesh.a.uuid || st.Receipt.NodeID != p.mesh.b.uuid || !reflect.DeepEqual(st.Receipt.Request, req) {
 			t.Fatalf("stale switch receipt = %+v, want correlated terminal configuration conflict", st.Receipt)
 		}
+		staleReceipt = *st.Receipt
 		f.pid(t, "ollama")
 		assertNoTargetStart(t)
 	}) {
@@ -381,25 +400,22 @@ func TestXARemoteConfigurationSwitch(t *testing.T) {
 		vetoReq = p.request(t, "xa-switch-veto")
 		id := origin.send(t, settings.RemoteSwitchMethod, vetoReq, true)
 		m := task2Response(t, origin, id)
-		if m.Error == nil || m.Error.Code != settings.SwitchRemoteVetoCode {
-			t.Fatalf("paused switch error = %+v, want remote veto", m.Error)
+		if m.Error == nil || m.Error.Code != -32011 || m.Error.Message != "remote engine switch: HTTP 409: This node is paused. Resume it on this node before managing it remotely." || len(m.Result) != 0 {
+			t.Fatalf("paused switch error = %+v, want common pause refusal", m.Error)
 		}
-		vetoStatus = p.remoteStatus(t, vetoReq.RequestID)
-		if vetoStatus.Receipt == nil || vetoStatus.Receipt.RequestID != vetoReq.RequestID || vetoStatus.Receipt.Phase != settings.SwitchRejected || !vetoStatus.Receipt.Terminal || vetoStatus.Receipt.Error == nil || vetoStatus.Receipt.Error.Kind != settings.SwitchErrorRemoteVeto || vetoStatus.Receipt.Error.Code != settings.SwitchRemoteVetoCode || vetoStatus.Receipt.Caller != p.mesh.a.uuid || vetoStatus.Receipt.NodeID != p.mesh.b.uuid || !reflect.DeepEqual(vetoStatus.Receipt.Request, vetoReq) {
-			t.Fatalf("paused switch receipt = %+v, want correlated terminal remote veto", vetoStatus.Receipt)
-		}
+		assertNoVetoReceipt(t)
 		f.pid(t, "ollama")
 		assertNoTargetStart(t)
 	}) {
 		return
 	}
 
-	if !t.Run("vetoed request replays as its stored receipt", func(t *testing.T) {
-		var result settings.SwitchResult
-		task2Decode(t, origin.call(t, settings.RemoteSwitchMethod, vetoReq).Result, &result)
-		if !reflect.DeepEqual(result.Receipt, *vetoStatus.Receipt) {
-			t.Fatal("identical veto retry changed the stored rejected receipt")
+	if !t.Run("repeated paused refusal still has no coordinator receipt", func(t *testing.T) {
+		m := task2Response(t, origin, origin.send(t, settings.RemoteSwitchMethod, vetoReq, true))
+		if m.Error == nil || m.Error.Code != -32011 || m.Error.Message != "remote engine switch: HTTP 409: This node is paused. Resume it on this node before managing it remotely." || len(m.Result) != 0 {
+			t.Fatalf("repeated paused switch error = %+v, want common pause refusal", m.Error)
 		}
+		assertNoVetoReceipt(t)
 		f.pid(t, "ollama")
 		assertNoTargetStart(t)
 	}) {
@@ -409,6 +425,9 @@ func TestXARemoteConfigurationSwitch(t *testing.T) {
 	if !t.Run("local resume then a fresh request completes", func(t *testing.T) {
 		f.rpcOK(t, "node:set-availability", map[string]string{"state": "available"})
 		resumedSourcePID = f.resumedSource(t)
+		if after := p.remoteStatus(t, staleReceipt.RequestID); after.Receipt == nil || !reflect.DeepEqual(*after.Receipt, staleReceipt) {
+			t.Fatal("pause and resume changed the correlated stale-revision receipt")
+		}
 		successReq = p.request(t, "xa-switch-ok")
 		var accepted settings.SwitchResult
 		task2Decode(t, origin.call(t, settings.RemoteSwitchMethod, successReq).Result, &accepted)
@@ -466,7 +485,7 @@ func TestXARemoteConfigurationSwitch(t *testing.T) {
 		if err != nil {
 			t.Fatalf("decode final switch journal: %v", err)
 		}
-		wantIDs := []string{"xa-switch-stale", "xa-switch-veto", "xa-switch-ok"}
+		wantIDs := []string{"xa-switch-stale", "xa-switch-ok"}
 		if len(journal.Receipts) != len(wantIDs) {
 			t.Fatalf("switch journal receipts=%d, want exactly %v", len(journal.Receipts), wantIDs)
 		}
@@ -475,8 +494,11 @@ func TestXARemoteConfigurationSwitch(t *testing.T) {
 				t.Fatalf("switch journal lacks receipt %q", requestID)
 			}
 		}
-		if !reflect.DeepEqual(journal.Receipts[vetoReq.RequestID], *vetoStatus.Receipt) || !reflect.DeepEqual(journal.Receipts[successReq.RequestID], *terminal.Receipt) {
-			t.Fatal("durable journal differs from the stored veto or completed receipt")
+		if _, ok := journal.Receipts[vetoReq.RequestID]; ok {
+			t.Fatal("common pause refusal reached the durable coordinator journal")
+		}
+		if !reflect.DeepEqual(journal.Receipts[staleReceipt.RequestID], staleReceipt) || !reflect.DeepEqual(journal.Receipts[successReq.RequestID], *terminal.Receipt) {
+			t.Fatal("durable journal differs from the stale-revision or completed receipt")
 		}
 	})
 }
@@ -511,7 +533,7 @@ func xaPeerDraft(t *testing.T, p nodepolicy.Policy) nodepolicy.PeerPolicy {
 
 func TestXARemoteConfigurationRoles(t *testing.T) {
 	xaPlatform(t)
-	f := newManagementFixture(t)
+	f := newManagementFixture(t, jointAvailable)
 	j := f.joint
 
 	if !t.Run("allowed peer sets roles", func(t *testing.T) {
@@ -568,7 +590,7 @@ func TestXARemoteConfigurationServing(t *testing.T) {
 	xaPlatform(t)
 
 	t.Run("declarations", func(t *testing.T) {
-		f := newManagementFixture(t)
+		f := newManagementFixture(t, jointAvailable)
 		j := f.joint
 		setDeclaration := func(t *testing.T, draft nodepolicy.PeerPolicy) {
 			t.Helper()

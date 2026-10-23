@@ -254,6 +254,24 @@ func newTask2Fixture(t *testing.T, options ...task2FixtureOption) *task2Fixture 
 		completeEngineManagerRecovery(t, func(method string, params any) jsonrpc.Message {
 			return f.engines[n.uuid].call(t, method, params)
 		})
+		// Standalone managers have no broker to publish policy. Supply its
+		// actual notification shape after recovery so granted mutations reach
+		// their handlers rather than the unknown-projection gate.
+		policy := nodepolicy.Default()
+		policy.Revision = "12"
+		advertisement := policy.Advertisement()
+		f.engines[n.uuid].send(t, "engine:node-projection", struct {
+			Policy            nodepolicy.Advertisement `json:"policy"`
+			PausedLocally     bool                     `json:"pausedLocally"`
+			ManagementBlocked bool                     `json:"managementBlocked"`
+		}{Policy: advertisement, PausedLocally: false, ManagementBlocked: false}, false)
+		var models struct {
+			Policy *nodepolicy.Advertisement `json:"policy"`
+		}
+		task2Decode(t, f.engines[n.uuid].call(t, "engine:models", nil).Result, &models)
+		if models.Policy == nil || !reflect.DeepEqual(*models.Policy, advertisement) {
+			t.Fatalf("standalone manager %s did not publish its available projection: %+v", n.uuid, models.Policy)
+		}
 		f.engines[n.uuid].call(t, "engine:configured-ports", nil)
 		n.cm = startTask1Process(t, n.base, clusterMgrBin, "--config-dir", n.base, "--port", strconv.Itoa(n.ports[noderec.ServiceCluster]))
 		n.cm.call(t, "cluster:get-node-id", nil)

@@ -27,7 +27,7 @@ func TestOBOffOrigin(t *testing.T) {
 	})
 
 	t.Run("peer Off", func(t *testing.T) {
-		f := newPolicyJointFixture(t)
+		f := newPolicyJointFixture(t, jointAvailable)
 		c := subscribeOBIntent(t, f.target)
 		f.http(t, "/v1/engines/stop", map[string]any{"engine": "ollama"}, http.StatusOK)
 		want := obIntent(false, map[string]engineintent.Origin{"ollama": engineintent.Peer})
@@ -82,7 +82,7 @@ func TestOBOffOrigin(t *testing.T) {
 	})
 
 	t.Run("restart preserves origin", func(t *testing.T) {
-		f := newPolicyJointFixture(t)
+		f := newPolicyJointFixture(t, jointAvailable)
 		c := subscribeOBIntent(t, f.target)
 		f.http(t, "/v1/engines/stop", map[string]any{"engine": "ollama"}, http.StatusOK)
 		c.assertIntent(t, obIntent(false, map[string]engineintent.Origin{"ollama": engineintent.Peer}))
@@ -99,29 +99,59 @@ func TestOBOffOrigin(t *testing.T) {
 		c.assertIntent(t, want)
 	})
 
-	t.Run("peer Off cannot downgrade local veto", func(t *testing.T) {
-		f := newPolicyJointFixture(t)
+	t.Run("peer Off preserves local origin and explicit lock", func(t *testing.T) {
+		f := newPolicyJointFixture(t, jointAvailable)
 		c := subscribeOBIntent(t, f.target)
 		c.call(t, "engine:stop", map[string]string{"engine": "ollama"})
 		want := obIntent(false, map[string]engineintent.Origin{"ollama": engineintent.Local})
 		c.assertIntent(t, want)
+		// A live HTTP 503 sink proves neither health nor physical shutdown.
+		// Close the owned probe listener so locking verifies a stopped engine.
+		f.inert.Close()
+		c.call(t, "engine:set-lock", map[string]any{"engine": "ollama", "locked": true})
 		f.http(t, "/v1/engines/stop", map[string]any{"engine": "ollama"}, http.StatusOK)
 		c.assertIntent(t, want)
 		assertOBStoredIntent(t, filepath.Join(jointAppDir(f.base), "engine-bin", "engine-state.json"), false, engineintent.Local)
-		// Remove the fixture's node pause so it cannot mask a lost engine veto.
-		c.call(t, "node:set-availability", map[string]string{"state": "available"})
-		task1Eventually(t, "engine-specific local veto after peer Off", 10*time.Second, func() bool {
-			body := f.http(t, "/v1/engines/start", map[string]any{"engine": "ollama"}, http.StatusConflict)
-			var refusal struct {
-				Code  string `json:"code"`
-				Error string `json:"error"`
-			}
-			if err := json.Unmarshal(body, &refusal); err != nil {
-				t.Fatalf("decode peer start refusal: %v", err)
-			}
-			return refusal.Code == "local_veto" && refusal.Error == "ollama was turned off on the node itself; start it there"
-		})
+		body := f.http(t, "/v1/engines/start", map[string]any{"engine": "ollama"}, http.StatusConflict)
+		var refusal struct {
+			Code  string `json:"code"`
+			Error string `json:"error"`
+		}
+		if err := json.Unmarshal(body, &refusal); err != nil {
+			t.Fatalf("decode peer start refusal: %v", err)
+		}
+		const locked = "This engine is locked on this node. Unlock it on this node before starting or loading a model."
+		if refusal.Code != "engine_locked" || refusal.Error != locked {
+			t.Fatalf("peer start refusal = %+v, want exact engine lock", refusal)
+		}
+		response := callRPC(t, f.origin.in, f.origin.msgs, "engine:remote-start", map[string]any{"node": "policy-joint-target", "engine": "ollama"}, 30*time.Second)
+		if response.Error == nil || response.Error.Code != -32013 || response.Error.Message != "remote /v1/engines/start: HTTP 409: "+locked || len(response.Result) != 0 {
+			t.Fatalf("peer start RPC refusal = %+v, want exact engine lock", response.Error)
+		}
 		assertOBIntent(t, decodeOBIntent(t, c.call(t, "engine:intent", nil)), want)
+	})
+
+	t.Run("unlocked saved local Off permits peer start", func(t *testing.T) {
+		f, _, newClient := newSwitchClientFixture(t)
+		c := subscribeOBIntent(t, f.p)
+		pid := f.pid(t, "ollama")
+		c.call(t, "engine:stop", map[string]string{"engine": "ollama"})
+		c.assertIntent(t, obIntent(false, map[string]engineintent.Origin{"ollama": engineintent.Local}))
+		assertSwitchProcessStopped(t, pid)
+		path := filepath.Join(jointAppDir(f.base), "engine-bin", "engine-state.json")
+		assertOBStoredIntent(t, path, false, engineintent.Local)
+		// Only the owned fake engine image and loopback controller can start.
+		managementHTTP(t, newClient(), f.ports.engineControl, http.MethodPost, "/v1/engines/start", map[string]string{"engine": "ollama"}, http.StatusOK)
+		c.assertIntent(t, obIntent(true, map[string]engineintent.Origin{}))
+		assertOBStoredIntent(t, path, true, "")
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		if len(f.starts["ollama"]) != 2 || len(f.starts["llamacpp"]) != 0 {
+			t.Fatalf("peer start changed unexpected engine execution: %v", f.starts)
+		}
+		if f.starts["ollama"][1] == pid {
+			t.Fatal("peer start did not replace the stopped fixture engine")
+		}
 	})
 }
 

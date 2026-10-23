@@ -626,7 +626,7 @@ func TestEngineSwitchProcessPinnedDirect(t *testing.T) {
 // its fake engines stay alive. No discovery or vendor engine is needed.
 func newSwitchClientFixture(t *testing.T) (*switchProcessFixture, *task1Process, func() *http.Client) {
 	t.Helper()
-	base := t.TempDir()
+	base := shortClusterTempDir(t)
 	cluster := filepath.Join(base, "cluster")
 	origin := t.TempDir()
 	const targetID, callerID = "e4-switch-target", "e4-switch-caller"
@@ -771,33 +771,58 @@ func TestE4SwitchClientDenialRevocationVetoConflict(t *testing.T) {
 	assertDenied("e4-revoked")
 	managementSet(t, cm, caller, true)
 	f.rpcOK(t, "node:set-availability", map[string]string{"state": "paused"})
-	assertRefused := func(request settings.SwitchRequest, code int, kind string) {
+	assertPaused := func(request settings.SwitchRequest) {
+		t.Helper()
+		actual, _, data := managementHTTPResponse(t, client, f.ports.engineControl, http.MethodPost, settings.SwitchApplyPath, request)
+		var failure struct {
+			Code  string `json:"code"`
+			Error string `json:"error"`
+		}
+		task2Decode(t, data, &failure)
+		if actual != http.StatusConflict || failure.Code != "local_veto" || failure.Error != "This node is paused. Resume it on this node before managing it remotely." {
+			t.Fatalf("paused switch refusal status=%d body=%s, want exact common pause refusal", actual, data)
+		}
+		actual, _, data = managementHTTPResponse(t, client, f.ports.engineControl, http.MethodPost, settings.SwitchStatusPath,
+			settings.SwitchStatusRequest{RequestID: request.RequestID})
+		if actual != http.StatusConflict || string(data) != "Unknown switch receipt for this caller.\n" {
+			t.Fatalf("paused switch receipt lookup status=%d body=%s, want exact unknown receipt", actual, data)
+		}
+		var status settings.SwitchStatus
+		task2Decode(t, managementHTTP(t, client, f.ports.engineControl, http.MethodPost, settings.SwitchStatusPath,
+			settings.SwitchStatusRequest{}, http.StatusOK), &status)
+		if status.Receipt != nil || status.ActiveRequestID != "" || status.ConfigurationRevision != request.ExpectedRevision {
+			t.Fatalf("paused switch reached coordinator or changed configuration: %+v", status)
+		}
+	}
+	paused := f.request(t, "e4-local-veto")
+	assertPaused(paused)
+	assertPaused(paused)
+	f.rpcOK(t, "node:set-availability", map[string]string{"state": "available"})
+	f.resumedSource(t)
+	assertRejected := func(request settings.SwitchRequest, code int, kind string) {
 		t.Helper()
 		actual, _, data := managementHTTPResponse(t, client, f.ports.engineControl, http.MethodPost, settings.SwitchApplyPath, request)
 		var failure struct {
 			Code string `json:"code"`
 		}
 		task2Decode(t, data, &failure)
-		wireCode := kind
-		if code == settings.SwitchRemoteVetoCode {
-			wireCode = "local_veto"
-		}
-		if actual != http.StatusConflict || failure.Code != wireCode {
+		if actual != http.StatusConflict || failure.Code != kind {
 			t.Fatalf("switch refusal status=%d body=%s, want code %d", actual, data, code)
 		}
 		var status settings.SwitchStatus
 		task2Decode(t, managementHTTP(t, client, f.ports.engineControl, http.MethodPost, settings.SwitchStatusPath,
 			settings.SwitchStatusRequest{RequestID: request.RequestID}, http.StatusOK), &status)
-		if status.Receipt == nil || status.Receipt.RequestID != request.RequestID || !status.Receipt.Terminal || status.Receipt.Phase != settings.SwitchRejected || status.Receipt.Error == nil || status.Receipt.Error.Code != code || status.Receipt.Error.Kind != kind {
-			t.Fatalf("typed refusal readback = %+v", status)
+		// The HTTP request may omit nodeId. The target canonicalizes it before
+		// storing the receipt, so compare the persisted request to that identity.
+		canonical := request
+		canonical.NodeID = "e4-switch-target"
+		if status.Receipt == nil || status.Receipt.RequestID != request.RequestID || status.Receipt.Caller != caller || status.Receipt.NodeID != canonical.NodeID || !reflect.DeepEqual(status.Receipt.Request, canonical) || status.Receipt.ExpectedRevision != request.ExpectedRevision || !status.Receipt.Terminal || status.Receipt.Phase != settings.SwitchRejected || status.Receipt.Error == nil || status.Receipt.Error.Code != code || status.Receipt.Error.Kind != kind {
+			t.Fatalf("typed refusal receipt = %+v", status.Receipt)
 		}
 	}
-	assertRefused(f.request(t, "e4-local-veto"), settings.SwitchRemoteVetoCode, settings.SwitchErrorRemoteVeto)
-	f.rpcOK(t, "node:set-availability", map[string]string{"state": "available"})
-	f.resumedSource(t)
 	stale := f.request(t, "e4-conflict")
 	stale.ExpectedRevision = "e3v1:" + strings.Repeat("0", 64)
-	assertRefused(stale, settings.SwitchConfigurationConflictCode, settings.SwitchErrorConfigurationConflict)
+	assertRejected(stale, settings.SwitchConfigurationConflictCode, settings.SwitchErrorConfigurationConflict)
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if len(f.starts["ollama"]) != 2 || len(f.starts["llamacpp"]) != 0 {
