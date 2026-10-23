@@ -76,7 +76,7 @@ func TestEngineAvailabilityWaitsForBothProxyOutcomes(t *testing.T) {
 	}
 	close(b.lmstudioPortReady)
 
-	for _, want := range []string{engineNodeProjectionMethod, settings.SwitchPrepareMethod, restoreEnabledEnginesMethod} {
+	for _, want := range []string{engineNodeProjectionMethod, settings.SwitchPrepareMethod, "engine:settings-projection", restoreEnabledEnginesMethod} {
 		select {
 		case got := <-restore:
 			if got != want {

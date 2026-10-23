@@ -6,6 +6,9 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -19,6 +22,114 @@ var (
 	launchDigestC = strings.Repeat("c", 64)
 	modelDigestB  = strings.Repeat("b", 64)
 )
+
+func TestSettingsRecoveryPublishesIdentityAfterEarlyEngineReady(t *testing.T) {
+	b, _ := newPolicyBroker(t)
+	engine := attachFakeEngine(t, b)
+	launch := settings.LaunchState{
+		Engine: "ollama", ServerPort: 11434, EffectivePort: 11434,
+		LaunchText: "serve", Running: true, Editable: true, Format: "pair-arguments-v1",
+	}
+	engine.setAnswer(func(method string, _ json.RawMessage) (any, string) {
+		if method == "engine:get-launch" {
+			return launch, ""
+		}
+		return nil, "unexpected engine request: " + method
+	})
+	pp, proxy := attachFakeProxy(t, b)
+	pp.readyMu.Lock()
+	pp.facadeState = map[string]proxyFacadeState{"ollama": {ready: true, port: 11435}}
+	pp.readyMu.Unlock()
+	source := b.activateEngineManagerSource()
+	b.observeModelIdentity(source, engineManagerSnapshot("ollama"))
+	// Run the engine:ready settings replay synchronously so it finishes before
+	// journal loading, without depending on the notification goroutine's timing.
+	b.replayLoadedEngineSettings()
+	if b.engineSettingsLoaded {
+		t.Fatal("readiness loaded the settings journal")
+	}
+	r := b.nodePolicyRuntime()
+	r.mu.Lock()
+	before := r.modelIdentityLocked()
+	r.mu.Unlock()
+	if len(before.Engines) != 0 {
+		t.Fatalf("engine identity joined before settings journal loading: %+v", before)
+	}
+	settled := appliedSnapshot("ollama", 3)
+	settled.NodeID = b.nodeID
+	settled.Running = true
+	settled.Editable = true
+	settled.EffectiveServerPort = launch.EffectivePort
+	settled.EffectiveProxyPort = 11435
+	settled.Format = launch.Format
+	data, err := json.Marshal(map[string]*engineSettingsRecord{"ollama": {Snapshot: settled}})
+	if err != nil {
+		t.Fatalf("encode settled settings journal: %v", err)
+	}
+	path, err := b.engineSettingsPath()
+	if err != nil {
+		t.Fatalf("settings journal path: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatalf("create settings journal directory: %v", err)
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatalf("write settled settings journal: %v", err)
+	}
+	if !b.recoverEngineSettings() {
+		t.Fatal("settled settings recovery failed")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	b.engineConfigMu.Lock()
+	restored := b.engineSettings["ollama"].Snapshot.Clone()
+	readback, readErr := b.settingsSnapshotLocked(ctx, "ollama")
+	b.reconcileLegacySettingsLocked()
+	after := b.engineSettings["ollama"].Snapshot.Clone()
+	b.engineConfigMu.Unlock()
+	if readErr != nil {
+		t.Fatalf("read settled live settings: %v", readErr)
+	}
+	if !reflect.DeepEqual(restored, readback) || !reflect.DeepEqual(restored, after) {
+		t.Fatalf("live readback changed settled settings: before = %+v, after = %+v", restored, after)
+	}
+	if restored.Epoch == settled.Epoch || restored.Sequence == 0 {
+		t.Fatalf("recovery did not publish the renewed journal epoch: %+v", restored)
+	}
+	fp, ok := settingsFingerprint(restored)
+	if !ok {
+		t.Fatalf("restored settings have no applied fingerprint: %+v", restored)
+	}
+	r.mu.Lock()
+	joined := r.modelIdentityLocked()
+	r.mu.Unlock()
+	if id := joined.Engines["ollama"]; id.SettingsFingerprint != fp || id.EngineRunID != "run-ollama" {
+		t.Fatalf("recovery did not join applied settings and engine identity: %+v", joined)
+	}
+	waitIdentity(t, proxy, "recovered settings identity", func(p nodepolicy.SetModelIdentityParams) bool {
+		return p.Engines["ollama"].SettingsFingerprint == fp
+	})
+	calls := engine.waitFor("recovered settings projection", func(calls []policyCall) bool {
+		for _, call := range calls {
+			if call.method == "engine:settings-projection" {
+				return true
+			}
+		}
+		return false
+	})
+	for _, call := range calls {
+		if call.method != "engine:settings-projection" {
+			continue
+		}
+		var snapshots []settings.Snapshot
+		if err := json.Unmarshal(call.params, &snapshots); err != nil {
+			t.Fatalf("decode recovered settings projection: %v", err)
+		}
+		if !call.notify || !reflect.DeepEqual(snapshots, []settings.Snapshot{restored}) {
+			t.Fatalf("settings projection = %+v, want %+v", snapshots, restored)
+		}
+	}
+}
 
 func TestModelIdentityServingPassThroughAndWithdrawal(t *testing.T) {
 	ab := newActivatedBroker(t)

@@ -963,12 +963,12 @@ func TestEngineManagerRespawnReconcilesUnknownCustomBackendBeforeRestore(t *test
 	b.setEngineMgr(newEngine)
 	order := make(chan string, 4)
 	go func() {
-		// engine:ready also publishes the node projection, at no fixed point
-		// in this sequence.
+		// Readiness and settings recovery also publish state projections.
+		// Consume them without changing the lifecycle order asserted below.
 		read := func() (*Message, error) {
 			for {
 				msg, err := newEngineCodec.Read()
-				if err != nil || msg.Method != engineNodeProjectionMethod {
+				if err != nil || (msg.Method != engineNodeProjectionMethod && msg.Method != "engine:settings-projection") {
 					if err == nil && msg.Method == "engine:switch-prepare" {
 						if err := newEngineCodec.Respond(msg.ID, emptySwitchManagerSnapshot()); err != nil {
 							t.Error(err)

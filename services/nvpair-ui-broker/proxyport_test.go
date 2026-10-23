@@ -39,7 +39,7 @@ func TestEnabledEngineRestoreWaitsForBothPortGates(t *testing.T) {
 	case <-time.After(100 * time.Millisecond):
 	}
 	close(broker.lmstudioPortReady)
-	for _, want := range []string{engineNodeProjectionMethod, settings.SwitchPrepareMethod, restoreEnabledEnginesMethod} {
+	for _, want := range []string{engineNodeProjectionMethod, settings.SwitchPrepareMethod, "engine:settings-projection", restoreEnabledEnginesMethod} {
 		select {
 		case got := <-method:
 			if got != want {

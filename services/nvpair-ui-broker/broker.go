@@ -1184,13 +1184,7 @@ func (b *Broker) forwardEngineNotificationFrom(source *engineManagerSource, meth
 		// A (re)started engine-manager holds no node projection until it is
 		// sent one. Off the read pump, like the settings projection below.
 		go b.publishNodeProjection()
-		go func() {
-			b.engineConfigMu.Lock()
-			defer b.engineConfigMu.Unlock()
-			if b.engineSettingsLoaded && b.engineSettingsError == nil && len(b.engineSettings) > 0 {
-				b.publishSettingsLocked()
-			}
-		}()
+		go b.replayLoadedEngineSettings()
 	}
 	if method == noderec.MethodSubscribe {
 		// engine-manager subscribes upward for its ec peer set (nodes exposing

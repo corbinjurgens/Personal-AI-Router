@@ -158,6 +158,14 @@ func (b *Broker) migrateLegacyEngineSettings() {
 	}
 }
 
+func (b *Broker) replayLoadedEngineSettings() {
+	b.engineConfigMu.Lock()
+	defer b.engineConfigMu.Unlock()
+	if b.engineSettingsLoaded && b.engineSettingsError == nil && len(b.engineSettings) > 0 {
+		b.publishSettingsLocked()
+	}
+}
+
 // Replay accepted operations before automatic engine startup. Component stores
 // can be at any phase after a crash; configure revalidates and converges them
 // under the same engine lock used by a live Apply, then records its outcome.
@@ -184,6 +192,9 @@ func (b *Broker) recoverEngineSettings() bool {
 		_ = b.runSettingsOperationLocked(ctx, engine, record)
 		cancel()
 	}
+	// Readiness may arrive before the journal is loaded. Seed the applied
+	// identity even when recovery and later live readbacks change no settings.
+	b.publishSettingsLocked()
 	return true
 }
 
