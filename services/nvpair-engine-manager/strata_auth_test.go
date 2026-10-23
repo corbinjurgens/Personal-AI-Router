@@ -169,32 +169,31 @@ func TestStrataAuthUnkeyedLaunchOffersNoCredential(t *testing.T) {
 	}
 }
 
-// PAIR's model-list reads carry the key, never follow a redirect with it and
-// never repeat it in an error. Load and unload remain unkeyed PAIR controls.
-func TestStrataAuthModelListCarriesKeyAndControlsDoNot(t *testing.T) {
+// PAIR's own requests to the keyed engine carry the key, load and unload
+// included: the real server answers every unauthenticated POST with 401. They
+// never follow a redirect with it and never repeat it in an error.
+func TestStrataAuthEngineRequestsCarryTheKey(t *testing.T) {
 	f, _ := startKeyedStrata(t)
 	var landed atomic.Int32
-	var modelReads atomic.Int32
-	var controlCalls atomic.Int32
+	var keyedReads atomic.Int32
 	var keyedControls atomic.Int32
+	var unkeyed atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		authorized := r.Header.Get("Authorization") == "Bearer "+strataAuthKey
 		switch r.URL.Path {
-		case "/v1/models":
-			modelReads.Add(1)
+		case "/v1/models", "/v1/load", "/v1/unload":
 			if !authorized {
+				unkeyed.Add(1)
 				w.WriteHeader(http.StatusUnauthorized)
 				return
 			}
-			_, _ = w.Write([]byte(`{"object":"list","data":[]}`))
-		case "/v1/load", "/v1/unload":
-			controlCalls.Add(1)
-			if r.Header.Get("Authorization") != "" {
+			if r.Method == http.MethodPost {
 				keyedControls.Add(1)
-				w.WriteHeader(http.StatusBadRequest)
+				_, _ = w.Write([]byte(`{"ok":true}`))
 				return
 			}
-			_, _ = w.Write([]byte(`{"ok":true}`))
+			keyedReads.Add(1)
+			_, _ = w.Write([]byte(`{"object":"list","data":[]}`))
 		case "/redirect":
 			http.Redirect(w, r, "/landing", http.StatusFound)
 		case "/landing":
@@ -231,8 +230,8 @@ func TestStrataAuthModelListCarriesKeyAndControlsDoNot(t *testing.T) {
 			t.Fatalf("%s rejected: %v", control.action, err)
 		}
 	}
-	if modelReads.Load() != 2 || controlCalls.Load() != 2 || keyedControls.Load() != 0 {
-		t.Fatalf("model reads=%d control calls=%d keyed controls=%d", modelReads.Load(), controlCalls.Load(), keyedControls.Load())
+	if keyedReads.Load() != 2 || keyedControls.Load() != 2 || unkeyed.Load() != 0 {
+		t.Fatalf("keyed reads=%d keyed controls=%d unkeyed requests=%d", keyedReads.Load(), keyedControls.Load(), unkeyed.Load())
 	}
 	var httpErr *ActionHTTPError
 	if _, err := call("list_models", http.MethodGet, "/redirect"); !errors.As(err, &httpErr) || httpErr.StatusCode != http.StatusFound || landed.Load() != 0 {
