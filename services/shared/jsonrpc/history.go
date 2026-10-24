@@ -25,6 +25,7 @@ const (
 	HistoryRecordFrameBytes = HistoryRecordBytes + HistoryEnvelopeBytes  // P
 	HistoryFrameBytes       = HistoryInitialBytes + HistoryEnvelopeBytes // H
 	HistoryIDBytes          = 512                                        // encoded token, including quotes and escapes
+	historyRawDepth         = 10000
 )
 
 var ErrHistoryBusy = errors.New(HistoryBusyMessage)
@@ -35,10 +36,10 @@ const HistoryBusyCode = -32096
 const HistoryBusyMessage = "routing history busy; retry"
 const HistoryInvalidCode = -32062
 
-// HistoryFailure contains no input-derived text. Owners discard their private
-// stage on discard, fail only the identified pending call on fail-call, and
-// fail their bounded history pending set and schedule one refetch on quarantine.
-// Ordinary calls must never be failed by this disposition.
+// HistoryFailure diagnostic fields contain no input-derived text. Owners discard
+// their private stage on discard, fail only the identified pending call on
+// fail-call, and fail their bounded history pending set and schedule one refetch
+// on quarantine. Ordinary calls must never be failed by this disposition.
 type HistoryFailure struct {
 	Disposition string
 	Category    string
@@ -47,6 +48,21 @@ type HistoryFailure struct {
 	// ScheduleRefetch requests one outstanding owner timer, independently of
 	// failing a newly retired call. Successful BeginMethod consumes that request.
 	ScheduleRefetch bool
+	// Refusal is set only for a fully checked, unambiguous incoming request.
+	// It never attributes or settles an outbound pending call.
+	Refusal *HistoryRequestRefusal
+}
+
+// HistoryRequestRefusal is a fixed control reply, not a decoded request. ReplyID
+// is either the exact admitted raw ID or literal null for an over-cap ID. It
+// borrows the reader's existing fixed ID slot until the next Read. The caller
+// must encode or fund its own copy before reading again, and retain that reply
+// backing through its actual queued/partial/failed/blocked write completion.
+// Do not log ReplyID; Error and all diagnostic fields remain fixed literals.
+type HistoryRequestRefusal struct {
+	ReplyID json.RawMessage
+	Code    int
+	Message string
 }
 
 func (e *HistoryFailure) Error() string { return e.Category }
@@ -101,10 +117,10 @@ func ProjectHistory(raw, dst []byte, offsets []uint32, schema HistoryProjection)
 // The outer classifier preserves encoding/json's ordinary 10,000-depth limit;
 // each selected history value then uses its much smaller J2 depth bound.
 func historyJSONValid(raw []byte, limit int) bool {
-	if limit < 1 || limit > 10000 {
+	if limit < 1 || limit > historyRawDepth {
 		return false
 	}
-	var stack [10001]byte
+	var stack [historyRawDepth + 1]byte
 	depth, i := 0, 0
 	space := func() {
 		for i < len(raw) && (raw[i] == ' ' || raw[i] == '\n' || raw[i] == '\r' || raw[i] == '\t') {
@@ -804,7 +820,13 @@ type HistoryCorrelation struct {
 }
 
 func validHistoryID(id []byte) bool {
-	if len(id) == 0 || len(id) > HistoryIDBytes || !bytes.Equal(bytes.TrimSpace(id), id) {
+	return len(id) <= HistoryIDBytes && validHistoryIDToken(id)
+}
+
+// The same token admission rule applies before an incoming over-cap ID is
+// refused without copying it. The raw envelope has already passed grammar.
+func validHistoryIDToken(id []byte) bool {
+	if len(id) == 0 || !bytes.Equal(bytes.TrimSpace(id), id) {
 		return false
 	}
 	if id[0] != '"' && id[0] != '-' && (id[0] < '0' || id[0] > '9') {
@@ -852,6 +874,10 @@ func (c *HistoryCorrelation) Retire() {
 	c.pendingMethod = ""
 }
 
+// Retire preserves classification, not an outbound write-completion verdict.
+// A failed Write may have transmitted part or all of a request. The owner must
+// separately prove no transmission, or keep the retired grant until the actual
+// late-response borrower completes or that transport generation is retired.
 func (c *HistoryCorrelation) ReleaseRetired() { c.retiredN = 0; c.retiredMethod = "" }
 func (c *HistoryCorrelation) Complete() {
 	c.pendingN = 0
@@ -1007,7 +1033,7 @@ func (r *HistoryReader) quarantine() (*Message, error) {
 }
 
 func (r *HistoryReader) guard(raw []byte) (*Message, error) {
-	if !utf8.Valid(raw) || !historyJSONValid(raw, 10000) {
+	if !utf8.Valid(raw) || !historyJSONValid(raw, historyRawDepth) {
 		return r.quarantine()
 	}
 	i := 0
@@ -1018,10 +1044,10 @@ func (r *HistoryReader) guard(raw []byte) (*Message, error) {
 		return r.quarantine()
 	}
 	i++
-	var id, value, errorValue, versionValue []byte
+	var id, value, errorValue, versionValue, methodValue []byte
 	valueName := ""
 	method := ""
-	selected, initial, ambiguous := false, false, false
+	selected, matchedID, ambiguous := false, false, false
 	ids, methods, values := 0, 0, 0
 	var outerSeen [historyEnvelopeFields]bool
 	duplicateEnvelope := false
@@ -1053,6 +1079,7 @@ func (r *HistoryReader) guard(raw []byte) (*Message, error) {
 		switch alias {
 		case historyMethodKey:
 			methods++
+			methodValue = token
 			if methods > 1 {
 				ambiguous = true
 			}
@@ -1067,8 +1094,7 @@ func (r *HistoryReader) guard(raw []byte) (*Message, error) {
 			}
 			id = token
 			if equalID(token, r.correlation.pending[:r.correlation.pendingN]) || equalID(token, r.correlation.retired[:r.correlation.retiredN]) {
-				selected = true
-				initial = true
+				matchedID = true
 			}
 		case historyParamsKey, historyResultKey:
 			values++
@@ -1090,6 +1116,15 @@ func (r *HistoryReader) guard(raw []byte) (*Message, error) {
 			i++
 		}
 	}
+	// ID namespaces are directional: a real incoming request can reuse an
+	// outbound call's ID. Only a response (no method candidate) is an initial.
+	initial := matchedID && methods == 0
+	if matchedID {
+		ordinaryRequest := !ambiguous && methods == 1 && method == "" && len(methodValue) > 2 && methodValue[0] == '"' && !outerSeen[historyResultKey] && !outerSeen[historyErrorKey]
+		if !ordinaryRequest {
+			selected = true
+		}
+	}
 	if !selected {
 		if len(raw)+1 > r.ordinary {
 			return nil, &DecodeError{ErrHistoryInvalid}
@@ -1103,6 +1138,9 @@ func (r *HistoryReader) guard(raw []byte) (*Message, error) {
 	if ambiguous {
 		return r.quarantine()
 	}
+	if methods == 1 && ids == 1 && method != "" && !outerSeen[historyResultKey] && !outerSeen[historyErrorKey] {
+		return r.incomingRequest(raw, id, value, versionValue, method, duplicateEnvelope)
+	}
 	failure := func() (*Message, error) {
 		if initial && equalID(id, r.correlation.pending[:r.correlation.pendingN]) {
 			r.correlation.Retire()
@@ -1114,9 +1152,6 @@ func (r *HistoryReader) guard(raw []byte) (*Message, error) {
 		return failure()
 	}
 	if ids > 0 && !validHistoryID(id) {
-		return failure()
-	}
-	if initial && methods != 0 {
 		return failure()
 	}
 	if !initial && (methods != 1 || valueName != "params") {
@@ -1206,14 +1241,75 @@ func (r *HistoryReader) guard(raw []byte) (*Message, error) {
 	if initial && equalID(id, r.correlation.retired[:r.correlation.retiredN]) {
 		return nil, historyFailure("discard", "history-stale")
 	}
+	msg.borrowedRead = true
 	return msg, nil
+}
+
+// Only this raw owner may expose a refusal. In particular, a failed projection
+// is never reparsed by a service to reconstruct identity from last-wins JSON.
+func (r *HistoryReader) incomingRequest(raw, id, params, version []byte, method string, duplicateEnvelope bool) (*Message, error) {
+	discard := func() (*Message, error) { return nil, historyFailure("discard", "history-invalid") }
+	if duplicateEnvelope {
+		return discard()
+	}
+	schema, ok := r.schema(method, false)
+	if !ok {
+		return discard()
+	}
+	// Check every subtree before attribution, including params that will fail
+	// the much smaller accepted schema depth. Grammar already bounded raw depth;
+	// the same offset grant bounds all key spans, without materializing them.
+	outer := HistoryProjection{Bytes: HistoryFrameBytes, Depth: historyRawDepth, Members: HistoryInitialBytes, ArrayLimit: HistoryInitialBytes}
+	p := historyParser{raw: raw, offsets: r.offsets[:0], schema: outer}
+	if p.value(nil, 1, false) != nil {
+		return discard()
+	}
+	if len(version) < 2 || version[0] != '"' || !keyIs(version, 0, "2.0") || !validHistoryIDToken(id) {
+		return discard()
+	}
+	if len(id) > HistoryIDBytes {
+		return r.refuseRequest([]byte("null"), HistoryInvalidCode, "history-invalid")
+	}
+	// Preserve the raw token before an in-place params projection can move it.
+	n := copy(r.idToken[:], id)
+	id = r.idToken[:n]
+	switch method {
+	case "routing:get-initial", "routing:subscribe", "routing:unsubscribe":
+		// Keep accepted envelope/value depth unchanged. The preceding complete
+		// duplicate proof permits a fixed refusal for these admission failures.
+		outer.Depth = schema.Depth + 2
+		bounded := historyParser{raw: raw, offsets: r.offsets[:0], schema: outer}
+		if len(params) == 0 || len(raw)-len(params)+1 > HistoryEnvelopeBytes || bounded.value(nil, 1, false) != nil {
+			return r.refuseRequest(id, HistoryInvalidCode, "history-invalid")
+		}
+		projected, _, err := ProjectHistory(params, r.output, r.offsets, schema)
+		if err != nil {
+			return r.refuseRequest(id, HistoryInvalidCode, "history-invalid")
+		}
+		token := json.RawMessage(id)
+		msg := &Message{JSONRPC: "2.0", ID: &token, Method: method, Params: projected}
+		msg.borrowedRead = true
+		return msg, nil
+	default:
+		// method came from historyMethod's closed literal set. All remaining
+		// methods are private notification methods and cannot be invoked.
+		return r.refuseRequest(id, -32601, "method not found")
+	}
+}
+
+func (r *HistoryReader) refuseRequest(id []byte, code int, message string) (*Message, error) {
+	n := copy(r.idToken[:], id)
+	return nil, &HistoryFailure{
+		Disposition: "refuse-request", Category: "history-invalid", Count: 1,
+		Refusal: &HistoryRequestRefusal{ReplyID: r.idToken[:n], Code: code, Message: message},
+	}
 }
 
 // WritePreencoded borrows a complete newline frame. acquire must be bounded by
 // its owner; parent is the transport lifetime, never a history-only timeout.
 // A nil acquire attempts the gate once and returns busy without queueing.
 func (c *Codec) WritePreencoded(acquire, parent context.Context, frame []byte) error {
-	if len(frame) < 2 || len(frame) > HistoryFrameBytes || frame[len(frame)-1] != '\n' || bytes.IndexByte(frame[:len(frame)-1], '\n') >= 0 || !utf8.Valid(frame) || !historyJSONValid(frame[:len(frame)-1], 10000) {
+	if len(frame) < 2 || len(frame) > HistoryFrameBytes || frame[len(frame)-1] != '\n' || bytes.IndexByte(frame[:len(frame)-1], '\n') >= 0 || !utf8.Valid(frame) || !historyJSONValid(frame[:len(frame)-1], historyRawDepth) {
 		return ErrHistoryInvalid
 	}
 	if acquire != nil {

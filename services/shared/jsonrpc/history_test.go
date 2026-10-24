@@ -198,18 +198,21 @@ func TestHistoryFrameMaximumBudgets(t *testing.T) {
 }
 
 func TestHistoryFrameLogicalBudgets(t *testing.T) {
-	test := func(name, frame string) {
+	test := func(name, frame, disposition string) {
 		t.Run(name, func(t *testing.T) {
 			_, err := historyTestReader(t, frame+"\n", &HistoryCorrelation{}).Read()
 			var failure *HistoryFailure
-			if !errors.As(err, &failure) || failure.Category != "history-invalid" || failure.Disposition != "discard" {
+			if !errors.As(err, &failure) || failure.Category != "history-invalid" || failure.Disposition != disposition {
 				t.Fatalf("error=%v", err)
+			}
+			if disposition == "refuse-request" && (failure.Refusal == nil || failure.Refusal.Code != -32062 || failure.Refusal.Message != "history-invalid" || string(failure.Refusal.ReplyID) != "null" || failure.FailPending || failure.ScheduleRefetch) {
+				t.Fatalf("over-cap ID refusal=%+v", failure)
 			}
 		})
 	}
-	test("record R plus one", `{"jsonrpc":"2.0","method":"routing/request","params":{"schema":1,"x":"`+strings.Repeat("x", HistoryRecordBytes)+`"}}`)
-	test("envelope E plus one", `{"jsonrpc":"2.0","method":"routing/request","params":{"schema":1},"x":"`+strings.Repeat("x", HistoryEnvelopeBytes)+`"}`)
-	test("ID 513", `{"jsonrpc":"2.0","method":"routing:get-initial","id":"`+strings.Repeat("a", 511)+`","params":{}}`)
+	test("record R plus one", `{"jsonrpc":"2.0","method":"routing/request","params":{"schema":1,"x":"`+strings.Repeat("x", HistoryRecordBytes)+`"}}`, "discard")
+	test("envelope E plus one", `{"jsonrpc":"2.0","method":"routing/request","params":{"schema":1},"x":"`+strings.Repeat("x", HistoryEnvelopeBytes)+`"}`, "discard")
+	test("ID 513", `{"jsonrpc":"2.0","method":"routing:get-initial","id":"`+strings.Repeat("a", 511)+`","params":{}}`, "refuse-request")
 }
 
 func TestHistoryFramePhysicalFraming(t *testing.T) {
@@ -697,4 +700,292 @@ func TestHistoryRawGuardKnownDecode(t *testing.T) {
 	if value.Schema != 1 {
 		t.Fatalf("schema=%d", value.Schema)
 	}
+}
+
+func historyIncomingTestReader(t *testing.T, input string, correlation *HistoryCorrelation) *Codec {
+	t.Helper()
+	c := historyTestReader(t, input, correlation)
+	c.history.schema = func(method string, initial bool) (HistoryProjection, bool) {
+		schema, ok := historyTestSchema(method, initial)
+		if !initial && (method == "routing:get-initial" || method == "routing:subscribe" || method == "routing:unsubscribe") {
+			schema.Type = reflect.TypeOf(struct{}{})
+		}
+		return schema, ok
+	}
+	return c
+}
+
+func TestHistoryIncomingRequestIDAdmission(t *testing.T) {
+	c := historyIncomingTestReader(t, "", &HistoryCorrelation{})
+	test := func(name, id, wantID string, wantCode int) {
+		t.Run(name, func(t *testing.T) {
+			c.history.r.Reset(strings.NewReader(`{"jsonrpc":"2.0","id":` + id + `,"method":"routing:get-initial","params":{}}` + "\n"))
+			msg, err := c.Read()
+			if wantCode == 0 {
+				if err != nil || msg == nil || !msg.IsRequest() || string(*msg.ID) != wantID || string(msg.Params) != `{}` {
+					t.Fatalf("legal ID read=%v err=%v", msg, err)
+				}
+				return
+			}
+			var failure *HistoryFailure
+			if msg != nil || !errors.As(err, &failure) || failure.Disposition != "refuse-request" || failure.Refusal == nil || failure.FailPending || failure.ScheduleRefetch {
+				t.Fatalf("refusal=%+v err=%v", failure, err)
+			}
+			if failure.Refusal.Code != wantCode || failure.Refusal.Message != "history-invalid" || string(failure.Refusal.ReplyID) != wantID || failure.Error() != "history-invalid" {
+				t.Fatalf("fixed refusal=%+v", failure.Refusal)
+			}
+			if &failure.Refusal.ReplyID[0] != &c.history.idToken[0] || len(failure.Refusal.ReplyID) > 512 {
+				t.Fatal("refusal ID does not borrow the bounded control slot")
+			}
+		})
+	}
+	id512 := `"` + strings.Repeat("a", 510) + `"`
+	escaped512 := `"` + strings.Repeat(`\u0061`, 85) + `"`
+	test("512 encoded bytes", id512, id512, 0)
+	test("512 escaped encoded bytes", escaped512, escaped512, 0)
+	test("existing numeric token policy", "-1.5e+2", "-1.5e+2", 0)
+	test("513 encoded bytes", `"`+strings.Repeat("a", 511)+`"`, "null", -32062)
+	test("513 escaped bytes but shorter decoded ID", `"`+strings.Repeat(`\u0061`, 85)+`x"`, "null", -32062)
+	test("large encoded ID", `"`+strings.Repeat("synthetic-id-secret", 4096)+`"`, "null", -32062)
+	test("over-cap numeric token", strings.Repeat("1", 513), "null", -32062)
+}
+
+func TestHistoryIncomingRequestFixedRefusals(t *testing.T) {
+	c := historyIncomingTestReader(t, "", &HistoryCorrelation{})
+	test := func(name, method, id, params, wantID string, wantCode int, wantMessage string) {
+		t.Run(name, func(t *testing.T) {
+			frame := `{"jsonrpc":"2.0","id":` + id + `,"method":"` + method + `"` + params + `}` + "\n"
+			c.history.r.Reset(strings.NewReader(frame))
+			var writes bytes.Buffer
+			c.writer = &writes
+			msg, err := c.Read()
+			var failure *HistoryFailure
+			if msg != nil || !errors.As(err, &failure) || failure.Refusal == nil || failure.Disposition != "refuse-request" || failure.FailPending || failure.ScheduleRefetch {
+				t.Fatalf("refusal=%+v err=%v", failure, err)
+			}
+			refusal := failure.Refusal
+			if string(refusal.ReplyID) != wantID || refusal.Code != wantCode || refusal.Message != wantMessage || failure.Error() != "history-invalid" || writes.Len() != 0 {
+				t.Fatalf("fixed refusal=%+v writes=%d", refusal, writes.Len())
+			}
+			// The caller owns this independently funded control reply before
+			// another Read. Raw ID spelling bypasses generic outer marshaling.
+			errorRaw, err := json.Marshal(&RPCError{Code: refusal.Code, Message: refusal.Message})
+			if err != nil {
+				t.Fatal(err)
+			}
+			reply := append([]byte(`{"jsonrpc":"2.0","id":`), refusal.ReplyID...)
+			reply = append(reply, `,"error":`...)
+			reply = append(reply, errorRaw...)
+			reply = append(reply, '}', '\n')
+			if len(reply) > 4096 || bytes.Contains(reply, []byte("synthetic-secret")) {
+				t.Fatal("refusal exceeded E or leaked rejected data")
+			}
+			var decoded struct {
+				JSONRPC string          `json:"jsonrpc"`
+				ID      json.RawMessage `json:"id"`
+				Error   *RPCError       `json:"error"`
+				Method  string          `json:"method"`
+				Params  json.RawMessage `json:"params"`
+				Result  json.RawMessage `json:"result"`
+			}
+			if err := json.Unmarshal(reply, &decoded); err != nil {
+				t.Fatal(err)
+			}
+			if decoded.JSONRPC != "2.0" || string(decoded.ID) != wantID || decoded.Error == nil || decoded.Error.Code != wantCode || decoded.Error.Message != wantMessage || decoded.Method != "" || decoded.Params != nil || decoded.Result != nil {
+				t.Fatalf("encoded refusal=%+v", decoded)
+			}
+		})
+	}
+	id := `"\u0061<>&"`
+	test("null public params", "routing:get-initial", id, `,"params":null`, id, -32062, "history-invalid")
+	test("scalar public params", "routing:subscribe", id, `,"params":"synthetic-secret"`, id, -32062, "history-invalid")
+	test("array public params", "routing:unsubscribe", id, `,"params":[]`, id, -32062, "history-invalid")
+	test("missing public params", "routing:get-initial", id, "", id, -32062, "history-invalid")
+	test("public params depth admission", "routing:subscribe", id, `,"params":`+strings.Repeat("[", 20)+`0`+strings.Repeat("]", 20), id, -32062, "history-invalid")
+	test("public params byte admission", "routing:subscribe", id, `,"params":{"secret":"`+strings.Repeat("x", HistoryRecordBytes)+`"}`, id, -32062, "history-invalid")
+	test("public envelope admission", "routing:subscribe", id, `,"params":{},"secret":"`+strings.Repeat("x", HistoryEnvelopeBytes)+`"`, id, -32062, "history-invalid")
+	test("maximum raw reply ID", "routing:subscribe", `"`+strings.Repeat(`\u0061`, 85)+`"`, `,"params":null`, `"`+strings.Repeat(`\u0061`, 85)+`"`, -32062, "history-invalid")
+	test("private record call", "routing/request", id, `,"params":{"synthetic-secret":0}`, id, -32601, "method not found")
+	test("private window call", "routing/history-window", id, `,"params":{}`, id, -32601, "method not found")
+	test("private end call", "routing/history-window-end", id, `,"params":{}`, id, -32601, "method not found")
+	test("private accepted call", "routing/history-accepted", id, `,"params":{}`, id, -32601, "method not found")
+	test("private changed call", "routing:changed", id, `,"params":null`, id, -32601, "method not found")
+	test("private call without params", "routing/request", id, "", id, -32601, "method not found")
+	test("private over-cap ID", "routing/request", `"`+strings.Repeat("a", 511)+`"`, `,"params":{}`, "null", -32062, "history-invalid")
+}
+
+func TestHistoryIncomingRequestNoUnsafeReplyAttribution(t *testing.T) {
+	c := historyIncomingTestReader(t, "", &HistoryCorrelation{})
+	test := func(name, frame, disposition string) {
+		t.Run(name, func(t *testing.T) {
+			correlation := HistoryCorrelation{}
+			c.history.correlation = &correlation
+			c.history.r.Reset(strings.NewReader(frame + "\n"))
+			msg, err := c.Read()
+			var failure *HistoryFailure
+			if msg != nil || !errors.As(err, &failure) || failure.Disposition != disposition || failure.Refusal != nil || failure.FailPending || failure.Error() != "history-invalid" {
+				t.Fatalf("unsafe attribution=%+v err=%v", failure, err)
+			}
+		})
+	}
+	test("notification", `{"jsonrpc":"2.0","method":"routing:subscribe","params":null}`, "discard")
+	test("private notification", `{"jsonrpc":"2.0","method":"routing/request","params":null}`, "discard")
+	test("null ID", `{"jsonrpc":"2.0","id":null,"method":"routing:subscribe","params":null}`, "discard")
+	test("object ID", `{"jsonrpc":"2.0","id":{},"method":"routing:subscribe","params":null}`, "discard")
+	test("wrong version", `{"jsonrpc":"1.0","id":1,"method":"routing:subscribe","params":null}`, "discard")
+	test("missing version", `{"id":1,"method":"routing:subscribe","params":null}`, "discard")
+	test("request with result", `{"jsonrpc":"2.0","id":1,"method":"routing:subscribe","params":null,"result":{}}`, "discard")
+	test("request with error", `{"jsonrpc":"2.0","id":1,"method":"routing:subscribe","params":null,"error":null}`, "discard")
+	test("duplicate version alias", `{"jsonrpc":"2.0","JSONRPC":"2.0","id":1,"method":"routing:subscribe","params":null}`, "discard")
+	test("duplicate params alias", `{"jsonrpc":"2.0","id":1,"method":"routing:subscribe","params":null,"Params":null}`, "discard")
+	test("duplicate unknown outer", `{"jsonrpc":"2.0","id":1,"method":"routing:subscribe","params":null,"secret":0,"secret":1}`, "discard")
+	test("duplicate unknown nested", `{"jsonrpc":"2.0","id":1,"method":"routing:subscribe","params":{"secret":{"a":0,"\u0061":1}}}`, "discard")
+	test("duplicate beyond accepted params depth", `{"jsonrpc":"2.0","id":1,"method":"routing:subscribe","params":`+strings.Repeat("[", 20)+`{"a":0,"a":1}`+strings.Repeat("]", 20)+`}`, "discard")
+	test("duplicate before over-cap refusal", `{"jsonrpc":"2.0","id":"`+strings.Repeat("a", 511)+`","method":"routing:subscribe","params":{"a":0,"a":1}}`, "discard")
+	test("duplicate IDs", `{"jsonrpc":"2.0","id":1,"ID":2,"method":"routing:subscribe","params":null}`, "quarantine")
+	test("duplicate IDs reversed", `{"jsonrpc":"2.0","ID":2,"id":1,"method":"routing:subscribe","params":null}`, "quarantine")
+	test("history method first", `{"jsonrpc":"2.0","id":1,"method":"routing:subscribe","Method":"ordinary","params":null}`, "quarantine")
+	test("history method last", `{"jsonrpc":"2.0","id":1,"Method":"ordinary","method":"routing:subscribe","params":null}`, "quarantine")
+	test("unclassifiable syntax", `{"synthetic-secret":`, "quarantine")
+}
+
+func TestHistoryIncomingRequestCollisionDoesNotSettleOutbound(t *testing.T) {
+	c := historyIncomingTestReader(t, "", &HistoryCorrelation{})
+	test := func(name, frame, wantMethod, wantDisposition string) {
+		t.Run(name, func(t *testing.T) {
+			var correlation HistoryCorrelation
+			if err := correlation.Begin([]byte(`"same"`)); err != nil {
+				t.Fatal(err)
+			}
+			c.history.correlation = &correlation
+			c.history.r.Reset(strings.NewReader(frame + "\n" + `{"jsonrpc":"2.0","id":"same","result":{"requests":[]}}` + "\n"))
+			msg, err := c.Read()
+			if wantDisposition == "" {
+				if err != nil || msg == nil || !msg.IsRequest() || msg.Method != wantMethod {
+					t.Fatalf("incoming request=%v err=%v", msg, err)
+				}
+			} else {
+				var failure *HistoryFailure
+				if msg != nil || !errors.As(err, &failure) || failure.Disposition != wantDisposition || failure.FailPending || failure.ScheduleRefetch {
+					t.Fatalf("incoming refusal settled outbound: %+v err=%v", failure, err)
+				}
+			}
+			if correlation.pendingN != len(`"same"`) || correlation.retiredN != 0 || correlation.Quarantined() {
+				t.Fatal("incoming ID collision changed outbound ownership")
+			}
+			response, err := c.Read()
+			if err != nil || response == nil || !response.IsResponse() || string(*response.ID) != `"same"` || string(response.Result) != `{"requests":[]}` {
+				t.Fatalf("genuine outbound response=%v err=%v", response, err)
+			}
+		})
+	}
+	test("public request", `{"jsonrpc":"2.0","id":"same","method":"routing:get-initial","params":{}}`, "routing:get-initial", "")
+	test("invalid public params", `{"jsonrpc":"2.0","id":"same","method":"routing:get-initial","params":null}`, "", "refuse-request")
+	test("private request", `{"jsonrpc":"2.0","id":"same","method":"routing/request","params":{}}`, "", "refuse-request")
+	test("ordinary request", `{"jsonrpc":"2.0","id":"same","method":"ordinary","params":{}}`, "ordinary", "")
+	test("ordinary method with response fields", `{"jsonrpc":"2.0","id":"same","method":"ordinary","result":{"requests":[]}}`, "", "discard")
+	test("null method cannot become response", `{"jsonrpc":"2.0","id":"same","method":null,"result":{"requests":[]}}`, "", "discard")
+	test("empty method cannot become response", `{"jsonrpc":"2.0","id":"same","method":"","result":{"requests":[]}}`, "", "discard")
+}
+
+func TestHistoryIncomingRequestRefusalBorrowAndOrdinaryProgress(t *testing.T) {
+	id := `"\u0061<>&"`
+	ordinaryID := `"` + strings.Repeat("ordinary-id", 100) + `"`
+	input := `{"jsonrpc":"2.0","id":` + id + `,"method":"routing:subscribe","params":null}` + "\n" +
+		`{"jsonrpc":"2.0","id":` + ordinaryID + `,"method":"ordinary","params":{}}` + "\n" +
+		`{"jsonrpc":"2.0","id":"next","method":"routing:unsubscribe","params":null}` + "\n"
+	c := historyIncomingTestReader(t, input, &HistoryCorrelation{})
+	_, err := c.Read()
+	var failure *HistoryFailure
+	if !errors.As(err, &failure) || failure.Refusal == nil {
+		t.Fatalf("first refusal=%v", err)
+	}
+	ownedID := append([]byte(nil), failure.Refusal.ReplyID...)
+	ordinary, err := c.Read()
+	if err != nil || ordinary == nil || !ordinary.IsRequest() || ordinary.Method != "ordinary" || string(*ordinary.ID) != ordinaryID {
+		t.Fatalf("ordinary traffic/ID cap changed: %v err=%v", ordinary, err)
+	}
+	_, err = c.Read()
+	var next *HistoryFailure
+	if !errors.As(err, &next) || next.Refusal == nil || string(next.Refusal.ReplyID) != `"next"` || string(ownedID) != id {
+		t.Fatalf("funded ID copy changed: %v err=%v", ownedID, err)
+	}
+}
+
+func TestHistoryIncomingRefusalDoesNotReplyToResponse(t *testing.T) {
+	var correlation HistoryCorrelation
+	if err := correlation.Begin([]byte("1")); err != nil {
+		t.Fatal(err)
+	}
+	c := historyIncomingTestReader(t, `{"jsonrpc":"2.0","id":1,"result":{"requests":null}}`+"\n", &correlation)
+	msg, err := c.Read()
+	var failure *HistoryFailure
+	if msg != nil || !errors.As(err, &failure) || failure.Disposition != "fail-call" || !failure.FailPending || failure.Refusal != nil {
+		t.Fatalf("response became incoming refusal: %+v err=%v", failure, err)
+	}
+	if correlation.pendingN != 0 || correlation.retiredN != 1 {
+		t.Fatal("ordinary pending failure ownership changed")
+	}
+}
+
+func TestHistoryIncomingOverlongEquivalentIDKeepsOutbound(t *testing.T) {
+	id := `"` + strings.Repeat("a", 100) + `"`
+	encoded := `"` + strings.Repeat(`\u0061`, 100) + `"`
+	var correlation HistoryCorrelation
+	if err := correlation.Begin([]byte(id)); err != nil {
+		t.Fatal(err)
+	}
+	input := `{"jsonrpc":"2.0","id":` + encoded + `,"method":"routing:get-initial","params":{}}` + "\n" +
+		`{"jsonrpc":"2.0","id":` + id + `,"result":{"requests":[]}}` + "\n"
+	c := historyIncomingTestReader(t, input, &correlation)
+	msg, err := c.Read()
+	var failure *HistoryFailure
+	if msg != nil || !errors.As(err, &failure) || failure.Refusal == nil || string(failure.Refusal.ReplyID) != "null" || failure.Refusal.Code != -32062 || failure.FailPending || failure.ScheduleRefetch {
+		t.Fatalf("incoming over-cap collision=%+v err=%v", failure, err)
+	}
+	if correlation.pendingN != len(id) || correlation.retiredN != 0 || correlation.Quarantined() {
+		t.Fatal("over-cap incoming request retired outbound initial")
+	}
+	response, err := c.Read()
+	if err != nil || response == nil || !response.IsResponse() || string(*response.ID) != id || string(response.Result) != `{"requests":[]}` {
+		t.Fatalf("genuine outbound response=%v err=%v", response, err)
+	}
+}
+
+func TestHistoryReadOwnershipDiscriminator(t *testing.T) {
+	test := func(name, frame string, pending, borrowed bool) {
+		t.Run(name, func(t *testing.T) {
+			var correlation HistoryCorrelation
+			if pending {
+				if err := correlation.Begin([]byte("1")); err != nil {
+					t.Fatal(err)
+				}
+			}
+			c := historyIncomingTestReader(t, frame+"\n", &correlation)
+			msg, err := c.Read()
+			if err != nil || msg == nil || msg.borrowedRead != borrowed {
+				t.Fatalf("read ownership = %v, want borrowed %v (err %v)", msg, borrowed, err)
+			}
+			encoded, err := json.Marshal(msg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var wire map[string]json.RawMessage
+			if err := json.Unmarshal(encoded, &wire); err != nil {
+				t.Fatal(err)
+			}
+			for key := range wire {
+				switch key {
+				case "jsonrpc", "id", "method", "params", "result", "error":
+				default:
+					t.Fatalf("internal ownership leaked onto wire as %s", key)
+				}
+			}
+		})
+	}
+	test("ordinary owned", `{"jsonrpc":"2.0","id":9,"method":"ordinary","params":{}}`, false, false)
+	test("projected request", `{"jsonrpc":"2.0","id":9,"method":"routing:subscribe","params":{}}`, false, true)
+	test("projected notification", `{"jsonrpc":"2.0","method":"routing/request","params":{"schema":1}}`, false, true)
+	test("projected result", `{"jsonrpc":"2.0","id":1,"result":{"requests":[]}}`, true, true)
+	test("projected error ID", `{"jsonrpc":"2.0","id":1,"error":{"code":-32096,"message":"routing history busy; retry"}}`, true, true)
 }

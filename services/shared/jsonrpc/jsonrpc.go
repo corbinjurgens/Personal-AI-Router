@@ -32,6 +32,8 @@ type Message struct {
 	Params  json.RawMessage  `json:"params,omitempty"`
 	Result  json.RawMessage  `json:"result,omitempty"`
 	Error   *RPCError        `json:"error,omitempty"`
+	// borrowedRead marks projected history storage owned by the current Read.
+	borrowedRead bool
 }
 
 // RPCError is the JSON-RPC 2.0 error object.
