@@ -440,8 +440,8 @@
 | `policy:request` | request (we call) | ➖ ignored |
 | `policy:set` | request (we call) | ✅ yes |
 | `ready` | request (we call) | ✅ yes |
-| `routing:active` | request (we call) | ➖ ignored |
-| `routing:cancel` | request (we call) | ➖ ignored |
+| `routing:active` | request (we call) | ✅ yes |
+| `routing:cancel` | request (we call) | ✅ yes |
 | `workloads:cancel` | request (we call) | ✅ yes |
 | `workloads:get-initial` | request (we call) | ✅ yes |
 | `workloads:subscribe` | request (we call) | ✅ yes |

@@ -62,6 +62,12 @@ import type {
 } from '@/shared/types/node-policy'
 import type { Workload } from '@/shared/types/workloads'
 import type {
+    RoutingActiveParams,
+    RoutingActiveResult,
+    RoutingCancelParams,
+    RoutingCancelResult
+} from '@/shared/types/routing'
+import type {
     AvailableNode,
     AskToJoinRequest,
     ClusterIdentityPayload,
@@ -162,6 +168,10 @@ export interface WsInvokeChannelMap {
     'workloads:get-initial': { request: void; response: Record<string, Workload> }
     // `ok` is false when the broker found no such job (it may have just finished).
     'workloads:cancel': { request: WorkloadCancelRequest; response: { ok: boolean } }
+
+    // Origin-local routing request control
+    'routing:cancel': { request: RoutingCancelParams; response: RoutingCancelResult }
+    'routing:active': { request: RoutingActiveParams; response: RoutingActiveResult }
 
     // Node policy and availability
     'policy:get': { request: NodePolicyTarget; response: NodePolicyDocument }

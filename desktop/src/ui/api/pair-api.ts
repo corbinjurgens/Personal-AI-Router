@@ -29,6 +29,11 @@ import type {
     WorkloadCancelRequest
 } from '@/shared/types/node-policy'
 import type { Workload } from '@/shared/types/workloads'
+import type {
+    RoutingActiveResult,
+    RoutingCancelParams,
+    RoutingCancelResult
+} from '@/shared/types/routing'
 import type { AppInitialSnapshot, ClusterInitialSnapshot } from '@/shared/types/bootstrap'
 
 // ---------------------------------------------------------------------------
@@ -123,6 +128,13 @@ export interface IWorkloadsApi {
     cancel(request: WorkloadCancelRequest): Promise<{ ok: boolean }>
 }
 
+interface IRoutingApi {
+    /** Cancel an origin-local routing request using its complete process identity. */
+    cancel(request: RoutingCancelParams): Promise<RoutingCancelResult>
+    /** Read the origin-local active request keys without model or content details. */
+    active(): Promise<RoutingActiveResult>
+}
+
 export interface INodePolicyApi {
     /** A node's policy as JSON text plus its live availability. Omit `nodeId` for this PC. */
     get(nodeId?: string): Promise<NodePolicyDocument>
@@ -169,6 +181,7 @@ export interface IPairApi {
     discovery: IDiscoveryApi
     engines: IEngineApi
     workloads: IWorkloadsApi
+    routing: IRoutingApi
     nodePolicy: INodePolicyApi
     errors: IErrorsApi
     metrics: IMetricsApi
@@ -255,6 +268,10 @@ export function createPairApi(transport: ServiceTransport): IPairApi {
             onUpsert: cb => transport.subscribePush('workloads:upsert', cb),
             onRemove: cb => transport.subscribePush('workloads:remove', cb),
             cancel: request => transport.invoke('workloads:cancel', request)
+        },
+        routing: {
+            cancel: request => transport.invoke('routing:cancel', request),
+            active: () => transport.invoke('routing:active', {})
         },
         nodePolicy: {
             get: nodeId => transport.invoke('policy:get', { nodeId }),
