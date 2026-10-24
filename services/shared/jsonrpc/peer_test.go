@@ -11,11 +11,241 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 )
+
+// peerHistoryStream holds the terminal read until the test has observed live
+// response delivery. It uses no socket or process and never retains writes.
+type peerHistoryStream struct {
+	io.Reader
+	terminal chan struct{}
+	written  chan struct{}
+	err      error
+}
+
+func (s *peerHistoryStream) Read(b []byte) (int, error) {
+	n, err := s.Reader.Read(b)
+	if n == 0 && err == io.EOF {
+		<-s.terminal
+		return 0, s.err
+	}
+	return n, err
+}
+
+func (s *peerHistoryStream) Write(b []byte) (int, error) {
+	select {
+	case s.written <- struct{}{}:
+	default:
+	}
+	return len(b), nil
+}
+
+func newPeerHistoryStream(t *testing.T, input string, terminalErr error) (*peerHistoryStream, func()) {
+	t.Helper()
+	s := &peerHistoryStream{Reader: strings.NewReader(input), terminal: make(chan struct{}), written: make(chan struct{}, 1), err: terminalErr}
+	var once sync.Once
+	release := func() { once.Do(func() { close(s.terminal) }) }
+	t.Cleanup(release)
+	return s, release
+}
+
+func newHistoryTestPeer(t *testing.T, stream io.ReadWriter, correlation *HistoryCorrelation) *Peer {
+	t.Helper()
+	codec, err := NewHistoryCodec(stream, 1<<20, make([]byte, 0, HistoryFrameBytes), make([]byte, 0, HistoryFrameBytes), make([]uint32, HistoryInitialBytes/4), correlation, historyTestSchema, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return NewPeer(codec)
+}
+
+func TestPeerHistoryFailuresPreserveOrdinaryCall(t *testing.T) {
+	test := func(name, frame string, want HistoryFailure) {
+		t.Run(name, func(t *testing.T) {
+			var correlation HistoryCorrelation
+			if err := correlation.Begin([]byte(`"history"`)); err != nil {
+				t.Fatal(err)
+			}
+			input := frame + "\n" + `{"jsonrpc":"2.0","id":1,"result":true}` + "\n" + `{"jsonrpc":"2.0","method":"ordinary","params":null}` + "\n"
+			stream, release := newPeerHistoryStream(t, input, io.EOF)
+			peer := newHistoryTestPeer(t, stream, &correlation)
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			call := make(chan error, 1)
+			go func() {
+				result, rpcErr, err := peer.Call(ctx, "ordinary", nil)
+				if err == nil && (rpcErr != nil || string(result) != "true") {
+					err = errors.New("ordinary result changed")
+				}
+				call <- err
+			}()
+			select {
+			case <-stream.written:
+			case <-ctx.Done():
+				t.Fatal("ordinary request was not written")
+			}
+			failures := make(chan HistoryFailure, 2)
+			notified := make(chan bool, 1)
+			historyFailed := false
+			go peer.ServeWithHistoryFailures(nil, func(method string, _ json.RawMessage) {
+				notified <- method == "ordinary" && len(failures) == 1 && historyFailed == want.FailPending
+			}, func(failure HistoryFailure) {
+				// Taking mu here proves callbacks do not run under the peer lock.
+				peer.mu.Lock()
+				peer.mu.Unlock()
+				if failure.FailPending {
+					historyFailed = true
+				}
+				failures <- failure
+			})
+			select {
+			case ok := <-notified:
+				if !ok {
+					t.Fatal("notification preceded history disposition handling")
+				}
+			case <-ctx.Done():
+				t.Fatal("ordinary notification was not delivered")
+			}
+			if got := <-failures; got != want {
+				t.Fatalf("history disposition = %+v, want %+v", got, want)
+			}
+			select {
+			case err := <-call:
+				if err != nil {
+					t.Fatalf("ordinary Call failed: %v", err)
+				}
+			case <-ctx.Done():
+				t.Fatal("ordinary Call did not complete")
+			}
+			select {
+			case <-peer.Done():
+				t.Fatal("history failure closed peer")
+			default:
+			}
+			release()
+		})
+	}
+	test("discard invalid private stage", `{"jsonrpc":"2.0","method":"routing/request","params":{"schema":null}}`, HistoryFailure{Disposition: "discard", Category: "history-invalid", Count: 1})
+	test("fail correlated history state", `{"jsonrpc":"2.0","id":"history","result":{"requests":null}}`, HistoryFailure{Disposition: "fail-call", Category: "history-invalid", Count: 1, FailPending: true})
+	test("quarantine unclassifiable input", `{"synthetic-private-sentinel":`, HistoryFailure{Disposition: "quarantine", Category: "history-invalid", Count: 1, FailPending: true, ScheduleRefetch: true})
+}
+
+func TestPeerHistoryFailureRefetchSequencing(t *testing.T) {
+	var correlation HistoryCorrelation
+	if err := correlation.Begin([]byte(`"history"`)); err != nil {
+		t.Fatal(err)
+	}
+	malformed := "{\n"
+	input := malformed + malformed + `{"jsonrpc":"2.0","method":"refetch-ready"}` + "\n" + `{"jsonrpc":"2.0","id":"refetch","result":{"requests":null}}` + "\n"
+	peer := NewPeer(historyTestReader(t, input, &correlation))
+	var failures []HistoryFailure
+	scheduled := false
+	peer.ServeWithHistoryFailures(nil, func(method string, _ json.RawMessage) {
+		if method != "refetch-ready" || !scheduled || !correlation.Quarantined() {
+			t.Fatal("refetch was not queued before next notification")
+		}
+		if err := correlation.Begin([]byte(`"refetch"`)); err != ErrHistoryBusy {
+			t.Fatalf("retired transfer was reusable: %v", err)
+		}
+		correlation.ReleaseRetired()
+		scheduled = false
+		if err := correlation.Begin([]byte(`"refetch"`)); err != nil {
+			t.Fatal(err)
+		}
+	}, func(failure HistoryFailure) {
+		if failure.ScheduleRefetch {
+			if scheduled {
+				t.Fatal("duplicate outstanding refetch")
+			}
+			scheduled = true
+		}
+		failures = append(failures, failure)
+	})
+	want := []HistoryFailure{
+		{Disposition: "quarantine", Category: "history-invalid", Count: 1, FailPending: true, ScheduleRefetch: true},
+		{Disposition: "quarantine", Category: "history-invalid", Count: 1},
+		{Disposition: "fail-call", Category: "history-invalid", Count: 1, FailPending: true},
+	}
+	if len(failures) != len(want) {
+		t.Fatalf("disposition count = %d, want %d", len(failures), len(want))
+	}
+	for i := range want {
+		if failures[i] != want[i] {
+			t.Fatalf("disposition %d = %+v, want %+v", i, failures[i], want[i])
+		}
+	}
+	if correlation.pendingN != 0 || correlation.retiredN == 0 || scheduled {
+		t.Fatal("refetch failure lost retired ownership or queued extra work")
+	}
+}
+
+func TestPeerHistoryTerminalReadsWakeOrdinaryCall(t *testing.T) {
+	test := func(name, input string, terminalErr error, optIn bool) {
+		t.Run(name, func(t *testing.T) {
+			stream, release := newPeerHistoryStream(t, input, terminalErr)
+			peer := newHistoryTestPeer(t, stream, &HistoryCorrelation{})
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			call := make(chan error, 1)
+			go func() { _, _, err := peer.Call(ctx, "ordinary", nil); call <- err }()
+			select {
+			case <-stream.written:
+			case <-ctx.Done():
+				t.Fatal("request was not written")
+			}
+			callbacks := make(chan HistoryFailure, 1)
+			if optIn {
+				go peer.ServeWithHistoryFailures(nil, nil, func(failure HistoryFailure) { callbacks <- failure })
+			} else {
+				go peer.Serve(nil, nil)
+			}
+			release()
+			select {
+			case err := <-call:
+				if err != ErrPeerClosed {
+					t.Fatalf("terminal read returned %v, want ErrPeerClosed", err)
+				}
+			case <-ctx.Done():
+				t.Fatal("terminal read did not wake Call")
+			}
+			if len(callbacks) != 0 {
+				t.Fatal("terminal error was reported as recoverable history")
+			}
+		})
+	}
+	test("EOF", "", io.EOF, true)
+	test("transport failure", "", errors.New("synthetic transport failure"), true)
+	test("physical overflow", strings.Repeat("x", HistoryFrameBytes+1), io.EOF, true)
+	test("default Serve keeps history failures terminal", "{\n", io.EOF, false)
+}
+
+func TestPeerHistoryBusyIsTerminal(t *testing.T) {
+	var correlation HistoryCorrelation
+	if err := correlation.Begin([]byte(`"history"`)); err != nil {
+		t.Fatal(err)
+	}
+	// A private-record lease cannot receive an initial. Read returns busy
+	// before consuming input, so recovering it would spin the read pump.
+	codec, err := NewHistoryCodec(rw{strings.NewReader(""), io.Discard}, 1024, make([]byte, 0, HistoryRecordFrameBytes), nil, make([]uint32, HistoryRecordBytes/4), &correlation, historyTestSchema, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	peer := NewPeer(codec)
+	peer.ServeWithHistoryFailures(nil, nil, func(HistoryFailure) {
+		t.Fatal("busy was reported as a consumed history failure")
+	})
+	select {
+	case <-peer.Done():
+	default:
+		t.Fatal("busy did not terminate read pump")
+	}
+	if _, _, err := peer.Call(context.Background(), "ordinary", nil); err != ErrPeerClosed {
+		t.Fatalf("Call after busy returned %v, want ErrPeerClosed", err)
+	}
+}
 
 // pipePeers wires two Peers over a synchronous in-memory net.Pipe. Handlers
 // that write a reply do so in a goroutine so a blocking write on the

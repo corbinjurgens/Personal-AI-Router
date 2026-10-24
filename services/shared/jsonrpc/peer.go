@@ -238,6 +238,27 @@ func (p *Peer) Close() {
 // Handlers run on the read-pump goroutine, so they must not block on this
 // peer's own Call (that would stall the pump); spawn a goroutine for that.
 func (p *Peer) Serve(onRequest func(*Message), onNotify func(method string, params json.RawMessage)) {
+	p.serve(onRequest, onNotify, nil)
+}
+
+// ServeWithHistoryFailures opts into recovering consumed, in-budget history
+// failures from NewHistoryCodec. A nil onHistoryFailure preserves Serve's
+// terminal behavior. All other errors retain Serve's existing semantics;
+// in particular ErrHistoryBusy, framing failures and EOF remain terminal.
+//
+// onHistoryFailure runs synchronously before the next read, without Peer.mu
+// held. It must apply the fixed disposition to its bounded history-only state,
+// including failing its history waiter and queuing at most one refetch when
+// requested. It must not perform I/O or wait on this peer's Call. Correlation
+// and retired transfer lifetime remain owned by HistoryCorrelation's caller;
+// this callback neither releases leases nor settles Peer.Call waiters.
+// Request/notification handlers must finish using borrowed history frame data
+// before returning, or retain it under an owner-provided lease.
+func (p *Peer) ServeWithHistoryFailures(onRequest func(*Message), onNotify func(method string, params json.RawMessage), onHistoryFailure func(HistoryFailure)) {
+	p.serve(onRequest, onNotify, onHistoryFailure)
+}
+
+func (p *Peer) serve(onRequest func(*Message), onNotify func(method string, params json.RawMessage), onHistoryFailure func(HistoryFailure)) {
 	defer p.Close()
 	for {
 		msg, err := p.codec.Read()
@@ -245,6 +266,11 @@ func (p *Peer) Serve(onRequest func(*Message), onNotify func(method string, para
 			var de *DecodeError
 			if errors.As(err, &de) {
 				continue // recoverable: skip the bad frame
+			}
+			var failure *HistoryFailure
+			if onHistoryFailure != nil && errors.As(err, &failure) {
+				onHistoryFailure(*failure)
+				continue
 			}
 			return // terminal (EOF / transport): stop and close
 		}
