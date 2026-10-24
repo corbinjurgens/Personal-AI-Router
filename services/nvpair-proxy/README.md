@@ -105,7 +105,15 @@ peer's advertised capability arrives on its discovery node and is kept as intern
 routing metadata. Hybrid role eligibility (`hybridLocalCandidates`) offers only a
 node's own declared role with finite qualification on a node advertising a valid
 capability for its engine and normalized model; peers without one keep concrete
-routing. No hybrid request path calls it yet.
+routing. The common request owner's hybrid policy branch now calls this filter,
+preserving tier candidate order, and shares attempts, strict queue/cold allowances
+and one pre-output deadline across destinations. Concrete HTTP inference still
+passes `concreteDispatchPolicy`; no HTTP entry selects the hybrid policy yet.
+The loopback routing listener lists aliases but refuses inference with `501`
+`routing_listener_not_inference_ready` before reading a body. Its dispatch cutover
+remains gated by Q4. Public selection is independently disabled by
+`PublicDispatchAvailable()`. See [Hybrid routing](../../docs/hybrid-routing.mdx)
+for selection bounds and listener lifetime.
 
 The capability is derived, never set: a profile's model is installed only when the
 profile names a local qualification that `local-qualification.json` in the shared
@@ -592,12 +600,16 @@ Engine switching also has two internal process-scoped requests:
   with a `port`, the process itself (not an engine facade) binds
   `127.0.0.1:<port>` and serves the hybrid aliases with no engine running. It is
   off by default, loopback only, and never advertised or exposed to the LAN. It
-  follows `node/set-policy`: a changed port closes and drains only this
-  listener before binding the new one, disabling closes it, and the broker's
-  replay after a proxy restart re-establishes it. A port already in use leaves
-  no listener, never another port (including a port a facade of this process or
-  any other socket holds on a wildcard address or `[::1]`, and a facade is likewise refused
-  the listener's port), and is reported as the service error
+  follows `node/set-policy`: a changed port binds first, serves with the same
+  HTTP server, then closes the old acceptance socket. Existing connections
+  keep their contexts. Disable cancels the server context and bounds shutdown
+  to three seconds before forced close; re-enable creates a fresh server.
+  The broker's replay after a proxy restart re-establishes it. A port already
+  in use preserves the working listener during rebind; an initial collision
+  leaves none. It never picks another port (including a port a facade of this
+  process or another socket holds on a wildcard address or `[::1]`, and a
+  facade is likewise refused the listener's port). A collision is reported as
+  the service error
   `nvpair-proxy:routing-listener-blocked` (`errors:report`, cleared when the
   listener binds or is disabled); the policy still activates, and replaying it
   retries the bind. It serves only:
@@ -613,7 +625,9 @@ Engine switching also has two internal process-scoped requests:
     Phase 4.** A query string, including a bare `?`, is `400` `query_not_allowed`.
 
   Other paths are `404` and other methods `405`. `Host` must be `127.0.0.1` or
-  `localhost` with the bound port, else `403` `host_not_allowed`. A request with
+  `localhost` with the accepted connection's local port, else `403`
+  `host_not_allowed`. Connections surviving a rebind still require their old
+  port in `Host`. A request with
   an `Origin` header is `403` `origin_not_allowed` unless the header is
   exactly one of the policy's `routing.listener.allowedOrigins`; for those,
   responses carry `Access-Control-Allow-Origin` and a preflight (`OPTIONS` with

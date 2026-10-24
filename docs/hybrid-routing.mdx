@@ -18,6 +18,76 @@ The [proxy specification](../services/nvpair-proxy/spec.md) is the normative
 runtime contract. The [broker's Node policy documentation](../services/nvpair-ui-broker/README.md#node-policy)
 describes persistence, revision conflicts and activation status.
 
+## Selection and request lifetime
+
+Concrete HTTP inference calls the common `routingSpend.dispatch` owner with
+`concreteDispatchPolicy`: five dispatch attempts and ten minutes before output.
+The driver also implements `hybridDispatchPolicy`, but no HTTP entry selects
+it yet. The facade keeps its concrete and legacy bare-tier behavior; listed
+`-api` and `-local` aliases remain unavailable for inference. The listener's
+dispatch cutover is still gated by Q4.
+
+The implemented hybrid branch filters the existing tier candidate order to
+nodes offering their own finitely qualified declared role and a valid strict
+capability for the concrete engine/model. Router tier entries alone cannot
+qualify a node. Tier rank leads warmth unless `preferLoaded:any` puts loaded
+models first; reservations stay within the leading rank/warmth class. Self
+and peer candidates share this order. The requested tier's API entries are
+considered in configured order after the first local/peer round, subject to
+public permission and availability. Public selection remains disabled in
+this build; refusal consumes no attempt and performs no credential lookup,
+durable reserve or send. A policy or lease acknowledgement cannot enable it.
+
+Hybrid `maxAttempts`, `preOutputBudgetSeconds`, `queueSeconds` and
+`coldStartSeconds` bound one request across destinations. They do not restart
+per attempt or inherit the concrete five-attempt/ten-minute budget. The
+driver conservatively deducts wait charges from both queue and cold
+allowances. A peer-service slot waits at most the smaller of remaining queue
+allowance and half the remaining pre-output time; zero refuses an occupied
+slot immediately. An occupied-slot refusal costs an attempt. The reserved
+slot allowance is subtracted from the destination's strict budgets before
+dispatch. Concrete peer-slot waits keep their request-context bound.
+
+Self candidates qualify the body and enter strict admission; peers receive
+the canonical request key, model identity and remaining budgets in
+`X-PAIR-Strict-Admission`. The destination revalidates identity, qualification
+and body, refuses an origin that differs from the authenticated peer before
+buffering, and dispatches only locally. Strict termination evidence and
+uncertain capacity holds retain their existing rules.
+
+Preparation, admission and first response share the pre-output deadline.
+The first accepted successful raw body byte commits through the same owner
+and sink described below and stops that deadline watch. A committed stream
+can continue under its stream and client-write idle limits, with no fallback.
+Regeneration retains the remaining policy bounds, cumulative spend and
+uncertain holds. Canonical request metadata and snapshots use the same byte
+root as inference buffers; the cancellation/accounting contract below applies
+even when no concrete workload or facade exists.
+
+## Loopback listener lifetime
+
+The active `routing.listener` policy controls an engine-independent listener
+on `127.0.0.1`. It lists aliases without starting an engine. Host, Origin,
+route, method, preflight and inference-query checks precede the `501`
+refusal; the listener reads no body and starts no admission or dispatch.
+Requests declaring a body still receive `Connection: close`.
+
+A port change binds the new socket first, serves it with the same HTTP server
+and closes the old acceptance socket. Existing connections keep their contexts
+and validate `Host` against the port captured when each connection was
+accepted. Bind failure preserves the old working listener and reports an
+error; an initial failure leaves no listener. There is no alternate port or
+retry timer. Origins and aliases follow the active policy per request.
+
+Disable cancels the server context, closes acceptance and allows at most
+three seconds for shutdown before forcing close; re-enable creates a fresh
+server. The server retains header and keep-alive idle bounds and has no
+whole-response write timeout. Process shutdown closes it before the facades
+under the shared three-second HTTP shutdown context, after the control read
+loop returns. This does not establish that context cancellation interrupts
+`codec.Read` or bounds every parent-channel operation. These listener lifetime
+changes do not enable hybrid inference.
+
 ## Inference buffer settings
 
 | Policy field | Range | Default | Meaning |
