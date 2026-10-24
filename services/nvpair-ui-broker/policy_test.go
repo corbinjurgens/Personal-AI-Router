@@ -9,6 +9,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net"
 	"os"
 	"path/filepath"
@@ -606,6 +607,155 @@ func TestNodePolicyLoadDefaultsCorruptAndPersist(t *testing.T) {
 	}
 	if entries, _ := filepath.Glob(filepath.Join(dir, nodepolicy.FileName+".*.tmp")); len(entries) != 0 {
 		t.Fatalf("atomic write left temp files: %v", entries)
+	}
+}
+
+func TestModelControlPolicyLoadPreservesDiskAndAvailability(t *testing.T) {
+	path := filepath.Join(t.TempDir(), nodepolicy.FileName)
+	raw := []byte(`{"version":2,"revision":"42","availability":"available","servedModels":[{"engine":"ollama","model":"bad\nname"}],"roles":{"weak":{"engine":"ollama","model":"good"},"strong":{"engine":"ollama","model":"bad\u0085name"}},"admission":{"memoryBudgetBytes":12345}}`)
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	b, _ := newPolicyBroker(t)
+	b.loadNodePolicy(path)
+	got := b.localPolicy()
+	if got.RecoveryRequired || got.Availability != nodepolicy.Available || got.Policy.Revision != "42" || got.Policy.Admission.MemoryBudgetBytes != 12345 {
+		t.Fatal("model repair invoked whole-node recovery or changed state")
+	}
+	if len(got.Policy.Roles) != 1 || got.Policy.Roles[nodepolicy.TierWeak].Model != "good" || got.Policy.ServedModels == nil || len(got.Policy.ServedModels) != 0 {
+		t.Fatal("model repair lost valid sibling or deny-all")
+	}
+	onDisk, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(raw, onDisk) {
+		t.Fatal("load rewrote policy")
+	}
+	if _, err := os.Stat(path + ".bad"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("model-only repair created recovery copy")
+	}
+}
+
+func TestModelControlPolicyLoadMalformedShapeRequiresRecovery(t *testing.T) {
+	path := filepath.Join(t.TempDir(), nodepolicy.FileName)
+	raw := []byte(`{"version":2,"revision":"42","servedModels":[{"engine":"ollama","model":false}]}`)
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	b, _ := newPolicyBroker(t)
+	b.loadNodePolicy(path)
+	if got := b.localPolicy(); !got.RecoveryRequired || got.Availability != nodepolicy.Paused {
+		t.Fatal("malformed shape did not invoke conservative recovery")
+	}
+	bad, err := os.ReadFile(path + ".bad")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(raw, bad) {
+		t.Fatal("recovery copy changed")
+	}
+}
+
+func TestModelControlPolicyLoadDiagnosticsNoEcho(t *testing.T) {
+	var output bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&output, nil)))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+	path := filepath.Join(t.TempDir(), nodepolicy.FileName)
+	raw := []byte(`{"roles":{"weak":{"engine":"ollama","model":"PRIVATE-MODEL\nunsafe"}}}`)
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	b, _ := newPolicyBroker(t)
+	b.loadNodePolicy(path)
+	if strings.Contains(output.String(), "PRIVATE-MODEL") || strings.Contains(output.String(), "unsafe") {
+		t.Fatal("model leaked in load diagnostics")
+	}
+	found := false
+	for _, line := range bytes.Split(bytes.TrimSpace(output.Bytes()), []byte{'\n'}) {
+		var entry struct {
+			Message  string `json:"msg"`
+			Category string `json:"category"`
+			Count    int    `json:"count"`
+		}
+		if err := json.Unmarshal(line, &entry); err != nil {
+			t.Fatal(err)
+		}
+		if entry.Message == "invalid stored model entries removed" {
+			if entry.Category != "roles" || entry.Count != 1 {
+				t.Fatal("unexpected sanitation diagnostic")
+			}
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("missing fixed category/count diagnostic")
+	}
+	output.Reset()
+	if err := os.WriteFile(path, []byte(`{"availability":"PRIVATE-DECODER-TEXT"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	b.loadNodePolicy(path)
+	if strings.Contains(output.String(), "PRIVATE-DECODER-TEXT") {
+		t.Fatal("decoder text leaked in recovery diagnostic")
+	}
+}
+
+func TestModelControlPolicyLoadLegacyKeepsDisk(t *testing.T) {
+	path := filepath.Join(t.TempDir(), nodepolicy.FileName)
+	raw := []byte(`{"version":1,"availability":"paused","roles":{"weak":{"engine":"ollama","model":"good"},"strong":{"engine":"ollama","model":"bad\nname"}},"tiers":{"weak":[{"engine":"ollama","model":"good"}]}}`)
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	b, _ := newPolicyBroker(t)
+	b.loadNodePolicy(path)
+	got := b.localPolicy()
+	if got.RecoveryRequired || got.Availability != nodepolicy.Paused || got.Policy.Version != 2 || got.Policy.Revision != "0" || len(got.Policy.Roles) != 1 || len(got.Policy.Tiers[nodepolicy.TierWeak]) != 1 {
+		t.Fatal("legacy repair lost state or invoked recovery")
+	}
+	onDisk, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(raw, onDisk) {
+		t.Fatal("legacy load rewrote disk")
+	}
+}
+
+func TestModelControlPolicyLoadKeepsWritesStrictAndAtomic(t *testing.T) {
+	path := filepath.Join(t.TempDir(), nodepolicy.FileName)
+	p := nodepolicy.Default()
+	p.Revision = "42"
+	p.Roles[nodepolicy.TierWeak] = nodepolicy.Role{Engine: "ollama", Model: "good"}
+	writePolicyFile(t, path, p)
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := newPolicyBroker(t)
+	b.loadNodePolicy(path)
+	for _, raw := range []string{
+		`{"roles":{"weak":{"engine":"ollama","model":"PRIVATE-MODEL\nunsafe"}}}`,
+		`{"roles":{"weak":{"engine":"ollama","model":"PRIVATE-MODEL\nunsafe"}},"Roles":{}}`,
+		`{"roles":{"weak":{"engine":"ollama","model":"PRIVATE-MODEL\nunsafe","model":"good"}}}`,
+	} {
+		if _, err := setCurrent(b, json.RawMessage(raw)); err == nil {
+			t.Fatal("invalid write accepted")
+		} else if strings.Contains(err.Error(), "PRIVATE-MODEL") {
+			t.Fatal("invalid model leaked in write error")
+		}
+		got := b.localPolicy()
+		if got.Policy.Revision != "42" || got.Policy.Roles[nodepolicy.TierWeak].Model != "good" || got.RecoveryRequired {
+			t.Fatal("refused write changed live policy")
+		}
+		after, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(before, after) {
+			t.Fatal("refused write changed disk")
+		}
 	}
 }
 

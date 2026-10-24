@@ -158,6 +158,9 @@ func (m StrictAdmissionModel) Validate() error {
 }
 
 func (m *StrictAdmissionModel) UnmarshalJSON(data []byte) error {
+	if _, err := filterModelEntry(data, false); err != nil {
+		return err
+	}
 	type wire StrictAdmissionModel
 	var next wire
 	if err := decodeStrictContract(data, &next, "engine", "model", "maxConcurrent", "identity"); err != nil {
@@ -171,24 +174,25 @@ func (m *StrictAdmissionModel) UnmarshalJSON(data []byte) error {
 }
 
 func (c *StrictAdmissionCapability) UnmarshalJSON(data []byte) error {
-	// Envelope parsing permits unknown fields only for unsupported versions.
-	var fields map[string]json.RawMessage
-	if err := json.Unmarshal(data, &fields); err != nil {
+	version, err := strictAdmissionVersion(data)
+	if err != nil {
 		return err
 	}
-	if fields == nil {
-		return errors.New("strictAdmission must be an object")
-	}
-	var version float64
-	if err := json.Unmarshal(fields["version"], &version); err != nil {
-		return errors.New("version must be a number")
-	}
-	if version < 1 || version > 2147483647 || version != float64(int(version)) {
-		return errors.New("version must be between 1 and 2147483647")
-	}
-	if int(version) != StrictAdmissionVersion {
-		*c = StrictAdmissionCapability{Version: int(version), unsupported: append(json.RawMessage(nil), data...)}
+	if version != StrictAdmissionVersion {
+		*c = StrictAdmissionCapability{Version: version, unsupported: append(json.RawMessage(nil), data...)}
 		return nil
+	}
+	// decodeStrictContract normalizes through an interface value. Guard the
+	// original model tokens and effective keys before that can repair encoding
+	// or collapse repeated members, including at direct readiness intake.
+	fields, err := modelObject(data)
+	if err != nil {
+		return err
+	}
+	if raw, ok := fields["models"]; ok {
+		if _, _, err := filterModelArray(raw, false); err != nil {
+			return err
+		}
 	}
 	type wire StrictAdmissionCapability
 	var next wire
@@ -200,6 +204,25 @@ func (c *StrictAdmissionCapability) UnmarshalJSON(data []byte) error {
 	}
 	*c = StrictAdmissionCapability(next)
 	return nil
+}
+
+func strictAdmissionVersion(data []byte) (int, error) {
+	// Envelope parsing permits unknown fields only for unsupported versions.
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return 0, err
+	}
+	if fields == nil {
+		return 0, errors.New("strictAdmission must be an object")
+	}
+	var version float64
+	if err := json.Unmarshal(fields["version"], &version); err != nil {
+		return 0, errors.New("version must be a number")
+	}
+	if version < 1 || version > 2147483647 || version != float64(int(version)) {
+		return 0, errors.New("version must be between 1 and 2147483647")
+	}
+	return int(version), nil
 }
 
 func (c StrictAdmissionCapability) MarshalJSON() ([]byte, error) {
@@ -216,7 +239,12 @@ func (c StrictAdmissionCapability) MarshalJSON() ([]byte, error) {
 // UnmarshalJSON distinguishes an absent capability from explicit null. Existing
 // advertisement fields retain their R1 decoding and encoding behavior.
 func (a *Advertisement) UnmarshalJSON(data []byte) error {
-	if err := CheckModelListKeys(data); err != nil {
+	clean, err := FilterAdvertisementModels(data)
+	if err != nil {
+		return err
+	}
+	data = clean
+	if err := checkModelListKeys(data); err != nil {
 		return err
 	}
 	type wire Advertisement
@@ -252,6 +280,124 @@ func (a *Advertisement) UnmarshalJSON(data []byte) error {
 	}
 	*a = Advertisement(next)
 	return nil
+}
+
+// FilterAdvertisementModels removes only invalid model entries from recognized
+// peer containers before strict nested decoding. Future strict versions remain
+// opaque. The returned JSON preserves explicit empty served permission.
+func FilterAdvertisementModels(data []byte) ([]byte, error) {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return nil, err
+	}
+	if fields == nil {
+		return nil, errors.New("policy must be a JSON object")
+	}
+	// Keep exact-field diagnostics ahead of any nested capability validation.
+	for key := range fields {
+		if key != "strictAdmission" && strings.EqualFold(key, "strictAdmission") {
+			return nil, fmt.Errorf("%q must use the exact field name strictAdmission", key)
+		}
+	}
+	if err := checkModelListKeys(data); err != nil {
+		return nil, err
+	}
+	// Transform members in document order. Legacy revision/Revision and other
+	// unrelated fields retain encoding/json's last-wins and case-fold behavior.
+	d := json.NewDecoder(bytes.NewReader(data))
+	if _, err := d.Token(); err != nil {
+		return nil, err
+	}
+	var out bytes.Buffer
+	out.WriteByte('{')
+	first := true
+	for d.More() {
+		tok, err := d.Token()
+		if err != nil {
+			return nil, err
+		}
+		key, ok := tok.(string)
+		if !ok {
+			return nil, errors.New("invalid policy key")
+		}
+		var raw json.RawMessage
+		if err := d.Decode(&raw); err != nil {
+			return nil, err
+		}
+		clean, err := filterAdvertisementField(key, raw)
+		if err != nil {
+			return nil, err
+		}
+		if clean == nil {
+			continue
+		}
+		if !first {
+			out.WriteByte(',')
+		}
+		first = false
+		encodedKey, err := json.Marshal(key)
+		if err != nil {
+			return nil, err
+		}
+		out.Write(encodedKey)
+		out.WriteByte(':')
+		out.Write(clean)
+	}
+	if _, err := d.Token(); err != nil {
+		return nil, err
+	}
+	out.WriteByte('}')
+	return out.Bytes(), nil
+}
+
+func filterAdvertisementField(key string, raw json.RawMessage) (json.RawMessage, error) {
+	if key == "servedModels" {
+		clean, _, err := filterModelArray(raw, true, "engine", "model")
+		return clean, err
+	}
+	if strings.EqualFold(key, "roles") && !bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		roles, err := modelObject(raw)
+		if err != nil {
+			return nil, err
+		}
+		for tier, raw := range roles {
+			ok, err := filterModelEntry(raw, true)
+			if err != nil {
+				return nil, err
+			}
+			if !ok {
+				delete(roles, tier)
+			}
+		}
+		return json.Marshal(roles)
+	}
+	if key == "strictAdmission" && !bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		version, err := strictAdmissionVersion(raw)
+		if err != nil {
+			return nil, err
+		}
+		if version == StrictAdmissionVersion {
+			capability, err := modelObject(raw)
+			if err != nil {
+				return nil, err
+			}
+			if len(capability) != 2 || capability["version"] == nil || capability["models"] == nil {
+				return nil, errors.New("invalid strict capability shape")
+			}
+			if models, ok := capability["models"]; ok {
+				clean, removed, err := filterModelArray(models, true, "engine", "model", "maxConcurrent", "identity")
+				if err != nil {
+					return nil, err
+				}
+				if removed > 0 && bytes.Equal(clean, []byte("[]")) {
+					return nil, nil
+				}
+				capability["models"] = clean
+			}
+			return json.Marshal(capability)
+		}
+	}
+	return raw, nil
 }
 
 // Advertisement returns what p publishes to paired peers. Each declared role

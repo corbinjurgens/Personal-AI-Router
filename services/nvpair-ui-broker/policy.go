@@ -280,7 +280,7 @@ func (b *Broker) loadNodePolicy(path string) {
 		recovery = true
 		slog.Warn("node policy unreadable; policy recovery is required", "path", path, "err", err)
 	default:
-		parsed, perr := nodepolicy.Parse(data)
+		parsed, removals, perr := nodepolicy.ParseStored(data)
 		if perr != nil {
 			recovery = true
 			bad := path + ".bad"
@@ -290,6 +290,11 @@ func (b *Broker) loadNodePolicy(path string) {
 			slog.Warn("node policy invalid; kept a copy and policy recovery is required", "path", path, "copy", bad, "err", perr)
 		} else {
 			policy = parsed
+			for _, category := range []string{"profiles", "roles", "tiers", "servedModels", "residentModels", "deployments", "residentReferences", "deploymentReferences", "familyReferences"} {
+				if count := removals[category]; count > 0 {
+					slog.Warn("invalid stored model entries removed", "category", category, "count", count)
+				}
+			}
 		}
 	}
 	if recovery {

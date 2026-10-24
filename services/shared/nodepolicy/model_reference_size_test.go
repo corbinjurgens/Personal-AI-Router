@@ -15,7 +15,7 @@ import (
 
 func TestServedResidentReferenceSize(t *testing.T) {
 	for _, field := range []string{"servedModels", "residentModels"} {
-		for _, fill := range []string{"m", "\x00", "<", "界"} {
+		for _, fill := range []string{"m", "\u2028", "<", "界"} {
 			t.Run(fmt.Sprintf("%s/%q", field, fill), func(t *testing.T) {
 				empty, err := json.Marshal(Role{Engine: "ollama"})
 				if err != nil {
@@ -48,6 +48,25 @@ func TestServedResidentReferenceSize(t *testing.T) {
 				check(true)
 			})
 		}
+	}
+}
+
+func TestModelIdentifierReferenceSizeRejectsNUL(t *testing.T) {
+	for _, field := range []string{"servedModels", "residentModels"} {
+		t.Run(field, func(t *testing.T) {
+			ref := Role{Engine: "ollama", Model: "old\x00model"}
+			raw, err := json.Marshal(map[string][]Role{field: {ref}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var p Policy
+			if err := json.Unmarshal(raw, &p); err == nil {
+				t.Fatal("NUL-bearing reference decoded")
+			}
+			if err := validateModelList(field, []Role{ref}); err == nil {
+				t.Fatal("NUL-bearing reference validated")
+			}
+		})
 	}
 }
 

@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"nvpair-shared/engines"
 )
@@ -170,7 +171,7 @@ const (
 	MethodObserveResident        = "node/observe-resident"
 	MaxResidentTimeoutMs         = 60_000
 	MaxModelConfigurationEntries = 256
-	MaxResidentModelBytes        = 1024
+	MaxResidentModelBytes        = MaxModelIdentifierBytes
 )
 
 // MaxResidentKeepAliveSeconds caps each load's idle retention at one day so a
@@ -937,8 +938,8 @@ func validateResidentRef(engine, model string) error {
 	if err := checkModelRef(engine, model, 0, nil); err != nil {
 		return err
 	}
-	if len(model) > MaxResidentModelBytes || strings.TrimSpace(model) != model {
-		return errors.New("model must be trimmed and at most 1024 bytes")
+	if strings.TrimSpace(model) != model {
+		return errors.New("model must be trimmed")
 	}
 	return nil
 }
@@ -950,6 +951,11 @@ func decodeResident[T any](data []byte, dst *T, required []string, optional ...s
 	fields, err := peerFields(data)
 	if err != nil {
 		return err
+	}
+	if raw, ok := fields["model"]; ok {
+		if err := ValidateModelIdentifierJSON(raw); err != nil {
+			return err
+		}
 	}
 	for _, key := range required {
 		if fields[key] == nil {
@@ -1262,6 +1268,42 @@ type EngineIdentity struct {
 	Serving             map[string]engines.ServingEnvelope `json:"serving,omitempty"`
 }
 
+func (i *EngineIdentity) UnmarshalJSON(data []byte) error {
+	fields, err := modelObject(data)
+	if err != nil {
+		return err
+	}
+	for _, name := range []string{"modelDigests", "serving"} {
+		key := modelField(fields, name)
+		if raw, ok := fields[key]; ok {
+			if !utf8.Valid(raw) {
+				return errors.New("invalid model identity encoding")
+			}
+			if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+				continue
+			}
+			// Model-name map keys are case-sensitive identifiers, unlike JSON
+			// struct field names. Keep encoding/json's existing map semantics.
+			var models map[string]json.RawMessage
+			if err := json.Unmarshal(raw, &models); err != nil {
+				return err
+			}
+			for model := range models {
+				if err := ValidateModelIdentifier(model); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	type plain EngineIdentity
+	var next plain
+	if err := json.Unmarshal(data, &next); err != nil {
+		return err
+	}
+	*i = EngineIdentity(next)
+	return nil
+}
+
 func (p SetModelIdentityParams) Validate() error {
 	if p.Engines == nil {
 		return errors.New("engines is required")
@@ -1291,11 +1333,17 @@ func (i EngineIdentity) Validate() error {
 		if strings.TrimSpace(model) == "" {
 			return errors.New("modelDigests contains an empty model")
 		}
+		if err := ValidateModelIdentifier(model); err != nil {
+			return err
+		}
 		if !strictDigest.MatchString(digest) {
 			return fmt.Errorf("modelDigests[%q] must be lowercase SHA-256 hex", model)
 		}
 	}
 	for model, envelope := range i.Serving {
+		if err := ValidateModelIdentifier(model); err != nil {
+			return err
+		}
 		if err := envelope.Validate(model, i.ModelDigests[model]); err != nil {
 			return fmt.Errorf("serving[%q]: %w", model, err)
 		}
