@@ -108,6 +108,18 @@ export function parseStrictAdmissionRequest(value: JsonValue | undefined): Stric
     }
 }
 
+function validModelIdentifier(value: string): boolean {
+    return (
+        value.length > 0 &&
+        value.length <= 512 &&
+        new TextEncoder().encode(value).byteLength <= 512 &&
+        Array.from(value).every(character => {
+            const code = character.charCodeAt(0)
+            return code >= 0x20 && (code < 0x7f || code > 0x9f)
+        })
+    )
+}
+
 /** Decode only the inventory policy's capability. Future versions are excluded. */
 export function parseStrictAdmissionCapability(
     value: JsonValue | undefined
@@ -132,7 +144,7 @@ export function parseStrictAdmissionCapability(
             engine === null ||
             !isValidRoutingEngineId(engine) ||
             name === null ||
-            name === '' ||
+            !validModelIdentifier(name) ||
             /^(weak|medium|strong)(-api|-local)?$/.exec(name)?.[0] === name
         ) {
             throw new Error('Invalid strict-admission engine/model')

@@ -214,6 +214,9 @@ func decodeModelList(name string, data []byte) ([]Role, error) {
 		if len(fields) != 2 || fields["engine"] == nil || fields["model"] == nil {
 			return nil, fmt.Errorf("%s[%d]: expected engine and model", name, i)
 		}
+		if err := ValidateModelIdentifierJSON(fields["model"]); err != nil {
+			return nil, err
+		}
 		if err := json.Unmarshal(entry, &refs[i]); err != nil {
 			return nil, err
 		}
@@ -251,8 +254,21 @@ func validateModelList(name string, refs []Role) error {
 
 // CheckModelListKeys checks raw servedModels and residentModels keys before JSON
 // decoding collapses duplicates or folds case. Call it before preprocessing a
-// policy object. Legacy fields retain their existing decoding rules.
+// policy object. It also checks raw model tokens and ambiguous effective keys
+// before preprocessing can lose their original encoding or occurrences.
 func CheckModelListKeys(data []byte) error {
+	if err := checkModelListKeys(data); err != nil {
+		return err
+	}
+	if _, _, err := filterPolicyModels(data, false); err != nil {
+		return err
+	}
+	return nil
+}
+
+// checkModelListKeys retains the advertisement's legacy decoding of unrelated
+// outer fields while checking the exact permission-list field names.
+func checkModelListKeys(data []byte) error {
 	dec := json.NewDecoder(bytes.NewReader(data))
 	if tok, err := dec.Token(); err != nil || tok != json.Delim('{') {
 		return errors.New("policy must be a JSON object")
@@ -600,8 +616,8 @@ func checkModelRef(engine, model string, contextTokens int, caps []Capability) e
 	if !engines.ValidRoutingID(engine) {
 		return fmt.Errorf("unknown engine %q", engine)
 	}
-	if model == "" {
-		return fmt.Errorf("model is required")
+	if err := ValidateModelIdentifier(model); err != nil {
+		return err
 	}
 	if IsReservedAlias(model) {
 		return fmt.Errorf("model %q is a reserved alias", model)
@@ -678,6 +694,10 @@ func validateRevision(rev string) error {
 // execution stay off. Parsing the marshaled result of Parse gives the same
 // policy.
 func Parse(data []byte) (Policy, error) {
+	return parsePolicy(data, nil)
+}
+
+func parsePolicy(data []byte, repairs *storedModelRepairs) (Policy, error) {
 	if err := CheckModelListKeys(data); err != nil {
 		return Policy{}, fmt.Errorf("parse policy: %w", err)
 	}
@@ -701,6 +721,9 @@ func Parse(data []byte) (Policy, error) {
 		return Policy{}, err
 	}
 	p.normalize()
+	if repairs != nil {
+		repairStoredModelReferences(&p, repairs)
+	}
 	if err := p.Validate(); err != nil {
 		return Policy{}, err
 	}

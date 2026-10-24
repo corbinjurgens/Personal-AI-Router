@@ -273,6 +273,58 @@ describe('strict-admission shared Go/TypeScript parity corpus', () => {
         expect(() => parseStrictAdmissionCapability(null)).toThrow()
     })
 
+    it('rejects every model control with a fixed error and no identifier echo', () => {
+        for (let code = 0; code <= 0x9f; code++) {
+            if (code >= 0x20 && code < 0x7f) continue
+            const fixtures = loadStrictFixtures()
+            const model = strictFixtureObject(fixtures.model)
+            model.identity = fixtures.identity
+            model.model = `PRIVATE-MODEL${String.fromCharCode(code)}unsafe`
+            expect(() => parseStrictAdmissionCapability({ version: 1, models: [model] })).toThrow(
+                /^Invalid strict-admission engine\/model$/
+            )
+        }
+    })
+
+    it('counts UTF-8 bytes after making model text well formed', () => {
+        const fixtures = loadStrictFixtures()
+        const model = strictFixtureObject(fixtures.model)
+        model.identity = fixtures.identity
+        model.model = '\ud800'.repeat(170) + 'ab'
+        const parsed = parseStrictAdmissionCapability({ version: 1, models: [model] })
+        if (parsed.state !== 'valid') throw new Error('Expected valid capability')
+        expect(parsed.models[0].model).toBe('\ufffd'.repeat(170) + 'ab')
+        model.model = '\ud800'.repeat(170) + 'abc'
+        expect(() => parseStrictAdmissionCapability({ version: 1, models: [model] })).toThrow(
+            /^Invalid strict-admission engine\/model$/
+        )
+    })
+
+    it.each(['1.0', '1e0'])('accepts integral capability spelling %s', spelling => {
+        const fixtures = loadStrictFixtures()
+        const model = strictFixtureObject(fixtures.model)
+        model.identity = fixtures.identity
+        const input: JsonValue = JSON.parse(
+            JSON.stringify({ version: 1, models: [model] }).replace(
+                '"version":1',
+                `"version":${spelling}`
+            )
+        )
+        expect(parseStrictAdmissionCapability(input)).toEqual({
+            state: 'valid',
+            version: 1,
+            models: [model]
+        })
+    })
+
+    it('keeps an integral future capability opaque', () => {
+        const input: JsonValue = JSON.parse('{"version":999.0,"models":"opaque","future":true}')
+        expect(parseStrictAdmissionCapability(input)).toEqual({
+            state: 'unsupported',
+            version: 999
+        })
+    })
+
     it('preserves unsupported versions without interpreting their fields', () => {
         expect(parseStrictAdmissionCapability({ version: 2, future: true })).toEqual({
             state: 'unsupported',

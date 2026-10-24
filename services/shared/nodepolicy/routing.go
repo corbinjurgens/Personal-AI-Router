@@ -455,8 +455,8 @@ func validateDeployment(d Deployment, accounts map[string]bool) error {
 	if !accounts[d.Account] {
 		return fmt.Errorf("account %q is not defined", d.Account)
 	}
-	if d.Model == "" {
-		return fmt.Errorf("model is required")
+	if err := ValidateModelIdentifier(d.Model); err != nil {
+		return err
 	}
 	if IsReservedAlias(d.Model) {
 		return fmt.Errorf("model %q is a reserved alias", d.Model)
