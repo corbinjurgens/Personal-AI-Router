@@ -15,7 +15,9 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
+	"runtime"
 	"strconv"
 	"testing"
 	"time"
@@ -404,7 +406,13 @@ func TestBrokerShutsDownOnSignal(t *testing.T) {
 // reaches app:ready. The advertiser is excluded — it's poll-driven and
 // only starts once local ollama is detected.
 func TestBrokerSpawnsAllModules(t *testing.T) {
-	stdin, msgs, stderr, cleanup := startBrokerWith(t,
+	configDir := t.TempDir()
+	configBase := configDir
+	if runtime.GOOS == "darwin" {
+		configBase = filepath.Join(configBase, "Library", "Application Support")
+	}
+	writeDisabledBuiltinEngineOverrides(t, configDir, filepath.Join(configBase, "Nvidia Corporation", "Personal AI Router"))
+	stdin, msgs, stderr, cleanup := startBrokerWithConfigDir(t, configDir,
 		"--errors-path", errorsBin,
 		"--node-info-path", nodeInfoBin,
 		"--proxy-path", proxyBin, "--proxy-engines", "ollama",
@@ -414,12 +422,35 @@ func TestBrokerSpawnsAllModules(t *testing.T) {
 		"--settings-path", nodeSettingsBin,
 		"--cluster-manager-path", clusterMgrBin,
 	)
-	_ = stdin
 	t.Cleanup(cleanup)
 
-	// Native engine detection and managed-port preparation run before ready.
-	// Allow those bounded probes to finish on a host with installed engines.
+	// The manager must reach readiness using only its private disabled-engine
+	// overrides, without probing installed engine listeners.
 	waitForMethod(t, msgs, "app:ready", 30*time.Second)
+	for i, engine := range engines.All() {
+		writeRequest(t, stdin, 900+i, "engine:describe", map[string]string{"engine": engine.Name})
+		response := waitForResponse(t, msgs, 10*time.Second)
+		if response.Error != nil {
+			t.Fatalf("describe disabled %s: %v", engine.Name, response.Error)
+		}
+		var manifest struct {
+			Platforms map[string]struct {
+				Detect  []string `json:"detect"`
+				Runtime struct {
+					Port          int `json:"port"`
+					Ready, Health json.RawMessage
+					AuthStatuses  []int `json:"auth_statuses"`
+				} `json:"runtime"`
+			} `json:"platforms"`
+		}
+		if err := json.Unmarshal(response.Result, &manifest); err != nil {
+			t.Fatalf("decode disabled %s: %v", engine.Name, err)
+		}
+		platform, ok := manifest.Platforms[runtime.GOOS+"/"+runtime.GOARCH]
+		if !ok || len(platform.Detect) != 1 || platform.Detect[0] != filepath.Join(configDir, "absent-"+engine.Name) || platform.Runtime.Port != 0 || (len(platform.Runtime.Ready) != 0 && string(platform.Runtime.Ready) != "null") || (len(platform.Runtime.Health) != 0 && string(platform.Runtime.Health) != "null") || len(platform.Runtime.AuthStatuses) != 0 {
+			t.Fatalf("built-in %s fixture override did not disable detection and probes", engine.Name)
+		}
+	}
 
 	// Each supervised worker logs "<name> started" on spawn (before any
 	// bind), so these lines appear regardless of later port conflicts.
