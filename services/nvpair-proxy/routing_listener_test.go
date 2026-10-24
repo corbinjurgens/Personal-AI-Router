@@ -1621,6 +1621,120 @@ func TestRoutingListener_InferenceUsesIndividualBodyLimit(t *testing.T) {
 	waitInferenceDrained(t, fx.p)
 }
 
+func TestRoutingListener_InferencePolicySnapshot(t *testing.T) {
+	fx := hybridPeerFixture(t, map[string]int{"a-busy": http.StatusServiceUnavailable, "b-ready": http.StatusOK})
+	policyA := fx.p.admission.currentPolicy()
+	policyA.Revision = "1"
+	policyA.Routing.Limits = nodepolicy.Limits{
+		MaxAttempts: 1, PreOutputBudgetSeconds: 30, QueueSeconds: 2, ColdStartSeconds: 3, MaxOutputTokens: 128,
+	}
+	policyA.Routing.Tiers = nodepolicy.Default().Routing.Tiers
+	policyA.Routing.Tiers["weak"] = nodepolicy.TierRouting{BareMode: nodepolicy.BareLocal}
+	t.Cleanup(func() { fx.p.shutdown(context.Background()) })
+	port := startRoutingPolicy(t, fx.p, fx.w, policyA)
+
+	// Send only the first byte. Canonical registration is the positive barrier
+	// proving the ingress snapshot exists before the next policy is activated.
+	begin := func(budget time.Duration) (net.Conn, *routingSpend, time.Time) {
+		t.Helper()
+		conn, err := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)), time.Second)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = conn.Close() })
+		if err := conn.SetDeadline(time.Now().Add(5 * time.Second)); err != nil {
+			t.Fatal(err)
+		}
+		sent := time.Now()
+		if _, err := fmt.Fprintf(conn, "POST /v1/chat/completions HTTP/1.1\r\nHost: localhost:%d\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s", port, len(hybridTestBody), hybridTestBody[:1]); err != nil {
+			t.Fatal(err)
+		}
+		waitForCond(t, 2*time.Second, "held inference canonical registration", func() bool {
+			return len(fx.p.activeRoutingRequests()) == 1
+		})
+		owner := fx.p.routingRequestControl(fx.p.activeRoutingRequests()[0])
+		if owner == nil {
+			t.Fatal("held inference has no canonical owner")
+		}
+		owner.mu.Lock()
+		deadline := owner.deadline
+		owner.mu.Unlock()
+		if deadline.Before(sent.Add(budget)) || deadline.After(time.Now().Add(budget)) {
+			t.Fatalf("registered deadline = %v, want ingress time plus %v", deadline, budget)
+		}
+		return conn, owner, deadline
+	}
+	finish := func(conn net.Conn) answer {
+		t.Helper()
+		if _, err := io.WriteString(conn, hybridTestBody[1:]); err != nil {
+			t.Fatal(err)
+		}
+		resp, err := http.ReadResponse(bufio.NewReader(conn), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		data, readErr := io.ReadAll(resp.Body)
+		closeErr := resp.Body.Close()
+		if readErr != nil || closeErr != nil {
+			t.Fatalf("read/close inference response: %v/%v", readErr, closeErr)
+		}
+		waitInferenceDrained(t, fx.p)
+		return answer{status: resp.StatusCode, header: resp.Header, body: data}
+	}
+	connA, ownerA, deadlineA := begin(30 * time.Second)
+	// Build B independently: currentPolicy returns shared read-only maps and
+	// slices, so mutating A's map here would invalidate the activation barrier.
+	policyB := fx.p.admission.currentPolicy()
+	policyB.Revision = "2"
+	policyB.Routing.Limits = nodepolicy.Limits{
+		MaxAttempts: 2, PreOutputBudgetSeconds: 60, QueueSeconds: 6, ColdStartSeconds: 7, MaxOutputTokens: 256,
+	}
+	policyB.Routing.Tiers = nodepolicy.Default().Routing.Tiers
+	policyB.Routing.Tiers["weak"] = nodepolicy.TierRouting{BareMode: nodepolicy.BareAPI}
+	activate(t, fx.p, fx.w, policyB)
+	if got := fx.p.admission.currentPolicy().Revision; got != "2" {
+		t.Fatalf("active revision = %q, want B", got)
+	}
+	gotA := finish(connA)
+	ownerA.mu.Lock()
+	gotDeadlineA, attemptsA := ownerA.deadline, ownerA.ordinal
+	ownerA.mu.Unlock()
+	if gotA.status != http.StatusServiceUnavailable || fx.eng["a-busy"].hits() != 1 || fx.eng["b-ready"].hits() != 0 || attemptsA != 1 {
+		t.Fatalf("A status/busy/ready/attempts = %d/%d/%d/%d, want 503/1/0/1; body %s",
+			gotA.status, fx.eng["a-busy"].hits(), fx.eng["b-ready"].hits(), attemptsA, gotA.body)
+	}
+	if !gotDeadlineA.Equal(deadlineA) {
+		t.Fatalf("A deadline changed after B activation: %v -> %v", deadlineA, gotDeadlineA)
+	}
+	strict := decodeStrictHeader(t, fx.eng["a-busy"].lastHeader())
+	if strict.Request != ownerA.key || strict.PreOutputBudgetMs <= 0 || strict.PreOutputBudgetMs > 30000 ||
+		strict.QueueBudgetMs <= 0 || strict.QueueBudgetMs > 2000 || strict.ColdStartBudgetMs <= 0 || strict.ColdStartBudgetMs > 3000 {
+		t.Fatalf("A strict request = %+v, want A's canonical key and finite A budgets", strict)
+	}
+	var forwarded struct {
+		Model string `json:"model"`
+	}
+	if err := json.Unmarshal([]byte(fx.eng["a-busy"].lastBody()), &forwarded); err != nil {
+		t.Fatal(err)
+	}
+	if forwarded.Model != "q:1b" {
+		t.Fatalf("A forwarded model = %q, want qualified local q:1b", forwarded.Model)
+	}
+
+	connB, ownerB, deadlineB := begin(60 * time.Second)
+	gotB := finish(connB)
+	ownerB.mu.Lock()
+	gotDeadlineB, attemptsB := ownerB.deadline, ownerB.ordinal
+	ownerB.mu.Unlock()
+	if gotB.status != http.StatusNotFound || fx.eng["a-busy"].hits() != 1 || fx.eng["b-ready"].hits() != 0 || attemptsB != 0 {
+		t.Fatalf("B status/busy/ready/attempts = %d/%d/%d/%d, want 404/1/0/0; body %s",
+			gotB.status, fx.eng["a-busy"].hits(), fx.eng["b-ready"].hits(), attemptsB, gotB.body)
+	}
+	if !gotDeadlineB.Equal(deadlineB) {
+		t.Fatalf("B deadline changed during dispatch: %v -> %v", deadlineB, gotDeadlineB)
+	}
+}
+
 func TestRoutingListener_InferenceEmptyAdapterCannotAcquireLaterFacade(t *testing.T) {
 	fx := hybridPeerFixture(t, map[string]int{"peer": http.StatusOK})
 	f := fx.p.soleFacade()

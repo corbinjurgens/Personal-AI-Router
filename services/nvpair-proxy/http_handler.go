@@ -732,7 +732,7 @@ func (f *facade) serveInference(w http.ResponseWriter, r *http.Request, start ti
 			writeIngressError(w, http.StatusBadRequest, "unsupported-alias", "inference requires one exact supported tier alias")
 			return
 		}
-		rules := p.admission.currentPolicy().Routing.Tiers[tier]
+		rules := policy.routingTiers[tier]
 		policy.apiOnly = policy.apiOnly || mode == nodepolicy.AliasAPI || (mode == nodepolicy.AliasBare && rules.BareMode == nodepolicy.BareAPI)
 		policy.publicAllowed = mode != nodepolicy.AliasLocal && !(mode == nodepolicy.AliasBare && rules.BareMode == nodepolicy.BareLocal) &&
 			rules.RemoteAllowed && nodepolicy.PublicDispatchAvailable()
