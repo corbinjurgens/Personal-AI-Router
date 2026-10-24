@@ -374,6 +374,14 @@ applies to the host the test runs on.
 | `ready` | probe | no | Readiness probe; `start` waits for it before reporting Running. |
 | `stop` | object | no | Process mode: `signal` (`"term"` default, or `"kill"`) + `grace_s` (seconds before force-kill). Command mode: `cmd` (argv) to bring the engine down. |
 | `health` | probe | no | Periodic liveness probe while Running; `interval_s` between checks. |
+| `auth_statuses` | int[] | no | HTTP statuses meaning a listener is present but requires a credential. Applies to HTTP `ready` and `health` probes; requires `ready.http`. Only `401` and `403` are allowed, without duplicates. Diagnosis only; never makes an engine ready. |
+| `app_processes` | string[] | no | App or daemon process image base names, matched case-insensitively. Entries must be nonempty after trimming whitespace, contain no `/` or `\`, and have no case-insensitive duplicates. Diagnosis only; process presence never makes an engine ready. |
+
+For process matching, the observed image's directory is removed using either
+path separator, a trailing `.exe` is removed case-insensitively, and whitespace
+is trimmed. Configured names use the same normalization before case-insensitive
+comparison. For example, `LM Studio` matches `LM Studio.exe`. Readiness remains
+the configured probe, regardless of either diagnosis field.
 
 A **probe** is `{ "http": "<url>", "status": <int>, "timeout_s": <int>, "interval_s": <int> }`
 or `{ "tcp": "<host:port>", ... }`. `status` defaults to `200`. Prefer

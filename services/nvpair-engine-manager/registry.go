@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io/fs"
 	"log/slog"
+	"net/http"
 	"os"
 	"path"
 	"path/filepath"
@@ -200,6 +201,10 @@ type Runtime struct {
 	Ready  *Probe    `json:"ready,omitempty"`
 	Stop   *StopSpec `json:"stop,omitempty"`
 	Health *Probe    `json:"health,omitempty"`
+	// AuthStatuses identify credential-required responses from HTTP ready and health probes.
+	AuthStatuses []int `json:"auth_statuses,omitempty"`
+	// AppProcesses are app or daemon image base names used only for connection diagnosis.
+	AppProcesses []string `json:"app_processes,omitempty"`
 }
 
 type EditableLaunch struct {
@@ -892,6 +897,29 @@ func (p *Platform) validate(key string) error {
 	}
 	if err := validateProbe(key, "health", p.Runtime.Health); err != nil {
 		return err
+	}
+	if len(p.Runtime.AuthStatuses) > 0 && (p.Runtime.Ready == nil || strings.TrimSpace(p.Runtime.Ready.HTTP) == "") {
+		return fmt.Errorf("platform %q: runtime.auth_statuses requires runtime.ready.http", key)
+	}
+	seenStatuses := make(map[int]bool, len(p.Runtime.AuthStatuses))
+	for _, status := range p.Runtime.AuthStatuses {
+		if status != http.StatusUnauthorized && status != http.StatusForbidden {
+			return fmt.Errorf("platform %q: runtime.auth_statuses value %d must be 401 or 403", key, status)
+		}
+		if seenStatuses[status] {
+			return fmt.Errorf("platform %q: runtime.auth_statuses value %d is listed twice", key, status)
+		}
+		seenStatuses[status] = true
+	}
+	for i, name := range p.Runtime.AppProcesses {
+		if strings.TrimSpace(name) == "" || strings.ContainsAny(name, `/\`) {
+			return fmt.Errorf("platform %q: runtime.app_processes entry %q must be a nonempty process image base name without path separators", key, name)
+		}
+		for _, previous := range p.Runtime.AppProcesses[:i] {
+			if strings.EqualFold(name, previous) {
+				return fmt.Errorf("platform %q: runtime.app_processes entry %q is listed twice (case-insensitive)", key, name)
+			}
+		}
 	}
 	return nil
 }

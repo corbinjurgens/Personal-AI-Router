@@ -18,6 +18,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -480,7 +481,7 @@ func (e *Executor) bringUpProcessWithSnapshot(ctx context.Context, st *engineSta
 		case <-readyCtx.Done():
 		}
 	}()
-	readyErr := e.waitReady(readyCtx, rt.Ready, port)
+	readyErr := e.waitReady(readyCtx, rt.Ready, port, rt.AuthStatuses)
 	select {
 	case <-proc.done:
 		readyErr = fmt.Errorf("process exited before readiness; check the launch options")
@@ -558,12 +559,14 @@ func (e *Executor) bringUpCommand(ctx context.Context, st *engineState, engine s
 		startAttempted = true
 		if err := run(ctx, argv); err != nil {
 			werr := fmt.Errorf("start command failed: %w", err)
+			werr = e.diagnoseStartFailure(ctx, st, port, err, werr)
 			e.reportStartFailedUnlessShuttingDown(ctx, engine, werr)
 			return cleanup(werr)
 		}
 	}
-	if err := e.waitReady(ctx, rt.Ready, port); err != nil {
+	if err := e.waitReady(ctx, rt.Ready, port, rt.AuthStatuses); err != nil {
 		werr := fmt.Errorf("engine %q did not become ready: %w", engine, err)
+		werr = e.diagnoseStartFailure(ctx, st, port, err, werr)
 		e.reportStartFailedUnlessShuttingDown(ctx, engine, werr)
 		e.emitState(engine)
 		return cleanup(werr)
@@ -1151,6 +1154,7 @@ func (e *Executor) runHealth(ctx context.Context, st *engineState, engine string
 	}
 	t := time.NewTicker(interval)
 	defer t.Stop()
+	reported := false
 	for {
 		select {
 		case <-ctx.Done():
@@ -1160,29 +1164,46 @@ func (e *Executor) runHealth(ctx context.Context, st *engineState, engine string
 			st.mu.Lock()
 			// Bail if stopped or if a newer start superseded this loop —
 			// a stale loop must never write health for a later run.
-			if !st.running || st.gen != gen {
+			if ctx.Err() != nil || !st.running || st.gen != gen {
 				st.mu.Unlock()
 				return
 			}
 			was := st.healthy
 			st.healthy = ok
 			st.mu.Unlock()
+			message := engine + " failed its health probe"
+			if !ok && !reported {
+				if d := e.diagnoseConnection(ctx, st, port); d != diagnosisNone {
+					message = diagnosisMessage(st.manifest.DisplayName, d)
+				}
+			}
+			st.mu.Lock()
+			// Diagnosis can outlive a stop or restart. Publish only for the run
+			// whose probe failed, ordered with lifecycle changes under mu.
+			if ctx.Err() != nil || !st.running || st.gen != gen {
+				st.mu.Unlock()
+				return
+			}
 			switch {
-			case was && !ok:
+			case !ok && !reported:
 				e.reporter.report(serviceError{
-					ID: unhealthyID(engine), Message: engine + " failed its health probe",
+					ID: unhealthyID(engine), Message: message,
 					Severity: "warning", Action: "none", EngineType: engine,
 				})
-				e.emitState(engine)
-			case !was && ok:
+				reported = true
+			case ok && reported:
 				e.reporter.clear(unhealthyID(engine))
+				reported = false
+			}
+			st.mu.Unlock()
+			if was != ok {
 				e.emitState(engine)
 			}
 		}
 	}
 }
 
-func (e *Executor) waitReady(ctx context.Context, p *Probe, port int) error {
+func (e *Executor) waitReady(ctx context.Context, p *Probe, port int, authStatuses []int) error {
 	if p == nil {
 		return nil
 	}
@@ -1191,9 +1212,19 @@ func (e *Executor) waitReady(ctx context.Context, p *Probe, port int) error {
 		timeout = time.Duration(p.TimeoutS) * time.Second
 	}
 	deadline := time.Now().Add(timeout)
+	authCount := 0
 	for {
-		if e.probe(ctx, p, port) {
+		ok, status := e.probeStatus(ctx, p, port)
+		if ok {
 			return nil
+		}
+		if slices.Contains(authStatuses, status) {
+			authCount++
+			if authCount == 3 && ctx.Err() == nil {
+				return errAuthRequired
+			}
+		} else {
+			authCount = 0
 		}
 		if time.Now().After(deadline) {
 			return fmt.Errorf("not ready after %s", timeout)
@@ -1207,25 +1238,30 @@ func (e *Executor) waitReady(ctx context.Context, p *Probe, port int) error {
 }
 
 func (e *Executor) probe(ctx context.Context, p *Probe, port int) bool {
+	ok, _ := e.probeStatus(ctx, p, port)
+	return ok
+}
+
+func (e *Executor) probeStatus(ctx context.Context, p *Probe, port int) (bool, int) {
 	if p == nil {
-		return true
+		return true, 0
 	}
 	vars := map[string]string{"port": strconv.Itoa(port)}
 	if p.HTTP != "" {
 		u, err := resolvePlaceholders(p.HTTP, vars)
 		if err != nil {
-			return false
+			return false, 0
 		}
 		pctx, cancel := context.WithTimeout(ctx, 3*time.Second)
 		defer cancel()
 		req, err := http.NewRequestWithContext(pctx, http.MethodGet, u, nil)
 		if err != nil {
-			return false
+			return false, 0
 		}
 		req.Header.Set(engineIdentityProbeHeader, "1")
 		resp, err := e.client.Do(req)
 		if err != nil {
-			return false
+			return false, 0
 		}
 
 		want := p.Status
@@ -1235,39 +1271,39 @@ func (e *Executor) probe(ctx context.Context, p *Probe, port int) bool {
 		statusMatches := resp.StatusCode == want
 		if p.JSONMatch == nil {
 			httpcon.DrainAndClose(resp.Body)
-			return statusMatches
+			return statusMatches, resp.StatusCode
 		}
 		body, err := io.ReadAll(io.LimitReader(resp.Body, maxProbeJSONBytes+1))
 		httpcon.DrainAndClose(resp.Body)
 		if !statusMatches || err != nil || len(body) > maxProbeJSONBytes {
-			return false
+			return false, resp.StatusCode
 		}
 		var obj map[string]json.RawMessage
 		if err := json.Unmarshal(body, &obj); err != nil {
-			return false
+			return false, resp.StatusCode
 		}
 		value, ok := resolveObjectPath(obj, p.JSONMatch.Field)
 		if !ok {
-			return false
+			return false, resp.StatusCode
 		}
 		var actual string
-		return json.Unmarshal(value, &actual) == nil && actual == p.JSONMatch.Value
+		return json.Unmarshal(value, &actual) == nil && actual == p.JSONMatch.Value, resp.StatusCode
 	}
 	if p.TCP != "" {
 		addr, err := resolvePlaceholders(p.TCP, vars)
 		if err != nil {
-			return false
+			return false, 0
 		}
 		pctx, cancel := context.WithTimeout(ctx, 3*time.Second)
 		defer cancel()
 		conn, err := (&net.Dialer{}).DialContext(pctx, "tcp", addr)
 		if err != nil {
-			return false
+			return false, 0
 		}
 		conn.Close()
-		return true
+		return true, 0
 	}
-	return true
+	return true, 0
 }
 
 func (e *Executor) reportStartFailed(engine string, err error) {

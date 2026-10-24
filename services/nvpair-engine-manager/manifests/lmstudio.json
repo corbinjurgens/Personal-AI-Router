@@ -18,6 +18,8 @@
     "remove": ["~/.lmstudio"]
   },
   "runtime": {
+    "auth_statuses": [401, 403],
+    "app_processes": ["LM Studio", "lm-studio", "llmster"],
     "editable_launch": {
       "fixed_args": ["server", "start"],
       "controls": [
