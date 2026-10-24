@@ -444,8 +444,9 @@ each node to the result set, before host deduplication, not before ordering: an
 excluded node does not claim its resolved host, so another record for that host
 stays eligible. The rule covers a concrete model, a request without a `model`
 member (which has no model-owner filter) and a tier request, because
-`resolveTierCandidates` resolves every declared role and tier entry through
-`resolveCandidates`. `hybridLocalCandidates` takes its candidates from
+`resolveTierCandidates` obtains candidates for applicable declared roles and
+eligible local tier entries through `resolveCandidates`; API entries are
+skipped. `hybridLocalCandidates` takes its candidates from
 `resolveTierCandidates` and so inherits the rule. As the hybrid description
 above states, no HTTP entry selects the hybrid policy yet, and the routing
 listener answers inference with `501` (§12.6).
@@ -461,8 +462,9 @@ The hint does not remove:
   inference pause filter.
 
 Each resolution reads the current discovery snapshot, so a hint takes effect on
-the next resolution after the proxy holds it, and a round's candidate list does
-not change once resolved (§5.1 re-resolves between rounds). A hint-only change
+the next resolution after the proxy holds it. A pause-hint update alone does not
+alter already-resolved candidates; §5.1 re-resolves between rounds, and a local
+policy generation change can also rebuild the current round. A hint-only change
 emits no `node/updated`. The hint is a snapshot of the peer's saved policy, not
 live state. Its scanner refresh has a nominal 15-second cadence plus other
 refresh work, observing a pause or resume needs a successful fetch, and a failed
@@ -476,8 +478,8 @@ so a loopback fixture shows propagation, not authenticated fetching. The
 The destination wins over a stale hint. A peer that is paused while the proxy
 still holds an empty hint for it receives the request and refuses it at admission
 with `503`, `X-PAIR-Admission: paused` and `Retry-After: 30`. The router treats
-that as a failed candidate and fails over, and relays the `503` only if no
-candidate is left. A hint that outlives a resume only keeps the node out of inference routing
+the rejection as retryable while another dispatch is permitted. On the final
+permitted attempt it relays the peer's `503`, even if other candidates remain. A hint that outlives a resume only keeps the node out of inference routing
 until a later fetch replaces it. Management changes never consult the hint; the
 target's own state decides them.
 
