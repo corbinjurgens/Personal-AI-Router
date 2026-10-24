@@ -9,16 +9,20 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptrace"
 	"os"
+	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"nvpair-shared/jsonrpc"
 	"nvpair-shared/nodepolicy"
+	"nvpair-shared/noderec"
 )
 
 // These are process proofs using real policy IPC and loopback HTTP. A known
@@ -26,6 +30,11 @@ import (
 // three fit in 192 MiB, four fit in 256 MiB, and four cannot fit in 192 MiB.
 // The additional parser and transport allowances do not approach either gap.
 func TestUnifiedDispatchProcess(t *testing.T) {
+	t.Run("concrete and hybrid share the broker controlled lifecycle", i7HybridLifecycle)
+	t.Run("active hybrid streams survive listener rebind", i7HybridRebind)
+	t.Run("broker routing control orders nine before ten and fences committed regenerate", i7HybridCancellation)
+	t.Run("disabled public hybrid selection sends nothing to the synthetic provider", i7HybridDisabledPublic)
+
 	t.Run("request under storage pressure completes after owner release", func(t *testing.T) {
 		f, _, _ := i7BuffersBroker(t, 192, 30)
 		u := i7BuffersUpstream(t)
@@ -358,12 +367,340 @@ func TestUnifiedDispatchProcess(t *testing.T) {
 	})
 }
 
+func i7HybridIdentity() nodepolicy.StrictModelIdentity {
+	return nodepolicy.StrictModelIdentity{EngineRunID: "i7-synthetic-engine", SettingsFingerprint: strings.Repeat("a", 64), ModelDigest: strings.Repeat("b", 64)}
+}
+
+// Publish through the existing private scanner fixture, not a product hook.
+// The loopback destination validates the synthetic strict envelope and rewritten
+// model. This is routing/process evidence, not native qualification or mTLS proof.
+func i7HybridFixture(t *testing.T, edits ...func(*nodepolicy.Policy)) (*i7BuffersFixture, *serviceFixture, *i7BuffersFake, int) {
+	t.Helper()
+	f, service, _ := i7BuffersBroker(t, 256, 0)
+	u := i7BuffersUpstream(t)
+	listener := freePort(t)
+	i7HybridPolicy(t, f, func(p *nodepolicy.Policy) {
+		p.Tiers["weak"] = []nodepolicy.TierEntry{{Kind: nodepolicy.EntryLocal, Engine: "llamacpp", Model: egressProcessModel}}
+		p.Routing.Listener = nodepolicy.Listener{Enabled: true, Port: listener}
+		for _, edit := range edits {
+			edit(p)
+		}
+	})
+	advertisement := &nodepolicy.Advertisement{Revision: "1", Roles: map[string]nodepolicy.AdvertisedRole{
+		"weak": {Engine: "llamacpp", Model: egressProcessModel, ContextTokens: 4096, MaxOutputTokens: 1024,
+			Qualification: &nodepolicy.QualificationRef{ID: "i7-fixture-only", Revision: "1"}},
+	}, StrictAdmission: &nodepolicy.StrictAdmissionCapability{Version: nodepolicy.StrictAdmissionVersion,
+		Models: []nodepolicy.StrictAdmissionModel{{Engine: "llamacpp", Model: egressProcessModel, MaxConcurrent: 16, Identity: i7HybridIdentity()}}}}
+	if err := advertisement.StrictAdmission.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	event := noderec.NodeEvent{Node: noderec.DirectoryNode{HostUUID: "i7-synthetic-node", Name: "i7-loopback", IP: "127.0.0.1",
+		Services:       map[noderec.ServiceKey]noderec.ServiceStatus{noderec.ServiceLlamaCPP: {Port: u.port}},
+		ModelsByEngine: map[string][]string{"llamacpp": {egressProcessModel}}, Policy: advertisement}}
+	frame := jsonrpc.Message{JSONRPC: "2.0", Method: noderec.NotifyNodeDiscovered, Params: egressProcessJSON(t, event)}
+	egressProcessHTTP(t, egressProcessHTTPClient(t), http.MethodPost, f.scannerPort, "/", egressProcessJSON(t, frame), http.StatusOK)
+	neEventually(t, "synthetic destination forwarded by the scanner and broker", 10*time.Second, func() bool {
+		reply := f.call(t, "llamacpp-proxy:nodes/list", map[string]any{})
+		egressProcessOK(t, reply)
+		var result struct {
+			Nodes []struct {
+				ID     string   `json:"id"`
+				Models []string `json:"models"`
+			} `json:"nodes"`
+		}
+		egressProcessDecode(t, reply.Result, &result)
+		for _, node := range result.Nodes {
+			if node.ID == event.Node.HostUUID && slices.Contains(node.Models, egressProcessModel) {
+				return true
+			}
+		}
+		return false
+	})
+	// The relayed advertisement supplies the qualification hints; the explicit
+	// fixture-only manual overlay authorizes plaintext to this loopback fake.
+	// Discovery.Nodes retains the subscribed metadata for the same stable ID.
+	egressProcessOK(t, f.call(t, "llamacpp-proxy:node/add-manual", map[string]any{
+		"id": event.Node.HostUUID, "host": "127.0.0.1", "port": u.port,
+		"addresses": []string{"127.0.0.1"}, "models": []string{egressProcessModel},
+	}))
+	i7HybridListenerReady(t, f.client, listener)
+	return f, service, u, listener
+}
+
+func i7HybridPolicy(t *testing.T, f *i7BuffersFixture, edit func(*nodepolicy.Policy)) {
+	t.Helper()
+	reply := f.call(t, "policy:get", map[string]any{})
+	before := decodeServicePolicySnapshot(t, &reply)
+	policy := before.Policy
+	edit(&policy)
+	if err := policy.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	egressProcessOK(t, f.call(t, "policy:set", map[string]any{"policy": policy, "expectedPersistedRevision": before.Policy.Revision}))
+	reply = f.call(t, "policy:get", map[string]any{})
+	stored := decodeServicePolicySnapshot(t, &reply)
+	egressProcessActivePolicy(t, f.call, stored.Policy.Revision)
+}
+
+func i7HybridListenerReady(t *testing.T, client *http.Client, port int) {
+	t.Helper()
+	neEventually(t, "hybrid listener model endpoint ready", 10*time.Second, func() bool {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		request, err := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("http://127.0.0.1:%d/v1/models", port), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		response, err := client.Do(request)
+		if err != nil {
+			return false
+		}
+		_, readErr := io.Copy(io.Discard, response.Body)
+		closeErr := response.Body.Close()
+		return response.StatusCode == http.StatusOK && readErr == nil && closeErr == nil
+	})
+}
+
+func i7HybridActive(t *testing.T, f *i7BuffersFixture) []nodepolicy.RoutingRequestKey {
+	t.Helper()
+	reply := f.call(t, "routing:active", nodepolicy.RoutingActiveParams{})
+	egressProcessOK(t, reply)
+	var active nodepolicy.RoutingActiveResult
+	egressProcessDecode(t, reply.Result, &active)
+	return active.Requests
+}
+
+func i7HybridActiveCount(t *testing.T, f *i7BuffersFixture, count int) []nodepolicy.RoutingRequestKey {
+	t.Helper()
+	var keys []nodepolicy.RoutingRequestKey
+	neEventually(t, "routing registry reaches expected owner count", 10*time.Second, func() bool {
+		keys = i7HybridActive(t, f)
+		return len(keys) == count
+	})
+	return keys
+}
+
+func i7HybridCancel(t *testing.T, f *i7BuffersFixture, key nodepolicy.RoutingRequestKey, regenerate bool, want nodepolicy.RoutingCancelStatus) {
+	t.Helper()
+	reply := f.call(t, "routing:cancel", nodepolicy.RoutingCancelParams{Request: key, Regenerate: regenerate})
+	egressProcessOK(t, reply)
+	var result nodepolicy.RoutingCancelResult
+	egressProcessDecode(t, reply.Result, &result)
+	if result.Status != want {
+		t.Fatalf("routing cancellation=%q, want %q", result.Status, want)
+	}
+}
+
+func i7HybridSlot(t *testing.T, u *i7BuffersFake, id string) *i7BuffersSlot {
+	t.Helper()
+	slot := u.slot(t, id)
+	u.mu.Lock()
+	slot.hybrid = true
+	u.mu.Unlock()
+	return slot
+}
+
+func i7HybridBody() []byte {
+	return []byte(`{"model":"weak-local","messages":[],"stream":true,"max_tokens":16}`)
+}
+
+func i7HybridAccepted(t *testing.T, slot *i7BuffersSlot, request *i7BuffersRequest) {
+	t.Helper()
+	select {
+	case <-slot.entered:
+	case <-request.done:
+		t.Fatalf("hybrid fixture request ended before destination acceptance: status=%d error=%v", request.result.status, request.result.err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("hybrid destination did not accept the request")
+	}
+}
+
+func i7HybridLifecycle(t *testing.T) {
+	f, _, u, listener := i7HybridFixture(t)
+	egressProcessOK(t, f.call(t, "workloads:subscribe", map[string]any{}))
+	var run nodepolicy.RoutingRequestKey
+	for i, route := range []struct {
+		name   string
+		port   int
+		body   []byte
+		hybrid bool
+	}{
+		{"concrete facade", f.port, i7BuffersBody(1024), false},
+		{"hybrid listener", listener, i7HybridBody(), true},
+	} {
+		t.Run(route.name, func(t *testing.T) {
+			slot := u.slot(t, route.name)
+			u.mu.Lock()
+			slot.hybrid = route.hybrid
+			u.mu.Unlock()
+			request := i7BuffersStart(t, f.client, route.port, "/v1/chat/completions", route.name, route.body)
+			i7HybridAccepted(t, slot, request)
+			egressProcessBarrier(t, request.firstByte, "client observed committed stream bytes")
+			keys := i7HybridActiveCount(t, f, 1)
+			key := keys[0]
+			if key.RequestID != strconv.Itoa(i+1) {
+				t.Fatalf("request ID=%q, want sequential shared owner %d", key.RequestID, i+1)
+			}
+			if i == 0 {
+				run = key
+			} else if key.OriginNodeID != run.OriginNodeID || key.ProxyRunID != run.ProxyRunID || slot.strict.Request != key {
+				t.Fatalf("hybrid/concrete identity or strict linkage differs: first=%+v current=%+v strict=%+v", run, key, slot.strict.Request)
+			}
+			started := i7BuffersBrokerWorkload(t, f.rpc, func(w departedRunInfo) bool { return w.State == "running" && w.ID == key.RequestID })
+			if started.RunID != key.ProxyRunID || started.OriginatedFrom != key.OriginNodeID || started.Engine != "llamacpp" {
+				t.Fatalf("workload and routing owner differ: workload=%+v routing=%+v", started, key)
+			}
+			slot.release()
+			i7BuffersCompletedStream(t, request)
+			i7BuffersBrokerWorkload(t, f.rpc, func(w departedRunInfo) bool { return w.key() == started.key() && w.State == "completed" })
+			i7HybridActiveCount(t, f, 0)
+		})
+	}
+}
+
+func i7HybridProxyIdentity(t *testing.T, service *serviceFixture) serviceProcessIdentity {
+	t.Helper()
+	owned, err := service.inventory.scan()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var proxies []serviceProcessIdentity
+	for _, identity := range owned {
+		if identity.Path == service.proxyPath {
+			proxies = append(proxies, identity)
+		}
+	}
+	if len(proxies) != 1 {
+		t.Fatalf("proxy identities=%+v, want exactly one", proxies)
+	}
+	return proxies[0]
+}
+
+func i7HybridRebind(t *testing.T) {
+	f, service, u, listener := i7HybridFixture(t)
+	identity := i7HybridProxyIdentity(t, service)
+	var held []i7BuffersHold
+	var retired []int
+	for i := range 3 {
+		id := fmt.Sprintf("rebind-%d", i)
+		slot := i7HybridSlot(t, u, id)
+		request := i7BuffersStart(t, f.client, listener, "/v1/chat/completions", id, i7HybridBody())
+		i7HybridAccepted(t, slot, request)
+		egressProcessBarrier(t, request.firstByte, "hybrid stream committed before rebind")
+		held = append(held, i7BuffersHold{slot, request})
+		before := i7HybridActiveCount(t, f, len(held))
+		retired = append(retired, listener)
+		listener = freePort(t)
+		i7HybridPolicy(t, f, func(p *nodepolicy.Policy) { p.Routing.Listener.Port = listener })
+		i7HybridListenerReady(t, f.client, listener)
+		for _, port := range retired {
+			conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), time.Second)
+			if err == nil {
+				if closeErr := conn.Close(); closeErr != nil {
+					t.Error(closeErr)
+				}
+				t.Fatalf("retired listener %d still accepts", port)
+			}
+			if !neConnectionRefused(err) {
+				t.Fatalf("retired listener %d did not refuse a fresh connection: %v", port, err)
+			}
+		}
+		if after := i7HybridActiveCount(t, f, len(held)); !slices.Equal(before, after) {
+			t.Fatalf("rebind changed owners: before=%+v after=%+v", before, after)
+		}
+		if got := i7HybridProxyIdentity(t, service); got != identity {
+			t.Fatalf("rebind replaced proxy: before=%+v after=%+v", identity, got)
+		}
+	}
+	// The source owner reuses one http.Server. Black-box evidence here is one
+	// unchanged proxy, one accepting routing port, and successful terminal output
+	// on every connection accepted before the preceding rebinds.
+	for _, h := range held {
+		h.slot.release()
+		i7BuffersCompletedStream(t, h.request)
+	}
+	i7HybridActiveCount(t, f, 0)
+}
+
+func i7HybridCancellation(t *testing.T) {
+	f, _, u, listener := i7HybridFixture(t)
+	var held []i7BuffersHold
+	for i := range 10 {
+		id := fmt.Sprintf("control-%d", i+1)
+		slot := i7HybridSlot(t, u, id)
+		request := i7BuffersStart(t, f.client, listener, "/v1/chat/completions", id, i7HybridBody())
+		i7HybridAccepted(t, slot, request)
+		egressProcessBarrier(t, request.firstByte, "routing cancellation stream committed")
+		held = append(held, i7BuffersHold{slot, request})
+	}
+	keys := i7HybridActiveCount(t, f, len(held))
+	for i, key := range keys {
+		if key.RequestID != strconv.Itoa(i+1) || key.OriginNodeID != keys[0].OriginNodeID || key.ProxyRunID != keys[0].ProxyRunID {
+			t.Fatalf("routing active order/identity at %d: %+v", i, keys)
+		}
+	}
+	i7HybridCancel(t, f, keys[8], true, nodepolicy.RoutingCancelConflictCommitted)
+	if after := i7HybridActive(t, f); !slices.Equal(keys, after) {
+		t.Fatalf("committed regenerate changed active owners: before=%+v after=%+v", keys, after)
+	}
+	i7HybridCancel(t, f, keys[9], false, nodepolicy.RoutingCancelCancelled)
+	egressProcessBarrier(t, held[9].slot.cancelled, "broker cancellation reached the live destination")
+	i7BuffersAwait(t, held[9].request)
+	remaining := i7HybridActiveCount(t, f, 9)
+	if !slices.Equal(remaining, keys[:9]) {
+		t.Fatalf("cancellation removed a different owner: %+v", remaining)
+	}
+	i7HybridCancel(t, f, keys[9], false, nodepolicy.RoutingCancelNotFound)
+	// Completing nine, after cancellation of ten, positively fences the conflict's
+	// lack of cancellation rather than treating a quiet interval as evidence.
+	for _, h := range held[:9] {
+		h.slot.release()
+		i7BuffersCompletedStream(t, h.request)
+	}
+	i7HybridActiveCount(t, f, 0)
+	pre := i7HybridSlot(t, u, "pre-output-cancel")
+	u.mu.Lock()
+	pre.preOutput = true
+	u.mu.Unlock()
+	request := i7BuffersStart(t, f.client, listener, "/v1/chat/completions", "pre-output-cancel", i7HybridBody())
+	i7HybridAccepted(t, pre, request)
+	key := i7HybridActiveCount(t, f, 1)[0]
+	i7HybridCancel(t, f, key, false, nodepolicy.RoutingCancelCancelled)
+	egressProcessBarrier(t, pre.cancelled, "pre-output cancellation reached destination")
+	i7BuffersAwait(t, request)
+	i7HybridActiveCount(t, f, 0)
+}
+
+func i7HybridDisabledPublic(t *testing.T) {
+	public := newEgressProcessUpstream(t)
+	staged := egressProcessPolicy(t, "1", public.publicPort)
+	// A changed credential-reference set intentionally restarts the proxy.
+	// Configure it before installing the fixture's ephemeral manual overlay.
+	f, _, u, listener := i7HybridFixture(t, func(p *nodepolicy.Policy) {
+		p.Tiers["weak"] = staged.Tiers["weak"]
+		p.Routing.Accounts, p.Routing.Deployments = staged.Routing.Accounts, staged.Routing.Deployments
+	})
+	egressProcessHTTP(t, egressProcessHTTPClient(t), http.MethodPost, listener, "/v1/chat/completions", []byte(`{"model":"weak-api","messages":[],"stream":false}`), http.StatusNotFound)
+	i7HybridActiveCount(t, f, 0)
+	public.assertNoPublic(t)
+	// Positive local completion after the refusal shows that an API-only miss
+	// neither fell through locally nor disabled subsequent hybrid dispatch.
+	slot := i7HybridSlot(t, u, "after-disabled-public")
+	request := i7BuffersStart(t, f.client, listener, "/v1/chat/completions", "after-disabled-public", i7HybridBody())
+	i7HybridAccepted(t, slot, request)
+	slot.release()
+	i7BuffersCompletedStream(t, request)
+	public.assertNoPublic(t)
+	i7HybridActiveCount(t, f, 0)
+}
+
 type i7BuffersFixture struct {
-	call     egressProcessCall
-	rpc      *serviceRPCClient
-	client   *http.Client
-	port     int
-	revision string
+	call        egressProcessCall
+	rpc         *serviceRPCClient
+	client      *http.Client
+	port        int
+	scannerPort int
+	revision    string
 }
 
 func i7BuffersBroker(t *testing.T, capacity, wait int) (*i7BuffersFixture, *serviceFixture, string) {
@@ -374,12 +711,13 @@ func i7BuffersBroker(t *testing.T, capacity, wait int) (*i7BuffersFixture, *serv
 		t.Fatalf("locate registered empty scanner fixture: %v", err)
 	}
 	jointCopyExecutable(t, self, f.scannerPath)
+	scannerPort := freePort(t)
 	f.env = append(f.env, "NVPAIR_TEST_SUBSCRIPTION_SCANNER="+f.scannerPath,
-		"NVPAIR_TEST_SUBSCRIPTION_PORT="+strconv.Itoa(freePort(t)), "USERPROFILE="+f.configDir, "OLLAMA_HOST=")
+		"NVPAIR_TEST_SUBSCRIPTION_PORT="+strconv.Itoa(scannerPort), "USERPROFILE="+f.configDir, "OLLAMA_HOST=")
 	f.start()
 	c := f.readyClient()
 	nextID := 7000
-	fixture := &i7BuffersFixture{rpc: c, client: egressProcessHTTPClient(t), port: f.facadePort}
+	fixture := &i7BuffersFixture{rpc: c, client: egressProcessHTTPClient(t), port: f.facadePort, scannerPort: scannerPort}
 	fixture.client.Timeout = 0 // Each HTTP request has its own bounded context.
 	fixture.call = func(t *testing.T, method string, params any) jsonrpc.Message {
 		t.Helper()
@@ -435,6 +773,8 @@ type i7BuffersSlot struct {
 	entered, cancelled, released chan struct{}
 	once                         sync.Once
 	preOutput                    bool
+	hybrid                       bool
+	strict                       nodepolicy.StrictAdmissionRequest
 }
 
 func (s *i7BuffersSlot) release() { s.once.Do(func() { close(s.released) }) }
@@ -459,11 +799,27 @@ func i7BuffersUpstream(t *testing.T) *i7BuffersFake {
 		u.mu.Lock()
 		slot := u.slots[r.Header.Get("X-I7-Buffers")]
 		preOutput := slot != nil && slot.preOutput
+		hybrid := slot != nil && slot.hybrid
 		u.mu.Unlock()
 		if slot == nil || r.Method != http.MethodPost || r.URL.Path != "/v1/chat/completions" {
 			t.Error("unexpected inference reached buffer fixture")
 			http.Error(w, "unexpected fixture route", http.StatusBadRequest)
 			return
+		}
+		if hybrid {
+			var body struct {
+				Model string `json:"model"`
+			}
+			if err := json.NewDecoder(io.LimitReader(r.Body, 64<<10)).Decode(&body); err != nil || body.Model != egressProcessModel {
+				t.Errorf("hybrid destination model=%q decode=%v", body.Model, err)
+				http.Error(w, "invalid hybrid fixture body", http.StatusBadRequest)
+				return
+			}
+			if err := json.Unmarshal([]byte(r.Header.Get(nodepolicy.StrictAdmissionHeader)), &slot.strict); err != nil || slot.strict.Identity != i7HybridIdentity() {
+				t.Errorf("hybrid strict envelope identity=%+v decode=%v", slot.strict.Identity, err)
+				http.Error(w, "invalid hybrid fixture envelope", http.StatusBadRequest)
+				return
+			}
 		}
 		if _, err := io.Copy(io.Discard, r.Body); err != nil {
 			t.Errorf("read held fake request: %v", err)
@@ -533,16 +889,17 @@ type i7BuffersHTTPResult struct {
 }
 
 type i7BuffersRequest struct {
-	ctx    context.Context
-	cancel context.CancelFunc
-	done   chan struct{}
-	result i7BuffersHTTPResult
+	ctx       context.Context
+	cancel    context.CancelFunc
+	done      chan struct{}
+	firstByte chan struct{}
+	result    i7BuffersHTTPResult
 }
 
 func i7BuffersStart(t *testing.T, client *http.Client, port int, path, id string, body []byte) *i7BuffersRequest {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
-	r := &i7BuffersRequest{ctx: ctx, cancel: cancel, done: make(chan struct{})}
+	r := &i7BuffersRequest{ctx: ctx, cancel: cancel, done: make(chan struct{}), firstByte: make(chan struct{})}
 	sent := make(chan struct{})
 	var sentOnce sync.Once
 	ctx = httptrace.WithClientTrace(ctx, &httptrace.ClientTrace{WroteHeaders: func() { sentOnce.Do(func() { close(sent) }) }})
@@ -561,10 +918,17 @@ func i7BuffersStart(t *testing.T, client *http.Client, port int, path, id string
 			return
 		}
 		r.result.status = response.StatusCode
-		data, readErr := io.ReadAll(io.LimitReader(response.Body, 64<<10))
+		var first [1]byte
+		n, firstErr := io.ReadFull(response.Body, first[:])
+		if n != 0 {
+			close(r.firstByte)
+		}
+		data, readErr := io.ReadAll(io.LimitReader(response.Body, (64<<10)-int64(n)))
 		closeErr := response.Body.Close()
-		r.result.body = data
-		if readErr != nil {
+		r.result.body = append(first[:n], data...)
+		if firstErr != nil && firstErr != io.EOF {
+			r.result.err = firstErr
+		} else if readErr != nil {
 			r.result.err = readErr
 		} else {
 			r.result.err = closeErr
