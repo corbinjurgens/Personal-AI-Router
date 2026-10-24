@@ -301,7 +301,7 @@ func (e *Executor) previewLaunchLocked(st *engineState, request settings.Request
 // Preparation supplies a bounded compiler on a state snapshot, sharing the
 // exact proposed-launch parser without reading current runtime digests.
 func (e *Executor) previewLaunch(st *engineState, request settings.Request, prepare func(launchCommand, Runtime) (*llamaServingLaunch, error)) settings.Preview {
-	result := settings.Preview{Settings: request.Settings.Clone(), Args: []string{}, Env: []string{}, Errors: request.Settings.Serving.Validate(), Serving: servingDeclarationReadback(request.Settings.Serving)}
+	result := settings.Preview{Settings: request.Settings.Clone(), Args: []string{}, Env: []string{}, Errors: servingDeclarationErrors(request.Settings.Serving), Serving: servingDeclarationReadback(request.Settings.Serving)}
 	if len(result.Errors) > 0 {
 		return result
 	}

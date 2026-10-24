@@ -73,6 +73,9 @@ func (e *Executor) Action(ctx context.Context, engine, action string, params jso
 	if !ok {
 		return nil, fmt.Errorf("engine %q has no action %q", engine, action)
 	}
+	if err := st.manifest.validateActionModelParams(action, params, true); err != nil {
+		return nil, err
+	}
 	if err := e.checkServingLoad(st, action, params); err != nil {
 		return nil, err
 	}

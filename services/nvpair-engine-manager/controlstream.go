@@ -60,7 +60,7 @@ type installRequest struct {
 type pullRequest struct {
 	OpID   string          `json:"opId"`
 	Engine string          `json:"engine"`
-	Model  string          `json:"model"`
+	Model  string          `json:"model,omitempty"`
 	Params json.RawMessage `json:"params,omitempty"`
 }
 
@@ -129,6 +129,26 @@ func (s *controlServer) handlePull(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Model == "" && len(req.Params) == 0 {
 		http.Error(w, `"model" or "params" is required`, http.StatusBadRequest)
+		return
+	}
+	manifest, ok := s.exec.reg.Get(req.Engine)
+	if !ok {
+		http.Error(w, "unknown engine", http.StatusBadRequest)
+		return
+	}
+	params := req.Params
+	if len(params) == 0 || string(params) == "null" {
+		var err error
+		params, err = s.exec.pullParams(req.Engine, req.Model)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+	}
+	if _, err := manifest.pullProgressModel(params); err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(streamFrame{Type: "error", OpID: req.OpID, Engine: req.Engine, Op: "pull", Message: err.Error()})
 		return
 	}
 	s.streamOp(w, r, req.OpID, req.Engine, "pull", func(ctx context.Context) (streamFrame, error) {

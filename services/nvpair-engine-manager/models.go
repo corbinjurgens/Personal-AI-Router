@@ -293,8 +293,9 @@ func extractStrings(raw json.RawMessage, spec *ActionResult) []string {
 // empty inventory. A missing, null, or wrong-typed array is unknown and returns
 // ok=false so callers do not label it authoritative empty. Malformed rows
 // inside a valid array are skipped, preserving additive response compatibility. For an
-// unfiltered inventory, however, a non-empty array with no usable names is
-// malformed rather than authoritative empty.
+// unfiltered inventory, however, a non-empty array with no string fields is
+// malformed rather than authoritative empty. Strings rejected by identifier
+// validation are filtered entries, so an all-rejected list is known-empty.
 func extractStringsResult(raw json.RawMessage, spec *ActionResult) ([]string, bool) {
 	var obj map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &obj); err != nil {
@@ -309,6 +310,7 @@ func extractStringsResult(raw json.RawMessage, spec *ActionResult) ([]string, bo
 		return nil, false
 	}
 	out := make([]string, 0)
+	haveString := false
 	for _, el := range arr {
 		if spec.Match != nil && !matchRow(el, spec.Match) {
 			continue
@@ -318,11 +320,15 @@ func extractStringsResult(raw json.RawMessage, spec *ActionResult) ([]string, bo
 			continue
 		}
 		var s string
-		if err := json.Unmarshal(fv, &s); err == nil && s != "" {
+		if err := json.Unmarshal(fv, &s); err == nil && !bytes.Equal(bytes.TrimSpace(fv), []byte("null")) {
+			haveString = true
+			if nodepolicy.ValidateModelIdentifierJSON(fv) != nil {
+				continue
+			}
 			out = append(out, s)
 		}
 	}
-	if spec.Match == nil && len(arr) > 0 && len(out) == 0 {
+	if spec.Match == nil && len(arr) > 0 && !haveString {
 		return nil, false
 	}
 	return out, true
@@ -401,7 +407,17 @@ func (e *Executor) cachedInventory() map[string][]string {
 	defer e.inventoryMu.Unlock()
 	out := make(map[string][]string, len(e.inventory))
 	for name, models := range e.inventory {
-		out[name] = models
+		out[name] = validModelIdentifiers(models)
+	}
+	return out
+}
+
+func validModelIdentifiers(models []string) []string {
+	out := make([]string, 0, len(models))
+	for _, model := range models {
+		if nodepolicy.ValidateModelIdentifier(model) == nil {
+			out = append(out, model)
+		}
 	}
 	return out
 }

@@ -31,6 +31,9 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"nvpair-shared/engines"
+	"nvpair-shared/nodepolicy"
 )
 
 const (
@@ -42,6 +45,24 @@ const (
 )
 
 var errPullProgressTimeout = errors.New("model download made no progress")
+
+// The ec pull decoder must retain the raw model boundary too: decoding a
+// malformed string first would permanently replace invalid UTF-8 bytes.
+func (p *pullRequest) UnmarshalJSON(data []byte) error {
+	if err := validateModelRequest(data, false); err != nil {
+		return err
+	}
+	type request pullRequest
+	var next request
+	if err := json.Unmarshal(data, &next); err != nil {
+		return err
+	}
+	if err := (&Manifest{}).validateActionModelParams(pullModelAction, next.Params, false); err != nil {
+		return err
+	}
+	*p = pullRequest(next)
+	return nil
+}
 
 type pullProgressWatchdog struct {
 	cancel      context.CancelCauseFunc
@@ -105,6 +126,29 @@ func modelFromParams(params json.RawMessage) string {
 	return p.Model
 }
 
+func (m *Manifest) pullProgressModel(params json.RawMessage) (string, error) {
+	if err := m.validateActionModelParams(pullModelAction, params, true); err != nil {
+		return "", err
+	}
+	model := modelFromParams(params)
+	if model == "" {
+		if binding, ok := m.operationBinding(engines.OperationPull); ok {
+			var fields map[string]json.RawMessage
+			if json.Unmarshal(params, &fields) == nil {
+				if raw, present := fields[binding.modelParam()]; present {
+					if err := json.Unmarshal(raw, &model); err != nil {
+						return "", fmt.Errorf("model must be a string")
+					}
+				}
+			}
+		}
+	}
+	if err := nodepolicy.ValidateModelIdentifier(model); err != nil {
+		return "", err
+	}
+	return model, nil
+}
+
 // PullModelStream runs the engine's pull_model action, publishing progress to
 // the hub as it advances, and returns the action's final JSON result. When
 // params is empty they come from the engine's pull binding (modelops.go), so a
@@ -115,6 +159,11 @@ func modelFromParams(params json.RawMessage) string {
 // content-mutation guard (model_mutation.go), so the broker withdraws that
 // engine's model identity before the first byte is requested.
 func (e *Executor) PullModelStream(ctx context.Context, engine, model string, params json.RawMessage) (json.RawMessage, error) {
+	if model != "" || len(params) == 0 {
+		if err := nodepolicy.ValidateModelIdentifier(model); err != nil {
+			return nil, err
+		}
+	}
 	st, err := e.state(engine)
 	if err != nil {
 		return nil, err
@@ -127,6 +176,13 @@ func (e *Executor) PullModelStream(ctx context.Context, engine, model string, pa
 		if params, err = e.pullParams(engine, model); err != nil {
 			return nil, err
 		}
+	}
+	progressModel, err := st.manifest.pullProgressModel(params)
+	if err != nil {
+		return nil, err
+	}
+	if model == "" {
+		model = progressModel
 	}
 	var result json.RawMessage
 	if err := e.withModelMutation(ctx, engine, func() error {
@@ -470,6 +526,13 @@ func (e *Executor) engineDisplayName(engine string) string {
 // reportPullFailed records a pull failure for the errors pipeline and returns
 // the user-facing message for progress frames and JSON-RPC errors.
 func (e *Executor) reportPullFailed(engine, model string, err error) string {
+	var refusal *modelIdentifierRefusal
+	if errors.As(err, &refusal) {
+		return refusal.Error()
+	}
+	if validationErr := nodepolicy.ValidateModelIdentifier(model); validationErr != nil {
+		return validationErr.Error()
+	}
 	msg := formatEnginePullError(e.engineDisplayName(engine), err)
 	e.reporter.report(serviceError{
 		ID: pullFailedID(engine, model), Message: msg,

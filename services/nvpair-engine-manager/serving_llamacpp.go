@@ -22,6 +22,7 @@ import (
 	"sync"
 
 	"nvpair-shared/engines"
+	"nvpair-shared/nodepolicy"
 )
 
 // ServingFieldError deliberately contains field/model identifiers, never source
@@ -297,6 +298,9 @@ func llamaCanonicalModelID(id string) string {
 }
 
 func validateLlamaModelID(id string) error {
+	if err := nodepolicy.ValidateModelIdentifier(id); err != nil {
+		return servingError(err.Error())
+	}
 	if id == "*" || id != strings.TrimSpace(id) || strings.ContainsAny(id, "[]#;\r\n\x00") || llamaCanonicalModelID(id) != id {
 		return &ServingFieldError{Field: "serving.models.modelId", ModelID: id, Reason: "Use an exact canonical native preset model ID."}
 	}
@@ -539,7 +543,7 @@ func llamaArtifactPaths(path string) ([]string, error) {
 }
 
 func compileLlamaServing(command launchCommand, rt Runtime, requireApproved bool) (*llamaServingLaunch, error) {
-	if len(rt.Serving.Validate()) != 0 {
+	if len(servingDeclarationErrors(rt.Serving)) != 0 {
 		return nil, servingError("Invalid serving declaration.")
 	}
 	canonicalIDs := map[string]bool{}

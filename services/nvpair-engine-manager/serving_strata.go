@@ -23,6 +23,7 @@ import (
 
 	"nvpair-shared/engines"
 	settings "nvpair-shared/enginesettings"
+	"nvpair-shared/nodepolicy"
 )
 
 type strataRuntimeHash struct {
@@ -423,6 +424,11 @@ func parseStrataServingConfig(data []byte) (strataServingConfig, error) {
 		if decoder.Decode(&value) != nil || bytes.Equal(value, []byte("null")) {
 			return config, servingError("Null or malformed Strata config values are unsupported.")
 		}
+		if strings.EqualFold(key, "model_name") {
+			if err := nodepolicy.ValidateModelIdentifierJSON(value); err != nil {
+				return config, servingError(err.Error())
+			}
+		}
 		if strings.EqualFold(key, "env") && !strataDistinctNames(value) {
 			return config, servingError("Duplicate or malformed Strata config key.")
 		}
@@ -487,7 +493,7 @@ func compileStrataServing(command launchCommand, rt Runtime, approved bool) (*ll
 // Derive and validate the complete selected-file closure using only bounded
 // reads. Both pre-lock hashing and locked compilation use this role check.
 func deriveStrataServing(command launchCommand, rt Runtime) (*llamaServingLaunch, error) {
-	if rt.modeOrDefault() != "process" || rt.Serving == nil || len(rt.Serving.Validate()) != 0 || len(rt.Serving.Models) != 1 {
+	if rt.modeOrDefault() != "process" || rt.Serving == nil || len(servingDeclarationErrors(rt.Serving)) != 0 || len(rt.Serving.Models) != 1 {
 		return nil, servingError("Prepared Strata requires one declared model and an owned process launch.")
 	}
 	if _, err := strataRuntimePaths(rt.Serving); err != nil {

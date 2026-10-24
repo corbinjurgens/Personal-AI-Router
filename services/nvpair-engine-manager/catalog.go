@@ -23,6 +23,7 @@ import (
 	"unicode/utf8"
 
 	"nvpair-shared/engines"
+	"nvpair-shared/nodepolicy"
 )
 
 // engine:catalog serves the set of models an engine can download, as opposed to
@@ -185,12 +186,13 @@ type ollamaLibraryFile struct {
 
 // ollamaLibraryRow is one committed entry, shaped like an Ollama tags response.
 type ollamaLibraryRow struct {
-	Name       string               `json:"name"`
-	Model      string               `json:"model"`
-	ModifiedAt string               `json:"modified_at"`
-	Size       uint64               `json:"size"`
-	Digest     string               `json:"digest"`
-	Details    ollamaLibraryDetails `json:"details"`
+	Name              string               `json:"name"`
+	Model             string               `json:"model"`
+	ModifiedAt        string               `json:"modified_at"`
+	Size              uint64               `json:"size"`
+	Digest            string               `json:"digest"`
+	Details           ollamaLibraryDetails `json:"details"`
+	invalidIdentifier bool
 }
 
 // ollamaLibraryDetails is the subset of an entry's details the catalogue uses.
@@ -214,9 +216,93 @@ type hfModelRow struct {
 	Private      bool     `json:"private"`
 	// Gated is false for an open repo and a string ("auto", "manual") for one
 	// that needs its terms accepted first, so it is kept raw.
-	Gated       json.RawMessage `json:"gated"`
-	PipelineTag string          `json:"pipeline_tag"`
-	Siblings    []hfSibling     `json:"siblings"`
+	Gated             json.RawMessage `json:"gated"`
+	PipelineTag       string          `json:"pipeline_tag"`
+	Siblings          []hfSibling     `json:"siblings"`
+	invalidIdentifier bool
+}
+
+func (r *ollamaLibraryRow) UnmarshalJSON(data []byte) error {
+	type row ollamaLibraryRow
+	var decoded row
+	wire := struct {
+		*row
+		Name  json.RawMessage `json:"name"`
+		Model json.RawMessage `json:"model"`
+	}{row: &decoded}
+	if err := json.Unmarshal(data, &wire); err != nil {
+		return err
+	}
+	decoded.Name, decoded.Model, decoded.invalidIdentifier = decodeCatalogIdentifiers(wire.Name, wire.Model)
+	*r = ollamaLibraryRow(decoded)
+	return nil
+}
+
+func (r *hfModelRow) UnmarshalJSON(data []byte) error {
+	type row hfModelRow
+	var decoded row
+	wire := struct {
+		*row
+		ID      json.RawMessage `json:"id"`
+		ModelID json.RawMessage `json:"modelId"`
+	}{row: &decoded}
+	if err := json.Unmarshal(data, &wire); err != nil {
+		return err
+	}
+	decoded.ID, decoded.ModelID, decoded.invalidIdentifier = decodeCatalogIdentifiers(wire.ID, wire.ModelID)
+	*r = hfModelRow(decoded)
+	return nil
+}
+
+// Empty strings retain the sources' optional alias fallback. Any supplied
+// malformed identifier rejects its row before trimming or fallback can hide it.
+func decodeCatalogIdentifiers(primary, fallback json.RawMessage) (string, string, bool) {
+	decode := func(raw json.RawMessage) (string, bool) {
+		if len(raw) == 0 {
+			return "", true
+		}
+		var value string
+		if json.Unmarshal(raw, &value) != nil {
+			return "", false
+		}
+		if bytes.Equal(bytes.TrimSpace(raw), []byte(`""`)) {
+			return "", true
+		}
+		return value, nodepolicy.ValidateModelIdentifierJSON(raw) == nil
+	}
+	a, aOK := decode(primary)
+	b, bOK := decode(fallback)
+	return a, b, !aOK || !bOK
+}
+
+func catalogIdentifier(primary, fallback string) (string, bool) {
+	for _, raw := range []string{primary, fallback} {
+		if raw != "" && nodepolicy.ValidateModelIdentifier(raw) != nil {
+			return "", false
+		}
+	}
+	id := strings.TrimSpace(primary)
+	if id == "" {
+		id = strings.TrimSpace(fallback)
+	}
+	return id, nodepolicy.ValidateModelIdentifier(id) == nil
+}
+
+// Validate common returns too, including previously cached rows. Keep the
+// original slice when every entry is valid, as with the embedded catalog.
+func validCatalogModels(models []CatalogModel) []CatalogModel {
+	for i, model := range models {
+		if nodepolicy.ValidateModelIdentifier(model.ID) != nil || nodepolicy.ValidateModelIdentifier(model.Name) != nil {
+			out := append(make([]CatalogModel, 0, len(models)), models[:i]...)
+			for _, candidate := range models[i+1:] {
+				if nodepolicy.ValidateModelIdentifier(candidate.ID) == nil && nodepolicy.ValidateModelIdentifier(candidate.Name) == nil {
+					out = append(out, candidate)
+				}
+			}
+			return out
+		}
+	}
+	return models
 }
 
 // hfSibling is one file in a Hugging Face repo.
@@ -260,12 +346,8 @@ type catalogService struct {
 // of concurrent callers one request between them.
 type listingCache struct {
 	// label names the catalogue in errors and logs.
-	label string
-	fetch func(context.Context) ([]CatalogModel, error)
-	// emptyOK accepts an empty list as an answer. A search can match nothing;
-	// a browse list that comes back empty has failed.
-	emptyOK bool
-
+	label   string
+	fetch   func(context.Context) ([]CatalogModel, error)
 	mu      sync.Mutex
 	models  []CatalogModel
 	fetched time.Time
@@ -388,6 +470,7 @@ func catalogTarget(platform, arch string) (string, string) {
 // host, so a client driving a peer is not offered models that peer can never
 // install.
 func filterForTarget(models []CatalogModel, platform, arch string) []CatalogModel {
+	models = validCatalogModels(models)
 	if platform == "darwin" && arch == "arm64" {
 		return models
 	}
@@ -447,7 +530,7 @@ func (c *catalogService) ollamaCatalog() ([]CatalogModel, ollamaLibraryFile, err
 		slog.Info("ollama model catalog loaded",
 			"models", len(c.ollama), "scrapedAt", file.ScrapedAt)
 	})
-	return c.ollama, c.ollamaMeta, c.ollamaErr
+	return validCatalogModels(c.ollama), c.ollamaMeta, c.ollamaErr
 }
 
 // normalizeOllamaRows converts committed rows into the shared shape, dropping
@@ -456,11 +539,8 @@ func normalizeOllamaRows(rows []ollamaLibraryRow) []CatalogModel {
 	seen := make(map[string]int, len(rows))
 	out := make([]CatalogModel, 0, len(rows))
 	for _, r := range rows {
-		name := strings.TrimSpace(r.Name)
-		if name == "" {
-			name = strings.TrimSpace(r.Model)
-		}
-		if name == "" {
+		name, ok := catalogIdentifier(r.Name, r.Model)
+		if r.invalidIdentifier || !ok {
 			continue
 		}
 		// The library page is the only URL an Ollama model has; the tag suffix
@@ -515,7 +595,7 @@ func (l *listingCache) get(ctx context.Context) ([]CatalogModel, time.Time, erro
 	if fresh || (haveList && backingOff) {
 		models, at := l.models, l.fetched
 		l.mu.Unlock()
-		return models, at, nil
+		return validCatalogModels(models), at, nil
 	}
 	// The backoff holds with nothing cached too. That is the likelier case for
 	// it — a machine that has never reached Hugging Face — and without it every
@@ -541,16 +621,14 @@ func (l *listingCache) get(ctx context.Context) ([]CatalogModel, time.Time, erro
 		if at.IsZero() {
 			return nil, time.Time{}, fmt.Errorf("%s unavailable", l.label)
 		}
-		return models, at, nil
+		return validCatalogModels(models), at, nil
 	}
 	done := make(chan struct{})
 	l.inflight = done
 	l.mu.Unlock()
 
 	models, err := l.fetch(ctx)
-	if err == nil && len(models) == 0 && !l.emptyOK {
-		err = fmt.Errorf("%s returned no models", l.label)
-	}
+	models = validCatalogModels(models)
 
 	l.mu.Lock()
 	if err == nil {
@@ -574,7 +652,7 @@ func (l *listingCache) get(ctx context.Context) ([]CatalogModel, time.Time, erro
 		slog.Warn("model catalog refresh failed; serving the previous list",
 			"catalog", l.label, "models", len(served), "err", err)
 	}
-	return served, at, nil
+	return validCatalogModels(served), at, nil
 }
 
 func (c *catalogService) fetchLmStudio(ctx context.Context) ([]CatalogModel, error) {
@@ -607,8 +685,7 @@ func (c *catalogService) llamaCPPSearch(query string) *listingCache {
 	search, ok := c.llamaSearches[key]
 	if !ok {
 		search = &listingCache{
-			label:   "llama.cpp search",
-			emptyOK: true,
+			label: "llama.cpp search",
 			fetch: func(ctx context.Context) ([]CatalogModel, error) {
 				rows, err := c.fetchHF(ctx, llamaCPPListing("search", query))
 				if err != nil {
@@ -706,9 +783,19 @@ func (c *catalogService) fetchHF(ctx context.Context, q url.Values) ([]hfModelRo
 		return nil, fmt.Errorf("model catalog returned %s", resp.Status)
 	}
 
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxCatalogBody+1))
+	if err != nil {
+		return nil, fmt.Errorf("read model catalog: %w", err)
+	}
+	if len(body) > maxCatalogBody {
+		return nil, fmt.Errorf("model catalog exceeds size limit")
+	}
 	var rows []hfModelRow
-	if err := json.NewDecoder(io.LimitReader(resp.Body, maxCatalogBody)).Decode(&rows); err != nil {
+	if err := json.Unmarshal(body, &rows); err != nil {
 		return nil, fmt.Errorf("decode model catalog: %w", err)
+	}
+	if rows == nil {
+		return nil, fmt.Errorf("model catalog must be an array")
 	}
 	return rows, nil
 }
@@ -725,11 +812,8 @@ func normalizeHFRows(rows []hfModelRow) []CatalogModel {
 	seen := make(map[string]int, len(rows))
 	out := make([]CatalogModel, 0, len(rows))
 	for _, r := range rows {
-		id := strings.TrimSpace(r.ID)
-		if id == "" {
-			id = strings.TrimSpace(r.ModelID)
-		}
-		if id == "" {
+		id, ok := catalogIdentifier(r.ID, r.ModelID)
+		if r.invalidIdentifier || !ok {
 			continue
 		}
 		author := lmStudioAuthor
@@ -821,11 +905,8 @@ func normalizeLlamaCPPRows(rows []hfModelRow) []CatalogModel {
 // repos with no file at the quantization offered, which fail once the download
 // has begun.
 func llamaCPPModel(r hfModelRow) (CatalogModel, bool) {
-	repo := strings.TrimSpace(r.ID)
-	if repo == "" {
-		repo = strings.TrimSpace(r.ModelID)
-	}
-	if !llamaCPPRepoPattern.MatchString(repo) {
+	repo, ok := catalogIdentifier(r.ID, r.ModelID)
+	if r.invalidIdentifier || !ok || !llamaCPPRepoPattern.MatchString(repo) {
 		return CatalogModel{}, false
 	}
 	// Only an explicit false is open. A gated repo reports how it is gated, and
@@ -844,6 +925,9 @@ func llamaCPPModel(r hfModelRow) (CatalogModel, bool) {
 		return CatalogModel{}, false
 	}
 	id := repo + ":" + llamaCPPQuantization
+	if nodepolicy.ValidateModelIdentifier(id) != nil {
+		return CatalogModel{}, false
+	}
 	tags := r.Tags
 	if !hasTag(tags, llamaCPPQuantization) {
 		tags = append(append([]string(nil), tags...), llamaCPPQuantization)
