@@ -446,6 +446,19 @@ One limit is outside the proxy's control: current Chromium-based browsers gate a
   trying under a dispatch budget and a wall-clock deadline, and it commits to a
   node at the first byte of response body rather than at its headers. `spec.md`
   §5.1–§5.4 is normative for the bounds, the commit point, and the statuses.
+- **Paused peers**: For inference, including requests without a `model` member
+  and tier requests, `resolveRouteCandidates` leaves a remote node out of the
+  result set when its advertised pause hint `Node.PausedBy` is non-empty. Self
+  and dormant self (judged by their own admission), manual nodes (no hint),
+  model lists, preflights and other non-inference requests are not filtered. The
+  hint is a snapshot refreshed on a nominal 15-second cadence and kept when a
+  fetch fails, so the destination's admission `503`, with the header
+  `X-PAIR-Admission: paused`, wins over a stale hint and the router fails over.
+  When hints exclude
+  every remote candidate and no self candidate remains, a concrete request gets
+  `502` and a tier request `404`. See [spec §5](spec.md#5-request-path),
+  [§12.2](spec.md#122-admission) and
+  [Node availability](../../docs/node-availability.mdx).
 
 ### Node policy: admission, tiers, cancel (fork)
 

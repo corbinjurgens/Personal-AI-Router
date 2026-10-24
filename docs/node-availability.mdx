@@ -236,8 +236,9 @@ destination:
 
 - A router that still believes a node is available sends the request. The node
   refuses it at admission with HTTP 503, `X-PAIR-Admission: paused` and
-  `Retry-After: 30`, and the router fails over to its next candidate. The
-  request is relayed as that 503 only when there is no candidate left.
+  `Retry-After: 30`, and the router fails over to its next candidate while another
+  dispatch is permitted. On the final permitted attempt the router relays that
+  503, even if other candidates remain.
 - A management change never consults the hint. The target decides from its own
   state, so a peer that has not yet seen the pause still receives `-32011`.
 - A hint that says paused after the node has resumed only keeps the node out of

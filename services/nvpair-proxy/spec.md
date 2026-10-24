@@ -430,11 +430,70 @@ For a model-bearing inference request:
 An ineligible manual selection cannot override the capability gate, and failover
 never broadens to an excluded node.
 
-Every inference request excludes advertised paused remote nodes before host
-deduplication, including requests without a `model` member. A model-less request
-has no model-owner filter. Self continues through local admission, and manual
-nodes without pause hints remain eligible. Model lists and control requests
-enumerate candidates without the inference pause filter.
+**Paused remote peers.** `resolveRouteCandidates(model, inference)` in `proxy.go`
+owns the pause rule. `resolveCandidates` calls it with `inference` true and
+`resolvePassthroughCandidates` with false. For an inference request, a remote
+node is not added to the result set when its `Node.PausedBy` is non-empty. Any
+non-empty value excludes, including an origin this build does not know. The hint
+is advisory (§12.2): it decides routing eligibility only, never what the peer
+will accept.
+
+Ordering (explicit `node/select` pin, scheduler priority, stable ID fallback) is
+computed over the full owner list. The exclusion is applied at the step that adds
+each node to the result set, before host deduplication, not before ordering: an
+excluded node does not claim its resolved host, so another record for that host
+stays eligible. The rule covers a concrete model, a request without a `model`
+member (which has no model-owner filter) and a tier request, because
+`resolveTierCandidates` obtains candidates for applicable declared roles and
+eligible local tier entries through `resolveCandidates`; API entries are
+skipped. `hybridLocalCandidates` takes its candidates from
+`resolveTierCandidates` and so inherits the rule. As the hybrid description
+above states, no HTTP entry selects the hybrid policy yet, and the routing
+listener answers inference with `501` (§12.6).
+
+The hint does not remove:
+
+- Self, including a dormant self candidate (§12.2). Local admission judges it,
+  and a paused self candidate is refused there with `503`.
+- A manual node without a pause hint. A manually added node carries no policy
+  advertisement, so it normally has none.
+- Model lists, CORS preflights and other non-inference requests, which
+  enumerate candidates through `resolvePassthroughCandidates` without the
+  inference pause filter.
+
+Each resolution reads the current discovery snapshot, so a hint takes effect on
+the next resolution after the proxy holds it. A pause-hint update alone does not
+alter already-resolved candidates; §5.1 re-resolves between rounds, and a local
+policy generation change can also rebuild the current round. A hint-only change
+emits no `node/updated`. The hint is a snapshot of the peer's saved policy, not
+live state. Its scanner refresh has a nominal 15-second cadence plus other
+refresh work, observing a pause or resume needs a successful fetch, and a failed
+fetch keeps the last successful policy indefinitely, so no convergence time is
+guaranteed. A peer fetched from a non-loopback address must be an admitted,
+pinned cluster peer reached over HTTPS through the cluster transport; an unpinned
+LAN peer is refused with no plaintext fallback. Loopback addresses use plaintext,
+so a loopback fixture shows propagation, not authenticated fetching. The
+[scanner README](../nvpair-node-scanner/README.md) is the owner of that fetch.
+
+The destination wins over a stale hint. A peer that is paused while the proxy
+still holds an empty hint for it receives the request and refuses it at admission
+with `503`, `X-PAIR-Admission: paused` and `Retry-After: 30`. The router treats
+the rejection as retryable while another dispatch is permitted. On the final
+permitted attempt it relays the peer's `503`, even if other candidates remain. A hint that outlives a resume only keeps the node out of inference routing
+until a later fetch replaces it. Management changes never consult the hint; the
+target's own state decides them.
+
+When hints exclude every remote candidate and no self candidate remains, a
+concrete model request is answered with the local `502`
+`{"error":"no available node advertises the requested model"}`, a request without
+a `model` member with `502` `{"error":"no active node selected or available"}`,
+and a tier request with `404` `no eligible model for tier <tier>` (§12.3). None
+carries `X-PAIR-Admission` or `Retry-After`, and no engine is contacted.
+
+The hint changes neither a node's advertised inventory nor its declared roles,
+so the combined model list and the tier aliases keep their declared contents
+while dispatch skips paused peers. This section makes no claim about whether a
+paused node stays in or leaves any inventory; that follows ordinary discovery.
 
 The llama.cpp facade exposes `GET /models` and `GET /v1/models` as aliases for
 the fleet's llama.cpp inventory. Both query every candidate's `GET /models`
@@ -1461,6 +1520,23 @@ the job deadline.
 here. A self candidate refused while the node is not `available` is excluded
 for the rest of the request; when nothing else can take it, the request is
 answered at once with the admission `503` instead of spending its retry budget.
+
+**Peers that are paused.** The same admission runs on the cluster ingress (§7),
+so a request that reaches a peer that is paused or draining is refused there
+with `503` and `X-PAIR-Admission: paused` (`Retry-After: 30`) or `draining`
+(`Retry-After: 5`). This is what a router receives when its pause hint for that
+peer was stale (§5); it fails over like any other failed candidate. The router's
+own filter is described in §5 and is only a routing preference.
+
+**Pause hint metadata.** `subscribedToNode` copies `DirectoryNode.Policy.PausedBy`
+onto the internal `Node.PausedBy`, together with `Roles`, `ServedModels`,
+`PolicyRevision` and `StrictAdmission`. `PausedBy` is `local` or `peer` for a
+pause with recorded provenance and empty otherwise, so a stored pause without
+provenance is not advertised as a pause. `nodeEqual` ignores these
+fields, so a revision or pause-hint change announces no `node/updated`.
+Availability itself is never carried in discovery TXT data; the hint arrives in
+the peer's inventory policy. A node without a policy advertisement, such as a
+manual node, has an empty hint.
 
 **Waking a stopped engine.** The broker advertises an engine only while it is
 healthy, so a stopped engine drops this node out of that engine's discovery
