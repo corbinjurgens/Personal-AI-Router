@@ -1750,8 +1750,7 @@ func TestUnifiedDispatchPeekReadErrorAndTimeout(t *testing.T) {
 }
 
 // serveHybridDispatch runs one inference request on the common driver under a
-// hybrid policy, prepared as handleHTTP prepares a concrete one. No production
-// caller sends a hybrid policy yet.
+// hybrid policy, prepared as the shared HTTP inference entry prepares one.
 func serveHybridDispatch(t *testing.T, f *facade, body string, policy dispatchPolicy) (*httptest.ResponseRecorder, *routingSpend) {
 	t.Helper()
 	p := f.host

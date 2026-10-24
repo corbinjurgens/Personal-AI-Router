@@ -186,8 +186,8 @@ whose advertised role carries finite qualification
 role's normalized model (`Node.strictModel`; this node's own installed
 capability for itself). Router tier entries never make a node hybrid eligible.
 The hybrid branch of `routingSpend.dispatch` calls this filter. The HTTP facade
-still supplies `concreteDispatchPolicy`; no HTTP entry supplies the hybrid
-policy yet (§5.1, §12.6).
+supplies `concreteDispatchPolicy`; the unified listener supplies the hybrid
+policy through the same HTTP request lifecycle (§5.1, §12.6).
 
 ### Local qualification and identity (B)
 
@@ -447,9 +447,8 @@ member (which has no model-owner filter) and a tier request, because
 `resolveTierCandidates` obtains candidates for applicable declared roles and
 eligible local tier entries through `resolveCandidates`; API entries are
 skipped. `hybridLocalCandidates` takes its candidates from
-`resolveTierCandidates` and so inherits the rule. As the hybrid description
-above states, no HTTP entry selects the hybrid policy yet, and the routing
-listener answers inference with `501` (§12.6).
+`resolveTierCandidates` and so inherits the rule, including inference entering
+through the unified routing listener (§12.6).
 
 The hint does not remove:
 
@@ -505,9 +504,10 @@ not inventory scope. Its inference routes remain `/v1/*`.
 
 Concrete HTTP inference uses `concreteDispatchPolicy(start)` on the common
 `routingSpend.dispatch` owner, with the bounds below. The same driver contains
-a hybrid policy branch; this is implemented selection machinery, not an enabled
-HTTP inference entry. The listener still refuses inference (§12.6), and the
-facade retains concrete and legacy bare-tier behavior (§12.3).
+a hybrid policy branch used by the unified listener (§12.6). Both enter through
+`facade.serveInference` for context, cancellation, owned buffering, registration
+and the response sink. The facade retains concrete and legacy bare-tier
+behavior (§12.3), including registration before its early validation exits.
 
 | Bound | Value | Governs |
 | --- | --- | --- |
@@ -599,7 +599,7 @@ Refused candidates consume no attempt and trigger no credential lookup,
 durable reservation or send. In this build `PublicDispatchAvailable()` is
 false, policy validation refuses remote/paid permissions and enabled
 deployments, and no production public qualification source is installed.
-This branch supplies no public activation or HTTP dispatch path.
+The listener entry supplies no public activation or permission.
 
 The first accepted successful raw response byte commits through the same
 owner and sink (§5.2), stopping the pre-output watch. A committed stream is
@@ -1561,8 +1561,8 @@ is resolved by the node it enters.
   the policy's origin-only `routing` section. The reachable concrete/legacy
   tier resolver considers `local` entries only and skips `api` entries without
   error: an API-only tier has no dispatch candidate there. Alias lists still
-  include API-only tiers (below). The common driver's hybrid branch is present
-  (§5.1), but no HTTP entry selects it. Migrating a
+  include API-only tiers (below). The unified listener selects the common
+  driver's hybrid branch (§5.1, §12.6). Migrating a
   version 1 file tags every entry `local`, so it resolves the candidates it
   resolved before.
 
@@ -1639,8 +1639,8 @@ is resolved by the node it enters.
   Nested keys, other fields and other paths are not checked. A bare tier in
   `name`, a query parameter or a model path keeps today's behavior. A bare tier
   spelled exactly in `model` on a classified inference route (including native
-  and Messages routes) keeps the tier path above until the Phase 4 cutover;
-  staged hybrid settings do not change it. The cluster ingress (§7) is not
+  and Messages routes) keeps the tier path above on facade entry; unified
+  listener inference uses §12.6. The cluster ingress (§7) is not
   covered; refusing aliases there is Phase 4 work.
 - **Model lists**: an OpenAI-shape model list (`/v1/models`, llama.cpp's
   `/models`) gains `{"id":"<alias>","object":"model","created":0,"owned_by":"pair"}`
@@ -1785,10 +1785,10 @@ subsequent cancellation arrives.
 An engine-independent loopback listener that serves the hybrid aliases (§12.3)
 with no engine running. Its configuration is the active policy's
 `routing.listener` (`enabled`, `port`, `allowedOrigins`), off by default. It has
-no engine profile, facade, discovery state or cluster personality, and is never
-advertised to peers: the proxy sends nothing upward about it except the
-unaddressed `errors:report` and `errors:clear` below, and no `ready`,
-discovery or node notification names its port.
+no independently enabled facade, discovery state or cluster personality, and
+is never advertised to peers. Bind state uses the unaddressed `errors:report`
+and `errors:clear` below; no `ready`, discovery or node notification names its
+port. Inference uses the existing request/workload notification contract.
 
 - **Lifecycle**: `node/set-policy` reconciles it after the revision activates,
   from the policy the controller then holds. Enabled with a port, it binds
@@ -1802,8 +1802,8 @@ discovery or node notification names its port.
   a 10-second header timeout, 90-second keep-alive idle timeout and 64 KiB
   header limit, with no whole-response `WriteTimeout`.
   A request that declares a body is still answered with `Connection: close`,
-  because no handler reads a body and net/http would otherwise read the unread
-  body before sending the answer. Only the listener this code owns is touched;
+  so net/http does not drain an unread body before a gate refusal. Accepted
+  inference reads through the common owned buffering path. Only the listener this code owns is touched;
   facades are unaffected. Process shutdown closes it before the facades using
   the shared three-second shutdown context and permanently stops reconciliation.
   This bounds HTTP teardown after the control read loop returns; cancelling a
@@ -1856,9 +1856,9 @@ discovery or node notification names its port.
   time it is not blocked in this process, which also clears an error a previous
   process left in the pipeline.
 - **Request order**: `Host`, then `Origin`, then route and method, then (for an
-  inference route) the query check, then the refusal. The first failing step
-  answers; none reads the body or touches a facade, admission, discovery or the
-  scheduler.
+  inference route) the query check, then the shared inference entry. The first
+  failing gate answers before body reads, registration, admission, discovery
+  or scheduler effects. Preflight is handled before inference entry.
   - `Host` must be `127.0.0.1` or `localhost` (case-insensitive) with exactly
     the port captured from the accepted connection's local address by
     `ConnContext`, else `403` `host_not_allowed`. After a rebind, an old
@@ -1878,22 +1878,51 @@ discovery or node notification names its port.
     a `POST` inference route (`isInferenceRequest`), so the set is the facades'
     union. Another method on a known path is `405` with `Allow`; an unknown path
     is `404`. A query string or a bare `?` on an inference route is `400`
-    `query_not_allowed`. Otherwise `501`
-    `{"error","code":"feature_unavailable","reason":"routing_listener_not_inference_ready"}`.
-    The Q4-gated dispatch cutover has not landed: only listener lifetime work
-    from I5-b2 is present. The aliases are listed but not inference-ready;
-    the common driver's hybrid policy (§5.1) does not change this refusal.
+    `query_not_allowed`. Otherwise `serveHybridInference` in `routing.go`
+    delegates to the common HTTP inference lifecycle with
+    `hybridDispatchPolicy` (§5.1). Limits bound owned body preparation and
+    dispatch before output; commitment stops that deadline, so a healthy
+    accepted stream survives activation changes and rebind.
   - `OPTIONS` with `Origin` and `Access-Control-Request-Method` on a known path
     is a preflight: `204` with `Access-Control-Allow-Methods` (the route's
     method and `OPTIONS`), `Access-Control-Allow-Headers: Content-Type,
     Authorization` and `Access-Control-Max-Age`, provided the requested method is
     the route's own and every requested header is one of those two; else `403`
     `preflight_not_allowed`. An `OPTIONS` that is not a preflight is `405`.
-- **Alias parsing**: the listener refuses every inference request regardless of
-  the model it names, so it does not parse bodies and shares no alias-parsing
-  code with the facades; `aliasRejection` and `requestAliasRejection` (§12.3)
-  remain the only place a model name is judged. Phase 4 decides what the
-  listener does with a named model.
+- **Alias parsing**: `ownInferenceBuffers` and `bufferInferenceBody` retain the
+  same storage account and effective individual body limit as the facade.
+  `validateRequestIdentifiers` checks every top-level model/name occurrence;
+  `ambiguousModelMember` refuses duplicates (including escaped keys) and
+  case-folded model spellings with `400` `ambiguous-model` before selection.
+  Exactly one top-level model naming an exact supported alias is required;
+  malformed JSON, concrete models, missing models and alias lookalikes return
+  `400` `unsupported-alias`. A single escaped spelling of the exact key or
+  alias is accepted. Nested model values are payload, not selectors.
+  Bare aliases follow the tier's `bareMode`; `-local` excludes public
+  destinations and `-api` excludes local destinations. Public remains disabled
+  by nodepolicy and the egress permission owner, so API-only requests return
+  `404` without falling through to local candidates. Other aliases use the
+  existing hybrid qualified-role selector, and only the selected concrete model
+  replaces the top-level alias. Facade alias refusal and strict/concrete
+  behavior (§12.3) retain their existing precedence. A strict admission header
+  on the unified listener is refused with `400` `strict-admission`: destination
+  admission remains local to the existing strict entry.
+- **Entry ownership**: the compatible enabled facade with the lexically first
+  engine name lends its dialect and notification ID sequence; OpenAI requests
+  still resolve across enabled engines. No new socket, subscription, persistent
+  state or request lifecycle owner is created. Without a compatible facade,
+  a request-local empty adapter remains excluded from local selection even if
+  a facade is enabled during body preparation. With public unavailable this
+  path emits no workload and cannot collide with a facade workload ID.
+  Both entries call `facade.serveInference`, which installs the request context,
+  cancellation reason, `newRoutingRequest`, storage owner, canonical registry,
+  response sink and common dispatch. Its defers unwind every early return and
+  retain registry discovery until outstanding buffer borrowers join. Disable
+  and shutdown cancel this same owner and force-close stalled sockets within
+  the listener grace; no detached body reader is introduced. Parent transport
+  writes remain bounded by `newOwnedCodec`/`NotifyContext` and transport close,
+  independently of HTTP grace. Context cancellation alone does not interrupt
+  `codec.Read` or prove broader parent-I/O acceptance.
 
 ### 12.7 Provider account ledger (D)
 

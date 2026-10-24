@@ -386,11 +386,48 @@ type dispatchPolicy struct {
 	deadline            time.Time
 	queueWait, coldWait time.Duration
 	hybrid              bool
+	apiOnly             bool
 	publicAllowed       bool
 }
 
 func concreteDispatchPolicy(start time.Time) dispatchPolicy {
 	return dispatchPolicy{maxAttempts: maxDispatchAttempts, deadline: start.Add(jobDeadline)}
+}
+
+// serveHybridInference enters the common HTTP request owner after listener
+// gates. An enabled compatible facade lends its dialect and ID sequence, never
+// its socket. OpenAI routes resolve across the enabled engine overlays.
+// Without a compatible facade the request-local adapter has no overlay or
+// listener: it can only refuse, as public dispatch is unavailable. It never
+// emits a workload or competes with a real facade's workload ID sequence.
+func (p *Proxy) serveHybridInference(w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
+	var f *facade
+	for _, enabled := range p.enabledFacades() {
+		if isInferenceRequest(enabled.profile, r.Method, r.URL.Path) && (f == nil || enabled.profile.Name < f.profile.Name) {
+			f = enabled
+		}
+	}
+	noFacade := f == nil
+	if noFacade {
+		for _, profile := range profiles {
+			if isInferenceRequest(profile, r.Method, r.URL.Path) {
+				f = newFacade(p, profile, NewDiscovery(), 0)
+				break
+			}
+		}
+	}
+	if f == nil {
+		writeIngressError(w, http.StatusNotFound, "not_found", "no such inference route")
+		return
+	}
+	pol := p.admission.currentPolicy()
+	policy := hybridDispatchPolicy(start, pol.Routing.Limits, nodepolicy.TierRouting{})
+	// Do not acquire a newly enabled overlay during body preparation on this
+	// unregistered adapter. Its numeric notification ID has no facade sequence.
+	policy.apiOnly = noFacade
+	reqID := strconv.FormatUint(f.nextRequestID.Add(1), 10)
+	f.serveInference(w, r, start, reqID, defaultStreamFrameIdle, policy)
 }
 
 // hybridDispatchPolicy reads one request's Limits. Public selection also
@@ -503,8 +540,12 @@ func (ctl *routingSpend) dispatch(f *facade, w http.ResponseWriter, r *http.Requ
 	tier := ""
 	var needs requestNeeds
 	crossEngine := false
-	if nodepolicy.IsTier(model) {
+	if policy.hybrid {
+		tier, _, _ = nodepolicy.ParseAlias(model)
+	} else if nodepolicy.IsTier(model) {
 		tier = model
+	}
+	if tier != "" {
 		needs, err = parseRequestNeedsOwned(preparationCtx, bodyBytes, r.URL.Path)
 		if err != nil {
 			writeIngressError(w, bufferRequestStatus(err), "inference-buffer", "inference request could not be prepared")
@@ -520,7 +561,7 @@ func (ctl *routingSpend) dispatch(f *facade, w http.ResponseWriter, r *http.Requ
 		if policy.hybrid {
 			// The tier order filtered to qualified declared roles; never a
 			// second selector. A hybrid request without a tier has none.
-			if tier != "" {
+			if tier != "" && !policy.apiOnly {
 				for _, h := range f.hybridLocalCandidates(tier, needs, crossEngine) {
 					strictFor[hybridCandidateKey(h.candidate)] = h.strict
 					cands = append(cands, h.candidate)

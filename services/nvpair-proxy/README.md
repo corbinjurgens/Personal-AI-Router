@@ -108,10 +108,10 @@ capability for its engine and normalized model; peers without one keep concrete
 routing. The common request owner's hybrid policy branch now calls this filter,
 preserving tier candidate order, and shares attempts, strict queue/cold allowances
 and one pre-output deadline across destinations. Concrete HTTP inference still
-passes `concreteDispatchPolicy`; no HTTP entry selects the hybrid policy yet.
-The loopback routing listener lists aliases but refuses inference with `501`
-`routing_listener_not_inference_ready` before reading a body. Its dispatch cutover
-remains gated by Q4. Public selection is independently disabled by
+passes `concreteDispatchPolicy`. The loopback routing listener enters the same
+HTTP request lifecycle with `hybridDispatchPolicy`, buffers under the effective
+individual body limit and accepts one exact tier alias. Qualified local and peer
+destinations receive the selected concrete model. Public selection remains disabled by
 `PublicDispatchAvailable()`. See [Hybrid routing](../../docs/hybrid-routing.mdx)
 for selection bounds and listener lifetime.
 
@@ -607,7 +607,7 @@ Engine switching also has two internal process-scoped requests:
   other paths are not. A bare tier in `name`, a query parameter or a model path
   keeps today's behavior, and a bare tier exactly spelled in `model` on a
   classified inference route keeps the legacy local-only tier path above,
-  unchanged by staged hybrid settings, until the Phase 4 cutover. The cluster
+  on facade entry. Unified listener inference uses the hybrid entry below. The cluster
   ingress is not covered; refusing aliases there belongs to Phase 4.
 - **Routing listener.** When the active policy sets `routing.listener.enabled`
   with a `port`, the process itself (not an engine facade) binds
@@ -631,11 +631,31 @@ Engine switching also has two internal process-scoped requests:
     declare; peers' declarations are not seen here. No upstream request is made.
   - Every inference route any engine profile declares (`POST /v1/chat/completions`,
     `/v1/completions`, `/v1/embeddings`, `/v1/messages`, `/api/generate`,
-    `/api/chat`, `/api/embeddings`, `/api/embed`): `501`
-    `{"error":...,"code":"feature_unavailable","reason":"routing_listener_not_inference_ready"}`
-    without reading the body, so there is no admission, wake, workload, engine
-    or remote activity. **The listed aliases are not inference-ready until
-    Phase 4.** A query string, including a bare `?`, is `400` `query_not_allowed`.
+    `/api/chat`, `/api/embeddings`, `/api/embed`): enters the common inference
+    owner after the Host, Origin, path, method, query and preflight gates.
+    Owned buffering uses the effective individual request limit; all top-level
+    model identifiers are checked before selection. One exact reserved alias
+    is required (`400` `unsupported-alias` otherwise); duplicate or case-folded
+    model members return `400` `ambiguous-model`. Nested model values remain
+    payload. Bare aliases follow `bareMode`; `-local` excludes APIs and `-api`
+    excludes local destinations. With public dispatch disabled, an API-only
+    request has no eligible destination (`404`) and does not fall back locally.
+    Other supported aliases select only qualified declared roles and carry the
+    strict destination envelope on peer hops. A query string, including a bare
+    `?`, is `400` `query_not_allowed`, before body reads or request registration.
+
+  `serveHybridInference` in `routing.go` selects a compatible enabled facade
+  deterministically for the driver's dialect and existing notification ID
+  sequence. It creates no facade listener or discovery subscription. With no
+  compatible facade, a request-local empty adapter is pinned to no local
+  candidates even if a facade is enabled while the body is arriving. With public
+  dispatch unavailable it emits no workload, so its notification ID cannot
+  collide with a real facade's workload. Rejections and successful requests
+  unwind the same buffers, cancellation and canonical registry as facade
+  inference. Rebind preserves committed streams; disable/shutdown cancels them
+  and forces socket close within the three-second listener grace. Parent I/O
+  retains its separate codec/transport lifetime; cancellation alone does not
+  interrupt `codec.Read`.
 
   Other paths are `404` and other methods `405`. `Host` must be `127.0.0.1` or
   `localhost` with the accepted connection's local port, else `403`

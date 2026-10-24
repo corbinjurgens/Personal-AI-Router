@@ -22,6 +22,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -374,7 +375,7 @@ func TestRoutingListener_BindsLoopbackOnly(t *testing.T) {
 	}
 }
 
-func TestRoutingListener_RejectsInferenceWithoutSideEffects(t *testing.T) {
+func TestRoutingListener_InferenceUnqualifiedOrUnsupportedHasNoDispatchEffects(t *testing.T) {
 	const selfID = "self-uuid"
 	tc := ollamaCase(t)
 	models := append([]string{"mid:7b"}, allAliases...)
@@ -421,25 +422,23 @@ func TestRoutingListener_RejectsInferenceWithoutSideEffects(t *testing.T) {
 		p, w, local := newFixture(t)
 		startRouting(t, p, w, "1")
 		port := boundPort(p)
-		setupFrames := len(frames(t, w))
 		for _, path := range []string{
 			"/v1/chat/completions", "/v1/completions", "/v1/embeddings", "/v1/messages",
 			"/api/generate", "/api/chat", "/api/embeddings", "/api/embed",
 		} {
 			got := call(t, port, http.MethodPost, path, nil)
-			if got.status != http.StatusNotImplemented || got.code(t) != "feature_unavailable" {
-				t.Errorf("POST %s = %d %s, want 501 feature_unavailable", path, got.status, got.body)
+			if got.status != http.StatusNotFound {
+				t.Errorf("POST %s = %d %s, want 404 without qualified candidates", path, got.status, got.body)
 			}
 		}
 		if n := local.hits(); n != 0 {
 			t.Errorf("engine received %d request(s), want none", n)
 		}
 		settled(t, p)
-		for _, f := range frames(t, w)[setupFrames:] {
-			if f.ID == nil && f.Method != "errors:clear" && f.Method != nodepolicy.NotifyStrictReadiness {
-				t.Errorf("proxy emitted %q for an inference attempt, want only the listener's error clear", f.Method)
-			}
+		if n := len(notificationsOf(t, w, workloadSubmittedMethod)); n != 0 {
+			t.Errorf("unqualified requests submitted %d workloads", n)
 		}
+		ownedAssertHandlerDrained(t, p, nil)
 	})
 
 	t.Run("every model name form", func(t *testing.T) {
@@ -468,14 +467,23 @@ func TestRoutingListener_RejectsInferenceWithoutSideEffects(t *testing.T) {
 				r.Body = io.NopCloser(strings.NewReader(body))
 				r.ContentLength = int64(len(body))
 			})
-			if got.status != http.StatusNotImplemented || got.code(t) != "feature_unavailable" {
-				t.Errorf("body %q = %d %s, want 501 feature_unavailable", body, got.status, got.body)
+			var request struct {
+				Model string `json:"model"`
+			}
+			parseErr := json.Unmarshal([]byte(body), &request)
+			want := http.StatusBadRequest
+			if parseErr == nil && nodepolicy.IsReservedAlias(request.Model) {
+				want = http.StatusNotFound
+			}
+			if got.status != want {
+				t.Errorf("body %q = %d %s, want %d", body, got.status, got.body, want)
 			}
 		}
 		if n := local.hits(); n != 0 {
 			t.Errorf("engine received %d request(s), want none", n)
 		}
 		settled(t, p)
+		ownedAssertHandlerDrained(t, p, nil)
 	})
 }
 
@@ -696,9 +704,6 @@ func assertFacadesUnchanged(t *testing.T, ports map[string]int, before map[strin
 		if got.status != want.status || string(got.body) != string(want.body) {
 			t.Errorf("%s facade answered %d %q after the listener event, want the unchanged %d %q",
 				engine, got.status, got.body, want.status, want.body)
-		}
-		if strings.Contains(string(got.body), routingReasonNotInferenceReady) {
-			t.Errorf("%s facade was answered by the routing listener: %s", engine, got.body)
 		}
 	}
 }
@@ -1027,8 +1032,8 @@ func TestRoutingListener_DeniesBrowserOriginsUnlessExactlyAllowed(t *testing.T) 
 	})
 	t.Run("allowed origin can read the inference refusal", func(t *testing.T) {
 		got := call(t, port, http.MethodPost, "/v1/chat/completions", withHeader("Origin", allowed))
-		if got.status != http.StatusNotImplemented || got.header.Get("Access-Control-Allow-Origin") != allowed {
-			t.Errorf("status %d, allow-origin %q; want 501 granting %q", got.status, got.header.Get("Access-Control-Allow-Origin"), allowed)
+		if got.status != http.StatusNotFound || got.header.Get("Access-Control-Allow-Origin") != allowed {
+			t.Errorf("status %d, allow-origin %q; want 404 granting %q", got.status, got.header.Get("Access-Control-Allow-Origin"), allowed)
 		}
 	})
 
@@ -1289,7 +1294,7 @@ func TestRoutingListener_StalledClientsNeitherDelayAnAnswerNorHoldTheControlLoop
 		}
 	}
 	head := func(port int) string {
-		return "POST /v1/chat/completions HTTP/1.1\r\nHost: 127.0.0.1:" + strconv.Itoa(port) +
+		return "POST /v1/chat/completions?denied=1 HTTP/1.1\r\nHost: 127.0.0.1:" + strconv.Itoa(port) +
 			"\r\nContent-Type: application/json\r\nContent-Length: 100\r\n\r\n"
 	}
 
@@ -1310,8 +1315,8 @@ func TestRoutingListener_StalledClientsNeitherDelayAnAnswerNorHoldTheControlLoop
 				t.Fatalf("no refusal within 1s of a stalled body: %v", err)
 			}
 			_ = resp.Body.Close()
-			if resp.StatusCode != http.StatusNotImplemented {
-				t.Errorf("status = %d, want 501", resp.StatusCode)
+			if resp.StatusCode != http.StatusBadRequest {
+				t.Errorf("status = %d, want query refusal 400", resp.StatusCode)
 			}
 
 			// Headers never finished.
@@ -1337,7 +1342,7 @@ func TestRoutingListener_StalledClientsNeitherDelayAnAnswerNorHoldTheControlLoop
 }
 
 // Replace the handler before the existing Serve gate opens. This exercises the
-// production server lifecycle without enabling the Q4-gated inference route.
+// production server lifecycle independently of inference selection.
 func routingLifetimeFixture(t *testing.T, p *Proxy, w *recordingWriter, handler http.Handler) int {
 	t.Helper()
 	gate := make(chan struct{})
@@ -1475,4 +1480,415 @@ func TestRoutingListener_ShutdownClosesBlockedBodyWithinGrace(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("forced socket close did not release the body reader")
 	}
+}
+
+func inferenceListener(t *testing.T, fx *tierFixture) int {
+	t.Helper()
+	t.Cleanup(func() { fx.p.shutdown(context.Background()) })
+	return startRoutingPolicy(t, fx.p, fx.w, fx.p.admission.currentPolicy())
+}
+
+func inferencePost(t *testing.T, port int, body string) *http.Response {
+	t.Helper()
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodPost,
+		"http://127.0.0.1:"+strconv.Itoa(port)+routeChatCompletions, strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := noKeepAlive.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = resp.Body.Close() })
+	return resp
+}
+
+func waitInferenceDrained(t *testing.T, p *Proxy) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		requests := len(p.activeRoutingRequests())
+		p.buffers.mu.Lock()
+		used := p.buffers.used
+		p.buffers.mu.Unlock()
+		if requests == 0 && used == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("inference did not drain: requests=%d bytes=%d", requests, used)
+		}
+		time.Sleep(time.Millisecond)
+	}
+	ownedAssertHandlerDrained(t, p, nil)
+}
+
+func TestRoutingListener_InferenceModelMembers(t *testing.T) {
+	test := func(name, body string, wantStatus, wantHits int, wantCode string) {
+		t.Run(name, func(t *testing.T) {
+			fx := hybridPeerFixture(t, map[string]int{"peer": http.StatusOK})
+			port := inferenceListener(t, fx)
+			resp := inferencePost(t, port, body)
+			data, err := io.ReadAll(resp.Body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if resp.StatusCode != wantStatus || fx.eng["peer"].hits() != wantHits {
+				t.Fatalf("status/hits = %d/%d, want %d/%d; body %s", resp.StatusCode, fx.eng["peer"].hits(), wantStatus, wantHits, data)
+			}
+			if wantCode != "" && (answer{body: data}).code(t) != wantCode {
+				t.Fatalf("refusal = %s, want code %s", data, wantCode)
+			}
+			if wantHits != 0 {
+				var forwarded struct {
+					Model   string `json:"model"`
+					Payload struct {
+						Model string `json:"model"`
+					} `json:"payload"`
+				}
+				if err := json.Unmarshal([]byte(fx.eng["peer"].lastBody()), &forwarded); err != nil {
+					t.Fatal(err)
+				}
+				if forwarded.Model != "q:1b" {
+					t.Fatalf("forwarded model = %q, want the selected concrete model", forwarded.Model)
+				}
+				if strings.Contains(body, `"payload"`) && forwarded.Payload.Model != "weak-api" {
+					t.Fatalf("nested payload changed: %+v", forwarded.Payload)
+				}
+				decodeStrictHeader(t, fx.eng["peer"].lastHeader())
+			} else if len(notificationsOf(t, fx.w, workloadSubmittedMethod)) != 0 {
+				t.Fatal("refused request submitted a workload")
+			}
+			waitInferenceDrained(t, fx.p)
+		})
+	}
+	test("bare alias", hybridTestBody, http.StatusOK, 1, "")
+	test("local alias", `{"model":"weak-local"}`, http.StatusOK, 1, "")
+	test("API alias never falls through to local", `{"model":"weak-api"}`, http.StatusNotFound, 0, "")
+	test("nested model is payload", `{"model":"weak","payload":{"model":"weak-api"}}`, http.StatusOK, 1, "")
+	test("nested model cannot select", `{"payload":{"model":"weak"}}`, http.StatusBadRequest, 0, "unsupported-alias")
+	test("escaped model key", `{"mo\u0064el":"weak"}`, http.StatusOK, 1, "")
+	test("escaped alias value", `{"model":"we\u0061k"}`, http.StatusOK, 1, "")
+	test("duplicate escaped key", `{"model":"weak","mo\u0064el":"weak-local"}`, http.StatusBadRequest, 0, "ambiguous-model")
+	test("duplicate unsupported first", `{"model":"weak-api","model":"weak"}`, http.StatusBadRequest, 0, "ambiguous-model")
+	test("duplicate unsupported last", `{"model":"weak","model":"ordinary"}`, http.StatusBadRequest, 0, "ambiguous-model")
+	test("case folded model key", `{"Model":"weak"}`, http.StatusBadRequest, 0, "ambiguous-model")
+	test("ordinary concrete model", `{"model":"q:1b"}`, http.StatusBadRequest, 0, "unsupported-alias")
+	test("padded alias", `{"model":" weak "}`, http.StatusBadRequest, 0, "unsupported-alias")
+	test("tagged alias", `{"model":"weak:latest"}`, http.StatusBadRequest, 0, "unsupported-alias")
+	test("malformed JSON", `{"model":"weak",`, http.StatusBadRequest, 0, "unsupported-alias")
+	test("all identifiers checked", `{"model":"`+strings.Repeat("x", maxRequestIdentifierBytes+1)+`","model":"weak"}`, http.StatusBadRequest, 0, "request-body")
+}
+
+func TestRoutingListener_InferenceGatesPrecedeBodyAndOwner(t *testing.T) {
+	test := func(name, method, path string, mutate func(*http.Request), want int) {
+		t.Run(name, func(t *testing.T) {
+			p, _ := zeroFacadeProxy(t)
+			source := &ownedBodySource{budget: p.buffers, remaining: 100}
+			r := httptest.NewRequest(method, "http://localhost:8123"+path, nil)
+			r.Body, r.ContentLength = source, 100
+			r = r.WithContext(context.WithValue(r.Context(), routingPortContextKey{}, 8123))
+			mutate(r)
+			w := httptest.NewRecorder()
+			(&routingHandler{host: p}).ServeHTTP(w, r)
+			if w.Code != want || source.reads != 0 || len(p.activeRoutingRequests()) != 0 || p.requestSequence != 0 {
+				t.Fatalf("gate status/reads/sequence = %d/%d/%d, want %d/0/0", w.Code, source.reads, p.requestSequence, want)
+			}
+			ownedAssertHandlerDrained(t, p, nil)
+		})
+	}
+	unchanged := func(*http.Request) {}
+	test("host", http.MethodPost, routeChatCompletions, func(r *http.Request) { r.Host = "evil.test:8123" }, http.StatusForbidden)
+	test("origin", http.MethodPost, routeChatCompletions, withHeader("Origin", "https://evil.test"), http.StatusForbidden)
+	test("path", http.MethodPost, "/no-such-path", unchanged, http.StatusNotFound)
+	test("method", http.MethodGet, routeChatCompletions, unchanged, http.StatusMethodNotAllowed)
+	test("query", http.MethodPost, routeChatCompletions+"?model=weak", unchanged, http.StatusBadRequest)
+	test("bare query", http.MethodPost, routeChatCompletions+"?", unchanged, http.StatusBadRequest)
+	test("preflight", http.MethodOptions, routeChatCompletions, unchanged, http.StatusMethodNotAllowed)
+}
+
+func TestRoutingListener_InferenceUsesIndividualBodyLimit(t *testing.T) {
+	fx := hybridPeerFixture(t, map[string]int{"peer": http.StatusOK})
+	fx.p.maxRequestBytes = 8
+	port := inferenceListener(t, fx)
+	resp := inferencePost(t, port, hybridTestBody)
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusRequestEntityTooLarge || (answer{body: data}).code(t) != "request-body" || fx.eng["peer"].hits() != 0 {
+		t.Fatalf("oversized request = %d %s, hits %d", resp.StatusCode, data, fx.eng["peer"].hits())
+	}
+	waitInferenceDrained(t, fx.p)
+}
+
+func TestRoutingListener_InferenceEmptyAdapterCannotAcquireLaterFacade(t *testing.T) {
+	fx := hybridPeerFixture(t, map[string]int{"peer": http.StatusOK})
+	f := fx.p.soleFacade()
+	fx.p.facadeMu.Lock()
+	delete(fx.p.facades, f.profile.Name)
+	fx.p.facadeMu.Unlock()
+	port := inferenceListener(t, fx)
+	conn, err := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)), time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if err := conn.SetDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fmt.Fprintf(conn, "POST /v1/chat/completions HTTP/1.1\r\nHost: localhost:%d\r\nContent-Length: %d\r\n\r\n%s", port, len(hybridTestBody), hybridTestBody[:1]); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for len(fx.p.activeRoutingRequests()) != 1 {
+		if time.Now().After(deadline) {
+			t.Fatal("adapter did not enter the shared owner")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	fx.p.facadeMu.Lock()
+	fx.p.facades[f.profile.Name] = f
+	fx.p.facadeMu.Unlock()
+	if _, err := io.WriteString(conn, hybridTestBody[1:]); err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.ReadResponse(bufio.NewReader(conn), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, readErr := io.ReadAll(resp.Body)
+	closeErr := resp.Body.Close()
+	if readErr != nil || closeErr != nil {
+		t.Fatalf("read/close refusal: %v/%v", readErr, closeErr)
+	}
+	if resp.StatusCode != http.StatusNotFound || fx.eng["peer"].hits() != 0 || len(notificationsOf(t, fx.w, workloadSubmittedMethod)) != 0 {
+		t.Fatalf("empty adapter acquired later facade: %d %s, hits %d", resp.StatusCode, data, fx.eng["peer"].hits())
+	}
+	waitInferenceDrained(t, fx.p)
+	// A new request can use the enabled facade and its own ID sequence.
+	ready := inferencePost(t, port, hybridTestBody)
+	if _, err := io.Copy(io.Discard, ready.Body); err != nil {
+		t.Fatal(err)
+	}
+	if ready.StatusCode != http.StatusOK || fx.eng["peer"].hits() != 1 {
+		t.Fatalf("new request status/hits = %d/%d", ready.StatusCode, fx.eng["peer"].hits())
+	}
+	waitInferenceDrained(t, fx.p)
+}
+
+// Replace only a private peer endpoint; qualification and strict advertisements
+// remain those of hybridPeerFixture. No installed port enters discovery.
+func inferencePeerHandler(t *testing.T, fx *tierFixture, id string, handler http.Handler) {
+	t.Helper()
+	server := httptest.NewServer(handler)
+	t.Cleanup(server.Close)
+	n := nodeFor(t, id, server.URL)
+	n.Models = []string{"q:1b"}
+	fx.p.soleFacade().discovery.AddManual(n)
+	fx.advertise(t, id, map[string]nodepolicy.AdvertisedRole{"weak": qualifiedRole("q:1b")}, strictCapabilityFor("ollama", "q:1b"))
+}
+
+func TestRoutingListener_InferencePartialResponseNeverFallsBack(t *testing.T) {
+	fx := hybridPeerFixture(t, map[string]int{"a-partial": http.StatusOK, "b-ready": http.StatusOK})
+	var hits atomic.Int32
+	inferencePeerHandler(t, fx, "a-partial", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		w.Header().Set("Content-Type", "text/event-stream")
+		if _, err := io.WriteString(w, continuitySSEEvent); err != nil {
+			t.Error(err)
+			return
+		}
+		if err := http.NewResponseController(w).Flush(); err != nil {
+			t.Error(err)
+			return
+		}
+		panic(http.ErrAbortHandler)
+	}))
+	port := inferenceListener(t, fx)
+	resp := inferencePost(t, port, `{"model":"weak","stream":true}`)
+	data, err := io.ReadAll(resp.Body)
+	if err != nil || !strings.HasPrefix(string(data), continuitySSEEvent) || resp.StatusCode != http.StatusOK {
+		t.Fatalf("partial response = %d %q, %v", resp.StatusCode, data, err)
+	}
+	assertContinuityError(t, streamProtocolSSE, data, streamInterruptReasonReadFailed)
+	if hits.Load() != 1 || fx.eng["b-ready"].hits() != 0 {
+		t.Fatalf("partial/fallback hits = %d/%d", hits.Load(), fx.eng["b-ready"].hits())
+	}
+	waitInferenceDrained(t, fx.p)
+}
+
+func TestRoutingListener_InferenceHealthyStreamSurvivesActivationAndFormerWriteTimeout(t *testing.T) {
+	fx := hybridPeerFixture(t, map[string]int{"peer": http.StatusOK})
+	release := make(chan struct{})
+	finish := sync.OnceFunc(func() { close(release) })
+	defer finish()
+	done := make(chan error, 1)
+	inferencePeerHandler(t, fx, "peer", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		if _, err := io.WriteString(w, continuitySSEEvent); err != nil {
+			done <- err
+			return
+		}
+		if err := http.NewResponseController(w).Flush(); err != nil {
+			done <- err
+			return
+		}
+		select {
+		case <-release:
+		case <-r.Context().Done():
+			done <- r.Context().Err()
+			return
+		}
+		_, err := io.WriteString(w, "data: [DONE]\n\n")
+		done <- err
+	}))
+	port := inferenceListener(t, fx)
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodPost,
+		"http://127.0.0.1:"+strconv.Itoa(port)+routeChatCompletions, strings.NewReader(`{"model":"weak","stream":true}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := &http.Client{Timeout: proxyReadHeaderTimeout + 5*time.Second, Transport: &http.Transport{DisableKeepAlives: true}}
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	first := make([]byte, len(continuitySSEEvent))
+	if _, err := io.ReadFull(resp.Body, first); err != nil || string(first) != continuitySSEEvent {
+		t.Fatalf("first frame %q, %v", first, err)
+	}
+	if len(fx.p.activeRoutingRequests()) != 1 {
+		t.Fatal("committed stream is missing its canonical owner")
+	}
+	pol := fx.p.admission.currentPolicy()
+	pol.Revision = "2"
+	pol.Routing.Limits.PreOutputBudgetSeconds = 1
+	started := time.Now()
+	activate(t, fx.p, fx.w, pol)
+	pol.Revision = "3"
+	activate(t, fx.p, fx.w, pol)
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("activations stalled behind committed inference for %v", elapsed)
+	}
+	timer := time.NewTimer(proxyReadHeaderTimeout + 100*time.Millisecond)
+	defer timer.Stop()
+	select {
+	case err := <-done:
+		t.Fatalf("committed stream ended before release: %v", err)
+	case <-timer.C:
+	}
+	finish()
+	tail, err := io.ReadAll(resp.Body)
+	if err != nil || string(tail) != "data: [DONE]\n\n" || resp.StatusCode != http.StatusOK {
+		t.Fatalf("stream tail %q, %v, status %d", tail, err, resp.StatusCode)
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	waitInferenceDrained(t, fx.p)
+}
+
+func TestRoutingListener_InferenceBlockedBodyShutdownWithinGrace(t *testing.T) {
+	p, w := zeroFacadeProxy(t)
+	port := startRouting(t, p, w, "1")
+	conn, err := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)), time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if _, err := fmt.Fprintf(conn, "POST /v1/chat/completions HTTP/1.1\r\nHost: localhost:%d\r\nContent-Length: 100\r\n\r\n{", port); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for len(p.activeRoutingRequests()) != 1 {
+		if time.Now().After(deadline) {
+			t.Fatal("body reader did not register its owner")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	started := time.Now()
+	p.shutdown(context.Background())
+	if elapsed := time.Since(started); elapsed > routingShutdownGrace+500*time.Millisecond {
+		t.Fatalf("body shutdown took %v", elapsed)
+	}
+	waitInferenceDrained(t, p)
+}
+
+func TestRoutingListener_InferenceBlockedClientShutdownWithinGrace(t *testing.T) {
+	fx := hybridPeerFixture(t, map[string]int{"peer": http.StatusOK})
+	done := make(chan struct{})
+	inferencePeerHandler(t, fx, "peer", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer close(done)
+		w.Header().Set("Content-Type", "text/event-stream")
+		chunk := `data: {"choices":[{"index":0,"delta":{"content":"` + strings.Repeat("x", 1024) + `"}}]}` + "\n\n"
+		for {
+			if _, err := io.WriteString(w, chunk); err != nil {
+				return
+			}
+			if err := http.NewResponseController(w).Flush(); err != nil {
+				return
+			}
+			if r.Context().Err() != nil {
+				return
+			}
+		}
+	}))
+	port := inferenceListener(t, fx)
+	conn, err := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)), time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	tcp, ok := conn.(*net.TCPConn)
+	if !ok {
+		t.Fatalf("client connection = %T", conn)
+	}
+	if err := tcp.SetReadBuffer(1024); err != nil {
+		t.Fatal(err)
+	}
+	body := `{"model":"weak","stream":true}`
+	if _, err := fmt.Fprintf(conn, "POST /v1/chat/completions HTTP/1.1\r\nHost: localhost:%d\r\nContent-Length: %d\r\n\r\n%s", port, len(body), body); err != nil {
+		t.Fatal(err)
+	}
+	// Never read from this client. An unbounded private producer must fill its
+	// socket buffers: require positive, then stalled sink progress before stop.
+	deadline := time.Now().Add(5 * time.Second)
+	var previous int64
+	for {
+		var sink *responseSink
+		fx.p.identityMu.Lock()
+		for _, request := range fx.p.requests {
+			request.owner.mu.Lock()
+			if request.owner.committed {
+				sink = request.owner.sink
+			}
+			request.owner.mu.Unlock()
+		}
+		fx.p.identityMu.Unlock()
+		if sink != nil {
+			sink.mu.Lock()
+			written, produced, flushed := sink.written, sink.produced, sink.flushed
+			sink.mu.Unlock()
+			if written > 0 && written == previous && (produced > written || flushed < written) {
+				break
+			}
+			previous = written
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("client never demonstrated a stalled response sink; last completed bytes=%d", previous)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	started := time.Now()
+	fx.p.shutdown(context.Background())
+	if elapsed := time.Since(started); elapsed > routingShutdownGrace+500*time.Millisecond {
+		t.Fatalf("blocked client shutdown took %v", elapsed)
+	}
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("shutdown did not close the upstream body")
+	}
+	waitInferenceDrained(t, fx.p)
 }
