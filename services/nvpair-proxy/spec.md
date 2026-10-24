@@ -198,15 +198,45 @@ digest and model content digests. It is decoded strictly, validated, answered
 previous identity kept. The capability is derived from the active policy, that
 identity and the qualification registry read once at start from the `appdir`
 artifact `local-qualification.json` (absent: empty; invalid: empty and logged).
+The accepted artifact schema integer is `2`: every entry requires non-null
+`shapes` with boolean `tools`, an array `structuredOutput` of distinct
+`json_object`/`json_schema` names, and boolean `reasoningReplay`. Replay is
+currently unsupported, so `reasoningReplay` must be `false`; `true` rejects the
+document. Missing/partial/null declarations, wrong types, unknown fields or modes,
+repeated keys/modes and unsupported versions reject the whole artifact. Version-1
+operator evidence needs explicit requalification against current identities,
+defaults, tokenizer/template, shapes and measured bounds, not a version-number
+edit or automatic migration. Shipped synthetic fixtures qualify no real target;
+they do not establish that operators have no evidence.
+
 A profile with `qualification {id, revision}` installs its normalized model only
 when the registry entry exists for the same engine and model, its
 `launchDigests` and `modelDigests` contain the identity's launch digest and the
 model's digest (looked up under every name normalizing to it; disagreeing names
 give none), the profile's `requestOptions` equal the qualified ones, its
 `contextTokens` and `maxOutputTokens` do not exceed the qualified ones, and the
-effective concurrency is finite. Two profiles normalizing to one model install
+effective concurrency is finite. Capability coverage fails closed: `tools`
+requires `shapes.tools:true`, `structured` requires both JSON modes, and vision,
+embeddings or unknown capabilities refuse installation. Empty capabilities add
+no shape requirement; one-mode evidence can serve that mode without advertising
+the broad structured capability. Two profiles normalizing to one model install
 neither. The installed identity is `{engineRunId, settingsFingerprint,
-modelDigest}`.
+modelDigest}`. Coverage withdrawal uses the existing generation fence.
+
+For an NE identity with `serving`, readiness also requires the normalized model's
+valid, unambiguous content-bound envelope: qualification context/output must fit
+its per-slot/output ceilings, effective concurrency must fit slots, and profile
+memory must cover declared VRAM. RAM is a separate domain. A nil serving map
+retains the non-NE inventory/digest rules. NE owns content/config/template identity:
+`modelDigests` consumes its canonical `pair-serving-content-v1` manifest SHA-256
+over ordered artifact role, size and trusted full-file SHA-256; `launchDigests`
+consumes `pair-serving-launch-v1`, binding the pre-snapshot launch digest and
+approved prepared digest, excluding random generation directories. Existing
+artifact attestation provenance and explicit renewed verification/apply remain
+required; B adds no provenance acceptance field or alternate identity store.
+Changed content, launch inputs, declarations/envelopes or defaults invalidate
+stale evidence. Inventory digest absence alone does not permanently exclude an
+approved NE llama.cpp launch. See [identity and attestation](../../docs/local-qualification.mdx#ne-artifact-attestation).
 
 `serveStrictLocal` calls `qualifyStrict` before `AdmitStrict`: the model must be
 installed under the request's identity (else 503 `strict-admission`), and the
@@ -215,18 +245,61 @@ body is validated against the installed qualification (else 400
 `/v1/chat/completions` shape is supported: allowlisted top-level fields, text
 content, function tools, `json_object`/`json_schema` formats, no repeated or
 case-variant keys, nesting at most 64. The profile's `requestOptions` are merged
-in first and the effective body is what is accounted and forwarded; a request
-may not send a field outside the allowlist, so it cannot override a qualified
-default or the context length. One finite output bound is required
+as defaults for absent fields. Incoming keys and every post-merge effective key
+are checked; defaults cannot inject unknown keys or context overrides.
+`reasoning_effort` and `parallel_tool_calls` are refused whenever present,
+including null, false and defaults-injected values. The effective body is what
+is accounted and forwarded, preserving accepted fields except the sole
+validated no-op removal below. One finite output bound is required
 (`max_tokens`/`max_completion_tokens`, equal if both) and may not exceed the
 lower of the profile's and the qualification's ceilings. The input bound is
 computed by the qualification's accounting method (`utf8-bytes`: request,
 message, tool and schema overheads plus the UTF-8 bytes of role, name, tool call
 id and text and of the compact tool call, tool, tool choice and schema JSON; the
-qualified context is at most 2^24 tokens); input plus
-output must not exceed the profile's context. `AdmitStrict` takes the
-generation `qualifyStrict` validated against and refuses a model reinstalled
+qualified context is at most 2^24 tokens); string choices contribute decoded
+UTF-8 bytes, object choices compact JSON bytes. `json_object` charges schema
+overhead; `json_schema` also charges its name, description and compact schema.
+Input plus output must fit the smaller profile/qualification context.
+`AdmitStrict` takes the generation `qualifyStrict` validated against and refuses a model reinstalled
 since. All of this happens before any wake, unload, slot or inference.
+
+Present tools must be a non-null array; omitted tools and `tools:[]` have no
+active definitions and zero definition overhead. Choice omitted/`none`/`auto`
+permits either; `required` and named choices require nonempty definitions and
+tools evidence. Named functions may omit `parameters`; supplied parameters must
+be an object. Definitions, assistant calls and tool-role history require tools
+evidence, including history with empty/omitted definitions. Assistant null content
+still requires nonempty calls. Null tool arrays, calls, choices, supplied
+parameters and formats, malformed members and new shapes are refused. JSON
+modes are independent evidence entries; omission/text grants no
+JSON mode and needs none. Nested decode failures retain generic diagnostics such
+as `unsupported shape`, not a specialized policy denial for every malformed
+member. Existing non-shape scalar, sampling, streaming and output rules remain.
+
+PAIR accepts `store:false` as a no-op, removes it before forwarding, and applies no accounting charge; `store:true` is explicitly refused because PAIR does not store requests. Omitting `store` preserves existing behavior.
+
+Both raw and merged store values are validated with normal defaults precedence;
+null and non-boolean values are refused. This local exception does not add
+`store` to the public-account adapter's allowlist. Pinned OpenCode 2.0.32 generic
+provider lowering emits false by default; `compatibility.supportsStore:false`
+was a pre-fix workaround, not a requirement after Task 7. The historical 2.0.32
+and 2.1.1 inventories, immutable native-source links, configuration conditions and
+synthetic examples are in [Pinned OpenCode compatibility](../../docs/local-qualification.mdx#pinned-opencode-compatibility);
+they make no installed-2.1.4 claim.
+
+Both inventoried releases automatically replay present assistant
+`reasoning_content`, with no established client replay-off switch. Current local
+validation refuses that member, including empty strings/null and every role;
+replay is never silently stripped. Future assistant-only replay would require
+approved exact NE-bound content/launch/template/reasoning-format evidence,
+unchanged forwarding and UTF-8 accounting (empty string zero bytes) plus existing
+message/template overheads. Schema `2` does not enable that future contract.
+Unqualified local reasoning turns remain incompatible, and exact-template
+qualification cannot alone bypass the current unsupported implementation.
+The named `replay-with-tool-roundtrip-refused` and `empty-replay-refused` fixtures
+record refusal; synthetic native streaming response forwarding is not real
+provider/model or successful replay qualification. None of this activates provider
+egress or waives the common HTTP entry's existing permission/acceptance gates.
 
 Before forwarding to an engine, ingress and self dispatch strip every
 `X-PAIR-*` header (strict, admission wait/result and routing model/engine/node/tier
