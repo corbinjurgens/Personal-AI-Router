@@ -8,6 +8,7 @@ nvpair-engine-manager/main/nvpair-engine-manager
 nvpair-engine-manager/proc-unavailable-stop/managed-engine
 nvpair-engine-manager/proc-unavailable-uninstall/managed-engine
 nvpair-engine-manager/secretenv-lsof/lsof
+nvpair-engine-manager/secretenv-ps/ps
 nvpair-engine-manager/secretenv-signalpid/taskkill
 nvpair-engine-manager/secretenv-ss/ss
 nvpair-engine-manager/secretenv-taskkill/taskkill
