@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"unsafe"
 )
 
 type historyTestValue struct {
@@ -20,6 +21,213 @@ type historyTestValue struct {
 }
 type historyTestInitial struct {
 	Requests []historyTestValue `json:"requests"`
+}
+
+func TestHistoryGeneratedCorrelationAllocationAndExhaustion(t *testing.T) {
+	var arbitrary HistoryCorrelation
+	if err := arbitrary.Begin([]byte(`"jh:1"`)); err != nil {
+		t.Fatal(err)
+	}
+	if err := arbitrary.EnableGeneratedIDs(); !errors.Is(err, ErrHistoryBusy) {
+		t.Fatalf("opt-in converted a live arbitrary call: %v", err)
+	}
+	arbitrary.Complete()
+	if err := arbitrary.EnableGeneratedIDs(); !errors.Is(err, ErrHistoryInvalid) {
+		t.Fatalf("opt-in reclassified a used arbitrary-ID generation: %v", err)
+	}
+	if err := arbitrary.Begin([]byte(`"still-arbitrary"`)); err != nil {
+		t.Fatal(err)
+	}
+	var correlation HistoryCorrelation
+	if _, err := correlation.BeginGeneratedMethod("routing:subscribe"); !errors.Is(err, ErrHistoryInvalid) {
+		t.Fatalf("generated allocation without opt-in: %v", err)
+	}
+	if err := correlation.EnableGeneratedIDs(); err != nil {
+		t.Fatal(err)
+	}
+	first, err := correlation.BeginGeneratedMethod("routing:subscribe")
+	if err != nil || string(first) != `"jh:1"` || !correlation.MatchesPending(first) {
+		t.Fatalf("first generated allocation: %s, %v", first, err)
+	}
+	if _, err := correlation.BeginGeneratedMethod("routing:get-initial"); !errors.Is(err, ErrHistoryBusy) {
+		t.Fatalf("second live initial: %v", err)
+	}
+	correlation.Retire() // Proven-unsent also consumes the ordinal.
+	correlation.ReleaseRetired()
+	second, err := correlation.BeginGeneratedMethod("routing:get-initial")
+	if err != nil || string(second) != `"jh:2"` {
+		t.Fatalf("retirement reused an ordinal: %s, %v", second, err)
+	}
+	correlation.Retire()
+	correlation.issued = ^uint64(0) - 1
+	last, err := correlation.BeginGeneratedMethod("routing:unsubscribe")
+	if err != nil || string(last) != `"jh:18446744073709551615"` || len(last) != 25 || cap(last) != 25 {
+		t.Fatalf("last generated token: %s, %v", last, err)
+	}
+	correlation.Complete()
+	if err := correlation.EnableGeneratedIDs(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := correlation.BeginGeneratedMethod("routing:subscribe"); !errors.Is(err, ErrHistoryExhausted) || err.Error() != "history-exhausted" || correlation.issued != ^uint64(0) {
+		t.Fatalf("exhaustion wrapped or reset the frontier: %v", err)
+	}
+	if got := unsafe.Sizeof(correlation); got != 1088 {
+		t.Fatalf("correlation control bytes = %d, want 1088", got)
+	}
+}
+
+func TestHistoryGeneratedQuarantineWithoutLateAAllowsB(t *testing.T) {
+	test := func(name, candidates string) {
+		t.Run(name, func(t *testing.T) {
+			var correlation HistoryCorrelation
+			if err := correlation.EnableGeneratedIDs(); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := correlation.BeginGeneratedMethod("routing:subscribe"); err != nil {
+				t.Fatal(err)
+			}
+			c := historyTestReader(t, "", &correlation)
+			read := func(frame string) (*Message, error) {
+				c.history.r.Reset(strings.NewReader(frame + "\n"))
+				return c.Read()
+			}
+			_, err := read(`{"jsonrpc":"2.0",` + candidates + `,"result":{"requests":[]}}`)
+			var failure *HistoryFailure
+			if !errors.As(err, &failure) || !failure.FailPending || !failure.ScheduleRefetch || failure.Disposition != "quarantine" {
+				t.Fatalf("A ambiguity: %+v, %v", failure, err)
+			}
+			_, err = read(`{"jsonrpc":"2.0",` + candidates + `,"result":{"requests":[]}}`)
+			var repeated *HistoryFailure
+			if !errors.As(err, &repeated) || repeated.FailPending || repeated.ScheduleRefetch {
+				t.Fatalf("A failed twice or queued another refetch: %+v, %v", repeated, err)
+			}
+			ordinary, err := read(`{"jsonrpc":"2.0","id":7,"result":{"alive":true}}`)
+			if err != nil || ordinary == nil || string(*ordinary.ID) != "7" || string(ordinary.Result) != `{"alive":true}` {
+				t.Fatalf("ordinary O lost: %+v, %v", ordinary, err)
+			}
+			b, err := correlation.BeginGeneratedMethod("routing:subscribe")
+			if err != nil || string(b) != `"jh:2"` || !correlation.Quarantined() {
+				t.Fatalf("B requires absent late A: %s, %v", b, err)
+			}
+			msg, err := read(`{"jsonrpc":"2.0","id":"jh:2","result":{"requests":[]}}`)
+			if err != nil || msg == nil || !correlation.MatchesPending(*msg.ID) || !correlation.Quarantined() {
+				t.Fatalf("guard alone restored history: %+v, %v", msg, err)
+			}
+			correlation.Complete() // The owner has now applied B.
+			if correlation.Quarantined() {
+				t.Fatal("applied current B did not restore history")
+			}
+		})
+	}
+	test("history first", `"id":"jh:1","\u0069d":7`)
+	test("history last escaped namespace", `"id":7,"\u0069d":"\u006ah\u003a\u0031"`)
+}
+
+func TestHistoryGeneratedRepeatedQuarantineStaleAndReservedResponses(t *testing.T) {
+	var correlation HistoryCorrelation
+	if err := correlation.EnableGeneratedIDs(); err != nil {
+		t.Fatal(err)
+	}
+	c := historyTestReader(t, "", &correlation)
+	read := func(frame string) (*Message, error) {
+		c.history.r.Reset(strings.NewReader(frame + "\n"))
+		return c.Read()
+	}
+	for _, candidates := range []string{`"id":"jh:1","id":7`, `"ID":7,"\u0069d":"\u006ah:2"`} {
+		if _, err := correlation.BeginGeneratedMethod("routing:subscribe"); err != nil {
+			t.Fatal(err)
+		}
+		_, err := read(`{"jsonrpc":"2.0",` + candidates + `,"result":{"requests":[]}}`)
+		var failure *HistoryFailure
+		if !errors.As(err, &failure) || !failure.FailPending || !failure.ScheduleRefetch {
+			t.Fatalf("repeated quarantine: %+v, %v", failure, err)
+		}
+	}
+	if _, err := correlation.BeginGeneratedMethod("routing:subscribe"); err != nil {
+		t.Fatal(err)
+	}
+	if msg, err := read(`{"jsonrpc":"2.0","id":"jh:3","result":{"requests":[]}}`); err != nil || msg == nil {
+		t.Fatalf("B recovery: %+v, %v", msg, err)
+	}
+	correlation.Complete()
+	// A new quarantine must survive every old success/error, including invalid
+	// stale values and reserved but unissued/noncanonical namespace responses.
+	if _, err := read(`{"broken":`); err == nil {
+		t.Fatal("malformed input accepted")
+	}
+	if _, err := correlation.BeginGeneratedMethod("routing:subscribe"); err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{`"jh:1"`, `"\u006ah:2"`, `"jh:3"`, `"jh:5"`, `"jh:0"`, `"jh:01"`, `"jh:+1"`, `"jh:18446744073709551616"`, `"jh:"`} {
+		for _, body := range []string{`"result":{"requests":null}`, `"error":{"code":-32096,"message":"routing history busy; retry"}`} {
+			msg, err := read(`{"jsonrpc":"2.0","id":` + id + `,` + body + `}`)
+			var failure *HistoryFailure
+			if msg != nil || !errors.As(err, &failure) || failure.Disposition != "discard" || failure.FailPending || failure.ScheduleRefetch || !correlation.Quarantined() || !correlation.MatchesPending([]byte(`"jh:4"`)) {
+				t.Fatalf("old/reserved response changed current ownership: %s, %+v, %v", id, failure, err)
+			}
+		}
+	}
+}
+
+func TestHistoryGeneratedStaleMaximumInitialUsesOnlyRawLease(t *testing.T) {
+	var correlation HistoryCorrelation
+	if err := correlation.EnableGeneratedIDs(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := correlation.BeginGeneratedMethod("routing:subscribe"); err != nil {
+		t.Fatal(err)
+	}
+	correlation.Retire()
+	value := `{"requests":[],"unknown":"` + strings.Repeat("x", HistoryInitialBytes-len(`{"requests":[],"unknown":""}`)) + `"}`
+	prefix := `{"jsonrpc":"2.0","id":"\u006ah:1","result":`
+	frame := prefix + value + strings.Repeat(" ", HistoryEnvelopeBytes-len(prefix)-2) + "}\n"
+	if len(frame) != HistoryFrameBytes {
+		t.Fatal("fixture does not consume H")
+	}
+	c := historyTestReader(t, frame, &correlation)
+	c.history.output = []byte("pinned output")[:0]
+	msg, err := c.Read()
+	var failure *HistoryFailure
+	if msg != nil || !errors.As(err, &failure) || failure.Category != "history-stale" || string(c.history.output[:cap(c.history.output)]) != "pinned output" {
+		t.Fatalf("stale result borrowed output or required an initial output grant: %v", err)
+	}
+}
+
+func TestHistoryGeneratedIncomingDirectionalityAndDefaultIsolation(t *testing.T) {
+	test := func(name, frame, method, wantID string, code int) {
+		t.Run(name, func(t *testing.T) {
+			var correlation HistoryCorrelation
+			if err := correlation.EnableGeneratedIDs(); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := correlation.BeginGeneratedMethod("routing:subscribe"); err != nil {
+				t.Fatal(err)
+			}
+			c := historyIncomingTestReader(t, frame+"\n", &correlation)
+			msg, err := c.Read()
+			if code != 0 {
+				var failure *HistoryFailure
+				if !errors.As(err, &failure) || failure.Refusal == nil || failure.FailPending || failure.ScheduleRefetch || failure.Disposition != "refuse-request" || failure.Refusal.Code != code || string(failure.Refusal.ReplyID) != wantID {
+					t.Fatalf("request refusal: %+v, %v", failure, err)
+				}
+			} else if err != nil || msg == nil || !msg.IsRequest() || msg.Method != method {
+				t.Fatalf("incoming request: %+v, %v", msg, err)
+			}
+			if !correlation.MatchesPending([]byte(`"jh:1"`)) || correlation.Quarantined() {
+				t.Fatal("incoming request changed outbound pending")
+			}
+		})
+	}
+	test("ordinary collision", `{"jsonrpc":"2.0","id":"\u006ah:1","method":"echo","params":{}}`, "echo", "", 0)
+	test("reserved unissued ordinary request", `{"jsonrpc":"2.0","id":"jh:999","method":"echo","params":{}}`, "echo", "", 0)
+	test("public collision refusal", `{"jsonrpc":"2.0","id":"jh:1","method":"routing:subscribe","params":null}`, "", `"jh:1"`, -32062)
+	test("private collision refusal", `{"jsonrpc":"2.0","id":"jh:1","method":"routing/request","params":{}}`, "", `"jh:1"`, -32601)
+	test("ordinary over512 caller ID", `{"jsonrpc":"2.0","id":"jh:`+strings.Repeat("1", 600)+`","method":"echo","params":{}}`, "echo", "", 0)
+	test("history over512 caller ID", `{"jsonrpc":"2.0","id":"jh:`+strings.Repeat("1", 600)+`","method":"routing:subscribe","params":{}}`, "", "null", -32062)
+	msg, err := historyTestReader(t, `{"jsonrpc":"2.0","id":"jh:999","result":{"ordinary":true}}`+"\n", &HistoryCorrelation{}).Read()
+	if err != nil || msg == nil || string(msg.Result) != `{"ordinary":true}` {
+		t.Fatalf("default correlation reserved a namespace: %+v, %v", msg, err)
+	}
 }
 
 func historyTestSchema(_ string, initial bool) (HistoryProjection, bool) {

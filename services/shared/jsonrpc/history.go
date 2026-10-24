@@ -31,6 +31,7 @@ const (
 var ErrHistoryBusy = errors.New(HistoryBusyMessage)
 var ErrHistoryFraming = errors.New("history-framing")
 var ErrHistoryInvalid = errors.New("history-invalid")
+var ErrHistoryExhausted = errors.New("history-exhausted")
 
 const HistoryBusyCode = -32096
 const HistoryBusyMessage = "routing history busy; retry"
@@ -807,16 +808,110 @@ func (p *historyParser) object(typ reflect.Type, level int, keep bool) error {
 	return p.emit([]byte{'}'}, keep)
 }
 
-// HistoryCorrelation has one live initial and one retired initial slot. Retire
-// does not release a transfer: clear it only when its actual borrower releases.
-// The connection owner serializes it with reads and pending-call changes.
+// HistoryCorrelation has one live initial. Default arbitrary-ID mode also has
+// one retired slot. Generated mode instead retains an issued ordinal frontier;
+// retiring a call never forgets its classification. Neither mode releases any
+// physical read, control write or output loan. The connection owner serializes
+// correlation with reads and pending-call changes, and fences the transport
+// generation before replacing this object.
 type HistoryCorrelation struct {
 	pending                      [HistoryIDBytes]byte
 	retired                      [HistoryIDBytes]byte
 	pendingN, retiredN           int
 	pendingMethod, retiredMethod string
+	issued                       uint64
 	quarantined                  bool
 	refetchQueued                bool
+	generated                    bool
+	arbitraryUsed                bool
+}
+
+// EnableGeneratedIDs opts this outbound direction into owner-minted IDs. It
+// must precede the first arbitrary-ID call on a fresh transport generation.
+// It cannot convert live/previous arbitrary-ID calls or reset a frontier.
+// Calling it again preserves the existing generated mode and frontier.
+func (c *HistoryCorrelation) EnableGeneratedIDs() error {
+	if c.generated {
+		return nil
+	}
+	if c.pendingN != 0 || c.retiredN != 0 {
+		return ErrHistoryBusy
+	}
+	if c.arbitraryUsed {
+		return ErrHistoryInvalid
+	}
+	c.generated = true
+	return nil
+}
+
+func historyCallMethod(method string) string {
+	switch method {
+	case "routing:get-initial":
+		return "routing:get-initial"
+	case "routing:subscribe":
+		return "routing:subscribe"
+	case "routing:unsubscribe":
+		return "routing:unsubscribe"
+	default:
+		return ""
+	}
+}
+
+// BeginGeneratedMethod allocates and registers before transmission. Its token
+// borrows the existing pending slot until the next correlation mutation; encode
+// or fund-copy it while serialized. Every issued ordinal is consumed forever
+// in this generation, including proven-unsent calls. The largest token is 25
+// bytes. Exhaustion is a fixed history-only failure, never wraparound.
+func (c *HistoryCorrelation) BeginGeneratedMethod(method string) (json.RawMessage, error) {
+	method = historyCallMethod(method)
+	if !c.generated || method == "" {
+		return nil, ErrHistoryInvalid
+	}
+	if c.pendingN != 0 {
+		return nil, ErrHistoryBusy
+	}
+	if c.issued == ^uint64(0) {
+		return nil, ErrHistoryExhausted
+	}
+	c.issued++
+	token := append(c.pending[:0], `"jh:`...)
+	token = strconv.AppendUint(token, c.issued, 10)
+	token = append(token, '"')
+	c.pendingN, c.pendingMethod = len(token), method
+	c.refetchQueued = false
+	return token[:len(token):len(token)], nil
+}
+
+// MatchesPending compares a guarded response against the one logical call,
+// including escaped-equivalent strings. It conveys no backing reuse right.
+func (c *HistoryCorrelation) MatchesPending(id []byte) bool {
+	return equalID(id, c.pending[:c.pendingN])
+}
+
+// Decode the reserved prefix and canonical positive ordinal directly from the
+// already grammar-checked token. Zero denotes a reserved but invalid ordinal.
+// Unknown strings are never decoded or copied into a materialized string.
+func generatedHistoryID(token []byte) (uint64, bool) {
+	if len(token) < 2 || token[0] != '"' {
+		return 0, false
+	}
+	i := 1
+	for _, want := range "jh:" {
+		if i >= len(token)-1 || keyRune(token, &i) != want {
+			return 0, false
+		}
+	}
+	var ordinal uint64
+	first := true
+	for i < len(token)-1 {
+		r := keyRune(token, &i)
+		if r < '0' || r > '9' || (first && r == '0') || ordinal > (^uint64(0)-uint64(r-'0'))/10 {
+			return 0, true
+		}
+		ordinal = ordinal*10 + uint64(r-'0')
+		first = false
+	}
+	return ordinal, true
 }
 
 func validHistoryID(id []byte) bool {
@@ -842,14 +937,8 @@ func (c *HistoryCorrelation) Begin(id []byte) error {
 // Each public history call returns an initial shape. Exactly one such call may
 // own the connection's initial transfer; ordinary pending calls stay elsewhere.
 func (c *HistoryCorrelation) BeginMethod(method string, id []byte) error {
-	switch method {
-	case "routing:get-initial":
-		method = "routing:get-initial"
-	case "routing:subscribe":
-		method = "routing:subscribe"
-	case "routing:unsubscribe":
-		method = "routing:unsubscribe"
-	default:
+	method = historyCallMethod(method)
+	if c.generated || method == "" {
 		return ErrHistoryInvalid
 	}
 	if !validHistoryID(id) {
@@ -860,6 +949,7 @@ func (c *HistoryCorrelation) BeginMethod(method string, id []byte) error {
 	}
 	c.pendingN = copy(c.pending[:], id)
 	c.pendingMethod = method
+	c.arbitraryUsed = true
 	c.refetchQueued = false
 	return nil
 }
@@ -868,16 +958,17 @@ func (c *HistoryCorrelation) Retire() {
 	if c.pendingN == 0 {
 		return
 	}
-	c.retiredN = copy(c.retired[:], c.pending[:c.pendingN])
+	if !c.generated {
+		c.retiredN = copy(c.retired[:], c.pending[:c.pendingN])
+		c.retiredMethod = c.pendingMethod
+	}
 	c.pendingN = 0
-	c.retiredMethod = c.pendingMethod
 	c.pendingMethod = ""
 }
 
-// Retire preserves classification, not an outbound write-completion verdict.
-// A failed Write may have transmitted part or all of a request. The owner must
-// separately prove no transmission, or keep the retired grant until the actual
-// late-response borrower completes or that transport generation is retired.
+// ReleaseRetired releases only the default arbitrary-ID classification slot.
+// Its owner must separately establish borrower completion or transport fencing.
+// In generated mode it cannot erase the issued frontier or release any loan.
 func (c *HistoryCorrelation) ReleaseRetired() { c.retiredN = 0; c.retiredMethod = "" }
 func (c *HistoryCorrelation) Complete() {
 	c.pendingN = 0
@@ -984,7 +1075,7 @@ func NewHistoryCodec(rw io.ReadWriter, ordinary int, raw, output []byte, offsets
 func (r *HistoryReader) Read() (*Message, error) {
 	// Private source links need record/ordinary backing only. A hop that can
 	// receive initial results must acquire its H/M leases before tracking a call.
-	if (r.correlation.pendingN != 0 || r.correlation.retiredN != 0) && (cap(r.raw) < HistoryFrameBytes || cap(r.output) < HistoryInitialBytes || cap(r.offsets)*4 < HistoryInitialBytes) {
+	if (r.correlation.pendingN != 0 || (!r.correlation.generated && r.correlation.retiredN != 0)) && (cap(r.raw) < HistoryFrameBytes || cap(r.output) < HistoryInitialBytes || cap(r.offsets)*4 < HistoryInitialBytes) {
 		return nil, ErrHistoryBusy
 	}
 	r.raw = r.raw[:0]
@@ -1048,6 +1139,8 @@ func (r *HistoryReader) guard(raw []byte) (*Message, error) {
 	valueName := ""
 	method := ""
 	selected, matchedID, ambiguous := false, false, false
+	reservedID := false
+	var ordinal uint64
 	ids, methods, values := 0, 0, 0
 	var outerSeen [historyEnvelopeFields]bool
 	duplicateEnvelope := false
@@ -1093,6 +1186,12 @@ func (r *HistoryReader) guard(raw []byte) (*Message, error) {
 				ambiguous = true
 			}
 			id = token
+			if r.correlation.generated {
+				if n, reserved := generatedHistoryID(token); reserved {
+					reservedID = true
+					ordinal = n
+				}
+			}
 			if equalID(token, r.correlation.pending[:r.correlation.pendingN]) || equalID(token, r.correlation.retired[:r.correlation.retiredN]) {
 				matchedID = true
 			}
@@ -1118,8 +1217,8 @@ func (r *HistoryReader) guard(raw []byte) (*Message, error) {
 	}
 	// ID namespaces are directional: a real incoming request can reuse an
 	// outbound call's ID. Only a response (no method candidate) is an initial.
-	initial := matchedID && methods == 0
-	if matchedID {
+	initial := (matchedID || reservedID) && methods == 0
+	if matchedID || reservedID {
 		ordinaryRequest := !ambiguous && methods == 1 && method == "" && len(methodValue) > 2 && methodValue[0] == '"' && !outerSeen[historyResultKey] && !outerSeen[historyErrorKey]
 		if !ordinaryRequest {
 			selected = true
@@ -1140,6 +1239,17 @@ func (r *HistoryReader) guard(raw []byte) (*Message, error) {
 	}
 	if methods == 1 && ids == 1 && method != "" && !outerSeen[historyResultKey] && !outerSeen[historyErrorKey] {
 		return r.incomingRequest(raw, id, value, versionValue, method, duplicateEnvelope)
+	}
+	if initial && reservedID && !r.correlation.MatchesPending(id) {
+		// No response backing is borrowed merely because it might arrive in
+		// the future. Late issued values (even semantically invalid ones) and
+		// reserved unissued/noncanonical values stop at this raw lease. They
+		// never project into output or change newer pending/quarantine state.
+		category := "history-invalid"
+		if ordinal != 0 && ordinal <= r.correlation.issued {
+			category = "history-stale"
+		}
+		return nil, historyFailure("discard", category)
 	}
 	failure := func() (*Message, error) {
 		if initial && equalID(id, r.correlation.pending[:r.correlation.pendingN]) {
