@@ -607,6 +607,35 @@ func TestOllamaPresenceRequestWaitsForPortGate(t *testing.T) {
 	}
 }
 
+func TestBrokerFallbackUsesPrivatePortCheck(t *testing.T) {
+	isolateOllamaHostTestConfig(t)
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("allocate private fallback endpoint: %v", err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	port := listener.Addr().(*net.TCPAddr).Port
+	if port <= managedOllamaBackendStart {
+		t.Fatalf("private endpoint %d is below the fallback search ranges", port)
+	}
+	for _, tc := range []struct {
+		name     string
+		fallback func(*Broker, ...int) int
+	}{
+		{name: "ollama", fallback: (*Broker).setOllamaProxyFallback},
+		{name: "lmstudio", fallback: (*Broker).setLMStudioProxyFallback},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b := &Broker{portAvailableCheck: func(candidate int) bool { return candidate == port }}
+			// The endpoint is held above, so a real bind check would reject it.
+			// Only this broker's synthetic checker may select it for a fake proxy.
+			if got := tc.fallback(b); got != port {
+				t.Fatalf("fallback = %d, want private fixture endpoint %d", got, port)
+			}
+		})
+	}
+}
+
 func TestNextFreeProxyPort(t *testing.T) {
 	for _, tc := range []struct {
 		name  string

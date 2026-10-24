@@ -228,6 +228,7 @@ func TestLiveLMStudioCleanRoom(t *testing.T) {
 func startManager(t *testing.T, env map[string]string) (chan frame, io.WriteCloser, func()) {
 	t.Helper()
 	cmd := exec.Command(managerBin)
+	env["NVPAIR_EM_LIVE_TEST"] = "1"
 	cmd.Env = overrideEnv(env)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {

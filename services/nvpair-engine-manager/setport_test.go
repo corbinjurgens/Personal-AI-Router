@@ -6,8 +6,11 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -77,9 +80,9 @@ func TestSetPortPreservesServingOverrideAndExplicitRemoval(t *testing.T) {
 	}
 }
 
-// loadWithOverrides builds a registry the same way buildRegistry does at
-// startup: bundled manifests first, then the per-user override dir deep-merged
-// on top. Used to prove a persisted port survives a "restart".
+// loadWithOverrides keeps the real startup merge for bundled metadata and
+// launch-description tests. Runtime port fixtures use reloadPortFixture so
+// status and background sweeps cannot reach vendor-default listeners.
 func loadWithOverrides(t *testing.T, overrideDir string) *Registry {
 	t.Helper()
 	reg := NewRegistry()
@@ -105,9 +108,83 @@ func hostPort(t *testing.T, reg *Registry, engine string) int {
 	return p.Runtime.Port
 }
 
-func newBundledExecutor(t *testing.T, overrideDir string) *Executor {
+// portFixtureManifest is fresh test-only bundled data, not a sanitized vendor
+// manifest. Its shared runtime also exercises platform override precedence.
+func portFixtureManifest(engine string, port int) map[string]any {
+	m := testEngineManifest(fakeEngineBin)
+	p := m.Platforms[hostKey()]
+	p.Runtime.Port = port
+	p.Runtime.Args = []string{"serve"}
+	p.Runtime.Env = map[string]string{
+		"OLLAMA_HOST": "{host}:{port}", "FAKE_ADDR": "{host}:{port}",
+	}
+	return map[string]any{
+		"engine": engine, "display_name": engine, "manifest_version": 1,
+		"runtime": p.Runtime, "actions": m.Actions,
+		"platforms": map[string]any{hostKey(): map[string]any{"detect": p.Detect}},
+	}
+}
+
+// Hold every allocation until the whole set is selected, so old/new/default
+// ports cannot accidentally be equal. All listeners are private loopback.
+func privateTestPorts(t *testing.T, count int, exclude ...int) []int {
 	t.Helper()
-	reg := loadWithOverrides(t, overrideDir)
+	ports, err := privateFixturePorts(count, exclude...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return ports
+}
+
+func privateFixturePorts(count int, exclude ...int) (ports []int, err error) {
+	var listeners []net.Listener
+	defer func() {
+		for _, listener := range listeners {
+			err = errors.Join(err, listener.Close())
+		}
+	}()
+	exclude = append([]int{11434, 1234, 1235, 8080, 8081}, exclude...)
+	for len(ports) < count {
+		listener, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			return nil, err
+		}
+		listeners = append(listeners, listener)
+		port := listener.Addr().(*net.TCPAddr).Port
+		if !slices.Contains(exclude, port) {
+			ports = append(ports, port)
+		}
+	}
+	return ports, nil
+}
+
+func reloadPortFixture(t *testing.T, base *Registry, overrideDir string) *Registry {
+	t.Helper()
+	reg := NewRegistry()
+	for engine, raw := range base.bundledRaw {
+		if _, err := reg.addManifest("test-only bundled "+engine, raw); err != nil {
+			t.Fatal(err)
+		}
+		reg.bundledRaw[engine] = append([]byte(nil), raw...)
+	}
+	if err := reg.LoadOverrideDir(overrideDir); err != nil {
+		t.Fatal(err)
+	}
+	return reg
+}
+
+func newPortFixtureExecutor(t *testing.T, overrideDir string) *Executor {
+	t.Helper()
+	base := NewRegistry()
+	ports := privateTestPorts(t, 2)
+	for i, engine := range []string{"ollama", "lmstudio"} {
+		raw, err := json.Marshal(portFixtureManifest(engine, ports[i]))
+		if err != nil {
+			t.Fatal(err)
+		}
+		base.bundledRaw[engine] = raw
+	}
+	reg := reloadPortFixture(t, base, overrideDir)
 	ex := NewExecutor(reg, NewReporter(nil), func(string, any) {}, t.TempDir())
 	ex.overrideDir = overrideDir
 	return ex
@@ -208,28 +285,23 @@ func TestOverrideDeepMergePreservesBundled(t *testing.T) {
 // a bundled engine that isn't running: the chosen port is written as a
 // manifest override and a fresh (startup-style) load comes back up on it.
 func TestSetPortPersistsAndRestores(t *testing.T) {
-	for _, tc := range []struct {
-		engine  string
-		port    int
-		bundled int
-	}{
-		{"ollama", 12345, 11434},
-		{"lmstudio", 4321, 1235},
-	} {
-		t.Run(tc.engine, func(t *testing.T) {
+	for _, engine := range []string{"ollama", "lmstudio"} {
+		t.Run(engine, func(t *testing.T) {
 			dir := t.TempDir()
-			ex := newBundledExecutor(t, dir)
+			ex := newPortFixtureExecutor(t, dir)
+			bundled := hostPort(t, ex.reg, engine)
+			port := privateTestPorts(t, 1, bundled)[0]
 
-			st, err := ex.SetPort(context.Background(), tc.engine, tc.port)
+			st, err := ex.SetPort(context.Background(), engine, port)
 			if err != nil {
 				t.Fatalf("SetPort: %v", err)
 			}
-			if st.Port != tc.port {
-				t.Errorf("returned status port: got %d, want %d", st.Port, tc.port)
+			if st.Port != port {
+				t.Errorf("returned status port: got %d, want %d", st.Port, port)
 			}
 
 			// The override file is the minimal port delta.
-			data, err := os.ReadFile(filepath.Join(dir, tc.engine+".json"))
+			data, err := os.ReadFile(filepath.Join(dir, engine+".json"))
 			if err != nil {
 				t.Fatalf("override file not written: %v", err)
 			}
@@ -238,24 +310,24 @@ func TestSetPortPersistsAndRestores(t *testing.T) {
 				t.Fatalf("override file invalid JSON: %v", err)
 			}
 			rt, _ := got["runtime"].(map[string]any)
-			if rt == nil || int(rt["port"].(float64)) != tc.port {
-				t.Errorf("override file runtime.port: got %v, want %d", got["runtime"], tc.port)
+			if rt == nil || int(rt["port"].(float64)) != port {
+				t.Errorf("override file runtime.port: got %v, want %d", got["runtime"], port)
 			}
 
 			// Restore: a fresh startup-style load comes up on the chosen port.
-			if p := hostPort(t, loadWithOverrides(t, dir), tc.engine); p != tc.port {
-				t.Errorf("restored port: got %d, want %d", p, tc.port)
+			if p := hostPort(t, reloadPortFixture(t, ex.reg, dir), engine); p != port {
+				t.Errorf("restored port: got %d, want %d", p, port)
 			}
 
 			// Reverting to the bundled default removes the override entirely.
-			if _, err := ex.SetPort(context.Background(), tc.engine, tc.bundled); err != nil {
+			if _, err := ex.SetPort(context.Background(), engine, bundled); err != nil {
 				t.Fatalf("SetPort revert: %v", err)
 			}
-			if _, err := os.Stat(filepath.Join(dir, tc.engine+".json")); !os.IsNotExist(err) {
+			if _, err := os.Stat(filepath.Join(dir, engine+".json")); !os.IsNotExist(err) {
 				t.Errorf("override file should be removed when reverting to default, stat err = %v", err)
 			}
-			if p := hostPort(t, loadWithOverrides(t, dir), tc.engine); p != tc.bundled {
-				t.Errorf("port after revert: got %d, want bundled default %d", p, tc.bundled)
+			if p := hostPort(t, reloadPortFixture(t, ex.reg, dir), engine); p != bundled {
+				t.Errorf("port after revert: got %d, want bundled default %d", p, bundled)
 			}
 		})
 	}
@@ -263,7 +335,7 @@ func TestSetPortPersistsAndRestores(t *testing.T) {
 
 // TestSetPortRejectsOutOfRange guards the validation boundary.
 func TestSetPortRejectsOutOfRange(t *testing.T) {
-	ex := newBundledExecutor(t, t.TempDir())
+	ex := newPortFixtureExecutor(t, t.TempDir())
 	for _, bad := range []int{0, -1, 70000} {
 		if _, err := ex.SetPort(context.Background(), "ollama", bad); err == nil {
 			t.Errorf("SetPort(%d) should have been rejected", bad)
@@ -272,25 +344,28 @@ func TestSetPortRejectsOutOfRange(t *testing.T) {
 }
 
 func TestSetPortMovesAdoptedCommandEngine(t *testing.T) {
-	ex, stopped, started := adoptedCommandEngineFixture(t, "lmstudio", 1234)
-	status, err := ex.SetPort(context.Background(), "lmstudio", 1235)
+	ports := privateTestPorts(t, 2)
+	oldPort, newPort := ports[0], ports[1]
+	ex, stopped, started := adoptedCommandEngineFixture(t, "lmstudio", oldPort)
+	status, err := ex.SetPort(context.Background(), "lmstudio", newPort)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !stopped() || !started(1235) {
-		t.Fatal("identified command engine was not stopped on 1234 and restarted on 1235")
+	if !stopped() || !started(newPort) {
+		t.Fatal("identified command engine was not stopped on the old port and restarted on the new port")
 	}
-	if status.Port != 1235 || !status.Running {
-		t.Fatalf("moved status = %+v, want running on 1235", status)
+	if status.Port != newPort || !status.Running {
+		t.Fatalf("moved status = %+v, want running on %d", status, newPort)
 	}
 }
 
 func TestSetPortStillRejectsAdoptedProcessEngine(t *testing.T) {
-	ex := adoptedProcessEngineFixture(t, "ollama", 11434)
-	if _, err := ex.SetPort(context.Background(), "ollama", 11435); err == nil {
+	ports := privateTestPorts(t, 2)
+	ex := adoptedProcessEngineFixture(t, "ollama", ports[0])
+	if _, err := ex.SetPort(context.Background(), "ollama", ports[1]); err == nil {
 		t.Fatal("adopted process engine unexpectedly moved")
 	}
-	if status, err := ex.Status("ollama"); err != nil || status.Port != 11434 || !status.Running {
+	if status, err := ex.Status("ollama"); err != nil || status.Port != ports[0] || !status.Running {
 		t.Fatalf("rejected process engine changed: status=%+v err=%v", status, err)
 	}
 	if _, err := os.Stat(filepath.Join(ex.overrideDir, "ollama.json")); !os.IsNotExist(err) {
@@ -299,11 +374,12 @@ func TestSetPortStillRejectsAdoptedProcessEngine(t *testing.T) {
 }
 
 func TestSetPortRejectsCommandEngineWithoutStopCommand(t *testing.T) {
-	ex := adoptedCommandEngineWithoutStopFixture(t, "external", 1234)
-	if _, err := ex.SetPort(context.Background(), "external", 1235); err == nil {
+	ports := privateTestPorts(t, 2)
+	ex := adoptedCommandEngineWithoutStopFixture(t, "external", ports[0])
+	if _, err := ex.SetPort(context.Background(), "external", ports[1]); err == nil {
 		t.Fatal("command engine without official stop unexpectedly moved")
 	}
-	if status, err := ex.Status("external"); err != nil || status.Port != 1234 || !status.Running {
+	if status, err := ex.Status("external"); err != nil || status.Port != ports[0] || !status.Running {
 		t.Fatalf("rejected command engine changed: status=%+v err=%v", status, err)
 	}
 	if _, err := os.Stat(filepath.Join(ex.overrideDir, "external.json")); !os.IsNotExist(err) {
@@ -312,20 +388,22 @@ func TestSetPortRejectsCommandEngineWithoutStopCommand(t *testing.T) {
 }
 
 func TestSetPortRestartsOldPortWhenPersistenceFails(t *testing.T) {
-	ex, stopped, started := adoptedCommandEngineFixture(t, "lmstudio", 1234)
+	ports := privateTestPorts(t, 2)
+	oldPort, newPort := ports[0], ports[1]
+	ex, stopped, started := adoptedCommandEngineFixture(t, "lmstudio", oldPort)
 	blocked := filepath.Join(t.TempDir(), "not-a-directory")
 	if err := os.WriteFile(blocked, []byte("blocked"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	ex.overrideDir = blocked
 
-	if _, err := ex.SetPort(context.Background(), "lmstudio", 1235); err == nil {
+	if _, err := ex.SetPort(context.Background(), "lmstudio", newPort); err == nil {
 		t.Fatal("expected persistence failure")
 	}
-	if !stopped() || !started(1234) || started(1235) {
-		t.Fatal("persistence failure did not stop and restore the engine on 1234")
+	if !stopped() || !started(oldPort) || started(newPort) {
+		t.Fatal("persistence failure did not stop and restore the engine on its old port")
 	}
-	if status, err := ex.Status("lmstudio"); err != nil || status.Port != 1234 || !status.Running {
-		t.Fatalf("restored status = %+v err=%v, want running on 1234", status, err)
+	if status, err := ex.Status("lmstudio"); err != nil || status.Port != oldPort || !status.Running {
+		t.Fatalf("restored status = %+v err=%v, want running on %d", status, err, oldPort)
 	}
 }

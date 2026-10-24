@@ -22,7 +22,7 @@ import (
 	"time"
 )
 
-// TestE2EOverStdio drives the real engine-manager binary end-to-end
+// TestE2EOverStdio drives the engine-manager with a test-only registry end-to-end
 // over JSON-RPC stdio: it discovers an injected "fake" engine, starts
 // it (spawning the fake-engine child), runs an action, stops it, and
 // shuts down — the same path the supervising broker uses.
@@ -90,6 +90,7 @@ func TestE2EOverStdio(t *testing.T) {
 // rest of its override across a new worker process, not just in-memory state.
 func TestE2EPortSavePreservesLaunchOverrides(t *testing.T) {
 	cfg, home := t.TempDir(), t.TempDir()
+	port := privateTestPorts(t, 1)[0]
 	override := map[string]any{
 		"engine": "ollama",
 		"runtime": map[string]any{
@@ -109,9 +110,9 @@ func TestE2EPortSavePreservesLaunchOverrides(t *testing.T) {
 		}
 	}
 	first := startE2EManager(t, cfg, home)
-	send(t, first.stdin, 1, "engine:set-port", map[string]any{"engine": "ollama", "port": 26001})
+	send(t, first.stdin, 1, "engine:set-port", map[string]any{"engine": "ollama", "port": port})
 	var saved EngineStatus
-	if err := json.Unmarshal(waitResult(t, first.frames, "1", 10*time.Second), &saved); err != nil || saved.Port != 26001 || saved.Running {
+	if err := json.Unmarshal(waitResult(t, first.frames, "1", 10*time.Second), &saved); err != nil || saved.Port != port || saved.Running {
 		t.Fatalf("saved status=%+v, err=%v", saved, err)
 	}
 	first.stop(t)
@@ -122,7 +123,7 @@ func TestE2EPortSavePreservesLaunchOverrides(t *testing.T) {
 		t.Fatal(err)
 	}
 	platform, ok := manifest.HostPlatform()
-	if !ok || platform.Runtime.Port != 26001 || len(platform.Runtime.Args) != 2 || platform.Runtime.Args[1] != "--custom-option" || platform.Runtime.Env["CUSTOM_SETTING"] != "retained" {
+	if !ok || platform.Runtime.Port != port || len(platform.Runtime.Args) != 2 || platform.Runtime.Args[1] != "--custom-option" || platform.Runtime.Env["CUSTOM_SETTING"] != "retained" {
 		t.Fatalf("worker restart lost settings: %+v", platform)
 	}
 	second.stop(t)
@@ -592,12 +593,13 @@ func writeE2EManifest(t *testing.T, dir string, manifest *Manifest) {
 }
 
 // isolatedManagerEnv is the environment for every manager process a test
-// starts. Profile and app-data roots point at test directories so the
-// bundled manifests cannot find, adopt or stop a real installed engine.
+// starts. Profile and app-data roots point at test directories; the compiled
+// registry overlay supplies only private fixtures, including on watcher sweeps.
 func isolatedManagerEnv(cfg, home string) []string {
 	return overrideEnv(map[string]string{
 		"APPDATA": cfg, "LOCALAPPDATA": cfg, "XDG_CONFIG_HOME": cfg,
 		"HOME": home, "USERPROFILE": home,
+		"FAKE_ADDR": "", "OLLAMA_HOST": "", "NVPAIR_EM_LIVE_TEST": "",
 	})
 }
 

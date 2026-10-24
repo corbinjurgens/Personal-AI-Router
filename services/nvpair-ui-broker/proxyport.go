@@ -79,6 +79,15 @@ func nextAvailablePortExcluding(start int, excludedPorts []int, available func(i
 	})
 }
 
+// portAvailable permits a fixture-owned check without changing the production
+// wildcard bind or relying on a process-wide override.
+func (b *Broker) portAvailable(port int) bool {
+	if b.portAvailableCheck != nil {
+		return b.portAvailableCheck(port)
+	}
+	return tcpPortAvailable(port)
+}
+
 // tcpPortAvailable uses the exact wildcard bind shape ollama-proxy uses. The
 // listener is only a preflight; the proxy's bind remains authoritative and a
 // process winning the race is handled as a normal, non-destructive failure.
@@ -237,7 +246,7 @@ func (b *Broker) setOllamaProxyFallback(excludedPorts ...int) int {
 		// proxy is squatting the engine's port when it starts.
 		excludedPorts = append(excludedPorts, managedOllamaFacadePort, managedOllamaBackendStart)
 	}
-	fallback := nextAvailablePortExcluding(managedOllamaBackendStart, excludedPorts, tcpPortAvailable)
+	fallback := nextAvailablePortExcluding(managedOllamaBackendStart, excludedPorts, b.portAvailable)
 	b.ollamaState().startupPort.Store(int32(fallback))
 	return fallback
 }
@@ -247,7 +256,7 @@ func (b *Broker) setOllamaProxyFallback(excludedPorts ...int) int {
 // ready event proves :11434 has actually been reserved. Adopted/external
 // engines are never moved because this slice has no process-takeover authority.
 func (b *Broker) prepareManagedOllamaFacade() {
-	b.prepareManagedOllamaFacadeWithPortCheck(tcpPortAvailable)
+	b.prepareManagedOllamaFacadeWithPortCheck(b.portAvailable)
 }
 
 func (b *Broker) prepareManagedOllamaFacadeWithPortCheck(portAvailable func(int) bool) {

@@ -219,6 +219,7 @@ func TestUnbindableLMStudioFacadeFinishesWithoutRestartingTheProcess(t *testing.
 	go proxy.peer.Serve(nil, nil)
 
 	b := &Broker{clusterDir: "cluster", lmstudioPortReady: make(chan struct{})}
+	useSyntheticBrokerPortChecks(t, b)
 	b.lmstudioState().backendPort.Store(managedLMStudioBackendStart)
 	b.lmstudioProxyGeneration.Store(1)
 	b.lmstudioProxyPublishedGeneration.Store(1)

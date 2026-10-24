@@ -178,7 +178,7 @@ func (b *Broker) proxyBringUpContext() (context.Context, context.CancelFunc) {
 func (b *Broker) enableEngineFacade(
 	ctx context.Context, pp *proxyProcess, profile engineProxyProfile, alias ollamaHostAlias,
 ) error {
-	return b.enableEngineFacadeWithPortCheck(ctx, pp, profile, alias, tcpPortAvailable)
+	return b.enableEngineFacadeWithPortCheck(ctx, pp, profile, alias, b.portAvailable)
 }
 
 func (b *Broker) enableEngineFacadeWithPortCheck(

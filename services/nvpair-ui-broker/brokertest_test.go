@@ -26,6 +26,15 @@ func emptySwitchManagerSnapshot() switchManagerSnapshot {
 	return switchManagerSnapshot{Configuration: configuration, ConfigurationFence: settings.SwitchConfigurationToken(configuration)}
 }
 
+// Pipe and fake-process fixtures exercise planning and ordering, not socket
+// occupancy. Report every candidate free so exclusions remain load-bearing,
+// without binding any candidate on the developer's machine. Tests that prove
+// real occupied-port rejection keep the default checker and private listeners.
+func useSyntheticBrokerPortChecks(t *testing.T, b *Broker) {
+	t.Helper()
+	b.portAvailableCheck = func(int) bool { return true }
+}
+
 // Both engines' port tests assert on an ownership gate opening or staying
 // shut, and did it by hand with an inline select. Three shapes recurred, and
 // the difference between two of them is easy to get wrong: waiting on

@@ -153,6 +153,8 @@ type ProxyStatusResult struct {
 // client connection in listen mode so future per-session caches (auth
 // tokens, watched-resource cursors, etc.) don't bleed across clients.
 type Broker struct {
+	// portAvailableCheck is fixed before use; nil keeps the production bind check.
+	portAvailableCheck func(int) bool
 	// routingForward bounds routing control forwarding to one operation.
 	routingForward atomic.Bool
 	// settingsApplyMu serializes engine settings applies end to end, including

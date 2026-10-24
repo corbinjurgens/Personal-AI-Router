@@ -373,7 +373,7 @@ func (b *Broker) validateSettingsPortsLocked(ctx context.Context, engine string,
 		if port == current.EffectiveProxyPort || (current.Running && port == current.EffectiveServerPort) {
 			continue
 		}
-		if !tcpPortAvailable(port) {
+		if !b.portAvailable(port) {
 			return fmt.Errorf("port %d is already in use", port)
 		}
 	}

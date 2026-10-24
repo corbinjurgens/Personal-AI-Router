@@ -104,6 +104,7 @@ func TestBlockingAManagedFacadeKeepsTheAliasForTheRetry(t *testing.T) {
 		ollamaPortReady:   make(chan struct{}),
 		lmstudioPortReady: make(chan struct{}),
 	}
+	useSyntheticBrokerPortChecks(t, b)
 	alias := ollamaHostAlias{Address: "127.0.0.1:11433", Port: 11433}
 	b.setOllamaHostAlias(alias)
 	b.ollamaState().managedFacade.Store(true)

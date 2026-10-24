@@ -179,6 +179,7 @@ func TestManagedLMStudioWrongReadyEntersFallbackAndWarns(t *testing.T) {
 	go proxy.peer.Serve(nil, nil)
 	errs := &errorsProcess{peer: NewPeer(NewCodec(errorsClient))}
 	b := &Broker{lmstudioPortReady: make(chan struct{})}
+	useSyntheticBrokerPortChecks(t, b)
 	b.lmstudioState().managedFacade.Store(true)
 	b.lmstudioState().backendPort.Store(managedLMStudioBackendStart)
 	b.setLMStudioProxy(proxy)
@@ -400,6 +401,7 @@ func TestManagedLMStudioConcurrentReadyWaitsForFallbackRebind(t *testing.T) {
 	proxy := &proxyProcess{peer: NewPeer(NewCodec(proxyClient))}
 	go proxy.peer.Serve(nil, nil)
 	b := &Broker{lmstudioPortReady: make(chan struct{})}
+	useSyntheticBrokerPortChecks(t, b)
 	b.lmstudioState().managedFacade.Store(true)
 	b.lmstudioState().backendPort.Store(managedLMStudioBackendStart)
 	b.setLMStudioProxy(proxy)
@@ -471,6 +473,7 @@ func TestManagedLMStudioExhaustedFallbacksFinishOnlyThatEngine(t *testing.T) {
 	go proxy.peer.Serve(nil, nil)
 
 	b := &Broker{lmstudioPortReady: make(chan struct{})}
+	useSyntheticBrokerPortChecks(t, b)
 	b.lmstudioState().managedFacade.Store(true)
 	b.lmstudioState().backendPort.Store(managedLMStudioBackendStart)
 	b.lmstudioProxyGeneration.Store(1)
@@ -628,6 +631,7 @@ func TestPrepareUnmanagedLMStudioPreservesPortsAndWaitsForProxy(t *testing.T) {
 
 func TestManagedLMStudioBindFailureWaitsForFallbackReady(t *testing.T) {
 	b := &Broker{lmstudioPortReady: make(chan struct{})}
+	useSyntheticBrokerPortChecks(t, b)
 	b.lmstudioState().managedFacade.Store(true)
 	b.lmstudioState().backendPort.Store(managedLMStudioBackendStart)
 
@@ -660,6 +664,7 @@ func TestManagedLMStudioBindFailureWaitsForFallbackReady(t *testing.T) {
 
 func TestManagedLMStudioRestartBindFailureChoosesFallback(t *testing.T) {
 	b := &Broker{lmstudioPortReady: make(chan struct{})}
+	useSyntheticBrokerPortChecks(t, b)
 	b.lmstudioState().managedFacade.Store(true)
 	b.lmstudioState().backendPort.Store(managedLMStudioBackendStart)
 	b.markLMStudioPortReady() // a later supervised proxy generation failed
@@ -691,6 +696,7 @@ func TestUnmanagedLMStudioProxyCollisionRebindsBeforeGate(t *testing.T) {
 	go proxy.peer.Serve(nil, nil)
 
 	b := &Broker{lmstudioPortReady: make(chan struct{})}
+	useSyntheticBrokerPortChecks(t, b)
 	b.lmstudioState().backendPort.Store(12400)
 	b.setLMStudioProxy(proxy)
 
@@ -763,6 +769,7 @@ func TestUnmanagedLMStudioCollisionRebindsBeforeStatusProbe(t *testing.T) {
 	engine, engineCodec := newTestRPCWorkerPipe(t)
 
 	b := &Broker{lmstudioPortReady: make(chan struct{})}
+	useSyntheticBrokerPortChecks(t, b)
 	b.lmstudioState().backendPort.Store(12400)
 	b.setLMStudioProxy(proxy)
 	b.setEngineMgr(engine)
@@ -806,6 +813,7 @@ func TestUnmanagedLMStudioCollisionRebindsBeforeStatusProbe(t *testing.T) {
 
 func TestUnknownLMStudioBackendFallbackSkipsUnprovenPorts(t *testing.T) {
 	b := &Broker{}
+	useSyntheticBrokerPortChecks(t, b)
 	fallback := b.setLMStudioProxyFallback()
 	if fallback == 0 || fallback == managedLMStudioFacadePort || fallback == managedLMStudioBackendStart {
 		t.Fatalf("unknown-backend fallback selected unproven port %d", fallback)
@@ -823,6 +831,7 @@ func TestUnknownLMStudioBackendMovesProxyBeforeStatusProbe(t *testing.T) {
 	engine, engineCodec := newTestRPCWorkerPipe(t)
 
 	b := &Broker{lmstudioPortReady: make(chan struct{})}
+	useSyntheticBrokerPortChecks(t, b)
 	b.setLMStudioProxy(proxy)
 	b.setEngineMgr(engine)
 
@@ -936,6 +945,7 @@ func TestEngineManagerRespawnReconcilesUnknownCustomBackendBeforeRestore(t *test
 		ollamaPortReady:   make(chan struct{}),
 		lmstudioPortReady: make(chan struct{}),
 	}
+	useSyntheticBrokerPortChecks(t, b)
 	close(b.ollamaPortReady)
 	b.setLMStudioProxy(proxy)
 	b.setEngineMgr(oldEngine)

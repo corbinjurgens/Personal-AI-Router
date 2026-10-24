@@ -117,7 +117,7 @@ func TestEngineManagerPortsInvalidProgrammaticConfigurationDoesNotSpawn(t *testi
 
 func TestEngineManagerPortsSpawnAndScannerReplay(t *testing.T) {
 	isolateOllamaHostTestConfig(t)
-	engineBinary := buildEngineManagerPortTestBinary(t, "ports-spawn", "nvpair-engine-manager", "../nvpair-engine-manager", ".")
+	engineBinary := buildPrivateEngineManagerPortFixture(t)
 	scannerBinary := buildServicePortFixture(t)
 	ports := make([]int, 2)
 	listeners := make([]net.Listener, 2)
@@ -156,6 +156,21 @@ func TestEngineManagerPortsSpawnAndScannerReplay(t *testing.T) {
 	}
 	t.Cleanup(supervisor.Stop)
 	worker := b.getEngineMgr()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	raw, rpcErr, err := worker.peer.Call(ctx, "engine:descriptors", nil)
+	if err != nil || rpcErr != nil {
+		t.Fatalf("read private engine registry: %v, %v", err, rpcErr)
+	}
+	var inventory struct {
+		Engines []json.RawMessage `json:"engines"`
+	}
+	if err := json.Unmarshal(raw, &inventory); err != nil {
+		t.Fatalf("decode private engine registry: %v", err)
+	}
+	if len(inventory.Engines) != 0 {
+		t.Fatalf("listener fixture loaded engine manifests: %s", raw)
+	}
 	for _, flag := range []struct {
 		name string
 		port int
@@ -307,19 +322,95 @@ func TestEngineManagerPortsSettingsReleaseUnusedDefaults(t *testing.T) {
 	}
 }
 
-func buildEngineManagerPortTestBinary(t *testing.T, role, program, directory, target string) string {
+// The listener/replay test needs the real main, Manager, Executor and listener
+// owners, but no engine inventory. Its generated build overlay changes only
+// startup registry construction, so watchLoaded cannot probe bundled engines.
+// Bundled-manifest loading remains covered by engine-manager's registry tests.
+func buildPrivateEngineManagerPortFixture(t *testing.T) string {
+	t.Helper()
+	mainPath, err := filepath.Abs("../nvpair-engine-manager/main.go")
+	if err != nil {
+		t.Fatalf("resolve engine-manager main: %v", err)
+	}
+	source, err := os.ReadFile(mainPath)
+	if err != nil {
+		t.Fatalf("read engine-manager main: %v", err)
+	}
+	fixture, err := privateEngineManagerPortFixtureSource(string(source))
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	fixturePath := filepath.Join(dir, "main.go")
+	if err := os.WriteFile(fixturePath, []byte(fixture), 0600); err != nil {
+		t.Fatalf("write private engine-manager main: %v", err)
+	}
+	overlay, err := json.Marshal(struct {
+		Replace map[string]string
+	}{Replace: map[string]string{mainPath: fixturePath}})
+	if err != nil {
+		t.Fatalf("encode engine-manager overlay: %v", err)
+	}
+	overlayPath := filepath.Join(dir, "overlay.json")
+	if err := os.WriteFile(overlayPath, overlay, 0600); err != nil {
+		t.Fatalf("write engine-manager overlay: %v", err)
+	}
+	return buildEngineManagerPortTestBinary(t, "ports-spawn", "nvpair-engine-manager", "../nvpair-engine-manager", ".", "-overlay", overlayPath)
+}
+
+func privateEngineManagerPortFixtureSource(source string) (string, error) {
+	const startupRegistry = "reg := buildRegistry(manifestDir)"
+	if count := strings.Count(source, startupRegistry); count != 1 {
+		return "", fmt.Errorf("engine-manager fixture requires exactly one startup registry construction, got %d", count)
+	}
+	return strings.Replace(source, startupRegistry, "reg := NewRegistry()", 1), nil
+}
+
+func TestEngineManagerPortFixtureRegistryIsolation(t *testing.T) {
+	source, err := os.ReadFile("../nvpair-engine-manager/main.go")
+	if err != nil {
+		t.Fatalf("read production engine-manager main: %v", err)
+	}
+	t.Run("production startup has one replacement site", func(t *testing.T) {
+		fixture, err := privateEngineManagerPortFixtureSource(string(source))
+		if err != nil {
+			t.Fatal(err)
+		}
+		// Restoring the private constructor must recover the entire production
+		// source. Transport, Manager startup and both listener owners stay real.
+		if strings.Replace(fixture, "reg := NewRegistry()", "reg := buildRegistry(manifestDir)", 1) != string(source) {
+			t.Fatal("fixture overlay changed more than startup registry construction")
+		}
+	})
+	for _, tc := range []struct {
+		name   string
+		source string
+	}{
+		{name: "missing construction", source: strings.ReplaceAll(string(source), "reg := buildRegistry(manifestDir)", "reg := NewRegistry()")},
+		{name: "duplicate construction", source: string(source) + "\nreg := buildRegistry(manifestDir)\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if fixture, err := privateEngineManagerPortFixtureSource(tc.source); err == nil || fixture != "" {
+				t.Fatalf("unsafe overlay returned %d bytes, %v; want rejection without generated source", len(fixture), err)
+			}
+		})
+	}
+}
+
+func buildEngineManagerPortTestBinary(t *testing.T, role, program, directory, target string, buildFlags ...string) string {
 	t.Helper()
 	binary := filepath.Join(testbin.Dir(t, "nvpair-ui-broker", role, program), testbin.Exe(program))
-	if err := buildPortTestBinary(binary, directory, target); err != nil {
+	if err := buildPortTestBinary(binary, directory, target, buildFlags...); err != nil {
 		t.Fatal(err)
 	}
 	return binary
 }
 
-func buildPortTestBinary(binary, directory, target string) error {
+func buildPortTestBinary(binary, directory, target string, buildFlags ...string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
-	command := exec.CommandContext(ctx, "go", "build", "-modcacherw", "-o", binary, target)
+	args := append([]string{"build", "-modcacherw", "-o", binary}, buildFlags...)
+	command := exec.CommandContext(ctx, "go", append(args, target)...)
 	command.Dir = directory
 	// Preserve the real caches while fixtures keep their private app-data roots.
 	command.Env = append(os.Environ(), portTestGoEnv...)

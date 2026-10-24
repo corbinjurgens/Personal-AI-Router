@@ -130,7 +130,7 @@ func (b *Broker) setLMStudioProxyFallback(excludedPorts ...int) int {
 		// free proxy port.
 		excludedPorts = append(excludedPorts, managedLMStudioFacadePort, managedLMStudioBackendStart)
 	}
-	fallback := nextAvailablePortExcluding(managedLMStudioBackendStart, excludedPorts, tcpPortAvailable)
+	fallback := nextAvailablePortExcluding(managedLMStudioBackendStart, excludedPorts, b.portAvailable)
 	b.lmstudioState().startupPort.Store(int32(fallback))
 	return fallback
 }
@@ -192,7 +192,7 @@ func (b *Broker) configureUnmanagedLMStudioFacade() {
 // command-mode LM Studio engine. Only after :1234 is verified free does the
 // broker force the proxy onto the compatibility port.
 func (b *Broker) prepareManagedLMStudioFacade() {
-	b.prepareManagedLMStudioFacadeWithPortCheck(tcpPortAvailable)
+	b.prepareManagedLMStudioFacadeWithPortCheck(b.portAvailable)
 }
 
 func (b *Broker) prepareManagedLMStudioFacadeWithPortCheck(portAvailable func(int) bool) {
