@@ -8,10 +8,8 @@ package main
 // aliases. It follows the activated node policy (routing.listener), so a proxy
 // restarted by the broker re-establishes it when the broker replays the policy.
 //
-// Until the hybrid cutover it lists aliases and nothing else. Every inference
-// route answers feature-unavailable before reading the body, so no admission,
-// wake, workload, engine or remote activity can follow from it. It has no
-// engine profile, no facade and no discovery state.
+// Inference enters the same request owner as facade inference, with the hybrid
+// dispatch policy. Discovery and engine state remain owned by enabled facades.
 
 import (
 	"context"
@@ -44,11 +42,6 @@ const (
 	routingCodeMethodNotAllowed = "method_not_allowed"
 	routingCodeQueryNotAllowed  = "query_not_allowed"
 	routingCodePreflightDenied  = "preflight_not_allowed"
-	// routingCodeFeatureUnavailable matches the facades' alias refusal code.
-	routingCodeFeatureUnavailable = "feature_unavailable"
-	// routingReasonNotInferenceReady: the listener has no dispatch path until
-	// the hybrid cutover.
-	routingReasonNotInferenceReady = "routing_listener_not_inference_ready"
 )
 
 // routingModelsPath is the one non-inference route the listener serves.
@@ -281,9 +274,8 @@ func (h *routingHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Vary", "Origin")
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
-	// No handler reads a request body. Closing after the answer keeps net/http
-	// from reading the unread body first, which would hold the answer back for
-	// as long as a client stalls mid-body.
+	// Gate refusals must not drain an unread body before answering. Accepted
+	// inference buffers it synchronously under the common owner's deadline.
 	if r.ContentLength != 0 {
 		w.Header().Set("Connection", "close")
 	}
@@ -316,8 +308,7 @@ func (h *routingHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case r.URL.RawQuery != "" || r.URL.ForceQuery:
 		writeRoutingError(w, http.StatusBadRequest, routingCodeQueryNotAllowed, "", "inference routes accept no query string")
 	default:
-		writeRoutingError(w, http.StatusNotImplemented, routingCodeFeatureUnavailable, routingReasonNotInferenceReady,
-			"hybrid routing is not available for inference yet")
+		h.host.serveHybridInference(w, r)
 	}
 }
 
