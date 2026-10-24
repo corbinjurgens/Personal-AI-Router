@@ -1,0 +1,115 @@
+{
+  "schema": 1,
+  "description": "Synthetic contract fixtures only; recovery does not assert an SC-b runtime implementation.",
+  "cases": [
+    {
+      "name": "rejected then served local",
+      "record": {
+        "schema": 1,
+        "request": {"originNodeId": "synthetic-origin", "proxyRunId": "synthetic-run", "requestId": "9223372036854775807"},
+        "workload": {"originNodeId": "synthetic-origin", "proxyRunId": "synthetic-run", "engine": "llamacpp", "id": "synthetic-job", "attemptIndex": 1, "attached": false},
+        "seq": 3,
+        "requested": {"model": "synthetic-model", "tier": "weak", "mode": "chat"},
+        "createdAt": 1700000000000, "endedAt": 1700000005000,
+        "state": "completed", "reason": "", "status": 200,
+        "served": {"kind": "local", "model": "synthetic-model", "nodeId": "synthetic-node", "engine": "llamacpp", "deploymentId": null, "accountId": null},
+        "recoverable": false,
+        "spend": {"currency": "USD", "ceilingNanoUsd": null, "grantedNanoUsd": null, "heldNanoUsd": null, "chargedNanoUsd": null, "accounting": "none"},
+        "droppedAttempts": 0,
+        "attempts": [
+          {"index": 0, "startedAt": 1700000000000, "endedAt": 1700000000350,
+           "destination": {"kind": "local", "model": "synthetic-model", "nodeId": "synthetic-busy", "engine": "llamacpp", "deploymentId": null, "accountId": null},
+           "outcome": "rejected", "reason": "admission-busy", "status": null,
+           "waits": {"admissionMs": 350, "firstByteMs": null}, "continuationOf": null, "account": null},
+          {"index": 1, "startedAt": 1700000000350, "endedAt": 1700000005000,
+           "destination": {"kind": "local", "model": "synthetic-model", "nodeId": "synthetic-node", "engine": "llamacpp", "deploymentId": null, "accountId": null},
+           "outcome": "committed", "reason": "", "status": 200,
+           "waits": {"admissionMs": 350, "firstByteMs": 1200}, "continuationOf": null, "account": null}
+        ]
+      }
+    },
+    {
+      "name": "terminal interrupted API retained accounting",
+      "record": {
+        "schema": 1,
+        "request": {"originNodeId": "synthetic-origin", "proxyRunId": "synthetic-run", "requestId": "2"},
+        "workload": null, "seq": 2,
+        "requested": {"model": "synthetic-model", "tier": "strong", "mode": "completion"},
+        "createdAt": 1700000010000, "endedAt": 1700000012000,
+        "state": "failed", "reason": "stream-interrupted", "status": 200, "served": null, "recoverable": false,
+        "spend": {"currency": "USD", "ceilingNanoUsd": "1000000000", "grantedNanoUsd": "250000000", "heldNanoUsd": "250000000", "chargedNanoUsd": "123456789", "accounting": "retained"},
+        "droppedAttempts": 0,
+        "attempts": [
+          {"index": 0, "startedAt": 1700000010000, "endedAt": 1700000012000,
+           "destination": {"kind": "api", "model": "synthetic-model", "nodeId": null, "engine": null, "deploymentId": "synthetic-deployment", "accountId": "synthetic-account"},
+           "outcome": "interrupted", "reason": "stream-interrupted", "status": 200,
+           "waits": {"admissionMs": 0, "firstByteMs": 1200}, "continuationOf": null,
+           "account": {"state": "unknown", "heldNanoUsd": "250000000", "chargedNanoUsd": "123456789", "accounting": "retained"}}
+        ]
+      }
+    },
+    {
+      "name": "cancelled with dropped prefix",
+      "record": {
+        "schema": 1,
+        "request": {"originNodeId": "synthetic-origin", "proxyRunId": "synthetic-run", "requestId": "3"},
+        "workload": {"originNodeId": "synthetic-origin", "proxyRunId": "synthetic-run", "engine": "llamacpp", "id": "synthetic-old-job", "attemptIndex": 0, "attached": false},
+        "seq": 4, "requested": {"model": "synthetic-model", "tier": "", "mode": "other"},
+        "createdAt": 1700000020000, "endedAt": 1700000023000,
+        "state": "cancelled", "reason": "cancel", "status": null, "served": null, "recoverable": false,
+        "spend": {"currency": "USD", "ceilingNanoUsd": null, "grantedNanoUsd": null, "heldNanoUsd": null, "chargedNanoUsd": null, "accounting": "none"},
+        "droppedAttempts": 2,
+        "attempts": [
+          {"index": 2, "startedAt": 1700000022000, "endedAt": 1700000023000,
+           "destination": {"kind": "local", "model": "synthetic-model", "nodeId": "synthetic-node", "engine": "llamacpp", "deploymentId": null, "accountId": null},
+           "outcome": "cancelled", "reason": "cancel", "status": null,
+           "waits": {"admissionMs": 0, "firstByteMs": null}, "continuationOf": null, "account": null}
+        ]
+      }
+    },
+    {
+      "name": "recoverable interruption",
+      "record": {
+        "schema": 1,
+        "request": {"originNodeId": "synthetic-origin", "proxyRunId": "synthetic-run", "requestId": "4"},
+        "workload": null, "seq": 2,
+        "requested": {"model": "synthetic-model", "tier": "medium", "mode": "chat"},
+        "createdAt": 1700000030000, "endedAt": null,
+        "state": "streaming", "reason": "", "status": 200, "served": null, "recoverable": true,
+        "spend": {"currency": "USD", "ceilingNanoUsd": null, "grantedNanoUsd": null, "heldNanoUsd": null, "chargedNanoUsd": null, "accounting": "none"},
+        "droppedAttempts": 0,
+        "attempts": [
+          {"index": 0, "startedAt": 1700000030000, "endedAt": 1700000031000,
+           "destination": {"kind": "local", "model": "synthetic-model", "nodeId": "synthetic-node", "engine": "llamacpp", "deploymentId": null, "accountId": null},
+           "outcome": "interrupted", "reason": "stream-interrupted", "status": 200,
+           "waits": {"admissionMs": 0, "firstByteMs": 350}, "continuationOf": null, "account": null}
+        ]
+      }
+    },
+    {
+      "name": "actual linked successor",
+      "record": {
+        "schema": 1,
+        "request": {"originNodeId": "synthetic-origin", "proxyRunId": "synthetic-run", "requestId": "5"},
+        "workload": null, "seq": 3,
+        "requested": {"model": "synthetic-model", "tier": "", "mode": "chat"},
+        "createdAt": 1700000040000, "endedAt": 1700000045000,
+        "state": "completed", "reason": "", "status": 200,
+        "served": {"kind": "local", "model": "synthetic-model", "nodeId": "synthetic-successor", "engine": "llamacpp", "deploymentId": null, "accountId": null},
+        "recoverable": false,
+        "spend": {"currency": "USD", "ceilingNanoUsd": null, "grantedNanoUsd": null, "heldNanoUsd": null, "chargedNanoUsd": null, "accounting": "none"},
+        "droppedAttempts": 0,
+        "attempts": [
+          {"index": 0, "startedAt": 1700000040000, "endedAt": 1700000041000,
+           "destination": {"kind": "local", "model": "synthetic-model", "nodeId": "synthetic-node", "engine": "llamacpp", "deploymentId": null, "accountId": null},
+           "outcome": "interrupted", "reason": "stream-interrupted", "status": 200,
+           "waits": {"admissionMs": 0, "firstByteMs": 350}, "continuationOf": null, "account": null},
+          {"index": 1, "startedAt": 1700000041000, "endedAt": 1700000045000,
+           "destination": {"kind": "local", "model": "synthetic-model", "nodeId": "synthetic-successor", "engine": "llamacpp", "deploymentId": null, "accountId": null},
+           "outcome": "committed", "reason": "", "status": 200,
+           "waits": {"admissionMs": 350, "firstByteMs": 1200}, "continuationOf": 0, "account": null}
+        ]
+      }
+    }
+  ]
+}
