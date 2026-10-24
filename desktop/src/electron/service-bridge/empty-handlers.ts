@@ -41,6 +41,12 @@ import {
     parseServiceErrors
 } from './modular-state'
 import { parseWorkloadsInitial } from './workload-projection'
+import {
+    routingActiveParams,
+    routingCancelParams,
+    parseRoutingActiveResult,
+    parseRoutingCancelResult
+} from './routing'
 
 import type { JsonObject, JsonValue } from './json-rpc-client'
 import { JsonRpcResponseError } from './json-rpc-client'
@@ -924,6 +930,19 @@ const EMPTY_SERVICE_BRIDGE_HANDLERS: BridgeHandlerMap = {
                 'workloads:cancel',
                 workloadCancelParams(payload)
             )
+        )
+    },
+
+    'routing:cancel': async payload => {
+        const params = routingCancelParams(payload)
+        return parseRoutingCancelResult(
+            await getModularSupervisor().callProcess('broker', 'routing:cancel', params)
+        )
+    },
+    'routing:active': async payload => {
+        const params = routingActiveParams(payload)
+        return parseRoutingActiveResult(
+            await getModularSupervisor().callProcess('broker', 'routing:active', params)
         )
     },
 
