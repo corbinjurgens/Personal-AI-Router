@@ -96,6 +96,7 @@ type Codec struct {
 	wgate          chan struct{}
 	retired        bool // guarded by wgate
 	interruptWrite func()
+	history        *HistoryReader
 }
 
 // NewCodec wraps rw with a Codec. Reads accept frames up to 1 MiB.
@@ -141,6 +142,9 @@ func NewCodecMaxFrameWithWriteInterrupt(rw io.ReadWriter, maxFrame int, interrup
 // frame (bad JSON or wrong version) is returned as a recoverable *DecodeError;
 // a terminal scanner/transport error is returned as a plain error.
 func (c *Codec) Read() (*Message, error) {
+	if c.history != nil {
+		return c.history.Read()
+	}
 	if !c.scanner.Scan() {
 		if err := c.scanner.Err(); err != nil {
 			return nil, fmt.Errorf("read error: %w", err)
@@ -169,7 +173,15 @@ func (c *Codec) writeContext(ctx context.Context, closed <-chan struct{}, interr
 		return err
 	}
 	data = append(data, '\n')
+	return c.writeEncodedContext(ctx, ctx, closed, interrupt, data)
+}
+
+// writeEncodedContext keeps the borrowed frame until both Write and its
+// interruption callback finish. Acquisition and active lifetimes are distinct.
+func (c *Codec) writeEncodedContext(acquire, ctx context.Context, closed <-chan struct{}, interrupt func(), data []byte) (err error) {
 	select {
+	case <-acquire.Done():
+		return acquire.Err()
 	case <-ctx.Done():
 		return ctx.Err()
 	case <-closed:
@@ -177,8 +189,15 @@ func (c *Codec) writeContext(ctx context.Context, closed <-chan struct{}, interr
 	case c.wgate <- struct{}{}:
 	}
 	defer func() { <-c.wgate }()
+	return c.writeOwnedContext(acquire, ctx, closed, interrupt, data)
+}
+
+func (c *Codec) writeOwnedContext(acquire, ctx context.Context, closed <-chan struct{}, interrupt func(), data []byte) (err error) {
 	// The gate and cancellation can become ready together. Recheck before any
 	// transport access so an expired waiter cannot write later.
+	if err := acquire.Err(); err != nil {
+		return err
+	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
