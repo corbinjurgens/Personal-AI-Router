@@ -388,6 +388,7 @@ type dispatchPolicy struct {
 	hybrid              bool
 	apiOnly             bool
 	publicAllowed       bool
+	routingTiers        map[string]nodepolicy.TierRouting
 }
 
 func concreteDispatchPolicy(start time.Time) dispatchPolicy {
@@ -423,6 +424,10 @@ func (p *Proxy) serveHybridInference(w http.ResponseWriter, r *http.Request) {
 	}
 	pol := p.admission.currentPolicy()
 	policy := hybridDispatchPolicy(start, pol.Routing.Limits, nodepolicy.TierRouting{})
+	// Published policy maps are immutable: retain this snapshot's alias rules
+	// through body preparation without copying them before buffer admission.
+	// Live admission and per-attempt authority checks remain independent.
+	policy.routingTiers = pol.Routing.Tiers
 	// Do not acquire a newly enabled overlay during body preparation on this
 	// unregistered adapter. Its numeric notification ID has no facade sequence.
 	policy.apiOnly = noFacade
