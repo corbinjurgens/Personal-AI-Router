@@ -88,7 +88,7 @@ func (b *Broker) loadDynamicEngines() {
 		slog.Warn("engine descriptors malformed; fronting only the built-in engines", "err", err)
 		return
 	}
-	b.setDynamicEngines(selectDynamicEngines(result.Engines), tcpPortAvailable)
+	b.setDynamicEngines(selectDynamicEngines(result.Engines), b.portAvailable)
 }
 
 // selectDynamicEngines keeps the descriptors this node fronts: not built in,

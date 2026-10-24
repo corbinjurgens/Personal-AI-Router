@@ -373,6 +373,7 @@ func TestFacadeEnableRejectionIsNotRetried(t *testing.T) {
 func TestOllamaProxyFallbackAvoidsTheEnginesPorts(t *testing.T) {
 	t.Run("backend unknown excludes both stock ports", func(t *testing.T) {
 		b := &Broker{}
+		useSyntheticBrokerPortChecks(t, b)
 		fallback := b.setOllamaProxyFallback()
 
 		if fallback == managedOllamaFacadePort || fallback == managedOllamaBackendStart {
@@ -386,6 +387,7 @@ func TestOllamaProxyFallbackAvoidsTheEnginesPorts(t *testing.T) {
 
 	t.Run("known backend is excluded", func(t *testing.T) {
 		b := &Broker{}
+		useSyntheticBrokerPortChecks(t, b)
 		b.ollamaState().backendPort.Store(managedOllamaBackendStart)
 
 		if fallback := b.setOllamaProxyFallback(); fallback == managedOllamaBackendStart {
@@ -398,6 +400,7 @@ func TestOllamaProxyFallbackAvoidsTheEnginesPorts(t *testing.T) {
 		// exclusion moved into setOllamaProxyFallback so no call site can omit
 		// it; this pins that the blocked path still avoids the engine's port.
 		b := &Broker{nodeID: "local-node", ollamaPortReady: make(chan struct{})}
+		useSyntheticBrokerPortChecks(t, b)
 		b.ollamaState().backendPort.Store(managedOllamaBackendStart)
 
 		if fallback := b.blockManagedOllamaFacade("test"); fallback == managedOllamaBackendStart {
@@ -440,6 +443,7 @@ func TestUnavailableProxyIsReportedButDeselectionIsNot(t *testing.T) {
 func TestBindFailureMovesTheNextSpawnOffTheContestedPort(t *testing.T) {
 	t.Run("ollama", func(t *testing.T) {
 		b := &Broker{nodeID: "local-node", ollamaPortReady: make(chan struct{})}
+		useSyntheticBrokerPortChecks(t, b)
 		// Unmanaged: no facade claim, so this is the path that used to be
 		// ignored entirely.
 		b.ollamaState().backendPort.Store(managedOllamaBackendStart)
@@ -456,6 +460,7 @@ func TestBindFailureMovesTheNextSpawnOffTheContestedPort(t *testing.T) {
 
 	t.Run("lmstudio", func(t *testing.T) {
 		b := &Broker{nodeID: "local-node", lmstudioPortReady: make(chan struct{})}
+		useSyntheticBrokerPortChecks(t, b)
 		b.lmstudioState().backendPort.Store(managedLMStudioBackendStart)
 		contested := managedLMStudioBackendStart + 7
 		b.lmstudioState().startupPort.Store(int32(contested))

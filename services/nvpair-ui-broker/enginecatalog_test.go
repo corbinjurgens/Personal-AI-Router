@@ -133,6 +133,7 @@ func TestLoadDynamicEnginesFromEngineManager(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			isolateOllamaHostTestConfig(t)
 			b := &Broker{proxyPath: "test-proxy"}
+			useSyntheticBrokerPortChecks(t, b)
 			worker, codec := newTestRPCWorkerPipe(t)
 			b.setEngineMgr(worker)
 			go func() {

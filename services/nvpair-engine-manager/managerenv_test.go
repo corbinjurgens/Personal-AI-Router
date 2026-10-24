@@ -52,3 +52,55 @@ func TestManagerLaunchesUseIsolatedEnv(t *testing.T) {
 		t.Fatalf("found %d manager launch sites, want at least 3", launches)
 	}
 }
+
+func TestIsolatedManagerEnvClearsAddressOverrides(t *testing.T) {
+	for _, key := range []string{"FAKE_ADDR", "OLLAMA_HOST", "NVPAIR_EM_LIVE_TEST"} {
+		t.Setenv(key, "ambient-value")
+	}
+	env := isolatedManagerEnv(t.TempDir(), t.TempDir())
+	for _, key := range []string{"FAKE_ADDR", "OLLAMA_HOST", "NVPAIR_EM_LIVE_TEST"} {
+		var values []string
+		for _, entry := range env {
+			name, value, ok := strings.Cut(entry, "=")
+			if ok && strings.EqualFold(name, key) {
+				values = append(values, value)
+			}
+		}
+		if !slices.Equal(values, []string{""}) {
+			t.Errorf("%s overrides = %q, want exactly one empty assignment", key, values)
+		}
+	}
+}
+
+// Read the generated bundle back through the production loader. A future
+// fixture change must not reintroduce a vendor binary, path or endpoint.
+func TestManagerFixtureBundleIsPrivate(t *testing.T) {
+	dir := t.TempDir()
+	if _, err := managerFixtureOverlay(dir); err != nil {
+		t.Fatal(err)
+	}
+	reg := NewRegistry()
+	if err := reg.LoadFS(os.DirFS(filepath.Join(dir, "bundled")), "."); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(reg.Names(), []string{"llamacpp", "lmstudio", "ollama"}) {
+		t.Fatalf("fixture engines = %v", reg.Names())
+	}
+	for _, name := range reg.Names() {
+		manifest, _ := reg.Get(name)
+		platform, ok := manifest.HostPlatform()
+		if !ok {
+			t.Fatalf("%s has no host platform", name)
+		}
+		rt := platform.Runtime
+		if rt.Bin != fakeEngineBin || !slices.Equal(platform.Detect, []string{fakeEngineBin}) || platform.Install != nil || platform.Uninstall != nil || platform.ModelsDir != "" {
+			t.Errorf("%s can reach a native installation: %+v", name, platform)
+		}
+		if rt.Port <= 0 || slices.Contains([]int{11434, 1234, 1235, 8080, 8081}, rt.Port) || rt.Bind != "" || rt.Mode != "" || len(rt.Start) != 0 || rt.CLI != "" {
+			t.Errorf("%s does not use a private process port: %+v", name, rt)
+		}
+		if rt.Env["FAKE_ADDR"] != "{host}:{port}" || rt.Env["OLLAMA_HOST"] != "{host}:{port}" || rt.Ready == nil || rt.Ready.HTTP != "http://127.0.0.1:{port}/" || rt.Health == nil || rt.Health.HTTP != rt.Ready.HTTP {
+			t.Errorf("%s can escape the fixture address: %+v", name, rt)
+		}
+	}
+}

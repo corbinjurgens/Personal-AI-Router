@@ -279,6 +279,9 @@ func TestDeselectedEngineIsNotPrepared(t *testing.T) {
 	b.setSettings(settings)
 	b.setEngineMgr(engine)
 
+	// Keep the managed policy branch deterministic without binding any of the
+	// real engines' compatibility or backend ports.
+	useSyntheticBrokerPortChecks(t, b)
 	b.prepareEnabledFacades()
 
 	select {
@@ -572,6 +575,7 @@ func newSupervisedBroker(t *testing.T, listener bool, facades ...string) *superv
 	}
 	t.Setenv(fakeProxyEnv, "1")
 	b, out := newPolicyBroker(t)
+	useSyntheticBrokerPortChecks(t, b)
 	b.proxyPath = exe
 	b.proxyEngines = facades
 	b.ollamaPortReady = make(chan struct{})

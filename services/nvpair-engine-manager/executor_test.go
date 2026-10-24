@@ -372,7 +372,7 @@ func TestStartUnknownEngine(t *testing.T) {
 func TestStartPortOverride(t *testing.T) {
 	ex := newTestExecutor(t, testEngineManifest(fakeEngineBin)) // manifest Port is 0
 	t.Cleanup(func() { _ = ex.Stop("fake") })
-	const want = 17777
+	want := privateTestPorts(t, 1)[0]
 	if err := ex.StartWith(context.Background(), "fake", startOpts{Port: want}); err != nil {
 		t.Fatalf("start with port override: %v", err)
 	}

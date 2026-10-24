@@ -250,6 +250,7 @@ func TestProxyFallbackSkipsASiblingEnginesConfiguredPort(t *testing.T) {
 			}
 
 			b := &Broker{}
+			useSyntheticBrokerPortChecks(t, b)
 			got := tc.fallback(b, tc.self.EnginePortBase)
 			if got == stored {
 				t.Fatalf("fallback chose %d, the port %s is configured on", got, tc.sibling.DisplayName)
@@ -366,11 +367,13 @@ func TestManagedBackendMovesSkipTheOllamaHostAlias(t *testing.T) {
 
 func TestOllamaProxyFallbackSkipsTheOllamaHostAlias(t *testing.T) {
 	b := &Broker{}
+	useSyntheticBrokerPortChecks(t, b)
 	b.setOllamaHostAlias(ollamaHostAlias{Port: managedOllamaBackendStart})
 	if got := b.setOllamaProxyFallback(); got == managedOllamaBackendStart {
 		t.Fatalf("proxy fallback = %d, want a port other than the alias", got)
 	}
 	lm := &Broker{}
+	useSyntheticBrokerPortChecks(t, lm)
 	lm.setOllamaHostAlias(ollamaHostAlias{Port: managedLMStudioBackendStart})
 	if got := lm.setLMStudioProxyFallback(); got == managedLMStudioBackendStart {
 		t.Fatalf("LM Studio proxy fallback = %d, want a port other than the alias", got)

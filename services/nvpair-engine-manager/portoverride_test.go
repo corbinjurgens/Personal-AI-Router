@@ -15,6 +15,7 @@ import (
 
 func TestSetPortPreservesOtherOverrides(t *testing.T) {
 	dir := t.TempDir()
+	ports := privateTestPorts(t, 3)
 	path := filepath.Join(dir, "ollama.json")
 	host := runtime.GOOS + "/" + runtime.GOARCH
 	original := map[string]any{
@@ -22,25 +23,29 @@ func TestSetPortPreservesOtherOverrides(t *testing.T) {
 		"display_name":   "Custom Ollama",
 		"custom_counter": json.Number("9007199254740993"),
 		"runtime": map[string]any{
-			"port": 21001,
+			"port": ports[0],
 			"args": []string{"serve", "--custom-option"},
 			"env":  map[string]string{"CUSTOM_SETTING": "kept"},
 		},
 		"platforms": map[string]any{
 			host: map[string]any{"runtime": map[string]any{
-				"port": 21002, "env": map[string]string{"HOST_SETTING": "kept"},
+				"port": ports[1], "env": map[string]string{"HOST_SETTING": "kept"},
 			}},
 		},
 	}
 	if err := writeJSONAtomic(path, original); err != nil {
 		t.Fatal(err)
 	}
-	ex := newBundledExecutor(t, dir)
-	for _, port := range []int{21003, 11434} {
+	ex := newPortFixtureExecutor(t, dir)
+	defaultPort, ok := ex.reg.bundledDefaultPort("ollama")
+	if !ok {
+		t.Fatal("missing fixture bundled default")
+	}
+	for _, port := range []int{ports[2], defaultPort} {
 		if _, err := ex.SetPort(context.Background(), "ollama", port); err != nil {
 			t.Fatal(err)
 		}
-		reg := loadWithOverrides(t, dir)
+		reg := reloadPortFixture(t, ex.reg, dir)
 		manifest, _ := reg.Get("ollama")
 		platform, _ := manifest.HostPlatform()
 		if platform.Runtime.Port != port {
@@ -119,19 +124,21 @@ func TestPersistPortRefusesMalformedOverrideWithoutClobbering(t *testing.T) {
 		t.Run(data, func(t *testing.T) {
 			dir := t.TempDir()
 			path := filepath.Join(dir, "ollama.json")
-			ex := newBundledExecutor(t, dir)
+			ex := newPortFixtureExecutor(t, dir)
+			defaultPort := hostPort(t, ex.reg, "ollama")
+			port := privateTestPorts(t, 1, defaultPort)[0]
 			if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := ex.SetPort(context.Background(), "ollama", 23001); err == nil {
+			if _, err := ex.SetPort(context.Background(), "ollama", port); err == nil {
 				t.Fatal("malformed override was overwritten")
 			}
 			got, err := os.ReadFile(path)
 			if err != nil || string(got) != data {
 				t.Fatalf("invalid override changed: %q, %v", got, err)
 			}
-			if got, _ := ex.Status("ollama"); got.Port != 11434 {
-				t.Fatalf("failed persistence changed runtime port: %+v", got)
+			if got, err := ex.Status("ollama"); err != nil || got.Port != defaultPort {
+				t.Fatalf("failed persistence changed runtime port: %+v, err=%v", got, err)
 			}
 		})
 	}
