@@ -2086,7 +2086,7 @@ func TestServedResidentProcessVeto(t *testing.T) {
 		f.call(t, "node:set-availability", map[string]string{"state": "paused"}, nil)
 		assertSwitchProcessStopped(t, int32(before.Base.PID))
 		f.resident(t, neModel)
-		f.entry(t, neModel, nodepolicy.ModelStateBlocked, nodepolicy.ModelReasonPausedLocal)
+		f.entry(t, neModel, nodepolicy.ModelStateBlocked, nodepolicy.ModelReasonPaused)
 		if got := len(f.starts(t)); got != starts {
 			t.Fatalf("paused resident desire started a runtime: starts=%d, want %d", got, starts)
 		}
@@ -2151,7 +2151,7 @@ func TestServedResidentProcessVeto(t *testing.T) {
 		f.entry(t, neModel, nodepolicy.ModelStateSatisfied, "")
 		f.call(t, "engine:stop", map[string]string{"engine": "llamacpp"}, nil)
 		starts := len(f.starts(t))
-		f.entry(t, neModel, nodepolicy.ModelStateBlocked, nodepolicy.ModelReasonEngineOffLocal)
+		f.entry(t, neModel, nodepolicy.ModelStateBlocked, nodepolicy.ModelReasonEngineOff)
 		if len(f.starts(t)) != starts {
 			t.Fatal("resident desire restarted local Off engine")
 		}
@@ -2596,7 +2596,7 @@ func TestServedResidentProcessSwitch(t *testing.T) {
 	if err != nil || stopped {
 		t.Fatalf("switch target not running: stopped=%t err=%v", stopped, err)
 	}
-	f.entry(t, neModel, nodepolicy.ModelStateBlocked, nodepolicy.ModelReasonEngineOffLocal)
+	f.entry(t, neModel, nodepolicy.ModelStateBlocked, nodepolicy.ModelReasonEngineOff)
 	if !reflect.DeepEqual(f.policy(t).Policy.ResidentModels, nodepolicy.ResidentModels{{Engine: "llamacpp", Model: neModel}}) {
 		t.Fatal("switch changed resident declaration")
 	}

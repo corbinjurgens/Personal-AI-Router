@@ -697,18 +697,9 @@ func strataContractNew(t *testing.T, installed bool) *strataContractFixture {
 	}
 	strataContractWriteJSON(t, filepath.Join(f.AppDir, "engines", "strata.json"), manifest)
 	f.strataContractWriteRuntime(t)
-	for _, engine := range engines.All() {
-		override := map[string]any{"engine": engine.Name, "platforms": map[string]any{runtime.GOOS + "/" + runtime.GOARCH: map[string]any{
-			"detect":  []string{filepath.Join(f.Root, "absent-"+engine.Name)},
-			"runtime": map[string]any{"port": 0, "ready": nil, "health": nil},
-		}}}
-		if engine.Name == "lmstudio" {
-			// Its dormant delete action requires readiness when restart_after is
-			// true. Disable that flag so the null-probe override remains valid.
-			override["actions"] = map[string]any{"delete_model": map[string]bool{"restart_after": false}}
-		}
-		strataContractWriteJSON(t, filepath.Join(f.AppDir, "engines", engine.Name+".json"), override)
-	}
+	// Clear inherited auth statuses as well as readiness so the disabled
+	// built-in manifests remain valid after connection-diagnosis additions.
+	writeDisabledBuiltinEngineOverrides(t, f.Root, f.AppDir)
 	return f
 }
 
@@ -746,12 +737,13 @@ func (f *strataContractFixture) strataContractStartManager(t *testing.T) {
 				Runtime struct {
 					Port          int `json:"port"`
 					Ready, Health json.RawMessage
+					AuthStatuses  []int `json:"auth_statuses"`
 				} `json:"runtime"`
 			} `json:"platforms"`
 		}
 		f.Manager.strataContractOK(t, "engine:describe", map[string]string{"engine": engine.Name}, &manifest)
 		platform, ok := manifest.Platforms[runtime.GOOS+"/"+runtime.GOARCH]
-		if !ok || !reflect.DeepEqual(platform.Detect, []string{filepath.Join(f.Root, "absent-"+engine.Name)}) || platform.Runtime.Port != 0 || (len(platform.Runtime.Ready) != 0 && string(platform.Runtime.Ready) != "null") || (len(platform.Runtime.Health) != 0 && string(platform.Runtime.Health) != "null") {
+		if !ok || !reflect.DeepEqual(platform.Detect, []string{filepath.Join(f.Root, "absent-"+engine.Name)}) || platform.Runtime.Port != 0 || (len(platform.Runtime.Ready) != 0 && string(platform.Runtime.Ready) != "null") || (len(platform.Runtime.Health) != 0 && string(platform.Runtime.Health) != "null") || len(platform.Runtime.AuthStatuses) != 0 {
 			t.Fatalf("built-in %s host override did not disable detection and probes", engine.Name)
 		}
 	}
