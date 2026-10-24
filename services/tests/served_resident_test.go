@@ -109,6 +109,8 @@ type srRuntimeState struct {
 	InventoryUnavailable bool                 `json:"inventoryUnavailable"`
 	DropNextLoadResponse bool                 `json:"dropNextLoadResponse"`
 	HideInventoryOnDrop  bool                 `json:"hideInventoryOnDrop"`
+	FailLoads            bool                 `json:"failLoads"`
+	FailedLoads          int                  `json:"failedLoads"`
 	UnexpectedRoutes     []string             `json:"unexpectedRoutes"`
 }
 
@@ -294,6 +296,10 @@ func runSRRuntime(args []string) error {
 				state.InventoryUnavailable = true
 			case "inventory-available":
 				state.InventoryUnavailable = false
+			case "fail-loads":
+				state.FailLoads = true
+			case "allow-loads":
+				state.FailLoads = false
 			case "drop-next-load-response":
 				state.DropNextLoadResponse = true
 			case "drop-load-and-hide-inventory":
@@ -343,6 +349,11 @@ func runSRRuntime(args []string) error {
 			if !ok {
 				state.Base.Unexpected++
 				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			if r.URL.Path == "/models/load" && state.FailLoads {
+				state.FailedLoads++
+				w.WriteHeader(http.StatusInternalServerError)
 				return
 			}
 			effect.Loaded = r.URL.Path == "/models/load"
@@ -1721,6 +1732,45 @@ func TestServedResidentProcessPermission(t *testing.T) {
 		}
 		srAssertNoEffects(t, before, f.control(t, ""))
 	})
+}
+
+func TestServedResidentProcessLoadFailedRecovers(t *testing.T) {
+	f := newSRProcessFixture(t)
+	f.control(t, "fail-loads")
+	f.resident(t, neModel)
+	f.entry(t, neModel, nodepolicy.ModelStateUnknown, nodepolicy.ModelReasonLoadFailed)
+	failed := f.control(t, "")
+	if failed.FailedLoads == 0 || failed.Models[neModel].Loaded || failed.Base.Loads != 0 {
+		t.Fatalf("failed load effects: %+v", failed)
+	}
+	// The production retry cadence is 30 seconds. Repeated desktop-facing
+	// readbacks must not spin another native load during this bounded window.
+	deadline := time.NewTimer(2 * time.Second)
+	defer deadline.Stop()
+	tick := time.NewTicker(100 * time.Millisecond)
+	defer tick.Stop()
+observe:
+	for {
+		select {
+		case <-deadline.C:
+			break observe
+		case <-tick.C:
+			f.entry(t, neModel, nodepolicy.ModelStateUnknown, nodepolicy.ModelReasonLoadFailed)
+			current := f.control(t, "")
+			if current.FailedLoads != failed.FailedLoads || current.Models[neModel].Loaded || current.Base.Loads != 0 {
+				t.Fatalf("load retry storm during failed-state readbacks: before=%+v after=%+v", failed, current)
+			}
+		}
+	}
+	f.control(t, "allow-loads")
+	// A fresh policy revision requests another reconciliation through the same
+	// broker/proxy/manager path, rather than loading directly through the fake.
+	f.resident(t, neModel)
+	f.entry(t, neModel, nodepolicy.ModelStateSatisfied, "")
+	recovered := f.control(t, "")
+	if recovered.FailedLoads != failed.FailedLoads || recovered.Models[neModel].Loads != 1 || !recovered.Models[neModel].Loaded || recovered.Base.Chats != 0 || recovered.Content != 0 || recovered.Base.Unexpected != 0 {
+		t.Fatalf("successful load did not recover cleanly: %+v", recovered)
+	}
 }
 
 func TestServedResidentProcessResidency(t *testing.T) {
