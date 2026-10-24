@@ -341,6 +341,7 @@
 | `cluster:invite-expired` | request (we call) | ✅ yes |
 | `cluster:invite-failed` | request (we call) | ✅ yes |
 | `cluster:invite-received` | request (we call) | ✅ yes |
+| `cluster:join-requests-changed` | request (we call) | ✅ yes |
 | `cluster:remote-management-changed` | request (we call) | ✅ yes |
 | `discovery:nodes-changed` | request (we call) | ✅ yes |
 | `engine:install-progress` | request (we call) | ✅ yes |

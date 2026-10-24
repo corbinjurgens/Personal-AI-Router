@@ -49,8 +49,8 @@ const (
 	membershipNone nodeMembership = iota
 	membershipMember
 	membershipPending
-	// membershipForeign is a node that belongs to some other cluster. It must
-	// leave that one before it can pair with us.
+	// membershipForeign belongs to another cluster. It cannot accept an Invite;
+	// an eligible local device may instead ask to join that cluster.
 	membershipForeign
 )
 

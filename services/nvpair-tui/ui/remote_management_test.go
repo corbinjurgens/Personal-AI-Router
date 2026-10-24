@@ -222,11 +222,23 @@ func TestLocalManagementAttachAndReconnectOnlyRead(t *testing.T) {
 	if v.remoteManagementFresh {
 		t.Fatal("pre-disconnect read restored permission")
 	}
-	request, result = terminalControlsReply(t, broker, v.Update(NotificationMsg{Msg: &rpc.Message{Method: "app:ready"}}), &rpc.Message{Result: []byte(`{"version":1,"revision":"8","grants":[]}`)})
+	reconnect, ok := v.Update(NotificationMsg{Msg: &rpc.Message{Method: "app:ready"}})().(tea.BatchMsg)
+	if !ok || len(reconnect) != 2 {
+		t.Fatal("reconnect did not schedule exactly the permission and join-request reads")
+	}
+	request, result = terminalControlsReply(t, broker, reconnect[0], &rpc.Message{Result: []byte(`{"version":1,"revision":"8","grants":[]}`)})
 	if request.Method != "cluster:get-remote-management" {
 		t.Fatalf("reconnect retried mutation: %s", request.Method)
 	}
 	v.Update(result)
+	request, result = terminalControlsReply(t, broker, reconnect[1], &rpc.Message{Result: []byte(`{"supported":true,"canAskToJoin":false,"requests":[]}`)})
+	if request.Method != "cluster:get-join-requests" || string(request.Params) != "{}" {
+		t.Fatalf("reconnect join read = %s %s", request.Method, request.Params)
+	}
+	v.Update(result)
+	if !v.joinFresh || !v.joinSnapshot.Supported || !v.remoteManagementFresh {
+		t.Fatal("reconnect did not independently hydrate permission and admission snapshots")
+	}
 }
 
 func TestRemotePermissionReadbackStates(t *testing.T) {

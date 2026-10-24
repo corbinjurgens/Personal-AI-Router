@@ -85,6 +85,33 @@ type clusterInvite struct {
 	State        string  `json:"state"`
 }
 
+// Admission requests are distinct from their eventual pairing invite.
+type joinRequest struct {
+	RequestID    string  `json:"requestId"`
+	Direction    string  `json:"direction"`
+	PeerNodeUUID string  `json:"peerNodeUuid"`
+	PeerName     string  `json:"peerName"`
+	PeerAddress  string  `json:"peerAddress"`
+	PeerPort     int     `json:"peerPort"`
+	State        string  `json:"state"`
+	InviteID     *string `json:"inviteId"`
+	Reason       string  `json:"reason"`
+	CreatedAt    int64   `json:"createdAt"`
+	ExpiresAt    int64   `json:"expiresAt"`
+}
+
+func (r joinRequest) live() bool {
+	return r.State == "awaiting-approval" || r.State == "awaiting-requester" || r.State == "pairing"
+}
+
+type joinRequestsSnapshot struct {
+	Supported               bool          `json:"supported"`
+	CanAskToJoin            bool          `json:"canAskToJoin"`
+	RequiresSoloReplacement bool          `json:"requiresSoloReplacement"`
+	BlockedReason           string        `json:"blockedReason"`
+	Requests                []joinRequest `json:"requests"`
+}
+
 // manualNode is the subset of nvpair-manual-nodes' ManualNodeStatus
 // (services/nvpair-manual-nodes/manager.go), the element of the broker's
 // nodes/list reply, that the Nodes tab uses.
