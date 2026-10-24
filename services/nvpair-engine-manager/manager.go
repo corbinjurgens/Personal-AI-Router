@@ -17,6 +17,7 @@ import (
 	"nvpair-shared/applog"
 	"nvpair-shared/clustertrust"
 	"nvpair-shared/engines"
+	settings "nvpair-shared/enginesettings"
 	"nvpair-shared/nodepolicy"
 	"nvpair-shared/noderec"
 	"nvpair-shared/reach"
@@ -501,7 +502,15 @@ func (m *Manager) runAction(ctx context.Context, msg *Message) {
 	var res json.RawMessage
 	var err error
 	if p.Action == pullModelAction {
-		model := modelFromParams(p.Params)
+		manifest, ok := m.exec.reg.Get(p.Engine)
+		if !ok {
+			manifest = &Manifest{}
+		}
+		model, validationErr := manifest.pullProgressModel(p.Params)
+		if validationErr != nil {
+			m.codec.RespondError(msg.ID, -32602, validationErr.Error())
+			return
+		}
 		res, err = m.exec.PullModelStream(ctx, p.Engine, model, p.Params)
 		if err != nil {
 			// A pull can fail after the client's synchronous call has already
@@ -544,6 +553,48 @@ func (m *Manager) applyDiscovery(msg *Message) {
 }
 
 func (m *Manager) parse(msg *Message, v any) bool {
+	switch v.(type) {
+	case *settings.Request, *settings.Configure:
+		if err := validateServingModelsJSON(msg.Params, "settings", "serving"); err != nil {
+			m.codec.RespondError(msg.ID, -32602, err.Error())
+			return false
+		}
+	case *remoteParam:
+		// Remote model RPCs must refuse before peer lookup/dial or progress
+		// publication. Non-model remote operations retain their ignored fields.
+		switch msg.Method {
+		case "engine:remote-load-model", "engine:remote-unload-model", "engine:remote-delete-model", "engine:remote-copy-model", "engine:remote-pull-model":
+			// Copy's node/engine/model structural checks already precede lookup.
+			// Other remote typed operations check required models here because
+			// runRemote constructs the peer client before its method guards.
+			requireModel := msg.Method != "engine:remote-pull-model" && msg.Method != "engine:remote-copy-model"
+			if err := validateModelRequest(msg.Params, requireModel); err != nil {
+				m.codec.RespondError(msg.ID, -32602, err.Error())
+				return false
+			}
+			var raw struct {
+				Model  json.RawMessage `json:"model"`
+				Params json.RawMessage `json:"params"`
+			}
+			if json.Unmarshal(msg.Params, &raw) == nil {
+				if msg.Method == "engine:remote-pull-model" {
+					if len(raw.Model) == 0 && (len(raw.Params) == 0 || string(raw.Params) == "null") {
+						if err := validateModelRequest(msg.Params, true); err != nil {
+							m.codec.RespondError(msg.ID, -32602, err.Error())
+							return false
+						}
+					}
+					// The local manifest does not establish a peer's binding.
+					// Only common pull fields are identifiers here; the destination
+					// checks its custom fields before subscribing or dispatching.
+					if err := (&Manifest{}).validateActionModelParams(pullModelAction, raw.Params, false); err != nil {
+						m.codec.RespondError(msg.ID, -32602, err.Error())
+						return false
+					}
+				}
+			}
+		}
+	}
 	if err := json.Unmarshal(msg.Params, v); err != nil {
 		m.codec.RespondError(msg.ID, -32602, "invalid params: "+err.Error())
 		return false

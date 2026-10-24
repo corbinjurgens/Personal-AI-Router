@@ -306,8 +306,8 @@ func TestNormalizeHFRowsMarksMLX(t *testing.T) {
 // system alone, so an Intel Mac was offered MLX models it can never install.
 func TestFilterForTarget(t *testing.T) {
 	models := []CatalogModel{
-		{ID: "plain/gguf"},
-		{ID: "apple/mlx", AppleOnly: true},
+		{ID: "plain/gguf", Name: "plain/gguf"},
+		{ID: "apple/mlx", Name: "apple/mlx", AppleOnly: true},
 	}
 
 	if got := filterForTarget(models, "darwin", "arm64"); len(got) != 2 {
@@ -516,7 +516,7 @@ func llamaCPPServer(t *testing.T, failAuthor string) (*httptest.Server, func() [
 		if q.Get("filter") != "gguf" || q.Get("full") != "true" {
 			t.Errorf("listing asked for %q, want GGUF repos in full", r.URL.RawQuery)
 		}
-		var rows []hfModelRow
+		rows := []hfModelRow{}
 		switch author, search := q.Get("author"), q.Get("search"); {
 		case author != "" && author == failAuthor:
 			w.WriteHeader(http.StatusBadGateway)

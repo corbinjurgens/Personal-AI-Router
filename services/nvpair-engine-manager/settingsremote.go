@@ -40,8 +40,17 @@ func (s *controlServer) settingsHandler(method string) pinnedPeerHandler {
 			http.Error(w, "settings coordinator unavailable", 503)
 			return
 		}
+		raw, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 64*1024))
+		if err != nil {
+			http.Error(w, "invalid settings request", http.StatusBadRequest)
+			return
+		}
+		if err := validateServingModelsJSON(raw, "settings", "serving"); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
 		var p settings.Request
-		decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64*1024))
+		decoder := json.NewDecoder(bytes.NewReader(raw))
 		decoder.DisallowUnknownFields()
 		if decoder.Decode(&p) != nil || decoder.Decode(&struct{}{}) != io.EOF {
 			http.Error(w, "invalid settings request", 400)

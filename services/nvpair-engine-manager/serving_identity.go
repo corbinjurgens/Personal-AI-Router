@@ -8,10 +8,67 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"strings"
 
 	"nvpair-shared/engines"
+	"nvpair-shared/nodepolicy"
 )
+
+// Engine-manager accepts model identifiers before the lower-level engine
+// declaration validator, which owns the remaining serving constraints.
+func servingDeclarationErrors(config *engines.ServingConfig) map[string]string {
+	fields := map[string]string{}
+	if config != nil {
+		for i, model := range config.Models {
+			if err := nodepolicy.ValidateModelIdentifier(model.ModelID); err != nil {
+				fields[fmt.Sprintf("serving.models.%d.modelId", i)] = err.Error()
+			}
+		}
+	}
+	if len(fields) != 0 {
+		return fields
+	}
+	return config.Validate()
+}
+
+// Inspect only declaration model fields before typed decoders or manifest
+// merging can replace malformed UTF-8. Other shape errors keep their owners.
+func validateServingModelsJSON(data json.RawMessage, path ...string) error {
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(data, &fields) != nil {
+		return nil
+	}
+	if len(path) > 0 {
+		for key, value := range fields {
+			if strings.EqualFold(key, path[0]) {
+				if err := validateServingModelsJSON(value, path[1:]...); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	}
+	for key, value := range fields {
+		if !strings.EqualFold(key, "models") {
+			continue
+		}
+		var models []map[string]json.RawMessage
+		if json.Unmarshal(value, &models) != nil {
+			continue
+		}
+		for _, model := range models {
+			for field, raw := range model {
+				if strings.EqualFold(field, "modelId") {
+					if err := nodepolicy.ValidateModelIdentifierJSON(raw); err != nil {
+						return servingError(err.Error())
+					}
+				}
+			}
+		}
+	}
+	return nil
+}
 
 // The versioned manifest binds asserted full-file hashes, never local samples.
 // Artifact order is the compiler-validated native consumption order.
@@ -56,9 +113,15 @@ func servingLaunchDigest(command launchCommand, prepared string) string {
 func servingRetentionDisabled(e engines.ServingEnvelope) bool { return e.Retention == "-1" }
 
 func servingEnvelopes(prepared *llamaServingLaunch) []engines.ServingEnvelope {
+	if prepared == nil || prepared.Config == nil || len(servingDeclarationErrors(prepared.Config)) != 0 {
+		return nil
+	}
 	result := make([]engines.ServingEnvelope, 0, len(prepared.Envelopes))
 	for i, envelope := range prepared.Envelopes {
 		if i >= len(prepared.Config.Models) {
+			return nil
+		}
+		if nodepolicy.ValidateModelIdentifier(envelope.ModelID) != nil {
 			return nil
 		}
 		envelope.ContentDigest = servingContentDigest(prepared.Config.Models[i])
@@ -79,7 +142,7 @@ func servingIdentityLocked(st *engineState) engineModelIdentity {
 	names := map[string]string{}
 	for _, envelope := range envelopes {
 		normalized := engines.NormalizeModelName(envelope.ModelID, st.manifest.ModelNamingOrDefault())
-		if _, exists := names[normalized]; exists || envelope.Validate(envelope.ModelID, envelope.ContentDigest) != nil {
+		if _, exists := names[normalized]; exists || nodepolicy.ValidateModelIdentifier(normalized) != nil || envelope.Validate(envelope.ModelID, envelope.ContentDigest) != nil {
 			return id
 		}
 		names[normalized] = envelope.ModelID
@@ -146,6 +209,9 @@ func validateServingSnapshot(ctx context.Context, st *engineState, s servingRunS
 func (e *Executor) currentServingEnvelope(ctx context.Context, engine, model string) (engines.ServingEnvelope, engineModelIdentity, error) {
 	refuse := func(reason string) (engines.ServingEnvelope, engineModelIdentity, error) {
 		return engines.ServingEnvelope{}, engineModelIdentity{}, &ServingIdentityRefusal{reason}
+	}
+	if nodepolicy.ValidateModelIdentifier(model) != nil {
+		return refuse("Invalid serving model identifier.")
 	}
 	st, err := e.state(engine)
 	if err != nil {

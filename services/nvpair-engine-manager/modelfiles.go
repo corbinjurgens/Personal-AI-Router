@@ -31,6 +31,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"nvpair-shared/nodepolicy"
 )
 
 const (
@@ -258,6 +260,10 @@ func modelQuery(w http.ResponseWriter, r *http.Request) (engine, model string, o
 	engine, model = q.Get("engine"), q.Get("model")
 	if engine == "" || model == "" {
 		http.Error(w, `"engine" and "model" are required`, http.StatusBadRequest)
+		return "", "", false
+	}
+	if err := nodepolicy.ValidateModelIdentifier(model); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
 		return "", "", false
 	}
 	return engine, model, true

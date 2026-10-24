@@ -607,6 +607,9 @@ func (r *Registry) bundledDefaultPort(engine string) (int, bool) {
 // declares no engine, or no bundled base exists for it, the override is
 // returned unchanged to be loaded as a standalone manifest.
 func (r *Registry) mergeOntoBundled(override []byte) ([]byte, error) {
+	if err := validateManifestModelIdentifiers(override); err != nil {
+		return nil, err
+	}
 	var om map[string]any
 	if err := json.Unmarshal(override, &om); err != nil {
 		return nil, fmt.Errorf("invalid JSON: %w", err)
@@ -634,6 +637,9 @@ func (r *Registry) mergeOntoBundled(override []byte) ([]byte, error) {
 // manifest with no top-level defaults is returned unchanged, so fully
 // per-platform manifests keep loading exactly as before.
 func applyPlatformDefaults(data []byte) ([]byte, error) {
+	if err := validateManifestModelIdentifiers(data); err != nil {
+		return nil, err
+	}
 	var top map[string]json.RawMessage
 	if err := json.Unmarshal(data, &top); err != nil {
 		return nil, fmt.Errorf("invalid JSON: %w", err)
@@ -676,6 +682,24 @@ func applyPlatformDefaults(data []byte) ([]byte, error) {
 	}
 	top["platforms"] = mb
 	return json.Marshal(top)
+}
+
+func validateManifestModelIdentifiers(data []byte) error {
+	if err := validateServingModelsJSON(data, "runtime", "serving"); err != nil {
+		return err
+	}
+	var manifest struct {
+		Platforms map[string]json.RawMessage `json:"platforms"`
+	}
+	if json.Unmarshal(data, &manifest) != nil {
+		return nil
+	}
+	for _, platform := range manifest.Platforms {
+		if err := validateServingModelsJSON(platform, "runtime", "serving"); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // deepMerge overlays override onto base and returns the result without
@@ -772,7 +796,7 @@ func (m *Manifest) Validate() error {
 }
 
 func (p *Platform) validate(key string) error {
-	if fields := p.Runtime.Serving.Validate(); len(fields) > 0 {
+	if fields := servingDeclarationErrors(p.Runtime.Serving); len(fields) > 0 {
 		return fmt.Errorf("platform %q: invalid serving declaration: %v", key, fields)
 	}
 	if policy := p.Runtime.EditableLaunch; policy != nil {

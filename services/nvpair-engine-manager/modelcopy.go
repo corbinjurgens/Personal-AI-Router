@@ -32,6 +32,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"nvpair-shared/nodepolicy"
 )
 
 // copyProgress is the engine:remote-progress payload for a model copy: the
@@ -149,6 +151,10 @@ func (m *Manager) runRemoteCopy(ctx context.Context, msg *Message) {
 		m.codec.RespondError(msg.ID, -32602, "model is required")
 		return
 	}
+	if err := validateModelRequest(msg.Params, true); err != nil {
+		m.codec.RespondError(msg.ID, -32602, err.Error())
+		return
+	}
 	peer, ok := m.peers.lookup(p.Node)
 	if !ok {
 		m.codec.RespondError(msg.ID, -32000, "node "+p.Node+" is not a discovered ec peer")
@@ -176,6 +182,9 @@ func (m *Manager) runRemoteCopy(ctx context.Context, msg *Message) {
 
 // CopyModelFrom copies model for engine from src into this node's engine store.
 func (e *Executor) CopyModelFrom(ctx context.Context, src modelFileSource, engine, model string, emit func(copyProgress)) (copyModelResult, error) {
+	if err := nodepolicy.ValidateModelIdentifier(model); err != nil {
+		return copyModelResult{}, err
+	}
 	if emit == nil {
 		emit = func(copyProgress) {}
 	}
@@ -538,6 +547,9 @@ func modelQueryValues(engine, model string) url.Values {
 
 // modelFiles implements modelFileSource over a peer's GET /v1/models/files.
 func (c *remoteClient) modelFiles(ctx context.Context, engine, model string, onProgress func(streamFrame)) (modelFileList, error) {
+	if err := nodepolicy.ValidateModelIdentifier(model); err != nil {
+		return modelFileList{}, err
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.base+controlModelFilesPath+"?"+modelQueryValues(engine, model).Encode(), nil)
 	if err != nil {
 		return modelFileList{}, err
@@ -580,6 +592,9 @@ func (c *remoteClient) modelFiles(ctx context.Context, engine, model string, onP
 
 // modelFile implements modelFileSource over a peer's GET /v1/models/file.
 func (c *remoteClient) modelFile(ctx context.Context, engine, model, path string, offset int64) (io.ReadCloser, int64, error) {
+	if err := nodepolicy.ValidateModelIdentifier(model); err != nil {
+		return nil, 0, err
+	}
 	q := modelQueryValues(engine, model)
 	q.Set("path", path)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.base+controlModelFilePath+"?"+q.Encode(), nil)
