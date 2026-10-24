@@ -16,8 +16,12 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	"nvpair-shared/jsonrpc"
 )
 
 type askProcess struct {
@@ -415,8 +419,50 @@ func askProcessWire(t *testing.T, port int, operation, id string, requester *ask
 func TestAskToJoinProcessUnattendedReviewAndDuplicateReady(t *testing.T) {
 	a, b := newAskProcess(t, nil), newAskProcess(t, nil)
 	a.create(t)
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	exited := make(chan struct{})
+	var callbacks atomic.Int32
+	var releaseOnce, closeOnce sync.Once
+	releaseCallback := func() { releaseOnce.Do(func() { close(release) }) }
+	callback := newFixtureHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		first := callbacks.Add(1) == 1
+		if first {
+			defer close(exited)
+		}
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/cluster/pairing" {
+			t.Errorf("Initial callback: method=%q path=%q", r.Method, r.URL.Path)
+		}
+		var envelope struct {
+			Phase string `json:"phase"`
+		}
+		if err := json.NewDecoder(io.LimitReader(r.Body, 4096)).Decode(&envelope); err != nil {
+			t.Errorf("decode Initial callback: %v", err)
+		} else if envelope.Phase != "initial" {
+			t.Errorf("callback phase = %q, want initial", envelope.Phase)
+		}
+		if first {
+			close(entered)
+		}
+		<-release
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	closeCallback := func() {
+		closeOnce.Do(func() {
+			releaseCallback()
+			// Close joins all handlers, including on an early Fatal before entry.
+			callback.Close()
+		})
+	}
+	t.Cleanup(closeCallback)
+	var callbackPort int
+	if _, err := fmt.Sscanf(callback.URL, "http://127.0.0.1:%d", &callbackPort); err != nil {
+		t.Fatalf("parse private callback port: %v", err)
+	}
 	const id = "jr-00000000000000000000000000000004"
-	status, r := askProcessWire(t, a.port, "request", id, b)
+	// Preserve b's claimed identity but hold Initial at our private callback.
+	requester := &askProcess{id: b.id, port: callbackPort}
+	status, r := askProcessWire(t, a.port, "request", id, requester)
 	if status != http.StatusOK || r.State != "awaiting-approval" {
 		t.Fatal("unattended request was not retained")
 	}
@@ -426,12 +472,88 @@ func TestAskToJoinProcessUnattendedReviewAndDuplicateReady(t *testing.T) {
 	first := askProcessApprove(t, a, id)
 	second := askProcessApprove(t, a, id)
 	if *first.InviteID != *second.InviteID {
-		t.Fatal("duplicate approval allocated a second invite")
+		t.Fatalf("duplicate approval invite = %q, want %q", *second.InviteID, *first.InviteID)
 	}
 	status, ready := askProcessWire(t, a.port, "ready", id, nil)
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Initial callback did not enter before duplicate ready")
+	}
 	status2, again := askProcessWire(t, a.port, "ready", id, nil)
-	if status != http.StatusOK || status2 != http.StatusOK || ready.State != "pairing" || again.State != "pairing" || ready.InviteID == nil || again.InviteID == nil || *ready.InviteID != *again.InviteID || *ready.InviteID != *first.InviteID {
-		t.Fatal("duplicate ready changed correlated invite")
+	for _, reply := range []struct {
+		name   string
+		status int
+		result askProcessRequest
+	}{{"first ready", status, ready}, {"duplicate ready", status2, again}} {
+		if reply.status != http.StatusOK {
+			t.Errorf("%s status = %d, want %d", reply.name, reply.status, http.StatusOK)
+		}
+		if reply.result.State != "pairing" {
+			t.Errorf("%s state = %q reason=%q, want pairing", reply.name, reply.result.State, reply.result.Reason)
+		}
+		if reply.result.RequestID != id {
+			t.Errorf("%s request ID = %q, want %q", reply.name, reply.result.RequestID, id)
+		}
+		if reply.result.InviteID == nil {
+			t.Errorf("%s invite ID = nil, want %q", reply.name, *first.InviteID)
+		} else if *reply.result.InviteID != *first.InviteID {
+			t.Errorf("%s invite ID = %q, want %q", reply.name, *reply.result.InviteID, *first.InviteID)
+		}
+	}
+	if got := callbacks.Load(); got != 1 {
+		t.Errorf("held Initial callback count = %d, want exactly one child", got)
+	}
+	releaseCallback()
+	select {
+	case <-exited:
+	case <-time.After(5 * time.Second):
+		t.Fatal("released Initial callback did not exit")
+	}
+	type requestSnapshot struct {
+		Supported bool                `json:"supported"`
+		Requests  []askProcessRequest `json:"requests"`
+	}
+	// Observe the public terminal notification before reading a final snapshot;
+	// snapshot polling is not the scheduling barrier for the two ready replies.
+	var terminal askProcessRequest
+	a.p.pump(func(m jsonrpc.Message) bool {
+		if m.Method != "cluster:join-requests-changed" {
+			return false
+		}
+		var snapshot requestSnapshot
+		if err := json.Unmarshal(m.Params, &snapshot); err != nil {
+			t.Fatalf("decode join-request notification: %v", err)
+		}
+		for _, request := range snapshot.Requests {
+			if request.RequestID == id && request.State == "failed" {
+				terminal = request
+				return true
+			}
+		}
+		return false
+	}, 15*time.Second)
+	snapshot := decodeResult[requestSnapshot](t, a.p.call("cluster:get-join-requests", map[string]any{}))
+	if !snapshot.Supported || len(snapshot.Requests) != 1 {
+		t.Fatalf("terminal snapshot: supported=%t requests=%+v", snapshot.Supported, snapshot.Requests)
+	}
+	for _, request := range []askProcessRequest{terminal, snapshot.Requests[0]} {
+		if request.RequestID != id || request.State != "failed" || request.Reason != "" {
+			t.Errorf("controlled HTTP %d terminal request = %+v, want id=%q state=failed reason=empty", http.StatusServiceUnavailable, request, id)
+		}
+		if request.InviteID == nil {
+			t.Errorf("terminal invite ID = nil, want %q", *first.InviteID)
+		} else if *request.InviteID != *first.InviteID {
+			t.Errorf("terminal invite ID = %q, want %q", *request.InviteID, *first.InviteID)
+		}
+	}
+	invite := decodeResult[outboundInviteResult](t, a.p.call("cluster:invite-status", map[string]any{"inviteId": *first.InviteID}))
+	if invite.State != "failed" || invite.Reason != "" || invite.InviteID != *first.InviteID {
+		t.Errorf("controlled HTTP failure invite = %+v, want id=%q state=failed reason=empty", invite, *first.InviteID)
+	}
+	closeCallback()
+	if got := callbacks.Load(); got != 1 {
+		t.Errorf("completed Initial callback count = %d, want exactly one child", got)
 	}
 	askProcessNoPeer(t, a, b, 1)
 	askProcessNoPeer(t, b, a, 0)
