@@ -68,6 +68,25 @@ func TestClassifiers(t *testing.T) {
 	}
 }
 
+func TestHistoryFrameOrdinaryCodecUnchanged(t *testing.T) {
+	frame := `{"jsonrpc":"2.0","method":"ordinary","params":{"value":"` + strings.Repeat("x", 2<<20) + `"}}` + "\n"
+	if _, err := readCodec(strings.NewReader(frame)).Read(); err == nil {
+		t.Fatal("default codec cap widened")
+	}
+	msg, err := NewCodecMaxFrame(rw{strings.NewReader(frame), io.Discard}, WorkerFrameBytes).Read()
+	if err != nil || msg == nil || msg.Method != "ordinary" {
+		t.Fatalf("ordinary worker frame rejected: %v", err)
+	}
+	if _, err := historyTestReader(t, frame, &HistoryCorrelation{}).Read(); err == nil {
+		t.Fatal("opt-in reader widened ordinary logical cap")
+	}
+	ordinary := `{"jsonrpc":"2.0","method":"first","method":"last","id":"` + strings.Repeat("x", 600) + `"}` + "\n"
+	msg, err = historyTestReader(t, ordinary, &HistoryCorrelation{}).Read()
+	if err != nil || msg == nil || msg.Method != "last" || msg.ID == nil || len(*msg.ID) != 602 {
+		t.Fatalf("ordinary decoder semantics changed: %v", err)
+	}
+}
+
 func TestNotifyRoundTrip(t *testing.T) {
 	var buf bytes.Buffer
 	if err := writeCodec(&buf).Notify("node/discovered", map[string]string{"id": "n1"}); err != nil {

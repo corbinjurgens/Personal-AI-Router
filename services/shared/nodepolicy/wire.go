@@ -1378,6 +1378,19 @@ const MethodWorkloadCancel = "workload/cancel"
 const MethodRoutingCancel = "routing/cancel"
 const MethodRoutingActive = "routing/active"
 
+// Branch-internal history contracts; production registration belongs to the
+// complete history integration. None of these methods is accepted from peers.
+const (
+	MethodRoutingGetInitial       = "routing:get-initial"
+	MethodRoutingSubscribe        = "routing:subscribe"
+	MethodRoutingUnsubscribe      = "routing:unsubscribe"
+	NotifyRoutingChanged          = "routing:changed"
+	NotifyRoutingRequest          = "routing/request"
+	NotifyRoutingHistoryWindow    = "routing/history-window"
+	NotifyRoutingHistoryWindowEnd = "routing/history-window-end"
+	NotifyRoutingHistoryAccepted  = "routing/history-accepted"
+)
+
 // WorkloadCancelParams names one in-flight workload this node's proxy
 // originated. Every hop requires the complete target; an old process's workload
 // counter must never resolve to a request in a newer process.
