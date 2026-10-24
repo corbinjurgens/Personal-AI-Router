@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"nvpair-shared/cors"
+	"nvpair-shared/nodepolicy"
 )
 
 type statusCapture struct {
@@ -557,7 +558,6 @@ func (f *facade) handleHTTP(w http.ResponseWriter, r *http.Request) {
 
 // The idle interval belongs to this request's reader, never a mutable global.
 func (f *facade) handleHTTPWithStreamIdle(w http.ResponseWriter, r *http.Request, streamIdle time.Duration) {
-	p := f.host
 	start := time.Now()
 	isInf := isInferenceRequest(f.profile, r.Method, r.URL.Path)
 
@@ -572,7 +572,14 @@ func (f *facade) handleHTTPWithStreamIdle(w http.ResponseWriter, r *http.Request
 		f.serveProxyPassthrough(w, r, start, reqID)
 		return
 	}
+	f.serveInference(w, r, start, reqID, streamIdle, concreteDispatchPolicy(start))
+}
 
+// serveInference is the common entry owner for facade and unified-listener
+// inference. Registration deliberately precedes buffering and validation:
+// early facade exits remain observable to routing/active and cancellation.
+func (f *facade) serveInference(w http.ResponseWriter, r *http.Request, start time.Time, reqID string, streamIdle time.Duration, policy dispatchPolicy) {
+	p := f.host
 	// The request's own context. The client leaving still cancels it, and so
 	// can workload/cancel and cancelActive, each naming why in cancelReason so
 	// the terminal workload event does not blame a client that never left.
@@ -593,7 +600,7 @@ func (f *facade) handleHTTPWithStreamIdle(w http.ResponseWriter, r *http.Request
 	ctl := newRoutingRequest(cancelRequest)
 	// One immutable pre-dispatch deadline also bounds initial owned storage.
 	// The live request context remains independent so accepted streams drain.
-	ctl.deadline = start.Add(jobDeadline)
+	ctl.deadline = policy.deadline
 	r = r.WithContext(context.WithValue(r.Context(), routingDeadlineContextKey{}, ctl.deadline))
 	defer ctl.finish()
 	stopCancellation := context.AfterFunc(reqCtx, func() {
@@ -601,7 +608,7 @@ func (f *facade) handleHTTPWithStreamIdle(w http.ResponseWriter, r *http.Request
 	})
 	defer stopCancellation()
 	var requestOwner *routingRequest
-	if isInf {
+	{
 		var buffers *ownedInferenceBuffers
 		r, buffers = p.ownInferenceBuffers(r)
 		w = &inferenceErrorWriter{ResponseWriter: w, ctx: r.Context()}
@@ -679,7 +686,7 @@ func (f *facade) handleHTTPWithStreamIdle(w http.ResponseWriter, r *http.Request
 	// candidates, admission or any upstream sees it. Control endpoints keep
 	// their existing behavior.
 	rejectAmbiguous := func() bool {
-		if !isInf || !ambiguousModelMember(bodyBytes) {
+		if !ambiguousModelMember(bodyBytes) {
 			return false
 		}
 		slog.Warn("proxy request rejected",
@@ -702,8 +709,8 @@ func (f *facade) handleHTTPWithStreamIdle(w http.ResponseWriter, r *http.Request
 		return
 	}
 	if strict != nil {
-		if !isInf {
-			writeIngressError(w, http.StatusBadRequest, "strict-admission", "strict admission requires inference")
+		if policy.hybrid {
+			writeIngressError(w, http.StatusBadRequest, "strict-admission", "strict admission requires a destination-local entry")
 			return
 		}
 		if rejectAmbiguous() {
@@ -714,51 +721,63 @@ func (f *facade) handleHTTPWithStreamIdle(w http.ResponseWriter, r *http.Request
 		f.serveStrictLocal(w, r, bodyBytes, model, *strict, false)
 		return
 	}
-	// A reserved hybrid alias the legacy tier path does not serve is refused
-	// here, before candidates, admission, reservation, workload or upstream.
-	if alias, reason, rejected := requestAliasRejection(r, bodyBytes, model, isInf); rejected {
-		slog.Warn("proxy request rejected",
-			"id", reqID, "method", r.Method, "path", r.URL.Path,
-			"remote", r.RemoteAddr, "reason", reason, "alias", alias)
-		writeAliasRejection(w, alias, reason)
-		_ = f.notify("proxy/request", RequestEvent{
-			ID:       reqID,
-			Method:   r.Method,
-			Path:     r.URL.Path,
-			Status:   http.StatusBadRequest,
-			Duration: time.Since(start).Milliseconds(),
-			Error:    reason,
-		})
-		return
-	}
-	// An alias-less ambiguous body is refused only now, so a reserved alias
-	// keeps the precedence its own test pins.
-	if rejectAmbiguous() {
-		return
-	}
-	if isInf {
-		_, err = parseOriginStreamRequest(r.URL.Path, bodyBytes)
-		if err != nil {
-			writeOriginStreamRequestError(w, err)
-			reason := "inference request could not be prepared"
-			var invalid *invalidStreamFlagError
-			if stderrors.As(err, &invalid) {
-				reason = "invalid stream flag"
-			}
+	if policy.hybrid {
+		if rejectAmbiguous() {
+			return
+		}
+		// A listener accepts only an exact reserved alias in one top-level
+		// model member. Nested models are payload, never routing selectors.
+		tier, mode, ok := nodepolicy.ParseAlias(model)
+		if !ok || !bodyModelMatches(bodyBytes, model) {
+			writeIngressError(w, http.StatusBadRequest, "unsupported-alias", "inference requires one exact supported tier alias")
+			return
+		}
+		rules := p.admission.currentPolicy().Routing.Tiers[tier]
+		policy.apiOnly = policy.apiOnly || mode == nodepolicy.AliasAPI || (mode == nodepolicy.AliasBare && rules.BareMode == nodepolicy.BareAPI)
+		policy.publicAllowed = mode != nodepolicy.AliasLocal && !(mode == nodepolicy.AliasBare && rules.BareMode == nodepolicy.BareLocal) &&
+			rules.RemoteAllowed && nodepolicy.PublicDispatchAvailable()
+	} else {
+		// A reserved hybrid alias the legacy tier path does not serve is refused
+		// here, before candidates, admission, reservation, workload or upstream.
+		if alias, reason, rejected := requestAliasRejection(r, bodyBytes, model, true); rejected {
+			slog.Warn("proxy request rejected",
+				"id", reqID, "method", r.Method, "path", r.URL.Path,
+				"remote", r.RemoteAddr, "reason", reason, "alias", alias)
+			writeAliasRejection(w, alias, reason)
 			_ = f.notify("proxy/request", RequestEvent{
-				ID: reqID, Method: r.Method, Path: r.URL.Path,
-				Status: bufferRequestStatus(err), Duration: time.Since(start).Milliseconds(),
-				Error: reason,
+				ID:       reqID,
+				Method:   r.Method,
+				Path:     r.URL.Path,
+				Status:   http.StatusBadRequest,
+				Duration: time.Since(start).Milliseconds(),
+				Error:    reason,
 			})
 			return
 		}
+		// An alias-less ambiguous body is refused only now, so a reserved alias
+		// keeps the precedence its own test pins.
+		if rejectAmbiguous() {
+			return
+		}
 	}
-	if isInf {
-		ctl.sink = newResponseSink(w, func() { ctl.cancelWithReason("client connection lost") })
-		w = ctl.sink
-		r = r.WithContext(withResponseSink(r.Context(), ctl.sink))
+	if _, err := parseOriginStreamRequest(r.URL.Path, bodyBytes); err != nil {
+		writeOriginStreamRequestError(w, err)
+		reason := "inference request could not be prepared"
+		var invalid *invalidStreamFlagError
+		if stderrors.As(err, &invalid) {
+			reason = "invalid stream flag"
+		}
+		_ = f.notify("proxy/request", RequestEvent{
+			ID: reqID, Method: r.Method, Path: r.URL.Path,
+			Status: bufferRequestStatus(err), Duration: time.Since(start).Milliseconds(),
+			Error: reason,
+		})
+		return
 	}
-	ctl.dispatch(f, w, r, start, reqID, bodyBytes, model, streamIdle, cancelReasonOr, requestOwner, concreteDispatchPolicy(start))
+	ctl.sink = newResponseSink(w, func() { ctl.cancelWithReason("client connection lost") })
+	w = ctl.sink
+	r = r.WithContext(withResponseSink(r.Context(), ctl.sink))
+	ctl.dispatch(f, w, r, start, reqID, bodyBytes, model, streamIdle, cancelReasonOr, requestOwner, policy)
 }
 
 // Storage cancellation alone cannot interrupt a socket-backed Body.Read (or
