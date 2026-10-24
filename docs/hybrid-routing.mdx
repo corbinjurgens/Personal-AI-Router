@@ -6,11 +6,11 @@ SPDX-License-Identifier: Apache-2.0
 # Hybrid routing
 
 The proxy owns inference requests across destination attempts, including their
-buffer storage, cancellation and response delivery. These controls already
-apply to the concrete inference path. The hybrid policy machinery is present,
-but the loopback routing listener still refuses inference with `501`
-`routing_listener_not_inference_ready`. Listing an alias does not make it
-inference-ready. Public dispatch remains disabled; see
+buffer storage, cancellation and response delivery. The unified loopback
+listener and the facade use the shared `serveInference` entry, with
+`hybridDispatchPolicy` and `concreteDispatchPolicy` respectively. The listener
+accepts one exact supported tier alias in the top-level `model` member:
+`weak`, `medium`, `strong`, or their `-local` and `-api` forms. Public dispatch remains disabled; see
 [Public egress lease](./public-egress-lease.mdx) for its separate activation
 requirements.
 
@@ -22,10 +22,10 @@ describes persistence, revision conflicts and activation status.
 
 Concrete HTTP inference calls the common `routingSpend.dispatch` owner with
 `concreteDispatchPolicy`: five dispatch attempts and ten minutes before output.
-The driver also implements `hybridDispatchPolicy`, but no HTTP entry selects
-it yet. The facade keeps its concrete and legacy bare-tier behavior; listed
-`-api` and `-local` aliases remain unavailable for inference. The listener's
-dispatch cutover is still gated by Q4.
+The unified listener supplies `hybridDispatchPolicy` through the same entry.
+The facade keeps its concrete and legacy bare-tier behavior, including its
+existing alias refusals. The 2026-10-22 decision selects non-strict routing on
+the listener for the daily milestone; strict-on-facade is a later unit.
 
 The implemented hybrid branch filters the existing tier candidate order to
 nodes offering their own finitely qualified declared role and a valid strict
@@ -68,8 +68,8 @@ even when no concrete workload or facade exists.
 
 The active `routing.listener` policy controls an engine-independent listener
 on `127.0.0.1`. It lists aliases without starting an engine. Host, Origin,
-route, method, preflight and inference-query checks precede the `501`
-refusal; the listener reads no body and starts no admission or dispatch.
+route, method, preflight and inference-query checks precede the shared
+inference entry, owned buffering and dispatch.
 Requests declaring a body still receive `Connection: close`.
 
 A port change binds the new socket first, serves it with the same HTTP server
@@ -85,8 +85,8 @@ server. The server retains header and keep-alive idle bounds and has no
 whole-response write timeout. Process shutdown closes it before the facades
 under the shared three-second HTTP shutdown context, after the control read
 loop returns. This does not establish that context cancellation interrupts
-`codec.Read` or bounds every parent-channel operation. These listener lifetime
-changes do not enable hybrid inference.
+`codec.Read` or bounds every parent-channel operation. The listener now supplies
+hybrid policy; public dispatch remains disabled and the facade is unchanged.
 
 ## Inference buffer settings
 
