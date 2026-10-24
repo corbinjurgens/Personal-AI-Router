@@ -185,7 +185,9 @@ whose advertised role carries finite qualification
 (`AdvertisedRole.HybridQualified`), and whose node has a strict entry for the
 role's normalized model (`Node.strictModel`; this node's own installed
 capability for itself). Router tier entries never make a node hybrid eligible.
-Hybrid dispatch (Phase 4) is its caller; none exists yet.
+The hybrid branch of `routingSpend.dispatch` calls this filter. The HTTP facade
+still supplies `concreteDispatchPolicy`; no HTTP entry supplies the hybrid
+policy yet (§5.1, §12.6).
 
 ### Local qualification and identity (B)
 
@@ -442,6 +444,12 @@ not inventory scope. Its inference routes remain `/v1/*`.
 
 ### 5.1 Retry bounds
 
+Concrete HTTP inference uses `concreteDispatchPolicy(start)` on the common
+`routingSpend.dispatch` owner, with the bounds below. The same driver contains
+a hybrid policy branch; this is implemented selection machinery, not an enabled
+HTTP inference entry. The listener still refuses inference (§12.6), and the
+facade retains concrete and legacy bare-tier behavior (§12.3).
+
 | Bound | Value | Governs |
 | --- | --- | --- |
 | `maxDispatchAttempts` | 5 | how many dispatches may fail |
@@ -494,6 +502,51 @@ are real:
 The last case is why the deadline cannot be dropped as redundant with the
 attempt count, and the middle one is why five attempts is a ceiling rather than
 a promise. **Do not remove either bound as unreachable.**
+
+#### Hybrid policy on the common driver
+
+`hybridDispatchPolicy(start, limits, rules)` uses `Limits.MaxAttempts` and
+`start + PreOutputBudgetSeconds`, with total `QueueSeconds` and
+`ColdStartSeconds` allowances across attempts. It does not multiply these by
+the concrete five-attempt/ten-minute bounds. Preparation, admission, peer-slot
+waits and first response compete for the same pre-output deadline. Wait charges
+conservatively reduce both queue and cold allowances across attempts; they do
+not restart at each destination.
+
+Hybrid local/peer resolution filters `resolveTierCandidates` through
+`hybridLocalCandidates`, preserving its policy rank/warmth order and eligible
+declared roles. `preferLoaded:any` puts warmth before tier rank; otherwise rank
+comes first. Reservations select within the leading rank/warmth class rather
+than promoting a fallback. Router entries alone cannot qualify a node. Self
+attempts qualify the body and enter `AdmitStrict`; peer attempts carry the
+canonical request key, strict model identity and remaining budgets in
+`X-PAIR-Strict-Admission`. Destination ingress revalidates them and stays
+local-only; an origin different from the authenticated peer is refused with
+403 before body buffering.
+
+A hybrid peer-service slot waits for at most the smaller of remaining queue
+allowance and half the remaining pre-output time (`peerSlotContext`). Zero
+means immediate refusal when occupied; `ErrPeerSlotOccupied` consumes an
+attempt. The slot allowance is reserved out of the destination's queue, cold
+and pre-output budgets before sending, so origin and destination cannot each
+spend the full allowance. Concrete peer-slot acquisition keeps its existing
+blocking behavior, bounded by the request context.
+
+The driver's public branch considers the requested tier's API entries in
+configured order after the first local/peer round, sharing the request's
+attempt ceiling and deadline. It requires remote permission and build
+availability, then the per-candidate advisory guard and G's wrapper (§12.9).
+Refused candidates consume no attempt and trigger no credential lookup,
+durable reservation or send. In this build `PublicDispatchAvailable()` is
+false, policy validation refuses remote/paid permissions and enabled
+deployments, and no production public qualification source is installed.
+This branch supplies no public activation or HTTP dispatch path.
+
+The first accepted successful raw response byte commits through the same
+owner and sink (§5.2), stopping the pre-output watch. A committed stream is
+governed by stream/read and client-write idle limits rather than the selection
+deadline; it cannot fall back. Strict capacity quarantine, cumulative spend,
+buffer ownership and both cancellation surfaces keep their existing contracts.
 
 #### Waiting for an owner
 
@@ -1429,10 +1482,11 @@ is resolved by the node it enters.
 
 - **Entry kinds**: a policy (schema version 2) tier entry has a `kind`. A
   `local` entry names an engine and model. An `api` entry names a deployment in
-  the policy's origin-only `routing` section. Until hybrid dispatch exists
-  (Phase 4 of the hybrid routing plan) the resolver and the model list consider
-  `local` entries only and skip `api` entries without error: a tier whose
-  entries are all `api` has no candidate. Migrating a
+  the policy's origin-only `routing` section. The reachable concrete/legacy
+  tier resolver considers `local` entries only and skips `api` entries without
+  error: an API-only tier has no dispatch candidate there. Alias lists still
+  include API-only tiers (below). The common driver's hybrid branch is present
+  (§5.1), but no HTTP entry selects it. Migrating a
   version 1 file tags every entry `local`, so it resolves the candidates it
   resolved before.
 
@@ -1662,15 +1716,23 @@ discovery or node notification names its port.
 
 - **Lifecycle**: `node/set-policy` reconciles it after the revision activates,
   from the policy the controller then holds. Enabled with a port, it binds
-  `127.0.0.1:<port>` and nothing else; disabled, it is closed. A changed port
-  drains and closes the old listener first, then binds the new one. The drain
-  is bounded to 250 ms (`routingDrainGrace`) and then forced: every handler is
-  instant, so only a stalled client can outlast it, and it must not hold the
-  control loop. A request that declares a body is answered with
-  `Connection: close`, because no handler reads a body and net/http would
-  otherwise read the unread body before sending the answer. Only the
-  listener this code owns is touched; facades are unaffected. Process shutdown
-  drains it before the facades and a later reconcile does nothing. A reconcile
+  `127.0.0.1:<port>` and nothing else. A changed port binds first, starts
+  serving the new socket with the same `http.Server`, installs it as the active
+  listener, then closes the old acceptance socket. Existing connections retain
+  their server and context; rebind does not cancel them or keep a retired
+  server. Disable cancels the server's base context, closes acceptance and
+  calls `Shutdown` with a three-second maximum (`routingShutdownGrace`),
+  forcing `Close` on timeout. Re-enable creates a fresh server. The server has
+  a 10-second header timeout, 90-second keep-alive idle timeout and 64 KiB
+  header limit, with no whole-response `WriteTimeout`.
+  A request that declares a body is still answered with `Connection: close`,
+  because no handler reads a body and net/http would otherwise read the unread
+  body before sending the answer. Only the listener this code owns is touched;
+  facades are unaffected. Process shutdown closes it before the facades using
+  the shared three-second shutdown context and permanently stops reconciliation.
+  This bounds HTTP teardown after the control read loop returns; cancelling a
+  context alone does not interrupt `codec.Read` or prove bounded parent I/O.
+  A reconcile
   that finds the configured port already served is a no-op, so the broker's
   replay after a proxy restart re-establishes the listener without a new push.
 - **Port exclusivity**: the listener does not bind a port another listener
@@ -1705,10 +1767,11 @@ discovery or node notification names its port.
     listener holds it when `facade/enable` arrives, the facade is refused with
     the bind failure. After a proxy restart the broker replays the policy
     first, so the listener takes the port and the facade is refused.
-- **Collision**: a failed bind or probe leaves no listener, never picks another port,
+- **Collision**: a failed bind or probe preserves the old working listener during
+  rebind; an initial failure leaves none. It never picks another port,
   logs a warning and sends the unaddressed `errors:report`
   `nvpair-proxy:routing-listener-blocked` (severity `error`, action `none`).
-  The proxy reports once and runs no retry timer, so the broker caches the
+  Each failed reconcile reports; there is no retry timer. The broker caches the
   report until the matching `errors:clear` and replays it to a restarted
   `nvpair-errors`, as it does for the OLLAMA_HOST alias warning.
   The revision still activates and acknowledges, so an unrelated setting is not
@@ -1721,7 +1784,10 @@ discovery or node notification names its port.
   answers; none reads the body or touches a facade, admission, discovery or the
   scheduler.
   - `Host` must be `127.0.0.1` or `localhost` (case-insensitive) with exactly
-    the bound port, else `403` `host_not_allowed`. This resists DNS rebinding.
+    the port captured from the accepted connection's local address by
+    `ConnContext`, else `403` `host_not_allowed`. After a rebind, an old
+    connection still requires its old port; it cannot use the new port in
+    `Host`. This resists DNS rebinding.
   - Any `Origin` header (including `null`, an empty value or repeats) is `403`
     `origin_not_allowed` unless there is exactly one and it equals an entry of
     `allowedOrigins` byte for byte. The entries are read from the active policy
@@ -1738,8 +1804,9 @@ discovery or node notification names its port.
     is `404`. A query string or a bare `?` on an inference route is `400`
     `query_not_allowed`. Otherwise `501`
     `{"error","code":"feature_unavailable","reason":"routing_listener_not_inference_ready"}`.
-    Phase 4 replaces this refusal with dispatch; until then the aliases are
-    listed but not inference-ready.
+    The Q4-gated dispatch cutover has not landed: only listener lifetime work
+    from I5-b2 is present. The aliases are listed but not inference-ready;
+    the common driver's hybrid policy (§5.1) does not change this refusal.
   - `OPTIONS` with `Origin` and `Access-Control-Request-Method` on a known path
     is a preflight: `204` with `Access-Control-Allow-Methods` (the route's
     method and `OPTIONS`), `Access-Control-Allow-Headers: Content-Type,
