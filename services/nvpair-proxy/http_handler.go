@@ -654,19 +654,25 @@ func (f *facade) serveInference(w http.ResponseWriter, r *http.Request, start ti
 	if err != nil {
 		status := bufferRequestStatus(err)
 		reason := "request body read failed"
+		message := "request body could not be buffered"
+		var invalidIdentifier *requestIdentifierError
 		if status == http.StatusRequestEntityTooLarge {
 			reason = "request body too large"
 		} else if status == http.StatusServiceUnavailable {
 			reason = "inference buffer capacity is busy"
+		} else if stderrors.As(err, &invalidIdentifier) {
+			reason, message = invalidIdentifier.Error(), invalidIdentifier.Error()
 		}
+		// Path identifiers have not been validated on this body-first exit.
+		// Keep early telemetry fixed rather than publishing a decoded token.
 		slog.Warn("proxy request rejected",
-			"id", reqID, "method", r.Method, "path", r.URL.Path,
+			"id", reqID, "method", r.Method, "path", "",
 			"remote", r.RemoteAddr, "reason", reason, "limit", p.requestBodyLimit())
-		writeIngressError(w, status, "request-body", "request body could not be buffered")
+		writeIngressError(w, status, "request-body", message)
 		_ = f.notify("proxy/request", RequestEvent{
 			ID:       reqID,
 			Method:   r.Method,
-			Path:     r.URL.Path,
+			Path:     "",
 			Status:   status,
 			Duration: time.Since(start).Milliseconds(),
 			Error:    reason,
@@ -834,11 +840,16 @@ func (f *facade) serveProxyPassthrough(w http.ResponseWriter, r *http.Request, s
 	body, model, err := bufferBodyAndModel(w, r, p.requestBodyLimit())
 	if err != nil {
 		reason := "request body read failed"
+		message := "request body could not be buffered"
+		var invalidIdentifier *requestIdentifierError
 		if bufferRequestStatus(err) == http.StatusRequestEntityTooLarge {
 			reason = "request body too large"
+		} else if stderrors.As(err, &invalidIdentifier) {
+			reason, message = invalidIdentifier.Error(), invalidIdentifier.Error()
 		}
-		writeIngressError(w, bufferRequestStatus(err), "request-body", "request body could not be buffered")
-		_ = f.notify("proxy/request", RequestEvent{ID: reqID, Method: r.Method, Path: r.URL.Path,
+		writeIngressError(w, bufferRequestStatus(err), "request-body", message)
+		// A model-detail path is still unvalidated when buffering fails.
+		_ = f.notify("proxy/request", RequestEvent{ID: reqID, Method: r.Method, Path: "",
 			Status: bufferRequestStatus(err), Duration: time.Since(start).Milliseconds(), Error: reason})
 		return
 	}

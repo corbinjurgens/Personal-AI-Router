@@ -9,12 +9,14 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/json"
 	stderrors "errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -1520,6 +1522,88 @@ func waitInferenceDrained(t *testing.T, p *Proxy) {
 		time.Sleep(time.Millisecond)
 	}
 	ownedAssertHandlerDrained(t, p, nil)
+}
+
+func TestModelControlsSelectionListenerShortAlias512ByteConcrete(t *testing.T) {
+	test := func(name, model string) {
+		t.Run(name, func(t *testing.T) {
+			pol := ollamaTierPolicy(map[string][]nodepolicy.TierEntry{"weak": {{Kind: nodepolicy.EntryLocal, Engine: "ollama", Model: model}}})
+			pol.TierPolicy.AllowStronger = false
+			fx := newTierFixture(t, ollamaCase(t), pol, map[string][]string{"peer": {model}}, nil)
+			fx.advertise(t, "peer", map[string]nodepolicy.AdvertisedRole{"weak": qualifiedRole(model)}, strictCapabilityFor("ollama", model))
+			port := inferenceListener(t, fx)
+			resp := inferencePost(t, port, `{"model":"weak"}`)
+			if _, err := io.ReadAll(resp.Body); err != nil {
+				t.Fatal(err)
+			}
+			if resp.StatusCode != http.StatusOK || fx.eng["peer"].hits() != 1 {
+				t.Fatalf("public HTTP listener status/upstream hits = %d/%d", resp.StatusCode, fx.eng["peer"].hits())
+			}
+			var forwarded struct {
+				Model string `json:"model"`
+			}
+			if err := json.Unmarshal([]byte(fx.eng["peer"].lastBody()), &forwarded); err != nil {
+				t.Fatal(err)
+			}
+			if len(model) != 512 || forwarded.Model != model {
+				t.Fatal("listener changed the selected 512-byte concrete model")
+			}
+			strict := decodeStrictHeader(t, fx.eng["peer"].lastHeader())
+			if strict.Request.OriginNodeID != fx.p.originNodeID || strict.Request.ProxyRunID != fx.p.runID || strict.Request.RequestID != "1" {
+				t.Fatalf("peer dispatch lost canonical key: %+v", strict.Request)
+			}
+			if nodepolicy.PublicDispatchAvailable() {
+				t.Fatal("provider API egress enabled")
+			}
+			waitInferenceDrained(t, fx.p)
+		})
+	}
+	test("ASCII concrete model", strings.Repeat("a", 508)+":tag")
+	test("multibyte concrete model", strings.Repeat("界", 169)+"a:tag")
+}
+
+func TestModelControlsIngressListenerKeyedRefusal(t *testing.T) {
+	test := func(name, body string) {
+		t.Run(name, func(t *testing.T) {
+			var logs bytes.Buffer
+			previous := slog.Default()
+			slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+			t.Cleanup(func() { slog.SetDefault(previous) })
+			fx := hybridPeerFixture(t, map[string]int{"peer": http.StatusOK})
+			port := inferenceListener(t, fx)
+			before := fx.p.requestSequence
+			resp := inferencePost(t, port, body)
+			data, err := io.ReadAll(resp.Body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var refusal struct {
+				Error string `json:"error"`
+				Code  string `json:"code"`
+			}
+			if err := json.Unmarshal(data, &refusal); err != nil {
+				t.Fatal(err)
+			}
+			if resp.StatusCode != http.StatusBadRequest || refusal.Error != "invalid model identifier" || (refusal.Code != "request-body" && refusal.Code != "request-identifier") {
+				t.Fatalf("identifier status/refusal = %d/%+v", resp.StatusCode, refusal)
+			}
+			waitInferenceDrained(t, fx.p)
+			if fx.p.requestSequence != before+1 || fx.eng["peer"].hits() != 0 || len(notificationsOf(t, fx.w, workloadSubmittedMethod)) != 0 {
+				t.Fatal("invalid model lacked exactly one canonical key or caused dispatch effects")
+			}
+			if logs.Len() == 0 {
+				t.Fatal("log capture did not observe the rejection path")
+			}
+			if bytes.Contains(data, []byte("sentinel")) || bytes.Contains(bytes.Join(fx.w.lines(), nil), []byte("sentinel")) || bytes.Contains(logs.Bytes(), []byte("sentinel")) {
+				t.Fatal("invalid model echoed to response, notification or log")
+			}
+		})
+	}
+	test("newline", `{"model":"sentinel\nmodel"}`)
+	test("DEL", `{"model":"sentinel\u007fmodel"}`)
+	test("C1", `{"model":"sentinel\u0085model"}`)
+	test("raw invalid UTF8", "{\"model\":\"sentinel"+string([]byte{0xff})+"model\"}")
+	test("folded name", `{"model":"weak","N\u0041ME":"sentinel\nmodel"}`)
 }
 
 func TestRoutingListener_InferenceModelMembers(t *testing.T) {

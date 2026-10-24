@@ -386,6 +386,29 @@ func TestRequestRegistrySnapshotCallerIDCapacity(t *testing.T) {
 	bufferAssertTotals(t, p.buffers, metadata, 2, 0)
 }
 
+func TestModelControlsRegistryIdentityAndCapacityRefuseBeforeRead(t *testing.T) {
+	test := func(name string, capacity bool) {
+		t.Run(name, func(t *testing.T) {
+			writer := &recordingWriter{}
+			p := NewProxy(NewCodec(writer))
+			if capacity {
+				p = newBoundProxy(NewCodec(writer))
+				lease := bufferMustAcquire(t, p.buffers, p.buffers.capacity)
+				defer lease.close()
+			}
+			f := newFacade(p, anyProfile(t), NewDiscovery(), 0)
+			body := &identityBody{}
+			rec := httptest.NewRecorder()
+			f.handleHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/chat?model=bad%0A", body))
+			if rec.Code != http.StatusServiceUnavailable || body.reads != 0 || p.requestSequence != 0 || len(p.activeRoutingRequests()) != 0 || len(writer.lines()) != 0 {
+				t.Fatalf("pre-registration refusal status/reads/counter/rows/notifications = %d/%d/%d/%d/%d", rec.Code, body.reads, p.requestSequence, len(p.activeRoutingRequests()), len(writer.lines()))
+			}
+		})
+	}
+	test("identity unavailable", false)
+	test("metadata capacity unavailable", true)
+}
+
 func TestRequestRegistrySaturationRefusesBeforeEffects(t *testing.T) {
 	w := &recordingWriter{}
 	p := newBoundProxy(NewCodec(w))

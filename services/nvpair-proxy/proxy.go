@@ -594,6 +594,9 @@ func (f *facade) resolvePassthroughCandidates() []candidate {
 // Returns an empty slice when no forwarding target is available; the caller
 // treats that as the rejection path.
 func (f *facade) resolveRouteCandidates(model string, inference bool) []candidate {
+	if model != "" && (nodepolicy.ValidateModelIdentifier(model) != nil || nodepolicy.ValidateModelIdentifier(f.profile.normalizeModel(model)) != nil) {
+		return nil
+	}
 	p := f.host
 	id := f.SelectedID()
 
@@ -995,15 +998,18 @@ func (p *Proxy) moveReservation(r reservation, nodeID string) reservation {
 // Kept a free function taking the profile so the match is testable without a
 // Proxy.
 func nodeAdvertisesModel(p engineProfile, n Node, model string) bool {
+	if nodepolicy.ValidateModelIdentifier(model) != nil {
+		return false
+	}
 	if !modelServed(n.ServedModels, p.Name, model, func(_ string, m string) string { return p.normalizeModel(m) }) {
 		return false
 	}
 	requested := p.normalizeModel(model)
-	if requested == "" {
+	if nodepolicy.ValidateModelIdentifier(requested) != nil {
 		return false
 	}
 	for _, available := range n.Models {
-		if p.normalizeModel(available) == requested {
+		if nodepolicy.ValidateModelIdentifier(available) == nil && p.normalizeModel(available) == requested {
 			return true
 		}
 	}
@@ -1327,7 +1333,7 @@ func subscribedToNode(p engineProfile, n noderec.DirectoryNode) (Node, bool) {
 		node.PausedBy = n.Policy.PausedBy
 		node.StrictAdmission = n.Policy.StrictAdmission
 	}
-	return node, true
+	return node.filteredModels(), true
 }
 
 func (p *Proxy) readLoop(ctx context.Context) error {
@@ -1404,7 +1410,12 @@ func (p *Proxy) handleMessage(msg *Message) {
 		// the relay re-sends the full set on every change, and enabling
 		// subscribes, so the next snapshot supersedes anything missed here.
 		if f := p.facadeFor(engine); f != nil {
-			f.replaceSubscribed(msg.Params)
+			clean, err := filterDiscoveryModelsJSON(msg.Params)
+			if err != nil {
+				slog.Warn("invalid discovery:nodes snapshot")
+				return
+			}
+			f.replaceSubscribed(clean)
 		}
 		return
 	}

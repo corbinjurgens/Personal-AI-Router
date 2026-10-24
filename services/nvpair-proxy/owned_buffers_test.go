@@ -114,10 +114,9 @@ func TestOwnedInferenceBuffers(t *testing.T) {
 	})
 	t.Run("model decoding uses one charged retained representation", func(t *testing.T) {
 		for _, tc := range []struct{ name, raw, want string }{
-			{"escapes", `{"model":"m\n\t\\\""}`, "m\n\t\\\""},
+			{"escapes", `{"model":"m\\\"\u754c"}`, "m\\\"界"},
 			{"surrogate pair", `{"model":"\uD83D\uDE00"}`, "😀"},
 			{"unpaired surrogate", `{"model":"\uD800x\uDC00"}`, "�x�"},
-			{"invalid UTF-8", "{\"model\":\"\xff\xfe\"}", "��"},
 		} {
 			t.Run(tc.name, func(t *testing.T) {
 				budget := bufferTestBudget(t, 192<<20, 0)
@@ -125,11 +124,38 @@ func TestOwnedInferenceBuffers(t *testing.T) {
 				r, owner := p.ownInferenceBuffers(httptest.NewRequest(http.MethodPost, "/api/generate", strings.NewReader(tc.raw)))
 				r.ContentLength = -1 // This case exercises unknown-length decoding storage.
 				defer owner.close()
-				_, model, err := bufferBodyAndModel(httptest.NewRecorder(), r, 64<<20)
-				if err != nil || model != tc.want {
+				body, model, err := bufferBodyAndModel(httptest.NewRecorder(), r, 64<<20)
+				if err != nil || model != tc.want || !bytes.Equal(body, []byte(tc.raw)) || cap(body) != 32<<10 {
 					t.Fatalf("model=%q err=%v, want %q", model, err, tc.want)
 				}
-				bufferAssertTotals(t, budget, int64((32<<10)+(96<<10)+len(tc.want)+8192), 3, 0)
+				// Unknown-length body backing + parser scratch + exactly one
+				// retained decoded string, including its builder allowance.
+				decodedCharge := int64(len(tc.want)) + 8192
+				bufferAssertTotals(t, budget, (32<<10)+(96<<10)+decodedCharge, 3, 0)
+				owner.close()
+				bufferAssertTotals(t, budget, 0, 0, 0)
+			})
+		}
+	})
+	t.Run("invalid model decoding retains only body and parser charges", func(t *testing.T) {
+		for _, tc := range []struct{ name, raw string }{
+			{"raw invalid UTF-8", "{\"model\":\"\xff\xfe\"}"},
+			{"escaped C0", `{"model":"m\n\t\\\""}`},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				budget := bufferTestBudget(t, 192<<20, 0)
+				p := &Proxy{buffers: budget}
+				r, owner := p.ownInferenceBuffers(httptest.NewRequest(http.MethodPost, "/api/generate", strings.NewReader(tc.raw)))
+				r.ContentLength = -1
+				defer owner.close()
+				body, model, err := bufferBodyAndModel(httptest.NewRecorder(), r, 64<<20)
+				var identifier *requestIdentifierError
+				if !errors.As(err, &identifier) || bufferRequestStatus(err) != http.StatusBadRequest || body != nil || model != "" {
+					t.Fatalf("invalid model: body=%d model=%q err=%v", len(body), model, err)
+				}
+				bufferAssertTotals(t, budget, (32<<10)+(96<<10), 2, 0)
+				owner.close()
+				bufferAssertTotals(t, budget, 0, 0, 0)
 			})
 		}
 	})
