@@ -54,6 +54,132 @@ func TestValidateAcceptsValid(t *testing.T) {
 	}
 }
 
+func TestManifestAuthStatuses(t *testing.T) {
+	t.Run("bundled manifests", func(t *testing.T) {
+		reg := NewRegistry()
+		if err := reg.LoadFS(bundledManifests, "manifests"); err != nil {
+			t.Fatal(err)
+		}
+		for _, engine := range []string{"lmstudio", "ollama", "llamacpp"} {
+			t.Run(engine, func(t *testing.T) {
+				m, ok := reg.Get(engine)
+				if !ok {
+					t.Fatalf("%s manifest not loaded", engine)
+				}
+				p, ok := m.HostPlatform()
+				if !ok {
+					t.Fatalf("%s host platform missing", engine)
+				}
+				var want []int
+				if engine == "lmstudio" {
+					want = []int{http.StatusUnauthorized, http.StatusForbidden}
+				}
+				if !slices.Equal(p.Runtime.AuthStatuses, want) {
+					t.Errorf("runtime.auth_statuses = %v, want %v", p.Runtime.AuthStatuses, want)
+				}
+			})
+		}
+	})
+
+	accept := func(name string, statuses []int) {
+		t.Run(name, func(t *testing.T) {
+			m := validManifest()
+			p := m.Platforms["linux/amd64"]
+			p.Runtime.AuthStatuses = statuses
+			m.Platforms["linux/amd64"] = p
+			if err := m.Validate(); err != nil {
+				t.Fatalf("valid auth statuses rejected: %v", err)
+			}
+		})
+	}
+	accept("accepts unauthorized", []int{http.StatusUnauthorized})
+	accept("accepts forbidden", []int{http.StatusForbidden})
+	accept("accepts both statuses", []int{http.StatusUnauthorized, http.StatusForbidden})
+
+	reject := func(name string, ready *Probe, statuses []int) {
+		t.Run(name, func(t *testing.T) {
+			m := validManifest()
+			p := m.Platforms["linux/amd64"]
+			p.Runtime.Ready = ready
+			p.Runtime.AuthStatuses = statuses
+			m.Platforms["linux/amd64"] = p
+			err := m.Validate()
+			if err == nil {
+				t.Fatal("invalid auth statuses accepted")
+			}
+			if !strings.Contains(err.Error(), `platform "linux/amd64": runtime.auth_statuses`) {
+				t.Fatalf("error = %q, want platform and runtime.auth_statuses", err)
+			}
+		})
+	}
+	reject("rejects missing ready probe", nil, []int{http.StatusUnauthorized})
+	reject("rejects TCP ready probe", &Probe{TCP: "127.0.0.1:{port}"}, []int{http.StatusUnauthorized})
+	reject("rejects whitespace HTTP ready probe", &Probe{HTTP: " \t", TCP: "127.0.0.1:{port}"}, []int{http.StatusUnauthorized})
+	reject("rejects other status", &Probe{HTTP: "http://127.0.0.1:{port}/"}, []int{http.StatusServiceUnavailable})
+	reject("rejects duplicate unauthorized", &Probe{HTTP: "http://127.0.0.1:{port}/"}, []int{http.StatusUnauthorized, http.StatusUnauthorized})
+	reject("rejects duplicate forbidden", &Probe{HTTP: "http://127.0.0.1:{port}/"}, []int{http.StatusForbidden, http.StatusForbidden})
+}
+
+func TestManifestAppProcesses(t *testing.T) {
+	t.Run("bundled manifests", func(t *testing.T) {
+		reg := NewRegistry()
+		if err := reg.LoadFS(bundledManifests, "manifests"); err != nil {
+			t.Fatal(err)
+		}
+		for _, engine := range []string{"lmstudio", "ollama", "llamacpp"} {
+			t.Run(engine, func(t *testing.T) {
+				m, ok := reg.Get(engine)
+				if !ok {
+					t.Fatalf("%s manifest not loaded", engine)
+				}
+				p, ok := m.HostPlatform()
+				if !ok {
+					t.Fatalf("%s host platform missing", engine)
+				}
+				var want []string
+				if engine == "lmstudio" {
+					want = []string{"LM Studio", "lm-studio", "llmster"}
+				}
+				if !slices.Equal(p.Runtime.AppProcesses, want) {
+					t.Errorf("runtime.app_processes = %v, want %v", p.Runtime.AppProcesses, want)
+				}
+			})
+		}
+	})
+
+	t.Run("accepts process image base names", func(t *testing.T) {
+		m := validManifest()
+		p := m.Platforms["linux/amd64"]
+		p.Runtime.AppProcesses = []string{"LM Studio", "lm-studio", "llmster", "Other App.exe"}
+		m.Platforms["linux/amd64"] = p
+		if err := m.Validate(); err != nil {
+			t.Fatalf("valid process image base names rejected: %v", err)
+		}
+	})
+
+	reject := func(name string, names []string) {
+		t.Run(name, func(t *testing.T) {
+			m := validManifest()
+			p := m.Platforms["linux/amd64"]
+			p.Runtime.AppProcesses = names
+			m.Platforms["linux/amd64"] = p
+			err := m.Validate()
+			if err == nil {
+				t.Fatal("invalid app process names accepted")
+			}
+			if !strings.Contains(err.Error(), `platform "linux/amd64": runtime.app_processes`) {
+				t.Fatalf("error = %q, want platform and runtime.app_processes", err)
+			}
+		})
+	}
+	reject("rejects empty name", []string{""})
+	reject("rejects whitespace name", []string{" \t\r\n"})
+	reject("rejects slash", []string{"Applications/LM Studio"})
+	reject("rejects backslash", []string{`Programs\LM Studio.exe`})
+	reject("rejects duplicate name", []string{"llmster", "llmster"})
+	reject("rejects case-insensitive duplicate", []string{"LM Studio", "lm studio"})
+}
+
 func TestValidateAcceptsCommandModeAndCmdAction(t *testing.T) {
 	m := validManifest()
 	p := m.Platforms["linux/amd64"]
