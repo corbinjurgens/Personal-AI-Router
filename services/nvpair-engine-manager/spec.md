@@ -927,10 +927,40 @@ Stores: Ollama uses `OLLAMA_MODELS` from the engine's launch environment or this
 
 ## 12. Failure Modes and Mitigations
 - **Download / checksum failure on install**: engine stays NotInstalled. → Fail fast before `run`; `engine:install-progress` error + `errors:report` (`engine-manager:install-failed:<engine>`); never execute an unverified payload.
-- **Engine fails its readiness probe**: start never reaches Running. → Bounded ready timeout → back to Stopped; structured error; no half-started state.
+- **Engine fails its readiness probe**: start never reaches Running. → Bounded ready timeout (or early failure after three consecutive declared auth responses, below) → back to Stopped; structured error; no half-started state.
 - **Engine process crashes**: engine unavailable. → A watcher flips state, emits `engine:state-changed` + `errors:report` (`engine-manager:exited:<engine>`); the parent's supervisor reports if the *manager itself* dies. (Automatic restart is planned — see §4 — not yet implemented.)
 - **`nvpair-errors` unavailable**: failures absent from the node's error list. → The Broker no-ops the forward; local applog + ring buffers still hold everything.
 - **Invalid / unknown-OS manifest**: that engine is unusable. → Reject at load with a specific error; other engines unaffected.
+
+Command-mode engines declaring `runtime.auth_statuses` and
+`runtime.app_processes` (currently LM Studio) diagnose failed start commands,
+failed readiness, and health-probe failures through the existing `errors:report`
+message. Start failures retain `engine-manager:start-failed:<engine>` with
+severity `error` and action `retry`; health failures retain
+`engine-manager:unhealthy:<engine>` with severity `warning` and action `none`.
+`engine:state-changed{EngineStatus}` and the error payloads are unchanged; no
+payload field was added. With `<Name>` replaced by the manifest's `display_name`,
+the messages are:
+
+- API-key refusal (a declared HTTP 401 or 403): `<Name> is running but requires an API key, and PAIR does not have one. Turn off API authentication in <Name>'s server settings, then try again.`
+- App or daemon process present but no connection: `Can't connect to <Name>. Does it have an API key set, or is its server off?`
+- No matching process: `Can't connect to <Name>, and no <Name> process is running. Open <Name>, then try again.`
+
+Auth evidence takes precedence over process inspection. Without diagnosis fields,
+or if process listing fails without auth evidence, the original failure wording
+is retained. Only three consecutive readiness responses with a declared auth
+status fail readiness early (about 0.6 seconds for immediate responses); any
+other result resets that count. Other failures retain the existing readiness
+timeout (60 seconds for LM Studio), and failed-start stop-command cleanup is
+unchanged. This diagnosis does not add LM Studio API-key storage or use.
+
+LM Studio readiness remains its HTTP probe: process presence never makes an
+engine running, healthy, adopted, or routable. Diagnosis runs on a start attempt
+(including automatic relaunch) or in the health loop of an engine PAIR started
+or adopted through Start. An engine adopted only by a passive status read has
+no health loop and gets no health diagnosis. A health failure is reported even
+if a status read already changed `healthy` to false, and the report clears when
+the health probe recovers. Merely opening LM Studio does not trigger diagnosis.
 
 ## 13. Observability
 - **Logging**: structured `slog` to stderr via `nvpair-shared/applog` (captured by the parent's debug panel); per-engine stdout/stderr ring buffers; key events — install fetch/verify/run outcomes, start/ready/stop transitions, health flips, action invocations, every failure.
