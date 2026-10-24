@@ -16,6 +16,9 @@ package main
 // proxy.go and http_handler.go.
 
 import (
+	"bytes"
+	"encoding/json"
+	"fmt"
 	"slices"
 	"sync"
 
@@ -80,6 +83,200 @@ type Node struct {
 	StrictAdmission *nodepolicy.StrictAdmissionCapability `json:"-"`
 }
 
+// Manual entries arrive as raw JSON too: guard model tokens before decoding
+// can repair their UTF-8. Directory snapshots use the same filter at ingress.
+func (n *Node) UnmarshalJSON(data []byte) error {
+	clean, err := filterModelInventoryJSON(data, "models")
+	if err != nil {
+		return err
+	}
+	type wire Node
+	var next wire
+	if err := json.Unmarshal(clean, &next); err != nil {
+		return err
+	}
+	*n = Node(next).filteredModels()
+	return nil
+}
+
+func filterModelNames(models []string) []string {
+	if models == nil {
+		return nil
+	}
+	clean := make([]string, 0, len(models))
+	for _, model := range models {
+		if nodepolicy.ValidateModelIdentifier(model) == nil {
+			clean = append(clean, model)
+		}
+	}
+	return clean
+}
+
+func (n Node) filteredModels() Node {
+	n.Models = filterModelNames(n.Models)
+	n.Loaded = filterModelNames(n.Loaded)
+	if n.Roles != nil {
+		roles := make(map[string]nodepolicy.AdvertisedRole, len(n.Roles))
+		for tier, role := range n.Roles {
+			if nodepolicy.ValidateModelIdentifier(role.Model) == nil {
+				roles[tier] = role
+			}
+		}
+		n.Roles = roles
+	}
+	if n.ServedModels != nil {
+		served := make(nodepolicy.ServedModels, 0, len(n.ServedModels))
+		for _, ref := range n.ServedModels {
+			if nodepolicy.ValidateModelIdentifier(ref.Model) == nil {
+				served = append(served, ref)
+			}
+		}
+		n.ServedModels = served
+	}
+	if n.StrictAdmission != nil && n.StrictAdmission.Version == nodepolicy.StrictAdmissionVersion {
+		models := n.StrictAdmission.Models
+		for i, entry := range models {
+			if nodepolicy.ValidateModelIdentifier(entry.Model) == nil {
+				continue
+			}
+			// Clean advertisements retain their original pointer and backing.
+			// Clone only after finding an entry that actually needs removal.
+			capability := *n.StrictAdmission
+			capability.Models = make([]nodepolicy.StrictAdmissionModel, 0, len(models)-1)
+			capability.Models = append(capability.Models, models[:i]...)
+			for _, remaining := range models[i+1:] {
+				if nodepolicy.ValidateModelIdentifier(remaining.Model) == nil {
+					capability.Models = append(capability.Models, remaining)
+				}
+			}
+			n.StrictAdmission = &capability
+			break
+		}
+	}
+	return n
+}
+
+// Keep raw valid siblings and null/empty distinctions. Only model containers
+// are inspected; unrelated fields retain their normal decoder behavior.
+func filterModelNamesJSON(raw []byte) ([]byte, error) {
+	var entries []json.RawMessage
+	if err := json.Unmarshal(raw, &entries); err != nil {
+		return nil, fmt.Errorf("invalid model inventory")
+	}
+	if entries == nil {
+		return raw, nil
+	}
+	clean := make([]json.RawMessage, 0, len(entries))
+	for _, entry := range entries {
+		if nodepolicy.ValidateModelIdentifierJSON(entry) == nil {
+			clean = append(clean, entry)
+		}
+	}
+	return json.Marshal(clean)
+}
+
+// Rewrite only recognized values, in document order, so folded/repeated
+// enclosing members keep encoding/json's existing merge behavior.
+func filterModelInventoryJSON(data []byte, modelFields ...string) ([]byte, error) {
+	if !ownedJSONValid(data) || !isJSONObject(data) {
+		return nil, fmt.Errorf("invalid model inventory")
+	}
+	var out []byte
+	last := 0
+	var filterErr error
+	visitObject(data, func(key []byte, start, end int) {
+		if filterErr != nil {
+			return
+		}
+		field := ""
+		for _, name := range modelFields {
+			if jsonKeyEqual(key, name, true) {
+				field = name
+				break
+			}
+		}
+		raw := data[start:end]
+		var clean []byte
+		var err error
+		switch field {
+		case "models":
+			clean, err = filterModelNamesJSON(raw)
+		case "modelsByEngine", "loadedByEngine":
+			var byEngine map[string]json.RawMessage
+			if err = json.Unmarshal(raw, &byEngine); err == nil && byEngine != nil {
+				for engine, models := range byEngine {
+					byEngine[engine], err = filterModelNamesJSON(models)
+					if err != nil {
+						break
+					}
+				}
+				if err == nil {
+					clean, err = json.Marshal(byEngine)
+				}
+			}
+		case "policy":
+			if !bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+				clean, err = nodepolicy.FilterAdvertisementModels(raw)
+			}
+		}
+		if err != nil {
+			filterErr = fmt.Errorf("invalid model inventory")
+			return
+		}
+		if clean != nil {
+			out = append(out, data[last:start]...)
+			out = append(out, clean...)
+			last = end
+		}
+	})
+	if filterErr != nil {
+		return nil, filterErr
+	}
+	return append(out, data[last:]...), nil
+}
+
+func filterDiscoveryModelsJSON(data []byte) ([]byte, error) {
+	if !ownedJSONValid(data) || !isJSONObject(data) {
+		return nil, fmt.Errorf("invalid discovery snapshot")
+	}
+	var out []byte
+	last := 0
+	var filterErr error
+	visitObject(data, func(key []byte, start, end int) {
+		if filterErr != nil || !jsonKeyEqual(key, "nodes", true) {
+			return
+		}
+		var nodes []json.RawMessage
+		if err := json.Unmarshal(data[start:end], &nodes); err != nil {
+			filterErr = err
+			return
+		}
+		for i, node := range nodes {
+			if bytes.Equal(bytes.TrimSpace(node), []byte("null")) {
+				continue
+			}
+			var err error
+			nodes[i], err = filterModelInventoryJSON(node, "models", "modelsByEngine", "loadedByEngine", "policy")
+			if err != nil {
+				filterErr = err
+				return
+			}
+		}
+		clean, err := json.Marshal(nodes)
+		if err != nil {
+			filterErr = err
+			return
+		}
+		out = append(out, data[last:start]...)
+		out = append(out, clean...)
+		last = end
+	})
+	if filterErr != nil {
+		return nil, fmt.Errorf("invalid discovery snapshot")
+	}
+	return append(out, data[last:]...), nil
+}
+
 // strictModel returns the strict admission entry n advertises for engine and
 // model. model must already be named the way that engine's facade names it,
 // which is how the destination publishes it. Only a valid capability of the
@@ -88,7 +285,7 @@ type Node struct {
 // candidate. Concrete routing does not consult it. The entry is an eligibility
 // hint; the destination revalidates every strict request.
 func (n Node) strictModel(engine, model string) (nodepolicy.StrictAdmissionModel, bool) {
-	if n.StrictAdmission.State() != nodepolicy.StrictCapabilityValid {
+	if nodepolicy.ValidateModelIdentifier(model) != nil || n.StrictAdmission.State() != nodepolicy.StrictCapabilityValid {
 		return nodepolicy.StrictAdmissionModel{}, false
 	}
 	for _, m := range n.StrictAdmission.Models {
@@ -170,6 +367,7 @@ func (d *Discovery) SetSubscribed(nodes []Node) (discovered, updated, removed []
 	defer d.mu.Unlock()
 	next := make(map[string]Node, len(nodes))
 	for _, n := range nodes {
+		n = n.filteredModels()
 		next[n.ID] = n
 		switch prev, ok := d.subscribedNodes[n.ID]; {
 		case !ok:
@@ -198,6 +396,7 @@ func nodeEqual(a, b Node) bool {
 }
 
 func (d *Discovery) AddManual(node Node) (added bool) {
+	node = node.filteredModels()
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	_, exists := d.manualNodes[node.ID]

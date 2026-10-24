@@ -207,8 +207,12 @@ func (p *Proxy) applySetEngineDrain(params json.RawMessage) error {
 }
 
 func (p *Proxy) applySetResidency(params json.RawMessage) error {
+	clean, err := filterModelInventoryJSON(params, "loadedByEngine")
+	if err != nil {
+		return err
+	}
 	var in nodepolicy.SetResidencyParams
-	if err := decodeStrict(params, &in); err != nil {
+	if err := decodeStrict(clean, &in); err != nil {
 		return err
 	}
 	if in.LoadedByEngine == nil {
@@ -218,11 +222,13 @@ func (p *Proxy) applySetResidency(params json.RawMessage) error {
 		if err := knownEngine(engine); err != nil {
 			return err
 		}
+		filtered := make([]string, 0, len(models))
 		for _, m := range models {
-			if strings.TrimSpace(m) == "" {
-				return fmt.Errorf("loadedByEngine.%s contains an empty model", engine)
+			if nodepolicy.ValidateModelIdentifier(m) == nil && nodepolicy.ValidateModelIdentifier(p.normalizeEngineModel(engine, m)) == nil {
+				filtered = append(filtered, m)
 			}
 		}
+		in.LoadedByEngine[engine] = filtered
 	}
 	p.admission.setResidency(in.LoadedByEngine)
 	slog.Debug("node residency set", "engines", len(in.LoadedByEngine))
@@ -274,21 +280,40 @@ func knownEngine(name string) error {
 // normalizeEngineModel names a model the way its engine does, so admission,
 // residency and profiles agree with nodeAdvertisesModel.
 func normalizeEngineModel(engine, model string) string {
-	if prof, ok := profileFor(engine); ok {
-		return prof.normalizeModel(model)
+	if nodepolicy.ValidateModelIdentifier(model) != nil {
+		return ""
 	}
-	return strings.TrimSpace(model)
+	if prof, ok := profileFor(engine); ok {
+		model = prof.normalizeModel(model)
+	} else {
+		model = strings.TrimSpace(model)
+	}
+	if nodepolicy.ValidateModelIdentifier(model) != nil {
+		return ""
+	}
+	return model
 }
 
 // modelServed is the permission comparison seam. B2 can replace normalization
 // here with the shared descriptor naming helper when it lands.
 func modelServed(served nodepolicy.ServedModels, engine, model string, normalize func(string, string) string) bool {
+	// An omitted model keeps the existing unrestricted-policy behavior; the
+	// ingress guard separately refuses an explicitly supplied empty token.
+	if model == "" {
+		return served == nil
+	}
+	if nodepolicy.ValidateModelIdentifier(model) != nil {
+		return false
+	}
+	want := normalize(engine, model)
+	if nodepolicy.ValidateModelIdentifier(want) != nil {
+		return false
+	}
 	if served == nil {
 		return true
 	}
-	want := normalize(engine, model)
 	for _, ref := range served {
-		if ref.Engine == engine && normalize(engine, ref.Model) == want {
+		if ref.Engine == engine && nodepolicy.ValidateModelIdentifier(ref.Model) == nil && normalize(engine, ref.Model) == want {
 			return true
 		}
 	}
@@ -301,8 +326,15 @@ const rejectNotServed nodepolicy.RejectReason = "not-served"
 // engines this process fronts, whose naming rule lives on their facade. An
 // engine without a facade here keeps exact naming.
 func (p *Proxy) normalizeEngineModel(engine, model string) string {
+	if nodepolicy.ValidateModelIdentifier(model) != nil {
+		return ""
+	}
 	if f := p.facadeFor(engine); f != nil {
-		return f.profile.normalizeModel(model)
+		normalized := f.profile.normalizeModel(model)
+		if nodepolicy.ValidateModelIdentifier(normalized) != nil {
+			return ""
+		}
+		return normalized
 	}
 	return normalizeEngineModel(engine, model)
 }

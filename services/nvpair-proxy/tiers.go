@@ -307,7 +307,7 @@ func (d declaredRoles) forTier(t string) []nodepolicy.AdvertisedRole {
 	var out []nodepolicy.AdvertisedRole
 	add := func(roles map[string]nodepolicy.AdvertisedRole) {
 		r, ok := roles[t]
-		if ok && !slices.ContainsFunc(out, func(o nodepolicy.AdvertisedRole) bool {
+		if ok && nodepolicy.ValidateModelIdentifier(r.Model) == nil && !slices.ContainsFunc(out, func(o nodepolicy.AdvertisedRole) bool {
 			return o.Engine == r.Engine && o.Model == r.Model
 		}) {
 			out = append(out, nodepolicy.AdvertisedRole{Engine: r.Engine, Model: r.Model})
@@ -366,7 +366,14 @@ func (f *facade) resolveTierCandidates(tier string, needs requestNeeds, crossEng
 	var out []candidate
 	seen := map[string]bool{}
 	add := func(c candidate, g *facade, model string, rank int, fromRole bool) {
-		key := c.id + "\x00" + c.engine + "\x00" + g.profile.normalizeModel(model)
+		if nodepolicy.ValidateModelIdentifier(model) != nil {
+			return
+		}
+		normalized := g.profile.normalizeModel(model)
+		if nodepolicy.ValidateModelIdentifier(normalized) != nil {
+			return
+		}
+		key := c.id + "\x00" + c.engine + "\x00" + normalized
 		if seen[key] {
 			return
 		}
@@ -385,7 +392,7 @@ func (f *facade) resolveTierCandidates(tier string, needs requestNeeds, crossEng
 			want := g.profile.normalizeModel(role.Model)
 			for _, c := range g.resolveCandidates(role.Model) {
 				r, ok := declared.of(c)[t]
-				if !ok || r.Engine != role.Engine || g.profile.normalizeModel(r.Model) != want ||
+				if !ok || r.Engine != role.Engine || nodepolicy.ValidateModelIdentifier(r.Model) != nil || g.profile.normalizeModel(r.Model) != want ||
 					!needs.metBy(r.Capabilities, r.ContextTokens) {
 					continue
 				}
@@ -393,7 +400,7 @@ func (f *facade) resolveTierCandidates(tier string, needs requestNeeds, crossEng
 			}
 		}
 		for _, e := range pol.Tiers[t] {
-			if !e.IsLocal() || !needs.metBy(e.Capabilities, e.ContextTokens) {
+			if !e.IsLocal() || nodepolicy.ValidateModelIdentifier(e.Model) != nil || !needs.metBy(e.Capabilities, e.ContextTokens) {
 				continue
 			}
 			g := f.tierFacade(e.Engine, crossEngine)
@@ -673,15 +680,17 @@ func queryModelKey(raw string) bool {
 // model normalization. Values remain borrowed, including malformed-prefix
 // completed members and query fields whose percent decoding later fails.
 func validateRequestIdentifiers(r *http.Request, body []byte) error {
-	tooLong := false
+	invalid := false
 	visitCompletedRequestMembers(body, func(key, raw []byte) bool {
-		if len(raw) > 0 && raw[0] == '"' && (jsonKeyEqual(key, "model", true) || jsonKeyEqual(key, "name", true)) && requestJSONStringTooLong(raw) {
-			tooLong = true
-			return false
+		if len(raw) > 0 && raw[0] == '"' && (jsonKeyEqual(key, "model", true) || jsonKeyEqual(key, "name", true)) {
+			if requestJSONStringTooLong(raw) || nodepolicy.ValidateModelIdentifierJSON(raw) != nil {
+				invalid = true
+				return false
+			}
 		}
 		return true
 	})
-	if tooLong {
+	if invalid {
 		return &requestIdentifierError{}
 	}
 	for rest := r.URL.RawQuery; rest != ""; {
@@ -695,18 +704,22 @@ func validateRequestIdentifiers(r *http.Request, body []byte) error {
 			continue
 		}
 		decoder := aliasQueryDecoder{raw: value}
+		var decoded [maxRequestIdentifierBytes]byte
 		n := 0
-		for _, more := decoder.nextByte(); more; _, more = decoder.nextByte() {
+		for b, more := decoder.nextByte(); more; b, more = decoder.nextByte() {
+			if n < len(decoded) {
+				decoded[n] = b
+			}
 			if n <= maxRequestIdentifierBytes {
 				n++
 			}
 		}
-		if !decoder.bad && n > maxRequestIdentifierBytes {
+		if !decoder.bad && (n > maxRequestIdentifierBytes || nodepolicy.ValidateModelIdentifier(string(decoded[:n])) != nil) {
 			return &requestIdentifierError{}
 		}
 	}
 	for _, prefix := range modelDetailPrefixes {
-		if rest, ok := strings.CutPrefix(r.URL.Path, prefix); ok && len(rest) > maxRequestIdentifierBytes {
+		if rest, ok := strings.CutPrefix(r.URL.Path, prefix); ok && (len(rest) > maxRequestIdentifierBytes || nodepolicy.ValidateModelIdentifier(rest) != nil) {
 			return &requestIdentifierError{}
 		}
 	}
