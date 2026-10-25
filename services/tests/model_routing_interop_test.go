@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"reflect"
 	"strconv"
@@ -21,6 +22,7 @@ import (
 	"nvpair-shared/jsonrpc"
 	"nvpair-shared/nodepolicy"
 	"nvpair-shared/noderec"
+	"nvpair-shared/testbin"
 )
 
 func TestModelControlsRoutingAcrossProcesses(t *testing.T) {
@@ -266,7 +268,7 @@ type routingUpstream struct {
 func newRoutingUpstream(t *testing.T, status int) *routingUpstream {
 	t.Helper()
 	upstream := &routingUpstream{}
-	upstream.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	upstream.server = newFixtureHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		upstream.hits.Add(1)
 		_, _ = io.Copy(io.Discard, r.Body)
 		w.Header().Set("Content-Type", "application/json")
@@ -282,15 +284,27 @@ func newRoutingUpstream(t *testing.T, status int) *routingUpstream {
 }
 
 func TestStrictModelRoutingAcrossProcesses(t *testing.T) {
-	if portBusy(11435) || portBusy(1234) {
-		t.Skip("ollama-proxy (11435) or lmstudio-proxy (1234) default port already in use; skipping")
-	}
-
 	owner404 := newRoutingUpstream(t, http.StatusNotFound)
 	ownerOK := newRoutingUpstream(t, http.StatusOK)
 	ineligible := newRoutingUpstream(t, http.StatusOK)
 
-	stdin, msgs, stderr, cleanup := startBrokerWith(t,
+	configDir, clusterDir := t.TempDir(), filepath.Join(t.TempDir(), "cluster")
+	facades := map[string]int{"ollama": freePort(t), "lmstudio": freePort(t)}
+	writePrivateBrokerEngineSettings(t, configDir, clusterDir, facades)
+	// Reuse the registered empty-directory scanner, so the strict candidates
+	// below come only from the test's manual overlay, never host discovery.
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	scanner := filepath.Join(testbin.Dir(t, "tests", "subscription-scanner", "subscription-scanner"), testbin.Exe("subscription-scanner"))
+	jointCopyExecutable(t, self, scanner)
+	stdin, msgs, stderr, cleanup := startBrokerWithDirsAndEnv(t, configDir, clusterDir, []string{
+		"NVPAIR_TEST_SUBSCRIPTION_SCANNER=" + scanner,
+		"NVPAIR_TEST_SUBSCRIPTION_PORT=" + strconv.Itoa(freePort(t)),
+	},
+		"--scanner-path", scanner,
+		"--engine-manager-path", engineMgrBin,
 		"--proxy-path", proxyBin, "--proxy-engines", "ollama,lmstudio",
 	)
 	t.Cleanup(cleanup)
@@ -302,6 +316,9 @@ func TestStrictModelRoutingAcrossProcesses(t *testing.T) {
 	waitForMethod(t, msgs, "app:ready", 10*time.Second)
 	ollamaPort := waitProxyReady(t, stdin, msgs, 15*time.Second)
 	lmstudioPort := waitLMStudioProxyReady(t, stdin, msgs, 15*time.Second)
+	if ollamaPort != facades["ollama"] || lmstudioPort != facades["lmstudio"] {
+		t.Fatalf("facade ports = ollama:%d lmstudio:%d, want private plan %v", ollamaPort, lmstudioPort, facades)
+	}
 
 	type proxyCase struct {
 		name      string
