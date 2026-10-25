@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"nvpair-shared/jsonrpc"
+	"nvpair-shared/nodepolicy"
 )
 
 type (
@@ -22,7 +23,10 @@ type (
 	RPCError = jsonrpc.RPCError
 )
 
-const notificationWriteBudget = 60 * time.Second
+const (
+	notificationWriteBudget = 60 * time.Second
+	proxyOrdinaryFrameBytes = 1 << 20
+)
 
 // Codec adds the parent session's notification lifetime to shared framing.
 type Codec struct {
@@ -30,19 +34,46 @@ type Codec struct {
 	root   context.Context
 	budget time.Duration
 	fail   func(string, error)
+	// Construction-only transport/hook references permit NewProxy to replace
+	// the unused ordinary scanner before publishing any reader or writer.
+	transport io.ReadWriter
+	interrupt func()
+	// The ordinary framing allowance, shared by all input. History output and
+	// offsets borrow the sole history owner's existing P/R banks.
+	raw []byte
 }
 
 func NewCodec(rw io.ReadWriter) *Codec {
-	return &Codec{Codec: jsonrpc.NewCodec(rw), root: context.Background(), budget: notificationWriteBudget}
+	return &Codec{Codec: jsonrpc.NewCodec(rw), root: context.Background(), budget: notificationWriteBudget, transport: rw}
 }
 
 func newOwnedCodec(root context.Context, transport io.ReadWriteCloser, fail func(string, error), budget time.Duration) *Codec {
-	return &Codec{
-		Codec: jsonrpc.NewCodecMaxFrameWithWriteInterrupt(transport, 1<<20, func() {
-			fail("active-write", errors.New("parent transport write failed or was interrupted"))
-		}),
-		root: root, budget: budget, fail: fail,
+	interrupt := func() {
+		fail("active-write", errors.New("parent transport write failed or was interrupted"))
 	}
+	return &Codec{
+		Codec: jsonrpc.NewCodecMaxFrameWithWriteInterrupt(transport, proxyOrdinaryFrameBytes, interrupt),
+		root:  root, budget: budget, fail: fail, transport: transport, interrupt: interrupt,
+	}
+}
+
+// Called once during NewProxy, before IO or publication. Drop the unused
+// scanner before allocating its replacement ordinary raw allowance; no second
+// reader or gate remains reachable. This is not a runtime codec replacement.
+func (c *Codec) attachRoutingHistory(h *proxyRoutingHistory) error {
+	if c.transport == nil || c.raw != nil || h == nil {
+		return jsonrpc.ErrHistoryInvalid
+	}
+	c.Codec = nil
+	c.raw = make([]byte, 0, proxyOrdinaryFrameBytes)
+	codec, err := jsonrpc.NewHistoryCodec(c.transport, proxyOrdinaryFrameBytes, c.raw,
+		h.frames[1][:0], h.guard[:], &h.correlation, nodepolicy.RoutingHistoryTransportSchema, c.interrupt)
+	if err != nil {
+		return err
+	}
+	c.Codec = codec
+	c.transport, c.interrupt = nil, nil
+	return nil
 }
 
 func (c *Codec) Notify(method string, params any) error {
@@ -65,6 +96,6 @@ func (c *Codec) NotifyContext(ctx context.Context, method string, params any) er
 // uses the parent's lifetime and existing write-interrupt owner. Fully stopped
 // output still couples ordinary notifications through their existing budget;
 // history adds no gate lease across frames, acknowledgements or copier turns.
-func (c *Codec) writeRoutingFrame(frame []byte) error {
-	return c.Codec.WritePreencoded(nil, c.root, frame)
+func (c *Codec) writeRoutingFrame(parent context.Context, frame []byte) error {
+	return c.Codec.WritePreencoded(nil, parent, frame)
 }

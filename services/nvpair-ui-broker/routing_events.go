@@ -194,12 +194,15 @@ type brokerRoutingHistory struct {
 	ackGeneration                   string
 	// One source-scoped quarantine/refetch token. Reconciliation belongs to
 	// the producer's existing unacknowledged-window timer, not a broker Call.
-	refetchSource *proxyProcess
-	quarantined   bool
-	refusal       routingHistoryRefusal
-	refusalActive bool
-	initialBusy   atomic.Bool
-	wake          chan struct{}
+	refetchSource       *proxyProcess
+	quarantined         bool
+	refusal             routingHistoryRefusal
+	refusalActive       bool
+	initialBusy         atomic.Bool
+	initialWriters      sync.WaitGroup
+	started             bool
+	interruptLocalWrite func()
+	wake                chan struct{}
 	// Barrier before the short apply-time workersMu check, outside workersMu.
 	beforeApply func()
 	// Instance barrier after acquisition cancellation, before its callback joins.
@@ -319,7 +322,7 @@ func (b *Broker) bindRoutingHistoryActivation(source *proxyProcess) bool {
 	}
 	r := b.nodePolicyRuntime()
 	r.mu.Lock()
-	valid := r.incarnation == source && r.runID != "" && r.activeRevision != "" && r.activationErr == ""
+	valid := r.incarnation == source && r.runID != "" && r.activeRevision != "" && r.activeRevision == r.current.Revision && r.activationErr == ""
 	origin, run := b.nodeID, r.runID
 	r.mu.Unlock()
 	if !valid || nodepolicy.ValidateRoutingIdentity(origin, run) != nil {
@@ -752,8 +755,7 @@ func respondLocalHistoryError(codec *Codec, id *json.RawMessage, code int) {
 func (b *Broker) handleRoutingHistoryRequest(msg *Message) {
 	h := b.routingHistory
 	if h == nil {
-		// Current production construction uses an ordinary codec without the
-		// history guard. Its owned IDs retain ordinary response serialization.
+		// Explicit ordinary constructors retain ordinary ID serialization.
 		if err := b.codec.RespondError(msg.ID, -32601, "method not found"); err != nil {
 			slog.Debug("routing history control reply failed", "category", "history-write-failed", "count", 1)
 		}
@@ -794,7 +796,11 @@ func (b *Broker) handleRoutingHistoryRequest(msg *Message) {
 	// before returning to the read pump; never retain msg or its Params.
 	var id [jsonrpc.HistoryIDBytes]byte
 	n := copy(id[:], *msg.ID)
-	go h.writeInitial(b.codec, id, n)
+	h.initialWriters.Add(1)
+	go func(codec *Codec) {
+		defer h.initialWriters.Done()
+		h.writeInitial(codec, id, n)
+	}(b.codec)
 }
 
 var errRoutingHistoryInitialDeadline = errors.New("routing history initial acquisition deadline")
@@ -878,6 +884,13 @@ func (h *brokerRoutingHistory) writeInitial(codec *Codec, id [jsonrpc.HistoryIDB
 // Pending output is scalar state; each turn reselects the newest accepted bank. Slow
 // output cannot pin old accepted/staging banks or block lifecycle withdrawal.
 func (h *brokerRoutingHistory) run() {
+	h.mu.Lock()
+	if h.started {
+		h.mu.Unlock()
+		return
+	}
+	h.started = true
+	h.mu.Unlock()
 	timer := time.NewTimer(time.Hour)
 	if !timer.Stop() {
 		<-timer.C

@@ -202,7 +202,7 @@ func serve(opts *runOptions, stdout io.Writer) int {
 		return 1
 	}
 
-	svc := newService(config{
+	svc := newServiceWithHistory(config{
 		endpoint:               endpoint,
 		version:                Version,
 		serviceBuildID:         buildinfo.Current(),

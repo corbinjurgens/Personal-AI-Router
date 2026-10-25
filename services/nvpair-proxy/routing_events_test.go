@@ -202,12 +202,12 @@ func TestRoutingHistoryProjection(t *testing.T) {
 
 func TestRoutingHistoryCapacity(t *testing.T) {
 	p := newBoundProxy(NewCodec(&recordingWriter{}))
-	if p.routingHistory != nil {
-		t.Fatal("production construction allocated history")
+	if p.routingHistory == nil {
+		t.Fatal("production construction omitted its history owner")
 	}
 	h := p.newRoutingHistory()
 	if p.newRoutingHistory() != h || h.current.cells == h.frozen.cells || h.active || len(h.writeWake) != 0 {
-		t.Fatal("demand construction duplicated banks or activated output")
+		t.Fatal("construction duplicated banks or activated output before Run")
 	}
 	if routingHistoryBytes != 34152448 || unsafe.Sizeof(*h.current.cells) != 16777216 || unsafe.Sizeof(*h.frozen.cells) != 16777216 || unsafe.Sizeof(h.scratch) != 65536 || len(h.frames[0]) != 135168 || len(h.frames[1]) != 135168 || unsafe.Sizeof(h.guard) != 131072 || routingHistoryControlUsed > 131072 {
 		t.Fatal("C4 exact bank/control dimensions changed")
@@ -253,7 +253,7 @@ func TestRoutingHistoryCapacityControlCensus(t *testing.T) {
 	}
 	// Each dynamic owner referent must name its funded backing or its borrowed
 	// baseline owner. sizeof alone would miss an added string/map/slice/closure.
-	allowed := map[string]bool{"proxy": true, "current.cells": true, "frozen.cells": true, "wake": true, "writeWake": true}
+	allowed := map[string]bool{"proxy": true, "parent": true, "current.cells": true, "frozen.cells": true, "wake": true, "writeWake": true}
 	var check func(reflect.Type, string)
 	check = func(typ reflect.Type, path string) {
 		switch typ.Kind() {
@@ -268,12 +268,19 @@ func TestRoutingHistoryCapacityControlCensus(t *testing.T) {
 			}
 		case reflect.Array:
 			check(typ.Elem(), path)
-		case reflect.Pointer, reflect.Chan:
+		case reflect.Pointer, reflect.Chan, reflect.Interface:
 			if !allowed[path] {
 				t.Fatalf("uncensused owner referent: %s (%s)", path, typ)
 			}
 			delete(allowed, path)
-		case reflect.String, reflect.Slice, reflect.Map, reflect.Func, reflect.Interface, reflect.UnsafePointer:
+		case reflect.String:
+			if path != "correlation.pendingMethod" && path != "correlation.retiredMethod" {
+				t.Fatalf("uncensused string referent: %s", path)
+			}
+			if !reflect.ValueOf(h.correlation).FieldByName(strings.TrimPrefix(path, "correlation.")).IsZero() {
+				t.Fatal("notification-only correlation retained an outgoing method")
+			}
+		case reflect.Slice, reflect.Map, reflect.Func, reflect.UnsafePointer:
 			t.Fatalf("uncensused dynamic owner field: %s (%s)", path, typ)
 		}
 	}
@@ -333,6 +340,7 @@ func TestRoutingHistoryCapacityControlCensus(t *testing.T) {
 		{"shared fixed grammar stack and captures", routingHistoryGrammarBytes},
 		{"ack, generation referent and fixed error", routingHistoryAckControlBytes},
 		{"fixed diagnostic input and handoff", routingHistoryDiagnosticBytes},
+		{"guarded parent reader, semantic scratch and fixed refusal", routingHistoryIngressControlBytes},
 	}
 	var total uintptr
 	for _, row := range rows {

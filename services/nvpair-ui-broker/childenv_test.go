@@ -6,6 +6,8 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"io"
 	"log/slog"
 	"os"
 	"runtime"
@@ -13,6 +15,7 @@ import (
 	"strings"
 	"testing"
 
+	"nvpair-shared/jsonrpc"
 	"nvpair-shared/nodepolicy"
 	"nvpair-shared/secretenv"
 	"nvpair-shared/secretenv/secretenvtest"
@@ -173,6 +176,60 @@ func TestStartProxyFailsClosedOnEnvironmentError(t *testing.T) {
 	secretenvtest.AssertNoValue(t, "startProxy error", err.Error())
 }
 
+func TestStartProxyHistoryAttachesBeforePump(t *testing.T) {
+	report := prepareProviderSecrets(t)
+	b := &Broker{}
+	lifetime := newBrokerMainLifetime()
+	t.Cleanup(lifetime.cancel)
+	var err error
+	b.routingHistory, err = newBrokerRoutingHistory(b, lifetime)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pp, err := startProxyWithHistory(b.routingHistory, "proxy", testExecutable(t), "info", nil, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(pp.Stop)
+	secretenvtest.AssertRemoved(t, secretenvtest.Wait(t, report))
+	if !pp.peer.Codec().ReadRetirementEnabled() || b.routingHistory.readers.slots[historyProxyPrivate].codec != pp.peer.Codec() {
+		t.Fatal("child pump started without the sole private read owner")
+	}
+	pp.Stop()
+	historyAwaitReadSignal(t, pp.retireRoutingHistoryRead())
+	historyRequireReadDetached(t, pp.peer.Codec())
+}
+
+func TestStartProxyHistoryAttachmentFailurePreservesExistingReader(t *testing.T) {
+	prepareProviderSecrets(t)
+	b := &Broker{}
+	lifetime := newBrokerMainLifetime()
+	t.Cleanup(lifetime.cancel)
+	var err error
+	b.routingHistory, err = newBrokerRoutingHistory(b, lifetime)
+	if err != nil {
+		t.Fatal(err)
+	}
+	old, err := b.routingHistory.readers.acquire(historyProxyPrivate, readWriter{strings.NewReader(""), io.Discard}, func() {}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { old.RetireRead() })
+	pp, err := startProxyWithHistory(b.routingHistory, "proxy", testExecutable(t), "info", nil, nil, nil)
+	if pp != nil {
+		pp.Stop()
+		t.Fatal("failed guard attachment exposed an ordinary child")
+	}
+	if !errors.Is(err, jsonrpc.ErrHistoryBusy) || b.routingHistory.readers.slots[historyProxyPrivate].codec != old {
+		t.Fatalf("attachment failure = %v, or replaced the admitted reader", err)
+	}
+	// Return from the failed launch includes Wait of the just-started child.
+	// The failed launch neither retires nor reuses the existing role backing.
+	if b.routingHistory.readers.slots[historyProxyPrivate].control.Available() {
+		t.Fatal("failed child released another reader's role")
+	}
+}
+
 // fakeProxyReserved asks a running fake proxy which reserved names it received.
 func fakeProxyReserved(t *testing.T, pp *proxyProcess) []string {
 	t.Helper()
@@ -227,6 +284,13 @@ func TestProxyRestartsOnceForAChangedReferenceSet(t *testing.T) {
 				t.Setenv(fakeProxyEnv, fakeProxyAcceptsFacades)
 			}
 			b := sb.b
+			lifetime := newBrokerMainLifetime()
+			t.Cleanup(lifetime.cancel)
+			var err error
+			b.routingHistory, err = newBrokerRoutingHistory(b, lifetime)
+			if err != nil {
+				t.Fatal(err)
+			}
 			b.startProxySupervision(len(facades) > 0)
 			pp := b.proxyProcessHandle()
 			requireProxyRunning(t, pp, "the proxy starts")
@@ -247,6 +311,15 @@ func TestProxyRestartsOnceForAChangedReferenceSet(t *testing.T) {
 				}
 				next := b.proxyProcessHandle()
 				requireProxyRunning(t, next, what)
+				if !next.peer.Codec().ReadRetirementEnabled() {
+					t.Fatal("replacement bypassed private history attachment")
+				}
+				b.workersMu.Lock()
+				bound := b.historySourceLocked(next)
+				b.workersMu.Unlock()
+				if !bound {
+					t.Fatal("replacement with no inference requests did not bind from its policy acknowledgement")
+				}
 				if (next != pp) != restart {
 					t.Fatalf("%s: replaced the proxy = %t, want %t", what, next != pp, restart)
 				}

@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -16,6 +17,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"nvpair-shared/engines"
@@ -23,6 +25,329 @@ import (
 	"nvpair-shared/nodepolicy"
 	"nvpair-shared/noderec"
 )
+
+type historyRunTransport struct {
+	input  *io.PipeReader
+	output *historyBoundaryWriter
+}
+
+func (t *historyRunTransport) Read(p []byte) (int, error)  { return t.input.Read(p) }
+func (t *historyRunTransport) Write(p []byte) (int, error) { return t.output.Write(p) }
+func (t *historyRunTransport) Close() error {
+	_ = t.output.Close()
+	return t.input.Close()
+}
+
+func TestRoutingHistoryProductionRunReplaysEmptyWindowUntilAcknowledged(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		input, feed := io.Pipe()
+		output := newHistoryBoundaryWriter(0)
+		transport := &historyRunTransport{input: input, output: output}
+		root, cancel := context.WithCancel(context.Background())
+		fail, join := newTerminalSession(root, cancel, transport)
+		defer join()
+		defer feed.Close()
+		p := NewProxy(newOwnedCodec(root, transport, fail, notificationWriteBudget))
+		done := make(chan error, 1)
+		go func() { done <- p.Run(root) }()
+		policy := nodepolicy.Default()
+		policy.Revision = "1"
+		policy.Routing.Listener.Enabled = false
+		params, err := json.Marshal(nodepolicy.SetPolicyParams{OriginNodeID: "origin", Policy: policy})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := io.WriteString(feed, `{"jsonrpc":"2.0","id":1,"method":"node/set-policy","params":`+string(params)+"}\n"); err != nil {
+			t.Fatal(err)
+		}
+		synctest.Wait()
+		cycles := func() []Message {
+			t.Helper()
+			frames, _ := output.snapshot()
+			var history []Message
+			for _, msg := range historyDecodeFrames(t, frames) {
+				if msg.Method == nodepolicy.NotifyRoutingHistoryWindow || msg.Method == nodepolicy.NotifyRoutingHistoryWindowEnd {
+					history = append(history, msg)
+				}
+			}
+			return history
+		}
+		historyCheckCycle(t, cycles(), nil, "1")
+		frames, _ := output.snapshot()
+		var acknowledged bool
+		for _, msg := range historyDecodeFrames(t, frames) {
+			if msg.ID != nil && string(*msg.ID) == "1" {
+				var ack nodepolicy.PolicyAck
+				if msg.Error != nil {
+					t.Fatalf("policy rejected: %+v", msg.Error)
+				}
+				if err := json.Unmarshal(msg.Result, &ack); err != nil {
+					t.Fatal(err)
+				}
+				acknowledged = ack.OriginNodeID == "origin" && ack.RunID == p.runID && ack.Revision == "1"
+			}
+		}
+		if !acknowledged {
+			t.Fatal("entry read loop did not acknowledge the exact policy binding")
+		}
+		source := p.routingFactSource()
+		if source == nil || string(source.process.origin[:source.process.originLen]) != "origin" || string(source.process.run[:source.process.runLen]) != p.runID {
+			t.Fatal("valid policy did not initialize the empty process source")
+		}
+		// Both a pre-bind drop and a lost accepted reply leave this same window
+		// unacknowledged. The sole production timer replays its generation.
+		time.Sleep(routingHistoryReconcile)
+		synctest.Wait()
+		messages := cycles()
+		if len(messages) != 4 {
+			t.Fatalf("unacknowledged empty window frames = %d, want 4", len(messages))
+		}
+		historyCheckCycle(t, messages[2:], nil, "1")
+		if _, err := io.WriteString(feed, "{\"jsonrpc\":\"2.0\",\"method\":\"routing/history-accepted\",\"params\":{\"schema\":1,\"generation\":\"1\"}}\n"); err != nil {
+			t.Fatal(err)
+		}
+		synctest.Wait()
+		if _, err := io.WriteString(feed, `{"jsonrpc":"2.0","id":2,"method":"node/set-policy","params":`+string(params)+"}\n"); err != nil {
+			t.Fatal(err)
+		}
+		synctest.Wait()
+		time.Sleep(2 * routingHistoryReconcile)
+		synctest.Wait()
+		if len(cycles()) != 4 || p.routingFactSource() != source {
+			t.Fatal("accepted empty source replayed or was replaced")
+		}
+		if err := feed.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if err := <-done; err != nil {
+			t.Fatal(err)
+		}
+		p.routingHistory.mu.Lock()
+		active := p.routingHistory.active
+		p.routingHistory.mu.Unlock()
+		if active {
+			t.Fatal("Run returned before its history writer completed")
+		}
+		if err := p.codec.Notify("ordinary-after-run", struct{}{}); err != nil || root.Err() != nil {
+			t.Fatalf("history shutdown changed the ordinary terminal-session lifetime: %v / %v", err, root.Err())
+		}
+	})
+}
+
+func TestRoutingHistoryAcknowledgementDispatch(t *testing.T) {
+	test := func(name, method, params string, request bool, want bool) {
+		t.Run(name, func(t *testing.T) {
+			p := newBoundProxy(NewCodec(&recordingWriter{}))
+			nativeRegistered(t, p, time.UnixMilli(1000))
+			h := p.newRoutingHistory()
+			historyTestScan(t, h)
+			historyTestCycle(t, h)
+			msg := &Message{JSONRPC: "2.0", Method: method, Params: json.RawMessage(params)}
+			if request {
+				id := json.RawMessage("7")
+				msg.ID = &id
+			}
+			p.handleMessage(msg)
+			if h.acknowledged != want {
+				t.Fatalf("acknowledged = %v, want %v", h.acknowledged, want)
+			}
+		})
+	}
+	test("exact parent notification", nodepolicy.NotifyRoutingHistoryAccepted, `{"schema":1,"generation":"1"}`, false, true)
+	test("old generation", nodepolicy.NotifyRoutingHistoryAccepted, `{"schema":1,"generation":"2"}`, false, false)
+	test("addressed alias", engines.AddressMethod("ollama", nodepolicy.NotifyRoutingHistoryAccepted), `{"schema":1,"generation":"1"}`, false, false)
+	test("request is not an acknowledgement", nodepolicy.NotifyRoutingHistoryAccepted, `{"schema":1,"generation":"1"}`, true, false)
+	test("duplicate field", nodepolicy.NotifyRoutingHistoryAccepted, `{"schema":1,"generation":"2","generation":"1"}`, false, false)
+	test("missing schema", nodepolicy.NotifyRoutingHistoryAccepted, `{"generation":"1"}`, false, false)
+}
+
+func TestRoutingHistoryParentIngressRawGuard(t *testing.T) {
+	test := func(name, raw string, accepted bool, refusalID string, refusalCode int) {
+		t.Run(name, func(t *testing.T) {
+			logs := &bytes.Buffer{}
+			previous := slog.Default()
+			slog.SetDefault(slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug})))
+			defer slog.SetDefault(previous)
+			out := &recordingWriter{}
+			// The ordinary response is a synchronous barrier after the guarded
+			// frame. No direct dispatch or last-wins JSON parsing precedes it.
+			ordinary := `{"jsonrpc":"2.0","id":"ordinary","method":"node/set-priority","params":{"generation":1,"nodes":[],"ranks":[]}}`
+			rw := struct {
+				io.Reader
+				io.Writer
+			}{strings.NewReader(raw + "\n" + ordinary + "\n"), out}
+			p := newBoundProxy(NewCodec(rw))
+			nativeRegistered(t, p, time.UnixMilli(1000))
+			h := p.newRoutingHistory()
+			historyTestScan(t, h)
+			historyTestCycle(t, h)
+			before := len(out.lines())
+			if err := p.readLoop(t.Context()); err != nil {
+				t.Fatal(err)
+			}
+			if h.acknowledged != accepted {
+				t.Fatalf("acknowledged = %v, want %v", h.acknowledged, accepted)
+			}
+			messages := historyDecodeFrames(t, out.lines()[before:])
+			want := 1
+			if refusalID != "" {
+				want++
+			}
+			if len(messages) != want {
+				t.Fatalf("control/ordinary replies = %d, want %d", len(messages), want)
+			}
+			if refusalID != "" {
+				reply := messages[0]
+				id := "null"
+				if reply.ID != nil {
+					id = string(*reply.ID)
+				}
+				if id != refusalID || reply.Error == nil || reply.Error.Code != refusalCode || reply.Error.Data != nil {
+					t.Fatalf("private refusal = %+v / ID %s", reply, id)
+				}
+			}
+			reply := messages[len(messages)-1]
+			var result struct {
+				Count *int `json:"count"`
+			}
+			if reply.ID == nil || string(*reply.ID) != `"ordinary"` || reply.Error != nil {
+				t.Fatalf("ordinary RPC did not survive: %+v", reply)
+			}
+			if err := json.Unmarshal(reply.Result, &result); err != nil || result.Count == nil || *result.Count != 0 {
+				t.Fatalf("ordinary result = %+v / %v", result, err)
+			}
+			if strings.Contains(logs.String(), "private-raw-sentinel") {
+				t.Fatal("raw history input reached diagnostics")
+			}
+		})
+	}
+	test("duplicate method before history", `{"jsonrpc":"2.0","method":"private-raw-sentinel","method":"routing/history-accepted","params":{"schema":1,"generation":"1"}}`, false, "", 0)
+	test("duplicate method after history", `{"jsonrpc":"2.0","method":"routing/history-accepted","method":"private-raw-sentinel","params":{"schema":1,"generation":"1"}}`, false, "", 0)
+	test("escaped duplicate method", `{"jsonrpc":"2.0","method":"private-raw-sentinel","\u006dethod":"routing/history-accepted","params":{"schema":1,"generation":"1"}}`, false, "", 0)
+	test("duplicate params", `{"jsonrpc":"2.0","method":"routing/history-accepted","params":{"private-raw-sentinel":true},"params":{"schema":1,"generation":"1"}}`, false, "", 0)
+	test("duplicate unknown subtree", `{"jsonrpc":"2.0","method":"routing/history-accepted","params":{"schema":1,"generation":"1"},"unknown":{"private-raw-sentinel":1,"private-raw-sentinel":2}}`, false, "", 0)
+	test("invalid ACK then valid same-generation ACK", `{"jsonrpc":"2.0","method":"private-raw-sentinel","method":"routing/history-accepted","params":{"schema":1,"generation":"1"}}`+"\n"+
+		`{"jsonrpc":"2.0","method":"routing/history-accepted","params":{"schema":1,"generation":"1"}}`, true, "", 0)
+	test("escaped acknowledgement", `{"jsonrpc":"2.0","\u006dethod":"routing/history-\u0061ccepted","params":{"schema":1,"generation":"1"}}`, true, "", 0)
+	test("known acknowledgement strips unknown fields", `{"jsonrpc":"2.0","method":"routing/history-accepted","params":{"schema":1,"generation":"1","unknown":"private-raw-sentinel"}}`, true, "", 0)
+	test("null acknowledgement params", `{"jsonrpc":"2.0","method":"routing/history-accepted","params":null}`, false, "", 0)
+	test("wrong acknowledgement schema", `{"jsonrpc":"2.0","method":"routing/history-accepted","params":{"schema":2,"generation":"1"}}`, false, "", 0)
+	test("old generation", `{"jsonrpc":"2.0","method":"routing/history-accepted","params":{"schema":1,"generation":"2"}}`, false, "", 0)
+	test("explicit null ID is not an ACK", `{"jsonrpc":"2.0","id":null,"method":"routing/history-accepted","params":{"schema":1,"generation":"1"}}`, false, "", 0)
+	test("overlong private request ID", `{"jsonrpc":"2.0","id":"`+strings.Repeat("x", jsonrpc.HistoryIDBytes)+`","method":"routing/history-accepted","params":{"schema":1,"generation":"1"}}`, false, "null", jsonrpc.HistoryInvalidCode)
+	test("private request", `{"jsonrpc":"2.0","id":"private\u0031","method":"routing/history-accepted","params":{"schema":1,"generation":"1"}}`, false, `"private\u0031"`, -32601)
+	test("public history request has no proxy owner", `{"jsonrpc":"2.0","id":"public","method":"routing:subscribe","params":{}}`, false, `"public"`, -32601)
+	test("wrong notification direction", `{"jsonrpc":"2.0","method":"routing/history-window-end","params":{"schema":1,"generation":"1"}}`, false, "", 0)
+}
+
+func TestRoutingHistoryParentIngressRetainsOrdinaryCapacity(t *testing.T) {
+	blob := strings.Repeat("x", jsonrpc.HistoryRecordFrameBytes+1)
+	raw := `{"jsonrpc":"2.0","id":1,"method":"ordinary","params":{"blob":"` + blob + `"}}` + "\n"
+	rw := struct {
+		io.Reader
+		io.Writer
+	}{strings.NewReader(raw), io.Discard}
+	p := NewProxy(NewCodec(rw))
+	if cap(p.codec.raw) != 1<<20 || p.codec.transport != nil || !reflect.ValueOf(p.codec.Codec).Elem().FieldByName("scanner").IsNil() {
+		t.Fatal("history construction retained an old scanner or replaced ordinary capacity with P")
+	}
+	msg, err := p.codec.Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var params struct {
+		Blob string `json:"blob"`
+	}
+	if err := json.Unmarshal(msg.Params, &params); err != nil || params.Blob != blob || msg.Method != "ordinary" {
+		t.Fatalf("ordinary frame between P and 1MiB changed: %v", err)
+	}
+}
+
+func TestRoutingHistoryParentIngressKeepsOrdinaryLimit(t *testing.T) {
+	raw := `{"jsonrpc":"2.0","method":"ordinary","params":{"blob":"` + strings.Repeat("x", 1<<20) + `"}}` + "\n" +
+		`{"jsonrpc":"2.0","method":"next-ordinary","params":{}}` + "\n"
+	rw := struct {
+		io.Reader
+		io.Writer
+	}{strings.NewReader(raw), io.Discard}
+	p := NewProxy(NewCodec(rw))
+	msg, err := p.codec.Read()
+	var failure *jsonrpc.HistoryFailure
+	if msg != nil || !errors.As(err, &failure) {
+		t.Fatalf("over-cap ordinary input escaped its raw allowance: %v / %v", msg, err)
+	}
+	msg, err = p.codec.Read()
+	if err != nil || msg == nil || msg.Method != "next-ordinary" {
+		t.Fatalf("next ordinary frame did not survive bounded discard: %v / %v", msg, err)
+	}
+	if cap(p.codec.raw) != 1<<20 {
+		t.Fatal("ordinary raw input grew after overflow")
+	}
+}
+
+func TestRoutingHistoryProductionRunJoinsBlockedWriter(t *testing.T) {
+	test := func(name string, eof bool) {
+		t.Run(name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				input, feed := io.Pipe()
+				defer feed.Close()
+				output := newHistoryBoundaryWriter(0)
+				output.holdAfterClose = true
+				defer output.unblock()
+				root, cancel := context.WithCancel(context.Background())
+				fail, join := newTerminalSession(root, cancel, &historyRunTransport{input: input, output: output})
+				defer join()
+				p := NewProxy(newOwnedCodec(root, &historyRunTransport{input: input, output: output}, fail, notificationWriteBudget))
+				policy := nodepolicy.Default()
+				policy.Revision = "1"
+				policy.Routing.Listener.Enabled = false
+				params, err := json.Marshal(nodepolicy.SetPolicyParams{OriginNodeID: "origin", Policy: policy})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err := p.applySetPolicy(params); err != nil {
+					t.Fatal(err)
+				}
+				output.block = output.attempt + 1
+				done := make(chan error, 1)
+				go func() { done <- p.Run(root) }()
+				<-output.entered
+				_, pinned := output.snapshot()
+				if eof {
+					if err := feed.Close(); err != nil {
+						t.Fatal(err)
+					}
+				} else {
+					cancel()
+				}
+				select {
+				case <-output.closed:
+				case <-time.After(time.Second):
+					t.Fatal("process shutdown did not interrupt the actual Write")
+				}
+				synctest.Wait()
+				select {
+				case err := <-done:
+					t.Fatalf("Run returned while its actual Write still borrowed frame storage: %v", err)
+				default:
+				}
+				_, after := output.snapshot()
+				if len(pinned) == 0 || !bytes.Equal(pinned, after) {
+					t.Fatal("cancellation reused the active frame")
+				}
+				if root.Err() == nil {
+					t.Fatal("active write interruption bypassed the existing terminal-session owner")
+				}
+				output.unblock()
+				if err := <-done; err != nil {
+					t.Fatal(err)
+				}
+			})
+		})
+	}
+	test("parent cancellation", false)
+	test("input EOF with a healthy parent root", true)
+}
 
 // Unlike the ordinary notification fixture, exactly one frame blocks. Its
 // borrowed slice is intentionally not copied until the actual Write returns.
@@ -504,11 +829,11 @@ func TestRoutingHistoryBetweenFramesAllowsInference(t *testing.T) {
 func TestParentNotificationHistoryGateDoesNotWaitOrFailParent(t *testing.T) {
 	w := newHistoryBoundaryWriter(1)
 	root, _, codec := historyOwnedCodec(t, w)
+	p := newBoundProxy(codec) // Complete production codec construction before any IO.
 	id := json.RawMessage(`1`)
 	ordinary := make(chan error, 1)
 	go func() { ordinary <- codec.Respond(&id, struct{}{}) }()
 	lifetimeReceive(t, w.entered)
-	p := newBoundProxy(codec)
 	nativeRegistered(t, p, time.UnixMilli(1000))
 	h := p.newRoutingHistory()
 	historyTestScan(t, h)
@@ -579,7 +904,7 @@ func TestParentNotificationHistoryActiveWriteUsesParentLifetime(t *testing.T) {
 	root, _, codec := historyOwnedCodec(t, w)
 	done := make(chan error, 1)
 	frame := []byte("{\"jsonrpc\":\"2.0\",\"method\":\"routing/history-window-end\",\"params\":{\"schema\":1,\"generation\":\"1\"}}\n")
-	go func() { done <- codec.writeRoutingFrame(frame) }()
+	go func() { done <- codec.writeRoutingFrame(root, frame) }()
 	lifetimeReceive(t, w.entered)
 	// The standard parent owns exactly the single J Write registration while
 	// this borrower is blocked. No timer/callback is minted per record/key.
@@ -657,7 +982,7 @@ func TestParentNotificationHistoryBrokenPipeUsesExistingFailureOwner(t *testing.
 	if err := w.Close(); err != nil {
 		t.Fatal(err)
 	}
-	err := codec.writeRoutingFrame([]byte("{}\n"))
+	err := codec.writeRoutingFrame(root, []byte("{}\n"))
 	if err == nil || root.Err() == nil || (!errors.Is(err, io.ErrClosedPipe) && !errors.Is(err, context.Canceled)) {
 		t.Fatalf("broken pipe bypassed existing parent owner: err=%v parent=%v", err, root.Err())
 	}

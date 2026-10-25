@@ -4,9 +4,11 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"log/slog"
 	"strconv"
 	"sync"
@@ -65,10 +67,12 @@ func (w *routingProjectionWindow) sort() {
 type proxyRoutingHistory struct {
 	mu                   sync.Mutex
 	proxy                *Proxy
+	parent               context.Context // Borrowed process lifetime; no history-private context.
 	current, frozen      routingProjectionWindow
 	scratch              routingProjectionCell
 	frames               [2][jsonrpc.HistoryRecordFrameBytes]byte
 	guard                [jsonrpc.HistoryRecordBytes / 4]uint32
+	correlation          jsonrpc.HistoryCorrelation // No outgoing history calls or waiter IDs.
 	process              routingProcessDescriptor
 	generation           nodepolicy.RoutingHistoryGeneration
 	generationText       [39]byte
@@ -82,8 +86,8 @@ type proxyRoutingHistory struct {
 // C census for the application-owned representation. The owner row includes
 // both window indexes, process copy, generation text, all flags/mutexes and
 // channel/pointer headers. The source directory includes its ONE scan bank.
-// The two frames and guard are admitted for the later private receiver;
-// construction does not start that receiver or any worker.
+// The two frames and guard also fund acknowledgement parameter projection;
+// construction does not start the parent read loop or any worker.
 //
 // Additional conservative runtime estimates come from the inspected Go 1.25
 // src/runtime/{chan,time,runtime2}.go
@@ -109,13 +113,13 @@ const (
 	routingHistoryChildMapBytes       = 48 + 136
 
 	routingHistoryOwnerControlBytes = unsafe.Sizeof(proxyRoutingHistory{}) - routingHistoryCellBytes - 2*jsonrpc.HistoryRecordFrameBytes - jsonrpc.HistoryRecordBytes +
-		unsafe.Sizeof(sync.Mutex{}) + unsafe.Sizeof((*proxyRoutingHistory)(nil)) // Proxy's demand-constructor fields.
+		unsafe.Sizeof(sync.Mutex{}) + unsafe.Sizeof((*proxyRoutingHistory)(nil)) // Proxy's constructor fields.
 	routingHistoryNativeControlBytes = unsafe.Sizeof(routingSourceDirectory{}) + unsafe.Sizeof(routingProcessDescriptor{}) + unsafe.Sizeof(routingFactsClock)
 	routingHistoryDescriptorOverlap  = 32*800 + 528 + 288 // One current native read, no second pointer/copy bank.
-	// Empty struct channel elements have zero backing: wake, writeWake, run's
-	// writer-join, shared active-Write callback-join; plus conservatively the
+	// Empty struct channel elements have zero backing: wake, writeWake, Run's
+	// copier-join, run's writer-join, shared active-Write callback-join; plus the
 	// lazy parent Done and AfterFunc child's Done (normally shared closedchan).
-	routingHistoryRoleChannelBytes = (2 + 1 + 1 + 1 + 1) * routingHistoryChannelControlBytes
+	routingHistoryRoleChannelBytes = (2 + 1 + 1 + 1 + 1 + 1) * routingHistoryChannelControlBytes
 	// One reused timeTimer, its physical capacity-one Time channel, and two
 	// timerWhen entries conservatively covering old/new heap bookkeeping.
 	routingHistoryTimerControlBytes = routingHistoryTimerObjectBytes + routingHistoryChannelControlBytes + unsafe.Sizeof(time.Time{}) + 2*(8+8)
@@ -142,14 +146,23 @@ const (
 	// One uint128 conversion: digits, returned string backing and header.
 	// The retained 39B generationText is already in the owner row.
 	routingHistoryGenerationBytes = 39 + 39 + unsafe.Sizeof("")
-	// One bounded encoder, one decimal scratch/conversion, and the frame
-	// slice headers across writeFrame -> writeRoutingFrame -> WritePreencoded.
+	// One bounded encoder, one decimal scratch/conversion and frame headers
+	// across writeFrame -> writeRoutingFrame -> WritePreencoded.
 	routingHistoryEncoderBytes = unsafe.Sizeof(routingHistoryJSON{}) + 20 + 20 + unsafe.Sizeof("") + 3*unsafe.Sizeof([]byte{})
+	// The raw input backing replaces the baseline ordinary 1MiB allowance.
+	// Count every added reader/header/reference here, including its 256-byte
+	// fragment buffer. Correlation is inline in the owner row above; its IDs
+	// and method referents stay empty because this direction originates no calls.
+	routingHistoryIngressControlBytes = unsafe.Sizeof(jsonrpc.HistoryReader{}) + unsafe.Sizeof(bufio.Reader{}) + 256 +
+		unsafe.Sizeof(io.ReadWriter(nil)) + unsafe.Sizeof((func())(nil)) + unsafe.Sizeof([]byte{}) +
+		routingHistoryGrammarBytes + 25600 + 2048 + // Raw guard and accepted bounded semantic/cursor scratch, including wrong-direction records.
+		unsafe.Sizeof(jsonrpc.HistoryFailure{}) + unsafe.Sizeof(jsonrpc.HistoryRequestRefusal{}) +
+		2*unsafe.Sizeof(jsonrpc.Message{}) + jsonrpc.HistoryIDBytes + 128 // One synchronous refusal frame, no queue.
 	// Shared WritePreencoded's nonrecursive grammar validator has a fixed
 	// 10001B state stack, two (raw slice + index pointer + code) closures and
 	// its depth/index words. It does not use encoding/json's growing pool.
 	routingHistoryGrammarBytes = 10001 + 2*(24+8+8) + 2*8
-	// One future receiver's bounded ack, its generation referent and one
+	// The receiver's bounded ack, its generation referent and one
 	// fixed error value. No raw input, decoder text or per-ack retained graph.
 	routingHistoryAckControlBytes = unsafe.Sizeof(nodepolicy.RoutingHistoryAccepted{}) + 39 + unsafe.Sizeof(nodepolicy.RoutingHistoryDiagnostic{})
 	// One synchronous fixed category/count diagnostic. LogAttrs uses Record's
@@ -161,7 +174,7 @@ const (
 	routingHistoryControlUsed = routingHistoryOwnerControlBytes + routingHistoryNativeControlBytes + routingHistoryDescriptorOverlap +
 		routingHistoryRoleChannelBytes + routingHistoryTimerControlBytes + routingHistoryCallbackBytes + routingHistoryWaitControlBytes +
 		routingHistoryWorkerCaptureBytes + routingHistoryWriteCaptureBytes + routingHistoryCycleStepBytes + routingHistoryGenerationBytes + routingHistoryEncoderBytes +
-		routingHistoryGrammarBytes + routingHistoryAckControlBytes + routingHistoryDiagnosticBytes
+		routingHistoryGrammarBytes + routingHistoryAckControlBytes + routingHistoryDiagnosticBytes + routingHistoryIngressControlBytes
 )
 
 var (
@@ -173,6 +186,7 @@ var (
 func newProxyRoutingHistory(p *Proxy) *proxyRoutingHistory {
 	return &proxyRoutingHistory{
 		proxy:   p,
+		parent:  p.codec.root,
 		current: routingProjectionWindow{cells: new([256]routingProjectionCell)},
 		frozen:  routingProjectionWindow{cells: new([256]routingProjectionCell)},
 		wake:    make(chan struct{}, 1), writeWake: make(chan struct{}, 1),
@@ -186,8 +200,7 @@ func routingHistoryWake(ch chan struct{}) {
 	}
 }
 
-// run is deliberately not called by production startup. The eventual owner
-// calls it once on the parent lifetime. There is one timer and one writer,
+// Run calls this once on the parent lifetime. There is one timer and one writer,
 // including during ack loss, source churn and arbitrarily long active writes.
 func (h *proxyRoutingHistory) run() {
 	h.mu.Lock()
@@ -202,7 +215,7 @@ func (h *proxyRoutingHistory) run() {
 		defer close(done)
 		for {
 			select {
-			case <-h.proxy.codec.root.Done():
+			case <-h.parent.Done():
 				return
 			case <-h.writeWake:
 				h.writeCycle()
@@ -214,7 +227,7 @@ func (h *proxyRoutingHistory) run() {
 	h.reconcile(false)
 	for {
 		select {
-		case <-h.proxy.codec.root.Done():
+		case <-h.parent.Done():
 			<-done // An active borrower, including its interrupt callback, must join.
 			return
 		case <-h.wake:
@@ -347,8 +360,24 @@ func (h *proxyRoutingHistory) reconcile(retry bool) bool {
 	return true
 }
 
-// The future private receiver passes an already validated, source-bound ack.
-// This entry point is constructible/testable but is not registered in Serve.
+// The sole parent read loop owns frames[1] and guard. Project before decoding,
+// using the already admitted receiver backing rather than another DTO/guard.
+func (h *proxyRoutingHistory) acceptNotification(raw []byte) {
+	schema, ok := nodepolicy.RoutingHistoryTransportSchema(nodepolicy.NotifyRoutingHistoryAccepted, false)
+	if !ok {
+		return
+	}
+	clean, _, err := jsonrpc.ProjectHistory(raw, h.frames[1][:0], h.guard[:], schema)
+	if err != nil {
+		return
+	}
+	var ack nodepolicy.RoutingHistoryAccepted
+	if jsonrpc.MaterializeHistory(clean, &ack, schema.Integer) == nil {
+		h.accepted(ack)
+	}
+}
+
+// Only the exact parent notification dispatcher supplies acknowledgements.
 func (h *proxyRoutingHistory) accepted(ack nodepolicy.RoutingHistoryAccepted) bool {
 	if ack.Validate() != nil {
 		return false
@@ -428,7 +457,7 @@ func (h *proxyRoutingHistory) writeFrame(method string, slot int) error {
 	if w.err != nil {
 		return w.err
 	}
-	return h.proxy.codec.writeRoutingFrame(w.data)
+	return h.proxy.codec.writeRoutingFrame(h.parent, w.data)
 }
 
 // Fixed-capacity JSON output never calls encoding/json or allocates a DTO.

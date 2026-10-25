@@ -164,7 +164,7 @@ type Broker struct {
 	portAvailableCheck func(int) bool
 	// routingForward bounds routing control forwarding to one operation.
 	routingForward atomic.Bool
-	// Constructed only at the Task318 integration owner. History data and its
+	// Constructed by main before the local codec. History data and its
 	// writer are independent of discovery/workload subscriptions.
 	routingHistory *brokerRoutingHistory
 	// All source identity/fence fields below are guarded by workersMu. No
@@ -1740,6 +1740,34 @@ func (b *Broker) serve(ctx context.Context, lifetime *brokerMainLifetime) error 
 	b.cancel = cancel
 	b.setServeCtx(ctx)
 	defer cancel()
+	if h := b.routingHistory; h != nil {
+		// Required local replies use background write contexts and can hold the
+		// dispatcher inside RespondHistoryError. Interrupt output independently
+		// of Serve returning. Main's startServe cancel wrapper cancels history
+		// before Serve, so both root cancellation and b.cancel reach this hook
+		// without registering J work on the ordinary Serve/RPC child graph.
+		interrupt := h.interruptLocalWrite
+		interrupted := make(chan struct{})
+		stopInterrupt := context.AfterFunc(h.parent, func() {
+			if interrupt != nil {
+				interrupt()
+			}
+			close(interrupted) // final application access of this callback
+		})
+		done := make(chan struct{})
+		go func() { defer close(done); h.run() }()
+		defer func() {
+			h.lifetime.historyCancel()
+			if !stopInterrupt() {
+				<-interrupted
+			} else if interrupt != nil {
+				interrupt()
+			}
+			<-h.readers.retire(historyLocalControl, b.codec)
+			<-done
+			h.initialWriters.Wait()
+		}()
+	}
 	stopPerformance := b.startPerformance(ctx)
 	defer stopPerformance()
 

@@ -137,6 +137,12 @@ func (p *proxyProcess) ReadyParams(engine string) json.RawMessage {
 // non-blocking sink (see stderrsink.go), so a stalled reader cannot block the
 // proxy's exit.
 func startProxy(name, binaryPath, logLevel string, refs []nodepolicy.CredentialRef, relayDir *relay.Directory, onNotify func(*proxyProcess, string, json.RawMessage), extraArgs ...string) (*proxyProcess, error) {
+	return startProxyWithHistory(nil, name, binaryPath, logLevel, refs, relayDir, onNotify, extraArgs...)
+}
+
+// A nil history owner is the explicit ordinary constructor. Main always passes
+// its owner; failure to attach that guard never selects an ordinary codec.
+func startProxyWithHistory(history *brokerRoutingHistory, name, binaryPath, logLevel string, refs []nodepolicy.CredentialRef, relayDir *relay.Directory, onNotify func(*proxyProcess, string, json.RawMessage), extraArgs ...string) (*proxyProcess, error) {
 	env, err := proxyEnv(os.Environ(), refs)
 	if err != nil {
 		return nil, err
@@ -175,7 +181,18 @@ func startProxy(name, binaryPath, logLevel string, refs []nodepolicy.CredentialR
 	if onNotify != nil {
 		pp.onNotify = func(method string, params json.RawMessage) { onNotify(pp, method, params) }
 	}
-	pp.attachPeer(readWriter{stdout, stdin})
+	if history == nil {
+		pp.attachPeer(readWriter{stdout, stdin})
+	} else if err := pp.attachRoutingHistoryProxyPipe(history.b, stdout); err != nil {
+		// No read pump or Wait goroutine owns this child yet. Close both pipes,
+		// stop and reap this exact process before returning the launch failure.
+		_ = stdin.Close()
+		_ = stdout.Close()
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		pp.retireRoutingHistoryRead()
+		return nil, fmt.Errorf("attach proxy routing history: %w", err)
+	}
 
 	go pp.servePeer()
 	go func() {
