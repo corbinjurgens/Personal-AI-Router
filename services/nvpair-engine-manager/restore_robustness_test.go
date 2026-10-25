@@ -453,7 +453,7 @@ func TestRestoreRejectsIdentifiedReplacementAfterSuccessfulReclaim(t *testing.T)
 		foreignPID = foreign.Process.Pid
 	}
 	err := ex.restoreEnabled(context.Background(), "fake")
-	if err == nil || !strings.Contains(err.Error(), "another process already owns the server port") {
+	if err == nil || err.Error() != "cannot start owned engine: another process already owns the server port" {
 		t.Fatalf("restore with post-reclaim replacement = %v", err)
 	}
 	st, err := ex.state("fake")

@@ -12,6 +12,10 @@ import (
 	"testing"
 )
 
+// procImage matches the Unix inspection helper for test-child cleanup after
+// the child releases its listening port.
+func procImage(pid int) string { return imagePathForPID(pid) }
+
 func TestListProcessNamesIncludesSelf(t *testing.T) {
 	executable, err := os.Executable()
 	if err != nil {

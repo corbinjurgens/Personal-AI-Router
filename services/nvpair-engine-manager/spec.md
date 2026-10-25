@@ -624,6 +624,8 @@ extensibility story for an open-source product.
   lock. A control CLI may detach a daemon before it returns, so cleanup must
   also run when that CLI fails or is cancelled.
 - Bound process-mode stops: on Unix send SIGTERM to the owned process group, then SIGKILL after `runtime.stop.grace_s` (five seconds by default); `signal:"kill"` skips the grace. On Windows, windowless managed engines require immediate `taskkill /T /F`.
+  Unix stop and orphan-reclaim signals target the group only when the PID is
+  its group leader (`pgid == pid`); otherwise they target the PID alone.
 - Reclaim an adopted managed orphan only after authoritative executable-image
   inspection: Linux `/proc/<pid>/exe`, macOS kernel `proc_pidpath` with a
   fixed-size buffer, or the Windows process-image API. Refuse unavailable,

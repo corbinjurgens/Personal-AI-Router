@@ -171,10 +171,6 @@ func imagePathForPID(pid int) string {
 	return windows.UTF16ToString(buf[:size])
 }
 
-// procImage matches the Unix inspection helper. A known owned test child can
-// still be identified for cleanup after it releases its listening port.
-func procImage(pid int) string { return imagePathForPID(pid) }
-
 // signalPID stops the PID's process tree with taskkill /T /F, matching
 // gracefulSignal. Keep the force argument for the shared platform interface.
 func signalPID(pid int, force bool) error {

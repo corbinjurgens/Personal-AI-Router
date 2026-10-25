@@ -393,6 +393,10 @@ startup cleanup uses the same policy. On Windows, the windowless engines we
 spawn cannot receive a graceful (non-`/F`) close, so stopping uses immediate
 `taskkill /T /F`.
 
+Unix signals target the whole process group only when the target PID is its
+group leader; a nonleader is signalled alone. This also applies to orphan
+reclaim, so a shared group retains its unrelated processes.
+
 For command-mode engines, any attempted start command may have launched a
 detached daemon before returning. If startup fails or is cancelled, including
 during shutdown, cleanup runs the manifest's bounded stop command and confirms
