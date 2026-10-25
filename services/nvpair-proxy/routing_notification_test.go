@@ -48,6 +48,7 @@ func TestRoutingHistoryProductionRunReplaysEmptyWindowUntilAcknowledged(t *testi
 		defer join()
 		defer feed.Close()
 		p := NewProxy(newOwnedCodec(root, transport, fail, notificationWriteBudget))
+		p.watchLocalAddrs = func(context.Context) {} // Real socket reads are not durably blocked in synctest.
 		done := make(chan error, 1)
 		go func() { done <- p.Run(root) }()
 		policy := nodepolicy.Default()
@@ -298,6 +299,7 @@ func TestRoutingHistoryProductionRunJoinsBlockedWriter(t *testing.T) {
 				fail, join := newTerminalSession(root, cancel, &historyRunTransport{input: input, output: output})
 				defer join()
 				p := NewProxy(newOwnedCodec(root, &historyRunTransport{input: input, output: output}, fail, notificationWriteBudget))
+				p.watchLocalAddrs = func(context.Context) {} // Real socket reads are not durably blocked in synctest.
 				policy := nodepolicy.Default()
 				policy.Revision = "1"
 				policy.Routing.Listener.Enabled = false

@@ -293,6 +293,10 @@ type Proxy struct {
 	codec  *Codec
 	cancel context.CancelFunc
 
+	// watchLocalAddrs starts the host network monitor. Tests using synctest
+	// replace it before Run to keep real routing-socket reads out of the bubble.
+	watchLocalAddrs func(context.Context)
+
 	// maxRequestBytes caps a buffered request body (see requestBodyLimit). Set
 	// from --max-request-bytes before serving; read-only afterwards.
 	maxRequestBytes int64
@@ -387,12 +391,13 @@ func (p *Proxy) newRoutingHistory() *proxyRoutingHistory {
 func NewProxy(codec *Codec) *Proxy {
 	epoch := time.Now()
 	p := &Proxy{
-		codec:       codec,
-		runID:       newRunID(),
-		activity:    nodeactivity.NewReporter(activityReportInterval),
-		accounts:    newAccountLedger(),
-		egress:      newEgressLease(func() time.Duration { return time.Since(epoch) }),
-		performance: performanceQueue{wake: make(chan struct{}, 1)},
+		watchLocalAddrs: startLocalAddrWatch,
+		codec:           codec,
+		runID:           newRunID(),
+		activity:        nodeactivity.NewReporter(activityReportInterval),
+		accounts:        newAccountLedger(),
+		egress:          newEgressLease(func() time.Duration { return time.Since(epoch) }),
+		performance:     performanceQueue{wake: make(chan struct{}, 1)},
 	}
 	p.routing = &routingListener{host: p}
 	p.newRoutingHistory()
@@ -495,7 +500,7 @@ func (p *Proxy) Run(ctx context.Context) error {
 	// Keep the "is this address local?" set fresh as interfaces come and go,
 	// so the loopback rewrite in nodeURL stays correct after VPN/dock changes
 	// or a sleep/wake IP reassignment.
-	startLocalAddrWatch(ctx)
+	p.watchLocalAddrs(ctx)
 
 	// No facade is brought up here: the process serves the JSON-RPC channel
 	// first and binds only when the broker enables an engine. A bind failure is
