@@ -209,7 +209,7 @@ func (e *Executor) doStart(ctx context.Context, st *engineState, engine string, 
 	}
 	if presence.Identified {
 		if opts.RequireOwned {
-			return fmt.Errorf("cannot apply launch settings: another process already owns the server port")
+			return fmt.Errorf("cannot start owned engine: another process already owns the server port")
 		}
 		slog.Info("adopting already-running external engine", "engine", engine, "port", port)
 		st.mu.Lock()

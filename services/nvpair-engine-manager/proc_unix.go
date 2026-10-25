@@ -33,17 +33,14 @@ func configureSysProcAttr(cmd *exec.Cmd) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 }
 
-// gracefulSignal sends SIGTERM to the process group (falling back to the
-// process itself). managedProc.stop escalates to SIGKILL if the group remains
-// alive after the manifest's grace period.
+// gracefulSignal sends SIGTERM to the process's own group if it leads one,
+// otherwise to the process alone. managedProc.stop escalates to SIGKILL after
+// the manifest's grace period.
 func gracefulSignal(cmd *exec.Cmd) error {
 	if cmd == nil || cmd.Process == nil {
 		return nil
 	}
-	if pgid, err := syscall.Getpgid(cmd.Process.Pid); err == nil {
-		return syscall.Kill(-pgid, syscall.SIGTERM)
-	}
-	return cmd.Process.Signal(syscall.SIGTERM)
+	return signalPID(cmd.Process.Pid, false)
 }
 
 // pidOnPort returns the PID listening on the given TCP port and that
@@ -162,9 +159,10 @@ func procImage(pid int) string {
 	return ""
 }
 
-// signalPID sends SIGTERM (or SIGKILL when force) to the process group when
-// possible. The owned-process escalation and orphan reclaim share it so forced
-// stops reach forked helpers (model runners, etc.).
+// signalPID sends SIGTERM (or SIGKILL when force) to the process group only
+// when pid leads that group; otherwise it signals pid alone. The owned-process
+// escalation and orphan reclaim share it so stops reach forked helpers without
+// signalling an unrelated group that an orphan may have joined.
 func signalPID(pid int, force bool) error {
 	if pid <= 0 {
 		return nil
@@ -173,7 +171,7 @@ func signalPID(pid int, force bool) error {
 	if force {
 		sig = syscall.SIGKILL
 	}
-	if pgid, err := syscall.Getpgid(pid); err == nil {
+	if pgid, err := syscall.Getpgid(pid); err == nil && pgid == pid {
 		return syscall.Kill(-pgid, sig)
 	}
 	return syscall.Kill(pid, sig)
