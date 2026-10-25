@@ -5,6 +5,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -14,6 +15,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -422,6 +424,9 @@ func TestReachableSelfDialsLoopback(t *testing.T) {
 	}
 	peerListener, err := net.Listen("tcp4", net.JoinHostPort(peerIP, portStr))
 	if err != nil {
+		if errors.Is(err, syscall.EADDRNOTAVAIL) {
+			t.Skipf("no second loopback address available on this host: %v", err)
+		}
 		t.Fatalf("listen for peer on the same private port: %v", err)
 	}
 	peerServer := newServer(peerListener, peerUUID, &peerHits, &peerConnections)
