@@ -271,6 +271,10 @@ func TestServiceInspectionErrorDuringKillRevalidation(t *testing.T) {
 			if err == nil || !strings.Contains(err.Error(), "refusing changed pid 123 identity") || p.signals != 0 || stoppedCalls != 0 {
 				t.Fatalf("changed identity: error=%v signals=%d stopped_probes=%d", err, p.signals, stoppedCalls)
 			}
+			departed := p.path != want.Path || p.created != want.Created
+			if errors.Is(err, errServiceProcessDeparted) != departed {
+				t.Fatalf("departed classification=%v, want %v; error=%v", errors.Is(err, errServiceProcessDeparted), departed, err)
+			}
 		})
 	}
 	testChanged("changed executable is never signalled", &serviceKillProbe{path: filepath.Join(filepath.Dir(path), "other"), created: want.Created}, newInventory())
