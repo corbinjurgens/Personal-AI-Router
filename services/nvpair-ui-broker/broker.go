@@ -505,7 +505,10 @@ func NewBroker(codec *Codec, paths workerPaths) *Broker {
 	// this node by an identity that survives a PC rename — hostname is display
 	// only. The same value is passed to nvpair-errors via --node-id so
 	// its localNodeID stays in lockstep with what the broker stamps.
-	nodeID := resolveLocalNodeID(paths.clusterDir)
+	nodeID := ""
+	if validateEngineManagerControlHost(controlHost) == nil {
+		nodeID = resolveLocalNodeID(paths.clusterDir)
+	}
 	return &Broker{
 		codec:                codec,
 		startedAt:            time.Now(),

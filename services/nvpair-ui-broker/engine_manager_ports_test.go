@@ -18,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"nvpair-shared/appdir"
 	settings "nvpair-shared/enginesettings"
 	"nvpair-shared/nodepolicy"
 	"nvpair-shared/noderec"
@@ -79,6 +80,53 @@ func TestEngineManagerControlHostInvalidProgrammaticConfigurationDoesNotSpawn(t 
 			if b.getScanner() != nil || b.getEngineMgr() != nil || len(b.regCache.Snapshot()) != 0 {
 				t.Fatal("invalid control host spawned or registered a worker")
 			}
+		})
+	}
+}
+
+func TestEngineManagerControlHostInvalidConstructionDoesNotCreateIdentity(t *testing.T) {
+	for _, tc := range []struct {
+		name, host      string
+		explicitCluster bool
+	}{
+		{name: "empty host with default identity directory", host: ""},
+		{name: "DNS host with explicit identity directory", host: "localhost", explicitCluster: true},
+		{name: "malformed host with explicit identity directory", host: "256.0.0.1", explicitCluster: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			isolateOllamaHostTestConfig(t)
+			defaultRoot, err := appdir.Dir()
+			if err != nil {
+				t.Fatalf("resolve private app directory: %v", err)
+			}
+			identityRoot := defaultRoot
+			paths := workerPaths{engineMgrControlHost: &tc.host}
+			if tc.explicitCluster {
+				identityRoot = filepath.Join(t.TempDir(), "identity")
+				paths.clusterDir = filepath.Join(identityRoot, "cluster")
+			}
+			assertNoIdentity := func() {
+				t.Helper()
+				for _, path := range []string{defaultRoot, identityRoot, filepath.Join(identityRoot, "node-id.json"), filepath.Join(identityRoot, "cluster")} {
+					if _, err := os.Stat(path); !os.IsNotExist(err) {
+						t.Fatalf("invalid control host created identity path %q or stat failed: %v", path, err)
+					}
+				}
+			}
+			assertNoIdentity()
+			b := NewBroker(nil, paths)
+			assertNoIdentity()
+			if b.nodeID != "" || b.engineMgrControlHost != tc.host {
+				t.Fatalf("invalid configuration resolved node ID %q or changed host to %q", b.nodeID, b.engineMgrControlHost)
+			}
+			if err := b.Serve(context.Background()); err == nil || !strings.Contains(err.Error(), "--engine-manager-control-host") {
+				t.Fatalf("Serve error = %v, want control host failure", err)
+			}
+			assertNoIdentity()
+			if handle, err := b.spawnEngineMgr(); err == nil || handle != nil || !strings.Contains(err.Error(), "--engine-manager-control-host") {
+				t.Fatalf("spawn = %v, %v, want control host failure without a handle", handle, err)
+			}
+			assertNoIdentity()
 		})
 	}
 }
