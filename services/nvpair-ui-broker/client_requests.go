@@ -212,7 +212,7 @@ func (b *Broker) handleMessage(msg *Message) {
 	}
 
 	switch msg.Method {
-	case "engine:switch", "engine:switch-status":
+	case "engine:switch", "engine:switch-status", "engine:switch-fence":
 		go b.handleEngineSwitch(msg)
 	case "engine:get-settings", "engine:preview-settings", "engine:apply-settings":
 		go b.handleEngineSettings(msg)

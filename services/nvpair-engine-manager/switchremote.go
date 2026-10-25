@@ -17,11 +17,13 @@ import (
 var switchRemoteMethods = map[string]string{
 	settings.RemoteSwitchMethod:       settings.SwitchApplyPath,
 	settings.RemoteSwitchStatusMethod: settings.SwitchStatusPath,
+	settings.RemoteSwitchFenceMethod:  settings.SwitchFencePath,
 }
 
 var switchRouteMethods = map[string]string{
 	settings.SwitchApplyPath:  settings.SwitchMethod,
 	settings.SwitchStatusPath: settings.SwitchStatusMethod,
+	settings.SwitchFencePath:  settings.SwitchFenceMethod,
 }
 
 // switchBrokerCall cancels only the relay wait. The broker owns accepted work
@@ -34,6 +36,13 @@ func normalizeSwitchParams(path string, data []byte, target string) (json.RawMes
 	var body any
 	var nodeID string
 	switch path {
+	case settings.SwitchFencePath:
+		p, err := settings.DecodeSwitchFenceRequest(data)
+		if err != nil {
+			return nil, "", &codedError{code: settings.SwitchInvalidParamsCode, message: err.Error()}
+		}
+		nodeID, p.NodeID = p.NodeID, target
+		body = p
 	case settings.SwitchApplyPath:
 		p, err := settings.DecodeSwitchRequest(data)
 		if err != nil {
@@ -101,7 +110,7 @@ func (m *Manager) remoteSwitch(ctx context.Context, msg *Message) {
 			}
 			return client, err
 		})
-	if err == nil {
+	if err == nil && msg.Method != settings.RemoteSwitchFenceMethod {
 		m.switchWatchers.observe(ctx, identity, result, m.switchWatchIdentity, m.remoteClient, m.codec.Notify)
 	}
 	m.respondOrErr(msg, result, err)
@@ -140,6 +149,22 @@ func (c *remoteClient) postSwitch(ctx context.Context, path string, params json.
 	}
 	if !json.Valid(data) {
 		return nil, fmt.Errorf("remote engine switch: invalid JSON response; operation outcome may be uncertain")
+	}
+	if path == settings.SwitchFencePath {
+		request, err := settings.DecodeSwitchFenceRequest(params)
+		if err != nil {
+			return nil, err
+		}
+		var result settings.SwitchFenceResult
+		if err := json.Unmarshal(data, &result); err != nil {
+			return nil, fmt.Errorf("remote engine switch fence: invalid response: %w", err)
+		}
+		if err := result.Validate(); err != nil {
+			return nil, fmt.Errorf("remote engine switch fence: invalid outcome: %w", err)
+		}
+		if result.NodeID != request.NodeID || result.RequestID != request.RequestID {
+			return nil, fmt.Errorf("remote engine switch fence: response identity does not match canonical request")
+		}
 	}
 	return json.RawMessage(data), nil
 }

@@ -621,6 +621,7 @@ func rmExpectedClasses() map[string]controlClass {
 		controlAvailabilitySetPath:  controlMutation,
 		settings.SwitchStatusPath:   controlRead,
 		settings.SwitchApplyPath:    controlMutation,
+		settings.SwitchFencePath:    controlMutation,
 	}
 }
 
@@ -667,6 +668,64 @@ func TestRemoteManagementRegistryParity(t *testing.T) {
 	}
 	if _, pattern := mux.Handler(&http.Request{Method: http.MethodGet, URL: &url.URL{Path: "/v1/not-a-control-route"}}); pattern != "" {
 		t.Fatalf("unregistered path resolved to pattern %q", pattern)
+	}
+}
+
+func TestRemoteManagementFenceUsesPinnedCallerAndFreshMutationGrant(t *testing.T) {
+	f := rmNewFixture(t, "uuid-self", "uuid-a", "uuid-b")
+	f.writePermissions("1", map[string]bool{"uuid-a": true, "uuid-b": false})
+	ex := &Executor{}
+	ex.nodeProjection.set(nodeProjection{ManagementBlocked: false})
+	var mu sync.Mutex
+	calls := 0
+	ex.switchParent = func(_ context.Context, method, caller string, raw json.RawMessage) (json.RawMessage, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		calls++
+		p, err := settings.DecodeSwitchFenceRequest(raw)
+		if err != nil {
+			return nil, err
+		}
+		if method != settings.SwitchFenceMethod || caller != "uuid-a" || p.NodeID != "uuid-self" || p.RequestID != "lost" {
+			return nil, fmt.Errorf("wrong fence relay: %s %s %+v", method, caller, p)
+		}
+		return json.Marshal(settings.SwitchFenceResult{NodeID: p.NodeID, RequestID: p.RequestID, Fenced: true})
+	}
+	s := &controlServer{mesh: f.mesh, exec: ex}
+	ts := rmTLSServer(t, f.mesh, s.mux())
+	allowed, denied := f.client("uuid-a"), f.client("uuid-b")
+	body := `{"nodeId":"spoofed-hop","requestId":"lost"}`
+	status, _, data := rmRequest(t, allowed, ts.URL, http.MethodPost, settings.SwitchFencePath, body)
+	if status != http.StatusOK {
+		t.Fatalf("granted fence HTTP %d: %s", status, data)
+	}
+	var result settings.SwitchFenceResult
+	if err := json.Unmarshal(data, &result); err != nil {
+		t.Fatal(err)
+	}
+	if err := result.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if !result.Fenced || result.NodeID != "uuid-self" {
+		t.Fatalf("fence = %+v", result)
+	}
+	status, _, data = rmRequest(t, denied, ts.URL, http.MethodPost, settings.SwitchFencePath, body)
+	if code, _ := rmCodedBody(t, data); status != http.StatusConflict || code != remoteManagementWireCode {
+		t.Fatalf("denied fence: HTTP %d %s", status, data)
+	}
+	status, _, data = rmRequest(t, allowed, ts.URL, http.MethodPost, settings.SwitchFencePath, `{"requestId":"lost","caller":"uuid-b"}`)
+	if status != http.StatusBadRequest {
+		t.Fatalf("spoofed caller: HTTP %d %s", status, data)
+	}
+	f.writePermissions("2", map[string]bool{"uuid-a": false, "uuid-b": false})
+	status, _, data = rmRequest(t, allowed, ts.URL, http.MethodPost, settings.SwitchFencePath, body)
+	if code, _ := rmCodedBody(t, data); status != http.StatusConflict || code != remoteManagementWireCode {
+		t.Fatalf("revoked fence: HTTP %d %s", status, data)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if calls != 1 {
+		t.Fatalf("fence relay calls = %d", calls)
 	}
 }
 

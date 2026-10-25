@@ -40,7 +40,7 @@ func (r *switchRelay) call(ctx context.Context, method, caller string, params js
 	if r.send == nil {
 		return nil, errors.New("switch coordinator unavailable")
 	}
-	if method != settings.SwitchMethod && method != settings.SwitchStatusMethod {
+	if method != settings.SwitchMethod && method != settings.SwitchStatusMethod && method != settings.SwitchFenceMethod {
 		return nil, &codedError{code: -32601, message: "unknown switch relay method"}
 	}
 	ctx, cancel := context.WithTimeout(ctx, settings.SwitchStatusWaitBudget+10*time.Second)
@@ -148,7 +148,7 @@ func (m *Manager) handleSwitchMessage(ctx context.Context, msg *Message) bool {
 		return false
 	}
 	switch msg.Method {
-	case settings.RemoteSwitchMethod, settings.RemoteSwitchStatusMethod:
+	case settings.RemoteSwitchMethod, settings.RemoteSwitchStatusMethod, settings.RemoteSwitchFenceMethod:
 		go m.remoteSwitch(ctx, msg)
 		return true
 	case settings.SwitchPrepareMethod, settings.SwitchStepMethod, settings.SwitchReconcileMethod:

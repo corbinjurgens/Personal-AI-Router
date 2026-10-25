@@ -52,6 +52,7 @@ type engineSwitchStore struct {
 	journal   settings.SwitchJournal
 	loaded    bool
 	untrusted *engineSwitchRecoveryError
+	fenceErr  error // latched fence-write failure; adopted uncertainty is never an ACK
 }
 
 // Reuse the settings journal's directory resolution without changing its owner.
@@ -116,6 +117,61 @@ func (s *engineSwitchStore) trustError() error {
 
 func (s *engineSwitchStore) Generation() uint64 { return s.journal.Generation }
 
+func (s *engineSwitchStore) IsFenced(caller, id string) bool {
+	for _, tombstone := range s.journal.Tombstones {
+		if tombstone.Caller == caller && tombstone.RequestID == id {
+			return true
+		}
+	}
+	return false
+}
+
+// Fence is serialized with both admission lookups by engineConfigMu. Receipts
+// win over absence fencing and retain their global ID ownership rule. The
+// bounded tombstones reserve only (caller, ID), never another caller's namespace.
+func (s *engineSwitchStore) Fence(nodeID, caller, id string) (settings.SwitchFenceResult, error) {
+	if err := s.trustError(); err != nil {
+		return settings.SwitchFenceResult{}, err
+	}
+	tombstone := settings.SwitchTombstone{Caller: caller, RequestID: id}
+	if err := tombstone.Validate(); err != nil {
+		return settings.SwitchFenceResult{}, switchStoreError(settings.SwitchErrorInvalidRequest, err.Error())
+	}
+	result := settings.SwitchFenceResult{NodeID: nodeID, RequestID: id}
+	if nodeID == "" {
+		return settings.SwitchFenceResult{}, switchStoreError(settings.SwitchErrorInvalidRequest, "node identity is required")
+	}
+	if receipt, ok := s.Lookup(id); ok {
+		if receipt.Caller != caller {
+			return settings.SwitchFenceResult{}, switchStoreError(settings.SwitchErrorReusedID, "request ID belongs to another caller")
+		}
+		result.Receipt = &receipt
+		if err := result.Validate(); err != nil {
+			return settings.SwitchFenceResult{}, err
+		}
+		return result, nil
+	}
+	if s.fenceErr != nil {
+		return settings.SwitchFenceResult{}, s.fenceErr
+	}
+	if !s.IsFenced(caller, id) {
+		next := s.copyJournal()
+		if len(next.Tombstones) == settings.MaxSwitchTombstones {
+			next.Tombstones = next.Tombstones[1:]
+		}
+		next.Tombstones = append(next.Tombstones, tombstone)
+		if err := switchStoreCapacity(next); err != nil {
+			return settings.SwitchFenceResult{}, err
+		}
+		if err := s.persist(next); err != nil {
+			s.fenceErr = err
+			return settings.SwitchFenceResult{}, err
+		}
+	}
+	result.Fenced = true
+	return result, nil
+}
+
 func (s *engineSwitchStore) Lookup(id string) (settings.SwitchReceipt, bool) {
 	if !s.loaded || s.untrusted != nil {
 		return settings.SwitchReceipt{}, false
@@ -150,6 +206,12 @@ func (s *engineSwitchStore) insert(r settings.SwitchReceipt, rejected bool) (set
 	}
 	if old, exists, err := s.duplicate(r); exists {
 		return old, err
+	}
+	if s.fenceErr != nil {
+		return settings.SwitchReceipt{}, s.fenceErr
+	}
+	if s.IsFenced(r.Caller, r.RequestID) {
+		return settings.SwitchReceipt{}, switchStoreError(settings.SwitchErrorFenced, "request ID was fenced by this caller")
 	}
 	phase := settings.SwitchAccepted
 	if rejected {
@@ -276,6 +338,7 @@ func switchStoreCapacity(j settings.SwitchJournal) error {
 
 func (s *engineSwitchStore) copyJournal() settings.SwitchJournal {
 	j := s.journal
+	j.Tombstones = append([]settings.SwitchTombstone(nil), s.journal.Tombstones...)
 	if s.journal.LocalObligations != nil {
 		j.LocalObligations = make(map[string]settings.SwitchLocalObligation, len(s.journal.LocalObligations))
 		for id, obligation := range s.journal.LocalObligations {

@@ -637,6 +637,72 @@ func TestSwitchStatusDecode(t *testing.T) {
 	}
 }
 
+func TestSwitchFenceContract(t *testing.T) {
+	checkSwitchWire(t, SwitchFenceRequest{RequestID: "lost"}, "requestId")
+	checkSwitchWire(t, SwitchFenceResult{NodeID: "node", RequestID: "lost", Fenced: true}, "nodeId requestId fenced")
+	for _, raw := range []string{`{}`, `null`, `{"requestId":"bad id"}`, `{"requestId":"lost","caller":"spoof"}`, `{"requestId":"lost"} {}`, `{"requestId":"` + strings.Repeat("x", 129) + `"}`} {
+		if _, err := DecodeSwitchFenceRequest([]byte(raw)); err == nil {
+			t.Errorf("accepted fence request %s", raw)
+		}
+	}
+	if _, err := DecodeSwitchFenceRequest([]byte(`{"nodeId":"alias","requestId":"lost"}`)); err != nil {
+		t.Fatal(err)
+	}
+	r := switchReceiptFixture()
+	test := func(name string, result SwitchFenceResult, valid bool) {
+		t.Run(name, func(t *testing.T) {
+			if err := result.Validate(); (err == nil) != valid {
+				t.Fatalf("Validate = %v; want valid %v", err, valid)
+			}
+		})
+	}
+	test("fenced", SwitchFenceResult{NodeID: r.NodeID, RequestID: r.RequestID, Fenced: true}, true)
+	test("accepted", SwitchFenceResult{NodeID: r.NodeID, RequestID: r.RequestID, Receipt: &r}, true)
+	test("neither", SwitchFenceResult{NodeID: r.NodeID, RequestID: r.RequestID}, false)
+	test("both", SwitchFenceResult{NodeID: r.NodeID, RequestID: r.RequestID, Fenced: true, Receipt: &r}, false)
+	test("wrong node", SwitchFenceResult{NodeID: "other", RequestID: r.RequestID, Receipt: &r}, false)
+	test("wrong request", SwitchFenceResult{NodeID: r.NodeID, RequestID: "other", Receipt: &r}, false)
+	test("no node", SwitchFenceResult{RequestID: r.RequestID, Fenced: true}, false)
+	if err := (SwitchError{Code: SwitchConfigurationConflictCode, Kind: SwitchErrorFenced, Message: "Fenced."}).Validate(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSwitchTombstoneJournalValidation(t *testing.T) {
+	test := func(name string, tombstones []SwitchTombstone, receipt *SwitchReceipt, generation uint64, valid bool) {
+		t.Run(name, func(t *testing.T) {
+			j := SwitchJournal{Version: SwitchVersion, Generation: generation, Receipts: map[string]SwitchReceipt{}, Tombstones: tombstones}
+			if receipt != nil {
+				j.Receipts[receipt.RequestID], j.ActiveRequestID = *receipt, receipt.RequestID
+			}
+			raw, err := json.Marshal(j)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := DecodeSwitchJournal(raw); (err == nil) != valid {
+				t.Fatalf("decode = %v; want valid %v", err, valid)
+			}
+		})
+	}
+	one := SwitchTombstone{Caller: "local", RequestID: "switch-42"}
+	r := switchReceiptFixture()
+	test("one", []SwitchTombstone{one}, nil, 1, true)
+	test("zero generation", []SwitchTombstone{one}, nil, 0, false)
+	test("duplicate pair", []SwitchTombstone{one, one}, nil, 1, false)
+	test("different owners", []SwitchTombstone{one, {Caller: "peer", RequestID: one.RequestID}}, nil, 1, true)
+	test("owned receipt collision", []SwitchTombstone{one}, &r, 1, false)
+	test("foreign receipt coexistence", []SwitchTombstone{{Caller: "peer", RequestID: one.RequestID}}, &r, 1, true)
+	test("empty caller", []SwitchTombstone{{RequestID: "lost"}}, nil, 1, false)
+	test("oversize caller", []SwitchTombstone{{Caller: strings.Repeat("x", 129), RequestID: "lost"}}, nil, 1, false)
+	test("bad caller", []SwitchTombstone{{Caller: "bad caller", RequestID: "lost"}}, nil, 1, false)
+	test("bad ID", []SwitchTombstone{{Caller: "local", RequestID: "bad id"}}, nil, 1, false)
+	many := make([]SwitchTombstone, MaxSwitchTombstones+1)
+	for i := range many {
+		many[i] = SwitchTombstone{Caller: "local", RequestID: fmt.Sprintf("id-%d", i)}
+	}
+	test("count bound", many, nil, 1, false)
+}
+
 func TestSwitchJournalDecode(t *testing.T) {
 	j := SwitchJournal{Version: 1, Receipts: map[string]SwitchReceipt{}}
 	raw, err := json.Marshal(j)
