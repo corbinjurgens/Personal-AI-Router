@@ -110,6 +110,32 @@
            "waits": {"admissionMs": 350, "firstByteMs": 1200}, "continuationOf": 0, "account": null}
         ]
       }
+    },
+    {
+      "name": "model-less local completion",
+      "record": {
+        "schema": 1,
+        "request": {"originNodeId": "synthetic-origin", "proxyRunId": "synthetic-run", "requestId": "7"},
+        "workload": null, "seq": 2,
+        "requested": {"model": "", "tier": "", "mode": "chat"},
+        "createdAt": 1700000060000, "endedAt": 1700000061000,
+        "state": "completed", "reason": "", "status": 200,
+        "served": {"kind": "local", "model": null, "nodeId": "synthetic-node", "engine": "llamacpp", "deploymentId": null, "accountId": null},
+        "recoverable": false,
+        "spend": {"currency": "USD", "ceilingNanoUsd": null, "grantedNanoUsd": null, "heldNanoUsd": null, "chargedNanoUsd": null, "accounting": "none"},
+        "droppedAttempts": 0,
+        "attempts": [
+          {"index": 0, "startedAt": 1700000060000, "endedAt": 1700000061000,
+           "destination": {"kind": "local", "model": null, "nodeId": "synthetic-node", "engine": "llamacpp", "deploymentId": null, "accountId": null},
+           "outcome": "committed", "reason": "", "status": 200,
+           "waits": {"admissionMs": 0, "firstByteMs": 100}, "continuationOf": null, "account": null}
+        ]
+      }
     }
+  ],
+  "invalidCases": [
+    {"name": "empty local destination model", "fixture": 0, "path": "attempts.0.destination.model", "value": ""},
+    {"name": "empty API destination model", "fixture": 1, "path": "attempts.0.destination.model", "value": ""},
+    {"name": "null API destination model", "fixture": 1, "path": "attempts.0.destination.model", "value": null}
   ]
 }

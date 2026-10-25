@@ -1507,7 +1507,7 @@ func TestRoutingHistoryPackedCapacity(t *testing.T) {
 	row.Requested.Model = model
 	node, engine := strings.Repeat("n", 128), strings.Repeat("e", 128)
 	for i := 0; i < 32; i++ {
-		row.Attempts = append(row.Attempts, nodepolicy.RoutingHistoryAttempt{Index: int64(i), StartedAt: 100, Destination: nodepolicy.RoutingHistoryDestination{Kind: "local", Model: model, NodeID: &node, Engine: &engine}, Outcome: "pending"})
+		row.Attempts = append(row.Attempts, nodepolicy.RoutingHistoryAttempt{Index: int64(i), StartedAt: 100, Destination: nodepolicy.RoutingHistoryDestination{Kind: "local", Model: &model, NodeID: &node, Engine: &engine}, Outcome: "pending"})
 	}
 	if err := row.Validate(); err != nil {
 		t.Fatal(err)
@@ -1624,7 +1624,7 @@ func TestRoutingHistoryProjectedPackingMatchesTypedPacking(t *testing.T) {
 	for i := 0; i < nodepolicy.RoutingHistoryAttempts; i++ {
 		row.Attempts = append(row.Attempts, nodepolicy.RoutingHistoryAttempt{
 			Index: int64(i), StartedAt: 100, Outcome: "pending",
-			Destination: nodepolicy.RoutingHistoryDestination{Kind: "local", Model: row.Requested.Model, NodeID: &node, Engine: &engine},
+			Destination: nodepolicy.RoutingHistoryDestination{Kind: "local", Model: &row.Requested.Model, NodeID: &node, Engine: &engine},
 		})
 	}
 	if err := row.Validate(); err != nil {
