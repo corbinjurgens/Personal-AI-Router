@@ -1,14 +1,14 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-import { memo, useMemo } from 'react'
+import { memo, useMemo, useRef } from 'react'
 import { Divider, Stack } from '@nvidia/foundations-react-core'
 import { useDropdownClickable } from '@/ui/hooks/useDropdownClickable'
 import { ModelRowHeader } from './ModelRowHeader'
 import { ModelRowSecondaryRow } from './ModelRowSecondaryRow'
 import type { ModelRowProps } from '@/ui/types/model-row'
 import type { EngineCommandType } from '@/shared/types/engine-api'
-import { isEngineCopyInProgress } from '@/shared/utils/engine-progress'
+import { isEngineCopyInProgress, isEnginePullInProgress } from '@/shared/utils/engine-progress'
 import { formatCopyProgressLabel } from '@/ui/utils/formatters'
 
 /** "Working" label shown on the secondary row while an optimistic action is in flight. */
@@ -44,17 +44,26 @@ function ModelRowInner({
     const actionDd = dropdown.get(`action-${model.name}`)
 
     const isLoaded = model.status === 'loaded'
+    const activeDownload =
+        isEnginePullInProgress(progress) ||
+        model.downloadState?.phase === 'queued' ||
+        model.downloadState?.phase === 'in_progress'
+    const ready =
+        model.downloaded &&
+        model.downloadStateCurrent === true &&
+        !model.downloadState?.blocksReadiness &&
+        !activeDownload
 
     const actionItems = useMemo(() => {
         const items: { id: string; children: string; disabled?: boolean; danger?: boolean }[] = []
         // A command is already in flight for this model -- lock the whole menu so
         // the user cannot fire a second conflicting op before it resolves.
-        const busy = pendingAction !== undefined
+        const busy = pendingAction !== undefined || activeDownload
         if (capabilities.hasLoad) {
             items.push({
                 id: 'load',
                 children: 'Load',
-                disabled: busy || isLoaded || !model.downloaded || !isRunning
+                disabled: busy || isLoaded || !ready || !isRunning
             })
         }
         if (capabilities.hasEject) {
@@ -72,7 +81,7 @@ function ModelRowInner({
             items.push({
                 id: 'copy',
                 children: 'Copy to this PC',
-                disabled: busy || !model.downloaded
+                disabled: busy || !ready
             })
         }
         if (capabilities.hasDeleteModel) {
@@ -86,9 +95,20 @@ function ModelRowInner({
         capabilities.hasDeleteModel,
         isLoaded,
         isRunning,
-        model.downloaded,
+        activeDownload,
+        ready,
         pendingAction
     ])
+
+    // A menu can retain a selection callback while its target state changes.
+    const latestAction = useRef({ actionItems, onAction })
+    latestAction.current = { actionItems, onAction }
+    const handleAction = (name: string, action: string) => {
+        const latest = latestAction.current
+        if (latest.actionItems.some(item => item.id === action && !item.disabled)) {
+            latest.onAction(name, action)
+        }
+    }
 
     const formattedName = displayName(model.name)
     // Pull already renders its own progress spinner via `progress`; only fall
@@ -108,13 +128,13 @@ function ModelRowInner({
                     modelName={model.name}
                     formattedName={formattedName}
                     isLoaded={isLoaded}
+                    isDownloaded={ready}
                     actionItems={actionItems}
                     actionDd={actionDd}
-                    onAction={onAction}
+                    onAction={handleAction}
                 />
                 <ModelRowSecondaryRow
                     model={model}
-                    progress={progress}
                     busyLabel={busyLabel}
                     hasExpiry={capabilities.hasExpiry}
                     expiryDd={expiryDd}

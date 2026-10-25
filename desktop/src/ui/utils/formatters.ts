@@ -121,3 +121,20 @@ export function formatPullProgressLabel(p: PullProgressFields): string {
 
     return status || '…'
 }
+
+/** Operation phase is independent of inventory readiness and loaded residency. */
+export function formatDownloadStatus(status: string, current: boolean | undefined): string {
+    if (current !== true) return 'Download status unknown'
+    switch (status) {
+        case 'queued':
+            return 'Download queued'
+        case 'in_progress':
+            return 'Downloading'
+        case 'failed':
+            return 'Download failed'
+        case 'complete':
+            return 'Download complete'
+        default:
+            return 'Download status unknown'
+    }
+}

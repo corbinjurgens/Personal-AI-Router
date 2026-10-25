@@ -2,26 +2,23 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { useMemo } from 'react'
-import { Dropdown, Flex, Text, type DropdownEntry } from '@nvidia/foundations-react-core'
-import type { ModelItem } from '@/ui/types/engine-info'
+import { Dropdown, Flex, Stack, Text, type DropdownEntry } from '@nvidia/foundations-react-core'
+import type { ModelItem } from '@/shared/types/engines'
 import type { ModelExpiry } from '@/shared/types/engines'
 import { isModelExpiry } from '@/shared/utils/engines'
-import { formatBytes, formatPullProgressLabel } from '@/ui/utils/formatters'
-import type { EngineProgress } from '@/shared/types/engines'
-import { isEnginePullInProgress } from '@/shared/utils/engine-progress'
+import { formatBytes } from '@/ui/utils/formatters'
+import { IncomingSyncPullRow } from './IncomingSyncPullRow'
 import { EXPIRY_OPTIONS, EXPIRY_SHORT_LABELS } from '@/ui/constants/model-row'
 import type { ModelRowDropdownControl } from '@/ui/types/model-row'
 
 export function ModelRowSecondaryRow({
     model,
-    progress,
     busyLabel,
     hasExpiry,
     expiryDd,
     onExpiryChange
 }: {
     model: ModelItem
-    progress?: EngineProgress
     /** Optimistic "working" label (load/eject/delete in flight) shown with a spinner. */
     busyLabel?: string | null
     hasExpiry: boolean
@@ -38,23 +35,37 @@ export function ModelRowSecondaryRow({
             })),
         [model.name, onExpiryChange]
     )
+    const download = model.downloadState
 
     return (
-        <Flex align="center" justify="between" gap="2" className="min-w-0 overflow-hidden ml-4">
-            {progress && isEnginePullInProgress(progress) ? (
-                <Flex align="center" className="min-w-0 shrink">
-                    <Flex align="center" gap="2" className="shrink-0 whitespace-nowrap">
-                        <span
-                            className="spinner-element"
-                            role="status"
-                            aria-label=""
-                            style={{ margin: '0' }}
+        <Flex align="center" justify="between" gap="2" className="min-w-0 ml-4">
+            {download || model.downloadStateCurrent !== true || !model.downloaded ? (
+                <Stack gap="1" className="min-w-0 grow">
+                    {(download || model.downloadStateCurrent !== true) && (
+                        <IncomingSyncPullRow
+                            row={{
+                                rawModel: model.name,
+                                label: model.name,
+                                status: download?.phase ?? 'unknown',
+                                current: model.downloadStateCurrent,
+                                percent: download?.percent,
+                                persistence: download?.persistence
+                            }}
                         />
+                    )}
+                    {!model.downloaded &&
+                        model.downloadStateCurrent === true &&
+                        (!download || download.phase === 'complete') && (
+                            <Text kind="body/regular/sm" className="text-subtle-color">
+                                Content readiness unknown
+                            </Text>
+                        )}
+                    {busyLabel && (
                         <Text kind="body/regular/sm" className="text-subtle-color">
-                            {formatPullProgressLabel(progress)}
+                            {busyLabel}
                         </Text>
-                    </Flex>
-                </Flex>
+                    )}
+                </Stack>
             ) : busyLabel ? (
                 <Flex align="center" className="min-w-0 shrink">
                     <Flex align="center" gap="2" className="shrink-0 whitespace-nowrap">

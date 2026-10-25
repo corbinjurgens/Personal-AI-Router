@@ -170,6 +170,19 @@ contract lives in [cluster-manager spec §7.0.1](../../services/nvpair-cluster-m
   turning an ongoing download into success. Initial snapshots replay the same
   target facts after a renderer refresh. Renderer action guards consume these
   facts; the target's Go admission remains authoritative.
+- Model rows display Download queued, Downloading, Download failed, Download
+  complete, or Download status unknown. Only current in-progress observations
+  show a small progress bar: measured percentages are determinate, otherwise
+  indeterminate. Unavailable observations explain that the device is disconnected
+  or its download status is unavailable. Loaded residency remains visible
+  independently; a complete operation can still have unknown content readiness.
+  Load and Copy require current ready content without a readiness block. Active
+  queued/in-progress pulls also disable Eject and Delete with Download in progress.
+  Menu selections recheck current facts, including an already-open menu and delete
+  confirmation. Failed partial content remains available in Add model for explicit
+  catalog retry; no retry, cleanup, or engine start happens automatically.
+  Pending pulls yield only to a new matching target download identity, never to
+  inventory presence, unrelated progress, or a previous download's terminal event.
 - The `engine:command` shape `{ command: 'setLock', engineType, nodeId, locked }`
   maps to the local `engine:set-lock`. The bridge sends it only when `nodeId` is
   this device's own node, and refuses any other target before sending with
