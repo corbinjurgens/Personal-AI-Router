@@ -19,6 +19,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"nvpair-shared/clustertrust"
@@ -1135,7 +1136,7 @@ func TestProxyReverseHybridPeerSlotWaitIsBounded(t *testing.T) {
 	}
 }
 
-func TestProxyReverseHybridPeerSlotPreservesDestinationBudget(t *testing.T) {
+func TestProxyReverseHybridPeerSlotUsesRemainingQueueAndDeadline(t *testing.T) {
 	base := context.Background()
 	peer := candidate{peerUUID: "peer"}
 	for _, tc := range []struct {
@@ -1144,12 +1145,15 @@ func TestProxyReverseHybridPeerSlotPreservesDestinationBudget(t *testing.T) {
 		want             time.Duration
 	}{
 		{"queue fits before destination", 2 * time.Second, 6 * time.Second, 2 * time.Second},
-		{"equal queue and deadline", 5 * time.Second, 5 * time.Second, 2500 * time.Millisecond},
+		{"equal queue and deadline", 5 * time.Second, 5 * time.Second, 5 * time.Second},
+		{"deadline bounds queue", 8 * time.Second, 5 * time.Second, 5 * time.Second},
+		{"zero queue", 0, 5 * time.Second, 0},
+		{"expired deadline", 2 * time.Second, -time.Second, 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx, wait := peerSlotContext(base, dispatchPolicy{hybrid: true}, peer, tc.queue, tc.preOutput)
-			if ctx == base || wait != tc.want || wait >= tc.preOutput {
-				t.Fatalf("hybrid peer slot context = (%v, %v), want bound %v below deadline %v", ctx, wait, tc.want, tc.preOutput)
+			if ctx == base || wait != tc.want {
+				t.Fatalf("hybrid peer slot context = (%v, %v), want bound %v", ctx, wait, tc.want)
 			}
 		})
 	}
@@ -1169,4 +1173,112 @@ func TestProxyReverseHybridPeerSlotPreservesDestinationBudget(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestUnifiedDispatchHybridStrictBudgetsAfterPeerSlot(t *testing.T) {
+	test := func(name string, wait, queue, cold, pre time.Duration, wantQueue, wantCold, wantPre int, wantOK bool) {
+		t.Run(name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				policy := hybridTestPolicy(1, pre)
+				key := nodepolicy.RoutingRequestKey{OriginNodeID: "origin", ProxyRunID: "run", RequestID: "1"}
+				model := nodepolicy.StrictAdmissionModel{Identity: strictRequest().Identity}
+				time.Sleep(wait)
+				req, ok := policy.strictRequest(key, model, queue, cold, wait)
+				if ok != wantOK {
+					t.Fatalf("available = %v, want %v", ok, wantOK)
+				}
+				if !ok {
+					return
+				}
+				if req.QueueBudgetMs != wantQueue || req.ColdStartBudgetMs != wantCold || req.PreOutputBudgetMs != wantPre {
+					t.Fatalf("budgets = queue %d cold %d pre-output %d, want %d/%d/%d", req.QueueBudgetMs, req.ColdStartBudgetMs, req.PreOutputBudgetMs, wantQueue, wantCold, wantPre)
+				}
+				if req.Request != key || req.Identity != model.Identity {
+					t.Fatalf("request identity changed: %+v", req)
+				}
+				if err := req.Validate(); err != nil {
+					t.Fatalf("invalid recomputed request: %v", err)
+				}
+			})
+		})
+	}
+	test("free slot preserves allowances", 0, 6*time.Second, 8*time.Second, 10*time.Second, 6000, 8000, 10000, true)
+	test("partial wait charged once", 2*time.Second, 6*time.Second, 8*time.Second, 10*time.Second, 4000, 6000, 8000, true)
+	test("spent cold allowance clamps to zero", 3*time.Second, 6*time.Second, time.Second, 10*time.Second, 3000, 0, 7000, true)
+	test("remaining deadline caps allowances", 2*time.Second, 9*time.Second, 10*time.Second, 5*time.Second, 3000, 3000, 3000, true)
+	test("submillisecond remainder refuses dispatch", 9999500*time.Nanosecond, time.Second, time.Second, 10*time.Millisecond, 0, 0, 0, false)
+	test("expired deadline refuses dispatch", 5*time.Second, 6*time.Second, 8*time.Second, 5*time.Second, 0, 0, 0, false)
+}
+
+func TestProxyReverseHybridPeerSlotRecomputesSentBudgets(t *testing.T) {
+	test := func(name string, direct bool) {
+		t.Run(name, func(t *testing.T) {
+			fx := newProxyReverseFixture(t, "ollama", http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				if _, err := io.WriteString(w, "{}"); err != nil {
+					t.Errorf("write engine response: %v", err)
+				}
+			}))
+			fx.directHealthy.Store(direct)
+			fx.node.Roles = map[string]nodepolicy.AdvertisedRole{"weak": qualifiedRole("fixture-model")}
+			fx.node.PolicyRevision = "1"
+			fx.node.StrictAdmission = strictCapabilityFor("ollama", "fixture-model:latest")
+			fx.p.soleFacade().discovery.SetSubscribed([]Node{fx.node})
+			policy := ollamaTierPolicy(map[string][]nodepolicy.TierEntry{"weak": {{Kind: nodepolicy.EntryLocal, Engine: "ollama", Model: "fixture-model"}}})
+			fx.p.admission.setPolicy(policy)
+			headers := make(chan http.Header, 1)
+			// Capture the envelope at authenticated ingress before strict admission.
+			ingress := fx.server.Config.Handler
+			fx.server.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == http.MethodPost {
+					headers <- r.Header.Clone()
+					// This fixture measures the origin's envelope; use ordinary
+					// destination admission after capturing it.
+					r.Header.Del(nodepolicy.StrictAdmissionHeader)
+				}
+				ingress.ServeHTTP(w, r)
+			})
+			cand := fx.candidate(t)
+			transport := fx.p.candidateTransport(cand)
+			var held []*http.Response
+			defer func() {
+				for _, response := range held {
+					if err := response.Body.Close(); err != nil {
+						t.Errorf("close occupying response: %v", err)
+					}
+				}
+			}()
+			for range 8 {
+				response, err := transport.RoundTrip(proxyReverseRequest(t, http.MethodGet, cand.url.String()+"/api/tags", nil))
+				if err != nil {
+					t.Fatal(err)
+				}
+				held = append(held, response)
+			}
+			released := make(chan struct{})
+			go func() {
+				defer close(released)
+				time.Sleep(200 * time.Millisecond)
+				if err := held[0].Body.Close(); err != nil {
+					t.Errorf("release peer slot: %v", err)
+				}
+			}()
+			hybrid := hybridTestPolicy(1, 8*time.Second)
+			hybrid.queueWait, hybrid.coldWait = 3*time.Second, 4*time.Second
+			recorder, ctl := serveHybridDispatch(t, fx.p.soleFacade(), hybridTestBody, hybrid)
+			<-released
+			if recorder.Code != http.StatusOK || ctl.ordinal != 1 {
+				t.Fatalf("status=%d attempts=%d body=%q, want one successful peer attempt", recorder.Code, ctl.ordinal, recorder.Body.String())
+			}
+			req := decodeStrictHeader(t, <-headers)
+			if req.QueueBudgetMs < 2000 || req.QueueBudgetMs > 2850 || req.ColdStartBudgetMs-req.QueueBudgetMs != 1000 {
+				t.Fatalf("destination budgets=%+v, want only the actual slot wait deducted from queue/cold", req)
+			}
+			if req.PreOutputBudgetMs < 6500 || req.PreOutputBudgetMs > 7850 || req.Request != ctl.key {
+				t.Fatalf("destination request=%+v, want elapsed pre-output time and the registry key", req)
+			}
+		})
+	}
+	test("direct", true)
+	test("reverse", false)
 }

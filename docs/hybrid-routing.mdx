@@ -43,10 +43,11 @@ Hybrid `maxAttempts`, `preOutputBudgetSeconds`, `queueSeconds` and
 per attempt or inherit the concrete five-attempt/ten-minute budget. The
 driver conservatively deducts wait charges from both queue and cold
 allowances. A peer-service slot waits at most the smaller of remaining queue
-allowance and half the remaining pre-output time; zero refuses an occupied
-slot immediately. An occupied-slot refusal costs an attempt. The reserved
-slot allowance is subtracted from the destination's strict budgets before
-dispatch. Concrete peer-slot waits keep their request-context bound.
+allowance and the remaining pre-output time; zero refuses an occupied
+slot immediately. An occupied-slot refusal costs an attempt. After acquisition,
+the actual time spent acquiring the slot is deducted from the destination's
+queue and cold budgets, and its pre-output budget is recomputed from the shared
+deadline before dialing. Concrete peer-slot waits keep their request-context bound.
 
 Self candidates qualify the body and enter strict admission; peers receive
 the canonical request key, model identity and remaining budgets in

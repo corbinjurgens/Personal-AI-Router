@@ -70,6 +70,7 @@ type PeerServiceClient struct {
 var ErrPeerSlotOccupied = errors.New("peer service slots are occupied")
 
 type peerSlotWaitKey struct{}
+type peerSlotAcquiredKey struct{}
 
 // WithPeerSlotWait bounds how long a PeerServiceClient request made with ctx
 // waits for one of the peerMaxConnsPerHost slots shared by its peer and
@@ -79,6 +80,14 @@ type peerSlotWaitKey struct{}
 // until a slot frees or ctx ends.
 func WithPeerSlotWait(ctx context.Context, wait time.Duration) context.Context {
 	return context.WithValue(ctx, peerSlotWaitKey{}, wait)
+}
+
+// WithPeerSlotAcquired runs prepare synchronously after slot acquisition and
+// before any connection is opened or request bytes are sent. It receives a
+// private request clone and the actual acquisition duration, and may update
+// headers or refuse dispatch. A refusal releases the slot and closes the body.
+func WithPeerSlotAcquired(ctx context.Context, prepare func(*http.Request, time.Duration) error) context.Context {
+	return context.WithValue(ctx, peerSlotAcquiredKey{}, prepare)
 }
 
 // acquirePeerSlot reserves one of slots for the caller, who must release it by
@@ -309,13 +318,26 @@ func (t *peerServiceTransport) RoundTrip(req *http.Request) (*http.Response, err
 	if req.URL.Scheme != scheme || req.URL.Host != identity.route.Address {
 		return nil, &ReverseUnavailableError{PeerUUID: key.uuid, Cause: errors.New("URL does not match current peer service endpoint")}
 	}
+	started := time.Now()
 	if err := acquirePeerSlot(req.Context(), h.slots); err != nil {
 		return nil, err
 	}
+	waited := time.Since(started)
 	release := func() { <-h.slots }
 	if err := reverseDialContextError(req.Context()); err != nil {
 		release()
 		return nil, err
+	}
+	if prepare, ok := req.Context().Value(peerSlotAcquiredKey{}).(func(*http.Request, time.Duration) error); ok {
+		req = req.Clone(req.Context())
+		if err := prepare(req, waited); err != nil {
+			release()
+			return nil, err
+		}
+		if err := reverseDialContextError(req.Context()); err != nil {
+			release()
+			return nil, err
+		}
 	}
 	if err := p.current(key, identity); err != nil {
 		release()
