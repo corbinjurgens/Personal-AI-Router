@@ -65,7 +65,15 @@ import type {
     RoutingActiveParams,
     RoutingActiveResult,
     RoutingCancelParams,
-    RoutingCancelResult
+    RoutingCancelResult,
+    RoutingHistoryConsumed,
+    RoutingHistoryInitial,
+    RoutingHistoryPull,
+    RoutingHistoryReady,
+    RoutingHistoryRecord,
+    RoutingHistoryTransfer,
+    RoutingHistoryConsumption,
+    RoutingHistoryCommit
 } from '@/shared/types/routing'
 import type {
     AvailableNode,
@@ -172,6 +180,15 @@ export interface WsInvokeChannelMap {
     // Origin-local routing request control
     'routing:cancel': { request: RoutingCancelParams; response: RoutingCancelResult }
     'routing:active': { request: RoutingActiveParams; response: RoutingActiveResult }
+    'routing:subscribe': { request: void; response: RoutingHistoryReady }
+    'routing:unsubscribe': { request: void; response: null }
+    'routing:get-initial': { request: void; response: RoutingHistoryInitial }
+    // Electron delivery controls. Never relayed as service/peer RPC methods.
+    'routing-history:pull': { request: RoutingHistoryPull; response: RoutingHistoryTransfer }
+    'routing-history:consumed': {
+        request: RoutingHistoryConsumed
+        response: RoutingHistoryConsumption
+    }
 
     // Node policy and availability
     'policy:get': { request: NodePolicyTarget; response: NodePolicyDocument }
@@ -191,6 +208,9 @@ export type WsInvokeResponse<C extends WsInvokeChannel> = WsInvokeChannelMap[C][
 // -----------------------------------------------------------------------------
 
 export interface WsPushChannelMap {
+    'routing:changed': RoutingHistoryRecord
+    'routing-history:ready': RoutingHistoryReady
+    'routing-history:committed': RoutingHistoryCommit
     'cluster:join-requests-changed': JoinRequestsSnapshot
     'cluster:remote-management-changed': RemoteManagementSnapshot
     // Nodes / cluster state

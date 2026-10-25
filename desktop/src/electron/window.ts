@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-import { BrowserWindow } from 'electron'
+import { BrowserWindow, type WebContents } from 'electron'
 import { join } from 'path'
 import { nativeImage } from 'electron'
 import { is } from '@electron-toolkit/utils'
@@ -9,6 +9,7 @@ import type { OverviewCommand, OverviewMessage } from '@/shared/types/overview'
 import { createStructuredLogger } from '@/shared/utils/log'
 import { openExternalSafe } from '@/electron/open-external'
 import { trackWindowVisibility } from '@/electron/window-visibility'
+import { getRoutingDelivery } from '@/electron/service-bridge/routing-delivery'
 
 const MIN_DIMENSION = 420
 
@@ -59,6 +60,9 @@ function revealWhenReady(window: BrowserWindow, label: string, retryLoad: () => 
     const clearTimers = (): void => {
         clearTimeout(fallbackTimer)
         clearTimeout(loadTimer)
+        // This existing close owner already shares the reveal lifecycle's
+        // window binding. Reveal-time timer cancellation is not destruction.
+        if (window.isDestroyed()) getRoutingDelivery().contextDestroyed(window)
     }
 
     const isUsable = (): boolean => !window.isDestroyed() && !window.webContents.isDestroyed()
@@ -160,6 +164,11 @@ function guardExternalNavigation(window: BrowserWindow): void {
 function attachWebContentsDiagnostics(window: BrowserWindow): void {
     const { webContents } = window
 
+    // A committed main-frame navigation replaces the document; in-page and
+    // canceled navigations do not. All three events end its transfer allowance.
+    webContents.on('did-navigate', () => getRoutingDelivery().contextDestroyed(window))
+    webContents.on('destroyed', () => getRoutingDelivery().contextDestroyed(window))
+
     webContents.on(
         'did-fail-load',
         (_event, errorCode, errorDescription, validatedURL, isMainFrame) => {
@@ -172,7 +181,9 @@ function attachWebContentsDiagnostics(window: BrowserWindow): void {
         }
     )
 
-    webContents.on('render-process-gone', (_event, details) => {
+    webContents.on('render-process-gone', function (this: WebContents, _event, details) {
+        const owner = BrowserWindow.fromWebContents(this)
+        if (owner) getRoutingDelivery().contextDestroyed(owner)
         log.error({
             sublevel: 'renderer-crash',
             message: `Renderer process gone: ${details.reason}`,
@@ -356,6 +367,7 @@ export function createTrayWindow(): BrowserWindow {
     // destroyed window reports isDestroyed() at once, but its `closed` event
     // follows later), so only clear the reference if it is still this window.
     window.on('closed', () => {
+        getRoutingDelivery().contextDestroyed(window)
         if (trayWindow === window) trayWindow = null
     })
 

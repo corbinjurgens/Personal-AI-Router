@@ -80,6 +80,23 @@ Electron main handles logical requests in
 
 See [Frontend API Reference](frontend-api.md) for the channel surface.
 
+Routing history uses sender-aware `routing-history:pull` and
+`routing-history:consumed` IPC rather than ordinary history data fanout.
+`routing-delivery.ts` keeps the shared bounded history banks and attaches only
+generation, cursor, lease and flags to each existing window registration. One
+scalar `routing-history:ready` token permits a pull; one outstanding transfer
+per renderer blocks further data copies until its exact generation/lease ack.
+The renderer validates and commits each packet before acknowledging it.
+
+Electron structured clone makes the transfer copy independent of the main
+source bank. The renderer's H allowance funds queued or delivered IPC bytes;
+renderer-internal memory after delivery belongs to that process. The existing
+window owner also releases a transfer on webContents destruction, renderer
+process loss, or committed main-frame document navigation (`did-navigate`).
+Canceled navigation, same-document navigation, load completion, unsubscribe and
+timeouts do not establish document destruction or release an outstanding loan.
+No per-renderer history cache or completion-attestation registry is required.
+
 ### Renderer to Electron
 
 `window.windowApi` is reserved for Electron-native operations:

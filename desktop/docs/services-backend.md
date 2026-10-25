@@ -13,6 +13,26 @@ Personal AI Router does not reimplement backend behavior in TypeScript. Electron
 process startup, translates JSON-RPC into the stable frontend contract, and
 projects backend notifications into renderer state.
 
+Routing history enters through a physical 33,558,528-byte newline frame cap on
+the service socket; ordinary messages keep their 8 MiB logical cap. Before
+generic parsing or raw trace, `routing-json.ts` checks every outer history
+method/ID candidate, rejects recursive duplicates, and strips unknown fields
+with bounded offsets and output scratch. Generated history calls use a disjoint
+`jh:` ordinal namespace; stale responses cannot resolve a later call. Invalid
+history quarantines/refetches history on the same connection without failing
+ordinary calls. Physical overflow closes through the existing reconnect owner.
+History request refusals have one outstanding reply slot, retained until the
+native write callback completes. Another history request requiring a refusal
+while that slot is occupied is a protocol violation: the client closes and
+reconnects through the same owner. Refusals never form an output backlog ahead
+of ordinary calls.
+
+The main history owner coalesces accepted records into packed bounded banks.
+History data bypasses ordinary push fanout and reaches a renderer only through
+its sender-validated pull/ack lease (see [Architecture](architecture.md)). Busy
+history initial loads retry with one bounded timer and remain loading. Routing
+diagnostics never alter inference, cancellation or accounting ownership.
+
 ## Runtime ownership
 
 `nvpair-service` is the only backend process Electron ever starts, and only when
