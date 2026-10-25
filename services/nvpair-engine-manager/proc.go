@@ -225,9 +225,10 @@ func linuxEngineImage(path, exe string) string {
 
 // isOurEngineImage reports whether the listener on our managed port is
 // running the same binary this service manages for the engine (st.binPath).
-// The compare is path-cleaned (symlinks resolved on Unix) so a PAIR-owned orphan on
-// our managed port is reclaimed by Stop, while an unrelated process that
-// merely grabbed the port is left for the caller to decline. An empty image
+// The compare uses file identity on Windows, canonical paths on Darwin and
+// symlink-resolved, case-sensitive paths on other Unix systems, allowing Stop
+// to reclaim a PAIR-owned orphan on our managed port while leaving an
+// unrelated listener for the caller to decline. An empty image
 // (e.g. a PID we can't introspect) never matches, so Stop fails closed.
 func isOurEngineImage(image, binPath string) bool {
 	return isOurEngineImageOn(image, binPath, runtime.GOOS)
@@ -239,6 +240,18 @@ func isOurEngineImageOn(image, binPath, platform string) bool {
 	}
 	image = normalizeEngineImage(image, platform)
 	binPath = filepath.Clean(binPath)
+	if platform == "windows" {
+		// Short names, junctions and symlinks can name the same executable.
+		// SameFile compares volume and file IDs on Windows, and returns false
+		// if either identity cannot be read. Never substitute a path/name or
+		// content comparison: distinct executable files are not our orphan.
+		imageInfo, err := os.Stat(image)
+		if err != nil || !imageInfo.Mode().IsRegular() {
+			return false
+		}
+		binInfo, err := os.Stat(binPath)
+		return err == nil && binInfo.Mode().IsRegular() && os.SameFile(imageInfo, binInfo)
+	}
 	if platform == "darwin" {
 		var err error
 		image, err = filepath.EvalSymlinks(image)
@@ -257,16 +270,13 @@ func isOurEngineImageOn(image, binPath, platform string) bool {
 		binInfo, binErr := os.Stat(binPath)
 		return strings.EqualFold(image, binPath) && imageErr == nil && binErr == nil && os.SameFile(imageInfo, binInfo)
 	}
-	if platform != "windows" {
-		if resolved, err := filepath.EvalSymlinks(image); err == nil {
-			image = resolved
-		}
-		if resolved, err := filepath.EvalSymlinks(binPath); err == nil {
-			binPath = resolved
-		}
-		return image == binPath
+	if resolved, err := filepath.EvalSymlinks(image); err == nil {
+		image = resolved
 	}
-	return strings.EqualFold(image, binPath)
+	if resolved, err := filepath.EvalSymlinks(binPath); err == nil {
+		binPath = resolved
+	}
+	return image == binPath
 }
 
 // isManagedInstallPath reports whether binPath is inside this engine's
@@ -285,20 +295,5 @@ func isManagedInstallPath(binPath, installDir string) bool {
 	if err != nil {
 		return false
 	}
-	// Resolve existing paths together so canonical image aliases cannot turn
-	// a symlink escaping the managed directory into install ownership.
-	if resolvedBin, err := filepath.EvalSymlinks(binAbs); err == nil {
-		resolvedDir, err := filepath.EvalSymlinks(dirAbs)
-		if err != nil {
-			return false
-		}
-		binAbs, dirAbs = resolvedBin, resolvedDir
-	} else if !os.IsNotExist(err) {
-		return false
-	}
-	rel, err := filepath.Rel(dirAbs, binAbs)
-	if err != nil || filepath.IsAbs(rel) || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return false
-	}
-	return true
+	return managedInstallPath(binAbs, dirAbs)
 }

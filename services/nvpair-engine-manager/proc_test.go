@@ -294,6 +294,14 @@ func TestIsManagedInstallPath(t *testing.T) {
 	base := t.TempDir()
 	inside := filepath.Join(base, "ollama", "bin", "ollama"+exeExt())
 	outside := filepath.Join(t.TempDir(), "ollama"+exeExt())
+	if err := os.MkdirAll(filepath.Dir(inside), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{inside, outside} {
+		if err := os.WriteFile(path, []byte("image fixture"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
 	if !isManagedInstallPath(inside, filepath.Join(base, "ollama")) {
 		t.Fatalf("managed child path %q was rejected", inside)
 	}
