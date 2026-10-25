@@ -120,9 +120,10 @@ export interface WsInvokeChannelMap {
     // Remove a node from the cluster (cluster-manager `nodes:remove`) and drop any
     // local manual discovery entry for it in the same call. Distinct from the
     // `nodes:remove` push (state update broadcast).
+    // `removed` reports cluster removal; manual cleanup failures are independent.
     'nodes:remove-member': {
         request: { nodeId: string }
-        response: { nodeId: string; removed: boolean }
+        response: { nodeId: string; removed: boolean; manualCleanupError?: string }
     }
 
     // Discovery
