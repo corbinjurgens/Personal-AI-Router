@@ -18,6 +18,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"nvpair-shared/noderec"
@@ -767,6 +768,96 @@ func TestPeerServiceClientSlotWait(t *testing.T) {
 				}
 			})
 		})
+	}
+}
+
+func TestPeerServiceClientSlotAcquiredRefusal(t *testing.T) {
+	f := newServiceClientFixture(t, http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		t.Error("refused request reached the destination")
+	}))
+	key := peerServiceKey{"peer", noderec.ServiceCluster}
+	identity, _, err := f.adapter.authority(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := f.adapter.health(key, identity)
+	test := func(name string, wait time.Duration) {
+		t.Run(name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				h.slots = make(chan struct{}, peerMaxConnsPerHost)
+				if wait > 0 {
+					for range peerMaxConnsPerHost {
+						h.slots <- struct{}{}
+					}
+					go func() { time.Sleep(wait); <-h.slots }()
+				}
+				refusal := errors.New("budget expired")
+				calls := 0
+				ctx := WithPeerSlotWait(context.Background(), 4*time.Second)
+				ctx = WithPeerSlotAcquired(ctx, func(req *http.Request, elapsed time.Duration) error {
+					calls++
+					if elapsed != wait || len(h.slots) == 0 {
+						t.Errorf("acquisition = %v, occupied slots %d; want %v with a slot held", elapsed, len(h.slots), wait)
+					}
+					req.Header.Set("X-Test-Budget", "updated")
+					return refusal
+				})
+				body := &serviceRequestBody{Reader: strings.NewReader("request")}
+				req, err := http.NewRequestWithContext(ctx, http.MethodPost, f.url, body)
+				if err != nil {
+					t.Fatal(err)
+				}
+				req.Header.Set("X-Test-Budget", "original")
+				response, err := f.adapter.Client("peer", noderec.ServiceCluster).Transport.RoundTrip(req)
+				if response != nil || !errors.Is(err, refusal) || calls != 1 {
+					t.Fatalf("response=%v err=%v callback calls=%d, want one refusal", response, err, calls)
+				}
+				if body.closed.Load() != 1 || req.Header.Get("X-Test-Budget") != "original" {
+					t.Fatalf("body closes=%d original header=%q, want one close and original header", body.closed.Load(), req.Header.Get("X-Test-Budget"))
+				}
+				wantHeld := 0
+				if wait > 0 {
+					wantHeld = peerMaxConnsPerHost - 1
+				}
+				if len(h.slots) != wantHeld {
+					t.Fatalf("occupied slots=%d, want %d after refusal", len(h.slots), wantHeld)
+				}
+				for range wantHeld {
+					<-h.slots
+				}
+				f.mu.Lock()
+				defer f.mu.Unlock()
+				if len(f.directCalls) != 0 || len(f.reverseCalls) != 0 {
+					t.Fatalf("refusal dialed: direct=%v reverse=%v", f.directCalls, f.reverseCalls)
+				}
+			})
+		})
+	}
+	test("free slot", 0)
+	test("slot released after waiting", 2*time.Second)
+}
+
+func TestPeerServiceClientSlotAcquiredUpdatesSentHeader(t *testing.T) {
+	f := newServiceClientFixture(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeServiceResponse(t, w, r.Header.Get("X-Test-Budget"))
+	}))
+	ctx := WithPeerSlotAcquired(context.Background(), func(req *http.Request, _ time.Duration) error {
+		req.Header.Set("X-Test-Budget", "updated")
+		return nil
+	})
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, f.url, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("X-Test-Budget", "original")
+	response, err := f.adapter.Client("peer", noderec.ServiceCluster).Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	body, err := io.ReadAll(response.Body)
+	if err != nil || string(body) != "updated" || req.Header.Get("X-Test-Budget") != "original" {
+		t.Fatalf("sent=%q err=%v original=%q, want updated/original", body, err, req.Header.Get("X-Test-Budget"))
 	}
 }
 

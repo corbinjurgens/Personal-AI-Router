@@ -502,15 +502,27 @@ func hybridDispatchPolicy(start time.Time, limits nodepolicy.Limits, rules nodep
 }
 
 // peerSlotContext uses the remaining hybrid queue allowance for the origin's
-// peer-service slot, leaving at least half the pre-output time for the
-// destination's strict admission and first response. Concrete and local
-// attempts retain their context.
+// peer-service slot, bounded by the shared pre-output deadline. Concrete and
+// local attempts retain their context.
 func peerSlotContext(ctx context.Context, policy dispatchPolicy, cand candidate, queueLeft, preOutputLeft time.Duration) (context.Context, time.Duration) {
 	if !policy.hybrid || cand.self || cand.peerUUID == "" {
 		return ctx, 0
 	}
-	wait := min(queueLeft, max(preOutputLeft/2, 0))
+	wait := min(queueLeft, max(preOutputLeft, 0))
 	return clustertrust.WithPeerSlotWait(ctx, wait), wait
+}
+
+// strictRequest deducts only actual slot acquisition time from the remaining
+// wait allowances. The absolute deadline already includes that elapsed time.
+func (policy dispatchPolicy) strictRequest(key nodepolicy.RoutingRequestKey, m nodepolicy.StrictAdmissionModel, queueLeft, coldLeft, slotWait time.Duration) (nodepolicy.StrictAdmissionRequest, bool) {
+	pre := time.Until(policy.deadline).Milliseconds()
+	if pre < 1 {
+		return nodepolicy.StrictAdmissionRequest{}, false
+	}
+	budget := func(d time.Duration) int { return int(min(max(d-slotWait, 0).Milliseconds(), pre)) }
+	return nodepolicy.StrictAdmissionRequest{Version: nodepolicy.StrictAdmissionVersion,
+		QueueBudgetMs: budget(queueLeft), ColdStartBudgetMs: budget(coldLeft), PreOutputBudgetMs: int(pre),
+		Request: key, Identity: m.Identity}, true
 }
 
 // publicChatSource supplies what a permitted public attempt needs: the
@@ -1160,18 +1172,8 @@ func (ctl *routingSpend) dispatch(f *facade, w http.ResponseWriter, r *http.Requ
 	spendWaits := func(d time.Duration) {
 		queueLeft, coldLeft = max(queueLeft-d, 0), max(coldLeft-d, 0)
 	}
-	// reserved is time the attempt may still spend before the destination
-	// receives the request (a peer slot wait). The destination's budgets are
-	// reduced by it, so waits on both sides never exceed one allowance.
-	strictRequestFor := func(m nodepolicy.StrictAdmissionModel, reserved time.Duration) (nodepolicy.StrictAdmissionRequest, bool) {
-		pre := (time.Until(deadline) - reserved).Milliseconds()
-		if pre < 1 {
-			return nodepolicy.StrictAdmissionRequest{}, false
-		}
-		budget := func(d time.Duration) int { return int(min(max(d-reserved, 0).Milliseconds(), pre)) }
-		return nodepolicy.StrictAdmissionRequest{Version: nodepolicy.StrictAdmissionVersion,
-			QueueBudgetMs: budget(queueLeft), ColdStartBudgetMs: budget(coldLeft), PreOutputBudgetMs: int(pre),
-			Request: ctl.key, Identity: m.Identity}, true
+	strictRequestFor := func(m nodepolicy.StrictAdmissionModel, slotWait time.Duration) (nodepolicy.StrictAdmissionRequest, bool) {
+		return policy.strictRequest(ctl.key, m, queueLeft, coldLeft, slotWait)
 	}
 	// dispatchPublic offers the tier's API entries once, in configured order,
 	// after the first round of local and peer candidates. A candidate that
@@ -1666,10 +1668,9 @@ func (ctl *routingSpend) dispatch(f *facade, w http.ResponseWriter, r *http.Requ
 		// next.
 		// The request travels on its own context so the slot bound below never
 		// reassigns attemptCtx, which the target watcher already reads.
-		// The destination's budgets are reduced by the origin's slot bound
-		// because acquisition happens inside the transport after the strict
-		// header is written. ErrPeerSlotOccupied costs one hybrid attempt.
-		requestCtx, peerSlotWait := peerSlotContext(attemptCtx, policy, cand, queueLeft, time.Until(deadline))
+		// ErrPeerSlotOccupied costs one hybrid attempt. The transport rebuilds
+		// the strict header after acquisition using the actual time spent.
+		requestCtx, _ := peerSlotContext(attemptCtx, policy, cand, queueLeft, time.Until(deadline))
 		attemptReq := r.WithContext(requestCtx)
 		attemptReq.Header = r.Header.Clone()
 		if streamRequest.protocol != streamProtocolUnknown {
@@ -1687,15 +1688,24 @@ func (ctl *routingSpend) dispatch(f *facade, w http.ResponseWriter, r *http.Requ
 		if policy.hybrid && !cand.self {
 			// The first production producer of the strict header. The
 			// destination revalidates identity, origin and body itself.
-			header := ""
-			if m, ok := strictFor[hybridCandidateKey(cand)]; ok {
-				if req, ok := strictRequestFor(m, peerSlotWait); ok {
-					if raw, err := json.Marshal(req); err == nil {
-						header = string(raw)
-					}
+			m, available := strictFor[hybridCandidateKey(cand)]
+			prepareStrictHeader := func(out *http.Request, slotWait time.Duration) error {
+				if !available {
+					return errStrictUnavailable
 				}
+				req, ok := strictRequestFor(m, slotWait)
+				if !ok {
+					ctl.expireBeforeOutput()
+					return context.DeadlineExceeded
+				}
+				raw, err := json.Marshal(req)
+				if err != nil {
+					return err
+				}
+				out.Header.Set(nodepolicy.StrictAdmissionHeader, string(raw))
+				return nil
 			}
-			if header == "" {
+			if err := prepareStrictHeader(attemptReq, 0); err != nil {
 				att.observeAttempt(routingAttemptResult{factRejected, factUnknown, 0, true})
 				cancelAttempt()
 				att.finished(publicAttemptTerminal{})
@@ -1709,7 +1719,9 @@ func (ctl *routingSpend) dispatch(f *facade, w http.ResponseWriter, r *http.Requ
 				ctl.observeIngress(routingIngressResult{factFailed, factUnknown, finalStatus})
 				break
 			}
-			attemptReq.Header.Set(nodepolicy.StrictAdmissionHeader, header)
+			if cand.peerUUID != "" {
+				attemptReq = attemptReq.WithContext(clustertrust.WithPeerSlotAcquired(requestCtx, prepareStrictHeader))
+			}
 		}
 		retry := false
 		retryBusy := false

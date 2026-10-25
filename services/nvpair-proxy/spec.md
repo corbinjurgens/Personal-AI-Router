@@ -677,12 +677,15 @@ local-only; an origin different from the authenticated peer is refused with
 403 before body buffering.
 
 A hybrid peer-service slot waits for at most the smaller of remaining queue
-allowance and half the remaining pre-output time (`peerSlotContext`). Zero
+allowance and remaining pre-output time (`peerSlotContext`). Zero
 means immediate refusal when occupied; `ErrPeerSlotOccupied` consumes an
-attempt. The slot allowance is reserved out of the destination's queue, cold
-and pre-output budgets before sending, so origin and destination cannot each
-spend the full allowance. Concrete peer-slot acquisition keeps its existing
-blocking behavior, bounded by the request context.
+attempt. After acquisition, the transport's `WithPeerSlotAcquired` hook rebuilds
+the strict envelope before dialing: queue and cold budgets deduct actual slot
+acquisition time, and pre-output uses the remaining absolute request deadline.
+An exhausted deadline refuses dispatch and releases the slot. The completed
+peer attempt charges elapsed time once to the request's remaining allowances.
+Concrete peer-slot acquisition keeps its existing blocking behavior, bounded by
+the request context.
 
 The driver's public branch considers the requested tier's API entries in
 configured order after the first local/peer round, sharing the request's
