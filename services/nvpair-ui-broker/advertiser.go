@@ -66,7 +66,7 @@ func (b *Broker) engineManagerPorts() (httpPort, controlPort int) {
 // discovery consolidation landed and the binary was deleted.)
 func (b *Broker) runAutoAdvertise(ctx context.Context) {
 	client := &http.Client{Timeout: 2 * time.Second}
-	ticker := time.NewTicker(autoAdvertiseInterval)
+	ticker := time.NewTicker(b.advertisementInterval())
 	defer ticker.Stop()
 
 	b.reconcileAdvertise(client)
@@ -145,7 +145,7 @@ func (b *Broker) ollamaFacadeIsPendingBackend() bool {
 // proxies are.
 func (b *Broker) runAutoAdvertiseLMStudio(ctx context.Context) {
 	client := &http.Client{Timeout: 2 * time.Second}
-	ticker := time.NewTicker(autoAdvertiseInterval)
+	ticker := time.NewTicker(b.advertisementInterval())
 	defer ticker.Stop()
 
 	b.reconcileAdvertiseLMStudio(client)
@@ -205,7 +205,7 @@ func (b *Broker) reconcileAdvertiseLMStudio(client *http.Client) {
 // recorded in its runtime profile, without compatibility-port reconciliation.
 func (b *Broker) runAutoAdvertiseEngine(ctx context.Context, profile engineProxyProfile) {
 	client := &http.Client{Timeout: 2 * time.Second}
-	ticker := time.NewTicker(autoAdvertiseInterval)
+	ticker := time.NewTicker(b.advertisementInterval())
 	defer ticker.Stop()
 
 	b.reconcileAdvertiseEngine(profile, client)

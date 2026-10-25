@@ -44,8 +44,12 @@ func main() {
 	schedulerPath := flag.String("scheduler-path", "", "path to nvpair-job-scheduler binary (default: ./nvpair-job-scheduler in the current working directory)")
 	clusterDirFlag := flag.String("cluster-dir", "", "cluster config dir (node.crt/node.key + trusted/) the broker passes to its mDNS workers (nvpair-errors, nvpair-workload-manager, nvpair-node-info, nvpair-node-scanner, nvpair-manual-nodes) to enable cluster-scoped inter-node mTLS; defaults to the per-user Nvidia Corporation/Personal AI Router cluster/ dir, where nvpair-cluster-manager mints them")
 	showVersion := flag.Bool("version", false, "print version and exit")
+	residentRetryInterval, advertiseInterval := registerTestWaitFlags(flag.CommandLine)
 	resolveLevel := applog.RegisterFlag(nil, slog.LevelInfo)
 	flag.Parse()
+	if err := validateTestWaitIntervals(*residentRetryInterval, *advertiseInterval); err != nil {
+		log.Fatal(err)
+	}
 	if err := validateEngineManagerControlHost(*engineMgrControlHost); err != nil {
 		log.Fatal(err)
 	}
@@ -288,6 +292,8 @@ func main() {
 		clusterMgr:           resolvedClusterMgr,
 		scheduler:            resolvedScheduler,
 		clusterDir:           clusterDir,
+		residentRetryDelay:   *residentRetryInterval,
+		advertiseCadence:     *advertiseInterval,
 	}
 	b, err := newMainBroker(lifetime, paths, transport, *ipcPath != "")
 	if err != nil {

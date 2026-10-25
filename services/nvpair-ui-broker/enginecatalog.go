@@ -264,7 +264,7 @@ func (b *Broker) dynamicEngineAvailabilityRunners() []func(context.Context) {
 
 func (b *Broker) runAutoAdvertiseDynamicEngine(ctx context.Context, profile engineProxyProfile) {
 	client := &http.Client{Timeout: 2 * time.Second}
-	ticker := time.NewTicker(autoAdvertiseInterval)
+	ticker := time.NewTicker(b.advertisementInterval())
 	defer ticker.Stop()
 	b.reconcileAdvertiseDynamicEngine(profile, client)
 	for {
