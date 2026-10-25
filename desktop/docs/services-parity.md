@@ -9,7 +9,7 @@ This document records the current integration status between Personal AI Router
 and the `services/` backend. It is a present-state reference, not a release
 history.
 
-- Backend versions: `services/versions.json` (rendered in `docs/services-api.md`)
+- Backend versions: `services/versions.json`
 - Method-level contract: `docs/services-api.md`
 - Exceptions: `docs/service-contract-exceptions.json`
 - Integration runbook: `docs/services-backend.md`
@@ -37,10 +37,40 @@ owns the transaction; clients correlate receipts rather than coordinate engines.
 | Engine version metadata    | Backend-limited                 | The backend status surface does not provide a complete version/install-owner/update contract                                                    |
 | Errors                     | Complete                        | Broker-relayed registry with peer synchronization                                                                                               |
 | Workloads                  | Complete after subscription     | Local and peer workload events feed one Electron catalog                                                                                        |
+| Routing history            | Consumer banks integrated; presentation separate | Origin-local public subscribe/unsubscribe/get-initial/changed through the service; desktop demand/pull/consumed and TUI reconnecting wire are active |
 | Cluster pairing            | Complete                        | PIN pairing, identity, membership, leave, and removal                                                                                           |
 | Cluster transport security | Backend-owned                   | Node-to-node transport security, including the proxies' cluster-mTLS inference ingress, is entirely backend; Personal AI Router implements none |
 | Settings                   | Partial                         | Cluster identity plus per-engine ports and engine arguments, local and remote; inert backend settings are not surfaced                            |
 | Model catalog search       | Backend-owned                   | `engine:catalog` serves the locked Ollama list and the cached LM Studio and llama.cpp catalogs, and searches Hugging Face for llama.cpp         |
+
+## Routing history availability and limits
+
+Production connects proxy facts, broker accepted windows, the service relay and
+desktop/TUI consumer banks. Public `routing:subscribe`, `routing:unsubscribe`
+and `routing:get-initial` use empty-object params and the initial reply shape
+`{requests: RoutingHistoryRecord[]}`; subscribed clients receive full-record
+`routing:changed`. Private window/request/end/accepted methods never reach
+clients, peers, managers or scheduler. The desktop already relays typed
+`routing:active`/`routing:cancel`; history adds no cancel action.
+
+History is private to the origin machine and memory-only. Broker restart clears
+it; proxy death can lose unsent/partial windows while preserving accepted rows.
+Clients clear banks on disconnect and resubscribe/refetch on reconnect. The
+newest 256 requests retain at most 32 attempts with original indexes and
+`droppedAttempts`. A model-less local destination keeps its node/engine and null
+model (`model not specified`); API models remain required. Money stays exact
+decimal nano-USD strings, waits are measured, and detached workload associations
+remain historical. Completed delivery can have failed accounting. See
+[the contract](../../services/nvpair-proxy/spec.md#1252-origin-local-routing-history)
+for amount meanings and merge/association rules.
+
+Eight service writer leases and one global initial transfer bound simultaneous
+history writes without a subscriber cap. Busy keeps desktop/TUI loading with
+validated rows and one bounded retry timer; ordinary RPC and inference continue.
+Bank/frame capacities are representation limits, not RSS claims. Electron's
+ready/pull/consumed loans are separate from the service relay. Original Tasks 4/5
+still own desktop Settings/card and TUI Routing-tab presentation. No SC-b or
+public-provider activation, native acceptance or whole-J318 completion is implied.
 
 ## Engine switch recovery limits
 
@@ -66,7 +96,8 @@ acceptance.
 
 ## Supervision
 
-`nvpair-ui-broker` is the sole Electron child. It owns:
+Electron starts only `nvpair-service` when needed; the service owns
+`nvpair-ui-broker`. The broker owns:
 
 - `nvpair-proxy`, one process hosting a facade per enabled engine, under one
   supervisor;
@@ -80,8 +111,8 @@ acceptance.
 - `nvpair-errors`;
 - `nvpair-job-scheduler`.
 
-Worker crashes are handled by the broker. Electron reports a broker crash and
-allows the user to restart the service.
+Worker crashes are handled by the broker; broker restarts belong to the service.
+Electron reports service connection state and exposes explicit service controls.
 
 ## Discovery and nodes
 

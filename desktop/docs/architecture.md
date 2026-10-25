@@ -97,6 +97,34 @@ Canceled navigation, same-document navigation, load completion, unsubscribe and
 timeouts do not establish document destruction or release an outstanding loan.
 No per-renderer history cache or completion-attestation registry is required.
 
+The production chain is typed proxy facts → complete private frozen window →
+broker accepted bank → service shared relay → desktop/TUI consumer banks.
+Broker policy activation binds the proxy source; only a complete matching
+window/end can commit and receive `routing/history-accepted`. Private
+`routing/history-window`, `routing/request`, `routing/history-window-end` and
+`routing/history-accepted` are never forwarded to clients, peers, managers or
+scheduler. The public origin-local wire is `routing:subscribe`,
+`routing:unsubscribe`, `routing:get-initial` and full-record `routing:changed`.
+The service owns one broker subscription; Electron's demand listener owns its
+service subscription, and ready/pull/consumed governs individual renderer loans.
+
+History stays in memory: broker restart clears it; proxy death preserves only
+previously accepted rows and can lose unsent/partial windows. Client reconnect
+uses a new generation and subscribe-before-baseline merge. Every bank keeps
+newest 256 requests with at most 32 attempts each. No inference/ledger state
+is reconstructed from those trimmed rows. Original Tasks 4/5 presentation is
+separate from the activated consumer banks.
+
+History capacity bounds admitted representations, not RSS. Desktop main has
+`3W+2H+M+P+C` = 151,269,376 bytes; each subscribed renderer has
+`3W+H+P+C` = 84,156,416 bytes, with at most 32 bytes of scalar state per existing
+window registration in main. Native facts and runtime/allocator overhead are
+separate. The service has eight concurrent history writer leases, no subscriber
+cap, and one global initial transfer. On busy, desktop/TUI retain rows and stay
+loading with one bounded retry timer while ordinary traffic progresses. See
+[the complete capacity table](../../services/nvpair-proxy/spec.md#1252-origin-local-routing-history)
+for constants and borrower lifetimes.
+
 ### Renderer to Electron
 
 `window.windowApi` is reserved for Electron-native operations:

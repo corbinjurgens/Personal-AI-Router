@@ -47,7 +47,7 @@ the subscription and cancels its busy retry timer. Existing `active()` and
 `cancel(request)` controls retain their behavior.
 
 The transport subscribes before initial hydration, merges accepted revisions by
-full request identity, retains newest history with a fixed window bound, and
+full request identity, retains the newest 256 requests, and
 rejects stale or terminal-regressing updates. A baseline is sent as leased
 packed-record packets followed by a scalar end; its global initial lease stays
 pinned between packets and through the end acknowledgement. Concurrent initial
@@ -55,6 +55,41 @@ loads remain loading with validated rows retained and one retry timer at
 250/500/1000 ms, then 1000 ms until available. Generation changes, disconnect
 and unsubscribe cancel the retry. A stopped renderer may hold its transfer
 indefinitely while other renderers and ordinary invokes continue.
+
+The service wire is `routing:subscribe {}`, `routing:unsubscribe {}` and
+`routing:get-initial {}`, each with the initial reply shape
+`{requests: RoutingHistoryRecord[]}`, plus full-record `routing:changed`
+notifications. The renderer API intentionally returns commit/loading tokens
+instead of those wire DTOs. Main's demand listener enables the service
+subscription only while a renderer requests history; this is not an
+unconditional renderer subscription. `routing-history:ready`,
+`routing-history:pull` and `routing-history:consumed` are Electron IPC controls,
+not broker methods. The private window/request/end/accepted methods never
+reach renderer clients or peers.
+
+Rows retain newest 32 attempts with original indexes and `droppedAttempts`.
+Null local `destination.model` retains the actual node/engine and is labelled
+`model not specified`; API models remain required. Nullable keys stay present.
+Money is exact decimal nano-USD strings, never `Number`/floating point: ceiling
+is the tightest paid limit, granted is cumulative liability upper bounds,
+held includes uncertain holds, and charged is known settled spend. Null is
+unknown/inapplicable; zero is known zero. Do not sum trimmed attempts or infer
+refunds. Completed delivery remains completed when accounting fails.
+Admission and first-byte waits are measured milliseconds; first-byte is null
+until a successful raw-body event and does not prove delivery. Workload matching
+requires full origin/run/engine/id plus the owner-established local attempt;
+detached associations are historical and never imply later API work is live.
+Trimming the associated attempt forces wire `attached=false`.
+
+History is private to this machine and memory-only. Broker restart clears it;
+proxy death can lose unsent/partial windows while previously accepted rows
+remain. Client disconnect clears its banks and generation; reconnect rehydrates.
+Busy (`-32096`, `routing history busy; retry`) retains loading and validated
+rows. Original Tasks 4/5 still own desktop Settings/card and TUI Routing-tab
+presentation. These APIs add no history cancel action, SC-b recovery or
+public-provider activation. See the
+[history contract](../../services/nvpair-proxy/spec.md#1252-origin-local-routing-history)
+for the full wire semantics and capacity ownership.
 
 ### `pairApi.app`
 

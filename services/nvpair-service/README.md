@@ -20,6 +20,54 @@ another client┘   (attach / detach)    (owns broker stdio)  └─ … every o
 The broker is unchanged: it still speaks newline-delimited JSON-RPC 2.0 over
 stdio to a single parent, which is now this process.
 
+## Origin-local routing history relay
+
+Production constructs the history-aware service before starting broker
+supervision or accepting clients. It owns one broker history subscription and
+one cache of the newest 256 records; the broker remains the accepted-history
+authority. Local clients use `routing:subscribe {}`, `routing:unsubscribe {}` and
+`routing:get-initial {}` (reply shape `{requests: RoutingHistoryRecord[]}`),
+and subscribed clients receive full-record `routing:changed` notifications.
+Subscription state is independent of other domains; subscribe before initial
+hydration and merge concurrent pushes by complete origin/run/request key and seq.
+
+Private `routing/history-window`, `routing/request`,
+`routing/history-window-end` and `routing/history-accepted` never reach clients,
+peers, managers or scheduler and cannot be injected through this endpoint.
+Electron's `routing-history:ready`, `routing-history:pull` and
+`routing-history:consumed` controls belong to its main/preload/renderer boundary;
+they are not service methods. TUI consumes the public service wire directly.
+
+There is no subscriber cap. Existing client registrations carry at most 32 bytes
+of history scalar cursor/flags each. At most eight history writer leases run
+concurrently, including one possible global initial transfer. Waiting clients
+advance fairly through the existing registry without a per-client data bank or
+waiter goroutine. A pinned initial or unavailable writer returns fixed
+`-32096`/`routing history busy; retry`; desktop/TUI retain validated rows and
+stay loading, with one retry timer at 250/500/1000 ms then one second until
+progress or cancellation. Other RPC and inference continue.
+Actual write completion, not logical timeout,
+releases borrowed storage.
+
+Raw history is guarded before generic parsing/logging; unknown fields are
+stripped and recursive duplicates rejected. Record/private values are bounded
+at 128 KiB, initial values at 32 MiB and physical newline frames at 33,558,528
+bytes. Ordinary service messages retain their 8 MiB logical cap. History's
+service capacity `3W+8P+2H+M+S+C` is 152,281,088 bytes, plus client scalars;
+this bounds admitted representations, not process RSS. Native producer facts,
+ordinary queues and baseline runtime memory are separate. See the
+[capacity and semantic contract](../nvpair-proxy/spec.md#1252-origin-local-routing-history)
+for the constants, the 32-attempt limit, exact money, waits and workload
+association rules.
+
+History is memory-only. Broker restart clears history and resets the relay;
+client disconnect clears its consumer generation, and reconnect resubscribes
+and fetches a fresh baseline. Proxy death preserves previously accepted rows
+but can lose unsent/partial windows; retirement proves no delivery or charge.
+Model-less local attempts preserve node/engine and null model (`model not specified`).
+Desktop/TUI consumer banks are activated; original Tasks 4/5 presentation remains
+separate. The relay adds no history cancel action or SC-b/public-provider support.
+
 ## Endpoint
 
 | Platform | Endpoint | Access |

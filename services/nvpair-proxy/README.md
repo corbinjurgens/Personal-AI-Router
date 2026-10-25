@@ -45,6 +45,39 @@ serialization are outside the inference byte root; live canonical registry
 entries and `routing/active` copies/encoding are charged to it. Queued identifiers and finished-model
 timestamps own small copies rather than retaining request storage.
 
+## Origin-local routing history
+
+One process-lifetime copier reads bounded, typed request facts captured after
+canonical registration and before body preparation. It runs independently of
+inference and publishes frozen windows to the local broker. Requests refused
+before registration are outside history. No prompt, response body, raw error,
+credential or provider configuration is retained in this projection.
+
+The private notifications `routing/history-window`, `routing/request` (one full
+record), and `routing/history-window-end` form one generation. The broker
+stages the complete window, validates its already acknowledged process/origin/run
+binding, commits it, then replies with `routing/history-accepted`. Unacknowledged
+windows replay on the single five-second reconciliation timer with the same
+generation. These methods never reach clients, peers, managers or the scheduler;
+clients use the broker's `routing:subscribe`, `routing:unsubscribe`,
+`routing:get-initial` and `routing:changed` surface through `nvpair-service`.
+
+History keeps the newest 256 requests and the newest 32 attempts per request,
+preserving original indexes and `droppedAttempts`. A model-less local attempt
+retains its actual node/engine with `destination.model=null`; its presentation
+label is `model not specified`. API destinations require a model.
+Money is an exact decimal nano-USD string or null, never inferred from the
+trimmed attempt list. See [the history contract](spec.md#1252-origin-local-routing-history)
+for ordering, waits, workload linkage, amount meanings and capacity ownership.
+
+History is memory-only. Proxy death can lose unsent facts and incomplete
+windows; the broker preserves previously accepted rows and retires that run's
+open presentation records. Broker restart clears history. Diagnostics neither
+replay inference nor invent delivery or charges. Desktop/TUI consumer banks are
+wired; desktop Settings/card presentation and the TUI Routing tab remain
+separate original Tasks 4/5. This does not enable public providers or SC-b
+same-model continuation.
+
 ## Local execution measurements
 
 The destination records each actual local inference dispatch, including a failed
@@ -385,8 +418,9 @@ SC-a never dispatches again after commit. A peer or engine loss mid-stream
 ends a managed OpenAI stream with an error frame plus `[DONE]`, not a pause,
 until SC-b (Ollama uses its error object). Endings are best effort when delivery
 fails. Qualified same-model continuation
-(SC-b), its attempt history and UI, and real-engine/native acceptance remain
-pending. Destination ingress remains local-only with no onward dispatch;
+(SC-b) and real-engine/native acceptance remain pending. Origin-local history
+is available to consumer banks independently; its presentation remains separate.
+Destination ingress remains local-only with no onward dispatch;
 recognizing a terminal frame does not resolve an uncertain strict admission
 hold. Non-streaming whole-body recovery remains outside SC-a.
 
