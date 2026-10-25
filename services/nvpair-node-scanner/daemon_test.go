@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -105,8 +106,22 @@ func TestReloadIdentityAdoptsClusterPrincipal(t *testing.T) {
 // discovered/updated browse event for our own uuid is a no-op on the directory.
 func TestSelfNotEvictedByBrowse(t *testing.T) {
 	d := newSelfTestDaemon("self-uuid", "192.168.1.17")
+	var publicationReads atomic.Int32
+	intercept := serviceBuildTransport(func(r *http.Request) (*http.Response, error) {
+		if r.Method != http.MethodGet || r.URL.String() != "http://127.0.0.1:14318/v1/node-info" {
+			t.Error("unexpected publication HTTP request")
+			return nil, fmt.Errorf("publication fixture refuses unexpected request")
+		}
+		publicationReads.Add(1)
+		return serviceBuildResponse(`{"hostUuid":"self-uuid"}`, http.StatusOK), nil
+	})
+	d.http.Transport = intercept
+	d.modelsHTTP.Transport = intercept
 	d.reg.register(noderec.RegisterParams{Service: noderec.ServiceNodeInfo, Port: 14318})
 	d.publishSelf()
+	if publicationReads.Load() != 1 {
+		t.Fatalf("intercepted publication reads = %d, want 1", publicationReads.Load())
+	}
 	if _, ok := d.dir.get("self-uuid"); !ok {
 		t.Fatal("publishSelf should put the local node in the directory")
 	}
@@ -126,6 +141,9 @@ func TestSelfNotEvictedByBrowse(t *testing.T) {
 		t.Error("self entry disappeared after a self 'discovered' browse event")
 	} else if n.Name != "myhost" {
 		t.Errorf("self entry Name = %q, want the registry-driven name", n.Name)
+	}
+	if publicationReads.Load() != 1 {
+		t.Fatalf("self browse events repeated publication HTTP: reads=%d", publicationReads.Load())
 	}
 }
 
@@ -353,43 +371,96 @@ func TestEnrichFallsBackToASecondPublishedAddress(t *testing.T) {
 
 // TestReachableSelfDialsLoopback pins the uuid-keyed self probe: when the
 // threshold-missed record is this host, reachable dials loopbackHost rather than
-// the advertised LAN ip=. A hostname-keyed browse filter is not required — and
+// the advertised peer endpoint. A hostname-keyed browse filter is not required — and
 // would wrongly drop a peer that merely shares our instance name.
 func TestReachableSelfDialsLoopback(t *testing.T) {
-	const selfUUID = "self-uuid"
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/v1/node-info" {
-			http.NotFound(w, r)
-			return
+	const selfUUID, peerUUID = "self-uuid", "peer-uuid"
+	const peerIP = "127.0.0.2"
+	var selfHits, peerHits, selfConnections, peerConnections atomic.Int32
+	newServer := func(listener net.Listener, uuid string, hits, connections *atomic.Int32) *httptest.Server {
+		t.Helper()
+		return &httptest.Server{
+			Listener: listener,
+			Config: &http.Server{
+				Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					if r.Method != http.MethodGet || r.URL.Path != "/v1/node-info" {
+						t.Errorf("unexpected request to %s: %s %s", uuid, r.Method, r.URL.Path)
+						http.NotFound(w, r)
+						return
+					}
+					if err := json.NewEncoder(w).Encode(NodeInfoResponse{HostUUID: uuid}); err != nil {
+						t.Errorf("encode %s identity: %v", uuid, err)
+						return
+					}
+					hits.Add(1)
+				}),
+				ConnState: func(_ net.Conn, state http.ConnState) {
+					if state == http.StateNew {
+						connections.Add(1)
+					}
+				},
+			},
 		}
-		_ = json.NewEncoder(w).Encode(NodeInfoResponse{HostUUID: selfUUID})
-	}))
-	defer srv.Close()
-	_, portStr, err := net.SplitHostPort(srv.Listener.Addr().String())
+	}
+	selfListener, err := net.Listen("tcp4", "127.0.0.1:0")
 	if err != nil {
-		t.Fatalf("split stub addr: %v", err)
+		t.Fatalf("listen for self: %v", err)
+	}
+	selfServer := newServer(selfListener, selfUUID, &selfHits, &selfConnections)
+	defer selfServer.Close()
+	_, portStr, err := net.SplitHostPort(selfListener.Addr().String())
+	if err != nil {
+		t.Fatalf("split self listener address: %v", err)
 	}
 	port, err := strconv.Atoi(portStr)
 	if err != nil {
-		t.Fatalf("stub port: %v", err)
+		t.Fatalf("self listener port: %v", err)
 	}
+	switch port {
+	case 11434, 1234, 1235, 8080, 8081, 14318, 14319, 14320, 14321, 14322, 14323:
+		t.Fatalf("fixture selected protected port %d", port)
+	}
+	peerListener, err := net.Listen("tcp4", net.JoinHostPort(peerIP, portStr))
+	if err != nil {
+		t.Fatalf("listen for peer on the same private port: %v", err)
+	}
+	peerServer := newServer(peerListener, peerUUID, &peerHits, &peerConnections)
+	defer peerServer.Close()
+	selfServer.Start()
+	peerServer.Start()
 
-	d := newSelfTestDaemon(selfUUID, "192.0.2.1")
-	// Advertise an unroutable DOCUMENTATION address so a LAN dial cannot succeed;
-	// the stub only listens on loopback.
+	d := newSelfTestDaemon(selfUUID, peerIP)
+	d.http = selfServer.Client()
+	d.http.Timeout = nodeInfoFetchTimeout
+	// Both possible dial addresses are owned; the UUID must choose between them.
 	self := RawNode{
 		ID:  "myhost",
-		TXT: []string{"v=1", "uuid=" + selfUUID, "ip=192.0.2.1", fmt.Sprintf("ni=%d", port)},
+		TXT: []string{"v=1", "uuid=" + selfUUID, "ip=" + peerIP, fmt.Sprintf("ni=%d", port)},
 	}
 	if !d.reachable(self) {
-		t.Fatal("self record must stay reachable via loopback when LAN ip= is unroutable")
+		t.Fatal("self record must reach its own loopback identity despite advertising the peer address")
 	}
+	if alive, conclusive := d.identityAlive(noderec.ParseTXT(self.TXT), []string{loopbackHost}); !alive || !conclusive {
+		t.Fatalf("self identity = %v,%v, want alive and conclusive", alive, conclusive)
+	}
+	if selfHits.Load() != 2 || selfConnections.Load() < 2 || peerHits.Load() != 0 || peerConnections.Load() != 0 {
+		t.Fatalf("self phase: self identity hits=%d, self connections=%d, peer identity hits=%d, peer connections=%d",
+			selfHits.Load(), selfConnections.Load(), peerHits.Load(), peerConnections.Load())
+	}
+	selfConnectionsBeforePeer := selfConnections.Load()
 
 	peer := RawNode{
 		ID:  "myhost", // same instance name as self — must not be treated as us
-		TXT: []string{"v=1", "uuid=peer-uuid", "ip=192.0.2.1", fmt.Sprintf("ni=%d", port)},
+		TXT: []string{"v=1", "uuid=" + peerUUID, "ip=" + peerIP, fmt.Sprintf("ni=%d", port)},
 	}
-	if d.reachable(peer) {
-		t.Error("a same-hostname peer advertising an unroutable LAN ip must not inherit the self loopback dial")
+	if !d.reachable(peer) {
+		t.Fatal("same-hostname peer must reach the advertised peer identity")
+	}
+	if alive, conclusive := d.identityAlive(noderec.ParseTXT(peer.TXT), []string{peerIP}); !alive || !conclusive {
+		t.Fatalf("peer identity = %v,%v, want alive and conclusive", alive, conclusive)
+	}
+	if selfHits.Load() != 2 || peerHits.Load() != 2 || peerConnections.Load() < 2 || selfConnections.Load() != selfConnectionsBeforePeer {
+		t.Fatalf("peer phase: self identity hits=%d, peer identity hits=%d, peer connections=%d, self connections=%d (before peer=%d)",
+			selfHits.Load(), peerHits.Load(), peerConnections.Load(), selfConnections.Load(), selfConnectionsBeforePeer)
 	}
 }

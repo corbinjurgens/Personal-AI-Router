@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net"
 	"net/http"
@@ -16,6 +17,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -81,25 +83,70 @@ func TestNodeInfoSilenceWhenNothingChanges(t *testing.T) {
 	}
 }
 
-// TestNodeInfoConnectGivesUpBeforeTheRequestBudget covers the split itself. The
-// address is reserved for documentation and is routed nowhere, so connecting to
-// it either fails immediately (the local network says so) or hangs — and hanging
-// is the case that mattered: it must end at the connect budget rather than
-// consume the whole request timeout the enrichment client allows.
+// TestNodeInfoConnectGivesUpBeforeTheRequestBudget exercises the real dialer's
+// connect budget during controlled resolution, without sending DNS or TCP
+// packets. It does not measure a kernel SYN drop.
 func TestNodeInfoConnectGivesUpBeforeTheRequestBudget(t *testing.T) {
 	if nodeInfoDialTimeout >= nodeInfoFetchTimeout {
 		t.Fatalf("a connect budget of %v inside a request budget of %v splits nothing",
 			nodeInfoDialTimeout, nodeInfoFetchTimeout)
 	}
 
-	start := time.Now()
-	conn, err := nodeInfoTransport(nil).DialContext(context.Background(), "tcp", "192.0.2.1:14300")
-	if err == nil {
-		_ = conn.Close()
-		t.Fatal("nothing may answer at a documentation address")
+	dialer := nodeInfoDialer()
+	var connectAttempted atomic.Bool
+	// A static-host answer can bypass DNS; refuse before any socket connects.
+	dialer.ControlContext = func(context.Context, string, string, syscall.RawConn) error {
+		connectAttempted.Store(true)
+		return errors.New("socket connect forbidden in controlled resolver test")
 	}
-	if elapsed := time.Since(start); elapsed >= nodeInfoFetchTimeout {
-		t.Fatalf("connect took %v; it must give up at the connect budget (%v), not the request budget (%v)",
+	resolverReached := make(chan struct{})
+	resolverStopped := make(chan struct{})
+	var reached, stopped sync.Once
+	dialer.Resolver = &net.Resolver{
+		PreferGo: true,
+		Dial: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			reached.Do(func() { close(resolverReached) })
+			<-ctx.Done()
+			stopped.Do(func() { close(resolverStopped) })
+			return nil, ctx.Err()
+		},
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), nodeInfoFetchTimeout)
+	defer cancel()
+	start := time.Now()
+	conn, err := dialer.DialContext(ctx, "tcp4", "node-info-connect-budget.invalid.:14300")
+	elapsed := time.Since(start)
+	if connectAttempted.Load() {
+		t.Fatal("socket connect guard reached; want the controlled DNS timeout")
+	}
+	if err == nil {
+		if closeErr := conn.Close(); closeErr != nil {
+			t.Errorf("close unexpected connection: %v", closeErr)
+		}
+		t.Fatal("connect succeeded while resolution was held until cancellation")
+	}
+	select {
+	case <-resolverReached:
+	default:
+		t.Fatal("real DialContext did not reach the controlled resolver")
+	}
+	select {
+	case <-resolverStopped:
+	case <-time.After(nodeInfoDialTimeout):
+		t.Fatal("controlled resolver did not stop after the dial timed out")
+	}
+	var timeout net.Error
+	if !errors.As(err, &timeout) || !timeout.Timeout() {
+		t.Fatalf("connect error = %v, want a timeout", err)
+	}
+	if ctx.Err() != nil {
+		t.Fatalf("connect consumed the request budget: %v", ctx.Err())
+	}
+	if dialer.Timeout != nodeInfoDialTimeout {
+		t.Fatalf("configured connect budget = %v, want %v", dialer.Timeout, nodeInfoDialTimeout)
+	}
+	if elapsed < nodeInfoDialTimeout || elapsed >= nodeInfoDialTimeout+(nodeInfoFetchTimeout-nodeInfoDialTimeout)/2 {
+		t.Fatalf("connect took %v; want the connect budget (%v) with room before the request budget (%v)",
 			elapsed, nodeInfoDialTimeout, nodeInfoFetchTimeout)
 	}
 }

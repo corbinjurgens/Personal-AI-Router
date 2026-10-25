@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -70,6 +71,7 @@ type scannerReverseFixture struct {
 	modelCalls        atomic.Int32
 	directInfo        atomic.Int32
 	directModels      atomic.Int32
+	directDials       atomic.Int32
 	reverseInfo       atomic.Int32
 	reverseModels     atomic.Int32
 	reportedHost      atomic.Value
@@ -159,6 +161,21 @@ func newScannerReverseFixture(t *testing.T) *scannerReverseFixture {
 	writeScannerAdmissionPin(t, dir, "peer", "cluster", 1)
 	peerMesh := clustertrust.Open(peerDir)
 	f := &scannerReverseFixture{d: newMembershipTestDaemon(dir)}
+	// Populate the finite logical routes below before publishing this fixture.
+	// The transport keeps each original URL, Host and TLS principal unchanged.
+	ownedDirect := make(map[string]string)
+	dialer := &net.Dialer{}
+	f.d.peerDialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		target, known := ownedDirect[address]
+		if network != "tcp" || !known {
+			return nil, errors.New("scanner fixture refuses unknown direct destination")
+		}
+		f.directDials.Add(1)
+		return dialer.DialContext(ctx, network, target)
+	}
 	f.reportedHost.Store("peer")
 	principal := "peer"
 	f.reportedPrincipal.Store(&principal)
@@ -301,6 +318,9 @@ func newScannerReverseFixture(t *testing.T) *scannerReverseFixture {
 		}
 		port := listener.Addr().(*net.TCPAddr).Port
 		f.node.Services[service] = noderec.ServiceStatus{Port: port}
+		for _, host := range []string{"localhost", "192.0.2.40"} {
+			ownedDirect[net.JoinHostPort(host, strconv.Itoa(port))] = listener.Addr().String()
+		}
 		start(listener, func(conn net.Conn) {
 			if service == noderec.ServiceNodeInfo {
 				f.directInfo.Add(1)
@@ -453,6 +473,47 @@ func TestScannerDirectPreferenceWithoutReverseSession(t *testing.T) {
 	}
 	if f.directInfo.Load() != 1 || f.directModels.Load() != 1 || f.reverseInfo.Load() != 0 || f.reverseModels.Load() != 0 {
 		t.Fatal("healthy direct requests used reverse")
+	}
+	if f.directDials.Load() != 2 {
+		t.Fatalf("owned direct dials = %d, want 2 through the scanner transport", f.directDials.Load())
+	}
+}
+
+func TestScannerFixtureDirectDialRejectsUnknownAndCanceled(t *testing.T) {
+	f := newScannerReverseFixture(t)
+	address := net.JoinHostPort("localhost", strconv.Itoa(f.node.Services[noderec.ServiceNodeInfo].Port))
+	for _, tc := range []struct{ name, network, address string }{
+		{"unknown host", "tcp", net.JoinHostPort("192.0.2.41", strconv.Itoa(f.node.Services[noderec.ServiceNodeInfo].Port))},
+		{"unknown port", "tcp", "localhost:0"},
+		{"unknown network", "udp", address},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			conn, err := f.d.peerDialContext(context.Background(), tc.network, tc.address)
+			if conn != nil {
+				if closeErr := conn.Close(); closeErr != nil {
+					t.Error(closeErr)
+				}
+				t.Fatal("unknown destination returned a connection")
+			}
+			if err == nil {
+				t.Fatal("unknown destination was not refused")
+			}
+		})
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	conn, err := f.d.peerDialContext(ctx, "tcp", address)
+	if conn != nil {
+		if closeErr := conn.Close(); closeErr != nil {
+			t.Error(closeErr)
+		}
+		t.Fatal("canceled dial returned a connection")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled dial error = %v, want context cancellation", err)
+	}
+	if f.directDials.Load() != 0 || f.directInfo.Load() != 0 || f.directModels.Load() != 0 || f.reverseInfo.Load() != 0 || f.reverseModels.Load() != 0 {
+		t.Fatal("refused or canceled fixture dial reached a listener")
 	}
 }
 

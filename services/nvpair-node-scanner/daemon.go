@@ -61,9 +61,10 @@ type daemon struct {
 	// deadline, so a peer with several engines can legitimately take longer than
 	// a node-info probe. A shorter client would give up mid-sweep and silently
 	// drop that peer's models.
-	modelsHTTP  *http.Client
-	peerMu      sync.Mutex
-	peerClients map[scannerPeerEndpoint]*clustertrust.PeerServiceClient
+	modelsHTTP      *http.Client
+	peerMu          sync.Mutex
+	peerClients     map[scannerPeerEndpoint]*clustertrust.PeerServiceClient
+	peerDialContext func(context.Context, string, string) (net.Conn, error)
 	// tlsHTTP, when non-nil (the operator passed --client-cert/--client-key/
 	// --ca-bundle), fetches node-info over HTTPS on the ni port instead of plain
 	// HTTP. Dormant by default (nil): node-info is plain per the transport policy,
@@ -189,13 +190,17 @@ const nodeInfoResponseDrainLimit = 64 << 10
 // already written off is not worth waiting longer for here.
 const nodeInfoDialTimeout = reach.DefaultTimeout
 
+func nodeInfoDialer() *net.Dialer {
+	return &net.Dialer{Timeout: nodeInfoDialTimeout}
+}
+
 // nodeInfoTransport is the transport both node-info clients dial through: the
 // plain one built here and, when the operator opts enrichment onto HTTPS, the
 // TLS one built in tls.go. The TLS handshake gets the same budget as the
 // connect, for the same reason.
 func nodeInfoTransport(tlsConfig *tls.Config) *http.Transport {
 	return &http.Transport{
-		DialContext:         (&net.Dialer{Timeout: nodeInfoDialTimeout}).DialContext,
+		DialContext:         nodeInfoDialer().DialContext,
 		TLSClientConfig:     tlsConfig,
 		TLSHandshakeTimeout: nodeInfoDialTimeout,
 		MaxConnsPerHost:     1,

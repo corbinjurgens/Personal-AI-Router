@@ -5,6 +5,24 @@ SPDX-License-Identifier: Apache-2.0
 
 # Microservice: Engine Manager (`nvpair-engine-manager`)
 
+## Model identifiers
+
+Models accepted for operations, serving declarations and selectable metadata
+must be nonempty valid UTF-8, at most 512 UTF-8 bytes, with no C0
+(U+0000–U+001F), DEL (U+007F), or C1 (U+0080–U+009F) characters. Validation
+precedes trimming, normalization, fallback naming and effects; malformed raw
+UTF-8 must be checked before JSON string decoding can replace it. Catalog and
+installed/loaded inventory filtering removes individual invalid entries while
+keeping valid siblings and successful empty inventories. Identifiers are never
+truncated; ordinary Unicode, spaces, tags and slashes keep their existing rules.
+
+New policy writes remain strict. Only the broker's disk-policy loader removes
+old invalid model entries and dependent references in memory, without rewriting
+the file, advancing its revision or discarding valid policy siblings. Explicit
+empty served permission remains deny-all. This load-only sanitation does not
+relax operation, serving, peer-update or activation validation, and adds no
+method or payload field.
+
 ## Unexpected owned-process exit
 
 An owned process exiting without an intentional stop reports the existing
@@ -557,12 +575,12 @@ extensibility story for an open-source product.
 - **Onboard a new engine (no code)**: a vendor adds `engines/<vendor>.json`; the generic runner exposes their lifecycle + actions immediately.
 - **Edge case — already installed**: detect short-circuits install (idempotent).
 - **Edge case — checksum mismatch**: install fails before `run`, is reported, and never executes an unverified payload.
-- **Edge case — readiness timeout / crash**: failed readiness returns to Stopped; a later crash flips health and is reported.
+- **Edge case — readiness timeout / crash**: failed readiness returns to Stopped; an unexpected owned-process exit is reported and enters bounded saved-On relaunch through `restoreEnabled` as described above.
 
 ## 4. Open Questions / Risks
 - **`engine:*` method stability**: the Broker forwards the namespace verbatim; evolve it additively and preserve `engine:get-installed` as the installed-engine query.
 - **`severity` / `action` enums**: current wire values are `info|warning|error` and `dismiss|retry|none`; coordinate any future shared-enum expansion without changing existing values.
-- **Risk — auto-restart policy**: off by default (opt-in manifest flag); revisit once a supervisor / Warden-equivalent exists.
+- **Bounded crash relaunch**: the existing owner retries an unexpected owned-process exit after 5 seconds, 30 seconds and 2 minutes while current saved intent remains known On. It rechecks intent under the lifecycle lock; Off/unknown intent, pause, shutdown and pending-switch ownership prevent automatic activation. Successful readiness ends the episode. There is no opt-in manifest flag or unbounded retry policy.
 - **Risk — dynamic port assignment**: manifest `port: 0` reserves the option; range/policy TBD (may move to a future supervisor).
 - **Risk — admin-only installers**: `mode: "admin"` is a flagged, refused exception, not the default; product direction is strictly user-mode.
 - **Risk — LAN-open inference bind (interim)**: inference engines default `runtime.bind` to `0.0.0.0` (ordinary engines stay loopback; a per-call `bind` re-pins). This is a deliberate, temporary exception to the loopback-only posture; narrow it once authenticated inference transport exists. The engine-manager `ec` control surface is already protected independently by pin-based mTLS.
@@ -915,7 +933,7 @@ Stores: Ollama uses `OLLAMA_MODELS` from the engine's launch environment or this
 ## 10. Design Constraints
 - **Performance**: control plane, not inference; sub-second RPCs except install (network-bound) and start (bounded by the readiness timeout).
 - **Scalability**: a handful of engines per node; one managed instance per engine in v1.
-- **Reliability**: best-effort; readiness + health probes; automatic restart on crash is planned but **not yet implemented** (see §4); install is one-shot and idempotent (detect short-circuits).
+- **Reliability**: best-effort readiness and health probes, with bounded saved-On crash relaunch through the existing `restoreEnabled` owner (§4). Explicit stop, pause and shutdown cancel recovery; exhausted attempts leave the unexpected-exit error visible. Install is one-shot and idempotent (detect short-circuits).
 - **Security**: **user mode only — no admin/sudo at runtime** (escalation reserved for product install and uninstall time: the Windows uninstaller is elevated and runs `--uninstall-managed`, which for that reason loads only the manifests compiled into the binary, never the user-writable override directory); both optional LAN listeners terminate pin-based mTLS and reject unpinned peers — the read-only model-list listener (`em`) because a node's model inventory is cluster data, and the `ec` control listener because its routes are privileged; `em` additionally serves plaintext on loopback only, for this node's own scanner; engines bind loopback by default, but a manifest's `runtime.bind` may open an inference engine to the LAN (Ollama defaults to `0.0.0.0`, overridable per-call); downloads are HTTPS-only (plain HTTP only from loopback) and checksum-verified before execution when the manifest pins a `sha256` (an unpinned fetch is HTTPS-only with a loud warning, like a `script` install).
 - **Compliance**: no PII; payloads carry engine/model identifiers and error messages only.
 
@@ -928,7 +946,7 @@ Stores: Ollama uses `OLLAMA_MODELS` from the engine's launch environment or this
 ## 12. Failure Modes and Mitigations
 - **Download / checksum failure on install**: engine stays NotInstalled. → Fail fast before `run`; `engine:install-progress` error + `errors:report` (`engine-manager:install-failed:<engine>`); never execute an unverified payload.
 - **Engine fails its readiness probe**: start never reaches Running. → Bounded ready timeout (or early failure after three consecutive declared auth responses, below) → back to Stopped; structured error; no half-started state.
-- **Engine process crashes**: engine unavailable. → A watcher flips state, emits `engine:state-changed` + `errors:report` (`engine-manager:exited:<engine>`); the parent's supervisor reports if the *manager itself* dies. (Automatic restart is planned — see §4 — not yet implemented.)
+- **Engine process crashes**: engine unavailable. → A watcher flips state, emits `engine:state-changed` + `errors:report` (`engine-manager:exited:<engine>`), then schedules the bounded saved-On relaunch episode (§4). Current On intent, pause/shutdown cancellation, switch ownership and reclaim fencing still govern every attempt; inference is not resumed. The parent's supervisor separately reports if the *manager itself* dies.
 - **`nvpair-errors` unavailable**: failures absent from the node's error list. → The Broker no-ops the forward; local applog + ring buffers still hold everything.
 - **Invalid / unknown-OS manifest**: that engine is unusable. → Reject at load with a specific error; other engines unaffected.
 

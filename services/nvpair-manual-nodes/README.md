@@ -5,6 +5,22 @@ SPDX-License-Identifier: Apache-2.0
 
 # nvpair-manual-nodes
 
+Ollama names and LM Studio IDs must be nonempty valid UTF-8, at most 512 UTF-8
+bytes, with no C0 (U+0000–U+001F), DEL (U+007F), or C1 (U+0080–U+009F)
+characters. The shared validator checks raw model tokens before JSON string
+decoding can replace malformed UTF-8. Invalid identifiers, including missing or
+empty names, are skipped individually; valid siblings retain their order. A
+successful list containing only invalid identifiers yields no valid models and
+does not change the engine's reachability. Malformed documents yield unavailable
+model inventory. Names are never trimmed, truncated or synthesized to pass
+validation; ordinary Unicode, spaces, tags and slashes retain their meaning.
+
+These model checks do not change manual-node identity or persistence contracts.
+New node-policy writes are strict. Only the broker's disk-policy loader removes
+old invalid model entries and dependent references in memory, preserving valid
+siblings and explicit empty served permission without rewriting the file or
+advancing its revision. This load-only sanitation does not relax new writes.
+
 A Go service for managing manually configured nodes on networks where mDNS discovery is unavailable. Accepts node addresses via JSON-RPC, probes each for Ollama, LM Studio, and node-info, and emits status events. The node list is persisted, so it survives a restart of this worker, the broker, or the machine.
 
 ## Communication

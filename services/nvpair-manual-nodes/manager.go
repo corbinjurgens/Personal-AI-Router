@@ -20,6 +20,7 @@ import (
 	"nvpair-shared/buildinfo"
 	"nvpair-shared/clustertrust"
 	"nvpair-shared/errors"
+	"nvpair-shared/nodepolicy"
 )
 
 // Version is stamped at build time via -ldflags "-X main.Version=...".
@@ -111,13 +112,13 @@ type ManualNodeStatus struct {
 	Address        string       `json:"address"`
 	OllamaUp       bool         `json:"ollama_up"`
 	OllamaPort     int          `json:"ollama_port"`
-	OllamaModels   []string     `json:"ollama_models,omitempty"`
+	OllamaModels   []string     `json:"ollama_models,omitzero"`
 	// LM Studio is probed on its default OpenAI-API port the same way Ollama
 	// is on 11434, so a manually-added node running LM Studio can be bridged
 	// into lmstudio-proxy by a supervising broker.
 	LMStudioUp     bool        `json:"lmstudio_up"`
 	LMStudioPort   int         `json:"lmstudio_port"`
-	LMStudioModels []string    `json:"lmstudio_models,omitempty"`
+	LMStudioModels []string    `json:"lmstudio_models,omitzero"`
 	NodeInfoUp     bool        `json:"node_info_up"`
 	NodeInfoPort   int         `json:"node_info_port"`
 	TLSEnabled     bool        `json:"tls_enabled,omitempty"`
@@ -348,6 +349,8 @@ func (m *Manager) probeNode(tn *trackedNode) {
 		prev.NodeInfoUp != newStatus.NodeInfoUp ||
 		prev.HostUUID != newStatus.HostUUID ||
 		prev.ServiceBuildID != newStatus.ServiceBuildID ||
+		(prev.OllamaModels == nil) != (newStatus.OllamaModels == nil) ||
+		(prev.LMStudioModels == nil) != (newStatus.LMStudioModels == nil) ||
 		!sliceEqual(prev.OllamaModels, newStatus.OllamaModels) ||
 		!sliceEqual(prev.LMStudioModels, newStatus.LMStudioModels) ||
 		!gpusEqual(prev.GPUs, newStatus.GPUs) ||
@@ -455,19 +458,28 @@ func (m *Manager) probeLMStudio(addr string, port int) (bool, []string) {
 	}
 	var result struct {
 		Data []struct {
-			ID string `json:"id"`
+			ID json.RawMessage `json:"id"`
 		} `json:"data"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+	decoder := json.NewDecoder(resp.Body)
+	if err := decoder.Decode(&result); err != nil {
 		// Reachable, but the model list didn't parse — still report it up.
 		slog.Debug("manual probe lmstudio up (models parse failed)",
-			"addr", addr, "port", port, "err", err)
+			"addr", addr, "port", port)
+		return true, nil
+	}
+	var trailing json.RawMessage
+	if err := decoder.Decode(&trailing); err != io.EOF {
 		return true, nil
 	}
 	models := make([]string, 0, len(result.Data))
 	for _, d := range result.Data {
-		if d.ID != "" {
-			models = append(models, d.ID)
+		model, err := decodeManualModelName(d.ID)
+		if err != nil {
+			return true, nil
+		}
+		if model != "" {
+			models = append(models, model)
 		}
 	}
 	slog.Debug("manual probe lmstudio up",
@@ -513,17 +525,46 @@ func (m *Manager) fetchOllamaModels(addr string, port int) []string {
 
 	var result struct {
 		Models []struct {
-			Name string `json:"name"`
+			Name json.RawMessage `json:"name"`
 		} `json:"models"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+	decoder := json.NewDecoder(resp.Body)
+	if err := decoder.Decode(&result); err != nil {
+		return nil
+	}
+	var trailing json.RawMessage
+	if err := decoder.Decode(&trailing); err != io.EOF {
 		return nil
 	}
 	names := make([]string, 0, len(result.Models))
-	for _, m := range result.Models {
-		names = append(names, m.Name)
+	for _, entry := range result.Models {
+		name, err := decodeManualModelName(entry.Name)
+		if err != nil {
+			return nil
+		}
+		if name != "" {
+			names = append(names, name)
+		}
 	}
 	return names
+}
+
+// Missing/invalid identifiers never acquire a fallback name. Validate raw bytes
+// before string decoding can repair UTF-8, while retaining document failure for
+// unrelated nonstring values. The shared validator owns every identifier rule.
+func decodeManualModelName(raw json.RawMessage) (string, error) {
+	if len(raw) == 0 {
+		return "", nil
+	}
+	valid := nodepolicy.ValidateModelIdentifierJSON(raw) == nil
+	var model string
+	if err := json.Unmarshal(raw, &model); err != nil {
+		return "", err
+	}
+	if !valid {
+		return "", nil
+	}
+	return model, nil
 }
 
 func (m *Manager) probeNodeInfo(client *http.Client, scheme, addr string, port int) (bool, NodeInfoResponse) {

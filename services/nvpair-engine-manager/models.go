@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"strings"
 	"sync"
@@ -185,7 +186,8 @@ func (e *Executor) modelsSweep(ctx context.Context, fullInventory bool) ModelsRe
 				run := e.engineRunID(name)
 				listRaw, listErr = e.Action(ctx, name, "list_models", nil)
 				if listErr != nil {
-					slog.Debug("engine:models list_models failed", "engine", name, "err", listErr)
+					category, status := inventoryFailureCategory(listErr)
+					slog.Debug("engine:models list_models failed", "engine", name, "action", "list_models", "category", category, "status", status)
 				} else if models, ok := extractStringsResult(listRaw, listSpec); ok {
 					perEngine[i] = models
 					listOK[i] = true
@@ -203,7 +205,8 @@ func (e *Executor) modelsSweep(ctx context.Context, fullInventory bool) ModelsRe
 				}
 				if err != nil {
 					loadedTransportFailed = true
-					slog.Debug("engine:models loaded_models failed", "engine", name, "err", err)
+					category, status := inventoryFailureCategory(err)
+					slog.Debug("engine:models loaded_models failed", "engine", name, "action", "loaded_models", "category", category, "status", status)
 				} else if models, ok := extractStringsResult(raw, loadedSpec); ok {
 					loadedRaw[i] = raw
 					// A successful query — even an empty result — records the key
@@ -275,6 +278,17 @@ func (e *Executor) modelsSweep(ctx context.Context, fullInventory bool) ModelsRe
 		}
 	}
 	return res
+}
+
+// Inventory failures can retain response bodies, credentials or transport URLs.
+// Classify without formatting arbitrary errors; the action's public error stays
+// unchanged. Zero status means no HTTP response status was available.
+func inventoryFailureCategory(err error) (string, int) {
+	var response *ActionHTTPError
+	if errors.As(err, &response) {
+		return "http-status", response.StatusCode
+	}
+	return "action-failed", 0
 }
 
 // extractStrings is the value-only wrapper used by focused extractor tests.

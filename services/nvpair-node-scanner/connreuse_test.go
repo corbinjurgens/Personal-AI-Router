@@ -4,7 +4,9 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -40,6 +42,7 @@ func TestModelsClientUsesOneConnectionPerDispatch(t *testing.T) {
 
 	var mu sync.Mutex
 	newConns := 0
+	directDials := 0
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/models", func(w http.ResponseWriter, r *http.Request) {
 		if _, ok := peerMesh.VerifyClientPin(r); !ok {
@@ -69,6 +72,22 @@ func TestModelsClientUsesOneConnectionPerDispatch(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	logicalAddress := net.JoinHostPort("localhost", portStr)
+	ownedAddress := ts.Listener.Addr().String()
+	dialer := &net.Dialer{}
+	d.peerDialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		if network != "tcp" || address != logicalAddress {
+			return nil, fmt.Errorf("connection fixture refuses unknown direct destination")
+		}
+		mu.Lock()
+		directDials++
+		mu.Unlock()
+		return dialer.DialContext(ctx, network, ownedAddress)
+	}
+
 	// "localhost" is not a loopback IP literal, so modelsClient takes the
 	// pinned mTLS path instead of the plaintext self-fetch.
 	const rounds = 5
@@ -82,9 +101,13 @@ func TestModelsClientUsesOneConnectionPerDispatch(t *testing.T) {
 
 	mu.Lock()
 	got := newConns
+	gotDials := directDials
 	mu.Unlock()
 	if got != rounds {
 		t.Fatalf("peer accepted %d connections for %d model fetches, want %d", got, rounds, rounds)
+	}
+	if gotDials != rounds {
+		t.Fatalf("owned direct dials = %d for %d model fetches, want %d", gotDials, rounds, rounds)
 	}
 }
 

@@ -4,6 +4,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"reflect"
 	"strings"
@@ -13,7 +14,208 @@ import (
 	"nvpair-shared/errors"
 	"nvpair-shared/nodepolicy"
 	"nvpair-shared/noderec"
+	"nvpair-ui-broker/relay"
 )
+
+// Consume the manual worker's existing status fields through its real broker
+// dispatcher, store mutation hook, subscription and ordinary client response.
+func TestModelControlsManualAttributionWireTransitions(t *testing.T) {
+	b := newManualTestBroker()
+	var clientWire bytes.Buffer
+	codec := NewCodec(&clientWire)
+	b.codec = codec
+	b.store.SetOnChange(b.emitNodesChanged)
+	id := json.RawMessage(`"304-manual-subscribe"`)
+	b.handleMessage(&Message{JSONRPC: "2.0", ID: &id, Method: "discovery:subscribe"})
+	ack, err := codec.Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ack.IsResponse() || ack.Error != nil {
+		t.Fatal("ordinary manual discovery subscription failed")
+	}
+	initial, err := codec.Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if initial.Method != "discovery:nodes-changed" || string(initial.Params) != "[]" {
+		t.Fatal("fresh subscription did not start with the empty store")
+	}
+	for _, tc := range []struct {
+		name, fields string
+		attribution  map[string][]string
+		flat         []string
+	}{
+		{"unknown omitted", ``, nil, nil},
+		{"unknown null", `,"ollama_models":null,"lmstudio_models":null`, nil, nil},
+		{"Ollama observed empty", `,"ollama_models":[]`, map[string][]string{"ollama": {}}, nil},
+		{"Ollama empty repeat", `,"ollama_models":[]`, map[string][]string{"ollama": {}}, nil},
+		{"empty to unknown", ``, nil, nil},
+		{"LM Studio observed empty", `,"lmstudio_models":[]`, map[string][]string{"lmstudio": {}}, nil},
+		{"both observed empty", `,"ollama_models":[],"lmstudio_models":[]`, map[string][]string{"ollama": {}, "lmstudio": {}}, nil},
+		{"empty Ollama and useful LM Studio", `,"ollama_models":[],"lmstudio_models":["first","last"]`, map[string][]string{"ollama": {}, "lmstudio": {"first", "last"}}, []string{"first", "last"}},
+		{"useful Ollama and empty LM Studio", `,"ollama_models":["first","last"],"lmstudio_models":[]`, map[string][]string{"ollama": {"first", "last"}, "lmstudio": {}}, []string{"first", "last"}},
+		{"unknown sibling has no invented key", `,"ollama_models":null,"lmstudio_models":["first","last"]`, map[string][]string{"lmstudio": {"first", "last"}}, []string{"first", "last"}},
+		{"populated siblings preserve flat order", `,"ollama_models":["first","shared"],"lmstudio_models":["shared","last"]`, map[string][]string{"ollama": {"first", "shared"}, "lmstudio": {"shared", "last"}}, []string{"first", "shared", "last"}},
+		{"return to unknown", ``, nil, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			raw := json.RawMessage(`{"id":"manual-presence","address":"127.0.0.1","hostUuid":"manual-owner","node_info_port":14318,"ollama_up":true,"ollama_port":11434,"lmstudio_up":true,"lmstudio_port":1234,"node_info_up":true,"telemetryValid":true,"msSince":7` + tc.fields + `}`)
+			var workerWire bytes.Buffer
+			workerCodec := NewCodec(&workerWire)
+			method := "node/updated"
+			if tc.name == "unknown omitted" {
+				method = "node/discovered"
+			}
+			if err := workerCodec.Notify(method, raw); err != nil {
+				t.Fatal(err)
+			}
+			frame, err := workerCodec.Read()
+			if err != nil {
+				t.Fatal(err)
+			}
+			b.forwardManualNodesNotification(frame.Method, frame.Params)
+			status := b.manualNodeStatuses["manual-presence"].status
+			if !status.OllamaUp || !status.LMStudioUp || !status.TelemetryValid || status.MSSince != 7 {
+				t.Fatal("manual notification changed ordinary status metadata")
+			}
+			assertClient := func(raw json.RawMessage) {
+				t.Helper()
+				var nodes []AvailableNode
+				if err := json.Unmarshal(raw, &nodes); err != nil {
+					t.Fatal(err)
+				}
+				if len(nodes) != 1 || nodes[0].ID != "manual-presence" || nodes[0].HostUUID != "manual-owner" || nodes[0].IPAddress != "127.0.0.1" || nodes[0].Port != 14318 ||
+					!reflect.DeepEqual(nodes[0].ModelsByEngine, tc.attribution) || !reflect.DeepEqual(nodes[0].Models, tc.flat) || nodes[0].LoadedByEngine != nil {
+					t.Fatalf("manual status/store/client wire lost inventory or metadata: %s", raw)
+				}
+				var fields []map[string]json.RawMessage
+				if err := json.Unmarshal(raw, &fields); err != nil {
+					t.Fatal(err)
+				}
+				_, present := fields[0]["modelsByEngine"]
+				if present != (tc.attribution != nil) {
+					t.Fatal("client wire manufactured or omitted manual attribution")
+				}
+			}
+			changed, err := codec.Read()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if changed.Method != "discovery:nodes-changed" || !changed.IsNotification() {
+				t.Fatal("manual store mutation did not emit the ordinary subscribed snapshot")
+			}
+			assertClient(changed.Params)
+			id := json.RawMessage(`"304-manual-get"`)
+			b.handleMessage(&Message{JSONRPC: "2.0", ID: &id, Method: "discovery:get-nodes"})
+			response, err := codec.Read()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !response.IsResponse() || response.Error != nil {
+				t.Fatal("ordinary manual get-nodes response failed")
+			}
+			var result map[string]json.RawMessage
+			if err := json.Unmarshal(response.Result, &result); err != nil {
+				t.Fatal(err)
+			}
+			assertClient(result["nodes"])
+		})
+	}
+}
+
+func TestModelControlsBrokerAttributionWire(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		raw         string
+		attribution map[string][]string
+	}{
+		{"nil omission retains legacy fallback", `{"hostUuid":"owner","name":"owner","ip":"127.0.0.1","models":["good"]}`, nil},
+		{"outer empty remains authoritative", `{"hostUuid":"owner","name":"owner","ip":"127.0.0.1","models":["good"],"modelsByEngine":{}}`, map[string][]string{}},
+		{"per engine empty", `{"hostUuid":"owner","name":"owner","ip":"127.0.0.1","models":["good"],"modelsByEngine":{"ollama":[]}}`, map[string][]string{"ollama": {}}},
+		{"populated and empty siblings", `{"hostUuid":"owner","name":"owner","ip":"127.0.0.1","models":["good"],"modelsByEngine":{"ollama":["first","last"],"lmstudio":[]}}`, map[string][]string{"ollama": {"first", "last"}, "lmstudio": {}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var node noderec.DirectoryNode
+			if err := json.Unmarshal([]byte(tc.raw), &node); err != nil {
+				t.Fatalf("decode original raw specimen: %v", err)
+			}
+			var scannerWire bytes.Buffer
+			scannerCodec := NewCodec(&scannerWire)
+			if err := scannerCodec.Notify(noderec.NotifyNodeUpdated, noderec.NodeEvent{Node: node}); err != nil {
+				t.Fatal(err)
+			}
+			frame, err := scannerCodec.Read()
+			if err != nil {
+				t.Fatal(err)
+			}
+			store := newDiscoveryStore()
+			directory := relay.NewDirectory()
+			scanner := &scannerProcess{store: store, relayDir: directory}
+			scanner.handleNotify(frame.Method, frame.Params)
+			internal := directory.Snapshot("")
+			if len(internal) != 1 || !reflect.DeepEqual(internal[0].ModelsByEngine, tc.attribution) || !reflect.DeepEqual(internal[0].Models, []string{"good"}) {
+				t.Fatal("scanner IPC or internal relay lost attribution or valid flat models")
+			}
+			var wire bytes.Buffer
+			codec := NewCodec(&wire)
+			broker := &Broker{codec: codec, store: store}
+			assertClient := func(t *testing.T, raw json.RawMessage) {
+				t.Helper()
+				var nodes []AvailableNode
+				if err := json.Unmarshal(raw, &nodes); err != nil {
+					t.Fatalf("decode ordinary client nodes: %v", err)
+				}
+				if len(nodes) != 1 || nodes[0].HostUUID != "owner" || nodes[0].ID != "owner" || nodes[0].IPAddress != "127.0.0.1" || !reflect.DeepEqual(nodes[0].Models, []string{"good"}) || !reflect.DeepEqual(nodes[0].ModelsByEngine, tc.attribution) {
+					t.Fatal("store/Snapshot/client JSON changed metadata or attribution")
+				}
+				var fields []map[string]json.RawMessage
+				if err := json.Unmarshal(raw, &fields); err != nil {
+					t.Fatal(err)
+				}
+				_, present := fields[0]["modelsByEngine"]
+				if present != (tc.attribution != nil) {
+					t.Fatal("client wire collapsed nil and present-empty attribution")
+				}
+			}
+			t.Run("get nodes through ordinary dispatcher and codec", func(t *testing.T) {
+				id := json.RawMessage(`"304-get"`)
+				broker.handleMessage(&Message{JSONRPC: "2.0", ID: &id, Method: "discovery:get-nodes"})
+				response, err := codec.Read()
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !response.IsResponse() || response.Error != nil {
+					t.Fatal("ordinary get-nodes response failed")
+				}
+				var result map[string]json.RawMessage
+				if err := json.Unmarshal(response.Result, &result); err != nil {
+					t.Fatal(err)
+				}
+				assertClient(t, result["nodes"])
+			})
+			t.Run("subscribe through ordinary dispatcher and codec", func(t *testing.T) {
+				id := json.RawMessage(`"304-subscribe"`)
+				broker.handleMessage(&Message{JSONRPC: "2.0", ID: &id, Method: "discovery:subscribe"})
+				ack, err := codec.Read()
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !ack.IsResponse() || ack.Error != nil {
+					t.Fatal("ordinary subscribe acknowledgement failed")
+				}
+				changed, err := codec.Read()
+				if err != nil {
+					t.Fatal(err)
+				}
+				if changed.Method != "discovery:nodes-changed" || !changed.IsNotification() {
+					t.Fatal("ordinary subscribed snapshot was not delivered")
+				}
+				assertClient(t, changed.Params)
+			})
+		})
+	}
+}
 
 // TestDiscoveryStoreRekeysOnRename verifies that a discovered node changing
 // hostname (same host UUID, new mDNS instance name) updates its single

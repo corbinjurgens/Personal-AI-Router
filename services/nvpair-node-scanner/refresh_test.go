@@ -4,12 +4,15 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"reflect"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -17,6 +20,310 @@ import (
 	"nvpair-shared/nodepolicy"
 	"nvpair-shared/noderec"
 )
+
+func TestModelControlsScannerInventory(t *testing.T) {
+	ascii512 := strings.Repeat("a", 512)
+	multibyte512 := strings.Repeat("界", 170) + "ab"
+	cases := []struct {
+		name, token string
+		valid       bool
+	}{
+		{"empty", `""`, false},
+		{"raw invalid UTF8", "\"raw-" + string([]byte{0xff}) + "\"", false},
+		{"escaped NUL", `"bad\u0000model"`, false},
+		{"escaped C0 end", `"bad\u001fmodel"`, false},
+		{"escaped DEL", `"bad\u007fmodel"`, false},
+		{"escaped C1 start", `"bad\u0080model"`, false},
+		{"escaped C1 end", `"bad\u009fmodel"`, false},
+		{"ASCII 512 bytes", `"` + ascii512 + `"`, true},
+		{"ASCII 513 bytes", `"` + ascii512 + `a"`, false},
+		{"multibyte 512 bytes", `"` + multibyte512 + `"`, true},
+		{"multibyte 513 bytes", `"` + strings.Repeat("界", 171) + `"`, false},
+		{"spaces tags slash and Unicode", `" model/日本語:tag "`, true},
+		{"valid replacement character", `"model\ufffd"`, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			list := `["first",` + tc.token + `,"last"]`
+			strictEntry := strings.Replace(strictModelJSON("j304-token"), `"j304-token"`, tc.token, 1)
+			strict := strictModelJSON("first") + "," + strictEntry + "," + strictModelJSON("last")
+			// Served references have a separate encoded-object bound. Keep
+			// identifier positives (including512 bytes) in inventory/roles/proof,
+			// with representable permissions; invalid tokens still test filtering.
+			servedToken := tc.token
+			wantServed := nodepolicy.ServedModels{{Engine: "ollama", Model: "first"}}
+			if tc.valid {
+				servedToken = `"last"`
+				wantServed = append(wantServed, nodepolicy.Role{Engine: "ollama", Model: "last"})
+			}
+			body := fmt.Sprintf(`{"models":%s,"modelsByEngine":{"ollama":%s,"lmstudio":[]},"loadedByEngine":{"ollama":%s},"policy":{"revision":"7","servedModels":[{"engine":"ollama","model":"first"},{"engine":"ollama","model":%s}],"roles":{"weak":{"engine":"ollama","model":%s},"strong":{"engine":"ollama","model":"last"}},"strictAdmission":{"version":1,"models":[%s]}}}`, list, list, list, servedToken, tc.token, strict)
+			d := newRefreshTestDaemon()
+			d.modelsHTTP.Transport = serviceBuildTransport(func(r *http.Request) (*http.Response, error) {
+				if r.URL.Host != "127.0.0.1:24001" || r.URL.Path != "/v1/models" {
+					t.Fatalf("unexpected inventory request: %s", r.URL)
+				}
+				return serviceBuildResponse(body, http.StatusOK), nil
+			})
+			seedEMNode(d, "model-controls", "127.0.0.1", 24001)
+			if !d.refreshNodeModels("model-controls", "127.0.0.1", 24001, "") {
+				t.Fatal("successful mixed inventory did not update")
+			}
+			want := []string{"first", "last"}
+			if tc.valid {
+				var model string
+				if err := json.Unmarshal([]byte(tc.token), &model); err != nil {
+					t.Fatalf("decode positive fixture: %v", err)
+				}
+				want = []string{"first", model, "last"}
+			}
+			node, present := d.dir.get("model-controls")
+			if !present || !reflect.DeepEqual(node.Models, want) || !reflect.DeepEqual(node.ModelsByEngine, map[string][]string{"ollama": want, "lmstudio": {}}) || !reflect.DeepEqual(node.LoadedByEngine, map[string][]string{"ollama": want}) {
+				t.Fatal("inventory lost valid siblings, order, attribution or known-empty engine")
+			}
+			if !reflect.DeepEqual(d.lastModels[node.HostUUID], want) || !reflect.DeepEqual(d.lastModelsByEngine[node.HostUUID], node.ModelsByEngine) || !reflect.DeepEqual(d.lastLoadedByEngine[node.HostUUID], node.LoadedByEngine) || !reflect.DeepEqual(d.lastPolicy[node.HostUUID], node.Policy) {
+				t.Fatal("cache differs from published sanitized inventory")
+			}
+			if node.Policy == nil || node.Policy.Revision != "7" || node.Policy.Roles["strong"].Model != "last" {
+				t.Fatal("valid advertisement metadata was lost")
+			}
+			_, hasWeak := node.Policy.Roles["weak"]
+			if hasWeak != tc.valid || !reflect.DeepEqual(node.Policy.ServedModels, wantServed) {
+				t.Fatal("advertisement did not filter model entries individually")
+			}
+			if tc.valid && node.Policy.Roles["weak"].Model != want[1] {
+				t.Fatal("valid role model changed while using bounded served references")
+			}
+			capability := node.Policy.StrictAdmission
+			if capability.State() != nodepolicy.StrictCapabilityValid {
+				t.Fatal("invalid model sibling discarded the valid supported capability")
+			}
+			var strictModels []string
+			for _, entry := range capability.Models {
+				if entry.Engine != "ollama" {
+					t.Fatal("supported capability lost engine attribution")
+				}
+				strictModels = append(strictModels, entry.Model)
+			}
+			if !reflect.DeepEqual(strictModels, want) {
+				t.Fatal("supported capability lost valid model siblings or order")
+			}
+		})
+	}
+}
+
+func TestModelControlsScannerServedReferenceBounds(t *testing.T) {
+	for _, tc := range []struct{ name, model string }{
+		{"ASCII identifier512 with oversized served reference", strings.Repeat("a", 512)},
+		{"multibyte identifier512 with oversized served reference", strings.Repeat("界", 170) + "ab"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := nodepolicy.ValidateModelIdentifier(tc.model); err != nil {
+				t.Fatalf("identifier positive violates its separate contract: %v", err)
+			}
+			// Encode raw input without ServedModels.MarshalJSON's strict write
+			// guard, then exercise the actual receive-side container contract.
+			ref, err := json.Marshal([]nodepolicy.Role{{Engine: "ollama", Model: tc.model}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var refused nodepolicy.ServedModels
+			if err := json.Unmarshal(ref, &refused); err == nil {
+				t.Fatal("oversized encoded served reference was accepted")
+			}
+			d := newRefreshTestDaemon()
+			body := `{"models":["good"],"modelsByEngine":{"ollama":["good"]},"loadedByEngine":{"ollama":["good"]},"policy":{"revision":"7","servedModels":[{"engine":"ollama","model":"good"}]}}`
+			d.modelsHTTP.Transport = serviceBuildTransport(func(*http.Request) (*http.Response, error) {
+				return serviceBuildResponse(body, http.StatusOK), nil
+			})
+			seedEMNode(d, "served-reference-bound", "127.0.0.1", 24001)
+			if !d.refreshNodeModels("served-reference-bound", "127.0.0.1", 24001, "") {
+				t.Fatal("bounded served-reference positive did not publish")
+			}
+			before, _ := d.dir.get("served-reference-bound")
+			body = `{"models":["replacement"],"policy":{"revision":"8","servedModels":` + string(ref) + `}}`
+			if d.refreshNodeModels("served-reference-bound", "127.0.0.1", 24001, "") {
+				t.Fatal("oversized served-reference document published")
+			}
+			after, _ := d.dir.get("served-reference-bound")
+			if !reflect.DeepEqual(after, before) || !reflect.DeepEqual(d.lastModels[before.HostUUID], before.Models) ||
+				!reflect.DeepEqual(d.lastModelsByEngine[before.HostUUID], before.ModelsByEngine) ||
+				!reflect.DeepEqual(d.lastLoadedByEngine[before.HostUUID], before.LoadedByEngine) || !reflect.DeepEqual(d.lastPolicy[before.HostUUID], before.Policy) {
+				t.Fatal("oversized served reference replaced last-good directory or cache")
+			}
+		})
+	}
+}
+
+func TestModelControlsScannerFutureCapability(t *testing.T) {
+	d := newRefreshTestDaemon()
+	body := `{"models":["good"],"policy":{"revision":"9","strictAdmission":{"version":2,"models":[{"model":"raw-` + string([]byte{0xff}) + `"},7,null]}}}`
+	d.modelsHTTP.Transport = serviceBuildTransport(func(*http.Request) (*http.Response, error) {
+		return serviceBuildResponse(body, http.StatusOK), nil
+	})
+	got, ok := d.fetchModels("127.0.0.1", 24001, "")
+	if !ok || !reflect.DeepEqual(got.models, []string{"good"}) || got.policy == nil || got.policy.StrictAdmission.State() != nodepolicy.StrictCapabilityUnsupported || len(got.policy.StrictAdmission.Models) != 0 {
+		t.Fatal("unsupported capability was interpreted, enabled or cost the valid flat inventory")
+	}
+}
+
+func TestModelControlsScannerSuccessfulEmptyAndLastGood(t *testing.T) {
+	d := newRefreshTestDaemon()
+	body := `{"models":["good"],"modelsByEngine":{"ollama":["good"]},"loadedByEngine":{"ollama":["good"]},"policy":{"revision":"8","servedModels":[{"engine":"ollama","model":"good"}]}}`
+	d.modelsHTTP.Transport = serviceBuildTransport(func(*http.Request) (*http.Response, error) {
+		return serviceBuildResponse(body, http.StatusOK), nil
+	})
+	seedEMNode(d, "empty-controls", "127.0.0.1", 24001)
+	if !d.refreshNodeModels("empty-controls", "127.0.0.1", 24001, "") {
+		t.Fatal("valid initial inventory did not update")
+	}
+	lastGood, _ := d.dir.get("empty-controls")
+	for _, tc := range []struct{ name, raw string }{
+		{"nonstring flat model", `{"models":[7]}`},
+		{"nonarray engine models", `{"modelsByEngine":{"ollama":7}}`},
+		{"trailing document", `{"models":["new"]} {}`},
+		{"invalid engine syntax in served reference", `{"models":["new"],"policy":{"servedModels":[{"engine":"unrecognized/engine","model":"new"}]}}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body = tc.raw
+			if d.refreshNodeModels("empty-controls", "127.0.0.1", 24001, "") {
+				t.Fatal("malformed document updated inventory")
+			}
+			node, _ := d.dir.get("empty-controls")
+			if !reflect.DeepEqual(node.Models, []string{"good"}) || !reflect.DeepEqual(d.lastModels[node.HostUUID], node.Models) ||
+				!reflect.DeepEqual(node, lastGood) || !reflect.DeepEqual(d.lastModelsByEngine[node.HostUUID], lastGood.ModelsByEngine) ||
+				!reflect.DeepEqual(d.lastLoadedByEngine[node.HostUUID], lastGood.LoadedByEngine) || !reflect.DeepEqual(d.lastPolicy[node.HostUUID], lastGood.Policy) {
+				t.Fatal("malformed document replaced last-good directory or cache")
+			}
+		})
+	}
+	t.Run("valid dynamic engine advertisement", func(t *testing.T) {
+		body = `{"models":["new"],"modelsByEngine":{"unrecognized-engine":["new"]},"loadedByEngine":{"unrecognized-engine":["new"]},"policy":{"revision":"8","servedModels":[{"engine":"unrecognized-engine","model":"new"}]}}`
+		if !d.refreshNodeModels("empty-controls", "127.0.0.1", 24001, "") {
+			t.Fatal("valid dynamic engine advertisement did not update inventory")
+		}
+		node, present := d.dir.get("empty-controls")
+		wantModels := []string{"new"}
+		wantByEngine := map[string][]string{"unrecognized-engine": {"new"}}
+		wantServed := nodepolicy.ServedModels{{Engine: "unrecognized-engine", Model: "new"}}
+		if !present || !reflect.DeepEqual(node.Models, wantModels) || !reflect.DeepEqual(node.ModelsByEngine, wantByEngine) ||
+			!reflect.DeepEqual(node.LoadedByEngine, wantByEngine) || node.Policy == nil || node.Policy.Revision != "8" || !reflect.DeepEqual(node.Policy.ServedModels, wantServed) {
+			t.Fatal("accepted dynamic engine or model was lost from the directory advertisement")
+		}
+		if !reflect.DeepEqual(d.lastModels[node.HostUUID], wantModels) || !reflect.DeepEqual(d.lastModelsByEngine[node.HostUUID], wantByEngine) ||
+			!reflect.DeepEqual(d.lastLoadedByEngine[node.HostUUID], wantByEngine) || !reflect.DeepEqual(d.lastPolicy[node.HostUUID], node.Policy) {
+			t.Fatal("valid dynamic engine advertisement was not cached with its attribution")
+		}
+	})
+	body = `{"models":["","bad\u007f"],"modelsByEngine":{"ollama":["bad\u0080"]},"loadedByEngine":{"ollama":["bad\u0000"]},"policy":{"revision":"9","servedModels":[{"engine":"ollama","model":""}]}}`
+	if !d.refreshNodeModels("empty-controls", "127.0.0.1", 24001, "") {
+		t.Fatal("successful all-invalid inventory did not replace last-good")
+	}
+	node, _ := d.dir.get("empty-controls")
+	if node.Models == nil || len(node.Models) != 0 || !reflect.DeepEqual(node.ModelsByEngine, map[string][]string{"ollama": {}}) || !reflect.DeepEqual(node.LoadedByEngine, map[string][]string{"ollama": {}}) || node.Policy == nil || node.Policy.ServedModels == nil || len(node.Policy.ServedModels) != 0 {
+		t.Fatal("all-invalid success did not retain known-empty inventory and deny-all permission")
+	}
+	if d.lastModels[node.HostUUID] == nil || len(d.lastModels[node.HostUUID]) != 0 || !reflect.DeepEqual(d.lastModelsByEngine[node.HostUUID], node.ModelsByEngine) || !reflect.DeepEqual(d.lastLoadedByEngine[node.HostUUID], node.LoadedByEngine) {
+		t.Fatal("successful known-empty result was not cached")
+	}
+	for _, tc := range []struct {
+		name, raw string
+		present   bool
+	}{
+		{"absent attribution", `{"models":["good"]}`, false},
+		{"null attribution", `{"models":["good"],"modelsByEngine":null,"loadedByEngine":null}`, false},
+		{"present empty attribution", `{"models":["good"],"modelsByEngine":{},"loadedByEngine":{}}`, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body = tc.raw
+			got, ok := d.fetchModels("127.0.0.1", 24001, "")
+			if !ok || (got.byEngine != nil) != tc.present || (got.loadedByEngine != nil) != tc.present || !reflect.DeepEqual(got.models, []string{"good"}) {
+				t.Fatal("fetch collapsed absent and present-empty attribution or changed valid flat models")
+			}
+		})
+	}
+}
+
+// Inventory presence must participate in the directory's change decision,
+// independently of the flat models and the shared notification serializer.
+func TestModelControlsScannerAttributionPresenceTransition(t *testing.T) {
+	d := newRefreshTestDaemon()
+	var wire bytes.Buffer
+	d.codec = NewCodec(&wire)
+	assertEvent := func(present bool) {
+		t.Helper()
+		var frame Message
+		if err := json.Unmarshal(wire.Bytes(), &frame); err != nil {
+			t.Fatalf("decode actual refresh notification: %v", err)
+		}
+		var event noderec.NodeEvent
+		if err := json.Unmarshal(frame.Params, &event); err != nil {
+			t.Fatalf("decode refresh node event: %v", err)
+		}
+		if frame.Method != noderec.NotifyNodeUpdated || !frame.IsNotification() || event.Node.HostUUID != "presence-transition" ||
+			(event.Node.ModelsByEngine != nil) != present || !reflect.DeepEqual(event.Node.Models, []string{"good"}) {
+			t.Fatalf("refresh notification lost identity, models or attribution presence: %+v", event.Node)
+		}
+		if event.Node.LoadedByEngine != nil {
+			t.Fatal("models attribution transition manufactured loaded attribution")
+		}
+		wire.Reset()
+	}
+	body := `{"models":["good"]}`
+	d.modelsHTTP.Transport = serviceBuildTransport(func(*http.Request) (*http.Response, error) {
+		return serviceBuildResponse(body, http.StatusOK), nil
+	})
+	seedEMNode(d, "presence-transition", "127.0.0.1", 24001)
+	if !d.refreshNodeModels("presence-transition", "127.0.0.1", 24001, "") {
+		t.Fatal("initial flat inventory did not update")
+	}
+	assertEvent(false)
+	body = `{"models":["good"],"modelsByEngine":{}}`
+	if !d.refreshNodeModels("presence-transition", "127.0.0.1", 24001, "") {
+		t.Fatal("nil-to-present-empty attribution must publish a directory change")
+	}
+	assertEvent(true)
+	node, _ := d.dir.get("presence-transition")
+	if node.ModelsByEngine == nil || d.lastModelsByEngine[node.HostUUID] == nil || len(node.EngineModels("ollama")) != 0 || !reflect.DeepEqual(node.Models, []string{"good"}) {
+		t.Fatal("authoritative empty refresh did not replace flat fallback in directory and cache")
+	}
+	if d.refreshNodeModels("presence-transition", "127.0.0.1", 24001, "") {
+		t.Fatal("identical present-empty attribution emitted another update")
+	}
+	if wire.Len() != 0 {
+		t.Fatal("unchanged present-empty refresh emitted a notification")
+	}
+	body = `{"models":["good"]}`
+	if !d.refreshNodeModels("presence-transition", "127.0.0.1", 24001, "") {
+		t.Fatal("present-empty-to-nil attribution must publish a directory change")
+	}
+	assertEvent(false)
+	node, _ = d.dir.get("presence-transition")
+	if node.ModelsByEngine != nil || d.lastModelsByEngine[node.HostUUID] != nil || !reflect.DeepEqual(node.EngineModels("ollama"), []string{"good"}) {
+		t.Fatal("legacy nil attribution did not restore its existing flat fallback")
+	}
+	if d.refreshNodeModels("presence-transition", "127.0.0.1", 24001, "") || wire.Len() != 0 {
+		t.Fatal("unchanged nil attribution emitted another update")
+	}
+}
+
+// Exercise the real notification serializer rather than only its typed input.
+func TestModelControlsScannerEmptyAttributionNotification(t *testing.T) {
+	var wire bytes.Buffer
+	d := &daemon{codec: NewCodec(&wire)}
+	d.emit(noderec.NotifyNodeUpdated, noderec.DirectoryNode{
+		HostUUID: "empty-attribution", Models: []string{"good"},
+		ModelsByEngine: map[string][]string{},
+	})
+	var frame struct {
+		Params noderec.NodeEvent `json:"params"`
+	}
+	if err := json.Unmarshal(wire.Bytes(), &frame); err != nil {
+		t.Fatalf("decode actual emitted node event: %v", err)
+	}
+	if frame.Params.Node.ModelsByEngine == nil || len(frame.Params.Node.EngineModels("ollama")) != 0 || !reflect.DeepEqual(frame.Params.Node.Models, []string{"good"}) {
+		t.Fatal("notification serialization lost authoritative empty attribution and enabled flat fallback")
+	}
+}
 
 // The model-inventory half of the periodic refresh loop (daemon.refreshPeersLoop) converges
 // a peer's DirectoryNode.Models / ModelsByEngine to its live engine-manager

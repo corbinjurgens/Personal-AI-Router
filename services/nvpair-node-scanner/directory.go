@@ -273,7 +273,8 @@ func (d *directory) applyModels(hostUUID, ip string, emPort int, inventory model
 	if !has || n.IP != ip || em.Port != emPort {
 		return n, false, false
 	}
-	if sameStringSet(n.Models, inventory.models) && sameByEngine(n.ModelsByEngine, inventory.byEngine) &&
+	if sameStringSet(n.Models, inventory.models) && (n.ModelsByEngine == nil) == (inventory.byEngine == nil) &&
+		sameByEngine(n.ModelsByEngine, inventory.byEngine) &&
 		sameByEngine(n.LoadedByEngine, inventory.loadedByEngine) && reflect.DeepEqual(n.Policy, inventory.policy) {
 		return n, false, true
 	}

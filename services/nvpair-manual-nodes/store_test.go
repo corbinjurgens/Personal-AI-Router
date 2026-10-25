@@ -113,8 +113,9 @@ func TestReplayRestoresSavedEntries(t *testing.T) {
 }
 
 func TestRunReplaysAfterReady(t *testing.T) {
+	const address = "replay.test"
 	path := filepath.Join(t.TempDir(), stateFileName)
-	if err := saveEntries(path, []ManualEntry{{Address: "127.0.0.1", Name: "loopback"}}); err != nil {
+	if err := saveEntries(path, []ManualEntry{{Address: address, Name: "loopback"}}); err != nil {
 		t.Fatal(err)
 	}
 	server, client := net.Pipe()
@@ -125,23 +126,64 @@ func TestRunReplaysAfterReady(t *testing.T) {
 		t.Fatal(err)
 	}
 	mgr.statePath = path
+	rt := newFakeRoundTripper()
+	mgr.client.Transport = rt
+	mgr.tlsClient.Transport = rt
+	configureHealthyNode(rt, address, []string{"replayed-ollama"}, sampleInfo())
+	configureHealthyLMStudio(rt, address, []string{"replayed-lmstudio"})
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go func() { _ = mgr.Run(ctx) }()
+	done := make(chan error, 1)
+	go func() { done <- mgr.Run(ctx) }()
+	defer func() {
+		cancel()
+		if err := client.Close(); err != nil {
+			t.Errorf("close client pipe: %v", err)
+		}
+		if err := server.Close(); err != nil {
+			t.Errorf("close server pipe: %v", err)
+		}
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Errorf("Run returned error: %v", err)
+			}
+		case <-time.After(2 * time.Second):
+			t.Error("Run did not stop after cancellation and pipe close")
+		}
+	}()
 
 	reader := bufio.NewReader(client)
 	if first := readPipeFrame(t, client, reader); first.Method != "ready" {
 		t.Fatalf("first frame = %+v, want ready before any restored node", first)
 	}
-	writePipeRequest(t, client, 5, "nodes/list", nil)
+	var discovered ManualNodeStatus
 	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		msg := readPipeFrame(t, client, reader)
+		if msg.Method == "node/discovered" {
+			discovered = decodeParams[ManualNodeStatus](t, msg)
+			break
+		}
+	}
+	if discovered.ID != "loopback" || discovered.Address != address ||
+		!discovered.OllamaUp || !discovered.LMStudioUp || !discovered.NodeInfoUp ||
+		len(discovered.OllamaModels) != 1 || discovered.OllamaModels[0] != "replayed-ollama" ||
+		len(discovered.LMStudioModels) != 1 || discovered.LMStudioModels[0] != "replayed-lmstudio" ||
+		!discovered.TelemetryValid || discovered.MSSince != sampleInfo().MSSince {
+		t.Fatalf("completed intercepted replay = %+v", discovered)
+	}
+	writePipeRequest(t, client, 5, "nodes/list", nil)
+	deadline = time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		msg := readPipeFrame(t, client, reader)
 		if !responseWithID(5)(msg) {
 			continue
 		}
 		list := decodeResult[map[string][]ManualNodeStatus](t, msg)
-		if len(list["nodes"]) != 1 || list["nodes"][0].ID != "loopback" {
+		if len(list["nodes"]) != 1 || list["nodes"][0].ID != "loopback" ||
+			list["nodes"][0].Address != address || !list["nodes"][0].NodeInfoUp ||
+			!sliceEqual(list["nodes"][0].OllamaModels, discovered.OllamaModels) ||
+			!sliceEqual(list["nodes"][0].LMStudioModels, discovered.LMStudioModels) {
 			t.Fatalf("nodes/list after restart = %+v", list)
 		}
 		return

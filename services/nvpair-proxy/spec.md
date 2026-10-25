@@ -11,6 +11,22 @@ SPDX-License-Identifier: Apache-2.0
 
 ## 1. Purpose
 
+### Model identifiers
+
+Accepted model metadata is nonempty valid UTF-8, at most 512 UTF-8 bytes, with
+no C0 (U+0000–U+001F), DEL (U+007F), or C1 (U+0080–U+009F) characters. The
+shared `nodepolicy` validator checks original identifiers before normalization
+and selectable normalized results afterward. Identifiers are never truncated
+or repaired into fallback names; ordinary Unicode, spaces, tags and slashes
+retain their existing meaning. Request identifiers keep the stricter 256-byte
+ingress cap. A short tier alias can select a valid 512-byte concrete model.
+
+Invalid inventory/catalog entries are skipped individually. New policy writes
+are rejected atomically; only the broker's stored-policy loader sanitizes old
+invalid model entries and their dependent references in memory, preserving
+valid siblings and explicit deny-all permissions without rewriting the file or
+advancing its revision. These rules add no routing method or payload field.
+
 ### Local execution observations (T2)
 
 Each actual engine-facing inference attempt may emit one `performance:sample`
@@ -948,7 +964,8 @@ Delivery remains best effort if the client has disconnected or writes fail.
 The sink records continuation as unavailable. SC-b's qualified same-model
 continuation remains pending and must use this request owner and sink rather
 than introduce another dispatch or delivery owner. Destination ingress remains
-local-only and gains no workload/attempt owner or onward route; parsing a terminal marker
+local-only, with its own local request/attempt arbitration and response sink,
+but no origin registry key or onward route; parsing a terminal marker
 does not establish engine termination or release an uncertain strict hold.
 
 ### 5.3 Per-attempt cancellation
@@ -1339,7 +1356,7 @@ state in force. The broker re-sends policy state whenever the proxy starts; unti
 
 | Method | Params | Effect |
 | --- | --- | --- |
-| `node/set-policy` | the whole `Policy` | validated with `nodepolicy.Parse`; its `availability` field is ignored; its `revision` becomes the active revision, and a revision older than the active one is refused with the previous policy kept |
+| `node/set-policy` | private `{originNodeId, policy}` | the policy is validated with `nodepolicy.Parse`; `originNodeId` binds the process's origin identity; the policy's `availability` field is ignored; its `revision` becomes the active revision, and a revision older than the active one is refused with the previous policy kept |
 | `node/set-availability` | `{state, cancelActive?}` | `available`, `draining` or `paused`; `cancelActive` cancels every admitted execution on this node; it never changes the active revision (§12.1.1) |
 | `node/set-engine-drain` | `{engine, drain}` | refuse new work for one engine during a settings restart |
 | `node/set-residency` | `{loadedByEngine}` | the models loaded per engine on this node, normalized per engine |
@@ -1365,7 +1382,8 @@ never sees a revision without its policy, or the reverse. It starts with no
 revision, older than any.
 
 `node/set-policy` is the only request that activates a revision. It answers
-`{revision, runId}`: the revision applied, and `runId`, this process's run nonce
+`{originNodeId, revision, runId}`: the bound origin identity, the revision applied,
+and `runId`, this process's run nonce
 (the one stamped on workloads). A revision lower than the active one is out of
 order: the request is refused with `-32602` and the previous policy and
 revision stay. The same revision again is an idempotent replay.
@@ -2118,15 +2136,18 @@ uses `reserveChatAccount` before sending and independently calls `reconcile`,
   credential-reference change are activation gates; equivalent provider
   credentials under different references are outside the local guarantee.
 
-### 12.8 Strict Chat adapter library (E; inactive)
+### 12.8 Strict Chat adapter library (E; provider dispatch gated)
 
 `chat_adapter.go`, `api_transport.go` and `runChatAccountAttempt` in `accounts.go`
 provide a private single-attempt library behind G's `runPublicChatAttempt` wrapper
-(§12.9). No HTTP handler, listener or JSON-RPC method exposes the wrapper; no real
-provider qualification is supplied here.
+(§12.9). Public HTTP inference enters the accepted `facade.serveInference`
+common entry, including API selection and bounded diagnostic refusals. Its
+provider attempt path uses this wrapper subject to the production provider
+gate; no real provider qualification is supplied here.
 `remoteDispatchAvailable` in `shared/nodepolicy/routing.go` remains false:
 enabled deployments and remote/paid tier permissions are refused. This section
-does not change concrete engine routing or the unavailable API aliases.
+does not disable that common HTTP entry or concrete engine routing. Provider
+dispatch and its diagnostic refusal remain distinct from ingress acceptance.
 
 #### Request and qualification contract
 
@@ -2297,14 +2318,15 @@ needs acceptance. Synthetic profiles/tests prove library boundaries only and
 cannot enable providers, establish vendor-wide ceilings or close native/live
 acceptance. No default fake profile or activation path is supplied.
 
-### 12.9 Public egress lease and stable consumer (G; disabled)
+### 12.9 Public egress lease and stable consumer (G; provider dispatch disabled)
 
 `shared/nodepolicy/routing.go` owns the single `remoteDispatchAvailable=false`
 constant. Policy validation refuses enabled deployments and remote/paid tier
 permissions; G's early and final production gates read the same value through
 `PublicDispatchAvailable()`. No environment variable, flag, policy field, mutable
-test switch or alternate enable bit exists. Production public traffic remains
-zero even if private lease messages are acknowledged. Activation requires a later
+test switch or alternate enable bit exists. Production provider egress remains
+zero even if private lease messages are acknowledged; the accepted public HTTP
+common entry and its diagnostic responses remain available. Provider activation requires a later
 reviewed source change after F's real OpenCode qualification, D's native durability
 and recovery gates, B's finite qualification, I's complete ingress/attempt/cancel
 path and final acceptance evidence. Qualification never flips availability.
