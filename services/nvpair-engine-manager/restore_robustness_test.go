@@ -55,6 +55,108 @@ func restoreOrphanExecutor(t *testing.T, m *Manifest, installDir string) *Execut
 	return ex
 }
 
+func spawnUnboundOrphan(t *testing.T, bin string, port int) *managedProc {
+	t.Helper()
+	started := make(chan struct{})
+	orphan, err := startManagedProc(bin, nil, map[string]string{
+		"FAKE_ADDR":        "127.0.0.1:" + strconv.Itoa(port),
+		"FAKE_START_DELAY": "1h",
+		"FAKE_OUTPUT":      "unbound orphan started",
+	}, func(stream, line string) {
+		if stream == "stdout" && line == "unbound orphan started" {
+			close(started)
+		}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { orphan.stop(0) })
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("delayed orphan did not start")
+	}
+	return orphan
+}
+
+func TestRestoreReclaimsSavedPIDBeforeOrphanBinds(t *testing.T) {
+	m, dir, port := restoreOrphanManifest(t)
+	bin := m.Platforms[hostKey()].Runtime.Bin
+	orphan := spawnUnboundOrphan(t, bin, port)
+	if got := probeListener(context.Background(), m.Platforms[hostKey()].Runtime.Ready, port); got != listenerProbeRefused {
+		t.Fatalf("delayed orphan endpoint = %v, want refused", got)
+	}
+	ex := restoreOrphanExecutor(t, m, dir)
+	if err := ex.desired.setProcessStop("fake", processStopEvidence{
+		Bin: bin, PID: orphan.cmd.Process.Pid, Port: port, Address: "127.0.0.1:" + strconv.Itoa(port),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := ex.desired.set("fake", true, intentLocal); err != nil {
+		t.Fatal(err)
+	}
+	if err := ex.RestoreEnabled(context.Background()); err != nil {
+		t.Fatalf("restore delayed orphan: %v", err)
+	}
+	if !orphanPIDExited(orphan.cmd.Process.Pid) {
+		t.Fatal("cold start raced the still-live unbound orphan")
+	}
+	st, err := ex.state("fake")
+	if err != nil {
+		t.Fatal(err)
+	}
+	st.mu.Lock()
+	proc, adopted, running := st.proc, st.adopted, st.running
+	st.mu.Unlock()
+	if proc == nil || proc == orphan || adopted || !running {
+		t.Fatalf("restore must own a cold child: proc=%p orphan=%p adopted=%v running=%v", proc, orphan, adopted, running)
+	}
+}
+
+func TestReclaimSavedPIDRequiresCurrentManagedImageAndEndpoint(t *testing.T) {
+	for _, scenario := range []string{"foreign current image", "different recorded image", "different saved port", "external install", "unknown PID"} {
+		t.Run(scenario, func(t *testing.T) {
+			m, dir, port := restoreOrphanManifest(t)
+			bin := m.Platforms[hostKey()].Runtime.Bin
+			orphanBin := bin
+			if scenario == "foreign current image" {
+				orphanBin = fakeEngineBin
+			}
+			orphan := spawnUnboundOrphan(t, orphanBin, port)
+			evidence := processStopEvidence{
+				Bin: bin, PID: orphan.cmd.Process.Pid, Port: port, Address: "127.0.0.1:" + strconv.Itoa(port),
+			}
+			switch scenario {
+			case "different recorded image":
+				evidence.Bin = fakeEngineBin
+			case "different saved port":
+				evidence.Port = port%65535 + 1
+			case "external install":
+				dir = t.TempDir()
+			case "unknown PID":
+				evidence.PID = 0
+			}
+			ex := restoreOrphanExecutor(t, m, dir)
+			if installed, err := ex.Detect("fake"); err != nil || !installed {
+				t.Fatalf("detect fixture: installed=%v err=%v", installed, err)
+			}
+			if err := ex.desired.setProcessStop("fake", evidence); err != nil {
+				t.Fatal(err)
+			}
+			st, err := ex.state("fake")
+			if err != nil {
+				t.Fatal(err)
+			}
+			st.opMu.Lock()
+			reclaimed, err := ex.reclaimOrphan(context.Background(), st, "fake", port)
+			st.opMu.Unlock()
+			if err != nil || reclaimed || !pidAlive(orphan.cmd.Process.Pid) {
+				t.Fatalf("nonmatching saved PID was reclaimed: reclaimed=%v err=%v alive=%v", reclaimed, err, pidAlive(orphan.cmd.Process.Pid))
+			}
+		})
+	}
+}
+
 func TestSwitchRecoveryReclaimsOnlyManagedDurableTarget(t *testing.T) {
 	for _, scenario := range []string{"healthy managed orphan", "unhealthy managed orphan", "foreign image", "external install", "different port"} {
 		t.Run(scenario, func(t *testing.T) {

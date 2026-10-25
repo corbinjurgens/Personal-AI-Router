@@ -53,10 +53,10 @@ func pidOnPort(port int) (pid int, image string, ok bool) {
 		return 0, "", false
 	}
 	if p != 0 {
-		return p, procImage(p), true
+		return p, imagePathForPID(p), true
 	}
 	if p, found := ssPID(port); found {
-		return p, procImage(p), true
+		return p, imagePathForPID(p), true
 	}
 	return 0, "", false
 }
@@ -118,10 +118,10 @@ func ssPID(port int) (int, bool) {
 	}
 }
 
-// procImage reads the executable identity from the OS, never argv or a
+// imagePathForPID reads the executable identity from the OS, never argv or a
 // basename. Darwin's proc_pidpath copies at most PROC_PIDPATHINFO_MAXSIZE
 // bytes from the kernel; unavailable or malformed inspection fails closed.
-func procImage(pid int) string {
+func imagePathForPID(pid int) string {
 	if pid <= 0 || int64(pid) > 1<<31-1 {
 		return ""
 	}

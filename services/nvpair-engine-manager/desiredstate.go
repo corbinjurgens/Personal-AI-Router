@@ -449,7 +449,26 @@ func (e *Executor) reclaimOrphan(ctx context.Context, st *engineState, engine st
 	if owned || port <= 0 || rt.modeOrDefault() != "process" || !isManagedInstallPath(binPath, installDir) {
 		return false, nil
 	}
-	pid, image, found := pidOnPort(port)
+	// A child may still be initializing when its manager dies. Listener-only
+	// inspection would miss it and let a cold child race its eventual bind.
+	// Saved identity locates a candidate, but only the current image predicate
+	// authorizes a signal, just as it does for an already listening orphan.
+	evidence, known, err := e.desired.processStop(engine)
+	if err != nil {
+		return false, err
+	}
+	var pid int
+	var image string
+	var found bool
+	if known && evidence.PID > 0 && evidence.Port == port && isOurEngineImage(evidence.Bin, binPath) {
+		image = imagePathForPID(evidence.PID)
+		if isOurEngineImage(image, binPath) {
+			pid, found = evidence.PID, true
+		}
+	}
+	if !found {
+		pid, image, found = pidOnPort(port)
+	}
 	if !found || !isOurEngineImage(image, binPath) {
 		return false, nil
 	}

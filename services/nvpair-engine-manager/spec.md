@@ -49,6 +49,18 @@ verified stop, later Stop, Sleep or shutdown retries that write without changing
 saved intent. Files without this map retain their previous semantics, and
 fixed-port engines continue using their configured port.
 
+Before listener inspection, reclaim checks any positive `processStops` PID
+whose saved port and executable match the current endpoint and managed binary.
+The current OS executable image must independently match that binary inside
+the managed install. This allows reclaim before bind, with the same PID-exit
+and listener-refusal confirmation and failed-reclaim fence as listener reclaim.
+A retained PID alone never authorizes signalling. Missing or zero PID records
+retain listener-based reclaim, including the unresolved spawn-to-PID-save
+window. Linux resolves executable symlinks when possible and compares paths
+case-sensitively. macOS still requires canonical resolution, accepting case
+aliases only when the filesystem confirms the same file. Windows image
+comparison is unchanged.
+
 ## Custom llama preset launch
 
 When custom `runtime.launch_args` uses native `--models-preset` (or the preset
