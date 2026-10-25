@@ -253,7 +253,7 @@ type modelContainer struct {
 }
 
 func readPolicyModelContainer(data []byte) (*modelContainer, error) {
-	return readModelContainer(data, "profiles", "roles", "tiers", "servedModels", "residentModels", "routing")
+	return readModelContainer(data, "profiles", "roles", "tiers", "servedModels", "residentModels", "engineBindings", "routing")
 }
 
 func readModelContainer(data []byte, owned ...string) (*modelContainer, error) {
@@ -396,6 +396,14 @@ func filterPolicyModels(data []byte, remove bool) ([]byte, map[string]int, error
 	}
 	fields := container.fields
 	counts := map[string]int{}
+	// Bindings are activation authority. Never sanitize them away, even on
+	// disk load where unrelated invalid model entries can be repaired.
+	if raw, ok := fields["engineBindings"]; ok {
+		var bindings EngineBindings
+		if err := json.Unmarshal(raw, &bindings); err != nil {
+			return nil, nil, err
+		}
+	}
 	for _, name := range []string{"profiles", "servedModels", "residentModels"} {
 		key := modelField(fields, name)
 		if raw, ok := fields[key]; ok {

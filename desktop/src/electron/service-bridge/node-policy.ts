@@ -588,7 +588,10 @@ export function parsePolicyText(text: string): JsonObject {
     return policy
 }
 
-function modelReferences(value: JsonValue | undefined): NodeModelReference[] | undefined {
+function modelReferences(
+    value: JsonValue | undefined,
+    binding = false
+): NodeModelReference[] | undefined {
     if (value === undefined) return undefined
     if (!Array.isArray(value) || value.length > 256) throw new Error('Invalid model list')
     const seen = new Set<string>()
@@ -599,11 +602,25 @@ function modelReferences(value: JsonValue | undefined): NodeModelReference[] | u
         if (
             !isValidRoutingEngineId(engine) ||
             model === '' ||
+            (binding &&
+                (Array.from(model).some(character => {
+                    const code = character.charCodeAt(0)
+                    return code < 0x20 || (code >= 0x7f && code <= 0x9f)
+                }) ||
+                    new TextEncoder().encode(model).length > 512 ||
+                    new TextEncoder().encode(
+                        JSON.stringify({ engine, model })
+                            .replace(/[<>&]/g, character => {
+                                return `\\u${character.charCodeAt(0).toString(16).padStart(4, '0')}`
+                            })
+                            .replace(/\u2028/g, '\\u2028')
+                            .replace(/\u2029/g, '\\u2029')
+                    ).length > 256)) ||
             /^(weak|medium|strong)(-api|-local)?$/.exec(model)?.[0] === model
         ) {
             throw new Error('Invalid model reference')
         }
-        const key = JSON.stringify([engine, model])
+        const key = JSON.stringify(binding ? model : [engine, model])
         if (seen.has(key)) throw new Error('Duplicate model reference')
         seen.add(key)
         return { engine, model }
@@ -614,7 +631,7 @@ function modelReferences(value: JsonValue | undefined): NodeModelReference[] | u
 // Validate decoded SR fields without reconstructing the policy or losing [].
 function validateModelPreferences(policy: JsonObject): void {
     for (const key of Object.keys(policy)) {
-        for (const name of ['servedModels', 'residentModels']) {
+        for (const name of ['servedModels', 'residentModels', 'engineBindings']) {
             if (key !== name && new RegExp(`^${name}$`, 'iu').test(key)) {
                 throw new Error(`${key} must use the exact field name ${name}`)
             }
@@ -622,6 +639,8 @@ function validateModelPreferences(policy: JsonObject): void {
     }
     const served = modelReferences(policy.servedModels)
     const residents = modelReferences(policy.residentModels)
+    // Descriptor-dependent overlap and served permission belong to the target.
+    modelReferences(policy.engineBindings, true)
     for (const ref of residents ?? []) {
         if (
             served !== undefined &&

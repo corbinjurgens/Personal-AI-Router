@@ -23,6 +23,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -512,6 +513,7 @@ func checkExpectedRevision(stored nodepolicy.Policy, expected string) error {
 
 func (b *Broker) localPolicy() policyGetResult {
 	e := b.captureModelConfig()
+	e.Policy.EngineBindings = slices.Clone(e.Policy.EngineBindings)
 	configuration := b.modelConfiguration(e)
 	return policyGetResult{ModelConfiguration: configuration, Policy: e.Policy, Availability: e.Live, RecoveryRequired: e.Recovery, policyActivation: e.Activation}
 }
@@ -675,6 +677,10 @@ func (b *Broker) persistPolicy(build func(stored nodepolicy.Policy) (nodepolicy.
 		r.mu.Unlock()
 		return nodepolicy.Policy{}, err
 	}
+	if err := policy.ValidateEngineBindings(b.engineModelNaming); err != nil {
+		r.mu.Unlock()
+		return nodepolicy.Policy{}, &invalidParamsError{err}
+	}
 	policy, err = r.publishLocked(policy)
 	if err != nil && !errors.Is(err, durablefile.ErrReplaced) {
 		r.mu.Unlock()
@@ -684,6 +690,7 @@ func (b *Broker) persistPolicy(build func(stored nodepolicy.Policy) (nodepolicy.
 		policy.Routing.Listener.Port != r.current.Routing.Listener.Port
 	refsChanged := credentialRefsDiffer(policy, r.current)
 	r.current = policy
+	r.current.EngineBindings = slices.Clone(policy.EngineBindings)
 	r.recoveryRequired = false
 	r.activationErr = ""
 	r.mu.Unlock()
@@ -875,7 +882,7 @@ func (b *Broker) relayPolicyToPeer(msg *Message, p policyParams) {
 	remote := remotePolicyMethods[msg.Method]
 	err := worker.RelayRequest(remote, msg.Params, func(result json.RawMessage, rpcErr *RPCError, err error) {
 		if err == nil && rpcErr == nil && msg.Method == methodPolicySet {
-			err = residentReadbackSupported(p.Policy, result)
+			err = modelControlReadbackSupported(p.Policy, result)
 		}
 		switch {
 		case err != nil:
@@ -892,7 +899,7 @@ func (b *Broker) relayPolicyToPeer(msg *Message, p policyParams) {
 	}
 }
 
-func residentReadbackSupported(request, result json.RawMessage) error {
+func modelControlReadbackSupported(request, result json.RawMessage) error {
 	var want map[string]json.RawMessage
 	var got struct {
 		Policy map[string]json.RawMessage `json:"policy"`
@@ -900,7 +907,7 @@ func residentReadbackSupported(request, result json.RawMessage) error {
 	if json.Unmarshal(request, &want) != nil || json.Unmarshal(result, &got) != nil {
 		return fmt.Errorf("unsupported policy readback")
 	}
-	for _, key := range []string{"servedModels", "residentModels"} {
+	for _, key := range []string{"servedModels", "residentModels", "engineBindings"} {
 		raw, present := want[key]
 		if !present {
 			continue
@@ -914,7 +921,7 @@ func residentReadbackSupported(request, result json.RawMessage) error {
 			continue
 		}
 		if !exists || json.Unmarshal(actual, &received) != nil || !reflect.DeepEqual(refs, received) {
-			return fmt.Errorf("target does not preserve %s; served/resident edits are unsupported", key)
+			return fmt.Errorf("target does not preserve %s; model-control edits are unsupported", key)
 		}
 	}
 	return nil

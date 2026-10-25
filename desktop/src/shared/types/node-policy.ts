@@ -3,7 +3,7 @@
 
 import type { EngineType } from '@/shared/types/engines'
 
-/** A concrete model reference in served permission or resident preference. */
+/** A concrete native model reference in permission, residency or engine bindings. */
 export interface NodeModelReference {
     engine: string
     model: string

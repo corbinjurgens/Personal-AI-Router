@@ -5,6 +5,25 @@ SPDX-License-Identifier: Apache-2.0
 
 # nvpair-ui-broker
 
+`policy:set` accepts target-owned `engineBindings`, a list of `{engine, model}`
+native references. Absence and `[]` disable the binding configuration; new
+local and peer readbacks always emit `engineBindings: []` when empty. The policy
+schema remains version 2. Each native name has one binding, with at most 256
+entries and the existing identifier and encoded-reference bounds. The target
+uses current descriptor naming to reject overlapping matching sets, including
+implied-latest aliases, and requires each binding to be served when served
+permission is explicit. Names remain case-sensitive. Saving changes no engine
+intent and starts no engine; request-triggered preparation is a separate feature.
+
+Bindings use the existing local or granted-peer CAS policy writer. Peer edits
+preserve private routing, accounts, tiers, availability and pause provenance.
+The relay checks that a target preserves requested model-control fields,
+including explicit empty bindings, and reports unsupported readback when an
+older target discards them. An uncertain save requires readback and review,
+never automatic CAS resubmission. Malformed stored bindings enter paused policy
+recovery and retain the original bytes for diagnosis; stored-model sanitation
+never removes them.
+
 Target-owned model download state uses the shared optional
 `downloadState:{version:1,sourceId,revision,recoveryRequired,entries}` snapshot.
 Entries carry `id`, `engine`, exact `model`, `phase`, `blocksReadiness`, optional
