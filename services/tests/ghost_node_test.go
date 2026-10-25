@@ -96,11 +96,8 @@ func TestScannerEvictsRecordSupersededAtItsAddress(t *testing.T) {
 	stopResponder()
 	reported.Store(wipedUUID)
 
-	// Eviction waits on the browser's full miss threshold (12 scans at 5s, a full
-	// minute) — the window is sized to outlast a node saturated by its own
-	// inference load — so this deadline is generous by design. The identity probe
-	// runs on every scan from ~15s in, so the mismatch is detected long before the
-	// eviction it eventually authorizes.
+	// Keep the production miss threshold and identity probe, but use the
+	// fixture's shorter scan cadence rather than waiting the production minute.
 	if !awaitNodeEvent(events, noderec.NotifyNodeRemoved, originalUUID, 2*time.Minute) {
 		t.Fatalf("scanner never evicted %s after its address began answering as %s; "+
 			"a record whose machine was re-identified must not be kept alive by a TCP probe",
@@ -119,7 +116,8 @@ func TestScannerEvictsRecordSupersededAtItsAddress(t *testing.T) {
 // real cluster identity on the LAN while the test runs.
 func startScannerForGhostTest(t *testing.T) <-chan jsonrpc.Message {
 	t.Helper()
-	cmd := exec.Command(scannerBin, "--cluster-dir", t.TempDir())
+	cmd := exec.Command(scannerBin, "--cluster-dir", t.TempDir(),
+		"--test-scan-interval=250ms", "--test-scan-timeout=150ms")
 	cmd.Stderr = os.Stderr
 
 	stdin, err := cmd.StdinPipe()

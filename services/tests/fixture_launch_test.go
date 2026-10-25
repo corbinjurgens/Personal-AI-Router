@@ -188,9 +188,10 @@ func TestFixtureBrokerLaunchSeamsRemainGuarded(t *testing.T) {
 		t.Fatal(err)
 	}
 	required := map[string]string{
-		"startInteropProcess": "fixtureBrokerCommand",
-		"startTask1Process":   "fixtureBrokerCommand",
-		"startChild":          "fixtureServiceCommand",
+		"startInteropProcess":      "fixtureBrokerCommand",
+		"startTask1Process":        "startTask1ProcessWithEnv",
+		"startTask1ProcessWithEnv": "fixtureBrokerCommand",
+		"startChild":               "fixtureServiceCommand",
 	}
 	for _, path := range files {
 		file, err := parser.ParseFile(token.NewFileSet(), path, nil, 0)

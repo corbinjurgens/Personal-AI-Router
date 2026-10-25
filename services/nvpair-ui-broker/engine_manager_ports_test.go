@@ -248,6 +248,8 @@ func TestEngineManagerPortsSpawnAndScannerReplay(t *testing.T) {
 		engineMgrHTTPPort: ports[0], engineMgrControlPort: ports[1],
 		engineMgrControlHost: &controlHost,
 		clusterDir:           filepath.Join(t.TempDir(), "cluster"),
+		disableMDNS:          true,
+		scannerWaits:         scannerWaitOverrides{scanInterval: 250 * time.Millisecond, scanTimeout: 150 * time.Millisecond, peerRefresh: 500 * time.Millisecond},
 	})
 	for _, listener := range listeners {
 		if err := listener.Close(); err != nil {
@@ -334,6 +336,11 @@ func TestEngineManagerPortsSpawnAndScannerReplay(t *testing.T) {
 			}
 			defer handle.Stop()
 			defer b.setScanner(nil)
+			wantTail := append(b.scannerArgs(), b.scannerWaits.args()...)
+			actual := b.getScanner().cmd.Args
+			if len(actual) < len(wantTail) || !reflect.DeepEqual(actual[len(actual)-len(wantTail):], wantTail) {
+				t.Fatalf("scanner startup arguments=%q, want fixture overrides %q", actual, wantTail)
+			}
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
 			for {

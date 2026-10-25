@@ -2496,17 +2496,23 @@ func TestModelConfigRestartProxyEngineOffRefusalRetries(t *testing.T) {
 
 func TestModelConfigRetryWakesAtDeadlineBetweenIdleTicks(t *testing.T) {
 	f := newModelConfigFixture(t)
+	f.b.residentRetryDelay = 60 * time.Millisecond
 	r := f.b.nodePolicyRuntime()
 	r.mu.Lock()
 	r.now = time.Now
 	r.mu.Unlock()
+	before := time.Now()
 	f.b.reconcileModelConfig(context.Background())
+	after := time.Now()
 	if got := len(modelConfigCalls(f.proxy, nodepolicy.MethodPrepareResident)); got != 1 {
 		t.Fatalf("initial prepares = %d, want one", got)
 	}
 	r.mu.Lock()
-	r.models.retryAt = time.Now().Add(60 * time.Millisecond)
+	retryAt := r.models.retryAt
 	r.mu.Unlock()
+	if retryAt.Before(before.Add(60*time.Millisecond)) || retryAt.After(after.Add(60*time.Millisecond)) {
+		t.Fatalf("retry deadline = %s, want configured 60ms after reconciliation", retryAt)
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() { defer close(done); f.b.runIdlePolicy(ctx) }()
