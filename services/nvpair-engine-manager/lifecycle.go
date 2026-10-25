@@ -48,9 +48,16 @@ const (
 // finish their file work asynchronously, so a single immediate check
 // races them.
 func (e *Executor) waitDetect(engine string, want bool, timeout time.Duration) bool {
+	return waitForDetection(func() bool {
+		ok, _ := e.Detect(engine)
+		return ok == want
+	}, timeout)
+}
+
+func waitForDetection(detected func() bool, timeout time.Duration) bool {
 	deadline := time.Now().Add(timeout)
 	for {
-		if ok, _ := e.Detect(engine); ok == want {
+		if detected() {
 			return true
 		}
 		if time.Now().After(deadline) {
@@ -148,6 +155,10 @@ func (e *Executor) doStart(ctx context.Context, st *engineState, engine string, 
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	pathInstalled, _ := e.Detect(engine)
+	if !pathInstalled && len(st.plat.DetectRequired) > 0 {
+		return fmt.Errorf("engine %q is not installed: mandatory detection files are incomplete", engine)
+	}
 	st.mu.Lock()
 	running := st.running
 	adopted := st.adopted
@@ -155,10 +166,6 @@ func (e *Executor) doStart(ctx context.Context, st *engineState, engine string, 
 		st.mu.Unlock()
 		return nil
 	}
-	st.mu.Unlock()
-
-	pathInstalled, _ := e.Detect(engine)
-	st.mu.Lock()
 	rt := st.plat.Runtime
 	port := st.port
 	st.mu.Unlock()
@@ -209,6 +216,12 @@ func (e *Executor) doStart(ctx context.Context, st *engineState, engine string, 
 	// A pause that landed while the identity probe ran refused its adoption.
 	if err := e.activationVeto(engine); err != nil {
 		return err
+	}
+	st.mu.Lock()
+	installed := st.installed
+	st.mu.Unlock()
+	if !installed && len(st.plat.DetectRequired) > 0 {
+		return fmt.Errorf("engine %q is not installed: mandatory detection files are incomplete", engine)
 	}
 	if fenced && (presence.Occupied || !orphanPIDExited(reclaimPID)) {
 		return fmt.Errorf("cannot start engine %q: an owned orphan reclaim failed; stop it before retrying", engine)
@@ -262,6 +275,14 @@ func (e *Executor) doStart(ctx context.Context, st *engineState, engine string, 
 
 	if err := e.bringUpWithCleanup(ctx, cleanupCtx, st, engine, rt, port, vars); err != nil {
 		return err
+	}
+	if len(st.plat.DetectRequired) > 0 {
+		if installed, _ := e.Detect(engine); !installed {
+			st.mu.Lock()
+			st.running = true
+			st.mu.Unlock()
+			return errors.Join(fmt.Errorf("engine %q is not installed: mandatory detection files are incomplete", engine), e.doStopContext(cleanupCtx, st, engine))
+		}
 	}
 	if err := e.activationVeto(engine); err != nil {
 		st.mu.Lock()

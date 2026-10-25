@@ -57,7 +57,7 @@ func (e *Executor) Install(ctx context.Context, engine string) error {
 	port := st.port
 	st.mu.Unlock()
 	presence := e.reconcilePresence(ctx, engine, st, false, port, false)
-	if presence.Identified {
+	if presence.Identified && len(st.plat.DetectRequired) == 0 {
 		// A healthy service is already present even though no managed binary
 		// was detected. Treat it as an external installation and never fetch a
 		// second copy. reconcilePresence emits the adopted state; the terminal
@@ -66,8 +66,12 @@ func (e *Executor) Install(ctx context.Context, engine string) error {
 		e.emitInstallProgress(engine, "already-installed", 100)
 		return nil
 	}
-	if presence.Occupied && st.plat.Runtime.modeOrDefault() == "process" {
-		err := fmt.Errorf("cannot install engine %q for port %d: the port is occupied by a service that did not identify as %s; use the existing service or choose another port", engine, port, st.manifest.DisplayName)
+	if presence.Occupied && (st.plat.Runtime.modeOrDefault() == "process" || len(st.plat.DetectRequired) > 0) {
+		reason := fmt.Sprintf("a service that did not identify as %s", st.manifest.DisplayName)
+		if presence.Identified {
+			reason = "a running service with incomplete mandatory detection files"
+		}
+		err := fmt.Errorf("cannot install engine %q for port %d: the port is occupied by %s; use the existing service or choose another port", engine, port, reason)
 		e.reportInstallFailed(engine, err)
 		return err
 	}
@@ -163,7 +167,8 @@ func (e *Executor) Install(ctx context.Context, engine string) error {
 }
 
 // Uninstall runs the manifest's uninstall command (user-mode), stopping
-// the engine first. No-op if the engine isn't currently detected.
+// the engine first. No-op only when its executable is absent, independently
+// of whether all mandatory installation files are still present.
 func (e *Executor) Uninstall(ctx context.Context, engine string) error {
 	done, err := e.admitMutation(engine)
 	if err != nil {
@@ -176,7 +181,8 @@ func (e *Executor) Uninstall(ctx context.Context, engine string) error {
 	}
 	st.opMu.Lock()
 	defer st.opMu.Unlock()
-	if ok, _ := e.Detect(engine); !ok {
+	pathInstalled, _ := e.Detect(engine)
+	if st.detectExecutable() == "" {
 		// Already gone — by its own uninstaller, or by hand. Drop our ownership
 		// claim with it: left behind, it would authorise removing a copy the
 		// user installs later, which PAIR has no right to touch.
@@ -210,7 +216,7 @@ func (e *Executor) Uninstall(ctx context.Context, engine string) error {
 	st.mu.Lock()
 	port := st.port
 	st.mu.Unlock()
-	presence := e.reconcilePresence(ctx, engine, st, true, port, false)
+	presence := e.reconcilePresence(ctx, engine, st, pathInstalled, port, false)
 	st.mu.Lock()
 	ownedProcess := st.proc != nil
 	st.mu.Unlock()
@@ -271,7 +277,10 @@ func (e *Executor) Uninstall(ctx context.Context, engine string) error {
 	// inside the tree, so a file the engine still holds open leaves a harmless
 	// remnant while the executable itself is gone — reporting that as a failure
 	// would tell the user to retry an uninstall that already worked.
-	if !e.waitDetect(engine, false, e.detectTimeout) {
+	if !waitForDetection(func() bool {
+		_, _ = e.Detect(engine)
+		return st.detectExecutable() == ""
+	}, e.detectTimeout) {
 		uerr := fmt.Errorf("engine %q still detected after uninstall", engine)
 		if runErr != nil {
 			uerr = fmt.Errorf("uninstall failed after %d attempts: %w", uninstallRetries, runErr)

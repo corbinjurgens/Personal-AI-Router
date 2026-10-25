@@ -27,7 +27,7 @@ import (
 // author is asking for fields/behavior we don't have); unknown
 // optional fields within a supported version are ignored so additive
 // schema growth stays backward compatible.
-const ManifestSchemaVersion = 1
+const ManifestSchemaVersion = 2
 
 const (
 	actionHTTPParamsBody  = "body"
@@ -101,10 +101,11 @@ func (m *Manifest) ModelNamingOrDefault() string {
 // first; OS-specific Go code is the fallback only for primitives a
 // manifest cannot express (process termination, console hiding).
 type Platform struct {
-	Detect    []string   `json:"detect,omitempty"`
-	Install   *Install   `json:"install,omitempty"`
-	Uninstall *Uninstall `json:"uninstall,omitempty"`
-	Runtime   Runtime    `json:"runtime"`
+	Detect         []string   `json:"detect,omitempty"`
+	DetectRequired []string   `json:"detect_required,omitempty"`
+	Install        *Install   `json:"install,omitempty"`
+	Uninstall      *Uninstall `json:"uninstall,omitempty"`
+	Runtime        Runtime    `json:"runtime"`
 	// ModelsDir is the engine's on-disk model store, referenced elsewhere as
 	// {models_dir}. Nothing this service removes may delete it: Uninstall skips
 	// it, and the app-level data purge never reaches it because validation
@@ -627,7 +628,7 @@ func (r *Registry) mergeOntoBundled(override []byte) ([]byte, error) {
 }
 
 // applyPlatformDefaults implements manifest-level shared defaults: a
-// top-level "detect" / "install" / "uninstall" / "runtime" / "models_dir"
+// top-level "detect" / "detect_required" / "install" / "uninstall" / "runtime" / "models_dir"
 // block is merged into every entry under "platforms", with the per-platform block
 // winning key-by-key. Nested objects (runtime, runtime.env, …) merge
 // recursively; arrays and scalars are replaced wholesale. The merge runs
@@ -644,8 +645,18 @@ func applyPlatformDefaults(data []byte) ([]byte, error) {
 	if err := json.Unmarshal(data, &top); err != nil {
 		return nil, fmt.Errorf("invalid JSON: %w", err)
 	}
+	var shared struct {
+		Version        int      `json:"manifest_version"`
+		DetectRequired []string `json:"detect_required"`
+	}
+	if err := json.Unmarshal(data, &shared); err != nil {
+		return nil, fmt.Errorf("invalid shared detection fields: %w", err)
+	}
+	if shared.Version == 1 && len(shared.DetectRequired) > 0 {
+		return nil, errors.New("detect_required requires manifest_version 2")
+	}
 	base := map[string]any{}
-	for _, k := range []string{"detect", "install", "uninstall", "runtime", "models_dir"} {
+	for _, k := range []string{"detect", "detect_required", "install", "uninstall", "runtime", "models_dir"} {
 		raw, ok := top[k]
 		if !ok {
 			continue
@@ -766,6 +777,9 @@ func (m *Manifest) Validate() error {
 		if !validPlatformKey(key) {
 			return fmt.Errorf("platform key %q must be \"<goos>/<goarch>\"", key)
 		}
+		if len(p.DetectRequired) > 0 && m.ManifestVersion < 2 {
+			return fmt.Errorf("platform %q: detect_required requires manifest_version 2", key)
+		}
 		if err := p.validate(key); err != nil {
 			return err
 		}
@@ -796,6 +810,14 @@ func (m *Manifest) Validate() error {
 }
 
 func (p *Platform) validate(key string) error {
+	if len(p.DetectRequired) > 0 && len(p.Detect) == 0 {
+		return fmt.Errorf("platform %q: detect_required requires detect executable alternatives", key)
+	}
+	for _, required := range p.DetectRequired {
+		if strings.TrimSpace(required) == "" {
+			return fmt.Errorf("platform %q: detect_required paths must not be blank", key)
+		}
+	}
 	if fields := servingDeclarationErrors(p.Runtime.Serving); len(fields) > 0 {
 		return fmt.Errorf("platform %q: invalid serving declaration: %v", key, fields)
 	}
@@ -1096,7 +1118,16 @@ func placeholderList(placeholders map[string]bool) []string {
 // placeholders in, so artifact placeholders stay scoped to their platform.
 func (p Platform) templatedStrings() []string {
 	var out []string
-	out = append(out, p.Detect...)
+	for _, candidate := range p.Detect {
+		if len(p.DetectRequired) > 0 {
+			candidate = unixEnvRe.ReplaceAllString(candidate, "")
+		}
+		out = append(out, candidate)
+	}
+	for _, required := range p.DetectRequired {
+		// ${VAR} is an environment reference, not a runner placeholder.
+		out = append(out, unixEnvRe.ReplaceAllString(required, ""))
+	}
 	if p.Install != nil {
 		out = append(out, p.Install.Run...)
 		out = append(out, p.Install.Script...)

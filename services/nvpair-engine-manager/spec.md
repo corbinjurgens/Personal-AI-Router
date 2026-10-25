@@ -5,6 +5,26 @@ SPDX-License-Identifier: Apache-2.0
 
 # Microservice: Engine Manager (`nvpair-engine-manager`)
 
+## Installation completeness
+
+Manifest version 2 adds optional shared/per-platform `detect_required` paths.
+With nonempty mandatory evidence, `EngineStatus.Installed` requires every path
+to resolve to a regular file and at least one regular-file executable alternative
+from ordered `detect`. Only the executable alternative selects the launch binary.
+Blank paths, missing environment values, unresolved placeholders and directories
+fail closed. Nonempty requirements in version 1 are rejected; omitted or empty
+requirements preserve existing detection and adoption semantics. Platform arrays
+replace shared arrays, so `[]` explicitly clears inherited requirements.
+
+Status may truthfully report a running service whose installation is incomplete.
+Readiness and adoption cannot restore `Installed` or bypass start/install checks
+in that case. Occupied listeners still prevent spawn and installation, and an
+existing owned process remains stoppable. Uninstall decides absence and success
+from executable presence independently of mandatory files, retaining ownership
+and failure reporting while an executable survives. Descriptors continue to
+report platform support through `available`; no status or descriptor fields are
+added. [MANIFEST.md](MANIFEST.md#platform-block) defines the authoring contract.
+
 ## Model identifiers
 
 Models accepted for operations, serving declarations and selectable metadata

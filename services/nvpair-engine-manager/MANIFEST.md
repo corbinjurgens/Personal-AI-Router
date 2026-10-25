@@ -151,8 +151,10 @@ Before enabling it, replace every `/REPLACE_WITH_ABSOLUTE_PATH/` value:
   and the argument after `--config` to the absolute configuration file path.
   Arguments are literal strings, not shell commands; do not rely on environment
   variable or tilde expansion in them. Escape backslashes in JSON on Windows.
-- Set each retained platform's `detect` entry to its absolute `server.py` path.
-  Detection checks existence, not Python dependencies or configuration validity.
+- Set `detect` to the absolute interpreter path, matching `runtime.bin`, and
+  `detect_required` to the absolute `server.py` and configuration file paths.
+  Keep `manifest_version: 2`. Detection requires the interpreter and both regular
+  files. It does not import Python dependencies or validate configuration contents.
   Keep only the platform entries you configure, and select an unused runtime port.
 
 The process command is Python plus `server.py --engine strata --config` followed
@@ -263,26 +265,37 @@ and recovery. Editing `args`/`start` directly remains trusted manifest authoring
 |---|---|---|---|
 | `engine` | string | yes | Unique id (the key used in `engine:*` calls). |
 | `display_name` | string | yes | Human-friendly name. |
-| `manifest_version` | int | yes | Must be `1`. A higher value is rejected (asks for behavior this binary lacks). Unknown optional fields within a supported version are ignored, so the schema can grow additively. |
+| `manifest_version` | int | yes | `1` or `2`. Nonempty `detect_required` requires `2`, so older managers reject the manifest instead of ignoring mandatory evidence. Higher versions are rejected. Unknown optional fields within a supported version are ignored. |
 | `platforms` | object | yes | Map of `"<goos>/<goarch>"` → platform block (e.g. `"windows/amd64"`, `"darwin/arm64"`, `"linux/amd64"`). At least one entry. The runner selects the block matching the host. |
 | `actions` | object | no | Map of action name → action (see below). |
 | `family` | string | no | The engine's lineage, same syntax as `engine`; defaults to the engine id. It selects the coded adapters the family shares: the model-store layout used by model copy and the download catalogue (`ollama`, `lmstudio` and `llamacpp` have both). A fork with its own id declares the family it came from. |
 | `protocols` | string[] | no | Protocol profiles the engine serves: `ollama-api`, `openai-v1`, `openai-chat`, `anthropic-messages`, `llamacpp-router`. `openai-chat` claims only `/v1/chat/completions` and `/v1/models`, without legacy completions or embeddings; `openai-v1` retains all of those routes. Published in the engine's descriptor; none means no inference surface is claimed. |
 | `model_naming` | string | no | `exact` (default) or `implied-latest-tag` (an untagged name means `:latest`, as in Ollama). |
 | `operations` | object | no | Semantic model operation bindings; see Model operations. |
-| `detect` / `install` / `uninstall` / `models_dir` / `runtime` | — | no | Optional **shared defaults** inherited by every platform (see below). |
+| `detect` / `detect_required` / `install` / `uninstall` / `models_dir` / `runtime` | — | no | Optional **shared defaults** inherited by every platform (see below). |
 
-**Shared defaults & per-platform overrides.** The platform-level fields `detect`, `install`, `uninstall`, `models_dir`, and `runtime` may also be given once at the top level as shared defaults; each `platforms` entry is then merged onto them. Nested objects (e.g. `runtime`, `runtime.env`) merge key-by-key with the platform value winning, while arrays and scalars are replaced wholesale. So a runtime that's identical across platforms except `cli` is declared once at the top level, and each platform sets only `"runtime": { "cli": "…" }`. Omitting a key inherits the default; setting it (even to a zero value like `"port": 0`) overrides it. A manifest that fully specifies each platform with no top-level defaults behaves exactly as before.
+**Shared defaults & per-platform overrides.** The platform-level fields `detect`, `detect_required`, `install`, `uninstall`, `models_dir`, and `runtime` may also be given once at the top level as shared defaults; each `platforms` entry is then merged onto them. Nested objects (e.g. `runtime`, `runtime.env`) merge key-by-key with the platform value winning, while arrays and scalars are replaced wholesale. So a runtime that's identical across platforms except `cli` is declared once at the top level, and each platform sets only `"runtime": { "cli": "…" }`. Omitting a key inherits the default; setting it (even to a zero value like `"port": 0`) overrides it. A manifest that fully specifies each platform with no top-level defaults behaves exactly as before.
 
 ## Platform block
 
 | Field | Type | Required | Notes |
 |---|---|---|---|
-| `detect` | string[] | no | Paths that, if any exists, mean the engine is already installed. Supports OS env refs (`%VAR%`, `$VAR`), a leading `~`, and the `{install_dir}` placeholder. |
+| `detect` | string[] | required with nonempty `detect_required` | Ordered executable alternatives. The first existing path becomes the launch binary. Supports OS env refs (`%VAR%`, `$VAR`), a leading `~`, and directory placeholders such as `{install_dir}`. Without mandatory evidence, existing detection and external-service adoption behavior is unchanged. |
+| `detect_required` | string[] | no | All listed paths must resolve to existing regular files, together with a regular-file executable alternative from `detect`. Supports the same path expansions (including `${VAR}`). Missing or empty environment references, unresolved placeholders, directories and blank paths fail closed. These files never select the launch binary. Nonempty arrays require manifest version `2`; an omitted or empty array keeps version `1` semantics. A platform's empty array clears an inherited requirement. |
 | `install` | object | no | How to obtain the engine (see Install). Omit for engines that are only ever detected/launched. |
 | `uninstall` | object | no | How to remove a user-mode install (see Uninstall). Backs `engine:uninstall`. |
 | `models_dir` | string | required with `uninstall.remove` | The engine's on-disk model store, available as `{models_dir}`. **Must be a literal path** — a template is rejected, so the store can never be derived from `{install_dir}`. See Model stores. |
 | `runtime` | object | yes | How to launch + probe the engine (see Runtime). |
+
+Mandatory evidence is checked on every detection/status refresh and before
+start, including an already-running engine. Readiness may still establish that
+a service is running, but cannot make an incomplete installation installed or
+make start/install succeed. A live listener continues to block overwrite or
+spawn, including for command-mode engines with mandatory evidence. An owned
+process remains running and stoppable when a required file disappears.
+Descriptor `available` continues to mean platform support, independently of
+local installation completeness. Detection checks file presence and type only,
+not file contents, dependencies or runtime qualification.
 
 ### Uninstall
 
@@ -309,7 +322,8 @@ preserve.
 
 Removal is best-effort within a tree. An engine still holding one file open
 leaves that remnant behind rather than stopping the walk, and the uninstall's
-verdict comes from whether the engine is still detected — half-removing an
+verdict comes from whether a `detect` executable remains, independently of
+missing mandatory files. Half-removing an
 engine and then reporting failure would leave the user retrying something that
 already worked. A symlinked target is unlinked, never descended into.
 

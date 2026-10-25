@@ -5,6 +5,9 @@ package main
 
 import (
 	"context"
+	"os"
+	"runtime"
+	"strings"
 	"time"
 )
 
@@ -19,26 +22,15 @@ type presenceResult struct {
 	Occupied   bool
 }
 
-// Detect updates and returns whether the engine is installed, based on
-// the manifest's detect paths (env-expanded existence checks).
+// Detect updates installation completeness while retaining the executable path
+// independently, so missing configuration cannot defeat owned-process cleanup.
 func (e *Executor) Detect(engine string) (bool, error) {
 	st, err := e.state(engine)
 	if err != nil {
 		return false, err
 	}
-	installed := false
-	binPath := ""
-	for _, p := range st.plat.Detect {
-		r, err := resolvePlaceholders(p, st.pathVars())
-		if err != nil {
-			continue // detect path references something other than a known directory
-		}
-		if ep := expandPath(r); fileExists(ep) {
-			installed = true
-			binPath = ep
-			break
-		}
-	}
+	binPath := st.detectExecutable()
+	installed := binPath != "" && st.detectRequiredFiles()
 	st.mu.Lock()
 	st.installed = installed
 	if binPath != "" {
@@ -46,6 +38,60 @@ func (e *Executor) Detect(engine string) (bool, error) {
 	}
 	st.mu.Unlock()
 	return installed, nil
+}
+
+// detectExecutable preserves detect's ordered alternatives. Required files
+// never select the program used by launch or orphan reclamation.
+func (st *engineState) detectExecutable() string {
+	for _, p := range st.plat.Detect {
+		if len(st.plat.DetectRequired) > 0 {
+			if ep := detectionFile(p, st.pathVars()); ep != "" {
+				return ep
+			}
+			continue
+		}
+		r, err := resolvePlaceholders(p, st.pathVars())
+		if err != nil {
+			continue // detect path references something other than a known directory
+		}
+		if ep := expandPath(r); fileExists(ep) {
+			return ep
+		}
+	}
+	return ""
+}
+
+func (st *engineState) detectRequiredFiles() bool {
+	for _, template := range st.plat.DetectRequired {
+		if detectionFile(template, st.pathVars()) == "" {
+			return false
+		}
+	}
+	return true
+}
+
+// detectionFile resolves mandatory evidence without letting an unresolved or
+// empty environment reference collapse to an existing path suffix.
+func detectionFile(template string, vars map[string]string) string {
+	envPattern := unixEnvRe
+	if runtime.GOOS == "windows" {
+		envPattern = winEnvRe
+	}
+	for _, token := range envPattern.FindAllString(template, -1) {
+		if strings.TrimSpace(os.Getenv(strings.Trim(token, "$%{}"))) == "" {
+			return ""
+		}
+	}
+	// Expand first so ${VAR} is not mistaken for a runner placeholder.
+	p, err := resolvePlaceholders(expandPath(template), vars)
+	if err != nil || strings.TrimSpace(p) == "" || strings.HasPrefix(p, "~") {
+		return ""
+	}
+	info, err := os.Stat(p)
+	if err != nil || !info.Mode().IsRegular() {
+		return ""
+	}
+	return p
 }
 
 // Status returns a fresh snapshot (re-detecting installed-ness).
@@ -152,6 +198,7 @@ func (e *Executor) lockedStatus(engine string) *bool {
 // allowWhileStopping is true only for an explicit Start. Passive status checks
 // must not undo a deliberate OFF by re-adopting a service behind st.stopping.
 func (e *Executor) reconcilePresence(ctx context.Context, engine string, st *engineState, pathInstalled bool, port int, allowWhileStopping bool) presenceResult {
+	executablePresent := st.detectExecutable() != ""
 	st.mu.Lock()
 	running := st.running
 	adopted := st.adopted
@@ -171,13 +218,16 @@ func (e *Executor) reconcilePresence(ctx context.Context, engine string, st *eng
 	// A command-mode engine needs its control CLI. A compatible HTTP endpoint
 	// alone (for example another OpenAI server on LM Studio's port) is not an
 	// installation and must not suppress the installer.
-	if !pathInstalled && st.plat.Runtime.modeOrDefault() != "process" {
+	if !pathInstalled && len(st.plat.DetectRequired) == 0 && st.plat.Runtime.modeOrDefault() != "process" {
 		return presenceResult{}
 	}
 
 	if port == 0 || ready == nil || proc != nil || (running && !adopted) {
 		return presenceResult{Identified: running, Occupied: running}
 	}
+	// Readiness can establish a running service, but cannot supply declared
+	// mandatory files. Keep liveness truthful without promoting installation.
+	serviceInstalled := pathInstalled || len(st.plat.DetectRequired) == 0
 
 	probeCtx, cancel := context.WithTimeout(ctx, presenceRefusalWindow)
 	listener := probeListener(probeCtx, ready, port)
@@ -198,7 +248,7 @@ func (e *Executor) reconcilePresence(ctx context.Context, engine string, st *eng
 		st.healthy = false
 		st.adopted = false
 		st.proc = nil
-		if !pathInstalled {
+		if !executablePresent {
 			// A service-only adoption has no managed image. Never leave a stale
 			// path that orphan reclamation could terminate.
 			st.binPath = ""
@@ -214,8 +264,8 @@ func (e *Executor) reconcilePresence(ctx context.Context, engine string, st *eng
 		// existing state and prevent install/start from writing over it.
 		if running && adopted {
 			st.mu.Lock()
-			st.installed = true
-			if !pathInstalled {
+			st.installed = serviceInstalled
+			if !executablePresent {
 				st.binPath = ""
 			}
 			st.mu.Unlock()
@@ -224,13 +274,18 @@ func (e *Executor) reconcilePresence(ctx context.Context, engine string, st *eng
 	}
 
 	identified := e.probe(ctx, ready, port)
+	if len(st.plat.DetectRequired) > 0 {
+		// The probe may outlive a file change. Refresh mandatory evidence after
+		// network I/O before publishing either healthy or transient adoption.
+		serviceInstalled, _ = e.Detect(engine)
+	}
 	if !identified {
 		if running && adopted {
 			st.mu.Lock()
 			changed := st.healthy
-			st.installed = true // previously identified external service
+			st.installed = serviceInstalled
 			st.healthy = false
-			if !pathInstalled {
+			if !executablePresent {
 				st.binPath = ""
 			}
 			st.mu.Unlock()
@@ -270,7 +325,7 @@ func (e *Executor) reconcilePresence(ctx context.Context, engine string, st *eng
 	if changed || st.runID == "" {
 		st.runID = newEngineRunID()
 	}
-	st.installed = true
+	st.installed = serviceInstalled
 	st.running = true
 	st.healthy = true
 	st.adopted = true
@@ -278,7 +333,7 @@ func (e *Executor) reconcilePresence(ctx context.Context, engine string, st *eng
 	if allowWhileStopping {
 		st.stopping = false
 	}
-	if !pathInstalled {
+	if !executablePresent {
 		// Detection missed, so this is explicitly an external service. Keep
 		// binPath empty so stop/uninstall can never treat it as our orphan.
 		st.binPath = ""
