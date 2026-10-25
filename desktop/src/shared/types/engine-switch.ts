@@ -70,6 +70,7 @@ export interface SwitchError {
     message: string
 }
 export interface SwitchReceipt {
+    automatic?: boolean
     version: number
     nodeId: string
     requestId: string

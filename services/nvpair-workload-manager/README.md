@@ -32,11 +32,15 @@ Two channels:
 Peers are discovered through the broker's node records rather than by this
 component browsing the network itself.
 
+Each outbound route uses the peer's advertised `wl` port independently of this
+node's listener. Missing, zero or out-of-range advertised ports are ignored,
+without substituting this node's port or the production default.
+
 ## CLI flags
 
 | Flag | Default | Description |
 | --- | --- | --- |
-| `--port <n>` | `14320` | Inter-node port to listen on and advertise |
+| `--port <n>` | `14320` | Inter-node port to listen on and advertise (1 to 65535; zero is rejected before startup) |
 | `--ipc <path>` | _(stdio)_ | IPC endpoint: Unix socket or Windows named pipe |
 | `--cluster-dir <path>` | _(none)_ | Cluster config dir (`node.crt` / `node.key` + `trusted/`) supplying the identity and pins the inter-node mTLS channel requires. Without it the node has no cluster identity and exchanges no inter-node traffic |
 | `--log-level <level>` | `info` | One of `error` / `warn` / `info` / `debug` |

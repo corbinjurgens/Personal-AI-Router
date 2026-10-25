@@ -114,7 +114,7 @@ type Manager struct {
 // exclude our own advertisement from the broadcast peer set (by UUID, so a
 // same-named peer isn't wrongly dropped).
 func NewManager(codec *Codec, port int, selfUUID, clusterDir string) *Manager {
-	peers := newPeerSet(port)
+	peers := newPeerSet()
 	dedup := newDedupIndex(defaultDedupCapacity)
 	// Inter-node traffic is cluster mTLS scoped to pinned peers, unconditionally:
 	// while this node is not a live cluster member it neither serves nor
@@ -149,6 +149,9 @@ func NewManager(codec *Codec, port int, selfUUID, clusterDir string) *Manager {
 }
 
 func (m *Manager) Run(ctx context.Context) error {
+	if err := validateListenerPort(m.server.port); err != nil {
+		return err
+	}
 	ctx, cancel := context.WithCancel(ctx)
 	m.ctx = ctx
 	m.cancel = cancel

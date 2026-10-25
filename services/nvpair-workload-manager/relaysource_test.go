@@ -47,7 +47,7 @@ func TestSameNameDistinctUUIDPeersSurviveReplace(t *testing.T) {
 
 	// peerSet.Replace keys the broadcast set by PeerNode.ID: both distinct-UUID
 	// peers must be added, not collapsed into one under the shared hostname.
-	ps := newPeerSet(14320)
+	ps := newPeerSet()
 	added, _ := ps.Replace(nodes)
 	if len(added) != 2 {
 		t.Fatalf("peerSet.Replace added %d targets, want 2 (same-named peers collapsed)", len(added))

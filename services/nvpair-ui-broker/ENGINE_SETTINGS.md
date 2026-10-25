@@ -281,13 +281,48 @@ deadline fails without stopping source. Pending invalidations replay before any
 facade enables after proxy restart. Invalidation does not grant strict readiness
 or erase uncertain capacity markers.
 
-The sibling `engine-switch-operations.json` journal keeps immutable terminal
-receipts with no automatic eviction. A full journal visibly rejects new IDs;
+The sibling `engine-switch-operations.json` journal keeps manual terminal
+receipts with no eviction. Manual receipt capacity visibly rejects new IDs;
 reserved space permits progress, terminal writes, recovery and identical retries.
 Write failure halts effects; a landed but uncertain replacement is adopted for
 readback while fresh mutations remain fenced. Terminal receipts are durable
 before manager reservation release. Release/cleanup failure retains a recovery
 fence; completion receipts are never rewritten to describe later runtime.
+
+Broker-internal binding preparation uses the same transaction with optional
+`automatic: true` on receipts, prepare envelopes and checkpoints. The public
+switch request has no automatic flag. Automatic work retains its initial
+absolute deadline, at most 90 seconds including acceptance, drain and activation;
+each step uses the earlier existing bound. Manual work keeps its 15-minute
+budget. Server readiness does not establish model readiness.
+The private reconcile envelope carries `cleanupDeadline` from the broker's
+bounded cleanup context without changing operation identity. Live cleanup uses
+the original remaining window; later recovery gets a fresh bounded cleanup
+window and never resumes forward execution.
+
+Automatic IDs are broker-generated `binding:<brokerRunId>:<sequence>` values.
+New public switch/fence submissions cannot use that namespace. Existing legacy
+manual receipts and tombstones keep their exact retry/fence semantics. Status
+reads retain caller authorization. Internal acceptance consumes a single-use
+current-run sequence and rechecks its producing proxy session at acceptance;
+pruning or restart cannot make a delayed submission fresh.
+
+The journal retains a ring of 32 settled terminal automatic receipts, in durable
+settlement order, plus unresolved work. Manual receipts and tombstones do not
+consume that ring. Automatic rows become eligible after obligations are
+discharged and manager release is verified. Settlement and pruning share one
+durable write with monotonic generation. Recovery, failed cleanup, byte limits
+and uncertain writes remain fences. Old journals read as manual without a write.
+
+Automatic replacement requires the sole running conflicting engine to be
+PAIR-controlled, non-adopted and free of reclaim uncertainty. The manager
+rechecks this before reservation and source effects. Automatic reservations
+prevent another engine from starting during replacement. Local Off may preempt
+automatic work of either origin through the existing durable operation-specific
+obligation. Delayed scoped Off cannot affect newer work. Manual local switches
+retain busy behavior; lock and pause guards remain authoritative. Desktop and
+TUI show `Automatic engine switch` with existing phases, request identities,
+observations and refusal codes.
 
 Failures terminate as `failed-validation`, `failed-drain`, `failed-source-stop`,
 `failed-target-start`, `failed-publication` or `failed-interrupted`; pre-acceptance

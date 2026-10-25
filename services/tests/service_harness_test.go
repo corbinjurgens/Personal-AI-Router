@@ -291,7 +291,11 @@ func newProxyServiceFixture(t *testing.T) *serviceFixture {
 
 func (f *serviceFixture) startChild(args ...string) *serviceChild {
 	f.t.Helper()
-	child := &serviceChild{cmd: exec.Command(f.servicePath, args...), done: make(chan struct{}), output: &serviceOutput{}}
+	cmd, err := fixtureServiceCommand(f.servicePath, args...)
+	if err != nil {
+		f.t.Fatalf("service fixture launch: %v", err)
+	}
+	child := &serviceChild{cmd: cmd, done: make(chan struct{}), output: &serviceOutput{}}
 	child.cmd.Dir = f.dir
 	child.cmd.Env = f.env
 	child.cmd.Stdout = child.output

@@ -32,7 +32,7 @@ import (
 // Thus no remote mDNS responder exists during any bootstrap or recovery below.
 func pairedBootstrapSelf(t *testing.T, remote *task1Node) noderec.DirectoryNode {
 	t.Helper()
-	scanner := startTask1Process(t, remote.base, scannerBin, "--cluster-dir", filepath.Join(remote.base, "cluster"))
+	scanner := startTask1Process(t, remote.base, scannerBin, "--mdns=false", "--cluster-dir", filepath.Join(remote.base, "cluster"))
 	var self noderec.DirectoryNode
 	task1Eventually(t, "serving scanner self snapshot", 10*time.Second, func() bool {
 		var result noderec.GetNodesResult
@@ -221,9 +221,8 @@ func newPairedBootstrapFixture(t *testing.T, blocked bool) *pairedBootstrapFixtu
 		{Service: noderec.ServiceEngineControl, Port: f.b.ports[noderec.ServiceEngineControl]},
 	}})
 	localCM, localEngine := f.local.copyBinary(clusterMgrBin), f.local.copyBinary(engineMgrBin)
-	bridge, env := newPortInteropBridge(t, localCM, f.a.ports[noderec.ServiceCluster])
-	f.local.env = append(f.local.env, env...)
-	for _, path := range []string{bridge, localCM, localEngine} {
+	f.local.ports.clusterManager = f.a.ports[noderec.ServiceCluster]
+	for _, path := range []string{localCM, localEngine} {
 		canonical, err := canonicalServicePath(path)
 		if err != nil {
 			t.Fatal(err)
@@ -232,11 +231,9 @@ func newPairedBootstrapFixture(t *testing.T, blocked bool) *pairedBootstrapFixtu
 	}
 	// No local installed engine or engine API participates in this test.
 	writeDisabledBuiltinEngineOverrides(t, f.local.dir, jointAppDir(f.local.configDir))
-	f.a.ports[noderec.ServiceEngineManager] = temporaryClusterPort(t)
-	f.a.ports[noderec.ServiceEngineControl] = temporaryClusterPort(t)
-	args := append(f.local.args(), "--cluster-manager-path", bridge, "--engine-manager-path", localEngine,
-		"--engine-manager-http-port", strconv.Itoa(f.a.ports[noderec.ServiceEngineManager]),
-		"--engine-manager-control-port", strconv.Itoa(f.a.ports[noderec.ServiceEngineControl]))
+	f.a.ports[noderec.ServiceEngineManager] = f.local.ports.engineManagerHTTP
+	f.a.ports[noderec.ServiceEngineControl] = f.local.ports.engineControl
+	args := append(f.local.args(), "--cluster-manager-path", localCM, "--engine-manager-path", localEngine)
 	f.local.service = f.local.startChild(args...)
 	waitTCP(t, net.JoinHostPort("127.0.0.1", strconv.Itoa(f.a.ports[noderec.ServiceCluster])), 10*time.Second)
 	f.client = f.local.dial()

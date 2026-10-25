@@ -482,8 +482,11 @@ func (f *facade) newLocalReverseProxy(target *url.URL) *httputil.ReverseProxy {
 // engine-idle evidence.
 func (f *facade) serveStrictLocal(w http.ResponseWriter, r *http.Request, body []byte, model string, req nodepolicy.StrictAdmissionRequest, peer bool, origin ...*routingSpend) {
 	admissionStarted := time.Now()
+	buffers := inferenceBuffers(r.Context())
+	var requestOwner *routingSpend
 	var observed *routingFactAttempt
 	if len(origin) != 0 {
+		requestOwner = origin[0]
 		observed = origin[0].strictFactAttempt(destinationDescriptor(model, origin[0].key.OriginNodeID, f.profile.Name, false))
 	}
 	rejectObservation := func(cause routingFactReason, status int) {
@@ -544,7 +547,7 @@ func (f *facade) serveStrictLocal(w http.ResponseWriter, r *http.Request, body [
 		writeIngressError(w, bufferRequestStatus(err), "inference-buffer", "inference request could not be prepared")
 		return
 	}
-	defer releasePreparation()
+	defer func() { buffers.releaseAfterPendingBody(releasePreparation) }()
 	ticket, err := f.host.admission.AdmitStrict(prepareCtx, f.profile.Name, model, req, validated.generation)
 	if err != nil {
 		rejectObservation(failureFactReason(err), http.StatusServiceUnavailable)
@@ -556,7 +559,7 @@ func (f *facade) serveStrictLocal(w http.ResponseWriter, r *http.Request, body [
 		observed.observeAdmission(performanceWait)
 	}
 	evidence := strictNotDispatched
-	defer func() { ticket.Finish(evidence) }()
+	defer func() { buffers.releaseAfterPendingBody(func() { ticket.Finish(evidence) }) }()
 	t := ticket.(*strictTicket)
 	f.host.admission.mu.Lock()
 	t.base.cancel = cancel
@@ -640,7 +643,7 @@ func (f *facade) serveStrictLocal(w http.ResponseWriter, r *http.Request, body [
 		if remaining <= 0 {
 			return context.DeadlineExceeded
 		}
-		b, err := awaitFirstBody(resp.Body, remaining)
+		b, err := awaitFirstBody(resp, remaining, requestOwner, buffers)
 		if err != nil {
 			return err
 		}

@@ -561,6 +561,9 @@ func (d *nodeDetail) switchView() string {
 		lines = append(lines, commandFailure(s.refusal))
 	}
 	if r := s.receipt; r != nil {
+		if r.Automatic {
+			lines = append(lines, "Automatic engine switch")
+		}
 		lines = append(lines, fmt.Sprintf("Node %s; From %s To %s; sequence %d; phase %s; recoveryRequired=%t",
 			r.NodeID, r.Request.SourceEngine, r.Request.TargetEngine, r.Sequence, r.Phase, r.RecoveryRequired))
 		if r.Error != nil {

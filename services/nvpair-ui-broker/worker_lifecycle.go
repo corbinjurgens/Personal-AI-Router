@@ -27,7 +27,7 @@ func (b *Broker) spawnScanner() (supervisedHandle, error) {
 	if err := b.scannerWaits.validate(); err != nil {
 		return nil, err
 	}
-	args := append(b.clusterDirArgs(), b.scannerWaits.args()...)
+	args := append(b.scannerArgs(), b.scannerWaits.args()...)
 	sp, err := startScanner(
 		b.scannerPath,
 		applog.LevelString(),
@@ -624,7 +624,7 @@ func (b *Broker) notifyEngineSwitchRecoveryReady(ctx context.Context, w *rpcWork
 }
 
 func (b *Broker) spawnManualNodes() (supervisedHandle, error) {
-	w, err := startRPCWorker("manual-nodes", b.manualNodesPath, append(b.logLevelArgs(), b.clusterDirArgs()...), b.forwardManualNodesNotification)
+	w, err := startRPCWorker("manual-nodes", b.manualNodesPath, b.manualNodesArgs(), b.forwardManualNodesNotification)
 	if err != nil {
 		return nil, err
 	}

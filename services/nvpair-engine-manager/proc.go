@@ -96,29 +96,47 @@ func scanLines(r io.Reader, stream string, onLine func(stream, line string)) {
 // windowless, so gracefulSignal is already taskkill /T /F and normally ends the
 // process immediately; the deadline remains a backstop for a failed taskkill.
 func (mp *managedProc) stop(grace time.Duration) {
+	_ = mp.stopContext(context.Background(), grace)
+}
+
+// stopContext uses the same signals as stop, but never turns an expired
+// automatic preparation budget into another grace interval or an unbounded
+// exit wait. A successful signal is not proof: only done confirms reaping.
+func (mp *managedProc) stopContext(ctx context.Context, grace time.Duration) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if mp == nil || mp.cmd == nil || mp.cmd.Process == nil {
-		return
+		return nil
 	}
 	select {
 	case <-mp.done:
-		return // already exited
+		return nil
 	default:
 	}
-	if grace <= 0 {
-		_ = signalPID(mp.cmd.Process.Pid, true)
-		<-mp.done
-		return
+	force := grace <= 0
+	_ = signalPIDContext(ctx, mp.cmd.Process.Pid, force)
+	if err := ctx.Err(); err != nil {
+		return err
 	}
-	_ = gracefulSignal(mp.cmd)
-	timer := time.NewTimer(grace)
-	defer timer.Stop()
+	if !force {
+		timer := time.NewTimer(grace)
+		defer timer.Stop()
+		select {
+		case <-mp.done:
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-timer.C:
+		}
+		_ = signalPIDContext(ctx, mp.cmd.Process.Pid, true)
+	}
 	select {
 	case <-mp.done:
-		return
-	case <-timer.C:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
 	}
-	_ = signalPID(mp.cmd.Process.Pid, true)
-	<-mp.done
 }
 
 // terminatePID stops the process with the given PID (and its tree on

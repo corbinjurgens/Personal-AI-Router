@@ -461,10 +461,12 @@ func (f *policyJointFixture) startOrigin(t *testing.T) {
 
 func (f *policyJointFixture) startTarget(t *testing.T) {
 	t.Helper()
+	ports := reserveFixtureServicePorts(t)
+	ports.engineManagerHTTP, ports.engineControl = f.ports[0], f.ports[1]
+	args := append([]string{"--scanner-path", f.scanner, "--engine-manager-path", f.engine, "--proxy-engines=", "--cluster-dir", f.cluster, "--log-level", "error"}, ports.args()...)
 	f.target = startInteropProcess(t, f.base, brokerBin, f.ports[0],
 		[]string{"OLLAMA_HOST=", "NVPAIR_TEST_SUBSCRIPTION_SCANNER=" + f.scanner, "NVPAIR_TEST_SUBSCRIPTION_PORT=" + strconv.Itoa(f.ports[2])},
-		"--scanner-path", f.scanner, "--engine-manager-path", f.engine, "--proxy-engines=", "--cluster-dir", f.cluster,
-		"--engine-manager-http-port", strconv.Itoa(f.ports[0]), "--engine-manager-control-port", strconv.Itoa(f.ports[1]), "--log-level", "error")
+		args...)
 	f.target.paths = append(f.target.paths, f.engine, f.scanner)
 	f.target.ports = append(f.target.ports, f.ports[1:]...)
 	waitForMethod(t, f.target.msgs, "app:ready", 15*time.Second)

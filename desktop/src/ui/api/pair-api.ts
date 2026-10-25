@@ -4,6 +4,7 @@
 import { type IEngineApi, createEngineApi } from '@/ui/api/engine-api'
 import { refreshNodeManagement } from '@/ui/stores/node-configuration.store'
 import type { ServiceTransport } from '@/shared/types/service-bridge'
+import type { WsInvokeResponse } from '@/shared/types/ws-channels'
 import { createRoutingHistory } from './routing-history'
 import type {
     AvailableNode,
@@ -61,7 +62,7 @@ export interface INodesApi {
         fetchedNodes: boolean
     }>
     /** Remove a node from the cluster (revokes membership + pinned trust). */
-    removeMember(nodeId: string): Promise<{ nodeId: string; removed: boolean }>
+    removeMember(nodeId: string): Promise<WsInvokeResponse<'nodes:remove-member'>>
     /** A node was added or updated in the discovery/metrics list. */
     onUpsert(callback: (node: NodeItem) => void): () => void
     /** A node was removed from the discovery/metrics list. */

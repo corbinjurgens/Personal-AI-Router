@@ -5,6 +5,11 @@ SPDX-License-Identifier: Apache-2.0
 
 # nvpair-tui
 
+Marked switch receipts display `Automatic engine switch` in the existing
+switch panel, retaining request identity, phases, current observations and
+refusal codes. Push notifications trigger authoritative readback. Automatic
+cause grants no management permission and creates no separate progress store.
+
 A terminal UI for running and supervising the NVPAIR fleet on a **headless
 machine over SSH**, where the bundled graphical UI cannot run. That is its
 purpose: it is an operations tool for hosts without a desktop, not a replacement

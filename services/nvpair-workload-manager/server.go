@@ -87,6 +87,9 @@ func NewServer(port int, dedup *dedupIndex, mesh *clustertrust.Mesh, emitUpsert 
 // the same listener serves pinned peers. No rebind, and no restart to re-read the
 // cluster dir. Blocks until ctx is cancelled, then drains.
 func (s *Server) Run(ctx context.Context) error {
+	if err := validateListenerPort(s.port); err != nil {
+		return err
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc(eventsPath, s.handleEvents)
 

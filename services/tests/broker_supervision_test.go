@@ -14,7 +14,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"runtime"
@@ -88,7 +87,10 @@ func startBrokerWithPorts(t *testing.T, configDir, clusterDir string, extraEnv [
 	if fixtureBrokerFrontsLlamaCPP(args) {
 		writePrivateBrokerEngineSettings(t, configDir, clusterDir, map[string]int{"llamacpp": freePort(t)})
 	}
-	cmd := exec.Command(brokerBin, args...)
+	cmd, err := fixtureBrokerCommand(brokerBin, args...)
+	if err != nil {
+		t.Fatal(err)
+	}
 	// Every supervised worker must use disposable per-test config. In
 	// particular, managed-port startup can persist an Ollama backend port; a
 	// cross-process test must never read or rewrite the developer's real file.
@@ -406,7 +408,10 @@ func TestBrokerShutsDownOnSignal(t *testing.T) {
 		"--proxy-path", proxyBin, "--proxy-engines", "ollama",
 		"--cluster-dir", t.TempDir(),
 	}, reserveFixtureServicePorts(t).args()...)
-	cmd := exec.Command(brokerBin, args...)
+	cmd, err := fixtureBrokerCommand(brokerBin, args...)
+	if err != nil {
+		t.Fatal(err)
+	}
 	configureBrokerSignalTarget(cmd)
 	cmd.Env = privateEngineEnv(t, t.TempDir())
 	cmd.Stderr = os.Stderr
@@ -589,7 +594,11 @@ func TestBrokerProxySetPortRebinds(t *testing.T) {
 		"--proxy-path", proxyBin, "--proxy-engines", "ollama",
 		"--engine-manager-path", engineMgrBin,
 	}, reserveFixtureServicePorts(t).args()...)
-	cmd := exec.Command(brokerBin, args...)
+	args = append(args, "--cluster-dir", t.TempDir())
+	cmd, err := fixtureBrokerCommand(brokerBin, args...)
+	if err != nil {
+		t.Fatal(err)
+	}
 	// Isolate per-user state (proxy-port.json, any engine override) to a
 	// temp dir so the test leaves the real config untouched.
 	cmd.Env = privateEngineEnv(t, cfg)
@@ -699,11 +708,8 @@ func TestBrokerManualNodeMergedIntoDiscovery(t *testing.T) {
 
 	waitForMethod(t, msgs, "app:ready", 10*time.Second)
 
-	// Add a manual node with a unique name and its canonical prefixed id. The manual
-	// prober dials fixed product ports (Ollama, LM Studio, node-info), so a
-	// loopback address would reach an installed PAIR's listeners and could
-	// rename the node to that service's host UUID. A documentation address
-	// (RFC 5737) owns no listener; each probe fails within its bounded timeout.
+	// The fixture disables every manual probe leg before worker startup, and the
+	// documentation address (RFC 5737) owns no listener, so nothing is dialed.
 	addReq := fmt.Sprintf(`{"jsonrpc":"2.0","id":800,"method":"node/add","params":{"address":"192.0.2.1","name":%q}}`, nodeName) + "\n"
 	if _, err := stdin.Write([]byte(addReq)); err != nil {
 		t.Fatalf("write node/add: %v", err)

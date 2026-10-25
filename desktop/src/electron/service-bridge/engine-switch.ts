@@ -155,6 +155,7 @@ function request(value: JsonValue | undefined): SwitchRequest {
 function receipt(value: JsonValue | undefined): SwitchReceipt {
     const row = object(value, [
         'version',
+        'automatic',
         'nodeId',
         'requestId',
         'caller',
@@ -175,6 +176,7 @@ function receipt(value: JsonValue | undefined): SwitchReceipt {
         'recoveryRequired'
     ])
     const result: SwitchReceipt = {
+        ...(row.automatic === undefined ? {} : { automatic: flag(row.automatic) }),
         version: sequence(row.version),
         nodeId: text(row.nodeId),
         requestId: matching(row.requestId, identity),
@@ -211,7 +213,7 @@ function receipt(value: JsonValue | undefined): SwitchReceipt {
         terminal !== (result.finishedAt !== null) ||
         updated < accepted ||
         deadline <= accepted ||
-        deadline - accepted > 900000 ||
+        deadline - accepted > (result.automatic ? 90000 : 900000) ||
         (result.finishedAt !== null &&
             (Date.parse(result.finishedAt) < accepted ||
                 Date.parse(result.finishedAt) > updated)) ||

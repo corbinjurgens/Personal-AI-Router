@@ -67,8 +67,10 @@ func (e *Executor) waitDetect(engine string, want bool, timeout time.Duration) b
 type startOpts struct {
 	RequireOwned bool
 	ReclaimOwned bool
-	Port         int
-	Bind         string
+	// Automatic switches retain their deadline through failed-start cleanup.
+	BoundedCleanup bool
+	Port           int
+	Bind           string
 	// Origin is who asked for the start. A paired node's start (intentPeer)
 	// is checked against the local veto again under the lifecycle lock.
 	Origin intentOrigin
@@ -132,6 +134,10 @@ func (e *Executor) StartWith(ctx context.Context, engine string, opts startOpts)
 // doStart performs the start. Callers must hold st.opMu.
 func (e *Executor) doStart(ctx context.Context, st *engineState, engine string, opts startOpts) (err error) {
 	ctx, finish := e.startContext(ctx, st)
+	cleanupCtx := context.Background()
+	if opts.BoundedCleanup {
+		cleanupCtx = ctx
+	}
 	defer func() {
 		err = vetoCause(ctx, err)
 		finish()
@@ -254,14 +260,14 @@ func (e *Executor) doStart(ctx context.Context, st *engineState, engine string, 
 	st.stopping = false
 	st.mu.Unlock()
 
-	if err := e.bringUp(ctx, st, engine, rt, port, vars); err != nil {
+	if err := e.bringUpWithCleanup(ctx, cleanupCtx, st, engine, rt, port, vars); err != nil {
 		return err
 	}
 	if err := e.activationVeto(engine); err != nil {
 		st.mu.Lock()
 		st.running = true
 		st.mu.Unlock()
-		return errors.Join(err, e.doStop(st, engine))
+		return errors.Join(err, e.doStopContext(cleanupCtx, st, engine))
 	}
 
 	// Linearize automatic readiness with the pause projection. A pause that
@@ -280,7 +286,7 @@ func (e *Executor) doStart(ctx context.Context, st *engineState, engine string, 
 		st.running = true
 		st.mu.Unlock()
 		e.nodeProjection.mu.Unlock()
-		return errors.Join(readyErr, e.doStop(st, engine))
+		return errors.Join(readyErr, e.doStopContext(cleanupCtx, st, engine))
 	}
 	st.running = true
 	st.runID = newEngineRunID()
@@ -338,13 +344,17 @@ func (e *Executor) startContext(ctx context.Context, st *engineState) (context.C
 }
 
 func (e *Executor) bringUp(ctx context.Context, st *engineState, engine string, rt Runtime, port int, vars map[string]string) error {
+	return e.bringUpWithCleanup(ctx, context.Background(), st, engine, rt, port, vars)
+}
+
+func (e *Executor) bringUpWithCleanup(ctx, cleanupCtx context.Context, st *engineState, engine string, rt Runtime, port int, vars map[string]string) error {
 	if strataServingRuntime(st, rt.Serving) && rt.modeOrDefault() != "process" {
 		return servingError("Prepared Strata requires an owned process launch.")
 	}
 	if rt.modeOrDefault() == "command" {
-		return e.bringUpCommand(ctx, st, engine, rt, port, vars)
+		return e.bringUpCommand(ctx, cleanupCtx, st, engine, rt, port, vars)
 	}
-	return e.bringUpProcess(ctx, st, engine, rt, port, vars)
+	return e.bringUpProcessWithCleanup(ctx, cleanupCtx, st, engine, rt, port, vars, prepareServingSnapshot)
 }
 
 // bringUpProcess spawns the engine as a foreground process this service
@@ -356,6 +366,10 @@ func (e *Executor) bringUpProcess(ctx context.Context, st *engineState, engine s
 // Snapshot preparation is passed explicitly so fake-process tests can exercise
 // an input change between preparation and the final check without timing races.
 func (e *Executor) bringUpProcessWithSnapshot(ctx context.Context, st *engineState, engine string, rt Runtime, port int, vars map[string]string, prepareSnapshot func(string, []byte) (string, func(), error)) error {
+	return e.bringUpProcessWithCleanup(ctx, context.Background(), st, engine, rt, port, vars, prepareSnapshot)
+}
+
+func (e *Executor) bringUpProcessWithCleanup(ctx, cleanupCtx context.Context, st *engineState, engine string, rt Runtime, port int, vars map[string]string, prepareSnapshot func(string, []byte) (string, func(), error)) error {
 	serving := preparedServingRuntime(st, rt.Serving)
 	if llamaServingRuntime(st, rt.Serving) {
 		rt = llamaServingBase(rt)
@@ -512,7 +526,12 @@ func (e *Executor) bringUpProcessWithSnapshot(ctx context.Context, st *engineSta
 	st.mu.Unlock()
 	evidence.PID = proc.cmd.Process.Pid
 	if err := e.desired.setProcessStop(engine, evidence); err != nil {
-		proc.stop(stopGrace(rt))
+		if stopErr := proc.stopContext(cleanupCtx, stopGrace(rt)); stopErr != nil {
+			st.mu.Lock()
+			st.running, st.healthy, st.stopping = true, false, true
+			st.mu.Unlock()
+			return errors.Join(fmt.Errorf("persist %s process identity: %w", engine, err), stopErr)
+		}
 		e.markStopped(st, engine)
 		return fmt.Errorf("persist %s process identity: %w", engine, err)
 	}
@@ -543,7 +562,12 @@ func (e *Executor) bringUpProcessWithSnapshot(ctx context.Context, st *engineSta
 		st.mu.Lock()
 		st.stopping = true
 		st.mu.Unlock()
-		proc.stop(stopGrace(rt))
+		if stopErr := proc.stopContext(cleanupCtx, stopGrace(rt)); stopErr != nil {
+			st.mu.Lock()
+			st.running, st.healthy = true, false
+			st.mu.Unlock()
+			return errors.Join(err, stopErr) // preserve the owned handle and endpoint
+		}
 		st.mu.Lock()
 		st.proc = nil
 		st.mu.Unlock()
@@ -561,7 +585,7 @@ func (e *Executor) bringUpProcessWithSnapshot(ctx context.Context, st *engineSta
 // bringUpCommand runs the manifest's ordered start commands (for a
 // daemon-style engine such as LM Studio), then waits for readiness.
 // There is no owned process — liveness comes from the probe.
-func (e *Executor) bringUpCommand(ctx context.Context, st *engineState, engine string, rt Runtime, port int, vars map[string]string) error {
+func (e *Executor) bringUpCommand(ctx, cleanupCtx context.Context, st *engineState, engine string, rt Runtime, port int, vars map[string]string) error {
 	st.mu.Lock()
 	st.proc = nil
 	st.mu.Unlock()
@@ -570,10 +594,10 @@ func (e *Executor) bringUpCommand(ctx context.Context, st *engineState, engine s
 		if !startAttempted {
 			return startErr
 		}
-		if stopErr := e.runCommandStop(st, engine, rt, port); stopErr != nil {
+		if stopErr := e.runCommandStopContext(cleanupCtx, st, engine, rt, port); stopErr != nil {
 			// A non-zero stop CLI can still have taken the daemon down. Confirm
 			// that before surfacing a cleanup failure.
-			if rt.Ready != nil && e.waitUnavailable(rt.Ready, port, time.Second) {
+			if rt.Ready != nil && e.waitUnavailableContext(cleanupCtx, rt.Ready, port, time.Second) {
 				return startErr
 			}
 			return errors.Join(startErr, fmt.Errorf("clean up failed %s start: %w", engine, stopErr))
@@ -765,11 +789,33 @@ func (e *Executor) doStop(st *engineState, engine string) error {
 
 // Switch recovery carries its cancellation through fallback orphan cleanup.
 func (e *Executor) doStopContext(ctx context.Context, st *engineState, engine string) (err error) {
+	return e.doStopOwnedContext(ctx, st, engine, nil)
+}
+
+// stopOwnership pins the observed source incarnation through the stop effect.
+// A switch must never turn a lost owned handle into permission to reclaim an
+// adopted replacement. Nil keeps ordinary Stop and manual E4 semantics.
+type stopOwnership struct {
+	process *managedProc
+	runID   string
+}
+
+type stopOwnershipChangedError struct{ engine string }
+
+func (err *stopOwnershipChangedError) Error() string {
+	return fmt.Sprintf("cannot automatically stop engine %q: source ownership changed", err.engine)
+}
+
+func (e *Executor) doStopOwnedContext(ctx context.Context, st *engineState, engine string, ownership *stopOwnership) (err error) {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 	st.mu.Lock()
 	rt := st.plat.Runtime
+	if ownership != nil && (st.proc != ownership.process || st.runID != ownership.runID || !st.running || st.adopted || st.reclaimFailed || st.reclaimPID != 0) {
+		st.mu.Unlock()
+		return &stopOwnershipChangedError{engine}
+	}
 	fenced, port, reclaimPID := st.reclaimFailed, st.port, st.reclaimPID
 	needsPortCleanup := st.running || fenced || st.portCleanupPending
 	st.mu.Unlock()
@@ -796,6 +842,10 @@ func (e *Executor) doStopContext(ctx context.Context, st *engineState, engine st
 	}
 	mode := rt.modeOrDefault()
 	st.mu.Lock()
+	if ownership != nil && (st.proc != ownership.process || st.runID != ownership.runID || !st.running || st.adopted || st.reclaimFailed || st.reclaimPID != 0) {
+		st.mu.Unlock()
+		return &stopOwnershipChangedError{engine}
+	}
 	if !st.running {
 		st.mu.Unlock()
 		return nil
@@ -871,11 +921,17 @@ func (e *Executor) doStopContext(ctx context.Context, st *engineState, engine st
 		if sp == nil || len(sp.Cmd) == 0 {
 			return e.reconcileFailedCommandStop(st, engine, true, fmt.Errorf("cannot stop engine %q: no stop command is configured", engine))
 		}
-		if err := e.runCommandStop(st, engine, rt, port); err != nil {
-			return e.reconcileFailedCommandStop(st, engine, rt.Ready == nil || !e.waitUnavailable(rt.Ready, port, time.Second), err)
+		stopErr := e.runCommandStopContext(ctx, st, engine, rt, port)
+		if stopErr != nil {
+			if ownership != nil || ctx.Err() != nil {
+				return stopErr // leave uncertain termination reserved
+			}
+			return e.reconcileFailedCommandStop(st, engine, rt.Ready == nil || !e.waitUnavailable(rt.Ready, port, time.Second), stopErr)
 		}
 	} else if proc != nil {
-		proc.stop(stopGrace(rt))
+		if err := proc.stopContext(ctx, stopGrace(rt)); err != nil {
+			return err
+		}
 	}
 
 	e.markStopped(st, engine)
@@ -886,6 +942,10 @@ func (e *Executor) doStopContext(ctx context.Context, st *engineState, engine st
 // and confirms that its listener closes. It is shared by normal Stop and by
 // failed/cancelled startup cleanup after a start CLI has detached a daemon.
 func (e *Executor) runCommandStop(st *engineState, engine string, rt Runtime, port int) error {
+	return e.runCommandStopContext(context.Background(), st, engine, rt, port)
+}
+
+func (e *Executor) runCommandStopContext(ctx context.Context, st *engineState, engine string, rt Runtime, port int) error {
 	sp := rt.Stop
 	if sp == nil || len(sp.Cmd) == 0 {
 		return fmt.Errorf("cannot stop engine %q: no stop command is configured", engine)
@@ -905,7 +965,7 @@ func (e *Executor) runCommandStop(st *engineState, engine string, rt Runtime, po
 	// Bound the stop CLI (e.g. `lms server stop`): the broker no longer
 	// force-kills engine-manager on a timeout, so an unbounded stop command
 	// would wedge StopAll and, in turn, the whole app shutdown.
-	stopCtx, cancelStop := context.WithTimeout(context.Background(), commandStopTimeout(rt))
+	stopCtx, cancelStop := context.WithTimeout(ctx, commandStopTimeout(rt))
 	runErr := e.runCommand(stopCtx, argv)
 	cancelStop()
 	if runErr != nil {
@@ -916,7 +976,7 @@ func (e *Executor) runCommandStop(st *engineState, engine string, rt Runtime, po
 		if sp.GraceS > 0 {
 			grace = time.Duration(sp.GraceS) * time.Second
 		}
-		if !e.waitUnavailable(rt.Ready, port, grace) {
+		if !e.waitUnavailableContext(ctx, rt.Ready, port, grace) {
 			return fmt.Errorf("stop %s: engine is still serving on port %d after %s", engine, port, grace)
 		}
 	}

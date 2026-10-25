@@ -226,6 +226,12 @@ func startInteropProcess(t *testing.T, base, binary string, port int, extraEnv [
 		t.Fatal(err)
 	}
 	p := &interopProcess{cmd: exec.Command(binary, args...), done: make(chan error, 1), paths: []string{canonical}}
+	if binary == brokerBin {
+		p.cmd, err = fixtureBrokerCommand(binary, args...)
+		if err != nil {
+			t.Fatalf("broker fixture launch: %v", err)
+		}
+	}
 	if port != 0 {
 		p.ports = []int{port}
 	}
@@ -554,6 +560,7 @@ func TestWorkloadFailedOnNodeLoss(t *testing.T) {
 	}
 	fx := newInterNodeCluster(t)
 	stdin, msgs, cleanup := startBrokerProcWithPorts(t, fx.nodeDir, ports,
+		"--scanner-mdns=true",
 		"--scanner-path", scannerBin,
 		"--workload-manager-path", workloadMgrBin,
 		"--test-scanner-scan-interval=250ms", "--test-scanner-scan-timeout=150ms",

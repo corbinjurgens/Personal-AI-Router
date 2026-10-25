@@ -343,9 +343,8 @@ class ModularBridgeState {
     }
 
     /**
-     * The display hostname for a node key (UUID), or '' when unknown. Used as a
-     * last-resort manual-removal key when address matching finds no persisted
-     * entry (see {@link resolveManualNodeKey}).
+     * The display hostname for a node key (UUID), or '' when unknown. Manual-only
+     * projections display the worker's entry ID; scanner projections display the hostname.
      */
     getNodeHostname(nodeId: string): string {
         return this.nodes.get(nodeId)?.name ?? ''
@@ -354,8 +353,8 @@ class ModularBridgeState {
     /**
      * Every address a node key (UUID) is known to be reachable at — its
      * canonical `reachableAddress`, its discovered addresses, and its `host`.
-     * Used to map a UUID back to the manual-nodes store entry (keyed by the
-     * user-entered address) when removing a manual node. Empty for an unknown id.
+     * Used to match current manual entries that have not reported a UUID yet.
+     * Empty for an unknown id.
      */
     getNodeAddresses(nodeId: string): string[] {
         const node = this.nodes.get(nodeId)

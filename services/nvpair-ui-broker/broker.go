@@ -201,6 +201,8 @@ type Broker struct {
 	startedAt            time.Time
 	nodeID               string
 	scannerPath          string
+	disableMDNS          bool
+	manualProbePorts     *manualProbePorts
 	nodeInfoPath         string
 	proxyPath            string
 	proxyEngines         []string
@@ -465,8 +467,10 @@ type Broker struct {
 // required; every other field is optional (an empty string means the
 // broker won't spawn that worker because its binary couldn't be resolved).
 type workerPaths struct {
-	scanner  string
-	nodeInfo string
+	disableMDNS      bool
+	manualProbePorts *manualProbePorts
+	scanner          string
+	nodeInfo         string
 	// proxy is the single nvpair-proxy binary, started once per entry in
 	// proxyEngines and then asked for that engine's facade via facade/enable.
 	proxy        string
@@ -527,6 +531,8 @@ func NewBroker(codec *Codec, paths workerPaths) *Broker {
 		startedAt:            time.Now(),
 		nodeID:               nodeID,
 		scannerPath:          paths.scanner,
+		disableMDNS:          paths.disableMDNS,
+		manualProbePorts:     paths.manualProbePorts,
 		nodeInfoPath:         paths.nodeInfo,
 		proxyPath:            paths.proxy,
 		proxyEngines:         paths.proxyEngines,
@@ -1773,6 +1779,9 @@ func (b *Broker) serve(ctx context.Context, lifetime *brokerMainLifetime) error 
 	}
 	if err := validateServicePorts(b.servicePorts()); err != nil {
 		return fmt.Errorf("service ports: %w", err)
+	}
+	if err := b.manualProbePorts.validate(); err != nil {
+		return err
 	}
 	if err := validateEngineManagerControlHost(b.engineMgrControlHost); err != nil {
 		return err

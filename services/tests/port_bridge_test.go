@@ -114,8 +114,10 @@ func TestPortInteropBridgeBrokerTeardownKillsStalledWorker(t *testing.T) {
 	port := freePort(t)
 	bridge, env := newPortInteropBridge(t, worker, port)
 	env = append(env, "NVPAIR_TEST_STALLED_PORT_WORKER="+worker)
-	p := startInteropProcess(t, base, brokerBin, port, env,
-		"--cluster-dir", filepath.Join(base, "cluster"), "--scanner-path", scannerBin, "--errors-path", bridge)
+	ports := reserveFixtureServicePorts(t)
+	ports.errors = port
+	args := append([]string{"--cluster-dir", filepath.Join(base, "cluster"), "--scanner-path", scannerBin, "--errors-path", bridge}, ports.args()...)
+	p := startInteropProcess(t, base, brokerBin, port, env, args...)
 	for _, path := range []string{scannerBin, bridge, worker} {
 		canonical, err := canonicalServicePath(path)
 		if err != nil {

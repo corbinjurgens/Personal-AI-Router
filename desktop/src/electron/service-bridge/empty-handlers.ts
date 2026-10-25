@@ -774,21 +774,47 @@ async function handleClusterCancelInvite(
     return result
 }
 
-/** Remove a manual peer through the broker, trying each candidate key until one matches. */
+/** Resolve the worker's saved entry before sending its canonical ID back for removal. */
 async function removeManualNode(
     supervisor: ReturnType<typeof getModularSupervisor>,
-    candidateKeys: readonly string[]
+    nodeId: string
 ): Promise<void> {
-    for (const id of new Set(candidateKeys.filter(key => key !== ''))) {
-        try {
-            const result = objectValue(
-                await supervisor.callProcess('broker', 'node/remove', { id })
-            )
-            if (booleanValue(result?.removed)) return
-        } catch {
-            return
-        }
+    const state = getModularBridgeState()
+    const hostname = state.getNodeHostname(nodeId)
+    // A manual-only discovery projection uses the worker's ID as its name/key.
+    const knownManual = nodeId.startsWith('manual:') || hostname.startsWith('manual:')
+    let result: JsonObject | null
+    try {
+        result = objectValue(await supervisor.callProcess('broker', 'nodes/list'))
+        if (!Array.isArray(result?.nodes)) throw new Error('Could not read saved manual nodes')
+    } catch (error) {
+        if (knownManual) throw error
+        return
     }
+    const entries = result.nodes.map(objectValue).filter(entry => entry !== null)
+    let matches = entries.filter(
+        entry =>
+            entry.id === nodeId ||
+            entry.hostUuid === nodeId ||
+            (knownManual && entry.id === hostname)
+    )
+    if (matches.length === 0) {
+        const addresses = state.getNodeAddresses(nodeId)
+        matches = entries.filter(
+            entry => !stringValue(entry.hostUuid) && addresses.includes(stringValue(entry.address))
+        )
+    }
+    if (matches.length === 0) {
+        if (knownManual) {
+            throw new Error('No saved manual entry matches this node')
+        }
+        return
+    }
+    if (matches.length !== 1) throw new Error('More than one saved manual entry matches this node')
+    const id = stringValue(matches[0].id)
+    if (!id) throw new Error('The matching manual entry has no canonical ID')
+    const removed = objectValue(await supervisor.callProcess('broker', 'node/remove', { id }))
+    if (!booleanValue(removed?.removed)) throw new Error('The saved manual entry was not removed')
 }
 
 async function handleNodeRemoveMember(
@@ -800,17 +826,16 @@ async function handleNodeRemoveMember(
     const selfId = state.getSelfId()
     const isSelfLeave = selfId !== null && payload.nodeId === selfId
 
-    // `payload.nodeId` is the node's UUID, but the broker's `node/remove` relay
-    // keys a manual entry by the name it was added with — never the UUID. The
-    // list lives in the service, so try each name this node is known by: its
-    // reachable addresses (an entry added without a name is keyed by its
-    // address), then its display hostname, then the raw id. All but the one that
-    // matches are harmless no-ops for a purely-discovered peer.
-    void removeManualNode(supervisor, [
-        ...state.getNodeAddresses(payload.nodeId),
-        state.getNodeHostname(payload.nodeId),
-        payload.nodeId
-    ])
+    // Discovery can prefer the scanner's display ID over a manual alias. Resolve
+    // against the worker's current list, and keep cleanup failure separate from
+    // cluster membership removal so revoking trust can still succeed.
+    let manualCleanupError: string | undefined
+    try {
+        await removeManualNode(supervisor, payload.nodeId)
+    } catch (error) {
+        manualCleanupError = getErrorString(error)
+    }
+    const cleanupResult = manualCleanupError ? { manualCleanupError } : {}
 
     if (isSelfLeave) {
         // Self-departure is `cluster:leave`, not `nodes:remove` (the cluster-manager
@@ -822,14 +847,19 @@ async function handleNodeRemoveMember(
         // identity clear / roster push needed.
         supervisor.clearAutoCreatedSoloForInvite()
         const leaveResult = objectValue(await callCluster('cluster:leave', {}))
-        return { nodeId: payload.nodeId, removed: booleanValue(leaveResult?.left) }
+        return {
+            nodeId: payload.nodeId,
+            removed: booleanValue(leaveResult?.left),
+            ...cleanupResult
+        }
     }
 
     // Peer removal: revoke the peer's membership + pinned trust.
     const result = objectValue(await callCluster('nodes:remove', { nodeId: payload.nodeId }))
     return {
         nodeId: stringValue(result?.nodeId) || payload.nodeId,
-        removed: booleanValue(result?.removed)
+        removed: booleanValue(result?.removed),
+        ...cleanupResult
     }
 }
 
