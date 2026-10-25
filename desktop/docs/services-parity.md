@@ -460,6 +460,26 @@ lifecycle pushes are immediate. These guarantees require a coordinated fleet
 update. Installed-machine, native UI, and isolated multi-process acceptance
 remain separate validation obligations.
 
+The source regression `TestModelDownloadStateProcess` in `services/tests` covers
+real service/broker/manager relays, fresh-client hydration, pinned observer reads,
+scanner loopback self-enrichment, queued-model isolation, native failure and
+disconnect outcomes, restart markers, readiness refusals and bounded retention.
+Its fake router uses synthetic catalog IDs and tiny target-only shards; the
+controller has no model store or model-serving listener. On Windows at base
+`44e76c6b` (2026-10-26), its final plain run passed 17 named terminals with no
+failures or skips. Race had 15 passes and two failed terminals after a fixed
+scanner image replacement was refused during setup; the affected leaf and its
+parent then passed a targeted race rerun. No data race was reported, and module
+vet exited zero. The failed aggregate race run is preserved. These runs include
+second-response NDJSON, replacement-route reads, control-POST counts and terminal
+subscriber convergence.
+Independent scanner peer refresh, automatic resident dispatch,
+the full progress-watchdog interval, lower-revision/retired-source notification
+injection, and exact crashes inside journal replacement
+are not established by this fixture. Its ec bind is loopback; existing em and
+cluster-manager listeners still bind wildcard addresses on private ports. Joined
+peer-transfer receipt assertions and native UI acceptance remain separate.
+
 `engine:models` (and the `em` `GET /v1/models` surface) returns the flat model
 union, the per-engine breakdown (`modelsByEngine`), the per-engine set of
 models loaded in memory (`loadedByEngine`), and `downloadState`. The engine-manager
