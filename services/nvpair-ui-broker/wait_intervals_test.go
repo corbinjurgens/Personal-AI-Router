@@ -10,10 +10,62 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 )
+
+func TestBrokerScannerWaitOverrides(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		want []string
+	}{
+		{name: "ordinary startup passes no overrides"},
+		{name: "scan pair", args: []string{"--test-scanner-scan-interval=250ms", "--test-scanner-scan-timeout=150ms"}, want: []string{"--test-scan-interval", "250ms", "--test-scan-timeout", "150ms"}},
+		{name: "peer refresh", args: []string{"--test-scanner-peer-refresh-interval=250ms"}, want: []string{"--test-peer-refresh-interval", "250ms"}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var overrides scannerWaitOverrides
+			flags := flag.NewFlagSet("scanner-waits", flag.ContinueOnError)
+			overrides.registerFlags(flags)
+			if err := flags.Parse(tc.args); err != nil {
+				t.Fatal(err)
+			}
+			if err := overrides.validate(); err != nil {
+				t.Fatal(err)
+			}
+			b := NewBroker(nil, workerPaths{clusterDir: filepath.Join(t.TempDir(), "cluster"), scannerWaits: overrides})
+			overrides.peerRefresh = time.Hour
+			if got := b.scannerWaits.args(); !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("scanner arguments=%q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestBrokerScannerWaitOverridesRejectInvalidConfiguration(t *testing.T) {
+	for name, overrides := range map[string]scannerWaitOverrides{
+		"negative scan":            {scanInterval: -time.Second},
+		"negative timeout":         {scanTimeout: -time.Second},
+		"negative refresh":         {peerRefresh: -time.Second},
+		"interval without timeout": {scanInterval: time.Second},
+		"timeout without interval": {scanTimeout: time.Second},
+		"timeout exceeds interval": {scanInterval: time.Second, scanTimeout: 2 * time.Second},
+	} {
+		t.Run(name, func(t *testing.T) {
+			b := NewBroker(nil, workerPaths{scannerWaits: overrides})
+			if err := b.Serve(context.Background()); err == nil {
+				t.Fatal("invalid scanner waits accepted by Serve")
+			}
+			if handle, err := b.spawnScanner(); err == nil || handle != nil {
+				t.Fatalf("invalid scanner waits spawned child: %v, %v", handle, err)
+			}
+		})
+	}
+}
 
 func TestBrokerWaitIntervalsDefaultContract(t *testing.T) {
 	if defaultResidentRetryInterval != 30*time.Second {

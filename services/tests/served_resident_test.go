@@ -458,10 +458,16 @@ func newSRSwitchProcessFixture(t *testing.T) *srProcessFixture {
 
 func newSRProcessFixtureWithRetention(t *testing.T, switchTarget bool, retention string) *srProcessFixture {
 	t.Helper()
+	return newSRProcessFixtureWithRetry(t, switchTarget, retention, time.Second)
+}
+
+func newSRProcessFixtureWithRetry(t *testing.T, switchTarget bool, retention string, retry time.Duration) *srProcessFixture {
+	t.Helper()
 	if runtime.GOOS != "windows" {
 		t.Skip("SR process evidence requires the Windows fixed-path lane")
 	}
 	f := &srProcessFixture{neServingFixture: newNEServingFixture(t)}
+	f.residentRetryInterval = retry
 	if switchTarget {
 		f.enableSwitchTarget(t)
 	}
@@ -725,6 +731,7 @@ func (f *srProcessFixture) start(t *testing.T) {
 		f.assertPlatformIsolation(t, engine, "raw host", manifest.Platforms)
 	}
 	args := append([]string{"--scanner-path", f.scanner, "--engine-manager-path", engineMgrBin, "--proxy-path", proxyBin, "--proxy-engines=llamacpp,ollama", "--cluster-dir", filepath.Join(f.root, "cluster"), "--log-level", "info"}, f.ports.args()...)
+	args = append(args, f.residentFixtureWaitArgs()...)
 	f.p = startInteropProcess(t, f.root, brokerBin, f.ports.engineManagerHTTP, []string{"OLLAMA_HOST=", "NVPAIR_TEST_SUBSCRIPTION_SCANNER=" + f.scanner, "NVPAIR_TEST_SUBSCRIPTION_PORT=" + strconv.Itoa(f.scannerPort)}, args...)
 	f.p.ports = append(f.p.ports, f.ports.engineControl, f.scannerPort, f.facadePort, f.switchEnginePort, f.switchFacadePort)
 	for _, path := range []string{engineMgrBin, proxyBin, f.scanner} {
@@ -1192,6 +1199,7 @@ func (f *srProcessFixture) startRelayed(t *testing.T) {
 	}
 	f.assertIsolationFiles(t)
 	args := append([]string{"--scanner-path", f.scanner, "--engine-manager-path", f.image, "--proxy-path", f.image, "--proxy-engines=llamacpp", "--cluster-dir", filepath.Join(f.root, "cluster"), "--log-level", "info"}, f.ports.args()...)
+	args = append(args, f.residentFixtureWaitArgs()...)
 	env := []string{"OLLAMA_HOST=", "NVPAIR_TEST_SUBSCRIPTION_SCANNER=" + f.scanner, "NVPAIR_TEST_SUBSCRIPTION_PORT=" + strconv.Itoa(f.scannerPort), "NVPAIR_SR_RELAY_IMAGE=" + f.image, "NVPAIR_SR_RELAY_MANAGER=" + engineMgrBin, "NVPAIR_SR_RELAY_PROXY=" + proxyBin, "NVPAIR_SR_RELAY_CONTROL=" + f.relay.server.URL}
 	f.relay.mu.Lock()
 	f.relay.stopping = false
@@ -1735,7 +1743,7 @@ func TestServedResidentProcessPermission(t *testing.T) {
 }
 
 func TestServedResidentProcessLoadFailedRecovers(t *testing.T) {
-	f := newSRProcessFixture(t)
+	f := newSRProcessFixtureWithRetry(t, false, "-1", 30*time.Second)
 	f.control(t, "fail-loads")
 	f.resident(t, neModel)
 	f.entry(t, neModel, nodepolicy.ModelStateUnknown, nodepolicy.ModelReasonLoadFailed)

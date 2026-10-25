@@ -109,6 +109,16 @@ engines. These fixture overrides leave the 30-second idle ticker, 60-second
 resident observation window, operation budgets, cancellation and capacity holds
 unchanged. They add no environment-variable configuration.
 
+Fixtures that supervise a real scanner can also pass
+`--test-scanner-scan-interval=250ms` together with
+`--test-scanner-scan-timeout=150ms`, or independently pass
+`--test-scanner-peer-refresh-interval=250ms`. These overrides are copied into
+the broker's worker plan and forwarded on every scanner launch and restart.
+Zero or omitted values pass no override and retain the scanner's normal
+defaults. Negative values, an incomplete scan pair, or a timeout longer than
+the scan interval are rejected before startup. The miss threshold and liveness
+probe policy are unchanged.
+
 A definite terminal manager `failed` result reports `unknown` with `load-failed`,
 including finish/recovery failures and readbacks while its terminal hold is
 retained. This reason does not prove that the model is unloaded or capacity is

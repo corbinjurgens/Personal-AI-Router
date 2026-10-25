@@ -95,7 +95,7 @@ func TestModelsRefreshConvergesWithoutMDNSChange(t *testing.T) {
 	})
 	t.Logf("advertising %s @ %s (em=%d), models initially empty", instance, nodeRecordService, emPort)
 
-	stdin, msgs, cleanup := startBroker(t)
+	stdin, msgs, cleanup := startBroker(t, "--test-scanner-peer-refresh-interval=250ms")
 	t.Cleanup(cleanup)
 
 	// Phase 1: the node is discovered and enriched, but with no models.

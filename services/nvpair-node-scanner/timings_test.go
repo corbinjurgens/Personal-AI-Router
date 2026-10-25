@@ -88,8 +88,8 @@ func TestScannerTimingFlagsRejectMalformedDuration(t *testing.T) {
 	fs.SetOutput(io.Discard)
 	timings.registerFlags(fs)
 	err := fs.Parse([]string{"--test-scan-timeout=soon"})
-	if err == nil || !strings.Contains(err.Error(), "invalid duration") {
-		t.Fatalf("parse error = %v, want invalid duration", err)
+	if err == nil || !strings.Contains(err.Error(), "test-scan-timeout") || !strings.Contains(err.Error(), "soon") {
+		t.Fatalf("parse error = %v, want rejection naming the malformed timeout", err)
 	}
 }
 

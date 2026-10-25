@@ -556,6 +556,7 @@ func TestWorkloadFailedOnNodeLoss(t *testing.T) {
 	stdin, msgs, cleanup := startBrokerProcWithPorts(t, fx.nodeDir, ports,
 		"--scanner-path", scannerBin,
 		"--workload-manager-path", workloadMgrBin,
+		"--test-scanner-scan-interval=250ms", "--test-scanner-scan-timeout=150ms",
 	)
 	t.Cleanup(cleanup)
 
@@ -599,13 +600,11 @@ func TestWorkloadFailedOnNodeLoss(t *testing.T) {
 	}
 	t.Log("peer workload tracked as running")
 
-	// Pull the peer off the network. The scanner holds a node through
-	// shared/discovery's full miss threshold (12 scans at 5s, a full minute) with
-	// a failed liveness probe on every scan from ~15s in, and only then evicts it,
-	// at which point the broker marks the workload it can no longer hear about.
-	// The window is deliberately long enough to outlast a node saturated by its
-	// own inference load, so this deadline has to clear it with room for the
-	// probes and scan jitter.
+	// Pull the peer off the network. Keep the production miss threshold and
+	// failed-liveness-probe requirement, but use this fixture's 250ms scan
+	// cadence instead of the production 5s interval. Once the peer is evicted,
+	// the broker marks the workload it can no longer hear about. The deadline
+	// still leaves room for probes and multicast jitter.
 	stopAdv()
 	t.Log("peer advertisement withdrawn; awaiting node eviction + workload failure")
 
