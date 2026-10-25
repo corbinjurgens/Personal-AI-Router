@@ -23,6 +23,7 @@ import getErrorString from '@/shared/utils/get-error-string'
 import { InlineErrorBanner } from '@/ui/components/InlineErrorBanner'
 import BulkNodeConfiguration from '@/ui/components/RoutingSettings/BulkNodeConfiguration'
 import RoleEditor from '@/ui/components/RoutingSettings/RoleEditor'
+import RoutingHistory from '@/ui/components/RoutingSettings/RoutingHistory'
 import { useConnectionStore } from '@/ui/stores/connection.store'
 import {
     useNodeConfigurationStore,
@@ -580,6 +581,7 @@ export default function RoutingSettings() {
             <div className="settings-card pair-paper p-4">
                 <BulkNodeConfiguration />
             </div>
+            <RoutingHistory />
         </Stack>
     )
 }

@@ -13,6 +13,8 @@ import { formatModelDisplayName } from '@/ui/utils/format-model-display-name'
 import { getWorkloadColorBar } from '@/ui/utils/colors'
 import { workloadModelLabel, workloadNodeLabel } from '@/ui/utils/workload-labels'
 import EngineIcon from '@/ui/components/EngineIcon'
+import { consumeRoutingRow, useRoutingStore } from '@/ui/stores/routing.store'
+import { workloadRoutingSummary } from '@/ui/utils/routing-labels'
 
 const formatDate = (timestamp: number) => {
     const date = new Date(timestamp)
@@ -98,6 +100,21 @@ function WorkloadCancelActions({ workload }: { workload: Workload }) {
 }
 
 function WorkloadItemCard({ workload }: { workload: Workload }) {
+    const routingRevision = useRoutingStore(state => state.revision)
+    const routingConnected = useRoutingStore(state => state.connected)
+    const routing = useMemo<ReturnType<typeof workloadRoutingSummary>>(() => {
+        void routingRevision
+        let summary: ReturnType<typeof workloadRoutingSummary> = null
+        if (!routingConnected) return summary
+        for (let index = 0; index < window.pairApi.routing.size; index++) {
+            consumeRoutingRow(index, record => {
+                summary = workloadRoutingSummary(record, workload)
+                return undefined
+            })
+            if (summary) break
+        }
+        return summary
+    }, [routingRevision, routingConnected, workload])
     // Subscribe to only this workload's execution node name. Selecting the whole
     // nodes array re-rendered every job card on any node/metrics update.
     const executionNodeText = useNodesStore(state => {
@@ -158,7 +175,11 @@ function WorkloadItemCard({ workload }: { workload: Workload }) {
     }, [workload.state, workload.createdAt, workload.startedAt, workload.completedAt])
 
     const className = useMemo(() => {
-        let result = `h-auto dir-ltr max-w-full min-w-0 pair-paper workload-card workload-card-${workload.state}`
+        const stateClass =
+            workload.state === 'failed' && routing && !routing.error
+                ? ''
+                : `workload-card-${workload.state}`
+        let result = `h-auto dir-ltr max-w-full min-w-0 pair-paper workload-card ${stateClass}`
 
         // Terminal states read as history and are dimmed; only live work keeps
         // full contrast.
@@ -171,7 +192,7 @@ function WorkloadItemCard({ workload }: { workload: Workload }) {
         }
 
         return result
-    }, [workload.state])
+    }, [workload.state, routing])
 
     return (
         <Card
@@ -222,7 +243,20 @@ function WorkloadItemCard({ workload }: { workload: Workload }) {
                     {subtext}
                 </Flex>
                 <WorkloadCancelActions workload={workload} />
-                {workload.error && workload.state === 'failed' && (
+                {routing && (
+                    <Text
+                        kind="body/regular/sm"
+                        className="min-w-0 [overflow-wrap:anywhere]"
+                        style={
+                            routing.error
+                                ? { color: 'var(--text-color-feedback-danger)' }
+                                : undefined
+                        }
+                    >
+                        {routing.text}
+                    </Text>
+                )}
+                {!routing && workload.error && workload.state === 'failed' && (
                     <Text
                         kind="body/regular/sm"
                         style={{ color: 'var(--text-color-feedback-danger)' }}

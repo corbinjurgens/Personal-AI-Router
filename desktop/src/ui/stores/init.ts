@@ -8,6 +8,7 @@ import { useNodesStore } from '@/ui/stores/nodes.store'
 import { useErrorsStore } from '@/ui/stores/errors.store'
 import { useMetricsStore } from '@/ui/stores/metrics.store'
 import { useWorkloadsStore } from '@/ui/stores/workloads.store'
+import { useRoutingStore } from '@/ui/stores/routing.store'
 import { useEngineStatusStore } from '@/ui/stores/engine-status.store'
 import { useEngineModelsStore } from '@/ui/stores/engine-models.store'
 import { useEngineProgressStore } from '@/ui/stores/engine-progress.store'
@@ -95,6 +96,7 @@ async function initializeAllStores(): Promise<void> {
         usePendingActionsStore.getState().initialize()
     }
     await useWorkloadsStore.getState().initialize()
+    if (overviewStores) useRoutingStore.getState().initialize()
 
     if (window.pairApi) {
         unsubStateRefresh = window.pairApi.connection.onStateRequestRefresh(() => {
@@ -121,6 +123,7 @@ function cleanupAllStores(): void {
     useEngineStatusStore.getState().cleanup()
     useWorkloadsStore.getState().cleanup()
     if (overviewStores) {
+        useRoutingStore.getState().cleanup()
         useErrorsStore.getState().cleanup()
         useDiscoveredNodesStore.getState().cleanup()
         useEngineModelsStore.getState().cleanup()
@@ -145,6 +148,7 @@ async function resyncAllStores(): Promise<void> {
     }
     await useWorkloadsStore.getState().refresh()
     if (overviewStores) useErrorsStore.getState().refresh()
+    if (overviewStores) void useRoutingStore.getState().refresh()
     useMetricsStore.getState().clearAll()
 
     const engineInitial = fetchEngineInitial()
