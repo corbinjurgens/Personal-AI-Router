@@ -780,7 +780,7 @@ func TestModelControlsCopyAndSourceQueriesRejectBeforeEffects(t *testing.T) {
 			if _, err := remote.modelFiles(context.Background(), "ollama", tc.model, nil); err == nil {
 				t.Fatal("remote file listing accepted invalid model")
 			}
-			body, start, err := remote.modelFile(context.Background(), "ollama", tc.model, "file", 0)
+			body, start, err := remote.modelFile(context.Background(), "ollama", tc.model, "file", "", 0)
 			modelControlsWantRefusal(t, err, tc.model)
 			if body != nil || start != 0 {
 				t.Fatal("invalid file request returned a value")

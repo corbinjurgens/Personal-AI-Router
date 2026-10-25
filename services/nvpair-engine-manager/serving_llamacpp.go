@@ -659,28 +659,9 @@ func compileLlamaServing(command launchCommand, rt Runtime, requireApproved bool
 		if perSlot <= model.MaxOutputTokens {
 			return nil, servingError("Output bound must be strictly below the derived per-slot context.")
 		}
-		paths := []string{}
-		for _, key := range []string{"model", "model-draft"} {
-			path, ok := options[key]
-			if !ok {
-				if key == "model" {
-					return nil, servingError("Every model preset requires an existing local model path.")
-				}
-				continue
-			}
-			if !filepath.IsAbs(path) {
-				path = filepath.Join(filepath.Dir(source), path)
-			}
-			path = filepath.Clean(path)
-			if err := validateLlamaPresetValue(key, path, model.ModelID); err != nil {
-				return nil, err
-			}
-			options[key] = path
-			shards, err := llamaArtifactPaths(path)
-			if err != nil {
-				return nil, err
-			}
-			paths = append(paths, shards...)
+		paths, _, err := llamaConsumedPaths(source, options, model.ModelID, 0)
+		if err != nil {
+			return nil, err
 		}
 		if len(paths) != len(model.Artifacts) {
 			return nil, servingError("Declare every consumed model and draft shard exactly once, in native order.")

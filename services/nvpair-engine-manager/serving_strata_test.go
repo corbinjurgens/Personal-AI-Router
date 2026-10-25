@@ -219,13 +219,12 @@ func TestStrataRuntimeHashOutsideOperationLock(t *testing.T) {
 				t.Fatal(err)
 			}
 			key := hashEntry{path: path, size: info.Size(), mtime: info.ModTime().UnixNano()}
-			call := &hashCall{}
-			call.wg.Add(1)
+			call := &hashCall{done: make(chan struct{})}
 			fileHashes.mu.Lock()
 			delete(fileHashes.done, path)
 			fileHashes.inflight[key] = call
 			fileHashes.mu.Unlock()
-			releaseHash := sync.OnceFunc(call.wg.Done)
+			releaseHash := sync.OnceFunc(func() { close(call.done) })
 			ctx, cancel := context.WithCancel(context.Background())
 			done := make(chan error, 1)
 			exited := make(chan struct{})
@@ -409,13 +408,12 @@ func TestStrataRuntimeChangesWhileHashing(t *testing.T) {
 	}
 	key := hashEntry{path: path, size: info.Size(), mtime: info.ModTime().UnixNano()}
 	waiting := make(chan struct{})
-	call := &hashCall{sum: artifact.SHA256, onWait: func() { close(waiting) }}
-	call.wg.Add(1)
+	call := &hashCall{done: make(chan struct{}), sum: artifact.SHA256, onWait: func() { close(waiting) }}
 	fileHashes.mu.Lock()
 	delete(fileHashes.done, path)
 	fileHashes.inflight[key] = call
 	fileHashes.mu.Unlock()
-	releaseHash := sync.OnceFunc(call.wg.Done)
+	releaseHash := sync.OnceFunc(func() { close(call.done) })
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	exited := make(chan struct{})

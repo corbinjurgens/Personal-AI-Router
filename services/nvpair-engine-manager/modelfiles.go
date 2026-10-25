@@ -12,10 +12,10 @@ package main
 //   - GET /v1/models/file?engine=&model=&path= serves one listed file, with HTTP
 //     Range support so an interrupted download resumes.
 //
-// The file set is resolved per request from the engine's own layout (see
-// modellayout.go) and nothing outside it is ever served: a path is accepted only
-// when it is exactly one of the model's listed files, and every listed file must
-// resolve, after symlinks, inside the engine's store.
+// The file set is resolved per request from the engine's layout or an exact
+// custom llama.cpp local binding (see modellayout.go and modelcopy_export.go).
+// Only listed relative paths are accepted; external custom artifacts additionally
+// require the source-local configured allowlist and issued export identity.
 
 import (
 	"context"
@@ -45,16 +45,24 @@ type modelFile struct {
 	// Path is slash-separated and relative to the layout root the engine uses
 	// for this model (see modelFileList).
 	Path   string `json:"path"`
+	Role   string `json:"role,omitempty"`
 	Size   int64  `json:"size"`
 	SHA256 string `json:"sha256"`
 	// abs is the file's resolved absolute path on the source. Never serialized.
-	abs string
+	abs        string
+	info       os.FileInfo
+	asserted   string
+	configured string
+	sample     string
 }
 
 // modelFileList is the GET /v1/models/files result.
 type modelFileList struct {
-	Engine string `json:"engine"`
-	Model  string `json:"model"`
+	Engine   string `json:"engine"`
+	Model    string `json:"model"`
+	Layout   string `json:"layout,omitempty"`
+	ExportID string `json:"exportId,omitempty"`
+	binding  string
 	// Revision is the snapshot a llama.cpp model's files were listed from (the
 	// Hugging Face commit in its cache). Empty for other engines.
 	Revision string      `json:"revision,omitempty"`
@@ -75,12 +83,22 @@ func validModelRelPath(p string) bool {
 		return false
 	}
 	for _, seg := range strings.Split(p, "/") {
+		for _, r := range seg {
+			if r < 32 {
+				return false
+			}
+		}
 		if seg == "" || seg == "." || seg == ".." {
 			return false
 		}
 		// Windows strips trailing dots and spaces, so "a." and "a" would be
 		// the same file there.
 		if strings.HasSuffix(seg, ".") || strings.HasSuffix(seg, " ") {
+			return false
+		}
+		base, _, _ := strings.Cut(strings.ToUpper(seg), ".")
+		switch base {
+		case "CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9", "COM¹", "COM²", "COM³", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9", "LPT¹", "LPT²", "LPT³":
 			return false
 		}
 	}
@@ -139,10 +157,12 @@ type hashEntry struct {
 	size  int64
 	mtime int64
 	sum   string
+	info  os.FileInfo
 }
 
 type hashCall struct {
-	wg     sync.WaitGroup
+	done   chan struct{}
+	info   os.FileInfo
 	sum    string
 	err    error
 	onWait func() // Optional synchronization for tests that inject an in-flight call.
@@ -156,26 +176,38 @@ var fileHashes = &hashCache{done: map[string]hashEntry{}, inflight: map[hashEntr
 // has no entry for its current size and mtime. onBytes, when set, receives the
 // running count of bytes hashed.
 func (c *hashCache) sum(ctx context.Context, abs string, onBytes func(int64)) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	info, err := os.Stat(abs)
 	if err != nil {
 		return "", err
 	}
 	key := hashEntry{path: abs, size: info.Size(), mtime: info.ModTime().UnixNano()}
 	c.mu.Lock()
-	if e, ok := c.done[abs]; ok && e.size == key.size && e.mtime == key.mtime {
+	if e, ok := c.done[abs]; ok && e.size == key.size && e.mtime == key.mtime && e.info != nil && os.SameFile(e.info, info) {
 		c.mu.Unlock()
 		return e.sum, nil
 	}
 	if call, ok := c.inflight[key]; ok {
 		c.mu.Unlock()
+		if call.info != nil && !os.SameFile(info, call.info) {
+			return "", fmt.Errorf("hash source changed")
+		}
 		if call.onWait != nil {
 			call.onWait()
 		}
-		call.wg.Wait()
-		return call.sum, call.err
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		case <-call.done:
+			if (errors.Is(call.err, context.Canceled) || errors.Is(call.err, context.DeadlineExceeded)) && ctx.Err() == nil {
+				return c.sum(ctx, abs, onBytes)
+			}
+			return call.sum, call.err
+		}
 	}
-	call := &hashCall{}
-	call.wg.Add(1)
+	call := &hashCall{done: make(chan struct{}), info: info}
 	c.inflight[key] = call
 	c.mu.Unlock()
 
@@ -184,13 +216,16 @@ func (c *hashCache) sum(ctx context.Context, abs string, onBytes func(int64)) (s
 	delete(c.inflight, key)
 	if call.err == nil {
 		// Store only if the file did not change while it was being read.
-		if after, err := os.Stat(abs); err == nil && after.Size() == key.size && after.ModTime().UnixNano() == key.mtime {
+		if after, err := os.Stat(abs); err == nil && sameCopyFile(info, after) {
 			key.sum = call.sum
+			key.info = after
 			c.done[abs] = key
+		} else {
+			call.err = fmt.Errorf("hash source changed")
 		}
 	}
 	c.mu.Unlock()
-	call.wg.Done()
+	close(call.done)
 	return call.sum, call.err
 }
 
@@ -202,7 +237,7 @@ func (c *hashCache) remember(abs, sum string) {
 		return
 	}
 	c.mu.Lock()
-	c.done[abs] = hashEntry{path: abs, size: info.Size(), mtime: info.ModTime().UnixNano(), sum: sum}
+	c.done[abs] = hashEntry{path: abs, size: info.Size(), mtime: info.ModTime().UnixNano(), sum: sum, info: info}
 	c.mu.Unlock()
 }
 
@@ -213,9 +248,17 @@ func hashFile(ctx context.Context, abs string, onBytes func(int64)) (string, err
 		return "", err
 	}
 	defer f.Close()
+	before, err := f.Stat()
+	if err != nil || !before.Mode().IsRegular() {
+		return "", fmt.Errorf("hash source is not a regular file")
+	}
 	h := sha256.New()
 	if _, err := copyWithContext(ctx, h, f, onBytes); err != nil {
 		return "", err
+	}
+	after, err := os.Stat(abs)
+	if err != nil || !sameCopyFile(before, after) {
+		return "", fmt.Errorf("hash source changed")
 	}
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
@@ -286,11 +329,13 @@ func modelLookupStatus(err error) int {
 // for the first time takes longer than an ordinary response-header budget, and
 // the frames keep the connection visibly alive meanwhile.
 func (s *controlServer) handleModelFiles(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithCancel(r.Context())
+	defer cancel()
 	engine, model, ok := modelQuery(w, r)
 	if !ok {
 		return
 	}
-	list, err := s.exec.modelSourceFiles(r.Context(), engine, model)
+	list, err := s.exec.modelSourceFiles(ctx, engine, model)
 	if err != nil {
 		http.Error(w, err.Error(), modelLookupStatus(err))
 		return
@@ -305,17 +350,34 @@ func (s *controlServer) handleModelFiles(w http.ResponseWriter, r *http.Request)
 	flusher.Flush()
 	enc := json.NewEncoder(w)
 	writeFrame := func(f streamFrame) {
-		_ = enc.Encode(f)
+		if err := enc.Encode(f); err != nil {
+			cancel()
+			return
+		}
 		flusher.Flush()
 	}
-	if err := hashModelFiles(r.Context(), &list, func(path string, pct int) {
+	if err := hashModelFiles(ctx, &list, func(path string, pct int) {
 		writeFrame(streamFrame{Type: "progress", Engine: engine, Op: "copy", Stage: "hashing", Percent: pct, Message: path})
 	}); err != nil {
 		writeFrame(streamFrame{Type: "error", Engine: engine, Op: "copy", Message: err.Error()})
 		return
 	}
+	if list.Layout == llamaArtifactsLayout {
+		if err := s.exec.recheckCopyExport(ctx, list); err != nil {
+			writeFrame(streamFrame{Type: "error", Message: err.Error()})
+			return
+		}
+		st, err := s.exec.state(engine)
+		if err != nil {
+			return
+		}
+		rememberCopyExport(st, list)
+	}
 	res, err := json.Marshal(list)
-	if err != nil {
+	if err != nil || len(res) > maxCopyManifest {
+		if err == nil {
+			err = fmt.Errorf("copy manifest exceeds bounds")
+		}
 		writeFrame(streamFrame{Type: "error", Engine: engine, Op: "copy", Message: err.Error()})
 		return
 	}
@@ -339,12 +401,30 @@ func hashModelFiles(ctx context.Context, list *modelFileList, progress func(path
 				return
 			}
 			last = time.Now()
-			progress(f.Path, int(done*100/f.Size))
+			progress(f.Path, copyPercent(done, f.Size))
 		})
 		if err != nil {
+			if list.Layout == llamaArtifactsLayout {
+				return fmt.Errorf("hash source artifact %s failed or changed", f.Path)
+			}
 			return fmt.Errorf("hash %s: %w", f.Path, err)
 		}
 		f.SHA256 = sum
+		if f.asserted != "" && f.asserted != sum {
+			return fmt.Errorf("full SHA256 disagrees with the configured artifact for %s", f.Path)
+		}
+		if f.info != nil {
+			after, err := os.Stat(f.abs)
+			resolved, resolveErr := filepath.EvalSymlinks(f.configured)
+			if err != nil || resolveErr != nil || resolved != f.abs || !sameCopyFile(f.info, after) {
+				return fmt.Errorf("source artifact changed for %s", f.Path)
+			}
+		}
+	}
+	if list.Layout == llamaArtifactsLayout {
+		var err error
+		list.ExportID, err = artifactExportID(*list)
+		return err
 	}
 	return nil
 }
@@ -367,10 +447,31 @@ func (s *controlServer) handleModelFile(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, err.Error(), modelLookupStatus(err))
 		return
 	}
+	if list.Layout == llamaArtifactsLayout {
+		if err := hashModelFiles(r.Context(), &list, func(string, int) {}); err != nil {
+			http.Error(w, "source artifact changed or unavailable", http.StatusConflict)
+			return
+		}
+		if r.URL.Query().Get("exportId") != list.ExportID {
+			http.Error(w, "export identity changed", http.StatusConflict)
+			return
+		}
+		if err := s.exec.recheckCopyExport(r.Context(), list); err != nil {
+			http.Error(w, "source binding changed", http.StatusConflict)
+			return
+		}
+		st, err := s.exec.state(engine)
+		if err != nil || !checkIssuedCopyExport(st, list) {
+			http.Error(w, "source binding changed or export expired; list the model again", http.StatusConflict)
+			return
+		}
+	}
 	var abs string
+	var selected modelFile
 	for _, f := range list.Files {
 		if f.Path == rel {
 			abs = f.abs
+			selected = f
 			break
 		}
 	}
@@ -388,6 +489,14 @@ func (s *controlServer) handleModelFile(w http.ResponseWriter, r *http.Request) 
 	if err != nil || !info.Mode().IsRegular() {
 		http.Error(w, "file unavailable", http.StatusNotFound)
 		return
+	}
+	if selected.info != nil {
+		resolved, err := filepath.EvalSymlinks(selected.configured)
+		current, statErr := os.Stat(selected.configured)
+		if err != nil || statErr != nil || resolved != abs || !sameCopyFile(selected.info, info) || !sameCopyFile(info, current) {
+			http.Error(w, "source artifact changed", http.StatusConflict)
+			return
+		}
 	}
 	w.Header().Set("Content-Type", "application/octet-stream")
 	http.ServeContent(w, r, "", info.ModTime(), file)

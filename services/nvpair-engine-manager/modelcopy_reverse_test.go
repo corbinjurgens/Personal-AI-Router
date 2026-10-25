@@ -209,7 +209,7 @@ func TestModelCopyReverseCancellationKeepsPartialWithoutVisibility(t *testing.T)
 	defer cancel()
 	client := f.peer.client(t, ctx)
 	dest := filepath.Join(f.root, filepath.FromSlash(f.weights))
-	file := plannedFile{modelFile: modelFile{Path: f.weights, Size: 500_000, SHA256: sha256Hex(f.model.blobs[f.weights])}, dest: dest}
+	file := plannedFile{modelFile: modelFile{Path: f.weights, Size: 500_000, SHA256: sha256Hex(f.model.blobs[f.weights])}, dest: dest, root: f.root}
 	// Cancel only once bytes reached the copy owner's .part, independently of
 	// HTTP buffering and the throttled user-facing progress notifications.
 	_, _, err := downloadPlannedFile(ctx, client, "ollama", "tiny", file, func(n int64) {
@@ -319,7 +319,7 @@ func TestModelCopyReverseInvalidPinNeverReachesFileHandlers(t *testing.T) {
 			if _, err := client.modelFiles(ctx, "ollama", "tiny", nil); err == nil {
 				t.Fatal("invalid pin allowed file listing")
 			}
-			body, _, err := client.modelFile(ctx, "ollama", "tiny", f.weights, 0)
+			body, _, err := client.modelFile(ctx, "ollama", "tiny", f.weights, "", 0)
 			if body != nil {
 				if closeErr := body.Close(); closeErr != nil {
 					t.Error(closeErr)
@@ -371,7 +371,7 @@ func TestModelCopyReverseDispatchedDirectGETDoesNotReplay(t *testing.T) {
 		return err
 	})
 	test("file download", func(ctx context.Context, client *remoteClient) error {
-		body, _, err := client.modelFile(ctx, "ollama", "tiny", "blobs/fixture", 0)
+		body, _, err := client.modelFile(ctx, "ollama", "tiny", "blobs/fixture", "", 0)
 		if body != nil {
 			err = errors.Join(err, body.Close())
 		}
@@ -467,7 +467,7 @@ func TestModelCopyReverseListingProgressAndFileBytesStreamBeforeCompletion(t *te
 	case <-ctx.Done():
 		t.Fatal("listing did not complete after release")
 	}
-	body, offset, err := client.modelFile(ctx, "lmstudio", "fixture", "fixture.gguf", 0)
+	body, offset, err := client.modelFile(ctx, "lmstudio", "fixture", "fixture.gguf", "", 0)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -41,7 +41,10 @@ func (f *fakeModelSource) modelFiles(context.Context, string, string, func(strea
 	return out, nil
 }
 
-func (f *fakeModelSource) modelFile(_ context.Context, _, _, path string, offset int64) (io.ReadCloser, int64, error) {
+func (f *fakeModelSource) modelFile(_ context.Context, _, _, path, exportID string, offset int64) (io.ReadCloser, int64, error) {
+	if exportID != f.list.ExportID {
+		return nil, 0, permanentCopyError{errors.New("export identity mismatch")}
+	}
 	f.mu.Lock()
 	f.fetched = append(f.fetched, path)
 	f.mu.Unlock()

@@ -28,6 +28,7 @@ import (
 	"io"
 	"io/fs"
 	"log/slog"
+	"math"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -116,7 +117,7 @@ func engineEnvValue(st *engineState, key string) string {
 // each file's resolved path. A sha256 is filled in only where the layout
 // already names it (content-addressed blobs); hashModelFiles computes the rest.
 func (e *Executor) modelSourceFiles(ctx context.Context, engine, model string) (modelFileList, error) {
-	_, store, err := e.modelStoreFor(engine)
+	st, store, err := e.modelStoreFor(engine)
 	if err != nil {
 		return modelFileList{}, err
 	}
@@ -125,7 +126,7 @@ func (e *Executor) modelSourceFiles(ctx context.Context, engine, model string) (
 	case engines.NameOllama:
 		list, err = ollamaSourceFiles(store.root, model)
 	case engines.NameLlamaCPP:
-		list, err = llamacppSourceFiles(store.root, model)
+		list, err = e.llamaExportFiles(ctx, st, store, model)
 	case engines.NameLMStudio:
 		list, err = e.lmstudioSourceFiles(ctx, store, model)
 	}
@@ -139,7 +140,9 @@ func (e *Executor) modelSourceFiles(ctx context.Context, engine, model string) (
 // plannedFile is one file the destination must hold, and where.
 type plannedFile struct {
 	modelFile
-	dest string
+	dest     string
+	root     string
+	exportID string
 	// check, when set, runs on the verified download before it is renamed into
 	// place (Ollama checks a manifest's blobs are all present first).
 	check func(part string) error
@@ -149,29 +152,45 @@ type plannedFile struct {
 // must be written (the one that makes the model visible last) and an
 // engine-specific step once all are in place.
 type copyPlan struct {
-	root     string
-	files    []plannedFile
-	finalize func(ctx context.Context) error
+	root       string
+	files      []plannedFile
+	finalize   func(ctx context.Context) error
+	layout     string
+	exportID   string
+	durability *copyDurability
+	preflight  func(context.Context) error
 }
 
 // planModelCopy validates a source listing against this node's layout for the
 // engine and maps each file to its destination.
 func (e *Executor) planModelCopy(st *engineState, store engineModelStore, model string, list modelFileList) (copyPlan, error) {
+	if list.Engine != store.engine || list.Model != model {
+		return copyPlan{}, fmt.Errorf("source listing identity does not match request")
+	}
+	if len(list.Files) > maxCopyArtifacts {
+		return copyPlan{}, fmt.Errorf("source listed too many artifacts")
+	}
 	seen := make(map[string]bool, len(list.Files))
+	var total int64
 	for _, f := range list.Files {
 		if !validModelRelPath(f.Path) {
 			return copyPlan{}, fmt.Errorf("source listed an unsafe path %q", f.Path)
 		}
-		if seen[f.Path] {
+		folded := copyPathKey(f.Path)
+		if seen[folded] {
 			return copyPlan{}, fmt.Errorf("source listed %q twice", f.Path)
 		}
-		seen[f.Path] = true
+		seen[folded] = true
 		if !validSHA256(f.SHA256) {
 			return copyPlan{}, fmt.Errorf("source listed %q without a valid sha256", f.Path)
 		}
 		if f.Size < 0 {
 			return copyPlan{}, fmt.Errorf("source listed %q with a negative size", f.Path)
 		}
+		if f.Size > math.MaxInt64-total {
+			return copyPlan{}, fmt.Errorf("source size total overflows")
+		}
+		total += f.Size
 	}
 	if len(list.Files) == 0 {
 		return copyPlan{}, fmt.Errorf("source listed no files for %q", model)
@@ -180,22 +199,35 @@ func (e *Executor) planModelCopy(st *engineState, store engineModelStore, model 
 		plan copyPlan
 		err  error
 	)
-	switch store.adapter {
-	case engines.NameOllama:
-		plan, err = ollamaPlan(store.root, model, list)
-	case engines.NameLlamaCPP:
-		plan, err = e.llamacppPlan(st, store.root, model, list)
-	case engines.NameLMStudio:
-		plan, err = e.lmstudioPlan(st, store, list)
-	default:
-		return copyPlan{}, fmt.Errorf("%w: %q", errModelCopyUnsupported, store.engine)
+	if list.Layout != "" {
+		if list.Layout != llamaArtifactsLayout || store.adapter != engines.NameLlamaCPP {
+			return copyPlan{}, fmt.Errorf("unsupported copy layout")
+		}
+		plan, err = customArtifactPlan(store, model, list)
+	} else {
+		switch store.adapter {
+		case engines.NameOllama:
+			plan, err = ollamaPlan(store.root, model, list)
+		case engines.NameLlamaCPP:
+			plan, err = e.llamacppPlan(st, store.root, model, list)
+		case engines.NameLMStudio:
+			plan, err = e.lmstudioPlan(st, store, list)
+		default:
+			return copyPlan{}, fmt.Errorf("%w: %q", errModelCopyUnsupported, store.engine)
+		}
 	}
 	if err != nil {
 		return copyPlan{}, err
 	}
-	for _, f := range plan.files {
+	for i := range plan.files {
+		f := &plan.files[i]
 		if !pathWithinRoot(store.root, f.dest) || filepath.Clean(f.dest) == store.root {
 			return copyPlan{}, fmt.Errorf("%q would be written outside the model store", f.Path)
+		}
+		f.root = store.root
+		f.exportID = list.ExportID
+		if err := safeCopyDestination(store.root, f.dest); err != nil {
+			return copyPlan{}, err
 		}
 	}
 	plan.root = store.root
