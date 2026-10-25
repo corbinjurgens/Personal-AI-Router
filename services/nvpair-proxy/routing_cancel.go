@@ -54,8 +54,9 @@ func (r *routingSpend) cancelTransitionLocked(regenerate bool) (routingCancelSta
 	if regenerate && !r.committed && !r.uncertain {
 		if a := r.active; a != nil && !a.aborted && a.terminal == nil && a.nodeID != "" {
 			a.aborted, a.redispatch = true, true
-			a.state, a.reason = routingEnding, "regenerating on another concrete destination"
-			r.transitionLocked(a.state, a.reason)
+			a.observeAttemptLocked(routingAttemptResult{factRedispatched, factRegenerate, 0, true})
+			a.state = routingEnding
+			r.transitionLocked(a.state, "regenerating on another concrete destination")
 			if r.excluded == nil {
 				r.excluded = map[string]bool{}
 			}
@@ -72,7 +73,11 @@ func (r *routingSpend) cancelTransitionLocked(regenerate bool) (routingCancelSta
 			return nodepolicy.RoutingCancelRegenerating, nil, nil, true
 		}
 	}
-	cancel, callback, changed := r.cancelLocked(routingCancelReason)
+	cause := factCancel
+	if regenerate {
+		cause = factRegenerate
+	}
+	cancel, callback, changed := r.cancelLockedCause(routingCancelReason, cause)
 	return nodepolicy.RoutingCancelCancelled, cancel, callback, changed
 }
 

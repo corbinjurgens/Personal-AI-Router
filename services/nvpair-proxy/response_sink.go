@@ -28,6 +28,8 @@ type responseSink struct {
 	continuationUnavailable                                         bool
 	body                                                            responseInterruptionBody
 	bootstrap                                                       *bufferLease
+	factVersion                                                     uint64
+	factOutcome                                                     streamOutcome
 }
 
 type responseSinkResult struct {
@@ -82,6 +84,7 @@ func (s *responseSink) WriteHeader(code int) {
 		return
 	}
 	s.status = code
+	s.factVersion++
 	s.mu.Unlock()
 	s.w.WriteHeader(code)
 	// Header and trailer share this internal channel. Once headers are sent,
@@ -105,6 +108,7 @@ func (s *responseSink) Write(p []byte) (int, error) {
 	}
 	s.mu.Lock()
 	s.written += int64(n)
+	s.factVersion++
 	if err != nil && s.writeErr == nil {
 		s.writeErr = err
 	}
@@ -118,12 +122,16 @@ func (s *responseSink) Write(p []byte) (int, error) {
 func (s *responseSink) FlushError() error {
 	err := http.NewResponseController(s.w).Flush()
 	s.mu.Lock()
+	oldFlushed, oldSucceeded, oldErr := s.flushed, s.flushSucceeded, s.writeErr
 	if err == nil {
 		s.flushed = s.written
 		s.flushSucceeded = true
 	}
 	if err != nil && !errors.Is(err, http.ErrNotSupported) && s.writeErr == nil {
 		s.writeErr = err
+	}
+	if oldFlushed != s.flushed || oldSucceeded != s.flushSucceeded || oldErr != s.writeErr {
+		s.factVersion++
 	}
 	s.mu.Unlock()
 	if err != nil && !errors.Is(err, http.ErrNotSupported) && s.cancel != nil {
@@ -138,6 +146,9 @@ func (s *responseSink) output(n int, genuine bool) {
 	}
 	s.mu.Lock()
 	s.produced += int64(n)
+	if n != 0 {
+		s.factVersion++
+	}
 	if genuine {
 		s.genuine += int64(n)
 	} else {
@@ -151,6 +162,14 @@ func (s *responseSink) streamResult(result streamFrameResult) {
 		return
 	}
 	s.mu.Lock()
+	reason := s.reason
+	if result.Reason != "" {
+		reason = result.Reason
+	}
+	if s.factOutcome != result.Outcome || s.reason != reason {
+		s.factVersion++
+	}
+	s.factOutcome = result.Outcome
 	s.streamFinished = result.Outcome != streamOutcomeCancelled && result.Outcome != streamOutcomeStreaming
 	if result.Outcome == streamOutcomeCompleted || result.Outcome == streamOutcomeUpstreamError {
 		s.endingPlanned = true
@@ -207,6 +226,7 @@ func (s *responseSink) planInterruptionLocked(reason string, attempt *publicAtte
 		s.endingPlanned = true
 		s.reason = reason
 		s.continuationUnavailable = true
+		s.factVersion++
 		return true
 	}
 	return false
