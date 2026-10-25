@@ -22,11 +22,11 @@ import (
 	"nvpair-shared/testbin"
 )
 
-// Reuse the registered, fixed-path orphan fixture; these cases must remain
-// serial because the executable paths are shared with the stop tests.
+// Each case owns its executable copy so a previous process's mapped image
+// cannot block the next copy on Windows. All fixture listeners use loopback.
 func restoreOrphanManifest(t *testing.T) (*Manifest, string, int) {
 	t.Helper()
-	dir := testbin.Dir(t, "nvpair-engine-manager", "stop-orphan", "fakeorphan")
+	dir := t.TempDir()
 	bin := filepath.Join(dir, testbin.Exe("fakeorphan"))
 	copyFile(t, fakeEngineBin, bin)
 	port, err := freePort()
