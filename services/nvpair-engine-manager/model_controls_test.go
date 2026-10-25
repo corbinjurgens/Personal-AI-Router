@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -25,6 +26,137 @@ import (
 	settings "nvpair-shared/enginesettings"
 	"nvpair-shared/nodepolicy"
 )
+
+func TestModelControlsInventoryFailureDiagnostics(t *testing.T) {
+	for _, tc := range []struct {
+		name                                  string
+		shared, failList, failLoaded, transport bool
+	}{
+		{"shared HTTP failure", true, true, true, false},
+		{"separate list HTTP failure", false, true, false, false},
+		{"separate loaded HTTP failure", false, false, true, false},
+		{"shared transport failure", true, true, true, true},
+		{"separate transport failures", false, true, true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h, _ := memoryModelsFixture(t)
+			ex := h.ex
+			st := ex.engines["ollama"]
+			st.port = 24001
+			if tc.shared {
+				act := st.manifest.Actions["loaded_models"]
+				act.HTTP = &ActionHTTP{Method: http.MethodGet, Path: "/api/tags"}
+				st.manifest.Actions["loaded_models"] = act
+			}
+			for _, action := range []string{"list_models", "loaded_models"} {
+				act := st.manifest.Actions[action]
+				httpAction := *act.HTTP
+				httpAction.Path += "?token=j304-url-secret"
+				act.HTTP = &httpAction
+				st.manifest.Actions[action] = act
+			}
+			healthy := *st.manifest
+			healthy.Engine = "healthy"
+			ex.reg.engines["healthy"] = &healthy
+			ex.engines["healthy"] = &engineState{manifest: &healthy, plat: &Platform{}, running: true, port: 24002, proc: &managedProc{}}
+			phase := "seed"
+			ex.client.Transport = memoryModelsTransport(func(r *http.Request) (*http.Response, error) {
+				if r.Method != http.MethodGet || (r.URL.Host != "127.0.0.1:24001" && r.URL.Host != "127.0.0.1:24002") ||
+					(r.URL.Path != "/api/tags" && r.URL.Path != "/api/ps") {
+					t.Errorf("unexpected inventory request: %s %s", r.Method, r.URL)
+					return nil, errors.New("unexpected inventory request")
+				}
+				if r.URL.Host == "127.0.0.1:24002" {
+					return mutationJSON(http.StatusOK, `{"models":[{"name":"sibling"}]}`)
+				}
+				failing := phase == "failure" && ((r.URL.Path == "/api/tags" && tc.failList) || (r.URL.Path == "/api/ps" && tc.failLoaded))
+				if failing {
+					if tc.transport {
+						return nil, errors.New("j304-transport-secret https://credential:private@fixture.invalid/secret")
+					}
+					return mutationJSON(http.StatusServiceUnavailable, "j304-body-secret")
+				}
+				if phase == "empty" {
+					return mutationJSON(http.StatusOK, `{"models":[{"name":""}]}`)
+				}
+				return mutationJSON(http.StatusOK, `{"models":[{"name":"seed"}]}`)
+			})
+			_, baseline, seed := ex.sweepLoaded(context.Background(), nil, false)
+			if !reflect.DeepEqual(seed.ByEngine["ollama"], []string{"seed"}) || !reflect.DeepEqual(baseline["ollama"], []string{"seed"}) {
+				t.Fatal("inventory/loaded positive did not seed the existing owner")
+			}
+			var capture bytes.Buffer
+			previous := slog.Default()
+			slog.SetDefault(slog.New(slog.NewJSONHandler(&capture, &slog.HandlerOptions{Level: slog.LevelDebug})))
+			t.Cleanup(func() { slog.SetDefault(previous) })
+			slog.Debug("j304 diagnostic capture enabled")
+			phase = "failure"
+			_, next, result := ex.sweepLoaded(context.Background(), baseline, false)
+			if !reflect.DeepEqual(result.ByEngine["healthy"], []string{"sibling"}) || !reflect.DeepEqual(result.LoadedByEngine["healthy"], []string{"sibling"}) ||
+				!reflect.DeepEqual(next["ollama"], []string{"seed"}) {
+				t.Fatal("inventory failure lost healthy sibling or last-good loaded baseline")
+			}
+			_, listPresent := result.ByEngine["ollama"]
+			_, loadedPresent := result.LoadedByEngine["ollama"]
+			if listPresent == tc.failList || loadedPresent == tc.failLoaded {
+				t.Fatal("failed action manufactured known-empty or removed its successful sibling action")
+			}
+			seen := map[string]int{}
+			marker := false
+			decoder := json.NewDecoder(bytes.NewReader(capture.Bytes()))
+			for {
+				var record struct {
+					Message  string `json:"msg"`
+					Level    string `json:"level"`
+					Engine   string `json:"engine"`
+					Action   string `json:"action"`
+					Category string `json:"category"`
+					Status   int    `json:"status"`
+				}
+				if err := decoder.Decode(&record); err == io.EOF {
+					break
+				} else if err != nil {
+					t.Fatalf("decode actual debug capture: %v", err)
+				}
+				if record.Message == "j304 diagnostic capture enabled" && record.Level == "DEBUG" {
+					marker = true
+					continue
+				}
+				if record.Engine == "ollama" && (record.Action == "list_models" || record.Action == "loaded_models") {
+					category, status := "http-status", http.StatusServiceUnavailable
+					if tc.transport {
+						category, status = "action-failed", 0
+					}
+					if record.Message != "engine:models "+record.Action+" failed" || record.Level != "DEBUG" || record.Category != category || record.Status != status {
+						t.Fatalf("unsafe or unclassified inventory diagnostic: %+v", record)
+					}
+					seen[record.Action]++
+				}
+			}
+			wantList, wantLoaded := 0, 0
+			if tc.failList {
+				wantList = 1
+			}
+			if tc.failLoaded {
+				wantLoaded = 1
+			}
+			if !marker || seen["list_models"] != wantList || seen["loaded_models"] != wantLoaded {
+				t.Fatalf("enabled capture missed the actual failure owner: marker=%v actions=%v", marker, seen)
+			}
+			for _, secret := range []string{"j304-body-secret", "j304-transport-secret", "j304-url-secret", "credential:private", "fixture.invalid/secret"} {
+				if strings.Contains(capture.String(), secret) {
+					t.Fatalf("inventory diagnostics leaked sentinel %q", secret)
+				}
+			}
+			phase = "empty"
+			_, _, empty := ex.sweepLoaded(context.Background(), next, false)
+			if empty.ByEngine["ollama"] == nil || len(empty.ByEngine["ollama"]) != 0 || empty.LoadedByEngine["ollama"] == nil || len(empty.LoadedByEngine["ollama"]) != 0 ||
+				!reflect.DeepEqual(empty.ByEngine["healthy"], []string{"sibling"}) {
+				t.Fatal("post-failure all-invalid success lost known-empty or useful sibling")
+			}
+		})
+	}
+}
 
 // These tests reuse the existing in-memory inventory fixture and HTTP seam.
 // They never start an engine, manager, catalog server, listener or command.

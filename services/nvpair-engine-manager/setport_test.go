@@ -125,6 +125,114 @@ func portFixtureManifest(engine string, port int) map[string]any {
 	}
 }
 
+// Synthetic candidates implement only the listener contract; no socket is bound.
+type fixturePortCandidate struct {
+	port       int
+	closeCalls int
+	closeErr   error
+}
+
+func (c *fixturePortCandidate) Accept() (net.Conn, error) {
+	return nil, errors.New("synthetic port candidate cannot accept connections")
+}
+
+func (c *fixturePortCandidate) Close() error {
+	c.closeCalls++
+	return c.closeErr
+}
+
+func (c *fixturePortCandidate) Addr() net.Addr {
+	return &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: c.port}
+}
+
+func TestPrivateFixturePortsRejectsProtectedAndCallerPorts(t *testing.T) {
+	candidates := []int{
+		11434, 1234, 1235, 8080, 8081, 14318, 14319, 14320,
+		24003, 14321, 14322, 14323, 24010, 24001, 24002,
+	}
+	var opened []*fixturePortCandidate
+	calls := 0
+	listen := func(network, address string) (net.Listener, error) {
+		if network != "tcp" || address != "127.0.0.1:0" {
+			t.Fatalf("allocation target = %s %s, want private loopback", network, address)
+		}
+		for _, candidate := range opened {
+			if candidate.closeCalls != 0 {
+				t.Fatal("a reservation was released before selection completed")
+			}
+		}
+		if calls == len(candidates) {
+			t.Fatal("allocator exhausted its synthetic candidates")
+		}
+		candidate := &fixturePortCandidate{port: candidates[calls]}
+		calls++
+		opened = append(opened, candidate)
+		return candidate, nil
+	}
+	excluded := []int{24010}
+	ports, err := allocatePrivateFixturePorts(listen, 3, excluded...)
+	if err != nil {
+		t.Fatalf("allocate synthetic ports: %v", err)
+	}
+	if !slices.Equal(ports, []int{24003, 24001, 24002}) || calls != len(candidates) {
+		t.Fatalf("selection = %v after %d calls, want ordered distinct allowed candidates", ports, calls)
+	}
+	if !slices.Equal(excluded, []int{24010}) {
+		t.Fatal("allocator changed caller exclusions")
+	}
+	for _, candidate := range opened {
+		if candidate.closeCalls != 1 {
+			t.Fatalf("candidate %d closed %d times, want once", candidate.port, candidate.closeCalls)
+		}
+	}
+}
+
+func TestPrivateFixturePortsJoinsAllocationAndCleanupErrors(t *testing.T) {
+	allocationErr := errors.New("synthetic allocation failure")
+	firstCloseErr := errors.New("first synthetic close failure")
+	secondCloseErr := errors.New("second synthetic close failure")
+	opened := []*fixturePortCandidate{
+		{port: 24003, closeErr: firstCloseErr},
+		{port: 14318, closeErr: secondCloseErr},
+	}
+	calls := 0
+	listen := func(network, address string) (net.Listener, error) {
+		if network != "tcp" || address != "127.0.0.1:0" {
+			t.Fatalf("allocation target = %s %s, want private loopback", network, address)
+		}
+		for _, candidate := range opened {
+			if candidate.closeCalls != 0 {
+				t.Fatal("cleanup ran before the allocation failed")
+			}
+		}
+		calls++
+		if calls > len(opened) {
+			return nil, allocationErr
+		}
+		return opened[calls-1], nil
+	}
+	ports, err := allocatePrivateFixturePorts(listen, 3)
+	if ports != nil || calls != 3 || !errors.Is(err, allocationErr) || !errors.Is(err, firstCloseErr) || !errors.Is(err, secondCloseErr) {
+		t.Fatalf("failure = ports %v, calls %d, error %v; want allocation and both cleanup errors", ports, calls, err)
+	}
+	for _, candidate := range opened {
+		if candidate.closeCalls != 1 {
+			t.Fatalf("candidate %d closed %d times after failure", candidate.port, candidate.closeCalls)
+		}
+	}
+}
+
+func TestPrivateFixturePortsZeroCountDoesNotAllocate(t *testing.T) {
+	listen := func(string, string) (net.Listener, error) {
+		t.Fatal("zero-count selection called the listener")
+		return nil, errors.New("unexpected synthetic allocation")
+	}
+	ports, err := allocatePrivateFixturePorts(listen, 0)
+	if ports != nil || err != nil {
+		t.Fatalf("zero-count selection = %v, %v; want nil without allocation", ports, err)
+	}
+}
+
 // Hold every allocation until the whole set is selected, so old/new/default
 // ports cannot accidentally be equal. All listeners are private loopback.
 func privateTestPorts(t *testing.T, count int, exclude ...int) []int {
@@ -136,21 +244,31 @@ func privateTestPorts(t *testing.T, count int, exclude ...int) []int {
 	return ports
 }
 
-func privateFixturePorts(count int, exclude ...int) (ports []int, err error) {
+func privateFixturePorts(count int, exclude ...int) ([]int, error) {
+	return allocatePrivateFixturePorts(net.Listen, count, exclude...)
+}
+
+// Inject only listener allocation so protected candidates can be supplied as
+// synthetic TCP addresses without binding them or changing a global listener.
+func allocatePrivateFixturePorts(listen func(string, string) (net.Listener, error), count int, exclude ...int) (ports []int, err error) {
 	var listeners []net.Listener
 	defer func() {
 		for _, listener := range listeners {
 			err = errors.Join(err, listener.Close())
 		}
 	}()
-	exclude = append([]int{11434, 1234, 1235, 8080, 8081}, exclude...)
+	exclude = append([]int{11434, 1234, 1235, 8080, 8081, 14318, 14319, 14320, 14321, 14322, 14323}, exclude...)
 	for len(ports) < count {
-		listener, err := net.Listen("tcp", "127.0.0.1:0")
+		listener, err := listen("tcp", "127.0.0.1:0")
 		if err != nil {
 			return nil, err
 		}
 		listeners = append(listeners, listener)
-		port := listener.Addr().(*net.TCPAddr).Port
+		address, ok := listener.Addr().(*net.TCPAddr)
+		if !ok {
+			return nil, errors.New("fixture allocation requires a TCP address")
+		}
+		port := address.Port
 		if !slices.Contains(exclude, port) {
 			ports = append(ports, port)
 		}

@@ -471,8 +471,9 @@ type DirectoryNode struct {
 	// from engine-manager's em /v1/models modelsByEngine field. A present engine
 	// key with [] means its inventory was successfully queried and is empty; a
 	// missing key means it was not running/queryable. Omitted when no engine
-	// inventory was successfully reported.
-	ModelsByEngine map[string][]string `json:"modelsByEngine,omitempty"`
+	// inventory was reported (nil); a nonnil empty map remains authoritative
+	// empty attribution and must not enable the flat-model fallback.
+	ModelsByEngine map[string][]string `json:"modelsByEngine,omitzero"`
 	// LoadedByEngine names the models currently resident in memory on this node,
 	// per engine (normally a subset of ModelsByEngine). Enriched from
 	// engine-manager's em /v1/models loadedByEngine field so a remote node's

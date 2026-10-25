@@ -6,6 +6,7 @@ package tests
 import (
 	"bytes"
 	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -17,6 +18,194 @@ import (
 	"nvpair-shared/jsonrpc"
 	"nvpair-shared/nodepolicy"
 )
+
+func TestModelControlsServiceStoredPolicy(t *testing.T) {
+	f := newServiceFixture(t)
+	f.withInertEngineManager()
+	policy := nodepolicy.Default()
+	policy.Revision = "304"
+	policy.Admission.MaxConcurrentPerModel = 7
+	policy.Profiles = []nodepolicy.Profile{
+		{Name: "first", Engine: "llamacpp", Model: "first"},
+		{Name: "invalid", Engine: "llamacpp", Model: "j304-invalid-placeholder"},
+		{Name: "last", Engine: "llamacpp", Model: "last"},
+	}
+	policy.Roles["weak"] = nodepolicy.Role{Engine: "llamacpp", Model: "first"}
+	policy.Tiers["weak"] = []nodepolicy.TierEntry{{Kind: nodepolicy.EntryLocal, Engine: "llamacpp", Model: "first"}}
+	policy.ServedModels = nodepolicy.ServedModels{{Engine: "llamacpp", Model: "first"}}
+	if err := policy.Validate(); err != nil {
+		t.Fatalf("validate stored positive control: %v", err)
+	}
+	raw := mustMarshal(t, policy)
+	if bytes.Count(raw, []byte(`"j304-invalid-placeholder"`)) != 1 {
+		t.Fatal("stored fixture does not contain exactly its intended raw model token")
+	}
+	raw = bytes.Replace(raw, []byte(`"j304-invalid-placeholder"`), []byte("\"raw-"+string([]byte{0xff})+"\""), 1)
+	path := f.policyPath()
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f.start()
+	c := f.readyClient()
+	want := policy
+	want.Profiles = []nodepolicy.Profile{policy.Profiles[0], policy.Profiles[2]}
+	assertPolicySnapshot(t, fetchServicePolicy(t, c), want, nodepolicy.Available)
+	if !bytes.Equal(readPolicyBytes(t, path), raw) {
+		t.Fatal("load-only sanitation rewrote stored bytes")
+	}
+	if _, err := os.Stat(path + ".bad"); !os.IsNotExist(err) {
+		t.Fatalf("mixed stored model inventory entered malformed-document recovery: %v", err)
+	}
+	// The service's own capped output is not broker stderr. Read the private
+	// pumpStderr-owned file through the broker's post-sanitation log marker;
+	// an ordinary policy RPC does not drain this independent stream.
+	logPath := filepath.Join(f.dir, "logs", "broker.log")
+	spillPath := filepath.Join(filepath.Dir(path), "logs", "nvpair-broker-unsent.log")
+	readSanitationLog := func() []byte {
+		t.Helper()
+		const maxCapture = 4 << 20
+		const maxBrokerLine = 1 << 20 // pumpStderr silently truncates at this bound.
+		deadline := time.Now().Add(serviceCallTimeout)
+		var first os.FileInfo
+		var largest int64
+		for {
+			for _, forbidden := range []string{logPath + ".1", spillPath} {
+				if _, err := os.Stat(forbidden); err == nil {
+					t.Fatalf("privacy capture cannot accept rotation or overflow: %s", forbidden)
+				} else if !os.IsNotExist(err) {
+					t.Fatalf("inspect privacy capture generation: %v", err)
+				}
+			}
+			file, err := os.Open(logPath)
+			if os.IsNotExist(err) {
+				if time.Now().After(deadline) {
+					t.Fatal("broker stderr file never appeared")
+				}
+				time.Sleep(20 * time.Millisecond)
+				continue
+			}
+			if err != nil {
+				t.Fatalf("open private broker stderr: %v", err)
+			}
+			info, statErr := file.Stat()
+			data, readErr := io.ReadAll(io.LimitReader(file, maxCapture+1))
+			closeErr := file.Close()
+			if statErr != nil || readErr != nil || closeErr != nil {
+				t.Fatalf("read private broker stderr: stat=%v read=%v close=%v", statErr, readErr, closeErr)
+			}
+			current, err := os.Stat(logPath)
+			if err != nil || !os.SameFile(info, current) || (first != nil && !os.SameFile(first, info)) || info.Size() < largest {
+				t.Fatal("broker stderr disappeared, rotated or was truncated during capture")
+			}
+			first, largest = info, info.Size()
+			if !info.Mode().IsRegular() || info.Size() > maxCapture || len(data) > maxCapture || int64(len(data)) < info.Size() {
+				t.Fatal("broker stderr capture is incomplete or exceeds its explicit bound")
+			}
+			for _, line := range bytes.Split(data, []byte{'\n'}) {
+				if len(line) >= maxBrokerLine || bytes.Contains(line, []byte("log reader fell behind")) {
+					t.Fatal("broker stderr reported overflow or reached the pump's truncation bound")
+				}
+			}
+			complete := data[:bytes.LastIndexByte(data, '\n')+1]
+			marker := []byte("[nvpair-ui-broker] INFO node policy loaded ")
+			for _, line := range bytes.Split(complete, []byte{'\n'}) {
+				if bytes.Contains(line, marker) && bytes.Contains(line, []byte(" revision=304 ")) && bytes.Contains(line, []byte("recoveryRequired=false")) {
+					// FIFO stderr writes put the sanitation records before this
+					// same-owner marker. Fail closed if that positive is absent.
+					if !bytes.Contains(complete, []byte("[nvpair-ui-broker] WARN invalid stored model entries removed category=profiles count=1")) {
+						t.Fatal("broker sanitation marker missing from captured stderr")
+					}
+					for _, forbidden := range []string{logPath + ".1", spillPath} {
+						if _, err := os.Stat(forbidden); !os.IsNotExist(err) {
+							t.Fatalf("capture generation/overflow check failed: %s: %v", forbidden, err)
+						}
+					}
+					return complete
+				}
+			}
+			if time.Now().After(deadline) {
+				t.Fatal("broker post-sanitation stderr barrier never arrived")
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+	}
+	if bytes.Contains(readSanitationLog(), []byte("raw-")) {
+		t.Fatal("stored model token appeared in broker diagnostics")
+	}
+}
+
+func TestModelControlsServicePolicyWrites(t *testing.T) {
+	f := newServiceFixture(t)
+	f.withInertEngineManager()
+	f.start()
+	c := f.readyClient()
+	observer := f.readyClient()
+	policy := servicePolicy(t, c)
+	policy.Profiles = []nodepolicy.Profile{{Name: "valid", Engine: "llamacpp", Model: strings.Repeat("a", 512)}}
+	policy = setServicePolicy(t, c, policy)
+	before := fetchServicePolicy(t, c)
+	stored := assertStoredPolicy(t, f.policyPath(), policy)
+	// A second client's get is an ordered barrier after the valid publication.
+	assertPolicySnapshot(t, fetchServicePolicy(t, observer), policy, nodepolicy.Available)
+	observer.mu.Lock()
+	observer.frames = nil
+	observer.bytes = 0
+	observer.mu.Unlock()
+	cases := []struct{ name, token string }{
+		{"empty", `""`},
+		{"raw invalid UTF8", "\"raw-" + string([]byte{0xff}) + "\""},
+		{"escaped C0", `"bad\u001f"`},
+		{"DEL", `"bad\u007f"`},
+		{"C1 start", `"bad\u0080"`},
+		{"C1 end", `"bad\u009f"`},
+		{"ASCII 513 bytes", `"` + strings.Repeat("b", 513) + `"`},
+		{"multibyte 513 bytes", `"` + strings.Repeat("界", 171) + `"`},
+	}
+	for i, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			draft := policy
+			draft.Profiles = append(append([]nodepolicy.Profile{}, policy.Profiles...), nodepolicy.Profile{Name: "rejected", Engine: "llamacpp", Model: "j304-invalid-placeholder"})
+			params := mustMarshal(t, map[string]any{"policy": draft, "expectedPersistedRevision": policy.Revision})
+			if bytes.Count(params, []byte(`"j304-invalid-placeholder"`)) != 1 {
+				t.Fatal("write fixture does not contain exactly its intended raw model token")
+			}
+			params = bytes.Replace(params, []byte(`"j304-invalid-placeholder"`), []byte(tc.token), 1)
+			m, err := c.call(strconv.Itoa(30400+i), "policy:set", params, serviceCallTimeout)
+			if err != nil {
+				t.Fatalf("invalid write transport: %v", err)
+			}
+			if m.Error == nil || m.Error.Code != -32602 || len(m.Result) != 0 {
+				t.Fatal("invalid new model write was accepted")
+			}
+			if strings.Contains(m.Error.Message, "raw-") || strings.Contains(m.Error.Message, "bad") || strings.Contains(m.Error.Message, strings.Repeat("b", 513)) || strings.Contains(m.Error.Message, strings.Repeat("界", 171)) {
+				t.Fatal("invalid write echoed model text")
+			}
+			if !reflect.DeepEqual(fetchServicePolicy(t, c), before) || !bytes.Equal(readPolicyBytes(t, f.policyPath()), stored) {
+				t.Fatal("invalid write changed policy, revision, availability or persisted bytes")
+			}
+			assertPolicySnapshot(t, fetchServicePolicy(t, observer), policy, nodepolicy.Available)
+			observer.mu.Lock()
+			frames := append([]*jsonrpc.Message{}, observer.frames...)
+			observer.mu.Unlock()
+			for _, frame := range frames {
+				if frame.Method == "policy:changed" {
+					var event struct {
+						Policy nodepolicy.Policy `json:"policy"`
+					}
+					if err := json.Unmarshal(frame.Params, &event); err != nil {
+						t.Fatalf("decode policy publication: %v", err)
+					}
+					if !reflect.DeepEqual(event.Policy, policy) {
+						t.Fatal("invalid draft reached policy publication")
+					}
+				}
+			}
+		})
+	}
+}
 
 func TestServicePolicy(t *testing.T) {
 	t.Run("valid update notifies and survives service restart", func(t *testing.T) {

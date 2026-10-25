@@ -97,6 +97,7 @@ func (d *daemon) peerServiceClient(hostUUID, peerUUID, host string, port int, se
 			PeerClientOptions: clustertrust.PeerClientOptions{Timeout: timeout},
 			BaseConfigDir:     d.baseDir, ResolveRoute: resolve,
 			DirectTimeout: nodeInfoDialTimeout,
+			DialContext:   d.peerDialContext,
 		})
 		if directoryBacked {
 			if d.peerClients == nil {

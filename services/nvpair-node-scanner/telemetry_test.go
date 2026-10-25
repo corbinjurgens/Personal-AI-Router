@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -104,12 +105,16 @@ func TestRefreshNodeTelemetryRejectsMismatchedIdentity(t *testing.T) {
 // scheduled it blind — while an address that answers sat unused in the same
 // published list.
 func TestRefreshTelemetryFailsOverToAnAnsweringAddress(t *testing.T) {
+	var failedAttempts, successfulAttempts, serverReads atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_ = json.NewEncoder(w).Encode(NodeInfoResponse{
+		serverReads.Add(1)
+		if err := json.NewEncoder(w).Encode(NodeInfoResponse{
 			HostUUID:       "node-a",
 			TelemetryValid: true,
 			GPUs:           []GPUInfo{{Name: "GPU 0", UtilizationPercent: 61}},
-		})
+		}); err != nil {
+			t.Errorf("encode node-info: %v", err)
+		}
 	}))
 	defer server.Close()
 	serverURL, err := url.Parse(server.URL)
@@ -121,16 +126,33 @@ func TestRefreshTelemetryFailsOverToAnAnsweringAddress(t *testing.T) {
 		t.Fatalf("parse server port: %v", err)
 	}
 
+	failedURL := "http://192.0.2.1:" + serverURL.Port() + "/v1/node-info"
+	successURL := server.URL + "/v1/node-info"
+	transport := serviceBuildTransport(func(r *http.Request) (*http.Response, error) {
+		if err := r.Context().Err(); err != nil {
+			return nil, err
+		}
+		if r.Method == http.MethodGet {
+			switch r.URL.String() {
+			case failedURL:
+				failedAttempts.Add(1)
+				return nil, fmt.Errorf("controlled telemetry candidate failure")
+			case successURL:
+				successfulAttempts.Add(1)
+				return server.Client().Transport.RoundTrip(r)
+			}
+		}
+		t.Error("unexpected telemetry fixture HTTP request")
+		return nil, fmt.Errorf("telemetry fixture refuses unexpected request")
+	})
 	var output bytes.Buffer
 	d := &daemon{
 		codec: NewCodec(&output),
 		dir:   newDirectory(),
-		// A short client timeout stands in for the daemon's own dial budget, so
-		// the address that never answers is written off promptly.
-		http: &http.Client{Timeout: 500 * time.Millisecond},
+		http:  &http.Client{Timeout: 500 * time.Millisecond, Transport: transport},
 	}
-	// TEST-NET-1 (RFC 5737) is routed nowhere, so only the second published
-	// address can answer.
+	// The first candidate fails inside the interceptor; only the exact owned
+	// success URL can reach the ordinary HTTP transport.
 	d.dir.upsert(noderec.DirectoryNode{
 		HostUUID: "node-a",
 		IP:       "192.0.2.1",
@@ -141,6 +163,10 @@ func TestRefreshTelemetryFailsOverToAnAnsweringAddress(t *testing.T) {
 	})
 
 	d.refreshTelemetryOnce(context.Background())
+	if failedAttempts.Load() != 1 || successfulAttempts.Load() != 1 || serverReads.Load() != 1 {
+		t.Fatalf("failover attempts: failed=%d successful=%d handler=%d, want 1 each",
+			failedAttempts.Load(), successfulAttempts.Load(), serverReads.Load())
+	}
 
 	var message Message
 	if err := json.Unmarshal(bytes.TrimSpace(output.Bytes()), &message); err != nil {

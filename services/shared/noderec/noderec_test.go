@@ -4,14 +4,124 @@
 package noderec
 
 import (
+	"bytes"
 	"encoding/json"
 	"reflect"
 	"strings"
 	"testing"
 
 	"nvpair-shared/buildinfo"
+	"nvpair-shared/jsonrpc"
 	"nvpair-shared/nodepolicy"
 )
+
+func TestModelControlsDirectoryAttributionWire(t *testing.T) {
+	for _, tc := range []struct {
+		name, raw   string
+		attribution map[string][]string
+		ollama      []string
+	}{
+		{"nil retains flat fallback", `{"hostUuid":"owner","models":["good"]}`, nil, []string{"good"}},
+		{"outer empty suppresses flat fallback", `{"hostUuid":"owner","models":["good"],"modelsByEngine":{}}`, map[string][]string{}, nil},
+		{"per engine known empty", `{"hostUuid":"owner","models":["good"],"modelsByEngine":{"ollama":[]}}`, map[string][]string{"ollama": {}}, []string{}},
+		{"populated siblings retain attribution", `{"hostUuid":"owner","models":["good"],"modelsByEngine":{"ollama":["first","last"],"lmstudio":["other"]}}`, map[string][]string{"ollama": {"first", "last"}, "lmstudio": {"other"}}, []string{"first", "last"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var node DirectoryNode
+			if err := json.Unmarshal([]byte(tc.raw), &node); err != nil {
+				t.Fatalf("decode raw inventory specimen: %v", err)
+			}
+			node.Name, node.IP, node.Trusted, node.LastSeen = "name", "127.0.0.1", true, 304
+			node.Services = map[ServiceKey]ServiceStatus{ServiceOllama: {Port: 24001}}
+			assertNode := func(t *testing.T, got DirectoryNode) {
+				t.Helper()
+				if !reflect.DeepEqual(got.ModelsByEngine, tc.attribution) || !reflect.DeepEqual(got.EngineModels("ollama"), tc.ollama) || !reflect.DeepEqual(got.Models, []string{"good"}) {
+					t.Fatal("wire round-trip changed attribution, fallback, order or valid flat inventory")
+				}
+				if got.HostUUID != "owner" || got.Name != "name" || got.IP != "127.0.0.1" || !got.Trusted || got.LastSeen != 304 || !reflect.DeepEqual(got.Services, node.Services) {
+					t.Fatal("wire round-trip changed unrelated node metadata")
+				}
+			}
+			t.Run("direct JSON", func(t *testing.T) {
+				encoded, err := json.Marshal(node)
+				if err != nil {
+					t.Fatal(err)
+				}
+				var fields map[string]json.RawMessage
+				if err := json.Unmarshal(encoded, &fields); err != nil {
+					t.Fatal(err)
+				}
+				_, present := fields["modelsByEngine"]
+				if present != (tc.attribution != nil) {
+					t.Fatal("attribution omission does not match nil state")
+				}
+				var decoded DirectoryNode
+				if err := json.Unmarshal(encoded, &decoded); err != nil {
+					t.Fatal(err)
+				}
+				assertNode(t, decoded)
+			})
+			t.Run("NodeEvent notification", func(t *testing.T) {
+				var wire bytes.Buffer
+				codec := jsonrpc.NewCodec(&wire)
+				if err := codec.Notify(NotifyNodeUpdated, NodeEvent{Node: node}); err != nil {
+					t.Fatal(err)
+				}
+				frame, err := codec.Read()
+				if err != nil {
+					t.Fatal(err)
+				}
+				if frame.Method != NotifyNodeUpdated || !frame.IsNotification() {
+					t.Fatal("node event envelope changed")
+				}
+				var event NodeEvent
+				if err := json.Unmarshal(frame.Params, &event); err != nil {
+					t.Fatal(err)
+				}
+				assertNode(t, event.Node)
+			})
+			t.Run("subscription snapshot notification", func(t *testing.T) {
+				var wire bytes.Buffer
+				codec := jsonrpc.NewCodec(&wire)
+				if err := codec.Notify(NotifyNodes, GetNodesResult{Nodes: []DirectoryNode{node}}); err != nil {
+					t.Fatal(err)
+				}
+				frame, err := codec.Read()
+				if err != nil {
+					t.Fatal(err)
+				}
+				var snapshot GetNodesResult
+				if err := json.Unmarshal(frame.Params, &snapshot); err != nil {
+					t.Fatalf("decode subscription snapshot: %v", err)
+				}
+				if frame.Method != NotifyNodes || len(snapshot.Nodes) != 1 {
+					t.Fatal("subscription snapshot envelope changed")
+				}
+				assertNode(t, snapshot.Nodes[0])
+			})
+			t.Run("get nodes response", func(t *testing.T) {
+				var wire bytes.Buffer
+				codec := jsonrpc.NewCodec(&wire)
+				id := json.RawMessage(`"304"`)
+				if err := codec.Respond(&id, GetNodesResult{Nodes: []DirectoryNode{node}}); err != nil {
+					t.Fatal(err)
+				}
+				frame, err := codec.Read()
+				if err != nil {
+					t.Fatal(err)
+				}
+				var snapshot GetNodesResult
+				if err := json.Unmarshal(frame.Result, &snapshot); err != nil {
+					t.Fatalf("decode get-nodes response: %v", err)
+				}
+				if !frame.IsResponse() || frame.Error != nil || len(snapshot.Nodes) != 1 {
+					t.Fatal("get-nodes response envelope changed")
+				}
+				assertNode(t, snapshot.Nodes[0])
+			})
+		})
+	}
+}
 
 func TestDirectoryOptionalServiceBuild(t *testing.T) {
 	clean := "git:" + strings.Repeat("a", 40)

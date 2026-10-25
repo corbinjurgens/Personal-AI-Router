@@ -106,8 +106,9 @@ type AvailableNode struct {
 	// Models stays the flat de-duplicated union for consumers that only need the
 	// node-level set; this is the per-engine breakdown a consumer needs to show a
 	// remote node's models under the correct engine (the UI's engine card).
-	// Omitted when no engine reports models.
-	ModelsByEngine map[string][]string `json:"modelsByEngine,omitempty"`
+	// Omitted only when attribution is nil; a nonnil empty map authoritatively
+	// reports no per-engine models and must remain present on the client wire.
+	ModelsByEngine map[string][]string `json:"modelsByEngine,omitzero"`
 	// LoadedByEngine names the models currently resident in memory per engine
 	// (normally a subset of ModelsByEngine), enriched by the daemon from the
 	// peer's engine-manager /v1/models loadedByEngine field. Lets a per-engine

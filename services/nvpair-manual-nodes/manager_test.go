@@ -11,6 +11,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -18,6 +19,217 @@ import (
 
 	"nvpair-shared/applog"
 )
+
+// Drive the existing probe owner and its real notification/list serializers.
+// Every HTTP request is intercepted by the private fakeRoundTripper.
+func TestModelControlsManualObservationPresenceTransitions(t *testing.T) {
+	for _, engine := range []string{"ollama", "lmstudio"} {
+		t.Run(engine, func(t *testing.T) {
+			m, rw, rt := newTestManager()
+			entry := ManualEntry{Name: "presence", Address: "node.local"}
+			tn := &trackedNode{entry: entry}
+			m.nodes[nodeID(entry)] = tn
+			ollamaBody := `{"models":[{"name":"sibling"}]}`
+			lmStudioBody := `{"data":[{"id":"sibling"}]}`
+			field, siblingField := "ollama_models", "lmstudio_models"
+			if engine == "lmstudio" {
+				field, siblingField = siblingField, field
+			}
+			rt.set(http.MethodGet, "node.local:11434", "/", func(*http.Request) (*http.Response, error) {
+				return httpJSON(http.StatusOK, `{}`)
+			})
+			rt.set(http.MethodGet, "node.local:11434", "/api/tags", func(*http.Request) (*http.Response, error) {
+				return httpJSON(http.StatusOK, ollamaBody)
+			})
+			rt.set(http.MethodGet, "node.local:1234", "/v1/models", func(*http.Request) (*http.Response, error) {
+				return httpJSON(http.StatusOK, lmStudioBody)
+			})
+			rt.set(http.MethodGet, "node.local:14318", "/v1/node-info", func(*http.Request) (*http.Response, error) {
+				return httpJSON(http.StatusOK, `{"hostUuid":"presence-owner","telemetryValid":true,"msSince":7}`)
+			})
+			setBody := func(ollama, lmstudio string) {
+				if engine == "ollama" {
+					ollamaBody = ollama
+				} else {
+					lmStudioBody = lmstudio
+				}
+			}
+			assertPayload := func(t *testing.T, raw json.RawMessage, want []string) {
+				t.Helper()
+				var status ManualNodeStatus
+				if err := json.Unmarshal(raw, &status); err != nil {
+					t.Fatalf("decode producer status: %v", err)
+				}
+				got, sibling := status.OllamaModels, status.LMStudioModels
+				if engine == "lmstudio" {
+					got, sibling = sibling, got
+				}
+				if !reflect.DeepEqual(got, want) || !reflect.DeepEqual(sibling, []string{"sibling"}) ||
+					status.ID != nodeID(entry) || status.Name != entry.Name || status.Address != entry.Address || status.HostUUID != "presence-owner" ||
+					!status.OllamaUp || !status.LMStudioUp || !status.NodeInfoUp || !status.TelemetryValid || status.MSSince != 7 {
+					t.Fatalf("status lost inventory presence, sibling or ordinary metadata: %+v", status)
+				}
+				var fields map[string]json.RawMessage
+				if err := json.Unmarshal(raw, &fields); err != nil {
+					t.Fatal(err)
+				}
+				_, present := fields[field]
+				if present != (want != nil) || fields[siblingField] == nil {
+					t.Fatalf("status wire lost observed presence: %s", raw)
+				}
+				if want != nil && len(want) == 0 && string(fields[field]) != "[]" {
+					t.Fatalf("known-empty inventory must be an array: %s", raw)
+				}
+			}
+			setBody(`{"models":`, `{"data":`)
+			m.probeAndDiscover(tn)
+			updated := readCaptureFrame(t, rw)
+			discovered := readCaptureFrame(t, rw)
+			if updated.Method != "node/updated" || discovered.Method != "node/discovered" {
+				t.Fatal("initial probe did not emit its ordinary status notifications")
+			}
+			assertPayload(t, updated.Params, nil)
+			assertPayload(t, discovered.Params, nil)
+			for _, phase := range []struct {
+				name, ollama, lmstudio string
+				want                  []string
+				changed               bool
+			}{
+				{"unknown repeat", `{"models":`, `{"data":`, nil, false},
+				{"successful empty", `{"models":[]}`, `{"data":[]}`, []string{}, true},
+				{"all invalid remains known empty", `{"models":[{"name":""}]}`, `{"data":[{"id":""}]}`, []string{}, false},
+				{"empty repeat", `{"models":[]}`, `{"data":[]}`, []string{}, false},
+				{"malformed returns unknown", `{"models":`, `{"data":`, nil, true},
+				{"unknown unchanged", `{"models":`, `{"data":`, nil, false},
+				{"populated order", `{"models":[{"name":"first"},{"name":"last"}]}`, `{"data":[{"id":"first"},{"id":"last"}]}`, []string{"first", "last"}, true},
+				{"populated repeat", `{"models":[{"name":"first"},{"name":"last"}]}`, `{"data":[{"id":"first"},{"id":"last"}]}`, []string{"first", "last"}, false},
+			} {
+				t.Run(phase.name, func(t *testing.T) {
+					setBody(phase.ollama, phase.lmstudio)
+					m.probeNode(tn)
+					if phase.changed {
+						frame := readCaptureFrame(t, rw)
+						if frame.Method != "node/updated" || !frame.IsNotification() {
+							t.Fatal("inventory transition did not emit the existing update notification")
+						}
+						assertPayload(t, frame.Params, phase.want)
+					}
+					// probeNode and its codec writes are synchronous; no polling is needed.
+					if len(rw.frames) != 0 {
+						t.Fatal("stable inventory or transition emitted an extra frame")
+					}
+					got := tn.status.OllamaModels
+					if engine == "lmstudio" {
+						got = tn.status.LMStudioModels
+					}
+					if !reflect.DeepEqual(got, phase.want) {
+						t.Fatalf("tracked inventory = %#v, want %#v", got, phase.want)
+					}
+					id := json.RawMessage(`304`)
+					m.handleMessage(&Message{JSONRPC: "2.0", ID: &id, Method: "nodes/list"})
+					response := readCaptureFrame(t, rw)
+					if response.Error != nil || !response.IsResponse() {
+						t.Fatal("ordinary nodes/list failed")
+					}
+					var result struct {
+						Nodes []json.RawMessage `json:"nodes"`
+					}
+					if err := json.Unmarshal(response.Result, &result); err != nil {
+						t.Fatal(err)
+					}
+					if len(result.Nodes) != 1 {
+						t.Fatalf("nodes/list returned %d nodes", len(result.Nodes))
+					}
+					assertPayload(t, result.Nodes[0], phase.want)
+				})
+			}
+		})
+	}
+}
+
+func TestModelControlsManualInventory(t *testing.T) {
+	ascii512 := strings.Repeat("a", 512)
+	cases := []struct {
+		name, token string
+		valid       bool
+	}{
+		{"empty", `""`, false},
+		{"missing", ``, false},
+		{"null", `null`, false},
+		{"raw invalid UTF8", "\"raw-" + string([]byte{0xff}) + "\"", false},
+		{"escaped NUL", `"bad\u0000model"`, false},
+		{"escaped C0 end", `"bad\u001fmodel"`, false},
+		{"escaped DEL", `"bad\u007fmodel"`, false},
+		{"escaped C1 start", `"bad\u0080model"`, false},
+		{"escaped C1 end", `"bad\u009fmodel"`, false},
+		{"ASCII 512 bytes", `"` + ascii512 + `"`, true},
+		{"ASCII 513 bytes", `"` + ascii512 + `a"`, false},
+		{"multibyte 512 bytes", `"` + strings.Repeat("界", 170) + `ab"`, true},
+		{"multibyte 513 bytes", `"` + strings.Repeat("界", 171) + `"`, false},
+		{"spaces tags slash and Unicode", `" model/日本語:tag "`, true},
+		{"valid replacement character", `"model\ufffd"`, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m, _, rt := newTestManager()
+			member := func(key string) string {
+				if tc.token == "" {
+					return `{}`
+				}
+				return `{"` + key + `":` + tc.token + `}`
+			}
+			rt.set(http.MethodGet, "fixture.invalid:24001", "/api/tags", func(*http.Request) (*http.Response, error) {
+				return httpJSON(http.StatusOK, `{"models":[{"name":"first"},`+member("name")+`,{"name":"last"}]}`)
+			})
+			rt.set(http.MethodGet, "fixture.invalid:24001", "/v1/models", func(*http.Request) (*http.Response, error) {
+				return httpJSON(http.StatusOK, `{"data":[{"id":"first"},`+member("id")+`,{"id":"last"}]}`)
+			})
+			want := []string{"first", "last"}
+			if tc.valid {
+				var model string
+				if err := json.Unmarshal([]byte(tc.token), &model); err != nil {
+					t.Fatalf("decode positive fixture: %v", err)
+				}
+				want = []string{"first", model, "last"}
+			}
+			if got := m.fetchOllamaModels("fixture.invalid", 24001); !reflect.DeepEqual(got, want) {
+				t.Fatal("Ollama inventory lost valid siblings/order or retained an invalid name")
+			}
+			up, got := m.probeLMStudio("fixture.invalid", 24001)
+			if !up || !reflect.DeepEqual(got, want) {
+				t.Fatal("LM Studio inventory lost liveness, valid siblings/order or retained an invalid ID")
+			}
+		})
+	}
+}
+
+func TestModelControlsManualKnownEmptyAndMalformed(t *testing.T) {
+	m, _, rt := newTestManager()
+	for _, tc := range []struct {
+		name, ollama, lmstudio string
+		knownEmpty             bool
+	}{
+		{"all invalid", `{"models":[{"name":""},{"name":"bad\u007f"}]}`, `{"data":[{"id":""},{"id":"bad\u0080"}]}`, true},
+		{"successful empty arrays", `{"models":[]}`, `{"data":[]}`, true},
+		{"nonstring identity", `{"models":[{"name":7}]}`, `{"data":[{"id":7}]}`, false},
+		{"malformed document", `{"models":[`, `{"data":[`, false},
+		{"trailing document", `{"models":[]} {}`, `{"data":[]} {}`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rt.set(http.MethodGet, "fixture.invalid:24001", "/api/tags", func(*http.Request) (*http.Response, error) {
+				return httpJSON(http.StatusOK, tc.ollama)
+			})
+			rt.set(http.MethodGet, "fixture.invalid:24001", "/v1/models", func(*http.Request) (*http.Response, error) {
+				return httpJSON(http.StatusOK, tc.lmstudio)
+			})
+			ollama := m.fetchOllamaModels("fixture.invalid", 24001)
+			up, lmstudio := m.probeLMStudio("fixture.invalid", 24001)
+			if !up || len(ollama) != 0 || len(lmstudio) != 0 || (ollama != nil) != tc.knownEmpty || (lmstudio != nil) != tc.knownEmpty {
+				t.Fatal("successful known-empty and malformed inventory were conflated or liveness changed")
+			}
+		})
+	}
+}
 
 type captureRW struct {
 	frames chan []byte
