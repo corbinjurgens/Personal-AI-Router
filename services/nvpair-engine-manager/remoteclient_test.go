@@ -46,7 +46,7 @@ func TestRemoteClientModelFilesUseOrdinaryHeaderBudget(t *testing.T) {
 		return err
 	})
 	test("download", func(ctx context.Context, client *remoteClient) error {
-		body, _, err := client.modelFile(ctx, "ollama", "tiny", "blobs/fixture", 0)
+		body, _, err := client.modelFile(ctx, "ollama", "tiny", "blobs/fixture", "", 0)
 		if body != nil {
 			err = errors.Join(err, body.Close())
 		}

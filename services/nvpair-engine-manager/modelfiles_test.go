@@ -242,7 +242,7 @@ func TestModelFileServesRanges(t *testing.T) {
 			rel = p
 		}
 	}
-	body, start, err := client.modelFile(context.Background(), "ollama", "tiny", rel, 4000)
+	body, start, err := client.modelFile(context.Background(), "ollama", "tiny", rel, "", 4000)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -251,7 +251,7 @@ func TestModelFileServesRanges(t *testing.T) {
 	if start != 4000 || string(got) != string(fx.blobs[rel][4000:]) {
 		t.Fatalf("ranged read started at %d with %d bytes, want the tail from 4000", start, len(got))
 	}
-	if _, _, err := client.modelFile(context.Background(), "ollama", "tiny", rel, 20000); err != errRangeNotSatisfiable {
+	if _, _, err := client.modelFile(context.Background(), "ollama", "tiny", rel, "", 20000); err != errRangeNotSatisfiable {
 		t.Fatalf("range past the end: err = %v, want errRangeNotSatisfiable", err)
 	}
 }

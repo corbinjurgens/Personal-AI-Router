@@ -618,20 +618,52 @@ first hash of a large model does not run into the 30-second response-header
 budget. `GET /v1/models/file` serves one file with `http.ServeContent`, so
 `Range` requests work. It only serves a path that is exactly one of the
 model's listed files; a malformed path (`..`, absolute, backslashes, drive
-letters) is a `400`, anything else not in the list is a `404`, and every listed
-file must resolve, after symlinks, inside the engine's store.
+letters) is a `400`, anything else not in the list is a `404`. For native
+layouts, every listed file must resolve, after symlinks, inside the engine's
+store; custom bindings use the exact local allowlist described below.
+
+Custom llama.cpp names are resolved separately from catalog identifiers. An
+exact configured native preset section supplies the local model and optional
+draft GGUF shards, in native order. Applied serving declarations must compile
+against their approved bindings and their asserted full SHA256 values must
+match streamed full-file hashes. Without a declaration, the same bounded preset
+parser and effective launch options select the exact section; relative paths
+are resolved against that preset. Projectors, adapters, includes and source URLs
+are explicitly refused on this custom path. Only these exact configured files
+may be exported outside `LLAMA_CACHE`; peers cannot provide host paths. A custom
+name with no unique binding is refused without guessing a Hugging Face repo.
+Committed custom-copy receipts can also supply an exact local binding. Different
+configured and receipt artifact sets for the same alias are ambiguous.
+
+Custom listings add `layout:"llama-artifacts-v1"`, `exportId`, and `role` on
+each file. Paths are synthetic `model/<GGUF basename>` and
+`draft/<GGUF basename>` entries; host paths and serving settings are absent.
+The export ID binds the exact model name and ordered role/path/size/full-SHA256
+manifest (canonical versioned JSON is specified beside `artifactExportID`). Each
+file GET must carry this `exportId`. The source re-resolves and checks the issued
+configuration and regular-file identity before opening the file. Source-local
+issued bindings are bounded; restart or eviction requires a fresh listing.
+Listing results are bounded to 1 MiB, artifact sets to 1024 entries and progress
+frames to 64 KiB independently of the stream's total length. Shared hashing
+waiters cancel independently; cancellation of a producer lets a live waiter
+retry under its own context.
 
 On the destination, the copy:
 
 1. Refuses an engine with no known layout, an engine that is not installed
    here, and a listing whose paths or hashes do not fit the engine's layout.
-2. Skips files already present with the listed size and sha256.
+2. Skips files already present with the listed size and sha256. Different
+   completed bytes are a conflict for every layout and are never overwritten.
+   Unsafe destination symlinks and Windows case/path collisions are refused.
 3. Refuses to start when the volume holding the store has less free space than
    the bytes still missing (net of partial downloads) plus 256 MiB.
 4. Downloads each missing file into `<final>.part` beside its final name,
    resuming an existing partial with an HTTP `Range` request. Partials are kept
    across retries and restarts. A download that receives nothing for 60
    seconds, or drops, is retried from where it stopped, up to five attempts.
+   Every attempt opens the partial through the store's rooted filesystem and
+   checks its regular-file identity before truncation or writes. Its pathname
+   and the renamed result must still identify the file whose bytes were hashed.
 5. Verifies the sha256 of the complete file, then renames it into place. A
    mismatch deletes the partial and fails the copy (after one fresh retry when
    the attempt had resumed an older partial).
@@ -648,6 +680,7 @@ render copy progress yet and ignores these frames.
 |---|---|---|---|
 | Ollama | `OLLAMA_MODELS` from the launch environment or this process, else `{models_dir}/models` (`~/.ollama/models`) | `blobs/sha256-*` named by the manifest, then `manifests/<host>/<namespace>/<name>/<tag>` | The manifest is written last, after checking every blob it names is in place. Ollama reads manifests on each listing, so no restart is needed |
 | llama.cpp | `LLAMA_CACHE` (the manifest sets `{models_dir}`, `~/.llamacpp`) | For `owner/repo:TAG`, the snapshot GGUF matching `TAG` with all its splits, plus the multimodal projector beside it, chosen as llama.cpp chooses them | Files go under the destination's existing snapshot for the repo, or the source's revision with `refs/main` written last. The first split goes last. A running router is asked to rescan (`GET /models?reload=1`) |
+| llama.cpp custom artifacts | `.pair-copies/<SHA256 of exact model ID>/<exportId>/` inside the destination's own store | Exact configured model and draft GGUF shards | Only the versioned alias-level `copy.json` receipt marks a completed bundle; native presets and inventory are not changed |
 | LM Studio | `{models_dir}` (`~/.lmstudio/models`) | The path `lms ls --json` gives for the model (a GGUF file plus any `mmproj` GGUF beside it, or an MLX directory). An id that matches several models by path prefix is refused | Same relative path. A running server is restarted afterwards, as for `delete_model`, because LM Studio indexes models at startup |
 
 Limits: one copy of a given model at a time per node. Ollama models named with
@@ -656,6 +689,23 @@ started outside PAIR may use a different `OLLAMA_MODELS` than this service
 resolves, and LM Studio's models root is the manifest's `models_dir`, not a
 custom folder chosen in LM Studio's settings. The destination's sha256 check
 catches a source file that changes during a copy.
+
+Custom bundles use the same identity-withdrawal guard, file locks, free-space,
+resume and full-hash checks. The receipt is published only after every artifact
+is verified. Interrupted bundles without a receipt remain resumable and are not
+completed copies. A different committed export for the same alias is a conflict;
+identical receipts are no-ops after file verification. No automatic deletion,
+native rescan, engine start, load or serving configuration follows custom COPY.
+
+The additive Go result carries `layout`, `exportId`, `requiresConfiguration:true`
+and `durability:"confirmed"|"uncertain"`. A replacement that landed but whose
+durability could not be confirmed is qualified completion, preserving the
+receipt and verified artifacts. Reading a previous receipt alone cannot establish
+durability, so an identical retry reports `uncertain`. Custom bundles need an
+explicit destination-owned serving setup before loading; receipts do not appear
+in `ModelsResult` or native `list_models`. Dedicated bridge/UI presentation of
+the setup requirement and durability qualification is separate work; these Go
+fields do not establish that presentation or serving readiness.
 
 ## CLI flags
 

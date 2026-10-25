@@ -16,6 +16,7 @@ package main
 // interrupted copy never leaves a half model the engine would try to load.
 
 import (
+	"bufio"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -48,12 +49,16 @@ type copyProgress struct {
 
 // copyModelResult is the engine:remote-copy-model result (under "result").
 type copyModelResult struct {
-	Engine       string `json:"engine"`
-	Model        string `json:"model"`
-	Files        int    `json:"files"`
-	FilesSkipped int    `json:"filesSkipped"`
-	BytesTotal   int64  `json:"bytesTotal"`
-	BytesCopied  int64  `json:"bytesCopied"`
+	Engine                string         `json:"engine"`
+	Model                 string         `json:"model"`
+	Files                 int            `json:"files"`
+	FilesSkipped          int            `json:"filesSkipped"`
+	BytesTotal            int64          `json:"bytesTotal"`
+	BytesCopied           int64          `json:"bytesCopied"`
+	Layout                string         `json:"layout,omitempty"`
+	ExportID              string         `json:"exportId,omitempty"`
+	Durability            copyDurability `json:"durability,omitempty"`
+	RequiresConfiguration bool           `json:"requiresConfiguration,omitempty"`
 }
 
 // modelFileSource is where a copy reads from: a peer's ec routes in production.
@@ -63,7 +68,7 @@ type modelFileSource interface {
 	modelFiles(ctx context.Context, engine, model string, onProgress func(streamFrame)) (modelFileList, error)
 	// modelFile opens one listed file from offset. start is the offset the body
 	// actually begins at: offset for a ranged reply, 0 for a full one.
-	modelFile(ctx context.Context, engine, model, path string, offset int64) (body io.ReadCloser, start int64, err error)
+	modelFile(ctx context.Context, engine, model, path, exportID string, offset int64) (body io.ReadCloser, start int64, err error)
 }
 
 var (
@@ -232,6 +237,13 @@ func (e *Executor) CopyModelFrom(ctx context.Context, src modelFileSource, engin
 	// engine's model identity before the first file is written.
 	var res copyModelResult
 	if err := e.withModelMutation(ctx, engine, func() error {
+		unlock := copyDestLocks.lock(plan.root + "\x00" + model)
+		defer unlock()
+		if plan.preflight != nil {
+			if err := plan.preflight(ctx); err != nil {
+				return err
+			}
+		}
 		var copyErr error
 		res, copyErr = runCopyPlan(ctx, src, engine, model, plan, emit)
 		if copyErr != nil {
@@ -242,7 +254,12 @@ func (e *Executor) CopyModelFrom(ctx context.Context, src modelFileSource, engin
 	}); err != nil {
 		return res, err
 	}
-	e.pokeLoaded()
+	if plan.layout != "" {
+		res.Layout, res.ExportID, res.RequiresConfiguration = plan.layout, plan.exportID, true
+		res.Durability = *plan.durability
+	} else {
+		e.pokeLoaded()
+	}
 	emit(copyProgress{
 		remoteProgress: remoteProgress{Stage: "done", Percent: 100},
 		BytesDone:      res.BytesTotal, BytesTotal: res.BytesTotal,
@@ -268,7 +285,7 @@ func runCopyPlan(ctx context.Context, src modelFileSource, engine, model string,
 		lastEmit = time.Now()
 		p := copyProgress{remoteProgress: remoteProgress{Stage: stage}, File: file, BytesDone: done, BytesTotal: res.BytesTotal}
 		if res.BytesTotal > 0 {
-			p.Percent = int(done * 100 / res.BytesTotal)
+			p.Percent = copyPercent(done, res.BytesTotal)
 		}
 		emit(p)
 	}
@@ -279,6 +296,11 @@ func runCopyPlan(ctx context.Context, src modelFileSource, engine, model string,
 	var needed int64
 	for i, f := range plan.files {
 		report("checking", f.Path, true)
+		if f.root != "" {
+			if err := safeCopyDestination(f.root, f.dest+".part"); err != nil {
+				return res, err
+			}
+		}
 		ok, err := destMatches(ctx, f)
 		if err != nil {
 			return res, err
@@ -326,6 +348,11 @@ func runCopyPlan(ctx context.Context, src modelFileSource, engine, model string,
 
 // destMatches reports whether f's destination already holds the listed content.
 func destMatches(ctx context.Context, f plannedFile) (bool, error) {
+	if f.root != "" {
+		if err := safeCopyDestination(f.root, f.dest); err != nil {
+			return false, err
+		}
+	}
 	info, err := os.Stat(f.dest)
 	if errors.Is(err, os.ErrNotExist) {
 		return false, nil
@@ -337,13 +364,16 @@ func destMatches(ctx context.Context, f plannedFile) (bool, error) {
 		return false, fmt.Errorf("%s is a directory on this node", f.dest)
 	}
 	if !info.Mode().IsRegular() || info.Size() != f.Size {
-		return false, nil
+		return false, fmt.Errorf("copy conflict: existing destination content differs for %s", f.Path)
 	}
 	sum, err := fileHashes.sum(ctx, f.dest, nil)
 	if err != nil {
 		return false, err
 	}
-	return sum == f.SHA256, nil
+	if sum != f.SHA256 {
+		return false, fmt.Errorf("copy conflict: existing destination content differs for %s", f.Path)
+	}
+	return true, nil
 }
 
 // checkFreeSpace refuses a copy that would leave less than the headroom free.
@@ -353,7 +383,7 @@ func checkFreeSpace(root string, needed int64) error {
 	if err != nil {
 		return fmt.Errorf("could not check free disk space at %s: %w", dir, err)
 	}
-	if want := needed + copyFreeSpaceHeadroom; free < uint64(want) {
+	if want := uint64(needed) + uint64(copyFreeSpaceHeadroom); free < want {
 		return fmt.Errorf("not enough free disk space on this node: the copy needs %s more and %s is free at %s (with %s kept in reserve)",
 			formatBytes(needed), formatBytes(int64(free)), dir, formatBytes(copyFreeSpaceHeadroom))
 	}
@@ -396,17 +426,36 @@ func downloadPlannedFile(ctx context.Context, src modelFileSource, engine, model
 	if ok, err := destMatches(ctx, f); err != nil || ok {
 		return 0, ok, err
 	}
-	if err := os.MkdirAll(filepath.Dir(f.dest), 0o755); err != nil {
+	if err := safeCopyDestination(f.root, f.dest+".part"); err != nil {
+		return 0, false, err
+	}
+	if err := os.MkdirAll(f.root, 0o755); err != nil {
+		return 0, false, err
+	}
+	root, err := os.OpenRoot(f.root)
+	if err != nil {
+		return 0, false, err
+	}
+	defer root.Close()
+	destRel, err := filepath.Rel(f.root, f.dest)
+	if err != nil {
+		return 0, false, err
+	}
+	if err := root.MkdirAll(filepath.Dir(destRel), 0o755); err != nil {
 		return 0, false, err
 	}
 	part := f.dest + ".part"
+	partRel := destRel + ".part"
 	retriedFresh := false
 	for attempt := 1; ; attempt++ {
-		sum, resumedFrom, n, err := fetchPart(ctx, src, engine, model, f, part, onBytes)
+		sum, resumedFrom, n, verified, err := fetchPart(ctx, src, engine, model, f, root, partRel, onBytes)
 		copied += n
 		if err == nil {
 			if sum != f.SHA256 {
-				_ = os.Remove(part)
+				if err := checkCopyPartial(root, partRel, verified); err != nil {
+					return copied, false, err
+				}
+				_ = root.Remove(partRel)
 				// A partial left by an earlier attempt may predate a change on
 				// the source; start over once before calling it a mismatch.
 				if resumedFrom > 0 && !retriedFresh {
@@ -415,12 +464,27 @@ func downloadPlannedFile(ctx context.Context, src modelFileSource, engine, model
 				}
 				return copied, false, fmt.Errorf("sha256 mismatch for %s: expected %s, got %s; the download was discarded", f.Path, f.SHA256, sum)
 			}
+			if err := checkCopyPartial(root, partRel, verified); err != nil {
+				return copied, false, err
+			}
 			if f.check != nil {
 				if err := f.check(part); err != nil {
 					return copied, false, fmt.Errorf("%s: %w", f.Path, err)
 				}
 			}
-			if err := os.Rename(part, f.dest); err != nil {
+			if ok, err := destMatches(ctx, f); err != nil || ok {
+				return copied, ok, err
+			}
+			if err := checkCopyPartial(root, partRel, verified); err != nil {
+				return copied, false, err
+			}
+			if err := root.Rename(partRel, destRel); err != nil {
+				return copied, false, err
+			}
+			// Rename operates on names. Recheck its actual result as well as
+			// the source name so a concurrent path swap cannot become a verified
+			// completed file or a custom publication receipt.
+			if err := checkCopyPartial(root, destRel, verified); err != nil {
 				return copied, false, err
 			}
 			fileHashes.remember(f.dest, sum)
@@ -440,23 +504,50 @@ func downloadPlannedFile(ctx context.Context, src modelFileSource, engine, model
 	}
 }
 
+func checkCopyPartial(root *os.Root, name string, verified os.FileInfo) error {
+	info, err := root.Lstat(name)
+	if err != nil || !sameCopyFile(info, verified) {
+		return permanentCopyError{fmt.Errorf("copy partial pathname or regular-file identity changed")}
+	}
+	return nil
+}
+
 // fetchPart makes one attempt at completing part from wherever it stands, and
 // returns the sha256 of the whole file, the offset it resumed from, and the
 // bytes it fetched.
-func fetchPart(ctx context.Context, src modelFileSource, engine, model string, f plannedFile, part string, onBytes func(int64)) (sum string, resumedFrom, fetched int64, err error) {
-	fh, err := os.OpenFile(part, os.O_RDWR|os.O_CREATE, 0o644)
+func fetchPart(ctx context.Context, src modelFileSource, engine, model string, f plannedFile, root *os.Root, part string, onBytes func(int64)) (sum string, resumedFrom, fetched int64, verified os.FileInfo, err error) {
+	// Repeat containment and type checks on every attempt, including retries.
+	// Root.OpenFile confines symlink traversal during the open itself; none of
+	// the subsequent truncation or writes can follow an escaping path swap.
+	if err := safeCopyDestination(f.root, filepath.Join(f.root, part)); err != nil {
+		return "", 0, 0, nil, permanentCopyError{err}
+	}
+	before, err := root.Lstat(part)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return "", 0, 0, nil, permanentCopyError{err}
+	}
+	if err == nil && !before.Mode().IsRegular() {
+		return "", 0, 0, nil, permanentCopyError{fmt.Errorf("copy partial must be a regular file")}
+	}
+	fh, err := root.OpenFile(part, os.O_RDWR|os.O_CREATE, 0o644)
 	if err != nil {
-		return "", 0, 0, permanentCopyError{err}
+		return "", 0, 0, nil, permanentCopyError{err}
 	}
 	defer fh.Close()
 	info, err := fh.Stat()
 	if err != nil {
-		return "", 0, 0, err
+		return "", 0, 0, nil, err
+	}
+	if err := checkCopyPartial(root, part, info); err != nil {
+		return "", 0, 0, nil, err
+	}
+	if before != nil && !os.SameFile(before, info) {
+		return "", 0, 0, nil, permanentCopyError{fmt.Errorf("copy partial changed while opening")}
 	}
 	offset := info.Size()
 	if offset > f.Size {
 		if err := fh.Truncate(0); err != nil {
-			return "", 0, 0, err
+			return "", 0, 0, nil, err
 		}
 		offset = 0
 	}
@@ -465,7 +556,7 @@ func fetchPart(ctx context.Context, src modelFileSource, engine, model string, f
 	h := sha256.New()
 	if offset > 0 {
 		if _, err := copyWithContext(ctx, h, io.NewSectionReader(fh, 0, offset), nil); err != nil {
-			return "", offset, 0, err
+			return "", offset, 0, nil, err
 		}
 		onBytes(offset)
 	}
@@ -473,20 +564,27 @@ func fetchPart(ctx context.Context, src modelFileSource, engine, model string, f
 		n, err := fetchRange(ctx, src, engine, model, f, fh, h, offset, onBytes)
 		fetched = n
 		if err != nil {
-			return "", offset, fetched, err
+			return "", offset, fetched, nil, err
 		}
 	}
 	if err := fh.Sync(); err != nil {
-		return "", offset, fetched, err
+		return "", offset, fetched, nil, err
 	}
-	return hex.EncodeToString(h.Sum(nil)), offset, fetched, nil
+	verified, err = fh.Stat()
+	if err != nil {
+		return "", offset, fetched, nil, err
+	}
+	if err := checkCopyPartial(root, part, verified); err != nil {
+		return "", offset, fetched, nil, err
+	}
+	return hex.EncodeToString(h.Sum(nil)), offset, fetched, verified, nil
 }
 
 // fetchRange downloads f from offset into fh (positioned by WriteAt), feeding h.
 func fetchRange(ctx context.Context, src modelFileSource, engine, model string, f plannedFile, fh *os.File, h io.Writer, offset int64, onBytes func(int64)) (int64, error) {
 	attemptCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	body, start, err := src.modelFile(attemptCtx, engine, model, f.Path, offset)
+	body, start, err := src.modelFile(attemptCtx, engine, model, f.Path, f.exportID, offset)
 	if errors.Is(err, errRangeNotSatisfiable) {
 		_ = fh.Truncate(0)
 		return 0, err
@@ -564,10 +662,14 @@ func (c *remoteClient) modelFiles(ctx context.Context, engine, model string, onP
 		data, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
 		return modelFileList{}, fmt.Errorf("HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(data)))
 	}
-	dec := json.NewDecoder(resp.Body)
+	reader := bufio.NewReaderSize(resp.Body, 64<<10)
 	for {
+		line, err := readCopyFrame(reader)
+		if err != nil {
+			return modelFileList{}, fmt.Errorf("decode listing frame: %w", err)
+		}
 		var f streamFrame
-		if err := dec.Decode(&f); err != nil {
+		if err := json.Unmarshal(line, &f); err != nil {
 			if err == io.EOF {
 				return modelFileList{}, fmt.Errorf("the listing ended without a result")
 			}
@@ -575,14 +677,20 @@ func (c *remoteClient) modelFiles(ctx context.Context, engine, model string, onP
 		}
 		switch f.Type {
 		case "progress":
+			if len(line) > maxCopyProgressFrame {
+				return modelFileList{}, fmt.Errorf("copy progress frame exceeds bounds")
+			}
 			if onProgress != nil {
 				onProgress(f)
 			}
 		case "error":
 			return modelFileList{}, fmt.Errorf("%s", f.Message)
 		case "result":
-			var list modelFileList
-			if err := json.Unmarshal(f.Result, &list); err != nil {
+			if len(f.Result) > maxCopyManifest {
+				return modelFileList{}, fmt.Errorf("copy manifest exceeds bounds")
+			}
+			list, err := decodeCopyManifest(f.Result)
+			if err != nil {
 				return modelFileList{}, fmt.Errorf("decode listing: %w", err)
 			}
 			return list, nil
@@ -591,12 +699,15 @@ func (c *remoteClient) modelFiles(ctx context.Context, engine, model string, onP
 }
 
 // modelFile implements modelFileSource over a peer's GET /v1/models/file.
-func (c *remoteClient) modelFile(ctx context.Context, engine, model, path string, offset int64) (io.ReadCloser, int64, error) {
+func (c *remoteClient) modelFile(ctx context.Context, engine, model, path, exportID string, offset int64) (io.ReadCloser, int64, error) {
 	if err := nodepolicy.ValidateModelIdentifier(model); err != nil {
 		return nil, 0, err
 	}
 	q := modelQueryValues(engine, model)
 	q.Set("path", path)
+	if exportID != "" {
+		q.Set("exportId", exportID)
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.base+controlModelFilePath+"?"+q.Encode(), nil)
 	if err != nil {
 		return nil, 0, err

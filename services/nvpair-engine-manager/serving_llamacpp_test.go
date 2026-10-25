@@ -37,6 +37,69 @@ type llamaServingFixture struct {
 	root     string
 }
 
+func TestModelCopyCustomAliasServingBinding(t *testing.T) {
+	test := func(name string, edit func(*testing.T, llamaServingFixture), wantError bool) {
+		t.Run(name, func(t *testing.T) {
+			f := newLlamaServingFixture(t)
+			settingsState(t, f.ex).modelsDir = t.TempDir()
+			for i := range f.request.Settings.Serving.Models {
+				model := &f.request.Settings.Serving.Models[i]
+				data, err := os.ReadFile(filepath.Join(f.root, model.ModelID+".gguf"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				model.Artifacts[0].SHA256 = sha256Hex(data)
+			}
+			applyLlamaServing(t, f, approveLlamaServing(t, f))
+			edit(t, f)
+			list, err := f.ex.modelSourceFiles(context.Background(), "fake", "medium")
+			if err == nil {
+				err = hashModelFiles(context.Background(), &list, func(string, int) {})
+			}
+			if (err != nil) != wantError {
+				t.Fatalf("list=%+v err=%v", list, err)
+			}
+			if err != nil && strings.Contains(err.Error(), f.root) {
+				t.Fatal("binding refusal disclosed host path")
+			}
+			assertNoLlamaSpawn(t, f)
+		})
+	}
+	test("applied exact declaration exports full asserted hashes", func(*testing.T, llamaServingFixture) {}, false)
+	test("declaration preset disagreement refuses instead of catalog fallback", func(t *testing.T, f llamaServingFixture) {
+		data, err := os.ReadFile(f.source)
+		if err != nil {
+			t.Fatal(err)
+		}
+		writeServingFixture(t, f.source, []byte(strings.Replace(string(data), "model = medium.gguf", "model = weak.gguf", 1)))
+	}, true)
+	test("approved binding change refuses export", func(t *testing.T, f llamaServingFixture) {
+		writeServingFixture(t, filepath.Join(f.root, "medium.gguf"), []byte("replaced model"))
+	}, true)
+	test("changed asserted digest invalidates approved declaration", func(t *testing.T, f llamaServingFixture) {
+		st := settingsState(t, f.ex)
+		st.mu.Lock()
+		st.plat.Runtime.Serving.Models[0].Artifacts[0].SHA256 = strings.Repeat("a", 64)
+		st.mu.Unlock()
+	}, true)
+	t.Run("sample binding is never used as a full hash", func(t *testing.T) {
+		f := newLlamaServingFixture(t)
+		settingsState(t, f.ex).modelsDir = t.TempDir()
+		// The original fixture deliberately asserts a synthetic full digest.
+		// Apply binds the actual samples, but must not turn that into a full hash.
+		applyLlamaServing(t, f, approveLlamaServing(t, f))
+		list, err := f.ex.modelSourceFiles(context.Background(), "fake", "medium")
+		if err != nil {
+			t.Fatal(err)
+		}
+		err = hashModelFiles(context.Background(), &list, func(string, int) {})
+		if err == nil || !strings.Contains(err.Error(), "full SHA256 disagrees") {
+			t.Fatalf("full assertion mismatch=%v", err)
+		}
+		assertNoLlamaSpawn(t, f)
+	})
+}
+
 func TestLlamaServingRetentionContract(t *testing.T) {
 	for _, location := range []string{"global preset", "model preset", "CLI", "environment"} {
 		t.Run(location, func(t *testing.T) {

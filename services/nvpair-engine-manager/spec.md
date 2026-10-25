@@ -889,10 +889,71 @@ The `engine:remote-*` methods are the client half: engine-manager resolves the t
   interrupted file attempt ends; the copy owner issues a new Range request and
   verifies the final hash under the transfer rules below.
 
-- **Source listing.** `GET /v1/models/files` resolves exactly the model's files from the engine's on-disk layout, as slash-separated paths relative to the engine's store, with size and sha256. Hashes are computed lazily by streaming the file and cached by absolute path, size and mtime; a file named by its sha256 (Ollama blobs, llama.cpp LFS blobs behind snapshot links) uses that name. Every listed file must resolve, after symlinks, to a regular file inside the store.
+- **Source listing.** `GET /v1/models/files` resolves exactly the model's files from the engine's on-disk layout, as slash-separated paths relative to the engine's store, with size and sha256. Hashes are computed lazily by streaming the file and cached by absolute path, size and mtime; a file named by its sha256 (Ollama blobs, llama.cpp LFS blobs behind snapshot links) uses that name. Native-layout files must resolve, after symlinks, to regular files inside the store; custom artifacts use the exact local bindings below.
 - **Source serving.** `GET /v1/models/file` serves a path only when it is exactly one of the model's listed files (`400` for a malformed path, `404` otherwise), through `http.ServeContent` for Range support.
+- **Custom llama.cpp identity.** Before interpreting an ID as an HF locator,
+  resolve exact configured preset/serving candidates and committed copy receipts.
+  Applied declarations must compile against the snapshot of the effective launch
+  configuration and approved artifact bindings; compilation and binding I/O run
+  outside lifecycle/state locks, followed by a snapshot recheck. Undeclared
+  presets use the same parser and effective launch-option precedence, resolving
+  relative paths against the preset. Export all consumed model then draft GGUF
+  shards, in native order. Unknown/ambiguous bindings, declaration/preset drift,
+  missing shards, projectors, adapters, includes and remote-source options are
+  refused without falling back to catalog interpretation. External files are
+  authorized only by these exact local bindings, never peer-provided paths.
+- **Custom export protocol.** A custom listing adds
+  `layout:"llama-artifacts-v1"`, `exportId` and per-file `role:"model"|"draft"`.
+  Synthetic paths are `model/<basename>` or `draft/<basename>`. The export ID is
+  SHA256 of version-1 canonical JSON containing the exact requested ModelID and
+  ordered role/path/size/full-SHA256 tuples; the serialization is normative in
+  `artifactExportID`. Sampled serving-binding hashes never substitute for full
+  file hashes, and asserted full serving hashes must match. GET adds
+  `exportId` and checks the source's issued binding snapshot, current manifest,
+  symlink-resolved identity and the opened regular file. A source restart or
+  bounded issuance-cache eviction requires relisting; unchanged listings retain
+  their binding. Neither host paths nor launch/serving configuration is exported.
+- **Bounds and cancellation.** Listing manifests are at most 1 MiB; progress
+  frames are at most 64 KiB each, with no cumulative hash-stream byte limit.
+  Result frames exceeding 64 KiB use the canonical stream envelope with `type`
+  first. Artifact arrays are decoded incrementally and limited to 1024 entries;
+  source shard enumeration refuses excessive counts before allocation. Sizes
+  and totals are nonnegative and checked for overflow. Duplicate, Windows-unsafe
+  and case-fold-colliding paths are refused. A shared hash waiter observes its own
+  cancellation immediately; a producer cancellation causes a live waiter to
+  re-stat and retry in the same cache under its own context, while ordinary I/O
+  failures are propagated. Successful full hashes remain reusable.
 - **Refusals before downloading.** An engine without a known layout, an engine not installed on the destination, a listing whose paths, hashes or shape do not fit the layout, and a volume with less free space than the missing bytes (net of partials) plus 256 MiB.
 - **Transfer.** Each missing file is downloaded to `<final>.part`, resumed with `Range` after an interruption or stall (60 s without data; up to five attempts per run), and partials survive across runs. The complete file's sha256 must match before an atomic rename; a mismatch deletes the partial and fails, after one fresh retry if the attempt resumed an older partial. Files already present with a matching hash are skipped.
+- **Conflicts and containment.** A differing completed destination file is a
+  conflict in every layout. Check all files before writes and recheck under the
+  writer locks, including before rename. Destination lexical and resolved
+  containment, pre-existing symlinks and case collisions are checked; escaping
+  locations and unsafe partial paths are refused. The model content mutation
+  guard and broker identity-withdrawal acknowledgement remain mandatory.
+  Each partial open, including retries, is confined through `os.Root` and
+  validated as the same regular file before truncation/writes. Check the verified
+  partial identity before and after the rooted rename; path swaps cannot qualify
+  a completed file or custom receipt.
+- **Custom publication.** Import into the destination-owned
+  `.pair-copies/<SHA256-of-exact-ModelID>/<exportId>/` tree. The raw alias is
+  metadata, not a filesystem path. Publish versioned alias-level `copy.json`
+  only after all artifact hashes verify, through the durable file replacer. The
+  receipt records engine, exact alias, layout, export identity and relative
+  artifact metadata; it contains no source paths or serving claims. A different
+  committed alias receipt is a conflict. An identical receipt is a no-op after
+  verification; reading it cannot establish earlier durability. Uncommitted
+  partial bundles are resumable but unavailable as completed copies. No garbage
+  collection, native preset mutation, rescan/start/load or fake native inventory
+  entry is added.
+- **Custom terminal result.** Add `layout`, `exportId`,
+  `requiresConfiguration:true` and typed `durability` (`confirmed` or
+  `uncertain`) to `copyModelResult`. Adopt a landed-but-uncertain receipt as
+  qualified completion; pre-replacement failures remain failures. An identical
+  verified receipt reports `uncertain` because its earlier durability is unknown.
+  Legacy layout results retain their original meaning. This Go contract alone
+  does not provide dedicated bridge/UI qualification display; custom artifact
+  completion is separate from destination serving configuration and readiness.
 - **Visibility.** The file that makes the model visible is written last: Ollama's manifest (after checking that every blob it names is present), llama.cpp's first GGUF split and then `refs/main` when the repo was not cached before, followed by `GET /models?reload=1` on a running router; LM Studio's model GGUF, followed by a restart of a running server (the `restart_after` path, since LM Studio indexes at startup).
 - **Progress.** `engine:remote-progress` with `op:"copy"` and `node` = the source: `listing`, `hashing` (relayed, with `file`), `checking`, `downloading` (`file`, `bytesDone`, `bytesTotal`, `percent` over the whole model), `finalizing`, then `done` (`percent:100`) or `error` (`percent:-1`).
 
