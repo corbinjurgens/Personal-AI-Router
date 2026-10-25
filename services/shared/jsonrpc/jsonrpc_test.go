@@ -20,6 +20,8 @@ import (
 	"testing/synctest"
 	"time"
 	"unsafe"
+
+	"nvpair-shared/pipeio"
 )
 
 // rw adapts a separate reader and writer into an io.ReadWriter for NewCodec.
@@ -911,7 +913,11 @@ func TestReadRetirementOSPipeInterrupt(t *testing.T) {
 	}
 	var closeOnce sync.Once
 	closeErrors := make(chan error, 1)
-	closeInput := func() { closeOnce.Do(func() { closeErrors <- input.Close() }) }
+	owned, err := pipeio.NewReader(input)
+	if err != nil {
+		t.Fatalf("own OS pipe reader: %v", err)
+	}
+	closeInput := func() { closeOnce.Do(func() { closeErrors <- owned.Close() }) }
 	t.Cleanup(func() {
 		// Closing the writer first also unblocks a read if interruption failed.
 		// This is failure cleanup, not evidence that retirement interrupted it.
@@ -920,7 +926,7 @@ func TestReadRetirementOSPipeInterrupt(t *testing.T) {
 		}
 		closeInput()
 	})
-	r := &readRetirementObservedReader{Reader: input, entered: make(chan struct{})}
+	r := &readRetirementObservedReader{Reader: owned, entered: make(chan struct{})}
 	c := newReadRetirementCodec(t, rw{r, io.Discard}, newReadRetirementBacking(), &HistoryCorrelation{}, closeInput)
 	reader := c.history.Load()
 	readDone := make(chan error, 1)

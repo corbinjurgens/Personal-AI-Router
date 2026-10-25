@@ -12,6 +12,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"os"
 	"reflect"
 	"strconv"
 	"strings"
@@ -22,6 +23,7 @@ import (
 	"nvpair-shared/engines"
 	"nvpair-shared/jsonrpc"
 	"nvpair-shared/nodepolicy"
+	"nvpair-shared/pipeio"
 )
 
 const (
@@ -1411,6 +1413,13 @@ func (p *proxyProcess) attachRoutingHistoryPeer(b *Broker, rw io.ReadWriter, int
 func (p *proxyProcess) attachRoutingHistoryProxyPipe(b *Broker, stdout io.ReadCloser) error {
 	if stdout == nil || p.stdin == nil {
 		return jsonrpc.ErrHistoryInvalid
+	}
+	if file, ok := stdout.(*os.File); ok {
+		owned, err := pipeio.NewReader(file)
+		if err != nil {
+			return err
+		}
+		stdout = owned
 	}
 	return p.attachRoutingHistoryPeer(b, readWriter{stdout, p.stdin}, func() { _ = stdout.Close() })
 }
