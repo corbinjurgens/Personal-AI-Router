@@ -21,6 +21,11 @@ with bounded offsets and output scratch. Generated history calls use a disjoint
 `jh:` ordinal namespace; stale responses cannot resolve a later call. Invalid
 history quarantines/refetches history on the same connection without failing
 ordinary calls. Physical overflow closes through the existing reconnect owner.
+History request refusals have one outstanding reply slot, retained until the
+native write callback completes. Another history request requiring a refusal
+while that slot is occupied is a protocol violation: the client closes and
+reconnects through the same owner. Refusals never form an output backlog ahead
+of ordinary calls.
 
 The main history owner coalesces accepted records into packed bounded banks.
 History data bypasses ordinary push fanout and reaches a renderer only through

@@ -181,6 +181,7 @@ export class JsonRpcSocketClient extends EventEmitter<JsonRpcClientEvents> {
     private pending = new Map<number, PendingCall>()
     private nextId = 0
     private writeTail: Promise<void> = Promise.resolve()
+    private refusalBusy = false
     private traceProtocol = false
     private rawFrame: Uint8Array | null = null
     private readonly historyProjector = getRoutingJsonProjector()
@@ -405,6 +406,9 @@ export class JsonRpcSocketClient extends EventEmitter<JsonRpcClientEvents> {
 
     private attach(socket: Duplex, epoch: number): void {
         this.socket = socket
+        // A replacement must not wait for callbacks on the retired transport.
+        // Its queued ordinary writes still check their original socket below.
+        this.writeTail = Promise.resolve()
         this.rawFrame = new Uint8Array(ROUTING_FRAME_BYTES)
         this.rawLength = 0
         this.historyIssued = 0n
@@ -495,12 +499,21 @@ export class JsonRpcSocketClient extends EventEmitter<JsonRpcClientEvents> {
         if (selected.kind === 'refuse') {
             const socket = this.socket
             if (!socket) return
+            if (this.refusalBusy) {
+                socket.destroy()
+                return
+            }
+            this.refusalBusy = true
             const id = new TextDecoder().decode(selected.id)
             const frame = `{"jsonrpc":"2.0","id":${id},"error":{"code":${selected.code},"message":"${selected.message}"}}\n`
-            // A fixed E-sized refusal is an ordinary RPC reply, copied before
-            // this raw lease ends. It follows the pre-existing ordinary writer;
-            // no history output bank, refusal queue or per-ID state is added.
-            void this.writeFrame(socket, frame).catch(() => {})
+            // One E-bounded native write, reserved before copying the raw ID.
+            // Stream writes preserve frame order without a refusal Promise
+            // backlog. Only its actual callback releases the reservation,
+            // including across connection replacement.
+            socket.write(frame, error => {
+                this.refusalBusy = false
+                if (error && this.socket === socket) socket.destroy()
+            })
             return
         }
         if (selected.kind === 'quarantine') {
@@ -588,6 +601,10 @@ export class JsonRpcSocketClient extends EventEmitter<JsonRpcClientEvents> {
         this.writeTail = this.writeTail.then(
             () =>
                 new Promise<void>((resolve, reject) => {
+                    if (socket !== this.socket || socket.destroyed) {
+                        reject(new Error(`${this.name} connection closed before writing`))
+                        return
+                    }
                     socket.write(
                         typeof frame === 'string' ? frame : `${JSON.stringify(frame)}\n`,
                         err => {

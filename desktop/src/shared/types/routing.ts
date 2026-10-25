@@ -67,7 +67,7 @@ export type RoutingHistoryReason =
 
 export interface RoutingHistoryDestination {
     kind: 'local' | 'api'
-    model: string
+    model: string | null
     nodeId: string | null
     engine: string | null
     deploymentId: string | null
@@ -227,7 +227,7 @@ const destinationShape: RoutingHistoryShape = {
     kind: 'object',
     fields: [
         ['kind', { kind: 'string', limit: 5, enum: 'destination' }],
-        ['model', text],
+        ['model', { ...text, nullable: true }],
         ['nodeId', nullableText],
         ['engine', nullableText],
         ['deploymentId', nullableText],
@@ -479,7 +479,7 @@ function status(value: JsonValue | undefined): number | null {
 function destination(value: JsonValue | undefined): { [key: string]: JsonValue } {
     const v = object(value)
     const kind = choice(v.kind, ['local', 'api'])
-    model(v.model, false)
+    if (kind !== 'local' || v.model !== null) model(v.model, false)
     if (kind === 'local') {
         id(v.nodeId)
         id(v.engine)
@@ -582,12 +582,16 @@ function validRecord(value: JsonValue | RoutingHistoryRecord): value is RoutingH
     decimal(k.requestId, true)
     model(
         q.model,
-        attempts.length === 0 &&
-            droppedAttempts === 0 &&
-            workload === null &&
-            v.served === null &&
-            state !== 'completed' &&
-            state !== 'streaming'
+        attempts.some(value => {
+            const d = object(object(value).destination)
+            return d.kind === 'local' && d.model === null
+        }) ||
+            (attempts.length === 0 &&
+                droppedAttempts === 0 &&
+                workload === null &&
+                v.served === null &&
+                state !== 'completed' &&
+                state !== 'streaming')
     )
     choice(q.tier, ['', 'weak', 'medium', 'strong'])
     choice(q.mode, ['chat', 'completion', 'embedding', 'other'])

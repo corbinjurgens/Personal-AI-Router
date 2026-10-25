@@ -27,6 +27,7 @@ interface Frame {
     id?: number | string
     method?: string
     params?: object
+    error?: { code: number; message: string }
 }
 
 /** A stand-in for nvpair-service: records what clients send and answers requests. */
@@ -120,6 +121,119 @@ class MemoryService extends Duplex {
 }
 
 describe('JsonRpcSocketClient history ingress', () => {
+    it('keeps one refusal reserved through its write and lets the next ordinary call follow it', async () => {
+        const service = new MemoryService()
+        const client = new JsonRpcSocketClient(
+            'broker',
+            async () => service,
+            [],
+            async () => service
+        )
+        const turn = () => new Promise<void>(resolve => setImmediate(resolve))
+        try {
+            client.start()
+            await Promise.resolve()
+            service.blockedWrite = true
+            service.push(
+                '{"jsonrpc":"2.0","id":"private-1","method":"routing/request","params":{}}\n'
+            )
+            await turn()
+            expect(service.received).toEqual([
+                {
+                    jsonrpc: '2.0',
+                    id: 'private-1',
+                    error: { code: -32601, message: 'method not found' }
+                }
+            ])
+            const ordinary = client.call('echo', { marker: 'after' })
+            await turn()
+            expect(service.received).toHaveLength(1)
+            expect(service.writableLength).toBeLessThanOrEqual(4096 + 128)
+            service.releaseWrite()
+            await turn()
+            expect(service.received.map(frame => frame.method ?? frame.error?.code)).toEqual([
+                -32601,
+                'echo'
+            ])
+            service.reply(1, { ok: true })
+            await expect(ordinary).resolves.toEqual({ ok: true })
+            service.push(
+                '{"jsonrpc":"2.0","id":"private-2","method":"routing/request","params":{}}\n'
+            )
+            await turn()
+            expect(service.received.at(-1)?.id).toBe('private-2')
+            expect(client.running).toBe(true)
+        } finally {
+            service.releaseWrite()
+            await client.detach()
+        }
+    })
+
+    it('resets a pinned connection on a refusal flood and reconnects without an ordinary output backlog', async () => {
+        vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+        const first = new MemoryService(),
+            replacement = new MemoryService()
+        const connect = vi
+            .fn<() => Promise<Duplex>>()
+            .mockResolvedValueOnce(first)
+            .mockResolvedValueOnce(replacement)
+        const client = new JsonRpcSocketClient('broker', connect, [1], async () => replacement)
+        const disconnected = vi.fn<() => void>()
+        client.on('disconnected', disconnected)
+        const turn = () => new Promise<void>(resolve => setImmediate(resolve))
+        try {
+            client.start()
+            await Promise.resolve()
+            first.blockedWrite = true
+            const before = expect(client.call('echo', { marker: 'before' })).rejects.toThrow(
+                'connection closed before replying'
+            )
+            await turn()
+            const originalBytes = first.writableLength
+            first.push(
+                Array.from(
+                    { length: 1000 },
+                    (_, index) =>
+                        JSON.stringify({
+                            jsonrpc: '2.0',
+                            id: `private-${index}`,
+                            method: 'routing/request',
+                            params: {}
+                        }) + '\n'
+                ).join('')
+            )
+            await turn()
+            await before
+            expect(first.destroyed).toBe(true)
+            expect(disconnected).toHaveBeenCalledOnce()
+            expect(first.received).toHaveLength(1)
+            expect(first.writableLength).toBeLessThanOrEqual(originalBytes + 4096)
+            await expect(client.call('echo', { marker: 'after-flood' })).rejects.toThrow(
+                'not running'
+            )
+            await vi.advanceTimersByTimeAsync(1)
+            expect(connect).toHaveBeenCalledTimes(2)
+            // The old native callback is still pinned; it cannot block this transport.
+            const ordinary = client.call('echo', { marker: 'replacement' })
+            await turn()
+            expect(replacement.received).toMatchObject([
+                { method: 'echo', params: { marker: 'replacement' } }
+            ])
+            const id = replacement.received[0]?.id
+            if (id === undefined) throw new Error('missing replacement request ID')
+            replacement.reply(id, { ok: true })
+            await expect(ordinary).resolves.toEqual({ ok: true })
+            first.releaseWrite()
+            await turn()
+            expect(first.received.filter(frame => frame.error)).toHaveLength(0)
+            expect(first.received).toHaveLength(1)
+        } finally {
+            first.releaseWrite()
+            await client.detach()
+            vi.useRealTimers()
+        }
+    })
+
     it('pins its actual control write after logical cancellation while ordinary input still resolves', async () => {
         const service = new MemoryService()
         const client = new JsonRpcSocketClient(

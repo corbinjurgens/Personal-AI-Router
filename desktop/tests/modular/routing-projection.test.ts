@@ -24,6 +24,14 @@ const corpus: Corpus = JSON.parse(
     )
 )
 
+function modelLessLocalRecord(): RoutingHistoryRecord {
+    const record: RoutingHistoryRecord = JSON.parse(JSON.stringify(corpus.cases[0].record))
+    for (const attempt of record.attempts) attempt.destination.model = null
+    if (record.served) record.served.model = null
+    record.requested.model = ''
+    return record
+}
+
 function altered(
     caseIndex: number,
     pathParts: readonly string[],
@@ -103,6 +111,90 @@ const requiredPaths = [
 ]
 
 describe('routing history schema parity', () => {
+    it('projects a model-less local record without losing its real node and engine', () => {
+        const record = modelLessLocalRecord()
+        const raw = new TextEncoder().encode(JSON.stringify(record))
+        const projected = new RoutingJsonProjector().record(raw)
+        consumeRoutingHistoryRecord(projected, value => {
+            expect(value).toEqual(record)
+            expect(value.attempts[0].destination).toMatchObject({
+                model: null,
+                nodeId: 'synthetic-busy',
+                engine: 'llamacpp'
+            })
+            return undefined
+        })
+    })
+
+    it('accepts a model-less record alongside other rows in initial projection and correlation', () => {
+        const initial = { requests: [modelLessLocalRecord(), corpus.cases[1].record] }
+        const raw = new TextEncoder().encode(JSON.stringify(initial))
+        const projector = new RoutingJsonProjector()
+        expect(JSON.parse(new TextDecoder().decode(projector.initial(raw)))).toEqual(initial)
+        const response = projector.frame(
+            new TextEncoder().encode(
+                JSON.stringify({ jsonrpc: '2.0', id: 'jh:1', result: initial })
+            ),
+            1n,
+            1n
+        )
+        if (response.kind !== 'response') throw new Error('expected a guarded initial response')
+        expect(JSON.parse(new TextDecoder().decode(response.value))).toEqual(initial)
+    })
+
+    it('preserves null models through the packed bank and IPC packet representation', () => {
+        const record = modelLessLocalRecord(),
+            main = new RoutingHistoryBank(),
+            renderer = new RoutingHistoryBank()
+        expect(main.apply(new TextEncoder().encode(JSON.stringify(record)))).toBe(true)
+        expect(renderer.applyPacked(main.at(0).slice())).toBe(true)
+        expect(
+            renderer.consume(0, value => {
+                expect(value).toEqual(record)
+                return undefined
+            })
+        ).toBe(true)
+    })
+
+    it.each([0, 1])('rejects an empty non-null destination model in corpus case %i', index => {
+        expect(() =>
+            new RoutingJsonProjector().record(
+                altered(index, ['attempts', '0', 'destination', 'model'], '')
+            )
+        ).toThrow('invalid-value')
+    })
+
+    it('rejects an empty served model', () => {
+        expect(() =>
+            new RoutingJsonProjector().record(altered(0, ['served', 'model'], ''))
+        ).toThrow('invalid-value')
+    })
+
+    it('rejects a null API destination model', () => {
+        expect(() =>
+            new RoutingJsonProjector().record(
+                altered(1, ['attempts', '0', 'destination', 'model'], null)
+            )
+        ).toThrow('invalid-value')
+    })
+
+    it('retains the requested-model restriction outside the model-unknown local case', () => {
+        expect(() =>
+            new RoutingJsonProjector().record(altered(0, ['requested', 'model'], ''))
+        ).toThrow('invalid-value')
+    })
+
+    it.each<'nodeId' | 'engine'>(['nodeId', 'engine'])(
+        'requires the real %s for a model-unknown local attempt',
+        field => {
+            const record = modelLessLocalRecord()
+            record.attempts[0].destination[field] = null
+            expect(() =>
+                new RoutingJsonProjector().record(new TextEncoder().encode(JSON.stringify(record)))
+            ).toThrow('invalid-value')
+        }
+    )
+
     it.each(requiredPaths)('requires the present key %s, including nullable fields', pathName => {
         expect(() =>
             new RoutingJsonProjector().record(altered(0, pathName.split('.'), undefined))

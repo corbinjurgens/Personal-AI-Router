@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { EventEmitter } from 'events'
+import fs from 'fs'
+import path from 'path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ipcMain, ipcRenderer } from 'electron'
 import type {
@@ -690,6 +692,52 @@ describe('production history subscription retry owner', () => {
 })
 
 describe('production history sender IPC and broadcaster', () => {
+    it('commits a corpus-derived model-less initial and update through production IPC', async () => {
+        const corpus: { cases: { record: RoutingHistoryRecord }[] } = JSON.parse(
+            fs.readFileSync(
+                path.resolve('../services/shared/nodepolicy/testdata/routing-request.json'),
+                'utf8'
+            )
+        )
+        const row = corpus.cases[0].record
+        row.requested.model = ''
+        for (const attempt of row.attempts) attempt.destination.model = null
+        if (row.served) row.served.model = null
+        getRoutingDelivery().initialResult(
+            new TextEncoder().encode(JSON.stringify({ requests: [row] }))
+        )
+        const a = sender(),
+            transport = isolatedTransport(a),
+            history = createRoutingHistory(transport)
+        const initial = history.getInitial()
+        await settle()
+        await commitInitial(a, initial)
+        await settle()
+        expect(
+            history.consumeCurrent(0, value => {
+                expect(value).toEqual(row)
+                return undefined
+            })
+        ).toBe(true)
+        row.seq++
+        applyRoutingHistoryChanged(new TextEncoder().encode(JSON.stringify(row)))
+        await receiveReady(a)
+        runFrame()
+        await settle()
+        expect(
+            history.consumeCurrent(0, value => {
+                expect(value).toEqual(row)
+                return undefined
+            })
+        ).toBe(true)
+        expect(a.ipc.maximumInFlight).toBe(1)
+        expect(getRoutingDelivery().capacity.initialLeases).toBe(0)
+        history.destroy()
+        await settle()
+        await receiveReady(a)
+        transport.destroy()
+    })
+
     it('loads a full retained window through one-record IPC loans and one scalar end', async () => {
         const a = sender(),
             transport = isolatedTransport(a),
