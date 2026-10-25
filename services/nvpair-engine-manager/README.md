@@ -1121,6 +1121,50 @@ requires a coordinated fleet update. Files predating this journal are not
 retroactively certified. Process, native UI and real-target acceptance remain
 separate from component tests.
 
+`services/tests/model_download_state_test.go::TestModelDownloadStateProcess`
+contains process scenarios for target-local service subscribers, a newly attached
+client, pinned observer inventory and production scanner self-enrichment. Its
+synthetic SSE router exposes first-shard, delayed-terminal and disconnect
+barriers. The assertions distinguish completion, stable ready inventory and
+loaded observation; reject typed/raw Load and existing export reads without
+native effects; isolate a cancelled queued model; and check direct/reverse POST
+counts, failure recovery, failed journal removal and bounded retained state.
+Service restarts use the existing private bundle's process-identity cleanup.
+On Windows at base `44e76c6b` (2026-10-26), the final plain run below passed
+17 named terminals with no failures or skips. The race run had 15 passes and
+two failed terminals (the queued-cancellation leaf and its parent): Windows
+refused replacement of the fixed scanner image during setup. That leaf alone
+then passed under race (two terminals, no failures or skips). No data race was
+reported. The failed aggregate run remains failed; no second full focused race
+pass is claimed. `go vet ./...` exited zero.
+The commands ran from `services/tests` with the fixed-path wrapper, private
+profile and offline Go bindings. Raw output remains in the machine's temporary
+`download-transfer-process-checks-20261026` directory.
+
+```sh
+go test -p 1 -parallel 1 -count=1 -json -timeout=30m -run '^TestModelDownloadStateProcess$' .
+go test -race -p 1 -parallel 1 -count=1 -json -timeout=30m -run '^TestModelDownloadStateProcess$' .
+go test -race -p 1 -parallel 1 -count=1 -json -timeout=15m -run '^TestModelDownloadStateProcess$/^queued_cancellation_has_no_native_effects_or_unsafe_marker$' .
+```
+
+These runs include bounded second-response NDJSON capture, replacement
+reverse-session/read checks, control-surface POST counters and exact terminal
+notification convergence assertions.
+The control observer reuses a registered fixture image and the existing owned
+port adapter; it forwards pinned HTTP streams to the real manager unchanged.
+
+The fixture does not prove independent scanner peer refresh: authenticated peer
+descriptors reject loopback addresses. Its production scanner uses only the
+target's registered loopback self-enrichment route, with mDNS disabled. Automatic
+resident dispatch is an internal broker/proxy boundary and is not exercised by
+this process fixture. The compiled manager has no short progress-watchdog seam
+or crash barrier inside durable journal replacement; watchdog and exact atomic
+replacement failures retain component-level coverage. No lower-revision or
+retired-source notification is injected by this fixture. The ec listener uses
+`--control-host=127.0.0.1`; em and cluster-manager retain their production
+wildcard binding on private fixture ports. No installed-machine or transfer-join
+acceptance follows from these scenarios.
+
 ## Shutdown behavior
 
 Shuts down on stdin EOF (parent closed the pipe), `SIGINT`/`SIGTERM`, or a
