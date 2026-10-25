@@ -15,9 +15,16 @@ import (
 	"sync"
 	"time"
 
+	"nvpair-shared/jsonrpc"
+	"nvpair-shared/modeldownload"
 	"nvpair-shared/nodepolicy"
 	"nvpair-shared/noderec"
 )
+
+// Model inventory is relayed over the ordinary worker JSON-RPC boundary. Bound
+// its HTTP envelope before decoding too, including unknown/oversize extensions.
+// Discovery retains its own, smaller frame limit.
+const modelsResponseBytes = jsonrpc.WorkerFrameBytes
 
 // enrichModelsAt decorates a node that advertises engine-manager (em) with its
 // model list, fetched at the em port (/v1/models) on host. The list moved off the
@@ -38,7 +45,15 @@ func (d *daemon) enrichModelsAt(node *noderec.DirectoryNode, host string) {
 func (d *daemon) enrichModelsCandidates(node *noderec.DirectoryNode, hosts []string) {
 	em, ok := node.Services[noderec.ServiceEngineManager]
 	if !ok || len(hosts) == 0 {
+		d.infoMu.Lock()
+		observation := d.lastDownloads[node.HostUUID].stale()
+		d.infoMu.Unlock()
+		node.DownloadState, node.DownloadStateCurrent = observation.snapshot, observation.current
 		return
+	}
+	var generation uint64
+	if d.dir != nil {
+		generation = d.dir.routeGeneration(node.HostUUID)
 	}
 	ask := func(host string) (modelInventory, bool) {
 		return d.fetchModelsForPeer(node.HostUUID, host, em.Port, node.ClusterUUID, true)
@@ -50,30 +65,49 @@ func (d *daemon) enrichModelsCandidates(node *noderec.DirectoryNode, hosts []str
 	if d.dir != nil && d.dir.authenticated(node.HostUUID) {
 		return
 	}
+	if d.dir != nil && d.dir.routeGeneration(node.HostUUID) != generation {
+		return
+	}
 	if fetched {
 		d.infoMu.Lock()
-		d.cacheInventoryLocked(node.HostUUID, inventory)
+		accepted := d.cacheInventoryLocked(node.HostUUID, inventory)
 		d.infoMu.Unlock()
-		inventory.applyTo(node)
-		return
+		if accepted {
+			inventory.applyTo(node)
+			return
+		}
 	}
 	d.infoMu.Lock()
 	_, had := d.lastModels[node.HostUUID]
+	if !fetched {
+		if observation, exists := d.lastDownloads[node.HostUUID]; exists {
+			d.lastDownloads[node.HostUUID] = observation.stale()
+		}
+	}
 	cached := modelInventory{
-		models:         d.lastModels[node.HostUUID],
-		byEngine:       d.lastModelsByEngine[node.HostUUID],
-		loadedByEngine: d.lastLoadedByEngine[node.HostUUID],
-		policy:         d.lastPolicy[node.HostUUID],
+		models:              d.lastModels[node.HostUUID],
+		byEngine:            d.lastModelsByEngine[node.HostUUID],
+		loadedByEngine:      d.lastLoadedByEngine[node.HostUUID],
+		policy:              d.lastPolicy[node.HostUUID],
+		downloadObservation: d.lastDownloads[node.HostUUID].stale(),
+	}
+	if fetched {
+		// A lower revision is ignored, including its claim about freshness.
+		cached.downloadObservation = d.lastDownloads[node.HostUUID].clone()
 	}
 	d.infoMu.Unlock()
-	if had {
+	if had || cached.snapshot != nil || cached.current != nil {
 		cached.applyTo(node)
 	}
 }
 
 // cacheInventoryLocked records a successful /v1/models answer as the node's
 // last-good inventory. Caller holds infoMu.
-func (d *daemon) cacheInventoryLocked(hostUUID string, inventory modelInventory) {
+func (d *daemon) cacheInventoryLocked(hostUUID string, inventory modelInventory) bool {
+	previous := d.lastDownloads[hostUUID]
+	if !inventory.accepts(previous) {
+		return false
+	}
 	if d.lastModels == nil {
 		d.lastModels = make(map[string][]string)
 	}
@@ -86,10 +120,19 @@ func (d *daemon) cacheInventoryLocked(hostUUID string, inventory modelInventory)
 	if d.lastPolicy == nil {
 		d.lastPolicy = make(map[string]*nodepolicy.Advertisement)
 	}
+	if d.lastDownloads == nil {
+		d.lastDownloads = make(map[string]downloadObservation)
+	}
 	d.lastModels[hostUUID] = inventory.models
 	d.lastModelsByEngine[hostUUID] = inventory.byEngine
 	d.lastLoadedByEngine[hostUUID] = inventory.loadedByEngine
 	d.lastPolicy[hostUUID] = inventory.policy
+	observation := inventory.downloadObservation.clone()
+	if observation.snapshot == nil && previous.snapshot != nil {
+		observation = previous.stale()
+	}
+	d.lastDownloads[hostUUID] = observation
+	return true
 }
 
 // fetchModels does one GET of a node's /v1/models, returning the
@@ -117,6 +160,13 @@ func (d *daemon) fetchPeerModels(hostUUID, ip string, port int, clusterUUID stri
 }
 
 func (d *daemon) fetchModelsForPeer(hostUUID, ip string, port int, clusterUUID string, discovering bool) (modelInventory, bool) {
+	d.infoMu.Lock()
+	baseline := d.lastDownloads[hostUUID]
+	var sourceBaseline string
+	if baseline.snapshot != nil {
+		sourceBaseline = baseline.snapshot.SourceID
+	}
+	d.infoMu.Unlock()
 	client, scheme, current, ok := d.modelsClient(hostUUID, ip, port, clusterUUID, discovering)
 	if !ok {
 		slog.Debug("model enrichment skipped: peer is not a pinned cluster member",
@@ -133,19 +183,30 @@ func (d *daemon) fetchModelsForPeer(hostUUID, ip string, port int, clusterUUID s
 	if resp.StatusCode != http.StatusOK {
 		return modelInventory{}, false
 	}
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, modelsResponseBytes+1))
+	if err != nil || len(raw) > modelsResponseBytes {
+		return modelInventory{}, false
+	}
 	var body struct {
 		Models         []json.RawMessage            `json:"models"`
 		ModelsByEngine map[string][]json.RawMessage `json:"modelsByEngine"`
 		LoadedByEngine map[string][]json.RawMessage `json:"loadedByEngine"`
 		Policy         json.RawMessage              `json:"policy"`
+		DownloadState  json.RawMessage              `json:"downloadState"`
 	}
-	decoder := json.NewDecoder(resp.Body)
-	if err := decoder.Decode(&body); err != nil {
+	if err := json.Unmarshal(raw, &body); err != nil {
 		return modelInventory{}, false
 	}
-	var trailing json.RawMessage
-	if err := decoder.Decode(&trailing); err != io.EOF {
+	members, object := objectMembers(raw)
+	if !object {
 		return modelInventory{}, false
+	}
+	seenDownload, invalidDownload := false, false
+	for _, member := range members {
+		if strings.EqualFold(member.key, "downloadState") {
+			invalidDownload = invalidDownload || seenDownload || member.key != "downloadState"
+			seenDownload = true
+		}
 	}
 	models, err := decodeInventoryModelNames(body.Models)
 	if err != nil {
@@ -172,7 +233,27 @@ func (d *daemon) fetchModelsForPeer(hostUUID, ip string, port int, clusterUUID s
 	if !current() {
 		return modelInventory{}, false
 	}
-	return modelInventory{models: models, byEngine: byEngine, loadedByEngine: loadedByEngine, policy: policy}, true
+	var observation downloadObservation
+	if invalidDownload || len(body.DownloadState) > 0 && !bytes.Equal(bytes.TrimSpace(body.DownloadState), []byte("null")) {
+		snapshot, err := modeldownload.Parse(body.DownloadState)
+		valid := err == nil && !invalidDownload
+		observation.current = &valid
+		if valid {
+			observation.snapshot = &snapshot
+		} else {
+			// Routing consumers read canonical names without interpreting this
+			// extension. Invalid lifecycle evidence cannot publish ready names.
+			models = []string{}
+			if byEngine == nil {
+				byEngine = make(map[string][]string)
+			}
+			for engine := range byEngine {
+				byEngine[engine] = []string{}
+			}
+		}
+	}
+	return modelInventory{models: models, byEngine: byEngine, loadedByEngine: loadedByEngine, policy: policy,
+		downloadObservation: observation, sourceBaseline: sourceBaseline}, true
 }
 
 // Keep model tokens raw until the shared validator has seen their original
@@ -361,8 +442,9 @@ func (d *daemon) refreshModelsOnce() {
 
 // refreshNodeModels fetches one peer's /v1/models and, on success, applies it to
 // the directory under the removed/re-addressed guard (directory.applyModels).
-// A failed fetch retains the last successful inventory: no cache write, no
-// directory change, no event. On a change it refreshes the enrichment caches
+// A failed fetch retains the last successful inventory and operation details,
+// but withdraws download freshness and emits that change once. On a successful
+// change it refreshes the enrichment caches
 // (so a later browse-driven fallback can't revert the directory to a stale
 // value) and emits exactly one discovery:node-updated carrying the full node.
 // Returns whether it emitted an update (used by tests).
@@ -396,9 +478,6 @@ func (d *daemon) refreshNodeModelsCandidates(hostUUID, guardIP string, hosts []s
 	}
 	key := hostKey{hostUUID: hostUUID, service: noderec.ServiceEngineManager}
 	_, inventory, fetched := askRemembered(&d.enrichHosts, key, hosts, ask)
-	if !fetched {
-		return false
-	}
 	d.peerServicesMu.Lock()
 	defer d.peerServicesMu.Unlock()
 	if d.dir.routeGeneration(hostUUID) != generation {
@@ -410,8 +489,23 @@ func (d *daemon) refreshNodeModelsCandidates(hostUUID, guardIP string, hosts []s
 		d.dir.mu.RUnlock()
 		incarnation, admitted := d.mesh.PeerServiceIncarnation(hostUUID)
 		if !admitted || incarnation != claim.Incarnation || !peerServicesFresh(claim, time.Now()) {
+			fetched = false
+		}
+	}
+	if !fetched {
+		node, changed, valid := d.dir.markDownloadsStale(hostUUID, guardIP, emPort)
+		if !valid {
 			return false
 		}
+		d.infoMu.Lock()
+		if observation, ok := d.lastDownloads[hostUUID]; ok {
+			d.lastDownloads[hostUUID] = observation.stale()
+		}
+		d.infoMu.Unlock()
+		if changed {
+			d.emit(noderec.NotifyNodeUpdated, node)
+		}
+		return changed
 	}
 	// Refresh the enrichment cache BEFORE touching the directory: the caches
 	// (infoMu) and the directory (dir.mu) are guarded by different locks, so if
@@ -422,8 +516,11 @@ func (d *daemon) refreshNodeModelsCandidates(hostUUID, guardIP string, hosts []s
 	// a node applyModels then finds removed — is benign (it is the last-known-good
 	// value the cache exists to preserve, and forget() clears it on eviction).
 	d.infoMu.Lock()
-	d.cacheInventoryLocked(hostUUID, inventory)
+	accepted := d.cacheInventoryLocked(hostUUID, inventory)
 	d.infoMu.Unlock()
+	if !accepted {
+		return false
+	}
 
 	node, changed, valid := d.dir.applyModels(hostUUID, guardIP, emPort, inventory)
 	if !valid {

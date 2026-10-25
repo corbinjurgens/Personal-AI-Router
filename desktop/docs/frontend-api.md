@@ -131,6 +131,24 @@ contract lives in [cluster-manager spec §7.0.1](../../services/nvpair-cluster-m
   refresh and invalidation. A disconnect or a broker or engine-manager restart
   makes every reported lock unknown again until a new report arrives. Current
   engine-managers do not report it yet.
+- Model snapshots carry `EngineModels.downloadState` (the target's full versioned
+  download snapshot) and `downloadStateCurrent`. Each `ModelItem` can carry its
+  exact `downloadState` entry and the same currentness. Rows are the union of
+  canonical inventory, observed loaded names, and lifecycle entries. `downloaded`
+  requires a current canonical inventory read, supported/current lifecycle data,
+  no recovery requirement, and no matching `blocksReadiness` entry. Names,
+  percentage 100 and operation completion do not independently establish ready
+  content. `status:'loaded'` continues to reflect actual residency, even when
+  the same model is unsafe to Load or Copy.
+- Pull progress carries `downloadState` (entry), `downloadSourceId`,
+  `downloadRevision`, and `downloadStateCurrent` alongside the existing target,
+  engine, model, status and optional percent. Authoritative statuses are
+  `queued`, `in_progress`, `failed`, `complete`, and `unknown`; a missing measured
+  percent stays indeterminate. Failed/unknown entries can remain after an RPC
+  settles. A disconnect preserves facts with unavailable currentness rather than
+  turning an ongoing download into success. Initial snapshots replay the same
+  target facts after a renderer refresh. Renderer action guards consume these
+  facts; the target's Go admission remains authoritative.
 - The `engine:command` shape `{ command: 'setLock', engineType, nodeId, locked }`
   maps to the local `engine:set-lock`. The bridge sends it only when `nodeId` is
   this device's own node, and refuses any other target before sending with

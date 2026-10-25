@@ -8,6 +8,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -89,7 +90,7 @@ func TestModelDownloadJournalRecovery(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info.Mode().Perm() != 0600 {
+	if runtime.GOOS != "windows" && info.Mode().Perm() != 0600 {
 		t.Fatalf("mode = %o", info.Mode().Perm())
 	}
 	recovered := newModelDownloads(newOpID(), filepath.Dir(d.store.path), map[string]string{"ollama": engines.ModelNamingImpliedLatestTag})
@@ -104,8 +105,8 @@ func TestModelDownloadJournalRecovery(t *testing.T) {
 }
 
 func TestModelDownloadJournalMalformedRecovery(t *testing.T) {
-	for _, input := range []string{"{", `{"version":1,"entries":null}`, strings.Repeat(" ", modeldownload.MaxJournalBytes+1)} {
-		t.Run("preserves unreadable journal", func(t *testing.T) {
+	test := func(name, input string) {
+		t.Run(name, func(t *testing.T) {
 			dir := t.TempDir()
 			path := filepath.Join(dir, modelDownloadFile)
 			if err := os.WriteFile(path, []byte(input), 0600); err != nil {
@@ -124,6 +125,13 @@ func TestModelDownloadJournalMalformedRecovery(t *testing.T) {
 			}
 		})
 	}
+	test("invalid JSON", "{")
+	test("null entries", `{"version":1,"entries":null}`)
+	test("duplicate entries", `{"version":1,"entries":[],"entries":[]}`)
+	test("case variant", `{"version":1,"Entries":[]}`)
+	test("unknown field", `{"version":1,"entries":[],"unexpected":true}`)
+	test("duplicate marker model", `{"version":1,"entries":[{"id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","engine":"llamacpp","model":"one","model":"two","contentKey":"two","naming":"exact"}]}`)
+	test("oversize journal", strings.Repeat(" ", modeldownload.MaxJournalBytes+1))
 }
 
 func TestModelDownloadJournalEncodedByteBound(t *testing.T) {

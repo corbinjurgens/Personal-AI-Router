@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"nvpair-shared/modeldownload"
 	"nvpair-tui/rpc"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -308,6 +309,11 @@ func TestDeniedManagementKeepsStatusReadableAndDoesNotRetry(t *testing.T) {
 	d.SetSize(180, 40)
 	d.engines = []engineStatus{{Engine: "ollama", Installed: true, Running: true, Healthy: true}}
 	d.refreshEngines()
+	snapshot := tuiDownloadSnapshot()
+	snapshot.Entries = []modeldownload.Entry{}
+	if !d.applyModels(modelsResult{ModelsByEngine: map[string][]string{"ollama": {"model"}}, DownloadState: snapshot, current: true}, true) {
+		t.Fatal("ready canonical inventory rejected")
+	}
 	request, denied := terminalControlsReply(t, broker, d.modelCmd("ollama", modelActions["load"], "model"), &rpc.Message{Error: &rpc.RPCError{Code: -32012, Message: permissionDeniedText}})
 	if request.Method != "engine:remote-load-model" {
 		t.Fatalf("method = %s", request.Method)
@@ -364,6 +370,11 @@ func TestGrantedManagementStillReportsLocalVeto(t *testing.T) {
 	client, broker := nodeInfoRPCFixture(t)
 	d := newNodeDetail(client, nodeRow{key: "peer", name: "Peer", membership: membershipMember, presence: presenceOnline})
 	d.remotePermission, d.remotePermissionFresh = remotePermission{Version: 1, Allowed: true, State: "allowed"}, true
+	snapshot := tuiDownloadSnapshot()
+	snapshot.Entries = []modeldownload.Entry{}
+	if !d.applyModels(modelsResult{ModelsByEngine: map[string][]string{"ollama": {"model"}}, DownloadState: snapshot, current: true}, true) {
+		t.Fatal("ready canonical inventory rejected")
+	}
 	_, result := terminalControlsReply(t, broker, d.modelCmd("ollama", modelActions["load"], "model"), &rpc.Message{Error: &rpc.RPCError{Code: -32011, Message: "engine is Off locally"}})
 	if cmd, _ := d.update(result); cmd != nil {
 		t.Fatal("local veto scheduled a retry")

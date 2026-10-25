@@ -4,10 +4,12 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -16,8 +18,103 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 )
+
+type modelDownloadBodyWriter struct {
+	*httptest.ResponseRecorder
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (w *modelDownloadBodyWriter) Write(body []byte) (int, error) {
+	w.once.Do(func() { close(w.entered) })
+	<-w.release
+	return w.ResponseRecorder.Write(body)
+}
+
+func TestModelDownloadExportReaderHoldsThroughBody(t *testing.T) {
+	root := t.TempDir()
+	fixture := writeOllamaModel(t, filepath.Join(root, "models"), "demo", 64, 1)
+	ex := copyTestExecutor(t, "ollama", root, true)
+	server := &controlServer{exec: ex}
+	writer := &modelDownloadBodyWriter{ResponseRecorder: httptest.NewRecorder(), entered: make(chan struct{}), release: make(chan struct{})}
+	var release sync.Once
+	done := make(chan struct{})
+	request := httptest.NewRequest(http.MethodGet, controlModelFilePath+"?engine=ollama&model=demo&path="+url.QueryEscape(fixture.manifestRel), nil)
+	go func() {
+		defer close(done)
+		server.handleModelFile(writer, request)
+	}()
+	t.Cleanup(func() { release.Do(func() { close(writer.release) }); <-done })
+	<-writer.entered
+	var effects int
+	err := ex.withModelMutation(context.Background(), "ollama", func() error { effects++; return nil })
+	if !errors.Is(err, errDownloadBusy) || effects != 0 {
+		t.Fatalf("mutation during body: effects=%d error=%v", effects, err)
+	}
+	release.Do(func() { close(writer.release) })
+	<-done
+	if writer.Code != http.StatusOK || !bytes.Equal(writer.Body.Bytes(), fixture.manifest) {
+		t.Fatalf("export response: status=%d bytes=%d", writer.Code, writer.Body.Len())
+	}
+	releaseWriter, err := ex.downloads.acquireWrite("ollama")
+	if err != nil {
+		t.Fatalf("reader leaked after body: %v", err)
+	}
+	releaseWriter()
+}
+
+func TestModelDownloadExportReaderHoldsThroughHashing(t *testing.T) {
+	root := t.TempDir()
+	fixture := writeOllamaModel(t, filepath.Join(root, "models"), "demo", 64, 1)
+	ex := copyTestExecutor(t, "ollama", root, true)
+	abs, err := filepath.EvalSymlinks(filepath.Join(root, "models", filepath.FromSlash(fixture.manifestRel)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(abs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entered := make(chan struct{})
+	call := &hashCall{sum: sha256Hex(fixture.manifest), onWait: func() { close(entered) }}
+	call.wg.Add(1)
+	key := hashEntry{path: abs, size: info.Size(), mtime: info.ModTime().UnixNano()}
+	fileHashes.mu.Lock()
+	fileHashes.inflight[key] = call
+	fileHashes.mu.Unlock()
+	var release sync.Once
+	done := make(chan struct{})
+	writer := httptest.NewRecorder()
+	go func() {
+		defer close(done)
+		(&controlServer{exec: ex}).handleModelFiles(writer, httptest.NewRequest(http.MethodGet, controlModelFilesPath+"?engine=ollama&model=demo", nil))
+	}()
+	t.Cleanup(func() {
+		release.Do(call.wg.Done)
+		<-done
+		fileHashes.mu.Lock()
+		delete(fileHashes.inflight, key)
+		fileHashes.mu.Unlock()
+	})
+	<-entered
+	err = ex.withModelMutation(context.Background(), "ollama", func() error { t.Error("mutation dispatched during hashing"); return nil })
+	if !errors.Is(err, errDownloadBusy) {
+		t.Fatalf("mutation during hashing = %v", err)
+	}
+	release.Do(call.wg.Done)
+	<-done
+	var result streamFrame
+	if err := json.NewDecoder(writer.Body).Decode(&result); err != nil {
+		t.Fatal(err)
+	}
+	if writer.Code != http.StatusOK || result.Type != "result" {
+		t.Fatalf("hash response: status=%d frame=%+v", writer.Code, result)
+	}
+}
 
 // copyTestExecutor builds an executor for one engine whose model store lives
 // under modelsDir. installed controls whether its detect path exists.

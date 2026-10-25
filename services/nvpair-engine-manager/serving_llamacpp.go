@@ -807,13 +807,18 @@ func (e *Executor) guardServingLoad(ctx context.Context, st *engineState, action
 	if err := e.activationVeto(st.manifest.Engine); err != nil {
 		return ctx, noop, err
 	}
+	reader, err := e.acquireLoadRead(ctx, st, action, params)
+	if err != nil {
+		return ctx, noop, err
+	}
 	ctx, cleanup := registerServingLoad(ctx, st)
 	// Register before the lifecycle wait so settings cancellation sees waiters.
 	if !residentLock(ctx, &st.opMu) {
 		cleanup()
+		reader()
 		return ctx, noop, vetoCause(ctx, ctx.Err())
 	}
-	release := sync.OnceFunc(func() { st.opMu.Unlock(); cleanup() })
+	release := sync.OnceFunc(func() { st.opMu.Unlock(); cleanup(); reader() })
 	if err := e.activationVeto(st.manifest.Engine); err != nil {
 		release()
 		return ctx, noop, err
@@ -849,16 +854,21 @@ func registerServingLoad(ctx context.Context, st *engineState) (context.Context,
 // Caller already holds opMu, under switch admission. Share the same stop fence,
 // registry and declaration check without recursively taking the lifecycle lock.
 func (e *Executor) guardServingLoadLocked(ctx context.Context, st *engineState, action string, params json.RawMessage) (context.Context, func(), error) {
+	reader, err := e.acquireLoadRead(ctx, st, action, params)
+	if err != nil {
+		return ctx, func() {}, err
+	}
 	ctx, cleanup := registerServingLoad(ctx, st)
+	release := sync.OnceFunc(func() { cleanup(); reader() })
 	if err := e.activationVeto(st.manifest.Engine); err != nil {
-		cleanup()
+		release()
 		return ctx, func() {}, err
 	}
 	if err := e.checkServingLoad(st, action, params); err != nil {
-		cleanup()
+		release()
 		return ctx, func() {}, err
 	}
-	return ctx, cleanup, nil
+	return ctx, release, nil
 }
 
 // Reject undeclared loads before mutation admission. guardServingLoad repeats

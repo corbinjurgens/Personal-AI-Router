@@ -12,8 +12,50 @@ import (
 
 	"nvpair-shared/buildinfo"
 	"nvpair-shared/jsonrpc"
+	"nvpair-shared/modeldownload"
 	"nvpair-shared/nodepolicy"
 )
+
+func TestModelDownloadDirectoryWire(t *testing.T) {
+	percent := 21
+	snapshot := &modeldownload.Snapshot{
+		Version: modeldownload.Version, SourceID: strings.Repeat("a", 32), Revision: "17", RecoveryRequired: true,
+		Entries: []modeldownload.Entry{{ID: strings.Repeat("b", 32), Engine: "llamacpp", Model: "org/model", Phase: modeldownload.PhaseUnknown,
+			BlocksReadiness: true, Percent: &percent, Reason: modeldownload.ReasonInterrupted, Persistence: modeldownload.PersistenceUncertain}},
+	}
+	test := func(name string, state *modeldownload.Snapshot, current *bool) {
+		t.Run(name, func(t *testing.T) {
+			node := DirectoryNode{HostUUID: "target", Models: []string{"ready"}, ModelsByEngine: map[string][]string{"llamacpp": {"ready"}},
+				LoadedByEngine: map[string][]string{"llamacpp": {"org/model"}}, DownloadState: state, DownloadStateCurrent: current}
+			raw, err := json.Marshal(node)
+			if err != nil {
+				t.Fatalf("encode directory: %v", err)
+			}
+			var got DirectoryNode
+			if err := json.Unmarshal(raw, &got); err != nil {
+				t.Fatalf("decode directory: %v", err)
+			}
+			if !reflect.DeepEqual(got, node) || !reflect.DeepEqual(got.EngineModels("llamacpp"), []string{"ready"}) {
+				t.Fatalf("operation changed inventory, residency or fields: got %+v, want %+v", got, node)
+			}
+			var fields map[string]json.RawMessage
+			if err := json.Unmarshal(raw, &fields); err != nil {
+				t.Fatalf("decode directory fields: %v", err)
+			}
+			if (fields["downloadState"] != nil) != (state != nil) || (fields["downloadStateCurrent"] != nil) != (current != nil) {
+				t.Fatal("unknown support and explicit freshness were conflated")
+			}
+		})
+	}
+	current, stale := true, false
+	test("current unsafe and independently loaded", snapshot, &current)
+	test("stale details remain visible", snapshot, &stale)
+	empty := snapshot.Clone()
+	empty.Entries = []modeldownload.Entry{}
+	test("explicit empty", &empty, &current)
+	test("unsupported", nil, nil)
+	test("invalid observation", nil, &stale)
+}
 
 func TestModelControlsDirectoryAttributionWire(t *testing.T) {
 	for _, tc := range []struct {

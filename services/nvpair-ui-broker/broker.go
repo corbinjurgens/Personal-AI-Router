@@ -22,6 +22,7 @@ import (
 	"nvpair-shared/clustertrust"
 	"nvpair-shared/engines"
 	"nvpair-shared/errors"
+	"nvpair-shared/modeldownload"
 	"nvpair-shared/nodeid"
 	"nvpair-shared/nodepolicy"
 	"nvpair-shared/noderec"
@@ -115,6 +116,9 @@ type AvailableNode struct {
 	// consumer show which of a remote node's models are loaded. Omitted
 	// when no engine reports loaded state.
 	LoadedByEngine map[string][]string `json:"loadedByEngine,omitempty"`
+	// Download state is target-owned; freshness is the scanner's observation.
+	DownloadState        *modeldownload.Snapshot `json:"downloadState,omitempty"`
+	DownloadStateCurrent *bool                   `json:"downloadStateCurrent,omitempty"`
 	// Policy is the node's own policy advertisement (declared roles, policy
 	// revision, pause origin) from the same /v1/models fetch. Omitted when the
 	// node publishes none, which means it declares nothing.

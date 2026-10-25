@@ -74,6 +74,7 @@ const mocks = vi.hoisted(() => ({
         setLocalDiscoveryModelRefresher: vi.fn<BridgeState['setLocalDiscoveryModelRefresher']>(),
         applyEngineIntent: vi.fn<BridgeState['applyEngineIntent']>(),
         invalidateEngineLocks: vi.fn<BridgeState['invalidateEngineLocks']>(),
+        invalidateModelObservations: vi.fn<BridgeState['invalidateModelObservations']>(),
         beginEngineIntentRead: vi.fn<BridgeState['beginEngineIntentRead']>(() => 0),
         getEngineIntent: vi.fn<BridgeState['getEngineIntent']>(() => null),
         prunePendingInvite: vi.fn<BridgeState['prunePendingInvite']>()

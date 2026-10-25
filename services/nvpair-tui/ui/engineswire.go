@@ -5,10 +5,12 @@ package ui
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 
 	"nvpair-shared/engines"
+	"nvpair-shared/modeldownload"
 	"nvpair-tui/rpc"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -48,9 +50,39 @@ func (e engineStatus) label() string {
 // currently resident in memory, which the engine-manager polls for and pushes —
 // so a client never has to poll to know what is loaded.
 type modelsResult struct {
-	Models         []string            `json:"models"`
-	ModelsByEngine map[string][]string `json:"modelsByEngine"`
-	LoadedByEngine map[string][]string `json:"loadedByEngine"`
+	Models         []string                `json:"models"`
+	ModelsByEngine map[string][]string     `json:"modelsByEngine"`
+	LoadedByEngine map[string][]string     `json:"loadedByEngine"`
+	DownloadState  *modeldownload.Snapshot `json:"downloadState,omitempty"`
+	// current qualifies the canonical inventory, not operation completion.
+	current bool
+}
+
+// UnmarshalJSON preserves inventory/residency even when the extension is
+// malformed, while refusing to treat malformed or absent support as ready.
+func (r *modelsResult) UnmarshalJSON(data []byte) error {
+	type plain modelsResult
+	var wire struct {
+		*plain
+		DownloadState json.RawMessage `json:"downloadState"`
+	}
+	next := modelsResult{}
+	wire.plain = (*plain)(&next)
+	if err := json.Unmarshal(data, &wire); err != nil {
+		return err
+	}
+	next.DownloadState = parseDownloadState(wire.DownloadState)
+	next.current = next.DownloadState != nil
+	*r = next
+	return nil
+}
+
+func parseDownloadState(data json.RawMessage) *modeldownload.Snapshot {
+	snapshot, err := modeldownload.Parse(data)
+	if err != nil {
+		return nil
+	}
+	return &snapshot
 }
 
 // engineOp is one lifecycle request and how to describe it to the operator.

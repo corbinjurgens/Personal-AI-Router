@@ -259,6 +259,50 @@ resolve to one node and lets workload/error attribution land on the right node.
 
 Local model state comes from `nvpair-engine-manager`; remote model state comes
 from scanner enrichment of each peer's engine-manager `/v1/models` endpoint.
+Local inventory reads use `engine:models` and select `modelsByEngine`, including
+startup, reconnect, lifecycle/discovery refresh and post-pull/delete refresh.
+Electron does not extract ready names from raw `list_models` actions.
+
+`engine:models`, `/v1/models`, and the full result inside
+`engine:models-changed {engine,models}` carry the optional `downloadState`:
+`{version:1,sourceId,revision,recoveryRequired,entries}`. Source and download IDs
+are target-minted lowercase hexadecimal identifiers; revisions are decimal
+uint64 strings ordered only within a source. Each entry contains
+`{id,engine,model,phase,blocksReadiness,percent?,reason?,persistence?}`. Phases are
+`queued`, `in_progress`, `failed`, `complete`, and `unknown`; percent is an
+optional measured integer from 0 through 100. Reasons are bounded codes:
+`busy`, `capacity`, `download_failed`, `interrupted`, `progress_timeout`,
+`acceptance_unknown`, `cleanup_unknown`, `persistence_error`, or `unsupported`.
+`persistence:"uncertain"` qualifies a terminal marker removal whose replacement
+landed without confirmed directory durability; it does not certify model files.
+
+Local `engine:pull-progress` carries `engine`, `op`, `stage`, optional `percent`,
+the exact `id` and `model`, and the full `downloadState`. Remote progress adds
+`node` and request `opId`; `opId` is distinct from the target download ID.
+Electron projects snapshots without an initiator association. Subscribe before
+fetching; reject lower revisions and retired sources, and fence in-flight reads
+against newer notifications. RPC settlement clears only request-local progress.
+Notifications cannot select a source incarnation, including a previously unseen
+retired worker: only a current local `engine:models` read or authenticated
+discovery observation establishes or replaces that baseline. A mismatching local
+notification revokes currentness and coalesces a rehydration read. Remote
+notifications wait for discovery to establish their source. Worker-ready and
+broker-session generations fence outstanding local reads.
+
+Discovery adds `downloadStateCurrent`: true after a successful current fetch,
+false after failure/source retirement, absent for unsupported data. Last-good
+inventory and lifecycle facts remain available for display, independently of
+currentness. A same-revision successful read can restore currentness. Other
+observers converge through the scanner's existing refresh cadence (normally
+15 seconds plus preceding refresh work and request budget), without per-row
+polling. The target and origin use immediate lifecycle pushes.
+
+The lifecycle extension is bounded to 256 KiB and 64 entries; unsafe attempts
+and recent nonblocking outcomes each have a limit of 32. The target's separate
+64 KiB unresolved-content journal survives restart without replaying downloads.
+Unreadable recovery state sets `recoveryRequired` and blocks readiness. Missing,
+malformed, unsupported or stale state never grants ready content. A coordinated
+fleet update is required. Loaded residency remains an independent observation.
 
 ### When the backend drops a node
 

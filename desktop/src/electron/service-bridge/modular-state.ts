@@ -2,14 +2,14 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import type { EngineInitialState, EngineIntentSnapshot } from '@/shared/types/engine-api'
+import type { ModelDownloadSnapshot } from '@/shared/types/model-download'
 import type {
     EngineDescriptor,
     EngineModels,
     EngineProcessStatus,
     EngineProgress,
     EngineStatusData,
-    EngineType,
-    ModelItem
+    EngineType
 } from '@/shared/types/engines'
 import type { LogEntry, LogPage } from '@/shared/types/log'
 import type { NodeItem } from '@/shared/types/nodes'
@@ -25,12 +25,16 @@ import {
     engineTypeFromManagerName,
     isEngineType
 } from '@/shared/utils/engines'
-import { engineProgressKey } from '@/shared/utils/engine-progress'
+import { engineProgressKey, isEnginePullInProgress } from '@/shared/utils/engine-progress'
 import { workloadKey } from '@/shared/utils/workloads'
 import { emitBridgePush } from './broadcaster'
 import { isModelCopyTerminal, modelCopyProgress, parseModelCopyFrame } from './model-copy'
-import { mergePullProgressPercent } from './pull-error-handling'
-import type { JsonRpcNotification, JsonValue } from './json-rpc-client'
+import {
+    ModelDownloadObservation,
+    parseModelDownloadSnapshot,
+    type ModelsResult
+} from './model-download'
+import type { JsonObject, JsonRpcNotification, JsonValue } from './json-rpc-client'
 import { serviceLogLevel } from './service-log-level'
 import { parsePerformanceProjection } from './performance'
 import {
@@ -61,7 +65,7 @@ import {
     cpuValue,
     memoryValue,
     sameHardware,
-    modelItem,
+    projectEngineModels,
     toNodeItem,
     toMetrics,
     toEngineStatus,
@@ -241,18 +245,14 @@ class ModularBridgeState {
      * map renders with safe defaults.
      */
     private engineDescriptors = new Map<EngineType, EngineDescriptor>()
-    /**
-     * Local model lists pulled from `nvpair-engine-manager`'s `list_models` action by
-     * the supervisor. Cached so `engines:get-initial` can include them and survive
-     * a UI refresh, just like the engine-manager lifecycle facts above. Stored for
-     * every engine including the discovery engine (Ollama): for non-discovery
-     * engines (LM Studio, …) it is the only model source; for Ollama it is the
-     * complete authoritative list that {@link discoveryModelsForNode} prefers over
-     * the (possibly TXT-truncated) mDNS-advertised list.
-     */
-    private localManagerModels = new Map<EngineType, ModelItem[]>()
-    /** Supervisor-registered hook to re-pull the local discovery engine's
-     *  authoritative `list_models` when discovery reports its model set changed. */
+    /** Last-good canonical inventory, independent of query currentness. */
+    private localManagerModels = new Map<EngineType, string[]>()
+    private localInventoryCurrent = new Set<EngineType>()
+    private localLoadedByEngine: Record<string, string[]> = {}
+    private localDownloads = new ModelDownloadObservation()
+    private remoteDownloads = new Map<string, ModelDownloadObservation>()
+    private remoteInventoryCurrent = new Map<string, Set<string>>()
+    /** Re-read canonical local inventory when discovery reports a model change. */
     private onLocalDiscoveryModelsChanged: ((engine: ProxyEngine) => void) | null = null
     /**
      * Optimistic transitional process status for a local engine while a
@@ -274,15 +274,7 @@ class ModularBridgeState {
      */
     private pendingRemoteEngineOps = new Map<string, EngineProcessStatus>()
     private pendingRemoteOpTimers = new Map<string, ReturnType<typeof setTimeout>>()
-    /**
-     * In-flight model pulls keyed by {@link engineProgressKey}. The pull is
-     * dispatched fire-and-forget, so we synthesize a `pulling` progress entry on
-     * dispatch (so {@link IncomingSyncPullRow} renders immediately) and clear it
-     * when the supervisor's awaited completion resolves. While the pull runs the
-     * backend streams live `engine:pull-progress` frames that advance
-     * this entry's percent in place. Held here too so `engines:get-initial` can
-     * replay it after a UI refresh mid-download.
-     */
+    /** Latest target lifecycle entries plus request-local optimistic progress. */
     private activePulls = new Map<string, EngineProgress>()
     /**
      * Authoritative remote-engine facts keyed by {@link remoteOpKey}
@@ -296,27 +288,6 @@ class ModularBridgeState {
      * evicted.
      */
     private remoteEngineFacts = new Map<string, RemoteEngineFacts>()
-    /**
-     * The model of an in-flight remote pull keyed by {@link remoteOpKey}. The
-     * backend's `engine:remote-progress` frames carry **no** `model` field
-     * (`nvpair-engine-manager/remote.go` `remoteProgress`), so we stamp the model
-     * we dispatched with here and backfill it onto every incoming frame — that
-     * keeps the optimistic entry, the streamed percent updates, and the terminal
-     * clear all on one {@link engineProgressKey}. Cleared by
-     * {@link finishRemoteModelPull}.
-     */
-    private remotePullModels = new Map<string, string>()
-    /**
-     * The model of an in-flight local pull keyed by `engineType`. The backend's
-     * `engine:pull-progress` frames (the local counterpart of
-     * `engine:remote-progress`) carry **no** `model` field
-     * (`nvpair-engine-manager/executor.go` `emitPullProgress`), so we stamp the
-     * model we dispatched here and backfill it onto every incoming frame — one
-     * active local pull per engine, matching the backend's engine-scoped
-     * progress hub. Set by {@link beginModelPull}, cleared by
-     * {@link finishModelPull}.
-     */
-    private localPullModels = new Map<EngineType, string>()
     /**
      * In-flight copies to this PC keyed by {@link remoteOpKey} of the source peer
      * and engine. `engine:remote-progress` copy frames carry no `model` either, so
@@ -436,6 +407,7 @@ class ModularBridgeState {
             if (nodeId && this.nodes.has(nodeId)) this.advanceNodeInfoGeneration(nodeId)
         }
         this.selfId = trimmed
+        this.publishDownloads(trimmed, this.localDownloads)
         emitBridgePush('state:request-refresh', undefined)
     }
 
@@ -515,12 +487,16 @@ class ModularBridgeState {
 
         // Local engines (self): every engine `nvpair-engine-manager` reports,
         // proxy-fronted or not. engine-manager is authoritative for the local
-        // node's install/run state; proxy-engine models prefer its cached
-        // `list_models` and fall back to discovery. Emitted here (not in the
+        // node's install/run state; model rows prefer canonical local inventory.
+        // Emitted here (not in the
         // per-node loop) so they survive a UI refresh even before the self node
         // is discovered.
         const selfId = this.selfId
-        for (const engineType of Array.from(this.engineManagerFacts.keys())) {
+        for (const engineType of new Set([
+            ...this.engineManagerFacts.keys(),
+            ...this.localManagerModels.keys(),
+            ...this.downloadEngines(this.localDownloads)
+        ])) {
             const selfNode = selfId ? this.nodes.get(selfId) : undefined
             const status = this.resolveLocalEngineStatus(engineType, selfNode)
             if (status) statuses.push(status)
@@ -1007,9 +983,6 @@ class ModularBridgeState {
             model,
             status: 'pulling'
         }
-        // Remember the model so the model-less `engine:remote-progress` frames can
-        // be re-associated with this exact entry (see remotePullModels).
-        this.remotePullModels.set(this.remoteOpKey(nodeId, engineType), model)
         this.activePulls.set(engineProgressKey(progress), progress)
         emitBridgePush('engines:progress-changed', progress)
     }
@@ -1069,22 +1042,17 @@ class ModularBridgeState {
 
     /** Whether an optimistic remote pull entry for this model is still in flight. */
     isRemoteModelPullActive(nodeId: string, engineType: EngineType, model: string): boolean {
-        return this.activePulls.has(
-            engineProgressKey({ nodeId, engineType, operation: 'pull', model })
+        return isEnginePullInProgress(
+            this.activePulls.get(
+                engineProgressKey({ nodeId, engineType, operation: 'pull', model })
+            )
         )
     }
 
-    /**
-     * Clear the optimistic remote pull entry once the awaited
-     * `engine:remote-pull-model` RPC settles. The backend emits **no** terminal
-     * `engine:remote-progress` for a pull (the peer's terminal stream frame
-     * becomes the JSON-RPC reply, never a notification —
-     * `nvpair-engine-manager/controlstream.go`), so this awaited-completion clear
-     * is the only signal that removes the spinner.
-     */
+    /** RPC settlement may clear only progress not yet superseded by target facts. */
     finishRemoteModelPull(nodeId: string, engineType: EngineType, model: string): void {
-        this.remotePullModels.delete(this.remoteOpKey(nodeId, engineType))
         const key = engineProgressKey({ nodeId, engineType, operation: 'pull', model })
+        if (this.activePulls.get(key)?.downloadState) return
         if (!this.activePulls.delete(key)) return
         emitBridgePush('engines:progress-cleared', { key })
     }
@@ -1104,31 +1072,22 @@ class ModularBridgeState {
             this.applyModelCopyFrame(params)
             return
         }
-        const operation = op === 'pull' || op === 'pull_model' ? 'pull' : 'install'
-        const stage = stringValue(obj.stage) || 'working'
-        // `engine:remote-progress` carries no `model`, so for a pull we backfill
-        // the model captured at dispatch — otherwise the frame would emit under a
-        // different key than the optimistic entry and never update/clear it.
-        const model =
-            stringValue(obj.model) ||
-            (operation === 'pull'
-                ? (this.remotePullModels.get(this.remoteOpKey(nodeId, engineType)) ?? '')
-                : '')
-
-        if (stage === 'done' || stage === 'already-installed' || stage === 'failed') {
-            const progressKey =
-                operation === 'pull' && model
-                    ? engineProgressKey({ nodeId, engineType, operation: 'pull', model })
-                    : `${nodeId}:${engineType}:${operation}`
-            emitBridgePush('engines:progress-cleared', { key: progressKey })
-            if (operation === 'pull') {
-                this.remotePullModels.delete(this.remoteOpKey(nodeId, engineType))
-                if (model) {
-                    this.activePulls.delete(
-                        engineProgressKey({ nodeId, engineType, operation: 'pull', model })
-                    )
-                }
+        if (op === 'pull' || op === 'pull_model') {
+            if (!stringValue(obj.opId)) {
+                const observation = this.downloadsForNode(nodeId)
+                observation.accept(undefined, false)
+                this.publishDownloads(nodeId, observation)
+                this.emitModelObservations(nodeId)
+                return
             }
+            this.applyDownloadFrame(nodeId, obj)
+            return
+        }
+        const operation = 'install'
+        const stage = stringValue(obj.stage) || 'working'
+        if (stage === 'done' || stage === 'already-installed' || stage === 'failed') {
+            const progressKey = `${nodeId}:${engineType}:${operation}`
+            emitBridgePush('engines:progress-cleared', { key: progressKey })
             if (stage === 'already-installed' || stage === 'failed') {
                 this.clearRemoteEngineOp(nodeId, engineType)
             }
@@ -1150,26 +1109,13 @@ class ModularBridgeState {
         }
 
         const node = this.nodes.get(nodeId)
-        const pullKey =
-            operation === 'pull' && model
-                ? engineProgressKey({ nodeId, engineType, operation: 'pull', model })
-                : ''
-        const existingPull = pullKey ? this.activePulls.get(pullKey) : undefined
-        const percent =
-            operation === 'pull'
-                ? mergePullProgressPercent(numberValue(obj.percent), existingPull?.percent)
-                : measuredPercent(obj.percent)
         const progress: EngineProgress = {
             engineType,
             nodeId,
             nodeName: node?.name ?? nodeId,
             operation,
             status: stage,
-            percent,
-            model: model || undefined
-        }
-        if (operation === 'pull' && model) {
-            this.activePulls.set(engineProgressKey(progress), progress)
+            percent: measuredPercent(obj.percent)
         }
         emitBridgePush('engines:progress-changed', progress)
     }
@@ -1253,14 +1199,17 @@ class ModularBridgeState {
         if (isProxyEngine(engineType)) return this.discoveryModelsForNode(node, engineType, node.id)
         const loaded = loadedNamesForEngine(node, engineType)
         const engine = engineManagerName(engineType)
-        const models = node.modelsByEngine !== undefined && Object.hasOwn(node.modelsByEngine, engine)
-            ? node.modelsByEngine[engine]
-            : []
-        return {
+        const models =
+            node.modelsByEngine !== undefined && Object.hasOwn(node.modelsByEngine, engine)
+                ? node.modelsByEngine[engine]
+                : []
+        return this.projectModels(
+            node.id,
             engineType,
-            nodeId: node.id,
-            models: models.map(name => modelItem(name, loaded.has(name)))
-        }
+            models,
+            loaded,
+            node.modelsByEngine !== undefined && Object.hasOwn(node.modelsByEngine, engine)
+        )
     }
 
     /**
@@ -1276,7 +1225,20 @@ class ModularBridgeState {
             const engineType = key.slice(prefix.length)
             if (isEngineType(engineType) && !isProxyEngine(engineType)) engines.push(engineType)
         }
-        return engines
+        const downloads = this.remoteDownloads.get(nodeId)
+        if (downloads)
+            engines.push(
+                ...this.downloadEngines(downloads).filter(engine => !isProxyEngine(engine))
+            )
+        const node = this.nodes.get(nodeId)
+        for (const name of [
+            ...Object.keys(node?.modelsByEngine ?? {}),
+            ...Object.keys(node?.loadedByEngine ?? {})
+        ]) {
+            const engineType = engineTypeFromManagerName(name)
+            if (engineType && !isProxyEngine(engineType)) engines.push(engineType)
+        }
+        return Array.from(new Set(engines))
     }
 
     /**
@@ -1438,20 +1400,17 @@ class ModularBridgeState {
     private dropRemoteEngineFacts(nodeId: string): void {
         for (const engine of [...PROXY_ENGINES, ...this.remoteFactEngines(nodeId)]) {
             this.remoteEngineFacts.delete(this.remoteOpKey(nodeId, engine))
-            this.remotePullModels.delete(this.remoteOpKey(nodeId, engine))
+        }
+        this.remoteDownloads.delete(nodeId)
+        this.remoteInventoryCurrent.delete(nodeId)
+        for (const [key, progress] of this.activePulls) {
+            if (progress.nodeId !== nodeId) continue
+            this.activePulls.delete(key)
+            emitBridgePush('engines:progress-cleared', { key })
         }
     }
 
-    /**
-     * Resolve which local engine (if any) needs its models pulled from
-     * engine-manager's `list_models` action for a given engine-manager engine
-     * id. Returns null only for unknown engines — **the discovery engine (Ollama)
-     * is included.** Its mDNS advertisement carries no model list (the proxy
-     * `node/*` TXT is empty), so engine-manager's `/api/tags` is the only working
-     * source for the local node's Ollama models. `setLocalEngineModels` scopes the
-     * result to the local node, so remote nodes keep their discovery-derived lists
-     * — no double-sourcing.
-     */
+    /** Resolve the engine key whose canonical inventory needs a refresh. */
     modelPullTarget(engineManagerEngine: string): EngineType | null {
         return engineTypeFromManagerName(engineManagerEngine)
     }
@@ -1459,34 +1418,243 @@ class ModularBridgeState {
     /**
      * Registered by the supervisor. Invoked with the affected proxy engine when
      * discovery reports the local node's model set for that engine changed, so the
-     * supervisor can re-pull the complete, authoritative `list_models` (TXT can
-     * truncate; a pull/delete on an already-running engine emits no
+     * supervisor can re-read `engine:models` (a pull/delete on an already-running engine emits no
      * `engine:state-changed`).
      */
     setLocalDiscoveryModelRefresher(fn: (engine: ProxyEngine) => void): void {
         this.onLocalDiscoveryModelsChanged = fn
     }
 
-    /**
-     * Cache and push the local node's model list for a non-discovery engine.
-     * Called by the supervisor after a `list_models` pull (or with an empty list
-     * when the engine is stopped, since its HTTP `list_models` is unreachable).
-     */
-    setLocalEngineModels(engineType: EngineType, modelNames: string[]): void {
-        const nodeId = this.selfId
-        // Stamp `'loaded'` from the self node's loaded set so a `list_models`
-        // refresh (pull/lifecycle) preserves residency instead of resetting every
-        // row to idle. The loaded set is seeded by discovery self-enrichment and
-        // kept fresh by {@link applyLocalLoadedModels}.
-        const loaded = loadedNamesForEngine(nodeId ? this.nodes.get(nodeId) : undefined, engineType)
-        const items = modelNames.map(name => modelItem(name, loaded.has(name)))
-        this.localManagerModels.set(engineType, items)
-        if (!nodeId) return
-        emitBridgePush('engines:state-changed', {
-            nodeId,
+    beginLocalModelsRead(): number {
+        return this.localDownloads.sequence
+    }
+
+    /** Apply the canonical full result; absent engine keys retain stale inventory. */
+    applyLocalModelsResult(result: ModelsResult, baselineSequence?: number): void {
+        const previousSource = this.localDownloads.snapshot?.sourceId
+        if (
+            !this.localDownloads.accept(
+                result.downloadState,
+                result.downloadStateCurrent,
+                baselineSequence
+            )
+        )
+            return
+        if (previousSource !== result.downloadState?.sourceId) this.localInventoryCurrent.clear()
+        const inventories = result.modelsByEngine ?? {}
+        const engines = new Set<EngineType>([
+            ...this.localManagerModels.keys(),
+            ...this.engineManagerFacts.keys(),
+            ...this.downloadEngines(this.localDownloads)
+        ])
+        for (const engine of new Set([
+            ...Object.keys(inventories),
+            ...Object.keys(result.loadedByEngine ?? {})
+        ])) {
+            const engineType = engineTypeFromManagerName(engine)
+            if (engineType) engines.add(engineType)
+        }
+        for (const engineType of engines) {
+            const engine = engineManagerName(engineType)
+            if (Object.hasOwn(inventories, engine)) {
+                this.localManagerModels.set(engineType, [...inventories[engine]])
+                this.localInventoryCurrent.add(engineType)
+            } else {
+                if (!this.localManagerModels.has(engineType))
+                    this.localManagerModels.set(engineType, [])
+                this.localInventoryCurrent.delete(engineType)
+            }
+        }
+        this.localLoadedByEngine = result.loadedByEngine ?? {}
+        this.applyLocalLoadedModels(this.localLoadedByEngine)
+        this.publishDownloads(this.selfId, this.localDownloads)
+        this.emitModelObservations(this.selfId)
+    }
+
+    /** Notifications cannot select a worker incarnation, even when their snapshot is full. */
+    applyLocalModelsNotification(result: ModelsResult): boolean {
+        if (
+            !this.localDownloads.snapshot ||
+            this.localDownloads.current !== true ||
+            result.downloadState?.sourceId !== this.localDownloads.snapshot.sourceId
+        ) {
+            if (this.localDownloads.current !== false) this.invalidateLocalModels()
+            return true
+        }
+        this.applyLocalModelsResult(result)
+        return false
+    }
+
+    /** A failed read keeps names and residency for display but revokes readiness. */
+    invalidateLocalModels(engineType?: EngineType, baselineSequence?: number): void {
+        if (baselineSequence !== undefined && baselineSequence !== this.localDownloads.sequence)
+            return
+        if (engineType) this.localInventoryCurrent.delete(engineType)
+        else this.localInventoryCurrent.clear()
+        this.localDownloads.accept(undefined, false)
+        this.publishDownloads(this.selfId, this.localDownloads)
+        this.emitModelObservations(this.selfId)
+    }
+
+    markLocalInventoryStale(engineType: EngineType): void {
+        this.localDownloads.sequence++
+        this.localInventoryCurrent.delete(engineType)
+        this.emitModelObservations(this.selfId)
+    }
+
+    invalidateModelObservations(): void {
+        this.invalidateLocalModels()
+        for (const [nodeId, observation] of this.remoteDownloads) {
+            this.remoteInventoryCurrent.delete(nodeId)
+            observation.accept(undefined, false)
+            this.publishDownloads(nodeId, observation)
+            this.emitModelObservations(nodeId)
+        }
+    }
+
+    private downloadsForNode(nodeId: string): ModelDownloadObservation {
+        if (nodeId === this.selfId) return this.localDownloads
+        let observation = this.remoteDownloads.get(nodeId)
+        if (!observation) {
+            observation = new ModelDownloadObservation()
+            this.remoteDownloads.set(nodeId, observation)
+        }
+        return observation
+    }
+
+    private downloadEngines(observation: ModelDownloadObservation): EngineType[] {
+        const engines: EngineType[] = []
+        for (const entry of observation.snapshot?.entries ?? []) {
+            const engine = engineTypeFromManagerName(entry.engine)
+            if (engine) engines.push(engine)
+        }
+        return engines
+    }
+
+    private projectModels(
+        nodeId: string,
+        engineType: EngineType,
+        names: string[],
+        loaded: Set<string>,
+        inventoryCurrent: boolean
+    ): EngineModels {
+        const observation = this.downloadsForNode(nodeId)
+        return projectEngineModels(
             engineType,
-            models: { engineType, nodeId, models: items }
-        })
+            nodeId,
+            names,
+            loaded,
+            observation.snapshot,
+            observation.current,
+            inventoryCurrent &&
+                (nodeId === this.selfId ||
+                    this.remoteInventoryCurrent.get(nodeId)?.has(engineManagerName(engineType)) ===
+                        true)
+        )
+    }
+
+    private emitModelObservations(nodeId: string | null): void {
+        if (!nodeId) return
+        const node = this.nodes.get(nodeId)
+        const observation = this.downloadsForNode(nodeId)
+        const engines = new Set<EngineType>([
+            ...PROXY_ENGINES,
+            ...this.downloadEngines(observation)
+        ])
+        if (nodeId === this.selfId) {
+            for (const engine of this.localManagerModels.keys()) engines.add(engine)
+        } else {
+            for (const engine of this.remoteFactEngines(nodeId)) engines.add(engine)
+        }
+        for (const engineType of engines) {
+            const models =
+                nodeId === this.selfId
+                    ? this.localManagerEngineModels(engineType, node, nodeId)
+                    : node
+                      ? this.remoteEngineModels(node, engineType)
+                      : this.projectModels(nodeId, engineType, [], new Set(), false)
+            if (models) emitBridgePush('engines:state-changed', { nodeId, engineType, models })
+        }
+    }
+
+    private publishDownloads(nodeId: string | null, observation: ModelDownloadObservation): void {
+        if (!nodeId) return
+        const keys = new Set<string>()
+        for (const entry of observation.snapshot?.entries ?? []) {
+            const engineType = engineTypeFromManagerName(entry.engine)
+            if (!engineType) continue
+            const progress: EngineProgress = {
+                nodeId,
+                nodeName: this.nodes.get(nodeId)?.name ?? nodeId,
+                engineType,
+                operation: 'pull',
+                model: entry.model,
+                status: observation.current === true ? entry.phase : 'unknown',
+                percent: observation.current === true ? entry.percent : undefined,
+                downloadState: entry,
+                downloadStateCurrent: observation.current,
+                downloadSourceId: observation.snapshot?.sourceId,
+                downloadRevision: observation.snapshot?.revision
+            }
+            const key = engineProgressKey(progress)
+            keys.add(key)
+            this.activePulls.set(key, progress)
+            emitBridgePush('engines:progress-changed', progress)
+        }
+        for (const [key, progress] of this.activePulls) {
+            if (progress.nodeId === nodeId && progress.downloadState && !keys.has(key)) {
+                this.activePulls.delete(key)
+                emitBridgePush('engines:progress-cleared', { key })
+            }
+        }
+    }
+
+    private applyDownloadFrame(nodeId: string, frame: JsonObject): boolean {
+        const observation = this.downloadsForNode(nodeId)
+        const snapshot = parseModelDownloadSnapshot(frame.downloadState)
+        const entry = snapshot?.entries.find(
+            entry =>
+                entry.id === frame.id &&
+                entry.engine === frame.engine &&
+                entry.model === frame.model
+        )
+        if (
+            !snapshot ||
+            !entry ||
+            observation.current !== true ||
+            snapshot.sourceId !== observation.snapshot?.sourceId
+        ) {
+            if (observation.current !== false) observation.accept(undefined, false)
+            this.publishDownloads(nodeId, observation)
+            this.emitModelObservations(nodeId)
+            return true
+        } else {
+            const previous = observation.snapshot
+            if (!observation.accept(snapshot, true)) return false
+            this.invalidateDownloadInventory(nodeId, previous, snapshot)
+        }
+        this.publishDownloads(nodeId, observation)
+        this.emitModelObservations(nodeId)
+        return false
+    }
+
+    /** A lifecycle push cannot certify an inventory read made before the mutation. */
+    private invalidateDownloadInventory(
+        nodeId: string,
+        previous: ModelDownloadSnapshot | undefined,
+        snapshot: ModelDownloadSnapshot
+    ): void {
+        if (previous?.sourceId !== snapshot.sourceId) {
+            if (nodeId === this.selfId) this.localInventoryCurrent.clear()
+            else this.remoteInventoryCurrent.delete(nodeId)
+            return
+        }
+        for (const entry of [...previous.entries, ...snapshot.entries]) {
+            if (!entry.blocksReadiness) continue
+            const engineType = engineTypeFromManagerName(entry.engine)
+            if (nodeId === this.selfId && engineType) this.localInventoryCurrent.delete(engineType)
+            else this.remoteInventoryCurrent.get(nodeId)?.delete(entry.engine)
+        }
     }
 
     /**
@@ -1502,6 +1670,7 @@ class ModularBridgeState {
      * discovered.
      */
     applyLocalLoadedModels(loadedByEngine: Record<string, string[]>): void {
+        this.localLoadedByEngine = loadedByEngine
         const nodeId = this.selfId
         if (!nodeId) return
         const node = this.nodes.get(nodeId)
@@ -1534,7 +1703,7 @@ class ModularBridgeState {
 
     /**
      * A local engine without a proxy facade (a descriptor engine), whose only
-     * model source is engine-manager's `list_models`: its cached list with
+     * model source is engine-manager's canonical inventory: its cached list with
      * residency stamped from the self node's loaded set. Null before the first
      * inventory.
      */
@@ -1544,36 +1713,18 @@ class ModularBridgeState {
         selfId: string
     ): EngineModels | null {
         const cached = this.localManagerModels.get(engineType)
-        if (!cached) return null
-        const loaded = loadedNamesForEngine(selfNode, engineType)
-        return {
+        if (!cached && !this.localDownloads.snapshot) return null
+        const engine = engineManagerName(engineType)
+        const loaded = Object.hasOwn(this.localLoadedByEngine, engine)
+            ? new Set(this.localLoadedByEngine[engine])
+            : loadedNamesForEngine(selfNode, engineType)
+        return this.projectModels(
+            selfId,
             engineType,
-            nodeId: selfId,
-            models: cached.map(item => ({
-                ...item,
-                status: loaded.has(item.name) ? 'loaded' : 'idle'
-            }))
-        }
-    }
-
-    /**
-     * Drop the local node's cached engine-manager model override for a proxy
-     * engine and re-publish the discovery-derived list. Used when engine-manager
-     * cannot supply an initial `list_models` inventory (for example an external
-     * engine it has not adopted), or when a stopped-state empty sentinel must be
-     * released after restart. Clearing the override lets discovery be the source
-     * of truth rather than blanking the UI with an empty list.
-     */
-    fallbackLocalEngineModelsToDiscovery(engine: ProxyEngine): void {
-        this.localManagerModels.delete(engine)
-        const nodeId = this.selfId
-        if (!nodeId) return
-        const models = this.discoveryModelsForNode(this.nodes.get(nodeId), engine, nodeId)
-        emitBridgePush('engines:state-changed', {
-            nodeId,
-            engineType: engine,
-            models
-        })
+            cached ?? [],
+            loaded,
+            this.localInventoryCurrent.has(engineType)
+        )
     }
 
     /**
@@ -1624,7 +1775,9 @@ class ModularBridgeState {
         // noderec.DirectoryNode.EngineModels.
         if (node.modelsByEngine !== undefined) {
             const managerEngine = engineManagerName(engine)
-            return Object.hasOwn(node.modelsByEngine, managerEngine) ? node.modelsByEngine[managerEngine] : []
+            return Object.hasOwn(node.modelsByEngine, managerEngine)
+                ? node.modelsByEngine[managerEngine]
+                : []
         }
         // Fallback for a pre-attribution peer: the flat union is unattributed, so
         // attribute it only when exactly one proxy engine is active on the node,
@@ -1637,13 +1790,14 @@ class ModularBridgeState {
 
     private toEngineModels(node: ModularNode, engine: ProxyEngine): EngineModels {
         const loaded = loadedNamesForEngine(node, engine)
-        return {
-            engineType: engine,
-            nodeId: node.id,
-            models: this.modelsForEngine(node, engine).map(name =>
-                modelItem(name, loaded.has(name))
-            )
-        }
+        return this.projectModels(
+            node.id,
+            engine,
+            this.modelsForEngine(node, engine),
+            loaded,
+            node.modelsByEngine !== undefined &&
+                Object.hasOwn(node.modelsByEngine, engineManagerName(engine))
+        )
     }
 
     /**
@@ -1653,7 +1807,7 @@ class ModularBridgeState {
      * {@link toEngineModels} attributes to a uniquely-active proxy engine — so
      * discovery is a live, refresh-safe source for every node.
      *
-     * For the **local** node we prefer engine-manager `list_models` whenever a
+     * For the **local** node we prefer canonical `engine:models` whenever a
      * successful result is cached, including an explicit empty list. Cache
      * absence means unknown and falls back to discovery (for example, an
      * externally-running Ollama that engine-manager has not adopted). This
@@ -1667,21 +1821,8 @@ class ModularBridgeState {
         nodeId: string
     ): EngineModels {
         if (nodeId === this.selfId) {
-            const cached = this.localManagerModels.get(engine)
-            if (cached !== undefined) {
-                // The cached list is the authoritative `list_models` set (names
-                // only); stamp `'loaded'` from the self node's discovery/push
-                // loaded set so the local card reflects in-memory residency too.
-                const loaded = loadedNamesForEngine(node, engine)
-                return {
-                    engineType: engine,
-                    nodeId,
-                    models: cached.map(item => ({
-                        ...item,
-                        status: loaded.has(item.name) ? 'loaded' : 'idle'
-                    }))
-                }
-            }
+            const cached = this.localManagerEngineModels(engine, node, nodeId)
+            if (cached) return cached
         }
         if (!node) return { engineType: engine, nodeId, models: [] }
         return this.toEngineModels(node, engine)
@@ -1815,8 +1956,7 @@ class ModularBridgeState {
      * instant the modal closes instead of looking like nothing happened; the
      * backend then streams live percent via `engine:pull-progress`
      * ({@link applyLocalEngineProgress}), which updates this same entry
-     * in place. Cleared by {@link finishModelPull} when the supervisor's awaited
-     * pull resolves.
+     * in place. RPC settlement clears only an entry without target facts.
      */
     beginModelPull(engineType: EngineType, model: string): void {
         const nodeId = this.selfId
@@ -1830,54 +1970,28 @@ class ModularBridgeState {
             model,
             status: 'pulling'
         }
-        // Remember the model so the model-less `engine:pull-progress` frames can
-        // be re-associated with this exact entry (see localPullModels).
-        this.localPullModels.set(engineType, model)
         this.activePulls.set(engineProgressKey(progress), progress)
         emitBridgePush('engines:progress-changed', progress)
     }
 
-    /**
-     * Project a `nvpair-engine-manager` `engine:pull-progress` for the local node
-     * — the local counterpart of `engine:remote-progress`: live
-     * download progress for a model pull driven via `engine:action`
-     * `pull_model`. The frame carries `{ engine, op, stage, percent, message }`
-     * and **no** `model`, so we backfill the model captured at dispatch and
-     * refresh the optimistic entry in place. Clearing stays with the awaited pull
-     * ({@link finishModelPull}), so this only advances percent/stage: it ignores
-     * the terminal error sentinel (`percent: -1`) and the non-download frames'
-     * `percent: 0` so the rendered bar never jumps backwards.
-     */
-    applyLocalEngineProgress(params: JsonValue | undefined): void {
+    /** Project a target-owned local pull, including downloads initiated elsewhere. */
+    applyLocalEngineProgress(params: JsonValue | undefined): boolean {
         const nodeId = this.selfId
-        if (!nodeId) return
+        if (!nodeId) return true
         const obj = objectValue(params)
-        if (!obj) return
-        const engineType = engineTypeFromManagerName(stringValue(obj.engine))
-        if (!engineType) return
-
-        const model = this.localPullModels.get(engineType)
-        if (!model) return
-        const key = engineProgressKey({ nodeId, engineType, operation: 'pull', model })
-        const existing = this.activePulls.get(key)
-        if (!existing) return
-
-        const percent = numberValue(obj.percent)
-        const progress: EngineProgress = {
-            ...existing,
-            status: stringValue(obj.stage) || existing.status,
-            percent: mergePullProgressPercent(percent, existing.percent)
-        }
-        this.activePulls.set(key, progress)
-        emitBridgePush('engines:progress-changed', progress)
+        if (!obj) return true
+        if (!engineTypeFromManagerName(stringValue(obj.engine))) return true
+        return this.applyDownloadFrame(nodeId, obj)
     }
 
     /** Whether an optimistic pull entry for this model is still in flight. */
     isModelPullActive(engineType: EngineType, model: string): boolean {
         const nodeId = this.selfId
         if (!nodeId) return false
-        return this.activePulls.has(
-            engineProgressKey({ nodeId, engineType, operation: 'pull', model })
+        return isEnginePullInProgress(
+            this.activePulls.get(
+                engineProgressKey({ nodeId, engineType, operation: 'pull', model })
+            )
         )
     }
 
@@ -1885,8 +1999,8 @@ class ModularBridgeState {
     finishModelPull(engineType: EngineType, model: string): void {
         const nodeId = this.selfId
         if (!nodeId) return
-        this.localPullModels.delete(engineType)
         const key = engineProgressKey({ nodeId, engineType, operation: 'pull', model })
+        if (this.activePulls.get(key)?.downloadState) return
         if (!this.activePulls.delete(key)) return
         emitBridgePush('engines:progress-cleared', { key })
     }
@@ -2045,6 +2159,10 @@ class ModularBridgeState {
         }
 
         this.advanceNodeInfoGeneration(nodeId)
+        const observation = this.downloadsForNode(nodeId)
+        observation.accept(undefined, false)
+        this.remoteInventoryCurrent.delete(nodeId)
+        this.publishDownloads(nodeId, observation)
 
         // A proxy source still reports the node; drop only the node-info snapshot
         // (the broker is the sole node-info / telemetry source now).
@@ -2064,6 +2182,7 @@ class ModularBridgeState {
             memory: null,
             // The advertisement came with the broker's record; none is left.
             policy: undefined,
+            downloadStateCurrent: false,
             serviceBuildId: undefined,
             lastSeen: Date.now()
         }
@@ -2076,6 +2195,43 @@ class ModularBridgeState {
         // (`cluster:get-node-id`), which equals the discovery/proxy hostUuid key,
         // so there is no hostname guessing here — `setSelfId` is the sole source.
         const existing = this.nodes.get(node.id)
+        if (source === 'broker') {
+            const observation = this.downloadsForNode(node.id)
+            // Direct local observations have a newer authority than scanner's cache.
+            const accepted =
+                node.id === this.selfId && this.localDownloads.snapshot
+                    ? false
+                    : observation.accept(node.downloadState, node.downloadStateCurrent)
+            if (node.id !== this.selfId && accepted) {
+                this.remoteInventoryCurrent.set(
+                    node.id,
+                    new Set(
+                        node.downloadStateCurrent === true
+                            ? Object.keys(node.modelsByEngine ?? {})
+                            : []
+                    )
+                )
+            }
+            if (accepted && node.id === this.selfId && node.downloadState) {
+                for (const [engine, names] of Object.entries(node.modelsByEngine ?? {})) {
+                    const engineType = engineTypeFromManagerName(engine)
+                    if (!engineType) continue
+                    this.localManagerModels.set(engineType, [...names])
+                    if (node.downloadStateCurrent === true)
+                        this.localInventoryCurrent.add(engineType)
+                }
+                this.localLoadedByEngine = node.loadedByEngine
+            }
+            if (!accepted && existing && node.id !== this.selfId) {
+                node = { ...node, models: existing.models, modelsByEngine: existing.modelsByEngine }
+            }
+            node = {
+                ...node,
+                downloadState: observation.snapshot,
+                downloadStateCurrent: observation.current
+            }
+            this.publishDownloads(node.id, observation)
+        }
         const merged = {
             ...this.mergeNode(existing, node, source),
             performance: this.performance.get(node.id)
@@ -2115,13 +2271,15 @@ class ModularBridgeState {
                     existing.modelsByEngine !== undefined &&
                     Object.hasOwn(existing.modelsByEngine, managerEngine)
                 const hasEngine =
-                    merged.modelsByEngine !== undefined && Object.hasOwn(merged.modelsByEngine, managerEngine)
+                    merged.modelsByEngine !== undefined &&
+                    Object.hasOwn(merged.modelsByEngine, managerEngine)
                 const attributionChanged =
-                    (existing.modelsByEngine === undefined) !== (merged.modelsByEngine === undefined) ||
+                    (existing.modelsByEngine === undefined) !==
+                        (merged.modelsByEngine === undefined) ||
                     hadEngine !== hasEngine ||
                     !sameStringList(
-                        hadEngine ? existing.modelsByEngine?.[managerEngine] ?? [] : [],
-                        hasEngine ? merged.modelsByEngine?.[managerEngine] ?? [] : []
+                        hadEngine ? (existing.modelsByEngine?.[managerEngine] ?? []) : [],
+                        hasEngine ? (merged.modelsByEngine?.[managerEngine] ?? []) : []
                     )
                 // Proxy presence is not a lifecycle fact: the broker can keep
                 // serving engine-manager while this optional routing proxy is
@@ -2311,6 +2469,8 @@ class ModularBridgeState {
             modelsByEngine: existing.modelsByEngine,
             loadedByEngine: existing.loadedByEngine,
             policy: existing.policy,
+            downloadState: existing.downloadState,
+            downloadStateCurrent: existing.downloadStateCurrent,
             serviceBuildId: existing.serviceBuildId,
             engines: setEngine(existing.engines, engine, next.engines[engine]),
             lastSeen: Math.max(existing.lastSeen, next.lastSeen)

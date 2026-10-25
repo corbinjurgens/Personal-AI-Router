@@ -207,6 +207,11 @@ func (e *Executor) withModelMutation(ctx context.Context, engine string, fn func
 		return modelMutationContextError(engine, ctx.Err())
 	}
 	defer func() { <-st.contentMu }()
+	releaseWriter, err := e.downloads.acquireWrite(engine)
+	if err != nil {
+		return err
+	}
+	defer releaseWriter()
 	if err := ctx.Err(); err != nil {
 		return modelMutationContextError(engine, err)
 	}

@@ -4,14 +4,167 @@
 package main
 
 import (
+	"bytes"
+	"context"
+	"encoding/json"
 	"errors"
+	"io"
 	"math"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 
+	"nvpair-shared/engines"
 	"nvpair-shared/modeldownload"
+	"nvpair-shared/nodepolicy"
 )
+
+type modelContentWriterKey struct{}
+
+func (e *Executor) acquireModelRead(engine, model string, owned bool) (func(), error) {
+	manifest, ok := e.reg.Get(engine)
+	if !ok {
+		return nil, errDownloadBusy
+	}
+	key, err := downloadKey(engine, model, manifest.ModelNamingOrDefault())
+	if err != nil {
+		return nil, err
+	}
+	return e.downloads.acquireRead(key, owned)
+}
+
+func (e *Executor) acquireLoadRead(ctx context.Context, st *engineState, action string, params json.RawMessage) (func(), error) {
+	binding, load := st.manifest.operationBinding(engines.OperationLoad)
+	if !load || action != binding.Action {
+		return func() {}, nil
+	}
+	var fields map[string]json.RawMessage
+	if len(params) > 0 && json.Unmarshal(params, &fields) != nil {
+		return nil, errDownloadBusy
+	}
+	owned, _ := ctx.Value(modelContentWriterKey{}).(string)
+	if _, present := fields[binding.modelParam()]; !present {
+		// Conventional actions may intentionally omit a model. Preserve their
+		// opaque payload, fencing all content in that engine for this read.
+		return e.downloads.acquireRead(downloadContentKey{engine: st.manifest.Engine}, owned == st.manifest.Engine)
+	}
+	var model string
+	if json.Unmarshal(fields[binding.modelParam()], &model) != nil {
+		return nil, errDownloadBusy
+	}
+	return e.acquireModelRead(st.manifest.Engine, model, owned == st.manifest.Engine)
+}
+
+// A Delete resolves only this key, following a successful native mutation and
+// a same-run unmasked absence observation. Ordinary canonical inventory is
+// deliberately unusable here: the marker itself masks that inventory.
+func (e *Executor) resolveDeletedDownload(ctx context.Context, st *engineState, field string, params, result json.RawMessage) {
+	var fields map[string]json.RawMessage
+	var model string
+	if json.Unmarshal(params, &fields) != nil || json.Unmarshal(fields[field], &model) != nil {
+		return
+	}
+	key, err := downloadKey(st.manifest.Engine, model, st.manifest.ModelNamingOrDefault())
+	if err != nil {
+		return
+	}
+	e.downloads.mu.Lock()
+	marker, exists := e.downloads.unsafe[key]
+	e.downloads.mu.Unlock()
+	if !exists {
+		return
+	}
+	var outcome struct {
+		Success *bool  `json:"success"`
+		Error   string `json:"error"`
+	}
+	if json.Unmarshal(result, &outcome) == nil && (outcome.Error != "" || outcome.Success != nil && !*outcome.Success) {
+		return
+	}
+	run := e.engineRunID(st.manifest.Engine)
+	if run == "" {
+		return
+	}
+	list, ok := st.manifest.Actions["list_models"]
+	if !ok || list.Result == nil {
+		return
+	}
+	var raw json.RawMessage
+	if pull, ok := st.manifest.Actions[pullModelAction]; ok && pull.ProgressProtocol == pullProgressProtocolLlamaCPPModelsSSE {
+		raw, err = e.reloadLlamaModelsResult(ctx, st)
+	} else {
+		raw, err = e.Action(ctx, st.manifest.Engine, "list_models", nil)
+	}
+	if err != nil || e.engineRunID(st.manifest.Engine) != run {
+		return
+	}
+	if !downloadAbsent(raw, list.Result, key, st.manifest.ModelNamingOrDefault()) {
+		return
+	}
+	if e.downloads.resolveMarker(key, marker.ID) {
+		e.pokeLoaded()
+	}
+}
+
+// Absence requires identifying every native row, including rows excluded by a
+// display/residency filter. A malformed row may be the affected model.
+func downloadAbsent(raw json.RawMessage, spec *ActionResult, key downloadContentKey, naming string) bool {
+	array, ok := downloadIdentityField(raw, spec.Array)
+	if !ok || bytes.Equal(bytes.TrimSpace(array), []byte("null")) {
+		return false
+	}
+	var rows []json.RawMessage
+	if json.Unmarshal(array, &rows) != nil {
+		return false
+	}
+	for _, row := range rows {
+		identity, ok := downloadIdentityField(row, spec.Field)
+		var name string
+		if !ok || nodepolicy.ValidateModelIdentifierJSON(identity) != nil || json.Unmarshal(identity, &name) != nil {
+			return false
+		}
+		observed, err := downloadKey(key.engine, name, naming)
+		if err != nil || observed == key {
+			return false
+		}
+	}
+	return true
+}
+
+// Preserve additional native fields, but never collapse ambiguous identity
+// fields (including case variants) into an absence proof.
+func downloadIdentityField(raw json.RawMessage, field string) (json.RawMessage, bool) {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	if token, err := decoder.Token(); err != nil || token != json.Delim('{') {
+		return nil, false
+	}
+	var found json.RawMessage
+	for decoder.More() {
+		token, err := decoder.Token()
+		name, ok := token.(string)
+		if err != nil || !ok {
+			return nil, false
+		}
+		var value json.RawMessage
+		if decoder.Decode(&value) != nil {
+			return nil, false
+		}
+		if strings.EqualFold(name, field) {
+			if name != field || found != nil {
+				return nil, false
+			}
+			found = value
+		}
+	}
+	if _, err := decoder.Token(); err != nil {
+		return nil, false
+	}
+	if _, err := decoder.Token(); err != io.EOF {
+		return nil, false
+	}
+	return found, found != nil
+}
 
 var (
 	errDownloadBusy     = errors.New("model content is busy")
@@ -33,6 +186,7 @@ type modelDownloads struct {
 	journalMu        sync.Mutex
 	source           string
 	revision         uint64
+	heldRevisions    uint64
 	recoveryRequired bool
 	active           map[downloadContentKey]*modelDownloadAttempt
 	unsafe           map[downloadContentKey]modelDownloadMarker
@@ -81,6 +235,11 @@ func (d *modelDownloads) reserve(engine, model, naming string) (*modelDownloadAt
 	if d.active[key] != nil {
 		return nil, errDownloadBusy
 	}
+	// Keep one terminal revision for every accepted request plus this one's
+	// initial admission and in-progress transition. Progress cannot consume it.
+	if math.MaxUint64-d.revision < uint64(len(d.active)*2+3)+d.heldRevisions {
+		return nil, errDownloadCapacity
+	}
 	slots := len(d.unsafe)
 	for k := range d.active {
 		if _, ok := d.unsafe[k]; !ok {
@@ -119,12 +278,30 @@ func (d *modelDownloads) update(a *modelDownloadAttempt, phase string, percent *
 	if a.entry.Phase == phase && equalDownloadPercent(a.entry.Percent, percent) {
 		return nil
 	}
+	reserved := d.reservedRevisionsLocked()
+	if a.entry.Phase == modeldownload.PhaseQueued && phase == modeldownload.PhaseInProgress {
+		// This transition consumes its own queued-to-in-progress reservation.
+		reserved--
+	}
+	if math.MaxUint64-d.revision <= reserved {
+		return errDownloadCapacity
+	}
 	if err := d.advanceLocked(); err != nil {
 		return err
 	}
 	a.entry.Phase, a.entry.Percent = phase, cloneDownloadPercent(percent)
 	d.outcomes[a.key] = a.entry
 	return nil
+}
+
+func (d *modelDownloads) reservedRevisionsLocked() uint64 {
+	reserved := uint64(len(d.active)) + d.heldRevisions
+	for _, attempt := range d.active {
+		if attempt.entry.Phase == modeldownload.PhaseQueued {
+			reserved++
+		}
+	}
+	return reserved
 }
 
 func cloneDownloadPercent(p *int) *int {
@@ -139,13 +316,18 @@ func equalDownloadPercent(a, b *int) bool {
 }
 
 func (d *modelDownloads) finish(a *modelDownloadAttempt, phase, reason, persistence string) error {
+	_, err := d.finishSnapshot(a, phase, reason, persistence)
+	return err
+}
+
+func (d *modelDownloads) finishSnapshot(a *modelDownloadAttempt, phase, reason, persistence string) (modeldownload.Snapshot, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if d.active[a.key] != a {
-		return errDownloadBusy
+		return modeldownload.Snapshot{}, errDownloadBusy
 	}
 	if err := d.advanceLocked(); err != nil {
-		return err
+		return modeldownload.Snapshot{}, err
 	}
 	_, blocked := d.unsafe[a.key]
 	a.entry.Phase, a.entry.Reason, a.entry.Persistence = phase, reason, persistence
@@ -159,12 +341,16 @@ func (d *modelDownloads) finish(a *modelDownloadAttempt, phase, reason, persiste
 			d.recent = d.recent[1:]
 		}
 	}
-	return nil
+	return d.snapshotLocked(), nil
 }
 
 func (d *modelDownloads) snapshot() modeldownload.Snapshot {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	return d.snapshotLocked()
+}
+
+func (d *modelDownloads) snapshotLocked() modeldownload.Snapshot {
 	s := modeldownload.Snapshot{Version: 1, SourceID: d.source, Revision: strconv.FormatUint(d.revision, 10), RecoveryRequired: d.recoveryRequired, Entries: make([]modeldownload.Entry, 0, len(d.outcomes))}
 	for _, e := range d.outcomes {
 		e.Percent = cloneDownloadPercent(e.Percent)
@@ -209,7 +395,66 @@ func (d *modelDownloads) changeMarker(a *modelDownloadAttempt, remove bool) (unc
 	return uncertain, err
 }
 
+// resolveMarker reserves its publication revision before any durable removal.
+// Progress and admission preserve that revision while journal I/O is outside
+// the gate; the landed journal and readiness outcome are then adopted together.
+func (d *modelDownloads) resolveMarker(key downloadContentKey, id string) bool {
+	d.journalMu.Lock()
+	defer d.journalMu.Unlock()
+	d.mu.Lock()
+	marker, exists := d.unsafe[key]
+	if d.recoveryRequired || !exists || marker.ID != id || d.active[key] != nil || math.MaxUint64-d.revision <= d.reservedRevisionsLocked() {
+		d.mu.Unlock()
+		return false
+	}
+	d.heldRevisions++
+	next := make(map[downloadContentKey]modelDownloadMarker, len(d.unsafe))
+	for k, value := range d.unsafe {
+		if k != key {
+			next[k] = value
+		}
+	}
+	d.mu.Unlock()
+	landed, uncertain, _ := d.store.save(next)
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.heldRevisions--
+	if !landed {
+		return false
+	}
+	d.unsafe = next
+	if d.active[key] == nil {
+		entry := d.outcomes[key]
+		entry.BlocksReadiness = false
+		if uncertain {
+			entry.Persistence = "uncertain"
+		}
+		d.removeRecentLocked(key)
+		d.outcomes[key] = entry
+		d.recent = append(d.recent, key)
+		if len(d.recent) > modeldownload.MaxRecentEntries {
+			delete(d.outcomes, d.recent[0])
+			d.recent = d.recent[1:]
+		}
+	}
+	// Capacity was reserved above and cannot be consumed by other transitions.
+	d.revision++
+	return true
+}
+
 func (d *modelDownloads) blockedLocked(key downloadContentKey) bool {
+	if key.model == "" {
+		for k := range d.active {
+			if k.engine == key.engine {
+				return true
+			}
+		}
+		for k := range d.unsafe {
+			if k.engine == key.engine {
+				return true
+			}
+		}
+	}
 	_, unsafe := d.unsafe[key]
 	return d.recoveryRequired || d.active[key] != nil || unsafe
 }
@@ -222,7 +467,7 @@ func (d *modelDownloads) blocked(key downloadContentKey) bool {
 
 func (d *modelDownloads) acquireRead(key downloadContentKey, ownedWriter bool) (func(), error) {
 	d.mu.Lock()
-	if d.blockedLocked(key) || d.writers[key.engine] && !ownedWriter {
+	if d.recoveryRequired || !ownedWriter && (d.blockedLocked(key) || d.writers[key.engine]) {
 		d.mu.Unlock()
 		return nil, errDownloadBusy
 	}

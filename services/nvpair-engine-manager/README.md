@@ -853,6 +853,55 @@ Pending waits are bounded; settings relay correlation is separate.
 `engine:remote-switch` and `engine:remote-switch-status` use the existing pinned
 peer client. Neither route provisions engines or falls back to remote start/stop.
 
+## Target-owned model downloads
+
+`PullModelStream` owns local, CLI and paired catalog pulls. The existing
+`engine:models`, `/v1/models` and `engine:models-changed` inventory carries
+`downloadState` (version 1): `sourceId`, decimal-string `revision`,
+`recoveryRequired` and `entries`. Each entry preserves the exact request model
+and engine, a target-minted ID, `queued`, `in_progress`, `failed`, `complete` or
+`unknown` phase, required `blocksReadiness`, optional measured integer percent
+and a fixed reason code. `persistence:"uncertain"` qualifies an outcome whose
+marker removal landed without confirmed directory durability. This does not
+certify vendor-file durability. Pull progress carries model, ID and the full
+snapshot; remote request `opId` remains a separate correlation identity.
+
+Operation completion, current content inventory and observed loaded residency
+are independent. Ready inventory and identity digests exclude queued and unsafe
+content. The named llama.cpp SSE adapter projects only stable `unloaded`,
+`loading`, `loaded` and `sleeping` inventory statuses. Name membership, transient
+`downloaded`, percent 100 and accepted POST do not prove native completion.
+NDJSON pulls require `status:"success"`; llama.cpp requires matching
+`download_finished`; CLI pulls require successful exit without an explicit error.
+
+`model-download-state.json` is a private, bounded unresolved-content journal,
+separate from desired engine intent. It retains unsafe PAIR attempts across
+restart and store changes without automatic effects. Its engine/content keys
+use descriptor-selected naming; raw dispatch spelling is preserved. The manager
+admits at most 32 accepted/unsafe keys, retains the latest 32 other outcomes,
+publishes at most 64 entries, and bounds journal/snapshot bytes to 64/256 KiB.
+Markers have no TTL or eviction. Malformed/unreadable recovery fences ready
+publication and Load/export/pull effects. A same-key explicit successful retry
+can resolve its marker. Successful Delete also requires a fresh same-run
+unmasked absence observation; llama.cpp requires a forced cache rescan. Failed
+cleanup, ordinary list absence and restart cannot clear a marker.
+
+Content writers and Load/export readers have nonblocking admission beside the
+existing content semaphore. An admitted reader makes a writer fail busy before
+withdrawal or effects; an active writer refuses new reads. Load guards cover
+typed/raw/remote actions and automatic residency. Export leases span hashing
+and response-body completion. Existing in-flight inference is not cancelled.
+
+Scanner observers keep last-good lifecycle data with `downloadStateCurrent`:
+false means stale, absent means unsupported. A successful same-revision refresh
+can restore currentness; older revisions cannot overwrite newer observations.
+Origin and target notifications are immediate; other observers converge through
+the existing refresh cycle and its work/request budgets. Updated clients require
+current support and canonical ready inventory for ready-dependent actions. This
+requires a coordinated fleet update. Files predating this journal are not
+retroactively certified. Process, native UI and real-target acceptance remain
+separate from component tests.
+
 ## Shutdown behavior
 
 Shuts down on stdin EOF (parent closed the pipe), `SIGINT`/`SIGTERM`, or a

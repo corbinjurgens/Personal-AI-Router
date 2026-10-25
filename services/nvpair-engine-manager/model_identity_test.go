@@ -10,6 +10,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -22,7 +23,68 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"nvpair-shared/engines"
+	"nvpair-shared/modeldownload"
 )
+
+func TestModelDownloadIdentityRetainsUnsafeMaskAfterMutation(t *testing.T) {
+	test := func(name, requestModel, listedModel string) {
+		t.Run(name, func(t *testing.T) {
+			ex := modelDownloadInventoryExecutor(t)
+			original := ex.client.Transport
+			ex.client.Transport = memoryModelsTransport(func(request *http.Request) (*http.Response, error) {
+				if request.URL.Path == "/api/tags" {
+					body := fmt.Sprintf(`{"models":[{"name":%q,"digest":%q},{"name":"ready:latest","digest":%q}]}`, listedModel, memoryTestDigest, memoryTestDigest)
+					return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body))}, nil
+				}
+				return original.RoundTrip(request)
+			})
+			ex.modelsSweep(context.Background(), true)
+			if got := ex.modelIdentity().Engines["ollama"].ModelDigests; len(got) != 2 {
+				t.Fatalf("ready identity baseline = %v", got)
+			}
+			attempt := reserveModelDownload(t, ex.downloads, "ollama", requestModel, engines.ModelNamingImpliedLatestTag)
+			assertMasked := func() {
+				t.Helper()
+				want := map[string]string{"ready:latest": memoryTestDigest}
+				if got := ex.modelIdentity().Engines["ollama"].ModelDigests; !reflect.DeepEqual(got, want) {
+					t.Fatalf("unsafe content escaped strict digest publication: %v", got)
+				}
+			}
+			assertMasked()
+			if _, err := ex.downloads.changeMarker(attempt, false); err != nil {
+				t.Fatalf("persist unsafe content: %v", err)
+			}
+			if err := ex.downloads.finish(attempt, modeldownload.PhaseFailed, modeldownload.ReasonDownloadFailed, ""); err != nil {
+				t.Fatalf("finish failed mutation: %v", err)
+			}
+			ex.endModelMutation("ollama", nil)
+			ex.modelsSweep(context.Background(), true)
+			assertMasked()
+		})
+	}
+	test("untagged unsafe key masks tagged digest", "demo", "demo:latest")
+	test("tagged unsafe key masks untagged digest", "demo:latest", "demo")
+}
+
+func TestModelDownloadRecoveryWithdrawsNamesAndDigestsOnly(t *testing.T) {
+	ex := modelDownloadInventoryExecutor(t)
+	ex.modelsSweep(context.Background(), true)
+	ex.downloads.mu.Lock()
+	ex.downloads.recoveryRequired = true
+	ex.downloads.mu.Unlock()
+	result := ex.ModelsResult(context.Background())
+	if len(result.Models) != 0 || len(result.ByEngine["ollama"]) != 0 || result.DownloadState == nil || !result.DownloadState.RecoveryRequired {
+		t.Fatalf("recovery published ready content or hid its state: %+v", result)
+	}
+	if len(ex.modelIdentity().Engines["ollama"].ModelDigests) != 0 {
+		t.Fatal("recovery published strict content digests")
+	}
+	if !reflect.DeepEqual(result.LoadedByEngine["ollama"], []string{"demo:latest"}) {
+		t.Fatalf("recovery synthesized an unload: %+v", result.LoadedByEngine)
+	}
+}
 
 // digestManifest is the fake engine with an Ollama-shaped list_models that
 // declares the content digest field, as the bundled Ollama manifest does.
@@ -155,18 +217,22 @@ func TestModelIdentityPairsDigestsWithTheirRun(t *testing.T) {
 	if err := ex.Start(ctx, "fake"); err != nil {
 		t.Fatalf("start: %v", err)
 	}
-	run := ex.engineRunID("fake")
 	listed := map[string]string{"llama3.2:1b": nameDigest("llama3.2:1b")}
+	current := modelInventoryObservation(t, ex, "fake")
+	current.models = listed
+	earlierRun := current
+	earlierRun.runID = "run-earlier"
 
-	ex.storeInventory(nil, map[string]observedDigests{"fake": {runID: "run-earlier", models: listed}}, ex.sweeps.Add(1))
+	ex.storeInventory(nil, map[string]observedDigests{"fake": earlierRun}, ex.sweeps.Add(1))
 	if got := ex.modelIdentity().Engines["fake"].ModelDigests; len(got) != 0 {
 		t.Fatalf("digests read under another run = %v, want none", got)
 	}
 
 	newer := ex.sweeps.Add(1)
 	older := newer - 1
-	ex.storeInventory(nil, map[string]observedDigests{"fake": {runID: run, models: listed}}, newer)
-	ex.storeInventory(nil, map[string]observedDigests{"fake": {runID: run, models: map[string]string{"llama3.2:1b": strings.Repeat("d", 64)}}}, older)
+	ex.storeInventory(nil, map[string]observedDigests{"fake": current}, newer)
+	current.models = map[string]string{"llama3.2:1b": strings.Repeat("d", 64)}
+	ex.storeInventory(nil, map[string]observedDigests{"fake": current}, older)
 	if got := ex.modelIdentity().Engines["fake"].ModelDigests; !reflect.DeepEqual(got, listed) {
 		t.Fatalf("digests after an older sweep stored late = %v, want the newer sweep's %v", got, listed)
 	}

@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"nvpair-shared/modeldownload"
 	"nvpair-shared/performancewire"
 	"nvpair-tui/rpc"
 
@@ -535,7 +536,43 @@ func TestPerformanceBrokerRestartRequiresNewSnapshot(t *testing.T) {
 	if d.performance != nil {
 		t.Fatal("late pre-restart snapshot became current")
 	}
-	d.update(performanceReplyFromRPC(t, broker, start))
+	if start == nil {
+		t.Fatal("broker readiness did not schedule snapshot refreshes")
+	}
+	batch, ok := start().(tea.BatchMsg)
+	if !ok || len(batch) != 2 {
+		t.Fatal("broker readiness did not refresh canonical models and performance")
+	}
+	modelDone := make(chan tea.Msg, 1)
+	go func() { modelDone <- batch[0]() }()
+	for _, method := range []string{"engine:subscribe", "engine:models"} {
+		request, err := broker.Read()
+		if err != nil {
+			t.Fatalf("read model hydration: %v", err)
+		}
+		if request.Method != method {
+			t.Fatalf("model hydration method = %q, want %q", request.Method, method)
+		}
+		result := json.RawMessage(`{"subscribed":true}`)
+		if method == "engine:models" {
+			snapshot := tuiDownloadSnapshot()
+			snapshot.Entries = []modeldownload.Entry{}
+			result = tuiDownloadJSON(t, tuiDownloadInventory(snapshot))
+		}
+		if err := broker.Write(&rpc.Message{JSONRPC: "2.0", ID: request.ID, Result: result}); err != nil {
+			t.Fatalf("reply model hydration: %v", err)
+		}
+	}
+	select {
+	case reply := <-modelDone:
+		d.update(reply)
+	case <-time.After(time.Second):
+		t.Fatal("canonical model hydration did not return")
+	}
+	if !d.modelReady("ollama", "exact/model") || d.performance != nil {
+		t.Fatal("model hydration did not restore readiness independently of performance")
+	}
+	d.update(performanceReplyFromRPC(t, broker, batch[1]))
 	if d.performance == nil {
 		t.Fatal("new broker snapshot was not accepted")
 	}

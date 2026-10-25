@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"nvpair-shared/buildinfo"
+	"nvpair-shared/modeldownload"
 	"nvpair-shared/noderec"
 )
 
@@ -52,9 +53,42 @@ type availableNode struct {
 	// no extra call: Models is the flat de-duplicated union, ModelsByEngine
 	// attributes each to the engine serving it, and LoadedByEngine names those
 	// currently resident in memory.
-	Models         []string            `json:"models"`
-	ModelsByEngine map[string][]string `json:"modelsByEngine"`
-	LoadedByEngine map[string][]string `json:"loadedByEngine"`
+	Models               []string                `json:"models"`
+	ModelsByEngine       map[string][]string     `json:"modelsByEngine"`
+	LoadedByEngine       map[string][]string     `json:"loadedByEngine"`
+	DownloadState        *modeldownload.Snapshot `json:"downloadState,omitempty"`
+	DownloadStateCurrent *bool                   `json:"downloadStateCurrent,omitempty"`
+}
+
+func (n *availableNode) UnmarshalJSON(data []byte) error {
+	type plain availableNode
+	var wire struct {
+		*plain
+		DownloadState        json.RawMessage `json:"downloadState"`
+		DownloadStateCurrent json.RawMessage `json:"downloadStateCurrent"`
+	}
+	next := availableNode{}
+	wire.plain = (*plain)(&next)
+	if err := json.Unmarshal(data, &wire); err != nil {
+		return err
+	}
+	next.DownloadState = parseDownloadState(wire.DownloadState)
+	var current bool
+	if string(wire.DownloadStateCurrent) == "true" || string(wire.DownloadStateCurrent) == "false" {
+		if err := json.Unmarshal(wire.DownloadStateCurrent, &current); err == nil {
+			next.DownloadStateCurrent = &current
+		}
+	}
+	*n = next
+	return nil
+}
+
+func (n availableNode) modelSnapshot() modelsResult {
+	return modelsResult{
+		Models: n.Models, ModelsByEngine: n.ModelsByEngine, LoadedByEngine: n.LoadedByEngine,
+		DownloadState: n.DownloadState,
+		current:       n.DownloadState != nil && n.DownloadStateCurrent != nil && *n.DownloadStateCurrent,
+	}
 }
 
 // clusterIdentity is this node's principal, from cluster:get-node-id.

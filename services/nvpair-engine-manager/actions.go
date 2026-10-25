@@ -76,6 +76,9 @@ func (e *Executor) Action(ctx context.Context, engine, action string, params jso
 	if err := st.manifest.validateActionModelParams(action, params, true); err != nil {
 		return nil, err
 	}
+	if action == pullModelAction {
+		return e.PullModelStream(ctx, engine, "", params)
+	}
 	if err := e.checkServingLoad(st, action, params); err != nil {
 		return nil, err
 	}
@@ -120,8 +123,14 @@ func (e *Executor) Action(ctx context.Context, engine, action string, params jso
 	// belongs to the same mutation.
 	var res json.RawMessage
 	if err := e.withModelMutation(ctx, engine, func() error {
+		ctx = context.WithValue(ctx, modelContentWriterKey{}, engine)
 		var runErr error
 		res, runErr = run()
+		if runErr == nil {
+			if binding, ok := st.manifest.operationBinding(engines.OperationDelete); ok && binding.Action == action {
+				e.resolveDeletedDownload(ctx, st, binding.modelParam(), params, res)
+			}
+		}
 		return runErr
 	}); err != nil {
 		return nil, err

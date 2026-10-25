@@ -33,7 +33,7 @@ func residentNativeFixture(t *testing.T) (llamaServingFixture, *loadedLlamaFake,
 		t.Fatal(err)
 	}
 	id := f.ex.modelIdentity().Engines["fake"]
-	f.ex.storeInventory(map[string][]string{"fake": {"resident-model", "weak"}}, nil, f.ex.sweeps.Add(1))
+	f.ex.storeInventory(map[string][]string{"fake": {"resident-model", "weak"}}, map[string]observedDigests{"fake": modelInventoryObservation(t, f.ex, "fake")}, f.ex.sweeps.Add(1))
 	p := nodepolicy.ReconcileResidentParams{OperationID: "resident:1", PolicyRevision: "1", DeclaredResidentCount: 1, Engine: "fake", Model: "resident-model",
 		Identity:  nodepolicy.StrictModelIdentity{EngineRunID: id.EngineRunID, ModelDigest: id.ModelDigests["resident-model"], SettingsFingerprint: nameDigest("synthetic-settings")},
 		TimeoutMs: 60000, Reservation: nodepolicy.ResidentReservationEvidence{ReservationID: "reservation", ProxyRunID: "proxy", ManagerIncarnation: f.ex.switchIncarnation},
@@ -128,7 +128,7 @@ func TestResidentDailyAdapterNativeRequirements(t *testing.T) {
 			if err := f.ex.desired.set("fake", true, intentLocal); err != nil {
 				t.Fatal(err)
 			}
-			f.ex.storeInventory(map[string][]string{"fake": {"resident-model"}}, nil, f.ex.sweeps.Add(1))
+			f.ex.storeInventory(map[string][]string{"fake": {"resident-model"}}, map[string]observedDigests{"fake": modelInventoryObservation(t, f.ex, "fake")}, f.ex.sweeps.Add(1))
 			id := f.ex.modelIdentity().Engines["fake"]
 			p := nodepolicy.ReconcileResidentParams{OperationID: "native:1", PolicyRevision: "1", DeclaredResidentCount: count, Engine: "fake", Model: "resident-model",
 				Identity:  nodepolicy.StrictModelIdentity{EngineRunID: id.EngineRunID, ModelDigest: id.ModelDigests["resident-model"], SettingsFingerprint: nameDigest("settings")},
@@ -513,7 +513,7 @@ func newResidentFixture(t *testing.T) *residentFixture {
 	if err := ex.desired.set("fake", true, intentLocal); err != nil {
 		t.Fatal(err)
 	}
-	ex.storeInventory(map[string][]string{"fake": {"m"}}, nil, ex.sweeps.Add(1))
+	ex.storeInventory(map[string][]string{"fake": {"m"}}, map[string]observedDigests{"fake": modelInventoryObservation(t, ex, "fake")}, ex.sweeps.Add(1))
 	ex.settingsHub.Publish([]settings.Snapshot{})
 	f := &residentFixture{ex: ex, transport: &residentTransport{loaded: `{"data":[{"id":"m","status":{"value":"loaded"}}]}`}, responses: make(chan Message, 8)}
 	ex.client = &http.Client{Transport: f.transport}
@@ -1241,8 +1241,10 @@ func TestResidentMalformedGrantNeverAuthorizesLiveContext(t *testing.T) {
 func TestResidentOldSweepCannotReplaceNewInventory(t *testing.T) {
 	f := newResidentFixture(t)
 	sweep := f.ex.sweeps.Add(2)
-	f.ex.storeInventory(map[string][]string{"fake": {}}, nil, sweep)
-	f.ex.storeInventory(map[string][]string{"fake": {"m"}}, map[string]observedDigests{"fake": {runID: f.p.Identity.EngineRunID, models: map[string]string{"m": f.p.Identity.ModelDigest}}}, sweep-1)
+	observed := modelInventoryObservation(t, f.ex, "fake")
+	f.ex.storeInventory(map[string][]string{"fake": {}}, map[string]observedDigests{"fake": observed}, sweep)
+	observed.models = map[string]string{"m": f.p.Identity.ModelDigest}
+	f.ex.storeInventory(map[string][]string{"fake": {"m"}}, map[string]observedDigests{"fake": observed}, sweep-1)
 	if got := f.ex.cachedInventory()["fake"]; len(got) != 0 {
 		t.Fatalf("old sweep restored installed inventory: %v", got)
 	}

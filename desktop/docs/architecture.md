@@ -266,6 +266,26 @@ closed `EngineType` union and narrows external strings with `isEngineType()`.
 `engineManagerName()` / `engineTypeFromManagerName()` are the one place that
 translation to and from the engine manager's own spelling lives.
 
+### Model download observations
+
+Model downloads are owned by the target's engine-manager. Electron subscribes
+to lifecycle events before fetching canonical `engine:models`, and hydrates
+again after broker reconnect. Both local notifications and scanner-enriched
+discovery carry the same versioned full `downloadState`; source/revision fences
+prevent a late baseline or retired incarnation from replacing newer facts.
+The service remains a relay and Electron holds only observations, with no
+model bytes or download execution on a controller.
+
+Content readiness, operation outcome, and loaded residency are independent.
+Model rows combine canonical ready names, real loaded names, and exact lifecycle
+entries. Last-good inventory is retained separately from currentness. Missing,
+malformed, unsupported, stale or recovery-required lifecycle data cannot make a
+name ready. A lifecycle completion waits for a current canonical inventory read;
+settling the initiating RPC cannot clear a newer target operation. The target's
+content gate refuses unsafe Load/export effects, including raw action and
+automatic residency paths. Existing authorization, engine intent, pause, lock
+and strict identity boundaries continue to apply.
+
 ### Engine settings
 
 Server port, proxy port, and the engine arguments are one authoritative

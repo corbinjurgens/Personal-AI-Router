@@ -17,6 +17,7 @@ import (
 	"nvpair-shared/applog"
 	"nvpair-shared/buildinfo"
 	"nvpair-shared/jsonrpc"
+	"nvpair-shared/modeldownload"
 	"nvpair-shared/netpick"
 	"nvpair-shared/nodepolicy"
 	"nvpair-shared/noderec"
@@ -74,7 +75,9 @@ type EnrichedNode struct {
 	// (normally a subset of ModelsByEngine), enriched by the daemon from the
 	// peer's engine-manager /v1/models loadedByEngine field. Carried through to
 	// AvailableNode so a remote node's cards can reflect loaded state.
-	LoadedByEngine map[string][]string `json:"loadedByEngine,omitempty"`
+	LoadedByEngine       map[string][]string     `json:"loadedByEngine,omitempty"`
+	DownloadState        *modeldownload.Snapshot `json:"downloadState,omitempty"`
+	DownloadStateCurrent *bool                   `json:"downloadStateCurrent,omitempty"`
 	// Policy is the node's policy advertisement from the same fetch, carried
 	// through to AvailableNode. Nil when the node publishes none.
 	Policy *nodepolicy.Advertisement `json:"policy,omitempty"`
@@ -92,6 +95,7 @@ type EnrichedNode struct {
 // node derived from evidence only it can observe, and leave a consumer whose
 // chosen address happens to be a link it cannot reach with nothing else to try.
 func directoryToEnriched(n noderec.DirectoryNode) EnrichedNode {
+	state, current := cloneDownloadObservation(n.DownloadState, n.DownloadStateCurrent)
 	addrs := n.CandidateIPs()
 	txt := n.AddressTXT()
 	if n.HostUUID != "" {
@@ -102,22 +106,24 @@ func directoryToEnriched(n noderec.DirectoryNode) EnrichedNode {
 		port = ni.Port
 	}
 	return EnrichedNode{
-		ServiceBuildID: n.ServiceBuildID,
-		ID:             n.Name,
-		HostUUID:       n.HostUUID,
-		Host:           n.Name,
-		Port:           port,
-		Addresses:      addrs,
-		TXT:            txt,
-		GPUs:           n.GPUs,
-		CPU:            n.CPU,
-		Memory:         n.Memory,
-		Trusted:        n.Trusted,
-		Clustered:      n.Clustered(),
-		Models:         n.Models,
-		ModelsByEngine: n.ModelsByEngine,
-		LoadedByEngine: n.LoadedByEngine,
-		Policy:         n.Policy,
+		ServiceBuildID:       n.ServiceBuildID,
+		ID:                   n.Name,
+		HostUUID:             n.HostUUID,
+		Host:                 n.Name,
+		Port:                 port,
+		Addresses:            addrs,
+		TXT:                  txt,
+		GPUs:                 n.GPUs,
+		CPU:                  n.CPU,
+		Memory:               n.Memory,
+		Trusted:              n.Trusted,
+		Clustered:            n.Clustered(),
+		Models:               n.Models,
+		ModelsByEngine:       n.ModelsByEngine,
+		LoadedByEngine:       n.LoadedByEngine,
+		DownloadState:        state,
+		DownloadStateCurrent: current,
+		Policy:               n.Policy,
 	}
 }
 
@@ -235,6 +241,7 @@ func (s *discoveryStore) Upsert(n EnrichedNode, source nodeSource) {
 		return
 	}
 	cp := n
+	cp.DownloadState, cp.DownloadStateCurrent = cloneDownloadObservation(n.DownloadState, n.DownloadStateCurrent)
 	s.mu.Lock()
 	sn := s.nodes[key]
 	sn.setSource(source, &cp)
@@ -245,6 +252,18 @@ func (s *discoveryStore) Upsert(n EnrichedNode, source nodeSource) {
 	if cb != nil {
 		cb()
 	}
+}
+
+func cloneDownloadObservation(state *modeldownload.Snapshot, current *bool) (*modeldownload.Snapshot, *bool) {
+	if state != nil {
+		value := state.Clone()
+		state = &value
+	}
+	if current != nil {
+		value := *current
+		current = &value
+	}
+	return state, current
 }
 
 // Remove drops one source's claim on a node and reports whether that removed the
@@ -309,6 +328,7 @@ func (s *discoveryStore) Snapshot() []AvailableNode {
 // when the first address turns out to be a link only one other machine can reach.
 func (sn storedNode) toAvailable() AvailableNode {
 	n := sn.projected()
+	state, current := cloneDownloadObservation(n.DownloadState, n.DownloadStateCurrent)
 	candidates := netpick.Candidates(n.TXT, n.Addresses)
 	var primary string
 	if len(candidates) > 0 {
@@ -320,20 +340,22 @@ func (sn storedNode) toAvailable() AvailableNode {
 		candidates = nil
 	}
 	return AvailableNode{
-		ServiceBuildID: n.ServiceBuildID,
-		ID:             n.ID,
-		Name:           n.ID,
-		HostUUID:       n.HostUUID,
-		IPAddress:      primary,
-		IPAddresses:    candidates,
-		Port:           n.Port,
-		LastSeen:       sn.lastSeen.Unix(),
-		Trusted:        n.Trusted,
-		Clustered:      n.Clustered,
-		Models:         n.Models,
-		ModelsByEngine: n.ModelsByEngine,
-		LoadedByEngine: n.LoadedByEngine,
-		Policy:         n.Policy,
+		ServiceBuildID:       n.ServiceBuildID,
+		ID:                   n.ID,
+		Name:                 n.ID,
+		HostUUID:             n.HostUUID,
+		IPAddress:            primary,
+		IPAddresses:          candidates,
+		Port:                 n.Port,
+		LastSeen:             sn.lastSeen.Unix(),
+		Trusted:              n.Trusted,
+		Clustered:            n.Clustered,
+		Models:               n.Models,
+		ModelsByEngine:       n.ModelsByEngine,
+		LoadedByEngine:       n.LoadedByEngine,
+		DownloadState:        state,
+		DownloadStateCurrent: current,
+		Policy:               n.Policy,
 	}
 }
 

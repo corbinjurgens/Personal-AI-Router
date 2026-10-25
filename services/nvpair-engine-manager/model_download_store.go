@@ -4,11 +4,13 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"unicode/utf8"
 
@@ -55,6 +57,51 @@ func downloadKey(engine, model, naming string) (downloadContentKey, error) {
 type modelDownloadJournal struct {
 	Version int                   `json:"version"`
 	Entries []modelDownloadMarker `json:"entries"`
+}
+
+// Journal recovery must not choose between duplicate or case-variant fields.
+// Require the exact private shape before encoding/json's permissive decoding.
+func downloadJournalObject(data []byte, required ...string) error {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	if token, err := decoder.Token(); err != nil || token != json.Delim('{') {
+		return errDownloadPersistence
+	}
+	seen := make(map[string]bool, len(required))
+	for decoder.More() {
+		token, err := decoder.Token()
+		name, ok := token.(string)
+		if err != nil || !ok || seen[name] || !slices.Contains(required, name) {
+			return errDownloadPersistence
+		}
+		var value json.RawMessage
+		if decoder.Decode(&value) != nil || bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
+			return errDownloadPersistence
+		}
+		seen[name] = true
+	}
+	if _, err := decoder.Token(); err != nil || len(seen) != len(required) {
+		return errDownloadPersistence
+	}
+	if _, err := decoder.Token(); err != io.EOF {
+		return errDownloadPersistence
+	}
+	return nil
+}
+
+func (j *modelDownloadJournal) UnmarshalJSON(data []byte) error {
+	if err := downloadJournalObject(data, "version", "entries"); err != nil {
+		return err
+	}
+	type plain modelDownloadJournal
+	return json.Unmarshal(data, (*plain)(j))
+}
+
+func (m *modelDownloadMarker) UnmarshalJSON(data []byte) error {
+	if err := downloadJournalObject(data, "id", "engine", "model", "contentKey", "naming"); err != nil {
+		return err
+	}
+	type plain modelDownloadMarker
+	return json.Unmarshal(data, (*plain)(m))
 }
 
 // The owner serializes capture, publication and adoption. The store performs

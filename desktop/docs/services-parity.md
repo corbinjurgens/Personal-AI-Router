@@ -291,12 +291,12 @@ through literally, with no maintained catalog of engine options or variables.
 
 ## Models
 
-Local model state comes from engine-manager actions. Remote model state comes
+Local model state comes from canonical `engine:models`. Remote model state comes
 from node-scanner enrichment and is attributed per engine.
 
 Personal AI Router uses:
 
-- `list_models`;
+- `engine:models`, selecting the requested engine's `modelsByEngine` inventory;
 - `pull_model`, whose body the bridge still spells by engine family (Ollama's
   `name`, every other engine's `model`);
 - the typed `engine:load-model`, `engine:unload-model` and
@@ -353,7 +353,7 @@ Load uses a separate 10/11-minute response-header budget:
 | `remoteReadyResponseHeaderTimeout` (`remoteclient.go`)        | 11min | Remote start/delete responses can wait on engine readiness, and a cold Ollama model load can withhold headers for minutes, so those calls use the readiness-sized client. Other model actions retain the ordinary 30s budget. |
 
 The net is a backstop, not the mechanism: a delete now ends the spinner on real
-backend truth either way. On success the refreshed `list_models` drops the model;
+backend truth either way. On success the refreshed canonical inventory drops the model;
 on failure the reported error carries `nodeId` + `engineType` + `modelName`, which
 is what lets the store attribute it and clear that row.
 
@@ -368,22 +368,44 @@ bounce itself raises no crash or unhealthy alert: `markStopped` cancels the
 health loop and clears `unhealthy`/`exited`, and `doStart` clears them again, so
 the engine simply shows as stopped and then running.
 
-A local `pull_model` streams live download progress: the engine-manager routes
-`engine:action{pull_model}` through its streaming pull path and emits
-`engine:pull-progress` (`{ engine, op, stage, percent, message }`) — the local
-counterpart of `engine:remote-progress`. Personal AI Router consumes it in
-`applyLocalEngineProgress` (`modular-supervisor.ts` → `modular-state.ts`),
-backfilling the dispatched model (the frame carries none) and advancing the
-optimistic pull entry's percent in place, so a local pull shows "Pulling · N%"
-to completion just like a remote pull. The awaited action response owns
-completion (clearing the entry and refreshing the model list); a CLI-driven pull
-(LM Studio) emits a single `pulling` marker and degrades to the indeterminate
-spinner.
+A local `pull_model` streams target-owned lifecycle snapshots through
+`engine:pull-progress` (`{engine,op,stage,percent?,id,model,downloadState}`).
+`engine:remote-progress` adds `node` and the distinct request `opId`. No
+single-model-per-engine initiation map is needed: target-local, origin and
+freshly attached clients can project queued, in-progress, failed, complete and
+unknown operations from the same exact target/model/download identity. Unknown
+percent remains indeterminate; RPC completion/timeout does not clear a newer
+authoritative operation. Copy and installation keep their existing ownership.
+
+`downloadState` is a full bounded version-1 snapshot with `sourceId`, decimal
+uint64 `revision`, `recoveryRequired`, and `entries`. Entry fields are `id`,
+`engine`, exact `model`, `phase`, backend-derived `blocksReadiness`, optional
+integer `percent`, bounded `reason` and optional `persistence:"uncertain"`.
+That qualification reports landed marker removal without confirmed directory
+durability. Snapshots allow at most 64 entries and 256 KiB, with up to 32 unsafe
+attempts and 32 recent outcomes; the separate unresolved-content journal is
+bounded to 64 KiB. Recovery preserves unsafe markers as unknown without
+automatic retry, cleanup or model effects.
+
+The bridge rejects malformed extensions, lower revisions and retired sources.
+Notifications alone cannot choose or replace a source baseline, even for an
+unseen retired worker. A mismatching local notification triggers a coalesced
+current `engine:models` read; remote notifications wait for authenticated
+discovery. Worker-ready and broker-session generations retire outstanding reads.
+It retains last-good names separately from current inventory. Discovery carries
+optional `downloadStateCurrent`: false on failed fetch/source retirement, absent
+for unsupported data, and true after a successful current fetch (including a
+same-revision refresh). Unsupported/stale/recovery-required data never grants
+readiness. Other observers use the existing scanner refresh cycle, normally
+15 seconds plus preceding refresh work and request budget; origin/target
+lifecycle pushes are immediate. These guarantees require a coordinated fleet
+update. Installed-machine, native UI, and isolated multi-process acceptance
+remain separate validation obligations.
 
 `engine:models` (and the `em` `GET /v1/models` surface) returns the flat model
-union, the per-engine breakdown (`modelsByEngine`), and the per-engine set of
-models loaded in memory (`loadedByEngine`). The engine-manager watches each
-running engine's loaded set and pushes `engine:models-changed`
+union, the per-engine breakdown (`modelsByEngine`), the per-engine set of
+models loaded in memory (`loadedByEngine`), and `downloadState`. The engine-manager
+watches inventory/readiness and loaded state and pushes `engine:models-changed`
 (`{ engine, models }`, the full `engine:models` shape) on explicit load/unload,
 LM Studio JIT auto-load, and TTL/idle eviction. Discovery carries
 `loadedByEngine` onto each node's `AvailableNode` so remote cards reflect
@@ -391,7 +413,7 @@ residency too.
 
 Personal AI Router consumes both: `parseBrokerNode` records `loadedByEngine` on every node
 (local via loopback self-enrichment, remote via the peer's enrichment), and
-`applyLocalLoadedModels` (`modular-supervisor.ts` → `modular-state.ts`) applies
+`applyLocalModelsResult` (`modular-supervisor.ts` → `modular-state.ts`) applies
 the `engine:models-changed` snapshot to the local node immediately. Model rows
 are stamped `ModelItem.status: 'loaded'` when a name is in that engine's loaded
 set, which drives the loaded dot, disables **Load** for a resident model, and
@@ -399,7 +421,12 @@ gates **Eject** to loaded models only (`ModelRow.tsx`). The optimistic
 load/eject pending-action clears on the resulting model patch instead of its
 safety-net timeout (`pending-actions.store.ts`). Loaded state carries no
 `sizeVram`/`expiresAt` — the backend delivers the simpler `loadedByEngine`
-name-set, not structured details.
+name-set, not structured details. Rows include lifecycle-only and loaded-only
+names. `downloaded:true` requires current canonical inventory and current
+supported lifecycle state with no recovery requirement or matching readiness
+block; even a complete operation waits for a current inventory read. Loaded
+observations remain independent, including a loaded model whose content is
+currently unsafe.
 
 The model catalogue is owned by the backend: `engine:catalog` on
 `nvpair-engine-manager` serves the curated Ollama, LM Studio, and llama.cpp

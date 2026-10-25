@@ -118,7 +118,8 @@ type daemon struct {
 	// lastPolicy caches the policy advertisement from the same /v1/models
 	// fetch, under the same last-good rule, so a transient miss does not make a
 	// node that declares roles look undeclared. Keyed by hostUuid.
-	lastPolicy map[string]*nodepolicy.Advertisement
+	lastPolicy    map[string]*nodepolicy.Advertisement
+	lastDownloads map[string]downloadObservation
 	// nodeInfoDown holds the nodes whose last node-info enrichment failed, so
 	// the outage is reported when it starts and when it ends rather than once
 	// per sweep. Guarded by infoMu with the caches it explains: the reason a
@@ -451,6 +452,21 @@ func (d *daemon) supersedingUpsert(node noderec.DirectoryNode) {
 	}
 	d.peerServicesMu.Lock()
 	defer d.peerServicesMu.Unlock()
+	// Enrichment and identity probes can overlap a model refresh. Reconcile
+	// against the accepted cache before publishing the browsed node.
+	d.infoMu.Lock()
+	if _, had := d.lastModels[node.HostUUID]; had {
+		inventory := modelInventory{
+			models: d.lastModels[node.HostUUID], byEngine: d.lastModelsByEngine[node.HostUUID],
+			loadedByEngine: d.lastLoadedByEngine[node.HostUUID], policy: d.lastPolicy[node.HostUUID],
+			downloadObservation: d.lastDownloads[node.HostUUID].clone(),
+		}
+		if node.DownloadState != nil {
+			inventory.sourceBaseline = node.DownloadState.SourceID
+		}
+		inventory.applyTo(&node)
+	}
+	d.infoMu.Unlock()
 	for _, old := range d.dir.upsertEvicting(node, proven) {
 		slog.Warn("dropping node record proven superseded by a newer identity on the same host",
 			"ip", old.IP, "droppedUuid", old.HostUUID, "droppedName", old.Name,
@@ -779,12 +795,16 @@ func (d *daemon) dropSelf(oldHostUUID, newHostUUID string) {
 	if policy, ok := d.lastPolicy[oldHostUUID]; ok {
 		d.lastPolicy[newHostUUID] = policy
 	}
+	if observation, ok := d.lastDownloads[oldHostUUID]; ok {
+		d.lastDownloads[newHostUUID] = observation.stale()
+	}
 	delete(d.lastInfo, oldHostUUID)
 	delete(d.lastInfoAt, oldHostUUID)
 	delete(d.lastModels, oldHostUUID)
 	delete(d.lastModelsByEngine, oldHostUUID)
 	delete(d.lastLoadedByEngine, oldHostUUID)
 	delete(d.lastPolicy, oldHostUUID)
+	delete(d.lastDownloads, oldHostUUID)
 	d.infoMu.Unlock()
 	if existed {
 		d.emit(noderec.NotifyNodeRemoved, noderec.DirectoryNode{HostUUID: oldHostUUID, Name: node.Name})
@@ -1578,6 +1598,9 @@ func (d *daemon) invalidatePeerServicesRoute(hostUUID string) {
 	delete(d.lastModelsByEngine, hostUUID)
 	delete(d.lastLoadedByEngine, hostUUID)
 	delete(d.lastPolicy, hostUUID)
+	if observation, ok := d.lastDownloads[hostUUID]; ok {
+		d.lastDownloads[hostUUID] = observation.stale()
+	}
 	delete(d.nodeInfoDown, hostUUID)
 	d.infoMu.Unlock()
 	d.clearUnreachable(hostUUID)
@@ -1586,6 +1609,9 @@ func (d *daemon) invalidatePeerServicesRoute(hostUUID string) {
 // forget drops all cached state only when the last directory claim disappears.
 func (d *daemon) forget(hostUUID string) {
 	d.invalidatePeerServicesRoute(hostUUID)
+	d.infoMu.Lock()
+	delete(d.lastDownloads, hostUUID)
+	d.infoMu.Unlock()
 	d.activityMu.Lock()
 	delete(d.lastActivityAt, hostUUID)
 	d.activityMu.Unlock()
