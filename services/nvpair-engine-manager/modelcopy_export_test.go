@@ -412,18 +412,19 @@ func TestModelCopyCustomAliasSecurity(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		replacement := f.artifact + ".new"
-		writeTestFile(t, replacement, []byte("swapped during hash"))
 		previous := hashProgressInterval
 		hashProgressInterval = 0
 		t.Cleanup(func() { hashProgressInterval = previous })
 		err = hashModelFiles(context.Background(), &list, func(string, int) {
-			if err := os.Rename(replacement, f.artifact); err != nil {
-				t.Fatal(err)
-			}
+			// Rewrite in place because Windows cannot replace an open file.
+			// The changed size makes sameCopyFile reject it even if mtime is unchanged.
+			writeTestFile(t, f.artifact, []byte("swapped during hash"))
 		})
 		if err == nil {
 			t.Fatal("source swap while hashing accepted")
+		}
+		if list.ExportID != "" {
+			t.Fatal("changed source received an export ID")
 		}
 		if strings.Contains(err.Error(), filepath.Dir(f.artifact)) {
 			t.Fatal("hash error disclosed host path")
