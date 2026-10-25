@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -80,7 +81,14 @@ func startProxyProc(t *testing.T, clusterDir, originNodeID string, listenPort in
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start proxy: %v", err)
 	}
-	p := &proxyProc{t: t, cmd: cmd, stdin: stdin, msgs: startMsgReader(stdout), nextID: 1}
+	p := &proxyProc{t: t, cmd: cmd, stdin: stdin, nextID: 1}
+	ready := false
+	defer func() {
+		if !ready {
+			p.stop()
+		}
+	}()
+	p.msgs = startMsgReader(stdout)
 	bindProxyFixtureIdentity(t, originNodeID, p.call)
 
 	// The mTLS ingress under test is engine-agnostic; Ollama is an arbitrary
@@ -99,6 +107,7 @@ func startProxyProc(t *testing.T, clusterDir, originNodeID string, listenPort in
 		t.Fatalf("facade/enable result = %s (err %v)", resp.Result, err)
 	}
 	p.port = enabled.Port
+	ready = true
 	return p
 }
 
@@ -118,13 +127,26 @@ func bindProxyFixtureIdentity(t *testing.T, originNodeID string, call func(strin
 }
 
 func (p *proxyProc) stop() {
+	p.t.Helper()
 	_ = p.stdin.Close()
-	done := make(chan struct{})
-	go func() { _ = p.cmd.Wait(); close(done) }()
+	done := make(chan error, 1)
+	go func() { done <- p.cmd.Wait() }()
+	var waitErr error
+	killed := false
 	select {
-	case <-done:
+	case waitErr = <-done:
 	case <-time.After(3 * time.Second):
-		_ = p.cmd.Process.Kill()
+		err := p.cmd.Process.Kill()
+		if err != nil && !errors.Is(err, os.ErrProcessDone) {
+			p.t.Errorf("kill proxy: %v", err)
+		}
+		killed = err == nil
+		waitErr = <-done
+	}
+	if waitErr != nil {
+		if _, exited := waitErr.(*exec.ExitError); !killed || !exited {
+			p.t.Errorf("wait for proxy: %v", waitErr)
+		}
 	}
 }
 
