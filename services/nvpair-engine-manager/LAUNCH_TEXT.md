@@ -176,7 +176,9 @@ lock; the declaration is checked again under that lock and retained through
 dispatch. A replacement that wins before the second check causes rejection and
 releases admission. Operation-lock cleanup precedes mutation cleanup and the
 restart owner, preserving `switchAdmission` before `opMu` ordering.
-Unconfigured launches keep the existing 8192/1 router defaults.
+Without a serving declaration, custom native preset launches follow the
+[custom preset rule](spec.md#custom-llama-preset-launch); launches without a
+preset keep the existing 8192/1 defaults.
 
 ## Launch resolution boundary
 

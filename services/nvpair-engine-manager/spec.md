@@ -36,6 +36,19 @@ defers automatic restore to switch reconciliation; the failed-reclaim latch and
 precise cold-reclaim predicate remain authoritative. There is no retry RPC or
 configuration setting, and recovery does not resume interrupted inference.
 
+## Custom llama preset launch
+
+When custom `runtime.launch_args` uses native `--models-preset` (or the preset
+is in `editable_launch.fixed_args`), omit the fixed model defaults for
+`ctx-size`, `parallel`, `sleep-idle-seconds` and `cache-ram`. These settings
+belong to each model preset; router CLI defaults would override every model.
+Preserve other fixed options, except where the user explicitly supplies the
+same option. Native aliases, long-option underscore normalization and equals
+forms identify the same setting. Explicit user model options pass through and
+override preset values without a duplicate fixed default. Preview, editable
+argument readback and pre-spawn validation use the same effective fixed
+prefix. Launches without a preset preserve the existing fixed arguments.
+
 ## Finite llama serving launch
 
 An optional versioned `runtime.serving` declaration activates the finite llama

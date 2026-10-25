@@ -352,6 +352,14 @@ with the port, and holds its operation lock through stop/rebind/start. The
 paired engine-control surface relays settings to its local broker and streams
 full authoritative snapshots to pinned peers.
 
+For custom llama.cpp launches using native `--models-preset` (including the
+equals form), model presets own context, parallelism, idle retention and cache
+RAM. Engine-manager omits the manifest's fixed `--ctx-size`, `--parallel`,
+`--sleep-idle-seconds` and `--cache-ram` defaults. Explicit user options still
+override the preset without a duplicate manifest default. Other fixed startup
+options remain, unless explicitly supplied by the user; launches without a
+preset retain their existing fixed arguments.
+
 ```
 NotInstalled --engine:install--> (HTTPS download + verify-if-pinned + user-mode run) --> Stopped
 Stopped      --engine:start----> (adopt if already serving the port, else spawn) --> Running --health--> Running
