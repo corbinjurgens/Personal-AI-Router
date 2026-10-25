@@ -653,7 +653,8 @@ func TestSwitchStopCheckpointFailureReturnsCurrentObservation(t *testing.T) {
 	writes := 0
 	useEngineFileReplacer(t, durablefile.Replacer{CreateTemp: func(dir, base string, _ os.FileMode) (durablefile.File, error) {
 		writes++
-		if writes == 2 {
+		// Stop-pending, allocated-port removal, then the post-stop checkpoint.
+		if writes == 3 {
 			return nil, errors.New("injected post-stop checkpoint failure")
 		}
 		return os.CreateTemp(dir, base+".*.tmp")

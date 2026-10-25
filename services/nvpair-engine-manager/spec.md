@@ -36,6 +36,19 @@ defers automatic restore to switch reconciliation; the failed-reclaim latch and
 precise cold-reclaim predicate remain authoritative. There is no retry RPC or
 configuration setting, and recovery does not resume interrupted inference.
 
+Before spawning a process-mode engine configured with `runtime.port: 0`, the
+desired-state owner durably saves its selected endpoint in the optional
+`allocatedPorts` map in `engine-state.json`. Restore reads that endpoint before
+allocating a new port or probing readiness, then applies the existing positive
+port, managed-install-path and current executable-image predicate. A matching
+orphan is stopped and verified before a cold launch; a foreign listener is
+never signalled. The endpoint is execution evidence, not authority to terminate
+a process or a change to saved On/Off intent. Clean stop, including shutdown,
+clears it; failed termination retains it. If endpoint removal fails after a
+verified stop, later Stop, Sleep or shutdown retries that write without changing
+saved intent. Files without this map retain their previous semantics, and
+fixed-port engines continue using their configured port.
+
 ## Custom llama preset launch
 
 When custom `runtime.launch_args` uses native `--models-preset` (or the preset

@@ -175,6 +175,15 @@ func TestE2EDesiredStateAcrossShutdownRPC(t *testing.T) {
 // A hard manager death leaves its owned child alive. Saved ON must reclaim
 // that exact managed image on the configured port before starting a new child.
 func TestE2ERestoreReclaimsOwnedOrphanAfterHardKill(t *testing.T) {
+	testE2ERestoreReclaimsOwnedOrphan(t, false)
+}
+
+func TestE2ERestoreReclaimsPortZeroOrphanAfterHardKill(t *testing.T) {
+	testE2ERestoreReclaimsOwnedOrphan(t, true)
+}
+
+func testE2ERestoreReclaimsOwnedOrphan(t *testing.T, portZero bool) {
+	t.Helper()
 	cfg, home := t.TempDir(), t.TempDir()
 	base := cfg
 	if runtime.GOOS == "darwin" {
@@ -194,6 +203,9 @@ func TestE2ERestoreReclaimsOwnedOrphanAfterHardKill(t *testing.T) {
 	manifest := testEngineManifest(bin)
 	platform := manifest.Platforms[hostKey()]
 	platform.Runtime.Port = port
+	if portZero {
+		platform.Runtime.Port = 0
+	}
 	platform.Runtime.Env["FAKE_PID_FILE"] = pidFile
 	manifest.Platforms[hostKey()] = platform
 	for _, dir := range []string{
@@ -206,8 +218,15 @@ func TestE2ERestoreReclaimsOwnedOrphanAfterHardKill(t *testing.T) {
 	first := startE2EManager(t, cfg, home)
 	send(t, first.stdin, 1, "engine:start", map[string]any{"engine": "fake"})
 	var started EngineStatus
-	if err := json.Unmarshal(waitResult(t, first.frames, "1", 20*time.Second), &started); err != nil || !started.Running || started.Port != port {
+	if err := json.Unmarshal(waitResult(t, first.frames, "1", 20*time.Second), &started); err != nil || !started.Running || started.Port <= 0 || (!portZero && started.Port != port) {
 		t.Fatalf("initial start = %+v, err=%v; want running on port %d", started, err, port)
+	}
+	port = started.Port
+	store := newDesiredStateStore(filepath.Join(root, "engine-bin"))
+	if portZero {
+		if saved, err := store.allocatedPort("fake"); err != nil || saved != port {
+			t.Fatalf("saved allocated port = %d, %v; want %d", saved, err, port)
+		}
 	}
 	data, err := os.ReadFile(pidFile)
 	if err != nil {
@@ -244,7 +263,7 @@ func TestE2ERestoreReclaimsOwnedOrphanAfterHardKill(t *testing.T) {
 	waitNotify(t, second.frames, "engine:state-changed", 20*time.Second)
 	send(t, second.stdin, 2, "engine:status", map[string]any{"engine": "fake"})
 	var restored EngineStatus
-	if err := json.Unmarshal(waitResult(t, second.frames, "2", 5*time.Second), &restored); err != nil || !restored.Running {
+	if err := json.Unmarshal(waitResult(t, second.frames, "2", 5*time.Second), &restored); err != nil || !restored.Running || restored.Port != port {
 		t.Fatalf("restored status = %+v, err=%v; want owned running process", restored, err)
 	}
 	data, err = os.ReadFile(pidFile)
@@ -259,6 +278,11 @@ func TestE2ERestoreReclaimsOwnedOrphanAfterHardKill(t *testing.T) {
 	waitE2EProcessDead(t, oldPID)
 	send(t, second.stdin, 3, "engine:stop", map[string]any{"engine": "fake"})
 	waitResult(t, second.frames, "3", 10*time.Second)
+	if portZero {
+		if saved, err := store.allocatedPort("fake"); err != nil || saved != 0 {
+			t.Fatalf("clean stop retained allocated port = %d, %v", saved, err)
+		}
+	}
 	second.stop(t)
 	if pidAlive(newPID) || portServing(port) {
 		t.Fatalf("replacement survived stop: pid=%d alive=%v portServing=%v", newPID, pidAlive(newPID), portServing(port))

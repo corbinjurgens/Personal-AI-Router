@@ -93,9 +93,12 @@ type engineState struct {
 	runID        string
 	launchDigest string
 	port         int
-	binPath      string
-	proc         *managedProc
-	healthStop   context.CancelFunc
+	// portCleanupPending retains a failed endpoint-removal write after the
+	// process has stopped, so a later stop/sleep/shutdown retries it.
+	portCleanupPending bool
+	binPath            string
+	proc               *managedProc
+	healthStop         context.CancelFunc
 	// startCancel lets StopAll unblock doStart before waiting on opMu.
 	startCancel context.CancelCauseFunc
 	// relaunch owns a bounded recovery episode after an unexpected owned exit.
@@ -147,8 +150,8 @@ type Executor struct {
 	progress  *progressHub
 	downloads *modelDownloads
 	baseDir   string // user-scoped install base
-	// desired persists explicit per-engine ON/OFF intent. Runtime state remains
-	// in-memory; shutdown cleanup must not rewrite this store.
+	// desired persists explicit per-engine ON/OFF intent and allocated endpoints.
+	// Shutdown clears endpoint evidence without rewriting saved intent.
 	desired *desiredStateStore
 	// nodeProjection is the broker's last node projection, served with the
 	// model inventory (nodeprojection.go).

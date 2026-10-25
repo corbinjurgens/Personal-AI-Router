@@ -20,6 +20,14 @@ three unsuccessful attempts leave the existing unexpected-exit error standing.
 Explicit stop, pause/sleep and shutdown cancel recovery; pending switches retain
 their recovery owner and failed orphan reclaim still fences adoption.
 
+Process-mode manifests with `runtime.port: 0` save their allocated endpoint in
+the desired-state file before spawn. After a manager crash, restore uses that
+port with the same managed-path and executable-image checks as fixed-port
+orphan reclaim, stopping a matching orphan before launching cold. Foreign
+processes are preserved. A clean stop clears the endpoint while shutdown
+preserves saved On/Off intent. Older files without endpoint metadata keep their
+existing restore behavior.
+
 ### llama.cpp backend checkpoint
 
 The `llamacpp` manifest runs `llama-server` in router mode on loopback port

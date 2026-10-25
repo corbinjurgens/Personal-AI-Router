@@ -27,6 +27,9 @@ type desiredStateFile struct {
 	PendingSwitch      *settings.SwitchCheckpoint `json:"pendingSwitch,omitempty"`
 	PendingSwitchPorts *switchCheckpointPorts     `json:"pendingSwitchPorts,omitempty"`
 	Engines            map[string]bool            `json:"engines"`
+	// AllocatedPorts locates process-mode port-zero launches after manager death.
+	// A port is evidence only; reclaim still checks the current managed image.
+	AllocatedPorts map[string]int `json:"allocatedPorts,omitempty"`
 	// OffBy records who saved each engine Off: intentLocal or intentPeer. An
 	// engine saved Off with no entry predates provenance and counts as local.
 	OffBy  map[string]intentOrigin `json:"offBy,omitempty"`
@@ -102,6 +105,52 @@ func (s *desiredStateStore) get(engine string) (enabled, known bool, err error) 
 	}
 	enabled, known = state.Engines[engine]
 	return enabled, known, nil
+}
+
+func (s *desiredStateStore) allocatedPort(engine string) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	state, err := s.load()
+	return state.AllocatedPorts[engine], err
+}
+
+// setAllocatedPort records the endpoint before spawn. Zero clears execution
+// evidence after a clean stop without changing the user's saved intent.
+func (s *desiredStateStore) setAllocatedPort(engine string, port int) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	state, err := s.load()
+	if err != nil {
+		return err
+	}
+	if state.AllocatedPorts[engine] == port {
+		return nil
+	}
+	if s.path == "" {
+		return errors.New("no user data directory is available")
+	}
+	if port == 0 {
+		delete(state.AllocatedPorts, engine)
+	} else {
+		if port < 1 || port > 65535 {
+			return errors.New("invalid allocated engine port")
+		}
+		if state.AllocatedPorts == nil {
+			state.AllocatedPorts = make(map[string]int)
+		}
+		state.AllocatedPorts[engine] = port
+	}
+	return s.save(state)
+}
+
+// Callers hold opMu and have verified that this launch is stopped (or never
+// spawned). A failed durable removal remains work for the next stop owner.
+func (e *Executor) clearAllocatedPort(st *engineState, engine string) error {
+	err := e.desired.setAllocatedPort(engine, 0)
+	st.mu.Lock()
+	st.portCleanupPending = err != nil
+	st.mu.Unlock()
+	return err
 }
 
 // snapshot projects registered engines from one read under the store lock.
@@ -226,6 +275,11 @@ func (s *desiredStateStore) load() (desiredStateFile, error) {
 	}
 	if state.Locked == nil {
 		state.Locked = make(map[string]bool)
+	}
+	for engine, port := range state.AllocatedPorts {
+		if port < 1 || port > 65535 {
+			return desiredStateFile{}, fmt.Errorf("invalid allocated port for %s", engine)
+		}
 	}
 	for engine, locked := range state.Locked {
 		if locked && state.Engines[engine] {
@@ -369,6 +423,9 @@ func (e *Executor) reclaimOrphan(ctx context.Context, st *engineState, engine st
 		return true, err
 	}
 	e.markStopped(st, engine)
+	if rt.Port == 0 {
+		return true, e.clearAllocatedPort(st, engine)
+	}
 	return true, nil
 }
 

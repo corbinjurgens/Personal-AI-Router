@@ -156,6 +156,15 @@ func (e *Executor) doStart(ctx context.Context, st *engineState, engine string, 
 	rt := st.plat.Runtime
 	port := st.port
 	st.mu.Unlock()
+	if port == 0 && rt.modeOrDefault() == "process" && opts.ReclaimOwned {
+		port, err = e.desired.allocatedPort(engine)
+		if err != nil {
+			return err
+		}
+		st.mu.Lock()
+		st.port = port
+		st.mu.Unlock()
+	}
 	reclaimPort := port
 	if opts.Port > 0 {
 		port = opts.Port
@@ -427,6 +436,17 @@ func (e *Executor) bringUpProcessWithSnapshot(ctx context.Context, st *engineSta
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	// Persist before spawn so even a hard kill during readiness leaves enough
+	// endpoint evidence for the existing managed-path/image reclaim predicate.
+	allocated := rt.Port == 0
+	if allocated {
+		if err := e.desired.setAllocatedPort(engine, port); err != nil {
+			return fmt.Errorf("persist %s allocated port: %w", engine, err)
+		}
+		st.mu.Lock()
+		st.portCleanupPending = false
+		st.mu.Unlock()
+	}
 	proc, err := startManagedProc(launch.Bin, launch.Args, launch.Env, func(stream, line string) {
 		if serving {
 			if prepared.Credential != "" {
@@ -445,6 +465,9 @@ func (e *Executor) bringUpProcessWithSnapshot(ctx context.Context, st *engineSta
 		}
 	})
 	if err != nil {
+		if allocated {
+			err = errors.Join(err, e.clearAllocatedPort(st, engine))
+		}
 		werr := fmt.Errorf("start %s: %w", engine, err)
 		if serving {
 			werr = servingError("NE spawn: process could not be started.")
@@ -502,6 +525,9 @@ func (e *Executor) bringUpProcessWithSnapshot(ctx context.Context, st *engineSta
 		st.mu.Lock()
 		st.proc = nil
 		st.mu.Unlock()
+		if allocated {
+			err = errors.Join(err, e.clearAllocatedPort(st, engine))
+		}
 		werr := fmt.Errorf("engine %q did not become ready: %w", engine, diagnostics.failure(err))
 		e.reportStartFailedUnlessShuttingDown(ctx, engine, werr)
 		e.emitState(engine)
@@ -716,14 +742,20 @@ func (e *Executor) doStop(st *engineState, engine string) error {
 }
 
 // Switch recovery carries its cancellation through fallback orphan cleanup.
-func (e *Executor) doStopContext(ctx context.Context, st *engineState, engine string) error {
+func (e *Executor) doStopContext(ctx context.Context, st *engineState, engine string) (err error) {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 	st.mu.Lock()
 	rt := st.plat.Runtime
 	fenced, port, reclaimPID := st.reclaimFailed, st.port, st.reclaimPID
+	needsPortCleanup := st.running || fenced || st.portCleanupPending
 	st.mu.Unlock()
+	defer func() {
+		if err == nil && needsPortCleanup && rt.Port == 0 && rt.modeOrDefault() == "process" {
+			err = e.clearAllocatedPort(st, engine)
+		}
+	}()
 	if fenced {
 		if !e.shuttingDown.Load() {
 			reclaimed, err := e.reclaimOrphan(ctx, st, engine, port)
