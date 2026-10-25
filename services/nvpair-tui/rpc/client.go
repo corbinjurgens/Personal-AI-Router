@@ -573,6 +573,23 @@ func (c *Client) SetHistorySubscription(wanted bool) {
 	h.mu.Unlock()
 }
 
+// RefreshHistory requests a fresh baseline through the existing serialized
+// history controller. It preserves accepted rows and coalesces pending reads.
+func (c *Client) RefreshHistory() {
+	if c.history == nil {
+		return
+	}
+	h := c.history
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if !h.wanted || h.exhausted {
+		return
+	}
+	h.loading = true
+	h.changed()
+	h.signal()
+}
+
 func (h *historySession) bind(t *transport, r io.Reader) {
 	h.readMu.Lock()
 	defer h.readMu.Unlock()
