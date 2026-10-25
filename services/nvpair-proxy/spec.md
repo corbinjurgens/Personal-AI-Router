@@ -871,16 +871,23 @@ complete valid events, including SSE heartbeat comments. Partial byte drips do
 not refresh it. It is separate from the first-body, dispatch and client-write
 bounds. Each client write/flush retains its 30-second deadline, refreshed for
 each operation; it bounds a stuck client, not time spent waiting for generation.
-Frames are held in volatile memory only: at most 1 MiB per raw frame and
-64 MiB of live frame-buffer allocations process-wide across facades, reserved
-before allocation/growth. Exhaustion terminates explicitly rather than waiting
-for memory. The category is subordinate to the inference aggregate budget.
+Frames are held in volatile memory only: at most 1 MiB per raw frame. Frame
+reservations compete with all other inference storage for the configured I8
+process-wide root across facades; there is no independent aggregate stream
+cutoff. Each request's frame scope retains its 64 MiB limit. Storage is reserved
+before allocation/growth; reader exhaustion terminates explicitly rather than
+waiting for memory.
 Before dispatch, an effectively enabled managed stream reserves separate response
 working storage for metadata, choice tracking, read scratch, its parser,
 raw frame storage and, for SSE, multiline assembly. One bounded lease covers
-the fixed storage plus two 1 MiB raw arrays and, for SSE, two 1 MiB payload
-arrays, so replacement overlap is prepaid before allocation. Actual frame
-allocations borrow that lease and their total cannot exceed its capacity. Local numeric
+the fixed storage plus two 1 MiB arrays for NDJSON or three for SSE. Raw and
+payload growth run synchronously under the reader lock: raw replacement keeps
+old/new raw arrays plus the retained payload; payload replacement keeps the raw
+array plus old/new payload arrays. Each array is bounded by 1 MiB. Both pairs
+never overlap, and payload replacement does not copy or retain old contents.
+Thus replacement overlap is prepaid before allocation without summing mutually
+exclusive peaks. Actual frame allocations borrow that lease and their total
+cannot exceed its capacity. Local numeric
 streams reserve a 96 KiB parser; local syntax-only and peer streams reserve
 16 KiB. OpenAI `/v1` routes default to non-streaming when `stream` is omitted
 or null; native Ollama NDJSON routes default to streaming. An unexpected
@@ -892,11 +899,19 @@ storage, and peer non-streaming requests reserve no preparation grants.
 This envelope does not share the request parser or performance fingerprint charge.
 Each pre-dispatch aggregate acquisition may wait up to the configured I8
 `waitSeconds` (zero for immediate refusal). Each acquisition joins the FIFO
-tail with a fresh deadline and holds earlier grants while queued; a full
-stream category refuses at once. Exhausted capacity returns 503, while a request or
-choice count that cannot fit the applicable limit returns 413, including an
+tail with a fresh deadline and holds earlier grants while queued. Exhausted
+capacity returns 503, while a request or choice count that cannot fit the
+applicable limit returns 413, including an
 impossible OpenAI choice count on a non-streaming request. Native NDJSON routes
 ignore `n`. Reader growth does not wait.
+Existing and new per-request scopes keep the same individual limit when root
+capacity changes. A queued proposal reserves its request scope, but receives
+no root charge until its FIFO grant fits current root capacity. Independent
+stream proposals may total more than root capacity and grant sequentially as
+earlier owners drain. A decrease preserves individually feasible queued
+proposals and live leases; no new grant can increase an over-capacity root.
+Cancellation or expiry returns a queued reservation without affecting admitted
+envelopes.
 The response reader claims the admitted storage without another root charge even
 if aggregate capacity decreases before the first output. Live readers retain
 their working allocations between frames, so an admitted stream can drain
@@ -923,22 +938,22 @@ also bind first. These isolated preparation ceilings are not throughput guarante
 
 | Preparation class | 192 MiB | 256 MiB | 1024 MiB |
 | --- | ---: | ---: | ---: |
-| Self numeric stream | 15 | 15 | 15 |
-| Self syntax stream | 15 | 15 | 15 |
+| Self numeric stream | 57 | 76 | 307 |
+| Self syntax stream | 59 | 78 | 315 |
 | Self non-stream | 874 | 1166 | 4665 |
 | Self omitted-flag OpenAI non-stream | 875 | 1167 | 4671 |
-| Peer stream | 15 | 15 | 15 |
+| Peer stream | 61 | 82 | 328 |
 | Peer non-stream | 2047 | 2729 | 10919 |
 
 The omitted-flag row uses `{"model":"m"}`; the explicit non-stream row
 includes `"stream":false`, so its retained request and fingerprint are larger.
-Each ceiling is the smaller of the aggregate capacity divided by the request
-charge and the existing 64 MiB stream category divided by the frame charge
-(the latter is absent for non-streams). Prepaying worst-case frame overlap
-reduces the one-choice SSE ceiling to 15 under the fixed 64 MiB stream category.
+Each ceiling is the aggregate capacity divided by the complete request charge,
+rounded down. A one-choice numeric SSE envelope is 3,256,321 bytes; the complete
+isolated request charge is 3,486,464 bytes.
 The envelope is a logical reservation; arrays still allocate only as needed.
-The stream category does not scale with I8 capacity. No whole-response prefix
-is retained. Real slow-model acceptance of the idle default remains pending.
+These counts and bytes are not physical memory or RSS measurements.
+No whole-response prefix is retained. Real slow-model acceptance of the idle
+default remains pending.
 
 On premature EOF, read failure, idle expiry, malformed framing or a memory bound,
 the old body closes and the torn tail is discarded. OpenAI receives
@@ -1431,8 +1446,8 @@ paired ingress: retained bodies, copies/rewrites, parsing/preparation and
 response buffers. It charges allocation capacity before allocation, including
 both arrays during growth, and retains a charge until the last borrower
 releases it. It is not a process RSS bound, an engine/GPU memory limit, or a
-promise about allocator/transport overhead. The stream category remains
-subordinate to this root (§5.2). Live registry metadata and routing snapshot
+promise about allocator/transport overhead. Stream envelopes use this same
+root (§5.2). Live registry metadata and routing snapshot
 copy/encoding storage also use this root (§12.5.1); cancellation of an existing
 owner requires no additional capacity and remains reachable under byte pressure.
 

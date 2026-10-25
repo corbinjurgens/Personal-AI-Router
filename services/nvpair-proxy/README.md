@@ -378,16 +378,18 @@ Successful managed streaming requires protocol completion: OpenAI `[DONE]`, or
 all requested choices' finish reasons followed by clean EOF; Ollama `done:true`.
 The next complete valid event must arrive within 60 seconds, including SSE
 heartbeat comments; partial byte drips do not refresh that idle interval.
-Frames use volatile memory only, with a 1 MiB raw-frame limit and 64 MiB of live
-frame-buffer reservations shared across facades. No response content is logged
-or persisted, and no whole-response prefix is retained.
+Frames use volatile memory only, with a 1 MiB raw-frame limit. Frame reservations
+compete with all other inference storage for the configured process-wide buffer
+root across facades. Each request's frame scope remains limited to 64 MiB.
+No response content is logged or persisted, and no whole-response prefix is retained.
 
 Effectively enabled streams prepay a bounded reader envelope, including raw-frame
-and SSE payload replacement overlap up to the frame limit. Allocations borrow
-that lease and cannot exceed it. Each aggregate acquisition
-may use the configured inference-buffer wait, while a full stream category
-refuses immediately. Local non-streams retain telemetry preparation and peer
-non-streams add none. Admitted readers can grow within that envelope and drain
+and SSE payload replacement overlap up to the frame limit. Growth replaces one
+array at a time, so SSE prepays three 1 MiB arrays rather than two replacement
+pairs together. Allocations borrow that lease and cannot exceed it. Each aggregate acquisition
+uses the root's FIFO queue and configured inference-buffer wait; there is no
+independent process-wide stream cutoff. Local non-streams retain telemetry
+preparation and peer non-streams add none. Admitted readers can grow within that envelope and drain
 after a cap decrease; new admissions and pre-output retries require current capacity. See the
 spec's preparation ceiling table and drain conditions, including protocol
 defaults and responses that acquire fresh reader grants.
