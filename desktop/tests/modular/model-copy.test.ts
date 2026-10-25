@@ -9,7 +9,8 @@ import {
     parseModelCopyFrame,
     parseModelCopyResult,
     parseModelCopyCapabilities,
-    parseActiveModelCopies
+    parseActiveModelCopies,
+    isModelCopyTerminal
 } from '@/electron/service-bridge/model-copy'
 import { getModularBridgeState } from '@/electron/service-bridge/modular-state'
 import { getModularSupervisor } from '@/electron/service-bridge/modular-supervisor'
@@ -80,10 +81,14 @@ function deferred<T>() {
     let resolve: (value: T) => void = () => {
         throw new Error('Uninitialized deferred')
     }
-    const promise = new Promise<T>(done => {
+    let reject: (error: Error) => void = () => {
+        throw new Error('Uninitialized deferred')
+    }
+    const promise = new Promise<T>((done, fail) => {
         resolve = done
+        reject = fail
     })
-    return { promise, resolve }
+    return { promise, resolve, reject }
 }
 async function flush(): Promise<void> {
     for (let i = 0; i < 100; i++) await Promise.resolve()
@@ -147,6 +152,27 @@ describe('copy wire boundary', () => {
             opId: request.opId,
             result
         })
+    })
+    it('accepts verified content when retry traffic exceeds the artifact byte total', () => {
+        const retried = { ...result, bytesTotal: 100, bytesCopied: 150 }
+        expect(
+            parseModelCopyResult({ opId: request.opId, result: retried }, request).result
+        ).toEqual(retried)
+    })
+    const invalidByteCounts: [string, Record<string, number>][] = [
+        ['negative traffic', { bytesCopied: -1 }],
+        ['fractional traffic', { bytesCopied: 1.5 }],
+        ['negative artifact total', { bytesTotal: -1 }],
+        ['more skipped files than files', { filesSkipped: result.files + 1 }]
+    ]
+    it.each(invalidByteCounts)('still rejects %s', (_label, values) => {
+        expect(() =>
+            parseModelCopyResult({ opId: request.opId, result: { ...result, ...values } }, request)
+        ).toThrow()
+    })
+    it('recognizes explicit uncertainty as a terminal wire stage', () => {
+        expect(isModelCopyTerminal('unknown')).toBe(true)
+        expect(parseModelCopyFrame(frame({ stage: 'unknown' }))?.stage).toBe('unknown')
     })
     const invalidResults: [string, JsonValue][] = [
         ['wrong operation', { opId: 'c'.repeat(32), result }],
@@ -382,6 +408,30 @@ describe('copy state', () => {
 })
 
 describe('copy supervisor and typed API', () => {
+    it('refreshes the destination after a verified retried copy and completes artifact progress at its byte total', async () => {
+        state.setSelfId('Mac')
+        const retried = { ...result, bytesTotal: 100, bytesCopied: 150 }
+        const call = vi
+            .spyOn(supervisor, 'callProcess')
+            .mockImplementation(async (_name, method): Promise<JsonValue> => {
+                if (method === 'engine:copy-model') return { opId: request.opId, result: retried }
+                if (method === 'engine:remote-get-installed') return { engines: [] }
+                if (method === 'discovery:get-nodes') return { nodes: [] }
+                throw new Error(`Unexpected call ${method}`)
+            })
+        await expect(supervisor.copyModel(request)).resolves.toMatchObject({ result: retried })
+        expect(call).toHaveBeenCalledWith('broker', 'engine:remote-get-installed', { node: 'Joes' })
+        expect(call).toHaveBeenCalledWith('broker', 'discovery:get-nodes')
+        expect(
+            state.getEngineInitialState().activeProgress.find(p => p.opId === request.opId)
+        ).toMatchObject({
+            status: 'done',
+            nodeId: 'Joes',
+            completed: 100,
+            total: 100,
+            copyResult: { bytesCopied: 150, bytesTotal: 100 }
+        })
+    })
     it('waits for the real response without a pull timeout and refreshes only the destination', async () => {
         state.setSelfId('Mac')
         const call = vi
@@ -880,6 +930,7 @@ describe('already-open copy observers', () => {
         notify(client, frame({ opId: strayId, stage: 'done' }))
         notify(client, frame({ opId: strayId, stage: 'error' }))
         notify(client, frame({ opId: strayId, stage: 'cancelled' }))
+        notify(client, frame({ opId: strayId, stage: 'unknown' }))
         notify(client, frame({ opId: '', stage: 'downloading' }))
         expect(emitBridgePush).not.toHaveBeenCalled()
         notify(client, frame())
@@ -893,6 +944,53 @@ describe('already-open copy observers', () => {
         expect(state.getEngineInitialState().activeProgress.some(p => p.opId === strayId)).toBe(
             false
         )
+    })
+
+    it('keeps explicit unknown terminal progress uncertain through the awaited RPC settlement', async () => {
+        const client = await connectObserver('Mac')
+        const pending = deferred<JsonValue>()
+        const call = vi.spyOn(supervisor, 'callProcess').mockReturnValue(pending.promise)
+        const copying = supervisor.copyModel(request)
+        const failed = expect(copying).rejects.toMatchObject({ code: -32010 })
+        notify(client, frame())
+        notify(client, frame({ stage: 'unknown', message: 'Destination acknowledgement lost' }))
+        expect(
+            state.getEngineInitialState().activeProgress.find(p => p.opId === request.opId)
+        ).toMatchObject({ status: 'unknown', exportId })
+        pending.reject(new JsonRpcResponseError(-32010, 'Synthetic settlement error'))
+        await failed
+        const outcome = state
+            .getEngineInitialState()
+            .activeProgress.find(p => p.opId === request.opId)
+        expect(outcome).toMatchObject({
+            status: 'unknown',
+            message: 'Destination acknowledgement lost'
+        })
+        expect(outcome?.error).toBeUndefined()
+        expect(outcome?.copyResult).toBeUndefined()
+        expect(isEngineCopyInProgress(outcome)).toBe(false)
+        expect(call).toHaveBeenCalledTimes(1)
+    })
+
+    it('settles explicit unknown progress for an observer without asserting failure or success', async () => {
+        const client = await connectObserver()
+        notify(client, frame())
+        notify(client, frame({ stage: 'unknown', message: 'Destination acknowledgement lost' }))
+        const outcome = state
+            .getEngineInitialState()
+            .activeProgress.find(p => p.opId === request.opId)
+        expect(outcome).toMatchObject({
+            status: 'unknown',
+            message: 'Destination acknowledgement lost',
+            exportId
+        })
+        expect(outcome?.error).toBeUndefined()
+        expect(outcome?.copyResult).toBeUndefined()
+        expect(isEngineCopyInProgress(outcome)).toBe(false)
+        notify(client, frame({ stage: 'error', message: 'Late contradictory terminal frame' }))
+        expect(
+            state.getEngineInitialState().activeProgress.find(p => p.opId === request.opId)
+        ).toEqual(outcome)
     })
 
     it('preserves awaited result ownership and imported operations when progress arrives', async () => {

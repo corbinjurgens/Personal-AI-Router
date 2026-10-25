@@ -20,6 +20,7 @@ export interface ModelCopyProgress {
     engine: string
     model: string
     op: 'copy'
+    /** Terminal stages: done, error, cancelled, unknown (transport/acknowledgement loss). */
     stage: string
     percent?: number
     message?: string
@@ -39,7 +40,9 @@ export interface ModelCopyResult {
     model: string
     files: number
     filesSkipped: number
+    /** Total verified artifact bytes; also the completed progress value on success. */
     bytesTotal: number
+    /** Network bytes including retries; may exceed bytesTotal. */
     bytesCopied: number
     layout?: string
     exportId?: string

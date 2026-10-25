@@ -121,6 +121,9 @@ and waits without a fixed pull-duration cutoff for `{opId, result}`. The result
 retains `files`, `filesSkipped`, `bytesTotal`, `bytesCopied`, optional `layout`,
 `exportId`, `durability` (`confirmed` or `uncertain`) and
 `requiresConfiguration`. A copy receipt does not assert serving readiness.
+`bytesCopied` measures network traffic including retries and may exceed
+`bytesTotal`. Successful progress completes at the artifact total `bytesTotal`;
+the result retains the actual network byte count.
 
 `modelCopyCapabilities({nodeId, engine})`, `cancelModelCopy(opId)` and
 `activeModelCopies()` use `engine:model-copy-capabilities`,
@@ -134,6 +137,10 @@ Cancellation addresses only the exact operation ID and returns `{cancelled}`.
 Copy progress retains the complete source/destination/engine/model tuple and
 `opId`, with the visible `nodeId` set to the destination. The bridge coalesces
 active progress and retains bounded last outcomes in the engine snapshot.
+The terminal stages are `done`, `error`, `cancelled` and `unknown`. Go reports
+`unknown` for transport or acknowledgement loss. The bridge preserves this
+uncertainty through RPC settlement and on observers; an error response alone
+cannot turn an explicit unknown outcome into a definite failure.
 Custom completion messages and typed results survive independently of native
 model inventory; no routable model row is fabricated. Reconnect hydrates Go's
 active set. An operation missing from that set has an unknown outcome unless

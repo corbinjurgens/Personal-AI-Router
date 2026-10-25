@@ -107,7 +107,7 @@ export function parseModelCopyFrame(value: JsonValue | undefined): ModelCopyProg
 }
 
 export function isModelCopyTerminal(stage: string): boolean {
-    return stage === 'done' || stage === 'error' || stage === 'cancelled'
+    return stage === 'done' || stage === 'error' || stage === 'cancelled' || stage === 'unknown'
 }
 
 export function modelCopyProgress(frame: ModelCopyProgress, nodeName: string): EngineProgress {
@@ -161,7 +161,7 @@ export function parseModelCopyResult(
     const filesSkipped = count(result.filesSkipped)
     const bytesTotal = count(result.bytesTotal)
     const bytesCopied = count(result.bytesCopied)
-    if (filesSkipped > files || bytesCopied > bytesTotal) return invalid()
+    if (filesSkipped > files) return invalid()
     return {
         opId: request.opId,
         result: {

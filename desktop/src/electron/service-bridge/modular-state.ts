@@ -332,7 +332,7 @@ class ModularBridgeState {
             sequence: number
             active: boolean
             awaitingResponse: boolean
-            terminal?: 'error' | 'cancelled'
+            terminal?: 'error' | 'cancelled' | 'unknown'
         }
     >()
     private modelCopySequence = 0
@@ -1093,7 +1093,7 @@ class ModularBridgeState {
             ...progress,
             expectedExportId: request.expectedExportId,
             exportId: result?.exportId ?? previous?.exportId,
-            completed: result?.bytesCopied ?? previous?.completed,
+            completed: result?.bytesTotal ?? previous?.completed,
             total: result?.bytesTotal ?? previous?.total,
             copyResult: result,
             message: completion,
@@ -1218,9 +1218,10 @@ class ModularBridgeState {
         const expectedExportId = copy.request.expectedExportId ?? previous?.exportId
         if (frame.exportId && expectedExportId && frame.exportId !== expectedExportId) return
         copy.sequence = ++this.modelCopySequence
-        if (frame.stage === 'error' || frame.stage === 'cancelled') copy.terminal = frame.stage
+        if (frame.stage === 'error' || frame.stage === 'cancelled' || frame.stage === 'unknown')
+            copy.terminal = frame.stage
         if (isModelCopyTerminal(frame.stage)) {
-            if (!copy.awaitingResponse) {
+            if (!copy.awaitingResponse || frame.stage === 'unknown') {
                 this.publishModelCopy({
                     ...progress,
                     exportId: progress.exportId ?? previous?.exportId
