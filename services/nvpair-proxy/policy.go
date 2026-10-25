@@ -139,6 +139,15 @@ func (p *Proxy) applySetPolicy(params json.RawMessage) (string, error) {
 		return "", err
 	}
 	policy := in.Policy
+	// Prepare the immutable process descriptor outside identityMu. Policy replay
+	// must establish a source even before this run registers its first request.
+	var source *routingSourceDirectory
+	if p.routingFactSource() == nil && nodepolicy.ValidateRoutingIdentity(in.OriginNodeID, p.runID) == nil {
+		process := &routingProcessDescriptor{}
+		process.originLen = uint16(copy(process.origin[:], in.OriginNodeID))
+		process.runLen = uint16(copy(process.run[:], p.runID))
+		source = &routingSourceDirectory{process: process}
+	}
 	p.identityMu.Lock()
 	if nodepolicy.ValidateRoutingIdentity(in.OriginNodeID, p.runID) != nil ||
 		(p.originNodeID != "" && p.originNodeID != in.OriginNodeID) {
@@ -151,7 +160,11 @@ func (p *Proxy) applySetPolicy(params json.RawMessage) (string, error) {
 		return "", err
 	}
 	p.originNodeID = in.OriginNodeID
+	if p.requestStorage.source == nil {
+		p.requestStorage.source = source
+	}
 	p.identityMu.Unlock()
+	routingHistoryWake(p.newRoutingHistory().wake)
 	// Only one ledger activation may run at once. A newer transition may
 	// already have replaced admission while an older durable write finishes.
 	// Obsolete waiters must not overwrite the newer account snapshot.

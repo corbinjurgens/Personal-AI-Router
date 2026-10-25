@@ -27,6 +27,7 @@ import (
 	"nvpair-shared/applog"
 	"nvpair-shared/clustertrust"
 	"nvpair-shared/engines"
+	"nvpair-shared/jsonrpc"
 	"nvpair-shared/netmon"
 	"nvpair-shared/netpick"
 	"nvpair-shared/nodeactivity"
@@ -267,8 +268,7 @@ func bufferBodyAndModel(w http.ResponseWriter, r *http.Request, limit int64) ([]
 }
 
 type Proxy struct {
-	// Demand-only diagnostics owner. No production caller starts it before the
-	// atomic history integration. Inference never acquires this mutex.
+	// One process-wide diagnostics owner. Inference never acquires this mutex.
 	routingHistoryMu sync.Mutex
 	routingHistory   *proxyRoutingHistory
 
@@ -375,6 +375,9 @@ func (p *Proxy) newRoutingHistory() *proxyRoutingHistory {
 	defer p.routingHistoryMu.Unlock()
 	if p.routingHistory == nil {
 		p.routingHistory = newProxyRoutingHistory(p)
+		if err := p.codec.attachRoutingHistory(p.routingHistory); err != nil {
+			panic(err) // Fixed bank dimensions and one construction must agree.
+		}
 	}
 	return p.routingHistory
 }
@@ -392,6 +395,7 @@ func NewProxy(codec *Codec) *Proxy {
 		performance: performanceQueue{wake: make(chan struct{}, 1)},
 	}
 	p.routing = &routingListener{host: p}
+	p.newRoutingHistory()
 	capacity, wait, err := p.bufferSettings(nodepolicy.Default())
 	if err != nil {
 		panic(err) // Built-in defaults must satisfy the individual body limit.
@@ -476,7 +480,16 @@ func (p *Proxy) Run(ctx context.Context) error {
 	ctx, cancel := context.WithCancel(ctx)
 	p.cancel = cancel
 	p.serveCtx = ctx
+	// History borrows this process lifetime, including EOF-driven shutdown.
+	// Ordinary notifications keep the terminal session's existing lifetime.
+	history := p.newRoutingHistory()
+	history.parent = ctx
 	defer cancel()
+	historyDone := make(chan struct{})
+	go func() {
+		defer close(historyDone)
+		history.run()
+	}()
 	go p.sendPerformance(ctx)
 
 	// Keep the "is this address local?" set fresh as interfaces come and go,
@@ -506,6 +519,7 @@ func (p *Proxy) Run(ctx context.Context) error {
 	shutCtx, shutCancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer shutCancel()
 	p.shutdown(shutCtx)
+	<-historyDone // Actual writes and their interruption callbacks have joined.
 
 	return err
 }
@@ -1357,8 +1371,24 @@ func (p *Proxy) readLoop(ctx context.Context) error {
 			if err == io.EOF || ctx.Err() != nil {
 				return nil
 			}
-			log.Printf("JSON-RPC read error: %v", err)
-			continue
+			var history *jsonrpc.HistoryFailure
+			if stderrors.As(err, &history) {
+				if refusal := history.Refusal; refusal != nil {
+					// The raw guard alone attributes this ID. Finish the fixed
+					// reply before the next read reuses its token/output backing.
+					if err := p.codec.RespondHistoryError(&refusal.ReplyID, refusal.Code); err != nil {
+						return err
+					}
+				}
+				slog.Debug("routing history parent frame rejected", "category", history.Category, "count", history.Count)
+				continue
+			}
+			var decode *jsonrpc.DecodeError
+			if stderrors.As(err, &decode) {
+				slog.Warn("JSON-RPC frame rejected", "category", "invalid-shape", "count", 1)
+				continue
+			}
+			return err // Physical overflow/EOF/transport failure cannot be retried.
 		}
 		p.handleMessage(msg)
 	}
@@ -1395,6 +1425,15 @@ func (p *Proxy) handleMessage(msg *Message) {
 			p.codec.RespondError(msg.ID, -32603, "internal error handling "+msg.Method)
 		}
 	}()
+
+	if _, history := nodepolicy.RoutingHistoryTransportSchema(msg.Method, false); history {
+		if msg.Method == nodepolicy.NotifyRoutingHistoryAccepted && msg.IsNotification() {
+			p.newRoutingHistory().acceptNotification(msg.Params)
+		} else if msg.IsRequest() {
+			_ = p.codec.RespondHistoryError(msg.ID, -32601)
+		}
+		return
+	}
 
 	if msg.Method == applog.SetLevelMethod {
 		resolved, err := applog.HandleSetLevelParams(msg.Params)

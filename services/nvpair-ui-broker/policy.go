@@ -1582,6 +1582,9 @@ func (b *Broker) sendPolicyStateLocked(ctx context.Context, pp *proxyProcess, ki
 	switch {
 	case activates != "":
 		changed := b.recordActivation(pp, activates, result, rpcErr, err)
+		// recordActivation has released nodePolicy.mu. A repeated valid ACK
+		// still establishes the exact process binding after a pre-bind window.
+		b.bindRoutingHistoryActivation(pp)
 		b.refreshStrictAdvertisement()
 		return changed || activationChanged
 	case kind == pushAvailability:

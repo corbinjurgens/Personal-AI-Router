@@ -13,6 +13,7 @@ import (
 	"log/slog"
 	"net"
 	"os"
+	"path/filepath"
 	"reflect"
 	"slices"
 	"strconv"
@@ -28,6 +29,308 @@ import (
 	"nvpair-shared/nodepolicy"
 	"nvpair-shared/pipeio"
 )
+
+func TestRoutingHistoryMainAssemblyStartsBeforeSupervisionAndJoinsFailure(t *testing.T) {
+	client, server := net.Pipe()
+	t.Cleanup(func() { _ = client.Close(); _ = server.Close() })
+	lifetime := newBrokerMainLifetime()
+	t.Cleanup(lifetime.cancel)
+	dir := t.TempDir()
+	b, err := newMainBroker(lifetime, workerPaths{scanner: filepath.Join(dir, "missing-scanner"), clusterDir: filepath.Join(dir, "cluster")}, server, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b.routingHistory == nil || b.routingHistory.lifetime != lifetime || b.codec == nil || !b.codec.ReadRetirementEnabled() {
+		t.Fatal("main assembly omitted history or its guarded local codec")
+	}
+	drained := make(chan struct{})
+	go func() { defer close(drained); _, _ = io.Copy(io.Discard, client) }()
+	if err := b.serveMainLifetime(lifetime); err == nil {
+		t.Fatal("missing scanner unexpectedly started")
+	}
+	historyAwaitReadSignal(t, drained)
+	if !b.routingHistory.started || b.routingHistory.parent.Err() != context.Canceled {
+		t.Fatal("history did not start before supervision or join its failed startup")
+	}
+}
+
+func TestRoutingHistoryMainAssemblyClosesFailedTransport(t *testing.T) {
+	client, server := net.Pipe()
+	t.Cleanup(func() { _ = client.Close(); _ = server.Close() })
+	lifetime := newBrokerMainLifetime()
+	t.Cleanup(lifetime.cancel)
+	// A stdio role requires the captured input/output owners, not a connection
+	// silently treated as ordinary JSON-RPC when the guard cannot attach.
+	b, err := newMainBroker(lifetime, workerPaths{clusterDir: t.TempDir()}, server, false)
+	if !errors.Is(err, jsonrpc.ErrHistoryInvalid) || b != nil || lifetime.root.Err() == nil {
+		t.Fatalf("failed assembly = %v / %v, parent = %v", b, err, lifetime.root.Err())
+	}
+	if _, err := client.Read(make([]byte, 1)); err != io.EOF {
+		t.Fatalf("failed assembly retained transport: %v", err)
+	}
+}
+
+type historyMainTransport struct {
+	io.Reader
+	*historyHeldOutput
+	closed chan struct{}
+	once   sync.Once
+}
+
+func (w *historyMainTransport) Close() error {
+	w.once.Do(func() { close(w.closed) })
+	return nil
+}
+
+func TestRoutingHistoryMainAssemblyJoinsBlockedInitialOnFailure(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		w := &historyHeldOutput{entered: make(chan struct{}), finish: make(chan struct{})}
+		var release sync.Once
+		finish := func() { release.Do(func() { close(w.finish) }) }
+		defer finish()
+		transport := &historyMainTransport{Reader: strings.NewReader(""), historyHeldOutput: w, closed: make(chan struct{})}
+		lifetime := newBrokerMainLifetime()
+		defer lifetime.cancel()
+		dir := t.TempDir()
+		b, err := newMainBroker(lifetime, workerPaths{scanner: filepath.Join(dir, "missing-scanner"), clusterDir: filepath.Join(dir, "cluster")}, transport, true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		b.handleMessage(routingBrokerRequest(`"initial"`, nodepolicy.MethodRoutingGetInitial, `{}`))
+		<-w.entered
+		done := make(chan error, 1)
+		go func() { done <- b.serveMainLifetime(lifetime) }()
+		<-transport.closed
+		synctest.Wait()
+		select {
+		case err := <-done:
+			t.Fatalf("Serve returned before the initial Write actually completed: %v", err)
+		default:
+		}
+		if !b.routingHistory.initialBusy.Load() {
+			t.Fatal("cancellation released the frozen initial before write completion")
+		}
+		finish()
+		if err := <-done; err == nil {
+			t.Fatal("missing scanner unexpectedly started")
+		}
+		if b.routingHistory.initialBusy.Load() {
+			t.Fatal("joined initial retained admission")
+		}
+		historyRequireReadDetached(t, b.codec)
+	})
+}
+
+// Hold the required reply's actual Write borrower even after closing the
+// underlying connection has interrupted its transport operation.
+type historyRequiredReplyTransport struct {
+	net.Conn
+	entered, closed, interrupted, completed, finish chan struct{}
+	borrowed                                        []byte
+	closeOnce                                       sync.Once
+}
+
+func (w *historyRequiredReplyTransport) Write(raw []byte) (int, error) {
+	var msg Message
+	if err := json.Unmarshal(raw, &msg); err != nil {
+		return 0, err
+	}
+	if msg.Error == nil {
+		return w.Conn.Write(raw)
+	}
+	w.borrowed = raw
+	close(w.entered)
+	n, err := w.Conn.Write(raw)
+	close(w.interrupted)
+	<-w.finish
+	close(w.completed) // final application access of the actual Write borrower
+	return n, err
+}
+
+func (w *historyRequiredReplyTransport) Close() error {
+	err := w.Conn.Close()
+	w.closeOnce.Do(func() { close(w.closed) })
+	return err
+}
+
+func TestRoutingHistoryMainAssemblyInterruptsRequiredReplyOnCancellation(t *testing.T) {
+	test := func(name string, cancelRoot bool) {
+		t.Run(name, func(t *testing.T) {
+			isolateOllamaHostTestConfig(t)
+			scanner := buildServicePortFixture(t)
+			client, server := net.Pipe()
+			transport := &historyRequiredReplyTransport{
+				Conn: server, entered: make(chan struct{}), closed: make(chan struct{}),
+				interrupted: make(chan struct{}), completed: make(chan struct{}), finish: make(chan struct{}),
+			}
+			var finishOnce sync.Once
+			finish := func() { finishOnce.Do(func() { close(transport.finish) }) }
+			lifetime := newBrokerMainLifetime()
+			dir := t.TempDir()
+			b, err := newMainBroker(lifetime, workerPaths{scanner: scanner, clusterDir: filepath.Join(dir, "cluster")}, transport, true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			done := make(chan error, 1)
+			go func() { done <- b.serveMainLifetime(lifetime) }()
+			joined := false
+			t.Cleanup(func() {
+				finish()
+				lifetime.cancel()
+				_ = client.Close()
+				_ = server.Close()
+				if !joined {
+					select {
+					case <-done:
+					case <-time.After(5 * time.Second):
+						t.Error("production Serve did not join during cleanup")
+					}
+				}
+			})
+			if err := client.SetDeadline(time.Now().Add(10 * time.Second)); err != nil {
+				t.Fatal(err)
+			}
+			peer := NewCodec(client)
+			for {
+				msg, err := peer.Read()
+				if err != nil {
+					t.Fatalf("production app:ready: %v", err)
+				}
+				if msg.Method == "app:ready" {
+					break
+				}
+			}
+			// The raw guard supplies the required refusal and its borrowed ID.
+			// No initial writer is involved, and the client never reads the reply.
+			if _, err := io.WriteString(client, `{"jsonrpc":"2.0","id":"required\u0031","method":"routing:subscribe","params":null}`+"\n"); err != nil {
+				t.Fatal(err)
+			}
+			historyAwaitReadSignal(t, transport.entered)
+			pinned := bytes.Clone(transport.borrowed)
+			var refusal Message
+			if err := json.Unmarshal(pinned, &refusal); err != nil {
+				t.Fatal(err)
+			}
+			if refusal.ID == nil || string(*refusal.ID) != `"required\u0031"` || refusal.Error == nil || refusal.Error.Code != jsonrpc.HistoryInvalidCode {
+				t.Fatalf("required local refusal = %+v", refusal)
+			}
+			if cancelRoot {
+				lifetime.cancel()
+			} else {
+				b.cancel() // The actual Serve cancellation owner also cancels history.
+			}
+			historyAwaitReadSignal(t, transport.closed)
+			historyAwaitReadSignal(t, transport.interrupted)
+			if b.routingHistory.parent.Err() != context.Canceled {
+				t.Fatal("production shutdown did not cancel the history branch")
+			}
+			if !cancelRoot && lifetime.root.Err() != nil {
+				t.Fatal("Serve cancellation changed the separate main lifetime")
+			}
+			select {
+			case err := <-done:
+				joined = true
+				t.Fatalf("Serve returned before the required Write actually completed: %v", err)
+			default:
+			}
+			select {
+			case <-transport.completed:
+				t.Fatal("required Write completed before its actual borrower was released")
+			default:
+			}
+			if !bytes.Equal(pinned, transport.borrowed) {
+				t.Fatal("cancellation reused the required reply frame")
+			}
+			codec := b.codec
+			historyRequireReadPending(t, codec.RetireRead())
+			readers := &b.routingHistory.readers
+			backing := reflect.ValueOf(readers.slots[historyLocalControl].raw).Pointer()
+			if _, err := readers.acquire(historyLocalControl, readWriter{strings.NewReader(""), io.Discard}, func() {}, nil); !errors.Is(err, jsonrpc.ErrHistoryBusy) {
+				t.Fatalf("required reply borrower released its read bank early: %v", err)
+			}
+			finish()
+			select {
+			case err := <-done:
+				joined = true
+				if err != nil {
+					t.Fatalf("production Serve cancellation: %v", err)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("production Serve did not join after actual Write completion")
+			}
+			historyAwaitReadSignal(t, transport.completed)
+			historyRequireReadDetached(t, codec)
+			replacement, err := readers.acquire(historyLocalControl, readWriter{strings.NewReader(""), io.Discard}, func() {}, nil)
+			if err != nil {
+				t.Fatalf("completed required reply retained its read bank: %v", err)
+			}
+			t.Cleanup(func() { replacement.RetireRead() })
+			if reflect.ValueOf(readers.slots[historyLocalControl].raw).Pointer() != backing {
+				t.Fatal("replacement allocated another read bank")
+			}
+			historyRequireReadDetached(t, codec)
+		})
+	}
+	test("root lifetime cancellation", true)
+	test("Serve cancellation", false)
+}
+
+func TestRoutingHistoryPolicyAcknowledgementBindsAtDispatch(t *testing.T) {
+	b, _ := newPolicyBroker(t)
+	lifetime := newBrokerMainLifetime()
+	t.Cleanup(lifetime.cancel)
+	var err error
+	b.routingHistory, err = newBrokerRoutingHistory(b, lifetime)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pp, _, acks := attachAckingProxy(t, b)
+	if !b.replayPolicyToProxy(t.Context(), pp) {
+		t.Fatal("policy replay failed")
+	}
+	b.workersMu.Lock()
+	bound := b.historySourceLocked(pp) && b.historyRun == acks.runID
+	b.workersMu.Unlock()
+	if !bound {
+		t.Fatal("actual policy acknowledgement did not bind the published source")
+	}
+	row := historyRecord("9", 10, 1)
+	row.Request.ProxyRunID = acks.runID
+	// A cycle dropped before binding must be accepted on the exact same
+	// generation replay, even when the repeated policy ACK changes no state.
+	b.workersMu.Lock()
+	b.historyOrigin, b.historyRun = "", ""
+	b.workersMu.Unlock()
+	historySend(t, b, pp, "1", row)
+	historyRequireRows(t, b)
+	if changed := b.sendPolicyStateLocked(t.Context(), pp, pushPolicy); changed {
+		t.Fatal("repeated valid policy acknowledgement unexpectedly changed activation")
+	}
+	historySend(t, b, pp, "1", row)
+	historyRequireRows(t, b, row)
+	// Lost accepted reply: replay is idempotent and schedules an exact-source
+	// acknowledgement again, without another accepted record/version.
+	version := b.routingHistory.version
+	b.routingHistory.ackSource, b.routingHistory.ackGeneration = nil, ""
+	historySend(t, b, pp, "1", row)
+	if b.routingHistory.version != version || b.routingHistory.ackSource != pp || b.routingHistory.ackGeneration != "1" {
+		t.Fatal("same-generation replay changed accepted rows or lost its acknowledgement")
+	}
+	oldAck := historyMarshal(t, nodepolicy.PolicyAck{OriginNodeID: b.nodeID, RunID: acks.runID, Revision: b.nodePolicy.current.Revision})
+	fresh := historyActivate(t, b, "replacement-without-requests")
+	b.recordActivation(pp, "1", oldAck, nil, nil)
+	if b.bindRoutingHistoryActivation(pp) {
+		t.Fatal("old policy callback rebound a departed process")
+	}
+	historySend(t, b, pp, "2", row)
+	b.routingHistory.mu.Lock()
+	b.routingHistory.retireLocked()
+	b.routingHistory.mu.Unlock()
+	rows := historyRows(t, b)
+	if len(rows) != 1 || rows[0].State != "failed" || rows[0].Reason != "proxy-exited" || b.proxyProcessHandle() != fresh {
+		t.Fatalf("empty replacement failed departure retirement: %+v", rows)
+	}
+}
 
 func historyFixture(t *testing.T) (*Broker, *proxyProcess, *syncBuffer) {
 	t.Helper()
@@ -1794,26 +2097,31 @@ func TestRoutingHistoryControlScratchOwnership(t *testing.T) {
 	// Named default-amd64 source representations, not emitted allocation or
 	// placement measurements. Channel pointers/function slots in h are already
 	// counted above. Zero-sized channel elements add no backing here.
-	const roleChannels = (2 + 2 + 1 + 1 + 1 + 2) * 112 // gates, role-done, wake, handoff, consumed, local/proxy callback-done
-	const retry = 112 + 112 + 24                       // timeTimer, channel and physical Time element
-	const currentReadValues = 2*128 + 2*32 + 32        // message/header alternatives, release captures, proxy adapter
-	const roleHooks = 5*24 + 24                        // local/proxy read, fence, request/failure; Peer interrupt
-	const afterFunctions = 2 * (104 + 16)              // local retirement and active proxy Write, including stop captures
-	const localLoopCaptures = 24 + 32 + 32 + 40 + 72   // retire, callback, join defer, pump launch, dispatch
-	const handoffCopies = 2 * 40                       // current unbuffered readResult locations, no queue
-	const proxyWriteCaptures = 10 + 40 + 24 + 56 + 48  // mutex/flags, interrupt, callback, finish and defer
-	const initialLaunch = 40                           // function/captures; ID data remains in the three-location row
+	const roleChannels = (2 + 2 + 1 + 1 + 1 + 3 + 1) * 112  // gates, role-done, wake, handoff, consumed, read/write callback-done, main writer join
+	const retry = 112 + 112 + 24                            // timeTimer, channel and physical Time element
+	const currentReadValues = 2*128 + 2*32 + 32             // message/header alternatives, release captures, proxy adapter
+	const roleHooks = 5*24 + 24 + 24                        // local/proxy read, fence, request/failure; Peer and local write interrupts
+	const afterFunctions = 3 * (104 + 16)                   // local retirement and both active Writes, including stop captures
+	const localLoopCaptures = 24 + 32 + 32 + 40 + 72        // retire, callback, join defer, pump launch, dispatch
+	const handoffCopies = 2 * 40                            // current unbuffered readResult locations, no queue
+	const proxyWriteCaptures = 2 * (10 + 40 + 24 + 56 + 48) // mutex/flags, interrupt, callback, finish and defer for initial and serial writer
+	const initialLaunch = 40 + 24                           // initial launch/join; ID data remains in the three-location row
 	control += roleChannels + retry + currentReadValues + roleHooks + afterFunctions + localLoopCaptures + handoffCopies + proxyWriteCaptures + initialLaunch
+	// One production output-cancellation AfterFunc, its stop capture, fixed join
+	// channel, callback/cleanup captures and a conservative joined waiter. It
+	// registers once on history, independently of required reply Write contexts.
+	const outputCancellation = 104 + 16 + 112 + 24 + 24 + 96
+	control += outputCancellation
 	// The private factory owns main, Serve and history standard cancelCtx
 	// headers/Done/cancel captures. Only main and history get J child maps:
-	// their lifetime maxima are two and three entries, respectively. A Swiss
+	// their lifetime maxima are two and five entries, respectively. A Swiss
 	// small map retains its 48-byte header and one 136-byte interface-key group;
 	// deletion/cancellation never credits that backing as reclaimed. Ordinary
 	// RPC child graphs stay with Serve and are not duplicated as J registrations.
 	const standardRoots = 3 * (80 + 112 + 16)
 	const retainedParentMaps = 2 * (48 + 136)
 	const cancelFanout = 24
-	const mainLifetimeCaptures = 32 + 16 + 16 // signal launch, main cancellation defer, Serve cancellation defer
+	const mainLifetimeCaptures = 32 + 16 + 16 + 24 + 24 // signal launch, main/Serve cancellation, history launch and cancel/join
 	control += int(unsafe.Sizeof(*h.lifetime)) + standardRoots + retainedParentMaps + cancelFanout + mainLifetimeCaptures
 	// Initial acquisition is counted separately from the preceding existing
 	// non-acquisition controls. One initialBusy admission owns one cancelCtx,
@@ -2699,7 +3007,7 @@ func TestRoutingHistoryLocalTransportReadOwners(t *testing.T) {
 			t.Fatal(err)
 		}
 		observed := &historyObservedReadCloser{ReadCloser: owned, entered: make(chan struct{})}
-		transport := &stdioTransport{Reader: observed, Writer: io.Discard}
+		transport := &stdioTransport{Reader: observed, Writer: historyDiscardCloser{}}
 		// The seam closes the same captured reader that the codec reads through.
 		codec, err := newRoutingHistoryLocalCodec(b, transport, false)
 		if err != nil {

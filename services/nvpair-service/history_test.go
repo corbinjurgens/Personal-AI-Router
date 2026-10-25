@@ -6,11 +6,14 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
 	"net"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -22,6 +25,69 @@ import (
 	"nvpair-shared/jsonrpc"
 	"nvpair-shared/nodepolicy"
 )
+
+func TestHistoryProductionEntryServesHistoryAndOrdinaryRPC(t *testing.T) {
+	// Reuse the fixed test image's command/broker roles. This exercises run ->
+	// serve -> Run, including the real private endpoint and exec-based spawner.
+	box := newNativeSandbox(t, unusedEndpoint(t))
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), nativeRunCap)
+	defer cancel()
+	cmd := box.command(t, ctx, "--endpoint", box.endpoint, "--log-dir", filepath.Join(box.dir, "logs"), "--broker-path", exe, "--", processBrokerArg)
+	for i, entry := range cmd.Env {
+		key, _, _ := strings.Cut(entry, "=")
+		if strings.EqualFold(key, fakeBrokerEnv) {
+			cmd.Env[i] = fakeBrokerEnv + "=1"
+		}
+	}
+	var output bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &output, &output
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	joined := false
+	t.Cleanup(func() {
+		cancel()
+		if !joined {
+			<-done
+		}
+	})
+	waitUntil(t, "production service endpoint", func() bool { return alreadyAnswering(ctx, box.endpoint) })
+	h := &harness{t: t, endpoint: box.endpoint}
+	client := h.dial()
+	client.notification("app:ready")
+	// The ordinary fake broker deliberately has no history responder. The
+	// first initial stays pending. An ordinary response is its dispatch barrier;
+	// another initial must receive the service's local history-only busy reply.
+	client.request(`"pending"`, nodepolicy.MethodRoutingGetInitial, `{}`)
+	reply := client.call(`"echo\u0031"`, "echo", `{"ordinary":true}`)
+	var echo struct {
+		Ordinary bool `json:"ordinary"`
+	}
+	if reply.Error != nil {
+		t.Fatalf("ordinary echo: %+v", reply.Error)
+	}
+	if err := json.Unmarshal(reply.Result, &echo); err != nil || !echo.Ordinary {
+		t.Fatalf("ordinary echo changed: %+v / %v", echo, err)
+	}
+	reply = client.call(`"history\u0031"`, nodepolicy.MethodRoutingGetInitial, `{}`)
+	if reply.Error == nil || reply.Error.Code != jsonrpc.HistoryBusyCode {
+		t.Fatalf("history loading reply = %+v", reply)
+	}
+	if reply := client.call("3", "service/stop", `{}`); reply.Error != nil {
+		t.Fatalf("stop: %+v", reply.Error)
+	}
+	err = <-done
+	joined = true
+	if err != nil || ctx.Err() != nil {
+		t.Fatalf("production service did not join cleanly: %v / %v; %s", err, ctx.Err(), output.String())
+	}
+}
 
 type historyTestInput struct{ requests chan []byte }
 
