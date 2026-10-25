@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"log"
 	"log/slog"
-	"net"
 
 	"nvpair-shared/engines"
 	"nvpair-shared/errors"
@@ -80,24 +79,12 @@ func nextAvailablePortExcluding(start int, excludedPorts []int, available func(i
 }
 
 // portAvailable permits a fixture-owned check without changing the production
-// wildcard bind or relying on a process-wide override.
+// port preflight or relying on a process-wide override.
 func (b *Broker) portAvailable(port int) bool {
 	if b.portAvailableCheck != nil {
 		return b.portAvailableCheck(port)
 	}
 	return tcpPortAvailable(port)
-}
-
-// tcpPortAvailable uses the exact wildcard bind shape ollama-proxy uses. The
-// listener is only a preflight; the proxy's bind remains authoritative and a
-// process winning the race is handled as a normal, non-destructive failure.
-func tcpPortAvailable(port int) bool {
-	ln, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
-	if err != nil {
-		return false
-	}
-	_ = ln.Close()
-	return true
 }
 
 func (b *Broker) reportPortOwnershipBlocked(reason string) {
