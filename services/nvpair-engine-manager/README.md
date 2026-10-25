@@ -983,9 +983,12 @@ an owned cold launch; a later fresh switch target start uses that owner too.
 Foreign listeners are never killed and retain the existing port-ownership error.
 Reclaim observes caller and shutdown cancellation before signalling and while
 waiting for termination. Windows windowless orphans use `taskkill /T /F` without
-consuming the Unix graceful interval. Failed or cancelled reclaim reports a start
-failure and fences adoption, including explicit Start, until a verified stop or
-successful owned cold start. Passive status remains not running and unhealthy.
+consuming the Unix graceful interval. After a forced signal, reclaim polls for
+positive PID-exit evidence for up to the default five-second stop grace, even
+without a readiness probe; caller cancellation interrupts that wait.
+Failed or cancelled reclaim reports a start failure and fences adoption,
+including explicit Start, until a verified stop or successful owned cold start.
+Passive status remains not running and unhealthy.
 Listener refusal alone cannot clear that fence: the recorded failed-reclaim PID
 must be verified exited. Live/reused PIDs and inspection errors retain the fence;
 the retained PID never authorizes signalling without the current reclaim predicate.
