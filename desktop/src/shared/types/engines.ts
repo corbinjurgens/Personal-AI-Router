@@ -11,6 +11,7 @@ import {
     ModelExpiries,
     ModelItemStatuses
 } from '@/shared/constants/engines'
+import type { ModelDownloadEntry, ModelDownloadSnapshot } from '@/shared/types/model-download'
 
 /**
  * An engine PAIR ships: a closed literal union of the `EngineTypes` tuple.
@@ -131,6 +132,10 @@ export interface EngineProgress {
     completed?: number
     total?: number
     error?: string
+    downloadState?: ModelDownloadEntry
+    downloadStateCurrent?: boolean
+    downloadSourceId?: string
+    downloadRevision?: string
 }
 
 /**
@@ -153,12 +158,16 @@ export interface EngineModels {
     engineType: EngineType
     nodeId: string
     models: ModelItem[]
+    downloadState?: ModelDownloadSnapshot
+    downloadStateCurrent?: boolean
 }
 
 export interface ModelItem {
     name: string
     size: number
     downloaded: boolean
+    downloadState?: ModelDownloadEntry
+    downloadStateCurrent?: boolean
     status: ModelItemStatus
     parameterSize: string
     quantization: string

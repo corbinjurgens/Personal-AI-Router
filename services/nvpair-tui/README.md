@@ -188,8 +188,38 @@ Existing long-operation timeouts still report continuing work rather than
 success, while quick-operation timeouts remain failures.
 
 A remote node's models come from the discovery snapshot, which the broker
-enriches from each peer's engine manager — no extra request. This machine's come
-from `engine:models` and stay live through `engine:models-changed`.
+enriches from each peer's engine manager. This machine's come from canonical
+`engine:models` and the nested full inventory in `engine:models-changed`. Detail
+subscribes before fetching its baseline and repeats hydration after a service
+or broker reconnect. Peer hydration reads the discovery snapshot, without
+contacting a model runtime or adding per-model polling.
+
+Model rows combine canonical ready inventory, observed loaded names and the
+target's versioned `downloadState` snapshot using the shared Go DTO. Queued,
+downloading (with a percent only when measured), failed, complete and unknown
+operations remain visible even without a ready inventory entry. Loaded is an
+independent observation: a failed/unsafe model can still be loaded, and download
+completion never asserts residency or readiness. The persistence-uncertain
+qualification remains visible on its reported outcome.
+
+Load requires current canonical ready inventory and supported, valid download
+state with no matching `blocksReadiness` entry or recovery-required flag. A
+pre-effect failure without a readiness block preserves already-ready content.
+Absent, malformed, unsupported and stale observations show unknown download
+status and refuse ready-dependent dispatch. Delete refuses confirmation and
+dispatch while a current matching download is queued or in progress, including
+descriptor-normalized model names. A confirmation armed before the pull is
+rechecked on submission. Outside an active pull, Eject/Delete retain their
+existing target and authority rules. The TUI does not currently expose a Copy
+command; its model dispatcher applies the same readiness fence to a copy operation.
+Snapshots preserve exact engine/model/download identities, reject older
+revisions within a source and replace a source only from a current canonical
+read or discovery observation. Engine notifications from another or unknown
+source invalidate currentness and request canonical hydration without retiring
+the authenticated source. Disconnection preserves last-known rows
+for presentation while invalidating readiness; a same-revision successful fetch
+can restore currentness.
+These guarantees require a coordinated fleet update; older peers remain unknown.
 
 #### Engine switching
 

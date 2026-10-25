@@ -64,6 +64,44 @@ Concretely, the daemon:
 
 ### Policy advertisement refresh
 
+Model enrichment also carries the target's optional `downloadState` snapshot:
+`{version:1,sourceId,revision,recoveryRequired,entries}`. Each entry preserves
+`id`, `engine`, exact `model`, `phase`, `blocksReadiness`, optional measured
+integer `percent`, bounded `reason`, and optional `persistence:"uncertain"`.
+The shared decoder bounds snapshots to 256 KiB and 64 entries, validates source
+and operation IDs, decimal uint64 revisions and lifecycle fields, and rejects
+duplicate IDs/model keys. The target retains unresolved unsafe entries and a
+bounded recent outcome set; scanner does not reconstruct operation history.
+
+`downloadStateCurrent` is observation metadata: true follows a successful
+validated current read, false follows failure or malformed lifecycle data.
+Last-good operation details remain visible with false currentness; a successful
+same-revision read can restore true. Absent support is unknown. Explicit current
+`entries:[]` is known empty, while missing, malformed or stale state never
+certifies readiness. The canonical model inventory and observed loaded set
+remain independent; scanner neither infers completion from a model name nor
+infers loaded state from completion. Updated clients require current support
+before enabling ready-dependent actions, so the guarantee requires a coordinated
+fleet update.
+
+The HTTP inventory envelope is bounded before JSON decoding by the existing
+large-worker reply limit. A malformed, aliased, repeated or oversize lifecycle
+extension withdraws flat/per-engine ready names while retaining real loaded
+observations and any valid prior snapshot with false currentness. This prevents
+inventory-only routing consumers from treating those names as ready. An absent
+extension keeps historical inventory semantics while updated clients report
+readiness as unknown. The lifecycle extension's own 256 KiB limit remains
+independent of the outer envelope cap.
+
+Lifecycle-only changes and freshness loss emit directory updates through the
+existing refresh path. Lower revisions from the same source are ignored; a
+current replacement source retires reads begun against the prior baseline.
+Host rekey retains stale display details and final eviction clears the cache.
+Refresh uses the existing nominal 15-second sweep, its preceding refresh work
+and bounded request batches; this is eventual convergence, with no universal
+wall-clock deadline. Lifecycle state is not advertised in mDNS and introduces
+no per-model polling.
+
 The model refresh also compares the policy advertisement, including its revision
 and `pausedBy` provenance (`local` or `peer`). A policy-only change updates the
 directory and last-good cache and emits one `discovery:node-updated` with the full

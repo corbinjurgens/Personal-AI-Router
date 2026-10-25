@@ -17,6 +17,33 @@ import {
 
 let unsubscribe = (): void => {}
 
+function seedRemoteSource(nodeId: string): void {
+    getModularBridgeState().handleNotification({
+        source: 'broker',
+        method: 'discovery:nodes-changed',
+        params: {
+            nodes: [
+                {
+                    hostUuid: nodeId,
+                    name: nodeId,
+                    ipAddress: '127.0.0.2',
+                    port: 1234,
+                    models: [],
+                    modelsByEngine: {},
+                    downloadStateCurrent: true,
+                    downloadState: {
+                        version: 1,
+                        sourceId: 'a'.repeat(32),
+                        revision: '0',
+                        recoveryRequired: false,
+                        entries: []
+                    }
+                }
+            ]
+        }
+    })
+}
+
 afterEach(() => {
     unsubscribe()
     unsubscribe = () => {}
@@ -65,6 +92,7 @@ describe('pull error handling', () => {
 describe('remote pull progress', () => {
     it('keeps indeterminate percent when the wire omits percent', () => {
         const state = getModularBridgeState()
+        seedRemoteSource('remote-indeterminate')
         const progressEvents: Array<{ percent?: number }> = []
         unsubscribe = subscribePush(event => {
             if (event.channel === 'engines:progress-changed') {
@@ -72,20 +100,38 @@ describe('remote pull progress', () => {
             }
         })
 
-        state.beginRemoteModelPull('remote-node', 'lm-studio', 'demo-model')
         state.applyRemoteEngineProgress({
-            node: 'remote-node',
+            node: 'remote-indeterminate',
             engine: 'lmstudio',
             op: 'pull',
             stage: 'pulling',
-            message: 'demo-model'
+            opId: 'request-1',
+            id: '1'.repeat(32),
+            model: 'demo-model',
+            downloadState: {
+                version: 1,
+                sourceId: 'a'.repeat(32),
+                revision: '1',
+                recoveryRequired: false,
+                entries: [
+                    {
+                        id: '1'.repeat(32),
+                        engine: 'lmstudio',
+                        model: 'demo-model',
+                        phase: 'in_progress',
+                        blocksReadiness: true
+                    }
+                ]
+            }
         })
 
         expect(progressEvents.at(-1)?.percent).toBeUndefined()
+        expect(progressEvents).toHaveLength(1)
     })
 
     it('advances percent when the wire carries byte progress', () => {
         const state = getModularBridgeState()
+        seedRemoteSource('remote-percent')
         const progressEvents: Array<{ percent?: number }> = []
         unsubscribe = subscribePush(event => {
             if (event.channel === 'engines:progress-changed') {
@@ -93,17 +139,67 @@ describe('remote pull progress', () => {
             }
         })
 
-        state.beginRemoteModelPull('remote-node', 'ollama', 'llama3.1:8b')
         state.applyRemoteEngineProgress({
-            node: 'remote-node',
+            node: 'remote-percent',
             engine: 'ollama',
             op: 'pull',
             stage: 'pulling',
             percent: 42,
-            message: 'llama3.1:8b'
+            opId: 'request-2',
+            id: '2'.repeat(32),
+            model: 'llama3.1:8b',
+            downloadState: {
+                version: 1,
+                sourceId: 'a'.repeat(32),
+                revision: '1',
+                recoveryRequired: false,
+                entries: [
+                    {
+                        id: '2'.repeat(32),
+                        engine: 'ollama',
+                        model: 'llama3.1:8b',
+                        phase: 'in_progress',
+                        blocksReadiness: true,
+                        percent: 42
+                    }
+                ]
+            }
         })
 
         expect(progressEvents.at(-1)?.percent).toBe(42)
+    })
+
+    it('rejects a mismatched target id without associating the frame with a dispatched model', () => {
+        const state = getModularBridgeState()
+        const events: string[] = []
+        unsubscribe = subscribePush(event => {
+            if (event.channel === 'engines:progress-changed') events.push(event.payload.status)
+        })
+        state.applyRemoteEngineProgress({
+            node: 'remote-wrong-id',
+            engine: 'ollama',
+            op: 'pull',
+            opId: 'request-3',
+            id: '3'.repeat(32),
+            model: 'demo',
+            stage: 'done',
+            downloadState: {
+                version: 1,
+                sourceId: 'a'.repeat(32),
+                revision: '1',
+                recoveryRequired: false,
+                entries: [
+                    {
+                        id: '4'.repeat(32),
+                        engine: 'ollama',
+                        model: 'demo',
+                        phase: 'complete',
+                        blocksReadiness: false
+                    }
+                ]
+            }
+        })
+        expect(events).toEqual([])
     })
 
     it('ignores model copy frames, which name the source peer', () => {

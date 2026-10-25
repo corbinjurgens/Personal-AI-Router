@@ -35,6 +35,7 @@ import (
 	"strings"
 
 	"nvpair-shared/buildinfo"
+	"nvpair-shared/modeldownload"
 	"nvpair-shared/nodepolicy"
 	"nvpair-shared/noderec/servicekey"
 )
@@ -481,6 +482,12 @@ type DirectoryNode struct {
 	// empty list means "running, nothing loaded"; a missing key means the peer
 	// didn't report loaded state for it. Omitted when the peer reports none.
 	LoadedByEngine map[string][]string `json:"loadedByEngine,omitempty"`
+	// DownloadState is target-owned operation/content state, independent of
+	// canonical inventory and observed residency. Missing support is unknown.
+	DownloadState *modeldownload.Snapshot `json:"downloadState,omitempty"`
+	// DownloadStateCurrent is true only for a successful, validated current
+	// fetch. False preserves a last-good snapshot for display after a failure.
+	DownloadStateCurrent *bool `json:"downloadStateCurrent,omitempty"`
 	// Policy is the node's own policy advertisement (declared roles, policy
 	// revision, pause origin), enriched from the same pinned em /v1/models
 	// fetch as the model lists and kept with the same last-good rule. Omitted

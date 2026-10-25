@@ -63,5 +63,5 @@ export function isEnginePullInProgress(
     if (!p || p.operation !== 'pull') return false
     if (p.status === 'idle') return false
     const s = p.status.toLowerCase()
-    return s !== 'complete' && s !== 'error'
+    return s !== 'complete' && s !== 'error' && s !== 'failed' && s !== 'unknown'
 }

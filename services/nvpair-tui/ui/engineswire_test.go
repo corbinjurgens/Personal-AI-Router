@@ -16,8 +16,77 @@ import (
 	"nvpair-shared/engineintent"
 	"nvpair-shared/engines"
 	"nvpair-shared/enginesettings"
+	"nvpair-shared/modeldownload"
 	"nvpair-tui/rpc"
 )
+
+func tuiDownloadSnapshot() *modeldownload.Snapshot {
+	return &modeldownload.Snapshot{
+		Version: modeldownload.Version, SourceID: strings.Repeat("a", 32), Revision: "7",
+		Entries: []modeldownload.Entry{{ID: strings.Repeat("b", 32), Engine: "ollama", Model: "exact/model",
+			Phase: modeldownload.PhaseInProgress, BlocksReadiness: true}},
+	}
+}
+
+func tuiDownloadJSON(t *testing.T, value any) json.RawMessage {
+	t.Helper()
+	data, err := json.Marshal(value)
+	if err != nil {
+		t.Fatalf("encode download fixture: %v", err)
+	}
+	return data
+}
+
+func TestModelDownloadLocalDecodePreservesInventoryWithoutTrustingMalformedSupport(t *testing.T) {
+	valid := string(tuiDownloadJSON(t, tuiDownloadSnapshot()))
+	test := func(name, extension string, supported bool) {
+		t.Run(name, func(t *testing.T) {
+			var got modelsResult
+			data := `{"modelsByEngine":{"ollama":["exact/model"]},"loadedByEngine":{"ollama":["exact/model"]}` + extension + `}`
+			if err := json.Unmarshal([]byte(data), &got); err != nil {
+				t.Fatalf("decode inventory: %v", err)
+			}
+			if got.current != supported || (got.DownloadState != nil) != supported {
+				t.Fatalf("support = %v, snapshot = %+v", got.current, got.DownloadState)
+			}
+			if !reflect.DeepEqual(got.ModelsByEngine["ollama"], []string{"exact/model"}) ||
+				!reflect.DeepEqual(got.LoadedByEngine["ollama"], []string{"exact/model"}) {
+				t.Fatalf("inventory/residency lost: %+v", got)
+			}
+		})
+	}
+	test("strict shared snapshot", `,"downloadState":`+valid, true)
+	test("unsupported", "", false)
+	test("null", `,"downloadState":null`, false)
+	test("missing readiness boolean", `,"downloadState":`+strings.Replace(valid, `,"blocksReadiness":true`, "", 1), false)
+	test("unsupported version", `,"downloadState":`+strings.Replace(valid, `"version":1`, `"version":2`, 1), false)
+	test("noncanonical revision", `,"downloadState":`+strings.Replace(valid, `"revision":"7"`, `"revision":"07"`, 1), false)
+	test("over byte limit", `,"downloadState":{"padding":"`+strings.Repeat("x", modeldownload.MaxSnapshotBytes)+`"}`, false)
+}
+
+func TestModelDownloadDiscoveryDecodeRequiresCurrentObservation(t *testing.T) {
+	test := func(name, metadata string, current bool) {
+		t.Run(name, func(t *testing.T) {
+			data := `{"hostUuid":"peer","modelsByEngine":{"ollama":["exact/model"]},"downloadState":` + string(tuiDownloadJSON(t, tuiDownloadSnapshot())) + metadata + `}`
+			var node availableNode
+			if err := json.Unmarshal([]byte(data), &node); err != nil {
+				t.Fatalf("decode discovery: %v", err)
+			}
+			rows := mergeNodes(nodeFeeds{discovered: []availableNode{node}})
+			if len(rows) != 1 || rows[0].downloadState == nil || !rows[0].downloadState.Equal(*tuiDownloadSnapshot()) {
+				t.Fatalf("discovery dropped lifecycle: %+v", rows)
+			}
+			if got := node.modelSnapshot().current; got != current {
+				t.Fatalf("current = %v, want %v", got, current)
+			}
+		})
+	}
+	test("current", `,"downloadStateCurrent":true`, true)
+	test("stale", `,"downloadStateCurrent":false`, false)
+	test("unsupported metadata", "", false)
+	test("malformed metadata", `,"downloadStateCurrent":"true"`, false)
+	test("null metadata", `,"downloadStateCurrent":null`, false)
+}
 
 // localRequest builds a local model operation's method and params for an
 // engine whose family is its own ID, as a built-in engine's is.
@@ -779,7 +848,11 @@ func TestTerminalControlsLateIntentAfterManagerReady(t *testing.T) {
 	if refresh == nil {
 		t.Fatal("manager readiness did not issue a fresh intent read")
 	}
-	request, current := terminalControlsReply(t, broker, refresh, &rpc.Message{Result: []byte(`{"enabledByEngine":{"ollama":false},"offByEngine":{"ollama":"peer"}}`)})
+	batch, ok := refresh().(tea.BatchMsg)
+	if !ok || len(batch) != 2 {
+		t.Fatal("manager readiness did not refresh intent and canonical models")
+	}
+	request, current := terminalControlsReply(t, broker, batch[0], &rpc.Message{Result: []byte(`{"enabledByEngine":{"ollama":false},"offByEngine":{"ollama":"peer"}}`)})
 	if request.Method != "engine:intent" {
 		t.Fatalf("method = %q, want engine:intent", request.Method)
 	}
@@ -787,6 +860,35 @@ func TestTerminalControlsLateIntentAfterManagerReady(t *testing.T) {
 	want := engineintent.Snapshot{EnabledByEngine: map[string]bool{"ollama": false}, OffByEngine: map[string]engineintent.Origin{"ollama": engineintent.Peer}}
 	if !reflect.DeepEqual(d.intent, want) {
 		t.Fatalf("intent = %+v, want %+v", d.intent, want)
+	}
+	done := make(chan tea.Msg, 1)
+	go func() { done <- batch[1]() }()
+	for _, method := range []string{"engine:subscribe", "engine:models"} {
+		request, err := broker.Read()
+		if err != nil {
+			t.Fatalf("read model hydration: %v", err)
+		}
+		if request.Method != method {
+			t.Fatalf("model hydration method = %q, want %q", request.Method, method)
+		}
+		result := json.RawMessage(`{"subscribed":true}`)
+		if method == "engine:models" {
+			snapshot := tuiDownloadSnapshot()
+			snapshot.Entries = []modeldownload.Entry{}
+			result = tuiDownloadJSON(t, tuiDownloadInventory(snapshot))
+		}
+		if err := broker.Write(&rpc.Message{JSONRPC: "2.0", ID: request.ID, Result: result}); err != nil {
+			t.Fatalf("reply model hydration: %v", err)
+		}
+	}
+	select {
+	case reply := <-done:
+		d.update(reply)
+	case <-time.After(time.Second):
+		t.Fatal("model hydration did not finish")
+	}
+	if !d.modelReady("ollama", "exact/model") || !reflect.DeepEqual(d.intent, want) {
+		t.Fatal("canonical model hydration lost ready content or refreshed intent")
 	}
 }
 
@@ -1073,6 +1175,11 @@ func TestTerminalControlsEngineLock(t *testing.T) {
 		client, broker := nodeInfoRPCFixture(t)
 		d := newNodeDetail(client, nodeRow{key: "peer", name: "Peer", membership: membershipMember, presence: presenceOnline})
 		d.remotePermission, d.remotePermissionFresh = remotePermission{Version: 1, Allowed: true, State: "allowed"}, true
+		snapshot := tuiDownloadSnapshot()
+		snapshot.Entries = []modeldownload.Entry{}
+		if !d.applyModels(modelsResult{ModelsByEngine: map[string][]string{"ollama": {"model"}}, DownloadState: snapshot, current: true}, true) {
+			t.Fatal("ready canonical inventory rejected")
+		}
 		const pausedText = "This node is paused. Resume it on this node before managing it remotely."
 		_, result := terminalControlsReply(t, broker, d.modelCmd("ollama", modelActions["load"], "model"), &rpc.Message{Error: &rpc.RPCError{Code: -32011, Message: pausedText}})
 		if cmd, _ := d.update(result); cmd != nil {

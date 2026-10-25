@@ -15,6 +15,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"reflect"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -24,12 +25,13 @@ import (
 	"nvpair-shared/clustertrust"
 	"nvpair-shared/engines"
 	settings "nvpair-shared/enginesettings"
+	"nvpair-shared/modeldownload"
 	"nvpair-shared/nodepolicy"
 )
 
 func TestModelControlsInventoryFailureDiagnostics(t *testing.T) {
 	for _, tc := range []struct {
-		name                                  string
+		name                                    string
 		shared, failList, failLoaded, transport bool
 	}{
 		{"shared HTTP failure", true, true, true, false},
@@ -198,6 +200,141 @@ func modelControlsJSON(t *testing.T, value any) json.RawMessage {
 		t.Fatalf("encode fixture: %v", err)
 	}
 	return raw
+}
+
+func modelControlsPullEntry(t *testing.T, event ProgressEvent, source, id, model string) modeldownload.Entry {
+	t.Helper()
+	if id == "" || event.ID != id || event.Engine != "ollama" || event.Model != model || event.Op != "pull" || event.Message != "" {
+		t.Fatalf("pull progress lost target identity or exposed a message: %+v", event)
+	}
+	state := event.DownloadState
+	if state == nil {
+		t.Fatal("pull progress omitted download state")
+	}
+	if err := state.Validate(); err != nil {
+		t.Fatalf("invalid pull download state: %v", err)
+	}
+	if state.SourceID != source || state.RecoveryRequired || len(state.Entries) != 1 {
+		t.Fatalf("unexpected pull snapshot: %+v", state)
+	}
+	entry := state.Entries[0]
+	if entry.ID != id || entry.Engine != event.Engine || entry.Model != model {
+		t.Fatalf("snapshot entry does not match progress: %+v", entry)
+	}
+	return entry
+}
+
+func TestModelDownloadPullIdentityFollowsDeclaredBinding(t *testing.T) {
+	test := func(name string, binding *OperationBinding, params, want string) {
+		t.Run(name, func(t *testing.T) {
+			manifest := &Manifest{Actions: map[string]Action{pullModelAction: {}}}
+			if binding != nil {
+				manifest.Operations = map[string]OperationBinding{engines.OperationPull: *binding}
+			}
+			model, err := manifest.pullProgressModel(json.RawMessage(params))
+			if err != nil || model != want {
+				t.Fatalf("pull identity=%q error=%v, want %q", model, err, want)
+			}
+		})
+	}
+	test("explicit target overrides conventional aliases", &OperationBinding{Action: pullModelAction, ModelParam: "target"}, `{"target":"actual","name":"other","model":"another"}`, "actual")
+	test("explicit default model overrides name", &OperationBinding{Action: pullModelAction}, `{"model":"actual","name":"other"}`, "actual")
+	test("explicit name overrides model", &OperationBinding{Action: pullModelAction, ModelParam: "name"}, `{"name":"actual","model":"other"}`, "actual")
+	test("custom key retains exact casing", &OperationBinding{Action: pullModelAction, ModelParam: "TARGET"}, `{"TARGET":"actual","target":"opaque","name":"other"}`, "actual")
+	test("conventional name alias remains supported", nil, `{"name":"actual"}`, "actual")
+	test("conventional name keeps alias precedence", nil, `{"name":"actual","model":"other"}`, "actual")
+	test("conventional model remains supported", nil, `{"model":"actual"}`, "actual")
+}
+
+func TestModelDownloadFailedBoundPullFencesActualNativeModel(t *testing.T) {
+	ex := modelControlsExecutor(t)
+	acceptModelMutations(ex)
+	root := t.TempDir()
+	t.Setenv("OLLAMA_MODELS", root)
+	params := json.RawMessage(`{"target":"actual","name":"other"}`)
+	var effects int
+	var artifact ollamaFixture
+	ex.client.Transport = memoryModelsTransport(func(r *http.Request) (*http.Response, error) {
+		effects++
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			return nil, err
+		}
+		if r.Method != http.MethodPost || r.URL.Path != "/pull" || !bytes.Equal(body, params) {
+			return nil, errors.New("pull changed its native dispatch or caller params")
+		}
+		var native struct{ Target string }
+		if err := json.Unmarshal(body, &native); err != nil {
+			return nil, err
+		}
+		artifact = writeOllamaModel(t, root, native.Target, 16, 3)
+		return mutationJSON(http.StatusOK, `{"error":"fixture native failure after content write"}`)
+	})
+	result, err := ex.Action(context.Background(), "ollama", pullModelAction, params)
+	if err == nil || result != nil || effects != 1 || artifact.manifestRel == "" {
+		t.Fatalf("failed native pull result=%s error=%v effects=%d artifact=%+v", result, err, effects, artifact)
+	}
+	snapshot := ex.downloads.snapshot()
+	if err := snapshot.Validate(); err != nil {
+		t.Fatalf("invalid failed pull snapshot: %v", err)
+	}
+	if len(snapshot.Entries) != 1 {
+		t.Fatalf("failed pull entries=%+v", snapshot)
+	}
+	entry := snapshot.Entries[0]
+	if entry.Model != "actual" || entry.Phase != modeldownload.PhaseFailed || entry.Reason != modeldownload.ReasonDownloadFailed || !entry.BlocksReadiness {
+		t.Fatalf("failed native model was not fenced: %+v", entry)
+	}
+	markers, err := ex.downloads.store.load()
+	if err != nil {
+		t.Fatalf("read failed pull journal: %v", err)
+	}
+	marker, found := markers[downloadContentKey{"ollama", "actual"}]
+	if !found || len(markers) != 1 || marker.ID != entry.ID || marker.Model != "actual" {
+		t.Fatalf("journal does not identify native target: %+v", markers)
+	}
+	if _, err := ex.ModelLoad(context.Background(), "ollama", "actual"); !errors.Is(err, errDownloadBusy) {
+		t.Fatalf("typed Load bypassed actual-model fence: %v", err)
+	}
+	if _, err := ex.Action(context.Background(), "ollama", "warm", params); !errors.Is(err, errDownloadBusy) {
+		t.Fatalf("raw Load bypassed actual-model fence: %v", err)
+	}
+	server := &controlServer{exec: ex}
+	query := modelQueryValues("ollama", "actual")
+	listing := httptest.NewRecorder()
+	server.handleModelFiles(listing, httptest.NewRequest(http.MethodGet, controlModelFilesPath+"?"+query.Encode(), nil))
+	query.Set("path", artifact.manifestRel)
+	file := httptest.NewRecorder()
+	server.handleModelFile(file, httptest.NewRequest(http.MethodGet, controlModelFilePath+"?"+query.Encode(), nil))
+	if listing.Code != http.StatusConflict || listing.Flushed || file.Code != http.StatusConflict || file.Flushed || effects != 1 {
+		t.Fatalf("failed model escaped export/Load fence: listing=%d file=%d native effects=%d", listing.Code, file.Code, effects)
+	}
+	release, err := ex.acquireModelRead("ollama", "other", false)
+	if err != nil {
+		t.Fatalf("unrelated name alias was incorrectly fenced: %v", err)
+	}
+	release()
+}
+
+func TestModelDownloadTypedPullRejectsMismatchWithDeclaredTargetBeforeEffects(t *testing.T) {
+	ex := modelControlsExecutor(t)
+	var effects, withdrawals, notifications int
+	ex.modelMutationParent = func(context.Context, string) error { withdrawals++; return nil }
+	ex.emit = func(string, any) { notifications++ }
+	ex.client.Transport = memoryModelsTransport(func(*http.Request) (*http.Response, error) {
+		effects++
+		return mutationJSON(http.StatusOK, `{"status":"success"}`)
+	})
+	before := ex.downloads.snapshot()
+	result, err := ex.PullModelStream(context.Background(), "ollama", "other", json.RawMessage(`{"target":"actual","name":"other"}`))
+	if err == nil || err.Error() != "pull model does not match action parameters" || result != nil ||
+		effects != 0 || withdrawals != 0 || notifications != 0 || !before.Equal(ex.downloads.snapshot()) || len(ex.Errors()) != 0 {
+		t.Fatalf("typed mismatch crossed reservation/effect boundary: result=%s error=%v effects=%d withdrawals=%d notifications=%d", result, err, effects, withdrawals, notifications)
+	}
+	markers, err := ex.downloads.store.load()
+	if err != nil || len(markers) != 0 {
+		t.Fatalf("typed mismatch created unsafe content: %+v, %v", markers, err)
+	}
 }
 
 func modelControlsInvalidIdentifiers() []struct{ name, model string } {
@@ -613,17 +750,24 @@ func TestModelControlsValidBoundActionsPreserveRequestAndPermissions(t *testing.
 				if !bytes.Equal(body, params) {
 					return nil, errors.New("valid action bytes changed")
 				}
+				if action == pullModelAction {
+					return mutationJSON(http.StatusOK, `{"accepted":true,"status":"success"}`)
+				}
 				return mutationJSON(http.StatusOK, `{"accepted":true}`)
 			})
 			result, err := ex.Action(context.Background(), "ollama", action, params)
 			var response struct {
-				Accepted bool `json:"accepted"`
+				Accepted bool   `json:"accepted"`
+				Status   string `json:"status"`
 			}
 			if err != nil {
 				t.Fatalf("valid Action: %v", err)
 			}
 			if err := json.Unmarshal(result, &response); err != nil || !response.Accepted || calls != 1 {
 				t.Fatalf("valid action result=%s calls=%d decode=%v", result, calls, err)
+			}
+			if action == pullModelAction && response.Status != "success" {
+				t.Fatalf("pull omitted native success terminal: %+v", response)
 			}
 			wantMutations := 0
 			if action == "erase" || action == pullModelAction {
@@ -1688,15 +1832,24 @@ func TestModelControlsActionPreservesOpaqueCustomCaseVariant(t *testing.T) {
 						return nil, errors.New("exact or opaque body key changed")
 					}
 				}
+				if tc.action == pullModelAction {
+					return mutationJSON(http.StatusOK, `{"accepted":true,"status":"success"}`)
+				}
 				return mutationJSON(http.StatusOK, `{"accepted":true}`)
 			})
 			result, err := ex.Action(context.Background(), "ollama", tc.action, params)
 			if err != nil {
 				t.Fatalf("valid exact model with opaque variant: %v", err)
 			}
-			var response struct{ Accepted bool }
+			var response struct {
+				Accepted bool
+				Status   string
+			}
 			if err := json.Unmarshal(result, &response); err != nil {
 				t.Fatalf("decode action result: %v", err)
+			}
+			if tc.action == pullModelAction && response.Status != "success" {
+				t.Fatalf("pull omitted native success terminal: %+v", response)
 			}
 			wantMutations := 0
 			if tc.action == "erase" || tc.action == pullModelAction {
@@ -1891,15 +2044,24 @@ func TestModelControlsConventionalHTTPActionsPreserveCallerParams(t *testing.T) 
 						return nil, errors.New("generic action body changed")
 					}
 				}
+				if tc.action == pullModelAction {
+					return mutationJSON(http.StatusOK, `{"accepted":true,"status":"success"}`)
+				}
 				return mutationJSON(http.StatusOK, `{"accepted":true}`)
 			})
 			result, err := ex.Action(context.Background(), "ollama", tc.action, json.RawMessage(tc.params))
 			if err != nil {
 				t.Fatalf("conventional action: %v", err)
 			}
-			var response struct{ Accepted bool }
+			var response struct {
+				Accepted bool
+				Status   string
+			}
 			if err := json.Unmarshal(result, &response); err != nil {
 				t.Fatalf("decode generic action result: %v", err)
+			}
+			if tc.action == pullModelAction && response.Status != "success" {
+				t.Fatalf("pull omitted native success terminal: %+v", response)
 			}
 			wantMutations := 1
 			if tc.action == "load_model" {
@@ -1999,13 +2161,21 @@ func TestModelControlsConventionalNamePullStreamsAtEntryBoundaries(t *testing.T)
 					} else if err != nil {
 						t.Fatalf("decode name-only stream: %v", err)
 					}
+					if frame.OpID != "name-only" || frame.ID == "" || frame.Engine != "ollama" || frame.Op != "pull" || frame.Model != model || frame.DownloadState == nil {
+						t.Fatalf("name-only stream lost target identity: %+v", frame)
+					}
 					if frame.Type == "progress" {
-						streamed = append(streamed, ProgressEvent{Engine: frame.Engine, Op: frame.Op, Stage: frame.Stage, Percent: frame.Percent, Message: frame.Message})
+						streamed = append(streamed, ProgressEvent{Engine: frame.Engine, Op: frame.Op, Stage: frame.Stage, Percent: frame.Percent, Message: frame.Message, ID: frame.ID, Model: frame.Model, DownloadState: frame.DownloadState})
 					}
 					terminal = frame
 				}
 				if recorder.Code != http.StatusOK || !recorder.Flushed || terminal.Type != "result" || terminal.OpID != "name-only" || !reflect.DeepEqual(streamed, progress) {
 					t.Fatalf("name-only stream: HTTP %d terminal=%+v streamed=%+v", recorder.Code, terminal, streamed)
+				}
+				// The stream's explicit queued frame replaces the queued local
+				// event emitted before its exact-ID subscription was installed.
+				if len(progress) == 0 || progress[len(progress)-1].DownloadState == nil || terminal.ID != progress[0].ID || !terminal.DownloadState.Equal(*progress[len(progress)-1].DownloadState) {
+					t.Fatalf("stream terminal does not match local lifecycle: %+v", terminal)
 				}
 				result = terminal.Result
 			}
@@ -2013,11 +2183,41 @@ func TestModelControlsConventionalNamePullStreamsAtEntryBoundaries(t *testing.T)
 			if err := json.Unmarshal(result, &response); err != nil {
 				t.Fatalf("decode name-only pull result: %v", err)
 			}
-			wantProgress := []ProgressEvent{
-				{Engine: "ollama", Op: "pull", Stage: "pulling", Percent: 40, Message: "pulling"},
-				{Engine: "ollama", Op: "pull", Stage: "success", Message: "success"},
+			wantProgress := []struct {
+				stage, phase string
+				percent      int
+				blocks       bool
+			}{
+				{"queued", modeldownload.PhaseQueued, 0, true},
+				{"pulling", modeldownload.PhaseInProgress, 0, true},
+				{"pulling", modeldownload.PhaseInProgress, 40, true},
+				{"success", modeldownload.PhaseComplete, 100, false},
 			}
-			if response.Status != "success" || !reflect.DeepEqual(progress, wantProgress) || calls != 1 || mutations != 1 ||
+			if len(progress) != len(wantProgress) {
+				t.Fatalf("pull progress=%+v, want queued, pulling, measured progress and terminal", progress)
+			}
+			var previousRevision uint64
+			for i, want := range wantProgress {
+				event := progress[i]
+				entry := modelControlsPullEntry(t, event, ex.switchIncarnation, progress[0].ID, model)
+				if event.Stage != want.stage || event.Percent != want.percent {
+					t.Fatalf("pull progress[%d]=%+v, want stage=%s percent=%d", i, event, want.stage, want.percent)
+				}
+				wantEntry := modeldownload.Entry{ID: event.ID, Engine: "ollama", Model: model, Phase: want.phase, BlocksReadiness: want.blocks}
+				if want.percent == 40 {
+					percent := 40
+					wantEntry.Percent = &percent
+				}
+				if !reflect.DeepEqual(entry, wantEntry) {
+					t.Fatalf("pull entry[%d]=%+v, want %+v", i, entry, wantEntry)
+				}
+				revision, err := strconv.ParseUint(event.DownloadState.Revision, 10, 64)
+				if err != nil || revision <= previousRevision {
+					t.Fatalf("pull revision=%q after %d: %v", event.DownloadState.Revision, previousRevision, err)
+				}
+				previousRevision = revision
+			}
+			if response.Status != "success" || calls != 1 || mutations != 1 ||
 				ex.progress.next != wantAdmissions || len(ex.progress.subs) != 0 || len(ex.Errors()) != 0 {
 				t.Fatalf("name-only pull result=%+v progress=%+v calls=%d mutations=%d", response, progress, calls, mutations)
 			}
@@ -2030,7 +2230,7 @@ func TestModelControlsConventionalNamePullStoppedEngineReportsTerminalError(t *t
 	ex.engines["ollama"].manifest.Operations = nil
 	ex.engines["ollama"].running = false
 	acceptModelMutations(ex)
-	var progress []map[string]any
+	var progress []ProgressEvent
 	ex.emit = func(method string, value any) {
 		if method == "engine:pull-progress" {
 			fields, ok := value.(map[string]any)
@@ -2038,7 +2238,17 @@ func TestModelControlsConventionalNamePullStoppedEngineReportsTerminalError(t *t
 				t.Errorf("pull progress type=%T", value)
 				return
 			}
-			progress = append(progress, fields)
+			raw, err := json.Marshal(fields)
+			if err != nil {
+				t.Errorf("encode stopped pull progress: %v", err)
+				return
+			}
+			var event ProgressEvent
+			if err := json.Unmarshal(raw, &event); err != nil {
+				t.Errorf("decode stopped pull progress: %v", err)
+				return
+			}
+			progress = append(progress, event)
 		}
 	}
 	var output bytes.Buffer
@@ -2050,10 +2260,24 @@ func TestModelControlsConventionalNamePullStoppedEngineReportsTerminalError(t *t
 		t.Fatalf("decode stopped-engine response: %v", err)
 	}
 	want := formatEnginePullError("Ollama", errors.New(`engine "ollama" is not running`))
-	wantProgress := []map[string]any{{"engine": "ollama", "op": "pull", "stage": "error", "percent": -1, "message": want}}
+	if len(progress) != 2 {
+		t.Fatalf("stopped pull progress=%+v, want queued and failed", progress)
+	}
+	downloadID := progress[0].ID
+	queued := modelControlsPullEntry(t, progress[0], ex.switchIncarnation, downloadID, "tiny")
+	failed := modelControlsPullEntry(t, progress[1], ex.switchIncarnation, downloadID, "tiny")
+	if progress[0].Stage != "queued" || progress[0].Percent != 0 ||
+		!reflect.DeepEqual(queued, modeldownload.Entry{ID: downloadID, Engine: "ollama", Model: "tiny", Phase: modeldownload.PhaseQueued, BlocksReadiness: true}) {
+		t.Fatalf("stopped pull did not queue exact model: %+v", progress[0])
+	}
+	if progress[1].Stage != "error" || progress[1].Percent != -1 ||
+		!reflect.DeepEqual(failed, modeldownload.Entry{ID: downloadID, Engine: "ollama", Model: "tiny", Phase: modeldownload.PhaseFailed, Reason: modeldownload.ReasonDownloadFailed}) ||
+		progress[0].DownloadState.Equal(*progress[1].DownloadState) || !progress[1].DownloadState.Equal(ex.downloads.snapshot()) {
+		t.Fatalf("stopped pull did not publish fixed terminal state: %+v", progress[1])
+	}
 	reports := ex.Errors()
-	if response.Error == nil || response.Error.Code != -32000 || response.Error.Message != want || !reflect.DeepEqual(progress, wantProgress) ||
-		len(reports) != 1 || reports[0].ModelName != "tiny" || reports[0].Operation != "pull" || reports[0].Action != "retry" {
+	if response.Error == nil || response.Error.Code != -32000 || response.Error.Message != want ||
+		len(reports) != 1 || reports[0].Message != want || reports[0].ModelName != "tiny" || reports[0].Operation != "pull" || reports[0].Action != "retry" {
 		t.Fatalf("stopped name-only pull response=%+v progress=%v reports=%+v", response, progress, reports)
 	}
 }

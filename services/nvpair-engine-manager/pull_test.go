@@ -7,7 +7,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -17,6 +19,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"nvpair-shared/modeldownload"
 )
 
 func TestPullProgressFromLine(t *testing.T) {
@@ -188,14 +192,22 @@ func TestPullModelLlamaCPPSSESubscribesBeforeStarting(t *testing.T) {
 	for len(progress) > 0 {
 		events = append(events, <-progress)
 	}
-	if len(events) != 2 {
-		t.Fatalf("progress events = %+v, want downloading and success", events)
+	if len(events) != 4 {
+		t.Fatalf("progress events = %+v, want queued, pulling, downloading and success", events)
 	}
-	if events[0].Stage != "downloading" || events[0].Percent != 50 {
-		t.Fatalf("download event = %+v, want 50%%", events[0])
+	if events[0].Stage != "queued" || events[1].Stage != "pulling" {
+		t.Fatalf("initial events = %+v", events[:2])
 	}
-	if events[1].Stage != "success" || events[1].Percent != 100 {
-		t.Fatalf("terminal event = %+v, want success at 100%%", events[1])
+	if events[2].Stage != "downloading" || events[2].Percent != 50 {
+		t.Fatalf("download event = %+v, want 50%%", events[2])
+	}
+	if events[3].Stage != "success" || events[3].Percent != 100 {
+		t.Fatalf("terminal event = %+v, want success at 100%%", events[3])
+	}
+	for _, event := range events {
+		if event.ID == "" || event.Model != model || event.DownloadState == nil {
+			t.Fatalf("missing target identity: %+v", event)
+		}
 	}
 }
 
@@ -481,15 +493,133 @@ func TestActionPullModelCmdMarkerAndResult(t *testing.T) {
 
 	mu.Lock()
 	defer mu.Unlock()
-	if len(pulls) != 1 {
-		t.Fatalf("expected exactly one pulling marker for a CLI pull, got %d: %+v", len(pulls), pulls)
+	if len(pulls) != 3 {
+		t.Fatalf("expected queued, pulling and complete for a CLI pull, got %d: %+v", len(pulls), pulls)
 	}
-	if pulls[0]["op"] != "pull" || pulls[0]["stage"] != "pulling" || pulls[0]["message"] != "demo:1b" {
-		t.Fatalf("unexpected CLI pull marker: %+v", pulls[0])
+	if pulls[0]["stage"] != "queued" || pulls[1]["op"] != "pull" || pulls[1]["stage"] != "pulling" || pulls[1]["model"] != "demo:1b" || pulls[2]["stage"] != "success" {
+		t.Fatalf("unexpected CLI lifecycle: %+v", pulls)
 	}
-	if _, hasPercent := pulls[0]["percent"]; hasPercent {
-		t.Fatalf("CLI pull marker must omit indeterminate percent, got %+v", pulls[0])
+	if _, hasPercent := pulls[1]["percent"]; hasPercent {
+		t.Fatalf("CLI pull marker must omit indeterminate percent, got %+v", pulls[1])
 	}
+	state, err := ex.state("fake")
+	if err != nil {
+		t.Fatalf("read CLI engine state: %v", err)
+	}
+	state.mu.Lock()
+	running, run := state.running, state.runID
+	state.mu.Unlock()
+	if running || run != "" {
+		t.Fatalf("CLI pull required or started an engine: running=%t run=%q", running, run)
+	}
+	snapshot := ex.downloads.snapshot()
+	if len(snapshot.Entries) != 1 || snapshot.Entries[0].Phase != modeldownload.PhaseComplete || snapshot.Entries[0].BlocksReadiness {
+		t.Fatalf("stopped CLI pull did not complete: %+v", snapshot)
+	}
+	markers, err := ex.downloads.store.load()
+	if err != nil || len(markers) != 0 {
+		t.Fatalf("stopped CLI pull retained unsafe markers: %+v, %v", markers, err)
+	}
+}
+
+func TestModelDownloadNativeCompletionBelongsToDispatchRun(t *testing.T) {
+	test := func(name string, retire func(*engineState), phase string, blocked bool) {
+		t.Run(name, func(t *testing.T) {
+			ex := modelControlsExecutor(t)
+			acceptModelMutations(ex)
+			st := ex.engines["ollama"]
+			params := json.RawMessage(`{"target":"demo","TARGET":"opaque\nvariant"}`)
+			started, release, finished := make(chan struct{}), make(chan struct{}), make(chan struct{})
+			var once sync.Once
+			var effects atomic.Int32
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			ex.client.Transport = memoryModelsTransport(func(r *http.Request) (*http.Response, error) {
+				effects.Add(1)
+				body, err := io.ReadAll(r.Body)
+				if err != nil {
+					return nil, err
+				}
+				if r.Method != http.MethodPost || r.URL.Path != "/pull" || !bytes.Equal(body, params) {
+					return nil, errors.New("pull changed its native dispatch or caller params")
+				}
+				close(started)
+				select {
+				case <-release:
+					return mutationJSON(http.StatusOK, `{"status":"success"}`)
+				case <-r.Context().Done():
+					return nil, r.Context().Err()
+				}
+			})
+			var pullErr error
+			go func() {
+				_, pullErr = ex.PullModelStream(ctx, "ollama", "demo", params)
+				close(finished)
+			}()
+			t.Cleanup(func() {
+				once.Do(func() { close(release) })
+				cancel()
+				select {
+				case <-finished:
+				case <-time.After(5 * time.Second):
+					t.Error("pull did not join after releasing native completion")
+				}
+			})
+			select {
+			case <-started:
+			case <-ctx.Done():
+				t.Fatalf("pull did not reach native completion barrier: %v", ctx.Err())
+			}
+			before := ex.downloads.snapshot()
+			if len(before.Entries) != 1 || before.Entries[0].Phase != modeldownload.PhaseInProgress || !before.Entries[0].BlocksReadiness {
+				t.Fatalf("pull was not unsafe before terminal: %+v", before)
+			}
+			st.mu.Lock()
+			retire(st)
+			st.mu.Unlock()
+			once.Do(func() { close(release) })
+			select {
+			case <-finished:
+			case <-ctx.Done():
+				t.Fatalf("pull did not settle: %v", ctx.Err())
+			}
+			if (pullErr != nil) != blocked || effects.Load() != 1 {
+				t.Fatalf("pull error=%v native effects=%d, blocked=%t", pullErr, effects.Load(), blocked)
+			}
+			snapshot := ex.downloads.snapshot()
+			if err := snapshot.Validate(); err != nil {
+				t.Fatalf("invalid terminal snapshot: %v", err)
+			}
+			if len(snapshot.Entries) != 1 {
+				t.Fatalf("terminal snapshot=%+v", snapshot)
+			}
+			entry := snapshot.Entries[0]
+			if entry.ID != before.Entries[0].ID || entry.Engine != "ollama" || entry.Model != "demo" || entry.Phase != phase || entry.BlocksReadiness != blocked {
+				t.Fatalf("terminal lost dispatch identity or readiness: %+v", entry)
+			}
+			if blocked && entry.Reason != modeldownload.ReasonInterrupted {
+				t.Fatalf("retired run terminal reason=%q", entry.Reason)
+			}
+			markers, err := ex.downloads.store.load()
+			if err != nil {
+				t.Fatalf("read retained journal: %v", err)
+			}
+			marker, retained := markers[downloadContentKey{"ollama", "demo"}]
+			if retained != blocked || retained && marker.ID != entry.ID {
+				t.Fatalf("unsafe journal=%+v, blocked=%t", markers, blocked)
+			}
+		})
+	}
+	test("same run success clears marker", func(*engineState) {}, modeldownload.PhaseComplete, false)
+	test("same process health generation preserves completion", func(st *engineState) {
+		st.gen++
+	}, modeldownload.PhaseComplete, false)
+	test("retired run success retains marker", func(st *engineState) {
+		st.runID = "replacement-run"
+		st.gen++
+	}, modeldownload.PhaseUnknown, true)
+	test("stopped run success retains marker", func(st *engineState) {
+		st.running, st.runID = false, ""
+	}, modeldownload.PhaseUnknown, true)
 }
 
 // TestActionPullModelFailureEmitsTerminalError proves a failed LOCAL pull emits
@@ -530,21 +660,19 @@ func TestActionPullModelFailureEmitsTerminalError(t *testing.T) {
 
 	mu.Lock()
 	defer mu.Unlock()
-	if len(pulls) != 1 {
-		t.Fatalf("expected exactly one terminal error frame, got %d: %+v", len(pulls), pulls)
+	if len(pulls) != 2 || pulls[0]["stage"] != "queued" {
+		t.Fatalf("expected queued and one terminal error frame, got %d: %+v", len(pulls), pulls)
 	}
-	if pulls[0]["op"] != "pull" || pulls[0]["stage"] != "error" {
-		t.Fatalf("expected a terminal error frame, got %+v", pulls[0])
+	terminal := pulls[1]
+	if terminal["op"] != "pull" || terminal["stage"] != "error" {
+		t.Fatalf("expected a terminal error frame, got %+v", terminal)
 	}
-	if pct, _ := pulls[0]["percent"].(int); pct != -1 {
-		t.Fatalf("expected percent -1 on the error frame, got %+v", pulls[0])
+	if pct, _ := terminal["percent"].(int); pct != -1 {
+		t.Fatalf("expected percent -1 on the error frame, got %+v", terminal)
 	}
-	msg, _ := pulls[0]["message"].(string)
-	if !strings.Contains(msg, "Fake Engine experienced an error while downloading a model") {
-		t.Fatalf("expected formatted error on the progress frame, got %+v", pulls[0])
-	}
-	if !strings.Contains(msg, `engine "fake" is not running`) {
-		t.Fatalf("expected engine detail in progress message, got %q", msg)
+	state, ok := terminal["downloadState"].(*modeldownload.Snapshot)
+	if !ok || len(state.Entries) != 1 || state.Entries[0].Phase != "failed" || state.Entries[0].BlocksReadiness {
+		t.Fatalf("pre-effect outcome = %+v", terminal)
 	}
 
 	snap := reporter.snapshot()

@@ -30,9 +30,11 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"nvpair-shared/engines"
+	"nvpair-shared/modeldownload"
 	"nvpair-shared/nodepolicy"
 )
 
@@ -107,10 +109,9 @@ func (w *pullProgressWatchdog) resolveError(ctx context.Context, fallback error)
 	return fallback
 }
 
-// modelFromParams extracts a human-readable model name from an engine:action
-// pull_model params object, preferring Ollama's "name" body key then the generic
-// {model} placeholder. Used only for the progress message — the params are still
-// passed through to the action verbatim.
+// modelFromParams resolves conventional pull aliases, preferring Ollama's
+// "name" body key then the generic {model} placeholder. Explicit descriptor
+// bindings take precedence in pullProgressModel; params are never rewritten.
 func modelFromParams(params json.RawMessage) string {
 	if len(params) == 0 {
 		return ""
@@ -130,18 +131,17 @@ func (m *Manifest) pullProgressModel(params json.RawMessage) (string, error) {
 	if err := m.validateActionModelParams(pullModelAction, params, true); err != nil {
 		return "", err
 	}
-	model := modelFromParams(params)
-	if model == "" {
-		if binding, ok := m.operationBinding(engines.OperationPull); ok {
-			var fields map[string]json.RawMessage
-			if json.Unmarshal(params, &fields) == nil {
-				if raw, present := fields[binding.modelParam()]; present {
-					if err := json.Unmarshal(raw, &model); err != nil {
-						return "", fmt.Errorf("model must be a string")
-					}
-				}
-			}
+	var model string
+	if binding, declared := m.Operations[engines.OperationPull]; declared {
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal(params, &fields); err != nil {
+			return "", err
 		}
+		if err := json.Unmarshal(fields[binding.modelParam()], &model); err != nil {
+			return "", fmt.Errorf("model must be a string")
+		}
+	} else {
+		model = modelFromParams(params)
 	}
 	if err := nodepolicy.ValidateModelIdentifier(model); err != nil {
 		return "", err
@@ -159,6 +159,55 @@ func (m *Manifest) pullProgressModel(params json.RawMessage) (string, error) {
 // content-mutation guard (model_mutation.go), so the broker withdraws that
 // engine's model identity before the first byte is requested.
 func (e *Executor) PullModelStream(ctx context.Context, engine, model string, params json.RawMessage) (json.RawMessage, error) {
+	token, err := e.reserveModelPull(ctx, engine, model, params)
+	if err != nil {
+		return nil, err
+	}
+	return token.run(ctx)
+}
+
+type modelPullContextKey struct{}
+
+// Includes the stopped generation for CLI pulls that do not require an engine
+// process. An empty run ID alone cannot distinguish stop/start/stop cycles.
+type modelPullRun struct {
+	id      string
+	gen     int64
+	running bool
+	port    int
+}
+
+func currentModelPullRun(st *engineState) modelPullRun {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	run := modelPullRun{id: st.runID, running: st.running, port: st.port}
+	if run.id == "" {
+		// Health-loop replacement can advance gen without retiring a known
+		// process. Use it only as the fallback identity for a stopped CLI run.
+		run.gen = st.gen
+	}
+	return run
+}
+
+type modelPullReservation struct {
+	exec              *Executor
+	id, engine, model string
+	params            json.RawMessage
+	st                *engineState
+	act               Action
+	attempt           *modelDownloadAttempt
+	mu                sync.Mutex
+	started           bool
+	terminal          *modeldownload.Snapshot
+	// Execution metadata is confined to run's goroutine.
+	effects     bool
+	dispatchRun *modelPullRun
+}
+
+func (e *Executor) reserveModelPull(ctx context.Context, engine, model string, params json.RawMessage) (*modelPullReservation, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if model != "" || len(params) == 0 {
 		if err := nodepolicy.ValidateModelIdentifier(model); err != nil {
 			return nil, err
@@ -184,39 +233,259 @@ func (e *Executor) PullModelStream(ctx context.Context, engine, model string, pa
 	if model == "" {
 		model = progressModel
 	}
-	var result json.RawMessage
-	if err := e.withModelMutation(ctx, engine, func() error {
-		var pullErr error
-		result, pullErr = e.runPullModel(ctx, st, engine, model, act, params)
-		return pullErr
-	}); err != nil {
+	if model != progressModel {
+		return nil, errors.New("pull model does not match action parameters")
+	}
+	a, err := e.downloads.reserve(engine, model, st.manifest.ModelNamingOrDefault())
+	if err != nil {
 		return nil, err
 	}
-	return result, nil
+	token := &modelPullReservation{exec: e, id: a.entry.ID, engine: engine, model: model, params: append(json.RawMessage(nil), params...), st: st, act: act, attempt: a}
+	token.emitProgress("queued", 0)
+	e.pokeLoaded()
+	return token, nil
+}
+
+func (t *modelPullReservation) progressEvent(stage string, percent int) ProgressEvent {
+	return ProgressEvent{ID: t.id, Engine: t.engine, Model: t.model, Op: "pull", Stage: stage, Percent: percent, DownloadState: t.snapshot()}
+}
+
+func (t *modelPullReservation) snapshot() *modeldownload.Snapshot {
+	t.mu.Lock()
+	if t.terminal != nil {
+		s := t.terminal.Clone()
+		t.mu.Unlock()
+		return &s
+	}
+	t.mu.Unlock()
+	s := t.exec.downloads.snapshot()
+	return &s
+}
+
+func (t *modelPullReservation) emitProgress(stage string, percent int) {
+	t.exec.emitPullProgress(t.progressEvent(stage, percent))
+}
+
+func (t *modelPullReservation) cancelUnstarted() {
+	t.mu.Lock()
+	if t.started {
+		t.mu.Unlock()
+		return
+	}
+	t.started = true
+	t.mu.Unlock()
+	t.finish("failed", "interrupted", "")
+	t.emitProgress("error", -1)
+	t.exec.pokeLoaded()
+}
+
+func (t *modelPullReservation) finish(phase, reason, persistence string) error {
+	snapshot, err := t.exec.downloads.finishSnapshot(t.attempt, phase, reason, persistence)
+	if err != nil {
+		return err
+	}
+	t.mu.Lock()
+	t.terminal = &snapshot
+	t.mu.Unlock()
+	return nil
+}
+
+type modelPullFailure struct {
+	phase, reason string
+	cause         error
+}
+
+func (f *modelPullFailure) Error() string { return f.cause.Error() }
+func (f *modelPullFailure) Unwrap() error { return f.cause }
+func pullFailure(phase, reason string, err error) error {
+	return &modelPullFailure{phase: phase, reason: reason, cause: err}
+}
+
+func (t *modelPullReservation) run(ctx context.Context) (result json.RawMessage, err error) {
+	t.mu.Lock()
+	if t.started {
+		t.mu.Unlock()
+		return nil, errDownloadBusy
+	}
+	t.started = true
+	t.mu.Unlock()
+	ctx = context.WithValue(ctx, modelPullContextKey{}, t)
+	phase, reason, persistence := "complete", "", ""
+	defer func() {
+		if err != nil {
+			phase, reason = "failed", "download_failed"
+			if t.effects {
+				phase, reason = "unknown", "interrupted"
+			}
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				reason = "interrupted"
+			}
+			if errors.Is(err, errDownloadBusy) {
+				reason = "busy"
+			}
+			var failure *modelPullFailure
+			if errors.As(err, &failure) {
+				phase, reason = failure.phase, failure.reason
+			}
+		}
+		if finishErr := t.finish(phase, reason, persistence); finishErr != nil {
+			err = errors.Join(err, finishErr)
+		}
+		stage, pct := "success", 100
+		if phase != "complete" {
+			stage, pct = "error", -1
+		}
+		t.emitProgress(stage, pct)
+		t.exec.pokeLoaded()
+	}()
+	err = t.exec.withModelMutation(ctx, t.engine, func() error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := t.exec.checkPullRetry(ctx, t); err != nil {
+			return err
+		}
+		releaseLoad := func() {}
+		if binding, load := t.st.manifest.operationBinding(engines.OperationLoad); load && binding.Action == pullModelAction {
+			if err := t.exec.beforeModelPullEffect(ctx); err != nil {
+				return err
+			}
+			loadCtx := context.WithValue(ctx, modelContentWriterKey{}, t.engine)
+			guarded, release, err := t.exec.guardServingLoad(loadCtx, t.st, pullModelAction, t.params)
+			if err != nil {
+				return err
+			}
+			releaseLoad = release
+			ctx = guarded
+		}
+		var pullErr error
+		result, pullErr = t.exec.runPullModel(ctx, t.st, t.engine, t.model, t.act, t.params)
+		if pullErr == nil {
+			// Linearize native completion against the selected execution run.
+			// A later restart cannot invalidate evidence already accepted here;
+			// release a bound Load guard before waiting for journal publication.
+			current := currentModelPullRun(t.st)
+			if t.dispatchRun == nil || current != *t.dispatchRun {
+				pullErr = pullFailure("unknown", "interrupted", errors.New("model download completed after its engine run was retired"))
+			}
+		}
+		releaseLoad()
+		if pullErr != nil {
+			return pullErr
+		}
+		uncertain, saveErr := t.exec.downloads.changeMarker(t.attempt, true)
+		if saveErr != nil && !uncertain {
+			return pullFailure("unknown", "persistence_error", saveErr)
+		}
+		if uncertain {
+			persistence = "uncertain"
+		}
+		return nil
+	})
+	return result, err
+}
+
+func (e *Executor) beforeModelPullEffect(ctx context.Context) error {
+	t, ok := ctx.Value(modelPullContextKey{}).(*modelPullReservation)
+	if !ok {
+		return errors.New("pull has no content reservation")
+	}
+	if t.effects {
+		return nil
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	uncertain, err := e.downloads.changeMarker(t.attempt, false)
+	if err != nil {
+		phase := "failed"
+		if uncertain {
+			phase = "unknown"
+		}
+		return pullFailure(phase, "persistence_error", err)
+	}
+	t.effects = true
+	if err := e.downloads.update(t.attempt, "in_progress", nil); err != nil {
+		return err
+	}
+	t.emitProgress("pulling", 0)
+	return nil
+}
+
+func (e *Executor) emitModelPullProgress(ctx context.Context, ev ProgressEvent, measured bool) {
+	t, ok := ctx.Value(modelPullContextKey{}).(*modelPullReservation)
+	if !ok {
+		return
+	}
+	before := e.downloads.snapshot()
+	var percent *int
+	if measured && ev.Percent >= 0 && ev.Percent <= 100 {
+		percent = &ev.Percent
+	}
+	if e.downloads.update(t.attempt, "in_progress", percent) != nil {
+		return
+	}
+	if !before.Equal(e.downloads.snapshot()) {
+		t.emitProgress(ev.Stage, ev.Percent)
+	}
+}
+
+func (e *Executor) checkPullRetry(ctx context.Context, t *modelPullReservation) error {
+	e.downloads.mu.Lock()
+	_, retry := e.downloads.unsafe[t.attempt.key]
+	e.downloads.mu.Unlock()
+	if !retry || t.act.ProgressProtocol != pullProgressProtocolLlamaCPPModelsSSE {
+		return nil
+	}
+	t.st.mu.Lock()
+	port := t.st.port
+	t.st.mu.Unlock()
+	status, err := e.llamaDownloadStatus(ctx, fmt.Sprintf("http://127.0.0.1:%d", port), t.model)
+	if err != nil {
+		return err
+	}
+	if status == "downloading" {
+		return errDownloadBusy
+	}
+	return nil
 }
 
 // runPullModel runs the pull itself: the CLI action form or the engine's
 // streaming HTTP download. Its caller holds the engine's content-mutation
 // guard.
 func (e *Executor) runPullModel(ctx context.Context, st *engineState, engine, model string, act Action, params json.RawMessage) (json.RawMessage, error) {
+	// Bind completion to the same snapshot that selects native dispatch inputs.
+	// CLI pulls may execute while stopped; retain that state instead of requiring
+	// a running process or manufacturing an engine incarnation for the command.
+	dispatchRun := currentModelPullRun(st)
+	if token, ok := ctx.Value(modelPullContextKey{}).(*modelPullReservation); ok {
+		token.dispatchRun = &dispatchRun
+	}
+	port := dispatchRun.port
 	// CLI action (e.g. lms get): no structured line progress; emit a start
 	// marker and return the final result via the existing runner.
 	if len(act.Cmd) > 0 {
 		actionCtx, cancel := context.WithTimeout(ctx, e.actionTimeout)
 		defer cancel()
-		st.mu.Lock()
-		port := st.port
-		st.mu.Unlock()
-		e.emitPullProgress(ProgressEvent{Engine: engine, Op: "pull", Stage: "pulling", Message: model})
-		return e.runCmdAction(actionCtx, st, act, port, params)
+		if err := e.beforeModelPullEffect(actionCtx); err != nil {
+			return nil, err
+		}
+		result, err := e.runCmdAction(actionCtx, st, act, port, params)
+		if err != nil {
+			return nil, pullFailure("failed", "download_failed", err)
+		}
+		var outcome struct {
+			Error   string `json:"error"`
+			Success *bool  `json:"success"`
+		}
+		if json.Unmarshal(result, &outcome) == nil && (outcome.Error != "" || outcome.Success != nil && !*outcome.Success) {
+			return nil, pullFailure("failed", "download_failed", errors.New("engine reported download failure"))
+		}
+		return result, nil
 	}
 
 	// HTTP action (e.g. Ollama /api/pull): stream NDJSON progress.
-	st.mu.Lock()
-	running := st.running
-	port := st.port
-	st.mu.Unlock()
-	if !running {
+	if !dispatchRun.running {
 		return nil, fmt.Errorf("engine %q is not running", engine)
 	}
 	pullCtx, watchdog := newPullProgressWatchdog(ctx, e.pullProgressTimeout)
@@ -234,6 +503,9 @@ func (e *Executor) runPullModel(ctx context.Context, st *engineState, engine, mo
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	if err := e.beforeModelPullEffect(pullCtx); err != nil {
+		return nil, err
+	}
 	resp, err := e.client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("pull %q: %w", model, watchdog.resolveError(pullCtx, err))
@@ -251,6 +523,7 @@ func (e *Executor) runPullModel(ctx context.Context, st *engineState, engine, mo
 	// volume a subscriber (local UI or remote relay) has to absorb. lastPct=-1
 	// is a sentinel pullProgressFromLine never yields, so the first frame emits.
 	last := json.RawMessage("null")
+	sawProtocol := false
 	lastStage, lastPct := "", -1
 	sc := bufio.NewScanner(resp.Body)
 	sc.Buffer(make([]byte, 0, 64*1024), 1<<20) // status lines are small; cap generously
@@ -261,18 +534,30 @@ func (e *Executor) runPullModel(ctx context.Context, st *engineState, engine, mo
 		}
 		last = append(json.RawMessage(nil), line...)
 		progress := decodeOllamaPullLine(line)
+		if progress.Error != "" {
+			return nil, pullFailure("failed", "download_failed", errors.New("engine reported download failure"))
+		}
+		if progress.Status == "success" {
+			return last, nil
+		}
+		if progress.Status != "" {
+			sawProtocol = true
+		}
 		watchdog.recordProgress(progress.progressKey(), progress.Completed)
 		ev := progress.event(engine)
 		if ev.Stage == lastStage && ev.Percent == lastPct {
 			continue
 		}
 		lastStage, lastPct = ev.Stage, ev.Percent
-		e.emitPullProgress(ev)
+		e.emitModelPullProgress(ctx, ev, progress.Total > 0)
 	}
 	if err := sc.Err(); err != nil {
 		return nil, fmt.Errorf("pull %q: %w", model, watchdog.resolveError(pullCtx, err))
 	}
-	return last, nil
+	if !sawProtocol {
+		return nil, pullFailure("unknown", "unsupported", errors.New("engine has no supported download terminal"))
+	}
+	return nil, pullFailure("unknown", "interrupted", errors.New("download stream ended before success"))
 }
 
 // pullModelLlamaCPPSSE runs llama.cpp's asynchronous router download protocol.
@@ -323,6 +608,9 @@ func (e *Executor) pullModelLlamaCPPSSE(ctx context.Context, engine, model strin
 		return nil, err
 	}
 	startReq.Header.Set("Content-Type", "application/json")
+	if err := e.beforeModelPullEffect(ctx); err != nil {
+		return nil, err
+	}
 	startResp, err := e.client.Do(startReq)
 	if err != nil {
 		return nil, llamaCPPUnconfirmedStartError(ctx, model, err)
@@ -359,7 +647,13 @@ func (e *Executor) pullModelLlamaCPPSSE(ctx context.Context, engine, model strin
 		cleanupCtx, cancelCleanup := context.WithTimeout(context.WithoutCancel(ctx), e.pullCleanupTimeout)
 		defer cancelCleanup()
 		if err := e.stopLlamaCPPDownload(cleanupCtx, baseURL, model); err != nil {
-			pullErr = errors.Join(pullErr, fmt.Errorf("pull %q: could not confirm download stopped: %w", model, err))
+			pullErr = pullFailure("unknown", "cleanup_unknown", errors.Join(pullErr, fmt.Errorf("pull %q: could not confirm download stopped: %w", model, err)))
+		} else {
+			reason := "interrupted"
+			if errors.Is(pullErr, errPullProgressTimeout) {
+				reason = "progress_timeout"
+			}
+			pullErr = pullFailure("failed", reason, pullErr)
 		}
 	}()
 	if cause := context.Cause(ctx); cause != nil {
@@ -384,15 +678,14 @@ func (e *Executor) pullModelLlamaCPPSSE(ctx context.Context, engine, model strin
 			pct := event.percent()
 			if pct != lastPct {
 				lastPct = pct
-				e.emitPullProgress(ProgressEvent{Engine: engine, Op: "pull", Stage: "downloading", Percent: pct, Message: model})
+				e.emitModelPullProgress(ctx, ProgressEvent{Engine: engine, Op: "pull", Stage: "downloading", Percent: pct, Message: model}, event.hasByteProgress())
 			}
 		case "download_finished":
 			terminal = true
-			e.emitPullProgress(ProgressEvent{Engine: engine, Op: "pull", Stage: "success", Percent: 100, Message: model})
 			return json.RawMessage(startData), nil
 		case "download_failed":
 			terminal = true
-			return nil, fmt.Errorf("pull %q: llama.cpp reported download failure", model)
+			return nil, pullFailure("failed", "download_failed", fmt.Errorf("pull %q: llama.cpp reported download failure", model))
 		}
 	}
 	if err := sc.Err(); err != nil {
@@ -405,20 +698,57 @@ func (e *Executor) pullModelLlamaCPPSSE(ctx context.Context, engine, model strin
 // caller may already be downloading this ID. Preserve the cause without blindly
 // unloading somebody else's model.
 func llamaCPPUnconfirmedStartError(ctx context.Context, model string, err error) error {
-	return fmt.Errorf("pull %q: download acceptance and cancellation could not be confirmed: %w", model, errors.Join(context.Cause(ctx), err))
+	return pullFailure("unknown", "acceptance_unknown", fmt.Errorf("pull %q: download acceptance and cancellation could not be confirmed: %w", model, errors.Join(context.Cause(ctx), err)))
 }
 
 // stopLlamaCPPDownload uses the same router as the start request. Inventory is
 // checked first because a missed terminal SSE may mean the model is now loaded;
 // unload would then interrupt inference rather than stop an active download.
 func (e *Executor) stopLlamaCPPDownload(ctx context.Context, baseURL, model string) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/models", nil)
+	status, err := e.llamaDownloadStatus(ctx, baseURL, model)
 	if err != nil {
 		return err
 	}
+	if status != "downloading" {
+		return nil
+	}
+	params, err := json.Marshal(map[string]string{"model": model})
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+"/models/unload", bytes.NewReader(params))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
 	resp, err := e.client.Do(req)
 	if err != nil {
-		return fmt.Errorf("check download inventory: %w", err)
+		return fmt.Errorf("stop download: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("stop download: HTTP %d", resp.StatusCode)
+	}
+	var stopped struct {
+		Success bool `json:"success"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 64*1024)).Decode(&stopped); err != nil {
+		return err
+	}
+	if !stopped.Success {
+		return errors.New("engine did not confirm download stopped")
+	}
+	return nil
+}
+
+func (e *Executor) llamaDownloadStatus(ctx context.Context, baseURL, model string) (string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/models", nil)
+	if err != nil {
+		return "", err
+	}
+	resp, err := e.client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("check download inventory: %w", err)
 	}
 	var inventory struct {
 		Data *[]struct {
@@ -431,53 +761,30 @@ func (e *Executor) stopLlamaCPPDownload(ctx context.Context, baseURL, model stri
 	decodeErr := json.NewDecoder(io.LimitReader(resp.Body, 8*1024*1024)).Decode(&inventory)
 	resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("check download inventory: HTTP %d", resp.StatusCode)
+		return "", fmt.Errorf("check download inventory: HTTP %d", resp.StatusCode)
 	}
 	if decodeErr != nil {
-		return fmt.Errorf("decode download inventory: %w", decodeErr)
+		return "", fmt.Errorf("decode download inventory: %w", decodeErr)
 	}
 	if inventory.Data == nil {
-		return errors.New("download inventory has no data array")
+		return "", errors.New("download inventory has no data array")
 	}
+	status := ""
 	for _, entry := range *inventory.Data {
 		if entry.ID != model {
 			continue
 		}
-		if entry.Status.Value == "" {
-			return errors.New("download inventory has no model status")
+		if status != "" {
+			return "", errors.New("ambiguous download inventory")
 		}
-		if entry.Status.Value != "downloading" {
-			return nil
+		switch entry.Status.Value {
+		case "downloading", "downloaded", "unloaded", "loading", "loaded", "sleeping":
+			status = entry.Status.Value
+		default:
+			return "", errors.New("download inventory has unknown model status")
 		}
-		params, err := json.Marshal(map[string]string{"model": model})
-		if err != nil {
-			return err
-		}
-		req, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+"/models/unload", bytes.NewReader(params))
-		if err != nil {
-			return err
-		}
-		req.Header.Set("Content-Type", "application/json")
-		resp, err := e.client.Do(req)
-		if err != nil {
-			return fmt.Errorf("stop download: %w", err)
-		}
-		defer resp.Body.Close()
-		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			return fmt.Errorf("stop download: HTTP %d", resp.StatusCode)
-		}
-		var stopped struct {
-			Success bool `json:"success"`
-		}
-		if err := json.NewDecoder(io.LimitReader(resp.Body, 64*1024)).Decode(&stopped); err != nil {
-			return fmt.Errorf("decode download stop response: %w", err)
-		}
-		if !stopped.Success {
-			return errors.New("engine did not confirm download stopped")
-		}
-		return nil
 	}
-	return nil
+	return status, nil
 }
 
 type llamaCPPModelsEvent struct {
@@ -514,6 +821,15 @@ func (e llamaCPPModelsEvent) percent() int {
 	return int(done * 100 / total)
 }
 
+func (e llamaCPPModelsEvent) hasByteProgress() bool {
+	for _, file := range e.Data.Progress {
+		if file.Total > 0 {
+			return true
+		}
+	}
+	return false
+}
+
 // engineDisplayName returns the manifest display name for user-facing copy.
 func (e *Executor) engineDisplayName(engine string) string {
 	st, err := e.state(engine)
@@ -542,6 +858,7 @@ func (e *Executor) reportPullFailed(engine, model string, err error) string {
 }
 
 type ollamaPullLine struct {
+	Error     string `json:"error"`
 	Status    string `json:"status"`
 	Digest    string `json:"digest"`
 	Total     int64  `json:"total"`

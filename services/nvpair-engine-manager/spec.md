@@ -1053,7 +1053,7 @@ The operator starts it: `engine:start {engine:"ollama"}` resolves the manifest r
 
 The operator stops it: `engine:stop {engine:"ollama"}` signals a process the service owns. For an **adopted** engine (no owned process), it resolves the PID bound to the port and terminates it only when that process is running the binary we manage — reclaiming an orphan a prior run left on our own managed port; a genuinely foreign listener (a different image on a different port) is declined with an error naming its PID and image. A user-initiated `stop` records the OFF intent regardless (even when the RPC returns an error), so the health loop and restore-on-restart don't flip the engine back on — clients must not treat a stop error as proof the OFF choice was discarded. The cluster `ec` stop endpoint shares this semantics and may return HTTP 500 while OFF is persisted. Local and peer Off retain their provenance; either permits a later granted peer activation when unlocked and available.
 
-The operator pulls a model: `engine:action {engine:"ollama", action:"pull_model", params:{name:"llama3.2"}}` issues the manifest-declared `POST 127.0.0.1:{port}/api/pull`. Because the action is `pull_model`, the request is routed through the streaming pull path (not the buffered `engine:action` reader): each `/api/pull` status line is emitted as an `engine:pull-progress` notification — so a local pull shows live download progress just like a remote pull's `engine:remote-progress` — and the request settles with the pull's terminal result line. Frames are coalesced (only a change in `stage` or `percent` is emitted) so a chatty engine that streams many byte-progress lines per layer doesn't flood subscribers. Streaming Ollama and llama.cpp pulls use a 30-minute inactivity watchdog that is refreshed only when a layer/file completed-byte count advances, allowing active downloads to exceed 30 minutes without letting duplicate progress or heartbeat frames keep a stalled pull alive. The engine's terminal `{"status":"success"}` surfaces as a `stage:"success"` frame; a **failed** pull emits a terminal `stage:"error", percent:-1, message:<why>` frame in addition to the JSON-RPC error, so a UI whose synchronous call already timed out on a long download still converges off "pulling". A CLI-driven pull (LM Studio's `lms get`) has no line-level progress, so it emits one `stage:"pulling"` marker and retains the fixed 30-minute action timeout before returning the command's result. On `shutdown` (or stdin EOF) the service stops every running engine first, so none are orphaned.
+The operator pulls a model with `engine:action {engine:"ollama", action:"pull_model", params:{name:"llama3.2"}}`, which issues the manifest-declared `POST 127.0.0.1:{port}/api/pull` through the streaming pull owner. Local `engine:pull-progress` and remote `engine:remote-progress` frames carry the target model, download ID and lifecycle snapshot. Unchanged lifecycle/percentage updates are coalesced. Streaming Ollama and llama.cpp pulls use a 30-minute inactivity watchdog refreshed only when a layer/file completed-byte count advances; duplicate progress and heartbeats do not keep a stalled pull alive. The NDJSON adapter requires `{"status":"success"}` before emitting `stage:"success"`; EOF or 100 percent alone is unknown. Failed or unknown pulls emit `stage:"error", percent:-1` with the fixed reason in their lifecycle snapshot, in addition to the JSON-RPC error. A CLI-driven pull (LM Studio's `lms get`) has indeterminate progress and retains the fixed 30-minute action timeout. Its successful command exit must not contain an explicit error result. On `shutdown` (or stdin EOF) the service stops every running engine first, so none are orphaned.
 
 For the `llamacpp-models-sse` adapter, the monitored model must match
 `params.model`. Subscribe before starting, and bound the `POST /models`
@@ -1202,6 +1202,53 @@ Switch relay requests use independent IDs and a bounded pending map. Replies
 preserve numeric error codes; waiter cancellation sends `engine:switch-cancel`
 and does not cancel an accepted operation. The existing pin gate supplies caller
 identity and the target replaces the incoming node alias.
+
+### Download lifecycle and content admission
+
+The canonical model inventory includes optional version-1 `downloadState`:
+`{version,sourceId,revision,recoveryRequired,entries}`. Source is the manager's
+fresh switch incarnation; revision is a canonical uint64 decimal string and
+never wraps. Entries are `{id,engine,model,phase,blocksReadiness,percent?,reason?,persistence?}`.
+ID is 32 lowercase hexadecimal characters; engine/model retain
+the shared identifier limits. Phase is `queued|in_progress|failed|complete|unknown`.
+Reasons are `busy|capacity|download_failed|interrupted|progress_timeout|acceptance_unknown|cleanup_unknown|persistence_error|unsupported`.
+Ordinary progress and success omit reason. Only measured integer percentages
+in 0–100 are present. Persistence qualification is `uncertain`, for a landed
+marker removal whose durability was not confirmed. No arbitrary native text or
+filesystem path is part of this contract.
+
+Snapshots are full, bounded to 256 KiB and 64 entries, with unique IDs and
+engine/content keys. Missing or malformed support is unknown; an explicit
+current empty entries array is known empty. Receiver currentness is separate
+`downloadStateCurrent` metadata on discovery observations. Queue/progress/
+terminal notifications carry exact model, ID and snapshot, while remote streams
+also retain request `opId`. The stream decoder validates both correlations.
+
+One Executor gate owns reservations, active writers, reader leases and unsafe
+memory. It is never held during another owner's wait, I/O or notification.
+The journal writer mutex is acquired outside that gate and engine/inventory/
+publication locks, ordering capture/save/adoption across engines. Journal
+publication precedes native effects. Pre-replacement failure retains old bytes;
+landed uncertain addition refuses effects and retains unsafe content; landed
+uncertain removal is adopted with explicit qualification. Recovery retains
+unsafe keys under the new source as unknown without starting network/model work.
+Naming-contract changes require conservative recovery. Limits are 32 accepted/
+unsafe keys, 32 recent outcomes and 64 KiB journal bytes; unresolved keys are
+never evicted. A pre-effect failure does not invalidate previously ready content,
+but never clears an earlier unsafe marker.
+
+Success resolves a marker only through its same-key native terminal from the
+current dispatch run and journal removal. Delete requires successful mutation
+plus current unmasked absence with every row identified; ambiguous identities
+retain the marker. llama.cpp must reconstruct its cache using `/models?reload=1`
+without redirects. Revision capacity is reserved before durable Delete resolution.
+Inventory/digests
+are fenced by engine run and content epoch and re-masked at publication. Loaded
+observations are independent and remain visible even for unsafe content. New
+Load/export readers and content writers exclude each other without waiting for
+content under `opMu`. Existing load dispatches and inference are not cancelled.
+No journal mechanism certifies historical vendor files, resumes downloads or
+implements a general job/history service.
 
 ### Product integration
 

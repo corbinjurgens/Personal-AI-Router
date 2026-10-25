@@ -86,6 +86,7 @@ func (d *directory) upsert(n noderec.DirectoryNode) (isNew bool) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	_, existed := d.nodes[n.HostUUID]
+	n = cloneDownloadNode(n)
 	d.browse[n.HostUUID] = n
 	if _, authenticated := d.peerServices[n.HostUUID]; !authenticated {
 		d.storeLocked(n)
@@ -183,6 +184,7 @@ func (d *directory) supersedeCandidates(n noderec.DirectoryNode, selfUUID string
 func (d *directory) upsertEvicting(n noderec.DirectoryNode, proven []noderec.DirectoryNode) (evicted []noderec.DirectoryNode) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	n = cloneDownloadNode(n)
 	for _, old := range proven {
 		if _, authenticated := d.peerServices[old.HostUUID]; authenticated {
 			continue
@@ -224,7 +226,7 @@ func (d *directory) get(hostUUID string) (noderec.DirectoryNode, bool) {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 	n, ok := d.nodes[hostUUID]
-	return n, ok
+	return cloneDownloadNode(n), ok
 }
 
 // snapshot returns the directory, optionally filtered to nodes advertising a
@@ -237,7 +239,7 @@ func (d *directory) snapshot(filter noderec.ServiceKey) []noderec.DirectoryNode 
 		if filter != "" && !n.HasService(filter) {
 			continue
 		}
-		out = append(out, n)
+		out = append(out, cloneDownloadNode(n))
 	}
 	d.mu.RUnlock()
 	sort.Slice(out, func(i, j int) bool { return out[i].HostUUID < out[j].HostUUID })
@@ -273,14 +275,51 @@ func (d *directory) applyModels(hostUUID, ip string, emPort int, inventory model
 	if !has || n.IP != ip || em.Port != emPort {
 		return n, false, false
 	}
+	if !inventory.accepts(nodeDownloadObservation(n)) {
+		return cloneDownloadNode(n), false, false
+	}
+	next := n
+	inventory.applyTo(&next)
 	if sameStringSet(n.Models, inventory.models) && (n.ModelsByEngine == nil) == (inventory.byEngine == nil) &&
 		sameByEngine(n.ModelsByEngine, inventory.byEngine) &&
-		sameByEngine(n.LoadedByEngine, inventory.loadedByEngine) && reflect.DeepEqual(n.Policy, inventory.policy) {
-		return n, false, true
+		sameByEngine(n.LoadedByEngine, inventory.loadedByEngine) && reflect.DeepEqual(n.Policy, inventory.policy) &&
+		nodeDownloadObservation(n).equal(nodeDownloadObservation(next)) {
+		return cloneDownloadNode(n), false, true
 	}
-	inventory.applyTo(&n)
-	d.nodes[hostUUID] = n
-	return n, true, true
+	d.retireDownloadReadsLocked(next)
+	d.nodes[hostUUID] = next
+	return cloneDownloadNode(next), true, true
+}
+
+func (d *directory) retireDownloadReadsLocked(next noderec.DirectoryNode) {
+	previous := d.nodes[next.HostUUID]
+	if previous.DownloadState != nil && next.DownloadState != nil && previous.DownloadState.SourceID != next.DownloadState.SourceID {
+		d.generations[next.HostUUID]++
+	}
+}
+
+func cloneDownloadNode(node noderec.DirectoryNode) noderec.DirectoryNode {
+	observation := nodeDownloadObservation(node).clone()
+	node.DownloadState, node.DownloadStateCurrent = observation.snapshot, observation.current
+	return node
+}
+
+// markDownloadsStale retains operation details and residency while withdrawing
+// only the observation's freshness. Repeated failures remain silent.
+func (d *directory) markDownloadsStale(hostUUID, ip string, emPort int) (noderec.DirectoryNode, bool, bool) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	node, present := d.nodes[hostUUID]
+	em, has := node.Services[noderec.ServiceEngineManager]
+	if !present || !has || node.IP != ip || em.Port != emPort {
+		return noderec.DirectoryNode{}, false, false
+	}
+	previous := nodeDownloadObservation(node)
+	stale := previous.stale()
+	changed := !previous.equal(stale)
+	node.DownloadState, node.DownloadStateCurrent = stale.snapshot, stale.current
+	d.nodes[hostUUID] = node
+	return cloneDownloadNode(node), changed, true
 }
 
 // applyClusterIdentity sets one node's cluster principal and the trust annotation

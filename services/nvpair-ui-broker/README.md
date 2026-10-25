@@ -5,6 +5,27 @@ SPDX-License-Identifier: Apache-2.0
 
 # nvpair-ui-broker
 
+Target-owned model download state uses the shared optional
+`downloadState:{version:1,sourceId,revision,recoveryRequired,entries}` snapshot.
+Entries carry `id`, `engine`, exact `model`, `phase`, `blocksReadiness`, optional
+integer `percent`, bounded `reason`, and optional `persistence:"uncertain"`.
+The shared contract limits snapshots to 256 KiB and 64 entries, including the
+target's bounded unresolved/recent state. Operation completion, current canonical
+model inventory and actual loaded observations remain separate facts.
+
+The existing generic `engine:models` response and subscribed
+`engine:pull-progress` / `engine:models-changed` notification relays preserve
+these fields without maintaining a second download owner. `nvpair-service`
+broadcasts those frames and clients rehydrate through the existing subscription
+and snapshot methods. Missing support is unknown; explicit current `entries:[]`
+is known empty. Discovery observations additionally carry
+`downloadStateCurrent`: true for a validated current fetch, false when stale.
+Stale details are for display and never establish readiness. Updated clients
+require current lifecycle support for ready-dependent actions, so the guarantee
+requires a coordinated fleet update. Scanner observation remains eventual on its
+existing nominal 15-second sweep, including preceding refresh work and request
+budgets; the broker adds no polling or operation history.
+
 Model identifiers must be nonempty valid UTF-8, at most 512 UTF-8 bytes, with
 no C0 (U+0000–U+001F), DEL (U+007F), or C1 (U+0080–U+009F) characters. New
 policy writes enforce this rule atomically. Only disk loading uses

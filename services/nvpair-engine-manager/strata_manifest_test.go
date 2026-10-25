@@ -162,10 +162,12 @@ func TestStrataModelsAndResidency(t *testing.T) {
 	})
 	got := ex.ModelsResult(context.Background())
 	managerIncarnation := ex.switchIncarnation
+	downloadState := ex.downloads.snapshot()
 	want := ModelsResult{
 		Models:         []string{"resident", "cold", "unknown", "loading"},
 		ByEngine:       map[string][]string{"strata": {"resident", "cold", "unknown", "loading"}},
 		LoadedByEngine: map[string][]string{"strata": {"resident"}},
+		DownloadState:  &downloadState,
 		MemoryEvidence: &performancewire.MemoryEvidence{
 			Version: 1, OmittedEntries: 0,
 			Entries: []performancewire.MemoryEvidenceEntry{{

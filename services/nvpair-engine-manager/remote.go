@@ -15,6 +15,8 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+
+	"nvpair-shared/modeldownload"
 )
 
 // remoteParam is the shared input for the engine:remote-* methods. Fields not
@@ -31,13 +33,16 @@ type remoteParam struct {
 // remoteProgress is the engine:remote-progress notification payload the broker
 // forwards to a subscribed UI.
 type remoteProgress struct {
-	OpID    string `json:"opId"`
-	Node    string `json:"node"`
-	Engine  string `json:"engine,omitempty"`
-	Op      string `json:"op,omitempty"`
-	Stage   string `json:"stage,omitempty"`
-	Percent int    `json:"percent,omitempty"`
-	Message string `json:"message,omitempty"`
+	OpID          string                  `json:"opId"`
+	Node          string                  `json:"node"`
+	Engine        string                  `json:"engine,omitempty"`
+	Op            string                  `json:"op,omitempty"`
+	Stage         string                  `json:"stage,omitempty"`
+	Percent       int                     `json:"percent,omitempty"`
+	Message       string                  `json:"message,omitempty"`
+	ID            string                  `json:"id,omitempty"`
+	Model         string                  `json:"model,omitempty"`
+	DownloadState *modeldownload.Snapshot `json:"downloadState,omitempty"`
 }
 
 // newOpID mints a random correlation id for a remote operation.
@@ -100,12 +105,28 @@ func (m *Manager) runRemote(ctx context.Context, msg *Message) {
 		}
 		opID := newOpID()
 		body := pullRequest{OpID: opID, Engine: p.Engine, Model: p.Model, Params: p.Params}
+		if body.Model == "" {
+			manifest, ok := m.exec.reg.Get(p.Engine)
+			if !ok {
+				m.codec.RespondError(msg.ID, -32602, "unknown engine")
+				return
+			}
+			body.Model, err = manifest.pullProgressModel(p.Params)
+			if err != nil {
+				m.codec.RespondError(msg.ID, -32602, err.Error())
+				return
+			}
+		}
 		terminal, err := client.stream(ctx, controlPullPath, body, m.remoteProgressFn(opID, peer.nodeID))
+		if terminal.DownloadState != nil {
+			// The terminal is authoritative even if an advisory hub frame dropped.
+			m.remoteProgressFn(opID, peer.nodeID)(terminal)
+		}
 		if err != nil {
 			m.codec.RespondError(msg.ID, rpcCode(err), err.Error())
 			return
 		}
-		m.codec.Respond(msg.ID, map[string]any{"opId": opID, "result": terminal.Result})
+		m.codec.Respond(msg.ID, map[string]any{"opId": opID, "id": terminal.ID, "engine": terminal.Engine, "model": terminal.Model, "downloadState": terminal.DownloadState, "result": terminal.Result})
 
 	case "engine:remote-load-model", "engine:remote-unload-model", "engine:remote-delete-model":
 		if p.Engine == "" {
@@ -155,6 +176,7 @@ func (m *Manager) remoteProgressFn(opID, node string) func(streamFrame) {
 		p := remoteProgress{
 			OpID: opID, Node: node, Engine: f.Engine, Op: f.Op,
 			Stage: f.Stage, Message: f.Message,
+			ID: f.ID, Model: f.Model, DownloadState: f.DownloadState,
 		}
 		if wirePercentIncluded(f.Percent) {
 			p.Percent = f.Percent

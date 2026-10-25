@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	settings "nvpair-shared/enginesettings"
 	"nvpair-shared/nodepolicy"
@@ -143,8 +144,9 @@ type Executor struct {
 	// progress fans install/pull progress to transient subscribers (the ec
 	// streaming handlers) in addition to the local engine:install-progress
 	// notification path. See progress.go.
-	progress *progressHub
-	baseDir  string // user-scoped install base
+	progress  *progressHub
+	downloads *modelDownloads
+	baseDir   string // user-scoped install base
 	// desired persists explicit per-engine ON/OFF intent. Runtime state remains
 	// in-memory; shutdown cleanup must not rewrite this store.
 	desired *desiredStateStore
@@ -216,7 +218,7 @@ type Executor struct {
 }
 
 func NewExecutor(reg *Registry, reporter *Reporter, emit func(string, any), baseDir string) *Executor {
-	return &Executor{
+	e := &Executor{
 		switchIncarnation:   newOpID(),
 		reg:                 reg,
 		reporter:            reporter,
@@ -235,6 +237,21 @@ func NewExecutor(reg *Registry, reporter *Reporter, emit func(string, any), base
 		loadedPoke:          make(chan struct{}, 1),
 		engines:             make(map[string]*engineState),
 	}
+	naming := make(map[string]string)
+	for _, engine := range reg.Names() {
+		if manifest, ok := reg.Get(engine); ok {
+			naming[engine] = manifest.ModelNamingOrDefault()
+		}
+	}
+	// A fresh profile may not have installed an engine yet. Provision its
+	// private journal directory before recovery; failure remains fail-closed.
+	if baseDir != "" {
+		if err := os.MkdirAll(baseDir, 0o700); err != nil {
+			slog.Warn("model download persistence directory unavailable")
+		}
+	}
+	e.downloads = newModelDownloads(e.switchIncarnation, baseDir, naming)
+	return e
 }
 
 func (e *Executor) SetReservedPort(port int) error {
@@ -391,6 +408,9 @@ func (e *Executor) emitInstallFrame(engine, stage string, pct int, errMsg string
 func (e *Executor) emitPullProgress(ev ProgressEvent) {
 	params := map[string]any{
 		"engine": ev.Engine, "op": ev.Op, "stage": ev.Stage, "message": ev.Message,
+	}
+	if ev.ID != "" {
+		params["id"], params["model"], params["downloadState"] = ev.ID, ev.Model, ev.DownloadState
 	}
 	if wirePercentIncluded(ev.Percent) {
 		params["percent"] = ev.Percent
