@@ -74,7 +74,7 @@ func applyLiteralLaunch(rt Runtime, command launchCommand, vars map[string]strin
 	if rt.LaunchArgs == nil {
 		return command, nil
 	}
-	command.Args = slices.Clone(p.FixedArgs)
+	command.Args = slices.Clone(fixedLaunchArgs(rt))
 	for _, control := range p.Controls {
 		if value, managed := control.managedValue(vars["host"], vars["port"]); managed && control.flag() != "" {
 			command.Args = append(command.Args, control.flag(), value)
@@ -163,7 +163,7 @@ func (e *Executor) launchStateLocked(engine string, st *engineState) settings.La
 				result.ServingReadback = &engines.ServingReadback{Status: "mismatch", Reason: servingErr.Error()}
 			}
 		}
-		result.LaunchText, err = command.argumentText(rt.EditableLaunch)
+		result.LaunchText, err = command.argumentText(rt)
 	}
 	switch {
 	case err != nil:
@@ -449,7 +449,7 @@ func (e *Executor) previewLaunch(st *engineState, request settings.Request, prep
 	if err != nil {
 		return fail(err.Error())
 	}
-	result.Settings.LaunchText, err = command.argumentText(policy)
+	result.Settings.LaunchText, err = command.argumentText(rt)
 	if err != nil {
 		return fail(err.Error())
 	}

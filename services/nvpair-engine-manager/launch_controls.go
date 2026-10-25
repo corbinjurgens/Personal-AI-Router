@@ -288,10 +288,11 @@ func validateEffectiveLaunch(rt Runtime, command launchCommand, host, port strin
 			}
 		}
 	}
-	if len(command.Args) < len(p.FixedArgs) || !slices.Equal(command.Args[:len(p.FixedArgs)], p.FixedArgs) {
+	fixed := fixedLaunchArgs(rt)
+	if len(command.Args) < len(fixed) || !slices.Equal(command.Args[:len(fixed)], fixed) {
 		return fmt.Errorf("launch does not match its fixed startup arguments")
 	}
-	args := command.Args[len(p.FixedArgs):]
+	args := command.Args[len(fixed):]
 	for i := 0; i < len(args); i++ {
 		control, value, last, err := p.readControl(args, i)
 		if err != nil {

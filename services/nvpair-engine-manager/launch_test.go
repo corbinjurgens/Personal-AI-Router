@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -78,6 +79,75 @@ func TestLaunchEnvironmentFormattingIsDeterministic(t *testing.T) {
 	text, err := launch.text()
 	if err != nil || text != `A_SETTING="a b" Z_SETTING="z" engine` {
 		t.Fatalf("unstable environment order or quoting: %q, %v", text, err)
+	}
+}
+
+func TestCustomLlamaPresetFixedArgs(t *testing.T) {
+	reg := loadWithOverrides(t, t.TempDir())
+	manifest, ok := reg.Get("llamacpp")
+	if !ok {
+		t.Fatal("missing bundled llama.cpp manifest")
+	}
+	rt := manifest.Platforms["linux/amd64"].Runtime
+	fixed := slices.Clone(rt.EditableLaunch.FixedArgs)
+	managed := []string{"--host", "127.0.0.1", "--port", "23456"}
+	vars := map[string]string{"host": "127.0.0.1", "port": "23456", "models_dir": "/test models", "install_dir": "/test engine"}
+	test := func(name string, args, extraFixed, wantFixed []string) {
+		t.Run(name, func(t *testing.T) {
+			runtime := rt
+			policy := *rt.EditableLaunch
+			policy.FixedArgs = append(slices.Clone(fixed), extraFixed...)
+			runtime.EditableLaunch = &policy
+			runtime.LaunchArgs = &args
+			launch, err := resolveProcessLaunch(runtime, "/test engine/llama-server", vars)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := append(slices.Clone(wantFixed), managed...)
+			want = append(want, args...)
+			if !slices.Equal(launch.Args, want) {
+				t.Fatalf("argv = %q, want %q", launch.Args, want)
+			}
+			if err := validateEffectiveLaunch(runtime, launch, vars["host"], vars["port"]); err != nil {
+				t.Fatalf("effective launch rejected: %v", err)
+			}
+			text, err := launch.argumentText(runtime)
+			if err != nil {
+				t.Fatal(err)
+			}
+			parsed, err := parseLaunchText(text)
+			if err != nil {
+				t.Fatal(err)
+			}
+			// Explicit environment assignments precede the editable arguments.
+			for len(parsed) > 0 && !strings.HasPrefix(parsed[0], "-") {
+				parsed = parsed[1:]
+			}
+			if !slices.Equal(parsed, want[len(wantFixed):]) {
+				t.Fatalf("editable argv = %q, want %q", parsed, want[len(wantFixed):])
+			}
+		})
+	}
+	test("preset owns model defaults", []string{"--models-preset", "/test models/preset.ini"}, nil, nil)
+	test("equals preset", []string{"--models-preset=/test models/preset.ini"}, nil, nil)
+	test("native underscore preset", []string{"--models_preset", "/test models/preset.ini"}, nil, nil)
+	test("user context", []string{"--models-preset", "preset.ini", "--ctx-size", "131072"}, nil, nil)
+	test("user equals context", []string{"--models-preset=preset.ini", "--ctx-size=32768"}, nil, nil)
+	test("user short context", []string{"--models-preset", "preset.ini", "-c", "32768"}, nil, nil)
+	test("non-preset defaults unchanged", []string{"--model", "model.gguf"}, nil, fixed)
+	test("non-preset explicit context unchanged", []string{"--ctx-size", "32768"}, nil, fixed)
+	test("preset text in option value is literal", []string{"--alias", "--models-preset"}, nil, fixed)
+	test("preset text in log filename is literal", []string{"--log-file", "--models-preset"}, nil, fixed)
+	test("equals preset text in log filename is literal", []string{"--log-file", "--models-preset=preset.ini"}, nil, fixed)
+	test("model option text in fixed filename is literal", []string{"--models-preset", "preset.ini"}, []string{"--log-file", "--ctx-size"}, []string{"--log-file", "--ctx-size"})
+	test("switch before preset", []string{"--log-disable", "--models-preset", "preset.ini"}, nil, nil)
+	test("two-value option before preset", []string{"--control-vector-layer-range", "1", "32", "--models-preset", "preset.ini"}, nil, nil)
+	test("router fixed args retained", []string{"--models-preset", "preset.ini"}, []string{"--models-max", "2", "--log-disable"}, []string{"--models-max", "2", "--log-disable"})
+	test("user router option wins", []string{"--models-preset", "preset.ini", "--models-max=3"}, []string{"--models-max", "2", "--log-disable"}, []string{"--log-disable"})
+	test("user non-envelope option wins", []string{"--models-preset", "preset.ini", "--log-file", "user.log"}, []string{"--log-file", "bundled.log"}, nil)
+	test("preset in fixed args", []string{"--ctx-size", "32768"}, []string{"--models-preset", "preset.ini"}, []string{"--models-preset", "preset.ini"})
+	if !slices.Equal(rt.EditableLaunch.FixedArgs, fixed) {
+		t.Fatal("custom launch mutated manifest defaults")
 	}
 }
 
