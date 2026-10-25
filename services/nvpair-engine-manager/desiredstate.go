@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"nvpair-shared/engineintent"
 	settings "nvpair-shared/enginesettings"
 	"os"
@@ -30,10 +31,55 @@ type desiredStateFile struct {
 	// AllocatedPorts locates process-mode port-zero launches after manager death.
 	// A port is evidence only; reclaim still checks the current managed image.
 	AllocatedPorts map[string]int `json:"allocatedPorts,omitempty"`
+	// ProcessStops survives removal of a manifest's host block. No arguments,
+	// environment, commands or credentials belong in this cleanup-only record.
+	ProcessStops map[string]processStopEvidence `json:"processStops,omitempty"`
 	// OffBy records who saved each engine Off: intentLocal or intentPeer. An
 	// engine saved Off with no entry predates provenance and counts as local.
 	OffBy  map[string]intentOrigin `json:"offBy,omitempty"`
 	Locked map[string]bool         `json:"locked,omitempty"`
+}
+
+type processStopEvidence struct {
+	Bin     string `json:"bin"`
+	Port    int    `json:"port"`
+	Address string `json:"address"`
+	// Zero means a crash could have occurred between spawn and saving its PID.
+	PID int `json:"pid"`
+}
+
+func (evidence processStopEvidence) valid() bool {
+	// Match probeListenerAddress: an empty TCP host denotes the local system.
+	_, _, addressErr := net.SplitHostPort(evidence.Address)
+	return filepath.IsAbs(evidence.Bin) && evidence.Port > 0 && evidence.Port <= 65535 && evidence.PID >= 0 && addressErr == nil
+}
+
+func (s *desiredStateStore) processStop(engine string) (processStopEvidence, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	state, err := s.load()
+	evidence, known := state.ProcessStops[engine]
+	return evidence, known, err
+}
+
+func (s *desiredStateStore) setProcessStop(engine string, evidence processStopEvidence) error {
+	if !evidence.valid() {
+		return fmt.Errorf("invalid process stop evidence for %s", engine)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	state, err := s.load()
+	if err != nil {
+		return err
+	}
+	if s.path == "" {
+		return errors.New("no user data directory is available")
+	}
+	if state.ProcessStops == nil {
+		state.ProcessStops = make(map[string]processStopEvidence)
+	}
+	state.ProcessStops[engine] = evidence
+	return s.save(state)
 }
 
 func (state *desiredStateFile) UnmarshalJSON(data []byte) error {
@@ -281,6 +327,11 @@ func (s *desiredStateStore) load() (desiredStateFile, error) {
 			return desiredStateFile{}, fmt.Errorf("invalid allocated port for %s", engine)
 		}
 	}
+	for engine, evidence := range state.ProcessStops {
+		if !evidence.valid() {
+			return desiredStateFile{}, fmt.Errorf("invalid process stop evidence for %s", engine)
+		}
+	}
 	for engine, locked := range state.Locked {
 		if locked && state.Engines[engine] {
 			return desiredStateFile{}, fmt.Errorf("invalid desired engine state: %s is both locked and On", engine)
@@ -464,7 +515,13 @@ func (e *Executor) confirmOrphanStoppedContext(ctx context.Context, engine strin
 		err = fmt.Errorf("reclaim owned %s orphan: %w", engine, ctx.Err())
 	}
 	if err != nil {
-		if st, stateErr := e.state(engine); stateErr == nil {
+		st, stateErr := e.state(engine)
+		if stateErr != nil {
+			e.mu.Lock()
+			st = e.stopOnly[engine]
+			e.mu.Unlock()
+		}
+		if st != nil {
 			st.mu.Lock()
 			if st.reclaimPID == 0 {
 				st.reclaimPID = pid

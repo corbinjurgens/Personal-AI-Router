@@ -43,6 +43,9 @@ type EngineStatus struct {
 	// is authoritative; nil, omitted on the wire, means lock state is not
 	// available, as from an older target, and is never read as unlocked.
 	Locked *bool `json:"locked,omitempty"`
+	// TerminationVerified is positive physical-stop evidence, never inferred
+	// from running:false or from the absence of a host-platform block.
+	TerminationVerified bool `json:"terminationVerified"`
 }
 
 // engineState is the per-engine runtime state.
@@ -218,6 +221,9 @@ type Executor struct {
 	shuttingDown atomic.Bool
 	mu           sync.Mutex
 	engines      map[string]*engineState
+	// stopOnly holds cleanup state for engines whose host block disappeared.
+	// It is never returned by state, so no activation can use saved evidence.
+	stopOnly map[string]*engineState
 }
 
 func NewExecutor(reg *Registry, reporter *Reporter, emit func(string, any), baseDir string) *Executor {
@@ -239,6 +245,7 @@ func NewExecutor(reg *Registry, reporter *Reporter, emit func(string, any), base
 		loadedPollInterval:  defaultLoadedPollSeconds * time.Second,
 		loadedPoke:          make(chan struct{}, 1),
 		engines:             make(map[string]*engineState),
+		stopOnly:            make(map[string]*engineState),
 	}
 	naming := make(map[string]string)
 	for _, engine := range reg.Names() {

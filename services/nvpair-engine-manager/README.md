@@ -189,7 +189,19 @@ Requests (caller → service):
 | `shutdown` | — | `null` |
 | `log/set-level` | `{ level }` | `{ level }` |
 
-`EngineStatus` = `{ engine, display_name, installed, running, healthy, port, locked? }`.
+`EngineStatus` = `{ engine, display_name, installed, running, healthy, port, locked?, terminationVerified }`.
+`terminationVerified:true` is positive physical-stop evidence for an engine whose
+host-platform block is absent. `running:false` and descriptor `available:false`
+alone carry no such evidence. Missing or false evidence is unverified. Before
+each process launch the manager saves the actual endpoint and executable, then
+the PID after spawn, in `engine-state.json` (without arguments or environment).
+If the host block later disappears, Sleep uses that cleanup-only record and the
+existing managed-install containment / exact-image reclaim predicate, never
+adoption. Both endpoint refusal and recorded process exit are required; a failed
+reclaim retains its PID fence even if the listener closes. Missing legacy records,
+an unresolved spawn-to-PID-save crash window, foreign listeners and indeterminate
+probes cannot establish stop evidence, so node pause remains draining and refuses
+success. The record cannot authorize starting an unsupported engine.
 `locked` is the engine's durable lock on its own node: present `true` or `false`
 is authoritative, and an absent field means lock state is unavailable, as from a
 target that predates it. A client never reads an absent `locked` as unlocked.

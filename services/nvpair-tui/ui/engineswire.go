@@ -28,6 +28,8 @@ type engineStatus struct {
 	// Locked is the target's durable engine lock. Nil means the target did not
 	// report one, as an older target does, and is never read as unlocked.
 	Locked *bool `json:"locked,omitempty"`
+	// Positive stop evidence; omission from an older target is unverified.
+	TerminationVerified bool `json:"terminationVerified"`
 }
 
 // engineLockedMessage is shown when an activation is refused because the

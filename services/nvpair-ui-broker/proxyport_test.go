@@ -557,12 +557,16 @@ func TestOllamaPresenceRequestWaitsForPortGate(t *testing.T) {
 			return
 		}
 		method <- request.Method
-		workerErr <- codec.Respond(request.ID, map[string]any{"engines": []any{}})
+		workerErr <- codec.Respond(request.ID, json.RawMessage(`{"engines":[{"engine":"custom","running":false,"terminationVerified":true}]}`))
 	}()
 
 	response := make(chan error, 1)
+	var result json.RawMessage
 	go func() {
-		_, err := NewCodec(brokerServer).Read()
+		msg, err := NewCodec(brokerServer).Read()
+		if msg != nil {
+			result = msg.Result
+		}
 		response <- err
 	}()
 
@@ -604,6 +608,19 @@ func TestOllamaPresenceRequestWaitsForPortGate(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("broker did not return the relayed response")
+	}
+	var inventory struct {
+		Engines []struct {
+			Engine              string `json:"engine"`
+			Running             bool   `json:"running"`
+			TerminationVerified bool   `json:"terminationVerified"`
+		} `json:"engines"`
+	}
+	if err := json.Unmarshal(result, &inventory); err != nil {
+		t.Fatal(err)
+	}
+	if len(inventory.Engines) != 1 || inventory.Engines[0].Running || !inventory.Engines[0].TerminationVerified {
+		t.Fatalf("relay lost termination evidence: %+v", inventory)
 	}
 }
 

@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -190,11 +191,21 @@ func TestLifecycleUsesResolvedLaunchBuilder(t *testing.T) {
 	for _, mode := range []string{"process", "command"} {
 		t.Run(mode, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "captured args.json")
+			port, err := freePort()
+			if err != nil {
+				t.Fatal(err)
+			}
 			manifest := testEngineManifest(fakeEngineBin)
 			for key, platform := range manifest.Platforms {
-				platform.Runtime = Runtime{Mode: mode, Bin: fakeEngineBin, Port: 25001,
-					Args:  []string{"captureargs", path, "{host}", "{port}", "two words", ""},
+				platform.Runtime = Runtime{Mode: mode, Bin: fakeEngineBin, Port: port,
+					Args:  []string{"{host}", "{port}", "two words", ""},
 					Start: [][]string{{fakeEngineBin, "captureargs", path, "{host}", "{port}", "two words", ""}},
+				}
+				if mode == "process" {
+					// Keep the process alive through readiness and durable PID save.
+					// The normal server records argv before opening its listener.
+					platform.Runtime.Env = map[string]string{"FAKE_START_LOG": path, "OLLAMA_HOST": "127.0.0.1:{port}"}
+					platform.Runtime.Ready = &Probe{TCP: "127.0.0.1:{port}"}
 				}
 				manifest.Platforms[key] = platform
 			}
@@ -203,23 +214,7 @@ func TestLifecycleUsesResolvedLaunchBuilder(t *testing.T) {
 				t.Fatal(err)
 			}
 			t.Cleanup(func() { _ = ex.Stop("fake") })
-			// Process mode has no readiness probe here; wait for the short-lived
-			// fixture to finish writing before inspecting its actual argv.
-			st, err := ex.state("fake")
-			if err != nil {
-				t.Fatal(err)
-			}
-			st.mu.Lock()
-			proc := st.proc
-			st.mu.Unlock()
-			if proc != nil {
-				select {
-				case <-proc.done:
-				case <-time.After(10 * time.Second):
-					t.Fatal("capture process did not exit")
-				}
-			}
-			assertCapturedArgs(t, path, []string{"127.0.0.1", "25001", "two words", ""})
+			assertCapturedArgs(t, path, []string{"127.0.0.1", strconv.Itoa(port), "two words", ""})
 		})
 	}
 }

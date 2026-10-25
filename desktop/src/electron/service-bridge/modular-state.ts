@@ -102,6 +102,8 @@ interface RemoteEngineFacts {
     running: boolean
     healthy: boolean
     port: number
+    /** Physical-stop evidence; absent/invalid wire data never proves it. */
+    terminationVerified: boolean
     /** The peer's durable engine lock; absent when the peer reported none. */
     locked?: boolean
 }
@@ -243,7 +245,7 @@ class ModularBridgeState {
      */
     private engineManagerFacts = new Map<
         EngineType,
-        { installed: boolean; running: boolean; port: number; locked?: boolean }
+        { installed: boolean; running: boolean; port: number; terminationVerified: boolean; locked?: boolean }
     >()
     /**
      * The local engine-manager's validated descriptors (`engine:descriptors`),
@@ -876,6 +878,7 @@ class ModularBridgeState {
             installed: booleanValue(obj.installed),
             running: booleanValue(obj.running),
             port: numberValue(obj.port),
+            terminationVerified: obj.running === false && obj.terminationVerified === true,
             ...reportedLock(obj.locked)
         })
         // A fresh authoritative state is the resolution of whatever op was in
@@ -1548,6 +1551,7 @@ class ModularBridgeState {
                 running: booleanValue(engineObj.running),
                 healthy: booleanValue(engineObj.healthy),
                 port: numberValue(engineObj.port),
+                terminationVerified: engineObj.running === false && engineObj.terminationVerified === true,
                 ...reportedLock(engineObj.locked)
             })
             seen.add(engineType)
@@ -1577,6 +1581,7 @@ class ModularBridgeState {
             running: booleanValue(obj.running),
             healthy: booleanValue(obj.healthy),
             port: numberValue(obj.port),
+            terminationVerified: obj.running === false && obj.terminationVerified === true,
             ...reportedLock(obj.locked)
         })
         this.emitRemoteEngineStatus(nodeId, engineType)
