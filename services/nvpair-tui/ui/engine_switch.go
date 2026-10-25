@@ -4,7 +4,6 @@
 package ui
 
 import (
-	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/json"
@@ -246,7 +245,7 @@ func (d *nodeDetail) switchCommand(method string, params any, requestID string, 
 		stamp.err = err
 		if err == nil {
 			if stamp.fence {
-				stamp.fenceResult, stamp.err = decodeSwitchFenceResult(msg.Result)
+				stamp.fenceResult, stamp.err = enginesettings.DecodeSwitchFenceResult(msg.Result)
 			} else if submit {
 				var result enginesettings.SwitchResult
 				stamp.err = json.Unmarshal(msg.Result, &result)
@@ -257,27 +256,6 @@ func (d *nodeDetail) switchCommand(method string, params any, requestID string, 
 		}
 		return stamp
 	})
-}
-
-func decodeSwitchFenceResult(raw []byte) (enginesettings.SwitchFenceResult, error) {
-	var result enginesettings.SwitchFenceResult
-	decoder := json.NewDecoder(bytes.NewReader(raw))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&result); err != nil {
-		return result, err
-	}
-	// A Go bool cannot distinguish a missing/null flag from false. Preserve
-	// the wire union: true has no receipt field, false has an owned receipt.
-	var fields map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &fields); err != nil {
-		return result, err
-	}
-	_, hasReceipt := fields["receipt"]
-	flag := bytes.TrimSpace(fields["fenced"])
-	if len(flag) == 0 || bytes.Equal(flag, []byte("null")) || result.Fenced && hasReceipt {
-		return result, errors.New("invalid engine switch fence response")
-	}
-	return result, result.Validate()
 }
 
 func (d *nodeDetail) switchStatusCmd(baseline bool) tea.Cmd {
